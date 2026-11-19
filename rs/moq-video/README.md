@@ -58,7 +58,7 @@ broadcast:
 
 ```rust
 let mut config = moq_video::capture::Config::default();
-config.source = moq_video::capture::Source::Display(None);
+config.source = moq_video::capture::Source::Display(moq_video::capture::DisplaySelection::default());
 
 let mut capture = moq_video::capture::open(&config).await?;
 while let Some(frame) = capture.read().await? {
@@ -137,16 +137,23 @@ Public entry points:
   the track and catalog are advertised up front, and the camera stays open
   whether or not anyone is watching. With `Capture::on_demand`, the camera opens
   only while a subscriber is watching and is released when the last one leaves.
-- `encode::Producer` publishes frames you encoded yourself (`publish(&[Encoded])`),
+- `encode::Producer` encodes raw frames you supply and publishes them
+  (`write(frame)`), registering the catalog rendition up front. Given the
+  connection's bandwidth allocator, it retunes the encoder to its grant between
+  frames; given the next lower rendition as `Options::lower`, it is a simulcast
+  rung that stops encoding while the grant cannot fund it and resumes on a
+  keyframe. `finish()` drains the encoder and returns a `Finished` that keeps the
+  track published.
+- `encode::Publisher` publishes frames you encoded yourself (`publish(&Encoded)`),
   handling the catalog and framing. Each is published at its own timestamp.
 
-The default features are `nvidia`, `vaapi`, and `mediacodec`, so a default
+The default features are `nvidia`, `v4l2`, `vaapi`, and `mediacodec`, so a default
 build has no software encoder. `openh264` adds the software H.264 fallback, the
 only H.264 encoder on a GPU-less host, at the cost of compiling vendored C++;
 enable it wherever that fallback is expected. `nvidia` and `vaapi` are
 Linux-only, `dlopen` their drivers at runtime, and need no build-time toolkit
-(`moq-vaapi` checks its libva bindings in). `v4l2` is opt-in only by
-convention, since `moq-v4l` checks its bindings in. `vpx` is opt-in because
+(`moq-vaapi` checks its libva bindings in). `v4l2` is Linux-only and needs
+no build-time toolkit, since `moq-v4l` checks its bindings in. `vpx` is opt-in because
 libvpx comes from the build host through pkg-config (set `VPX_STATIC=1` to link
 the archive, as the Nix dev shell does). `render` is also opt-in so codec-only
 consumers do not compile wgpu.

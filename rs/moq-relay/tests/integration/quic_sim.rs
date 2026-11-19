@@ -13,11 +13,11 @@ use moq_tokio::quic::driver::sim::{Link, Network, Path};
 
 use crate::memory;
 
-const PORT: u16 = 443;
+pub(crate) const PORT: u16 = 443;
 /// Where each client binds, on its own host
 const CLIENT_PORT: u16 = 4433;
-const PUBLISHER: IpAddr = ip(2);
-const SUBSCRIBER: IpAddr = ip(3);
+pub(crate) const PUBLISHER: IpAddr = ip(2);
+pub(crate) const SUBSCRIBER: IpAddr = ip(3);
 
 /// The groups the publisher writes, one every [`INTERVAL`]
 const GROUPS: u64 = 20;
@@ -27,7 +27,7 @@ const FRAME: usize = 4_000;
 /// How long a run may take before it counts as stalled, in simulated time
 const TIMEOUT: Duration = Duration::from_secs(60);
 
-const fn ip(last: u8) -> IpAddr {
+pub(crate) const fn ip(last: u8) -> IpAddr {
 	IpAddr::V4(Ipv4Addr::new(10, 0, 0, last))
 }
 
@@ -92,14 +92,14 @@ fn two_relays() {
 }
 
 /// A relay serving on a simulated host
-struct Relay {
-	addr: SocketAddr,
-	fingerprints: Vec<String>,
+pub(crate) struct Relay {
+	pub(crate) addr: SocketAddr,
+	pub(crate) fingerprints: Vec<String>,
 }
 
 /// Serve `cluster` on `addr` through `auth`: each session the server accepts runs a relay
 /// [`Connection`] on its own simulator task.
-async fn serve(network: &Network, addr: SocketAddr, cluster: &cluster::Cluster, auth: &auth::Auth) -> Relay {
+pub(crate) async fn serve(network: &Network, addr: SocketAddr, cluster: &cluster::Cluster, auth: &auth::Auth) -> Relay {
 	let _ = rind_rustls::default_provider().unwrap().install_default();
 	let mut config = moq_tokio::server::Config::default();
 	config.listen.bind = Some(moq_tokio::listen::Bind::Addr(addr));
@@ -147,7 +147,7 @@ async fn deliver(network: &Network, publish: &Relay, subscribe: &Relay) -> Vec<u
 		let mut source = track.clone();
 		while source.subscription_changed().await.unwrap().is_none() {}
 		for sequence in 0..GROUPS {
-			let mut group = source.create_group(moq_net::group::Info { sequence }).unwrap();
+			let mut group = source.create_group(moq_net::group::Info { start: sequence }).unwrap();
 			let timestamp = moq_net::Timestamp::from_millis(sequence * INTERVAL.as_millis() as u64).unwrap();
 			group.write_frame(timestamp, vec![sequence as u8; FRAME]).unwrap();
 			group.finish().unwrap();
@@ -174,7 +174,7 @@ async fn deliver(network: &Network, publish: &Relay, subscribe: &Relay) -> Vec<u
 			.unwrap();
 		let mut groups = Vec::new();
 		while let Some(mut group) = reader.recv_group().await.unwrap() {
-			let sequence = group.sequence;
+			let sequence = group.start;
 			let frame = group.read_frame().await.unwrap().expect("a group is cut short");
 			assert_eq!(frame.payload.len(), FRAME, "group {sequence} is cut short");
 			assert!(
@@ -220,4 +220,106 @@ fn lossy(network: &Network, a: SocketAddr, b: SocketAddr) {
 	};
 	network.path(a, b, |p| *p = path.clone());
 	network.path(b, a, |p| *p = path);
+}
+
+/// The bytes the bulk transfer carries in one group: past the 32 MB live tail, so a hop
+/// that sheds rather than paces loses some
+const BULK: usize = 40 * 1024 * 1024;
+/// The size of each frame of [`BULK`]
+const CHUNK: usize = 8 * 1024;
+
+/// A group carries a bulk transfer through a relay without loss: the writer waits on `ready`
+/// before each frame, and the reader drains at its own pace, slower than the writer, so
+/// every hop has to pace its ingest to that reader rather than shed.
+///
+/// A paused stream must hold no more than the credit its session reserves for it, or the
+/// connection window fills with bytes nobody takes and the transport evicts the stream.
+#[test]
+fn a_group_carries_a_bulk_transfer_losslessly() {
+	memory::run(|| async {
+		let network = Network::new(0);
+		let auth = memory::public(&["**"], &[], &[]);
+		let cluster = memory::start(memory::cluster(), moq_tokio::connect::Config::default()).await;
+		let relay = serve(&network, SocketAddr::new(ip(1), PORT), &cluster, &auth).await;
+
+		let origin = moq_tokio::origin::spawn();
+		let broadcast = origin
+			.route("bulk", moq_net::origin::RouteOptions::default())
+			.expect("route");
+		let mut track = broadcast
+			.broadcast()
+			.create_track("data", moq_net::track::Info::default())
+			.expect("track");
+		broadcast.announce().expect("announce");
+		let _publisher = client(&network, PUBLISHER, &relay)
+			.with_publisher(&origin)
+			.connect(url(&relay));
+
+		let viewer = moq_tokio::origin::spawn();
+		let _subscriber = client(&network, SUBSCRIBER, &relay)
+			.with_subscriber(viewer.clone())
+			.connect(url(&relay));
+
+		let write = async {
+			while track.subscription_changed().await.unwrap().is_none() {}
+			let mut group = track.append_group(moq_net::Timestamp::unscaled(0)).unwrap();
+			let info = moq_net::frame::Info {
+				size: CHUNK as u64,
+				timestamp: moq_net::Timestamp::unscaled(0),
+			};
+			for index in 0..BULK / CHUNK {
+				group.ready(&info).await;
+				group
+					.write_frame(moq_net::Timestamp::unscaled(0), vec![index as u8; CHUNK])
+					.unwrap();
+			}
+			group.finish().unwrap();
+		};
+		let read = async {
+			let remote = loop {
+				match viewer.consume().request("bulk", None).await {
+					Ok(remote) => break remote,
+					// Not announced through the relay yet.
+					Err(_) => kio::clock::sleep(Duration::from_millis(50)).await,
+				}
+			};
+			let consumer = remote
+				.track("data")
+				.unwrap()
+				.subscribe(
+					moq_net::track::Subscription::default()
+						.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(600))),
+				)
+				.await
+				.unwrap();
+			let mut ordered = consumer.ordered();
+			let mut group = ordered
+				.next_group()
+				.await
+				.unwrap()
+				.and_then(moq_net::track::Item::group)
+				.expect("a group");
+			let mut read = 0;
+			while let Some(frame) = group
+				.read_frame()
+				.await
+				.unwrap_or_else(|err| panic!("after {read} bytes: {err}"))
+			{
+				let index = read / CHUNK;
+				assert_eq!(frame.payload.len(), CHUNK, "frame {index} is cut short");
+				assert!(
+					frame.payload.iter().all(|&byte| byte == index as u8),
+					"frame {index} is corrupted"
+				);
+				read += CHUNK;
+				// A consumer draining at about 64 MB/s, slower than the writer.
+				kio::clock::sleep(Duration::from_micros(CHUNK as u64 / 64)).await;
+			}
+			read
+		};
+		let read = kio::clock::timeout(Duration::from_secs(600), async { futures::join!(write, read).1 })
+			.await
+			.expect("the transfer stalled");
+		assert_eq!(read, BULK);
+	});
 }

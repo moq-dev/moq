@@ -2,7 +2,7 @@ import type * as broadcast from "./broadcast.ts";
 import { StreamCode, StreamError } from "./error.ts";
 import type { WireRoute } from "./hop.ts";
 import * as Instance from "./instance.ts";
-import { bestCandidate, coveringPrefixes } from "./internal.ts";
+import { bestCandidate, coveringPrefixes, mostSpecific } from "./internal.ts";
 import type * as Path from "./path.ts";
 import { type Served, sameInstance } from "./wire.ts";
 
@@ -38,8 +38,11 @@ class Validity {
 	}
 }
 
-// The route a consume selected: its instance, and the origin node its requests name (lite-07).
-type Selection = Served & { readonly route: Pick<WireRoute, "instance" | "node">; readonly validity?: Validity };
+// The route a consume selected: its instance, which its requests pin.
+type Selection = Served & {
+	readonly route: Pick<WireRoute, "instance">;
+	readonly validity?: Validity;
+};
 
 class Blind implements Selection {
 	readonly identity = {};
@@ -47,13 +50,7 @@ class Blind implements Selection {
 	readonly validity = new Validity();
 }
 
-/** Which claims above a consumed path may serve it: lite-07's floors. @internal */
-export interface Covering {
-	/** Whether the claim of origin `node` at `at` may serve a consume of `path` below it. */
-	covers(node: bigint, at: Path.Valid, path: Path.Valid): boolean;
-}
-
-type Advertised = { identity: object; route: WireRoute; parked?: boolean };
+type Advertised = { identity: object; route: WireRoute };
 
 /** Consumed broadcasts shared only within the selected serving instance. @internal */
 export class BroadcastCache {
@@ -65,11 +62,6 @@ export class BroadcastCache {
 	#blind = new Map<Path.Valid, Blind>();
 	#blindPrefixes = new Map<Path.Valid, Set<Path.Valid>>();
 	#paths = new Map<Path.Valid, Set<Path.Valid>>();
-	readonly #covering?: Covering;
-
-	constructor(covering?: Covering) {
-		this.#covering = covering;
-	}
 
 	/** Record this interest's live advertisement, preserving identity across route updates. */
 	announce(path: Path.Valid, owner: object, route: WireRoute, restart = false): void {
@@ -88,22 +80,6 @@ export class BroadcastCache {
 		this.#update(path);
 	}
 
-	/**
-	 * Keep this interest's advertisement in its place among a tie while no consume may select it,
-	 * until it is announced again without a restart: a lite-07 route that cannot be used for now.
-	 */
-	park(path: Path.Valid, owner: object): void {
-		const entry = this.#announced.get(path)?.get(owner);
-		if (!entry || entry.parked) return;
-		entry.parked = true;
-		this.#update(path);
-	}
-
-	/** Re-check every consume's selection, once what covers a path changed without an announcement. */
-	revalidate(): void {
-		for (const path of this.#cache.keys()) this.#check(path);
-	}
-
 	/** Withdraw this interest's advertisement without disturbing another interest's routes. */
 	withdraw(path: Path.Valid, owner: object): void {
 		const entries = this.#announced.get(path);
@@ -114,21 +90,23 @@ export class BroadcastCache {
 
 	/** Resolve the same most-specific-prefix and route preference as the origin. */
 	instance(path: Path.Valid): Selection {
-		for (const prefix of coveringPrefixes(path)) {
-			const best = bestCandidate(path, prefix, this.#eligible(path, prefix), (entry) => entry.route);
-			if (best) {
-				const cached = this.#cache.get(path)?.get(best.route.instance ?? best.identity);
-				// A minted instance names the announcement, not the publisher's stream, so a
-				// request for it can only name the path: it holds while this route is selected.
-				const named = best.route.instance !== undefined && !Instance.isMinted(best.route.instance);
-				return {
-					...best,
-					validity: !named
-						? ((cached?.consumer.closed.peek() === undefined ? cached?.selection.validity : undefined) ??
-							new Validity())
-						: undefined,
-				};
-			}
+		const best = mostSpecific(
+			path,
+			(prefix) => bestCandidate(path, prefix, this.#eligible(prefix), (entry) => entry.route),
+			(entry) => entry.route,
+		);
+		if (best) {
+			const cached = this.#cache.get(path)?.get(best.route.instance ?? best.identity);
+			// A minted instance names the announcement, not the publisher's stream, so a
+			// request for it can only name the path: it holds while this route is selected.
+			const named = best.route.instance !== undefined && !Instance.isMinted(best.route.instance);
+			return {
+				...best,
+				validity: !named
+					? ((cached?.consumer.closed.peek() === undefined ? cached?.selection.validity : undefined) ??
+						new Validity())
+					: undefined,
+			};
 		}
 		return this.#blind.get(path) ?? new Blind();
 	}
@@ -139,20 +117,15 @@ export class BroadcastCache {
 	 * resolves or refuses.
 	 */
 	pinned(path: Path.Valid, instance: Instance.Valid): Selection {
-		for (const prefix of coveringPrefixes(path)) {
-			const entries = this.#eligible(path, prefix).filter((entry) => entry.route.instance === instance);
-			const best = bestCandidate(path, prefix, entries, (entry) => entry.route);
-			if (best) return best;
-		}
-		return { identity: {}, route: { instance } };
-	}
-
-	/**
-	 * The origin node of the best route now serving `instance` at `path` (lite-07), whichever
-	 * instance wins the path, or undefined when no route names one.
-	 */
-	node(path: Path.Valid, instance: Instance.Valid): bigint | undefined {
-		return this.pinned(path, instance).route.node;
+		const best = mostSpecific(
+			path,
+			(prefix) => {
+				const entries = this.#eligible(prefix).filter((entry) => entry.route.instance === instance);
+				return bestCandidate(path, prefix, entries, (entry) => entry.route);
+			},
+			(entry) => entry.route,
+		);
+		return best ?? { identity: {}, route: { instance } };
 	}
 
 	/** Clone the live cached consumer only when it serves the selected instance. */
@@ -224,17 +197,9 @@ export class BroadcastCache {
 		}
 	}
 
-	// The advertisements at `prefix` a consume of `path` may select, oldest first.
-	#eligible(path: Path.Valid, prefix: Path.Valid): Advertised[] {
-		const covering = this.#covering;
-		return [...(this.#announced.get(prefix)?.values() ?? [])].filter(
-			(entry) =>
-				!entry.parked &&
-				(prefix === path ||
-					entry.route.node === undefined ||
-					!covering ||
-					covering.covers(entry.route.node, prefix, path)),
-		);
+	// The advertisements at `prefix`, oldest first.
+	#eligible(prefix: Path.Valid): Advertised[] {
+		return [...(this.#announced.get(prefix)?.values() ?? [])];
 	}
 
 	#update(prefix: Path.Valid): void {

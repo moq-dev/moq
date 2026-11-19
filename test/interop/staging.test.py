@@ -45,7 +45,6 @@ class Staging(unittest.TestCase):
             self.tools / "cargo",
             """
 case "$1" in
-    tree) echo "moq-net v0.1.0" ;;
     metadata) printf '{"target_directory":"%s"}\n' "$FIXTURE_TARGET" ;;
     install)
         while [[ "$1" != --root ]]; do shift; done
@@ -58,8 +57,8 @@ case "$1" in
             while [[ "$1" != --target-dir ]]; do shift; done
             mkdir -p "$2/debug"
             cp "$FIXTURE_TARGET/adapter" "$2/debug/compat-container"
-        elif [[ "$*" == *'-p moq-c'* ]]; then
-            printf '{"reason":"build-script-executed","package_id":"/moq-c#0.0.0","out_dir":"%s/header"}\n' \
+        elif [[ "$*" == *'-p libmoq'* ]]; then
+            printf '{"reason":"build-script-executed","package_id":"/libmoq#0.0.0","out_dir":"%s/header"}\n' \
                 "$FIXTURE_TARGET"
         fi
         ;;
@@ -189,7 +188,6 @@ fi
 case "$1" in
     encode) echo catalog >"$2"; echo frame >"$3" ;;
     decode) [[ "$(cat "$2")" == catalog && "$(cat "$3")" == frame ]] ;;
-    fetch-supported) echo false ;;
     *) exit 2 ;;
 esac
 """,
@@ -210,7 +208,6 @@ rm -rf "$TARGET"
 "$HARNESS_RUN/current/moq-relay" --help
 for source in current released; do
     "$HARNESS_RUN/hang-$source/compat-container" decode "$HARNESS_RUN/current.catalog" "$HARNESS_RUN/current.frame"
-    [[ "$("$HARNESS_RUN/hang-$source/compat-container" fetch-supported moq-lite-07)" == false ]]
 done
 """
         )

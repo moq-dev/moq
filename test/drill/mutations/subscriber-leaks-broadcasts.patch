@@ -11,7 +11,7 @@
 diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.rs
 --- a/rs/moq-net/src/lite/subscriber.rs
 +++ b/rs/moq-net/src/lite/subscriber.rs
-@@ -2042,7 +2042,8 @@
+@@ -2596,7 +2596,8 @@ struct PrefixRun {
  	/// it comes from the connect config or the peer's SETUP, neither of which
  	/// changes for the life of the session.
  	link_cost: u64,
@@ -21,7 +21,7 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
  	// Lite06+: announce ids. Each received `active` implicitly assigns the next
  	// per-stream ordinal; `ended`/`restart` reference it instead of repeating the
  	// path, and lite-07 bases name it too. Tracked even for announces we drop
-@@ -2145,7 +2146,10 @@
+@@ -2682,7 +2683,10 @@ impl AnnouncePrefix {
  		let mut run: PrefixRun = PrefixRun {
  			responder_origin,
  			link_cost,
@@ -33,17 +33,17 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
  			decoder: lite::AnnounceDecoder::default(),
  			auth_epoch: 0,
  			initial,
-@@ -2301,7 +2305,8 @@
+@@ -2811,7 +2815,8 @@ struct SourceServe {
  	path: Path,
  	instance: Option<crate::Instance>,
- 	node: u64,
+ 	node: Option<crate::route::NodeId>,
 -	source: crate::model::broadcast::SourceGuard,
 +	// MUTATION: never dropped, so a session that ends keeps every source it minted alive.
 +	source: std::mem::ManuallyDrop<crate::model::broadcast::SourceGuard>,
  	dynamic: crate::broadcast::Requests,
  	route: kio::Consumer<()>,
  	// A dedicated close-watch handle, since each pending operation needs its own.
-@@ -2451,7 +2456,7 @@
+@@ -2955,7 +2960,7 @@ impl SourceServe {
  			path: minted.path,
  			instance: minted.instance,
  			node: minted.node,
@@ -52,7 +52,7 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
  			datagram_requests: minted.dynamic.datagrams(),
  			dynamic: minted.dynamic,
  			route: minted.route,
-@@ -2560,7 +2565,7 @@
+@@ -3063,7 +3068,7 @@ impl kio::Task for SourceServe {
  					let serve = TrackServe {
  						validity: self.dynamic.validity().clone(),
  						route: Some(self.route.clone()),

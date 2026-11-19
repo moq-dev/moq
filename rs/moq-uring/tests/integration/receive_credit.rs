@@ -166,12 +166,14 @@ fn partial_frame_gives_way() {
 			let mut high_sub = within(&handle, "the high subscription", subscribe("high", 100)).await;
 
 			// Three quarters of the window, held by a frame that never finishes.
-			let mut low_frame = low
-				.append_group()
-				.expect("low group")
+			let group = low
+				.append_group(Timestamp::from_millis(low.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+				.expect("low group");
+			let timestamp = Timestamp::from_millis(group.start).unwrap();
+			let mut low_frame = group
 				.create_frame(frame::Info {
 					size: WINDOW as u64,
-					timestamp: Some(Timestamp::ZERO),
+					timestamp,
 				})
 				.expect("low frame");
 			low_frame.write(vec![1u8; WINDOW * 3 / 4]).expect("partial payload");
@@ -196,17 +198,30 @@ fn partial_frame_gives_way() {
 
 			// Half the window, which only fits once the low frame lets go.
 			let payload = Bytes::from(vec![2u8; WINDOW / 2]);
-			let mut high_group = high.append_group().expect("high group");
+			let mut high_group = high
+				.append_group(
+					moq_net::Timestamp::from_millis(high.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+				)
+				.expect("high group");
 			high_group
-				.write_frame(Timestamp::ZERO, payload.clone())
+				.write_frame(
+					moq_net::Timestamp::from_millis(high_group.start).unwrap(),
+					payload.clone(),
+				)
 				.expect("high frame");
 			high_group.finish().expect("finish high");
 			assert_eq!(next_frame(&handle, &mut high_sub).await, payload);
 
 			// The session survives, and the low track keeps delivering what fits.
 			drop(low_frame);
-			let mut group = low.append_group().expect("after group");
-			group.write_frame(Timestamp::ZERO, &b"after"[..]).expect("after frame");
+			let mut group = low
+				.append_group(
+					moq_net::Timestamp::from_millis(low.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+				)
+				.expect("after group");
+			group
+				.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), &b"after"[..])
+				.expect("after frame");
 			group.finish().expect("finish after");
 			assert_eq!(next_frame(&handle, &mut low_sub).await, &b"after"[..]);
 

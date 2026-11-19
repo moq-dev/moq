@@ -8,7 +8,7 @@ description: TOML reference for moq-relay
 `moq-relay relay.toml`. Every key is also a CLI flag and environment variable
 that joins the section and key: `listen.tls.cert` is `--listen-tls-cert` /
 `MOQ_LISTEN_TLS_CERT`. The exceptions: `listen.bind` is spelled `--listen` /
-`MOQ_LISTEN`, and `listen.extensions` and `connect.extensions` are TOML only.
+`MOQ_LISTEN`.
 Precedence is CLI, then env, then file, then defaults.
 `moq-relay --help` lists every flag.
 
@@ -18,7 +18,7 @@ Precedence is CLI, then env, then file, then defaults.
 [listen]
 bind = "[::]:443"                    # QUIC (UDP), as --listen. Omit for a stream-only relay.
 version = ["moq-lite-05"]            # Restrict accepted versions. Omit for all but moq-lite-07-wip.
-timeout = "10s"                      # Handshake deadline. "0" waits forever.
+timeout = "30s"                      # Handshake deadline. "0" waits forever.
 
 [listen.reset]
 secret = "/etc/moq/reset.key"        # File holding 64 hex chars. Omit for a random key.
@@ -45,10 +45,6 @@ bind = "127.0.0.1:4444"
 [listen.unix]                        # Plaintext qmux over a Unix socket, gated by peer credentials.
 bind = "/run/moq/internal.sock"
 allow.uid = [1001]
-
-[listen.extensions]                  # moq-transport SETUP extensions to offer, each on by default.
-                                     # The relay always offers ietf, for moq-lite-07 relay links.
-solicit = false                      # Decline MoQ Solicit, so peers may announce unasked.
 ```
 
 `timeout` bounds the whole handshake, transport through MoQ SETUP and auth
@@ -64,17 +60,18 @@ arrive without one.
 
 `bind` is the relay's one UDP port. Beside QUIC it carries WebRTC media for an
 [embedder](/bin/relay/#embed) that takes it; otherwise that traffic is dropped,
-as are STUN Binding queries ([`[stun]`](#stun) has its own port) and anything
-else. `/metrics` counts the drops in `moq_relay_demux_dropped_total` by `reason`:
-`unclaimed` (WebRTC with no embedder), `overflow`, `stun`, and `unknown`. Not
-with `runtime.io_uring`, which serves QUIC alone.
+as are STUN Binding queries and anything else. `/metrics` counts the drops in
+`moq_relay_demux_dropped_total` by `reason`: `unclaimed` (WebRTC with no
+embedder), `overflow`, `stun`, and `unknown`. Not with `runtime.io_uring`, which
+serves QUIC alone.
 
 `reset.secret` lets a relay restarted on the same address reset its
 predecessor's QUIC connections, so clients reconnect at once instead of
 waiting out the idle timeout. Keep it secret, and give it to one relay
 only: any holder resets every other holder's connections, so live relays behind
 one address would reset each other's clients unless the load balancer routes by
-connection ID (`[listen.lb] id`, QUIC-LB). Relays on different addresses gain nothing from sharing
+connection ID (`[listen.lb] id`, QUIC-LB), as the two relays of a
+[handoff](#handoff) do. Relays on different addresses gain nothing from sharing
 it, since a client accepts a reset only from its relay's address.
 Create one with `openssl rand -hex 32 > reset.key`.
 
@@ -85,7 +82,6 @@ A stream-only relay refuses `preferred_v4`, `preferred_v6`, `lb.id`, and
 The io\_uring runtime refuses `preferred_v4`, `preferred_v6`, and `lb.id`;
 use the tokio runtime when the listener needs these settings.
 `[listen.lb] nonce` needs an `id` in the same table; unset nonce uses 8.
-The `--listen-quic-lb-id` and `--listen-quic-lb-nonce` flags update that table.
 `unix.allow` needs `unix.bind`.
 
 `[listen.lb.forward]` keeps a connection alive when its packets land on another relay behind
@@ -106,8 +102,7 @@ so one file serves the whole cluster:
 A packet for an unlisted server ID is dropped. A forward is accepted only from a listed address
 and under the shared `key` (`openssl rand -hex 32 > forward.key`). A changed file replaces the
 map; an invalid one is logged and the last valid map kept, or stops startup. Forwarding needs
-`lb.id` and all three settings, which the `--listen-quic-lb-forward-bind`, `-key`, and `-peers`
-flags update.
+`lb.id` and all three settings.
 
 ## \[quic]
 
@@ -115,7 +110,7 @@ Transport tuning, applied to accepted and dialed connections alike.
 
 ```toml
 [quic]
-congestion_control = "delay"         # "delay" (BBR, the default), "loss" (CUBIC), or "none".
+congestion_control = "bbr"           # "bbr" (BBR v3, the default), "cubic", or "unlimited".
 max_streams = 10000                  # Concurrent streams per connection, bidi and uni; 0 is refused. Default.
 idle_timeout = "10s"                 # Drop a connection after this long with nothing on it. Default.
 # keep_alive = "3s"                  # Ping interval; unset or "0s" derives it from the idle timeout.
@@ -124,12 +119,12 @@ mtu_discovery = false                # Path MTU discovery. Default.
 receive_window = 4194304             # Whole-connection window, in bytes. Default (4 MiB).
 stream_receive_window = 1048576      # Per-stream window, in bytes. Default (1 MiB).
 send_window = 4194304                # Unacknowledged outgoing data, in bytes. Default (4 MiB).
-qlog = "/var/log/moq/qlog"           # Existing directory. Needs the `qlog` build feature.
+qlog = "/var/log/moq/qlog"           # Existing directory.
 # keylog = "/private/keys.log"       # Explicit secret log path; unset is off.
 ```
 
-`congestion_control = "none"` runs no congestion control and no pacing. It is
-meant for tests and controlled links, where nothing else shares the path.
+`congestion_control = "unlimited"` runs no congestion control and no pacing. It
+is meant for tests and controlled links, where nothing else shares the path.
 
 Set `keylog` only while debugging, since the file decrypts every captured session.
 Tokio and io\_uring open the configured path at initialization. New Unix files are
@@ -218,7 +213,7 @@ io_uring = false                     # Drive them with io_uring instead of tokio
 ```
 
 Packets are steered by connection ID, so a client that migrates stays with its
-worker. `workers` needs the `quic` feature. Every worker and the TLS stream
+worker. Every worker and the TLS stream
 listener serve one shared identity, generated or file-backed, so a certificate
 rotation reaches them together and `/certificate.sha256` stays accurate.
 
@@ -226,9 +221,9 @@ Pinning is off by default because every relay pins its workers to the same
 first cores, so two relays on one host, or one limited to fewer CPUs than the
 host has, would crowd onto them. Turn it on for a host the relay has to itself.
 
-`io_uring` additionally needs Linux 6.12+ and the `io-uring` cargo feature; it
-shares the same reloadable TLS identity and serves every configured version
-like the shared runtime. A setting the build or host cannot deliver refuses to
+`io_uring` additionally needs Linux 6.12+ on a 64-bit x86, ARM, RISC-V,
+LoongArch, or POWER CPU; it shares the same reloadable TLS identity and serves
+every configured version like the shared runtime. A setting the host cannot deliver refuses to
 start rather than being ignored. Linux 6.14 up to the 7.3 fix (backported to
 stable kernels) charges io\_uring rings to `RLIMIT_MEMLOCK`: if io\_uring workers
 fail to start naming it, raise it (`LimitMEMLOCK=` under systemd).
@@ -255,35 +250,6 @@ keep the connection open; a WebSocket upgrade hands its lifetime to MoQ.
 
 See [HTTP endpoints](/bin/relay/http).
 
-## \[stun]
-
-Build with `cargo install moq-relay --features stun` to use the relay as an
-explicitly selected STUN server for WebRTC ICE. This feature is off by default.
-The listener has its own UDP port and is disabled unless configured:
-
-```toml
-[stun]
-bind = "[::]:3478"                  # Or --stun-bind / MOQ_STUN_BIND.
-```
-
-List `stun:relay.example.com:3478` in the application's ICE servers. Clients
-never infer a STUN server from their relay session. This provides Binding
-responses with the sender's mapped address, without TURN relaying or ICE
-signaling. It is plain STUN over UDP, so it needs no TLS certificate;
-`stuns:` (STUN over TLS) is not served.
-
-The private limits are 10 requests/second per source IP with a burst of 20,
-and 1000/second globally with a burst of 2000. The source table retains at most
-4096 IPs; an idle entry can be replaced once its two-second bucket has refilled.
-Excess, malformed, unsupported, and non-Binding datagrams receive no reply.
-The internal `/metrics` endpoint reports `moq_relay_stun_replies_total` and
-`moq_relay_stun_dropped_total` with `reason` values `source`, `global`,
-`capacity`, `invalid`, and `io`, only when this listener is configured.
-`io` counts replies that could not be sent; `moq_relay_stun_io_errors_total`
-also counts asynchronous peer errors reported while receiving. Peer network
-errors and interrupted calls leave the listener running; other local socket
-failures stop the relay.
-
 ## \[auth]
 
 ```toml
@@ -305,12 +271,11 @@ See [Authentication](/bin/relay/auth).
 connect = ["https://us-east.example.com/?cost=10"]   # Peers to dial. ?cost prices the link, or use {url, cost, egress, token, upstream} objects.
 node = "https://us-west.example.com/"                 # This relay's own URL.
 token = "cluster.jwt"                                 # JWT for dials without an inline ?jwt=.
-route_key = "route.key"                               # Route key; relays sharing the file fail over as one to scoped peers.
-max_hops = 32                                         # Longest accepted/forwarded hop path (1 to 32).
+max_hops = 32                                         # Legacy: longest hop path on moq-lite-03 to 06 (1 to 32).
 
 [cluster.api]
 url = "https://api.example.com/peers"                  # Live JSON peer list; a local file also works.
-# tls.root = ["api-ca.pem"]                           # API server trust, independent from connect.tls.
+# root = ["api-ca.pem"]                               # API server trust, independent from connect.tls.
 
 [cluster.lan]                                         # Find peers on the LAN over mDNS.
 enabled = true
@@ -322,7 +287,10 @@ See [Clustering](/bin/relay/cluster).
 
 ## \[connect]
 
-Settings for outbound dials (cluster peers, auth API).
+Settings for outbound dials (cluster peers, auth API). Where and with what
+credential to dial come from `[cluster]`, so the relay refuses to start with
+`connect.url` (`--connect`): use `cluster.connect`; or `connect.tokens`
+(`--connect-token`): use `cluster.token` or a peer's `token`.
 
 ```toml
 [connect]
@@ -332,7 +300,6 @@ tls.cert = "relay.pem"               # Present a client certificate (mTLS to pee
 tls.key = "relay.key"
 goaway.redirect = "same-host"        # How far to trust a draining peer's redirect URI.
 goaway.handover = "10s"              # Cap on how long the drained upstream keeps serving.
-extensions.solicit = false           # Decline MoQ Solicit on outbound moq-transport sessions, as in [listen.extensions].
 ```
 
 A draining upstream may name a replacement URI. `same-host` follows it only
@@ -414,7 +381,11 @@ drain_timeout = "10s"                # Top-level key, as --drain-timeout / MOQ_D
 
 The first SIGTERM or SIGINT starts a drain: every session is sent a GOAWAY
 asking it to reconnect elsewhere, including any that connect during the drain,
-and is force-closed if it is still connected when the window ends. Accepted
+and is force-closed if it is still connected when the window ends. The cluster
+links the relay dialed are drained the same way and stop redialing, so a
+neighbour hears the relay is draining and moves its routes before the link
+closes. A neighbour keeps serving such a link rather than leave it, so a relay
+that dialed a peer holds its drain to the end of the window. Accepted
 connections still handshaking or awaiting authorization hold the drain until
 they finish, fail, or reach that same deadline, where any still pending is
 refused or closed. Public HTTP/1.1 connections hold the drain from TCP accept
@@ -424,7 +395,7 @@ ALPN because extended CONNECT is disabled. A later WebSocket upgrade on the same
 keep-alive connection joins the drain when its headers arrive. The internal
 listener is unaffected.
 
-The relay exits as soon as every admitted connection has left, or immediately on
+The relay exits as soon as every admitted connection and dialed link has left, or immediately on
 a second signal. When the window ends, it stops waiting for connections still
 pending and exits once every session it closed has reported its `end` to the
 auth server, each report bounded by that server's request timeout. Once it commits to exit, WebSocket
@@ -436,9 +407,50 @@ closed when the window ends. An embedder can take over the signals; see
 
 An embedder's drain alert can page on the `forced` count returned by
 [`Observer::drained`](https://docs.rs/moq-relay/latest/moq_relay/shutdown/struct.Observer.html#method.drained).
+It leaves out the dialed links the drain holds to its end, so a routine
+restart reports none.
 Its `ending` count distinguishes sessions already closed before the deadline
 but still reporting their end. The live tally separates open sessions from
 that cleanup, and the summary's elapsed time stays the same for late observers.
+
+## \[handoff]
+
+```toml
+[handoff]
+socket = "/run/moq-relay/handoff.sock"   # Hand every socket to the relay that replaces this one. Linux only.
+supervise = false                        # Run under a stand-in main process, for a systemd restart.
+```
+
+With `socket` set, a starting relay first connects to it. When a relay already
+serves there, the new one takes over every listening socket the old one holds
+instead of binding its own: the QUIC port, `[listen.tcp]`, `[listen.unix]`,
+`[web]`, and `[internal]`. A listener whose address changed binds
+afresh. Once the new relay is ready it takes every new QUIC handshake, and the
+old one stops accepting and drains as on SIGTERM ([Shutdown](#shutdown)): its
+sessions stay with it until they leave or `drain_timeout` passes. Cluster peers
+redial once on that GOAWAY and reach the new relay, so the drain does not wait
+on them. A session that stays on the old relay anyway, such as a client that
+ignores GOAWAY, loses the routes it shared with those peers once they leave.
+Either relay exiting leaves the other's sessions alone, and if one dies without
+closing its sessions, the other answers their packets with a stateless reset,
+which their clients accept when both relays share `[listen.reset] secret`.
+
+The QUIC port is handed on as a reuseport group with room for two relays, each
+steering its own connections by connection ID, so handoff needs
+`[runtime] workers` (tokio or io\_uring) and halves the most workers a relay
+runs to 128. The new relay serves the old one's worker count, logging a warning
+when the config asks for another. A relay still serving beside the one it
+replaced refuses a third until that one exits. A relay dialing static or API
+cluster peers needs `[connect] bind` on port 0: their shared dial socket on a
+fixed port is bound at startup and not handed on. Packets on the QUIC port that
+are not QUIC, such as WebRTC, go to the newest relay, so a WebRTC session on the old
+relay ends at the handoff.
+
+Both relays name the same node while the old one drains. Each counts the
+sessions it serves, and the new one holds back its [stats](#stats) broadcast
+until the old one exits. Both must run as the same user. Memory and file
+descriptors double while both run. [Production](/setup/prod#upgrades) shows the
+systemd unit settings that make a restart a handoff.
 
 ## \[log]
 

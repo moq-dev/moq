@@ -23,7 +23,7 @@ const PAYLOAD = new Uint8Array([0xde, 0xad]);
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 function write(group: { writeFrame(frame: { payload: Uint8Array; timestamp: Time.Timestamp }): void }, ts: number) {
-	group.writeFrame({ payload: encodeFrame(PAYLOAD, Duration.micros(ts)), timestamp: Time.Timestamp.now() });
+	group.writeFrame({ payload: encodeFrame(PAYLOAD, Duration.micros(ts)), timestamp: Time.Timestamp.fromMicros(ts) });
 }
 
 // The most frames the consumer may hold: past the max buffer, one more wire frame. Each held frame
@@ -307,7 +307,7 @@ test("Consumer expires a hole behind a full max buffer from when the group past 
 			group.finish();
 		}
 		const marker = track.createGroup(3n);
-		marker.writeFrame({ payload: new Uint8Array(), timestamp: Time.Timestamp.now() });
+		marker.writeFrame({ payload: new Uint8Array(), timestamp: Time.Timestamp.fromMicros(30_000) });
 		marker.finish();
 		// The reader is slow: the hole before group 3 expired before anything is read.
 		await clock.advance(Duration.millis(1_000));

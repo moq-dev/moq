@@ -6,12 +6,12 @@
 //! one of two directions. The caller inspects [`Request::resource`] /
 //! [`Request::stream_id`], makes an authorization decision, and either:
 //!
-//! - **[`Request::Publish`]**: [`Publish::accept`] (ingest the connection's
-//!   MPEG-TS into an origin at a path) or [`Publish::reject`]. This is the
-//!   contribution path (OBS, ffmpeg).
-//! - **[`Request::Subscribe`]**: [`Subscribe::accept`] (re-mux a broadcast from
-//!   an origin back to MPEG-TS and stream it down to the caller) or
-//!   [`Subscribe::reject`]. This is the egress path: a player (VLC, ffmpeg) pulls
+//! - **[`Request::Publish`]**: [`Publish::accept`] with an [`Import`] (ingest the
+//!   connection's MPEG-TS into an origin at a path) or [`Publish::reject`]. This
+//!   is the contribution path (OBS, ffmpeg).
+//! - **[`Request::Play`]**: [`Play::accept`] with an [`Export`] (re-mux a broadcast
+//!   from an origin back to MPEG-TS and stream it down to the caller) or
+//!   [`Play::reject`]. This is the egress path: a player (VLC, ffmpeg) pulls
 //!   `srt://host:port?streamid=#!::r=<broadcast>,m=request`.
 //!
 //! This mirrors `moq-tokio`'s `Server` / `Request`, so the gateway stays
@@ -185,7 +185,7 @@ pub struct Server {
 	incoming: SrtIncoming,
 	local_addr: SocketAddr,
 	/// The negotiated SRT receive latency, reused as the egress delay (at least a
-	/// second) on each [`Subscribe`] (see [`crate::ts::Subscriber::new`]).
+	/// second) on each [`Play`] (see [`crate::ts::Subscriber::new`]).
 	latency: Duration,
 }
 
@@ -194,7 +194,7 @@ impl Server {
 	///
 	/// `latency` is the SRT receive latency, negotiated at handshake time; pass
 	/// `None` for a sensible default (500ms). It doubles as the egress delay for
-	/// [`Subscribe`] requests, but no less than a second.
+	/// [`Play`] requests, but no less than a second.
 	pub async fn bind(addr: SocketAddr, latency: impl Into<Option<Duration>>) -> Result<Self> {
 		let latency = latency.into().unwrap_or(DEFAULT_LATENCY);
 
@@ -225,7 +225,7 @@ impl Server {
 		self.local_addr
 	}
 
-	/// Wait for the next connection that wants to publish or subscribe.
+	/// Wait for the next connection that wants to publish or play.
 	///
 	/// Connections whose stream id can't be routed (no usable resource name) are
 	/// rejected internally and skipped, so every [`Request`] returned is
@@ -247,14 +247,11 @@ impl Server {
 				stream_id,
 				peer,
 				latency: self.latency,
-				program: None,
-				follow: Duration::ZERO,
-				stitch: false,
 			};
 
 			// `m=request` reads a broadcast out; everything else publishes one in.
 			return Some(match mode {
-				ConnectionMode::Request => Request::Subscribe(Subscribe(pending)),
+				ConnectionMode::Request => Request::Play(Play(pending)),
 				_ => Request::Publish(Publish(pending)),
 			});
 		}
@@ -274,19 +271,12 @@ struct Pending {
 	/// fields out of it (e.g. a token in `u=` or a custom key).
 	stream_id: Option<String>,
 	peer: SocketAddr,
-	/// The SRT receive latency, reused as the egress delay (at least a second) on a subscribe.
+	/// The SRT receive latency, reused as the egress delay (at least a second) on a play.
 	latency: Duration,
-	/// The programs of a multiplex an ingest publishes. Override with [`Publish::with_program`].
-	program: Option<Program>,
-	/// How long an egress waits for the same instance to return. Override with
-	/// [`Subscribe::with_follow`].
-	follow: Duration,
-	/// Whether an egress follows a replacement. Override with [`Subscribe::with_stitch`].
-	stitch: bool,
 }
 
 /// What an accepted SRT connection wants: to contribute media ([`Publish`]) or to
-/// view it ([`Subscribe`]).
+/// view it ([`Play`]).
 ///
 /// Yielded by [`Server::accept`], classified by the stream id's `m=` mode.
 /// Inspect [`resource`](Self::resource) / [`stream_id`](Self::stream_id), then
@@ -296,8 +286,8 @@ struct Pending {
 pub enum Request {
 	/// A client pushing media in (OBS, ffmpeg). Ingest it with [`Publish::accept`].
 	Publish(Publish),
-	/// A client pulling media out (VLC, ffmpeg). Serve it with [`Subscribe::accept`].
-	Subscribe(Subscribe),
+	/// A client pulling media out (VLC, ffmpeg) with `m=request`. Serve it with [`Play::accept`].
+	Play(Play),
 }
 
 impl Request {
@@ -306,7 +296,7 @@ impl Request {
 	pub fn resource(&self) -> &str {
 		match self {
 			Request::Publish(r) => r.resource(),
-			Request::Subscribe(r) => r.resource(),
+			Request::Play(r) => r.resource(),
 		}
 	}
 
@@ -314,7 +304,7 @@ impl Request {
 	pub fn stream_id(&self) -> Option<&str> {
 		match self {
 			Request::Publish(r) => r.stream_id(),
-			Request::Subscribe(r) => r.stream_id(),
+			Request::Play(r) => r.stream_id(),
 		}
 	}
 
@@ -322,7 +312,7 @@ impl Request {
 	pub fn peer(&self) -> SocketAddr {
 		match self {
 			Request::Publish(r) => r.peer(),
-			Request::Subscribe(r) => r.peer(),
+			Request::Play(r) => r.peer(),
 		}
 	}
 }
@@ -355,17 +345,10 @@ impl Publish {
 		self.0.peer
 	}
 
-	/// Publish one program of a multi-program feed, or each as its own broadcast under the
-	/// accepted path. `None` (the default) fails an ingest whose PAT lists more than one.
-	pub fn with_program(mut self, program: impl Into<Option<Program>>) -> Self {
-		self.0.program = program.into();
-		self
-	}
-
-	/// Accept the publish: announce a broadcast at `path` in `origin` and pump the
-	/// connection's MPEG-TS into it, published as `ingest` says, until the client disconnects.
+	/// Accept the publish: announce the [`Import`]'s broadcast in its publisher and pump the
+	/// connection's MPEG-TS into it, published as its ingest says, until the client disconnects.
 	///
-	/// `origin` is whatever the caller wants the media published into (e.g. a
+	/// The publisher is whatever the caller wants the media published into (e.g. a
 	/// relay's shared origin, optionally scoped per the authenticated token). This
 	/// future resolves when the connection ends, so callers usually run it on its
 	/// own task.
@@ -376,16 +359,16 @@ impl Publish {
 	///
 	/// The ingest's max age is unrelated to the SRT receive latency [`Server::bind`]
 	/// negotiates, which is a transport buffer on this hop.
-	pub async fn accept(
-		self,
-		origin: &origin::Producer,
-		path: impl Into<moq_net::Path>,
-		ingest: &moq_mux::Ingest,
-	) -> Result<()> {
-		let path: moq_net::Path = path.into();
+	pub async fn accept(self, import: Import<'_>) -> Result<()> {
 		let socket = self.0.request.accept(None).await?;
-		tracing::info!(peer = %self.0.peer, %path, "SRT publish accepted");
-		serve_publish(origin, path.as_str(), socket, ingest, self.0.program).await
+		tracing::info!(peer = %self.0.peer, path = %import.broadcast, "SRT publish accepted");
+		let Import {
+			publisher,
+			broadcast,
+			ingest,
+			program,
+		} = import;
+		serve_publish(publisher, broadcast.as_str(), socket, &ingest, program).await
 	}
 
 	/// Reject the publish with a verdict the client can distinguish on the wire.
@@ -398,15 +381,15 @@ impl Publish {
 	}
 }
 
-/// A pending SRT subscribe (egress), waiting on the caller to authorize it.
+/// A pending SRT play (egress, `m=request`), waiting on the caller to authorize it.
 ///
 /// The viewing counterpart of [`Publish`]: inspect [`resource`](Self::resource) /
 /// [`stream_id`](Self::stream_id), then [`accept`](Self::accept) to serve a
 /// broadcast from an origin down to the caller, or [`reject`](Self::reject) it.
 /// Dropping it without either drops the connection.
-pub struct Subscribe(Pending);
+pub struct Play(Pending);
 
-impl Subscribe {
+impl Play {
 	/// The resource name to route on (the stream id's `r=` value, or the raw
 	/// stream id).
 	pub fn resource(&self) -> &str {
@@ -426,46 +409,87 @@ impl Subscribe {
 		self.0.peer
 	}
 
-	/// Wait up to `follow` for the same publisher instance, or when stitching a replacement, to
-	/// come back once the broadcast ends, carrying on with the same stream. Zero (the default)
-	/// follows only an instance already serving, else closes the SRT stream.
-	pub fn with_follow(mut self, follow: Duration) -> Self {
-		self.0.follow = follow;
-		self
-	}
-
-	/// Follow another publisher instance replacing the broadcast, as a full program switch on
-	/// the same SRT connection. Off by default, which ends the stream with
-	/// [`moq_mux::Error::Replaced`].
-	pub fn with_stitch(mut self, stitch: bool) -> Self {
-		self.0.stitch = stitch;
-		self
-	}
-
-	/// Accept the subscribe: resolve the broadcast at `path` in `origin`, re-mux
+	/// Accept the play: resolve the [`Export`]'s broadcast in its subscriber, re-mux
 	/// it to MPEG-TS, and stream it down to the caller until either side ends.
 	///
 	/// Waits for the broadcast to be announced (so a caller may connect before the
 	/// publisher), cancelling cleanly if the caller disconnects first. This future
 	/// resolves when playback ends, so callers usually run it on its own task.
-	pub async fn accept(self, origin: &origin::Consumer, path: impl Into<moq_net::Path>) -> Result<()> {
-		let path: moq_net::Path = path.into();
+	pub async fn accept(self, export: Export<'_>) -> Result<()> {
 		let socket = self.0.request.accept(None).await?;
-		tracing::info!(peer = %self.0.peer, %path, "SRT subscribe accepted");
+		tracing::info!(peer = %self.0.peer, path = %export.broadcast, "SRT play accepted");
 		let options = crate::ts::Options {
 			latency: self.0.latency,
-			follow: self.0.follow,
-			stitch: self.0.stitch,
+			follow: export.follow,
+			stitch: export.stitch,
 		};
-		serve_subscribe(origin, path.as_str(), socket, options).await
+		serve_subscribe(export.subscriber, export.broadcast.as_str(), socket, options).await
 	}
 
-	/// Reject the subscribe with a verdict the client can distinguish on the wire.
+	/// Reject the play with a verdict the client can distinguish on the wire.
 	///
 	/// As with a publish, the [`Server`] has to outlive the client's handshake for
 	/// the verdict to reach the wire.
 	pub async fn reject(self, reason: Reject) -> Result<()> {
 		Ok(self.0.request.reject(reason.reason()).await?)
+	}
+}
+
+/// Where and how an SRT ingest publishes: [`Publish::accept`], or [`Client::pull`](crate::Client::pull).
+#[non_exhaustive]
+pub struct Import<'a> {
+	/// The producer the media is published into.
+	pub publisher: &'a origin::Producer,
+	/// The broadcast to publish, relative to the producer's root.
+	pub broadcast: moq_net::Path,
+	/// How the ingested broadcast is published.
+	pub ingest: moq_mux::Ingest,
+	/// Publish one program of a multi-program feed, or each as its own broadcast under
+	/// [`broadcast`](Self::broadcast). `None` (the default) fails an ingest whose PAT lists
+	/// more than one.
+	pub program: Option<Program>,
+}
+
+impl<'a> Import<'a> {
+	/// Publish into `publisher` under `broadcast` with the default [`Ingest`](moq_mux::Ingest),
+	/// refusing a multiplex.
+	pub fn new(publisher: &'a origin::Producer, broadcast: impl Into<moq_net::Path>) -> Self {
+		Self {
+			publisher,
+			broadcast: broadcast.into(),
+			ingest: moq_mux::Ingest::default(),
+			program: None,
+		}
+	}
+}
+
+/// Where and how an SRT egress reads its broadcast: [`Play::accept`], or
+/// [`Client::publish`](crate::Client::publish).
+#[non_exhaustive]
+pub struct Export<'a> {
+	/// The consumer the broadcast is read from.
+	pub subscriber: &'a origin::Consumer,
+	/// The broadcast to send, relative to the consumer's root.
+	pub broadcast: moq_net::Path,
+	/// How long to wait for the same publisher instance, or when [stitching](Self::stitch) a
+	/// replacement, to come back once the broadcast ends, carrying on with the same stream.
+	/// Zero (the default) follows only an instance already serving, else ends the stream.
+	pub follow: Duration,
+	/// Follow another publisher instance replacing the broadcast, as a full program switch on
+	/// the same SRT connection. Off by default, which ends the stream with
+	/// [`moq_mux::Error::Replaced`].
+	pub stitch: bool,
+}
+
+impl<'a> Export<'a> {
+	/// Send `broadcast` from `subscriber`, ending the stream when its publisher does.
+	pub fn new(subscriber: &'a origin::Consumer, broadcast: impl Into<moq_net::Path>) -> Self {
+		Self {
+			subscriber,
+			broadcast: broadcast.into(),
+			follow: Duration::ZERO,
+			stitch: false,
+		}
 	}
 }
 
@@ -685,10 +709,10 @@ mod tests {
 		});
 
 		let request = server.accept().await.expect("an SRT request");
-		let Request::Subscribe(subscribe) = request else {
-			panic!("m=request must create a subscribe request");
+		let Request::Play(play) = request else {
+			panic!("m=request must create a play request");
 		};
-		let mut sender = subscribe.0.request.accept(None).await.unwrap();
+		let mut sender = play.0.request.accept(None).await.unwrap();
 		let mut receiver = caller.await.unwrap();
 
 		// Several times srt-tokio's 32-packet default, which stalls before the tenth
@@ -868,6 +892,8 @@ mod tests {
 		use moq_mux::container::{Producer, ts};
 		use moq_net::Timestamp;
 
+		kio::clock::host_time(); // real SRT sockets
+
 		// Short enough to keep the test quick, long enough that the release instants
 		// either side of the marker are separated by more than clock noise.
 		const LATENCY: Duration = Duration::from_millis(300);
@@ -926,12 +952,14 @@ mod tests {
 				.unwrap()
 		});
 
-		let Request::Subscribe(subscribe) = server.accept().await.expect("an SRT request") else {
-			panic!("m=request must create a subscribe request");
+		let Request::Play(play) = server.accept().await.expect("an SRT request") else {
+			panic!("m=request must create a play request");
 		};
 		let consumer = origin.consume();
-		let egress =
-			tokio::spawn(async move { subscribe.accept(&consumer, moq_net::Path::from_static("marker")).await });
+		let egress = tokio::spawn(async move {
+			play.accept(Export::new(&consumer, moq_net::Path::from_static("marker")))
+				.await
+		});
 		let mut receiver = caller.await.unwrap();
 
 		// Three seconds of program, then wait until the receiver is actually playing it
@@ -945,9 +973,10 @@ mod tests {
 			.unwrap();
 		received.push(first);
 
-		// The publisher declares a break and continues forward.
+		// The publisher declares a break and continues forward, with half a second written at
+		// once: a longer burst would leave the marker's group stale before the egress reads it.
 		producer.discontinuity().unwrap();
-		write(&mut producer, 30, OFFSET + 3_000_000);
+		write(&mut producer, 5, OFFSET + 3_000_000);
 
 		// Drain until the muxer flags the break, which it does exactly once, on the new
 		// generation's leading clock packet.
@@ -1061,17 +1090,19 @@ mod tests {
 				.await
 				.unwrap()
 		});
-		let Request::Subscribe(subscribe) = server.accept().await.expect("an SRT request") else {
-			panic!("m=request must create a subscribe request");
+		let Request::Play(play) = server.accept().await.expect("an SRT request") else {
+			panic!("m=request must create a play request");
 		};
 		let consumer = origin.consume();
 		let task = tokio::spawn(async move {
 			let _server = server;
-			subscribe
-				.with_follow(follow)
-				.with_stitch(stitch)
-				.accept(&consumer, moq_net::Path::from_static("live"))
-				.await
+			play.accept(Export {
+				subscriber: &consumer,
+				broadcast: moq_net::Path::from_static("live"),
+				follow,
+				stitch,
+			})
+			.await
 		});
 		(caller.await.unwrap(), task)
 	}

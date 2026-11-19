@@ -28,7 +28,7 @@ The API is the most important thing to get right: a bad shape costs a breaking c
 - Nest related API, configuration, and output fields under their shared role.
 - Mirror API names across Rust, JS, and the bindings.
 - Keep package boundaries modular and reusable; prefer a module in an existing package over a one-off package.
-- Never mark a special case inside a value: not a huge number like `u64::MAX` (it is the longest varint), and not a reserved prefix or character in a string. Use 0, a separate message or type, a typed field, or a boolean.
+- Never mark a special case inside a value: not a huge number like `u64::MAX` (it is the longest varint), and not a reserved prefix or character in a string. Use 0, a separate message or type, a typed field, or a boolean. The one exception is a path segment's leading `.`, which hides the path from announce discovery.
 - Enforce a policy where the thing is created, not where it is checked: the signer bounds a token's lifetime, and the verifier accepts what a valid token carries. Don't add `allow-*` opt-out flags; move or generalize the rule.
 
 # Development
@@ -38,6 +38,7 @@ PRs target `main`, where breaking API changes are allowed.
 Wire changes stay backwards compatible with *published* drafts/versions; an unpublished `-wip` version changes freely.
 moq.pro rolls out with relays on the newest and previous release side by side, so those two versions must interoperate as relays. A temporary migration for that is fine when it is clearly marked and easy to delete at the next version migration.
 Our libraries prefer moq-lite, so moq-transport compatibility only matters against third-party implementations.
+Ask before planning or building work that a large live-media platform would not use, such as mesh networking, robotics, AI agents, P2P, or TCP tunnels: it belongs to Kixel (kixel-ai/kixel.ai), which builds on moq rather than waiting on it.
 
 Build output may live outside the checkout and gets wiped, so scratch never goes in `target/`.
 
@@ -49,7 +50,7 @@ Review locally with one reviewer, not the pair: `quest review --harness codex`, 
 
 # Cross-Package Sync
 
-`moq-ffi` powers every SDK except Rust and JS. Keep all languages and wrappers at the same functionality.
+`moq-ffi` powers every SDK except Rust and JS. A feature reaches the bindings when a binding user needs it; every language and wrapper then gets it together.
 A Rust change with a JS counterpart updates both in the same PR: `moq-net` and `js/net`, `hang` and `js/hang`, `moq-auth` and `js/auth`.
 A wire-format change updates its matching draft in the same PR: framing, fields, enum values, and version negotiation.
 Wire, `moq-ffi`, or gateway changes also run `just test interop --all`; plain `interop` is Rust-only.

@@ -27,7 +27,6 @@ publish = false
 anyhow = { version = "1", features = ["backtrace"] }
 base64 = { version = "0.23" }
 bytemuck = { version = "1", default-features = false, features = ["derive", "extern_crate_alloc", "min_const_generics"] }
-byteorder = { version = "1" }
 bytes = { version = "1", features = ["serde"] }
 camino = { version = "1", default-features = false, features = ["serde1"] }
 chrono = { version = "0.4", features = ["serde"] }
@@ -36,7 +35,7 @@ clap_builder = { version = "4", default-features = false, features = ["cargo", "
 const-oid = { version = "0.10", default-features = false, features = ["db"] }
 crossbeam-utils = { version = "0.8" }
 crypto-common = { version = "0.1", default-features = false, features = ["std"] }
-der = { version = "0.8", default-features = false, features = ["derive", "flagset", "oid", "std", "zeroize"] }
+der = { version = "0.8", default-features = false, features = ["derive", "flagset", "oid", "pem", "std"] }
 derive_more = { version = "2", features = ["debug", "display", "error", "from"] }
 digest-93f6ce9d446188ac = { package = "digest", version = "0.10", features = ["mac", "std"] }
 digest-a6292c17cd707f01 = { package = "digest", version = "0.11", features = ["alloc", "mac", "oid"] }
@@ -52,25 +51,26 @@ futures-executor = { version = "0.3" }
 futures-sink = { version = "0.3" }
 futures-task = { version = "0.3", default-features = false, features = ["std"] }
 futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
+getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 hashbrown = { version = "0.17", default-features = false, features = ["default-hasher", "inline-more"] }
 hex = { version = "0.4" }
-hmac = { version = "0.12", default-features = false, features = ["reset"] }
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["server-auto", "service", "tokio"] }
 indexmap = { version = "2", features = ["serde"] }
 log = { version = "0.4", default-features = false, features = ["std"] }
-md-5-93f6ce9d446188ac = { package = "md-5", version = "0.10" }
-md-5-a6292c17cd707f01 = { package = "md-5", version = "0.11" }
+md-5 = { version = "0.11" }
 memchr = { version = "2" }
 mio = { version = "1", features = ["net", "os-ext"] }
 nom-181b0d20215bb231 = { package = "nom", version = "8" }
 num-bigint = { version = "0.4" }
 num-complex = { version = "0.4" }
 num-integer = { version = "0.1", features = ["i128"] }
+num-rational = { version = "0.4", default-features = false, features = ["num-bigint-std", "std"] }
 num-traits = { version = "0.2", features = ["i128"] }
 object_store = { version = "0.14", default-features = false, features = ["aws-base", "azure-base", "fs", "gcp-base", "reqwest"] }
 once_cell = { version = "1" }
 percent-encoding = { version = "2" }
+pkcs8 = { version = "0.11", default-features = false, features = ["pem"] }
 portable-atomic = { version = "1" }
 proptest = { version = "1", default-features = false, features = ["handle-panics"] }
 rcgen = { version = "0.14", default-features = false, features = ["pem"] }
@@ -84,11 +84,11 @@ serde_core = { version = "1", features = ["alloc", "rc"] }
 serde_json = { version = "1", features = ["float_roundtrip", "preserve_order", "raw_value", "unbounded_depth"] }
 serde_spanned = { version = "1", default-features = false, features = ["serde", "std"] }
 serde_with = { version = "3", features = ["base64", "hex", "json"] }
-sha2 = { version = "0.10" }
 siphasher = { version = "1" }
 slab = { version = "0.4" }
 smallvec = { version = "1", default-features = false, features = ["const_new", "union", "write"] }
 socket2 = { version = "0.6", default-features = false, features = ["all"] }
+spki = { version = "0.8", default-features = false, features = ["pem"] }
 subtle = { version = "2" }
 time = { version = "0.3", features = ["formatting", "local-offset", "macros", "parsing"] }
 tokio = { version = "1", features = ["full", "test-util"] }
@@ -98,9 +98,9 @@ toml = { version = "1" }
 toml_datetime = { version = "1", features = ["serde"] }
 toml_parser = { version = "1" }
 tower = { version = "0.5", default-features = false, features = ["make", "util"] }
+tracing = { version = "0.1" }
 tracing-core = { version = "0.1" }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "local-time"] }
-tungstenite = { version = "0.30", default-features = false, features = ["__rustls-tls", "handshake"] }
 typenum = { version = "1", default-features = false, features = ["const-generics"] }
 url = { version = "2", features = ["serde"] }
 usage-argv = { version = "7", default-features = false, features = ["complete", "diagnostics", "help-advanced"] }
@@ -113,7 +113,6 @@ zeroize = { version = "1", features = ["derive"] }
 anyhow = { version = "1", features = ["backtrace"] }
 base64 = { version = "0.23" }
 bytemuck = { version = "1", default-features = false, features = ["derive", "extern_crate_alloc", "min_const_generics"] }
-byteorder = { version = "1" }
 bytes = { version = "1", features = ["serde"] }
 camino = { version = "1", default-features = false, features = ["serde1"] }
 cc = { version = "1", default-features = false, features = ["parallel"] }
@@ -123,7 +122,7 @@ clap_builder = { version = "4", default-features = false, features = ["cargo", "
 const-oid = { version = "0.10", default-features = false, features = ["db"] }
 crossbeam-utils = { version = "0.8" }
 crypto-common = { version = "0.1", default-features = false, features = ["std"] }
-der = { version = "0.8", default-features = false, features = ["derive", "flagset", "oid", "std", "zeroize"] }
+der = { version = "0.8", default-features = false, features = ["derive", "flagset", "oid", "pem", "std"] }
 derive_more = { version = "2", features = ["debug", "display", "error", "from"] }
 derive_more-impl = { version = "2", features = ["debug", "display", "error", "from"] }
 digest-93f6ce9d446188ac = { package = "digest", version = "0.10", features = ["mac", "std"] }
@@ -141,25 +140,26 @@ futures-executor = { version = "0.3" }
 futures-sink = { version = "0.3" }
 futures-task = { version = "0.3", default-features = false, features = ["std"] }
 futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
+getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 hashbrown = { version = "0.17", default-features = false, features = ["default-hasher", "inline-more"] }
 hex = { version = "0.4" }
-hmac = { version = "0.12", default-features = false, features = ["reset"] }
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["server-auto", "service", "tokio"] }
 indexmap = { version = "2", features = ["serde"] }
 log = { version = "0.4", default-features = false, features = ["std"] }
-md-5-93f6ce9d446188ac = { package = "md-5", version = "0.10" }
-md-5-a6292c17cd707f01 = { package = "md-5", version = "0.11" }
+md-5 = { version = "0.11" }
 memchr = { version = "2" }
 mio = { version = "1", features = ["net", "os-ext"] }
 nom-181b0d20215bb231 = { package = "nom", version = "8" }
 num-bigint = { version = "0.4" }
 num-complex = { version = "0.4" }
 num-integer = { version = "0.1", features = ["i128"] }
+num-rational = { version = "0.4", default-features = false, features = ["num-bigint-std", "std"] }
 num-traits = { version = "0.2", features = ["i128"] }
 object_store = { version = "0.14", default-features = false, features = ["aws-base", "azure-base", "fs", "gcp-base", "reqwest"] }
 once_cell = { version = "1" }
 percent-encoding = { version = "2" }
+pkcs8 = { version = "0.11", default-features = false, features = ["pem"] }
 portable-atomic = { version = "1" }
 proc-macro2 = { version = "1" }
 proptest = { version = "1", default-features = false, features = ["handle-panics"] }
@@ -175,11 +175,11 @@ serde_core = { version = "1", features = ["alloc", "rc"] }
 serde_json = { version = "1", features = ["float_roundtrip", "preserve_order", "raw_value", "unbounded_depth"] }
 serde_spanned = { version = "1", default-features = false, features = ["serde", "std"] }
 serde_with = { version = "3", features = ["base64", "hex", "json"] }
-sha2 = { version = "0.10" }
 siphasher = { version = "1" }
 slab = { version = "0.4" }
 smallvec = { version = "1", default-features = false, features = ["const_new", "union", "write"] }
 socket2 = { version = "0.6", default-features = false, features = ["all"] }
+spki = { version = "0.8", default-features = false, features = ["pem"] }
 subtle = { version = "2" }
 syn-7b89eefb6aaa9bf3 = { package = "syn", version = "3", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
 syn-f595c2ba2a3f28df = { package = "syn", version = "2", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
@@ -191,9 +191,9 @@ toml = { version = "1" }
 toml_datetime = { version = "1", features = ["serde"] }
 toml_parser = { version = "1" }
 tower = { version = "0.5", default-features = false, features = ["make", "util"] }
+tracing = { version = "0.1" }
 tracing-core = { version = "0.1" }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "local-time"] }
-tungstenite = { version = "0.30", default-features = false, features = ["__rustls-tls", "handshake"] }
 typenum = { version = "1", default-features = false, features = ["const-generics"] }
 url = { version = "2", features = ["serde"] }
 usage-argv = { version = "7", default-features = false, features = ["complete", "diagnostics", "help-advanced"] }
@@ -210,7 +210,6 @@ crossbeam-epoch = { version = "0.9" }
 dispatch2 = { version = "0.3" }
 errno = { version = "0.3" }
 flate2 = { version = "1", features = ["zlib-rs"] }
-getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
@@ -241,7 +240,6 @@ crossbeam-epoch = { version = "0.9" }
 dispatch2 = { version = "0.3" }
 errno = { version = "0.3" }
 flate2 = { version = "1", features = ["zlib-rs"] }
-getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
@@ -270,9 +268,10 @@ bitflags = { version = "2", default-features = false, features = ["std"] }
 bytemuck = { version = "1", default-features = false, features = ["aarch64_simd"] }
 crossbeam-epoch = { version = "0.9" }
 cudarc = { version = "0.19", default-features = false, features = ["cuda-12020", "driver", "fallback-dynamic-loading", "nvrtc"] }
+event-listener = { version = "5" }
+event-listener-strategy = { version = "0.5" }
 flate2 = { version = "1", features = ["zlib-rs"] }
 futures-io = { version = "0.3" }
-getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
@@ -299,9 +298,10 @@ bitflags = { version = "2", default-features = false, features = ["std"] }
 bytemuck = { version = "1", default-features = false, features = ["aarch64_simd"] }
 crossbeam-epoch = { version = "0.9" }
 cudarc = { version = "0.19", default-features = false, features = ["cuda-12020", "driver", "fallback-dynamic-loading", "nvrtc"] }
+event-listener = { version = "5" }
+event-listener-strategy = { version = "0.5" }
 flate2 = { version = "1", features = ["zlib-rs"] }
 futures-io = { version = "0.3" }
-getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
@@ -323,7 +323,6 @@ zerocopy = { version = "0.8", default-features = false, features = ["derive", "s
 [target.x86_64-pc-windows-msvc.dependencies]
 crossbeam-epoch = { version = "0.9" }
 flate2 = { version = "1", features = ["zlib-rs"] }
-getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
@@ -342,7 +341,6 @@ zerocopy = { version = "0.8", default-features = false, features = ["derive", "s
 [target.x86_64-pc-windows-msvc.build-dependencies]
 crossbeam-epoch = { version = "0.9" }
 flate2 = { version = "1", features = ["zlib-rs"] }
-getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
@@ -363,9 +361,10 @@ bitflags = { version = "2", default-features = false, features = ["std"] }
 bytemuck = { version = "1", default-features = false, features = ["aarch64_simd"] }
 crossbeam-epoch = { version = "0.9" }
 cudarc = { version = "0.19", default-features = false, features = ["cuda-12020", "driver", "fallback-dynamic-loading", "nvrtc"] }
+event-listener = { version = "5" }
+event-listener-strategy = { version = "0.5" }
 flate2 = { version = "1", features = ["zlib-rs"] }
 futures-io = { version = "0.3" }
-getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
@@ -392,9 +391,10 @@ bitflags = { version = "2", default-features = false, features = ["std"] }
 bytemuck = { version = "1", default-features = false, features = ["aarch64_simd"] }
 crossbeam-epoch = { version = "0.9" }
 cudarc = { version = "0.19", default-features = false, features = ["cuda-12020", "driver", "fallback-dynamic-loading", "nvrtc"] }
+event-listener = { version = "5" }
+event-listener-strategy = { version = "0.5" }
 flate2 = { version = "1", features = ["zlib-rs"] }
 futures-io = { version = "0.3" }
-getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }

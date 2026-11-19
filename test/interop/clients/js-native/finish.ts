@@ -24,10 +24,10 @@ export async function readFinish(
 		const catalogs = Catalog.watch(broadcast)[Symbol.asyncIterator]();
 		try {
 			let catalog = await catalogs.next();
-			while (!catalog.done && !Object.keys(catalog.value.video?.renditions ?? {}).length)
+			while (!catalog.done && !Object.keys(catalog.value.value.video?.renditions ?? {}).length)
 				catalog = await catalogs.next();
 			if (catalog.done) throw new Error("finished catalog had no video");
-			const [name, config] = Object.entries(catalog.value.video?.renditions ?? {})[0];
+			const [name, config] = Object.entries(catalog.value.value.video?.renditions ?? {})[0];
 			const format =
 				config.container.kind === "legacy"
 					? new Container.Legacy.Format(config)
@@ -37,8 +37,8 @@ export async function readFinish(
 			if (!format) throw new Error("unsupported finish media container");
 			const subscription = broadcast
 				.track(Catalog.track(name, config))
-				.subscribe({ delay: { max: maxDelay }, ranges: [{ start: { absolute: 0n } }] });
-			const media = new Container.Consumer(subscription, { format, delay: { max: maxDelay } });
+				.subscribe({ delay: { min: null, max: maxDelay }, ranges: [{ start: { time: 0n } }] });
+			const media = new Container.Consumer(subscription, { format, delay: { min: null, max: maxDelay } });
 			let count = 0;
 			try {
 				for (;;) {
@@ -69,7 +69,7 @@ export async function readFinish(
 				if (!group) throw new Error("no health group");
 				try {
 					const frame = await group.readFrame();
-					// Its timestamp goes unchecked: lite-05/06 carry an untimed track's send time.
+					// Its timestamp goes unchecked: lite-05/06 declare an untimed track in milliseconds.
 					if (!frame || new TextDecoder().decode(frame.payload) !== "session-alive")
 						throw new Error("health frame");
 					if ((await group.readFrame()) !== undefined || (await track.recvGroup()) !== undefined)

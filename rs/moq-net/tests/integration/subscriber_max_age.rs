@@ -1,11 +1,13 @@
 #![cfg(feature = "async")]
 
-//! Relays forward their subscribers' delay: the most tolerant negotiated max, and the smallest stated min.
+//! Relays forward their subscribers' delay: the most tolerant negotiated max, and the largest stated min.
 
 use std::time::Duration;
 
-use moq_net::{Timestamp, Version, origin, track};
+use moq_net::{Version, origin, track};
 
+use crate::support::AppendNext;
+use crate::support::AtStart;
 use crate::support::harness::{peer, spawn};
 
 fn origin(hop: u64) -> origin::Producer {
@@ -30,10 +32,11 @@ async fn budget(track: &mut track::Producer, millis: u64, version: Version) {
 	.unwrap_or_else(|_| panic!("{version}: wanted {millis}ms, publisher has {:?}", track.subscription()));
 }
 
+/// moq-transport carries no subscriber budget, so only moq-lite forwards one.
 #[kio::test]
 async fn relay_forwards_the_most_tolerant_subscriber_max_age() {
-	for draft in [18, 22] {
-		let version: Version = format!("moq-transport-{draft}").parse().unwrap();
+	for alpn in ["moq-lite-06", "moq-lite-07-wip"] {
+		let version: Version = alpn.parse().unwrap();
 		let publisher = origin(1);
 		let relay = origin(2);
 		let viewer = origin(3);
@@ -49,8 +52,8 @@ async fn relay_forwards_the_most_tolerant_subscriber_max_age() {
 				track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 			)
 			.unwrap();
-		let mut group = source.append_group().unwrap();
-		group.write_frame(Timestamp::ZERO, b"catalog").unwrap();
+		let mut group = source.append_next().unwrap();
+		group.write_frame(group.at_start(), b"catalog").unwrap();
 		group.finish().unwrap();
 		broadcast.announce().unwrap();
 		let consumer = viewer.consume();
@@ -77,7 +80,7 @@ async fn relay_forwards_the_most_tolerant_subscriber_max_age() {
 		budget(&mut source, 10, version).await;
 		// A quiet catalog survives far longer than the budget because it has no successor.
 		kio::clock::sleep(Duration::from_secs(1)).await;
-		assert_eq!(snapshot.sequence, 0, "{version}");
+		assert_eq!(snapshot.start, 0, "{version}");
 		assert_eq!(
 			snapshot.read_frame().await.unwrap().unwrap().payload,
 			b"catalog".as_slice()
@@ -101,10 +104,11 @@ async fn min_delay(track: &mut track::Producer, min: Option<Duration>) {
 	.unwrap_or_else(|_| panic!("wanted min {min:?}, publisher has {:?}", track.subscription()));
 }
 
-/// A lite-07 relay forwards the smallest stated min delay upstream, and a lite-06 subscriber,
-/// whose wire cannot state one, never pulls it to zero.
+/// A lite-07 relay forwards the largest stated min delay upstream, so its copy reaches back for
+/// the reader that buffers most, and a lite-06 subscriber, whose wire cannot state one, counts
+/// for nothing.
 #[kio::test]
-async fn relay_forwards_the_smallest_stated_min_delay() {
+async fn relay_forwards_the_largest_stated_min_delay() {
 	let lite07: Version = "moq-lite-07-wip".parse().unwrap();
 	let lite06: Version = "moq-lite-06".parse().unwrap();
 	let publisher = origin(1);
@@ -124,8 +128,8 @@ async fn relay_forwards_the_smallest_stated_min_delay() {
 			track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 		)
 		.unwrap();
-	let mut group = source.append_group().unwrap();
-	group.write_frame(Timestamp::ZERO, b"catalog").unwrap();
+	let mut group = source.append_next().unwrap();
+	group.write_frame(group.at_start(), b"catalog").unwrap();
 	group.finish().unwrap();
 	broadcast.announce().unwrap();
 
@@ -150,13 +154,13 @@ async fn relay_forwards_the_smallest_stated_min_delay() {
 	let unstated = cache(&legacy).await.subscribe(prefs(Some(0))).await.unwrap();
 	min_delay(&mut source, None).await;
 	let modern = cache(&modern).await;
-	let slow = modern.subscribe(prefs(Some(500))).await.unwrap();
-	min_delay(&mut source, Some(Duration::from_millis(500))).await;
 	let fast = modern.subscribe(prefs(Some(100))).await.unwrap();
 	min_delay(&mut source, Some(Duration::from_millis(100))).await;
-	drop(fast);
+	let slow = modern.subscribe(prefs(Some(500))).await.unwrap();
 	min_delay(&mut source, Some(Duration::from_millis(500))).await;
 	drop(slow);
+	min_delay(&mut source, Some(Duration::from_millis(100))).await;
+	drop(fast);
 	min_delay(&mut source, None).await;
 	drop(unstated);
 }

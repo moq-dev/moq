@@ -19,7 +19,6 @@ author:
 normative:
   moqt: I-D.ietf-moq-transport
   qmux: I-D.ietf-quic-qmux
-  webtrans-h3: I-D.ietf-webtrans-http3
   qmuxws:
     title: "QMux over WebSocket"
     target: https://datatracker.ietf.org/doc/draft-lcurley-qmux-websocket/
@@ -30,16 +29,11 @@ normative:
     date: false
   RFC3986:
   RFC6455:
-  RFC8032:
-  RFC8446:
-  RFC8831:
   RFC9000:
   RFC9002:
 
 informative:
   I-D.lcurley-moq-cluster:
-  RFC7627:
-  RFC8966:
   moqflate:
     title: "DEFLATE Compressed Tracks for MoQ"
     target: https://datatracker.ietf.org/doc/draft-lcurley-moq-flate/
@@ -134,13 +128,14 @@ Any broadcasts and subscriptions are transparently proxied by the CDN behind the
 ## Broadcast
 A Broadcast is a collection of Tracks named by a path.
 This corresponds to a MoqTransport's "track namespace".
-A path is a sequence of non-empty segments joined by `/` (0x2F), so it never starts or ends with `/` or contains two in a row; the empty path has no segments and prefixes every path.
-A `\` (0x5C) escapes the `\` or `/` that follows it, as a MoqTransport namespace field holding either is spelled; a path with any other `\` is a PROTOCOL_VIOLATION, or in a claim refused (see [Refused Content](#refused-content)).
+A path is a sequence of non-empty segments joined by `/` (0x2F), so it never starts or ends with a separator or contains two in a row; the empty path has no segments and prefixes every path.
+A `\` (0x5C) escapes the `\` or `/` that follows it, as a MoqTransport namespace field holding either is spelled; a path with any other `\` is a PROTOCOL_VIOLATION.
+A segment is the text between two `/` that no `\` escapes, so `a\/b` is one segment, one namespace field holding a `/`; every rule that counts, matches, or compares segments reads them this way, and a prefix never ends inside an escape.
 A continuous stream is named by an Instance, carried on its claims (see [ANNOUNCE_START](#announce-start)): a path and an Instance name one Broadcast, and a publisher MUST NOT serve different content under the same pair.
-Within one Instance, group sequences never restart and never name two different groups, so claims sharing it serve the same bytes; two Instances are independent streams, never stitched together.
-A publisher that starts its group sequences over, such as a restarted process, uses a new Instance, while replicas of the same content share one.
-A publisher MAY keep an Instance across restarts only if it continues the sequence space and announces a higher Epoch each time.
-A Track recreated within one Instance likewise continues past every Group Sequence its predecessor published.
+Within one Instance, a Group start never names two different Groups, so claims sharing it serve the same bytes; two Instances are independent streams, never stitched together.
+A publisher whose Group starts could go back, such as a restarted process with a new clock, uses a new Instance, while replicas of the same content share one.
+A publisher MAY keep an Instance across restarts only if its Group starts keep moving forward and it announces a higher Epoch each time.
+A Track recreated within one Instance likewise starts past every Group its predecessor published.
 A receiver does not detect a publisher that breaks this, which corrupts only that Broadcast for its subscribers.
 The Epoch is a counter within one Instance that picks its live incarnation while a stale claim lingers; it is never compared across Instances.
 
@@ -172,15 +167,26 @@ The subscriber and publisher both indicate their delivery preference:
 The combination of these preferences enables the most important content to arrive during network degradation while still respecting encoding dependencies.
 
 A Track is instead a datagram Track when its publisher creates it as one: a series of unreliable QUIC datagrams with no Groups (see [Datagrams](#datagrams)).
-Which kind a Track is never changes, and the wire does not say; the application knows it from its catalog or by convention.
+Which kind a Track is never changes; a [Tracks Stream](#tracks-stream) listing says it, and otherwise the application knows it from its catalog or by convention.
 Datagram Tracks have a namespace apart from other Tracks, so a datagram Track and a Track of Groups may share a name and are independent.
 
 ## Group
 A Group is an ordered stream of Frames within a Track.
 
 Each group consists of an append-only list of Frames.
-A publisher never creates a Group with sequence 2^64-1, so every range of Groups ends within 64 bits; a receiver treats a Group Stream naming it as a malformed Track.
-A Group is normally served by a dedicated QUIC stream which is closed on completion, reset by the publisher, or cancelled by the subscriber.
+A Group is addressed by its start, a timestamp in the Track's `Timescale`: its frame 0's timestamp, or a bare number on a Track with a `Timescale` of 0.
+No two Groups of a Track share a start, so starts order Groups without a counter, and moq-lite carries no Group sequence number.
+A gap between two starts says nothing on its own: the [GROUP](#group-message) message names the start of the Group before it when the publisher knows it, and [SUBSCRIBE_SKIP](#subscribe-skip) names the starts it declared it will never produce.
+A receiver addresses a Group by the start it carries whatever its frames hold, so a publisher that numbers its Groups 0, 1, 2 is still served, with time Anchors compared against those numbers.
+A publisher never creates a Group with start 2^64-1, so every span of starts ends within 64 bits; a receiver treats a Group Stream naming it as a malformed Track.
+
+A Group ends in one of three ways:
+
+- Finished: a [GROUP_END](#group-end) names where it ends, so it is whole.
+- Closed: its stream ends (FIN) without a GROUP_END, so every Frame sent on it arrived, but the Group may have held more.
+- Aborted: its stream is reset.
+
+A Group is normally served by a dedicated QUIC stream which is finished or closed on completion, reset by the publisher, or cancelled by the subscriber.
 This ensures that all Frames within a Group arrive reliably and in order.
 
 In contrast, Groups may arrive out of order due to network congestion and prioritization.
@@ -193,30 +199,30 @@ A frame is used to represent a chunk of data with an upfront size.
 The contents are opaque to the moq-lite layer.
 
 Frames within a Group are numbered from 0 in the order they were produced.
-This index is not transmitted per frame; it is implied by position within the Group, anchored by the [GROUP](#group) message's `Frame Start`.
-A Group Stream normally starts at frame 0.
+This index is not transmitted per frame; it is implied by position within the Group.
+A Group Stream starts at frame 0, and a Fetch Stream at its FETCH's `Frame Start`.
 
-Each frame of a timed Track carries a presentation timestamp expressed in the Track's `Timescale` (see [TRACK_INFO](#track-info)), used by the moq-lite layer for [expiration](#expiration) decisions.
-A Track without a `Timescale` is untimed: its frames carry no timestamp.
+Each frame carries a presentation timestamp expressed in the Track's `Timescale` (see [TRACK_INFO](#track-info)), used by the moq-lite layer for [expiration](#expiration) decisions.
+A Track with a `Timescale` of 0 is scale-less: its timestamps and Group starts are bare numbers in no known unit, and each frame's timestamp is its Group's start.
 A timestamp MUST be less than 2^61, so every version can carry it; a receiver treats a larger one as a malformed Track.
-Unless a negotiated extension specifies otherwise, a publisher MUST NOT start a timed Group's frame 0 earlier than that of any lower-sequence Group it publishes.
+Unless a negotiated extension specifies otherwise, a publisher MUST NOT start a Group's frame 0 at or before that of any Group with a lower start it publishes, and MUST NOT give a frame of a scale-less Track any timestamp but its Group's start.
 A receiver MAY check a received Group against this rule, refusing a violating Group's stream (STOP_SENDING) with TIMESTAMP_MISMATCH.
 A relay serves a Track's timestamps on as it received them, including ones it did not check, unless a negotiated extension specifies otherwise.
 
 ## Positions {#positions}
-A Position is a (Group Sequence, Frame Index) pair identifying one frame within a Track.
+A Position is a (Group Start, Frame Index) pair identifying one frame within a Track.
 Positions order lexicographically: by group first, then by frame within the group.
 
-SUBSCRIBE reads whole Groups: a Range's Absolute Anchors name Groups (see [SUBSCRIBE](#subscribe)), so a subscription never starts or stops partway through one.
+SUBSCRIBE reads whole Groups: a Range's Anchors name Groups (see [SUBSCRIBE](#subscribe)), so a subscription never starts or stops partway through one.
 FETCH reads one Group, or a slice of one: its `Frame Start` and `Frame End` bound the returned frames, and a frame index of 0 at the start, or an absent end frame, is the whole Group.
-A subscriber that has received frames 0 through `N-1` of group `G` and wants the rest FETCHes `G` from frame `N` and subscribes from Group `G+1`, so the two requests cover the Track with no gap and no overlap.
+A subscriber that has received frames 0 through `N-1` of the Group starting at `G` and wants the rest FETCHes `G` from frame `N`, and subscribes for the Groups after it.
 
 This is what lets a subscriber move a Track to a different publisher partway through a Group instead of waiting for the next Group to start, which matters for Tracks whose current Group may stay open indefinitely.
 A Group can therefore be assembled from more than one publisher: each contributes a disjoint run of frames, and the subscriber concatenates them in index order.
-A subscriber that has received the first `B` bytes of frame `N` FETCHes `G` from frame `N` with a `Start Byte` of `B`, so a frame read partway on one publisher continues on another without sending its first bytes again.
 
-A partial Group is only ever delivered to a subscriber that asked for one with FETCH, or as the [continuation](#yield) of a paused Group.
-A publisher that holds only part of a Group a subscription covers names it in a [SUBSCRIBE_DROP](#subscribe-drop) rather than deliver the part it holds.
+A partial Group is only ever delivered to a subscriber that asked for one with FETCH.
+A publisher that holds only the later frames of a Group a subscription covers names it in a [SUBSCRIBE_DROP](#subscribe-drop) rather than deliver the part it holds.
+One that holds its earlier frames, such as a relay whose upstream closed the Group, delivers them and closes the Group Stream without a GROUP_END.
 A Group is the unit of decodability: its earlier Frames may carry a keyframe or compression state the later Frames need.
 
 # Flow
@@ -229,12 +235,13 @@ See [Transports](#transports) for the bindings.
 
 How the underlying connection is authenticated is out-of-scope for this draft.
 
-A subscriber that holds an Auth Stream and an Announce Stream needs credit for at least 4 concurrent bidirectional streams to establish a subscription.
-AUTH and ANNOUNCE occupy two streams for the session lifetime, and TRACK is briefly held alongside SUBSCRIBE, requiring two more.
+A subscriber that holds an Auth Stream needs credit for at least 3 concurrent bidirectional streams to establish a subscription.
+AUTH occupies one stream for the session lifetime, and TRACK is briefly held alongside SUBSCRIBE, requiring two more.
+The Setup and Announce Streams need credit for 2 unidirectional streams beside the Group Streams.
 
 ## Transports {#transports}
-moq-lite defines five transport bindings.
-All five carry the same control and data streams defined elsewhere in this document; they differ only in how QUIC streams are multiplexed onto the underlying connection.
+moq-lite defines four transport bindings.
+All four carry the same control and data streams defined elsewhere in this document; they differ only in how QUIC streams are multiplexed onto the underlying connection.
 
 |----|---------------------|------------------|----------------------|
 |    | Transport           | ALPN / Identifier | Record framing      |
@@ -243,22 +250,14 @@ All five carry the same control and data streams defined elsewhere in this docum
 | 2  | WebTransport / H3   | `moq-lite-xx` (CONNECT header) | Native WebTransport streams |
 | 3  | Qmux over TCP/TLS   | `moq-lite-xx` (ALPN over TLS)  | Qmux Record [qmux]  |
 | 4  | Qmux over WebSocket | `moq-lite-xx` (Sec-WebSocket-Protocol) | WebSocket message [qmuxws] |
-| 5  | Qmux over RTCDataChannel | `moq-lite-xx` (signaling and DataChannel protocol) | DataChannel message |
 
 For bindings 1 and 2, moq-lite uses the underlying QUIC/WebTransport stream APIs directly.
-QUIC datagrams (see [Datagrams](#datagrams)) are supported by bindings 1 and 2 only; a publisher MUST NOT emit datagrams on bindings 3, 4, and 5, and a subscriber SHOULD NOT open a [Datagrams Stream](#datagrams-stream) there.
+QUIC datagrams (see [Datagrams](#datagrams)) are supported by bindings 1 and 2 only; a publisher MUST NOT emit datagrams on bindings 3 and 4, and a subscriber SHOULD NOT open a [Datagrams Stream](#datagrams-stream) there.
 
 For binding 3, a client opens a TCP connection, performs a TLS handshake, and negotiates the moq-lite version as the ALPN token.
 Each direction of the TLS byte stream then carries Qmux Records as defined in [qmux].
 
 For binding 4, a client opens a WebSocket connection [RFC6455] offering the moq-lite version as the subprotocol, per [qmuxws]: each WebSocket binary message carries one Qmux Record's `Frames` payload, with the message boundary replacing the Record `Size` field.
-
-For binding 5, WebRTC Data Channels [RFC8831] carry Qmux. Signaling agrees the moq-lite version before establishing the peer connection.
-The client creates one reliable, ordered RTCDataChannel with that version as its protocol; the server MUST refuse a channel whose protocol differs or whose delivery is unordered or partially reliable.
-The binding uses Qmux draft-01: each binary DataChannel message carries one Record's `Frames` payload, with the message boundary replacing the Record `Size` field.
-The record limit defaults to 16 KiB and MUST NOT exceed the negotiated SCTP `maxMessageSize`; an endpoint MUST refuse a message limit below Qmux's minimum record size.
-A sender splits stream payloads at frame boundaries to fit this limit, never within a frame.
-Signaling, peer admission, and ICE server selection are application concerns.
 
 All other moq-lite semantics (stream types, message encoding, flow control, etc.) are identical across bindings.
 
@@ -343,9 +342,9 @@ Sent when resetting a stream (RESET_STREAM), or when refusing to receive one (ST
 | ------- | ------------- | ----------- |
 |  0x32  | GROUP_TOO_LARGE | The group grew past the publisher's cache budget and was aborted. |
 | ------- | ------------- | ----------- |
-|  0x33  | NOT_FOUND | The requested group, track, or broadcast is not here. A sequence its publisher declared it will never produce is named by SUBSCRIBE_SKIP instead; any other sequence a publisher never had, including a gap it never declared, is named with NOT_FOUND unless it is past the subscriber's budget (see [SUBSCRIBE_DROP](#subscribe-drop)). |
+|  0x33  | NOT_FOUND | The requested group, track, or broadcast is not here. A start its publisher declared it will never produce is named by SUBSCRIBE_SKIP instead; any other start a publisher never had, including a gap it never declared, is named with NOT_FOUND unless it is past the subscriber's budget (see [SUBSCRIBE_DROP](#subscribe-drop)). |
 | ------- | ------------- | ----------- |
-|  0x34  | OLD | The group was superseded by a newer group and dropped. In SUBSCRIBE_DROP, the next SUBSCRIBE_UPDATE reopens it: the publisher re-offers the group or drops it again. |
+|  0x34  | OLD | The group was superseded by a newer group and dropped. |
 | ------- | ------------- | ----------- |
 |  0x35  | EVICTED | The group was dropped under memory pressure. Unlike OLD it was still current, so it can be re-fetched. |
 | ------- | ------------- | ----------- |
@@ -355,11 +354,9 @@ Sent when resetting a stream (RESET_STREAM), or when refusing to receive one (ST
 | ------- | ------------- | ----------- |
 |  0x38  | FRAME_TOO_LARGE | A frame declared a payload larger than the receiver accepts. |
 | ------- | ------------- | ----------- |
-|  0x39  | TIMESTAMP_MISMATCH | A frame's timestamp does not fit its track: it is present on an untimed track, absent on a timed one, or starts a Group before a lower-sequence one. |
+|  0x39  | TIMESTAMP_MISMATCH | A frame's timestamp does not fit its track: it starts a Group at or before one with a lower start, or differs from its Group's start on a scale-less track. |
 | ------- | ------------- | ----------- |
 |  0x3B  | UNAUTHORIZED | The endpoint does not authorize this request, or no longer does, such as when the [scope](#auth-stream) does not cover it. The session stays up. |
-| ------- | ------------- | ----------- |
-|  0x3C  | YIELDED | The Group Stream was reset to make room for a higher-priority stream. The Group is not given up: it [continues](#yield) on a later stream. |
 | ------- | ------------- | ----------- |
 
 Note that CANCELLED is 0x1, not 0x0: a stream reset with 0x0 is an INTERNAL_ERROR, not a routine cancellation.
@@ -369,6 +366,209 @@ A relay terminating a stream because the upstream session serving it ended SHOUL
 # Streams
 moq-lite uses a bidirectional stream for each transaction.
 If the stream is closed, potentially with an error, the transaction is terminated.
+Discovery and routing instead share one unidirectional [Announce Stream](#announce) per endpoint.
+
+## Announce Stream {#announce}
+Each endpoint MAY open one unidirectional Announce Stream (0x3), on which it sends everything it says about discovery and routing, in order: as a subscriber, the prefixes it wants claims for, and as a publisher, the claims answering the prefixes its peer wants, and the routes they travel under.
+A claim is an announcement that the paths under its prefix can be served; it claims capability, not inventory, so it never asserts that any specific broadcast exists.
+A routing node is an endpoint that forwards and sends the [Node ID Parameter](#node-id-parameter); two routing nodes also exchange routes (see [Routing](#routing)), and every other session carries claims alone (see [Claims](#claims)).
+
+An endpoint that opens the stream keeps it for the session, so no message it sends about routing overtakes another.
+An endpoint MUST close the session with a PROTOCOL_VIOLATION if its peer opens a second Announce Stream or resets one.
+An endpoint finishes its stream only when it is leaving the session, which ends every route and claim it sent.
+Its peer keeps answering the prefixes the endpoint asked for, which it can no longer edit.
+
+A subscriber edits the set of prefixes it wants claims for with ANNOUNCE_REQUEST messages.
+An edit too large for one message continues over several: every ANNOUNCE_REQUEST of an edit but the last sets `More`, and nothing else comes between them on the stream.
+The set starts empty and MAY be empty, no prefix in it is at or below another, and encoded as the Adds of one ANNOUNCE_REQUEST it fits the [Message Length](#message-length) limit.
+A subscriber MUST NOT send an edit before the publisher has answered its last, so a publisher holds at most one unanswered: a subscriber whose interest moves meanwhile sends what it wants by then as its next edit.
+
+A publisher answers each edit with one ANNOUNCE_OK, where the edit takes effect on its stream (see [Edits](#edits)), and sends the matching claims and any future changes:
+
+- ANNOUNCE_OK: the peer's unanswered edit takes effect here.
+- ANNOUNCE_START: a matching claim.
+- ANNOUNCE_UPDATE: a claim changed.
+- ANNOUNCE_END: a claim is gone.
+- SYNCED: the initial set of one prefix is complete.
+
+And between routing nodes:
+
+- ROUTE: the publisher's route to a routing node, new or changed.
+- ROUTE_END: the publisher let go of a route and every claim under it.
+- DEAD: a session on the path of routes the publisher sent closed.
+- DRAIN: a node on the path of routes the publisher sent sent a GOAWAY.
+- ANNOUNCE_FLOOR: a batch of a route's claims is complete.
+
+The publisher MUST send [SYNCED](#synced) exactly once for each prefix an edit adds, after the ANNOUNCE_OK answering it and the prefix's initial set, unless a later edit removes the prefix first.
+The subscriber MAY batch a prefix's messages until its SYNCED; subsequent ones are live updates.
+The initial set is relative to this hop: a relay answers with what it holds without waiting for upstreams.
+The publisher MAY coalesce changes to a claim it has not yet sent, and sends no more claims before SYNCED than the initial set holds.
+A retraction of a claim or route already sent MAY precede SYNCED.
+A prefix outside the subscriber's [scope](#auth-stream) lists nothing and is SYNCED at once.
+
+Each Add of an ANNOUNCE_REQUEST implicitly assigns the next Prefix ID on its sender's stream, each ROUTE to a routing node the stream has no live route to the next Route ID, and each ANNOUNCE_START the next Announce ID: three counters per stream starting at 0 that increment by 1 per assignment.
+No id appears on the wire where it is assigned; both endpoints derive it from the message order on the (reliable, ordered) stream, and other messages reference it instead of repeating the prefix, the routing node, or the claim's path.
+A SYNCED names a Prefix ID the peer assigned; every other id a message names is its sender's.
+Ids are never reused within a stream.
+A ROUTE_END retires its Route ID and the Announce ID of every claim under the route; an ANNOUNCE_END retires one Announce ID, and an edit the Prefix IDs it removes and the Announce ID of every claim it drops.
+
+An endpoint MUST close the session with a PROTOCOL_VIOLATION if it receives:
+
+- a message referencing a Prefix ID, Route ID, or Announce ID that was never assigned or already retired;
+- any other message between the ANNOUNCE_REQUESTs of one edit, or an edit that leaves a prefix of the set at or below another or the set past the limit;
+- an ANNOUNCE_OK with no edit unanswered, or an ANNOUNCE_REQUEST starting an edit while one is;
+- an edit from a routing neighbour that leaves its set anything but empty or the empty prefix alone;
+- any message but ANNOUNCE_OK and ANNOUNCE_REQUEST before the first ANNOUNCE_OK on the stream, which answers nothing yet;
+- a second SYNCED for a prefix, or one before the ANNOUNCE_OK answering the edit that added it;
+- a ROUTE, ROUTE_END, DEAD, DRAIN, or ANNOUNCE_FLOOR on a session that does not exchange routes; or
+- a message that does not decode within its Message Length, a flag this version does not define, or a Node ID of 0.
+
+When the session closes, an endpoint MUST assume that every route and claim on the peer's stream is gone.
+
+A broadcast path has at most 32 segments and at most 4,096 bytes; a receiver MUST close the session with a PROTOCOL_VIOLATION on a longer one, except one resolved by [Compression](#announce-compression) or joined beneath a root of the receiver's own, whose claim it drops: the ANNOUNCE_START still assigns its Announce ID, the messages naming it stay valid, and the receiver SHOULD log and count it.
+A claim covers a path when its prefix is a leading run of the path's segments; matching is per path segment, so a prefix never matches half a segment, and equality is byte-by-byte within each segment.
+A publisher presents each claim inside a requested prefix and only the most specific claim at or above it, at that prefix itself, which is exactly the covered set the subscriber may see.
+A claim presented above its own prefix carries how many segments broader it is than the path it is presented at, its Above, so the subscriber can tell it from a claim exactly at that path.
+Every path on the stream is relative to the session, whichever requested prefix it lies in.
+
+### Edits {#edits}
+An edit takes effect on the publisher's stream at the ANNOUNCE_OK answering it.
+Until then the publisher's messages answer the set before it, so they may still name a prefix the edit removes, and never after.
+
+At the ANNOUNCE_OK both endpoints drop every claim on the stream whose path lies within a prefix the edit removes, retiring its Announce ID, with no ANNOUNCE_END.
+The publisher then sends what the added prefixes cover, a claim the removed prefixes also covered included, and a SYNCED for each.
+A receiver that could not resolve a claim's path (see [ANNOUNCE_START](#announce-start)) cannot tell whether a removed prefix held it: it keeps the claim's Announce ID valid until the publisher ends it, or until the edit leaves no prefix that was in effect before it, when every earlier claim is dropped.
+
+Routes are not requested by prefix: a publisher sends a routing neighbour routes exactly while the neighbour's set is the empty prefix.
+An edit that empties the set drops every route on the stream, and every claim under one, at the ANNOUNCE_OK, retiring their ids with no ROUTE_END; asking for the empty prefix again starts them anew.
+
+### Claims {#claims}
+On a session that does not exchange routes, a publisher sends the claims its own requests would resolve, and nothing of how it reaches them.
+For each path and Instance its peer's prefixes present, it sends at most one claim: the one it would serve a request there from (see [Resolution](#resolution)), and never one it learned from that peer.
+The claim carries the publisher's cost to it, the lowest priority and any drain on the way, and its chain (see [ANNOUNCE_START](#announce-start)).
+It sets the claim's `Marked` flag when a marked session lies on the way to it, and never sends such a claim over a marked session.
+
+When the publisher's way to a claim changes, it sends an ANNOUNCE_UPDATE.
+While it has no way to a claim it still holds, it sets the claim's `Unavailable` flag rather than withdrawing it, and fails requests for it with UNROUTABLE; it sends an ANNOUNCE_END with `Lost` once it has shown the claim unavailable for 800 milliseconds.
+A receiver takes `Unavailable` only as a change to a claim it already holds at that Epoch and Above: it does not hold a claim it is first told unavailable until an ANNOUNCE_UPDATE clears the flag.
+Another Instance at a path is another claim: the publisher sends its ANNOUNCE_START before the ANNOUNCE_END of the one it replaces, so the subscriber sees the broadcast restart rather than go.
+
+A receiver adds the session's link cost (see [Cost Parameter](#cost-parameter)) to the claim's cost, and takes the lower of the claim's priority and its own local priority for the session.
+A routing node that receives a claim this way announces it to its routing neighbours as its own, under its marked Node ID when the session is marked or the claim's `Marked` flag is set (see [Routing](#routing)).
+A claim's chain names each relay the claim entered or left a routing domain by: a routing node appends its own Relay when it takes a claim from anything but a routing neighbour (a peer it does not exchange routes with, an earlier version, or its own application), and when it sends a claim to a peer it does not exchange routes with, unless the chain already ends with its Relay.
+The chain therefore names the routing node that first announced the claim, then for each scoped grant the claim crossed the relay that sent it and the relay that took it, each once in a row: a relay that takes a claim across one grant and sends it across the next appears once.
+A routing node MUST NOT take a claim whose chain, with its own Relay appended, would name any Relay twice or reach 32 Relays: such a claim left a relay's routing domain and came back to it.
+A routing node sends no peer a claim whose chain its own Relay would carry to 32.
+A Relay names a process whatever identity it announces under, so the chain is the same for a claim announced under a marked Node ID.
+
+### Floors {#floors}
+Each routing node numbers the changes to the claims it announces with a Revision, starting at 0 for each Node ID.
+Between routing nodes a stream carries a route's claims in batches: the ANNOUNCE_START, ANNOUNCE_UPDATE, and ANNOUNCE_END messages since the last ANNOUNCE_FLOOR all change the claims of the routing node that the route the next ANNOUNCE_FLOOR names leads to.
+A batch names each claim at most once, and its floor carries a Revision higher than the last the publisher sent for the route; a receiver MUST close the session with a PROTOCOL_VIOLATION otherwise.
+
+A floor certifies that the publisher's copy of that node's claims, with the batch applied, is complete as of the Revision.
+A publisher therefore sends a routing neighbour every claim under a route, and the neighbour asks for the empty prefix or for nothing: it MUST NOT ask for part of the tree.
+A receiver keeps each neighbour's copy, and its own view of the node's claims follows the copy with the highest Revision: a batch at or below the Revision of its view changes only the sender's copy, so an older copy never revives a claim whose withdrawal a newer one delivered.
+A claim a newer copy lacks is lost, unless the batch says its publisher ended it (see [ANNOUNCE_END](#announce-end)).
+
+### Compression {#announce-compression}
+An ANNOUNCE_START MAY copy the head of its path from a live claim on the same stream, its base.
+`Path Base` names it by distance: the base's Announce ID is the next unassigned Announce ID minus `Path Base`, so 1 names the latest ANNOUNCE_START, and 0 names no base.
+The receiver resolves the base against the claims live when the message arrives, and the result is identical to the literal encoding: a base ending later changes nothing.
+The base need not share the new claim's route, nor the requested prefix it lies in.
+A publisher MAY always send a `Path Base` of 0.
+
+The subscriber MUST close the session with a PROTOCOL_VIOLATION if a non-zero `Path Base` names an Announce ID that was never assigned or already retired, or a `Path Keep` is non-zero with a `Path Base` of 0 or exceeds the base's segments.
+A resolved path that breaks its own rules, or a base whose claim the subscriber dropped, drops the claim (see [Announce](#announce)).
+
+### Hidden Paths {#hidden}
+A claim is hidden from a request when a segment of its path below the requested prefix starts with `.` (0x2E).
+A segment inside the prefix never hides anything, so a request that names the hidden segment itself (`.stats`) lists what is under it, and a claim at or above the prefix has no segment below it.
+Only the first byte counts: `catalog.v2` is not hidden.
+
+A publisher SHOULD NOT announce a hidden claim unless the ANNOUNCE_REQUEST set `Hidden`.
+Hiding is a convenience for discovery, not access control: a publisher MAY treat a subscriber it trusts, such as another relay in its own cluster, as opted in, and MUST authorize hidden paths like any other.
+SUBSCRIBE, FETCH, and TRACK resolve a hidden path exactly as any other.
+
+### Routing {#routing}
+Routing nodes route to each other by path vector.
+A route leads to a routing node that announces claims, never to a publisher: the claims of an endpoint belong to the routing node it connects to, which announces them under its own Node ID and Revision (see [Floors](#floors)).
+
+A routing node names itself with a Node ID: a non-zero identifier of the relay and its Start, a number that is higher each time the relay's process starts, such as its start time, with Marked clear.
+A Node ID is declared, not proven.
+Two endpoints exchange routes when both send the [Node ID Parameter](#node-id-parameter); each MUST close the session with UNAUTHORIZED when either's grant (see [AUTH_OK](#auth-ok)) covers less than every path, so a peer confined to part of the tree sends claims alone.
+
+A route carries its Path: one hop per node it crossed, the node it leads to first and the sender last.
+A hop names a node by its Node ID, and the session the node learned the route on by its Session Number: a number of the node's own, unique among its sessions and higher for each one it opens or accepts.
+A node offers a route to itself, with a Path of its own hop alone, Session Number 0, and cost 0, from when it first announces a claim until it restarts.
+A node sending a route it learned appends its own hop, naming the session it learned the route on, and adds that session's link cost (see [Cost Parameter](#cost-parameter)), which is at least 1.
+A Path has at most 32 hops, and a route whose cost would overflow 64 bits is never used.
+
+A node never uses a route whose Path names its own relay, at any Start.
+It sends a neighbour its selected route to each routing node, except back over the session it learned the route on, to a neighbour already on the Path, or, when the route is marked, to a neighbour on a marked session.
+A node MAY mark a session, such as one to an upstream it only reads from: a route is marked when it arrived on a marked session or with its marked flag set.
+A routing node announces each claim it takes over a marked session, or with its `Marked` flag set (see [Claims](#claims)), under its marked Node ID: its own Relay and Start with Marked set, which names the same process and holds no session.
+Its route to that Node ID is marked, at cost 0, with a Path of two hops, the marked Node ID and then its own, each with Session Number 0; the marked hop counts toward the 32 like any other.
+So no such claim crosses a second marked session, and every copy of a node's claims stays whole (see [Floors](#floors)).
+
+A route is draining when a node on its Path sent a GOAWAY, as its draining flag or a [DRAIN](#drain) says.
+Its priority is the lowest local priority of a session on its Path: a receiver takes the lower of the priority the route carries and its own local priority for the session, and a node's route to itself carries the highest.
+A node ranks its routes to a routing node: one that is not draining first, then the highest priority, then the lowest cost.
+Extending a route never clears its drain, never raises its priority, and always raises its cost, so no node ranks a route above how the neighbour it came from ranked it, and selection converges.
+Among routes of equal rank a node selects one that is not marked, then the one through the neighbour it already uses.
+A node selects at once: there is no hold, and no timer between routing nodes.
+
+A receiver MUST close the session with a PROTOCOL_VIOLATION on a ROUTE whose Path does not begin with a hop of Session Number 0, does not end with the sender's Node ID, names the receiver's relay, has one hop and a cost other than 0, names a marked Node ID past its first hop, or begins with a marked Node ID not followed by the same Relay and Start, unmarked, with Session Number 0.
+
+A SUBSCRIBE, FETCH, TRACK, TRACKS, or DATAGRAMS request names the routing node that announces the claim serving it.
+A subscriber that names none lets the publisher select one (see [Resolution](#resolution)), and a relay forwarding a request names the node it selected or was given.
+A relay forwards a request naming a routing node only along its selected route to that node, or to the endpoint whose claim it announces when the request names the relay itself, and resets it with UNROUTABLE when it has neither.
+
+Claims with the same Instance serve the same Broadcast, so a relay MAY move a live subscription between them, including onto a higher Epoch, continuing from the first frame the subscriber lacks, and a route change (a reconnect, a cheaper path, a draining session) is invisible to the subscriber.
+A relay MUST NOT move a subscription to a claim with a different Instance: it stays on its Instance's claims and ends with the last of them.
+When another Broadcast wins the path, subscriptions already open stay on theirs until the subscriber drops them or the claim goes; new requests resolve the winner.
+A version before this one carries no Instance, so a receiver of such a session mints one for each ANNOUNCE_START it receives, with Epoch 0, and forwards it as the claim's Instance with `Minted` set, so a reader can tell it names an announcement rather than the publisher's stream.
+A minted Instance is new for every announcement, so a publisher reconnecting or re-announcing through such a hop is another stream.
+
+### Closed Sessions and Drains {#closed-sessions}
+A node that loses a session to a routing neighbour names the hop it lost: its own Node ID and that session's Session Number, with the Node ID of the node at the far end.
+It sends one [DEAD](#dead) for it to each neighbour it sent a route whose Path holds the hop, and each neighbour passes it on in the same way, once per neighbour.
+A DEAD ends every route its sender sent through the hop, which keeps its Route ID until the sender sends a ROUTE for it again or a ROUTE_END.
+
+For each pair of relays a node remembers the highest session it knows closed, ordering sessions by their node's Start and then their Session Number, and never uses a route whose Path names a session of that pair at or below it.
+A route through a closed session that arrives late is therefore unusable, and a relay that restarts takes a higher Start, so its new sessions are not.
+A node whose Start repeats or goes back has its new sessions refused.
+
+A node that sends a GOAWAY is draining.
+A node that receives one sends a [DRAIN](#drain) naming the draining node to each neighbour it sent a route through that node, and each neighbour passes it on in the same way, once per neighbour.
+Every route through a draining node ranks as draining, and stays usable.
+
+A receiver MUST close the session with a PROTOCOL_VIOLATION on a DEAD or DRAIN naming a hop or node on no live route that peer sent it, or a DEAD whose far node is not the one before the hop on those routes.
+
+A node closes the session when its Announce Stream has made no progress for 10 seconds with messages left to send, so a peer that stops reading never holds a route.
+It MAY close one whose peer reads more slowly than what it is sent changes, once the messages left to send pass a bound of the node's choosing.
+
+### Resolution {#resolution}
+A SUBSCRIBE, FETCH, or TRACK request naming no routing node names a path, and the receiver resolves it against the claims covering that path.
+
+Only the most specific covering claims are consulted: those with the longest prefix, which for a claim shown below its own prefix is the path it is shown at less its Above (see [ANNOUNCE_START](#announce-start)).
+A claim strictly inside another's paths always ranks above it, and a broadcast's exact path is the most specific claim there is, so a concrete announcement shadows every broader claim covering it at any cost; claims over the same prefix shown at the same path form one tier, and among those shown at different paths the deepest wins (see [Above](#announce-start)).
+The winning tier is the whole answer: a refusal from it never falls through to a less specific claim, so a service refusing a path does not leak the request to a catch-all, and one unserved path costs one round trip rather than a walk down the candidates.
+Nor is a refusal retried at another claim of the same prefix.
+
+Within the tier, a claim is ineligible while another claim of the same prefix carries its Instance at a higher Epoch, however cheap it is and whether or not a route reaches it, so a request fails with UNROUTABLE while the newest Epoch is unavailable.
+Among the eligible claims, the receiver SHOULD prefer one that is neither draining nor `Unavailable`, then the highest priority, then the lowest cost, the claim's cost plus the cost of the route to the node announcing it, then the lowest Rendezvous Hash, and then the most recently received, so a reconnecting publisher is not outranked by the stale session it replaced.
+The Rendezvous Hash is the 64-bit FNV-1a hash, with the standard offset basis `0xCBF29CE484222325` and prime, of the requested path's UTF-8 bytes followed by the claim's Instance.
+Every node that knows the same claims ranks them the same, so equal-cost Instances of one prefix share its paths and every relay sends one path to the same Instance.
+When choosing which claim to advertise for a prefix, the requested path is the prefix itself.
+
+A claim resolved this way serves the request like any other, and the claim is not consumed by it.
+A relay MUST NOT announce a path merely because it resolved it: the covering claim stays the only advertisement until the advertiser announces the concrete path, which it SHOULD do once it is producing, so a later request finds the running broadcast by its exact path instead of resolving a second producer.
+The advertiser MAY announce the path under the claim's Instance, so subscriptions resolved through the claim continue on it (see [Routing](#routing)); when that announcement ends, a claim still serving its Instance restarts under a new one, so a restarted answer is another Broadcast.
+
+An advertiser that will not serve a resolved request resets the request stream with a typed code (see [Error Codes](#error-codes)).
+Every refusal is terminal and propagates without re-resolution, so probing unserved paths costs one round trip per path.
+An advertiser signals capacity through its claim alone, withdrawing or re-pricing it before it runs out.
 
 ## Bidirectional Streams
 Bidirectional streams are used for control streams.
@@ -377,8 +577,6 @@ There's a 1-byte STREAM_TYPE at the beginning of each stream.
 |---------|--------------|-------------|
 |     ID  | Stream       | Creator     |
 |--------:|:-------------|:------------|
-|    0x1  | Announce     | Subscriber  |
-| ------- | ------------ | ----------- |
 |    0x2  | Subscribe    | Subscriber  |
 | ------- | ------------- | ---------- |
 |    0x3  | Fetch        | Subscriber  |
@@ -396,227 +594,6 @@ There's a 1-byte STREAM_TYPE at the beginning of each stream.
 |    0x9  | Datagrams    | Subscriber  |
 | ------- | ------------- | ----------- |
 
-### Announce
-A subscriber can open an Announce Stream to discover claims matching a prefix.
-A claim is an announcement that paths under its prefix can be served by one origin node; it claims capability, not inventory, so it never asserts that any specific broadcast exists.
-A route is how the publisher reaches an origin node, and every claim on the stream travels under the route to its origin (see [Routing](#routing)).
-
-The subscriber creates the stream with an ANNOUNCE_REQUEST message.
-The publisher replies with a single ANNOUNCE_OK message followed by the matching routes and claims and any future changes:
-
-- ROUTE_START: the publisher reaches an origin node.
-- ROUTE_UPDATE: a route's seqno, metric, down-only bit, RTT, or hops changed.
-- ROUTE_HOLD: the publisher has no usable route but holds it while it recovers.
-- ROUTE_END: the publisher let go of a route and every claim under it.
-- ANNOUNCE_START: a matching claim of a route's origin node.
-- ANNOUNCE_END: the origin withdrew a claim.
-- ANNOUNCE_UPDATE: a claim's cost changed.
-- ANNOUNCE_RESTART: a claim now serves another Instance, or a higher Epoch of the same one.
-- ANNOUNCE_FLOOR: a batch of a route's claims is complete.
-- WARM_START: the publisher offers the copy of a broadcast the subscriber gets by pulling through it (see [Warm Routes](#warm-routes)).
-- WARM_UPDATE: a warm route's Warm Cost, drain, priority, or Hops changed.
-- WARM_END: the publisher withdrew a warm route.
-- SYNCED: the initial set is complete.
-
-In the other direction, the subscriber sends ROUTE_REQUEST and echoes every ROUTE_END (see [Routing](#routing)).
-
-The publisher MUST send [SYNCED](#synced) exactly once, after the initial set.
-The subscriber MAY batch messages until SYNCED; subsequent ones are live updates.
-The initial set is relative to this hop: a relay answers with what it holds without waiting for upstreams.
-The publisher MAY coalesce changes to a claim it has not yet sent, and sends no more claims before SYNCED than the initial set holds.
-A retraction of a claim or route already sent MAY precede SYNCED.
-
-Each ROUTE_START implicitly assigns the next Route ID on the stream, each ANNOUNCE_START the next Announce ID, and each WARM_START the next Warm ID: three counters starting at 0 that increment by 1 per assignment.
-No id appears on the wire where it is assigned; both endpoints derive it from the message order on the (reliable, ordered) stream, and other messages reference it instead of repeating the origin node, the claim's prefix, or the warm route's path.
-Ids are never reused within a stream.
-A ROUTE_END retires its Route ID, the Announce ID of every claim under the route, and the Warm ID of every warm route under it; an ANNOUNCE_END retires one Announce ID, and a WARM_END one Warm ID.
-
-A stream has at most one live route per origin node, and each route at most one live claim per prefix.
-Another origin claiming the same prefix is another claim, under its own route.
-An ANNOUNCE_UPDATE or ANNOUNCE_RESTART atomically replaces a claim while keeping its id live; a claim never moves to another route.
-
-The subscriber MUST close the session with a PROTOCOL_VIOLATION if it receives a message referencing a Route ID or Announce ID that was never assigned or already retired, a ROUTE_START for an origin node that already has a live route on the stream, an ANNOUNCE_START for a prefix its route already claims, or any message before ANNOUNCE_OK.
-When the stream is closed, the subscriber MUST assume that every route and claim on it is gone.
-
-A broadcast path has at most 32 segments and at most 4,096 bytes; a receiver MUST close the session with a PROTOCOL_VIOLATION on a longer one, except in a claim, which it refuses instead (see [Refused Content](#refused-content)), including one resolved by [Compression](#announce-compression).
-A claim covers a path when its prefix is a leading run of the path's segments; matching is per path segment, so a prefix never matches half a segment, and equality is byte-by-byte within each segment.
-A publisher answering a request stream presents, per route, each claim inside the requested prefix and only the most specific claim at or above it, at the requested prefix itself (an empty suffix), which is exactly the covered set the subscriber may see.
-When that most specific covering claim changes, such as when it is withdrawn and a broader one still covers the request, the publisher moves the presented claim to the new one with an ANNOUNCE_UPDATE or ANNOUNCE_RESTART, and ends it only when no claim of the route covers the requested prefix.
-There MAY be multiple Announce Streams, potentially containing overlapping prefixes, that get their own ANNOUNCE_OK and messages.
-
-#### Floors {#floors}
-Each origin node numbers the changes to its own claims with a Revision, starting at 0 for each Node ID.
-A stream carries a route's claims in batches: the ANNOUNCE messages under the route since its last ANNOUNCE_FLOOR, closed by the next one.
-The publisher sends a ROUTE_START before any claim under it, and SYNCED only once every route it sent has a floor.
-
-A floor names a Revision and certifies that the stream's claims for the route, across the whole requested prefix, are the origin's claims at that Revision as the request presents them (see [Announce](#announce)).
-It certifies only what its own request shows: a stream whose ANNOUNCE_REQUEST did not set `Hidden` certifies nothing about hidden claims.
-A publisher that does not know the route's claims across the whole requested prefix at one Revision, such as a relay that knows them only beneath part of it, still closes each batch, with a floor that certifies nothing.
-A subscriber that may receive claims only beneath one prefix, because its [scope](#auth-stream) or the publisher's confines the stream there, SHOULD request that prefix rather than one above it, so the publisher can certify the request. When that prefix changes, it SHOULD open a request for the new one and end the old one once the new one is SYNCED.
-
-The subscriber applies a batch whole, once its floor arrives.
-A receiver that hears one origin's claims on several streams merges them claim by claim, each at the prefix its stream presents it: of the streams whose floor certifies the claim, the one with the highest Revision decides whether it exists, and a claim no floor certifies exists while some stream carries it.
-An older floor never revives a claim whose withdrawal a newer one delivered.
-A floor that certifies nothing proves no claim absent: the stream's claims stay until its ANNOUNCE_END or ROUTE_END.
-While a receiver has a usable route to the origin and every peer whose last advertised route to it is feasible here has answered the current request, it lets go of a claim none of those peers certifies or carries: it goes offline, which is not an ANNOUNCE_END.
-
-#### Compression {#announce-compression}
-An ANNOUNCE_START MAY copy the head of its path from a live claim on the same stream, its base.
-`Path Base` names it by distance: the base's Announce ID is the next unassigned Announce ID minus `Path Base`, so 1 names the latest ANNOUNCE_START, and 0 names no base.
-The receiver resolves the base against the claims live when the message arrives, and the result is identical to the literal encoding: a base ending later changes nothing.
-The base need not share the new claim's route.
-A publisher MAY always send a `Path Base` of 0.
-
-The subscriber MUST close the session with a PROTOCOL_VIOLATION if a non-zero `Path Base` names an Announce ID that was never assigned or already retired, or a `Path Keep` is non-zero with a `Path Base` of 0 or exceeds the base's segments.
-A resolved path that breaks its own rules, or a base whose path the subscriber refused, refuses the claim (see [Refused Content](#refused-content)).
-
-#### Refused Content {#refused-content}
-Route messages carry content the publisher may only have forwarded: a route's Node ID, Seqno, Flags, and Hops, a claim's path, Instance, and Lite-06 Chain, and a warm route's path, Instance, Flags, and Hops.
-A newer version or release may send such content that an older receiver cannot use, so a receiver that refuses it withdraws only the route or claim it describes and keeps the session, as BGP treats a malformed attribute as a withdrawal ({{?RFC7606}}).
-This specification marks each such value "refused"; the receiver skips the rest of the message's body, and SHOULD log and count each refusal so a refused route is never silently missing.
-
-- A refused ROUTE_START still assigns its Route ID, and a refused ROUTE_UPDATE keeps it; either leaves the receiver no route, so its claims go offline as on ROUTE_END. The messages naming the Route ID stay valid, and a later ROUTE_UPDATE the receiver can use makes the route usable again, with the claims its last floor certified. A route to Node ID 0 stays refused.
-- A refused ANNOUNCE_START still assigns its Announce ID, and a refused ANNOUNCE_UPDATE or ANNOUNCE_RESTART keeps it; the claim goes offline at its route's next floor, which is not an ANNOUNCE_END. A claim whose path was refused stays refused; any other comes back with a later ANNOUNCE_RESTART the receiver can use. Its origin withdrew nothing, so while a route has a live claim the receiver refused, the receiver takes the route's floors as certifying nothing, and a relay forwards no withdrawal for the claim.
-- A refused WARM_START still assigns its Warm ID.
-
-Only the publisher's own framing and stream state close the session: a message that does not decode within its Message Length, such as an RTT flag without its RTT, and a message naming an id that was never assigned or already retired, or breaking the stream's order, as above.
-A relay never forwards content a peer would refuse for the relay's own part in it: a route that arrives with 32 Hops is unusable, so the relay's Hop never takes one past 32.
-
-#### Hidden Paths {#hidden}
-A claim is hidden from a request when a segment of its path below the requested prefix starts with `.` (0x2E).
-A segment inside the prefix never hides anything, so a request that names the hidden segment itself (`.stats`) lists what is under it, and a claim at or above the prefix has no segment below it.
-Only the first byte counts: `catalog.v2` is not hidden.
-
-A publisher SHOULD NOT announce a hidden claim unless the ANNOUNCE_REQUEST set `Hidden`.
-Hiding is a convenience for discovery, not access control: a publisher MAY treat a subscriber it trusts, such as another relay in its own cluster, as opted in, and MUST authorize hidden paths like any other.
-SUBSCRIBE, FETCH, and TRACK resolve a hidden path exactly as any other.
-
-#### Routing {#routing}
-Routing follows the Babel routing protocol [RFC8966], keyed by origin node: each node selects one route per origin node and advertises it to its neighbours.
-
-An origin node names itself with a Node ID: a non-zero 64-bit value, fresh for each process restart and shared by every session of that process.
-An origin MUST NOT declare a Node ID with the most significant bit set.
-That bit marks a qualified Node ID: a relay files every Node ID a peer with a scoped publish grant sends (see [AUTH_OK](#auth-ok)), the peer's own included, under a qualified Node ID of its own derivation, collision-resistant at 64 bits, and translates it back when it forwards a request on that session.
-The derivation is keyed by the key the peer proved with the [Route Key Parameter](#route-key-parameter), so peers sharing one key are filed alike and fail over as one, or by a key unique to the session when the peer proved none.
-A relay MUST ignore a qualified Node ID received from such a peer, and claims under its qualified Node IDs outside that peer's grant.
-A Node ID is otherwise declared, not proven.
-
-An origin advertises its own route with a Metric of 0 and a Seqno that only it advances.
-A receiver adds the session's link cost (see [Cost Parameter](#cost-parameter)) to the Metric of every route the peer sends; the sum is its metric through that peer.
-Each link adds at least 1, so a route's metric strictly increases away from its origin.
-A metric that overflows 64 bits makes the route unusable.
-
-A route carries its Hops: the Hop ID of every node it crossed, the origin node first and the sender last.
-A Hop ID is a non-zero 64-bit value a node names itself with for as long as its process runs, such as the Node ID it started with; a rotation does not change it.
-A receiver tolerates a zero or repeated Hop ID instead of closing the session: such a route harms only itself.
-A node sending its selected route appends its own Hop ID to the Hops it received, and an origin's own route starts with its Hop ID alone.
-A relay forwards the other entries unchanged and never qualifies them.
-A route that arrives with 32 Hops is unusable.
-
-A route may also carry an RTT: the round trip to its origin node in milliseconds, summed link by link.
-It is informational: nothing ranks or selects a route, or judges it feasible, by its RTT.
-An origin advertises its own route with an RTT of 0.
-A receiver adds its link min RTT for the session to the RTT of every route the peer sends; the sum is its RTT through that peer, which it advertises on the route it selects.
-A link min RTT is the lowest smoothed RTT [RFC9002] the connection measured over the last 30 seconds, read once a second, in milliseconds rounded up.
-A lifetime minimum never rises after a path change, so it is not a link min RTT.
-A node SHOULD keep the link min RTT it adds until the lowest reading differs from it by more than the larger of 5 ms and a quarter of it, so jitter and short queues send no ROUTE_UPDATE and a lasting change sends one per route.
-A node whose connection reports no RTT has no link min RTT, so it sends the routes it learned there without one, and a route without one stays without one past every later node.
-A sum too large to encode is sent without one too.
-An endpoint learns its round trip to an origin node by adding its own link min RTT to the RTT of the route it selected; without its own, the RTT alone covers every hop past its first.
-Like the Metric, an RTT is unverified: a peer can misstate only what crosses it.
-
-A node keeps a feasibility distance per Node ID: the highest Seqno of any route it advertised, and the lowest metric it advertised at that Seqno, as in [RFC8966] Section 3.5.1.
-A route is feasible when no feasibility distance is kept for its Node ID yet, when its Seqno is greater than the distance's, or when its Seqno is equal and its advertised Metric is lower.
-A node selects, per Node ID, among its feasible routes that are not held: a session that has not received a GOAWAY, then the highest local priority, then the lowest metric.
-It MUST NOT select an infeasible route, and a distance only ever falls within a Seqno, so advertising a longer route never raises it.
-It MUST NOT select a route whose Hops name it either, feasible or not: that is a copy of a route the node sent, which no distance refuses once the node dropped it.
-Such a route counts below as an infeasible route where the feasibility condition refuses it, and as no route where it does not: its sender routes through the node, and moves once it hears the node has no route.
-Under a qualified Node ID it counts only if its Hops also begin with those of the route the node last sent under that Node ID: otherwise a relay past the node derived the Node ID from the node's route under another, and that copy stands whatever the node does.
-A node MAY mark a session upstream.
-A route is down-only when it arrived on an upstream session or with its down-only flag set; a node sends a down-only route with the flag set, and never on an upstream session.
-
-A node sends its selected route to an origin node on an Announce Stream it answers only while the route has a claim the stream's request presents (see [Announce](#announce)): it sends ROUTE_START before the first such claim, and once the last one is withdrawn, the batch carrying that withdrawal, closed by its floor (which certifies the withdrawal where the node can certify the request), then ROUTE_END. It starts that route on the stream again only once the subscriber echoed the ROUTE_END. A subscriber therefore holds no route for an origin node its request does not meet.
-A node that does not forward, such as a client, sends only its own route, and holds no feasibility distance for any other.
-An origin advances its Seqno whenever its own set of sessions changes.
-It never advertises a Seqno or Revision of 2^64-1: a change that would reach it instead rotates its Node ID, ending the old route everywhere and announcing its claims again under the new one.
-
-A node with no usable route to an origin node holds it while it can still recover: while every route it has to the node is infeasible, or a peer holds a route whose last advertisement is feasible here.
-A held route travels as a ROUTE_HOLD, and its claims stay shown but unavailable until a ROUTE_UPDATE makes it usable again.
-Otherwise the node lets go, sending ROUTE_END wherever it advertised the route, and its claims go offline.
-Neither proves that the origin withdrew its claims.
-
-A node whose routes to an origin node are all infeasible sends a ROUTE_REQUEST with its distance's Seqno plus 1 to the peer whose route it would select were it feasible.
-A node holding a selected route at least that new answers by advertising it, and the origin answers by raising its Seqno to at least the requested one; a request for 2^64-1 rotates the origin's Node ID.
-Any other node forwards the request to the peer whose route it would select, even the requester.
-Every node keeps one pending request per origin node, its own or forwarded, at the highest Seqno requested, dropping requests no newer, until it selects a route at least that new or has no route left, and sends it again whenever its Seqno rises or that peer changes.
-
-The receiver of a ROUTE_END echoes it back on the same stream once it dropped the route.
-A node drops a feasibility distance once no peer's route to the node is left open, it advertises none, and every ROUTE_END it sent for it was echoed; a closed session counts as an echo.
-No peer then routes through the node, and the Hops refuse any copy of its own route that still returns.
-
-A SUBSCRIBE, FETCH, TRACK, TRACKS, or DATAGRAMS request names the origin node that serves it.
-A subscriber that names 0 lets the publisher select one (see [Resolution](#resolution)), and a relay forwarding a request names the origin node it selected or was given.
-A relay forwards a request naming an origin node only on its selected route to that node, or a SUBSCRIBE through the neighbor [Warm Routes](#warm-routes) chooses for its broadcast, and resets it with UNROUTABLE when it has no usable route to it, so the request never reaches another origin.
-
-Claims with the same Instance serve the same Broadcast, so a relay MAY move a live subscription between them, including onto a higher Epoch, continuing from the first frame the subscriber lacks, and a route change (a reconnect, a cheaper path, a draining session) is invisible to the subscriber.
-A relay MUST NOT move a subscription to a claim with a different Instance: it stays on its Instance's claims and ends with the last of them.
-When another Broadcast wins the path, subscriptions already open stay on theirs until the subscriber drops them or the claim goes; new requests resolve the winner, and the ANNOUNCE_RESTART tells subscribers to request again.
-A receiver of an ANNOUNCE_RESTART (or of the ANNOUNCE_END and ANNOUNCE_START standing in for one) MUST NOT serve a new request under its prefix from anything resolved through the replaced claim.
-A version before this one carries no Instance, so a receiver of such a session mints one for each ANNOUNCE_START it receives, with Epoch 0, and forwards it as the claim's Instance with `Minted` set, so a reader can tell it names an announcement rather than the publisher's stream.
-A minted Instance is new for every announcement, so a publisher reconnecting or re-announcing through such a hop is another stream.
-
-#### Resolution {#resolution}
-A SUBSCRIBE, FETCH, or TRACK request naming no origin node names a path, and the receiver resolves it against the claims covering that path whose route it selected and is usable.
-
-Only the most specific covering claims are consulted: those with the longest prefix.
-A claim strictly inside another's paths always ranks above it, and a broadcast's exact path is the most specific claim there is, so a concrete announcement shadows every broader claim covering it at any cost; claims over the same prefix form one tier.
-The winning tier is the whole answer: a refusal from it never falls through to a less specific claim, so a service refusing a path does not leak the request to a catch-all, and one unserved path costs one round trip rather than a walk down the candidates.
-Nor is a refusal retried at another claim of the same prefix.
-
-Within the tier, a claim is ineligible while another claim of the same prefix carries its Instance at a higher Epoch, however cheap it is.
-Among the eligible claims, the receiver SHOULD prefer a route whose session has not received a GOAWAY, then the highest local priority of the route's session, then the lowest cost, the claim's Announce Cost plus its route's metric, then the lowest Rendezvous Hash, and then the most recently received, so a reconnecting publisher is not outranked by the stale session it replaced.
-The Rendezvous Hash is the 64-bit FNV-1a hash, with offset basis `0x420C0DECB00B` and the standard FNV-64 prime, of the requested path's UTF-8 bytes followed by the origin's Node ID as 8 little-endian bytes.
-Every node that knows the same claims ranks them the same, so equal-cost origins of one prefix share its paths and every relay sends one path to the same origin.
-When choosing which claim to advertise for a prefix, the requested path is the prefix itself.
-
-A claim resolved this way serves the request like any other, and the claim is not consumed by it.
-A relay MUST NOT announce a path merely because it resolved it: the covering claim stays the only advertisement until the advertiser announces the concrete path, which it SHOULD do once it is producing, so a later request finds the running broadcast by its exact path instead of resolving a second producer.
-The advertiser MAY announce the path under the claim's Instance, so subscriptions resolved through the claim continue on it (see [Routing](#routing)); when that announcement ends, a claim still serving its Instance restarts under a new one, so a restarted answer is another Broadcast.
-
-An advertiser that will not serve a resolved request resets the request stream with a typed code (see [Error Codes](#error-codes)).
-Every refusal is terminal and propagates without re-resolution, so probing unserved paths costs one round trip per path.
-An advertiser signals capacity through its claim alone, withdrawing or re-pricing it before it runs out.
-
-#### Warm Routes {#warm-routes}
-A relay MAY pull each broadcast through a neighbor of its choosing rather than along its selected route to the origin node, so a broadcast crosses fewer relays and neighboring relays share one copy.
-A warm route offers a neighbor a copy of one broadcast: the Hops it crossed, its `Warm Cost`, whether it drains, and its priority.
-An endpoint that does not choose per broadcast ignores every WARM_START, WARM_UPDATE, and WARM_END, sends none, pulls each broadcast along its selected route, and says so in each SUBSCRIBE.
-
-A relay's **source** for a broadcast is where it pulls it from: its next hop on its selected route to the origin node, or a neighbor whose warm route it joins.
-A source ranks as a route does (see [Routing](#routing)): one crossing no draining session first, then the one whose lowest link priority is highest, then the cheapest.
-The next hop ranks as the relay's selected route; a warm route ranks by its own drain, priority, and `Warm Cost`, combined with the link it arrives on as a route's are.
-Among sources of equal rank a relay prefers a warm route, then the one whose carrier has the lower Rendezvous Hash, then any fixed order.
-
-A relay with a local reader of a broadcast is that copy's **carrier**: it offers every neighbor its copy, with its own Hop ID as the only Hop, a `Warm Cost` of 0, no drain, and a priority of 127, whatever it pulls.
-A relay with no local reader offers each neighbor the best of its sources whose Hops name neither relay, when that is a warm route: its Hops with the relay's own Hop ID appended, and its rank as the relay sees it.
-What a relay offers so depends only on its readers, its route, and the warm routes offered to it, never on who pulls what, and a warm route ranks no better at each relay it crosses, so the warm routes of a broadcast settle once its readers and the routes do, as any path vector whose rank only worsens along a path does.
-A relay offers a warm route only while it has a selected route to the origin node and the Hops fit in 32, on the Announce Stream it answers whose request covers the broadcast's path, under that route.
-It sends a WARM_UPDATE when the copy it offers a neighbor changes, and a WARM_END once it offers none, so a broadcast no relay reads costs no message of its own.
-
-A carrier pulls through its best source, so what it pulls depends only on the warm routes offered to it and its route, never on who pulls from it.
-A relay with no local reader that has a neighbor's SUBSCRIBE pulls through its best source whose Hops name no neighbor whose subscription it serves.
-A carrier MUST NOT join a warm route whose carrier ranks above its own by the Rendezvous Hash of the broadcast's path and the carrier's Hop ID, as defined in [Resolution](#resolution), so two carriers never join each other.
-Each SUBSCRIBE says in `Warm` whether it joins the copy the publisher offered or follows the subscriber's route.
-A relay that serves a SUBSCRIBE from a relay following its route MUST pull along its own route, so a pull that follows routes reaches the origin node.
-A relay with no local reader gets the copy it pulls to each neighbor whose subscription it serves, so it MUST pull along its own route unless, for each of them it offered a warm route, what it pulls is that warm route or a copy whose carrier ranks below that warm route's carrier; a neighbor it offered none, such as one whose SUBSCRIBE crossed a WARM_END, bounds nothing.
-A relay MUST NOT join a copy of another Instance.
-
-Once the warm routes and subscriptions in flight are delivered, the pulls of a broadcast are free of loops.
-A relay following its route forwards along the routes' tree to the origin node.
-A relay that joins a warm route gets a copy whose carrier, then whose warm route, ranks strictly better than what it gives each relay joined to it: a carrier gives its own copy and joins only a lower-ranked carrier's, and a relay with no local reader joins either the warm route it offered, which ranks strictly better one hop closer to its carrier, or a lower-ranked carrier's copy.
-So no chain of joins returns to a relay already on it, and a join that reaches a relay following its route continues along the routes' tree.
-Two relays acting on each other's stale offers can still join each other until the WARM_END or WARM_UPDATE crossing their link arrives, and the pull then moves on.
-
 ### Subscribe
 A subscriber opens Subscribe Streams to request a Track.
 
@@ -633,31 +610,31 @@ A claim asserts capability rather than inventory, so a subscription for a covere
 The track's immutable publisher properties are not carried here; they are fetched once via a [Track Stream](#track-stream).
 The subscriber needs the track's TRACK_INFO (notably its timescale) to interpret FRAME messages, and MAY open the Track and Subscribe streams concurrently, buffering frames until it arrives.
 
-The publisher sends SUBSCRIBE_OK once the start is resolved, and SUBSCRIBE_FINISH as soon as the exclusive final group is known (see [SUBSCRIBE_OK](#subscribe-ok) and [SUBSCRIBE_FINISH](#subscribe-finish)).
+The publisher sends SUBSCRIBE_OK once the start is resolved, and SUBSCRIBE_FINISH as soon as the Track's end is known (see [SUBSCRIBE_OK](#subscribe-ok) and [SUBSCRIBE_FINISH](#subscribe-finish)).
 Neither closes the stream: the publisher keeps reading SUBSCRIBE_UPDATE messages, so an update can still widen the Ranges, including into an ended Track's history, and the publisher serves or drops what it newly covers.
-The subscriber judges a Range complete from what it observed: the Groups it received, the SUBSCRIBE_SKIP and SUBSCRIBE_DROP messages, the Range Starts in SUBSCRIBE_OK and SUBSCRIBE_STARTED, and SUBSCRIBE_FINISH.
-Drops and Groups name absolute sequences, so the subscriber judges them against its latest Ranges, and an update still in flight changes nothing it has counted.
+The subscriber judges a Range complete from what it observed: the Groups it received and the starts their `Previous Start` passed over, the SUBSCRIBE_SKIP and SUBSCRIBE_DROP messages, the Range Starts in SUBSCRIBE_OK and SUBSCRIBE_STARTED, and SUBSCRIBE_FINISH.
+Drops and Groups name starts, so the subscriber judges them against its latest Ranges, and an update still in flight changes nothing it has counted.
 The publisher never closes its side first: a subscription whose every Range has an `End` other than None and whose every Group has been delivered, skipped, or dropped stays open for an update to widen it.
 
 A subscriber fills Groups it misses by asking for them as Ranges, adding them to an open subscription with SUBSCRIBE_UPDATE or opening a bounded SUBSCRIBE when none is open, rather than with a FETCH of each Group; FETCH remains for one Group, or a slice of one.
-A publisher never sends a Group twice on one subscription, except to re-offer one whose stream it reset, so a Group the subscription already delivered or named in a final SUBSCRIBE_DROP is asked for with a SUBSCRIBE of its own.
-A Group dropped with OLD that the subscriber still wants needs no new SUBSCRIBE: a SUBSCRIBE_UPDATE with a `Subscriber Max Age` its age does not reach reopens it on the same subscription (see [SUBSCRIBE_UPDATE](#subscribe-update)).
+A publisher never sends a Group twice on one subscription, so a Group the subscription already delivered or named in a SUBSCRIBE_DROP is asked for with a SUBSCRIBE of its own.
+That includes a Group dropped with OLD that the subscriber still wants, such as a relay reader whose `Subscriber Max Age` is wider than the one the drop was judged under: no SUBSCRIBE_UPDATE reopens a drop.
 
 The subscriber closes its side (FIN) once it wants nothing more from the subscription, and the publisher then closes its side (FIN), cancelling any Group Stream still open.
-After SUBSCRIBE_FINISH, the subscriber SHOULD close its side once its tail accounting has settled: every received Group Stream has been read to its FIN, reset, or dropped, and every sequence in range has arrived, been named by SUBSCRIBE_SKIP or SUBSCRIBE_DROP, or exhausted the subscriber's grace period.
+After SUBSCRIBE_FINISH, the subscriber SHOULD close its side once its tail accounting has settled: every received Group Stream has been read to its FIN, reset, or dropped, and every start in range has arrived, been passed over by a [GROUP](#group-message)'s `Previous Start`, been named by SUBSCRIBE_SKIP or SUBSCRIBE_DROP, or exhausted the subscriber's grace period.
 A publisher closing its session gracefully MUST wait for the subscriber's FIN or reset on every Subscribe Stream before closing the connection; a transport acknowledgement alone does not confirm the subscriber read the tail.
 Either endpoint MAY reset the stream at any time.
 
 ### Fetch
 A subscriber opens a Fetch Stream (0x3) to request a single Group from a Track.
 
-The subscriber sends a FETCH message containing the broadcast path, track name, priority, group sequence, and the frame range within that group.
+The subscriber sends a FETCH message containing the broadcast path, track name, priority, group start, and the frame range within that group.
 Unlike SUBSCRIBE, FETCH works on both live and ended broadcasts; it is the only way to read an ended one.
 The publisher responds with FRAME messages directly on the same bidirectional stream - there is no response header.
-The Group Sequence and index of the first returned frame are implicit, taken from the original FETCH request.
+The Group Start and index of the first returned frame are implicit, taken from the original FETCH request.
 Because there is no response header, a publisher that cannot serve the requested frame range in full MUST reset the stream rather than return a shorter run; the subscriber has no way to learn where a truncated response actually started.
 As with a subscription, the subscriber MUST already have the track's [TRACK_INFO](#track-info) to parse the returned frames; because the properties are immutable, a single Track Stream lookup is reused across every FETCH of that track (group-by-group fetches do not re-fetch it).
-The publisher FINs the stream after the last frame, or resets the stream on error.
+The publisher ends the stream as a [Group Stream](#group-stream) ends: with a [GROUP_END](#group-end) and a FIN once the response reaches the end of a finished Group, with a FIN alone after the last frame requested or the last frame of a closed Group, or with a reset on error.
 
 Fetch behaves like HTTP: a single request/response per stream.
 
@@ -678,12 +655,13 @@ A listing is discovery, not delivery: the subscriber SUBSCRIBEs to each Track it
 The subscriber sends a [TRACKS](#tracks) message naming the broadcast path and Instance.
 The publisher replies with listing events, then FINs the stream once the Broadcast ends, or resets it on error:
 
-- [TRACKS_ADD](#tracks-add): a Track is listed, with its TRACK_INFO.
+- [TRACKS_ADD](#tracks-add): a Track is listed, with its kind and its TRACK_INFO or DATAGRAMS_INFO.
 - [TRACKS_REMOVE](#tracks-remove): a listed Track no longer is, without having finished.
 - [TRACKS_FINISH](#tracks-finish): a listed Track no longer is because it finished.
 - [SYNCED](#synced): every Track this hop listed when the stream opened, and still lists, has been sent.
 
-A Broadcast lists the Tracks its publisher produces, except datagram Tracks, which are never listed: TRACK_INFO does not say which kind a Track is, so a subscriber could not tell whether to SUBSCRIBE or send DATAGRAMS.
+A Broadcast lists the Tracks its publisher produces, datagram Tracks included.
+A listing names a Track by its kind and name, since the two kinds have separate namespaces, and the kind tells the subscriber whether to SUBSCRIBE or send DATAGRAMS.
 A Track the publisher serves only on request, such as any name a transcoder answers for, is never listed, and listing never creates one.
 A removal, either TRACKS_REMOVE or TRACKS_FINISH, promises only that the Track is no longer listed; a SUBSCRIBE for its name MAY still succeed.
 TRACKS_FINISH says the Track's publisher declared its end, so its Groups are all the Track will hold; TRACKS_REMOVE says it left unfinished, such as a publisher that went away or a claim that was withdrawn, so it may go on elsewhere.
@@ -698,7 +676,7 @@ The publisher MAY coalesce changes to a name it has not yet sent, but never omit
 It sends SYNCED exactly once, after every Track it listed when the stream opened and still lists, and sends no more events before SYNCED than it listed then.
 A removal of a Track already sent MAY precede SYNCED.
 
-The subscriber MUST close the session with a PROTOCOL_VIOLATION on a TRACKS_ADD for a name already listed on the stream, a TRACKS_REMOVE or TRACKS_FINISH for a name not listed, a second SYNCED, or an unknown event type.
+The subscriber MUST close the session with a PROTOCOL_VIOLATION on a TRACKS_ADD for a kind and name already listed on the stream, a TRACKS_REMOVE or TRACKS_FINISH for a kind and name not listed, a second SYNCED, or an unknown event type or kind.
 A FIN before SYNCED means the Broadcast ended.
 A publisher MUST reset a Tracks Stream with NOT_FOUND when the claim it would serve the path from covers it by a shorter prefix: a claim asserts capability, not inventory, so it names no Broadcast to list.
 A subscriber MAY skip the Track Stream for a Track it learned from TRACKS_ADD, since the properties are the same immutable ones.
@@ -816,7 +794,7 @@ The subscriber priority takes precedence, so the subscriber can likewise full-sc
 
 ### Group Order
 Within a subscription, a publisher SHOULD transmit pending Groups in the subscriber's `Group Order`: newest first when descending (the default), oldest first when ascending.
-Descending sheds the backlog rather than the live edge under congestion, which is what a Group boundary exists to make possible; ascending drains a backlog in sequence order, for catch-up.
+Descending sheds the backlog rather than the live edge under congestion, which is what a Group boundary exists to make possible; ascending drains a backlog in start order, for catch-up.
 
 `Group Order` only orders transmission; it never decides whether a Group is delivered, which is [Expiration](#expiration)'s job.
 An ascending subscriber SHOULD raise its `Subscriber Max Age` so the backlog it intends to drain is not expired first.
@@ -826,21 +804,21 @@ A subscriber MUST support gaps and out-of-order delivery regardless.
 
 ## Expiration
 Expiration governs when an older group is dropped.
-The publisher SHOULD reset Group Streams for non-latest groups whose age reaches `Subscriber Max Age` (see [SUBSCRIBE](#subscribe), and the age definition below); the subscriber MAY also locally drop such groups.
+The publisher SHOULD stop sending non-latest groups whose age reaches `Subscriber Max Age` (see [SUBSCRIBE](#subscribe), and the age definition below); the subscriber MAY also locally drop such groups.
 Expiration only removes the group from live delivery; the publisher MAY still retain it for FETCH or new subscriptions until its age exceeds `Publisher Max Age` (see [TRACK_INFO](#track-info)).
 A FETCH can additionally carry `Subscriber Max Age`; it can tighten, but never relax, the publisher bound.
 
 It is not crucial to aggressively expire groups thanks to [prioritization](#prioritization), but a lower priority group still consumes RAM, bandwidth, and potentially flow control.
 It is RECOMMENDED that an application set conservative limits and only resort to expiration when data is absolutely no longer needed.
 
-A group is never expired until its **successor** has arrived: the next group by sequence number that has arrived at this hop and was not reset.
+A group is never expired until its **successor** has arrived: the next group by start that has arrived at this hop and was not reset.
 The latest group has no successor, so it is never expired.
 A group is expired once either of two ages meets the relevant `Max Age`:
 
 - Its **timestamp age** is the difference between the *newest* frame timestamp of the latest group that has at least one frame, and this group's **reach**, defined below.
 - Its **arrival age** is the time elapsed since its successor arrived at this hop.
 
-A group of an untimed Track has no timestamps, so arrival age alone expires it.
+On a scale-less Track, timestamp age counts bare units as the milliseconds of a Max Age.
 
 By timestamp age, a group is expired only once it **provably cannot overlap the Max Age window**: every frame it could still present is older than the budget allows.
 Arrival age needs no such proof: it bounds how long a superseded group may still wait to be delivered.
@@ -848,23 +826,24 @@ Being behind is not itself a reason to expire anything.
 [Prioritization](#prioritization) already transmits newer groups first, so an older group consumes only whatever capacity is left over; it therefore closes the gap faster than the live edge advances, and a receiver that is behind can converge without losing content.
 What cannot be recovered is a group with nothing left worth delivering, and that is what expiration removes.
 
-A group's **reach** is the first frame timestamp of the next group by sequence number, or unbounded when no later group has presented a frame.
-A group cannot present past where its successor begins, so this is the furthest it could still reach.
-Its own frames do not bound it: frame durations are not carried on the wire, so a group's last frame timestamp is where that frame *starts* presenting, not where the group ends.
-A group whose successor has not presented a frame therefore has no timestamp age, because nothing yet proves where it stops.
+A group's **reach** is its own end once it finished (see [GROUP_END](#group-end)), and otherwise the first frame timestamp of the next group by start, or unbounded when no later group has presented a frame.
+A group cannot present past its end or where its successor begins, so this is the furthest it could still reach.
+Its frames alone do not bound it: frame durations are not carried on the wire, so a group's last frame timestamp is where that frame *starts* presenting, not where the group ends.
+An unfinished group whose successor has not presented a frame therefore has no timestamp age, because nothing yet proves where it stops.
 The group itself needs no timestamp: a zero-frame group (a keep-alive or gap marker) is bounded by its successor's first frame the same way.
 
 Reach is an exclusive bound, so a timestamp age **equal** to Max Age already expires the group: the freshest frame it could still hold sits strictly below its reach, and is therefore strictly older than the budget.
 A Max Age of zero follows from the same rule without a special case.
 
 Timestamp age means a burst of groups delivered together still reads as its true age, so catching up never resets the clock.
-Arrival age bounds what timestamps cannot: a publisher whose timestamps stop advancing, a successor that never presents a frame, an untimed Track, and a run of empty groups.
+Arrival age bounds what timestamps cannot: a publisher whose timestamps stop advancing, a successor that never presents a frame, and a run of empty groups.
 
-An expired group SHOULD be reset at the QUIC level to avoid consuming flow control.
-A publisher MUST NOT finish (FIN) the Group Stream of an expired group that has not finished at this hop, even after sending every frame it holds; it resets with OLD instead, since a FIN claims the group is whole.
+A publisher stops sending an expired group: it resets the group's Group Stream with OLD and names the group in a [SUBSCRIBE_DROP](#subscribe-drop) with OLD, as it does a group it opened no stream for.
+This includes a stream whose GROUP_END was sent but not yet acknowledged, whose bytes would otherwise hold flow control the streams behind it need.
+A subscriber that already read such a stream whole, through its GROUP_END and FIN, keeps the group: the OLD drop changes nothing for its readers.
 
 ## Unidirectional Streams
-Unidirectional streams are used for data transmission.
+Unidirectional streams are used for data transmission, the session's setup, and discovery and routing.
 
 |--------|----------|-------------|
 |     ID | Stream   | Creator     |
@@ -873,7 +852,7 @@ Unidirectional streams are used for data transmission.
 | ------ | -------- | ----------- |
 |    0x1 | Setup    | Either      |
 | ------ | -------- | ----------- |
-|    0x2 | Padding  | Either      |
+|    0x3 | Announce | Either      |
 | ------ | -------- | ----------- |
 
 ### Setup {#setup-stream}
@@ -883,39 +862,29 @@ The opener sends a single SETUP message and immediately closes the stream (FIN).
 There is exactly one Setup Stream per direction; an endpoint that receives a second Setup Stream MUST close the session with a PROTOCOL_VIOLATION.
 An endpoint with no optional capabilities sends a SETUP with an empty parameter list rather than omitting the stream, giving the peer a deterministic signal that no capabilities are forthcoming.
 
-### Padding {#padding-stream}
-Either endpoint MAY open a Padding Stream (0x2), followed by arbitrary bytes until FIN.
-The receiver MUST read and discard those bytes incrementally, returning stream and connection flow-control credit as they arrive without retaining the body.
-Receiving padding does not change session or subscription state.
-This allows bandwidth probes to measure delivery without requiring a media subscription.
+### Announce {#announce-stream}
+Each endpoint MAY open one Announce Stream (0x3) for the session; see [Announce Stream](#announce).
 
-### Group
+### Group {#group-stream}
 A publisher creates Group Streams in response to a Subscribe Stream.
 
-A Group Stream MUST start with a GROUP message and MAY be followed by any number of FRAME messages.
+A Group Stream MUST start with a GROUP message and MAY be followed by any number of FRAME messages, then a GROUP_END if the Group finished.
 A Group MAY contain zero FRAME messages, potentially indicating a gap in the track.
 A frame MAY contain an empty payload, potentially indicating a gap in the group.
 
-The GROUP message's `Frame Start` gives the index of the first FRAME on the stream, so a stream carrying only part of a Group is self-describing.
+A publisher ends a Group Stream the way its Group ended (see [Group](#group)): with a GROUP_END and a FIN for a finished Group, with a FIN alone for a closed one, and with a reset for an aborted one.
+A publisher MUST NOT send a GROUP_END for a Group that has not finished at this hop, and a subscriber treats bytes after a GROUP_END as a malformed Track.
 
-A publisher MUST NOT send two Group Streams for the same Group Sequence on one subscription, except to re-offer a Group whose stream it reset (see [SUBSCRIBE_DROP](#subscribe-drop)), or to [continue](#yield) one.
-The re-offer can arrive before that reset: a subscriber holds a Group Stream for a sequence whose earlier stream is still arriving unread until that stream ends, then discards it if the earlier stream completed the Group, or reads it if the earlier stream was reset.
-Since the publisher reset the earlier stream, the subscriber MAY instead end that stream at once and read the later one, ignoring the frames it holds; a browser can lose a reset that reaches a stream before its application does.
+A publisher MUST NOT send two Group Streams for the same Group Start on one subscription.
 A subscriber assembling a Group from more than one publisher does so across separate subscriptions, and is responsible for concatenating the runs in index order and for ignoring any frame it has already received.
 
 Both the publisher and subscriber MAY reset the stream at any time.
 This is not a fatal error and the session remains active.
 The subscriber MAY cache the error and potentially retry later.
 
-#### Yield {#yield}
-A publisher out of the peer's stream credit MAY reset the lowest-priority Group Stream with YIELDED to make room for a higher-priority one.
-A Group Stream carrying the `ietf` extension's object records is never reset with YIELDED.
-
-A Group whose stream was reset with YIELDED is paused, not given up: the subscriber keeps the frames it received, and the publisher MUST later continue the Group on another Group Stream or name it in [SUBSCRIBE_DROP](#subscribe-drop).
-A continuation is a Group Stream for the paused Group whose `Frame Start` is the reset stream's own `Frame Start`, since a reset can discard frames the transport acknowledged.
-The subscriber ignores the frames it already holds, including the part of a frame the reset cut short, and appends the rest; a continuation that starts past the frames it holds whole is malformed.
-A continuation MAY overtake the earlier stream's reset, and waits unread until that stream ends, or ends it, as for a re-offer.
-A subscriber whose transport reports a Group Stream's reset without its error code, as a browser can, pauses the Group as for YIELDED: the publisher's continuation or SUBSCRIBE_DROP settles it.
+A publisher out of the peer's stream credit MAY reset the lowest-priority Group Stream with TOO_FAR_BEHIND to make room for a higher-priority one.
+That gives the Group up on the subscription: the publisher names it in [SUBSCRIBE_DROP](#subscribe-drop), and a subscriber that wants the rest of it FETCHes the Group from the first frame it lacks (see [Positions](#positions)).
+The drop settles the Group even where the subscriber's transport loses the reset or its error code, as a browser can.
 
 ## Datagrams
 QUIC datagrams provide unreliable, unordered delivery for latency-sensitive content that does not need retransmission.
@@ -923,7 +892,7 @@ They carry the datagrams of a datagram Track: each has the Track's own Sequence 
 A datagram is never cached, stored, retransmitted, or returned by FETCH, and a subscriber receives one only through a [Datagrams Stream](#datagrams-stream).
 A publisher SHOULD drop a datagram rather than block when the transport has no room for it.
 
-Every datagram begins with a Type (i): 0x0 for a Track Datagram, or 0x1 for a Padding Datagram.
+Every datagram begins with a Type (i): 0x0 for a Track Datagram, the only type this version defines.
 A receiver MUST discard a datagram with an unknown type.
 The total datagram body, including Type, MUST NOT exceed 1200 bytes; a sender MUST NOT send a larger one and a receiver MUST silently drop it.
 
@@ -936,31 +905,25 @@ DATAGRAM Body {
   Type (i) = 0x0
   Subscribe ID (i)
   Sequence (i)
-  [Timestamp (i)]
+  Timestamp (i)
   Payload (b)
 }
 ~~~
 
 **Subscribe ID**:
 The Subscribe ID of an active Datagrams Stream on the same session.
-A subscriber MUST silently drop a datagram with an unknown Subscribe ID, or one that arrives before its stream's DATAGRAMS_INFO, since it cannot tell whether a Timestamp follows.
+A subscriber MUST silently drop a datagram with an unknown Subscribe ID, or one that arrives before its stream's DATAGRAMS_INFO, since it cannot read the Timestamp without the Track's `Timescale`.
 
 **Sequence**:
 The datagram's sequence number within its datagram Track, which the publisher assigns in the order it produces them.
 It is the Track's own, not a Group Sequence, and names no cached content: a Sequence may repeat, as from a restarted publisher, and a subscriber delivers a repeat like any other datagram.
 
 **Timestamp**:
-The absolute presentation timestamp of the datagram, in the Track's `Timescale`.
-Present only when DATAGRAMS_INFO's `Timescale` is not 0; on a Track with a `Timescale` of 0, the Sequence stands in for the datagram's time.
+The absolute presentation timestamp of the datagram, in the Track's `Timescale`, or a bare number on a Track with a `Timescale` of 0.
 
 **Payload**:
 The payload, extending to the end of the datagram.
 A payload that does not fit is not sent.
-
-### Padding Datagram
-
-Either endpoint MAY send a Padding Datagram (0x1), followed by arbitrary bytes to the datagram boundary.
-A receiver MUST discard it without changing session or subscription state.
 
 # Encoding
 This section covers the encoding of each message.
@@ -975,9 +938,9 @@ moq-lite-07 uses the leading-ones encoding of [moqt]: the number of leading 1 bi
 Most messages are prefixed with a variable-length integer indicating the number of bytes in the message payload that follows.
 This length field does not include the length of the varint length itself.
 
-A message on the Setup Stream or any bidirectional stream that fails to decode, such as one whose fields disagree with its Message Length or carry a value this specification forbids, MUST close the session with a PROTOCOL_VIOLATION, except content a route message forwards, which the receiver refuses (see [Refused Content](#refused-content)).
+A message on the Setup Stream, an Announce Stream, or any bidirectional stream that fails to decode, such as one whose fields disagree with its Message Length or carry a value this specification forbids, MUST close the session with a PROTOCOL_VIOLATION.
 Resetting only the stream would let the peer repeat the violation on the next one.
-A stream that ends or is reset before its message completes only terminates that stream, except on the Setup and Auth Streams.
+A stream that ends or is reset before its message completes only terminates that stream, except on the Setup, Announce, and Auth Streams.
 A GROUP or FRAME that fails to decode resets only its Group or Fetch Stream, and a STREAM_TYPE the negotiated version does not define resets only its stream (see [STREAM_TYPE](#stream_type)).
 Except in FRAME, a Message Length over 65,535 bytes is unexpected: a sender MUST NOT exceed it, and a receiver MAY reject it based on the length prefix alone.
 The version and extensions should be used to support new fields, not the message length.
@@ -1044,15 +1007,11 @@ The following Setup Parameters are defined:
 |------|----------------|-------------|
 | 0x4  | Cost           | Cost (i)    |
 |------|----------------|-------------|
-| 0x5  | Node ID        | Node ID (i) |
+| 0x5  | Node ID        | Node ID (..)|
 |------|----------------|-------------|
 | 0x6  | Implementation | Tokens (s)  |
 |------|----------------|-------------|
 | 0x7  | Token          | Token (b)   |
-|------|----------------|-------------|
-| 0x8  | Route Key      | Proof (..)  |
-|------|----------------|-------------|
-| 0x9  | Lite-06 Chain  | (empty)     |
 |------|----------------|-------------|
 
 ### Probe Parameter {#probe-parameter}
@@ -1094,23 +1053,42 @@ The role is a hint that only ever narrows the session: a server MUST still enfor
 Only the client sends it; a client that receives one MUST close the session with a PROTOCOL_VIOLATION. A relay MUST NOT forward it.
 
 ### Cost Parameter {#cost-parameter}
-The Cost Parameter declares what reaching this endpoint costs: a receiver adds the value the sender declared to the Metric of every route that sender sends (see [Routing](#routing)).
+The Cost Parameter declares what reaching this endpoint costs: a receiver adds the value the sender declared to the cost of every route and claim that sender sends (see [Routing](#routing)).
 
-The Parameter Value is a variable-length integer in deployment-chosen units, the same units as the Metric and the Announce Cost.
-An absent parameter means the default cost of 1, under which a route's metric is its hop count.
-A value of 0 is a PROTOCOL_VIOLATION: a free link would leave a route as close as the one it came from, which the feasibility condition relies on never happening.
+The Parameter Value is a variable-length integer in deployment-chosen units, the same units as a route's and a claim's cost.
+An absent parameter means the default cost of 1, under which a route's cost is its hop count.
+A value of 0 is a PROTOCOL_VIOLATION: a free link would leave a route as cheap as the one it came from, and selection converges only because extending a route raises its cost (see [Routing](#routing)).
 
 Both endpoints send it and the two values need not match: the parameter prices the sender's own egress. A relay MUST NOT forward it.
 
 A declared cost is an assertion, not an instruction: a receiver MAY charge a locally configured value of at least 1 instead, so a peer cannot reprice its neighbours by declaring itself cheap.
 
 ### Node ID Parameter {#node-id-parameter}
-The Node ID Parameter declares the Node ID the sender originates its own routes under (see [Routing](#routing)).
-Its value MUST NOT be 0 or have the most significant bit set; a receiver MUST close the session with a PROTOCOL_VIOLATION if it does.
+The Node ID Parameter declares that the sender is a routing node, and the Node ID it names itself with (see [Routing](#routing)).
 
-A receiver that receives its own Node ID has reached itself, such as a relay dialing an address of its own, and SHOULD close the session.
+~~~
+Node ID {
+  Relay (i),
+  Start (i),
+  Marked (8),
+}
+~~~
+
+**Relay**:
+The relay's identifier, the same across its restarts.
+A receiver MUST close the session with a PROTOCOL_VIOLATION if it is 0.
+
+**Start**:
+Which start of the relay's process this is, higher than every earlier one.
+
+**Marked**:
+1 for a routing node's marked Node ID (see [Routing](#routing)), which names the same process as its Relay and Start and holds no session, else 0.
+A receiver MUST close the session with a PROTOCOL_VIOLATION on any other value, and on a marked Node ID anywhere but the first hop of a [ROUTE](#route)'s Path or a request's Node: in SETUP, in another hop, or in a [DEAD](#dead) or [DRAIN](#drain).
+
+A Node ID appears in this form wherever a message carries one.
+A receiver that receives its own Relay has reached itself, such as a relay dialing an address of its own, and SHOULD close the session.
 A Node ID in SETUP is declared, not proven, and a receiver MUST NOT authorize on it.
-Either endpoint MAY send it, and an endpoint that originates no routes omits it, having no Node ID to declare. A relay MUST NOT forward it.
+An endpoint that forwards nothing, such as a client, MUST NOT send it. A relay MUST NOT forward it.
 
 ### Implementation Parameter {#implementation-parameter}
 The Implementation Parameter names the sender's software, so a peer can attribute a session to its build.
@@ -1129,48 +1107,42 @@ The URI is fixed before the version is negotiated, so a client that may negotiat
 
 Only the client sends it; a client that receives one MUST close the session with a PROTOCOL_VIOLATION. A relay MUST NOT forward it.
 
-### Route Key Parameter {#route-key-parameter}
-The Route Key Parameter proves that the sender holds an Ed25519 [RFC8032] key, bound to this session, so a receiver recognizes the sender, and endpoints sharing its key, across sessions.
-
-~~~
-Route Key Proof {
-  Public Key (256),
-  Signature (512),
-}
-~~~
-
-**Public Key**:
-The sender's Ed25519 public key.
-
-**Signature**:
-The key's Ed25519 signature over the ASCII bytes `moq-lite route key`, then one byte naming the sender's side of the session (0 for the client, 1 for the server), then 32 bytes of keying material exported from the session with the label `EXPORTER-moq-lite-route-key` and an empty context.
-
-Binding 1 exports with the TLS exporter (Section 7.5 of [RFC8446]), and binding 2 with the WebTransport session's exporter [webtrans-h3] (see [Transports](#transports)).
-The exporter MUST yield material that only the session's two endpoints know and no other session shares.
-TLS 1.3's exporter provides this, after resumption too; its early exporter does not, since a replayed 0-RTT ClientHello reproduces it on another connection, nor does TLS 1.2 without the extended master secret [RFC7627], which lets an attacker give two of its sessions one secret.
-An endpoint MUST NOT send the parameter on a session that provides no such exporter.
-The exported material and the sender's side keep a proof from being replayed on another session, relayed by an attacker or an intermediary that terminates TLS, or reflected back to its sender.
-
-Either endpoint MAY send it. A receiver MUST close the session with a PROTOCOL_VIOLATION if the value is not 96 bytes.
-A receiver that relies on the key MUST verify the signature first, closing the session with a PROTOCOL_VIOLATION if it does not verify; without an exporter on the session, it cannot rely on the key.
-A relay MUST NOT forward it.
-
-
-### Lite-06 Chain Parameter {#lite06-chain-parameter}
-The Lite-06 Chain Parameter says the sender reads the Lite-06 Chain on ANNOUNCE_START, ANNOUNCE_UPDATE, and ANNOUNCE_RESTART (see [ANNOUNCE_START](#announce-start)).
-It is a temporary extension for relays that also peer over moq-lite-06, and the next version removes it.
-The Parameter Value MUST be empty; a receiver MUST close the session with a PROTOCOL_VIOLATION otherwise.
-
 ## ANNOUNCE_REQUEST {#announce-request}
-A subscriber sends an ANNOUNCE_REQUEST message to indicate it wants to receive the claims, and the routes they travel under, for any broadcasts with a path that starts with the requested prefix.
+A subscriber sends an ANNOUNCE_REQUEST message on its Announce Stream to edit the set of prefixes it wants claims for: every broadcast with a path that starts with a prefix of the set.
 
 ~~~
 ANNOUNCE_REQUEST Message {
+  Type (i) = 0x5
   Message Length (i)
+  More (8),
+  Remove Count (i),
+  Prefix ID (i) ...,
+  Add Count (i),
+  Add (..) ...,
+}
+
+Add {
   Broadcast Path Prefix (s),
   Hidden (8),
 }
 ~~~
+
+**Type**:
+Set to 0x5 to indicate an ANNOUNCE_REQUEST message.
+
+**More**:
+1 when the next message on the stream is an ANNOUNCE_REQUEST continuing this edit, 0 on an edit's last.
+Any other value is a PROTOCOL_VIOLATION.
+The publisher applies an edit's ANNOUNCE_REQUESTs together, at its last: each removes a prefix the set held before the edit, and each Add assigns the next Prefix ID in order across them.
+Parts whose Adds alone pass the set's limit, or that remove more prefixes than the set holds, are a PROTOCOL_VIOLATION as soon as they arrive.
+
+**Remove Count** and **Prefix ID**:
+The prefixes to remove from the set, each by its Prefix ID.
+One that was never assigned, was already removed, or is listed twice in an edit is a PROTOCOL_VIOLATION.
+
+**Add Count** and **Add**:
+The prefixes to add once those are removed.
+Each Add implicitly assigns the next Prefix ID on the stream (see [Announce](#announce)).
 
 **Broadcast Path Prefix**:
 Indicate interest for any broadcasts with a path that starts with this prefix.
@@ -1179,21 +1151,23 @@ Indicate interest for any broadcasts with a path that starts with this prefix.
 1 to also receive hidden claims (see [Hidden Paths](#hidden)), 0 otherwise.
 Any other value is a PROTOCOL_VIOLATION.
 
-The publisher MUST respond with an ANNOUNCE_OK message followed by the matching routes and claims and any future changes, subject to [Routing](#routing).
-The subscriber then sends only [ROUTE_REQUEST](#route-request) and [ROUTE_END](#route-end) echoes on the stream.
+One edit MAY swap prefixes for one above or below them, or re-add a prefix it removes to change its `Hidden`.
+The publisher MUST respond to the edit's last ANNOUNCE_REQUEST with an ANNOUNCE_OK on its own Announce Stream, followed by the claims the added prefixes match and any future changes.
 Implementations SHOULD consider reasonable limits on the number of matching claims and routes to prevent resource exhaustion.
 
 
 ## ANNOUNCE_OK {#announce-ok}
-A publisher sends an ANNOUNCE_OK message exactly once, as the first message on the response side of an Announce Stream.
+A publisher sends one ANNOUNCE_OK message on its Announce Stream for each edit it receives, after the edit's last ANNOUNCE_REQUEST, where the edit takes effect (see [Edits](#edits)).
 
 ~~~
 ANNOUNCE_OK Message {
+  Type (i) = 0x6
   Message Length (i) = 0
 }
 ~~~
 
-ANNOUNCE_OK has no body and reserves no fields for a route-key proof.
+**Type**:
+Set to 0x6 to indicate an ANNOUNCE_OK message.
 
 ## SYNCED {#synced}
 The initial set on a discovery stream has been delivered.
@@ -1201,117 +1175,65 @@ The initial set on a discovery stream has been delivered.
 ~~~
 SYNCED Message {
   Type (i) = 0x4
-  Message Length (i) = 0
-}
-~~~
-
-SYNCED has no body and assigns no id.
-A second SYNCED on the same stream is a PROTOCOL_VIOLATION.
-An Announce Stream ending before SYNCED is a PROTOCOL_VIOLATION; a Tracks Stream FIN before SYNCED means the Broadcast ended (see [Tracks](#tracks-stream)).
-
-
-## ROUTE_START {#route-start}
-A publisher sends a ROUTE_START message when it reaches an origin node (see [Routing](#routing)).
-Each ROUTE_START implicitly assigns the next Route ID on the stream, later referenced by ROUTE_UPDATE, ROUTE_HOLD, ROUTE_END, ANNOUNCE_FLOOR, ANNOUNCE_START, and WARM_START (see [Announce](#announce)).
-
-~~~
-ROUTE_START Message {
-  Type (i) = 0x6
   Message Length (i)
-  Node ID (i),
-  Seqno (i),
-  Metric (i),
-  Flags (8),
-  [RTT (i),]
-  Hop Count (i),
-  Hop ID (i) ...,
+  [Prefix ID (i)]
 }
 ~~~
 
-**Type**:
-Set to 0x6 to indicate a ROUTE_START message.
+**Prefix ID**:
+On an Announce Stream, the prefix whose initial set is complete: the Prefix ID an Add of the peer's ANNOUNCE_REQUEST assigned.
+Absent on a Tracks Stream, which has one initial set.
 
-**Node ID**:
-The origin node, as the publisher names it on this session.
-0 is refused (see [Refused Content](#refused-content)).
-
-**Seqno**:
-The origin's sequence number of the route, which only the origin advances.
-2^64-1 is refused.
-
-**Metric**:
-The publisher's metric to the origin node, 0 when it is the origin.
-
-**Flags**:
-A bit field: 0x1 when the route is down-only (see [Routing](#routing)), and 0x2 when an RTT follows.
-Any other bit set is refused, rather than ignored: a later version may give a bit a meaning that changes the route, or a field ahead of the Hops.
-
-**RTT**:
-The publisher's RTT to the origin node in milliseconds (see [Routing](#routing)), 0 when it is the origin.
-Present only when Flags has 0x2 set, and absent when the publisher has none.
-
-**Hop Count**:
-The number of Hop IDs that follow.
-More than 32 is refused.
-
-**Hop ID**:
-The route's Hops (see [Routing](#routing)), in order, the publisher's own last.
+SYNCED assigns no id.
+A second SYNCED for the same prefix, or on the same Tracks Stream, is a PROTOCOL_VIOLATION.
+A Tracks Stream FIN before SYNCED means the Broadcast ended (see [Tracks](#tracks-stream)).
 
 
-## ROUTE_UPDATE {#route-update}
-A publisher sends a ROUTE_UPDATE message when a route it sent changes, referencing its Route ID.
+## ROUTE {#route}
+A publisher sends a ROUTE message when it selects a route to a routing node, or the route it sent changes (see [Routing](#routing)).
+The route leads to the node its first Hop names.
+A ROUTE to a node the stream has no live route to implicitly assigns the next Route ID on the stream, later referenced by ROUTE_END and ANNOUNCE_FLOOR (see [Announce](#announce)); any other replaces that route, keeping its Route ID and its claims.
 
 ~~~
-ROUTE_UPDATE Message {
+ROUTE Message {
   Type (i) = 0x7
   Message Length (i)
-  Route ID (i),
-  Seqno (i),
-  Metric (i),
-  Flags (8),
-  [RTT (i),]
   Hop Count (i),
-  Hop ID (i) ...,
+  Hop (..) ...,
+  Flags (8),
+  Priority (8),
+  Cost (i),
+}
+
+Hop {
+  Node ID (..),
+  Session Number (i),
 }
 ~~~
 
 **Type**:
-Set to 0x7 to indicate a ROUTE_UPDATE message.
+Set to 0x7 to indicate a ROUTE message.
 
-**Route ID**:
-The ordinal implicitly assigned by a prior ROUTE_START on this stream.
+**Hop Count**:
+The number of Hops that follow, from 1 to 32.
 
-**Seqno**, **Metric**, **Flags**, **RTT**, **Hop Count**, and **Hop ID**:
-As defined for [ROUTE_START](#route-start), replacing the route's.
-A ROUTE_UPDATE for a held route makes it usable again.
+**Hop**:
+The route's Path (see [Routing](#routing)), in order, the first being the node the route leads to and the last the publisher's own: each node's [Node ID](#node-id-parameter) and the Session Number it learned the route on, 0 for the first.
 
+**Flags**:
+A bit field: 0x1 when the route is marked and 0x2 when the route is draining (see [Routing](#routing)).
 
-## ROUTE_HOLD {#route-hold}
-A publisher sends a ROUTE_HOLD message when it has no usable route to the origin node but still holds the route and its claims while it recovers (see [Routing](#routing)), referencing its Route ID.
-The receiver keeps the route's last Seqno, Metric, Flags, RTT, and Hops, and does not select it until a ROUTE_UPDATE.
+**Priority**:
+The route's priority, the lowest local priority of a session on its Path, as a u8 with 128 as the midpoint; higher ranks first.
 
-~~~
-ROUTE_HOLD Message {
-  Type (i) = 0xB
-  Message Length (i)
-  Route ID (i)
-}
-~~~
-
-**Type**:
-Set to 0xB to indicate a ROUTE_HOLD message.
-
-**Route ID**:
-The ordinal implicitly assigned by a prior ROUTE_START on this stream.
+**Cost**:
+The publisher's cost to the node the route leads to, 0 when it is that node.
 
 
 ## ROUTE_END {#route-end}
 A publisher sends a ROUTE_END message when it lets go of a route, referencing its Route ID.
 It retires the Route ID and every claim under the route, whose ANNOUNCE_END the publisher does not send.
-It claims nothing about the origin's claims, which may still be served elsewhere.
-
-The subscriber sends the same message back on the stream once it dropped the route, its echo (see [Routing](#routing)).
-A subscriber MUST send exactly one echo for each ROUTE_END, and a publisher MUST close the session with a PROTOCOL_VIOLATION on an echo naming a Route ID it has not ended or already saw echoed.
+It claims nothing about those claims, which may still be served elsewhere.
 
 ~~~
 ROUTE_END Message {
@@ -1325,41 +1247,56 @@ ROUTE_END Message {
 Set to 0x8 to indicate a ROUTE_END message.
 
 **Route ID**:
-The ordinal implicitly assigned by a prior ROUTE_START on this stream.
+The ordinal implicitly assigned by a prior ROUTE on this stream.
 
 
-## ROUTE_REQUEST {#route-request}
-A subscriber sends a ROUTE_REQUEST message to ask for a route to an origin node at least as new as a Seqno (see [Routing](#routing)).
-It names the origin node rather than a Route ID, so it stays valid while a ROUTE_END for that route is in flight.
+## DEAD {#dead}
+A publisher sends a DEAD message when a session on the Path of routes it sent closed (see [Closed Sessions and Drains](#closed-sessions)).
+It covers every route on the stream through that session, and assigns no id.
 
 ~~~
-ROUTE_REQUEST Message {
-  Type (i) = 0xA
+DEAD Message {
+  Type (i) = 0x9
   Message Length (i)
-  Node ID (i),
-  Seqno (i),
+  Hop (..),
+  Far Node ID (..),
 }
 ~~~
 
 **Type**:
-Set to 0xA to indicate a ROUTE_REQUEST message.
+Set to 0x9 to indicate a DEAD message.
+
+**Hop**:
+The hop that died: the Node ID of the node that lost the session, and that session's Session Number, as a [ROUTE](#route)'s Path names it.
+
+**Far Node ID**:
+The Node ID of the node at the session's other end.
+
+
+## DRAIN {#drain}
+A publisher sends a DRAIN message when a node on the Path of routes it sent sent a GOAWAY (see [Closed Sessions and Drains](#closed-sessions)).
+It covers every route on the stream through that node, and assigns no id.
+
+~~~
+DRAIN Message {
+  Type (i) = 0xA
+  Message Length (i)
+  Node ID (..),
+}
+~~~
+
+**Type**:
+Set to 0xA to indicate a DRAIN message.
 
 **Node ID**:
-The origin node, as the publisher names it on this session.
-0 is a PROTOCOL_VIOLATION.
-
-**Seqno**:
-The Seqno the subscriber needs.
-A publisher with no route to the origin node drops the request.
-
-A publisher MUST close the session with a PROTOCOL_VIOLATION if it receives any message type other than ROUTE_REQUEST or ROUTE_END after the ANNOUNCE_REQUEST.
+The Node ID of the node that sent the GOAWAY.
 
 
 ## ANNOUNCE_START {#announce-start}
-A publisher sends an ANNOUNCE_START message to advertise a claim of a route's origin node: that paths under a prefix can be served.
-Each ANNOUNCE_START implicitly assigns the next Announce ID on the stream, later referenced by ANNOUNCE_END, ANNOUNCE_UPDATE, and ANNOUNCE_RESTART (see [Announce](#announce)).
+A publisher sends an ANNOUNCE_START message to advertise a claim: that paths under a prefix can be served.
+Each ANNOUNCE_START implicitly assigns the next Announce ID on the stream, later referenced by ANNOUNCE_END and ANNOUNCE_UPDATE (see [Announce](#announce)).
 
-Only the suffix is encoded on the wire, as the full claim prefix can be constructed by prepending the requested prefix.
+The claim's prefix is encoded relative to the session.
 
 ~~~
 ANNOUNCE_START Message {
@@ -1368,12 +1305,19 @@ ANNOUNCE_START Message {
   Path Base (i),
   Path Keep (i),
   Claim Prefix Suffix (s),
-  Route ID (i),
   Instance (b),
   Minted (8),
   Epoch (i),
-  Announce Cost (i),
-  [Lite-06 Chain (..)],
+  Claim (..),
+}
+
+Claim {
+  Cost (i),
+  Above (i),
+  Flags (8),
+  Priority (8),
+  Chain Count (i),
+  Relay (i) ...,
 }
 ~~~
 
@@ -1381,20 +1325,16 @@ ANNOUNCE_START Message {
 Set to 0x0 to indicate an ANNOUNCE_START message.
 
 **Path Base** and **Path Keep**:
-The suffix begins with the first `Path Keep` segments of the suffix claimed by the base that `Path Base` names (see [Compression](#announce-compression)).
+The claim's prefix begins with the first `Path Keep` segments of the prefix claimed by the base that `Path Base` names (see [Compression](#announce-compression)).
 
 **Claim Prefix Suffix**:
-The remaining segments of the suffix, which is combined with the requested prefix to form the claim's full prefix.
-An empty suffix claims the requested prefix itself, which is how a claim covering more than the request presents (see [Announce](#announce)).
-
-**Route ID**:
-The route the claim travels under: its origin node is the claim's.
-A claim never changes its Route ID.
+The remaining segments of the claim's prefix.
+A claim covering more than the requested prefix it lies in presents at that requested prefix (see [Announce](#announce)).
 
 **Instance**:
 The stream the claim serves (see [Broadcast](#broadcast)): non-empty UTF-8 text.
-An empty or non-UTF-8 Instance is refused (see [Refused Content](#refused-content)).
-A relay forwards the Instance unchanged.
+An empty or non-UTF-8 Instance is a PROTOCOL_VIOLATION.
+A relay forwards the Instance unchanged, and a claim never changes it.
 
 **Minted**:
 1 when a receiver minted the Instance for a version that carries none (see [Routing](#routing)), 0 when the publisher named it.
@@ -1406,21 +1346,33 @@ An Instance minted and one named with the same text are different Instances.
 Which incarnation of the Instance the claim serves: a counter the publisher raises within one Instance, 0 unless it keeps an Instance across restarts.
 A relay forwards the Epoch unchanged.
 
-Only an ANNOUNCE_RESTART changes the Instance or the Epoch; ANNOUNCE_UPDATE never does.
+**Cost**:
+The sender's cost to the claim, in the units of the [Cost Parameter](#cost-parameter).
+Its publisher prices it: 0 for content it already produces, larger for a standby that starts work on demand.
+A routing node sends a routing neighbour the cost it learned the claim at, and any other peer that cost plus the cost of its route to the node announcing the claim (see [Claims](#claims)).
+A cost saturates at 2^62-1.
 
-**Announce Cost**:
-The origin's price for this prefix, in the units of the [Cost Parameter](#cost-parameter): 0 for content it already produces, larger for a standby that starts work on demand.
-A relay forwards it unchanged; the cost of a path through the claim is the Announce Cost plus the route's metric.
+**Above**:
+How many segments the claim's own prefix is broader than the path it is shown at (see [Announce](#announce)): 0 for a claim exactly there.
+A publisher presenting a claim above the requested prefix at the requested prefix itself writes the distance between them, plus the Above the claim already had where it learned it from a stream of a broader request, and no more than the path has segments below the publisher's root.
+A claim is no more above its path than the path has segments; a receiver MUST close the session with a PROTOCOL_VIOLATION otherwise.
+A receiver treats a claim as covering its path less its Above, and ranks the claims of a request by that prefix first, longest first, then, among claims of the same prefix, by the path each is shown at, deepest first (see [Resolution](#resolution)), so the claim of a broadcast at exactly the requested path outranks a broader claim shown there or deeper, however the two compare otherwise.
+The claims of one tier are those of the winning prefix shown at the winning depth; claims of the same prefix shown at a shallower depth are not consulted.
+A relay forwards a claim's Above unchanged, adding the distance when it shows the claim at a narrower prefix than the one it learned it at.
 
-**Lite-06 Chain**:
-The moq-lite-06 Hop ID list a claim arrived with where its origin node learned it over moq-lite-06, encoded as that list: a count, then each Hop ID.
-A publisher sends it, as the message's last field, only to a peer that sent the [Lite-06 Chain Parameter](#lite06-chain-parameter), and only when the claim has one; a received chain that is empty, or names a Hop ID twice, is refused.
-A relay forwards it unchanged, and translating the claim for a moq-lite-06 peer sends it followed by a Hop ID standing for the claim's origin node.
-A node MUST NOT serve a claim whose chain names itself, by its own Hop ID or one standing for its Node ID, or whose translated chain would exceed its hop limit.
+**Flags**:
+A bit field: 0x1 (`Unavailable`) when no route reaches the claim from the sender (see [Claims](#claims)), 0x2 when a node on the way to the claim is draining, and 0x4 (`Marked`) when a marked session lies on the way to it (see [Routing](#routing)).
+
+**Priority**:
+The lowest local priority of a session on the way to the claim's publisher, as a u8 with 128 as the midpoint; a publisher's own claim carries 255.
+
+**Chain Count** and **Relay**:
+The claim's chain: the Relay (see [Node ID Parameter](#node-id-parameter)) of each relay the claim entered or left a routing domain by, oldest first (see [Claims](#claims)), and none for a claim no routing node has taken.
+More than 31, or a Relay of 0, is a PROTOCOL_VIOLATION: no routing node sends a chain its Relay would carry to 32 (see [Claims](#claims)).
 
 
 ## ANNOUNCE_END {#announce-end}
-A publisher sends an ANNOUNCE_END message when the origin withdrew a claim, referencing its Announce ID.
+A publisher sends an ANNOUNCE_END message when a claim is gone, referencing its Announce ID.
 The id is retired and MUST NOT be referenced again.
 Retraction claims nothing about the content: a broadcast whose publisher stops advertising may remain readable by exact path, serving its stored groups over FETCH.
 Retraction does not disturb subscriptions already in flight, which conclude normally with SUBSCRIBE_FINISH.
@@ -1430,7 +1382,8 @@ How a subscriber learns the path of stored content is out of band, e.g. an appli
 ANNOUNCE_END Message {
   Type (i) = 0x1
   Message Length (i)
-  Announce ID (i)
+  Announce ID (i),
+  Lost (8),
 }
 ~~~
 
@@ -1441,19 +1394,24 @@ Set to 0x1 to indicate an ANNOUNCE_END message.
 The ordinal implicitly assigned by a prior ANNOUNCE_START on this stream.
 A claim that is announced again after an ANNOUNCE_END gets a fresh id from its next ANNOUNCE_START.
 
+**Lost**:
+0 when the claim's publisher withdrew it, and 1 when the sender only lost its way to the claim, or its grant to announce it, so the claim may still be served elsewhere.
+Any other value is a PROTOCOL_VIOLATION.
+A relay forwards which of the two it was.
+
 
 ## ANNOUNCE_UPDATE {#announce-update}
-A publisher sends an ANNOUNCE_UPDATE message when the origin re-prices a claim, referencing its Announce ID.
-The claim's prefix and route are unchanged and the id stays live.
-An update carries no content claim: in-flight subscriptions under the claim are undisturbed.
+A publisher sends an ANNOUNCE_UPDATE message when a claim changes, referencing its Announce ID.
+The claim's prefix and Instance are unchanged and the id stays live.
+In-flight subscriptions under the claim are undisturbed, and continue onto a higher Epoch.
 
 ~~~
 ANNOUNCE_UPDATE Message {
   Type (i) = 0x2
   Message Length (i)
   Announce ID (i),
-  Announce Cost (i),
-  [Lite-06 Chain (..)],
+  Epoch (i),
+  Claim (..),
 }
 ~~~
 
@@ -1463,44 +1421,16 @@ Set to 0x2 to indicate an ANNOUNCE_UPDATE message.
 **Announce ID**:
 As defined for [ANNOUNCE_END](#announce-end).
 
-**Announce Cost** and **Lite-06 Chain**:
-As defined for [ANNOUNCE_START](#announce-start), replacing the claim's; an absent chain replaces it with none.
-
-
-## ANNOUNCE_RESTART {#announce-restart}
-A publisher sends an ANNOUNCE_RESTART message when a claim now serves another Instance, or a higher Epoch of the same one (see [Routing](#routing)), referencing its Announce ID.
-The claim's prefix and route are unchanged and the id stays live.
-Under another Instance, whatever the subscriber resolved under the prefix through the claim is the old stream: in-flight subscriptions on it are undisturbed, and a new request resolves afresh.
-Under a higher Epoch of the same Instance the stream continues, and so do its subscriptions.
-
-~~~
-ANNOUNCE_RESTART Message {
-  Type (i) = 0x3
-  Message Length (i)
-  Announce ID (i),
-  Instance (b),
-  Minted (8),
-  Epoch (i),
-  Announce Cost (i),
-  [Lite-06 Chain (..)],
-}
-~~~
-
-**Type**:
-Set to 0x3 to indicate an ANNOUNCE_RESTART message.
-
-**Announce ID**:
-As defined for [ANNOUNCE_END](#announce-end).
-
-**Instance**, **Minted**, **Epoch**, **Announce Cost**, and **Lite-06 Chain**:
+**Epoch** and **Claim**:
 As defined for [ANNOUNCE_START](#announce-start), replacing the claim's.
+
 
 ## ANNOUNCE_FLOOR {#announce-floor}
 A publisher sends an ANNOUNCE_FLOOR message to close a batch of a route's claims (see [Floors](#floors)).
 
 ~~~
 ANNOUNCE_FLOOR Message {
-  Type (i) = 0x9
+  Type (i) = 0x3
   Message Length (i)
   Route ID (i),
   Revision (i),
@@ -1508,115 +1438,13 @@ ANNOUNCE_FLOOR Message {
 ~~~
 
 **Type**:
-Set to 0x9 to indicate an ANNOUNCE_FLOOR message.
+Set to 0x3 to indicate an ANNOUNCE_FLOOR message.
 
 **Route ID**:
-The ordinal implicitly assigned by a prior ROUTE_START on this stream.
+The route the batch's claims travel under: the ordinal implicitly assigned by a prior ROUTE on this stream.
 
 **Revision**:
-The origin's Revision at which the floor certifies the stream's claims for the route, plus one, or 0 when it certifies nothing.
-
-
-## WARM_START {#warm-start}
-A publisher sends a WARM_START message to offer the subscriber its copy of a broadcast (see [Warm Routes](#warm-routes)).
-Each WARM_START implicitly assigns the next Warm ID on the stream, later referenced by WARM_UPDATE and WARM_END (see [Announce](#announce)).
-
-~~~
-WARM_START Message {
-  Type (i) = 0xC
-  Message Length (i)
-  Route ID (i),
-  Broadcast Path Suffix (s),
-  Instance (b),
-  Minted (8),
-  Warm Cost (i),
-  Flags (8),
-  Priority (8),
-  Hop Count (i),
-  Hop ID (i) ...,
-}
-~~~
-
-**Type**:
-Set to 0xC to indicate a WARM_START message.
-
-**Route ID**:
-The route to the broadcast's origin node: the ordinal implicitly assigned by a prior ROUTE_START on this stream.
-A warm route never changes its Route ID.
-
-**Broadcast Path Suffix**:
-Combined with the requested prefix to form the broadcast's path.
-
-**Instance** and **Minted**:
-The Instance of the copy the publisher carries, as defined for [ANNOUNCE_START](#announce-start).
-
-**Warm Cost**:
-What pulling the copy costs the publisher, 0 when it is the copy's carrier (see [Warm Routes](#warm-routes)), in the units of the route's Metric.
-
-**Flags**:
-A bit field: 0x1 when a session on the copy's Hops drains (see [Routing](#routing)).
-Any other bit set is refused (see [Refused Content](#refused-content)).
-
-**Priority**:
-The lowest local priority of a link on the copy's Hops as a signed 8-bit integer, 127 at its carrier (see [Routing](#routing)).
-
-**Hop Count**:
-The number of Hop IDs that follow.
-0, which names no carrier, or more than 32 is refused.
-
-**Hop ID**:
-The copy's Hops (see [Warm Routes](#warm-routes)), in order, its carrier first and the publisher's own last.
-
-A stream has at most one live warm route per route and Broadcast: a relay still pulling an Instance for readers pinned to it offers that copy beside the one of the Instance that replaced it.
-A subscriber that uses warm routes MUST close the session with a PROTOCOL_VIOLATION on a WARM_START naming a Route ID that was never assigned or already retired, or a path and Instance its route already has a live warm route for.
-
-
-## WARM_UPDATE {#warm-update}
-A publisher sends a WARM_UPDATE message when the copy a warm route offers changes, referencing its Warm ID.
-The id stays live.
-
-~~~
-WARM_UPDATE Message {
-  Type (i) = 0xD
-  Message Length (i)
-  Warm ID (i),
-  Warm Cost (i),
-  Flags (8),
-  Priority (8),
-  Hop Count (i),
-  Hop ID (i) ...,
-}
-~~~
-
-**Type**:
-Set to 0xD to indicate a WARM_UPDATE message.
-
-**Warm ID**:
-The ordinal implicitly assigned by a prior WARM_START on this stream.
-
-**Warm Cost**, **Flags**, **Priority**, **Hop Count**, and **Hop ID**:
-As defined for [WARM_START](#warm-start), replacing the warm route's.
-
-
-## WARM_END {#warm-end}
-A publisher sends a WARM_END message when it withdraws a warm route, referencing its Warm ID.
-The id is retired and MUST NOT be referenced again.
-A ROUTE_END retires the warm routes under its route without a WARM_END.
-
-~~~
-WARM_END Message {
-  Type (i) = 0xE
-  Message Length (i)
-  Warm ID (i)
-}
-~~~
-
-**Type**:
-Set to 0xE to indicate a WARM_END message.
-
-**Warm ID**:
-As defined for [WARM_UPDATE](#warm-update).
-A subscriber that uses warm routes MUST close the session with a PROTOCOL_VIOLATION on a WARM_UPDATE or WARM_END naming a Warm ID that was never assigned or already retired.
+The Revision of the node the route leads to as of which the publisher's copy of its claims is complete.
 
 
 ## SUBSCRIBE
@@ -1629,7 +1457,7 @@ SUBSCRIBE Message {
   Broadcast Path (s)
   Instance (b)
   Minted (8)
-  Node ID (i)
+  Node (..)
   Track Name (s)
   Subscriber Priority (8)
   Group Order (8)
@@ -1637,8 +1465,6 @@ SUBSCRIBE Message {
   Subscriber Min Age (i)
   Range Count (i)
   Range (..) ...
-  Update (i)
-  Warm (8)
 }
 
 Range {
@@ -1648,9 +1474,8 @@ Range {
 
 Anchor {
   Anchor Type (i)
-  [Group Sequence (i)]
-  [Groups Back (i)]
   [Timestamp (i)]
+  [Groups Back (i)]
 }
 
 ~~~
@@ -1659,7 +1484,7 @@ Anchor {
 A unique identifier chosen by the subscriber.
 A Subscribe ID MUST NOT be reused within the same session, even if the prior subscription has been closed.
 
-**Instance**, **Minted**, and **Node ID**:
+**Instance**, **Minted**, and **Node**:
 As in [TRACK](#track).
 
 **Subscriber Priority**:
@@ -1673,18 +1498,18 @@ Any other value is a PROTOCOL_VIOLATION.
 See the [Group Order](#group-order) section for more information.
 
 **Subscriber Max Age**:
-The subscriber's preference, in milliseconds, for how long a non-latest group may remain in flight before being considered stale and dropped from live delivery.
-The publisher SHOULD reset (at the QUIC level) Group Streams for groups whose age, as defined in [Expiration](#expiration), reaches this duration.
+The subscriber's preference for how long a non-latest group may remain in flight before being considered stale and dropped from live delivery, encoded as milliseconds plus one; `0` means no limit.
+The publisher SHOULD stop sending groups whose age, as defined in [Expiration](#expiration), reaches this duration.
 Applies only to non-latest groups; the latest group is never dropped on staleness grounds.
-A value of `0` means the subscriber wants only the latest group in live delivery (older groups are immediately stale once a newer group arrives).
+An encoded value of `1` declares a duration of zero: the subscriber wants only the latest group in live delivery (older groups are immediately stale once a newer group arrives).
 This is a delivery-time preference, not a retention rule: the publisher MAY still hold these groups for FETCH or future subscriptions (see `Publisher Max Age` in [TRACK_INFO](#track-info)).
 See the [Expiration](#expiration) section for more information.
 
 **Subscriber Min Age**:
 The subscriber's target latency behind the live edge, in milliseconds plus one: the playout or jitter-buffer delay it holds.
 A value of `0` means the subscriber did not state one, which is distinct from a stated zero (`1`).
-It is a hint that asks for nothing: a publisher MAY use it, for example to start a cold join that far back, and MAY ignore it.
-A relay forwarding an aggregate of several subscriptions SHOULD carry the smallest stated value, and not stated when none is, so a subscription that did not state one never pulls the aggregate to zero.
+It decides where a Range joining at the live edge starts (see below).
+A relay forwarding an aggregate of several subscriptions SHOULD carry the largest stated value, and not stated when none is, so its own copy starts far enough back for the subscription that buffers most.
 
 **Range Count**:
 The number of Ranges that follow.
@@ -1694,33 +1519,30 @@ A value of 0 is a PROTOCOL_VIOLATION, since a subscription that asks for nothing
 A span of the Track to deliver, from its `Start` up to its `End`.
 The subscription is the union of its Ranges: the publisher delivers each Group inside any of them once, in `Group Order` across all of them, and accounts with SUBSCRIBE_SKIP or SUBSCRIBE_DROP for every Group it will not deliver.
 Each Range implicitly takes the next Range ID on the stream, starting at 0, which a [SUBSCRIBE_UPDATE](#subscribe-update) uses to retire it.
+A relay asking for the union of several subscriptions' Ranges, whose exact union does not fit one SUBSCRIBE, SHOULD ask for fewer Ranges covering it, joining the Ranges separated by the narrowest gaps, rather than refuse a subscription: each reader still reads only its own Ranges from the relay's copy.
 
 **Anchor Type**:
 Which fields follow, and what the Anchor names:
 
 - None (0x0): no fields. As a `Start`, the oldest Group (no floor); as an `End`, the live edge (unbounded).
-- Absolute (0x1): `Group Sequence`. A `Start` delivers from that Group and an `End` stops just before it.
-- Relative (0x2): `Groups Back`, the Group that many before the latest, 0 being the latest. Included as an `End`.
-- Time (0x3): `Timestamp`, the Group containing that presentation time in the Track's `Timescale` (see [TRACK_INFO](#track-info)). Included as an `End`. On an untimed Track it is refused with TIMESTAMP_MISMATCH.
+- Time (0x1): `Timestamp`, the Group containing that time: the one whose start (see [Group](#group)) is the highest at or below it.
+- Relative (0x2): `Groups Back`, the Group that many before the latest, 0 being the latest.
 
 Any other value is a PROTOCOL_VIOLATION.
+Both ends include the Group they name, so a Range from Time `a` to Time `b` delivers every Group from the one containing `a` through the one containing `b`.
 The publisher resolves a Relative or Time Anchor against the Track as it holds it.
 A Range resolves once: an update that leaves it live does not resolve it again.
 
-**Update**:
-The number of the subscription's terms this message sets: 0 on SUBSCRIBE, and on each SUBSCRIBE_UPDATE a larger value than the one before it.
-A [SUBSCRIBE_DROP](#subscribe-drop) echoes the number in effect when its groups were given up, so the subscriber can tell a stale verdict on its current terms from one an update has since replaced.
-
-**Warm**:
-1 when the subscriber joins the copy the publisher offered it in a warm route, and 0 when it follows the subscriber's selected route, as an endpoint that does not choose per broadcast always does (see [Warm Routes](#warm-routes)).
-Any other value is a PROTOCOL_VIOLATION.
-
-A `Start` is a floor, not a request; `Subscriber Max Age` is the only thing that asks for data.
+A `Start` is a floor, not a request; `Subscriber Max Age` and `Subscriber Min Age` are the only things that ask for data.
 The publisher SHOULD start at the oldest group at or above the floor that [Expiration](#expiration) has not expired, and MUST NOT deliver an older one.
-A `Subscriber Max Age` of 0 therefore starts at the latest group, since every older group is already stale.
+A `Subscriber Max Age` of zero therefore starts at the latest group, since every older group is already stale.
 A subscriber that buffers is then handed the head of what it can still play instead of only the live edge, and is never sent history it would discard on arrival: the same bound decides what to start at and what to expire, so the two cannot disagree.
 A floor above the latest group simply waits there: that is a resumed subscription naming where it left off.
 Reaching back is best-effort, not a guarantee that the groups still exist; see `Publisher Max Age` in [TRACK_INFO](#track-info).
+
+A Range joining at the live edge, with a `Start` of Relative 0 and an `End` of None, starts by a nonzero `Subscriber Min Age` instead: the publisher SHOULD start it at the newest group it holds that starts at or before the live edge minus the Min Age, at the oldest group it holds when none does, and never at a group Expiration has expired.
+The live edge is the newest frame timestamp the publisher holds; on a Track without a timescale, the Min Age is measured by when each group arrived at the publisher instead.
+The publisher starts from what it holds and never fetches to reach further back, so a subscriber is handed the buffer it will play, and no more, without waiting for it to fill.
 
 A Range covers whole Groups; a subscriber reads a slice of a Group with FETCH (see [Positions](#positions)).
 
@@ -1730,9 +1552,8 @@ A subscriber MAY send multiple SUBSCRIBE_UPDATE messages to update the subscript
 Every field but the Ranges restates the subscription, and the latest one applies.
 The Ranges are an edit, growing or shrinking the subscription: the update retires the live Ranges it names by Range ID, then adds its own, each taking the next Range ID.
 Lowering a `Start` covers the groups below the old one that the publisher still holds, not only those that arrive later; a group already sent is not sent again.
-Growing the subscription asks for what it newly covers: the publisher MUST serve the newly covered Groups it holds and never delivered on this subscription.
-Every SUBSCRIBE_UPDATE, whatever it changes, reopens every stale (OLD) SUBSCRIBE_DROP sent before it: the publisher MUST serve each Group named in one that it still holds, that the new terms cover, and that is no longer stale under them, and MUST name each that is still stale in a SUBSCRIBE_DROP carrying the new `Update`.
-A SUBSCRIBE_DROP with any other Error Code is final, and no update reopens it.
+Growing the subscription asks for what it newly covers: the publisher MUST serve the newly covered Groups it holds and never delivered or dropped on this subscription.
+No update reopens a Group the subscription already delivered or named in a SUBSCRIBE_DROP, whatever its Error Code, even one an update makes no longer stale.
 A SUBSCRIBE_UPDATE never resets the subscription, since a reset would race Group Streams already in flight, and shrinking it sends no SUBSCRIBE_SKIP or SUBSCRIBE_DROP.
 
 ~~~
@@ -1746,14 +1567,11 @@ SUBSCRIBE_UPDATE Message {
   Range ID (i) ...
   Range Count (i)
   Range (..) ...
-  Update (i)
-  Wanted Group (i)
-  Warm (8)
+  Wanted Start (i)
 }
 ~~~
 
 See [SUBSCRIBE](#subscribe) for information about each field.
-An `Update` no larger than the previous one only confuses the subscriber's own accounting of stale drops; the publisher echoes the latest value it read.
 
 **Remove Count** and **Range ID**:
 The live Ranges to retire.
@@ -1764,11 +1582,12 @@ The Ranges to add, which may be none.
 The live Ranges after the edit MUST NOT be empty, and MUST fit in one SUBSCRIBE: once encoded they take at most 65,535 bytes.
 A publisher closes the session with a PROTOCOL_VIOLATION otherwise.
 
-**Wanted Group**:
-The newest group the subscriber's live-edge joins want, encoded as the sequence plus one; `0` means none.
+**Wanted Start**:
+The group start the subscriber's readers want, plus one; `0` means none.
+A value past every start the subscriber holds asks for a new group (see [Refresh](#track-info)).
 Like the other fields, it is subscription state: every SUBSCRIBE_UPDATE restates it, and the latest one applies.
-A publisher MUST ignore a value at or below its largest group, and otherwise evaluate it as a new SUBSCRIBE under the Track's Refresh ratio.
-A new SUBSCRIBE itself counts as a join and needs no Wanted Group field.
+A publisher MUST ignore a value at or below its largest group's start, and otherwise evaluate it as a refresh request under the Track's Refresh Interval, or under its Refresh ratio when it declares no interval.
+A new SUBSCRIBE itself counts as a live-edge join and needs no Wanted Start field.
 
 ## TRACK
 TRACK is sent by a subscriber to request a Track's immutable publisher properties.
@@ -1780,7 +1599,7 @@ TRACK Message {
   Broadcast Path (s)
   Instance (b)
   Minted (8)
-  Node ID (i)
+  Node (..)
   Track Name (s)
 }
 ~~~
@@ -1793,9 +1612,18 @@ The stream the subscriber expects, encoded as in [ANNOUNCE_START](#announce-star
 A publisher MUST refuse a request with UNROUTABLE when no claim of that Instance serves the path, so a request is never answered by a different stream than the one it named.
 A relay fills in the Instance and Minted of the claim it resolved when forwarding a request upstream; TRACKS, SUBSCRIBE, FETCH, and DATAGRAMS carry them the same way.
 
-**Node ID**:
-The origin node that serves the request, as the publisher names it on this session, or 0 for whichever the publisher selects (see [Routing](#routing)).
+**Node**:
+The routing node that announces the claim serving the request (see [Routing](#routing)), as a [Node ID](#node-id-parameter) that may be marked: its Relay, followed by its Start and Marked unless the Relay is 0, which names none and leaves the publisher to select one.
+An endpoint that is no routing node names none, and serves a request itself whichever node it names.
 TRACKS, SUBSCRIBE, FETCH, and DATAGRAMS carry it the same way.
+
+~~~
+Node {
+  Relay (i),
+  [Start (i)],
+  [Marked (8)],
+}
+~~~
 
 **Track Name**:
 The name of the track.
@@ -1811,6 +1639,7 @@ TRACK_INFO Message {
   Publisher Max Age (i)
   Timescale (i)
   Refresh (i)
+  Refresh Interval (i)
   Compression (i)
 }
 ~~~
@@ -1838,15 +1667,18 @@ The unit is milliseconds, matching `Subscriber Max Age`.
 See the [Expiration](#expiration) section for more information.
 
 **Timescale**:
-The number of timestamp units per second for frame timestamps on this Track, or `0` for an untimed Track, whose FRAME messages carry no timestamp.
+The number of timestamp units per second for frame timestamps and Group starts on this Track, or `0` for a scale-less Track, whose timestamps are bare numbers (see [Frame](#frame)).
 Common values include `1000` (milliseconds), `1000000` (microseconds), `48000` (audio sample rate), and `90000` (RTP video clock).
 
-**Refresh**:
-An optional unsigned 32-bit byte ratio, encoded as the ratio plus one; `0` disables refresh.
-On a live-edge join, a publisher asks for a group beyond every sequence already produced when the newest group's bytes after its first frame exceed the ratio times that first frame's bytes.
-Joins coalesce until the requested group arrives.
-The request does not hold back delivery: the joiner still receives the newest cached group while it is pending.
-A relay forwards its joins' demand in SUBSCRIBE_UPDATE's `Wanted Group`.
+**Refresh** and **Refresh Interval**:
+When a reader asks for a group beyond every start already produced.
+Refresh is an optional unsigned 32-bit byte ratio, encoded as the ratio plus one, and Refresh Interval an optional duration encoded like `Publisher Max Age`; `0` omits either, and a Track omitting both never refreshes.
+A live-edge join asks when the newest group's bytes after its first frame exceed the ratio times that first frame's bytes, or always when there is no ratio.
+A reader's explicit request asks regardless of the ratio when the Track declares an interval, and like a join otherwise.
+Either request takes effect only once the newest group arrived at least the interval ago, measured on the judging endpoint's monotonic clock from when it received (or produced) that group; one made sooner waits until then.
+Requests coalesce until a group beyond the newest arrives, which answers them all, so the interval caps how often the publisher produces groups however many readers ask.
+A request does not hold back delivery: the reader still receives the newest cached group while it is pending.
+Every hop judges a request against its own cache, and a relay forwards the requests it judged in SUBSCRIBE_UPDATE's `Wanted Start`.
 
 **Compression**:
 How each Group of this Track is compressed: none (0x0), or DEFLATE (0x1), each Group one DEFLATE stream as specified by {{moqflate}}.
@@ -1863,14 +1695,14 @@ TRACKS Message {
   Broadcast Path (s)
   Instance (b)
   Minted (8)
-  Node ID (i)
+  Node (..)
 }
 ~~~
 
 **Broadcast Path**:
 The path of the Broadcast to list.
 
-**Instance**, **Minted**, and **Node ID**:
+**Instance**, **Minted**, and **Node**:
 As in [TRACK](#track).
 The listing is pinned to the stream that answers it and ends with that stream.
 
@@ -1881,16 +1713,22 @@ A publisher sends TRACKS_ADD on a Tracks Stream when a Track is listed.
 TRACKS_ADD Message {
   Type (i) = 0x0
   Message Length (i)
+  Kind (i)
   Track Name (s)
-  Track Info (..)
+  Info (..)
 }
 ~~~
 
-**Track Name**:
-The name of the Track, unique among the Tracks listed on the stream.
+**Kind**:
+Which kind of Track is listed: a Track of Groups (0x0) or a datagram Track (0x1).
+Any other value is a PROTOCOL_VIOLATION.
 
-**Track Info**:
-A [TRACK_INFO](#track-info) message, with its own Message Length, as a Track Stream would answer for the Track.
+**Track Name**:
+The name of the Track, unique among the Tracks of its kind listed on the stream.
+
+**Info**:
+For a Track of Groups, a [TRACK_INFO](#track-info) message, with its own Message Length, as a Track Stream would answer for the Track.
+For a datagram Track, a [DATAGRAMS_INFO](#datagrams-info) message, with its own Message Length, as a Datagrams Stream would answer for it.
 
 ## TRACKS_REMOVE {#tracks-remove}
 A publisher sends TRACKS_REMOVE on a Tracks Stream when a listed Track is no longer listed.
@@ -1899,12 +1737,13 @@ A publisher sends TRACKS_REMOVE on a Tracks Stream when a listed Track is no lon
 TRACKS_REMOVE Message {
   Type (i) = 0x1
   Message Length (i)
+  Kind (i)
   Track Name (s)
 }
 ~~~
 
-**Track Name**:
-The name a TRACKS_ADD on the stream listed.
+**Kind** and **Track Name**:
+The kind and name a TRACKS_ADD on the stream listed.
 
 ## TRACKS_FINISH {#tracks-finish}
 A publisher sends TRACKS_FINISH on a Tracks Stream when a listed Track is no longer listed because it finished: its publisher declared its end.
@@ -1913,12 +1752,13 @@ A publisher sends TRACKS_FINISH on a Tracks Stream when a listed Track is no lon
 TRACKS_FINISH Message {
   Type (i) = 0x2
   Message Length (i)
+  Kind (i)
   Track Name (s)
 }
 ~~~
 
-**Track Name**:
-The name a TRACKS_ADD on the stream listed.
+**Kind** and **Track Name**:
+The kind and name a TRACKS_ADD on the stream listed.
 
 ## DATAGRAMS {#datagrams-message}
 DATAGRAMS is sent by a subscriber to subscribe to a datagram Track.
@@ -1931,7 +1771,7 @@ DATAGRAMS Message {
   Broadcast Path (s)
   Instance (b)
   Minted (8)
-  Node ID (i)
+  Node (..)
   Track Name (s)
   Subscriber Priority (8)
 }
@@ -1978,6 +1818,7 @@ SUBSCRIBE_OK Message {
   Message Length (i)
   Largest Group (i)
   [Largest Frame (i)]
+  [Largest Ended (8)]
   Range Start Count (i)
   Range Start (i) ...
 }
@@ -1988,18 +1829,23 @@ Set to 0x0 to indicate a SUBSCRIBE_OK message.
 
 **Largest Group** and **Largest Frame**:
 The largest position the publisher knows of for the track when it answers: the last frame that exists, like moq-transport's Largest Location, including one a relay's source reported that has yet to arrive.
-`Largest Group` is the group sequence plus one, and 0 means the track has nothing yet, in which case `Largest Frame` is absent.
+`Largest Group` is the group's start plus one, and 0 means the track has nothing yet, in which case `Largest Frame` and `Largest Ended` are absent.
 A subscriber takes it as where the live feed is: a relay holding groups from an earlier subscription serves them from cache only once this says they are current, which a publisher answering promptly lets it do without waiting for a frame.
 
+**Largest Ended**:
+Whether the largest group has ended: 0x1 when it finished or closed, so no frame follows `Largest Frame`, and 0x0 otherwise, an aborted group included.
+Any other value is a PROTOCOL_VIOLATION.
+A subscriber joining a Track whose newest group ended knows at once that the group is not the live one, without waiting for its stream to end.
+
 **Range Start**:
-One per Range of the SUBSCRIBE, in Range ID order: the Group where the Range's delivery starts, plus one, so a subscriber learns where a Relative or Time Anchor landed.
+One per Range of the SUBSCRIBE, in Range ID order: the start of the Group where the Range's delivery starts, plus one, so a subscriber learns where a Relative or Time Anchor landed.
 0 means the Range has no Group to deliver, including one an update retired before the answer.
 The Range's Groups from this one are owed as described in [SUBSCRIBE_DROP](#subscribe-drop); an earlier one is not, though it MAY still arrive.
 A subscriber MUST treat a `Range Start Count` other than the SUBSCRIBE's `Range Count` as a PROTOCOL_VIOLATION.
 A Range an update adds has its start reported by [SUBSCRIBE_STARTED](#subscribe-started) instead, even one added before SUBSCRIBE_OK.
 
 ## SUBSCRIBE_FINISH {#subscribe-finish}
-A SUBSCRIBE_FINISH message is sent by the publisher to signal that no group at or after a given sequence will be produced.
+A SUBSCRIBE_FINISH message is sent by the publisher to signal that no group at or after a given start will be produced.
 It ends the Track, not the subscription: the Subscribe Stream stays open (see [Subscribe](#subscribe)).
 
 ~~~
@@ -2015,15 +1861,15 @@ SUBSCRIBE_FINISH Message {
 Set to 0x1 to indicate a SUBSCRIBE_FINISH message.
 
 **Group**:
-The exclusive end of the range: the absolute sequence number of the first group that will never be delivered.
+The exclusive end of the Track: one past the start of its last group, so no group starts at or after it.
 A value of 0 means the track ended before producing any groups.
-The subscriber MUST NOT wait for any group at or after this sequence.
+The subscriber MUST NOT wait for any group starting at or after it.
 
 **Error Code**:
 0 if the track ended cleanly, otherwise the stream error code it ended with plus 1.
 Groups below the end stay deliverable either way; a subscriber reaching the end surfaces the error instead of a clean end, and a relay forwards it with the end.
 
-The publisher SHOULD send SUBSCRIBE_FINISH as soon as the exclusive final group is known, even while lower groups are still in flight.
+The publisher SHOULD send SUBSCRIBE_FINISH as soon as the end is known, even while lower groups are still in flight.
 
 ## SUBSCRIBE_STARTED {#subscribe-started}
 A SUBSCRIBE_STARTED message resolves where a Range that a [SUBSCRIBE_UPDATE](#subscribe-update) added starts.
@@ -2053,83 +1899,68 @@ A Range retired before its start resolved gets none.
 
 ## SUBSCRIBE_DROP {#subscribe-drop}
 
-A publisher names groups that existed but that it will not deliver with SUBSCRIBE_DROP on the Subscribe Stream: an aborted or reset group, one evicted or expired with no copy left to serve it, or one past the subscriber's budget (OLD).
-Sequences the publisher declared it will never produce are named by [SUBSCRIBE_SKIP](#subscribe-skip) instead.
-A sequence the publisher never had but never declared skipped, such as a gap between the Groups it created or one a relay never received, might have existed, so it is named in SUBSCRIBE_DROP: with OLD when it is past the subscriber's budget, otherwise with NOT_FOUND.
+A publisher names starts where it holds a group it will not deliver, or holds none to deliver, with SUBSCRIBE_DROP on the Subscribe Stream: an aborted or reset group, one evicted or expired with no copy left to serve it, or one past the subscriber's budget (OLD).
+Starts the publisher declared it will never produce are named by [SUBSCRIBE_SKIP](#subscribe-skip) instead.
+A start the publisher never had but never declared skipped, such as a gap between the Groups it created or one a relay never received, might have held a group, so it is named in SUBSCRIBE_DROP: with OLD when it is past the subscriber's budget, otherwise with NOT_FOUND.
 
 ~~~
 SUBSCRIBE_DROP Message {
   Type (i) = 0x2
   Message Length (i)
   Group Start (i)
-  Group Count (i)
+  Group End (i)
   Error Code (i)
-  Update (i)
 }
 ~~~
 
-**Group Start** and **Group Count** name the group sequences the publisher gave up: `Group Count` of them from `Group Start`.
-A `Group Count` of 0 is an empty range, and a `Group Start + Group Count` above 2^64-1 is a PROTOCOL_VIOLATION.
+**Group Start** and **Group End** name the span of starts the publisher gave up, from `Group Start` up to but not including `Group End`.
+A span is a span of time, so it covers the gaps between the Groups in it as well as the Groups themselves.
+A `Group End` at or below `Group Start` is a PROTOCOL_VIOLATION.
 
 **Error Code** is a [stream error code](#error-codes) saying why the groups were given up, as a reset retaining the Group Stream header would: for example OLD for one past the subscriber's budget, EVICTED for one the publisher no longer holds, or NOT_FOUND for one a relay never received.
 A subscriber MUST end the readers of a dropped group it holds with that error, including a group whose stream is still arriving, rather than end it cleanly.
-A stale (OLD) drop is the exception: it ends no group whose Group Stream arrived, since that stream wins over it (see below), and a publisher that gives up a stream it opened resets it.
 
-**Update**:
-The [SUBSCRIBE](#subscribe) or [SUBSCRIBE_UPDATE](#subscribe-update) `Update` in effect when the publisher gave the groups up.
-A subscriber MUST treat an `Update` larger than the last one it sent as a PROTOCOL_VIOLATION.
+Every drop is final on its subscription: no SUBSCRIBE_UPDATE reopens it, and a subscriber that still wants a dropped group asks for it with a SUBSCRIBE of its own.
+An OLD drop was judged against the `Subscriber Max Age` in effect when the publisher gave the group up, which the drop does not carry.
+A relay that received one settles with it only a reader whose own budget is no wider than the subscription's and whose Ranges include every group the relay's own Ranges name above the dropped start, since the verdict on a group was judged against the groups above it; it asks again for a reader the drop does not settle.
 
-A drop whose Error Code is OLD is a stale verdict, which holds only under the update it names.
-The subscriber judges it against the `Subscriber Max Age` it sent with that update, from its own record: the drop does not carry the budget.
-A stale drop whose `Update` a later update has replaced is no verdict, since the update may have moved the Range or budget it was judged against: the subscriber still owes those groups, and a relay asks for such a group again rather than drop it for its own readers.
-The next SUBSCRIBE_UPDATE reopens every stale drop the subscriber accounted for, which it owes again until the publisher serves the group or drops it again under the new `Update`, as described in [SUBSCRIBE_UPDATE](#subscribe-update).
-A relay that received a stale drop settles with it only a reader whose own budget is no wider than the one the relay sent with that update and whose Ranges include every group the relay's own Ranges name above the dropped sequence, since the verdict on a group was judged against the groups above it.
-
-A drop with any other Error Code is final, whatever its `Update`, and replaces a stale drop of the same sequences, so no update reopens them.
-
-A later [SUBSCRIBE_SKIP](#subscribe-skip) for the same sequences overrides a drop, whatever its Error Code: the subscriber records them as skipped from then on, and a relay forwards the skip even over a drop it already forwarded.
+A later [SUBSCRIBE_SKIP](#subscribe-skip) or [GROUP](#group-message) `Previous Start` passing over the same starts overrides a drop, whatever its Error Code: the subscriber records them as skipped from then on, and a relay forwards the skip even over a drop it already forwarded.
 A subscriber that already ended readers on the drop does not deliver anything again: those readers stay ended.
-A drop that follows a skip of the same sequences changes nothing.
+A drop that follows a skip of the same starts changes nothing.
 
-A Group Stream for a sequence the subscriber already saw dropped, as after such a re-offer, wins over the drop: the subscriber delivers it.
-A Group Stream also wins over a stale drop of its sequence that arrives after it, since the stream can overtake a drop the publisher sent first.
-Either way the Group Stream accounts for the sequence, and the next SUBSCRIBE_UPDATE does not reopen it: the publisher, having served it, neither serves it again nor names it in another drop.
-
-For every sequence in the subscription's range, the publisher MUST send a Group Stream or name it in SUBSCRIBE_SKIP or SUBSCRIBE_DROP.
-This includes streams reset before their headers were delivered.
-A reliably delivered reset retaining the Group Stream header accounts for that group instead, unless it is YIELDED.
-A [paused](#yield) Group is accounted for only once a continuation completes it, a reset of one other than YIELDED ends it, or a SUBSCRIBE_DROP names it.
-The publisher SHOULD name a sequence as soon as it gives it up, without waiting for SUBSCRIBE_FINISH.
-
-Before moq-lite-07, SUBSCRIBE_DROP carries an inclusive `Group End` in place of `Group Count`, where `Group Start = Group End + 1` is an empty range and a larger Group Start is a PROTOCOL_VIOLATION.
-It carries no `Update`, its Error Code is application-specific, and it also names the sequences moq-lite-07 names in SUBSCRIBE_SKIP; every such drop is final.
+For every start in the subscription's range, the publisher MUST send a Group Stream, pass over it with a Group Stream's `Previous Start`, or name it in SUBSCRIBE_SKIP or SUBSCRIBE_DROP.
+This includes streams reset before their headers were delivered, and streams the subscriber stopped (STOP_SENDING), which it may have discarded unread; such a drop carries the STOP_SENDING's Error Code.
+A publisher that names a Group in a drop after opening its stream also names, in a SUBSCRIBE_SKIP sent before the drop, the skipped starts that stream's `Previous Start` passed over, since the GROUP may never arrive.
+A drop naming a stopped duplicate of a Group that another Group Stream already completed changes nothing for that Group: its readers keep it whole.
+A reliably delivered reset retaining the Group Stream header accounts for that group instead, unless it answers a STOP_SENDING.
+The publisher SHOULD name a start as soon as it gives it up, without waiting for SUBSCRIBE_FINISH.
 
 ## SUBSCRIBE_SKIP {#subscribe-skip}
 
-A publisher names sequences it declared it will never produce with SUBSCRIBE_SKIP on the Subscribe Stream.
+A publisher names starts it declared it will never produce with SUBSCRIBE_SKIP on the Subscribe Stream.
 
 ~~~
 SUBSCRIBE_SKIP Message {
   Type (i) = 0x3
   Message Length (i)
   Group Start (i)
-  Group Count (i)
+  Group End (i)
 }
 ~~~
 
-**Group Start** and **Group Count** name the sequences that will never hold a group, as in [SUBSCRIBE_DROP](#subscribe-drop).
+**Group Start** and **Group End** name the span of starts that will never hold a group, as in [SUBSCRIBE_DROP](#subscribe-drop).
 
-A skip names only sequences the original publisher declared it will never produce, and it is final: no Group will ever exist at those sequences, whatever the terms.
-A publisher MUST NOT later create a Group at a sequence it skipped, and a subscriber MUST NOT deliver a Group Stream for one.
-It carries no error and ends no reader, since there is nothing to read; a subscriber stops waiting for those sequences.
-A skip overrides an earlier SUBSCRIBE_DROP of the same sequences, whatever its Error Code, since never produced is the most authoritative account of a sequence: no update reopens them, and a relay forwards the skip downstream even over a drop it already forwarded.
+A skip names only starts the original publisher declared it will never produce, and it is final: no Group will ever exist at those starts, whatever the terms.
+A publisher MUST NOT later create a Group at a start it skipped, and a subscriber MUST NOT deliver a Group Stream for one.
+It carries no error and ends no reader, since there is nothing to read; a subscriber stops waiting for those starts.
+A skip overrides an earlier SUBSCRIBE_DROP of the same starts, whatever its Error Code, since never produced is the most authoritative account of a start, and a relay forwards the skip downstream even over a drop it already forwarded.
 A subscriber that already ended readers on that drop does not deliver anything again: those readers stay ended.
-A skip never overrides a Group that arrived, since that Group was produced; a subscriber ignores a skip for such a sequence, which is a protocol error the publisher made, and MAY log it.
+A skip never overrides a Group that arrived, since that Group was produced; a subscriber ignores a skip for such a start, which is a protocol error the publisher made, and MAY log it.
 
-A gap in the sequence numbers says nothing on its own: a publisher may create Groups out of order, or create again a sequence whose Group it aborted, so it never skips a sequence merely because a higher Group exists or the Track ended without it.
-Only the application producing the Track knows a sequence will never exist, for example when it numbers Groups sparsely, or when it moves on to the next Group and so declares that it will not go back to fill the sequences below.
-A publisher SHOULD send the skip as soon as it declares it.
-A relay forwards a skip it received unchanged, and never skips a sequence on its own: one it never received is named in SUBSCRIBE_DROP (see [SUBSCRIBE_DROP](#subscribe-drop)).
+A gap between starts says nothing on its own: a publisher may create Groups out of order, or create again a start whose Group it aborted, so it never skips a start merely because a higher Group exists or the Track ended without it.
+Only the application producing the Track knows a start will never hold a Group, for example when it moves on to the next Group and so declares that it will not go back to fill the starts below.
+A publisher SHOULD send the skip as soon as it declares it, except for the skipped starts directly below a Group whose stream it opens on the subscription, which that stream's [GROUP](#group-message) `Previous Start` passes over instead.
+A relay forwards a skip it received, or one a `Previous Start` declared, and never skips a start on its own: one it never received is named in SUBSCRIBE_DROP (see [SUBSCRIBE_DROP](#subscribe-drop)).
 
 ## FETCH
 FETCH is sent by a subscriber to request a single group from a track.
@@ -2140,13 +1971,12 @@ FETCH Message {
   Broadcast Path (s)
   Instance (b)
   Minted (8)
-  Node ID (i)
+  Node (..)
   Track Name (s)
   Subscriber Priority (8)
   Subscriber Max Age (i)
-  Group Sequence (i)
+  Group Start (i)
   Frame Start (i)
-  Start Byte (i)
   Frame End (i)
 }
 ~~~
@@ -2154,7 +1984,7 @@ FETCH Message {
 **Broadcast Path**:
 The broadcast path of the track to fetch from.
 
-**Instance**, **Minted**, and **Node ID**:
+**Instance**, **Minted**, and **Node**:
 As in [TRACK](#track).
 
 **Track Name**:
@@ -2167,18 +1997,14 @@ See the [Prioritization](#prioritization) section for more information.
 **Subscriber Max Age**:
 The optional maximum age in milliseconds that the subscriber accepts, encoded as the value plus one; 0 omits the reader bound.
 The publisher still applies `Publisher Max Age`, and MUST use the tighter bound while serving and while the returned group remains open.
+A response whose group expires under that bound before the subscriber acknowledges it is reset with OLD, even after its GROUP_END, as a Group Stream is (see [Expiration](#expiration)).
 
-**Group Sequence**:
-The sequence number of the group to fetch.
+**Group Start**:
+The start of the group to fetch.
 
 **Frame Start**:
 The index of the first frame to return within the group (see [Positions](#positions)).
 A plain absolute index; 0 means the start of the group (default).
-
-**Start Byte**:
-The offset of the first payload byte to return within the frame at `Frame Start`; 0 means the whole frame (default).
-The first FRAME of the response still states that frame's full size, and carries only its payload from `Start Byte` on; later frames are whole.
-A non-zero `Start Byte` at or past the frame's size is a protocol violation, since the rest of a frame is never empty, and so is a non-zero `Start Byte` on a Track whose `Compression` is not none, since a compressed frame inflates only from its first byte, or on a Track carrying a MoqTransport Version under the `ietf` extension, whose object records name whole objects.
 
 **Frame End**:
 The last frame to return (inclusive), encoded as the absolute frame index + 1.
@@ -2186,11 +2012,11 @@ A value of 0 means through the end of the group (default).
 A `Frame End` below `Frame Start` once decoded is a protocol violation; equal bounds are a legal single-frame range.
 
 The publisher responds with FRAME messages directly on the same stream - there is no response header.
-The subscriber parses them using the track's [TRACK_INFO](#track-info), which it MUST already have (see the [Track Stream](#track-stream)); the group sequence and the index of the first frame are implicit from the FETCH request.
-The publisher FINs the stream after the last frame, or resets on error.
+The subscriber parses them using the track's [TRACK_INFO](#track-info), which it MUST already have (see the [Track Stream](#track-stream)); the group start and the index of the first frame are implicit from the FETCH request.
+The publisher ends the stream with a GROUP_END and a FIN once the response reaches the end of a finished group, with a FIN alone after the last frame requested or the last frame of a closed group, or with a reset on error.
 There is no FETCH_ERROR message - the publisher signals failure by resetting the stream.
 A publisher holding fewer frames than requested MUST reset rather than truncate, since a short response is indistinguishable from one that started elsewhere.
-A group that ends before `Frame End` is not a truncation: the publisher FINs after the last frame it has, provided the group is complete and it served everything from `Frame Start` onward.
+A group that ends before `Frame End` is not a truncation: the publisher ends the stream after the last frame it has, provided the group finished or closed and it served everything from `Frame Start` onward.
 
 ## PROBE
 PROBE is used to measure the available bitrate of the connection.
@@ -2240,7 +2066,7 @@ An endpoint MUST close the session with a protocol violation if it receives more
 
 A peer that reconnects to a provided URI SHOULD keep using that URI for subsequent reconnects rather than reverting to the original, until a connection attempt to it fails; it then SHOULD revert to the original, which may still answer.
 
-Routes that arrived on a session that received a GOAWAY stay usable until the session ends, ranked below every other (see [Routing](#routing)).
+Routes through a node that sent a GOAWAY stay usable until its sessions end, ranked below every other (see [Closed Sessions and Drains](#closed-sessions)).
 
 ## AUTH {#auth-message}
 AUTH is the first message on an Auth Stream, presenting a token.
@@ -2284,7 +2110,7 @@ A value greater than 2^53 - 1 is invalid and MUST close the session with PROTOCO
 The acceptor revokes a lapsed grant with AUTH_ERROR; the opener uses Expires to present a replacement token in time.
 
 ### Path Pattern {#path-pattern}
-A pattern is a set of broadcast paths, written as `/`-separated segments.
+A pattern is a set of broadcast paths, written as `/`-separated segments split as a path's are, so a literal names a segment holding a `/` by escaping it.
 Each segment is one of:
 
 - a literal, matching that segment exactly;
@@ -2321,19 +2147,24 @@ AUTH_ERROR Message {
 A code from the [session error registry](#session-error-codes), such as UNAUTHORIZED.
 A code that does not fit in 32 bits is a PROTOCOL_VIOLATION that closes the session.
 
+INTERNAL_ERROR, TOO_MANY_REQUESTS, and CONTROL_MESSAGE_TIMEOUT mean the acceptor failed to decide, such as when its authorization service is unreachable or its verification queue is full.
+A presenter that receives one of them SHOULD present the same token again on a new Auth Stream after a backoff that grows with each consecutive such refusal, and treats the token as unanswered until then.
+Any other code is the acceptor's decision on the token: the presenter does not present that token again.
+An acceptor that cannot decide SHOULD send one of the first three codes rather than UNAUTHORIZED, which ends the token.
+
 **Reason Phrase**:
 A human-readable reason, at most 8,192 bytes.
 Invalid UTF-8 or a reason longer than 8,192 bytes is a PROTOCOL_VIOLATION that closes the session.
 
-## GROUP
+## GROUP {#group-message}
 The GROUP message contains information about a Group, as well as a reference to the subscription being served.
 
 ~~~
 GROUP Message {
   Message Length (i)
   Subscribe ID (i)
-  Group Sequence (i)
-  Frame Start (i)
+  Group Start (i)
+  Previous Start (i)
 }
 ~~~
 
@@ -2341,16 +2172,15 @@ GROUP Message {
 The corresponding Subscribe ID.
 This ID is used to distinguish between multiple subscriptions for the same track.
 
-**Group Sequence**:
-The sequence number of the group.
-This SHOULD increase by 1 for each new group.
+**Group Start**:
+The start of the group (see [Group](#group)).
 A subscriber MUST handle gaps, potentially caused by congestion.
 
-**Frame Start**:
-The index of the first FRAME message on this stream within the group (see [Positions](#positions)).
-A plain absolute index; 0 means the stream carries the group from its beginning, which is the common case.
-A non-zero value means the leading frames are not on this stream.
-The subscriber MUST NOT assume it will receive the missing frames on another stream; they are a gap unless a FETCH covers them, or the stream [continues](#yield) a paused Group.
+**Previous Start**:
+The start of the Group before this one on the Track, plus one; `0` means the publisher does not know it, such as for the first Group after a restart or a Group created out of order.
+No Group has a start between the two, so the subscriber accounts for the starts strictly between them as a [SUBSCRIBE_SKIP](#subscribe-skip) would, and a cache or reader sees a hole before this Group without a round trip.
+A publisher knows it when the starts below this Group were declared skipped down to a Group, or a Group starts just below it.
+A value at or above `Group Start` plus one is a malformed Track.
 
 
 ## FRAME
@@ -2359,7 +2189,7 @@ The FRAME message is a payload within a group.
 ~~~
 FRAME Message {
   Payload Length (i)
-  [Timestamp Delta (i)]
+  Timestamp Delta (i)
   [Inflated Size (i)]
   Payload (b)
 }
@@ -2367,13 +2197,10 @@ FRAME Message {
 
 **Payload Length**:
 The size of the payload on the wire, plus one.
-A `Payload Length` of 0 is malformed.
-
-Before moq-lite-07, FRAME carries `Message Length`, the payload size without the plus one, after `Inflated Size` and `Timestamp Delta`.
+A `Payload Length` of 0 is a [GROUP_END](#group-end) instead.
 
 **Timestamp Delta**:
-A signed delta from the previous frame's timestamp, in the Track's negotiated `Timescale`.
-Present only on a timed Track.
+A signed delta from the previous frame's timestamp, in the Track's `Timescale`, or in bare units on a scale-less Track.
 Encoded as a zigzag-mapped variable-length integer:
 
 - Encode: `unsigned = (signed << 1) ^ (signed >> 63)` (arithmetic right shift).
@@ -2390,6 +2217,25 @@ A receiver MUST check it against its limits before inflating, and MUST treat a p
 **Payload**:
 An application-specific payload.
 
+## GROUP_END {#group-end}
+GROUP_END ends a finished Group on a Group or Fetch Stream, after its last FRAME.
+It shares FRAME's leading field, reserving the `Payload Length` value 0 that a FRAME never carries.
+
+~~~
+GROUP_END Message {
+  Payload Length (i) = 0
+  End (i)
+}
+~~~
+
+**End**:
+The Group's exclusive end: the timestamp where it stops presenting, in the Track's `Timescale`, or a bare number on a scale-less Track.
+It is greater than every frame timestamp in the Group and no greater than the next Group's start; a receiver treats an `End` at or below the Group's start as a malformed Track.
+
+A Group that ends with a GROUP_END is whole: every frame it will ever hold has been sent.
+The publisher FINs the stream right after it, and a receiver treats any byte that follows as a malformed Track.
+A stream that FINs without a GROUP_END carries a closed Group, which may have held more frames than arrived (see [Group](#group)).
+
 
 # Appendix A: Changelog
 
@@ -2402,13 +2248,10 @@ An application-specific payload.
 
 - Switched every variable-length integer, including SETUP parameter values, from QUIC's two-bit length prefix to moq-transport's leading-ones encoding, widening the range to 64 bits.
 - Capped the Message Length of every message except FRAME at 65,535 bytes. SETUP parameter counts are bounded by Message Length, without a separate count cap.
-- Any Setup Stream or bidirectional stream message that fails to decode closes the session with PROTOCOL_VIOLATION; previously only an unexpected Message Length did, as a SHOULD. This includes a frame bound without its group bound, which previously reset only the stream. A stream ending mid-message outside the Setup and Auth Streams, a malformed GROUP or FRAME on a Group or Fetch Stream, and an unknown stream type still affect only that stream.
+- Any Setup Stream, Announce Stream, or bidirectional stream message that fails to decode closes the session with PROTOCOL_VIOLATION; previously only an unexpected Message Length did, as a SHOULD. This includes a frame bound without its group bound, which previously reset only the stream. A stream ending mid-message outside the Setup and Auth Streams, a malformed GROUP or FRAME on a Group or Fetch Stream, and an unknown stream type still affect only that stream.
 - A session without a negotiated subprotocol negotiates the version in a draft-14 CLIENT_SETUP and SERVER_SETUP exchange.
-- Added the reliable ordered RTCDataChannel binding, with one Qmux Record per binary message and no datagrams.
 - Added the SETUP `Implementation` parameter (0x6): the sender's software as `name/version` product tokens.
 - Added the client-only Token Setup Parameter (0x7), carrying the connection credential in SETUP instead of only the request URI.
-- Added the Route Key Setup Parameter (0x8): an Ed25519 public key and its signature over keying material exported from the session.
-- Added Padding Stream (0x2), read and discarded incrementally by either endpoint.
 - A Report-level publisher reads and ignores PROBE targets instead of resetting the Probe Stream.
 - A GOAWAY recipient MAY keep opening requests on the current session until it has moved to a replacement session; previously it MUST NOT open new streams. The sender SHOULD keep answering them and MAY reset one with GOING_AWAY, which the recipient SHOULD retry on another route.
 
@@ -2427,36 +2270,39 @@ An application-specific payload.
 - Added the Auth Stream (0x7) with AUTH, AUTH_OK, and AUTH_ERROR: either endpoint presents a token on its own stream and learns the [path patterns](#path-pattern) it may publish and subscribe to. The union of a session's open grants is its scope. A shrink withdraws what it no longer covers, and an announcement outside the scope closes the session with UNAUTHORIZED. A peer without the stream resets it.
 - Scope widens before AUTH_OK. A presenter waits for unanswered non-empty tokens before sending an uncovered request or rejecting a publication, and renewal waits for AUTH_OK before withdrawing the old token.
 - An Auth Stream message that fails to decode, has trailing body bytes, or has an unexpected type, or a second AUTH from the opener, closes the session with PROTOCOL_VIOLATION, as do invalid UTF-8 or an oversized AUTH_ERROR reason.
+- An AUTH_ERROR with INTERNAL_ERROR, TOO_MANY_REQUESTS, or CONTROL_MESSAGE_TIMEOUT leaves the token undecided, and the presenter presents it again after a growing backoff; any other code ends the token.
 - Limited AUTH_OK Expires to 2^53 - 1 milliseconds, with an out-of-range value closing the session with PROTOCOL_VIOLATION.
 
 ### Paths and Routing {#changelog-07-routing}
 
 - Limited a broadcast path to 32 segments and 4,096 bytes.
 - A path never has an empty segment, so a leading, trailing, or doubled `/` is a PROTOCOL_VIOLATION rather than a second spelling of the same path.
-- A `\` in a path escapes only `\` or `/`; any other `\` is a PROTOCOL_VIOLATION rather than a second spelling of the same namespace field.
+- A `\` in a path escapes only `\` or `/`; any other `\` is a PROTOCOL_VIOLATION rather than a second spelling of the same namespace field. An escaped `/` never splits a segment, so one namespace field is one segment wherever segments are counted or matched.
 - Hid claims with a `.`-prefixed segment below the requested prefix from announce discovery, and added the ANNOUNCE_REQUEST `Hidden` field to opt in.
-- Replaced ANNOUNCE_OK Active Count with an ordered, empty SYNCED event (0x4), marking the initial set without retaining claims that end before delivery.
-- Added `Instance` and `Epoch` to ANNOUNCE_START and ANNOUNCE_RESTART, and `Instance` to TRACK, TRACKS, SUBSCRIBE, and FETCH. The Instance is non-empty UTF-8 text naming one continuous stream, and a path and an Instance name one Broadcast; the Epoch is a counter within one Instance. A relay MAY move a subscription between claims with the same Instance, continuing from the first frame the subscriber lacks instead of at a group boundary, and never between claims with different Instances. Within one Instance only its highest Epoch is eligible. A request's Instance is empty when it pins none. Replaces the first-hop identity.
-- Added ANNOUNCE_RESTART (0x3): a live advertisement now serves another Instance, or a higher Epoch of the same one.
+- Replaced ANNOUNCE_OK Active Count with an ordered SYNCED event (0x4), marking the initial set of the prefix it names without retaining claims that end before delivery.
+- Added `Instance` and `Epoch` to ANNOUNCE_START, and `Instance` to TRACK, TRACKS, SUBSCRIBE, FETCH, and DATAGRAMS. The Instance is non-empty UTF-8 text naming one continuous stream, and a path and an Instance name one Broadcast; the Epoch is a counter within one Instance, which ANNOUNCE_UPDATE may raise. A relay MAY move a subscription between claims with the same Instance, continuing from the first frame the subscriber lacks instead of at a group boundary, and never between claims with different Instances. Within one Instance only its highest Epoch is eligible. A request's Instance is empty when it pins none. Replaces the first-hop identity.
+- Another Instance at a path is another claim, started before the one it replaces ends.
 - An advertiser MAY announce a path it answers through a claim under the claim's Instance, so subscriptions resolved through the claim continue, and a claim still serving that Instance when the announcement ends restarts under a new one.
-- A receiver mints an Instance for each announcement a session of an earlier version delivers, and a `Minted` field beside every Instance (ANNOUNCE_START, ANNOUNCE_RESTART, TRACK, TRACKS, SUBSCRIBE, FETCH, and DATAGRAMS) says whether a receiver minted it, so no Instance text is reserved for minting.
+- A receiver mints an Instance for each announcement a session of an earlier version delivers, and a `Minted` field beside every Instance says whether a receiver minted it, so no Instance text is reserved for minting.
 - Added announce compression: ANNOUNCE_START gains `Path Base` and `Path Keep` to copy the head of a live claim's suffix.
-- Split routing into two layers on the Announce Stream. ROUTE_START (0x6), ROUTE_UPDATE (0x7), and ROUTE_END (0x8) advertise how the publisher reaches an origin node, named by a Node ID, with a seqno, an additive metric, and a down-only bit, and loops are prevented by Babel's feasibility condition. Every ANNOUNCE_START names its route's Route ID in place of the Hop ID list, so a link change sends one ROUTE_UPDATE per origin rather than an update per claim. Removed the Hop ID list and ANNOUNCE_OK's Hop ID, and replaced the SETUP Hop parameter (0x5) with a [Node ID parameter](#node-id-parameter), so an endpoint that reaches itself detects it at setup.
-- ROUTE_START and ROUTE_UPDATE carry Flags, whose 0x2 bit adds an optional RTT: the informational sum of each link's lowest smoothed RTT over the last 30 seconds to the origin node, which never selects a route.
-- Added Hops to ROUTE_START and ROUTE_UPDATE: the Hop ID of every node the route crossed, at most 32. A node never selects a route whose Hops name it, so one that dropped its feasibility distance cannot take back a copy of its own route. A zero or repeated Hop ID in a route's Hops is tolerated, where a repeated non-zero Hop ID in moq-lite-06's Hop ID list is a PROTOCOL_VIOLATION.
-- Added ROUTE_HOLD (0xB), which holds a route while it recovers; ROUTE_END lets it go. Neither withdraws the origin's claims, and the subscriber echoes every ROUTE_END back.
-- Added ROUTE_REQUEST (0xA), sent by the subscriber on the Announce Stream to ask for a route with a newer seqno when every route it has is infeasible.
-- Added ANNOUNCE_FLOOR (0x9), closing each batch of a route's claims with the origin Revision at which the stream's claims across the requested prefix are certified plus one, or 0 to certify nothing, so a stale copy never revives a claim whose withdrawal a newer one delivered. A floor certifies only the claims its own request shows.
-- A route presents only its most specific claim covering the requested prefix, moved to the next covering claim when it is withdrawn rather than ended.
-- A subscriber whose scope confines a stream to one prefix SHOULD request that prefix, and replace the request when the prefix changes.
-- A route goes on a stream only while it has a claim the request presents, and ends after the batch withdrawing its last claim. It starts on that stream again only once the subscriber echoed the ROUTE_END.
-- Added `Node ID` to TRACK, TRACKS, SUBSCRIBE, FETCH, and DATAGRAMS: the origin node the first hop selected, followed by every later hop.
-- Replaced Warm and Cold Route Cost with the origin's Announce Cost, unchanged in transit. ANNOUNCE_UPDATE carries only the Announce Cost.
+- Replaced the bidirectional Announce Stream (0x1) with one unidirectional Announce Stream (0x3) per endpoint, carrying everything it says about discovery and routing in order, so none of it overtakes the rest. A second Announce Stream, or one that is reset, closes the session. A finished Announce Stream means its endpoint is leaving.
+- ANNOUNCE_REQUEST (0x5) edits a set of prefixes, none at or below another, and ANNOUNCE_OK (0x6) marks where each edit takes effect; a subscriber sends one edit at a time. An edit too large for one message continues over several ANNOUNCE_REQUESTs, each but the last with `More` set, and takes effect whole. Both endpoints drop the claims within a removed prefix at the ANNOUNCE_OK. SYNCED names the requested prefix by its Prefix ID, and every claim's path is relative to the session rather than to its requested prefix.
+- Replaced the Hop ID list with a claim's Cost, `Above`, flags, priority, and chain on ANNOUNCE_START and ANNOUNCE_UPDATE. The chain names the relays the claim entered or left a routing domain by: the announcing relay, then each scoped grant's sender and receiver. A relay takes no claim whose chain, with it appended, names a relay twice. The 0x1 flag marks a claim no route reaches, which its sender keeps for 800 milliseconds before ending it, the 0x2 flag one behind a draining node, and the 0x4 flag one behind a marked session, which a routing node announces under its marked Node ID, whose route is marked.
+- ANNOUNCE_END carries `Lost`: whether the claim's publisher withdrew it or the sender only lost its way to it.
+- Replaced the SETUP Hop parameter (0x5) with a [Node ID parameter](#node-id-parameter), a Relay, its Start, and a Marked byte that only a routing node's marked Node ID sets, which only a routing node sends. Two routing nodes exchange routes; every other session carries claims alone, one per path and Instance. Removed ANNOUNCE_OK's Hop ID.
+- Added ROUTE (0x7) and ROUTE_END (0x8): a routing node's route to another, a path vector of at most 32 hops, each a Node ID and the Session Number that node learned the route on, with a marked bit, a draining bit, a priority, and an additive cost. A node never uses a route whose Path names its relay, and ranks routes by drain, then priority, then cost.
+- Added DEAD (0x9): a node that loses a session names that hop once to each neighbour it sent a route through it, which ends those routes. A node never uses a route through a session at or below the highest it knows closed between the same two relays.
+- Added DRAIN (0xA): names a node that sent a GOAWAY once per neighbour, and every route through it ranks draining.
+- Added ANNOUNCE_FLOOR (0x3), closing each batch of a route's claims with the Revision of the node the route leads to, so a stale copy never revives a claim whose withdrawal a newer one delivered.
+- A node closes a session whose peer leaves its Announce Stream undrained for 10 seconds.
+- A publisher presents only the most specific claim covering the requested prefix.
+- A subscriber whose scope confines it to some prefixes SHOULD request those, and edit its set when they change.
+- Added `Node` to TRACK, TRACKS, SUBSCRIBE, FETCH, and DATAGRAMS: the routing node announcing the claim the first hop selected, which every later hop follows.
+- Replaced Warm and Cold Route Cost with one cost, which each link adds to.
 - The Cost parameter must be at least 1.
-- Replaced the shortest-path, Hop ID, Instance Hash, and Chain Hash tie-breaks with the local priority of the route's session, the Announce Cost plus the route's metric, and a Rendezvous Hash of the requested path and the origin's Node ID.
+- Added `Above` to ANNOUNCE_START and ANNOUNCE_UPDATE: how many segments broader than the requested prefix a presented claim is. A claim presented at the requested prefix from above otherwise looked exactly like a claim at the prefix, so a broadcast nested under another's path could lose to the broader claim covering it, depending on the order a relay listed them in. Receivers take a claim to cover its path less its Above.
+- Replaced the shortest-path, Hop ID, Instance Hash, and Chain Hash tie-breaks with the claim's drain or unavailability and priority, its cost, and a Rendezvous Hash of the requested path and the claim's Instance, a standard FNV-1a.
 - Removed the standby-ordering deployment requirements on Route Cost seeds and bounds.
-- Added warm routes: WARM_START (0xC), WARM_UPDATE (0xD), and WARM_END (0xE) on the Announce Stream, and `Warm` on SUBSCRIBE and SUBSCRIBE_UPDATE. A relay MAY pull each broadcast through a neighbor that offers a copy of it, carrying the copy's Hops from its carrier, its Warm Cost, its drain, and its priority. A carrier offers its copy whatever it pulls and joins only a lower-ranked carrier's; a relay with no reader offers each neighbor its best source that avoids it, pulls it only while that is what it offered each relay it serves, and follows its route when a neighbor following its own pulls through it. The offers settle as a path vector does, and the pulls are then free of loops.
-- Added the temporary Lite-06 Chain Setup Parameter (0x9) and a trailing Lite-06 Chain on ANNOUNCE_START, ANNOUNCE_UPDATE, and ANNOUNCE_RESTART: the moq-lite-06 Hop ID list of a claim learned over moq-lite-06, which a node drops when it names that node.
 
 ### Tracks {#changelog-07-tracks}
 
@@ -2464,34 +2310,36 @@ An application-specific payload.
 - An open Track Stream is interest in the Track until the subscriber closes it, which a subscriber does once its Subscribe Stream has a response.
 - Named 128 the midpoint priority for an unset Subscriber or Publisher Priority.
 - Made TRACK_INFO Publisher Max Age optional, encoded as milliseconds plus one with zero meaning no limit.
-- Added TRACK_INFO `Refresh` and SUBSCRIBE_UPDATE `Wanted Group`, carrying ratio-based refresh demand through relays.
+- Added TRACK_INFO `Refresh` and `Refresh Interval`, and SUBSCRIBE_UPDATE `Wanted Start`, carrying refresh requests through relays: a live-edge join judged by the byte ratio, or a reader's explicit request, either one waiting out the interval.
 - Added `Compression` to TRACK_INFO: none (0x0) or DEFLATE (0x1), whose Groups are DEFLATE streams per draft-lcurley-moq-flate. FRAME carries an `Inflated Size` when it is not none.
-- An untimed Track declares a `Timescale` of 0 in TRACK_INFO, and its FRAME messages omit the timestamp.
-- A publisher must not start a timed Group's frame 0 earlier than a lower-sequence Group's, and a receiver may refuse a Group that does. A relay serves every Track's timestamps on as received.
+- A `Timescale` of 0 in TRACK_INFO declares a scale-less Track, whose timestamps and Group starts are bare numbers; each of its frames carries its Group's start as its timestamp.
+- A publisher must not start a Group's frame 0 at or before that of a Group with a lower start, and a receiver may refuse a Group that does. A relay serves every Track's timestamps on as received.
+- Replaced Group sequence numbers with Group starts: a Group is addressed by its frame 0's timestamp, or a bare number on a scale-less Track, and no field carries a sequence. A Time Anchor names the Group with the highest start at or below it.
 - Bounded every timestamp below 2^61. A larger one is a malformed Track.
-- Reserved Group sequence 2^64-1: a publisher never creates it, and a Group Stream naming it is a malformed Track.
+- Reserved Group start 2^64-1: a publisher never creates it, and a Group Stream naming it is a malformed Track.
+- TRACKS_ADD, TRACKS_REMOVE, and TRACKS_FINISH carry a `Kind`, so a listing names datagram Tracks too, each with its DATAGRAMS_INFO.
 
 ### Subscriptions {#changelog-07-subscribe}
 
-- Replaced `Group Start`, `Group End`, `Frame Start`, and `Frame End` in SUBSCRIBE and SUBSCRIBE_UPDATE with a non-empty list of Ranges of whole Groups. Each end is an Anchor: none, an absolute Group (exclusive as an end), a count of Groups back from the latest, or a presentation time.
+- Replaced `Group Start`, `Group End`, `Frame Start`, and `Frame End` in SUBSCRIBE and SUBSCRIBE_UPDATE with a non-empty list of Ranges of whole Groups. Each end is an Anchor: none, a time naming the Group containing it, or a count of Groups back from the latest, and both ends include the Group they name.
 - Added `Group Order` to SUBSCRIBE and SUBSCRIBE_UPDATE: descending (0x0, the previous fixed order) or ascending (0x1).
-- Added an optional `Subscriber Min Age` to SUBSCRIBE and SUBSCRIBE_UPDATE, the subscriber's target latency, encoded as milliseconds plus one with zero meaning not stated. A relay forwards the smallest stated value.
+- Encoded `Subscriber Max Age` in SUBSCRIBE and SUBSCRIBE_UPDATE as milliseconds plus one, with zero meaning no limit.
+- Added an optional `Subscriber Min Age` to SUBSCRIBE and SUBSCRIBE_UPDATE, the subscriber's target latency, encoded as milliseconds plus one with zero meaning not stated. A Range joining at the latest group starts that far behind the live edge, from the groups the publisher holds. A relay forwards the largest stated value.
 - FETCH reads one Group or a slice of one, and SUBSCRIBE reads whole Groups: a read starting partway through a Group FETCHes it. A publisher holding only part of a Group a subscription covers drops it.
-- Added `Start Byte` to FETCH, after `Frame Start`: the response's first frame states its full size and carries only its payload from that byte, so a frame read partway on one publisher continues on another from where it stopped.
 - A SUBSCRIBE_UPDATE that lowers a `Start` covers the groups below the old start that the publisher still holds, not only those that arrive later. A group already sent is not sent again.
 - Replaced SUBSCRIBE_OK `Group` with a `Range Start` per Range: the Group where that Range's delivery starts, including at a Relative or Time Anchor, from which its Groups are owed.
 - Each Range takes an implicit Range ID, and SUBSCRIBE_UPDATE edits the live Ranges instead of restating them: `Remove Count` Range IDs to retire, then the Ranges to add. The live Ranges must stay non-empty and fit in one SUBSCRIBE. A Range resolves its Anchors once, however many updates leave it live.
 - SUBSCRIBE_OK's Range Starts answer the SUBSCRIBE's Ranges, and added SUBSCRIBE_STARTED (type 0x4) resolving where each Range an update adds starts.
 - A subscriber fills missing Groups through Ranges on a subscription instead of a FETCH per Group, and asks for a Group a subscription already delivered or dropped, including one dropped with OLD, with a SUBSCRIBE of its own.
-- Added `Largest Group` and `Largest Frame` to SUBSCRIBE_OK: the publisher's largest position when it answers, which a subscriber takes as where the live feed is. A publisher MUST answer at once when the requested start is past it.
+- Added `Largest Group`, `Largest Frame`, and `Largest Ended` to SUBSCRIBE_OK: the publisher's largest position when it answers, which a subscriber takes as where the live feed is, and whether that Group has ended. A publisher MUST answer at once when the requested start is past it.
 - Renamed SUBSCRIBE_END to SUBSCRIBE_FINISH, matching TRACKS_FINISH: it ends the Track, not the subscription.
 - Added `Error Code` to SUBSCRIBE_FINISH: a track can end with an error while keeping the groups below its end.
-- Restored SUBSCRIBE_DROP (type 0x2), replacing Stream Count on SUBSCRIBE_FINISH. Every sequence is accounted for by a Group Stream or a drop; a publisher SHOULD send a drop as soon as it gives a sequence up.
+- Restored SUBSCRIBE_DROP (type 0x2), replacing Stream Count on SUBSCRIBE_FINISH. Every start is accounted for by a Group Stream or a drop; a publisher SHOULD send a drop as soon as it gives a start up.
 - SUBSCRIBE_DROP's Error Code is a stream error code, which ends the dropped groups' readers, including one still arriving.
-- Refuse a SUBSCRIBE_DROP whose Group Start is greater than Group End plus one on every earlier version that carries it.
-- SUBSCRIBE_DROP and SUBSCRIBE_SKIP carry `Group Start` and `Group Count` in place of an inclusive `Group End`. A range past 2^64-1 is a PROTOCOL_VIOLATION.
-- Added SUBSCRIBE_SKIP (type 0x3) for sequences the publisher declared it will never produce, which ends no reader and is final: a Group is never created at a skipped sequence. A skip overrides an earlier drop of the same sequences, whatever its Error Code, without re-delivering to readers the drop already ended, and never overrides a Group that arrived. A gap in the sequence numbers is not a skip, since Groups may be created out of order; a sequence never had and never declared skipped is named in SUBSCRIBE_DROP. SUBSCRIBE_DROP no longer names declared skips.
-- Added `Update` to SUBSCRIBE, SUBSCRIBE_UPDATE, and SUBSCRIBE_DROP: the number of the terms in effect. A stale (OLD) drop holds only under the update it names, judged against the budget the subscriber sent with it; every later SUBSCRIBE_UPDATE reopens it, and the publisher re-offers the group or drops it again under the new `Update`. Any other drop is final. A Group Stream wins over its earlier drop, and over a stale drop that arrives after it; no update reopens a sequence its Group Stream accounted for. A re-offered Group Stream that overtakes the reset of the stream it replaces waits, unread, until that stream ends, and is read only if it was reset.
+- A Group Stream the subscriber stopped (STOP_SENDING) is named in SUBSCRIBE_DROP with the STOP_SENDING's Error Code, even after a reliable reset.
+- SUBSCRIBE_DROP and SUBSCRIBE_SKIP name a span of starts, from `Group Start` up to an exclusive `Group End`, in place of an inclusive `Group End`. An empty or inverted span is a PROTOCOL_VIOLATION.
+- Added SUBSCRIBE_SKIP (type 0x3) for starts the publisher declared it will never produce, which ends no reader and is final: a Group is never created at a skipped start. A skip overrides an earlier drop of the same starts, whatever its Error Code, without re-delivering to readers the drop already ended, and never overrides a Group that arrived. A gap between starts is not a skip, since Groups may be created out of order; a start never had and never declared skipped is named in SUBSCRIBE_DROP. SUBSCRIBE_DROP no longer names declared skips.
+- Every SUBSCRIBE_DROP is final on its subscription, OLD included: no SUBSCRIBE_UPDATE reopens a drop, and a subscriber that still wants the Group asks for it with a SUBSCRIBE of its own.
 - SUBSCRIBE_FINISH declares the final boundary while lower groups can still be in flight, and no longer closes the Subscribe Stream: the publisher keeps reading SUBSCRIBE_UPDATE, so an update can reach an ended Track's history.
 - A covered subscription, whose every Range has an End and whose every Group was sent or dropped, also stays open for an update; the publisher never FINs first.
 - A publisher that withheld SUBSCRIBE_OK sends it, then the drops it withheld, once no group can resolve the start: every Group of a bounded subscription was given up, or the Track finished.
@@ -2500,15 +2348,16 @@ An application-specific payload.
 ### Delivery {#changelog-07-delivery}
 
 - Replaced group datagrams with datagram Tracks, a namespace apart from Tracks of Groups. A subscriber subscribes to one on the Datagrams Stream (0x9) with DATAGRAMS and DATAGRAMS_UPDATE, which carry only a priority, and the publisher answers with DATAGRAMS_INFO. A datagram carries the Track's own Sequence and a Timestamp, with no Group, Inflated Size, or Range. Datagrams no longer count toward SUBSCRIBE_DROP, and a subscriber no longer deduplicates them against Group Streams.
-- Added a leading Type to datagrams: Track (0x0) or Padding (0x1), which either endpoint discards without changing session or subscription state.
-- Expiration also measures a group's arrival age, the time since its successor arrived at this hop, so a group of an untimed Track expires by arrival age alone.
-- A publisher resets the Group Stream of an expired, unfinished group with OLD rather than finishing it, even after sending every frame it holds.
-- Added [YIELDED](#yield) (0x3C): a publisher out of stream credit resets the lowest-priority Group Stream with it, which pauses the Group for a later Group Stream to continue from where the reset stream started.
-- A subscriber MAY end a Group Stream once a later stream for its Group arrives, rather than wait for its reset, and pauses a Group whose reset arrives without its error code as for YIELDED.
+- Added a leading Type to datagrams, 0x0 for a Track Datagram; a receiver discards one of an unknown Type.
+- FRAME and datagrams always carry a timestamp, a bare number on a scale-less Track.
+- Replaced GROUP's `Group Sequence` with `Group Start`, added `Previous Start`, the start of the Group before it, so a subscriber sees the gap before a Group without a SUBSCRIBE_SKIP, and removed `Frame Start`: a subscription reads whole Groups, so every Group Stream starts at frame 0.
+- Added GROUP_END, a `Payload Length` of 0 followed by the Group's exclusive end: a Group or Fetch Stream ends with it when its Group finished, a FIN alone ends a closed Group whose frames may not all exist, and a reset aborts. A Group's own end bounds its reach.
+- Expiration also measures a group's arrival age, the time since its successor arrived at this hop.
+- A relay closes a Group it holds only the start of, without a GROUP_END. A publisher resets the Group Stream of a group that expires with OLD, even one whose GROUP_END it sent but is not yet acknowledged, and names the group in a SUBSCRIBE_DROP with OLD.
 - FRAME leads with `Payload Length`, the payload size plus one, in place of the trailing `Message Length`; 0 is malformed.
 - A publisher SHOULD drop a datagram rather than block when the transport has no room for it, where it previously sent one only if the congestion controller could transmit it immediately.
-- Added an optional `Subscriber Max Age` to FETCH, encoded as milliseconds plus one with zero meaning absent. It can tighten, but never relax, `Publisher Max Age`.
-- A receiver refuses forwarded route content it cannot use, such as an unknown route flag, more than 32 Hops, or an invalid claim path or Instance, withdrawing only that route or claim rather than closing the session ([Refused Content](#refused-content)). A refused claim goes offline, and its route's floors certify nothing while it holds one.
+- Added an optional `Subscriber Max Age` to FETCH, encoded as milliseconds plus one with zero meaning absent. It can tighten, but never relax, `Publisher Max Age`. A response whose group expires before it is acknowledged is reset with OLD.
+- A receiver drops a claim whose resolved path it cannot hold, such as one past the path limits once joined beneath its own root, rather than closing the session ([Announce](#announce)).
 
 ## moq-lite-06
 
@@ -2618,6 +2467,7 @@ A quick comparison of moq-lite and moq-transport-14:
 - Names use utf-8 strings instead of byte arrays.
 - Track Namespace is a string, not an array of any array of bytes.
 - Subscriptions default to the latest group, not the latest object.
+- Groups are addressed by their start timestamp, not a Group ID.
 - No subgroups
 - No Object ID gaps
 - No object properties
@@ -2662,6 +2512,7 @@ Some of these fields occur in multiple messages.
 - Expires
 - ContentExists
 - Parameters
+- Group ID
 - Subgroup ID
 - Object ID
 - Object Status
@@ -2669,7 +2520,7 @@ Some of these fields occur in multiple messages.
 
 
 # Security Considerations
-moq-lite inherits the transport security of the underlying connection: QUIC and WebTransport provide confidentiality and integrity via TLS 1.3, the Qmux TCP and WebSocket bindings run over TLS, and the RTCDataChannel binding inherits DTLS security. How that connection is authenticated is out of scope (see [Connection](#connection)). The considerations below are specific to moq-lite.
+moq-lite inherits the transport security of the underlying connection: QUIC and WebTransport provide confidentiality and integrity via TLS 1.3, and the Qmux TCP and WebSocket bindings run over TLS. How that connection is authenticated is out of scope (see [Connection](#connection)). The considerations below are specific to moq-lite.
 
 ## Bandwidth Probing
 The `Increase` Probe level (see [Probe Parameter](#probe-parameter)) lets a subscriber ask the publisher to pad the connection up to a target bitrate. A publisher MUST NOT treat the target as authorization to send beyond what congestion control allows: padding is bounded by the congestion window, so probing cannot be used to amplify traffic toward the subscriber or a spoofed address. Because all data flows on an established, congestion-controlled session to the connecting peer, moq-lite offers no off-path amplification vector.
@@ -2682,8 +2533,8 @@ A token presented on an Auth Stream is as sensitive as one in the request URI, a
 GOAWAY carries an optional New Session URI that asks the peer to reconnect elsewhere. A malicious or compromised peer could use this to redirect a client to an attacker-controlled server. A recipient MUST validate the URI against local policy (scheme, authority, and port) before reconnecting, and MUST NOT reconnect if validation fails (see [GOAWAY](#goaway)). Migrated subscriptions carry no implicit trust from the prior session; the new session is authenticated independently.
 
 ## Routing Metadata and Privacy
-A Node ID (see [Routing](#routing)) is opaque and fresh for each restart: it tells a peer which claims share an origin, and a route's metric how far that origin is, but not the relays in between.
-A Node ID is declared, not proven, so a peer can forge another origin's Node ID or advertise a better route than it has. Qualifying the Node IDs of a peer with a scoped publish grant, under the key it proved in SETUP, confines such a forgery to the claims inside that grant; an unscoped peer is trusted with every origin.
+A route's Path names every relay it crossed, so a routing node learns the shape of the mesh it routes over; a claim sent to any other peer carries a cost, a priority, and the Relays in its chain, but no Path.
+A Node ID is declared, not proven, so a routing node can forge another's Node ID or advertise a better route than it has: endpoints exchange routes only with peers they trust with the whole tree. A peer confined by a scoped grant sends claims alone, which its receiver announces as its own and only inside that grant.
 
 ## Resource Exhaustion
 A peer can open many streams (subscriptions, announcements, fetches), request large announce prefixes, or advertise broad claims. Implementations SHOULD bound the number of concurrent subscriptions, announce matches, routes, and cached groups; an endpoint whose peer goes past its bound on subscriptions or announcements SHOULD close the session with TOO_MANY_REQUESTS, and SHOULD rely on QUIC flow control and stream limits to backpressure a misbehaving peer (see [ANNOUNCE_REQUEST](#announce-request)). Expiration (see [Expiration](#expiration)) bounds how long stale groups consume memory and flow control. A broad claim invites a request for any covered path, each of which may start work: an advertiser SHOULD bound the work it starts, withdrawing its claim before it runs out, and every refusal is terminal, so a flood of requests costs the mesh one round trip each rather than a search (see [Resolution](#resolution)).

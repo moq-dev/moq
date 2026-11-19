@@ -1,5 +1,5 @@
 import { Duration, Elapsed, sleep, timeout } from "@moq/clock";
-import { Session as Qmux, type SessionOptions as QmuxOptions, type Version as QmuxVersion } from "@moq/qmux";
+import type { Session as Qmux, SessionOptions as QmuxOptions, Version as QmuxVersion } from "@moq/qmux";
 import { type Getter, race } from "@moq/signals";
 import type * as Auth from "../auth.ts";
 import { vacant } from "../auth_session.ts";
@@ -14,12 +14,12 @@ import * as Hex from "../util/hex.ts";
 import { after } from "../util/timer.ts";
 import { isWebTransportSupported } from "./browser.ts";
 import { parse, show } from "./endpoint.ts";
-import * as Extensions from "./extensions.ts";
 import { DISCOVERY_REMOVED, forwardAnnounced } from "./forward.ts";
 import { DEFAULT_TIMEOUT, exchangeSetup, handsOff } from "./handshake.ts";
 import type { Session } from "./session.ts";
 import { inspect } from "./stats.ts";
 import { credential, fallback, hold, type Presentation } from "./tokens.ts";
+import { transportOf } from "./transport.ts";
 
 // Default head start for WebTransport before attempting the WebSocket fallback.
 const DEFAULT_WEBSOCKET_DELAY = Duration.millis(500);
@@ -251,13 +251,6 @@ export interface ConnectProps {
 	consume?: OriginProducer;
 
 	/**
-	 * The moq-transport extensions to offer, each on unless set to `false`.
-	 *
-	 * @internal Tests only; nothing outside the package consumes it.
-	 */
-	extensions?: Extensions.Extensions;
-
-	/**
 	 * Credentials to present, kept apart from the URL.
 	 *
 	 * The first is the connection credential: it rides SETUP, and the URL's `jwt` query too
@@ -312,8 +305,6 @@ type SessionProps = {
 	handle?: Auth.Handle;
 	/** Whether this side dialed; only the dialing side aborts on a publication its grant does not cover. */
 	client: boolean;
-	/** The moq-transport extensions this side offers. */
-	extensions: Extensions.Offered;
 	/** The connection credential SETUP presents, on versions that carry one. */
 	token?: Uint8Array;
 	/** The implementation this side advertises in SETUP; empty sends nothing. */
@@ -474,7 +465,6 @@ async function connectInner(
 		publish: props.publish,
 		handle: props.auth,
 		client: true,
-		extensions: Extensions.offered(props.extensions),
 		token: presented.setup === undefined ? undefined : new TextEncoder().encode(presented.setup),
 		implementation: props.implementation ?? IMPLEMENTATION,
 		probeTarget: props.viewers?.target,
@@ -496,7 +486,8 @@ async function connectInner(
 	void abort.then(() => session.close());
 
 	// Record who won the race to this server, so QUIC's next head start follows the last result.
-	if (session instanceof Qmux) {
+	const websocket = transportOf(session) === "websocket";
+	if (websocket) {
 		console.debug(show(parse(url)), "connected via WebSocket");
 		websocketWon.add(server);
 	} else {
@@ -514,9 +505,9 @@ async function connectInner(
 		session.close();
 		throw new Error("server negotiated no protocol, and no offered version negotiates in SETUP");
 	}
-	const won = session instanceof Qmux && fallbackDial ? fallbackDial : dial;
+	const won = websocket && fallbackDial ? fallbackDial : dial;
 	const connection = await connectTransport(url, session as WebTransport, wiring(won), offered.setup);
-	if (session instanceof Qmux) {
+	if (websocket) {
 		const forget = () => websocketWon.delete(server);
 		void connection.closed.then(forget, forget);
 	}
@@ -554,8 +545,7 @@ async function dialRace(
 					protocols: offered.alpns,
 					versions: Object.fromEntries(offered.alpns.map((alpn) => [alpn, QMUX[alpn] ?? null])),
 					config: {
-						maxStreamsBidi: maxStreams,
-						maxStreamsUni: maxStreams,
+						maxStreams,
 						receiveWindow: BigInt(props.websocket?.receiveWindow ?? DEFAULT_RECEIVE_WINDOW),
 						streamReceiveWindow: BigInt(
 							props.websocket?.streamReceiveWindow ?? DEFAULT_STREAM_RECEIVE_WINDOW,
@@ -952,13 +942,17 @@ async function connectWebSocket(
 	cancel: Promise<void>,
 	options: QmuxOptions,
 ): Promise<Qmux | undefined> {
-	const timer = sleep(delay);
-
-	const active = await Promise.race([cancel, timer.then(() => true)]);
+	const active = await race([cancel, sleep(delay).then(() => true)]);
 	if (!active) return undefined;
 
+	// qmux loads only once the fallback dials, so a session WebTransport wins within its head
+	// start never downloads it.
+	const qmux = await race([cancel, import("@moq/qmux")]);
+	if (!qmux) return undefined;
+	const { Session } = qmux;
+
 	for (let wait = WEBSOCKET_REDIAL; ; wait = wait.mul(2)) {
-		const quic = new Qmux(url, options);
+		const quic = new Session(url, options);
 
 		// Wait for the WebSocket to connect, for the cancel promise to resolve, or for the
 		// redial. `ready` rejects on a refused/failed connection, so a throw here is the

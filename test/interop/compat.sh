@@ -35,39 +35,10 @@ uv run --no-project python sh/js/install.py frozen
 bun "$DIR/compat/resolve.ts" resolve "$HARNESS_RUN/versions.json"
 value() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$HARNESS_RUN/versions.json" "$1"; }
 
-# The binary asset and registry version must agree. A missing asset builds the
-# exact published crate instead; a corrupt/mismatched asset is a hard failure.
-release_binary() {
-    local crate="$1" binary="$2" version asset digest url
-    version=$(value "$crate")
-    mkdir -p "$HARNESS_RUN/released/bin"
-    if gh release view "$crate-v$version" --repo moq-dev/moq --json assets >"$HARNESS_RUN/$crate-assets.json" 2>"$HARNESS_RUN/$crate-assets.log"; then
-        asset=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(next((a["url"] for a in d["assets"] if a["name"]==sys.argv[2]),""))' "$HARNESS_RUN/$crate-assets.json" "$crate-v$version-x86_64-unknown-linux-gnu")
-    else
-        asset=""
-    fi
-    if [[ -n "$asset" ]]; then
-        # Release assets are an optimization for Linux x86_64, the nightly host.
-        [[ "$(uname -sm)" == "Linux x86_64" ]] || asset=""
-    fi
-    if [[ -n "$asset" ]]; then
-        url="https://github.com/moq-dev/moq/releases/download/$crate-v$version/SHA256SUMS"
-        curl -fLS "$url" -o "$HARNESS_RUN/$crate-sums"
-        digest=$(awk -v name="$crate-v$version-x86_64-unknown-linux-gnu" '$2 == name { print $1 }' "$HARNESS_RUN/$crate-sums")
-        [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || {
-            echo "release is missing its asset checksum" >&2
-            exit 1
-        }
-        curl -fLS "$asset" -o "$HARNESS_RUN/released/bin/$binary"
-        printf '%s  %s\n' "$digest" "$HARNESS_RUN/released/bin/$binary" | sha256sum -c -
-        chmod +x "$HARNESS_RUN/released/bin/$binary"
-    else
-        cargo install --locked --version "$version" --root "$HARNESS_RUN/released" --target-dir "$WORKSPACE/target/compat-released" "$crate"
-    fi
-    "$HARNESS_RUN/released/bin/$binary" --version
-}
-release_binary moq-cli moq
-release_binary moq-relay moq-relay
+# shellcheck source-path=SCRIPTDIR source=../lib/release.sh
+source "$DIR/../lib/release.sh"
+release_binary moq-cli moq "$(value moq-cli)" "$HARNESS_RUN/released"
+release_binary moq-relay moq-relay "$(value moq-relay)" "$HARNESS_RUN/released"
 cargo build --locked -p moq-cli -p moq-relay
 TARGET=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys;print(json.load(sys.stdin)["target_directory"])')
 harness_stage current/moq "$TARGET/debug/moq"
@@ -132,13 +103,6 @@ edition = "2024"
 hang = $dependency
 bytes = "1"
 TOML
-    # The adapter names moq-net itself, so it takes the copy this hang resolves.
-    if [[ "$source" == current ]]; then
-        net="{ path = \"$WORKSPACE/rs/moq-net\" }"
-    else
-        net="\"=$(cargo tree --manifest-path "$manifest" --invert moq-net --depth 0 --prefix none | awk '{ print substr($2, 2) }')\""
-    fi
-    echo "moq-net = $net" >>"$manifest"
     cargo build --manifest-path "$manifest" --target-dir "$TARGET/compat-hang-$source"
     harness_stage "hang-$source/compat-container" "$TARGET/compat-hang-$source/debug/compat-container"
     "$HARNESS_RUN/hang-$source/compat-container" encode "$HARNESS_RUN/$source.catalog" "$HARNESS_RUN/$source.frame"
@@ -168,7 +132,7 @@ cell() {
     local name="$version relay=$relay_source publisher=$source $lane"
     # A control reads its own source's output; every other cell reads the opposite one's.
     case "$lane:$source" in
-        media-control:* | *:both) reader="$source" ;;
+        media-control:*) reader="$source" ;;
         *:current) reader=released ;;
         *) reader=current ;;
     esac
@@ -200,8 +164,15 @@ cell() {
 fetch() {
     local relay="$1" pub="$2" sub="$3" js="$4" version="$5"
     RELAY_BIN="$relay" CLI_BIN="$pub" INTEROP_SUB_MOQ="$sub" INTEROP_VERSION="$version" \
-        INTEROP_COMPAT_CLIENT="$js" INTEROP_FETCH_TRACK=1 \
+        INTEROP_COMPAT_CLIENT="$js" INTEROP_FETCH_TRACK=1 INTEROP_PUB_ANNEXB="$(annexb_import "$pub")" \
         bash "$DIR/interop.sh" --publishers rust --subscribers rust
+}
+
+# TEMPORARY migration, delete once the released CLI names it `h264`: releases before
+# it name the Annex-B import `avc3`. Probed once, so a release with the rename needs no edit.
+if "$RELEASED" import h264 --help >/dev/null 2>&1; then released_annexb=h264; else released_annexb=avc3; fi
+annexb_import() {
+    [[ "$1" == "$RELEASED" ]] && echo "$released_annexb" || echo h264
 }
 
 # The released CLI's fMP4 import restamps media on its arrival clock, so its tone
@@ -233,22 +204,16 @@ done 3<"$HARNESS_RUN/controls"
 # drafts are listed: our clients and relays always prefer lite with each other, so
 # IETF between them is not compared here (`just test interop` covers IETF).
 # Fd 3, so a child reading stdin (ffmpeg does) cannot consume the version list.
-# Dropping a released FETCH is a cell, so a planned break on its version covers it too.
-fetch_kept() {
-    [[ "$1" != true || "$2" == true ]] || {
-        echo "the checkout removed published FETCH"
-        return 1
-    }
-}
 while read -r version <&3; do
     released_relay="$HARNESS_RUN/released/bin/moq-relay"
-    # Each moq-net library states whether the draft has FETCH, so a FETCH cell that
-    # fails is a failure, never a skip. Dropping a released capability fails too.
-    current_fetch=$("$HARNESS_RUN/hang-current/compat-container" fetch-supported "$version")
-    released_fetch=$("$HARNESS_RUN/hang-released/compat-container" fetch-supported "$version")
-    cell fetch-capability "$version" both both fetch_kept "$released_fetch" "$current_fetch"
-    if [[ "$released_fetch" != true || "$current_fetch" != true ]]; then
-        echo "SKIP $version fetch and js-publish: no FETCH on this draft in both libraries"
+    # The draft defines FETCH (lite-05 onward), so a library that drops it fails the
+    # FETCH cells rather than skipping them.
+    case "$version" in
+        moq-lite-0[1-4]) has_fetch=false ;;
+        *) has_fetch=true ;;
+    esac
+    if [[ "$has_fetch" != true ]]; then
+        echo "SKIP $version fetch and js-publish: the draft has no FETCH"
         skipped=$((skipped + 8))
     fi
     for relay_source in current released; do
@@ -265,7 +230,7 @@ while read -r version <&3; do
                 cell "media-$reader" "$version" "$relay_source" "$source" env RELAY_BIN="$relay" CLI_BIN="$pub" INTEROP_SUB_MOQ="$sub" INTEROP_VERSION="$version" \
                     INTEROP_COMPAT_CLIENT="$other_js" INTEROP_DECODE=1 INTEROP_PUB_LIVE="$(live_publisher "$pub")" bash "$DIR/interop.sh" --subscribers "$reader"
             done
-            [[ "$released_fetch" == true && "$current_fetch" == true ]] || continue
+            [[ "$has_fetch" == true ]] || continue
             # Drive JS publication from actual subscriber demand: the publisher's own JS
             # subscribes and observes the group, which the opposite Rust CLI then
             # FETCHes by ID. Reading the newest group races its live delivery.

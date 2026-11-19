@@ -1,11 +1,10 @@
 import * as Instance from "../instance.ts";
 import * as Mint from "../mint.ts";
 import type { Reader, Writer } from "../stream.ts";
+import { decodeUtf8 } from "../util/utf8.ts";
 import { hasInstance, hasRoutes, type Version } from "./version.ts";
 
 const encoder = new TextEncoder();
-// `ignoreBOM` keeps a leading U+FEFF, which is instance text like any other, as Rust does.
-const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 /** Encode the instance a request pins as its UTF-8 bytes and minted flag, or empty and unminted
  * for none. Older versions carry nothing, so the peer resolves whichever instance wins the path.
@@ -27,15 +26,20 @@ export async function decodePin(r: Reader, version: Version): Promise<Instance.V
 	return decode(bytes, minted);
 }
 
-/** Encode the origin node a request names, 0 letting the publisher select one. Only lite-07
- * carries it, so an older peer always selects, and a node set here is dropped. Mirrors rs/moq-net. */
-export async function encodeNode(w: Writer, version: Version, node: bigint): Promise<void> {
-	if (hasRoutes(version)) await w.u62(node);
+/** Encode the forwarding node a request names. An endpoint knows none, so it always sends Node
+ * ID 0, which lets the publisher select one. Only lite-07 carries it. Mirrors rs/moq-net. */
+export async function encodeNode(w: Writer, version: Version): Promise<void> {
+	if (hasRoutes(version)) await w.u62(0n);
 }
 
-/** Decode the origin node a request names; see {@link encodeNode}. */
-export async function decodeNode(r: Reader, version: Version): Promise<bigint> {
-	return hasRoutes(version) ? await r.u62() : 0n;
+/** Decode the forwarding node a request names: a Node ID, and the node's start and Marked unless
+ * the ID is 0. An endpoint forwards nothing, so whichever node the request names, it serves the
+ * request itself. */
+export async function decodeNode(r: Reader, version: Version): Promise<void> {
+	if (!hasRoutes(version)) return;
+	if ((await r.u62()) === 0n) return;
+	await r.u62();
+	await r.bool();
 }
 
 /** Encode the instance, its minted flag, and the epoch an announcement serves. Every route
@@ -67,29 +71,7 @@ async function encode(w: Writer, instance: Instance.Valid): Promise<void> {
 	await w.bool(Instance.isMinted(instance));
 }
 
-/** Decode lite-07's instance and epoch, with `instance` undefined when they are well framed but
- * the instance is not one this node can use, which withdraws only the claim naming it. Mirrors
- * rs/moq-net. */
-export async function decodeForwarded(r: Reader): Promise<{ instance?: Instance.Valid; epoch: bigint }> {
-	const bytes = await r.read(await r.u53());
-	const minted = await r.bool();
-	const epoch = await r.u62();
-	const text = utf8(bytes);
-	if (text === undefined || text.length === 0 || !text.isWellFormed()) return { epoch };
-	const named = Instance.parse(text);
-	return { instance: minted ? Mint.mint(named) : named, epoch };
-}
-
-/** `bytes` as UTF-8 text, or undefined when they are not UTF-8. */
-export function utf8(bytes: Uint8Array): string | undefined {
-	try {
-		return decoder.decode(bytes);
-	} catch {
-		return undefined;
-	}
-}
-
 function decode(bytes: Uint8Array, minted: boolean): Instance.Valid {
-	const named = Instance.parse(decoder.decode(bytes));
+	const named = Instance.parse(decodeUtf8(bytes));
 	return minted ? Mint.mint(named) : named;
 }

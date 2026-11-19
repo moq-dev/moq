@@ -13,19 +13,18 @@ categories = ["network-programming", "asynchronous"]
 
 [features]
 default = []
-# Enable qlog support
-qlog = ["dep:qlog"]
-# The sans-IO QMux connection, which runs the stream state machine over a reliable, ordered
-# transport. Driven by the `qmux` crate.
-mux = []
 # The seeded, impaired network path (`sim::Link`) the tests run endpoints across, for a
 # driver that runs QUIC on kio's simulator. Meant for dev-dependencies.
 sim = []
 
+# Calls the congestion controller's probe hooks that moq-congestion's `lab` candidates override
+# (`Controller::paces_probe`, `Controller::on_probe_target`). Meant for dev-dependencies.
+lab = ["moq-congestion/lab"]
+
 # Exposes the `fuzz/` harness's target bodies, and the plaintext crypto the connection
 # target and the benches run on, through the `fuzz` module. rind keys the endpoint's
 # reset and token secrets. Off by default.
-fuzz = ["dep:arbitrary"]
+fuzz = ["dep:arbitrary", "sim"]
 
 [dependencies]
 arbitrary = { version = "1.5", features = ["derive"], optional = true }
@@ -39,7 +38,7 @@ lru-slab = "0.1.2"
 moq-congestion = { workspace = true }
 # rind's rustls provider and the `UnsupportedCpu` error the transport crates share.
 moq-crypto = { workspace = true, features = ["provider"] }
-qlog = { version = "0.18", optional = true }
+qlog = { workspace = true }
 rand = { workspace = true }
 rind = { workspace = true }
 rustc-hash = { workspace = true }
@@ -57,8 +56,10 @@ criterion = { package = "bench-harness", path = "../bench-harness" }
 hex-literal = "1"
 # The tests and benches read time through the runtime, as the drivers do.
 kio = { path = "../kio", features = ["runtime", "sim"] }
-# The mux module's tests run in the default merge gate.
-moq-quic = { path = ".", features = ["mux"] }
+# The candidate controllers and BBR3's delay bound the simulated comparisons run.
+moq-congestion = { path = "../moq-congestion", features = ["lab"] }
+# The probe hooks GoogCC overrides, so the comparisons run it as it probes.
+moq-quic = { path = ".", features = ["lab"] }
 proptest = { workspace = true }
 rand_pcg = { workspace = true }
 rcgen = { workspace = true, features = ["pem"] }

@@ -23,13 +23,13 @@ export const DISCOVERY_REMOVED =
 const LINGER = Duration.millis(2000);
 
 /**
- * Names one route a session reports: its prefix, and on lite-07 the origin node whose claim it
- * is, since a stream reports each node's claim at a path as its own route.
+ * Names one route a session reports: its prefix, and on lite-07 the instance whose claim it is,
+ * since a stream reports each instance's claim at a path as its own route.
  */
 type Key = string;
 
 function keyOf(prefix: Path.Valid, route: WireRoute): Key {
-	return route.node === undefined ? prefix : `${prefix}\u0000${route.node}`;
+	return route.claimed && route.instance !== undefined ? `${prefix}\u0000${route.instance}` : prefix;
 }
 
 /** One announce request open on the session, and the routes it currently reports. */
@@ -74,6 +74,10 @@ interface Reported {
  * left. The routes a closed request carried go with it, and come back once the broader request
  * reports them.
  *
+ * A lite-07 claim serves only the paths the session's floors still certify beneath it, asked
+ * per request, and asked again for every open request when a floor moves that with no route
+ * changing.
+ *
  * Each active announcement inserts a route covering the announced prefix, served lazily
  * through this connection, so nothing touches the wire until somebody requests a path
  * under it. A retraction removes the entry, and so does the session dying, which is what
@@ -88,7 +92,8 @@ interface Reported {
  */
 export function forwardAnnounced(conn: Session, origin: OriginProducer): void {
 	const originWire = wireOf(origin);
-	const exclusive = wireOf(conn).exclusive;
+	const session = wireOf(conn);
+	const exclusive = session.exclusive;
 	// Reassigned on a downgrade, so the origin stops counting this session as discovering.
 	// Called through a closure so the session's death always detaches the current one.
 	let detach = originWire.attach(true);

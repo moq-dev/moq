@@ -237,7 +237,7 @@ impl From<moq_audio::decode::Read> for MoqAudioRead {
 			moq_audio::decode::Read::Frame(frame) => Self::Frame { frame: frame.into() },
 			moq_audio::decode::Read::Gap { timestamp, duration } => Self::Gap {
 				timestamp: timestamp.into(),
-				duration: crate::ffi::duration(duration.into()),
+				duration: crate::ffi::gap(duration),
 			},
 			moq_audio::decode::Read::End { end } => Self::End { end: end.into() },
 		}
@@ -396,12 +396,14 @@ impl TryFrom<MoqAudioFrame> for moq_audio::Frame {
 /// is PCM in the format declared by the [`MoqAudioEncoderInput`]
 /// passed at publish time.
 ///
-/// Released before its finish, or still open when its broadcast closes, it ends its track with
-/// `Unroutable`, which a moq-transport reader sees as `Internal`: its wire has no such code.
+/// Released before its finish, it ends its track with `Dropped`, which readers elsewhere see as
+/// `Internal`. Still open when its broadcast closes, it ends it with `Unroutable`, which a
+/// moq-transport reader sees as `Internal`: its wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqAudioProducer {
 	inner: std::sync::Mutex<Option<moq_audio::encode::Producer>>,
-	reservation: std::sync::Mutex<Option<Arc<MoqReservation>>>,
+	/// The claim itself; [`reservation`](Self::reservation) hands out only views of it.
+	reservation: std::sync::Mutex<Option<Arc<moq_net::bandwidth::Reservation>>>,
 	/// Held so the reservation's registry outlives extra bandwidth handles.
 	_bandwidth: Option<Arc<MoqAllocator>>,
 	children: crate::producer::Children,
@@ -420,7 +422,7 @@ impl crate::producer::Child for MoqAudioProducer {
 
 impl Drop for MoqAudioProducer {
 	fn drop(&mut self) {
-		crate::producer::Child::abort(self, moq_net::Error::Unroutable);
+		crate::producer::Child::abort(self, moq_net::Error::Dropped);
 	}
 }
 
@@ -462,10 +464,37 @@ impl MoqAudioProducer {
 	}
 
 	/// This encoder's bandwidth reservation, if it was published against a
-	/// [`MoqAllocator`]. Dropping the handle does not release the claim; the
-	/// producer holds it until [`finish`](Self::finish).
+	/// [`MoqAllocator`]. The producer owns the claim, not the handle: dropping the
+	/// handle keeps it, and [`finish`](Self::finish) releases it however many handles
+	/// remain, after which they read no rate.
 	pub fn reservation(&self) -> Option<Arc<MoqReservation>> {
-		self.reservation.lock().unwrap().clone()
+		let guard = self.reservation.lock().unwrap();
+		Some(Arc::new(MoqReservation::borrowed(guard.as_ref()?)))
+	}
+
+	/// Abort this track with an application error code, but only while nobody wants it.
+	///
+	/// This is how an on-demand publisher ends a track once [`MoqTrackDemand::wanted_changed`]
+	/// returns null. Releasing it instead fails a reader that joined in between. Returns true
+	/// once the track is closed, and this handle's later calls fail with `Closed`. Returns
+	/// false, leaving the track unchanged, when a reader wants it again, so keep serving and
+	/// wait for the next null on a fresh `demand()`: one that already returned null misses a
+	/// reader that came and went, and waits on. Fails with `Closed` once finished, like every
+	/// other call.
+	pub fn abort_unwanted(&self, error_code: u16) -> Result<bool, MoqError> {
+		let _guard = crate::ffi::runtime().enter();
+		let mut guard = self.inner.lock().unwrap();
+		let producer = guard.take().ok_or(MoqError::Closed)?;
+		match producer.abort_unwanted(moq_net::Error::App(error_code)) {
+			Ok(()) => {
+				self.reservation.lock().unwrap().take();
+				Ok(true)
+			}
+			Err(producer) => {
+				*guard = Some(producer);
+				Ok(false)
+			}
+		}
 	}
 
 	/// Drain the encoder and finish the audio track.
@@ -549,7 +578,7 @@ impl MoqAudioProducer {
 		// means the Rust producer will reserve and follow whenever it starts to.
 		let reservation = bandwidth
 			.as_ref()
-			.map(|bandwidth| bandwidth.reserve_demand(&producer.demand(), producer.bitrate().as_bps()));
+			.map(|bandwidth| Arc::new(bandwidth.inner().reserve(&producer.demand(), producer.bitrate())));
 
 		children.adopt(Arc::new(MoqAudioProducer {
 			inner: std::sync::Mutex::new(Some(producer)),
@@ -820,7 +849,10 @@ mod tests {
 			// A partial codec frame makes finish publish the final packet and lookahead.
 			audio
 				.write(MoqAudioFrame {
-					timestamp: MoqTimestamp { value: 0, scale: 1 },
+					timestamp: MoqTimestamp {
+						value: 0,
+						scale: Some(1),
+					},
 					data: vec![0.1_f32; 860].into_iter().flat_map(f32::to_ne_bytes).collect(),
 				})
 				.unwrap();

@@ -11,12 +11,11 @@ import { Timescale } from "../time.ts";
 import { decodeNode, decodePin, encodeNode, encodePin } from "./instance.ts";
 import * as Message from "./message.ts";
 import { fromWire, toWire } from "./priority.ts";
-import { hasDatagrams, hasDatagramTracks, hasPadding, type Version, wireTimescale } from "./version.ts";
+import { hasDatagrams, hasDatagramTracks, type Version } from "./version.ts";
 
 /**
- * A QUIC datagram body: `subscribe (i) | sequence (i) | [timestamp (i)] | payload (b)`, with the
- * timestamp present only when the subscription's track carries one (see `wireTimescale`).
- * Lite-07 prefixes datagram-track bodies with type 0x0; type 0x1 is discarded padding.
+ * A QUIC datagram body: `subscribe (i) | sequence (i) | timestamp (i) | payload (b)`. Lite-07
+ * prefixes datagram-track bodies with type 0x0, its only datagram type.
  *
  * The payload runs to the datagram boundary, so unlike a size-prefixed lite message there is no
  * inner length prefix. Mirrors the Rust `lite::Datagram`; the model counterpart is
@@ -30,12 +29,15 @@ export class Datagram {
 	subscribe: bigint;
 	/** The datagram track's sequence, mapped to a group sequence on lite-05/06. */
 	sequence: bigint;
-	/** Absolute presentation timestamp in the track's wire timescale, or undefined on a track that carries none. */
-	timestamp: number | undefined;
+	/**
+	 * Absolute presentation timestamp in the track's wire timescale. A scale-less track's is the
+	 * bare value its producer gave, which is the datagram's sequence.
+	 */
+	timestamp: bigint;
 	/** The frame payload, delimited by the datagram boundary. */
 	payload: Uint8Array;
 
-	constructor(subscribe: bigint, sequence: bigint, timestamp: number | undefined, payload: Uint8Array) {
+	constructor(subscribe: bigint, sequence: bigint, timestamp: bigint, payload: Uint8Array) {
 		this.subscribe = subscribe;
 		this.sequence = sequence;
 		this.timestamp = timestamp;
@@ -45,15 +47,10 @@ export class Datagram {
 	/** Encode the body to a single `Uint8Array` (no length prefix; the datagram boundary delimits it). */
 	encode(version: Version): Uint8Array {
 		if (!hasDatagrams(version)) throw new Error("datagrams require lite-05 or newer");
-		// A version that always carries a timescale has no untimed body.
-		if (this.timestamp === undefined && wireTimescale(version, undefined) !== undefined) {
-			throw new Error(`version ${version} has no untimed datagram`);
-		}
-
 		const subscribe = encodeVarint(this.subscribe, version);
 		const sequence = encodeVarint(this.sequence, version);
-		const timestamp = this.timestamp === undefined ? new Uint8Array() : encodeVarint(this.timestamp, version);
-		const type = hasPadding(version) ? encodeVarint(0x0, version) : new Uint8Array();
+		const timestamp = encodeVarint(this.timestamp, version);
+		const type = hasDatagramTracks(version) ? encodeVarint(0x0, version) : new Uint8Array();
 
 		const out = new Uint8Array(
 			type.byteLength +
@@ -75,29 +72,19 @@ export class Datagram {
 		return out;
 	}
 
-	/**
-	 * Decode a group datagram or discard padding with `undefined`. `timed` reports whether the
-	 * track of the given subscribe ID carries a timestamp, which the body itself does not say.
-	 */
-	static async decode(
-		data: Uint8Array,
-		version: Version,
-		framing: (subscribe: bigint) => { timed: boolean },
-	): Promise<Datagram | undefined> {
+	/** Decode a datagram body. An unknown lite-07 type throws, so the caller discards it. */
+	static async decode(data: Uint8Array, version: Version): Promise<Datagram> {
 		if (!hasDatagrams(version)) throw new Error("datagrams require lite-05 or newer");
 		const r = new Reader(undefined, data, version);
-		if (hasPadding(version)) {
+		if (hasDatagramTracks(version)) {
 			const type = await r.u62();
-			if (type === 1n) return;
 			if (type !== 0n) throw new Error(`unknown datagram type: ${type}`);
 		}
 		const subscribe = await r.u62();
 		const sequence = await r.u62();
-		const { timed } = framing(subscribe);
-		const timestamp = timed ? await r.u53() : undefined;
+		const timestamp = await r.u62();
 		const payload = await r.readAll();
-		const result = new Datagram(subscribe, sequence, timestamp, payload);
-		return result;
+		return new Datagram(subscribe, sequence, timestamp, payload);
 	}
 }
 
@@ -113,8 +100,6 @@ export class Datagrams {
 	broadcast: Path.Valid;
 	/** The publisher instance the subscriber expects. */
 	instance?: Instance.Valid;
-	/** The origin node that serves the request, 0 for whichever the publisher selects. Lite-07+. */
-	node: bigint;
 	/** The datagram track's name. */
 	track: string;
 	/** The subscriber priority, higher first. */
@@ -124,12 +109,10 @@ export class Datagrams {
 		id: bigint;
 		broadcast: Path.Valid;
 		instance?: Instance.Valid;
-		node?: bigint;
 		track: string;
 		priority: number;
 	}) {
 		this.instance = properties.instance;
-		this.node = properties.node ?? 0n;
 		this.id = properties.id;
 		this.broadcast = properties.broadcast;
 		this.track = properties.track;
@@ -143,7 +126,7 @@ export class Datagrams {
 			await w.u62(this.id);
 			await w.string(Path.encode(this.broadcast));
 			await encodePin(w, version, this.instance);
-			await encodeNode(w, version, this.node);
+			await encodeNode(w, version);
 			await w.string(this.track);
 			await w.u8(toWire(this.priority));
 		});
@@ -152,18 +135,19 @@ export class Datagrams {
 	/** Decode the size-prefixed request. */
 	static async decode(reader: Reader, version: Version): Promise<Datagrams> {
 		guard(version);
-		return Message.decode(
-			reader,
-			async (r) =>
-				new Datagrams({
-					id: await r.u62(),
-					broadcast: Path.decode(await r.string()),
-					instance: await decodePin(r, version),
-					node: await decodeNode(r, version),
-					track: await r.string(),
-					priority: fromWire(await r.u8()),
-				}),
-		);
+		return Message.decode(reader, async (r) => {
+			const id = await r.u62();
+			const broadcast = Path.decode(await r.string());
+			const instance = await decodePin(r, version);
+			await decodeNode(r, version);
+			return new Datagrams({
+				id,
+				broadcast,
+				instance,
+				track: await r.string(),
+				priority: fromWire(await r.u8()),
+			});
+		});
 	}
 }
 

@@ -18,6 +18,7 @@ export class Consumer {
 	constructor(track: Net.Track.Subscriber, props: ConsumerProps);
 	readonly buffered: Signals.Getter<BufferedRanges>;
 	close(): void;
+	readonly finished: Signals.Getter<boolean>;
 	next(): Promise<Read | undefined>;
 	readonly spread: Signals.Getter<Net.Clock.Duration>;
 }
@@ -25,15 +26,16 @@ export class Consumer {
 export interface ConsumerProps {
 	delay?: Signals.GetterInit<Net.Track.Delay>;
 	format: Format;
+	ordered?: Net.Track.Ordered;
+	playhead?: Playhead;
 	predecessor?: Consumer;
-	wait?: Signals.GetterInit<Net.Clock.Duration | undefined>;
 	warmup?: Net.Clock.Duration;
 }
 
 export const DELAY_MAX: Net.Clock.Duration;
 
 export interface Format {
-	decode(payload: Uint8Array, timestamp: Net.Time.Timestamp | undefined): Frame[];
+	decode(payload: Uint8Array, timestamp: Net.Time.Timestamp): Frame[];
 	end?(frame: Frame): Net.Clock.Duration | undefined;
 	readonly kind?: "audio" | "video" | "data";
 }
@@ -71,11 +73,17 @@ export namespace Legacy {
 		copyTo(buffer: Uint8Array): void;
 	}
 	export function encodeFrame(source: Uint8Array | Legacy.Source, timestamp: Net.Clock.Duration): Uint8Array;
+	export function packetDuration(config: AudioConfig): ((payload: Uint8Array) => Net.Clock.Duration | undefined) | undefined;
 }
 
 export * as Loc from "@moq/loc";
 
 export const MAX_AGE: Net.Clock.Duration;
+
+export interface Playhead {
+	readonly anchor: Signals.Getter<unknown>;
+	now(): Net.Clock.Duration | undefined;
+}
 
 export type Read = {
 	frame: ReceivedFrame;

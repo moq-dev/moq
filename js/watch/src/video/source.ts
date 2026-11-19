@@ -2,14 +2,8 @@ import * as Catalog from "@moq/hang/catalog";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
 import { SupportProbe } from "../support-probe";
-import { supported as decoderSupported } from "./supported";
-
-/**
- * A function that checks if a video configuration can be played.
- *
- * `Decoder.supported` is the WebCodecs probe used by `<moq-watch>`.
- */
-export type Supported = (config: Catalog.VideoConfig) => Promise<boolean>;
+import { decoderConfigKey } from "./config";
+import { supported } from "./supported";
 
 /** What the viewer wants from the video rendition; the source picks the best one within it. */
 export type Target = {
@@ -35,10 +29,6 @@ export type Target = {
 export type SourceInput = {
 	broadcast: Getter<Broadcast | undefined>;
 	target: Getter<Target | undefined>;
-
-	// A function that checks if a video configuration can be played. Renditions that fail the
-	// probe are filtered out. Defaults to `Decoder.supported`, the WebCodecs probe.
-	supported: Getter<Supported | undefined>;
 
 	// The receive rate in bits per second this video may spend, used to auto-select a rendition
 	// when the target has no explicit bitrate. A `Player` wires its viewer grant less its audio.
@@ -223,7 +213,8 @@ export class Source {
 	/** The wired inputs, read-only. */
 	readonly in: Readonlys<SourceInput>;
 
-	#probe = new SupportProbe<Catalog.VideoConfig>("video");
+	// Renditions the WebCodecs decoder cannot play are filtered out.
+	#probe = new SupportProbe<Catalog.VideoConfig>("video", { supported, key: decoderConfigKey });
 
 	readonly #out: SourceOutput = {
 		catalog: new Signal<Catalog.Video | undefined>(undefined),
@@ -247,7 +238,6 @@ export class Source {
 		this.in = {
 			broadcast: getter(props?.broadcast),
 			target: getter(props?.target),
-			supported: getter(props?.supported),
 			rate: getter(props?.rate),
 		};
 
@@ -268,11 +258,10 @@ export class Source {
 	}
 
 	#runSupported(effect: Effect): void {
-		const supported = effect.get(this.in.supported) ?? decoderSupported;
 		// Read the catalog from the broadcast itself, so the probe result is tagged with the right one.
 		const broadcast = effect.get(this.in.broadcast);
 		const renditions = (broadcast && effect.get(broadcast.out.catalog)?.video?.renditions) ?? {};
-		this.#probe.run(effect, supported, renditions, (available) => this.#out.available.set(available));
+		this.#probe.run(effect, renditions, (available) => this.#out.available.set(available));
 	}
 
 	#runSelected(effect: Effect): void {

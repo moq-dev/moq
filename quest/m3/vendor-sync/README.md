@@ -59,11 +59,6 @@ moq-audio's NetEq time stretch port, once part of the WebRTC child, was
 replaced by a stretch written from its published description. moq-congestion's Cubic came from
 quinn and stays with the quinn child.
 
-The 2026-11-12 audit found moq-webrtc's vendored str0m, dimpl, `is`, and
-sctp-proto (vendored 2026-11-07, after that scan) with no child, so they got
-[one](/quest/m3/vendor-sync/webrtc-stack.md) starting from the revisions
-`rs/moq-webrtc/src/vendor/mod.rs` records.
-
 Out of scope: forks moq no longer consumes (moq-dev/quiche, moq-dev/noq,
 kixelated/cros-codecs, kixelated/openh264-rs, kixelated/fflate, and
 kixelated/goog_cc, now in-tree as moq-congestion's `gcc`), the

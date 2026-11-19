@@ -56,7 +56,8 @@ test("TrackInfo for Rust's default Info matches cross-language wire bytes", asyn
 		priority: model.priority,
 		maxAge: model.maxAge?.asMillis(),
 		timescale: model.timescale ?? undefined,
-		refresh: model.refresh ?? undefined,
+		refresh: model.refresh.ratio ?? undefined,
+		refreshInterval: model.refresh.interval?.asMillis(),
 		compress: model.compression === "deflate",
 	});
 	expect(await bytes((w) => info.encode(w, Version.DRAFT_05), Version.DRAFT_05)).toEqual(
@@ -227,13 +228,24 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06]) {
 	});
 }
 
-test("refresh ratio survives lite-07 and disappears on legacy wires", async () => {
+test("refresh ratio and interval survive lite-07 and disappear on legacy wires", async () => {
 	for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 		for (const refresh of [undefined, 0, 3, 0xffff_ffff]) {
-			const info = new TrackInfo({ priority: 7, refresh });
-			const encoded = await bytes((w) => info.encode(w, version), version);
-			const decoded = await TrackInfo.decode(new Reader(undefined, encoded, version), version);
-			expect(decoded.refresh).toBe(version === Version.DRAFT_07 ? refresh : undefined);
+			for (const refreshInterval of [undefined, 0, 1500]) {
+				const info = new TrackInfo({ priority: 7, refresh, refreshInterval });
+				const encoded = await bytes((w) => info.encode(w, version), version);
+				const decoded = await TrackInfo.decode(new Reader(undefined, encoded, version), version);
+				const lite07 = version === Version.DRAFT_07;
+				expect(decoded.refresh).toBe(lite07 ? refresh : undefined);
+				expect(decoded.refreshInterval).toBe(lite07 ? refreshInterval : undefined);
+			}
 		}
 	}
+});
+
+test("refresh interval rides between the ratio and the compression, plus one like max age", async () => {
+	const info = new TrackInfo({ priority: 0, refresh: 1, refreshInterval: 1500, timescale: 1000 });
+	const encoded = await bytes((w) => info.encode(w, Version.DRAFT_07), Version.DRAFT_07);
+	// The ratio plus one, the interval plus one as a two byte leading-ones varint, then no compression.
+	expect([...encoded.slice(-4)]).toEqual([0x02, 0x85, 0xdd, 0x00]);
 });

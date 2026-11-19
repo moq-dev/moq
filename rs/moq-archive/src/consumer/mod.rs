@@ -7,11 +7,14 @@
 //! demand from the store through [`track::Requests`](moq_net::track::Requests) fills.
 //!
 //! A reader's time start older than the newest group is looked up from the object keys, each of
-//! which carries its first frame's timestamp, so the range starts at the stored group containing
-//! it however old, and a time end stops just past the group containing it.
+//! which carries where its group starts, so the range starts at the stored group containing it
+//! however old, and a time end stops just past the group containing it.
 //!
 //! A growing archive is followed: every [`Config::refresh`], one delimiter LIST of the prefix
-//! finds added tracks, and one LIST per track after its newest key finds new objects. Once the
+//! finds added tracks, and one LIST per track after its newest key finds new objects. That LIST
+//! covers the whole track instead once the objects added since its last whole listing outnumber
+//! the ones that listing found, and a read that finds an object gone lists the whole track at
+//! once, so a reader attached to a pruned archive indexes about what the store retains. Once the
 //! prefix holds `.end`, each track ends as recorded and refreshing stops. Without it the archive
 //! stays live, which is also how one whose producer stopped early reads.
 //!
@@ -239,7 +242,10 @@ impl<S: ObjectStore> Consumer<S> {
 
 	fn apply(&mut self, refreshed: Refreshed) -> Result<()> {
 		for (name, info, index) in refreshed.added {
-			let producer = self.broadcast.create_track(name.as_str(), info)?;
+			let producer = self
+				.broadcast
+				.create_track(name.as_str(), info)
+				.ok_or(moq_net::Error::Duplicate)?;
 			let dynamic = producer.requests();
 			self.tracks.insert(
 				name,
@@ -321,26 +327,15 @@ async fn refresh<S: ObjectStore>(shared: Arc<Shared<S>>, mut tracks: Vec<Snapsho
 
 	let mut ends = Vec::new();
 	for track in tracks {
-		let (dir, cursor, timed) = {
-			let index = track.index.lock().unwrap();
-			(index.dir.clone(), index.cursor().clone(), index.timed())
-		};
-		let listed = index::list(store.inner(), &dir, &cursor, timed, ended).await?;
-		track.index.lock().unwrap().extend(&listed.objects);
+		let timed = track.index.lock().unwrap().timed();
+		let listed = index::refresh(store.inner(), &track.index, ended).await?;
 		if let Some(end) = listed.end {
 			ends.push((track.name.clone(), end));
 		}
 
 		let (objects, from) = match track.started {
 			// Everything new, in order.
-			true => (
-				listed
-					.objects
-					.into_iter()
-					.map(|(start, _, path)| (start, path))
-					.collect(),
-				0,
-			),
+			true => (listed.objects, 0),
 			// Only the newest sequence: fills serve the rest.
 			false => {
 				let Some((start, path)) = track.index.lock().unwrap().newest() else {

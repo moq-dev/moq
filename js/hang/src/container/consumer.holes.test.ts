@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
-import { Duration } from "@moq/clock";
+import { Duration, now } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { Time, Track } from "@moq/net";
+import { Signal } from "@moq/signals";
 import { Consumer, type Read } from "./consumer.ts";
 import { encodeFrame, Format } from "./legacy.ts";
 
@@ -13,7 +14,7 @@ test.each([0, 100])("a sequence hole before a paused data marker expires at %sms
 	const track = new Track.Producer("data");
 	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(30_000) } }), {
 		format: new Format("data"),
-		delay: { max: Duration.millis(budget) },
+		delay: { min: null, max: Duration.millis(budget) },
 	});
 	const results: Read[] = [];
 	const reading = (async () => {
@@ -27,13 +28,14 @@ test.each([0, 100])("a sequence hole before a paused data marker expires at %sms
 		const first = track.createGroup(0n);
 		first.writeFrame({
 			payload: encodeFrame(new Uint8Array([1]), Duration.micros(10_000)),
-			timestamp: Time.Timestamp.now(),
+			timestamp: Time.Timestamp.fromMicros(10_000),
 		});
 		first.finish();
 		await flush();
 		expect(results).toHaveLength(1);
 		const marker = track.createGroup(2n);
-		marker.writeFrame({ payload: new Uint8Array(), timestamp: Time.Timestamp.now() });
+		// A data marker carries no container timestamp; its group's start still passes the first's.
+		marker.writeFrame({ payload: new Uint8Array(), timestamp: Time.Timestamp.fromMicros(20_000) });
 		marker.finish();
 		await flush();
 		if (budget > 0) {
@@ -64,7 +66,7 @@ test("a filled hole cancels its timer and the next hole gets a fresh budget", as
 	const track = new Track.Producer("data");
 	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(30_000) } }), {
 		format: new Format("data"),
-		delay: { max: Duration.millis(100) },
+		delay: { min: null, max: Duration.millis(100) },
 	});
 	const results: Read[] = [];
 	const reading = (async () => {
@@ -81,7 +83,8 @@ test("a filled hole cancels its timer and the next hole gets a fresh budget", as
 				timestamp === undefined
 					? new Uint8Array()
 					: encodeFrame(new Uint8Array([1]), Duration.micros(timestamp)),
-			timestamp: Time.Timestamp.fromMicros(timestamp ?? 20_000),
+			// A marker group still starts past the newest group's first frame.
+			timestamp: Time.Timestamp.fromMicros(timestamp ?? 30_000),
 		});
 		group.finish();
 	};
@@ -121,7 +124,7 @@ test("the holes a stalled source left behind share one budget", async () => {
 	const track = new Track.Producer("data");
 	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(30_000) } }), {
 		format: new Format("data"),
-		delay: { max: Duration.millis(100) },
+		delay: { min: null, max: Duration.millis(100) },
 	});
 	const results: Read[] = [];
 	const reading = (async () => {
@@ -165,7 +168,7 @@ test("a hole is late from the earliest arrival past it", async () => {
 	const track = new Track.Producer("data");
 	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(30_000) } }), {
 		format: new Format("data"),
-		delay: { max: Duration.millis(100) },
+		delay: { min: null, max: Duration.millis(100) },
 	});
 	const results: Read[] = [];
 	const reading = (async () => {
@@ -272,7 +275,7 @@ test.each([true, false])("the head after a declared end is waited for (arrives: 
 	const track = new Track.Producer("audio");
 	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(30_000) } }), {
 		format: new Format("audio"),
-		delay: { max: Duration.millis(300) },
+		delay: { min: null, max: Duration.millis(300) },
 	});
 	const results: Read[] = [];
 	const reading = (async () => {
@@ -352,7 +355,7 @@ test("a newest-first flush past a hole delivers the groups landing behind its ne
 	const track = new Track.Producer("audio");
 	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(30_000) } }), {
 		format: new Format("audio"),
-		delay: { max: Duration.millis(80) },
+		delay: { min: null, max: Duration.millis(80) },
 	});
 	const results: Read[] = [];
 	const reading = (async () => {
@@ -363,11 +366,13 @@ test("a newest-first flush past a hole delivers the groups landing behind its ne
 		}
 	})();
 	// One 20ms frame per group, as a voice publisher writes them, all sent at once.
-	const sent = Time.Timestamp.now();
 	const write = (sequence: number) => {
 		const group = track.createGroup(BigInt(sequence));
 		const timestamp = Duration.micros(sequence * 20_000);
-		group.writeFrame({ payload: encodeFrame(new Uint8Array([1]), timestamp), timestamp: sent });
+		group.writeFrame({
+			payload: encodeFrame(new Uint8Array([1]), timestamp),
+			timestamp: Time.Timestamp.fromMicros(sequence * 20_000),
+		});
 		group.finish();
 	};
 	try {
@@ -403,8 +408,7 @@ test("a hole is waited for the wait while an arrived group plays up to the max d
 	const track = new Track.Producer("audio");
 	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(30_000) } }), {
 		format: new Format("audio"),
-		delay: { max: Duration.millis(1000) },
-		wait: Duration.millis(100),
+		delay: { min: Duration.millis(100), max: Duration.millis(1000) },
 	});
 	const results: Read[] = [];
 	const reading = (async () => {
@@ -464,6 +468,115 @@ test("a hole is waited for the wait while an arrived group plays up to the max d
 		write(10n, 1950);
 		await flush();
 		expect(reads()).toEqual([0, 500, "gap", 520, "gap", 700, 800, "gap", 900, 1900, 1950, 2000, 2200]);
+	} finally {
+		consumer.close();
+		track.finish();
+		track.close();
+		try {
+			await reading;
+		} finally {
+			installed.close();
+		}
+	}
+});
+
+test.each([
+	["the playout clock reaching the group past it", 900, 100],
+	["the wait, while the clock trails", 0, 500],
+	["the wait, without a clock", undefined, 500],
+])("a hole ends at %s", async (_, start, after) => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const origin = now();
+	// A playout clock presenting `start` ms of media now, advancing with the manual clock.
+	const playhead =
+		start === undefined
+			? undefined
+			: { now: () => Duration.millis(start).add(now().since(origin)), anchor: new Signal(0) };
+	const track = new Track.Producer("audio");
+	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(30_000) } }), {
+		format: new Format("audio"),
+		delay: { min: Duration.millis(500), max: Duration.millis(2_000) },
+		playhead,
+	});
+	const results: Read[] = [];
+	const reading = (async () => {
+		for (;;) {
+			const read = await consumer.next();
+			if (!read) return;
+			results.push(read);
+		}
+	})();
+	const write = (sequence: bigint, millis: number) => {
+		const group = track.createGroup(sequence);
+		group.writeFrame({
+			payload: encodeFrame(new Uint8Array([1]), Duration.millis(millis)),
+			timestamp: Time.Timestamp.fromMicros(millis * 1000),
+		});
+		group.finish();
+	};
+	try {
+		write(0n, 0);
+		await flush();
+		expect(results).toHaveLength(1);
+		// A resume: the groups past the hole start a second of media later, inside the max delay.
+		write(50n, 1_000);
+		await flush();
+		await clock.advance(Duration.millis(after - 1));
+		expect(results).toHaveLength(1);
+		await clock.advance(Duration.millis(1));
+		expect(results.slice(1).map((read) => read.kind)).toEqual(["gap", "frame"]);
+	} finally {
+		consumer.close();
+		track.finish();
+		track.close();
+		try {
+			await reading;
+		} finally {
+			installed.close();
+		}
+	}
+});
+
+test("a hole ends once the playout clock jumps past the group past it", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	// A clock trailing the group past the hole until it re-anchors a second later.
+	let position = Duration.ZERO;
+	const anchor = new Signal(0);
+	const track = new Track.Producer("audio");
+	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(30_000) } }), {
+		format: new Format("audio"),
+		delay: { min: Duration.millis(500), max: Duration.millis(2_000) },
+		playhead: { now: () => position, anchor },
+	});
+	const results: Read[] = [];
+	const reading = (async () => {
+		for (;;) {
+			const read = await consumer.next();
+			if (!read) return;
+			results.push(read);
+		}
+	})();
+	const write = (sequence: bigint, millis: number) => {
+		const group = track.createGroup(sequence);
+		group.writeFrame({
+			payload: encodeFrame(new Uint8Array([1]), Duration.millis(millis)),
+			timestamp: Time.Timestamp.fromMicros(millis * 1000),
+		});
+		group.finish();
+	};
+	try {
+		write(0n, 0);
+		await flush();
+		write(50n, 1_000);
+		await flush();
+		await clock.advance(Duration.millis(10));
+		expect(results).toHaveLength(1);
+		position = Duration.millis(1_000);
+		anchor.set(1);
+		await flush();
+		expect(results.slice(1).map((read) => read.kind)).toEqual(["gap", "frame"]);
 	} finally {
 		consumer.close();
 		track.finish();

@@ -7,31 +7,31 @@
 // implementation that calls the reference proves nothing about the document.
 
 /** Milliseconds of media time the reference search looks back over. */
-export const WINDOW = 2000;
+const WINDOW = 2000;
 
 /** Milliseconds of delay per histogram bucket. */
-export const BUCKET = 20;
+const BUCKET = 20;
 
 /** Histogram buckets, so the measured term saturates at BUCKET * BUCKETS. */
-export const BUCKETS = 100;
+const BUCKETS = 100;
 
 /** The quantile of the delay distribution the target is read at. */
-export const QUANTILE = 0.95;
+const QUANTILE = 0.95;
 
 /** Weight retained per folded observation. */
-export const FORGET = 0.983;
+const FORGET = 0.983;
 
 /** Milliseconds of arrival time per resampled observation. */
-export const RESAMPLE = 500;
+const RESAMPLE = 500;
 
 /** The most weight one observation takes, which only the prior's weight can lift it toward. */
-export const FRESH_MAX = 0.1;
+const FRESH_MAX = 0.1;
 
 /** Idle intervals folded at once, purely to bound the work. */
-export const IDLE_MAX = 1024;
+const IDLE_MAX = 1024;
 
 /** The cold-start distribution, which is also what an idle receiver relaxes back to. */
-export function prior(): Float64Array {
+function prior(): Float64Array {
 	const out = new Float64Array(BUCKETS);
 	for (let i = 0; i < BUCKETS; i++) {
 		out[i] = 0.5 ** (i + 1);
@@ -79,6 +79,8 @@ export class Estimator {
 	#start?: number;
 	/** The latest a frame produced before the subscription arrived, starting at `#start`. */
 	#joined = 0;
+	/** Every interval closed so far measured the join, so a skipped backlog can still extend it. */
+	#open = true;
 	/** A declared end precedes the next measured observation, so the silence before it is not idle. */
 	#ended = false;
 	/** The earliest a frame stalled in this interval was due. */
@@ -167,7 +169,10 @@ export class Estimator {
 		// join, not the path: those frames queued behind the backlog, and the player skipped onto
 		// the clock past all of it. It folds nothing, like an interval with no arrival.
 		if (this.#oldest + this.#fastest() < this.#joined) this.#pending += 1;
-		else this.#close(Math.min(BUCKETS - 1, Math.floor(this.#peak / BUCKET)));
+		else {
+			this.#open = false;
+			this.#close(Math.min(BUCKETS - 1, Math.floor(this.#peak / BUCKET)));
+		}
 
 		if (resumed) {
 			// The publisher declared the silence, so it is not evidence of anything: the
@@ -242,6 +247,13 @@ export class Estimator {
 			this.#fold(undefined);
 		}
 		this.#stall = undefined;
+	}
+
+	/** A frame produced before the subscription arrived at `arrival` but was skipped unread. */
+	backlog(arrival: number): void {
+		// Before any observation the join has not started, and starts later than this.
+		// Once an interval measured the path the join is over, and a skip is an outage's.
+		if (this.#start !== undefined && this.#open) this.#joined = Math.max(this.#joined, arrival);
 	}
 
 	/** A declared end lies between the previous observation and the next. */

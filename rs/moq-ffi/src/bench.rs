@@ -144,9 +144,9 @@ impl Report {
 	}
 }
 
-fn check(case: &Case, round: u64, frame: usize, want: &[u8], payload: &[u8], timestamp_us: Option<u64>) {
+fn check(case: &Case, round: u64, frame: usize, want: &[u8], payload: &[u8], timestamp_us: u64) {
 	assert!(payload == want, "corrupt frame {frame} of round {round}");
-	assert_eq!(timestamp_us, Some(round * case.frames() as u64 + frame as u64));
+	assert_eq!(timestamp_us, round * case.frames() as u64 + frame as u64);
 }
 
 async fn ffi_round(
@@ -165,9 +165,10 @@ async fn ffi_round(
 				let mut read = Vec::with_capacity(frames);
 				for _ in 0..frames {
 					let frame = group.read_frame().await.unwrap().expect("group ended");
-					let timestamp = frame
-						.timestamp
-						.map(|t| moq_net::Timestamp::try_from(t).unwrap().as_micros() as u64);
+					let timestamp = moq_net::Timestamp::try_from(frame.timestamp)
+						.unwrap()
+						.as_micros()
+						.unwrap() as u64;
 					read.push((frame.payload, timestamp));
 				}
 				read
@@ -175,14 +176,19 @@ async fn ffi_round(
 		})
 		.collect();
 	for track in tracks {
-		let group = track.append_group().unwrap();
+		let group = track
+			.append_group(MoqTimestamp {
+				value: n * case.frames() as u64,
+				scale: Some(1_000_000),
+			})
+			.unwrap();
 		for f in 0..case.frames() {
 			let frame = MoqFrame {
 				payload: payload.to_vec(),
-				timestamp: Some(MoqTimestamp {
+				timestamp: MoqTimestamp {
 					value: n * case.frames() as u64 + f as u64,
-					scale: 1_000_000,
-				}),
+					scale: Some(1_000_000),
+				},
 			};
 			group.write_frame(frame).unwrap();
 		}
@@ -212,14 +218,17 @@ async fn net_round(
 				let mut read = Vec::with_capacity(frames);
 				for _ in 0..frames {
 					let frame = group.read_frame().await.unwrap().expect("group ended");
-					read.push((frame.payload, frame.timestamp.map(|t| t.as_micros() as u64)));
+					read.push((frame.payload, frame.timestamp.as_micros().unwrap() as u64));
 				}
 				(consumer, read)
 			})
 		})
 		.collect();
 	for track in &mut tracks {
-		let mut group = track.append_group().unwrap();
+		// The group starts at its first frame's time, in the track's microseconds.
+		let mut group = track
+			.append_group(moq_net::Timestamp::from_micros(n * case.frames() as u64).unwrap())
+			.unwrap();
 		for f in 0..case.frames() {
 			let timestamp = moq_net::Timestamp::from_micros(n * case.frames() as u64 + f as u64).unwrap();
 			// Copy, as a binding's write does, so the baseline does not get zero-copy for free.
@@ -256,9 +265,8 @@ async fn rust_ffi() {
 		let broadcast = route.broadcast();
 		let timed = MoqTrackInfo {
 			priority: 0,
-			max_age: None,
-			max_age_unlimited: false,
-			refresh: None,
+			max_age: Some(Duration::ZERO),
+			refresh: Default::default(),
 			timescale: Some(1_000_000),
 			compression: None,
 		};
@@ -277,9 +285,13 @@ async fn rust_ffi() {
 
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast.publish_track("calls".into(), None).unwrap();
-	let group = track.append_group().unwrap().consume().unwrap();
-	report.call("sequence", || {
-		black_box(black_box(&group).sequence());
+	let group = track
+		.append_group(MoqTimestamp::unscaled(0))
+		.unwrap()
+		.consume()
+		.unwrap();
+	report.call("start", || {
+		black_box(black_box(&group).start());
 	});
 	let consumer = track.consume(None).unwrap();
 	report.call("info", || {

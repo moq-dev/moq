@@ -329,19 +329,36 @@ struct Drain {
 	/// Drain counter, stamped on the change-detection state an entry touches
 	/// so state the report no longer carries can be dropped.
 	tick: u64,
-	/// An instant and its timestamp, which group numbers count intervals from.
+	/// An instant and its wall time since the MoQ epoch, which timestamps and intervals count
+	/// from.
 	base: (Instant, Duration),
 }
 
-/// One drain's instant and the publish interval it falls in, which numbers every
-/// group the drain opens. Counted at full resolution, so drains at least an interval
-/// apart never share a number.
+/// One drain's instant, its timestamp, and the publish interval it falls in, which lets a
+/// track open at most one group per interval. Counted at full resolution, so drains at
+/// least an interval apart never share an interval.
 #[derive(Clone, Copy, Debug)]
 struct Stamp {
-	/// Stamps the drain's frames.
+	/// When the drain ran.
 	at: Instant,
+	/// Stamps the drain's frames, and keys the group a snapshot opens.
+	timestamp: moq_net::Timestamp,
 	/// The drain's interval since the timestamp epoch.
 	group: u64,
+}
+
+/// Wall time since the MoQ epoch at `at`, on the ambient clock: the clock stats frames are
+/// stamped with.
+///
+/// Mapped through the clock's fixed origin rather than read from the wall, so a clock correction
+/// never moves a timestamp back.
+fn since_epoch(at: Instant) -> Duration {
+	let (instant, wall) = kio::clock::origin();
+	let base = wall.saturating_duration_since(kio::clock::Wall::MOQ_EPOCH);
+	match at.checked_duration_since(instant) {
+		Some(after) => base + after,
+		None => base.saturating_sub(instant.saturating_duration_since(at)),
+	}
 }
 
 impl Drain {
@@ -355,16 +372,18 @@ impl Drain {
 			node,
 			report: Report::default(),
 			tick: 0,
-			base: (now, Duration::from(moq_net::Timestamp::from(now))),
+			base: (now, since_epoch(now)),
 		})
 	}
 
-	/// Stamp a drain at `at`, numbering it by the interval it falls in.
+	/// Stamp a drain at `at`, with the interval it falls in.
 	fn stamp(&self, at: Instant) -> Stamp {
-		let (instant, timestamp) = self.base;
-		let elapsed = timestamp + at.saturating_duration_since(instant);
+		let (instant, base) = self.base;
+		let elapsed = base + at.saturating_duration_since(instant);
 		Stamp {
 			at,
+			timestamp: moq_net::Timestamp::from_millis(elapsed.as_millis() as u64)
+				.expect("a wall clock this side of the year 2300"),
 			group: (elapsed.as_nanos() / self.task.interval.as_nanos()) as u64,
 		}
 	}
@@ -427,29 +446,25 @@ impl<V: Serialize> Serialize for Frame<V> {
 	}
 }
 
-/// Writes encoded snapshots, numbering each group by the publish interval it
-/// opens in (see [`Stamp`]). A recreated track (an
-/// on-demand track asked for again)
-/// opens in a later interval than its predecessor's last group, so it resumes
-/// past any group a subscriber has cached, with nothing kept for names that
-/// left. A track opens at most one group per interval: a snapshot due in an
-/// interval that already has one waits for the next.
+/// Writes encoded snapshots, starting each group at its drain's timestamp (see
+/// [`Stamp`]). A recreated track (an on-demand track asked for again) opens in a
+/// later interval than its predecessor's last group, so it resumes past any group
+/// a subscriber has cached, with nothing kept for names that left. A track opens
+/// at most one group per interval: a snapshot due in an interval that already has
+/// one waits for the next.
 ///
-/// A bucket track's name is never reused, so it numbers its groups from 0
-/// instead ([`Self::counted`]): group 0 is where the run's counters start.
-///
-/// The numbering is why this wraps the encoder rather than a
-/// `moq_json::snapshot::Producer`, which numbers its own groups.
+/// The interval rule is why this wraps the encoder rather than a
+/// `moq_json::snapshot::Producer`, which opens a group whenever the encoder asks.
 struct Snapshot<T> {
 	track: track::Producer,
 	encoder: moq_json::snapshot::Encoder<T>,
 	group: Option<moq_net::group::Producer>,
-	/// The sequence of the newest group written, which a refresh has to pass.
+	/// The start of the newest group written, which a refresh, and the next group, has to pass.
 	largest: Option<u64>,
 	/// The interval the newest group opened in, which the next group has to pass.
 	opened: Option<u64>,
-	/// Number groups from 0 rather than by interval.
-	counted: bool,
+	/// The track's name is new, so nothing comes before its first group, and it says so.
+	fresh: bool,
 	deltas: bool,
 	/// The newest snapshot payload written, and what the last update wrote
 	/// (zero when nothing). Bench builds only.
@@ -468,7 +483,7 @@ impl<T: Serialize> Snapshot<T> {
 			group: None,
 			largest: None,
 			opened: None,
-			counted: false,
+			fresh: false,
 			#[cfg(feature = "bench")]
 			held: 0,
 			#[cfg(feature = "bench")]
@@ -476,9 +491,13 @@ impl<T: Serialize> Snapshot<T> {
 		}
 	}
 
-	/// Number groups from 0, for a track whose name no earlier run used.
-	fn counted(mut self) -> Self {
-		self.counted = true;
+	/// Declare every start below the first group skipped, for a track whose name no earlier
+	/// run used: a reader then knows the first group it reads opens the track
+	/// ([`moq_net::track::Subscriber::is_skipped`]). A reader the skip hasn't reached, in
+	/// flight or forgotten by this relay's cache, reads the first group as a later one, so
+	/// a meter that bills a run from zero only on its first group never counts it twice.
+	fn fresh(mut self) -> Self {
+		self.fresh = true;
 		self
 	}
 
@@ -486,13 +505,13 @@ impl<T: Serialize> Snapshot<T> {
 		self.track.demand()
 	}
 
-	/// Write one frame, stamped and numbered by its drain. `Some(len)` is the payload
-	/// written; `None` means the value was unchanged, the interval already has a group for a
-	/// snapshot, or the track already ended, and nothing was written.
+	/// Write one frame, stamped by its drain. `Some(len)` is the payload written; `None`
+	/// means the value was unchanged, the interval already has a group for a snapshot, or
+	/// the track already ended, and nothing was written.
 	///
-	/// A frame over the group budget aborts the track with
-	/// [`moq_net::Error::FrameTooLarge`]: skipping it would leave readers on the
-	/// previous snapshot with no sign it stopped tracking.
+	/// Any encoder error, such as a frame over the group budget, aborts the group and the
+	/// track with the cause: skipping it would leave readers on the previous snapshot with no
+	/// sign it stopped tracking.
 	fn update(&mut self, value: &T, stamp: Stamp) -> moq_json::Result<Option<usize>> {
 		#[cfg(feature = "bench")]
 		{
@@ -504,41 +523,48 @@ impl<T: Serialize> Snapshot<T> {
 		// A joiner wants a group past the newest, so open this tick's with a snapshot, even of an
 		// unchanged value. Answered once per tick rather than at once: a joiner waits at most one
 		// interval, the same as for any change.
-		if let (Some(wanted), Some(largest)) = (self.track.demand().wanted(), self.largest)
-			&& wanted > largest
-		{
+		if self.largest.is_some()
+			&& matches!(
+				self.track.demand().poll_refresh(&kio::Waiter::noop()),
+				std::task::Poll::Ready(Ok(()))
+			) {
 			self.encoder.reset();
 		}
 		let frame = match self.encoder.update(value) {
 			Ok(Some(frame)) => frame,
 			Ok(None) => return Ok(None),
-			// The encoder refuses a frame past the group budget before anything is written.
-			Err(moq_json::Error::Net(moq_net::Error::FrameTooLarge)) => {
-				let err = moq_net::Error::FrameTooLarge;
+			Err(err) => {
+				// The track carries a moq-net error; a value that won't serialize has no wire code.
+				let reason = match &err {
+					moq_json::Error::Net(err) => err.clone(),
+					_ => moq_net::StreamError::Internal.into(),
+				};
 				if let Some(group) = self.group.take() {
-					let _ = group.abort(err.clone());
+					let _ = group.abort(reason.clone());
 				}
-				let _ = self.track.clone().abort(err.clone());
-				return Err(err.into());
+				let _ = self.track.clone().abort(reason);
+				return Err(err);
 			}
-			Err(err) => return Err(err),
 		};
 		let len = frame.payload.len();
-		let timestamp = moq_net::Timestamp::from(stamp.at);
+		let timestamp = stamp.timestamp;
 		if frame.keyframe {
-			// The interval already has its group: the uncommitted frame is encoded again next tick.
-			if self.opened.is_some_and(|opened| stamp.group <= opened) {
+			let start = self.track.info().rescale(timestamp)?.value();
+			// The interval already has its group, or a group starts at this timestamp (an
+			// interval under a millisecond): the uncommitted frame is encoded again next tick.
+			if self.opened.is_some_and(|opened| stamp.group <= opened)
+				|| self.largest.is_some_and(|largest| start <= largest)
+			{
 				return Ok(None);
 			}
-			let sequence = match self.counted {
-				true => self.largest.map_or(0, |largest| largest + 1),
-				false => stamp.group,
-			};
 			if let Some(group) = self.group.take() {
 				group.finish()?;
 			}
-			self.group = Some(self.track.create_group(moq_net::group::Info { sequence })?);
-			self.largest = Some(sequence);
+			if self.fresh && self.largest.is_none() {
+				self.track.skip_groups(0..start);
+			}
+			self.group = Some(self.track.append_group(timestamp)?);
+			self.largest = Some(start);
 			self.opened = Some(stamp.group);
 			#[cfg(feature = "bench")]
 			{
@@ -581,11 +607,17 @@ struct Output<V> {
 /// They are compressed and keep merge-patch deltas inside the track's own
 /// DEFLATE window, so a joiner asks for a fresh group once the deltas outweigh
 /// eight snapshots.
+///
+/// A superseded group never goes stale on the publisher's say: a reader that needs every
+/// delta, such as one metering counters, waits for a group's finish even when the next
+/// group lands first, as its own [`Delay::max`](track::Delay::max) allows. A latest-only
+/// reader still skips one the moment a newer one arrives.
 fn info() -> track::Info {
 	track::Info::default()
 		.with_timescale(moq_net::Timescale::MILLI)
 		.with_compression(moq_net::track::Compression::Deflate)
-		.with_refresh(8)
+		.with_refresh(moq_net::track::Refresh::default().with_ratio(8))
+		.with_max_age(None)
 }
 
 /// The snapshot codec every stats track encodes with.
@@ -599,7 +631,9 @@ fn config() -> moq_json::snapshot::Config {
 
 impl<V: Serialize> Output<V> {
 	fn create(broadcast: &broadcast::Producer, name: &str) -> Result<Self, moq_net::Error> {
-		Ok(Self::new(broadcast.create_track(name, info())?))
+		Ok(Self::new(
+			broadcast.create_track(name, info()).ok_or(moq_net::Error::Duplicate)?,
+		))
 	}
 
 	/// Publish on the track `request` asked for, or create `name` without one.
@@ -623,7 +657,7 @@ impl<V: Serialize> Output<V> {
 
 	/// Whether anyone wants the output.
 	fn is_wanted(&self) -> bool {
-		self.snapshot.demand().wanted().is_some()
+		self.snapshot.demand().wanted()
 	}
 
 	/// Publish this drain's entries (`{}` when there are none) and clear them
@@ -896,13 +930,15 @@ struct PathUsage {
 impl BucketTrack {
 	fn create(broadcast: &broadcast::Producer, bucket: &Path) -> Result<Self, moq_net::Error> {
 		// A new counter run under its own name: readers keep its counters apart from
-		// an earlier epoch's, and its MoQ group 0 is where they start.
+		// an earlier epoch's, and its first MoQ group is where they start.
 		let epoch = Epoch::mint();
 		let name = crate::bucket_track(bucket, &epoch);
-		let track = broadcast.create_track(name.as_str(), info())?;
+		let track = broadcast
+			.create_track(name.as_str(), info())
+			.ok_or(moq_net::Error::Duplicate)?;
 		Ok(Self {
 			name,
-			snapshot: Snapshot::new(track, config()).counted(),
+			snapshot: Snapshot::new(track, config()).fresh(),
 			body: BucketBody {
 				epoch,
 				tiers: Frame::default(),
@@ -1002,19 +1038,23 @@ impl BucketTrack {
 }
 
 /// Each prefix of `path` from the root down to `path` itself, paired with the
-/// next segment below it (`None` at `path`).
+/// next segment below it (`None` at `path`). An escaped `/` stays in its segment.
 fn ancestors(path: &str) -> impl Iterator<Item = (&str, Option<&str>)> {
-	let mut at = Some(0);
+	let mut parts = moq_net::path::parts(path);
+	let mut end = Some(0);
 	std::iter::from_fn(move || {
-		let end = at?;
-		if end == path.len() {
-			at = None;
+		let prefix = &path[..end?];
+		let Some(segment) = parts.next() else {
+			end = None;
 			return Some((path, None));
-		}
-		let start = if end == 0 { 0 } else { end + 1 };
-		let next = path[start..].find('/').map_or(path.len(), |i| start + i);
-		at = Some(next);
-		Some((&path[..end], Some(&path[start..next])))
+		};
+		// Segments are contiguous, one `/` apart.
+		end = Some(if prefix.is_empty() {
+			segment.len()
+		} else {
+			prefix.len() + 1 + segment.len()
+		});
+		Some((prefix, Some(segment)))
 	})
 }
 
@@ -1313,7 +1353,7 @@ impl NodePublisher {
 			let Some(rest) = entry.path.strip_prefix(&path) else {
 				continue;
 			};
-			let child = rest.as_str().split('/').next().filter(|child| !child.is_empty());
+			let child = rest.parts().next();
 			track.add(entry, child, tick);
 		}
 		track.publish(tick, stamp);
@@ -1410,10 +1450,11 @@ mod tests {
 		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
 	}
 
-	/// A drain at the current instant, numbered `group`.
+	/// A drain at the current instant in interval `group`, of a second each.
 	fn stamp(group: u64) -> Stamp {
 		Stamp {
 			at: kio::clock::now(),
+			timestamp: Timestamp::from_secs(group).unwrap(),
 			group,
 		}
 	}
@@ -1431,27 +1472,27 @@ mod tests {
 		let frame = |n| Frame {
 			entries: vec![(Path::from_static("a"), n)],
 		};
-		let wanted = |track: &track::Producer| track.demand().wanted();
+		let refreshing = |track: &track::Producer| track.demand().poll_refresh(&kio::Waiter::noop()).is_ready();
 
 		// A 7 byte snapshot and nine 7 byte deltas: past eight snapshots.
 		for n in 0..10 {
 			snapshot.update(&frame(n), stamp(5)).unwrap();
 		}
-		assert_eq!(snapshot.largest, Some(5));
+		assert_eq!(snapshot.largest, Some(5_000));
 		let _late = track.subscribe(None);
-		assert_eq!(wanted(&track), Some(6), "the join asks for a fresh group");
+		assert!(refreshing(&track), "the join asks for a fresh group");
 
 		// The interval already has its group, so the snapshot waits for the next one.
 		assert!(snapshot.update(&frame(9), stamp(5)).unwrap().is_none());
-		assert_eq!(snapshot.largest, Some(5));
+		assert_eq!(snapshot.largest, Some(5_000));
 
 		assert!(
 			snapshot.update(&frame(9), stamp(6)).unwrap().is_some(),
 			"restated though unchanged"
 		);
-		assert_eq!(snapshot.largest, Some(6), "numbered by its interval");
+		assert_eq!(snapshot.largest, Some(6_000), "started at its drain's timestamp");
 		assert!(snapshot.update(&frame(10), stamp(6)).unwrap().is_some());
-		assert_eq!(snapshot.largest, Some(6), "the next change is a delta");
+		assert_eq!(snapshot.largest, Some(6_000), "the next change is a delta");
 	}
 
 	/// A relay origin, and the cache pool its copies are billed to.
@@ -1567,7 +1608,7 @@ mod tests {
 					.unwrap();
 				let group = pumping(&mut drain, cursor.recv_group()).await.unwrap().unwrap();
 				if let Some(old) = previous {
-					assert!(group.sequence > old, "re-hold must have a fresh group identity");
+					assert!(group.start > old, "re-hold must have a fresh group identity");
 				}
 				drop(group);
 				drop(cursor);
@@ -1595,13 +1636,7 @@ mod tests {
 				let mut cursor = pumping(&mut drain, broadcast.track(&name).unwrap().subscribe(None))
 					.await
 					.unwrap();
-				previous = Some(
-					pumping(&mut drain, cursor.recv_group())
-						.await
-						.unwrap()
-						.unwrap()
-						.sequence,
-				);
+				previous = Some(pumping(&mut drain, cursor.recv_group()).await.unwrap().unwrap().start);
 				drop(cursor);
 				drop(reader);
 				for _ in 0..100 {
@@ -1629,6 +1664,69 @@ mod tests {
 				(1_307, 2_614),
 				"broadcast totals never reset on re-hold"
 			);
+		}
+	}
+
+	/// A reader that waits for late groups reads a stats group to its end even when the next
+	/// group lands first, as it can on a relay when the group's finish trails the next
+	/// group's stream. A cut there would drop the deltas a counter's reader needs.
+	#[tokio::test(start_paused = true)]
+	async fn a_patient_reader_waits_for_a_finish_behind_the_next_group() {
+		for version in ["moq-lite-06", "moq-lite-07-wip"].map(|value| value.parse().unwrap()) {
+			let origin = produce_origin();
+			let route = origin
+				.route(Path::from_static(".stats/node"), origin::RouteOptions::default())
+				.unwrap();
+			let track = route.broadcast().create_track("t.json", info()).unwrap();
+			let (middle, _middle_cache) = relay();
+			let (edge, _edge_cache) = relay();
+			let _links = [
+				link(&origin, &middle, version).await,
+				link(&middle, &edge, version).await,
+			];
+			let at = |secs| Timestamp::from_secs(secs).unwrap();
+			let mut first = track.append_group(at(1)).unwrap();
+			first.write_frame(at(1), b"{}".to_vec()).unwrap();
+
+			let consumer = edge.consume().with_hidden(true);
+			let remote = consumer.request(".stats/node", None).await.unwrap();
+			let patient =
+				track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(10)));
+			let mut ordered = remote
+				.track("t.json")
+				.unwrap()
+				.subscribe(patient)
+				.await
+				.unwrap()
+				.ordered();
+			let mut reading = loop {
+				match ordered.next_group().await.unwrap().unwrap() {
+					track::Item::Group(group) => break group,
+					// Keys below where the subscription began were never this reader's.
+					track::Item::Gap { .. } => continue,
+				}
+			};
+			assert_eq!(reading.read_frame().await.unwrap().unwrap().payload, b"{}".as_slice());
+			first.write_frame(at(2), b"{\"a\":1}".to_vec()).unwrap();
+			assert_eq!(
+				reading.read_frame().await.unwrap().unwrap().payload,
+				b"{\"a\":1}".as_slice()
+			);
+
+			let mut second = track.append_group(at(3)).unwrap();
+			second.write_frame(at(3), b"{\"a\":1}".to_vec()).unwrap();
+			// A latest-only reader at the edge sees the next group arrive there.
+			let mut latest = remote.track("t.json").unwrap().subscribe(None).await.unwrap();
+			while latest.recv_group().await.unwrap().unwrap().start != second.start {}
+			first.finish().unwrap();
+			assert!(
+				reading.read_frame().await.unwrap().is_none(),
+				"{version}: the group ends cleanly"
+			);
+			match ordered.next_group().await.unwrap().unwrap() {
+				track::Item::Group(group) => assert_eq!(group.start, second.start, "{version}"),
+				track::Item::Gap { range, error } => panic!("{version}: groups {range:?} given up: {error}"),
+			}
 		}
 	}
 
@@ -1773,13 +1871,15 @@ mod tests {
 				.expect("subscribe");
 
 			if frames > 0 {
-				let mut group = producer.append_group().expect("group");
+				let mut group = producer
+					.append_group(Timestamp::from_millis(0).unwrap())
+					.expect("group");
 				for _ in 0..frames {
 					group
 						.write_frame(Timestamp::ZERO, vec![0u8; frame_size])
 						.expect("write");
 				}
-				group.finish().expect("finish");
+				group.finish().expect("close");
 
 				let mut group = sub.recv_group().await.expect("recv").expect("group");
 				while group.read_frame().await.expect("read").is_some() {}
@@ -1904,7 +2004,7 @@ mod tests {
 	/// The same, without blocking: `None` once nothing more is buffered.
 	fn try_next_frame(track: &mut track::Ordered) -> Option<moq_net::frame::Frame> {
 		use futures::FutureExt;
-		let mut group = track.next_group().now_or_never()?.expect("ok")?;
+		let mut group = track.next_group().now_or_never()?.expect("ok")?.group()?;
 		group.read_frame().now_or_never()?.expect("ok")
 	}
 
@@ -1926,7 +2026,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_late_drain_leaves_the_next_its_own_interval() {
 		// Schedule the drains a millisecond before an interval boundary.
-		let phase = Duration::from(Timestamp::from(kio::clock::now())).as_millis() % 1000;
+		let phase = since_epoch(kio::clock::now()).as_millis() % 1000;
 		tokio::time::advance(Duration::from_millis(((1999 - phase) % 1000) as u64)).await;
 
 		let origin = produce_origin();
@@ -2231,9 +2331,13 @@ mod tests {
 				.subscribe(None)
 				.await
 				.expect("subscribe");
-			let mut group = video.append_group().expect("group");
-			group.write_frame(Timestamp::ZERO, vec![0u8; size]).expect("write");
-			group.finish().expect("finish");
+			let mut group = video
+				.append_group(Timestamp::from_millis(video.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+				.expect("group");
+			group
+				.write_frame(Timestamp::from_millis(group.start).unwrap(), vec![0u8; size])
+				.expect("write");
+			group.finish().expect("close");
 			let mut group = sub.recv_group().await.expect("recv").expect("group");
 			while group.read_frame().await.expect("read").is_some() {}
 		}
@@ -2604,6 +2708,11 @@ mod tests {
 				("a/bc/d", None)
 			]
 		);
+		// An escaped `/` is content of its segment, never a level of its own.
+		assert_eq!(
+			walk(r"a\/b/c\\"),
+			[("", Some(r"a\/b")), (r"a\/b", Some(r"c\\")), (r"a\/b/c\\", None)]
+		);
 	}
 
 	/// A held prefix carries its rollup, the broadcast at exactly the prefix,
@@ -2689,9 +2798,9 @@ mod tests {
 			subs.push(track.subscribe(None).await.expect("subscribe"));
 		}
 		{
-			let mut group = video.append_group().expect("group");
+			let mut group = video.append_group(Timestamp::from_millis(0).unwrap()).expect("group");
 			group.write_frame(Timestamp::ZERO, vec![0u8; 10]).expect("write");
-			group.finish().expect("finish");
+			group.finish().expect("close");
 		}
 		drive_tick().await;
 		let (_, stats) = announced(&origin).await;
@@ -3058,9 +3167,19 @@ mod tests {
 				.expect("listing")
 				.expect("live");
 			let (name, listed) = match event {
-				broadcast::TracksEvent::Added { name, .. } => (name, true),
-				broadcast::TracksEvent::Removed { name } | broadcast::TracksEvent::Finished { name } => (name, false),
-				broadcast::TracksEvent::Synced => continue,
+				broadcast::TracksEvent::Added {
+					name,
+					info: broadcast::Listed::Track(_),
+				} => (name, true),
+				broadcast::TracksEvent::Removed {
+					kind: broadcast::Kind::Track,
+					name,
+				}
+				| broadcast::TracksEvent::Finished {
+					kind: broadcast::Kind::Track,
+					name,
+				} => (name, false),
+				_ => continue,
 			};
 			if let Some((bucket, _)) = crate::parse_bucket_track(&name) {
 				return (bucket.as_str().to_string(), listed);
@@ -3156,7 +3275,7 @@ mod tests {
 
 	/// A bucket that returns after its linger starts a new counter run: a new
 	/// epoch counted from zero under its own track name, so a reader summing each
-	/// epoch never counts the old one twice, and its MoQ group 0 is where its
+	/// epoch never counts the old one twice, and its first MoQ group is where its
 	/// counters start.
 	#[tokio::test(start_paused = true)]
 	async fn a_relisted_bucket_starts_a_new_epoch_from_zero() {
@@ -3164,16 +3283,21 @@ mod tests {
 		let registry = producer.registry();
 		let (_, broadcast) = announced(&origin).await;
 		let stats = crate::Consumer::new(broadcast.clone(), Default::default());
-		// The listed run's name, and the sequence of its first group.
+		// The listed run's name, and the start of its first group, which nothing comes before.
 		let run = async |broadcast: &moq_net::broadcast::Consumer| {
 			let name = crate::listed_bucket_track(broadcast, &moq_net::Path::from_static("acme")).await;
 			let mut track = subscribe(broadcast, &name).await;
 			let mut first = None;
 			while let Some(group) = futures::FutureExt::now_or_never(track.next_group()) {
-				let sequence = group.unwrap().unwrap().sequence;
-				first = Some(first.map_or(sequence, |first: u64| first.min(sequence)));
+				let start = group.unwrap().unwrap().group().expect("a group").start;
+				first = Some(first.map_or(start, |first: u64| first.min(start)));
 			}
-			(name, first)
+			let first = first.expect("a run's first group is listed");
+			assert!(
+				track.is_skipped(0..first),
+				"a run says nothing precedes its first group"
+			);
+			(name, Some(first))
 		};
 
 		let session =
@@ -3187,7 +3311,7 @@ mod tests {
 		let first = reader.next().await.unwrap().unwrap();
 		assert_eq!(first.tiers[""].sessions.sessions_started, 1);
 		let (old_name, old_first) = run(&broadcast).await;
-		assert_eq!(old_first, Some(0), "a run's first group is group 0");
+		assert!(old_first.is_some(), "a run's first group is listed");
 
 		drop(session);
 		for _ in 0..3 {
@@ -3224,7 +3348,7 @@ mod tests {
 		);
 		let (new_name, new_first) = run(&broadcast).await;
 		assert_ne!(new_name, old_name, "a run never reuses a track name");
-		assert_eq!(new_first, Some(0), "the new run starts at group 0 too");
+		assert!(new_first > old_first, "the new run starts at its own first drain");
 		assert_eq!(
 			default_totals(&broadcast).await.sessions.sessions_started,
 			2,

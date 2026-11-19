@@ -10,9 +10,9 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-FUZZ_EXCLUDES = " ".join(f"--exclude {crate}-fuzz" for crate in ("moq-net", "moq-quic", "moq-mux", "moq-rtmp"))
+FUZZ_CRATES = ("moq-net", "moq-quic", "moq-mux", "moq-rtmp", "moq-sock", "moq-uring")
+FUZZ_EXCLUDES = " ".join(f"--exclude {crate}-fuzz" for crate in FUZZ_CRATES)
 DEVICE_FEATURES = "moq-video/capture moq-audio/capture moq-audio/playback moq-cli/play moq-cli/openh264"
-LINUX = os.uname().sysname == "Linux"
 
 
 def target_features():
@@ -73,7 +73,7 @@ class SelectTest(unittest.TestCase):
             return calls.read_text().splitlines() if calls.exists() else []
 
     def test_nextest_launcher_selects_workspace(self):
-        features = [*DEVICE_FEATURES.split(), "moq-webrtc/p2p", *(["moq-relay/io-uring"] if LINUX else [])]
+        features = DEVICE_FEATURES.split()
         features += [feature for feature in target_features() if feature not in features]
         for github_actions in (False, True):
             for action in ("check", "check-test", "lint", "test"):
@@ -86,8 +86,7 @@ class SelectTest(unittest.TestCase):
                     )
         selected = self.selected("sh/rs/nextest.sh")
         # The gate's lint runs no extra target or feature builds.
-        for recipe in ("uring-check", "capture"):
-            self.assertNotIn(f"rs {recipe}", selected)
+        self.assertNotIn("rs capture", selected)
 
     def test_cargo_configuration_selects_workspace(self):
         for path in (".cargo/config.toml", ".cargo/config"):
@@ -127,7 +126,7 @@ class SelectTest(unittest.TestCase):
         # moq-net and its dependencies can deepen the session driver's Send proof.
         for path in ("rs/moq-net/src/lib.rs", "rs/kio/src/lib.rs", "Cargo.lock"):
             with self.subTest(path=path):
-                calls = self.selected(path)
+                calls = [call for call in self.selected(path) if call != "rs c-tests --syntax"]
                 self.assertEqual(len(calls), 4, calls)
                 self.assertTrue(calls[0].startswith("rs lint "), calls)
                 self.assertEqual(calls[1], "rs media-defaults", calls)
@@ -138,6 +137,26 @@ class SelectTest(unittest.TestCase):
         # Only the lint phase runs it, so the gate compiles it once.
         self.assertNotIn("rs send-depth", self.selected("rs/moq-net/src/lib.rs", action="test"))
         self.assertNotIn("rs send-depth", self.selected("rs/moq-auth/src/lib.rs"))
+        # moq-tokio spawns the driver, so its own changes are proved too.
+        self.assertIn("rs send-depth", self.selected("rs/moq-tokio/src/client.rs"))
+
+    def test_gate_compiles_c_callers_against_libmoq(self):
+        # libmoq, a crate its header reaches, and the C callers' own inputs.
+        for path in (
+            "rs/libmoq/src/lib.rs",
+            "rs/libmoq/c-tests/abort-unwanted.c",
+            "rs/moq-net/src/lib.rs",
+            "sh/rs/c-tests.sh",
+            "doc/lib/c/index.md",
+            "doc/lib/samples.sh",
+            "Cargo.lock",
+        ):
+            with self.subTest(path=path):
+                self.assertRegex(path, dispatch_scope())
+                self.assertEqual(self.selected(path).count("rs c-tests --syntax"), 1)
+        # Only the lint phase runs it, and only for libmoq.
+        self.assertNotIn("rs c-tests --syntax", self.selected("rs/libmoq/src/lib.rs", action="test"))
+        self.assertNotIn("rs c-tests --syntax", self.selected("rs/moq-auth/src/lib.rs"))
 
     def test_media_defaults_are_isolated_from_device_features(self):
         for path in ("rs/moq-audio/src/lib.rs", "rs/moq-video/src/lib.rs", "Cargo.lock"):
@@ -176,26 +195,16 @@ class SelectTest(unittest.TestCase):
                 self.assertEqual(len(calls), 1, calls)
                 # The targets' required features follow the device ones.
                 self.assertIn(f" --features {features}", calls[0])
-        # moq-webrtc's data channel transport is off by default too.
-        calls = self.selected("rs/moq-webrtc/src/p2p/mod.rs", action="test")
-        self.assertEqual(len(calls), 1, calls)
-        self.assertIn(" moq-webrtc/p2p", calls[0])
-        # So is a change to qmux, which only that optional feature pulls in.
-        calls = self.selected("rs/qmux/src/lib.rs", action="test")
-        self.assertTrue(any(" moq-webrtc/p2p" in call for call in calls), calls)
         # A dependency of the media crates still runs both their device tests.
         calls = self.selected("rs/moq-audio/src/lib.rs", action="test")
         self.assertIn("--package moq-video --package moq-audio", calls[0])
 
-    def test_io_uring_joins_the_linux_test_build(self):
-        for path in ("rs/moq-uring/src/lib.rs", "rs/moq-relay/src/lib.rs", "rs/moq-net/src/lib.rs"):
+    def test_io_uring_changes_test_the_relay(self):
+        for path in ("rs/moq-uring/src/lib.rs", "rs/moq-relay/src/lib.rs"):
             with self.subTest(path=path):
                 calls = self.selected(path, action="test")
                 self.assertEqual(len(calls), 1, calls)
-                self.assertEqual(" moq-relay/io-uring" in calls[0], LINUX, calls)
-                if path == "rs/moq-uring/src/lib.rs":
-                    self.assertIn("/rs/moq-uring#", calls[0])
-        self.assertNotIn("moq-relay/io-uring", self.selected("rs/moq-cli/src/main.rs", action="test")[0])
+                self.assertIn("/rs/moq-relay#", calls[0])
 
     def test_net_session_tests_follow_the_library(self):
         for path in ("rs/moq-net/src/lib.rs", "rs/moq-json/src/lib.rs", "rs/moq-net-tests/tests/integration/main.rs"):
@@ -394,7 +403,7 @@ class MetadataTest(unittest.TestCase):
         artifact = {"reason": "compiler-artifact", "filenames": [str(self.scratch / "libmoq.a")]}
         header = {
             "reason": "build-script-executed",
-            "package_id": "path+file:///rs/moq-c#1.0.0",
+            "package_id": "path+file:///rs/libmoq#1.0.0",
             "out_dir": str(self.scratch),
         }
         # Cargo emits a stream, not an array. Both selectors must reject an
@@ -484,19 +493,6 @@ class FeatureTest(unittest.TestCase):
             with self.subTest(feature=feature):
                 calls = self.trace("net", net_features=f'moq-net feature "{feature}"', expected_returncode=1)
                 self.assertTrue(all(call.startswith("tree ") for call in calls), calls)
-
-    def test_tokio_keeps_extremes_and_transport_contracts(self):
-        boundary = self.trace("tokio")
-        exhaustive = self.trace("tokio", "--all")
-        self.assertEqual(sum(call.startswith("clippy ") for call in boundary), 3)
-        self.assertEqual(sum(call.startswith("clippy ") for call in exhaustive), 9)
-        self.assertTrue(any(" --tests " in call for call in boundary))
-        self.assertFalse(any(" --all-targets " in call for call in boundary))
-        self.assertTrue(any(" --all-targets " in call for call in exhaustive))
-        self.assertEqual(
-            [call for call in boundary if not call.startswith("clippy ")],
-            [call for call in exhaustive if not call.startswith("clippy ")],
-        )
 
     def test_media_keeps_dependency_contracts_and_vpx_tests(self):
         boundary = self.trace("media")

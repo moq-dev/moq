@@ -30,7 +30,7 @@ import { Time } from "@moq/net";
 
 // Publish: each update supersedes the last.
 const producer = new Snapshot.Producer({ track });
-producer.update({ value: { hello: "world" }, at: Time.Timestamp.now() });
+producer.update({ hello: "world" }, Time.Timestamp.now());
 
 // Consume: each state in order, with the timestamp of the frame that produced it. The consumer
 // subscribes to the track itself; pass `broadcast.track(name)` for a remote one.
@@ -54,8 +54,8 @@ import { Stream } from "@moq/json";
 import { Time } from "@moq/net";
 
 const producer = new Stream.Producer({ track });
-producer.append({ value: { event: "started" }, at: Time.Timestamp.now() });
-producer.append({ value: { event: "stopped" }, at: Time.Timestamp.now() });
+producer.append({ event: "started" }, Time.Timestamp.now());
+producer.append({ event: "stopped" }, Time.Timestamp.now());
 
 const consumer = new Stream.Consumer({ track: track.subscribe() });
 for await (const { value, at } of consumer) {

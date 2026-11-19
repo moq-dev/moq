@@ -444,7 +444,7 @@ impl<E: CatalogExt> Reserved<E> {
 		}
 	}
 
-	/// Declare the track's longest group (its GOP), which the catalog's `media.join.interval`
+	/// Declare the track's longest group (its GOP), which the catalog's `sync.interval`
 	/// promises. Without one, a video or audio track measures it over its first second or group,
 	/// whichever is longer, before the interval is declared.
 	pub fn with_interval(mut self, interval: impl Into<Option<std::time::Duration>>) -> Self {
@@ -610,7 +610,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		info: moq_net::track::Info,
 		interval: Option<std::time::Duration>,
 	) -> crate::Result<crate::container::Producer<super::hang::Container, C>> {
-		let track = self.catalog.fresh_track(&self.name, info)?;
+		let track = self.catalog.fresh_track(&self.name, info);
 		let rendition = self.catalog.rendition(track.name())?;
 		self.catalog.media(track, container, rendition, None, interval)
 	}

@@ -148,6 +148,16 @@ class Producer:
         value = self._inner.reservation()
         return None if value is None else Reservation(value)
 
+    def abort_unwanted(self, error_code: int) -> bool:
+        """Abort this track with an application error code, but only while nobody wants it.
+
+        Call it once :meth:`TrackDemand.wanted_changed` returns ``False``. Returns ``True`` once
+        the track is closed, and ``False``, leaving the track open, when a reader joined since;
+        keep serving and wait for the next ``None`` on a fresh ``demand()``: one that already
+        returned ``None`` misses a reader that came and went, and waits on.
+        """
+        return self._inner.abort_unwanted(error_code)
+
     def finish(self) -> None:
         """Flush any frames the codec is holding and finalize the track."""
         self._inner.finish()

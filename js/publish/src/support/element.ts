@@ -6,10 +6,10 @@
  * @module
  */
 
-import { type Level, type Report, Support } from "@moq/ui";
-import { type Full, isSupported } from "./";
+import { type Report, Support } from "@moq/ui";
+import { type Full, isSupported, type Level } from "./";
 
-export type { Show } from "@moq/ui";
+export { type Report, type Show, type Status, Support } from "@moq/ui";
 
 function summarize(support: Full): Level {
 	if (support.webtransport === "none") return "none";

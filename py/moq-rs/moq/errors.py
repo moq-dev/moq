@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from moq_ffi import MoqError, MoqProtocolKind
+from moq_ffi import MoqError, moq_error_is_auth, moq_error_is_shutdown
 from moq_ffi._uniffi.moq import (
     _uniffi_rust_call,
     _UniffiFfiConverterString,
@@ -34,20 +34,17 @@ def is_shutdown(err: BaseException) -> bool:
     Useful for breaking out of an `async for` without treating the expected
     end-of-stream error as a problem.
     """
-    return isinstance(err, (MoqError.Cancelled, MoqError.Closed))
+    return isinstance(err, MoqError) and moq_error_is_shutdown(err)
 
 
 def is_auth(err: BaseException) -> bool:
-    """True for HTTP 401/403, an expired token, a protocol Unauthorized or Expired
-    session close, and a track revocation.
+    """True for HTTP 401/403, an expired or malformed token, a protocol Unauthorized
+    or Expired session close, and a track revocation.
 
     Unlike a transport failure, retrying without new credentials won't help, so
     callers should surface these rather than reconnect.
     """
-    if isinstance(err, (MoqError.Unauthorized, MoqError.Forbidden, MoqError.Expired)):
-        return True
-    protocol = protocol_error(err)
-    return protocol is not None and protocol.kind in (MoqProtocolKind.UNAUTHORIZED, MoqProtocolKind.EXPIRED)
+    return isinstance(err, MoqError) and moq_error_is_auth(err)
 
 
 def protocol_error(err: BaseException) -> ProtocolError | None:

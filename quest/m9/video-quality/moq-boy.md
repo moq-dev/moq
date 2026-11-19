@@ -15,8 +15,8 @@ write Y4M. Only the ROM fetch touches the network.
 
 Today (`rs/moq-boy/src/video.rs`) moq-boy encodes the native 160x144 frame at
 60 fps through OpenH264 in camera mode, because a frame that small is below
-the hardware encoders' minimum size. The bitrate is the 0.07 bits-per-pixel
-default (about 97 kbps), with a 2 s GOP.
+the hardware encoders' minimum size. The bitrate is the default cap for
+that size and rate (about 245 kbps), with a 2 s GOP.
 
 Score the way the player displays the video, at a size fixed in the
 harness rather than read from a window. Upscale the reference and the

@@ -24,7 +24,7 @@ const MAX_VARINT: usize = 9;
 /// One frame as a relay reads it back out of the group.
 #[derive(Debug, PartialEq)]
 struct Seen {
-	timestamp: Option<crate::Timestamp>,
+	timestamp: crate::Timestamp,
 	payload: Bytes,
 	/// The Object ID and property block the frame kept, if it was not plain.
 	fields: Option<(u64, Option<Bytes>)>,
@@ -45,7 +45,8 @@ struct Ingested {
 enum Session {
 	Lite {
 		version: lite::Version,
-		/// The session negotiated the `ietf` extension, so each frame follows a record.
+		/// The session negotiated the `ietf` extension and the track has a Version, so
+		/// each frame follows a record.
 		records: bool,
 		frame_start: u64,
 	},
@@ -92,9 +93,11 @@ pub fn ingest(data: &[u8]) -> bool {
 			// The track arrives timed exactly when the wire stamps it: never before Lite05,
 			// always on Lite05/06 (an untimed one carries its send times), as declared after.
 			let timed = version.wire_timescale(timed.then_some(Timescale::MILLI)).is_some();
+			// Only the `ietf` extension carries a Version, and only on a track that has one.
+			let draft = draft.filter(|_| settings & 0x10 != 0 && version.has_ietf());
 			let session = Session::Lite {
 				version,
-				records: settings & 0x10 != 0 && version.has_ietf(),
+				records: draft.is_some(),
 				frame_start: (settings >> 5) as u64,
 			};
 			// Only lite-07 can mark a track compressed.
@@ -133,7 +136,7 @@ fn check(session: Session, info: &track::Info, body: &[u8], ingested: &Ingested)
 	let mut payload = 0;
 	for (index, frame) in ingested.frames.iter().enumerate() {
 		assert_eq!(
-			frame.timestamp.is_some(),
+			frame.timestamp.scale().is_some(),
 			info.timescale.is_some(),
 			"frame {index} does not match its track's timeline"
 		);
@@ -168,8 +171,9 @@ fn check(session: Session, info: &track::Info, body: &[u8], ingested: &Ingested)
 		Session::Lite { records, .. } => {
 			// Timing, inflated size, and size; a record adds its code and block length.
 			let fields = 3 + 2 * records as usize;
-			// The Group State, and an END_OF_GROUP record with its block length.
-			let trailer = (1 + 2 * records as usize) * MAX_VARINT;
+			// The Group State, and an END_OF_GROUP record with its block length; or a
+			// GROUP_END's zero length and End.
+			let trailer = 3 * MAX_VARINT;
 			let blocks: usize = ingested
 				.frames
 				.iter()
@@ -210,16 +214,16 @@ fn run(session: Session, info: &track::Info, body: &[u8], chunk: usize) -> Optio
 	// Unbounded, so eviction never aborts a group mid-frame.
 	broadcast.pool = cache::Pool::unbounded();
 	let broadcast = broadcast.produce();
-	let track = broadcast.create_track("ingest", info.clone()).ok()?;
+	let track = broadcast.create_track("ingest", info.clone())?;
 
-	let (end, group) = match session {
+	let (end, fin, group) = match session {
 		Session::Lite {
 			version,
 			records,
 			frame_start,
 		} => {
 			let mut reader = reader(Bytes::copy_from_slice(body), chunk, version);
-			let producer = track.append_group().ok()?;
+			let producer = track.append_next().ok()?;
 			let consumer = producer.consume();
 			let mut viewer = stored(producer.consume(), info.compressed());
 			let mut group = crate::recv::Group::new(producer);
@@ -230,16 +234,14 @@ fn run(session: Session, info: &track::Info, body: &[u8], chunk: usize) -> Optio
 				keep_up(&mut viewer);
 				res
 			});
-			(end.map(|()| "fin".to_string()), (group, consumer))
+			let fin = end.as_ref().ok().copied().flatten();
+			let end = end.map(|end| end.map_or_else(|| "fin".to_string(), |end| format!("end {end}")));
+			(end, fin, (group, consumer))
 		}
 		Session::Ietf { version } => {
 			let (header, used) = ietf::GroupHeader::decode_slice(body, version).ok()?;
 			let mut reader = reader(Bytes::copy_from_slice(&body[used..]), chunk, version);
-			let producer = track
-				.create_group(group::Info {
-					sequence: header.group_id,
-				})
-				.ok()?;
+			let producer = track.create_group(group::Info { start: header.group_id }).ok()?;
 			producer
 				.set_wire(group::Wire {
 					sparse: false,
@@ -260,7 +262,7 @@ fn run(session: Session, info: &track::Info, body: &[u8], chunk: usize) -> Optio
 				keep_up(&mut viewer);
 				res
 			});
-			(end.map(|ended| format!("{ended:?}")), (group, consumer))
+			(end.map(|ended| format!("{ended:?}")), None, (group, consumer))
 		}
 	};
 
@@ -268,7 +270,7 @@ fn run(session: Session, info: &track::Info, body: &[u8], chunk: usize) -> Optio
 	// Settle the group as the session does, so the reader below never waits.
 	match &end {
 		Ok(_) => {
-			let _ = group.finish();
+			let _ = group.end(fin);
 		}
 		Err(err) => {
 			let _ = group.abort(err.clone());
@@ -361,11 +363,14 @@ pub(super) fn seeds() -> Vec<super::Seed> {
 	};
 
 	// moq-lite: three plain frames, at every version, timed and untimed. The timing
-	// prefix is a zigzag delta, so 0x02 steps the clock forward by one.
+	// prefix is a zigzag delta, so 0x02 steps the clock forward by one; an untimed lite-07
+	// frame carries one too, which keeps its group's start. Lite-07 also ends the group
+	// whole with a GROUP_END.
 	for (index, version) in super::LITE_VERSIONS.iter().enumerate() {
 		for timed in [false, true] {
 			let mut data = vec![(index * 2) as u8, timed as u8, 3];
-			let timing = version.wire_timescale(timed.then_some(Timescale::MILLI)).is_some();
+			let framing = lite::Framing::new(&track_info(timed, false, None), *version);
+			let timing = framing.stamped();
 			// Lite-07 leads with the size plus one; earlier versions end the header with it.
 			let length_first = version.has_length_first();
 			for (n, payload) in [&b"abc"[..], b"", b"defgh"].into_iter().enumerate() {
@@ -373,24 +378,33 @@ pub(super) fn seeds() -> Vec<super::Seed> {
 					data.push(payload.len() as u8 + 1);
 				}
 				if timing {
-					data.push(if n == 0 { 0 } else { 2 });
+					data.push(if n == 0 || !timed { 0 } else { 2 });
 				}
 				if !length_first {
 					data.push(payload.len() as u8);
 				}
 				data.extend_from_slice(payload);
 			}
+			if version.has_group_end() {
+				// A zero length, then the End: past the last frame's 2ms, or the start's next
+				// unit when untimed.
+				let mut whole = data.clone();
+				whole.extend_from_slice(&[0, if timed { 3 } else { 1 }]);
+				push(whole);
+			}
 			push(data);
 		}
 	}
 
-	// moq-lite-07 with the `ietf` extension: a plain Group State, then records.
+	// moq-lite-07 with the `ietf` extension, on a track a draft-18 publisher made: a plain
+	// Group State, then records.
 	let lite07 = super::LITE_VERSIONS.len() - 1;
 	let mut data = vec![(lite07 * 2) as u8, 0x10, 2, 0];
 	for payload in [&b"ab"[..], b"c"] {
 		// Object 0 is the first record's absolute ID, then each next one is a zero delta,
-		// and neither has a property block. The frame's size follows, plus one.
-		data.extend_from_slice(&[0, 0, payload.len() as u8 + 1]);
+		// and neither has a property block. The frame's size follows, plus one, then a zero
+		// timestamp delta, which keeps the untimed group's start.
+		data.extend_from_slice(&[0, 0, payload.len() as u8 + 1, 0]);
 		data.extend_from_slice(payload);
 	}
 	push(data);

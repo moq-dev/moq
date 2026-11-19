@@ -12,7 +12,8 @@ browser fix make those paths dead code.
 ## Plan
 
 Found by [moq-dev/moq#8673](https://github.com/moq-dev/moq/pull/8673) with
-`just test stream-credit`, whose YIELDED resets of just-opened streams hit
+`just test stream-credit`, whose preempting resets of just-opened streams
+(YIELDED then, TOO_FAR_BEHIND since #8965) hit
 both bugs within a few milliseconds of the stream's data.
 
 - Chromium 156: the network service accepts the stream and replies to Blink's
@@ -39,8 +40,8 @@ both bugs within a few milliseconds of the stream's data.
 Decided 2026-11-13 (maintainer, `/quest-complete`): ✅ keep this follow-up
 (rejected: drop it and live with the workaround alone).
 
-## Waiting
-
-- Maintainer: approve filing at crbug.com and bugzilla.mozilla.org, outside the
-  moq orgs, which needs your go-ahead; check each tracker's policy on
-  LLM-written reports first. Recommendation: file both, with the repro.
+Decided 2026-11-15 (maintainer, /quest-complete): ✅ approved to file at
+crbug.com and bugzilla.mozilla.org, each only after reading that tracker's
+policy on LLM-written reports and searching for an existing report. Where a
+tracker bans LLM-written reports, hand the maintainer a draft with the repro
+instead of filing it.

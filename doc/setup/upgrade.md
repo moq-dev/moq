@@ -26,9 +26,9 @@ replaces it.
 ## Migration guides
 
 - **Binaries:** [moq-relay](https://github.com/moq-dev/moq/blob/main/rs/moq-relay/MIGRATE.md), [moq-cli (`moq`)](https://github.com/moq-dev/moq/blob/main/rs/moq-cli/MIGRATE.md), [moq-gst](https://github.com/moq-dev/moq/blob/main/rs/moq-gst/MIGRATE.md), [obs-moq](https://github.com/moq-dev/moq/blob/main/cpp/obs/MIGRATE.md)
-- **Bindings:** [moq-ffi (UniFFI)](https://github.com/moq-dev/moq/blob/main/rs/moq-ffi/MIGRATE.md), [moq-c (C)](https://github.com/moq-dev/moq/blob/main/rs/moq-c/MIGRATE.md), [Python](https://github.com/moq-dev/moq/blob/main/py/moq-rs/MIGRATE.md), [Go](https://github.com/moq-dev/moq/blob/main/go/wrapper/MIGRATE.md), [Swift](https://github.com/moq-dev/moq/blob/main/swift/MIGRATE.md), [Kotlin](https://github.com/moq-dev/moq/blob/main/kt/moq/MIGRATE.md), [Dart](https://github.com/moq-dev/moq/blob/main/dart/moq/MIGRATE.md), [C++](https://github.com/moq-dev/moq/blob/main/cpp/moq/MIGRATE.md)
-- **Rust:** [hang](https://github.com/moq-dev/moq/blob/main/rs/hang/MIGRATE.md), [kio](https://github.com/moq-dev/moq/blob/main/rs/kio/MIGRATE.md), [kio-macros](https://github.com/moq-dev/moq/blob/main/rs/kio/macros/MIGRATE.md), [moq-archive](https://github.com/moq-dev/moq/blob/main/rs/moq-archive/MIGRATE.md), [moq-audio](https://github.com/moq-dev/moq/blob/main/rs/moq-audio/MIGRATE.md), [moq-auth](https://github.com/moq-dev/moq/blob/main/rs/moq-auth/MIGRATE.md), [moq-crypto](https://github.com/moq-dev/moq/blob/main/rs/moq-crypto/MIGRATE.md), [moq-hls](https://github.com/moq-dev/moq/blob/main/rs/moq-hls/MIGRATE.md), [moq-json](https://github.com/moq-dev/moq/blob/main/rs/moq-json/MIGRATE.md), [moq-loc](https://github.com/moq-dev/moq/blob/main/rs/moq-loc/MIGRATE.md), [moq-msf](https://github.com/moq-dev/moq/blob/main/rs/moq-msf/MIGRATE.md), [moq-mux](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/MIGRATE.md), [moq-net](https://github.com/moq-dev/moq/blob/main/rs/moq-net/MIGRATE.md), [moq-nvenc](https://github.com/moq-dev/moq/blob/main/rs/moq-nvenc/MIGRATE.md), [moq-pattern](https://github.com/moq-dev/moq/blob/main/rs/moq-pattern/MIGRATE.md), [moq-rtmp](https://github.com/moq-dev/moq/blob/main/rs/moq-rtmp/MIGRATE.md), [moq-sock](https://github.com/moq-dev/moq/blob/main/rs/moq-sock/MIGRATE.md), [moq-srt](https://github.com/moq-dev/moq/blob/main/rs/moq-srt/MIGRATE.md), [moq-stats](https://github.com/moq-dev/moq/blob/main/rs/moq-stats/MIGRATE.md), [moq-tokio](https://github.com/moq-dev/moq/blob/main/rs/moq-tokio/MIGRATE.md), [moq-transcode](https://github.com/moq-dev/moq/blob/main/rs/moq-transcode/MIGRATE.md), [moq-uring](https://github.com/moq-dev/moq/blob/main/rs/moq-uring/MIGRATE.md), [moq-v4l](https://github.com/moq-dev/moq/blob/main/rs/moq-v4l/MIGRATE.md), [moq-video](https://github.com/moq-dev/moq/blob/main/rs/moq-video/MIGRATE.md), [moq-webrtc (was moq-rtc)](https://github.com/moq-dev/moq/blob/main/rs/moq-webrtc/MIGRATE.md), [qmux](https://github.com/moq-dev/moq/blob/main/rs/qmux/MIGRATE.md)
-- **JavaScript:** [`@moq/auth`](https://github.com/moq-dev/moq/blob/main/js/auth/MIGRATE.md), [`@moq/clock`](https://github.com/moq-dev/moq/blob/main/js/clock/MIGRATE.md), [`@moq/hang`](https://github.com/moq-dev/moq/blob/main/js/hang/MIGRATE.md), [`@moq/json`](https://github.com/moq-dev/moq/blob/main/js/json/MIGRATE.md), [`@moq/loc`](https://github.com/moq-dev/moq/blob/main/js/loc/MIGRATE.md), [`@moq/msf`](https://github.com/moq-dev/moq/blob/main/js/msf/MIGRATE.md), [`@moq/net`](https://github.com/moq-dev/moq/blob/main/js/net/MIGRATE.md), [`@moq/pattern`](https://github.com/moq-dev/moq/blob/main/js/pattern/MIGRATE.md), [`@moq/publish`](https://github.com/moq-dev/moq/blob/main/js/publish/MIGRATE.md), [`@moq/qmux`](https://github.com/moq-dev/moq/blob/main/js/qmux/MIGRATE.md), [`@moq/room`](https://github.com/moq-dev/moq/blob/main/js/room/MIGRATE.md), [`@moq/signals`](https://github.com/moq-dev/moq/blob/main/js/signals/MIGRATE.md), [`@moq/ui`](https://github.com/moq-dev/moq/blob/main/js/ui/MIGRATE.md), [`@moq/video`](https://github.com/moq-dev/moq/blob/main/js/video/MIGRATE.md), [`@moq/watch`](https://github.com/moq-dev/moq/blob/main/js/watch/MIGRATE.md)
+- **Bindings:** [moq-ffi (UniFFI)](https://github.com/moq-dev/moq/blob/main/rs/moq-ffi/MIGRATE.md), [libmoq (C)](https://github.com/moq-dev/moq/blob/main/rs/libmoq/MIGRATE.md), [Python](https://github.com/moq-dev/moq/blob/main/py/moq-rs/MIGRATE.md), [Go](https://github.com/moq-dev/moq/blob/main/go/wrapper/MIGRATE.md), [Swift](https://github.com/moq-dev/moq/blob/main/swift/MIGRATE.md), [Kotlin](https://github.com/moq-dev/moq/blob/main/kt/moq/MIGRATE.md), [Dart](https://github.com/moq-dev/moq/blob/main/dart/moq/MIGRATE.md), [C++](https://github.com/moq-dev/moq/blob/main/cpp/moq/MIGRATE.md)
+- **Rust:** [hang](https://github.com/moq-dev/moq/blob/main/rs/hang/MIGRATE.md), [kio](https://github.com/moq-dev/moq/blob/main/rs/kio/MIGRATE.md), [kio-macros](https://github.com/moq-dev/moq/blob/main/rs/kio/macros/MIGRATE.md), [moq-archive](https://github.com/moq-dev/moq/blob/main/rs/moq-archive/MIGRATE.md), [moq-audio](https://github.com/moq-dev/moq/blob/main/rs/moq-audio/MIGRATE.md), [moq-auth](https://github.com/moq-dev/moq/blob/main/rs/moq-auth/MIGRATE.md), [moq-hls](https://github.com/moq-dev/moq/blob/main/rs/moq-hls/MIGRATE.md), [moq-json](https://github.com/moq-dev/moq/blob/main/rs/moq-json/MIGRATE.md), [moq-loc](https://github.com/moq-dev/moq/blob/main/rs/moq-loc/MIGRATE.md), [moq-msf](https://github.com/moq-dev/moq/blob/main/rs/moq-msf/MIGRATE.md), [moq-mux](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/MIGRATE.md), [moq-net](https://github.com/moq-dev/moq/blob/main/rs/moq-net/MIGRATE.md), [moq-nvenc](https://github.com/moq-dev/moq/blob/main/rs/moq-nvenc/MIGRATE.md), [moq-pattern](https://github.com/moq-dev/moq/blob/main/rs/moq-pattern/MIGRATE.md), [moq-rtmp](https://github.com/moq-dev/moq/blob/main/rs/moq-rtmp/MIGRATE.md), [moq-sock](https://github.com/moq-dev/moq/blob/main/rs/moq-sock/MIGRATE.md), [moq-srt](https://github.com/moq-dev/moq/blob/main/rs/moq-srt/MIGRATE.md), [moq-stats](https://github.com/moq-dev/moq/blob/main/rs/moq-stats/MIGRATE.md), [moq-tokio](https://github.com/moq-dev/moq/blob/main/rs/moq-tokio/MIGRATE.md), [moq-transcode](https://github.com/moq-dev/moq/blob/main/rs/moq-transcode/MIGRATE.md), [moq-uring](https://github.com/moq-dev/moq/blob/main/rs/moq-uring/MIGRATE.md), [moq-v4l](https://github.com/moq-dev/moq/blob/main/rs/moq-v4l/MIGRATE.md), [moq-video](https://github.com/moq-dev/moq/blob/main/rs/moq-video/MIGRATE.md), [moq-webrtc (was moq-rtc)](https://github.com/moq-dev/moq/blob/main/rs/moq-webrtc/MIGRATE.md), [qmux](https://github.com/moq-dev/moq/blob/main/rs/qmux/MIGRATE.md)
+- **JavaScript:** [`@moq/auth`](https://github.com/moq-dev/moq/blob/main/js/auth/MIGRATE.md), [`@moq/clock`](https://github.com/moq-dev/moq/blob/main/js/clock/MIGRATE.md), [`@moq/hang`](https://github.com/moq-dev/moq/blob/main/js/hang/MIGRATE.md), [`@moq/json`](https://github.com/moq-dev/moq/blob/main/js/json/MIGRATE.md), [`@moq/loc`](https://github.com/moq-dev/moq/blob/main/js/loc/MIGRATE.md), [`@moq/msf`](https://github.com/moq-dev/moq/blob/main/js/msf/MIGRATE.md), [`@moq/net`](https://github.com/moq-dev/moq/blob/main/js/net/MIGRATE.md), [`@moq/pattern`](https://github.com/moq-dev/moq/blob/main/js/pattern/MIGRATE.md), [`@moq/publish`](https://github.com/moq-dev/moq/blob/main/js/publish/MIGRATE.md), [`@moq/qmux`](https://github.com/moq-dev/moq/blob/main/js/qmux/MIGRATE.md), [`@moq/room`](https://github.com/moq-dev/moq/blob/main/js/room/MIGRATE.md), [`@moq/signals`](https://github.com/moq-dev/moq/blob/main/js/signals/MIGRATE.md), [`@moq/video`](https://github.com/moq-dev/moq/blob/main/js/video/MIGRATE.md), [`@moq/watch`](https://github.com/moq-dev/moq/blob/main/js/watch/MIGRATE.md)
 
 ## Unreleased
 
@@ -36,14 +36,7 @@ These land with the next breaking release.
 
 - **WebRTC moves to `moq-webrtc`.** The `moq-rtc` crate is renamed
   `moq-webrtc`: replace `moq_rtc::` with `moq_webrtc::`. Its last release stays
-  on crates.io. moq-tokio's `webrtc` feature is gone: enable moq-webrtc's `p2p`
-  feature and use `moq_webrtc::p2p` instead of `moq_tokio::webrtc`, with
-  `offerer.connect(&client)` for `client.connect_webrtc(&offerer)` and
-  `answerer.accept(&listener)` for `listener.accept_webrtc(&answerer)`. The
-  ICE agent that was `moq-ice`, never published, is a private module of
-  moq-webrtc. moq-cli's `webrtc` cargo feature is gone: drop it from your
-  build; `import rtc` and `export rtc` never needed it. Nothing changes on the
-  wire.
+  on crates.io. Nothing changes on the wire.
 - **The default priority byte moves again.** Priorities are signed in every
   API, -128 to 127 with 0 unset, so nobody has to know that 127 is the middle
   of a byte. The wire keeps one byte and one urgency on both protocols, so an
@@ -61,7 +54,7 @@ These land with the next breaking release.
   upgrade that offers no `qmux-NN` subprotocol with 400 instead of falling back
   to the legacy `webtransport` format, so upgrade such clients before relays.
 - **Data-track breaks are an object with no bytes** (#5815). A hang data
-  track (TS private PES, sections, `m2ts`, text) marks a discontinuity with a
+  track (TS private PES, sections, passthrough, text) marks a discontinuity with a
   group of one empty object instead of a skipped group. Older consumers fail
   to decode it, so upgrade exporters and players before publishers.
 - **Auth requests name `webtransport`** (#5293). Relays report a WebTransport
@@ -71,17 +64,17 @@ These land with the next breaking release.
   format. An object role, including one with a `rate` cap, is refused; use
   pattern arrays for `publish` and `subscribe`.
 - **The join interval replaces archive timelines.** The hang catalog's root
-  `archive` section is gone, and the root `clock` moved to `media.clock`. The
-  catalog's `media.join.interval`, the longest GOP of any track, is the grid an
+  `archive` section is gone, and the root `clock` moved to `sync.clock`. The
+  catalog's `sync.interval`, the longest GOP of any track, is the grid an
   HLS exporter numbers segments on from the media tracks themselves; Rust
   publishers and `@moq/publish` declare it. Neither side reads the other's
   shape, so upgrade HLS exporters and their publishers together.
-- **Announce restarts.** moq-lite 07 adds `ANNOUNCE_RESTART` (0x3): another
-  instance, or a higher epoch of the same one, now serves the prefix. lite-06's
-  `ANNOUNCE_RESTART` is named `ANNOUNCE_UPDATE`, as it always meant. Elsewhere,
-  a restart is still an end then a start.
+- **Announce restarts.** On moq-lite 07 another instance at a path starts
+  before the one it replaces ends, and `ANNOUNCE_UPDATE` carries a higher epoch
+  of the same one. lite-06's `ANNOUNCE_RESTART` is named `ANNOUNCE_UPDATE`, as
+  it always meant. Elsewhere, a restart is still an end then a start.
 - **Publisher instances ride the route.** moq-lite 07 carries the instance and
-  epoch after the path in `ANNOUNCE_START` and `ANNOUNCE_RESTART`, and the
+  epoch after the path in `ANNOUNCE_START`, and the
   pinned instance in `TRACK`, `TRACKS`, `SUBSCRIBE`, and `FETCH`. Older wires
   carry none, so the receiving session mints an instance per announcement:
   default lite-06 sessions, including cluster GOAWAY redials, lose seamless
@@ -115,11 +108,9 @@ in any order, apart from these:
   finds no timeline in an old publisher's catalog, so upgrade publishers
   before the HLS gateway.
 - **Token grants are patterns.** Existing `put`/`get` tokens and key scopes
-  keep working as subtrees, and subtree-only grants are still signed in that
-  form, so a `moq-token` deployment can upgrade issuers and verifiers in either
-  order. Verifiers on the pattern-only `moq-auth` 0.1.0/0.1.1 or `@moq/auth`
-  0.1.x/0.2.0 refuse that form, so upgrade them before their issuers. Grants
-  only a pattern can express need an upgraded verifier.
+  keep working as subtrees, but every token and key scope is now written as
+  `publish` and `subscribe`, which a `moq-token` verifier (moq-relay 0.14 and
+  earlier) refuses. Upgrade verifiers before their issuers.
 - **Gossip discovery is removed.** Until every relay that ran
   `--cluster-mesh` is upgraded, keep client grants off `.internal/`: an older
   relay still dials any URL announced there with `cluster.token`, and an

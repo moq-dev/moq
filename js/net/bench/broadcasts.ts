@@ -5,9 +5,9 @@ import { Signal } from "@moq/signals";
 import type { Grant } from "../src/auth.ts";
 import { Producer as BroadcastProducer } from "../src/broadcast.ts";
 import { BroadcastCache } from "../src/consume.ts";
-import { HopSchema, WireRoute } from "../src/hop.ts";
+import { defined } from "../src/defined.test-util.ts";
+import { toHop, WireRoute } from "../src/hop.ts";
 import * as Instance from "../src/instance.ts";
-import { AnnounceRequest } from "../src/lite/announce.ts";
 import { Publisher } from "../src/lite/publisher.ts";
 import { Subscriber } from "../src/lite/subscriber.ts";
 import { TrackInfo } from "../src/lite/track.ts";
@@ -15,7 +15,7 @@ import { ALPN_07_WIP, Version } from "../src/lite/version.ts";
 import { createMockTransportPair } from "../src/mock.ts";
 import { Producer } from "../src/origin.ts";
 import * as Path from "../src/path.ts";
-import { Stream, Writer } from "../src/stream.ts";
+import { Writer } from "../src/stream.ts";
 import { wireOf } from "../src/wire.ts";
 
 // Keep protocol diagnostics out of the measured CSV on stdout.
@@ -101,7 +101,7 @@ console.log("tracks,listings,create_remove_and_read_us");
 for (const trackCount of [8, 128, 1024]) {
 	for (const listingCount of [1, 8, 32]) {
 		const broadcast = new BroadcastProducer();
-		for (let index = 0; index < trackCount; index++) broadcast.createTrack(`held-${index}`);
+		for (let index = 0; index < trackCount; index++) defined(broadcast.createTrack(`held-${index}`));
 		const listings = Array.from({ length: listingCount }, () => broadcast.consume().tracks());
 		// Past each listing's initial set and SYNCED.
 		for (const listing of listings) {
@@ -109,7 +109,7 @@ for (const trackCount of [8, 128, 1024]) {
 		}
 		const start = performance.now();
 		for (let index = 0; index < listed; index++) {
-			broadcast.createTrack(`new-${index}`);
+			defined(broadcast.createTrack(`new-${index}`));
 			for (const listing of listings) {
 				const event = await listing.next();
 				if (event?.kind !== "added" || event.name !== `new-${index}`) throw new Error("listing missed a track");
@@ -202,15 +202,7 @@ for (const patternCount of [8, 32, 128]) {
 			...Array.from({ length: patternCount - 1 }, (_, i) => Path.Pattern.literal(`other/${i}`)),
 		]);
 		const grant = new Signal<Grant | undefined>({ publish: new Path.Patterns(), subscribe });
-		const subscriber = new Subscriber(
-			quic,
-			Version.DRAFT_05,
-			HopSchema.parse(1n),
-			undefined,
-			undefined,
-			undefined,
-			grant,
-		);
+		const subscriber = new Subscriber(quic, Version.DRAFT_05, toHop(1n), undefined, undefined, undefined, grant);
 		const groups = await Promise.all(
 			Array.from({ length: fetchCount }, (_, i) => subscriber.fetchGroup(Path.from(`room/${i}`), "video", 0n)),
 		);
@@ -409,21 +401,25 @@ for (const routeCount of routeCounts) {
 		});
 		const senders = Array.from({ length: observerCount }, () => {
 			const pair = createMockTransportPair(ALPN_07_WIP);
-			const publisher = new Publisher(pair.server, Version.DRAFT_07, HopSchema.parse(1n), origin.consume());
 			const entered = Promise.withResolvers<void>();
 			const release = Promise.withResolvers<void>();
-			const stream = new Stream({
-				version: Version.DRAFT_07,
-				readable: new ReadableStream<Uint8Array>(),
-				writable: new WritableStream<Uint8Array>({
-					async write() {
+			// The session's Announce Stream, whose first write stalls.
+			const create = pair.server.createUnidirectionalStream.bind(pair.server);
+			pair.server.createUnidirectionalStream = async (options) => {
+				const writer = (await create(options)).getWriter();
+				return new WritableStream<Uint8Array>({
+					async write(chunk) {
 						entered.resolve();
 						await release.promise;
+						await writer.write(chunk);
 					},
-				}),
-			});
-			const running = publisher.runAnnounce(new AnnounceRequest(Path.empty()), stream);
-			return { pair, publisher, entered, release, running };
+					close: () => writer.close(),
+					abort: (reason) => writer.abort(reason),
+				}) as Awaited<ReturnType<typeof create>>;
+			};
+			const publisher = new Publisher(pair.server, Version.DRAFT_07, toHop(1n), origin.consume());
+			publisher.request(false, [], [{ prefix: Path.empty(), hidden: false }]);
+			return { pair, publisher, entered, release };
 		});
 		await Promise.all(senders.map((sender) => sender.entered.promise));
 		const start = performance.now();
@@ -438,11 +434,10 @@ for (const routeCount of routeCounts) {
 			`stalled-announce,${routeCount},${observerCount},${(((performance.now() - start) * 1000) / updates).toFixed(1)}`,
 		);
 		await Promise.all(
-			senders.map(async ({ pair, publisher, release, running }) => {
+			senders.map(async ({ pair, publisher, release }) => {
 				const drained = publisher.drain();
 				release.resolve();
 				await drained;
-				await running;
 				publisher.close();
 				pair.client.close();
 				pair.server.close();

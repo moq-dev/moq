@@ -13,40 +13,59 @@ import (
 // Timestamp is an exact media time: Value units at Scale units per second, with Value
 // at most 2^61 - 1 and Scale non-zero and at most 2^62 - 1. A read carries the track's
 // scale, so a tick such as 90 kHz survives a read and republish exactly.
+//
+// A scale-less track has no time, so there Scale is nil and Value is the frame's group key
+// (a datagram's sequence); build one with Unscaled. The zero Timestamp is Unscaled(0).
+// Scale is a pointer, so == compares its address: compare two with reflect.DeepEqual.
 type Timestamp = ffi.MoqTimestamp
+
+// Unscaled is the scale-less timestamp at group key key, or a datagram's sequence.
+func Unscaled(key uint64) Timestamp {
+	return Timestamp{Value: key}
+}
+
+// TimestampFromScale is value units at scale units per second; a write refuses one past
+// the bounds above with ErrTimeOverflow.
+func TimestampFromScale(value, scale uint64) Timestamp {
+	return Timestamp{Value: value, Scale: &scale}
+}
 
 // TimestampFromDuration converts d exactly, at nanosecond scale, refusing a negative d.
 func TimestampFromDuration(d time.Duration) (Timestamp, error) {
 	if d < 0 {
 		return Timestamp{}, fmt.Errorf("negative timestamp: %v", d)
 	}
-	return Timestamp{Value: uint64(d), Scale: uint64(time.Second)}, nil
+	return TimestampFromScale(uint64(d), uint64(time.Second)), nil
 }
 
 // TimestampToDuration converts t to a time.Duration, rounded down to a whole
-// nanosecond, saturating past time.Duration's ~292 years. It panics on a zero
-// Scale, which no read returns.
-func TimestampToDuration(t Timestamp) time.Duration {
-	if t.Scale == 0 {
-		panic("moq: timestamp with a zero scale")
+// nanosecond, saturating past time.Duration's ~292 years. It fails on an unscaled
+// timestamp, which has no time, and on a zero Scale, which no read returns.
+func TimestampToDuration(t Timestamp) (time.Duration, error) {
+	if t.Scale == nil {
+		return 0, fmt.Errorf("unscaled timestamp #%d has no time", t.Value)
+	}
+	scale := *t.Scale
+	if scale == 0 {
+		return 0, fmt.Errorf("timestamp with a zero scale")
 	}
 	hi, lo := bits.Mul64(t.Value, uint64(time.Second))
-	if hi >= t.Scale {
-		return time.Duration(math.MaxInt64)
+	if hi >= scale {
+		return time.Duration(math.MaxInt64), nil
 	}
-	ns, _ := bits.Div64(hi, lo, t.Scale)
+	ns, _ := bits.Div64(hi, lo, scale)
 	if ns > math.MaxInt64 {
-		return time.Duration(math.MaxInt64)
+		return time.Duration(math.MaxInt64), nil
 	}
-	return time.Duration(ns)
+	return time.Duration(ns), nil
 }
 
-// Frame is a raw track frame: a payload and its presentation timestamp.
-// Timestamp is nil on an untimed track, on both publish and receive.
+// Frame is a raw track frame: a payload and its presentation timestamp, on both publish
+// and receive. On a scale-less track the timestamp is Unscaled at the frame's group key.
 type Frame = ffi.MoqFrame
 
 // Datagram is a best-effort track datagram as received: sequence number, timestamp
-// (nil from an untimed track), and payload.
+// (Unscaled at the sequence on a scale-less track), and payload.
 type Datagram = ffi.MoqDatagram
 
 // DatagramInfo fixes a datagram track's publisher priority and optional timestamp scale.
@@ -57,11 +76,15 @@ type DatagramInfo = ffi.MoqDatagramInfo
 // starts at the newest group and skips a superseded group at once.
 type Delay struct {
 	// Min is the target latency: the playout or jitter-buffer delay held behind the live edge,
-	// and where a cold join starts. A Min past Max starts at Max, since the publisher serves
-	// nothing older. moq-lite-07 sends it upstream.
+	// where a cold join starts, and how long a decoder waits for a missing group. A Min past Max
+	// starts and waits at Max, since the publisher serves nothing older. moq-lite-07 sends it
+	// upstream.
 	Min time.Duration
-	// MinUnstated leaves Min unstated, ignoring it. A decoder plays it as zero, while the
-	// subscription keeps it unstated, so it never pulls the aggregate across subscribers to zero.
+	// MinUnstated leaves Min unstated, ignoring it. A decoder starts it as zero and waits a
+	// missing group for Max (an audio decoder floors it at zero and waits only its playout
+	// estimate, which can be larger), while the subscription keeps it unstated, so it never
+	// pulls the aggregate across subscribers to zero, unless a catalog warmup or an audio
+	// decoder's playout delay states one.
 	MinUnstated bool
 	// Max is how far a non-latest group may fall behind the live edge before it is skipped. Zero
 	// skips immediately; a larger value tolerates that much reordering. It caps every range,
@@ -144,22 +167,37 @@ func subscriptionFFI(s *Subscription) (*ffi.MoqSubscription, error) {
 	return &out, err
 }
 
+// TrackRefresh says when a subscriber asks a track's publisher for a new group,
+// which TrackDemand.Refresh reports. The zero value asks for nothing.
+//
+// A track opting in starts each group with an independent frame (a keyframe or a
+// snapshot), so a new group is something the publisher can make on request.
+type TrackRefresh struct {
+	// Ratio is how many times its first frame a group's later bytes may grow before
+	// a joining subscriber asks for a new group. Zero asks on any join once a frame
+	// follows the first; nil leaves joins to Interval alone.
+	Ratio *uint32
+	// Interval is how long after the newest group arrived a request may ask for
+	// another, or nil for no wait. It caps how often the publisher makes groups
+	// however many subscribers ask.
+	Interval *time.Duration
+}
+
 // TrackInfo holds publisher-side track properties: priority, how long a
-// superseded group stays fresh, how many times its first frame a group's later
-// bytes may grow before a joining subscriber asks for a new group (nil never
-// asks), and the timescale in ticks per second (nil means untimed on both publish
-// and receive). Priority is higher first; the zero Priority is the midpoint a nil
-// TrackInfo uses. Compression compresses each group on the wire to peers that
-// support it, nil sending frames as written; readers always see the original frames.
+// superseded group stays fresh, when a subscriber asks for a new group, and the
+// timescale in ticks per second (nil means untimed on both publish and receive).
+// Priority is higher first; the zero Priority is the midpoint a nil TrackInfo
+// uses. Compression compresses each group on the wire to peers that support it,
+// nil sending frames as written; readers always see the original frames.
 type TrackInfo struct {
 	Priority int8
 	// MaxAge is how long a superseded group stays fresh. Zero, the default, serves
 	// only the live edge.
 	MaxAge time.Duration
 	// MaxAgeUnlimited ignores MaxAge and sets no publisher limit, leaving only the
-	// cache to bound how long a superseded group is served.
+	// cache to bound how long a superseded group is served: the ffi record's null MaxAge.
 	MaxAgeUnlimited bool
-	Refresh         *uint32
+	Refresh         TrackRefresh
 	Timescale       *uint64
 	Compression     *Compression
 }
@@ -169,28 +207,38 @@ func trackInfoFFI(info *TrackInfo) (*ffi.MoqTrackInfo, error) {
 		return nil, nil
 	}
 	out := &ffi.MoqTrackInfo{
-		Priority:        info.Priority,
-		MaxAgeUnlimited: info.MaxAgeUnlimited,
-		Refresh:         info.Refresh,
-		Timescale:       info.Timescale,
-		Compression:     info.Compression,
+		Priority: info.Priority,
+		Refresh: ffi.MoqTrackRefresh{
+			Ratio:    info.Refresh.Ratio,
+			Interval: info.Refresh.Interval,
+		},
+		Timescale:   info.Timescale,
+		Compression: optional(info.Compression),
 	}
 	if !info.MaxAgeUnlimited {
 		out.MaxAge = &info.MaxAge
 	}
-	return out, bridge.NonNegative(out.MaxAge, "max age")
+	if err := bridge.NonNegative(out.MaxAge, "max age"); err != nil {
+		return nil, err
+	}
+	return out, bridge.NonNegative(info.Refresh.Interval, "refresh interval")
 }
 
 func trackInfoFromFFI(info ffi.MoqTrackInfo) TrackInfo {
 	out := TrackInfo{
 		Priority:        info.Priority,
-		MaxAgeUnlimited: info.MaxAgeUnlimited,
-		Refresh:         info.Refresh,
-		Timescale:       info.Timescale,
-		Compression:     info.Compression,
+		MaxAgeUnlimited: info.MaxAge == nil,
+		Refresh: TrackRefresh{
+			Ratio:    info.Refresh.Ratio,
+			Interval: info.Refresh.Interval,
+		},
+		Timescale: info.Timescale,
 	}
-	if info.MaxAge != nil && !info.MaxAgeUnlimited {
+	if info.MaxAge != nil {
 		out.MaxAge = *info.MaxAge
+	}
+	if info.Compression != nil {
+		out.Compression = *info.Compression
 	}
 	return out
 }

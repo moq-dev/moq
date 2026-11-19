@@ -7,8 +7,7 @@
 //! broadcasts, then applies one external change at a time: a link flap, a relay
 //! restart, a publisher restarting under a fresh identity, a client joining or
 //! leaving, or a broadcast published or withdrawn. Once the mesh goes quiet, every
-//! relay and client must have followed the rules the `verify-route` skill states on
-//! what it showed, and must now show exactly what it can reach. The announce
+//! relay and client must have followed the route rules on what it showed, and must now show exactly what it can reach. The announce
 //! messages each change cost are counted against [`budget`].
 //!
 //! `MOQ_ROUTE_SEED` and `MOQ_ROUTE_CASES` pick the cases; a failure prints the seed
@@ -22,9 +21,11 @@ use std::time::Duration;
 
 use futures::channel::mpsc;
 
-use moq_net::{Instance, Timescale, Timestamp, Version, cache, origin, stats, track};
+use moq_net::{Instance, Timescale, Version, cache, origin, stats, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
+use crate::support::AppendNext;
+use crate::support::AtStart;
 use crate::support::{self, Rng};
 
 const VERSION: &str = "moq-lite-07-wip";
@@ -361,9 +362,9 @@ impl Mesh {
 				.broadcast()
 				.create_track(TRACK, track::Info::default().with_timescale(Timescale::MILLI))
 				.unwrap();
-			let mut group = track.append_group().unwrap();
+			let mut group = track.append_next().unwrap();
 			group
-				.write_frame(Timestamp::ZERO, bytes::Bytes::from(path.clone()))
+				.write_frame(group.at_start(), bytes::Bytes::from(path.clone()))
 				.unwrap();
 			group.finish().unwrap();
 			route.announce().unwrap();

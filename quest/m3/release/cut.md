@@ -15,9 +15,10 @@ minor up per later API or wire cut, following
 [Versions](/RELEASE.md#versions), including packages that did not change. `@moq/qmux` and the Rust `qmux` crate are
 exempt from that version (`version.json`), so check each against its
 registry by hand: npm already has `@moq/qmux` 0.3.3 and 0.3.4, published
-from moq-dev/web-transport, while `js/qmux` is at 0.3.3. Publishing 0.3.3
+from moq-dev/web-transport, and 0.3.5 for
+[the release line's credit fix](https://github.com/moq-dev/moq/pull/8808), while `js/qmux` is at 0.3.3. Publishing 0.3.3
 fails, and `workspace:^` would resolve `@moq/net`'s dependency to
-web-transport's 0.3.4, a different API. `js/qmux` must publish above 0.3.4;
+web-transport's latest 0.3.x, a different API. `js/qmux` must publish above that;
 the maintainer picks the version (found 2026-11-07 by the API shape audit).
 Recommended 2026-11-12 (/quest-audit): 0.4.0, so a consumer of
 web-transport's `^0.3` never resolves to the new API.
@@ -33,7 +34,11 @@ compatibility, draft, package, and all-language interop checks, and verify
 publication outcomes. Separate artifact install proofs and package-specific
 tags follow this cut. This planning PR cuts and publishes nothing.
 After publication, check Release remeasure and its pin-update PR, as
-RELEASE.md describes. The pipeline re-measures changed planned-break pins
+RELEASE.md describes. Also check that the first release-plz PR after the cut
+gets the regenerated `nix/Cargo.nix` commit
+([moq-dev/moq#8684](https://github.com/moq-dev/moq/pull/8684)) and passes
+Check: that step has never run (found by the
+[feature review](/quest/m3/release/feature-review.md), 2026-11-14). The pipeline re-measures changed planned-break pins
 and requests landing through the main merge queue.
 
 This cut carries stats epochs, so it drops
@@ -204,9 +209,40 @@ after [moq-dev/moq#7942](https://github.com/moq-dev/moq/pull/7942) until the
 re-run fixed them. Run those browser checks by hand on the cut tree, along
 with the suites above.
 
+Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit):
+
+- ✅ The cut waits on [the rind 0.4 adapters](/quest/m0/rind-adapters.md)
+  ([moq-dev/moq#8432](https://github.com/moq-dev/moq/pull/8432)), so the
+  `UnsupportedCpu` error that exists only for rind 0.3 is never published.
+- ✅ The FFI's `abort_unwanted`
+  ([moq-dev/moq#8897](https://github.com/moq-dev/moq/pull/8897)) lands first: it adds a
+  method to an existing binding object, which the API diff counts as a
+  break once 0.22 is published.
+- ✅ End-to-end encryption does not publish at this cut
+  ([its own unpublished crate](https://github.com/moq-dev/moq/pull/8947)),
+  so `moq-e2ee` is no longer a retired name, and the paragraph above about
+  publishing a pointer above 0.0.25 no longer applies: the name is held for
+  [the finished format](/quest/m3/e2ee-format.md). `release` still holds
+  `rs/moq-e2ee` at 0.0.25 and publishes it; once the cut merges `main` into
+  `release`, its copy is `publish = false` at 0.0.26. Check that
+  release-plz proposes nothing for `moq-e2ee`.
+- ✅ The hand-written C API publishes as `libmoq` 0.22, its final line,
+  reversing 2026-10-25, so the
+  cut gate's "hand-written `moq-c`" below reads `libmoq`, and the two
+  quests for a code-free `libmoq` stub were deleted.
+
+On the reconciled candidate, regenerate the Nix build plan with `just rs cargo-nix` after the
+shared version bump. A dry run of the bump to 0.22.0 updated 52 packages and left Cargo.nix stale.
+Repeat the two-relay smoke with the candidate and the last published relay. Put each binary upstream
+in turn, then publish from each side, discover it from the other, fetch and compare a frame, and
+observe withdrawal. All four paths passed on lite-06 with 0.17.17 and audited main at d0ce553674.
+Re-run the existing cut checks on the resolved merge and version bump. After publication,
+check that Release remeasure opened or updated its pin PR, as RELEASE.md describes.
+
 ## Required
 
 - [Breaking release readiness](/quest/m2/README.md) - code, protocol and package proofs
+- [rind 0.4 adapters](/quest/m0/rind-adapters.md) - `UnsupportedCpu`, which exists only for rind 0.3, never publishes
 - [Migration audit](/quest/m3/release/migrate-audit.md) - every break on the cut PR has its MIGRATE.md entry
 - [API shape review](/quest/m3/release/api-review.md) - every new or changed public API was reviewed for a better shape, and approved changes landed
 - [Feature review](/quest/m3/release/feature-review.md) - every major work line since the last release was judged end to end, and its follow-ups landed
@@ -214,3 +250,4 @@ with the suites above.
 - [Interop and Video pass on main](/quest/m0/interop-green/README.md) - the cut PR's release gate runs `interop.yml`, which failed on `main` every day through 2026-11-12
 - [Nightly passes on main](/quest/m0/nightly/README.md) - the release gate runs `features.yml`, red in the 2026-11-12 Nightly
 - [Claim new npm names](/quest/m3/release/npm-first-publish.md) - trusted publishing can publish every new `@moq/*` package
+- [Pre-cut correctness fixes](/quest/m1/precut-fixes/README.md) - both pre-cut audits' required fixes have landed

@@ -13,16 +13,19 @@ are the catalog modes on the [hang](/concept/hang#data-tracks) page. Window is
 a third framing for a raw track: both ends opt into it, and a generic catalog
 reader will not pick it up.
 
-- **Snapshot**: lossy latest value, with RFC 7396 merge-patch deltas. A delta before any snapshot is an error. `next()` yields each state in order, skipping every group a newer one supersedes; `latest()` skips to the newest. Deltas ride one group until a joiner wants a fresh one: give the track a `refresh` ratio (8 is typical) and the producer restates the value in a new group. Without a ratio a group rolls only at its caps.
+- **Snapshot**: lossy latest value, with RFC 7396 merge-patch deltas. A delta before any snapshot is an error. `next()` yields each state in order, skipping every group a newer one supersedes; `latest()` skips to the newest. Deltas ride one group until a reader asks for a fresh one: give the track a `refresh` (a `ratio` of 8 is typical for joins, and an `interval` lets `subscriber.refresh()` ask regardless of size) and the producer restates the value in a new group. Without one a group rolls only at its caps.
 - **Stream**: lossless append-log in a single group. A reader that falls behind fails the read rather than resuming mid-log.
-- **Window**: a bounded run of records a reader can join at any point. A new group restates what it keeps explicitly, so a reader that was keeping up is not handed a record twice. Its ops roll on the track's `refresh` ratio the same way.
+- **Window**: a bounded run of records a reader can join at any point. A new group restates what it keeps explicitly, so a reader that was keeping up is not handed a record twice. Its ops roll on the track's `refresh` the same way.
 
 Compression is the track's: create it with `compression: "deflate"`, which JSON benefits
-from, and readers see plain frames either way. Producers take
-a `Timed` value, `{ value, at }`, where `at` is the capture time written as
-the frame timestamp, and the snapshot and stream consumers return the same
-shape. Nothing fills in now: a timed track needs `at` on every write, and
-an untimed track (no `timescale`) takes none and reads back without one.
+from, and readers see plain frames either way. Every write takes
+`(value, at)`, such as `update(value, at)`, where `at` is the capture time
+written as the frame timestamp, and the consumers return a `Timed` value,
+`{ value, at }`. Nothing fills in now: every write takes `at`. On an untimed track (no
+`timescale`) it is `Time.Timestamp.unscaled(key)`: a snapshot or window
+restatement opens its group at that key, which must pass every group the
+track holds, and a delta or op rides the open group, so it reads back with
+that group's key.
 
 ```ts
 import { Snapshot } from "@moq/json";
@@ -37,7 +40,9 @@ for await (const { value, at } of consumer) {
 `next()` yields every buffered state of the group it is reading and skips a
 group once a newer one supersedes it: the consumer takes the track, a
 `Track.Consumer` such as `broadcast.track(name)`, and subscribes to it itself at
-a zero `delay.max`, so nothing can raise its budget. Use `latest()` to skip
+a zero `delay.max`, so nothing else can raise its budget. A reader that applies
+each state at its timestamp passes its playout delay as `delay` to keep the
+superseded states it may still need. Use `latest()` to skip
 straight to the head, and `close()` to end the subscription.
 
 A stream rides one group with no record-count or cumulative byte limit. The

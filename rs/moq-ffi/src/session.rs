@@ -106,7 +106,7 @@ pub struct MoqClientTls {
 /// QUIC transport tuning, mirroring moq-tokio's QUIC config. Ignored by the WebSocket fallback.
 ///
 /// Null fields use the library default, which [`moq_client_defaults`] reports where there is
-/// one; `gso`, `mtu_discovery`, and `congestion_control` leave the choice to the backend.
+/// one; `gso` and `mtu_discovery` leave the choice to the backend.
 #[derive(Clone, Debug, Default, PartialEq, Eq, uniffi::Record)]
 pub struct MoqQuicConfig {
 	/// Cap on the concurrent QUIC streams the peer may open toward this endpoint; 0 is refused.
@@ -127,11 +127,10 @@ pub struct MoqQuicConfig {
 	/// Path MTU discovery: probes for the largest packet size the path allows.
 	#[uniffi(default = None)]
 	pub mtu_discovery: Option<bool>,
-	/// The congestion control family.
+	/// The congestion control algorithm, BBR v3 when null.
 	#[uniffi(default = None)]
-	pub congestion_control: Option<MoqCongestionControl>,
-	/// Directory, which must exist, to write qlog traces into. Fails `new` unless
-	/// [`moq_qlog_supported`].
+	pub congestion_control: Option<Arc<MoqCongestionControl>>,
+	/// Directory, which must exist, to write qlog traces into.
 	#[uniffi(default = None)]
 	pub qlog: Option<String>,
 	/// Danger: write TLS session secrets to the file `SSLKEYLOGFILE` names, for decrypting a
@@ -140,24 +139,33 @@ pub struct MoqQuicConfig {
 	pub keylog: Option<bool>,
 }
 
-/// The congestion control family for a QUIC connection.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
-pub enum MoqCongestionControl {
-	/// Loss-based (CUBIC): chases throughput, so the send rate sawtooths.
-	Loss,
-	/// Delay-based (BBR): keeps queues short and the send rate steady enough for an encoder to track.
-	Delay,
-	/// No congestion control and no pacing, for tests and controlled links.
-	None,
-}
+/// The congestion control algorithm for a QUIC connection.
+///
+/// An immutable object rather than an enum, so a new algorithm joins as a constructor without
+/// breaking callers that switch over a closed enum.
+#[derive(Debug, PartialEq, Eq, Hash, uniffi::Object)]
+#[uniffi::export(Debug, Eq, Hash)]
+pub struct MoqCongestionControl(moq_tokio::quic::CongestionControl);
 
-impl From<MoqCongestionControl> for moq_tokio::quic::CongestionControl {
-	fn from(family: MoqCongestionControl) -> Self {
-		match family {
-			MoqCongestionControl::Loss => Self::Loss,
-			MoqCongestionControl::Delay => Self::Delay,
-			MoqCongestionControl::None => Self::None,
-		}
+#[uniffi::export]
+impl MoqCongestionControl {
+	/// BBR v3, the default: keeps queues short and the send rate steady enough for an encoder
+	/// to track.
+	#[uniffi::constructor]
+	pub fn bbr() -> Arc<Self> {
+		Arc::new(Self(moq_tokio::quic::CongestionControl::Bbr))
+	}
+
+	/// CUBIC: chases throughput, so the send rate sawtooths.
+	#[uniffi::constructor]
+	pub fn cubic() -> Arc<Self> {
+		Arc::new(Self(moq_tokio::quic::CongestionControl::Cubic))
+	}
+
+	/// No congestion control and no pacing, for tests and controlled links.
+	#[uniffi::constructor]
+	pub fn unlimited() -> Arc<Self> {
+		Arc::new(Self(moq_tokio::quic::CongestionControl::Unlimited))
 	}
 }
 
@@ -169,7 +177,7 @@ impl From<MoqQuicConfig> for moq_tokio::quic::Config {
 		quic.keep_alive = config.keep_alive.map(Into::into);
 		quic.gso = config.gso;
 		quic.mtu_discovery = config.mtu_discovery;
-		quic.congestion_control = config.congestion_control.map(Into::into);
+		quic.congestion_control = config.congestion_control.map(|algorithm| algorithm.0);
 		quic.qlog = config.qlog.map(Into::into);
 		quic.keylog = config
 			.keylog
@@ -194,27 +202,57 @@ pub struct MoqWebSocketConfig {
 
 /// Retry pacing for the automatic reconnect.
 ///
-/// It applies only once a session has been established: a first dial that reaches no
-/// session ends the connection with its error rather than retrying, unless the peer refused
-/// credentials the tokens have replaced since, which earns another dial. The delay starts at
-/// `initial`, multiplies by `multiplier` after each failed attempt, and caps at `max`.
+/// Until the peer has accepted a session's credential or drained a session with a GOAWAY
+/// (or, on moq-lite 03/04, which never answer it, a session stayed up 1s), a failed dial or a
+/// closed session, such as a refused credential, ends the connection with its error rather
+/// than retrying. The delay starts at `initial`, multiplies by `multiplier` after each
+/// failed attempt, and caps at `max`.
 /// After `timeout` of consecutive failures the connection gives up for good; the window
 /// resets whenever a session stays up past 1s. Each null field uses moq-tokio's default:
-/// 1s, x2, 5s, and no give-up. Zero means off: no wait, no growth, no cap, or no give-up.
+/// 1s, x2, 5s, and no give-up. Zero means zero: retry at once, or give up at the first
+/// failure.
 #[derive(Clone, Debug, Default, PartialEq, Eq, uniffi::Record)]
 pub struct MoqBackoff {
 	/// Delay before the first reconnect attempt. 0 retries at once.
 	#[uniffi(default = None)]
 	pub initial: Option<Duration>,
-	/// Multiplier applied to the delay after each failure.
+	/// Multiplier applied to the delay after each failure. 0 or 1 keeps it constant.
 	#[uniffi(default = None)]
 	pub multiplier: Option<u32>,
-	/// Maximum delay between reconnect attempts. 0 leaves it uncapped.
+	/// Maximum delay between reconnect attempts. Null uses 5s, and 0 retries at once.
 	#[uniffi(default = None)]
 	pub max: Option<Duration>,
-	/// Time spent retrying before giving up. 0 retries forever.
+	/// Lift the cap on the delay, which then grows without bound. Refused with `max` set.
+	#[uniffi(default = false)]
+	pub max_unlimited: bool,
+	/// Time spent retrying before giving up. Null never gives up, and 0 gives up at the
+	/// first failure.
 	#[uniffi(default = None)]
 	pub timeout: Option<Duration>,
+}
+
+impl MoqBackoff {
+	/// Set each field given on moq-tokio's `backoff`, leaving the rest at their defaults.
+	pub(crate) fn apply(self, backoff: &mut moq_tokio::connection::Backoff) -> Result<(), MoqError> {
+		if let Some(initial) = self.initial {
+			backoff.initial = Some(initial.into());
+		}
+		if let Some(multiplier) = self.multiplier {
+			backoff.multiplier = multiplier;
+		}
+		backoff.max = match (self.max, self.max_unlimited) {
+			(Some(_), true) => {
+				return Err(MoqError::Config {
+					reason: "backoff max and max_unlimited are exclusive".into(),
+				});
+			}
+			(Some(max), false) => Some(max.into()),
+			(None, true) => Some(moq_tokio::cli::Bound::NONE),
+			(None, false) => None,
+		};
+		backoff.timeout = self.timeout.map(Into::into);
+		Ok(())
+	}
 }
 
 /// What sessions opened through this crate advertise in SETUP: the caller's `prefix`, then
@@ -267,8 +305,9 @@ pub fn moq_client_defaults() -> MoqClientConfig {
 		backoff: MoqBackoff {
 			initial: Some(backoff.initial()),
 			multiplier: Some(backoff.multiplier),
-			max: Some(backoff.max().unwrap_or_default()),
-			timeout: Some(backoff.timeout().unwrap_or_default()),
+			max: backoff.max(),
+			max_unlimited: backoff.max().is_none(),
+			timeout: backoff.timeout(),
 		},
 		..Default::default()
 	}
@@ -281,12 +320,6 @@ pub fn moq_client_defaults() -> MoqClientConfig {
 #[uniffi::export]
 pub fn moq_versions() -> Vec<String> {
 	moq_net::Versions::all().iter().map(ToString::to_string).collect()
-}
-
-/// Whether this build can write qlog traces, so a UI can hide `MoqQuicConfig::qlog` otherwise.
-#[uniffi::export]
-pub fn moq_qlog_supported() -> bool {
-	moq_tokio::qlog_supported()
 }
 
 /// Parse protocol version names, as `MoqClientConfig::versions` and
@@ -350,19 +383,7 @@ impl Client {
 			connect.websocket.delay = Some(delay.into());
 		}
 
-		let backoff = config.backoff;
-		if let Some(initial) = backoff.initial {
-			connect.backoff.initial = Some(initial.into());
-		}
-		if let Some(multiplier) = backoff.multiplier {
-			connect.backoff.multiplier = multiplier;
-		}
-		if let Some(max) = backoff.max {
-			connect.backoff.max = Some(max.into());
-		}
-		if let Some(timeout) = backoff.timeout {
-			connect.backoff.timeout = Some(timeout.into());
-		}
+		config.backoff.apply(&mut connect.backoff)?;
 
 		let quic = config.quic.into();
 
@@ -562,6 +583,7 @@ mod tests {
 			once: true,
 			backoff: MoqBackoff {
 				timeout: Some(Duration::ZERO),
+				max_unlimited: true,
 				..Default::default()
 			},
 			..Default::default()
@@ -594,10 +616,12 @@ impl MoqClient {
 	///
 	/// Once a session has been established, it automatically reconnects with backoff when
 	/// the transport drops (unless [`MoqClientConfig::once`] is set), and broadcasts
-	/// consumed through it ride out the gap. The first dial fails fast instead: if none of
-	/// the peer's addresses yields a session, [`MoqSession::closed`] resolves with that
-	/// error, so an app started before its relay is reachable must start the session again.
-	/// A refusal of credentials replaced during that dial redials with the new ones instead.
+	/// consumed through it ride out the gap. Until the peer has accepted a session's credential or drained
+	/// a session with a GOAWAY
+	/// (or, on moq-lite 03/04, which never answer it, a session stayed up 1s) it fails fast instead: if none of the peer's addresses yields a session, or the peer closes the
+	/// one it accepted, as a relay refusing a credential does, [`MoqSession::closed`] resolves
+	/// with that error, so an app started before its relay is reachable must start the session
+	/// again.
 	/// Read [`MoqSession::state`] and wait with [`MoqSession::state_changed`] for
 	/// reconnects; [`MoqSession::closed`] waits for the terminal result.
 	///
@@ -634,8 +658,7 @@ impl MoqTokens {
 	/// The first is the connection credential, unless the URL carries its own `?jwt=`; each
 	/// other one widens the grant over in-band AUTH. The next dial presents them, and a live
 	/// session that supports in-band AUTH presents them at once, withdrawing each replaced
-	/// token once its replacements are answered, even when one is refused. After an
-	/// authorization refusal the session redials only if they changed.
+	/// token once its replacements are answered, even when one is refused.
 	pub fn set(&self, tokens: Vec<String>) -> Result<(), MoqError> {
 		{
 			self.inner.set(parse_tokens(tokens)?);
@@ -716,7 +739,8 @@ pub enum MoqConnectionPhase {
 		/// The latest failed dial, or none before the first one fails.
 		failure: Option<MoqError>,
 	},
-	/// A session is serving.
+	/// A session is serving: its peer accepted the credential, or on moq-lite 03/04, which
+	/// never answer it, the session stayed up 1s. A refused session never reaches this phase.
 	Connected {
 		/// The live session's negotiated version, spelled like `moq-lite-03`.
 		version: String,

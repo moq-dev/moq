@@ -1,4 +1,7 @@
 import { expect, mock, spyOn, test } from "bun:test";
+import { Duration } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
+import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 
 // Bun cannot load the blob-URL worklet import used by the audio decoder. This test never provides
@@ -20,14 +23,13 @@ test("audio downloads only while the tile is active and audible", async () => {
 
 	const connection = new Moq.Connection({ enabled: false });
 	const origin = new Moq.Origin.Producer();
-	const endpoint = new Moq.Socket.Endpoint(origin, Moq.Path.from("game"), "viewer-test");
 	const game = new Game({
 		sessionId: "test",
 		connection,
 		origin,
-		endpoint,
 		expanded: new Moq.Signals.Signal<string | undefined>(undefined),
 		gamePrefix: "game",
+		viewerPrefix: "viewer",
 	});
 
 	try {
@@ -45,7 +47,6 @@ test("audio downloads only while the tile is active and audible", async () => {
 		expect(game.audioDecoder.in.enabled.peek()).toBe(false);
 	} finally {
 		game.close();
-		endpoint.close();
 		origin.close();
 		connection.close();
 		if (originalDocument) Object.defineProperty(globalThis, "document", originalDocument);
@@ -64,22 +65,25 @@ test("status skips values that fail the schema and ends when the track errors", 
 	const origin = new Moq.Origin.Producer();
 	const publication = origin.route(Moq.Path.from("game", "test"));
 	const track = publication.broadcast.createTrack("status");
+	if (!track) throw new Error("the track already exists");
 
 	// One finished group per status, so between statuses the loop waits on the next group.
 	const publish = (value: unknown) => {
-		const group = track.appendGroup();
-		group.writeFrame({ payload: new TextEncoder().encode(JSON.stringify(value)) });
+		const group = track.appendGroup(Moq.Time.Timestamp.unscaled((track.largest()?.group ?? -1n) + 1n));
+		group.writeFrame({
+			payload: new TextEncoder().encode(JSON.stringify(value)),
+			timestamp: Moq.Time.Timestamp.unscaled(group.start),
+		});
 		group.finish();
 	};
 
-	const endpoint = new Moq.Socket.Endpoint(origin, Moq.Path.from("game"), "viewer-test");
 	const game = new Game({
 		sessionId: "test",
 		connection,
 		origin,
-		endpoint,
 		expanded: new Moq.Signals.Signal<string | undefined>(undefined),
 		gamePrefix: "game",
+		viewerPrefix: "viewer",
 	});
 
 	try {
@@ -89,7 +93,7 @@ test("status skips values that fail the schema and ends when the track errors", 
 		expect(game.status.peek()).toBeUndefined();
 		expect(refused()).toBe(1);
 
-		const valid = { buttons: ["a"], players: 0 };
+		const valid = { buttons: ["a"], latency: { abc123: [{ label: "input", ms: 42 }] } };
 		publish(valid);
 		await settle(30);
 		expect(game.status.peek()).toEqual(valid);
@@ -101,7 +105,6 @@ test("status skips values that fail the schema and ends when the track errors", 
 		expect(error.mock.calls.filter(([msg]) => msg === "spawn error")).toHaveLength(1);
 	} finally {
 		game.close();
-		endpoint.close();
 		origin.close();
 		connection.close();
 		warn.mockRestore();
@@ -111,53 +114,77 @@ test("status skips values that fail the schema and ends when the track errors", 
 	}
 });
 
-test("input opens a session that carries commands up and latency down until deactivated", async () => {
+// The viewer's command broadcast at {viewerPrefix}/{game}/{viewerId}, read as the emulator does.
+async function commands(origin: Moq.Origin.Producer, viewerId: string) {
+	const request = origin.consume().request(Moq.Path.from("viewer", "test", viewerId));
+	await settle();
+	const broadcast = request.active.peek();
+	if (!broadcast) throw new Error("no command broadcast");
+	return new Json.Snapshot.Consumer<Record<string, unknown>>({ track: broadcast.track("command") });
+}
+
+test("input publishes a command broadcast until the idle timer or deactivation closes it", async () => {
 	const originalDocument = Object.getOwnPropertyDescriptor(globalThis, "document");
 	Object.defineProperty(globalThis, "document", { configurable: true, value: new EventTarget() });
+	const clock = new Manual();
+	const installed = clock.install();
 
 	const connection = new Moq.Connection({ enabled: false });
-	// The session waits for a live connection; the endpoints share one origin instead of a relay.
+	// The broadcast waits for a live connection; the emulator reads the same origin instead of a relay.
 	Object.defineProperty(connection, "status", { value: new Moq.Signals.Signal("connected") });
 	const origin = new Moq.Origin.Producer();
-	const emulator = new Moq.Socket.Endpoint(origin, Moq.Path.from("game"), "test");
-	const endpoint = new Moq.Socket.Endpoint(origin, Moq.Path.from("game"), "viewer-test");
 	const game = new Game({
 		sessionId: "test",
 		connection,
 		origin,
-		endpoint,
 		expanded: new Moq.Signals.Signal<string | undefined>(undefined),
 		gamePrefix: "game",
+		viewerPrefix: "viewer",
 	});
 
 	try {
 		game.hovered.set(true);
 		game.heldButtons.add("a");
 		game.sendButtons();
-
-		const incoming = await emulator.acceptTrack();
-		expect(incoming.peer).toBe("viewer-test");
-		const session = await incoming.accept();
-		const commands = session.consumer.ordered();
-		const command = await (await commands.nextGroup())?.readJson();
-		expect(command).toEqual({ type: "buttons", buttons: ["a"], timestamps: [] });
-
-		const latency = [{ label: "input", ms: 42 }];
-		session.producer.writeFrame({ payload: new TextEncoder().encode(JSON.stringify({ latency })) });
-		await settle(30);
-		expect(game.latency.peek()).toEqual(latency);
-
-		// Leaving the tile ends the session, so the emulator counts this viewer gone.
-		game.hovered.set(false);
-		expect(await commands.nextGroup()).toBeUndefined();
 		await settle();
-		expect(game.latency.peek()).toBeUndefined();
+
+		const first = game.viewerId.peek();
+		expect(first).toHaveLength(6);
+		const reader = await commands(origin, first as string);
+		expect((await reader.next())?.value).toEqual({ type: "buttons", buttons: ["a"], timestamps: [], seq: 1 });
+
+		// A later command is a delta on the same track.
+		game.heldButtons.delete("a");
+		game.sendButtons();
+		expect((await reader.next())?.value).toEqual({ type: "buttons", buttons: [], timestamps: [], seq: 2 });
+
+		// A minute without input withdraws the broadcast, so the emulator counts this viewer gone.
+		await clock.advance(Duration.secs(60));
+		expect(game.viewerId.peek()).toBeUndefined();
+		expect(await reader.next()).toBeUndefined();
+
+		// The next input publishes under a new id, and leaving the tile withdraws it.
+		game.sendCommand({ type: "reset" });
+		await settle();
+		const second = game.viewerId.peek();
+		expect(second).toBeDefined();
+		expect(second).not.toBe(first);
+		const again = await commands(origin, second as string);
+		expect((await again.next())?.value).toEqual({ type: "reset", timestamps: [], seq: 3 });
+
+		// A repeated reset is its own command, not an unchanged value the producer skips.
+		game.sendCommand({ type: "reset" });
+		expect((await again.next())?.value).toEqual({ type: "reset", timestamps: [], seq: 4 });
+
+		game.hovered.set(false);
+		await settle();
+		expect(game.viewerId.peek()).toBeUndefined();
+		expect(await again.next()).toBeUndefined();
 	} finally {
 		game.close();
-		endpoint.close();
-		emulator.close();
 		origin.close();
 		connection.close();
+		installed.close();
 		if (originalDocument) Object.defineProperty(globalThis, "document", originalDocument);
 		else Reflect.deleteProperty(globalThis, "document");
 	}
@@ -172,15 +199,13 @@ test("a command sent while disconnected is dropped, not replayed on reconnect", 
 	const status = new Moq.Signals.Signal<string>("connecting");
 	Object.defineProperty(connection, "status", { value: status });
 	const origin = new Moq.Origin.Producer();
-	const emulator = new Moq.Socket.Endpoint(origin, Moq.Path.from("game"), "test");
-	const endpoint = new Moq.Socket.Endpoint(origin, Moq.Path.from("game"), "viewer-test");
 	const game = new Game({
 		sessionId: "test",
 		connection,
 		origin,
-		endpoint,
 		expanded: new Moq.Signals.Signal<string | undefined>(undefined),
 		gamePrefix: "game",
+		viewerPrefix: "viewer",
 	});
 
 	try {
@@ -188,28 +213,17 @@ test("a command sent while disconnected is dropped, not replayed on reconnect", 
 		game.sendCommand({ type: "reset" });
 		await settle();
 
-		let dialed = false;
-		const incoming = emulator.acceptTrack().then((track) => {
-			dialed = true;
-			return track;
-		});
 		status.set("connected");
 		await settle(50);
-		expect(dialed).toBe(false);
+		expect(game.viewerId.peek()).toBeUndefined();
 
 		game.heldButtons.add("a");
 		game.sendButtons();
-		const session = await (await incoming).accept();
-		const commands = session.consumer.ordered();
-		expect(await (await commands.nextGroup())?.readJson()).toEqual({
-			type: "buttons",
-			buttons: ["a"],
-			timestamps: [],
-		});
+		await settle();
+		const reader = await commands(origin, game.viewerId.peek() as string);
+		expect((await reader.next())?.value).toEqual({ type: "buttons", buttons: ["a"], timestamps: [], seq: 1 });
 	} finally {
 		game.close();
-		endpoint.close();
-		emulator.close();
 		origin.close();
 		connection.close();
 		if (originalDocument) Object.defineProperty(globalThis, "document", originalDocument);

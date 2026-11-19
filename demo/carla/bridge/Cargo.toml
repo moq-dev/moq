@@ -39,6 +39,8 @@ tracing = "0.1"
 # The stand-in producer: a native Vulkan renderer that hands the bridge
 # exportable slots exactly the way the CARLA plugin does.
 ash = "0.38"
+# Each test owns the directory its socket and lock file live in.
+tempfile = "3"
 
 [lints.clippy]
 # Every suppression says why, so the next lint audit can judge it.

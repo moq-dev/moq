@@ -98,6 +98,8 @@ impl Names {
 #[derive(Default)]
 pub(super) struct Closed {
 	_track: Option<Sink>,
+	/// A finished audio or video track, which no longer has a [`Sink`].
+	_media: Option<import::track::Finished>,
 	/// A finished text track, which no longer has a [`Sink`].
 	_text: Option<moq_mux::container::Finished<moq_mux::catalog::hang::Container, hang::catalog::TextConfig>>,
 	/// The catalog `_track` published in, kept open until the owner drops.
@@ -519,7 +521,7 @@ impl Pad {
 			let broadcast = broadcast.clone();
 			let request = broadcast
 				.reserve_track(name.clone())
-				.with_context(|| format!("cannot reserve track {name}"))?;
+				.with_context(|| format!("the track {name} already exists"))?;
 			// Raw data declares a short explicit max age for subscribers that buffer its samples.
 			let info = moq_net::track::Info::default()
 				.with_timescale(moq_net::Timescale::MICRO)
@@ -547,7 +549,7 @@ impl Pad {
 					&mut broadcast,
 					reserved,
 					requested,
-					import::VideoFormat::Avc3,
+					import::VideoFormat::H264,
 					&[],
 					container,
 				)?;
@@ -558,7 +560,7 @@ impl Pad {
 					&mut broadcast,
 					reserved,
 					requested,
-					import::VideoFormat::Hev1,
+					import::VideoFormat::H265,
 					&[],
 					container,
 				)?;
@@ -615,7 +617,7 @@ impl Pad {
 				let name = Self::track_name(&broadcast, requested, ".mp3");
 				let request = broadcast
 					.reserve_track(name.clone())
-					.with_context(|| format!("cannot reserve track {name}"))?;
+					.with_context(|| format!("the track {name} already exists"))?;
 				let producer = request.accept(hang::container::track_info(hang::catalog::PRIORITY.audio));
 				(
 					moq_mux::codec::mp3::Import::new(producer, reserved, Self::audio_config(config.into(), container))?
@@ -648,7 +650,7 @@ impl Pad {
 				let name = Self::track_name(&broadcast, requested, ".opus");
 				let request = broadcast
 					.reserve_track(name.clone())
-					.with_context(|| format!("cannot reserve track {name}"))?;
+					.with_context(|| format!("the track {name} already exists"))?;
 				let producer = request.accept(hang::container::track_info(hang::catalog::PRIORITY.audio));
 				(
 					moq_mux::codec::opus::Import::new(producer, reserved, Self::audio_config(config, container))?
@@ -686,7 +688,9 @@ impl Pad {
 		name: String,
 		structure: &gst::StructureRef,
 	) -> Result<Text> {
-		let request = broadcast.reserve_track(name.clone())?;
+		let request = broadcast
+			.reserve_track(name.clone())
+			.ok_or_else(|| anyhow::anyhow!("the track {name} already exists"))?;
 		let producer = request.accept(hang::container::track_info(hang::catalog::PRIORITY.text));
 
 		let mut config = hang::catalog::TextConfig::new(hang::catalog::TextFormat::Vtt);
@@ -720,10 +724,10 @@ impl Pad {
 		init: &[u8],
 		container: hang::catalog::Container,
 	) -> Result<(import::Track, String)> {
-		let name = Self::track_name(broadcast, requested, &format!(".{format}"));
+		let name = Self::track_name(broadcast, requested, format.track_suffix());
 		let request = broadcast
 			.reserve_track(name.clone())
-			.with_context(|| format!("cannot reserve track {name}"))?;
+			.with_context(|| format!("the track {name} already exists"))?;
 		let mut video = import::VideoInit::new(format, init.to_vec());
 		video.hint.container = container;
 		let track = import::Track::video(request, reserved, video)?;
@@ -739,10 +743,10 @@ impl Pad {
 		init: &[u8],
 		container: hang::catalog::Container,
 	) -> Result<(import::Track, String)> {
-		let name = Self::track_name(broadcast, requested, &format!(".{format}"));
+		let name = Self::track_name(broadcast, requested, format.track_suffix());
 		let request = broadcast
 			.reserve_track(name.clone())
-			.with_context(|| format!("cannot reserve track {name}"))?;
+			.with_context(|| format!("the track {name} already exists"))?;
 		let mut audio = import::AudioInit::new(format, init.to_vec());
 		audio.container = container;
 		let track = import::Track::audio(request, reserved, audio)?;
@@ -986,11 +990,12 @@ impl Pad {
 			self.names.end(track.name());
 		}
 		let mut text = None;
+		let mut media = None;
 		let (result, track) = match track {
-			Sink::Media(mut media) => (
-				media.track.finish().map_err(anyhow::Error::from),
-				Some(Sink::Media(media)),
-			),
+			Sink::Media(sink) => {
+				let result = sink.track.finish().map(|finished| media = Some(finished));
+				(result.map_err(anyhow::Error::from), None)
+			}
 			Sink::Text(sink) => {
 				let result = sink.producer.finish().map(|finished| text = Some(finished));
 				(result.map_err(anyhow::Error::from), None)
@@ -1007,6 +1012,7 @@ impl Pad {
 		};
 		let closed = Closed {
 			_track: track,
+			_media: media,
 			_text: text,
 			_catalog: Some(catalog),
 		};
@@ -1476,7 +1482,7 @@ mod tests {
 		);
 		assert_eq!(
 			second.observe_caps(&broadcast, &catalog, producer_options(&h264_caps(), Some("camera")),),
-			CapsOutcome::Failed("cannot reserve track camera: duplicate".to_string()),
+			CapsOutcome::Failed("the track camera already exists".to_string()),
 			"the duplicate reservation is rejected"
 		);
 		assert!(second.is_failed(), "the collision fails the second pad");
@@ -1520,7 +1526,8 @@ mod tests {
 		// The reader may skip to the latest group, but never sees the track end before the new caps.
 		loop {
 			let group = subscriber.recv_group().await.unwrap().expect("the track continues");
-			if group.sequence == 2 {
+			let start = moq_net::Timestamp::new(group.start, group.timescale().unwrap()).unwrap();
+			if start.as_millis().unwrap() == 80 {
 				break;
 			}
 		}
@@ -1550,7 +1557,7 @@ mod tests {
 			pad.observe_caps(&broadcast, &catalog, producer_options(&vp8, Some("camera"))),
 			CapsOutcome::Active("camera/1".to_string())
 		);
-		assert_eq!(subscriber.recv_group().await.unwrap().expect("a group").sequence, 0);
+		assert_eq!(subscriber.recv_group().await.unwrap().expect("a group").start, 0);
 		assert!(subscriber.recv_group().await.unwrap().is_none(), "the old track ended");
 	}
 
@@ -2067,7 +2074,12 @@ mod tests {
 			.expect("subscribe to the opaque track")
 			.ordered();
 
-		let mut group = subscriber.next_group().await.unwrap().expect("a first group");
+		let mut group = subscriber
+			.next_group()
+			.await
+			.unwrap()
+			.and_then(moq_net::track::Item::group)
+			.expect("a first group");
 		let frame = group.read_frame().await.unwrap().expect("a frame in the first group");
 		assert_eq!(
 			frame.payload.as_ref(),
@@ -2075,7 +2087,7 @@ mod tests {
 			"the payload goes out untouched"
 		);
 		assert_eq!(
-			std::time::Duration::from(frame.timestamp.expect("timed")).as_micros(),
+			std::time::Duration::try_from(frame.timestamp).unwrap().as_micros(),
 			40_000,
 			"the frame carries the PTS mapped through the segment"
 		);
@@ -2084,11 +2096,16 @@ mod tests {
 			"one buffer produces one group with one frame"
 		);
 
-		let mut group = subscriber.next_group().await.unwrap().expect("a second group");
+		let mut group = subscriber
+			.next_group()
+			.await
+			.unwrap()
+			.and_then(moq_net::track::Item::group)
+			.expect("a second group");
 		let frame = group.read_frame().await.unwrap().expect("a frame in the second group");
 		assert_eq!(frame.payload.as_ref(), b"second");
 		assert_eq!(
-			std::time::Duration::from(frame.timestamp.expect("timed")).as_micros(),
+			std::time::Duration::try_from(frame.timestamp).unwrap().as_micros(),
 			80_000
 		);
 	}
@@ -2190,11 +2207,16 @@ mod tests {
 			.await
 			.expect("subscribe to the opaque track")
 			.ordered();
-		let mut group = subscriber.next_group().await.unwrap().expect("a group");
+		let mut group = subscriber
+			.next_group()
+			.await
+			.unwrap()
+			.and_then(moq_net::track::Item::group)
+			.expect("a group");
 		let frame = group.read_frame().await.unwrap().expect("a frame");
 		assert_eq!(frame.payload.as_ref(), b"no pts", "the unstamped buffer was published");
 		assert_eq!(
-			std::time::Duration::from(frame.timestamp.expect("timed")).as_micros(),
+			std::time::Duration::try_from(frame.timestamp).unwrap().as_micros(),
 			25_000
 		);
 	}

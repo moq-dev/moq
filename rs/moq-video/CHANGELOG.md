@@ -9,11 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The VA-API backend no longer holds every H.264 picture until the next access unit arrives: a stream without B-frames comes out as it decodes, which took a frame interval off decode latency (100 ms at 10 fps).
 - NVIDIA transcodes no longer serialize the whole GPU: NVDEC skips the multi-millisecond decoder-caps query when a flush's new parser keeps the decoder, decoded frames reuse pooled device memory instead of a `cuMemAlloc` and `cuMemFree` each, and each NVENC session scales CUDA frames into one input it registers once and reuses one output bitstream, where it used to allocate, register, and free all of them per frame.
 - A V4L2 camera that opens and never delivers a frame no longer blocks its capture thread forever: reads time out after a second, so dropping the `capture::Stream` stops the thread and closes the device promptly.
 - The PipeWire camera listing hides nodes that offer no format the backend converts, such as an IR camera with only GREY, as the V4L2 listing already does.
 - `capture::cameras()` lists a webcam once with the `pipewire` feature: the dedupe read `api.v4l2.path`, which a PipeWire registry global lacks, and now reads `object.path`.
 - A PipeWire camera that another client already runs opens and captures, sharing that client's mode, where it used to time out waiting for a format or a frame.
+- The `pipewire` feature builds next to GUI toolkits that use ashpd's `async-io` backend, such as GPUI. moq-video now uses that backend too, since ashpd refuses to build with both. The portal calls still work under tokio, because zbus runs the D-Bus connection on its own thread.
 
 ### Added
 
@@ -27,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - With the `pipewire` feature, `capture::cameras()` lists a webcam that a PipeWire node fronts as `pipewire:<node name>`, ahead of the V4L2 devices, instead of as `/dev/videoN`, since PipeWire shares the camera while V4L2 holds it exclusively. A `/dev/videoN` id still opens V4L2.
 - With the `pipewire` feature, `Source::Camera(None)` opens PipeWire's default camera outside a sandbox when PipeWire lists a camera, and `/dev/video0` otherwise.
 - [**breaking**] `encode::Producer::new` and `with_track` take a `moq_mux::catalog::Reserved` instead of the catalog, so a caller declares the encoder's GOP with `reserve().with_timeline_hint(gop)`.
+- [**breaking**] `encode::Config`, `decode::Config`, `resize::Config`, and `encode::Capture` pick hardware with one `device: Device` field, present on every platform and feature set, in place of the `cfg`-gated `vaapi` and `v4l2` paths. `Device::Render` also places NVENC and NVDEC on the NVIDIA GPU behind the node, where they used to open CUDA device 0, and a named node steers automatic backend selection to the backends that drive it.
+- [**breaking**] `capture::Config::cursor` is a `capture::Cursor` (`Drawn`, the default, or `Hidden`) instead of a bool, and `capture::Mode` is `#[non_exhaustive]`.
 
 ## [0.1.10](https://github.com/moq-dev/moq/compare/moq-video-v0.1.9...moq-video-v0.1.10) - 2026-10-05
 

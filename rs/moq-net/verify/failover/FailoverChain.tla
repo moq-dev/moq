@@ -11,8 +11,8 @@
 (*             B <- A        with Mesh, B may also route through A         *)
 (*                                                                         *)
 (* Each layer is one step its own model checked, so the state stays small: *)
-(*  - A route change is one `Switch` (`verify-route` checks which next hop *)
-(*    routing picks; here any live upstream may win).                      *)
+(*  - A route change is one `Switch` (the router's tests check which next  *)
+(*    hop routing picks; here any live upstream may win).                  *)
 (*  - A switch asks the new copy from the reader's newest group, or from   *)
 (*    the lowest gap below it (`Reader::sync`, `backfill_gaps`,            *)
 (*    `verify-resume`). A reader hands each group out once, from any copy  *)
@@ -34,8 +34,8 @@
 (* every hop subscribes before the first group, and a copy's range is      *)
 (* resolved from its first group (SUBSCRIBE_OK), so a relay knows which    *)
 (* groups its copy owes. A fetch reaches the serving route while that      *)
-(* route lives, after the track ended too: the skill's open findings are   *)
-(* where the code does not yet.                                            *)
+(* route lives, and a relay whose track ended still moves to another route *)
+(* for the reads that hold it, forgetting the track only once none does.   *)
 (***************************************************************************)
 EXTENDS Integers, FiniteSets
 
@@ -72,7 +72,8 @@ VARIABLES
     alive,   \* which relays are up
     deaths,  \* relays that died
     cp,      \* cp[e]: the copy at e[1] of the track e[2] serves, and e[2]'s reader for it
-    front,   \* front[r]: the route r serves from, how its track ended, switches made
+    front,   \* front[r]: the route r serves from, how its track ended, the route it
+             \* ended on, switches made
     left     \* the client unsubscribed
 
 vars == <<org, alive, deaths, cp, front, left>>
@@ -126,11 +127,24 @@ ResumeAsk(e) ==
         from == IF got = {} THEN 0 ELSE IF gaps # {} THEN Min(gaps) ELSE newest
     IN {g \in cp[e].ask : g >= from}
 
-\* What a copy at u asks: the union of its readers' demand (`Producer::subscription`).
-Demand(u) == UNION {ResumeAsk(e) : e \in {x \in Downs(u) : Live(x)}}
+\* A downstream copy still reads the track at its upstream: its subscription is open, or
+\* a group it was handed or fetched is not over (`TrackWeak::is_held`).
+Reads(e) ==
+    /\ Live(e)
+    /\ \/ ~cp[e].fin
+       \/ \E g \in Groups : Short(e, g) \/ (g \in cp[e].fetch /\ cp[e].fr[g] = -1)
+
+\* What a copy at u asks: the union of its open readers' demand (`Producer::subscription`).
+Demand(u) == UNION {ResumeAsk(e) : e \in {x \in Downs(u) : Live(x) /\ ~cp[x].fin}}
 Wanted(u) == \E e \in Downs(u) : Live(e)
 
 Serving(u) == <<u, front[u].cur>>
+\* Where a fetch at u goes (`Route::answering`): once the track finished, the copy it
+\* ended on until that copy fails, since a copy served after the end caches nothing.
+Answering(u) ==
+    IF front[u].end = "ok" /\ Live(<<u, front[u].last>>)
+    THEN <<u, front[u].last>>
+    ELSE Serving(u)
 Routable(w) == IF w = "O" THEN TRUE ELSE alive[w] /\ front[w].end # "err"
 
 \* A complete copy (`TrackState::is_complete` once every group below the end
@@ -179,7 +193,8 @@ Init ==
     /\ cp = [e \in Edges |->
                 IF e \in {CE, <<"E", "A">>, <<"A", "O">>} THEN Fresh(Groups) ELSE Gone]
     /\ front = [r \in Relays |->
-                    [cur |-> IF r = "E" THEN "A" ELSE "O", end |-> "open", sw |-> 0]]
+                    [cur |-> IF r = "E" THEN "A" ELSE "O", end |-> "open", last |-> None,
+                     sw |-> 0]]
     /\ left = FALSE
 
 \* The origin writes a group whole, in order. Frames split only at the hops.
@@ -225,37 +240,44 @@ Recover(e, g, s) ==
     /\ front[u].end # "err"
     /\ s \in Holders(u, e, g)
     /\ \/ SrcDead(u, cp[e].src[g], g)
-       \/ cp[e].src[g] # front[u].cur /\ s = front[u].cur /\ front[u].end = "open"
+       \/ cp[e].src[g] # front[u].cur /\ s = front[u].cur
     /\ cp' = [cp EXCEPT ![e].src[g] = s]
     /\ UNCHANGED <<org, alive, deaths, front, left>>
 
-\* A relay asks its serving route for a group a reader needs that no copy it
-\* holds has or may still land: a backfill for a widened or fetched range, or a
-\* fetch of the rest of a short group (`Recover::poll_fetch`).
+\* A relay asks upstream for a group a reader needs that no copy it holds has or
+\* may still land: a backfill for a widened or fetched range, sent where its reads
+\* go first (`Fetching`), or a fetch of the rest of a short group, sent to the
+\* serving route (`Recover::poll_fetch`).
 Ask(u, g) ==
     LET w == front[u].cur
-        e0 == Serving(u)
+        \* A missing group goes where the relay's reads go first; the rest of a short
+        \* one goes to the serving route.
+        missing == \E e \in Downs(u) :
+                       /\ Lacks(e, g)
+                       /\ \A s \in Srcs(u) : SrcFr(u, s, g) < 0
+                       /\ ~MayLand(u, g)
+        short == \E e \in Downs(u) :
+                     /\ Short(e, g)
+                     /\ Exhausted(e, g)
+                     /\ cp[e].src[g] # w
+                     /\ Holders(u, e, g) = {}
     IN
     /\ u \in Relays
     /\ front[u].end # "err"
-    /\ Live(e0)
-    /\ g \notin cp[e0].ask \cup cp[e0].fetch
-    /\ cp[e0].fr[g] = -1
-    /\ \E e \in Downs(u) :
-        \/ /\ Lacks(e, g)
-           /\ \A s \in Srcs(u) : SrcFr(u, s, g) < 0
-           /\ ~MayLand(u, g)
-        \/ /\ Short(e, g)
-           /\ Exhausted(e, g)
-           /\ cp[e].src[g] # w
-           /\ Holders(u, e, g) = {}
-    /\ cp' = [cp EXCEPT ![e0].fetch = @ \cup {g}]
+    /\ \E e0 \in {Answering(u), Serving(u)} :
+        /\ \/ e0 = Answering(u) /\ missing
+           \/ e0 = Serving(u) /\ short
+        /\ Live(e0)
+        /\ g \notin cp[e0].ask \cup cp[e0].fetch
+        /\ cp[e0].fr[g] = -1
+        /\ cp' = [cp EXCEPT ![e0].fetch = @ \cup {g}]
     /\ UNCHANGED <<org, alive, deaths, front, left>>
 
 \* A short group nothing can continue fails (`Recover::poll` gives up): its
 \* source failed, no other copy holds it, and no fetch can reach the rest,
-\* because the front has no route left, ended with its serving copy gone, or
-\* the live serving copy is the source that gave up on the group.
+\* because the front has no route left, ended with its serving copy gone and
+\* no route to move to, or the live serving copy is the source that gave up
+\* on the group.
 Abort(e, g) ==
     LET u == e[2] IN
     /\ u # "O"
@@ -264,7 +286,7 @@ Abort(e, g) ==
     /\ SrcDead(u, cp[e].src[g], g)
     /\ Holders(u, e, g) = {}
     /\ \/ front[u].end = "err"
-       \/ front[u].end = "ok" /\ ~Live(Serving(u))
+       \/ front[u].end = "ok" /\ ~Live(Serving(u)) /\ \A w \in Up(u) : ~Routable(w)
        \/ cp[e].src[g] = front[u].cur /\ Live(Serving(u))
     /\ cp' = [cp EXCEPT ![e].bad = @ \cup {g}]
     /\ UNCHANGED <<org, alive, deaths, front, left>>
@@ -273,7 +295,7 @@ Abort(e, g) ==
 Subscribe(u) ==
     /\ u \in Relays
     /\ front[u].end = "open"
-    /\ Wanted(u)
+    /\ \E e \in Downs(u) : Reads(e)
     /\ Routable(front[u].cur)
     /\ ~Held(Serving(u))
     /\ cp' = [cp EXCEPT ![Serving(u)] = Fresh(Demand(u))]
@@ -281,22 +303,26 @@ Subscribe(u) ==
 
 \* The front moves to another route: forced off a dead one, or at will while
 \* the switches last (`Producer::splice`). A copy it still holds of that route
-\* is asked again from where the readers got to; otherwise a new one is.
+\* is asked again from where the readers got to; otherwise a new one is. A
+\* track that ended moves too, for the group reads and fetches still holding
+\* it (`Action::Reroute`): its readers stay on the copy it ended on, so a
+\* copy asked for them subscribes nothing, and one still held is left as is.
 Switch(u, w) ==
     LET usable == Live(Serving(u)) /\ Routable(front[u].cur)
         e1 == <<u, w>>
+        open == front[u].end = "open"
     IN
     /\ u \in Relays
-    /\ front[u].end = "open"
+    /\ front[u].end # "err"
     /\ Wanted(u)
     /\ w \in Up(u) /\ w # front[u].cur
     /\ Routable(w)
     /\ usable => front[u].sw < MaxSwitches
     /\ front' = [front EXCEPT ![u].cur = w, ![u].sw = @ + (IF usable THEN 1 ELSE 0)]
     /\ cp' = [cp EXCEPT ![e1] =
-                IF Live(e1) /\ ~cp[e1].fin THEN [@ EXCEPT !.ask = Demand(u)]
+                IF Live(e1) /\ ~cp[e1].fin /\ open THEN [@ EXCEPT !.ask = Demand(u)]
                 ELSE IF Live(e1) THEN @
-                ELSE Fresh(Demand(u))]
+                ELSE Fresh(IF open THEN Demand(u) ELSE {})]
     /\ UNCHANGED <<org, alive, deaths, left>>
 
 \* The serving copy completed: the front ends the track (`Action::Finish`).
@@ -305,7 +331,7 @@ FrontFinish(u) ==
     /\ front[u].end = "open"
     /\ Live(Serving(u))
     /\ Whole(Serving(u))
-    /\ front' = [front EXCEPT ![u].end = "ok"]
+    /\ front' = [front EXCEPT ![u].end = "ok", ![u].last = front[u].cur]
     /\ UNCHANGED <<org, alive, deaths, cp, left>>
 
 \* No route is left: the front fails the track, and every reader with it.
@@ -339,6 +365,8 @@ LetGo(u, s) ==
     /\ s \in Up(u)
     /\ Held(e1)
     /\ s # front[u].cur \/ front[u].end = "err"
+    \* A finished track keeps the copy it ended on (`Phase::Finished`).
+    /\ ~(front[u].end = "ok" /\ s = front[u].last)
     /\ \A e \in Downs(u), g \in Groups :
         /\ Short(e, g) => cp[e].src[g] # s /\ cp[e1].fr[g] < 0 /\ ~MayLand(u, g)
         /\ Lacks(e, g) => cp[e1].fr[g] < 0 /\ ~(Live(e1) /\ g \in cp[e1].ask)
@@ -353,7 +381,20 @@ Park(u) ==
     /\ ~Wanted(u)
     /\ \E s \in Up(u) : Held(<<u, s>>)
     /\ cp' = [e \in Edges |-> IF e[1] = u THEN Gone ELSE cp[e]]
-    /\ front' = [front EXCEPT ![u].end = IF @ = "ok" THEN "open" ELSE @]
+    /\ front' = [front EXCEPT ![u].end = IF @ = "ok" THEN "open" ELSE @,
+                              ![u].last = None]
+    /\ UNCHANGED <<org, alive, deaths, left>>
+
+\* The linger runs out on a relay whose track ended and that nothing reads any
+\* more (`Action::Forget`): it is forgotten, so the next reader gets a fresh front.
+\* A read still holding the track keeps it, so the read still moves off a dying
+\* route (`TrackWeak::is_held`).
+Forget(u) ==
+    /\ u \in Relays
+    /\ front[u].end = "ok"
+    /\ ~\E e \in Downs(u) : Reads(e)
+    /\ front' = [front EXCEPT ![u].end = "open", ![u].last = None]
+    /\ cp' = [e \in Edges |-> IF e[1] = u THEN Gone ELSE cp[e]]
     /\ UNCHANGED <<org, alive, deaths, left>>
 
 \* A relay dies: copies downstream of it fail, and its own vanish.
@@ -395,7 +436,7 @@ Next ==
         \/ \E s \in Srcs(e[2]) : HandOut(e, g, s) \/ Recover(e, g, s)
         \/ Frame(e, g) \/ Abort(e, g)
     \/ \E u \in Relays :
-        \/ Subscribe(u) \/ FrontFinish(u) \/ FrontFail(u) \/ Park(u)
+        \/ Subscribe(u) \/ FrontFinish(u) \/ FrontFail(u) \/ Park(u) \/ Forget(u)
         \/ \E w \in Up(u) : Switch(u, w) \/ LetGo(u, w)
         \/ \E g \in Groups : Ask(u, g)
     \/ \E e \in Edges : EndOk(e)

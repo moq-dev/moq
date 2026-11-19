@@ -7,8 +7,6 @@
  *
  * @module
  */
-import type { Duration } from "@moq/clock";
-import * as z from "zod/mini";
 import type { Credential } from "./auth.ts";
 import type * as Instance from "./instance.ts";
 import { isLeadingOnes, type StreamVersion } from "./stream.ts";
@@ -20,17 +18,19 @@ import { isLeadingOnes, type StreamVersion } from "./stream.ts";
  * stamps into a chain as an announcement passes through, so a receiver can spot its own
  * id and reject a loop. The SETUP parameter that carries it session-wide is `Hop` too.
  *
- * The {@link HopSchema} validates any incoming value and brands it so the type system
+ * {@link toHop} validates any incoming value and brands it so the type system
  * enforces "only validated ids flow into hop chains." Internal code that synthesizes one
- * (e.g. `randomHop`) uses `HopSchema.parse(...)` to brand a raw bigint.
+ * (e.g. `randomHop`) brands a raw bigint the same way.
  */
-export const HopSchema = z
-	.bigint()
-	.check(z.refine((value) => value >= 0n && value < 1n << 64n, "Hop must be a non-negative 64-bit integer"))
-	.brand("Hop");
+export type Hop = bigint & { readonly [hopBrand]: true };
 
-/** A relay's hop id, validated by {@link HopSchema}. */
-export type Hop = z.infer<typeof HopSchema>;
+declare const hopBrand: unique symbol;
+
+/** Brand `value` as a {@link Hop}, refusing anything outside the unsigned 64-bit range. */
+export function toHop(value: bigint): Hop {
+	if (value < 0n || value >= 1n << 64n) throw new RangeError("Hop must be a non-negative 64-bit integer");
+	return value as Hop;
+}
 
 /**
  * The reserved id 0, meaning "no identity".
@@ -40,7 +40,7 @@ export type Hop = z.infer<typeof HopSchema>;
  * in common, and never excluded from an advertisement. A chain that holds a 0 anywhere
  * is anonymous for route selection.
  */
-export const UNKNOWN_HOP: Hop = HopSchema.parse(0n);
+export const UNKNOWN_HOP: Hop = toHop(0n);
 
 /**
  * The id `hop` carries on a wire in `version`'s varint form.
@@ -77,7 +77,7 @@ export function randomHop(): Hop {
 	// Mask to 53 bits.
 	const raw = buf[0] & 0x1f_ffff_ffff_ffffn;
 	// Guard against the (astronomically unlikely) zero draw.
-	return HopSchema.parse(raw === 0n ? 1n : raw);
+	return toHop(raw === 0n ? 1n : raw);
 }
 
 /** The static cost of pulling content through a route; lower wins. */
@@ -112,18 +112,6 @@ export interface RouteInfo {
 	 * it recovers: request again once it turns available.
 	 */
 	readonly available: boolean;
-	/**
-	 * The round trip to the route's origin node over moq-lite-07, informational: it never ranks
-	 * or selects a route.
-	 *
-	 * Each link on the path adds its min RTT, the lowest smoothed RTT it measured over the last
-	 * 30 seconds, this session's own link included. Undefined on any other wire, on a route this
-	 * origin serves itself, and while any link on the path has no measurement.
-	 *
-	 * A listing reports it as of the event that carries the route: a change to the RTT alone is
-	 * no event.
-	 */
-	readonly rtt?: Duration;
 }
 
 /**
@@ -137,7 +125,6 @@ export function routeInfo(route: WireRoute): RouteInfo {
 		instance: route.instance,
 		cost: route.cost,
 		available: route.available ?? true,
-		rtt: route.rtt,
 	};
 }
 
@@ -180,13 +167,23 @@ export interface WireRoute {
 	/** See {@link RouteInfo.available}; unset means available. */
 	readonly available?: boolean;
 	/**
-	 * The origin node a lite-07 route reaches, which every request through it names. Unset on a
-	 * route announced here and on every other version. Local: requests name it, readers never
-	 * see it.
+	 * A claim a lite-07 peer sent, one per instance at a path, which a reader asking for every
+	 * claim reports as a route of its own. Unset on a route announced here and on every other
+	 * version. Local: readers never see it.
 	 */
-	readonly node?: bigint;
-	/** See {@link RouteInfo.rtt}. */
-	readonly rtt?: Duration;
+	readonly claimed?: boolean;
+	/**
+	 * The lowest priority of a link on the way to a lite-07 claim's publisher: higher ranks
+	 * first, after drain and before cost. Unset ranks as 0, the priority of a link no one set.
+	 * Local, as `claimed` is.
+	 */
+	readonly priority?: number;
+	/**
+	 * How many segments broader the lite-07 claim is than the path it is presented at: a claim
+	 * exactly at a path outranks every broader one shown there, before anything else. Unset ranks
+	 * as 0. Local, as `claimed` is.
+	 */
+	readonly above?: bigint;
 }
 
 /** Constructors and helpers for {@link WireRoute}. @internal */
@@ -208,8 +205,9 @@ export const WireRoute = {
 			auth: route.auth,
 			draining: route.draining,
 			available: route.available,
-			node: route.node,
-			rtt: route.rtt,
+			claimed: route.claimed,
+			priority: route.priority,
+			above: route.above,
 		};
 	},
 };
@@ -228,7 +226,7 @@ export function isAnonymous(route: WireRoute): boolean {
 
 /**
  * Whether two routes name the same instance, epoch, hop chain, cost, auth, drain state,
- * availability, origin node, and RTT.
+ * availability, whether a lite-07 peer claimed it, priority, and how far above its path a claim is.
  *
  * @internal
  */
@@ -242,8 +240,9 @@ export function routesEqual(a: WireRoute | undefined, b: WireRoute | undefined):
 		a.auth === b.auth &&
 		(a.draining ?? false) === (b.draining ?? false) &&
 		(a.available ?? true) === (b.available ?? true) &&
-		a.node === b.node &&
-		(a.rtt === b.rtt || (!!a.rtt && !!b.rtt && a.rtt.eq(b.rtt))) &&
+		(a.claimed ?? false) === (b.claimed ?? false) &&
+		(a.priority ?? 0) === (b.priority ?? 0) &&
+		(a.above ?? 0n) === (b.above ?? 0n) &&
 		a.hops.length === b.hops.length &&
 		a.hops.every((hop, i) => hop === b.hops[i])
 	);

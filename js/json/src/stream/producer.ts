@@ -1,6 +1,7 @@
 import type * as Moq from "@moq/net";
-import { Error as NetError, type Timed } from "@moq/net";
+import { Error as NetError } from "@moq/net";
 
+import { frameTime } from "../time.ts";
 import { type Config as CodecConfig, Encoder, type Pending } from "./encoder.ts";
 
 /**
@@ -40,10 +41,11 @@ export class Producer<T> {
 	 * second group. The track is aborted rather than closed cleanly, so a consumer sees the failure
 	 * instead of a log that merely looks complete.
 	 *
-	 * `at` is when the value was captured, written as its frame timestamp. Omit it only on an
-	 * untimed track: it is never filled in.
+	 * `at` is when the value was captured, written as its frame timestamp. On a scale-less track it
+	 * is {@link Moq.Time.Timestamp.unscaled} at a group key instead: the first record opens the log's
+	 * group there, and every record carries that group's key.
 	 */
-	append({ value, at }: Timed<T>): void {
+	append(value: T, at: Moq.Time.Timestamp): void {
 		// Encode first, so a value that can't be serialized doesn't publish an empty group that
 		// subscribers would advance into and wait on. Opening the group afterwards is safe because
 		// the record stays uncommitted until the write lands.
@@ -58,10 +60,10 @@ export class Producer<T> {
 			throw err;
 		}
 
-		this.#group ??= this.#track.appendGroup();
+		this.#group ??= this.#track.appendGroup(at);
 
 		try {
-			this.#group.writeFrame({ payload: record.payload, timestamp: at });
+			this.#group.writeFrame({ payload: record.payload, timestamp: frameTime(this.#group, at) });
 		} catch (err) {
 			// The group is live, so the record is a hole in the log and a second group would hand
 			// consumers that gap dressed up as a complete log.

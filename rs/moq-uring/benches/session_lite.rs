@@ -198,10 +198,20 @@ mod linux {
 						.block_on(async {
 							let start = Instant::now();
 							for _ in 0..iterations {
-								let mut writer = track.append_group().expect("append group");
+								let mut writer = track
+									.append_group(
+										moq_net::Timestamp::from_millis(
+											track.largest().map_or(0, |largest| largest.group + 1),
+										)
+										.unwrap(),
+									)
+									.expect("append group");
 								for _ in 0..FRAMES {
 									writer
-										.write_frame(moq_net::Timestamp::ZERO, frame.clone())
+										.write_frame(
+											moq_net::Timestamp::from_millis(writer.start).unwrap(),
+											frame.clone(),
+										)
 										.expect("write frame");
 								}
 								writer.finish().expect("finish group");

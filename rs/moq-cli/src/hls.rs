@@ -531,7 +531,7 @@ mod test {
 		announced.next().await.expect("announced");
 		let broadcast = consumer.request("hls", None).await.unwrap();
 		let mut catalogs = hang::catalog::Catalog::<()>::subscribe(&broadcast).await.unwrap();
-		let catalog = catalogs.next().await.unwrap().expect("a catalog");
+		let catalog = catalogs.next().await.unwrap().expect("a catalog").value;
 		let name = catalog.audio.renditions.keys().next().expect("an audio rendition");
 		let mut media = broadcast.track(name).unwrap().subscribe(None).await.unwrap();
 		let mut listing = broadcast.track("catalog.json").unwrap().subscribe(None).await.unwrap();
@@ -539,7 +539,7 @@ mod test {
 		// The source restarts at zero under the same init segment.
 		std::fs::write(&playlist, format!("{live}#EXT-X-DISCONTINUITY\n#EXTINF:1,\n1.m4s\n")).unwrap();
 		let err = importing.await.unwrap().expect_err("a reset fails the import");
-		assert!(format!("{err:#}").contains("rewound"), "{err:#}");
+		assert!(format!("{err:#}").contains("failed to decode"), "{err:#}");
 
 		for track in [&mut media, &mut listing] {
 			let ended = ended_with(track).await;

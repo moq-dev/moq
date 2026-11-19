@@ -66,8 +66,9 @@ what you need, and call `run`, which keeps the listeners, QUIC workers, and
 shutdown inside the relay. An embedded CLI calls
 `config.relay.merge(&cli_layer)?` after its own `parse_from_with_settings` to
 load the relay file and environment, retain provenance, and refuse obsolete
-spellings, then `moq_tokio::cli::check_env` with its own spec to refuse `MOQ_*`
-variables it does not read. CLI-only fields on the embedding root stay intact.
+spellings. Declare `#[usage(unknown_env(prefix = "MOQ_"))]` on the embedding
+root to refuse `MOQ_*` variables it does not read. CLI-only fields on the
+embedding root stay intact.
 
 ```rust
 use axum::routing::get;
@@ -100,7 +101,7 @@ relay.with_web(web).run().await?;
   from `relay.shutdown().admission()` and pass `relay.shutdown().clone()` to
   `Connection::with_shutdown`, so the drain waits for its handshakes too.
 - To serve a session from any other moq-net transport, such as the in-memory
-  one in tests, enable the `test-support` feature, read its SETUP with `moq_net::Server::accept_request` and pass
+  one in tests, enable the `test-support` feature, read its SETUP with `moq_net::Server::handshake` and pass
   `Accepted::new(handshake, transport)` to `Connection::new`. The client must
   send its path in the SETUP. The server's accept timeout (`moq_net::Server::with_timeout`)
   bounds admission and, on moq-lite 01/02, the SETUP reply too.

@@ -1,114 +1,111 @@
-# [L] Route layer acceptance
+# [M] Route layer acceptance
 
 ## Goal
 
-The route layer is proven on the implementation, not the model: the
-forwarding and first-hop selection fixtures run against the router and the
-session, and the reference model in
-`rs/moq-net/tests/integration/routing_contracts/` is deleted. The incident
-fixtures, tiered-cluster and partition end-to-end checks, failover
-measurements, and benchmarks below pass in CI, and the mitigations they
-replace are retired.
+A lite-07 subscriber whose grant permits more disjoint regions than one
+ANNOUNCE_REQUEST can name either discovers every region or says it cannot:
+no reader sees a region it never asked for as synced and empty.
 
 ## Plan
 
-Decided 2026-11-12 (maintainer, /quest-plan on the quests still written for
-Babel): acceptance is of the path rule
-([epic](/quest/m2/cluster-routes/README.md) Plan item 27), on the
-sessions [the switch](/quest/m2/cluster-routes/switch.md) leaves.
-The seqno request fixtures are replaced below, since the rule has no seqno
-and no request.
+Decided 2026-11-14 (maintainer, /quest-complete on
+[moq-dev/moq#8768](https://github.com/moq-dev/moq/pull/8768)): ✅ stays in
+m2 and gates the cut, per lite07-finalize's 2026-10-13 rule that routes'
+tier and partition tests run before the cut (rejected: moving it to m3 and
+fixing late routing flaws in lite-08). A flaw found here is fixed on
+lite-07-wip before it freezes.
 
-- Port the forwarding fixtures (`Forward`, `Aggregate`, pool ties, and the
-  sweeps over them) to the implementation, then delete the model.
-- The earlier simulator persisted seqnos across restart, and the path rule
-  has none. Re-run with a fresh routing identity per restart and the
-  stale-state rules; do not carry the old assumption into acceptance.
-- Retire [moq-dev/moq#5375](https://github.com/moq-dev/moq/pull/5375)'s
-  quarantine, [moq-dev/moq#5391](https://github.com/moq-dev/moq/pull/5391)'s
-  dedup, and the 300 ms hold only once the fixtures below demonstrate their
-  replacement (see the epic's hold-down note).
-- Add a session-level fixture for routes scoped to interested origins
-  (Plan item 15 of the epic, implemented on the router): a client watching
-  one prefix holds routes only to the origins whose claims meet it, a
-  request for a path outside its interest still resolves through the relay
-  (Node ID 0), and an origin leaving the interest ends its route after the
-  batch withdrawing its last claim there, closed by its floor: one that
-  certifies the withdrawal where the relay certifies the request, and one
-  certifying nothing where it knows only part of it.
+[moq-dev/moq#9112](https://github.com/moq-dev/moq/pull/9112) confined the
+`lite06_churn` mitigations to routes learned over a hop chain, made a claim
+the route node lets go of leave every copy at once, recorded why lite-06
+keeps its `Start, End, Start` residual, and pointed the Node ID 0 coverage
+at the native JS claims lanes of `just test interop`. What remains:
 
-The counterexamples from #4349 (closed; this epic still owns the fix) are the `residual_*` tests in
-`rs/moq-net/tests/integration/mesh_withdraw.rs`. They pin today's hunting on lite-06:
-a stale path outlasting the 300 ms hold, a revival the quarantine misses,
-and 179 hunting relays (3 reviving) over 200 seeded meshes. Turn each into a
-single retraction everywhere, and keep `cross_node_close_retracts_once`
-passing. On `main` an epochless switch to a stale path is a Restart, which a
-lite-06 client sees as a retraction and an announcement; the release sent an
-in-place update.
+`auth::residual_lite_07_a_grant_too_wide_to_ask_syncs_without_its_last_region`
+pins the flaw on real sessions. A relay grants its client 18 disjoint
+regions over two tokens; each token's grant fits its own AUTH message, but
+the union does not fit the one ANNOUNCE_REQUEST a subscriber's whole set
+must (`lite::request_fits`, which the publisher enforces). `coarsen` in
+`lite/subscriber/routed.rs` then drops the last region, and `release` treats
+a want no asked prefix overlaps as answered: a whole-tree reader syncs
+without that region's broadcast, and a reader of the region alone syncs
+empty. Fix it per the decision under Waiting, and turn the residual into
+the passing case.
 
-Publishing toggles too, decided 2026-10-13: a longer path arrives first and
-the better route then replaces it. `late_better_path_updates_in_place` pins
-the lite-07 mesh, where the move keeps the instance and a lite-06 or lite-07
-client sees an update. `residual_late_better_path_restarts_on_lite06` pins the
-lite-06 mesh, where each relay mints its own instance and the client sees
-`Start, End, Start` while the broadcast stays live; turn it into an update.
+What the publishers do today with an ask wider than the grant (traced in
+code, then run on a server enforcing `r00/a/**` and `r01/b/**` with the
+subscriber forced to ask for the root):
 
-Tests, time mocked: the handoff fixtures and sweeps, already on the router;
-[moq-dev/moq#4644](https://github.com/moq-dev/moq/pull/4644)'s live-graph withdrawal and failover tests (the PR closed and
-its branch is gone; fetch `refs/pull/4644/head`) as acceptance, run on the wip version; a
-link flap with many broadcasts behind one origin costs one ROUTE change per
-link; a ring of three where a stale neighbour cannot revive an ended
-broadcast; a two-uplink mesh that never carries CDN routes back to the CDN;
-an island reached through the CDN after a partition; an unknown Route ID
-refused; a five-node ring whose preferred origin link fails moves to its
-longer backup, at once where the backup's path avoids the far end of the
-closed link and once the doubt lifts where it runs through it, while that
-backup never loses its session; a relay with several neighbours that dies
-is named in one withdrawal per session, and no relay moves onto a route
-through it before the doubt lifts; two relays whose only routes run through
-each other both let go, neither holding for the other; and a relay that
-holds lets go once the neighbours behind it have answered, including one
-whose session closes without an answer. Failover is measured
-on broadcast liveness while the next hop changes, including a new next hop
-whose ROUTE arrives before its ANNOUNCE set, and reports per-path
-retractions and re-announcements beside the ROUTE budget; eventual route
-recovery alone does not show it is seamless.
+- The ask is legal. The draft already says a prefix outside the
+  subscriber's scope "lists nothing and is SYNCED at once"
+  (`doc/draft/moq-lite.md`, Announce). Confining the ask to the grant is
+  only `coarsen`'s choice, from
+  [moq-dev/moq#8987](https://github.com/moq-dev/moq/pull/8987). Neither
+  publisher checks an ask against the grant: both filter each claim by its
+  path (`Answer::shows` in `lite/publisher/routed.rs`, `#changes` in
+  `js/net/src/lite/answer.ts`), and `Answer::poll_permit` re-filters every
+  claim the node told as the grant changes. The root ask got ANNOUNCE_OK,
+  SYNCED, both granted broadcasts, nothing outside the grant, and no close.
+- A claim above a granted region is lost. A publisher presents a broader
+  claim at the requested prefix itself (`relay.rs`, "presented at the
+  prefix itself"). Asked for a region, a service claim at `r00` arrives at
+  `r00/a`, which the grant covers. Asked for the root, it would arrive at
+  `r00`, which the grant does not cover, so the filter drops it. The reader
+  syncs without a claim that serves its region.
+- `js/net`'s subscriber already asks for the root once its readers' set
+  does not fit (`#wanted` in `js/net/src/lite/routed.ts`), ignoring the
+  grant. So a confined JS client with that many readers has this gap
+  against either publisher today.
 
-Tiered-cluster and partition/healing end-to-end checks belong here,
-not after lite-07 can be finalized: two regions with redundant cores, publish,
-claim withdrawal, core loss, and matching-epoch failover reaching a far edge;
-a two-uplink mesh reached through CDN during partition. Include overlapping
-wildcards, a hidden exportable alternative under one selection, epochless Restart, and a
-grant union crossing the scoped boundary each way (a `**` token added, then expiring). Fixtures are
-public and time-mocked, wired into CI alongside Rust/JS interop.
+Decided 2026-11-19 (maintainer, in the coordinating session, on
+[moq-dev/moq#9112](https://github.com/moq-dev/moq/pull/9112)): ✅ D, ask
+wider and answer the granted part (rejected: A, the size exception for
+granted regions; B, the public API change; C, leaving the reader to hang).
+It changes the lite-07-wip draft and both publishers, so it lands before
+the cut. The options as they were put:
 
-Mounts get the same continuity checks (`rs/moq-net/tests/integration/mount.rs`):
-a claim whose predecessor covers a mount's target arrives beneath the mount
-point exactly as it does unmounted, on lite-06 and lite-07. This replaces
-the deleted mount-takeover quest, whose `Takeover` event
-[moq-dev/moq#8063](https://github.com/moq-dev/moq/pull/8063) removes in
-favor of the claim's instance; if #8063 closes unmerged, restore that quest.
+- How a subscriber handles a grant too wide for one ANNOUNCE_REQUEST.
+  - (D) Ask wider, answer the granted part. `coarsen` falls back to the
+    regions' longest shared ancestor, up to the root, and never drops a
+    region. Draft: a requested prefix wider than the subscriber's scope is
+    answered as if each granted region inside it were asked: a claim above a
+    region is presented at that region, and SYNCED follows every region's
+    initial set. Add one ordering rule: a publisher answers with a grant
+    change before the ANNOUNCE_OK of the next edit it reads after the
+    AUTH_OK, so a subscriber whose grant widens under a wide ask can send an
+    empty edit and hold new readers until its ANNOUNCE_OK. `rs/moq-net`:
+    the publisher reads each granted region inside an ask through its own
+    node key, as it reads mounts, re-narrowed on each grant change. That
+    also keeps the publisher from reading ungranted subtrees, which bounds
+    its work and leaves SYNCED's timing blind to what it hides. The
+    subscriber's `coarsen` widens instead of dropping. `js/net`: the answer
+    presents a claim above a granted region at the region; the subscriber
+    already falls back to the root, and gains the widening sync. No message
+    field changes and no public API changes. It also fixes JS's existing
+    root fallback.
+  - (A) Exception to the size rule. A subscriber's set may pass one message
+    when each prefix past it is a region the publisher granted. Draft: the
+    exception, plus how both ends derive a grant's regions from its patterns
+    (`interest_prefixes`, wildcards included), plus what happens when a
+    narrowing (an AUTH_OK replacing the grant, an AUTH_ERROR, or a lapse)
+    crosses an edit already sent. The acceptor judges a request when it
+    reads it, so that edit names a region no longer granted, and as written
+    the publisher must close the session. A narrowing between edits leaves
+    the set past the limit until the subscriber's next edit removes the
+    region. `rs/moq-net`: the publisher checks each extra prefix against its
+    grant, and `coarsen` keeps every granted region. `js/net`: the same
+    check, and its subscriber, which knows nothing of the grant today, has
+    to ask by the grant's regions.
+  - (B) API: a reader of an unasked region learns the session cannot answer
+    it, a public change in Rust, JS, and the bindings.
+  - (C) Neither: a reader overlapping an unasked region never syncs, a hang
+    in place of a wrong answer.
 
-Benchmark origins, broadcasts per origin, neighbors, active tracks/fronts,
-and announce cursors independently. A route update must not expand back into
-per-broadcast table rewrites or poll unrelated fronts. Measure messages, bytes,
-wakes/select calls, CPU, replay work, and retained state. One broadcast per
-origin is an explicit case. Coordinate with Route wakes and Announce replay;
-benchmark smoke alone does not enforce complexity, so add operation-count
-regressions. Bound held routes, doubts, and remembered dead hops under
-same-clock churn.
-
-Decided 2026-11-12 (maintainer, /quest-audit; epic Plan item 30): three
-fixtures from routing prior art, as tests before any design change. A
-relay vanishes and its neighbours notice up to the 3 s keep-alive apart,
-which shows whether the doubt timer must follow the keep-alive or relay
-keep-alives must shorten. Three relays whose local priorities form a dispute
-wheel settle, or the test pins how they fail (RFC 4264). A primary route
-fails and returns, and every relay ends back on it.
-
-## Required
-
-- [lite-07 sessions run the path router](/quest/m2/cluster-routes/switch.md) - the sessions and the route rule these fixtures accept
+  D over A: D keeps the one-message rule whole, never names a region on the
+  wire, so a narrowing cannot turn an honest edit into a violation, and
+  needs no shared rule for deriving regions. It costs a presentation rule
+  and the publisher's narrowing, which JS's root fallback needs anyway. Done
+  once the choice is recorded in Plan.
 
 ## Related
 

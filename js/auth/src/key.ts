@@ -2,9 +2,10 @@ import { wall } from "@moq/clock";
 import * as jose from "jose";
 import * as z from "zod/mini";
 import { type Algorithm, AlgorithmSchema } from "./algorithm.ts";
-import { type Claims, ClaimsSchema, ScopeSchema, scopeAllows } from "./claims.ts";
+import { type Claims, ClaimsFieldsSchema, ClaimsSchema, Scope, ScopeSchema } from "./claims.ts";
+import * as Json from "./json.ts";
 import * as Path from "./path.ts";
-import { encodeGrants, nestRates } from "./wire.ts";
+import { encodeClaims } from "./wire.ts";
 
 /**
  * A validated key identifier (kid). At most 128 alphanumeric, hyphen, or underscore characters.
@@ -19,9 +20,9 @@ export const KeyIdSchema = z.string().check(
 export type KeyId = z.infer<typeof KeyIdSchema>;
 
 /**
- * Key operations that can be performed
+ * What a key may be used for: signing tokens, verifying them, or both.
  */
-export const OperationSchema = z.enum(["sign", "verify", "decrypt", "encrypt"]);
+export const OperationSchema = z.enum(["sign", "verify"]);
 /** A value parsed by {@link OperationSchema}. */
 export type Operation = z.infer<typeof OperationSchema>;
 
@@ -35,7 +36,7 @@ const EC_ALGORITHM_TO_CURVE: Record<"ES256" | "ES384", "P-256" | "P-384"> = {
 
 const Base64FieldSchema = z.string().check(
 	z.minLength(1),
-	z.refine((value) => decodeBase64Flexible(value) !== null, {
+	z.refine((value) => decodeBase64url(value, true) !== null, {
 		message: "Field must be valid base64url data",
 	}),
 );
@@ -50,18 +51,7 @@ const BaseKeySchema = z.object({
 
 const OctKeySchema = z.extend(BaseKeySchema, {
 	kty: z.literal("oct"),
-	k: Base64FieldSchema.check(
-		z.refine(
-			(secret) => {
-				// Validate minimum length (at least 32 bytes when decoded)
-				const decoded = decodeBase64Flexible(secret);
-				return decoded && decoded.byteLength >= MIN_HMAC_SECRET_BYTES;
-			},
-			{
-				message: `Secret must be at least ${MIN_HMAC_SECRET_BYTES} bytes when decoded`,
-			},
-		),
-	),
+	k: Base64FieldSchema,
 });
 
 const RsaKeySchema = z
@@ -111,9 +101,13 @@ const OkpKeySchema = z.extend(BaseKeySchema, {
 	d: z.optional(Base64FieldSchema),
 });
 
-const CanonicalKeySchema = z.discriminatedUnion("kty", [OctKeySchema, RsaKeySchema, EcKeySchema, OkpKeySchema]);
-/** A JSON Web Key of any supported type: oct, RSA, EC, or OKP. */
-export const KeySchema = CanonicalKeySchema;
+/** A JSON Web Key of any supported type: oct, RSA, EC, or OKP, with an algorithm and curve its type supports. */
+export const KeySchema = z.discriminatedUnion("kty", [OctKeySchema, RsaKeySchema, EcKeySchema, OkpKeySchema]).check(
+	z.superRefine((key, ctx) => {
+		const message = keyIssue(key);
+		if (message) ctx.addIssue({ code: "custom", message });
+	}),
+);
 /** A value parsed by {@link KeySchema}. */
 export type Key = z.infer<typeof KeySchema>;
 /** An RSA, EC, or OKP key. */
@@ -123,80 +117,60 @@ export type SymmetricKey = Extract<Key, { kty: "oct" }>;
 /** An asymmetric key without its private parameters. */
 export type PublicKey = Omit<AsymmetricKey, "d" | "p" | "q" | "dp" | "dq" | "qi">;
 
-/** Derive a verify-only copy of this key, dropping the private material. */
+/** Derive a verify-only copy of this key, dropping the private material and sharing nothing with it. */
 function toPublic(key: Key): PublicKey {
-	switch (key.kty) {
-		case "oct":
-			throw new Error("Cannot derive public key from oct (symmetric) key");
+	if (key.kty === "oct") throw new Error("Cannot derive public key from oct (symmetric) key");
+	if (!key.key_ops.includes("verify")) throw new Error("Key does not support verify operation");
 
-		case "RSA": {
-			const { d, p, q, dp, dq, qi, key_ops, ...publicKey } = key;
-			return { ...publicKey, key_ops: key_ops.filter((op) => op !== "sign" && op !== "decrypt") };
-		}
-
-		case "EC": {
-			const { d, key_ops, ...publicKey } = key;
-			return { ...publicKey, key_ops: key_ops.filter((op) => op !== "sign" && op !== "decrypt") };
-		}
-
-		case "OKP": {
-			const { d, key_ops, ...publicKey } = key;
-			return { ...publicKey, key_ops: key_ops.filter((op) => op !== "sign" && op !== "decrypt") };
-		}
-	}
+	// A deep copy, since the signer enforces its scope and an alias would let the copy edit it.
+	const copy: Record<string, unknown> = structuredClone(key);
+	for (const field of ["d", "p", "q", "dp", "dq", "qi"]) delete copy[field];
+	copy.key_ops = ["verify"];
+	return copy as PublicKey;
 }
 
 /** Parse a key from a string, auto-detecting JSON or base64url encoding. */
 function parse(jwk: string): Key {
-	const trimmed = jwk.trim();
+	// Trimmed as Rust's `str::trim` does, which differs from `String.trim` on U+0085 and U+FEFF.
+	const trimmed = jwk.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, "");
 
-	let data: unknown;
-	if (trimmed.startsWith("{")) {
-		// Plain JSON
-		try {
-			data = JSON.parse(trimmed);
-		} catch {
-			throw new Error("Failed to parse JWK: invalid JSON format");
-		}
-	} else {
-		// Base64url encoded JSON
-		const decoded = decodeBase64Flexible(trimmed);
+	let json = trimmed;
+	if (!trimmed.startsWith("{")) {
+		// Base64url encoded JSON, unpadded as both languages write it.
+		const decoded = decodeBase64url(trimmed, false);
 		if (!decoded) {
 			throw new Error("Failed to decode JWK: invalid base64url encoding");
 		}
 		try {
-			const jsonString = new TextDecoder().decode(decoded);
-			data = JSON.parse(jsonString);
+			json = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(decoded);
 		} catch {
-			throw new Error("Failed to parse JWK: invalid JSON format after base64url decode");
+			throw new Error("Failed to decode JWK: invalid UTF-8 after base64url decode");
 		}
 	}
 
-	let key: Key;
+	let data: unknown;
 	try {
-		key = KeySchema.parse(data);
+		data = Json.parse(json);
 	} catch (error) {
-		throw new Error(`Failed to validate JWK: ${error instanceof Error ? error.message : "unknown error"}`);
+		throw new Error(`Failed to parse JWK: ${error instanceof Error ? error.message : "invalid JSON"}`);
 	}
 
 	try {
-		validateKey(key);
+		return KeySchema.parse(data);
 	} catch (error) {
 		throw new Error(`Failed to validate JWK: ${error instanceof Error ? error.message : "unknown error"}`);
 	}
-
-	return key;
 }
 
 /**
  * Sign the claims with this key, returning the encoded token.
  *
- * `iat` is written only when the claims carry one, so an unset field stays off the
- * wire rather than being stamped with the current time.
+ * `issued` is written only when the claims carry one, so an unset field stays off the
+ * wire rather than being stamped with the current time; nor is an `id` invented.
  *
- * Takes each role as its patterns, capped by `publish_rate` or `subscribe_rate` beside
- * it, as the decoded {@link Claims} spell them; the `{path, rate}` wire form and the
- * legacy `put`/`get` spelling are refused.
+ * Takes each role as {@link Claims} spell it: its patterns, or `{path, rate}` when capped.
+ * A field {@link Claims} lacks is refused, the wire's `exp` and the legacy `put`/`get`
+ * included.
  *
  * Throws on a root spelled with an empty segment, a `\` escaping anything but `\` or
  * `/`, or more than 4096 bytes. Verifying stays lenient on the empty segments, so tokens
@@ -205,11 +179,10 @@ function parse(jwk: string): Key {
 async function sign(key: Key, claims: Claims): Promise<string> {
 	ensureOperationSupported(key, "sign");
 
-	// Scope-check and sign what the schema parsed, never the raw input. The caps nest
-	// back into their roles first, which the schema refuses a role already in.
+	// Scope-check and sign what the schema parsed, never the raw input.
 	let parsed: Claims;
 	try {
-		parsed = ClaimsSchema.parse(nestRates(claims));
+		parsed = ClaimsFieldsSchema.parse(claims);
 	} catch (error) {
 		throw new Error(`Invalid claims: ${error instanceof Error ? error.message : "unknown error"}`);
 	}
@@ -217,8 +190,7 @@ async function sign(key: Key, claims: Claims): Promise<string> {
 	ensureClaimsWithinScope(key, parsed);
 
 	const joseKey = await importJoseKey(key);
-	// Written the legacy way when that says the same thing, so older verifiers accept it.
-	const jwt = await new jose.SignJWT(encodeGrants(parsed))
+	const jwt = await new jose.SignJWT(encodeClaims(parsed))
 		.setProtectedHeader({
 			alg: key.alg,
 			typ: "JWT",
@@ -245,8 +217,8 @@ async function verify(key: PublicKey | SymmetricKey, token: string): Promise<Cla
 		throw new Error(`Failed to parse token claims: ${error instanceof Error ? error.message : "unknown error"}`);
 	}
 	const now = wall().asUnixMillis() / 1000;
-	if (claims.exp !== undefined && claims.exp <= now) throw new Error("Token has expired");
-	if (claims.nbf !== undefined && claims.nbf > now) throw new Error("Token is not yet valid");
+	if (claims.expires !== undefined && claims.expires <= now) throw new Error("Token has expired");
+	if (claims.notBefore !== undefined && claims.notBefore > now) throw new Error("Token is not yet valid");
 	ensureClaimsWithinScope(key, claims);
 	return claims;
 }
@@ -417,7 +389,7 @@ function getHashForAlgorithm(alg: Algorithm): "SHA-256" | "SHA-384" | "SHA-512" 
 export const Key = {
 	/** Parse a key from JSON or base64url-encoded JSON. */
 	parse,
-	/** Derive a verify-only copy, dropping the private material. Throws on a symmetric (oct) key, which has no public half. */
+	/** Derive a verify-only copy, dropping the private material. Throws on a symmetric (oct) key, which has no public half, and on a key that cannot verify. */
 	public: toPublic,
 	/** Sign the claims with this key, returning the encoded token. */
 	sign,
@@ -428,50 +400,43 @@ export const Key = {
 };
 
 function ensureClaimsWithinScope(key: PublicKey | SymmetricKey | Key, claims: Claims): void {
-	if (key.scope && !scopeAllows(key.scope, claims)) {
+	if (key.scope && !Scope.allows(key.scope, claims)) {
 		throw new Error("Token capabilities exceed the key scope");
 	}
 }
 
-function validateKey(key: Key): void {
+/** Why the key's algorithm, curve, or secret can never work, or undefined when it can. */
+function keyIssue(
+	key: z.infer<typeof OctKeySchema | typeof RsaKeySchema | typeof EcKeySchema | typeof OkpKeySchema>,
+): string | undefined {
 	switch (key.kty) {
 		case "oct": {
-			if (!HMAC_ALGORITHMS.has(key.alg)) {
-				throw new Error(`Algorithm ${key.alg} is incompatible with oct keys`);
-			}
-			const secret = decodeBase64Flexible(key.k);
+			if (!HMAC_ALGORITHMS.has(key.alg)) return `Algorithm ${key.alg} is incompatible with oct keys`;
+			const secret = decodeBase64url(key.k, true);
 			if (!secret || secret.byteLength < MIN_HMAC_SECRET_BYTES) {
-				throw new Error("Secret must be at least 32 bytes when decoded");
+				return `Secret must be at least ${MIN_HMAC_SECRET_BYTES} bytes when decoded`;
 			}
-			break;
+			return;
 		}
-		case "RSA": {
-			if (!RSA_ALGORITHMS.has(key.alg)) {
-				throw new Error(`Algorithm ${key.alg} is incompatible with RSA keys`);
-			}
-			break;
-		}
+		case "RSA":
+			if (!RSA_ALGORITHMS.has(key.alg)) return `Algorithm ${key.alg} is incompatible with RSA keys`;
+			return;
 		case "EC": {
-			if (!isEcAlgorithm(key.alg)) {
-				throw new Error(`Algorithm ${key.alg} is incompatible with EC keys`);
-			}
+			if (!isEcAlgorithm(key.alg)) return `Algorithm ${key.alg} is incompatible with EC keys`;
 			const expectedCurve = EC_ALGORITHM_TO_CURVE[key.alg];
-			if (key.crv !== expectedCurve) {
-				throw new Error(`Algorithm ${key.alg} requires curve ${expectedCurve}`);
+			if (key.crv !== expectedCurve) return `Algorithm ${key.alg} requires curve ${expectedCurve}`;
+			const length = key.crv === "P-256" ? 32 : 48;
+			if (
+				decodeBase64url(key.x, true)?.byteLength !== length ||
+				decodeBase64url(key.y, true)?.byteLength !== length
+			) {
+				return `Coordinates must be ${length} bytes for ${key.crv}`;
 			}
-			break;
+			return;
 		}
-		case "OKP": {
-			if (key.alg !== "EdDSA") {
-				throw new Error(`Algorithm ${key.alg} is incompatible with OKP keys`);
-			}
-			if (key.crv !== "Ed25519") {
-				throw new Error("Only Ed25519 OKP keys are supported");
-			}
-			break;
-		}
-		default:
-			throw new Error(`Unsupported key type ${(key as { kty: string }).kty}`);
+		case "OKP":
+			if (key.alg !== "EdDSA") return `Algorithm ${key.alg} is incompatible with OKP keys`;
+			return;
 	}
 }
 
@@ -488,7 +453,7 @@ function ensureOperationSupported(key: Key | PublicKey, operation: Operation): v
 function ensurePrivateMaterial(key: Key): void {
 	switch (key.kty) {
 		case "oct":
-			return; // shared secret already validated by validateKey()
+			return; // KeySchema already checked the secret
 		case "RSA":
 			if (!key.d) {
 				throw new Error("RSA key is missing the private exponent required for signing");
@@ -517,16 +482,20 @@ async function importJoseKey(key: Key | PublicKey): Promise<CryptoKey | Uint8Arr
 	return jose.importJWK(jwk, key.alg);
 }
 
-function decodeBase64Flexible(value: string): Uint8Array | null {
-	const trimmed = value.trim();
-	if (!trimmed) {
-		return null;
-	}
+const BASE64URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
-	try {
-		// Accept standard base64 too by mapping it onto the base64url alphabet.
-		return jose.base64url.decode(trimmed.replaceAll("+", "-").replaceAll("/", "_"));
-	} catch {
-		return null;
-	}
+/**
+ * Decode base64url exactly as `moq-auth` does, or return null: unpadded, or with canonical
+ * padding when `padded` allows it, never empty, and with no whitespace, standard-alphabet
+ * characters, or nonzero trailing bits.
+ */
+function decodeBase64url(value: string, padded: boolean): Uint8Array | null {
+	const body = padded && value.length % 4 === 0 ? value.replace(/==?$/, "") : value;
+	if (!/^[A-Za-z0-9_-]+$/.test(body) || body.length % 4 === 1) return null;
+
+	// The last character's low bits fall past the final byte, so a canonical encoding zeroes them.
+	const spare = [0, 0, 0b1111, 0b11][body.length % 4] ?? 0;
+	if (BASE64URL.indexOf(body[body.length - 1] ?? "") & spare) return null;
+
+	return jose.base64url.decode(body);
 }

@@ -4,13 +4,13 @@ import { Manual } from "@moq/clock/test";
 import { Once } from "@moq/signals";
 import type * as announce from "../announced.ts";
 import { ProtocolViolation, StreamCode, Stream as StreamError } from "../error.ts";
-import { type Hop, HopSchema, UNKNOWN_HOP } from "../hop.ts";
+import { type Hop, toHop, UNKNOWN_HOP } from "../hop.ts";
 import { hooks } from "../internal.ts";
 import { createMockTransportPair, manual, settlesWithin } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream } from "../stream.ts";
 import { Tail } from "../tail.ts";
-import { Timescale } from "../time.ts";
+import { Timescale, Timestamp } from "../time.ts";
 import * as track from "../track.ts";
 import * as demandUtil from "../util/demand.ts";
 import type * as Cluster from "./cluster.ts";
@@ -321,8 +321,8 @@ test("an entry buffered past a consumer close does not pin the path", async () =
 });
 
 /** The Hop IDs a cluster-negotiated session declared, ours first. */
-const SELF: Hop = HopSchema.parse(7n);
-const PEER: Hop = HopSchema.parse(9n);
+const SELF: Hop = toHop(7n);
+const PEER: Hop = toHop(9n);
 
 /**
  * A peer that knows our Hop ID never advertises a path that already ran through us, so
@@ -491,7 +491,7 @@ test("a PUBLISH_NAMESPACE update that starts looping back is detached", async ()
 	await acceptSubscribeNamespace(pair.client);
 
 	// Published by 11, relayed by the peer. Every update keeps that publisher.
-	const publisher = HopSchema.parse(11n);
+	const publisher = toHop(11n);
 	const request = await Stream.open(pair.server, { version: VERSION });
 	const handler = subscriber.runPublishNamespace(
 		new PublishNamespace({
@@ -598,7 +598,7 @@ test("a PUBLISH_NAMESPACE update that changes the publisher applies in place", a
 		new PublishNamespace({
 			requestId: 0n,
 			trackNamespace: Path.from("theirs"),
-			params: { cluster: { hops: [HopSchema.parse(11n), PEER], cost: 0n } },
+			params: { cluster: { hops: [toHop(11n), PEER], cost: 0n } },
 		}),
 		request,
 	);
@@ -610,7 +610,7 @@ test("a PUBLISH_NAMESPACE update that changes the publisher applies in place", a
 	const held = subscriber.consume(Path.from("theirs"));
 
 	await peer.writer.u53(PublishNamespaceUpdate.id);
-	await new PublishNamespaceUpdate({ requestId: 3n, update: { hops: [HopSchema.parse(8n), PEER] } }).encode(
+	await new PublishNamespaceUpdate({ requestId: 3n, update: { hops: [toHop(8n), PEER] } }).encode(
 		peer.writer,
 		VERSION,
 	);
@@ -619,7 +619,7 @@ test("a PUBLISH_NAMESPACE update that changes the publisher applies in place", a
 	expect(await announced.next()).toMatchObject({
 		prefix: Path.from("theirs"),
 		kind: "update",
-		route: { hops: [HopSchema.parse(8n), PEER] },
+		route: { hops: [toHop(8n), PEER] },
 	});
 
 	expect(subscriber.consume(Path.from("theirs")).closed).toBe(held.closed);
@@ -729,7 +729,11 @@ async function subscribeTrack({
 	version?: IetfVersion;
 	properties?: Properties;
 	subscription?: track.Subscription;
-} = {}): Promise<{ subscriber: Subscriber; track: track.Subscriber }> {
+} = {}): Promise<{
+	subscriber: Subscriber;
+	track: track.Subscriber;
+	pair: ReturnType<typeof createMockTransportPair>;
+}> {
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const session = new NativeSession(pair.server, version, true);
 	const subscriber = new Subscriber({ session });
@@ -748,7 +752,7 @@ async function subscribeTrack({
 	await peer.writer.u53(SubscribeOk.id);
 	await new SubscribeOk({ trackAlias: ALIAS, properties }).encode(peer.writer, version);
 
-	return { subscriber, track: consumer };
+	return { subscriber, track: consumer, pair };
 }
 
 // A refusal already ended the request: a reset back would tell the publisher we failed. The
@@ -807,37 +811,75 @@ test("a track without TIMESCALE arrives untimed, even if an object carries a Tim
 	const group = await track.ordered().nextGroup();
 	const frame = await group?.readFrame();
 	expect(frame?.payload).toEqual(new Uint8Array([42]));
-	expect(frame?.timestamp).toBeUndefined();
+	// Its group's key, not the object's Timestamp.
+	expect(frame?.timestamp).toEqual(Timestamp.unscaled(0n));
 	track.close();
 });
 
-test("an object-scope Timescale is never applied", async () => {
+test("a received frame's time is its group's key in the track's TIMESCALE", async () => {
 	const { subscriber, track } = await subscribeTrack({ properties: { timescale: Timescale.MICRO } });
 	expect((await track.info()).timescale).toBe(Timescale.MICRO);
 
-	// Property 0x08 (Timescale) = 1 per second, then 0x10 (Timestamp) = 5 as a type delta of 8.
-	await subscriber.handleGroup(stampedGroup(0n), new Reader(undefined, encodeStamped([0x08, 1, 0x08, 5]), VERSION));
+	// Property 0x08 (Timescale) = 1 per second, then 0x10 (Timestamp) = 5 as a type delta of 8:
+	// neither is read. The second object carries no properties at all.
+	const objects = new Uint8Array([...encodeStamped([0x08, 1, 0x08, 5]), ...encodeStamped([])]);
+	await subscriber.handleGroup(stampedGroup(7n), new Reader(undefined, objects, VERSION));
 	const group = await track.ordered().nextGroup();
-	const frame = await group?.readFrame();
-	expect(frame?.timestamp?.scale).toBe(Timescale.MICRO);
-	expect(frame?.timestamp?.value).toBe(5);
+	for (let i = 0; i < 2; i++) {
+		const frame = await group?.readFrame();
+		expect(frame?.payload).toEqual(new Uint8Array([42]));
+		expect(frame?.timestamp).toEqual(new Timestamp(7, Timescale.MICRO));
+	}
+	expect(track.closed.peek()).toBeUndefined();
 	track.close();
 });
 
-test("an object without a Timestamp on a TIMESCALE track is malformed", async () => {
+test("a group whose key no timestamp holds is refused, not the track", async () => {
 	const { subscriber, track } = await subscribeTrack({ properties: { timescale: Timescale.MICRO } });
 	const reader = new Reader(undefined, encodeStamped([]), VERSION);
 	const stop = spyOn(reader, "stop");
 
-	await subscriber.handleGroup(stampedGroup(0n), reader);
+	await subscriber.handleGroup(stampedGroup(1n << 53n), reader);
 
 	expect(stop).toHaveBeenCalledTimes(1);
-	const err = stop.mock.calls[0][0];
-	expect(err).toBeInstanceOf(StreamError);
-	expect((err as StreamError).code).toBe(StreamCode.MalformedTrack);
-	// The track can't be trusted past it, so it ends rather than skipping one group.
-	expect(track.closed.peek()).toBe(err as StreamError);
+	expect(stop.mock.calls[0][0]).toBeInstanceOf(RangeError);
+	expect(track.closed.peek()).toBeUndefined();
 	stop.mockRestore();
+	track.close();
+});
+
+test("a Prior Group ID Gap skips the keys just below its group", async () => {
+	const { subscriber, track } = await subscribeTrack();
+	await subscriber.handleGroup(stampedGroup(0n), new Reader(undefined, encodeStamped([]), VERSION));
+	// Property 0x3C (Prior Group ID Gap) = 3, inside Immutable Properties (0x0b) on the second
+	// object too: once per group, so the agreeing repeat changes nothing.
+	const objects = new Uint8Array([...encodeStamped([0x3c, 3]), ...encodeStamped([0x0b, 2, 0x3c, 3])]);
+	await subscriber.handleGroup(stampedGroup(5n), new Reader(undefined, objects, VERSION));
+
+	expect(hooks.skippedBelow(track, 5n)).toBe(3n);
+	// Group 1 is not named, so it may still arrive.
+	expect(hooks.skippedBelow(track, 2n)).toBe(0n);
+	expect(track.closed.peek()).toBeUndefined();
+	track.close();
+});
+
+test("a Prior Group ID Gap reaching below group 0 or repeated in one object is a malformed track", async () => {
+	for (const [groupId, properties] of [
+		[2n, [0x3c, 3]],
+		[5n, [0x3c, 1, 0, 1]],
+	] as const) {
+		const { subscriber, track } = await subscribeTrack();
+		const reader = new Reader(undefined, encodeStamped([...properties]), VERSION);
+		const stop = spyOn(reader, "stop");
+
+		await subscriber.handleGroup(stampedGroup(groupId), reader);
+
+		const err = stop.mock.calls[0][0];
+		expect(err).toBeInstanceOf(StreamError);
+		expect((err as StreamError).code).toBe(StreamCode.MalformedTrack);
+		expect(track.closed.peek()).toBe(err as StreamError);
+		stop.mockRestore();
+	}
 });
 
 test("a compact END_OF_TRACK at object 5 with properties is subgroup 5, refused without ending the track", async () => {
@@ -1102,7 +1144,7 @@ test("early group waits for SUBSCRIBE_OK priority before track acceptance", asyn
 	expect((await track.info()).priority).toBe(127 - 37);
 	expect(group.publisherPriority).toBe(37);
 	const ordered = track.ordered();
-	expect((await ordered.nextGroup())?.sequence).toBe(3n);
+	expect((await ordered.nextGroup())?.start).toBe(3n);
 	const explicit = new GroupMessage({
 		trackAlias: ALIAS,
 		groupId: 4n,
@@ -1113,7 +1155,7 @@ test("early group waits for SUBSCRIBE_OK priority before track acceptance", asyn
 	await subscriber.handleGroup(explicit, new Reader(undefined, encodeObjects([0]), VERSION));
 	expect(explicit.publisherPriority).toBe(9);
 	expect((await track.info()).priority).toBe(127 - 37);
-	expect((await ordered.nextGroup())?.sequence).toBe(4n);
+	expect((await ordered.nextGroup())?.start).toBe(4n);
 	ordered.close();
 	track.close();
 });
@@ -1128,7 +1170,7 @@ test.each([Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22])(
 			.track("video")
 			.subscribe({
 				...track.Subscription.default(),
-				ranges: [{ start: { absolute: 1n } }],
+				ranges: [{ start: { time: 1n } }],
 				order: "ascending",
 				delay: { max: null },
 			});
@@ -1160,9 +1202,9 @@ test.each([Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22])(
 			await Promise.all(arrivals);
 			const ordered = consumer.ordered();
 			try {
-				for (const sequence of [1n, 2n]) {
+				for (const key of [1n, 2n]) {
 					const group = await ordered.nextGroup();
-					expect(group?.sequence).toBe(sequence);
+					expect(group?.start).toBe(key);
 					if (!group) throw new Error("missing prefix group");
 					expect(await group.readString()).toBe("object 0");
 					expect(await group.readString()).toBe("object 0");
@@ -1188,7 +1230,7 @@ test.each([Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22])(
 			.track("video")
 			.subscribe({
 				...track.Subscription.default(),
-				ranges: [{ start: { absolute: 0n } }],
+				ranges: [{ start: { time: 0n } }],
 				order: "ascending",
 				delay: { max: null },
 			});
@@ -1251,7 +1293,7 @@ test("a bounded subscription asks upstream from its start without an end", async
 		.track("video")
 		.subscribe({
 			...track.Subscription.default(),
-			ranges: [{ start: { absolute: 4n }, end: { absolute: 10n } }],
+			ranges: [{ start: { time: 4n }, end: { time: 9n } }],
 			order: "ascending",
 			delay: { max: null },
 		});
@@ -1296,7 +1338,7 @@ test("a group served from partway through is dropped", async () => {
 	);
 
 	const group = await track.ordered().nextGroup();
-	expect(group?.sequence).toBe(4n);
+	expect(group?.start).toBe(4n);
 
 	track.close();
 });
@@ -1316,7 +1358,7 @@ test("a clear FIRST_OBJECT at object 0 is the whole group", async () => {
 	);
 
 	const group = await track.ordered().nextGroup();
-	expect(group?.sequence).toBe(3n);
+	expect(group?.start).toBe(3n);
 	if (!group) return;
 	expect(await group.readString()).toBe("object 0");
 	expect(group.frameCount).toBe(2);
@@ -1341,7 +1383,7 @@ test("an END_OF_GROUP status on a marked stream finishes the group", async () =>
 	);
 
 	const group = await track.ordered().nextGroup();
-	expect(group?.sequence).toBe(3n);
+	expect(group?.start).toBe(3n);
 	if (!group) return;
 	for (let i = 0; i < 5; i++) {
 		expect(await group.readString()).toBe("object 0");
@@ -1407,7 +1449,7 @@ test("a clear FIRST_OBJECT past object 0 is dropped", async () => {
 	);
 
 	const group = await track.ordered().nextGroup();
-	expect(group?.sequence).toBe(4n);
+	expect(group?.start).toBe(4n);
 
 	track.close();
 });
@@ -1450,7 +1492,7 @@ test.each([
 
 	// This tests stream framing, independent of gaps below these groups. An ordered
 	// subscription with this budget would wait for the unreceived groups 0..2.
-	for (const sequence of expected) expect((await track.recvGroup())?.sequence).toBe(BigInt(sequence));
+	for (const key of expected) expect((await track.recvGroup())?.start).toBe(BigInt(key));
 	track.close();
 });
 
@@ -1469,7 +1511,7 @@ test("a group that claims its first object must start at zero", async () => {
 	const group = await track.ordered().nextGroup();
 	expect(group).toBeDefined();
 	if (!group) return;
-	await expect(group.readFrameSequence()).rejects.toThrow(/object IDs must start at 0/);
+	await expect(group.readFrameIndex()).rejects.toThrow(/object IDs must start at 0/);
 
 	track.close();
 });
@@ -1483,9 +1525,9 @@ for (const [name, firstObject, bytes] of [
 		const { subscriber, track } = await subscribeTrack();
 		const opened = Promise.withResolvers<Tail>();
 		const open = Tail.prototype.open;
-		const opening = spyOn(Tail.prototype, "open").mockImplementation(function (this: Tail, sequence) {
+		const opening = spyOn(Tail.prototype, "open").mockImplementation(function (this: Tail, key) {
 			opened.resolve(this);
-			return open.call(this, sequence);
+			return open.call(this, key);
 		});
 		const cancelled = jest.fn();
 		let controller: ReadableStreamDefaultController<Uint8Array>;
@@ -1518,6 +1560,52 @@ for (const [name, firstObject, bytes] of [
 		await tail.settle(() => true, new Once<null>());
 	});
 }
+
+// The relay forwards a withdrawn route's END_OF_TRACK just as the viewer's own unsubscribe
+// closes the track, so the marker lands on a track that already ended. The track is gone, not
+// the publisher wrong, so the session stays up for the route that replaces it.
+test("an END_OF_TRACK after the track closed locally leaves the session open", async () => {
+	const { subscriber, track, pair } = await subscribeTrack();
+	const close = spyOn(pair.server, "close");
+	const opened = Promise.withResolvers<void>();
+	const open = Tail.prototype.open;
+	const opening = spyOn(Tail.prototype, "open").mockImplementation(function (this: Tail, key) {
+		opened.resolve();
+		return open.call(this, key);
+	});
+	const ended = Promise.withResolvers<void>();
+	// Restored even when an assertion or a wait below fails, so no other test runs through the spies.
+	onTestFinished(() => {
+		ended.resolve();
+		opening.mockRestore();
+		close.mockRestore();
+	});
+	// A standalone END_OF_TRACK at object 0, whose stream has not ended yet.
+	const readable = new ReadableStream<Uint8Array>({
+		start(controller) {
+			controller.enqueue(new Uint8Array([0, 0, 4]));
+			void ended.promise.then(() => controller.close());
+		},
+	});
+	const reader = new Reader(readable, undefined, VERSION);
+	const handled = subscriber.handleGroup(
+		new GroupMessage({
+			trackAlias: ALIAS,
+			groupId: 3n,
+			subGroupId: 0n,
+			publisherPriority: 0,
+			flags: groupFlags(true),
+		}),
+		reader,
+	);
+	await opened.promise;
+	// Let the handler decode the marker and wait for its stream to end.
+	for (let i = 0; i < 10; i++) await yieldNow();
+	track.close();
+	await handled;
+
+	expect(close).not.toHaveBeenCalled();
+});
 
 test("every object in a chunk reaches the reader before it wakes", async () => {
 	const { subscriber, track } = await subscribeTrack();
@@ -1845,32 +1933,27 @@ test.each(["done", "fin"] as const)("a counted set cut short by %s closes the se
 	}
 });
 
-for (const negotiated of [false, true]) {
-	test(`subscriber max age is sent only to a declaring peer: ${negotiated}`, async () => {
-		const pair = createMockTransportPair(ALPN.DRAFT_18);
-		const subscriber = new Subscriber({
-			session: new NativeSession(pair.server, VERSION, true),
-			maxAge: negotiated,
-		});
-		const track = subscriber
-			.consume(Path.from("room"))
-			.track("video")
-			.subscribe({ delay: { max: Duration.millis(250) } });
-		const peer = await nextStream(pair.client);
-		expect(await peer.reader.u53()).toBe(Subscribe.id);
-		const request = await Subscribe.decode(peer.reader, VERSION);
-		expect(request.maxAge).toBe(negotiated ? 250 : undefined);
-		await peer.writer.u53(SubscribeOk.id);
-		await new SubscribeOk({ trackAlias: ALIAS }).encode(peer.writer, VERSION);
-		await track.info();
-		// The aggregate can change before SUBSCRIBE_OK: the first update must catch it.
-		const tolerant = track.fork({ delay: { max: Duration.millis(900) }, priority: 9 });
-		expect(await peer.reader.u53()).toBe(SubscribeUpdate.id);
-		const update = await SubscribeUpdate.decode(peer.reader, VERSION);
-		expect(update.parameters.maxAge).toBe(negotiated ? 900 : undefined);
-		expect(update.parameters.subscriberPriority).toBe(127 - 9);
-		tolerant.close();
-		track.close();
-		peer.close();
-	});
-}
+test("a subscriber budget is not sent on moq-transport", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
+	const subscriber = new Subscriber({ session: new NativeSession(pair.server, VERSION, true) });
+	const track = subscriber
+		.consume(Path.from("room"))
+		.track("video")
+		.subscribe({ delay: { max: Duration.millis(250) } });
+	const peer = await nextStream(pair.client);
+	expect(await peer.reader.u53()).toBe(Subscribe.id);
+	// The publisher refuses a parameter it does not define, so decoding proves there is none.
+	await Subscribe.decode(peer.reader, VERSION);
+	await peer.writer.u53(SubscribeOk.id);
+	await new SubscribeOk({ trackAlias: ALIAS }).encode(peer.writer, VERSION);
+	await track.info();
+	// Only the priority change is worth an update; the wider budget is not on the wire.
+	const tolerant = track.fork({ delay: { max: Duration.millis(900) }, priority: 9 });
+	expect(await peer.reader.u53()).toBe(SubscribeUpdate.id);
+	const update = await SubscribeUpdate.decode(peer.reader, VERSION);
+	expect(update.parameters.vars.has(0x915c6n)).toBeFalse();
+	expect(update.parameters.subscriberPriority).toBe(127 - 9);
+	tolerant.close();
+	track.close();
+	peer.close();
+});

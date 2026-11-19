@@ -105,11 +105,11 @@ Coroutine read_one(std::shared_ptr<moq::TrackConsumer> consumer, std::optional<m
 }
 #endif
 
-// Whether two timestamps name the same instant at any scales; the probe's values are small
-// enough that the cross products cannot overflow.
+// Whether two scaled timestamps name the same instant at any scales; the probe's values are
+// small enough that the cross products cannot overflow.
 bool same_time(const moq::Timestamp &a, const moq::Timestamp &b)
 {
-	return a.value * b.scale == b.value * a.scale;
+	return a.scale && b.scale && a.value * *b.scale == b.value * *a.scale;
 }
 
 // A datagram-only request reaches its own handler and demand.
@@ -127,9 +127,11 @@ void datagram_tracks()
 	auto producer = ok(request->accept(std::nullopt), "accept datagrams");
 	CHECK(ok(producer->priority(), "aggregate priority") == 12);
 	CHECK(!ok(stream->demand(), "stream demand")->wanted());
-	ok(producer->insert({7, std::nullopt, bytes("seven")}), "insert datagram");
+	// A scale-less datagram track has no time: its timestamp is the unscaled sequence.
+	ok(producer->insert({7, moq::Timestamp{7, std::nullopt}, bytes("seven")}), "insert datagram");
 	auto received = ok(consumer->recv().get(), "receive datagram");
 	CHECK(received && received->sequence == 7 && received->payload == bytes("seven"));
+	CHECK(received->timestamp.value == 7 && !received->timestamp.scale);
 	consumer->cancel();
 	CHECK(!ok(producer->priority_changed(12).get(), "released demand"));
 	ok(producer->finish(), "finish datagrams");
@@ -137,20 +139,22 @@ void datagram_tracks()
 	ok(broadcast->close(), "close datagram broadcast");
 }
 
-// Timestamps are exact records: a 90 kHz tick and a present zero read back as written, an
-// untimed frame reads back untimed, and a record past the bounds is refused.
+// Timestamps are exact records: a 90 kHz tick and a present zero read back as written, a
+// scale-less track's unscaled group key reads back unscaled, and a record past the bounds is
+// refused.
 void timestamp_roundtrip()
 {
 	auto broadcast = ok(moq::BroadcastProducer::init(), "timestamp broadcast");
 	moq::TrackInfo timed;
+	timed.max_age = std::chrono::nanoseconds::zero();
 	timed.timescale = 90000;
 	auto track = ok(broadcast->publish_track("timed", timed), "publish timed track");
 	auto consumer = ok(track->consume(std::nullopt), "consume timed track");
 	for (uint64_t value : {0, 1}) {
 		ok(track->write_frame({bytes("tick"), moq::Timestamp{value, 90000}}), "write tick");
 		auto frame = ok(consumer->read_frame().get(), "read tick");
-		CHECK(frame && frame->timestamp);
-		CHECK(frame->timestamp->value == value && frame->timestamp->scale == 90000);
+		CHECK(frame);
+		CHECK(frame->timestamp.value == value && frame->timestamp.scale == uint64_t(90000));
 	}
 	for (const moq::Timestamp &invalid :
 	     {moq::Timestamp{0, 0}, moq::Timestamp{0, uint64_t(1) << 62}, moq::Timestamp{uint64_t(1) << 61, 90000}}) {
@@ -159,12 +163,35 @@ void timestamp_roundtrip()
 		CHECK(std::holds_alternative<moq::Error::kTimeOverflow>(refused.error().get_variant()));
 	}
 
-	auto untimed = ok(broadcast->publish_track("untimed", std::nullopt), "publish untimed track");
-	auto untimed_consumer = ok(untimed->consume(std::nullopt), "consume untimed track");
-	ok(untimed->write_frame({bytes("untimed"), std::nullopt}), "write untimed");
-	auto frame = ok(untimed_consumer->read_frame().get(), "read untimed");
-	CHECK(frame && !frame->timestamp);
+	auto untimed = ok(broadcast->publish_track("untimed", std::nullopt), "publish scale-less track");
+	auto untimed_consumer = ok(untimed->consume(std::nullopt), "consume scale-less track");
+	// An unscaled timestamp on a timed track is refused.
+	CHECK(!track->write_frame({bytes("tick"), moq::Timestamp{2, std::nullopt}}));
+	ok(untimed->write_frame({bytes("untimed"), moq::Timestamp{3, std::nullopt}}), "write unscaled");
+	auto frame = ok(untimed_consumer->read_frame().get(), "read unscaled");
+	CHECK(frame && frame->timestamp.value == 3 && !frame->timestamp.scale);
 	ok(broadcast->close(), "close timestamp broadcast");
+}
+
+// A refresh reads back as published, and the first subscriber of a track with no group asks
+// for one.
+void track_refresh()
+{
+	auto broadcast = ok(moq::BroadcastProducer::init(), "refresh broadcast");
+	moq::TrackInfo info;
+	info.max_age = std::chrono::nanoseconds::zero();
+	info.refresh.ratio = 0;
+	info.refresh.interval = std::chrono::milliseconds(500);
+	auto track = ok(broadcast->publish_track("refresh", info), "publish refreshed track");
+	auto demand = ok(track->demand(), "refresh demand");
+	auto consumer = ok(track->consume(std::nullopt), "consume refreshed track");
+	auto got = consumer->info();
+	CHECK(got.refresh.ratio == uint32_t(0));
+	CHECK(got.refresh.interval == std::chrono::nanoseconds(std::chrono::milliseconds(500)));
+	ok(demand->refresh().get(), "refresh");
+	// A track with no group has nothing more to send: its first is already asked for.
+	ok(consumer->refresh().get(), "subscriber refresh");
+	ok(broadcast->close(), "close refresh broadcast");
 }
 
 // Only the defaults carry moq-net's zero delay; a bare record leaves both bounds unset.
@@ -181,7 +208,7 @@ void audio_roundtrip()
 {
 	auto broadcast = ok(moq::BroadcastProducer::init(), "audio broadcast");
 	auto receiver = ok(broadcast->consume(), "audio receiver");
-	auto catalogs = ok(moq::MediaCatalogConsumer::subscribe(receiver).get(), "audio catalog consumer");
+	auto catalogs = ok(moq::MediaCatalogConsumer::subscribe(receiver, {}).get(), "audio catalog consumer");
 	auto catalog = ok(moq::MediaCatalogProducer::init(broadcast), "audio catalog producer");
 	moq::AudioEncoderInput input{moq::AudioSampleFormat::kF32, 48000, 2};
 	moq::AudioEncoderOutput output{};
@@ -320,6 +347,7 @@ void minted_instance()
 int main()
 {
 	timestamp_roundtrip();
+	track_refresh();
 	datagram_tracks();
 	subscription_defaults();
 	audio_roundtrip();
@@ -362,6 +390,7 @@ int main()
 	CHECK(route->instance_id() && !route->instance_id()->is_minted());
 	auto broadcast = route->broadcast();
 	moq::TrackInfo info;
+	info.max_age = std::chrono::nanoseconds::zero();
 	info.timescale = 1000000;
 	auto track = ok(broadcast->publish_track("data", info), "publish_track");
 	ok(route->announce(), "announce");
@@ -430,7 +459,7 @@ int main()
 	CHECK(frame.has_value());
 	CHECK(frame->payload == bytes("hello"));
 	// Lite-07 carries both the Implementation parameter and frame timestamps.
-	CHECK(frame->timestamp && same_time(*frame->timestamp, {1000, 1000000}));
+	CHECK(same_time(frame->timestamp, {1000, 1000000}));
 
 	// A continuation receives the next frame on the executor.
 	{

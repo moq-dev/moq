@@ -15,6 +15,12 @@ itself stays on NVIDIA; the stand-in proves the bridge elsewhere.
 
 ## Plan
 
+Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit): the CARLA
+demo stays in this repository for now, because moq.dev hosts it as a demo
+(rejected: moving it to Kixel, where AGENTS.md sends robotics work). The
+bridge therefore stays a consumer of moq-video's external Vulkan images
+(`frame::vulkan`).
+
 moq-video owns the surface, the backend selection, the Vulkan Video backend,
 and its hardware tests. This quest only removes what the bridge still pins.
 
@@ -40,8 +46,8 @@ probe opens the camera's own backend with a CPU picture.
     `VERSION`, so a mismatched bridge and worker fail at hello naming both
     versions; test the refusal both ways. Open, if mixed versions must run:
     negotiate at hello and keep the v1 layout for H.264.
-  - `sim/moq_carla_sim/bridge.py` publishes `AVC3` or `HEV1` instead of
-    hardcoding `AVC3`.
+  - `sim/moq_carla_sim/bridge.py` publishes `H264` or `H265` instead of
+    hardcoding `H264`.
 - Scaling: one render still feeds the 426x240 and 1280x720 renditions,
   scaled on the GPU. GPU-side copies are allowed; a CPU round trip is not.
 - Test: the stand-in (`tests/standin/mod.rs`) stops requiring vendor

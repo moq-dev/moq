@@ -8,11 +8,12 @@
 //! partway through the group. A group cut short is aborted, never cached as whole.
 
 use crate::support;
+use support::AtStart;
 
 use std::time::Duration;
 
 use bytes::Bytes;
-use moq_net::{Timestamp, Version, origin};
+use moq_net::{Version, origin};
 use support::harness::peer;
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -64,7 +65,9 @@ async fn abandoned_fetch_reaches_the_publisher(version: &str, relays: u64, stage
 	let groups = request.requests();
 	let _track = request.accept(timed());
 	let mut request = match futures::future::select(std::pin::pin!(groups.requested_fill()), &mut waiting).await {
-		futures::future::Either::Left((request, _)) => request.expect("the fetch reaches the publisher"),
+		futures::future::Either::Left((request, _)) => {
+			support::groups(request.expect("the fetch reaches the publisher"))
+		}
 		futures::future::Either::Right(_) => panic!("nothing answered the fetch"),
 	};
 
@@ -78,8 +81,10 @@ async fn abandoned_fetch_reaches_the_publisher(version: &str, relays: u64, stage
 			.unwrap_or_else(|_| panic!("{ctx}: the publisher's fetch is still wanted"));
 		}
 		Stage::MidResponse => {
-			let mut group = request.accept(0, timed()).unwrap();
-			group.write_frame(Timestamp::ZERO, Bytes::from_static(b"head")).unwrap();
+			let mut group = request.accept(0, timed()).unwrap().expect("a fresh group");
+			group
+				.write_frame(group.at_start(), Bytes::from_static(b"head"))
+				.unwrap();
 
 			let mut fetched = waiting.await.unwrap();
 			let frame = fetched.read_frame().await.unwrap().unwrap();
@@ -98,7 +103,9 @@ async fn abandoned_fetch_reaches_the_publisher(version: &str, relays: u64, stage
 				.unwrap();
 
 			// No hop cached the head as the whole group: a fresh fetch reads it all.
-			group.write_frame(Timestamp::ZERO, Bytes::from_static(b"tail")).unwrap();
+			group
+				.write_frame(group.at_start(), Bytes::from_static(b"tail"))
+				.unwrap();
 			group.finish().unwrap();
 			let mut fetched = kio::clock::timeout(Duration::from_secs(5), track.fetch_group(0, None))
 				.await
@@ -111,9 +118,13 @@ async fn abandoned_fetch_reaches_the_publisher(version: &str, relays: u64, stage
 			assert_eq!(payloads, [&b"head"[..], &b"tail"[..]], "{ctx}");
 		}
 		Stage::Drained => {
-			let mut group = request.accept(0, timed()).unwrap();
-			group.write_frame(Timestamp::ZERO, Bytes::from_static(b"head")).unwrap();
-			group.write_frame(Timestamp::ZERO, Bytes::from_static(b"tail")).unwrap();
+			let mut group = request.accept(0, timed()).unwrap().expect("a fresh group");
+			group
+				.write_frame(group.at_start(), Bytes::from_static(b"head"))
+				.unwrap();
+			group
+				.write_frame(group.at_start(), Bytes::from_static(b"tail"))
+				.unwrap();
 
 			let mut fetched = waiting.await.unwrap();
 			for expected in [&b"head"[..], b"tail"] {
@@ -188,12 +199,14 @@ async fn a_refetch_within_the_linger_stays_on_the_relay(version: &str) {
 	let groups = request.requests();
 	let _track = request.accept(timed());
 	let request = match futures::future::select(std::pin::pin!(groups.requested_fill()), &mut waiting).await {
-		futures::future::Either::Left((request, _)) => request.expect("the fetch reaches the publisher"),
+		futures::future::Either::Left((request, _)) => {
+			support::groups(request.expect("the fetch reaches the publisher"))
+		}
 		futures::future::Either::Right(_) => panic!("nothing answered the fetch"),
 	};
-	let mut group = request.accept(0, timed()).unwrap();
+	let mut group = request.accept(0, timed()).unwrap().expect("a fresh group");
 	group
-		.write_frame(Timestamp::ZERO, Bytes::from_static(b"segment"))
+		.write_frame(group.at_start(), Bytes::from_static(b"segment"))
 		.unwrap();
 	let group = group.finish().unwrap();
 	let mut fetched = waiting.await.unwrap();

@@ -74,14 +74,23 @@ case $MODE in
         CRITERION_CARGO_ARGS=()
         CRITERION_FILTER_ARGS=()
         parsing_filters=false
+        previous=
         for argument in "${@:2}"; do
             if [[ $argument == -- && $parsing_filters == false ]]; then
                 parsing_filters=true
             elif [[ $parsing_filters == true ]]; then
                 CRITERION_FILTER_ARGS+=("$argument")
             else
+                # The base build matches each package against the base's names, so it takes
+                # only a name or a glob, as a separate argument.
+                if [[ -n $BASE ]] && { [[ $argument == --package=* || $argument == -p?* ]] ||
+                    [[ ($previous == -p || $previous == --package) && $argument == *[@:#]* ]]; }; then
+                    echo "--criterion takes a package as -p NAME or a glob, not $argument" >&2
+                    exit 2
+                fi
                 CRITERION_CARGO_ARGS+=("$argument")
             fi
+            previous=$argument
         done
         ;;
     --audio)
@@ -416,25 +425,48 @@ criterion_build() {
         | [($package | split("/") | last) + "/" + .target.name, $package, .executable] | @tsv' | sort >"$out"
 }
 
-# Build the base with the current cargo arguments, minus bench targets its selected packages
-# do not have yet: naming one would fail the whole build. Lists nothing in OUT when every
+# Build the base with the current cargo arguments, minus the packages and bench targets it
+# does not have yet: naming one would fail the whole build. Lists nothing in OUT when every
 # selected target is new.
 criterion_build_base() {
-    local out=$1 names name index selected=0 count=${#CRITERION_CARGO_ARGS[@]}
-    local args=() packages=()
+    local out=$1 metadata package pattern names name index selected=0 asked=0 count=${#CRITERION_CARGO_ARGS[@]}
+    local args=() present=() packages=()
     : >"$out"
-    for ((index = 0; index + 1 < count; index++)); do
-        if [[ ${CRITERION_CARGO_ARGS[index]} == -p || ${CRITERION_CARGO_ARGS[index]} == --package ]]; then
-            packages+=("${CRITERION_CARGO_ARGS[index + 1]}")
-        fi
-    done
-    # Another package's target of the same name must not count, or cargo rejects the base build.
-    names=$(cd "$WORKTREE" && cargo metadata --locked --format-version 1 --no-deps |
-        jq -r '.packages[] | select(($ARGS.positional | length) == 0 or (.name as $name | any($ARGS.positional[]; . == $name)))
-            | .targets[] | select(any(.kind[]; . == "bench")) | .name' --args ${packages[@]+"${packages[@]}"}) || return 1
+    metadata=$(cd "$WORKTREE" && cargo metadata --locked --format-version 1 --no-deps) || return 1
+    mapfile -t present < <(jq -r '.packages[].name' <<<"$metadata") || return 1
     for ((index = 0; index < count; index++)); do
         name=${CRITERION_CARGO_ARGS[index]}
-        if [[ $name == --bench ]] && ((index + 1 < count)); then
+        if [[ $name == -p || $name == --package ]] && ((index + 1 < count)); then
+            index=$((index + 1))
+            pattern=${CRITERION_CARGO_ARGS[index]}
+            asked=$((asked + 1))
+            # A selector, literal or a pattern, that names no package of the base selects only
+            # new ones, whose targets are new too; cargo rejects a build that names it.
+            name=
+            for package in "${present[@]}"; do
+                # shellcheck disable=SC2053 # Matched as the pattern cargo reads it as.
+                if [[ $package == $pattern ]]; then
+                    packages+=("$package")
+                    name=$package
+                fi
+            done
+            if [[ -n $name ]]; then
+                args+=(--package "$pattern")
+            fi
+        fi
+    done
+    # Without a package left, cargo would build the whole workspace instead.
+    if ((asked)) && ((${#packages[@]} == 0)); then
+        return 0
+    fi
+    # Another package's target of the same name must not count, or cargo rejects the base build.
+    names=$(jq -r '.packages[] | select(($ARGS.positional | length) == 0 or (.name as $name | any($ARGS.positional[]; . == $name)))
+        | .targets[] | select(any(.kind[]; . == "bench")) | .name' --args ${packages[@]+"${packages[@]}"} <<<"$metadata") || return 1
+    for ((index = 0; index < count; index++)); do
+        name=${CRITERION_CARGO_ARGS[index]}
+        if [[ $name == -p || $name == --package ]] && ((index + 1 < count)); then
+            index=$((index + 1))
+        elif [[ $name == --bench ]] && ((index + 1 < count)); then
             index=$((index + 1))
             name=${CRITERION_CARGO_ARGS[index]}
             selected=$((selected + 1))
@@ -496,6 +528,49 @@ unavailable() {
     printf 'Paired comparison unavailable for %s: %s\n' "$1" "$2" >&2
 }
 
+# Copy the executables a list names to BENCH_KEEP_BUILDS, with the commit they were built
+# from, so a later run can measure them as its base without relinking them.
+keep_builds() {
+    local list=$1 dir=$BENCH_KEEP_BUILDS index=0 key package executable
+    rm -rf "$dir"
+    mkdir -p "$dir/bin"
+    (cd "$ROOT" && git rev-parse HEAD) >"$dir/commit"
+    : >"$dir/targets.tsv"
+    while IFS=$'\t' read -r key package executable; do
+        cp "$executable" "$dir/bin/$index"
+        printf '%s\t%s\t%s\n' "$key" "${package#"$ROOT"/}" "bin/$index" >>"$dir/targets.tsv"
+        index=$((index + 1))
+    done <"$list"
+}
+
+# List the base's kept executables in OUT, as criterion_build would, from the base checkout's
+# packages. Fails when BENCH_BASE_BUILDS holds no builds of BASE covering every current target
+# that can load on this host.
+kept_base() {
+    local out=$1 current=$2 dir=${BENCH_BASE_BUILDS:-} key package file loaded
+    [[ -n $dir && -s $dir/targets.tsv && -f $dir/commit && $(<"$dir/commit") == "$BASE" ]] || return 1
+    dir=$(cd "$dir" && pwd -P)
+    while IFS=$'\t' read -r key _; do
+        [[ -n $(target_line "$dir/targets.tsv" "$key") ]] || return 1
+    done <"$current"
+    : >"$out"
+    while IFS=$'\t' read -r key package file; do
+        # An artifact download drops the executable bit.
+        chmod +x "$dir/$file"
+        # The executables link against the store paths of the shell that built them, which a
+        # fresh runner lacks after a toolchain or library bump. The loader alone, never main,
+        # resolves the interpreter and every library: anything missing builds the base instead.
+        if ! loaded=$(LD_TRACE_LOADED_OBJECTS=1 "$dir/$file" 2>&1); then
+            printf 'Kept base executable %s has no loader here\n' "$key" >&2
+            return 1
+        elif [[ $loaded == *"not found"* ]]; then
+            printf 'Kept base executable %s lacks a library here:\n%s\n' "$key" "$loaded" >&2
+            return 1
+        fi
+        printf '%s\t%s\t%s\n' "$key" "$WORKTREE/$package" "$dir/$file" >>"$out"
+    done <"$dir/targets.tsv"
+}
+
 # Measure the selected targets in quick mode. With a base, run each target's base build
 # beside it, alternating which goes first, then confirm the screen's worst slowdowns.
 # A failed current target fails the run; the base only marks its targets unavailable.
@@ -506,6 +581,7 @@ measure_criterion() {
     local key side targets index=0 status=0
     local filters=(${CRITERION_FILTER_ARGS[@]+"${CRITERION_FILTER_ARGS[@]}"})
     criterion_build "$current" "$ROOT" ${CRITERION_CARGO_ARGS[@]+"${CRITERION_CARGO_ARGS[@]}"}
+    if [[ -n ${BENCH_KEEP_BUILDS:-} ]]; then keep_builds "$current"; fi
     mapfile -t targets < <(cut -f1 "$current")
     if ((${#targets[@]} == 0)); then
         printf 'no Criterion bench targets selected\n' >&2
@@ -517,15 +593,22 @@ measure_criterion() {
         mkdir -p "$RUN/base-context"
         (cd "$WORKTREE" && python3 "$ROOT/bench/metadata.py" "$RUN/base-context" "$BASE" comparison-base)
         printf 'Criterion paired with base %s\n' "$BASE"
-        printf 'Base build log: %s/base-build.log\n' "$RUN"
-        local build_status=(0 0)
-        criterion_build_base "$base" 2>&1 | tee "$RUN/base-build.log" >&2 || build_status=("${PIPESTATUS[@]}")
-        if ((build_status[1] != 0)); then
-            printf 'Failed to write base build log: %s/base-build.log\n' "$RUN" >&2
-        fi
-        if ((build_status[0] != 0)); then
-            : >"$base"
-            for key in "${targets[@]}"; do unavailable "$key" "base build failed"; done
+        if kept_base "$base" "$current"; then
+            printf 'Base executables kept by an earlier run: %s\n' "$BENCH_BASE_BUILDS"
+        else
+            if [[ -n ${BENCH_BASE_BUILDS:-} ]]; then
+                printf 'No kept base executable of every target in %s; building the base\n' "$BENCH_BASE_BUILDS"
+            fi
+            printf 'Base build log: %s/base-build.log\n' "$RUN"
+            local build_status=(0 0)
+            criterion_build_base "$base" 2>&1 | tee "$RUN/base-build.log" >&2 || build_status=("${PIPESTATUS[@]}")
+            if ((build_status[1] != 0)); then
+                printf 'Failed to write base build log: %s/base-build.log\n' "$RUN" >&2
+            fi
+            if ((build_status[0] != 0)); then
+                : >"$base"
+                for key in "${targets[@]}"; do unavailable "$key" "base build failed"; done
+            fi
         fi
     fi
     : >"$RUN/paired-identical.txt"
@@ -873,9 +956,14 @@ generate_certificate() {
 
 # The runtime matrix and profiling use identical feature selection and support checks.
 build_workers() {
-    local checkout=$1 target=$2 profile=$3 features=moq-relay/io-uring
+    local checkout=$1 target=$2 profile=$3
+    local -a features=()
+    # A revision from before the relay always compiled io_uring on Linux names it as a feature.
+    if grep -q '^io-uring = ' "$checkout/rs/moq-relay/Cargo.toml"; then
+        features+=(moq-relay/io-uring)
+    fi
     if [[ ${4:-} == heap ]]; then
-        features+=,moq-relay/jemalloc
+        features+=(moq-relay/jemalloc)
     fi
     printf 'Building worker runtimes: %s (%s)\n' "$checkout" "$profile"
     (
@@ -883,7 +971,7 @@ build_workers() {
         cd /
         CARGO_TARGET_DIR=$target cargo --config "$checkout/.cargo/config.toml" build \
             --manifest-path "$checkout/Cargo.toml" --locked --profile "$profile" \
-            -p moq-relay -p moq-bench --features "$features"
+            -p moq-relay -p moq-bench --features "${features[*]}"
     )
 }
 

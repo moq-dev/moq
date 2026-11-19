@@ -14,8 +14,8 @@
 //!   the keys that sign and verify it. `moq auth generate|sign|verify` is the CLI.
 //!
 //! Grants and claims name paths with [`Pattern`]s from `moq-pattern`, re-exported here:
-//! `foo` is one broadcast, `foo/**` is a subtree, `**` is everything. Each role may also
-//! carry a bitrate cap, a [`Rate`].
+//! `foo` is one broadcast, `foo/**` is a subtree, `**` is everything. Each role is an
+//! [`Access`]: its patterns, and optionally a bitrate cap, a [`Rate`].
 //!
 //! The lease `poll_*` methods are always available. Enable the `async` feature for their
 //! generated async wrappers (`changed`, `closed`, and `revalidate_requested`) and
@@ -23,6 +23,7 @@
 
 #![warn(missing_docs)]
 
+mod access;
 mod algorithm;
 mod claims;
 #[cfg(test)]
@@ -30,6 +31,9 @@ mod corpus;
 mod crypto;
 mod error;
 mod fs;
+/// Test support for the `fuzz/` harness: the target bodies and their seeds.
+#[cfg(any(test, feature = "fuzz"))]
+pub mod fuzz;
 mod generate;
 mod grant;
 mod key;
@@ -38,10 +42,10 @@ mod path;
 mod rate;
 mod request;
 mod set;
+mod token_id;
 mod wire;
 
 pub mod lease;
-pub mod mesh;
 pub mod refusal;
 pub use refusal::Refusal;
 #[cfg(feature = "serve")]
@@ -51,6 +55,7 @@ pub mod tier;
 #[cfg(feature = "client")]
 mod client;
 
+pub use access::*;
 pub use algorithm::*;
 pub use claims::*;
 #[cfg(feature = "client")]
@@ -63,3 +68,4 @@ pub use moq_pattern::{InvalidPattern, Pattern, Patterns, Segment, Specificity};
 pub use rate::*;
 pub use request::*;
 pub use set::*;
+pub use token_id::*;

@@ -564,7 +564,7 @@ async fn the_same_instance_within_the_follow_continues() {
 	assert!(split < LONG.len(), "the capture has a tail after the export joined");
 	let old = relay.origin.request("demo", None).await.unwrap();
 	assert_eq!(old.info().instance.as_ref(), Some(&instance));
-	let clock = catalog.snapshot().media.clock;
+	let clock = catalog.snapshot().sync.clock;
 	connection.abort(moq_net::Error::Cancel);
 	connection.closed().await.unwrap();
 	kio::clock::timeout(TIMEOUT, old.closed())
@@ -584,7 +584,7 @@ async fn the_same_instance_within_the_follow_continues() {
 		import.decode(chunk).unwrap();
 	}
 	assert_eq!(
-		catalog.snapshot().media.clock,
+		catalog.snapshot().sync.clock,
 		clock,
 		"the capture keeps its catalog clock"
 	);
@@ -1115,6 +1115,48 @@ async fn a_passthrough_export_ends_with_its_redundant_importer() {
 	feeding.abort();
 }
 
+/// `repair mp4` refuses a file something else holds the lock on, as a recorder does while it
+/// writes, and leaves it untouched.
+#[tokio::test]
+async fn repair_refuses_a_locked_recording() {
+	let dir = tempfile::tempdir().unwrap();
+	let path = dir.path().join("recording.mp4");
+	std::fs::write(&path, b"not scanned: the lock refuses first").unwrap();
+	let recorder = std::fs::File::open(&path).unwrap();
+	recorder.try_lock().unwrap();
+
+	let output = moq_repair(&path).await;
+	assert!(!output.status.success(), "repaired a file a recorder holds");
+	assert!(
+		String::from_utf8_lossy(&output.stderr).contains("may still be open by a recorder"),
+		"{}",
+		String::from_utf8_lossy(&output.stderr)
+	);
+	assert_eq!(std::fs::read(&path).unwrap(), b"not scanned: the lock refuses first");
+
+	// Once the recorder lets go, the file is scanned instead.
+	drop(recorder);
+	let output = moq_repair(&path).await;
+	assert!(
+		!String::from_utf8_lossy(&output.stderr).contains("may still be open by a recorder"),
+		"{}",
+		String::from_utf8_lossy(&output.stderr)
+	);
+}
+
+/// Run `moq repair mp4` on the file.
+async fn moq_repair(path: &std::path::Path) -> std::process::Output {
+	let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_moq"))
+		.env_remove("KIO_DENY_HOST_TIMERS")
+		.args(["repair", "mp4"])
+		.arg(path)
+		.output();
+	kio::clock::timeout(TIMEOUT, output)
+		.await
+		.expect("repair never exited")
+		.unwrap()
+}
+
 /// `repair mp4` finishes a recording whose `export mp4` was killed as a regular MP4, and leaves
 /// it alone once finished.
 #[tokio::test]
@@ -1130,13 +1172,24 @@ async fn a_killed_mp4_recording_is_repaired() {
 		.expect("spawn export");
 	let (mut publisher, feeding) = import(&relay);
 
+	// Audio fragments as its groups end, video only at the next keyframe, two seconds in.
 	kio::clock::timeout(TIMEOUT, async {
-		while std::fs::metadata(&path).map_or(0, |file| file.len()) < 10_000 {
+		while fragmented(&std::fs::read(&path).unwrap_or_default()).len() < 2 {
 			kio::clock::sleep(Duration::from_millis(50)).await;
 		}
 	})
 	.await
-	.expect("the recording never grew");
+	.expect("the recording never held a fragment of each track");
+	// The recorder holds its lock while it writes, so repairing now would corrupt the file.
+	let mid = std::fs::read(&path).unwrap();
+	let refused = moq_repair(&path).await;
+	assert!(!refused.status.success(), "repaired a recording still being written");
+	assert!(String::from_utf8_lossy(&refused.stderr).contains("may still be open by a recorder"));
+	assert!(
+		std::fs::read(&path).unwrap().starts_with(&mid),
+		"a refused repair rewrote the file"
+	);
+
 	recording.kill().await.unwrap();
 	let killed = std::fs::read(&path).unwrap();
 	assert_eq!(
@@ -1146,15 +1199,7 @@ async fn a_killed_mp4_recording_is_repaired() {
 	);
 
 	let repair = || async {
-		let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_moq"))
-			.env_remove("KIO_DENY_HOST_TIMERS")
-			.args(["repair", "mp4"])
-			.arg(&path)
-			.output();
-		let output = kio::clock::timeout(TIMEOUT, output)
-			.await
-			.expect("repair never exited")
-			.unwrap();
+		let output = moq_repair(&path).await;
 		assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
 		std::fs::read(&path).unwrap()
 	};
@@ -1191,6 +1236,18 @@ fn boxes(file: &[u8]) -> Vec<mp4_atom::Any> {
 	boxes
 }
 
+/// The track ids with a complete moof+mdat fragment in a recording, possibly mid-write.
+fn fragmented(file: &[u8]) -> std::collections::HashSet<u32> {
+	boxes(file)
+		.windows(2)
+		.filter_map(|pair| match pair {
+			[mp4_atom::Any::Moof(moof), mp4_atom::Any::Mdat(_)] => Some(moof),
+			_ => None,
+		})
+		.flat_map(|moof| moof.traf.iter().map(|traf| traf.tfhd.track_id))
+		.collect()
+}
+
 /// Count the frames the relay delivers on `demo`'s video track as they arrive. A GOP lasts two
 /// seconds, so subscribing during the first one counts them all.
 fn delivered(relay: &Relay) -> Arc<AtomicUsize> {
@@ -1201,7 +1258,7 @@ fn delivered(relay: &Relay) -> Arc<AtomicUsize> {
 		let broadcast = origin.follow("demo", None).unwrap().available().await.unwrap().unwrap();
 		let mut catalogs = hang::catalog::Catalog::<()>::subscribe(&broadcast).await.unwrap();
 		let name = loop {
-			let catalog = catalogs.next().await.unwrap().expect("the catalog ended");
+			let catalog = catalogs.next().await.unwrap().expect("the catalog ended").value;
 			if let Some(name) = catalog.video.renditions.keys().next() {
 				break name.clone();
 			}

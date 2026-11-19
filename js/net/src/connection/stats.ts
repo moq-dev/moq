@@ -166,8 +166,8 @@ export async function transportStats(quic: WebTransport): Promise<Stats> {
 
 /**
  * Whether `quic` can report a send-rate estimate: only a WebTransport session with a
- * real `getStats()`. The WebSocket fallback's qmux session reports no counters, the WebRTC
- * data channel's throws, shipping Chromium implements none, and Safari's is a stub.
+ * real `getStats()`. The WebSocket fallback's qmux session reports no counters, shipping
+ * Chromium implements none, and Safari's is a stub.
  *
  * @internal
  */

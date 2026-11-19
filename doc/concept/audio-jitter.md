@@ -38,17 +38,29 @@ frame:
 
 Both sit below the decoder and above nothing: no reordering, no gap handling, no
 age budget. Except one skip: both consumers close a group below where delivery
-stands unread, so a join's backlog they skip is never observed, and a join
-delayed only by it is measured as lateness.
+stands unread, so its frames are never observed. When it is
+[backlog](#the-joins-backlog), they report its arrival instead, which ends the
+join as late as its observed backlog would.
 
 Natively that holds only as far as the caller lets it. The container consumer
 reads groups in sequence order and applies its age budget inside `read()`, so a
 group skipped for age is never observed, and a frame queued behind a stalled
 group is observed when the stall clears. A missing group, one that has delivered
-no frame, is waited for only the playout delay plus any lookahead, since past that
-it would play late: a reordered backlog's holes waited out to the whole budget
+no frame, is waited for only the playout delay, the subscription's `delay.min`,
+since past that it would play late: a reordered backlog's holes waited out to the whole budget
 would delay the frames behind them, which the estimator would measure as
-jitter. A caller that estimates keeps the budget past the target, which is why
+jitter. The browser player leaves the hole to the transport: it reads its audio
+through an ordered track reader whose own `delay.max` is what the ring holds of
+the delay plus the stretch threshold, past which the ring would skip the hole's
+audio anyway, and plays each gap that reader reports as the hole. The reader
+gives up on a missing group by the same two clocks as any stale group: once the
+newest frame is that far past where the group after it starts, or that group
+arrived that long ago. A late burst that fills a hole a moment after the group
+past it lands still plays it, and a viewer resuming behind a replayed backlog
+does not hold the live audio for the backlog's oldest group. That reader's
+budget is its own: a second subscription to the same track, read in arrival
+order, observes every frame its own wider budget receives, so the late groups
+the reader gives up on are still measured. A caller that estimates keeps the budget past the target, which is why
 `moq play` waits on a stalled audio group for the delay plus the estimate's 2 s
 ceiling. The observation is also only as honest as
 the caller is prompt: `read()` is timed when it resolves, so a player drains it
@@ -63,8 +75,7 @@ the target: the estimate creeps up one bucket at a time while the frames it
 should have measured go unplayed. Both implementations subscribe with the delay
 plus the estimate's own 2 s ceiling, whatever the player's `stretch` setting:
 `moq play` through its age budget, and the browser through the audio
-subscription alone, since its container consumer observes each frame before
-applying the local budget. So any lateness the estimator can measure is
+subscription it observes arrivals on, beside the narrower ordered one it plays. So any lateness the estimator can measure is
 observed at once. A buffered browser player keeps its subscription at least the
 delay plus its lookahead.
 Browser video keeps the shared budget, because a longer one fetches whole stale
@@ -125,8 +136,8 @@ observe(arrival, media):
 
     if oldest + fastest < joined:       # the join, not the path: folds nothing
         pending += 1
-    else:
-        close(bucket of peak)
+    else:                               # open starts true
+        open = false; close(bucket of peak)
     if resumed:                         # a declared silence folds nothing
         settle(); origin = arrival; index = 0
     else:                               # held until this interval closes
@@ -152,6 +163,10 @@ close(bucket):                          # pending starts at 0 and is spent here
 settle():                               # a stall is one observation
     if a stall is open:
         fold(stall.bucket); fold(nothing) min(stall.span, IDLE_MAX) times; close it
+
+backlog(arrival):                       # a backlog group skipped unread arrived
+    if not first observation and open:
+        joined = max(joined, arrival)
 
 end():                                  # a declared end precedes the next observation
     if not first observation: ended = true
@@ -324,6 +339,22 @@ is measured from its first flush past the backlog. A first frame slower than the
 path after it is itself backlog, so most subscriptions skip their first interval,
 which leaves the prior 500 ms later.
 
+A group the consumer skips unread carries no timestamp to test, so the consumer
+tells backlog by its sequence instead: one at or below the publisher's largest
+group when the subscription began, the largest the subscriber knows once the
+publisher answered (moq-lite's subscribe answer carries it, and without one the
+groups that landed stand in), was produced before it. It is read as the answer
+arrives, not when the first group does: any earlier, a cached group racing the
+answer would set it, and any later, live groups landing meanwhile would. Only such a group's arrival is reported,
+with `backlog`, so a path that drops late groups from the start, all produced
+since, holds no join open. A report extends the join only while the join is
+**open**, before any interval has measured the path: after that, a skipped group
+is an outage's, whose frames queued behind it belong to the stall rule. On
+`relay-mic-rtt40` the browser closes 267 groups 5 to 6 s old, arriving 1.0 to
+1.3 s in, and the live frames queued behind them are up to 300 ms late; observed
+or reported, they fold nothing, where unreported they hold the target at 320 ms
+for a 20 s half-life.
+
 ### The histogram
 
 An empirical distribution of `BUCKETS` buckets `BUCKET` wide, holding total
@@ -441,7 +472,8 @@ already inside every number on this page: a publisher writing 100 ms of media at
 once produces arrivals whose relative delay reaches
 100 ms less one frame, on a perfect network, with no help from the catalog.
 
-So the advertised value is a **floor**, not an addend:
+So the advertised value is a **floor**, not an addend, in the network's share of
+the target (audio adds its output latency [at the speaker](#at-the-speaker)):
 
 ```
 target = max(measured, advertised) + frame
@@ -499,10 +531,47 @@ them. The cost is over-buffering by the smallest subscribed `delay` when the
 broadcast's earliest rendition is not subscribed.
 
 The playout is recomputed when a rendition is subscribed, unsubscribed, or its
-catalog entry rises, so dropping a slow rendition lowers latency. Each track's
-own arrivals only ever move its part of the shared reference earlier. A track
+catalog entry rises, so dropping a slow rendition lowers latency. A track's
+arrivals move its part of the shared reference earlier at once, and later only
+after [a lasting step](#a-lasting-step). A track
 that leaves, or whose timeline restarts, releases its part: the earliest
 remaining track's anchor takes over, or the next frame re-anchors.
+
+### A lasting step
+
+The estimator forgets a lasting increase in path delay within `WINDOW`, since
+it measures each frame against the fastest of the last two seconds. An anchor
+that only moved earlier would not: every frame after the step would be late for
+it by the step, and once the target fell back, audio would underrun on it and
+video would show each frame late.
+
+So each track's anchor follows its arrivals later on sustained evidence. A
+track's arrivals fall into back-to-back windows of `WINDOW` of arrival time, the
+arrival that closes one counting in it and opening the next. When a window
+closes and every arrival in it trailed the track's anchor by more than **half
+the delay**, the anchor moves later to the window's earliest arrival. The
+reference is still the earliest anchor, so it moves fully once every arriving
+track has followed; a track that stops arriving keeps its anchor and holds the
+reference where it was.
+
+Half the delay is the deadband because a smaller trail is not worth a move: it
+spends at most half the buffer, and a noisy path's fastest frame per window
+wanders by far less than the target that same spread sizes. Replayed through the
+Nightly's captured arrivals, a 10 or 20 ms deadband moved the reference two to
+seven times a minute on `wide`, and a deadband of the whole delay never moved it
+on the Opus `step` row, whose 55 ms step matched its 60 ms target. An outage and
+its backlog span no whole window, so they never move it; a congestion that
+holds every frame past half the delay for a whole window is a step for as long
+as it lasts, and the first frame through after it moves the anchor back.
+
+A move is lag like any other: audio slows down within its stretch threshold or
+pads past it, and video holds a frame. No latency is added to absorb a step
+before it is evidence, so the frames between the step and the move are late.
+
+The `clock/corpus.json` cases hold `js/watch` `Sync` and `moq_mux::sync` to the
+same reference series. Each case fixes the delay and plays runs of arrivals,
+`frames` of them `every` milliseconds from `start`, cycling through `tracks` and
+the arrival-minus-media `offsets`, and gives the `reference` offset after each run.
 
 A track that replaces another in the same slot and on the same broadcast path,
 such as the new name a codec change publishes under, continues the outgoing
@@ -516,6 +585,37 @@ track's arrivals. What the outgoing track measured but has not folded, its
 interval in progress and any open stall, folds into the continued histogram as
 if that interval closed at the switch, judged by the outgoing track's join: a switch most often follows an outage,
 and would otherwise drop the outage's one observation.
+
+A subscription the viewer stops and starts again on the same path, as a pause or
+a hidden tab does, continues the same way. The stop says nothing about the path,
+as a [declared silence](#declared-silence) says nothing about it. Starting over
+would give the first outage after the resume a tenth of the histogram, so one
+late flush would hold the target near its own lateness for a half-life. A
+continued histogram gives that outage only `1 - FORGET`.
+
+## At the speaker
+
+Audio is placed on the clock where it is heard, not where it is rendered. The
+output takes time to sound what the player hands it, so an audio track's target
+also counts that **output latency**, and video waits for it too, which lip sync
+on that device needs:
+
+```
+target = max(measured, advertised) + frame + output
+```
+
+The player reads the clock at the moment the output sounds a sample and renders
+the media due then; its buffer holds the target less the delay between render
+and speaker. The output latency is the most the device reported over the last
+5 s, since a host's report moves with where each read lands.
+
+| | Placed at | `output` |
+| --- | --- | --- |
+| Browser | `getOutputTimestamp()`, the context time sounding at a page instant, against which the clock is paired at the greatest offset, falling 0.1 ms a report | `baseLatency` plus the peak `outputLatency` |
+| Native | the callback's playback timestamp | the host's reported delay plus one device period |
+
+A fixed browser delay is still taken literally, and a fixed native delay is
+raised to the output latency, as [Fixed targets](#fixed-targets) describes.
 
 ## Rise, fall, startup, and the ceiling
 
@@ -594,7 +694,7 @@ that interval is [stalled](#one-observation-per-stall), whose stall owns them.
 the work: after 1024 folds the retained weight is about 2e-8, so the cap changes
 no output an `f64` can represent.
 
-A receiver coming back from a pause is not cold: the evidence that survived
+A subscription whose arrivals stop and come back is not cold: the evidence that survived
 keeps decaying at the base rate. Only the weight the prior regained is replaced
 quickly, the same way it is at cold start, since it stands for no evidence at
 all.
@@ -602,7 +702,7 @@ all.
 ### Declared silence
 
 A publisher that stops sending on purpose, such as a muted push-to-talk
-speaker, marks the stop with a declared end. The silence after it says
+speaker or a talker who falls silent, marks the stop with a declared end. The silence after it says
 nothing about the path, so relaxing toward the prior would only make a
 listener who sat through a long mute come back over-buffered. `end()` tells
 the estimator that a declared end lies between the previous observation and
@@ -630,6 +730,12 @@ target = delay
 An impossible fixed target is refused, not silently adjusted. A negative delay,
 or one beyond the track's max age, is an error at configuration time.
 Supported or refused, not warned about and continued.
+
+The one exception is the [output latency](#at-the-speaker), which no delay can
+undercut. Natively, `moq play` raises a fixed delay below its device's output
+latency to that latency, since audio cannot sound sooner. The browser keeps the
+delay as given, so one shorter than the jitter plus the output latency
+underruns rather than letting audio trail video.
 
 In the browser this is the numeric `delay` setting; natively it is
 `decode::Options::delay.min` with `decode::Options::estimate` set to `false`.
@@ -696,8 +802,10 @@ directly, so neither is graded against the other.
 `arrival` and `media` are parallel arrays in **delivery order**, the order the
 receiver observes them, so `media` is deliberately out of order in the
 `reorder` and `backlog` cases. `advertised` and `delay` are present only where the case uses
-them, as is `ends`: the indices, ascending, of the frames observed right after a
-[declared end](#declared-silence), each of which calls `end()` before it is observed. `target` lists `[frame index, target]` at every frame where the target
+them, as are `ends`: the indices, ascending, of the frames observed right after a
+[declared end](#declared-silence), each of which calls `end()` before it is observed,
+and `skipped`: the indices, ascending, of the frames a consumer closed unread, each
+reported with `backlog(arrival)` instead of observed. `target` lists `[frame index, target]` at every frame where the target
 differs from the previous frame's, starting at frame 0, so an implementation
 folds the trace one frame at a time and compares its target at each listed
 index. Tolerance is 1e-6 ms, which the `f64` rules above make generous.
@@ -711,6 +819,7 @@ index. Tolerance is 1e-6 ms, which the `f64` rules above make generous.
 | `reorder` | A run delivered after a newer one is measured against the frames before it, so the target covers waiting for it |
 | `backlog` | A backlog delivered newest first behind the live edge is not measured, so its media span never reaches the target |
 | `join` | A recorded join whose backlog arrives interleaved with the live edge, and delays the live frames queued behind it, folds nothing, so the target leaves the prior for the path's own |
+| `skipped` | The `join` recording with the stale backlog a consumer closes below its cursor reported rather than observed still folds nothing for the join, so the target follows `join`'s |
 | `idle` | A 30 s gap relaxes the histogram toward the prior |
 | `silence` | A declared 60 s silence and a declared pause leave the target where it was, and a later undeclared gap still relaxes it |
 | `tunein` | A stale frame then the live edge 14.5 s later leaves the target near the frame duration. This is the #3517 regression |
@@ -749,7 +858,13 @@ content; past the threshold it snaps onto the clock, as video does. When the
 audio received ahead of the playhead is about to run out, playback slows down
 to bridge the gap, never trailing the clock past the threshold. A congestion
 stall within the threshold costs a slowdown, a gap, and a catch-up; one past it
-costs a skip.
+costs a skip. Audio that arrives trailing the clock past the threshold, such as a
+publisher's replayed history ahead of the live edge, is decoded only to warm the
+codec and never reaches the playout buffer, so playback starts at the live edge
+instead of anchoring on the backlog. The exception is audio up to an end the
+stream declares before that audio decodes, such as a mute, which plays out
+rather than being skipped; a track's finish declares its end only after its
+last audio decodes, so that audio is skipped like the rest.
 
 The splice is waveform-similarity overlap-add (WSOLA), after Verhelst and
 Roelands, "An overlap-add technique based on waveform similarity (WSOLA) for
@@ -884,7 +999,8 @@ read once on the clock, its threshold both ways is one hop, so the backlog a
 subscription opens on is skipped and playback starts on the clock. Only those
 skips and a ring overflowing its fixed capacity drop received audio; each
 counts as a skip in the player's stats. A finite tail before a declared end
-plays as received, and a playhead behind the clock skips a declared silence by
+is never skipped, though one ahead of the clock still waits for it in silence,
+and a playhead behind the clock skips a declared silence by
 its lag rather than stretching across it, which drops no audio.
 
 After an underrun the player resumes on a cushion of one window and one read,

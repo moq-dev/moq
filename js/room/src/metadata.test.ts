@@ -4,6 +4,7 @@ import * as Net from "@moq/net";
 import type * as Publish from "@moq/publish";
 import { Effect, Signal } from "@moq/signals";
 import type * as Watch from "@moq/watch";
+import { defined } from "./defined.test-util.ts";
 import { consume, type ExtendedCatalog, type Preview, serve, TRACK, userFields } from "./metadata.ts";
 
 // Drain queued effects and their asynchronous subscription continuations.
@@ -49,13 +50,13 @@ test("metadata clears when entries disappear or broadcast becomes inactive", asy
 	});
 	const active = new Signal<Net.Broadcast.Consumer | undefined>(net.consume());
 	const user = new Json.Snapshot.Producer({
-		track: net.createTrack(TRACK.user, { timescale: Net.Time.Timescale.MILLI }),
+		track: defined(net.createTrack(TRACK.user, { timescale: Net.Time.Timescale.MILLI })),
 	});
 	const preview = new Json.Snapshot.Producer({
-		track: net.createTrack(TRACK.preview, { timescale: Net.Time.Timescale.MILLI }),
+		track: defined(net.createTrack(TRACK.preview, { timescale: Net.Time.Timescale.MILLI })),
 	});
-	user.update({ value: { name: "Alice" }, at: Net.Time.Timestamp.now() });
-	preview.update({ value: { info: { video: true } }, at: Net.Time.Timestamp.now() });
+	user.update({ name: "Alice" }, Net.Time.Timestamp.now());
+	preview.update({ info: { video: true } }, Net.Time.Timestamp.now());
 	const consumed = consume({ out: { catalog, active } } as unknown as Watch.Broadcast);
 	try {
 		await flush();
@@ -84,29 +85,30 @@ test("metadata refuses values that do not match their schema and keeps the last 
 	const active = new Signal<Net.Broadcast.Consumer | undefined>(net.consume());
 	// Unvalidated producers, standing in for a remote publisher that sends anything.
 	const user = new Json.Snapshot.Producer<unknown>({
-		track: net.createTrack(TRACK.user, { timescale: Net.Time.Timescale.MILLI }),
+		track: defined(net.createTrack(TRACK.user, { timescale: Net.Time.Timescale.MILLI })),
 	});
 	const preview = new Json.Snapshot.Producer<unknown>({
-		track: net.createTrack(TRACK.preview, { timescale: Net.Time.Timescale.MILLI }),
+		track: defined(net.createTrack(TRACK.preview, { timescale: Net.Time.Timescale.MILLI })),
 	});
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
 	const consumed = consume({ out: { catalog, active } } as unknown as Watch.Broadcast);
 	try {
+		// Each write opens a group at its time, so the writes take distinct ones.
 		// A `null` used to throw at `value.id` and end the update loop.
-		user.update({ value: null, at: Net.Time.Timestamp.now() });
-		preview.update({ value: { info: { video: "yes" } }, at: Net.Time.Timestamp.now() });
+		user.update(null, Net.Time.Timestamp.fromMillis(1));
+		preview.update({ info: { video: "yes" } }, Net.Time.Timestamp.fromMillis(1));
 		await flush();
 		expect(consumed.user.name.peek()).toBeUndefined();
 		expect(consumed.preview.peek()).toEqual({});
 
 		// The subscription survives a refused value.
-		user.update({ value: { name: "Alice" }, at: Net.Time.Timestamp.now() });
-		preview.update({ value: { info: { video: true } }, at: Net.Time.Timestamp.now() });
+		user.update({ name: "Alice" }, Net.Time.Timestamp.fromMillis(2));
+		preview.update({ info: { video: true } }, Net.Time.Timestamp.fromMillis(2));
 		await flush();
 		expect(consumed.user.name.peek()).toBe("Alice");
 		expect(consumed.preview.peek()).toEqual({ video: true });
 
-		user.update({ value: { name: 42 }, at: Net.Time.Timestamp.now() });
+		user.update({ name: 42 }, Net.Time.Timestamp.fromMillis(3));
 		await flush();
 		expect(consumed.user.name.peek()).toBe("Alice");
 		expect(warn).toHaveBeenCalledTimes(3);

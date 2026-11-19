@@ -38,10 +38,8 @@ a blocker ranks by its own milestone, so the earlier quest would stall behind
 the later milestone's work. Additive work that builds on m2 joins m3, which
 ranks right after m2, rather than m1.
 
-A change is breaking when a published consumer or a deployed peer must adapt
-to it: the public Rust, JS, or bindings API, a frozen wire version, the hang
-catalog JSON, a stored or exported container format, or CLI flags, config
-keys, and environment variables. The test is whether it would need a breaking
+A change is breaking when it is an API break or a wire change, as
+[Releases](/RELEASE.md#releases) defines them. The test is whether it would need a breaking
 release if it landed right after the cut, so a change to lite-07-wip or to a
 `main`-only API the cut would publish counts. A non-urgent fix that breaks
 joins m2; when a non-breaking fix exists, the fix joins m1 and the break m2.
@@ -57,13 +55,8 @@ After the next cut, each release cycle runs in three phases by kind of
 change (decided 2026-11-09, maintainer): additive work, then API breaks, then
 wire changes, as [Releases](/RELEASE.md#releases) describes. `main` is
 cut on demand in the first two phases, so their cuts are no longer gated on a
-milestone; the wire phase is short and its cut ends the cycle. An API break
-is what a published consumer adapts to when it rebuilds: the public Rust, JS,
-or bindings API, CLI flags, config keys, and environment variables. A wire
-change is what a deployed peer adapts to without rebuilding: a frozen wire
-version, the hang catalog JSON, or a stored or exported container format,
-since a deployed peer parses those too. A change to an unpublished `-wip`
-wire version is wire work.
+milestone; the wire phase is short and its cut ends the cycle. A change to an
+unpublished `-wip` wire version is wire work.
 
 The next cut performs a re-split, and each cut that ends a cycle shifts the
 milestones (decided 2026-10-19, rule replaced 2026-11-05 and 2026-11-09). The
@@ -99,6 +92,6 @@ Critical fixes continue to reach the existing release through backports.
 
 Test flakes join m0 without asking (decided 2026-11-05, maintainer): a test
 that fails intermittently in CI, Nightly, or the merge queue becomes a child
-of m0's [test flakes](/quest/m0/test-flakes-2/README.md) epic. Skills that plan
+of m0's [test flakes](/quest/m0/test-flakes-3/README.md) epic, planned anew once it completes. Skills that plan
 follow-ups plan a reported flake there without asking whether or where; the
 planning PR's review is the check.

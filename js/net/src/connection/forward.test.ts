@@ -177,10 +177,10 @@ test("a request through a received route consumes that route's instance", async 
 	origin.close();
 });
 
-// A lite-07 stream reports each origin node's claim at a path as its own route, so the origin
-// holds every candidate: an unpinned request spreads by node as Rust's does, and one pinned to
-// the claim that does not win still resolves.
-test("the origin holds each origin node's claim at a prefix", async () => {
+// A lite-07 stream reports each instance's claim at a path as its own route, so the origin holds
+// every candidate: an unpinned request spreads by instance, and one pinned to the claim that
+// does not win still resolves.
+test("the origin holds each instance's claim at a prefix", async () => {
 	const origin = new OriginProducer();
 	const session = new FakeSession();
 	forwardAnnounced(session.session, origin);
@@ -189,12 +189,12 @@ test("the origin holds each origin node's claim at a prefix", async () => {
 	const watch = origin.routes(Path.Pattern.subtree(Path.from("pool")));
 	await settle();
 	expect(session.requests[0]).toMatchObject({ claims: true });
-	start(session.stream("pool/**"), "pool", { ...WireRoute.default, instance: a, node: 0x7an });
-	start(session.stream("pool/**"), "pool", { ...WireRoute.default, instance: b, node: 0x8bn });
+	start(session.stream("pool/**"), "pool", { ...WireRoute.default, instance: a, claimed: true });
+	start(session.stream("pool/**"), "pool", { ...WireRoute.default, instance: b, claimed: true });
 	session.stream("pool/**").synced();
 	await settle();
 
-	// 0x8b's rendezvous hash wins `pool/job`; see `lite07_ties_match_js` in rs/moq-net.
+	// `b`'s rendezvous hash wins `pool/job`; see `lite07_ties_match_js` in rs/moq-net.
 	const job = Path.from("pool/job");
 	const unpinned = origin.request(job);
 	await settle();

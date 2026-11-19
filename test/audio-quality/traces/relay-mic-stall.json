@@ -1,9 +1,10 @@
 {
-	"version": 3,
-	"source": "relay-mic.json with its arrivals from 15 s rewritten: nothing arrives for 1.5 s, then the held frames arrive oldest first at twice real time until they meet live arrivals 18 s in",
+	"version": 4,
+	"source": "relay-mic.json with its arrivals from 15 s rewritten: nothing arrives for 1.5 s, then the held frames arrive oldest first at twice real time until they meet live arrivals 18 s in. Version 4 adds largest, the publisher's largest group as the subscription began. This recording predates it, so it is derived (2026-11-15): the newest group whose first frame's media timestamp plus the trace's lowest lag (the smallest at minus timestamp) falls at or before the first arrival, the live edge as the first frame arrived.",
 	"description": "A path that stalls for longer than the target and then trickles the backlog in late: the audio a player keeps and how long it takes to return to the clock.",
 	"transport": "webtransport",
 	"rtt": 2,
+	"largest": 32142,
 	"config": {
 		"codec": "opus",
 		"container": {

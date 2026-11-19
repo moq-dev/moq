@@ -9,7 +9,8 @@
 //! [`broadcast::Producer::create_datagrams`](crate::broadcast::Producer::create_datagrams),
 //! and a reader asks for a [`Consumer`] with
 //! [`broadcast::Consumer::datagrams`](crate::broadcast::Consumer::datagrams). A consumer
-//! is live from when it is created: it never receives a datagram written before it.
+//! is live from when it is created: it never receives a datagram written before it. A
+//! created track is in the broadcast's [listing](crate::broadcast::Tracks) until it ends.
 //!
 //! Delivery is best-effort per hop: a session drops (with a debug log) any datagram whose
 //! encoded body exceeds the transport's datagram size, and sessions that can't carry
@@ -40,7 +41,7 @@ use std::{
 
 use bytes::Bytes;
 
-use crate::{Error, Result, Timescale, Timestamp, stats};
+use crate::{Error, Result, Timescale, Timestamp, broadcast, stats};
 
 /// Hard ceiling on a datagram payload, matching the QUIC DATAGRAM frame limit.
 ///
@@ -69,8 +70,9 @@ const DEFAULT_PRIORITY: i8 = 0;
 pub struct Datagram {
 	/// The datagram track's own sequence number.
 	pub sequence: u64,
-	/// Presentation timestamp in the track's timescale, or `None` on a track without one.
-	pub timestamp: Option<Timestamp>,
+	/// Presentation timestamp in the track's timescale, or on a scale-less track
+	/// [`Timestamp::unscaled`] at its sequence.
+	pub timestamp: Timestamp,
 	/// The datagram payload.
 	pub payload: Bytes,
 }
@@ -104,16 +106,14 @@ impl Info {
 
 	/// `timestamp` at this track's [`timescale`](Self::timescale).
 	///
-	/// A track is all timed or all untimed: a timestamp that doesn't match it, or one the
+	/// A track is all timed or all scale-less: a timestamp that doesn't match it, or one the
 	/// track's scale can't hold, is [`Error::TimestampMismatch`]. A writer that changes
 	/// state before its datagram reaches the track, such as encrypting it, rescales first so
 	/// a refused timestamp changes nothing.
-	pub fn rescale(&self, timestamp: Option<Timestamp>) -> Result<Option<Timestamp>> {
-		match (timestamp, self.timescale) {
-			(Some(timestamp), Some(timescale)) => Ok(Some(
-				timestamp.convert(timescale).map_err(|_| Error::TimestampMismatch)?,
-			)),
-			(None, None) => Ok(None),
+	pub fn rescale(&self, timestamp: Timestamp) -> Result<Timestamp> {
+		match (timestamp.scale(), self.timescale) {
+			(Some(_), Some(timescale)) => timestamp.convert(timescale).map_err(|_| Error::TimestampMismatch),
+			(None, None) => Ok(timestamp),
 			_ => Err(Error::TimestampMismatch),
 		}
 	}
@@ -143,6 +143,8 @@ struct State {
 	producers: usize,
 	// Each live consumer's priority, or None for passive forwarding over an existing stream.
 	priorities: slab::Slab<Option<i8>>,
+	// The broadcast's listing of a track its producer created, withdrawn once the track ends.
+	listed: Option<broadcast::Unlist>,
 }
 
 impl State {
@@ -168,10 +170,14 @@ impl State {
 		self.buffer.push_back(datagram);
 	}
 
-	fn end(&mut self, end: Result<()>) {
+	/// End the track, returning its listing to withdraw once this lock is released, since
+	/// the broadcast's lock is taken first.
+	#[must_use = "drop the listing after releasing the lock"]
+	fn end(&mut self, end: Result<()>) -> Option<broadcast::Unlist> {
 		if self.end.is_some() {
-			return;
+			return None;
 		}
+		let finished = end.is_ok();
 		// A finish leaves what is buffered for the consumers already reading; an error
 		// ends the track at once, so nobody reads what is left.
 		let unread = end.is_err() || self.priorities.is_empty();
@@ -179,6 +185,7 @@ impl State {
 		if unread {
 			self.release();
 		}
+		self.listed.take().map(|listed| listed.finished(finished))
 	}
 
 	/// Drop what is buffered: nobody can read it any more. A consumer joining later starts
@@ -265,6 +272,12 @@ impl Producer {
 		self
 	}
 
+	/// Keep the track in its broadcast's listing until it ends. Called under the broadcast's lock.
+	pub(super) fn listed(self, unlist: broadcast::Unlist) -> Self {
+		self.state.lock().listed = Some(unlist);
+		self
+	}
+
 	pub(super) fn weak(&self) -> Weak {
 		Weak {
 			name: self.name.clone(),
@@ -284,17 +297,21 @@ impl Producer {
 
 	/// Append a datagram with the next sequence number, returning that sequence.
 	///
-	/// Pass `None` on an untimed track; a timestamp that doesn't match the track is
-	/// [`Error::TimestampMismatch`]. Keep payloads well under the 1200-byte minimum path
+	/// A scale-less track has no time, so its datagram's [`Timestamp::unscaled`] names the
+	/// sequence instead, as its key names a group. A timestamp that doesn't match the track
+	/// is [`Error::TimestampMismatch`]. Keep payloads well under the 1200-byte minimum path
 	/// MTU: a hop drops a datagram that does not fit.
-	pub fn append<B: crate::IntoBytes>(&mut self, timestamp: impl Into<Option<Timestamp>>, payload: B) -> Result<u64> {
+	pub fn append<B: crate::IntoBytes>(&mut self, timestamp: Timestamp, payload: B) -> Result<u64> {
 		let mut state = self.state.lock();
-		let sequence = state.next.ok_or(crate::coding::BoundsExceeded)?;
+		let sequence = match timestamp.scale() {
+			Some(_) => state.next.ok_or(crate::coding::BoundsExceeded)?,
+			None => timestamp.value(),
+		};
 		self.push(
 			&mut state,
 			Datagram {
 				sequence,
-				timestamp: timestamp.into(),
+				timestamp,
 				payload: payload.into_bytes(),
 			},
 		)?;
@@ -316,6 +333,10 @@ impl Producer {
 		}
 		state.closed()?;
 		datagram.timestamp = self.info.rescale(datagram.timestamp)?;
+		// A scale-less datagram's timestamp is its sequence.
+		if datagram.timestamp.scale().is_none() && datagram.timestamp.value() != datagram.sequence {
+			return Err(Error::TimestampMismatch);
+		}
 		self.stats.meter().datagram(datagram.payload.len() as u64);
 		state.push(datagram);
 		Ok(())
@@ -334,12 +355,14 @@ impl Producer {
 
 	/// End the track cleanly: consumers read `None` once they have read what is buffered.
 	pub fn finish(self) {
-		self.state.lock().end(Ok(()));
+		let unlist = self.state.lock().end(Ok(()));
+		drop(unlist);
 	}
 
 	/// End the track with an error.
 	pub fn abort(self, err: Error) {
-		self.state.lock().end(Err(err));
+		let unlist = self.state.lock().end(Err(err));
+		drop(unlist);
 	}
 
 	/// The highest subscriber priority among the track's consumers, or `None` when it has none.
@@ -390,7 +413,9 @@ impl Producer {
 		if !state.priorities.is_empty() {
 			return false;
 		}
-		state.end(Err(Error::Cancel));
+		let unlist = state.end(Err(Error::Cancel));
+		drop(state);
+		drop(unlist);
 		true
 	}
 
@@ -419,7 +444,9 @@ impl Drop for Producer {
 		let mut state = self.state.lock();
 		state.producers -= 1;
 		if state.producers == 0 {
-			state.end(Err(Error::Dropped));
+			let unlist = state.end(Err(Error::Dropped));
+			drop(state);
+			drop(unlist);
 		}
 	}
 }
@@ -666,7 +693,11 @@ impl Drop for Consumer {
 			// Nobody waits for a request no handler accepted yet: withdraw it, so a handler
 			// that stops polling never holds requests nobody reads.
 			if state.priorities.is_empty() && state.info.is_none() {
-				state.end(Err(Error::Cancel));
+				let unlisted = state.end(Err(Error::Cancel));
+				debug_assert!(
+					unlisted.is_none(),
+					"only a created track is listed, and it has its info"
+				);
 			}
 			// The last reader of a finished track leaves what it never read.
 			if state.priorities.is_empty() && state.end.is_some() {
@@ -682,6 +713,15 @@ mod tests {
 
 	fn recv(consumer: &mut Consumer) -> Poll<Result<Option<Datagram>>> {
 		consumer.poll_recv(&kio::Waiter::noop())
+	}
+
+	/// A scale-less datagram's timestamp: its sequence.
+	fn seq(sequence: u64) -> Timestamp {
+		Timestamp::unscaled(sequence)
+	}
+
+	fn ms(millis: u64) -> Timestamp {
+		Timestamp::from_millis(millis).unwrap()
 	}
 
 	fn sequence(consumer: &mut Consumer) -> u64 {
@@ -702,7 +742,7 @@ mod tests {
 		assert_eq!(producer.priority(), Some(-7));
 		drop(reader);
 		assert_eq!(producer.priority(), None);
-		producer.append(None, &b"tail"[..]).unwrap();
+		producer.append(seq(0), &b"tail"[..]).unwrap();
 		producer.finish();
 		for consumer in [&mut observer, &mut copy] {
 			let Poll::Ready(Ok(Some(datagram))) = consumer.poll_recv(&kio::Waiter::noop()) else {
@@ -718,13 +758,13 @@ mod tests {
 
 	#[test]
 	fn append_counts_its_own_sequence_past_inserts() {
-		let mut producer = Info::default().produce("dg");
+		let mut producer = Info::default().with_timescale(Timescale::MILLI).produce("dg");
 		let mut consumer = producer.consume();
-		assert_eq!(producer.append(None, "a").unwrap(), 0);
+		assert_eq!(producer.append(ms(0), "a").unwrap(), 0);
 		producer
 			.insert(Datagram {
 				sequence: 10,
-				timestamp: None,
+				timestamp: ms(10),
 				payload: Bytes::from_static(b"b"),
 			})
 			.unwrap();
@@ -732,11 +772,11 @@ mod tests {
 		producer
 			.insert(Datagram {
 				sequence: 3,
-				timestamp: None,
+				timestamp: ms(3),
 				payload: Bytes::from_static(b"c"),
 			})
 			.unwrap();
-		assert_eq!(producer.append(None, "d").unwrap(), 11);
+		assert_eq!(producer.append(ms(11), "d").unwrap(), 11);
 		let got: Vec<u64> = (0..4).map(|_| sequence(&mut consumer)).collect();
 		assert_eq!(got, [0, 10, 3, 11]);
 		assert!(recv(&mut consumer).is_pending());
@@ -745,24 +785,24 @@ mod tests {
 	/// Past `u64::MAX` no sequence remains, so `append` refuses instead of repeating it.
 	#[test]
 	fn append_refuses_once_the_sequence_is_spent() {
-		let mut producer = Info::default().produce("dg");
+		let mut producer = Info::default().with_timescale(Timescale::MILLI).produce("dg");
 		producer
 			.insert(Datagram {
 				sequence: u64::MAX,
-				timestamp: None,
+				timestamp: ms(0),
 				payload: Bytes::from_static(b"last"),
 			})
 			.unwrap();
-		assert!(matches!(producer.append(None, "x"), Err(Error::BoundsExceeded(_))));
+		assert!(matches!(producer.append(ms(1), "x"), Err(Error::BoundsExceeded(_))));
 	}
 
 	#[test]
 	fn a_consumer_starts_live() {
 		let mut producer = Info::default().produce("dg");
-		producer.append(None, "old").unwrap();
+		producer.append(seq(0), "old").unwrap();
 		let mut consumer = producer.consume();
 		assert!(recv(&mut consumer).is_pending());
-		producer.append(None, "new").unwrap();
+		producer.append(seq(1), "new").unwrap();
 		assert_eq!(sequence(&mut consumer), 1);
 	}
 
@@ -770,8 +810,8 @@ mod tests {
 	fn a_slow_consumer_skips_to_the_oldest_held() {
 		let mut producer = Info::default().produce("dg");
 		let mut consumer = producer.consume();
-		for _ in 0..MAX_BUFFERED + 5 {
-			producer.append(None, "x").unwrap();
+		for sequence in 0..MAX_BUFFERED as u64 + 5 {
+			producer.append(seq(sequence), "x").unwrap();
 		}
 		assert_eq!(sequence(&mut consumer), 5);
 	}
@@ -781,16 +821,16 @@ mod tests {
 		let mut producer = Info::default().produce("dg");
 		let mut consumer = producer.consume();
 		let payload = Bytes::from(vec![0; MAX_BUFFERED_BYTES / 4]);
-		for _ in 0..8 {
-			producer.append(None, payload.clone()).unwrap();
+		for sequence in 0..8 {
+			producer.append(seq(sequence), payload.clone()).unwrap();
 		}
 		// Four fit, so the oldest four went.
 		assert_eq!(sequence(&mut consumer), 4);
 		// The newest is always held, even alone over the budget.
 		let mut producer = Info::default().produce("dg");
 		let mut consumer = producer.consume();
-		for _ in 0..2 {
-			producer.append(None, vec![0; MAX_PAYLOAD]).unwrap();
+		for sequence in 0..2 {
+			producer.append(seq(sequence), vec![0; MAX_PAYLOAD]).unwrap();
 		}
 		assert_eq!(sequence(&mut consumer), 1);
 	}
@@ -799,18 +839,26 @@ mod tests {
 	fn timestamps_must_match_the_track() {
 		let mut timed = Info::default().with_timescale(Timescale::MILLI).produce("dg");
 		let mut consumer = timed.consume();
-		assert!(matches!(timed.append(None, "x"), Err(Error::TimestampMismatch)));
+		assert!(matches!(timed.append(seq(0), "x"), Err(Error::TimestampMismatch)));
 		timed.append(Timestamp::from_secs(1).unwrap(), "x").unwrap();
 		let Poll::Ready(Ok(Some(datagram))) = recv(&mut consumer) else {
 			panic!("expected a datagram");
 		};
 		// Converted into the track's scale.
-		assert_eq!(datagram.timestamp, Some(Timestamp::from_millis(1000).unwrap()));
+		assert_eq!(datagram.timestamp, Timestamp::from_millis(1000).unwrap());
 		let mut untimed = Info::default().produce("dg");
 		assert!(matches!(
 			untimed.append(Timestamp::from_secs(1).unwrap(), "x"),
 			Err(Error::TimestampMismatch)
 		));
+		// A scale-less datagram's timestamp names its sequence, so another is a mismatch.
+		let wrong = Datagram {
+			sequence: 4,
+			timestamp: seq(5),
+			payload: Bytes::from_static(b"x"),
+		};
+		assert!(matches!(untimed.insert(wrong), Err(Error::TimestampMismatch)));
+		assert_eq!(untimed.append(seq(4), "x").unwrap(), 4);
 	}
 
 	#[test]
@@ -819,7 +867,7 @@ mod tests {
 		let mut finished = producer.consume();
 		producer.clone().finish();
 		assert!(matches!(recv(&mut finished), Poll::Ready(Ok(None))));
-		assert!(matches!(producer.append(None, "x"), Err(Error::Closed)));
+		assert!(matches!(producer.append(seq(0), "x"), Err(Error::Closed)));
 
 		let producer = Info::default().produce("dg");
 		let mut dropped = producer.consume();
@@ -831,8 +879,8 @@ mod tests {
 	fn a_finish_delivers_what_is_buffered() {
 		let mut producer = Info::default().produce("dg");
 		let mut consumer = producer.consume();
-		producer.append(None, "a").unwrap();
-		producer.append(None, "b").unwrap();
+		producer.append(seq(0), "a").unwrap();
+		producer.append(seq(1), "b").unwrap();
 		producer.finish();
 		assert_eq!(sequence(&mut consumer), 0);
 		assert_eq!(sequence(&mut consumer), 1);
@@ -841,7 +889,7 @@ mod tests {
 		// A consumer arriving after the finish never reads them.
 		let mut producer = Info::default().produce("dg");
 		let _reading = producer.consume();
-		producer.append(None, "a").unwrap();
+		producer.append(seq(0), "a").unwrap();
 		producer.clone().finish();
 		let mut late = producer.consume();
 		assert!(matches!(recv(&mut late), Poll::Ready(Ok(None))));
@@ -849,12 +897,12 @@ mod tests {
 		// Nobody left to read them, they go: on a finish with no consumer, or with the last
 		// consumer of a finished track.
 		let mut producer = Info::default().produce("dg");
-		producer.append(None, "a").unwrap();
+		producer.append(seq(0), "a").unwrap();
 		producer.clone().finish();
 		assert!(producer.state.read().buffer.is_empty());
 		let mut producer = Info::default().produce("dg");
 		let reading = producer.consume();
-		producer.append(None, "a").unwrap();
+		producer.append(seq(0), "a").unwrap();
 		producer.clone().finish();
 		assert_eq!(producer.state.read().buffer.len(), 1);
 		drop(reading);
@@ -864,7 +912,7 @@ mod tests {
 		// An abort drops them.
 		let mut producer = Info::default().produce("dg");
 		let mut consumer = producer.consume();
-		producer.append(None, "a").unwrap();
+		producer.append(seq(0), "a").unwrap();
 		producer.abort(Error::Cancel);
 		assert!(matches!(recv(&mut consumer), Poll::Ready(Err(Error::Cancel))));
 	}

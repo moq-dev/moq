@@ -19,7 +19,7 @@
 //!   conditional on the subcommand.
 //! - The endpoint is one subcommand: a container format (`ts`, `fmp4`, ... read
 //!   from stdin on import, written to stdout on export) or a gateway (`hls`,
-//!   `rtmp`, `srt`, `rtc`, `archive`). Exactly one per stage, so "which endpoint" is
+//!   `rtmp`, `srt`, `webrtc`, `archive`). Exactly one per stage, so "which endpoint" is
 //!   unambiguous and there's no silently-ignored flag.
 //! - `--` starts another stage on the same Origin and the same MoQ attachment, so
 //!   one process can bridge several broadcasts (or both directions at once). Usage
@@ -44,7 +44,7 @@ use crate::subscribe::{CatalogFormatArg, SubscribeFormat};
 #[derive(usage_rs::Cli, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[usage(name = "moq", version = env!("CARGO_PKG_VERSION"))]
-#[usage(completion, settings)]
+#[usage(completion, settings, unknown_env(prefix = "MOQ_"))]
 #[usage(after_help = "Separate additional import/export stages with `--`; they share one \
                         connection and one Origin. Every `--` starts a stage, so it is not an \
                         end-of-options marker: write a path starting with `-` as `./-name`.")]
@@ -179,13 +179,7 @@ impl Invocation {
 			print!("{reply}");
 			std::process::exit(0);
 		}
-		match Self::try_parse_from(args).and_then(|parsed| {
-			// Here rather than in `try_parse_from`, which tests drive under whatever
-			// environment the test runner has.
-			moq_tokio::cli::check_env(&[Cli::spec(), Stage::spec()], &[])
-				.map_err(|err| ParseError::new(ParseErrorKind::ValueValidation, format!("error: {err}\n")))?;
-			Ok(parsed)
-		}) {
+		match Self::try_parse_from(args) {
 			Ok(parsed) => parsed,
 			Err(err) => err.exit(),
 		}
@@ -540,7 +534,6 @@ impl MoqSide {
 		found.extend(self.quic.deprecated());
 		found.extend(self.server.deprecated());
 		found.extend(self.cluster.deprecated());
-		found.extend(self.auth.deprecated());
 		if self.name.is_some() {
 			found.flag("--name", None, "--broadcast");
 		}
@@ -556,10 +549,7 @@ impl MoqSide {
 
 	/// Whether `--cluster-lan` asked this process to mesh over the LAN.
 	pub fn lan(&self) -> bool {
-		#[cfg(feature = "cluster-lan")]
-		return self.cluster.lan.enabled;
-		#[cfg(not(feature = "cluster-lan"))]
-		false
+		self.cluster.lan.enabled
 	}
 
 	/// The server to bind, which the LAN mesh shares with ordinary clients.
@@ -602,19 +592,15 @@ impl MoqSide {
 		);
 		// The `--connect` client and the cluster's WAN dials each bind
 		// `--connect-bind` for QUIC, so a fixed port would collide halfway through startup.
-		#[cfg(feature = "quic")]
 		anyhow::ensure!(
 			!(self.client.url.is_some()
 				&& self.cluster_dials()
 				&& self.client.bind.is_some_and(|bind| bind.port() != 0)),
 			"--connect-bind with a fixed port cannot serve both --connect and --cluster-connect / --cluster-api-url, which each bind it: use port 0, or drop --connect (unset MOQ_CONNECT if it supplies the URL)"
 		);
-		#[cfg(feature = "cluster-lan")]
-		{
-			self.cluster.lan.validate()?;
-			if self.lan() {
-				moq_relay::cluster::Cluster::validate_lan_versions(&self.client, &self.server_config())?;
-			}
+		self.cluster.lan.validate()?;
+		if self.lan() {
+			moq_relay::cluster::Cluster::validate_lan_versions(&self.client, &self.server_config())?;
 		}
 		// A listener for ordinary clients admits nobody without a decision; a mesh
 		// listener alone admits its peers by their LAN credential.
@@ -842,6 +828,9 @@ impl Import {
 		if self.latency_max.is_some() {
 			found.flag("--latency-max", None, "--max-age");
 		}
+		if let ImportSource::Rtc(_) = &self.source {
+			found.flag("import rtc", None, "import webrtc");
+		}
 		#[cfg(feature = "capture")]
 		if let ImportSource::Capture(capture) = &self.source {
 			found.extend(capture.deprecated());
@@ -854,8 +843,8 @@ impl Import {
 /// from stdin; the gateways bridge another protocol.
 #[derive(usage_rs::Subcommands, Clone)]
 pub enum ImportSource {
-	/// Raw H.264 Annex-B from stdin.
-	Avc3,
+	/// Raw H.264 Annex B elementary stream from stdin.
+	H264,
 	/// Fragmented MP4 / CMAF from stdin.
 	Fmp4(Fmp4Import),
 	/// MPEG-TS from stdin.
@@ -871,7 +860,10 @@ pub enum ImportSource {
 	/// RTSP: pull an IP camera's stream (`--connect`), reconnecting on failure.
 	Rtsp(crate::rtsp::ImportArgs),
 	/// WebRTC: WHEP client pulling a remote (`--connect`) or WHIP server accepting publishes (`--listen`).
-	Rtc(crate::rtc::Args),
+	Webrtc(crate::webrtc::Args),
+	/// The released spelling of [`Self::Webrtc`].
+	#[usage(hide = true)]
+	Rtc(crate::webrtc::Args),
 	/// Replay a recording from an object store, serving its groups on demand.
 	Archive(crate::archive::ImportArgs),
 	/// Capture a local source (camera, display, window, app, microphone) and
@@ -884,7 +876,7 @@ impl ImportSource {
 	/// The stdin container format, when this source is one of the container formats.
 	pub fn stdin_format(&self) -> Option<PublishFormat> {
 		Some(match self {
-			Self::Avc3 => PublishFormat::Avc3,
+			Self::H264 => PublishFormat::H264,
 			Self::Fmp4(args) => PublishFormat::Fmp4 { cmaf: args.cmaf },
 			Self::Ts(args) if args.passthrough => PublishFormat::TsPassthrough {
 				pcr_pid: args.pcr_pid.map(|pid| pid.0),
@@ -905,12 +897,16 @@ impl ImportSource {
 			Self::Ts(args) if args.program == Some(TsProgram::All) => {
 				Some("`import ts --program all` builds a catalog per program")
 			}
-			Self::Hls(_) | Self::Rtmp(_) | Self::Srt(_) | Self::Rtsp(_) | Self::Rtc(_) | Self::Archive(_) => {
-				Some("the gateway and archive imports build their own catalogs")
-			}
+			Self::Hls(_)
+			| Self::Rtmp(_)
+			| Self::Srt(_)
+			| Self::Rtsp(_)
+			| Self::Webrtc(_)
+			| Self::Rtc(_)
+			| Self::Archive(_) => Some("the gateway and archive imports build their own catalogs"),
 			#[cfg(feature = "capture")]
 			Self::Capture(_) => None,
-			Self::Avc3 | Self::Fmp4(_) | Self::Ts(_) | Self::Flv => None,
+			Self::H264 | Self::Fmp4(_) | Self::Ts(_) | Self::Flv => None,
 		}
 	}
 
@@ -921,17 +917,20 @@ impl ImportSource {
 			// Every run is followed by a redial publishing the next one, so a run's end is not
 			// the end of the content, and its finished catalog would tell readers to stop.
 			Self::Rtsp(_) => Some("`import rtsp` redials after every session, so a run's end is not the content's"),
-			Self::Rtc(rtc) if rtc.connect.is_some() => Some("a WHEP pull has no clean end"),
+			Self::Webrtc(webrtc) | Self::Rtc(webrtc) if webrtc.connect.is_some() => {
+				Some("a WHEP pull has no clean end")
+			}
 			Self::Archive(_) => Some("`import archive` serves its recording until stopped"),
 			#[cfg(feature = "capture")]
 			Self::Capture(_) => Some("`import capture` has no clean end"),
-			Self::Avc3
+			Self::H264
 			| Self::Fmp4(_)
 			| Self::Ts(_)
 			| Self::Flv
 			| Self::Hls(_)
 			| Self::Rtmp(_)
 			| Self::Srt(_)
+			| Self::Webrtc(_)
 			| Self::Rtc(_) => None,
 		}
 	}
@@ -958,7 +957,7 @@ pub struct TsImport {
 	pub program: Option<TsProgram>,
 
 	/// Publish the multiplex whole instead of demultiplexing it: every 188-byte packet verbatim,
-	/// on one track the catalog's `m2ts` section names. Scrambled streams, private PIDs, and the
+	/// on one track the catalog's `mpegts` section names. Scrambled streams, private PIDs, and the
 	/// PSI and SI ride through as authored. Bytes before the first group are dropped.
 	#[usage(long, conflicts = "--program")]
 	pub passthrough: bool,
@@ -1074,6 +1073,7 @@ impl Export {
 			ExportSink::H264(args) | ExportSink::H265(args) => found.extend(args.deprecated()),
 			ExportSink::Rtmp(rtmp) => found.extend(rtmp.deprecated()),
 			ExportSink::Hls(hls) => found.extend(hls.deprecated()),
+			ExportSink::Rtc(_) => found.flag("export rtc", None, "export webrtc"),
 			_ => {}
 		}
 		found
@@ -1105,7 +1105,10 @@ pub enum ExportSink {
 	/// SRT: push to a remote (`--connect`) or serve requests (`--listen`).
 	Srt(crate::srt::ExportArgs),
 	/// WebRTC: WHIP client pushing to a remote (`--connect`) or WHEP server serving plays (`--listen`).
-	Rtc(crate::rtc::Args),
+	Webrtc(crate::webrtc::Args),
+	/// The released spelling of [`Self::Webrtc`].
+	#[usage(hide = true)]
+	Rtc(crate::webrtc::Args),
 	/// Record every broadcast announced under `--broadcast` into an object store.
 	Archive(crate::archive::ExportArgs),
 	/// Write the broadcast's media reports (`import --report`) to stdout as JSON lines.
@@ -1123,7 +1126,7 @@ impl ExportSink {
 			Self::Hls(_) => "hls",
 			Self::Rtmp(_) => "rtmp",
 			Self::Srt(_) => "srt",
-			Self::Rtc(_) => "rtc",
+			Self::Webrtc(_) | Self::Rtc(_) => "webrtc",
 			Self::Archive(_) => "archive",
 			Self::Report => "report",
 			Self::Echo => "echo",
@@ -1212,7 +1215,7 @@ pub struct ContainerSink {
 	pub stitch: bool,
 	pub fragment_duration: Option<Duration>,
 	pub mux_rate: Option<u64>,
-	/// Write the `m2ts` passthrough track back out (`ts` only).
+	/// Write the passthrough track back out (`ts` only).
 	pub passthrough: bool,
 	/// The file a recording writes (`mp4` only); the rest write to stdout.
 	pub output: Option<PathBuf>,
@@ -1306,7 +1309,7 @@ pub struct BufferedFragmented {
 pub struct Transport {
 	/// How far behind the source the output runs (e.g. `2s`), like an SRT receiver's latency,
 	/// including how far ahead of its decode time each frame is sent. A frame that arrives
-	/// later than this is dropped, and a stalled group is skipped once it falls half this
+	/// later than this is dropped, and a stalled group is skipped once it falls this far
 	/// behind the newest content.
 	#[usage(long, default = "1s")]
 	pub delay: moq_tokio::cli::Duration,
@@ -1789,7 +1792,7 @@ mod tests {
 			&["hls", "--hls-listen", "127.0.0.1:8080"],
 			&["rtmp", "--listen", "127.0.0.1:1935"],
 			&["srt", "--listen", "127.0.0.1:9000"],
-			&["rtc", "--listen", "127.0.0.1:8443"],
+			&["webrtc", "--listen", "127.0.0.1:8443"],
 			&["archive", "file:///tmp/archive"],
 		];
 		for sink in sinks {
@@ -1810,6 +1813,18 @@ mod tests {
 		}
 	}
 
+	/// The WebRTC media socket flags configure the listener, so a dialer refuses them.
+	#[test]
+	fn webrtc_media_flags_need_the_listener() {
+		for flag in [["--udp-bind", "[::]:5000"], ["--public-addr", "203.0.113.1:5000"]] {
+			let listen = [&["webrtc", "--listen", "127.0.0.1:8443"][..], &flag].concat();
+			export(&listen).unwrap().validate().unwrap();
+			let connect = [&["webrtc", "--connect", "http://remote/whip"][..], &flag].concat();
+			let err = export(&connect).err().expect("a dialer took a listener flag");
+			assert!(err.to_string().contains("--listen"), "{flag:?}: {err}");
+		}
+	}
+
 	/// `--report` and `--echo-path` go where the CLI builds the one catalog they add a section to.
 	#[test]
 	fn catalog_sections_need_a_catalog_the_cli_builds() {
@@ -1822,7 +1837,7 @@ mod tests {
 				["ts"].as_slice(),
 				&["fmp4"],
 				&["flv"],
-				&["avc3"],
+				&["h264"],
 				&["ts", "--program", "1"],
 			] {
 				import(flags, source).validate().unwrap();
@@ -1985,6 +2000,34 @@ mod tests {
 		assert!(format(&["--passthrough", "--pcr-pid", "0"]).is_none(), "the PAT");
 		assert!(format(&["--passthrough", "--pcr-pid", "clock"]).is_none());
 		assert!(matches!(format(&[]), Some(PublishFormat::Ts { program: None })));
+	}
+
+	/// `--udp-bind` and `--public-addr` configure the server's shared socket, so a `--connect` client refuses them.
+	#[test]
+	fn webrtc_socket_flags_require_listen() {
+		for verb in ["import", "export"] {
+			let url = "http://127.0.0.1:8443/live";
+			for flag in [["--public-addr", "1.2.3.4:5"], ["--udp-bind", "0.0.0.0:0"]] {
+				assert!(
+					Invocation::try_parse_from(["moq", verb, "webrtc", "--connect", url, flag[0], flag[1]]).is_err(),
+					"{verb} webrtc --connect {}",
+					flag[0]
+				);
+			}
+			assert!(
+				Invocation::try_parse_from([
+					"moq",
+					verb,
+					"webrtc",
+					"--listen",
+					"127.0.0.1:8443",
+					"--public-addr",
+					"1.2.3.4:5"
+				])
+				.is_ok(),
+				"{verb} webrtc --listen --public-addr"
+			);
+		}
 	}
 
 	/// `import srt` takes the same `--program` as `import ts`; `export srt` has no program to pick.
@@ -2662,6 +2705,27 @@ mod tests {
 			panic!("subscribe must not start a run");
 		};
 		assert!(err.to_string().contains("subscribe -> export"), "{err}");
+
+		for verb in ["import", "export"] {
+			let argv = [
+				"moq",
+				"--connect",
+				"http://relay",
+				"--broadcast",
+				"room",
+				verb,
+				"rtc",
+				"--listen",
+				"127.0.0.1:8443",
+			];
+			let Err(err) = Invocation::try_parse_from(argv) else {
+				panic!("{verb} rtc must not start a run");
+			};
+			assert!(
+				err.to_string().contains(&format!("{verb} rtc -> {verb} webrtc")),
+				"{err}"
+			);
+		}
 	}
 
 	/// An exported `MOQ_CONNECT` configures a MoQ side but does not ask for one, so a
@@ -2685,6 +2749,21 @@ mod tests {
 
 		let typed = Invocation::try_parse_from(["moq", "--connect", url, "auth", "generate"]).expect("parse");
 		assert!(typed.reject("auth").is_err(), "a typed --connect stopped being refused");
+	}
+
+	/// A `MOQ_*` variable no verb reads is refused, even for a local verb that reads none.
+	#[test]
+	fn unknown_env_is_refused() {
+		if !test_env::Env::default()
+			.set("MOQ_CONECT", "https://relay.example.com")
+			.isolate()
+		{
+			return;
+		}
+		let Err(error) = Invocation::try_parse_from(["moq", "auth", "generate"]) else {
+			panic!("an unknown variable was accepted");
+		};
+		assert!(error.to_string().contains("MOQ_CONECT"), "{error}");
 	}
 
 	#[test]
@@ -2726,7 +2805,6 @@ mod tests {
 			}
 		}
 
-		#[cfg(feature = "cluster-lan")]
 		{
 			let cli = Invocation::try_parse_from(["moq", "--cluster-lan", "auth", "generate"]).unwrap();
 			let err = cli.reject("auth").unwrap_err().to_string();
@@ -2770,7 +2848,7 @@ mod tests {
 			&["--listen-version", "moq-lite-02"],
 			&["--listen-tls-generate", "localhost"],
 			&["--listen-preferred-v4", "127.0.0.1:443"],
-			&["--listen-quic-lb-id", "01"],
+			&["--listen-lb-id", "01"],
 			&["--listen-tcp-bind", "127.0.0.1:0"],
 			&["--cluster-node", "https://self.example"],
 			&["--auth-public", "**"],
@@ -2844,7 +2922,7 @@ mod tests {
 
 	/// `--connect` and a WAN cluster peer each bind `--connect-bind` for QUIC, so a
 	/// fixed port is refused before anything binds; port 0 or either side alone is
-	/// fine, and a build without QUIC binds nothing to collide.
+	/// fine.
 	#[test]
 	fn a_fixed_connect_bind_serves_one_dialer() {
 		let parse = |flags: &[&str]| {
@@ -2861,12 +2939,8 @@ mod tests {
 			]
 			.concat();
 			let result = parse(&both).moq.validate();
-			if cfg!(feature = "quic") {
-				let err = result.unwrap_err().to_string();
-				assert!(err.contains("--connect-bind") && err.contains(peer[0]), "{err}");
-			} else {
-				result.expect("without QUIC nothing binds the fixed port");
-			}
+			let err = result.unwrap_err().to_string();
+			assert!(err.contains("--connect-bind") && err.contains(peer[0]), "{err}");
 
 			let ephemeral = [
 				&["--connect", "https://relay.example", "--connect-bind", "127.0.0.1:0"][..],
@@ -2908,7 +2982,6 @@ mod tests {
 
 	/// `--cluster-lan` is a MoQ side on its own, and it supplies the listener the
 	/// user would otherwise have to spell out.
-	#[cfg(feature = "cluster-lan")]
 	#[test]
 	fn cluster_lan_is_a_moq_side_and_fills_in_a_listener() {
 		let cli = Invocation::try_parse_from(["moq", "--cluster-lan", "import", "ts"]).expect("parse");
@@ -2952,7 +3025,6 @@ mod tests {
 
 	/// The secret is only read by the mesh, so configuring one without it is an
 	/// error rather than a silently ignored flag.
-	#[cfg(feature = "cluster-lan")]
 	#[test]
 	fn cluster_lan_secret_requires_the_mesh() {
 		for lan in [None, Some("--cluster-lan=false")] {
@@ -2991,7 +3063,6 @@ mod tests {
 
 	/// The app is only read by the mesh, so configuring one without it is an
 	/// error rather than a silently ignored flag. The default is `default`.
-	#[cfg(feature = "cluster-lan")]
 	#[test]
 	fn cluster_lan_app_requires_the_mesh_and_defaults() {
 		for lan in [None, Some("--cluster-lan=false")] {
@@ -3032,7 +3103,6 @@ mod tests {
 
 	/// A mesh dial authenticates through its request path, which legacy moq-lite
 	/// versions do not carry.
-	#[cfg(feature = "cluster-lan")]
 	#[test]
 	fn cluster_lan_requires_a_path_capable_version() {
 		for (flag, reported) in [

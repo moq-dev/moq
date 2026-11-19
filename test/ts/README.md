@@ -694,7 +694,7 @@ The default queue is twice the export's delay, so a sender that kept it full
 would make every unit late. The delay-based default (BBRv3) does not: it keeps
 about a round trip queued, so the backlog lands at the relay, which ages groups out
 (`Old`), and the queue itself overflows only when it is about a round trip deep.
-The loss-based `MOQ_QUIC_CONGESTION_CONTROL=loss` (CUBIC) fills it, latency
+The loss-based CUBIC (`MOQ_QUIC_CONGESTION_CONTROL=cubic`) fills it, latency
 outgrows the delay, and the export refuses the run as a clock drift.
 
 So the queue's own tail drop runs as a lane of its own: CUBIC behind a 250 ms
@@ -703,7 +703,7 @@ retransmit behind a full queue (about twice 300 ms) still lands inside the 1 s
 delay. A loss-based run fails unless the queue overflowed.
 
 ```bash
-MOQ_QUIC_CONGESTION_CONTROL=loss just test ts --headroom --rate 7000000 --queue 250ms
+MOQ_QUIC_CONGESTION_CONTROL=cubic just test ts --headroom --rate 7000000 --queue 250ms
 ```
 
 Measured on 2026-10-18 and 2026-10-19 with other test runs sharing the host:
@@ -971,9 +971,9 @@ All recipes use the same pinned Nix FFmpeg and TSDuck locally and in CI.
 
 Nightly and manual runs also invoke `just test ts --pair`,
 `just test ts --live --duration 120`, `just test ts --headroom --rate 7000000 --duration 120`,
-the same with `--queue 250ms` and `MOQ_QUIC_CONGESTION_CONTROL=loss`,
+the same with `--queue 250ms` and `MOQ_QUIC_CONGESTION_CONTROL=cubic`,
 and `just test ts --passthrough --rate 7000000 --queue 250ms --duration 120`
-with `MOQ_QUIC_CONGESTION_CONTROL=loss`, and `just rs ts-recovery`.
+with `MOQ_QUIC_CONGESTION_CONTROL=cubic`, and `just rs ts-recovery`.
 The pair exercises late-joining subscribers; the live window distinguishes ongoing
 clock drift from initial buffer filling; the congested paths judge what the export
 does when the path cannot carry the media.

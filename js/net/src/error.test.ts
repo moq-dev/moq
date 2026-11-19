@@ -9,7 +9,9 @@ import {
 	Lagged,
 	NotFound,
 	ProtocolViolation,
+	Retry,
 	reason,
+	retry,
 	SessionCode,
 	SessionError,
 	StreamCode,
@@ -93,8 +95,35 @@ test("the error type names the registry the code came from", () => {
 	expect(Number(stream.code)).toBe(Number(session?.code));
 });
 
-test("invalid request IDs keep their session registry code", () => {
-	expect(fromClose({ closeCode: 0x4 })?.code).toBe(SessionCode.InvalidRequestId);
+test("a code only moq-transport defines keeps its number", () => {
+	for (const code of [0x4, 0x6, 0x8, 0x13, 0x17, 0x19, 0x1b]) {
+		expect(Number(fromClose({ closeCode: code })?.code)).toBe(code);
+		expect(Object.values(SessionCode) as number[]).not.toContain(code);
+	}
+});
+
+test("retry separates a failed delivery from a verdict", () => {
+	for (const err of [
+		new SessionError(SessionCode.Unauthorized),
+		new SessionError(0x4 as SessionCode),
+		new StreamError(StreamCode.SessionClosed),
+		new StreamError(StreamCode.Cancel),
+		new StreamError(StreamCode.ControlTimeout),
+		Object.assign(new Error("closed"), { source: "session" }),
+	]) {
+		expect([err.message, retry(err)]).toEqual([err.message, Retry.Same]);
+	}
+	expect(retry(new StreamError(StreamCode.Unroutable))).toBe(Retry.Reroute);
+	for (const err of [
+		new NotFound("broadcast"),
+		new StreamError(StreamCode.Unauthorized),
+		new StreamError(StreamCode.MalformedTrack),
+		new StreamError(0x22 as StreamCode),
+		new Error("malformed"),
+		"thrown",
+	]) {
+		expect([String(err), retry(err)]).toEqual([String(err), Retry.Never]);
+	}
 });
 
 test("the code types reject the other registry", () => {
@@ -214,19 +243,12 @@ test("session codes match the draft's Session Error Codes table", () => {
 		Internal: 0x1,
 		Unauthorized: 0x2,
 		ProtocolViolation: 0x3,
-		InvalidRequestId: 0x4,
-		KeyValueFormatting: 0x6,
 		TooManyRequests: 0x7,
-		InvalidPath: 0x8,
 		GoawayTimeout: 0x10,
 		Timeout: 0x11,
-		AuthTokenCacheOverflow: 0x13,
 		Version: 0x15,
 		MalformedAuthToken: 0x16,
-		UnknownAuthTokenAlias: 0x17,
 		Expired: 0x18,
-		InvalidAuthority: 0x19,
-		TooManyRequestUpdates: 0x1b,
 		Unsupported: 0x30,
 	});
 });
@@ -249,7 +271,6 @@ test("stream codes match the draft's Stream Error Codes table", () => {
 		FrameTooLarge: 0x38,
 		TimestampMismatch: 0x39,
 		Unauthorized: 0x3b,
-		Yielded: 0x3c,
 	});
 });
 
@@ -276,7 +297,6 @@ test("the code tables keep their registry ranges", () => {
 		StreamCode.FrameTooLarge,
 		StreamCode.TimestampMismatch,
 		StreamCode.Unauthorized,
-		StreamCode.Yielded,
 	];
 	for (const code of Object.values(StreamCode)) {
 		if (assignedLite.includes(code)) {
@@ -404,7 +424,6 @@ test("toStreamCode and fromTransport agree on what a code means", () => {
 		StreamCode.Unroutable,
 		StreamCode.FrameTooLarge,
 		StreamCode.Unauthorized,
-		StreamCode.Yielded,
 		StreamCode(70),
 	]) {
 		expect(toStreamCode(fromTransport(toTransport(code, "reset")))).toBe(code);
@@ -438,7 +457,6 @@ test("toStreamCode: lite-only codes do not reach an IETF peer", () => {
 		StreamCode.GroupTooLarge,
 		StreamCode.Unroutable,
 		StreamCode.FrameTooLarge,
-		StreamCode.Yielded,
 	]) {
 		expect(toStreamCode(new StreamError(code), { version: Version.DRAFT_22 })).toBe(StreamCode.Internal);
 	}

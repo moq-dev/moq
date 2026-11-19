@@ -21,6 +21,13 @@ use tokio::sync::broadcast;
 
 use crate::Error;
 
+/// How long a superseded source group stays worth decoding: long enough for its tail to
+/// arrive behind its successor's head, and no longer, since the feed is a live reader.
+/// An unbounded budget asks for everything the publisher keeps, which a moq-lite-06 hop
+/// delivers from its oldest cached group, so a cold start would decode the whole cache
+/// before reaching the live edge.
+const SUPERSEDED: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// Frames buffered per listener. A rung that falls further behind than this
 /// lags out (skipping to the next group) instead of stalling the other rungs;
 /// the decode task itself never blocks on a slow listener.
@@ -29,7 +36,8 @@ const CAPACITY: usize = 16;
 /// One item of the shared live feed, in stream order.
 #[derive(Clone)]
 pub(crate) enum Item {
-	/// A new source group started; the frames that follow belong to it.
+	/// A new source group started; the frames that follow belong to it. Carries its key, which
+	/// the output group mirroring it shares.
 	Group(u64),
 	/// A decoded frame of the current group. Cloning is cheap (`Arc`), and a GPU
 	/// frame stays on the GPU for every receiving rung.
@@ -182,22 +190,22 @@ async fn decode(inner: &Inner, sender: &broadcast::Sender<Item>) -> Result<(), E
 	// backend opens.
 	let mut decoder = moq_video::decode::Sink::open(&inner.config, &inner.decoder).await?;
 
-	// Starts at the live edge, but keeps a superseded group for as long as its
-	// publisher does: every rung mirrors each source group as a whole, so a tail
-	// dropped because the next group began costs viewers the entire output group.
+	// Starts at the live edge, and keeps a superseded group for [`SUPERSEDED`]:
+	// every rung mirrors each source group as a whole, so a tail dropped because the
+	// next group began costs viewers the entire output group.
 	// Ascending, since this loop finishes one group before it reads the next.
 	// Reading stays in arrival order: every group decodes independently from its
 	// own keyframe, so there is nothing for a sequence cursor to buy.
 	let subscription = moq_net::track::Subscription::default()
 		.with_ranges([moq_net::track::Range::live()])
 		.with_order(moq_net::track::Order::Ascending)
-		.with_delay(moq_net::track::Delay::default().with_max(None));
+		.with_delay(moq_net::track::Delay::default().with_max(SUPERSEDED));
 	let mut subscriber = inner.broadcast.track(&inner.name)?.subscribe(subscription).await?;
 
 	while let Some(mut group) = subscriber.recv_group().await? {
 		// Sends only fail with zero receivers, which is fine: teardown aborts
 		// this task at the next await anyway.
-		let _ = sender.send(Item::Group(group.sequence));
+		let _ = sender.send(Item::Group(group.start));
 
 		let mut first = true;
 		let complete = loop {
@@ -207,7 +215,7 @@ async fn decode(inner: &Inner, sender: &broadcast::Sender<Item>) -> Result<(), E
 				// A failed group read loses that group alone, such as one its
 				// publisher gave up; a failed track ends `recv_group` above instead.
 				Err(err) => {
-					tracing::debug!(%err, group = group.sequence, "lost a source group");
+					tracing::debug!(%err, group = group.start, "lost a source group");
 					break false;
 				}
 			};

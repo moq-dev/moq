@@ -1,4 +1,3 @@
-use crate::vendor::str0m;
 use std::collections::VecDeque;
 use std::net::{IpAddr, SocketAddr};
 use std::ops::{Deref, DerefMut};
@@ -6,11 +5,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use kio::clock::Instant;
+use str0m::ice::{StunMessage, TransId};
 use str0m::net::{Protocol, Receive};
-use str0m::{Candidate, IceConnectionState, Input, Output, Rtc};
-use stun_types::attribute::XorMappedAddress;
-use stun_types::message::{BINDING, Message, MessageClass, MessageWriteVec, TransactionId};
-use stun_types::prelude::*;
+use str0m::{Event, IceConnectionState, Input, Output, Rtc};
 use tokio::net::UdpSocket;
 
 use super::{Inbound, Socket};
@@ -21,21 +18,14 @@ use super::{Inbound, Socket};
 /// tried and exhausted (after ~21s at its defaults), but with no remote candidates
 /// it treats the session as still possible forever, since trickle ICE could add
 /// one. Set above str0m's own exhaustion so a slow but real peer is not clipped.
-///
-/// It counts from when the peer could hold every local candidate: once gathering
-/// ends, so a caller that sends its description only after the last candidate is
-/// not clipped by an unreachable STUN server's retransmissions, and for an
-/// [`Agent::awaiting_answer`], once the answer applies.
 const ESTABLISH_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// RFC 8489 section 6.2.1: the first retransmission timeout of a STUN request.
-const STUN_RTO: Duration = Duration::from_millis(500);
-
-/// RFC 8489 section 6.2.1: how many times a STUN request is sent (`Rc`).
-const STUN_SENDS: u32 = 7;
-
-/// RFC 8489 section 6.2.1: how long to wait after the last send, in RTOs (`Rm`).
-const STUN_LAST_WAIT: u32 = 16;
+/// How many of its latest binding requests an establishing agent remembers the
+/// destination of, and how many addresses that answered one. str0m paces a new check
+/// every 50 ms, so this spans the last few seconds of checks and their retransmits; an
+/// answer to an older one only fails to confirm, and the address then waits for its
+/// holder to end.
+const CHECKS: usize = 64;
 
 /// Why an [`Agent`] stopped.
 #[derive(Clone, Debug, thiserror::Error)]
@@ -49,7 +39,7 @@ pub enum Error {
 	#[error("ICE did not connect in time")]
 	Timeout,
 
-	/// str0m failed (SDP, DTLS, SCTP, or ICE state).
+	/// str0m failed (SDP, DTLS, or ICE state).
 	#[error("rtc error: {0}")]
 	Rtc(String),
 }
@@ -60,45 +50,15 @@ impl Error {
 	}
 }
 
-/// What [`Agent::next`] surfaced.
-#[derive(Debug)]
-#[expect(
-	clippy::large_enum_variant,
-	reason = "moved once per poll; boxing would allocate for every data channel message"
-)]
-pub enum Event {
-	/// An event from str0m. ICE disconnection is reported as [`Error::Closed`] instead.
-	Rtc(str0m::Event),
-	/// A server-reflexive candidate, already added locally, to signal to the peer.
-	#[cfg_attr(
-		not(feature = "p2p"),
-		allow(dead_code, reason = "only the p2p transport gathers server-reflexive candidates")
-	)]
-	Candidate(Candidate),
-	/// Every STUN server answered or gave up: no more local candidates follow.
-	Gathered,
-}
-
-/// A STUN Binding request in flight to one server.
-struct Query {
-	server: SocketAddr,
-	/// The host candidate the request leaves from, which a reply's mapping is the reflexive form of.
-	base: SocketAddr,
-	id: TransactionId,
-	request: Vec<u8>,
-	sends: u32,
-	rto: Duration,
-	/// When to retransmit, or give up after the last send.
-	deadline: Instant,
-}
-
 /// Where the connection is in its life.
 enum Phase {
-	/// An offer awaits its answer, which holds off the [`ESTABLISH_TIMEOUT`].
-	Held,
 	/// ICE has yet to connect; the [`ESTABLISH_TIMEOUT`] runs from `started`.
 	Establishing {
 		started: Instant,
+		/// Where each recent binding request went, newest last, at most [`CHECKS`].
+		checks: VecDeque<(TransId, SocketAddr)>,
+		/// The addresses that answered one of `checks` themselves, at most [`CHECKS`].
+		answered: Vec<SocketAddr>,
 	},
 	Connected,
 	/// The connection ended, for this reason: every later [`Agent::next`] reports it.
@@ -118,15 +78,14 @@ pub struct Agent {
 	/// Never empty.
 	locals: Vec<SocketAddr>,
 	inbound: Inbound,
-	stun: Vec<Query>,
-	/// When every STUN query answered or gave up, once [`Event::Gathered`] went out.
-	gathered: Option<Instant>,
 	events: VecDeque<Event>,
 	/// When str0m next wants a timeout, as of the last drain.
 	timeout: Instant,
 	/// Datagrams the socket refused for lack of buffer space, sent first next time.
 	outbox: VecDeque<(Vec<u8>, SocketAddr)>,
 	phase: Phase,
+	/// Close once connected with nothing due, which [`Agent::close`] asked for.
+	closing: bool,
 }
 
 impl Agent {
@@ -145,46 +104,25 @@ impl Agent {
 			socket_v6,
 			locals,
 			inbound,
-			stun: Vec::new(),
-			gathered: None,
 			events: VecDeque::new(),
 			timeout: now,
 			outbox: VecDeque::new(),
-			phase: Phase::Establishing { started: now },
+			phase: Phase::Establishing {
+				started: now,
+				checks: VecDeque::new(),
+				answered: Vec::new(),
+			},
+			closing: false,
 		};
-		// Signaling already changed the connection.
-		agent.drain();
-		Ok(agent)
-	}
-
-	/// Ask each STUN server for this socket's public mapping, offering what comes
-	/// back as a server-reflexive candidate. Servers of a family with no host
-	/// candidate are skipped.
-	#[cfg_attr(
-		not(feature = "p2p"),
-		allow(dead_code, reason = "only the p2p transport gathers server-reflexive candidates")
-	)]
-	pub fn with_stun(mut self, servers: &[SocketAddr]) -> Self {
-		let now = Instant::now();
-		for &server in servers {
-			let server = canonical(server);
-			let Some(base) = self.locals.iter().find(|l| l.is_ipv4() == server.is_ipv4()).copied() else {
-				tracing::debug!(%server, "no host candidate of this family; skipping STUN server");
-				continue;
-			};
-			let request = Message::builder_request(BINDING, MessageWriteVec::new());
-			let id = request.transaction_id();
-			self.stun.push(Query {
-				server,
-				base,
-				id,
-				request: request.finish(),
-				sends: 0,
-				rto: STUN_RTO,
-				deadline: now,
-			});
+		// str0m's ICE has no clock, and asks for no timeout, until its first one. Without
+		// it a side that hears no checks, such as one facing an ICE-lite peer, would never
+		// check the candidates signaling gave it. Draining on drop sends what this
+		// and signaling produced.
+		let result = agent.rtc_mut().handle_input(Input::Timeout(now.into_std()));
+		if let Err(err) = result {
+			agent.fail(Error::rtc(err));
 		}
-		self
+		Ok(agent)
 	}
 
 	/// The connection being driven, read only.
@@ -192,31 +130,29 @@ impl Agent {
 		&self.rtc
 	}
 
-	/// Hold off the deadline for ICE to connect until the first [`Agent::rtc_mut`],
-	/// for an offer whose answer has yet to arrive: signaling time is the caller's.
-	#[cfg_attr(not(feature = "p2p"), allow(dead_code, reason = "only the p2p transport offers"))]
-	pub fn awaiting_answer(mut self) -> Self {
-		self.phase = Phase::Held;
-		self
-	}
-
 	/// Change the connection through a guard that drains what the change produced
 	/// when dropped: transmits are sent, and events wait for [`Agent::next`].
 	pub fn rtc_mut(&mut self) -> RtcMut<'_> {
-		if let Phase::Held = self.phase {
-			self.phase = Phase::Establishing {
-				started: Instant::now(),
-			};
-		}
-		self.change()
-	}
-
-	/// [`Agent::rtc_mut`] for the agent's own changes, which never start the deadline.
-	fn change(&mut self) -> RtcMut<'_> {
 		RtcMut(self)
 	}
 
-	/// Drive the connection until it surfaces an [`Event`].
+	/// An event str0m already surfaced, without driving the connection.
+	pub fn queued(&mut self) -> Option<Event> {
+		self.events.pop_front()
+	}
+
+	/// Close the connection with an RTCP BYE and a DTLS close_notify once it has sent
+	/// everything written to it, after which [`Agent::next`] reports [`Error::Closed`].
+	///
+	/// str0m packetizes a written frame only on a timeout, and holds media until DTLS and
+	/// SRTP are up, so the close waits for a connection with nothing due. A peer that never
+	/// connects still ends with [`Error::Timeout`].
+	pub fn close(&mut self) {
+		self.closing = true;
+	}
+
+	/// Drive the connection until str0m surfaces an [`Event`]. ICE disconnection is
+	/// reported as [`Error::Closed`] instead.
 	///
 	/// Cancel safe: the connection is always drained between calls, and a datagram
 	/// the socket could not take yet is kept and sent first on the next call.
@@ -225,20 +161,16 @@ impl Agent {
 			if let Some(event) = self.events.pop_front() {
 				return Ok(event);
 			}
-			if let Phase::Failed(err) = &self.phase {
-				return Err(err.clone());
-			}
-			if self.gathered.is_none() && self.stun.is_empty() {
-				self.gathered = Some(Instant::now());
-				return Ok(Event::Gathered);
-			}
-
+			// Sent before reporting an end too, which may have queued a close_notify.
 			while let Some((data, dst)) = self.outbox.front() {
 				match self.socket.send_to(data, *dst).await {
 					Ok(_) => {}
 					Err(err) => tracing::warn!(%err, dst = %dst, "send failed"),
 				}
 				self.outbox.pop_front();
+			}
+			if let Phase::Failed(err) = &self.phase {
+				return Err(err.clone());
 			}
 
 			// A dead Rtc (DTLS failure, explicit disconnect) reports a never-firing
@@ -252,11 +184,18 @@ impl Agent {
 				self.fail(Error::Timeout);
 				continue;
 			}
-
-			let deadline = self.stun.iter().map(|q| q.deadline).chain(establish);
-			let deadline = deadline.fold(self.timeout, Instant::min);
+			let deadline = establish.map_or(self.timeout, |at| at.min(self.timeout));
 
 			let now = Instant::now();
+			// Once SRTP is up with nothing due, str0m has packetized and sent every frame
+			// written to it.
+			if deadline > now && self.rtc.is_connected() && std::mem::take(&mut self.closing) {
+				let result = self.rtc_mut().close();
+				if let Err(err) = result {
+					self.fail(Error::rtc(err));
+				}
+				continue;
+			}
 			if deadline > now {
 				tokio::select! {
 					packet = self.inbound.packets.recv() => {
@@ -272,21 +211,17 @@ impl Agent {
 				}
 			}
 
-			let now = Instant::now();
-			let result = self.change().handle_input(Input::Timeout(now.into_std()));
+			let result = self.rtc_mut().handle_input(Input::Timeout(Instant::now().into_std()));
 			if let Err(err) = result {
 				self.fail(Error::rtc(err));
 			}
-			self.retransmit(now);
 		}
 	}
 
-	/// When [`ESTABLISH_TIMEOUT`] expires, or `None` while it is held, gathering, or over.
+	/// When [`ESTABLISH_TIMEOUT`] expires, or `None` once ICE connected or the connection ended.
 	fn establish(&self) -> Option<Instant> {
-		match (&self.phase, self.gathered) {
-			(Phase::Establishing { started }, Some(gathered)) => {
-				Some((*started).max(gathered).saturating_add(ESTABLISH_TIMEOUT))
-			}
+		match &self.phase {
+			Phase::Establishing { started, .. } => Some(started.saturating_add(ESTABLISH_TIMEOUT)),
 			_ => None,
 		}
 	}
@@ -311,7 +246,19 @@ impl Agent {
 					self.timeout = Instant::from_std(timeout);
 					return;
 				}
-				Output::Transmit(transmit) => self.send(&transmit.contents, transmit.destination),
+				Output::Transmit(transmit) => {
+					// Only a shared socket's route needs to know where checks went.
+					if self.inbound.route.is_some()
+						&& let Phase::Establishing { checks, .. } = &mut self.phase
+						&& let Some(check) = stun(&transmit.contents).filter(|m| m.is_binding_request())
+					{
+						if checks.len() == CHECKS {
+							checks.pop_front();
+						}
+						checks.push_back((check.trans_id(), transmit.destination));
+					}
+					self.send(&transmit.contents, transmit.destination)
+				}
 				Output::Event(event) => {
 					if let str0m::Event::IceConnectionStateChange(state) = &event {
 						tracing::debug!(?state, "ice state");
@@ -319,10 +266,16 @@ impl Agent {
 							return self.fail(Error::Closed);
 						}
 						if state.is_connected() {
+							// Take each claimed address the peer proved it is at.
+							if let Phase::Establishing { answered, .. } = &self.phase
+								&& let Some(route) = &self.inbound.route
+							{
+								answered.iter().for_each(|addr| route.confirm(*addr));
+							}
 							self.phase = Phase::Connected;
 						}
 					}
-					self.events.push_back(Event::Rtc(event));
+					self.events.push_back(event);
 				}
 			}
 		}
@@ -341,7 +294,7 @@ impl Agent {
 		match self.socket.try_send_to(data, dst) {
 			Ok(_) => {}
 			// Changes can keep coming while the socket stays full, so the backlog is
-			// bounded like the inbound queue; ICE, SCTP, and RTP recover the loss.
+			// bounded like the inbound queue; ICE, DTLS, and RTP recover the loss.
 			Err(err) if err.kind() == std::io::ErrorKind::WouldBlock && self.outbox.len() < crate::ice::INBOX => {
 				self.outbox.push_back((data.to_vec(), dst))
 			}
@@ -353,86 +306,54 @@ impl Agent {
 	}
 
 	fn receive(&mut self, data: &[u8], src: SocketAddr) {
-		if self.stun_reply(data, src) {
-			return;
-		}
-
 		let local = pick_local(&self.locals, src);
-		// Anything can arrive on a socket a server-reflexive candidate exposes, so a
-		// datagram that is not STUN, DTLS, or RTP is noise, not a failure.
+		// Anything can arrive on a public socket, so a datagram that is not STUN,
+		// DTLS, or RTP is noise, not a failure.
 		let Ok(receive) = Receive::new(Protocol::Udp, src, local, data) else {
 			tracing::debug!(%src, len = data.len(), "dropped unrecognized datagram");
 			return;
 		};
+		// Before str0m sees it, since the answer may be what connects ICE.
+		if self.inbound.route.is_some()
+			&& let Phase::Establishing { checks, answered, .. } = &mut self.phase
+			&& answered.len() < CHECKS
+			&& !answered.contains(&src)
+			&& answers_check(checks, data, src)
+		{
+			answered.push(src);
+		}
 		let result = self
-			.change()
+			.rtc_mut()
 			.handle_input(Input::Receive(Instant::now().into_std(), receive));
 		if let Err(err) = result {
 			self.fail(Error::rtc(err));
 		}
 	}
+}
 
-	/// Consume a reply to one of our STUN queries, returning false for anything else.
-	fn stun_reply(&mut self, data: &[u8], src: SocketAddr) -> bool {
-		if self.stun.is_empty() {
-			return false;
-		}
-		let Ok(reply) = Message::from_bytes(data) else {
-			return false;
-		};
-		let id = reply.transaction_id();
-		let Some(index) = self.stun.iter().position(|q| q.id == id && q.server == src) else {
-			return false;
-		};
-		let query = self.stun.swap_remove(index);
+/// Whether a datagram from `src` answers a check this agent sent to `src`, which proves
+/// the peer is there: only `src` saw that check's transaction ID. That is the check RFC 8445
+/// §7.2.5.2.1 asks for and str0m skips, pairing a response with its check by transaction
+/// ID alone, so a peer could answer its own check from a spoofed source.
+///
+/// Once ICE connects, the agent confirms every claimed address that answered, never the
+/// source of whatever datagram connected it: once any pair is valid, str0m may report the
+/// connection while handling another datagram, such as a spoofed request after one switched
+/// its role to controlling.
+fn answers_check(checks: &VecDeque<(TransId, SocketAddr)>, data: &[u8], src: SocketAddr) -> bool {
+	let Some(message) = stun(data) else {
+		return false;
+	};
+	let id = message.trans_id();
+	message.is_successful_binding_response() && checks.iter().any(|check| *check == (id, src))
+}
 
-		if !reply.has_method(BINDING) || !reply.has_class(MessageClass::Success) {
-			tracing::debug!(server = %query.server, "STUN server refused the binding request");
-			return true;
-		}
-		let Ok(mapped) = reply.attribute::<XorMappedAddress>() else {
-			tracing::debug!(server = %query.server, "STUN reply carries no mapped address");
-			return true;
-		};
-
-		let mapped = canonical(mapped.addr(id));
-		match Candidate::server_reflexive(mapped, query.base, "udp") {
-			// None: redundant with a candidate the agent already has, as when there is no NAT.
-			Ok(candidate) => {
-				let added = self.change().add_local_candidate(candidate).cloned();
-				if let Some(candidate) = added {
-					self.events.push_back(Event::Candidate(candidate));
-				}
-			}
-			Err(err) => tracing::debug!(%err, %mapped, "unusable server-reflexive address"),
-		}
-		true
+/// Parse a datagram as STUN, which alone starts with 0..=3 (RFC 7983).
+fn stun(data: &[u8]) -> Option<StunMessage<'_>> {
+	if data.first().is_none_or(|first| *first > 3) {
+		return None;
 	}
-
-	/// Send each STUN request that is due, dropping those out of attempts.
-	fn retransmit(&mut self, now: Instant) {
-		let mut due = Vec::new();
-		self.stun.retain_mut(|query| {
-			if query.deadline > now {
-				return true;
-			}
-			if query.sends == STUN_SENDS {
-				tracing::debug!(server = %query.server, "STUN server did not answer");
-				return false;
-			}
-			query.sends += 1;
-			query.deadline = now.saturating_add(match query.sends {
-				STUN_SENDS => STUN_RTO * STUN_LAST_WAIT,
-				_ => query.rto,
-			});
-			query.rto *= 2;
-			due.push((query.request.clone(), query.server));
-			true
-		});
-		for (request, server) in due {
-			self.send(&request, server);
-		}
-	}
+	StunMessage::parse(data).ok()
 }
 
 /// Mutable access to an [`Agent`]'s connection, which drains it when dropped.
@@ -506,7 +427,11 @@ mod tests {
 		let socket = Arc::new(UdpSocket::from_std(socket).unwrap());
 		let local = socket.local_addr().unwrap();
 		let socket = Socket::new(socket.clone(), vec![local], crate::ice::reader(socket)).unwrap();
-		Agent::new(Rtc::builder().build(Instant::now().into_std()), socket).unwrap()
+		Agent::new(
+			crate::session::rtc_config().unwrap().build(Instant::now().into_std()),
+			socket,
+		)
+		.unwrap()
 	}
 
 	#[tokio::test]
@@ -519,38 +444,22 @@ mod tests {
 		assert_eq!(agent.outbox.len(), crate::ice::INBOX);
 	}
 
-	#[tokio::test]
-	async fn awaiting_answer_holds_the_deadline() {
-		let mut agent = unpolled().awaiting_answer();
-		assert!(matches!(agent.phase, Phase::Held));
-		// The agent's own changes, such as timeouts and STUN, leave it held.
-		drop(agent.change());
-		assert!(matches!(agent.phase, Phase::Held));
-		drop(agent.rtc_mut());
-		assert!(matches!(agent.phase, Phase::Establishing { .. }));
-	}
-
-	#[tokio::test]
-	async fn gathering_holds_the_deadline() {
-		let mut agent = unpolled().with_stun(&["127.0.0.1:3478".parse().unwrap()]);
-		// An unreachable STUN server retransmits for longer than the deadline, so the
-		// deadline waits for gathering to end.
-		assert_eq!(agent.establish(), None);
-		agent.stun.clear();
-		assert!(matches!(agent.next().await, Ok(Event::Gathered)));
-		let gathered = agent.gathered.unwrap();
-		assert_eq!(agent.establish(), Some(gathered.saturating_add(ESTABLISH_TIMEOUT)));
-	}
-
 	/// A peer that answers but never sends: DTLS gives up on its handshake before ICE
 	/// connects, which reports as ICE never connecting rather than a DTLS failure.
 	#[tokio::test(start_paused = true)]
 	async fn a_handshake_giving_up_before_ice_connects_is_a_timeout() {
-		let mut offerer = Rtc::builder().build(Instant::now().into_std());
+		let mut offerer = crate::session::rtc_config().unwrap().build(Instant::now().into_std());
 		let mut api = offerer.sdp_api();
-		api.add_channel("test".into());
+		api.add_media(
+			str0m::media::MediaKind::Audio,
+			str0m::media::Direction::SendOnly,
+			None,
+			None,
+			None,
+		);
 		let (offer, pending) = api.apply().unwrap();
-		let answer = Rtc::builder()
+		let answer = crate::session::rtc_config()
+			.unwrap()
 			.build(Instant::now().into_std())
 			.sdp_api()
 			.accept_offer(offer)
@@ -560,12 +469,15 @@ mod tests {
 		let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
 		let local = socket.local_addr().unwrap();
 		let socket = Socket::new(socket.clone(), vec![local], crate::ice::reader(socket)).unwrap();
-		// A STUN server that never answers holds the deadline past the handshake's
-		// retransmissions, so DTLS deterministically gives up first.
-		let stun = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-		let mut agent = Agent::new(offerer, socket)
-			.unwrap()
-			.with_stun(&[stun.local_addr().unwrap()]);
+		let mut agent = Agent::new(offerer, socket).unwrap();
+		// Hold the deadline past the handshake's retransmissions, so DTLS
+		// deterministically gives up first.
+		let held = Instant::now().saturating_add(Duration::from_secs(3600));
+		agent.phase = Phase::Establishing {
+			started: held,
+			checks: VecDeque::new(),
+			answered: Vec::new(),
+		};
 
 		let err = loop {
 			match agent.next().await {
@@ -574,10 +486,131 @@ mod tests {
 			}
 		};
 		assert!(matches!(err, Error::Timeout), "{err:?}");
-		assert_eq!(agent.establish(), None, "the deadline had yet to start");
+		assert!(Instant::now() < held, "the deadline fired, not DTLS");
 		// The reason sticks: driving the agent again reports it again.
 		let again = agent.next().await;
 		assert!(matches!(again, Err(Error::Timeout)), "{again:?}");
+	}
+
+	/// Facing an ICE-lite offerer, which never sends a check, the answerer checks the
+	/// offer's candidate on its own.
+	#[tokio::test]
+	async fn an_ice_lite_offerers_candidate_is_checked_unprompted() {
+		let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+		let now = Instant::now().into_std();
+		let mut offerer = crate::session::rtc_config().unwrap().set_ice_lite(true).build(now);
+		offerer.add_local_candidate(str0m::Candidate::host(peer.local_addr().unwrap(), "udp").unwrap());
+		let mut api = offerer.sdp_api();
+		api.add_media(
+			str0m::media::MediaKind::Audio,
+			str0m::media::Direction::SendOnly,
+			None,
+			None,
+			None,
+		);
+		let (offer, _) = api.apply().unwrap();
+		// An offerer taking the DTLS client role, with no SSRCs declared, leaves the
+		// answerer no DTLS or media timer that would start ICE's clock instead.
+		let offer: String = offer
+			.to_sdp_string()
+			.replace("a=setup:actpass", "a=setup:active")
+			.split_inclusive("\r\n")
+			.filter(|line| !line.starts_with("a=ssrc"))
+			.collect();
+		let offer = str0m::change::SdpOffer::from_sdp_string(&offer).unwrap();
+
+		let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+		let local = socket.local_addr().unwrap();
+		let mut answerer = crate::session::rtc_config().unwrap().build(now);
+		answerer.add_local_candidate(str0m::Candidate::host(local, "udp").unwrap());
+		answerer.sdp_api().accept_offer(offer).unwrap();
+		let socket = Socket::new(socket.clone(), vec![local], crate::ice::reader(socket)).unwrap();
+		let mut agent = Agent::new(answerer, socket).unwrap();
+
+		let mut buf = [0u8; 1500];
+		tokio::select! {
+			received = peer.recv_from(&mut buf) => {
+				let (len, src) = received.unwrap();
+				assert_eq!(src, local);
+				// A STUN Binding request.
+				assert!(len >= 20 && buf[..2] == [0x00, 0x01], "{:?}", &buf[..len]);
+			}
+			err = async { loop { if let Err(err) = agent.next().await { break err } } } => {
+				panic!("the agent ended without a check: {err:?}");
+			}
+		}
+	}
+
+	/// A close sends every frame written before it: str0m packetizes a frame only on a
+	/// timeout, so closing at once would drop what it still queued.
+	#[tokio::test]
+	async fn a_close_sends_what_was_written_first() {
+		use str0m::media::{Direction, Frequency, MediaKind, MediaTime};
+		const FRAMES: u64 = 50;
+
+		let now = Instant::now().into_std();
+		let mut sender = crate::session::rtc_config().unwrap().build(now);
+		let mut receiver = crate::session::rtc_config().unwrap().build(now);
+		// Candidates go into the SDP, so bind before the exchange.
+		let sender_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+		let receiver_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+		for (rtc, socket) in [(&mut sender, &sender_socket), (&mut receiver, &receiver_socket)] {
+			let local = socket.local_addr().unwrap();
+			rtc.add_local_candidate(str0m::Candidate::host(local, "udp").unwrap());
+		}
+		let mut api = sender.sdp_api();
+		let mid = api.add_media(MediaKind::Audio, Direction::SendOnly, None, None, None);
+		let (offer, pending) = api.apply().unwrap();
+		let answer = receiver.sdp_api().accept_offer(offer).unwrap();
+		sender.sdp_api().accept_answer(pending, answer).unwrap();
+		let agent = |rtc, socket: Arc<UdpSocket>| {
+			let local = socket.local_addr().unwrap();
+			Agent::new(
+				rtc,
+				Socket::new(socket.clone(), vec![local], crate::ice::reader(socket)).unwrap(),
+			)
+			.unwrap()
+		};
+		let mut sender = agent(sender, sender_socket);
+		let mut receiver = agent(receiver, receiver_socket);
+
+		while !(sender.rtc().is_connected() && receiver.rtc().is_connected()) {
+			tokio::select! {
+				event = sender.next() => { event.unwrap(); }
+				event = receiver.next() => { event.unwrap(); }
+			}
+		}
+
+		// Every frame written back to back, each through its own guard, which drains it as
+		// str0m requires before the next write, then the close.
+		let pt = (sender.rtc_mut().writer(mid).unwrap().payload_params().next().unwrap()).pt();
+		for n in 0..FRAMES {
+			let time = MediaTime::new(960 * n, Frequency::FORTY_EIGHT_KHZ);
+			(sender.rtc_mut().writer(mid).unwrap())
+				.write(pt, now, time, vec![0xfc, n as u8])
+				.unwrap();
+		}
+		sender.close();
+
+		let mut received = 0;
+		let mut sending = true;
+		loop {
+			tokio::select! {
+				event = sender.next(), if sending => match event {
+					Ok(_) => {}
+					Err(Error::Closed) => sending = false,
+					Err(err) => panic!("the sender failed: {err:?}"),
+				},
+				event = receiver.next() => match event {
+					Ok(Event::MediaData(_)) => received += 1,
+					Ok(_) => {}
+					// The sender's close_notify ends the receiver.
+					Err(Error::Closed) => break,
+					Err(err) => panic!("the receiver failed: {err:?}"),
+				},
+			}
+		}
+		assert_eq!(received, FRAMES, "frames written before the close were lost");
 	}
 
 	#[test]

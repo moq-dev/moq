@@ -63,9 +63,10 @@ window.runRecovery = async (packets) => {
 	const route = origin.route(name);
 	// Every group is written before the decoder reads from the first, so none may go stale.
 	const track = route.broadcast.createTrack("video", { timescale: Moq.Time.Timescale.MICRO, maxAge: null });
+	if (!track) throw new Error("the track already exists");
 	let group: Moq.Group.Producer | undefined;
 	for (const packet of packets) {
-		if (group?.sequence !== BigInt(packet.group)) {
+		if (group?.start !== BigInt(packet.group)) {
 			group?.finish();
 			group = track.createGroup(BigInt(packet.group));
 		}
@@ -91,7 +92,13 @@ window.runRecovery = async (packets) => {
 		catalogFormat: "manual",
 		catalog: { video: { renditions: { video: config } } },
 	});
-	const source = new Source({ broadcast, supported: async () => true });
+	const source = new Source({ broadcast });
+	// A rejected codec probe selects no rendition, so nothing else would end the run.
+	source.out.error.subscribe((error) => {
+		if (!error) return;
+		failed = error;
+		ended();
+	});
 	const sync = new Sync({ delay: Duration.millis(0), lookahead: Duration.millis(10_000) });
 	const decoder = new Decoder({ source, sync });
 	try {

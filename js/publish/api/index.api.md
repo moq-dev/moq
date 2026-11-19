@@ -70,7 +70,7 @@ export namespace Audio {
 		channelCount: number;
 		sampleRate: number;
 	}
-	export type Kind = "voice" | "music" | "auto";
+	export type Kind = "voice" | "music";
 	export type Opus = "opus" | Audio.OpusConfig;
 	export type OpusConfig = {
 		bitrate?: number;
@@ -83,13 +83,13 @@ export namespace Audio {
 	export type Rendition = import("@moq/publish").Rendition<Hang.Catalog.AudioConfig>;
 	export interface SampleSource {
 		channelCount: number;
-		kind: Audio.Kind;
+		kind?: Audio.Kind;
 		sampleRate: number;
 		samples: ReadableStream<AudioData>;
 	}
 	export type Source = Audio.StreamTrack | Audio.SourceConfig | Audio.SampleSource;
 	export interface SourceConfig {
-		kind: Audio.Kind;
+		kind?: Audio.Kind;
 		track: Audio.StreamTrack;
 	}
 	export type Stats = Required<Pick<Hang.Stats.RenditionInput, "frames" | "bytes">> & {
@@ -131,7 +131,7 @@ export type BroadcastInput = {
 		height: number;
 		width: number;
 	} | undefined>;
-	echo: Signals.Getter<Net.Path.Relative | undefined>;
+	echoPath: Signals.Getter<Net.Path.Relative | undefined>;
 	enabled: Signals.Getter<boolean>;
 	flip: Signals.Getter<boolean>;
 	maxAge: Signals.Getter<Clock.Duration | null | undefined>;
@@ -158,6 +158,11 @@ export interface Fanout<T> {
 export * as Hang from "@moq/hang";
 
 export type Kind = "video" | "audio" | "text";
+
+export namespace MediaClock {
+	export function capture(at: Clock.Instant): Clock.Duration;
+	export function now(): Clock.Duration;
+}
 
 export * as Net from "@moq/net";
 

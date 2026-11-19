@@ -18,10 +18,6 @@ pub enum KeyOperation {
 	Sign,
 	/// Verify a signature.
 	Verify,
-	/// Decrypt content.
-	Decrypt,
-	/// Encrypt content.
-	Encrypt,
 }
 
 /// <https://datatracker.ietf.org/doc/html/rfc7518#section-6>
@@ -152,20 +148,42 @@ pub struct RsaPrivateKey {
 	pub oth: Option<Vec<RsaAdditionalPrime>>,
 }
 
+const RSA_PRIVATE_FIELDS: [&str; 6] = ["d", "p", "q", "dp", "dq", "qi"];
+
 // Flattening Option<RsaPrivateKey> otherwise swallows missing-field errors and turns
 // malformed private keys into public keys. Decide whether private material exists first.
 fn deserialize_rsa_private<'de, D>(deserializer: D) -> Result<Option<RsaPrivateKey>, D::Error>
 where
 	D: Deserializer<'de>,
 {
-	let fields = serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
+	// The leftover members, refusing a repeated private one as every other field does, so its
+	// value never depends on which copy a parser keeps. Unread members may repeat.
+	struct Fields;
+
+	impl<'de> serde::de::Visitor<'de> for Fields {
+		type Value = serde_json::Map<String, serde_json::Value>;
+
+		fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+			f.write_str("a JWK object")
+		}
+
+		fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+			let mut fields = serde_json::Map::new();
+			while let Some((key, value)) = map.next_entry::<String, serde_json::Value>()? {
+				if RSA_PRIVATE_FIELDS.contains(&key.as_str()) && fields.contains_key(&key) {
+					return Err(serde::de::Error::custom(format!("duplicate field `{key}`")));
+				}
+				fields.insert(key, value);
+			}
+			Ok(fields)
+		}
+	}
+
+	let fields = deserializer.deserialize_map(Fields)?;
 	if fields.contains_key("oth") {
 		return Err(serde::de::Error::custom("multi-prime RSA (oth) is unsupported"));
 	}
-	if ["d", "p", "q", "dp", "dq", "qi"]
-		.iter()
-		.any(|field| fields.contains_key(*field))
-	{
+	if RSA_PRIVATE_FIELDS.iter().any(|field| fields.contains_key(*field)) {
 		serde_json::from_value(serde_json::Value::Object(fields))
 			.map(Some)
 			.map_err(serde::de::Error::custom)
@@ -234,11 +252,19 @@ pub struct Jwk {
 	pub material: KeyMaterial,
 
 	/// The key ID, useful for rotating keys.
-	#[serde(skip_serializing_if = "Option::is_none")]
+	#[serde(
+		default,
+		skip_serializing_if = "Option::is_none",
+		deserialize_with = "crate::wire::present"
+	)]
 	pub kid: Option<crate::KeyId>,
 
 	/// Optional authorization limits for tokens signed by this key.
-	#[serde(default, skip_serializing_if = "Option::is_none")]
+	#[serde(
+		default,
+		skip_serializing_if = "Option::is_none",
+		deserialize_with = "crate::wire::present"
+	)]
 	pub scope: Option<crate::Scope>,
 }
 
@@ -276,11 +302,7 @@ impl Jwk {
 			scope.validate()?;
 		}
 
-		if let KeyMaterial::OCT { secret } = &self.material
-			&& secret.len() < MIN_OCT_SECRET_BYTES
-		{
-			return Err(KeyError::SecretTooShort(MIN_OCT_SECRET_BYTES).into());
-		}
+		self.validate_material()?;
 
 		if let KeyMaterial::RSA {
 			private: Some(private), ..
@@ -295,6 +317,51 @@ impl Jwk {
 			decode: Default::default(),
 			encode: Default::default(),
 		})
+	}
+}
+
+impl Jwk {
+	/// Refuse a key whose algorithm, curve, or material can never sign or verify, so a bad key fails
+	/// at parse rather than at first use.
+	fn validate_material(&self) -> crate::Result<()> {
+		use Algorithm::*;
+		match &self.material {
+			KeyMaterial::OCT { secret } => {
+				if !matches!(self.algorithm, HS256 | HS384 | HS512) {
+					return Err(KeyError::InvalidAlgorithm.into());
+				}
+				if secret.len() < MIN_OCT_SECRET_BYTES {
+					return Err(KeyError::SecretTooShort(MIN_OCT_SECRET_BYTES).into());
+				}
+			}
+			KeyMaterial::RSA { .. } => {
+				if !matches!(self.algorithm, RS256 | RS384 | RS512 | PS256 | PS384 | PS512) {
+					return Err(KeyError::InvalidAlgorithm.into());
+				}
+			}
+			KeyMaterial::EC { curve, x, y, .. } => {
+				let (name, alg, len) = match curve {
+					EllipticCurve::P256 => ("P-256", ES256, 32),
+					EllipticCurve::P384 => ("P-384", ES384, 48),
+					_ => return Err(KeyError::InvalidCurve("EC").into()),
+				};
+				if self.algorithm != alg {
+					return Err(KeyError::InvalidAlgorithmForCurve(name).into());
+				}
+				if x.len() != len || y.len() != len {
+					return Err(KeyError::InvalidCoordinateLength(name).into());
+				}
+			}
+			KeyMaterial::OKP { curve, .. } => {
+				if *curve != EllipticCurve::Ed25519 {
+					return Err(KeyError::InvalidCurve("OKP").into());
+				}
+				if self.algorithm != EdDSA {
+					return Err(KeyError::InvalidAlgorithmForCurve("Ed25519").into());
+				}
+			}
+		}
+		Ok(())
 	}
 }
 
@@ -419,7 +486,7 @@ impl Key {
 	///
 	/// Fails for symmetric (`oct`) keys, which have no public half, and for a key that cannot
 	/// verify in the first place.
-	pub fn to_public(&self) -> crate::Result<Self> {
+	pub fn public(&self) -> crate::Result<Self> {
 		if !self.operations.contains(&KeyOperation::Verify) {
 			return Err(KeyError::VerifyUnsupported.into());
 		}
@@ -479,57 +546,16 @@ impl Key {
 			return Ok(key);
 		}
 
+		// `Jwk::import` already matched the algorithm, curve, and coordinates to the material.
 		let decoding_key = match self.material {
-			KeyMaterial::OCT { ref secret } => match self.algorithm {
-				Algorithm::HS256 | Algorithm::HS384 | Algorithm::HS512 => DecodingKey::from_secret(secret),
-				_ => return Err(KeyError::InvalidAlgorithm.into()),
-			},
-			KeyMaterial::EC {
-				ref curve,
-				ref x,
-				ref y,
-				..
-			} => match curve {
-				EllipticCurve::P256 => {
-					if self.algorithm != Algorithm::ES256 {
-						return Err(KeyError::InvalidAlgorithmForCurve("P-256").into());
-					}
-					if x.len() != 32 || y.len() != 32 {
-						return Err(KeyError::InvalidCoordinateLength("P-256").into());
-					}
-
-					DecodingKey::from_ec_components(
-						base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(x).as_ref(),
-						base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(y).as_ref(),
-					)?
-				}
-				EllipticCurve::P384 => {
-					if self.algorithm != Algorithm::ES384 {
-						return Err(KeyError::InvalidAlgorithmForCurve("P-384").into());
-					}
-					if x.len() != 48 || y.len() != 48 {
-						return Err(KeyError::InvalidCoordinateLength("P-384").into());
-					}
-
-					DecodingKey::from_ec_components(
-						base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(x).as_ref(),
-						base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(y).as_ref(),
-					)?
-				}
-				_ => return Err(KeyError::InvalidCurve("EC").into()),
-			},
-			KeyMaterial::OKP { ref curve, ref x, .. } => match curve {
-				EllipticCurve::Ed25519 => {
-					if self.algorithm != Algorithm::EdDSA {
-						return Err(KeyError::InvalidAlgorithmForCurve("Ed25519").into());
-					}
-
-					DecodingKey::from_ed_components(
-						base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(x).as_ref(),
-					)?
-				}
-				_ => return Err(KeyError::InvalidCurve("OKP").into()),
-			},
+			KeyMaterial::OCT { ref secret } => DecodingKey::from_secret(secret),
+			KeyMaterial::EC { ref x, ref y, .. } => DecodingKey::from_ec_components(
+				base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(x).as_ref(),
+				base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(y).as_ref(),
+			)?,
+			KeyMaterial::OKP { ref x, .. } => {
+				DecodingKey::from_ed_components(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(x).as_ref())?
+			}
 			KeyMaterial::RSA { ref public, .. } => {
 				DecodingKey::from_rsa_raw_components(public.n.as_ref(), public.e.as_ref())
 			}
@@ -544,10 +570,7 @@ impl Key {
 		}
 
 		let encoding_key = match self.material {
-			KeyMaterial::OCT { ref secret } => match self.algorithm {
-				Algorithm::HS256 | Algorithm::HS384 | Algorithm::HS512 => EncodingKey::from_secret(secret),
-				_ => return Err(KeyError::InvalidAlgorithm.into()),
-			},
+			KeyMaterial::OCT { ref secret } => EncodingKey::from_secret(secret),
 			KeyMaterial::EC {
 				ref curve,
 				ref x,
@@ -567,15 +590,8 @@ impl Key {
 					EcdsaKeyPair::from_scalar_and_public_key(algorithm, d, &point).map_err(crate::Error::crypto)?;
 				EncodingKey::from_ec_der(pair.to_pkcs8().as_ref())
 			}
-			KeyMaterial::OKP {
-				ref curve,
-				ref d,
-				ref x,
-			} => {
+			KeyMaterial::OKP { ref d, ref x, .. } => {
 				let d = d.as_ref().ok_or(KeyError::MissingPrivateKey)?;
-				if *curve != EllipticCurve::Ed25519 {
-					return Err(KeyError::InvalidCurve("OKP").into());
-				}
 
 				let pair = Ed25519KeyPair::from_seed_and_public_key(d, x).map_err(crate::Error::crypto)?;
 				EncodingKey::from_ed_der(pair.to_pkcs8().as_ref())
@@ -721,33 +737,28 @@ fn deserialize_base64url<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
 where
 	D: Deserializer<'de>,
 {
-	let s = String::deserialize(deserializer)?;
-
-	// Try to decode as unpadded base64url first (preferred format)
-	base64::engine::general_purpose::URL_SAFE_NO_PAD
-		.decode(&s)
-		.or_else(|_| {
-			// Fall back to padded base64url for backwards compatibility
-			base64::engine::general_purpose::URL_SAFE.decode(&s)
-		})
-		.map_err(serde::de::Error::custom)
+	decode_base64url(&String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
 }
 
 fn deserialize_base64url_optional<'de, D>(deserializer: D) -> Result<Option<Vec<u8>>, D::Error>
 where
 	D: Deserializer<'de>,
 {
-	let s: Option<String> = Option::deserialize(deserializer)?;
-	match s {
-		Some(s) => {
-			let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
-				.decode(&s)
-				.or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(&s))
-				.map_err(serde::de::Error::custom)?;
-			Ok(Some(decoded))
-		}
-		None => Ok(None),
+	// A present field: `null` is refused, as `@moq/auth` does, rather than read as absent.
+	let s = String::deserialize(deserializer)?;
+	decode_base64url(&s).map(Some).map_err(serde::de::Error::custom)
+}
+
+/// A key field: unpadded base64url, or padded for backwards compatibility. Empty is refused,
+/// as `@moq/auth` does, since no key material is empty.
+fn decode_base64url(s: &str) -> Result<Vec<u8>, String> {
+	if s.is_empty() {
+		return Err("empty key field".to_string());
 	}
+	base64::engine::general_purpose::URL_SAFE_NO_PAD
+		.decode(s)
+		.or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(s))
+		.map_err(|err| err.to_string())
 }
 
 #[cfg(test)]
@@ -773,14 +784,13 @@ mod tests {
 
 	fn create_test_claims() -> Claims {
 		Claims {
-			publish_rate: None,
-			subscribe_rate: None,
 			root: "test-path".to_string(),
-			publish: patterns(&["test-pub/**"]),
-			subscribe: patterns(&["test-sub/**"]),
+			publish: patterns(&["test-pub/**"]).into(),
+			subscribe: patterns(&["test-sub/**"]).into(),
 			expires: Some(kio::clock::wall() + Duration::from_secs(3600)),
 			issued: Some(kio::clock::wall()),
 			not_before: None,
+			id: None,
 		}
 	}
 
@@ -887,7 +897,7 @@ mod tests {
 		let key = Key::from_str(json).unwrap();
 		assert_eq!(key.operations, sign_verify());
 
-		let public = key.to_public().unwrap();
+		let public = key.public().unwrap();
 		assert_eq!(public.operations, [KeyOperation::Verify].into());
 	}
 
@@ -936,12 +946,12 @@ mod tests {
 			.unwrap();
 		let allowed = Claims {
 			root: "test-path".into(),
-			publish: patterns(&["allowed/room/**"]),
+			publish: patterns(&["allowed/room/**"]).into(),
 			..Default::default()
 		};
 		let denied = Claims {
 			root: "test-path".into(),
-			publish: patterns(&["other/**"]),
+			publish: patterns(&["other/**"]).into(),
 			..Default::default()
 		};
 
@@ -959,7 +969,7 @@ mod tests {
 		let key = create_test_key();
 		let claims = |root: &str| Claims {
 			root: root.into(),
-			publish: patterns(&["**"]),
+			publish: patterns(&["**"]).into(),
 			..Default::default()
 		};
 		let scope = |root: &str| crate::Scope {
@@ -992,7 +1002,7 @@ mod tests {
 	fn test_key_derived_material_never_stale() {
 		let claims = Claims {
 			root: "test-path".into(),
-			publish: patterns(&["test-pub/**"]),
+			publish: patterns(&["test-pub/**"]).into(),
 			..Default::default()
 		};
 
@@ -1054,14 +1064,13 @@ mod tests {
 	fn test_key_sign_invalid_claims() {
 		let key = create_test_key();
 		let invalid_claims = Claims {
-			publish_rate: None,
-			subscribe_rate: None,
 			root: "test-path".to_string(),
-			publish: patterns(&[]),
-			subscribe: patterns(&[]),
+			publish: patterns(&[]).into(),
+			subscribe: patterns(&[]).into(),
 			expires: None,
 			issued: None,
 			not_before: None,
+			id: None,
 		};
 
 		let result = key.sign(&invalid_claims);
@@ -1234,14 +1243,13 @@ mod tests {
 	fn test_key_verify_token_without_exp() {
 		let key = create_test_key();
 		let claims = Claims {
-			publish_rate: None,
-			subscribe_rate: None,
 			root: "test-path".to_string(),
-			publish: patterns(&["**"]),
-			subscribe: patterns(&["**"]),
+			publish: patterns(&["**"]).into(),
+			subscribe: patterns(&["**"]).into(),
 			expires: None,
 			issued: None,
 			not_before: None,
+			id: None,
 		};
 		let token = key.sign(&claims).unwrap();
 
@@ -1256,14 +1264,13 @@ mod tests {
 	fn test_key_round_trip() {
 		let key = create_test_key();
 		let original_claims = Claims {
-			publish_rate: None,
-			subscribe_rate: None,
 			root: "test-path".to_string(),
-			publish: patterns(&["test-pub/**"]),
-			subscribe: patterns(&["test-sub/**"]),
+			publish: patterns(&["test-pub/**"]).into(),
+			subscribe: patterns(&["test-sub/**"]).into(),
 			expires: Some(kio::clock::wall() + Duration::from_secs(3600)),
 			issued: Some(kio::clock::wall()),
 			not_before: None,
+			id: None,
 		};
 
 		let token = key.sign(&original_claims).unwrap();
@@ -1352,7 +1359,7 @@ mod tests {
 		let key = Key::generate(Algorithm::HS256, Some(crate::KeyId::decode("test-id").unwrap()))
 			.expect("HMAC key generation failed");
 
-		assert!(key.to_public().is_err());
+		assert!(key.public().is_err());
 	}
 
 	#[test]
@@ -1361,7 +1368,7 @@ mod tests {
 		assert!(key.is_ok());
 		let key = key.unwrap();
 
-		let public_key = key.to_public().unwrap();
+		let public_key = key.public().unwrap();
 		assert_eq!(key.kid, public_key.kid);
 		assert_eq!(public_key.operations, [KeyOperation::Verify].into());
 		assert!(public_key.encode.get().is_none());
@@ -1388,7 +1395,7 @@ mod tests {
 		assert!(key.is_ok());
 		let key = key.unwrap();
 
-		let public_key = key.to_public().unwrap();
+		let public_key = key.public().unwrap();
 		assert_eq!(key.kid, public_key.kid);
 		assert_eq!(public_key.operations, [KeyOperation::Verify].into());
 		assert!(public_key.encode.get().is_none());
@@ -1422,7 +1429,7 @@ mod tests {
 		assert!(key.is_ok());
 		let key = key.unwrap();
 
-		let public_key = key.to_public().unwrap();
+		let public_key = key.public().unwrap();
 		assert_eq!(key.kid, public_key.kid);
 		assert_eq!(public_key.operations, [KeyOperation::Verify].into());
 		assert!(public_key.encode.get().is_none());
@@ -1496,6 +1503,31 @@ mod tests {
 	}
 
 	#[test]
+	fn test_import_refuses_mismatched_algorithm() {
+		let mismatched = |alg: Algorithm, other: Algorithm| {
+			let mut jwk = Key::generate(alg, None).unwrap().export();
+			jwk.algorithm = other;
+			jwk.import().is_err()
+		};
+		// Each key type with an algorithm from another type, and each curve with the other's.
+		assert!(mismatched(Algorithm::HS256, Algorithm::ES256));
+		assert!(mismatched(Algorithm::RS256, Algorithm::HS256));
+		assert!(mismatched(Algorithm::ES256, Algorithm::ES384));
+		assert!(mismatched(Algorithm::ES384, Algorithm::RS384));
+		assert!(mismatched(Algorithm::EdDSA, Algorithm::ES256));
+		// Within its own family, a key may switch algorithm.
+		assert!(!mismatched(Algorithm::RS256, Algorithm::PS512));
+		assert!(!mismatched(Algorithm::HS256, Algorithm::HS512));
+
+		// The same check runs when parsing, alone or in a set.
+		let mut jwk = Key::generate(Algorithm::HS256, None).unwrap().export();
+		jwk.algorithm = Algorithm::ES256;
+		let json = serde_json::to_string(&jwk).unwrap();
+		assert!(json.parse::<Key>().is_err());
+		assert!(serde_json::from_str::<crate::KeySet>(&format!("{{\"keys\":[{json}]}}")).is_err());
+	}
+
+	#[test]
 	fn test_hmac_algorithms() {
 		let key_256 = Key::generate(Algorithm::HS256, Some(crate::KeyId::decode("test-id").unwrap()));
 		let key_384 = Key::generate(Algorithm::HS384, Some(crate::KeyId::decode("test-id").unwrap()));
@@ -1525,6 +1557,18 @@ mod tests {
 			incomplete["key_ops"] = serde_json::json!(["verify"]);
 			let error = serde_json::from_value::<Key>(incomplete).expect_err(field);
 			assert!(error.to_string().contains(field), "{field}: {error}");
+		}
+	}
+
+	#[test]
+	fn private_rsa_refuses_a_repeated_member() {
+		let key = Key::generate(Algorithm::RS256, None).unwrap();
+		let json = serde_json::to_string(&key).unwrap();
+		for field in RSA_PRIVATE_FIELDS {
+			// The flattened private fields are read apart from the rest, so check each one.
+			let repeated = format!("{{\"{field}\":\"AQ\",{}", &json[1..]);
+			let error = Key::from_str(&repeated).expect_err(field);
+			assert!(error.to_string().contains("duplicate field"), "{field}: {error}");
 		}
 	}
 
@@ -1637,7 +1681,7 @@ mod tests {
 			"validation using private key"
 		);
 
-		let public_verified_claims = key.to_public().unwrap().verify(&token).unwrap();
+		let public_verified_claims = key.public().unwrap().verify(&token).unwrap();
 		assert_eq!(public_verified_claims.root, claims.root, "validation using public key");
 	}
 
@@ -1674,7 +1718,7 @@ mod tests {
 
 		// Different algorithm should fail verification
 		let private_result = key_ps256.verify(&token);
-		let public_result = key_ps256.to_public().unwrap().verify(&token);
+		let public_result = key_ps256.public().unwrap().verify(&token);
 		assert!(private_result.is_err());
 		assert!(public_result.is_err());
 	}
@@ -1688,7 +1732,7 @@ mod tests {
 		assert!(key.operations.contains(&KeyOperation::Sign));
 		assert!(key.operations.contains(&KeyOperation::Verify));
 
-		let public_key = key.to_public().unwrap();
+		let public_key = key.public().unwrap();
 		assert!(!public_key.operations.contains(&KeyOperation::Sign));
 		assert!(public_key.operations.contains(&KeyOperation::Verify));
 
@@ -1723,7 +1767,7 @@ mod tests {
 		assert!(key.operations.contains(&KeyOperation::Sign));
 		assert!(key.operations.contains(&KeyOperation::Verify));
 
-		let public_key = key.to_public().unwrap();
+		let public_key = key.public().unwrap();
 		assert!(!public_key.operations.contains(&KeyOperation::Sign));
 		assert!(public_key.operations.contains(&KeyOperation::Verify));
 
@@ -1821,22 +1865,22 @@ mod tests {
 
 		let inside = Claims {
 			root: "demo/room".into(),
-			publish: patterns(&["alice"]),
+			publish: patterns(&["alice"]).into(),
 			..Default::default()
 		};
 		let outside = Claims {
 			root: "demo".into(),
-			publish: patterns(&["lobby/**"]),
+			publish: patterns(&["lobby/**"]).into(),
 			..Default::default()
 		};
 		assert!(key.verify(&key.sign(&inside).unwrap()).is_ok());
 		assert!(matches!(key.sign(&outside), Err(crate::Error::ScopeExceeded)));
 
-		// Written back the way it was read, so the old CLI still loads it.
+		// Written back as the pattern it reads as.
 		assert!(
 			serde_json::to_string(&key)
 				.unwrap()
-				.contains(r#""scope":{"root":"demo","put":["room"]}"#)
+				.contains(r#""scope":{"root":"demo","publish":["room/**"]}"#)
 		);
 	}
 
@@ -1961,7 +2005,7 @@ mod tests {
 			std::fs::write(&path, "").unwrap();
 			std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
 
-			let public = Key::generate(Algorithm::ES256, None).unwrap().to_public().unwrap();
+			let public = Key::generate(Algorithm::ES256, None).unwrap().public().unwrap();
 			public.to_file(&path).unwrap();
 			assert_eq!(mode(&path), 0o644);
 			std::fs::remove_file(&path).ok();

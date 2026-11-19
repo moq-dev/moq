@@ -30,7 +30,7 @@ const RAMP: Duration = Duration::from_secs(4);
 
 /// The soonest a failed change is retried: the time the ramp takes to clear the
 /// hysteresis band, so a sender that keeps failing is asked at most this often.
-const RETRY: Duration = Duration::from_millis(RAMP.as_millis() as u64 / HYSTERESIS);
+pub const RETRY: Duration = Duration::from_millis(RAMP.as_millis() as u64 / HYSTERESIS);
 
 /// How a bandwidth estimate maps onto the bitrate a sender should produce at.
 ///

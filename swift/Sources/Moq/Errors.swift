@@ -5,21 +5,14 @@ extension MoqError {
     /// rather than actual failures. Useful for swallowing the expected error
     /// an `AsyncSequence` produces when its consuming task is cancelled.
     public var isShutdown: Bool {
-        switch self {
-        case .Cancelled, .Closed: return true
-        default: return false
-        }
+        moqErrorIsShutdown(err: self)
     }
 
-    /// True for HTTP 401/403, an expired token, a protocol Unauthorized or Expired session close,
+    /// True for HTTP 401/403, an expired or malformed token, a protocol Unauthorized or Expired session close,
     /// and a track revocation. Unlike a transport failure, retrying without new credentials won't help, so callers
     /// should surface these rather than reconnect.
     public var isAuth: Bool {
-        switch self {
-        case .Unauthorized, .Forbidden, .Expired: return true
-        case .Protocol(let details) where details.kind == .unauthorized || details.kind == .expired: return true
-        default: return false
-        }
+        moqErrorIsAuth(err: self)
     }
 
     /// The structured protocol failure, or nil if this is not one.

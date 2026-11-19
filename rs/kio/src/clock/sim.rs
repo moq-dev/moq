@@ -255,6 +255,11 @@ pub(crate) fn wall_in(id: u64) -> Wall {
 	expect_run(id).time.borrow().clock.wall()
 }
 
+/// How long run `id` has spent suspended.
+pub(crate) fn suspended_in(id: u64) -> Duration {
+	expect_run(id).time.borrow().clock.suspended()
+}
+
 /// Whether the calling thread is inside [`run`].
 pub fn is_running() -> bool {
 	CURRENT.with(|current| current.borrow().is_some())
@@ -404,6 +409,27 @@ pub async fn advance(duration: Duration) {
 /// Outside [`run`].
 pub fn step_wall(wall: Wall) {
 	expect_current().time.borrow_mut().clock.step_wall(wall);
+}
+
+/// Run the simulated wall clock `ppm` parts per million fast of the instant from now on, slow
+/// when negative, as a host's oscillator runs off the UTC its wall clock follows.
+///
+/// # Panics
+///
+/// Outside [`run`].
+pub fn set_drift(ppm: i32) {
+	expect_current().time.borrow_mut().clock.set_drift(ppm);
+}
+
+/// Suspend the simulated host for `duration`: the wall time moves and the instant does not, so no
+/// timer fires, as a monotonic clock stops while the host sleeps. A captured
+/// [`Clock`](crate::clock::Clock) reports it as [`suspended`](crate::clock::Clock::suspended).
+///
+/// # Panics
+///
+/// Outside [`run`].
+pub fn suspend(duration: Duration) {
+	expect_current().time.borrow_mut().clock.suspend(duration);
 }
 
 /// Complete once every other task is parked and no timer or queued deadline is

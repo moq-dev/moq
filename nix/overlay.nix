@@ -24,12 +24,12 @@ let
   '';
 
   # The native libraries an external linker must pass alongside libmoq.a.
-  # rs/moq-c/native-libs/ is the single source: rs/moq-c/CMakeLists.txt reads
-  # it for in-tree consumers, and moq-c below substitutes it into the moq-c.pc
+  # rs/libmoq/native-libs/ is the single source: rs/libmoq/CMakeLists.txt reads
+  # it for in-tree consumers, and libmoq below substitutes it into the moq.pc
   # and find_package templates directly rather than running CMake, so format
   # it the way each expects: `Libs.private` flags, and CMakeLists.txt's
   # MOQ_NATIVE_LIBS_QUOTED.
-  moqCNativeLibs =
+  libmoqNativeLibs =
     let
       platform =
         if final.stdenv.hostPlatform.isDarwin then
@@ -38,7 +38,7 @@ let
           "windows"
         else
           "linux";
-      lines = final.lib.splitString "\n" (builtins.readFile ../rs/moq-c/native-libs/${platform}.txt);
+      lines = final.lib.splitString "\n" (builtins.readFile ../rs/libmoq/native-libs/${platform}.txt);
       entries = builtins.filter (line: line != "" && !(final.lib.hasPrefix "#" line)) lines;
       framework = entry: "-framework ${final.lib.removePrefix "framework:" entry}";
       isFramework = final.lib.hasPrefix "framework:";
@@ -53,11 +53,11 @@ let
     };
 
   # Releases carry the OpenH264 software fallback, which is opt-in.
-  moqCCrate = crates.build {
-    root = "moq-c";
+  libmoqCrate = crates.build {
+    root = "libmoq";
     features = [ "openh264" ];
     # Cargo.toml's `[lib] name`, which crate2nix drops for a staticlib-only
-    # crate, so the archive would be libmoq_c.
+    # crate, so the archive would be liblibmoq.
     rootAttrs.libName = "moq";
   };
 
@@ -95,32 +95,32 @@ in
   };
 
   # Lay out the artifact tree the way release tarballs and downstream
-  # `find_package(moq-c)` consumers already expect.
-  moq-c = final.stdenv.mkDerivation {
-    pname = "moq-c";
-    inherit (moqCCrate) version;
+  # `find_package(moq)` consumers already expect.
+  libmoq = final.stdenv.mkDerivation {
+    pname = "libmoq";
+    inherit (libmoqCrate) version;
     dontUnpack = true;
     nativeBuildInputs = [ final.pkg-config ];
-    passthru = { inherit (moqCCrate) deps; };
+    passthru = { inherit (libmoqCrate) deps; };
 
     installPhase = ''
       runHook preInstall
 
-      mkdir -p $out/lib/pkgconfig $out/include $out/lib/cmake/moq-c
+      mkdir -p $out/lib/pkgconfig $out/include $out/lib/cmake/moq
 
       # buildRustCrate suffixes the archive with the crate's metadata hash, and
       # keeps build.rs's OUT_DIR, where it writes the header.
-      cp ${moqCCrate.lib}/lib/libmoq-*.a $out/lib/libmoq.a
-      cp ${moqCCrate.lib}/lib/moq-c.out/include/moq.h $out/include/
+      cp ${libmoqCrate.lib}/lib/libmoq-*.a $out/lib/libmoq.a
+      cp ${libmoqCrate.lib}/lib/libmoq.out/include/moq.h $out/include/
 
       # Rendered here rather than by build.rs: the template's paths are relative
       # to the .pc, which only holds once libmoq.a sits beside pkgconfig/.
-      pc=$out/lib/pkgconfig/moq-c.pc
-      substitute ${../rs/moq-c/moq-c.pc.in} "$pc" \
+      pc=$out/lib/pkgconfig/moq.pc
+      substitute ${../rs/libmoq/moq.pc.in} "$pc" \
         --subst-var-by VERSION "$version" \
-        --subst-var-by LIBS_PRIVATE ${final.lib.escapeShellArg moqCNativeLibs.pc}
+        --subst-var-by LIBS_PRIVATE ${final.lib.escapeShellArg libmoqNativeLibs.pc}
       if grep -nE '@[A-Z_]+@' "$pc"; then
-        echo "unsubstituted placeholder in moq-c.pc (see above)" >&2
+        echo "unsubstituted placeholder in moq.pc (see above)" >&2
         exit 1
       fi
       # Resolve the paths the way a consumer's pkg-config will, so a template
@@ -128,20 +128,19 @@ in
       for check in libdir:libmoq.a includedir:moq.h; do
         dir=$(pkg-config --variable="''${check%%:*}" "$pc")
         if [ ! -f "$dir/''${check#*:}" ]; then
-          echo "moq-c.pc ''${check%%:*} $dir has no ''${check#*:}" >&2
+          echo "moq.pc ''${check%%:*} $dir has no ''${check#*:}" >&2
           exit 1
         fi
       done
 
-      substitute ${../rs/moq-c/cmake/moq-c-config.cmake.in} \
-        $out/lib/cmake/moq-c/moq-c-config.cmake \
+      substitute ${../rs/libmoq/cmake/moq-config.cmake.in} \
+        $out/lib/cmake/moq/moq-config.cmake \
         --subst-var-by LIB_FILE libmoq.a \
         --subst-var-by VERSION "$version" \
-        --subst-var-by MOQ_NATIVE_LIBS_QUOTED ${final.lib.escapeShellArg moqCNativeLibs.cmake}
-      substitute ${../rs/moq-c/cmake/moq-c-config-version.cmake.in} \
-        $out/lib/cmake/moq-c/moq-c-config-version.cmake \
-        --subst-var-by VERSION "$version" \
-        --subst-var-by MAJOR_VERSION "''${version%%.*}"
+        --subst-var-by MOQ_NATIVE_LIBS_QUOTED ${final.lib.escapeShellArg libmoqNativeLibs.cmake}
+      substitute ${../rs/libmoq/cmake/moq-config-version.cmake.in} \
+        $out/lib/cmake/moq/moq-config-version.cmake \
+        --subst-var-by VERSION "$version"
 
       runHook postInstall
     '';

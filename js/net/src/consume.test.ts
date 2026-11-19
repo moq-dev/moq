@@ -1,9 +1,11 @@
 import { expect, test } from "bun:test";
 import { Producer } from "./broadcast.ts";
 import { BroadcastCache } from "./consume.ts";
+import { defined } from "./defined.test-util.ts";
 import { StreamCode, StreamError } from "./error.ts";
 import { WireRoute } from "./hop.ts";
 import * as Instance from "./instance.ts";
+import { hooks } from "./internal.ts";
 import * as Path from "./path.ts";
 
 test("cache identity follows the serving announcement, preserving held tracks", async () => {
@@ -15,7 +17,7 @@ test("cache identity follows the serving announcement, preserving held tracks", 
 	const instance = Instance.random();
 	cache.announce(pool, broad, { ...WireRoute.default, instance });
 	const source = new Producer();
-	const track = source.createTrack("video");
+	const track = defined(source.createTrack("video"));
 	const held = cache.insert(job, cache.instance(job), source.consume());
 	const ordered = held.track("video").subscribe().ordered();
 	cache.announce(job, specific, { ...WireRoute.default, instance });
@@ -31,8 +33,8 @@ test("cache identity follows the serving announcement, preserving held tracks", 
 	const shared = cache.get(job, cache.instance(job));
 	expect(shared?.closed).toBe(fresh.closed);
 	// Cache replacement never transfers or closes the track an old handle is reading.
-	track.appendGroup().finish();
-	expect((await ordered.nextGroup())?.sequence).toBe(0n);
+	hooks.appendNext(track).finish();
+	expect((await ordered.nextGroup())?.start).toBe(0n);
 	cache.withdraw(job, specific);
 	expect(cache.get(job, cache.instance(job))).toBeUndefined();
 	for (const consumer of [held, same, fresh, shared]) consumer?.close();
@@ -195,22 +197,4 @@ test("the newest stream wins a tie at its own prefix", () => {
 	const z = { ...WireRoute.default, instance: Instance.random() };
 	cache.announce(path, older, z, true);
 	expect(cache.instance(path).route.instance).toBe(z.instance);
-});
-
-test("the node serving an instance follows its routes even when another instance wins", () => {
-	const cache = new BroadcastCache();
-	const path = Path.from("room");
-	const x = Instance.random();
-	const a = {};
-	const b = {};
-	const c = {};
-	cache.announce(path, a, { ...WireRoute.default, instance: x, node: 1n });
-	cache.announce(path, b, { ...WireRoute.default, instance: x, node: 2n, cost: 5n });
-	expect(cache.node(path, x)).toBe(1n);
-	cache.withdraw(path, a);
-	cache.announce(path, c, { ...WireRoute.default, instance: Instance.random(), node: 3n });
-	expect(cache.instance(path).route.node).toBe(3n);
-	expect(cache.node(path, x)).toBe(2n);
-	cache.withdraw(path, b);
-	expect(cache.node(path, x)).toBeUndefined();
 });

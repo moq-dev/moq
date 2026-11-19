@@ -25,8 +25,8 @@
 	"dependencies": {
 		"@moq/clock": "workspace:^",
 		"@moq/pattern": "workspace:^",
-		"commander": "^15.0.0",
-		"jose": "^6.2.15",
+		"commander": "^15.1.0",
+		"jose": "^6.2.16",
 		"zod": "^4.6.7"
 	},
 	"devDependencies": {

@@ -270,9 +270,10 @@ impl Listings {
 		};
 		if entry.info.is_some() {
 			for lister in self.listers(&key.0) {
+				// Moq-transport has no datagram tracks to list.
 				let _ = match finished {
-					true => lister.finish(&key.1),
-					false => lister.remove(&key.1),
+					true => lister.finish(broadcast::Kind::Track, key.1.clone()),
+					false => lister.remove(broadcast::Kind::Track, key.1.clone()),
 				};
 			}
 		}
@@ -735,7 +736,6 @@ impl Subscriber {
 		writer.buffer_message(
 			ietf::SubscribeUpdate::ID,
 			&ietf::SubscribeUpdate {
-				max_age: forward.max_age,
 				request_id,
 				subscriber_priority: forward.priority.map(super::super::priority::to_wire),
 				forward: Some(forward.forward),
@@ -1208,7 +1208,6 @@ impl OpenPaused {
 					let buffered = stream.writer.buffer_message(
 						ietf::Subscribe::ID,
 						&ietf::Subscribe {
-							max_age: None,
 							new_group: None,
 							request_id,
 							track_namespace: key.0.clone(),
@@ -1788,7 +1787,6 @@ pub(super) struct Forward {
 	pub(super) fill: Option<ietf::Fill>,
 	/// The aggregate priority, in the model's higher-first terms.
 	pub(super) priority: Option<i8>,
-	pub(super) max_age: Option<u64>,
 	pub(super) new_group: Option<u64>,
 }
 
@@ -1884,8 +1882,8 @@ mod tests {
 	fn event(tracks: &mut crate::broadcast::Tracks) -> Option<String> {
 		match tracks.poll_next(&kio::Waiter::noop()) {
 			Poll::Ready(Ok(Some(crate::broadcast::TracksEvent::Added { name, .. }))) => Some(format!("+{name}")),
-			Poll::Ready(Ok(Some(crate::broadcast::TracksEvent::Removed { name }))) => Some(format!("-{name}")),
-			Poll::Ready(Ok(Some(crate::broadcast::TracksEvent::Finished { name }))) => Some(format!("~{name}")),
+			Poll::Ready(Ok(Some(crate::broadcast::TracksEvent::Removed { name, .. }))) => Some(format!("-{name}")),
+			Poll::Ready(Ok(Some(crate::broadcast::TracksEvent::Finished { name, .. }))) => Some(format!("~{name}")),
 			Poll::Ready(Ok(Some(crate::broadcast::TracksEvent::Synced))) => Some("synced".into()),
 			Poll::Ready(other) => Some(format!("{other:?}")),
 			Poll::Pending => None,
@@ -2387,9 +2385,13 @@ mod tests {
 			.producer
 			.clone()
 			.unwrap();
-		let mut group = copy.create_group(crate::model::group::Info { sequence: 5 }).unwrap();
-		group.write_frame(None, b"key".as_slice()).unwrap();
-		group.write_frame(None, b"delta".as_slice()).unwrap();
+		let mut group = copy.create_group(crate::model::group::Info { start: 5 }).unwrap();
+		group
+			.write_frame(crate::Timestamp::unscaled(group.start), b"key".as_slice())
+			.unwrap();
+		group
+			.write_frame(crate::Timestamp::unscaled(group.start), b"delta".as_slice())
+			.unwrap();
 
 		// A join past the ratio asks for group 6, which stays outstanding.
 		let join = track.subscribe(None).await.unwrap();

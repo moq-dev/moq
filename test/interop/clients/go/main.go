@@ -84,7 +84,7 @@ func publishTone(ctx context.Context, audio *moqaudio.Producer, tones []float64)
 			}
 		}
 		// Stamped on the sample clock, so every batch time is exact.
-		if err := audio.Write(moqaudio.Frame{Timestamp: moq.Timestamp{Value: uint64(phase), Scale: audioRate}, Data: data}); err != nil {
+		if err := audio.Write(moqaudio.Frame{Timestamp: moq.TimestampFromScale(uint64(phase), audioRate), Data: data}); err != nil {
 			fmt.Fprintf(os.Stderr, "tone: %v\n", err)
 			return
 		}
@@ -164,7 +164,7 @@ func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeo
 	if err != nil {
 		return err
 	}
-	media, err := moqmedia.NewVideoTrackStreamProducer(producer, moqmedia.Named{}, moqmedia.VideoInit{Format: moqmedia.VideoFormatAvc3, Data: nil})
+	media, err := moqmedia.NewVideoTrackStreamProducer(producer, moqmedia.Named{}, moqmedia.VideoInit{Format: moqmedia.VideoFormatH264, Data: nil})
 	if err != nil {
 		return err
 	}
@@ -256,7 +256,7 @@ func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeo
 	if err != nil {
 		return err
 	}
-	if err := live.WriteFrame(moq.Frame{Payload: []byte("session-alive")}); err != nil {
+	if err := live.WriteFrame(moq.Frame{Payload: []byte("session-alive"), Timestamp: moq.Unscaled(0)}); err != nil {
 		return err
 	}
 	if err := live.Finish(); err != nil {
@@ -288,7 +288,7 @@ func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeo
 // encodes on demand) may announce a rendition in a later update rather than the
 // first snapshot, so wait for a catalog that has both video and audio.
 func catalogWithMedia(ctx context.Context, consumer *moq.BroadcastConsumer) (*moqmedia.Catalog, error) {
-	catalogs, err := moqmedia.NewCatalogConsumer(ctx, consumer)
+	catalogs, err := moqmedia.NewCatalogConsumer(ctx, consumer, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -324,7 +324,7 @@ func finishSubscribe(ctx context.Context, client *moq.Client, broadcast string, 
 	if err != nil {
 		return err
 	}
-	catalogs, err := moqmedia.NewCatalogConsumer(ctx, consumer)
+	catalogs, err := moqmedia.NewCatalogConsumer(ctx, consumer, 0)
 	if err != nil {
 		return err
 	}
@@ -347,7 +347,7 @@ func finishSubscribe(ctx context.Context, client *moq.Client, broadcast string, 
 	for id, video = range catalog.Video {
 		break
 	}
-	media, err := moqmedia.NewTrackConsumer(ctx, consumer, moqmedia.TrackConfig{Rendition: moqmedia.VideoRendition(id, video), Subscription: &moq.Subscription{Delay: moq.Delay{Max: maxDelay}}})
+	media, err := moqmedia.NewTrackConsumer(ctx, consumer, moqmedia.TrackConfig{Rendition: moqmedia.VideoRendition(id, video), Subscription: &moq.Subscription{Delay: moq.Delay{MinUnstated: true, Max: maxDelay}}})
 	if err != nil {
 		return err
 	}
@@ -435,7 +435,7 @@ func finishSubscribe(ctx context.Context, client *moq.Client, broadcast string, 
 	if err != nil {
 		return err
 	}
-	// Its timestamp goes unchecked: lite-05/06 carry an untimed track's send time.
+	// Its timestamp goes unchecked: lite-05/06 declare an untimed track in milliseconds.
 	if frame == nil || string(frame.Payload) != "session-alive" {
 		return errors.New("unexpected session health payload")
 	}
@@ -511,7 +511,11 @@ func decodeAudio(ctx context.Context, consumer *moq.BroadcastConsumer, id string
 		}
 		samples := len(frame.Data) / frameBytes
 
-		fmt.Fprintf(log, "%d %d\n", moq.TimestampToDuration(frame.Timestamp).Microseconds(), samples)
+		at, err := moq.TimestampToDuration(frame.Timestamp)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(log, "%d %d\n", at.Microseconds(), samples)
 		if _, err := pcm.Write(frame.Data); err != nil {
 			return err
 		}
@@ -572,7 +576,7 @@ func subscribe(ctx context.Context, url, broadcast string, opts dialOptions, tim
 		break
 	}
 
-	media, err := moqmedia.NewTrackConsumer(ctx, consumer, moqmedia.TrackConfig{Rendition: moqmedia.VideoRendition(id, video), Subscription: &moq.Subscription{Delay: moq.Delay{Max: maxDelay}}})
+	media, err := moqmedia.NewTrackConsumer(ctx, consumer, moqmedia.TrackConfig{Rendition: moqmedia.VideoRendition(id, video), Subscription: &moq.Subscription{Delay: moq.Delay{MinUnstated: true, Max: maxDelay}}})
 	if err != nil {
 		return err
 	}

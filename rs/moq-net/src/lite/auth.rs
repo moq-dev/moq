@@ -100,6 +100,22 @@ pub struct AuthError {
 	pub reason: String,
 }
 
+impl AuthError {
+	/// Whether the code says the acceptor failed to decide (INTERNAL_ERROR, TOO_MANY_REQUESTS,
+	/// or CONTROL_MESSAGE_TIMEOUT), so the presenter presents the token again after a backoff.
+	/// Any other code is the acceptor's verdict.
+	pub(crate) fn undecided(&self) -> bool {
+		use crate::SessionError;
+		[
+			SessionError::Internal,
+			SessionError::TooManyRequests,
+			SessionError::Timeout,
+		]
+		.iter()
+		.any(|undecided| u64::from(undecided.to_code()) == self.code)
+	}
+}
+
 /// Longest AUTH_ERROR reason, in bytes. Matches the GOAWAY URI cap: generous for a
 /// human-readable reason, and rejected from the length prefix alone.
 const MAX_REASON: usize = 8192;
@@ -331,6 +347,20 @@ mod tests {
 				Auth::decode_msg(&mut Decoder::new(&[0], version.into()), version),
 				Err(DecodeError::Version)
 			));
+		}
+	}
+
+	/// Only INTERNAL_ERROR (0x1), TOO_MANY_REQUESTS (0x7), and CONTROL_MESSAGE_TIMEOUT (0x11)
+	/// leave a token undecided, as the draft's AUTH_ERROR section lists them. Mirrored in
+	/// `js/net/src/lite/auth.test.ts`.
+	#[test]
+	fn only_three_codes_leave_a_token_undecided() {
+		for code in (0..0x100).chain([u64::from(u32::MAX), u64::MAX]) {
+			let reply = AuthError {
+				code,
+				reason: String::new(),
+			};
+			assert_eq!(reply.undecided(), matches!(code, 0x1 | 0x7 | 0x11), "{code:#x}");
 		}
 	}
 }

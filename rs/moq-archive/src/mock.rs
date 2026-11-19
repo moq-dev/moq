@@ -244,6 +244,15 @@ impl ObjectStore for Mock {
 
 	async fn get_opts(&self, location: &Path, options: GetOptions) -> object_store::Result<GetResult> {
 		self.log(Op::Get(location.to_string()));
+		let stall = self
+			.state()
+			.stall_gets
+			.iter()
+			.find(|(pattern, _)| location.as_ref().contains(pattern))
+			.map(|(_, gate)| gate.clone());
+		if let Some(gate) = stall {
+			gate.acquire().await.expect("stall gate closed").forget();
+		}
 		if self.state().hide_gets.iter().any(|p| location.as_ref().contains(p)) {
 			return Err(object_store::Error::NotFound {
 				path: location.to_string(),
@@ -255,15 +264,6 @@ impl ObjectStore for Mock {
 				store: "mock",
 				source: "outage".into(),
 			});
-		}
-		let stall = self
-			.state()
-			.stall_gets
-			.iter()
-			.find(|(pattern, _)| location.as_ref().contains(pattern))
-			.map(|(_, gate)| gate.clone());
-		if let Some(gate) = stall {
-			gate.acquire().await.expect("stall gate closed").forget();
 		}
 		self.inner.get_opts(location, options).await
 	}

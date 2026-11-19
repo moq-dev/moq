@@ -26,7 +26,7 @@ async fn steer(tracks: u16, floors: u64) -> u64 {
 			let arrival = jitter::Arrival {
 				arrived: at,
 				read: at,
-				decode: Timestamp::from_millis(second * 1_000).unwrap().into(),
+				decode: Timestamp::from_millis(second * 1_000).unwrap().try_into().unwrap(),
 				restart: 0,
 				sync: true,
 				leading: false,
@@ -87,7 +87,7 @@ fn acquisition(c: &mut Criterion) {
 										jitter::Arrival {
 											arrived: start,
 											read: start,
-											decode: Timestamp::from_millis(frame * 20).unwrap().into(),
+											decode: Timestamp::from_millis(frame * 20).unwrap().try_into().unwrap(),
 											restart: 0,
 											sync: frame % 15 == 0,
 											leading: false,
@@ -144,7 +144,8 @@ fn handoff(c: &mut Criterion) {
 													u64::from(instance) * 10_000 + frame * 20,
 												)
 												.unwrap()
-												.into(),
+												.try_into()
+												.unwrap(),
 												restart: 0,
 												sync: frame % 15 == 0,
 												leading: false,
@@ -193,7 +194,7 @@ fn admission(c: &mut Criterion) {
 						let frame = |decode| jitter::Arrival {
 							arrived: start,
 							read: kio::clock::now(),
-							decode: Timestamp::from_millis(decode).unwrap().into(),
+							decode: Timestamp::from_millis(decode).unwrap().try_into().unwrap(),
 							restart: 0,
 							sync: true,
 							leading: false,

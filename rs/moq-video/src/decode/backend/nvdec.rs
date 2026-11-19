@@ -137,7 +137,8 @@ impl Nvdec {
 
 		// `CudaContext::new` retains the device's primary context, the same one
 		// the NVENC backend uses, so frames pass between them without a copy.
-		let ctx = CudaContext::new(0).map_err(|e| codec_err(format!("CUDA init: {e:?}")))?;
+		let ordinal = cuda::ordinal(&config.device)?.unwrap_or(0);
+		let ctx = CudaContext::new(ordinal).map_err(|e| codec_err(format!("CUDA init: {e:?}")))?;
 		ctx.bind_to_thread()
 			.map_err(|e| codec_err(format!("CUDA bind: {e:?}")))?;
 		// The decoder itself waits for the first sequence header, so ask now
@@ -222,7 +223,7 @@ impl Backend for Nvdec {
 			payload_size: access_unit.len() as c_ulong,
 			payload: access_unit.as_ptr(),
 			// cuvid's clock rate is microseconds (set at parser creation).
-			timestamp: timestamp.as_micros() as i64,
+			timestamp: timestamp.as_micros()? as i64,
 		};
 
 		self.parse(&mut packet)
@@ -709,13 +710,13 @@ mod tests {
 			for encoded in encoder.encode_all(&gradient_frame(&rgba, w, h, i)).unwrap() {
 				for decoded in decoder.decode_all(encoded.payload, encoded.timestamp, i == 0).unwrap() {
 					let i420 = decoded.surface.to_i420().unwrap().into_owned();
-					out.push((decoded.timestamp.as_micros() as u64, i420));
+					out.push((decoded.timestamp.as_micros().unwrap() as u64, i420));
 				}
 			}
 		}
 		for decoded in decoder.flush_all().unwrap() {
 			let i420 = decoded.surface.to_i420().unwrap().into_owned();
-			out.push((decoded.timestamp.as_micros() as u64, i420));
+			out.push((decoded.timestamp.as_micros().unwrap() as u64, i420));
 		}
 		assert!(!out.is_empty(), "NVDEC produced no frames");
 		out
@@ -762,11 +763,11 @@ mod tests {
 					.unwrap()
 				{
 					let frames = decoder.decode_all(encoded.payload, encoded.timestamp, i == 0).unwrap();
-					timestamps.extend(frames.iter().map(|frame| frame.timestamp.as_micros() as u64));
+					timestamps.extend(frames.iter().map(|frame| frame.timestamp.as_micros().unwrap() as u64));
 				}
 			}
 			let frames = decoder.flush_all().unwrap();
-			timestamps.extend(frames.iter().map(|frame| frame.timestamp.as_micros() as u64));
+			timestamps.extend(frames.iter().map(|frame| frame.timestamp.as_micros().unwrap() as u64));
 			// A second flush lands on a parser that has seen no packet yet.
 			assert!(
 				decoder.flush_all().unwrap().is_empty(),

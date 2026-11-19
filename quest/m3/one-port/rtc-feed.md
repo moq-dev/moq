@@ -38,6 +38,14 @@ pub enum Socket {
 ```
 
 Build on moq-webrtc's ICE module (split out in #5702) rather than beside it.
+
+Found 2026-11-14 by the [feature review](/quest/m3/release/feature-review.md):
+the one-port demux already hands WebRTC its share of the port as
+`moq_tokio::quic::demux::WebRtc` (`rs/moq-tokio/src/quic/demux.rs`), with
+`poll_recv`, `poll_send`, and a `pin` that releases on drop, reached through
+`Relay::webrtc()`; only tests call either today. Consume that handle instead
+of the sketch's `mpsc` channels and new send trait, which `rs/AGENTS.md`'s
+rule against `tokio::sync` in libraries rules out.
 moq-webrtc's `ice::Socket { udp, locals, inbound }` already separates the advertised
 host candidates (`locals`, from `ice_candidates`) from the bound address and
 takes routed datagrams on its `Inbound` queue, and the server mux
@@ -48,7 +56,8 @@ read loop: moq-webrtc's `ice::Socket`'s `udp: Arc<UdpSocket>` becomes
 implements it, so the bound case behaves as today), and a fed mux routes
 datagrams from the demux hook instead of reading a bound socket. Adapt the
 sketch above to that: `advertised` is `ice_candidates`, and `recv` feeds
-the mux's existing router. Address-family mapping follows the real socket,
+the mux's existing router; the `Socket` enum is replaced by a second
+constructor (below). Address-family mapping follows the real socket,
 not the advertisement: a dual-stack socket bound to `[::]` may advertise a
 public IPv4 address, so the `Transmit` impl owns the IPv4-mapped conversion
 moq-webrtc's ICE module applies today. Received and pinned addresses use the same
@@ -70,10 +79,15 @@ returns a guard that releases the pin on drop. So the fed `Socket` takes a
 selected pair, dropped when its session ends or ICE moves. A feed's `recv`
 returns `None` once the listener is gone.
 
-Things to watch: the server config is `Clone` today and a receiver is not, so
-the fed socket may belong in the server's constructor rather than the
-config. The fed mux has nothing to bind lazily, and a dropped feed should
-fail the server loudly rather than idle.
+Settled 2026-11-16 by the bind at startup: the socket is the constructor's,
+not the config's. `Server::bind(addr, config).await` binds its own socket, and
+`server::Config` holds only `ice_candidates` and stays `Clone`; there is no
+`Socket` enum. The feed adds a second constructor, such as
+`Server::feed(webrtc, config)`, taking the `WebRtc` handle by value, so it is
+an addition, not a break. Its `ice_candidates` are the shared address to
+advertise, sent as given (port 0 takes the socket's port). The fed mux has
+nothing to bind, and a dropped feed should fail the server loudly rather than
+idle.
 
 Noted 2026-10-31 from [moq-dev/moq#7095](https://github.com/moq-dev/moq/pull/7095):
 its demux `Datagram` carries no ECN marks or kernel receive timestamp. If

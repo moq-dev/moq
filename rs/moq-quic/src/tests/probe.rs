@@ -47,6 +47,9 @@ const FALL: Duration = Duration::from_secs(8);
 
 /// The seeds the acceptance suite runs each scenario over, probing and as the baseline
 const SEEDS: ops::RangeInclusive<u64> = 1..=8;
+/// The seeds for a competing upload, whose loss-driven sharing spreads one seed's late frames
+/// wider than the deadline budget, so eight seeds' mean decides the budget by seed alone
+const COMPETING_SEEDS: ops::RangeInclusive<u64> = 1..=32;
 /// The seed the merge gate runs
 const GATE: ops::RangeInclusive<u64> = 1..=1;
 
@@ -359,7 +362,7 @@ fn run(scenario: &Scenario) -> Outcome {
 
 		if let Some((client, _, id, _)) = &competing {
 			let mut stream = pair.client_send(*client, *id);
-			while stream.write(&mut &[0; 16_384][..]).is_ok() {}
+			while matches!(stream.try_write(&mut &[0; 16_384][..]), Poll::Ready(Ok(_))) {}
 		}
 
 		pair.drive_client();
@@ -381,7 +384,7 @@ fn run(scenario: &Scenario) -> Outcome {
 			if let Some(id) = *recv {
 				let mut stream = pair.server_recv(*server, id);
 				let mut chunks = stream.read().unwrap();
-				while let Ok(Some(chunk)) = chunks.next(usize::MAX) {
+				while let Poll::Ready(Ok(Some(chunk))) = chunks.try_next(usize::MAX) {
 					outcome.competitor += chunk.bytes.len() as u64;
 				}
 				chunks.finalize();
@@ -486,10 +489,10 @@ fn flush(pair: &mut Pair, ch: ConnectionHandle, groups: &mut [Group]) {
 	for group in groups.iter_mut().filter(|g| g.reset.is_none() && !g.finished) {
 		let mut stream = pair.client_send(ch, group.id);
 		while !group.backlog.is_empty() {
-			match stream.write(&mut &group.backlog[..]) {
-				Ok(n) => drop(group.backlog.drain(..n)),
-				Err(send::Error::Blocked) => return,
-				Err(e) => panic!("write: {e}"),
+			match stream.try_write(&mut &group.backlog[..]) {
+				Poll::Ready(Ok(n)) => drop(group.backlog.drain(..n)),
+				Poll::Pending => return,
+				Poll::Ready(Err(e)) => panic!("write: {e}"),
 			}
 		}
 		if group.ended.is_some() {
@@ -542,21 +545,29 @@ fn receive(
 			reading.done = true;
 			continue;
 		};
-		loop {
-			match chunks.next(usize::MAX) {
-				Ok(Some(chunk)) => reading.read += chunk.bytes.len() as u64,
-				Ok(None) => {
+		let reset = loop {
+			match chunks.try_next(usize::MAX) {
+				Poll::Ready(Ok(Some(chunk))) => reading.read += chunk.bytes.len() as u64,
+				Poll::Ready(Ok(None)) => {
 					reading.done = true;
-					break;
+					break false;
 				}
-				Err(recv::Error::Blocked) => break,
-				Err(_) => {
+				Poll::Pending => break false,
+				Poll::Ready(Err(_)) => {
 					reading.done = true;
-					break;
+					break true;
 				}
 			}
-		}
+		};
 		chunks.finalize();
+		// A read that reaches an expired group's reset keeps its stream, and the stream ID credit
+		// the sender opens later groups with, until the reset's code is asked for.
+		if reset {
+			assert!(
+				stream.received_reset().expect("an expiry ends a read early").is_some(),
+				"only an expiry ends a read early"
+			);
+		}
 
 		// The sender opens each group's stream in order, after any it opened before the media
 		let frames = &groups[(id.index() - groups[0].id.index()) as usize].written;
@@ -1175,7 +1186,7 @@ fn competing(label: &str, upload: Upload) {
 		competitor: Some(upload),
 		..Scenario::default()
 	};
-	compare(label, scenario, SEEDS);
+	compare(label, scenario, COMPETING_SEEDS);
 }
 
 #[test]

@@ -138,6 +138,15 @@ class SelectionTest(unittest.TestCase):
                 self.assertTrue(plan["all"])
                 self.assertEqual(len(plan["packages"]), len(self.packages))
 
+    def test_shared_tooling_workspace_falls_back(self):
+        # Packages run its scripts by path, so its manifest dependents are not all its users.
+        self.packages["js/common"] = {"name": "@example/common"}
+        self.packages["demo/nested"]["devDependencies"] = {"@example/common": "workspace:*"}
+        self.write()
+        plan = self.plan(["js/common/package.ts"])
+        self.assertTrue(plan["all"])
+        self.assertEqual(len(plan["packages"]), len(self.packages))
+
     def test_optional_dependency_selects_transitive_consumers(self):
         self.assertEqual(
             set(self.plan(["js/bindings/README.md"])["packages"]), {"@example/bindings", "browser", "demo"}
@@ -228,6 +237,25 @@ class SelectionTest(unittest.TestCase):
             selector.run(action, self.plan(paths))
         return calls
 
+    def test_node_loads_published_tsc_builds_with_their_dependencies_built(self):
+        tsc = "rm -rf dist && tsc -b tsconfig.build.json"
+        # vite emits the JS here, and `tsc -p` only declarations.
+        self.packages["js/core"]["scripts"]["build"] = "rm -rf dist && vite build && tsc -p tsconfig.build.json"
+        self.packages["js/view"]["scripts"]["build"] = tsc
+        self.packages["js/room"] = {
+            "name": "@example/room",
+            "dependencies": {"@example/view": "workspace:*", "zod": "^4"},
+            "scripts": {"build": tsc},
+        }
+        self.packages["js/lib"] = {"name": "@example/lib", "scripts": {"build": "tsc -p tsconfig.build.json"}}
+        self.packages["js/private"] = {"name": "@example/private", "private": True, "scripts": {"build": tsc}}
+        self.write()
+        calls = self.calls(["js/room/src/index.ts", "js/lib/src/index.ts", "js/private/src/index.ts"])
+        self.assertIn(
+            ["bun", "run", "--filter=@example/core", "--filter=@example/view", "--elide-lines=0", "build"], calls
+        )
+        self.assertEqual(calls[-1], ["node", "sh/js/dist-imports.test.mjs", "js/lib", "js/room"])
+
     def test_executor_runs_only_selected_package_scripts(self):
         calls = self.calls(["doc/index.md"])
         scripts = [c for c in calls if c[:2] == ["bun", "run"]]
@@ -263,7 +291,8 @@ class SelectionTest(unittest.TestCase):
             [c for c in calls if c[:2] == ["bun", "run"]],
             [["bun", "run", "test", *junit(d)] for d in ("js/view", "doc")],
         )
-        self.assertTrue(any(c[:3] == ["bun", "test", *junit(".")[:1]] and junit(".")[1] in c for c in calls))
+        root_test = ["bun", "--no-env-file", "test", *junit(".")]
+        self.assertTrue(any(c[: len(root_test)] == root_test for c in calls))
 
     def test_owned_package_without_scripts_keeps_harness_check(self):
         self.packages["doc"].pop("scripts")

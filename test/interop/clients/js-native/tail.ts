@@ -20,6 +20,11 @@ import { Duration } from "@moq/clock";
 import * as Moq from "@moq/net";
 import { install } from "@moq/web-transport";
 
+// Append the group after the newest on a scale-less track: its start is the next key.
+function appendNext(track: Moq.Track.Producer): Moq.Group.Producer {
+	return track.appendGroup(Moq.Time.Timestamp.unscaled((track.largest()?.group ?? -1n) + 1n));
+}
+
 install();
 const GROUPS = 4;
 const BYTES = 256 * 1024;
@@ -66,12 +71,13 @@ function frames(sequence: number): Uint8Array[] {
 function write(track: Moq.Track.Producer) {
 	track.finishAt({ group: BigInt(GROUPS), frame: 0 });
 	for (let sequence = 0; sequence < GROUPS; sequence++) {
-		const group = track.appendGroup();
+		const group = appendNext(track);
 		if (drop && sequence === 1) {
 			group.abort(new Error("cut"));
 			continue;
 		}
-		for (const payload of frames(sequence)) group.writeFrame({ payload });
+		for (const payload of frames(sequence))
+			group.writeFrame({ payload, timestamp: Moq.Time.Timestamp.unscaled(group.start) });
 		group.finish();
 	}
 	track.finish();
@@ -84,14 +90,21 @@ function write(track: Moq.Track.Producer) {
 function serveHistory(track: Moq.Track.Producer) {
 	track.finishAt({ group: BigInt(GROUPS), frame: 0 });
 	const live = track.createGroup(BigInt(GROUPS - 1));
-	for (const payload of frames(GROUPS - 1)) live.writeFrame({ payload });
+	for (const payload of frames(GROUPS - 1))
+		live.writeFrame({ payload, timestamp: Moq.Time.Timestamp.unscaled(live.start) });
 	live.finish();
 	const requests = track.requests();
 	void (async () => {
 		for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
+			if (fill.kind === "lookup") {
+				fill.close();
+				continue;
+			}
 			for (let sequence = fill.wanted(); sequence !== undefined; sequence = fill.wanted()) {
 				const group = fill.accept(sequence);
-				for (const payload of frames(Number(sequence))) group.writeFrame({ payload });
+				if (!group) throw new Error("the group was already answered");
+				for (const payload of frames(Number(sequence)))
+					group.writeFrame({ payload, timestamp: Moq.Time.Timestamp.unscaled(group.start) });
 				group.finish();
 				console.error(`history served ${sequence}`);
 			}
@@ -102,11 +115,11 @@ function serveHistory(track: Moq.Track.Producer) {
 
 /** Read one whole group, checking every frame's bytes, and report when the `late` head is in. */
 async function read(group: Moq.Group.Consumer) {
-	for (const [index, want] of frames(Number(group.sequence)).entries()) {
+	for (const [index, want] of frames(Number(group.start)).entries()) {
 		const frame = await group.readFrame();
 		assert(frame, "short group");
-		assert(Buffer.from(frame.payload).equals(want), `wrong frame ${index} in group ${group.sequence}`);
-		if (late && group.sequence === 0n && index + 1 === LATE_HEAD) process.stdout.write("late head\n");
+		assert(Buffer.from(frame.payload).equals(want), `wrong frame ${index} in group ${group.start}`);
+		if (late && group.start === 0n && index + 1 === LATE_HEAD) process.stdout.write("late head\n");
 	}
 	assert.equal(await group.readFrame(), undefined, "extra frame");
 }
@@ -125,6 +138,7 @@ try {
 		if (datagram) {
 			// Untimed: the OBJECT_DATAGRAM carries no timestamp, so the subscriber checks the payload alone.
 			const track = broadcast.createDatagrams("tail");
+			if (!track) throw new Error("the track already exists");
 			broadcastPublication.announce();
 			const lines = createInterface({ input: process.stdin });
 			const commands = lines[Symbol.asyncIterator]();
@@ -132,7 +146,7 @@ try {
 				while (track.priority.peek() === undefined) await track.priority.changed();
 				for (let sequence = 0; sequence < GROUPS; sequence++) {
 					assert.equal((await commands.next()).value, `datagram ${sequence}`, "missing datagram command");
-					track.append(undefined, new Uint8Array(900).fill(sequence));
+					track.append(Moq.Time.Timestamp.unscaled(BigInt(sequence)), new Uint8Array(900).fill(sequence));
 				}
 				const ack = await commands.next();
 				assert.equal(ack.value, "clean end", "reader did not acknowledge a clean end");
@@ -150,30 +164,34 @@ try {
 				maxAge: null,
 				...(status ? { priority: 2 } : {}),
 			});
+			if (!track) throw new Error("the track already exists");
 			if (cached) write(track);
 			if (history) serveHistory(track);
 			let head: Moq.Group.Producer | undefined;
 			if (late) {
-				head = track.appendGroup();
-				for (const payload of frames(0).slice(0, LATE_HEAD)) head.writeFrame({ payload });
+				head = appendNext(track);
+				for (const payload of frames(0).slice(0, LATE_HEAD))
+					head.writeFrame({ payload, timestamp: Moq.Time.Timestamp.unscaled(head.start) });
 			}
 			broadcastPublication.announce();
 			const lines = createInterface({ input: process.stdin });
 			const commands = lines[Symbol.asyncIterator]();
 			if (head) {
 				assert.equal((await commands.next()).value, "late tail", "subscriber did not read the head");
-				for (const payload of frames(0).slice(LATE_HEAD)) head.writeFrame({ payload });
+				for (const payload of frames(0).slice(LATE_HEAD))
+					head.writeFrame({ payload, timestamp: Moq.Time.Timestamp.unscaled(head.start) });
 				head.finish();
 				for (let sequence = 1; sequence < LATE_GROUPS; sequence++) {
-					const group = track.appendGroup();
-					for (const payload of frames(sequence)) group.writeFrame({ payload });
+					const group = appendNext(track);
+					for (const payload of frames(sequence))
+						group.writeFrame({ payload, timestamp: Moq.Time.Timestamp.unscaled(group.start) });
 					group.finish();
 				}
 				track.finish();
 				track.close();
 			} else if (!status && !cached && !history) {
 				const demand = track.demand();
-				while (demand.wanted.peek() === undefined) await demand.wanted.changed();
+				while (!demand.wanted.peek()) await demand.wanted.changed();
 				write(track);
 				track.close();
 			}
@@ -238,7 +256,7 @@ try {
 				// head predates the subscription.
 				const track = broadcast.track("tail").subscribe({
 					delay: { max: Duration.millis(drop ? 60_000 : 5000) },
-					...(late ? {} : { ranges: [{ start: { absolute: 0n } }] }),
+					...(late ? {} : { ranges: [{ start: { time: 0n } }] }),
 				});
 				if (compress)
 					assert.equal((await track.info()).compression, version === "moq-lite-07-wip" ? "deflate" : "none");
@@ -249,7 +267,7 @@ try {
 							const group = await track.recvGroup();
 							assert(group, "missing group");
 							try {
-								assert.equal(group.sequence, BigInt(sequence), "joined the wrong group");
+								assert.equal(group.start, BigInt(sequence), "joined the wrong group");
 								await read(group);
 							} finally {
 								group.close();
@@ -263,9 +281,9 @@ try {
 							const group = await track.recvGroup();
 							if (!group) break;
 							try {
-								assert(group.sequence < GROUPS, `unexpected group ${group.sequence}`);
+								assert(group.start < GROUPS, `unexpected group ${group.start}`);
 								await read(group);
-								seen.push(Number(group.sequence));
+								seen.push(Number(group.start));
 							} finally {
 								group.close();
 							}

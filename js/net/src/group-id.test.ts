@@ -3,11 +3,13 @@
 import { expect, test } from "bun:test";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { accept, connect } from "./connection/index.ts";
+import { defined } from "./defined.test-util.ts";
 import * as Ietf from "./ietf/index.ts";
 import * as Lite from "./lite/index.ts";
 import { createMockTransportPair } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
+import { Timestamp } from "./time.ts";
 import { wireOf } from "./wire.ts";
 
 // The first group ID a `number` cannot hold, and the largest a QUIC varint carries.
@@ -48,7 +50,7 @@ async function forward(input: BroadcastConsumer, carriesDatagrams: boolean): Pro
 	const copy = new BroadcastProducer();
 	if (carriesDatagrams) {
 		const reader = input.datagrams("video");
-		const writer = copy.createDatagrams("video", await reader.info());
+		const writer = defined(copy.createDatagrams("video", await reader.info()));
 		void (async () => {
 			try {
 				for (let datagram = await reader.recv(); datagram; datagram = await reader.recv())
@@ -61,10 +63,10 @@ async function forward(input: BroadcastConsumer, carriesDatagrams: boolean): Pro
 			}
 		})();
 	}
-	const video = copy.createTrack("video", await subscription.info());
+	const video = defined(copy.createTrack("video", await subscription.info()));
 	void (async () => {
 		for (let group = await subscription.recvGroup(); group; group = await subscription.recvGroup()) {
-			const out = video.createGroup(group.sequence);
+			const out = video.createGroup(group.start);
 			for (let frame = await group.readFrame(); frame; frame = await group.readFrame()) out.writeFrame(frame);
 			out.finish();
 		}
@@ -87,8 +89,8 @@ for (const wire of WIRES) {
 
 		const path = Path.from("big");
 		const publication = source.route(path);
-		const datagrams = wire.datagrams ? publication.broadcast.createDatagrams("video") : undefined;
-		const track = publication.broadcast.createTrack("video");
+		const datagrams = wire.datagrams ? defined(publication.broadcast.createDatagrams("video")) : undefined;
+		const track = defined(publication.broadcast.createTrack("video"));
 
 		const dynamic = relay.claim(path);
 		const inputs: BroadcastConsumer[] = [];
@@ -105,18 +107,24 @@ for (const wire of WIRES) {
 		// Publish once the viewer's subscription reached the publisher through the relay, so
 		// every group rides it live rather than racing it.
 		const demand = track.demand();
-		while (demand.wanted.peek() === undefined) await demand.wanted.changed();
+		while (!demand.wanted.peek()) await demand.wanted.changed();
 
-		for (const sequence of [PAST_SAFE, MAX_QUIC]) {
-			const group = track.createGroup(sequence);
-			group.writeFrame({ payload: enc.encode(`first ${sequence}`) });
-			group.writeFrame({ payload: enc.encode(`second ${sequence}`) });
+		for (const key of [PAST_SAFE, MAX_QUIC]) {
+			const group = track.createGroup(key);
+			group.writeFrame({
+				payload: enc.encode(`first ${key}`),
+				timestamp: Timestamp.unscaled(group.start),
+			});
+			group.writeFrame({
+				payload: enc.encode(`second ${key}`),
+				timestamp: Timestamp.unscaled(group.start),
+			});
 			group.finish();
 
 			const received = await reader.recvGroup();
-			expect(received?.sequence).toBe(sequence);
-			expect(dec.decode((await received?.readFrame())?.payload)).toBe(`first ${sequence}`);
-			expect(dec.decode((await received?.readFrame())?.payload)).toBe(`second ${sequence}`);
+			expect(received?.start).toBe(key);
+			expect(dec.decode((await received?.readFrame())?.payload)).toBe(`first ${key}`);
+			expect(dec.decode((await received?.readFrame())?.payload)).toBe(`second ${key}`);
 			expect(await received?.readFrame()).toBeUndefined();
 			received?.close();
 		}
@@ -124,7 +132,11 @@ for (const wire of WIRES) {
 		if (datagrams) {
 			const unreliable = remote.datagrams("video");
 			await unreliable.info();
-			datagrams.insert({ sequence: PAST_SAFE + 1n, payload: enc.encode("datagram") });
+			datagrams.insert({
+				sequence: PAST_SAFE + 1n,
+				timestamp: Timestamp.unscaled(PAST_SAFE + 1n),
+				payload: enc.encode("datagram"),
+			});
 			const received = await unreliable.recv();
 			expect(received?.sequence).toBe(PAST_SAFE + 1n);
 			expect(dec.decode(received?.payload)).toBe("datagram");
@@ -143,11 +155,11 @@ for (const wire of WIRES) {
 }
 
 test("a group sequence that is not a non-negative bigint is refused where a caller passes one", async () => {
-	const track = new BroadcastProducer().createTrack("video");
+	const track = defined(new BroadcastProducer().createTrack("video"));
 	// A plain JS caller can still pass a number, which would otherwise mix with bigints later.
 	expect(() => track.createGroup(1 as unknown as bigint)).toThrow(TypeError);
 	expect(() => track.createGroup(-1n)).toThrow(RangeError);
-	expect(track.createGroup(MAX_QUIC).sequence).toBe(MAX_QUIC);
+	expect(track.createGroup(MAX_QUIC).start).toBe(MAX_QUIC);
 	const consumer = new BroadcastProducer().consume().track("video");
 	await expect(consumer.fetchGroup(1 as unknown as bigint)).rejects.toThrow(TypeError);
 });

@@ -10,14 +10,14 @@
 
 Tokio-based connection helpers for native [Media over QUIC](https://moq.dev) applications, on top of [moq-net](https://github.com/moq-dev/moq/tree/main/rs/moq-net).
 
-Establishes MoQ connections over a few different transports, selectable via cargo features:
+Establishes MoQ connections over a few different transports, all compiled in and picked at runtime by URL scheme or config:
 
 - **WebTransport** (HTTP/3) via [moq-quic](https://crates.io/crates/moq-quic)
 - **Raw QUIC** with ALPN negotiation
 - **WebSocket** as a fallback when QUIC isn't available
+- **TCP**, **TLS**, and **Unix sockets** (Unix only) via [qmux](https://crates.io/crates/qmux)
 
 Also handles TLS, certificate generation, logging setup, and reconnection logic, with Usage-derived configuration ready for binaries.
-`quic::web` exposes WebTransport streams, datagrams, and send groups without requiring a MoQ session; its session also implements moq-net's poll traits directly.
 
 ## Examples
 

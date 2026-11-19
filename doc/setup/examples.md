@@ -18,6 +18,7 @@ migration guides.
 | Build a meeting with a roster and chat | [Rooms](/lib/js/room) | [`meet.ts`](https://github.com/moq-dev/moq/blob/main/demo/web/src/meet.ts) |
 | Send input back to a live application | [MoQ Boy](/bin/demo#moq-boy) | [`demo/boy`](https://github.com/moq-dev/moq/tree/main/demo/boy) |
 | Stream a simulator and send controls | [CARLA](/bin/demo#carla) | [`demo/carla`](https://github.com/moq-dev/moq/tree/main/demo/carla) |
+| Play 360 or VR180 video with spatial audio in a headset | [VR](/bin/demo#vr) | [`demo/vr`](https://github.com/moq-dev/moq/tree/main/demo/vr) |
 | Bring an existing media tool | [OBS](/bin/obs), [GStreamer](/bin/gstreamer), or [gateways](/bin/#gateways) | [`demo/pub`](https://github.com/moq-dev/moq/tree/main/demo/pub), [`demo/sub`](https://github.com/moq-dev/moq/tree/main/demo/sub) |
 
 Run checkout examples inside the [Nix dev shell](/setup/dev). Each demo's

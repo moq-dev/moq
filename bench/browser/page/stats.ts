@@ -93,6 +93,7 @@ async function allocator(connection: Moq.Connection): Promise<Moq.Bandwidth.Hand
 function reserve(handle: Moq.Bandwidth.Handle, origin: Moq.Origin.Producer, name: string) {
 	const publication = origin.route(Moq.Path.from(name), { hidden: true });
 	const track = publication.broadcast.createTrack("video", { priority: 1 });
+	if (!track) throw new Error("the track already exists");
 	const reservation = handle.reserve(track.demand(), 2_500_000);
 	cleanup.push(() => {
 		reservation.close();
@@ -151,6 +152,7 @@ async function receive(config: Sampling): Promise<void> {
 	const publishing = new Moq.Origin.Producer();
 	const publication = publishing.route(Moq.Path.from(`${config.path}/live`), { hidden: true });
 	const track = publication.broadcast.createTrack("data", { timescale: Moq.Time.Timescale.MILLI });
+	if (!track) throw new Error("the track already exists");
 	publication.announce();
 	const publisher = await Moq.Connection.connect({
 		url: new URL(config.url),
@@ -159,8 +161,9 @@ async function receive(config: Sampling): Promise<void> {
 	});
 	let frame = 0;
 	const timer = setInterval(() => {
-		const group = track.appendGroup();
-		group.writeFrame({ payload: payload(RECEIVE_BYTES, frame), timestamp: Moq.Time.Timestamp.fromMillis(frame) });
+		const timestamp = Moq.Time.Timestamp.fromMillis(frame);
+		const group = track.appendGroup(timestamp);
+		group.writeFrame({ payload: payload(RECEIVE_BYTES, frame), timestamp });
 		group.finish();
 		frame++;
 	}, 1000 / RECEIVE_FPS);
@@ -251,6 +254,7 @@ async function resume(config: Sampling & { cycles: number; idle_ms: number; limi
 		await new Promise((resolve) => setTimeout(resolve, config.idle_ms));
 		const publication = origin.route(Moq.Path.from(`${config.path}/resume/${cycle}`), { hidden: true });
 		const track = publication.broadcast.createTrack("video", { priority: 1 });
+		if (!track) throw new Error("the track already exists");
 		const start = performance.now();
 		const reservation = handle.reserve(track.demand(), 2_500_000);
 		const deadline = start + config.limit_ms;

@@ -1,9 +1,9 @@
 //! Fills: the groups readers miss, asked of a [`Requests`](super::Requests) handler by range.
 //!
-//! A miss is a sequence a reader wants that the cache doesn't hold and the live feed will
+//! A miss is a key a reader wants that the cache doesn't hold and the live feed will
 //! never deliver. A reader joins the fill already covering it, or queues a new one, and a
-//! handler serves each fill it takes as one bounded run: [`Fill::accept`] for each group it
-//! has, [`Fill::drop_groups`] for the rest.
+//! handler serves each fill it takes as one bounded run: [`FillGroups::accept`] for each group it
+//! has, [`FillGroups::drop_groups`] for the rest.
 //!
 //! A fill serves under what its readers ask now: a reader changing its priority, budget, or
 //! order moves every fill it waits on, queued or taken. Only the first group's start frame
@@ -21,19 +21,22 @@ use std::{
 use rangemap::{RangeMap, RangeSet};
 
 use super::{Info, Order, Position, TrackState, clamp_max_delay};
-use crate::{Error, Result, StreamError, Timestamp, group, util::SendCell};
+use crate::{Error, Result, StreamError, group, util::SendCell};
 
 /// The fills a track's readers asked for, queued or taken by a handler, under one lock.
 #[derive(Default)]
 pub(in crate::model) struct FillState {
 	// Live `Requests` handles: a fill queues only while one can take it.
 	handlers: usize,
+	// Live handles that take only fetches, a finished copy's session: a reader's miss
+	// settles without them, since the subscription already settled what it owed.
+	fetchers: usize,
 	next: u64,
 	// Every fill not yet ended, queued or taken, by id.
 	pending: HashMap<u64, Pending>,
 	// The queued subset, oldest first.
 	queue: VecDeque<u64>,
-	// The fill each unresolved sequence waits on, so a second reader joins it rather than
+	// The fill each unresolved key waits on, so a second reader joins it rather than
 	// asking again.
 	covers: RangeMap<u64, u64>,
 }
@@ -41,26 +44,26 @@ pub(in crate::model) struct FillState {
 /// One fill until it ends.
 struct Pending {
 	start: Position,
-	// The first byte asked of frame `start`, for a reader continuing it partway.
-	byte: u64,
 	end: u64,
 	// Exclusive frame cap in the last group; None asks through the original end.
 	frame_end: Option<u64>,
 	// The time a lookup asks for, which owes no group.
-	time: Option<Timestamp>,
+	time: Option<u64>,
 	// What its joins ask with now, shared with them and its handler.
 	asks: kio::Shared<Asks>,
 	queued: bool,
 	// A flight: a separate copy of one group from its start frame, which no other reader
-	// joins by sequence; see [`FillState::fly`].
+	// joins by key; see [`FillState::fly`].
 	flight: bool,
-	// How many joins still read each sequence: one a reader narrowed away is no longer owed.
+	// A fetch asked or joined it, so a fetch-only handler still takes it.
+	fetch: bool,
+	// How many joins still read each key: one a reader narrowed away is no longer owed.
 	wants: RangeMap<u64, u32>,
 	// What its handler accepted that no join has picked up yet, which holds back the next
-	// group: see [`Fill::poll_wanted_changed`].
+	// group: see [`FillGroups::poll_wanted_changed`].
 	unseen: RangeSet<u64>,
 	// Readers hold consumers, so it counts the fill's demand; the handler's copy says what
-	// became of each sequence.
+	// became of each key.
 	result: kio::Producer<Outcome>,
 }
 
@@ -111,7 +114,7 @@ impl Pending {
 
 /// What a reader asks its fills with, which it may change while they are out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct Asking {
+pub(in crate::model) struct Asking {
 	pub priority: i8,
 	pub max_delay: Option<Duration>,
 	pub order: Order,
@@ -184,11 +187,11 @@ impl Asks {
 	}
 }
 
-/// What became of a fill's sequences, shared with every reader that joined it.
+/// What became of a fill's keys, shared with every reader that joined it.
 #[derive(Default)]
 pub(crate) struct Outcome {
 	accepted: RangeSet<u64>,
-	// Why each refused run was refused; refusing a sequence again replaces why.
+	// Why each refused run was refused; refusing a key again replaces why.
 	refused: RangeMap<u64, Refusal>,
 	refusals: u64,
 	// Accepted or refused, kept as answers arrive so a fill answered group by group costs
@@ -200,13 +203,13 @@ pub(crate) struct Outcome {
 }
 
 impl Outcome {
-	/// Why `sequence` was refused, if it was, and the budget its source was asked under.
-	pub(crate) fn refused(&self, sequence: u64) -> Option<(&Error, Option<Duration>)> {
-		self.refused.get(&sequence).map(|refusal| (&refusal.err, refusal.asked))
+	/// Why `key` was refused, if it was, and the budget its source was asked under.
+	pub(crate) fn refused(&self, key: u64) -> Option<(&Error, Option<Duration>)> {
+		self.refused.get(&key).map(|refusal| (&refusal.err, refusal.asked))
 	}
 
-	pub(super) fn is_accepted(&self, sequence: u64) -> bool {
-		self.accepted.contains(&sequence)
+	pub(super) fn is_accepted(&self, key: u64) -> bool {
+		self.accepted.contains(&key)
 	}
 
 	/// The lowest group accepted: a lookup's answer.
@@ -214,9 +217,9 @@ impl Outcome {
 		self.accepted.iter().next().map(|run| run.start)
 	}
 
-	/// The partial copy accepted for `sequence`, if it still holds `frames`.
-	pub(super) fn partial(&self, sequence: u64, frames: group::Bounds) -> Option<group::Handle> {
-		self.partial.get(&sequence).filter(|copy| copy.covers(frames)).cloned()
+	/// The partial copy accepted for `key`, if it still holds `frames`.
+	pub(super) fn partial(&self, key: u64, frames: group::Bounds) -> Option<group::Handle> {
+		self.partial.get(&key).filter(|copy| copy.covers(frames)).cloned()
 	}
 
 	/// What was answered within `wanted`: accepted, or refused with why and the budget
@@ -280,20 +283,20 @@ impl Eq for Refusal {}
 /// A reader's request: the run `start.group..end`, from `start.frame` in its first group.
 pub(super) struct Ask {
 	pub start: Position,
-	/// The first byte of frame `start` the reader wants: it already holds those before.
-	pub byte: u64,
 	pub end: u64,
 	pub frame_end: Option<u64>,
 	pub asking: Asking,
 	/// A lookup of the group holding this time within the run, which owes none of it.
-	pub time: Option<Timestamp>,
+	pub time: Option<u64>,
+	/// Asked by a fetch rather than a reader's miss, so a fetch-only handler takes it.
+	pub fetch: bool,
 }
 
 /// A reader's place in one fill: the part of it the reader wants.
 pub(super) struct Join {
 	fills: kio::Shared<FillState>,
 	id: u64,
-	/// The sequences of the fill this reader asked for.
+	/// The keys of the fill this reader asked for.
 	pub groups: ops::Range<u64>,
 	// The part of `groups` it still reads, counted in the fill's wants.
 	held: RangeSet<u64>,
@@ -409,16 +412,48 @@ impl FillState {
 	/// waiting on those fills finds them gone; a fill already taken stays with its handler.
 	pub(super) fn remove_handler(&mut self) {
 		self.handlers -= 1;
+		self.release_queued();
+	}
+
+	/// Turn a handler into one that takes only fetches.
+	pub(super) fn fetches_only(&mut self) {
+		self.add_fetcher();
+		self.remove_handler();
+	}
+
+	pub(super) fn add_fetcher(&mut self) {
+		self.fetchers += 1;
+	}
+
+	/// Count a fetch-only handler out; see [`Self::remove_handler`].
+	pub(super) fn remove_fetcher(&mut self) {
+		self.fetchers -= 1;
+		self.release_queued();
+	}
+
+	/// Drop each queued fill no handler left would take.
+	fn release_queued(&mut self) {
 		if self.handlers > 0 {
 			return;
 		}
-		for id in std::mem::take(&mut self.queue) {
+		let fetchers = self.fetchers;
+		let pending = &self.pending;
+		let (keep, drop): (VecDeque<u64>, VecDeque<u64>) = std::mem::take(&mut self.queue)
+			.into_iter()
+			.partition(|id| fetchers > 0 && pending.get(id).is_some_and(|pending| pending.fetch));
+		self.queue = keep;
+		for id in drop {
 			self.end(id);
 		}
 	}
 
 	pub(super) fn has_handlers(&self) -> bool {
 		self.handlers > 0
+	}
+
+	/// Whether a handler would take a fetch.
+	pub(super) fn takes_fetches(&self) -> bool {
+		self.handlers > 0 || self.fetchers > 0
 	}
 
 	pub(super) fn has_queued(&self) -> bool {
@@ -456,19 +491,16 @@ impl FillState {
 			.collect();
 		let mut gaps: Vec<ops::Range<u64>> = self.covers.gaps(&span).collect();
 		for (mut groups, id) in covered {
-			let pending = self
-				.pending
-				.get_mut(&id)
-				.expect("a covered sequence names a pending fill");
+			let pending = self.pending.get_mut(&id).expect("a covered key names a pending fill");
 			if groups.start == pending.start.group {
 				// A reader starting in an earlier group wants this one whole.
-				let (frame, byte) = match ask.start.group == groups.start {
-					true => (ask.start.frame, ask.byte),
-					false => (0, 0),
+				let frame = match ask.start.group == groups.start {
+					true => ask.start.frame,
+					false => 0,
 				};
-				if (frame, byte) < (pending.start.frame, pending.byte) {
+				if frame < pending.start.frame {
 					match pending.queued {
-						true => (pending.start.frame, pending.byte) = (frame, byte),
+						true => pending.start.frame = frame,
 						// Taken: its handler may have asked its source from the later frame
 						// already, so the earlier frames are a fill of their own.
 						false => {
@@ -494,6 +526,7 @@ impl FillState {
 				continue;
 			}
 			pending.want(groups.clone());
+			pending.fetch |= ask.fetch;
 			pending.asks.lock().add(&ask.asking);
 			joins.push(Join {
 				fills: shared.clone(),
@@ -511,16 +544,20 @@ impl FillState {
 		if ask.asking.order == Order::Descending {
 			gaps.reverse();
 		}
+		let takes = match ask.fetch {
+			true => self.takes_fetches(),
+			false => self.has_handlers(),
+		};
 		for groups in gaps {
-			if self.handlers == 0 {
+			if !takes {
 				unfillable.push(groups);
 				continue;
 			}
 			let id = self.next;
 			self.next += 1;
-			let (start, byte) = match groups.start == ask.start.group {
-				true => (ask.start, ask.byte),
-				false => (Position::group(groups.start), 0),
+			let start = match groups.start == ask.start.group {
+				true => ask.start,
+				false => Position::group(groups.start),
 			};
 			let result = kio::Producer::<Outcome>::default();
 			let mut asks = Asks::default();
@@ -542,13 +579,13 @@ impl FillState {
 				id,
 				Pending {
 					start,
-					byte,
 					end: groups.end,
 					frame_end: if groups.end == ask.end { ask.frame_end } else { None },
 					time: None,
 					asks,
 					queued: true,
 					flight: false,
+					fetch: ask.fetch,
 					wants: RangeMap::from_iter([(groups.clone(), 1)]),
 					unseen: RangeSet::new(),
 					result,
@@ -559,25 +596,25 @@ impl FillState {
 		(joins, unfillable)
 	}
 
-	/// Join or queue a flight of group `sequence` from `frame`: a fill answered with a copy
-	/// of its own, which no reader joins by sequence, since a copy shed past its readers
+	/// Join or queue a flight of group `key` from `frame`: a fill answered with a copy
+	/// of its own, which no reader joins by key, since a copy shed past its readers
 	/// holds nothing for one asking earlier. Readers asking from the same frame before it is
 	/// answered share it. `None` while no handler can take it.
 	pub(super) fn fly(
 		&mut self,
 		shared: &kio::Shared<FillState>,
-		sequence: u64,
+		key: u64,
 		frame: u64,
 		asking: Asking,
 	) -> Option<Join> {
-		let groups = sequence..sequence.checked_add(1)?;
+		let groups = key..key.checked_add(1)?;
 		if self.handlers == 0 {
 			return None;
 		}
 		let boarding = self.pending.iter_mut().find(|(_, pending)| {
 			pending.flight
-				&& pending.start == Position { group: sequence, frame }
-				&& !pending.result.read().resolved.contains(&sequence)
+				&& pending.start == Position { group: key, frame }
+				&& !pending.result.read().resolved.contains(&key)
 		});
 		let id = match boarding {
 			Some((id, pending)) => {
@@ -593,14 +630,14 @@ impl FillState {
 				self.pending.insert(
 					id,
 					Pending {
-						start: Position { group: sequence, frame },
-						byte: 0,
+						start: Position { group: key, frame },
 						end: groups.end,
 						frame_end: None,
 						time: None,
 						asks: kio::Shared::new(asks),
 						queued: true,
 						flight: true,
+						fetch: false,
 						wants: RangeMap::from_iter([(groups.clone(), 1)]),
 						unseen: RangeSet::new(),
 						result: Default::default(),
@@ -624,7 +661,7 @@ impl FillState {
 	}
 
 	/// Queue a fill looking up `time` within `ask`'s run, with the join waiting on its answer.
-	fn queue_lookup(&mut self, shared: &kio::Shared<FillState>, ask: &Ask, time: Timestamp) -> Join {
+	fn queue_lookup(&mut self, shared: &kio::Shared<FillState>, ask: &Ask, time: u64) -> Join {
 		let id = self.next;
 		self.next += 1;
 		let result = kio::Producer::<Outcome>::default();
@@ -645,13 +682,13 @@ impl FillState {
 			id,
 			Pending {
 				start: ask.start,
-				byte: 0,
 				end: ask.end,
 				frame_end: None,
 				time: Some(time),
 				asks,
 				queued: true,
 				flight: false,
+				fetch: false,
 				wants: RangeMap::new(),
 				unseen: RangeSet::new(),
 				result,
@@ -663,7 +700,7 @@ impl FillState {
 
 	/// Count a join out of reading `groups` of fill `id`. What nobody reads any more is no
 	/// longer routed to it: a reader wanting it later asks afresh rather than joining a fetch
-	/// being cancelled, so a sequence a fill stops owing stays unowed. Its answers are
+	/// being cancelled, so a key a fill stops owing stays unowed. Its answers are
 	/// forgotten too, so a wide fill holds the answers its readers have yet to take, not one
 	/// per group its source answered.
 	fn unwant(&mut self, id: u64, groups: ops::Range<u64>) {
@@ -690,11 +727,11 @@ impl FillState {
 		}
 	}
 
-	/// Whether a join of fill `id` still reads `sequence`.
-	fn wants(&self, id: u64, sequence: u64) -> bool {
+	/// Whether a join of fill `id` still reads `key`.
+	fn wants(&self, id: u64, key: u64) -> bool {
 		self.pending
 			.get(&id)
-			.is_some_and(|pending| pending.wants.contains_key(&sequence))
+			.is_some_and(|pending| pending.wants.contains_key(&key))
 	}
 
 	/// Whether a join of fill `id` still reads any of `groups`.
@@ -776,9 +813,8 @@ pub(super) fn poll_requested(
 	}) {
 		let id = guard.pop().expect("predicate guaranteed a fill");
 		let pending = guard.pending.get(&id).expect("popped fill is pending");
-		let (start, byte, end, frame_end, time, flight) = (
+		let (start, end, frame_end, time, flight) = (
 			pending.start,
-			pending.byte,
 			pending.end,
 			pending.frame_end,
 			pending.time,
@@ -792,17 +828,16 @@ pub(super) fn poll_requested(
 			fills: fills.clone(),
 			id,
 			start,
-			byte,
 			end,
 			frame_end,
-			time,
 			flight,
 			asks,
 			result,
 		};
-		return Poll::Ready(Ok(Fill {
-			inner: Arc::new(SendCell::new(inner)),
-			prev: None,
+		let inner = Arc::new(SendCell::new(inner));
+		return Poll::Ready(Ok(match time {
+			Some(time) => Fill::Lookup(FillLookup { inner, time }),
+			None => Fill::Groups(FillGroups { inner, prev: None }),
 		}));
 	}
 
@@ -815,6 +850,15 @@ pub(super) fn poll_requested(
 		Poll::Ready(Err(closed)) => Poll::Ready(Err(closed.outcome.aborted().cloned().unwrap_or(Error::Dropped))),
 		Poll::Pending => Poll::Pending,
 	}
+}
+
+/// What readers ask a [`Requests`](super::Requests) handler for: a run of groups to serve, or a
+/// time to look up.
+pub enum Fill {
+	/// Groups readers miss.
+	Groups(FillGroups),
+	/// A time a reader's range starts at that no cached group resolves.
+	Lookup(FillLookup),
 }
 
 /// A run of groups readers miss, for a [`Requests`](super::Requests) handler to serve.
@@ -835,7 +879,7 @@ pub(super) fn poll_requested(
 /// A clone serves the same fill, and the fill is settled once the last clone drops. Each
 /// clone watches on its own, so its first [`poll_wanted_changed`](Self::poll_wanted_changed)
 /// reports the current value.
-pub struct Fill {
+pub struct FillGroups {
 	// Its track state reaches every group of the track, so the cell proves `Send` once
 	// here instead of inside every session machine holding a fill.
 	inner: Arc<SendCell<Inner>>,
@@ -843,7 +887,7 @@ pub struct Fill {
 	prev: Option<Option<u64>>,
 }
 
-impl Clone for Fill {
+impl Clone for FillGroups {
 	fn clone(&self) -> Self {
 		Self {
 			inner: self.inner.clone(),
@@ -852,54 +896,98 @@ impl Clone for Fill {
 	}
 }
 
-/// The state a [`Fill`] and its per-group handles share. The last one dropping settles what
+/// The state a fill and its per-group handles share. The last one dropping settles what
 /// was left.
 struct Inner {
 	state: kio::Producer<TrackState>,
 	fills: kio::Shared<FillState>,
 	id: u64,
 	start: Position,
-	// The first byte of frame `start` asked for.
-	byte: u64,
 	end: u64,
 	// Exclusive frame cap in the last group; None asks through the original end.
 	frame_end: Option<u64>,
-	time: Option<Timestamp>,
 	// Answered with a copy of its own rather than the cache's; see [`FillState::fly`].
 	flight: bool,
 	asks: kio::Shared<Asks>,
 	result: kio::Producer<Outcome>,
 }
 
-impl Fill {
+/// A time a reader's range starts at that no group the cache holds resolves, for a
+/// [`Requests`](super::Requests) handler to look up: [`accept`](Self::accept) the group
+/// containing it, the newest one starting at or before it, or the oldest group when every group
+/// starts after it. The reader's range then starts there.
+///
+/// A lookup owes no group, so it waits only on its first accept. Dropped unanswered, as a
+/// handler that can't resolve times does, the reader's range reaches back to the newest group
+/// the cache holds at or before the time, or, with none, reads every group the cache holds and
+/// asks none starting before the time.
+pub struct FillLookup {
+	inner: Arc<SendCell<Inner>>,
+	time: u64,
+}
+
+impl FillLookup {
+	/// The time to look up, in the track's timescale (a bare start on a scale-less track).
+	pub fn time(&self) -> u64 {
+		self.time
+	}
+
+	/// The most urgent delivery priority among the readers waiting on it now.
+	pub fn priority(&self) -> i8 {
+		self.inner.asks.read().priority()
+	}
+
+	/// The most tolerant age budget among the readers waiting on it now, or `None` for the
+	/// publisher's max age alone. Each reader still enforces its own.
+	pub fn max_delay(&self) -> Option<Duration> {
+		self.inner.max_delay()
+	}
+
+	/// Insert group `key`, the one containing [`time`](Self::time), into the track's cache,
+	/// handing it to the readers waiting on the lookup, and return a [`group::Producer`] to fill.
+	///
+	/// `info` sets the track's [`Info`] if it hasn't been accepted yet, and is ignored otherwise.
+	/// Returns `None` if the group was already answered or cached. Errors with
+	/// [`Error::Skipped`] if the track skipped it, or the track's abort error.
+	pub fn accept(&self, key: u64, info: impl Into<Option<Info>>) -> Result<Option<group::Producer>> {
+		self.inner.accept(key, info.into())
+	}
+
+	/// The groups the answer may lie in, which a test checks the lookup was asked over.
+	#[cfg(all(test, feature = "async"))]
+	pub(crate) fn span(&self) -> ops::Range<u64> {
+		self.inner.start.group..self.inner.end
+	}
+}
+
+impl FillGroups {
 	/// The first group to fill, and the frame within it to start from.
 	pub fn start(&self) -> Position {
 		self.inner.start
 	}
 
-	/// The frame group `sequence` starts from: [`start`](Self::start)'s frame for the first
+	/// Whether a [`Consumer::fetch_group`](super::Consumer::fetch_group) asked or joined it,
+	/// rather than only readers that missed it.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn is_fetch(&self) -> bool {
+		let inner = &self.inner;
+		inner
+			.fills
+			.read()
+			.pending
+			.get(&inner.id)
+			.is_some_and(|pending| pending.fetch)
+	}
+
+	/// The frame group `key` starts from: [`start`](Self::start)'s frame for the first
 	/// group, 0 for the rest.
-	pub fn frame_start(&self, sequence: u64) -> u64 {
-		self.inner.frame_start(sequence)
+	pub fn frame_start(&self, key: u64) -> u64 {
+		self.inner.frame_start(key)
 	}
 
 	/// The exclusive end group.
 	pub fn end(&self) -> u64 {
 		self.inner.end
-	}
-
-	/// The presentation time a reader's range starts at that no group the cache holds
-	/// resolves, so this fill looks it up: [`accept`](Self::accept) the group containing it,
-	/// the newest one starting at or before it, or the oldest group when every group starts
-	/// after it. The reader's range then starts there, once that group's first frame is
-	/// written.
-	///
-	/// A lookup owes no group, so [`wanted`](Self::wanted) is `None` and
-	/// [`is_wanted`](Self::is_wanted) false throughout; it waits only on its first accept.
-	/// Dropped unanswered, as a handler that can't resolve times does, the reader's range
-	/// reaches back to the oldest group the cache holds. `None` for a fill of groups.
-	pub fn time(&self) -> Option<Timestamp> {
-		self.inner.time
 	}
 
 	/// The most urgent delivery priority among the readers waiting on it now.
@@ -918,17 +1006,17 @@ impl Fill {
 		self.inner.asks.read().order()
 	}
 
-	/// Insert group `sequence` into the track's cache, handing it to the readers waiting on
+	/// Insert group `key` into the track's cache, handing it to the readers waiting on
 	/// it, and return a [`group::Producer`] to fill.
 	///
 	/// The group starts at [`start`](Self::start)'s frame when it is the first group, so the
 	/// frames written keep the indices they have in the group. `info` sets the track's
 	/// [`Info`] if it hasn't been accepted yet (a fetch with no live subscription), and is
-	/// ignored otherwise. Errors with [`Error::InvalidRange`] outside the fill,
-	/// [`Error::Duplicate`] if the group was already answered or cached, [`Error::Skipped`] if
-	/// the track skipped it, or the track's abort error.
-	pub fn accept(&self, sequence: u64, info: impl Into<Option<Info>>) -> Result<group::Producer> {
-		self.inner.accept(sequence, info.into())
+	/// ignored otherwise. Returns `None` if the group was already answered or cached. Errors
+	/// with [`Error::InvalidRange`] outside the fill, [`Error::Skipped`] if the track skipped
+	/// it, or the track's abort error.
+	pub fn accept(&self, key: u64, info: impl Into<Option<Info>>) -> Result<Option<group::Producer>> {
+		self.inner.accept(key, info.into())
 	}
 
 	/// Name `groups` as never to be delivered: the source no longer has them. Readers stop
@@ -959,18 +1047,18 @@ impl Fill {
 		self.inner.result.poll_wanted_changed(waiter, true).map(drop)
 	}
 
-	/// Whether a reader still waits for group `sequence` from this fill: false once every
+	/// Whether a reader still waits for group `key` from this fill: false once every
 	/// reader took it or narrowed past it, or nobody waits on the fill. A group stops being
 	/// wanted for good; once accepted and taken, [`group::Producer::demand`](crate::group::Producer::demand)
 	/// says who reads it.
-	pub fn is_wanted(&self, sequence: u64) -> bool {
-		self.inner.is_wanted(sequence)
+	pub fn is_wanted(&self, key: u64) -> bool {
+		self.inner.is_wanted(key)
 	}
 
-	/// Resolves once no reader waits for group `sequence` from this fill, so stop serving it.
+	/// Resolves once no reader waits for group `key` from this fill, so stop serving it.
 	#[cfg_attr(feature = "async", kio::wrapper)]
-	pub fn poll_unwanted(&self, sequence: u64, waiter: &kio::Waiter) -> Poll<()> {
-		self.inner.poll_unwanted(sequence, waiter)
+	pub fn poll_unwanted(&self, key: u64, waiter: &kio::Waiter) -> Poll<()> {
+		self.inner.poll_unwanted(key, waiter)
 	}
 
 	/// How many answer runs the fill still holds for its readers.
@@ -1001,7 +1089,7 @@ impl Fill {
 		}
 		loop {
 			let wanted = self.inner.wanted();
-			let sequence = {
+			let key = {
 				let outcome = self.inner.result.read();
 				let mut gaps = wanted
 					.iter()
@@ -1019,17 +1107,17 @@ impl Fill {
 					.inner
 					.state
 					.read()
-					.covering_range(sequence, self.inner.bounds(sequence))
+					.covering_range(key, self.inner.bounds(key))
 					.is_some();
 			if !cached {
-				return Some(sequence);
+				return Some(key);
 			}
 			let Ok(mut outcome) = self.inner.result.write() else {
-				return Some(sequence);
+				return Some(key);
 			};
-			outcome.accept(sequence..sequence + 1);
+			outcome.accept(key..key + 1);
 			drop(outcome);
-			uncover(&self.inner.fills, self.inner.id, sequence..sequence + 1);
+			uncover(&self.inner.fills, self.inner.id, key..key + 1);
 		}
 	}
 
@@ -1038,7 +1126,7 @@ impl Fill {
 	/// when it next reads. `None`, once the fill is withdrawn or answered, never waits. The
 	/// first call returns at once, unless a group already accepted has yet to reach a reader.
 	///
-	/// So `while let Some(sequence) = fill.wanted_changed().await` writes one group at a time
+	/// So `while let Some(key) = fill.wanted_changed().await` writes one group at a time
 	/// as the fastest reader reads on, rather than a batch the cache may evict before it is
 	/// read. A reader reading in another order than the fill's picks up groups it cannot take
 	/// yet, so those wait in the cache.
@@ -1090,46 +1178,46 @@ impl Fill {
 	/// session asks its source for the whole run at once.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn next_run(&self) -> Option<ops::Range<u64>> {
-		let sequence = self.wanted()?;
-		Some(self.run_from(sequence, self.inner.owed_around(sequence)))
+		let key = self.wanted()?;
+		Some(self.run_from(key, self.inner.owed_around(key)))
 	}
 
 	/// [`Self::next_run`], passing over `skip`: a group another request is already bringing,
 	/// so the groups around it are served while it waits. `None` once nothing else is owed.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn next_run_except(&self, skip: u64) -> Option<ops::Range<u64>> {
-		let sequence = self.wanted_except(Some(skip))?;
-		let owed = self.inner.owed_around(sequence);
-		let owed = match skip < sequence {
+		let key = self.wanted_except(Some(skip))?;
+		let owed = self.inner.owed_around(key);
+		let owed = match skip < key {
 			true => owed.start.max(skip + 1)..owed.end,
 			false => owed.start..owed.end.min(skip),
 		};
-		Some(self.run_from(sequence, owed))
+		Some(self.run_from(key, owed))
 	}
 
-	/// The run from `sequence` over the `owed` groups beside it, in the fill's order, up to
+	/// The run from `key` over the `owed` groups beside it, in the fill's order, up to
 	/// the nearest one the cache holds.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	fn run_from(&self, sequence: u64, owed: ops::Range<u64>) -> ops::Range<u64> {
+	fn run_from(&self, key: u64, owed: ops::Range<u64>) -> ops::Range<u64> {
 		let state = self.inner.state.read();
 		let held = |(_, slot): &(&u64, &super::Slot)| !slot.is_aborted();
 		match self.order() {
 			Order::Ascending => {
 				let end = state
 					.lookup
-					.range(sequence + 1..owed.end)
+					.range(key + 1..owed.end)
 					.find(held)
 					.map_or(owed.end, |(held, _)| *held);
-				sequence..end
+				key..end
 			}
 			Order::Descending => {
 				let start = state
 					.lookup
-					.range(owed.start..sequence)
+					.range(owed.start..key)
 					.rev()
 					.find(held)
 					.map_or(owed.start, |(held, _)| held + 1);
-				start..sequence + 1
+				start..key + 1
 			}
 		}
 	}
@@ -1187,23 +1275,22 @@ impl Fill {
 		self.inner.reject(groups, err, self.max_delay());
 	}
 
-	/// Declare the track's exclusive final sequence, as the source answering a request
+	/// Declare the track's exclusive final key, as the source answering a request
 	/// reported it. A no-op once the track declared an end, or holds a later group.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn finish_track_at(&self, final_sequence: u64) {
-		self.inner.finish_track_at(final_sequence);
+	pub(crate) fn finish_track_at(&self, final_key: u64) {
+		self.inner.finish_track_at(final_key);
 	}
 
-	/// A handle on group `sequence` alone, for a session serving the fill one group at a time.
+	/// A handle on group `key` alone, for a session serving the fill one group at a time.
 	/// It keeps what the readers ask now, which is what its source gets asked.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn group(&self, sequence: u64) -> GroupFill {
+	pub(crate) fn group(&self, key: u64) -> GroupFill {
 		GroupFill {
 			inner: self.inner.clone(),
-			sequence,
-			frame_start: self.inner.frame_start(sequence),
-			byte_start: self.inner.byte_start(sequence),
-			frame_end: self.inner.bounds(sequence).end,
+			key,
+			frame_start: self.inner.frame_start(key),
+			frame_end: self.inner.bounds(key).end,
 			priority: self.priority(),
 			max_delay: self.max_delay(),
 		}
@@ -1211,12 +1298,12 @@ impl Fill {
 }
 
 impl Inner {
-	fn contains(&self, sequence: u64) -> bool {
-		(self.start.group..self.end).contains(&sequence)
+	fn contains(&self, key: u64) -> bool {
+		(self.start.group..self.end).contains(&key)
 	}
 
-	fn is_wanted(&self, sequence: u64) -> bool {
-		self.result.wanted() && self.fills.read().wants(self.id, sequence)
+	fn is_wanted(&self, key: u64) -> bool {
+		self.result.wanted() && self.fills.read().wants(self.id, key)
 	}
 
 	/// Whether a group this fill accepted has yet to reach a reader.
@@ -1232,12 +1319,12 @@ impl Inner {
 		self.asks.read().max_delay()
 	}
 
-	fn poll_unwanted(&self, sequence: u64, waiter: &kio::Waiter) -> Poll<()> {
+	fn poll_unwanted(&self, key: u64, waiter: &kio::Waiter) -> Poll<()> {
 		if self.result.poll_wanted_changed(waiter, true).is_ready() {
 			return Poll::Ready(());
 		}
 		self.fills
-			.poll(waiter, |fills| match fills.wants(self.id, sequence) {
+			.poll(waiter, |fills| match fills.wants(self.id, key) {
 				true => Poll::Pending,
 				false => Poll::Ready(()),
 			})
@@ -1254,26 +1341,17 @@ impl Inner {
 			.map_or_else(RangeSet::new, |pending| pending.wanted(&span))
 	}
 
-	fn frame_start(&self, sequence: u64) -> u64 {
-		match sequence == self.start.group {
+	fn frame_start(&self, key: u64) -> u64 {
+		match key == self.start.group {
 			true => self.start.frame,
 			false => 0,
 		}
 	}
 
-	/// The first byte group `sequence` starts from within its first frame.
-	fn byte_start(&self, sequence: u64) -> u64 {
-		match sequence == self.start.group {
-			true => self.byte,
-			false => 0,
-		}
-	}
-
-	fn bounds(&self, sequence: u64) -> group::Bounds {
+	fn bounds(&self, key: u64) -> group::Bounds {
 		group::Bounds {
-			start: self.frame_start(sequence),
-			byte: self.byte_start(sequence),
-			end: if sequence.checked_add(1) == Some(self.end) {
+			start: self.frame_start(key),
+			end: if key.checked_add(1) == Some(self.end) {
 				self.frame_end
 			} else {
 				None
@@ -1281,26 +1359,19 @@ impl Inner {
 		}
 	}
 
-	/// A writer that never says it answers from a byte writes whole frames, so its copy
-	/// starts at a frame boundary even when the fill asked from a byte: only
-	/// [`GroupFill::accept_from`] starts one partway into a frame.
-	fn accept(&self, sequence: u64, info: Option<Info>) -> Result<group::Producer> {
-		let frames = group::Bounds {
-			byte: 0,
-			..self.bounds(sequence)
-		};
-		self.accept_from(sequence, info, frames)
+	fn accept(&self, key: u64, info: Option<Info>) -> Result<Option<group::Producer>> {
+		self.accept_from(key, info, self.bounds(key))
 	}
 
-	fn accept_from(&self, sequence: u64, info: Option<Info>, frames: group::Bounds) -> Result<group::Producer> {
-		if !self.contains(sequence) {
+	fn accept_from(&self, key: u64, info: Option<Info>, frames: group::Bounds) -> Result<Option<group::Producer>> {
+		if !self.contains(key) {
 			return Err(Error::InvalidRange);
 		}
-		let Some(end) = sequence.checked_add(1) else {
+		let Some(end) = key.checked_add(1) else {
 			return Err(Error::InvalidRange);
 		};
-		if self.result.read().resolved.contains(&sequence) {
-			return Err(Error::Duplicate);
+		if self.result.read().resolved.contains(&key) {
+			return Ok(None);
 		}
 		// Written for a reader that has yet to pick it up, which the next group waits on.
 		// Recorded before the group is cached, since a reader may take it from the cache and
@@ -1308,8 +1379,8 @@ impl Inner {
 		let unseen = {
 			let mut fills = self.fills.lock();
 			match fills.pending.get_mut(&self.id) {
-				Some(pending) if pending.wants.contains_key(&sequence) => {
-					pending.unseen.insert(sequence..end);
+				Some(pending) if pending.wants.contains_key(&key) => {
+					pending.unseen.insert(key..end);
 					true
 				}
 				_ => false,
@@ -1318,8 +1389,8 @@ impl Inner {
 		// Cache the group before answering: readers resolve an accept through the cache.
 		let res = TrackState::modify(&self.state).and_then(|mut state| {
 			let res = match self.flight {
-				true => state.insert_flight(sequence, frames, info),
-				false => state.insert_group_request(sequence, frames, info),
+				true => state.insert_flight(key, frames, info).map(Some),
+				false => state.insert_group_request(key, frames, info),
 			};
 			let deferred = state.deferred();
 			drop(state);
@@ -1327,20 +1398,20 @@ impl Inner {
 			res
 		});
 		if unseen
-			&& res.is_err()
+			&& !matches!(res, Ok(Some(_)))
 			&& let Some(pending) = self.fills.lock().pending.get_mut(&self.id)
 		{
-			pending.unseen.remove(sequence..end);
+			pending.unseen.remove(key..end);
 		}
 		if let Ok(mut outcome) = self.result.write() {
-			outcome.accept(sequence..end);
-			if let Ok(group) = &res
-				&& (self.flight || frames.start > 0 || frames.byte > 0 || frames.end.is_some())
+			outcome.accept(key..end);
+			if let Ok(Some(group)) = &res
+				&& (self.flight || frames.start > 0 || frames.end.is_some())
 			{
-				outcome.partial.insert(sequence, group.handle());
+				outcome.partial.insert(key, group.handle());
 			}
 		}
-		uncover(&self.fills, self.id, sequence..end);
+		uncover(&self.fills, self.id, key..end);
 		res
 	}
 
@@ -1439,24 +1510,24 @@ impl Inner {
 		}
 	}
 
-	/// The run of owed sequences around `sequence`: read by a reader and unanswered.
+	/// The run of owed keys around `key`: read by a reader and unanswered.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	fn owed_around(&self, sequence: u64) -> ops::Range<u64> {
+	fn owed_around(&self, key: u64) -> ops::Range<u64> {
 		let wanted = self.wanted();
 		let outcome = self.result.read();
 		wanted
-			.overlapping(&(sequence..sequence + 1))
+			.overlapping(&(key..key + 1))
 			.flat_map(|run| outcome.resolved.gaps(run))
-			.find(|gap| gap.contains(&sequence))
-			.unwrap_or(sequence..sequence + 1)
+			.find(|gap| gap.contains(&key))
+			.unwrap_or(key..key + 1)
 	}
 
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	fn finish_track_at(&self, final_sequence: u64) {
+	fn finish_track_at(&self, final_key: u64) {
 		if let Ok(mut state) = TrackState::modify(&self.state)
 			&& state.declared().is_none()
 		{
-			let _ = state.set_end(Position::group(final_sequence), None);
+			let _ = state.set_end(Position::group(final_key), None);
 		}
 	}
 }
@@ -1519,7 +1590,7 @@ impl TrackState {
 pub(crate) struct Readers {
 	fills: kio::Shared<FillState>,
 	id: u64,
-	sequence: u64,
+	key: u64,
 	outcome: kio::Producer<Outcome>,
 }
 
@@ -1533,21 +1604,20 @@ impl Readers {
 		}
 		self.fills
 			.poll(waiter, |fills| match fills.pending.get(&self.id) {
-				Some(pending) if !pending.wants.contains_key(&self.sequence) => Poll::Ready(()),
+				Some(pending) if !pending.wants.contains_key(&self.key) => Poll::Ready(()),
 				_ => Poll::Pending,
 			})
 			.map(drop)
 	}
 }
 
-/// One group of a [`Fill`], for a session serving it a group at a time. Answering it answers
+/// One group of a [`FillGroups`], for a session serving it a group at a time. Answering it answers
 /// that group of the fill; dropping it unanswered leaves the group to the fill.
 #[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(crate) struct GroupFill {
 	inner: Arc<SendCell<Inner>>,
-	sequence: u64,
+	key: u64,
 	frame_start: u64,
-	byte_start: u64,
 	frame_end: Option<u64>,
 	priority: i8,
 	max_delay: Option<Duration>,
@@ -1555,9 +1625,9 @@ pub(crate) struct GroupFill {
 
 #[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 impl GroupFill {
-	/// The group sequence to fetch.
-	pub(crate) fn sequence(&self) -> u64 {
-		self.sequence
+	/// The group key to fetch.
+	pub(crate) fn key(&self) -> u64 {
+		self.key
 	}
 
 	/// The delivery priority the readers asked for when the group was taken.
@@ -1576,24 +1646,19 @@ impl GroupFill {
 		self.frame_start
 	}
 
-	/// The first byte of frame [`Self::frame_start`] the readers want; 0 is the whole frame.
-	pub(crate) fn byte_start(&self) -> u64 {
-		self.byte_start
-	}
-
 	/// The requested exclusive last frame, if this copy is bounded at the back.
 	pub(crate) fn frame_end(&self) -> Option<u64> {
 		self.frame_end
 	}
 
 	/// Accept the actual wire range, which an older or compressed upstream may have widened.
-	pub(crate) fn accept_from(&self, info: Info, frames: group::Bounds) -> Result<group::Producer> {
-		self.inner.accept_from(self.sequence, Some(info), frames)
+	pub(crate) fn accept_from(&self, info: Info, frames: group::Bounds) -> Result<Option<group::Producer>> {
+		self.inner.accept_from(self.key, Some(info), frames)
 	}
 
-	/// Poll until no reader waits on this group, as [`Fill::poll_unwanted`].
+	/// Poll until no reader waits on this group, as [`FillGroups::poll_unwanted`].
 	pub(crate) fn poll_unwanted(&self, waiter: &kio::Waiter) -> Poll<()> {
-		self.inner.poll_unwanted(self.sequence, waiter)
+		self.inner.poll_unwanted(self.key, waiter)
 	}
 
 	/// Whether a reader still waits on the fill.
@@ -1608,21 +1673,21 @@ impl GroupFill {
 		Readers {
 			fills: self.inner.fills.clone(),
 			id: self.inner.id,
-			sequence: self.sequence,
+			key: self.key,
 			outcome: self.inner.result.clone(),
 		}
 	}
 
-	/// Insert the group into the cache, as [`Fill::accept`].
+	/// Insert the group into the cache, as [`FillGroups::accept`].
 	#[cfg(test)]
-	pub(crate) fn accept(self, info: impl Into<Option<Info>>) -> Result<group::Producer> {
-		self.inner.accept(self.sequence, info.into())
+	pub(crate) fn accept(self, info: impl Into<Option<Info>>) -> Result<Option<group::Producer>> {
+		self.inner.accept(self.key, info.into())
 	}
 
 	/// Refuse the group with the source's answer, for the readers waiting now. Only
 	/// [`Error::Old`] under the publisher's max age (with every older group of the fill)
 	/// is recorded, as a stale verdict under that age.
 	pub(crate) fn reject(self, err: Error) {
-		self.inner.reject(self.sequence..self.sequence + 1, err, self.max_delay);
+		self.inner.reject(self.key..self.key + 1, err, self.max_delay);
 	}
 }

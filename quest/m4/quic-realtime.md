@@ -36,7 +36,9 @@ spike assumed no consumer; teleoperation uplinks are one):
   scheduler's grants. So the candidates group arrivals into bursts before
   fitting a trend, as GoogCC does. Reproduce it with `just rs quic-sim`.
 - Bake-off: all three candidates in parallel, each a controller
-  in `moq-congestion`. The moq-shaper presets `cellular-step`,
+  in `moq-congestion` compiled only behind its `lab` test-support feature
+  (for the delay bound, only its setter); a winner leaves the feature. The
+  moq-shaper presets `cellular-step`,
   `cellular-bursty` and `cellular-deep` decide it. The report states the
   shaper's timing jitter, measured over `near-zero`, as the noise floor of the
   delay signal. The BBR3 delay bound (`bbr3::Config::delay_bound`) brought
@@ -60,14 +62,15 @@ spike assumed no consumer; teleoperation uplinks are one):
   only stops a rung on a session with a sender, so a `Realtime` that cannot
   probe would silently leave moq-cli, OBS, and FFI simulcast publishers with
   no rung disable or recovery. A candidate that cannot probe does not ship.
-- Naming: add `Realtime` to `moq_tokio::quic::CongestionControl` (`realtime`
-  on the CLI and in TOML), which is `non_exhaustive`, so it is additive.
-  `Delay` keeps meaning BBR3; reword its doc line to say model-based, since
-  BBR does not react to queuing delay directly. A new variant rather than
-  upgrading `Delay`, so current users see no behavior change.
+- Naming (revised 2026-11-14, below): each winner joins
+  `moq_tokio::quic::CongestionControl` as a variant named after its algorithm
+  (`gcc`, `scream` on the CLI and in TOML), which is `non_exhaustive`, so it is
+  additive, as is a new moq-ffi `MoqCongestionControl` constructor. `Bbr`
+  keeps meaning BBR v3. A new variant rather than upgrading `Bbr`, so current
+  users see no behavior change.
 - Docs: inline only. The congestion-control lines in `doc/bin/cli.md` and
   `doc/lib/*` gain the new variant; no new page.
-- SCReAMv2 landed as `moq_congestion::Scream`
+- SCReAMv2 landed as `moq_congestion::scream::Scream`
   ([moq-dev/moq#7547](https://github.com/moq-dev/moq/pull/7547)). moq-quic's
   `tests::scream` measures it on the sim beside BBR3, and moq-tokio's
   `scream` integration tests over the real presets. Its estimate is a window
@@ -95,7 +98,7 @@ Collapse evidence for the comparison (maintainer, ✅ 2026-11-05, on
 response time bounds its reported estimate; the loss-bound estimate and
 Startup/recovery ordering fixes complete that quest. The lossless bufferbloat
 case belongs in this comparison rather than a new estimator or enabling the
-delay bound on `CongestionControl::Delay` before the bake-off:
+delay bound on `CongestionControl::Bbr` before the bake-off:
 
 - Real sockets, `just rs rung-disable`, FFI ladder over moq-shaper's
   `cellular-step` (2 → 0.5 → 0.1 → 2 Mbit/s at 8 / 20 / 32 s): the
@@ -172,3 +175,20 @@ through `bandwidth_estimate` → `estimated_send_rate` → `set_bitrate`.
 the upstream encoder, so a GStreamer pipeline at a fixed bitrate still queues
 when capacity drops; [its own quest](/quest/m4/moqsink-feedback.md)
 owns that feedback. The bake-off and shipping `Realtime` do not wait on it.
+
+Found 2026-11-14 by the [feature review](/quest/m3/release/feature-review.md):
+the candidates would publish unselectable with moq-congestion's first
+release. Decided 2026-11-14 (maintainer, pick on
+[moq-dev/moq#8764](https://github.com/moq-dev/moq/pull/8764)): ✅ the cut ships
+BBR through the existing selector and keeps GCC, SCReAM, and the BBR3 delay
+bound off the published API. Decided 2026-11-15 (maintainer, /quest-complete,
+on [moq-dev/moq#8850](https://github.com/moq-dev/moq/pull/8850)), in the
+maintainer's words: "wait why a new crate? put them behind a feature then
+definitely not a new crate". ✅ GCC and SCReAMv2 stay modules of
+moq-congestion, compiled only behind its `lab` test-support feature, which
+also gates the delay bound's setter (rejected: a separate workspace-only
+crate). This supersedes the earlier record of the #8764 pick as rejecting "an
+unstable feature", which paraphrased the pick rather than quoting it.
+This bake-off tests them, and each winner joins `CongestionControl` as a
+variant named after its algorithm, or, for the delay bound, a `bbr3::Config`
+option; losers stay out of the published API.

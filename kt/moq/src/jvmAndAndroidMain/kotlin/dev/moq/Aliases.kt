@@ -40,7 +40,10 @@ typealias ServerTls = uniffi.moq.MoqServerTls
 /** QUIC transport tuning, such as the peer's inbound stream cap. */
 typealias QuicConfig = uniffi.moq.MoqQuicConfig
 
-/** The congestion control family for a QUIC connection. */
+/**
+ * The congestion control algorithm for a QUIC connection. Build one with `CongestionControl.bbr()`,
+ * `cubic()`, or `unlimited()`; a new algorithm joins as a new constructor named after it.
+ */
 typealias CongestionControl = uniffi.moq.MoqCongestionControl
 
 /** The WebSocket fallback raced against QUIC: whether it runs and QUIC's head start. */
@@ -102,8 +105,7 @@ typealias Following = uniffi.moq.MoqFollowing
 typealias Announce = uniffi.moq.MoqAnnounce
 
 /**
- * What an [AnnounceConsumer] yields: [AnnounceEventPresent], [AnnounceEventUnavailable],
- * [AnnounceEventAvailable], [AnnounceEventAbsent], or [AnnounceEventOffline].
+ * What an [AnnounceConsumer] yields: [AnnounceEventPresent] or [AnnounceEventAbsent].
  *
  * Another publisher instance taking a path over keeps it present: hold a [Following] to see the
  * broadcast change.
@@ -116,22 +118,10 @@ typealias AnnounceEvent = uniffi.moq.MoqAnnounceEvent
 typealias AnnounceEventPresent = uniffi.moq.MoqAnnounceEvent.Present
 
 /**
- * The present path lost every usable path to its origin but may recover one: it stays present while
- * requests for it may fail.
+ * No route covers the path any more, whether its origin withdrew it or this side let go of it;
+ * carries its last route.
  */
-typealias AnnounceEventUnavailable = uniffi.moq.MoqAnnounceEvent.Unavailable
-
-/** The present path recovered a usable path: request it again. */
-typealias AnnounceEventAvailable = uniffi.moq.MoqAnnounceEvent.Available
-
-/** The origin withdrew the path; carries its last route. */
 typealias AnnounceEventAbsent = uniffi.moq.MoqAnnounceEvent.Absent
-
-/**
- * This side let go of the path, which its origin may still serve: the session it arrived on closed,
- * or the network lost every path to it. Carries its last route.
- */
-typealias AnnounceEventOffline = uniffi.moq.MoqAnnounceEvent.Offline
 
 // Broadcast / track / group producers and consumers.
 /** The write side of a broadcast: publish tracks into it. */
@@ -158,7 +148,7 @@ typealias TrackRequests = uniffi.moq.MoqTrackRequests
 typealias TrackDemand = uniffi.moq.MoqTrackDemand
 
 /**
- * The read side of a raw track: yields groups in sequence order, skipping ahead if it falls behind.
+ * The read side of a raw track: yields groups in start order, skipping ahead if it falls behind.
  */
 typealias TrackConsumer = uniffi.moq.MoqTrackConsumer
 
@@ -172,13 +162,22 @@ typealias GroupProducer = uniffi.moq.MoqGroupProducer
 typealias GroupConsumer = uniffi.moq.MoqGroupConsumer
 
 // Data types.
-/** A datagram payload with its own sequence and optional timestamp. */
+/**
+ * A datagram payload with its own sequence and timestamp, the [unscaled] sequence on a scale-less
+ * track.
+ */
 typealias Datagram = uniffi.moq.MoqDatagram
 
-/** A payload plus the timestamp it should be presented at. */
+/**
+ * A payload plus the timestamp it should be presented at, or its group's [unscaled] key on a
+ * scale-less track.
+ */
 typealias Frame = uniffi.moq.MoqFrame
 
-/** An exact media timestamp: `value` units at `scale` units per second. */
+/**
+ * An exact timestamp: `value` units at `scale` units per second, or on a scale-less track a null
+ * `scale` and the group key (a datagram's sequence) as `value`; see [unscaled].
+ */
 typealias Timestamp = uniffi.moq.MoqTimestamp
 
 /**
@@ -195,9 +194,8 @@ typealias Instance = uniffi.moq.MoqInstance
 typealias RouteOptions = uniffi.moq.MoqRouteOptions
 
 /**
- * The read-only facts on a received route: the [Instance] of the stream it serves, relay hop ids
- * (oldest first), static production and link cost (lower wins), and its informational `rtt` to the
- * origin node.
+ * The read-only facts on a received route: the [Instance] of the stream it serves, static
+ * production and link cost (lower wins), and whether a usable path reaches it.
  */
 typealias RouteInfo = uniffi.moq.MoqRouteInfo
 
@@ -205,9 +203,12 @@ typealias RouteInfo = uniffi.moq.MoqRouteInfo
 typealias Subscription = uniffi.moq.MoqSubscription
 
 /**
- * How far behind the live edge a subscriber or decoder plays: `min` is the target latency and where
- * a cold join starts, null to leave it unstated (a decoder plays it as zero), and `max`, null for
- * no subscriber limit, is how far a non-latest group may fall behind before it is skipped. A `min`
+ * How far behind the live edge a subscriber or decoder plays: `min` is the target latency, where a
+ * cold join starts, and how long a decoder waits for a missing group, null to leave it unstated (a
+ * decoder starts it as zero and waits a missing group for `max`, except an audio decoder, which
+ * floors it at zero and waits only its playout estimate, which can be larger; a catalog warmup or
+ * an audio decoder's playout delay still states a `min` to the publisher), and `max`, null for no
+ * subscriber limit, is how far a non-latest group may fall behind before it is skipped. A `min`
  * past `max` starts at `max`.
  */
 typealias Delay = uniffi.moq.MoqDelay
@@ -220,41 +221,50 @@ typealias Delay = uniffi.moq.MoqDelay
 fun uniffi.moq.MoqSubscription.Companion.default(): Subscription =
     uniffi.moq.moqSubscriptionDefaults()
 
-/** A span of a track to deliver: from `start` up to `end`, or onward when `end` is null. */
+/**
+ * A span of a track to deliver: from `start` through `end`, or onward when `end` is null. Every end
+ * includes its whole group.
+ */
 typealias Range = uniffi.moq.MoqRange
 
-/**
- * Where one end of a [Range] falls: [AnchorOldest], [AnchorAbsolute], [AnchorRelative], or
- * [AnchorTime].
- */
+/** Where one end of a [Range] falls: [AnchorOldest], [AnchorRelative], or [AnchorTime]. */
 typealias Anchor = uniffi.moq.MoqAnchor
 
 /** The oldest group still around, as far back as the max delay allows. A start only. */
 typealias AnchorOldest = uniffi.moq.MoqAnchor.Oldest
 
-/** A group, delivered from its first frame. */
-typealias AnchorAbsolute = uniffi.moq.MoqAnchor.Absolute
-
 /** The group `groups` before the latest one, clamped to group 0: 0 is the latest. */
 typealias AnchorRelative = uniffi.moq.MoqAnchor.Relative
 
-/** The group containing `timestamp`, a presentation time. */
+/**
+ * The group containing `timestamp`, an unscaled time in the track's timescale; a scaled one is
+ * refused. As an end it includes every group starting at or before the time.
+ */
 typealias AnchorTime = uniffi.moq.MoqAnchor.Time
 
 /** Which pending group the publisher sends first: `ASCENDING` or `DESCENDING`. */
 typealias Order = uniffi.moq.MoqOrder
 
-/** A location within a track: a group sequence and a frame index in it. */
+/** A location within a track: a group start and a frame index in it. */
 typealias Position = uniffi.moq.MoqPosition
 
-/** Options for fetching one past group by sequence. */
+/** Options for fetching one past group by start. */
 typealias FetchGroupOptions = uniffi.moq.MoqFetchGroupOptions
 
-/** Delivery settings for a raw track: priority, ordering, latency budget, and timescale. */
+/** Delivery settings for a raw track: priority, max age, refresh, timescale, and compression. */
 typealias TrackInfo = uniffi.moq.MoqTrackInfo
 
 /**
- * How a track's frames are compressed on the wire: `DEFLATE`, or `null` in [TrackInfo] for none.
+ * When a subscriber asks a track's publisher for a new group, which [TrackDemand.refresh] reports:
+ * a join once the newest group outweighs `ratio` times its first frame (any join when `null`),
+ * waiting out `interval` (`null` for no wait), which caps how often the publisher makes groups
+ * however many subscribers ask. A bare `TrackRefresh()` asks for nothing.
+ */
+typealias TrackRefresh = uniffi.moq.MoqTrackRefresh
+
+/**
+ * How a track's frames are compressed on the wire: `Compression.deflate()`, or `null` in
+ * [TrackInfo] for none. Compare a received one with `==` or by `name()`.
  */
 typealias Compression = uniffi.moq.MoqCompression
 
@@ -293,7 +303,7 @@ typealias AudioEncoderOutput = uniffi.moq.MoqAudioEncoderOutput
 /** One video frame: pixels in the configured layout plus a presentation timestamp. */
 typealias VideoFrame = uniffi.moq.MoqVideoFrame
 
-/** A video codec identifier (H.264 or H.265). */
+/** Selects the video encoder codec. Build one with `VideoCodec.h264()` or `VideoCodec.h265()`. */
 typealias VideoCodec = uniffi.moq.MoqVideoCodec
 
 /**
@@ -374,8 +384,11 @@ typealias ConnectionState = uniffi.moq.MoqConnectionState
 
 /**
  * Retry pacing for the automatic reconnect: initial delay, multiplier, ceiling, and give-up window.
- * It applies only once a session has been established: a first dial that reaches no session ends
- * the connection with its error rather than retrying.
+ * A null field keeps its default, zero means zero (retry at once, or give up at the first failure),
+ * and `maxUnlimited` lifts the ceiling. Until the peer has accepted a session's credential or
+ * drained a session with a GOAWAY (or, on moq-lite 03/04, which never answer it, a session stayed
+ * up 1s), a failed dial or a closed session, such as a refused credential, ends the connection with
+ * its error rather than retrying.
  */
 typealias Backoff = uniffi.moq.MoqBackoff
 
@@ -393,7 +406,8 @@ typealias ProtocolError = uniffi.moq.MoqProtocolError
 // directly. `dev.moq.media.Container` aliases `MoqContainer` for signatures, but its
 // variants still need the full name (`uniffi.moq.MoqContainer.Loc`). Enums
 // (AudioFormat) are fine: entry access through the alias works. Objects
-// (AudioCodec) expose constructors through the alias (`AudioCodec.opus()`).
+// (AudioCodec, VideoCodec, Compression) expose constructors through the alias
+// (`AudioCodec.opus()`).
 
 /** Writes live datagrams with an independent sequence counter and no cache. */
 typealias DatagramProducer = uniffi.moq.MoqDatagramProducer

@@ -70,9 +70,10 @@ describe("replay", () => {
 	});
 
 	it("counts each run-dry the way the player's stats do", async () => {
-		// One frame 200 ms late against a 100 ms target: the ring runs dry once and re-stalls to refill,
-		// which counts the short quantum it ran dry in and the stall after it.
-		const trace = paced(10, (i) => (i === 250 ? 230 : 30)).sort((a, b) => a.at - b.at);
+		// Ten frames held and released together, the first 200 ms late against a 100 ms target: the ring
+		// runs dry once and re-stalls to refill, which counts the short quantum it ran dry in and the
+		// stall after it.
+		const trace = paced(10, (i) => (i >= 250 && i < 260 ? 30 + (260 - i) * 20 : 30)).sort((a, b) => a.at - b.at);
 		const counted = async (arrivals: Arrival[]) => {
 			let last = 0;
 			for await (const { underruns } of replay(arrivals, {
@@ -89,19 +90,17 @@ describe("replay", () => {
 		expect(await counted(trace)).toBeLessThanOrEqual(2);
 	});
 
-	it("holds newer groups behind a missing one until the max delay gives up on it", async () => {
+	it("holds newer groups behind a missing one until the ring could no longer play it", async () => {
 		const trace = paced(10, () => 30).filter((arrival) => arrival.group !== 250);
-		// The consumer delivers in group order, so the ring runs dry for longer than the missing frame
-		// while the groups behind it wait. Writing arrivals straight into the ring plays straight through.
-		const frame = Math.ceil((20 / 1000) * (RATE / QUANTUM));
-		expect(
-			await underruns(trace, {
-				rate: RATE,
-				config: CONFIG,
-				delay: Duration.millis(100),
-				duration: observed(10),
-			}),
-		).toBeGreaterThan(frame);
+		// The consumer delivers in group order, so the ring runs dry while the groups behind the missing
+		// one wait, and the ordered reader gives up on it as the ring's stretch bound passes it.
+		const run = await underruns(trace, {
+			rate: RATE,
+			config: CONFIG,
+			delay: Duration.millis(100),
+			duration: observed(10),
+		});
+		expect(run).toBeGreaterThan(0);
 		expect(warn).toHaveBeenCalled();
 	});
 
@@ -195,6 +194,23 @@ describe("replay against the shared clock", () => {
 	// 80 ms of spread against a fixed 40 ms target: every flush runs a ring dry that cannot fall behind.
 	const flushed = paced(60, (i) => 30 + (4 - (i % 5)) * 20);
 	const fixed = { rate: RATE, config: CONFIG, delay: Duration.millis(40), duration: observed(60) };
+
+	// A late burst lands out of order: the group before lands a moment after the one past it, which the
+	// clock already passed. The ring still plays audio trailing the clock within the stretch, so the
+	// consumer waits for that group rather than skipping a hole the burst fills; with the stretch off,
+	// the ring would skip it anyway.
+	it("keeps a hole a late burst fills once the clock passed the group past it", async () => {
+		// Groups 250 to 259 are held and released together at 5230 ms, 250 a millisecond after the rest.
+		const held = (i: number) => (i >= 250 && i < 260 ? 5230 - i * 20 + (i === 250 ? 1 : 0) : 30);
+		const trace = paced(10, held).sort((a, b) => a.at - b.at);
+		const options = { rate: RATE, config: CONFIG, delay: Duration.millis(100), duration: observed(10) };
+
+		// The consumer warns on every group it skips.
+		await lag(trace, options, 0);
+		expect(warn).not.toHaveBeenCalled();
+		await lag(trace, { ...options, stretch: 0 }, 0);
+		expect(warn).toHaveBeenCalled();
+	});
 
 	it("underruns a fixed target short of the spread with the stretch off, rather than trailing the clock", async () => {
 		const { lags, median, underruns, accelerated } = await lag(flushed, { ...fixed, stretch: 0 }, 30_000);

@@ -100,8 +100,8 @@ func ExampleClient_Route() {
 	_ = route.Announce()
 
 	// 20 ms in, counted on the Opus 48 kHz sample clock.
-	pts := moq.Timestamp{Value: 960, Scale: 48_000}
-	if err := media.WriteFrame(moq.Frame{Payload: []byte("opus frame"), Timestamp: &pts}); err != nil {
+	pts := moq.TimestampFromScale(960, 48_000)
+	if err := media.WriteFrame(moq.Frame{Payload: []byte("opus frame"), Timestamp: pts}); err != nil {
 		log.Fatal(err)
 	}
 
@@ -140,7 +140,7 @@ func Example_mediaVideoHint() {
 	}
 	defer broadcast.Close()
 
-	media, err := moqmedia.NewVideoTrackProducer(broadcast, moqmedia.Named{}, moqmedia.VideoInit{Format: moqmedia.VideoFormatAvc3, Data: nil, Hint: &moqmedia.VideoHint{}})
+	media, err := moqmedia.NewVideoTrackProducer(broadcast, moqmedia.Named{}, moqmedia.VideoInit{Format: moqmedia.VideoFormatH264, Data: nil, Hint: &moqmedia.VideoHint{}})
 	if err != nil {
 		log.Fatal(err)
 	}

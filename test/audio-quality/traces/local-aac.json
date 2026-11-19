@@ -1,9 +1,10 @@
 {
-	"version": 3,
-	"source": "a local moq-relay on 127.0.0.1, ffmpeg's AAC sine over MPEG-TS through moq import ts, recorded 2026-09-29",
+	"version": 4,
+	"source": "a local moq-relay on 127.0.0.1, ffmpeg's AAC sine over MPEG-TS through moq import ts, recorded 2026-09-29. Version 4 adds largest, the publisher's largest group as the subscription began. This recording predates it, so it is derived (2026-11-15): the newest group whose first frame's media timestamp plus the trace's lowest lag (the smallest at minus timestamp) falls at or before the first arrival, the live edge as the first frame arrived.",
 	"description": "The shallow control: the audio quality harness's AAC publisher with nothing but loopback between it and the viewer.",
 	"transport": "webtransport",
 	"rtt": 1,
+	"largest": 42,
 	"config": {
 		"codec": "mp4a.40.2",
 		"container": {

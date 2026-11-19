@@ -1,15 +1,15 @@
-//! Viewer sessions and their commands.
+//! Viewer discovery and command handling.
 //!
-//! The emulator runs a server socket endpoint named for its game, and each viewer dials it
-//! from a client endpoint in a `track` session. Each group the viewer writes is one JSON command: button states or a
-//! reset. The emulator answers each button command with that viewer's latency breakdown,
-//! one group per reply, on its own half of the session. A viewer is gone once its session
-//! ends, and a reload is a new session.
+//! Viewers are MoQ publishers: each creates a broadcast under the viewer prefix
+//! with a "command" track containing JSON button states and reset requests. The
+//! command track is read through [`moq_json`], so snapshots and merge-patch
+//! deltas are reconstructed into a full command before dispatch. This module
+//! discovers viewer broadcasts and relays their commands to the emulator thread
+//! via an mpsc channel.
 
 use std::time::Duration;
 
 use crate::emulator::Button;
-use crate::status::LatencyEntry;
 
 /// A single timestamp entry from the viewer.
 #[derive(serde::Deserialize, Debug)]
@@ -19,11 +19,27 @@ struct RawTimestamp {
 	ts: f64,
 }
 
+/// The pipeline stages a viewer reports, in order. Anything else is dropped, so the latency the
+/// shared status retains per viewer stays this small whatever a viewer sends.
+const STAGES: [&str; 3] = ["received", "decoded", "rendered"];
+
 /// A parsed timestamp entry with Duration.
 #[derive(Debug)]
 pub struct TimestampEntry {
-	pub label: String,
+	pub label: &'static str,
 	pub ts: Duration,
+}
+
+/// The first timestamp of each known stage, in pipeline order, dropping one no Duration can hold.
+fn stages(timestamps: Vec<RawTimestamp>) -> Vec<TimestampEntry> {
+	STAGES
+		.iter()
+		.filter_map(|&label| {
+			let t = timestamps.iter().find(|t| t.label == label)?;
+			let ts = Duration::try_from_secs_f64(t.ts / 1000.0).ok()?;
+			Some(TimestampEntry { label, ts })
+		})
+		.collect()
 }
 
 /// A command sent by a viewer.
@@ -42,37 +58,12 @@ enum RawCommand {
 	Reset {},
 }
 
-/// What the emulator writes back to one viewer, one per group.
-#[derive(serde::Serialize)]
-struct Reply<'a> {
-	/// The viewer's latency breakdown, in pipeline order.
-	latency: &'a [LatencyEntry],
-}
+/// A viewer's broadcast path under the game's viewer prefix, which keys its buttons and latency.
+pub type ViewerId = String;
 
-/// One viewer's session, numbered locally: the session id is a secret, so it stays out
-/// of logs and status.
-pub type ViewerId = u64;
-
-/// Where the emulator writes a viewer's replies.
-pub struct Replies(moq_net::track::Producer);
-
-impl Replies {
-	/// Send the viewer its latency breakdown.
-	pub fn latency(&mut self, latency: &[LatencyEntry]) {
-		let reply = serde_json::to_vec(&Reply { latency }).expect("a reply always serializes");
-		if let Err(err) = self.0.write_frame(None, reply) {
-			tracing::debug!(%err, "viewer reply dropped");
-		}
-	}
-}
-
-/// A viewer's session event, in the order the emulator applies them.
+/// A command with viewer identity attached.
+#[derive(Debug)]
 pub enum Command {
-	/// A viewer's session opened.
-	Joined {
-		viewer: ViewerId,
-		replies: Replies,
-	},
 	/// Full button state for a viewer.
 	Buttons {
 		viewer: ViewerId,
@@ -81,121 +72,132 @@ pub enum Command {
 		timestamps: Vec<TimestampEntry>,
 	},
 	Reset,
-	/// A viewer's session ended.
+	/// A viewer stopped publishing, went offline, or sent a frame that doesn't decode.
 	Left {
 		viewer: ViewerId,
 	},
 }
 
-/// Accept every viewer that dials `endpoint`, forwarding their commands to the emulator.
-///
-/// Fails once the endpoint can no longer accept: it closed, or a hop to the relay can't
-/// carry sockets.
+/// Read the commands of every viewer broadcast announced in `viewers`.
 pub async fn handle_viewers(
-	endpoint: &moq_net::socket::Endpoint,
+	viewers: &moq_net::origin::Consumer,
 	cmd_tx: &tokio::sync::mpsc::Sender<Command>,
 ) -> anyhow::Result<()> {
-	for viewer in 0.. {
-		let incoming = endpoint.accept_track().await?;
-		tokio::spawn(run_viewer(viewer, incoming, cmd_tx.clone()));
+	let mut announced = viewers.announced();
+	// The follower per viewer, which reads each broadcast a restarted viewer replaces the old with.
+	let mut readers: std::collections::HashMap<ViewerId, tokio::task::JoinHandle<()>> = Default::default();
+	while let Some(event) = announced.next().await {
+		match event {
+			moq_net::announce::Event::Present(announce) => {
+				let viewer = announce.prefix.to_string();
+				let reader = tokio::spawn(follow_viewer(viewers.clone(), announce.prefix, cmd_tx.clone()));
+				if let Some(old) = readers.insert(viewer.clone(), reader) {
+					// The new follower may never restate what the old one held, so release it.
+					stop(old).await;
+					let _ = cmd_tx.send(Command::Left { viewer }).await;
+				}
+			}
+			moq_net::announce::Event::Absent(announce) => {
+				let viewer = announce.prefix.to_string();
+				// Dropping a join handle leaves its task running, so stop it here.
+				if let Some(old) = readers.remove(&viewer) {
+					stop(old).await;
+				}
+				tracing::info!(%viewer, "viewer went offline");
+				let _ = cmd_tx.send(Command::Left { viewer }).await;
+			}
+		}
 	}
-	unreachable!("viewer ids are exhausted")
+	anyhow::bail!("viewer origin closed")
 }
 
-/// Accept one viewer's dial and relay its commands until the session ends.
-async fn run_viewer(
-	viewer: ViewerId,
-	incoming: moq_net::socket::Incoming<moq_net::socket::TrackStream>,
+/// Stop a viewer's follower and wait until it has, so no command it was partway through sending
+/// lands after the `Left` that follows: on the multi-thread runtime, an aborted task may still be
+/// running on another worker.
+async fn stop(follower: tokio::task::JoinHandle<()>) {
+	follower.abort();
+	let _ = follower.await;
+}
+
+/// Read the commands of each broadcast a viewer publishes at `path`, switching to the new one
+/// when the viewer restarts. A refused resolution waits for the serving route to change, since
+/// the listing reports nothing new while the path stays present.
+async fn follow_viewer(
+	origin: moq_net::origin::Consumer,
+	path: moq_net::Path,
 	cmd_tx: tokio::sync::mpsc::Sender<Command>,
 ) {
-	let peer = incoming.peer().to_string();
-	let stream = match incoming.accept(None).await {
-		Ok(stream) => stream,
-		Err(err) => {
-			tracing::debug!(%peer, %err, "viewer dial failed");
-			return;
-		}
-	};
-	tracing::info!(%peer, viewer, "viewer connected");
-
-	let replies = Replies(stream.producer.clone());
-	if cmd_tx.send(Command::Joined { viewer, replies }).await.is_err() {
+	let viewer = path.to_string();
+	let Ok(mut following) = origin.follow(&path, None) else {
 		return;
-	}
-
-	let result = read_commands(viewer, stream.consumer, &cmd_tx).await;
-	let _ = cmd_tx.send(Command::Left { viewer }).await;
-	match result {
-		Ok(()) => {
-			tracing::info!(%peer, viewer, "viewer disconnected");
-			let _ = stream.producer.finish();
-		}
-		Err(err) => {
-			tracing::info!(%peer, viewer, %err, "viewer session failed");
-			let _ = stream.producer.abort(err);
+	};
+	let mut reading = None;
+	loop {
+		tokio::select! {
+			change = following.available() => match change {
+				Ok(Some(broadcast)) => {
+					// A restarted viewer can replace its broadcast before the old one ends: release the
+					// old one's buttons and latency, since the new one may never restate them.
+					if reading.take().is_some() {
+						tracing::info!(%viewer, "viewer replaced");
+						let _ = cmd_tx.send(Command::Left { viewer: viewer.clone() }).await;
+					}
+					tracing::info!(%viewer, "viewer connected");
+					reading = Some(Box::pin(read_commands(&viewer, broadcast, &cmd_tx)));
+				}
+				Ok(None) => {}
+				// The follower's documented end: it returns Closed on every call once the origin
+				// closes, so waiting on it again would spin.
+				Err(moq_net::Error::Closed) => return,
+				// A refused resolution, which the next call retries once the serving route changes.
+				Err(err) => tracing::debug!(%viewer, %err, "viewer not resolved; waiting for a route change"),
+			},
+			read = async { reading.as_mut().expect("guarded").await }, if reading.is_some() => {
+				reading = None;
+				if let Err(err) = read {
+					tracing::warn!(%viewer, %err, "viewer command error");
+				}
+				tracing::info!(%viewer, "viewer disconnected");
+				let _ = cmd_tx.send(Command::Left { viewer: viewer.clone() }).await;
+			}
 		}
 	}
 }
 
-/// Forward each command the viewer writes, one per group, until it finishes its half.
+/// Forward the newest command of one viewer broadcast until its track ends or fails.
+///
+/// A command that decodes as JSON but isn't one the emulator knows is skipped, so a newer viewer
+/// can add commands. A frame that isn't JSON, or a merge patch that doesn't apply, ends the read:
+/// that viewer's publisher is broken, and it hurts only that viewer.
 async fn read_commands(
-	viewer: ViewerId,
-	consumer: moq_net::track::Subscriber,
+	viewer: &str,
+	broadcast: moq_net::broadcast::Consumer,
 	cmd_tx: &tokio::sync::mpsc::Sender<Command>,
-) -> Result<(), moq_net::Error> {
-	// Each command carries the viewer's whole button state, so a newer one supersedes a
-	// delayed one rather than waiting behind it. A reset can be skipped the same way, only
-	// when a newer command overtakes it in flight.
-	let live = consumer.subscription().with_delay(moq_net::track::Delay::default());
-	consumer.control().update(live)?;
-	let mut commands = consumer.ordered();
-	while let Some(mut group) = commands.next_group().await? {
-		let frame = match group.read_frame().await {
-			Ok(Some(frame)) => frame,
-			Ok(None) => continue,
-			// Judged by stream code, so a group the viewer's side reset is the same loss as
-			// one the delay budget dropped here. A newer command restates the whole state.
-			Err(err)
-				if matches!(
-					moq_net::StreamError::from(&err),
-					moq_net::StreamError::Old
-						| moq_net::StreamError::Evicted
-						| moq_net::StreamError::TooFarBehind
-						| moq_net::StreamError::GroupTooLarge
-				) =>
-			{
-				tracing::debug!(viewer, %err, "command lost");
-				continue;
-			}
-			Err(err) => return Err(err),
-		};
+) -> anyhow::Result<()> {
+	// The consumer subscribes at a zero delay budget and skips a lost group, so a command still in
+	// flight never holds up a newer one: each restates the viewer's whole button state.
+	let mut commands = moq_json::snapshot::Consumer::<serde_json::Value>::new(
+		broadcast.track("command")?,
+		moq_json::snapshot::consumer::Config::default(),
+	);
 
-		// A viewer is untrusted: a malformed command is skipped, not fatal.
-		let command = match serde_json::from_slice::<RawCommand>(&frame.payload) {
+	while let Some(command) = commands.latest().await? {
+		let command = match serde_json::from_value::<RawCommand>(command.value) {
 			Ok(command) => command,
 			Err(err) => {
-				tracing::warn!(viewer, %err, "invalid command");
+				tracing::warn!(%viewer, %err, "unknown command");
 				continue;
 			}
 		};
 
 		let command = match command {
-			RawCommand::Buttons { buttons, timestamps } => {
-				let timestamps = timestamps
-					.into_iter()
-					.filter_map(|t| {
-						let ts = Duration::try_from_secs_f64(t.ts / 1000.0).ok()?;
-						Some(TimestampEntry { label: t.label, ts })
-					})
-					.collect();
-				Command::Buttons {
-					viewer,
-					buttons,
-					timestamps,
-				}
-			}
+			RawCommand::Buttons { buttons, timestamps } => Command::Buttons {
+				viewer: viewer.to_string(),
+				buttons,
+				timestamps: stages(timestamps),
+			},
 			RawCommand::Reset {} => {
-				tracing::info!(viewer, "reset");
+				tracing::info!(%viewer, "reset");
 				Command::Reset
 			}
 		};
@@ -210,33 +212,52 @@ async fn read_commands(
 mod tests {
 	use std::time::Duration;
 
-	use moq_net::socket::{Endpoint, TrackStream};
-
 	use super::*;
 
-	/// An emulator endpoint and a viewer endpoint on one origin, the emulator accepting.
-	async fn setup() -> (
-		moq_net::origin::Producer,
-		Endpoint,
-		TrackStream,
-		tokio::sync::mpsc::Receiver<Command>,
-	) {
+	/// An origin whose viewer broadcasts the handler reads, as the emulator scopes it.
+	fn setup() -> (moq_net::origin::Producer, tokio::sync::mpsc::Receiver<Command>) {
 		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
 		tokio::spawn(moq_net::time::run(driver));
-		let game = Endpoint::new(&origin, "boy", "tetris").unwrap();
 		let (tx, rx) = tokio::sync::mpsc::channel(16);
-		tokio::spawn(async move { handle_viewers(&game, &tx).await });
-
-		let viewer = Endpoint::new(&origin, "boy", "alice").unwrap();
-		let session = kio::clock::timeout(Duration::from_secs(5), viewer.dial_track("tetris", None).unwrap())
-			.await
-			.expect("dial timeout")
-			.expect("dial");
-		(origin, viewer, session, rx)
+		let consumer = origin.consume();
+		tokio::spawn(async move { handle_viewers(&consumer, &tx).await });
+		(origin, rx)
 	}
 
-	fn send(session: &mut TrackStream, command: &str) {
-		session.producer.write_frame(None, command.as_bytes().to_vec()).unwrap();
+	/// A viewer's broadcast and its command track, as the element publishes them.
+	struct Viewer {
+		route: moq_net::origin::Route,
+		track: moq_net::track::Producer,
+		commands: moq_json::snapshot::Producer<serde_json::Value>,
+		at: u64,
+	}
+
+	impl Viewer {
+		fn new(origin: &moq_net::origin::Producer, id: &str) -> Self {
+			let route = origin.route(id, moq_net::origin::RouteOptions::default()).unwrap();
+			let track = route
+				.broadcast()
+				.create_track(
+					"command",
+					moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+				)
+				.unwrap();
+			let commands = moq_json::snapshot::Producer::new(track.clone(), moq_json::snapshot::Config::default());
+			Self {
+				route,
+				track,
+				commands,
+				at: 0,
+			}
+		}
+
+		/// Publish a command, a snapshot or a delta against the last one.
+		fn send(&mut self, command: &str) {
+			self.at += 1;
+			let value: serde_json::Value = serde_json::from_str(command).unwrap();
+			let at = moq_net::Timestamp::from_millis(self.at).unwrap();
+			self.commands.update(&value, at).unwrap();
+		}
 	}
 
 	async fn recv(rx: &mut tokio::sync::mpsc::Receiver<Command>) -> Command {
@@ -246,21 +267,20 @@ mod tests {
 			.expect("handler ended")
 	}
 
-	/// A viewer is untrusted: a malformed command, or a timestamp no Duration can
-	/// hold, is dropped without ending that viewer's session.
+	/// A viewer is untrusted: an unknown command, or a timestamp of an unknown stage or one no Duration
+	/// can hold, is dropped without ending that viewer's commands.
 	#[tokio::test(start_paused = true)]
-	async fn malformed_commands_are_skipped() {
-		let (_origin, _viewer, mut session, mut rx) = setup().await;
-		let Command::Joined { viewer, .. } = recv(&mut rx).await else {
-			panic!("the session did not join first");
-		};
+	async fn unknown_commands_are_skipped() {
+		let (origin, mut rx) = setup();
+		let mut viewer = Viewer::new(&origin, "alice");
 
-		send(&mut session, "not json");
-		send(&mut session, r#"{"type":"explode"}"#);
-		send(&mut session, r#"{"type":"buttons","buttons":["turbo"]}"#);
-		send(
-			&mut session,
-			r#"{"type":"buttons","buttons":["a"],"timestamps":[{"label":"past","ts":-5},{"label":"far","ts":1e300},{"label":"ok","ts":1500}]}"#,
+		// Read one at a time, so each is decoded rather than superseded by the next.
+		for command in [r#"{"type":"explode"}"#, r#"{"type":"buttons","buttons":["turbo"]}"#] {
+			viewer.send(command);
+			kio::clock::sleep(Duration::from_millis(100)).await;
+		}
+		viewer.send(
+			r#"{"type":"buttons","buttons":["a"],"timestamps":[{"label":"rendered","ts":3000},{"label":"evil","ts":1},{"label":"received","ts":-5},{"label":"decoded","ts":1500},{"label":"decoded","ts":9}]}"#,
 		);
 
 		let Command::Buttons {
@@ -269,93 +289,157 @@ mod tests {
 			timestamps,
 		} = recv(&mut rx).await
 		else {
-			panic!("the viewer's session ended at a malformed command");
+			panic!("the viewer's commands ended at an unknown command");
 		};
-		assert_eq!(from, viewer);
+		assert_eq!(from, "alice");
 		assert_eq!(buttons, vec![Button::A]);
-		assert_eq!(timestamps.len(), 1, "{timestamps:?}");
-		assert_eq!(timestamps[0].label, "ok");
-		assert_eq!(timestamps[0].ts, Duration::from_millis(1500));
+		// Only known stages, the first of each, in pipeline order, without the one no Duration holds.
+		let timestamps: Vec<_> = timestamps.iter().map(|t| (t.label, t.ts)).collect();
+		assert_eq!(
+			timestamps,
+			[
+				("decoded", Duration::from_millis(1500)),
+				("rendered", Duration::from_millis(3000))
+			]
+		);
 	}
 
-	/// A command still in flight when a newer one lands is superseded, not a session
-	/// failure: the newer state reaches the emulator on the same session.
+	/// However many timestamps a viewer sends, the shared status retains at most one per stage.
+	#[test]
+	fn timestamps_are_bounded_by_the_stages() {
+		let timestamps = (0..10_000)
+			.map(|n| RawTimestamp {
+				label: ["received", "decoded", "rendered", "other"][n % 4].to_string(),
+				ts: n as f64,
+			})
+			.collect();
+		assert_eq!(stages(timestamps).len(), STAGES.len());
+	}
+
+	/// A frame that isn't JSON ends only its own viewer: the other keeps playing.
+	#[tokio::test(start_paused = true)]
+	async fn an_undecodable_frame_ends_only_its_viewer() {
+		let (origin, mut rx) = setup();
+		let broken = Viewer::new(&origin, "mallory");
+		let mut alice = Viewer::new(&origin, "alice");
+		kio::clock::sleep(Duration::from_millis(100)).await;
+
+		let mut group = broken
+			.track
+			.append_group(moq_net::Timestamp::from_millis(1).unwrap())
+			.unwrap();
+		group
+			.write_frame(moq_net::Timestamp::from_millis(1).unwrap(), b"not json".to_vec())
+			.unwrap();
+		group.finish().unwrap();
+		let Command::Left { viewer } = recv(&mut rx).await else {
+			panic!("the broken viewer did not leave");
+		};
+		assert_eq!(viewer, "mallory");
+
+		alice.send(r#"{"type":"buttons","buttons":["b"]}"#);
+		let Command::Buttons { viewer, buttons, .. } = recv(&mut rx).await else {
+			panic!("another viewer's frame ended this one");
+		};
+		assert_eq!(viewer, "alice");
+		assert_eq!(buttons, vec![Button::B]);
+		drop(broken);
+	}
+
+	/// A command still in flight when a newer one lands is superseded, not a failure: the newer
+	/// state reaches the emulator.
 	#[tokio::test(start_paused = true)]
 	async fn a_superseded_command_is_skipped() {
-		let (_origin, _viewer, mut session, mut rx) = setup().await;
-		let Command::Joined { viewer, .. } = recv(&mut rx).await else {
-			panic!("the session did not join first");
-		};
+		let (origin, mut rx) = setup();
+		let mut viewer = Viewer::new(&origin, "alice");
+		kio::clock::sleep(Duration::from_millis(100)).await;
 
 		// The reader parks on this group's first frame, which never arrives.
-		let _stalled = session.producer.append_group().unwrap();
-		tokio::task::yield_now().await;
-		session
-			.producer
-			.write_frame(None, br#"{"type":"buttons","buttons":["a"]}"#.to_vec())
+		let _stalled = viewer
+			.track
+			.append_group(moq_net::Timestamp::from_millis(1).unwrap())
 			.unwrap();
+		tokio::task::yield_now().await;
+		viewer.at = 1;
+		viewer.send(r#"{"type":"buttons","buttons":["a"]}"#);
 
 		let Command::Buttons {
 			viewer: from, buttons, ..
 		} = recv(&mut rx).await
 		else {
-			panic!("the superseded command ended the session");
+			panic!("the superseded command ended the viewer");
 		};
-		assert_eq!(from, viewer);
+		assert_eq!(from, "alice");
 		assert_eq!(buttons, vec![Button::A]);
 	}
 
-	/// Replies reach the viewer on its own session, and finishing the viewer's half
-	/// counts it as gone.
+	/// Each broadcast is its own viewer, and withdrawing one leaves only that one.
 	#[tokio::test(start_paused = true)]
-	async fn replies_reach_the_viewer_and_a_finish_leaves() {
-		let (_origin, _viewer, session, mut rx) = setup().await;
-		let Command::Joined { viewer, mut replies } = recv(&mut rx).await else {
-			panic!("the session did not join first");
-		};
+	async fn each_broadcast_is_a_viewer_until_it_leaves() {
+		let (origin, mut rx) = setup();
+		let mut alice = Viewer::new(&origin, "alice");
+		let mut bob = Viewer::new(&origin, "bob");
+		kio::clock::sleep(Duration::from_millis(100)).await;
 
-		replies.latency(&[LatencyEntry {
-			label: "input".into(),
-			ms: 42,
-		}]);
-		let mut reader = session.consumer.ordered();
-		let mut group = kio::clock::timeout(Duration::from_secs(5), reader.next_group())
-			.await
-			.expect("reply timeout")
-			.unwrap()
-			.expect("a reply");
-		let frame = group.read_frame().await.unwrap().expect("a frame");
-		assert_eq!(&frame.payload[..], br#"{"latency":[{"label":"input","ms":42}]}"#);
-
-		let _producer = session.producer.finish().unwrap();
-		let Command::Left { viewer: left } = recv(&mut rx).await else {
-			panic!("the finished session did not leave");
+		alice.send(r#"{"type":"buttons","buttons":["a"]}"#);
+		let Command::Buttons { viewer, .. } = recv(&mut rx).await else {
+			panic!("alice's command did not arrive");
 		};
-		assert_eq!(left, viewer);
+		assert_eq!(viewer, "alice");
+		bob.send(r#"{"type":"buttons","buttons":["b"]}"#);
+		let Command::Buttons { viewer, .. } = recv(&mut rx).await else {
+			panic!("bob's command did not arrive");
+		};
+		assert_eq!(viewer, "bob");
+
+		alice.route.withdraw();
+		let Command::Left { viewer } = recv(&mut rx).await else {
+			panic!("the withdrawn viewer did not leave");
+		};
+		assert_eq!(viewer, "alice");
+
+		bob.send(r#"{"type":"reset"}"#);
+		assert!(matches!(recv(&mut rx).await, Command::Reset));
 	}
 
-	/// Each session is its own viewer, so a reload's new session never merges with the old.
+	/// A restarted viewer whose new broadcast takes over the path while the old one is still live
+	/// releases the old one's buttons, even if the new one never restates them.
 	#[tokio::test(start_paused = true)]
-	async fn each_session_is_a_viewer() {
-		let (origin, viewer, first, mut rx) = setup().await;
-		let Command::Joined { viewer: a, .. } = recv(&mut rx).await else {
-			panic!("the first session did not join");
-		};
+	async fn a_replaced_broadcast_releases_its_buttons() {
+		let (origin, mut rx) = setup();
+		let mut old = Viewer::new(&origin, "alice");
+		kio::clock::sleep(Duration::from_millis(100)).await;
+		old.send(r#"{"type":"buttons","buttons":["a"]}"#);
+		assert!(matches!(recv(&mut rx).await, Command::Buttons { .. }));
 
-		let second = kio::clock::timeout(Duration::from_secs(5), viewer.dial_track("tetris", None).unwrap())
+		let mut new = Viewer::new(&origin, "alice");
+		let Command::Left { viewer } = recv(&mut rx).await else {
+			panic!("the replaced broadcast kept its buttons");
+		};
+		assert_eq!(viewer, "alice");
+
+		new.send(r#"{"type":"reset"}"#);
+		assert!(matches!(recv(&mut rx).await, Command::Reset));
+		drop(old);
+	}
+
+	/// A viewer whose handler refuses it stays followed: the listing reports nothing new when a
+	/// publisher takes the path over, so only the follower can pick it up.
+	#[tokio::test(start_paused = true)]
+	async fn a_refused_viewer_is_read_once_a_publisher_takes_over() {
+		let (origin, mut rx) = setup();
+
+		let claim = origin.claim("alice", moq_net::origin::RouteOptions::default()).unwrap();
+		kio::clock::timeout(Duration::from_secs(1), claim.requested())
 			.await
-			.expect("dial timeout")
-			.expect("dial");
-		let Command::Joined { viewer: b, .. } = recv(&mut rx).await else {
-			panic!("the second session did not join");
-		};
-		assert_ne!(a, b);
+			.expect("never asked")
+			.expect("the claim closed")
+			.reject(moq_net::Error::NotFound);
+		kio::clock::sleep(Duration::from_secs(1)).await;
 
-		drop(first);
-		let Command::Left { viewer: left } = recv(&mut rx).await else {
-			panic!("the dropped session did not leave");
-		};
-		assert_eq!(left, a);
-		drop((second, origin));
+		let mut viewer = Viewer::new(&origin, "alice");
+		kio::clock::sleep(Duration::from_secs(1)).await;
+		viewer.send(r#"{"type":"reset"}"#);
+		assert!(matches!(recv(&mut rx).await, Command::Reset));
 	}
 }

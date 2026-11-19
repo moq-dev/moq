@@ -140,14 +140,14 @@ async fn next_hop_lost(version: &str) {
 	let _to_preferred = link(version, &publisher, &preferred).await;
 	let _to_standby = link(version, &publisher, &standby).await;
 	let mut announced = relay.consume().routes();
-	let first_hop = link(
+	let first_hop = link(version, &preferred, &relay).await;
+	let first = started(&mut announced).await;
+	let _second_hop = link(
 		version,
-		&preferred,
-		&relay.clone().with_preference(origin::Preference::new(1)),
+		&standby,
+		&relay.clone().with_priority(origin::Priority::new(-1)),
 	)
 	.await;
-	let first = started(&mut announced).await;
-	let _second_hop = link(version, &standby, &relay).await;
 	if let Ok(event) = kio::clock::timeout(Duration::from_secs(1), announced.next()).await {
 		panic!("{version}: the standby route changed the preferred one: {event:?}");
 	}
@@ -156,12 +156,16 @@ async fn next_hop_lost(version: &str) {
 	first_hop.client.abort(moq_net::Error::Cancel);
 	let event = kio::clock::timeout(Duration::from_secs(10), announced.next()).await;
 	match version.to_string().as_str() {
-		// The relay already serves the claim through every feasible route, so the
-		// standby carries on with nothing to announce.
+		// The relay already serves the claim through both neighbors, so the standby
+		// carries on: the route moves in place, under the same instance.
 		"moq-lite-07-wip" => {
-			if let Ok(event) = event {
-				panic!("{version}: expected the same stream to continue, got {event:?}");
-			}
+			let event = event.expect("announce hung").expect("announce ended");
+			assert_eq!(event.kind, origin::RouteKind::Update, "{version}: {event:?}");
+			assert_eq!(
+				event.announce.route.instance(),
+				&first,
+				"{version}: expected the same stream to continue"
+			);
 			kio::clock::timeout(Duration::from_secs(10), relay.consume().request("job", None))
 				.await
 				.expect("request hung")

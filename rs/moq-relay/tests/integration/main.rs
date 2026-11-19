@@ -8,6 +8,8 @@
 //! `shutdown_signal` owns those signals, which reach every listener in this process.
 
 mod auth_lifetime;
+// Its listeners are the simulator (`test-support`) and the io_uring workers.
+#[cfg(any(feature = "test-support", uring))]
 mod bitrate_caps;
 mod cluster_close;
 #[cfg(feature = "test-support")]
@@ -20,9 +22,11 @@ mod cluster_unknown;
 mod connection;
 #[cfg(feature = "test-support")]
 mod drain;
+mod drain_dialed;
 mod embed;
 #[cfg(feature = "test-support")]
 mod goaway_cluster;
+mod handoff;
 mod hidden_cluster;
 mod implementation;
 mod lan_mesh;
@@ -30,7 +34,7 @@ mod logs;
 mod memory;
 mod peer_limits;
 mod public_rules;
-#[cfg(all(feature = "test-support", feature = "quic"))]
+#[cfg(feature = "test-support")]
 mod quic_sim;
 mod refusals;
 mod released_cli;
@@ -40,7 +44,6 @@ mod session_revalidate;
 mod shutdown_signal;
 mod smoke;
 #[cfg(feature = "test-support")]
-mod socket_auth;
 mod stack;
 mod tenant_matrix;
 mod upstream_links;

@@ -77,6 +77,10 @@ pub enum Error {
 	/// Whole bytes follow the AudioSpecificConfig's last field.
 	#[error("{0} bytes after the AudioSpecificConfig")]
 	TrailingBytes(usize),
+
+	/// An ADTS header or frame is invalid, or cannot carry the frame.
+	#[error("adts: {0}")]
+	Adts(#[from] adts::Error),
 }
 
 /// A result using this module's error type.
@@ -366,6 +370,11 @@ fn read_general_audio<T: Buf>(reader: &mut BitReader<T>, core: u8) -> Result<boo
 		reader.read(14, Error::IncompleteConfig)?;
 	}
 	Ok(reader.read(1, Error::IncompleteConfig)? == 1)
+}
+
+/// Whether the raw data block `block` leads with a program config element.
+pub(crate) fn leads_with_program_config(block: &[u8]) -> bool {
+	block.first().is_some_and(|&byte| u32::from(byte >> 5) == ID_PCE)
 }
 
 /// Build the AudioSpecificConfig for a stream that signals its fields per frame, as ADTS does.

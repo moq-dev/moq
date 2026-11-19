@@ -20,6 +20,11 @@ use crate::{Error, Frame, Level};
 /// catalog clock's own correlation. A host that reports no usable capture time, and system audio,
 /// are stamped once by the capture producer before fanout.
 ///
+/// The device counts samples on its own clock, so the encode resamples by up to 2000 ppm to keep
+/// each buffer at its capture instant rather than drift from it by the sample count. Stamps that
+/// stay over 100 ms behind for a second, such as after a suspended host, re-anchor the timeline so
+/// the gap lands in the PTS; over 100 ms ahead, input is dropped until they catch up.
+///
 /// `#[non_exhaustive]`: construct via [`Capture::new`] and set
 /// fields, so new publication settings can be added without changing
 /// [`publish_capture`].
@@ -120,7 +125,7 @@ pub fn publish_capture<E: CatalogExt>(
 ) -> Result<(Publication, Driver), Error> {
 	let clock = catalog.clock();
 	let input = options.capture.input().clone();
-	let producer = Producer::new(&mut broadcast, catalog, input, &options.encode)?;
+	let producer = Producer::capture(&mut broadcast, catalog, input, &options.encode)?;
 	let track_name: Arc<str> = producer.track_name().into();
 	let reservation = options.encode.bandwidth.reserve(&producer.demand(), producer.bitrate());
 	let state = kio::Producer::new(Published {
@@ -415,7 +420,7 @@ fn stamp(clock: &moq_mux::Clock, captured: Instant) -> Result<u64, Error> {
 		Err(moq_mux::Error::InvalidCapture) => {
 			let now = clock.now();
 			let ago = Instant::now().saturating_duration_since(captured).as_micros();
-			if ago > now.as_micros() {
+			if ago > now.as_micros().expect("the broadcast clock is scaled") {
 				moq_net::Timestamp::ZERO
 			} else {
 				now
@@ -423,7 +428,7 @@ fn stamp(clock: &moq_mux::Clock, captured: Instant) -> Result<u64, Error> {
 		}
 		timestamp => timestamp?,
 	};
-	Ok(timestamp.as_micros() as u64)
+	Ok(timestamp.as_micros()? as u64)
 }
 
 /// Encodes retained history while a subscriber wants it, and expires it otherwise.
@@ -444,7 +449,7 @@ struct Retention<'a> {
 impl Retention<'_> {
 	/// Expire retained history, then encode one retained frame if wanted.
 	fn refresh(&self, producer: &mut Producer) -> Result<(), Error> {
-		let active = !self.retain || self.demand.wanted().is_some();
+		let active = !self.retain || self.demand.wanted();
 		producer.set_active(active, self.clock.now())?;
 		if !self.failed {
 			publish_state(self.state, if active { Status::Live } else { Status::Waiting });
@@ -462,7 +467,8 @@ impl Retention<'_> {
 		}
 		let delay = producer
 			.backlog_deadline()
-			.map(|at| at.saturating_sub(self.clock.now().into()));
+			.map(|at| at.saturating_sub(self.clock.now().try_into().expect("the broadcast clock is scaled")));
+
 		tokio::select! {
 			changed = self.demand.wanted_changed() => { changed?; }
 			_ = async {
@@ -494,7 +500,7 @@ fn frame(samples: &[f32], timestamp_us: u64) -> Result<Frame, Error> {
 	Ok(Frame::new(bytes.into(), moq_net::Timestamp::from_micros(timestamp_us)?))
 }
 
-#[cfg(all(test, feature = "bus"))]
+#[cfg(test)]
 mod tests {
 	use super::*;
 	use crate::bus::{Bus, Config as BusConfig, Strip};
@@ -642,7 +648,7 @@ mod tests {
 				{
 					assert!(frame < 1_000, "the viewer never got both renditions listed");
 					samples.try_push(Ok(Samples::plain(vec![0.25; 1920], false))).unwrap();
-					if frame.is_multiple_of(5) && wanted.wanted().is_some() {
+					if frame.is_multiple_of(5) && wanted.wanted() {
 						// A 2s GOP, opening with a keyframe once the capture starts.
 						let keyframe = video.needs_keyframe() || frame.is_multiple_of(100);
 						let payload: &[u8] = match keyframe {
@@ -662,7 +668,7 @@ mod tests {
 					frame += 1;
 				}
 				assert!(
-					catalog.snapshot().media.join.is_some(),
+					catalog.snapshot().sync.interval.is_some(),
 					"the capture declared its interval"
 				);
 
@@ -728,7 +734,7 @@ mod tests {
 					);
 					let encoded = packet(&mut track).await;
 					assert_eq!(
-						encoded.timestamp.as_micros(),
+						encoded.timestamp.as_micros().unwrap(),
 						captured.duration_since(epoch).as_micros()
 					);
 					assert_eq!(
@@ -751,7 +757,7 @@ mod tests {
 				block.captured = Some(captured);
 				samples.try_push(Ok(block)).unwrap();
 				observer.read().await.unwrap();
-				assert_eq!(packet(&mut track).await.timestamp.as_micros(), 240_000);
+				assert_eq!(packet(&mut track).await.timestamp.as_micros().unwrap(), 240_000);
 				encode_task.abort();
 				assert!(encode_task.await.unwrap_err().is_cancelled());
 				// The capture and independent observer remain live after the encoder goes away too.
@@ -831,9 +837,9 @@ mod tests {
 						// Only fresh capture, resuming after the discontinuity, reaches the subscriber.
 						samples.try_push(Ok(Samples::plain(vec![0.5; 1920], true))).unwrap();
 						observer.read().await.unwrap();
-						assert!(packet(&mut track).await.timestamp.as_micros() > 30_000_000);
+						assert!(packet(&mut track).await.timestamp.as_micros().unwrap() > 30_000_000);
 					} else {
-						assert_eq!(packet(&mut track).await.timestamp.as_micros(), 100_000);
+						assert_eq!(packet(&mut track).await.timestamp.as_micros().unwrap(), 100_000);
 						assert!(matches!(publication.state().status(), Status::Live));
 					}
 					encode_task.abort();
@@ -877,7 +883,7 @@ mod tests {
 					assert!(!publication.is_finished());
 					let track = if subscribe_late {
 						let mut track = subscribe(&broadcast, Duration::from_secs(30)).await;
-						assert_eq!(packet(&mut track).await.timestamp.as_micros(), 100_000);
+						assert_eq!(packet(&mut track).await.timestamp.as_micros().unwrap(), 100_000);
 						Some(track)
 					} else {
 						None
@@ -922,6 +928,8 @@ mod tests {
 		assert!(publication.is_finished());
 	}
 
+	/// A gap resumes on the shared capture clock, unless the block before it ran past that: a
+	/// timeline only moves forward, so it then resumes where that block's packet ends.
 	#[tokio::test(start_paused = true)]
 	async fn opus_uses_the_shared_capture_clock_including_gaps_and_clamping() {
 		tokio::task::LocalSet::new()
@@ -952,13 +960,14 @@ mod tests {
 					samples.try_push(Ok(block)).unwrap();
 					let observed = observer.read().await.unwrap();
 					assert_eq!(observed.captured, captured.unwrap_or(now));
-					assert_eq!(packet(&mut track).await.timestamp.as_micros(), expected);
+					assert_eq!(packet(&mut track).await.timestamp.as_micros().unwrap(), expected);
 					let mut block = Samples::plain(vec![0.5; 1920], true);
 					block.captured = Some(now);
 					samples.try_push(Ok(block)).unwrap();
 					assert!(observer.read().await.unwrap().gap);
 					let next = packet(&mut track).await;
-					assert_eq!(next.timestamp.as_micros(), 1_000_000);
+					// The first block is one 20 ms packet.
+					assert_eq!(next.timestamp.as_micros().unwrap(), (expected + 20_000).max(1_000_000));
 					encode_task.abort();
 					assert!(encode_task.await.unwrap_err().is_cancelled());
 					capture_task.abort();

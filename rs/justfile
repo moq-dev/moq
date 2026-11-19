@@ -13,29 +13,24 @@ set working-directory := '..'
 # needs a nightly toolchain and sanitizer flags, so `just rs fuzz` is the one recipe
 # that may compile it. Every `--workspace` below therefore carries this, as does
 # sh/rs/select.sh, since it cannot read this.
-no_fuzz := "--exclude moq-net-fuzz --exclude moq-quic-fuzz --exclude moq-mux-fuzz --exclude moq-rtmp-fuzz"
+no_fuzz := "--exclude moq-net-fuzz --exclude moq-quic-fuzz --exclude moq-mux-fuzz --exclude moq-rtmp-fuzz --exclude moq-sock-fuzz --exclude moq-uring-fuzz --exclude qmux-fuzz --exclude moq-auth-fuzz"
 
 default:
     just check
 
-# Model-check a TLA+ spec with TLC, e.g. `just rs tla moq-net/verify/route/RouteHandoff.tla`.
+# Model-check a TLA+ spec with TLC, e.g. `just rs tla moq-net/verify/failover/FailoverChain.tla`.
 # Pass `-config rs/<path>.cfg` for a config not named after the spec, and
 # `../<path>.tla` for a spec outside `rs/`, such as a generated one in `.tmp/`.
 # sh/tlc.py says how a run shares the host.
 tla spec *args:
     python3 sh/tlc.py rs/{{ spec }} {{ args }}
 
-# Prove a Tamarin model's lemmas, e.g. `just rs tamarin moq-net/verify/route-key/RouteKey.spthy`.
-# Pass `-D=<VARIANT>` for a variant the model defines.
-tamarin spec *args:
-    nix shell --inputs-from . nixpkgs#tamarin-prover --command tamarin-prover --prove {{ args }} rs/{{ spec }}
-
 # Default features for the selected packages; `features` covers the feature
 # matrix nightly and on release PRs. No `cargo check` pass: clippy is a
 # superset of it, and the two use different rustc wrappers, so running both
 # compiles the workspace twice.
 #
-# A bare `just rs check` is default-members, which skips moq-c, moq-ffi,
+# A bare `just rs check` is default-members, which skips libmoq, moq-ffi,
 # and moq-gst; pass `--workspace` for all of it.
 
 # Compile, lint, format-check, doc-check, and verify dependency hygiene.
@@ -103,11 +98,6 @@ fix-changed $LIST:
 test-changed $LIST:
     sh/rs/select.sh test "$LIST"
 
-# Compile moq-tokio at its feature extremes; --all also isolates crypto and transport modes.
-[positional-arguments]
-tokio-features *args:
-    sh/rs/tokio-features.sh "$@"
-
 # Runs the `#[cfg(windows)]` code past the compiler, which the Linux gate
 # skips; platform.yml runs it on a Windows runner, scoped like `check-changed`
 # so a release PR compiles only the affected crates. Default
@@ -137,25 +127,15 @@ uring-changed base="":
     bash sh/changed.sh "$1" > "$changed"
     bash sh/rs/select.sh uring "$changed"
 
-# Compile and test the io_uring relay path, which is off the default feature set.
+# Test the io_uring relay path on a kernel that supports it.
 # Linux-only; CI_STRICT requires a supported kernel instead of skipping tests.
 [positional-arguments]
 uring *args:
-    just rs uring-check "$@"
-    bash sh/rs/nextest.sh cargo nextest run --locked -p moq-uring -p moq-relay --features moq-relay/io-uring --tests "$@"
+    bash sh/rs/nextest.sh cargo nextest run --locked -p moq-uring -p moq-relay --tests "$@"
     # Signal ownership and scoped tracing must also survive sharing one process.
     cargo test --locked -p moq-relay --test integration
     # Needs a second IPv6 address on lo, which the io_uring CI lanes add.
     bash sh/rs/nextest.sh cargo nextest run --locked -p moq-uring --test integration --run-ignored only -E 'test(=local_addr::a_v6_wildcard_answers_from_the_address_reached)' "$@"
-    bash sh/local.sh cargo clippy --locked -p moq-uring -p moq-relay --features moq-relay/io-uring,moq-relay/qlog --all-targets "$@" -- -D warnings
-    bash sh/rs/nextest.sh cargo nextest run --locked -p moq-uring --features qlog --tests "$@"
-
-# Compile the io_uring relay path, off the default feature set.
-[positional-arguments]
-uring-check *args:
-    bash sh/local.sh cargo clippy --locked -p moq-uring -p moq-relay --features moq-relay/io-uring --all-targets "$@" -- -D warnings
-    # Without the default `quic`, so moq-tokio's `driver` is off: the relay's io_uring path must not lean on it.
-    bash sh/local.sh cargo clippy --locked -p moq-relay --no-default-features --features io-uring --all-targets "$@" -- -D warnings
 
 # The Apple-gated code in moq-video, moq-audio, and moq-sock, which
 # platform.yml compiles on a Mac runner alongside `windows`.
@@ -255,9 +235,10 @@ audit:
 
 # Outside nextest because the staticlib link alone outlasts its hang budget.
 
-# Compile and run moq-c's C fixtures, and the C doc samples, against libmoq.a. Must run on Unix.
-c-tests:
-    sh/rs/c-tests.sh
+# Compile and run libmoq's C fixtures, and the C doc samples, against libmoq.a; `--syntax` only compiles them against moq.h. Must run on Unix.
+[positional-arguments]
+c-tests *args:
+    sh/rs/c-tests.sh "$@"
 
 # The workspace-hack would supply third-party features a crate forgets to
 # declare, so CI runs this after `cargo hakari disable && cargo update
@@ -271,17 +252,11 @@ features:
     run just rs net-features --all
     run just rs coroutines
     run just rs quic-features --all
-    run just rs crypto-key
-    run just rs tokio-features --all
     run just rs media-features --all
     run bash sh/local.sh cargo check --locked --workspace {{ no_fuzz }} --all-targets --no-default-features
-    run bash sh/local.sh cargo check --locked -p moq-relay --no-default-features
-    run just rs test -p moq-relay --no-default-features
     run bash sh/local.sh cargo check --locked -p moq-cli --no-default-features
-    run just rs test -p moq-cli --no-default-features --features capture,websocket -E 'test(capture_window)'
-    run just rs test -p moq-cli --no-default-features --features capture,pipewire,websocket -E 'test(capture_window)'
-    run bash sh/local.sh cargo check --locked -p moq-bench --no-default-features
-    run bash sh/local.sh cargo check --locked -p moq-boy --no-default-features
+    run just rs test -p moq-cli --no-default-features --features capture -E 'test(capture_window)'
+    run just rs test -p moq-cli --no-default-features --features capture,pipewire -E 'test(capture_window)'
     # Alone, since the workspace's `kio/sim` dev-dependencies would unify `kio/async` back in.
     run bash sh/local.sh cargo check --locked --manifest-path rs/moq-auth/Cargo.toml --lib --all-features
     run bash sh/local.sh cargo check --locked -p moq-hls -p moq-rtmp -p moq-webrtc --no-default-features --all-targets
@@ -313,27 +288,11 @@ coroutines:
     run env RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-hls --no-deps --no-default-features
     run bash sh/rs/coroutines.sh moq-stats -- --no-default-features
     run env RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-stats --no-deps --no-default-features
-    run bash sh/rs/coroutines.sh moq-crypto -- --no-default-features --features sign,e2ee,provider,serde
-    run env RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-crypto --no-deps --no-default-features --features sign,e2ee,provider,serde
+    run bash sh/rs/coroutines.sh moq-crypto -- --no-default-features --features provider
+    run env RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-crypto --no-deps --no-default-features --features provider
+    run bash sh/rs/coroutines.sh moq-e2ee
+    run env RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-e2ee --no-deps
     run bash sh/rs/coroutines.sh rs/moq-auth/Cargo.toml -- --no-default-features
-    finish
-
-# Prove moq-crypto's key-only build, which moq-auth depends on, leaves out the transport, then lint and test it alone; a workspace build unifies the default features back in.
-crypto-key:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    source sh/checks.sh
-    key_only_dependencies() {
-        graph=$(cargo tree --locked -p moq-crypto --no-default-features --features serde -e normal --prefix none) || return
-        if grep -E '^moq-net ' <<<"$graph"; then
-            echo "moq-crypto without sign or e2ee must not depend on moq-net" >&2
-            return 1
-        fi
-    }
-    run key_only_dependencies
-    run bash sh/local.sh cargo clippy --locked -p moq-crypto --no-default-features --all-targets -- -D warnings
-    run bash sh/local.sh cargo clippy --locked -p moq-crypto --no-default-features --features serde --all-targets -- -D warnings
-    run bash sh/rs/nextest.sh cargo nextest run --locked -p moq-crypto --no-default-features --features serde
     finish
 
 # Prove moq-quic leaves kio's dev-only clock runtime to its consumers, and lints without its default features; a workspace build unifies both back in.
@@ -410,7 +369,7 @@ doctest *args:
 miri *args:
     bash sh/rs/miri.sh "$@"
 
-# Run the moq-quic simulation's random workloads from a fresh seed, printing the settings that replay it, then the bandwidth probe's acceptance suite, the receive-timestamps comparison, and the realtime controllers' comparison.
+# Run the moq-quic simulation's random workloads from a fresh seed, each datagram checked against QUIC's rules, printing the settings that replay it, then the bandwidth probe's acceptance suite, the receive-timestamps comparison, and the realtime controllers' comparison.
 quic-sim:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -471,8 +430,8 @@ render-sw:
 
 # Run the ignored mDNS tests, which multicast on the host's network interfaces.
 multicast:
-    just rs test -p moq-tokio --features mdns --lib --run-ignored only -E 'test(=mdns::tests::same_app_peers_find_each_other) | test(/^mdns::tests::daemon_/)'
-    just rs test -p moq-relay --features cluster-lan --run-ignored only -E 'test(/^lan_mesh::/)'
+    just rs test -p moq-tokio --lib --run-ignored only -E 'test(=mdns::tests::same_app_peers_find_each_other) | test(/^mdns::tests::daemon_/)'
+    just rs test -p moq-relay --run-ignored only -E 'test(/^lan_mesh::/)'
 
 # Run the long TS recovery arms; a failing arm keeps its export and ledgers under $HARNESS_RUNS.
 ts-recovery:
@@ -485,7 +444,7 @@ audio-devices:
     dir=$(mktemp -d)
     trap 'rm -rf "$dir"' EXIT
     python3 test/lib/pulse.py --dir "$dir/run" -- \
-        just rs test -p moq-audio --features aec,pulseaudio --run-ignored only -E 'not test(/benchmark_/)'
+        just rs test -p moq-audio --features capture,playback,pulseaudio --run-ignored only -E 'not test(/benchmark_/)'
 
 # Needs nightly and cargo-fuzz; CI replays the corpus on stable through each
 # crate's own tests instead. See the README in each rs/<crate>/fuzz/.
@@ -502,6 +461,11 @@ fuzz target *args:
 # Report native workspace or one crate's coverage under target/coverage/<crate>.
 coverage crate="workspace":
     bash sh/rs/coverage.sh '{{ crate }}'
+
+# Mutate the route and resume code (`.cargo/mutants.toml`), failing on any mutant the tests miss.
+[positional-arguments]
+mutants *args:
+    bash sh/local.sh bash sh/rs/mutants.sh "$@"
 
 # Build the default workspace members.
 build:
@@ -555,10 +519,10 @@ package-nfpm *args:
 package-ffi *args:
     rs/moq-ffi/build.sh "$@"
 
-# Build and package moq-c.
+# Build and package libmoq.
 [positional-arguments]
-package-moq-c *args:
-    rs/moq-c/build.sh "$@"
+package-libmoq *args:
+    rs/libmoq/build.sh "$@"
 
 # Build and package the moq-gst GStreamer plugin.
 [positional-arguments]
@@ -594,8 +558,8 @@ codspeed shard:
             --bench parameter_sets --bench sync --bench ts_programs --bench ts_schedule --bench ts_video
         ;;
     rest)
-        build -p kio -p moq-audio -p moq-crypto -p moq-json -p moq-pattern -p moq-quic -p moq-rtmp \
-            --features moq-audio/bus,moq-json/bench,moq-quic/fuzz \
+        build -p kio -p moq-audio -p moq-e2ee -p moq-json -p moq-pattern -p moq-quic -p moq-rtmp \
+            --features moq-json/bench,moq-quic/fuzz \
             --bench tasks --bench waiter --bench bus --bench protect --bench codec --bench table \
             --bench matching --bench endpoint --bench receive --bench sent_packets --bench streams \
             --bench chunk_interleaving

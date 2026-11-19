@@ -9,7 +9,6 @@ export namespace Audio {
 		readonly out: Signals.Readonlys<Audio.DecoderOutput>;
 		reset(): void;
 		readonly source: Audio.Source;
-		static supported: (config: Hang.Catalog.AudioConfig) => Promise<boolean>;
 		readonly sync: Sync;
 	}
 	export type DecoderInput = {
@@ -18,6 +17,7 @@ export namespace Audio {
 	export type DecoderOutput = {
 		buffered: Signals.Signal<BufferedRanges>;
 		context: Signals.Signal<AudioContext | undefined>;
+		ended: Signals.Signal<boolean>;
 		error: Signals.Signal<Error | undefined>;
 		root: Signals.Signal<AudioNode | undefined>;
 		sampleRate: Signals.Signal<number | undefined>;
@@ -55,7 +55,6 @@ export namespace Audio {
 	}
 	export type SourceInput = {
 		broadcast: Signals.Getter<Broadcast | undefined>;
-		supported: Signals.Getter<Audio.Supported | undefined>;
 		target: Signals.Getter<Audio.Target | undefined>;
 	};
 	export type SourceOutput = {
@@ -80,7 +79,6 @@ export namespace Audio {
 		trimmed: Clock.Duration;
 		underruns: number;
 	}
-	export type Supported = (config: Hang.Catalog.AudioConfig) => Promise<boolean>;
 	export type Target = {
 		name?: string;
 	};
@@ -179,6 +177,7 @@ export * as Signals from "@moq/signals";
 
 export class Sync {
 	constructor(props?: Signals.Inputs<SyncInput>);
+	readonly anchor: Signals.Getter<unknown>;
 	close(): void;
 	readonly in: Signals.Readonlys<SyncInput>;
 	now(): Clock.Duration | undefined;
@@ -197,7 +196,6 @@ export type SyncOutput = {
 	delay: Signals.Signal<Clock.Duration>;
 	instant: Signals.Signal<boolean>;
 	maxDelay: Signals.Signal<Clock.Duration>;
-	reference: Signals.Signal<number | undefined>;
 	timestamp: Signals.Signal<Clock.Duration | undefined>;
 };
 
@@ -244,7 +242,6 @@ export namespace Video {
 		readonly in: Signals.Readonlys<Video.DecoderInput>;
 		readonly out: Signals.Readonlys<Video.DecoderOutput>;
 		readonly source: Video.Source;
-		static supported: (config: Hang.Catalog.VideoConfig) => Promise<boolean>;
 		readonly sync: Sync;
 	}
 	export type DecoderInput = {
@@ -256,6 +253,7 @@ export namespace Video {
 			height: number;
 			width: number;
 		} | undefined>;
+		ended: Signals.Signal<boolean>;
 		error: Signals.Signal<Error | undefined>;
 		stalled: Signals.Signal<boolean>;
 		stats: Signals.Signal<Video.Stats | undefined>;
@@ -294,7 +292,6 @@ export namespace Video {
 	export type SourceInput = {
 		broadcast: Signals.Getter<Broadcast | undefined>;
 		rate: Signals.Getter<number | undefined>;
-		supported: Signals.Getter<Video.Supported | undefined>;
 		target: Signals.Getter<Video.Target | undefined>;
 	};
 	export type SourceOutput = {
@@ -316,7 +313,6 @@ export namespace Video {
 		stalled: Clock.Duration;
 		stalls: number;
 	}
-	export type Supported = (config: Hang.Catalog.VideoConfig) => Promise<boolean>;
 	export type Target = {
 		bitrate?: number;
 		height?: number;

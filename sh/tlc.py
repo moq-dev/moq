@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Model-check one TLA+ spec with TLC: `sh/tlc.py <spec.tla> [tlc args...]`.
 
+`sh/tlc.py --identity` prints the Java and the classpath instead, whose store
+paths change with TLC, so sh/tla.sh can tell when a result is stale.
+
 The `tla` recipes run every model through here, so a run shares the host:
 TLC runs at the lowest priority on 4 workers, which Nightly's runners have and
 the `verify-*` skills' times assume; core-seconds stay near flat from 2 to 24
@@ -13,7 +16,9 @@ their Java overrides (such as `FoldSet`) evaluate natively.
 TLC never removes a metadir it was killed in, and a model's can reach tens of
 GB, so each run's lives under the checkout's `.tmp/tlc/`, is removed when the
 run exits, and holds a lock the kernel drops when the run dies, however it
-dies. A run first removes every metadir whose lock nobody holds.
+dies. A run first removes every metadir whose lock nobody holds. Java's temp
+dir points into the metadir too, since the JVM ignores TMPDIR and TLC leaves a
+`tlc-<n>` directory there on every run.
 """
 
 import fcntl
@@ -85,7 +90,10 @@ def release(base, meta):
 
 def main(argv):
     if not argv:
-        sys.exit("usage: sh/tlc.py <spec.tla> [tlc args...]")
+        sys.exit("usage: sh/tlc.py <spec.tla> [tlc args...] | --identity")
+    if argv == ["--identity"]:
+        print(*classpath(), sep="\n")
+        return 0
     spec, args = argv[0], argv[1:]
     java, cp = classpath()
     base = ROOT / ".tmp/tlc"
@@ -95,7 +103,8 @@ def main(argv):
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     start, before = time.monotonic(), resource.getrusage(resource.RUSAGE_CHILDREN)
     try:
-        command = ["nice", "-n", "19", java, "-Xmx4g", "-XX:+UseParallelGC", "-cp", cp, "tlc2.TLC"]
+        command = ["nice", "-n", "19", java, "-Xmx4g", "-XX:+UseParallelGC", f"-Djava.io.tmpdir={meta}"]
+        command += ["-cp", cp, "tlc2.TLC"]
         command += ["-workers", "4", "-checkpoint", "0", "-cleanup", "-noGenerateSpecTE", "-metadir", str(meta)]
         status = subprocess.run([*command, *args, spec], cwd=ROOT, pass_fds=(fd,)).returncode
     except KeyboardInterrupt:

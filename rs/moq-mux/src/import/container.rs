@@ -50,7 +50,7 @@ impl<E: crate::container::ts::Catalog> ContainerImpl<E> {
 		match self {
 			ContainerImpl::Fmp4(decoder) => decoder.decode(data),
 			ContainerImpl::Mkv(decoder) => decoder.decode(data),
-			ContainerImpl::Ts(decoder) => decoder.decode(data).map_err(Into::into),
+			ContainerImpl::Ts(decoder) => Ok(decoder.decode(data)?),
 			ContainerImpl::Flv(decoder) => decoder.decode(data),
 		}
 	}
@@ -143,9 +143,9 @@ impl<E: crate::container::ts::Catalog> Container<E> {
 		self.inner.cut()
 	}
 
-	/// Close the current group and open the next one at `sequence`.
-	pub fn seek(&mut self, sequence: u64) -> Result<()> {
-		self.inner.seek(sequence)
+	/// Close the current group and open the next one at `start`.
+	pub fn seek(&mut self, start: u64) -> Result<()> {
+		self.inner.seek(start)
 	}
 }
 
@@ -175,7 +175,8 @@ pub struct Finished<E: crate::container::ts::Catalog = ()> {
 }
 
 impl<E: crate::container::ts::Catalog> Finished<E> {
-	/// Release every track's cache, reporting `err` to readers that have not drained it.
+	/// Abort every track with `err`. Readers still draining a track get its clean end instead once
+	/// every group below its end finished.
 	pub fn abort(self, err: moq_net::Error) {
 		match self.inner {
 			FinishedImpl::Fmp4(finished) => finished.abort(err),

@@ -12,20 +12,10 @@ import { Game } from "./game.ts";
 import { mount } from "./ui/element.tsx";
 
 /** The attributes the element observes. */
-const OBSERVED = ["url", "prefix", "prefix-game"] as const;
+const OBSERVED = ["url", "prefix", "prefix-game", "prefix-viewer"] as const;
 type Observed = (typeof OBSERVED)[number];
 
 const DEFAULT_PREFIX = Moq.Path.from("boy");
-
-// Sockets need moq-lite-07 or moq-transport on every hop, and the relay offers moq-lite-07 only when asked.
-const VERSIONS = ["moq-lite-07-wip"];
-
-// A viewer's client endpoint id: random, so no other viewer can claim it. A viewer only dials, so it
-// announces a client endpoint, which can never pose as a game's server endpoint.
-function viewerId(): string {
-	const bytes = crypto.getRandomValues(new Uint8Array(16));
-	return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
-}
 
 const cleanup = new FinalizationRegistry<Moq.Signals.Effect>((signals) => signals.close());
 
@@ -43,9 +33,9 @@ class Enabled extends Moq.Signals.Signal<boolean> {
 		super(false);
 	}
 
-	override set(value: boolean, notify?: boolean): void {
+	override set(value: boolean, force?: true): void {
 		this.#wanted = value;
-		super.set(value && this.#running, notify);
+		super.set(value && this.#running, force);
 	}
 
 	run(running: boolean): void {
@@ -60,11 +50,11 @@ class Enabled extends Moq.Signals.Signal<boolean> {
  *
  * Attributes:
  *   - `url` - MoQ relay URL
- *   - `prefix` - Base path prefix (default: "boy"). Derives prefix-game.
- *   - `prefix-game` - Path prefix for game broadcasts and the socket endpoints of games and viewers
- *     (default: `{prefix}/game`)
+ *   - `prefix` - Base path prefix (default: "boy"). Derives prefix-game and prefix-viewer.
+ *   - `prefix-game` - Path prefix for game broadcasts (default: `{prefix}/game`)
+ *   - `prefix-viewer` - Path prefix for viewer broadcasts (default: `{prefix}/viewer`)
  *
- * Each viewer runs one client socket endpoint with a random id and dials each game it plays.
+ * While a viewer gives input to a game, it publishes a command broadcast at `{prefix-viewer}/{game}/{id}`.
  */
 export default class MoqBoy extends HTMLElement {
 	/** The attributes the browser reports changes to. */
@@ -72,7 +62,7 @@ export default class MoqBoy extends HTMLElement {
 
 	/** The relay connection, shared by every game. */
 	readonly connection: Moq.Connection;
-	/** The origin this viewer's endpoint is published into, served across reconnects. */
+	/** The origin viewer broadcasts are published into, served across reconnects. */
 	readonly origin = new Moq.Origin.Producer();
 	/** The session currently expanded, or undefined for the grid. */
 	readonly expanded = new Moq.Signals.Signal<string | undefined>(undefined);
@@ -89,6 +79,7 @@ export default class MoqBoy extends HTMLElement {
 	readonly #enabled = new Enabled();
 	readonly #prefix = new Moq.Signals.Signal<Moq.Path.Valid>(DEFAULT_PREFIX);
 	readonly #gamePrefixOverride = new Moq.Signals.Signal<Moq.Path.Valid | undefined>(undefined);
+	readonly #viewerPrefixOverride = new Moq.Signals.Signal<Moq.Path.Valid | undefined>(undefined);
 	readonly #sessions = new Map<string, Game>();
 	#dispose?: () => void;
 
@@ -96,11 +87,10 @@ export default class MoqBoy extends HTMLElement {
 		super();
 		cleanup.register(this, this.#signals);
 
-		// One origin, both directions: the viewer's endpoint is published into it and the
-		// relay's announced games and endpoints arrive in it, with no risk of echoing either back.
+		// One origin, both directions: viewer broadcasts are published into it and the
+		// relay's announced games arrive in it, with no risk of echoing either back.
 		this.connection = new Moq.Connection({
 			enabled: this.#enabled,
-			versions: VERSIONS,
 			publish: this.origin.consume(),
 			consume: this.origin,
 			share: false,
@@ -149,8 +139,10 @@ export default class MoqBoy extends HTMLElement {
 
 		if (name === "prefix") {
 			this.#prefix.set(path ?? DEFAULT_PREFIX);
-		} else {
+		} else if (name === "prefix-game") {
 			this.#gamePrefixOverride.set(path);
+		} else {
+			this.#viewerPrefixOverride.set(path);
 		}
 	}
 
@@ -193,15 +185,22 @@ export default class MoqBoy extends HTMLElement {
 		this.#refuse("prefix-game", false);
 	}
 
+	/** The path prefix for viewer broadcasts, mirrored by the `prefix-viewer` attribute. */
+	get prefixViewer(): string {
+		return this.#viewerPrefixOverride.peek() ?? Moq.Path.from(this.#prefix.peek(), "viewer");
+	}
+
+	set prefixViewer(value: string) {
+		this.#viewerPrefixOverride.set(Moq.Path.from(value));
+		this.#refuse("prefix-viewer", false);
+	}
+
 	#runDiscovery(effect: Moq.Signals.Effect) {
 		const base = effect.get(this.#prefix);
 		const gamePrefix = effect.get(this.#gamePrefixOverride) ?? Moq.Path.from(base, "game");
+		const viewerPrefix = effect.get(this.#viewerPrefixOverride) ?? Moq.Path.from(base, "viewer");
 
-		// The endpoint every game under this prefix is dialed from.
-		const endpoint = new Moq.Socket.Endpoint(this.origin, gamePrefix, viewerId());
-		effect.cleanup(() => endpoint.close());
-
-		// Games under the old prefix dial from the old endpoint, so they go with it.
+		// Games under the old prefixes go with them.
 		effect.cleanup(() => {
 			for (const game of this.#sessions.values()) game.close();
 			this.#sessions.clear();
@@ -223,20 +222,19 @@ export default class MoqBoy extends HTMLElement {
 				if (!capture?.isLiteral) continue;
 
 				const id = capture.text;
-				const gone = entry.kind === "absent" || entry.kind === "offline";
 				if (entry.kind === "present" && !this.#sessions.has(id)) {
 					const config: GameConfig = {
 						sessionId: id,
 						connection: this.connection,
 						origin: this.origin,
-						endpoint,
 						expanded: this.expanded,
 						gamePrefix,
+						viewerPrefix,
 					};
 					const game = new Game(config);
 					this.#sessions.set(id, game);
 					this.games.set(new Map(this.#sessions));
-				} else if (gone) {
+				} else if (entry.kind === "absent") {
 					const game = this.#sessions.get(id);
 					if (game) {
 						game.close();

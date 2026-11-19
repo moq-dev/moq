@@ -3,7 +3,7 @@ import { Duration, type Installed, Wall } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
-import { Track } from "@moq/net";
+import { Time, Track } from "@moq/net";
 import { Effect } from "@moq/signals";
 import { CatalogProducer } from "./catalog.ts";
 
@@ -16,7 +16,7 @@ test("catalog producer seeds subscribers and fans out edits", async () => {
 	});
 
 	const effect = new Effect();
-	const track = new Track.Producer("catalog.json");
+	const track = new Track.Producer("catalog.json").accept({ timescale: Time.Timescale.MILLI });
 	catalog.serve(track, effect);
 	const consumer = new Json.Snapshot.Consumer<Catalog.Root>({ track });
 
@@ -53,25 +53,27 @@ test("catalog producer refuses an ID naming both a video and an audio rendition"
 	).toThrow(Catalog.DuplicateRendition);
 });
 
-test("catalog producer computes the version from the fields it uses", async () => {
+test("catalog producer computes each entry version from the fields it uses", async () => {
 	const catalog = new CatalogProducer();
 	const effect = new Effect();
-	const track = new Track.Producer("catalog.json");
+	const track = new Track.Producer("catalog.json").accept({ timescale: Time.Timescale.MILLI });
 	catalog.serve(track, effect);
 	const consumer = new Json.Snapshot.Consumer<Catalog.Root>({ track });
 	const video = { codec: "avc1.64001f", container: { kind: "legacy" as const } };
 
-	// A caller's own version is replaced by the computed one.
+	// A caller's own version is replaced by the computed ones: the renamed rendition's, not the root's.
 	catalog.mutate((c) => {
 		c.video = { renditions: { hd: { ...video, track: "video" } } };
 		c.version = 3;
 	});
-	expect((await consumer.latest())?.value.version).toBe(4);
+	const renamed = (await consumer.latest())?.value;
+	expect(renamed).not.toHaveProperty("version");
+	expect(renamed?.video?.renditions.hd).toHaveProperty("version", 4);
 
 	catalog.mutate((c) => {
 		c.video = { renditions: { hd: video } };
 	});
-	expect((await consumer.latest())?.value).not.toHaveProperty("version");
+	expect((await consumer.latest())?.value.video?.renditions.hd).not.toHaveProperty("version");
 
 	effect.close();
 });
@@ -83,13 +85,13 @@ test("catalog producer publishes every update as a snapshot group", async () => 
 	});
 
 	const effect = new Effect();
-	const track = new Track.Producer("catalog.json");
+	const track = new Track.Producer("catalog.json").accept({ timescale: Time.Timescale.MILLI });
 	catalog.serve(track, effect);
 	const subscriber = track.subscribe().ordered();
 
 	const first = await subscriber.nextGroup();
-	expect(first?.sequence).toBe(0n);
-	expect(await first?.readJson()).toEqual({ media: { clock: expect.anything() }, video: { renditions: {} } });
+	if (!first) throw new Error("expected the first snapshot");
+	expect(await first?.readJson()).toEqual({ sync: { clock: expect.anything() }, video: { renditions: {} } });
 	expect(first?.done).toBe(true);
 
 	catalog.mutate((c) => {
@@ -97,9 +99,10 @@ test("catalog producer publishes every update as a snapshot group", async () => 
 	});
 
 	const second = await subscriber.nextGroup();
-	expect(second?.sequence).toBe(1n);
+	// Each snapshot opens a group at its timestamp, past the previous one.
+	expect(second?.start).toBeGreaterThan(first.start);
 	expect(await second?.readJson()).toEqual({
-		media: { clock: expect.anything() },
+		sync: { clock: expect.anything() },
 		video: { renditions: {} },
 		scte35: { splices: [] },
 	});
@@ -115,13 +118,13 @@ test("catalog producer advertises the page clock from the first snapshot", async
 	const catalog = new CatalogProducer();
 
 	const effect = new Effect();
-	const track = new Track.Producer("catalog.json");
+	const track = new Track.Producer("catalog.json").accept({ timescale: Time.Timescale.MILLI });
 	catalog.serve(track, effect);
 	const consumer = new Json.Snapshot.Consumer<Catalog.Root>({ track });
 
 	// Before any rendition: a live-only publisher exposes its clock.
 	const first = Catalog.RootSchema.parse((await consumer.latest())?.value);
-	const mapping = first.media?.clock;
+	const mapping = first.sync?.clock;
 	if (!mapping) throw new Error("expected a media clock");
 	expect(mapping.timescale).toBe(1_000_000);
 
@@ -136,7 +139,7 @@ test("catalog producer advertises the page clock from the first snapshot", async
 		c.video = { renditions: {} };
 	});
 	const second = Catalog.RootSchema.parse((await consumer.latest())?.value);
-	expect(second.media?.clock).toEqual(mapping);
+	expect(second.sync?.clock).toEqual(mapping);
 
 	effect.close();
 	installed.close();
@@ -154,7 +157,7 @@ test("catalog producer omits the clock when the page's wall clock is unset", asy
 		});
 
 		const effect = new Effect();
-		const track = new Track.Producer("catalog.json");
+		const track = new Track.Producer("catalog.json").accept({ timescale: Time.Timescale.MILLI });
 		catalog.serve(track, effect);
 		const subscriber = track.subscribe().ordered();
 		const group = await subscriber.nextGroup();
@@ -174,12 +177,12 @@ test("a reconnecting subscriber is seeded with the full current catalog", async 
 
 	// The first subscription drains and ends...
 	const first = new Effect();
-	catalog.serve(new Track.Producer("catalog.json"), first);
+	catalog.serve(new Track.Producer("catalog.json").accept({ timescale: Time.Timescale.MILLI }), first);
 	first.close();
 
 	// ...and a fresh subscription still gets the current catalog, not nothing.
 	const effect = new Effect();
-	const track = new Track.Producer("catalog.json");
+	const track = new Track.Producer("catalog.json").accept({ timescale: Time.Timescale.MILLI });
 	catalog.serve(track, effect);
 	const seeded = (await new Json.Snapshot.Consumer<Catalog.Root>({ track }).latest())?.value;
 	expect(seeded?.video).toEqual({ renditions: {} });
@@ -351,7 +354,7 @@ describe("estimate publication window", () => {
 		});
 		const effect = new Effect();
 		scopes.push(effect);
-		const track = new Track.Producer("catalog.json");
+		const track = new Track.Producer("catalog.json").accept({ timescale: Time.Timescale.MILLI });
 		producer.serve(track, effect);
 		const consumer = new Json.Snapshot.Consumer<Catalog.Root>({ track });
 		const estimate = (jitter: number) =>
@@ -440,7 +443,7 @@ describe("estimate publication window", () => {
 		// The window closed with the output, so a new subscriber's first estimate is immediate.
 		const again = new Effect();
 		scopes.push(again);
-		const track = new Track.Producer("catalog.json");
+		const track = new Track.Producer("catalog.json").accept({ timescale: Time.Timescale.MILLI });
 		producer.serve(track, again);
 		const reader = new Json.Snapshot.Consumer<Catalog.Root>({ track });
 		await reader.latest();
@@ -460,7 +463,9 @@ describe("estimate publication window", () => {
 		const leading = await sent();
 		await advance(990);
 		expect((await consumer.latest())?.value.video?.renditions.v.delay).toBe(Catalog.u53(7));
-		expect(await sent()).toBe((leading ?? 0n) + 1n);
+		// One trailing group, starting where the window ends.
+		expect(leading).toBe(1n);
+		expect(await sent()).toBe(1000n);
 		producer.mutate((catalog) => {
 			if (!catalog.video) throw new Error("video missing");
 			catalog.video.renditions.other = { codec: "avc1.640028", container: { kind: "legacy" } };

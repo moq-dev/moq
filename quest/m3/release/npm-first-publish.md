@@ -2,12 +2,12 @@
 
 ## Goal
 
-`@moq/clock`, `@moq/libav`, `@moq/stats`, `@moq/ui`, and `@moq/video` exist on npm, each with trusted
+`@moq/clock`, `@moq/libav`, `@moq/stats`, and `@moq/video` exist on npm, each with trusted
 publishing attached to `moq-dev/moq` and the `npm` Environment. The cut's release workflow can then publish
 their real versions. A maintainer does this by hand. Delete this quest once
 the checks pass:
 
-- `npm view @moq/<name>` resolves for all five, and the package settings show
+- `npm view @moq/<name>` resolves for all four, and the package settings show
   the `moq-dev/moq` trusted publisher with Environment `npm`.
 
 ## Plan
@@ -26,6 +26,10 @@ at 0.1.0 with a release script, and the name returns 404. Nothing published
 depends on it, so a miss fails only its own publish. All five still returned
 404 on 2026-11-12.
 
+Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit): `@moq/ui`
+became a workspace-private package bundled into watch and publish, so its
+name is not claimed and it left this list, which had five names.
+
 Decided 2026-10-22 (maintainer): publish a minimal `0.0.0` placeholder
 (README only) per name to claim it, then attach the trusted publisher. The
 cut publishes the real `0.1.0` (`0.0.1` for `@moq/stats`) through the workflow with provenance, so no
@@ -40,10 +44,6 @@ published to npm yet` install failure on every run (noted 2026-11-03 from
 [moq-dev/moq#7714](https://github.com/moq-dev/moq/pull/7714), e.g.
 [run 41591680387](https://github.com/moq-dev/moq/actions/runs/41591680387));
 it clears with the same publication.
-
-`@moq/p2p` is out of scope: it is private with no release script, so the cut
-does not publish it. [Watch opts in](/quest/m4/p2p/watch.md) owns its first
-publication, including claiming its names.
 
 Decided 2026-11-06 (maintainer, /quest-unblock): JSR is dropped (every `@moq` JSR
 package was archived on 2026-11-07), so no JSR names are claimed.

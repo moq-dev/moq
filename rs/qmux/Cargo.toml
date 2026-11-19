@@ -13,28 +13,24 @@ keywords = ["quic", "qmux", "websocket", "tcp", "multiplexing"]
 categories = ["network-programming", "asynchronous"]
 
 [features]
-default = ["tls", "wss"]
-tcp = ["tokio/net"]
-tls = ["tcp", "dep:tokio-rustls", "dep:rustls"]
-uds = ["tokio/net"]
-ws = ["dep:tokio-tungstenite", "dep:futures"]
-wss = ["ws", "dep:rustls-native-certs", "dep:rustls", "tokio-tungstenite/rustls-tls-native-roots"]
+# Exposes the `fuzz/` harness's target body and seeds through the `fuzz` module.
+fuzz = ["kio/sim", "tokio/io-util"]
 
 [dependencies]
 bytes = { workspace = true }
-futures = { workspace = true, optional = true }
+futures = { workspace = true }
 kio = { workspace = true, features = ["runtime"] }
 # rind's rustls provider and the `UnsupportedCpu` error the transport crates share.
 moq-crypto = { workspace = true, features = ["provider"] }
 moq-net = { workspace = true }
 # The stream state machine, shared with QUIC. `mux` drives it over a reliable transport.
-moq-quic = { workspace = true, features = ["mux"] }
-rustls = { version = "0.23", default-features = false, optional = true }
-rustls-native-certs = { workspace = true, optional = true }
+moq-quic = { workspace = true }
+rustls = { version = "0.23", default-features = false }
+rustls-native-certs = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
-tokio-rustls = { workspace = true, optional = true }
-tokio-tungstenite = { workspace = true, features = ["connect", "handshake"], optional = true }
+tokio = { workspace = true, features = ["net"] }
+tokio-rustls = { workspace = true }
+tokio-tungstenite = { workspace = true, features = ["connect", "handshake", "rustls-tls-native-roots"] }
 # `poll_read_buf`, which reads into a `BytesMut` without zeroing it first.
 tokio-util = { workspace = true, features = ["io"] }
 tracing = { workspace = true }
@@ -45,6 +41,7 @@ libc = { workspace = true }
 [dev-dependencies]
 anyhow = { workspace = true }
 criterion = { package = "bench-harness", path = "../bench-harness" }
+kio = { path = "../kio", features = ["sim"] }
 # The last release before this crate moved here, for wire interop tests only.
 qmux06 = { package = "qmux", version = "0.6.3", default-features = false, features = ["tcp", "ws"] }
 # A self-signed identity and the relay's crypto provider, for the bench example's TLS transports.
@@ -56,22 +53,16 @@ tokio = { workspace = true, features = ["full", "test-util"] }
 web-transport-trait = { workspace = true }
 workspace-hack = { path = "../workspace-hack" }
 
+# Writes the generated fuzzer corpus to disk. Needs the `fuzz` feature, so a default
+# build skips it.
 [[example]]
-name = "interop-client"
-required-features = ["tcp", "ws"]
-
-[[example]]
-name = "interop-server"
-required-features = ["tcp", "ws"]
-
-[[example]]
-name = "bench"
-required-features = ["tls", "wss"]
+name = "fuzz-seeds"
+path = "examples/fuzz-seeds.rs"
+required-features = ["fuzz"]
 
 [[bench]]
 name = "receive"
 harness = false
-required-features = ["tcp", "ws"]
 
 [lints]
 workspace = true

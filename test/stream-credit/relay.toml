@@ -8,7 +8,6 @@ level = "info"
 [listen]
 bind = "127.0.0.1:4480"
 tls.generate = ["localhost", "127.0.0.1"]
-# The YIELDED reset that pauses a group is lite-07's; lite-06 resets cancel it.
 version = ["moq-lite-07-wip", "moq-lite-06"]
 
 [web.http]

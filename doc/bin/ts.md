@@ -6,7 +6,8 @@ description: Carry a transport stream through MoQ, demultiplexed or whole, and w
 # MPEG-TS
 
 `moq import ts` reads a transport stream on stdin and `moq export ts` writes one
-to stdout. [SRT](/bin/srt) carries the same import and export over the network.
+to stdout. [SRT](/bin/srt) carries the semantic import and export over the
+network; it has no passthrough mode.
 There are two modes, and they make different promises.
 
 ```bash
@@ -23,7 +24,7 @@ moq ... --broadcast event.hang export ts --passthrough > out.ts
 
 | | Semantic | Passthrough (`--passthrough`) |
 | --- | --- | --- |
-| On the wire | One track per elementary stream, plus the PSI and SI the import keeps, in the [`mpegts`](/draft/moq-mpegts) catalog section | One [`m2ts`](/concept/hang#transport-streams) track of whole 188-byte packets |
+| On the wire | One track per elementary stream, plus the PSI and SI the import keeps, in the [`mpegts`](/draft/moq-mpegts) catalog section | One [passthrough](/concept/hang#transport-streams) track of whole 188-byte packets, named in the same section |
 | Output | A rebuilt TS: same media, programs, descriptors and kept SI; new packetization, PCR and table cadence | The source's packets, byte for byte, from the first group on |
 | Browsers and `moq play` | Watch the video and AAC or Opus audio; MP2, AC-3 and E-AC-3 play only where the player has a decoder for them, which `moq play` does not | Have nothing to decode |
 | A relay | Drops and prioritizes per track | Caches and drops whole runs of packets |
@@ -85,14 +86,16 @@ A broadcast holds one program. A multi-program stream is refused until
 broadcast (`event.hang` becomes `event/1.hang`, `event/2.hang`), following the
 PAT: a program it adds publishes, one it drops ends, and one that returns
 publishes as a new [instance](/concept/moq-lite#publisher-instances). A listed
-program whose PMT does not arrive within 0.5 s of program clock ends the import.
+program whose PMT does not arrive within 0.5 s of program clock counts as
+`PMT_error_2` in the feed health while the others publish, and starts once its
+PMT arrives.
 
 A PMT that adds, removes, or retypes a stream, or reuses a PID, ends the old
 track and continues under a fresh name; the export announces each layout at its
 next PMT `version_number`. A PAT that moves the PMT is followed, and the export
 moves its own PMT behind a new PAT.
 
-The import republishes as a new instance when the source moves onto another
+The import, over stdin or SRT, republishes as a new instance when the source moves onto another
 timeline: the PCR and every stream stepping back, flagged or not, a step more
 than 10 s forward without `discontinuity_indicator`, or a PAT naming another
 `transport_stream_id` or program number. The new stream carries nothing over
@@ -148,11 +151,14 @@ track, so an `.msf` broadcast needs `--catalog-format hang`. The encoding is in
 
 An importer joining a live feed waits for what it needs before publishing.
 
-- **Semantic:** the import waits for the PAT, PMT, and a PCR, and holds the
-  catalog until two seconds of PCR have measured a constant mux rate or shown
-  the input to be variable-rate. A subscriber joins at a keyframe, and the
-  export puts a PAT and PMT ahead of it. From there a late exporter writes the
-  same packets as a running one, but for continuity counters.
+- **Semantic:** the import waits for the PAT, PMT, and a PCR, and publishes the
+  catalog with the first media. A constant mux rate follows as a catalog update
+  once two seconds of PCR have measured it; a variable-rate source never records
+  one. An export without `--mux-rate` waits up to those two seconds for the rate
+  before it starts, so a variable-rate source costs it one wait. A subscriber
+  joins at a keyframe, and the export puts a PAT and PMT ahead of it. From
+  there a late exporter writes the same packets as a running one, but for
+  continuity counters.
 - **Passthrough:** nothing is published until the PAT, the clock program's
   PMT, a PCR, and a group start. Bytes before that, and bytes off the 188-byte
   grid, are dropped: the output equals the input over the *admitted interval*,
@@ -179,8 +185,9 @@ what the network drops, so random packet loss alone loses no content.
   hole longer than the export can pad over skips PCR slots, and then the first
   PCR after them flags the clock jump. PAT/PMT versions do not change either
   way. A group cut short keeps what arrived. Video resumes at its next
-  keyframe, dropping orphaned leading pictures; other tracks carry on. On a path slower than the media, whole groups
-  are shed and the latency holds. After an outage that exhausts the buffered
+  keyframe, dropping H.264 and H.265 leading pictures that reference the group
+  before; MPEG-2 video goes out whole. Other tracks carry on. On a path slower
+  than the media, whole groups are shed and the latency holds. After an outage that exhausts the buffered
   media, overdue padding can arrive in a burst when media resumes.
 - **Passthrough:** surviving packets go out unchanged, on their source schedule.
   A missing interval stays missing: the export never repairs continuity counters,
@@ -190,9 +197,11 @@ what the network drops, so random packet loss alone loses no content.
   the output decodes, or meets the T-STD, across the gap.
 
 Damage in the source is the importer's concern, not MoQ's. In semantic mode a
-damaged packet is dropped on its own PID, so video freezes until its next
-keyframe while the other tracks carry on, and feed health (stalled streams,
-TR 101 290 counters) is logged and reported without changing what publishes.
+lost packet, or one the receiver flagged with the transport error indicator, is
+dropped on its own PID, so video freezes until its next keyframe while the
+other tracks carry on, and feed health (stalled streams, TR 101 290 counters)
+is logged and reported without changing what publishes. A media unit that
+arrives whole but does not decode ends the import with the cause.
 Passthrough carries damaged packets as they came.
 
 ## Evidence
@@ -251,7 +260,8 @@ details each grader and its negative controls.
 | Semantic: a congested and an overflowing path shed whole groups, stay T-STD compliant, keep their latency | `just test ts --headroom --rate 7000000`, with `--queue 250ms` | Nightly only |
 | Passthrough: a missing group leaves its time out and counts one gap; a cut group loses only its tail; a late run is dropped alone | [`release_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/release_test.rs) `a_group_never_delivered_leaves_its_time_out`, `a_group_cut_short_loses_only_its_tail`, `an_object_past_its_deadline_is_a_gap_in_that_release_only` | PR |
 | Passthrough: an overflowing path keeps surviving packets in place through the source's last | `just test ts --passthrough --rate 7000000 --queue 250ms` | Nightly only |
-| Source damage drops only the damaged PID's unit | [`import.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/import.rs) `damaged_h264_nal_recovers`, `video_drops_a_partial_access_unit_across_a_continuity_break` | PR |
+| Source damage drops only the damaged PID's unit | [`import.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/import.rs) `damaged_tei_recovers`, `video_drops_a_partial_access_unit_across_a_continuity_break` | PR |
+| A whole unit that does not decode ends the import | [`import.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/import.rs) `undecodable_nal_ends_the_import`, `malformed_opus_pes_ends_the_import_unpublished` | PR |
 
 ### Not claimed
 

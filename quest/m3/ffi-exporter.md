@@ -8,8 +8,10 @@ moq's bindings (Kotlin, Swift, Python, Go, Dart, C++, and C) come from
 attributes. moq-ffi shrinks to the remainder that is genuinely new API.
 `rs/uniffi-bindgen`, `nix/uniffi-dart-*`, the per-generator pins, and the
 UniFFI dependency are deleted, and the three `kixelated/uniffi-*` generator
-forks are archived. Wrapper APIs do not change except where a decision below
-says so.
+forks are archived. The switch is a breaking release of every binding
+(decided 2026-11-16): the hand-written parts of each wrapper keep their API
+except where a decision below says so, and the generated names the wrappers
+re-export may change.
 
 ## Plan
 
@@ -68,7 +70,38 @@ dependency, so crates.io moq-ffi still builds (see the
   workflows, `rs/moq-ffi/build.sh`, and `sh/` read the generators from it.
   Delete `rs/uniffi-bindgen`, the "five places" comments in `flake.nix`, and the
   `nix/uniffi-dart-*` lockfile and patch. The `sh/{kt,swift,dart,cpp}`
-  packaging scripts stay: they package moq.
+  packaging scripts stay, except the Swift FFI ones the release template below
+  replaces.
+- **Python and Swift FFI releases** (maintainer, 2026-11-17, from
+  [kixel-ai/rust2#852](https://github.com/kixel-ai/rust2/pull/852), which added
+  rust2's [release template](https://github.com/kixel-ai/rust2/blob/main/ffi/release/README.md)):
+  moq-ffi's wheels and XCFramework come from rust2's shared `bindings.yml`
+  builder, published by the `release.yml` that
+  `package.py init --manifest-path rs/moq-ffi/Cargo.toml --swift-mirror moq-dev/moq-swift-ffi`
+  writes at the rust2 commit moq pins, plus `features: openh264`. It publishes
+  on the `moq-ffi-v*` tags moq already cuts. Register it as `moq-ffi`'s PyPI
+  trusted publisher in place of `release-py-ffi.yml`, then delete
+  `release-py-ffi.yml`, `release-swift-ffi.yml`,
+  `sh/swift/{package,verify,publish}-ffi.sh`, and the maturin section of
+  `pyproject.toml`. `release-swift-lib.yml`, `release-py.yml`, and
+  `sh/swift/{package,verify,publish}.sh` keep packaging the hand-written
+  wrappers, against the new FFI package.
+  - ✅ Floors rise to Python 3.11 (the stable ABI's first with the buffer
+    protocol), macOS 13 and Swift 6.2, with iOS 16 unchanged, and moq-ffi
+    ships no sdist, since a source build needs the nightly exporter
+    (rejected: keep Python 3.10; keep macOS 12.3 by gating `Swift.Duration`
+    APIs; a pre-exported sdist).
+  - ✅ Delete the Swift FFI packaging scripts the template replaces (rejected:
+    keep them), so one path packages the FFI.
+  - ✅ Accept the exporter's names: the Python import stays `moq_ffi`, the
+    Swift module becomes `MoqFfi` and the asset `MoqFfiFFI.xcframework.zip`
+    (today both `MoqFFI`), listed in `MIGRATE.md` (rejected: keep `MoqFFI`,
+    which needs a rename the exporter has no way to express).
+  - ✅ A new `swift-mirror` environment holds moq-bot's App credentials,
+    deployable only from `moq-ffi-v*` tags, so moq's `release.yml` stays
+    exactly what `package.py init` writes and a rust2 pin bump is a re-init
+    (rejected: hand-editing moq's copy to the existing `bot` environment;
+    renaming the template's environment in rust2 to moq's name).
 - Zero-default durations (Decided 2026-11-03 (maintainer, follow-up planning after the 2026-11-03 /quest-afk and /quest-complete runs), from
   [moq-dev/moq#7697](https://github.com/moq-dev/moq/pull/7697)): the
   exporter gives generated duration fields a zero default, so a bare C++
@@ -109,14 +142,49 @@ dependency, so crates.io moq-ffi still builds (see the
   with an error, which the fork still leaks (moq-ffi's errors hold no
   handles today).
 
-Public API: moq-ffi's dependency names change, generated C type names become
-CamelCase, and the generated record `MoqAudioEncoderFinished` becomes
-`MoqAudioEncoderFinish` in every language; wrapper APIs do not change except
-Dart's `MoqRoute.instanceId()`, which takes the exporter's name. Wire: none.
+Deferred 2026-11-15 (maintainer, /quest-complete): the `Waiting` decision on
+the generated binding renames stays open, kept out of that run's m0 to m2
+scope, since the binding API changes anyway in the rust2 migration expected
+around 2026-12-15.
 
-## Waiting
+Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit), settling
+that `Waiting` item: ✅ accept two breaks. 0.22 ships the bindings on
+UniFFI, and the switch is a second breaking binding release (rejected:
+announcing the binding packages as a preview that freezes at the switch;
+holding the binding packages off the shared minor until the switch; counting
+only the hand-written wrappers as public API, the old option B).
 
-- Maintainer: whether the generated binding renames may land after the cut. The switch renames C types to CamelCase, `MoqAudioEncoderFinished` to `MoqAudioEncoderFinish` in every generated binding, and Dart `moq_ffi`'s `instanceId`, which would force a binding-breaking release. (A) Accept one binding-breaking release when the switch lands. (B) Count only the hand-written wrappers as public API, since they already alias these names (for example `instance()` in `dart/moq/lib/src/client.dart`), so the generated renames ship as non-breaking. I recommend B; C costs nothing either way, since no `c-v*` tag ships before the cut.
+Option B's premise does not hold, which is why it was not offered again: the
+generated layer is public API in most languages, counted 2026-11-16.
+
+- Kotlin: 187 `typealias` lines under `kt/moq/src/jvmAndAndroidMain` onto
+  `uniffi.moq.*` classes, handles included (104 in `Aliases.kt`), and a test
+  requires one for every generated record and handle
+  (`SmokeTest.kt:224`).
+- Dart: 157 `typedef` lines under `dart/moq/lib`.
+- Swift wraps handles but has 102 `typealias` lines under
+  `swift/Sources/Moq` (46 in `Aliases.swift`), among them `MoqError`,
+  `ProtocolKind`, `AnnounceEvent`, and `ConnectionPhase`.
+- C++ and the generated C are generated entirely.
+
+So "wrapper APIs do not change" in the bullets above, carried over from the
+abandoned fork plan, is a property to measure, not assume: the switch's PR diffs each
+language's public API (`sh/api-diff`) and its Impact section lists every
+rename for the packages' `MIGRATE.md`. Reshapes that outlive the generator
+land before the cut instead: the open-set rule in `rs/moq-ffi/AGENTS.md`
+(selector objects, `Unknown` variants, and a null `max_age` for no limit) and
+the group rename; the switch keeps those shapes. The audit's other binding findings were not picked: the `Moq`
+facade Kotlin and Dart start from stays, and `MoqError`'s variants stay as
+they are.
+
+Public API: breaking in every binding. moq-ffi's dependency names change,
+generated C type names become CamelCase, the generated record
+`MoqAudioEncoderFinished` becomes `MoqAudioEncoderFinish` in every language,
+Dart's `MoqRoute.instanceId()` takes the exporter's name, the FFI Swift module
+becomes `MoqFfi`, moq-ffi's floors rise to Python 3.11, macOS 13, and Swift
+6.2 with no sdist, and any other generated name the wrappers re-export may
+change, each listed in the PR.
+Wire: none.
 
 ## Required
 

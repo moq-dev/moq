@@ -19,11 +19,11 @@ export async function run(): Promise<void> {
 		const reader = check.subscribe({ delay: { max: Duration.millis(80) } });
 		try {
 			for (const timestamps of [[0], [100], [150, 200, 160]]) {
-				const group = check.appendGroup();
+				const group = hooks.appendNext(check);
 				for (const ms of timestamps) group.writeFrame({ payload, timestamp: Time.Timestamp.fromMillis(ms) });
 				group.finish();
 			}
-			if ((await reader.recvGroup())?.sequence !== 1n) throw new Error("B-frame tail rewound the drift edge");
+			if ((await reader.recvGroup())?.start !== 1n) throw new Error("B-frame tail rewound the drift edge");
 		} finally {
 			reader.close();
 			check.finish();
@@ -34,9 +34,10 @@ export async function run(): Promise<void> {
 			for (const publishers of [1, 4])
 				for (const readers of [1, 8])
 					for (const mode of [0, 1, 2]) {
-						const stamp = (ms: number, index: number) =>
+						// A scale-less frame carries its group's key instead of a time.
+						const stamp = (ms: number, index: number, key: bigint) =>
 							mode === 0
-								? undefined
+								? Time.Timestamp.unscaled(key)
 								: mode === 2 && index % 2 !== 0
 									? Time.Timestamp.fromMicros(ms * 1000)
 									: Time.Timestamp.fromMillis(ms);
@@ -53,10 +54,10 @@ export async function run(): Promise<void> {
 							for (const track of tracks) {
 								hooks.receiveTrack(track);
 								for (let sequence = 0; sequence < retained; sequence++) {
-									const group = track.appendGroup();
+									const group = hooks.appendNext(track);
 									group.writeFrame({
 										payload,
-										timestamp: stamp(sequence * 100, sequence),
+										timestamp: stamp(sequence * 100, sequence, BigInt(sequence)),
 									});
 									group.finish();
 								}
@@ -75,10 +76,10 @@ export async function run(): Promise<void> {
 								for (let sequence = 0; sequence < retained; sequence++)
 									for (const reader of ordered) {
 										const group = await reader.nextGroup();
-										if (group?.sequence !== BigInt(sequence)) throw new Error("history missing");
+										if (group?.start !== BigInt(sequence)) throw new Error("history missing");
 										await group.readFrame();
 									}
-								sources.push(track.appendGroup());
+								sources.push(hooks.appendNext(track));
 								for (const reader of ordered) {
 									const group = await reader.nextGroup();
 									if (!group) throw new Error("live group missing");
@@ -98,6 +99,7 @@ export async function run(): Promise<void> {
 										Math.floor(iteration / offsets.length) * 100 +
 										offsets[iteration % offsets.length],
 									iteration,
+									BigInt(retained),
 								);
 								for (const source of sources) source.writeFrame({ payload, timestamp });
 								for (const reader of waiting)
@@ -105,7 +107,9 @@ export async function run(): Promise<void> {
 								for (const frame of await Promise.all(pending))
 									if (
 										frame?.payload[0] !== 7 ||
-										frame.timestamp?.asMillis() !== timestamp?.asMillis()
+										(timestamp.scale === undefined
+											? frame.timestamp.value !== timestamp.value
+											: frame.timestamp.asMillis() !== timestamp.asMillis())
 									)
 										throw new Error("frame missing or reordered");
 							}

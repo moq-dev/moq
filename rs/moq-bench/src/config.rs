@@ -121,6 +121,8 @@ pub struct Config {
 pub(crate) enum Command {
 	/// Sample the CPU, memory, and sockets of the process under test (Linux only).
 	Host(crate::host::Args),
+	/// Publish and follow named broadcasts through one relay, reporting each reader's gaps.
+	Replay(Box<crate::replay::Args>),
 }
 
 impl Default for Config {
@@ -163,14 +165,32 @@ impl Config {
 			std::process::exit(0);
 		}
 		let config = Self::parse_and_merge(args)?;
-		// The sampler reads no environment, and runs beside a relay whose own
-		// `MOQ_*` settings would otherwise be refused as unknown.
-		if config.command.is_none() {
-			moq_tokio::cli::check_env(&[Self::spec()], &[])?;
+		config.refuse_unknown_env()?;
+		// `replay` takes its own log flags and installs its own logger.
+		if !matches!(config.command, Some(Command::Replay(_))) {
+			config.log.init()?;
 		}
-		config.log.init()?;
 		tracing::trace!(?config, "final config");
 		Ok(config)
+	}
+
+	/// Refuse every `MOQ_*` variable the load generator does not read.
+	///
+	/// By hand rather than with `#[usage(unknown_env)]`, which would refuse it for `host`
+	/// too: the sampler reads no environment, and runs beside a relay whose own `MOQ_*`
+	/// settings would otherwise be refused as unknown.
+	fn refuse_unknown_env(&self) -> anyhow::Result<()> {
+		if self.command.is_some() {
+			return Ok(());
+		}
+		let env: Vec<_> = std::env::vars_os().map(|(name, _)| name).collect();
+		let unknown = usage_rs::argv::env::unknown(Self::spec().root, "MOQ_", &[], env.iter().map(|n| n.as_os_str()));
+		anyhow::ensure!(
+			unknown.is_empty(),
+			"unknown environment variables under 'MOQ_': {}",
+			unknown.join(", ")
+		);
+		Ok(())
 	}
 
 	/// The released spellings in use, each paired with what replaced it.
@@ -196,14 +216,18 @@ impl Config {
 			.skip(1)
 			.map(std::ffi::OsString::as_os_str)
 			.collect::<Vec<_>>();
-		if let Some((command, rest)) = argv.split_first()
-			&& *command == "host"
-		{
-			let args = crate::host::parse(rest)?;
-			return Ok(Self {
-				command: Some(Command::Host(args)),
-				..Self::default()
-			});
+		if let Some((command, rest)) = argv.split_first() {
+			let command = match command.to_str() {
+				Some("host") => Some(Command::Host(crate::host::parse(rest)?)),
+				Some("replay") => Some(Command::Replay(Box::new(crate::replay::parse(rest)?))),
+				_ => None,
+			};
+			if command.is_some() {
+				return Ok(Self {
+					command,
+					..Self::default()
+				});
+			}
 		}
 		// Help and version are questions rather than failures. Answered and exited
 		// here, because wrapping them renders an empty `anyhow` error and exits
@@ -223,7 +247,7 @@ impl Config {
 		// load generator flags came first, and they configure nothing it runs.
 		anyhow::ensure!(
 			config.command.is_none(),
-			"`moq-bench host` takes only its own flags, given after `host`"
+			"`moq-bench host` and `moq-bench replay` take only their own flags, given after the subcommand"
 		);
 		let env = usage_rs::config::EnvLayer::from_process();
 		let file_path = config.file.clone();
@@ -247,7 +271,7 @@ impl Config {
 		// the file's own released keys in one message.
 		let mut deprecated = config.deprecated();
 		let (mut config, resolved) = moq_tokio::cli::Merge {
-			registry: Settings::SETTINGS_REGISTRY,
+			registry: Self::SETTINGS_REGISTRY,
 			cli: &cli_layer,
 			env: &env,
 			file,
@@ -354,61 +378,6 @@ impl Config {
 	pub fn publishes(&self) -> bool {
 		self.broadcasts().min.max(self.broadcasts().max) > 0
 	}
-}
-
-#[allow(
-	dead_code,
-	reason = "declares the settings for the usage registry; nothing reads the fields"
-)]
-#[derive(usage_rs::Config)]
-struct Settings {
-	#[usage(env = "MOQ_BENCH_NAME", cli("--name"))]
-	name: Option<String>,
-
-	#[usage(env = "MOQ_BENCH_FANOUT", cli("--fanout"))]
-	fanout: Option<String>,
-
-	#[usage(env = "MOQ_BENCH_STARTUP", cli("--startup"))]
-	startup: Option<String>,
-
-	#[usage(env = "MOQ_BENCH_DURATION", cli("--duration"))]
-	duration: Option<String>,
-
-	#[usage(env = "MOQ_BENCH_REPORT", cli("--report"))]
-	report: Option<String>,
-
-	#[usage(env = "MOQ_BENCH_CONNECTIONS", cli("--connections"))]
-	connections: Option<String>,
-
-	#[usage(env = "MOQ_BENCH_BROADCASTS", cli("--broadcasts"))]
-	broadcasts: Option<String>,
-
-	#[usage(env = "MOQ_BENCH_SUBSCRIBE", cli("--subscribe"))]
-	subscribe: Option<String>,
-
-	#[usage(env = "MOQ_BENCH_FPS", cli("--fps"))]
-	fps: Option<String>,
-
-	#[usage(env = "MOQ_BENCH_FRAME_SIZE", cli("--frame-size"))]
-	frame_size: Option<String>,
-
-	#[usage(env = "MOQ_BENCH_GROUP_SIZE", cli("--group-size"))]
-	group_size: Option<String>,
-
-	#[usage(env = "MOQ_BENCH_MAX_DELAY", cli("--max-delay"))]
-	max_delay: Option<String>,
-
-	#[usage(env = "MOQ_BENCH_OUTPUT", cli("--output"))]
-	output: Option<String>,
-
-	#[usage(flatten)]
-	client: moq_tokio::settings::Connect,
-
-	#[usage(flatten)]
-	quic: moq_tokio::settings::Quic,
-
-	#[usage(flatten)]
-	log: moq_tokio::settings::Log,
 }
 
 #[cfg(test)]
@@ -619,6 +588,20 @@ url = "https://example.com"
 		assert!(config.command.is_none());
 	}
 
+	/// An unknown `MOQ_*` variable is refused for the generator, but not for `host`.
+	#[test]
+	fn unknown_env_refused_except_for_host() {
+		if !test_env::Env::default().set("MOQ_BENCH_TYPO", "1").isolate() {
+			return;
+		}
+		let config = Config::parse_and_merge(["moq-bench"]).unwrap();
+		let error = config.refuse_unknown_env().unwrap_err().to_string();
+		assert!(error.contains("MOQ_BENCH_TYPO"), "{error}");
+
+		let host = Config::parse_and_merge(["moq-bench", "host", "--pid", "1"]).unwrap();
+		host.refuse_unknown_env().unwrap();
+	}
+
 	/// A generator flag beside `host` would configure nothing, so it is an error.
 	#[test]
 	fn host_refuses_generator_flags() {
@@ -629,12 +612,6 @@ url = "https://example.com"
 		] {
 			assert!(Config::parse_and_merge(argv).is_err(), "{argv:?} was accepted");
 		}
-	}
-
-	#[test]
-	fn the_settings_registry_matches_the_cli() {
-		let drift = Settings::SETTINGS_REGISTRY.drift(Config::SETTINGS_BINDINGS);
-		assert!(drift.is_empty(), "{drift:#?}");
 	}
 
 	#[test]

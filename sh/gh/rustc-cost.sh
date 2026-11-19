@@ -27,7 +27,10 @@ fi
 stats=$(mktemp)
 trap 'rm -f "$stats"' EXIT
 status=0
-perf stat -x, --no-big-num --no-scale -e instructions:u,task-clock -o "$stats" -- "$@" || status=$?
+# task-clock names its PMU: perf resolves a bare software event through the
+# first sysfs mount it finds, and a systemd-nspawn container with a private user
+# namespace mounts sysfs piecewise, so that mount is /sys/block, not /sys.
+perf stat -x, --no-big-num --no-scale -e instructions:u,software/task-clock/ -o "$stats" -- "$@" || status=$?
 
 # A hybrid CPU reports instructions per core type, and a type the compiler
 # never ran on is "<not counted>". --no-scale keeps each type's count as
@@ -36,7 +39,7 @@ cpu=
 instructions=
 while IFS=, read -r count _ event _; do
     case "$event" in
-        task-clock*) cpu=${count%.*} ;;
+        *task-clock*) [[ ! "$count" =~ ^[0-9]+(\.[0-9]+)?$ ]] || cpu=${count%.*} ;;
         *instructions*) [[ ! "$count" =~ ^[0-9]+$ ]] || instructions=$((${instructions:-0} + count)) ;;
     esac
 done <"$stats"

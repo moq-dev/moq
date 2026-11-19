@@ -46,7 +46,7 @@ async fn shaped_uplink_disables_and_resumes() {
 		tls: insecure_tls(),
 		once: true,
 		quic: MoqQuicConfig {
-			congestion_control: Some(MoqCongestionControl::Delay),
+			congestion_control: Some(MoqCongestionControl::bbr()),
 			..Default::default()
 		},
 		websocket: MoqWebSocketConfig {
@@ -81,7 +81,7 @@ async fn shaped_uplink_disables_and_resumes() {
 					.first()
 					.cloned()
 					.map(|producer| MoqMediaProducer::Track { producer }),
-				..video_init(MoqVideoFormat::Avc3, h264_init())
+				..video_init(MoqVideoFormat::H264, h264_init())
 			},
 		)
 		.unwrap();
@@ -93,7 +93,9 @@ async fn shaped_uplink_disables_and_resumes() {
 		tracks.push(track);
 	}
 	let remote = await_announced(&receiver.consume(), "ladder").await;
-	let catalog = MoqMediaCatalogConsumer::subscribe(&remote).await.unwrap();
+	let catalog = MoqMediaCatalogConsumer::subscribe(&remote, Duration::ZERO)
+		.await
+		.unwrap();
 	let first = catalog.next().await.unwrap().expect("catalog ended");
 	let low = MoqMediaTrackConsumer::subscribe(
 		&remote,
@@ -166,7 +168,7 @@ async fn shaped_uplink_disables_and_resumes() {
 						let mut payload = if idr { h264_init() } else { Vec::new() };
 						payload.extend_from_slice(&[0, 0, 0, 1, if idr { 0x65 } else { 0x41 }, 0x88, 0x84, 0x21]);
 						payload.resize((bitrate_bps / 8 / 30) as usize, 0xff);
-						track.write_frame(MoqFrame { payload, timestamp: Some(us(timestamp)) }).unwrap();
+						track.write_frame(MoqFrame { payload, timestamp: us(timestamp) }).unwrap();
 						keyframe[i] = false;
 						sent[i] += 1;
 					}

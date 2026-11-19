@@ -10,7 +10,6 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use super::StreamId;
 use super::recv::{Error, Reader, Stream};
 use super::{StreamsState, state::get_or_insert_recv};
-use crate::VarInt;
 use crate::connection::assembler::Assembler;
 use crate::connection::waits::Wait;
 
@@ -18,12 +17,18 @@ use crate::connection::waits::Wait;
 ///
 /// They keep their connection flow control credit until released, so the connection receive
 /// window bounds what every lease on the connection holds together. Handed out as a [`Lease`]
-/// by [`Stream::lease()`].
+/// by [`Stream::poll_lease()`].
+///
+/// Bytes the reader has yet to take keep their stream credit too (see [`Self::untaken`]), so a
+/// reader that stops leasing holds at most its stream window of them, however much it leased
+/// before, besides what it took and has not released.
 #[derive(Debug, Default)]
 pub(super) struct Leased {
 	chunks: VecDeque<Bytes>,
 	/// Bytes in `chunks`.
 	len: u64,
+	/// Bytes out in a [`Lease`], until it is handed back.
+	lent: u64,
 	/// Bytes whose connection credit is withheld: `len`, plus bytes taken or advanced past but
 	/// not yet released.
 	held: u64,
@@ -58,7 +63,7 @@ fn unlooked(unread: u64, lease: &Leased) -> bool {
 #[derive(Debug, Clone, Copy)]
 enum End {
 	Fin,
-	Reset(VarInt),
+	Reset,
 }
 
 impl Leased {
@@ -98,6 +103,18 @@ impl Leased {
 		};
 		self.len -= chunk.len() as u64;
 		chunk
+	}
+
+	/// Bytes moved out of the receive buffer that the reader has yet to take, here or out in a
+	/// [`Lease`]. They have not been read, so they hold back the stream's credit as unread
+	/// buffered bytes do.
+	pub(super) fn untaken(&self) -> u64 {
+		self.len + self.lent
+	}
+
+	/// The `len` a reader waits for, or zero.
+	pub(super) fn wanted(&self) -> u64 {
+		self.want.unwrap_or(0)
 	}
 
 	/// Return the credit of every byte read out of a [`Lease`].
@@ -185,6 +202,7 @@ impl Leased {
 	/// Discard everything, returning the credit held.
 	pub(super) fn discard(&mut self) -> u64 {
 		self.len = 0;
+		self.lent = 0;
 		self.chunks.clear();
 		self.want = None;
 		self.ready = false;
@@ -192,7 +210,7 @@ impl Leased {
 	}
 }
 
-/// Bytes of a receive stream leased with [`Stream::lease()`], read as a [`Buf`]
+/// Bytes of a receive stream leased with [`Stream::poll_lease()`], read as a [`Buf`]
 ///
 /// Reading moves past bytes for good. Hand the lease back with [`Stream::release()`] to return
 /// the connection credit of the bytes read, or with [`Stream::restore()`] to keep it, as for a
@@ -266,9 +284,12 @@ impl Stream<'_> {
 	/// [`Self::release()`], and those not read are leased again next time. Hand every lease
 	/// back before leasing again.
 	///
-	/// [`Error::Blocked`] records the `want`, so the next wake of a [`Self::poll_lease()`] on this
-	/// stream means it may be met, and so that a connection window every reader is waiting on
-	/// can be recovered by evicting the stream ranked lowest by [`Self::set_priority()`].
+	/// Pending records the `want` and registers `waiter` until more arrives, the stream ends, or
+	/// an eviction fails it. Recording the `want` lets a connection window every reader is
+	/// waiting on be recovered by evicting the stream ranked lowest by [`Self::set_priority()`].
+	/// Bytes that arrived stay leasable after the connection is lost, and only then does this fail
+	/// with [`Error::ConnectionLost`]. Fails with [`Error::Reset`] once the stream was reset and
+	/// fewer than `want` bytes are left.
 	///
 	/// Nothing is evicted while the peer has connection credit left, so while the leased and
 	/// unread bytes of every stream together stay below the connection receive window. A receiver
@@ -287,27 +308,63 @@ impl Stream<'_> {
 	///
 	/// # Panics
 	/// - when the last lease of the stream was not handed back
-	pub fn lease(&mut self, want: usize) -> Result<Lease, Error> {
+	pub fn poll_lease(&mut self, waiter: &kio::Waiter, want: usize) -> Poll<Result<Lease, Error>> {
 		let (result, transmit) = self.lease_inner(want);
 		self.transmit(transmit);
-		result
+		let Some(result) = result else {
+			// A stuck window may have evicted this very stream, waking its readers before this
+			// one parked.
+			if self
+				.state
+				.recv_mut(self.id)
+				.is_some_and(|recv| recv.reader == Reader::Evicted)
+			{
+				return Poll::Ready(Err(Error::Evicted));
+			}
+			if self.state.waits.lost().is_some() {
+				return Poll::Ready(Err(Error::ConnectionLost));
+			}
+			self.state.waits.register(self.id, Wait::Read, waiter);
+			return Poll::Pending;
+		};
+		Poll::Ready(result)
 	}
 
-	fn lease_inner(&mut self, want: usize) -> (Result<Lease, Error>, bool) {
+	/// [`Self::poll_lease()`] without waiting, for tests and the fuzz target.
+	#[cfg(any(test, feature = "fuzz"))]
+	pub(crate) fn try_lease(&mut self, want: usize) -> Poll<Result<Lease, Error>> {
+		self.poll_lease(&kio::Waiter::noop(), want)
+	}
+
+	/// [`Self::try_lease()`] when `want` bytes must have arrived, for tests.
+	///
+	/// # Panics
+	/// - when fewer have
+	#[cfg(test)]
+	pub(crate) fn lease(&mut self, want: usize) -> Result<Lease, Error> {
+		match self.try_lease(want) {
+			Poll::Ready(result) => result,
+			Poll::Pending => panic!("fewer than {want} bytes to lease"),
+		}
+	}
+
+	/// The lease, `None` while fewer than `want` bytes have arrived, and whether a frame is due.
+	fn lease_inner(&mut self, want: usize) -> (Option<Result<Lease, Error>>, bool) {
 		// Bytes out in a lease do not count: a unit that outgrows the window with them is one
 		// the stuck window evicts by rank, so it gives way like any other rather than failing
 		// alone.
 		let want = want as u64;
 		if want > self.state.receive_window {
-			return (Err(Error::TooLarge), false);
+			return (Some(Err(Error::TooLarge)), false);
 		}
 		let transmit = match self.fill() {
 			Ok(transmit) => transmit,
-			Err(err) => return (Err(err), false),
+			Err(err) => return (Some(Err(err)), false),
 		};
 		let lease = self.state.lease_mut(self.id).expect("filled above");
 		if lease.len >= want || lease.is_fin() {
 			lease.out = true;
+			lease.lent = lease.len;
 			let out = Lease {
 				chunks: std::mem::take(&mut lease.chunks),
 				len: std::mem::take(&mut lease.len) as usize,
@@ -315,52 +372,24 @@ impl Stream<'_> {
 			};
 			// Its reader may be about to free the window.
 			self.state.unlooked.insert(self.id);
-			return (Ok(out), transmit);
+			return (Some(Ok(out)), transmit);
 		}
 		match lease.end {
 			Some(End::Fin) => unreachable!("handed out above"),
-			Some(End::Reset(code)) => {
+			Some(End::Reset) => {
 				debug_assert!(!transmit, "a reset stream takes no credit");
-				(Err(Error::Reset(code)), transmit)
+				(Some(Err(Error::Reset)), transmit)
 			}
 			None => {
 				lease.want = Some(want);
+				// A unit larger than the stream window needs room for the rest of it.
+				let credit = self.queue_max_stream_data();
 				// It may be waiting behind a gap, which holds eviction off until filled.
 				self.state.unlooked.insert(self.id);
 				// An eviction always has a reader to wake, even with no `MAX_DATA` due yet.
 				let evicted = self.unstick();
-				(Err(Error::Blocked), transmit || evicted)
+				(None, transmit || credit || evicted)
 			}
-		}
-	}
-
-	/// [`Self::lease()`], or wait for more to arrive
-	///
-	/// Pending registers `waiter` until more arrives, the stream ends, or an eviction fails it.
-	/// Bytes that arrived stay leasable after the connection is lost, and only then does this
-	/// fail with [`Error::ConnectionLost`].
-	///
-	/// # Panics
-	/// - when the last lease of the stream was not handed back
-	pub fn poll_lease(&mut self, waiter: &kio::Waiter, want: usize) -> Poll<Result<Lease, Error>> {
-		let result = self.lease(want);
-		match result {
-			// A stuck window may have evicted this very stream, waking its readers before this
-			// one parked.
-			Err(Error::Blocked)
-				if self
-					.state
-					.recv_mut(self.id)
-					.is_some_and(|recv| recv.reader == Reader::Evicted) =>
-			{
-				Poll::Ready(Err(Error::Evicted))
-			}
-			Err(Error::Blocked) if self.state.waits.lost().is_some() => Poll::Ready(Err(Error::ConnectionLost)),
-			Err(Error::Blocked) => {
-				self.state.waits.register(self.id, Wait::Read, waiter);
-				Poll::Pending
-			}
-			result => Poll::Ready(result),
 		}
 	}
 
@@ -369,19 +398,19 @@ impl Stream<'_> {
 	/// They wait for a later [`Self::release()`], as the start of a message read only in part
 	/// does.
 	pub fn restore(&mut self, lease: Lease) {
-		self.put_back(lease);
+		let credit = self.put_back(lease);
 		// Only a stuck pass that waited reruns: a reader handing back what it looked at is not
 		// stuck itself, and one that is waits for more with its next lease.
 		let transmit = self.state.stuck_waiting && self.unstick();
-		self.transmit(transmit);
+		self.transmit(credit || transmit);
 	}
 
 	/// Hand a lease back, returning the connection credit of every byte read from it or from an
 	/// earlier one, once the units they belong to are complete
 	pub fn release(&mut self, lease: Lease) {
-		self.put_back(lease);
+		let credit = self.put_back(lease);
 		let transmit = self.release_credit();
-		self.transmit(transmit);
+		self.transmit(credit || transmit);
 	}
 
 	/// Wake the driver when a frame is due
@@ -405,12 +434,19 @@ impl Stream<'_> {
 	}
 
 	/// [`Self::lease()`] and hand it straight back, for tests that read through the lease's
-	/// bookkeeping rather than a [`Lease`].
+	/// bookkeeping rather than a [`Lease`]: pending while fewer than `want` bytes arrived, and
+	/// whether a frame is due.
 	#[cfg(test)]
-	pub(crate) fn peek(&mut self, want: usize) -> (Result<(), Error>, bool) {
+	pub(crate) fn peek(&mut self, want: usize) -> (Poll<Result<(), Error>>, bool) {
 		let (lease, transmit) = self.lease_inner(want);
 		self.transmit(transmit);
-		(lease.map(|lease| self.put_back(lease)), transmit)
+		let peeked = match lease {
+			Some(lease) => Poll::Ready(lease.map(|lease| {
+				self.put_back(lease);
+			})),
+			None => Poll::Pending,
+		};
+		(peeked, transmit)
 	}
 
 	/// Read up to `max` leased bytes out, keeping their credit, as reading a [`Lease`] does.
@@ -441,21 +477,25 @@ impl Stream<'_> {
 		transmit
 	}
 
-	/// Put the bytes `lease` did not read back in front of the stream's lease.
+	/// Put the bytes `lease` did not read back in front of the stream's lease, returning whether
+	/// what the reader took grew the stream's credit enough to send.
 	///
 	/// Dropped instead once the stream was stopped, which discarded its lease and its credit.
-	fn put_back(&mut self, lease: Lease) {
+	fn put_back(&mut self, lease: Lease) -> bool {
 		let Some(recv) = self.state.recv_mut(self.id) else {
-			return;
+			return false;
 		};
 		let state = &mut recv.lease;
 		if !std::mem::take(&mut state.out) {
-			return;
+			return false;
 		}
 		// An out lease holds eviction off, and nothing fills a lease while it is out.
 		debug_assert!(recv.reader != Reader::Evicted && state.chunks.is_empty());
 		state.chunks = lease.chunks;
 		state.len = lease.len as u64;
+		state.lent = 0;
+		// What the reader took returns its stream credit.
+		self.queue_max_stream_data()
 	}
 
 	/// Rank this stream for eviction: when the connection window is stuck, the stream with the
@@ -490,17 +530,28 @@ impl Stream<'_> {
 			self.state.ranks.extend(recv.lease.rank_once(self.id));
 		}
 		if recv.lease.end.is_none() {
-			recv.lease.end = match recv.reset_code() {
-				Some(code) => Some(End::Reset(code)),
-				None if recv.is_read() => Some(End::Fin),
-				None => None,
+			recv.lease.end = if recv.reset_code().is_some() {
+				Some(End::Reset)
+			} else if recv.is_read() {
+				Some(End::Fin)
+			} else {
+				None
 			};
 		}
-		let (_, transmit) = recv.max_stream_data(self.state.stream_receive_window);
+		Ok(self.queue_max_stream_data())
+	}
+
+	/// Queue a `MAX_STREAM_DATA` if the stream's credit grew enough to send, returning whether.
+	fn queue_max_stream_data(&mut self) -> bool {
+		let window = self.state.stream_receive_window;
+		let Some(recv) = self.state.recv_mut(self.id) else {
+			return false;
+		};
+		let (_, transmit) = recv.max_stream_data(window);
 		if transmit {
 			self.pending.max_stream_data.insert(self.id);
 		}
-		Ok(transmit)
+		transmit
 	}
 
 	/// Return `bytes` of withheld connection credit to the peer.

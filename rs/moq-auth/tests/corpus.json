@@ -154,8 +154,57 @@
 		{
 			"name": "registered_claims_are_ignored",
 			"key": "hs256",
-			"payload": { "publish": ["**"], "iss": "issuer", "sub": 7, "jti": ["x"] },
+			"payload": { "publish": ["**"], "iss": "issuer", "sub": 7 },
 			"claims": { "root": "", "publish": ["**"], "subscribe": [] }
+		},
+		{
+			"name": "token_id",
+			"key": "hs256",
+			"payload": { "publish": ["**"], "jti": "550e8400-e29b-41d4-a716-446655440000" },
+			"claims": { "root": "", "publish": ["**"], "subscribe": [], "jti": "550e8400-e29b-41d4-a716-446655440000" }
+		},
+		{
+			"name": "token_id_at_the_length_bound",
+			"key": "hs256",
+			"payload": {
+				"publish": ["**"],
+				"jti": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+			},
+			"claims": {
+				"root": "",
+				"publish": ["**"],
+				"subscribe": [],
+				"jti": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+			}
+		},
+		{
+			"name": "token_id_past_the_length_bound",
+			"key": "hs256",
+			"payload": {
+				"publish": ["**"],
+				"jti": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+			},
+			"claims": null
+		},
+		{
+			"name": "token_id_not_a_string",
+			"key": "hs256",
+			"payload": { "publish": ["**"], "jti": ["x"] },
+			"claims": null
+		},
+		{ "name": "null_token_id", "key": "hs256", "payload": { "publish": ["**"], "jti": null }, "claims": null },
+		{ "name": "empty_token_id", "key": "hs256", "payload": { "publish": ["**"], "jti": "" }, "claims": null },
+		{
+			"name": "token_id_with_a_space",
+			"key": "hs256",
+			"payload": { "publish": ["**"], "jti": "a b" },
+			"claims": null
+		},
+		{
+			"name": "token_id_beyond_ascii",
+			"key": "hs256",
+			"payload": { "publish": ["**"], "jti": "caf\u00e9" },
+			"claims": null
 		},
 		{ "name": "unknown_claim", "key": "hs256", "payload": { "publish": ["**"], "aud": "relay" }, "claims": null },
 		{ "name": "grants_nothing", "key": "hs256", "payload": { "publish": [], "subscribe": [] }, "claims": null },
@@ -164,7 +213,7 @@
 			"name": "capped_role",
 			"key": "hs256",
 			"payload": { "publish": { "path": ["alice/**"], "rate": 1000 }, "subscribe": ["**"] },
-			"claims": { "root": "", "publish": ["alice/**"], "publish_rate": 1000, "subscribe": ["**"] }
+			"claims": { "root": "", "publish": { "path": ["alice/**"], "rate": 1000 }, "subscribe": ["**"] }
 		},
 		{
 			"name": "misspelled_cap",
@@ -254,6 +303,47 @@
 			"valid": false
 		},
 		{
+			"name": "a_null_scope",
+			"jwk": { "kty": "oct", "alg": "HS256", "k": "Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68", "scope": null },
+			"valid": false
+		},
+		{
+			"name": "a_null_kid",
+			"jwk": { "kty": "oct", "alg": "HS256", "k": "Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68", "kid": null },
+			"valid": false
+		},
+		{
+			"name": "a_null_key_ops",
+			"jwk": {
+				"kty": "oct",
+				"alg": "HS256",
+				"k": "Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68",
+				"key_ops": null
+			},
+			"valid": false
+		},
+		{
+			"name": "a_null_scope_root",
+			"jwk": {
+				"kty": "oct",
+				"alg": "HS256",
+				"k": "Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68",
+				"scope": { "root": null, "publish": ["**"] }
+			},
+			"valid": false
+		},
+		{
+			"name": "a_null_okp_private_key",
+			"jwk": {
+				"kty": "OKP",
+				"alg": "EdDSA",
+				"crv": "Ed25519",
+				"x": "UiU9fT_SdBBpkFtJPRCY0gX1jK_Dr9syYLFuEz4QUM4",
+				"d": null
+			},
+			"valid": false
+		},
+		{
 			"name": "short_secret",
 			"jwk": { "kty": "oct", "alg": "HS256", "k": "c2hvcnQ" },
 			"valid": false
@@ -261,6 +351,168 @@
 		{
 			"name": "missing_kty",
 			"jwk": { "alg": "HS256", "k": "Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68" },
+			"valid": false
+		},
+		{
+			"name": "oct_with_an_rsa_algorithm",
+			"jwk": {
+				"kty": "oct",
+				"alg": "PS256",
+				"k": "jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA"
+			},
+			"valid": false
+		},
+		{
+			"name": "rsa_with_an_hmac_algorithm",
+			"jwk": {
+				"kty": "RSA",
+				"alg": "HS384",
+				"key_ops": ["verify"],
+				"n": "p2nsYkS2yzIvhdcez-PS9Sew7aN7fZlGwbyOJrzzfhYKj1lcKEnlc1UCnTvIuqVqAMZ2H2W0flT7dP6oYETN0mDxJMTrccAUcB9GvMIc0774y5mXSNMDD2cF7M6m7FDYo1xFk8GMUhIFJXewknY9g_SVy2OUIgEET6hqGJmhgfiw9o6WVKAKAgewHjUi2KPJcvKYwUMTLvMPnIpsGZmJBH3CU85RnkmYEg91ZJsDuJXlPv9WOrWMmeo9kkj_dFElwANxhA5-Mlzzmzz6up-skzonpMknYaCUsruYI3GheenRMWIu6Blzm-acgDgsJjwkwN_xW9qBSdfMAqW1mcmaKw",
+				"e": "AQAB"
+			},
+			"valid": false
+		},
+		{
+			"name": "ec_with_an_rsa_algorithm",
+			"jwk": {
+				"kty": "EC",
+				"alg": "RS256",
+				"key_ops": ["verify"],
+				"crv": "P-256",
+				"x": "MTm-tdpUeGdRtA4lS-SYQSs2VtinHFTfB8Wi2WnzSqw",
+				"y": "m0kSg8wde8t0aoeK5fiikAsyQtDUJsL30sZgE5Vcsd8"
+			},
+			"valid": false
+		},
+		{
+			"name": "p256_with_the_p384_algorithm",
+			"jwk": {
+				"kty": "EC",
+				"alg": "ES384",
+				"key_ops": ["verify"],
+				"crv": "P-256",
+				"x": "MTm-tdpUeGdRtA4lS-SYQSs2VtinHFTfB8Wi2WnzSqw",
+				"y": "m0kSg8wde8t0aoeK5fiikAsyQtDUJsL30sZgE5Vcsd8"
+			},
+			"valid": false
+		},
+		{
+			"name": "okp_with_an_ec_algorithm",
+			"jwk": {
+				"kty": "OKP",
+				"alg": "ES256",
+				"key_ops": ["verify"],
+				"crv": "Ed25519",
+				"x": "S9n3tEG677fSNpa0Ftf46OPBte5y1pTwvm4fPkEw_Z8"
+			},
+			"valid": false
+		},
+		{
+			"name": "an_empty_private_field",
+			"jwk": {
+				"kty": "EC",
+				"alg": "ES256",
+				"crv": "P-256",
+				"x": "MTm-tdpUeGdRtA4lS-SYQSs2VtinHFTfB8Wi2WnzSqw",
+				"y": "m0kSg8wde8t0aoeK5fiikAsyQtDUJsL30sZgE5Vcsd8",
+				"d": ""
+			},
+			"valid": false
+		},
+		{
+			"name": "a_padded_field",
+			"jwk": {
+				"kty": "oct",
+				"alg": "HS256",
+				"k": "jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA="
+			},
+			"valid": true
+		},
+		{
+			"name": "nonzero_trailing_bits",
+			"jwk": {
+				"kty": "oct",
+				"alg": "HS256",
+				"k": "jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQB"
+			},
+			"valid": false
+		},
+		{
+			"name": "nonzero_trailing_bits_behind_padding",
+			"jwk": {
+				"kty": "oct",
+				"alg": "HS256",
+				"k": "jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQB="
+			},
+			"valid": false
+		},
+		{
+			"name": "a_field_with_whitespace",
+			"jwk": {
+				"kty": "oct",
+				"alg": "HS256",
+				"k": " jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA"
+			},
+			"valid": false
+		},
+		{
+			"name": "a_field_in_the_standard_alphabet",
+			"jwk": {
+				"kty": "oct",
+				"alg": "HS256",
+				"k": "jvS2B/SKkvhtObaiKg9n2vq/Iqdus+nVCVVYBWf0BQA"
+			},
+			"valid": false
+		},
+		{
+			"name": "a_repeated_member",
+			"jwk": "{\"k\":\"jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA\",\"kty\":\"oct\",\"alg\":\"HS256\",\"k\":\"jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA\"}",
+			"valid": false
+		},
+		{
+			"name": "a_repeated_scope_member",
+			"jwk": "{\"scope\":{\"root\":\"a\",\"root\":\"b\",\"publish\":[\"**\"]},\"kty\":\"oct\",\"alg\":\"HS256\",\"k\":\"jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA\"}",
+			"valid": false
+		},
+		{
+			"name": "a_repeated_unread_member",
+			"jwk": "{\"note\":1,\"note\":2,\"kty\":\"oct\",\"alg\":\"HS256\",\"k\":\"jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA\"}",
+			"valid": true
+		},
+		{
+			"name": "base64url_encoded",
+			"jwk": "eyJrdHkiOiJvY3QiLCJhbGciOiJIUzI1NiIsImsiOiJqdlMyQl9TS2t2aHRPYmFpS2c5bjJ2cV9JcWR1cy1uVkNWVllCV2YwQlFBIn0",
+			"valid": true
+		},
+		{
+			"name": "base64url_encoded_with_padding",
+			"jwk": "eyJrdHkiOiJvY3QiLCJhbGciOiJIUzI1NiIsImsiOiJqdlMyQl9TS2t2aHRPYmFpS2c5bjJ2cV9JcWR1cy1uVkNWVllCV2YwQlFBIn0=",
+			"valid": false
+		},
+		{
+			"name": "a_byte_order_mark",
+			"jwk": "\ufeff{\"kty\":\"oct\",\"alg\":\"HS256\",\"k\":\"jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA\"}",
+			"valid": false
+		},
+		{
+			"name": "a_lone_surrogate",
+			"jwk": "{\"note\":\"\\ud800\",\"kty\":\"oct\",\"alg\":\"HS256\",\"k\":\"jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA\"}",
+			"valid": false
+		},
+		{
+			"name": "nesting_at_the_recursion_limit",
+			"jwk": "{\"note\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]],\"kty\":\"oct\",\"alg\":\"HS256\",\"k\":\"jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA\"}",
+			"valid": true
+		},
+		{
+			"name": "nesting_past_the_recursion_limit",
+			"jwk": "{\"note\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]],\"kty\":\"oct\",\"alg\":\"HS256\",\"k\":\"jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA\"}",
+			"valid": false
+		},
+		{
+			"name": "a_number_out_of_range",
+			"jwk": "{\"note\":1e400,\"kty\":\"oct\",\"alg\":\"HS256\",\"k\":\"jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA\"}",
 			"valid": false
 		}
 	],
@@ -319,6 +571,56 @@
 				]
 			},
 			"valid": false
+		},
+		{
+			"name": "a_key_with_an_algorithm_its_type_cannot_use",
+			"jwks": {
+				"keys": [
+					{
+						"kty": "oct",
+						"alg": "HS256",
+						"k": "jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA",
+						"kid": "first"
+					},
+					{
+						"kty": "oct",
+						"alg": "PS256",
+						"k": "Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68",
+						"kid": "second"
+					}
+				]
+			},
+			"valid": false
+		},
+		{
+			"name": "a_repeated_keys_member",
+			"jwks": "{\"keys\":[],\"keys\":[{\"kty\":\"oct\",\"alg\":\"HS256\",\"k\":\"jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA\"}]}",
+			"valid": false
+		},
+		{
+			"name": "a_repeated_unread_member",
+			"jwks": "{\"note\":1,\"note\":2,\"keys\":[{\"kty\":\"oct\",\"alg\":\"HS256\",\"k\":\"jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA\"}]}",
+			"valid": true
+		},
+		{
+			"name": "an_unread_member_out_of_range",
+			"jwks": "{\"keys\":[{\"kty\":\"oct\",\"alg\":\"HS256\",\"k\":\"jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA\"}],\"note\":1e400}",
+			"valid": false
+		},
+		{
+			"name": "an_unread_member_with_a_lone_surrogate",
+			"jwks": "{\"keys\":[{\"kty\":\"oct\",\"alg\":\"HS256\",\"k\":\"jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA\"}],\"note\":\"\\ud800\"}",
+			"valid": false
+		},
+		{
+			"name": "an_unread_member_nested_too_deep",
+			"jwks": "{\"keys\":[{\"kty\":\"oct\",\"alg\":\"HS256\",\"k\":\"jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA\"}],\"note\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}",
+			"valid": false
+		},
+		{
+			"name": "leading_unicode_whitespace",
+			"jwks": "\u00a0{\"keys\":[{\"kty\":\"oct\",\"alg\":\"HS256\",\"k\":\"jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA\"}]}",
+			"valid": false
 		}
 	],
 	"grants": [
@@ -330,7 +632,39 @@
 		{ "name": "expires_past_the_clock", "grant": { "publish": ["**"], "expires": 18446744074 }, "valid": false },
 		{ "name": "revalidate_without_expires", "grant": { "publish": ["**"], "revalidate": 60 }, "valid": false },
 		{ "name": "grants_nothing", "grant": { "expires": 4102444800 }, "valid": false },
-		{ "name": "upstream_without_peer", "grant": { "publish": ["**"], "upstream": true }, "valid": false },
-		{ "name": "invalid_tier", "grant": { "publish": ["**"], "tier": "a b" }, "valid": false }
+		{ "name": "invalid_tier", "grant": { "publish": ["**"], "tier": "a b" }, "valid": false },
+		{ "name": "unknown_field", "grant": { "publish": ["**"], "future": true }, "valid": false },
+		{ "name": "flat_rate", "grant": { "publish": ["**"], "publish_rate": 8000 }, "valid": false },
+		{
+			"name": "legacy_upstream_flag",
+			"grant": { "publish": ["**"], "peer": true, "upstream": true },
+			"valid": false
+		},
+		{
+			"name": "capped_role",
+			"grant": { "publish": { "path": ["alice/**"], "rate": 8000 }, "subscribe": ["**"] },
+			"valid": true
+		},
+		{ "name": "cap_on_nothing", "grant": { "publish": { "path": [], "rate": 8000 } }, "valid": false },
+		{ "name": "misspelled_cap", "grant": { "publish": { "path": ["**"], "rat": 8000 } }, "valid": false },
+		{ "name": "link_peer", "grant": { "publish": ["**"], "link": "peer" }, "valid": true },
+		{ "name": "link_upstream", "grant": { "publish": ["**"], "link": "upstream", "peer": true }, "valid": true },
+		{ "name": "peer_alias", "grant": { "publish": ["**"], "peer": true }, "valid": true },
+		{ "name": "not_a_peer", "grant": { "publish": ["**"], "peer": false }, "valid": true },
+		{
+			"name": "link_disagrees_with_peer",
+			"grant": { "publish": ["**"], "link": "upstream", "peer": false },
+			"valid": false
+		},
+		{ "name": "unknown_link", "grant": { "publish": ["**"], "link": "downstream" }, "valid": false },
+		{ "name": "null_link", "grant": { "publish": ["**"], "link": null }, "valid": false },
+		{ "name": "null_root", "grant": { "publish": ["**"], "root": null }, "valid": false },
+		{ "name": "null_revalidate", "grant": { "publish": ["**"], "revalidate": null }, "valid": false },
+		{ "name": "null_tier", "grant": { "publish": ["**"], "tier": null }, "valid": false },
+		{ "name": "null_label", "grant": { "publish": ["**"], "label": null }, "valid": false },
+		{ "name": "null_mounts", "grant": { "publish": ["**"], "mounts": null }, "valid": false },
+		{ "name": "null_peer", "grant": { "publish": ["**"], "peer": null }, "valid": false },
+		{ "name": "positional", "grant": [["**"]], "valid": false },
+		{ "name": "null_grant", "grant": null, "valid": false }
 	]
 }

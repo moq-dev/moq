@@ -1,8 +1,6 @@
 //! Session tests over an in-memory byte stream, on paused tokio time.
 
 use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
@@ -161,97 +159,6 @@ async fn reading_returns_flow_control_credit() {
 	}
 }
 
-/// A stream's bytes count as acknowledged once they go to the transport, which a stalled link
-/// holds back; a reset stream never is.
-#[tokio::test(start_paused = true)]
-async fn a_stream_is_acknowledged_once_its_bytes_go_out() {
-	for &version in Version::ALL {
-		let (client, server, up, _down) = link();
-		let (client, server) = establish(client, server, config(version), config(version)).await;
-
-		let mut send = client.open_uni(SendOptions::default()).await.unwrap();
-		assert_eq!(send.acknowledged(), Some(true), "{version:?}: nothing written");
-		up.send(Flow::Stall).unwrap();
-		// More than the pipe holds, within the peer's stream window.
-		let data = payload(2 * PIPE, 5);
-		write_all(&mut send, data.clone()).await;
-		assert_eq!(send.acknowledged(), Some(false), "{version:?}: the link holds the rest");
-
-		up.send(Flow::Open).unwrap();
-		let mut recv = server.accept_uni().await.unwrap();
-		assert_eq!(read_exact(&mut recv, data.len()).await.unwrap(), data, "{version:?}");
-		assert_eq!(send.acknowledged(), Some(true), "{version:?}: all of it went out");
-
-		send.reset(1);
-		assert_eq!(send.acknowledged(), Some(false), "{version:?}");
-	}
-}
-
-/// A byte stream whose room the test can close, as a peer that stops reading does once the
-/// buffers between fill. A closed one never wakes the driver for room again.
-struct Gate {
-	inner: Stream<DuplexStream>,
-	full: Arc<AtomicBool>,
-}
-
-impl Transport for Gate {
-	fn bind(&mut self, config: &Config) {
-		self.inner.bind(config);
-	}
-
-	fn poll_recv(&mut self, waiter: &kio::Waiter) -> Poll<Result<Bytes, Error>> {
-		self.inner.poll_recv(waiter)
-	}
-
-	fn poll_ready(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		match self.full.load(Ordering::Relaxed) {
-			true => Poll::Pending,
-			false => self.inner.poll_ready(waiter),
-		}
-	}
-
-	fn send(&mut self, record: Bytes) -> Result<(), Error> {
-		self.inner.send(record)
-	}
-
-	fn poll_flush(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		self.inner.poll_flush(waiter)
-	}
-
-	fn poll_close(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		self.inner.poll_close(waiter)
-	}
-}
-
-/// A stream's bytes count as delivered once the transport takes them, and never while the
-/// transport has no room for them.
-#[tokio::test(start_paused = true)]
-async fn delivery_counts_only_what_the_transport_took() {
-	for &version in Version::ALL {
-		let (client, server) = tokio::io::duplex(PIPE);
-		let full = Arc::new(AtomicBool::new(false));
-		let client = Gate {
-			inner: Stream::new(client),
-			full: full.clone(),
-		};
-		let (client, server) = tokio::join!(
-			Session::connect(client, config(version)),
-			Session::accept(Stream::new(server), config(version))
-		);
-		let (client, _server) = (spawn(client.unwrap()), spawn(server.unwrap()));
-
-		let mut send = client.open_uni(SendOptions::default()).await.unwrap();
-		write_all(&mut send, payload(1000, 6)).await;
-		kio::clock::sleep(Duration::from_millis(100)).await;
-		assert_eq!(send.delivered(), Some(1000), "{version:?}: the transport took it");
-
-		full.store(true, Ordering::Relaxed);
-		write_all(&mut send, payload(PIPE, 7)).await;
-		kio::clock::sleep(Duration::from_millis(100)).await;
-		assert_eq!(send.delivered(), Some(1000), "{version:?}: the transport had no room");
-	}
-}
-
 /// Lease `want` bytes, returning how many were leased and handing them back unread, so they
 /// keep their credit.
 async fn lease(recv: &mut RecvStream, want: usize) -> Result<usize, Error> {
@@ -268,6 +175,49 @@ async fn read_exact(recv: &mut RecvStream, want: usize) -> Result<Bytes, Error> 
 		})
 	})
 	.await
+}
+
+/// What `send` answers about the bytes below `offset`, without waiting.
+fn acked(send: &SendStream, offset: &moq_quic::send::Offset) -> Poll<Result<(), Error>> {
+	send.poll_acked(&kio::Waiter::noop(), offset)
+}
+
+/// A stream's bytes count as sent once the transport takes them, which a stalled link holds
+/// back. A reset discards what the link still holds, so only the prefix that went out stays sent,
+/// and egress never bills the rest.
+#[tokio::test(start_paused = true)]
+async fn bytes_count_as_sent_once_the_link_takes_them() {
+	for &version in Version::ALL {
+		let (client, server, up, _down) = link();
+		let (client, server) = establish(client, server, config(version), config(version)).await;
+
+		let mut send = client.open_uni(SendOptions::default()).await.unwrap();
+		let first = payload(1000, 5);
+		write_all(&mut send, first.clone()).await;
+		let mut recv = server.accept_uni().await.unwrap();
+		assert_eq!(read_exact(&mut recv, first.len()).await.unwrap(), first, "{version:?}");
+		let went_out = send.offset();
+		assert!(
+			matches!(acked(&send, &went_out), Poll::Ready(Ok(()))),
+			"{version:?}: the link took it"
+		);
+
+		up.send(Flow::Stall).unwrap();
+		// More than the pipe holds, within the peer's stream window.
+		write_all(&mut send, payload(2 * PIPE, 6)).await;
+		let held = send.offset();
+		assert!(acked(&send, &held).is_pending(), "{version:?}: the link holds the rest");
+
+		send.reset(1);
+		assert!(
+			matches!(acked(&send, &went_out), Poll::Ready(Ok(()))),
+			"{version:?}: what went out stays sent"
+		);
+		assert!(
+			matches!(acked(&send, &held), Poll::Ready(Err(_))),
+			"{version:?}: the reset discarded the rest"
+		);
+	}
 }
 
 /// Leased bytes keep their credit, so incomplete messages fill the receive window rather than
@@ -360,10 +310,9 @@ async fn set_limits_widens_and_refuses_a_rate_cap() {
 	));
 }
 
-/// moq-net opens a session's receive window through the transport trait, unless the session's
-/// window is fixed, which it reports as a limit it cannot change.
+/// moq-net opens a session's receive window through the transport trait.
 #[tokio::test(start_paused = true)]
-async fn the_transport_widens_unless_its_window_is_fixed() {
+async fn the_transport_widens_the_window() {
 	let mut limits = net::Limits::default();
 	limits.receive_window = std::num::NonZeroU64::new(16 << 20);
 
@@ -373,19 +322,6 @@ async fn the_transport_widens_unless_its_window_is_fixed() {
 		poll::Session::receive_window(&server).unwrap().connection,
 		std::num::NonZeroU64::new(16 << 20)
 	);
-
-	let mut fixed = config(Version::QMux02);
-	fixed.fixed_receive_window = true;
-	let (_client, server) = pair(config(Version::QMux02), fixed).await;
-	let window = poll::Session::receive_window(&server).unwrap().connection;
-	assert_eq!(
-		poll::Session::set_limits(&server, limits),
-		Err(net::LimitsError::Unsupported)
-	);
-	let mut direct = moq_quic::Limits::default();
-	direct.receive_window = limits.receive_window;
-	assert!(matches!(server.set_limits(direct), Err(Error::InvalidConfig(_))));
-	assert_eq!(poll::Session::receive_window(&server).unwrap().connection, window);
 }
 
 /// A reset seen through a lease frees the stream while the reader still holds it, returning
@@ -574,7 +510,6 @@ async fn datagrams_need_records() {
 }
 
 /// A keep-alive that would expire before the first Pong could return is refused.
-#[cfg(feature = "ws")]
 #[tokio::test]
 async fn websocket_keep_alive_needs_room_for_a_pong() {
 	use tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};
@@ -596,7 +531,6 @@ async fn websocket_keep_alive_needs_room_for_a_pong() {
 
 /// A sender that never runs out of output still sends its WebSocket keep-alive Pings, so
 /// a peer that has no keep-alive and sends nothing back does not let it time out.
-#[cfg(feature = "ws")]
 #[tokio::test(start_paused = true)]
 async fn websocket_keep_alive_runs_during_continuous_output() {
 	use tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};
@@ -805,6 +739,41 @@ async fn an_oversized_record_is_a_frame_encoding_error() {
 				"no CONNECTION_CLOSE in {sent:02x?}"
 			);
 		}
+	}
+}
+
+/// A WebSocket message over the record limit, which the socket refuses before buffering it,
+/// also closes the connection with a CONNECTION_CLOSE the peer can read.
+#[tokio::test(start_paused = true)]
+async fn an_oversized_websocket_message_is_a_frame_encoding_error() {
+	use futures::{SinkExt, StreamExt};
+	use tokio_tungstenite::{
+		WebSocketStream,
+		tungstenite::{Message, protocol::Role},
+	};
+
+	use crate::transport::WsTransport;
+
+	for version in [Version::QMux01, Version::QMux02] {
+		let config = config(version);
+		let (client, raw) = tokio::io::duplex(PIPE);
+		let ws = WebSocketStream::from_raw_socket(client, Role::Client, Some(crate::ws::capped(&config))).await;
+		let session = spawn(Session::new(WsTransport::new(ws, Address::Uri), Side::Client, config.clone()).unwrap());
+		let mut raw = WebSocketStream::from_raw_socket(raw, Role::Server, None).await;
+		let limit = usize::try_from(config.max_record_size)
+			.unwrap()
+			.max(crate::MAX_FRAME_SIZE);
+		raw.send(Message::Binary(vec![0; limit + 1].into())).await.unwrap();
+
+		let err = session.closed().await;
+		assert!(matches!(err, Error::FrameEncoding), "{version:?}: got {err:?}");
+		let mut closed = false;
+		while let Some(Ok(message)) = raw.next().await {
+			if let Message::Binary(data) = message {
+				closed |= data.windows(2).any(|w| w == [0x1c, 0x07]);
+			}
+		}
+		assert!(closed, "{version:?}: no CONNECTION_CLOSE");
 	}
 }
 

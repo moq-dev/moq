@@ -1,4 +1,4 @@
-//! What one reader did with each group sequence, as runs: handed out, skipped as stale, given
+//! What one reader did with each group key, as runs: handed out, skipped as stale, given
 //! up, and what its wire was told.
 
 use std::ops::Range;
@@ -17,10 +17,10 @@ use crate::Error;
 /// settles costs what the cache would hold, never more.
 pub(super) const RUN_OVERHEAD: u64 = 2 * size_of::<(Range<u64>, Pending)>() as u64;
 
-/// One reader's record of every sequence it settled, as runs.
+/// One reader's record of every key it settled, as runs.
 #[derive(Default)]
 pub(crate) struct Record {
-	/// The groups handed out, so none is handed out twice: not when its sequence is re-created,
+	/// The groups handed out, so none is handed out twice: not when its key is re-created,
 	/// nor when another route delivers it too.
 	pub(super) delivered: Delivered,
 	/// Cached groups skipped as stale, which a wider budget owes again.
@@ -29,10 +29,10 @@ pub(crate) struct Record {
 	/// wider budget owes them again. Kept under an open window too, which a reader may narrow to
 	/// a bounded one.
 	pub(super) written_off: RangeSet<u64>,
-	/// Sequences given up and not reported yet, with why: stale skips, cuts, and upstream skips
+	/// Keys given up and not reported yet, with why: stale skips, cuts, and upstream skips
 	/// and drops.
 	pub(super) pending: RangeMap<u64, Pending>,
-	/// Every sequence already reported, with how.
+	/// Every key already reported, with how.
 	pub(super) reported: RangeMap<u64, Report>,
 	/// Everything below was settled for good and folded away under pool pressure: handed
 	/// out, or reported final, so none is handed out or reported again.
@@ -47,8 +47,8 @@ pub(crate) struct Record {
 }
 
 /// A run a reader has yet to report, and whether it was copied from the track's runs, which a
-/// rescan folds in afresh: one the track forgot, such as a stale run new terms superseded,
-/// leaves nothing behind.
+/// rescan folds in afresh: one the track forgot, such as a stale run a new upstream
+/// subscription superseded, leaves nothing behind.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Pending {
 	pub hole: Hole,
@@ -62,80 +62,42 @@ impl Pending {
 	}
 }
 
-/// How a reader reported a run, and what its wire was told.
+/// How a reader reported a run, and what its wire was told. Every report is final: a drop,
+/// stale (OLD) or not, settles its keys for good on the wire.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Report {
-	/// Served on a Group Stream, or given up on a version whose drops are all final: nothing
-	/// goes out over it.
+	/// Served on a Group Stream, or given up on a version that has no skip: nothing goes out
+	/// over it.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	Settled,
-	/// Dropped for good: no update reopens it, though a skip still goes out over it.
+	/// Dropped, though a skip still goes out over it.
 	Dropped,
-	/// Dropped as stale (OLD), which an update reopens.
-	Stale {
-		/// An upstream's stale run decided it, which is the upstream's to judge again then.
-		received: bool,
-		/// Its Group Stream expired as stale, or it was dropped OLD for good: its publisher
-		/// drops it again under each update rather than this reader reopening it.
-		expired: bool,
-		/// Its group was handed out after the drop, which the group won: no update reopens it.
-		taken: bool,
-	},
 	/// Skipped, which replaces a drop.
 	Skip,
 }
 
 impl Report {
-	/// How `hole` reports, as it came from upstream when `received`.
-	pub fn of(hole: &Hole, received: bool) -> Self {
+	/// How `hole` reports.
+	pub fn of(hole: &Hole) -> Self {
 		match hole {
 			Hole::Skip => Self::Skip,
-			hole if hole.stale_budget().is_some() => Self::Stale {
-				received,
-				expired: false,
-				taken: false,
-			},
-			_ => Self::Dropped,
+			Hole::Drop { .. } => Self::Dropped,
 		}
 	}
 
-	/// Whether this report stops `hole` going out over it: a skip goes out over a drop, and
-	/// a final drop over a stale one, since each replaces what it goes out over. An OLD drop
-	/// never goes out over a stale one, which already said OLD.
+	/// Whether this report stops `hole` going out over it: only a skip goes out over a drop.
 	pub fn blocks(self, hole: &Hole) -> bool {
 		match self {
 			Self::Settled | Self::Skip => true,
-			Self::Dropped | Self::Stale { taken: true, .. } => !matches!(hole, Hole::Skip),
-			Self::Stale { .. } => hole.error() == crate::StreamError::Old,
+			Self::Dropped => !matches!(hole, Hole::Skip),
 		}
-	}
-
-	/// Whether it settles its run for good, so a fold may forget it: served, skipped, dropped
-	/// for good, or stale with its group handed out since.
-	fn is_final(self) -> bool {
-		match self {
-			Self::Settled | Self::Skip | Self::Dropped => true,
-			Self::Stale { taken, .. } => taken,
-		}
-	}
-
-	/// Whether an update reopens it: a stale drop nothing settled since.
-	pub fn reopens(self) -> bool {
-		matches!(
-			self,
-			Self::Stale {
-				expired: false,
-				taken: false,
-				..
-			}
-		)
 	}
 }
 
 impl Record {
 	/// Report the first part of `range` nothing already reported blocks, as `hole` says,
 	/// replacing what it goes out over. `None` when every part is blocked.
-	pub fn report(&mut self, range: Range<u64>, hole: &Hole, received: bool) -> Option<Range<u64>> {
+	pub fn report(&mut self, range: Range<u64>, hole: &Hole) -> Option<Range<u64>> {
 		let range = range.start.max(self.floor)..range.end;
 		if range.is_empty() {
 			return None;
@@ -147,7 +109,7 @@ impl Record {
 			.map(|(run, _)| run.clone())
 			.collect();
 		let gap = blocked.gaps(&range).next()?;
-		self.reported.insert(gap.clone(), Report::of(hole, received));
+		self.reported.insert(gap.clone(), Report::of(hole));
 		Some(gap)
 	}
 
@@ -162,7 +124,7 @@ impl Record {
 			.map(|(range, pending)| (range.clone(), pending.clone()))
 		{
 			self.pending.remove(range.clone());
-			if let Some(gap) = self.report(range.clone(), &pending.hole, pending.received) {
+			if let Some(gap) = self.report(range.clone(), &pending.hole) {
 				if gap.end < range.end {
 					self.pending.insert(gap.end..range.end, pending.clone());
 				}
@@ -171,40 +133,14 @@ impl Record {
 		}
 		None
 	}
-
-	/// Mark a stale report on `sequence` settled by its group being handed out.
-	pub fn retire(&mut self, sequence: u64) {
-		if let Some(end) = sequence.checked_add(1)
-			&& let Some(Report::Stale { received, expired, .. }) = self.reported.get(&sequence).copied()
-		{
-			self.reported.insert(
-				sequence..end,
-				Report::Stale {
-					received,
-					expired,
-					taken: true,
-				},
-			);
-		}
-	}
 }
 
-/// What a publisher told the wire about a reader's sequences.
+/// What a publisher told the wire about a reader's keys.
 #[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 impl Record {
-	/// Whether the wire was told of `sequence`: served, or given up.
-	pub fn told(&self, sequence: u64) -> bool {
-		sequence < self.floor || self.reported.contains_key(&sequence)
-	}
-
-	/// Whether the pool folded `sequence` into this record's floor, final for this reader.
-	pub fn folded(&self, sequence: u64) -> bool {
-		sequence < self.floor
-	}
-
-	/// Whether `sequence` went out as a stale drop, which a group still replaces.
-	pub fn told_stale(&self, sequence: u64) -> bool {
-		matches!(self.reported.get(&sequence), Some(Report::Stale { .. }))
+	/// Whether the wire was told of `key`: served, or given up.
+	pub fn told(&self, key: u64) -> bool {
+		key < self.floor || self.reported.contains_key(&key)
 	}
 
 	/// The parts of `range` the wire was told nothing of.
@@ -216,71 +152,19 @@ impl Record {
 		}
 	}
 
-	/// Record that the wire was told `report` of `range`. A stale report keeps the parts an
-	/// upstream's stale run decided, which stay the upstream's to judge again.
+	/// Record that the wire was told `report` of `range`.
 	pub fn tell(&mut self, range: Range<u64>, report: Report) {
-		if range.is_empty() {
-			return;
-		}
-		let received: Vec<_> = match report {
-			Report::Stale { received: false, .. } => self
-				.reported
-				.overlapping(&range)
-				.filter(|(_, report)| matches!(report, Report::Stale { received: true, .. }))
-				.map(|(run, _)| run.start.max(range.start)..run.end.min(range.end))
-				.collect(),
-			_ => Vec::new(),
-		};
-		self.reported.insert(range, report);
-		if let Report::Stale { expired, taken, .. } = report {
-			for run in received {
-				self.reported.insert(
-					run,
-					Report::Stale {
-						received: true,
-						expired,
-						taken,
-					},
-				);
-			}
+		if !range.is_empty() {
+			self.reported.insert(range, report);
 		}
 	}
 
-	/// Forget what the wire was told of `range` that an update may reopen, which is owed again.
+	/// Forget every report of `range`, which the wire was never told: a run given up below
+	/// where delivery starts, which a later widening may still serve.
 	pub fn untell(&mut self, range: Range<u64>) {
-		// A final report stays: nothing reopens it, and a stale verdict must never go out over it.
-		let reopened: Vec<_> = self
-			.reported
-			.overlapping(&range)
-			.filter(|(_, report)| !report.is_final())
-			.map(|(run, _)| run.start.max(range.start)..run.end.min(range.end))
-			.collect();
-		for run in reopened {
-			self.reported.remove(run);
+		if !range.is_empty() {
+			self.reported.remove(range);
 		}
-	}
-
-	/// Forget the drops of `range` the wire was told, which a verdict or group replaces.
-	pub fn replace_drops(&mut self, range: Range<u64>) {
-		let drops: Vec<_> = self
-			.reported
-			.overlapping(&range)
-			.filter(|(_, report)| matches!(report, Report::Dropped | Report::Stale { .. }))
-			.map(|(run, _)| run.start.max(range.start)..run.end.min(range.end))
-			.collect();
-		for run in drops {
-			self.reported.remove(run);
-		}
-	}
-
-	/// The runs whose Group Stream expired as stale, or that went out OLD for good, which
-	/// each update drops again.
-	pub fn expired(&self) -> RangeSet<u64> {
-		self.reported
-			.iter()
-			.filter(|(_, report)| matches!(report, Report::Stale { expired: true, .. }))
-			.map(|(run, _)| run.clone())
-			.collect()
 	}
 }
 
@@ -356,10 +240,10 @@ impl Record {
 	}
 
 	/// Raise the floor over the final prefix: each run from it up to the lowest one that is
-	/// not final. Final are the groups handed out, the reports nothing reopens, and this
-	/// reader's own stale skips, which a wider budget would offer again only while the pool
-	/// still held their groups. Not final are the reports an update reopens, the runs given
-	/// up and not reported yet, and the sequences nothing settled.
+	/// not final. Final are the groups handed out, every report, and this reader's own stale
+	/// skips, which a wider budget would offer again only while the pool still held their
+	/// groups. Not final are the runs given up and not reported yet, and the keys nothing
+	/// settled.
 	fn fold(&mut self, handed: Option<u64>) {
 		// The runs copied from the track's drop set go first: the next scan folds in again
 		// whatever the track still holds.
@@ -378,8 +262,7 @@ impl Record {
 		let mut floor = self.floor;
 		loop {
 			let next = match self.reported.get_key_value(&floor) {
-				Some((run, report)) if report.is_final() => run.end,
-				Some(_) => break,
+				Some((run, _)) => run.end,
 				None if self.pending.contains_key(&floor) => break,
 				None => {
 					let local = [
@@ -458,13 +341,13 @@ mod test {
 	fn a_record_bills_each_run() {
 		let (pool, track) = account();
 		let mut record = Record::default();
-		for sequence in 0..4 {
-			record.delivered.insert(sequence);
+		for key in 0..4 {
+			record.delivered.insert(key);
 		}
 		record.settle(|| track.clone(), &mut (), None).unwrap();
 		assert_eq!(pool.used(), 0, "a lone prefix bills nothing");
-		for sequence in (10..1_000).step_by(2) {
-			record.reported.insert(sequence..sequence + 1, Report::Dropped);
+		for key in (10..1_000).step_by(2) {
+			record.reported.insert(key..key + 1, Report::Dropped);
 		}
 		record.settle(|| track.clone(), &mut (), None).unwrap();
 		assert_eq!(pool.used(), 495 * RUN_OVERHEAD);
@@ -473,8 +356,8 @@ mod test {
 	}
 
 	/// Under a debt its track could not pay, a record folds what is final into its floor:
-	/// handed-out groups and reports nothing reopens, however many sequences a run spans.
-	/// Folded sequences count as handed out and reported.
+	/// handed-out groups and reports, however many keys a run spans.
+	/// Folded keys count as handed out and reported.
 	#[test]
 	fn a_debt_folds_the_final_prefix() {
 		let (pool, track) = account();
@@ -492,14 +375,14 @@ mod test {
 			record.told(7) && record.delivered.contains(7),
 			"a folded drop stays dropped"
 		);
-		assert_eq!(record.report(0..u64::MAX / 2 + 2, &Hole::Skip, false), None);
+		assert_eq!(record.report(0..u64::MAX / 2 + 2, &Hole::Skip), None);
 		let mut untold = RangeSet::new();
 		untold.insert(u64::MAX / 2 + 2..u64::MAX / 2 + 3);
 		assert_eq!(record.untold(0..u64::MAX / 2 + 3), untold);
 	}
 
 	/// The group a read hands out stays above the fold: its publisher has yet to tell its wire
-	/// of it, and takes a sequence below the floor as told already.
+	/// of it, and takes a key below the floor as told already.
 	#[test]
 	fn a_debt_folds_short_of_the_handed_group() {
 		let (pool, track) = account();
@@ -515,45 +398,34 @@ mod test {
 		assert!(!record.told(3), "the handed group stays to be told");
 	}
 
-	/// A debt that needs a run this reader was promised ends it with `TooFarBehind`: a stale
-	/// report an update reopens, or a run above one. What is final below it still folds.
+	/// A debt that needs a run this reader was promised ends it with `TooFarBehind`: one given
+	/// up and not reported yet, or a run above one. What is final below it still folds.
 	#[test]
 	fn a_debt_on_a_promise_ends_the_reader() {
-		for promise in [
-			Report::Stale {
-				received: false,
-				expired: false,
-				taken: false,
-			},
-			Report::Stale {
-				received: false,
-				expired: true,
-				taken: false,
-			},
-		] {
-			let (pool, track) = account();
-			let mut record = Record::default();
-			record.delivered.insert(0);
-			record.reported.insert(1..2, Report::Dropped);
-			record.reported.insert(2..3, promise);
-			// Enough runs above it that ending the reader frees more than evicting a group.
-			for sequence in (5..1_000).step_by(2) {
-				record.reported.insert(sequence..sequence + 1, Report::Dropped);
-			}
-			record.settle(|| track.clone(), &mut (), None).unwrap();
-			owe(&track, pool.used());
-			let err = record.settle(|| track.clone(), &mut (), None).unwrap_err();
-			assert_eq!(StreamError::from(&err), StreamError::TooFarBehind, "{promise:?}");
-			assert_eq!(pool.used(), 0, "{promise:?}: its record went with it");
-			assert!(record.failed());
-			assert!(
-				record.settle(|| track.clone(), &mut (), None).is_err(),
-				"{promise:?}: it stays ended"
-			);
+		let (pool, track) = account();
+		let mut record = Record::default();
+		record.delivered.insert(0);
+		record.reported.insert(1..2, Report::Dropped);
+		record
+			.pending
+			.insert(2..3, Pending::own(Hole::drop(StreamError::NotFound)));
+		// Enough runs above it that ending the reader frees more than evicting a group.
+		for key in (5..1_000).step_by(2) {
+			record.reported.insert(key..key + 1, Report::Dropped);
 		}
+		record.settle(|| track.clone(), &mut (), None).unwrap();
+		owe(&track, pool.used());
+		let err = record.settle(|| track.clone(), &mut (), None).unwrap_err();
+		assert_eq!(StreamError::from(&err), StreamError::TooFarBehind);
+		assert_eq!(pool.used(), 0, "its record went with it");
+		assert!(record.failed());
+		assert!(
+			record.settle(|| track.clone(), &mut (), None).is_err(),
+			"it stays ended"
+		);
 	}
 
-	/// A run given up and not reported yet, or a sequence nothing settled, is no fold's to
+	/// A run given up and not reported yet, or a key nothing settled, is no fold's to
 	/// forget either; a debt the fold pays leaves the reader running.
 	#[test]
 	fn a_debt_the_fold_pays_leaves_the_reader() {
@@ -577,16 +449,12 @@ mod test {
 	#[test]
 	fn a_debt_ends_only_a_reader_holding_much() {
 		let (pool, track) = account();
-		let stale = Report::Stale {
-			received: false,
-			expired: false,
-			taken: false,
-		};
+		let promise = Pending::own(Hole::drop(StreamError::NotFound));
 		let mut small = Record::default();
-		small.reported.insert(1..2, stale);
+		small.pending.insert(1..2, promise.clone());
 		let mut large = Record::default();
-		for sequence in (1..1_000).step_by(2) {
-			large.reported.insert(sequence..sequence + 1, stale);
+		for key in (1..1_000).step_by(2) {
+			large.pending.insert(key..key + 1, promise.clone());
 		}
 		small.settle(|| track.clone(), &mut (), None).unwrap();
 		large.settle(|| track.clone(), &mut (), None).unwrap();
@@ -595,6 +463,32 @@ mod test {
 		assert!(large.settle(|| track.clone(), &mut (), None).is_err());
 		assert_eq!(pool.used(), RUN_OVERHEAD);
 		small.settle(|| track.clone(), &mut (), None).unwrap();
+	}
+
+	/// A tail's bill pays the readers' debt but is no record to end: it never joins the mean
+	/// that picks which record ends, whether it is small or large.
+	#[test]
+	fn a_tail_bill_never_skews_which_record_ends() {
+		let (_pool, track) = account();
+		let mut records = [track.reader(), track.reader()];
+		records[0].set(1_536);
+		records[1].set(2_880);
+		let mut tail = track.tail();
+		tail.set(RUN_OVERHEAD);
+		assert!(
+			!records[0].ends(),
+			"the mean is the records' 2208 B, not the tail's share"
+		);
+		assert!(records[1].ends());
+		assert!(!tail.ends(), "a tail never ends");
+		tail.set(100_000);
+		assert!(
+			records[1].ends(),
+			"a large tail does not lift the mean over every record"
+		);
+		drop(tail);
+		assert!(records[1].ends());
+		assert!(!records[0].ends());
 	}
 
 	/// Whatever a bill frees pays its readers' debt, however it shrank, and the debt is forgiven
@@ -612,23 +506,5 @@ mod test {
 		assert_eq!(bill.debt(), 0, "within its capacity, the pool forgives the rest");
 		bill.set(5 * RUN_OVERHEAD);
 		assert_eq!(bill.debt(), 0, "a later pressure owes nothing of it");
-	}
-
-	/// Owing a run again takes back only what an update may reopen: a final report inside it
-	/// stays, so no stale verdict goes out over it.
-	#[test]
-	fn untelling_a_run_keeps_its_final_reports() {
-		let stale = Report::Stale {
-			received: false,
-			expired: false,
-			taken: false,
-		};
-		let mut record = Record::default();
-		record.tell(0..2, stale);
-		record.tell(2..3, Report::Skip);
-		record.tell(3..5, stale);
-		record.untell(0..5);
-		assert!(!record.told(0) && !record.told(4), "the stale runs are owed again");
-		assert!(record.told(2), "the skip stays");
 	}
 }

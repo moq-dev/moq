@@ -81,10 +81,12 @@ void main() {
       final broadcast = MoqBroadcastProducer();
       final track = broadcast.publishTrack(
         name: 'frames',
-        info: MoqTrackInfo(timescale: 1000000),
+        info: MoqTrackInfo(timescale: 1000000, refresh: MoqTrackRefresh()),
       );
       final consumer = track.consume(subscription: null);
-      final producer = track.appendGroup();
+      final producer = track.appendGroup(
+        start: MoqTimestamp(value: 0, scale: 1000000),
+      );
       producer.writeFrame(
         frame: MoqFrame(
           payload: payload,

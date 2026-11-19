@@ -18,12 +18,18 @@ fn replay() -> moq_net::track::Subscription {
 /// Drain every group currently buffered on the consumer without waiting for new ones.
 /// Used in tests where the producer is still alive after writing.
 #[cfg(test)]
-fn drain_group_sequences(consumer: &mut moq_net::track::Subscriber) -> Vec<u64> {
-	let mut sequences = Vec::new();
+fn drain_group_starts(consumer: &mut moq_net::track::Subscriber) -> Vec<u64> {
+	let mut starts = Vec::new();
 	while let Some(group) = consumer.recv_group().now_or_never().and_then(|r| r.ok().flatten()) {
-		sequences.push(group.sequence);
+		starts.push(group.start);
 	}
-	sequences
+	starts
+}
+
+/// A group `start` on a track counting in `timescale`, in microseconds.
+fn micros(start: u64, timescale: Option<moq_net::Timescale>) -> u64 {
+	let timescale = timescale.expect("a timed track");
+	moq_net::Timestamp::new(start, timescale).unwrap().as_micros().unwrap() as u64
 }
 
 fn run_fmp4(data: &[u8]) -> crate::catalog::hang::Catalog {
@@ -717,7 +723,7 @@ async fn published(
 		let track = consumer.track(name).unwrap().subscribe(replay()).await.unwrap();
 		let mut reader = crate::container::Consumer::new(track, container);
 		while let Some(frame) = reader.read_frame().await.unwrap() {
-			samples.push((frame.timestamp.as_micros(), frame.keyframe, frame.payload));
+			samples.push((frame.timestamp.as_micros().unwrap(), frame.keyframe, frame.payload));
 		}
 	}
 	out
@@ -1088,7 +1094,7 @@ async fn unwrapped_samples_present_at_their_composition_time() {
 	let mut frames = Vec::new();
 	while let Some(frame) = group.read_frame().await.unwrap() {
 		let frame = hang::container::Frame::decode(frame.payload).unwrap();
-		frames.push((frame.timestamp.as_micros(), frame.payload.to_vec()));
+		frames.push((frame.timestamp.as_micros().unwrap(), frame.payload.to_vec()));
 	}
 	// 25, 27, and 26 frames at 24 per second, in whole microseconds.
 	assert_eq!(
@@ -1386,7 +1392,8 @@ async fn video_joined_mid_gop_starts_at_a_sync_sample() {
 		for fragment in &fragments {
 			fmp4.decode(fragment).unwrap();
 		}
-		fmp4.seek(10).unwrap();
+		// Past every start the tracks hold, in either's timescale: group starts strictly increase.
+		fmp4.seek(1_000_000).unwrap();
 		for fragment in &after_seek {
 			fmp4.decode(fragment).unwrap();
 		}
@@ -1594,11 +1601,11 @@ async fn test_seek_sets_initial_sequence_in(passthrough: bool) {
 	let _ = fmp4.decode(&frag_buf);
 	let _finished = fmp4.finish().unwrap();
 
-	let sequences = drain_group_sequences(&mut video_track);
-	assert!(!sequences.is_empty(), "expected at least one group");
-	assert_eq!(sequences[0], 100, "first group should land at the seeked sequence");
-	for win in sequences.windows(2) {
-		assert_eq!(win[1], win[0] + 1, "subsequent groups should auto-increment");
+	let starts = drain_group_starts(&mut video_track);
+	assert!(!starts.is_empty(), "expected at least one group");
+	assert_eq!(starts[0], 100, "first group should land at the seeked start");
+	for win in starts.windows(2) {
+		assert!(win[1] > win[0], "subsequent groups start later, at their keyframes");
 	}
 }
 
@@ -1655,8 +1662,8 @@ async fn test_msf_catalog_roundtrip() {
 	assert!(matches!(audio.container, Container::Cmaf { .. }));
 }
 
-/// The sequence of every group a finished track published.
-async fn sequences(consumer: &moq_net::broadcast::Consumer, track: &str) -> Vec<u64> {
+/// The start of every group a finished track published, in microseconds.
+async fn starts(consumer: &moq_net::broadcast::Consumer, track: &str) -> Vec<u64> {
 	let replay = moq_net::track::Subscription::default()
 		.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(3600)));
 	let mut track = consumer
@@ -1666,11 +1673,15 @@ async fn sequences(consumer: &moq_net::broadcast::Consumer, track: &str) -> Vec<
 		.await
 		.unwrap()
 		.ordered();
-	let mut sequences = Vec::new();
-	while let Some(group) = track.next_group().await.unwrap() {
-		sequences.push(group.sequence);
+	let timescale = track.info().timescale;
+	let mut starts = Vec::new();
+	while let Some(item) = track.next_group().await.unwrap() {
+		// Nothing exists below the first group, which the read reports as a gap.
+		if let moq_net::track::Item::Group(group) = item {
+			starts.push(micros(group.start, timescale));
+		}
 	}
-	sequences
+	starts
 }
 
 // ---- Sample-duration handling in decode() ----
@@ -2105,7 +2116,7 @@ async fn segmented_source_writes_one_group_per_segment_in(passthrough: bool) {
 		}
 	}
 	assert_eq!(
-		catalog.snapshot().media.interval(),
+		catalog.snapshot().sync.interval,
 		Some(std::time::Duration::from_secs(1)),
 		"passthrough={passthrough}"
 	);
@@ -2113,13 +2124,13 @@ async fn segmented_source_writes_one_group_per_segment_in(passthrough: bool) {
 	catalog.finish().unwrap();
 
 	assert_eq!(
-		sequences(&consumer, &video_name).await,
-		[0, 1, 2],
+		starts(&consumer, &video_name).await,
+		[0, 1_000_000, 2_000_000],
 		"one video group per segment"
 	);
 	assert_eq!(
-		sequences(&consumer, &audio_name).await,
-		[0, 1, 2],
+		starts(&consumer, &audio_name).await,
+		[0, 1_000_000, 2_000_000],
 		"one audio group per segment, not one per fragment"
 	);
 }
@@ -2170,9 +2181,12 @@ async fn groups_with_skew(video_offset_us: i64, passthrough: bool) -> (Vec<u64>,
 	let _finished = fmp4.finish().unwrap();
 	catalog.finish().unwrap();
 
+	// The second each group starts in, which a skew of a few frames either way leaves alone.
+	let segments =
+		|starts: Vec<u64>| -> Vec<u64> { starts.into_iter().map(|start| (start + 500_000) / 1_000_000).collect() };
 	(
-		sequences(&consumer, &video_name).await,
-		sequences(&consumer, &audio_name).await,
+		segments(starts(&consumer, &video_name).await),
+		segments(starts(&consumer, &audio_name).await),
 	)
 }
 
@@ -2308,9 +2322,18 @@ async fn a_mid_gop_join_keeps_tracks_on_the_same_groups_in(passthrough: bool) {
 	}
 	let _finished = fmp4.finish().unwrap();
 
-	let video = drain_group_sequences(&mut video_track);
-	let audio = drain_group_sequences(&mut audio_track);
-	assert_eq!(audio, video, "audio and video groups line up");
+	let video: Vec<_> = drain_group_starts(&mut video_track)
+		.into_iter()
+		.map(|start| micros(start, video_track.info().timescale))
+		.collect();
+	let audio: Vec<_> = drain_group_starts(&mut audio_track)
+		.into_iter()
+		.map(|start| micros(start, audio_track.info().timescale))
+		.collect();
+	// Audio's first group also holds the fragment before video's first keyframe, so the groups
+	// line up from there: as many of them, cut where video cuts.
+	assert_eq!(audio.len(), video.len(), "audio and video groups line up");
+	assert_eq!(audio[1..], video[1..], "audio and video groups line up");
 }
 
 /// One audio fragment for bbb's track 2, carrying a single sample at the track's 44100 timescale.
@@ -2571,7 +2594,7 @@ fn live_session(start_us: u64, frames: u64) -> Vec<u8> {
 struct Imported {
 	published: std::collections::BTreeMap<String, Vec<u128>>,
 	video: String,
-	/// The `media.clock` the catalog advertised.
+	/// The `sync.clock` the catalog advertised.
 	clock: hang::catalog::Clock,
 	arrival: std::ops::RangeInclusive<kio::clock::Wall>,
 	/// Why a chunk was refused, if one was.
@@ -2610,7 +2633,7 @@ async fn import_session(chunks: &[Vec<u8>]) -> Imported {
 	Imported {
 		published: crate::container::test_util::published(&consumer, &snapshot).await,
 		video,
-		clock: snapshot.media.clock.expect("the catalog advertises a clock"),
+		clock: snapshot.sync.clock.expect("the catalog advertises a clock"),
 		arrival: before..=after,
 		refused,
 	}
@@ -2679,13 +2702,13 @@ async fn join_after(earlier: Earlier, start_us: u64) {
 	};
 	let mut stamps = data.as_ref().map(|stream| stream.consume());
 	let clock = catalog.clock();
-	let fixed = catalog.snapshot().media.clock;
+	let fixed = catalog.snapshot().sync.clock;
 
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
 	fmp4.decode(&init).unwrap();
-	let before = clock.now().as_micros();
+	let before = clock.now().as_micros().unwrap();
 	fmp4.decode(&live_session(start_us, 20)).unwrap();
-	let after = clock.now().as_micros();
+	let after = clock.now().as_micros().unwrap();
 	if let Some(stream) = data.as_mut() {
 		stream
 			.append(&serde_json::json!("after"), catalog.clock().now())
@@ -2695,7 +2718,7 @@ async fn join_after(earlier: Earlier, start_us: u64) {
 
 	let snapshot = catalog.snapshot();
 	assert_eq!(
-		snapshot.media.clock, fixed,
+		snapshot.sync.clock, fixed,
 		"{earlier:?}: the import never moves the clock"
 	);
 	let published = crate::container::test_util::published(&consumer, &snapshot).await;
@@ -2716,7 +2739,7 @@ async fn join_after(earlier: Earlier, start_us: u64) {
 		let mut times = Vec::new();
 		while let std::task::Poll::Ready(Ok(Some(mut group))) = stamps.poll_recv_group(&waiter) {
 			while let std::task::Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) {
-				times.push(frame.timestamp.unwrap().as_micros());
+				times.push(frame.timestamp.as_micros().unwrap());
 			}
 		}
 		assert_eq!(times.len(), 2);
@@ -2752,13 +2775,13 @@ async fn an_import_shifts_onto_an_explicit_clock() {
 
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
 	fmp4.decode(&init).unwrap();
-	let before = clock.now().as_micros();
+	let before = clock.now().as_micros().unwrap();
 	fmp4.decode(&live_session(3_600_000_000, 5)).unwrap();
-	let after = clock.now().as_micros();
+	let after = clock.now().as_micros().unwrap();
 	let _finished = fmp4.finish().unwrap();
 
 	let snapshot = catalog.snapshot();
-	assert_eq!(snapshot.media.clock, clock.wall());
+	assert_eq!(snapshot.sync.clock, clock.wall());
 	let published = crate::container::test_util::published(&consumer, &snapshot).await;
 	let first = published[snapshot.video.renditions.keys().next().unwrap()][0];
 	assert!((before - TICK..=after).contains(&first), "{before} {first} {after}");
@@ -2830,7 +2853,7 @@ async fn first_catalog_carries_the_anchored_clock() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
-	let provisional = catalog.snapshot().media.clock.expect("a clock");
+	let provisional = catalog.snapshot().sync.clock.expect("a clock");
 	let mut clocks = crate::container::test_util::Clocks::subscribe(&consumer).await;
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
 
@@ -2838,7 +2861,7 @@ async fn first_catalog_carries_the_anchored_clock() {
 	assert_eq!(clocks.drain(), vec![], "the moov alone publishes nothing");
 
 	fmp4.decode(&live_session(3_600_000_000, 20)).unwrap();
-	let anchored = catalog.snapshot().media.clock.expect("a clock");
+	let anchored = catalog.snapshot().sync.clock.expect("a clock");
 	assert_ne!(anchored, provisional, "the first fragment anchors the clock");
 	let published = clocks.drain();
 	assert!(!published.is_empty(), "the first fragment publishes the catalog");
@@ -2881,7 +2904,12 @@ async fn a_moov_with_nothing_selected_releases_its_reservation() {
 	assert!(clocks.drain().is_empty(), "nothing servable is published");
 
 	catalog
-		.mutate(|catalog| catalog.m2ts = Some(hang::catalog::M2ts::new("input.m2ts")))
+		.mutate(|catalog| {
+			catalog.json.tracks.insert(
+				"input.json".to_string(),
+				hang::catalog::JsonConfig::new(hang::catalog::Mode::Snapshot),
+			);
+		})
 		.unwrap();
 	assert_eq!(clocks.drain().len(), 1, "no reservation still gates the catalog");
 }
@@ -2964,7 +2992,11 @@ async fn imports_the_sample_defaults_fixtures_in(passthrough: bool) {
 					let frame = hang::container::Frame::decode(frame.payload).unwrap();
 					// The duration marker closing a video group is no sample.
 					if !frame.payload.is_empty() {
-						samples.push((frame.timestamp.as_micros() as u64, index == 0, frame.payload.to_vec()));
+						samples.push((
+							frame.timestamp.as_micros().unwrap() as u64,
+							index == 0,
+							frame.payload.to_vec(),
+						));
 					}
 					index += 1;
 				}
@@ -2985,7 +3017,7 @@ async fn imports_the_sample_defaults_fixtures_in(passthrough: bool) {
 
 		let mut first = track.recv_group().await.unwrap().unwrap();
 		let frame = first.read_frame().await.unwrap().unwrap();
-		let frames = super::decode(frame.payload, frame.timestamp, wire.track().unwrap()).unwrap();
+		let frames = super::decode(frame.payload, Some(frame.timestamp), wire.track().unwrap()).unwrap();
 		let samples: Vec<super::FixtureSample> = frames.iter().map(super::FixtureSample::from).collect();
 		assert_eq!(samples, fixture.samples, "{}", fixture.name);
 
@@ -3125,7 +3157,7 @@ async fn webvtt_samples_become_timed_text_with_source_metadata() {
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	);
 	let frame = reader.read_frame().await.unwrap().unwrap();
-	assert_eq!(frame.timestamp.as_micros(), 250_000);
+	assert_eq!(frame.timestamp.as_micros().unwrap(), 250_000);
 	assert_eq!(
 		&frame.payload[..],
 		b"WEBVTT\n\ncue-1\n00:00:00.250 --> 00:00:01.500 align:start\nHello\n\n"
@@ -3496,7 +3528,7 @@ async fn ttml_samples_become_timed_text_with_source_metadata() {
 	assert_eq!(config.format, hang::catalog::TextFormat::Ttml);
 	assert_eq!(config.lang.as_deref(), Some("eng"));
 	assert_eq!(config.label.as_deref(), Some("English captions"));
-	assert_eq!(frame.timestamp.as_micros(), 100_000_000);
+	assert_eq!(frame.timestamp.as_micros().unwrap(), 100_000_000);
 	assert_eq!(
 		&frame.payload[..],
 		br#"<tt xmlns="http://www.w3.org/ns/ttml" xml:lang="en"><body begin="00:01:40" end="00:01:44"><div begin="00:00:01"><p begin="0.5s" end="2s">Hello</p></div></body></tt>"#
@@ -3519,7 +3551,7 @@ async fn ttml_follows_a_shifted_source_clock() {
 		.place(moq_net::Timestamp::from_secs(100).unwrap(), wall)
 		.unwrap();
 	let (_, frame) = imported_ttml(timebase, broadcast, &catalog, &consumer).await;
-	assert_eq!(frame.timestamp.as_micros(), 10_000_000);
+	assert_eq!(frame.timestamp.as_micros().unwrap(), 10_000_000);
 	assert_eq!(
 		&frame.payload[..],
 		br#"<tt xmlns="http://www.w3.org/ns/ttml" xml:lang="en"><body begin="00:00:10" end="00:00:14"><div begin="00:00:01"><p begin="0.5s" end="2s">Hello</p></div></body></tt>"#
@@ -3578,7 +3610,7 @@ async fn ttml_body_begins_at_the_serialized_frame_timestamp() {
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	);
 	let frame = reader.read_frame().await.unwrap().unwrap();
-	assert_eq!(frame.timestamp.as_micros(), 100_000_011);
+	assert_eq!(frame.timestamp.as_micros().unwrap(), 100_000_011);
 	let payload = std::str::from_utf8(&frame.payload).unwrap();
 	assert!(
 		payload.contains(r#"<body begin="00:01:40.000011" end="00:01:44.000011">"#),

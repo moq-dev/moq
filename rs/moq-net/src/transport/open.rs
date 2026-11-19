@@ -91,16 +91,6 @@ impl Rank {
 	}
 }
 
-/// One of a session's open group streams, as its list read it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct OpenStream {
-	/// Where the stream ranks now.
-	pub rank: Rank,
-	/// Whether the peer has acknowledged every byte written to it, or `None` when the
-	/// transport cannot tell.
-	pub acknowledged: Option<bool>,
-}
-
 /// The group streams a session has open, keyed so each can leave.
 #[derive(Default)]
 struct Listing {
@@ -138,8 +128,8 @@ impl Line {
 		}
 		let open = lines.open_streams();
 		let open_streams = open.len();
-		let acknowledged = open.iter().filter(|stream| stream.acknowledged == Some(true)).count();
-		let lowest = open.first().map(|stream| stream.rank);
+		let acknowledged = open.iter().filter(|(_, stream)| stream.acknowledged()).count();
+		let lowest = open.first().map(|(rank, _)| *rank);
 		tracing::debug!(
 			open_streams,
 			acknowledged,
@@ -225,7 +215,7 @@ impl Lines {
 			.collect();
 		let mut open: BTreeMap<(Rank, u64), _> = listed
 			.into_iter()
-			.map(|(key, stream)| ((stream.read().rank, key), stream))
+			.map(|(key, stream)| ((stream.rank(), key), stream))
 			.collect();
 		for rank in owed {
 			// An open that cannot preempt the lowest stream finds no lower-priority group open,
@@ -256,11 +246,11 @@ impl Lines {
 	/// The session's open group streams, the lowest ranked first.
 	///
 	/// A stream is open from when it opens until it is finished, reset, or dropped.
-	pub(crate) fn open_streams(&self) -> Vec<OpenStream> {
+	pub(super) fn open_streams(&self) -> Vec<(Rank, Arc<boxed::Listed>)> {
 		// Read each stream outside the listing's lock, which its owner takes to leave.
 		let streams: Vec<_> = self.listing().streams.values().filter_map(Weak::upgrade).collect();
-		let mut open: Vec<_> = streams.iter().map(|stream| stream.read()).collect();
-		open.sort_by_key(|stream| stream.rank);
+		let mut open: Vec<_> = streams.into_iter().map(|stream| (stream.rank(), stream)).collect();
+		open.sort_by_key(|(rank, _)| *rank);
 		open
 	}
 
@@ -541,7 +531,7 @@ mod tests {
 		let options = |priority| SendOptions { group: None, priority };
 		let open = |open: &mut Open, priority| session.poll_open_group(open, &waiter, options(priority), 7);
 		let ranks = |session: &boxed::Session| -> Vec<Rank> {
-			session.open_streams().into_iter().map(|stream| stream.rank).collect()
+			session.open_streams().into_iter().map(|(rank, _)| rank).collect()
 		};
 
 		let mut streams: Vec<_> = [2, 1]
@@ -651,7 +641,7 @@ mod tests {
 		let credit = Mutex::new(Credit::default());
 		// Live subscriptions in their own groups, numbering their groups far apart.
 		let groups = [("early", 10), ("late", 1_000_000)]
-			.map(|(name, sequence)| (name, sequence, session.send_group(0).expect("the sink opens groups")));
+			.map(|(name, key)| (name, key, session.send_group(0).expect("the sink opens groups")));
 		let waiter = kio::Waiter::noop();
 		let mut order = Vec::new();
 		for round in 0..4 {
@@ -659,10 +649,10 @@ mod tests {
 			// up a group once its successor exists.
 			let mut opens: Vec<_> = groups
 				.iter()
-				.map(|(name, sequence, group)| {
+				.map(|(name, key, group)| {
 					let options = SendOptions {
 						group: Some(group),
-						priority: sequence + round,
+						priority: key + round,
 					};
 					(*name, options, Open::default())
 				})

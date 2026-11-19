@@ -475,17 +475,18 @@ impl Bystander {
 	}
 
 	/// Write the next group: two frames of the same size every time, so groups charge the
-	/// cache alike, holding the sequence so a misplaced one shows.
+	/// cache alike, holding the key so a misplaced one shows.
 	fn publish(&self) {
 		let mut sent = self.sent.borrow_mut();
-		let sequence = sent.len() as u64;
-		let mut group = self.track.append_group().expect("the bystander's group");
+		let key = sent.len() as u64;
+		let mut group = self.track.append_next().expect("the bystander's group");
 		let mut frames = Vec::new();
 		for frame in 0..2u8 {
-			let mut payload = sequence.to_be_bytes().repeat(8);
+			let mut payload = key.to_be_bytes().repeat(8);
 			payload.push(frame);
 			let payload = Bytes::from(payload);
-			group.write_frame(None, payload.clone()).expect("the bystander's frame");
+			let key = crate::Timestamp::unscaled(group.start);
+			group.write_frame(key, payload.clone()).expect("the bystander's frame");
 			frames.push(payload);
 		}
 		group.finish().expect("the bystander's group finish");
@@ -777,8 +778,9 @@ fn record(version: Version, scenario: Scenario) -> Vec<Action> {
 					route.announce().expect("the client's announce");
 					let subscribed = async { while let Ok(None) = track.subscription_changed().await {} };
 					let _ = kio::clock::timeout(timeout, subscribed).await;
-					let mut group = track.append_group().expect("the client's group");
-					group.write_frame(None, Bytes::from_static(b"frame")).expect("a frame");
+					let mut group = track.append_next().expect("the client's group");
+					let key = crate::Timestamp::unscaled(group.start);
+					group.write_frame(key, Bytes::from_static(b"frame")).expect("a frame");
 					group.finish().expect("the client's group finish");
 					kio::clock::sleep(timeout).await;
 				}
@@ -945,10 +947,6 @@ impl poll::Session for Recorder {
 	fn receive_window(&self) -> Option<crate::transport::ReceiveWindow> {
 		self.inner.receive_window()
 	}
-
-	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
-		self.inner.export_keying_material(label, context)
-	}
 }
 
 impl Recorder {
@@ -977,6 +975,15 @@ impl Recorder {
 impl poll::SendStream for Recorded<memory::SendStream> {
 	type Error = memory::Error;
 	type Group = poll::Ungrouped;
+	type Offset = u64;
+
+	fn offset(&self) -> u64 {
+		self.inner.offset()
+	}
+
+	fn poll_acked(&self, waiter: &kio::Waiter, offset: &u64) -> Poll<Result<(), Self::Error>> {
+		self.inner.poll_acked(waiter, offset)
+	}
 
 	fn poll_write(&mut self, waiter: &kio::Waiter, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 		let written = std::task::ready!(self.inner.poll_write(waiter, buf))?;
@@ -1010,18 +1017,6 @@ impl poll::SendStream for Recorded<memory::SendStream> {
 
 	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Self::Error>> {
 		self.inner.poll_closed(waiter)
-	}
-
-	fn acknowledged(&self) -> Option<bool> {
-		self.inner.acknowledged()
-	}
-
-	fn delivered(&self) -> Option<u64> {
-		self.inner.delivered()
-	}
-
-	fn poll_delivered(&self, waiter: &kio::Waiter) -> Poll<()> {
-		self.inner.poll_delivered(waiter)
 	}
 }
 

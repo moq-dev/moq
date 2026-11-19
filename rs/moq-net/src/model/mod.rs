@@ -4,7 +4,6 @@ pub mod cache;
 pub mod datagram;
 pub mod frame;
 pub mod group;
-pub mod socket;
 pub mod track;
 
 // The origin + announce subsystem shares one implementation (a route table).
@@ -41,7 +40,6 @@ mod resume;
 mod resume_model;
 mod subscription;
 mod time;
-mod timed;
 mod weak_cache;
 
 use request_queue::RequestQueue;
@@ -49,28 +47,23 @@ use weak_cache::{WeakCache, WeakEntry};
 
 pub use bytes::*;
 pub use time::*;
-pub use timed::Timed;
 
 /// Routing broadcasts into an origin, and consuming them through it.
 pub mod origin {
 	pub use super::follow::Following;
 	#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
 	pub(crate) use super::origin_impl::Footprint;
-	pub(crate) use super::origin_impl::HiddenWithheld;
-	#[cfg(feature = "async")]
-	pub(crate) use super::origin_impl::HiddenWithholding;
 	#[cfg(feature = "async")]
 	// private: capability gap
 	pub(crate) use super::origin_impl::Lookup;
 	#[cfg(feature = "async")]
 	pub(crate) use super::origin_impl::Mounted;
-	#[cfg(feature = "async")]
-	pub(crate) use super::origin_impl::NodeFilter;
 	pub use super::origin_impl::{
-		Claim, Config, Consumer, Cost, Driver, Link, Preference, Producer, Request, Requesting, Route, RouteInfo,
-		RouteOptions, Source,
+		Claim, Config, Consumer, Cost, Driver, Link, Priority, Producer, Request, Requesting, Route, RouteInfo,
+		RouteOptions,
 	};
-	pub use crate::route::RouteKey;
+	#[cfg(feature = "async")]
+	pub(crate) use super::origin_impl::{Lane, NodeFilter};
 
 	// Relay-level: every route change, for forwarding and stats. Apps read
 	// `announce` and `follow` instead.

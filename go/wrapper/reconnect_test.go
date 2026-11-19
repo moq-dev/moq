@@ -82,9 +82,8 @@ func dialWorker(t *testing.T, ctx context.Context, url string) *moq.Client {
 	client, err := moq.Dial(ctx, url, moq.ClientConfig{
 		TLS: moq.ClientTLS{Insecure: true},
 		Backoff: moq.Backoff{
-			Initial: 50 * time.Millisecond,
-			Max:     time.Second,
-			Timeout: moq.RetryForever,
+			Initial: ptr(50 * time.Millisecond),
+			Max:     ptr(time.Second),
 		},
 	})
 	if err != nil {
@@ -167,7 +166,7 @@ func TestListenKeylogRequiresSSLKEYLOGFILE(t *testing.T) {
 	}
 }
 
-// A Go worker survives a relay restart the way a moq-c worker does: the session
+// A Go worker survives a relay restart the way a libmoq worker does: the session
 // redials with backoff, the publisher re-announces its broadcast to the fresh
 // relay, and the subscriber's subscription receives frames again. The connect count
 // pairs with Status so a worker can log each reconnect.
@@ -230,6 +229,10 @@ func TestReconnectAcrossRelayRestart(t *testing.T) {
 	if frame, err := trackConsumer.ReadFrame(ctx); err != nil || frame == nil {
 		t.Fatalf("frame before restart: frame=%+v err=%v", frame, err)
 	}
+	// Connected once the relay accepted each session, so the drop below redials rather than
+	// ending them as refusals.
+	waitConnects(t, ctx, publisher.Session(), 1)
+	waitConnects(t, ctx, subscriber.Session(), 1)
 	if state := subscriber.Session().State(); !isConnected(state) {
 		t.Fatalf("not serving before any drop: %+v", state)
 	}
@@ -328,7 +331,7 @@ func TestDialConnectionOptions(t *testing.T) {
 			KeepAlive:         ptr(time.Duration(0)),
 			GSO:               ptr(false),
 			MTUDiscovery:      ptr(true),
-			CongestionControl: ptr(moq.CongestionControlLoss),
+			CongestionControl: moq.CubicCongestionControl(),
 		},
 		WebSocket: moq.WebSocketConfig{Enabled: ptr(false)},
 	})
@@ -357,7 +360,7 @@ func TestFirstDialState(t *testing.T) {
 		Timeout:   ptr(100 * time.Millisecond),
 		TLS:       moq.ClientTLS{Insecure: true},
 		WebSocket: moq.WebSocketConfig{Enabled: ptr(false)},
-		Backoff:   moq.Backoff{Initial: 50 * time.Millisecond, Max: 50 * time.Millisecond, Timeout: moq.RetryForever},
+		Backoff:   moq.Backoff{Initial: ptr(50 * time.Millisecond), Max: ptr(50 * time.Millisecond)},
 	})
 	if err != nil {
 		t.Fatal(err)

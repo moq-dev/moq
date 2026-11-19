@@ -145,9 +145,9 @@ async fn received(
 			.ok_or_else(|| anyhow::anyhow!("empty group"))?;
 		let payload = String::from_utf8(frame.payload.to_vec())?;
 		anyhow::ensure!(
-			got.insert(group.sequence, payload).is_none(),
+			got.insert(group.start, payload).is_none(),
 			"group {} delivered twice",
-			group.sequence
+			group.start
 		);
 	}
 }
@@ -159,12 +159,15 @@ fn groups(range: std::ops::Range<u64>) -> BTreeMap<u64, String> {
 async fn relay(version: Version) -> anyhow::Result<()> {
 	let publisher = moq_tokio::origin::spawn();
 	let broadcast = publisher.route("history", moq_net::origin::RouteOptions::hidden())?;
-	let track = broadcast.broadcast().create_track(
-		"video",
-		Info::default().with_timescale(Timescale::MILLI).with_max_age(None),
-	)?;
+	let track = broadcast
+		.broadcast()
+		.create_track(
+			"video",
+			Info::default().with_timescale(Timescale::MILLI).with_max_age(None),
+		)
+		.expect("a free name");
 	for sequence in 0..GROUPS {
-		let mut group = track.create_group(moq_net::group::Info { sequence })?;
+		let mut group = track.create_group(moq_net::group::Info { start: sequence })?;
 		group.write_frame(
 			Timestamp::from_millis(sequence * 1000)?,
 			format!("group {sequence}").into_bytes(),
@@ -223,7 +226,10 @@ async fn relay(version: Version) -> anyhow::Result<()> {
 	let wide = Subscription::default()
 		.with_delay(Delay::default().with_max(None))
 		.with_ranges([match version.alpn() {
-			"moq-lite-05" => Range::groups(0..),
+			"moq-lite-05" => Range {
+				start: moq_net::track::Anchor::Time(0),
+				end: None,
+			},
 			_ => Range::oldest(),
 		}]);
 	let mut below = relay.subscribe(wide.clone()).await?;

@@ -1,7 +1,5 @@
 //! The per-connection transport knobs, the same for either role.
 
-use super::Congestion;
-#[cfg(feature = "qlog")]
 use super::qlog;
 use crate::quic::Limits;
 
@@ -16,6 +14,12 @@ pub struct Config {
 	/// Close the connection after this long without activity. Must fit a QUIC
 	/// varint in milliseconds.
 	pub idle_timeout: std::time::Duration,
+	/// The inactivity bound until the handshake completes, in place of
+	/// [`idle_timeout`](Self::idle_timeout), so a short idle timeout does not
+	/// cut off a handshake whose probes back off under loss. Defaults to
+	/// moq-quic's 30 seconds. See
+	/// [`moq_quic::transport::Config::handshake_timeout`].
+	pub handshake_timeout: std::time::Duration,
 	/// Flow-control windows and stream counts. Each `None` takes its default:
 	///
 	/// - 1024 streams of each kind a peer may have open at once. MoQ opens a
@@ -30,8 +34,7 @@ pub struct Config {
 	///   stream.
 	/// - 4 MiB of unacknowledged outgoing data, whatever the peer allows.
 	pub limits: Limits,
-	/// The congestion controller each connection runs, BBRv3 by default. A
-	/// [`Congestion`] family converts into one with `.into()`.
+	/// The congestion controller each connection runs, BBRv3 by default.
 	pub congestion: std::sync::Arc<dyn moq_congestion::Factory + Send + Sync>,
 	/// How often to send an ack-eliciting packet on an otherwise idle
 	/// connection, `None` (the default) to derive it from the negotiated idle
@@ -47,10 +50,6 @@ pub struct Config {
 	/// moq-quic takes one sink per transport config, so this writes one file
 	/// per endpoint on the accept side and per dial on the connect side, each
 	/// event tagged with the qlog `group_id` of the connection it belongs to.
-	///
-	/// Only compiled with the `qlog` feature, so a build without it cannot ask
-	/// for traces the backends would not produce.
-	#[cfg(feature = "qlog")]
 	pub qlog: Option<qlog::Sink>,
 }
 
@@ -58,11 +57,11 @@ impl Default for Config {
 	fn default() -> Self {
 		Self {
 			idle_timeout: std::time::Duration::from_secs(10),
+			handshake_timeout: moq_quic::transport::Config::default().handshake_timeout,
 			limits: Limits::default(),
-			congestion: Congestion::Delay.into(),
+			congestion: std::sync::Arc::new(moq_congestion::bbr3::Config::default()),
 			keep_alive: None,
 			mtu_discovery: false,
-			#[cfg(feature = "qlog")]
 			qlog: None,
 		}
 	}
@@ -74,11 +73,11 @@ impl std::fmt::Debug for Config {
 		let mut debug = f.debug_struct("Config");
 		debug
 			.field("idle_timeout", &self.idle_timeout)
+			.field("handshake_timeout", &self.handshake_timeout)
 			.field("limits", &self.limits)
 			.field("congestion", &format_args!(".."))
 			.field("keep_alive", &self.keep_alive)
 			.field("mtu_discovery", &self.mtu_discovery);
-		#[cfg(feature = "qlog")]
 		debug.field("qlog", &self.qlog);
 		debug.finish()
 	}

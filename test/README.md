@@ -11,15 +11,18 @@ questions to a harness. For builds and CI selection, see the
 | [interop](interop/README.md) | `just test interop --all` | clients built from this checkout interoperate; without `--all`, only Rust runs |
 | [wire compatibility](interop/README.md) | `just test wire-compat` | this checkout exchanges data with published versions |
 | [IETF conformance](ietf-conformance/README.md) | `just test ietf-conformance` | pinned Moxygen sections 1-7, under the relay conformance profile, preserve subgroup-zero objects through one relay |
+| [QUIC interop](quic-interop/README.md) | `just test quic-interop` | moq-quic, as server and client, passes the QUIC Interop Runner against pinned quic-go, ngtcp2, quiche, and quinn |
 | [registry smoke](smoke/README.md) | `just test smoke` | published packages install and interoperate; see the guide for matrix selection |
 | [browser media](interop/README.md) | `just test media` | browser capture and playback deliver video and audio through publication lifecycle changes |
 | [failure drills](drill/README.md) | `just test drill` | relay and transport failures terminate or recover as expected |
+| [mesh replay](mesh-replay/README.md) | `just test mesh-replay` | how long a mesh of real relays takes to feed every reader again and go quiet after link reopens, a crash, and a roll between the newest release and this checkout, and the control traffic each costs; the guide lists what fails a run |
 | [ts](ts/README.md) | `just test ts` | the subscriber's `export ts` output is IRD-compliant |
 | [native-play](native-play/README.md) | `just test native-play` | the shipped headless player follows overlapping publishers and fallback through decoded PCM on a private Linux null audio device |
 | [audio-quality](audio-quality/README.md) | `just test audio-quality` | browser and native audio playout stay within budget over an impaired path |
 | [drain](drain/README.md) | `just test drain` | a JS viewer migrates off a draining relay without a dropped group |
 | [stream-credit](stream-credit/README.md) | `just test stream-credit` | a browser tab reads 300 live tracks past its ~100-stream WebTransport cap, the highest priority first, and nothing hangs |
 | qmux | `just test qmux` | `@moq/qmux`, as client and as server, interoperates with the Rust qmux 0.6.3 release on every QMux draft |
+| vr | `just test vr` | a VR180 left-right MP4 with ambisonic Opus keeps its catalog projection, stereo, and layout through import and a relay, and `demo/vr` lays out each eye and turns the sound field with the head |
 | video | `just test video` | the `@moq/video` renderer paints through WebGPU and falls back to Canvas2D after losing the GPU |
 | [json-properties](json-properties.md) | `just test json-properties` | both Snapshot codecs reconstruct, and both Window codecs emit the exact events for, random JSON sequences with replayable seeds |
 
@@ -31,13 +34,15 @@ when run concurrently or from different worktrees. The shared
 
 Every run owns three things and touches nothing else.
 
-**A private run directory.** `mktemp -d` under `$TMPDIR/moq-test-<uid>`, mode 700,
-holding every log, generated config, and capture. `HARNESS_RUNS` moves the root.
+**A private run directory.** `mktemp -d` under the checkout's `.tmp/harness/`, mode 700,
+holding every log, generated config, and capture. `HARNESS_RUNS` moves the root. A kept
+run therefore goes away with its worktree and never lands in a small or shared `TMPDIR`.
 Client builds go here too (the Python venv, the staged Go modules, the browser
 page), so two runs from one checkout never rebuild a client the other is running.
 Interop and wire-compat also stage their Cargo executables, headers, static libraries,
 and GStreamer plugin here immediately after building, as hard links or copies across
-filesystems. Every later execution, link, and plugin load uses these run-owned paths,
+filesystems (reflinked where `cp` supports it). Every later execution, link, and plugin
+load uses these run-owned paths,
 so collecting shared Cargo output cannot remove an artifact a running matrix still
 needs. Binary overrides are staged too, including nested wire-compat cells.
 

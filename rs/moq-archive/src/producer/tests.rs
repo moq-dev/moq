@@ -45,7 +45,7 @@ fn ms(ms: u64) -> Timestamp {
 
 /// Write a whole group of `(pts, payload)` frames.
 fn group(track: &track::Producer, sequence: u64, frames: &[(u64, &str)]) {
-	let mut group = track.create_group(group::Info { sequence }).unwrap();
+	let mut group = track.create_group(group::Info { start: sequence }).unwrap();
 	for (pts, payload) in frames {
 		group.write_frame(ms(*pts), payload.to_string()).unwrap();
 	}
@@ -140,11 +140,7 @@ fn contents(objects: &BTreeMap<String, Object>) -> Vec<Vec<(u64, Vec<String>)>> 
 		.collect()
 }
 
-fn key(group: u64, frame: u64, pts: u64) -> String {
-	format!("{group:019}-{frame:019}-{pts:019}")
-}
-
-fn untimed(group: u64, frame: u64) -> String {
+fn key(group: u64, frame: u64) -> String {
 	format!("{group:019}-{frame:019}")
 }
 
@@ -176,7 +172,7 @@ async fn timed_objects_cut_at_group_boundaries_by_duration() {
 	let objects = objects(&store, "video", true).await;
 	assert_eq!(
 		objects.keys().cloned().collect::<Vec<_>>(),
-		[key(0, 0, 0), key(2, 0, 2000), key(4, 0, 4000)]
+		[key(0, 0), key(2, 0), key(4, 0)]
 	);
 	assert_eq!(
 		contents(&objects)[0],
@@ -191,8 +187,10 @@ async fn timed_objects_cut_at_group_boundaries_by_duration() {
 	assert!(complete(&store).await);
 }
 
+/// A group created below one already stored is a gap, and never stalls the groups after it: the
+/// recorder reads in key order, and a local track owes nothing between the groups it holds.
 #[tokio::test(start_paused = true)]
-async fn a_lost_group_is_a_gap_that_never_stalls_later_groups() {
+async fn a_late_group_is_a_gap_that_never_stalls_later_groups() {
 	let store = store();
 	let broadcast = broadcast::Info::new().produce();
 	let video = broadcast.create_track("video", timed()).unwrap();
@@ -204,26 +202,16 @@ async fn a_lost_group_is_a_gap_that_never_stalls_later_groups() {
 	group(&video, 2, &[(2000, "c")]);
 	group(&video, 3, &[(3000, "d")]);
 	settle().await;
-	// Group 0 is flushed alone; 2 and 3 wait on the missing 1.
+	// Nothing waits on 1, so every group is stored within the flush.
 	sleep(SECOND + SECOND / 2).await;
-	assert_eq!(
-		objects(&store, "video", true).await.keys().cloned().collect::<Vec<_>>(),
-		[key(0, 0, 0)]
-	);
-
-	// Once the max delay passes, the gap is given up and the rest follow within the flush.
-	sleep(2 * SECOND).await;
 	let stored = objects(&store, "video", true).await;
-	assert_eq!(
-		stored.keys().cloned().collect::<Vec<_>>(),
-		[key(0, 0, 0), key(2, 0, 2000)]
-	);
+	assert_eq!(stored.keys().cloned().collect::<Vec<_>>(), [key(0, 0), key(2, 0)]);
 	assert_eq!(
 		contents(&stored)[1],
 		[(2, vec!["2000/c".to_string()]), (3, vec!["3000/d".to_string()]),]
 	);
 
-	// The lost group arriving too late stays a gap.
+	// A group below the stored ones arrives too late and stays a gap.
 	group(&video, 1, &[(1000, "b")]);
 	let _video = video.finish().unwrap();
 	broadcast.close();
@@ -231,40 +219,6 @@ async fn a_lost_group_is_a_gap_that_never_stalls_later_groups() {
 	let stored = objects(&store, "video", true).await;
 	assert_eq!(stored.len(), 2);
 	assert_eq!(end(&store, "video").await, Some(End::Finish(At { group: 4, frame: 0 })));
-}
-
-/// Arrival is not sequence order, so a fresh track's first arrival waits for a lower sequence.
-#[tokio::test(start_paused = true)]
-async fn a_fresh_track_waits_for_a_group_below_its_first_arrival() {
-	let store = store();
-	let broadcast = broadcast::Info::new().produce();
-	let video = broadcast.create_track("video", timed()).unwrap();
-	let config = config().with_flush(SECOND).with_max_delay(2 * SECOND);
-	let task = spawn(&store, &broadcast, config);
-	subscribed(&video).await;
-
-	group(&video, 2, &[(2000, "c")]);
-	settle().await;
-	group(&video, 1, &[(1000, "b")]);
-	settle().await;
-	// Nothing is stored until the wait from the first arrival gives up on group 0.
-	sleep(SECOND + SECOND / 2).await;
-	assert!(objects(&store, "video", true).await.is_empty());
-
-	sleep(2 * SECOND).await;
-	let stored = objects(&store, "video", true).await;
-	assert_eq!(stored.keys().cloned().collect::<Vec<_>>(), [key(1, 0, 1000)]);
-	assert_eq!(
-		contents(&stored)[0],
-		[(1, vec!["1000/b".to_string()]), (2, vec!["2000/c".to_string()]),]
-	);
-
-	// Group 0 arriving after that is too late.
-	group(&video, 0, &[(0, "a")]);
-	let _video = video.finish().unwrap();
-	broadcast.close();
-	finished(task).await;
-	assert_eq!(objects(&store, "video", true).await.len(), 1);
 }
 
 #[tokio::test(start_paused = true)]
@@ -293,7 +247,7 @@ async fn an_oversized_timed_group_splits_into_ordered_unique_keys() {
 	let objects = objects(&store, "video", true).await;
 	assert_eq!(
 		objects.keys().cloned().collect::<Vec<_>>(),
-		[key(0, 0, 0), key(0, 2, 2000), key(0, 5, 4000)]
+		[key(0, 0), key(0, 2), key(0, 5)]
 	);
 	let stored: Vec<String> = contents(&objects)
 		.into_iter()
@@ -315,19 +269,19 @@ async fn an_open_untimed_group_is_cut_at_each_flush() {
 	let task = spawn(&store, &broadcast, config().with_flush(SECOND));
 	subscribed(&data).await;
 
-	let mut open = data.create_group(group::Info { sequence: 0 }).unwrap();
-	open.write_frame(None, "a").unwrap();
+	let mut open = data.create_group(group::Info { start: 0 }).unwrap();
+	open.write_frame(moq_net::Timestamp::unscaled(0), "a").unwrap();
 	settle().await;
 	sleep(SECOND).await;
-	let head = untimed(0, 0);
+	let head = key(0, 0);
 	let first = get(&store, &format!("data/{head}")).await.unwrap();
 
-	open.write_frame(None, "b").unwrap();
+	open.write_frame(moq_net::Timestamp::unscaled(0), "b").unwrap();
 	settle().await;
 	sleep(SECOND).await;
 	assert_eq!(get(&store, &format!("data/{head}")).await.unwrap(), first);
 	let stored = objects(&store, "data", false).await;
-	assert_eq!(stored.keys().cloned().collect::<Vec<_>>(), [head, untimed(0, 1)]);
+	assert_eq!(stored.keys().cloned().collect::<Vec<_>>(), [head, key(0, 1)]);
 	assert_eq!(
 		contents(&stored),
 		[[(0, vec!["a".to_string()])], [(0, vec!["b".to_string()])]]
@@ -352,17 +306,17 @@ async fn an_untimed_group_splits_by_wall_clock() {
 	let task = spawn(&store, &broadcast, config());
 	subscribed(&data).await;
 
-	let mut open = data.create_group(group::Info { sequence: 0 }).unwrap();
+	let mut open = data.create_group(group::Info { start: 0 }).unwrap();
 	for payload in ["a", "b", "c", "d", "e"] {
-		open.write_frame(None, payload).unwrap();
+		open.write_frame(moq_net::Timestamp::unscaled(0), payload).unwrap();
 		settle().await;
 		sleep(SECOND / 2).await;
 	}
 	open.finish().unwrap();
 	settle().await;
 	sleep(2 * SECOND).await;
-	let mut next = data.create_group(group::Info { sequence: 1 }).unwrap();
-	next.write_frame(None, "f").unwrap();
+	let mut next = data.create_group(group::Info { start: 1 }).unwrap();
+	next.write_frame(moq_net::Timestamp::unscaled(1), "f").unwrap();
 	next.finish().unwrap();
 	settle().await;
 	let _data = data.finish().unwrap();
@@ -372,7 +326,7 @@ async fn an_untimed_group_splits_by_wall_clock() {
 	let stored = objects(&store, "data", false).await;
 	assert_eq!(
 		stored.keys().cloned().collect::<Vec<_>>(),
-		[untimed(0, 0), untimed(0, 4), untimed(1, 0)]
+		[key(0, 0), key(0, 4), key(1, 0)]
 	);
 	let strings = |frames: &[&str]| frames.iter().map(|frame| frame.to_string()).collect::<Vec<_>>();
 	assert_eq!(
@@ -393,7 +347,7 @@ async fn an_idle_track_is_flushed_within_the_bound() {
 	let task = spawn(&store, &broadcast, config().with_flush(SECOND));
 	subscribed(&video).await;
 
-	let mut open = video.create_group(group::Info { sequence: 0 }).unwrap();
+	let mut open = video.create_group(group::Info { start: 0 }).unwrap();
 	open.write_frame(ms(0), "a").unwrap();
 	settle().await;
 	sleep(SECOND / 2).await;
@@ -401,7 +355,7 @@ async fn an_idle_track_is_flushed_within_the_bound() {
 	sleep(SECOND / 2).await;
 	assert_eq!(
 		objects(&store, "video", true).await.keys().cloned().collect::<Vec<_>>(),
-		[key(0, 0, 0)]
+		[key(0, 0)]
 	);
 
 	// The open group continues in the next object.
@@ -413,7 +367,7 @@ async fn an_idle_track_is_flushed_within_the_bound() {
 	finished(task).await;
 	assert_eq!(
 		objects(&store, "video", true).await.keys().cloned().collect::<Vec<_>>(),
-		[key(0, 0, 0), key(0, 1, 100)]
+		[key(0, 0), key(0, 1)]
 	);
 }
 
@@ -428,11 +382,13 @@ async fn a_restart_mid_group_loses_and_duplicates_nothing() {
 	subscribed(&video).await;
 	subscribed(&data).await;
 
-	let mut timed_group = video.create_group(group::Info { sequence: 0 }).unwrap();
-	let mut untimed_group = data.create_group(group::Info { sequence: 0 }).unwrap();
+	let mut timed_group = video.create_group(group::Info { start: 0 }).unwrap();
+	let mut untimed_group = data.create_group(group::Info { start: 0 }).unwrap();
 	for (pts, payload) in [(0, "a"), (100, "b")] {
 		timed_group.write_frame(ms(pts), payload).unwrap();
-		untimed_group.write_frame(None, payload).unwrap();
+		untimed_group
+			.write_frame(moq_net::Timestamp::unscaled(0), payload)
+			.unwrap();
 	}
 	settle().await;
 	sleep(SECOND).await;
@@ -441,11 +397,11 @@ async fn a_restart_mid_group_loses_and_duplicates_nothing() {
 
 	// Both groups grow while nothing records them.
 	timed_group.write_frame(ms(200), "c").unwrap();
-	untimed_group.write_frame(None, "c").unwrap();
+	untimed_group.write_frame(moq_net::Timestamp::unscaled(0), "c").unwrap();
 	let task = spawn(&store, &broadcast, config);
 	settle().await;
 	timed_group.write_frame(ms(300), "d").unwrap();
-	untimed_group.write_frame(None, "d").unwrap();
+	untimed_group.write_frame(moq_net::Timestamp::unscaled(0), "d").unwrap();
 	timed_group.finish().unwrap();
 	untimed_group.finish().unwrap();
 	settle().await;
@@ -455,10 +411,7 @@ async fn a_restart_mid_group_loses_and_duplicates_nothing() {
 	finished(task).await;
 
 	let stored = objects(&store, "video", true).await;
-	assert_eq!(
-		stored.keys().cloned().collect::<Vec<_>>(),
-		[key(0, 0, 0), key(0, 2, 200)]
-	);
+	assert_eq!(stored.keys().cloned().collect::<Vec<_>>(), [key(0, 0), key(0, 2)]);
 	let frames: Vec<String> = contents(&stored)
 		.into_iter()
 		.flatten()
@@ -468,10 +421,7 @@ async fn a_restart_mid_group_loses_and_duplicates_nothing() {
 
 	// The untimed group continues in its own object too.
 	let stored = objects(&store, "data", false).await;
-	assert_eq!(
-		stored.keys().cloned().collect::<Vec<_>>(),
-		[untimed(0, 0), untimed(0, 2)]
-	);
+	assert_eq!(stored.keys().cloned().collect::<Vec<_>>(), [key(0, 0), key(0, 2)]);
 	let frames: Vec<String> = contents(&stored)
 		.into_iter()
 		.flatten()
@@ -493,7 +443,7 @@ async fn a_partial_group_resumes_after_its_last_stored_frame() {
 	subscribed(&video).await;
 
 	group(&video, 0, &[(0, "a")]);
-	let mut partial = video.create_group(group::Info { sequence: 1 }).unwrap();
+	let mut partial = video.create_group(group::Info { start: 1 }).unwrap();
 	partial.start_at(2).unwrap();
 	partial.write_frame(ms(500), "c").unwrap();
 	settle().await;
@@ -513,7 +463,7 @@ async fn a_partial_group_resumes_after_its_last_stored_frame() {
 	let stored = objects(&store, "video", true).await;
 	assert_eq!(
 		stored.keys().cloned().collect::<Vec<_>>(),
-		[key(0, 0, 0), key(1, 2, 500), key(1, 3, 600)]
+		[key(0, 0), key(1, 2), key(1, 3)]
 	);
 	let frames: Vec<String> = contents(&stored)
 		.into_iter()
@@ -561,18 +511,19 @@ async fn changed_properties_fail_the_resume() {
 	);
 }
 
-/// A reader still reads a version 2 `.info`, but a producer never appends to one.
+/// A prefix in another format version, such as one a main build wrote before the format shipped,
+/// is refused before anything is written to it.
 #[tokio::test(start_paused = true)]
-async fn an_older_version_fails_the_resume() {
+async fn another_version_fails_the_resume() {
 	let store = store();
 	let info = object_store::path::Path::from("rec/video/.info");
-	let v2 = br#"{"version":2,"priority":128,"timescale":1000}"#;
-	store.inner().put(&info, v2.as_ref().into()).await.unwrap();
+	let v4 = br#"{"version":4,"priority":0,"timescale":1000}"#;
+	store.inner().put(&info, v4.as_ref().into()).await.unwrap();
 	let broadcast = broadcast::Info::new().produce();
 	let _video = broadcast.create_track("video", timed()).unwrap();
 	let err = spawn(&store, &broadcast, config()).await.unwrap().unwrap_err();
-	assert!(matches!(err, Error::Version(2)), "{err}");
-	assert_eq!(get(&store, "video/.info").await.as_deref(), Some(&v2[..]));
+	assert!(matches!(err, Error::Version(4)), "{err}");
+	assert_eq!(get(&store, "video/.info").await.as_deref(), Some(&v4[..]));
 }
 
 #[tokio::test(start_paused = true)]
@@ -587,8 +538,8 @@ async fn track_names_stay_one_segment_through_a_resume() {
 	let task = spawn(&store, &broadcast, config().with_flush(SECOND));
 	for track in &tracks {
 		subscribed(track).await;
-		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
-		group.write_frame(None, "x").unwrap();
+		let mut group = track.create_group(group::Info { start: 0 }).unwrap();
+		group.write_frame(moq_net::Timestamp::unscaled(0), "x").unwrap();
 		group.finish().unwrap();
 	}
 	settle().await;
@@ -598,7 +549,7 @@ async fn track_names_stay_one_segment_through_a_resume() {
 
 	let stored = keys(&store).await;
 	for dir in ["a%2Fb", "%2Ehidden", "end"] {
-		assert!(stored.contains(&format!("{dir}/{}", untimed(0, 0))), "{stored:?}");
+		assert!(stored.contains(&format!("{dir}/{}", key(0, 0))), "{stored:?}");
 		assert!(stored.contains(&format!("{dir}/.info")), "{stored:?}");
 	}
 
@@ -713,11 +664,11 @@ async fn markers_wait_for_the_listing_to_end() {
 	subscribed(&audio).await;
 
 	group(&video, 0, &[(0, "a")]);
-	let mut last = video.create_group(group::Info { sequence: 1 }).unwrap();
+	let mut last = video.create_group(group::Info { start: 1 }).unwrap();
 	last.write_frame(ms(1000), "b").unwrap();
 	last.write_frame(ms(1100), "c").unwrap();
 	// A mid-group end: frames 0 and 1 of group 1.
-	video.finish_at(Position { group: 1, frame: 2 }, None).unwrap();
+	video.finish_at(Position::new(1, 2)).unwrap();
 	last.finish().unwrap();
 	settle().await;
 	sleep(SECOND).await;
@@ -742,14 +693,12 @@ async fn markers_wait_for_the_listing_to_end() {
 async fn an_errored_end_records_its_error() {
 	let store = store();
 	let broadcast = broadcast::Info::new().produce();
-	let mut video = broadcast.create_track("video", timed()).unwrap();
+	let video = broadcast.create_track("video", timed()).unwrap();
 	let task = spawn(&store, &broadcast, config());
 	subscribed(&video).await;
 	group(&video, 0, &[(0, "a")]);
 	group(&video, 1, &[(1000, "b")]);
-	video
-		.finish_at(Position::group(2), Some(moq_net::Error::App(7)))
-		.unwrap();
+	let _video = video.fail(moq_net::Error::App(7)).unwrap();
 	settle().await;
 	broadcast.close();
 	finished(task).await;
@@ -793,6 +742,40 @@ async fn a_re_added_track_continues_and_its_marker_records_the_last_run() {
 		.collect();
 	assert_eq!(frames, ["0/a", "1000/b", "2000/c"]);
 	assert_eq!(end(&store, "video").await, Some(End::Error(64 + 3)));
+}
+
+/// A re-added track that still holds the last group stored whole hands it back, since the next
+/// run asks from one past it and a time start names the group containing that: it is passed
+/// over rather than stored again.
+#[tokio::test(start_paused = true)]
+async fn a_re_added_track_holding_the_last_stored_group_stores_it_once() {
+	let store = store();
+	let broadcast = broadcast::Info::new().produce();
+	let first = broadcast.create_track("video", timed()).unwrap();
+	let task = spawn(&store, &broadcast, config());
+	subscribed(&first).await;
+	group(&first, 0, &[(0, "a")]);
+	group(&first, 1000, &[(1000, "b")]);
+	let first = first.finish().unwrap();
+	settle().await;
+	drop(first);
+	settle().await;
+
+	let second = broadcast.create_track("video", timed()).unwrap();
+	group(&second, 1000, &[(1000, "b")]);
+	subscribed(&second).await;
+	group(&second, 2000, &[(2000, "c")]);
+	settle().await;
+	let _second = second.finish().unwrap();
+	broadcast.close();
+	finished(task).await;
+
+	let frames: Vec<String> = contents(&objects(&store, "video", true).await)
+		.into_iter()
+		.flatten()
+		.flat_map(|(_, frames)| frames)
+		.collect();
+	assert_eq!(frames, ["0/a", "1000/b", "2000/c"]);
 }
 
 /// A track re-added with other properties after it was listed is refused before any of its

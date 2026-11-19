@@ -1,6 +1,14 @@
 import { Duration, Elapsed, Instant, type Interval, interval, MissedTickBehavior, now, timeout } from "@moq/clock";
 import { Credit, StreamLimit, Window } from "./credit.ts";
-import { resetCode, SessionError, StreamError, streamCode } from "./error.ts";
+import {
+	resetCode,
+	SessionError,
+	StreamError,
+	streamCode,
+	TransportCode,
+	TransportError,
+	transportCode,
+} from "./error.ts";
 import type { TransportParams, WireFormat } from "./frame.ts";
 import * as Frame from "./frame.ts";
 import { DEFAULT_TRANSPORT_PARAMS, usesRecords } from "./frame.ts";
@@ -29,10 +37,8 @@ export type SendStreamOptions = WebTransportSendStreamOptions & {
 
 /** Configuration for a QMux session. */
 export interface Config {
-	/** Max concurrent bidirectional streams the peer can open. */
-	maxStreamsBidi?: bigint;
-	/** Max concurrent unidirectional streams the peer can open. */
-	maxStreamsUni?: bigint;
+	/** Max concurrent streams the peer can open, in each direction. */
+	maxStreams?: bigint;
 	/** Connection-level receive window in bytes. */
 	receiveWindow?: bigint;
 	/** Receive window in bytes for every stream. */
@@ -54,8 +60,7 @@ export interface Config {
 }
 
 const DEFAULT_CONFIG: Required<Config> = {
-	maxStreamsBidi: 100n,
-	maxStreamsUni: 100n,
+	maxStreams: 100n,
 	receiveWindow: 1_048_576n,
 	streamReceiveWindow: 262_144n,
 	idleTimeout: Duration.secs(30),
@@ -104,8 +109,8 @@ function configToTransportParams(config: Required<Config>): TransportParams {
 		initialMaxStreamDataBidiLocal: config.streamReceiveWindow,
 		initialMaxStreamDataBidiRemote: config.streamReceiveWindow,
 		initialMaxStreamDataUni: config.streamReceiveWindow,
-		initialMaxStreamsBidi: config.maxStreamsBidi,
-		initialMaxStreamsUni: config.maxStreamsUni,
+		initialMaxStreamsBidi: config.maxStreams,
+		initialMaxStreamsUni: config.maxStreams,
 		// Clamp to maxRecordSize so we never advertise a datagram larger than our
 		// record layer accepts.
 		maxDatagramFrameSize:
@@ -635,6 +640,8 @@ type End =
 
 /** A `WebTransport` session carried over a WebSocket, for hosts without native WebTransport. */
 export class Session implements WebTransport {
+	/** The transport label MoQ reports, telling this session apart from native WebTransport. */
+	readonly transport = "websocket";
 	// The transport: a native `WebSocketStream` when the platform has one,
 	// otherwise the `WebSocketStream` ponyfill over a plain `WebSocket`. Either
 	// way, one API.
@@ -781,8 +788,8 @@ export class Session implements WebTransport {
 		// Receive limits are version-independent.
 		const notify = () => this.#scheduler?.notify();
 		this.#recvData = new Window(this.#ourParams.initialMaxData, notify);
-		this.#recvBiLimit = new StreamLimit(this.#config.maxStreamsBidi, notify);
-		this.#recvUniLimit = new StreamLimit(this.#config.maxStreamsUni, notify);
+		this.#recvBiLimit = new StreamLimit(this.#config.maxStreams, notify);
+		this.#recvUniLimit = new StreamLimit(this.#config.maxStreams, notify);
 
 		const ready = Promise.withResolvers<void>();
 		this.ready = ready.promise;
@@ -914,7 +921,11 @@ export class Session implements WebTransport {
 				// to silently drop (which would desync the session).
 				if (typeof value === "string") {
 					const reason = "text frames are not valid for QMux";
-					this.#end({ clean: false, cause: new Error(reason), send: { code: 1003, reason } });
+					this.#end({
+						clean: false,
+						cause: new Error(reason),
+						send: { code: TransportCode.PROTOCOL_VIOLATION, reason },
+					});
 					return;
 				}
 				// `openWebSocketStream` normalizes the native API's ArrayBuffer chunks,
@@ -993,7 +1004,8 @@ export class Session implements WebTransport {
 		try {
 			if (usesRecords(this.#version)) {
 				if (BigInt(data.byteLength) > this.#ourParams.maxRecordSize) {
-					throw new Error(
+					throw new TransportError(
+						TransportCode.FRAME_ENCODING_ERROR,
 						`record exceeds our max_record_size (${data.byteLength} > ${this.#ourParams.maxRecordSize})`,
 					);
 				}
@@ -1008,7 +1020,10 @@ export class Session implements WebTransport {
 				// never do, so the initial value is what a peer may send. Each message
 				// is one frame here.
 				if (this.#version === "qmux-00" && data.byteLength > Frame.MAX_FRAME_SIZE) {
-					throw new Error(`frame exceeds max_frame_size (${data.byteLength} > ${Frame.MAX_FRAME_SIZE})`);
+					throw new TransportError(
+						TransportCode.FRAME_ENCODING_ERROR,
+						`frame exceeds max_frame_size (${data.byteLength} > ${Frame.MAX_FRAME_SIZE})`,
+					);
 				}
 				const frame = Frame.decode(data, this.#version);
 				if (frame !== null) {
@@ -1016,12 +1031,13 @@ export class Session implements WebTransport {
 				}
 			}
 		} catch (error) {
-			// A decode failure or a frame that violates a negotiated limit is fatal.
+			// A decode failure or a frame that violates a negotiated limit is fatal, closing
+			// with the QUIC transport error code the violation carries.
 			console.error("Protocol violation:", error);
 			this.#end({
 				clean: false,
 				cause: toError(error, "Protocol violation"),
-				send: { code: 1002, reason: "Protocol violation" },
+				send: { code: transportCode(error), reason: "Protocol violation" },
 			});
 		}
 	}
@@ -1117,7 +1133,10 @@ export class Session implements WebTransport {
 		// default minimum. Omitted values decode to the default, so only an explicit
 		// smaller value trips this (TRANSPORT_PARAMETER_ERROR).
 		if (usesRecords(this.#version) && params.maxRecordSize < Frame.DEFAULT_MAX_RECORD_SIZE) {
-			throw new Error("max_record_size below the default minimum");
+			throw new TransportError(
+				TransportCode.TRANSPORT_PARAMETER_ERROR,
+				"max_record_size below the default minimum",
+			);
 		}
 		this.#paramsReceived = true;
 		this.#peerParams = params;
@@ -1334,7 +1353,7 @@ export class Session implements WebTransport {
 	#openPeerStream(id: Stream.Id): StreamState & { recv: RecvStream } {
 		// Per QUIC RFC 9000 §4.6, the limit applies to the stream index.
 		const limit = this.#recvLimit(id.dir);
-		if (!limit.open(id.index)) throw new Error("stream limit exceeded");
+		if (!limit.open(id.index)) throw new TransportError(TransportCode.STREAM_LIMIT_ERROR, "stream limit exceeded");
 		this.#recvOpen(id.dir).record(id.index);
 
 		const bidi = id.dir === Stream.Dir.Bi;
@@ -1390,7 +1409,7 @@ export class Session implements WebTransport {
 		const id = frame.id;
 		const streamId = id.value.value;
 		if (!id.canRecv(this.#isServer)) {
-			throw new Error("Invalid stream ID direction");
+			throw new TransportError(TransportCode.STREAM_STATE_ERROR, "Invalid stream ID direction");
 		}
 
 		const recv = this.#streams.get(streamId)?.recv;
@@ -1403,7 +1422,8 @@ export class Session implements WebTransport {
 		if (!this.#isPeerStream(id)) {
 			// One of ours whose receive half already ended: a late frame, dropped.
 			// One we never opened is malformed (canRecv leaves only bidi here).
-			if (id.index >= this.#nextBiStreamId) throw new Error("STREAM frame for a stream we never opened");
+			if (id.index >= this.#nextBiStreamId)
+				throw new TransportError(TransportCode.STREAM_STATE_ERROR, "STREAM frame for a stream we never opened");
 			return;
 		}
 		// A peer stream whose receive half already ended stays closed.
@@ -1421,13 +1441,16 @@ export class Session implements WebTransport {
 		// A RESET_STREAM_AT frame (reliableSize present, draft-02) is only legal if
 		// we advertised the `reset_stream_at` transport parameter. Receiving it
 		// otherwise - or on an earlier draft, which never advertises it - is a
-		// PROTOCOL_VIOLATION. Plain RESET_STREAM is always allowed.
+		// FRAME_ENCODING_ERROR. Plain RESET_STREAM is always allowed.
 		if (frame.reliableSize !== undefined && !this.#ourParams.resetStreamAt) {
-			throw new Error("RESET_STREAM_AT received without advertising reset_stream_at");
+			throw new TransportError(
+				TransportCode.FRAME_ENCODING_ERROR,
+				"RESET_STREAM_AT received without advertising reset_stream_at",
+			);
 		}
 		const id = frame.id;
 		if (!id.canRecv(this.#isServer)) {
-			throw new Error("Invalid stream ID direction");
+			throw new TransportError(TransportCode.STREAM_STATE_ERROR, "Invalid stream ID direction");
 		}
 		if (this.#closed) return;
 
@@ -1443,7 +1466,8 @@ export class Session implements WebTransport {
 		if (!this.#isPeerStream(id)) {
 			// One of ours whose receive half already ended, unless we never opened it.
 			const opened = id.dir === Stream.Dir.Bi ? this.#nextBiStreamId : this.#nextUniStreamId;
-			if (id.index >= opened) throw new Error("RESET_STREAM for a stream we never opened");
+			if (id.index >= opened)
+				throw new TransportError(TransportCode.STREAM_STATE_ERROR, "RESET_STREAM for a stream we never opened");
 			return;
 		}
 		// A terminal peer stream stays terminal, so a duplicate RESET can't charge its final size twice.
@@ -1452,7 +1476,7 @@ export class Session implements WebTransport {
 		// A reset as the stream's first frame opens and closes it at once, and the
 		// application never sees it: charge its final size and return its slot.
 		const limit = this.#recvLimit(id.dir);
-		if (!limit.open(id.index)) throw new Error("stream limit exceeded");
+		if (!limit.open(id.index)) throw new TransportError(TransportCode.STREAM_LIMIT_ERROR, "stream limit exceeded");
 		this.#recvOpen(id.dir).record(id.index);
 		const size =
 			id.dir === Stream.Dir.Bi

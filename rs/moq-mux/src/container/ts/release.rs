@@ -5,15 +5,19 @@ use std::time::Duration;
 
 use kio::clock::Instant;
 
+use super::error::unsupported;
+use super::export;
+
 #[cfg(feature = "async")]
 use crate::catalog::CatalogFormat;
 use crate::catalog::Stream;
+use crate::catalog::hang::Catalog;
 use crate::container::consumer::Event;
 use crate::container::{ExportSource, Frame};
 use crate::jitter::{self, Arrival, Push};
 
-/// Writes the multiplex a broadcast's [`m2ts`](hang::catalog::M2ts) track carries back out
-/// byte-identical, each object a fixed delay after its PCR time, like an SRT receiver.
+/// Writes the multiplex a broadcast's [passthrough track](super::Mpegts::passthrough) carries
+/// back out byte-identical, each object a fixed delay after its PCR time, like an SRT receiver.
 ///
 /// The [importer](super::Passthrough) stamps each object, the packets from one PCR to the
 /// next, with the PCR time of its first byte on the catalog clock. The release holds every
@@ -26,8 +30,8 @@ use crate::jitter::{self, Arrival, Push};
 /// wait it out; the bytes carry the jump.
 pub struct Release {
 	source: crate::Source,
-	catalog: Option<crate::catalog::Consumer<()>>,
-	/// The `m2ts` track, once a catalog names it.
+	catalog: Option<crate::catalog::Consumer<super::Ext>>,
+	/// The passthrough track, once a catalog names it.
 	track: Option<(String, ExportSource)>,
 	/// When the track was subscribed. Nothing it delivers reached the release before then,
 	/// however long the cache held it.
@@ -41,18 +45,12 @@ pub struct Release {
 }
 
 impl Release {
-	/// Subscribe to the catalog of `source`, waiting for the `m2ts` section that names its track.
+	/// Subscribe to the catalog of `source`, in either format, waiting for the `mpegts` section to
+	/// name its passthrough track.
 	///
 	/// Each object is written `delay` after its PCR time; late objects are dropped.
-	///
-	/// Fails for [`CatalogFormat::Msf`], which has no `m2ts` section.
 	#[cfg(feature = "async")]
 	pub async fn new(source: crate::Source, catalog_format: CatalogFormat, delay: Duration) -> crate::Result<Self> {
-		if catalog_format == CatalogFormat::Msf {
-			return Err(
-				anyhow::anyhow!("the MSF catalog has no `m2ts` passthrough track; read the hang catalog").into(),
-			);
-		}
 		let mut subscribing = crate::catalog::Subscribing::new(&source.broadcast(), catalog_format);
 		let catalog = kio::wait(|waiter| subscribing.poll_ok(waiter)).await?;
 		let mut jitter = jitter::Buffer::new(delay);
@@ -156,7 +154,7 @@ impl Release {
 				let arrival = Arrival {
 					arrived: arrived.max(self.subscribed),
 					read: kio::clock::now(),
-					decode: frame.timestamp.into(),
+					decode: frame.timestamp.try_into()?,
 					restart: track.markers(),
 					// The output opens on a group, at a random access point; from then on every
 					// object goes out on its own, so one dropped late is a gap of its packets only.
@@ -185,33 +183,32 @@ impl Release {
 		}
 	}
 
-	/// Subscribe to the track the catalog's `m2ts` section names, the first time it names one.
-	fn update_catalog(&mut self, catalog: &crate::catalog::hang::Catalog<()>) -> crate::Result<()> {
-		let Some(m2ts) = &catalog.m2ts else {
+	/// Subscribe to the passthrough track the catalog names, the first time it names one.
+	fn update_catalog(&mut self, catalog: &Catalog<super::Ext>) -> crate::Result<()> {
+		let Some(passthrough) = &catalog.ext.mpegts.passthrough else {
 			if self.track.is_none() && !(catalog.video.renditions.is_empty() && catalog.audio.renditions.is_empty()) {
-				return Err(anyhow::anyhow!(
-					"the broadcast is demultiplexed, with no `m2ts` passthrough track to release"
-				)
-				.into());
+				return Err(
+					unsupported!("the broadcast is demultiplexed, with no passthrough track to release").into(),
+				);
 			}
 			return Ok(());
 		};
 		match &self.track {
 			None => {
-				let source = ExportSource::for_stream(
-					&self.source,
-					&m2ts.track,
-					moq_net::track::Delay::default().with_max(self.delay / 2),
-				)?;
+				let source =
+					ExportSource::for_stream(&self.source, &passthrough.track, export::subscribed(self.delay))?;
+				let source = export::skipping(source, self.delay);
 				let source = match self.replay {
 					true => source,
 					false => source.live(),
 				};
-				self.track = Some((m2ts.track.clone(), source));
+				self.track = Some((passthrough.track.clone(), source));
 				self.subscribed = kio::clock::now();
 			}
-			Some((name, _)) if *name != m2ts.track => {
-				return Err(anyhow::anyhow!("the `m2ts` track moved from `{name}` to `{}`", m2ts.track).into());
+			Some((name, _)) if *name != passthrough.track => {
+				return Err(
+					unsupported!("the passthrough track moved from `{name}` to `{}`", passthrough.track).into(),
+				);
 			}
 			Some(_) => {}
 		}

@@ -289,12 +289,6 @@ impl Connection {
 		}
 	}
 
-	/// The transport refused an incoming record larger than `max_record_size`, or a draft-00
-	/// frame larger than `max_frame_size`, rather than read it into memory
-	pub fn handle_oversized(&mut self) {
-		self.fail(self.oversized());
-	}
-
 	/// The transport found the peer violating its framing, such as overrunning a buffer it
 	/// bounds itself, so close with `err`
 	pub fn handle_violation(&mut self, err: TransportError) {
@@ -650,12 +644,15 @@ impl Connection {
 
 	fn process(&mut self, mut payload: Bytes, now: Instant) -> Result<(), TransportError> {
 		let size = payload.len();
-		let limit = match self.config.version.uses_records() {
-			true => self.config.max_record_size.into_inner(),
-			false => MAX_FRAME_SIZE as u64,
+		let (limit, oversized) = match self.config.version.uses_records() {
+			true => (
+				self.config.max_record_size.into_inner(),
+				"record exceeds max_record_size",
+			),
+			false => (MAX_FRAME_SIZE as u64, "frame exceeds max_frame_size"),
 		};
 		if size as u64 > limit {
-			return Err(self.oversized());
+			return Err(TransportError::FRAME_ENCODING_ERROR(oversized));
 		}
 		// What the record keeps allocated while a stream holds a slice of it, which bounds how
 		// much memory the peer's buffered data pins. A transport may slice records out of a
@@ -691,14 +688,6 @@ impl Connection {
 		}
 		self.streams.queue_max_stream_id(&mut self.pending);
 		Ok(())
-	}
-
-	/// The error for a record or draft-00 frame over its size limit
-	fn oversized(&self) -> TransportError {
-		match self.config.version.uses_records() {
-			true => TransportError::FRAME_ENCODING_ERROR("record exceeds max_record_size"),
-			false => TransportError::FRAME_ENCODING_ERROR("frame exceeds max_frame_size"),
-		}
 	}
 
 	/// End the connection over a violation, telling the peer with a CONNECTION_CLOSE, unless it

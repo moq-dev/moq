@@ -1,7 +1,7 @@
 //! Numbering a rendition's groups into HLS segments on the broadcast's join-interval grid.
 //!
 //! HLS numbers segments by position, so every edge and every reload has to derive the same
-//! consecutive numbers from timestamps alone. The catalog's `media.join.interval` fixes the
+//! consecutive numbers from timestamps alone. The catalog's `sync.interval` fixes the
 //! segment length, the smallest whole multiple of the interval that is at least [`MIN_SEGMENT`]
 //! (see [`segment_length`]), which draws a grid line at every multiple of that length in pts.
 //! Every rendition numbers its segments on it, so they share segment numbers while each cuts its
@@ -9,12 +9,19 @@
 //!
 //! A group spans from its first frame's pts to the next group's. It belongs to one segment: the
 //! first line it contains, so segment N starts at the group containing pts N × length; or, if it
-//! contains none, the line it starts after, `floor(pts / length)`. Groups are never split, since a
-//! segment starting mid-GOP is not independent. A grid slot no group starts a segment in, because
-//! an overrun or a pause skipped it, is listed as a gap, so the numbering never skips: on a 2s grid,
-//! a group A = [0s, 7s) is segment 0, slots 1 and 2 are gaps, and a contiguous B = [7s, 7.2s)
-//! starts segment 3. An edge joining at B derives that from B's and its successor's timestamps,
-//! without A.
+//! contains none, the line it starts after, `floor(pts / length)`. A group off the grid is placed
+//! once its successor starts, or sooner once one of its own frames passes the next line, since it
+//! then contains that line unless its successor overlaps it; the segment before it completes then,
+//! not a group later. A keyframe may overlap the previous group's last frames (a TS content join
+//! does), so when that overlap straddles a line, an edge that saw the earlier group lists it in the
+//! line's segment while one that joined at the overlapping group lists that segment without it.
+//! That one segment differs across edges, for that broadcast alone (accepted by the maintainer,
+//! 2026-11-15, for listing every off-grid segment up to a group sooner). Groups are never split,
+//! since a segment starting mid-GOP is not independent. A grid slot no group starts a
+//! segment in, because an overrun or a pause skipped it, is listed as a gap, so the numbering never
+//! skips: on a 2s grid, a group A = [0s, 7s) is segment 0, slots 1 and 2 are gaps, and a contiguous
+//! B = [7s, 7.2s) starts segment 3. An edge joining at B derives that from B's and its successor's
+//! timestamps, without A.
 //!
 //! A segment starts at its first group's pts, or at its line when that group starts after it, as
 //! a group resuming from a pause does, and a gap at its line; its `EXTINF` runs to the next
@@ -41,6 +48,68 @@ pub(crate) fn segment_length(interval: Duration) -> Duration {
 	Duration::from_nanos(u64::try_from(length).unwrap_or(u64::MAX))
 }
 
+/// A segment's groups, by start, oldest first.
+///
+/// Starts are timestamps, so the groups a segment holds are listed rather than spanned: the keys
+/// between two groups name none. A segment holding more groups than any request fetches (see
+/// [`Rendition::max_groups`](super::rendition::Rendition::max_groups)) is never served, so past
+/// that its groups are only counted: groups whose pts stalls in one segment cost no memory.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Groups {
+	starts: Vec<u64>,
+	/// The groups past [`MAX_LISTED`] it holds, counted rather than listed.
+	unlisted: usize,
+}
+
+/// The most starts a segment lists: one more than any request fetches.
+const MAX_LISTED: usize = super::rendition::MAX_SEGMENT_GROUPS as usize + 1;
+
+impl Groups {
+	/// The one group starting at `start`.
+	pub fn one(start: u64) -> Self {
+		Self {
+			starts: vec![start],
+			unlisted: 0,
+		}
+	}
+
+	/// The first group's start, or `None` for a gap.
+	pub fn first(&self) -> Option<u64> {
+		self.starts.first().copied()
+	}
+
+	/// The last group's start listed, or `None` for a gap.
+	pub fn last(&self) -> Option<u64> {
+		self.starts.last().copied()
+	}
+
+	/// How many groups the segment holds, listed or not.
+	pub fn len(&self) -> usize {
+		self.starts.len() + self.unlisted
+	}
+
+	/// The groups starting at or below `last`.
+	pub fn through(&self, last: u64) -> Self {
+		Self {
+			starts: self.starts.iter().copied().take_while(|start| *start <= last).collect(),
+			unlisted: 0,
+		}
+	}
+
+	/// Each group's start, oldest first.
+	pub fn starts(&self) -> std::vec::IntoIter<u64> {
+		self.starts.clone().into_iter()
+	}
+
+	/// Add a group starting after every one held, counting it once the list is full.
+	fn push(&mut self, start: u64) {
+		match self.starts.len() < MAX_LISTED {
+			true => self.starts.push(start),
+			false => self.unlisted += 1,
+		}
+	}
+}
+
 /// One segment the grid completed, oldest first.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Slot {
@@ -48,8 +117,8 @@ pub(crate) enum Slot {
 	Media {
 		/// The segment's number on the grid.
 		segment: u64,
-		/// Its groups, in sequence order: from its first group up to the next segment's.
-		groups: std::ops::Range<u64>,
+		/// Its groups, by start.
+		groups: Groups,
 		/// Its first group's pts.
 		pts: Timestamp,
 		/// Where its `EXTINF` starts: its first group's pts, or its line when that group starts
@@ -77,10 +146,11 @@ pub(crate) enum Slot {
 	Reset,
 }
 
-/// A group seen but not yet placed: placing it needs its end, the next group's pts.
+/// A group seen but not yet placed: placing it needs its end, the next group's pts, unless one of
+/// its frames passes the next line first.
 #[derive(Clone, Copy, Debug)]
 struct Group {
-	sequence: u64,
+	start: u64,
 	pts: Timestamp,
 }
 
@@ -88,7 +158,7 @@ struct Group {
 #[derive(Clone, Debug)]
 struct Open {
 	segment: u64,
-	groups: std::ops::Range<u64>,
+	groups: Groups,
 	pts: Timestamp,
 	/// Where a discontinuity marker after its last group stopped the content, if one did.
 	stop: Option<Timestamp>,
@@ -98,18 +168,18 @@ impl Open {
 	fn new(segment: u64, group: Group) -> Self {
 		Self {
 			segment,
-			groups: group.sequence..group.sequence + 1,
+			groups: Groups::one(group.start),
 			pts: group.pts,
 			stop: None,
 		}
 	}
 }
 
-/// Places one rendition's groups, fed in sequence order, into segments on a grid of one length.
+/// Places one rendition's groups, fed in start order, into segments on a grid of one length.
 pub(crate) struct Grid {
 	/// The segment length in nanoseconds, at least one.
 	length: u128,
-	/// The newest group, until the next one bounds it.
+	/// The newest group, until the next one bounds it or a frame past the next line places it.
 	pending: Option<Group>,
 	open: Option<Open>,
 	/// The newest group's pts, which the next must not precede.
@@ -143,13 +213,13 @@ impl Grid {
 	/// The segment a group starting at `pts` and ending at `end` belongs to, or `None` while it
 	/// needs an `end` it doesn't have.
 	pub fn segment(&self, pts: Timestamp, end: Option<Timestamp>) -> Option<u64> {
-		let pts = pts.as_nanos();
+		let pts = super::nanos(pts);
 		let slot = pts / self.length;
 		if pts.is_multiple_of(self.length) {
 			return Some(slot as u64);
 		}
 		let line = (slot + 1) * self.length;
-		let end = end?.as_nanos();
+		let end = super::nanos(end?);
 		Some(if end > line { slot + 1 } else { slot } as u64)
 	}
 
@@ -158,7 +228,7 @@ impl Grid {
 	/// group starts after its line may follow earlier groups of the same segment.
 	pub fn starts(&self, slot: &Slot) -> bool {
 		match slot {
-			Slot::Media { segment, pts, .. } => (*segment as u128).saturating_mul(self.length) >= pts.as_nanos(),
+			Slot::Media { segment, pts, .. } => (*segment as u128).saturating_mul(self.length) >= super::nanos(*pts),
 			Slot::Gap { .. } => true,
 			Slot::Reset => false,
 		}
@@ -170,15 +240,15 @@ impl Grid {
 	}
 
 	/// The groups of the open segment so far.
-	pub fn open_groups(&self) -> Option<std::ops::Range<u64>> {
+	pub fn open_groups(&self) -> Option<Groups> {
 		self.open.as_ref().map(|open| open.groups.clone())
 	}
 
 	/// The oldest group no completed segment holds: the open segment's first, else the group
 	/// waiting for its end.
 	pub fn unplaced(&self) -> Option<u64> {
-		let open = self.open.as_ref().map(|open| open.groups.start);
-		open.or(self.pending.map(|group| group.sequence))
+		let open = self.open.as_ref().and_then(|open| open.groups.first());
+		open.or(self.pending.map(|group| group.start))
 	}
 
 	/// Whether a segment waits to be completed: one is open, or a group waits for its end.
@@ -196,7 +266,11 @@ impl Grid {
 	/// line can exceed it.
 	fn start(&self, segment: u64, pts: Timestamp) -> Timestamp {
 		let line = self.line(segment);
-		if pts.as_nanos() > line.as_nanos() { line } else { pts }
+		if super::nanos(pts) > super::nanos(line) {
+			line
+		} else {
+			pts
+		}
 	}
 
 	/// The pts of line `segment`.
@@ -205,9 +279,9 @@ impl Grid {
 		Timestamp::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX)).unwrap_or(Timestamp::ZERO)
 	}
 
-	/// A group `sequence` starts at `pts`, after every group already fed. Returns the segments it
-	/// completes.
-	pub fn group(&mut self, sequence: u64, pts: Timestamp) -> Vec<Slot> {
+	/// The group keyed `start` has its first frame at `pts`, after every group already fed. Returns
+	/// the segments it completes.
+	pub fn group(&mut self, start: u64, pts: Timestamp) -> Vec<Slot> {
 		let mut out = Vec::new();
 		// A group starting before the one before it, even within one slot, can't share a segment
 		// or a numbering with what came before, since its media would run backwards.
@@ -220,13 +294,36 @@ impl Grid {
 			let segment = self.segment(pending.pts, Some(pts)).expect("bounded");
 			self.place(pending, segment, &mut out);
 		}
-		let group = Group { sequence, pts };
+		let group = Group { start, pts };
 		// A group starting on a line needs no end to place, so the segment before it completes now.
 		match self.segment(pts, None) {
 			Some(segment) => self.place(group, segment, &mut out),
 			None => self.pending = Some(group),
 		}
 		out
+	}
+
+	/// A frame of the newest group starts at `pts`. Once that is past the line after the group's
+	/// start, the group contains the line, so it is placed in that line's segment now rather than
+	/// when its successor starts: the same segment its successor's pts would give it, which starts
+	/// after all of its frames. Returns the segments it completes.
+	pub fn reach(&mut self, pts: Timestamp) -> Vec<Slot> {
+		let mut out = Vec::new();
+		let Some(pending) = self.pending else {
+			return out;
+		};
+		let slot = super::nanos(pending.pts) / self.length;
+		if super::nanos(pts) > (slot + 1) * self.length {
+			self.pending = None;
+			self.place(pending, slot as u64 + 1, &mut out);
+		}
+		out
+	}
+
+	/// Whether the newest group waits for its end to be placed, which [`reach`](Self::reach) may
+	/// settle early.
+	pub fn pending(&self) -> bool {
+		self.pending.is_some()
 	}
 
 	/// A discontinuity marker at `at` stopped the content: the newest group ends there rather than
@@ -258,7 +355,7 @@ impl Grid {
 			let end = [open.stop, end, reach]
 				.into_iter()
 				.flatten()
-				.find(|end| end.as_nanos() > open.pts.as_nanos())
+				.find(|end| super::nanos(*end) > super::nanos(open.pts))
 				.unwrap_or(open.pts);
 			out.push(Slot::Media {
 				segment: open.segment,
@@ -280,7 +377,7 @@ impl Grid {
 			return;
 		};
 		if segment == open.segment {
-			open.groups.end = group.sequence + 1;
+			open.groups.push(group.start);
 			// The content resumed within the segment, so it runs to whatever ends this group.
 			open.stop = None;
 			return;
@@ -319,6 +416,19 @@ impl Grid {
 mod test {
 	use super::*;
 
+	/// A segment that piles up more groups than any request fetches counts the rest, so its
+	/// memory stays bounded however long its groups' pts stalls, and it still reads as too long.
+	#[test]
+	fn an_overfull_segment_counts_its_groups_past_the_list() {
+		let mut groups = Groups::one(0);
+		for start in 1..(MAX_LISTED as u64 + 10) {
+			groups.push(start);
+		}
+		assert_eq!(groups.len(), MAX_LISTED + 10);
+		assert_eq!(groups.starts.len(), MAX_LISTED);
+		assert!(groups.len() as u64 > super::super::rendition::MAX_SEGMENT_GROUPS);
+	}
+
 	fn ms(ms: u64) -> Timestamp {
 		Timestamp::from_millis(ms).unwrap()
 	}
@@ -336,8 +446,18 @@ mod test {
 					start,
 					end,
 					..
-				} => (segment, groups, start.as_millis() as u64, end.as_millis() as u64),
-				Slot::Gap { segment, pts, end } => (segment, 0..0, pts.as_millis() as u64, end.as_millis() as u64),
+				} => (
+					segment,
+					groups.first().unwrap()..groups.last().unwrap() + 1,
+					start.as_millis().unwrap() as u64,
+					end.as_millis().unwrap() as u64,
+				),
+				Slot::Gap { segment, pts, end } => (
+					segment,
+					0..0,
+					pts.as_millis().unwrap() as u64,
+					end.as_millis().unwrap() as u64,
+				),
 				Slot::Reset => panic!("unexpected reset"),
 			})
 			.collect()
@@ -522,7 +642,21 @@ mod test {
 						slots.extend(grid.group(sequence as u64, ms(*start)));
 					}
 					slots.extend(grid.finish(Some(ms(end - 1)), Some(ms(end))));
+					// Frames read before the next group starts, in any order, list the same
+					// segments, only sooner.
+					let mut early = Grid::new(Duration::from_millis(length), 256);
+					let mut early_slots = Vec::new();
+					for (sequence, start) in starts.iter().enumerate().skip(join) {
+						early_slots.extend(early.group(sequence as u64, ms(*start)));
+						let until = starts.get(sequence + 1).copied().unwrap_or(end);
+						for _ in 0..3 {
+							early_slots.extend(early.reach(ms(start + next(until - start))));
+						}
+					}
+					early_slots.extend(early.finish(Some(ms(end - 1)), Some(ms(end))));
+					let early = listed(early_slots);
 					let listed = listed(slots);
+					assert_eq!(early, listed, "{interval} ms: {starts:?}");
 					for (index, (segment, _, start, end)) in listed.iter().enumerate() {
 						let extinf = end - start;
 						let fits = ((extinf as f64) / 1_000.0).round() as u64 <= target;
@@ -567,6 +701,35 @@ mod test {
 			[(1, 2..3, 2000, 3500)],
 			"3.5s reaches 4s"
 		);
+
+		// A frame past the next line settles the newest group without its successor.
+		let mut grid = Grid::new(Duration::from_secs(2), 256);
+		assert!(grid.group(0, ms(500)).is_empty());
+		assert!(
+			grid.reach(ms(1900)).is_empty(),
+			"short of the line, it may still end before it"
+		);
+		assert!(
+			grid.reach(ms(2000)).is_empty(),
+			"its successor may still start on the line"
+		);
+		assert!(
+			grid.reach(ms(2033)).is_empty(),
+			"it opens segment 1, which nothing completes yet"
+		);
+		assert!(!grid.pending());
+		assert!(grid.group(1, ms(2500)).is_empty());
+		assert_eq!(
+			listed(grid.reach(ms(4100))),
+			[(1, 0..1, 500, 2500)],
+			"listed at 4.1s rather than when group 2 starts at 4.5s"
+		);
+		assert!(grid.reach(ms(4200)).is_empty(), "already placed");
+		assert!(grid.group(2, ms(4500)).is_empty());
+		assert_eq!(
+			listed(grid.finish(Some(ms(5000)), Some(ms(5000)))),
+			[(2, 1..3, 2500, 5000)]
+		);
 	}
 
 	/// A long pause lists only the newest gaps, the ones a playlist window can still hold.
@@ -602,7 +765,7 @@ mod test {
 			slots
 				.into_iter()
 				.filter_map(|slot| match slot {
-					Slot::Media { content, .. } => Some(content.map(|at| at.as_millis() as u64)),
+					Slot::Media { content, .. } => Some(content.map(|at| at.as_millis().unwrap() as u64)),
 					_ => None,
 				})
 				.collect()

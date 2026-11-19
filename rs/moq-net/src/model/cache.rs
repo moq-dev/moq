@@ -725,16 +725,20 @@ pub(super) struct Track {
 	// account drops. Raw codec only: an Extra here would keep this account alive.
 	encoder: Mutex<Option<flate::Encoder>>,
 
-	// What this track's readers' records bill, how many bill anything, and the eviction debt
-	// the track could not pay itself, which those readers pay; see [`Reader`].
+	// What this track's readers' records bill, how many bill anything, the tail ledgers' bills,
+	// and the eviction debt the track could not pay itself, which those readers pay; see
+	// [`Reader`].
 	readers: Readers,
 }
 
 /// What a track's readers bill for their records, and the debt they owe.
 #[derive(Default)]
 struct Readers {
+	// Records only: the mean [`Reader::ends`] compares against, which a tail never skews.
 	bytes: AtomicU64,
 	count: AtomicU64,
+	// Tail ledgers: room for the debt like the records, but never one to end.
+	tails: AtomicU64,
 	debt: AtomicU64,
 }
 
@@ -760,11 +764,11 @@ impl Track {
 		}
 	}
 
-	/// Group `sequence` holds every frame it will have: a whole copy finished. A group name
+	/// Group `key` holds every frame it will have: a whole copy finished. A group name
 	/// fixes its content, so no legal write raises the largest past it.
-	pub(super) fn finish_largest(&self, sequence: u64) {
+	pub(super) fn finish_largest(&self, key: u64) {
 		let mut largest = self.largest.lock();
-		if largest.position.is_some_and(|position| position.group == sequence) {
+		if largest.position.is_some_and(|position| position.group == key) {
 			largest.open = false;
 		}
 	}
@@ -777,6 +781,24 @@ impl Track {
 	/// Whether the largest group's content may still grow; see [`Self::finish_largest`].
 	pub(super) fn largest_open(&self) -> bool {
 		self.largest.read().open
+	}
+
+	/// Whether `position` is the largest and its group ended there; see [`Self::finish_largest`].
+	pub(super) fn largest_finished(&self, position: Position) -> bool {
+		let largest = self.largest.read();
+		largest.position == Some(position) && !largest.open
+	}
+
+	/// The source reported `position` as its largest, its group ended there when `finished`.
+	pub(super) fn report_largest(&self, position: Position, finished: bool) {
+		let mut largest = self.largest.lock();
+		if largest.position.is_none_or(|current| position > current) {
+			largest.position = Some(position);
+			largest.open = true;
+		}
+		if finished && largest.position == Some(position) {
+			largest.open = false;
+		}
 	}
 
 	/// End the largest stream once the track ends: no newer frame can follow.
@@ -881,15 +903,15 @@ impl Track {
 		self.declared.load(Ordering::Acquire)
 	}
 
-	/// Watch every group the publisher cuts, rather than chosen sequences.
+	/// Watch every group the publisher cuts, rather than chosen keys.
 	pub(super) fn watch_cuts(&self) -> aborts::Watch {
 		self.aborts.get_or_init(Arc::default).watch_cuts()
 	}
 
-	/// Notify watchers that group `sequence` aborted, if the publisher cut it.
-	pub(super) fn aborted(&self, sequence: u64, cut: bool) {
+	/// Notify watchers that group `key` aborted, if the publisher cut it.
+	pub(super) fn aborted(&self, key: u64, cut: bool) {
 		if cut && let Some(aborts) = self.aborts.get() {
-			aborts.notify(sequence);
+			aborts.notify(key);
 		}
 	}
 
@@ -931,16 +953,28 @@ impl Track {
 		Reader {
 			track: self.clone(),
 			bytes: 0,
+			record: true,
+		}
+	}
+
+	/// Open an empty bill against this account for a subscription's tail ledger: it pays the
+	/// readers' debt by folding, but never ends, since a publisher's drops are final.
+	pub(super) fn tail(self: &Arc<Self>) -> Reader {
+		Reader {
+			track: self.clone(),
+			bytes: 0,
+			record: false,
 		}
 	}
 
 	/// Hand the part of `debt` this track could not pay to its readers, up to what their
-	/// records bill beyond what they already owe.
+	/// records and tails bill beyond what they already owe.
 	pub(super) fn owe_readers(&self, debt: &mut u64) {
 		let readers = &self.readers;
 		let mut shifted = 0;
 		let _ = readers.debt.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |owed| {
-			let room = readers.bytes.load(Ordering::Relaxed).saturating_sub(owed);
+			let billed = readers.bytes.load(Ordering::Relaxed) + readers.tails.load(Ordering::Relaxed);
+			let room = billed.saturating_sub(owed);
 			shifted = room.min(*debt);
 			(shifted > 0).then_some(owed + shifted)
 		});
@@ -1347,29 +1381,36 @@ impl Drop for Charge {
 	}
 }
 
-/// What one reader's record bills to its track's account, and its share of the debt the
-/// track could not pay. Released on drop.
-pub(super) struct Reader {
+/// What one reader's record, or one subscription's tail ledger, bills to its track's account,
+/// and its share of the debt the track could not pay. Released on drop.
+///
+/// Only a record can [`Self::ends`]; a tail pays by folding, so it stays out of the mean
+/// that decides which record to end.
+pub(crate) struct Reader {
 	track: Arc<Track>,
 	bytes: u64,
+	record: bool,
 }
 
 impl Reader {
 	/// Bill `bytes` in all, settling the track's debt after a growth: call with no track lock
 	/// held.
-	pub(super) fn set(&mut self, bytes: u64) {
+	pub(crate) fn set(&mut self, bytes: u64) {
 		if bytes == self.bytes {
 			return;
 		}
 		let readers = &self.track.readers;
-		match (self.bytes, bytes) {
-			(0, _) => readers.count.fetch_add(1, Ordering::Relaxed),
-			(_, 0) => readers.count.fetch_sub(1, Ordering::Relaxed),
-			_ => 0,
-		};
+		let billed = if self.record { &readers.bytes } else { &readers.tails };
+		if self.record {
+			match (self.bytes, bytes) {
+				(0, _) => readers.count.fetch_add(1, Ordering::Relaxed),
+				(_, 0) => readers.count.fetch_sub(1, Ordering::Relaxed),
+				_ => 0,
+			};
+		}
 		if bytes > self.bytes {
 			let grown = bytes - self.bytes;
-			readers.bytes.fetch_add(grown, Ordering::Relaxed);
+			billed.fetch_add(grown, Ordering::Relaxed);
 			self.track.pool.add(grown);
 			self.track.written.fetch_add(grown, Ordering::Relaxed);
 			self.bytes = bytes;
@@ -1377,7 +1418,7 @@ impl Reader {
 		} else {
 			// Whatever a record frees pays toward its readers' debt, however it shrank.
 			let shrunk = self.bytes - bytes;
-			readers.bytes.fetch_sub(shrunk, Ordering::Relaxed);
+			billed.fetch_sub(shrunk, Ordering::Relaxed);
 			let _ = readers.debt.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |debt| {
 				(debt > 0).then(|| debt.saturating_sub(shrunk))
 			});
@@ -1386,14 +1427,9 @@ impl Reader {
 		}
 	}
 
-	/// Bytes currently billed.
-	pub(super) fn size(&self) -> u64 {
-		self.bytes
-	}
-
 	/// The debt the track's readers owe, forgiven once the pool is back within its capacity:
 	/// nothing needs the room any more, as the track forgives its own debt.
-	pub(super) fn debt(&self) -> u64 {
+	pub(crate) fn debt(&self) -> u64 {
 		let readers = &self.track.readers;
 		let pool = &self.track.pool;
 		if pool.capacity().is_none_or(|capacity| pool.used() <= capacity) {
@@ -1409,8 +1445,17 @@ impl Reader {
 	pub(super) fn ends(&self) -> bool {
 		let readers = &self.track.readers;
 		let count = readers.count.load(Ordering::Relaxed);
-		self.bytes > ENTRY_OVERHEAD
+		self.record
+			&& self.bytes > ENTRY_OVERHEAD
 			&& u128::from(self.bytes) * u128::from(count) >= u128::from(readers.bytes.load(Ordering::Relaxed))
+	}
+}
+
+impl std::fmt::Debug for Reader {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Reader")
+			.field("bytes", &self.bytes)
+			.finish_non_exhaustive()
 	}
 }
 

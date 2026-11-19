@@ -93,10 +93,10 @@ impl Chain {
 	}
 
 	fn populate(&self) {
-		for sequence in 0..GROUPS {
-			let mut group = self.source.create_group(moq_net::group::Info { sequence }).unwrap();
+		for key in 0..GROUPS {
+			let mut group = self.source.create_group(moq_net::group::Info { start: key }).unwrap();
 			group
-				.write_frame(Timestamp::from_millis(sequence * 1000).unwrap(), &b"x"[..])
+				.write_frame(Timestamp::from_millis(key * 1000).unwrap(), &b"x"[..])
 				.unwrap();
 			group.finish().unwrap();
 		}
@@ -134,7 +134,7 @@ async fn received(subscriber: &mut track::Subscriber) -> BTreeSet<u64> {
 	let mut got = BTreeSet::new();
 	while let Ok(group) = kio::clock::timeout(Duration::from_secs(1), subscriber.recv_group()).await {
 		let group = group.unwrap().expect("the track is live");
-		assert!(got.insert(group.sequence), "group {} delivered twice", group.sequence);
+		assert!(got.insert(group.start), "group {} delivered twice", group.start);
 	}
 	got
 }
@@ -194,7 +194,7 @@ async fn a_tightened_start_leaves_history_fillable_by_an_intermediate_reader() {
 		let reading = kio::clock::sim::spawn(async move {
 			let mut got = BTreeSet::new();
 			while got.len() < 6 {
-				got.insert(intermediate.recv_group().await.unwrap().unwrap().sequence);
+				got.insert(intermediate.recv_group().await.unwrap().unwrap().start);
 			}
 			got
 		});
@@ -313,10 +313,10 @@ async fn wider_newcomers_after_the_first_pull_nothing_upstream() {
 		.route("live", moq_net::origin::RouteOptions::hidden())
 		.unwrap();
 	let source = broadcast.broadcast().create_track("video", timed()).unwrap();
-	for sequence in 0..GROUPS {
-		let mut group = source.create_group(moq_net::group::Info { sequence }).unwrap();
+	for key in 0..GROUPS {
+		let mut group = source.create_group(moq_net::group::Info { start: key }).unwrap();
 		group
-			.write_frame(Timestamp::from_millis(sequence * 1000).unwrap(), &b"x"[..])
+			.write_frame(Timestamp::from_millis(key * 1000).unwrap(), &b"x"[..])
 			.unwrap();
 		group.finish().unwrap();
 	}
@@ -374,10 +374,10 @@ async fn a_legacy_viewer_beating_a_relay_copy_joins_at_the_live_edge() {
 			.unwrap();
 		let source = route.broadcast().create_track("video", timed()).unwrap();
 		route.announce().unwrap();
-		for sequence in 0..GROUPS {
-			let mut group = source.create_group(moq_net::group::Info { sequence }).unwrap();
+		for key in 0..GROUPS {
+			let mut group = source.create_group(moq_net::group::Info { start: key }).unwrap();
 			group
-				.write_frame(Timestamp::from_millis(sequence * 1000).unwrap(), &b"x"[..])
+				.write_frame(Timestamp::from_millis(key * 1000).unwrap(), &b"x"[..])
 				.unwrap();
 			group.finish().unwrap();
 		}

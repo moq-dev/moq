@@ -1,10 +1,9 @@
 //! moq-lite datagrams: QUIC datagram bodies, and lite-07's request for a datagram track.
 //!
-//! A body is `subscribe (i) | sequence (i) | [timestamp (i)] | payload (b)`, with the
-//! timestamp present only when the subscription's track carries one (see
-//! [`Version::wire_timescale`]). Lite-07 prefixes it with type 0x0; type 0x1 is discarded
-//! padding. The payload runs to the datagram boundary, so unlike a [`super::Message`] there
-//! is no inner length prefix.
+//! A body is `subscribe (i) | sequence (i) | timestamp (i) | payload (b)`. Lite-07 prefixes it
+//! with type 0x0, its only datagram type.
+//! The payload runs to the datagram boundary, so unlike a [`super::Message`] there is no
+//! inner length prefix.
 //!
 //! On lite-05/06 a body is a single-frame group on a SUBSCRIBE subscription, its sequence
 //! the group's. On lite-07 it is a datagram of a datagram track, subscribed through a
@@ -29,9 +28,10 @@ pub struct Datagram {
 	pub subscribe: u64,
 	/// The datagram's sequence: its group's on lite-05/06, the datagram track's on lite-07.
 	pub sequence: u64,
-	/// Absolute presentation timestamp in the track's wire timescale, or `None` on a track
-	/// that carries no timestamps.
-	pub timestamp: Option<u64>,
+	/// Absolute presentation timestamp in the track's wire timescale. A scale-less track's
+	/// is the bare value its producer gave, which is the datagram's sequence (see
+	/// [`Version::wire_timescale`]).
+	pub timestamp: u64,
 	/// The payload, delimited by the datagram boundary.
 	pub payload: Bytes,
 }
@@ -42,19 +42,12 @@ impl Encode<Version> for Datagram {
 			return Err(EncodeError::Version);
 		}
 
-		// A version that always carries a timescale has no untimed body.
-		if self.timestamp.is_none() && version.wire_timescale(None).is_some() {
-			return Err(EncodeError::Version);
-		}
-
-		if version.has_padding() {
+		if version.has_datagram_tracks() {
 			w.varint(0x0)?;
 		}
 		w.varint(self.subscribe)?;
 		w.varint(self.sequence)?;
-		if let Some(timestamp) = self.timestamp {
-			w.varint(timestamp)?;
-		}
+		w.varint(self.timestamp)?;
 
 		// Payload runs to the datagram boundary: written raw, no length prefix.
 		w.slice(&self.payload);
@@ -66,43 +59,31 @@ impl Datagram {
 	/// The largest encoded datagram body a lite hop carries.
 	pub(super) const MAX_SIZE: usize = 1200;
 
-	/// Decode a datagram, or discard padding with `None`, without copying its payload.
+	/// Decode a datagram without copying its payload.
 	///
-	/// `timed` says whether the track of the given subscribe ID carries timestamps, which
-	/// the body itself does not.
-	pub(crate) fn decode(
-		buf: Bytes,
-		version: Version,
-		timed: impl FnOnce(u64) -> bool,
-	) -> Result<Option<Self>, DecodeError> {
+	/// An unknown lite-07 type is an error, so the caller discards it.
+	pub(crate) fn decode(buf: Bytes, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_datagrams() {
 			return Err(DecodeError::Version);
 		}
 
 		let mut r = Decoder::new(&buf, version.into());
-		if version.has_padding() {
-			match r.varint()? {
-				0x0 => (),
-				0x1 => return Ok(None),
-				_ => return Err(DecodeError::InvalidValue),
-			}
+		if version.has_datagram_tracks() && r.varint()? != 0x0 {
+			return Err(DecodeError::InvalidValue);
 		}
 		let subscribe = r.varint()?;
 		let sequence = r.varint()?;
-		let timestamp = match timed(subscribe) {
-			true => Some(r.varint()?),
-			false => None,
-		};
+		let timestamp = r.varint()?;
 
 		// Everything remaining is the payload (the datagram boundary delimits it).
 		let payload = buf.slice(buf.len() - r.remaining()..);
 
-		Ok(Some(Self {
+		Ok(Self {
 			subscribe,
 			sequence,
 			timestamp,
 			payload,
-		}))
+		})
 	}
 }
 
@@ -117,9 +98,9 @@ pub struct Datagrams<'a> {
 	pub broadcast: Path,
 	/// The instance the subscriber expects; see [`crate::origin::Route::instance`].
 	pub instance: Option<crate::Instance>,
-	/// The Node ID of the origin that serves the request, or 0 for whichever the
-	/// publisher selects.
-	pub node: u64,
+	/// The forwarding node whose claim the request follows, or `None` for whichever the
+	/// publisher selects. Lite07+ only.
+	pub node: Option<crate::route::NodeId>,
 	pub track: Cow<'a, str>,
 	/// The subscriber's priority.
 	pub priority: i8,
@@ -263,31 +244,16 @@ mod test {
 	use super::*;
 
 	#[test]
-	fn padding_needs_no_subscription() {
-		for mut body in [vec![1], vec![1; Datagram::MAX_SIZE], vec![0x80, 1, 0xff]] {
-			// Padding bytes need not be valid varints or any other structured encoding.
-			if body.len() == Datagram::MAX_SIZE {
-				body[1..].fill(0xff);
-			}
-			assert!(
-				Datagram::decode(body.into(), Version::Lite07, |_| panic!(
-					"padding must not look up a subscription"
-				))
-				.unwrap()
-				.is_none()
-			);
-		}
-	}
-
-	#[test]
 	fn invalid_types_never_reach_a_subscription() {
-		for body in [&[][..], &[0x80][..], &[2, 1, 2, 3][..], &[0xff; 9][..]] {
-			assert!(
-				Datagram::decode(Bytes::copy_from_slice(body), Version::Lite07, |_| panic!(
-					"invalid type must not look up a subscription"
-				))
-				.is_err()
-			);
+		// 0x0 is the only type.
+		for body in [
+			&[][..],
+			&[0x80][..],
+			&[1, 1, 2, 3][..],
+			&[2, 1, 2, 3][..],
+			&[0xff; 9][..],
+		] {
+			assert!(Datagram::decode(Bytes::copy_from_slice(body), Version::Lite07).is_err());
 		}
 	}
 
@@ -296,12 +262,12 @@ mod test {
 		let original = Datagram {
 			subscribe: 1,
 			sequence: 42,
-			timestamp: Some(1_000),
+			timestamp: 1_000,
 			payload: Bytes::from_static(b"hello"),
 		};
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
 			let buf = original.encode_bytes(version).unwrap();
-			let decoded = Datagram::decode(buf, version, |_| true).unwrap().unwrap();
+			let decoded = Datagram::decode(buf, version).unwrap();
 			assert_eq!(decoded, original);
 		}
 	}
@@ -313,7 +279,7 @@ mod test {
 		let dg = Datagram {
 			subscribe: 1,
 			sequence: 2,
-			timestamp: Some(3),
+			timestamp: 3,
 			payload: Bytes::from_static(b"world"),
 		};
 		let buf = dg.encode_bytes(Version::Lite05).unwrap();
@@ -322,30 +288,17 @@ mod test {
 	}
 
 	#[test]
-	fn untimed_omits_the_timestamp() {
+	fn a_scale_less_lite07_datagram_carries_its_bare_timestamp() {
+		// A scale-less track's timestamp is the producer's bare value, still on the wire.
 		let dg = Datagram {
 			subscribe: 1,
 			sequence: 2,
-			timestamp: None,
+			timestamp: 2,
 			payload: Bytes::from_static(b"world"),
 		};
 		let buf = dg.encode_bytes(Version::Lite07).unwrap();
-		assert_eq!(&buf[..], b"\x00\x01\x02world");
-		let decoded = Datagram::decode(buf, Version::Lite07, |id| {
-			assert_eq!(id, 1);
-			false
-		})
-		.unwrap()
-		.unwrap();
-		assert_eq!(decoded, dg);
-
-		// Lite-05/06 have no untimed body.
-		for version in [Version::Lite05, Version::Lite06] {
-			assert!(
-				matches!(dg.encode_bytes(version), Err(EncodeError::Version)),
-				"{version}"
-			);
-		}
+		assert_eq!(&buf[..], b"\x00\x01\x02\x02world");
+		assert_eq!(Datagram::decode(buf, Version::Lite07).unwrap(), dg);
 	}
 
 	#[test]
@@ -353,12 +306,12 @@ mod test {
 		let dg = Datagram {
 			subscribe: 1,
 			sequence: 2,
-			timestamp: Some(3),
+			timestamp: 3,
 			payload: Bytes::from_static(b"x"),
 		};
 		assert!(matches!(dg.encode_bytes(Version::Lite04), Err(EncodeError::Version)));
 		assert!(matches!(
-			Datagram::decode(Bytes::from_static(b"\x01\x02\x03x"), Version::Lite04, |_| true),
+			Datagram::decode(Bytes::from_static(b"\x01\x02\x03x"), Version::Lite04),
 			Err(DecodeError::Version)
 		));
 	}
@@ -369,7 +322,11 @@ mod test {
 			id: 7,
 			broadcast: Path::from_static("room/alice"),
 			instance: None,
-			node: 0x7a3f,
+			node: Some(crate::route::NodeId {
+				relay: 0x7a3f,
+				start: 9,
+				marked: false,
+			}),
 			track: "audio".into(),
 			priority: -3,
 		};
@@ -377,7 +334,14 @@ mod test {
 		let (decoded, _) = Datagrams::decode_slice(&buf, Version::Lite07).unwrap();
 		assert_eq!(decoded.id, 7);
 		assert_eq!(decoded.broadcast, request.broadcast);
-		assert_eq!(decoded.node, 0x7a3f);
+		assert_eq!(
+			decoded.node,
+			Some(crate::route::NodeId {
+				relay: 0x7a3f,
+				start: 9,
+				marked: false,
+			})
+		);
 		assert_eq!(decoded.track, "audio");
 		assert_eq!(decoded.priority, -3);
 		assert!(matches!(

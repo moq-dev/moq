@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { Duration, type Installed } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { type Group, Time, Track, Varint } from "@moq/net";
+import { AudioConfigSchema } from "../catalog/audio.ts";
 import { Consumer } from "./consumer.ts";
 import { Format as LegacyFormat } from "./legacy.ts";
 
@@ -59,14 +60,14 @@ test("Consumer waits on a non-sequential hang group because it has no per-frame 
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(track.subscribe(), {
 		format: new LegacyFormat("data"),
-		delay: { max: Duration.millis(5000) },
+		delay: { min: null, max: Duration.millis(5000) },
 	});
 
 	// Group A at a large sequence, completed so the cursor advances past it.
 	const a = track.createGroup(1_000_000n);
 	a.writeFrame({
 		payload: encodeLegacyFrame(0, new Uint8Array([0x01])),
-		timestamp: Time.Timestamp.now(),
+		timestamp: Time.Timestamp.fromMicros(0),
 	});
 	a.finish();
 
@@ -83,7 +84,7 @@ test("Consumer waits on a non-sequential hang group because it has no per-frame 
 	const b = track.createGroup(1_090_000n);
 	b.writeFrame({
 		payload: encodeLegacyFrame(1_000_000, new Uint8Array([0x02])),
-		timestamp: Time.Timestamp.now(),
+		timestamp: Time.Timestamp.fromMicros(1_000_000),
 	});
 
 	// Within the max delay budget (5s), the parked next() stays parked: no duration means no proof of
@@ -107,7 +108,7 @@ test("Consumer reads on without a gap past a group it skipped", async () => {
 		for (const timestamp of timestamps) {
 			group.writeFrame({
 				payload: encodeLegacyFrame(timestamp, new Uint8Array([0x01])),
-				timestamp: Time.Timestamp.now(),
+				timestamp: Time.Timestamp.fromMicros(timestamp),
 			});
 		}
 	};
@@ -129,6 +130,45 @@ test("Consumer reads on without a gap past a group it skipped", async () => {
 	await clock.advance(Duration.ZERO);
 	const next = await poll(consumer.next());
 	expect(next).toMatchObject({ kind: "frame", group: 20n });
+
+	consumer.close();
+	track.finish();
+	track.close();
+});
+
+// Legacy frames carry no duration, so an audio reader reads each packet's from its codec. One-packet
+// groups sequenced by their starts, as a Rust publisher numbers them, then run back to back without
+// waiting on the sequences between them, while a missing one is still a gap.
+test("Consumer reads one-packet Opus groups at sparse sequences back to back", async () => {
+	const track = new Track.Producer("test");
+	const config = AudioConfigSchema.parse({
+		codec: "opus",
+		container: { kind: "legacy" },
+		sampleRate: 48_000,
+		numberOfChannels: 2,
+	});
+	const consumer = new Consumer(track.subscribe(), {
+		format: new LegacyFormat(config),
+		delay: { min: null, max: Duration.millis(5000) },
+	});
+	// One 20 ms CELT packet per group, each read before the next lands. The group starting at 40 ms
+	// never arrives.
+	const packet = new Uint8Array([31 << 3, 0]);
+	const publish = (start: number) => {
+		const group = track.createGroup(BigInt(start));
+		group.writeFrame({ payload: encodeLegacyFrame(start, packet), timestamp: Time.Timestamp.fromMicros(start) });
+		group.finish();
+	};
+
+	publish(0);
+	expect(await poll(consumer.next())).toMatchObject({ kind: "frame", group: 0n });
+	const next = consumer.next();
+	publish(20_000);
+	expect(await poll(next)).toMatchObject({ kind: "frame", group: 20_000n });
+	// Nothing proves the timeline unbroken past 40 ms, so the reader waits on the missing group.
+	const after = consumer.next();
+	publish(60_000);
+	expect(await poll(after)).toBe("pending");
 
 	consumer.close();
 	track.finish();

@@ -92,8 +92,8 @@ pub struct Config {
 	/// but only one live microphone can attach to it; another open returns
 	/// [`Error::Busy`].
 	///
-	/// Requires the `aec` feature.
-	#[cfg(feature = "aec")]
+	/// Requires the `playback` feature.
+	#[cfg(all(feature = "capture", feature = "playback"))]
 	pub aec: Option<crate::aec::Control>,
 }
 
@@ -414,7 +414,7 @@ impl Microphone {
 		// first callback arrives, so the buffers it needs are allocated off the
 		// audio thread. The attachment moves into the callback writer and releases
 		// automatically when this stream tears down.
-		#[cfg(feature = "aec")]
+		#[cfg(all(feature = "capture", feature = "playback"))]
 		let aec = config
 			.aec
 			.as_ref()
@@ -424,7 +424,7 @@ impl Microphone {
 		let (mut writer, rx) = buffer::channel(
 			channels as usize,
 			sample_rate,
-			#[cfg(feature = "aec")]
+			#[cfg(all(feature = "capture", feature = "playback"))]
 			aec,
 		);
 		let error_tx = kio::Producer::new(None);
@@ -436,29 +436,29 @@ impl Microphone {
 		let mut clock = StreamClock::default();
 		let stream = match sample_format {
 			cpal::SampleFormat::F32 => {
-				let errors = error_tx.clone();
+				let (errors, gap) = (error_tx.clone(), writer.gap());
 				device.build_input_stream(
 					stream_config,
 					move |data: &[f32], info| writer.write_f32(data, clock.capture(info, Instant::now())),
-					move |err| stream_err(&errors, err),
+					move |err| stream_err(&errors, &gap, err),
 					None,
 				)
 			}
 			cpal::SampleFormat::I16 => {
-				let errors = error_tx.clone();
+				let (errors, gap) = (error_tx.clone(), writer.gap());
 				device.build_input_stream(
 					stream_config,
 					move |data: &[i16], info| writer.write_i16(data, clock.capture(info, Instant::now())),
-					move |err| stream_err(&errors, err),
+					move |err| stream_err(&errors, &gap, err),
 					None,
 				)
 			}
 			cpal::SampleFormat::U16 => {
-				let errors = error_tx.clone();
+				let (errors, gap) = (error_tx.clone(), writer.gap());
 				device.build_input_stream(
 					stream_config,
 					move |data: &[u16], info| writer.write_u16(data, clock.capture(info, Instant::now())),
-					move |err| stream_err(&errors, err),
+					move |err| stream_err(&errors, &gap, err),
 					None,
 				)
 			}
@@ -787,9 +787,13 @@ impl StreamClock {
 	}
 }
 
-fn stream_err(errors: &kio::Producer<Option<cpal::Error>>, err: cpal::Error) {
+/// End capture on a fatal stream error. One the stream survives, such as an overrun, may still
+/// have lost audio, so the next buffer carries a gap rather than closing over the loss: encoding
+/// straight across it would shift every later sample earlier by what was lost.
+fn stream_err(errors: &kio::Producer<Option<cpal::Error>>, gap: &buffer::Gap, err: cpal::Error) {
 	if survivable(err.kind()) {
 		tracing::warn!(error = %err, "microphone stream error does not require a restart");
+		gap.mark();
 		return;
 	}
 
@@ -869,7 +873,7 @@ mod tests {
 		let (tx, rx) = buffer::channel(
 			1,
 			48_000,
-			#[cfg(feature = "aec")]
+			#[cfg(all(feature = "capture", feature = "playback"))]
 			None,
 		);
 		let failures = kio::Producer::new(None);
@@ -880,6 +884,7 @@ mod tests {
 	fn fail(errors: &kio::Producer<Option<cpal::Error>>, message: &'static str) {
 		stream_err(
 			errors,
+			&buffer::Gap::default(),
 			cpal::Error::with_message(cpal::ErrorKind::DeviceNotAvailable, message),
 		);
 	}
@@ -924,8 +929,34 @@ mod tests {
 	#[test]
 	fn survivable_errors_do_not_end_the_stream() {
 		let (_samples, errors, _reader) = reader();
-		stream_err(&errors, cpal::Error::new(cpal::ErrorKind::DeviceChanged));
+		stream_err(
+			&errors,
+			&buffer::Gap::default(),
+			cpal::Error::new(cpal::ErrorKind::DeviceChanged),
+		);
 
+		assert!(errors.read().is_none());
+	}
+
+	/// An overrun the host recovered from lost audio between callbacks, so the next buffer says so
+	/// and the encode re-anchors rather than closing over the loss.
+	#[tokio::test]
+	async fn a_survived_overrun_marks_the_next_buffer_as_a_gap() {
+		let (mut samples, errors, mut reader) = reader();
+		samples.write_f32(&[1.0], None);
+		stream_err(&errors, &samples.gap(), cpal::Error::new(cpal::ErrorKind::Xrun));
+		samples.write_f32(&[2.0], None);
+		samples.write_f32(&[3.0], None);
+
+		let gaps: Vec<bool> = [
+			reader.read().await.unwrap().unwrap(),
+			reader.read().await.unwrap().unwrap(),
+			reader.read().await.unwrap().unwrap(),
+		]
+		.iter()
+		.map(|samples| samples.gap)
+		.collect();
+		assert_eq!(gaps, [false, true, false]);
 		assert!(errors.read().is_none());
 	}
 

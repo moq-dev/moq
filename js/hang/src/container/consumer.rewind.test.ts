@@ -14,8 +14,14 @@ beforeEach(() => {
 });
 afterEach(() => installed.close());
 
+// A track at hang's microsecond timescale, as `trackInfo` pins it: each group starts at its first
+// frame's timestamp. No publisher max age, so a reader reaches superseded groups.
+function micro(): Track.Producer {
+	return new Track.Producer("rewind").accept({ timescale: Time.Timescale.MICRO, maxAge: null });
+}
+
 function setup() {
-	const track = new Track.Producer("rewind");
+	const track = micro();
 	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(30_000) } }), {
 		format: new Format("video"),
 		delay: { max: Duration.millis(30_000) },
@@ -24,7 +30,7 @@ function setup() {
 }
 
 function group(track: Track.Producer, timestamps: number[], end?: number) {
-	const group = track.appendGroup();
+	const group = track.appendGroup(Time.Timestamp.fromMicros(timestamps[0]));
 	for (const timestamp of timestamps) {
 		group.writeFrame({
 			timestamp: Time.Timestamp.fromMicros(timestamp),
@@ -74,7 +80,8 @@ for (const start of [16_000, 0]) {
 			expect((await frame(consumer))?.group).toBe(0n);
 			await frame(consumer);
 			producer.encode(new Uint8Array([1]), Duration.micros(start), true);
-			expect((await frame(consumer))?.group).toBe(1n);
+			// A keyframe that doesn't start past the open group continues it.
+			expect((await frame(consumer))?.group).toBe(BigInt(start));
 		} finally {
 			consumer.close();
 			producer.finish();
@@ -103,7 +110,7 @@ test("Consumer rejects a later frame below the previous group start", async () =
 	try {
 		group(track, [100_000]);
 		await frame(consumer);
-		const current = track.appendGroup();
+		const current = track.appendGroup(Time.Timestamp.fromMicros(200_000));
 		current.writeFrame({
 			timestamp: Time.Timestamp.fromMicros(200_000),
 			payload: encodeFrame(new Uint8Array([1]), Duration.micros(200_000)),
@@ -122,7 +129,7 @@ test("Consumer rejects a later frame below the previous group start", async () =
 });
 
 test("Producer refuses a rewind before closing the current group", () => {
-	const track = new Track.Producer("rewind");
+	const track = micro();
 	const producer = new Producer(track, new Format("video"));
 	try {
 		producer.encode(new Uint8Array([1]), Duration.micros(100_000), true);

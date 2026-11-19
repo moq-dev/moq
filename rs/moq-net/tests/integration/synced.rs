@@ -5,6 +5,7 @@
 //! on the answer, as a best effort, on the rest.
 
 use std::collections::BTreeSet;
+use std::task::Poll;
 use std::time::Duration;
 
 use moq_net::{Version, origin};
@@ -12,8 +13,9 @@ use moq_net::{Version, origin};
 use crate::support;
 use support::harness::{MockConnectOptions, connect_mock};
 
-/// Long enough, in virtual time, for anything in flight to reach the far side.
-const SETTLE: Duration = Duration::from_secs(1);
+/// Long enough, in virtual time, for anything in flight to reach the far side, past
+/// the time a claim no route reaches is shown unavailable.
+const SETTLE: Duration = Duration::from_secs(2);
 
 fn produce_origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
@@ -22,32 +24,37 @@ fn produce_origin(hop: u64) -> origin::Producer {
 }
 
 /// Read events until the consumer syncs, returning the prefixes then announced.
+/// Sync is checked whenever no event is ready, so a consumer that syncs early is
+/// caught at that moment rather than at the next event.
 async fn read_until_synced(announced: &mut origin::Routes) -> BTreeSet<String> {
 	let mut seen = BTreeSet::new();
-	while !announced.poll_synced(&kio::Waiter::noop()).is_ready() {
-		let event = kio::clock::timeout(SETTLE, announced.next())
-			.await
-			.expect("synced in time")
-			.expect("the cursor stays open");
-		match event {
-			origin::RouteEvent {
-				kind: origin::RouteKind::Start | origin::RouteKind::Restart,
-				announce,
-			} => {
-				seen.insert(announce.prefix.to_string());
+	let read = kio::wait(|waiter| {
+		loop {
+			let event = match announced.poll_next(waiter) {
+				Poll::Ready(event) => event.expect("the cursor stays open"),
+				Poll::Pending => return announced.poll_synced(waiter),
+			};
+			match event {
+				origin::RouteEvent {
+					kind: origin::RouteKind::Start | origin::RouteKind::Restart,
+					announce,
+				} => {
+					seen.insert(announce.prefix.to_string());
+				}
+				origin::RouteEvent {
+					kind: origin::RouteKind::End | origin::RouteKind::Offline,
+					announce,
+				} => {
+					seen.remove(announce.prefix.as_str());
+				}
+				origin::RouteEvent {
+					kind: origin::RouteKind::Update,
+					..
+				} => {}
 			}
-			origin::RouteEvent {
-				kind: origin::RouteKind::End | origin::RouteKind::Offline,
-				announce,
-			} => {
-				seen.remove(announce.prefix.as_str());
-			}
-			origin::RouteEvent {
-				kind: origin::RouteKind::Update,
-				..
-			} => {}
 		}
-	}
+	});
+	kio::clock::timeout(SETTLE, read).await.expect("synced in time");
 	seen
 }
 
@@ -123,6 +130,51 @@ async fn a_second_session_catches_up() {
 	kio::clock::sleep(SETTLE).await;
 	read_until_synced(&mut announced).await;
 	drop(second);
+}
+
+/// A cut session's claim is shown unavailable, then let go. A session redialed after
+/// that tells the claim again, and the consumer stays unsynced until it is in: synced
+/// still means every route the peer announced is shown.
+#[kio::test]
+async fn a_redial_syncs_once_its_claims_are_in() {
+	let publisher = produce_origin(1);
+	let a = publisher.route("a", moq_net::origin::RouteOptions::hidden()).unwrap();
+	a.announce().unwrap();
+
+	let subscriber = produce_origin(2);
+	let connect = || {
+		let mut options = MockConnectOptions::new("moq-lite-07-wip".parse::<Version>().unwrap());
+		options.server_publish = Some(publisher.consume());
+		options.client_subscribe = Some(subscriber.clone());
+		connect_mock(options)
+	};
+	let first = connect().await;
+	let mut announced = subscriber.consume().routes();
+	assert_eq!(
+		read_until_synced(&mut announced).await,
+		BTreeSet::from(["a".to_string()])
+	);
+
+	first.client.abort(moq_net::Error::Cancel);
+	first.server.abort(moq_net::Error::Cancel);
+	let gone = kio::clock::timeout(SETTLE, async {
+		loop {
+			let event = announced.next().await.expect("the cursor stays open");
+			match event.kind {
+				origin::RouteKind::Update => assert!(!event.announce.route.available(), "{event:?}"),
+				_ => break event,
+			}
+		}
+	})
+	.await
+	.expect("let go in time");
+	assert_eq!(gone.kind, origin::RouteKind::Offline);
+
+	let _second = connect().await;
+	assert_eq!(
+		read_until_synced(&mut announced).await,
+		BTreeSet::from(["a".to_string()])
+	);
 }
 
 /// A cold relay's empty set is complete before an upstream joins it.

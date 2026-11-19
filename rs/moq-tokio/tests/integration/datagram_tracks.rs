@@ -136,8 +136,8 @@ async fn run(relay: bool, js_publishes: bool) {
 		for ((sequence, micros, payload), got) in AUDIO.into_iter().zip(got) {
 			assert_eq!(got.sequence, sequence, "audio sequence");
 			assert_eq!(
-				got.timestamp.map(|t| t.as_micros()),
-				Some(micros.into()),
+				got.timestamp.as_micros().unwrap(),
+				u128::from(micros),
 				"audio timestamp"
 			);
 			assert_eq!(got.payload, payload, "audio payload");
@@ -149,14 +149,18 @@ async fn run(relay: bool, js_publishes: bool) {
 		got.sort_by_key(|datagram| datagram.sequence);
 		for ((sequence, payload), got) in EVENTS.into_iter().zip(got) {
 			assert_eq!(got.sequence, sequence, "events sequence");
-			assert_eq!(got.timestamp, None, "an untimed datagram has no timestamp");
+			assert_eq!(
+				got.timestamp,
+				Timestamp::unscaled(sequence),
+				"a scale-less datagram is stamped with its sequence"
+			);
 			assert_eq!(got.payload, payload, "events payload");
 		}
 		let mut group = track.recv_group().await.unwrap().expect("stream track ended early");
 		let frame = group.read_frame().await.unwrap().expect("group ended early");
 		assert_eq!(
-			frame.timestamp.map(|t| t.as_millis()),
-			Some(FRAME.0.into()),
+			frame.timestamp.as_millis().unwrap(),
+			u128::from(FRAME.0),
 			"frame timestamp"
 		);
 		assert_eq!(frame.payload, FRAME.1, "frame payload");
@@ -209,7 +213,7 @@ async fn run(relay: bool, js_publishes: bool) {
 			audio
 				.insert(datagram::Datagram {
 					sequence,
-					timestamp: Some(Timestamp::from_micros(micros).unwrap()),
+					timestamp: Timestamp::from_micros(micros).unwrap(),
 					payload: Bytes::from_static(payload),
 				})
 				.unwrap();
@@ -218,7 +222,7 @@ async fn run(relay: bool, js_publishes: bool) {
 			events
 				.insert(datagram::Datagram {
 					sequence,
-					timestamp: None,
+					timestamp: Timestamp::unscaled(sequence),
 					payload: Bytes::from_static(payload),
 				})
 				.unwrap();

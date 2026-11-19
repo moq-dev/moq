@@ -145,8 +145,9 @@ impl Metrics for Untracked {}
 ///
 /// A session's ingest stops reading a group's stream while the group's fastest reader is far
 /// behind, so flow control pushes back to the publisher. Such a paused stream keeps up to
-/// `stream` bytes counted against the shared `connection` window, so the session pauses only
-/// as many streams as fit in half of it; the rest keep reading. See
+/// `stream` bytes it has not read, plus what it read of a frame's unsealed segment, counted
+/// against the shared `connection` window, so the session pauses only as many streams as fit
+/// in half of it; the rest keep reading. See
 /// [`poll::Session::receive_window`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -399,17 +400,6 @@ pub mod poll {
 			Err(super::LimitsError::Unsupported)
 		}
 
-		/// Export 32 bytes of keying material from this session's handshake under `label` and
-		/// `context` (RFC 8446 section 7.5), or `None` when the transport has no exporter.
-		///
-		/// Both ends of one session export the same bytes, and no other session does.
-		/// WebTransport derives them per session as its draft specifies, since other sessions
-		/// may share the connection.
-		fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
-			let _ = (label, context);
-			None
-		}
-
 		/// Accept the next unidirectional stream opened by the peer.
 		fn accept_uni(&self) -> AcceptUni<'_, Self> {
 			AcceptUni::new(self)
@@ -618,10 +608,6 @@ pub mod poll {
 		fn set_limits(&self, limits: super::Limits) -> Result<(), super::LimitsError> {
 			(**self).set_limits(limits)
 		}
-
-		fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
-			(**self).export_keying_material(label, context)
-		}
 	}
 
 	/// A transport that the async client and server can box:
@@ -631,12 +617,18 @@ pub mod poll {
 	/// Boxing is what compiles the session code once per binary rather than once per
 	/// transport.
 	pub trait Boxable:
-		Session<SendStream: Send + Sync + SendStream<Group: Send + Sync>, RecvStream: Send + Sync> + Send + Sync
+		Session<SendStream: Send + Sync + SendStream<Group: Send + Sync, Offset: Send + Sync>, RecvStream: Send + Sync>
+		+ Send
+		+ Sync
 	{
 	}
 
 	impl<S> Boxable for S where
-		S: Session<SendStream: Send + Sync + SendStream<Group: Send + Sync>, RecvStream: Send + Sync> + Send + Sync
+		S: Session<
+				SendStream: Send + Sync + SendStream<Group: Send + Sync, Offset: Send + Sync>,
+				RecvStream: Send + Sync,
+			> + Send
+			+ Sync
 	{
 	}
 
@@ -698,6 +690,26 @@ pub mod poll {
 
 		/// The transport's send group, [`Ungrouped`] for a transport without them.
 		type Group: SendGroup;
+
+		/// A position in the stream, minted only by [`offset`](Self::offset), for
+		/// [`poll_acked`](Self::poll_acked). `()` for a transport that cannot see acknowledgments.
+		type Offset: 'static;
+
+		/// The position just past every byte written so far.
+		fn offset(&self) -> Self::Offset;
+
+		/// Poll until every byte below `offset` reaches the peer unless the session fails.
+		///
+		/// That is once the peer acknowledged them, or, over a reliable link such as qmux's TCP,
+		/// once the link took them, so a reset can no longer discard them. Errors once those
+		/// bytes can never get there: the stream was reset by either side or the session closed.
+		/// Bytes already acknowledged stay so after a reset or stop. The default, for a transport
+		/// that cannot see acknowledgments, is ready at once: the bytes it took are all it knows.
+		/// An offset minted by another stream may panic.
+		fn poll_acked(&self, waiter: &kio::Waiter, offset: &Self::Offset) -> Poll<Result<(), Self::Error>> {
+			let _ = (waiter, offset);
+			Poll::Ready(Ok(()))
+		}
 
 		/// Poll to write some of the buffer to the stream, returning how many bytes were
 		/// written. See [`poll_write_buf`](Self::poll_write_buf) for the partial-write
@@ -771,35 +783,6 @@ pub mod poll {
 		/// Some implementations do not support FIN acknowledgement, in which case this
 		/// resolves once the FIN is sent.
 		fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Self::Error>>;
-
-		/// Whether the peer has acknowledged every byte written so far, or `None` when the
-		/// transport cannot tell, as a browser's WebTransport cannot.
-		///
-		/// A transport answers for all of its streams or for none. A stream that was reset, or
-		/// that the peer stopped, is never acknowledged.
-		fn acknowledged(&self) -> Option<bool> {
-			None
-		}
-
-		/// How many leading bytes written to this stream the transport delivered, counting each
-		/// once however often it was retransmitted, or `None` when it cannot tell.
-		///
-		/// Delivered means the peer acknowledged it, or on a reliable link such as qmux's, that
-		/// the link took it. It only grows while the stream lives; after a reset it may stop
-		/// answering. Egress stats bill a frame's bytes only once delivered, and fall back to the
-		/// bytes the stream took when this is `None`.
-		fn delivered(&self) -> Option<u64> {
-			None
-		}
-
-		/// Resolves once the transport delivered every byte written so far, so a caller
-		/// tracking [`Self::delivered`] learns of progress without polling for it. It may
-		/// resolve without progress, and stays pending once nothing more will be delivered, as
-		/// after a reset. Never resolves by default.
-		fn poll_delivered(&self, waiter: &kio::Waiter) -> Poll<()> {
-			let _ = waiter;
-			Poll::Pending
-		}
 
 		/// Write some of the buffer, returning how many bytes were accepted.
 		fn write<'a>(&'a mut self, buf: &'a [u8]) -> Write<'a, Self> {

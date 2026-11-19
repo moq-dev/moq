@@ -12,7 +12,7 @@ use crate::producer::MoqTrackInfo;
 fn raw_frame(frame: moq_net::frame::Frame) -> MoqFrame {
 	MoqFrame {
 		payload: frame.payload.to_vec(),
-		timestamp: frame.timestamp.map(Into::into),
+		timestamp: frame.timestamp.into(),
 	}
 }
 
@@ -24,11 +24,14 @@ fn raw_frame(frame: moq_net::frame::Frame) -> MoqFrame {
 /// an omitted one to zero, and a bare C or C++ record leaves both unset.
 #[derive(Clone, Copy, Debug, uniffi::Record)]
 pub struct MoqDelay {
-	/// The target latency: the playout or jitter-buffer delay held behind the live edge, and
-	/// where a cold join starts, or null to leave it unstated. A media consumer plays an
-	/// unstated minimum as zero, while the subscription keeps it unstated, so it never pulls
-	/// the aggregate across subscribers to zero. moq-lite-07 sends it upstream. A `min` past
-	/// `max` starts at `max`, since the publisher serves nothing older.
+	/// The target latency: the playout or jitter-buffer delay held behind the live edge, where
+	/// a cold join starts, and how long a media consumer waits for a missing group, or null to
+	/// leave it unstated. A media consumer starts an unstated minimum as zero and waits a
+	/// missing group for `max` instead (an audio decoder floors it at zero and waits only its
+	/// playout estimate, which can be larger), while the subscription keeps it unstated, so it
+	/// never pulls the aggregate across subscribers to zero, unless a catalog warmup or an
+	/// audio decoder's playout delay states one. moq-lite-07 sends it upstream. A `min`
+	/// past `max` starts and waits at `max`, since the publisher serves nothing older.
 	pub min: Option<Duration>,
 	/// How far a non-latest group may fall behind the live edge before it is skipped, or null
 	/// for no subscriber limit, leaving the publisher's max age alone to bound it. `0` skips
@@ -95,15 +98,14 @@ pub fn moq_subscription_defaults() -> MoqSubscription {
 	}
 }
 
-/// A span of a track to deliver: from `start` up to `end`, or onward when `end` is null.
+/// A span of a track to deliver: from `start` through `end`, or onward when `end` is null.
 ///
-/// A relative or time start is the first frame of its group, and a relative or time end
-/// includes its whole group. An absolute end is exclusive.
+/// Every start is the first frame of its group, and every end includes its whole group.
 #[derive(Clone, Copy, uniffi::Record)]
 pub struct MoqRange {
 	/// Where delivery starts.
 	pub start: MoqAnchor,
-	/// Where delivery stops, or null to keep following the live edge.
+	/// Where delivery stops, including its group, or null to keep following the live edge.
 	#[uniffi(default = None)]
 	pub end: Option<MoqAnchor>,
 }
@@ -111,19 +113,21 @@ pub struct MoqRange {
 /// Where one end of a [`MoqRange`] falls, mirroring [`moq_net::track::Anchor`].
 #[derive(Clone, Copy, uniffi::Enum)]
 pub enum MoqAnchor {
-	/// This group, delivered from its first frame.
-	Absolute {
-		/// The absolute group sequence number.
-		group: u64,
-	},
-	/// The group this many before the latest, clamped to group 0: `0` is the latest group.
+	/// The group this many before the latest, counting the groups held: `0` is the latest
+	/// group, and one counting back past every group held reaches back to the oldest.
 	Relative {
 		/// The number of groups back from the live edge.
 		groups: u64,
 	},
-	/// The group containing this presentation time. An untimed track refuses it.
+	/// The group containing this time: the newest one starting at or before it. A group is
+	/// named by its start, so its start names exactly it. As an end, it includes every group
+	/// starting at or before the time.
+	///
+	/// Over a session older than moq-lite-07, a start between two groups reaches the
+	/// publisher as the first group at or after it, missing the one containing it.
 	Time {
-		/// The presentation time.
+		/// The time in the track's timescale, given [unscaled](MoqTimestamp::unscaled). A scaled
+		/// one is refused with a timestamp mismatch until the bindings convert it.
 		timestamp: MoqTimestamp,
 	},
 	/// The oldest group still around, as far back as the max delay allows. A start only.
@@ -134,32 +138,34 @@ pub enum MoqAnchor {
 /// [`moq_net::track::Order`].
 #[derive(Clone, Copy, uniffi::Enum)]
 pub enum MoqOrder {
-	/// Oldest first, draining a backlog in sequence order.
+	/// Oldest first, draining a backlog in start order.
 	Ascending,
 	/// Newest first, so congestion sheds the backlog rather than the live edge.
 	Descending,
 }
 
-impl TryFrom<MoqAnchor> for moq_net::track::Anchor {
-	type Error = MoqError;
-
-	fn try_from(anchor: MoqAnchor) -> Result<Self, MoqError> {
-		Ok(match anchor {
-			MoqAnchor::Oldest => Self::Oldest,
-			MoqAnchor::Absolute { group } => Self::Absolute(group),
-			MoqAnchor::Relative { groups } => Self::Relative(groups),
-			MoqAnchor::Time { timestamp } => Self::Time(timestamp.try_into()?),
+impl MoqAnchor {
+	/// This anchor as moq-net reads it. A time must be unscaled, in the track's timescale: the
+	/// timescale is unknown here, so a scaled one is refused rather than read in the wrong units.
+	fn resolve(self) -> Result<moq_net::track::Anchor, MoqError> {
+		use moq_net::track::Anchor;
+		Ok(match self {
+			Self::Oldest => Anchor::Oldest,
+			Self::Relative { groups } => Anchor::Relative(groups),
+			Self::Time { timestamp } => match timestamp.scale {
+				None => Anchor::Time(timestamp.value),
+				Some(_) => return Err(moq_net::Error::TimestampMismatch.into()),
+			},
 		})
 	}
 }
 
-impl TryFrom<MoqRange> for moq_net::track::Range {
-	type Error = MoqError;
-
-	fn try_from(range: MoqRange) -> Result<Self, MoqError> {
-		Ok(Self {
-			start: range.start.try_into()?,
-			end: range.end.map(TryInto::try_into).transpose()?,
+impl MoqRange {
+	/// This range as moq-net reads it.
+	pub(crate) fn resolve(self) -> Result<moq_net::track::Range, MoqError> {
+		Ok(moq_net::track::Range {
+			start: self.start.resolve()?,
+			end: self.end.map(MoqAnchor::resolve).transpose()?,
 		})
 	}
 }
@@ -182,7 +188,7 @@ impl From<moq_net::track::Order> for MoqOrder {
 	}
 }
 
-/// Options for fetching one past group by sequence.
+/// Options for fetching one past group by start.
 #[derive(Clone, uniffi::Record)]
 pub struct MoqFetchGroupOptions {
 	/// Delivery priority for the fetch stream; higher values preempt lower ones.
@@ -212,12 +218,11 @@ impl TryFrom<MoqSubscription> for moq_net::track::Subscription {
 			.with_priority(s.priority)
 			.with_delay(s.delay.into());
 		if let Some(ranges) = s.ranges {
-			subscription = subscription.with_ranges(
-				ranges
-					.into_iter()
-					.map(TryInto::try_into)
-					.collect::<Result<Vec<_>, _>>()?,
-			);
+			let ranges = ranges
+				.into_iter()
+				.map(MoqRange::resolve)
+				.collect::<Result<Vec<_>, _>>()?;
+			subscription = subscription.with_ranges(ranges);
 		}
 		if let Some(order) = s.order {
 			subscription = subscription.with_order(order.into());
@@ -370,7 +375,7 @@ impl MoqBroadcastConsumer {
 			.await
 	}
 
-	/// Fetch one complete group by track name and group sequence.
+	/// Fetch one complete group by track name and group start.
 	///
 	/// This does not create a live subscription. A retained group resolves immediately;
 	/// otherwise the request waits for a dynamic producer to serve it. The returned
@@ -378,14 +383,14 @@ impl MoqBroadcastConsumer {
 	pub async fn fetch_group(
 		&self,
 		name: String,
-		sequence: u64,
+		start: u64,
 		options: Option<MoqFetchGroupOptions>,
 	) -> Result<Arc<MoqGroupConsumer>, MoqError> {
 		self.driver
 			.watch(async {
 				let options = options.map(moq_net::group::Fetch::from);
 				let track = self.inner.track(&name).map_err(map_fetch_error)?;
-				let group = track.fetch_group(sequence, options).await.map_err(map_fetch_error)?;
+				let group = track.fetch_group(start, options).await.map_err(map_fetch_error)?;
 				Ok(Arc::new(MoqGroupConsumer::new(group, self.driver.clone())))
 			})
 			.await
@@ -413,7 +418,7 @@ enum Cursor {
 	Uncommitted(moq_net::track::Subscriber),
 	/// Committed to arrival order by the first `recv_group`.
 	Arrival(moq_net::track::Subscriber),
-	/// Committed to sequence order by the first `next_group` or `read_frame`.
+	/// Committed to start order by the first `next_group` or `read_frame`.
 	Ordered(Box<OrderedCursor>),
 	/// Transient, while the subscriber is moved out to be converted.
 	Converting,
@@ -435,7 +440,7 @@ struct TrackInner {
 
 impl TrackInner {
 	/// The arrival cursor, committing this track to it, or [`MoqError::AlreadyCommitted`]
-	/// once it committed to sequence order.
+	/// once it committed to start order.
 	fn arrival(&mut self) -> Result<&mut moq_net::track::Subscriber, MoqError> {
 		if let Cursor::Uncommitted(_) = &self.track {
 			let Cursor::Uncommitted(track) = std::mem::replace(&mut self.track, Cursor::Converting) else {
@@ -452,7 +457,7 @@ impl TrackInner {
 		}
 	}
 
-	/// The sequence cursor, committing this track to it, or [`MoqError::AlreadyCommitted`]
+	/// The ordered cursor, committing this track to it, or [`MoqError::AlreadyCommitted`]
 	/// once it committed to arrival order.
 	fn ordered(&mut self) -> Result<&mut OrderedCursor, MoqError> {
 		// Only move the subscriber out when there is one to convert: `ordered()` consumes
@@ -490,13 +495,13 @@ impl TrackInner {
 					waiter.waker().wake_by_ref();
 					return Poll::Ready(Ok(Some(group)));
 				}
-				ordered.track.poll_next_group(waiter).map(|r| r.map_err(Into::into))
+				poll_group(&mut ordered.track, waiter).map(|r| r.map_err(Into::into))
 			}
 			Err(e) => Poll::Ready(Err(e)),
 		}
 	}
 
-	/// The first frame of the next group in sequence order, skipping completed empty groups.
+	/// The first frame of the next group in start order, skipping completed empty groups.
 	///
 	/// One poll does the whole step, so it never trusts a slot it filled on an earlier poll:
 	/// a group `next_group` took from `pending` in between is simply gone, and the wake it
@@ -510,7 +515,7 @@ impl TrackInner {
 		loop {
 			let group = match &mut ordered.pending {
 				Some(group) => group,
-				None => match ready!(ordered.track.poll_next_group(waiter)) {
+				None => match ready!(poll_group(&mut ordered.track, waiter)) {
 					Ok(Some(group)) => ordered.pending.insert(group),
 					Ok(None) => return Poll::Ready(Ok(None)),
 					Err(err) => return Poll::Ready(Err(err.into())),
@@ -585,12 +590,12 @@ impl MoqTrackConsumer {
 impl MoqTrackConsumer {
 	/// Return the next group in arrival order. Returns `None` when the track ends.
 	///
-	/// Groups are returned as they arrive on the wire, which may be out of sequence
+	/// Groups are returned as they arrive on the wire, which may be out of start
 	/// order (e.g. if a later group lands before an earlier one on a separate stream).
 	/// One that drifts further behind the live edge than the subscription's `delay.max`
 	/// is skipped, or ends its pending read if already returned; raise it to keep stalled groups.
 	///
-	/// The first call commits this track to arrival order: sequence-order reads
+	/// The first call commits this track to arrival order: start-order reads
 	/// ([`Self::next_group`], [`Self::read_frame`]) fail with
 	/// [`MoqError::AlreadyCommitted`] afterwards.
 	pub async fn recv_group(&self) -> Result<Option<Arc<MoqGroupConsumer>>, MoqError> {
@@ -598,14 +603,14 @@ impl MoqTrackConsumer {
 		Ok(self.group(group))
 	}
 
-	/// Return the next group with a higher sequence number than any previously
+	/// Return the next group with a later start than any previously
 	/// returned, skipping late arrivals. Returns `None` when the track ends.
 	///
-	/// Shares the sequence cursor with [`Self::read_frame`]: a group one method
+	/// Shares the ordered cursor with [`Self::read_frame`]: a group one method
 	/// has already taken is not returned by the other. A `read_frame` cancelled
 	/// after acquiring a group leaves that group here.
 	///
-	/// The first call commits this track to sequence order: arrival-order reads
+	/// The first call commits this track to start order: arrival-order reads
 	/// ([`Self::recv_group`]) fail with [`MoqError::AlreadyCommitted`] afterwards.
 	pub async fn next_group(&self) -> Result<Option<Arc<MoqGroupConsumer>>, MoqError> {
 		let group = self.reads.wait(|inner, waiter| inner.poll_next_group(waiter)).await?;
@@ -619,7 +624,7 @@ impl MoqTrackConsumer {
 	/// only when the track ends. Cancelling one call keeps the current group so a
 	/// later `read_frame` or [`Self::next_group`] still sees it.
 	///
-	/// Shares the sequence cursor with [`Self::next_group`], committing the track
+	/// Shares the ordered cursor with [`Self::next_group`], committing the track
 	/// the same way.
 	pub async fn read_frame(&self) -> Result<Option<MoqFrame>, MoqError> {
 		let frame = self.reads.wait(|inner, waiter| inner.poll_read_frame(waiter)).await?;
@@ -645,6 +650,22 @@ impl MoqTrackConsumer {
 		Ok(())
 	}
 
+	/// Ask the publisher for a group starting after the newest one this node holds, judged by
+	/// the track's [`MoqTrackRefresh`](crate::producer::MoqTrackRefresh), returning once the
+	/// request is sent.
+	///
+	/// It is sent once the newest group is old enough, when whatever serves the track reads
+	/// it: the session forwarding it upstream, or a local publisher waiting in
+	/// [`MoqTrackDemand::refresh`](crate::demand::MoqTrackDemand::refresh). Concurrent calls
+	/// share one request and all return when it is sent. Cancelling the call before then
+	/// withdraws its request. It returns at once when there is nothing to send: a track that
+	/// does not refresh, a ratio the newest group is under, a track with no group yet, or a
+	/// request already sent. It also returns when a newer group lands first. The new group
+	/// arrives through the normal reads, such as [`Self::next_group`].
+	pub async fn refresh(&self) -> Result<(), MoqError> {
+		crate::ffi::run(self.control.refresh()).await
+	}
+
 	/// Cancel all current and future reads.
 	///
 	/// Terminal: the subscription is released here, not when the handle is.
@@ -656,7 +677,7 @@ impl MoqTrackConsumer {
 /// A group whose frames can be read in order.
 #[derive(uniffi::Object)]
 pub struct MoqGroupConsumer {
-	sequence: u64,
+	start: u64,
 	reads: Polled<moq_net::group::Consumer>,
 	driver: Background,
 }
@@ -664,7 +685,7 @@ pub struct MoqGroupConsumer {
 impl MoqGroupConsumer {
 	pub(crate) fn new(group: moq_net::group::Consumer, driver: Background) -> Self {
 		Self {
-			sequence: group.sequence,
+			start: group.start,
 			reads: Polled::new(group).supervised(driver.clone()),
 			driver,
 		}
@@ -688,9 +709,9 @@ impl MoqGroupConsumer {
 
 #[uniffi::export]
 impl MoqGroupConsumer {
-	/// The sequence number of this group within the track.
-	pub fn sequence(&self) -> u64 {
-		self.sequence
+	/// The start of this group, in its track's timescale, which names it within the track.
+	pub fn start(&self) -> u64 {
+		self.start
 	}
 
 	/// Read the next frame in this group, including its timestamp.
@@ -709,5 +730,20 @@ impl MoqGroupConsumer {
 	/// Terminal: the group and whatever it still buffers are released here, not when the handle is.
 	pub fn cancel(&self) {
 		self.reads.cancel();
+	}
+}
+
+/// The next group of an ordered read. The bindings report no gaps, so a group the track
+/// gave up on is passed over.
+fn poll_group(
+	track: &mut moq_net::track::Ordered,
+	waiter: &kio::Waiter,
+) -> Poll<Result<Option<moq_net::group::Consumer>, moq_net::Error>> {
+	loop {
+		match ready!(track.poll_next_group(waiter))? {
+			Some(moq_net::track::Item::Group(group)) => return Poll::Ready(Ok(Some(group))),
+			Some(moq_net::track::Item::Gap { .. }) => continue,
+			None => return Poll::Ready(Ok(None)),
+		}
 	}
 }

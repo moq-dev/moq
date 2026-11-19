@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use crate::error::MoqError;
 
-/// A watch-only handle to the group a published track's subscribers want next.
+/// A watch-only handle to whether a published track has subscribers, and when they ask for a new
+/// group.
 ///
 /// Weak: holding it neither keeps the track open nor locks the producer it came from, so a wait
 /// can park here while the producer keeps publishing. Waits fail with `Closed` once the track is
@@ -34,18 +35,29 @@ impl MoqTrackDemand {
 		self.inner.name().to_string()
 	}
 
-	/// The group subscribers want next: null while nobody consumes the track, otherwise the
-	/// sequence the next group should have at least. A value past the newest group asks for a
-	/// new group now, typically a keyframe.
-	pub fn wanted(&self) -> Option<u64> {
+	/// Whether anyone consumes the track: a subscription, query, fetch, or a group one of them
+	/// was handed and has not finished reading.
+	pub fn wanted(&self) -> bool {
 		self.inner.wanted()
 	}
 
 	/// Wait for `wanted` to change and return the new value. The first call returns at once.
-	pub async fn wanted_changed(&self) -> Result<Option<u64>, MoqError> {
+	///
+	/// End a track nobody wants with its producer's `abort_unwanted`, which keeps it for a reader
+	/// that joined since.
+	pub async fn wanted_changed(&self) -> Result<bool, MoqError> {
 		self.changes
 			.wait(|changes, waiter| changes.poll_wanted_changed(waiter).map(gone))
 			.await
+	}
+
+	/// Wait until a subscriber asks for a new group: the first group of a track with none, or a
+	/// join or refresh judged by the track's [`MoqTrackRefresh`](crate::producer::MoqTrackRefresh)
+	/// once its interval has passed. Returns at once while the request is pending, and the next
+	/// group written answers it, so loop: wait here, then write a group that starts with a
+	/// keyframe or a snapshot.
+	pub async fn refresh(&self) -> Result<(), MoqError> {
+		crate::ffi::run(kio::wait(|waiter| self.inner.poll_refresh(waiter).map(gone))).await
 	}
 }
 
@@ -53,13 +65,13 @@ impl MoqTrackDemand {
 impl MoqTrackDemand {
 	/// Wait until some subscriber wants the track.
 	pub(crate) async fn until_wanted(&self) -> Result<(), MoqError> {
-		while self.wanted_changed().await?.is_none() {}
+		while !self.wanted_changed().await? {}
 		Ok(())
 	}
 
 	/// Wait until no subscriber wants the track.
 	pub(crate) async fn until_unwanted(&self) -> Result<(), MoqError> {
-		while self.wanted_changed().await?.is_some() {}
+		while self.wanted_changed().await? {}
 		Ok(())
 	}
 }

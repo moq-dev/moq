@@ -204,17 +204,17 @@ const std::vector<Field> &Fields()
 				   1, 60000, 100, "Delay before the first reconnect attempt; it grows from here."));
 		f.push_back(Number(BACKOFF_MAX, "Reconnect delay cap (ms)", Millis(d.backoff.max, BACKOFF_MAX), 1,
 				   600000, 1000, "Ceiling on the growing reconnect delay."));
-		f.push_back(Number(BACKOFF_TIMEOUT, "Give up after (ms)", Millis(d.backoff.timeout, BACKOFF_TIMEOUT), 0,
-				   3600000, 1000,
+		// The library's default never gives up, which this field spells as 0.
+		f.push_back(Number(BACKOFF_TIMEOUT, "Give up after (ms)",
+				   d.backoff.timeout ? Millis(d.backoff.timeout, BACKOFF_TIMEOUT) : 0, 0, 3600000, 1000,
 				   "Total time to keep reconnecting after a drop before the stream fails. 0 retries "
 				   "forever. A first connect that reaches no server fails the stream at once."));
 
 		// QUIC transport.
-		f.push_back(Choose(
-			QUIC_CONGESTION_CONTROL, "Congestion control",
-			{{"Automatic", AUTO}, {"Delay-based (BBR)", "delay"}, {"Loss-based (CUBIC)", "loss"}}, false,
-			"Delay-based keeps queues short and the send rate steady enough for an "
-			"encoder to track. Loss-based chases throughput instead."));
+		f.push_back(Choose(QUIC_CONGESTION_CONTROL, "Congestion control",
+				   {{"Automatic", AUTO}, {"BBR", "bbr"}, {"CUBIC", "cubic"}}, false,
+				   "BBR, the default, keeps queues short and the send rate steady enough for an "
+				   "encoder to track. CUBIC chases throughput instead."));
 		f.push_back(Number(QUIC_MAX_STREAMS, "Max concurrent streams",
 				   static_cast<long long>(d.quic.max_streams.value_or(0)), 1, 65536, 1,
 				   "MoQ opens a stream per group, so a busy publisher wants this high."));
@@ -229,13 +229,9 @@ const std::vector<Field> &Fields()
 		f.push_back(Choose(QUIC_MTU_DISCOVERY, "Path MTU discovery", AutoOnOff(), false,
 				   "Probe the path so packets use the largest size it allows. Turn it "
 				   "off if discovery itself causes drops."));
-		// Only when this build can capture: setting a directory without support fails
-		// the dial, so offering it would be a control that only breaks things.
-		if (moq::qlog_supported()) {
-			f.push_back(Directory(QUIC_QLOG, "qlog directory",
-					      "Write QUIC connection traces here for diagnosing stalls. Leave "
-					      "empty to disable; the files get large."));
-		}
+		f.push_back(Directory(QUIC_QLOG, "qlog directory",
+				      "Write QUIC connection traces here for diagnosing stalls. Leave "
+				      "empty to disable; the files get large."));
 		f.push_back(Toggle(QUIC_KEYLOG, "TLS key log", false,
 				   "Write TLS session secrets to the file the SSLKEYLOGFILE environment "
 				   "variable names, to decrypt a packet capture. Anyone holding that file "
@@ -344,32 +340,31 @@ std::string Configure(obs_data_t *settings, moq::ClientConfig &config)
 
 	config.backoff.initial = Milliseconds(settings, BACKOFF_INITIAL, error);
 	config.backoff.max = Milliseconds(settings, BACKOFF_MAX, error);
-	config.backoff.timeout = Milliseconds(settings, BACKOFF_TIMEOUT, error);
+	// 0 here means never give up, which the library spells as no timeout: its zero gives up
+	// at the first failure.
+	if (const auto timeout = Milliseconds(settings, BACKOFF_TIMEOUT, error); timeout.count() != 0)
+		config.backoff.timeout = timeout;
 
-	// Automatic leaves the tri-states and the congestion family unset, which keeps the
-	// transport free to pick.
-	if (const char *family = OptionalString(settings, QUIC_CONGESTION_CONTROL)) {
-		if (strcmp(family, "delay") == 0)
-			config.quic.congestion_control = moq::CongestionControl::kDelay;
-		else if (strcmp(family, "loss") == 0)
-			config.quic.congestion_control = moq::CongestionControl::kLoss;
+	// Automatic leaves the tri-states and the congestion control unset, which keeps the
+	// library default. A scene saved with a released family name (`delay`, `loss`) is
+	// refused rather than mapped, and the message tells the user how to fix it.
+	if (const char *algorithm = OptionalString(settings, QUIC_CONGESTION_CONTROL)) {
+		if (strcmp(algorithm, "bbr") == 0)
+			config.quic.congestion_control = moq::CongestionControl::bbr();
+		else if (strcmp(algorithm, "cubic") == 0)
+			config.quic.congestion_control = moq::CongestionControl::cubic();
 		else
-			Refuse(error, std::string("unknown congestion control: ") + family);
+			Refuse(error, std::string("congestion control '") + algorithm +
+					      "' is not supported: pick BBR or CUBIC for Congestion control in "
+					      "the output's Advanced settings");
 	}
 	config.quic.max_streams = Amount(settings, QUIC_MAX_STREAMS, error);
 	config.quic.idle_timeout = Milliseconds(settings, QUIC_IDLE_TIMEOUT, error);
 	config.quic.keep_alive = Milliseconds(settings, QUIC_KEEP_ALIVE, error);
 	config.quic.gso = TriState(settings, QUIC_GSO, error);
 	config.quic.mtu_discovery = TriState(settings, QUIC_MTU_DISCOVERY, error);
-	// A scene collection written by a qlog-capable build keeps the key even where the
-	// field is hidden. Refusing would block Go Live on a setting the user can no longer
-	// see, let alone clear, so the trace is skipped and the log says why.
-	if (const char *qlog = OptionalString(settings, QUIC_QLOG)) {
-		if (moq::qlog_supported())
-			config.quic.qlog = qlog;
-		else
-			LOG_WARNING("Skipping the qlog directory %s: this build cannot write qlog", qlog);
-	}
+	if (const char *qlog = OptionalString(settings, QUIC_QLOG))
+		config.quic.qlog = qlog;
 	config.quic.keylog = obs_data_get_bool(settings, QUIC_KEYLOG);
 
 	config.websocket.enabled = obs_data_get_bool(settings, WEBSOCKET_ENABLED);

@@ -1,4 +1,4 @@
-import { canvasPresentationTransform, type Presentation } from "./presentation";
+import { canvasPresentationTransform, type Presentation } from "./presentation.ts";
 
 /** Draws frames into a Canvas2D context. */
 export class Canvas2D {
@@ -37,5 +37,6 @@ export class Canvas2D {
 		ctx.restore();
 	}
 
+	// fallow-ignore-next-line unused-class-member
 	close() {}
 }

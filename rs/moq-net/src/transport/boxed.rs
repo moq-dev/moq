@@ -90,7 +90,7 @@ impl Session {
 
 	/// The session's open group streams, the lowest ranked first.
 	#[cfg(test)]
-	pub(crate) fn open_streams(&self) -> Vec<open::OpenStream> {
+	pub(super) fn open_streams(&self) -> Vec<(open::Rank, Arc<Listed>)> {
 		self.opens.open_streams()
 	}
 
@@ -149,15 +149,16 @@ pub(super) struct Shared<S: ?Sized> {
 }
 
 impl Shared<dyn ErasedSession> {
-	/// Reserve the credit of one more paused stream, unless it would push the paused total
-	/// over half the connection window, returning how much it reserved. Without a connection
-	/// window a paused stream holds only its own credit, so it reserves nothing.
-	fn reserve(&self) -> Option<u64> {
+	/// Reserve the credit of one more paused stream, its stream window and the `taken` bytes it
+	/// read without returning their credit, unless it would push the paused total over half the
+	/// connection window, returning how much it reserved. Without a connection window a paused
+	/// stream holds only its own credit, so it reserves nothing.
+	fn reserve(&self, taken: u64) -> Option<u64> {
 		let window = self.session.receive_window()?;
 		let Some(connection) = window.connection else {
 			return Some(0);
 		};
-		let charge = window.stream.min(connection.get());
+		let charge = window.stream.saturating_add(taken).min(connection.get());
 		let cap = connection.get() / 2;
 		self.paused
 			.fetch_update(Ordering::AcqRel, Ordering::Acquire, |paused| {
@@ -258,6 +259,9 @@ impl poll::SendGroup for Group {
 	}
 }
 
+/// A boxed stream's offset, holding the transport's own behind the boundary.
+pub(crate) struct Offset(Box<dyn Any + Send + Sync>);
+
 /// A boxed outgoing stream.
 pub(crate) struct SendStream(Sender);
 
@@ -270,20 +274,12 @@ enum Sender {
 impl SendStream {
 	/// Box a stream, keeping its own send-group type behind the boundary.
 	#[cfg(test)]
-	pub(crate) fn new(stream: impl poll::SendStream<Group: Send + Sync> + Send + Sync) -> Self {
+	pub(crate) fn new(stream: impl poll::SendStream<Group: Send + Sync, Offset: Send + Sync> + Send + Sync) -> Self {
 		Self(Sender::Own(Box::new(stream)))
 	}
 
-	fn own(stream: impl poll::SendStream<Group: Send + Sync> + Send + Sync + 'static) -> Self {
+	fn own(stream: impl poll::SendStream<Group: Send + Sync, Offset: Send + Sync> + Send + Sync + 'static) -> Self {
 		Self(Sender::Own(Box::new(stream)))
-	}
-
-	/// Whether the session reset this group stream to make room for a higher-ranked open.
-	pub(crate) fn preempted(&self) -> bool {
-		match &self.0 {
-			Sender::Own(_) => false,
-			Sender::Listed(listing) => listing.listed.lock().preempted,
-		}
 	}
 
 	/// Run `f` on the transport's stream, then leave the session's list if `unlist`.
@@ -393,13 +389,21 @@ impl Listed {
 		self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 	}
 
-	/// The stream's rank, and whether the peer acknowledged everything written to it.
-	pub(super) fn read(&self) -> open::OpenStream {
+	/// Where the stream ranks now.
+	pub(super) fn rank(&self) -> open::Rank {
 		let state = self.lock();
-		open::OpenStream {
-			rank: open::Rank::new(state.group.as_ref().map(|group| group.read()), state.priority),
-			acknowledged: state.stream.acknowledged(),
-		}
+		open::Rank::new(state.group.as_ref().map(|group| group.read()), state.priority)
+	}
+
+	/// Whether the peer acknowledged everything written to it, always so for a transport that
+	/// cannot see acknowledgments.
+	pub(super) fn acknowledged(&self) -> bool {
+		let state = self.lock();
+		let offset = state.stream.offset();
+		matches!(
+			state.stream.poll_acked(&kio::Waiter::noop(), &offset),
+			Poll::Ready(Ok(()))
+		)
 	}
 
 	/// Reset the stream to make room, failing its writer with the reset's code.
@@ -465,11 +469,12 @@ impl RecvStream {
 		self.0.window()
 	}
 
-	/// Reserve the receive credit this stream may hold while ingest stops reading it, returning
-	/// whether it may stop: not once the session's paused streams hold half its connection
-	/// window, nor on a transport that reports no window.
-	pub(crate) fn pause(&mut self) -> bool {
-		self.0.pause()
+	/// Reserve the receive credit this stream may hold while ingest stops reading it, its stream
+	/// window and the `taken` bytes read without returning their credit, returning whether it
+	/// may stop: not once the session's paused streams hold half its connection window, nor on
+	/// a transport that reports no window.
+	pub(crate) fn pause(&mut self, taken: u64) -> bool {
+		self.0.pause(taken)
 	}
 
 	/// Return the credit [`Self::pause`] reserved, as ingest reads the stream again.
@@ -583,7 +588,6 @@ pub(super) trait ErasedSession: Send + Sync {
 	fn probe(&self) -> Option<Probe>;
 	fn receive_window(&self) -> Option<ReceiveWindow>;
 	fn set_limits(&self, limits: Limits) -> Result<(), LimitsError>;
-	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]>;
 }
 
 trait ErasedGroup: Send + Sync {
@@ -600,9 +604,8 @@ trait ErasedSend: Send + Sync {
 	fn finish(&mut self) -> Result<(), Error>;
 	fn reset(&mut self, code: u32);
 	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Error>>;
-	fn acknowledged(&self) -> Option<bool>;
-	fn delivered(&self) -> Option<u64>;
-	fn poll_delivered(&self, waiter: &kio::Waiter) -> Poll<()>;
+	fn offset(&self) -> Offset;
+	fn poll_acked(&self, waiter: &kio::Waiter, offset: &Offset) -> Poll<Result<(), Error>>;
 }
 
 trait ErasedRecv: Send + Sync {
@@ -612,7 +615,7 @@ trait ErasedRecv: Send + Sync {
 	fn stop(&mut self, code: u32);
 	fn poll_reset(&mut self, waiter: &kio::Waiter) -> Poll<Error>;
 	fn window(&self) -> u64;
-	fn pause(&mut self) -> bool;
+	fn pause(&mut self, taken: u64) -> bool;
 	fn resume(&mut self);
 }
 
@@ -725,10 +728,6 @@ impl<S: poll::Boxable> ErasedSession for S {
 	fn set_limits(&self, limits: Limits) -> Result<(), LimitsError> {
 		poll::Session::set_limits(self, limits)
 	}
-
-	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
-		poll::Session::export_keying_material(self, label, context)
-	}
 }
 
 impl<G: poll::SendGroup + Send + Sync> ErasedGroup for G {
@@ -745,7 +744,7 @@ impl<G: poll::SendGroup + Send + Sync> ErasedGroup for G {
 	}
 }
 
-impl<T: poll::SendStream<Group: Send + Sync> + Send + Sync> ErasedSend for T {
+impl<T: poll::SendStream<Group: Send + Sync, Offset: Send + Sync> + Send + Sync> ErasedSend for T {
 	fn poll_write(&mut self, waiter: &kio::Waiter, buf: &[u8]) -> Poll<Result<usize, Error>> {
 		poll::SendStream::poll_write(self, waiter, buf).map_err(Error::new)
 	}
@@ -780,16 +779,16 @@ impl<T: poll::SendStream<Group: Send + Sync> + Send + Sync> ErasedSend for T {
 		poll::SendStream::poll_closed(self, waiter).map_err(Error::new)
 	}
 
-	fn acknowledged(&self) -> Option<bool> {
-		poll::SendStream::acknowledged(self)
+	fn offset(&self) -> Offset {
+		Offset(Box::new(poll::SendStream::offset(self)))
 	}
 
-	fn delivered(&self) -> Option<u64> {
-		poll::SendStream::delivered(self)
-	}
-
-	fn poll_delivered(&self, waiter: &kio::Waiter) -> Poll<()> {
-		poll::SendStream::poll_delivered(self, waiter)
+	fn poll_acked(&self, waiter: &kio::Waiter, offset: &Offset) -> Poll<Result<(), Error>> {
+		let offset = offset
+			.0
+			.downcast_ref::<T::Offset>()
+			.expect("offset belongs to another transport");
+		poll::SendStream::poll_acked(self, waiter, offset).map_err(Error::new)
 	}
 }
 
@@ -826,11 +825,11 @@ impl<T: poll::RecvStream + Send + Sync> ErasedRecv for Budgeted<T> {
 		})
 	}
 
-	fn pause(&mut self) -> bool {
+	fn pause(&mut self, taken: u64) -> bool {
 		if self.held > 0 {
 			return true;
 		}
-		let Some(held) = self.session.upgrade().and_then(|shared| shared.reserve()) else {
+		let Some(held) = self.session.upgrade().and_then(|shared| shared.reserve(taken)) else {
 			return false;
 		};
 		self.held = held;
@@ -938,15 +937,20 @@ impl poll::Session for Session {
 	fn set_limits(&self, limits: Limits) -> Result<(), LimitsError> {
 		self.inner.session.set_limits(limits)
 	}
-
-	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
-		self.inner.session.export_keying_material(label, context)
-	}
 }
 
 impl poll::SendStream for SendStream {
 	type Error = Error;
 	type Group = Group;
+	type Offset = Offset;
+
+	fn offset(&self) -> Offset {
+		self.get().offset()
+	}
+
+	fn poll_acked(&self, waiter: &kio::Waiter, offset: &Offset) -> Poll<Result<(), Error>> {
+		self.get().poll_acked(waiter, offset)
+	}
 
 	fn poll_write(&mut self, waiter: &kio::Waiter, buf: &[u8]) -> Poll<Result<usize, Error>> {
 		self.poll_writing(waiter, |stream| stream.poll_write(waiter, buf))
@@ -1001,18 +1005,6 @@ impl poll::SendStream for SendStream {
 				state.stream.poll_closed(waiter)
 			}
 		}
-	}
-
-	fn acknowledged(&self) -> Option<bool> {
-		self.get().acknowledged()
-	}
-
-	fn delivered(&self) -> Option<u64> {
-		self.get().delivered()
-	}
-
-	fn poll_delivered(&self, waiter: &kio::Waiter) -> Poll<()> {
-		self.get().poll_delivered(waiter)
 	}
 }
 
@@ -1086,8 +1078,9 @@ mod test {
 		recv
 	}
 
-	/// Each paused stream reserves its stream window, and the session pauses no more than
-	/// fit in half the connection window; a stream resuming or dropped returns its share.
+	/// Each paused stream reserves its stream window and what it took of an unsealed segment,
+	/// and the session pauses no more than fit in half the connection window; a stream
+	/// resuming or dropped returns its share.
 	#[test]
 	fn paused_streams_hold_at_most_half_the_connection_window() {
 		let gate = kio::Producer::new(true);
@@ -1096,22 +1089,31 @@ mod test {
 				.with_receive_window(ReceiveWindow::new(std::num::NonZeroU64::new(100), 20)),
 		);
 		let mut streams: Vec<_> = (0..3).map(|_| accept(&session)).collect();
-		assert!(streams[0].pause());
-		assert!(streams[0].pause(), "a paused stream reserves once");
-		assert!(streams[1].pause());
-		assert!(!streams[2].pause(), "a third would hold 60 of 100");
+		assert!(streams[0].pause(0));
+		assert!(streams[0].pause(0), "a paused stream reserves once");
+		assert!(streams[1].pause(0));
+		assert!(!streams[2].pause(0), "a third would hold 60 of 100");
 
 		streams[0].resume();
-		assert!(streams[2].pause(), "a resumed stream returned its share");
+		assert!(streams[2].pause(0), "a resumed stream returned its share");
 		drop(streams.remove(1));
-		assert!(accept(&session).pause(), "so did a dropped one");
+		assert!(accept(&session).pause(0), "so did a dropped one");
+
+		// A stream partway through a segment also holds the credit of what it took of it.
+		let session = Session::new(
+			SinkSession::accepted_bi(gate.consume())
+				.with_receive_window(ReceiveWindow::new(std::num::NonZeroU64::new(100), 20)),
+		);
+		let mut first = accept(&session);
+		assert!(first.pause(25), "holds 45 of 100");
+		assert!(!accept(&session).pause(0), "a second would hold 65 of 100");
 
 		// Without a connection window nothing is shared, so every stream may pause.
 		let session = Session::new(
 			SinkSession::accepted_bi(gate.consume()).with_receive_window(ReceiveWindow::new(None, u64::MAX)),
 		);
 		let mut streams: Vec<_> = (0..3).map(|_| accept(&session)).collect();
-		assert!(streams.iter_mut().all(|stream| stream.pause()));
+		assert!(streams.iter_mut().all(|stream| stream.pause(0)));
 	}
 
 	/// A stream paces at the credit its session grants it, so a hop holds about what its
@@ -1145,7 +1147,7 @@ mod test {
 	}
 
 	fn ranks(session: &Session) -> Vec<open::Rank> {
-		session.open_streams().into_iter().map(|stream| stream.rank).collect()
+		session.open_streams().into_iter().map(|(rank, _)| rank).collect()
 	}
 
 	fn ungrouped(priority: i64) -> SendOptions<'static, Group> {
@@ -1177,27 +1179,97 @@ mod test {
 		assert!(session.open_streams().is_empty());
 	}
 
-	/// A listed stream reports the peer acknowledging what was written to it, and a reset one
-	/// never is.
+	/// A stream that counts written bytes as its offset and reports them acknowledged up to
+	/// a mark, to check the boxed layer carries its offset through and back.
+	struct Acking {
+		written: u64,
+		acked: u64,
+	}
+
+	impl poll::SendStream for Acking {
+		type Error = super::super::memory::Error;
+		type Group = poll::Ungrouped;
+		type Offset = u64;
+
+		fn offset(&self) -> u64 {
+			self.written
+		}
+
+		fn poll_acked(&self, _: &kio::Waiter, offset: &u64) -> Poll<Result<(), Self::Error>> {
+			match *offset <= self.acked {
+				true => Poll::Ready(Ok(())),
+				false => Poll::Pending,
+			}
+		}
+
+		fn poll_write(&mut self, _: &kio::Waiter, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
+			self.written += buf.len() as u64;
+			Poll::Ready(Ok(buf.len()))
+		}
+
+		fn set_priority(&mut self, _: i64) {}
+
+		fn set_group(&mut self, group: &Self::Group) {
+			match *group {}
+		}
+
+		fn finish(&mut self) -> Result<(), Self::Error> {
+			Ok(())
+		}
+
+		fn reset(&mut self, _: u32) {}
+
+		fn poll_closed(&self, _: &kio::Waiter) -> Poll<Result<(), Self::Error>> {
+			Poll::Pending
+		}
+	}
+
+	/// A boxed stream hands back the transport's own offset, and a transport without
+	/// acknowledgments answers at once, listed or not.
+	#[test]
+	fn a_boxed_stream_forwards_acknowledgment() {
+		let waiter = kio::Waiter::noop();
+		let mut stream = SendStream::new(Acking { written: 0, acked: 3 });
+		assert!(matches!(
+			poll::SendStream::poll_write(&mut stream, &waiter, b"abc"),
+			Poll::Ready(Ok(3))
+		));
+		let three = poll::SendStream::offset(&stream);
+		assert!(matches!(
+			poll::SendStream::poll_write(&mut stream, &waiter, b"de"),
+			Poll::Ready(Ok(2))
+		));
+		let five = poll::SendStream::offset(&stream);
+		assert!(matches!(
+			poll::SendStream::poll_acked(&stream, &waiter, &three),
+			Poll::Ready(Ok(()))
+		));
+		assert!(poll::SendStream::poll_acked(&stream, &waiter, &five).is_pending());
+
+		let session = Session::new(SinkSession::new(Default::default()));
+		let listed = open_group(&session, ungrouped(0));
+		let offset = poll::SendStream::offset(&listed);
+		assert!(matches!(
+			poll::SendStream::poll_acked(&listed, &waiter, &offset),
+			Poll::Ready(Ok(()))
+		));
+	}
+
+	/// A listed stream reads as acknowledged once the peer has everything written to it.
 	#[test]
 	fn a_listed_stream_reports_its_acknowledgement() {
 		let (a, b) = super::super::memory::pair(Default::default());
 		let session = Session::new(a);
 		let mut stream = open_group(&session, ungrouped(0));
-		let acknowledged = || session.open_streams()[0].acknowledged;
-		assert_eq!(acknowledged(), Some(true), "nothing written is all acknowledged");
+		let acknowledged = || session.open_streams()[0].1.acknowledged();
+		assert!(acknowledged(), "nothing written is all acknowledged");
 
 		let waiter = kio::Waiter::noop();
 		assert!(matches!(
 			poll::SendStream::poll_write(&mut stream, &waiter, b"group"),
 			Poll::Ready(Ok(5))
 		));
-		assert_eq!(acknowledged(), Some(false));
-		assert_eq!(
-			poll::SendStream::acknowledged(&stream),
-			Some(false),
-			"the writer reads the same"
-		);
+		assert!(!acknowledged());
 
 		let Poll::Ready(Ok(mut recv)) = poll::Session::poll_accept_uni(&b, &waiter) else {
 			panic!("the peer accepts the stream");
@@ -1206,14 +1278,11 @@ mod test {
 			poll::RecvStream::poll_read_chunk(&mut recv, &waiter, 16),
 			Poll::Ready(Ok(Some(_)))
 		));
-		assert_eq!(acknowledged(), Some(true));
-
-		poll::SendStream::reset(&mut stream, 1);
-		assert_eq!(poll::SendStream::acknowledged(&stream), Some(false));
+		assert!(acknowledged());
 	}
 
 	/// A grouped stream ranks by its group's current priority, and follows a move to another
-	/// group; a transport that cannot tell reports no acknowledgement.
+	/// group; a transport that cannot see acknowledgements reports its bytes acknowledged.
 	#[test]
 	fn a_listed_stream_ranks_by_its_group() {
 		let session = Session::new(SinkSession::new(Default::default()).with_groups());
@@ -1226,18 +1295,17 @@ mod test {
 				priority: 2,
 			},
 		);
-		let read = |session: &Session| session.open_streams()[0];
-		let grouped = |session: &Session| match read(session).rank {
+		let grouped = |session: &Session| match session.open_streams()[0].0 {
 			open::Rank::Grouped { group, stream, .. } => (group, stream),
 			open::Rank::Ungrouped { .. } => panic!("the stream is in a group"),
 		};
 		assert_eq!(grouped(&session), (1, 2));
-		assert_eq!(read(&session).acknowledged, None);
 
 		poll::SendGroup::set_priority(&mut low, 3);
 		assert_eq!(grouped(&session), (3, 2));
 		poll::SendStream::set_group(&mut stream, &high);
 		assert_eq!(grouped(&session), (5, 2));
+		assert!(session.open_streams()[0].1.acknowledged());
 	}
 
 	/// A stream accepted while the connection window was held back, such as one buffered
@@ -1263,7 +1331,7 @@ mod test {
 	fn an_unbounded_stream_never_pauses() {
 		let gate = kio::Producer::new(true);
 		let session = Session::new(SinkSession::accepted_bi(gate.consume()));
-		assert!(!accept(&session).pause());
+		assert!(!accept(&session).pause(0));
 
 		let session = Session::new(
 			SinkSession::accepted_bi(gate.consume())
@@ -1271,6 +1339,6 @@ mod test {
 		);
 		let mut stream = accept(&session);
 		drop(session);
-		assert!(!stream.pause());
+		assert!(!stream.pause(0));
 	}
 }

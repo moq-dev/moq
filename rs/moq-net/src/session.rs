@@ -226,6 +226,14 @@ impl PartialEq for Session {
 
 impl Eq for Session {}
 
+impl std::fmt::Debug for Session {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Session")
+			.field("version", &self.version())
+			.finish_non_exhaustive()
+	}
+}
+
 impl Session {
 	/// Returns the negotiated protocol version.
 	pub fn version(&self) -> Version {
@@ -404,23 +412,34 @@ impl Session {
 		}
 	}
 
-	/// Drain the peer gracefully: the handle for sending this session's single
-	/// GOAWAY.
+	/// Drain the peer gracefully: send this session's single GOAWAY.
 	///
-	/// The graceful counterpart to [`abort`](Self::abort). Send the message with
-	/// [`goaway::Producer::send`], then await [`closed`](Self::closed) to observe
-	/// the peer leaving.
+	/// The graceful counterpart to [`abort`](Self::abort). Await
+	/// [`closed`](Self::closed) afterwards to observe the peer leaving.
 	///
 	/// Only a [`Goaway`](goaway::Goaway) carrying a [`timeout`](goaway::Goaway::timeout)
 	/// schedules a close of our own, so without one this waits for a peer that may
-	/// never leave. Set a deadline when the drain has to finish.
+	/// never leave. Set a deadline when the drain has to finish. It starts at the driver
+	/// poll this send wakes, so the session must stay driven for the message to reach
+	/// the wire and for the deadline to close it.
 	///
 	/// Available on every version. A version with no GOAWAY message (moq-lite-03
 	/// and earlier) simply carries no explanation to the peer; the deadline is the
 	/// sender's own timer either way, so the session still closes on schedule and
 	/// the caller does not branch on the negotiated version.
-	pub fn drain(&self) -> goaway::Producer {
-		self.goaway.producer()
+	///
+	/// # Errors
+	///
+	/// Returns [`Error::ProtocolViolation`] when a client names a redirect URI, which
+	/// the peer would be required to close the session over (draft-22 section 9.2), or
+	/// when the URI exceeds the 8,192-byte wire cap.
+	///
+	/// Returns [`Error::Duplicate`] if this session already sent one. The wire carries
+	/// at most one, so the second is dropped rather than replacing the first, but the
+	/// caller is told rather than left guessing. A session that already closed has
+	/// nothing left to drain, which is no error.
+	pub fn goaway(&self, goaway: goaway::Goaway) -> Result<(), Error> {
+		self.goaway.send(goaway)
 	}
 
 	/// Observe a GOAWAY from the peer, telling us to migrate elsewhere.
@@ -459,6 +478,19 @@ impl Session {
 	/// The connection credential this side presents on AUTH, or `None` when this session offers no AUTH.
 	pub(crate) fn credential(&self) -> Option<&auth::Credential> {
 		self.credential.as_ref()
+	}
+
+	/// Ready once the peer accepted the connection credential: with its SETUP, or on
+	/// moq-lite-07-wip the AUTH_OK to the connection's own credential. Ready at once when the
+	/// handshake already carried that answer, and never on moq-lite 03/04, which have none.
+	pub(crate) fn poll_accepted(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.link.poll_accepted(waiter)
+	}
+
+	/// Whether the peer never answers the connection credential, as on moq-lite 03/04, so
+	/// only uptime suggests it took the credential.
+	pub(crate) fn is_silent(&self) -> bool {
+		self.link.is_silent()
 	}
 
 	/// This session's side of its [`auth`](Self::auth) handle.
@@ -1112,11 +1144,6 @@ impl Slots {
 			max,
 			stats: None,
 		}
-	}
-
-	/// A count of its own under the same cap, starting empty and reported nowhere.
-	pub(crate) fn split(&self) -> Self {
-		Self::new(self.max)
 	}
 
 	/// Report how many are held to `stats`, as `cap`'s peak.

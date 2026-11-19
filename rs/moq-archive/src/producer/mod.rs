@@ -21,7 +21,6 @@
 //! # }
 //! ```
 
-mod ordered;
 mod resume;
 mod track;
 
@@ -38,7 +37,7 @@ use std::time::Duration;
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt, StreamExt};
-use moq_net::broadcast::TracksEvent;
+use moq_net::broadcast::{Listed, TracksEvent};
 use moq_net::{StreamError, broadcast};
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 
@@ -58,9 +57,9 @@ pub struct Config {
 	/// The object is cut there, mid-group if need be. Keep it above [`Self::duration`], or
 	/// objects are cut by it instead.
 	pub flush: Duration,
-	/// The longest a missing group is waited for, capping the publisher's max age. A group still
-	/// missing then is a gap, and the frames behind it wait for that verdict. A track with nothing
-	/// stored waits this long from its first arrival for a lower sequence, unless that one is 0.
+	/// How far newer content may run ahead of a group the track still owes before it is given up
+	/// as a gap, capping the publisher's max age. The frames behind it wait for that verdict. A
+	/// group the publisher skipped or dropped is never waited for.
 	pub max_delay: Duration,
 	/// Prune old objects (a DVR), or keep everything when `None` (an archive).
 	pub dvr: Option<Dvr>,
@@ -183,7 +182,10 @@ impl<S: ObjectStore> Producer<S> {
 			.await;
 
 			match event {
-				Event::Listed(Ok(Some(TracksEvent::Added { name, info }))) => {
+				Event::Listed(Ok(Some(TracksEvent::Added {
+					name,
+					info: Listed::Track(info),
+				}))) => {
 					let queue = queues.entry(name.to_string()).or_insert_with(|| {
 						let queue = kio::Queue::new();
 						let record = track::record(
@@ -201,8 +203,15 @@ impl<S: ObjectStore> Producer<S> {
 					// Only fails once closed, which happens when the listing ends.
 					let _ = queue.try_push(info);
 				}
+				// A datagram track is never cached, so there is nothing of it to archive.
 				Event::Listed(Ok(Some(
-					TracksEvent::Synced | TracksEvent::Removed { .. } | TracksEvent::Finished { .. },
+					TracksEvent::Added {
+						info: Listed::Datagrams(_),
+						..
+					}
+					| TracksEvent::Synced
+					| TracksEvent::Removed { .. }
+					| TracksEvent::Finished { .. },
 				))) => {}
 				Event::Listed(Ok(None)) => {
 					listing = None;

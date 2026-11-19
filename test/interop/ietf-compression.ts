@@ -1,6 +1,5 @@
 /** JS does not offer IETF FLATE and consumes Rust's inflated fallback through its subscriber. */
 import assert from "node:assert/strict";
-import { offered } from "../../js/net/src/connection/extensions.ts";
 import { exchangeSetup } from "../../js/net/src/connection/handshake.ts";
 import { Group } from "../../js/net/src/ietf/object.ts";
 import { NativeSession } from "../../js/net/src/ietf/session.ts";
@@ -20,10 +19,7 @@ const pair = createMockTransportPair(`moqt-${input.draft}`);
 try {
 	if (input.response === undefined) {
 		// Exercise the real offer builder rather than constructing a reduced test offer.
-		const exchanging = exchangeSetup(pair.client, version, "compression interop", {
-			client: true,
-			extensions: offered(),
-		});
+		const exchanging = exchangeSetup(pair.client, version, "compression interop", { client: true });
 		const remote = new Writer(await pair.server.createUnidirectionalStream(), version);
 		await remote.u53(Setup.id);
 		await new Setup().encode(remote, version);
@@ -52,6 +48,7 @@ try {
 		const track = subscriber.consume(Path.from("room")).track("data").subscribe();
 		try {
 			const request = await Stream.accept(pair.server, version);
+			if (!request) throw new Error("the group was already answered");
 			assert(request);
 			assert.equal(await request.reader.u53(), Subscribe.id);
 			await Subscribe.decode(request.reader, version);

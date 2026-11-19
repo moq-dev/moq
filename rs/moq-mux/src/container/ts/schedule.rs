@@ -4,11 +4,49 @@ use std::cmp::Reverse;
 use std::collections::{BinaryHeap, VecDeque};
 use std::time::Duration;
 
-use anyhow::Context;
 use mpeg2ts::ts::TsPacket;
 use rustc_hash::FxHashMap;
 
 use super::export::PCR_INTERVAL;
+
+/// Why the schedule cannot lay a unit onto the grid: the multiplex needs more than the export
+/// allows it.
+#[derive(Clone, Debug, thiserror::Error)]
+pub(super) enum Error {
+	/// A frame of a placed PES does not fit its decoder buffer.
+	#[error("MPEG-TS PES on PID {pid} holds a {largest}-byte frame, exceeding its {size}-byte decoder buffer")]
+	Frame { pid: u16, largest: usize, size: usize },
+	/// An access unit does not fit its decoder buffer.
+	#[error(
+		"MPEG-TS access unit on PID {pid} has {elementary} payload bytes ({bytes} bytes with PES headers), exceeding its {size}-byte decoder buffer"
+	)]
+	Unit {
+		pid: u16,
+		elementary: usize,
+		bytes: usize,
+		size: usize,
+	},
+	/// A unit missed its decode deadline at `rate`, which `delay` would have sent it ahead of.
+	#[error(
+		"MPEG-TS output missed a decode deadline on PID {pid} at {rate} b/s (estimated needed rate {needed} b/s); raise the delay to {delay:?}, which sends it as far ahead as its decoder buffer holds, or the multiplex rate"
+	)]
+	Late {
+		pid: u16,
+		rate: u64,
+		needed: u128,
+		delay: Duration,
+	},
+	/// A unit missed its decode deadline at `rate`, sent as far ahead as its decoder buffer holds.
+	#[error(
+		"MPEG-TS output missed a decode deadline on PID {pid} at {rate} b/s (estimated needed rate {needed} b/s), sent as far ahead as its decoder buffer holds; raise the multiplex rate"
+	)]
+	Rate { pid: u16, rate: u64, needed: u128 },
+	/// Program tables were led before the PMT PID and clock they go out with were set.
+	#[error("program tables led before they were set")]
+	Unset,
+}
+
+type Result<T> = std::result::Result<T, Error>;
 
 /// Grid slots per second, so a multiplex rate in bits per second is also the per-slot
 /// allowance in [`PACKET`] units.
@@ -209,7 +247,12 @@ struct Unit {
 	runs: Vec<Run>,
 	/// For a unit of program tables, what they put in force and the PIDs they hold back.
 	tables: Option<Program>,
+	/// The payload of the frames it carries, counted once it has gone out.
+	charges: Vec<Charge>,
 }
+
+/// A frame's payload bytes, counted against its bill once the unit carrying it goes out.
+pub(super) type Charge = (moq_net::stats::Bill, u64);
 
 /// What a unit of program tables puts in force once it has gone out ([`Tables`]).
 struct Program {
@@ -445,6 +488,8 @@ pub(super) struct Slot {
 	/// How many units of program tables begin in the slot, each laying the tables as they
 	/// stood ([`Schedule::set_psi`]).
 	pub begun: usize,
+	/// The payload of the frames whose units finish in the slot, to count once it goes out.
+	pub charges: Vec<Charge>,
 }
 
 impl Slot {
@@ -625,6 +670,8 @@ pub(super) struct Schedule {
 	/// The unit held packets last went out in, by `seq`: what is muxed after them waits until it
 	/// has finished, as it rides a lane of its own.
 	deferred: Option<u64>,
+	/// The frames the next unit pushed carries ([`Self::bill`]).
+	charges: Vec<Charge>,
 }
 
 impl Schedule {
@@ -652,6 +699,7 @@ impl Schedule {
 			clocked: 0,
 			unclocked: Vec::new(),
 			deferred: None,
+			charges: Vec::new(),
 		}
 	}
 
@@ -823,6 +871,12 @@ impl Schedule {
 		self.units = units;
 	}
 
+	/// Count a frame's payload once the next unit pushed, which carries it, has gone out. One
+	/// that never goes out, dropped by [`Self::clear`] or with no packets, counts nothing.
+	pub fn bill(&mut self, charge: Charge) {
+		self.charges.push(charge);
+	}
+
 	/// Send the program tables ahead of the next unit pushed, under its deadline. Program
 	/// tables ride one lane, so each version goes out after the one before it, and a revision
 	/// is one boundary: no unit of a stream they add goes out before them, and their clock PID
@@ -833,7 +887,7 @@ impl Schedule {
 
 	/// Queue an access unit of one frame.
 	#[cfg(test)]
-	pub fn push(&mut self, pid: u16, timing: Timing, packets: Vec<u8>, keyframe: bool) -> anyhow::Result<()> {
+	pub fn push(&mut self, pid: u16, timing: Timing, packets: Vec<u8>, keyframe: bool) -> Result<()> {
 		self.push_frames(pid, timing, packets, keyframe, Vec::new())
 	}
 
@@ -848,7 +902,7 @@ impl Schedule {
 		packets: Vec<u8>,
 		keyframe: bool,
 		frames: Vec<(u128, usize)>,
-	) -> anyhow::Result<()> {
+	) -> Result<()> {
 		self.queue(pid, timing, None, packets, keyframe, frames)
 	}
 
@@ -867,7 +921,7 @@ impl Schedule {
 		packets: Vec<u8>,
 		keyframe: bool,
 		frames: Vec<(u128, usize)>,
-	) -> anyhow::Result<()> {
+	) -> Result<()> {
 		let timing = Timing {
 			by: decode.max(place),
 			decode,
@@ -883,10 +937,11 @@ impl Schedule {
 		packets: Vec<u8>,
 		keyframe: bool,
 		mut frames: Vec<(u128, usize)>,
-	) -> anyhow::Result<()> {
+	) -> Result<()> {
+		let charges = std::mem::take(&mut self.charges);
 		if let Some(tables) = self.lead.take() {
-			let pmt = self.pmt.context("program tables without a PMT PID")?;
-			let clock = self.psi.as_ref().context("program tables never set")?.clock;
+			let pmt = self.pmt.ok_or(Error::Unset)?;
+			let clock = self.psi.as_ref().ok_or(Error::Unset)?.clock;
 			// Later tables wait too, so each version follows the one before it.
 			let mut holds = tables.added;
 			holds.extend([pid, pmt]);
@@ -931,10 +986,9 @@ impl Schedule {
 			// A placed PES's frames leave the buffer one by one as it streams in, so only each
 			// has to fit; any other unit arrives whole by its first frame's decode time.
 			if let Some(largest) = frames.iter().map(|&(_, bytes)| bytes).max().filter(|_| place.is_some()) {
-				anyhow::ensure!(
-					largest <= size,
-					"MPEG-TS PES on PID {pid} holds a {largest}-byte frame, exceeding its {size}-byte decoder buffer"
-				);
+				if largest > size {
+					return Err(Error::Frame { pid, largest, size });
+				}
 			} else if bytes > size {
 				// Only the error names the elementary size, so the PES headers are parsed here.
 				let headers: usize = on_pid()
@@ -944,9 +998,12 @@ impl Schedule {
 					.map(|body| 9 + usize::from(body[8]))
 					.sum();
 				let elementary = bytes.saturating_sub(headers);
-				anyhow::bail!(
-					"MPEG-TS access unit on PID {pid} has {elementary} payload bytes ({bytes} bytes with PES headers), exceeding its {size}-byte decoder buffer"
-				);
+				return Err(Error::Unit {
+					pid,
+					elementary,
+					bytes,
+					size,
+				});
 			}
 		}
 		// The deadline its last frame would have on its own.
@@ -959,6 +1016,7 @@ impl Schedule {
 		unit.keyframe = keyframe;
 		unit.place = place;
 		unit.frames = frames;
+		unit.charges = charges;
 		Ok(())
 	}
 
@@ -989,6 +1047,7 @@ impl Schedule {
 			frames: Vec::new(),
 			runs,
 			tables,
+			charges: Vec::new(),
 		});
 		self.units.back_mut().expect("the unit just pushed")
 	}
@@ -1040,9 +1099,22 @@ impl Schedule {
 				.is_none_or(|horizon| self.next.is_some_and(|next| next > horizon))
 	}
 
+	/// Move each unit that has gone out whole into its decoder buffer, returning the charges
+	/// of the frames it carries.
+	fn retire(&mut self) -> Vec<Charge> {
+		let mut charges = Vec::new();
+		for unit in self.units.iter_mut().filter(|unit| unit.remaining() == 0) {
+			self.decoding.extend(unit.leaving());
+			charges.append(&mut unit.charges);
+		}
+		self.units.retain(|unit| unit.remaining() > 0);
+		charges
+	}
+
 	/// Drop everything queued and start the grid afresh.
 	pub fn clear(&mut self) {
 		self.units.clear();
+		self.charges.clear();
 		self.decoding.clear();
 		self.transport.clear();
 		self.system = None;
@@ -1116,7 +1188,7 @@ impl Schedule {
 	/// `known` is the first slot a unit still to be pushed could go out in ([`Self::release`]),
 	/// which settles every slot before it; `None` means nothing more is coming, so every
 	/// queued unit goes out and the clock runs on to the last decode time.
-	pub fn next(&mut self, known: Option<u128>) -> anyhow::Result<Option<Slot>> {
+	pub fn next(&mut self, known: Option<u128>) -> Result<Option<Slot>> {
 		if known.is_none() && self.is_empty() {
 			return Ok(None);
 		}
@@ -1204,10 +1276,7 @@ impl Schedule {
 		let tables = (0..self.units.len())
 			.filter(|&i| self.units[i].remaining() == 0 && self.enforce(i, index))
 			.count();
-		for unit in self.units.iter().filter(|unit| unit.remaining() == 0) {
-			self.decoding.extend(unit.leaving());
-		}
-		self.units.retain(|unit| unit.remaining() > 0);
+		let charges = self.retire();
 		Ok(Some(Slot {
 			index,
 			discontinuity,
@@ -1221,12 +1290,13 @@ impl Schedule {
 			clock,
 			tables,
 			begun,
+			charges,
 		}))
 	}
 
 	/// Plan the packets and null positions together, against the actual transport clock.
 	/// Decoder removal and the delivery deadline stay exact even between PCR grid points.
-	fn padded(&mut self, index: u128, rate: u64) -> anyhow::Result<Slot> {
+	fn padded(&mut self, index: u128, rate: u64) -> Result<Slot> {
 		let first = packets_before(index, rate);
 		let count = (packets_before(index + 1, rate) - first).max(1) as usize;
 		let time = |position: usize| {
@@ -1246,6 +1316,7 @@ impl Schedule {
 			clock: self.clock,
 			tables: 0,
 			begun: 0,
+			charges: Vec::new(),
 		};
 		let clock = self.clock.filter(|pid| self.buffers.contains_key(pid));
 		let mut holding = self.holding(|i| self.units[i].remaining());
@@ -1574,10 +1645,7 @@ impl Schedule {
 			}) {
 			return Err(self.missed(unit.pid, index, rate));
 		}
-		for unit in self.units.iter().filter(|unit| unit.remaining() == 0) {
-			self.decoding.extend(unit.leaving());
-		}
-		self.units.retain(|unit| unit.remaining() > 0);
+		out.charges = self.retire();
 		self.busy_slots = if out.nulls > 0 { 0 } else { self.busy_slots + 1 };
 		Ok(out)
 	}
@@ -1585,7 +1653,7 @@ impl Schedule {
 	/// The error for a unit on `pid` that misses its decode deadline at `rate`, naming what
 	/// would carry it: the delay at which it goes as far ahead as its decoder buffer holds,
 	/// where the window cut it short, else a faster multiplex.
-	fn missed(&self, pid: u16, index: u128, rate: u64) -> anyhow::Error {
+	fn missed(&self, pid: u16, index: u128, rate: u64) -> Error {
 		// Every slot since the last with a spare null position went out full, so the packets
 		// released by now and still unsent built up over that stretch alone. Units not yet
 		// released are the delay's lookahead, not a deficit.
@@ -1604,13 +1672,13 @@ impl Schedule {
 			.map(|buffer| slot(buffer.reach.as_nanos()))
 			.filter(|&reach| reach > self.window);
 		match reach {
-			Some(reach) => anyhow::anyhow!(
-				"MPEG-TS output missed a decode deadline on PID {pid} at {rate} b/s (estimated needed rate {needed} b/s); raise the delay to {:?}, which sends it as far ahead as its decoder buffer holds, or the multiplex rate",
-				PCR_INTERVAL * u32::try_from(reach).unwrap_or(u32::MAX)
-			),
-			None => anyhow::anyhow!(
-				"MPEG-TS output missed a decode deadline on PID {pid} at {rate} b/s (estimated needed rate {needed} b/s), sent as far ahead as its decoder buffer holds; raise the multiplex rate"
-			),
+			Some(reach) => Error::Late {
+				pid,
+				rate,
+				needed,
+				delay: PCR_INTERVAL * u32::try_from(reach).unwrap_or(u32::MAX),
+			},
+			None => Error::Rate { pid, rate, needed },
 		}
 	}
 
@@ -3350,6 +3418,7 @@ mod tests {
 			clock: None,
 			tables: 0,
 			begun: 0,
+			charges: Vec::new(),
 		};
 		let mut null = unit(0, 1);
 		(null[1], null[2]) = (0x1f, 0xff);
@@ -3392,6 +3461,7 @@ mod tests {
 			clock: None,
 			tables: 0,
 			begun: 0,
+			charges: Vec::new(),
 		};
 		let mut null = unit(0, 1);
 		(null[1], null[2]) = (0x1f, 0xff);

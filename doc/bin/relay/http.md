@@ -13,7 +13,7 @@ operational ones that must stay private.
 | Endpoint | Returns |
 | --- | --- |
 | `GET /announced/<prefix>` | Broadcasts announced under the prefix, named relative to it. |
-| `GET /fetch/<broadcast>/<track>?group=N` | One group from the cache, the latest by default, or `404` if the track has no such group. Useful for catch-up and debugging. |
+| `GET /fetch/<broadcast>/<track>?group=N` | One group from the cache: the one that starts at `N` in the track's timescale, the latest by default, or `404` if the track has no such group. Useful for catch-up and debugging. |
 | `GET /certificate.sha256` | The fingerprint of the first configured TLS certificate, for pinning a self-signed dev certificate. |
 | `GET /health` | `200 ok`, unauthenticated, for load balancers. |
 
@@ -96,10 +96,20 @@ A few worth alerting on:
   `transport`, `application`, `expired`): admitted sessions that ended
   abnormally. A clean close is not a failure. Reported only while
   [stats](/bin/relay/config#stats) are enabled.
+- The moq-lite-07 [route layer](/concept/stats#presence), by `tier`, while
+  [stats](/bin/relay/config#stats) are enabled:
+  `moq_relay_route_changes_total` and `moq_relay_route_rewrites_total` (route
+  changes a peer caused, and the broadcasts each rewrote),
+  `moq_relay_route_withdrawals_total` by `direction` (`sent`, `received`) and
+  `kind` (`dead`, `drain`), `moq_relay_route_refusals_total` by `reason`
+  (`path`, `scope`, `looped`), and `moq_relay_route_sessions_closed_total` by
+  `kind` (`stalled`, `overrun`, `malformed`, `role`, `unasked`, `regressed`,
+  `other`). Compare a canary relay's rates with its neighbours' while rolling
+  out a release.
 - `moq_relay_stale_bytes_total` and friends: content dropped for drifting past
   a subscriber's latency budget.
-- `moq_relay_draining_sessions`: sessions sent a GOAWAY during a
-  [shutdown drain](/bin/relay/config#shutdown) that have not left yet.
+- `moq_relay_draining_sessions`: sessions and dialed cluster links sent a GOAWAY
+  during a [shutdown drain](/bin/relay/config#shutdown) that have not left yet.
 - `moq_relay_panics_total`: bugs that closed one session instead of the
   relay. Each logs an error with the message and the session's span. A panic
   in a long-lived task (the origin, the cache governor, the certificate reload,

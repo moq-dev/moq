@@ -46,7 +46,7 @@ export type Input = {
  * The page learns of a stall after the ring does: up to five quanta late, in the worklet's next
  * state message.
  */
-export const STALL_SLACK_MS = 60;
+const STALL_SLACK_MS = 60;
 
 const median = (values: number[]): number | undefined => {
 	if (values.length === 0) return undefined;
@@ -62,7 +62,7 @@ export function percentile(values: number[], p: number): number | null {
 }
 
 /** Least-squares slope of `ys` over `xs`. Null with nothing to fit. */
-export function slope(xs: number[], ys: number[]): number | null {
+function slope(xs: number[], ys: number[]): number | null {
 	const n = xs.length;
 	if (n < 2) return null;
 	const mx = xs.reduce((a, b) => a + b, 0) / n;
@@ -77,10 +77,10 @@ export function slope(xs: number[], ys: number[]): number | null {
 }
 
 /** How far before a disturbance audio's resting point is read from. */
-export const REST_MS = 5000;
+const REST_MS = 5000;
 
 /** One codec frame of a row, the tolerance for audio being back where it rested. */
-export const frameMs = (row: Row): Ms => (row.codec === "aac" ? (1024 / row.rate) * 1000 : BUCKET_MS);
+const frameMs = (row: Row): Ms => (row.codec === "aac" ? (1024 / row.rate) * 1000 : BUCKET_MS);
 
 /**
  * The longest time audio took to return after a disturbance, in ms, or null when it never had a
@@ -126,7 +126,7 @@ export function recovery(
  * The ring starts stalled, before the page has a context to stamp that on, so a first change to
  * unstalled closes a span that opened before anything was recorded.
  */
-export function stallSpans(samples: Sample[]): { start: Ms; end: Ms }[] {
+function stallSpans(samples: Sample[]): { start: Ms; end: Ms }[] {
 	const changes = samples.flatMap((s) => s.stalls ?? []);
 	const spans: { start: Ms; end: Ms }[] = [];
 	let open: Ms | undefined = changes[0]?.stalled === false ? Number.NEGATIVE_INFINITY : undefined;

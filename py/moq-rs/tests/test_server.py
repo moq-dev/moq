@@ -130,7 +130,7 @@ async def test_client_reconnects_and_resumes_announcements():
                     initial=timedelta(milliseconds=50),
                     multiplier=2,
                     max=timedelta(milliseconds=200),
-                    timeout=timedelta(0),
+                    timeout=None,
                 ),
             ) as client:
                 session = client.session
@@ -139,7 +139,8 @@ async def test_client_reconnects_and_resumes_announcements():
                 assert state.connects == 1
                 assert session.stats().version is not None
 
-                # Kill the transport under the client, like a relay restart.
+                # Kill the transport under the client, like a relay restart. CONNECTED
+                # means the peer accepted the session, so the drop redials.
                 await asyncio.wait_for(accepted.wait(), timeout=10)
                 sessions[0].cancel(0)
 
@@ -189,7 +190,7 @@ async def test_session_state_names_a_failing_first_dial():
                 initial=timedelta(milliseconds=50),
                 multiplier=2,
                 max=timedelta(milliseconds=200),
-                timeout=timedelta(0),
+                timeout=None,
             ),
         )
         async with client:
@@ -367,7 +368,7 @@ async def test_client_connection_knobs():
                     keep_alive=timedelta(0),
                     gso=False,
                     mtu_discovery=True,
-                    congestion_control=moq.CongestionControl.LOSS,
+                    congestion_control=moq.CongestionControl.cubic(),
                     keylog=False,
                 ),
                 websocket=moq.WebSocketConfig(enabled=False),
@@ -584,7 +585,7 @@ async def test_client_context_keeps_the_body_error():
                     reader = await asyncio.wait_for(consumer.subscribe_track("data"), timeout=5.0)
                     reading.append(asyncio.create_task(drain(reader)))
                     demand = track.demand()
-                    while await asyncio.wait_for(demand.wanted_changed(), timeout=5.0) is None:
+                    while not await asyncio.wait_for(demand.wanted_changed(), timeout=5.0):
                         pass
                     raise ZeroDivisionError("boom")
             # The error exits the context without draining, but the session is over.

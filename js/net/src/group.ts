@@ -25,11 +25,11 @@ import {
 } from "./frame.ts";
 import { type Expiry, type GroupRecover, hooks, type ReadGroupFrame, type Replacement } from "./internal.ts";
 import { Queue } from "./queue.ts";
-import { rescale } from "./rescale.ts";
+import { rescaleIn } from "./rescale.ts";
 import type { Timestamp } from "./time.ts";
 import type { Info as TrackInfo } from "./track.ts";
+import { checkKey, RESERVED } from "./util/key.ts";
 import { MAX_FRAME_BYTES } from "./util/limits.ts";
-import { checkSequence, RESERVED } from "./util/sequence.ts";
 
 // A live tail budget, including a conservative charge for each frame's object and queue slot.
 const TAIL_BYTES = 32 * 1024 * 1024;
@@ -42,7 +42,7 @@ function frameBytes(frame: Frame): number {
 }
 
 /**
- * A frame buffered in a group: its presentation {@link Timestamp}, if any, and payload bytes.
+ * A frame buffered in a group: its presentation {@link Timestamp} and payload bytes.
  *
  * The timestamp carries its own scale, so a track can pick its units; the wire layer
  * converts it into the track's negotiated timescale.
@@ -51,11 +51,12 @@ export interface Frame {
 	/** The plain payload, shared across readers even when the track stores compressed bytes. */
 	payload: Uint8Array;
 	/**
-	 * Presentation timestamp, present exactly when the track has a timescale. A frame on a
-	 * track without one is untimed and omits it; a write that disagrees with its track is
-	 * refused with {@link TimestampMismatch}.
+	 * Presentation timestamp at the track's timescale. A scale-less track has no time, so its
+	 * frame carries {@link Timestamp.unscaled} at its group's key instead. A write that
+	 * disagrees with its track, or names another group's key, is refused with
+	 * {@link TimestampMismatch}.
 	 */
-	timestamp?: Timestamp;
+	timestamp: Timestamp;
 	/**
 	 * When the frame landed in this node's group, on the installed clock.
 	 *
@@ -71,10 +72,10 @@ function headShed(frame: Frame | undefined): boolean {
 	return frame instanceof Chunked && frame.base > 0;
 }
 
-/** Options for a sequence-aware frame read. */
+/** Options for an index-aware frame read. */
 export interface ReadOptions {
 	/**
-	 * The lowest sequence number the caller wants; defaults to the whole group.
+	 * The lowest frame index the caller wants; defaults to the whole group.
 	 *
 	 * Frames below it are discarded instead of returned. The group still starts at frame 0,
 	 * so this is a reader filter, not a missing prefix.
@@ -84,34 +85,37 @@ export interface ReadOptions {
 
 /** Immutable group metadata. */
 export interface Info {
-	/** Sequence number of this group within its track. */
-	sequence: bigint;
+	/** Where this group starts, in its track's timescale: its key on the track. */
+	start: bigint;
 }
 
 /** Reactive backing state shared by the group producer and one consumer. */
 class GroupState {
-	readonly sequence: bigint;
+	readonly start: bigint;
 	frames = new Signal(new Queue<Frame>());
 	closed = new Once<Error | null>();
+	// Where the group ends, in its track's timescale, once its producer finished it whole: set
+	// before a clean `closed`, and undefined when it only closed.
+	end?: bigint;
 	total = new Signal<number>(0); // The total number of frames in the group thus far
 
-	// Absolute sequence of the frame at the front of `frames`, advanced by a read: the
-	// sequence the next read returns.
-	start = 0;
+	// Index of the frame at the front of `frames`, advanced by a read: the index the next
+	// read returns.
+	index = 0;
 	// The wire offset this copy began at; unlike `start`, reads never advance it.
 	offset = 0;
 
 	cacheBytes = 0;
-	// What the source copy bills its track's cache pool, while cached. A mirror shares its
+	// The source copy's access record in its track's cache, while cached. A mirror shares its
 	// source's, so its reads count as accesses.
 	charge?: Charge;
 	compressed?: boolean;
 	flate?: Compression;
-	// The owning track's info, which every frame's timestamp must `rescale` to: a timed track's frames
-	// carry a timestamp its scale holds, an untimed track's carry none. Undefined for a group
-	// no track has claimed yet, which takes either.
+	// The owning track's info, which every frame's timestamp must `rescaleIn` to: a timed track's
+	// frames carry a timestamp its scale holds, a scale-less track's the unscaled group key.
+	// Undefined for a group no track has claimed yet, which takes either.
 	track?: TrackInfo;
-	// The first frame's timestamp, retained after reads. Media time only: an untimed group
+	// The first frame's timestamp, retained after reads. Media time only: a scale-less group
 	// never has one, so it says nothing about whether a frame was written.
 	timestamp?: Timestamp;
 	// The highest frame PTS, including when the decode-order tail presents earlier.
@@ -136,8 +140,8 @@ class GroupState {
 	// one tees from where that one stopped, so the frames below came from the failed copy.
 	from = 0;
 
-	constructor(sequence: bigint) {
-		this.sequence = sequence;
+	constructor(start: bigint) {
+		this.start = start;
 	}
 }
 
@@ -153,22 +157,24 @@ class Landed implements Frame {
 	get payload(): Uint8Array {
 		return this.#frame.payload;
 	}
-	get timestamp(): Timestamp | undefined {
+	get timestamp(): Timestamp {
 		return this.#frame.timestamp;
 	}
 }
 
-// Refuse a frame whose timestamp the track's timeline refuses.
-function checkTimed(track: TrackInfo | undefined, frame: Frame) {
-	if (track) rescale(track, frame.timestamp);
+// Refuse a frame whose timestamp the track's timeline refuses, or that names another group's key.
+function checkTimed(track: TrackInfo | undefined, start: bigint, frame: Frame) {
+	if (track) rescaleIn(track, frame.timestamp, start);
 }
 
 function appendFrame(state: GroupState, frame: Frame) {
 	if (state.closed.peek() !== undefined) throw new Error("group is closed");
 
-	state.timestamp ??= frame.timestamp;
-	if (frame.timestamp === undefined) state.latest = undefined;
-	else if (state.latest === undefined || state.latest.isBefore(frame.timestamp)) state.latest = frame.timestamp;
+	// Media time only: a scale-less frame's key says nothing about when it presents.
+	const timed = frame.timestamp.scale === undefined ? undefined : frame.timestamp;
+	state.timestamp ??= timed;
+	if (timed === undefined) state.latest = undefined;
+	else if (state.latest === undefined || state.latest.isBefore(timed)) state.latest = timed;
 	state.frames.mutate((frames) => {
 		frames.push(frame);
 	});
@@ -177,7 +183,7 @@ function appendFrame(state: GroupState, frame: Frame) {
 	for (const fn of state.progress) fn(state.total.peek());
 }
 
-let makeDemand: (sequence: bigint, wanted: Getter<boolean>, state: GroupState) => Demand;
+let makeDemand: (start: bigint, wanted: Getter<boolean>, state: GroupState) => Demand;
 
 /**
  * A watch-only view of a group's mirror readers, including coalesced fetches.
@@ -185,19 +191,19 @@ let makeDemand: (sequence: bigint, wanted: Getter<boolean>, state: GroupState) =
  * @internal The sessions' own fetch coalescing is its only consumer.
  */
 export class Demand {
-	/** The group sequence this handle watches. */
-	readonly sequence: bigint;
+	/** The start of the group this handle watches. */
+	readonly start: bigint;
 	#wanted: Getter<boolean>;
 	#state: GroupState;
 
-	private constructor(sequence: bigint, wanted: Getter<boolean>, state: GroupState) {
-		this.sequence = sequence;
+	private constructor(start: bigint, wanted: Getter<boolean>, state: GroupState) {
+		this.start = start;
 		this.#wanted = wanted;
 		this.#state = state;
 	}
 
 	static {
-		makeDemand = (sequence, wanted, state) => new Demand(sequence, wanted, state);
+		makeDemand = (start, wanted, state) => new Demand(start, wanted, state);
 	}
 
 	/**
@@ -223,8 +229,8 @@ export class Demand {
  * @public
  */
 export interface Finished {
-	/** Sequence number of this group within its track. */
-	readonly sequence: bigint;
+	/** Where this group starts, in its track's timescale: its key on the track. */
+	readonly start: bigint;
 	/** Settles once the group closes: `null` on a clean close, or the abort {@link Error}. */
 	readonly closed: GetPromise<Error | null>;
 	/** A read handle for this group. */
@@ -237,8 +243,8 @@ export interface Finished {
  * @public
  */
 export class Producer {
-	/** Sequence number of this group within its track. */
-	readonly sequence: bigint;
+	/** Where this group starts, in its track's timescale: its key on the track. */
+	readonly start: bigint;
 
 	#state: GroupState;
 	// Each open mirror, with whether its reader will still read it.
@@ -270,11 +276,11 @@ export class Producer {
 	// keeps its mirrors open for the duplicate that takes over to tee into.
 	#holds = 0;
 
-	constructor(sequence: bigint) {
-		if (checkSequence(sequence) >= RESERVED) throw new RangeError(`group sequence out of range: ${sequence}`);
-		this.#state = new GroupState(sequence);
-		this.sequence = sequence;
-		this.#demand = makeDemand(sequence, this.#wanted, this.#state);
+	constructor(start: bigint) {
+		if (checkKey(start) >= RESERVED) throw new RangeError(`group start out of range: ${start}`);
+		this.#state = new GroupState(start);
+		this.start = start;
+		this.#demand = makeDemand(start, this.#wanted, this.#state);
 	}
 
 	static {
@@ -283,7 +289,7 @@ export class Producer {
 			if (state.compressed === compressed) return;
 			if (state.compressed !== undefined)
 				throw new ProtocolViolation("group compression disagrees with its track");
-			if (compressed && state.start !== 0) throw new ProtocolViolation("compressed group lacks its prefix");
+			if (compressed && state.index !== 0) throw new ProtocolViolation("compressed group lacks its prefix");
 			if (compressed && Array.from(state.frames.peek()).some((frame) => frame instanceof Chunked))
 				throw new ProtocolViolation("compressed group holds a streamed frame");
 			// A frame written before the track chose compression is encoded and sent whole too.
@@ -296,12 +302,9 @@ export class Producer {
 			state.flate = flate;
 			const frames = Array.from(state.frames.peek(), (frame) => flate.push(frame));
 			state.frames.set(new Queue(frames));
-			const bytes = frames.reduce((bytes, frame) => bytes + frameBytes(frame), 0);
-			if (bytes > state.cacheBytes) state.charge?.bill(bytes - state.cacheBytes);
-			else state.charge?.sub(state.cacheBytes - bytes);
-			state.cacheBytes = bytes;
+			state.cacheBytes = frames.reduce((bytes, frame) => bytes + frameBytes(frame), 0);
 			for (const mirror of group.#mirrors?.keys() ?? []) {
-				mirror.frames.set(new Queue(frames.slice(mirror.start - state.start)));
+				mirror.frames.set(new Queue(frames.slice(mirror.index - state.index)));
 				mirror.flate = flate;
 				mirror.compressed = true;
 			}
@@ -309,6 +312,11 @@ export class Producer {
 			if (state.closed.peek() !== undefined) flate.finish();
 		};
 		hooks.groupOffset = (group) => group.#state.offset;
+		hooks.groupHeadless = (group) => group.#state.index > 0 || headShed(group.#state.frames.peek().first);
+		hooks.groupMayStart = (group) => {
+			const state = group.#state;
+			return state.offset === 0 && state.total.peek() === 0 && state.closed.peek() === undefined;
+		};
 		hooks.holdGroup = (group) => {
 			group.#holds++;
 			let held = true;
@@ -322,16 +330,14 @@ export class Producer {
 			const error = failed.#state.closed.peek();
 			if (!(error instanceof Error)) throw new Error("group has not failed");
 			const state = next.#state;
-			// The failed copy's frames the continued mirrors hold, once each though mirrors share them.
-			const kept = new Set<Frame>();
 			for (const [mirror, reads] of failed.#mirrors ?? []) {
 				failed.#unmirror(mirror);
 				// The successor continues a mirror from the frame it reached, so it must hold that
 				// frame from its start. Compression binds a group to its prefix, so a compressed
 				// successor starts at 0.
 				if (mirror.closed.peek() !== undefined) continue;
-				const lost = state.start === mirror.total.peek() && headShed(state.frames.peek().first);
-				if (state.closed.peek() !== undefined || state.start > mirror.total.peek() || lost) {
+				const lost = state.index === mirror.total.peek() && headShed(state.frames.peek().first);
+				if (state.closed.peek() !== undefined || state.index > mirror.total.peek() || lost) {
 					mirror.closed.set(error);
 					continue;
 				}
@@ -346,17 +352,13 @@ export class Producer {
 					mirror.closed.set(evicted());
 					continue;
 				}
-				for (const frame of mirror.frames.peek()) kept.add(frame);
 				mirror.from = mirror.total.peek();
 				mirror.charge = state.charge;
 				if (state.compressed) mirror.flate = state.flate;
-				let index = state.start;
+				let index = state.index;
 				for (const frame of state.frames.peek()) if (index++ >= mirror.from) appendFrame(mirror, frame);
 				next.#attach(mirror, reads);
 			}
-			let bytes = 0;
-			for (const frame of kept) bytes += frameBytes(frame);
-			return bytes;
 		};
 		hooks.startGroup = (group, start) => {
 			if (!Number.isSafeInteger(start) || start < 0) throw new RangeError("invalid group frame start");
@@ -364,7 +366,7 @@ export class Producer {
 			if (state.total.peek() !== 0 || state.closed.peek() !== undefined || group.#mirrors?.size)
 				throw new Error("group already started");
 			if (start !== 0 && state.compressed) throw new ProtocolViolation("compressed group lacks its prefix");
-			state.start = state.offset = start;
+			state.index = state.offset = start;
 			state.total.set(start);
 		};
 		hooks.writeGroupFrame = (group, frame, inflated) => group.#writeFrame(frame, inflated);
@@ -382,7 +384,7 @@ export class Producer {
 			if (state.track !== undefined && (state.track.timescale != null) === timed) return;
 			// Another track already holds it to the opposite timedness, empty or not.
 			if (state.track !== undefined) throw new TimestampMismatch();
-			for (const frame of state.frames.peek()) checkTimed(track, frame);
+			for (const frame of state.frames.peek()) checkTimed(track, state.start, frame);
 			state.track = track;
 		};
 		hooks.admitGroupStart = (group, admit) => {
@@ -398,23 +400,20 @@ export class Producer {
 			if (state.offset !== 0) return false;
 			const first = state.frames.peek().first;
 			// A shed front, whole frames or the first frame's head, cannot be replayed.
-			if (state.start > 0 || headShed(first)) return true;
+			if (state.index > 0 || headShed(first)) return true;
 			if (first === undefined) return false;
 			const head = payloadBytes(first);
 			const bytes = state.flate?.stored ?? state.cacheBytes - state.frames.peek().length * FRAME_BYTES;
 			return bytes - head > head * ratio;
 		};
 		hooks.chargeGroup = (group, charge) => {
-			const state = group.#state;
-			state.charge = charge;
-			charge?.bill(state.cacheBytes);
+			group.#state.charge = charge;
 		};
-		hooks.shedGroup = (group, debt, cap, readers) => group.#shed(debt, cap, readers);
 		hooks.limitGroup = (group, frames) => {
 			// A closed group takes no more frames, but one already past the cap still
 			// contradicts the end.
 			if (group.#state.total.peek() > frames) {
-				throw new ProtocolViolation(`group ${group.sequence} already holds a frame past the track's end`);
+				throw new ProtocolViolation(`group ${group.start} already holds a frame past the track's end`);
 			}
 			group.#limit = frames;
 		};
@@ -442,7 +441,7 @@ export class Producer {
 	 * @internal Track fan-out and fetch coalescing only. Use {@link consume} instead.
 	 */
 	mirror(): Consumer {
-		const dst = new GroupState(this.sequence);
+		const dst = new GroupState(this.start);
 		dst.timestamp = this.#state.timestamp;
 		dst.latest = this.#state.latest;
 		dst.flate = this.#state.flate;
@@ -450,23 +449,24 @@ export class Producer {
 		dst.charge = this.#state.charge;
 		// A track restamps its own mirror with when the group joined it.
 		dst.arrived = this.#state.arrived;
-		if (this.#state.start === this.#state.offset && !headShed(this.#state.frames.peek().first)) {
+		if (this.#state.index === this.#state.offset && !headShed(this.#state.frames.peek().first)) {
 			for (const frame of this.#state.frames.peek()) appendFrame(dst, frame);
 		} else {
 			dst.flate = undefined;
 			const closed = this.#state.closed.peek();
 			dst.closed.set(closed instanceof Error ? closed : evicted());
 		}
-		dst.start = dst.closed.peek() instanceof Error ? this.#state.offset : this.#state.start;
+		dst.index = dst.closed.peek() instanceof Error ? this.#state.offset : this.#state.index;
 		dst.offset = this.#state.offset;
 		// The replay only covers what is still buffered, so the count has to come from the
-		// source: it is what names a frame's absolute sequence, and what a publisher reads
+		// source: it is what names a frame's absolute index, and what a publisher reads
 		// to resolve the live edge.
 		dst.total.set(this.#state.total.peek());
 
 		if (dst.closed.peek() !== undefined) return makeConsumer(dst);
 		const closed = this.#state.closed.peek();
 		if (closed !== undefined) {
+			dst.end = this.#state.end;
 			dst.closed.set(closed);
 			return makeConsumer(dst);
 		}
@@ -568,7 +568,7 @@ export class Producer {
 				if (this.#open !== open) throw new Error("group is closed");
 				const bytes = entry.write(chunk);
 				this.#state.cacheBytes += bytes;
-				this.#state.charge?.add(bytes);
+				this.#state.charge?.touch();
 				this.#trim();
 				this.#state.charge?.settle();
 			},
@@ -576,7 +576,7 @@ export class Producer {
 				if (this.#open !== open) throw new Error("group is closed");
 				this.#open = undefined;
 				entry.arrived = now();
-				this.#state.charge?.recordWrite();
+				this.#state.charge?.touch();
 				entry.done.set(null);
 				// Wake whole-frame readers waiting for it to complete.
 				this.#state.frames.mutate(() => {});
@@ -595,6 +595,19 @@ export class Producer {
 		if (this.#state.flate && (inflated === undefined ? !encodable(size) : size > MAX_FRAME_BYTES))
 			throw new FrameTooLarge();
 		if ((inflated ?? 0) > MAX_FRAME_BYTES) throw new FrameTooLarge();
+		// Held in the track's timescale, rounded down, as Rust's `write_frame` holds it: two starts
+		// within one unit tie, as they do once on the wire.
+		const track = this.#state.track;
+		if (track) {
+			const rescaled = rescaleIn(track, frame.timestamp, this.#state.start);
+			// An unscaled timestamp is a key, which may lie past what a number holds.
+			const moved =
+				rescaled.scale !== frame.timestamp.scale ||
+				(rescaled.scale === undefined
+					? rescaled.key !== frame.timestamp.key
+					: rescaled.value !== frame.timestamp.value);
+			if (moved) frame = { payload: frame.payload, timestamp: rescaled };
+		}
 		const commits = this.#admit(frame);
 		if (inflated !== undefined && (!this.#state.flate || !Number.isSafeInteger(inflated) || inflated < 0))
 			throw new ProtocolViolation("unexpected inflated frame size");
@@ -614,13 +627,13 @@ export class Producer {
 		if (this.#open) throw new Error("a frame is still being written");
 		if (this.#state.total.peek() === Number.MAX_SAFE_INTEGER)
 			throw new ProtocolViolation("group frame index exceeds the safe integer range");
-		checkTimed(this.#state.track, frame);
+		checkTimed(this.#state.track, this.#state.start, frame);
 		if (this.#limit !== undefined && this.#state.total.peek() >= this.#limit) {
 			throw new Error(`frame ${this.#state.total.peek()} is past the track's end`);
 		}
 		// Frame 0 must fit between its neighbors in every track it joined, checked before
 		// any of them records it, so a refusal leaves the group and its tracks as they were.
-		if (this.#admits && frame.timestamp !== undefined && this.#state.total.peek() === 0) {
+		if (this.#admits && frame.timestamp.scale !== undefined && this.#state.total.peek() === 0) {
 			const start = frame.timestamp;
 			return this.#admits.map((admit) => admit(start));
 		}
@@ -628,9 +641,8 @@ export class Producer {
 	}
 
 	#append(frame: Frame, commits: (() => void)[] | undefined) {
-		const bytes = frameBytes(frame);
-		this.#state.cacheBytes += bytes;
-		this.#state.charge?.add(bytes);
+		this.#state.cacheBytes += frameBytes(frame);
+		this.#state.charge?.touch();
 		appendFrame(this.#state, frame);
 		if (commits) {
 			this.#admits = undefined;
@@ -644,7 +656,7 @@ export class Producer {
 			else if (index >= mirror.total.peek()) appendFrame(mirror, frame);
 		}
 		this.#trim();
-		// Past the frame's own bookkeeping: paying the track's debt may evict other groups.
+		// Past the frame's own bookkeeping: the track's idle scan may evict other groups.
 		this.#state.charge?.settle();
 	}
 
@@ -669,40 +681,13 @@ export class Producer {
 		this.#shedMirrors(bytes);
 	}
 
-	// Shed whole frames from the front toward the cache pool's `debt`, freeing about `cap` at
-	// most, for a group the debt cannot evict whole: one being read, or the live edge. A frame
-	// larger than what is left of the debt stays, with everything after it. An open group keeps
-	// its newest committed frame, for the reader about to take it, and any frame still being
-	// written. A finished group no longer tees into its mirrors, so it ends `readers`, the copies
-	// its track still holds, that had yet to take a shed frame. Returns the bytes freed. Mirrors
-	// Rust's `GroupState::shed`.
-	#shed(debt: number, cap: number, readers: Iterable<Consumer>): number {
-		const state = this.#state;
-		const closed = state.closed.peek();
-		if (closed instanceof Error) return 0;
-		const frames = state.frames.peek();
-		const last = frames.last;
-		const writing = last instanceof Chunked && last.done.peek() === undefined;
-		const keep = closed === null ? 0 : writing ? 2 : 1;
-		const bytes = state.cacheBytes;
-		while (frames.length > keep && bytes - state.cacheBytes < cap) {
-			const front = frames.first;
-			if (!front || (front instanceof Chunked && front.done.peek() === undefined)) break;
-			if (frameBytes(front) > debt - (bytes - state.cacheBytes)) break;
-			this.#shift();
-		}
-		this.#shedMirrors(bytes);
-		if (closed === null) for (const reader of readers) shedReader(reader, state.start);
-		return bytes - state.cacheBytes;
-	}
-
 	// Drop the front frame.
 	#shift(): void {
 		const state = this.#state;
 		const front = state.frames.peek().shift() as Frame;
 		state.cacheBytes -= frameBytes(front);
 		if (front instanceof Chunked) front.release();
-		state.start++;
+		state.index++;
 	}
 
 	// Release what the front shed since it held `bytes`, and end the mirrors that can no longer
@@ -711,14 +696,13 @@ export class Producer {
 		const state = this.#state;
 		const frames = state.frames.peek();
 		if (state.cacheBytes === bytes) return;
-		state.charge?.sub(bytes - state.cacheBytes);
-		state.flate?.shed(state.start);
+		state.flate?.shed(state.index);
 		const lost = headShed(frames.first);
 		for (const mirror of this.#mirrors?.keys() ?? []) {
 			// A mirror that has not taken the front frame can no longer read it from its start.
 			if (mirror.closed.peek() !== undefined) continue;
-			const front = Math.max(mirror.start, mirror.from);
-			if (front > state.start || (front === state.start && !lost)) continue;
+			const front = Math.max(mirror.index, mirror.from);
+			if (front > state.index || (front === state.index && !lost)) continue;
 			mirror.frames.set(new Queue());
 			mirror.cacheBytes = 0;
 			mirror.flate = undefined;
@@ -727,16 +711,24 @@ export class Producer {
 		}
 	}
 
-	/** True once the group has been closed. */
-	get isClosed(): boolean {
-		return this.#state.closed.peek() !== undefined;
+	/**
+	 * Ends the group without saying where it ends, returning it as {@link Finished}: every frame
+	 * written reaches its readers, but they can't tell the group is whole. Idempotent, as the
+	 * Rust `group::Producer::finish`.
+	 */
+	finish(): Finished {
+		this.#end(null);
+		return this;
 	}
 
 	/**
-	 * Marks the group complete, returning it as {@link Finished}: no more frames will be written.
-	 * Idempotent.
+	 * Ends the group whole at `end`, the exclusive end of its presentation in the track's
+	 * timescale, returning it as {@link Finished}, as the Rust `group::Producer::finish_at`. An
+	 * `end` at or before the group's start throws {@link TimestampMismatch}.
 	 */
-	finish(): Finished {
+	finishAt(end: bigint): Finished {
+		if (end <= this.start) throw new TimestampMismatch();
+		if (this.#state.closed.peek() === undefined) this.#state.end = end;
 		this.#end(null);
 		return this;
 	}
@@ -787,15 +779,16 @@ export class Producer {
 		const outcome = this.#state.closed.peek();
 		if (outcome === undefined) return;
 		for (const mirror of this.#mirrors?.keys() ?? []) {
-			if (mirror.closed.peek() === undefined) mirror.closed.set(outcome);
+			if (mirror.closed.peek() === undefined) {
+				if (outcome === null) mirror.end = this.#state.end;
+				mirror.closed.set(outcome);
+			}
 			this.#unmirror(mirror);
 		}
 	}
 }
 
 let makeConsumer: (state: GroupState) => Consumer;
-// End a track-held copy of a finished group that had yet to take frame `start - 1`, now shed.
-let shedReader: (group: Consumer, start: number) => void;
 
 // A replacement copy asked for on behalf of one consumer, settled or still out.
 interface Attempt {
@@ -980,8 +973,8 @@ class CombinedClosed implements GetPromise<Error | null> {
  * @public
  */
 export class Consumer {
-	/** Sequence number of this group within its track. */
-	readonly sequence: bigint;
+	/** Where this group starts, in its track's timescale: its key on the track. */
+	readonly start: bigint;
 
 	#state: GroupState;
 	// The copy it was mirrored from, which that copy's cache evicts.
@@ -1002,6 +995,8 @@ export class Consumer {
 	#expired?: Expired;
 	// Closed by its reader, which ends it whatever is left unread.
 	#released = false;
+	// Settles once this reader is released, made only when something waits on it.
+	#releasing?: PromiseWithResolvers<void>;
 	// The arrival of the copy first read, kept once a replacement copy is adopted.
 	#arrived?: Instant;
 	// The last frame handed out to stream before it completed. Cut short, it is lost, so no
@@ -1011,7 +1006,7 @@ export class Consumer {
 	private constructor(state: GroupState) {
 		this.#state = state;
 		this.#mirrored = state;
-		this.sequence = state.sequence;
+		this.start = state.start;
 	}
 
 	/**
@@ -1024,6 +1019,14 @@ export class Consumer {
 	 */
 	get arrived(): Instant {
 		return this.#arrived ?? this.#state.arrived;
+	}
+
+	/**
+	 * Where the group ends in its track's timescale, once its producer finished it whole with
+	 * {@link Producer.finishAt}'s `end`: undefined while it is open, or when it ended without one.
+	 */
+	get end(): bigint | undefined {
+		return this.#state.closed.peek() === null ? this.#state.end : undefined;
 	}
 
 	/**
@@ -1106,6 +1109,11 @@ export class Consumer {
 		makeConsumer = (state) => new Consumer(state);
 		hooks.releaseGroupReader = (group, abort) => group.#release(abort);
 		hooks.groupDone = (group) => group.#done();
+		hooks.groupReleased = (group) => {
+			if (group.#released) return Promise.resolve();
+			group.#releasing ??= Promise.withResolvers<void>();
+			return group.#releasing.promise;
+		};
 		hooks.readsMirrored = (group) => group.#state === group.#mirrored;
 		hooks.groupReads = (group, reads) => group.#mirrored.reads?.(reads);
 		hooks.groupTimestamp = (group) =>
@@ -1116,6 +1124,7 @@ export class Consumer {
 		};
 		hooks.groupArrived = (group) => group.#state.arrived;
 		hooks.groupIndex = (group) => group.#index();
+		hooks.groupFirstFrame = (group) => group.#state.offset;
 		hooks.groupStarted = (group) =>
 			group.#state.total.peek() > group.#state.offset || group.#state.closed.peek() !== undefined;
 		hooks.groupFate = (group) => {
@@ -1131,6 +1140,7 @@ export class Consumer {
 		hooks.expireGroup = (group, expiry) => {
 			group.#expiry = expiry;
 		};
+		hooks.groupExpiry = (group) => group.#expiry;
 		hooks.groupFailed = (group) => group.#failed();
 		hooks.recoverGroup = (group, recover) => {
 			group.#recover = recover;
@@ -1141,12 +1151,7 @@ export class Consumer {
 		};
 		hooks.readGroupFrame = (group, compressed, from = 0) => group.#readFrame(from, compressed, true);
 		hooks.evictGroup = (group, lost) => group.#evict(lost);
-		shedReader = (group, start) => {
-			// A copy that took every shed frame keeps reading; one that had not lost them.
-			const state = group.#state;
-			if (state === group.#mirrored && Math.max(state.start, state.from) < start) group.#evict(evicted());
-		};
-		hooks.refreshGroup = (group) => group.#state.charge?.refresh();
+		hooks.refreshGroup = (group) => group.#state.charge?.touch();
 		hooks.onShedRead = (group, notify) => {
 			group.#state.shedRead = notify;
 		};
@@ -1191,7 +1196,7 @@ export class Consumer {
 			this.#fail(lost);
 		}
 		if (frames.length > 0) {
-			this.#state.start += frames.length;
+			this.#state.index += frames.length;
 		}
 		this.#state.cacheBytes = 0;
 		this.#state.flate = undefined;
@@ -1261,7 +1266,7 @@ export class Consumer {
 
 	// The next frame this consumer reads: past what it read, and what a copy it adopted repeats.
 	#index(): number {
-		return Math.max(this.#state.start, this.#skip);
+		return Math.max(this.#state.index, this.#skip);
 	}
 
 	// Give up a replacement still being asked for, or one nobody adopted: the group ended without it.
@@ -1277,9 +1282,9 @@ export class Consumer {
 	#adopt(replacement: Replacement): void {
 		const next = replacement.group.#state;
 		const index = this.#index();
-		if (next.start > index) {
+		if (next.index > index) {
 			replacement.discard();
-			this.#fail(new Error(`group ${this.sequence} cannot resume at frame ${index}`));
+			this.#fail(new Error(`group ${this.start} cannot resume at frame ${index}`));
 			return;
 		}
 		replacement.adopt();
@@ -1298,9 +1303,9 @@ export class Consumer {
 	#bufferedFrames(): Queue<Frame> {
 		const frames = this.#state.frames.peek();
 		// A resumed copy repeats the frames an earlier one already delivered.
-		while (this.#state.start < this.#skip && frames.length > 0) {
+		while (this.#state.index < this.#skip && frames.length > 0) {
 			frames.shift();
-			this.#state.start++;
+			this.#state.index++;
 		}
 		return frames;
 	}
@@ -1327,11 +1332,11 @@ export class Consumer {
 		if (front instanceof Chunked) {
 			if (take === "stream" || (take === "collect" && front.done.peek() === undefined)) {
 				frames.shift();
-				const sequence = this.#state.start++;
+				const index = this.#state.index++;
 				this.#streamed = front;
 				this.#refresh();
-				this.#state.charge?.refresh();
-				return { sequence, frame: front, chunks: makeFrameConsumer(sequence, front) };
+				this.#state.charge?.touch();
+				return { index, frame: front, chunks: makeFrameConsumer(index, front) };
 			}
 			if (front.done.peek() === undefined) return undefined;
 		}
@@ -1351,10 +1356,10 @@ export class Consumer {
 			throw verdict;
 		}
 		if (frames.length === 0 && this.#state.closed.peek() !== undefined) this.#state.flate = undefined;
-		const sequence = this.#state.start++;
+		const index = this.#state.index++;
 		this.#refresh();
-		this.#state.charge?.refresh();
-		return { sequence, frame, inflated: slice?.inflated };
+		this.#state.charge?.touch();
+		return { index, frame, inflated: slice?.inflated };
 	}
 
 	/** True once no further frames can be read: this handle or the group has closed, and every buffered frame is read. */
@@ -1363,11 +1368,6 @@ export class Consumer {
 			this.#verdict.peek() !== undefined ||
 			(this.#bufferedFrames().length === 0 && (this.#released || this.#settled()))
 		);
-	}
-
-	/** True once this handle or the group has been closed, regardless of whether buffered frames remain unread. Synchronous complement to the {@link closed} promise. */
-	get isClosed(): boolean {
-		return this.#verdict.peek() !== undefined || this.#released || this.#settled();
 	}
 
 	// Whether the copy being read ended, for good: a failure recovery may continue is not an end.
@@ -1379,7 +1379,7 @@ export class Consumer {
 	/**
 	 * How many frames the group has held, including any already read.
 	 *
-	 * It is also the next frame's sequence number, so `frameCount - 1` names the newest
+	 * It is also the next frame's index, so `frameCount - 1` names the newest
 	 * frame written so far. A publisher snapshots it to resolve the track's live edge.
 	 */
 	get frameCount(): number {
@@ -1398,12 +1398,12 @@ export class Consumer {
 		return this.#readBufferedFrame()?.frame;
 	}
 
-	/** Like {@link tryReadFrame} but also reports the frame's sequence number within the group. */
-	tryReadFrameSequence(): ({ sequence: number } & Frame) | undefined {
+	/** Like {@link tryReadFrame} but also reports the frame's index within the group. */
+	tryReadFrameIndex(): ({ index: number } & Frame) | undefined {
 		if (this.#verdict.peek()) return undefined;
 		const read = this.#readBufferedFrame();
 		if (!read) return undefined;
-		return { sequence: read.sequence, ...read.frame };
+		return { index: read.index, ...read.frame };
 	}
 
 	/** Resolves once {@link readFrame} would not block. */
@@ -1439,13 +1439,13 @@ export class Consumer {
 	}
 
 	/**
-	 * Reads the next frame along with its sequence number within the group.
+	 * Reads the next frame along with its index within the group.
 	 * Treat the returned frame bytes as read-only; they are shared with other consumers.
 	 */
-	async readFrameSequence(options?: ReadOptions): Promise<({ sequence: number } & Frame) | undefined> {
+	async readFrameIndex(options?: ReadOptions): Promise<({ index: number } & Frame) | undefined> {
 		const read = await this.#readFrame(options?.from ?? 0);
 		if (!read) return undefined;
-		return { sequence: read.sequence, ...read.frame };
+		return { index: read.index, ...read.frame };
 	}
 
 	/**
@@ -1455,7 +1455,7 @@ export class Consumer {
 	async nextFrame(): Promise<FrameConsumer | undefined> {
 		const read = await this.#readFrame(0, false, true);
 		if (!read) return undefined;
-		return read.chunks ?? makeFrameConsumer(read.sequence, read.frame);
+		return read.chunks ?? makeFrameConsumer(read.index, read.frame);
 	}
 
 	async #readFrame(from: number, compressed = false, streaming = false): Promise<ReadGroupFrame | undefined> {
@@ -1470,11 +1470,11 @@ export class Consumer {
 			// than waiting for it whole while the group sheds its head.
 			const read = this.#readBufferedFrame(compressed, streaming ? "stream" : "collect");
 			if (read) {
-				if (read.sequence < from) {
+				if (read.index < from) {
 					if (read.chunks) this.#streamed = undefined;
 					continue;
 				}
-				if (read.chunks && !streaming) return this.#join(read.sequence, read.chunks);
+				if (read.chunks && !streaming) return this.#join(read.index, read.chunks);
 				return read;
 			}
 
@@ -1504,7 +1504,7 @@ export class Consumer {
 	}
 
 	// Read a streamed frame whole. Losing any of it ends this reader, since the frame is gone.
-	async #join(sequence: number, chunks: FrameConsumer): Promise<ReadGroupFrame | undefined> {
+	async #join(index: number, chunks: FrameConsumer): Promise<ReadGroupFrame | undefined> {
 		const parts: Uint8Array[] = [];
 		let size = 0;
 		try {
@@ -1529,7 +1529,7 @@ export class Consumer {
 				await Signal.race(...chunkChanged(chunks), this.#state.closed, ...(this.#expiry?.changed ?? []));
 			}
 			const payload = parts.length === 0 ? EMPTY : joined(parts, size);
-			return { sequence, frame: { payload, timestamp: chunks.timestamp, arrived: chunks.arrived } };
+			return { index, frame: { payload, timestamp: chunks.timestamp, arrived: chunks.arrived } };
 		} catch (error) {
 			const verdict = this.#fail(error);
 			this.#refresh();
@@ -1569,6 +1569,7 @@ export class Consumer {
 		this.#recover = undefined;
 		// Closing is terminal for this reader, even with frames still unread.
 		this.#released = true;
+		this.#releasing?.resolve();
 		if (this.#state.closed.peek() === undefined) this.#state.closed.set(abort ?? null);
 		this.#refresh();
 	}

@@ -33,7 +33,7 @@
 //! `session_delivery_datagram` writes to a datagram track per broadcast instead of groups:
 //! one datagram per track per round across publisher and viewer axes, then larger payloads
 //! and cadences, on moq-lite and moq-transport-22. Throughput counts delivered datagrams,
-//! each checked for its sequence and payload, so a lost one fails.
+//! each checked for its key and payload, so a lost one fails.
 //! Delivery uses expiry-only pools: history expires between rounds outside timing,
 //! so byte pressure cannot shed unread frames during a batch.
 //! `SESSION_EXPIRY_ONLY=1` advances the cache clock by a second instead of the 30s
@@ -88,6 +88,8 @@
 mod harness;
 #[path = "../../tests/integration/support/mock.rs"]
 pub(crate) mod mock;
+#[path = "../../tests/integration/support/schedule.rs"]
+mod schedule;
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -430,23 +432,34 @@ fn runtime() -> tokio::runtime::Runtime {
 		.unwrap()
 }
 
+/// How long a lite-07 origin's route node holds a closed session's claims in case another
+/// session serves them: its debounce, 32 hops of 25 ms (`route::relay::debounce`).
+const ROUTE_LINGER: Duration = Duration::from_millis(32 * 25);
+
 /// Drop what a cell built on `rt`, if Criterion's filter ran it, and assert every task its
 /// sessions and origins spawned ends with it: a task that outlives its handles leaks for
-/// as long as a relay runs.
+/// as long as a relay runs. The origins may first wait out [`ROUTE_LINGER`], on a paused
+/// clock so the wait costs nothing.
 fn retire<T>(rt: &tokio::runtime::Runtime, built: Option<T>) {
 	let Some(built) = built else {
 		return;
 	};
 	drop(built);
-	// Each close reaches the next driver on its following poll; this many passes is far
-	// more than any teardown chain takes.
 	rt.block_on(async {
-		for _ in 0..1024 {
-			if rt.metrics().num_alive_tasks() == 0 {
-				break;
+		tokio::time::pause();
+		// Each close reaches the next driver on its following poll; this many passes is far
+		// more than any teardown chain takes.
+		let settle = || async {
+			for _ in 0..1024 {
+				if rt.metrics().num_alive_tasks() == 0 {
+					break;
+				}
+				tokio::task::yield_now().await;
 			}
-			tokio::task::yield_now().await;
-		}
+		};
+		settle().await;
+		tokio::time::sleep(ROUTE_LINGER).await;
+		settle().await;
 	});
 	assert_eq!(rt.metrics().num_alive_tasks(), 0, "tasks outlived the cell's handles");
 }
@@ -516,13 +529,34 @@ impl MeasurementClock {
 	}
 }
 
+/// Append the next group on a [`timed`] track, one millisecond past its largest start or at
+/// 0 on an empty track, so groups keep the key order a counter would give them.
+fn append_next(track: &track::Producer) -> group::Producer {
+	let key = track.largest().map_or(0, |largest| largest.group + 1);
+	track.append_group(Timestamp::from_millis(key).unwrap()).unwrap()
+}
+
+/// Where a group on a [`timed`] track starts, as its frames' timestamp.
+fn at(group: &group::Producer) -> Timestamp {
+	Timestamp::from_millis(group.start).unwrap()
+}
+
+/// The groups from the one starting at `key` onward.
+fn from(key: u64) -> track::Range {
+	track::Range {
+		start: track::Anchor::Time(key),
+		end: None,
+	}
+}
+
 fn write_group(track: &track::Producer, payload: &Bytes, frames: usize) -> u64 {
-	let mut group = track.append_group().unwrap();
+	let mut group = append_next(track);
+	let timestamp = at(&group);
 	for _ in 0..frames {
-		group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+		group.write_frame(timestamp, payload.clone()).unwrap();
 	}
 	let group = group.finish().unwrap();
-	group.sequence
+	group.start
 }
 
 /// Read one whole group, returning its payload bytes so skipped work can't look
@@ -731,9 +765,10 @@ impl<B: Backend> Cluster<B> {
 		let (origin, pool) = self.origin(CLIENT_CACHE);
 		let mut options = MockConnectOptions::new(self.version);
 		options.transport.stream_buffer = self.window;
-		// Draft 22, the one IETF version here, keeps its SETUP stream open beside the groups.
-		options.transport.max_concurrent_uni_streams =
-			self.credit.map(|credit| credit + usize::from(!self.version.is_lite()));
+		// Draft 22 keeps its SETUP stream open beside the groups, and moq-lite-07 the
+		// relay's Announce Stream: neither may take the one grant the groups share.
+		let persistent = !self.version.is_lite() || self.version.as_str() == "moq-lite-07-wip";
+		options.transport.max_concurrent_uni_streams = self.credit.map(|credit| credit + usize::from(persistent));
 		options.client_discovers_all = self.discovers_all;
 		// Hidden included, as the dash's `.stats/` scope sees its subtree.
 		options.server_publish = Some(B::origin(&self.relays[relay]).consume().with_hidden(true));
@@ -1044,8 +1079,8 @@ impl<B: Backend> Room<B> {
 					let mut bytes = 0;
 					for (broadcast, track) in &viewer.fetches {
 						let newest = newest[*broadcast];
-						for sequence in newest + 1 - burst..=newest {
-							let mut group = track.fetch_group(sequence, None).await.unwrap();
+						for key in newest + 1 - burst..=newest {
+							let mut group = track.fetch_group(key, None).await.unwrap();
 							while let Some(frame) = group.read_frame().await.unwrap() {
 								bytes += frame.payload.len();
 							}
@@ -1085,7 +1120,7 @@ impl<B: Backend> Room<B> {
 		}
 	}
 
-	/// Line every viewer up on the same next sequence before the strict rounds.
+	/// Line every viewer up on the same next key before the strict rounds.
 	///
 	/// A consumer is live once its track's info arrives, but on lite-05/06 the SUBSCRIBE
 	/// that carries the datagrams follows that answer, so a datagram may still miss it.
@@ -1167,8 +1202,8 @@ impl<B: Backend> Room<B> {
 		self.written += 1;
 
 		for (writing, &broadcast) in self.writing.iter_mut().zip(&self.watched) {
-			let group = writing.get_or_insert_with(|| self.cluster.tracks[broadcast].append_group().unwrap());
-			group.write_frame(Timestamp::ZERO, self.payload.clone()).unwrap();
+			let group = writing.get_or_insert_with(|| append_next(&self.cluster.tracks[broadcast]));
+			group.write_frame(at(group), self.payload.clone()).unwrap();
 			if last {
 				writing.take().expect("written above").finish().unwrap();
 			}
@@ -1377,7 +1412,7 @@ pub(crate) fn range_updates<B: Backend>(c: &mut Criterion) {
 								&[TRACK],
 								Some(
 									track::Subscription::default()
-										.with_range(span..)
+										.with_ranges([from(span)])
 										.with_delay(track::Delay::default().with_max(None)),
 								),
 							)
@@ -1397,7 +1432,7 @@ pub(crate) fn range_updates<B: Backend>(c: &mut Criterion) {
 								viewer.subscribers[0]
 									.update(
 										track::Subscription::default()
-											.with_range(future..)
+											.with_ranges([from(future)])
 											.with_delay(track::Delay::default().with_max(None)),
 									)
 									.unwrap();
@@ -1407,9 +1442,10 @@ pub(crate) fn range_updates<B: Backend>(c: &mut Criterion) {
 									assert!(viewer.subscribers[0].poll_recv_group(waiter).is_pending());
 								}
 								loop {
-									if cluster.tracks[0].subscription().is_some_and(|subscription| {
-										subscription.ranges == [track::Range::groups(future..)]
-									}) {
+									if cluster.tracks[0]
+										.subscription()
+										.is_some_and(|subscription| subscription.ranges == [from(future)])
+									{
 										return std::task::Poll::Ready(());
 									}
 									if cluster.tracks[0].poll_subscription_changed(waiter).is_pending() {
@@ -1418,15 +1454,15 @@ pub(crate) fn range_updates<B: Backend>(c: &mut Criterion) {
 								}
 							})
 							.await;
-							for sequence in next..future {
-								assert_eq!(write_group(&cluster.tracks[0], &payload, 1), sequence);
+							for key in next..future {
+								assert_eq!(write_group(&cluster.tracks[0], &payload, 1), key);
 							}
 							let started = Instant::now();
 							for viewer in &mut viewers {
 								viewer.subscribers[0]
 									.update(
 										track::Subscription::default()
-											.with_range(future - 1..)
+											.with_ranges([from(future - 1)])
 											.with_delay(track::Delay::default().with_max(None)),
 									)
 									.unwrap();
@@ -1461,12 +1497,11 @@ fn join<B: Backend>(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Ite
 						let cluster = Cluster::<B>::new(version, *shape, false).await;
 						let payload = Bytes::from(vec![0; shape.frame]);
 						for track in &cluster.tracks {
-							for sequence in 0..shape.history {
-								let mut group = track.append_group().unwrap();
+							for key in 0..shape.history as u64 {
+								let start = Timestamp::from_millis(key).unwrap();
+								let mut group = track.append_group(start).unwrap();
 								for _ in 0..shape.group_frames {
-									group
-										.write_frame(Timestamp::from_millis(sequence as u64).unwrap(), payload.clone())
-										.unwrap();
+									group.write_frame(start, payload.clone()).unwrap();
 								}
 								group.finish().unwrap();
 							}
@@ -1853,7 +1888,7 @@ impl<B: Backend> ChurnRoom<B> {
 			drop(subscriber);
 			drop(track);
 			let mut demand = self.churn[session].demand();
-			while demand.wanted_changed().await.unwrap().is_some() {}
+			while demand.wanted_changed().await.unwrap() {}
 		}
 		start.elapsed()
 	}

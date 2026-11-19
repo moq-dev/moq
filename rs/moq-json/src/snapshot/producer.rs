@@ -9,7 +9,6 @@ use serde::de::DeserializeOwned;
 
 use super::{Encoded, Encoder};
 use crate::refresh::Refresh;
-use moq_net::Timed;
 
 use crate::{Error, Result};
 
@@ -92,8 +91,10 @@ impl<T: Serialize> Producer<T> {
 	/// A join wants one once the open group's deltas outweigh the track's
 	/// [`refresh`](moq_net::track::Info::refresh) ratio times its snapshot (see
 	/// [`Demand::wanted`](moq_net::track::Demand::wanted)). It is a soft trigger: that joiner still
-	/// reads the cached group, then the new one. The snapshot carries the newest timestamp written, so the new group never starts before the last.
-	/// Nothing happens before the first update, or on a track without a ratio.
+	/// reads the cached group, then the new one. The snapshot carries the newest timestamp written,
+	/// where its group starts; while that is the newest group's own start, the refresh waits for a
+	/// later update, since two groups never share a start. Nothing happens before the first update,
+	/// or on a track without a ratio.
 	///
 	/// The producer has no runtime of its own, so the owner drives this: loop on it, or select on it
 	/// beside the updates. Errors once the track is closed.
@@ -102,18 +103,15 @@ impl<T: Serialize> Producer<T> {
 		take(&self.inner).poll_refresh(waiter)
 	}
 
-	/// Publish a new value, emitting a snapshot or a delta automatically.
+	/// Publish a new value at `at` (see [`Timed::at`](crate::Timed::at)), emitting a snapshot or a delta automatically.
 	///
 	/// Returns the encoded size of the frame written, or `None` if the value is unchanged from the
 	/// previous publish and nothing was written.
-	pub fn update<'a>(&mut self, value: impl Into<Timed<&'a T>>) -> Result<Option<usize>>
-	where
-		T: 'a,
-	{
-		take(&self.inner).update(value.into())
+	pub fn update(&mut self, value: &T, at: moq_net::Timestamp) -> Result<Option<usize>> {
+		take(&self.inner).update(value, at)
 	}
 
-	/// Edit the current value in place and publish at `at`, or leave it untimed.
+	/// Edit the current value in place and publish it at `at` (see [`Timed::at`](crate::Timed::at)).
 	///
 	/// The closure receives the current value: everything published through this producer so far,
 	/// composed, or `T::default()` if nothing has been. Edit it in place; on return the result is
@@ -123,7 +121,7 @@ impl<T: Serialize> Producer<T> {
 	/// # fn example(producer: &mut moq_json::snapshot::Producer<serde_json::Value>) -> moq_json::Result<()> {
 	/// producer.mutate(|catalog| {
 	///     catalog["scte35"] = serde_json::json!({ "id": 1 });
-	/// }, None)
+	/// }, moq_net::Timestamp::from_millis(100).unwrap())
 	/// # }
 	/// ```
 	///
@@ -131,7 +129,7 @@ impl<T: Serialize> Producer<T> {
 	/// from the latest value, so their sections compose instead of clobbering one another. This is
 	/// [`modify`](Self::modify) opened and committed for you; take the guard to hold the lock across
 	/// several edits, and [`update`](Self::update) to replace the whole value.
-	pub fn mutate(&mut self, f: impl FnOnce(&mut T), at: Option<moq_net::Timestamp>) -> Result<()>
+	pub fn mutate(&mut self, f: impl FnOnce(&mut T), at: moq_net::Timestamp) -> Result<()>
 	where
 		T: Default + DeserializeOwned,
 	{
@@ -140,7 +138,7 @@ impl<T: Serialize> Producer<T> {
 		guard.commit()
 	}
 
-	/// Edit the current value, publishing on drop at `at`, or untimed when absent.
+	/// Edit the current value, publishing on drop at `at` (see [`Timed::at`](crate::Timed::at)).
 	///
 	/// The returned [`Guard`] derefs to the current value: everything published through this producer
 	/// so far, composed, or `T::default()` if nothing has been. Editing it through [`DerefMut`] marks
@@ -163,7 +161,7 @@ impl<T: Serialize> Producer<T> {
 	/// consumers see it instead of a stale value, and the next `modify` returns it here. Call
 	/// [`Guard::commit`] to get the error back immediately instead. A panic while the guard is held
 	/// discards the in-flight edit rather than publishing a torn value.
-	pub fn modify(&mut self, at: Option<moq_net::Timestamp>) -> Result<Guard<'_, T>>
+	pub fn modify(&mut self, at: moq_net::Timestamp) -> Result<Guard<'_, T>>
 	where
 		T: Default + DeserializeOwned,
 	{
@@ -186,7 +184,7 @@ impl<T: Serialize> Producer<T> {
 		})
 	}
 
-	/// Finish the open group, so the deltas already written stop being provisional.
+	/// Close the open group, so the deltas already written stop being provisional.
 	///
 	/// No replacement group opens until the next [`update`](Self::update) or [`poll_refresh`](Self::poll_refresh), which emits a full
 	/// snapshot as its first frame even when the value is unchanged. A consumer joining at that group
@@ -221,6 +219,24 @@ impl<T: Serialize> Producer<T> {
 		inner.abort(err.into());
 		Ok(())
 	}
+
+	/// [`abort`](Self::abort) the track only while nobody wants it, handing the handle back
+	/// unchanged when a reader does.
+	///
+	/// This is how an on-demand publisher ends a track once its [`demand`](Self::demand) reports
+	/// nobody wants it: dropping or aborting it instead fails a reader that joined in between.
+	/// See [`moq_net::track::Producer::abort_unwanted`]. Clones sharing the track see it as
+	/// [`abort`](Self::abort) leaves it.
+	pub fn abort_unwanted(self, err: moq_net::Error) -> std::result::Result<(), Self> {
+		let mut inner = take(&self.inner);
+		// The check and the abort are one step on the track; the rest is the same cleanup.
+		if inner.track.inner.clone().abort_unwanted(err.clone()).is_err() {
+			drop(inner);
+			return Err(self);
+		}
+		inner.abort(err.into());
+		Ok(())
+	}
 }
 
 /// A value whose producer [finished](Producer::finish) it: it can still be read or aborted, but
@@ -230,7 +246,7 @@ impl<T: Serialize> Producer<T> {
 ///
 /// ```compile_fail,E0599
 /// # fn cannot_update(value: moq_json::snapshot::Finished<u32>) {
-/// value.update(&1).unwrap();
+/// value.update(&1, moq_net::Timestamp::unscaled(0)).unwrap();
 /// # }
 /// ```
 #[must_use = "dropping the last handle releases the track, which new readers can then no longer find"]
@@ -250,7 +266,8 @@ impl<T> Finished<T> {
 		take(&self.inner).track.inner.demand()
 	}
 
-	/// Release the track's cache, reporting `err` to readers that have not drained it.
+	/// Abort the track with `err`; see [`moq_net::track::Finished::abort`]. Readers still draining
+	/// get the clean end instead once every group below the end finished.
 	pub fn abort(self, err: moq_net::Error) -> Result<()> {
 		take(&self.inner).abort(err.into());
 		Ok(())
@@ -270,7 +287,7 @@ pub struct Guard<'a, T: Serialize> {
 	inner: MutexGuard<'a, Inner<T>>,
 	value: T,
 	dirty: bool,
-	at: Option<moq_net::Timestamp>,
+	at: moq_net::Timestamp,
 }
 
 impl<T: Serialize> Guard<'_, T> {
@@ -291,10 +308,7 @@ impl<T: Serialize> Guard<'_, T> {
 		self.dirty = false;
 
 		// We already hold the lock, so publish through the held guard rather than re-locking.
-		self.inner.update(Timed {
-			value: &self.value,
-			at: self.at,
-		})?;
+		self.inner.update(&self.value, self.at)?;
 		Ok(())
 	}
 }
@@ -341,6 +355,7 @@ struct Inner<T> {
 
 	/// The newest timestamp written, which a refresh restates the value at. An update may carry an
 	/// older timestamp than its group's first frame, and a new group may not start before that one.
+	/// `None` before the first write.
 	at: Option<moq_net::Timestamp>,
 
 	/// Whether this producer still publishes, or how it ended the track.
@@ -380,15 +395,16 @@ impl<T> Inner<T> {
 		// Idempotent: a track that is already closed keeps its first reason.
 		let _ = self.track.inner.clone().abort(reason);
 		self.state.abort(err);
+		self.refresh.ended();
 	}
 
-	/// Finish the open group, leaving the next update to open a replacement with a full snapshot.
+	/// Close the open group, leaving the next update to open a replacement with a full snapshot.
 	fn cut(&mut self) -> Result<()> {
 		if self.track.group.is_none() {
 			return Ok(());
 		}
 
-		// The group closes either way below, so reset first: a `finish` error must not leave the
+		// The group closes either way below, so reset first: a `close` error must not leave the
 		// encoder emitting deltas against a snapshot whose group is gone.
 		self.encoder.reset();
 		self.track.cut()
@@ -396,13 +412,13 @@ impl<T> Inner<T> {
 }
 
 impl<T: Serialize> Inner<T> {
-	fn update(&mut self, payload: Timed<&T>) -> Result<Option<usize>> {
+	fn update(&mut self, value: &T, at: moq_net::Timestamp) -> Result<Option<usize>> {
 		self.open()?;
-		let timestamp = self.track.rescale(payload.at)?;
+		let timestamp = self.track.rescale(at)?;
 		// Split the borrow so `frame` can hold the encoder while `track` is written through.
 		let Inner { track, encoder, .. } = self;
 
-		let Some(frame) = encoder.update(payload.value)? else {
+		let Some(frame) = encoder.update(value)? else {
 			return Ok(None);
 		};
 
@@ -413,7 +429,10 @@ impl<T: Serialize> Inner<T> {
 		track.write(timestamp, &frame)?;
 		let size = frame.payload.len();
 		frame.commit();
-		self.at = self.at.max(timestamp);
+		if self.at.is_none_or(|newest| timestamp > newest) {
+			self.at = Some(timestamp);
+			self.refresh.advanced();
+		}
 
 		Ok(Some(size))
 	}
@@ -423,12 +442,26 @@ impl<T: Serialize> Inner<T> {
 		self.open()?;
 		std::task::ready!(self.refresh.poll(self.track.largest, waiter))?;
 
-		let Inner { track, encoder, at, .. } = self;
+		let Inner {
+			track,
+			encoder,
+			at,
+			refresh,
+			..
+		} = self;
+		// Two groups never share a start, so a refresh at the newest group's own start waits for a
+		// later write. Checked before encoding, since a snapshot dropped unwritten resets the encoder.
+		let Some(at) = *at else {
+			return refresh.park(waiter);
+		};
+		if !crate::starts_past(&track.inner, at) {
+			return refresh.park(waiter);
+		}
 		// A group was written, so a value was encoded and there is one to restate.
 		let Some(frame) = encoder.snapshot()? else {
 			return std::task::Poll::Pending;
 		};
-		track.write(*at, &frame)?;
+		track.write(at, &frame)?;
 		frame.commit();
 		std::task::Poll::Ready(Ok(()))
 	}
@@ -449,6 +482,7 @@ impl<T: Serialize> Inner<T> {
 			return Err(err);
 		}
 		self.state = crate::state::State::Finished;
+		self.refresh.ended();
 		Ok(())
 	}
 }
@@ -460,7 +494,7 @@ struct Track {
 	/// The group a delta would be appended to, open only while deltas are enabled.
 	group: Option<moq_net::group::Producer>,
 
-	/// The sequence of the newest group written, which a refresh has to pass.
+	/// The start of the newest group written, which a refresh has to pass.
 	largest: Option<u64>,
 
 	/// Whether the encoder can emit deltas at all. With them off every frame is a snapshot, so a
@@ -469,7 +503,7 @@ struct Track {
 }
 
 impl Track {
-	/// Finish the open group without opening a replacement.
+	/// Close the open group without opening a replacement.
 	fn cut(&mut self) -> Result<()> {
 		if let Some(group) = self.group.take() {
 			group.finish()?;
@@ -478,18 +512,18 @@ impl Track {
 	}
 
 	/// `timestamp` at the track's timescale, or [`moq_net::Error::TimestampMismatch`] when it is
-	/// missing on a timed track, present on an untimed one, or beyond what the scale can hold.
+	/// unscaled on a timed track, scaled on a scale-less one, or beyond what the scale can hold.
 	///
 	/// An update checks this before encoding. Found by `write_frame` instead, the mismatch would
 	/// come after a snapshot published its group, leaving an empty newest group in place of the
 	/// last value, and the dropped frame would reset the encoder, rolling a group for nothing.
-	fn rescale(&self, timestamp: Option<moq_net::Timestamp>) -> Result<Option<moq_net::Timestamp>> {
+	fn rescale(&self, timestamp: moq_net::Timestamp) -> Result<moq_net::Timestamp> {
 		Ok(self.inner.info().rescale(timestamp)?)
 	}
 
 	/// Write one encoded frame at a timestamp already [rescaled](Self::rescale) to the track, rolling a
 	/// group when it's a snapshot.
-	fn write(&mut self, timestamp: Option<moq_net::Timestamp>, encoded: &Encoded) -> Result<()> {
+	fn write(&mut self, timestamp: moq_net::Timestamp, encoded: &Encoded) -> Result<()> {
 		// Check before touching a group. `write_snapshot` closes the previous group and publishes a
 		// new one before the frame is written, so discovering the limit inside `write_frame` would
 		// leave an empty newest group behind: a snapshot consumer jumps to the newest, so the previous
@@ -504,15 +538,20 @@ impl Track {
 		}
 	}
 
-	/// Close the open group and write a snapshot as the first frame of a new one.
-	fn write_snapshot(&mut self, timestamp: Option<moq_net::Timestamp>, payload: bytes::Bytes) -> Result<()> {
+	/// Write a snapshot as the first frame of a new group starting at `timestamp`, then close the
+	/// previous group.
+	///
+	/// A start at or before the newest group's is [`moq_net::Error::TimestampMismatch`], refused
+	/// before the previous group closes.
+	fn write_snapshot(&mut self, timestamp: moq_net::Timestamp, payload: bytes::Bytes) -> Result<()> {
+		let mut group = self.inner.append_group(timestamp)?;
+		self.largest = Some(group.start);
+
 		// The previous group is complete; no more frames will be appended to it.
-		if let Some(group) = self.group.take() {
-			group.finish()?;
+		if let Some(previous) = self.group.take() {
+			previous.finish()?;
 		}
 
-		let mut group = self.inner.append_group()?;
-		self.largest = Some(group.sequence);
 		if let Err(err) = group.write_frame(timestamp, payload) {
 			// `append_group` already published this group, and a rejected frame (too large) doesn't
 			// close the track. Dropping the handle does NOT close the group, so leaving it would strand
@@ -532,11 +571,12 @@ impl Track {
 	}
 
 	/// Append a delta to the group the last snapshot opened.
-	fn write_delta(&mut self, timestamp: Option<moq_net::Timestamp>, payload: bytes::Bytes) -> Result<()> {
-		self.group
+	fn write_delta(&mut self, timestamp: moq_net::Timestamp, payload: bytes::Bytes) -> Result<()> {
+		let group = self
+			.group
 			.as_mut()
-			.expect("the encoder only emits a delta after a snapshot opened a group")
-			.write_frame(timestamp, payload)?;
+			.expect("the encoder only emits a delta after a snapshot opened a group");
+		group.write_frame(crate::frame_time(group, timestamp), payload)?;
 		Ok(())
 	}
 

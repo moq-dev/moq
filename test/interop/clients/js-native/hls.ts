@@ -57,6 +57,7 @@ try {
 	};
 	const publish = (kind: "video" | "audio", parts: Frame[][]) => {
 		const media = broadcast.createTrack(kind, Container.trackInfo({ priority: Catalog.PRIORITY[kind] }));
+		if (!media) throw new Error("the track already exists");
 		const producer = new Container.Legacy.Producer(media, new Container.Legacy.Format(kind));
 		for (const [index, part] of parts.entries()) {
 			if (index > 0) producer.discontinuity();
@@ -80,15 +81,16 @@ try {
 		priority: Catalog.PRIORITY.catalog,
 		compression: "deflate",
 	});
+	if (!track) throw new Error("the track already exists");
 	const catalog = new Json.Snapshot.Producer<Catalog.Root>({ track, deltas: false });
-	catalog.update({
-		value: Catalog.encode({
+	catalog.update(
+		Catalog.encode({
 			video: { renditions: renditions.video },
 			audio: { renditions: renditions.audio },
-			media: { join: { interval: Catalog.u53(INTERVAL) } },
+			sync: { interval: Catalog.u53(INTERVAL) },
 		}),
-		at: Moq.Time.Timestamp.now(),
-	});
+		Moq.Time.Timestamp.now(),
+	);
 	catalog.finish();
 	publication.announce();
 	console.log("hls ready");

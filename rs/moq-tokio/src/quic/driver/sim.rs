@@ -1,4 +1,4 @@
-//! Test support, enabled by the `sim` feature: QUIC with no sockets, endpoints on kio's
+//! Test support, enabled by the `test-support` feature: QUIC with no sockets, endpoints on kio's
 //! simulator joined by seeded, impaired paths
 //!
 //! A [`Network`] binds a [`Socket`] per address for [`Endpoint::new`](super::endpoint::Endpoint::new),
@@ -8,6 +8,7 @@
 //! bottleneck queue, a fixed one-way latency, then its loss, duplication, jitter, and
 //! reordering, all drawn from the network's seed. With each endpoint's `rng_seed` set too, a
 //! seed replays a run exactly. A destination nobody bound drops the datagram, as UDP does.
+//! Every datagram is checked against QUIC's [`Rules`], panicking on the first that breaks one.
 //!
 //! It runs only inside `kio::clock::sim::run`, where every arrival is a simulated timer.
 //!
@@ -22,7 +23,7 @@ use std::{
 	task::{Context, Poll, Waker},
 };
 
-pub use moq_quic::sim::{Bottleneck, Link, QueueStats};
+pub use moq_quic::sim::{Bottleneck, Link, QueueStats, Rules};
 use moq_sock::udp::{EcnCodepoint, RecvMeta, Transmit};
 use rand::{RngExt, SeedableRng, rngs::StdRng};
 
@@ -47,6 +48,8 @@ struct State {
 	hosts: HashMap<SocketAddr, Bound>,
 	/// Keyed by sender, then destination. A pair never set is a clean path with no latency.
 	paths: HashMap<(SocketAddr, SocketAddr), Path>,
+	/// Judges every datagram sent and delivered
+	rules: Rules,
 	/// Where the search for a free ephemeral port starts, so a port is not reused soon after it closes
 	ephemeral: u16,
 }
@@ -76,6 +79,7 @@ impl Network {
 			rng: StdRng::seed_from_u64(seed),
 			hosts: HashMap::new(),
 			paths: HashMap::new(),
+			rules: Rules::new(),
 			ephemeral: EPHEMERAL,
 		})))
 	}
@@ -112,6 +116,9 @@ impl Network {
 		let now = kio::clock::now();
 		let (marked, arrivals) = {
 			let state = &mut *self.0.lock().unwrap();
+			if let Err(violation) = state.rules.sent(now, from, to, contents) {
+				panic!("{violation}");
+			}
 			let path = state.paths.entry((from, to)).or_default();
 			path.link.transmit(&mut state.rng, now, path.latency, contents.len())
 		};
@@ -136,6 +143,9 @@ impl Network {
 
 	fn deliver(&self, to: SocketAddr, datagram: Datagram) {
 		let mut state = self.0.lock().unwrap();
+		state
+			.rules
+			.received(kio::clock::now(), datagram.from, to, &datagram.contents);
 		// Nobody bound the destination, or it closed since: the datagram is lost.
 		let Some(host) = state.hosts.get_mut(&to) else {
 			return;

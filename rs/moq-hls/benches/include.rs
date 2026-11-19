@@ -5,7 +5,7 @@ use std::hint::black_box;
 use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use hang::catalog::{Include, Join, VideoCodec, VideoConfig};
+use hang::catalog::{Include, VideoCodec, VideoConfig};
 use moq_hls::{Server, export::Route};
 use moq_mux::catalog::hang::Catalog;
 
@@ -17,9 +17,7 @@ fn publish_catalog(
 		.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
 		.unwrap();
 	let mut producer = moq_json::snapshot::Producer::new(track, Default::default());
-	producer
-		.update(moq_net::Timed::from(catalog).at(moq_net::Timestamp::ZERO))
-		.unwrap();
+	producer.update(catalog, moq_net::Timestamp::ZERO).unwrap();
 	producer
 }
 
@@ -34,7 +32,7 @@ fn include(c: &mut Criterion) {
 			let (server, broadcaster, route, _publications, _catalogs, _origin) = runtime.block_on(async {
 				let origin = moq_tokio::origin::spawn();
 				let mut root = Catalog::default();
-				root.media.join = Join::new(Duration::from_secs(2));
+				root.sync.interval = Some(Duration::from_secs(2));
 				let mut publications = Vec::new();
 				let mut catalogs = Vec::new();
 				let mut first = None;
@@ -49,7 +47,7 @@ fn include(c: &mut Criterion) {
 						)
 						.unwrap();
 					let mut catalog = Catalog::default();
-					catalog.media = root.media;
+					catalog.sync = root.sync;
 					for rendition in 0..renditions {
 						let mut video = VideoConfig::new(VideoCodec::VP8);
 						video.coded_width = Some(320);

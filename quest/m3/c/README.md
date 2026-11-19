@@ -35,10 +35,13 @@ Decided earlier, still standing:
   (`err->protocol`). Infallible calls return their value directly, optional
   scalars are `{has_value, value}`, each async function has its own callback
   typedef, and unnamed variant fields are `v1`, as in C++.
-- The generated package takes over the `moq-c` name and `moq::c` target at
-  the shared minor of the cut that ships it, after the hand-written crate's
-  0.22 (RELEASE.md's [Versions](/RELEASE.md#versions),
-  [moq-dev/moq#7610](https://github.com/moq-dev/moq/pull/7610)).
+- The generated package is the first published `moq-c`, with the `moq::c`
+  target, at the shared minor of the cut that ships it (RELEASE.md's
+  [Versions](/RELEASE.md#versions),
+  [moq-dev/moq#7610](https://github.com/moq-dev/moq/pull/7610)). Amended
+  2026-11-16 (maintainer, /quest-plan of the pre-cut audit): the
+  hand-written API ships at 0.22 as `libmoq`, not `moq-c`, so the generated package takes
+  over no published name and C users rename once, when the API changes.
 - Docs change inline: the consumer quest rewrites `doc/lib/c`, and its Impact
   bullet carries the move for the package's `MIGRATE.md`.
 

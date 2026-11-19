@@ -53,7 +53,6 @@ impl Connecting {
 		runtime: &crate::runtime::Spawner,
 	) -> Self {
 		let shared = Shared {
-			#[cfg(feature = "net")]
 			probe: conn.congestion_state().probes().then(moq_net::transport::Probe::new),
 			..Shared::default()
 		};
@@ -183,7 +182,6 @@ impl Future for ConnectionDriver {
 		}
 		// A new target waits for the next poll: probing only resends data in flight, so it has
 		// nothing to send until a write or an ACK polls anyway.
-		#[cfg(feature = "net")]
 		if let Some(probe) = &this.conn.shared.probe {
 			conn.inner.set_probe_target(probe.target().as_bps() / 8);
 		}
@@ -199,7 +197,6 @@ impl Future for ConnectionDriver {
 		conn.forward_endpoint_events();
 
 		// Every datagram sent or received passes through this poll.
-		#[cfg(feature = "net")]
 		{
 			let stats = conn.inner.stats();
 			this.conn.shared.wire.set_sent_bytes(stats.udp_tx.bytes);
@@ -489,17 +486,9 @@ impl Connection {
 	}
 
 	/// The receive windows now in force: the connection's, and the most one stream holds.
-	#[cfg(feature = "quic")]
 	pub(crate) fn receive_window(&self) -> moq_net::transport::ReceiveWindow {
 		let state = self.0.state.lock();
 		moq_net::transport::ReceiveWindow::new(Some(state.inner.receive_window()), state.inner.stream_receive_window())
-	}
-
-	/// 32 bytes of keying material exported from the TLS session under `label` and `context`,
-	/// or `None` before the handshake completes.
-	#[cfg(feature = "quic")]
-	pub(crate) fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
-		self.0.state.lock().inner.export_keying_material(label, context)
 	}
 
 	/// How many send streams the connection still holds state for
@@ -512,17 +501,15 @@ impl Connection {
 	#[cfg(test)]
 	pub(crate) fn send_released(&self, id: StreamId) -> bool {
 		let mut state = self.0.state.lock();
-		matches!(state.inner.send_stream(id).end(), Err(moq_quic::send::Error::Closed))
+		state.inner.send_stream(id).stopped().is_err()
 	}
 
 	/// The wire counters the driver updates as it sends and receives.
-	#[cfg(feature = "quic")]
 	pub(crate) fn wire(&self) -> moq_net::transport::Wire {
 		self.0.shared.wire.clone()
 	}
 
 	/// The target the driver probes up to, or `None` when the congestion controller cannot probe.
-	#[cfg(feature = "quic")]
 	pub(crate) fn probe(&self) -> Option<moq_net::transport::Probe> {
 		self.0.shared.probe.clone()
 	}
@@ -647,12 +634,8 @@ pub(crate) struct Shared {
 	/// Number of live handles that can used to initiate or handle I/O; excludes the driver
 	ref_count: AtomicUsize,
 	/// Refreshed by every driver poll, so readers never wake the driver to sample.
-	///
-	/// Only moq-net reads them, so a driver-only build skips the per-poll stats.
-	#[cfg(feature = "net")]
 	wire: moq_net::transport::Wire,
 	/// The session's probe target, read by every driver poll
-	#[cfg(feature = "net")]
 	probe: Option<moq_net::transport::Probe>,
 }
 
@@ -664,11 +647,11 @@ pub(crate) struct State {
 	conn_events: mpsc::UnboundedReceiver<ConnectionEvent>,
 	endpoint_events: mpsc::UnboundedSender<(ConnectionHandle, EndpointEvent)>,
 	/// The terminal error [`Connection::poll_closed`] reports, set once by the driver: moq-quic's
-	/// reason, a local close only once its CONNECTION_CLOSE is on the socket, or why the driver
-	/// stopped, which moq-quic cannot take and so wins over its reason everywhere.
+	/// reason, once any CONNECTION_CLOSE it owes is on the socket, or why the driver stopped,
+	/// which moq-quic cannot take and so wins over its reason everywhere.
 	///
-	/// A latch of its own rather than moq-quic's `poll_closed`, which resolves a local close as
-	/// soon as it is asked for, before anything sent it.
+	/// A latch of its own rather than moq-quic's `poll_closed`, which resolves a close before
+	/// anything sent it.
 	closed: Option<Error>,
 	closed_waiters: kio::WaiterList,
 	/// The endpoint's socket, sent through without keeping it open
@@ -717,6 +700,7 @@ impl State {
 				None => {
 					self.send_buffer.clear();
 					self.send_buffer.reserve(self.inner.current_mtu() as usize);
+					let owed = self.inner.owes_close();
 					match self
 						.inner
 						.poll_transmit(waiter, now, max_datagrams, &mut self.send_buffer)
@@ -726,8 +710,8 @@ impl State {
 								None => 1,
 								Some(s) => t.size.div_ceil(s), // round up
 							};
-							// Once closed, moq-quic transmits nothing but the CONNECTION_CLOSE.
-							(t, self.inner.is_closed())
+							// This transmit carries the CONNECTION_CLOSE the loss owed.
+							(t, owed && !self.inner.owes_close())
 						}
 						Poll::Pending => break,
 					}
@@ -863,10 +847,12 @@ impl State {
 
 	/// Publish a loss moq-quic recorded, parking `waiter` until it records one.
 	///
-	/// A local close waits for `drive_transmit` to put its CONNECTION_CLOSE on the socket.
+	/// A loss that owes the peer a CONNECTION_CLOSE waits for `drive_transmit` to put it on the
+	/// socket, including one held back for a full socket.
 	fn check_lost(&mut self, waiter: &kio::Waiter) {
 		if let Poll::Ready(reason) = self.inner.poll_closed(waiter)
-			&& !matches!(reason, Error::LocallyClosed { .. })
+			&& !self.inner.owes_close()
+			&& !self.buffered_transmit.as_ref().is_some_and(|(_, closes)| *closes)
 		{
 			self.publish(reason);
 		}

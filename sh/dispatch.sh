@@ -115,26 +115,27 @@ module py '^(py/|sh/py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/|rs/uniffi-bindgen
 # sh/rs/select.sh widens to the whole workspace for inputs every crate shares.
 # moq-cli builds the Rust interop clients as examples from outside its
 # crate; sh/rs/select.test.py fails when a target's directory is missing.
-# moq-relay's tests read its NixOS module.
-module rs '^(\.cargo/|nix/modules/moq-relay\.nix$|sh/local\.(sh|ts)$|rs/|test/interop/clients/rust/|sh/rs/|Cargo\.(toml|lock)$|clippy\.toml$|rust-toolchain\.toml$|\.config/nextest\.toml$)' \
-    tools='cargo jq' compiles='check fix' fix
+# moq-relay's tests read its NixOS module, and libmoq's lint compiles the C
+# doc samples.
+module rs '^(\.cargo/|nix/modules/moq-relay\.nix$|doc/lib/c/|doc/lib/samples\.sh$|sh/local\.(sh|ts)$|rs/|test/interop/clients/rust/|sh/rs/|Cargo\.(toml|lock)$|clippy\.toml$|rust-toolchain\.toml$|\.config/nextest\.toml$)' \
+    tools='cargo jq cc' compiles='check fix' fix
 # nix/Cargo.nix records each crate's dependencies, features, and targets,
 # read from the manifests, the lockfile, and the files cargo discovers targets
 # from. The pinned crate2nix comes from flake.lock.
 module cargo_nix '((^|/)(Cargo\.(toml|lock)|build\.rs)$|^rs/.*/src/(lib\.rs|main\.rs|bin/)|^nix/(Cargo\.nix|crate-hashes\.json)$|^sh/rs/cargo-nix\.sh$|^flake\.lock$)' \
     tools='nix nixfmt cargo' fix
-# The C package links moq-c's native-libs lists, and the C++ package's FFI
+# The C package links libmoq's native-libs lists, and the C++ package's FFI
 # pin. Both packages format with sh/clang-format.sh and OBS's style file.
-module c '^(\.cargo/config\.toml$|c/|sh/c/|sh/clang-format\.sh$|cpp/obs/\.clang-format$|rs/moq-ffi/|rs/moq-c/native-libs/|cpp/moq/FFI_VERSION$|cpp/moq/cmake/moq-ffi\.cmake$)' \
+module c '^(\.cargo/config\.toml$|c/|sh/c/|sh/clang-format\.sh$|cpp/obs/\.clang-format$|rs/moq-ffi/|rs/libmoq/native-libs/|cpp/moq/FFI_VERSION$|cpp/moq/cmake/moq-ffi\.cmake$)' \
     tools='cargo cmake cc c++ pkg-config uniffi-bindgen-cpp clang-format' compiles=check fix
-# The package links moq-c's native-libs lists, and compiles its doc samples.
+# The package links libmoq's native-libs lists, and compiles its doc samples.
 # It shares a lane with obs_compile because both build cpp/moq/build.
-module cpp '^(\.cargo/config\.toml$|cpp/moq/|cpp/justfile$|sh/cpp/|sh/clang-format\.sh$|cpp/obs/\.clang-format$|rs/moq-ffi/|rs/moq-c/native-libs/|doc/lib/cpp/|doc/lib/samples\.sh$)' \
+module cpp '^(\.cargo/config\.toml$|cpp/moq/|cpp/justfile$|sh/cpp/|sh/clang-format\.sh$|cpp/obs/\.clang-format$|rs/moq-ffi/|rs/libmoq/native-libs/|doc/lib/cpp/|doc/lib/samples\.sh$)' \
     tools='cargo cmake c++ uniffi-bindgen-cpp clang-format' compiles=check lane=cpp fix
 # The plugin and its tests call through the bindings generated from cpp/moq
-# and moq-ffi and link through moq-c's native-libs lists, and flake.nix owns
+# and moq-ffi and link through libmoq's native-libs lists, and flake.nix owns
 # the libobs headers it compiles against.
-module obs_compile '^(\.cargo/config\.toml$|cpp/obs/|cpp/moq/|sh/obs/|rs/moq-ffi/|rs/moq-c/native-libs/|flake\.nix$)' \
+module obs_compile '^(\.cargo/config\.toml$|cpp/obs/|cpp/moq/|sh/obs/|rs/moq-ffi/|rs/libmoq/native-libs/|flake\.nix$)' \
     tools='cargo cmake pkg-config uniffi-bindgen-cpp' compiles=check lane=cpp
 # The bun lane serializes fixers and JS builds that write shared outputs.
 # Dependency setup separately uses sh/js/install.py across every entry point.
@@ -148,6 +149,11 @@ module biome '' \
 # Root Nix inputs own the browser version every npm Playwright pin matches.
 module js '^(js/|bench/browser/|doc/|drafts/|demo/(boy|web|carla/web)/|test/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$|flake\.(nix|lock)$)' \
     tools='bun python3 uv' lane=bun fix
+# fallow over the whole workspace: removing the last use of an export in one
+# package leaves it dead in the package that defines it, which a run scoped to
+# the changed packages would never analyze.
+module dead_code '(\.([mc]?[jt]sx?|vue)|(^|/)package\.json|^bun\.lock|^\.fallowrc\.jsonc)$' \
+    tools='bun uv' lane=bun
 # The recorded-trace replays play through the player's container consumer and
 # ring on a simulated clock: deterministic, seconds long, and only Bun (plus uv
 # for the install step), so they gate every diff that can move a row. It shares
@@ -204,8 +210,17 @@ module drafts '^(drafts/|sh/drafts/|doc/\.vitepress/drafts\.ts$)' \
     tools='bun uv kramdown-rfc xml2rfc' lane=bun
 module markdown '' \
     tools='bun uv' lane=bun fix
+# Workflow lints and repository-wide policy, such as every opt-in test having a
+# caller, so they gate every diff.
 module gh '' \
-    tools='actionlint zizmor bun python3 uv cargo release-plz clippy-driver dpkg-deb nfpm rpm' lane=bun
+    tools='actionlint zizmor bun python3 uv cargo' lane=bun
+# `just gh test`, the repository tooling tests, follow what they run and read,
+# including the selectors under sh/, the release-plz configuration, the nfpm
+# configs, the Cargo and Bun workspace manifests and lockfiles, and the flake
+# that pins their tools. Its check that Nightly's benchmark tests exist greps all of rs/, so it
+# runs in `gh check` instead. Nightly's full gate runs them whatever changed.
+module tooling '^(sh/|bench/|test/smoke/|packaging/|\.github/|\.cargo/|\.config/hakari\.toml$|\.release-plz\.toml$|Cargo\.(toml|lock)$|rs/moq-ffi/build\.sh$|go/wrapper/|rs/[^/]+/(Cargo\.toml|verify/.*\.cfg)$|js/[^/]+/(bench/|package\.json$)|package\.json$|bun\.lock$|flake\.(nix|lock)$)|(^|/)justfile$' \
+    tools='bun python3 uv cargo release-plz clippy-driver dpkg-deb nfpm rpm' lane=bun
 # The drill mutations patch Rust source, so a Rust change can move the code
 # they target. Only nightly runs the drills; this catches a stale patch.
 module drill '^(rs/|test/drill/)'
@@ -218,9 +233,9 @@ module moq_sh '^infra/moq-sh/' \
 # as does a bump of the flake-pinned validator.
 module quest '^(quest/|flake\.lock$|sh/quest\.sh$)' \
     tools='quest'
-# `obs check` compares the OBS pinned in buildspec.json, flake.nix, and
-# nixpkgs, and the last moves on a flake.lock bump alone.
-module obs '^(cpp/obs/|sh/obs/|flake\.(nix|lock)$)' \
+# `obs check` compares the OBS pinned in buildspec.json, flake.nix, nixpkgs,
+# and @moq/obs, and nixpkgs moves on a flake.lock bump alone.
+module obs '^(cpp/obs/|sh/obs/|flake\.(nix|lock)$|js/obs/src/obs\.ts$)' \
     tools='clang-format cmake gersemi jq' fix
 # ts.yml's crate filters against the closure test/ts/run.sh builds, which
 # moves only with a manifest, the lockfile, or the harness's packages.
@@ -404,12 +419,13 @@ files() {
 }
 
 # One phase of one module, run through `run`. The bindings run their tests in
-# their check; rs, js, py, and gh test right after it, in the same lane.
+# their check; rs, js, and py test right after it, in the same lane.
 step() {
     local listed=$logs/$2.files
     case "$1:$2" in
         check:js) run just js check-changed "$js_list" ;;
         check:workers) run just js workers ;;
+        check:dead_code) run just js dead-code ;;
         check:moq_sh) run just infra moq-sh test ;;
         # The check keeps docs and the isolated default-media lint; the test
         # phase enforces the other clippy checks in its existing build.
@@ -417,9 +433,10 @@ step() {
         check:carla_bridge) run just carla bridge-check ;;
         check:bench)
             run python3 bench/compare.test.py
-            run bash sh/local.sh cargo check --locked --package moq-relay --package moq-bench --features moq-relay/io-uring
+            run bash sh/local.sh cargo check --locked --package moq-relay --package moq-bench
             ;;
         check:quest) run bash sh/quest.sh check ;;
+        check:tooling) run just gh test ;;
         check:audio_quality) run just test audio-quality --replays --enforce ;;
         check:drill) run just test drill-sensitivity --apply-only ;;
         check:obs_compile) run just obs compile ;;
@@ -481,7 +498,6 @@ step() {
         test:rs) run just rs test-changed "$rs_list" ;;
         test:js) run just js test-changed "$js_list" ;;
         test:py) run just py test ;;
-        test:gh) run just gh test ;;
         fix:rs) run just rs fix-changed "$rs_list" ;;
         fix:carla_bridge) run just carla bridge-fix ;;
         fix:cargo_nix) run just rs cargo-nix ;;
@@ -562,11 +578,9 @@ run_lane() {
     trap 'stop; cancelled; exit 143' TERM
     for module in "$@"; do
         phases=("$verb")
-        # gh's tooling tests run on every diff: path selection would let a
-        # broken selector skip the very tests that catch it.
         if [[ "$verb" == check ]]; then
             case "$module" in
-                rs | js | py | gh) phases+=(test) ;;
+                rs | js | py) phases+=(test) ;;
             esac
         fi
         for phase in "${phases[@]}"; do

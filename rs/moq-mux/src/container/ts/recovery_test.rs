@@ -90,9 +90,6 @@ enum Profile {
 	Spliced,
 	/// [`Closed`](Self::Closed) for two minutes.
 	Long,
-	/// MPEG-2 open GOP, carried as whole PES: after the first every group opens on a sequence
-	/// header, behind two B-pictures that reference the group before.
-	Mpeg2,
 }
 
 /// One FFmpeg encode.
@@ -109,8 +106,6 @@ struct Encode {
 enum Video {
 	H264(&'static str),
 	H265(&'static str),
-	/// FFmpeg's `mpeg2video`, a GOP every twelve pictures, each open but the first.
-	Mpeg2,
 }
 
 impl Encode {
@@ -142,16 +137,6 @@ impl Encode {
 				x265 = format!("{params}:pools=none:frame-threads=1:log-level=error");
 				args.extend(["-c:v", "libx265", "-x265-params", &x265]);
 			}
-			Video::Mpeg2 => args.extend([
-				"-c:v",
-				"mpeg2video",
-				"-g",
-				"12",
-				"-bf",
-				"2",
-				"-sc_threshold",
-				"1000000000",
-			]),
 		}
 		args.extend([
 			"-preset",
@@ -256,7 +241,7 @@ struct Clip {
 impl Profile {
 	/// The clip, loaded once per process.
 	fn clip(self) -> &'static Clip {
-		static CLIPS: [std::sync::OnceLock<Clip>; 9] = [const { std::sync::OnceLock::new() }; 9];
+		static CLIPS: [std::sync::OnceLock<Clip>; 8] = [const { std::sync::OnceLock::new() }; 8];
 		CLIPS[self as usize].get_or_init(|| {
 			const CLOSED: &str = "keyint=12:min-keyint=12:scenecut=0";
 			const OPEN: &str = "keyint=12:min-keyint=12:scenecut=0:open-gop=1:bframes=3:b-adapt=0";
@@ -296,7 +281,6 @@ impl Profile {
 					seconds: "120",
 					..encode("320x240", Video::H264(CLOSED), 0)
 				}),
-				Self::Mpeg2 => whole(encode("320x240", Video::Mpeg2, 0)),
 			}
 		})
 	}
@@ -311,7 +295,7 @@ impl Profile {
 
 	/// Whether its leading pictures reference the group before.
 	fn orphans(self) -> bool {
-		matches!(self, Self::Open | Self::Rasl | Self::Mpeg2)
+		matches!(self, Self::Open | Self::Rasl)
 	}
 
 	/// The PCR discontinuities the source declares.
@@ -457,11 +441,13 @@ fn splice(a: Vec<u8>, b: Vec<u8>, declare: bool) -> Clip {
 	}
 }
 
-/// One track as the import published it: each group's sequence and frames, in decode order.
+/// One track as the import published it: each group's start and frames, in decode order.
 struct Recorded {
 	name: String,
 	video: bool,
 	groups: Vec<(u64, Vec<moq_net::frame::Frame>)>,
+	/// Where each group ended whole, when the import said.
+	ends: Vec<Option<u64>>,
 }
 
 /// What the import of a clip published.
@@ -474,7 +460,7 @@ struct Recording {
 /// Import `profile`'s clip whole and read back every frame of every track.
 async fn record(profile: Profile) -> Recording {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	// Kept whole, however long the clip, with the `mpegts` section that carries MPEG-2 video.
+	// Kept whole, however long the clip, with the `mpegts` section the export reads.
 	let config = (crate::catalog::Config::default().with_max_age(Duration::from_secs(300)))
 		.with_catalog(Catalog::<Ext>::default());
 	let catalog = crate::catalog::Producer::new(&mut broadcast, config).unwrap();
@@ -484,14 +470,7 @@ async fn record(profile: Profile) -> Recording {
 	let _finished = import.finish().unwrap();
 	let snapshot = catalog.snapshot();
 
-	let whole = (snapshot.ext.mpegts.tracks.iter()).filter(|(_, track)| {
-		track
-			.pes_packet
-			.as_ref()
-			.is_some_and(|pes| matches!(pes.stream_type, 0x01 | 0x02))
-	});
-	let names = (snapshot.video.renditions.keys().chain(whole.map(|(name, _)| name)))
-		.map(|name| (name.clone(), true))
+	let names = (snapshot.video.renditions.keys().map(|name| (name.clone(), true)))
 		.chain(snapshot.audio.renditions.keys().map(|name| (name.clone(), false)));
 	let mut tracks = Vec::new();
 	for (name, video) in names {
@@ -505,6 +484,7 @@ async fn record(profile: Profile) -> Recording {
 			.await
 			.unwrap();
 		let mut groups = Vec::new();
+		let mut ends = Vec::new();
 		while let Some(mut group) = kio::clock::timeout(Duration::from_secs(1), track.recv_group())
 			.await
 			.unwrap()
@@ -514,9 +494,19 @@ async fn record(profile: Profile) -> Recording {
 			while let Some(frame) = group.read_frame().await.unwrap() {
 				frames.push(frame);
 			}
-			groups.push((group.sequence, frames));
+			ends.push(group.end());
+			groups.push((group.start, frames));
 		}
-		tracks.push(Recorded { name, video, groups });
+		// The import appends each group, so nothing lies below its first or between two.
+		for run in skips(groups.iter().map(|(start, _)| *start)) {
+			assert!(track.is_skipped(run.clone()), "{name}: the import skips {run:?}");
+		}
+		tracks.push(Recorded {
+			name,
+			video,
+			groups,
+			ends,
+		});
 	}
 	assert_eq!(
 		tracks.iter().map(|track| track.video).collect::<Vec<_>>(),
@@ -534,19 +524,22 @@ async fn record(profile: Profile) -> Recording {
 	}
 }
 
+/// The group starts skipped below the first of `starts` and between each two, which no group holds.
+fn skips(starts: impl IntoIterator<Item = u64>) -> Vec<std::ops::Range<u64>> {
+	let mut runs = Vec::new();
+	let mut next = 0;
+	for start in starts {
+		runs.push(next..start);
+		next = start + 1;
+	}
+	runs
+}
+
 /// The presentation time of a published frame, in microseconds on the catalog clock, and
-/// whether it is the marker of a declared discontinuity. A whole video PES is stamped with its
-/// placement, so its own PTS says when it presents.
+/// whether it is the marker of a declared discontinuity.
 fn decoded(frame: &moq_net::frame::Frame) -> (u64, bool) {
 	let frame = hang::container::Frame::decode(frame.payload.clone()).unwrap();
-	let pts = match frame.payload.get(..4) {
-		Some([0, 0, 1, 0xe0..=0xef]) => {
-			let pts = super::psi::PesStart::parse(&frame.payload).unwrap().pts.unwrap();
-			pts * 100 / 9
-		}
-		_ => frame.timestamp.as_micros() as u64,
-	};
-	(pts, frame.payload.is_empty())
+	(frame.timestamp.as_micros().unwrap() as u64, frame.payload.is_empty())
 }
 
 /// The presentation time of a published frame, in microseconds on the catalog clock.
@@ -912,6 +905,16 @@ async fn run(recording: &Recording, arm: &Arm) -> Run {
 	let consumer = broadcast.consume();
 	let groups: Vec<Vec<(u64, Vec<moq_net::frame::Frame>)>> =
 		recording.tracks.iter().map(|track| track.groups.clone()).collect();
+	let ends: Vec<Vec<Option<u64>>> = recording.tracks.iter().map(|track| track.ends.clone()).collect();
+	// The import's skips, which a relay forwards with the first group past each: a group the path
+	// omits is not skipped, so the export sees it missing.
+	let mut skips: Vec<_> = (recording.tracks.iter())
+		.map(|track| {
+			skips(track.groups.iter().map(|(start, _)| *start))
+				.into_iter()
+				.peekable()
+		})
+		.collect();
 	let start = Instant::now();
 	let publisher = tokio::spawn(async move {
 		let _keep = &broadcast;
@@ -933,20 +936,28 @@ async fn run(recording: &Recording, arm: &Arm) -> Run {
 			let (sequence, frames) = &groups[t][g];
 			let Some(f) = step else {
 				let group = open[t].take().unwrap();
-				match kept[t] == frames.len() {
-					true => {
+				match (kept[t] == frames.len(), ends[t][g]) {
+					(true, Some(end)) => {
+						group.finish_at(end).unwrap();
+					}
+					(true, None) => {
 						group.finish().unwrap();
 					}
-					false => group.abort(moq_net::Error::Old).unwrap(),
+					(false, _) => group.abort(moq_net::Error::Old).unwrap(),
 				}
 				continue;
 			};
+			if open[t].is_none() {
+				while let Some(run) = skips[t].next_if(|run| run.end <= *sequence) {
+					producers[t].skip_groups(run);
+				}
+			}
 			let group = open[t].get_or_insert_with(|| {
 				kept[t] = 0;
-				let info = moq_net::group::Info { sequence: *sequence };
+				let info = moq_net::group::Info { start: *sequence };
 				producers[t].create_group(info).unwrap()
 			});
-			assert_eq!(group.sequence, *sequence, "a schedule interleaves groups of track {t}");
+			assert_eq!(group.start, *sequence, "a schedule interleaves groups of track {t}");
 			group
 				.write_frame(frames[f].timestamp, frames[f].payload.clone())
 				.unwrap();
@@ -1680,31 +1691,6 @@ async fn open_gop_trims_only_the_orphans() {
 	);
 	assert!(
 		leading_out(video, 7) > 0 && leading_out(video, 10) > 0,
-		"a continuous group keeps them"
-	);
-	assert_eq!(run.stats.release.gaps, 2);
-}
-
-/// MPEG-2 open GOP, whose pictures are stamped with their placement rather than their
-/// presentation: the leading B-pictures a skip or a cut orphans are trimmed, and so are those of
-/// the group the export joins at, while every group after a whole one keeps its own.
-#[tokio::test(start_paused = true)]
-async fn mpeg2_open_gop_trims_only_the_orphans() {
-	let run = recover(Arm {
-		join: Duration::from_millis(1100),
-		..arm(Profile::Mpeg2, skip_and_cut).breaks(0)
-	})
-	.await;
-	let video = run.ledger(true);
-	let first = video.units.iter().find(|unit| unit.output).unwrap().group;
-	assert_eq!(first, 2, "the export joins at the group in flight");
-	assert_eq!(
-		(leading_out(video, 2), leading_out(video, 6), leading_out(video, 9)),
-		(0, 0, 0),
-		"the orphans are trimmed"
-	);
-	assert!(
-		leading_out(video, 3) > 0 && leading_out(video, 7) > 0 && leading_out(video, 10) > 0,
 		"a continuous group keeps them"
 	);
 	assert_eq!(run.stats.release.gaps, 2);

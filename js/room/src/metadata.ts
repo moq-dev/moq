@@ -184,6 +184,7 @@ function serveSnapshot<T>(
 			maxAge: Duration.millis(86_400_000),
 			priority: PRIORITY,
 		});
+		if (!track) throw new Error(`the track ${name} already exists`);
 		effect.cleanup(() => {
 			track.finish();
 			track.close();
@@ -193,7 +194,7 @@ function serveSnapshot<T>(
 		effect.cleanup(() => producer.finish());
 
 		effect.run((effect) => {
-			producer.update({ value: value(effect), at: Moq.Time.Timestamp.now() });
+			producer.update(value(effect), Json.next(track, Moq.Time.Timestamp.now()));
 		});
 	});
 }

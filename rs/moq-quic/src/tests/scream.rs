@@ -257,7 +257,7 @@ fn run(scenario: &Scenario) -> Outcome {
 		for (id, (received, completed)) in reading.iter_mut() {
 			let mut stream = conn.recv_stream(*id);
 			let Ok(mut chunks) = stream.read() else { continue };
-			while let Ok(Some(chunk)) = chunks.next(usize::MAX) {
+			while let Poll::Ready(Ok(Some(chunk))) = chunks.try_next(usize::MAX) {
 				*received += chunk.bytes.len() as u64;
 				read += chunk.bytes.len() as u64;
 			}
@@ -316,10 +316,10 @@ fn flush(pair: &mut Pair, ch: ConnectionHandle, groups: &mut [Group]) {
 		let mut stream = pair.client_send(ch, group.id);
 		while group.backlog > 0 {
 			let chunk = &ZEROS[..group.backlog.min(ZEROS.len() as u64) as usize];
-			match stream.write(&mut &chunk[..]) {
-				Ok(n) => group.backlog -= n as u64,
-				Err(send::Error::Blocked) => return,
-				Err(e) => panic!("write: {e}"),
+			match stream.try_write(&mut &chunk[..]) {
+				Poll::Ready(Ok(n)) => group.backlog -= n as u64,
+				Poll::Pending => return,
+				Poll::Ready(Err(e)) => panic!("write: {e}"),
 			}
 		}
 		if group.ended {

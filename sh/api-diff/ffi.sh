@@ -2,8 +2,8 @@
 # Write the FFI interfaces of the last release and of this checkout as headers,
 # so sh/api-diff/run.sh can diff them. usage: sh/api-diff/ffi.sh <out>
 #
-# - moq.h: the C header, from the newest `moq-c-v*` (formerly `libmoq-v*`)
-#   release archive, and from moq-c's build script here.
+# - moq.h: the C header, from the newest `libmoq-v*` release archive, and from
+#   libmoq's build script here.
 # - moq-ffi.hpp: the UniFFI surface every binding is generated from, rendered as
 #   the C++ header uniffi-bindgen-cpp writes for it, which declares each exported
 #   item with its full signature. The baseline comes from the newest `moq-ffi-v*`
@@ -34,10 +34,10 @@ strip() {
     gcc -x "$1" -fpreprocessed -dD -E -P -w "$2" -o "$3"
 }
 
-c_tag=$(latest '^(moq-c|libmoq)-v')
+c_tag=$(latest '^libmoq-v')
 ffi_tag=$(latest '^moq-ffi-v')
 if [[ -z "$c_tag" || -z "$ffi_tag" ]]; then
-    echo "no moq-c or moq-ffi release found" >&2
+    echo "no libmoq or moq-ffi release found" >&2
     exit 1
 fi
 
@@ -46,11 +46,11 @@ gh release download "$c_tag" --repo moq-dev/moq --pattern '*-x86_64-unknown-linu
 tar -xzf "$work"/c/*.tar.gz -C "$work/c" --wildcards '*/include/moq.h'
 strip c "$work"/c/*/include/moq.h "$out/baseline/moq.h"
 
-# moq-c's build script writes the header into its OUT_DIR, which `cargo check` runs.
-c_out=$(cargo check --locked -p moq-c --message-format=json |
-    jq -r 'select(.reason == "build-script-executed") | select(.package_id | test("/moq-c#")) | .out_dir' | tail -1)
+# libmoq's build script writes the header into its OUT_DIR, which `cargo check` runs.
+c_out=$(cargo check --locked -p libmoq --message-format=json |
+    jq -r 'select(.reason == "build-script-executed") | select(.package_id | test("/libmoq#")) | .out_dir' | tail -1)
 if [[ -z "$c_out" || ! -f "$c_out/include/moq.h" ]]; then
-    echo "cargo check -p moq-c wrote no moq.h" >&2
+    echo "cargo check -p libmoq wrote no moq.h" >&2
     exit 1
 fi
 strip c "$c_out/include/moq.h" "$out/current/moq.h"

@@ -899,10 +899,19 @@ fn export_keying_material() {
 	const LABEL: &[u8] = b"test_label";
 	const CONTEXT: &[u8] = b"test_context";
 
-	let client = pair.client_conn_mut(client_ch).export_keying_material(LABEL, CONTEXT);
-	let server = pair.server_conn_mut(server_ch).export_keying_material(LABEL, CONTEXT);
-	assert!(client.is_some());
-	assert_eq!(client, server);
+	// client keying material
+	let mut client_buf = [0u8; 64];
+	pair.client_conn_mut(client_ch)
+		.export_keying_material(&mut client_buf, LABEL, CONTEXT)
+		.unwrap();
+
+	// server keying material
+	let mut server_buf = [0u8; 64];
+	pair.server_conn_mut(server_ch)
+		.export_keying_material(&mut server_buf, LABEL, CONTEXT)
+		.unwrap();
+
+	assert_eq!(&client_buf[..], &server_buf[..]);
 }
 
 #[test]
@@ -974,8 +983,9 @@ fn reset_stream() {
 	assert_matches!(pair.server_streams(server_ch).accept(Dir::Uni), Some(stream) if stream == s);
 	let mut recv = pair.server_recv(server_ch, s);
 	let mut chunks = recv.read().unwrap();
-	assert_matches!(chunks.next(usize::MAX), Err(recv::Error::Reset(ERROR)));
+	assert_matches!(chunks.next(usize::MAX), Err(recv::Error::Reset));
 	chunks.finalize();
+	assert_eq!(recv.received_reset(), Ok(Some(ERROR)));
 	// The reset stream ends reset, never finished.
 	assert_eq!(
 		peek(|waiter| pair.client_send(client_ch, s).poll_end(waiter)),
@@ -1006,12 +1016,9 @@ fn stop_stream() {
 
 	assert_matches!(
 		pair.client_send(client_ch, s).write(&mut &b"foo"[..]),
-		Err(send::Error::Stopped(ERROR))
+		Err(send::Error::Stopped)
 	);
-	assert_matches!(
-		pair.client_send(client_ch, s).finish(),
-		Err(send::Error::Stopped(ERROR))
-	);
+	assert_matches!(pair.client_send(client_ch, s).finish(), Err(send::Error::Stopped));
 }
 
 #[test]
@@ -1194,7 +1201,7 @@ fn deferred_accept_uses_handshake_idle_timeout() {
 	pair.time = start.saturating_add(Duration::from_secs(3));
 	assert!(pair.server.try_accept(delayed, pair.time).is_ok());
 
-	pair.time = start.saturating_add(Duration::from_secs(10));
+	pair.time = start.saturating_add(transport::Config::default().handshake_timeout);
 	assert_matches!(pair.server.try_accept(late, pair.time), Err(ConnectionError::TimedOut));
 }
 
@@ -1624,19 +1631,13 @@ fn data_blocked() {
 		pair.client_send(client_ch, s).write(&mut &b"0123456789ab"[..]).unwrap(),
 		10
 	);
-	assert_matches!(
-		pair.client_send(client_ch, s).write(&mut &b"c"[..]),
-		Err(send::Error::Blocked)
-	);
+	assert_matches!(pair.client_send(client_ch, s).try_write(&mut &b"c"[..]), Poll::Pending);
 	pair.drive();
 	assert_eq!(pair.client_conn_mut(client_ch).stats().frame_tx.data_blocked, 1);
 	assert_eq!(pair.server_conn_mut(server_ch).stats().frame_rx.data_blocked, 1);
 
 	// Being refused again at the same limit does not repeat the frame
-	assert_matches!(
-		pair.client_send(client_ch, s).write(&mut &b"c"[..]),
-		Err(send::Error::Blocked)
-	);
+	assert_matches!(pair.client_send(client_ch, s).try_write(&mut &b"c"[..]), Poll::Pending);
 	pair.drive();
 	assert_eq!(pair.client_conn_mut(client_ch).stats().frame_tx.data_blocked, 1);
 
@@ -1651,10 +1652,7 @@ fn data_blocked() {
 		pair.client_send(client_ch, s).write(&mut &b"0123456789ab"[..]).unwrap(),
 		10
 	);
-	assert_matches!(
-		pair.client_send(client_ch, s).write(&mut &b"c"[..]),
-		Err(send::Error::Blocked)
-	);
+	assert_matches!(pair.client_send(client_ch, s).try_write(&mut &b"c"[..]), Poll::Pending);
 	pair.drive();
 	let stats = pair.client_conn_mut(client_ch).stats();
 	assert_eq!(stats.frame_tx.data_blocked, 2);
@@ -1686,19 +1684,13 @@ fn stream_data_blocked() {
 		pair.client_send(client_ch, s).write(&mut &b"0123456789ab"[..]).unwrap(),
 		10
 	);
-	assert_matches!(
-		pair.client_send(client_ch, s).write(&mut &b"c"[..]),
-		Err(send::Error::Blocked)
-	);
+	assert_matches!(pair.client_send(client_ch, s).try_write(&mut &b"c"[..]), Poll::Pending);
 	pair.drive();
 	assert_eq!(pair.client_conn_mut(client_ch).stats().frame_tx.stream_data_blocked, 1);
 	assert_eq!(pair.server_conn_mut(server_ch).stats().frame_rx.stream_data_blocked, 1);
 
 	// Being refused again at the same limit does not repeat the frame
-	assert_matches!(
-		pair.client_send(client_ch, s).write(&mut &b"c"[..]),
-		Err(send::Error::Blocked)
-	);
+	assert_matches!(pair.client_send(client_ch, s).try_write(&mut &b"c"[..]), Poll::Pending);
 	pair.drive();
 	assert_eq!(pair.client_conn_mut(client_ch).stats().frame_tx.stream_data_blocked, 1);
 
@@ -1713,10 +1705,7 @@ fn stream_data_blocked() {
 		pair.client_send(client_ch, s).write(&mut &b"0123456789ab"[..]).unwrap(),
 		10
 	);
-	assert_matches!(
-		pair.client_send(client_ch, s).write(&mut &b"c"[..]),
-		Err(send::Error::Blocked)
-	);
+	assert_matches!(pair.client_send(client_ch, s).try_write(&mut &b"c"[..]), Poll::Pending);
 	pair.drive();
 	let stats = pair.client_conn_mut(client_ch).stats();
 	assert_eq!(stats.frame_tx.stream_data_blocked, 2);
@@ -1758,10 +1747,7 @@ fn data_blocked_not_sent_for_local_send_window() {
 		pair.client_send(client_ch, s).write(&mut &b"0123456789"[..]).unwrap(),
 		5
 	);
-	assert_matches!(
-		pair.client_send(client_ch, s).write(&mut &b"x"[..]),
-		Err(send::Error::Blocked)
-	);
+	assert_matches!(pair.client_send(client_ch, s).try_write(&mut &b"x"[..]), Poll::Pending);
 	pair.drive();
 
 	assert_eq!(pair.client_conn_mut(client_ch).stats().frame_tx.data_blocked, 0);
@@ -1791,10 +1777,7 @@ fn data_blocked_dropped_when_limit_raised() {
 		pair.client_send(client_ch, s).write(&mut &b"0123456789ab"[..]).unwrap(),
 		10
 	);
-	assert_matches!(
-		pair.client_send(client_ch, s).write(&mut &b"c"[..]),
-		Err(send::Error::Blocked)
-	);
+	assert_matches!(pair.client_send(client_ch, s).try_write(&mut &b"c"[..]), Poll::Pending);
 
 	// The peer raises the limit before the queued frame gets transmitted
 	pair.server_conn_mut(server_ch).set_receive_window(100u32.into());
@@ -1828,10 +1811,7 @@ fn stream_data_blocked_not_sent_after_reset() {
 		pair.client_send(client_ch, s).write(&mut &b"0123456789ab"[..]).unwrap(),
 		10
 	);
-	assert_matches!(
-		pair.client_send(client_ch, s).write(&mut &b"c"[..]),
-		Err(send::Error::Blocked)
-	);
+	assert_matches!(pair.client_send(client_ch, s).try_write(&mut &b"c"[..]), Poll::Pending);
 
 	// Resetting the stream before the queued frame gets transmitted discards it
 	pair.client_send(client_ch, s).reset(0u32.into()).unwrap();
@@ -1866,10 +1846,7 @@ fn data_blocked_retransmit() {
 		pair.client_send(client_ch, s).write(&mut &b"0123456789ab"[..]).unwrap(),
 		10
 	);
-	assert_matches!(
-		pair.client_send(client_ch, s).write(&mut &b"c"[..]),
-		Err(send::Error::Blocked)
-	);
+	assert_matches!(pair.client_send(client_ch, s).try_write(&mut &b"c"[..]), Poll::Pending);
 	pair.drive_client();
 	pair.server.inbound.clear(); // Lose the packet carrying the frame
 	pair.drive();
@@ -2369,13 +2346,39 @@ fn migration() {
 	pair.drive_server();
 	assert_ne!(pair.server_conn_mut(server_ch).total_recvd(), 0);
 
+	pair.client.capture_inbound_packets = true;
 	pair.drive();
 	// The connection survives the client's own path change.
 	assert_matches!(pair.client_conn_mut(client_ch).error(), None);
 	assert_eq!(pair.server_conn_mut(server_ch).remote_address(), pair.client.addr);
 
-	// Assert that the client's response to the PATH_CHALLENGE was an IMMEDIATE_ACK, instead of a
-	// second ping
+	// The lone PING left the server a budget far short of 1200 bytes, so its first PATH_CHALLENGE
+	// went out short, and a full-size one followed once the address was validated (RFC 9000
+	// §8.2.1). These are the payload sizes of the packets carrying one, in arrival order.
+	let challenges: Vec<usize> = pair
+		.client
+		.captured_packets
+		.iter()
+		.filter(|payload| {
+			frame::Iter::new(Bytes::copy_from_slice(payload))
+				.unwrap()
+				.any(|frame| matches!(frame, Ok(Frame::PathChallenge(_))))
+		})
+		.map(Vec::len)
+		.collect();
+	assert_eq!(challenges.len(), 2, "PATH_CHALLENGE payload sizes: {challenges:?}");
+	assert!(
+		challenges[0] < 1000,
+		"the first challenge was not short: {challenges:?}"
+	);
+	// Header and AEAD tag take well under 60 bytes of the 1200
+	assert!(
+		challenges[1] + 60 >= usize::from(INITIAL_MTU),
+		"the second challenge was short: {challenges:?}"
+	);
+
+	// Assert that the client answered each PATH_CHALLENGE on its active path with an
+	// IMMEDIATE_ACK, instead of another ping
 	let client_stats_after_migrate = pair.client_conn_mut(client_ch).stats();
 	assert_eq!(
 		client_stats_after_migrate.frame_tx.ping - client_stats_after_connect.frame_tx.ping,
@@ -2383,7 +2386,7 @@ fn migration() {
 	);
 	assert_eq!(
 		client_stats_after_migrate.frame_tx.immediate_ack - client_stats_after_connect.frame_tx.immediate_ack,
-		1
+		2
 	);
 }
 
@@ -2408,8 +2411,8 @@ fn test_flow_control(config: transport::Config, window_size: usize) {
 	info!("writing");
 	assert_eq!(pair.client_send(client_ch, s).write(&mut &msg[..]), Ok(window_size));
 	assert_eq!(
-		pair.client_send(client_ch, s).write(&mut &msg[window_size..]),
-		Err(send::Error::Blocked)
+		pair.client_send(client_ch, s).try_write(&mut &msg[window_size..]),
+		Poll::Pending
 	);
 	pair.drive();
 	info!("resetting");
@@ -2418,8 +2421,9 @@ fn test_flow_control(config: transport::Config, window_size: usize) {
 
 	let mut recv = pair.server_recv(server_ch, s);
 	let mut chunks = recv.read().unwrap();
-	assert_eq!(chunks.next(usize::MAX).err(), Some(recv::Error::Reset(VarInt(42))));
+	assert_eq!(chunks.next(usize::MAX).err(), Some(recv::Error::Reset));
 	chunks.finalize();
+	assert_eq!(recv.received_reset(), Ok(Some(VarInt(42))));
 
 	// Happy path
 	info!("writing");
@@ -2429,8 +2433,8 @@ fn test_flow_control(config: transport::Config, window_size: usize) {
 		.unwrap();
 	assert_eq!(pair.client_send(client_ch, s).write(&mut &msg[..]), Ok(window_size));
 	assert_eq!(
-		pair.client_send(client_ch, s).write(&mut &msg[window_size..]),
-		Err(send::Error::Blocked)
+		pair.client_send(client_ch, s).try_write(&mut &msg[window_size..]),
+		Poll::Pending
 	);
 
 	pair.drive();
@@ -2438,17 +2442,17 @@ fn test_flow_control(config: transport::Config, window_size: usize) {
 	let mut recv = pair.server_recv(server_ch, s);
 	let mut chunks = recv.read().unwrap();
 	loop {
-		match chunks.next(usize::MAX) {
-			Ok(Some(chunk)) => {
+		match chunks.try_next(usize::MAX) {
+			Poll::Ready(Ok(Some(chunk))) => {
 				cursor += chunk.bytes.len();
 			}
-			Ok(None) => {
+			Poll::Ready(Ok(None)) => {
 				panic!("end of stream");
 			}
-			Err(recv::Error::Blocked) => {
+			Poll::Pending => {
 				break;
 			}
-			Err(e) => {
+			Poll::Ready(Err(e)) => {
 				panic!("{}", e);
 			}
 		}
@@ -2472,8 +2476,8 @@ fn test_flow_control(config: transport::Config, window_size: usize) {
 	drive_until(&mut pair, |pair| grants(pair) > before);
 	let lost = grants(&mut pair);
 	assert_eq!(
-		pair.client_send(client_ch, s).write(&mut &msg[..]),
-		Err(send::Error::Blocked),
+		pair.client_send(client_ch, s).try_write(&mut &msg[..]),
+		Poll::Pending,
 		"the dropped grant did not reach the sender"
 	);
 	pair.to_client.loss = 0.0;
@@ -2482,8 +2486,8 @@ fn test_flow_control(config: transport::Config, window_size: usize) {
 	info!("writing");
 	assert_eq!(pair.client_send(client_ch, s).write(&mut &msg[..]), Ok(window_size));
 	assert_eq!(
-		pair.client_send(client_ch, s).write(&mut &msg[window_size..]),
-		Err(send::Error::Blocked)
+		pair.client_send(client_ch, s).try_write(&mut &msg[window_size..]),
+		Poll::Pending
 	);
 
 	pair.drive();
@@ -2491,17 +2495,17 @@ fn test_flow_control(config: transport::Config, window_size: usize) {
 	let mut recv = pair.server_recv(server_ch, s);
 	let mut chunks = recv.read().unwrap();
 	loop {
-		match chunks.next(usize::MAX) {
-			Ok(Some(chunk)) => {
+		match chunks.try_next(usize::MAX) {
+			Poll::Ready(Ok(Some(chunk))) => {
 				cursor += chunk.bytes.len();
 			}
-			Ok(None) => {
+			Poll::Ready(Ok(None)) => {
 				panic!("end of stream");
 			}
-			Err(recv::Error::Blocked) => {
+			Poll::Pending => {
 				break;
 			}
-			Err(e) => {
+			Poll::Ready(Err(e)) => {
 				panic!("{}", e);
 			}
 		}
@@ -2573,12 +2577,12 @@ fn stop_opens_bidi() {
 
 	let mut recv = pair.server_recv(server_ch, s);
 	let mut chunks = recv.read().unwrap();
-	assert_matches!(chunks.next(usize::MAX), Err(recv::Error::Blocked));
+	assert_matches!(chunks.try_next(usize::MAX), Poll::Pending);
 	chunks.finalize();
 
 	assert_matches!(
 		pair.server_send(server_ch, s).write(&mut &b"foo"[..]),
-		Err(send::Error::Stopped(ERROR))
+		Err(send::Error::Stopped)
 	);
 	assert_eq!(
 		peek(|waiter| pair.server_send(server_ch, s).poll_end(waiter)),
@@ -3004,10 +3008,7 @@ fn stop_before_finish() {
 	pair.server_recv(server_ch, s).stop(ERROR).unwrap();
 	pair.drive();
 
-	assert_matches!(
-		pair.client_send(client_ch, s).finish(),
-		Err(send::Error::Stopped(ERROR))
-	);
+	assert_matches!(pair.client_send(client_ch, s).finish(), Err(send::Error::Stopped));
 }
 
 #[test]
@@ -3583,7 +3584,7 @@ fn finish_acked() {
 		chunks.next(usize::MAX),
 		Ok(Some(chunk)) if chunk.bytes == MSG
 	);
-	assert_matches!(chunks.next(usize::MAX), Err(recv::Error::Blocked));
+	assert_matches!(chunks.try_next(usize::MAX), Poll::Pending);
 	chunks.finalize();
 
 	// Finish before receiving data ack
@@ -5199,7 +5200,7 @@ fn stream_chunks(mut recv: recv::Stream<'_>) -> Vec<u8> {
 	let mut buf = Vec::new();
 
 	let mut chunks = recv.read().unwrap();
-	while let Ok(Some(chunk)) = chunks.next(usize::MAX) {
+	while let Poll::Ready(Ok(Some(chunk))) = chunks.try_next(usize::MAX) {
 		buf.extend(chunk.bytes);
 	}
 
@@ -6181,7 +6182,6 @@ fn application_close_in_initial_is_rejected() {
 	);
 }
 
-#[cfg(feature = "qlog")]
 #[test]
 fn qlog_packet_lost_trigger() {
 	use qlog::events::{EventData, quic::PacketLostTrigger};
@@ -6243,7 +6243,6 @@ fn qlog_packet_lost_trigger() {
 	);
 }
 
-#[cfg(feature = "qlog")]
 #[test]
 fn qlog_pacing_rate_is_bits_per_second() {
 	use qlog::events::EventData;
@@ -6540,7 +6539,8 @@ fn gso_train_fits_one_udp_send() {
 }
 
 /// A congestion callback, as the transport reported it. Packets are named by send time, which
-/// several packets can share.
+/// several packets can share. `LossDone` and `AckDone` end each loss and ACK callback, with its
+/// `now`.
 #[derive(Debug, Clone, Copy)]
 enum PacketEvent {
 	Sent { at: Instant },
@@ -6548,6 +6548,8 @@ enum PacketEvent {
 	Lost { sent: Instant },
 	Congestion { sent: Instant, ecn: bool },
 	AppLimited { in_flight: u64 },
+	LossDone { now: Instant },
+	AckDone { now: Instant },
 }
 
 type PacketLog = Arc<Mutex<Vec<PacketEvent>>>;
@@ -6580,6 +6582,7 @@ impl Controller for PacketRecorder {
 		for acked in ack.packets {
 			self.push(PacketEvent::Acked { sent: acked.sent });
 		}
+		self.push(PacketEvent::AckDone { now: ack.now });
 	}
 
 	fn on_loss(&mut self, loss: congestion::Loss<'_>) {
@@ -6591,6 +6594,7 @@ impl Controller for PacketRecorder {
 			sent: newest.sent,
 			ecn: false,
 		});
+		self.push(PacketEvent::LossDone { now: loss.now });
 	}
 
 	fn on_ce(&mut self, ce: congestion::Ce) {
@@ -6685,7 +6689,7 @@ fn check_packet_resolution(log: &PacketLog) -> Vec<PacketEvent> {
 					assert_eq!(Some(at), last_lost, "loss congestion names another packet");
 				}
 			}
-			PacketEvent::AppLimited { .. } => {}
+			PacketEvent::AppLimited { .. } | PacketEvent::LossDone { .. } | PacketEvent::AckDone { .. } => {}
 		}
 	}
 	events
@@ -6760,6 +6764,62 @@ fn recorded_pair(factory: PacketRecorderFactory) -> (Pair, ConnectionHandle, Pac
 	// The client builds its controller before the server hears of it.
 	let log = factory.logs.lock().unwrap()[0].clone();
 	(pair, client_ch, log)
+}
+
+/// An ACK that reveals losses reports them to the controller before itself, as RFC 9002's
+/// OnAckReceived orders them, so the loss response shapes that ACK's processing.
+#[test]
+fn ack_reports_its_losses_first() {
+	let _guard = subscribe();
+	let (mut pair, client_ch, log) = recorded_pair(Default::default());
+	let s = pair
+		.client_streams(client_ch)
+		.open(Dir::Uni, Default::default())
+		.unwrap();
+	pair.client_send(client_ch, s).write(&mut &[42; 16 * 1024][..]).unwrap();
+	pair.drive_client();
+	// Drop the first of the flight, so the ACK of the rest declares it lost by packet threshold.
+	assert!(
+		pair.server.inbound.len() > 4,
+		"too few packets for a packet-threshold loss"
+	);
+	pair.server.inbound.pop_front();
+	// The server takes the rest a microsecond apart, so each ACK it sends arrives at its own
+	// instant, which then names the ACK a loss was found by.
+	for (i, (arrival, ..)) in pair.server.inbound.iter_mut().enumerate() {
+		*arrival = arrival.saturating_add(Duration::from_micros(i as u64));
+	}
+	while let Some(&(arrival, ..)) = pair.server.inbound.front() {
+		pair.time = pair.time.max(arrival);
+		pair.drive_server();
+	}
+	assert!(pair.client.inbound.len() > 1, "too few ACKs to tell apart");
+	pair.drive();
+
+	let events = check_packet_resolution(&log);
+	let losses: Vec<_> = events
+		.iter()
+		.enumerate()
+		.filter_map(|(i, e)| match e {
+			PacketEvent::LossDone { now } => Some((i, *now)),
+			_ => None,
+		})
+		.collect();
+	assert!(!losses.is_empty(), "no loss reported");
+	for (i, now) in losses {
+		assert!(
+			!events[..i]
+				.iter()
+				.any(|e| matches!(e, PacketEvent::AckDone { now: at } if *at == now)),
+			"the ACK that revealed a loss was reported before it"
+		);
+		assert!(
+			events[i..]
+				.iter()
+				.any(|e| matches!(e, PacketEvent::AckDone { now: at } if *at == now)),
+			"the ACK that revealed a loss was never reported"
+		);
+	}
 }
 
 /// Counts the congestion events one controller's log reports for CE marks.
@@ -6996,17 +7056,6 @@ fn leased(pair: &mut Pair, server_ch: ConnectionHandle) -> usize {
 	pair.server_conn_mut(server_ch).stats().credit.leased as usize
 }
 
-/// Lease what has arrived on `s`, read `n` bytes of it, and release their credit, returning
-/// whether the peer finished the stream right after the leased bytes.
-fn consume(pair: &mut Pair, server_ch: ConnectionHandle, s: StreamId, n: usize) -> bool {
-	let mut recv = pair.server_recv(server_ch, s);
-	let mut lease = recv.lease(0).unwrap();
-	let fin = lease.is_fin();
-	lease.advance(n);
-	recv.release(lease);
-	fin
-}
-
 /// Write what the client can of `msg` up to `until`, finishing at its end, and lease what the
 /// server can, without consuming, until neither makes progress. Returns the bytes newly leased.
 fn pump_leased(
@@ -7022,7 +7071,7 @@ fn pump_leased(
 		pair.drive();
 		let mut wrote = 0;
 		if *sent < until
-			&& let Ok(n) = pair.client_send(client_ch, s).write(&mut &msg[*sent..until])
+			&& let Poll::Ready(Ok(n)) = pair.client_send(client_ch, s).try_write(&mut &msg[*sent..until])
 		{
 			wrote = n;
 			*sent += n;
@@ -7045,20 +7094,18 @@ fn pump_leased(
 	}
 }
 
-/// Leases keep replenishing a stream window much smaller than the connection's, while the
-/// connection window stays spent until the bytes are consumed. A consume below the usual
-/// `MAX_DATA` threshold still unblocks the peer once it nears its limit, without relying on its
-/// DATA_BLOCKED.
-///
-/// The peer never spends the whole window: a lease held then would be evicted, since nothing
-/// could free it.
+/// A reader that leases without taking holds one stream window, however large the
+/// connection's: stream credit returns as bytes are taken, and connection credit once they are
+/// released. So a reader that stops taking, as moq-net's ingest does to pace a slow reader,
+/// never spends the connection window, which would get its stream evicted.
 #[test]
-fn lease_spends_connection_window_only() {
+fn leases_hold_one_stream_window() {
 	const WINDOW: usize = 4000;
+	const STREAM: usize = 1000;
 	let _guard = subscribe();
 	let mut transport = transport::Config::default();
 	transport.limits.receive_window = NonZeroU64::new(WINDOW as u64);
-	transport.limits.stream_receive_window = NonZeroU64::new(1000);
+	transport.limits.stream_receive_window = NonZeroU64::new(STREAM as u64);
 	let mut pair = Pair::new(
 		Default::default(),
 		server::Config {
@@ -7073,26 +7120,107 @@ fn lease_spends_connection_window_only() {
 		.open(Dir::Uni, Default::default())
 		.unwrap();
 	let msg = vec![0xAB; WINDOW + 50];
+	let all = msg.len();
 	let mut sent = 0;
 
-	// Three stream windows' worth, all leased and none consumed.
-	assert_eq!(pump_leased(&mut pair, chs, s, (&msg, 3000), &mut sent), 3000);
+	// Leased and never taken: one stream window.
+	assert_eq!(pump_leased(&mut pair, chs, s, (&msg, all), &mut sent), STREAM);
 	let stats = pair.server_conn_mut(server_ch).stats().credit;
-	assert_eq!((stats.leased, stats.available), (3000, 1000));
+	assert_eq!(
+		(stats.leased, stats.available),
+		(STREAM as u64, (WINDOW - STREAM) as u64)
+	);
 
-	// Too little to announce while the peer has room, so the peer blocks at the window, and the
-	// frame that spends the last of its room is what announces it.
-	assert!(!consume(&mut pair, server_ch, s, 100));
-	let all = msg.len();
-	assert_eq!(pump_leased(&mut pair, chs, s, (&msg, all), &mut sent), 1050);
-	assert_eq!(sent, msg.len());
-	assert_eq!(leased(&mut pair, server_ch), WINDOW + 50 - 100);
+	// Taken but restored, as the start of a message is, keeps the connection credit and
+	// returns the stream credit.
+	let mut recv = pair.server_recv(server_ch, s);
+	let mut lease = recv.lease(0).unwrap();
+	lease.advance(500);
+	recv.restore(lease);
+	assert_eq!(pump_leased(&mut pair, chs, s, (&msg, all), &mut sent), 500);
+	let stats = pair.server_conn_mut(server_ch).stats().credit;
+	assert_eq!((stats.leased, stats.available), (1500, (WINDOW - 1500) as u64));
 
-	let all = leased(&mut pair, server_ch);
-	assert!(consume(&mut pair, server_ch, s, all), "finished after the leased bytes");
+	// Taking and releasing everything delivers the rest of the message.
+	let mut read = 500;
+	for _ in 0..all {
+		let mut recv = pair.server_recv(server_ch, s);
+		let mut lease = recv.lease(0).unwrap();
+		let (len, fin) = (lease.remaining(), lease.is_fin());
+		lease.advance(len);
+		recv.release(lease);
+		read += len;
+		if fin {
+			break;
+		}
+		pump_leased(&mut pair, chs, s, (&msg, all), &mut sent);
+	}
+	assert_eq!((sent, read), (all, all));
 	assert_eq!(leased(&mut pair, server_ch), 0);
 	pair.server_recv(server_ch, s).stop(0u32.into()).unwrap();
 	assert_eq!(pair.server_recv(server_ch, s).lease(0).err(), Some(recv::Error::Closed));
+}
+
+/// Lease `want` bytes of `s` once they arrive, driving the pair until they do, and hand them
+/// back unread.
+fn await_unit(
+	pair: &mut Pair,
+	(client_ch, server_ch): (ConnectionHandle, ConnectionHandle),
+	s: StreamId,
+	msg: &[u8],
+	sent: &mut usize,
+	want: usize,
+) {
+	for _ in 0..msg.len() {
+		if let Poll::Ready(Ok(n)) = pair.client_send(client_ch, s).try_write(&mut &msg[*sent..]) {
+			*sent += n;
+		}
+		pair.drive();
+		let mut recv = pair.server_recv(server_ch, s);
+		match recv.try_lease(want) {
+			Poll::Ready(Ok(lease)) => {
+				assert!(lease.remaining() >= want);
+				recv.restore(lease);
+				return;
+			}
+			Poll::Ready(Err(err)) => panic!("lease failed: {err}"),
+			Poll::Pending => {}
+		}
+	}
+	panic!("{want} bytes never arrived: {sent} sent");
+}
+
+/// A reader waiting for a unit larger than its stream window gets room for the unit, and after
+/// taking a few bytes, room for the few more its next unit needs, however far below the usual
+/// update threshold.
+#[test]
+fn a_waiting_reader_gets_room_for_its_unit() {
+	const STREAM: usize = 1000;
+	const UNIT: usize = 3000;
+	let _guard = subscribe();
+	let mut transport = transport::Config::default();
+	transport.limits.receive_window = NonZeroU64::new(4000);
+	transport.limits.stream_receive_window = NonZeroU64::new(STREAM as u64);
+	let mut pair = Pair::new(
+		Default::default(),
+		server::Config {
+			transport,
+			..server_config()
+		},
+	);
+	let chs = pair.connect();
+	let s = pair.client_streams(chs.0).open(Dir::Uni, Default::default()).unwrap();
+	let msg = vec![0xAB; UNIT + 10];
+	let mut sent = 0;
+
+	await_unit(&mut pair, chs, s, &msg, &mut sent, UNIT);
+
+	let mut recv = pair.server_recv(chs.1, s);
+	let mut lease = recv.lease(0).unwrap();
+	lease.advance(10);
+	recv.release(lease);
+	await_unit(&mut pair, chs, s, &msg, &mut sent, UNIT);
+	assert_eq!(sent, msg.len());
 }
 
 #[test]
@@ -7314,11 +7442,11 @@ fn upload(
 		while unsent > 0 {
 			match pair
 				.client_send(client_ch, s)
-				.write(&mut &CHUNK[..unsent.min(CHUNK.len())])
+				.try_write(&mut &CHUNK[..unsent.min(CHUNK.len())])
 			{
-				Ok(n) => unsent -= n,
-				Err(send::Error::Blocked) => break,
-				Err(e) => panic!("{e}"),
+				Poll::Ready(Ok(n)) => unsent -= n,
+				Poll::Pending => break,
+				Poll::Ready(Err(e)) => panic!("{e}"),
 			}
 			if unsent == 0 {
 				pair.client_send(client_ch, s).finish().unwrap();
@@ -7331,7 +7459,7 @@ fn upload(
 		if let Some(stream) = server_stream {
 			let mut recv = pair.server_recv(server_ch, stream);
 			let mut chunks = recv.read().unwrap();
-			while let Ok(Some(chunk)) = chunks.next(usize::MAX) {
+			while let Poll::Ready(Ok(Some(chunk))) = chunks.try_next(usize::MAX) {
 				received += chunk.bytes.len();
 			}
 			chunks.finalize();
@@ -7357,4 +7485,27 @@ fn default_controller_supports_bandwidth_probing() {
 	});
 	assert!(controller.probes());
 	assert!(controller.metrics().pacing_rate.is_some());
+}
+
+/// A local close owes the peer a CONNECTION_CLOSE until a transmit hands it over, and the peer it
+/// reaches owes none back
+#[test]
+fn close_owed_until_transmitted() {
+	let _guard = subscribe();
+	let mut pair = Pair::default();
+	let (client_ch, server_ch) = pair.connect();
+	assert!(!pair.client_conn_mut(client_ch).owes_close());
+
+	let now = pair.time;
+	pair.client_conn_mut(client_ch).close(now, VarInt(42), String::new());
+	assert!(pair.client_conn_mut(client_ch).owes_close());
+
+	pair.drive_client();
+	assert!(!pair.client_conn_mut(client_ch).owes_close());
+	assert!(pair.client_conn_mut(client_ch).error().is_some());
+
+	pair.drive();
+	let server = pair.server_conn_mut(server_ch);
+	assert!(server.is_closed());
+	assert!(!server.owes_close());
 }

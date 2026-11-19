@@ -2,6 +2,7 @@ import { expect, jest, onTestFinished, test } from "bun:test";
 import { Duration, now } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import * as Connection from "../connection/index.ts";
+import { defined } from "../defined.test-util.ts";
 import { StreamCode } from "../error.ts";
 import { hooks } from "../internal.ts";
 import { GRACE } from "../ledger.ts";
@@ -10,7 +11,7 @@ import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
 import { Tail } from "../tail.ts";
-import { Timescale } from "../time.ts";
+import { Timescale, Timestamp } from "../time.ts";
 import * as track from "../track.ts";
 import { wireOf } from "../wire.ts";
 import { Fetch, FetchOk } from "./fetch.ts";
@@ -123,7 +124,6 @@ async function head(requestId: bigint, payloads: string[], group = GROUP, versio
 			await new FetchFrame({ payload: text(payload), priority: 0 }).encode(
 				w,
 				{ group, object, first: object === 0 },
-				undefined,
 				version,
 			);
 		}
@@ -198,7 +198,7 @@ test("a head that lands before its tail is continued by it", async () => {
 	await subscriber.handleGroup(...liveStream(GROUP, 2, ["t2", "t3"]));
 
 	const group = await consumer.ordered().nextGroup();
-	expect(group?.sequence).toBe(GROUP);
+	expect(group?.start).toBe(GROUP);
 	expect(await frames(group)).toEqual(["h0", "h1", "t2", "t3"]);
 });
 
@@ -222,7 +222,7 @@ test("a catalog written once is readable from the head alone", async () => {
 	await subscriber.handleFetch(await head(fetch.requestId, ['{"video":{}}'], 0n));
 
 	const group = await consumer.ordered().nextGroup();
-	expect(group?.sequence).toBe(0n);
+	expect(group?.start).toBe(0n);
 	expect(untext((await group?.readFrame())?.payload)).toBe('{"video":{}}');
 });
 
@@ -258,7 +258,7 @@ for (const outcome of ["a refused joining FETCH", "an empty joining FETCH"] as c
 		await subscriber.handleGroup(...liveStream(GROUP + 1n, 0, ["n0"]));
 
 		const group = await consumer.ordered().nextGroup();
-		expect(group?.sequence).toBe(GROUP + 1n);
+		expect(group?.start).toBe(GROUP + 1n);
 		expect(await frames(group)).toEqual(["n0"]);
 	});
 }
@@ -273,7 +273,7 @@ test("a reader in sequence order with no delay budget skips headless groups", as
 	await subscriber.handleGroup(...liveStream(GROUP + 2n, 0, ["n0"]));
 
 	const group = await consumer.ordered().nextGroup();
-	expect(group?.sequence).toBe(GROUP + 2n);
+	expect(group?.start).toBe(GROUP + 2n);
 });
 
 for (const version of VERSIONS) {
@@ -282,14 +282,14 @@ for (const version of VERSIONS) {
 			const { subscriber, consumer, answer } = await subscribed(version, {
 				order: "ascending",
 				delay: { max: null },
-				ranges: [{ start: { absolute: 0n } }],
+				ranges: [{ start: { time: 0n } }],
 			});
 			await answer({ groupId: 0n, objectId });
 			// Largest is inclusive, including object 0: its following tail is no whole message.
 			await subscriber.handleGroup(...liveStream(0n, Number(objectId) + 1, ["cut"], version));
 			await subscriber.handleGroup(...liveStream(1n, 0, ["whole"], version));
 			const group = await consumer.ordered().nextGroup();
-			expect(group?.sequence).toBe(1n);
+			expect(group?.start).toBe(1n);
 			expect(await frames(group)).toEqual(["whole"]);
 		});
 	}
@@ -304,7 +304,7 @@ test("a tail parked on a refused joining FETCH is dropped", async () => {
 	await subscriber.handleGroup(...liveStream(GROUP + 1n, 0, ["n0"]));
 
 	const group = await consumer.ordered().nextGroup();
-	expect(group?.sequence).toBe(GROUP + 1n);
+	expect(group?.start).toBe(GROUP + 1n);
 });
 
 test("a joining FETCH has no deadline of its own", async () => {
@@ -320,7 +320,7 @@ test("a joining FETCH has no deadline of its own", async () => {
 	await tail;
 
 	const group = await consumer.ordered().nextGroup();
-	expect(group?.sequence).toBe(GROUP);
+	expect(group?.start).toBe(GROUP);
 	expect(await frames(group)).toEqual(["h0", "h1", "t2"]);
 });
 
@@ -340,7 +340,7 @@ test("a joining FETCH reset after FETCH_OK costs only the head", async () => {
 
 	// The parked tail was dropped and nothing holds the end open.
 	const group = await consumer.recvGroup();
-	expect(group?.sequence).toBe(GROUP + 1n);
+	expect(group?.start).toBe(GROUP + 1n);
 	expect(await consumer.recvGroup()).toBeUndefined();
 	expect(await consumer.closed).toBeNull();
 	expect(now().since(started).lt(GRACE)).toBe(true);
@@ -351,7 +351,7 @@ test("SUBSCRIPTION_ENDED cancels a head nothing claimed", async () => {
 	await accept(fetching);
 	await subscriber.handleFetch(await head(fetch.requestId, ["h0", "h1"]));
 	const group = await consumer.ordered().nextGroup();
-	expect(group?.sequence).toBe(GROUP);
+	expect(group?.start).toBe(GROUP);
 
 	// The group may run past the head upstream, so it must not read as whole.
 	await subscriber.handleGroup(...liveStream(GROUP + 1n, 0, ["n0"]));
@@ -399,7 +399,7 @@ test("a whole group for a headed sequence is refused, with its head", async () =
 	await subscriber.handleGroup(...liveStream(GROUP, 0, ["w0"]));
 
 	const group = await consumer.ordered().nextGroup();
-	expect(group?.sequence).toBe(GROUP);
+	expect(group?.start).toBe(GROUP);
 	expect(await group?.closed).toBeInstanceOf(Error);
 });
 
@@ -424,7 +424,6 @@ async function deltaHead(requestId: bigint, payloads: string[], delta: number) {
 				await new FetchFrame({ payload: text(payload), priority: 0 }).encode(
 					w,
 					{ group: GROUP, object, first: true },
-					undefined,
 					VERSION,
 				);
 				continue;
@@ -481,13 +480,11 @@ test("a joining FETCH spanning another group drops the head", async () => {
 		await new FetchFrame({ payload: text("h0"), priority: 0 }).encode(
 			w,
 			{ group: GROUP, object: 0, first: true },
-			undefined,
 			VERSION,
 		);
 		await new FetchFrame({ payload: text("x0"), priority: 0 }).encode(
 			w,
 			{ group: GROUP + 1n, object: 0, first: false, previousGroup: GROUP },
-			undefined,
 			VERSION,
 		);
 	});
@@ -520,7 +517,7 @@ for (const version of VERSIONS) {
 		await tail;
 
 		const group = await consumer.ordered().nextGroup();
-		expect(group?.sequence).toBe(GROUP);
+		expect(group?.start).toBe(GROUP);
 		expect(await frames(group)).toEqual(["h0", "h1", "t2"]);
 	});
 
@@ -550,7 +547,7 @@ for (const version of VERSIONS) {
 
 		// The fill was the one stream counted, so the head is the whole group and the track ends.
 		const group = await consumer.recvGroup();
-		expect(group?.sequence).toBe(0n);
+		expect(group?.start).toBe(0n);
 		expect(await frames(group)).toEqual(["catalog"]);
 		expect(await consumer.recvGroup()).toBeUndefined();
 		expect(await consumer.closed).toBeNull();
@@ -563,7 +560,7 @@ test("a clean end finishes a head nothing claimed", () => {
 	const j = new Join(0n, t);
 	const producer = new track.Producer("catalog").createGroup(0n);
 	expect(j.open(() => producer)).toBe(producer);
-	producer.writeFrame({ payload: text("c") });
+	producer.writeFrame({ payload: text("c"), timestamp: Timestamp.unscaled(producer.start) });
 	j.wrote();
 	j.finish(producer);
 	expect(j.outstanding).toBe(true);
@@ -577,20 +574,18 @@ test("fetch objects decode as FetchFrame wrote them", async () => {
 		await new FetchFrame({ payload: text("a"), priority: 0 }).encode(
 			w,
 			{ group: 5n, object: 0, first: true },
-			undefined,
 			VERSION,
 		);
 		await new FetchFrame({ payload: new Uint8Array(), priority: 0 }).encode(
 			w,
 			{ group: 5n, object: 1, first: false },
-			undefined,
 			VERSION,
 		);
 	});
 	const reader = new Reader(undefined, bytes, VERSION);
-	const first = await reader.decode((c) => decodeFetchObject(c, undefined));
+	const first = await reader.decode((c) => decodeFetchObject(c));
 	expect(first).toMatchObject({ kind: "object", group: 5n, object: 0, priority: 0, subgroup: "zero" });
-	const second = await reader.decode((c) => decodeFetchObject(c, undefined));
+	const second = await reader.decode((c) => decodeFetchObject(c));
 	expect(second).toMatchObject({ kind: "object", group: undefined, object: undefined, payload: new Uint8Array() });
 });
 
@@ -612,10 +607,10 @@ async function publishing(version: IetfVersion) {
 	const publication = origin.route(Path.from("room"));
 	const broadcast = publication.broadcast;
 	// Written once, before anyone subscribed, and left open: only the head can deliver it.
-	const catalog = broadcast.createTrack("catalog.json", { timescale: Timescale.MILLI });
-	catalog.appendGroup().writeFrame(textFrame("catalog"));
-	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
-	const group = video.appendGroup();
+	const catalog = defined(broadcast.createTrack("catalog.json", { timescale: Timescale.MILLI }));
+	hooks.appendNext(catalog).writeFrame(textFrame("catalog"));
+	const video = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
+	const group = hooks.appendNext(video);
 	group.writeFrame(textFrame("v0"));
 	group.writeFrame(textFrame("v1"));
 
@@ -628,11 +623,11 @@ for (const version of VERSIONS) {
 	test(`${versionName(version)}: a late JS subscriber gets a JS publisher's current groups from object 0`, async () => {
 		const { remote, group, sent } = await publishing(version);
 		const catalogGroup = await remote.track("catalog.json").subscribe().recvGroup();
-		expect(catalogGroup?.sequence).toBe(0n);
+		expect(catalogGroup?.start).toBe(0n);
 		expect(untext((await catalogGroup?.readFrame())?.payload)).toBe("catalog");
 
 		const videoGroup = await remote.track("video").subscribe().recvGroup();
-		expect(videoGroup?.sequence).toBe(0n);
+		expect(videoGroup?.start).toBe(0n);
 		group.writeFrame(textFrame("v2"));
 		group.finish();
 		expect(await frames(videoGroup)).toEqual(["v0", "v1", "v2"]);
@@ -683,7 +678,7 @@ test("a second fetch stream after the track ended leaves the first head to its o
 	// The second stream, discarding, ends first: the head is still the first stream's.
 	j.finish(undefined);
 	expect(first.closed.peek()).toBeUndefined();
-	first.writeFrame({ payload: text("c") });
+	first.writeFrame({ payload: text("c"), timestamp: Timestamp.unscaled(first.start) });
 	j.finish(first);
 	expect(first.closed.peek()).toBeNull();
 });

@@ -1,21 +1,71 @@
-# [L] A higher-priority group takes over an acknowledged stream in a later lite version
+# [XL] A preempted group pauses and continues in lite-08, by reset or by takeover
 
 ## Goal
 
-In a lite version after lite-07, when an open waits for credit and a lower-priority group stream's
-sent data is all acknowledged, the new group takes that stream over at once:
-the group stream ends one group with GROUP_END and starts another, needing no
-credit. The group that lost its stream pauses and a later stream continues
-it, as a YIELDED reset's group already does. moq-transport, lite-07, and older lite
-versions keep reset only.
+In lite-08, a group that loses its stream to a higher-priority one is paused
+instead of dropped, and a later stream continues it. It loses the stream one
+of two ways, designed together: the publisher resets the lowest-priority
+Group Stream to free stream credit, or, when that stream's sent data is all
+acknowledged, the new group takes the stream over at once with an in-band
+marker and needs no credit. lite-07 and older, and moq-transport, keep the
+reset as a final drop that the reader FETCHes around.
 
 ## Plan
+
+Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit): ✅ paused
+groups and continuations leave lite-07
+([moq-dev/moq#8965](https://github.com/moq-dev/moq/pull/8965)) and are designed again here,
+with takeover, as one lite-08 feature (rejected: keep YIELDED in lite-07 and
+add takeover later; keep it but stop pausing on a reset without a code).
+lite-07 would have frozen the half that still needs a new stream per
+continuation, on a signal browsers lose. The decisions below still hold
+where they don't conflict with these, with "lite-07" and "a later lite
+version" read as lite-08:
+
+- **The marker needs a new name and encoding.** The 2026-11-12 pick below
+  made takeover's GROUP_END a FRAME whose `Payload Length` is 0, which
+  pauses the group. lite-07 now freezes a GROUP_END with that name on that
+  reserved value meaning the opposite: the group is whole, and here is its
+  exclusive end timestamp
+  ([time addressing](https://github.com/moq-dev/moq/pull/8908)). Recommended: a
+  distinct marker (say GROUP_PAUSE), laid out so one zero `Payload Length`
+  leads to either; lite-08 is a new version, so it may re-lay what follows
+  the zero.
+- **The pause must not hang on a reset's error code.** Chromium loses a
+  reset that lands right after stream data and Firefox loses its code
+  ([browser reset reports](/quest/m4/browser-reset-reports.md)), which is
+  why lite-07-wip's draft told a subscriber to pause on any reset without a
+  code, and only JS did. Recommended: the publisher says a group is paused
+  on the Subscribe Stream, or with the in-band marker, and Rust and JS read
+  the same signal.
+- **A continuation should not resend.** lite-07-wip's continuation restarted
+  at the reset stream's own `Frame Start`, since a reset can discard frames
+  the transport acknowledged, so the reader skipped what it held. Weigh a
+  continuation that starts where the reader says it stopped, which is what
+  a FETCH from a frame index already is.
+- **Tracks carrying moq-transport object records** never yielded in
+  lite-07-wip. Say what they do here.
+- **Measure first.** Before either half is built, measure a lossless reader
+  of more tracks than the stream cap: how often a group is preempted, and
+  what a drop plus FETCH (lite-07's behaviour) costs against a continuation.
+  The 2026-11-13 decision below asked this of takeover's round trip; it now
+  covers both halves. If the drop plus FETCH is close, delete this quest.
+
+What lite-07-wip built is in history to start from:
+[moq-dev/moq#8545](https://github.com/moq-dev/moq/pull/8545) (YIELDED,
+paused groups, continuations, `SubscribeAccounting.tla`),
+[moq-dev/moq#8673](https://github.com/moq-dev/moq/pull/8673) (the browser
+workarounds), and
+[moq-dev/moq#8843](https://github.com/moq-dev/moq/pull/8843) (yielding on
+relay links). The `test/stream-credit` harness stays on `main`, checking
+drops.
 
 Decided 2026-11-13 (maintainer, /quest-run): ✅ move this quest from m1 to
 m3 (rejected: keep it in m1 before lite-07 finalizes; delete it).
 [moq-dev/moq#8545](https://github.com/moq-dev/moq/pull/8545)'s YIELDED reset
-already gives stream credit to the highest-priority groups under a browser's
-~100-stream cap; takeover saves only the ~1 RTT a reset waits for
+already gave stream credit to the highest-priority groups under a browser's
+~100-stream cap (as the plain reset still does after 2026-11-16); takeover
+saves only the ~1 RTT a reset waits for
 MAX_STREAMS, at the cost of a new wire message (GROUP_END) and multi-group
 streams in Rust and JS, and lite-07's finalization does not need it.
 Takeover comes in a later lite version only if measurements show that round
@@ -71,10 +121,14 @@ subscription whose stream it takes over), since stream credit is
 session-wide and the waiting higher-priority group is usually another
 track's. `GroupRecv` rebinds the stream at each GROUP message.
 
-Public API: none. Wire: GROUP_END and group stream takeover in a later lite
-version.
+Public API: `StreamError::Yielded`, or whatever replaces it, returns to Rust
+and `@moq/net`. Wire: lite-08 paused groups, continuations, a takeover
+marker, and multi-group streams. lite-07's GROUP has no `Frame Start` (only
+lite-06 carries one), so a continuation that starts partway through its group
+brings one back, or names its start some other way.
 
 ## Related
 
-- [YIELDED reset](https://github.com/moq-dev/moq/pull/8545) - the reset-based priority scheduling this would shave a round trip off
-- [Finalize lite-07](/quest/m2/lite07-finalize.md) - freezes lite-07 without takeover
+- [A reader fetches a group reset to make room](/quest/m3/fetch-preempted-group.md) - the drop plus FETCH that Measure first compares a continuation against
+- [YIELDED reset](https://github.com/moq-dev/moq/pull/8545) - the lite-07-wip design this starts from
+- [Finalize lite-07](/quest/m2/lite07-finalize.md) - freezes lite-07 without takeover or continuations

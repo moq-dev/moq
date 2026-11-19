@@ -41,6 +41,8 @@ json-patch = "5"
 moq-json = { path = ".", features = ["async"] }
 moq-net = { path = "../moq-net", features = ["async"] }
 proptest = { workspace = true, features = ["handle-panics"] }
+# A raw record skips the formatter's container hooks, which the nesting tests cover.
+serde_json = { workspace = true, features = ["raw_value"] }
 workspace-hack = { path = "../workspace-hack" }
 
 [[bench]]
@@ -59,11 +61,6 @@ harness = false
 [[bench]]
 name = "window"
 harness = false
-
-# Run the documented example's inline test in the normal nextest gate.
-[[example]]
-name = "teleop"
-test = true
 
 [lints]
 workspace = true

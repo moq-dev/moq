@@ -29,8 +29,6 @@ pub enum MoqProtocolKind {
 	Unauthorized,
 	/// The peer broke a protocol rule; the session is unusable.
 	ProtocolViolation,
-	/// A key-value pair was malformed or repeated more than allowed.
-	KeyValueFormatting,
 	/// The peer did not close within the GOAWAY drain deadline.
 	GoawayTimeout,
 	/// A control message took too long.
@@ -61,26 +59,15 @@ pub enum MoqProtocolKind {
 	TimestampMismatch,
 	/// An application-chosen code, offset into the 64+ range on the wire.
 	App,
-	/// A code this version does not recognize; [`MoqProtocolError::code`] is the value.
+	/// A code moq-lite does not name, such as one only moq-transport defines;
+	/// [`MoqProtocolError::code`] is the value.
 	Unknown,
 	/// The session exceeded its announcement or subscription cap.
 	TooManyRequests,
 	/// The authorization token expired and can be refreshed. Session 0x18.
 	Expired,
-	/// A token registration exceeded the advertised cache size.
-	AuthTokenCacheOverflow,
 	/// The peer could not parse an authorization token.
 	MalformedAuthToken,
-	/// A token referred to an alias that was never registered.
-	UnknownAuthTokenAlias,
-	/// The peer reused or sent an invalid request ID.
-	InvalidRequestId,
-	/// The peer sent a path it may not send.
-	InvalidPath,
-	/// The peer sent an authority it may not send.
-	InvalidAuthority,
-	/// The peer exceeded its outstanding request update limit.
-	TooManyRequestUpdates,
 }
 
 /// A protocol failure a peer sent (or this side will send): scope, verbatim code, kind,
@@ -134,18 +121,11 @@ fn session_kind(err: &moq_net::SessionError) -> MoqProtocolKind {
 		moq_net::SessionError::Unauthorized => MoqProtocolKind::Unauthorized,
 		moq_net::SessionError::Expired => MoqProtocolKind::Expired,
 		moq_net::SessionError::ProtocolViolation => MoqProtocolKind::ProtocolViolation,
-		moq_net::SessionError::KeyValueFormatting => MoqProtocolKind::KeyValueFormatting,
 		moq_net::SessionError::GoawayTimeout => MoqProtocolKind::GoawayTimeout,
 		moq_net::SessionError::Timeout => MoqProtocolKind::Timeout,
 		moq_net::SessionError::Version => MoqProtocolKind::Version,
 		moq_net::SessionError::TooManyRequests => MoqProtocolKind::TooManyRequests,
-		moq_net::SessionError::AuthTokenCacheOverflow => MoqProtocolKind::AuthTokenCacheOverflow,
 		moq_net::SessionError::MalformedAuthToken => MoqProtocolKind::MalformedAuthToken,
-		moq_net::SessionError::UnknownAuthTokenAlias => MoqProtocolKind::UnknownAuthTokenAlias,
-		moq_net::SessionError::InvalidRequestId => MoqProtocolKind::InvalidRequestId,
-		moq_net::SessionError::InvalidPath => MoqProtocolKind::InvalidPath,
-		moq_net::SessionError::InvalidAuthority => MoqProtocolKind::InvalidAuthority,
-		moq_net::SessionError::TooManyRequestUpdates => MoqProtocolKind::TooManyRequestUpdates,
 		moq_net::SessionError::App(_) => MoqProtocolKind::App,
 		moq_net::SessionError::Unknown(_) => MoqProtocolKind::Unknown,
 		_ => MoqProtocolKind::Unknown,
@@ -224,9 +204,8 @@ pub enum MoqError {
 		reason: String,
 	},
 
-	// Native codec errors, behind the optional `audio`/`video` features.
+	// Native codec errors.
 	/// An audio codec operation failed.
-	#[cfg(feature = "audio")]
 	#[error("{reason}")]
 	Audio {
 		/// A diagnostic message describing the failure.
@@ -234,7 +213,6 @@ pub enum MoqError {
 	},
 
 	/// A video codec operation failed.
-	#[cfg(feature = "video")]
 	#[error("{reason}")]
 	Video {
 		/// A diagnostic message describing the failure.
@@ -347,7 +325,7 @@ pub enum MoqError {
 
 	/// This track or group already committed to another way of reading it.
 	///
-	/// A track is read in arrival order, in sequence order, or by a typed reader such as a
+	/// A track is read in arrival order, in start order, or by a typed reader such as a
 	/// JSON consumer, never two of them, and the first group read picks the order. A group is
 	/// read raw or by a media group consumer, and the first frame read picks raw. Reaching
 	/// for another one afterwards is this error rather than [`Self::Unsupported`]: each works
@@ -414,6 +392,92 @@ pub enum MoqError {
 	},
 }
 
+/// What to do after a request failed, as [`moq_error_retry`] answers it. Mirrors
+/// moq-net's `Retry` and js/net's `retry`.
+///
+/// It judges the request, not the session: a session closed with any code, an auth refusal
+/// included, answers [`Self::Same`], since whether the session comes back is the
+/// connection's call. A caller deciding whether to reconnect checks [`moq_error_is_auth`]
+/// first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum MoqRetry {
+	/// The source failed to deliver rather than judging the request, so asking it again may
+	/// succeed: its connection dropped, its session ended, or it is going away.
+	Same,
+	/// The source lost its route to the content, so only another route continues it.
+	Reroute,
+	/// The answer judged the request or what it carried, so it repeats on every attempt:
+	/// refused, not found, malformed, or a local mistake.
+	Never,
+}
+
+impl MoqError {
+	/// What to do after a request failed with this error: moq-net's `Error::retry` verdict.
+	///
+	/// Rebuilds the moq-net error this one came from, so moq-net's table decides. Any other
+	/// local failure, [`Self::Internal`] included, repeats on every attempt, except a failed
+	/// dial, a transport failure before the session existed, and [`Self::Busy`], which asks
+	/// the caller to try again. A session close answers [`MoqRetry::Same`] whatever its code,
+	/// so a caller deciding whether to reconnect checks [`Self::is_auth`] first.
+	pub fn retry(&self) -> MoqRetry {
+		let err = match self {
+			Self::Protocol { details } => match details.scope {
+				MoqErrorScope::Session => moq_net::Error::Session(moq_net::SessionError::from_code(details.code)),
+				MoqErrorScope::Stream => moq_net::Error::Stream(moq_net::StreamError::from_code(details.code)),
+			},
+			Self::Transport { .. } | Self::Connect { .. } | Self::Busy => return MoqRetry::Same,
+			Self::Closed => moq_net::Error::Closed,
+			Self::Cancelled => moq_net::Error::Cancel,
+			_ => return MoqRetry::Never,
+		};
+		match err.retry() {
+			moq_net::Retry::Same => MoqRetry::Same,
+			moq_net::Retry::Reroute => MoqRetry::Reroute,
+			_ => MoqRetry::Never,
+		}
+	}
+
+	/// Whether the credentials were refused: HTTP 401 or 403, an expired or malformed token,
+	/// a session closed as unauthorized, or a track's access revoked. Retrying without new
+	/// credentials won't help.
+	pub fn is_auth(&self) -> bool {
+		match self {
+			Self::Unauthorized | Self::Forbidden | Self::Expired => true,
+			Self::Protocol { details } => matches!(
+				details.kind,
+				MoqProtocolKind::Unauthorized | MoqProtocolKind::Expired | MoqProtocolKind::MalformedAuthToken
+			),
+			_ => false,
+		}
+	}
+
+	/// Whether this is the expected end of a graceful shutdown, [`Self::Cancelled`] or
+	/// [`Self::Closed`], rather than a failure.
+	pub fn is_shutdown(&self) -> bool {
+		matches!(self, Self::Cancelled | Self::Closed)
+	}
+}
+
+/// What to do after a request failed with `err`: ask the same source again, find another
+/// route, or give up. A session close answers `Same` whatever its code, so check
+/// [`moq_error_is_auth`] first before reconnecting.
+#[uniffi::export]
+pub fn moq_error_retry(err: MoqError) -> MoqRetry {
+	err.retry()
+}
+
+/// Whether `err` refused the credentials, so retrying without new ones won't help.
+#[uniffi::export]
+pub fn moq_error_is_auth(err: MoqError) -> bool {
+	err.is_auth()
+}
+
+/// Whether `err` is the expected end of a graceful shutdown rather than a failure.
+#[uniffi::export]
+pub fn moq_error_is_shutdown(err: MoqError) -> bool {
+	err.is_shutdown()
+}
+
 impl From<moq_net::Error> for MoqError {
 	fn from(err: moq_net::Error) -> Self {
 		match err {
@@ -432,6 +496,10 @@ impl From<moq_net::Error> for MoqError {
 			moq_net::Error::Unauthorized => Self::Unauthorized,
 			moq_net::Error::Expired => Self::Expired,
 			moq_net::Error::Unsupported | moq_net::Error::Version => Self::Unsupported,
+			// The session's own close code, which this side sends when the drain runs out.
+			moq_net::Error::GoawayTimeout => Self::Protocol {
+				details: MoqProtocolError::from_session(&moq_net::SessionError::GoawayTimeout),
+			},
 			moq_net::Error::Session(err) => Self::Protocol {
 				details: MoqProtocolError::from_session(&err),
 			},
@@ -502,7 +570,6 @@ impl From<moq_json::Error> for MoqError {
 	}
 }
 
-#[cfg(feature = "audio")]
 impl From<moq_audio::Error> for MoqError {
 	fn from(err: moq_audio::Error) -> Self {
 		match err {
@@ -514,7 +581,6 @@ impl From<moq_audio::Error> for MoqError {
 	}
 }
 
-#[cfg(feature = "video")]
 impl From<moq_video::Error> for MoqError {
 	fn from(err: moq_video::Error) -> Self {
 		match err {
@@ -569,24 +635,28 @@ mod tests {
 			(0x1, MoqProtocolKind::Internal),
 			(0x2, MoqProtocolKind::Unauthorized),
 			(0x3, MoqProtocolKind::ProtocolViolation),
-			(0x4, MoqProtocolKind::InvalidRequestId),
-			(0x6, MoqProtocolKind::KeyValueFormatting),
 			(0x7, MoqProtocolKind::TooManyRequests),
-			(0x8, MoqProtocolKind::InvalidPath),
 			(0x10, MoqProtocolKind::GoawayTimeout),
 			(0x11, MoqProtocolKind::Timeout),
-			(0x13, MoqProtocolKind::AuthTokenCacheOverflow),
 			(0x15, MoqProtocolKind::Version),
 			(0x16, MoqProtocolKind::MalformedAuthToken),
-			(0x17, MoqProtocolKind::UnknownAuthTokenAlias),
 			(0x18, MoqProtocolKind::Expired),
-			(0x19, MoqProtocolKind::InvalidAuthority),
-			(0x1b, MoqProtocolKind::TooManyRequestUpdates),
 		] {
 			let error = MoqProtocolError::from_session(&moq_net::SessionError::from_code(code));
 			assert_eq!(error.scope, MoqErrorScope::Session);
 			assert_eq!(error.code, code);
 			assert_eq!(error.kind, kind, "session code {code:#x}");
+		}
+	}
+
+	/// A code only moq-transport defines is no kind of ours, and keeps its number.
+	#[test]
+	fn moq_transport_session_codes_are_unknown() {
+		for code in [0x4, 0x6, 0x8, 0x13, 0x17, 0x19, 0x1b] {
+			let error = MoqProtocolError::from_session(&moq_net::SessionError::from_code(code));
+			assert_eq!(error.scope, MoqErrorScope::Session);
+			assert_eq!(error.code, code);
+			assert_eq!(error.kind, MoqProtocolKind::Unknown, "session code {code:#x}");
 		}
 	}
 
@@ -790,5 +860,86 @@ mod tests {
 			}
 			other => panic!("expected Protocol, got {other}"),
 		}
+	}
+
+	/// Every moq-net error keeps moq-net's own retry verdict across the boundary, except a
+	/// producer dropped without an end: a local fault the boundary reports as Internal.
+	#[test]
+	fn retry_agrees_with_moq_net() {
+		use moq_net::{Error, SessionError, StreamError};
+		let mut errors = vec![
+			Error::Transport("reset".into()),
+			Error::IdleTimeout,
+			Error::Version,
+			Error::UnexpectedStream,
+			Error::Duplicate,
+			Error::Skipped,
+			Error::Cancel,
+			Error::Timeout,
+			Error::Old,
+			Error::App(3),
+			Error::NotFound,
+			Error::InvalidRange,
+			Error::Unroutable,
+			Error::WrongSize,
+			Error::ProtocolViolation,
+			Error::Unauthorized,
+			Error::Expired,
+			Error::UnexpectedMessage,
+			Error::Unsupported,
+			Error::TooManyRequests,
+			Error::UnknownAlpn("x".into()),
+			Error::Closed,
+			Error::GoingAway,
+			Error::GoawayTimeout,
+			Error::Evicted,
+			Error::Lagged,
+			Error::FrameTooLarge,
+			Error::Remote(0x7),
+		];
+		errors.extend((0..0x50).map(|code| Error::Session(SessionError::from_code(code))));
+		errors.extend((0..0x50).map(|code| Error::Stream(StreamError::from_code(code))));
+		for err in errors {
+			let expected = match err.retry() {
+				moq_net::Retry::Same => MoqRetry::Same,
+				moq_net::Retry::Reroute => MoqRetry::Reroute,
+				_ => MoqRetry::Never,
+			};
+			assert_eq!(MoqError::from(err.clone()).retry(), expected, "{err:?}");
+		}
+		assert_eq!(MoqError::from(Error::Dropped).retry(), MoqRetry::Never);
+	}
+
+	#[test]
+	fn auth_covers_http_tokens_and_protocol_refusals() {
+		use moq_net::{Error, SessionError, StreamError};
+		for err in [
+			MoqError::Unauthorized,
+			MoqError::Forbidden,
+			MoqError::Expired,
+			Error::Session(SessionError::Unauthorized).into(),
+			Error::Session(SessionError::Expired).into(),
+			Error::Session(SessionError::MalformedAuthToken).into(),
+			Error::Stream(StreamError::Unauthorized).into(),
+		] {
+			assert!(err.is_auth(), "{err:?}");
+			assert!(!err.is_shutdown(), "{err:?}");
+		}
+		for err in [
+			MoqError::Closed,
+			MoqError::NotFound,
+			Error::Session(SessionError::TooManyRequests).into(),
+			Error::Transport("reset".into()).into(),
+		] {
+			assert!(!err.is_auth(), "{err:?}");
+		}
+	}
+
+	#[test]
+	fn shutdown_is_cancelled_or_closed() {
+		assert!(moq_error_is_shutdown(MoqError::Cancelled));
+		assert!(moq_error_is_shutdown(moq_net::Error::GoingAway.into()));
+		assert!(!moq_error_is_shutdown(MoqError::Busy));
+		assert!(!moq_error_is_shutdown(moq_net::Error::Transport("reset".into()).into()));
 	}
 }

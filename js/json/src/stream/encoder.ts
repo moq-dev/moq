@@ -1,6 +1,7 @@
 import { Error as NetError } from "@moq/net";
 import type * as z from "zod/mini";
 import { MAX_FRAME_BYTES } from "../limits.ts";
+import { stringify } from "../parse.ts";
 
 /** Options for an {@link Encoder}. */
 export interface Config<T = unknown> {
@@ -52,14 +53,7 @@ export class Encoder<T> {
 	 */
 	encode(value: T): Pending {
 		const valid = this.#schema ? this.#schema.parse(value) : value;
-		const text = JSON.stringify(valid);
-		if (text === undefined) {
-			// `JSON.stringify` yields undefined for a top-level undefined, function, or symbol, which
-			// would otherwise frame as empty bytes and fail on the consumer instead of here.
-			throw new Error("record is not representable as JSON");
-		}
-
-		const payload = new TextEncoder().encode(text);
+		const payload = new TextEncoder().encode(stringify(valid));
 		if (payload.length > MAX_FRAME_BYTES) throw new NetError.FrameTooLarge();
 		return { payload, commit: () => {} };
 	}
