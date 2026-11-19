@@ -54,7 +54,8 @@ exclude_re = [
     # poll, so these differ only when another thread writes the route between that
     # read and this check, a window no deterministic test can stage. There the
     # original retries on the new copy and the arm prevents a lost wake.
-    'replace \|\| with && in Fetching::poll_moved$',
+    'replace \|\| with && in Fetching::(poll_moved|moved)$',
+    'replace Fetching::moved -> bool with false$',
     ':\d+:6: delete match arm Some\(Some\(Err\(err\)\)\) in <impl kio::Task for Fetching>::poll$',
     # The reader list's sweep only bounds memory: a dead entry fails every
     # `Weak::upgrade`, and `subscribe` sweeps the list again.
