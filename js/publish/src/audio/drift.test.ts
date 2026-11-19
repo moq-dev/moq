@@ -136,7 +136,11 @@ describe("Drift", () => {
 	test("a clock past the bound stays bounded", () => {
 		for (const ppm of [-3000, 3000]) {
 			const result = run({ ppm, jitter: 0 }, 600);
-			expect(result.resyncs.length + result.drops).toBeGreaterThan(0);
+			// The 1000 ppm left over runs 100 ms off every 100 s, so each direction corrects about five
+			// times. A fast clock re-anchors too, once the drops let capture catch up.
+			expect(result.resyncs.length).toBeGreaterThanOrEqual(4);
+			if (ppm > 0) expect(result.drops).toBeGreaterThan(0);
+			else expect(result.drops).toBe(0);
 			expect(worst(result, 0)).toBeLessThan(100 + 15);
 		}
 	});
@@ -196,6 +200,19 @@ describe("Stamper", () => {
 		const { errors, stamps } = stamp({ ppm: 100, jitter: 0.002 }, 60, { jumps: [[30, 3_600_000_000]] });
 		expect(worst({ errors, resyncs: [], drops: 0 }, 10)).toBeLessThan(FRAME);
 		for (let i = 1; i < stamps.length; i++) expect(stamps[i]).toBeGreaterThan(stamps[i - 1]);
+	});
+
+	// A context 3000 ppm fast leads by the 1000 ppm the bound leaves, 100 ms every 100 s, which
+	// uncorrected reaches 300 ms here. The stamper drops what runs ahead and re-anchors where the
+	// stamps end, so the audio stays within the resync bound of capture without a gap or overlap.
+	test("drops what a context past the bound runs ahead", () => {
+		const { errors, stamps, ends } = stamp({ ppm: 3000, jitter: 0.002 }, 300);
+		expect(worst({ errors, resyncs: [], drops: 0 }, 0)).toBeLessThan(100 + 15);
+		for (let i = 1; i < stamps.length; i++) {
+			expect(stamps[i]).toBeGreaterThanOrEqual(ends[i - 1] - 1e-6);
+			// Within one 10 ms quantum: the re-anchor lands on the first quantum captured after the end.
+			expect(stamps[i] - ends[i - 1]).toBeLessThan(10_000);
+		}
 	});
 
 	// Never back: every frame starts at or after where the last one ended.
