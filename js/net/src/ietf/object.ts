@@ -525,7 +525,7 @@ const FETCH_DATAGRAM = 0x40;
 const FETCH_SUBGROUP = 0x03;
 
 /** How a fetched object names its Subgroup ID. */
-export type FetchSubgroup = "zero" | "prior" | "next" | "explicit" | "datagram";
+type FetchSubgroup = "zero" | "prior" | "next" | "explicit" | "datagram";
 
 /** One object read off a fetch stream, the inverse of {@link FetchFrame.encode}. */
 export type FetchedObject =

@@ -39,10 +39,6 @@ package that defines it, which a branch-scoped run never analyzes. If the
 winner is too slow for that, the PR body says what it adds to `just check`.
 Fix whatever it finds that the sweep did not.
 
-## Required
-
-- [Dead export and manifest sweep](/quest/m1/js-dead-code/sweep.md) - clears the findings known today, so this PR holds only the tool and what it newly finds
-
 ## Related
 
 - [Code audit](/quest/m1/audit-code.md) - its dead-code pass uses the configured tool

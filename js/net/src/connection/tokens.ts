@@ -48,7 +48,7 @@ export function fallback(primary: URL, url: URL, tokens: readonly string[], setu
 }
 
 /** `url` with `jwt` appended to its query. @internal */
-export function withJwt(url: URL, jwt: string): URL {
+function withJwt(url: URL, jwt: string): URL {
 	const next = new URL(url);
 	next.searchParams.append("jwt", jwt);
 	return next;
