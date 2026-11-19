@@ -5460,7 +5460,8 @@ impl Finished {
 
 	/// Abort the track with the given error; see [`Producer::abort`].
 	///
-	/// Once every group below the end finished, readers still get the clean end.
+	/// Once every group below the end finished, readers still get the end the track declared: the
+	/// clean end after [`Producer::finish`], or the error [`Producer::fail`] gave.
 	pub fn abort(self, err: Error) -> Result<()> {
 		self.producer.abort(err)
 	}

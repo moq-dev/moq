@@ -306,7 +306,8 @@ impl Finished {
 		self.import.stats()
 	}
 
-	/// Release every track's cache, reporting `err` to readers that have not drained it.
+	/// Abort every track with `err`. Readers still draining a track get its clean end instead once
+	/// every group below its end finished.
 	pub fn abort(self, err: moq_net::Error) {
 		self.import.abort(err);
 	}

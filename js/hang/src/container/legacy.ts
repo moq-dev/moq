@@ -120,7 +120,10 @@ function micros(timestamp: Duration): number {
  * still refuses a frame after the finish.
  */
 export interface Finished {
-	/** Abort the track with an error; see {@link Producer.abort}. */
+	/**
+	 * Mirrors the Rust `container::Finished::abort`, and like it changes nothing a reader sees: every
+	 * group finished, so readers still draining get the rest of the track and its clean end, not `err`.
+	 */
 	abort(err: Error): void;
 }
 
@@ -282,7 +285,10 @@ export class Producer {
 		return this;
 	}
 
-	/** Abort the current group and the track with `err`, which readers see in place of a clean end. */
+	/**
+	 * Abort the current group and the track with `err`, which readers see in place of a clean end. A
+	 * no-op after {@link finish}: the track is already complete.
+	 */
 	abort(err: Error) {
 		this.#group?.abort(err);
 		this.#group = undefined;

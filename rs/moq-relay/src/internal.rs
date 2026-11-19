@@ -737,6 +737,80 @@ impl Scrape {
 		Ok(())
 	}
 
+	/// The per-tier route-layer counters of lite-07 sessions.
+	fn encode_routes(
+		&self,
+		encoder: &mut DescriptorEncoder,
+		sessions: &[(moq_net::stats::Tier, moq_net::stats::Presence)],
+	) -> std::fmt::Result {
+		use moq_net::stats::{RouteClose, RouteRefusal, Withdrawal};
+
+		counter(
+			encoder,
+			"moq_relay_route_changes",
+			"Changes to a relay's route that a peer caused.",
+			sessions
+				.iter()
+				.map(|(tier, presence)| ([("tier", tier.as_str())], presence.routes.changed)),
+		)?;
+		counter(
+			encoder,
+			"moq_relay_route_rewrites",
+			"Broadcasts rewritten into the origin behind route changes.",
+			sessions
+				.iter()
+				.map(|(tier, presence)| ([("tier", tier.as_str())], presence.routes.rewritten)),
+		)?;
+		counter(
+			encoder,
+			"moq_relay_route_withdrawals",
+			"Route withdrawals sent and received, by kind.",
+			sessions.iter().flat_map(|(tier, presence)| {
+				let routes = &presence.routes;
+				[("sent", routes.sent), ("received", routes.received)]
+					.into_iter()
+					.flat_map(move |(direction, counts)| {
+						Withdrawal::ALL.iter().map(move |&kind| {
+							(
+								[
+									("tier", tier.as_str()),
+									("direction", direction),
+									("kind", kind.as_str()),
+								],
+								counts.count(kind),
+							)
+						})
+					})
+			}),
+		)?;
+		counter(
+			encoder,
+			"moq_relay_route_refusals",
+			"Routes and claims a peer forwarded that the relay refused, keeping the session, by reason.",
+			sessions.iter().flat_map(|(tier, presence)| {
+				RouteRefusal::ALL.iter().map(|&reason| {
+					(
+						[("tier", tier.as_str()), ("reason", reason.as_str())],
+						presence.routes.refused.count(reason),
+					)
+				})
+			}),
+		)?;
+		counter(
+			encoder,
+			"moq_relay_route_sessions_closed",
+			"Sessions closed for their route layer, by kind.",
+			sessions.iter().flat_map(|(tier, presence)| {
+				RouteClose::ALL.iter().map(|&kind| {
+					(
+						[("tier", tier.as_str()), ("kind", kind.as_str())],
+						presence.routes.closed.count(kind),
+					)
+				})
+			}),
+		)
+	}
+
 	/// The per-tier session counters, plus control bytes and messages split by message class.
 	fn encode_sessions(&self, encoder: &mut DescriptorEncoder) -> std::fmt::Result {
 		use moq_net::stats::{Presence, Totals};
@@ -798,6 +872,8 @@ impl Scrape {
 				})
 			}),
 		)?;
+
+		self.encode_routes(encoder, &sessions)?;
 
 		let control = self.stats.control();
 		for (name, help, field) in [
@@ -2067,6 +2143,11 @@ mod tests {
 # TYPE moq_relay_inflated_bytes_total counter
 # TYPE moq_relay_panics_total counter
 # TYPE moq_relay_requests_total counter
+# TYPE moq_relay_route_changes_total counter
+# TYPE moq_relay_route_refusals_total counter
+# TYPE moq_relay_route_rewrites_total counter
+# TYPE moq_relay_route_sessions_closed_total counter
+# TYPE moq_relay_route_withdrawals_total counter
 # TYPE moq_relay_sessions_closed_total counter
 # TYPE moq_relay_sessions_connected gauge
 # TYPE moq_relay_sessions_failed_total counter
@@ -2101,6 +2182,22 @@ counter moq_relay_groups_total{role="subscriber",tier="edge"} 0
 counter moq_relay_inflated_bytes_total{role="publisher",tier="edge"} 0
 counter moq_relay_inflated_bytes_total{role="subscriber",tier="edge"} 0
 counter moq_relay_requests_total{tier="edge"} 1
+counter moq_relay_route_changes_total{tier="edge"} 0
+counter moq_relay_route_refusals_total{reason="looped",tier="edge"} 0
+counter moq_relay_route_refusals_total{reason="path",tier="edge"} 0
+counter moq_relay_route_refusals_total{reason="scope",tier="edge"} 0
+counter moq_relay_route_rewrites_total{tier="edge"} 0
+counter moq_relay_route_sessions_closed_total{kind="malformed",tier="edge"} 0
+counter moq_relay_route_sessions_closed_total{kind="other",tier="edge"} 0
+counter moq_relay_route_sessions_closed_total{kind="overrun",tier="edge"} 0
+counter moq_relay_route_sessions_closed_total{kind="regressed",tier="edge"} 0
+counter moq_relay_route_sessions_closed_total{kind="role",tier="edge"} 0
+counter moq_relay_route_sessions_closed_total{kind="stalled",tier="edge"} 0
+counter moq_relay_route_sessions_closed_total{kind="unasked",tier="edge"} 0
+counter moq_relay_route_withdrawals_total{direction="received",kind="dead",tier="edge"} 0
+counter moq_relay_route_withdrawals_total{direction="received",kind="drain",tier="edge"} 0
+counter moq_relay_route_withdrawals_total{direction="sent",kind="dead",tier="edge"} 0
+counter moq_relay_route_withdrawals_total{direction="sent",kind="drain",tier="edge"} 0
 counter moq_relay_sessions_closed_total{tier="edge"} 0
 counter moq_relay_sessions_failed_total{kind="application",tier="edge"} 0
 counter moq_relay_sessions_failed_total{kind="expired",tier="edge"} 0

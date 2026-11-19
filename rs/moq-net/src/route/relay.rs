@@ -425,6 +425,14 @@ struct Best<N> {
 /// path, the next hop in use, the shorter path, the neighbour's Node ID, and its session.
 type Order<N> = (bool, Reverse<i8>, Metric, bool, bool, usize, NodeId, N);
 
+/// What a forwarding node's usable routes give the ways to its claims ([`Router::ways`]):
+/// each one's next hop, rank, and mark, and the next hop of the one in use.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Ways<N> {
+	routes: Vec<(N, Rank, bool)>,
+	best: Option<N>,
+}
+
 /// What changed at a router since its caller last asked.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Changes<I> {
@@ -432,6 +440,8 @@ pub(crate) struct Changes<I> {
 	pub routes: BTreeSet<NodeId>,
 	/// The broadcasts whose claims, or what the reader shows of them, may have changed.
 	pub broadcasts: BTreeSet<Broadcast<I>>,
+	/// Claims a neighbour gave whose chain this node never takes, each taken as lost.
+	pub looped: u64,
 }
 
 impl<I> Default for Changes<I> {
@@ -439,6 +449,7 @@ impl<I> Default for Changes<I> {
 		Self {
 			routes: BTreeSet::new(),
 			broadcasts: BTreeSet::new(),
+			looped: 0,
 		}
 	}
 }
@@ -524,6 +535,8 @@ pub(crate) struct Router<N, I, A> {
 	/// Forwarding nodes whose route changed since the neighbours were last told.
 	stale: BTreeSet<NodeId>,
 	best: BTreeMap<NodeId, Best<N>>,
+	/// What each forwarding node's usable routes give the ways to its claims.
+	ways: BTreeMap<NodeId, Ways<N>>,
 	/// The forwarding nodes whose last selected route was marked, kept while no route
 	/// reaches them and their claims stay known, so the claims keep the mark.
 	marks: BTreeSet<NodeId>,
@@ -634,6 +647,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			draining: BTreeSet::new(),
 			stale: BTreeSet::new(),
 			best: BTreeMap::new(),
+			ways: BTreeMap::new(),
 			marks: BTreeSet::new(),
 			tx_hops: BTreeMap::new(),
 			sent_to: BTreeMap::new(),
@@ -1519,12 +1533,14 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 	fn reselect(&mut self, origin: NodeId) {
 		let current = self.best.get(&origin).map(|best| best.via);
 		let mut pick: Option<(Best<N>, Order<N>)> = None;
-		// A route that is not the best still serves the origin's claims, so each change
-		// to one reaches whoever follows them.
-		if let Some(log) = &mut self.log {
-			log.routes.insert(origin);
-		}
-		for mine in self.usable(origin) {
+		let usable = self.usable(origin);
+		let mut ways = Ways {
+			routes: (usable.iter())
+				.map(|mine| (mine.via, mine.offer.rank(), mine.offer.marked))
+				.collect(),
+			best: None,
+		};
+		for mine in usable {
 			let via = mine.via;
 			let offer = mine.offer.clone();
 			let (draining, priority, cost) = mine.offer.rank();
@@ -1545,6 +1561,8 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			}
 		}
 		let pick = pick.map(|(best, _)| best);
+		ways.best = pick.as_ref().map(|best| best.via);
+		self.relog(origin, ways);
 		let was = self.best.get(&origin);
 		if was == pick.as_ref() {
 			return;
@@ -1563,9 +1581,6 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			Some(best) => self.best.insert(origin, best),
 			None => self.best.remove(&origin),
 		};
-		if let Some(log) = &mut self.log {
-			log.routes.insert(origin);
-		}
 		// Whether its claims are reachable follows the route, and so does the rank of each
 		// that the rank reaches.
 		if (flipped || remarked)
@@ -1578,6 +1593,20 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			self.dirty.extend(ranked.iter().cloned());
 		}
 		self.stale.insert(origin);
+	}
+
+	/// Log `origin`'s route as changed once what its ways carry does. A route that is not
+	/// the best still serves the origin's claims, so a change to any usable route counts,
+	/// but one that leaves every way's next hop, rank, and mark alone, such as a new path
+	/// at the same cost, changes nothing a reader follows.
+	fn relog(&mut self, origin: NodeId, ways: Ways<N>) {
+		let changed = match ways.routes.is_empty() {
+			true => self.ways.remove(&origin).is_some(),
+			false => self.ways.insert(origin, ways.clone()).as_ref() != Some(&ways),
+		};
+		if changed && let Some(log) = &mut self.log {
+			log.routes.insert(origin);
+		}
 	}
 
 	/// What `peer` should hear of `origin` now.
@@ -1986,7 +2015,12 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		for (broadcast, change) in changes {
 			self.visit();
 			let change = match change {
-				Change::Live(claim) if !self.takes(&claim.chain) => Change::Lost,
+				Change::Live(claim) if !self.takes(&claim.chain) => {
+					if let Some(log) = &mut self.log {
+						log.looped += 1;
+					}
+					Change::Lost
+				}
 				// Unavailable is only ever news of a run this neighbour gave before: one first
 				// seen unavailable, which nothing can serve, is not there until it is
 				// available. A neighbour that moved to it no longer gives the run it gave.
@@ -2708,6 +2742,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			draining,
 			stale,
 			best,
+			ways: _,
 			marks,
 			tx_hops: _,
 			sent_to: _,
@@ -2837,6 +2872,20 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		}
 		assert_eq!(self.claimants, claimants, "claimants");
 		assert_eq!(self.ranked, ranked, "ranked claims");
+		// Rebuilt with what the work count leaves out.
+		let work = self.work.get();
+		let origins: BTreeSet<&NodeId> = self.heard.keys().chain(self.ways.keys()).collect();
+		for origin in origins {
+			let routes: Vec<_> = (self.usable(*origin).iter())
+				.map(|mine| (mine.via, mine.offer.rank(), mine.offer.marked))
+				.collect();
+			let ways = (!routes.is_empty()).then(|| Ways {
+				routes,
+				best: self.best.get(origin).map(|best| best.via),
+			});
+			assert_eq!(self.ways.get(origin), ways.as_ref(), "the ways to {origin:?}");
+		}
+		self.work.set(work);
 		let deadlines: BTreeSet<(Instant, Broadcast<I>)> = (self.waiting.iter())
 			.map(|(broadcast, at)| (*at, broadcast.clone()))
 			.collect();
@@ -3153,6 +3202,33 @@ mod tests {
 		};
 		router.recv(3, announce).unwrap();
 		assert_eq!(router.own().1[&(p("near"), 7)].cost, Metric::MAX, "an endpoint's claim");
+	}
+
+	/// A route that moves onto another path at the same rank changes no way to its claims,
+	/// so its caller relanes none of them; one that costs more does.
+	#[test]
+	fn a_route_logs_a_change_only_when_its_ways_do() {
+		let mut router = Router::<usize, u64, Run>::new(node(1), debounce(HOP));
+		router.follow();
+		open(&mut router, 2, Role::Routing(node(2)));
+		router.recv(2, route(5, 2, 1)).unwrap();
+		assert_eq!(router.changes().routes, BTreeSet::from([node(5)]), "a new route");
+		let mut moved = route(5, 2, 1);
+		if let Msg::Route { offer: Some(offer), .. } = &mut moved {
+			let mut path = offer.path.to_vec();
+			path.insert(
+				1,
+				Hop {
+					node: node(4),
+					session: 1,
+				},
+			);
+			offer.path = path.into();
+		}
+		router.recv(2, moved).unwrap();
+		assert!(router.changes().routes.is_empty(), "the same rank on another path");
+		router.recv(2, route(5, 2, 2)).unwrap();
+		assert_eq!(router.changes().routes, BTreeSet::from([node(5)]), "a dearer route");
 	}
 
 	/// A claim reached over a route ranks as the route does too: draining if the route is,
