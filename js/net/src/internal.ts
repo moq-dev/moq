@@ -744,11 +744,17 @@ export const hooks: {
 	startsAtKeys: (producer: Producer) => void;
 	/**
 	 * Record where the upstream publisher started each of a lite-07 copy's live wire ranges, as
-	 * `[time, start]` pairs by the time each asked from, replacing the last set: a reader's time
-	 * start the copy cannot place among its own groups resolves to it. Mirrors the Rust
+	 * `[time, start, through]` by the time each asked from (0 for the oldest group), `start`
+	 * undefined for one with no group to deliver, replacing the last set: a reader's time start the
+	 * copy cannot place among its own groups resolves to it. An empty answer holds for a reader
+	 * within `budget`, the narrowest the subscription asked in milliseconds. Mirrors the Rust
 	 * `track::Producer::time_starts`; assigned by `track.ts`.
 	 */
-	timeStarts: (producer: Producer, starts: Iterable<readonly [bigint, bigint, (bigint | undefined)?]>) => void;
+	timeStarts: (
+		producer: Producer,
+		starts: Iterable<readonly [bigint, bigint | undefined, (bigint | undefined)?]>,
+		budget: number,
+	) => void;
 	/**
 	 * Tell a lite-07 copy where its publisher started each live range counting back, as
 	 * `[back, start, latest]` triples, replacing the last set: the copy holds only part of the

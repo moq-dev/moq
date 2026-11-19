@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc c443c74044d087822aa18f1202b5106aec905b52dbe5fc307ae900b041b18609 # shrinks to ops = [(2, 0, 1)], wire = true, starts = [(0, 2, None)]
+cc 9f25beb5f5012b3975089a5fa29ffdf0eafecf7b9a39677b6a40249575717545 # shrinks to ops = [], wire = true, starts = [(0, None, None)]

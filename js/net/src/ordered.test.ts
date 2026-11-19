@@ -4,7 +4,7 @@ import { expect, test } from "bun:test";
 import { Duration, sleep } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { StreamCode, StreamError } from "./error.ts";
-import { hooks, staleHole } from "./internal.ts";
+import { hooks, NO_MAX_DELAY, staleHole } from "./internal.ts";
 import { textFrame } from "./mock.ts";
 import { Timestamp } from "./time.ts";
 import { type Ordered, Producer as TrackProducer } from "./track.ts";
@@ -413,7 +413,7 @@ test("an ordered read hands out nothing past a time start still waiting to be pl
 	expect(items(ordered)).toEqual([]);
 	// A session's tail holds the read at the answered start's group until it lands, and says
 	// nothing lies between it and 2000.
-	hooks.timeStarts(producer, [[1500n, 1000n]]);
+	hooks.timeStarts(producer, [[1500n, 1000n]], NO_MAX_DELAY);
 	put(producer, 1000n, false);
 	producer.skipGroups(1001n, 2000n);
 	expect(items(ordered)).toEqual(["group 1000", "group 2000"]);
@@ -424,13 +424,17 @@ test("a time start folded upstream into an earlier range places from the range c
 	put(producer, 2000n, false);
 	const subscriber = producer.subscribe({ delay: { max: null }, ranges: [{ start: { time: 1500n } }] });
 	// A range asked from 1000 that ends at 1200 doesn't reach the time.
-	hooks.timeStarts(producer, [[1000n, 1000n, 1200n]]);
+	hooks.timeStarts(producer, [[1000n, 1000n, 1200n]], NO_MAX_DELAY);
 	expect(hooks.servingResolved(subscriber)).toEqual([undefined]);
 	// The oldest group's range, answered at 2000, served nothing at or before it.
-	hooks.timeStarts(producer, [
-		[1000n, 1000n, 1200n],
-		[0n, 2000n, undefined],
-	]);
+	hooks.timeStarts(
+		producer,
+		[
+			[1000n, 1000n, 1200n],
+			[0n, 2000n, undefined],
+		],
+		NO_MAX_DELAY,
+	);
 	expect(hooks.servingResolved(subscriber)).toEqual([{ start: 0n, end: undefined, floored: false }]);
 });
 
@@ -442,7 +446,7 @@ test("a folded time start wakes its read when the grace for a gap below it passe
 		// An oldest-group reader holds the feed open from its answered start, 1000.
 		const oldest = producer.subscribe({ delay: { max: Duration.secs(1) } });
 		hooks.startTrack(producer, { start: 1000n });
-		hooks.timeStarts(producer, [[0n, 1000n]]);
+		hooks.timeStarts(producer, [[0n, 1000n]], NO_MAX_DELAY);
 		// Group 1000's stream reset before its header: only 1800, 2000, and the skips around them
 		// land, 1800 last, so the read's own budget for the time runs out after the gap's grace.
 		producer.skipGroups(1001n, 1800n);
@@ -525,12 +529,31 @@ test("a skip is no group to place a waiting time start from", () => {
 test("a folded time start never places below the range covering it", () => {
 	const producer = receivedTrack();
 	put(producer, 500n, false);
-	hooks.timeStarts(producer, [[1000n, 1200n, 1500n]]);
+	hooks.timeStarts(producer, [[1000n, 1200n, 1500n]], NO_MAX_DELAY);
 	// The covering range's first group was given up, and nothing lies between it and the time.
 	drop(producer, 1200n, 1201n);
 	producer.skipGroups(1201n, 1600n);
 	const subscriber = producer.subscribe({ delay: { max: null }, ranges: [{ start: { time: 1500n } }] });
 	expect(hooks.servingResolved(subscriber)).toEqual([{ start: 1200n, end: undefined, floored: true }]);
+});
+
+test("a range answered empty holds back no later group within its budget, though it places nothing", () => {
+	const producer = receivedTrack();
+	put(producer, 2000n, false);
+	// Asked with a one second budget: the answer says nothing about a group a wider reader still wants.
+	hooks.timeStarts(producer, [[1000n, undefined, 1800n]], 1000);
+	const at = (time: bigint) =>
+		hooks.servingResolved(producer.subscribe({ delay: { max: null }, ranges: [{ start: { time } }] }));
+	expect(at(1000n)).toEqual([undefined]);
+	expect(at(1500n)).toEqual([undefined]);
+	// GROUP 2000 says nothing lies between the time and it.
+	producer.skipGroups(1000n, 2000n);
+	const read = (time: bigint, max: Duration | null) =>
+		items(producer.subscribe({ delay: { max }, ranges: [{ start: { time } }] }).ordered());
+	for (const time of [1000n, 1500n]) {
+		expect(read(time, Duration.secs(1))).toEqual(["group 2000"]);
+		expect(read(time, null)).toEqual([]);
+	}
 });
 
 // Run every pending microtask and the ones they queue, as a timer firing would.

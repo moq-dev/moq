@@ -607,12 +607,32 @@ impl Anchors {
 	}
 }
 
-/// Where a received copy's publisher started a range asked from a time, and the last time
-/// the range reaches, `None` while it follows the live edge.
+/// How a received copy's publisher answered a range asked from a time, and the last time the
+/// range reaches, `None` while it follows the live edge.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct TimeStart {
-	start: u64,
+	answer: Answer,
 	through: Option<u64>,
+}
+
+/// Where a publisher started a range, as its answer says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Answer {
+	/// The group the range starts at.
+	At(u64),
+	/// No group to deliver, under at most this budget: the publisher starts at the oldest group
+	/// its budget has not expired, so a wider reader may still get one.
+	Empty(Duration),
+}
+
+impl TimeStart {
+	/// The group the range starts at, `None` when it had none to deliver.
+	fn start(&self) -> Option<u64> {
+		match self.answer {
+			Answer::At(start) => Some(start),
+			Answer::Empty(_) => None,
+		}
+	}
 }
 
 /// Where a received copy's publisher started a range counting back, and the latest group it
@@ -1299,13 +1319,24 @@ impl TrackState {
 			return Containing::Group(time);
 		}
 		match self.time_starts.get(&time) {
-			Some(reported) if reported.start <= time => return Containing::Group(reported.start),
+			Some(&TimeStart {
+				answer: Answer::At(start),
+				..
+			}) if start <= time => return Containing::Group(start),
 			// The publisher serves nothing at or before it, as it does for a time older than
 			// every group it holds.
-			Some(_) => return Containing::Before,
-			None => {}
+			Some(TimeStart {
+				answer: Answer::At(_), ..
+			}) => return Containing::Before,
+			// No group to deliver holds only under the budget it was asked with, which may
+			// have left out a group a wider reader still gets: it places nothing.
+			Some(TimeStart {
+				answer: Answer::Empty(_),
+				..
+			})
+			| None => {}
 		}
-		let covering = self.covering_start(time);
+		let covering = self.covering_start(time).and_then(|reported| reported.start());
 		match self.lookup.range(..=time).next_back() {
 			Some((&key, _))
 				if self.dropped_cover(key.saturating_add(1)..time.saturating_add(1))
@@ -1333,14 +1364,25 @@ impl TrackState {
 		}
 	}
 
-	/// Where a range asked from an earlier time that reaches `time` started, which upstream
-	/// folded a range asked from `time` into, so it reports nothing for this time itself.
-	fn covering_start(&self, time: u64) -> Option<u64> {
+	/// Whether the range asked from `time`, or the one upstream folded it into, had no group to
+	/// deliver to a reader within `budget`: the live feed brings it none of the range's groups.
+	fn answered_empty(&self, time: u64, budget: Duration) -> bool {
+		let reported = self
+			.time_starts
+			.get(&time)
+			.copied()
+			.or_else(|| self.covering_start(time));
+		matches!(reported, Some(TimeStart { answer: Answer::Empty(asked), .. }) if budget <= asked)
+	}
+
+	/// The range asked from an earlier time that reaches `time`, which upstream folded a range
+	/// asked from `time` into, so it reports nothing for this time itself.
+	fn covering_start(&self, time: u64) -> Option<TimeStart> {
 		self.time_starts
 			.range(..time)
 			.rev()
 			.find(|(_, reported)| reported.through.is_none_or(|through| through >= time))
-			.map(|(_, reported)| reported.start)
+			.map(|(_, reported)| *reported)
 	}
 
 	/// The times [`Self::landed_through`] may place, wherever the groups and drops leave them:
@@ -1374,7 +1416,15 @@ impl TrackState {
 		if !self.anchors.received() || self.time_starts.contains_key(&time) {
 			return None;
 		}
-		let from = self.landing_from(time, self.covering_start(time))?;
+		let covering = match self.covering_start(time) {
+			// Its range had no group to deliver, so no read waits on it.
+			Some(TimeStart {
+				answer: Answer::Empty(_),
+				..
+			}) => return None,
+			covering => covering.and_then(|reported| reported.start()),
+		};
+		let from = self.landing_from(time, covering)?;
 		self.landing_through(time, from).flatten()
 	}
 
@@ -4904,28 +4954,43 @@ impl Producer {
 	}
 
 	/// Record where the upstream publisher started each of this lite-07 copy's live wire
-	/// ranges, as `(time, start, through)` by the time each asked from (0 for the oldest group)
-	/// and the last time it reaches (`None` while open), replacing the last set. A reader's
-	/// time start this copy cannot place among its own groups resolves to the range asked from
-	/// it, or to one reaching it that upstream folded it into.
+	/// ranges, as `(time, start, through)` by the time each asked from (0 for the oldest group),
+	/// `None` for one with no group to deliver, and the last time it reaches (`None` while
+	/// open), replacing the last set. A reader's time start this copy cannot place among its
+	/// own groups resolves to the range asked from it, or to one reaching it that upstream
+	/// folded it into. An empty answer holds for a reader within `budget`, the narrowest the
+	/// subscription asked with, since the publisher resolves a start by the budget it asked.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn time_starts(&self, starts: impl IntoIterator<Item = (u64, u64, Option<u64>)>) {
+	pub(crate) fn time_starts(
+		&self,
+		starts: impl IntoIterator<Item = (u64, Option<u64>, Option<u64>)>,
+		budget: Duration,
+	) {
 		let mut merged: BTreeMap<u64, TimeStart> = BTreeMap::new();
 		for (time, start, through) in starts {
+			// An open range never resolves empty, so such an answer says nothing.
+			if start.is_none() && through.is_none() {
+				continue;
+			}
+			let answer = start.map_or(Answer::Empty(budget), Answer::At);
 			// Two ranges asked from one time: the lower start and the farther reach hold for both.
 			merged
 				.entry(time)
 				.and_modify(|held| {
-					held.start = held.start.min(start);
+					held.answer = match (held.answer, answer) {
+						(Answer::At(held), Answer::At(start)) => Answer::At(held.min(start)),
+						(Answer::At(start), _) | (_, Answer::At(start)) => Answer::At(start),
+						(empty, _) => empty,
+					};
 					held.through = held.through.zip(through).map(|(a, b)| a.max(b));
 				})
-				.or_insert(TimeStart { start, through });
+				.or_insert(TimeStart { answer, through });
 		}
 		let starts = merged;
 		if let Ok(mut state) = self.modify()
 			&& state.time_starts != starts
 		{
-			state.highest_time_start = starts.values().map(|reported| reported.start).max();
+			state.highest_time_start = starts.values().filter_map(TimeStart::start).max();
 			state.time_starts = starts;
 			state.placing += 1;
 		}
@@ -9522,9 +9587,12 @@ impl Cursor {
 				// An unjudgeable old gap cannot hold a finite read, as for an owed group.
 				let floor = times.start.max(state.cache_floor(drift.budget));
 				for time in window.waiting_in(floor..times.end) {
-					// Its successor is this group's or one below: the group containing the
-					// time is judged as an owed group at it would be.
-					if state.poll_drifted(time, &drift.edge.servable, drift.budget, None, waiter) {
+					// Its range had no group to deliver, so the feed lands none of it. Its
+					// successor is this group's or one below: the group containing the time is
+					// judged as an owed group at it would be.
+					if state.answered_empty(time, drift.budget)
+						|| state.poll_drifted(time, &drift.edge.servable, drift.budget, None, waiter)
+					{
 						continue;
 					}
 					if let Some(folds) = state.time_start_folds(time) {
@@ -12502,13 +12570,16 @@ mod test {
 		fn unplaced_matches_containing(
 			ops in proptest::collection::vec((0u8..5, 0u64..40, 1u64..8), 0..24),
 			wire: bool,
-			starts in proptest::collection::vec((0u64..48, 0u64..48, proptest::option::of(0u64..56)), 0..3),
+			starts in proptest::collection::vec(
+				(0u64..48, proptest::option::of(0u64..48), proptest::option::of(0u64..56)),
+				0..3
+			),
 		) {
 			let producer = track_producer("test", Info::default());
 			if wire {
 				producer.received();
 				producer.anchored();
-				producer.time_starts(starts.clone());
+				producer.time_starts(starts.clone(), Duration::MAX);
 			}
 			for (op, start, len) in ops {
 				let groups = start..start + len;
@@ -12523,7 +12594,12 @@ mod test {
 			}
 			let state = producer.state.read();
 			let unplaced = state.unplaced().expect("a track always tells");
-			let reported: BTreeSet<u64> = starts.iter().map(|(time, ..)| *time).collect();
+			// A range answered with no group to deliver places nothing.
+			let reported: BTreeSet<u64> = starts
+				.iter()
+				.filter(|(_, start, _)| start.is_some())
+				.map(|(time, ..)| *time)
+				.collect();
 			let landing = state.landing_span();
 			for time in (0..64).chain([u64::MAX - 1, u64::MAX]) {
 				let inside = unplaced.runs.iter().any(|run| run.contains(&time));
@@ -15833,7 +15909,7 @@ mod test {
 
 		// The publisher started the range asked from 1700 at 1000, and the one from 500 at 1000
 		// too, past it: nothing at or before 500 is served.
-		producer.time_starts([(1700, 1000, None), (500, 1000, None)]);
+		producer.time_starts([(1700, Some(1000), None), (500, Some(1000), None)], Duration::MAX);
 		assert_eq!(placed(&mut answered), Some((1000, true)));
 		assert_eq!(placed(&mut before), Some((0, false)));
 		assert_eq!(placed(&mut later), None);
@@ -15880,11 +15956,51 @@ mod test {
 		assert_eq!(next(), None, "2000 waits on the start");
 		// A session's tail holds the read at the answered start's group until it lands, and
 		// says nothing lies between it and 2000.
-		producer.time_starts([(1500, 1000, None)]);
+		producer.time_starts([(1500, Some(1000), None)], Duration::MAX);
 		write_group(&producer, 1000);
 		producer.skip_groups(1001..2000);
 		assert_eq!(next(), Some(Ok(1000)));
 		assert_eq!(next(), Some(Ok(2000)));
+	}
+
+	/// A range its publisher answered with no group to deliver, under a budget, lands none of
+	/// its groups for a reader within that budget, so that reader's ordered read holds no later
+	/// group back for the time it asks from, or one folded into it. A wider reader may still
+	/// get one once the budget widens, so it keeps waiting, and the answer places neither time.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_empty_range_holds_back_no_later_group_within_its_budget() {
+		let budget = Duration::from_millis(100);
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		write_group(&producer, 2000);
+		producer.time_starts([(1000, None, Some(1800))], budget);
+		{
+			let state = producer.state.read();
+			assert_eq!(state.containing(1000), Containing::Unknown);
+			assert_eq!(state.containing(1500), Containing::Unknown, "folded into it");
+		}
+		let read = |time: u64, max: Option<Duration>| {
+			let mut ordered = producer
+				.subscribe(
+					Subscription::default()
+						.with_ranges([Range {
+							start: Anchor::Time(time),
+							end: None,
+						}])
+						.with_delay(Delay::default().with_max(max)),
+				)
+				.ordered();
+			match ordered.next_group().now_or_never() {
+				Some(Ok(Some(Item::Group(group)))) => Some(group.start),
+				None => None,
+				Some(res) => panic!("not a group: {:?}", res.map(|item| item.is_some())),
+			}
+		};
+		assert_eq!(read(1000, Some(budget)), Some(2000));
+		assert_eq!(read(1500, Some(budget)), Some(2000), "folded into it");
+		assert_eq!(read(1500, None), None, "a wider reader may still get 1000");
 	}
 
 	/// A lite-07 copy places a time start that upstream folded into an earlier range by that
@@ -15917,12 +16033,12 @@ mod test {
 		write_group(&producer, 2000);
 
 		// A range asked from 1000 that ends at 1200 doesn't reach the time.
-		producer.time_starts([(1000, 1000, Some(1200))]);
+		producer.time_starts([(1000, Some(1000), Some(1200))], Duration::MAX);
 		let mut bounded = ordered(&producer);
 		assert_eq!(next(&mut bounded), None, "the start still waits");
 
 		// The oldest group's range, answered at 2000, reaches it.
-		producer.time_starts([(1000, 1000, Some(1200)), (0, 2000, None)]);
+		producer.time_starts([(1000, Some(1000), Some(1200)), (0, Some(2000), None)], Duration::MAX);
 		assert_eq!(next(&mut bounded), Some(2000));
 		assert_eq!(next(&mut ordered(&producer)), Some(2000));
 	}
@@ -15983,7 +16099,7 @@ mod test {
 		producer.anchored();
 		elapse(&producer, Duration::ZERO);
 		producer.start_resolved(1000).unwrap();
-		producer.time_starts([(0, 1000, None)]);
+		producer.time_starts([(0, Some(1000), None)], Duration::MAX);
 		// Group 1000's stream reset before its header: only 1800, 2000, and the skips around
 		// them land, 1800 last.
 		producer.skip_groups(1001..1800);
@@ -16032,7 +16148,7 @@ mod test {
 		producer.anchored();
 		elapse(&producer, Duration::ZERO);
 		producer.start_resolved(1000).unwrap();
-		producer.time_starts([(0, 1000, None)]);
+		producer.time_starts([(0, Some(1000), None)], Duration::MAX);
 		producer.skip_groups(1001..2000);
 		write_group(&producer, 2000);
 		let mut subscriber = producer.subscribe(replay().with_ranges([Range {
@@ -16171,7 +16287,7 @@ mod test {
 		producer.received();
 		producer.anchored();
 		write_group(&producer, 500);
-		producer.time_starts([(1000, 1200, Some(1500))]);
+		producer.time_starts([(1000, Some(1200), Some(1500))], Duration::MAX);
 		let cut = producer.create_group(group::Info { start: 1200 }).unwrap();
 		cut.abort(Error::Cancel).unwrap();
 		producer.modify().unwrap().reclaim_aborted(1200);

@@ -1058,12 +1058,18 @@ let timeAnchors: (producer: Producer) => {
 	placing: number;
 };
 
-/** Where a received copy's publisher started a range asked from a time, and the last time it reaches. */
-interface TimeStart {
-	start: bigint;
-	/** Undefined while the range follows the live edge. */
-	through?: bigint;
-}
+/**
+ * How a received copy's publisher answered a range asked from a time: the group it starts at, or
+ * `empty`, the budget in milliseconds under which it had no group to deliver (the publisher starts
+ * at the oldest group its budget has not expired, so a wider reader may still get one). `through`
+ * is the last time it reaches, undefined while it follows the live edge. Mirrors the Rust `TimeStart`.
+ */
+type TimeStart = ({ start: bigint; empty?: never } | { start?: never; empty: number }) & { through?: bigint };
+
+// Whether a received copy's range asked from `time`, or the one upstream folded it into, had no
+// group to deliver to a reader within `budget`: the live feed brings it none of the range's groups.
+// Assigned in the producer's static block. Mirrors the Rust `TrackState::answered_empty`.
+let answeredEmpty: (producer: Producer, time: bigint, budget: number) => boolean;
 
 // Where a received copy's live feed landed every key it could through `time`, counting from
 // `covering`, where a range covering the time started, or else its first arrival at or below
@@ -1092,13 +1098,14 @@ function withoutRun(runs: readonly Run[], cut: Run): Run[] {
 	return out;
 }
 
-// Where a range asked from an earlier time that reaches `time` started, which upstream folded a
-// range asked from `time` into, so it reports nothing for this time itself.
-function coveringStart(starts: ReadonlyMap<bigint, TimeStart>, time: bigint): bigint | undefined {
-	let covering: [bigint, bigint] | undefined;
+// The range asked from an earlier time that reaches `time`, which upstream folded a range asked from
+// `time` into, so it reports nothing for this time itself. Mirrors the Rust
+// `TrackState::covering_start`.
+function coveringStart(starts: ReadonlyMap<bigint, TimeStart>, time: bigint): TimeStart | undefined {
+	let covering: [bigint, TimeStart] | undefined;
 	for (const [asked, reported] of starts) {
 		if (asked >= time || (reported.through !== undefined && reported.through < time)) continue;
-		if (covering === undefined || asked > covering[0]) covering = [asked, reported.start];
+		if (covering === undefined || asked > covering[0]) covering = [asked, reported];
 	}
 	return covering?.[1];
 }
@@ -1365,7 +1372,7 @@ export class Producer {
 	#timeStarts = new Map<bigint, TimeStart>();
 	// The lowest time and highest start in `#timeStarts`, so the times its ranges may place are
 	// bounded without a walk of them all.
-	#timeStartReach: { lowest: bigint; highest: bigint } | undefined;
+	#timeStartReach: { lowest: bigint; highest?: bigint } | undefined;
 	// On a lite-07 copy, where the publisher started each live range counting back, by its count.
 	#relativeStarts = new Map<bigint, { start: bigint; latest?: bigint }>();
 	// Counts changes to how a time start is placed other than by groups arriving or drops: the wire,
@@ -1613,30 +1620,35 @@ export class Producer {
 			producer.#startsAtKeys = true;
 			producer.#placing++;
 		};
-		hooks.timeStarts = (producer, starts) => {
+		hooks.timeStarts = (producer, starts, budget) => {
 			const merged = new Map<bigint, TimeStart>();
 			for (const [time, start, through] of starts) {
+				// An open range never resolves empty, so such an answer says nothing.
+				if (start === undefined && through === undefined) continue;
 				const held = merged.get(time);
 				// Two ranges asked from one time: the lower start and the farther reach hold for both.
+				const reach =
+					held === undefined
+						? through
+						: held.through === undefined || through === undefined
+							? undefined
+							: max(held.through, through);
+				const lower =
+					held?.start === undefined || start === undefined ? (held?.start ?? start) : min(held.start, start);
 				merged.set(
 					time,
-					held === undefined
-						? { start, through }
-						: {
-								start: min(held.start, start),
-								through:
-									held.through === undefined || through === undefined
-										? undefined
-										: max(held.through, through),
-							},
+					lower === undefined ? { empty: budget, through: reach } : { start: lower, through: reach },
 				);
 			}
 			producer.#timeStarts = merged;
-			let reach: { lowest: bigint; highest: bigint } | undefined;
+			let reach: { lowest: bigint; highest?: bigint } | undefined;
 			for (const [asked, reported] of merged) {
-				reach = reach
-					? { lowest: min(reach.lowest, asked), highest: max(reach.highest, reported.start) }
-					: { lowest: asked, highest: reported.start };
+				const start = reported.start;
+				const highest =
+					reach?.highest === undefined || start === undefined
+						? (reach?.highest ?? start)
+						: max(reach.highest, start);
+				reach = { lowest: reach ? min(reach.lowest, asked) : asked, highest };
 			}
 			producer.#timeStartReach = reach;
 			producer.#placing++;
@@ -1661,9 +1673,16 @@ export class Producer {
 			const end = next.done ? UNBOUNDED : next.value.start;
 			return end > start ? { start, end } : undefined;
 		};
+		answeredEmpty = (producer, time, budget) => {
+			const reported = producer.#timeStarts.get(time) ?? coveringStart(producer.#timeStarts, time);
+			return reported?.empty !== undefined && budget <= reported.empty;
+		};
 		timeStartFolds = (producer, time) => {
 			if (!producer.#wire || producer.#timeStarts.has(time)) return undefined;
-			const from = producer.#landingFrom(time, coveringStart(producer.#timeStarts, time));
+			const covering = coveringStart(producer.#timeStarts, time);
+			// Its range had no group to deliver, so no read waits on it.
+			if (covering && covering.start === undefined) return undefined;
+			const from = producer.#landingFrom(time, covering?.start);
 			return from === undefined ? undefined : producer.#landingThrough(time, from)?.folds;
 		};
 		hooks.relativeStarts = (producer, starts) => {
@@ -3742,10 +3761,13 @@ export class Subscriber {
 				// `TrackState::containing_received`.
 				if (wire) {
 					if (below === time) return { group: time };
-					const start = anchors.starts.get(time)?.start;
+					const reported = anchors.starts.get(time);
 					// The publisher serves nothing at or before it, as for a time older than every group.
-					if (start !== undefined) return start <= time ? { group: start } : "before";
-					const covering = coveringStart(anchors.starts, time);
+					if (reported?.start !== undefined)
+						return reported.start <= time ? { group: reported.start } : "before";
+					// No group to deliver holds only under the budget it was asked with, which may have left
+					// out a group a wider reader still gets: it places nothing.
+					const covering = coveringStart(anchors.starts, time)?.start;
 					if (below !== undefined && (drops.covers(below + 1n, time + 1n) || index < keys.length)) {
 						return { group: below };
 					}
@@ -5518,8 +5540,9 @@ export class Subscriber {
 		const producer = this.#state.producer;
 		let waits = false;
 		for (const time of this.#window.waitingIn(start, key)) {
-			// Its successor is this group's or one below: the group containing the time is judged as an
-			// owed group at it would be.
+			// Its range had no group to deliver, so the feed lands none of it. Its successor is this
+			// group's or one below: the group containing the time is judged as an owed group at it would be.
+			if (producer && answeredEmpty(producer, time, drift.budget)) continue;
 			if (this.#staleAt(time, drift, true)) continue;
 			const folds = producer && timeStartFolds(producer, time);
 			if (folds !== undefined) this.#wakeAt(folds.since(Instant.ZERO).asNanos());

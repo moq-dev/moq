@@ -23,7 +23,7 @@ import {
 import type { Consumer as GroupConsumer } from "../group.ts";
 import { type Hop, isAnonymous, MAX_HOPS, toHop, UNKNOWN_HOP, WireRoute } from "../hop.ts";
 import * as Instance from "../instance.ts";
-import { hooks } from "../internal.ts";
+import { hooks, NO_MAX_DELAY } from "../internal.ts";
 import { GRACE } from "../ledger.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
@@ -2877,6 +2877,51 @@ test("a widened range's SUBSCRIBE_STARTED resolves the feed's start", async () =
 		await drainReactions();
 		expect(await track.start()).toBe(1n);
 	} finally {
+		track.close();
+		broadcast.close();
+		subscriber.close();
+	}
+});
+
+// A range the publisher answers with no group to deliver lands none of its groups, so the copy is
+// told, and an ordered read holds no later group back for its time. Only one whose end takes in its
+// time says so: one ending by a count back may still have skipped the group containing it.
+test("a lite-07 range answered empty is reported only for a range reaching its time", async () => {
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, toHop(1n));
+	const broadcast = subscriber.consume(Path.from("room"));
+	const reported: (readonly [bigint, bigint | undefined, (bigint | undefined)?])[][] = [];
+	const timeStarts = hooks.timeStarts;
+	const budgets: number[] = [];
+	hooks.timeStarts = (producer, starts, budget) => {
+		reported.push([...starts]);
+		budgets.push(budget);
+		timeStarts(producer, starts, budget);
+	};
+	const track = broadcast.track("video").subscribe({
+		delay: { max: null },
+		ranges: [
+			{ start: { time: 10n }, end: { time: 20n } },
+			{ start: { time: 30n }, end: { relative: 0n } },
+			{ start: { time: 66n } },
+		],
+	});
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version);
+		const request = await opened(1);
+		await request.reading;
+		await respond(request, version, [{ start: new SubscribeStart([undefined, undefined, 66n]) }]);
+		await drainReactions();
+		expect(reported.at(-1)).toEqual([
+			[10n, undefined, 20n],
+			[66n, 66n, undefined],
+		]);
+		// Under the narrowest budget the subscription asked with, here none.
+		expect(budgets.at(-1)).toEqual(NO_MAX_DELAY);
+	} finally {
+		hooks.timeStarts = timeStarts;
 		track.close();
 		broadcast.close();
 		subscriber.close();
