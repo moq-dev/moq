@@ -705,8 +705,8 @@ pub(crate) struct TrackState {
 	// The frames of each group a reader already held when it asked this copy to resume that
 	// group past them, by key, which the group adopts as it arrives (see
 	// [`Consumer::lend_head`]). Filled through a read guard, so it needs its own lock. One per
-	// group, taken as that group arrives or dropped as it is given up, so it holds only the
-	// groups readers resumed this copy at that are still to come.
+	// group, taken as that group arrives or dropped as it is given up or the track tears down,
+	// so it holds only the groups readers resumed this copy at that are still to come.
 	lent: Mutex<BTreeMap<u64, Arc<group::Head>>>,
 
 	// The key and start of the highest-key group that left the cache holding a
@@ -2711,6 +2711,8 @@ impl TrackState {
 	/// reader that already pulled one ends with `err` too and its writer fails.
 	fn tear_down(&mut self, err: Error) -> (Option<Position>, OpenGroups) {
 		self.release_ingress();
+		// Nothing arrives after this to take a lent head.
+		self.lent.get_mut().unwrap_or_else(PoisonError::into_inner).clear();
 		let resume = self.resume_position();
 		let groups = self
 			.lookup
@@ -15847,6 +15849,12 @@ mod test {
 		consumer.lend_head(8, head(8, 1));
 		producer.skip_groups(8..9);
 		assert!(!producer.modify().unwrap().lent.get_mut().unwrap().contains_key(&8));
+		// So does every one still waiting once the copy tears down.
+		let aborted = track_producer("aborted", Info::timed());
+		let reader = aborted.consume();
+		reader.lend_head(3, head(3, 1));
+		aborted.abort(Error::Cancel).unwrap();
+		assert!(reader.with_state(|state| state.unwrap().read().lent.lock().unwrap().is_empty()));
 		for (key, at) in [(7, 2), (9, 1)] {
 			let Received::Group(group) = producer.create_group_at(group::Info { start: key }, at).unwrap() else {
 				panic!("nothing else holds group {key}");
