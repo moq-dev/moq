@@ -2785,6 +2785,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "gstreamer-check"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bca00e318412c20405c6e0817cb330b706d128c779c9ec613fa2b53e4daf55c7"
+dependencies = [
+ "glib",
+ "gstreamer",
+ "gstreamer-check-sys",
+]
+
+[[package]]
+name = "gstreamer-check-sys"
+version = "0.25.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7beea104cb86688e15047b9712419e7d9194c0ca8ce47848fcc8482c0207be9c"
+dependencies = [
+ "glib-sys",
+ "gobject-sys",
+ "gstreamer-sys",
+ "libc",
+ "system-deps 9.0.0",
+]
+
+[[package]]
 name = "gstreamer-sys"
 version = "0.25.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4488,6 +4512,7 @@ dependencies = [
  "gst-plugin-version-helper",
  "gstreamer",
  "gstreamer-audio",
+ "gstreamer-check",
  "hang",
  "kio",
  "moq-audio",
@@ -10630,6 +10655,7 @@ dependencies = [
  "num-bigint",
  "num-complex",
  "num-integer",
+ "num-rational",
  "num-traits",
  "objc2 0.6.5",
  "objc2-core-audio",
