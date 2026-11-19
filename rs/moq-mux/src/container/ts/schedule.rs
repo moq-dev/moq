@@ -1270,10 +1270,7 @@ impl Schedule {
 			self.deferred = Some(unit.seq);
 			self.last = last;
 		}
-		// A tail running out, such as the old program's ahead of a switch, carries only its clock.
-		if known.is_some() {
-			self.repeat(index);
-		}
+		self.repeat(index);
 		// A long outage jumps to the start of its backfill. Flag that first PCR, not a
 		// still-queued slot on the old clock, nor the media slot after the backfill.
 		let discontinuity = self.next.is_some_and(|next| index > next);
@@ -2024,8 +2021,9 @@ mod tests {
 			last.is_some_and(|last| last <= slot(ms(100))),
 			"the unit due at 100 ms goes out by slot {last:?}"
 		);
+		// The two leading the units, and the grid's copies while the picture is queued.
 		let tables: usize = slots.iter().filter_map(|(_, pids, _)| pids.get(&100)).sum();
-		assert_eq!(tables, 2);
+		assert_eq!(tables, 5);
 	}
 
 	/// After a long silence, media keeps its send-ahead instead of riding the old clock.
@@ -2283,10 +2281,15 @@ mod tests {
 	}
 
 	/// With the clock running, the grid repeats the tables in force every [`TABLE_REPEAT`]
-	/// between the copies the media leads, and only while media is still to go out.
+	/// between the copies the media leads, and only while media is still to go out, whether
+	/// drained to the source's horizon or to the end, as at a switch.
 	#[test]
 	fn the_grid_repeats_the_tables_while_media_flows() {
-		for rate in [None, Some(RATE)] {
+		let horizons = [None, Some(slot(ms(4_000)))];
+		for (rate, known) in [None, Some(RATE)]
+			.into_iter()
+			.flat_map(|rate| horizons.map(|known| (rate, known)))
+		{
 			let mut schedule = Schedule::new(Duration::ZERO);
 			schedule.set_rate(rate);
 			schedule.set_tables(100);
@@ -2304,7 +2307,7 @@ mod tests {
 			}
 			let mut pats = Vec::new();
 			let mut last = 0;
-			while let Some(slot) = schedule.next(Some(slot(ms(4_000)))).unwrap() {
+			while let Some(slot) = schedule.next(known).unwrap() {
 				let packets = slot.packets.as_chunks::<{ TsPacket::SIZE }>().0;
 				if packets.iter().any(|packet| pid(packet) == 0) {
 					pats.push(slot.index);
@@ -2313,16 +2316,16 @@ mod tests {
 					last = slot.index;
 				}
 			}
-			assert!(pats.len() > 2, "{rate:?}: the grid repeats the tables");
+			assert!(pats.len() > 2, "{rate:?} {known:?}: the grid repeats the tables");
 			for pair in pats.windows(2) {
 				assert!(
 					pair[1] - pair[0] <= REPEAT_SLOTS,
-					"{rate:?}: tables {pair:?} slots apart"
+					"{rate:?} {known:?}: tables {pair:?} slots apart"
 				);
 			}
 			assert!(
 				*pats.last().unwrap() <= last,
-				"{rate:?}: the clock runs on with no tables"
+				"{rate:?} {known:?}: the clock runs on with no tables"
 			);
 		}
 	}
