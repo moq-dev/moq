@@ -36,12 +36,14 @@ kind = "end-source"
 kind = "roll"
 to = "old"
 
-# A follow left holding a broadcast whose track ended, which it never replaces while the same
-# Instance serves the path again: the front ended at its session's close.
+# Mid-roll, a relay still on the release ends a front at its session's close rather than wait
+# for the detour, leaving a follow holding a track that ended. It lasts until the release cut
+# ships the fix.
 [[known]]
 check = "unfed"
 kind = "stuck"
-quest = "/quest/m2/multicast/detour-resume.md"
+event = "roll"
+quest = "/quest/m3/release/cut.md"
 
 # Mid-roll, a new relay accepts an old neighbour's subscribe that arrives as the neighbour
 # withdraws its echo of the broadcast, then forwards nothing. `half-roll.toml` reproduces it
