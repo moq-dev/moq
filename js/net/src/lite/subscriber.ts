@@ -2875,8 +2875,8 @@ export class Subscriber {
 	// say where one starts. Mirrors the Rust `SubStream::declare`.
 	#declare(entry: SubscribeEntry): void {
 		// Where the publisher started each live range asked from a group's start, which a reader's
-		// time start there resolves to when the copy holds no group at it. Mirrors the Rust
-		// `report_time_starts`.
+		// time start there resolves to when the copy holds no group at it, and one asked from the
+		// oldest group as asked from 0. Mirrors the Rust `SubStream::report_starts`.
 		const times: [bigint, bigint][] = [];
 		// And each one counting back, which the copy, holding only part of the track, can't count,
 		// with the latest group it counted back from.
@@ -2889,6 +2889,7 @@ export class Subscriber {
 			if (at === undefined) continue;
 			if (time !== undefined) times.push([time, at]);
 			else if (back !== undefined) relative.push([back, at, entry.edges.get(id)]);
+			else if (range !== undefined && range.start === undefined) times.push([0n, at]);
 		}
 		hooks.timeStarts(entry.track, times);
 		hooks.relativeStarts(entry.track, relative);

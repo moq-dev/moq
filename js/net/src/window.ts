@@ -560,6 +560,17 @@ export class Window {
 		return this.#pending.size > 0;
 	}
 
+	/**
+	 * The keys of the ranges still waiting on a relative anchor, a live join's reach back, or a
+	 * time start. Mirrors the Rust `Window::unsettled`.
+	 */
+	unsettled(): Set<bigint> {
+		const keys = new Set([...this.#pending, ...this.#reaching]);
+		for (const entry of this.#waiting.all()) for (const key of entry.keys) keys.add(key);
+		for (const entry of this.#looking.all()) for (const key of entry.keys) keys.add(key);
+		return keys;
+	}
+
 	/** Whether nothing is left to resolve as groups arrive. */
 	get settled(): boolean {
 		return this.#pending.size === 0 && !this.#unplaced() && this.#looking.size === 0;

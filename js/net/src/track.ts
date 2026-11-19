@@ -1008,6 +1008,8 @@ let keysOf: (producer: Producer) => readonly bigint[];
 let timeAnchors: (producer: Producer) => {
 	atKeys: boolean;
 	starts: ReadonlyMap<bigint, bigint>;
+	/** The newest of `starts` past the time its range asked from, 0 when none is. */
+	past: bigint;
 	relative: ReadonlyMap<bigint, { start: bigint; latest?: bigint }>;
 	/** Bumped whenever the others, or whether the producer is a received copy, change. */
 	placing: number;
@@ -1277,6 +1279,9 @@ export class Producer {
 	// Where the upstream publisher started each of a lite-07 copy's live wire ranges, by the time
 	// it asked from. Mirrors the Rust `TrackState::time_starts`.
 	#timeStarts = new Map<bigint, bigint>();
+	// The newest start in `#timeStarts` past the time its range asked from, kept as it is
+	// replaced: a reader's `unplaced` reads it on every settle. Mirrors the Rust `starts_past`.
+	#startsPast = 0n;
 	// On a lite-07 copy, where the publisher started each live range counting back, by its count.
 	#relativeStarts = new Map<bigint, { start: bigint; latest?: bigint }>();
 	// Counts changes to how a time start is placed other than by groups arriving or drops: the wire,
@@ -1513,6 +1518,7 @@ export class Producer {
 		timeAnchors = (producer) => ({
 			atKeys: producer.#startsAtKeys,
 			starts: producer.#timeStarts,
+			past: producer.#startsPast,
 			relative: producer.#relativeStarts,
 			placing: producer.#placing,
 		});
@@ -1522,6 +1528,10 @@ export class Producer {
 		};
 		hooks.timeStarts = (producer, starts) => {
 			producer.#timeStarts = new Map(starts);
+			producer.#startsPast = 0n;
+			for (const [asked, start] of producer.#timeStarts) {
+				if (asked < start && start > producer.#startsPast) producer.#startsPast = start;
+			}
 			producer.#placing++;
 		};
 		hooks.relativeStarts = (producer, starts) => {
@@ -3634,7 +3644,16 @@ export class Subscriber {
 					if (below !== undefined && (drops.covers(below + 1n, time + 1n) || index < keys.length)) {
 						return { group: below };
 					}
-					if (below === undefined && drops.covers(0n, time + 1n)) return "before";
+					if (below === undefined) {
+						if (drops.covers(0n, time + 1n)) return "before";
+						// A range asked from an earlier time, or from the oldest group (as 0), that the
+						// publisher started past it says the same, while the copy holds no group there.
+						if (anchors.past > time) {
+							for (const [asked, start] of anchors.starts) {
+								if (asked < time && start > time) return "before";
+							}
+						}
+					}
 					return "unknown";
 				}
 				if (below !== undefined) return { group: below };
@@ -3649,14 +3668,20 @@ export class Subscriber {
 				const runs: Run[] = [];
 				const first = keys[0];
 				const last = keys.at(-1);
+				// `containing` places a time below every held group from a start reported past an
+				// earlier range's time, which an eviction brings about without moving the mark, so a
+				// run there starts past the newest such start. Mirrors the Rust `TrackState::unplaced`.
+				const past = wire ? anchors.past : 0n;
+				const unheld = (run: Run | undefined): Run | undefined =>
+					run && run.start < past ? { start: past, end: run.end } : run;
 				if (anchors.atKeys || state.fetch) {
 					// Every time starts a group.
 				} else if (first === undefined || last === undefined) {
-					const open = uncovered(0n);
+					const open = unheld(uncovered(0n));
 					if (open) runs.push(open);
 				} else if (wire) {
 					// Below every group, up to the first, and above the last, past the drops after it.
-					const below = uncovered(0n);
+					const below = unheld(uncovered(0n));
 					if (below && below.start < first) runs.push({ start: below.start, end: first });
 					const above = uncovered(last + 1n);
 					if (above) runs.push(above);

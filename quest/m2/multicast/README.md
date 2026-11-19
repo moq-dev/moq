@@ -38,9 +38,8 @@ test covered on real sessions. It found two flaws, both now fixed:
 through a lost claim's debounce, so a reader resumes on a detour learned after
 its session closed, and a route moving behind one next hop no longer resends a
 group, since a lite-07 range may start partway through one. The lite-07 cut
-still waits on this epic's children, the two flaws the mesh replay found,
-[feeding an old relay's subscription mid-roll](/quest/m2/multicast/roll-echo-stall.md)
-and [a lite-07 front that stops delivering after it switches copies](/quest/m2/multicast/splice-stall.md);
+still waits on this epic's children, a flaw the mesh replay found,
+[a lite-07 front that stops delivering after it switches copies](/quest/m2/multicast/splice-stall.md);
 and on
 [route layer acceptance](/quest/m2/cluster-routes/acceptance.md)'s
 scoped subscriber whose grant is too wide to ask for. It does not wait on

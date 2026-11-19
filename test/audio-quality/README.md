@@ -128,7 +128,10 @@ untraced control and never use traced rows to calibrate quality budgets.
 To replay a capture, put its arrivals, final environment configuration, and `largest` (the
 observer's join, `environment.largest` in `<tag>.page.json`) into the version 4
 `Trace` below, subtract the first arrival's `at` from every arrival and from the last sample's
-`at` for the duration, and supply the observed minimum RTT as a diagnostic. Replay measures the
+`at` for the duration, and supply the observed minimum RTT as a diagnostic. A publisher that keys
+groups by timestamp never produces the keys between them, so the replay declares those skipped where
+one group's media ends as the next begins, as each group's append does on the wire, and leaves a hole
+in the media owed. Replay measures the
 target from the arrivals and holds the configuration constant; compare the raw samples when it
 changed during the live run. The observer only
 records frames delivered under the player's maximum age, so a replay cannot recover groups the

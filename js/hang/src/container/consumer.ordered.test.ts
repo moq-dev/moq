@@ -4,21 +4,33 @@ import { expect, test } from "bun:test";
 import { Duration } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { Time, Track } from "@moq/net";
+import { u53 } from "../catalog/integers.ts";
 import { Consumer, type Read } from "./consumer.ts";
 import { encodeFrame, Format } from "./legacy.ts";
 
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 
+// One 20 ms CELT packet: its TOC byte states the duration, which an Opus format reads.
+const OPUS = new Uint8Array([0xf8]);
+
 // An audio track whose missing groups an unserved fill owes, as a session's feed would, read by a
 // consumer whose ordered reader waits `wait` for a hole and whose arrival subscription reaches 2 s.
-function setup(wait: number) {
+// Frames state no duration unless `opus`.
+function setup(wait: number, opus = false) {
 	const clock = new Manual();
 	const installed = clock.install();
 	const track = new Track.Producer("audio");
 	const requests = track.requests();
 	const ordered = track.subscribe({ delay: { min: Duration.ZERO, max: Duration.millis(wait) } }).ordered();
 	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.secs(2) } }), {
-		format: new Format("audio"),
+		format: opus
+			? new Format({
+					codec: "opus",
+					sampleRate: u53(48_000),
+					numberOfChannels: u53(2),
+					container: { kind: "legacy" },
+				})
+			: new Format("audio"),
 		delay: { min: Duration.ZERO, max: Duration.secs(2) },
 		ordered,
 	});
@@ -34,7 +46,7 @@ function setup(wait: number) {
 	const write = (sequence: bigint, ms: number) => {
 		const group = track.createGroup(sequence);
 		group.writeFrame({
-			payload: encodeFrame(new Uint8Array([1]), Duration.millis(ms)),
+			payload: encodeFrame(opus ? OPUS : new Uint8Array([1]), Duration.millis(ms)),
 			timestamp: Time.Timestamp.fromMillis(ms),
 		});
 		group.finish();
@@ -139,4 +151,69 @@ test("the estimate observes late groups the ordered reader gave up on", async ()
 		}
 	};
 	expect((await spread(300)).gt(await spread(0))).toBe(true);
+});
+
+test("a gap over keys that held no media is no loss", async () => {
+	const t = setup(100, true);
+	try {
+		// Keyed by timestamp in microseconds, with the keys between never declared skipped. The group
+		// past them opens before its frame lands, and the reader gives the keys up while it waits.
+		t.write(0n, 0);
+		const group = t.track.createGroup(20_000n);
+		await t.clock.advance(Duration.millis(100));
+		// A later group the reader hands out at once wakes the consumer before the frame says nothing
+		// was missing.
+		t.track.skipGroups(20_001n, 40_000n);
+		t.write(40_000n, 40);
+		await flush();
+		group.writeFrame({ payload: encodeFrame(OPUS, Duration.millis(20)), timestamp: Time.Timestamp.fromMillis(20) });
+		group.finish();
+		await flush();
+		expect(t.read()).toEqual(["frame 0", "frame 20", "frame 40"]);
+	} finally {
+		await t.close();
+	}
+});
+
+test("a gap over keys that held media is still a loss", async () => {
+	const t = setup(100, true);
+	try {
+		t.write(0n, 0);
+		t.write(40_000n, 40);
+		await t.clock.advance(Duration.millis(100));
+		await flush();
+		expect(t.read()).toEqual(["frame 0", "gap 20+20", "frame 40"]);
+	} finally {
+		await t.close();
+	}
+});
+
+test("an open group that never delivers a frame is passed once the reader's wait ages it", async () => {
+	const t = setup(100, true);
+	try {
+		t.write(0n, 0);
+		// Opened, never written or finished.
+		t.track.createGroup(1n);
+		// Group 2 lands at 20 ms. The reader expires the open group a wait after its successor landed.
+		for (let i = 2; i <= 6; i++) {
+			await t.clock.advance(Duration.millis(20));
+			t.write(BigInt(i), i * 20);
+		}
+		await t.clock.advance(Duration.millis(19));
+		await flush();
+		expect(t.read()).toEqual(["frame 0"]);
+		await t.clock.advance(Duration.millis(1));
+		await flush();
+		expect(t.read()).toEqual([
+			"frame 0",
+			"gap 20+20",
+			"frame 40",
+			"frame 60",
+			"frame 80",
+			"frame 100",
+			"frame 120",
+		]);
+	} finally {
+		await t.close();
+	}
 });
