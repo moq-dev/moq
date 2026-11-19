@@ -10,7 +10,7 @@ import type * as Echo from "./echo.ts";
 import type * as Stats from "./stats.ts";
 
 /** A grade, ordered by severity with `unknown` below every graded one. */
-export type Verdict = "unknown" | "healthy" | "degraded" | "unhealthy";
+type Verdict = "unknown" | "healthy" | "degraded" | "unhealthy";
 
 /** Which client wrote a report, and so which of its numbers can be graded. */
 export type Role = "publisher" | "viewer";
@@ -24,7 +24,7 @@ export interface Observer {
 }
 
 /** One snapshot and the broadcast it was read from. */
-export interface Report<S> {
+interface Report<S> {
 	/** Who observed the snapshot's numbers. */
 	observer: Observer;
 	/** The cumulative snapshot. */
@@ -44,7 +44,7 @@ export interface Sample<S> {
 }
 
 /** The values at which an input grades degraded and unhealthy (below them, for `headroom`). */
-export interface Limits {
+interface Limits {
 	/** Degraded from this value on. */
 	degraded: number;
 	/** Unhealthy from this value on. */
@@ -85,13 +85,13 @@ export function defaultThresholds(): Thresholds {
 }
 
 /** Why a sample's deltas started over: a counter went down, or the broadcast was replaced. */
-export type Reset = "decrease" | "replaced";
+type Reset = "decrease" | "replaced";
 
 /** An input a verdict can rest on: RTT in milliseconds; the rest are ratios over the interval. */
-export type Input = "rtt" | "loss" | "headroom" | "skipped" | "late" | "errors" | "stalled";
+type Input = "rtt" | "loss" | "headroom" | "skipped" | "late" | "errors" | "stalled";
 
 /** One input's value and the grade it earned. */
-export interface Evidence {
+interface Evidence {
 	/** The input graded. */
 	input: Input;
 	/** The value in the input's unit, absent when the reports cannot show it. */
@@ -101,7 +101,7 @@ export interface Evidence {
 }
 
 /** The reporting connection's grade and its loss over the interval. */
-export interface Connection {
+interface Connection {
 	/** The worst graded evidence, or unknown when none was graded. */
 	verdict: Verdict;
 	/** Every input graded for the role, in a fixed order. */
@@ -115,7 +115,7 @@ export interface Connection {
 }
 
 /** One rendition's grade and its delivery over the interval. */
-export interface Rendition {
+interface Rendition {
 	/** The worst graded evidence, or unknown when none was graded. */
 	verdict: Verdict;
 	/** Every input graded for the role, in a fixed order. */

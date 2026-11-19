@@ -57,4 +57,3 @@ Not a wire change.
 
 ## Related
 
-- [detour-resume](/quest/m2/multicast/detour-resume.md) - a front that ends, rather than waits, when its session closes before the detour arrives

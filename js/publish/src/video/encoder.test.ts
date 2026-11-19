@@ -83,6 +83,8 @@ class FakeVideoEncoder {
 	}
 
 	configure(config: VideoEncoderConfig): void {
+		// As browsers do: a bitrate must be positive.
+		if (config.bitrate === 0) throw new TypeError("invalid bitrate");
 		this.state = "configured";
 		this.#codec = config.codec;
 		this.configs.push(config);
@@ -380,7 +382,7 @@ test("a bandwidth estimate updates the bitrate without blanking the config or re
 // quantizer; one that accepts the mode and ignores the value, as Firefox does, or refuses it, as
 // Chrome's software H.264 does, runs a constant bitrate at the cap instead.
 for (const quantizer of ["honored", "ignored", "refused"] as const) {
-	test(`an encoder that ${quantizer} a per-frame quantizer follows a grant`, async () => {
+	test(`an encoder that ${quantizer} a per-frame quantizer follows a grant down to zero and back`, async () => {
 		using _videoEncoder = installFakeVideoEncoder();
 		FakeVideoEncoder.quantizer = quantizer;
 
@@ -451,6 +453,32 @@ for (const quantizer of ["honored", "ignored", "refused"] as const) {
 			} else {
 				expect(live.configs.map((config) => config.bitrate)).toEqual([cap, 200_000]);
 			}
+
+			// A zero grant, as higher priorities taking the whole estimate leave: every frame is held
+			// back, and constant mode can't be configured at zero, so it keeps its last config.
+			estimate.set(0);
+			await settle();
+			expect(encoder.out.resolved.peek()?.bitrate).toBe(0);
+			const configs = live.configs.length;
+			const encoded = live.options.length;
+			const skipped = encoder.out.stats.peek().skipped;
+			controller.enqueue({ timestamp: 66_666, close: () => {} } as unknown as VideoFrame);
+			await clock.advance(PROBE);
+			expect(encoder.out.error.peek()).toBeUndefined();
+			expect(live.configs).toHaveLength(configs);
+			expect(live.options).toHaveLength(encoded);
+			expect(encoder.out.stats.peek().skipped).toBe(skipped + 1);
+
+			// The grant recovers: constant mode configures again and encodes the next frame.
+			estimate.set(10_000_000);
+			await settle();
+			expect(encoder.out.resolved.peek()?.bitrate).toBe(cap);
+			if (mode === "constant") expect(live.configs.at(-1)?.bitrate).toBe(cap);
+			else expect(live.configs).toHaveLength(1);
+			controller.enqueue({ timestamp: 100_000, close: () => {} } as unknown as VideoFrame);
+			await clock.advance(PROBE);
+			expect(encoder.out.error.peek()).toBeUndefined();
+			expect(live.options).toHaveLength(encoded + 1);
 		} finally {
 			encoder.close();
 			fanout.close();

@@ -2,7 +2,7 @@
 //! its neighbours notice seconds apart, failures at one instant on a mesh larger than any
 //! exhaustive check, and no group crossing a link twice for one subscription.
 
-use super::{Feed, Join, Mesh, Source, detour_lost, measured, readers, reports, ring, shown};
+use super::{Feed, Join, Mesh, Source, measured, readers, reports, ring, shown};
 use crate::path_routes::{cut, lite07, quiesce};
 use crate::support::Rng;
 
@@ -10,10 +10,9 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 /// A ring of `count` relays with a publisher on `R0`, the link from `R1` to `R2` priced
-/// `r1_r2`. The link from `R0` to `R1` closes, and `R1` resumes the way round the ring.
-/// Unless `held`, every other route to `R0` ran through `R1`, so `R1` held none at the cut:
-/// its detour arrives a round trip later, once `R2` hears the closed session named.
-async fn detour(count: usize, r1_r2: u64, held: bool) {
+/// `r1_r2`. The link from `R0` to `R1` closes, and every reader, `R1`'s included, reads on
+/// the way round the ring, every group once.
+async fn detour(count: usize, r1_r2: u64) {
 	let mut mesh = Mesh::new(count);
 	for i in 0..count {
 		let cost = if i == 1 { r1_r2 } else { 1 };
@@ -30,10 +29,6 @@ async fn detour(count: usize, r1_r2: u64, held: bool) {
 	quiesce().await;
 	let case = format!("ring of {count}, R1-R2 at {r1_r2}, R0-R1 cut");
 	for (i, report) in reports(&mut readers, since, &case).iter().enumerate() {
-		if i == 1 && !held {
-			assert!(detour_lost(report, false), "{case}: R1: {report:?}");
-			continue;
-		}
 		assert!(report.seamless(), "{case}: R{i}: {report:?}");
 	}
 	assert_eq!(mesh.doubled(), [], "ring of {count}, R1-R2 at {r1_r2}");
@@ -44,15 +39,17 @@ async fn detour(count: usize, r1_r2: u64, held: bool) {
 #[kio::test]
 async fn a_relay_resumes_on_a_detour_it_already_holds() {
 	for (count, r1_r2) in [(3, 1), (4, 3), (5, 4)] {
-		detour(count, r1_r2, true).await;
+		detour(count, r1_r2).await;
 	}
 }
 
-/// `R1` holds no other route to `R0` when its session closes.
+/// `R1` holds no other route to `R0` when its session closes: every other one ran through
+/// `R1`, so its detour arrives a round trip later, once `R2` hears the closed session named.
+/// `R1`'s front rides through the claim's debounce until it does.
 #[kio::test]
 async fn a_relay_resumes_on_a_detour_learned_after_the_cut() {
 	for count in [4, 5, 6] {
-		detour(count, 1, false).await;
+		detour(count, 1).await;
 	}
 }
 

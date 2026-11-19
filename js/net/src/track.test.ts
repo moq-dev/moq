@@ -5624,3 +5624,50 @@ test("finishing returns handles that write nothing new but fill a late group", a
 	expect(hooks.tryRecvGroup(subscriber, false)).toEqual({ kind: "done" });
 	finished.close();
 });
+
+// Mirrors moq-net's `unplaced_holds_only_what_containing_cant_place`: a run holds only times
+// `containing` can't place, but those a reported start places directly, and leaves out only
+// times below the newest start reported past an earlier range's time.
+test("track: a reader's unplaced times are only times its holdings can't place", () => {
+	let seed = 5;
+	const random = (below: number) => {
+		seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+		// The high bits: an LCG's low bits cycle.
+		return (seed >>> 16) % below;
+	};
+	const errors = [new StreamError(StreamCode.NotFound), new StreamError(StreamCode.Cancel)];
+	for (let round = 0; round < 400; round++) {
+		const received = random(2) === 0;
+		const producer = received ? receivedTrack() : new TrackProducer("test").accept({ maxAge: null });
+		const starts: [bigint, bigint][] = [];
+		if (received) {
+			for (let n = random(3); n > 0; n--) starts.push([BigInt(random(48)), BigInt(random(48))]);
+			hooks.timeStarts(producer, starts);
+		}
+		const reported = new Set(starts.map(([time]) => time));
+		let past = 0n;
+		for (const [asked, start] of new Map(starts)) if (asked < start && start > past) past = start;
+		const reader = producer.subscribe();
+		for (let step = random(16); step >= 0; step--) {
+			const holdings = hooks.subscriberHoldings(reader);
+			const unplaced = holdings.unplaced?.();
+			expect(unplaced).toBeDefined();
+			for (let at = 0n; at < 64n; at++) {
+				const open = unplaced?.runs.some((run) => run.start <= at && at < run.end) ?? false;
+				const unknown = holdings.containing(at) === "unknown";
+				if (reported.has(at)) expect([at, unknown]).toEqual([at, false]);
+				else if (open) expect([at, unknown]).toEqual([at, true]);
+				else if (unknown) expect([at, received && at < past]).toEqual([at, true]);
+			}
+			const key = BigInt(random(48));
+			if (random(2) === 0) {
+				try {
+					putGroup(producer, key);
+				} catch {
+					// A key this copy refuses, such as one a skip covers.
+				}
+			} else hooks.dropTrackGroups(producer, key, key + BigInt(1 + random(4)), { error: errors[random(2)] });
+		}
+		producer.close();
+	}
+});

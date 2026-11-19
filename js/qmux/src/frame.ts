@@ -126,33 +126,33 @@ export interface MaxStreamData {
 	max: bigint;
 }
 
-export interface MaxStreamsBidi {
+interface MaxStreamsBidi {
 	type: "max_streams_bidi";
 	max: bigint;
 }
 
-export interface MaxStreamsUni {
+interface MaxStreamsUni {
 	type: "max_streams_uni";
 	max: bigint;
 }
 
-export interface DataBlocked {
+interface DataBlocked {
 	type: "data_blocked";
 	limit: bigint;
 }
 
-export interface StreamDataBlocked {
+interface StreamDataBlocked {
 	type: "stream_data_blocked";
 	id: Stream.Id;
 	limit: bigint;
 }
 
-export interface StreamsBlockedBidi {
+interface StreamsBlockedBidi {
 	type: "streams_blocked_bidi";
 	limit: bigint;
 }
 
-export interface StreamsBlockedUni {
+interface StreamsBlockedUni {
 	type: "streams_blocked_uni";
 	limit: bigint;
 }
@@ -220,12 +220,8 @@ export const RECOMMENDED_TRANSPORT_PARAMS: TransportParams = {
 	resetStreamAt: false,
 };
 
-export interface Padding {
-	type: "padding";
-}
-
 /** QX_PING frame (draft-01) */
-export interface PingRequest {
+interface PingRequest {
 	type: "ping_request";
 	sequence: bigint;
 }

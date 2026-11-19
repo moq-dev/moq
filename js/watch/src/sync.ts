@@ -126,7 +126,7 @@ export type Part = {
 };
 
 /** A window of one track's arrivals: when it opened and the earliest reference among them. @internal */
-export type Window = { start: number; least: number };
+type Window = { start: number; least: number };
 
 /**
  * Where the clock's current timeline stands. `idle` has not played and holds nothing back: it is

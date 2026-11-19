@@ -68,6 +68,13 @@ pub(in crate::model) trait Holdings {
 	/// Where `time` falls among the groups held.
 	fn containing(&self, time: u64) -> Containing;
 
+	/// Runs of times that [`Self::containing`] can't place, so a window skips its time starts
+	/// in them rather than try each again whenever the groups held change. `None` when it
+	/// can't tell, so each is tried.
+	fn unplaced(&self) -> Option<Unplaced> {
+		None
+	}
+
 	/// The lowest group held starting at or after `from`.
 	fn next_start(&self, from: u64) -> Option<u64>;
 
@@ -115,6 +122,21 @@ pub(in crate::model) enum Containing {
 	Unknown,
 }
 
+/// The times a hop's [`Holdings::containing`] can't place, as up to two runs: every time in
+/// them is [`Containing::Unknown`], except the few that `mark` places another way.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::model) struct Unplaced {
+	pub runs: [ops::RangeInclusive<u64>; 2],
+	/// Changes whenever a time inside the runs may have come to be placed by something other
+	/// than a group arriving or a drop, so a window that saw another mark tries every start.
+	pub mark: u64,
+}
+
+impl Unplaced {
+	/// An empty run, for a hop that places every time on one side.
+	pub const NONE: ops::RangeInclusive<u64> = ops::RangeInclusive::new(1, 0);
+}
+
 /// A hop that holds no groups of its own, such as a reader following route copies that
 /// resolve its ranges for it.
 pub(in crate::model) struct Unheld;
@@ -160,8 +182,11 @@ pub(in crate::model) struct Window {
 	/// every span.
 	looking: BTreeSet<(u64, u64)>,
 	/// The spans whose time start waits on a group arriving, which read only the groups from
-	/// that time meanwhile.
-	waiting: BTreeSet<u64>,
+	/// that time meanwhile: by that time, then key, so a change to the groups held tries only
+	/// those its [`Holdings::unplaced`] leaves out, found without visiting the rest.
+	waiting: BTreeSet<(u64, u64)>,
+	/// The [`Unplaced::mark`] every waiting span was last tried under.
+	waited: Option<u64>,
 	/// The ranges of a live join whose reach back waits on the groups held to measure the
 	/// live edge, which read nothing meanwhile: a group held is no reason to start at it.
 	reaching: BTreeSet<u64>,
@@ -234,6 +259,7 @@ impl Window {
 			pending: BTreeSet::new(),
 			looking: BTreeSet::new(),
 			waiting: BTreeSet::new(),
+			waited: None,
 			reaching: BTreeSet::new(),
 			groups: Cover::default(),
 			missable: Cover::default(),
@@ -279,7 +305,6 @@ impl Window {
 		}
 		self.pending.remove(&key);
 		self.reaching.remove(&key);
-		self.waiting.remove(&key);
 		if let Some(span) = self.spans.remove(&key) {
 			self.uncount(key, &span);
 		}
@@ -312,9 +337,7 @@ impl Window {
 	/// floor already keeps out every group but one starting there, and serves the first group
 	/// from it either way.
 	pub fn is_waiting_above(&self, floor: u64) -> bool {
-		self.waiting
-			.iter()
-			.any(|&position| matches!(self.spans[&position].anchor, Anchor::Time(time) if time > floor))
+		self.waiting.last().is_some_and(|&(time, _)| time > floor)
 	}
 
 	/// Resolve what the groups now held settle: relative anchors once `latest` exists, and
@@ -346,22 +369,30 @@ impl Window {
 	}
 
 	/// Start the spans whose time start waits on a group, once one arrived, or once nothing
-	/// can arrive any more. Returns whether any did.
+	/// can arrive any more. Only the times the holdings may now place are tried, so a change
+	/// placing one of them costs that one, not every span still waiting. Returns whether any
+	/// started.
 	fn start_waiting(&mut self, holdings: &impl Holdings) -> bool {
+		let complete = holdings.complete();
+		let unplaced = holdings.unplaced().filter(|_| !complete);
+		let tried: Vec<(u64, u64)> = match unplaced {
+			Some(unplaced) if self.waited == Some(unplaced.mark) => outside(&unplaced.runs)
+				.flat_map(|gap| self.waiting.range((*gap.start(), 0)..=(*gap.end(), u64::MAX)))
+				.copied()
+				.collect(),
+			_ => {
+				self.waited = unplaced.map(|unplaced| unplaced.mark);
+				self.waiting.iter().copied().collect()
+			}
+		};
 		let mut started = false;
-		for key in std::mem::take(&mut self.waiting) {
-			let Anchor::Time(time) = self.spans[&key].anchor else {
-				unreachable!("only a time start waits on a group");
-			};
+		for (time, key) in tried {
 			let (start, floored) = match holdings.containing(time) {
 				Containing::Group(group) => (group, true),
 				// The group holding it is older than any held, or nothing can arrive.
 				Containing::Before => (0, false),
-				Containing::Unknown if holdings.complete() => (0, false),
-				Containing::Unknown => {
-					self.waiting.insert(key);
-					continue;
-				}
+				Containing::Unknown if complete => (0, false),
+				Containing::Unknown => continue,
 			};
 			started = true;
 			self.start_span(key, time, start, floored, holdings);
@@ -593,6 +624,8 @@ impl Window {
 		for key in keys {
 			self.place_range(key, latest, holdings);
 		}
+		// Each span waiting was just tried against these holdings.
+		self.waited = holdings.unplaced().map(|unplaced| unplaced.mark);
 		Ok(())
 	}
 
@@ -629,7 +662,6 @@ impl Window {
 			// [`Self::start_waiting`].
 			Start::Waiting => {
 				let span = Span::new(anchor, 0, end, false, None);
-				self.waiting.insert(key);
 				self.count(key, Span { waiting: true, ..span }, holdings);
 				return;
 			}
@@ -666,6 +698,9 @@ impl Window {
 		if let Some(looking) = span.looking {
 			self.looking.insert((looking.time, key));
 		}
+		if let Some(time) = span.waits_on() {
+			self.waiting.insert((time, key));
+		}
 		self.spans.insert(key, span);
 	}
 
@@ -690,10 +725,21 @@ impl Window {
 		if let Some(looking) = span.looking {
 			self.looking.remove(&(looking.time, key));
 		}
+		if let Some(time) = span.waits_on() {
+			self.waiting.remove(&(time, key));
+		}
 	}
 }
 
 impl Span {
+	/// The time start it waits on the groups held to place, if any.
+	fn waits_on(&self) -> Option<u64> {
+		match (self.waiting, self.anchor) {
+			(true, Anchor::Time(time)) => Some(time),
+			_ => None,
+		}
+	}
+
 	fn new(anchor: Anchor, start: u64, end: Option<u64>, floored: bool, looking: Option<Looking>) -> Self {
 		Self {
 			anchor,
@@ -754,6 +800,25 @@ fn check<'a>(mut ranges: impl Iterator<Item = &'a Range> + Clone, holdings: &imp
 		return Err(Error::Unsupported);
 	}
 	Ok(())
+}
+
+/// The times outside `runs`, lowest first, as runs.
+fn outside(runs: &[ops::RangeInclusive<u64>]) -> impl Iterator<Item = ops::RangeInclusive<u64>> + '_ {
+	let mut from = Some(0);
+	let mut runs = runs.iter().filter(|run| !run.is_empty());
+	std::iter::from_fn(move || {
+		loop {
+			let at = from?;
+			let Some(run) = runs.next() else {
+				from = None;
+				return Some(at..=u64::MAX);
+			};
+			from = run.end().checked_add(1).map(|next| next.max(at));
+			if at < *run.start() {
+				return Some(at..=*run.start() - 1);
+			}
+		}
+	})
 }
 
 /// The Min Age a live join reaches back by: `min`, for [`Range::live`], where this hop resolves
@@ -858,6 +923,9 @@ mod tests {
 		skipped: Vec<ops::Range<u64>>,
 		complete: bool,
 		looks_up: bool,
+		/// Every key below this was dropped, so a time below it is placed before every
+		/// group even while none is held.
+		dropped: u64,
 	}
 
 	impl Keys {
@@ -877,9 +945,20 @@ mod tests {
 		fn containing(&self, time: u64) -> Containing {
 			match self.held.range(..=time).next_back() {
 				Some(key) => Containing::Group(*key),
-				None if self.held.is_empty() => Containing::Unknown,
+				None if self.held.is_empty() && time >= self.dropped => Containing::Unknown,
 				None => Containing::Before,
 			}
+		}
+
+		fn unplaced(&self) -> Option<Unplaced> {
+			let unknown = match self.held.is_empty() {
+				true => self.dropped..=u64::MAX,
+				false => Unplaced::NONE,
+			};
+			Some(Unplaced {
+				runs: [unknown, Unplaced::NONE],
+				mark: 0,
+			})
 		}
 
 		fn next_start(&self, from: u64) -> Option<u64> {
@@ -903,6 +982,105 @@ mod tests {
 					.skipped
 					.iter()
 					.any(|run| run.start <= keys.start && keys.end <= run.end)
+		}
+	}
+
+	/// [`Keys`] keeping its [`Holdings::unplaced`] to itself, so a window tries every start
+	/// still waiting on each change.
+	struct Blind<'a>(&'a Keys);
+
+	impl Holdings for Blind<'_> {
+		fn looks_up(&self) -> bool {
+			self.0.looks_up()
+		}
+
+		fn containing(&self, time: u64) -> Containing {
+			self.0.containing(time)
+		}
+
+		fn next_start(&self, from: u64) -> Option<u64> {
+			self.0.next_start(from)
+		}
+
+		fn back(&self, latest: u64, back: u64) -> Option<u64> {
+			self.0.back(latest, back)
+		}
+
+		fn complete(&self) -> bool {
+			self.0.complete()
+		}
+
+		fn never_produced(&self, keys: ops::Range<u64>) -> bool {
+			self.0.never_produced(keys)
+		}
+	}
+
+	/// Everything a reader of `window` sees.
+	fn seen(window: &Window) -> impl PartialEq + std::fmt::Debug {
+		let lookups: BTreeSet<_> = window.lookups().collect();
+		(
+			window.runs(0).collect::<Vec<_>>(),
+			window.missable(0).collect::<Vec<_>>(),
+			(window.floor(), window.start(), window.named(), window.end()),
+			(window.resolved(), lookups, window.is_settled(), !window.waiting.is_empty()),
+		)
+	}
+
+	proptest::proptest! {
+		/// A window that skips the starts its holdings can't place sees what one trying every
+		/// start sees, through groups arriving and leaving, drops, edits, lookups answering,
+		/// and the track completing.
+		#[test]
+		fn settling_by_steps_matches_trying_every_start(
+			ranges in proptest::collection::vec((proptest::bool::weighted(0.2), 0u64..40, proptest::option::of(0u64..48)), 1..12),
+			ops in proptest::collection::vec((0u8..6, 0u64..48), 0..24),
+			looks_up: bool,
+		) {
+			let to_range = |(relative, start, end): (bool, u64, Option<u64>)| {
+				let start = match relative {
+					true => Anchor::Relative(start % 6),
+					false => time(start),
+				};
+				range(start, end.map(time))
+			};
+			let ranges: Vec<Range> = ranges.into_iter().map(to_range).collect();
+			let mut next_key = ranges.len() as u64;
+			let mut keys = Keys {
+				looks_up,
+				..Keys::default()
+			};
+			let mut fast = Window::new(&ranges, None, None, &keys).unwrap();
+			let mut full = Window::new(&ranges, None, None, &Blind(&keys)).unwrap();
+			for (op, value) in ops {
+				let latest = keys.held.last().copied();
+				match op {
+					0 => drop(keys.held.insert(value)),
+					1 => keys.dropped = keys.dropped.max(value),
+					2 => {
+						let Some((time, _)) = fast.lookups().next() else {
+							continue;
+						};
+						let answer = (value % 2 == 0).then_some(value);
+						fast.found(time, answer, &keys);
+						full.found(time, answer, &Blind(&keys));
+					}
+					3 => keys.complete = true,
+					// Retire one range and add a time start, placed against what is held now.
+					4 => {
+						let added = [(next_key, range(time(value), None))];
+						next_key += 1;
+						let retired = [value % next_key];
+						fast.edit(retired, &added, latest, &keys).unwrap();
+						full.edit(retired, &added, latest, &Blind(&keys)).unwrap();
+					}
+					// The oldest group held is evicted.
+					_ => drop(keys.held.pop_first()),
+				}
+				let latest = keys.held.last().copied();
+				fast.settle(latest, &keys);
+				full.settle(latest, &Blind(&keys));
+				proptest::prop_assert_eq!(seen(&fast), seen(&full));
+			}
 		}
 	}
 
