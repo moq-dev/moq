@@ -40,7 +40,11 @@
 //! identity. A claim's chain names each relay it entered or left a routing domain by, the
 //! announcer, then each grant's exporter and adopter, and a node takes no claim whose
 //! chain, with it appended, names a relay twice or grows past the longest path: that claim
-//! left a relay's domain and came back.
+//! left a relay's domain and came back. Floors order one claimant's claims, not the copies
+//! two grants announced again under two claimants, so a node that hears a claim's publisher
+//! ended it holds back every copy of it standing then, the same announcer, first in the
+//! chain, at no newer epoch, until each copy's own end arrives: no copy shows a moment
+//! between the two ends.
 //!
 //! Each neighbour asks for a set of prefixes edited in place, as under the path rule: a
 //! routing neighbour forwards for the whole domain, so it asks for the whole tree, and
@@ -413,6 +417,35 @@ pub(crate) fn precedence<A: Item>(item: &A) -> (u64, Reverse<u64>) {
 	(item.above(), Reverse(item.epoch()))
 }
 
+/// The relay that first announced `claim`, which `origin` claims: the first its chain
+/// names, or `origin`'s relay for a claim that crossed no grant.
+fn announcer<A>(claim: &Claim<A>, origin: NodeId) -> Id {
+	claim.chain.first().copied().unwrap_or(origin.relay)
+}
+
+/// The copies of an ended claim that stood when its end arrived: past a grant, each was
+/// announced again under another claimant, so its end comes later by its own way. Each
+/// is held back until its holder ends it; a holder ends its copy before it claims again,
+/// as a claimant's floors and a neighbour's stream order them, so a claim announced
+/// again is never held back.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Ended<N> {
+	/// The newest epoch ended.
+	epoch: u64,
+	/// The claimants whose claim is a copy.
+	origins: BTreeSet<NodeId>,
+	/// The neighbours whose given claim is a copy.
+	peers: BTreeSet<N>,
+}
+
+/// Who holds a copy of a claim at a node: a claimant it knows through a route, or a
+/// neighbour that gave it across a grant.
+#[derive(Clone, Copy, Debug)]
+enum Holder<N> {
+	Origin(NodeId),
+	Peer(N),
+}
+
 /// A broadcast: a path, and the Instance a claim there serves.
 pub(crate) type Broadcast<I> = (Path, I);
 
@@ -724,6 +757,9 @@ pub(crate) struct Router<N, I, A> {
 	revs: BTreeMap<NodeId, Rev>,
 	/// Per broadcast, the claims each endpoint or scoped neighbour gave this node.
 	givers: BTreeMap<Broadcast<I>, BTreeMap<N, Claim<A>>>,
+	/// Per broadcast, each announcer whose claim its publisher ended, with the copies of it
+	/// that other ways brought and still stand ([`Self::stale_copy`]).
+	withdrawn: BTreeMap<Broadcast<I>, BTreeMap<Id, Ended<N>>>,
 	/// The neighbour behind each of this node's own claims.
 	sources: BTreeMap<Broadcast<I>, N>,
 	/// The forwarding nodes claiming each broadcast, by path.
@@ -828,6 +864,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			known: BTreeMap::new(),
 			revs: BTreeMap::new(),
 			givers: BTreeMap::new(),
+			withdrawn: BTreeMap::new(),
 			sources: BTreeMap::new(),
 			claimants: BTreeMap::new(),
 			ranked: BTreeMap::new(),
@@ -1963,6 +2000,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		let mut claimed = Vec::new();
 		let mut unclaimed = Vec::new();
 		let mut lost = Vec::new();
+		let mut ended = Vec::new();
 		for (broadcast, change) in &changes {
 			match change {
 				Change::Live(claim) => {
@@ -1974,6 +2012,9 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 				Change::Ended | Change::Lost => {
 					if let Some(claim) = known.items.remove(broadcast) {
 						unclaimed.push(broadcast.clone());
+						if *change == Change::Ended {
+							ended.push((broadcast.clone(), announcer(&claim, origin), claim.item.epoch()));
+						}
 						// `restate` keeps its own claim's source.
 						if *change == Change::Lost && !own {
 							lost.push((broadcast.clone(), claim));
@@ -2001,6 +2042,97 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			let changes = changes.clone();
 			self.out.push((peer, Msg::Claims { origin, changes, floor }));
 		}
+		// The late end of a copy already held back says nothing new.
+		let ended: Vec<(Broadcast<I>, Id, u64)> = (ended.into_iter())
+			.filter(|(broadcast, announcer, _)| {
+				let held = self.withdrawn.get(broadcast).and_then(|held| held.get(announcer));
+				!held.is_some_and(|ended| ended.origins.contains(&origin))
+			})
+			.collect();
+		// A claimant that let go of its copy holds none.
+		for (broadcast, change) in &changes {
+			if !matches!(change, Change::Live(_)) {
+				self.unhold(broadcast, |ended| _ = ended.origins.remove(&origin));
+			}
+		}
+		// Its publisher ended the claim: every copy of it standing now is stale, and this
+		// node's own, taken across a grant from one, ends with it.
+		for (broadcast, announcer, epoch) in ended {
+			if self.withdraw(&broadcast, announcer, epoch) && self.givers.contains_key(&broadcast) {
+				self.restate(broadcast.clone(), Change::Ended);
+			}
+		}
+	}
+
+	/// Hold back each copy of `broadcast` standing now of `announcer`'s claim at no newer
+	/// than `epoch`, which its publisher ended. Returns whether any stands.
+	fn withdraw(&mut self, broadcast: &Broadcast<I>, announcer: Id, epoch: u64) -> bool {
+		let copy = |by: Id, claim: &Claim<A>| by == announcer && claim.item.epoch() <= epoch;
+		let (path, instance) = broadcast;
+		let origins: BTreeSet<NodeId> = (self.claimants.get(path).and_then(|claims| claims.get(instance)))
+			.into_iter()
+			.flatten()
+			.filter(|origin| {
+				let claim = self.known.get(origin).and_then(|known| known.items.get(broadcast));
+				claim.is_some_and(|claim| copy(self::announcer(claim, **origin), claim))
+			})
+			.copied()
+			.collect();
+		let peers: BTreeSet<N> = (self.givers.get(broadcast).into_iter().flatten())
+			.filter(|(_, claim)| claim.chain.first().is_some_and(|by| copy(*by, claim)))
+			.map(|(peer, _)| *peer)
+			.collect();
+		self.count(origins.len() + peers.len());
+		if origins.is_empty() && peers.is_empty() {
+			return false;
+		}
+		let held = self.withdrawn.entry(broadcast.clone()).or_default();
+		let ended = held.entry(announcer).or_insert_with(|| Ended {
+			epoch,
+			origins: BTreeSet::new(),
+			peers: BTreeSet::new(),
+		});
+		ended.epoch = ended.epoch.max(epoch);
+		ended.origins.extend(origins);
+		ended.peers.extend(peers);
+		self.dirty.insert(broadcast.clone());
+		true
+	}
+
+	/// A holder let go of its copy of an ended claim of `broadcast`, as `release` says:
+	/// forget each ended claim no copy of stands any more.
+	fn unhold(&mut self, broadcast: &Broadcast<I>, release: impl Fn(&mut Ended<N>)) {
+		let Some(held) = self.withdrawn.get_mut(broadcast) else {
+			return;
+		};
+		held.retain(|_, ended| {
+			release(ended);
+			!(ended.origins.is_empty() && ended.peers.is_empty())
+		});
+		if held.is_empty() {
+			self.withdrawn.remove(broadcast);
+		}
+	}
+
+	/// Whether `claim` of `broadcast`, held by `holder`, is a copy of a claim its publisher
+	/// ended that stood when the end arrived ([`Ended`]): it would show a moment before its
+	/// own end arrives by its own way.
+	fn stale_copy(&self, broadcast: &Broadcast<I>, claim: &Claim<A>, holder: Holder<N>) -> bool {
+		let Some(held) = self.withdrawn.get(broadcast) else {
+			return false;
+		};
+		let by = match holder {
+			Holder::Origin(origin) => Some(announcer(claim, origin)),
+			Holder::Peer(_) => claim.chain.first().copied(),
+		};
+		let Some(ended) = by.and_then(|by| held.get(&by)) else {
+			return false;
+		};
+		let holds = match holder {
+			Holder::Origin(origin) => ended.origins.contains(&origin),
+			Holder::Peer(peer) => ended.peers.contains(&peer),
+		};
+		holds && claim.item.epoch() <= ended.epoch
 	}
 
 	fn claim(&mut self, broadcast: &Broadcast<I>, origin: NodeId) {
@@ -2171,6 +2303,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 				self.givers.remove(broadcast);
 			}
 		}
+		self.unhold(broadcast, |ended| _ = ended.peers.remove(&peer));
 	}
 
 	/// Announce the cheapest claim any neighbour gave this node for `broadcast`, or
@@ -2178,6 +2311,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 	/// the marked identity, and moves between the two as its source does.
 	fn restate(&mut self, broadcast: Broadcast<I>, cause: Change<A>) {
 		let cheapest = (self.givers.get(&broadcast).into_iter().flatten())
+			.filter(|(peer, claim)| !self.stale_copy(&broadcast, claim, Holder::Peer(**peer)))
 			.map(|(&peer, claim)| {
 				self.visit();
 				// A claim from a neighbour that sent GOAWAY is draining from here on.
@@ -2295,7 +2429,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		(origins.into_iter().flatten()).filter_map(move |&origin| {
 			self.visit();
 			let claim = self.known.get(&origin)?.items.get(&broadcast)?;
-			Some((origin, claim))
+			(!self.stale_copy(&broadcast, claim, Holder::Origin(origin))).then_some((origin, claim))
 		})
 	}
 
@@ -2319,7 +2453,10 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			if self.is_self(origin) {
 				for (peer, given) in self.givers.get(broadcast).into_iter().flatten() {
 					self.visit();
-					if precedence(&given.item) != precedence(&claim.item) || given.unavailable {
+					if precedence(&given.item) != precedence(&claim.item)
+						|| given.unavailable
+						|| self.stale_copy(broadcast, given, Holder::Peer(*peer))
+					{
 						continue;
 					}
 					let mut given = given.clone();
@@ -2406,7 +2543,9 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			self.visit();
 			let (path, instance) = broadcast;
 			let closest = self.closest(broadcast).map(|(_, claim)| claim.item.clone());
-			let claimed = (self.claimants.get(path)).is_some_and(|claims| claims.contains_key(instance));
+			// A copy of a claim its publisher ended claims nothing.
+			let claimed = (self.claimants.get(path)).is_some_and(|claims| claims.contains_key(instance))
+				&& self.claims_of(broadcast).next().is_some();
 			let shown = match claimed {
 				true => {
 					self.unwait(broadcast);
@@ -2797,6 +2936,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			known,
 			revs,
 			givers: _,
+			withdrawn: _,
 			sources,
 			claimants: _,
 			ranked: _,
@@ -3690,6 +3830,82 @@ mod tests {
 				.collect();
 			assert_eq!(own, [(p("fresh"), 7)], "upstream {upstream}");
 		}
+	}
+
+	/// Two grants announce one publisher's claim again under two claimants, so the two
+	/// copies reach a node as different claims. Once its publisher ends the claim the
+	/// node hears of first, the other copy, the same announcer at no newer epoch, is never
+	/// shown, nor this node's own taken from it; a newer epoch from that announcer is.
+	#[test]
+	fn a_copy_of_an_ended_claim_is_never_shown() {
+		let mut router = Router::<usize, u64, Run>::new(node(1), debounce(HOP));
+		open(&mut router, 2, Role::Routing(node(2)));
+		open(&mut router, 4, Role::Routing(node(4)));
+		open(&mut router, 5, Role::Scoped(vec![p(ROOT)]));
+		router.recv(2, route(2, 2, 1)).unwrap();
+		router.recv(4, route(4, 4, 2)).unwrap();
+		let copy = |chain: Vec<Id>, epoch: u64| {
+			let Change::Live(claim) = chained(chain) else {
+				unreachable!("a live claim");
+			};
+			Change::Live(Claim {
+				item: run(epoch),
+				..claim
+			})
+		};
+		let broadcast = (p("live"), 7);
+		let claims = |origin: Id, change: Change<Run>, floor: Rev| Msg::Claims {
+			origin: node(origin),
+			changes: vec![(broadcast.clone(), change)],
+			floor,
+		};
+		router.recv(2, claims(2, copy(vec![9, 2], 0), 1)).unwrap();
+		router.recv(4, claims(4, copy(vec![9, 4], 0), 1)).unwrap();
+		let given = vec![(broadcast.clone(), copy(vec![9, 8], 0))];
+		router.recv(5, Msg::Announce { changes: given }).unwrap();
+		let shown = |router: &Router<usize, u64, Run>| router.shown().contains_key(&(7, p("live")));
+		assert!(shown(&router));
+
+		router.recv(2, claims(2, Change::Ended, 2)).unwrap();
+		assert!(!shown(&router), "the copies are of the ended claim");
+		assert!(router.own().1.is_empty(), "nor is the node's own taken from one");
+
+		router.recv(4, claims(4, copy(vec![9, 4], 1), 2)).unwrap();
+		assert!(shown(&router), "a newer epoch is a new claim");
+	}
+
+	/// A publisher that withdraws its claim and announces it again at the same epoch, as
+	/// `origin::Route::withdraw` and `announce` do, is shown at once: only the copies that
+	/// stood when the end arrived are held back.
+	#[test]
+	fn a_claim_announced_again_at_the_same_epoch_shows_at_once() {
+		let mut router = Router::<usize, u64, Run>::new(node(1), debounce(HOP));
+		open(&mut router, 2, Role::Routing(node(2)));
+		open(&mut router, 3, Role::Scoped(vec![p(ROOT)]));
+		router.recv(2, route(2, 2, 1)).unwrap();
+		let broadcast = (p("live"), 7);
+		let given = |change: Change<Run>| Msg::Announce {
+			changes: vec![(broadcast.clone(), change)],
+		};
+		let claims = |change: Change<Run>, floor: Rev| Msg::Claims {
+			origin: node(2),
+			changes: vec![(broadcast.clone(), change)],
+			floor,
+		};
+		router.recv(3, given(chained(vec![9]))).unwrap();
+		router.recv(2, claims(chained(vec![9, 2]), 1)).unwrap();
+		let own = |router: &Router<usize, u64, Run>| router.own().1.contains_key(&broadcast);
+		assert!(own(&router));
+
+		router.recv(3, given(Change::Ended)).unwrap();
+		assert!(
+			!router.shown().contains_key(&(7, p("live"))),
+			"node 2's copy is of the ended claim"
+		);
+		router.recv(3, given(chained(vec![9]))).unwrap();
+		assert!(own(&router), "announced again, the claim is no copy");
+		router.recv(2, claims(Change::Ended, 2)).unwrap();
+		assert!(own(&router));
 	}
 
 	/// A relay never tells a claim whose chain its own Relay would carry to the longest
