@@ -890,6 +890,9 @@ async fn capture_loop<S: CaptureSource>(
 					if std::mem::take(&mut live.encoding) {
 						producer.discontinuity().await?;
 					}
+					// A rung disabled under congestion loses its viewers to the one below, so it
+					// follows the grant meanwhile to re-enable once funded, and they can come back.
+					producer.follow_unwritten().await;
 					continue;
 				}
 				if !live.encoding {

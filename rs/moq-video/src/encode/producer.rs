@@ -147,6 +147,9 @@ pub struct Producer {
 	ceiling_only: bool,
 	/// The soonest a resume at the ceiling that failed is tried again, a grant's retry step later.
 	resume_retry: Option<kio::clock::Instant>,
+	/// Whether the grant is being followed with nothing written, so a resume re-enables the rung
+	/// without opening an encoder nobody would feed.
+	unwritten: bool,
 }
 
 impl Producer {
@@ -233,6 +236,7 @@ impl Producer {
 			marked: false,
 			ceiling_only: false,
 			resume_retry: None,
+			unwritten: false,
 		})
 	}
 
@@ -483,6 +487,21 @@ impl Producer {
 		self.publisher.wanted()
 	}
 
+	/// Follow the grant with nothing written, for a rung nobody watches.
+	///
+	/// A rung the grant disabled re-enables once it is funded again, so a viewer that switched
+	/// down when it disabled can switch back; its encoder opens on the next frame written. Does
+	/// nothing for a rendition with no [`lower`](Options::lower) one, which ignores the grant
+	/// while unwatched.
+	pub(crate) async fn follow_unwritten(&mut self) {
+		if self.lower.is_none() {
+			return;
+		}
+		self.unwritten = true;
+		self.follow().await;
+		self.unwritten = false;
+	}
+
 	/// Report source frames the encoder never saw, in the catalog's stats.
 	pub(crate) fn report_skipped(&self, frames: u64) {
 		self.publisher.report_skipped(frames);
@@ -692,6 +711,15 @@ impl Producer {
 			(rate::Target::Enabled(bitrate), Encoding::Disabled) => {
 				let ceiling = *self.ceiling.read();
 				let bitrate = bitrate.min(ceiling);
+				// Nothing is written, so the next frame opens the encoder, and a backend that refuses
+				// the funded rate keeps its ceiling there.
+				if self.unwritten {
+					self.publisher.set_enabled(true)?;
+					self.target = rate::Target::Enabled(bitrate);
+					self.publisher.report_bitrate(bitrate);
+					self.encoding = Encoding::Idle;
+					return Ok(());
+				}
 				if self.ceiling_only && bitrate < ceiling {
 					self.defer_resume();
 					return Ok(());
@@ -984,6 +1012,56 @@ mod tests {
 		assert_eq!(high.bitrate(), Some(ceiling));
 		let resumed = probe::take();
 		assert!(resumed.iter().all(|(event, _)| *event != "set_bitrate"), "{resumed:?}");
+
+		let _high = high.finish().await.unwrap();
+		let _low = low.finish().await.unwrap();
+	}
+
+	/// A rung disabled under congestion whose viewers left re-enables once the grant funds it
+	/// again, with nothing written and no encoder opened, so a viewer can switch back; the next
+	/// frame written opens its encoder.
+	#[cfg(feature = "capture")]
+	#[tokio::test(start_paused = true)]
+	#[expect(
+		clippy::await_holding_lock,
+		reason = "the guard only keeps other tests out of the process-wide probe log, and this runtime has one thread, so holding it across an await blocks nothing"
+	)]
+	async fn an_unwatched_rung_re_enables_once_funded() {
+		let _probe = probe::exclusive();
+		let estimate = moq_net::bandwidth::Producer::new();
+		estimate.set(Some(Rate::from_mbps(4))).unwrap();
+		let bandwidth = moq_net::bandwidth::Allocator::new(estimate.consume());
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let low = probed(
+			&broadcast,
+			&catalog,
+			"low",
+			Rate::from_kbps(500),
+			moq_net::bandwidth::Allocator::unlimited(),
+			None,
+		);
+		let ceiling = Rate::from_mbps(2);
+		let mut high = probed(&broadcast, &catalog, "high", ceiling, bandwidth, Some(low.rung()));
+		let mut micros = 0;
+		high.write(frame(&mut micros)).await.unwrap();
+
+		// Disabled while the link was congested, as the grant would have.
+		high.apply(rate::Target::Disabled).await.unwrap();
+		high.defer_resume();
+		assert!(!enabled(&catalog, "high"));
+		let _ = probe::take();
+
+		// Nobody watches it now, and the link has recovered: following the grant re-enables it.
+		tokio::time::advance(Duration::from_secs(1)).await;
+		high.follow_unwritten().await;
+		assert!(enabled(&catalog, "high"));
+		assert_eq!(events("open"), 0, "an encoder opened for a rendition nobody writes to");
+
+		high.write(frame(&mut micros)).await.unwrap();
+		assert_eq!(events("open"), 1);
+		assert!(high.bitrate().is_some());
 
 		let _high = high.finish().await.unwrap();
 		let _low = low.finish().await.unwrap();
