@@ -170,6 +170,8 @@ signals.run((effect) => {
     // still replays the last value. Each value is stamped with when it was
     // written, so the track declares a timescale.
     const track = net.createTrack("meta.json", { timescale: Moq.Time.Timescale.MILLI });
+    // Undefined while a live track already holds the name.
+    if (!track) return;
     effect.cleanup(() => {
         track.finish();
         track.close();
