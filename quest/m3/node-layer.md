@@ -76,8 +76,7 @@ and claims cross as route-free announces with a chain, drain, and the
   every in-domain link `upstream`, so no relay passes one in-domain peer's
   claim to another, ends a claim everywhere at once on a full mesh, with
   relays still serving their own clients. That fits the flat dialable arm,
-  with claims sent from the announcer to every relay directly or through
-  reflectors.
+  with claims sent from the announcer to every relay directly.
 - Without the marks, a cycle echoes: when the publisher ends a claim, each
   relay holds its neighbour's copy, which no route or revision orders, and
   shows it unavailable until the debounce lets it go, as offline rather
@@ -86,9 +85,10 @@ and claims cross as route-free announces with a chain, drain, and the
   Route-free claims carry no announcer revision or floor (`Msg::Claims` from
   a peer with no route is refused), so a design that wants cycles inside a
   domain needs a wire change in a later version.
-- Today a relay leaves routes off only by wiring each direction as its own
-  session. A knob that keeps a two-way session route-free is API for the
-  implementation quest, not this one.
+- Today a relay leaves routes off by wiring each direction as its own
+  session, or on a two-way session whose grants are not whole or whose
+  proxy is off. A knob that keeps a two-way session with whole grants and
+  proxy on route-free is API for the implementation quest, not this one.
 
 Recommendations:
 
