@@ -276,6 +276,10 @@ assert.deepEqual(features.jobs.features.strategy.matrix.recipe, ["rs features"])
 // The exact command: `just gate -rs` would skip a module.
 assert.match(nightly.jobs.gate.steps.at(-1).run, /^nix develop --command just gate$/m);
 assert.deepEqual(nightly.jobs.gate["runs-on"], ["self-hosted", "moq-queue"]);
-assert.equal(nightly.jobs.gate.if, "github.ref == 'refs/heads/main'", "gate runs only main's code on the queue's runners");
+assert.equal(
+	nightly.jobs.gate.if,
+	"github.ref == 'refs/heads/main'",
+	"gate runs only main's code on the queue's runners",
+);
 assert.ok(!/secrets\s*[.[]/.test(JSON.stringify(nightly.jobs.gate)), "a self-hosted Nightly job gets no secrets");
 console.log("queue event policy passed");
