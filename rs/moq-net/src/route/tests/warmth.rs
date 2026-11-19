@@ -1607,10 +1607,17 @@ impl Mesh {
 			sim.read(relay, cast, true);
 			settled &= sim.settle();
 		}
+		// `check` passes over a reader the route layer never routes, which here is a
+		// file that links it to nothing.
+		let unfed = (self.readers.iter()).find(|&&(cast, relay)| !sim.feeds(relay, cast));
 		let mut out = Carried {
-			right: match settled {
-				true => sim.check(),
-				false => Err("never settled".into()),
+			right: match (settled, unfed) {
+				(false, _) => Err("never settled".into()),
+				(true, Some(&(cast, relay))) => Err(format!(
+					"relay {} is never fed broadcast {}",
+					self.relays[relay], self.casts[cast].0
+				)),
+				(true, None) => sim.check(),
 			},
 			links: BTreeMap::new(),
 			sent: sim.sent - sent,
@@ -1655,8 +1662,9 @@ const EXAMPLE: &str = include_str!("warmth.mesh");
 /// once each of its readers has joined in turn, on every link and on those of each
 /// label, then per link: ranked readers against path joins. A tree feeding the same
 /// readers spans about as many links either way, so the saving shows in which links
-/// carry it: the cost, and the labelled links. Without it, the committed example. A deployment's graph is
-/// private, so pass its file by absolute path and commit none:
+/// carry it: the cost, and the labelled links. Without the variable, it reads the
+/// committed example. A deployment's graph is private, so pass its file by absolute
+/// path and commit none:
 ///
 /// `MOQ_WARMTH_MESH=/path/to/mesh just rs test -p moq-net --release --run-ignored only --no-capture -E 'test(=route::tests::warmth::benchmark_warmth_mesh)'`
 #[test]
@@ -1723,6 +1731,20 @@ fn a_mesh_file_carries_fewer_link_groups_ranked() {
 		(mesh.total(&path, backbone), mesh.total(&ranked, backbone)),
 		((4, 32), (1, 8))
 	);
+}
+
+/// A reader with no route to its publisher fails the run instead of counting for nothing.
+#[test]
+fn a_mesh_file_with_an_unlinked_reader_is_not_right() {
+	let text = "relay a b c\nlink a b 2 1 peer\npublish live a\nread live b c";
+	for arm in [PATH, ORDER_ROUTE] {
+		let carried = Mesh::parse(text).expect("parsed").carry(arm);
+		assert_eq!(carried.right, Err("relay c is never fed broadcast live".into()));
+	}
+	let linked = format!("{text}\nlink b c 2 1 peer");
+	for arm in [PATH, ORDER_ROUTE] {
+		assert_eq!(Mesh::parse(&linked).expect("parsed").carry(arm).right, Ok(()));
+	}
 }
 
 /// A file that names what it never declared, or prices a link wrong, is refused with
