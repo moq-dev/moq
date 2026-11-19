@@ -1721,7 +1721,9 @@ mod tests {
 		}
 	}
 
-	/// Newest-first delivery must leave time for history covering min plus warmup.
+	/// A newest-first backlog delivered before the first read starts where min plus warmup reach
+	/// back to: the warmup keeps the history it needs. A local track owes nothing, so the reader
+	/// waits for no group that has not landed (a received copy's owed groups are moq-mux's tests).
 	#[tokio::test(start_paused = true)]
 	async fn media_warmup_reaches_history() {
 		for warmup in [None, Some(Duration::ZERO), Some(Duration::from_millis(300))] {
@@ -1732,12 +1734,10 @@ mod tests {
 			let mut consumer = MediaConsumer::new(warmup, delay).await;
 			consumer.write(5, 5_000_000);
 			consumer.write(4, 4_700_000);
-			let first = kio::clock::timeout(Duration::from_millis(50), consumer.frame()).await;
-			let warming = warmup.is_some_and(|warmup| !warmup.is_zero());
-			assert_eq!(first.is_err(), warming, "warmup={warmup:?}");
 			consumer.write(3, 4_400_000);
 			drop(consumer.track.clone().finish().unwrap());
-			let mut stamps: Vec<_> = first.ok().flatten().into_iter().collect();
+			let warming = warmup.is_some_and(|warmup| !warmup.is_zero());
+			let mut stamps = Vec::new();
 			while let Some(stamp) = consumer.frame().await {
 				stamps.push(stamp);
 			}
