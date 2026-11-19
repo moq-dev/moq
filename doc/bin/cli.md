@@ -160,7 +160,10 @@ and leaves it fragmented, minus that fragment. Unlike `fmp4`, a rendition that
 joins mid-recording is kept, though only the finished file indexes it.
 `moq repair mp4 <file>` finishes a recording that a crash or second signal left
 fragmented, in place and the same way: it indexes every fragment written in full,
-late renditions included, and cuts a partial one at the end.
+late renditions included, and cuts a partial one at the end. Finishing syncs to
+disk in an order that keeps the file playable if it is itself cut short, and
+`repair` also finishes such a file. It leaves a file alone only when its index is
+exactly what its fragments hold.
 
 The recorder holds an exclusive file lock on its output while it records, and the
 OS drops the lock with a killed recorder. `repair` refuses a file it can't lock,

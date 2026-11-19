@@ -163,6 +163,22 @@ describe("Window", () => {
 		expect(window.missable(0n)[0]).toEqual({ start: 5n, end: UNBOUNDED });
 	});
 
+	test("a reported start moves a relative start, never a relative end", () => {
+		const held = new Keys(keys(0n, 10n));
+		// The publisher reported starting the range counting back 2 from 9 at 8, past the 7 counted.
+		const reported: Holdings = {
+			resolves: () => true,
+			containing: (at) => held.containing(at),
+			nextStart: (from) => held.nextStart(from),
+			back: (latest, back) => held.back(latest, back),
+			reportedStart: (latest, back) => (latest === 9n && back === 2n ? 8n : undefined),
+			complete: () => false,
+		};
+		expect(new Window([range(relative(2n))], 9n, reported).start()).toBe(8n);
+		const ended = new Window([range(time(0n), relative(2n))], 9n, reported);
+		expect(covered(ended, held.held)).toEqual(keys(0n, 8n));
+	});
+
 	test("relative anchors count groups back from the latest", () => {
 		let held = new Keys([0n, 33n, 66n, 99n]);
 		let window = new Window([range(relative(2n), relative(1n))], 99n, held);

@@ -13,8 +13,9 @@ publishers stop changing, the pulls settle. A later step lets an edge query
 its other upstreams when it gains demand, once the conditions below hold. A
 relay that sends no rank or warm signal is treated as cold and behaves as it
 does today, and a relay it pulls through takes its route. Relays export how many
-upstream copies they hold and what each choice was for. The wire lands in
-the first wip version after the lite-07 cut.
+upstream copies they hold and what each choice was for. The wire lands on
+lite-07-wip if the port has landed and passed the mesh replay when the cut
+is made, and otherwise in the first wip version after the cut.
 
 ## Plan
 
@@ -49,6 +50,26 @@ exercised them). The 2026-11-14 decision stands: lite-07 freezes without a
 warm wire. The route layer it ranks on shipped in
 [moq-dev/moq#8987](https://github.com/moq-dev/moq/pull/8987), and this port
 is the first item after the cut.
+
+Decided 2026-11-19 (maintainer, in the coordinating session): ✅ **the port
+starts now, and the cut does not wait for it** (rejected: blocking the cut
+on warmth; starting only after the cut, as decided 2026-11-17). The cut now
+waits on [the mesh replay](/quest/m2/multicast/mesh-replay.md) and the
+flaws the audit found, so the port has that long. If it has landed and been
+through the mesh replay when the cut is made, its wire is in lite-07; if
+not, lite-07 freezes without it and the wire moves to the next wip version.
+[The cut](/quest/m2/lite07-finalize.md) checks it as one of its steps. The
+reason for the change: a deployment expects warm pulls to cut what its
+backbone carries by a large part, and a release is the only way its
+production mesh gets them.
+
+First, before building: measure that saving. The simulator's shapes are
+generated, and against path joins the saving runs from under 1% on random
+region meshes to 8% on tiers and 70% on rings (the table below), so it
+depends on the graph. Let `warmth.rs` read a mesh from a file (relays, links
+with costs and marks, and where readers and publishers sit), run ranked
+readers and path joins on it, and report link-groups carried by each. A
+deployment's graph is private: take the file by path and commit none.
 
 **Why ranked readers settle.** A relay's choice reads only copies feeding
 lower ranks, and what those feed never depends on a higher rank's choice.
@@ -402,8 +423,8 @@ uplink hands it to one other drone, not four (94 against settled pulls'
   to. Bring a rewording to the maintainer if the two contradict.
 
 Public API: report any relay configuration added, such as a warm cost per
-link. Wire, in the first wip version after the lite-07 cut and all
-additive: an advert on the announce stream carrying an Instance's offer,
+link. Wire, on lite-07-wip or the first wip version after the cut as
+decided 2026-11-19, and all additive: an advert on the announce stream carrying an Instance's offer,
 path, mark, and rank, and its withdrawal, in order with the route messages
 there; a rank on the SUBSCRIBE and a message updating it; the same offer,
 path, mark, and rank on the subscribe answer and its updates; and, with the
@@ -411,10 +432,7 @@ later step, a query naming an Instance, answered once with an offer, path,
 mark, and rank or none. A rank is a route cost and a Node ID. Nothing
 lite-07 freezes changes.
 
-## Required
-
-- [Lite-07 finalized](/quest/m2/lite07-finalize.md) - warmth's wire lands in the first wip version after the cut (maintainer, 2026-11-17)
-
 ## Related
 
+- [Real relays replay a mesh and its faults](/quest/m2/multicast/mesh-replay.md) - the port runs through it before its wire may join lite-07
 - [Route health](/quest/m3/route-health/README.md) - its metadata-only subscription answers the same way

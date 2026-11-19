@@ -72,9 +72,10 @@ impl<T: Serialize> Encoder<T> {
 	/// [`commit`](Pending::commit)s.
 	///
 	/// Errors with [`moq_net::Error::FrameTooLarge`] if the record is larger than one frame may be
-	/// (32 MiB, what moq-net's group cache holds). The refused record leaves the encoder untouched.
+	/// (32 MiB, what moq-net's group cache holds), and with [`crate::Error::Json`] if it nests too
+	/// deeply for a decoder to read. The refused record leaves the encoder untouched.
 	pub fn encode(&mut self, value: &T) -> Result<Pending<'_, T>> {
-		let payload = Bytes::from(serde_json::to_vec(value)?);
+		let payload = Bytes::from(crate::strict::to_vec(value, 0)?);
 		if payload.len() as u64 > self.max_frame_bytes {
 			return Err(moq_net::Error::FrameTooLarge.into());
 		}

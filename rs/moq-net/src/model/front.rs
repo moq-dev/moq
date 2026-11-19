@@ -671,11 +671,15 @@ impl Front {
 			// Died mid-serve after delivering from the same instance: normal failover,
 			// re-splice at the first missing group from the serving source, or from the
 			// route a switch already under way moves to, whatever the error, since the
-			// route it leaves may be what failed.
+			// route it leaves may be what failed. A copy still read from a source that
+			// closed during the switch has no serving source to judge the instance by, so
+			// the route the switch asks speaks for it.
 			Err(err)
 				if delivered
 					&& (err.transient() || self.upstream.is_some())
-					&& self.serving.is_some_and(|(_, candidate)| candidate.carried) =>
+					&& (self.serving.map(|(_, candidate)| candidate))
+						.or(self.upstream)
+						.is_some_and(|candidate| candidate.carried) =>
 			{
 				track.state = TrackState::Idle;
 				track.lost = Some(err);
@@ -1907,6 +1911,65 @@ mod tests {
 				"{err}: {actions:?}"
 			);
 		}
+	}
+
+	/// A track still asking a source when it closes is spliced to that source's copy once
+	/// its info arrives, while the switch away is under way. When that copy fails, no
+	/// source serves to judge the instance by, so the route the switch asks does: the
+	/// track waits for it rather than ending.
+	#[test]
+	fn a_copy_of_a_closed_source_failing_during_a_switch_waits_for_it() {
+		let mut front = querying(remote(1), 100);
+		assert_actions(
+			front.step(Event::SourceClosed { source: 100 }),
+			&[
+				Action::Detach {
+					source: 100,
+					drain: true,
+				},
+				Action::Reselect,
+			],
+		);
+		assert_actions(
+			front.step(Event::Selected {
+				best: Some(remote(3)),
+				serving_closing: false,
+			}),
+			&[Action::Request { route: 3 }],
+		);
+		assert_actions(
+			front.step(Event::TrackInfo {
+				track: name("video"),
+				source: 100,
+				closing: true,
+				result: Ok(info()),
+				retry: None,
+			}),
+			&[Action::Splice {
+				track: name("video"),
+				source: 100,
+			}],
+		);
+		assert_actions(
+			front.step(Event::TrackEnded {
+				track: name("video"),
+				source: 100,
+				closing: true,
+				result: Err(Error::Unroutable),
+				delivered: true,
+			}),
+			&[],
+		);
+		assert_actions(
+			front.step(Event::Resolved {
+				route: 3,
+				result: Ok(300),
+			}),
+			&[Action::Query {
+				track: name("video"),
+				source: 300,
+			}],
+		);
 	}
 
 	/// A switch given up on, with the serving route the best again, leaves a track that

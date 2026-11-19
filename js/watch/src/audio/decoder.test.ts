@@ -1588,7 +1588,8 @@ async function livePlayback(burst: number) {
 	// Published before the decoder subscribes, since a broadcast with no request handler refuses
 	// an unknown track.
 	let track = producer.createTrack("audio", { timescale: Moq.Time.Timescale.MILLI, maxAge: Container.MAX_AGE });
-	const decoder = new Decoder({ source, sync });
+	const enabled = new Signal(true);
+	const decoder = new Decoder({ source, sync, enabled });
 
 	const samples = (48_000 * FRAME) / 1000;
 	const output = [new Float32Array(samples), new Float32Array(samples)];
@@ -1601,6 +1602,7 @@ async function livePlayback(burst: number) {
 	const ring = () => worklets.findLast((worklet) => worklet.ring && insert.mock.contexts.includes(worklet.ring));
 	return {
 		sync,
+		enabled,
 		error: decoder.out.error,
 		// Lose one whole group without changing the following media timestamps or arrival cadence.
 		// An open fill nobody serves stands in for a session's feed, which owes the group until the
@@ -1700,7 +1702,7 @@ it("a missing live group re-primes without clearing decoded PCM or resetting Syn
 	}
 });
 
-describe("Decoder across a rename", () => {
+describe("Decoder across a rename or a pause", () => {
 	// A codec change renames the audio track, and the replacement's consumer reads the same path.
 	// Clearing the estimate at teardown and restarting it from the cold-start prior dropped the
 	// shared "auto" delay and climbed back as the new track relearned the lateness, so the ring
@@ -1729,6 +1731,34 @@ describe("Decoder across a rename", () => {
 			expect({ skips, silent: playback.counts.silent - before.silent }).toEqual({ skips: 0, silent: 0 });
 			expect(playback.ring()).toBe(ring);
 			expect(lowest.ge(delay)).toBe(true);
+		} finally {
+			await playback.close();
+		}
+	});
+
+	// A pause stops the rendition and a resume subscribes again on the same path. Restarting its
+	// estimate from the cold-start prior gave the first outage after the resume a tenth of the
+	// histogram, so one late burst held the shared delay near a second.
+	it("keeps the estimate across a pause, so one late burst after the resume does not raise the delay", async () => {
+		const playback = await livePlayback(1);
+		try {
+			// Long enough for the estimate to settle on a path where every frame lands on time.
+			await playback.run(20_000);
+			const warm = playback.sync.out.delay.peek();
+
+			playback.enabled.set(false);
+			await playback.run(23_000);
+			playback.enabled.set(true);
+			// Past the join, so the outage below is measured as the path's.
+			await playback.run(25_000);
+
+			// One outage: 800ms of frames held back and flushed at once.
+			playback.burst = 40;
+			await playback.run(25_800);
+			playback.burst = 1;
+			await playback.run(28_000);
+
+			expect(playback.sync.out.delay.peek().asMillis()).toBeLessThan(warm.asMillis() + 100);
 		} finally {
 			await playback.close();
 		}
