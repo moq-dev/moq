@@ -650,11 +650,7 @@ mod tests {
 			self.0.lock().unwrap().written
 		}
 
-		fn poll_acked(
-			&self,
-			_: &kio::Waiter,
-			offset: &u64,
-		) -> Poll<Result<(), Self::Error>> {
+		fn poll_acked(&self, _: &kio::Waiter, offset: &u64) -> Poll<Result<(), Self::Error>> {
 			let mut state = self.0.lock().unwrap();
 			match () {
 				// As the trait's default answers.

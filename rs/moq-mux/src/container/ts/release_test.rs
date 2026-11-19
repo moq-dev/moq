@@ -126,8 +126,7 @@ fn republish_cut(
 	let cut = cut.to_vec();
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let mut catalog = crate::catalog::Producer::new(&mut broadcast, config()).unwrap();
-	let track = broadcast
-		.unique_track(".m2ts", catalog.track_info(hang::catalog::PRIORITY.video));
+	let track = broadcast.unique_track(".m2ts", catalog.track_info(hang::catalog::PRIORITY.video));
 	let name = track.name().to_string();
 	catalog
 		.mutate(|catalog| catalog.ext.mpegts.passthrough = Some(PassthroughTrack::new(name)))

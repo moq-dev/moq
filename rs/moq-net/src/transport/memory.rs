@@ -1213,10 +1213,7 @@ mod tests {
 		let acked = |send: &SendStream, offset: u64| send.poll_acked(&noop(), &offset);
 		let (a, b) = pair(Config::default());
 		let (mut send, mut recv) = uni(&a, &b);
-		assert!(matches!(
-			acked(&send, send.offset()),
-			Poll::Ready(Ok(()))
-		));
+		assert!(matches!(acked(&send, send.offset()), Poll::Ready(Ok(()))));
 
 		ready(write(&mut send, &Bytes::from_static(b"one"))).unwrap();
 		let one = send.offset();

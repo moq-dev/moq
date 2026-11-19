@@ -3,6 +3,7 @@ import { Duration } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { accept } from "../connection/accept.ts";
 import { connect } from "../connection/connect.ts";
+import { defined } from "../defined.test-util.ts";
 import { hooks } from "../internal.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer } from "../origin.ts";
@@ -18,7 +19,7 @@ test.each([ALPN_06, ALPN_07_WIP])("refresh joins reach a browser publisher on %s
 	const b = new Producer();
 	const broadcastRoute = source.route(Path.from("room"));
 	const broadcast = broadcastRoute.broadcast;
-	const producer = broadcast.createTrack("data", { refresh: { ratio: 1 } });
+	const producer = defined(broadcast.createTrack("data", { refresh: { ratio: 1 } }));
 	const asked = hooks.demandAsked(producer.demand());
 	const pair = createMockTransportPair(alpn);
 	const url = new URL("https://localhost/refresh");
@@ -91,9 +92,11 @@ test("a refresh resolves once the session sends it upstream", async () => {
 	const installed = clock.install();
 	const source = new Producer();
 	const b = new Producer();
-	const producer = source.route(Path.from("room")).broadcast.createTrack("data", {
-		refresh: { interval: Duration.secs(5) },
-	});
+	const producer = defined(
+		source.route(Path.from("room")).broadcast.createTrack("data", {
+			refresh: { interval: Duration.secs(5) },
+		}),
+	);
 	const asked = hooks.demandAsked(producer.demand());
 	const pair = createMockTransportPair(ALPN_07_WIP);
 	const url = new URL("https://localhost/refresh");

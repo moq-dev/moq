@@ -16,6 +16,7 @@ import { Duration } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import fc from "fast-check";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
+import { defined } from "./defined.test-util.ts";
 import { NotFound, StreamCode, StreamError, TooFarBehind } from "./error.ts";
 import type { Frame, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { toHop, WireRoute } from "./hop.ts";
@@ -469,7 +470,7 @@ class Model {
 		});
 		const serving = wireOf(this.origin).receive(PATH, route);
 		const broadcast = new BroadcastProducer();
-		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+		const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 		void (async () => {
 			for await (const request of serving.requested()) {
 				request.serve(Upstream.of(broadcast, (key, local) => this.fill(instance, slot, key, local)));

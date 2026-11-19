@@ -4,6 +4,7 @@ import { Manual } from "@moq/clock/test";
 import { Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
+import { defined } from "../defined.test-util.ts";
 import { fromTransport, ProtocolViolation, SessionCode, StreamCode, StreamError, toStreamCode } from "../error.ts";
 import { Consumer as GroupConsumer, type Producer as GroupProducer } from "../group.ts";
 import { randomHop } from "../hop.ts";
@@ -208,7 +209,7 @@ async function subscribeEnd(
 	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
 
 	const broadcast = publish(origin, Path.from("test"));
-	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 
 	const client = await Stream.open(pair.client, { version });
 	const server = await Stream.accept(pair.server, version);
@@ -278,11 +279,13 @@ async function groupSendOrders(options: {
 	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
 
 	const broadcast = publish(origin, Path.from("test"));
-	const track = broadcast.createTrack("video", {
-		timescale: Timescale.MILLI,
-		priority: options.publisher,
-		maxAge: null,
-	});
+	const track = defined(
+		broadcast.createTrack("video", {
+			timescale: Timescale.MILLI,
+			priority: options.publisher,
+			maxAge: null,
+		}),
+	);
 
 	const client = await Stream.open(pair.client, { version });
 	const server = await Stream.accept(pair.server, version);
@@ -375,7 +378,7 @@ test("lite draft-05: a subscribe update re-ranks a group already on the wire", a
 	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), origin.consume());
 
 	const broadcast = publish(origin, Path.from("test"));
-	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 
 	const client = await Stream.open(pair.client, { version: Version.DRAFT_05 });
 	const server = await Stream.accept(pair.server, Version.DRAFT_05);
@@ -426,7 +429,7 @@ test("lite draft-05: a subscribe update during the stream open still ranks the g
 	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), origin.consume());
 
 	const broadcast = publish(origin, Path.from("test"));
-	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 
 	// Hold the group's stream open call until the test releases it.
 	let release: () => void = () => {};
@@ -484,7 +487,7 @@ test("lite draft-05: many concurrent groups share one subscription listener", as
 	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), origin.consume());
 
 	const broadcast = publish(origin, Path.from("test"));
-	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 
 	const client = await Stream.open(pair.client, { version: Version.DRAFT_05 });
 	const server = await Stream.accept(pair.server, Version.DRAFT_05);
@@ -536,7 +539,7 @@ test("lite draft-05: the fetch response ranks the publisher's own writes", async
 	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), origin.consume());
 
 	const broadcast = publish(origin, Path.from("test"));
-	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 
 	const group = track.createGroup(7n);
 	group.writeFrame(textFrame("hello"));
@@ -569,7 +572,7 @@ test.each([0, 5, 6, 7])("a fetched cached tail keeps absolute indices from %s", 
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
 	const broadcast = publish(origin, Path.from("test"));
-	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	const group = hooks.receiveGroup(track, { start: 0n, offset: 5 });
 	for (const value of ["a", "b"]) group.writeFrame(textFrame(value));
 	group.finish();
@@ -615,7 +618,7 @@ test("lite draft-06: an unchecked track's fetched frames carry their own timesta
 	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomHop(), origin.consume());
 
 	const broadcast = publish(origin, Path.from("test"));
-	const track = broadcast.createTrack("video", { timescale: Timescale.MICRO, unchecked: true });
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MICRO, unchecked: true }));
 
 	const group = track.createGroup(0n);
 	group.writeFrame(textFrame("hello", Timestamp.fromMillis(36_000_000)));
@@ -739,7 +742,7 @@ async function servedSubscription(
 	}
 	// Unset is no publisher limit: these fixtures serve superseded groups.
 	const info = { timescale: Timescale.MILLI, maxAge: options.maxAge ?? null };
-	let track = options.pending ? undefined : broadcast.createTrack("video", info);
+	let track = options.pending ? undefined : defined(broadcast.createTrack("video", info));
 	for (const key of options.prefill ?? []) {
 		if (!track) throw new Error("a pending track holds nothing to prefill");
 		const group = track.createGroup(key);
@@ -2293,7 +2296,7 @@ test("lite draft-07: subscribe end precedes groups below a declared finish", asy
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, Version.DRAFT_07, randomHop(), origin.consume());
 	const broadcast = publish(origin, Path.from("test"));
-	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 
 	const client = await Stream.open(pair.client, { version: Version.DRAFT_07 });
 	const server = await Stream.accept(pair.server, Version.DRAFT_07);
@@ -2338,7 +2341,7 @@ test("lite draft-06: an errored end is not declared early", async () => {
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomHop(), origin.consume());
 	const broadcast = publish(origin, Path.from("test"));
-	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 
 	const client = await Stream.open(pair.client, { version: Version.DRAFT_06 });
 	const server = await Stream.accept(pair.server, Version.DRAFT_06);
@@ -2395,7 +2398,7 @@ async function heldOpenEnd() {
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, Version.DRAFT_07, randomHop(), origin.consume());
 	const broadcast = publish(origin, Path.from("test"));
-	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 
 	let open!: (ok: boolean) => void;
 	const opened = new Promise<boolean>((resolve) => {
@@ -2474,7 +2477,7 @@ test("lite draft-07: a group whose close fails is dropped", async () => {
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, Version.DRAFT_07, randomHop(), origin.consume());
 	const broadcast = publish(origin, Path.from("test"));
-	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 
 	const createUni = pair.server.createUnidirectionalStream.bind(pair.server);
 	spyOn(pair.server, "createUnidirectionalStream").mockImplementation(async (options) => {
@@ -2521,7 +2524,7 @@ test("blocked DROP responses stop opening later groups", async () => {
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, Version.DRAFT_07, randomHop(), origin.consume());
 	const broadcast = publish(origin, Path.from("test"));
-	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 	const client = await Stream.open(pair.client, { version: Version.DRAFT_07 });
 	const server = await Stream.accept(pair.server, Version.DRAFT_07);
 	if (!server) throw new Error("missing subscribe stream");
@@ -2608,7 +2611,7 @@ async function serve(
 	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomHop(), origin.consume());
 
 	const broadcast = publish(origin, Path.from("test"));
-	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 
 	const client = await Stream.open(pair.client, { version: Version.DRAFT_06 });
 	const server = await Stream.accept(pair.server, Version.DRAFT_06);
@@ -2804,7 +2807,7 @@ async function saturatedGroup() {
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), origin.consume());
 	const broadcast = publish(origin, Path.from("test"));
-	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 
 	const client = await Stream.open(pair.client, { version: Version.DRAFT_05 });
 	const server = await Stream.accept(pair.server, Version.DRAFT_05);
@@ -2882,7 +2885,7 @@ test("lite draft-05: a blocked group header is reset when the group expires", as
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), origin.consume());
 	const broadcast = publish(origin, Path.from("test"));
-	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	const client = await Stream.open(pair.client, { version: Version.DRAFT_05 });
 	const server = await Stream.accept(pair.server, Version.DRAFT_05);
 	if (!server) throw new Error("publisher never accepted the subscribe stream");
@@ -3006,7 +3009,7 @@ test("lite draft-05: a group parked at its tail resets as too old when it expire
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), origin.consume());
 	const broadcast = publish(origin, Path.from("test"));
-	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	const frame = (ms: number) => ({ payload: new TextEncoder().encode("x"), timestamp: Timestamp.fromMillis(ms) });
 
 	const client = await Stream.open(pair.client, { version: Version.DRAFT_05 });
@@ -3063,7 +3066,7 @@ test("lite draft-05: a group that goes stale while its stream opens writes nothi
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), origin.consume());
 	const broadcast = publish(origin, Path.from("test"));
-	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 
 	let requested!: () => void;
 	const opening = new Promise<void>((resolve) => {
@@ -3237,7 +3240,7 @@ test("lite draft-06: a grant that shrinks while a TRACK resolves refuses it", as
 
 	const resets = spyOn(Writer.prototype, "reset");
 	const produced = new BroadcastProducer();
-	produced.createTrack("video", { timescale: Timescale.MILLI });
+	defined(produced.createTrack("video", { timescale: Timescale.MILLI }));
 	try {
 		const serving = publisher.runTrackInfo(new TrackMessage(Path.from("live/cam"), "video"), server);
 
@@ -3296,7 +3299,7 @@ test("lite draft-06: a grant that shrinks while TRACK_INFO is blocked resets it"
 
 	const resets = spyOn(Writer.prototype, "reset");
 	const produced = new BroadcastProducer();
-	produced.createTrack("video", { timescale: Timescale.MILLI });
+	defined(produced.createTrack("video", { timescale: Timescale.MILLI }));
 	try {
 		const serving = publisher.runTrackInfo(new TrackMessage(Path.from("live/cam"), "video"), stream);
 		const request = await requests.next();
@@ -3376,7 +3379,7 @@ test("lite draft-06: a grant that shrinks mid-fetch resets the fetch", async () 
 	});
 
 	const broadcast = publish(origin, Path.from("live"));
-	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	// Left open, so the fetch is still serving when the grant shrinks.
 	const group = track.createGroup(0n);
 	group.writeFrame(textFrame("first"));
@@ -3412,7 +3415,7 @@ test("lite draft-07: a fetch whose budget gives up partway resets as too old", a
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, Version.DRAFT_07, randomHop(), origin.consume());
 	const broadcast = publish(origin, Path.from("live"));
-	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	const frame = (ms: number) => ({ payload: new TextEncoder().encode("x"), timestamp: Timestamp.fromMillis(ms) });
 	// Left open, so the fetch is still serving when the track runs on.
 	const open = track.createGroup(0n);
@@ -3459,7 +3462,7 @@ test.each([0, 1])("lite draft-07 reports the cached largest position when starti
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
 	const broadcast = publish(origin, Path.from("quiet"));
-	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	const group = track.createGroup(0n);
 	group.writeFrame(textFrame("cached"));
 	group.finish();
@@ -3505,7 +3508,7 @@ test.each([false, true])(
 		const origin = new OriginProducer();
 		const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
 		const broadcast = publish(origin, Path.from("relayed"));
-		const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+		const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 		// The source answered with group 4 as its largest; only group 0 has landed.
 		hooks.reportedLargest(track, { group: 4n, frame: 0 }, ended);
 		const group = track.createGroup(0n);
@@ -3577,7 +3580,7 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 		const pair = createMockTransportPair(ALPN_05);
 		const origin = new OriginProducer();
 		const broadcast = publish(origin, Path.from("test"));
-		const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+		const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 		const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
 		const client = await Stream.open(pair.client, { version });
 		const server = await Stream.accept(pair.server, version);
@@ -3689,8 +3692,8 @@ test("lite-06: a datagram request failing behind the shared writer resets rather
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
 	const broadcast = publish(origin, Path.from("test"));
-	const first = broadcast.createDatagrams("a");
-	const second = broadcast.createDatagrams("b");
+	const first = defined(broadcast.createDatagrams("a"));
+	const second = defined(broadcast.createDatagrams("b"));
 
 	const subscribe = async (id: bigint, track: string) => {
 		const client = await Stream.open(pair.client, { version });
@@ -3785,8 +3788,8 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06]) {
 		test(`${label}, stream track ${stream}: a SUBSCRIBE sends the datagrams written since its TRACK_INFO`, async () => {
 			const legacy = legacyPublisher(version);
 			try {
-				const datagrams = legacy.broadcast.createDatagrams("events");
-				if (stream) legacy.broadcast.createTrack("events", { timescale: Timescale.MILLI });
+				const datagrams = defined(legacy.broadcast.createDatagrams("events"));
+				if (stream) defined(legacy.broadcast.createTrack("events", { timescale: Timescale.MILLI }));
 				await legacy.track();
 				datagrams.append(Timestamp.unscaled(0n), Uint8Array.of(0xaa));
 				await legacy.subscribe(-5);
@@ -3804,7 +3807,7 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06]) {
 	test(`${label}: a SUBSCRIBE reads from the oldest hold`, async () => {
 		const legacy = legacyPublisher(version);
 		try {
-			const datagrams = legacy.broadcast.createDatagrams("events");
+			const datagrams = defined(legacy.broadcast.createDatagrams("events"));
 			await legacy.track();
 			datagrams.append(Timestamp.unscaled(0n), Uint8Array.of(0xaa));
 			await legacy.track();
@@ -3820,11 +3823,11 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06]) {
 	test(`${label}: a SUBSCRIBE reads the current datagram track past an older hold`, async () => {
 		const legacy = legacyPublisher(version);
 		try {
-			const first = legacy.broadcast.createDatagrams("events");
+			const first = defined(legacy.broadcast.createDatagrams("events"));
 			await legacy.track();
 			first.append(Timestamp.unscaled(0n), Uint8Array.of(0xaa));
 			first.finish();
-			const current = legacy.broadcast.createDatagrams("events");
+			const current = defined(legacy.broadcast.createDatagrams("events"));
 			await legacy.track();
 			current.append(Timestamp.unscaled(0n), Uint8Array.of(0xbb));
 			await legacy.subscribe(0);

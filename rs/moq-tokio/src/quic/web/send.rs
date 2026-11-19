@@ -340,11 +340,7 @@ impl moq_net::transport::poll::SendStream for Stream {
 	}
 
 	/// Once reset, answers from the prefix acknowledged by then, failing for the bytes after it.
-	fn poll_acked(
-		&self,
-		waiter: &kio::Waiter,
-		offset: &send::Offset,
-	) -> Poll<Result<(), Self::Error>> {
+	fn poll_acked(&self, waiter: &kio::Waiter, offset: &send::Offset) -> Poll<Result<(), Self::Error>> {
 		let acked = match &self.state {
 			State::Open(stream) => stream.poll_acked(waiter, *offset),
 			State::Finished(stream) => stream.poll_acked(waiter, *offset),

@@ -4536,7 +4536,10 @@ mod test {
 			.unwrap();
 
 		let copy = request.accept(crate::track::Info::timed());
-		let mut group = fill.accept(0, crate::track::Info::timed()).unwrap().expect("a fresh group");
+		let mut group = fill
+			.accept(0, crate::track::Info::timed())
+			.unwrap()
+			.expect("a fresh group");
 		group.write_frame(ts(0), b"early".as_ref()).unwrap();
 		group.finish().unwrap();
 		assert!(
@@ -4563,7 +4566,10 @@ mod test {
 		assert!((&mut fetching).now_or_never().is_none());
 		let fill = refused_dynamic.requested_groups().now_or_never().unwrap().unwrap();
 		let wrong = refused.accept(crate::track::Info::timed());
-		let mut group = fill.accept(0, crate::track::Info::timed()).unwrap().expect("a fresh group");
+		let mut group = fill
+			.accept(0, crate::track::Info::timed())
+			.unwrap()
+			.expect("a fresh group");
 		group.write_frame(ts(0), b"wrong".as_ref()).unwrap();
 		group.finish().unwrap();
 		drop(staged);
@@ -4578,7 +4584,10 @@ mod test {
 			.expect("asked again of the next route")
 			.unwrap();
 		let copy = request.accept(crate::track::Info::timed());
-		let mut group = fill.accept(0, crate::track::Info::timed()).unwrap().expect("a fresh group");
+		let mut group = fill
+			.accept(0, crate::track::Info::timed())
+			.unwrap()
+			.expect("a fresh group");
 		group.write_frame(ts(0), b"right".as_ref()).unwrap();
 		group.finish().unwrap();
 		let _logical = logical.accept(crate::track::Info::timed());
@@ -4686,7 +4695,10 @@ mod test {
 		assert!((&mut fetching).now_or_never().is_none());
 		let fill = dynamic.requested_groups().now_or_never().unwrap().unwrap();
 		let _staged_copy = request.accept(crate::track::Info::timed());
-		let mut group = fill.accept(0, crate::track::Info::timed()).unwrap().expect("a fresh group");
+		let mut group = fill
+			.accept(0, crate::track::Info::timed())
+			.unwrap()
+			.expect("a fresh group");
 		group.write_frame(ts(0), b"x".as_ref()).unwrap();
 		group.finish().unwrap();
 		assert!((&mut fetching).now_or_never().is_none());
@@ -4704,7 +4716,10 @@ mod test {
 			.now_or_never()
 			.expect("asked of the serving copy")
 			.unwrap();
-		let mut group = fill.accept(0, crate::track::Info::timed()).unwrap().expect("a fresh group");
+		let mut group = fill
+			.accept(0, crate::track::Info::timed())
+			.unwrap()
+			.expect("a fresh group");
 		group.write_frame(ts(0), b"x".as_ref()).unwrap();
 		group.finish().unwrap();
 		let mut fetched = fetching.now_or_never().expect("answered").unwrap();

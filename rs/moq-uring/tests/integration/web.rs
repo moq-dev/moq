@@ -335,10 +335,7 @@ fn an_offset_stays_acknowledged_through_a_reset() {
 			let cut = SendStream::offset(&send);
 			SendStream::reset(&mut send, 1);
 			let acked = |offset| SendStream::poll_acked(&send, &kio::Waiter::noop(), offset);
-			assert!(
-				matches!(acked(&payload), Poll::Ready(Ok(()))),
-				"the reset forgot it"
-			);
+			assert!(matches!(acked(&payload), Poll::Ready(Ok(()))), "the reset forgot it");
 			assert!(matches!(acked(&cut), Poll::Ready(Err(_))), "the reset cut it");
 			assert_eq!(SendStream::offset(&send), cut);
 

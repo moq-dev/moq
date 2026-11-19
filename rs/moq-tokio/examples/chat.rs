@@ -53,7 +53,10 @@ async fn run_broadcast(origin: moq_net::origin::Producer) -> anyhow::Result<()> 
 	// Frames are stamped with this host's wall clock in milliseconds, so the track declares that
 	// timescale.
 	let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
-	let mut track = route.broadcast().create_track("chat", info).context("the track already exists")?;
+	let mut track = route
+		.broadcast()
+		.create_track("chat", info)
+		.context("the track already exists")?;
 
 	// Create a group, which starts at its first frame's timestamp.
 	// Each group is independent and the newest group(s) will be prioritized.

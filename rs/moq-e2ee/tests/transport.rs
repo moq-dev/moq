@@ -90,7 +90,11 @@ async fn connect_protected(version: Version, label: &str) -> Fixture {
 async fn grouped_roundtrip(version: &str, payload: &[u8]) {
 	kio::clock::timeout(TEST_TIMEOUT, async {
 		let fixture = connect_protected(version.parse().unwrap(), "video").await;
-		let mut producer = fixture.producer.create_track("video", timed()).unwrap().expect("a free name");
+		let mut producer = fixture
+			.producer
+			.create_track("video", timed())
+			.unwrap()
+			.expect("a free name");
 		let mut consumer = fixture
 			.consumer
 			.subscribe(
@@ -125,7 +129,11 @@ async fn grouped_over_ietf() {
 async fn datagram_roundtrip(version: &str, plaintext: &[u8]) {
 	kio::clock::timeout(TEST_TIMEOUT, async {
 		let fixture = connect_protected(version.parse().unwrap(), "audio").await;
-		let mut producer = fixture.producer.create_datagrams("audio", timed_datagrams()).unwrap().expect("a free name");
+		let mut producer = fixture
+			.producer
+			.create_datagrams("audio", timed_datagrams())
+			.unwrap()
+			.expect("a free name");
 		let mut consumer = fixture.consumer.datagrams("audio").unwrap();
 		// A remote subscriber is live once its request reaches the publisher, which sees its priority.
 		consumer.set_priority(1);

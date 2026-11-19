@@ -631,7 +631,9 @@ fn config() -> moq_json::snapshot::Config {
 
 impl<V: Serialize> Output<V> {
 	fn create(broadcast: &broadcast::Producer, name: &str) -> Result<Self, moq_net::Error> {
-		Ok(Self::new(broadcast.create_track(name, info()).ok_or(moq_net::Error::Duplicate)?))
+		Ok(Self::new(
+			broadcast.create_track(name, info()).ok_or(moq_net::Error::Duplicate)?,
+		))
 	}
 
 	/// Publish on the track `request` asked for, or create `name` without one.
@@ -931,7 +933,9 @@ impl BucketTrack {
 		// an earlier epoch's, and its first MoQ group is where they start.
 		let epoch = Epoch::mint();
 		let name = crate::bucket_track(bucket, &epoch);
-		let track = broadcast.create_track(name.as_str(), info()).ok_or(moq_net::Error::Duplicate)?;
+		let track = broadcast
+			.create_track(name.as_str(), info())
+			.ok_or(moq_net::Error::Duplicate)?;
 		Ok(Self {
 			name,
 			snapshot: Snapshot::new(track, config()).fresh(),

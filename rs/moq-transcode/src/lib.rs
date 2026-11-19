@@ -1013,7 +1013,10 @@ mod tests {
 
 		tokio::spawn(async move {
 			while let Ok(request) = source_fetches.requested_fill().await.map(groups) {
-				let mut group = request.accept(request.start().group, None).unwrap().expect("a fresh group");
+				let mut group = request
+					.accept(request.start().group, None)
+					.unwrap()
+					.expect("a fresh group");
 				write_keyframe(&mut group);
 				group.finish().unwrap();
 			}

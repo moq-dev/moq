@@ -1230,7 +1230,12 @@ mod tests {
 			panic!("a time lookup");
 		};
 		assert_eq!(lookup.time(), 7);
-		lookup.accept(6, None).unwrap().expect("a fresh group").finish().unwrap();
+		lookup
+			.accept(6, None)
+			.unwrap()
+			.expect("a fresh group")
+			.finish()
+			.unwrap();
 		while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
 		let fill = fills.requested_fill().await.map(groups).unwrap();
 		assert_eq!((fill.start().group, fill.end()), (7, 10));
@@ -1373,7 +1378,12 @@ mod tests {
 			panic!("a time lookup");
 		};
 		assert_eq!(lookup.time(), 1);
-		lookup.accept(0, None).unwrap().expect("a fresh group").finish().unwrap();
+		lookup
+			.accept(0, None)
+			.unwrap()
+			.expect("a fresh group")
+			.finish()
+			.unwrap();
 		while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
 		let fill = fills.requested_fill().await.map(groups).unwrap();
 		assert_eq!((fill.start().group, fill.end()), (1, HOUR));
@@ -1441,13 +1451,23 @@ mod tests {
 			panic!("a time lookup");
 		};
 		assert_eq!(lookup.time(), 7);
-		lookup.accept(6, None).unwrap().expect("a fresh group").finish().unwrap();
+		lookup
+			.accept(6, None)
+			.unwrap()
+			.expect("a fresh group")
+			.finish()
+			.unwrap();
 		while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
 		let fill = fills.requested_fill().await.map(groups).unwrap();
 		assert_eq!((fill.start().group, fill.end()), (7, 10));
 
 		// Group 7 is served, and the reader never reads again to pick it up.
-		fill.clone().accept(7, None).unwrap().expect("a fresh group").finish().unwrap();
+		fill.clone()
+			.accept(7, None)
+			.unwrap()
+			.expect("a fresh group")
+			.finish()
+			.unwrap();
 		let mut tasks = tokio::task::JoinSet::new();
 		spawn_fill(&mut tasks, rung, fill, Arc::new(Semaphore::new(1)));
 		let wait = std::time::Duration::from_secs(5);

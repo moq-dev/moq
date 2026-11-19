@@ -339,7 +339,6 @@ impl Producer {
 		name: Arc<str>,
 		info: track::Info,
 	) -> Option<track::Producer> {
-
 		// A consumer may have requested this name before it existed (a live
 		// [`Requests`] queues such requests). Creating the track fulfills that
 		// request: its consumers resolve against this very producer. Without
@@ -371,11 +370,7 @@ impl Producer {
 	/// Moq-lite 05 and 06 carry it on its name's stream track subscriptions, but only those
 	/// that start once it exists: create it before, or with, a stream track of the same name.
 	/// See [`datagram`](crate::datagram).
-	pub fn create_datagrams(
-		&self,
-		name: impl Into<Arc<str>>,
-		info: datagram::Info,
-	) -> Option<datagram::Producer> {
+	pub fn create_datagrams(&self, name: impl Into<Arc<str>>, info: datagram::Info) -> Option<datagram::Producer> {
 		self.insert_datagrams(name.into(), info, true)
 	}
 
@@ -391,12 +386,7 @@ impl Producer {
 		self.insert_datagrams(name.into(), info, false)
 	}
 
-	fn insert_datagrams(
-		&self,
-		name: Arc<str>,
-		info: datagram::Info,
-		listed: bool,
-	) -> Option<datagram::Producer> {
+	fn insert_datagrams(&self, name: Arc<str>, info: datagram::Info, listed: bool) -> Option<datagram::Producer> {
 		let mut state = self.state.lock();
 		let producer = match state.datagrams.get(name.as_ref()) {
 			Some(live) => {
@@ -2349,7 +2339,10 @@ mod test {
 		let track = consumer.track("track1").unwrap();
 		let pending_fetch = track.fetch_group(0, None);
 		let fetch = dynamic.requested_fill_group().await.unwrap();
-		let group = fetch.accept(crate::track::Info::timed()).unwrap().expect("a fresh group");
+		let group = fetch
+			.accept(crate::track::Info::timed())
+			.unwrap()
+			.expect("a fresh group");
 		group.finish().unwrap();
 		pending_fetch.await.unwrap();
 

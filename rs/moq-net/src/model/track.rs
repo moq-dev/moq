@@ -14622,7 +14622,10 @@ mod test {
 	fn a_refusal_releases_the_live_edge_a_fill_cached() {
 		let state = TrackState::spawn(Arc::new(broadcast::Info::default()));
 		let mut guard = state.write().ok().unwrap();
-		let _group = guard.insert_group_request(0, group::Bounds::default(), None).unwrap().expect("a fresh group");
+		let _group = guard
+			.insert_group_request(0, group::Bounds::default(), None)
+			.unwrap()
+			.expect("a fresh group");
 		assert!(guard.protects(0));
 		guard.reject(Error::NotFound, None);
 		assert!(!guard.protects(0));
@@ -16904,7 +16907,11 @@ mod test {
 				.now_or_never()
 				.expect("fill request is ready")
 				.unwrap();
-			req.accept(None).unwrap().expect("a fresh group").abort(error.clone()).unwrap();
+			req.accept(None)
+				.unwrap()
+				.expect("a fresh group")
+				.abort(error.clone())
+				.unwrap();
 			drop(pending);
 			let waiter = kio::Waiter::noop();
 			assert!(
@@ -21406,7 +21413,12 @@ mod test {
 			.unwrap();
 		drop(req);
 		assert!(fresh.poll_unwanted(&kio::Waiter::noop()).is_pending());
-		fresh.accept(Info::timed()).unwrap().expect("a fresh group").finish().unwrap();
+		fresh
+			.accept(Info::timed())
+			.unwrap()
+			.expect("a fresh group")
+			.finish()
+			.unwrap();
 		assert_eq!(retry.await.unwrap().start, 5);
 	}
 
@@ -21451,7 +21463,12 @@ mod test {
 			.now_or_never()
 			.expect("the retry queues a fresh request")
 			.unwrap();
-		fresh.accept(Info::timed()).unwrap().expect("a fresh group").finish().unwrap();
+		fresh
+			.accept(Info::timed())
+			.unwrap()
+			.expect("a fresh group")
+			.finish()
+			.unwrap();
 		assert_eq!(retry.await.unwrap().start, 5);
 	}
 
@@ -21479,7 +21496,10 @@ mod test {
 			.expect("the retry queues a fresh request")
 			.unwrap();
 
-		let mut group = req.accept(Info::timed()).expect("a withdrawn request still accepts").expect("a fresh group");
+		let mut group = req
+			.accept(Info::timed())
+			.expect("a withdrawn request still accepts")
+			.expect("a fresh group");
 		group
 			.write_frame(group.key_time(), bytes::Bytes::from_static(b"hi"))
 			.unwrap();
@@ -21970,7 +21990,11 @@ mod test {
 			.now_or_never()
 			.expect("the retry queues a fresh request")
 			.unwrap();
-		req.accept(Info::timed()).unwrap().expect("a fresh group").finish().unwrap();
+		req.accept(Info::timed())
+			.unwrap()
+			.expect("a fresh group")
+			.finish()
+			.unwrap();
 		assert!(retry.await.unwrap().read_frame().await.unwrap().is_none());
 	}
 
@@ -25165,7 +25189,10 @@ mod test {
 		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&waiter) else {
 			panic!("below the start is a miss");
 		};
-		let _writing = [fill.accept(0, None).unwrap().expect("a fresh group"), fill.accept(1, None).unwrap().expect("a fresh group")];
+		let _writing = [
+			fill.accept(0, None).unwrap().expect("a fresh group"),
+			fill.accept(1, None).unwrap().expect("a fresh group"),
+		];
 		for key in 2..10 {
 			fill.group(key).reject(Error::NotFound);
 		}
@@ -29675,7 +29702,11 @@ mod test {
 				.unwrap();
 		}
 		assert_eq!(read_numbered(&mut late), None);
-		let mut flight = asked(&requests).expect("a flight").accept(0, None).unwrap().expect("a fresh group");
+		let mut flight = asked(&requests)
+			.expect("a flight")
+			.accept(0, None)
+			.unwrap()
+			.expect("a fresh group");
 		assert_eq!(read_numbered(&mut late), None);
 		for index in 0..1_000 {
 			flight
@@ -29815,7 +29846,11 @@ mod test {
 				.unwrap();
 		}
 		assert_eq!(read_numbered(&mut late), None);
-		let mut flight = asked(&requests).expect("a flight").accept(0, None).unwrap().expect("a fresh group");
+		let mut flight = asked(&requests)
+			.expect("a flight")
+			.accept(0, None)
+			.unwrap()
+			.expect("a fresh group");
 		assert_eq!(read_numbered(&mut late), None);
 		// A newer group leaves group 0 cold, and its cached copy goes whole.
 		let mut newer = producer.append_next().unwrap();
@@ -29875,7 +29910,11 @@ mod test {
 		let (mut fast, mut slow) = (live.consume(), live.consume());
 		assert_eq!(read_numbered(&mut fast), None);
 		assert_eq!(read_numbered(&mut slow), None);
-		let mut flight = asked(&requests).unwrap().accept(0, None).unwrap().expect("a fresh group");
+		let mut flight = asked(&requests)
+			.unwrap()
+			.accept(0, None)
+			.unwrap()
+			.expect("a fresh group");
 		assert_eq!(read_numbered(&mut fast), None);
 		assert_eq!(read_numbered(&mut slow), None);
 		assert_eq!(read_numbered(&mut slow), None);

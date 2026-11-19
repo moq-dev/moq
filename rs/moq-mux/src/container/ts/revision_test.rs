@@ -1474,8 +1474,7 @@ async fn a_revision_out_before_the_one_it_follows_takes_its_version() {
 
 	// A cue and an AAC track start together, the cue muxed first, on the lower PID: its
 	// revision waits with it for its placement, the AAC track's goes out now.
-	let track = broadcast
-		.unique_track(".scte35", hang::container::track_info(hang::catalog::PRIORITY.video));
+	let track = broadcast.unique_track(".scte35", hang::container::track_info(hang::catalog::PRIORITY.video));
 	let entry = super::catalog::Track {
 		pid: DATA_PID,
 		descriptors: Vec::new(),
@@ -1556,8 +1555,7 @@ async fn a_stream_taking_a_pid_over_leaves_the_buffer_before_it() {
 	let _finished = before.finish().unwrap();
 	live(&mut export, &mut frames, start, &mut [(&mut first, 0x21)], 3_000, 6_000).await;
 
-	let track = broadcast
-		.unique_track(".private", hang::container::track_info(hang::catalog::PRIORITY.video));
+	let track = broadcast.unique_track(".private", hang::container::track_info(hang::catalog::PRIORITY.video));
 	let entry = super::catalog::Track {
 		pid: DATA_PID,
 		descriptors: Vec::new(),

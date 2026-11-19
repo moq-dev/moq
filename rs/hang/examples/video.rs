@@ -65,7 +65,9 @@ fn create_track(broadcast: &mut moq_net::broadcast::Producer) -> anyhow::Result<
 	catalog.video.insert(video_track, video_config)?;
 
 	// Publish the catalog as a "catalog.json" track in the broadcast.
-	let catalog_track = broadcast.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info()).context("the track already exists")?;
+	let catalog_track = broadcast
+		.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
+		.context("the track already exists")?;
 	// This catalog never changes, so its one group starts at zero, where the media's timeline does.
 	let mut group = catalog_track.append_group(moq_net::Timestamp::ZERO)?;
 	group.write_frame(moq_net::Timestamp::ZERO, catalog.to_json()?)?;
@@ -74,7 +76,9 @@ fn create_track(broadcast: &mut moq_net::broadcast::Producer) -> anyhow::Result<
 	// Actually create the media track now.
 	// track_info() pins the microsecond timescale that the legacy container encodes with, and
 	// declares the publisher priority so a subscriber orders this against a broadcast's audio.
-	let track = broadcast.create_track(video_track, hang::container::track_info(hang::catalog::PRIORITY.video)).context("the track already exists")?;
+	let track = broadcast
+		.create_track(video_track, hang::container::track_info(hang::catalog::PRIORITY.video))
+		.context("the track already exists")?;
 
 	Ok(track)
 }

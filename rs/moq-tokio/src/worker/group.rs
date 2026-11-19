@@ -788,13 +788,12 @@ fn run(
 
 	let built = {
 		let _guard = runtime.enter();
-		Server::build(server, crate::server::Parts::Member(member))
-			.and_then(|server| {
-				let addr = server
-					.local_addr()
-					.ok_or(crate::Error::NoBackend("no QUIC listener configured"))?;
-				Ok((server, addr))
-			})
+		Server::build(server, crate::server::Parts::Member(member)).and_then(|server| {
+			let addr = server
+				.local_addr()
+				.ok_or(crate::Error::NoBackend("no QUIC listener configured"))?;
+			Ok((server, addr))
+		})
 	};
 
 	let (server, addr) = match built {

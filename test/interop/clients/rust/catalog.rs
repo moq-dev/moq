@@ -34,7 +34,8 @@ async fn main() -> anyhow::Result<()> {
 	let route = origin.route(&args[2], moq_net::origin::RouteOptions::hidden())?;
 	let track = route
 		.broadcast()
-		.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info()).context("the track already exists")?;
+		.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
+		.context("the track already exists")?;
 	ensure!(
 		track.info().compression == moq_net::track::Compression::Deflate,
 		"hang catalogs are compressed"

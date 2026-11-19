@@ -889,11 +889,7 @@ impl<E: CatalogExt> Producer<E> {
 	/// handed out, for a rendition whose identity changed: a name always means the same content.
 	///
 	/// A successor's own successor counts on from the same base, so `v/1` is followed by `v/2`.
-	pub(crate) fn fresh_track(
-		&self,
-		name: &str,
-		info: moq_net::track::Info,
-	) -> moq_net::track::Producer {
+	pub(crate) fn fresh_track(&self, name: &str, info: moq_net::track::Info) -> moq_net::track::Producer {
 		let mut state = take(&self.current);
 		let base = match name.rsplit_once('/') {
 			Some((base, n)) if n.parse::<u64>().is_ok() && state.revisions.contains_key(base) => base,
