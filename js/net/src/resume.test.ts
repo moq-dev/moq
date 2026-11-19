@@ -2,7 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { Duration, yieldNow } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { Signal } from "@moq/signals";
-import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
+import { Consumer as BroadcastConsumer, Producer as BroadcastProducer, type FetchFrom } from "./broadcast.ts";
 import { NotFound, SessionCode, SessionError, StreamCode, StreamError } from "./error.ts";
 import { type Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { WireRoute } from "./hop.ts";
@@ -20,7 +20,13 @@ import type * as track from "./track.ts";
 import { unwanted } from "./util/demand.ts";
 import { overrideBroadcastWire, wireOf } from "./wire.ts";
 
-const INFO: track.Info = { compression: "none", timescale: null, maxAge: null, priority: 0, refresh: null };
+const INFO: track.Info = {
+	compression: "none",
+	timescale: null,
+	maxAge: null,
+	priority: 0,
+	refresh: { ratio: null, interval: null },
+};
 
 const INSTANCE = Instance.parse("01900000-0000-7000-8000-000000000001");
 const NEWER = Instance.parse("01900000-0000-7000-8000-000000000002");
@@ -150,6 +156,58 @@ test("returning to a route reuses its subscription and held group", async () => 
 	} finally {
 		mirrored.mockRestore();
 		open.finish();
+		sub.close();
+		front.consumer.close();
+		for (const handle of handles) handle.close();
+		for (const source of sources) source.close();
+		installed.close();
+	}
+});
+
+// Mirrors `a_front_refresh_moves_to_the_next_copy` in rs/moq-net/src/model/track.rs: a pending
+// refresh outlives the copy it asked, and only the logical track closing rejects it.
+test("a pending refresh moves to the next copy when the one it asked closes", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const front = new Front();
+	const sources = [new BroadcastProducer(), new BroadcastProducer()];
+	const handles = sources.map((source) => source.consume());
+	const tracks = sources.map((source) => {
+		const producer = source.createTrack("seq", { maxAge: null, refresh: { interval: Duration.secs(5) } });
+		const group = producer.createGroup(0n);
+		group.writeFrame({ payload: enc.encode("0"), timestamp: Timestamp.unscaled(group.start) });
+		group.finish();
+		return producer;
+	});
+	front.serve(handles[0]);
+	const sub = front.consumer.track("seq").subscribe();
+	try {
+		await clock.advance(Duration.ZERO);
+		const refresh = sub.refresh();
+		expect(await isPending(refresh)).toBe(true);
+		tracks[0].abort(new StreamError(StreamCode.SessionClosed));
+		expect(await isPending(refresh)).toBe(true);
+
+		front.serve(handles[1]);
+		await clock.advance(Duration.ZERO);
+		expect(await isPending(refresh)).toBe(true);
+		await clock.advance(Duration.secs(5));
+		expect(tracks[1].demand().refresh.peek()).toBe(true);
+		await refresh;
+
+		const group = tracks[1].createGroup(1n);
+		group.writeFrame({ payload: enc.encode("1"), timestamp: Timestamp.unscaled(group.start) });
+		group.finish();
+		drain(sub);
+		const closed = sub.refresh().catch((err: unknown) => err);
+		expect(await isPending(closed)).toBe(true);
+		// The serving route loses the track: the read ends it, and the refresh with it.
+		tracks[1].abort(new StreamError(StreamCode.Internal));
+		const ended = await sub.recvGroup().catch((err: unknown) => err);
+		expect(ended).toBeInstanceOf(StreamError);
+		expect(await closed).toBe(ended);
+		expect(await sub.refresh().catch((err: unknown) => err)).toBe(ended);
+	} finally {
 		sub.close();
 		front.consumer.close();
 		for (const handle of handles) handle.close();
@@ -353,6 +411,81 @@ test("a group below the replacement's resume point is backfilled", async () => {
 		tb.write(4n);
 		await clock.advance(Duration.ZERO);
 		expect(drain(sub)).toEqual([4n]);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		for (const handle of handles) handle.close();
+		for (const source of sources) source.close();
+		installed.close();
+	}
+});
+
+test("a late group on a drained serving copy is read", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const front = new Front();
+	const sources = [new BroadcastProducer(), new BroadcastProducer()];
+	const handles = sources.map((source) => source.consume());
+	const [ta, tb] = sources.map(copy);
+	hooks.receiveTrack(ta.producer);
+	hooks.receiveTrack(tb.producer);
+	front.serve(handles[0]);
+	const sub = front.consumer.track("seq").subscribe({ delay: { max: Duration.millis(3_600_000) } });
+	try {
+		await clock.advance(Duration.ZERO);
+		ta.write(0n);
+		expect(drain(sub)).toEqual([0n]);
+		front.serve(handles[1]);
+		await clock.advance(Duration.ZERO);
+		// Its first group bounds the replaced copy at 1, which it may still deliver.
+		tb.write(2n);
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([2n]);
+		tb.producer.finish();
+		const next = sub.recvGroup();
+		expect(await isPending(next)).toBe(true);
+		tb.write(1n);
+		await clock.advance(Duration.ZERO);
+		expect((await next)?.start).toBe(1n);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		for (const handle of handles) handle.close();
+		for (const source of sources) source.close();
+		installed.close();
+	}
+});
+
+test("a late group under the resume point is backfilled again", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const front = new Front();
+	const sources = [new BroadcastProducer(), new BroadcastProducer()];
+	const handles = sources.map((source) => source.consume());
+	const [ta, tb] = sources.map(copy);
+	hooks.receiveTrack(ta.producer);
+	hooks.receiveTrack(tb.producer);
+	front.serve(handles[0]);
+	const sub = front.consumer.track("seq").subscribe({ delay: { max: Duration.millis(3_600_000) } });
+	try {
+		await clock.advance(Duration.ZERO);
+		ta.write(2n);
+		ta.producer.finish();
+		expect(sub.tryRecvGroup()?.start).toBe(2n);
+		// A switch away and back resumes `ta` past 2; the backfill below it finds its track
+		// complete and runs out, while `tb`'s copies hold the read open.
+		front.serve(handles[1]);
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([]);
+		front.serve(handles[0]);
+		await clock.advance(Duration.ZERO);
+		const next = sub.recvGroup();
+		expect(await isPending(next)).toBe(true);
+		// `tb` fails, and 1 lands late on `ta` before the read looks again.
+		tb.producer.abort(new StreamError(StreamCode.SessionClosed));
+		ta.write(1n);
+		await clock.advance(Duration.ZERO);
+		expect((await next)?.start).toBe(1n);
 	} finally {
 		sub.close();
 		front.consumer.close();
@@ -1816,6 +1949,35 @@ test("a fetched group continues from the next route once its own fails", async (
 	b.close();
 });
 
+test("a held fetch lets go of the route it resumed onto once its reader releases the group", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	const stalled = ta.write(5n, 1, false);
+	front.serve(a.consume());
+	// Held, as the lite publisher asks while a FETCH reply waits for its acknowledgement.
+	const held: track.FetchGroupOptions & FetchFrom = { held: true };
+	const group = await front.consumer.track("seq").fetchGroup(5n, held);
+	expect(dec.decode((await group.readFrame())?.payload)).toBe("5.0");
+
+	tb.write(5n, 2);
+	front.serve(b.consume());
+	stalled.abort(new StreamError(StreamCode.SessionClosed));
+	expect(dec.decode((await group.readFrame())?.payload)).toBe("5.1");
+	expect(await group.readFrame()).toBeUndefined();
+	await settle();
+	expect(tb.producer.demand().wanted.peek()).toBe(true);
+
+	group.close();
+	await unwanted(tb.producer.demand());
+
+	front.consumer.close();
+	a.close();
+	b.close();
+});
+
 test("a replacement spliced before the first copy answers is still checked against it", async () => {
 	const front = new Front();
 	const a = new BroadcastProducer();
@@ -2010,7 +2172,7 @@ test("a recovery fetch a later route supersedes is abandoned", async () => {
 	stalled.abort(new StreamError(StreamCode.SessionClosed));
 	const read = group.readFrame();
 	await settle();
-	const fetching = tb.producer.demand().wanted.peek() !== undefined;
+	const fetching = tb.producer.demand().wanted.peek();
 
 	// Another route has it cached: the group continues there, and the fetch from b stops.
 	tc.write(0n, 2);
@@ -2019,7 +2181,7 @@ test("a recovery fetch a later route supersedes is abandoned", async () => {
 	sub.close();
 	await settle();
 	expect(fetching).toBe(true);
-	expect(tb.producer.demand().wanted.peek()).toBeUndefined();
+	expect(tb.producer.demand().wanted.peek()).toBe(false);
 
 	front.consumer.close();
 	a.close();
@@ -2360,7 +2522,7 @@ test("a front serving another front reports the inner serving route's drop", asy
 for (const [field, first, second] of [
 	["priority", { priority: 1 }, { priority: 2 }],
 	["compression", { compression: "deflate" }, { compression: "none" }],
-	["refresh", { refresh: 4 }, {}],
+	["refresh", { refresh: { ratio: 4 } }, { refresh: { ratio: 4, interval: Duration.secs(1) } }],
 ] as const) {
 	test(`track info keeps one ${field} answer across routes`, async () => {
 		const front = new Front();
@@ -2662,7 +2824,7 @@ test.each([true, false])(
 			// The serving copy's group bounded the previous route's copy, so the next read lets it go.
 			pending = next();
 			await settle();
-			expect(copies[route - 1].producer.demand().wanted.peek()).toBeUndefined();
+			expect(copies[route - 1].producer.demand().wanted.peek()).toBe(false);
 		}
 
 		view?.close();
@@ -3117,7 +3279,7 @@ test.each(["lands", "dropped", "expired"])(
 			tb.write(2n);
 			expect(drain(sub)).toEqual([2n]);
 			expect(drain(sub)).toEqual([]);
-			expect(ta.producer.demand().wanted.peek()).toBeDefined();
+			expect(ta.producer.demand().wanted.peek()).toBe(true);
 
 			if (outcome === "dropped") hooks.dropTrackGroups(ta.producer, 1n, 2n, { error: new NotFound("group") });
 			if (outcome === "expired") await clock.advance(SECOND);
@@ -3126,7 +3288,7 @@ test.each(["lands", "dropped", "expired"])(
 				await settle();
 				expect(drain(sub)).toEqual([]);
 				await settle();
-				expect(ta.producer.demand().wanted.peek()).toBeUndefined();
+				expect(ta.producer.demand().wanted.peek()).toBe(false);
 			}
 			ta.write(1n);
 			expect(drain(sub)).toEqual(outcome === "lands" ? [1n] : []);
@@ -3176,7 +3338,7 @@ test("a group read whole still expires once the reader lets go of its copy", asy
 		await clock.advance(half);
 		expect(drain(sub)).toEqual([]);
 		await settle();
-		expect(ta.producer.demand().wanted.peek()).toBeUndefined();
+		expect(ta.producer.demand().wanted.peek()).toBe(false);
 		expect(expired).toBeUndefined();
 
 		await clock.advance(half);
@@ -3216,7 +3378,7 @@ test("an ordered reader keeps no copy for a group it passed", async () => {
 	await settle();
 	expect(next()).toBeUndefined();
 	await settle();
-	expect(ta.producer.demand().wanted.peek()).toBeUndefined();
+	expect(ta.producer.demand().wanted.peek()).toBe(false);
 
 	sub.close();
 	front.consumer.close();
@@ -3357,7 +3519,7 @@ test("a group-only reader of a finite track settles closed and lets go of its co
 	expect(await sub.recvGroup()).toBeUndefined();
 	await settle();
 	expect(sub.closed.peek()).toBeNull();
-	expect(ta.producer.demand().wanted.peek()).toBeUndefined();
+	expect(ta.producer.demand().wanted.peek()).toBe(false);
 
 	sub.close();
 	front.consumer.close();
@@ -3399,7 +3561,7 @@ test("a group-only fork of a finite track settles closed and lets go of its copy
 	expect(await fork.recvGroup()).toBeUndefined();
 	await settle();
 	expect(fork.closed.peek()).toBeNull();
-	expect(ta.producer.demand().wanted.peek()).toBeUndefined();
+	expect(ta.producer.demand().wanted.peek()).toBe(false);
 
 	fork.close();
 	front.consumer.close();
@@ -3566,7 +3728,7 @@ test.each(["lands", "expired"])(
 			expect(drain(sub)).toEqual(outcome === "lands" ? [1n] : []);
 			expect(await sub.recvGroup()).toBeUndefined();
 			await settle();
-			expect(ta.producer.demand().wanted.peek()).toBeUndefined();
+			expect(ta.producer.demand().wanted.peek()).toBe(false);
 		} finally {
 			sub.close();
 			front.consumer.close();
@@ -3619,7 +3781,7 @@ test.each([
 			tb.write(6n);
 			expect(read()).toEqual([6n]);
 			await clock.advance(Duration.ZERO);
-			expect(ta.producer.demand().wanted.peek()).toBeUndefined();
+			expect(ta.producer.demand().wanted.peek()).toBe(false);
 			expect(asked()).toBe(5n);
 
 			sub.withRange({ start: { included: 1n } });
@@ -4190,4 +4352,146 @@ test("a group an inner front hands out already failed still continues on the out
 	inner.consumer.close();
 	a.close();
 	b.close();
+});
+
+// Mirrors `an_ended_copy_leaves_a_time_start_to_the_serving_copy` in rs/moq-net/src/model/resume.rs:
+// a copy that failed holds nothing past its last group, so it reaches a time start past that group
+// back to its oldest. The copy continuing the track places it where the track holds it.
+test("a failed copy leaves a time start to the serving copy", async () => {
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	hooks.receiveTrack(ta.producer);
+	hooks.receiveTrack(tb.producer);
+	const front = new Front();
+	front.serve(a.consume());
+	ta.write(64n);
+	const waiting = front.consumer.track("seq").subscribe({ delay: { max: null }, ranges: [{ start: { time: 66n } }] });
+	try {
+		const read: bigint[] = [];
+		const reading = (async () => {
+			for (let group = await waiting.recvGroup(); group; group = await waiting.recvGroup()) {
+				read.push(group.start);
+				group.close();
+				if (read.length === 2) return;
+			}
+		})();
+		await settle();
+		// The source fails before the group holding the start arrives.
+		ta.producer.abort(new StreamError(StreamCode.SessionClosed));
+		await settle();
+		expect(read).toEqual([]);
+		// Nor does the reader report a start the failed copy placed.
+		expect(hooks.servingResolved(waiting)[0]).toBeUndefined();
+		expect(hooks.servingStarts(waiting, 0n)[0]).toBeUndefined();
+		front.serve(b.consume());
+		await settle();
+		// Fetched ahead of the live feed's 66.
+		tb.write(67n);
+		tb.write(66n);
+		await reading;
+		expect(read.sort()).toEqual([66n, 67n]);
+		expect(hooks.servingResolved(waiting)[0]?.start).toBe(66n);
+	} finally {
+		waiting.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+	}
+});
+
+// A range from the oldest group needs no copy to place it, so a failed copy's buffered group goes
+// out without waiting for a replacement, as the Rust reader's window starting unheld places it.
+test("a failed copy hands out its buffered group under ranges no copy places", async () => {
+	const a = new BroadcastProducer();
+	const ta = copy(a);
+	hooks.receiveTrack(ta.producer);
+	const front = new Front();
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe({ delay: { max: null } });
+	try {
+		ta.write(64n);
+		ta.producer.abort(new StreamError(StreamCode.SessionClosed));
+		await settle();
+		const group = sub.tryRecvGroup();
+		expect(group?.start).toBe(64n);
+		group?.close();
+	} finally {
+		sub.close();
+		front.consumer.close();
+		a.close();
+	}
+});
+
+// A failed copy holding a group back for a placement still reports its failure: a route still
+// serving is asked afresh, and that copy places the start, rather than the read waiting on a copy
+// that can deliver nothing more. It got a group, so its route did not refuse the track.
+test("a failed copy holding a group back is still subscribed afresh", async () => {
+	const { a, active, close } = await setup();
+	const ta = copy(a);
+	hooks.receiveTrack(ta.producer);
+	ta.write(64n);
+	const sub = active.track("seq").subscribe({ delay: { max: null }, ranges: [{ start: { time: 66n } }] });
+	await settle();
+	expect(sub.tryRecvGroup()).toBeUndefined();
+
+	ta.producer.abort(new StreamError(StreamCode.Internal));
+	const again = copy(a);
+	hooks.receiveTrack(again.producer);
+	again.write(66n);
+	again.write(67n);
+	const read: bigint[] = [];
+	for (let attempt = 0; attempt < 10 && read.length < 2; attempt++) {
+		await settle();
+		for (let group = sub.tryRecvGroup(); group; group = sub.tryRecvGroup()) {
+			read.push(group.start);
+			group.close();
+		}
+	}
+	expect(read).toEqual([66n, 67n]);
+	expect(sub.closed.peek()).toBeUndefined();
+
+	sub.close();
+	close();
+});
+
+// As above, with the fresh copy failing too while it holds a group back: the read asks again.
+test("failed copies holding groups back are each subscribed afresh", async () => {
+	const { a, active, close } = await setup();
+	const ta = copy(a);
+	hooks.receiveTrack(ta.producer);
+	ta.write(64n);
+	const sub = active.track("seq").subscribe({ delay: { max: null }, ranges: [{ start: { time: 66n } }] });
+	const read: bigint[] = [];
+	const poll = async () => {
+		for (let attempt = 0; attempt < 10 && read.length < 2; attempt++) {
+			await settle();
+			for (let group = sub.tryRecvGroup(); group; group = sub.tryRecvGroup()) {
+				read.push(group.start);
+				group.close();
+			}
+		}
+	};
+	await poll();
+	expect(read).toEqual([]);
+
+	ta.producer.abort(new StreamError(StreamCode.Internal));
+	const retry = copy(a);
+	hooks.receiveTrack(retry.producer);
+	retry.write(65n);
+	await poll();
+	expect(read).toEqual([]);
+
+	retry.producer.abort(new StreamError(StreamCode.Internal));
+	const again = copy(a);
+	hooks.receiveTrack(again.producer);
+	again.write(66n);
+	again.write(67n);
+	await poll();
+	expect(read).toEqual([66n, 67n]);
+	expect(sub.closed.peek()).toBeUndefined();
+
+	sub.close();
+	close();
 });

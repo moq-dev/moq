@@ -17,19 +17,40 @@ fn pair(server_reset_stream_at: bool) -> Pair {
 	Pair::new(Default::default(), config)
 }
 
+/// How a read of a server stream stopped
+#[derive(Debug, PartialEq, Eq)]
+enum Ended {
+	Finished,
+	/// Reset with this code, which the read freed the stream to learn
+	Reset(VarInt),
+	/// Nothing more has arrived yet
+	Pending,
+	Failed(recv::Error),
+}
+
 /// Read a server stream until it ends, returning the bytes and how it ended
-fn read(pair: &mut Pair, ch: ConnectionHandle, s: StreamId) -> (Vec<u8>, Result<(), recv::Error>) {
+fn read(pair: &mut Pair, ch: ConnectionHandle, s: StreamId) -> (Vec<u8>, Ended) {
 	let mut recv = pair.server_recv(ch, s);
-	let mut chunks = recv.read().unwrap();
+	let mut chunks = match recv.read() {
+		Ok(chunks) => chunks,
+		Err(err) => return (Vec::new(), Ended::Failed(err)),
+	};
 	let mut data = Vec::new();
 	let end = loop {
-		match chunks.next(usize::MAX) {
-			Ok(Some(chunk)) => data.extend_from_slice(&chunk.bytes),
-			Ok(None) => break Ok(()),
-			Err(e) => break Err(e),
+		match chunks.try_next(usize::MAX) {
+			Poll::Ready(Ok(Some(chunk))) => data.extend_from_slice(&chunk.bytes),
+			Poll::Ready(Ok(None)) => break Poll::Ready(Ok(())),
+			Poll::Ready(Err(e)) => break Poll::Ready(Err(e)),
+			Poll::Pending => break Poll::Pending,
 		}
 	};
 	chunks.finalize();
+	let end = match end {
+		Poll::Ready(Ok(())) => Ended::Finished,
+		Poll::Ready(Err(recv::Error::Reset)) => Ended::Reset(recv.received_reset().unwrap().expect("reset")),
+		Poll::Ready(Err(e)) => Ended::Failed(e),
+		Poll::Pending => Ended::Pending,
+	};
 	(data, end)
 }
 
@@ -51,7 +72,7 @@ fn write(pair: &mut Pair, ch: ConnectionHandle, s: StreamId) -> send::Offset {
 ///
 /// A plain RESET_STREAM lets the receiver discard data it has not read yet, so only an
 /// application that keeps reading sees the prefix a peer without RESET_STREAM_AT is sent.
-fn drive_reading(pair: &mut Pair, ch: ConnectionHandle, s: StreamId) -> (Vec<u8>, Result<(), recv::Error>) {
+fn drive_reading(pair: &mut Pair, ch: ConnectionHandle, s: StreamId) -> (Vec<u8>, Ended) {
 	let mut accepted = false;
 	let mut data = Vec::new();
 	loop {
@@ -60,12 +81,12 @@ fn drive_reading(pair: &mut Pair, ch: ConnectionHandle, s: StreamId) -> (Vec<u8>
 		if accepted {
 			let (read, end) = read(pair, ch, s);
 			data.extend(read);
-			if end != Err(recv::Error::Blocked) {
+			if end != Ended::Pending {
 				return (data, end);
 			}
 		}
 		if !busy {
-			return (data, Err(recv::Error::Blocked));
+			return (data, Ended::Pending);
 		}
 	}
 }
@@ -144,7 +165,7 @@ fn delivers_prefix_before_error() {
 	assert_eq!(accept(&mut pair, server_ch), s);
 	assert_eq!(
 		read(&mut pair, server_ch, s),
-		(MSG[..RELIABLE].to_vec(), Err(recv::Error::Reset(ERROR)))
+		(MSG[..RELIABLE].to_vec(), Ended::Reset(ERROR))
 	);
 	// Both halves let go of the stream once the prefix and the reset are through
 	assert_eq!(pair.client_streams(client_ch).send_streams(), 0);
@@ -174,7 +195,7 @@ fn delivers_unsent_prefix() {
 	assert_eq!(accept(&mut pair, server_ch), s);
 	assert_eq!(
 		read(&mut pair, server_ch, s),
-		(MSG[..RELIABLE].to_vec(), Err(recv::Error::Reset(ERROR)))
+		(MSG[..RELIABLE].to_vec(), Ended::Reset(ERROR))
 	);
 }
 
@@ -196,7 +217,7 @@ fn retransmits_lost_prefix() {
 	pair.drive_client();
 	pair.drive_server();
 	assert_eq!(accept(&mut pair, server_ch), s);
-	assert_eq!(read(&mut pair, server_ch, s), (Vec::new(), Err(recv::Error::Blocked)));
+	assert_eq!(read(&mut pair, server_ch, s), (Vec::new(), Ended::Pending));
 	assert_matches!(
 		pair.server_conn_mut(server_ch).recv_stream(s).received_reset(),
 		Ok(None)
@@ -205,7 +226,7 @@ fn retransmits_lost_prefix() {
 	pair.drive();
 	assert_eq!(
 		read(&mut pair, server_ch, s),
-		(MSG[..RELIABLE].to_vec(), Err(recv::Error::Reset(ERROR)))
+		(MSG[..RELIABLE].to_vec(), Ended::Reset(ERROR))
 	);
 	assert_eq!(pair.client_streams(client_ch).send_streams(), 0);
 }
@@ -229,7 +250,7 @@ fn retransmits_lost_reset() {
 	assert_eq!(accept(&mut pair, server_ch), s);
 	assert_eq!(
 		read(&mut pair, server_ch, s),
-		(MSG[..RELIABLE].to_vec(), Err(recv::Error::Reset(ERROR)))
+		(MSG[..RELIABLE].to_vec(), Ended::Reset(ERROR))
 	);
 	assert_eq!(pair.client_streams(client_ch).send_streams(), 0);
 }
@@ -286,7 +307,7 @@ fn after_finish() {
 		assert_eq!(accept(&mut pair, server_ch), s);
 		assert_eq!(
 			read(&mut pair, server_ch, s),
-			(MSG[..reliable].to_vec(), Err(recv::Error::Reset(ERROR)))
+			(MSG[..reliable].to_vec(), Ended::Reset(ERROR))
 		);
 	}
 	assert_eq!(pair.client_streams(client_ch).send_streams(), 0);
@@ -313,17 +334,14 @@ fn flow_control_blocked() {
 		pair.client_send(client_ch, s).write(&mut &MSG[RELIABLE..]),
 		Ok(10 - RELIABLE)
 	);
-	assert_eq!(
-		pair.client_send(client_ch, s).write(&mut &MSG[..]),
-		Err(send::Error::Blocked)
-	);
+	assert_eq!(pair.client_send(client_ch, s).try_write(&mut &MSG[..]), Poll::Pending);
 	pair.client_send(client_ch, s).reset_at(offset, ERROR).unwrap();
 	pair.drive();
 
 	assert_eq!(accept(&mut pair, server_ch), s);
 	assert_eq!(
 		read(&mut pair, server_ch, s),
-		(MSG[..RELIABLE].to_vec(), Err(recv::Error::Reset(ERROR)))
+		(MSG[..RELIABLE].to_vec(), Ended::Reset(ERROR))
 	);
 	assert!(!pair.server_conn_mut(server_ch).is_closed());
 }
@@ -348,7 +366,7 @@ fn unsupported_holds_reset_until_acked() {
 	assert_eq!(resets_sent(&mut pair, client_ch), 0);
 	assert_eq!(
 		drive_reading(&mut pair, server_ch, s),
-		(MSG[..RELIABLE].to_vec(), Err(recv::Error::Reset(ERROR)))
+		(MSG[..RELIABLE].to_vec(), Ended::Reset(ERROR))
 	);
 	assert_eq!(resets_sent(&mut pair, client_ch), 1);
 	pair.drive();
@@ -371,7 +389,7 @@ fn unsupported_retransmits_lost_prefix() {
 
 	assert_eq!(
 		drive_reading(&mut pair, server_ch, s),
-		(MSG[..RELIABLE].to_vec(), Err(recv::Error::Reset(ERROR)))
+		(MSG[..RELIABLE].to_vec(), Ended::Reset(ERROR))
 	);
 	assert_eq!(resets_sent(&mut pair, client_ch), 1);
 	pair.drive();
@@ -392,16 +410,13 @@ fn unsupported_resets_at_once_when_acked() {
 	let offset = write(&mut pair, client_ch, s);
 	pair.drive();
 	assert_eq!(accept(&mut pair, server_ch), s);
-	assert_eq!(read(&mut pair, server_ch, s), (MSG.to_vec(), Err(recv::Error::Blocked)));
+	assert_eq!(read(&mut pair, server_ch, s), (MSG.to_vec(), Ended::Pending));
 
 	pair.client_send(client_ch, s).reset_at(offset, ERROR).unwrap();
 	pair.drive_client();
 	assert_eq!(resets_sent(&mut pair, client_ch), 1);
 	pair.drive();
-	assert_eq!(
-		read(&mut pair, server_ch, s),
-		(Vec::new(), Err(recv::Error::Reset(ERROR)))
-	);
+	assert_eq!(read(&mut pair, server_ch, s), (Vec::new(), Ended::Reset(ERROR)));
 }
 
 /// A finished stream reset while its reset is held ends in the reset, never as finished.
@@ -426,7 +441,7 @@ fn unsupported_after_finish() {
 
 	assert_eq!(
 		drive_reading(&mut pair, server_ch, s),
-		(MSG[..RELIABLE].to_vec(), Err(recv::Error::Reset(ERROR)))
+		(MSG[..RELIABLE].to_vec(), Ended::Reset(ERROR))
 	);
 	pair.drive();
 	assert_eq!(pair.client_streams(client_ch).send_streams(), 0);
@@ -503,13 +518,13 @@ fn unsupported_returns_flow_control() {
 		.open(Dir::Uni, Default::default())
 		.unwrap();
 	assert_eq!(
-		pair.client_send(client_ch, next).write(&mut &MSG[..]),
-		Err(send::Error::Blocked)
+		pair.client_send(client_ch, next).try_write(&mut &MSG[..]),
+		Poll::Pending
 	);
 
 	assert_eq!(
 		drive_reading(&mut pair, server_ch, s),
-		(MSG[..RELIABLE].to_vec(), Err(recv::Error::Reset(ERROR)))
+		(MSG[..RELIABLE].to_vec(), Ended::Reset(ERROR))
 	);
 	pair.drive();
 	assert_eq!(pair.client_send(client_ch, next).write(&mut &MSG[..]), Ok(MSG.len()));
@@ -532,10 +547,7 @@ fn unsupported_allows_zero() {
 	pair.drive();
 
 	assert_eq!(accept(&mut pair, server_ch), s);
-	assert_eq!(
-		read(&mut pair, server_ch, s),
-		(Vec::new(), Err(recv::Error::Reset(ERROR)))
-	);
+	assert_eq!(read(&mut pair, server_ch, s), (Vec::new(), Ended::Reset(ERROR)));
 }
 
 #[test]

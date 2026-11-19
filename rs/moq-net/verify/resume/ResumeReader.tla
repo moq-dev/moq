@@ -17,7 +17,8 @@
 (* stale or expires), arrival order, no local range, copies that answer at *)
 (* once, and a reader that joins before any group lands. A route declares  *)
 (* its end once it holds the last group, a gap below it may still land,    *)
-(* and a route that declared its end never fails.                          *)
+(* even once its session settled that end, and a route that declared its   *)
+(* end never fails.                                                        *)
 (***************************************************************************)
 EXTENDS Integers, Sequences, FiniteSets
 
@@ -82,7 +83,7 @@ Admits(floor, until, g) ==
 
 NewCopy(id, t, gen, floor, rep, until) ==
     [id |-> id, t |-> t, gen |-> gen, floor |-> floor, rep |-> rep,
-     until |-> until, done |-> "no", since |-> rep, idx |-> 1,
+     until |-> until, done |-> "no", drained |-> 0, since |-> rep, idx |-> 1,
      took |-> {}, owed |-> {}]
 
 \* The wire asks for [floor, until] instead (`Copy::bound`, or `Copy::send` on a
@@ -121,10 +122,11 @@ Peek(c, dlv, fuel) ==
             THEN [c |-> c, g |-> g, src |-> "owed"]
             ELSE Peek([c EXCEPT !.took = @ \cup {g}, !.owed = @ \ {g}], dlv, fuel - 1)
     \* `TrackState::poll_recv_group`: past the last arrival, a complete track
-    \* ends the walk, and an aborted one fails it.
+    \* ends the walk, and an aborted one fails it. A clean end records the
+    \* arrivals it saw (`Copy::drained`).
     ELSE IF c.idx > Len(arr) THEN
         IF trk[c.t].whole
-            THEN [c |-> [c EXCEPT !.done = "ok"], g |-> None, src |-> "none"]
+            THEN [c |-> [c EXCEPT !.done = "ok", !.drained = Len(arr)], g |-> None, src |-> "none"]
         ELSE IF trk[c.t].failed
             THEN [c |-> [c EXCEPT !.done = "err"], g |-> None, src |-> "none"]
             ELSE [c |-> c, g |-> None, src |-> "none"]
@@ -230,20 +232,28 @@ BackfillGaps(r) ==
             IN IF gaps = {} THEN r1 ELSE Backfill(r1, Min(gaps), at)
 
 \* The copy loop of `poll_lowest`: peek each copy, keeping the lowest group;
-\* a tie goes to the newer copy.
-RECURSIVE Scan(_, _, _, _)
-Scan(cs, dlv, i, best) ==
-    IF i > Len(cs) THEN [cs |-> cs, best |-> best]
+\* a tie goes to the newer copy. A copy that ran out cleanly is read again
+\* once a group arrived on it since (`Copy::drained`); one arriving on the
+\* serving copy, which resumed at a floor, may be under it (`late`).
+RECURSIVE Scan(_, _, _, _, _, _)
+Scan(cs, dlv, gen, i, best, late) ==
+    IF i > Len(cs) THEN [cs |-> cs, best |-> best, late |-> late]
     ELSE
-        LET c == cs[i] IN
-        IF c.done # "no" \/ (Bounded(c) /\ Covers(dlv, 0, End(c)))
-            THEN Scan(cs, dlv, i + 1, best)
+        LET c0 == cs[i]
+            spent == Bounded(c0) /\ Covers(dlv, 0, End(c0))
+            reopens == c0.done = "ok" /\ ~spent /\ Len(trk[c0.t].arr) > c0.drained
+            c == IF reopens THEN [c0 EXCEPT !.done = "no"] ELSE c0
+            serves == ~c.rep /\ c.gen = gen /\ c.floor # None
+        IN
+        IF c.done # "no" \/ spent
+            THEN Scan(cs, dlv, gen, i + 1, best, late)
         ELSE
             LET p == Peek(c, dlv, Fuel)
                 cs2 == [cs EXCEPT ![i] = p.c]
                 better == p.g # None /\ (best.g = None \/ p.g <= best.g)
-            IN Scan(cs2, dlv, i + 1,
-                    IF better THEN [i |-> i, g |-> p.g, src |-> p.src] ELSE best)
+            IN Scan(cs2, dlv, gen, i + 1,
+                    IF better THEN [i |-> i, g |-> p.g, src |-> p.src] ELSE best,
+                    late \/ (reopens /\ serves))
 
 NoBest == [i |-> 0, g |-> None, src |-> "none"]
 
@@ -316,19 +326,24 @@ PollEnd(r, drained, waits) ==
     ELSE IF front.end = "ok" /\ (s = {} \/ \E c \in s : c.done # "no") THEN ok
     ELSE "no"
 
-\* One `poll_recv_group` on the logical track (`Reader::poll_lowest`).
-Poll(r) ==
-    LET r1 == BackfillGaps(Sync(r, front))
-        sc == Scan(r1.copies, r1.dlv, 1, NoBest)
-        r2 == [r1 EXCEPT !.copies = sc.cs]
+\* One `poll_recv_group` on the logical track (`Reader::poll_lowest`, looked
+\* at again while it returns `None`: a late group on the serving copy sets
+\* `resumed`, so the next pass asks its route for what lies under its floor).
+RECURSIVE Pass(_)
+Pass(r1) ==
+    LET sc == Scan(r1.copies, r1.dlv, r1.gen, 1, NoBest, FALSE)
+        r2 == [r1 EXCEPT !.copies = sc.cs, !.resumed = @ \/ sc.late]
     IN
     IF sc.best.g # None THEN [r |-> Take(r2, sc.best), cid |-> r2.copies[sc.best.i].id, g |-> sc.best.g]
+    ELSE IF sc.late THEN Pass(BackfillGaps(r2))
     ELSE
         LET drained == \E c \in Serving(r2) : c.done = "ok"
             r3 == IF drained THEN BoundAtEnd(r2) ELSE r2
             lg == LetGo(r3)
             r4 == [r3 EXCEPT !.copies = lg.copies]
         IN [r |-> [r4 EXCEPT !.ended = PollEnd(r4, drained, lg.waits)], cid |-> 0, g |-> None]
+
+Poll(r) == Pass(BackfillGaps(Sync(r, front)))
 
 \* What a clean end owes the reader: every group its serving route held once
 \* complete, and, as `resume_model`'s oracle owes, every group all live routes
@@ -337,6 +352,12 @@ Owed(r) ==
     {g \in Groups :
         \/ Len(r.copies) > 0 /\ g \in Held(r.copies[Len(r.copies)].t)
         \/ \A t \in Tracks : Live(t) => g \in Held(t)}
+
+\* What `resume_model`'s oracle owes a read that ends cleanly: every group
+\* all live routes hold as it ends, late ones included. One landing after it
+\* is not owed.
+Carried ==
+    {g \in Groups : \A t \in Tracks : Live(t) => g \in Landed(t)}
 
 \* The groups the reader lacks that a replaced copy it still holds has unread,
 \* or may still get by the rule `may_land` applies, within what it asks for.
@@ -360,7 +381,7 @@ Init ==
     /\ front = [cur |-> 1, gen |-> 1, end |-> "open", switches |-> 0]
     \* Subscribed to the serving copy at once (`Consumer::subscribe`).
     /\ rd = [gen |-> 1, next |-> 2, newest |-> None, dlv |-> {}, resumed |-> TRUE,
-             ended |-> "no", dup |-> FALSE, late |-> {},
+             ended |-> "no", dup |-> FALSE, late |-> {}, carried |-> {},
              copies |-> <<NewCopy(1, 1, 1, None, FALSE, NoBound)>>]
     /\ reading = {}
 
@@ -389,6 +410,15 @@ Finish(t) ==
     /\ Live(t) /\ ~trk[t].fin
     /\ G - 1 \in Landed(t)
     /\ trk' = [trk EXCEPT ![t] = Seal([@ EXCEPT !.fin = TRUE])]
+    /\ UNCHANGED <<front, rd, reading>>
+
+\* The route's session settles its declared end (`Producer::finish_shared` on a
+\* received copy): it has every group stream it will get, so the track is
+\* complete with what it holds, gaps and all. A group still in flight below
+\* the end may land afterwards, and is not owed by the route.
+Settle(t) ==
+    /\ Live(t) /\ trk[t].fin /\ ~trk[t].whole
+    /\ trk' = [trk EXCEPT ![t].whole = TRUE, ![t].held = Landed(t)]
     /\ UNCHANGED <<front, rd, reading>>
 
 \* The front serves another live route (`Producer::splice`), and every reader
@@ -425,7 +455,7 @@ FrontFail ==
 Read ==
     /\ rd.ended = "no"
     /\ LET p == Poll(rd)
-           r == IF p.r.ended = "ok" THEN [p.r EXCEPT !.late = Late(p.r)] ELSE p.r
+           r == IF p.r.ended = "ok" THEN [p.r EXCEPT !.late = Late(p.r), !.carried = Carried] ELSE p.r
        IN /\ rd' = r
           /\ reading' = IF Hold /\ p.g # None THEN reading \cup {[g |-> p.g, cid |-> p.cid]} ELSE reading
     /\ rd' # rd
@@ -443,7 +473,7 @@ Done ==
     /\ UNCHANGED vars
 
 Next ==
-    \/ \E t \in Tracks : Up(t) \/ Down(t) \/ Finish(t) \/ Serve(t)
+    \/ \E t \in Tracks : Up(t) \/ Down(t) \/ Finish(t) \/ Settle(t) \/ Serve(t)
     \/ \E t \in Tracks, g \in Groups : Land(t, g)
     \/ FrontFinish \/ FrontFail
     \/ Read
@@ -459,8 +489,9 @@ Spec == Init /\ [][Next]_vars
 \* A group is handed out at most once, whichever copies deliver it.
 OnceEach == ~rd.dup
 
-\* A clean end comes with every group it owes (`Owed`), judged as routes go on.
-CleanEndIsComplete == rd.ended = "ok" => Owed(rd) \subseteq rd.dlv
+\* A clean end comes with every group it owes (`Owed`), judged as routes go on,
+\* and every group all live routes held as it ended (`Carried`).
+CleanEndIsComplete == rd.ended = "ok" => (Owed(rd) \cup rd.carried) \subseteq rd.dlv
 
 \* The serving copy draining ends the track only once no copy it replaced may
 \* still deliver a group the reader lacks below that end (`Late`, as it ended).

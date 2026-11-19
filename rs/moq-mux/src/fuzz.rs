@@ -149,7 +149,7 @@ pub fn cmaf(data: &[u8]) -> bool {
 }
 
 /// The codecs [`annexb`] splits, selected by the leading byte modulo their count.
-const STREAMS: &[VideoFormat] = &[VideoFormat::Avc3, VideoFormat::Hev1, VideoFormat::Av01];
+const STREAMS: &[VideoFormat] = &[VideoFormat::H264, VideoFormat::H265, VideoFormat::Av01];
 
 /// A raw byte stream of unknown frame boundaries: H.264 or H.265 Annex-B, or AV1 OBUs.
 ///

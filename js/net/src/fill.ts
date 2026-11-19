@@ -520,7 +520,9 @@ export function requestsOf(state: FillState): Requests {
  * Most tracks never serve old content, so this lives on its own handle rather than the producer:
  * a publisher backed by storage opens one to serve groups its live cache no longer holds, or
  * never held. While at least one is open, a reader missing a run of groups queues a {@link Fill}
- * here; with none open, the miss is given up. {@link close} it once done.
+ * here; with none open, the miss is given up. {@link close} it once done, and keep taking fills
+ * until then: a reader waits on its {@link FillLookup} until it is answered or closed, so a
+ * handle left open but unread stalls that reader.
  *
  * @public
  */

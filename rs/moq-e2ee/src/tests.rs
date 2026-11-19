@@ -806,11 +806,11 @@ fn reserved_track_serves_on_demand() {
 	let request = protected.producer.reserve_track("audio").unwrap();
 	assert_eq!(request.name(), "audio");
 	let demand = request.demand();
-	assert!(!demand.wanted().is_some());
+	assert!(!demand.wanted());
 
 	let subscribing = protected.consumer.subscribe("audio", subscribe_all()).unwrap();
 	assert!(subscribing.poll_ok(&kio::Waiter::noop()).is_pending());
-	assert!(demand.wanted().is_some());
+	assert!(demand.wanted());
 
 	let mut audio = request.accept(timed());
 	let mut reader = resolve(&subscribing).unwrap();
@@ -901,7 +901,7 @@ fn requests_serve_undeclared_names() {
 	assert!(subscribing.poll_ok(&kio::Waiter::noop()).is_pending());
 	let request = requested(&mut requests);
 	assert_eq!(request.name(), "stats/viewers");
-	assert!(request.demand().wanted().is_some());
+	assert!(request.demand().wanted());
 	assert_eq!(protected.producer.generation().claims(), 0);
 
 	let mut track = request.accept(timed());
@@ -1283,7 +1283,7 @@ impl Parked {
 fn grouped_failure_wakes_pending_reads_and_releases_demand() {
 	let mut pair = pair("video");
 	let demand = pair.net.demand();
-	assert!(demand.wanted().is_some());
+	assert!(demand.wanted());
 
 	// One authentic frame, then silence. The group and the track stay open.
 	let semantic = pair.semantic.as_str();
@@ -1341,7 +1341,7 @@ fn grouped_failure_wakes_pending_reads_and_releases_demand() {
 	);
 	// The sibling's reader held the track wanted until that read released it.
 	assert!(
-		!demand.wanted().is_some(),
+		!demand.wanted(),
 		"track demand stayed live after authentication failure"
 	);
 	assert_eq!(
@@ -1366,7 +1366,7 @@ fn a_held_group_keeps_demand_after_the_track_drops() {
 
 	let mut group = recv_group(&mut pair.consumer);
 	drop(pair.consumer);
-	assert!(demand.wanted().is_some(), "a held group keeps its track wanted");
+	assert!(demand.wanted(), "a held group keeps its track wanted");
 
 	// The held group is not failed by the unsubscribe.
 	assert_eq!(read_frame(&mut group).plaintext, &b"ok"[..]);
@@ -1374,7 +1374,7 @@ fn a_held_group_keeps_demand_after_the_track_drops() {
 	assert_eq!(read_frame(&mut group).plaintext, &b"next"[..]);
 
 	drop(group);
-	assert!(demand.wanted().is_none(), "the last reader leaving releases the track");
+	assert!(!demand.wanted(), "the last reader leaving releases the track");
 }
 
 #[test]

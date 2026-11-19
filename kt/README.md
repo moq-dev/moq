@@ -35,7 +35,6 @@ Moq.connect("https://relay.example.com").use { moq ->
         // restarts; `moq.follow(path)` hands out each new run, or null once it goes offline.
         val announce = when (event) {
             is AnnounceEventPresent -> event.announce
-            // Absent, offline, or a change in availability.
             else -> return@collect
         }
         // Prefix stays origin-relative; captures reports what * matched.

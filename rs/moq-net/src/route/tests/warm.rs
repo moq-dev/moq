@@ -486,7 +486,7 @@ fn close(streams: &mut BTreeMap<Node, BTreeSet<u64>>, peer: Node, stream: u64) {
 	}
 }
 
-fn pair(a: Node, b: Node) -> (Node, Node) {
+pub(super) fn pair(a: Node, b: Node) -> (Node, Node) {
 	(a.min(b), a.max(b))
 }
 
@@ -621,8 +621,9 @@ impl WarmSim {
 		self.net.link(node, home, 1, Tie::Peer);
 		self.net.publish(node, id);
 		(0..claims)
-			.map(|claim| {
-				let path = format!("live/{claim}");
+			.map(|_| {
+				// Numbered across publishers, so no two announce one path.
+				let path = format!("live/{}", self.casts.len());
 				self.net.claim(node, &path, true);
 				self.casts.push((id, p(&path)));
 				self.casts.len() - 1
@@ -1531,7 +1532,7 @@ impl WarmSim {
 		carry.since = reading.then_some(round);
 		// A reader at a relay already fed has its first frame at once, whether or not
 		// anything is sent.
-		if reading && self.fed(node, cast) && self.live(node, cast).is_some() {
+		if reading && self.feeds(node, cast) {
 			self.entry(node, cast).since = None;
 			self.waits.push(0);
 		}
@@ -1752,6 +1753,11 @@ impl WarmSim {
 
 	// --- What is true ---
 
+	/// Whether `node` is fed `cast` from a publisher still live.
+	pub fn feeds(&self, node: Node, cast: usize) -> bool {
+		self.fed(node, cast) && self.live(node, cast).is_some()
+	}
+
 	/// Whether `node` is fed `cast`: its pulls lead to the publisher, each received.
 	pub fn fed(&self, node: Node, cast: usize) -> bool {
 		let mut at = node;
@@ -1885,7 +1891,7 @@ impl WarmSim {
 		let round = self.round;
 		let mut reach: BTreeMap<Node, BTreeSet<Node>> = BTreeMap::new();
 		for (node, cast) in self.readers() {
-			let fed = self.fed(node, cast) && self.live(node, cast).is_some();
+			let fed = self.feeds(node, cast);
 			let start = self.endpoints[&self.casts[cast].0];
 			let path = reach
 				.entry(start)
@@ -1916,10 +1922,7 @@ impl WarmSim {
 				if self.circles(node, cast) {
 					return Err(format!("{}: broadcast {cast} circles at relay {node}", self.arm.name()));
 				}
-				if self.reading(node, cast)
-					&& reach.contains(&node)
-					&& !(self.fed(node, cast) && self.live(node, cast).is_some())
-				{
+				if self.reading(node, cast) && reach.contains(&node) && !self.feeds(node, cast) {
 					return Err(format!("{}: relay {node} unfed for broadcast {cast}", self.arm.name()));
 				}
 				let carry = self.carry(node, cast);

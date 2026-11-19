@@ -45,6 +45,33 @@ export const FailuresSchema = zeros({
 	expired: counter,
 });
 
+/** Route withdrawals by kind. */
+export const WithdrawalsSchema = zeros({ dead: counter, drain: counter });
+
+/** Routes and claims a peer forwarded that a relay refused, keeping the session, by reason. */
+export const RouteRefusalsSchema = zeros({ path: counter, scope: counter, looped: counter });
+
+/** Sessions closed for their route layer, by kind. */
+export const RouteClosesSchema = zeros({
+	stalled: counter,
+	overrun: counter,
+	malformed: counter,
+	role: counter,
+	unasked: counter,
+	regressed: counter,
+	other: counter,
+});
+
+/** What one label's moq-lite-07 sessions did on the route layer. */
+export const RoutesSchema = zeros({
+	changed: counter,
+	rewritten: counter,
+	sent: WithdrawalsSchema,
+	received: WithdrawalsSchema,
+	refused: RouteRefusalsSchema,
+	closed: RouteClosesSchema,
+});
+
 /** Sessions and requests under one stats label; live sessions are `sessions_started - sessions_ended`. */
 export const PresenceSchema = zeros({
 	sessions_refused: RefusalsSchema,
@@ -59,6 +86,7 @@ export const PresenceSchema = zeros({
 	wire_tx: counter,
 	wire_rx: counter,
 	routes_refused: counter,
+	routes: RoutesSchema,
 });
 
 /** One tier's cumulative counters for a whole node: egress, ingress, and sessions. */
@@ -110,6 +138,14 @@ export type Traffic = z.infer<typeof TrafficSchema>;
 export type Refusals = z.infer<typeof RefusalsSchema>;
 /** Session failures by kind. */
 export type Failures = z.infer<typeof FailuresSchema>;
+/** Route withdrawals by kind. */
+export type Withdrawals = z.infer<typeof WithdrawalsSchema>;
+/** Refused routes and claims by reason. */
+export type RouteRefusals = z.infer<typeof RouteRefusalsSchema>;
+/** Sessions closed for their route layer, by kind. */
+export type RouteCloses = z.infer<typeof RouteClosesSchema>;
+/** What one label's moq-lite-07 sessions did on the route layer. */
+export type Routes = z.infer<typeof RoutesSchema>;
 /** Sessions and requests under one stats label. */
 export type Presence = z.infer<typeof PresenceSchema>;
 /** One tier's node-wide totals. */

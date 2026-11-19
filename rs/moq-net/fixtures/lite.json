@@ -245,6 +245,13 @@
 		"expect": "refused"
 	},
 	{
+		"name": "a claim whose chain names a relay twice decodes: a routing node only declines to take it",
+		"version": "moq-lite-07-wip",
+		"message": "announce",
+		"hex": "000f000001780161000103000080020707",
+		"expect": "decoded"
+	},
+	{
 		"name": "a claim whose chain names more than 32 relays is refused",
 		"version": "moq-lite-07-wip",
 		"message": "announce",

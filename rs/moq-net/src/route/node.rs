@@ -95,7 +95,7 @@ pub(crate) struct Served {
 	pub available: bool,
 	/// The one a reader here follows, and a request naming no node.
 	pub primary: bool,
-	/// The relays that announced it again across a scoped grant or an older version.
+	/// Each relay it entered or left a routing domain by, as [`relay::Claim::chain`].
 	pub chain: Vec<Id>,
 	/// The way to it crossed a marked link, so the origin never offers it to an upstream.
 	pub marked: bool,
@@ -194,6 +194,12 @@ struct State {
 	released: Vec<(Box<dyn Orphan>, bool)>,
 	/// Whether each of the origin's own claims is filed as having crossed a marked link.
 	own: BTreeMap<Broadcast, bool>,
+	/// Where each session counts what its peer causes.
+	stats: HashMap<Key, crate::stats::Session>,
+	/// What the router changed since the last flush, each changed route with the session
+	/// whose input first changed it.
+	rerouted: BTreeMap<NodeId, Option<Key>>,
+	redrawn: BTreeSet<Broadcast>,
 }
 
 /// The node every lite-07 session of one origin shares.
@@ -253,11 +259,32 @@ impl Drop for Locked<'_> {
 	}
 }
 
+/// Whether a node still exists, without keeping it alive.
+#[cfg(test)]
+pub(crate) struct WeakNode(std::sync::Weak<Mutex<State>>);
+
+#[cfg(test)]
+impl WeakNode {
+	pub fn alive(&self) -> bool {
+		self.0.strong_count() > 0
+	}
+}
+
 impl Node {
-	/// A node naming itself `me`, dating what it hears by `clock`.
-	pub fn new(me: NodeId, clock: Deadlines) -> Self {
+	/// A handle that does not keep this node alive.
+	#[cfg(test)]
+	pub fn downgrade(&self) -> WeakNode {
+		WeakNode(Arc::downgrade(&self.state))
+	}
+
+	/// A node naming itself `me`, dating what it hears by `clock`, that carries claims
+	/// between its peers when it `forwards`, as a relay does.
+	pub fn new(me: NodeId, forwards: bool, clock: Deadlines) -> Self {
 		debug_assert!(me.relay != 0, "a node names a relay");
 		let mut router = Router::new(me, relay::debounce(relay::HOP));
+		if !forwards {
+			router.endpoint();
+		}
 		router.clock(clock.now());
 		router.follow();
 		for (key, upstream) in [(LOCAL, false), (LOCAL_MARKED, true)] {
@@ -288,6 +315,9 @@ impl Node {
 				serving: HashMap::new(),
 				released: Vec::new(),
 				own: BTreeMap::new(),
+				stats: HashMap::new(),
+				rerouted: BTreeMap::new(),
+				redrawn: BTreeSet::new(),
 			})),
 			timer: kio::Shared::new(None),
 			moved: kio::Shared::new(0),
@@ -295,15 +325,15 @@ impl Node {
 	}
 
 	/// A node for the origin whose node is `relay`, named by it and by when it started,
-	/// which only grows across the restarts of one relay.
-	pub fn origin(relay: std::num::NonZeroU64, clock: Deadlines) -> Self {
+	/// which only grows across the restarts of one relay, that `forwards` as the origin does.
+	pub fn origin(relay: std::num::NonZeroU64, forwards: bool, clock: Deadlines) -> Self {
 		let started = kio::clock::Wall::now().saturating_duration_since(kio::clock::Wall::UNIX_EPOCH);
 		let me = NodeId {
 			relay: relay.get(),
 			start: u64::try_from(started.as_micros()).unwrap_or(u64::MAX),
 			marked: false,
 		};
-		Self::new(me, clock)
+		Self::new(me, forwards, clock)
 	}
 
 	/// Whether `other` is this node, rather than another origin's.
@@ -394,6 +424,23 @@ impl Node {
 		}
 	}
 
+	/// Let go of everything closed sessions left behind, which nothing serves again once
+	/// nothing owns the origin: each claim goes offline, so no reader waits on it.
+	pub fn release_orphans(&self) {
+		let mut locked = self.lock();
+		let state = &mut *locked;
+		state.lanes.retain(|_, slots| {
+			slots.retain(|_, slot| match slot.orphan.take() {
+				Some(orphan) => {
+					state.released.push((orphan, false));
+					false
+				}
+				None => true,
+			});
+			!slots.is_empty()
+		});
+	}
+
 	/// Fire the router's timers due by the origin's clock.
 	pub fn timeout(&self) {
 		let mut state = self.lock();
@@ -443,6 +490,12 @@ impl Stream {
 	/// Date what the stream hands the node by its session's clock too.
 	pub fn with_clock(mut self, clock: Deadlines) -> Self {
 		self.clock = Some(clock);
+		self
+	}
+
+	/// Count the route changes the session's peer causes on `stats`.
+	pub fn with_stats(self, stats: crate::stats::Session) -> Self {
+		self.node.lock().stats.insert(self.key, stats);
 		self
 	}
 
@@ -511,6 +564,9 @@ impl Stream {
 		};
 		let key = state.register(port)?;
 		state.mounts.entry(main).or_default().insert(key);
+		if let Some(stats) = state.stats.get(&main).cloned() {
+			state.stats.insert(key, stats);
+		}
 		Ok(Stream {
 			node: self.node.clone(),
 			key,
@@ -533,7 +589,9 @@ impl Stream {
 		let mut state = self.node.lock();
 		let now = self.now(&state);
 		state.router.clock(now);
-		state.router.recv(self.key, msg)
+		let result = state.router.recv(self.key, msg);
+		state.note(Some(self.key));
+		result
 	}
 
 	/// Tell the other sessions what the messages taken in changed.
@@ -545,6 +603,7 @@ impl Stream {
 	pub fn ask(&self, edit: relay::Edit) -> Result<(), Error> {
 		let mut state = self.node.lock();
 		state.router.ask(self.key, edit)?;
+		state.note(Some(self.key));
 		state.flush(&self.node);
 		Ok(())
 	}
@@ -565,6 +624,7 @@ impl Stream {
 		let now = self.now(&state);
 		state.router.clock(now);
 		state.router.goaway(self.key);
+		state.note(Some(self.key));
 		state.flush(&self.node);
 	}
 
@@ -583,23 +643,28 @@ impl Stream {
 		let now = self.now(&state);
 		state.router.clock(now);
 		state.close(self.key);
+		state.note(Some(self.key));
 		state.flush(&self.node);
 	}
 
 	/// Whether this session now serves `origin`'s claim of `broadcast` as it was last
-	/// handed it, or may not carry it.
-	pub fn serving(&self, origin: NodeId, broadcast: &Broadcast, ok: bool) {
+	/// handed it, or may not carry it. Returns whether that newly refuses the claim, for
+	/// its stats to count once however often it is handed again.
+	pub fn serving(&self, origin: NodeId, broadcast: &Broadcast, ok: bool) -> bool {
 		let mut state = self.node.lock();
 		let key = (origin, self.key);
 		let Some(slot) = (state.lanes.get_mut(broadcast)).and_then(|slots| slots.get_mut(&key)) else {
-			return;
+			return false;
 		};
-		slot.confirm = match ok {
+		let confirm = match ok {
 			true => Confirm::Serving,
 			false => Confirm::Refused,
 		};
+		let refused = confirm == Confirm::Refused && slot.confirm != Confirm::Refused;
+		slot.confirm = confirm;
 		state.settle(broadcast, false);
 		*self.node.moved.lock() += 1;
+		refused
 	}
 
 	/// Leave what this session serves of `origin`'s claim of `broadcast` behind as it
@@ -622,6 +687,7 @@ impl Drop for Stream {
 		for mount in state.mounts.remove(&self.key).unwrap_or_default() {
 			state.close(mount);
 			state.queues.remove(&mount);
+			state.stats.remove(&mount);
 		}
 		if let Some(main) = self.main
 			&& let Some(mounts) = state.mounts.get_mut(&main)
@@ -632,7 +698,9 @@ impl Drop for Stream {
 		state.queues.remove(&self.key);
 		let key = self.key;
 		state.tags.retain(|_, session| *session != key);
+		state.note(Some(key));
 		state.flush(&self.node);
+		state.stats.remove(&key);
 	}
 }
 
@@ -681,6 +749,19 @@ impl State {
 		}
 	}
 
+	/// Take what the router changed, crediting each route it changed first here to the
+	/// session `cause`, whose input changed it.
+	fn note(&mut self, cause: Option<Key>) {
+		let changes = self.router.changes();
+		if let Some(stats) = cause.and_then(|cause| self.stats.get(&cause)) {
+			stats.refuse_routes(crate::stats::RouteRefusal::Looped, changes.looped);
+		}
+		for origin in changes.routes {
+			self.rerouted.entry(origin).or_insert(cause);
+		}
+		self.redrawn.extend(changes.broadcasts);
+	}
+
 	/// Queue what the router has to say, and bring what the origin serves in line with
 	/// what its reader shows.
 	fn flush(&mut self, node: &Node) {
@@ -707,11 +788,20 @@ impl State {
 			.filter(|event| event.kind == Kind::End)
 			.map(|event| (event.claim, event.id))
 			.collect();
-		let changes = self.router.changes();
-		let mut dirty = changes.broadcasts;
-		for origin in changes.routes {
-			dirty.extend(self.router.claimed(origin).cloned());
+		self.note(None);
+		let mut dirty = BTreeSet::new();
+		for (origin, cause) in std::mem::take(&mut self.rerouted) {
+			// Each broadcast is relaned once a flush, so it counts for the first change
+			// that brings it in.
+			let mut rewritten = 0;
+			for broadcast in self.router.claimed(origin) {
+				rewritten += u64::from(dirty.insert(broadcast.clone()));
+			}
+			if let Some(stats) = cause.and_then(|cause| self.stats.get(&cause)) {
+				stats.route_changed(rewritten);
+			}
 		}
+		dirty.append(&mut self.redrawn);
 		let moved = !dirty.is_empty();
 		// What the reader shows first, so the instance that replaces another at a path is
 		// served before the one it replaces goes.

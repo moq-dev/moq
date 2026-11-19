@@ -1,5 +1,5 @@
 /**
- * The MoQ Cluster extension (draft-lcurley-moq-cluster-01).
+ * The MoQ Cluster extension (draft-lcurley-moq-cluster).
  *
  * moq-transport carries no routing information, so a peer cannot tell whether an
  * advertisement already passed through us. This extension adds it:

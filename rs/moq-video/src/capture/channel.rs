@@ -686,7 +686,7 @@ mod tests {
 		let mut subscriber = moq_mux::container::Consumer::new(subscriber, container);
 		let reserved = catalog.reserve().with_interval(config.effective_join());
 		let mut producer = Publisher::new(track, reserved, rendition).unwrap();
-		assert!(producer.demand().wanted().is_some());
+		assert!(producer.demand().wanted());
 
 		for step in 0..10u128 {
 			let frame = chan.recv().await.unwrap().unwrap();

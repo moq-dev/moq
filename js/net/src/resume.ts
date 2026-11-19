@@ -52,6 +52,7 @@ import { Delivered } from "./delivered.ts";
 import { NotFound, Retry, retry, SessionError, StreamCode, StreamError, sessionClosed } from "./error.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
 import {
+	type Ask,
 	type DropRun,
 	finalKey,
 	type GroupRecover,
@@ -71,7 +72,7 @@ import { grace } from "./ledger.ts";
 import { keyOf, type Lister, type Tracks, type TracksEvent } from "./listing.ts";
 import * as track from "./track.ts";
 import { max, min, UNBOUNDED } from "./util/key.ts";
-import { clamped, type Resolved, sameRanges, type Window } from "./window.ts";
+import { clamped, type Resolved, sameRanges, Window } from "./window.ts";
 import { type Broadcast as BroadcastWire, registerWire, wireOf } from "./wire.ts";
 
 /** A copy claiming the same content with different metadata: refused rather than reinterpreted. */
@@ -135,8 +136,14 @@ const INFO_FIELDS = Object.keys({
 function compatible(a: track.Info, b: track.Info): boolean {
 	return INFO_FIELDS.every((field) => {
 		const [l, r] = [a[field], b[field]];
+		if (field === "refresh") return sameRefresh(a.refresh, b.refresh);
 		return l instanceof Duration && r instanceof Duration ? l.eq(r) : l === r;
 	});
+}
+
+function sameRefresh(a: track.Refresh, b: track.Refresh): boolean {
+	const interval = a.interval === null || b.interval === null ? a.interval === b.interval : a.interval.eq(b.interval);
+	return a.ratio === b.ratio && interval;
 }
 
 /**
@@ -343,8 +350,12 @@ interface Copy {
 	 * groups the newer one may never have.
 	 */
 	until?: bigint | null;
-	/** The group channel ran out: cleanly (`null`) or failed. */
-	done?: Error | null;
+	/**
+	 * The group channel ran out: failed, or cleanly with how many groups had arrived on the copy
+	 * by then, since one arriving later is still in flight below its end, which a read still open
+	 * takes.
+	 */
+	done?: Error | number;
 	/**
 	 * When a newer group superseded every group under the bound: the newer copy's first group, or
 	 * the track's end. What the reader still lacks from it is waited for from here, for no longer
@@ -353,7 +364,10 @@ interface Copy {
 	since?: Instant;
 	/** Groups still read that came from this copy, which keep a replaced copy subscribed. */
 	lease: number;
-	/** It handed out a group, so a failure is its route failing mid-serve rather than refusing. */
+	/**
+	 * It handed out a group, or got one it holds back for a placement, so a failure is its route
+	 * failing mid-serve rather than refusing.
+	 */
 	delivered?: boolean;
 }
 
@@ -646,6 +660,10 @@ class Reader implements ResumeSource {
 		const placed = this.#resolution;
 		for (const copy of this.#copies) {
 			if (copy.floor !== undefined || copy.until !== undefined) continue;
+			// A copy whose delivery failed places a time start past its last group as if nothing
+			// followed, but the front's next copy continues the track: only that copy knows which
+			// group holds it, until the track concludes. Mirrors the Rust `Reader::window`.
+			if (!this.route.concluded && copyFailed(copy)) continue;
 			if (!copy.from || !sameRanges(copy.from, ranges)) continue;
 			const own = hooks.servingResolved(copy.sub);
 			placed.resolved = ranges.map((_, index) => placed.resolved[index] ?? own[index]);
@@ -785,6 +803,18 @@ class Reader implements ResumeSource {
 		return undefined;
 	}
 
+	judgedGroup(key: bigint): GroupConsumer | undefined {
+		for (let index = this.#copies.length - 1; index >= 0; index--) {
+			const copy = this.#copies[index];
+			const group = hooks.cachedGroup(copy.sub, key);
+			if (!group) continue;
+			// Judged by the copy it is read from: this reader's own timeline stays empty.
+			hooks.expireGroup(group, hooks.staleAt(copy.sub, key));
+			return this.#handOut(copy, group);
+		}
+		return undefined;
+	}
+
 	/**
 	 * `copy` handed out `key`. The serving copy's first group bounds the copies it replaced
 	 * just below it: what they hold under it may be groups the new route never has, and what
@@ -808,7 +838,31 @@ class Reader implements ResumeSource {
 
 	#deliverable(copy: Copy, key: bigint, delivered: Delivered): boolean {
 		const end = copyEnd(copy);
-		return (end === undefined || key < end) && !delivered.has(key);
+		if ((end !== undefined && key >= end) || delivered.has(key)) return false;
+		// A failed copy resolved the reader's ranges as if nothing followed its last group: the
+		// placement a copy continuing the track made decides. Mirrors the Rust `Reader::window`.
+		if (this.route.concluded || !copyFailed(copy)) return true;
+		return this.#placement().some(
+			(range) => range !== undefined && key >= range.start && (range.end === undefined || key < range.end),
+		);
+	}
+
+	/**
+	 * The reader's ranges as {@link #placed} resolves them now, or as they resolve with no copy at
+	 * all: a range from the oldest group needs no copy to place it. Mirrors the Rust reader's
+	 * window starting unheld.
+	 */
+	#placement(): (Resolved | undefined)[] {
+		const ranges = (this.#shell.subscription.peek() ?? track.Subscription.default()).ranges ?? [{}];
+		const placed = this.#placed(ranges);
+		const unheld = new Window(ranges, undefined).resolved();
+		return ranges.map((_, index) => placed[index] ?? unheld[index]);
+	}
+
+	// Whether a failed copy's next group waits for a copy continuing the track to place the
+	// reader's ranges, which decides whether it goes out. Mirrors the Rust `Reader::poll_lowest`.
+	#waits(copy: Copy): boolean {
+		return !this.route.concluded && copyFailed(copy) && this.#placement().includes(undefined);
 	}
 
 	tryGroup(ordered: boolean, delivered: Delivered, dispositions: boolean): Recv {
@@ -817,6 +871,7 @@ class Reader implements ResumeSource {
 		this.#learnEnd();
 		if (this.#closed) return { kind: "done" };
 		this.#groupsRead = true;
+		this.#reopen();
 		this.#backfillGaps(delivered);
 		if (dispositions) {
 			const dropped = this.#tryDrop(delivered);
@@ -836,12 +891,22 @@ class Reader implements ResumeSource {
 			// A newer copy must not pass it and permanently discard it from sequence order.
 			if (ordered && recv.kind === "idle") return recv;
 		}
+		// The failed copies holding a group back for a placement, which still report their failure.
+		const held = new Set<Copy>();
 		// The serving copy first: it is the one that keeps delivering.
 		for (let index = this.#copies.length - 1; index >= 0; index--) {
 			const copy = this.#copies[index];
 			if (!this.#feeds(copy)) continue;
 			for (;;) {
-				const recv = take(copy, ordered, this.#newest === undefined ? undefined : this.#newest + 1n);
+				const newest = this.#newest === undefined ? undefined : this.#newest + 1n;
+				// Its group stays there until placed, but how it ran out is still judged below. It got
+				// a group, so its route did not refuse the track.
+				if (this.#waits(copy) && hooks.peekGroup(copy.sub, ordered, newest) !== undefined) {
+					copy.delivered = true;
+					held.add(copy);
+					break;
+				}
+				const recv = take(copy, ordered, newest);
 				if (recv.kind === "group") {
 					if (!this.#deliverable(copy, recv.group.start, delivered)) {
 						recv.group.close();
@@ -853,10 +918,11 @@ class Reader implements ResumeSource {
 				// Drained: the track ended as the copy did, which is not cleanly when its
 				// session went away short of the declared end.
 				if (recv.kind === "done") {
-					copy.done = copy.sub.closed.peek() ?? null;
-					if (copy.done === null && hooks.subscriberEnd(copy.sub)) this.#settled = true;
+					const closed = copy.sub.closed.peek();
+					copy.done = closed instanceof Error ? closed : hooks.arrived(copy.sub);
+					if (!(closed instanceof Error) && hooks.subscriberEnd(copy.sub)) this.#settled = true;
 				} else if (recv.kind === "error") copy.done = recv.error;
-				else if (this.#drained(copy, delivered)) copy.done = null;
+				else if (this.#drained(copy, delivered)) copy.done = hooks.arrived(copy.sub);
 				break;
 			}
 		}
@@ -866,7 +932,11 @@ class Reader implements ResumeSource {
 			const dropped = this.#tryDrop(delivered);
 			if (dropped) return dropped;
 		}
-		return this.#end((copy) => copy.done);
+		return this.#end((copy) => {
+			if (typeof copy.done === "number") return null;
+			const failed = held.has(copy) ? copy.sub.closed.peek() : undefined;
+			return copy.done ?? (failed instanceof Error ? failed : undefined);
+		});
 	}
 
 	/**
@@ -974,6 +1044,19 @@ class Reader implements ResumeSource {
 		return hooks.spent(copy.sub, start, end, delivered);
 	}
 
+	// A copy that ran out cleanly still takes a group in flight below its end while the read stays
+	// open, as a cursor still reading it would. One landing on the serving copy may lie under its
+	// resume point, which is not that copy's to read, and a backfill that already ran out was let
+	// go: ask its route again. Mirrors the Rust `Reader::poll_lowest`.
+	#reopen(): void {
+		const serving = this.#serving();
+		for (const copy of this.#copies) {
+			if (typeof copy.done !== "number" || hooks.arrived(copy.sub) <= copy.done) continue;
+			copy.done = undefined;
+			if (copy === serving && !copy.replaced && copy.floor !== undefined) this.#resumed = true;
+		}
+	}
+
 	// Whether `copy` may still feed groups: its channel has not run out, and what it holds is
 	// within the reader's budget, which ends a full budget after a newer group superseded it.
 	#feeds(copy: Copy): boolean {
@@ -992,7 +1075,7 @@ class Reader implements ResumeSource {
 					ordered,
 					this.#newest === undefined ? undefined : this.#newest + 1n,
 				);
-				if (key === undefined) break;
+				if (key === undefined || this.#waits(copy)) break;
 				if (this.#deliverable(copy, key, delivered)) {
 					// A tie goes to the newer copy, so the serving one hands out its first group and
 					// bounds the copies it replaced.
@@ -1389,11 +1472,24 @@ class Reader implements ResumeSource {
 		return serving && hooks.holeEnd(serving.sub, key, dropped);
 	}
 
+	// A failed serving copy's own resolution is no placement while the front may still replace it:
+	// the reader's ranges stay as placed, pending until a copy continuing the track places them.
+	// Mirrors the Rust reader answering from its window.
+	#placesNothing(serving: Copy): boolean {
+		return !this.route.concluded && copyFailed(serving);
+	}
+
 	// Each copy asks for the reader's ranges in turn, clamped to its floor and replacement.
 	starts(from: bigint): (bigint | undefined)[] | undefined {
 		this.sync();
 		const serving = this.#serving();
-		return serving && hooks.servingStarts(serving.sub, from);
+		if (!serving) return undefined;
+		if (!this.#placesNothing(serving)) return hooks.servingStarts(serving.sub, from);
+		return this.#placement().map((range) => {
+			if (!range) return undefined;
+			const start = max(range.start, from);
+			return range.end === undefined || range.end > start ? start : undefined;
+		});
 	}
 
 	// Each copy resolves the reader's ranges in turn, clamped to its floor and replacement.
@@ -1401,6 +1497,7 @@ class Reader implements ResumeSource {
 		this.sync();
 		const serving = this.#serving();
 		if (!serving) return undefined;
+		if (this.#placesNothing(serving)) return this.#placement();
 		// As the first copy to resolve them placed them, then as the serving copy does.
 		const ranges = (this.#shell.subscription.peek() ?? track.Subscription.default()).ranges ?? [{}];
 		const placed = this.#placed(ranges);
@@ -1531,10 +1628,73 @@ class Reader implements ResumeSource {
 		}
 	}
 
-	join(): void {
+	ask(ask: Ask): void {
 		this.sync();
 		const serving = this.#serving();
-		if (serving) hooks.joinSubscriber(serving.sub);
+		if (serving) hooks.askSubscriber(serving.sub, ask);
+	}
+
+	// A request outlives the copy it asked: once that copy closes while the logical track is open,
+	// it asks the copy the route serves next, so only the logical track closing rejects it.
+	// Mirrors the Rust `Failover`.
+	async refresh(signal?: AbortSignal): Promise<void> {
+		// How the copy last asked closed: the track's end once no route serves another.
+		let failed: unknown;
+		for (let asked: number | undefined; ; ) {
+			this.sync();
+			const closed = this.#shell.closed.peek();
+			if (closed !== undefined) throw closed ?? closedBeforeSent(this.route.name);
+			signal?.throwIfAborted();
+			const generation = this.route.generation;
+			if (generation !== asked) {
+				asked = generation;
+				const serving = this.#serving();
+				if (serving) {
+					try {
+						return await this.#request(serving, signal);
+					} catch (err) {
+						if (signal?.aborted) throw err;
+						failed = err;
+						continue;
+					}
+				}
+				// Nothing served when it was called: the next copy's join asks.
+				if (failed === undefined) return;
+			} else if (this.route.concluded || this.route.refusal) {
+				throw failed;
+			}
+			await new Promise<void>((resolve) => {
+				const disposes: Dispose[] = [];
+				const wake = () => {
+					for (const dispose of disposes) dispose();
+					signal?.removeEventListener("abort", wake);
+					resolve();
+				};
+				disposes.push(this.route.changed.changed(wake), this.#shell.closed.changed(wake));
+				signal?.addEventListener("abort", wake, { once: true });
+			});
+		}
+	}
+
+	// Ask `serving` for a refresh, withdrawing it once the logical track closes.
+	async #request(serving: Copy, signal?: AbortSignal): Promise<void> {
+		const asked = new AbortController();
+		const abort = () => asked.abort(signal?.reason);
+		signal?.addEventListener("abort", abort, { once: true });
+		let dispose: Dispose | undefined;
+		const ended = new Promise<never>((_, reject) => {
+			dispose = this.#shell.closed.changed((closed) => {
+				if (closed === undefined) return;
+				reject(closed ?? closedBeforeSent(this.route.name));
+				asked.abort();
+			});
+		});
+		try {
+			return await Promise.race([serving.sub.refresh({ signal: asked.signal }), ended]);
+		} finally {
+			signal?.removeEventListener("abort", abort);
+			dispose?.();
+		}
 	}
 
 	fork(options?: track.Subscription): track.Subscriber {
@@ -1639,6 +1799,10 @@ async function until(change: PromiseLike<unknown>, signal?: AbortSignal): Promis
 		signal.removeEventListener("abort", onAbort);
 	}
 	signal.throwIfAborted();
+}
+
+function closedBeforeSent(name: string): Error {
+	return new StreamError(StreamCode.Cancel, { message: `track ${name} closed before the refresh was sent` });
 }
 
 function dropped(): Error {
@@ -2266,6 +2430,9 @@ export class Front {
 					adopt: () => {
 						current.release();
 						current = next.source;
+						// Its fetch may hold its subscription until its reader lets go, and the
+						// reader is now `fetched.group`.
+						void hooks.groupReleased(fetched.group).then(() => next.group.close());
 					},
 					discard: () => {
 						next.group.close();

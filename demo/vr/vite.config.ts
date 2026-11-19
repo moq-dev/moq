@@ -1,6 +1,6 @@
+import { worklet } from "@moq/common/vite-plugin-worklet";
 import { resolve } from "path";
 import { defineConfig } from "vite";
-import { worklet } from "../../js/common/vite-plugin-worklet.ts";
 
 export default defineConfig({
 	root: "src",

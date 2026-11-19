@@ -95,7 +95,7 @@ impl Properties {
 			priority: Some(super::priority::to_wire(info.priority)),
 			group_order: Some(GroupOrder::Descending),
 			// A track opted in to refresh answers a NEW_GROUP_REQUEST as a join.
-			dynamic_groups: info.refresh.is_some(),
+			dynamic_groups: info.refresh.enabled(),
 			compress: info.compressed(),
 			unknown: Vec::new(),
 		}
@@ -751,7 +751,7 @@ mod tests {
 			.with_max_age(Duration::from_secs(7))
 			.with_timescale(Timescale::MILLI)
 			.with_priority(9)
-			.with_refresh(0);
+			.with_refresh(crate::track::Refresh::default().with_ratio(0));
 		unknown.refused(&info)
 	}
 

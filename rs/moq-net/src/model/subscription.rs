@@ -3,9 +3,9 @@ use std::{
 	time::Duration,
 };
 
-mod runs;
+mod cover;
 mod window;
-pub(super) use runs::{Layered, Runs};
+pub(super) use cover::{Cover, minus};
 pub(crate) use window::Accounted;
 pub(crate) use window::Resolved;
 pub(super) use window::{Containing, Holdings, Unheld, Window};
@@ -267,7 +267,7 @@ impl Range {
 	///
 	/// An [`Anchor::Oldest`] end delivers nothing either: every reader holding one is
 	/// refused, so it never reaches the demand asked upstream.
-	pub(super) fn is_empty(&self) -> bool {
+	pub(crate) fn is_empty(&self) -> bool {
 		match (self.start, self.end) {
 			(_, Some(Anchor::Oldest)) => true,
 			(Anchor::Time(start), Some(Anchor::Time(end))) => end < start,
@@ -501,15 +501,6 @@ impl Subscription {
 			})
 			.collect();
 		Self { ranges, ..self.clone() }
-	}
-
-	/// Whether a subscriber joins at the live edge: a range counting back from the latest
-	/// group and following it. A fixed start resumes a known group instead, such as a route
-	/// switch picking up where the reader stopped.
-	pub(super) fn joins_live(&self) -> bool {
-		self.ranges
-			.iter()
-			.any(|range| matches!(range.start, Anchor::Oldest | Anchor::Relative(_)) && range.end.is_none())
 	}
 }
 

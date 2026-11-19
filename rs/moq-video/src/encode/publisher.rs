@@ -106,14 +106,16 @@ impl Publisher {
 		}
 	}
 
-	/// The group a subscriber wants past the largest published, which the next frame should
-	/// open with a keyframe, or `None` while the largest serves.
+	/// The group past the largest published while a subscriber asks for one, which the next
+	/// frame should open with a keyframe, or `None` while the largest serves.
 	#[cfg_attr(not(feature = "capture"), allow(dead_code, reason = "only capture forces keyframes"))]
 	pub(crate) fn wanted(&self) -> Option<u64> {
 		let track = self.track();
-		let wanted = track.demand().wanted()?;
-		let largest = track.largest().map(|largest| largest.group);
-		largest.is_none_or(|largest| wanted > largest).then_some(wanted)
+		let asked = track.demand().poll_refresh(&kio::Waiter::noop());
+		if !matches!(asked, std::task::Poll::Ready(Ok(()))) {
+			return None;
+		}
+		Some(track.largest().map_or(0, |largest| largest.group.saturating_add(1)))
 	}
 
 	/// Publish one already-encoded frame at its own timestamp: one whole access unit
@@ -252,7 +254,8 @@ impl Finished {
 		self.track.demand()
 	}
 
-	/// Abort the track with `err`, so subscribers that have not drained it see the real cause.
+	/// Abort the track with `err`; see [`moq_net::track::Finished::abort`]. Readers still draining
+	/// get the clean end instead once every group below the end finished.
 	pub fn abort(self, err: moq_net::Error) {
 		self.track.abort(err);
 	}

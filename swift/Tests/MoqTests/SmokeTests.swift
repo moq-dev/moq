@@ -37,7 +37,7 @@ final class SmokeTests: XCTestCase {
         XCTAssertEqual(try request.priority(), 12)
         let producer = try request.accept()
         XCTAssertEqual(try producer.priority(), 12)
-        XCTAssertNil(try stream.demand().wanted)
+        XCTAssertFalse(try stream.demand().wanted)
         try producer.insert(Datagram(sequence: 7, timestamp: .unscaled(7), payload: Data("seven".utf8)))
         let datagram = try await consumer.recv()
         XCTAssertEqual(datagram?.sequence, 7)
@@ -619,7 +619,7 @@ final class SmokeTests: XCTestCase {
             optimizeForLatency: true
         )
         let media = try Media.TrackProducer.video(
-            broadcast: broadcast, initData: Media.VideoInit(format: .avc3, data: Data(), hint: hint))
+            broadcast: broadcast, initData: Media.VideoInit(format: .h264, data: Data(), hint: hint))
         try media.finish()
         try broadcast.close()
     }
@@ -794,21 +794,21 @@ final class SmokeTests: XCTestCase {
         let snapshotDemand = try snapshot.demand()
         let streamDemand = try stream.demand()
         XCTAssertEqual(snapshotDemand.name, "status")
-        XCTAssertNil(snapshotDemand.wanted)
+        XCTAssertFalse(snapshotDemand.wanted)
         let consumer = try broadcast.consume()
 
         let snapshotConsumer = try Json.SnapshotConsumer<[String: Int]>(
             broadcast: consumer, name: "status")
         let streamConsumer = try Json.StreamConsumer<[String: Int]>(
             track: try await consumer.subscribeTrack(name: "events"))
-        while try await snapshotDemand.wantedChanged() == nil {}
-        while try await streamDemand.wantedChanged() == nil {}
-        XCTAssertEqual(snapshotDemand.wanted, 0)
+        while try await !snapshotDemand.wantedChanged() {}
+        while try await !streamDemand.wantedChanged() {}
+        XCTAssertTrue(snapshotDemand.wanted)
 
         snapshotConsumer.cancel()
         streamConsumer.cancel()
-        while try await snapshotDemand.wantedChanged() != nil {}
-        while try await streamDemand.wantedChanged() != nil {}
+        while try await snapshotDemand.wantedChanged() {}
+        while try await streamDemand.wantedChanged() {}
 
         try broadcast.close()
     }
@@ -818,7 +818,7 @@ final class SmokeTests: XCTestCase {
         let broadcast = try BroadcastProducer()
         let track = try broadcast.publishTrack(name: "status")
         let demand = try track.demand()
-        while try await demand.wantedChanged() != nil {}
+        while try await demand.wantedChanged() {}
 
         let late = try track.consume()
         XCTAssertFalse(try track.abortUnwanted(errorCode: 7))
@@ -826,9 +826,9 @@ final class SmokeTests: XCTestCase {
         let frame = try await late.readFrame()
         XCTAssertEqual(frame?.payload, Data("still serving".utf8))
 
-        while try await demand.wantedChanged() == nil {}
+        while try await !demand.wantedChanged() {}
         late.cancel()
-        while try await demand.wantedChanged() != nil {}
+        while try await demand.wantedChanged() {}
         XCTAssertTrue(try track.abortUnwanted(errorCode: 7))
         XCTAssertThrowsError(try track.abortUnwanted(errorCode: 7)) { error in
             guard case MoqError.Closed = error else {
@@ -845,7 +845,7 @@ final class SmokeTests: XCTestCase {
             broadcast: broadcast,
             track: try broadcast.publishTrack(name: "events", info: TrackInfo(maxAge: nil, timescale: 1_000_000)))
         let demand = try producer.demand()
-        while try await demand.wantedChanged() != nil {}
+        while try await demand.wantedChanged() {}
 
         let late = try Json.StreamConsumer<String>(
             track: try await broadcast.consume().subscribeTrack(name: "events"))
@@ -854,9 +854,9 @@ final class SmokeTests: XCTestCase {
         let record = try await late.next()
         XCTAssertEqual(record, Json.Timed(value: "still serving", timestamp: micros(0)))
 
-        while try await demand.wantedChanged() == nil {}
+        while try await !demand.wantedChanged() {}
         late.cancel()
-        while try await demand.wantedChanged() != nil {}
+        while try await demand.wantedChanged() {}
         XCTAssertTrue(try producer.abortUnwanted(errorCode: 7))
         XCTAssertThrowsError(try producer.abortUnwanted(errorCode: 7)) { error in
             guard case MoqError.Closed = error else {
@@ -897,6 +897,32 @@ final class SmokeTests: XCTestCase {
         let info = TrackInfo(maxAge: nil)
         let unlimited = try broadcast.publishTrack(name: "unlimited", info: info).consume().info()
         XCTAssertNil(unlimited.maxAge)
+        try broadcast.close()
+    }
+
+    /// A refresh reads back as published, and a bare one asks for nothing.
+    func testTrackInfoRefresh() throws {
+        let broadcast = try BroadcastProducer()
+        let info = TrackInfo(maxAge: 0, refresh: TrackRefresh(ratio: 2, interval: 0.5))
+        let got = try broadcast.publishTrack(name: "refresh", info: info).consume().info().refresh
+        XCTAssertEqual(got.ratio, 2)
+        XCTAssertEqual(got.interval, 0.5)
+        let plain = try broadcast.publishTrack(name: "plain").consume().info().refresh
+        XCTAssertNil(plain.ratio)
+        XCTAssertNil(plain.interval)
+        try broadcast.close()
+    }
+
+    /// The first subscriber of a track with no group asks for one.
+    func testDemandRefreshWaitsForAGroupRequest() async throws {
+        let broadcast = try BroadcastProducer()
+        let track = try broadcast.publishTrack(
+            name: "status", info: TrackInfo(maxAge: 0, refresh: TrackRefresh(ratio: 0)))
+        let demand = try track.demand()
+        let consumer = try track.consume()
+        try await demand.refresh()
+        _ = consumer
+        try track.finish()
         try broadcast.close()
     }
 

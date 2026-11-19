@@ -80,7 +80,7 @@ class SnapshotProducer:
 
     Each :meth:`update` supersedes the last; a late joiner only sees the newest value, encoded as
     snapshots and merge-patch deltas automatically. Set ``deltas=False`` to publish every update
-    as a full snapshot in its own group. With deltas on, give the track a ``refresh`` ratio so a
+    as a full snapshot in its own group. With deltas on, give the track a :class:`moq.TrackRefresh` ``ratio`` so a
     join after more than that many snapshots' worth of deltas asks for the value restated in a
     fresh group. A name the catalog already carries is refused.
     """
@@ -109,7 +109,7 @@ class SnapshotProducer:
     def abort_unwanted(self, error_code: int) -> bool:
         """Abort this track with an application error code, but only while nobody wants it.
 
-        Call it once :meth:`TrackDemand.wanted_changed` returns ``None``. Returns ``True`` once
+        Call it once :meth:`TrackDemand.wanted_changed` returns ``False``. Returns ``True`` once
         the track is closed, and ``False``, leaving the track open, when a reader joined since;
         keep serving and wait for the next ``None`` on a fresh ``demand()``: one that already
         returned ``None`` misses a reader that came and went, and waits on.
@@ -142,7 +142,7 @@ class StreamProducer:
     def abort_unwanted(self, error_code: int) -> bool:
         """Abort this track with an application error code, but only while nobody wants it.
 
-        Call it once :meth:`TrackDemand.wanted_changed` returns ``None``. Returns ``True`` once
+        Call it once :meth:`TrackDemand.wanted_changed` returns ``False``. Returns ``True`` once
         the track is closed, and ``False``, leaving the track open, when a reader joined since;
         keep serving and wait for the next ``None`` on a fresh ``demand()``: one that already
         returned ``None`` misses a reader that came and went, and waits on.
@@ -218,7 +218,7 @@ class WindowProducer:
     that restate the records it retains, so a reader can join at any point. Bound what it retains
     by popping, or with ``checkpoint_records`` for a window that is never popped: a reader that
     keeps up still sees every record, while one joining later is told the older ones were skipped.
-    Give the track a ``refresh`` ratio so a join past it gets the window restated in a fresh group.
+    Give the track a :class:`moq.TrackRefresh` ``ratio`` so a join past it gets the window restated in a fresh group.
 
     Not advertised in the broadcast's catalog, which has no window mode; a reader names the track.
     """
@@ -255,7 +255,7 @@ class WindowProducer:
     def abort_unwanted(self, error_code: int) -> bool:
         """Abort this track with an application error code, but only while nobody wants it.
 
-        Call it once :meth:`TrackDemand.wanted_changed` returns ``None``. Returns ``True`` once
+        Call it once :meth:`TrackDemand.wanted_changed` returns ``False``. Returns ``True`` once
         the track is closed, and ``False``, leaving the track open, when a reader joined since;
         keep serving and wait for the next ``None`` on a fresh ``demand()``: one that already
         returned ``None`` misses a reader that came and went, and waits on.

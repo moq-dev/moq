@@ -526,7 +526,7 @@ test("a listing over a session carries each track's info, end to end", async () 
 		timescale: Timescale.MILLI,
 		maxAge: Duration.millis(3000),
 		priority: 9,
-		refresh: 4,
+		refresh: { ratio: 4, interval: Duration.millis(250) },
 		compression: "deflate",
 	});
 
@@ -538,7 +538,7 @@ test("a listing over a session carries each track's info, end to end", async () 
 			timescale: Timescale.MILLI,
 			maxAge: Duration.millis(3000),
 			priority: 9,
-			refresh: 4,
+			refresh: { ratio: 4, interval: Duration.millis(250) },
 			compression: "deflate",
 		},
 	});

@@ -17,6 +17,8 @@ Decided 2026-11-01 (maintainer, follow-up planning after the 2026-11-01 /quest-a
 
 Re-scoped 2026-11-12 (/quest-audit): [Each side says everything about routing on one stream](https://github.com/moq-dev/moq/pull/8835) gives a lite-07 side one Announce Stream and turns a token-scope change into an edit of its interest set, so on lite-07 the factor K becomes one and the per-stream `regrant` this plan targets remains only for lite-06 and older. Re-measure the regrant (or interest-set edit) cost on lite-07 with the benches below, and apply the steps that follow to whichever path still pays routes × members. If only the older versions still pay it, say so in the PR and leave them.
 
+As shipped by [moq-dev/moq#8987](https://github.com/moq-dev/moq/pull/8987), lite-07 regrants in `Routed::poll_permit` (`rs/moq-net/src/lite/publisher/routed.rs`): a routing peer's grant must stay whole or the session closes, and on a claims-only session every claim told or live is re-synced against the new permit, so lite-07 still pays its claims times grant members once per session. The `AnnounceRun::regrant` path above now serves lite-06 and older only.
+
 - Derive the change once per `AUTH_OK`, not per stream: the members added and removed between the old and new grant. Each stream then re-checks only the routes under a changed member's prefix, using the origin's prefix structure to find them instead of walking every route. A member's prefix here is its literal segments before its first wildcard (`*` or `**`), since grant members are `Patterns` (`Permit` in `rs/moq-net/src/auth.rs`); a member that starts with a wildcard has no literal prefix and re-checks every route under the stream's prefix, as today. Bench that shape on its own row, and test wildcard members, removed members, and old and new grants that overlap.
 - A grown grant needs only routes under the added members, not a whole-origin snapshot per stream.
 - Keep today's semantics: a revoked route retracts, a newly covered route advertises, and a route both grants cover is untouched.
@@ -27,4 +29,4 @@ Public API: none. Wire: none.
 ## Related
 
 - [Bound peer grant processing by design](/quest/m5/peer-grant-bound.md) - may change the received-grant type this compares against; whichever lands second adapts
-- [Announce interest streams share one route table](/quest/m4/announce-interest-memory.md) - the per-stream route state that this walk reads
+- [Cap the legacy announce interest streams](/quest/m4/announce-interest-memory.md) - the per-stream route state that this walk reads on lite-06 and older

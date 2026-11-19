@@ -155,7 +155,7 @@ async function chain(up: Version, down: Version) {
 		/** Wait until the publisher's track has a subscriber through the relay. */
 		async reached() {
 			const demand = track.demand();
-			while (demand.wanted.peek() === undefined) await demand.wanted.changed();
+			while (!demand.wanted.peek()) await demand.wanted.changed();
 		},
 		async close() {
 			remote.close();

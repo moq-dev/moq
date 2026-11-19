@@ -80,3 +80,24 @@ disk ([moq-dev/moq#9033](https://github.com/moq-dev/moq/pull/9033)), benches
 [moq-dev/moq#9021](https://github.com/moq-dev/moq/pull/9021),
 [moq-dev/moq#9022](https://github.com/moq-dev/moq/pull/9022)), and mutants
 ([moq-dev/moq#9019](https://github.com/moq-dev/moq/pull/9019)).
+
+Decided 2026-11-18 (maintainer, /quest-plan), from the triage of runs
+[44127032469](https://github.com/moq-dev/moq/actions/runs/44127032469) and
+[44342367698](https://github.com/moq-dev/moq/actions/runs/44342367698): four
+more children (JS resume window, audio-quality p50 ceilings, publisher drop
+cost, resume mutants). Owned elsewhere: the firefox player by
+[moq-dev/moq#9141](https://github.com/moq-dev/moq/pull/9141), OBS by
+[moq-dev/moq#9016](https://github.com/moq-dev/moq/pull/9016), and fixes in PRs
+from the same triage: benches
+([moq-dev/moq#9089](https://github.com/moq-dev/moq/pull/9089),
+[moq-dev/moq#9090](https://github.com/moq-dev/moq/pull/9090),
+[moq-dev/moq#9098](https://github.com/moq-dev/moq/pull/9098),
+[moq-dev/moq#9099](https://github.com/moq-dev/moq/pull/9099)), features
+([moq-dev/moq#9091](https://github.com/moq-dev/moq/pull/9091),
+[moq-dev/moq#9092](https://github.com/moq-dev/moq/pull/9092)), quic-interop
+([moq-dev/moq#9096](https://github.com/moq-dev/moq/pull/9096),
+[moq-dev/moq#9097](https://github.com/moq-dev/moq/pull/9097)), fuzz
+([moq-dev/moq#9105](https://github.com/moq-dev/moq/pull/9105),
+[moq-dev/moq#9106](https://github.com/moq-dev/moq/pull/9106)), and route-sweep
+([moq-dev/moq#9108](https://github.com/moq-dev/moq/pull/9108)). The JS audit's
+picomatch advisory was withdrawn upstream.

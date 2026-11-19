@@ -107,7 +107,7 @@ test("the observer shares playback demand and closes without ending playback", a
 		expect(player.closed.peek()).toBeUndefined();
 		player.close();
 		const demand = track.demand();
-		while (demand.wanted.peek() !== undefined && demand.closed.peek() === undefined) {
+		while (demand.wanted.peek() && demand.closed.peek() === undefined) {
 			await Signal.race(demand.wanted, demand.closed);
 		}
 		expect(capture.error()).toBeUndefined();

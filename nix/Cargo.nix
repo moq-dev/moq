@@ -19249,6 +19249,11 @@ rec {
         ];
         devDependencies = [
           {
+            name = "kio";
+            packageId = "kio";
+            features = [ "manual" ];
+          }
+          {
             name = "libc";
             packageId = "libc";
             target = { target, features }: (target."unix" or false);
@@ -19686,6 +19691,11 @@ rec {
               "std"
               "handle-panics"
             ];
+          }
+          {
+            name = "serde_json";
+            packageId = "serde_json";
+            features = [ "raw_value" ];
           }
           {
             name = "workspace-hack";

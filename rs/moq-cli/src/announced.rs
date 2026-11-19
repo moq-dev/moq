@@ -92,9 +92,7 @@ async fn follow(
 
 		let (announce, active) = match event {
 			Event::Present(announce) => (announce, true),
-			Event::Absent(announce) | Event::Offline(announce) => (announce, false),
-			// The set lists presence; a held path stays listed.
-			Event::Available(_) | Event::Unavailable(_) => continue,
+			Event::Absent(announce) => (announce, false),
 		};
 
 		let path = announce.prefix.as_str();

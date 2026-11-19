@@ -3,8 +3,8 @@
 //!
 //! Exporters declare what wire shape they want their frames in (currently:
 //! length-prefixed NAL units for H.264/H.265) and call [`ExportSource::poll_read`]
-//! to pull normalized frames. For Annex-B sources (catalog codec marked
-//! `inline: true` / `in_band: true`, empty `description`) the source attaches
+//! to pull normalized frames. For Annex-B sources (no catalog `description`,
+//! whatever the codec string says) the source attaches
 //! an [`Avc1`] / [`Hvc1`] transform that strips parameter sets into an avcC or
 //! hvcC and length-prefixes the rest; frames wait until that record exists. fMP4
 //! instead attaches an [`InBand`] transform, keeping the sets in the samples, when
@@ -76,6 +76,9 @@ enum SourceState {
 	Active(Box<Active>),
 	/// The track ended, the sibling instance it read went, or the source was stopped.
 	Ended,
+	/// The track itself failed: its subscription was refused, or it ended with an error once the
+	/// groups already here were read. Media that failed to decode is the export's own error instead.
+	Lost,
 }
 
 /// How a source subscribes, fixed before its first poll.
@@ -241,7 +244,7 @@ impl ExportSource {
 
 	/// Subscribe to a video rendition without attaching any codec-shape
 	/// transform. Payloads pass through untouched (Annex-B stays Annex-B,
-	/// avc1 length-prefixed stays length-prefixed). The Annex-B exporter
+	/// length-prefixed stays length-prefixed). The Annex-B exporter
 	/// uses this to keep parameter sets in-band.
 	///
 	/// Rejects an escaping `broadcast` reference like [`Self::for_video`].
@@ -524,7 +527,7 @@ impl ExportSource {
 	pub fn poll_received(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		match &mut self.state {
 			SourceState::Active(active) => active.consumer.poll_received(waiter),
-			SourceState::Ended => Poll::Ready(()),
+			SourceState::Ended | SourceState::Lost => Poll::Ready(()),
 			_ => Poll::Pending,
 		}
 	}
@@ -617,7 +620,7 @@ impl ExportSource {
 				{
 					return self.end();
 				}
-				Poll::Ready(Err(err)) => return Poll::Ready(Err(err.into())),
+				Poll::Ready(Err(err)) => return self.lose(err.into()),
 				Poll::Pending => return Poll::Pending,
 			};
 			let priority = self.source.control(track.control())?;
@@ -684,6 +687,7 @@ impl ExportSource {
 					{
 						return self.end();
 					}
+					Poll::Ready(Err(err)) if consumer.lost() => return self.lose(err),
 					Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
 					Poll::Pending => return Poll::Pending,
 				};
@@ -790,6 +794,20 @@ impl ExportSource {
 	fn end(&mut self) -> Poll<crate::Result<Option<Event>>> {
 		self.stop();
 		Poll::Ready(Ok(None))
+	}
+
+	/// Fail the rendition with its track's own error, which [`Self::lost`] then tells apart from
+	/// the export's own errors.
+	fn lose(&mut self, err: crate::Error) -> Poll<crate::Result<Option<Event>>> {
+		self.stop();
+		self.state = SourceState::Lost;
+		Poll::Ready(Err(err))
+	}
+
+	/// Whether the error this source returned was its track failing, which ends only this
+	/// rendition: a publisher that loses a source may list a replacement for it.
+	pub(crate) fn lost(&self) -> bool {
+		matches!(self.state, SourceState::Lost)
 	}
 
 	fn finish_ends(&mut self) {

@@ -16,9 +16,9 @@
 //! arrival skew between them, and the output keeps the source's pace.
 //!
 //! Video flows through `ExportSource`, which normalizes every H.264/H.265
-//! source to length-prefixed NALU plus a resolved avcC/hvcC (parsing in-band
-//! avc3/hev1 parameter sets out of the bitstream, or taking the catalog
-//! `description` for out-of-band avc1/hvc1). The muxer then does one
+//! source to length-prefixed NALU plus a resolved avcC/hvcC (parsing the
+//! parameter sets out of an Annex-B bitstream, or taking the catalog
+//! `description` for a length-prefixed one). The muxer then does one
 //! length-prefixed -> Annex-B conversion, re-injecting the parameter sets as
 //! inline NALs on every keyframe. CMAF tracks are rejected with a clear error.
 
@@ -555,22 +555,36 @@ impl Track {
 	}
 
 	/// Read within the jitter window, or hold the first frame until the program tables are built.
-	fn fill(&mut self, name: &str, waiter: &kio::Waiter, input: &mut Input<'_>) -> crate::Result<()> {
+	///
+	/// Returns the track's own failure, which ended it, apart from the export's errors: the
+	/// export decides whether it outlives that ([`Export::survive`]).
+	fn fill(&mut self, name: &str, waiter: &kio::Waiter, input: &mut Input<'_>) -> crate::Result<Option<crate::Error>> {
 		if self.key.name.is_empty() {
 			self.key.name = name.to_string();
 		}
 		if self.pending.is_some() || self.read != Read::Live {
-			return Ok(());
+			return Ok(None);
 		}
 		let is_video = matches!(self.kind, Kind::Video(_));
 		// A placed frame is judged at release, against the keyframe's departure ([`Export::leads_video`]).
 		let aligned = !is_video && !self.kind.placed();
+		let mut lost = None;
 		loop {
 			if !input.waiting_for_header && input.jitter.full(&self.key, waiter) {
 				let _ = self.source.poll_received(waiter);
 				break;
 			}
-			match self.source.poll_event(waiter)? {
+			let event = match self.source.poll_event(waiter) {
+				// The track failed: it ends like a finished one, and the export decides whether that
+				// ends it too ([`Export::survive`]).
+				Poll::Ready(Err(err)) if self.source.lost() => {
+					self.read = Read::Ended;
+					lost = Some(err);
+					break;
+				}
+				event => event?,
+			};
+			match event {
 				Poll::Ready(Some(Event::Frame { frame, arrived })) => {
 					if is_video && frame.keyframe && input.waiting_for_header {
 						tracing::debug!(target: "moq_mux::container::ts::handoff", phase = "keyframe", now = ?kio::clock::now(), program = self.key.program, ?arrived);
@@ -641,7 +655,7 @@ impl Track {
 		if self.read == Read::Ended && !input.waiting_for_header {
 			self.release(name, input.jitter, true)?;
 		}
-		Ok(())
+		Ok(lost)
 	}
 
 	/// The samples an audio frame of `payload` lasts and their rate, if it may share a PES with
@@ -1922,7 +1936,7 @@ where
 					},
 				);
 				let ended = live && track.read != Read::Live;
-				if let Err(err) = filled {
+				if let Err(err) = filled.and_then(|lost| lost.map_or(Ok(()), |err| self.survive(&name, err))) {
 					self.leave(err)?;
 				}
 				if ended || matches!(self.program.feed, Feed::Retired(_)) {
@@ -2357,7 +2371,7 @@ where
 	/// and slices that arrive before their codec config resolves are dropped: a receiver
 	/// joining mid-GOP can't use them, and parking them would stop us polling for the
 	/// keyframe that carries the parameter sets. [`ExportSource`] has already transformed
-	/// Annex-B avc3/hev1 into length-prefixed form and resolved the avcC/hvcC.
+	/// Annex-B input into length-prefixed form and resolved the avcC/hvcC.
 	fn fill(&mut self, waiter: &kio::Waiter) -> crate::Result<()> {
 		let mut input = Input {
 			waiting_for_header: self.program.psi.is_none(),
@@ -2365,9 +2379,25 @@ where
 			jitter: &mut self.jitter,
 			trimmed: &mut self.program.trimmed,
 		};
+		let mut lost = Vec::new();
 		for (name, track) in &mut self.program.tracks {
-			track.fill(name, waiter, &mut input)?;
+			if let Some(err) = track.fill(name, waiter, &mut input)? {
+				lost.push((name.clone(), err));
+			}
 		}
+		lost.into_iter().try_for_each(|(name, err)| self.survive(&name, err))
+	}
+
+	/// Whether the export outlives the failure of track `name`, which [`Track::fill`] ended.
+	///
+	/// While another track still reads, only that rendition ends: a publisher that loses a
+	/// source, such as a microphone, may list a replacement, which joins like any new rendition.
+	/// With nothing left reading, the failure is the program's, as before.
+	fn survive(&self, name: &str, err: crate::Error) -> crate::Result<()> {
+		if !self.program.tracks.values().any(|track| track.read == Read::Live) {
+			return Err(err);
+		}
+		tracing::warn!(track = name, %err, "rendition failed; the export keeps its other media");
 		Ok(())
 	}
 
@@ -3095,10 +3125,13 @@ where
 		}
 	}
 
-	/// Header is ready when every track's [`ExportSource`] has resolved its
-	/// codec config (from the catalog `description`, or built by the transform).
+	/// Header is ready when a track, and every track still reading, has resolved its codec
+	/// config through its [`ExportSource`] (from the catalog `description`, or built by the
+	/// transform). A track that ended before its config holds nothing back.
 	fn header_ready(&self) -> bool {
-		self.program.tracks.values().all(|t| t.source.header_ready())
+		let tracks = &self.program.tracks;
+		tracks.values().any(|t| t.source.header_ready())
+			&& tracks.values().all(|t| t.read != Read::Live || t.source.header_ready())
 	}
 
 	/// Every video track has buffered its first frame (the keyframe) or finished.
@@ -3236,8 +3269,9 @@ where
 
 	/// Build the PAT/PMT once every track's PID and codec is known.
 	fn build_psi(&mut self) -> Result<()> {
+		// A track that ended before its codec config never carries a frame, so the PMT leaves it out.
 		for track in self.program.tracks.values_mut() {
-			track.listed = true;
+			track.listed = track.read == Read::Live || track.source.header_ready();
 		}
 		let pcr_pid = self.pick_clock()?;
 		let pmt = self.program_map(pcr_pid)?;
@@ -3259,7 +3293,7 @@ where
 		if !self.program.pcr_discontinuity {
 			self.program.schedule.open();
 		}
-		for track in self.program.tracks.values() {
+		for track in self.program.tracks.values().filter(|track| track.listed) {
 			self.program.liveness.register(track.pid);
 		}
 		self.program.psi = Some(Psi {

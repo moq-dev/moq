@@ -8,7 +8,7 @@ use moq_net::{Timescale, Timestamp, group, track};
 use object_store::ObjectStore;
 
 use super::Shared;
-use super::index::Index;
+use super::index::{self, Index, Start};
 use crate::layout::{End, Entry, Frame, Object};
 use crate::{Error, Info, Result};
 
@@ -183,7 +183,31 @@ impl Asker<'_> {
 /// as the live cache resolves it. Left unanswered when the archive holds no group, or the store
 /// fails.
 async fn look_up<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, lookup: &FillLookup) {
-	let pts = lookup.time();
+	loop {
+		match search(shared, index, lookup.time()).await {
+			Search::Found(sequence) => return serve_group(shared, index, Asker::Lookup(lookup), sequence).await,
+			// The index dropped what the store pruned, at least the object found gone, which no
+			// listing adds back, so the search starts over on what it retains. Each retry drops an
+			// object for good, so only a store pruning what it lists faster than a GET keeps
+			// this going, at one LIST and GET per object it writes.
+			Search::Pruned => {}
+			Search::Unanswered => return,
+		}
+	}
+}
+
+/// How a lookup's search ended.
+enum Search {
+	/// At the group starting at this sequence.
+	Found(u64),
+	/// At an object the store pruned since it was listed.
+	Pruned,
+	/// With no group, or a store failure.
+	Unanswered,
+}
+
+/// Search the index for the group containing `pts`; see [`look_up`].
+async fn search<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, pts: u64) -> Search {
 	let (around, timed) = {
 		let index = index.lock().unwrap();
 		(index.around(pts), index.timed())
@@ -191,8 +215,9 @@ async fn look_up<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, looku
 	// Newest first, skipping a group whose head was pruned, which can't be served from its first
 	// frame.
 	for (start, path) in around {
-		let Some(object) = load(shared, index, start, &path, timed).await else {
-			return;
+		let object = match load(shared, index, start, &path, timed).await {
+			Ok(object) => object,
+			Err(ended) => return ended,
 		};
 		let found = object
 			.entries
@@ -203,7 +228,7 @@ async fn look_up<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, looku
 			.find(|(_, entry)| !entry.frames.is_empty() && entry.sequence <= pts)
 			.map(|(_, entry)| entry.sequence);
 		if let Some(sequence) = found {
-			return serve_group(shared, index, Asker::Lookup(lookup), sequence).await;
+			return Search::Found(sequence);
 		}
 	}
 
@@ -211,8 +236,9 @@ async fn look_up<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, looku
 	// one whose head was pruned, which can't be served from its first frame.
 	let mut next = index.lock().unwrap().after(None);
 	while let Some((start, path)) = next {
-		let Some(object) = load(shared, index, start, &path, timed).await else {
-			return;
+		let object = match load(shared, index, start, &path, timed).await {
+			Ok(object) => object,
+			Err(ended) => return ended,
 		};
 		let found = object
 			.entries
@@ -221,34 +247,35 @@ async fn look_up<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, looku
 			.find(|(position, entry)| !entry.frames.is_empty() && (*position > 0 || object.frame_start == 0))
 			.map(|(_, entry)| entry.sequence);
 		if let Some(sequence) = found {
-			return serve_group(shared, index, Asker::Lookup(lookup), sequence).await;
+			return Search::Found(sequence);
 		}
 		next = index.lock().unwrap().after(Some(start));
 	}
+	Search::Unanswered
 }
 
-/// The object a lookup searches, `None` once the store failed.
+/// The object a lookup searches, or how the search ends without it.
 ///
 /// An abandoned lookup still finishes the read and answers nobody: a lookup owes no group, so
 /// nothing tells it when its readers stop waiting.
 async fn load<S: ObjectStore>(
 	shared: &Shared<S>,
 	index: &Mutex<Index>,
-	start: (u64, u64),
+	start: Start,
 	path: &object_store::path::Path,
 	timed: bool,
-) -> Option<Arc<Object>> {
-	match super::object(shared, path, start, timed).await {
-		Ok(object) => Some(object),
-		Err(err) => {
-			if let Error::NotFound(_) = err {
-				// Pruned since it was listed.
-				index.lock().unwrap().forget(start);
-			}
-			tracing::warn!(%path, %err, "archived object is unavailable for a time lookup");
-			None
-		}
-	}
+) -> std::result::Result<Arc<Object>, Search> {
+	let err = match super::object(shared, path, start, timed).await {
+		Ok(object) => return Ok(object),
+		// Pruned since it was listed.
+		Err(Error::NotFound(_)) => match index::pruned(shared.store.inner(), index, start).await {
+			Ok(()) => return Err(Search::Pruned),
+			Err(err) => err,
+		},
+		Err(err) => err,
+	};
+	tracing::warn!(%path, %err, "archived object is unavailable for a time lookup");
+	Err(Search::Unanswered)
 }
 
 /// Answer group `sequence` for `asker` from the objects holding it, drop the run of sequences
@@ -268,7 +295,16 @@ async fn serve_group<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, a
 
 	let mut objects = Vec::with_capacity(holding.len());
 	for (start, path) in &holding {
-		let load = super::object(shared, path, *start, timed);
+		let load = async {
+			let loaded = super::object(shared, path, *start, timed).await;
+			if let Err(Error::NotFound(_)) = loaded {
+				// Pruned since it was listed, and likely not alone.
+				if let Err(err) = index::pruned(shared.store.inner(), index, *start).await {
+					tracing::warn!(%path, %err, "archived track is unavailable to list");
+				}
+			}
+			loaded
+		};
 		let loaded = match asker {
 			// A lookup owes no group, so nothing says when its readers stop waiting: it finishes
 			// the read.
@@ -285,8 +321,6 @@ async fn serve_group<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, a
 		match loaded {
 			Ok(object) => objects.push(object),
 			Err(Error::NotFound(_)) => {
-				// Pruned since it was listed.
-				index.lock().unwrap().forget(*start);
 				asker.drop_groups(sequence..sequence + 1);
 				return;
 			}
