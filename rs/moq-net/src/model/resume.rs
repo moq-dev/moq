@@ -246,7 +246,7 @@ impl Producer {
 	}
 
 	/// Serve the track from `copy` from now on, subscribing every reader to it.
-	#[cfg(test)]
+	#[cfg(any(test, feature = "fuzz"))]
 	pub(super) fn serve(&self, copy: track::Consumer) {
 		self.serve_from(copy, None);
 	}
@@ -1677,7 +1677,13 @@ impl Reader {
 						continue;
 					}
 					if matches!(self.copies[index].sub, Sub::Ready(_)) {
-						let resolved = self.copies[index].resolved.clone();
+						let copy = &self.copies[index].resolved;
+						let resolved: BTreeMap<u64, Resolved> = self
+							.window
+							.unsettled()
+							.into_iter()
+							.filter_map(|key| Some((key, *copy.get(&key)?)))
+							.collect();
 						self.resolve(&resolved);
 					}
 				}

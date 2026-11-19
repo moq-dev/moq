@@ -5821,6 +5821,36 @@ fn clamp_combined(combined: Option<Subscription>, bound: Option<Duration>) -> Op
 	Some(combined)
 }
 
+/// A front's logical track served from one route's copy, for benches.
+#[cfg(any(test, feature = "fuzz"))]
+pub(crate) struct Routed {
+	/// The logical track readers subscribe to.
+	pub logical: Producer,
+	/// The route's copy, which its source writes.
+	pub copy: Producer,
+	/// Concludes the logical track once dropped.
+	_routes: super::resume::Producer,
+}
+
+#[cfg(any(test, feature = "fuzz"))]
+impl Routed {
+	/// A logical track named `name`, and a copy of it serving it, both with `info`.
+	pub(crate) fn new(name: &str, info: Info) -> Self {
+		let broadcast = Arc::new(broadcast::Info::default());
+		let routes = super::resume::Producer::new();
+		let logical = Request::new(broadcast.clone(), name)
+			.routes(routes.consume())
+			.accept(info.clone());
+		let copy = Producer::new(broadcast, name, info);
+		routes.serve(copy.consume());
+		Self {
+			logical,
+			copy,
+			_routes: routes,
+		}
+	}
+}
+
 /// Aborts a track without keeping it open, from [`Producer::abort_handle`].
 ///
 /// Holding one neither keeps the track alive nor counts as its producer, so a track whose
