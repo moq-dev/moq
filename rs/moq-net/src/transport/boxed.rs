@@ -887,7 +887,11 @@ impl<T: poll::RecvStream + Send + Sync> ErasedRecv for Budgeted<T> {
 	}
 
 	fn window(&self) -> u64 {
-		self.pacing().window
+		let pacing = self.pacing();
+		match self.unshaped || pacing.allowance == 0 {
+			true => pacing.window,
+			false => (pacing.window + pacing.stream).min(crate::model::pace::AHEAD),
+		}
 	}
 
 	fn shape(&mut self, room: Option<u64>, unsealed: u64) {
