@@ -1158,6 +1158,18 @@ export class Consumer {
 						// What an ordered reader gives up it reports as a gap; a key it skips without one was never a
 						// group. A gap an empty group carries still marks the next frame, which follows the loss.
 						if (!contiguous && (decided ? head.gap : !empty)) {
+							// A lost group could have continued a declared end, unless every start it could have
+							// taken lies past the end: then the media paused there first, read ahead of the gap.
+							const declared = this.#ending;
+							if (declared) {
+								const first = this.#firstUnskipped(this.#active, head.consumer.start);
+								if (first !== undefined) {
+									this.#ending = undefined;
+									if (!ptsContiguous(declared.end, keyMicros(first, declared.scale))) {
+										return this.#declare(declared);
+									}
+								}
+							}
 							this.#lost = true;
 							if (!startup) {
 								console.warn(
@@ -1175,7 +1187,8 @@ export class Consumer {
 			if (starting === undefined && head && this.#active !== undefined && head.consumer.start <= this.#active) {
 				const seq = head.consumer.start;
 				// The group after a declared end has started: one starting at the end continues the media,
-				// and a later one resumes it after a pause the end declared. A loss reads as the gap instead.
+				// and a later one resumes it after a pause the end declared. A loss that could have continued
+				// it already dropped it, and one past it already read it.
 				const declared = this.#ending;
 				this.#ending = undefined;
 				if (declared && !this.#lost && !ptsContiguous(declared.end, keyMicros(seq, declared.scale))) {
@@ -1355,6 +1368,22 @@ export class Consumer {
 		const passing = this.#passed(declared.end);
 		if (passing !== undefined) left = Math.min(passing, left ?? passing);
 		return left;
+	}
+
+	// The earliest start in `[start, end)` the publisher did not declare skipped, where a group lost in
+	// it could begin, or undefined when it declared the whole run skipped. Mirrors Rust's
+	// `first_unskipped`.
+	#firstUnskipped(start: bigint, end: bigint): bigint | undefined {
+		if (this.#track.isSkipped(start, end)) return undefined;
+		// Skipped prefixes only grow with the run, so the first unskipped start is a bisection.
+		let low = start;
+		let high = end - 1n;
+		while (low < high) {
+			const mid = low + (high - low) / 2n;
+			if (this.#track.isSkipped(start, mid + 1n)) low = mid + 1n;
+			else high = mid;
+		}
+		return low;
 	}
 
 	// Read a declared end as the end of its group's media.

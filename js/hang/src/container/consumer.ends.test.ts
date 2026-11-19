@@ -241,3 +241,27 @@ test.each([
 		await reader.done;
 	}
 });
+
+// A loss after a declared end reads the end first when every start a lost group could have taken lies
+// past it: the publisher declared the run up to there skipped, so no lost group continued the media.
+test("a loss past a declared skip reads the end ahead of the gap", async () => {
+	const track = micro();
+	const reader = collect(track.subscribe({ delay: { max: Duration.millis(30_000) } }), DELAY);
+	try {
+		const first = track.createGroup(0n);
+		frame(first, 0);
+		first.finishAt(20_000n);
+		// Only the starts from 990 ms on stayed undeclared, so a group lost there began past the end.
+		track.skipGroups(1n, 990_000n);
+		const later = track.createGroup(1_000_000n);
+		frame(later, 1_000_000);
+		await flush();
+		await clock.advance(Duration.millis(100));
+		expect(reader.items).toEqual(["0", "end 20000", "gap 20000+980000", "1000000"]);
+	} finally {
+		reader.consumer.close();
+		track.finish();
+		track.close();
+		await reader.done;
+	}
+});
