@@ -1245,7 +1245,9 @@ async fn raw_track_update_does_not_wait_for_pending_read() {
 				max: Some(Duration::from_millis(25)),
 			},
 			ranges: Some(vec![MoqRange {
-				start: MoqAnchor::Absolute { group: 0 },
+				start: MoqAnchor::Time {
+					timestamp: MoqTimestamp::unscaled(0),
+				},
 				end: None,
 			}]),
 			order: None,
@@ -9693,16 +9695,17 @@ async fn route_and_claim_credentials_ride_the_moq_transport_announce() {
 		.unwrap();
 }
 
-/// A time anchor starts at the group containing it, and a scale-less track compares it with
-/// bare starts. Its time is unscaled, in the track's timescale: a scaled one is refused rather
-/// than read in units the subscription can't check.
+/// A time start is the group containing it and a time end includes the groups starting at or
+/// before it, so a former exclusive end at `t` reads as `Time(t - 1)`. A scale-less track
+/// compares a time with bare starts. Its time is unscaled, in the track's timescale: a scaled
+/// one is refused rather than read in units the subscription can't check.
 #[tokio::test]
-async fn time_anchors_start_at_the_containing_group() {
+async fn time_anchors_select_the_containing_groups() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast
 		.publish_track("events".into(), Some(unlimited_info()))
 		.unwrap();
-	for timestamp_us in [0, 1_000, 2_000] {
+	for timestamp_us in [0, 1_000, 2_000, 3_000] {
 		// Each group starts at its frame's time, in the track's microseconds.
 		let group = track.create_group(timestamp_us).unwrap();
 		group
@@ -9714,19 +9717,23 @@ async fn time_anchors_start_at_the_containing_group() {
 		group.finish().unwrap();
 	}
 
-	let since = |timestamp_us| MoqSubscription {
+	let time = |timestamp_us| MoqAnchor::Time {
+		timestamp: MoqTimestamp::unscaled(timestamp_us),
+	};
+	let subscription = |ranges| MoqSubscription {
 		priority: 0,
 		delay: MoqDelay {
 			min: Some(Duration::ZERO),
 			max: Some(Duration::from_secs(10)),
 		},
-		ranges: Some(vec![MoqRange {
-			start: MoqAnchor::Time {
-				timestamp: MoqTimestamp::unscaled(timestamp_us),
-			},
-			end: None,
-		}]),
+		ranges,
 		order: Some(MoqOrder::Ascending),
+	};
+	let between = |start, end: Option<u64>| {
+		subscription(Some(vec![MoqRange {
+			start: time(start),
+			end: end.map(time),
+		}]))
 	};
 	let scaled = MoqRange {
 		start: MoqAnchor::Time { timestamp: us(1_500) },
@@ -9736,17 +9743,34 @@ async fn time_anchors_start_at_the_containing_group() {
 		scaled.resolve(),
 		Err(MoqError::Protocol { details }) if details.kind == MoqProtocolKind::TimestampMismatch
 	));
-	let consumer = track.consume(Some(since(1_500))).unwrap();
-	let mut starts = Vec::new();
-	for _ in 0..2 {
-		let group = kio::clock::timeout(TIMEOUT, consumer.recv_group())
+
+	// Every group a read hands out before it ends, by start. Start order ends at the first
+	// group past the range, where arrival order waits for a straggler until it ages out.
+	let starts = async |subscription| {
+		let consumer = track.consume(Some(subscription)).unwrap();
+		let mut starts = Vec::new();
+		while let Some(group) = kio::clock::timeout(TIMEOUT, consumer.next_group())
 			.await
 			.expect("timed out waiting for a cached group")
 			.unwrap()
-			.expect("expected a group");
-		starts.push(group.start());
-	}
-	assert_eq!(starts, vec![1_000, 2_000]);
+		{
+			starts.push(group.start());
+		}
+		starts
+	};
+	assert_eq!(starts(between(1_500, Some(2_000))).await, vec![1_000, 2_000]);
+	// What an exclusive end at 2000 asked for.
+	assert_eq!(starts(between(1_500, Some(1_999))).await, vec![1_000]);
+	// An exclusive end at 0 asked for nothing: an empty list, unlike the omitted default.
+	assert_eq!(starts(subscription(Some(Vec::new()))).await, Vec::<u64>::new());
+
+	let open = track.consume(Some(subscription(None))).unwrap();
+	let group = kio::clock::timeout(TIMEOUT, open.next_group())
+		.await
+		.expect("timed out waiting for a cached group")
+		.unwrap()
+		.expect("omitted ranges read the track");
+	assert_eq!(group.start(), 3_000, "the default starts at the newest group");
 
 	let untimed = broadcast
 		.publish_track(
@@ -9758,7 +9782,7 @@ async fn time_anchors_start_at_the_containing_group() {
 		)
 		.unwrap();
 	let consumer = untimed.consume(None).unwrap();
-	consumer.update(since(0)).unwrap();
+	consumer.update(between(0, None)).unwrap();
 }
 
 // Frame-only controls keep checking payloads independently of the breaks between frames.

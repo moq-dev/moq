@@ -221,27 +221,24 @@ typealias Delay = uniffi.moq.MoqDelay
 fun uniffi.moq.MoqSubscription.Companion.default(): Subscription =
     uniffi.moq.moqSubscriptionDefaults()
 
-/** A span of a track to deliver: from `start` up to `end`, or onward when `end` is null. */
+/**
+ * A span of a track to deliver: from `start` through `end`, or onward when `end` is null. Every
+ * end includes its whole group.
+ */
 typealias Range = uniffi.moq.MoqRange
 
-/**
- * Where one end of a [Range] falls: [AnchorOldest], [AnchorAbsolute], [AnchorRelative], or
- * [AnchorTime].
- */
+/** Where one end of a [Range] falls: [AnchorOldest], [AnchorRelative], or [AnchorTime]. */
 typealias Anchor = uniffi.moq.MoqAnchor
 
 /** The oldest group still around, as far back as the max delay allows. A start only. */
 typealias AnchorOldest = uniffi.moq.MoqAnchor.Oldest
-
-/** A group, delivered from its first frame. */
-typealias AnchorAbsolute = uniffi.moq.MoqAnchor.Absolute
 
 /** The group `groups` before the latest one, clamped to group 0: 0 is the latest. */
 typealias AnchorRelative = uniffi.moq.MoqAnchor.Relative
 
 /**
  * The group containing `timestamp`, an unscaled time in the track's timescale; a scaled one is
- * refused.
+ * refused. As an end it includes every group starting at or before the time.
  */
 typealias AnchorTime = uniffi.moq.MoqAnchor.Time
 
