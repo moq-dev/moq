@@ -609,12 +609,19 @@ async fn capture_loop<S: CaptureSource>(
 			// Capture timestamps use a private monotonic timeline. The offset to the broadcast clock is
 			// sampled per frame, so each queued frame maps by acquisition, not dequeue, time, and the
 			// stream follows the clock's slew toward the wall clock and its jump across a suspend.
-			let before = camera.now().as_micros()? as i128;
-			let media = clock.now().as_micros()? as i128;
-			let after = camera.now().as_micros()? as i128;
-			// Reads straddling a stall would skew it, so those keep the last offset.
-			if offset.is_none() || after - before <= STALL {
-				offset = Some(media - (before + after) / 2);
+			// Reads straddling a stall would skew it, so those keep the last offset. The first after
+			// an open has none to keep and fixes the reopen lead, so it reads again instead.
+			let mut sample = clock_offset(clock, &camera)?;
+			for _ in 0..RESAMPLES {
+				if sample.is_some() || offset.is_some() {
+					break;
+				}
+				sample = clock_offset(clock, &camera)?;
+			}
+			if let Some(sample) = sample {
+				offset = Some(sample);
+			} else if offset.is_none() {
+				offset = Some(clock_offset_unchecked(clock, &camera)?);
 			}
 			let mut micros = frame.timestamp.as_micros()? as i128 + offset.unwrap_or_default();
 			// A camera never rewinds its own stream, but a reopened one maps from the shared clock,
@@ -684,6 +691,23 @@ async fn capture_loop<S: CaptureSource>(
 
 /// The most two camera readings may straddle for the broadcast clock read between them to place it.
 const STALL: i128 = 1_000;
+
+/// How many more times a stream's first offset is read while every read straddles a stall.
+const RESAMPLES: usize = 8;
+
+/// The broadcast clock's lead over `camera`'s timeline in microseconds, read between two camera
+/// readings, or `None` when they straddle a stall.
+fn clock_offset(clock: &moq_mux::Clock, camera: &capture::Stream) -> Result<Option<i128>, Error> {
+	let before = camera.now().as_micros()? as i128;
+	let media = clock.now().as_micros()? as i128;
+	let after = camera.now().as_micros()? as i128;
+	Ok((after - before <= STALL).then_some(media - (before + after) / 2))
+}
+
+/// [`clock_offset`] however long its reads straddle, for a host that never reads cleanly.
+fn clock_offset_unchecked(clock: &moq_mux::Clock, camera: &capture::Stream) -> Result<i128, Error> {
+	Ok(clock.now().as_micros()? as i128 - camera.now().as_micros()? as i128)
+}
 
 /// A broadcast clock reading in microseconds, zero before PTS zero.
 fn map_capture_timestamp(micros: i128) -> Result<Timestamp, Error> {
