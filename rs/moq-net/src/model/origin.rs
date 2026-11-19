@@ -4462,8 +4462,9 @@ fn follow_demand(
 	if held.is_none() && copy.is_none() {
 		return;
 	}
+	// Woken by the demand changing, which `follow` reads from each reader's own edits.
 	if let Some(accepted) = accepted {
-		while let Poll::Ready(Ok(_)) = accepted.poll_subscription_changed(waiter) {}
+		accepted.watch_subscription(waiter);
 	}
 	match held {
 		Some(hold) => {
@@ -4577,7 +4578,7 @@ impl kio::Task for FrontServeRun {
 		}
 		for mut io in std::mem::take(in_flight) {
 			if let Logical::Requested(request) = &mut io.logical {
-				while let Poll::Ready(Some(_)) = request.poll_subscription_changed(waiter) {}
+				request.watch_subscription(waiter);
 				match io.query.poll_ok(waiter) {
 					Poll::Ready(Ok(info)) => io.logical.accept(info),
 					Poll::Ready(Err(err)) => {

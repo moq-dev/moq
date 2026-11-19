@@ -1826,6 +1826,13 @@ impl Reader {
 					self.window
 						.edit(edited.iter().map(|(key, _)| *key), &added, None, &Unheld)
 						.expect("a hop that holds nothing refuses nothing");
+					// A retired range has nothing left to backfill, so a peer that keeps retiring
+					// and adding ranges before the floor resolves holds only its live ones here.
+					if let Some(Resumed::Ranges(keys)) = &mut self.resumed {
+						for (key, _) in edited.iter().filter(|(_, range)| range.is_none()) {
+							keys.remove(key);
+						}
+					}
 					// The serving copy's resume point may cut off groups the added ranges cover,
 					// judged by the reader's window. A route change still to judge is judged
 					// against every range instead, since the ones it placed moved.
@@ -8037,6 +8044,12 @@ mod test {
 			{
 				let reader = edited.reader();
 				assert!(reader.mirrored.ranges.iter().eq(live.iter()), "step {step}");
+				if let Some(Resumed::Ranges(keys)) = &reader.resumed {
+					assert!(
+						keys.iter().all(|key| live.contains_key(key)),
+						"step {step}: only live ranges wait to be backfilled"
+					);
+				}
 				for copy in &reader.copies {
 					let held = copy.preferences().read();
 					let keys: Vec<u64> = held.ranges().map(|(key, _)| key).collect();

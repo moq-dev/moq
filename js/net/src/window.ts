@@ -13,6 +13,7 @@ import type { Duration } from "@moq/clock";
 import { Counts, Cover } from "./cover.ts";
 import type { Anchor, Range } from "./track.ts";
 import { max, min, UNBOUNDED } from "./util/key.ts";
+import { Sorted } from "./util/sorted.ts";
 
 /** A run of group starts `[start, end)`; an open run ends at {@link UNBOUNDED}. */
 export type Run = { start: bigint; end: bigint };
@@ -721,7 +722,7 @@ export class Window {
 	/** The time starts still looked up, by time. Mirrors the Rust `Window::lookups`. */
 	lookups(): Lookup[] {
 		const lookups: Lookup[] = [];
-		for (const { keys } of this.#looking.all) {
+		for (const { keys } of this.#looking.all()) {
 			for (const key of keys) {
 				const looking = this.#spans.get(key)?.looking;
 				if (looking) lookups.push(looking);
@@ -875,69 +876,70 @@ export class Window {
 }
 
 /** Spans by key, keyed by the time each waits on or looks up, lowest first. */
-type Timed = { time: bigint; keys: bigint[] };
+type Timed = { time: bigint; keys: Set<bigint> };
 
-/** {@link Timed} entries kept sorted by time, so the times in a run are found without a walk. */
+const compareTimes = (a: bigint, b: bigint): number => (a < b ? -1 : a > b ? 1 : 0);
+
+/**
+ * {@link Timed} entries ordered by time, so the times in a run are found without a walk, and a
+ * span joins or leaves its time without shifting every other.
+ */
 class ByTime {
-	#entries: Timed[] = [];
+	#entries = new Sorted<bigint, Timed>((entry) => entry.time, compareTimes);
 
 	get size(): number {
-		return this.#entries.length;
+		return this.#entries.size;
 	}
 
-	get all(): readonly Timed[] {
-		return this.#entries;
-	}
-
-	// The index of the first entry at or after `time`.
-	#at(time: bigint): number {
-		const entries = this.#entries;
-		return lowerBound(entries.length, (i) => entries[i].time >= time);
+	/** Every entry, lowest first. */
+	*all(): Generator<Timed> {
+		const first = this.#entries.first();
+		if (first) yield* this.#entries.from(first.time);
 	}
 
 	/** Add the span keyed `key` under `time`. */
 	add(time: bigint, key: bigint): void {
-		const at = this.#at(time);
-		const entry = this.#entries[at];
-		if (entry?.time === time) entry.keys.push(key);
-		else this.#entries.splice(at, 0, { time, keys: [key] });
+		const entry = this.#entries.ceil(time);
+		if (entry?.time === time) entry.keys.add(key);
+		else this.#entries.insert({ time, keys: new Set([key]) });
 	}
 
 	/** Take the span keyed `key` out from under `time`, if it is there. */
 	remove(time: bigint, key: bigint): void {
-		const at = this.#at(time);
-		const entry = this.#entries[at];
-		if (entry?.time !== time) return;
-		const index = entry.keys.indexOf(key);
-		if (index < 0) return;
-		entry.keys.splice(index, 1);
-		if (entry.keys.length === 0) this.#entries.splice(at, 1);
+		const entry = this.#entries.ceil(time);
+		if (entry?.time !== time || !entry.keys.delete(key)) return;
+		if (entry.keys.size === 0) this.#entries.delete(time);
 	}
 
 	/** Put back an entry taken out, whose time no entry holds. */
 	put(entry: Timed): void {
-		this.#entries.splice(this.#at(entry.time), 0, entry);
+		this.#entries.insert(entry);
 	}
 
 	/** Take out the spans under `time`, if any. */
-	take(time: bigint): bigint[] | undefined {
-		const at = this.#at(time);
-		if (this.#entries[at]?.time !== time) return undefined;
-		return this.#entries.splice(at, 1)[0].keys;
+	take(time: bigint): Set<bigint> | undefined {
+		const entry = this.#entries.ceil(time);
+		if (entry?.time !== time) return undefined;
+		this.#entries.delete(time);
+		return entry.keys;
 	}
 
 	/** Take out every entry whose time is in `[start, end)`, lowest first. */
 	takeIn(start: bigint, end: bigint): Timed[] {
-		const from = this.#at(start);
-		const to = end >= UNBOUNDED ? this.#entries.length : this.#at(end);
-		return to > from ? this.#entries.splice(from, to - from) : [];
+		const taken: Timed[] = [];
+		for (const entry of this.#entries.from(start)) {
+			if (end < UNBOUNDED && entry.time >= end) break;
+			taken.push(entry);
+		}
+		for (const entry of taken) this.#entries.delete(entry.time);
+		return taken;
 	}
 
 	/** Take out every entry, lowest first. */
 	takeAll(): Timed[] {
-		const entries = this.#entries;
-		this.#entries = [];
-		return entries;
+		const taken = [...this.all()];
+		this.#entries = new Sorted<bigint, Timed>((entry) => entry.time, compareTimes);
+		return taken;
 	}
 }
 
@@ -966,18 +968,6 @@ function spanReads(span: Span): [Run | undefined, Run | undefined] {
 		reach = time(span.anchor) ?? span.reach ?? span.start;
 	}
 	return [{ start: span.start, end: span.end }, reach < span.end ? { start: reach, end: span.end } : undefined];
-}
-
-// The first index in `[0, length)` for which `past` holds, `past` being false then true.
-function lowerBound(length: number, past: (index: number) => boolean): number {
-	let lo = 0;
-	let hi = length;
-	while (lo < hi) {
-		const mid = (lo + hi) >>> 1;
-		if (past(mid)) hi = mid;
-		else lo = mid + 1;
-	}
-	return lo;
 }
 
 // The times outside sorted, disjoint `runs`, as runs lowest first.

@@ -5408,6 +5408,14 @@ impl Producer {
 		snapshot_subscription(&subs, bound)
 	}
 
+	/// Arm `waiter` for the next change to the subscribers' demand, without reading it: a
+	/// caller that follows each subscriber's own edits needs the wake, not the aggregate,
+	/// whose ranges cost every subscriber's to build.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn watch_subscription(&self, waiter: &kio::Waiter) {
+		watch_combined(&self.state, waiter);
+	}
+
 	/// The aggregate subscription once it changes: the most demanding request across all
 	/// live subscribers, or `None` once the last one drops. Errors once the track is aborted.
 	///
@@ -5782,6 +5790,12 @@ fn poll_combined_changed(
 	waiter: &kio::Waiter,
 ) -> Poll<Option<Subscription>> {
 	subs.lock().poll_changed(bound, prev, waiter)
+}
+
+/// Arm `waiter` for the next change to the counted aggregate, reading none of it.
+fn watch_combined(state: &kio::Producer<TrackState>, waiter: &kio::Waiter) {
+	let subs = state.read().subscriptions.clone();
+	subs.lock().watch(waiter);
 }
 
 /// Read the counted aggregate without walking the audience.
@@ -12275,6 +12289,13 @@ impl Request {
 		let (subs, bound) = (state.subscriptions.clone(), state.demand_bound());
 		drop(state);
 		snapshot_subscription(&subs, bound)
+	}
+
+	/// Arm `waiter` for the next change to the demand of everyone waiting, without reading
+	/// it; see [`Producer::watch_subscription`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn watch_subscription(&self, waiter: &kio::Waiter) {
+		watch_combined(&self.state, waiter);
 	}
 
 	/// The aggregate [`subscription`](Self::subscription) once it changes, or `None` once
