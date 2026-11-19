@@ -1,6 +1,6 @@
 //! Graceful shutdown coordination: the first shutdown signal fires a broadcast
 //! that every accepted session observes, draining it with a GOAWAY before the
-//! process exits.
+//! process exits. The cluster links the relay dialed drain the same way.
 //!
 //! The drain has one deadline, fixed when it starts. A session accepted after
 //! that (a cached DNS resolve, a pool alias) is sent a GOAWAY at once, carrying
@@ -120,7 +120,7 @@ impl Signals {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Tally {
-	/// Served sessions whose closure has not yet been observed by supervision.
+	/// Served sessions, and dialed cluster links, whose closure has not yet been observed.
 	pub open: usize,
 	/// Closed sessions still reporting their end.
 	pub ending: usize,
@@ -273,6 +273,8 @@ impl Observer {
 	///
 	/// One served after the deadline is closed at once and not counted: arrivals
 	/// a listener still lets through must not hold a drain that is past it.
+	///
+	/// A cluster link the relay dials is counted the same way, from before its first dial.
 	pub fn serve(&self) -> Serving {
 		let counted = self.deadline().is_none_or(|deadline| Instant::now() < deadline);
 		if counted {
@@ -403,6 +405,17 @@ impl Observer {
 		session.abort(moq_net::Error::GoawayTimeout);
 		session.closed().await;
 	}
+
+	/// Drain a cluster link this relay dialed as [`drain`](Self::drain) does an
+	/// accepted session: it stops redialing, sends a GOAWAY, and closes at the deadline.
+	async fn drain_link(&self, link: moq_tokio::Connection, counted: bool) {
+		let now = Instant::now();
+		let deadline = self.deadline().unwrap_or(now.saturating_add(self.drain_timeout));
+		let _draining = counted.then(|| self.draining(deadline));
+		if let Err(err) = link.drain(deadline.saturating_duration_since(now)).await {
+			tracing::debug!(%err, "dialed link did not leave before the drain deadline");
+		}
+	}
 }
 
 /// A session the drain waits on, from [`Observer::serve`].
@@ -430,6 +443,12 @@ impl Serving {
 	pub(crate) async fn drain(&self, session: &moq_net::Session) {
 		let counted = !matches!(self.count, Count::Uncounted);
 		self.shutdown.drain(session, counted).await;
+	}
+
+	/// Drain a cluster link this relay dialed; see [`Observer::drain_link`].
+	pub(crate) async fn drain_link(&self, link: moq_tokio::Connection) {
+		let counted = !matches!(self.count, Count::Uncounted);
+		self.shutdown.drain_link(link, counted).await;
 	}
 
 	/// The session closed: count it as ending until this drops. Only the first call counts.

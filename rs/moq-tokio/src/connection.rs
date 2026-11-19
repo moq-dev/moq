@@ -17,6 +17,24 @@ use crate::{Addrs, Client, Error};
 
 pub use moq_net::reconnect::Restart;
 
+/// Close a predecessor still finishing a handover, aborting it at its deadline.
+async fn close_predecessor(
+	predecessor: Option<(moq_net::Session, kio::clock::Instant)>,
+) -> Result<(), moq_net::Error> {
+	let Some((session, deadline)) = predecessor else {
+		return Ok(());
+	};
+	let abort = session.clone();
+	let mut close = std::pin::pin!(session.close());
+	tokio::select! {
+		res = &mut close => res,
+		_ = kio::clock::sleep_until(deadline) => {
+			abort.abort(moq_net::Error::GoawayTimeout);
+			close.await
+		}
+	}
+}
+
 /// How a failed dial to `url` bears on the address walk.
 ///
 /// An address no backend of `client` can dial never works. A status the peer actually sent
@@ -1077,8 +1095,64 @@ impl Connection {
 		// Abort stops redials, but the sessions still need their token grants until
 		// the drain completes. Dropping this owner also ends auth if close is cancelled.
 		let running = self.task.running.upgrade();
+		let (session, predecessor) = self.stop();
+		let session = async move {
+			match session {
+				Some(session) => session.close().await,
+				None => Ok(()),
+			}
+		};
+		let (session, predecessor) =
+			crate::runtime::scope(async { tokio::join!(session, close_predecessor(predecessor)) }).await;
+		drop(running);
+		Ok(session.and(predecessor)?)
+	}
+
+	/// Stop the loop for every clone and drain the live session with an empty-URI
+	/// GOAWAY ("reconnect to me"), waiting for the peer to close it. A peer relay
+	/// does not close it on its own: it ranks the session's routes below every other
+	/// and keeps serving it until this side closes it.
+	///
+	/// At `timeout` the session is closed with [`moq_net::Error::GoawayTimeout`] on
+	/// this side's own timer, so a peer stalling the GOAWAY's write cannot hold it
+	/// open. A predecessor still finishing a handover closes as in
+	/// [`close`](Self::close), and tokens stay presented until both end. Returns `Ok`
+	/// when nothing was live or the peer left before `timeout`, whatever its close
+	/// code, and [`moq_net::Error::GoawayTimeout`] when `timeout` closed the session.
+	pub async fn drain(self, timeout: Duration) -> crate::Result<()> {
+		let running = self.task.running.upgrade();
+		let deadline = kio::clock::now().saturating_add(timeout);
+		let (session, predecessor) = self.stop();
+		let session = async move {
+			let Some(session) = session else {
+				return Ok(());
+			};
+			// A client never names a redirect, and the loop that could send another is
+			// stopped, so neither error is reachable; the deadline closes it regardless.
+			if let Err(err) = session.goaway(moq_net::goaway::Goaway::new().with_timeout(Some(timeout))) {
+				tracing::warn!(%err, "failed to drain session");
+			}
+			tokio::select! {
+				biased;
+				_ = session.closed() => Ok(()),
+				() = kio::clock::sleep_until(deadline) => {
+					session.abort(moq_net::Error::GoawayTimeout);
+					session.closed().await;
+					Err(moq_net::Error::GoawayTimeout)
+				}
+			}
+		};
+		let (session, predecessor) =
+			crate::runtime::scope(async { tokio::join!(session, close_predecessor(predecessor)) }).await;
+		drop(running);
+		Ok(session.and(predecessor)?)
+	}
+
+	/// Refuse redials for every clone and stop the loop, returning the live session
+	/// and any predecessor still finishing a handover, with its deadline.
+	fn stop(&self) -> (Option<moq_net::Session>, Option<(moq_net::Session, kio::clock::Instant)>) {
 		// Refuse redials and take the sessions under one lock: see [`CloseGuard`].
-		let (session, predecessor) = {
+		let taken = {
 			let mut closed = self.task.closed.lock().unwrap();
 			*closed = Some(moq_net::Error::Cancel);
 			let state = self.state.read();
@@ -1090,29 +1164,7 @@ impl Connection {
 			)
 		};
 		self.task.handle.abort();
-		let session = async move {
-			match session {
-				Some(session) => session.close().await,
-				None => Ok(()),
-			}
-		};
-		let predecessor = async move {
-			let Some((session, deadline)) = predecessor else {
-				return Ok(());
-			};
-			let abort = session.clone();
-			let mut close = std::pin::pin!(session.close());
-			tokio::select! {
-				res = &mut close => res,
-				_ = kio::clock::sleep_until(deadline) => {
-					abort.abort(moq_net::Error::GoawayTimeout);
-					close.await
-				}
-			}
-		};
-		let (session, predecessor) = crate::runtime::scope(async { tokio::join!(session, predecessor) }).await;
-		drop(running);
-		Ok(session.and(predecessor)?)
+		taken
 	}
 
 	/// Drive moq-net's policy: dial each attempt it asks for and publish what it does.
