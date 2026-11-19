@@ -140,7 +140,7 @@ func Example_mediaVideoHint() {
 	}
 	defer broadcast.Close()
 
-	media, err := moqmedia.NewVideoTrackProducer(broadcast, moqmedia.Named{}, moqmedia.VideoInit{Format: moqmedia.VideoFormatAvc3, Data: nil, Hint: &moqmedia.VideoHint{}})
+	media, err := moqmedia.NewVideoTrackProducer(broadcast, moqmedia.Named{}, moqmedia.VideoInit{Format: moqmedia.VideoFormatH264, Data: nil, Hint: &moqmedia.VideoHint{}})
 	if err != nil {
 		log.Fatal(err)
 	}

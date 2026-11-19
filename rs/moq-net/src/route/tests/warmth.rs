@@ -6,6 +6,7 @@
 //! costs against the cheapest, how many copies leave the publisher's relay, the
 //! messages and rounds it took, and whether pulls ever formed a cycle or left a reader
 //! unfed. The ignored benchmarks print the tables; the tests pin what they show.
+//! [`benchmark_warmth_mesh`] measures a mesh read from a file instead.
 
 use super::multi::Tie;
 use super::warm::*;
@@ -1478,4 +1479,306 @@ fn ranked_pulls_settle_random_case_503() {
 		assert_eq!(out.failed, 0, "{}: {:?}", arm.name(), out.first);
 	}
 	assert_eq!(churn(NOT_DOWN_QUERY, 503..504, random).failed, 1);
+}
+
+// --- A mesh from a file ---
+
+/// A mesh read from a file, one statement per line, `#` starting a comment:
+///
+/// - `relay <name>...` names relays.
+/// - `link <a> <b> <cold> <warm> <peer|up> [<label>]` links two: what a copy starting
+///   across the link costs, what one already crossing it costs, `up` when `a` marks `b`
+///   its upstream, and a label to total by, such as `backbone`.
+/// - `publish <broadcast> <relay>` puts a broadcast's publisher on a relay.
+/// - `read <broadcast> <relay>...` puts a reader of it on each relay, joining in the
+///   file's order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Mesh {
+	relays: Vec<String>,
+	links: Vec<(Node, Node, Price, Tie)>,
+	/// Each link's label, if it has one.
+	labels: BTreeMap<(Node, Node), String>,
+	/// Each broadcast and its publisher's relay.
+	casts: Vec<(String, Node)>,
+	/// A broadcast and a relay reading it.
+	readers: Vec<(usize, Node)>,
+}
+
+impl Mesh {
+	/// The mesh `text` describes, or the first line that is wrong.
+	fn parse(text: &str) -> Result<Self, String> {
+		let mut mesh = Self {
+			relays: Vec::new(),
+			links: Vec::new(),
+			labels: BTreeMap::new(),
+			casts: Vec::new(),
+			readers: Vec::new(),
+		};
+		for (number, line) in text.lines().enumerate() {
+			let line = line.split('#').next().unwrap_or_default();
+			let words: Vec<&str> = line.split_whitespace().collect();
+			mesh.statement(&words)
+				.map_err(|err| format!("line {}: {err}", number + 1))?;
+		}
+		match mesh.casts.is_empty() {
+			true => Err("no broadcast is published".into()),
+			false => Ok(mesh),
+		}
+	}
+
+	fn relay(&self, name: &str) -> Result<Node, String> {
+		(self.relays.iter())
+			.position(|relay| relay == name)
+			.ok_or_else(|| format!("no relay named {name}"))
+	}
+
+	fn cast(&self, name: &str) -> Result<usize, String> {
+		(self.casts.iter())
+			.position(|(cast, _)| cast == name)
+			.ok_or_else(|| format!("no broadcast named {name}"))
+	}
+
+	fn statement(&mut self, words: &[&str]) -> Result<(), String> {
+		match *words {
+			[] => {}
+			["relay", ref names @ ..] if !names.is_empty() => {
+				for name in names {
+					if self.relay(name).is_ok() {
+						return Err(format!("relay {name} is named twice"));
+					}
+					self.relays.push(name.to_string());
+				}
+			}
+			["link", a, b, cold, warm, tie @ ("peer" | "up"), ref label @ ..] if label.len() < 2 => {
+				let (a, b) = (self.relay(a)?, self.relay(b)?);
+				let price = |word: &str| word.parse::<Metric>().map_err(|err| format!("price {word}: {err}"));
+				let (cold, warm) = (price(cold)?, price(warm)?);
+				if a == b {
+					return Err("a link joins two relays".into());
+				}
+				if self.links.iter().any(|&(c, d, ..)| pair(a, b) == pair(c, d)) {
+					return Err("the link is listed twice".into());
+				}
+				if warm < 1 || cold < warm {
+					return Err(format!(
+						"a warm price of {warm} against {cold}: at least 1, at most the cold price"
+					));
+				}
+				let tie = if tie == "up" { Tie::Up } else { Tie::Peer };
+				self.links.push((a, b, Price::new(cold, warm), tie));
+				if let [label] = label {
+					self.labels.insert(pair(a, b), label.to_string());
+				}
+			}
+			["publish", cast, relay] => {
+				if self.cast(cast).is_ok() {
+					return Err(format!("broadcast {cast} is published twice"));
+				}
+				self.casts.push((cast.to_string(), self.relay(relay)?));
+			}
+			["read", cast, ref relays @ ..] if !relays.is_empty() => {
+				let cast = self.cast(cast)?;
+				for relay in relays {
+					let reader = (cast, self.relay(relay)?);
+					if self.readers.contains(&reader) {
+						return Err(format!("relay {relay} reads it twice"));
+					}
+					self.readers.push(reader);
+				}
+			}
+			_ => return Err(format!("not a statement: {}", words.join(" "))),
+		}
+		Ok(())
+	}
+
+	/// Build the mesh under `arm`, join each reader in turn, and report what settled.
+	fn carry(&self, arm: Arm) -> Carried {
+		let mut sim = WarmSim::new(arm, self.relays.len(), self.casts.len(), 7);
+		for &(a, b, price, tie) in &self.links {
+			sim.link(a, b, price, tie);
+		}
+		let mut settled = sim.settle();
+		for (index, &(_, home)) in self.casts.iter().enumerate() {
+			assert_eq!(sim.publish(index, home, 1), [index]);
+		}
+		settled &= sim.settle();
+		let sent = sim.sent;
+		for &(cast, relay) in &self.readers {
+			sim.read(relay, cast, true);
+			settled &= sim.settle();
+		}
+		// `check` passes over a reader the route layer never routes, which here is a
+		// file that links it to nothing.
+		let unfed = (self.readers.iter()).find(|&&(cast, relay)| !sim.feeds(relay, cast));
+		let mut out = Carried {
+			right: match (settled, unfed) {
+				(false, _) => Err("never settled".into()),
+				(true, Some(&(cast, relay))) => Err(format!(
+					"relay {} is never fed broadcast {}",
+					self.relays[relay], self.casts[cast].0
+				)),
+				(true, None) => sim.check(),
+			},
+			links: BTreeMap::new(),
+			sent: sim.sent - sent,
+		};
+		for cast in 0..self.casts.len() {
+			// A publisher's own link to its relay is no link of the mesh.
+			for (a, b) in sim.tree(cast).edges {
+				if a.max(b) < self.relays.len() {
+					*out.links.entry(pair(a, b)).or_default() += 1;
+				}
+			}
+		}
+		out
+	}
+
+	/// The link-groups `carried` puts on the links labelled `label`, or on every link,
+	/// and their cold prices summed.
+	fn total(&self, carried: &Carried, label: Option<&str>) -> (usize, Metric) {
+		(self.links.iter())
+			.filter(|&&(a, b, ..)| label.is_none_or(|label| self.labels.get(&pair(a, b)).is_some_and(|l| l == label)))
+			.filter_map(|&(a, b, price, _)| Some((*carried.links.get(&pair(a, b))?, price.cold)))
+			.fold((0, 0), |(count, cost), (copies, cold)| {
+				(count + copies, cost + copies as Metric * cold)
+			})
+	}
+}
+
+/// What a [`Mesh`] carries once every reader is fed.
+#[derive(Clone, Debug)]
+struct Carried {
+	right: Result<(), String>,
+	/// Link-groups: the copies each link carries of one group of every broadcast.
+	links: BTreeMap<(Node, Node), usize>,
+	sent: Sent,
+}
+
+/// A core mesh with a regional pop, two edges, and two publishers, small enough to
+/// read: what a private graph's file looks like.
+const EXAMPLE: &str = include_str!("warmth.mesh");
+
+/// Per arm, the link-groups a mesh read from the file `MOQ_WARMTH_MESH` names carries
+/// once each of its readers has joined in turn, on every link and on those of each
+/// label, then per link: ranked readers against path joins. A tree feeding the same
+/// readers spans about as many links either way, so the saving shows in which links
+/// carry it: the cost, and the labelled links. Without the variable, it reads the
+/// committed example. A deployment's graph is private, so pass its file by absolute
+/// path and commit none:
+///
+/// `MOQ_WARMTH_MESH=/path/to/mesh just rs test -p moq-net --release --run-ignored only --no-capture -E 'test(=route::tests::warmth::benchmark_warmth_mesh)'`
+#[test]
+#[ignore = "a benchmark; Nightly runs it from test/route-sweep.sh"]
+fn benchmark_warmth_mesh() {
+	let text = match std::env::var("MOQ_WARMTH_MESH") {
+		Ok(path) => std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("{path}: {err}")),
+		Err(_) => EXAMPLE.to_string(),
+	};
+	let mesh = Mesh::parse(&text).unwrap_or_else(|err| panic!("{err}"));
+	let arms = [PATH, ORDER_ROUTE];
+	let carried = arms.map(|arm| mesh.carry(arm));
+	let labels: BTreeSet<&str> = mesh.labels.values().map(String::as_str).collect();
+	println!("arm,links,link_groups,cold_cost,messages,warm_messages,right");
+	for (arm, carried) in arms.iter().zip(&carried) {
+		for label in [None].into_iter().chain(labels.iter().copied().map(Some)) {
+			let (count, cost) = mesh.total(carried, label);
+			println!(
+				"{},{},{count},{cost},{},{},{}",
+				arm.name(),
+				label.unwrap_or("all"),
+				carried.sent.total(),
+				carried.sent.warm(),
+				carried
+					.right
+					.clone()
+					.err()
+					.map_or("yes".into(), |err| err.replace(',', ";")),
+			);
+		}
+	}
+	println!("link,label,cold,warm,kind,{},{}", arms[0].name(), arms[1].name());
+	for &(a, b, price, tie) in &mesh.links {
+		let [path, ranked] = carried
+			.each_ref()
+			.map(|carried| carried.links.get(&pair(a, b)).copied().unwrap_or(0));
+		if path + ranked > 0 {
+			let kind = if tie == Tie::Up { "upstream" } else { "peer" };
+			let label = mesh.labels.get(&pair(a, b)).map_or("-", String::as_str);
+			println!(
+				"{} {},{label},{},{},{kind},{path},{ranked}",
+				mesh.relays[a], mesh.relays[b], price.cold, price.warm
+			);
+		}
+	}
+	for (arm, carried) in arms.iter().zip(&carried) {
+		assert_eq!(carried.right, Ok(()), "{}", arm.name());
+	}
+}
+
+/// The example settles under both arms over as many links, and ranked readers move it
+/// off the backbone.
+#[test]
+fn a_mesh_file_carries_fewer_link_groups_ranked() {
+	let mesh = Mesh::parse(EXAMPLE).expect("the example");
+	let [path, ranked] = [PATH, ORDER_ROUTE].map(|arm| mesh.carry(arm));
+	assert_eq!((path.right.clone(), ranked.right.clone()), (Ok(()), Ok(())));
+	assert_eq!(
+		(mesh.total(&path, None), mesh.total(&ranked, None)),
+		((12, 53), (12, 39))
+	);
+	let backbone = Some("backbone");
+	assert_eq!(
+		(mesh.total(&path, backbone), mesh.total(&ranked, backbone)),
+		((4, 32), (1, 8))
+	);
+}
+
+/// A reader with no route to its publisher fails the run instead of counting for nothing.
+#[test]
+fn a_mesh_file_with_an_unlinked_reader_is_not_right() {
+	let text = "relay a b c\nlink a b 2 1 peer\npublish live a\nread live b c";
+	for arm in [PATH, ORDER_ROUTE] {
+		let carried = Mesh::parse(text).expect("parsed").carry(arm);
+		assert_eq!(carried.right, Err("relay c is never fed broadcast live".into()));
+	}
+	let linked = format!("{text}\nlink b c 2 1 peer");
+	for arm in [PATH, ORDER_ROUTE] {
+		assert_eq!(Mesh::parse(&linked).expect("parsed").carry(arm).right, Ok(()));
+	}
+}
+
+/// A file that names what it never declared, or prices a link wrong, is refused with
+/// its line.
+#[test]
+fn a_mesh_file_is_refused_at_its_first_wrong_line() {
+	let refused = |text: &str| Mesh::parse(text).expect_err("refused");
+	assert_eq!(refused("relay a\nlink a b 2 1 peer"), "line 2: no relay named b");
+	assert_eq!(refused("relay a a"), "line 1: relay a is named twice");
+	assert_eq!(
+		refused("relay a b\nlink a b 2 1 peer\nlink b a 3 1 peer"),
+		"line 3: the link is listed twice"
+	);
+	assert_eq!(refused("relay a\nlink a a 2 1 peer"), "line 2: a link joins two relays");
+	assert_eq!(
+		refused("relay a b\nlink a b 1 2 up"),
+		"line 2: a warm price of 2 against 1: at least 1, at most the cold price"
+	);
+	assert_eq!(
+		refused("relay a b\nlink a b 2 1 down"),
+		"line 2: not a statement: link a b 2 1 down"
+	);
+	assert_eq!(
+		refused("relay a b\nlink a b 2 1 up long haul"),
+		"line 2: not a statement: link a b 2 1 up long haul"
+	);
+	assert_eq!(
+		refused("relay a\npublish live a\npublish live a"),
+		"line 3: broadcast live is published twice"
+	);
+	assert_eq!(refused("relay a\nread live a"), "line 2: no broadcast named live");
+	assert_eq!(
+		refused("relay a\npublish live a\nread live a a"),
+		"line 3: relay a reads it twice"
+	);
+	assert_eq!(refused("relay a # alone"), "no broadcast is published");
 }

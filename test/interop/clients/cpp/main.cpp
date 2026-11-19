@@ -216,7 +216,7 @@ int publish(
     auto broadcast = route->broadcast();
     auto catalog = ok(moq::MediaCatalogProducer::init(broadcast), "catalog producer");
     auto media = ok(
-        moq::MediaTrackStreamProducer::video(broadcast, moq::MediaTarget::kNamed{}, {moq::VideoFormat::kAvc3, {}}),
+        moq::MediaTrackStreamProducer::video(broadcast, moq::MediaTarget::kNamed{}, {moq::VideoFormat::kH264, {}}),
         "video stream producer"
     );
     moq::AudioEncoderOutput output{moq::AudioCodec::opus()};

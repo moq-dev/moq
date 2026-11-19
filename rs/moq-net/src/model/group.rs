@@ -4142,13 +4142,6 @@ impl Consumer {
 		self.poll_expiry(waiter, true)
 	}
 
-	/// Whether the subscription this group was handed out under gave up on it as stale, as
-	/// [`Self::poll_expired`] or a read failing with [`Error::Old`] found.
-	#[cfg(feature = "async")]
-	pub(crate) fn is_expired(&self) -> bool {
-		self.expired
-	}
-
 	/// Apply the drift budget to a read that found nothing and is about to park, failing
 	/// it with [`Error::Old`] once the budget gives up.
 	///

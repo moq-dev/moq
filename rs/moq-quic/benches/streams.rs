@@ -7,6 +7,8 @@
 //! reprioritize case moves streams that stay queued, never sending them. The group churn case
 //! moves and cancels send groups, one per subscription, while the rest have data queued.
 
+use std::task::Poll;
+
 use bytes::Bytes;
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use moq_quic::stream::Dir;
@@ -17,7 +19,7 @@ use moq_quic::stream::Dir;
 )]
 mod common;
 
-use common::{Pair, Setup, ThreadCpu, payload};
+use common::{Pair, Setup, ThreadCpu, WriteNow, payload};
 
 #[allow(dead_code, reason = "the scheduler benchmark exercises only its queued send paths")]
 #[path = "../src/connection/streams/schedule.rs"]
@@ -135,7 +137,7 @@ fn send(pair: &mut Pair, streams: usize, priorities: usize, writes: usize, size:
 		// `as _` follows the priority type, which a scheduler rewrite widens.
 		stream.set_priority((index % priorities) as _).unwrap();
 		for _ in 0..writes {
-			assert_eq!(stream.write(&mut data.clone()).unwrap(), size, "write was cut short");
+			assert_eq!(stream.write_now(&mut data.clone()), size, "write was cut short");
 		}
 		stream.finish().unwrap();
 	}
@@ -175,7 +177,7 @@ fn bench_reprioritize(c: &mut Criterion<ThreadCpu>) {
 		let ids: Vec<_> = (0..queued)
 			.map(|_| {
 				let id = conn.streams().open(Dir::Uni, Default::default()).expect("stream limit");
-				assert_eq!(conn.send_stream(id).write(&mut &b"x"[..]).unwrap(), 1);
+				assert_eq!(conn.send_stream(id).write_now(&mut &b"x"[..]), 1);
 				id
 			})
 			.collect();
@@ -228,7 +230,7 @@ fn bench_group_churn(c: &mut Criterion<ThreadCpu>) {
 							};
 							let id = conn.streams().open(Dir::Uni, options).expect("stream limit");
 							let mut stream = conn.send_stream(id);
-							assert_eq!(stream.write(&mut data.clone()).unwrap(), BYTES);
+							assert_eq!(stream.write_now(&mut data.clone()), BYTES);
 							stream.finish().unwrap();
 							id
 						})
@@ -272,12 +274,20 @@ fn send_windowed(pair: &mut Pair, total: usize, size: usize) {
 	while written < total {
 		// A write the window cuts short resumes mid-chunk, so every chunk boundary stays put.
 		let start = written % size;
-		match pair.client().send_stream(id).write(&mut data.slice(start..)) {
-			Ok(n) => written += n,
-			Err(moq_quic::send::Error::Blocked) => {
-				pair.drive_until(|pair| pair.client().send_stream(id).write(&mut Bytes::new()).is_ok())
-			}
-			Err(err) => panic!("{err}"),
+		let noop = kio::Waiter::noop();
+		match pair
+			.client()
+			.send_stream(id)
+			.poll_write(&noop, &mut data.slice(start..))
+		{
+			Poll::Ready(Ok(n)) => written += n,
+			Poll::Pending => pair.drive_until(|pair| {
+				matches!(
+					pair.client().send_stream(id).poll_write(&noop, &mut Bytes::new()),
+					Poll::Ready(Ok(_))
+				)
+			}),
+			Poll::Ready(Err(err)) => panic!("{err}"),
 		}
 	}
 	pair.client().send_stream(id).finish().unwrap();
@@ -351,12 +361,16 @@ fn bench_connection_blocked(c: &mut Criterion<ThreadCpu>) {
 							});
 							// A window can't be zero, so one stream spends its only byte.
 							let id = pair.client().streams().open(Dir::Uni, Default::default()).unwrap();
-							assert_eq!(pair.client().send_stream(id).write(&mut &b"x"[..]), Ok(1));
+							let noop = kio::Waiter::noop();
+							assert_eq!(
+								pair.client().send_stream(id).poll_write(&noop, &mut &b"x"[..]),
+								Poll::Ready(Ok(1))
+							);
 							for _ in 0..live {
 								let id = pair.client().streams().open(Dir::Uni, Default::default()).unwrap();
 								assert_eq!(
-									pair.client().send_stream(id).write(&mut &b"x"[..]),
-									Err(moq_quic::send::Error::Blocked)
+									pair.client().send_stream(id).poll_write(&noop, &mut &b"x"[..]),
+									Poll::Pending
 								);
 							}
 							pair
@@ -365,7 +379,7 @@ fn bench_connection_blocked(c: &mut Criterion<ThreadCpu>) {
 							for _ in 0..churn {
 								let id = pair.client().streams().open(Dir::Uni, Default::default()).unwrap();
 								let mut stream = pair.client().send_stream(id);
-								assert_eq!(stream.write(&mut &b"x"[..]), Err(moq_quic::send::Error::Blocked));
+								assert_eq!(stream.poll_write(&kio::Waiter::noop(), &mut &b"x"[..]), Poll::Pending);
 								stream.reset(0u32.into()).unwrap();
 							}
 							// The peer never grants credit. Packet exchange and dropping the live

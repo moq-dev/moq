@@ -724,9 +724,8 @@ export function hasLengthFirst(version: Version): boolean {
 
 /**
  * Whether GROUP carries the previous group's `Previous Start`, and a Group or Fetch Stream ends a
- * finished group with GROUP_END and a closed one with a bare FIN. A publisher then closes an
- * expired group's stream rather than resetting it. Added in lite-07; earlier versions end every
- * group with a bare FIN.
+ * finished group with GROUP_END and a closed one with a bare FIN. Added in lite-07; earlier
+ * versions end every group with a bare FIN.
  */
 export function hasGroupEnd(version: Version): boolean {
 	switch (version) {

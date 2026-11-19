@@ -889,7 +889,7 @@ fn publish_media_owns_its_rendition_before_the_first_keyframe() {
 	// nothing until a keyframe lands.
 	let media = id(publish_video(
 		broadcast,
-		moq_video_format::MOQ_VIDEO_FORMAT_AVC3,
+		moq_video_format::MOQ_VIDEO_FORMAT_H264,
 		&[],
 		None,
 	));
@@ -6312,7 +6312,7 @@ fn video_publish_consume() {
 	let broadcast = publish_broadcast(origin, path);
 
 	let init = h264_init();
-	let format = moq_video_format::MOQ_VIDEO_FORMAT_AVC3;
+	let format = moq_video_format::MOQ_VIDEO_FORMAT_H264;
 	let media = id(publish_video(broadcast, format, &init, None));
 
 	let consume = request_broadcast(origin, path);
@@ -7337,7 +7337,7 @@ fn video_raw_decode() {
 	// The init's SPS/PPS only seed catalog metadata; avc3 frames carry their own
 	// inline parameter sets, so the decoder reads the true 320x240 from the wire.
 	let init = h264_init();
-	let format = moq_video_format::MOQ_VIDEO_FORMAT_AVC3;
+	let format = moq_video_format::MOQ_VIDEO_FORMAT_H264;
 	let media = id(publish_video(broadcast, format, &init, None));
 
 	let consume = request_broadcast(origin, path);
@@ -9273,7 +9273,7 @@ fn track_request_media_carries_hints() {
 	let h264 = h264_init();
 	let video_config = moq_video_init {
 		lower: 0,
-		format: moq_video_format::MOQ_VIDEO_FORMAT_AVC3 as u32,
+		format: moq_video_format::MOQ_VIDEO_FORMAT_H264 as u32,
 		init: h264.as_ptr(),
 		init_len: h264.len(),
 		label: std::ptr::null(),
@@ -9328,7 +9328,7 @@ fn invalid_hints_are_refused() {
 	let video = |hint: moq_video_hint| {
 		let config = moq_video_init {
 			lower: 0,
-			format: moq_video_format::MOQ_VIDEO_FORMAT_AVC3 as u32,
+			format: moq_video_format::MOQ_VIDEO_FORMAT_H264 as u32,
 			init: h264.as_ptr(),
 			init_len: h264.len(),
 			label: std::ptr::null(),
@@ -9444,7 +9444,7 @@ fn preencoded_rungs_and_rate_control() {
 	let broadcast = publish_broadcast(origin, b"preencoded-rungs");
 	let init = h264_init();
 	let config = |lower| moq_video_init {
-		format: moq_video_format::MOQ_VIDEO_FORMAT_AVC3 as u32,
+		format: moq_video_format::MOQ_VIDEO_FORMAT_H264 as u32,
 		init: init.as_ptr(),
 		init_len: init.len(),
 		label: std::ptr::null(),

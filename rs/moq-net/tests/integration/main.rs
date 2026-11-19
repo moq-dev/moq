@@ -77,6 +77,7 @@ mod route_failover;
 mod route_health;
 mod route_race;
 mod route_stats;
+mod routeless_domain;
 mod segmented_frame;
 mod session_close;
 mod session_panic;

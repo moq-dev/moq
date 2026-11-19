@@ -205,8 +205,7 @@ impl From<moq_net::announce::Announce> for MoqAnnounce {
 	}
 }
 
-/// What a [`MoqAnnounceConsumer`] yields: a path becoming present, absent, or offline, or
-/// its availability changing.
+/// What a [`MoqAnnounceConsumer`] yields: a path becoming present or absent.
 ///
 /// Another publisher instance taking a path over keeps it present: follow it with
 /// `MoqOriginConsumer::follow` to see the broadcast change.
@@ -217,27 +216,9 @@ pub enum MoqAnnounceEvent {
 		/// The announcement that made the path present.
 		announce: MoqAnnounce,
 	},
-	/// The present path lost every usable path to its origin but may recover one: it stays
-	/// present while requests for it may fail.
-	Unavailable {
-		/// The announcement, now unavailable.
-		announce: MoqAnnounce,
-	},
-	/// The present path recovered a usable path: request it again.
-	Available {
-		/// The announcement, available again.
-		announce: MoqAnnounce,
-	},
-	/// The origin withdrew the path: no route covers it any more. Carries its last
-	/// advertised route.
+	/// No route covers the path any more, whether its origin withdrew it or this side let go
+	/// of it. Carries its last advertised route.
 	Absent {
-		/// The announcement that went.
-		announce: MoqAnnounce,
-	},
-	/// This origin let go of the path, and no route covers it any more: the session it
-	/// arrived on closed, or the network lost every path to it. Its origin may still serve
-	/// it. Carries its last advertised route.
-	Offline {
 		/// The announcement that went.
 		announce: MoqAnnounce,
 	},
@@ -250,16 +231,7 @@ impl From<moq_net::announce::Event> for MoqAnnounceEvent {
 			Event::Present(announce) => Self::Present {
 				announce: announce.into(),
 			},
-			Event::Unavailable(announce) => Self::Unavailable {
-				announce: announce.into(),
-			},
-			Event::Available(announce) => Self::Available {
-				announce: announce.into(),
-			},
 			Event::Absent(announce) => Self::Absent {
-				announce: announce.into(),
-			},
-			Event::Offline(announce) => Self::Offline {
 				announce: announce.into(),
 			},
 		}
