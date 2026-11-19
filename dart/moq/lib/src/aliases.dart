@@ -158,13 +158,12 @@ extension type Timestamp._(MoqTimestamp _timestamp) implements MoqTimestamp {
 
 /// How far behind the live edge a subscriber or decoder plays: where it starts, and how late it may fall.
 extension type Delay._(MoqDelay _delay) implements MoqDelay {
-  /// `min` is the target latency, where a cold join starts, and how long a decoder waits for a
-  /// missing group, and `max` is how far a non-latest group may fall behind before it is skipped.
+  /// `min` is the target latency, where a cold join starts, and `max` is how far a non-latest
+  /// group may fall behind before it is skipped, and how long a decoder waits for a missing group.
   /// Both default to zero, moq-net's default. An explicit null `min` leaves it unstated, which a
-  /// decoder starts as zero, waiting a missing group for `max` instead (an audio decoder floors it
-  /// at zero and waits only its playout estimate, which can be larger; a catalog warmup or an audio
-  /// decoder's playout delay still states a `min` to the publisher), and an
-  /// explicit null `max` sets no subscriber limit. A `min` past `max` starts at `max`.
+  /// decoder starts as zero (a catalog warmup or an audio decoder's playout delay still states a
+  /// `min` to the publisher), and an explicit null `max` sets no subscriber limit. A `min` past
+  /// `max` starts at `max`.
   Delay({Duration? min = Duration.zero, Duration? max = Duration.zero})
     : this._(MoqDelay(min: min, max: max));
 }

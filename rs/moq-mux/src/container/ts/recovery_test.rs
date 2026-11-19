@@ -482,14 +482,18 @@ async fn record(profile: Profile) -> Recording {
 					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(300))),
 			)
 			.await
-			.unwrap();
+			.unwrap()
+			.ordered();
 		let mut groups = Vec::new();
 		let mut ends = Vec::new();
-		while let Some(mut group) = kio::clock::timeout(Duration::from_secs(1), track.recv_group())
+		while let Some(item) = kio::clock::timeout(Duration::from_secs(1), track.next_group())
 			.await
 			.unwrap()
 			.unwrap()
 		{
+			let moq_net::track::Item::Group(mut group) = item else {
+				continue;
+			};
 			let mut frames = Vec::new();
 			while let Some(frame) = group.read_frame().await.unwrap() {
 				frames.push(frame);

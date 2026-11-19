@@ -55,13 +55,17 @@ async fn import(data: &[u8]) -> Imported {
 			moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(RECORDING)),
 		)
 		.await
-		.unwrap();
+		.unwrap()
+		.ordered();
 	let mut objects = Vec::new();
-	while let Some(mut group) = kio::clock::timeout(Duration::from_secs(1), track.recv_group())
+	while let Some(item) = kio::clock::timeout(Duration::from_secs(1), track.next_group())
 		.await
 		.unwrap()
 		.unwrap()
 	{
+		let moq_net::track::Item::Group(mut group) = item else {
+			continue;
+		};
 		while let Some(frame) = group.read_frame().await.unwrap() {
 			if frame.payload.is_empty() {
 				let micros = objects.last().map_or(0, |object: &Object| object.micros);
