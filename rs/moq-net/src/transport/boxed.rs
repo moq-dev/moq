@@ -1282,7 +1282,7 @@ mod test {
 	}
 
 	/// A grouped stream ranks by its group's current priority, and follows a move to another
-	/// group; a transport that cannot tell reports no acknowledgement.
+	/// group; a transport that cannot see acknowledgements reports its bytes acknowledged.
 	#[test]
 	fn a_listed_stream_ranks_by_its_group() {
 		let session = Session::new(SinkSession::new(Default::default()).with_groups());
@@ -1305,6 +1305,7 @@ mod test {
 		assert_eq!(grouped(&session), (3, 2));
 		poll::SendStream::set_group(&mut stream, &high);
 		assert_eq!(grouped(&session), (5, 2));
+		assert!(session.open_streams()[0].1.acknowledged());
 	}
 
 	/// A stream accepted while the connection window was held back, such as one buffered
