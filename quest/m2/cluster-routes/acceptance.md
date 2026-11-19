@@ -57,10 +57,14 @@ subscriber forced to ask for the root):
   grant. So a confined JS client with that many readers has this gap
   against either publisher today.
 
-## Waiting
+Decided 2026-11-19 (maintainer, in the coordinating session, on
+[moq-dev/moq#9112](https://github.com/moq-dev/moq/pull/9112)): ✅ D, ask
+wider and answer the granted part (rejected: A, the size exception for
+granted regions; B, the public API change; C, leaving the reader to hang).
+It changes the lite-07-wip draft and both publishers, so it lands before
+the cut. The options as they were put:
 
-- Maintainer: how a subscriber handles a grant too wide for one
-  ANNOUNCE_REQUEST. Recommended: D.
+- How a subscriber handles a grant too wide for one ANNOUNCE_REQUEST.
   - (D) Ask wider, answer the granted part. `coarsen` falls back to the
     regions' longest shared ancestor, up to the root, and never drops a
     region. Draft: a requested prefix wider than the subscriber's scope is
