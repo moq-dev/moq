@@ -4,7 +4,7 @@
 //! what arrives, not what one subscriber asked for. A [`Window`] is the per-subscriber
 //! side: resolved at the hop serving the subscriber, it filters that subscriber's reads.
 
-use std::{ops, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, ops, sync::Arc, time::Duration};
 
 use super::{Anchor, Layered, Range, Runs};
 use crate::{Error, Result};
@@ -64,6 +64,13 @@ pub(in crate::model) trait Holdings {
 	/// Where `time` falls among the groups held.
 	fn containing(&self, time: u64) -> Containing;
 
+	/// Runs of times that [`Self::containing`] can't place, so a window skips its time starts
+	/// in them rather than try each again whenever the groups held change. `None` when it
+	/// can't tell, so each is tried.
+	fn unplaced(&self) -> Option<Unplaced> {
+		None
+	}
+
 	/// The lowest group held starting at or after `from`.
 	fn next_start(&self, from: u64) -> Option<u64>;
 
@@ -103,6 +110,21 @@ pub(in crate::model) enum Containing {
 	Unknown,
 }
 
+/// The times a hop's [`Holdings::containing`] can't place, as up to two runs: every time in
+/// them is [`Containing::Unknown`], except the few that `mark` places another way.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::model) struct Unplaced {
+	pub runs: [ops::RangeInclusive<u64>; 2],
+	/// Changes whenever a time inside the runs may have come to be placed by something other
+	/// than a group arriving or a drop, so a window that saw another mark tries every start.
+	pub mark: u64,
+}
+
+impl Unplaced {
+	/// An empty run, for a hop that places every time on one side.
+	pub const NONE: ops::RangeInclusive<u64> = ops::RangeInclusive::new(1, 0);
+}
+
 /// A hop that holds no groups of its own, such as a reader following route copies that
 /// resolve its ranges for it.
 pub(in crate::model) struct Unheld;
@@ -138,11 +160,15 @@ pub(in crate::model) struct Window {
 	min: Option<Duration>,
 	spans: Vec<Span>,
 	/// The spans still looking up their time start (see [`Self::found`]), which read nothing
-	/// meanwhile: kept apart so a probe finds them without visiting every span.
-	looking: Vec<usize>,
+	/// meanwhile, by that time: kept apart so a probe or an answer finds them without
+	/// visiting every span.
+	looking: BTreeMap<u64, Vec<usize>>,
 	/// The spans whose time start waits on a group arriving, which read only the groups from
-	/// that time meanwhile.
-	waiting: Vec<usize>,
+	/// that time meanwhile, by that time: a change to the groups held places only those its
+	/// [`Holdings::unplaced`] leaves out, found without visiting the rest.
+	waiting: BTreeMap<u64, Vec<usize>>,
+	/// The [`Unplaced::mark`] every waiting span was last tried under.
+	waited: Option<u64>,
 	/// The ranges, by index, of a live join whose reach back waits on the groups held to
 	/// measure the live edge, which read nothing meanwhile: a group held is no reason to
 	/// start at it.
@@ -159,10 +185,11 @@ pub(in crate::model) struct Window {
 	/// The floor the last [`Self::covered_by`] checked from, and where it stopped finding the
 	/// groups accounted for.
 	covered: Option<(u64, u64)>,
-	/// The lowest start among the spans that name theirs, and whether every span does: see
-	/// [`Self::named`] and [`Self::start`]. Kept so a probe reads them without a walk.
-	named: Option<u64>,
-	all_named: bool,
+	/// How many spans name each start, and how many name none: see [`Self::named`] and
+	/// [`Self::start`]. Counted so a probe reads them, and a span starting updates them,
+	/// without a walk.
+	named: BTreeMap<u64, usize>,
+	unnamed: usize,
 }
 
 /// One non-empty range, resolved.
@@ -205,16 +232,17 @@ impl Window {
 			ranges: ranges.to_vec(),
 			min,
 			spans: Vec::new(),
-			looking: Vec::new(),
-			waiting: Vec::new(),
+			looking: BTreeMap::new(),
+			waiting: BTreeMap::new(),
+			waited: None,
 			reaching: Vec::new(),
 			groups: Layered::default(),
 			missable: Layered::default(),
 			pending: false,
 			settled: false,
 			covered: None,
-			named: None,
-			all_named: true,
+			named: BTreeMap::new(),
+			unnamed: 0,
 		};
 		window.place(latest, holdings)?;
 		Ok(window)
@@ -258,62 +286,83 @@ impl Window {
 			let _ = self.place(latest, holdings);
 			return !self.pending;
 		}
-		let mut moved = false;
+		// The spans placed or started here, each reading at least what it did before, unless
+		// one now looks up its start and reads nothing meanwhile.
+		let mut moved = Vec::new();
 		if !self.reaching.is_empty() {
 			let placed = self.spans.len();
 			for index in std::mem::take(&mut self.reaching) {
 				self.place_range(index, latest, holdings);
 			}
-			if self.spans.len() > placed {
-				self.name();
-				moved = true;
-			}
+			moved.extend(placed..self.spans.len());
 		}
-		moved |= !self.waiting.is_empty() && self.start_waiting(holdings);
-		if moved {
-			self.rebuild(holdings);
+		let shrank = !self.waiting.is_empty() && self.start_waiting(holdings, &mut moved);
+		match (moved.is_empty(), shrank) {
+			(true, _) => return false,
+			(false, true) => self.rebuild(holdings),
+			(false, false) => self.grow(moved, holdings),
 		}
-		moved
+		true
 	}
 
 	/// Start the spans whose time start waits on a group, once one arrived, or once nothing
-	/// can arrive any more. Returns whether any did.
-	fn start_waiting(&mut self, holdings: &impl Holdings) -> bool {
-		let mut started = false;
-		for position in std::mem::take(&mut self.waiting) {
-			let Anchor::Time(time) = self.spans[position].anchor else {
-				unreachable!("only a time start waits on a group");
-			};
+	/// can arrive any more, adding each one started to `started`. Only the times the
+	/// holdings may now place are tried, so a change placing one of them costs that one, not
+	/// every span still waiting. Returns whether one started reads less than before: it looks
+	/// up its start, reading nothing meanwhile.
+	fn start_waiting(&mut self, holdings: &impl Holdings, started: &mut Vec<usize>) -> bool {
+		let complete = holdings.complete();
+		let unplaced = holdings.unplaced().filter(|_| !complete);
+		let tried: Vec<(u64, Vec<usize>)> = match unplaced {
+			Some(unplaced) if self.waited == Some(unplaced.mark) => {
+				let times: Vec<u64> = outside(&unplaced.runs)
+					.flat_map(|gap| self.waiting.range(gap).map(|(time, _)| *time))
+					.collect();
+				times
+					.into_iter()
+					.filter_map(|time| self.waiting.remove_entry(&time))
+					.collect()
+			}
+			_ => {
+				self.waited = unplaced.map(|unplaced| unplaced.mark);
+				std::mem::take(&mut self.waiting).into_iter().collect()
+			}
+		};
+		let mut shrank = false;
+		for (time, positions) in tried {
 			let (start, floored) = match holdings.containing(time) {
 				Containing::Group(group) => (group, true),
 				// The group holding it is older than any held, or nothing can arrive.
 				Containing::Before => (0, false),
-				Containing::Unknown if holdings.complete() => (0, false),
+				Containing::Unknown if complete => (0, false),
 				Containing::Unknown => {
-					self.waiting.push(position);
+					self.waiting.insert(time, positions);
 					continue;
 				}
 			};
-			started = true;
-			self.start_span(position, time, start, floored, holdings);
+			for position in positions {
+				shrank |= self.start_span(position, time, start, floored, holdings);
+				started.push(position);
+			}
 		}
-		if started {
-			self.name();
-		}
-		started
+		shrank
 	}
 
 	/// Start the span at `position`, whose time start `time` waited, at `start`: looked up
 	/// where the groups held can't place it, as when first resolved, and otherwise reading
-	/// its groups.
-	fn start_span(&mut self, position: usize, time: u64, start: u64, floored: bool, holdings: &impl Holdings) {
+	/// its groups. Returns whether it looks its start up.
+	fn start_span(&mut self, position: usize, time: u64, start: u64, floored: bool, holdings: &impl Holdings) -> bool {
 		let asked = matches!(self.ranges[self.spans[position].index].start, Anchor::Time(_));
+		self.unname(position);
 		let span = &mut self.spans[position];
 		(span.start, span.floored, span.waiting) = (start, floored, false);
-		if let Some(below) = unresolved(time, start, floored, holdings).filter(|_| asked) {
+		let looking = unresolved(time, start, floored, holdings).filter(|_| asked);
+		if let Some(below) = looking {
 			span.looking = Some(Looking { time, below });
-			self.looking.push(position);
+			self.looking.entry(time).or_default().push(position);
 		}
+		self.name(position);
+		looking.is_some()
 	}
 
 	/// Whether group `key` is in range. Everything is while a relative anchor waits.
@@ -333,9 +382,9 @@ impl Window {
 	/// The lowest group the ranges name, `None` while one reaches back to the oldest group
 	/// or an anchor waits.
 	pub fn start(&self) -> Option<u64> {
-		match self.pending || !self.reaching.is_empty() || !self.all_named {
+		match self.pending || !self.reaching.is_empty() || self.unnamed > 0 {
 			true => None,
-			false => self.named,
+			false => self.lowest_named(),
 		}
 	}
 
@@ -344,7 +393,7 @@ impl Window {
 	pub fn named(&self) -> Option<u64> {
 		match self.pending || self.unplaced() {
 			true => None,
-			false => self.named,
+			false => self.lowest_named(),
 		}
 	}
 
@@ -478,7 +527,8 @@ impl Window {
 	/// group held, which holds the group containing it if the track's history does.
 	pub fn lookups(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
 		self.looking
-			.iter()
+			.values()
+			.flatten()
 			.filter_map(|span| self.spans[*span].looking.map(|looking| (looking.time, looking.below)))
 	}
 
@@ -487,30 +537,22 @@ impl Window {
 	/// that group is held. `None`, or an answer not held, means the history couldn't tell, so
 	/// they start where the groups held say. Returns whether the groups in range moved.
 	pub fn found(&mut self, time: u64, group: Option<u64>, holdings: &impl Holdings) -> bool {
-		let mut found = Vec::new();
-		self.looking.retain(|span| match self.spans[*span].looking {
-			Some(looking) if looking.time == time => {
-				found.push(*span);
-				false
-			}
-			_ => true,
-		});
-		if found.is_empty() {
+		let Some(found) = self.looking.remove(&time) else {
 			return false;
-		}
+		};
 		let held = group.filter(|group| holdings.next_start(*group) == Some(*group));
-		for index in found {
+		let (start, floored) = match (held, holdings.containing(time)) {
+			(Some(group), _) | (None, Containing::Group(group)) => (group, true),
+			(None, _) => (0, false),
+		};
+		// A span looking up its start read nothing, so each one found only reads more.
+		for &index in &found {
+			self.unname(index);
 			let span = &mut self.spans[index];
-			if span.looking.take().is_none() {
-				continue;
-			}
-			(span.start, span.floored) = match (held, holdings.containing(time)) {
-				(Some(group), _) | (None, Containing::Group(group)) => (group, true),
-				(None, _) => (0, false),
-			};
+			(span.looking, span.start, span.floored) = (None, start, floored);
+			self.name(index);
 		}
-		self.name();
-		self.rebuild(holdings);
+		self.grow(found, holdings);
 		true
 	}
 
@@ -525,13 +567,16 @@ impl Window {
 		self.looking.clear();
 		self.waiting.clear();
 		self.reaching.clear();
+		self.named.clear();
+		self.unnamed = 0;
 		self.pending = false;
 		for index in 0..self.ranges.len() {
 			if !self.ranges[index].is_empty() {
 				self.place_range(index, latest, holdings);
 			}
 		}
-		self.name();
+		// Each span waiting was just tried against these holdings.
+		self.waited = holdings.unplaced().map(|unplaced| unplaced.mark);
 		self.rebuild(holdings);
 		Ok(())
 	}
@@ -568,8 +613,11 @@ impl Window {
 			// Reads only the groups from its time until the groups held place it; see
 			// [`Self::start_waiting`].
 			Start::Waiting => {
-				self.waiting.push(self.spans.len());
-				self.spans.push(Span {
+				let Anchor::Time(time) = anchor else {
+					unreachable!("only a time start waits on a group");
+				};
+				self.waiting.entry(time).or_default().push(self.spans.len());
+				self.push(Span {
 					index,
 					anchor,
 					start: 0,
@@ -589,10 +637,10 @@ impl Window {
 			}
 			_ => None,
 		};
-		if looking.is_some() {
-			self.looking.push(self.spans.len());
+		if let Some(looking) = looking {
+			self.looking.entry(looking.time).or_default().push(self.spans.len());
 		}
-		self.spans.push(Span {
+		self.push(Span {
 			index,
 			anchor,
 			start,
@@ -608,61 +656,136 @@ impl Window {
 		!self.waiting.is_empty() || !self.reaching.is_empty()
 	}
 
-	/// Keep [`Self::named`] and [`Self::start`] current with where the spans start.
-	fn name(&mut self) {
-		self.named = self
-			.spans
-			.iter()
-			.filter(|span| span.floored)
-			.map(|span| span.start)
-			.min();
-		self.all_named = self.spans.iter().all(|span| span.floored);
+	/// Add `span`, counted in [`Self::named`] and [`Self::start`].
+	fn push(&mut self, span: Span) {
+		self.spans.push(span);
+		self.name(self.spans.len() - 1);
+	}
+
+	/// Count where the span at `position` starts in [`Self::named`] and [`Self::start`].
+	fn name(&mut self, position: usize) {
+		let span = &self.spans[position];
+		match span.floored {
+			true => *self.named.entry(span.start).or_default() += 1,
+			false => self.unnamed += 1,
+		}
+	}
+
+	/// Stop counting where the span at `position` starts, before it moves.
+	fn unname(&mut self, position: usize) {
+		let span = &self.spans[position];
+		if !span.floored {
+			self.unnamed -= 1;
+			return;
+		}
+		if let Some(count) = self.named.get_mut(&span.start) {
+			*count -= 1;
+			if *count == 0 {
+				self.named.remove(&span.start);
+			}
+		}
+	}
+
+	/// The lowest start a span names.
+	fn lowest_named(&self) -> Option<u64> {
+		self.named.first_key_value().map(|(start, _)| *start)
+	}
+
+	fn update_settled(&mut self) {
+		// A span still looking up its start reads nothing until it knows which group that is.
+		self.settled = !self.pending && self.looking.is_empty() && !self.unplaced();
 	}
 
 	/// The groups in range: every span that knows where it starts, through its end, and
 	/// every span waiting on a time start from that time.
 	fn rebuild(&mut self, holdings: &impl Holdings) {
 		self.covered = None;
-		// A span still looking up its start reads nothing until it knows which group that is.
-		self.settled = !self.pending && self.looking.is_empty() && !self.unplaced();
+		self.update_settled();
 		let (mut groups, mut missable) = (Vec::new(), Vec::new());
-		for span in self.spans.iter().filter(|span| span.looking.is_none()) {
-			let Some(last) = span.end.map_or(Some(u64::MAX), |end| end.checked_sub(1)) else {
-				continue;
-			};
-			// A span waiting on its time start reads from that time meanwhile, and may ask a miss
-			// there, as one reaching back past every group held does: whichever group contains
-			// it starts at or before it, so every group from there on is in range.
-			if span.waiting {
-				if let Anchor::Time(time) = span.anchor
-					&& time <= last
-				{
-					groups.push(time..=last);
-					missable.push(time..=last);
-				}
-				continue;
-			}
-			if last < span.start {
-				continue;
-			}
-			groups.push(span.start..=last);
-			// A time start before every group held reaches back to the group containing it,
-			// which is unknown here, so it asks no miss below its time: every key from there
-			// on is in range, the key at the time itself being the containing group if it
-			// exists. A relative one counting back past every group held asks none below the
-			// oldest, since which of them it reaches is unknown.
-			let reach = match (span.anchor, span.floored) {
-				(Anchor::Time(time), false) => time,
-				(Anchor::Relative(_), false) => holdings.next_start(0).unwrap_or(span.start),
-				_ => span.start,
-			};
-			if reach <= last {
-				missable.push(reach..=last);
-			}
+		for span in &self.spans {
+			let (reads, asks) = span.reads(holdings);
+			groups.extend(reads);
+			missable.extend(asks);
 		}
 		self.groups = Layered::new(Arc::new(Runs::new(groups)), Runs::default());
 		self.missable = Layered::new(Arc::new(Runs::new(missable)), Runs::default());
 	}
+
+	/// Take in the spans at `positions`, each now reading at least what it did before: their
+	/// runs layer over the groups, so a change to a few spans costs them, not every range,
+	/// and what reads the groups diffs only the layer.
+	fn grow(&mut self, positions: impl IntoIterator<Item = usize>, holdings: &impl Holdings) {
+		self.update_settled();
+		for position in positions {
+			let (reads, asks) = self.spans[position].reads(holdings);
+			if let Some(run) = reads {
+				// A coverage check resumes where it stopped, so groups added below that are
+				// checked again.
+				if let Some((_, through)) = &mut self.covered {
+					*through = (*through).min(*run.start());
+				}
+				self.groups.insert(run);
+			}
+			if let Some(run) = asks {
+				self.missable.insert(run);
+			}
+		}
+	}
+}
+
+impl Span {
+	/// The groups this span reads, and those of them a miss may ask for.
+	fn reads(&self, holdings: &impl Holdings) -> (Option<ops::RangeInclusive<u64>>, Option<ops::RangeInclusive<u64>>) {
+		// A span still looking up its start reads nothing until it knows which group that is.
+		if self.looking.is_some() {
+			return (None, None);
+		}
+		let Some(last) = self.end.map_or(Some(u64::MAX), |end| end.checked_sub(1)) else {
+			return (None, None);
+		};
+		// A span waiting on its time start reads from that time meanwhile, and may ask a miss
+		// there, as one reaching back past every group held does: whichever group contains
+		// it starts at or before it, so every group from there on is in range.
+		if self.waiting {
+			return match self.anchor {
+				Anchor::Time(time) if time <= last => (Some(time..=last), Some(time..=last)),
+				_ => (None, None),
+			};
+		}
+		if last < self.start {
+			return (None, None);
+		}
+		// A time start before every group held reaches back to the group containing it,
+		// which is unknown here, so it asks no miss below its time: every key from there
+		// on is in range, the key at the time itself being the containing group if it
+		// exists. A relative one counting back past every group held asks none below the
+		// oldest, since which of them it reaches is unknown.
+		let reach = match (self.anchor, self.floored) {
+			(Anchor::Time(time), false) => time,
+			(Anchor::Relative(_), false) => holdings.next_start(0).unwrap_or(self.start),
+			_ => self.start,
+		};
+		(Some(self.start..=last), (reach <= last).then_some(reach..=last))
+	}
+}
+
+/// The times outside `runs`, which are disjoint and lowest first, as runs lowest first.
+fn outside(runs: &[ops::RangeInclusive<u64>]) -> impl Iterator<Item = ops::RangeInclusive<u64>> + '_ {
+	let mut from = Some(0);
+	let mut runs = runs.iter().filter(|run| !run.is_empty());
+	std::iter::from_fn(move || {
+		loop {
+			let at = from?;
+			let Some(run) = runs.next() else {
+				from = None;
+				return Some(at..=u64::MAX);
+			};
+			from = run.end().checked_add(1).map(|next| next.max(at));
+			if at < *run.start() {
+				return Some(at..=*run.start() - 1);
+			}
+		}
+	})
 }
 
 /// The Min Age a live join reaches back by: `min`, for [`Range::live`], where this hop resolves
@@ -756,6 +879,8 @@ mod tests {
 
 	use std::collections::BTreeSet;
 
+	use rangemap::RangeInclusiveSet;
+
 	/// The group starts a hop holds, the key runs its producer skipped, and whether a
 	/// handler serves its history.
 	#[derive(Default)]
@@ -764,6 +889,9 @@ mod tests {
 		skipped: Vec<ops::Range<u64>>,
 		complete: bool,
 		looks_up: bool,
+		/// Every key below this was dropped, so a time below it is placed before every
+		/// group even while none is held.
+		dropped: u64,
 	}
 
 	impl Keys {
@@ -783,9 +911,20 @@ mod tests {
 		fn containing(&self, time: u64) -> Containing {
 			match self.held.range(..=time).next_back() {
 				Some(key) => Containing::Group(*key),
-				None if self.held.is_empty() => Containing::Unknown,
+				None if self.held.is_empty() && time >= self.dropped => Containing::Unknown,
 				None => Containing::Before,
 			}
+		}
+
+		fn unplaced(&self) -> Option<Unplaced> {
+			let unknown = match self.held.is_empty() {
+				true => self.dropped..=u64::MAX,
+				false => Unplaced::NONE,
+			};
+			Some(Unplaced {
+				runs: [unknown, Unplaced::NONE],
+				mark: 0,
+			})
 		}
 
 		fn next_start(&self, from: u64) -> Option<u64> {
@@ -809,6 +948,115 @@ mod tests {
 					.skipped
 					.iter()
 					.any(|run| run.start <= keys.start && keys.end <= run.end)
+		}
+	}
+
+	/// [`Keys`] keeping its [`Holdings::unplaced`] to itself, so a window tries every start
+	/// still waiting on each change.
+	struct Blind<'a>(&'a Keys);
+
+	impl Holdings for Blind<'_> {
+		fn looks_up(&self) -> bool {
+			self.0.looks_up()
+		}
+
+		fn containing(&self, time: u64) -> Containing {
+			self.0.containing(time)
+		}
+
+		fn next_start(&self, from: u64) -> Option<u64> {
+			self.0.next_start(from)
+		}
+
+		fn back(&self, latest: u64, back: u64) -> Option<u64> {
+			self.0.back(latest, back)
+		}
+
+		fn complete(&self) -> bool {
+			self.0.complete()
+		}
+
+		fn never_produced(&self, keys: ops::Range<u64>) -> bool {
+			self.0.never_produced(keys)
+		}
+	}
+
+	/// What `window` reads and may ask a miss for, and the lowest start its spans name,
+	/// worked out from its spans afresh.
+	fn rebuilt(
+		window: &Window,
+		holdings: &impl Holdings,
+	) -> (RangeInclusiveSet<u64>, RangeInclusiveSet<u64>, Option<u64>) {
+		let (mut groups, mut missable) = (RangeInclusiveSet::new(), RangeInclusiveSet::new());
+		for span in &window.spans {
+			let (reads, asks) = span.reads(holdings);
+			groups.extend(reads);
+			missable.extend(asks);
+		}
+		let named = window
+			.spans
+			.iter()
+			.filter(|span| span.floored)
+			.map(|span| span.start)
+			.min();
+		(groups, missable, named)
+	}
+
+	/// Everything a reader of `window` sees.
+	fn seen(window: &Window) -> impl PartialEq + std::fmt::Debug {
+		let lookups: BTreeSet<_> = window.lookups().collect();
+		(
+			window.runs(0).collect::<Vec<_>>(),
+			window.missable(0).collect::<Vec<_>>(),
+			(window.floor(), window.start(), window.named(), window.end()),
+			(window.resolved(), lookups, window.is_settled(), window.is_waiting()),
+		)
+	}
+
+	proptest::proptest! {
+		/// A window that skips the starts its holdings can't place and grows its groups as
+		/// spans start sees what one trying every start sees, and reads what rebuilding from
+		/// its spans would, through groups arriving, drops, lookups answering, and the track
+		/// completing.
+		#[test]
+		fn settling_by_steps_matches_a_full_settle(
+			ranges in proptest::collection::vec((0u64..40, proptest::option::of(0u64..48)), 1..12),
+			ops in proptest::collection::vec((0u8..4, 0u64..48), 0..24),
+			looks_up: bool,
+		) {
+			let ranges: Vec<Range> = ranges
+				.into_iter()
+				.map(|(start, end)| range(time(start), end.map(time)))
+				.collect();
+			let mut keys = Keys {
+				looks_up,
+				..Keys::default()
+			};
+			let mut fast = Window::new(&ranges, None, None, &keys).unwrap();
+			let mut full = Window::new(&ranges, None, None, &Blind(&keys)).unwrap();
+			for (op, value) in ops {
+				match op {
+					0 => drop(keys.held.insert(value)),
+					1 => keys.dropped = keys.dropped.max(value),
+					2 => {
+						let Some((time, _)) = fast.lookups().next() else {
+							continue;
+						};
+						let answer = (value % 2 == 0).then_some(value);
+						fast.found(time, answer, &keys);
+						full.found(time, answer, &Blind(&keys));
+					}
+					_ => keys.complete = true,
+				}
+				let latest = keys.held.last().copied();
+				fast.settle(latest, &keys);
+				full.settle(latest, &Blind(&keys));
+				proptest::prop_assert_eq!(seen(&fast), seen(&full));
+				let (groups, missable, named) = rebuilt(&fast, &keys);
+				proptest::prop_assert!(fast.runs(0).eq(groups.iter().cloned()));
+				proptest::prop_assert!(fast.missable(0).eq(missable.iter().cloned()));
+				proptest::prop_assert_eq!(fast.lowest_named(), named);
+			}
 		}
 	}
 

@@ -1,28 +1,61 @@
 //! Sets of group keys held as sorted runs, and the layered set a [`Window`](super::Window)
 //! reads: fixed runs shared across its moves, with the few runs its time ends walk on top.
 //!
-//! A subscription may name thousands of ranges, yet an unsettled time end moves its cap on
-//! each group. Rebuilding or copying every run on each move would let a peer multiply what
-//! one group costs by its range count, so the runs that never move are kept apart, shared
-//! by reference, and only the layer above them is rebuilt.
+//! A subscription may name thousands of ranges, yet each time start that resolves, or each
+//! group a drop gives up under one, widens a single range. Rebuilding or copying every run
+//! on each such change would let a peer multiply what one group costs by its range count,
+//! so the runs that don't move are kept apart, shared by reference, and only the few runs
+//! layered above them are copied.
 
 use std::{ops::RangeInclusive, sync::Arc};
-
-use rangemap::RangeInclusiveSet;
 
 /// Disjoint runs of groups, lowest first and never adjacent, each found from either end by
 /// one search.
 ///
-/// Not a [`RangeInclusiveSet`]: its overlapping iterator walks back from the last run, so
-/// finding the highest run below a point costs every run above it.
+/// Not a [`RangeInclusiveSet`](rangemap::RangeInclusiveSet): its overlapping iterator walks
+/// back from the last run, so finding the highest run below a point costs every run above it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(in crate::model) struct Runs(Vec<RangeInclusive<u64>>);
 
 impl Runs {
 	/// The runs of `runs`, in any order, overlapping or not.
 	pub fn new(runs: impl IntoIterator<Item = RangeInclusive<u64>>) -> Self {
-		let set: RangeInclusiveSet<u64> = runs.into_iter().filter(|run| !run.is_empty()).collect();
-		Self(set.into_iter().collect())
+		let mut runs: Vec<_> = runs.into_iter().filter(|run| !run.is_empty()).collect();
+		runs.sort_unstable_by_key(|run| *run.start());
+		Self(coalesce(runs))
+	}
+
+	pub fn len(&self) -> usize {
+		self.0.len()
+	}
+
+	/// Add `run`, merging it with every run it overlaps or touches: a search and a copy of
+	/// the runs above it.
+	pub fn insert(&mut self, run: RangeInclusive<u64>) {
+		if run.is_empty() {
+			return;
+		}
+		let (lo, hi) = (*run.start(), *run.end());
+		let from = self.0.partition_point(|run| run.end().saturating_add(1) < lo);
+		let to = self.0.partition_point(|run| *run.start() <= hi.saturating_add(1));
+		let merged = match self.0.get(from..to) {
+			Some([first, .., last]) => lo.min(*first.start())..=hi.max(*last.end()),
+			Some([only]) => lo.min(*only.start())..=hi.max(*only.end()),
+			_ => run,
+		};
+		self.0.splice(from..to, std::iter::once(merged));
+	}
+
+	/// The runs of both, merged in one pass over each.
+	fn union(&self, other: &Self) -> Self {
+		let (mut a, mut b) = (self.0.iter().peekable(), other.0.iter().peekable());
+		let merged = std::iter::from_fn(|| match (a.peek(), b.peek()) {
+			(Some(x), Some(y)) if x.start() <= y.start() => a.next(),
+			(Some(_), Some(_)) => b.next(),
+			(Some(_), None) => a.next(),
+			(None, _) => b.next(),
+		});
+		Self(coalesce(merged.cloned().collect()))
 	}
 
 	pub fn contains(&self, key: u64) -> bool {
@@ -181,6 +214,27 @@ impl Layered {
 		self.last(0, u64::MAX).map(|run| *run.end())
 	}
 
+	/// Add `run`. The layer takes it, so what reads both diffs only the layers, until the
+	/// layer outgrows the square root of the fixed runs and folds into them: each add costs
+	/// that root, copying the layer and folding included, however many ranges lie under it.
+	/// A run already held changes nothing, so the result stays equal by reference.
+	pub fn insert(&mut self, run: RangeInclusive<u64>) {
+		let (lo, hi) = (*run.start(), *run.end());
+		if lo > hi
+			|| self
+				.first(lo, hi)
+				.is_some_and(|held| *held.start() == lo && *held.end() >= hi)
+		{
+			return;
+		}
+		let layer = Arc::make_mut(&mut self.layer);
+		layer.insert(run);
+		if layer.len().saturating_mul(layer.len()) > self.fixed.len() {
+			self.fixed = Arc::new(self.fixed.union(layer));
+			self.layer = Arc::default();
+		}
+	}
+
 	/// What `self` holds and `old` doesn't within `lo..=hi`, lowest first, when both share
 	/// their fixed runs: `None` when they don't.
 	///
@@ -202,6 +256,23 @@ impl Layered {
 		}
 		Some(gained)
 	}
+}
+
+/// `runs`, sorted by start, with each run that overlaps or touches the one before merged
+/// into it.
+fn coalesce(runs: Vec<RangeInclusive<u64>>) -> Vec<RangeInclusive<u64>> {
+	let mut merged: Vec<RangeInclusive<u64>> = Vec::with_capacity(runs.len());
+	for run in runs {
+		match merged.last_mut() {
+			Some(last) if *run.start() <= last.end().saturating_add(1) => {
+				if run.end() > last.end() {
+					*last = *last.start()..=*run.end();
+				}
+			}
+			_ => merged.push(run),
+		}
+	}
+	merged
 }
 
 /// The parts of `run` that `runs` doesn't hold, lowest first.
@@ -234,6 +305,8 @@ fn minus(run: RangeInclusive<u64>, runs: &Runs) -> impl Iterator<Item = RangeInc
 
 #[cfg(test)]
 mod tests {
+	use rangemap::RangeInclusiveSet;
+
 	use super::*;
 
 	/// A small deterministic generator, so a failure replays.
@@ -272,6 +345,30 @@ mod tests {
 		points.sort_unstable();
 		points.dedup();
 		points
+	}
+
+	/// Adding runs one at a time holds their union, folds the layer into the fixed runs once
+	/// it outgrows their square root, and changes nothing for a run already held.
+	#[test]
+	fn inserted_runs_hold_their_union() {
+		let mut next = generator();
+		for round in 0..500 {
+			let fixed = random_runs(&mut next, 40, 200);
+			let mut layered = Layered::new(Arc::new(Runs::new(fixed.clone())), Runs::default());
+			let mut union: RangeInclusiveSet<u64> = fixed.iter().cloned().collect();
+			for run in random_runs(&mut next, 30, 200) {
+				let before = layered.clone();
+				let held = union.gaps(&run).next().is_none();
+				layered.insert(run.clone());
+				union.insert(run.clone());
+				let context = || format!("round {round}: {fixed:?} after {run:?}");
+				assert!(layered.runs(0).eq(union.iter().cloned()), "{}", context());
+				assert!(layered.layer().len().pow(2) <= layered.fixed().len(), "{}", context());
+				if held {
+					assert!(Arc::ptr_eq(&before.layer, &layered.layer), "{}", context());
+				}
+			}
+		}
 	}
 
 	/// A layered set answers every query as the set of its runs merged would.

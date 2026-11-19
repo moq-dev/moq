@@ -23,7 +23,7 @@ use super::record::{Pending, Record, Report};
 use crate::ledger::{self, Ledger};
 
 pub(crate) use super::subscription::Resolved;
-use super::subscription::{Accounted, Containing, Holdings, Layered, Runs, Window};
+use super::subscription::{Accounted, Containing, Holdings, Layered, Runs, Unplaced, Window};
 pub use super::subscription::{Anchor, Delay, Order, Position, Range, Subscription};
 use rangemap::{RangeInclusiveSet, RangeMap, RangeSet};
 
@@ -745,6 +745,9 @@ pub(crate) struct TrackState {
 	// a time it holds no group at, but its publisher reports where it resolved one. Replaced
 	// whole as the ranges change, so it holds at most one entry per live range.
 	time_starts: BTreeMap<u64, u64>,
+	// Counts changes to how a time start is placed other than by groups arriving or drops:
+	// `time_starts`, `anchors`, and `starts_at_keys`. See [`Unplaced::mark`].
+	placing: u64,
 	// Keys the upstream publisher gave up, with why: an incoming SUBSCRIBE_SKIP or
 	// SUBSCRIBE_DROP, or a producer cut. Kept apart from the cache so reclaiming a slot
 	// cannot erase a disposition a relay must forward, and as ranges so a wide one costs
@@ -1111,6 +1114,45 @@ impl Holdings for TrackState {
 			None if self.lookup.is_empty() => Containing::Unknown,
 			None => Containing::Before,
 		}
+	}
+
+	/// Exactly the times [`Self::containing`] can't place, but those `time_starts` places.
+	fn unplaced(&self) -> Option<Unplaced> {
+		let none = Unplaced::NONE;
+		// The times at or after `from` whose keys from `from` through them drops do not all cover.
+		let uncovered = |from: u64| match self.dropped.get(&from) {
+			Some(run) if run.end == u64::MAX => none.clone(),
+			Some(run) => run.end..=u64::MAX,
+			None => from..=u64::MAX,
+		};
+		let runs = if self.starts_at_keys {
+			[none.clone(), none]
+		} else {
+			match (self.lookup.first_key_value(), self.lookup.last_key_value()) {
+				// Before any group, only a time whose keys down to 0 were all dropped is placed.
+				(None, _) | (_, None) => [uncovered(0), none],
+				(Some(_), Some(_)) if self.anchors != Anchors::Wire => [none.clone(), none],
+				// A copy places a time below its groups only once the keys down to 0 were
+				// dropped, and one above them only once the keys down to the newest were.
+				(Some((&first, _)), Some((&last, _))) => {
+					let below = uncovered(0);
+					let below = *below.start()..=(*below.end()).min(first.saturating_sub(1));
+					let below = match first {
+						0 => none.clone(),
+						_ => below,
+					};
+					let above = match last.checked_add(1) {
+						Some(next) => uncovered(next),
+						None => none,
+					};
+					[below, above]
+				}
+			}
+		};
+		Some(Unplaced {
+			runs,
+			mark: self.placing,
+		})
 	}
 
 	fn next_start(&self, from: u64) -> Option<u64> {
@@ -4734,6 +4776,7 @@ impl Producer {
 			&& state.anchors == Anchors::Local
 		{
 			state.anchors = Anchors::Refused;
+			state.placing += 1;
 		}
 	}
 
@@ -4743,6 +4786,7 @@ impl Producer {
 	pub(crate) fn anchored(&self) {
 		if let Ok(mut state) = self.modify() {
 			state.anchors = Anchors::Wire;
+			state.placing += 1;
 		}
 	}
 
@@ -4765,6 +4809,7 @@ impl Producer {
 			&& state.time_starts != starts
 		{
 			state.time_starts = starts;
+			state.placing += 1;
 		}
 	}
 
@@ -4774,6 +4819,7 @@ impl Producer {
 	pub(crate) fn starts_at_keys(&self) {
 		if let Ok(mut state) = self.modify() {
 			state.starts_at_keys = true;
+			state.placing += 1;
 		}
 	}
 
@@ -7614,6 +7660,33 @@ fn settles(budget: Duration, coverage: &Coverage, start: u64, hole: &Hole) -> bo
 	budget <= stale && reads(above..u64::MAX)
 }
 
+/// The starts at which a received stale run settles a reader whose coverage grew from `old`
+/// to `new` under the same budget and did not before, or `None` inside for none: `None` when
+/// the coverage changed other than by growing. See [`settles`]: only an uncapped reader is
+/// settled, by a run whose next key the open run of its groups holds, and that run's start
+/// only falls as the groups grow.
+fn settling(old: &Coverage, new: &Coverage) -> Option<Option<ops::Range<u64>>> {
+	let ((old, old_cap), (new, cap)) = match (old, new) {
+		(None, None) => return Some(None),
+		(Some(old), Some(new)) => (old, new),
+		_ => return None,
+	};
+	if old_cap != cap || !new.shares_fixed(old) {
+		return None;
+	}
+	if cap.is_some() {
+		return Some(None);
+	}
+	// The lowest start settled: the one just below the open run, or only the last key.
+	let settled = |groups: &Layered| {
+		groups
+			.last(u64::MAX, u64::MAX)
+			.map_or(u64::MAX, |run| run.start().saturating_sub(1))
+	};
+	let run = settled(new)..settled(old);
+	Some((!run.is_empty()).then_some(run))
+}
+
 impl Drift {
 	/// Whether `hole`, over a run from `start`, settles this reader; see [`settles`].
 	fn settles(&self, start: u64, hole: &Hole) -> bool {
@@ -8390,7 +8463,7 @@ struct Within<'a> {
 
 /// The span, window revision, and the budget and coverage that settle received stale runs
 /// (see [`Drift::settles`]) a [`DropCursor`] last scanned the whole span under; between them
-/// it folds in only the runs that changed.
+/// it folds in only the runs that changed, and what the window gained.
 type Scan = (ops::Range<u64>, u64, Option<(Duration, Coverage)>);
 
 /// What a wire publisher's cursor gave up, found as it changes rather than by rescanning
@@ -8405,6 +8478,10 @@ struct DropCursor {
 	/// The [`TrackState::drops_changes`] revision [`Record::pending`] folded in.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	seen: u64,
+	/// The window's groups as of [`Self::scanned`]'s revision, so a window that only grew
+	/// since folds in what it gained rather than rescanning the span.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	groups: Option<Layered>,
 	/// The budget and coverage of the last drift judged, which settle received stale runs
 	/// until the next: a queue-only poll judges none, and must not unsettle them.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
@@ -8419,6 +8496,7 @@ impl DropCursor {
 			cuts: state.cache.watch_cuts(),
 			scanned: None,
 			seen: 0,
+			groups: None,
 			drift: None,
 		}
 	}
@@ -8447,6 +8525,44 @@ impl DropCursor {
 		}
 	}
 
+	/// What a scan of `span` would newly find since the last, when the span is the same and
+	/// the window and the reader's coverage only grew: the runs the window gained, and each
+	/// received stale run a wider coverage now settles. `None` when anything else moved.
+	fn grown(
+		&self,
+		state: &TrackState,
+		window: &Window,
+		old_drift: Option<&(Duration, Coverage)>,
+		span: &ops::Range<u64>,
+	) -> Option<Vec<ops::Range<u64>>> {
+		let last = span.end.checked_sub(1).filter(|last| *last >= span.start);
+		let (groups, old) = (window.groups()?, self.groups.as_ref()?);
+		let mut grown: Vec<_> = match last {
+			Some(last) => groups.gained(old, span.start, last)?,
+			None if groups.shares_fixed(old) => Vec::new(),
+			None => return None,
+		}
+		.into_iter()
+		.map(|run| *run.start()..run.end().saturating_add(1))
+		.collect();
+		let settling = match (old_drift, &self.drift) {
+			(None, None) => None,
+			(Some((old_budget, old)), Some((budget, new))) if old_budget == budget => settling(old, new)?,
+			_ => return None,
+		};
+		// A scan judges a drop at its start within the span, so each one starting where a
+		// stale run newly settles is folded in whole.
+		if let Some(settling) = settling {
+			for (run, _) in state.drops.overlapping(&settling) {
+				let start = run.start.max(span.start);
+				if settling.contains(&start) {
+					grown.push(start..run.end);
+				}
+			}
+		}
+		Some(grown)
+	}
+
 	/// The lowest unreported run of `within` given up, now marked reported, with why.
 	fn next(
 		&mut self,
@@ -8462,18 +8578,35 @@ impl DropCursor {
 				Self::cut(record, key, slot);
 			}
 		}
-		// Rescan the span only after the window moves or what settles a stale run does, since
-		// out-of-window and unsettling runs were skipped and may be owed now; otherwise fold in
-		// only the runs that changed, so a drop costs each cursor the runs it touches.
+		// Rescan the span only after the window moves other than by growing, or what settles a
+		// stale run does, since out-of-window and unsettling runs were skipped and may be owed
+		// now; otherwise fold in only the runs that changed and what the window gained, so a
+		// drop costs each cursor the runs it touches, even one that starts a range.
 		if let Some(drift) = within.drift {
 			self.drift = Some((drift.budget, drift.coverage.clone()));
 		}
 		let scan = (span.clone(), within.revision, self.drift.clone());
-		let full = std::mem::take(&mut record.rescan) || self.scanned.as_ref() != Some(&scan);
-		let changed: Vec<ops::Range<u64>> = match full {
-			false => state.drops_changes.since(self.seen).collect(),
-			true => {
-				self.scanned = Some(scan);
+		let rescan = std::mem::take(&mut record.rescan);
+		let grown = match &self.scanned {
+			_ if rescan => None,
+			Some(scanned) if *scanned == scan => Some(Vec::new()),
+			Some((old_span, _, old_drift)) if old_span == span => self.grown(state, window, old_drift.as_ref(), span),
+			_ => None,
+		};
+		let full = grown.is_none();
+		self.scanned = Some(scan);
+		self.groups = window.groups().cloned();
+		let changed: Vec<ops::Range<u64>> = match grown {
+			Some(grown) => {
+				// What the window newly reads may hold cuts the scan skipped.
+				for run in &grown {
+					for (&key, slot) in state.lookup.range(run.clone()) {
+						Self::cut(record, key, slot);
+					}
+				}
+				state.drops_changes.since(self.seen).chain(grown).collect()
+			}
+			None => {
 				let received: Vec<_> = record
 					.pending
 					.iter()
@@ -12079,6 +12212,42 @@ mod test {
 	}
 
 	proptest::proptest! {
+		/// The times a track reports unplaced are exactly those its `containing` can't place,
+		/// but for the ones a copy's reported time starts place, on its own groups or on a
+		/// lite-07 copy's, through groups arriving and every way keys are given up.
+		#[test]
+		fn unplaced_matches_containing(
+			ops in proptest::collection::vec((0u8..4, 0u64..40, 1u64..8), 0..24),
+			wire: bool,
+			starts in proptest::collection::vec((0u64..48, 0u64..48), 0..3),
+		) {
+			let producer = track_producer("test", Info::default());
+			if wire {
+				producer.anchored();
+				producer.time_starts(starts.clone());
+			}
+			for (op, start, len) in ops {
+				let groups = start..start + len;
+				match op {
+					0 => producer.drop_groups(groups, StreamError::Cancel),
+					1 => producer.skip_groups(groups),
+					2 => drop(producer.create_group(group::Info { start })),
+					_ => producer.modify().unwrap().forget_drops(groups),
+				}
+			}
+			let state = producer.state.read();
+			let unplaced = state.unplaced().expect("a track always tells");
+			let reported: BTreeSet<u64> = starts.iter().map(|(time, _)| *time).collect();
+			for time in (0..64).chain([u64::MAX - 1, u64::MAX]) {
+				let inside = unplaced.runs.iter().any(|run| run.contains(&time));
+				let unknown = state.containing(time) == Containing::Unknown;
+				match wire && reported.contains(&time) {
+					true => proptest::prop_assert!(!unknown, "a reported start places {}", time),
+					false => proptest::prop_assert_eq!(inside, unknown, "at {}", time),
+				}
+			}
+		}
+
 		/// The coalesced drop set answers coverage as a walk of the drop runs would, through
 		/// every way a run is given up, split, replaced, or forgotten.
 		#[test]
@@ -12729,6 +12898,29 @@ mod test {
 		assert_eq!(read_groups(|waiter| arrival.poll_recv_group(waiter)), want);
 		let mut ordered = bounded().ordered();
 		assert_eq!(read_groups(|waiter| groups_only(ordered.poll_next_group(waiter))), want);
+	}
+
+	/// A drop outside a reader's ranges is reported once a group arriving places a time start
+	/// below it, widening its range over the drop, as a scan of the whole window would.
+	#[test]
+	fn a_range_widened_by_a_group_reports_an_earlier_drop() {
+		let producer = track_producer("test", Info::default());
+		// The range at 0 keeps the floor where it is, so only the window moves.
+		let at = |time| Range {
+			start: Anchor::Time(time),
+			end: Some(Anchor::Time(time)),
+		};
+		let mut reader = producer.subscribe(replay().with_ranges([at(0), at(8)]));
+		let waiter = kio::Waiter::noop();
+		assert!(reader.poll_drop(&waiter).is_pending());
+		producer.drop_groups(5..6, StreamError::Cancel);
+		assert!(reader.poll_drop(&waiter).is_pending(), "outside the range");
+		let _group = producer.create_group(group::Info { start: 3 }).unwrap();
+		assert_eq!(
+			reader.poll_drop(&waiter),
+			Poll::Ready((5..6, Hole::drop(StreamError::Cancel))),
+			"the group containing time 8 starts at 3"
+		);
 	}
 
 	/// A group missing its head is never served short: reading it is [`Error::Lagged`],
@@ -27217,6 +27409,42 @@ mod test {
 			[(4..5, Hole::Skip)],
 			"the stale run is outside its range"
 		);
+	}
+
+	/// A received stale run in a reader's range settles it once a group arriving places its
+	/// open range's time start low enough to read every group above the run, so it is
+	/// reported then, as a scan of the whole window would, though the window grew only above
+	/// the run.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_stale_run_settles_once_the_open_range_reaches_it() {
+		let producer = track_producer("test", Info::timed());
+		// An unsettled run is asked of a handler rather than given up as unfillable.
+		let _dynamic = producer.requests();
+		let budget = Duration::from_millis(500);
+		// Time 0 names group 0, so the first range reads through 5 at once; the open one waits
+		// on a group to place its time start.
+		let first = Range {
+			start: Anchor::Time(0),
+			end: Some(Anchor::Time(5)),
+		};
+		let open = Range {
+			start: Anchor::Time(8),
+			end: None,
+		};
+		let mut reader = producer.subscribe(
+			Subscription::default()
+				.with_delay(Delay::default().with_max(budget))
+				.with_ranges([first, open]),
+		);
+		producer.give_up(5..6, Hole::stale(budget));
+		let waiter = kio::Waiter::noop();
+		assert!(
+			reader.poll_drop(&waiter).is_pending(),
+			"the groups above it are not all read"
+		);
+		let _group = producer.create_group(group::Info { start: 6 }).unwrap();
+		assert_eq!(reader.poll_drop(&waiter), Poll::Ready((5..6, Hole::stale(budget))));
 	}
 
 	/// A queue-only poll, which judges no drift, still reports the received stale runs the
