@@ -15849,8 +15849,16 @@ mod test {
 		assert_eq!(at(9, 9).merge(past(7, 9)), at(9, 9));
 		assert_eq!(past(7, 9).merge(at(9, 9)), at(9, 9));
 		assert_eq!(past(7, 9).merge(past(8, 9)), past(8, 9));
-		assert_eq!(at(9, 9).merge(at(7, 9)), at(7, 9), "a wider budget delivered from lower");
-		assert_eq!(at(9, 9).merge(past(7, 10)), past(7, 10), "a newer latest moved the count");
+		assert_eq!(
+			at(9, 9).merge(at(7, 9)),
+			at(7, 9),
+			"a wider budget delivered from lower"
+		);
+		assert_eq!(
+			at(9, 9).merge(past(7, 10)),
+			past(7, 10),
+			"a newer latest moved the count"
+		);
 	}
 
 	/// A gap the cache made in a lite-07 copy is one no report or arrival fills, so a relative
