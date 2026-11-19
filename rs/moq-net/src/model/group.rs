@@ -415,7 +415,7 @@ impl Head {
 	}
 
 	/// Roughly what holding it costs: payloads, fields, and their slots.
-	fn bytes(&self) -> u64 {
+	pub(super) fn bytes(&self) -> u64 {
 		let payload: u64 = self.entries.iter().map(|entry| entry.frame.payload.len() as u64).sum();
 		let fields: u64 = self
 			.entries

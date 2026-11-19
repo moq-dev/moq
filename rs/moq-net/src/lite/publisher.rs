@@ -4704,23 +4704,46 @@ impl Bounds {
 
 /// The frame starts of `positions` that apply among `ranges`: a group delivers once across
 /// the ranges, so a frame start applies only to a group no other range may cover, since
-/// another range's would ask for it from frame 0. Costs the ranges once per position, and
-/// nothing while no range starts partway through a group.
+/// another range's would ask for it from frame 0. A peer may send thousands of ranges, so this
+/// sorts the ranges' times once rather than scanning them per position, and costs nothing
+/// while no range starts partway through a group.
 fn first_frames<'a>(
 	positions: impl IntoIterator<Item = &'a (u64, u64)>,
-	ranges: impl IntoIterator<Item = &'a crate::track::Range> + Clone,
+	ranges: impl IntoIterator<Item = &'a crate::track::Range>,
 ) -> Vec<(u64, u64)> {
 	use crate::track::Anchor;
-	(positions.into_iter().copied())
-		.filter(|(group, _)| {
-			let covers = |range: &&crate::track::Range| match (range.start, range.end) {
-				(Anchor::Time(start), _) if start > *group => false,
-				(_, Some(Anchor::Time(end))) if end < *group => false,
-				_ => true,
-			};
-			ranges.clone().into_iter().filter(covers).nth(1).is_none()
-		})
-		.collect()
+	let mut positions: Vec<_> = positions.into_iter().copied().collect();
+	if positions.is_empty() {
+		return positions;
+	}
+	// A range may cover a group unless it starts past it or ends before it, by time. One that
+	// starts past where it ends covers none, so with it left out, no range does both and the
+	// ranges covering a group are the rest less those two counts.
+	let (mut count, mut starts, mut ends) = (0, Vec::new(), Vec::new());
+	for range in ranges {
+		let start = match range.start {
+			Anchor::Time(start) => Some(start),
+			_ => None,
+		};
+		let end = match range.end {
+			Some(Anchor::Time(end)) => Some(end),
+			_ => None,
+		};
+		if start.zip(end).is_some_and(|(start, end)| start > end) {
+			continue;
+		}
+		count += 1;
+		starts.extend(start);
+		ends.extend(end);
+	}
+	starts.sort_unstable();
+	ends.sort_unstable();
+	positions.retain(|(group, _)| {
+		let past = starts.len() - starts.partition_point(|start| start <= group);
+		let before = ends.partition_point(|end| end < group);
+		count - past - before <= 1
+	});
+	positions
 }
 
 /// A subscription's requested ranges in the model's whole groups, by Range ID, with the
@@ -7076,6 +7099,41 @@ mod serve_group_test {
 		);
 		assert_eq!((inside.frames.start(5), inside.frames.end(5)), (2, Some(3)));
 		assert_eq!((inside.frames.start(4), inside.frames.end(6)), (0, None));
+	}
+
+	/// The sweep in `first_frames` keeps exactly the positions a scan of every range per
+	/// position keeps: those no more than one range may cover.
+	#[test]
+	fn first_frames_matches_a_scan_of_every_range() {
+		use rand::{RngExt, SeedableRng};
+		use track::Anchor;
+		let mut rng = rand::rngs::StdRng::seed_from_u64(0x6672616d6573);
+		for _ in 0..2000 {
+			let anchor = |rng: &mut rand::rngs::StdRng| match rng.random_range(0..3) {
+				0 => Anchor::Relative(rng.random_range(0..3)),
+				_ => Anchor::Time(rng.random_range(0..8)),
+			};
+			let ranges: Vec<track::Range> = (0..rng.random_range(0..6))
+				.map(|_| track::Range {
+					start: anchor(&mut rng),
+					end: rng.random_bool(0.6).then(|| anchor(&mut rng)),
+				})
+				.collect();
+			let positions: Vec<(u64, u64)> = (0..rng.random_range(0..4))
+				.map(|_| (rng.random_range(0..8), rng.random_range(1..4)))
+				.collect();
+			let scanned: Vec<(u64, u64)> = (positions.iter().copied())
+				.filter(|(group, _)| {
+					let covers = |range: &&track::Range| match (range.start, range.end) {
+						(Anchor::Time(start), _) if start > *group => false,
+						(_, Some(Anchor::Time(end))) if end < *group => false,
+						_ => true,
+					};
+					ranges.iter().filter(covers).nth(1).is_none()
+				})
+				.collect();
+			assert_eq!(first_frames(&positions, &ranges), scanned, "{ranges:?} {positions:?}");
+		}
 	}
 
 	/// Each lite-07 range starting partway through a group serves that group from its frame,

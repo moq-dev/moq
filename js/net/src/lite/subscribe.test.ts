@@ -286,6 +286,40 @@ test("a lite-07 range may start partway through a group, which the span keeps", 
 	const overlapping = [{ start: { absolute: 7n, frame: 4 } }, { start: { absolute: 9n, frame: 2 } }];
 	expect([...positionFrames(overlapping)]).toEqual([[7n, 4]]);
 
+	// The sorted sweep keeps exactly what a scan of every range per Position keeps.
+	let seed = 0x6672616d;
+	const random = (n: number) => {
+		seed = (seed * 1103515245 + 12345) % 2 ** 31;
+		return seed % n;
+	};
+	for (let i = 0; i < 2000; i++) {
+		const anchor = () => (random(3) === 0 ? { relative: BigInt(random(3)) } : { time: BigInt(random(8)) });
+		const ranges: WireRange[] = [];
+		for (let n = random(6); n > 0; n--) {
+			const range: WireRange =
+				random(3) === 0
+					? { start: { absolute: BigInt(random(8)), frame: 1 + random(3) } }
+					: { start: anchor() };
+			if (random(5) < 3) range.end = random(4) === 0 ? { relative: 0n } : { time: BigInt(random(8)) };
+			ranges.push(range);
+		}
+		const scanned = new Map<bigint, number>();
+		for (const range of ranges) {
+			const start = range.start;
+			if (start?.absolute === undefined || !start.frame) continue;
+			let covering = 0;
+			for (const other of ranges) {
+				const from = other.start?.absolute ?? other.start?.time;
+				const to = other.end?.absolute ?? (other.end?.time === undefined ? undefined : other.end.time + 1n);
+				if ((from !== undefined && from > start.absolute) || (to !== undefined && to <= start.absolute))
+					continue;
+				covering++;
+			}
+			if (covering === 1) scanned.set(start.absolute, start.frame);
+		}
+		expect(positionFrames(ranges)).toEqual(scanned);
+	}
+
 	// An end there can't go out.
 	await expect(
 		encodeMessage(

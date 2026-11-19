@@ -324,25 +324,52 @@ export function spanOf(version: Version, ranges: readonly WireRange[]): Span & {
 /**
  * The first frame each lite-07 Position start asks its group from, by group, for each group no
  * other range may cover: a group is delivered once, so one another range covers goes whole.
+ * A peer may send thousands of ranges, so this sorts their bounds once rather than scanning
+ * them per Position.
  */
 export function positionFrames(ranges: readonly WireRange[]): Map<bigint, number> {
 	const frames = new Map<bigint, number>();
+	const positions: [bigint, number][] = [];
+	for (const { start } of ranges) {
+		if (start?.absolute !== undefined && start.frame) positions.push([start.absolute, start.frame]);
+	}
+	if (positions.length === 0) return frames;
+	// A range may cover a group unless it starts past it or ends at or before it. One that
+	// starts at or past its end covers none, so with it left out, no range does both and the
+	// ranges covering a group are the rest less those two counts.
+	const starts: bigint[] = [];
+	const ends: bigint[] = [];
+	let count = 0;
 	for (const range of ranges) {
-		const start = range.start;
-		if (start?.absolute === undefined || !start.frame) continue;
-		const group = start.absolute;
-		const frame = start.frame;
-		let covering = 0;
-		for (const other of ranges) {
-			const from = other.start?.absolute ?? other.start?.time;
-			const to = other.end?.absolute ?? (other.end?.time === undefined ? undefined : other.end.time + 1n);
-			// Unknown ends, such as a count back, may cover it.
-			if ((from !== undefined && from > group) || (to !== undefined && to <= group)) continue;
-			covering++;
-		}
-		if (covering === 1) frames.set(group, frame);
+		const from = range.start?.absolute ?? range.start?.time;
+		// Unknown ends, such as a count back, may cover it.
+		const to = range.end?.absolute ?? (range.end?.time === undefined ? undefined : range.end.time + 1n);
+		if (from !== undefined && to !== undefined && from >= to) continue;
+		count++;
+		if (from !== undefined) starts.push(from);
+		if (to !== undefined) ends.push(to);
+	}
+	const order = (a: bigint, b: bigint) => (a < b ? -1 : a > b ? 1 : 0);
+	starts.sort(order);
+	ends.sort(order);
+	for (const [group, frame] of positions) {
+		const past = starts.length - countAtOrBelow(starts, group);
+		const before = countAtOrBelow(ends, group);
+		if (count - past - before === 1) frames.set(group, frame);
 	}
 	return frames;
+}
+
+/** How many of the `sorted` values are at or below `value`. */
+function countAtOrBelow(sorted: readonly bigint[], value: bigint): number {
+	let low = 0;
+	let high = sorted.length;
+	while (low < high) {
+		const mid = (low + high) >> 1;
+		if (sorted[mid] <= value) low = mid + 1;
+		else high = mid;
+	}
+	return low;
 }
 
 /**

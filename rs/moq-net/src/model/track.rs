@@ -707,8 +707,9 @@ pub(crate) struct TrackState {
 	// group past them, by key, which the group adopts as it arrives (see
 	// [`Consumer::lend_head`]). Filled through a read guard, so it needs its own lock. One per
 	// group, taken as that group arrives or dropped as it is given up or the track tears down,
-	// so it holds only the groups readers resumed this copy at that are still to come.
-	lent: Mutex<BTreeMap<u64, Arc<group::Head>>>,
+	// and together never past what one group may cache, so it holds only the newest groups
+	// readers resumed this copy at that are still to come.
+	lent: Mutex<Lent>,
 
 	// The key and start of the highest-key group that left the cache holding a
 	// checked start (see [`group::Origin::Bound`]). Eviction is not a key prefix, so a
@@ -1258,10 +1259,52 @@ impl Holdings for TrackState {
 	}
 }
 
+/// The heads lent to a copy for the groups its readers resumed it at, by key; see
+/// [`Consumer::lend_head`].
+#[derive(Default)]
+struct Lent {
+	heads: BTreeMap<u64, Arc<group::Head>>,
+	/// What they hold together, never past [`group::MAX_CACHE_BYTES`]: no group adopts a
+	/// head past what it may cache, and readers that keep moving on while the copy delivers
+	/// nothing keep lending it newer groups, so the oldest go first.
+	bytes: u64,
+}
+
+impl Lent {
+	/// Hold `head` for group `key`. Of two loans for one group the longer stands.
+	fn lend(&mut self, key: u64, head: &Arc<group::Head>) {
+		let held = |head: &group::Head| head.frames_from_first().unwrap_or_default();
+		if self.heads.get(&key).is_some_and(|slot| held(slot) >= held(head)) {
+			return;
+		}
+		self.take(key);
+		self.bytes += head.bytes();
+		self.heads.insert(key, head.clone());
+		while self.bytes > group::MAX_CACHE_BYTES
+			&& let Some((_, head)) = self.heads.pop_first()
+		{
+			self.bytes -= head.bytes();
+		}
+	}
+
+	fn take(&mut self, key: u64) -> Option<Arc<group::Head>> {
+		let head = self.heads.remove(&key)?;
+		self.bytes -= head.bytes();
+		Some(head)
+	}
+
+	fn retain(&mut self, keep: impl Fn(u64) -> bool) {
+		let dropped: Vec<u64> = self.heads.keys().copied().filter(|key| !keep(*key)).collect();
+		for key in dropped {
+			self.take(key);
+		}
+	}
+}
+
 impl TrackState {
 	/// The head lent for group `key`, taken; see [`Consumer::lend_head`].
 	fn take_lent(&self, key: u64) -> Option<Arc<group::Head>> {
-		self.lent.lock().unwrap_or_else(PoisonError::into_inner).remove(&key)
+		self.lent.lock().unwrap_or_else(PoisonError::into_inner).take(key)
 	}
 
 	/// Hold `head` for group `key` until it arrives, or return the copies of it already
@@ -1271,12 +1314,7 @@ impl TrackState {
 			return slot.copies().cloned().collect();
 		}
 		// Under the caller's read guard, so the group cannot arrive before the loan is held.
-		let mut lent = self.lent.lock().unwrap_or_else(PoisonError::into_inner);
-		let held = |head: &group::Head| head.frames_from_first().unwrap_or_default();
-		let slot = lent.entry(key).or_insert_with(|| head.clone());
-		if held(head) > held(slot) {
-			*slot = head.clone();
-		}
+		self.lent.lock().unwrap_or_else(PoisonError::into_inner).lend(key, head);
 		Vec::new()
 	}
 
@@ -1646,7 +1684,7 @@ impl TrackState {
 		// A group given up never arrives to take the head lent for it.
 		if hole.is_some() {
 			let lent = self.lent.get_mut().unwrap_or_else(PoisonError::into_inner);
-			lent.retain(|key, _| !groups.contains(key));
+			lent.retain(|key| !groups.contains(&key));
 		}
 		if hole.as_ref().is_none_or(|hole| hole.stale_budget().is_none())
 			&& self
@@ -2728,7 +2766,7 @@ impl TrackState {
 	fn tear_down(&mut self, err: Error) -> (Option<Position>, OpenGroups) {
 		self.release_ingress();
 		// Nothing arrives after this to take a lent head.
-		self.lent.get_mut().unwrap_or_else(PoisonError::into_inner).clear();
+		*self.lent.get_mut().unwrap_or_else(PoisonError::into_inner) = Lent::default();
 		let resume = self.resume_position();
 		let groups = self
 			.lookup
@@ -16062,6 +16100,27 @@ mod test {
 		edge.finish().unwrap();
 	}
 
+	/// The heads lent to a copy never hold more together than one group may cache: readers
+	/// moving on while the copy delivers nothing keep lending newer groups, and the oldest go.
+	#[test]
+	#[cfg(feature = "async")]
+	fn lent_heads_keep_within_what_a_group_caches() {
+		let producer = track_producer("test", Info::timed());
+		let consumer = producer.consume();
+		let half = (group::MAX_CACHE_BYTES / 2) as usize;
+		for key in [1, 2, 3] {
+			let mut prefix = group::Info { start: key }.produce();
+			prefix
+				.write_frame(Timestamp::from_millis(key).unwrap(), bytes::Bytes::from(vec![0; half]))
+				.unwrap();
+			consumer.lend_head(key, prefix.consume().handoff().head().unwrap());
+		}
+		let lent = producer.modify().unwrap();
+		let lent = lent.lent.lock().unwrap();
+		assert_eq!(lent.heads.keys().copied().collect::<Vec<_>>(), [3]);
+		assert!(lent.bytes <= group::MAX_CACHE_BYTES);
+	}
+
 	/// A copy lent the heads of two groups its readers resumed it at holds each whole as it
 	/// arrives partway through, from the moment a reader can see it.
 	#[test]
@@ -16085,13 +16144,22 @@ mod test {
 		// A group given up drops its loan.
 		consumer.lend_head(8, head(8, 1));
 		producer.skip_groups(8..9);
-		assert!(!producer.modify().unwrap().lent.get_mut().unwrap().contains_key(&8));
+		assert!(
+			!producer
+				.modify()
+				.unwrap()
+				.lent
+				.get_mut()
+				.unwrap()
+				.heads
+				.contains_key(&8)
+		);
 		// So does every one still waiting once the copy tears down.
 		let aborted = track_producer("aborted", Info::timed());
 		let reader = aborted.consume();
 		reader.lend_head(3, head(3, 1));
 		aborted.abort(Error::Cancel).unwrap();
-		assert!(reader.with_state(|state| state.unwrap().read().lent.lock().unwrap().is_empty()));
+		assert!(reader.with_state(|state| state.unwrap().read().lent.lock().unwrap().heads.is_empty()));
 		for (key, at) in [(7, 2), (9, 1)] {
 			let Received::Group(group) = producer.create_group_at(group::Info { start: key }, at).unwrap() else {
 				panic!("nothing else holds group {key}");
