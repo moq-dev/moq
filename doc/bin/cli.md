@@ -23,7 +23,7 @@ install. It needs an ARMv7 CPU, so not a Pi 1, Zero, or Zero W.
 
 | Verb | Endpoint | |
 | --- | --- | --- |
-| `import` | `ts`, `fmp4`, `flv`, `avc3` | Read a container from stdin (usually FFmpeg). |
+| `import` | `ts`, `fmp4`, `flv`, `h264` | Read a container from stdin (usually FFmpeg). |
 | `import` | `capture` | Capture a camera, display, window, or app plus a microphone, and encode natively. |
 | `import` | `hls <url>` | Follow a remote live HLS playlist. |
 | `import` | `rtmp`, `srt`, `webrtc` | Accept pushes (`--listen`) or pull from a remote (`--connect`). |

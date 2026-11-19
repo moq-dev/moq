@@ -193,13 +193,19 @@ cell() {
 fetch() {
     local relay="$1" pub="$2" sub="$3" js="$4" version="$5"
     RELAY_BIN="$relay" CLI_BIN="$pub" INTEROP_SUB_MOQ="$sub" INTEROP_VERSION="$version" \
-        INTEROP_COMPAT_CLIENT="$js" INTEROP_FETCH_TRACK=1 \
+        INTEROP_COMPAT_CLIENT="$js" INTEROP_FETCH_TRACK=1 INTEROP_PUB_ANNEXB="$(annexb_import "$pub")" \
         bash "$DIR/interop.sh" --publishers rust --subscribers rust
 }
 
 # The released CLI's fMP4 import restamps media on its arrival clock, so its tone
 # does not start at timestamp zero and its decodes cannot be held to the tone's
 # phase (see phase_checked in interop.sh). Its readers' phase is still checked.
+# TEMPORARY migration, delete once the released CLI names it `h264`: the released CLI's Annex-B
+# import is `import avc3`.
+annexb_import() {
+    [[ "$1" == "$RELEASED" ]] && echo avc3 || echo h264
+}
+
 live_publisher() {
     [[ "$1" == "$RELEASED" ]] && echo 1 || echo 0
 }

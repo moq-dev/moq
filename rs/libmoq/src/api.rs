@@ -118,21 +118,21 @@ pub enum moq_audio_format {
 
 /// A single video codec [moq_publish_video] can parse.
 ///
-/// H.264 and H.265 appear twice each because the framing differs, not just the
-/// codec: AVC1/HVC1 are length-prefixed with an out-of-band config record,
-/// while AVC3/HEV1 are Annex-B with the parameter sets inline.
+/// H.264 and H.265 appear twice each because the input framing differs:
+/// AVC1/HVC1 are length-prefixed with an out-of-band config record, while
+/// H264/H265 are a raw Annex B elementary stream with the parameter sets inline.
 #[repr(C)]
 #[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum moq_video_format {
 	/// H.264, length-prefixed NALUs with an out-of-band avcC.
 	MOQ_VIDEO_FORMAT_AVC1 = 0,
-	/// H.264, Annex-B with inline SPS/PPS.
-	MOQ_VIDEO_FORMAT_AVC3 = 1,
+	/// H.264, a raw Annex B elementary stream with inline SPS/PPS.
+	MOQ_VIDEO_FORMAT_H264 = 1,
 	/// H.265, length-prefixed NALUs with an out-of-band hvcC.
 	MOQ_VIDEO_FORMAT_HVC1 = 2,
-	/// H.265, Annex-B with inline parameter sets.
-	MOQ_VIDEO_FORMAT_HEV1 = 3,
+	/// H.265, a raw Annex B elementary stream with inline parameter sets.
+	MOQ_VIDEO_FORMAT_H265 = 3,
 	/// AV1.
 	MOQ_VIDEO_FORMAT_AV01 = 4,
 	/// VP8.
@@ -377,9 +377,9 @@ fn video_format_from_u32(value: u32) -> Result<moq_mux::import::VideoFormat, Err
 	use moq_mux::import::VideoFormat;
 	Ok(match value {
 		v if v == moq_video_format::MOQ_VIDEO_FORMAT_AVC1 as u32 => VideoFormat::Avc1,
-		v if v == moq_video_format::MOQ_VIDEO_FORMAT_AVC3 as u32 => VideoFormat::Avc3,
+		v if v == moq_video_format::MOQ_VIDEO_FORMAT_H264 as u32 => VideoFormat::H264,
 		v if v == moq_video_format::MOQ_VIDEO_FORMAT_HVC1 as u32 => VideoFormat::Hvc1,
-		v if v == moq_video_format::MOQ_VIDEO_FORMAT_HEV1 as u32 => VideoFormat::Hev1,
+		v if v == moq_video_format::MOQ_VIDEO_FORMAT_H265 as u32 => VideoFormat::H265,
 		v if v == moq_video_format::MOQ_VIDEO_FORMAT_AV01 as u32 => VideoFormat::Av01,
 		v if v == moq_video_format::MOQ_VIDEO_FORMAT_VP8 as u32 => VideoFormat::Vp8,
 		v if v == moq_video_format::MOQ_VIDEO_FORMAT_VP9 as u32 => VideoFormat::Vp9,

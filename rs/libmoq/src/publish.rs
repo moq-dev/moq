@@ -516,7 +516,7 @@ impl Publish {
 			..
 		} = self.broadcast(broadcast)?;
 		let broadcast = broadcast.clone();
-		let name = broadcast.unique_name(&format!(".{}", init.format));
+		let name = broadcast.unique_name(init.format.track_suffix());
 		let request = broadcast.reserve_track(name)?;
 
 		let track = import::Track::audio(request, catalog.reserve().with_interval(interval), init)?;
@@ -538,7 +538,7 @@ impl Publish {
 			..
 		} = self.broadcast(broadcast)?;
 		let broadcast = broadcast.clone();
-		let name = broadcast.unique_name(&format!(".{}", init.format));
+		let name = broadcast.unique_name(init.format.track_suffix());
 		let request = broadcast.reserve_track(name)?;
 
 		let priority = init.priority;

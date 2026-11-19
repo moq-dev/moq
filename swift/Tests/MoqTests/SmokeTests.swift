@@ -619,7 +619,7 @@ final class SmokeTests: XCTestCase {
             optimizeForLatency: true
         )
         let media = try Media.TrackProducer.video(
-            broadcast: broadcast, initData: Media.VideoInit(format: .avc3, data: Data(), hint: hint))
+            broadcast: broadcast, initData: Media.VideoInit(format: .h264, data: Data(), hint: hint))
         try media.finish()
         try broadcast.close()
     }

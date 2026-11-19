@@ -591,7 +591,7 @@ public:
 		broadcast = route->broadcast();
 		if (video) {
 			moq::VideoInit init{};
-			init.format = moq::VideoFormat::kAvc3;
+			init.format = moq::VideoFormat::kH264;
 			init.data = TestH264Init();
 			this->video =
 				TestOk(moq::MediaTrackProducer::video(broadcast, moq::MediaTarget::kNamed{}, init),
@@ -953,7 +953,7 @@ int main()
 		CHECK(publisher.WriteUntil([] { return g_output_frames > 0; }));
 		FreezeCatalog(ctx, publisher);
 		moq::VideoInit init{};
-		init.format = moq::VideoFormat::kAvc3;
+		init.format = moq::VideoFormat::kH264;
 		init.data = TestH264Init();
 		auto replacement = TestOk(
 			moq::MediaTrackProducer::video(publisher.broadcast,
@@ -1378,7 +1378,7 @@ int main()
 		CHECK(publisher.WriteUntil([] { return g_output_frames > 0; }));
 		FreezeCatalog(ctx, publisher);
 		moq::VideoInit init{};
-		init.format = moq::VideoFormat::kAvc3;
+		init.format = moq::VideoFormat::kH264;
 		init.data = TestH264Init();
 		auto replacement = TestOk(
 			moq::MediaTrackProducer::video(publisher.broadcast,
@@ -1407,7 +1407,7 @@ int main()
 		FreezeCatalog(ctx, publisher);
 		g_candidate_decode = failure;
 		moq::VideoInit init{};
-		init.format = moq::VideoFormat::kAvc3;
+		init.format = moq::VideoFormat::kH264;
 		init.data = TestH264Init();
 		auto replacement = TestOk(
 			moq::MediaTrackProducer::video(publisher.broadcast,
@@ -1643,7 +1643,7 @@ int main()
 		CHECK(publisher.WriteUntil([] { return g_output_frames > 0; }));
 		g_find_decoder_ok = false;
 		moq::VideoInit init{};
-		init.format = moq::VideoFormat::kAvc3;
+		init.format = moq::VideoFormat::kH264;
 		init.data = TestH264Init();
 		auto replacement = TestOk(
 			moq::MediaTrackProducer::video(publisher.broadcast,

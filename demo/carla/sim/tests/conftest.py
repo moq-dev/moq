@@ -75,7 +75,7 @@ class CatalogProducer:
 
 
 moq_media.CatalogProducer = CatalogProducer
-moq_media.VideoFormat = SimpleNamespace(AVC3="avc3")
+moq_media.VideoFormat = SimpleNamespace(H264="h264")
 moq_media.VideoInit = lambda **kwargs: SimpleNamespace(**kwargs)
 moq_media.VideoHint = lambda **kwargs: SimpleNamespace(**kwargs)
 moq_media.Dimensions = lambda **kwargs: SimpleNamespace(**kwargs)
