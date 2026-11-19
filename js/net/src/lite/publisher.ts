@@ -2389,20 +2389,10 @@ export class Publisher {
 		const { sub, group, givenUp, stamp, compress, priority, previous, start: startFrame, end: endFrame } = options;
 		// The header names the requested position, so a copy missing it must be refused.
 		const msg = new GroupMessage({ subscribe: sub, key: group.start, previous, frameStart: startFrame });
-		// Lite-07 ends a finished group with GROUP_END and closes, rather than resets, the stream of
-		// a group that expires on it: the stream accounts for the group, so no drop names it.
-		const closes = hasGroupEnd(this.version);
-		// The write under way, which an expiry close lets complete, so the stream ends on a frame.
-		let writing: Promise<unknown> | undefined;
-		// Whether the stream's end went out, after which it is never reset for expiry on lite-07.
-		let ended = false;
 		// The subscription's budget, or an eviction of what is left to read, may give up on the
 		// group mid-write, which abandons the stream. A group already given up never starts the write.
 		const write = async (op: () => Promise<unknown>) => {
-			const stop = await givenUp.write(() => {
-				writing = op();
-				return writing;
-			});
+			const stop = await givenUp.write(op);
 			if (stop) throw stop;
 		};
 		// Everything past this point runs inside the cleanup scope, so a failure never leaves
@@ -2469,38 +2459,19 @@ export class Publisher {
 				});
 			}
 
-			const end = closes && whole ? group.end : undefined;
+			// Lite-07 ends a finished group with GROUP_END.
+			const end = hasGroupEnd(this.version) && whole ? group.end : undefined;
 			if (end !== undefined) await write(() => stream.write(groupEnd(stream.version, end)));
 			stream.close();
-			ended = true;
 			group.close();
 			// A stream that fails after its FIN may have lost its header, so report it for a DROP.
-			// Its bytes still hold the connection until acknowledged, so before lite-07 a group gone
-			// stale meanwhile is reset like one still serving, as the Rust `GroupServe` does.
-			if (closes) await stream.closed;
-			else await write(() => stream.closed);
+			// Its bytes still hold the connection until acknowledged, so a group gone stale meanwhile
+			// is reset like one still serving, as the Rust `GroupServe` does: stale bytes must not fill
+			// the send window ahead of the streams behind them.
+			await write(() => stream.closed);
 			return undefined;
 		} catch (err: unknown) {
-			let e = error(err);
-			if (closes && !ended && hooks.groupExpired(group)) {
-				// Expired on its stream: what went out stands as a closed group, once the frame being
-				// written completes. One that fails resets the stream with its failure instead, since a
-				// FIN would cut it short. Mirrors the Rust `GroupServe`'s expiry close.
-				const failed = await writing?.then(
-					() => undefined,
-					(err: unknown) => error(err),
-				);
-				if (failed === undefined) {
-					console.debug(`closing expired group: subscribe=${sub} key=${group.start}`);
-					stream.close();
-					group.close();
-					return await stream.closed.then(
-						() => undefined,
-						(err: unknown) => error(err),
-					);
-				}
-				e = failed;
-			}
+			const e = error(err);
 			stream.reset(e);
 			hooks.releaseGroupReader(group, e);
 			return e;

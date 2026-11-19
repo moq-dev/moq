@@ -1134,7 +1134,6 @@ export class Consumer {
 			group.#expiry = expiry;
 		};
 		hooks.groupFailed = (group) => group.#failed();
-		hooks.groupExpired = (group) => group.#expiry?.expired() === true;
 		hooks.recoverGroup = (group, recover) => {
 			group.#recover = recover;
 			// A front serving another front attaches its recovery after the inner one handed the

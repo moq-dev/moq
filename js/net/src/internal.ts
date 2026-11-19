@@ -1003,11 +1003,6 @@ export const hooks: {
 	/** The failure that ends a group's reader, as its `closed` would settle, without building that handle. */
 	groupFailed: (group: GroupConsumer) => Error | undefined;
 	/**
-	 * Whether the subscription's budget gave the group up, rather than its copy failing or the
-	 * cache evicting it. Mirrors the Rust crate-private `group::Consumer::is_expired`.
-	 */
-	groupExpired: (group: GroupConsumer) => boolean;
-	/**
 	 * Carry a group across its logical track's route changes. Attached before the group is handed
 	 * out, so its `closed` never settles on a failure the recovery continues past.
 	 */
@@ -1407,9 +1402,6 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	groupFailed: () => {
-		throw new Error("group.ts not loaded");
-	},
-	groupExpired: () => {
 		throw new Error("group.ts not loaded");
 	},
 	recoverGroup: () => {
