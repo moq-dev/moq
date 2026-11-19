@@ -203,7 +203,6 @@ the version that ships them.
 
 - [Cache-aware multicast](/quest/m2/multicast/README.md) - lite-07 carries the redesigned route layer: routes to forwarding nodes, no holds or doubt, claims crossing trust boundaries by a chain, and no Route Key
 - [Routes and announces](/quest/m2/cluster-routes/README.md) - the route layer's fixtures pass on real lite-07 sessions, and the lite-06 churn mitigations they replace are retired
-- [Route-free domain check](/quest/m2/lite07-routeless-domain.md) - the frozen wire lets a domain route below MoQ, keeping the node layer open
 
 ## Related
 
