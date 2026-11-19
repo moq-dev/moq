@@ -1351,7 +1351,8 @@ impl TrackState {
 	/// The group `back` groups before `latest` on a received copy, counted only through the
 	/// groups it holds and the starts its publisher declared skipped between them: any other
 	/// gap may hold groups the copy never saw, such as one below what a first reader asked
-	/// for, so the count is [`Containing::Unknown`] there. A gap the cache may have made is one
+	/// for, so the count is [`Containing::Unknown`] there, unless a range from group 0
+	/// started above it. A gap the cache may have made is one
 	/// no report or arrival fills, so it is `None` there, to count over the groups held as a
 	/// publisher that let them go does. Each step lands on a group held, so a huge count walks
 	/// the cache once.
@@ -1370,6 +1371,13 @@ impl TrackState {
 				_ => below,
 			};
 			if !self.lookup.contains_key(&below) {
+				// The publisher delivers nothing below where a range from group 0 started, so
+				// a count reaching below it starts there.
+				if let Some(&start) = self.time_starts.get(&0)
+					&& below < start
+				{
+					return Some(Containing::Group(start));
+				}
 				let uncached = self.uncached.is_some_and(|uncached| below <= uncached);
 				return (!uncached).then_some(Containing::Unknown);
 			}

@@ -10142,8 +10142,8 @@ impl SubStream {
 	}
 
 	/// Tell the copy where the publisher started each live range: one asked from a group's
-	/// start, which a reader's time start there resolves to when the copy holds no group at
-	/// it, and one counting back, which the copy, holding only part of the track, can't count.
+	/// start or the oldest group, which a reader's time start there resolves to when the copy
+	/// holds no group at it, and one counting back, which the copy, holding only part of the track, can't count.
 	/// Lite-07 only, where each range's start is reported.
 	fn report_starts(&self, serving: &track::Producer) {
 		if !self.live.reports_starts() {
@@ -10158,6 +10158,8 @@ impl SubStream {
 			};
 			match (range.start, start) {
 				(Some(lite::Anchor::Absolute(time)), Some(start)) if time.frame == 0 => times.push((time.group, start)),
+				// From the oldest group, as one asked from group 0.
+				(None, Some(start)) => times.push((0, start)),
 				(Some(lite::Anchor::Relative(back)), start) => {
 					if let Some(Some(latest)) = self.edges.get(&id) {
 						// With no group to deliver, the start lies at or past the range's end:

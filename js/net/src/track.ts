@@ -3746,6 +3746,10 @@ export class Subscriber {
 						below = run.start - 1n;
 					}
 					if (keys[keyIndex(keys, below)] !== below) {
+						// The publisher delivers nothing below where a range from group 0 started, so a count
+						// reaching below it starts there.
+						const floor = anchors.starts.get(0n);
+						if (floor !== undefined && below < floor) return { group: floor };
 						// The cache may have made this gap, which no report or arrival fills, so count over
 						// the groups held, as a publisher that let them go does.
 						return anchors.uncached !== undefined && below <= anchors.uncached ? undefined : "unknown";

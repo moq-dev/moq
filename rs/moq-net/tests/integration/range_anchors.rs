@@ -385,3 +385,72 @@ async fn a_later_relative_start_on_a_partial_copy_reads_only_its_groups() {
 	drop(first);
 	let _track = track.finish().unwrap();
 }
+
+/// A copy reading a track from its oldest group learns where the publisher's groups start, so
+/// a later reader counting back past them starts there, as the publisher does, rather than
+/// wait on a group below that never arrives. Mirrors the `@moq/net` `integration: lite-07
+/// counts a later relative start back to where the oldest range started`.
+#[kio::test]
+async fn a_later_relative_start_counts_back_to_where_the_oldest_range_started() {
+	let publisher = produce_origin(1);
+	let broadcast = publisher
+		.route("room", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
+	let track = broadcast
+		.broadcast()
+		.create_track(
+			"data",
+			Info::default().with_timescale(Timescale::MILLI).with_max_age(FOREVER),
+		)
+		.unwrap();
+	broadcast.announce().unwrap();
+	for key in 1..4 {
+		let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
+		group.write_frame(millis(key), &b"x"[..]).unwrap();
+		group.finish().unwrap();
+	}
+
+	let subscriber = produce_origin(2);
+	let _pair = peer("moq-lite-07-wip".parse::<Version>().unwrap(), &publisher, &subscriber).await;
+	let remote = kio::clock::timeout(TIMEOUT, subscriber.consume().follow("room", None).unwrap().available())
+		.await
+		.expect("resolve timeout")
+		.expect("broadcast resolves")
+		.unwrap();
+	let subscribe = |ranges: Vec<Range>| {
+		let subscription = Subscription::default()
+			.with_delay(Delay::default().with_max(FOREVER))
+			.with_order(Order::Ascending)
+			.with_ranges(ranges);
+		remote.track("data").unwrap().subscribe(subscription)
+	};
+	let read = async |reader: &mut moq_net::track::Subscriber, count: usize| {
+		let mut read = Vec::new();
+		for _ in 0..count {
+			let group = kio::clock::timeout(TIMEOUT, reader.recv_group())
+				.await
+				.expect("group timeout")
+				.unwrap();
+			read.push(group.map(|group| group.start));
+		}
+		read
+	};
+
+	let mut oldest = kio::clock::timeout(TIMEOUT, subscribe(vec![Range::oldest()]))
+		.await
+		.expect("subscribe timeout")
+		.unwrap();
+	assert_eq!(read(&mut oldest, 3).await, [Some(1), Some(2), Some(3)]);
+
+	let mut later = kio::clock::timeout(TIMEOUT, subscribe(vec![range(Anchor::Relative(5), None)]))
+		.await
+		.expect("subscribe timeout")
+		.unwrap();
+	assert_eq!(
+		read(&mut later, 3).await,
+		[Some(1), Some(2), Some(3)],
+		"counted back past group 1, as the publisher does"
+	);
+	drop(oldest);
+	let _track = track.finish().unwrap();
+}

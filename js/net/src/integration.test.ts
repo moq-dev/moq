@@ -535,6 +535,53 @@ test("integration: lite-07 starts a later reader's relative range where the publ
 	}
 });
 
+// A copy reading a track from its oldest group learns where the publisher's groups start, so a later
+// reader counting back past them starts there, as the publisher does, rather than wait on a group
+// below that never arrives. Mirrors the Rust
+// `a_later_relative_start_counts_back_to_where_the_oldest_range_started`.
+test("integration: lite-07 counts a later relative start back to where the oldest range started", async () => {
+	const pair = createMockTransportPair(Lite.ALPN_07_WIP);
+	const origin = new OriginProducer();
+	const [client, server] = await Promise.all([
+		connect(url, { transport: pair.client }),
+		accept(pair.server, url, { publish: origin.consume() }),
+	]);
+
+	const broadcast = publish(origin, Path.from("test"));
+	const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
+	for (let key = 1n; key < 4n; key++) {
+		const group = producer.createGroup(key);
+		group.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.fromMillis(Number(key)) });
+		group.finish();
+	}
+
+	const remote = wireOf(client).consume(Path.from("test"));
+	const subscribe = (ranges: TrackRange[]) =>
+		remote
+			.track("video")
+			.subscribe({ delay: { max: null }, order: "ascending", ranges })
+			.ordered();
+	const read = async (reader: ReturnType<typeof subscribe>, count: number) => {
+		const got: (bigint | undefined)[] = [];
+		for (let i = 0; i < count; i++)
+			got.push((await withTimeout(reader.nextGroup(), Duration.millis(2_000), "group timed out"))?.start);
+		return got;
+	};
+	try {
+		const oldest = subscribe([{}]);
+		expect(await read(oldest, 3)).toEqual([1n, 2n, 3n]);
+		const later = subscribe([{ start: { relative: 5n } }]);
+		expect(await read(later, 3)).toEqual([1n, 2n, 3n]);
+		oldest.close();
+		later.close();
+	} finally {
+		remote.close();
+		broadcast.close();
+		client.abort();
+		server.abort();
+	}
+});
+
 // A publisher counts a relative start back from its newest group, which may hold no frame yet and
 // so counts neither in the largest it reports nor where the copy resolves the start. The copy reports
 // the publisher's start, where a reader waiting on each group in sequence starts. Mirrors the Rust
