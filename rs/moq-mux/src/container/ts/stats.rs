@@ -167,7 +167,7 @@ pub struct Stream {
 	/// counted separately from a resync.
 	#[serde(skip_serializing_if = "is_zero")]
 	pub unconfirmed: u64,
-	/// Damaged packets, PES, or access units refused whole on this PID. Export stays zero.
+	/// Damaged packets or PES refused whole on this PID. Export stays zero.
 	#[serde(skip_serializing_if = "is_zero")]
 	pub damaged: u64,
 	/// Whole PES or sections, SI included, dropped because the program clock could not place

@@ -41,9 +41,9 @@ Superseded 2026-11-18 (maintainer, /quest-plan of the enum-return audit):
 flips that we don't understand and limp along with broken functionality."
 This replaces the 2026-11-17 design above that drops and counts a lone
 stream's stray packets as damage (rejected now: tolerating an unexplained
-step). [TS unit abort](/quest/m1/ts-unit-abort.md) removes the import's
-damage tolerance; this quest adds back only a step with a known source, as an
-explicit case. If no real source turns up, delete this quest and record why.
+step). [moq-dev/moq#9170](https://github.com/moq-dev/moq/pull/9170) removed
+the import's unit damage tolerance; this quest adds back only a step with a
+known source, as an explicit case. If no real source turns up, delete this quest and record why.
 
 Tests: a capture or generator reproducing the step's real source, and the
 import's behavior on it; for unexplained corruption, the import ends with the
@@ -55,10 +55,6 @@ Caused by, for the fix PR's `## Caused by`:
 
 - [moq-dev/moq#7898](https://github.com/moq-dev/moq/pull/7898) - made a lone stream's rewind fatal to the import
 - [moq-dev/moq#5967](https://github.com/moq-dev/moq/pull/5967) - PCR unwrap that can go negative on a data-only program
-
-## Required
-
-- [TS unit abort](/quest/m1/ts-unit-abort.md) - removes the import's damage tolerance, so a known step is added back as an explicit case
 
 ## Related
 

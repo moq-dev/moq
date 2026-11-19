@@ -9,8 +9,9 @@ description: SRT contribution and playback
 source (`--connect`); `moq export srt` serves SRT to players or pushes to a
 remote. The payload is MPEG-TS, so the same codecs and behavior as
 [`import ts`](/bin/ts) apply: H.264/H.265 video and AAC, MP2, AC-3, E-AC-3, or
-Opus audio. A damaged unit is dropped and the session stays up; video resumes at its
-next keyframe, freezing for up to one GOP.
+Opus audio. A lost or flagged-corrupt packet drops only its unit and the session
+stays up; video resumes at its next keyframe, freezing for up to one GOP. A unit
+that arrives whole but does not decode ends the session with the cause.
 
 ```bash
 # Accept a contribution feed and publish it
