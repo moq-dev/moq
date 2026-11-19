@@ -2018,12 +2018,15 @@ impl<R: Request> RequestServe<R> {
 				}
 				RequestState::Finish { finished, stale } => {
 					// Those bytes hold the connection until acknowledged, so a reply gone stale
-					// meanwhile is reset rather than left to stall the streams behind it.
-					if stale.as_mut().is_some_and(|group| group.poll_expired(waiter)) {
-						return Poll::Ready(Err(Error::Old));
-					}
+					// while it waits is reset rather than left to stall the streams behind it.
 					if !*finished {
-						ready!(stream.writer.poll_flush(waiter))?;
+						let Poll::Ready(flushed) = stream.writer.poll_flush(waiter) else {
+							return match stale.as_mut().is_some_and(|group| group.poll_expired(waiter)) {
+								true => Poll::Ready(Err(Error::Old)),
+								false => Poll::Pending,
+							};
+						};
+						flushed?;
 						stream.writer.finish()?;
 						*finished = true;
 					}
@@ -2034,7 +2037,16 @@ impl<R: Request> RequestServe<R> {
 						ready!(self.poll_closed(waiter))?;
 					}
 					let stream = self.stream.as_mut().expect("stream present");
-					return stream.writer.poll_close(waiter);
+					let Poll::Ready(closed) = stream.writer.poll_close(waiter) else {
+						let RequestState::Finish { stale, .. } = &mut self.state else {
+							unreachable!()
+						};
+						return match stale.as_mut().is_some_and(|group| group.poll_expired(waiter)) {
+							true => Poll::Ready(Err(Error::Old)),
+							false => Poll::Pending,
+						};
+					};
+					return Poll::Ready(closed);
 				}
 			}
 		}

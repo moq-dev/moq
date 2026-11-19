@@ -3452,8 +3452,6 @@ test("lite draft-07: a fetch whose budget gives up partway resets as too old", a
 // A fetch sent whole whose FIN the requester has yet to acknowledge still holds the connection, so
 // it resets as too old once its budget gives the group up, as the Rust `FetchServe` does.
 test("lite draft-07: a fetch sent whole resets as too old when it goes stale unacknowledged", async () => {
-	const clock = new Manual();
-	const installed = clock.install();
 	const pair = createMockTransportPair(ALPN_07_WIP);
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, Version.DRAFT_07, randomHop(), origin.consume());
@@ -3462,6 +3460,7 @@ test("lite draft-07: a fetch sent whole resets as too old when it goes stale una
 	const frame = (ms: number) => ({ payload: new TextEncoder().encode("x"), timestamp: Timestamp.fromMillis(ms) });
 	const whole = track.createGroup(0n);
 	whole.writeFrame(frame(0));
+	whole.finish();
 
 	const client = await Stream.open(pair.client, { version: Version.DRAFT_07 });
 	const incoming = pair.server.incomingBidirectionalStreams.getReader();
@@ -3492,21 +3491,20 @@ test("lite draft-07: a fetch sent whole resets as too old when it goes stale una
 			group: 0n,
 		});
 		const serving = publisher.runFetch(msg, server);
-		// The frame is on the wire, then its successor arrives, and the group finishes: the whole
-		// group and its FIN go out, with the group still inside its budget.
+		// The whole group and its FIN go out before any successor arrives.
 		await client.reader.u8();
-		const next = track.createGroup(1n);
-		next.writeFrame(frame(100));
-		whole.finish();
 		await flush();
 		expect(reset).toBeUndefined();
 
-		// Its successor arrived the budget ago, with the FIN still unacknowledged.
-		await clock.advance(Duration.millis(500));
+		// Then the track runs a second past its successor, with the FIN still unacknowledged.
+		for (const ms of [1000, 2000]) {
+			const group = track.createGroup(BigInt(ms / 1000));
+			group.writeFrame(frame(ms));
+			group.finish();
+		}
 		await serving;
 		expect(toStreamCode(fromTransport(reset))).toBe(StreamCode.Old);
 	} finally {
-		installed.close();
 		publisher.close();
 		client.close();
 		broadcast.close();

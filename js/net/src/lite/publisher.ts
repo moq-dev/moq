@@ -1282,6 +1282,8 @@ export class Publisher {
 					signal: left.signal,
 					// A copy holding the frames asked on serves them; one missing them is filled whole.
 					frameStart: msg.startFrame,
+					// The budget judges the group until the response is acknowledged.
+					held: true,
 				};
 				group = await front.track(msg.track).fetchGroup(msg.group, options);
 				serving(group);

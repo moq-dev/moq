@@ -2750,9 +2750,9 @@ impl RunFill {
 			return Poll::Ready(());
 		}
 		// Or until the group expires: stale bytes must not hold the connection.
-		let closed = wait!(Settle => match write.poll_stale(waiter) {
-			true => Poll::Ready(Err(Error::Old)),
-			false => writer.poll_close(waiter),
+		let closed = wait!(Settle => match writer.poll_close(waiter) {
+			Poll::Pending if write.poll_stale(waiter) => Poll::Ready(Err(Error::Old)),
+			closed => closed,
 		});
 		match closed {
 			Ok(()) => tracing::debug!(fill = %self.request_id, "fill complete"),
@@ -5496,9 +5496,9 @@ impl FetchRespond {
 		// Settle: the writer keeps the stream, and its rank, until the acknowledgement, or
 		// until the group expires, which resets it.
 		writer.finish()?;
-		let settled = wait!(Settle => match self.write.poll_stale(waiter) {
-			true => Poll::Ready(Err(Error::Old)),
-			false => writer.poll_close(waiter),
+		let settled = wait!(Settle => match writer.poll_close(waiter) {
+			Poll::Pending if self.write.poll_stale(waiter) => Poll::Ready(Err(Error::Old)),
+			closed => closed,
 		});
 		if let Err(err) = &settled {
 			writer.abort(err);

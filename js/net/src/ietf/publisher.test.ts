@@ -4397,7 +4397,8 @@ test("draft-22: an update fills its snapshot under its own request ID", async ()
 
 test("draft-22: an empty newer group is not an object in Largest or a relative fill", async () => {
 	const fx = fixture();
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	// No max age, so the superseded group stays fresh enough to fill.
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 	writeGroup(track, 2);
 	const empty = hooks.appendNext(track);
 	const { client, ok } = await runSubscribe(
@@ -4608,6 +4609,57 @@ test("draft-22: cancellation resets a fill whose FIN is unacknowledged", async (
 		client.close();
 		while (track.subscription.peek() !== undefined) await track.subscription.changed();
 		expect(reset).toBe(true);
+	} finally {
+		client.close();
+		track.finish();
+		track.close();
+		fx.close();
+	}
+});
+
+// A fill whose FIN waits on an acknowledgement resets once its group goes stale under the
+// subscription's budget, as the Rust fill does, rather than hold the connection for stale bytes.
+test("draft-22: a fill whose FIN is unacknowledged resets once its group goes stale", async () => {
+	const fx = fixture();
+	const finished = Promise.withResolvers<void>();
+	let reset = false;
+	const resets = Promise.withResolvers<void>();
+	const unacknowledged = new WritableStream<Uint8Array>({
+		start(controller) {
+			controller.signal.addEventListener("abort", () => {
+				reset = true;
+				resets.resolve();
+			});
+		},
+		close() {
+			finished.resolve();
+			return new Promise<void>(() => {});
+		},
+	});
+	spyOn(fx.pair.server, "createUnidirectionalStream").mockImplementationOnce(async () => unacknowledged);
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: Duration.millis(500) });
+	writeGroup(track, 1);
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 0n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "absolute", startGroup: 10n, startObject: 0n },
+			fill: { filter: { kind: "unfiltered" }, rangeFilters: false },
+		}),
+	);
+	try {
+		await finished.promise;
+		expect(reset).toBe(false);
+		// The track runs a second past the filled group's successor.
+		for (const ms of [1000, 2000]) {
+			const group = hooks.appendNext(track);
+			group.writeFrame({ payload: new TextEncoder().encode("edge"), timestamp: Timestamp.fromMillis(ms) });
+			group.finish();
+		}
+		await resets.promise;
 	} finally {
 		client.close();
 		track.finish();

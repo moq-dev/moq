@@ -1495,6 +1495,9 @@ export class Publisher {
 			const out = new FetchWriter({ stream, version, priority: publisherPriority });
 			const group = hooks.cachedGroup(cache, fill.start.group);
 			if (!group) throw new NotFound("fill group unavailable");
+			// Judged by the subscription's budget, as the Rust fill's fetched group is, so a fill
+			// parked on flow control or awaiting its acknowledgement gives up once it goes stale.
+			hooks.expireGroup(group, hooks.staleAt(cache, group.start));
 			const given = untilGivenUp(group, cancelled);
 			try {
 				await this.#writeFetchGroup({

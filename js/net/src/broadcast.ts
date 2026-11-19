@@ -341,7 +341,9 @@ async function fetchGroup(
 					// now: an in-progress group must keep receiving frames for its lifetime
 					// (mirrors Rust poll_fetch), and a failed group's unread frames stay in the
 					// cache's reach, expirable, until the caller lets them go.
-					void hooks.groupDone(recv.group).then(() => subscriber.close());
+					void (
+						(options as FetchFrom).held ? hooks.groupReleased(recv.group) : hooks.groupDone(recv.group)
+					).then(() => subscriber.close());
 					return recv.group;
 				case "drop":
 					// Its own reason, so a stale verdict stays OLD: a relay's fill asking under this
@@ -368,6 +370,12 @@ async function fetchGroup(
  */
 export interface FetchFrom {
 	frameStart?: number;
+	/**
+	 * Keep the fetch's subscription, which judges the group's budget, until the reader releases
+	 * the group rather than once it reads the end: a publisher still owed an acknowledgement
+	 * resets a response that goes stale meanwhile.
+	 */
+	held?: boolean;
 }
 
 // Settles once a read of `subscriber` may go differently.
