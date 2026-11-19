@@ -666,6 +666,8 @@ impl Front {
 			return;
 		};
 		let spliced = track.state == (TrackState::Spliced { source });
+		// A copy the closed source answered after its close: neither served nor drained.
+		let late = serving != Some(source) && track.draining != Some(source);
 		// A track finishing on a copy other than the serving source's asks that source for
 		// one anew, since finishing lets go of a query in flight: the group reads still
 		// holding the track continue from it, as after a later source change.
@@ -715,7 +717,8 @@ impl Front {
 			// route a switch already under way moves to, whatever the error, since the
 			// route it leaves may be what failed. A copy still read from a source that
 			// closed during the switch has no serving source to judge the instance by, so
-			// the route the switch asks speaks for it.
+			// the route the switch asks speaks for it. What that copy died of is no
+			// serving copy's loss: the route's answer is its own verdict, as while waiting.
 			Err(err)
 				if delivered
 					&& (err.transient() || self.upstream.is_some())
@@ -724,7 +727,11 @@ impl Front {
 						.is_some_and(|candidate| candidate.carried) =>
 			{
 				track.state = TrackState::Idle;
-				track.lost = Some(err);
+				if late {
+					track.closed.get_or_insert(err);
+				} else {
+					track.lost = Some(err);
+				}
 				self.fail_over(name, actions);
 			}
 			// A copy the closed source answered after its close died while the front waits on
@@ -1478,6 +1485,84 @@ mod tests {
 			&[Action::Query {
 				track: name("video"),
 				source: 200,
+			}],
+		);
+	}
+
+	/// A front whose claim closed, asking the route that serves it next, with a copy the
+	/// closed source answered after its close spliced in and then dead.
+	fn late_copy_died_while_asking() -> Front {
+		let mut front = querying(claim(1), 100);
+		front.step(Event::SourceClosed { source: 100 });
+		assert_actions(
+			front.step(Event::Selected {
+				best: Some(claim(2)),
+				serving_closing: false,
+			}),
+			&[Action::Request { route: 2 }],
+		);
+		assert_actions(
+			front.step(Event::TrackInfo {
+				track: name("video"),
+				source: 100,
+				closing: true,
+				result: Ok(info()),
+				retry: None,
+			}),
+			&[Action::Splice {
+				track: name("video"),
+				source: 100,
+			}],
+		);
+		assert_actions(
+			front.step(Event::TrackEnded {
+				track: name("video"),
+				source: 100,
+				closing: true,
+				result: Err(Error::Session(crate::SessionError::Cancel)),
+				delivered: true,
+			}),
+			&[],
+		);
+		front
+	}
+
+	/// The late copy dies while the next route is asked, and that route refuses the
+	/// broadcast: the track ends with the refusal, not the closed session's error.
+	#[test]
+	fn a_late_copy_dying_while_asking_yields_to_a_broadcast_refusal() {
+		let mut front = late_copy_died_while_asking();
+		assert_actions(refuse(&mut front, 2), &[Action::End { err: Error::NotFound }]);
+		assert!(front.lost("video").is_none());
+	}
+
+	/// The late copy dies while the next route is asked, whose source then refuses the
+	/// track: the track aborts with that refusal, not the closed session's error.
+	#[test]
+	fn a_late_copy_dying_while_asking_yields_to_a_track_refusal() {
+		let mut front = late_copy_died_while_asking();
+		assert_actions(
+			front.step(Event::Resolved {
+				route: 2,
+				result: Ok(200),
+			}),
+			&[Action::Query {
+				track: name("video"),
+				source: 200,
+			}],
+		);
+		assert_actions(
+			front.step(Event::TrackInfo {
+				track: name("video"),
+				source: 200,
+				closing: false,
+				result: Err(Error::Unsupported),
+				retry: None,
+			}),
+			&[Action::Abort {
+				track: name("video"),
+				err: Error::Unsupported,
+				retry: None,
 			}],
 		);
 	}
