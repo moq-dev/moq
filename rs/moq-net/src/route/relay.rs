@@ -1536,7 +1536,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			self.count(known.items.len());
 			for (broadcast, claim) in known.items {
 				self.unclaim(&broadcast, origin);
-				self.unhold(&broadcast, |ended| _ = ended.origins.remove(&origin));
+				self.unhold(&broadcast, |_, ended| _ = ended.origins.remove(&origin));
 				self.dirty.insert(broadcast.clone());
 				self.drop_claim(broadcast, origin, claim, None);
 			}
@@ -2050,18 +2050,19 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 				!held.is_some_and(|ended| ended.origins.contains(&origin) && *epoch <= ended.epoch)
 			})
 			.collect();
-		// A claimant that let go of its copy, or claims a newer epoch, holds none.
+		// A claimant that let go of its copy, or now claims another announcer's claim or a
+		// newer epoch, holds none.
 		for (broadcast, change) in &changes {
 			match change {
 				Change::Live(claim) => {
-					let epoch = claim.item.epoch();
-					self.unhold(broadcast, |ended| {
-						if epoch > ended.epoch {
+					let (by, epoch) = (announcer(claim, origin), claim.item.epoch());
+					self.unhold(broadcast, |announcer, ended| {
+						if by != announcer || epoch > ended.epoch {
 							ended.origins.remove(&origin);
 						}
 					});
 				}
-				_ => self.unhold(broadcast, |ended| _ = ended.origins.remove(&origin)),
+				_ => self.unhold(broadcast, |_, ended| _ = ended.origins.remove(&origin)),
 			}
 		}
 		// Its publisher ended the claim: every copy of it standing now is stale, and this
@@ -2110,12 +2111,12 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 
 	/// A holder let go of its copy of an ended claim of `broadcast`, as `release` says:
 	/// forget each ended claim no copy of stands any more.
-	fn unhold(&mut self, broadcast: &Broadcast<I>, release: impl Fn(&mut Ended<N>)) {
+	fn unhold(&mut self, broadcast: &Broadcast<I>, release: impl Fn(Id, &mut Ended<N>)) {
 		let Some(held) = self.withdrawn.get_mut(broadcast) else {
 			return;
 		};
-		held.retain(|_, ended| {
-			release(ended);
+		held.retain(|announcer, ended| {
+			release(*announcer, ended);
 			!(ended.origins.is_empty() && ended.peers.is_empty())
 		});
 		if held.is_empty() {
@@ -2291,11 +2292,12 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			match change {
 				Change::Live(claim) => {
 					peer.given.insert(broadcast.clone(), claim.clone());
-					let epoch = claim.item.epoch();
+					let (by, epoch) = (claim.chain.first().copied(), claim.item.epoch());
 					self.givers.entry(broadcast.clone()).or_default().insert(from, claim);
-					// A neighbour that gives a newer epoch holds no copy of an older end.
-					self.unhold(&broadcast, |ended| {
-						if epoch > ended.epoch {
+					// A neighbour that gives another announcer's claim, or a newer epoch, holds
+					// no copy of an older end.
+					self.unhold(&broadcast, |announcer, ended| {
+						if by != Some(announcer) || epoch > ended.epoch {
 							ended.peers.remove(&from);
 						}
 					});
@@ -2319,7 +2321,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 				self.givers.remove(broadcast);
 			}
 		}
-		self.unhold(broadcast, |ended| _ = ended.peers.remove(&peer));
+		self.unhold(broadcast, |_, ended| _ = ended.peers.remove(&peer));
 	}
 
 	/// Announce the cheapest claim any neighbour gave this node for `broadcast`, or
@@ -3942,6 +3944,14 @@ mod tests {
 		router.recv(2, claims(2, Change::Ended, 2)).unwrap();
 		let shown = |router: &Router<usize, u64, Run>| router.shown().contains_key(&(7, p("live")));
 		assert!(!shown(&router), "node 4's copy is of the ended claim");
+
+		// Moving to another announcer's claim and back at the same epoch: no copy any more.
+		router.recv(4, claims(4, chained(vec![10, 4]), 2)).unwrap();
+		router.recv(4, claims(4, chained(vec![9, 4]), 3)).unwrap();
+		assert!(shown(&router), "node 4 let go of its copy");
+		router.recv(2, claims(2, chained(vec![9, 2]), 3)).unwrap();
+		router.recv(2, claims(2, Change::Ended, 4)).unwrap();
+		assert!(!shown(&router), "node 4 holds a copy again");
 
 		router.disconnect(4);
 		open(&mut router, 4, Role::Routing(node(4)));
