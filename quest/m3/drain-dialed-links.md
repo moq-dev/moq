@@ -24,8 +24,11 @@ cheaper than an unplanned one.
 - Hand the shutdown observer to the cluster dial loop, so it sends GOAWAY on
   its live session, stops redialing, and holds the drain open until the session
   ends or the shared deadline passes.
-- Test it on real relays: a drained relay with only dialed links shows
-  `routes.received.drain` on each neighbour before `routes.received.dead`.
+- Test it on real relays, in a triangle where the drained relay dials both
+  others: each neighbour, hearing the GOAWAY itself, counts
+  `routes.sent.drain` toward the other, which counts `routes.received.drain`,
+  all before either counts a DEAD. The neighbour that hears the GOAWAY counts
+  no DRAIN received: the draining relay sends GOAWAY, not DRAIN.
 
 Public API: none. Wire: none.
 

@@ -63,7 +63,9 @@ Agent's choices, for the implementer to revisit:
 - Each relay's route counts come from its stats (`routes` in a label's
   presence) or `/metrics` (`moq_relay_route_*`), which
   [moq-dev/moq#9126](https://github.com/moq-dev/moq/pull/9126) added; see
-  `doc/concept/stats.md`.
+  `doc/concept/stats.md`. They count only moq-lite-07 sessions: a link still on
+  lite-06 runs no route node and reports zeros, so the report shows its
+  route counts as unavailable rather than zero.
 - A pair of edges joined over lite-06 can still transit, a known gap of the
   lite-06 path that ends when the mesh finishes its roll. Name it in the
   report instead of failing on it.
