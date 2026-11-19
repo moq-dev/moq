@@ -1179,12 +1179,12 @@ impl Subscriber {
 		reader.window();
 		let reader = &mut *reader;
 		// Only the serving copy places one: the reader's own window holds no groups. Its
-		// subscription mirrors the reader's ranges in key order.
+		// subscription keys each range as the reader does.
 		let indices: Vec<Option<u64>> = keys
 			.into_iter()
 			.map(|key| match reader.window.resolved_key(key) {
 				Some(_) => None,
-				None => reader.keys.binary_search(&key).ok().map(|index| index as u64),
+				None => reader.mirrored.ranges.contains_key(&key).then_some(key),
 			})
 			.collect();
 		let mut found = match reader.copies.last_mut().map(|copy| &mut copy.sub) {

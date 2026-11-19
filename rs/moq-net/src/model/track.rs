@@ -15849,7 +15849,7 @@ mod test {
 				.with_delay(Delay::default().with_max(None))
 		};
 		let placed = |subscriber: &mut Subscriber| {
-			subscriber.resolved_ranges()[0].map(|resolved| (resolved.start, resolved.floored))
+			subscriber.resolved_ranges([0])[0].map(|resolved| (resolved.start, resolved.floored))
 		};
 		let producer = track_producer("test", Info::timed());
 		producer.received();
@@ -15887,7 +15887,7 @@ mod test {
 				.with_delay(Delay::default().with_max(None))
 		};
 		let placed = |subscriber: &mut Subscriber| {
-			subscriber.resolved_ranges()[0].map(|resolved| (resolved.start, resolved.floored))
+			subscriber.resolved_ranges([0])[0].map(|resolved| (resolved.start, resolved.floored))
 		};
 		let producer = track_producer("test", Info::timed());
 		producer.received();
@@ -15918,7 +15918,7 @@ mod test {
 				.with_delay(Delay::default().with_max(None))
 		};
 		let placed = |subscriber: &mut Subscriber| {
-			subscriber.resolved_ranges()[0].map(|resolved| (resolved.start, resolved.floored))
+			subscriber.resolved_ranges([0])[0].map(|resolved| (resolved.start, resolved.floored))
 		};
 		let producer = track_producer("test", Info::timed());
 		producer.received();
