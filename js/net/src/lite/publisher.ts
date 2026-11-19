@@ -62,6 +62,7 @@ import { Probe } from "./probe.ts";
 import {
 	encodeSubscribeResponse,
 	LiveRanges,
+	positionFrames,
 	rangesOf,
 	requestedRanges,
 	type Subscribe,
@@ -273,6 +274,8 @@ type FrameBounds = {
 	endGroup?: bigint;
 	/** Last frame (inclusive) to send within {@link endGroup}; every other group runs to its end. */
 	endFrame?: number;
+	/** Lite-07: the first frame of each group a range starts partway through (see {@link positionFrames}). */
+	starts: ReadonlyMap<bigint, number>;
 };
 
 /**
@@ -288,7 +291,7 @@ type FrameBounds = {
  */
 function frameRange(bounds: FrameBounds, key: bigint): { start: number; end?: number } {
 	return {
-		start: bounds.startGroup === key ? bounds.startFrame : 0,
+		start: bounds.starts.get(key) ?? (bounds.startGroup === key ? bounds.startFrame : 0),
 		end: bounds.endGroup === key ? bounds.endFrame : undefined,
 	};
 }
@@ -994,6 +997,7 @@ export class Publisher {
 			startFrame: msg.startFrame,
 			endGroup: msg.endGroup,
 			endFrame: msg.endFrame,
+			starts: hasRanges(this.version) ? positionFrames(msg.ranges ?? []) : new Map(),
 		};
 		let legacy: datagram.Consumer | undefined;
 		const legacyPriority = new Signal(msg.priority);
@@ -1647,6 +1651,8 @@ export class Publisher {
 							bounds.startFrame = update.startFrame;
 							bounds.endGroup = update.endGroup;
 							bounds.endFrame = update.endFrame;
+							// The update carries every live range by now (see `apply`).
+							bounds.starts = hasRanges(this.version) ? positionFrames(update.ranges ?? []) : new Map();
 							moveCursor();
 							// A run elided for a group the ranges no longer name goes out after all.
 							if (!(await sendElided())) return false;

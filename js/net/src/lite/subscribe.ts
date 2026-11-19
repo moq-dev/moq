@@ -290,9 +290,9 @@ async function decodeRanges(r: Reader): Promise<WireRange[]> {
 
 /**
  * Lite-07 `ranges` and the one span covering every one of them, which the subscriber narrows
- * again. A range covers whole groups but for a Position start, whose frame the span keeps when
- * the span starts there and no other range may cover that group: each group is delivered once.
- * A Position above the span's start goes whole, as more than it asked.
+ * again. A range covers whole groups but for a Position start (see {@link positionFrames}),
+ * whose frame the span keeps when the span starts there. The publisher reads every Position
+ * from the ranges themselves.
  */
 export function spanOf(version: Version, ranges: readonly WireRange[]): Span & { ranges: WireRange[] } {
 	let start: bigint | undefined;
@@ -312,7 +312,7 @@ export function spanOf(version: Version, ranges: readonly WireRange[]): Span & {
 	if (live) end = undefined;
 	// An exclusive end at the very first group names nothing.
 	if (end === 0n) throw new ProtocolViolation(EMPTY_RANGE);
-	const startFrame = start === undefined ? 0 : positionFrame(ranges, start);
+	const startFrame = start === undefined ? 0 : (positionFrames(ranges).get(start) ?? 0);
 	return {
 		ranges: [...ranges],
 		startGroup: canonicalStartGroup(version, start, startFrame),
@@ -321,19 +321,28 @@ export function spanOf(version: Version, ranges: readonly WireRange[]): Span & {
 	};
 }
 
-/** The frame a Position start asks group `group` from, 0 unless no other range may cover it. */
-function positionFrame(ranges: readonly WireRange[], group: bigint): number {
-	let frame = 0;
-	let covering = 0;
+/**
+ * The first frame each lite-07 Position start asks its group from, by group, for each group no
+ * other range may cover: a group is delivered once, so one another range covers goes whole.
+ */
+export function positionFrames(ranges: readonly WireRange[]): Map<bigint, number> {
+	const frames = new Map<bigint, number>();
 	for (const range of ranges) {
-		const from = range.start?.absolute ?? range.start?.time;
-		const to = range.end?.absolute ?? (range.end?.time === undefined ? undefined : range.end.time + 1n);
-		// Unknown ends, such as a count back, may cover it.
-		if ((from !== undefined && from > group) || (to !== undefined && to <= group)) continue;
-		covering++;
-		if (range.start?.absolute === group && range.start.frame) frame = range.start.frame;
+		const start = range.start;
+		if (start?.absolute === undefined || !start.frame) continue;
+		const group = start.absolute;
+		const frame = start.frame;
+		let covering = 0;
+		for (const other of ranges) {
+			const from = other.start?.absolute ?? other.start?.time;
+			const to = other.end?.absolute ?? (other.end?.time === undefined ? undefined : other.end.time + 1n);
+			// Unknown ends, such as a count back, may cover it.
+			if ((from !== undefined && from > group) || (to !== undefined && to <= group)) continue;
+			covering++;
+		}
+		if (covering === 1) frames.set(group, frame);
 	}
-	return covering === 1 ? frame : 0;
+	return frames;
 }
 
 /**

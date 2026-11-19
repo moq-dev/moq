@@ -346,6 +346,14 @@ impl Fall {
 	}
 }
 
+/// A head [`Handle::take_head`] adopted, still to settle with the track and the cache; see
+/// [`Handle::settle_head`].
+#[must_use]
+pub(super) struct Adopted {
+	now: Option<u64>,
+	latest: Option<Timestamp>,
+}
+
 /// The frames a copy of a group holds, from where it starts, which a successor copy of
 /// the same group on another route adopts below where it starts.
 pub(super) struct Head {
@@ -2720,8 +2728,17 @@ impl Handle {
 	/// compressed group adopts only a compressed head, taking its inflated sizes beside the
 	/// slices, so its plain readers inflate from the adopted frames.
 	pub(super) fn adopt_head(&self, head: &Head) {
+		if let Some(adopted) = self.take_head(head) {
+			self.settle_head(adopted);
+		}
+	}
+
+	/// The part of [`Self::adopt_head`] that touches only this group, so a track can run it
+	/// under its own lock before any reader sees the group: then [`Self::settle_head`], with
+	/// that lock released.
+	pub(super) fn take_head(&self, head: &Head) -> Option<Adopted> {
 		let Ok(mut state) = self.state.write() else {
-			return;
+			return None;
 		};
 		let offset = state.offset;
 		let reaches = head.start.saturating_add(head.entries.len()) >= offset;
@@ -2729,7 +2746,7 @@ impl Handle {
 		// A copy that shed its front holds no run from `offset` for the head to precede.
 		let shed = state.held() != offset;
 		if state.outcome.error().is_some() || state.sparse() || !same_form || shed || head.start >= offset || !reaches {
-			return;
+			return None;
 		}
 		let count = offset - head.start;
 		let entries = &head.entries[..count];
@@ -2743,13 +2760,13 @@ impl Handle {
 		// shed to make room for.
 		let slots = state.slots() + (count * size_of::<Entry>()) as u64;
 		if state.tail().saturating_add(payload + metadata + slots) > MAX_CACHE_BYTES {
-			return;
+			return None;
 		}
 		let mut adopted = Vec::with_capacity(count);
 		for (index, entry) in (head.start..).zip(entries) {
 			let mut entry = entry.clone();
 			if state.canonicalize(index, &mut entry).is_err() {
-				return;
+				return None;
 			}
 			// Below the log, so off this copy's pace scale: taking it reports nothing.
 			entry.end = 0;
@@ -2792,11 +2809,18 @@ impl Handle {
 			wire.last = wire.last.or(Some(offset as u64 - 1));
 		}
 		let extra = metadata + growth + if state.content.is_none() { payload } else { 0 };
-		let now = state.charge.add(extra);
-		drop(state);
+		Some(Adopted {
+			now: state.charge.add(extra),
+			latest: head_latest,
+		})
+	}
+
+	/// Settle a head [`Self::take_head`] adopted with the track and the cache: the group
+	/// counts as content now, as a first frame would make it.
+	pub(super) fn settle_head(&self, adopted: Adopted) {
 		self.start(None);
-		self.cache.settle(now);
-		if let Some(latest) = head_latest {
+		self.cache.settle(adopted.now);
+		if let Some(latest) = adopted.latest {
 			self.cache.wakes().presented(latest);
 		}
 	}

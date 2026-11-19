@@ -8,6 +8,7 @@ import {
 	encodeSubscribeResponse,
 	inclusiveGroupEnd,
 	LiveRanges,
+	positionFrames,
 	rangeSize,
 	requestedRanges,
 	Subscribe,
@@ -275,8 +276,15 @@ test("a lite-07 range may start partway through a group, which the span keeps", 
 		expect(spanOf(Version.DRAFT_07, [position, other]).startFrame).toBe(0);
 	}
 	expect(spanOf(Version.DRAFT_07, [position, { start: { time: 9n } }]).startFrame).toBe(4);
-	// The span qualifies only its lowest start, so a Position above another range's goes whole.
+	// The span qualifies only its lowest start; the publisher reads every Position from the ranges.
 	expect(spanOf(Version.DRAFT_07, [position, { start: { time: 1n }, end: { time: 3n } }]).startFrame).toBe(0);
+	const disjoint = [{ start: { absolute: 7n, frame: 4 }, end: { time: 8n } }, { start: { absolute: 9n, frame: 2 } }];
+	expect([...positionFrames(disjoint)]).toEqual([
+		[7n, 4],
+		[9n, 2],
+	]);
+	const overlapping = [{ start: { absolute: 7n, frame: 4 } }, { start: { absolute: 9n, frame: 2 } }];
+	expect([...positionFrames(overlapping)]).toEqual([[7n, 4]]);
 
 	// An end there can't go out.
 	await expect(
