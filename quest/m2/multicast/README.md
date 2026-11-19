@@ -81,10 +81,18 @@ The maintainer's requirements, which every child is judged against:
     moq-transport node is always an endpoint.
 12. No global view. With competing claims each node uses its closest, and
     nothing elects a leader.
-    Narrowed 2026-11-18 inside one trusted domain, for judging
-    [the node layer](/quest/m3/node-layer.md): a node may know its domain's
-    topology, but nothing elects a leader and competing claims resolve to
-    the closest.
+    Narrowed 2026-11-18 inside one trusted domain, for judging node layers
+    under MoQ: a node may know its domain's topology, but nothing elects a
+    leader and competing claims resolve to the closest. The node-layer
+    bake-off ([moq-dev/moq#9149](https://github.com/moq-dev/moq/pull/9149))
+    kept the path vector: link state sent more route messages on every link
+    or relay failure but a 12-relay partition (up to 60 times at 32 relays;
+    a publisher moving costs it claim floods, not route messages), with fewer readers unfed after a partition or a hub dying
+    slowly but more after a transit dies, and held fewer copies of each
+    claim. A flat domain over a network that routes underneath sends nothing
+    for link events that network absorbs, but notices a partition only by
+    keep-alives and fans out only with warm routes across every pair of
+    relays.
 13. A secondary route may carry metadata only, so a stalled primary is found
     without waiting on QUIC keep-alives, where a node opts in.
 14. No approach is assumed: earlier attempts are evidence, not constraints.
