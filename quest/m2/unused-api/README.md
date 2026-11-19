@@ -22,7 +22,7 @@ check Kixel and moq.pro for a caller, and keep what one uses. Both pin a
 lists its items with the grep that found no caller here, so its PR re-runs
 the grep on its own head and adds the downstream check.
 
-Removal is the default. Hide an item (`pub(crate)`, `#[doc(hidden)]`,
+Removal is the default. Hide an item (`pub(crate)`,
 `@internal`, a `test-support` or `lab` feature) only when code in this
 repository still needs it across a crate or package boundary.
 

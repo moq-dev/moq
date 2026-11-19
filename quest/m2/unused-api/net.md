@@ -3,8 +3,8 @@
 ## Goal
 
 `track::Subscriber::next_in_range`, `is_skipped`, and `poll_start` are
-crate-private, and so is `Subscriber::with_range` if its last production
-caller can leave. Their one consumer is moq-mux's container reader, which
+crate-private, and their js/net mirrors leave its published surface. Their
+one consumer is the container reader (moq-mux, and `@moq/hang` in JS), which
 orders groups itself; `track::Ordered` reports a `Gap`, so the reader can
 move onto it.
 
@@ -51,23 +51,59 @@ Decided 2026-11-17 (maintainer, `/quest-run m0/m1/m2`):
   documented surface; C, shrink it to making `with_range` crate-private
   alone).
 
+Hiding is no middle ground: `#[doc(hidden)]` is banned
+([moq-dev/moq#8392](https://github.com/moq-dev/moq/pull/8392)), and js/net
+keeps `@internal` for deprecated exports.
+
+Step 1's design (2026-11-19, from reading `container/consumer.rs` and
+`Ordered`), rule by rule for a hole at the reader's cursor:
+
+- `Ordered` already covers a finished track, keys the ranges exclude
+  (`next_in_range`), declared skips (`is_skipped`), and `Delay::max` aged on
+  the reach against the newest frame, though only on a track whose moq-net
+  groups carry timestamps; on an untimed one it waits until the hole
+  resolves, where the reader ages on decoded container timestamps.
+- The reader keeps 1 ms continuity (on a `Gap`, it calls the loss only once
+  the next group's first frame fails to continue the edge) and the slow-group
+  skip, since `Ordered` hands out the next group while the reader still reads
+  the current one. A full max buffer past a hole is moot: `Ordered` leaves
+  those groups in the transport cache.
+- `Ordered` cannot run two rules, since it never hands out the groups past a
+  hole: the `Delay::min` wall-time wait since a group past the hole landed,
+  and the playout clock reaching where that group starts.
+
+Options for those two, waiting on the maintainer (see Waiting):
+
+- A (recommended): `Ordered` lets the reader see the group held past the
+  hole it waits at and give that hole up as a `Gap` now: two public methods.
+  Every reader rule and its hole tests carry over, untimed tracks included,
+  and moq-net takes no playout policy. The reader's aged rule sees that one
+  group, not the newest content past it; `Ordered`'s own `Delay::max` still
+  ages the hole on a timed track.
+- B: `Ordered` takes the policy: `Delay::min` becomes a wall-time hole wait
+  for every ordered reader (a behavior change for moq-json, moq-hls, and the
+  bindings, which read `Ordered` too), plus an input for the clock's position
+  as a group key, which only a time-keyed track has: a sequence-keyed legacy
+  track loses the clock rule.
+
+Either way the net public API shrinks by one method (three leave, A adds two,
+B one input plus a behavior change), so keeping the three public, rejected
+above, stays the cheaper path if the rewrite's playback risk outweighs that.
+
+`@moq/hang`'s container reader calls the js/net mirrors (`start`,
+`nextInRange`, `isSkipped`), so the same move applies there in the same PR.
+
+`with_range` stays public (recommended, from the same reading): moq-json,
+moq-audio, and moq-mux's `container/source.rs` call it as a local filter on
+an established subscription, which `Subscription::ranges`, a wire request,
+does not replace.
+
 Steps:
 
-1. Design the container reader's hole policy on `track::Ordered` first: what
-   moves into moq-net (the wait, the clock, the buffer cap, continuity) and
-   what stays in the reader. Decide there whether `Ordered` takes the
-   wall-time wait that `Delay::min` now means, and how the reader's hole
-   tests in `container/consumer.rs` carry over. Added `Ordered` API needs the
-   maintainer's say.
+1. Add the picked `Ordered` API.
 2. Move the reader onto it, and the `is_skipped` callers onto
    `Ordered::is_skipped`.
-3. Make `next_in_range`, `is_skipped`, and `poll_start` crate-private. Make
-   `Subscriber::with_range` crate-private too if the callers listed above can
-   leave: `moq-json`, `moq-audio`, and the benches move to
-   `Subscription::ranges`; `container/source.rs`'s resubscription needs
-   "after group N" with a time start, which a `Range` cannot say, so it
-   needs the reader's own cursor to drop that group. Otherwise `with_range`
-   stays and this quest records why.
+3. Make `next_in_range`, `is_skipped`, and `poll_start` crate-private.
 - `origin::Consumer::covering` stays `pub`: moq.pro and moq-net's own
   `benches/origin.rs` call it.
 
@@ -76,8 +112,13 @@ The reader reads gaps through `Ordered::next_item` once
 `next_group` then yields groups alone (decided 2026-11-18, maintainer,
 /quest-plan); whichever lands second makes the switch.
 
-Public API: breaking, removals only unless step 1 adds `Ordered` inputs.
-Wire: none.
+Public API: breaking; A adds two `Ordered` methods, B one input. Wire: none.
+
+## Waiting
+
+- Maintainer: pick how the container reader's hole wait and playout clock
+  reach `Ordered`, A or B above; recommended A. An agent cannot pick: this
+  quest reserves new `Ordered` API for the maintainer's say.
 
 ## Related
 
