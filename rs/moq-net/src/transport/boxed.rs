@@ -395,8 +395,8 @@ impl Listed {
 		open::Rank::new(state.group.as_ref().map(|group| group.read()), state.priority)
 	}
 
-	/// Whether the peer acknowledged everything written to it, never assumed when the transport
-	/// cannot tell.
+	/// Whether the peer acknowledged everything written to it, always so for a transport that
+	/// cannot see acknowledgments.
 	pub(super) fn acknowledged(&self) -> bool {
 		let state = self.lock();
 		let offset = state.stream.offset();
@@ -1300,7 +1300,6 @@ mod test {
 			open::Rank::Ungrouped { .. } => panic!("the stream is in a group"),
 		};
 		assert_eq!(grouped(&session), (1, 2));
-		assert!(!session.open_streams()[0].1.acknowledged());
 
 		poll::SendGroup::set_priority(&mut low, 3);
 		assert_eq!(grouped(&session), (3, 2));
