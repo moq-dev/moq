@@ -56,7 +56,10 @@
 //! claim stay; a run it is first told unavailable, which nothing can serve, it takes only
 //! once told it available. A request
 //! follows the claim at the most specific path covering it that the reader shows, at its
-//! claimant too, and fails closed while that one is unavailable or lost. Among the claims
+//! claimant too, and fails closed while that one is unavailable or lost. It leaves toward
+//! another node only through a neighbour whose own copy of that node's claims holds the
+//! claim: a route can arrive before the claims behind it, and a neighbour refuses a request
+//! for a claim it has not heard. Among the claims
 //! of one Instance at one path, only the one shown closest to its own path, at the newest
 //! epoch among those, may serve, reachable or not, as `model::origin` ranks them; a
 //! route's rank chooses among those alone. A route whose cost a link would carry past the
@@ -1947,6 +1950,10 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			};
 		}
 		heard.floor = floor;
+		// What a request may follow through the sender moved with its copy, even when this
+		// node's view of `origin` did not.
+		self.dirty
+			.extend(changes.iter().map(|(broadcast, _)| broadcast.clone()));
 		let known = self.known.entry(origin).or_default();
 		// The newest floor wins, so an older copy never revives what a newer one withdrew.
 		if floor <= known.floor && !mutated!(self, OldFloor) {
@@ -2516,8 +2523,46 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 				let best = (self.claims_of(&claim)).map(|(_, claim)| precedence(&claim.item)).min();
 				(!own.unavailable && best == Some(precedence(&own.item))).then_some(Next::Local(source))
 			}
-			false => self.best.get(&origin).map(|best| Next::Via(best.via)),
+			// The best route whose neighbour holds the claim: one that has yet to hear it
+			// would refuse the request.
+			false => {
+				let known = self.known.get(&origin);
+				let claim = (ancestors(path).rev())
+					.map(|above| (above, instance.clone()))
+					.find(|claim| known.is_some_and(|known| known.items.contains_key(claim)));
+				match claim {
+					Some(claim) => self.lead(origin, &claim).map(Next::Via),
+					None => self.best.get(&origin).map(|best| Next::Via(best.via)),
+				}
+			}
 		}
+	}
+
+	/// Whether `via`'s copy of `origin`'s claims holds `broadcast` as this node knows it:
+	/// available, and of the same precedence. A neighbour routes to `origin` before its claims
+	/// reach it, and refuses a request for a claim it has not heard, or heard only unavailable
+	/// or in an older revision.
+	fn holds(&self, origin: NodeId, via: N, broadcast: &Broadcast<I>) -> bool {
+		let Some(known) = (self.known.get(&origin)).and_then(|known| known.items.get(broadcast)) else {
+			return false;
+		};
+		(self.heard.get(&origin))
+			.and_then(|offers| offers.get(&via))
+			.and_then(|heard| heard.items.get(broadcast))
+			.is_some_and(|heard| !heard.unavailable && precedence(&heard.item) == precedence(&known.item))
+	}
+
+	/// The neighbour a request for `origin`'s claim of `broadcast` leaves by: the route to
+	/// `origin` when its neighbour holds the claim, else the best usable route whose does.
+	fn lead(&self, origin: NodeId, broadcast: &Broadcast<I>) -> Option<N> {
+		let best = self.best.get(&origin)?;
+		if self.holds(origin, best.via, broadcast) {
+			return Some(best.via);
+		}
+		(self.usable(origin).into_iter())
+			.filter(|route| self.holds(origin, route.via, broadcast))
+			.min_by_key(|route| order(route, Some(best.via)))
+			.map(|route| route.via)
 	}
 
 	/// Every claim of `broadcast` this node knows, with its claimant, reachable or not.
@@ -2572,14 +2617,18 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 				}
 				continue;
 			}
-			// Every usable route to its claimant serves it, for the same reason.
-			let best = self.best.get(&origin).map(|best| best.via);
+			// Every usable route to its claimant whose neighbour holds the claim serves it,
+			// for the same reason.
+			let lead = self.lead(origin, broadcast);
 			for route in self.usable(origin) {
+				if !self.holds(origin, route.via, broadcast) {
+					continue;
+				}
 				ways.push(Way {
 					origin,
 					next: Next::Via(route.via),
 					claim: claim.over(&route.offer),
-					closest: closest == Some(origin) && best == Some(route.via),
+					closest: closest == Some(origin) && lead == Some(route.via),
 				});
 			}
 		}
@@ -3418,6 +3467,72 @@ mod tests {
 		router.timeout(router.deadline().expect("a debounce"));
 		assert_eq!(router.pick(&under), Some(me));
 		assert_eq!(router.step(me, &under), Some(Next::Local(2)));
+	}
+
+	/// A neighbour routes to a node before that node's claims reach it, and refuses a request
+	/// for one it has not heard. A request follows a claim only through a neighbour whose own
+	/// copy holds it, and through the cheaper one once that copy catches up.
+	#[test]
+	fn a_request_follows_only_a_neighbour_that_holds_the_claim() {
+		let mut router = Router::<usize, u64, Run>::new(node(1), debounce(HOP));
+		open(&mut router, 2, Role::Routing(node(2)));
+		open(&mut router, 3, Role::Routing(node(3)));
+		let broadcast = (p("live"), 7);
+		let claims = |floor| Msg::Claims {
+			origin: node(5),
+			changes: vec![(broadcast.clone(), claim(run(1), 0))],
+			floor,
+		};
+		// Both route to node 5, the cheaper through 2, whose copy of its claims is empty.
+		router.recv(2, route(5, 2, 1)).unwrap();
+		router.recv(3, route(5, 3, 2)).unwrap();
+		router.recv(3, claims(1)).unwrap();
+		assert_eq!(router.best(node(5)).map(|(via, _)| via), Some(2));
+		let ways = |router: &Router<usize, u64, Run>| {
+			(router.ways(&broadcast).into_iter())
+				.map(|way| (way.next, way.closest))
+				.collect::<Vec<_>>()
+		};
+		assert_eq!(ways(&router), [(Next::Via(3), true)]);
+		assert_eq!(router.step(node(5), &broadcast), Some(Next::Via(3)));
+		router.recv(2, claims(1)).unwrap();
+		assert_eq!(ways(&router), [(Next::Via(2), true), (Next::Via(3), false)]);
+		assert_eq!(router.step(node(5), &broadcast), Some(Next::Via(2)));
+	}
+
+	/// A neighbour whose copy holds the claim only unavailable refuses a request for it too,
+	/// though this node knows it available from another. Its copy catching up makes it a way.
+	#[test]
+	fn a_request_skips_a_neighbour_that_holds_the_claim_unavailable() {
+		let mut router = Router::<usize, u64, Run>::new(node(1), debounce(HOP));
+		open(&mut router, 2, Role::Routing(node(2)));
+		open(&mut router, 3, Role::Routing(node(3)));
+		let broadcast = (p("live"), 7);
+		let claims = |unavailable, floor| Msg::Claims {
+			origin: node(5),
+			changes: vec![(
+				broadcast.clone(),
+				match claim(run(1), 0) {
+					Change::Live(claim) => Change::Live(Claim { unavailable, ..claim }),
+					other => other,
+				},
+			)],
+			floor,
+		};
+		router.recv(2, route(5, 2, 1)).unwrap();
+		router.recv(3, route(5, 3, 2)).unwrap();
+		router.recv(2, claims(true, 1)).unwrap();
+		router.recv(3, claims(false, 2)).unwrap();
+		let ways = |router: &Router<usize, u64, Run>| {
+			(router.ways(&broadcast).into_iter())
+				.map(|way| (way.next, way.closest))
+				.collect::<Vec<_>>()
+		};
+		assert_eq!(ways(&router), [(Next::Via(3), true)]);
+		assert_eq!(router.step(node(5), &broadcast), Some(Next::Via(3)));
+		router.recv(2, claims(false, 3)).unwrap();
+		assert_eq!(ways(&router), [(Next::Via(2), true), (Next::Via(3), false)]);
+		assert_eq!(router.step(node(5), &broadcast), Some(Next::Via(2)));
 	}
 
 	/// Among claims of one Instance at one path, one exactly there outranks a broader one
@@ -6164,7 +6279,14 @@ mod tests {
 		assert_eq!(router.pick(&room), Some(node(4)), "both marked: the lower Node ID");
 		assert_eq!(closest(&router), vec![(node(4), Next::Via(2), true)]);
 
+		// A route that starts brings the claims as they stand.
 		router.recv(3, route(4, 3, 1)).unwrap();
+		let claims = Msg::Claims {
+			origin: node(4),
+			changes: vec![(room.clone(), claim(run(0), 0))],
+			floor: 1,
+		};
+		router.recv(3, claims).unwrap();
 		router.drain();
 		assert_eq!(router.changes().routes, BTreeSet::from([node(4)]), "an unmarked route");
 		assert_eq!(router.pick(&room), Some(node(4)), "the unmarked claim is closest");

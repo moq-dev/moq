@@ -634,3 +634,54 @@ fn a_waiting_request_wakes_when_its_claim_moves() {
 	assert!(flag.woken(), "the claim went");
 	assert_eq!(node.poll_forward(2, None, &hall, &waiter), Poll::Ready(None));
 }
+
+/// A neighbour that routes to a node before its claims arrive serves none of them, and is
+/// handed each once its own copy holds it, though nothing changed of the claim here.
+#[test]
+fn a_neighbour_serves_a_claim_once_its_copy_holds_it() {
+	let (node, _clock) = node();
+	let room = cast("room");
+	let far = id(9);
+	let route = |via: u64, cost| Msg::Route {
+		origin: far,
+		offer: Some(Offer {
+			path: [
+				Hop { node: far, session: 0 },
+				Hop {
+					node: id(via),
+					session: 1,
+				},
+			]
+			.into(),
+			draining: false,
+			priority: i8::MAX,
+			cost,
+			marked: false,
+		}),
+	};
+	let claims = Msg::Claims {
+		origin: far,
+		changes: vec![(room.clone(), live(0))],
+		floor: 1,
+	};
+	let lagging = node.connect(1, port(Role::Routing(id(7)))).unwrap();
+	lagging.recv(Msg::Edited).unwrap();
+	let ahead = node.connect(2, port(Role::Routing(id(8)))).unwrap();
+	ahead.recv(Msg::Edited).unwrap();
+	lagging.recv(route(7, 1)).unwrap();
+	lagging.flush();
+	ahead.recv(route(8, 2)).unwrap();
+	ahead.recv(claims.clone()).unwrap();
+	ahead.flush();
+	assert!(serves(&lagging).is_empty(), "its copy lacks the claim");
+	assert_eq!(confirm(&ahead), 1);
+	let waiter = kio::Waiter::noop();
+	assert_eq!(
+		node.poll_forward(3, Some(far), &room, &waiter),
+		Poll::Ready(Some(Via::Route { node: far }))
+	);
+
+	lagging.recv(claims).unwrap();
+	lagging.flush();
+	assert_eq!(confirm(&lagging), 1);
+}
