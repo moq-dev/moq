@@ -439,18 +439,6 @@ impl Reader {
 	}
 }
 
-/// Pinned, not endorsed, until [the detour fix](/quest/m2/multicast/detour-resume.md): a relay
-/// whose serving session closes before the detour to the same Instance reaches it, one
-/// round trip later, ends its front. Its reader restarts cleanly onto another Instance
-/// when one serves the path (`other`), and otherwise reads nothing more. The fix makes
-/// each such reader seamless, and each case calling this changes with it.
-pub(super) fn detour_lost(report: &Report, other: bool) -> bool {
-	match other {
-		true => report.clean() && report.runs.len() == 2,
-		false => report.after == 0,
-	}
-}
-
 /// What a reader saw across a failure.
 #[derive(Clone, Debug, Default)]
 pub(super) struct Report {
