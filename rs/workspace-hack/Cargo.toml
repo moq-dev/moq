@@ -52,6 +52,8 @@ futures-sink = { version = "0.3" }
 futures-task = { version = "0.3", default-features = false, features = ["std"] }
 futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
 getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
+gstreamer = { version = "0.25", features = ["v1_16"] }
+gstreamer-sys = { version = "0.25", default-features = false, features = ["v1_16"] }
 hashbrown = { version = "0.17", default-features = false, features = ["default-hasher", "inline-more"] }
 hex = { version = "0.4" }
 hyper = { version = "1", features = ["full"] }
@@ -65,6 +67,7 @@ nom-181b0d20215bb231 = { package = "nom", version = "8" }
 num-bigint = { version = "0.4" }
 num-complex = { version = "0.4" }
 num-integer = { version = "0.1", features = ["i128"] }
+num-rational = { version = "0.4", default-features = false, features = ["num-bigint-std", "std"] }
 num-traits = { version = "0.2", features = ["i128"] }
 object_store = { version = "0.14", default-features = false, features = ["aws-base", "azure-base", "fs", "gcp-base", "reqwest"] }
 once_cell = { version = "1" }
@@ -140,6 +143,8 @@ futures-sink = { version = "0.3" }
 futures-task = { version = "0.3", default-features = false, features = ["std"] }
 futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
 getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
+gstreamer = { version = "0.25", features = ["v1_16"] }
+gstreamer-sys = { version = "0.25", default-features = false, features = ["v1_16"] }
 hashbrown = { version = "0.17", default-features = false, features = ["default-hasher", "inline-more"] }
 hex = { version = "0.4" }
 hyper = { version = "1", features = ["full"] }
@@ -153,6 +158,7 @@ nom-181b0d20215bb231 = { package = "nom", version = "8" }
 num-bigint = { version = "0.4" }
 num-complex = { version = "0.4" }
 num-integer = { version = "0.1", features = ["i128"] }
+num-rational = { version = "0.4", default-features = false, features = ["num-bigint-std", "std"] }
 num-traits = { version = "0.2", features = ["i128"] }
 object_store = { version = "0.14", default-features = false, features = ["aws-base", "azure-base", "fs", "gcp-base", "reqwest"] }
 once_cell = { version = "1" }
