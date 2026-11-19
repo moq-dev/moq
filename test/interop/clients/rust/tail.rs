@@ -116,8 +116,8 @@ async fn main() -> anyhow::Result<()> {
 			let route = origin.route(&args[3], moq_net::origin::RouteOptions::hidden())?;
 			let broadcast = route.broadcast();
 			if datagram {
-				// Untimed: the OBJECT_DATAGRAM carries no timestamp, so the subscriber can
-				// check the payload alone. Stay open until each one is acknowledged.
+				// Untimed: each datagram's timestamp is unscaled at its sequence, which the
+				// OBJECT_DATAGRAM carries as its group ID. Stay open until each one is acknowledged.
 				let mut track = broadcast.create_datagrams("tail", moq_net::datagram::Info::default())?;
 				route.announce()?;
 				let session = client
@@ -233,7 +233,10 @@ async fn main() -> anyhow::Result<()> {
 						frame.payload.iter().all(|byte| *byte == sequence as u8),
 						"corrupt datagram"
 					);
-					ensure!(frame.timestamp.scale().is_none(), "unexpected IETF timestamp");
+					ensure!(
+						frame.timestamp == moq_net::Timestamp::unscaled(sequence),
+						"datagram timestamp is not its sequence"
+					);
 					println!("datagram {sequence}");
 				}
 				eprintln!("datagram clean groups=0,1,2,3 bytes=3600");
