@@ -182,7 +182,20 @@ impl Producer {
 		for reader in readers {
 			let mut reader = reader.lock().unwrap_or_else(PoisonError::into_inner);
 			let preferences = reader.subscription.read().clone();
+			// A failed copy's resolution is no placement, as in `Reader::window`: the reader's
+			// own stands, or the anchors do for ranges it has yet to take up.
+			let failed = reader.route.end().is_none()
+				&& reader
+					.copies
+					.last()
+					.is_some_and(|copy| matches!(copy.sub, Sub::Ready(_)) && copy_failed(&copy.track));
+			let placed = match failed {
+				true if reader.mirrored.ranges == preferences.ranges => Some(reader.window().resolved()),
+				true => Some(Vec::new()),
+				false => None,
+			};
 			let resolved = match reader.copies.last_mut() {
+				_ if placed.is_some() => placed.unwrap_or_default(),
 				Some(Copy {
 					sub: Sub::Ready(sub),
 					from,
