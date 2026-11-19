@@ -15,6 +15,12 @@ read on seamlessly, and `detour_lost` is gone.
 
 ## Plan
 
+Decided 2026-11-19 (coordinator, under the maintainer's pick that day to
+merge on the coordinator's recommendation): ✅ kept, under this epic, so the
+lite-07 cut waits on it (rejected: dropping it; m3). A reader that reads
+nothing more for good after one link cut is the worst failure the audit
+found, and it needs only a ring of four.
+
 Found by [the uncovered cases](https://github.com/moq-dev/moq/pull/9111). It
 happens wherever every neighbour's route to the announcing relay ran through
 the relay that lost its session, so none was offered back to it: a ring of

@@ -31,7 +31,14 @@ frames this way. A switch to another neighbour sends the group over another
 link, so no single link carries it twice, though the bytes are still
 redundant.
 
-Options:
+Decided 2026-11-19 (maintainer, in the coordinating session, on
+[moq-dev/moq#9111](https://github.com/moq-dev/moq/pull/9111)): ✅ option 1,
+a SUBSCRIBE range may start at an absolute group and frame position on
+lite-07-wip (rejected: 2, the partial fix with no wire change; 4, accepting
+the duplicate; 3 stays rejected). It lands before the cut. Warm routing
+moves pulls for price, so these switches become common once it ships.
+
+Options, as they were put:
 
 1. Wire, on lite-07-wip: a SUBSCRIBE range start may be an absolute
    (group, frame) position again, as on lite-06. The GROUP header already
@@ -50,8 +57,3 @@ Options:
    naming its first hop's routing node, which keeps requests loop-free.
 4. Accept one group per same-next-hop switch and document the cost.
 
-## Waiting
-
-- Maintainer: pick an option before the lite-07 cut, since option 1 changes
-  the wire. Recommended: 1. Check it is done by this quest's Plan naming the
-  pick.
