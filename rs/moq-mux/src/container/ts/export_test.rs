@@ -9210,6 +9210,12 @@ async fn a_track_failing_before_its_config_leaves_the_header_to_the_rest() {
 	end.expect("a video failing before its config does not end the export");
 	frames.extend(rest);
 	assert_eq!(pes_count(&frames), 10, "every audio frame went out");
+	let listed: Vec<_> = pmts(&frames).into_iter().map(|(_, types)| types).collect();
+	assert!(!listed.is_empty(), "the program went out");
+	assert!(
+		listed.iter().all(|types| *types == [StreamType::AdtsAac]),
+		"the PMT lists only the audio: {listed:?}"
+	);
 }
 
 /// Publish an empty catalog at `live` under `route`.

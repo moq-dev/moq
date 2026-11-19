@@ -670,6 +670,11 @@ impl<S: Stream> Export<S> {
 				continue;
 			};
 			let track = &mut self.video[index];
+			// The replacement's declared depth deepens the shift before its first DTS, as a depth
+			// declared after the header does ([`Self::update_catalog`]).
+			if track.flavor.has_composition_time() {
+				self.shift = self.shift.max(config.reorder.map_or(0, u32::from));
+			}
 			track.fallback_description = fallback_description(&config);
 			track.dts_reserve = dts_reserve(&config);
 			track.config = Some(config);

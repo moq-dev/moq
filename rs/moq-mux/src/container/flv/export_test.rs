@@ -1827,6 +1827,95 @@ async fn a_failed_rendition_continues_on_its_replacement() {
 	}
 }
 
+/// A video replacement that declares a reorder depth deepens the shift before its first DTS, so
+/// a group presenting from just past zero still decodes at or after it.
+#[tokio::test(start_paused = true)]
+async fn a_replacement_declaring_reorder_raises_the_shift() {
+	use hang::catalog::{AAC, AudioConfig, Container, H264, VideoConfig};
+	use moq_net::Timestamp;
+
+	let mut producer = moq_net::broadcast::Info::new().produce();
+	let consumer = producer.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
+	let mut video_config = VideoConfig::new(H264 {
+		profile: 0x42,
+		constraints: 0xc0,
+		level: 0x1f,
+		inline: false,
+	});
+	video_config.container = Container::Legacy;
+	video_config.description = Some(Bytes::from(avcc()));
+	let mut audio_config = AudioConfig::new(AAC { profile: 2 }, 44100, 2);
+	audio_config.container = Container::Legacy;
+	audio_config.description = Some(Bytes::from_static(&ASC));
+
+	let legacy = || crate::catalog::hang::Container::Legacy(crate::container::Kind::Data);
+	let add_video =
+		|producer: &mut moq_net::broadcast::Producer, catalog: &mut crate::catalog::Producer, config: &VideoConfig| {
+			let track = producer.create_track(producer.unique_name(".avc1"), timed()).unwrap();
+			catalog
+				.modify()
+				.unwrap()
+				.video
+				.renditions
+				.insert(track.name().to_string(), config.clone());
+			crate::container::Producer::new(track, legacy())
+		};
+	let mut video = add_video(&mut producer, &mut catalog, &video_config);
+	let audio_track = producer.create_track(producer.unique_name(".aac"), timed()).unwrap();
+	let mut audio = crate::container::Producer::new(audio_track, legacy());
+	let frame = |ms: u64, payload: &'static [u8], keyframe| crate::container::Frame {
+		timestamp: Timestamp::from_millis(ms).unwrap(),
+		duration: None,
+		payload: Bytes::from_static(payload),
+		keyframe,
+	};
+	video.write(frame(0, &[0, 0, 0, 1, 0x65], true)).unwrap();
+	audio.write(frame(0, &[0xde, 0xad], true)).unwrap();
+	catalog
+		.modify()
+		.unwrap()
+		.audio
+		.renditions
+		.insert(audio.name().to_string(), audio_config);
+
+	let mut exporter = open_export(crate::source::announced(&consumer).await)
+		.await
+		.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY))
+		.with_replay();
+	let mut exported = Vec::new();
+	assert!(drain_until_idle(&mut exporter, &mut exported).await.is_none());
+
+	video.abort(moq_net::Error::Transport("camera lost".into()));
+	assert!(drain_until_idle(&mut exporter, &mut exported).await.is_none());
+	video_config.reorder = Some(2);
+	let mut replacement = add_video(&mut producer, &mut catalog, &video_config);
+	assert!(drain_until_idle(&mut exporter, &mut exported).await.is_none());
+	for (ms, keyframe) in [(1, true), (5, false), (3, false)] {
+		let payload: &'static [u8] = if keyframe {
+			&[0, 0, 0, 1, 0x65]
+		} else {
+			&[0, 0, 0, 1, 0x41]
+		};
+		replacement.write(frame(ms, payload, keyframe)).unwrap();
+	}
+	let _finished = replacement.finish().unwrap();
+	let _finished = audio.finish().unwrap();
+	catalog.finish().unwrap();
+
+	let end = drain_until_idle(&mut exporter, &mut exported).await;
+	assert!(matches!(end, Some(Ok(()))), "{end:?}");
+	let video: Vec<_> = parse_tags(&exported)
+		.iter()
+		.filter(|tag| tag.tag_type == super::TAG_VIDEO && tag.body[1] == super::AVC_NALU)
+		.map(|tag| {
+			let pts = i64::from(tag.timestamp) + i64::from(super::read_i24(&tag.body[2..5]));
+			(tag.timestamp, pts)
+		})
+		.collect();
+	assert_eq!(video, [(0, 0), (1, 3), (2, 7), (3, 5)]);
+}
+
 /// An audio-only export binds the best-ranked of two listed renditions. When that one fails it
 /// continues on the other with no catalog update, reading it from the poll that continues the
 /// failed track: nothing else would wake the export for its first frames.

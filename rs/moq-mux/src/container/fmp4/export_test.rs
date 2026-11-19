@@ -1664,10 +1664,12 @@ async fn a_spare_rendition_fails_once_its_medium_ends_cleanly() {
 }
 
 /// A video that fails before supplying its codec configuration leaves the init to the audio,
-/// which plays on without it.
+/// which plays on without it. While the publisher keeps the failed video listed, a later catalog
+/// update neither reads it again nor takes it for a rendition the init never declared.
 #[tokio::test(start_paused = true)]
 async fn a_track_failing_before_its_config_leaves_the_init_to_the_rest() {
 	let (mut live, mut audio) = live_av();
+	let name = audio.name().to_string();
 	// The baseline catalog would describe the video without its SPS.
 	wait_for_sps(&mut live);
 	write_audio(&mut audio, 0, 5);
@@ -1677,10 +1679,20 @@ async fn a_track_failing_before_its_config_leaves_the_init_to_the_rest() {
 	assert!(early.is_err(), "the init waits on the video's config: {early:?}");
 	live.track.abort(moq_net::Error::Transport("camera lost".into()));
 	write_audio(&mut audio, 100_000, 5);
-	let _finished = audio.finish().unwrap();
-	live.catalog.finish().unwrap();
 
 	let init = chunk_now(&mut exporter).await.init().expect("init");
+	let mut fragments = drain_now(&mut exporter).await;
+	live.catalog
+		.modify()
+		.unwrap()
+		.audio
+		.renditions
+		.get_mut(&name)
+		.unwrap()
+		.bitrate = Some(64_000);
+	write_audio(&mut audio, 200_000, 5);
+	let _finished = audio.finish().unwrap();
+	live.catalog.finish().unwrap();
 	let mut cursor = Cursor::new(init.as_ref());
 	let mut handlers = Vec::new();
 	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).expect("decode init") {
@@ -1689,10 +1701,10 @@ async fn a_track_failing_before_its_config_leaves_the_init_to_the_rest() {
 		}
 	}
 	assert_eq!(handlers, ["soun"], "only the audio is declared");
-	let fragments = drain_now(&mut exporter).await;
+	fragments.extend(drain_now(&mut exporter).await);
 	assert_eq!(
 		samples_per_track(&fragments).values().sum::<usize>(),
-		10,
+		15,
 		"the audio went out"
 	);
 }

@@ -555,12 +555,15 @@ impl Track {
 	}
 
 	/// Read within the jitter window, or hold the first frame until the program tables are built.
-	fn fill(&mut self, name: &str, waiter: &kio::Waiter, input: &mut Input<'_>) -> crate::Result<()> {
+	///
+	/// Returns the track's own failure, which ended it, apart from the export's errors: the
+	/// export decides whether it outlives that ([`Export::survive`]).
+	fn fill(&mut self, name: &str, waiter: &kio::Waiter, input: &mut Input<'_>) -> crate::Result<Option<crate::Error>> {
 		if self.key.name.is_empty() {
 			self.key.name = name.to_string();
 		}
 		if self.pending.is_some() || self.read != Read::Live {
-			return Ok(());
+			return Ok(None);
 		}
 		let is_video = matches!(self.kind, Kind::Video(_));
 		// A placed frame is judged at release, against the keyframe's departure ([`Export::leads_video`]).
@@ -652,7 +655,7 @@ impl Track {
 		if self.read == Read::Ended && !input.waiting_for_header {
 			self.release(name, input.jitter, true)?;
 		}
-		lost.map_or(Ok(()), Err)
+		Ok(lost)
 	}
 
 	/// The samples an audio frame of `payload` lasts and their rate, if it may share a PES with
@@ -1933,11 +1936,7 @@ where
 					},
 				);
 				let ended = live && track.read != Read::Live;
-				let lost = track.source.lost();
-				if let Err(err) = filled.or_else(|err| match lost {
-					true => self.survive(&name, err),
-					false => Err(err),
-				}) {
+				if let Err(err) = filled.and_then(|lost| lost.map_or(Ok(()), |err| self.survive(&name, err))) {
 					self.leave(err)?;
 				}
 				if ended || matches!(self.program.feed, Feed::Retired(_)) {
@@ -2382,10 +2381,7 @@ where
 		};
 		let mut lost = Vec::new();
 		for (name, track) in &mut self.program.tracks {
-			if let Err(err) = track.fill(name, waiter, &mut input) {
-				if !track.source.lost() {
-					return Err(err);
-				}
+			if let Some(err) = track.fill(name, waiter, &mut input)? {
 				lost.push((name.clone(), err));
 			}
 		}
@@ -3273,8 +3269,9 @@ where
 
 	/// Build the PAT/PMT once every track's PID and codec is known.
 	fn build_psi(&mut self) -> Result<()> {
+		// A track that ended before its codec config never carries a frame, so the PMT leaves it out.
 		for track in self.program.tracks.values_mut() {
-			track.listed = true;
+			track.listed = track.read == Read::Live || track.source.header_ready();
 		}
 		let pcr_pid = self.pick_clock()?;
 		let pmt = self.program_map(pcr_pid)?;
@@ -3296,7 +3293,7 @@ where
 		if !self.program.pcr_discontinuity {
 			self.program.schedule.open();
 		}
-		for track in self.program.tracks.values() {
+		for track in self.program.tracks.values().filter(|track| track.listed) {
 			self.program.liveness.register(track.pid);
 		}
 		self.program.psi = Some(Psi {

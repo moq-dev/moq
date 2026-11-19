@@ -96,8 +96,9 @@ pub struct Export<S: Stream> {
 	/// ([`Phase::Lost`]), and fails the export once none is left that could.
 	spares: HashMap<String, Rendition>,
 
-	/// Renditions a spare replaced after their track failed, ignored while still listed.
-	replaced: HashSet<String>,
+	/// Failed renditions ignored while still listed: one a spare replaced, or one whose track
+	/// failed before the init described it.
+	retired: HashSet<String>,
 
 	init: Init,
 
@@ -728,7 +729,7 @@ impl<S: Stream> Export<S> {
 			tracks: HashMap::new(),
 			departed: HashMap::new(),
 			spares: HashMap::new(),
-			replaced: HashSet::new(),
+			retired: HashSet::new(),
 			init: Init::Waiting {
 				queued: VecDeque::new(),
 				deadline: None,
@@ -1129,7 +1130,7 @@ impl<S: Stream> Export<S> {
 		let mut spares = HashMap::new();
 		for (name, config) in video.chain(audio) {
 			// A name used by both a video and an audio rendition is the video one.
-			if active.contains(&name) || !listed.insert(name.clone()) || self.replaced.contains(&name) {
+			if active.contains(&name) || !listed.insert(name.clone()) || self.retired.contains(&name) {
 				continue;
 			}
 			if !self.tracks.contains_key(&name)
@@ -1217,7 +1218,7 @@ impl<S: Stream> Export<S> {
 				queued.retain(|(name, _)| active.contains(name));
 			}
 		}
-		self.replaced.retain(|name| listed.contains(name));
+		self.retired.retain(|name| listed.contains(name));
 		self.spares = spares;
 		self.settle_spares().map(|_| ())
 	}
@@ -1231,12 +1232,14 @@ impl<S: Stream> Export<S> {
 	///
 	/// Returns whether a spare continued a track, whose new source has yet to be polled.
 	fn survive(&mut self, name: &str, err: crate::Error) -> Result<bool> {
-		// Before the init a track that could not be described declares nothing.
+		// Before the init a track that could not be described declares nothing, and its rendition
+		// is not read again while the publisher keeps it listed.
 		if !self.init.written()
 			&& let Some(track) = self.tracks.get(name)
 			&& !track.described()
 		{
 			self.tracks.remove(name);
+			self.retired.insert(name.to_string());
 		}
 		let continued = self.settle_spares()?;
 		if !self
@@ -1302,7 +1305,7 @@ impl<S: Stream> Export<S> {
 			};
 			let source = match std::mem::replace(&mut track.phase, Phase::Stopped) {
 				Phase::Lost(failed) => {
-					self.replaced.insert(previous.clone());
+					self.retired.insert(previous.clone());
 					source.continuing(&failed.source)
 				}
 				Phase::Departed(resume) => source.resuming(&resume),
