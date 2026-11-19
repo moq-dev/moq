@@ -669,7 +669,7 @@ impl Model {
 				Cursor::Arrival(sub) => sub.poll_recv_group(&waiter),
 				Cursor::Ordered(sub) => match sub.poll_next_group(&waiter) {
 					// An ordered read reports its drops in turn.
-					Poll::Ready(Ok(Some(track::Item::Gap { range, error }))) => {
+					Poll::Ready(Ok(Some(track::Item::Gap { range, error, .. }))) => {
 						reader.report_drop(index, range, &format!("{error:?}"))?;
 						continue;
 					}

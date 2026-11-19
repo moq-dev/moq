@@ -363,9 +363,9 @@ export interface Delay {
 	/**
 	 * The target latency, the playout or jitter-buffer delay held behind the live edge. Omitted
 	 * means `0`; `null` means not stated, which a peer whose wire cannot carry it (moq-lite
-	 * before 07, moq-transport) sends. A media consumer also waits this long for a missing group,
-	 * since past it the group would play late, and starts an unstated minimum as `0` but waits a
-	 * missing group for {@link Delay.max} instead.
+	 * before 07, moq-transport) sends. It only sets where a reader starts: a missing group is given
+	 * up by {@link Delay.max} alone, whatever the minimum. A media consumer starts an unstated
+	 * minimum as `0`.
 	 *
 	 * A live join, `{ start: { relative: 0n } }` with no end, starts this far behind the live edge:
 	 * at the newest group that began at or before the live edge minus this, so a player's buffer
