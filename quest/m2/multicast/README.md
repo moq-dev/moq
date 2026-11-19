@@ -31,15 +31,18 @@ a marked Node ID, and marked the lite-06 churn mitigations; and
 chain name its announcing relay, then each grant's exporter and adopter.
 Its proof is
 `rs/moq-net/verify/route-algebra/`, and the quests written against the old
-wire were retargeted or deleted. The lite-07 cut still waits on this epic's
-children, [the uncovered cases](/quest/m2/multicast/accept.md),
-[route counters](/quest/m2/multicast/route-counters.md), and
-[the mesh replay](/quest/m2/multicast/mesh-replay.md), and on
+wire were retargeted or deleted.
+[moq-dev/moq#9111](https://github.com/moq-dev/moq/pull/9111) ran the cases no
+test covered on real sessions. The lite-07 cut still waits on this epic's
+children, the two flaws it found,
+[a reader resuming on a detour learned after its session closed](/quest/m2/multicast/detour-resume.md)
+and [a route moving behind one next hop resending a group](/quest/m2/multicast/resend.md),
+whose fix changes the wire,
+[the mesh replay](/quest/m2/multicast/mesh-replay.md), and
+[draining dialed links](/quest/m2/multicast/drain-dialed-links.md), and on
 [route layer acceptance](/quest/m2/cluster-routes/acceptance.md) retiring
 the lite-06 mitigations. After the cut come warmth's wire
 ([cache-aware routing](/quest/m3/cache-routing/README.md)),
-[route benches](/quest/m3/route-benches.md),
-[the proof binding](/quest/m3/route-proof-binding.md),
 [route health](/quest/m3/route-health/README.md), and
 [outbound federation](/quest/m3/cluster-routing/federation.md).
 
@@ -74,6 +77,10 @@ The maintainer's requirements, which every child is judged against:
     moq-transport node is always an endpoint.
 12. No global view. With competing claims each node uses its closest, and
     nothing elects a leader.
+    Narrowed 2026-11-18 inside one trusted domain, for judging
+    [the node layer](/quest/m3/node-layer.md): a node may know its domain's
+    topology, but nothing elects a leader and competing claims resolve to
+    the closest.
 13. A secondary route may carry metadata only, so a stalled primary is found
     without waiting on QUIC keep-alives, where a node opts in.
 14. No approach is assumed: earlier attempts are evidence, not constraints.

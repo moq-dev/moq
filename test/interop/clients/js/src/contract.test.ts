@@ -22,8 +22,12 @@ const nearLive = {
 	previous: 183,
 	source: 196,
 	bound: 45,
-	sample: { frameId: 186, audioContext: "running", audioStalled: false },
+	sample: { frameId: 186, audioContext: "running", audioStalled: false, audioTimestamp: 6200 },
 };
+
+test("a declared silence before any audio is not live playback", () => {
+	expect(reachesLive({ ...nearLive, sample: { ...nearLive.sample, audioTimestamp: 0 } })).toBe(false);
+});
 
 test("an advancing preview while audio buffers is not live playback", () => {
 	expect(reachesLive({ ...nearLive, sample: { ...nearLive.sample, audioStalled: true } })).toBe(false);

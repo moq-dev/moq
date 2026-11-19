@@ -1,4 +1,5 @@
 import { MAX_FRAME_BYTES, TAIL_BYTES, tailCharge } from "../limits.ts";
+import { stringify } from "../parse.ts";
 
 /** Frames (header included) in one group before a new group is forced, matching the Snapshot cap. Bounds how many operations a joiner must replay after its checkpoint. */
 const MAX_GROUP_FRAMES = 1024;
@@ -135,10 +136,8 @@ export class Encoder<T> {
 
 		// Encode before touching the window, so a value that can't be serialized leaves the encoder
 		// exactly as it was.
-		const text: string | undefined = JSON.stringify(value);
-		if (text === undefined) {
-			throw new Error("record is not representable as JSON");
-		}
+		// A header nests each record two containers deep, in its object and its `records` array.
+		const text = stringify(value, 2);
 
 		const edit: Edit = { push: text };
 		if (this.#resync || !this.#opAllowed()) {

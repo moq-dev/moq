@@ -34,10 +34,13 @@ to the tests that exist:
   newest and previous release meshed, and lite-07 is chosen link by link:
   only two new relays speak it to each other. Nothing runs a mesh in that
   state, where one path crosses both versions.
-- The same decision keeps the per-broadcast rewrite of
-  [route benches](/quest/m3/route-benches.md) in m3 on the condition that it
-  is measured on a deployed mesh's shape before that mesh's cluster links
-  move to lite-07. This quest's report is that measurement.
+- The same decision kept the fix for the per-broadcast rewrite after the
+  cut, now in [route wakes](/quest/m4/route-wakes.md), on the condition that
+  the cost is measured on a deployed mesh's shape before that mesh's cluster
+  links move to lite-07.
+  [moq-dev/moq#9114](https://github.com/moq-dev/moq/pull/9114) benched it:
+  10 origin writes per broadcast when an upstream reopens twice. This
+  quest's report is that measurement on a real mesh.
 
 Decided 2026-11-18 (maintainer, on
 [moq-dev/moq#9110](https://github.com/moq-dev/moq/pull/9110)): ✅ it blocks
@@ -57,19 +60,22 @@ Agent's choices, for the implementer to revisit:
   relay.
 - The counts are a report, not a gate, as benchmarks are (2026-10-20,
   maintainer).
+- Each relay's route counts come from its stats (`routes` in a label's
+  presence) or `/metrics` (`moq_relay_route_*`), which
+  [moq-dev/moq#9126](https://github.com/moq-dev/moq/pull/9126) added; see
+  `doc/concept/stats.md`. They count only moq-lite-07 sessions: a link still on
+  lite-06 runs no route node and reports zeros, so the report shows its
+  route counts as unavailable rather than zero.
 - A pair of edges joined over lite-06 can still transit, a known gap of the
   lite-06 path that ends when the mesh finishes its roll. Name it in the
   report instead of failing on it.
 
 Public API: none. Wire: none.
 
-## Required
-
-- [A relay counts what its route layer does](/quest/m2/multicast/route-counters.md) - the counts the report reads from each relay
-
 ## Related
 
-- [Route benches](/quest/m3/route-benches.md) - the costs this measures on a real mesh
-- [The cases no test covers run on real sessions](/quest/m2/multicast/accept.md) - the same failures on mock sessions with mocked time
+- [Route wakes](/quest/m4/route-wakes.md) - owns the rewrite this measures on a real mesh
+- `rs/moq-net/tests/integration/route_audit/` ([moq-dev/moq#9111](https://github.com/moq-dev/moq/pull/9111)) - the same failures on mock sessions with mocked time
 - [Random fault schedules](/quest/m4/cluster-fault-schedules.md) - searches fault timings on the simulated clock
 - [A nightly soak](/quest/m4/relay-soak.md) - one real relay under churn
+- [A draining relay drains the cluster links it dialed](/quest/m2/multicast/drain-dialed-links.md) - without it, a drained relay's dialed links end with DEAD and no DRAIN

@@ -933,8 +933,8 @@ impl Finished {
 		}
 	}
 
-	/// Release the track's cache, reporting `err` to readers that have not drained it; see
-	/// [`moq_net::track::Finished::abort`].
+	/// Abort the track with `err`; see [`moq_net::track::Finished::abort`]. Readers still draining get the clean end
+	/// instead once every group below the end finished.
 	pub fn abort(self, err: moq_net::Error) {
 		match self.inner {
 			FinishedKind::Video(track) => track.abort(err),

@@ -32,8 +32,8 @@ name: Nightly
 # for the full set, so it rotates (see sh/rs/mutants.sh).
 #
 # `route-proof` type-checks the route rule's convergence proof with Agda, about
-# two minutes. The Rust side of its binding, the generated `Vectors.agda`, is
-# checked current by every PR's tests; the proof itself only changes when the
+# two minutes. The Rust side of its binding, the generated `Vectors.agda` and
+# `ClaimVectors.agda`, is checked current by every PR's tests; the proof itself only changes when the
 # rule does, which review checks.
 #
 # `quic-interop` runs moq-quic against other QUIC stacks through the QUIC

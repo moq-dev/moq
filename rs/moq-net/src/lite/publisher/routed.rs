@@ -29,6 +29,7 @@ use crate::{
 		node::{self, Change, Claim, Msg},
 		relay,
 	},
+	stats::{RouteClose, Withdrawal},
 };
 
 /// A node key the answer reads: the session's own, or a mount's.
@@ -115,6 +116,8 @@ pub(in crate::lite) struct Answer {
 	live: HashMap<Named, (u64, Claim)>,
 	/// The session is leaving: nothing more is sent.
 	withdrawn: bool,
+	/// Why the last error closes the session, when the route layer said.
+	cause: Option<RouteClose>,
 }
 
 impl Answer {
@@ -153,6 +156,7 @@ impl Answer {
 			told: BTreeMap::new(),
 			live: HashMap::new(),
 			withdrawn: false,
+			cause: None,
 		}
 	}
 
@@ -160,6 +164,12 @@ impl Answer {
 	/// ANNOUNCE_REQUEST.
 	pub(in crate::lite) fn continuing(&self) -> bool {
 		self.parts.is_some()
+	}
+
+	/// Why the error [`Self::request`] last returned closes the session, as its stats
+	/// count it: what the route layer said, or else a request the rule never builds.
+	pub(in crate::lite) fn closed(&mut self) -> RouteClose {
+		self.cause.take().unwrap_or(RouteClose::Malformed)
 	}
 
 	/// ANNOUNCE_REQUEST: the peer edits the prefixes it asks for, over as many messages as
@@ -229,7 +239,10 @@ impl Answer {
 			return Err(Error::ProtocolViolation);
 		}
 		// The node refuses a routing peer that asks for part of the tree.
-		self.main.recv(Msg::Ask(edit)).map_err(|_| Error::ProtocolViolation)?;
+		self.main.recv(Msg::Ask(edit)).map_err(|err| {
+			self.cause = Some(err.close());
+			Error::ProtocolViolation
+		})?;
 		self.next_prefix = next;
 		self.request = Some(Request { remove, add: added });
 		Ok(())
@@ -307,8 +320,14 @@ impl Answer {
 		match msg {
 			Msg::Route { origin, offer } => self.route(writer, origin, offer),
 			Msg::Claims { origin, changes, floor } => self.claims(writer, origin, changes, floor),
-			Msg::Dead { hop, far } => writer.buffer(&Wire::Dead { hop, far }),
-			Msg::Drain { node } => writer.buffer(&Wire::Drain { node }),
+			Msg::Dead { hop, far } => {
+				self.origin.stats().withdrawal(Withdrawal::Dead, false);
+				writer.buffer(&Wire::Dead { hop, far })
+			}
+			Msg::Drain { node } => {
+				self.origin.stats().withdrawal(Withdrawal::Drain, false);
+				writer.buffer(&Wire::Drain { node })
+			}
 			Msg::Announce { changes } => {
 				for (broadcast, change) in changes {
 					self.announce(writer, source, broadcast, change)?;

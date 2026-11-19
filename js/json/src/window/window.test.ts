@@ -644,3 +644,18 @@ test("finishing returns a window that reads but takes no edit", () => {
 	// @ts-expect-error a finished window takes no record
 	expect(() => finished.push({ n: 2 }, key())).toThrow("track is closed");
 });
+
+// Mirrors the Rust `aborting_a_finished_window_still_drains`: an abort after finish changes nothing a
+// reader sees, since every group finished, so one still draining gets the rest and the clean end.
+test("aborting a finished window still drains", async () => {
+	const track = new Track.Producer("test");
+	const consumer = new Consumer<Rec>({ track: track.subscribe() });
+	const producer = new Producer<Rec>({ track });
+	producer.push({ n: 0 }, key());
+	producer.push({ n: 1 }, key());
+	expect((await consumer.next())?.value).toEqual({ push: { index: 0, value: { n: 0 } } });
+
+	producer.finish().abort(new NetError.Stream(StreamCode.Cancel));
+	expect((await consumer.next())?.value).toEqual({ push: { index: 1, value: { n: 1 } } });
+	expect(await consumer.next()).toBeUndefined();
+});

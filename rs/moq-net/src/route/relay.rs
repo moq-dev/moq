@@ -112,11 +112,10 @@ pub(crate) struct Hop {
 }
 
 /// A route's rank, lower first: draining, then the lowest priority, then the cost.
-type Rank = (bool, Reverse<i8>, Metric);
+pub(crate) type Rank = (bool, Reverse<i8>, Metric);
 
-/// How claims of one precedence order, lower first: the rank of the route and the claim
-/// together, then the fewer relays that took the claim on its way here, and the claimant.
-type ClaimOrder = (Rank, usize, NodeId);
+/// How claims of one precedence order, as [`claim_order`] keys them.
+pub(crate) type ClaimOrder = (Rank, bool, usize, NodeId);
 
 /// What a route says.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -134,9 +133,93 @@ pub(crate) struct Offer {
 }
 
 impl Offer {
-	fn rank(&self) -> Rank {
+	pub(crate) fn rank(&self) -> Rank {
 		(self.draining, Reverse(self.priority), self.cost)
 	}
+
+	/// The route node `me` offers to its own identity `origin`, itself or its marked one,
+	/// over a link it marked when `upstream`. The marked identity's route leads through
+	/// `me`, as if learned on a marked link, so it is never sent over another.
+	pub(crate) fn own(me: NodeId, origin: NodeId, upstream: bool) -> Option<Self> {
+		let hop = Hop { node: me, session: 0 };
+		let path: Arc<[Hop]> = match origin.marked {
+			true => Arc::new([
+				Hop {
+					node: origin,
+					session: 0,
+				},
+				hop,
+			]),
+			false => Arc::new([hop]),
+		};
+		let own = Self {
+			path,
+			draining: false,
+			priority: i8::MAX,
+			cost: 0,
+			marked: origin.marked,
+		};
+		(!(own.marked && upstream)).then_some(own)
+	}
+
+	/// This route, as node `me` holds it over its session `session`, sent on to routing
+	/// neighbour `to` over a link `me` marked when `upstream`: never to a relay already on
+	/// its path, or from one marked link to another.
+	pub(crate) fn onward(&self, me: NodeId, session: u64, to: NodeId, upstream: bool) -> Option<Self> {
+		if names(&self.path, to.relay) || (self.marked && upstream) {
+			return None;
+		}
+		let path: Arc<[Hop]> = self.path.iter().copied().chain([Hop { node: me, session }]).collect();
+		Some(Self { path, ..self.clone() })
+	}
+}
+
+/// Everything a node holds that decides whether it uses a route a neighbour offers, and
+/// how it ranks it.
+pub(crate) struct Here<'a> {
+	/// Per pair of relays, the highest session known closed.
+	pub closed: &'a BTreeMap<(Id, Id), (u64, u64)>,
+	/// Closed sessions a live heard route still names.
+	pub dead: &'a BTreeMap<Hop, NodeId>,
+	/// Nodes named as draining.
+	pub draining: &'a BTreeSet<NodeId>,
+}
+
+impl Here<'_> {
+	/// `offer`, heard on `port` from a neighbour that sent GOAWAY when `draining`, as it
+	/// stands here: priced and ranked over the link. `None` for one this node never uses:
+	/// at the longest path, through a session known closed, or past the metric.
+	pub fn arrive(&self, port: &Port, draining: bool, offer: &Offer) -> Option<Offer> {
+		let floored = pairs(&offer.path).any(|(pair, at)| self.closed.get(&pair).is_some_and(|highest| at <= *highest));
+		if offer.path.len() >= MAX_HOPS || floored || offer.path.iter().any(|hop| self.dead.contains_key(hop)) {
+			return None;
+		}
+		Some(Offer {
+			path: offer.path.clone(),
+			draining: offer.draining || draining || offer.path.iter().any(|hop| self.draining.contains(&hop.node)),
+			priority: offer.priority.min(port.priority),
+			// A route no link could extend is past every other, so it is never used.
+			cost: offer.cost.checked_add(port.cost)?,
+			marked: offer.marked || port.upstream,
+		})
+	}
+}
+
+/// How a candidate route orders, lower first: rank, then one with no marked link on its
+/// path, which more neighbours may be sent, the next hop in use (`current`), the shorter
+/// path, the neighbour's Node ID, and its session.
+pub(crate) fn order<N: Key>(best: &Best<N>, current: Option<N>) -> Order<N> {
+	let (draining, priority, cost) = best.offer.rank();
+	(
+		draining,
+		priority,
+		cost,
+		best.offer.marked,
+		current != Some(best.via),
+		best.offer.path.len(),
+		best.offer.path.last().expect("a heard route names its sender").node,
+		best.via,
+	)
 }
 
 /// The Node ID a node announces what it took over a marked link under.
@@ -182,7 +265,7 @@ fn pairs(path: &[Hop]) -> impl Iterator<Item = ((Id, Id), (u64, u64))> + '_ {
 
 /// The pair of relays `hop`'s session joins, as the floor files it, and where the session
 /// stands in that pair's order.
-fn floor_of(hop: Hop, far: NodeId) -> ((Id, Id), (u64, u64)) {
+pub(crate) fn floor_of(hop: Hop, far: NodeId) -> ((Id, Id), (u64, u64)) {
 	((hop.node.relay, far.relay), (hop.node.start, hop.session))
 }
 
@@ -223,18 +306,110 @@ impl<A: Item> Claim<A> {
 		(self.draining, Reverse(self.priority), self.cost)
 	}
 
-	fn lowered(&self, by: u64) -> Self {
+	pub(crate) fn lowered(&self, by: u64) -> Self {
 		Self {
 			item: self.item.lowered(by),
 			..self.clone()
 		}
 	}
+
+	/// The rank and mark of this claim, announced by another node of this node's routing
+	/// domain, joined with `route`, this node's route to that node.
+	fn joined(&self, route: &Offer) -> (Rank, bool) {
+		let (draining, Reverse(priority), cost) = route.rank();
+		let rank = (
+			draining || self.draining,
+			Reverse(priority.min(self.priority)),
+			cost.saturating_add(self.cost),
+		);
+		(rank, self.marked || route.marked)
+	}
+
+	/// This claim, announced by another node of this node's routing domain, as it stands
+	/// here over `route`, this node's route to that node.
+	pub(crate) fn over(&self, route: &Offer) -> Self {
+		let ((draining, Reverse(priority), cost), marked) = self.joined(route);
+		Self {
+			draining,
+			priority,
+			cost,
+			marked,
+			..self.clone()
+		}
+	}
+
+	/// This claim, as it stands at relay `me`, told across a grant over a link `me` marked
+	/// when `upstream`: the chain names `me` as the claim leaves its routing domain, unless
+	/// it does not `forward`. `None` where it is told to no one: one that crossed a marked
+	/// link goes over no other, and one that would reach the longest path goes nowhere.
+	pub(crate) fn exported(&self, me: Id, forwards: bool, upstream: bool) -> Option<Self> {
+		if upstream && self.marked {
+			return None;
+		}
+		let mut claim = self.clone();
+		stamp(&mut claim.chain, me, forwards);
+		(claim.chain.len() < MAX_HOPS).then_some(claim)
+	}
+
+	/// This claim, given by a neighbour on `port`, as relay `me` takes it: priced over the
+	/// link, marked if `port` is, and its chain naming `me` as it enters `me`'s routing
+	/// domain. `None` where `me` refuses it: the chain, with `me` appended, names a relay
+	/// twice or reaches the longest path.
+	pub(crate) fn adopted(&self, me: Id, forwards: bool, port: &Port) -> Option<Self> {
+		if !takes(&self.chain, me, forwards) {
+			return None;
+		}
+		let mut claim = self.clone();
+		// Saturating, as `model::origin`'s claim cost does, so a claim's cost never
+		// decides whether it can serve.
+		claim.cost = claim.cost.saturating_add(port.cost);
+		claim.priority = claim.priority.min(port.priority);
+		claim.marked |= port.upstream;
+		stamp(&mut claim.chain, me, forwards);
+		Some(claim)
+	}
+}
+
+/// Whether relay `me` takes a claim whose chain is `chain` from a peer it exchanges no
+/// routes with. One naming `me`, or any relay twice, left the routing domain of that relay
+/// and came back to it, and one `me` would carry to the longest path is never taken, as a
+/// route past the metric is never used.
+fn takes(chain: &[Id], me: Id, forwards: bool) -> bool {
+	// At most 31 relays (`well_built`), so a quadratic scan beats allocating a set.
+	let once = (chain.iter().enumerate()).all(|(at, relay)| *relay != me && !chain[..at].contains(relay));
+	once && chain.len() + usize::from(forwards) < MAX_HOPS
+}
+
+/// Name relay `me` at the end of a claim's chain as the claim enters or leaves its routing
+/// domain, unless it ends the chain already, as a relay that adopted a claim across one
+/// grant and exports it across the next does, or it does not `forward`.
+fn stamp(chain: &mut Vec<Id>, me: Id, forwards: bool) {
+	if forwards && chain.last() != Some(&me) {
+		chain.push(me);
+	}
+}
+
+/// How claims of one precedence order at a node, lower first: the rank of the claim
+/// joined with `route`, the route to its announcer `origin`, or none for the node's own;
+/// then one no marked link reached, which more neighbours may be told, as a route is
+/// chosen; the fewer relays that took it on its way here; and the claimant. It reads only
+/// the route's rank and mark, which [`Ways`] records, so a route change that moves the
+/// closest claim is logged ([`Router::relog`]).
+pub(crate) fn claim_order<A: Item>(claim: &Claim<A>, route: Option<&Offer>, origin: NodeId) -> ClaimOrder {
+	let (rank, marked) = match route {
+		Some(route) => claim.joined(route),
+		None => (claim.rank(), claim.marked),
+	};
+	// Counted as the relays that took the claim on its way here: this node's own claim
+	// names it already, and another's lacks the step from here to its announcer.
+	let taken = claim.chain.len() + usize::from(route.is_some());
+	(rank, marked, taken, origin)
 }
 
 /// Which claims of one Instance at one path may serve it, lower first: the one closest to
 /// its own path, then the newest epoch. A route's rank chooses only among claims that tie
 /// here, so an older run never stands in for a newer one that lost its route.
-fn precedence<A: Item>(item: &A) -> (u64, Reverse<u64>) {
+pub(crate) fn precedence<A: Item>(item: &A) -> (u64, Reverse<u64>) {
 	(item.above(), Reverse(item.epoch()))
 }
 
@@ -416,14 +591,21 @@ impl<I, A> Default for Known<I, A> {
 
 /// The route this node uses, as it stands here: the heard offer with the link added.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Best<N> {
-	via: N,
-	offer: Offer,
+pub(crate) struct Best<N> {
+	pub via: N,
+	pub offer: Offer,
 }
 
-/// How candidate routes order, lower first: rank, then one with no marked link on its
-/// path, the next hop in use, the shorter path, the neighbour's Node ID, and its session.
-type Order<N> = (bool, Reverse<i8>, Metric, bool, bool, usize, NodeId, N);
+/// How candidate routes order, lower first, as [`order`] keys them.
+pub(crate) type Order<N> = (bool, Reverse<i8>, Metric, bool, bool, usize, NodeId, N);
+
+/// What a forwarding node's usable routes give the ways to its claims ([`Router::ways`]):
+/// each one's next hop, rank, and mark, and the next hop of the one in use.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Ways<N> {
+	routes: Vec<(N, Rank, bool)>,
+	best: Option<N>,
+}
 
 /// What changed at a router since its caller last asked.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -432,6 +614,8 @@ pub(crate) struct Changes<I> {
 	pub routes: BTreeSet<NodeId>,
 	/// The broadcasts whose claims, or what the reader shows of them, may have changed.
 	pub broadcasts: BTreeSet<Broadcast<I>>,
+	/// Claims a neighbour gave whose chain this node never takes, each taken as lost.
+	pub looped: u64,
 }
 
 impl<I> Default for Changes<I> {
@@ -439,6 +623,7 @@ impl<I> Default for Changes<I> {
 		Self {
 			routes: BTreeSet::new(),
 			broadcasts: BTreeSet::new(),
+			looped: 0,
 		}
 	}
 }
@@ -524,6 +709,8 @@ pub(crate) struct Router<N, I, A> {
 	/// Forwarding nodes whose route changed since the neighbours were last told.
 	stale: BTreeSet<NodeId>,
 	best: BTreeMap<NodeId, Best<N>>,
+	/// What each forwarding node's usable routes give the ways to its claims.
+	ways: BTreeMap<NodeId, Ways<N>>,
 	/// The forwarding nodes whose last selected route was marked, kept while no route
 	/// reaches them and their claims stay known, so the claims keep the mark.
 	marks: BTreeSet<NodeId>,
@@ -634,6 +821,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			draining: BTreeSet::new(),
 			stale: BTreeSet::new(),
 			best: BTreeMap::new(),
+			ways: BTreeMap::new(),
 			marks: BTreeSet::new(),
 			tx_hops: BTreeMap::new(),
 			sent_to: BTreeMap::new(),
@@ -1475,76 +1663,48 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		touched.extend(routes.copied());
 	}
 
-	/// Whether a session on `path` is at or below its pair's floor.
-	fn floored(&self, path: &[Hop]) -> bool {
-		pairs(path).any(|(pair, at)| self.closed.get(&pair).is_some_and(|highest| at <= *highest))
-	}
-
-	/// Pick the route to `origin`, and mark it stale for the neighbours if it changed.
 	/// Every route to `origin` a neighbour offers that this node may use, as it would
 	/// hold it: priced and ranked over the link it came on.
-	fn usable(&self, origin: NodeId) -> Vec<Best<N>> {
+	pub(crate) fn usable(&self, origin: NodeId) -> Vec<Best<N>> {
+		let here = Here {
+			closed: &self.closed,
+			dead: &self.dead,
+			draining: &self.draining,
+		};
 		let mut usable = Vec::new();
 		for (&via, heard) in self.heard.get(&origin).into_iter().flatten() {
 			self.visit();
 			let peer = &self.peers[&via];
-			let offer = &heard.offer;
-			if heard.ended
-				|| offer.path.len() >= MAX_HOPS
-				|| self.floored(&offer.path)
-				|| offer.path.iter().any(|hop| self.dead.contains_key(hop))
-			{
+			if heard.ended {
 				continue;
 			}
-			// A route no link could extend is past every other, so it is never used.
-			let Some(cost) = offer.cost.checked_add(peer.port.cost) else {
-				continue;
-			};
-			let draining =
-				offer.draining || peer.draining || offer.path.iter().any(|hop| self.draining.contains(&hop.node));
-			usable.push(Best {
-				via,
-				offer: Offer {
-					path: offer.path.clone(),
-					draining,
-					priority: offer.priority.min(peer.port.priority),
-					cost,
-					marked: offer.marked || peer.port.upstream,
-				},
-			});
+			if let Some(offer) = here.arrive(&peer.port, peer.draining, &heard.offer) {
+				usable.push(Best { via, offer });
+			}
 		}
 		usable
 	}
 
+	/// Pick the route to `origin`, and mark it stale for the neighbours if it changed.
 	fn reselect(&mut self, origin: NodeId) {
 		let current = self.best.get(&origin).map(|best| best.via);
 		let mut pick: Option<(Best<N>, Order<N>)> = None;
-		// A route that is not the best still serves the origin's claims, so each change
-		// to one reaches whoever follows them.
-		if let Some(log) = &mut self.log {
-			log.routes.insert(origin);
-		}
-		for mine in self.usable(origin) {
-			let via = mine.via;
-			let offer = mine.offer.clone();
-			let (draining, priority, cost) = mine.offer.rank();
-			// Among equal ranks one with no marked link, which more neighbours may be sent,
-			// and then the next hop in use.
-			let key = (
-				draining,
-				priority,
-				cost,
-				mine.offer.marked,
-				current != Some(via),
-				offer.path.len(),
-				offer.path.last().expect("a heard route names its sender").node,
-				via,
-			);
+		let usable = self.usable(origin);
+		let mut ways = Ways {
+			routes: (usable.iter())
+				.map(|mine| (mine.via, mine.offer.rank(), mine.offer.marked))
+				.collect(),
+			best: None,
+		};
+		for mine in usable {
+			let key = order(&mine, current);
 			if pick.as_ref().is_none_or(|(_, best)| key < *best) {
 				pick = Some((mine, key));
 			}
 		}
 		let pick = pick.map(|(best, _)| best);
+		ways.best = pick.as_ref().map(|best| best.via);
+		self.relog(origin, ways);
 		let was = self.best.get(&origin);
 		if was == pick.as_ref() {
 			return;
@@ -1563,9 +1723,6 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			Some(best) => self.best.insert(origin, best),
 			None => self.best.remove(&origin),
 		};
-		if let Some(log) = &mut self.log {
-			log.routes.insert(origin);
-		}
 		// Whether its claims are reachable follows the route, and so does the rank of each
 		// that the rank reaches.
 		if (flipped || remarked)
@@ -1580,6 +1737,20 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		self.stale.insert(origin);
 	}
 
+	/// Log `origin`'s route as changed once what its ways carry does. A route that is not
+	/// the best still serves the origin's claims, so a change to any usable route counts,
+	/// but one that leaves every way's next hop, rank, and mark alone, such as a new path
+	/// at the same cost, changes nothing a reader follows.
+	fn relog(&mut self, origin: NodeId, ways: Ways<N>) {
+		let changed = match ways.routes.is_empty() {
+			true => self.ways.remove(&origin).is_some(),
+			false => self.ways.insert(origin, ways.clone()).as_ref() != Some(&ways),
+		};
+		if changed && let Some(log) = &mut self.log {
+			log.routes.insert(origin);
+		}
+	}
+
 	/// What `peer` should hear of `origin` now.
 	fn offer_for(&self, origin: NodeId, peer: N) -> Option<Offer> {
 		let to = self.peers.get(&peer)?;
@@ -1589,49 +1760,14 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			if !self.revs.contains_key(&origin) {
 				return None;
 			}
-			let me = Hop {
-				node: self.me,
-				session: 0,
-			};
-			// The marked identity's route leads through this node, as if learned on a
-			// marked link, and is never sent over another.
-			let marked = origin == self.me_marked;
-			if marked && to.port.upstream {
-				return None;
-			}
-			let path: Arc<[Hop]> = match marked {
-				true => Arc::new([
-					Hop {
-						node: self.me_marked,
-						session: 0,
-					},
-					me,
-				]),
-				false => Arc::new([me]),
-			};
-			return Some(Offer {
-				path,
-				draining: false,
-				priority: i8::MAX,
-				cost: 0,
-				marked,
-			});
+			return Offer::own(self.me, origin, to.port.upstream);
 		}
 		let best = self.best.get(&origin)?;
-		// Never back over the session it came on, to a node already on its path, or from
-		// one marked link to another.
-		if best.via == peer || names(&best.offer.path, to_id.relay) || (best.offer.marked && to.port.upstream) {
+		// Never back over the session it came on.
+		if best.via == peer {
 			return None;
 		}
-		let mut path = best.offer.path.to_vec();
-		path.push(Hop {
-			node: self.me,
-			session: self.peers[&best.via].session,
-		});
-		Some(Offer {
-			path: path.into(),
-			..best.offer.clone()
-		})
+		(best.offer).onward(self.me, self.peers[&best.via].session, to_id, to.port.upstream)
 	}
 
 	/// Tell every routing neighbour of each route that changed, and a neighbour that newly
@@ -1982,11 +2118,15 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		if !well_built(&changes) {
 			return Err(Error::Malformed);
 		}
-		let (cost, priority, upstream) = (peer.port.cost, peer.port.priority, peer.port.upstream);
 		for (broadcast, change) in changes {
 			self.visit();
 			let change = match change {
-				Change::Live(claim) if !self.takes(&claim.chain) => Change::Lost,
+				Change::Live(claim) if !takes(&claim.chain, self.me.relay, self.forwards) => {
+					if let Some(log) = &mut self.log {
+						log.looped += 1;
+					}
+					Change::Lost
+				}
 				// Unavailable is only ever news of a run this neighbour gave before: one first
 				// seen unavailable, which nothing can serve, is not there until it is
 				// available. A neighbour that moved to it no longer gives the run it gave.
@@ -2000,15 +2140,9 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 						false => continue,
 					}
 				}
-				Change::Live(mut claim) => {
-					// Saturating, as `model::origin`'s claim cost does, so a claim's cost
-					// never decides whether it can serve.
-					claim.cost = claim.cost.saturating_add(cost);
-					claim.priority = claim.priority.min(priority);
-					claim.marked |= upstream;
-					// The claim enters this node's routing domain here.
-					self.stamp(&mut claim.chain);
-					Change::Live(claim)
+				Change::Live(claim) => {
+					let port = &self.peers[&from].port;
+					Change::Live(claim.adopted(self.me.relay, self.forwards, port).expect("taken"))
 				}
 				change => change,
 			};
@@ -2028,26 +2162,6 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			}
 		}
 		Ok(())
-	}
-
-	/// Whether this node takes a claim whose chain is `chain` from a peer it exchanges no
-	/// routes with. One naming this node, or any relay twice, left the routing domain of
-	/// that relay and came back to it, and one this node would carry to the longest path
-	/// is never taken, as a route past the metric is never used.
-	fn takes(&self, chain: &[Id]) -> bool {
-		let me = self.me.relay;
-		// At most 31 relays (`well_built`), so a quadratic scan beats allocating a set.
-		let once = (chain.iter().enumerate()).all(|(at, relay)| *relay != me && !chain[..at].contains(relay));
-		once && chain.len() + usize::from(self.forwards) < MAX_HOPS
-	}
-
-	/// Name this node at the end of a claim's chain as the claim enters or leaves its
-	/// routing domain, unless it ends the chain already, as a relay that adopted a claim
-	/// across one grant and exports it across the next does.
-	fn stamp(&self, chain: &mut Vec<Id>) {
-		if self.forwards && chain.last() != Some(&self.me.relay) {
-			chain.push(self.me.relay);
-		}
 	}
 
 	fn ungive(&mut self, broadcast: &Broadcast<I>, peer: N) {
@@ -2071,18 +2185,16 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 				claim.draining |= self.peers.get(&peer).is_some_and(|peer| peer.draining);
 				(claim, peer)
 			})
-			// Precedence first and then rank, as `closest`, an unavailable claim last.
+			// Precedence first and then the order `closest` takes, an unavailable claim last.
 			.min_by_key(|(claim, peer)| {
+				let owner = match claim.marked {
+					true => self.me_marked,
+					false => self.me,
+				};
 				(
 					precedence(&claim.item),
 					claim.unavailable,
-					claim.draining,
-					Reverse(claim.priority),
-					claim.cost,
-					// Among equal ranks one that crossed no marked link, which more
-					// neighbours may be told, as a route is chosen.
-					claim.marked,
-					claim.chain.len(),
+					claim_order(claim, None, owner),
 					*peer,
 				)
 			});
@@ -2227,13 +2339,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 				ways.push(Way {
 					origin,
 					next: Next::Via(route.via),
-					claim: Claim {
-						cost: claim.cost.saturating_add(route.offer.cost),
-						priority: claim.priority.min(route.offer.priority),
-						draining: claim.draining || route.offer.draining,
-						marked: claim.marked || route.offer.marked,
-						..claim.clone()
-					},
+					claim: claim.over(&route.offer),
 					closest: closest == Some(origin) && best == Some(route.via),
 				});
 			}
@@ -2271,29 +2377,19 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			if claim.unavailable {
 				continue;
 			}
-			let rank = match self.is_self(origin) {
-				true => claim.rank(),
-				false => {
-					let Some(best) = self.best.get(&origin) else {
-						continue;
-					};
-					let (draining, Reverse(priority), cost) = best.offer.rank();
-					(
-						draining || claim.draining,
-						Reverse(priority.min(claim.priority)),
-						cost.saturating_add(claim.cost),
-					)
-				}
+			let route = match self.is_self(origin) {
+				true => None,
+				false => match self.best.get(&origin) {
+					Some(best) => Some(&best.offer),
+					None => continue,
+				},
 			};
-			// Counted as the relays that took the claim on its way here: this node's own claim
-			// names it already, and another's lacks the step from here to its announcer.
-			let taken = claim.chain.len() + usize::from(!self.is_self(origin));
-			let key = (rank, taken, origin);
+			let key = claim_order(claim, route, origin);
 			if pick.as_ref().is_none_or(|(best, _)| key < *best) {
 				pick = Some((key, claim));
 			}
 		}
-		pick.map(|((_, _, origin), claim)| (origin, claim))
+		pick.map(|((_, _, _, origin), claim)| (origin, claim))
 	}
 
 	// --- Readers, endpoints, and scoped neighbours ---
@@ -2502,26 +2598,13 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 	fn stands(&self, peer: N, path: &Path, from: &Path, instance: &I) -> Option<Told<A>> {
 		self.reader.get(instance.clone(), from)?;
 		let broadcast = (from.clone(), instance.clone());
-		let marked = self.peers[&peer].port.upstream;
-		let source = |origin: NodeId| {
-			(self.is_self(origin) && self.sources.get(&broadcast) == Some(&peer))
-				|| (marked && self.crossed_mark(origin, &broadcast))
-		};
+		let source = |origin: NodeId| self.is_self(origin) && self.sources.get(&broadcast) == Some(&peer);
+		// Each claim carries whether it crossed a marked link on its way here, which
+		// `exported` reads.
 		let claim = match self.closest(&broadcast) {
 			Some((origin, _)) if source(origin) => return None,
 			Some((origin, claim)) if self.is_self(origin) => claim.clone(),
-			Some((origin, claim)) => {
-				let route = &self.best[&origin].offer;
-				Claim {
-					item: claim.item.clone(),
-					cost: claim.cost.saturating_add(route.cost),
-					priority: claim.priority.min(route.priority),
-					draining: claim.draining || route.draining,
-					unavailable: false,
-					chain: claim.chain.clone(),
-					marked: claim.marked || route.marked,
-				}
-			}
+			Some((origin, claim)) => claim.over(&self.best[&origin].offer),
 			None => match self
 				.claims_of(&broadcast)
 				.min_by_key(|(origin, claim)| (precedence(&claim.item), *origin))
@@ -2535,20 +2618,14 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 				// Lost, and waiting out the debounce: what it showed, to every asker alike.
 				None => {
 					let gone = self.gone.get(from)?.get(instance)?;
-					if gone.source == Some(peer) || (marked && gone.claim.marked) {
+					if gone.source == Some(peer) {
 						return None;
 					}
 					gone.claim.clone()
 				}
 			},
 		};
-		// The claim leaves this node's routing domain here, so the chain names its exporter,
-		// and one that would reach the longest path is told to no one.
-		let mut claim = claim;
-		self.stamp(&mut claim.chain);
-		if claim.chain.len() >= MAX_HOPS {
-			return None;
-		}
+		let claim = claim.exported(self.me.relay, self.forwards, self.peers[&peer].port.upstream)?;
 		let by = (path.parts().count() - from.parts().count()) as u64;
 		Some(Told {
 			claim: claim.lowered(by),
@@ -2647,6 +2724,11 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		!self.out.is_empty() || !self.stale.is_empty() || !self.fresh.is_empty()
 	}
 
+	/// The forwarding nodes some neighbour offers this node a route to.
+	pub fn heard(&self) -> Vec<NodeId> {
+		self.heard.keys().copied().collect()
+	}
+
 	/// The forwarding nodes this node routes to.
 	pub fn routes(&self) -> Vec<NodeId> {
 		self.best.keys().copied().collect()
@@ -2708,6 +2790,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			draining,
 			stale,
 			best,
+			ways: _,
 			marks,
 			tx_hops: _,
 			sent_to: _,
@@ -2837,6 +2920,20 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		}
 		assert_eq!(self.claimants, claimants, "claimants");
 		assert_eq!(self.ranked, ranked, "ranked claims");
+		// Rebuilt with what the work count leaves out.
+		let work = self.work.get();
+		let origins: BTreeSet<&NodeId> = self.heard.keys().chain(self.ways.keys()).collect();
+		for origin in origins {
+			let routes: Vec<_> = (self.usable(*origin).iter())
+				.map(|mine| (mine.via, mine.offer.rank(), mine.offer.marked))
+				.collect();
+			let ways = (!routes.is_empty()).then(|| Ways {
+				routes,
+				best: self.best.get(origin).map(|best| best.via),
+			});
+			assert_eq!(self.ways.get(origin), ways.as_ref(), "the ways to {origin:?}");
+		}
+		self.work.set(work);
 		let deadlines: BTreeSet<(Instant, Broadcast<I>)> = (self.waiting.iter())
 			.map(|(broadcast, at)| (*at, broadcast.clone()))
 			.collect();
@@ -3153,6 +3250,33 @@ mod tests {
 		};
 		router.recv(3, announce).unwrap();
 		assert_eq!(router.own().1[&(p("near"), 7)].cost, Metric::MAX, "an endpoint's claim");
+	}
+
+	/// A route that moves onto another path at the same rank changes no way to its claims,
+	/// so its caller relanes none of them; one that costs more does.
+	#[test]
+	fn a_route_logs_a_change_only_when_its_ways_do() {
+		let mut router = Router::<usize, u64, Run>::new(node(1), debounce(HOP));
+		router.follow();
+		open(&mut router, 2, Role::Routing(node(2)));
+		router.recv(2, route(5, 2, 1)).unwrap();
+		assert_eq!(router.changes().routes, BTreeSet::from([node(5)]), "a new route");
+		let mut moved = route(5, 2, 1);
+		if let Msg::Route { offer: Some(offer), .. } = &mut moved {
+			let mut path = offer.path.to_vec();
+			path.insert(
+				1,
+				Hop {
+					node: node(4),
+					session: 1,
+				},
+			);
+			offer.path = path.into();
+		}
+		router.recv(2, moved).unwrap();
+		assert!(router.changes().routes.is_empty(), "the same rank on another path");
+		router.recv(2, route(5, 2, 2)).unwrap();
+		assert_eq!(router.changes().routes, BTreeSet::from([node(5)]), "a dearer route");
 	}
 
 	/// A claim reached over a route ranks as the route does too: draining if the route is,
@@ -5105,5 +5229,110 @@ mod tests {
 				.any(|(to, msg)| *to == 12 && matches!(msg, Msg::Route { offer: Some(_), .. } | Msg::Claims { .. })),
 			"a marked neighbour heard of it: {out:?}"
 		);
+	}
+
+	/// Among claims of equal rank, one no marked link reached is closest, as a route is
+	/// chosen, so an upstream is told it rather than nothing. Node 4's claim reaches this
+	/// node over a link it marked and node 5's over one it did not, at the same rank, and
+	/// node 4 names the lower Node ID.
+	#[test]
+	fn an_unmarked_claim_is_closest_among_equal_ranks() {
+		let mut router: Router<usize, u64, Run> = Router::new(node(1), debounce(HOP));
+		let upstream = |role| Port {
+			upstream: true,
+			..port(role)
+		};
+		router.connect(2, upstream(Role::Routing(node(2)))).unwrap();
+		router.recv(2, Msg::Edited).unwrap();
+		open(&mut router, 3, Role::Routing(node(3)));
+		router.connect(6, upstream(Role::Scoped(vec![p(ROOT)]))).unwrap();
+		router.recv(6, Msg::Edited).unwrap();
+		let all = Edit {
+			remove: Vec::new(),
+			add: vec![p(ROOT)],
+		};
+		router.edit(2, all.clone()).unwrap();
+		router.edit(6, all).unwrap();
+		router.drain();
+
+		let room = (p("live"), 7);
+		for (origin, via) in [(4, 2), (5, 3)] {
+			router.recv(via, route(origin, via as Id, 1)).unwrap();
+			let claims = Msg::Claims {
+				origin: node(origin),
+				changes: vec![(room.clone(), claim(run(0), 0))],
+				floor: 1,
+			};
+			router.recv(via, claims).unwrap();
+		}
+		let out = router.drain();
+		let told = (out.iter()).any(|(to, msg)| {
+			*to == 6 && matches!(msg, Msg::Announce { changes } if changes.iter().any(|(at, change)| *at == room && matches!(change, Change::Live(_))))
+		});
+		assert!(told, "the upstream was told nothing: {out:?}");
+		assert_eq!(router.pick(&room), Some(node(5)), "the unmarked claim is closest");
+	}
+
+	/// A route that turns marked at the same rank, through the same session and path,
+	/// changes which of two equal-rank claims is closest, so it is logged as a change to
+	/// the ways (#9114 logs only those) and the closest way moves with it. Node 4's claim
+	/// reaches this node over a link it marked and node 5's over one it did not; then node
+	/// 5's route turns marked, and node 4's gains an unmarked one.
+	#[test]
+	fn a_route_flipping_which_claim_is_unmarked_reaches_its_followers() {
+		let mut router: Router<usize, u64, Run> = Router::new(node(1), debounce(HOP));
+		router.follow();
+		router
+			.connect(
+				2,
+				Port {
+					upstream: true,
+					..port(Role::Routing(node(2)))
+				},
+			)
+			.unwrap();
+		router.recv(2, Msg::Edited).unwrap();
+		open(&mut router, 3, Role::Routing(node(3)));
+		router.drain();
+
+		let room = (p("live"), 7);
+		for (origin, via) in [(4, 2), (5, 3)] {
+			router.recv(via, route(origin, via as Id, 1)).unwrap();
+			let claims = Msg::Claims {
+				origin: node(origin),
+				changes: vec![(room.clone(), claim(run(0), 0))],
+				floor: 1,
+			};
+			router.recv(via, claims).unwrap();
+		}
+		router.drain();
+		router.changes();
+		assert_eq!(router.pick(&room), Some(node(5)), "the unmarked claim is closest");
+
+		let closest = |router: &Router<usize, u64, Run>| {
+			(router.ways(&room).into_iter())
+				.filter(|way| way.closest)
+				.map(|way| (way.origin, way.next, way.claim.marked))
+				.collect::<Vec<_>>()
+		};
+		let mut marked = route(5, 3, 1);
+		if let Msg::Route { offer: Some(offer), .. } = &mut marked {
+			offer.marked = true;
+		}
+		router.recv(3, marked).unwrap();
+		router.drain();
+		assert_eq!(
+			router.changes().routes,
+			BTreeSet::from([node(5)]),
+			"the mark alone moved"
+		);
+		assert_eq!(router.pick(&room), Some(node(4)), "both marked: the lower Node ID");
+		assert_eq!(closest(&router), vec![(node(4), Next::Via(2), true)]);
+
+		router.recv(3, route(4, 3, 1)).unwrap();
+		router.drain();
+		assert_eq!(router.changes().routes, BTreeSet::from([node(4)]), "an unmarked route");
+		assert_eq!(router.pick(&room), Some(node(4)), "the unmarked claim is closest");
+		assert_eq!(closest(&router), vec![(node(4), Next::Via(3), false)]);
 	}
 }

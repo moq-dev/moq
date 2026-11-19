@@ -19693,6 +19693,11 @@ rec {
             ];
           }
           {
+            name = "serde_json";
+            packageId = "serde_json";
+            features = [ "raw_value" ];
+          }
+          {
             name = "workspace-hack";
             packageId = "workspace-hack";
           }

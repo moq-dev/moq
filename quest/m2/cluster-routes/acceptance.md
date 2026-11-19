@@ -38,7 +38,7 @@ router's forwarding and operation-count fixtures went with it, and
 `route/tests/multicast*.rs` covers the new one. The route fan-out quest
 those pinned was deleted
 with the old rule, its one surviving cost moved to
-[route benches](/quest/m3/route-benches.md).
+[route wakes](/quest/m4/route-wakes.md).
 
 Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit): the
 switch makes `origin::Config::update_hold` crate-private, since nothing
