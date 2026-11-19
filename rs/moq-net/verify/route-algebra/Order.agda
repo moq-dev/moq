@@ -9,7 +9,8 @@ module Order where
 import Data.Bool.Base as Boolᵇ
 open Boolᵇ using (Bool)
 import Data.Bool.Properties as Bool
-open import Data.List.Base using (List; _∷_; length)
+open import Data.List.Base using (List)
+open import Data.Maybe.Base using (Maybe; nothing; just)
 import Data.List.Relation.Binary.Lex.NonStrict as ListLex
 open import Data.List.Relation.Binary.Pointwise using (Pointwise-≡⇒≡; ≡⇒Pointwise-≡)
 import Data.Nat.Base as ℕᵇ
@@ -19,12 +20,14 @@ open import Data.Product.Base using (_×_; _,_; proj₁; proj₂)
 import Data.Product.Relation.Binary.Lex.NonStrict as ProductLex
 open import Data.Product.Relation.Binary.Pointwise.NonDependent using (≡×≡⇒≡; ≡⇒≡×≡)
 open import Data.Sum.Base using (inj₁; inj₂)
+open import Function.Base using (flip)
 open import Level using (0ℓ)
 open import Relation.Binary.Core using (Rel; _⇒_)
 open import Relation.Binary.Definitions using (Decidable)
 open import Relation.Binary.PropositionalEquality.Core using (_≡_; _≢_; refl; cong)
 import Relation.Binary.PropositionalEquality.Properties as ≡
 open import Relation.Binary.Structures using (IsDecTotalOrder)
+import Relation.Binary.Construct.Flip.EqAndOrd as Flip
 open import Relation.Nullary.Decidable.Core using (yes; no; map′)
 
 -- A decidable total order on A whose equality is _≡_.
@@ -96,10 +99,21 @@ keyed f inj OB = record
   }
   where module OB = Ordered OB
 
--- Shorter lists first, then by the given order: a list is always below
--- itself with one more element in front.
-shortlex : ∀ {A : Set} → Ordered (List A) → Ordered (List A)
-shortlex OL = keyed (λ xs → length xs , xs) (λ eq → cong proj₂ eq) (lex nat OL)
+-- Higher first.
+newest : Ordered ℕ
+newest = record { _≤_ = flip ℕᵇ._≤_ ; isDecTotalOrder = Flip.isDecTotalOrder ℕ.≤-isDecTotalOrder }
+
+-- None first, then the higher.
+runs : Ordered (Maybe ℕ)
+runs = keyed key key-injective (lex nat newest)
+  where
+  key : Maybe ℕ → ℕ × ℕ
+  key nothing  = 0 , 0
+  key (just n) = 1 , n
+
+  key-injective : ∀ {x y} → key x ≡ key y → x ≡ y
+  key-injective {nothing} {nothing} _    = refl
+  key-injective {just _}  {just _}  refl = refl
 
 ------------------------------------------------------------------------
 -- Building a lexicographic comparison one component at a time
@@ -116,6 +130,3 @@ module _ {A B : Set} (OA : Ordered A) (OB : Ordered B) where
   ... | yes eq = inj₂ (eq , k eq)
   ... | no  ne = inj₁ (a≤a' , ne)
 
--- A list is below itself with one more element in front.
-shortlex-∷ : ∀ {A : Set} (OL : Ordered (List A)) x xs → Ordered._≤_ (shortlex OL) xs (x ∷ xs)
-shortlex-∷ OL x xs = inj₁ (ℕ.n≤1+n (length xs) , ℕ.<⇒≢ (ℕ.n<1+n (length xs)))

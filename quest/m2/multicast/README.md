@@ -43,7 +43,6 @@ whose fix changes the wire,
 [route layer acceptance](/quest/m2/cluster-routes/acceptance.md) retiring
 the lite-06 mitigations. After the cut come warmth's wire
 ([cache-aware routing](/quest/m3/cache-routing/README.md)),
-[the proof binding](/quest/m3/route-proof-binding.md),
 [route health](/quest/m3/route-health/README.md), and
 [outbound federation](/quest/m3/cluster-routing/federation.md).
 
