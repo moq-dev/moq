@@ -114,9 +114,9 @@ pub struct JsonConfig {
 	#[serde_as(as = "crate::catalog::NotNull")]
 	pub schema: Option<String>,
 
-	/// The maximum bitrate of the track in bits per second, if known.
+	/// The maximum bitrate of the track in bits per second, if known, at most 2^53 - 1.
 	#[serde(default)]
-	#[serde_as(as = "crate::catalog::NotNull")]
+	#[serde_as(as = "crate::catalog::NotNull<crate::snapshot::Number>")]
 	pub bitrate: Option<u64>,
 
 	/// The largest media span the publisher hands to the transport behind a payload's timestamp,
