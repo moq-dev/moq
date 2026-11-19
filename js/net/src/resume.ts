@@ -666,10 +666,10 @@ class Reader implements ResumeSource {
 	}
 
 	/**
-	 * The reader's ranges resolved, a relative or time anchor where the first copy to place them
-	 * all placed it, whatever its failover cap: that bounds what the copy delivers, not where the
-	 * ranges resolve. Kept once placed, past that copy being let go. Pending, naming every group,
-	 * while an anchor waits on a copy to place it. A copy resolves a time start against the groups
+	 * The reader's ranges resolved, a relative or time anchor where the first copy to place it
+	 * placed it, whatever its failover cap: that bounds what the copy delivers, not where the ranges
+	 * resolve. Kept once placed, past that copy being let go. A range stays as first held, unplaced,
+	 * while an anchor of its waits on a copy to place it. A copy resolves a time start against the groups
 	 * it holds, which may place it below where the reader's window did: the window decides what is
 	 * handed out. Mirrors the Rust `Reader::window`.
 	 */
@@ -704,42 +704,41 @@ class Reader implements ResumeSource {
 	}
 
 	/**
-	 * Resolve unsettled {@link #window} anchors with a copy's resolution of the reader's ranges,
-	 * unless an anchor still waits there too. Mirrors the Rust `Reader::resolve`.
+	 * Place each unsettled {@link #window} range where a copy resolved it, on its own: one whose
+	 * anchors still wait leaves the rest placed, so a publisher names their starts. Mirrors the Rust
+	 * `Reader::resolve`.
 	 */
 	#resolve(resolved: readonly (Resolved | undefined)[]): void {
 		const resolution = this.#resolution;
 		if (!resolution) return;
-		// Once placed, relative and time starts stay pinned even while a time end settles.
-		const placed = resolution.window.pending ? undefined : resolution.window.resolved();
-		const anchored: track.Range[] = [];
-		for (const [index, range] of resolution.from.entries()) {
-			const at = resolved[index];
+		const placed: [bigint, track.Range][] = [];
+		for (const key of resolution.window.unsettled()) {
+			const range = resolution.from[Number(key)];
+			if (range === undefined) continue;
+			const at = resolved[Number(key)];
 			if (!at) {
 				// A range the copy left unresolved keeps its anchors, which only a copy can place.
 				const unplaced =
 					range.start?.relative !== undefined ||
 					(range.start?.time ?? 0n) > 0n ||
 					range.end?.relative !== undefined;
-				if (unplaced && !isEmpty(range)) return;
-				anchored.push(range);
+				// Placed as it is: nothing of it waits on a copy.
+				if (!unplaced || isEmpty(range)) placed.push([key, range]);
 				continue;
 			}
-			const previous = placed?.[index];
-			const start = previous ?? at;
-			const end = previous?.end ?? at.end;
-			if (range.end !== undefined && end === 0n) {
-				anchored.push(EMPTY);
+			if (range.end !== undefined && at.end === 0n) {
+				placed.push([key, EMPTY]);
 				continue;
 			}
 			const out: track.Range = {};
 			// One that reached back to the oldest group still does, as on a plain reader.
-			if (range.start !== undefined && start.floored) out.start = { time: start.start };
-			if (range.end !== undefined) out.end = end === undefined ? range.end : { time: end - 1n };
-			anchored.push(out);
+			if (range.start !== undefined && at.floored) out.start = { time: at.start };
+			if (range.end !== undefined) out.end = at.end === undefined ? range.end : { time: at.end - 1n };
+			// A relative end still open would leave it waiting on a first group it never gets.
+			if (out.end?.relative !== undefined && !isEmpty(out)) continue;
+			placed.push([key, out]);
 		}
-		const window = new Window(anchored, undefined, AT_KEYS);
-		if (!window.pending) resolution.window = window;
+		if (placed.length > 0) resolution.window.edit([], placed, undefined, AT_KEYS);
 	}
 
 	/** The reader's ranges, as its preferences name them. */
