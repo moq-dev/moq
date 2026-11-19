@@ -3044,14 +3044,14 @@ mod tests {
 		let route = publisher
 			.route("bcast", moq_net::origin::RouteOptions::hidden())
 			.unwrap();
-		let mut track = route
+		let track = route
 			.broadcast()
 			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
 			.unwrap();
 		route.announce().unwrap();
 		let container = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio);
 		let payload: Bytes = vec![0u8; 160 * size_of::<f32>()].into();
-		let mut write = |sequence: u64| {
+		let write = |sequence: u64| {
 			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
 			let frame = moq_mux::container::Frame {
 				timestamp: Timestamp::from_micros(sequence * 20_000).unwrap(),
@@ -3097,7 +3097,11 @@ mod tests {
 		}
 		let since = kio::clock::now();
 		assert!(matches!(consumer.read().await.unwrap(), Some(Read::Gap { .. })));
-		assert!(since.elapsed() >= max / 2, "the hole was not waited: {:?}", since.elapsed());
+		assert!(
+			since.elapsed() >= max / 2,
+			"the hole was not waited: {:?}",
+			since.elapsed()
+		);
 		for _ in 2..6 {
 			next_frame(&mut consumer)
 				.await
