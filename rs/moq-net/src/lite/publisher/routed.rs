@@ -844,6 +844,11 @@ impl Answer {
 	/// An answer on a session of its own to the origin's node, whose peer asked for
 	/// nothing yet.
 	pub(in crate::lite) fn alone(origin: origin::Consumer) -> Self {
+		Self::alone_on(origin, crate::auth::Link::new(false))
+	}
+
+	/// [`Self::alone`], on the session `auth`.
+	pub(in crate::lite) fn alone_on(origin: origin::Consumer, auth: crate::auth::Link) -> Self {
 		let port = relay::Port {
 			cost: 1,
 			priority: 0,
@@ -851,7 +856,7 @@ impl Answer {
 			role: relay::Role::Scoped(Vec::new()),
 		};
 		let main = origin.route_node().connect(lite::session_tag(), port).unwrap();
-		Self::new(origin, crate::auth::Link::new(false), Arc::new(main), false)
+		Self::new(origin, auth, Arc::new(main), false)
 	}
 
 	/// Send everything the node queued for the peer.
@@ -859,7 +864,9 @@ impl Answer {
 		let waiter = kio::Waiter::noop();
 		self.main.flush();
 		loop {
-			if let Some(msg) = self.main.try_wire() {
+			if !self.holding()
+				&& let Some(msg) = self.main.try_wire()
+			{
 				self.output(writer, msg)?;
 				continue;
 			}

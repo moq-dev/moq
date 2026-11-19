@@ -3779,6 +3779,99 @@ mod announce_test {
 		assert!(matches!(refused, Err(Error::ProtocolViolation)), "{refused:?}");
 	}
 
+	/// A lite-07 prefix wider than the grant is answered region by region: a claim above a
+	/// region is presented at the region, and nothing outside the grant is told. A grant
+	/// change is answered before the ANNOUNCE_OK of the next edit, even one that changes
+	/// nothing, mounts beneath a newly granted region included; a narrowing loses what it
+	/// no longer shows.
+	#[kio::test]
+	async fn a_lite07_prefix_wider_than_the_grant_is_answered_region_by_region() {
+		let path = |path: &str| crate::Path::new(path).unwrap();
+		let subtrees = |paths: &[&str]| -> crate::Patterns {
+			paths.iter().map(|path| crate::Pattern::subtree(path).unwrap()).collect()
+		};
+		let origin = Hop::new(1).unwrap().produce();
+		let _above = origin.announce("a", origin::RouteInfo::new()).unwrap();
+		let _ax = origin.announce("a/b/x", origin::RouteInfo::new()).unwrap();
+		let _cy = origin.announce("c/y", origin::RouteInfo::new()).unwrap();
+		let _outside = origin.announce("d/z", origin::RouteInfo::new()).unwrap();
+		let _cam = origin.announce("src/cam", origin::RouteInfo::new()).unwrap();
+		let consumer = (origin.mount("e/m", "src").unwrap())
+			.scope("", &crate::Patterns::from(crate::Pattern::all()))
+			.unwrap()
+			.consume();
+		let auth = crate::auth::Link::new(false);
+		let limit = |paths: &[&str]| crate::auth::Grant {
+			publish: crate::Patterns::default(),
+			subscribe: subtrees(paths),
+			expires: None,
+		};
+		auth.handle().authorize(&limit(&["a/b"]));
+		let mut answer = super::routed::Answer::alone_on(consumer, auth.clone());
+		let log = Log::default();
+		let mut wire = Wire {
+			writes: log.writes.clone(),
+			cursor: 0,
+			version: Version::Lite07,
+		};
+		let mut writer = Writer::new(
+			crate::transport::boxed::SendStream::new(SinkSend::new(log)),
+			Version::Lite07,
+		);
+		let waiter = kio::Waiter::noop();
+		let mut sent = |answer: &mut super::routed::Answer| {
+			answer.drain(&mut writer).unwrap();
+			assert!(writer.poll_flush(&waiter).is_ready());
+			wire.take_announces()
+		};
+		// The paths the peer is told, each with how far above it its claim is.
+		let mut decoder = lite::AnnounceDecoder::default();
+		let mut started = |msgs: &[lite::AnnounceBroadcast]| -> Vec<(String, u64)> {
+			let mut told = Vec::new();
+			for msg in msgs {
+				match msg {
+					lite::AnnounceBroadcast::Start { suffix, claim, .. } => {
+						let path = decoder.start(Some(suffix.clone())).unwrap().unwrap();
+						told.push((path.to_string(), claim.item.above));
+					}
+					lite::AnnounceBroadcast::End { id, .. } => {
+						decoder.end(*id).unwrap();
+					}
+					_ => {}
+				}
+			}
+			told.sort();
+			told
+		};
+
+		answer.request(false, Vec::new(), vec![(path(""), true)]).unwrap();
+		let first = sent(&mut answer);
+		assert_eq!(first[0], lite::AnnounceBroadcast::Ok);
+		let told = started(&first);
+		// `a` covers the region from one segment above it; `c/y` and `d/z` lie outside.
+		assert_eq!(told, [("a/b".to_string(), 1), ("a/b/x".to_string(), 0)], "{first:?}");
+		assert_eq!(first.last(), Some(&lite::AnnounceBroadcast::Synced { prefix: 0 }));
+
+		// The grant widens to `c` and the mount point `e`, unread until the next edit: the
+		// edit changes nothing, and its ANNOUNCE_OK follows both.
+		auth.handle().authorize(&limit(&["a/b", "c", "e"]));
+		answer.request(false, Vec::new(), Vec::new()).unwrap();
+		let widened = sent(&mut answer);
+		let ok = widened.iter().position(|msg| *msg == lite::AnnounceBroadcast::Ok);
+		assert_eq!(ok, Some(widened.len() - 1), "{widened:?}");
+		let told = started(&widened);
+		assert_eq!(told, [("c/y".to_string(), 0), ("e/m/cam".to_string(), 0)], "{widened:?}");
+
+		// Narrowed back, what it no longer shows is lost.
+		auth.handle().authorize(&limit(&["a/b"]));
+		answer.poll_permit(&waiter).unwrap();
+		let narrowed = sent(&mut answer);
+		let lost = narrowed
+			.iter()
+			.filter(|msg| matches!(msg, lite::AnnounceBroadcast::End { lost: true, .. }));
+		assert_eq!(lost.count(), 2, "{narrowed:?}");
+	}
+
 	/// A lite-07 edit removing a prefix and adding it again, as a peer changing its
 	/// Hidden opt-in does, tells what a mount beneath it presents again under the new
 	/// Prefix ID: both ends dropped the claim with the prefix, so nothing ends.
