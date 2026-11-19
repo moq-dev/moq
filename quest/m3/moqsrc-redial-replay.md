@@ -20,5 +20,6 @@ A wall clock hid it because the synced sink just waited.
 Recommendation: keep the instance's `Timeline` across the redial (the
 follower already keeps one per instance in `resumable`) and resume each
 rendition after the last group it pushed, so replayed groups are skipped as
-stale. Then make `rendered` in that test fail on a frame the sink holds early,
-which today it lets the clock catch up to.
+stale. Then make `rendered` in that test fail on a frame whose clock wait lies
+past the time its stamp places it (the 50ms step), which today it lets the
+clock catch up to; a wait at its due time stays valid.

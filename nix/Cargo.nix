@@ -59582,17 +59582,6 @@ rec {
             ];
           }
           {
-            name = "gstreamer";
-            packageId = "gstreamer";
-            features = [ "v1_16" ];
-          }
-          {
-            name = "gstreamer-sys";
-            packageId = "gstreamer-sys";
-            usesDefaultFeatures = false;
-            features = [ "v1_16" ];
-          }
-          {
             name = "half";
             packageId = "half";
             usesDefaultFeatures = false;
@@ -61052,17 +61041,6 @@ rec {
               "std"
               "sys_rng"
             ];
-          }
-          {
-            name = "gstreamer";
-            packageId = "gstreamer";
-            features = [ "v1_16" ];
-          }
-          {
-            name = "gstreamer-sys";
-            packageId = "gstreamer-sys";
-            usesDefaultFeatures = false;
-            features = [ "v1_16" ];
           }
           {
             name = "half";

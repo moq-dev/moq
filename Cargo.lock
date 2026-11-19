@@ -10635,8 +10635,6 @@ dependencies = [
  "futures-task",
  "futures-util",
  "getrandom 0.4.3",
- "gstreamer",
- "gstreamer-sys",
  "half",
  "hashbrown 0.17.1",
  "hex",

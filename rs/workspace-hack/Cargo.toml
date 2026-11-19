@@ -52,8 +52,6 @@ futures-sink = { version = "0.3" }
 futures-task = { version = "0.3", default-features = false, features = ["std"] }
 futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
 getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
-gstreamer = { version = "0.25", features = ["v1_16"] }
-gstreamer-sys = { version = "0.25", default-features = false, features = ["v1_16"] }
 hashbrown = { version = "0.17", default-features = false, features = ["default-hasher", "inline-more"] }
 hex = { version = "0.4" }
 hyper = { version = "1", features = ["full"] }
@@ -143,8 +141,6 @@ futures-sink = { version = "0.3" }
 futures-task = { version = "0.3", default-features = false, features = ["std"] }
 futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
 getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
-gstreamer = { version = "0.25", features = ["v1_16"] }
-gstreamer-sys = { version = "0.25", default-features = false, features = ["v1_16"] }
 hashbrown = { version = "0.17", default-features = false, features = ["default-hasher", "inline-more"] }
 hex = { version = "0.4" }
 hyper = { version = "1", features = ["full"] }
