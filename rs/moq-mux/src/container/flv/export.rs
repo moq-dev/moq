@@ -228,6 +228,9 @@ enum Read {
 	Finished,
 	/// The track itself failed. Another rendition of its kind and codec may continue it.
 	Lost,
+	/// The track ended before its codec config, so the header left it out: nothing may continue
+	/// it, or the file would carry media its header never declared.
+	Omitted,
 }
 
 impl FlvTrack {
@@ -764,7 +767,7 @@ impl<S: Stream> Export<S> {
 			let Some(config) = catalog.video.renditions.get(&track.name) else {
 				continue;
 			};
-			if track.source.reads(&self.source, &track.name, config) {
+			if track.read == Read::Omitted || track.source.reads(&self.source, &track.name, config) {
 				continue;
 			}
 			if video_flavor(config)? != track.flavor {
@@ -781,7 +784,7 @@ impl<S: Stream> Export<S> {
 			let Some(config) = catalog.audio.renditions.get(&track.name) else {
 				continue;
 			};
-			if track.source.reads(&self.source, &track.name, config) {
+			if track.read == Read::Omitted || track.source.reads(&self.source, &track.name, config) {
 				continue;
 			}
 			if audio_flavor(config)? != track.flavor {
@@ -929,8 +932,9 @@ impl<S: Stream> Export<S> {
 			}
 		}
 		for track in self.video.iter_mut().chain(&mut self.audio) {
-			if declared(track) {
-				track.announced = track.config_record()?;
+			match declared(track) {
+				true => track.announced = track.config_record()?,
+				false => track.read = Read::Omitted,
 			}
 		}
 		// A group decodes its first `reorder` frames a millisecond apart before its earliest

@@ -1903,7 +1903,7 @@ async fn a_continued_track_wakes_the_export() {
 }
 
 /// A video that fails before supplying its codec configuration leaves the header to the audio,
-/// which plays on without it.
+/// which plays on without it, and no replacement can add the video the header left out.
 #[tokio::test(start_paused = true)]
 async fn a_track_failing_before_its_config_leaves_the_header_to_the_rest() {
 	use hang::catalog::{AAC, AudioConfig, Container, H264, VideoConfig};
@@ -1956,10 +1956,40 @@ async fn a_track_failing_before_its_config_leaves_the_header_to_the_rest() {
 
 	video.abort(moq_net::Error::Transport("camera lost".into()));
 	audio.write(frame(20)).unwrap();
+	assert!(drain_until_idle(&mut exporter, &mut exported).await.is_none());
+
+	// The header declared no video, so a compatible replacement can't add it.
+	let replacement = producer.create_track(producer.unique_name(".avc1"), timed()).unwrap();
+	let mut config = VideoConfig::new(H264 {
+		profile: 0x42,
+		constraints: 0xc0,
+		level: 0x1f,
+		inline: false,
+	});
+	config.container = Container::Legacy;
+	config.description = Some(Bytes::from(avcc()));
+	catalog
+		.modify()
+		.unwrap()
+		.video
+		.renditions
+		.insert(replacement.name().to_string(), config);
+	let mut replacement = crate::container::Producer::new(replacement, legacy());
+	replacement
+		.write(crate::container::Frame {
+			timestamp: Timestamp::from_millis(40).unwrap(),
+			duration: None,
+			payload: Bytes::from_static(&[0, 0, 0, 1, 0x65]),
+			keyframe: true,
+		})
+		.unwrap();
+	assert!(drain_until_idle(&mut exporter, &mut exported).await.is_none());
+
 	let _finished = audio.finish().unwrap();
 	catalog.finish().unwrap();
 	let end = drain_until_idle(&mut exporter, &mut exported).await;
 	assert!(matches!(end, Some(Ok(()))), "{end:?}");
+	assert_eq!(exported[4], 0x04, "the header declares only audio");
 	let tags = parse_tags(&exported);
 	let audio = tags
 		.iter()

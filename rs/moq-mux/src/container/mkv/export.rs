@@ -116,6 +116,9 @@ enum Read {
 	Finished,
 	/// The track itself failed. A spare of its kind may continue it.
 	Lost,
+	/// The track ended before its codec config, so the header left it out: nothing may continue
+	/// it, or the file would carry a track number its header never declared.
+	Omitted,
 }
 
 impl MkvTrack {
@@ -756,7 +759,10 @@ impl<S: Stream> Export<S> {
 			self.spares = spares;
 			self.replaced.retain(|name| active.contains_key(name));
 			for (name, config) in &catalog.audio.renditions {
-				if let Some((key, track)) = self.tracks.iter_mut().find(|(_, track)| track.rendition == *name)
+				if let Some((key, track)) = self
+					.tracks
+					.iter_mut()
+					.find(|(_, track)| track.rendition == *name && track.read != Read::Omitted)
 					&& !track.source.reads(&self.source, name, config)
 					&& let Some(source) = ExportSource::for_audio(&self.source, name, config, self.delay)?
 				{
@@ -764,7 +770,11 @@ impl<S: Stream> Export<S> {
 				}
 			}
 			for (name, config) in &catalog.video.renditions {
-				if let Some((key, track)) = self.tracks.iter_mut().find(|(_, track)| track.rendition == *name) {
+				if let Some((key, track)) = self
+					.tracks
+					.iter_mut()
+					.find(|(_, track)| track.rendition == *name && track.read != Read::Omitted)
+				{
 					if !track.source.reads(&self.source, name, config)
 						&& let Some(source) = ExportSource::for_video(&self.source, name, config, self.delay)?
 					{
@@ -869,11 +879,11 @@ impl<S: Stream> Export<S> {
 		let video = catalog.video.renditions.keys().map(|name| (name, TrackKind::Video));
 		let audio = catalog.audio.renditions.keys().map(|name| (name, TrackKind::Audio));
 		for (name, kind) in video.chain(audio) {
-			if self
-				.tracks
-				.get(name)
-				.is_some_and(|track| track.finished() && !declarable(catalog, name, track))
+			if let Some(track) = self.tracks.get_mut(name)
+				&& track.finished()
+				&& !declarable(catalog, name, track)
 			{
+				track.read = Read::Omitted;
 				continue;
 			}
 			let track = self.tracks.get_mut(name).ok_or_else(|| match kind {

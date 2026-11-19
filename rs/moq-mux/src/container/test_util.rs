@@ -72,7 +72,7 @@ impl Live {
 		Self::new(".avc3", Self::insert_avc3)
 	}
 
-	fn insert_avc3(catalog: &mut crate::catalog::Producer, name: String) {
+	pub(crate) fn insert_avc3(catalog: &mut crate::catalog::Producer, name: String) {
 		let mut config = VideoConfig::new(H264 {
 			profile: 0x42,
 			constraints: 0xc0,

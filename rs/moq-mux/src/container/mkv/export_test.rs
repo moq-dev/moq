@@ -1059,23 +1059,32 @@ async fn a_continued_track_wakes_the_export() {
 /// out with the audio that still plays.
 #[tokio::test(start_paused = true)]
 async fn a_track_failing_before_its_config_leaves_the_header_to_the_rest() {
-	let mut live = Live::avc3();
-	let mut audio = add_aac(&mut live);
-	audio.write(raw_frame(0, b"aud", true)).unwrap();
-	let mut exporter = crate::container::mkv::Export::new(live.source().await, live.catalog_stream().await);
+	let mut config = hang::catalog::AudioConfig::new(hang::catalog::AAC { profile: 2 }, 44100, 2);
+	config.description = Some(Bytes::from_static(&[0x12, 0x10]));
+	let mut live = Live::audio(config);
+	let video = live.add_track(".avc3", Live::insert_avc3);
+	live.track.write(raw_frame(0, b"aud", true)).unwrap();
+	let mut exporter = crate::container::mkv::Export::new(live.source().await, live.catalog_stream().await)
+		.with_fragment_duration(std::time::Duration::ZERO);
 	assert!(
 		drain_now(&mut exporter).await.unwrap().is_empty(),
 		"the header waits on the video"
 	);
-	live.track.abort(moq_net::Error::Transport("camera lost".into()));
-	audio.write(raw_frame(20_000, b"aud", true)).unwrap();
-	let _finished = audio.finish().unwrap();
-	live.catalog.finish().unwrap();
-	let mut out = Vec::new();
-	while let Some(chunk) = exporter.next().await.unwrap() {
-		out.extend_from_slice(&chunk);
-	}
-	assert_eq!(blocks(out).len(), 2, "the audio went out");
+	video.abort(moq_net::Error::Transport("camera lost".into()));
+	live.track.write(raw_frame(20_000, b"aud", true)).unwrap();
+	let out = drain_now(&mut exporter).await.unwrap();
+	assert!(
+		!blocks(out).is_empty(),
+		"the header went out without the video, then the audio"
+	);
+
+	// The header declared no video track, so a replacement can't continue the one it left out.
+	let replacement = live.add_track(".avc3", Live::insert_avc3);
+	let err = drain_now(&mut exporter).await.unwrap_err();
+	assert!(
+		matches!(&err, crate::Error::Mkv(crate::container::mkv::Error::HeaderAddedTrack(added)) if added == replacement.name()),
+		"{err:?}"
+	);
 }
 
 /// A rendition that joins after the header waits only while a declared track of its kind could
