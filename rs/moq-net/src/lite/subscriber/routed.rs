@@ -172,6 +172,10 @@ pub(in crate::lite) struct Routed {
 	wants: BTreeMap<Path, Option<crate::model::Snapshot>>,
 	/// The prefixes asked of the peer.
 	asked: BTreeMap<u64, Asked>,
+	/// The grant changed since the last edit: the next is sent even when it changes
+	/// nothing, since its ANNOUNCE_OK follows what the change shows under a wider prefix,
+	/// and the readers wait for it.
+	regranted: bool,
 	next_prefix: u64,
 	/// The edits the peer has yet to answer, oldest first.
 	edits: VecDeque<Editing>,
@@ -239,8 +243,9 @@ fn widest(set: &BTreeSet<Path>) -> BTreeSet<Path> {
 /// grant's `regions`, or all of them without a confined grant, give way to the longest
 /// prefix they share, the largest such group first, and then a prefix alone in its
 /// region gives way to the region. Either lies inside the region, so the session asks
-/// for more than it wants and never for more than it is granted. Regions that are too
-/// many on their own lose the last of them.
+/// for more than it wants and never for more than it is granted. Regions too many on
+/// their own give way to the longest prefix any of them share, up to the root: the peer
+/// answers a prefix wider than the grant region by region, so none goes unasked.
 fn coarsen(mut set: BTreeSet<Path>, regions: &BTreeSet<Path>) -> BTreeSet<Path> {
 	while !lite::request_fits(set.iter(), lite::Version::Lite07) {
 		// Each prefix files under the widest region holding it.
@@ -265,19 +270,27 @@ fn coarsen(mut set: BTreeSet<Path>, regions: &BTreeSet<Path>) -> BTreeSet<Path> 
 				.max_by_key(|(_, group)| bytes(group))
 				.map(|(region, _)| region.clone())
 		};
-		match shared.or_else(region) {
-			Some(wider) => {
-				set.insert(wider);
-				set = widest(&set);
-			}
-			None => {
-				// Nothing is left to widen: the grant's regions alone pass one request.
-				let dropped = set.pop_last();
-				tracing::warn!(?dropped, "a grant too wide for one ANNOUNCE_REQUEST goes unasked");
-			}
-		}
+		// Nothing is left to widen within a region: the regions alone pass one request.
+		let wider = shared.or_else(region).unwrap_or_else(|| deepest_shared(&set));
+		set.insert(wider);
+		set = widest(&set);
 	}
 	set
+}
+
+/// The longest prefix at least two of `set` lie within, the root at the least.
+fn deepest_shared(set: &BTreeSet<Path>) -> Path {
+	let mut counts: BTreeMap<Path, usize> = BTreeMap::new();
+	for prefix in set {
+		for above in route::ancestors(prefix).filter(|above| above != prefix) {
+			*counts.entry(above).or_default() += 1;
+		}
+	}
+	(counts.into_iter())
+		.filter(|(_, count)| *count > 1)
+		.map(|(above, _)| above)
+		.max_by_key(|above| above.parts().count())
+		.unwrap_or_default()
 }
 
 impl Routed {
@@ -328,6 +341,7 @@ impl Routed {
 			origin: subscriber.origin.clone(),
 			wants: BTreeMap::new(),
 			asked: BTreeMap::new(),
+			regranted: false,
 			next_prefix: 0,
 			edits: VecDeque::new(),
 			finished: false,
@@ -391,7 +405,8 @@ impl Routed {
 			remove: asking.difference(&wanted).cloned().collect(),
 			add: wanted.difference(&asking).cloned().collect(),
 		};
-		if edit.remove.is_empty() && edit.add.is_empty() {
+		let regranted = std::mem::take(&mut self.regranted);
+		if edit.remove.is_empty() && edit.add.is_empty() && !regranted {
 			return;
 		}
 		// Refused only for a set with one prefix inside another, which `asks` never builds.
@@ -780,6 +795,14 @@ impl Routed {
 			};
 		}
 		let same = permit.same_limit(&self.permit);
+		// A grant change shows more or less of the peer's answer to a prefix wider than the
+		// grant: the readers wait again, for the answer to an edit, which follows it.
+		if permit.granted_regions() != self.permit.granted_regions() && !self.stream.asking().is_empty() {
+			self.regranted = true;
+			for (want, snapshot) in &mut self.wants {
+				snapshot.get_or_insert_with(|| self.origin.snapshot(want.clone()));
+			}
+		}
 		self.permit = permit.clone();
 		self.reask();
 		if same {

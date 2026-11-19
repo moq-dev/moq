@@ -615,12 +615,32 @@ impl Permit {
 	/// request the peer's floors can certify.
 	#[cfg(feature = "async")]
 	pub(crate) fn granted_regions(&self) -> Option<Vec<crate::Path>> {
-		let granted = self.granted.as_ref()?;
-		let everything = moq_pattern::Pattern::subtree("").ok()?;
-		if granted.contains(&everything) {
-			return None;
-		}
-		Some(crate::model::interest_prefixes(granted))
+		confining(self.granted.as_ref()?)
+	}
+
+	/// The prefixes the grant and the limit together confine this direction to, or `None`
+	/// while neither does: every path both allow lies within one of them.
+	#[cfg(feature = "async")]
+	pub(crate) fn regions(&self) -> Option<Vec<crate::Path>> {
+		let granted = self.granted.as_ref().and_then(confining);
+		let limit = self.limit.as_ref().and_then(confining);
+		let (granted, limit) = match (granted, limit) {
+			(None, None) => return None,
+			(Some(one), None) | (None, Some(one)) => return Some(one),
+			(Some(granted), Some(limit)) => (granted, limit),
+		};
+		// Of two regions one lies within the other, or they share nothing.
+		let mut both: Vec<crate::Path> = (granted.iter())
+			.flat_map(|a| limit.iter().map(move |b| (a, b)))
+			.filter_map(|(a, b)| match () {
+				_ if a.has_prefix(b) => Some(a.clone()),
+				_ if b.has_prefix(a) => Some(b.clone()),
+				_ => None,
+			})
+			.collect();
+		both.sort();
+		both.dedup();
+		Some(both)
 	}
 
 	/// Whether both set the same limit on the peer, whatever either was granted.
@@ -638,6 +658,16 @@ impl Permit {
 			(Some(this), Some(other)) => this.covers(other),
 		};
 		covers(&self.granted, &other.granted) && covers(&self.limit, &other.limit)
+	}
+}
+
+/// The prefixes `patterns` confine paths to, or `None` when they allow every path.
+#[cfg(feature = "async")]
+fn confining(patterns: &Patterns) -> Option<Vec<crate::Path>> {
+	let everything = moq_pattern::Pattern::subtree("").ok()?;
+	match patterns.contains(&everything) {
+		true => None,
+		false => Some(crate::model::interest_prefixes(patterns)),
 	}
 }
 
