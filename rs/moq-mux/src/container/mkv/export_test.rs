@@ -935,6 +935,117 @@ async fn a_moved_rendition_continues_on_its_new_track() {
 	}
 }
 
+/// Add a Legacy AAC rendition to `live`.
+fn add_aac(live: &mut Live) -> crate::container::Producer<crate::catalog::hang::Container> {
+	live.add_track(".aac", |catalog, name| {
+		let mut config = hang::catalog::AudioConfig::new(hang::catalog::AAC { profile: 2 }, 44100, 2);
+		config.description = Some(Bytes::from_static(&[0x12, 0x10]));
+		config.container = hang::catalog::Container::Legacy;
+		catalog.modify().unwrap().audio.renditions.insert(name, config);
+	})
+}
+
+/// The `(track number, payload)` of every block in `mkv`.
+fn blocks(mkv: Vec<u8>) -> Vec<(u64, Vec<u8>)> {
+	WebmIterator::new(&mut Cursor::new(mkv), &[])
+		.filter_map(|tag| match tag {
+			Ok(MatroskaSpec::SimpleBlock(data)) => {
+				let block = SimpleBlock::try_from(&data).unwrap();
+				Some((block.track, block.read_frame_data().unwrap()[0].data.to_vec()))
+			}
+			_ => None,
+		})
+		.collect()
+}
+
+/// A capture that loses its microphone fails the audio track, keeps it listed while it drains,
+/// and lists the reopened one under a new name, either before or after a reader sees the failure.
+/// The replacement continues under the audio track number the header declared while the video
+/// plays on.
+#[tokio::test(start_paused = true)]
+async fn a_failed_rendition_continues_on_its_replacement() {
+	for listed_first in [false, true] {
+		let mut live = Live::avc3();
+		let mut audio = add_aac(&mut live);
+		let failed = audio.name().to_string();
+		live.track.write(video_frame(0, true)).unwrap();
+		audio.write(raw_frame(0, b"old", true)).unwrap();
+		let mut exporter = crate::container::mkv::Export::new(live.source().await, live.catalog_stream().await)
+			.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(5)));
+		let mut out = drain_now(&mut exporter).await.unwrap();
+
+		let mut replacement = None;
+		if listed_first {
+			replacement = Some(add_aac(&mut live));
+			out.extend(drain_now(&mut exporter).await.unwrap());
+		}
+		audio.write(raw_frame(20_000, b"old", true)).unwrap();
+		out.extend(drain_now(&mut exporter).await.unwrap());
+		audio.abort(moq_net::Error::Transport("audio device lost".into()));
+		live.track.write(video_frame(100_000, true)).unwrap();
+		out.extend(drain_now(&mut exporter).await.unwrap());
+		let mut replacement = replacement.unwrap_or_else(|| add_aac(&mut live));
+		out.extend(drain_now(&mut exporter).await.unwrap());
+		for ms in [200, 220, 240] {
+			replacement.write(raw_frame(ms * 1000, b"new", true)).unwrap();
+			out.extend(drain_now(&mut exporter).await.unwrap());
+		}
+		live.catalog.modify().unwrap().audio.renditions.remove(&failed);
+		live.track.write(video_frame(300_000, true)).unwrap();
+		out.extend(drain_now(&mut exporter).await.unwrap());
+		live.track.end_with(None).unwrap();
+		let _finished = replacement.finish().unwrap();
+		live.catalog.finish().unwrap();
+		while let Some(chunk) = exporter.next().await.unwrap() {
+			out.extend_from_slice(&chunk);
+		}
+
+		let blocks = blocks(out);
+		let audio: Vec<_> = blocks
+			.iter()
+			.filter(|(_, payload)| payload.as_slice() == b"old" || payload.as_slice() == b"new")
+			.collect();
+		let payloads: Vec<&[u8]> = audio.iter().map(|(_, payload)| payload.as_slice()).collect();
+		assert_eq!(payloads, [&b"old"[..], b"old", b"new", b"new", b"new"], "listed first: {listed_first}");
+		let numbers: std::collections::HashSet<u64> = audio.iter().map(|(number, _)| *number).collect();
+		assert_eq!(numbers.len(), 1, "the replacement writes under the declared track");
+		assert_eq!(blocks.len(), audio.len() + 3, "the video played on");
+	}
+}
+
+/// A rendition that joins after the header waits only while a declared track of its kind could
+/// still fail: once that one ends cleanly, it is a track the header never declared.
+#[tokio::test(start_paused = true)]
+async fn a_spare_rendition_fails_once_its_kind_ends_cleanly() {
+	let mut live = Live::avc3();
+	let mut audio = add_aac(&mut live);
+	live.track.write(video_frame(0, true)).unwrap();
+	audio.write(raw_frame(0, b"old", true)).unwrap();
+	let mut exporter = crate::container::mkv::Export::new(live.source().await, live.catalog_stream().await);
+	drain_now(&mut exporter).await.unwrap();
+
+	let spare = add_aac(&mut live);
+	drain_now(&mut exporter).await.unwrap();
+	let _finished = audio.finish().unwrap();
+	let err = drain_now(&mut exporter).await.unwrap_err();
+	assert!(
+		matches!(&err, crate::Error::Mkv(crate::container::mkv::Error::HeaderAddedTrack(added)) if added == spare.name()),
+		"{err:?}"
+	);
+}
+
+/// With nothing else reading, a failed track still fails the export.
+#[tokio::test(start_paused = true)]
+async fn the_last_failed_track_fails_the_export() {
+	let mut live = Live::avc3();
+	live.track.write(video_frame(0, true)).unwrap();
+	let mut exporter = crate::container::mkv::Export::new(live.source().await, live.catalog_stream().await);
+	drain_now(&mut exporter).await.unwrap();
+	live.track.abort(moq_net::Error::Transport("camera lost".into()));
+	let err = drain_now(&mut exporter).await.unwrap_err();
+	assert!(err.to_string().contains("camera lost"), "{err:?}");
+}
+
 /// The header's TrackEntry carries the rendition's first avcC, which a move to a track
 /// described by another SPS cannot change mid-file. It fails before writing any of that track.
 #[tokio::test(start_paused = true)]
