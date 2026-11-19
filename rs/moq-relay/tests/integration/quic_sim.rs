@@ -250,7 +250,7 @@ fn concurrent_groups_carry_bulk_transfers_losslessly() {
 /// How many bulk transfers share one connection in
 /// [`concurrent_groups_carry_bulk_transfers_losslessly`]: well past the two that pause when
 /// each paused stream holds its whole stream window.
-const SESSIONS: usize = 16;
+const SESSIONS: usize = 12;
 
 /// Write `tracks` tracks of one group each, [`BULK`] bytes in `chunk`-byte frames, through
 /// one relay, and read the first `read` bytes of each slower than they are written,

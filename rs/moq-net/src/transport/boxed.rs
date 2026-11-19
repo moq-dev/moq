@@ -167,7 +167,8 @@ const PAUSED: u64 = 64;
 /// How ingest paces a stream under its session's receive windows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Pacing {
-	/// How far the group's writer reads ahead of its fastest reader before pausing.
+	/// How far the group's writer reads ahead of its fastest reader before pausing, on a
+	/// transport that cannot shape credit, whose paused streams hold their stream credit.
 	window: u64,
 	/// The stream's full receive credit.
 	stream: u64,
@@ -494,7 +495,8 @@ impl RecvStream {
 
 	/// How far ingest reads this stream ahead of its group's fastest reader before pausing:
 	/// the credit the stream may hold, so a paced hop buffers about what its peer can have
-	/// in flight on it.
+	/// in flight on it, and on a transport that shapes credit a stream window more, which a
+	/// paused stream no longer holds in the transport.
 	pub(crate) fn window(&self) -> u64 {
 		self.0.window()
 	}
@@ -890,6 +892,8 @@ impl<T: poll::RecvStream + Send + Sync> ErasedRecv for Budgeted<T> {
 		let pacing = self.pacing();
 		match self.unshaped || pacing.allowance == 0 {
 			true => pacing.window,
+			// A shaped stream holds a stream window less once paused, so its group holds it
+			// instead, and a paced reader has as much buffered ahead as before.
 			false => (pacing.window + pacing.stream).min(crate::model::pace::AHEAD),
 		}
 	}
@@ -1272,6 +1276,7 @@ mod test {
 		};
 
 		let (mut stream, windows) = shaping(0);
+		assert_eq!(stream.window(), 2 * STREAM, "its group holds what the transport does not");
 		stream.shape(None, 0);
 		assert!(windows.lock().unwrap().is_empty(), "already at its full credit");
 		stream.shape(Some(10_000), 0);
@@ -1320,6 +1325,17 @@ mod test {
 
 		let session = Session::new(SinkSession::accepted_bi(gate.consume()));
 		assert_eq!(accept(&session).window(), AHEAD);
+
+		// One that shares a window paces at a stream window more until its transport turns
+		// out unable to shape credit, so its paused streams hold the stream window instead.
+		let session = Session::new(
+			SinkSession::accepted_bi(gate.consume())
+				.with_receive_window(ReceiveWindow::new(std::num::NonZeroU64::new(1 << 20), 1 << 16)),
+		);
+		let mut stream = accept(&session);
+		assert_eq!(stream.window(), 2 << 16);
+		stream.shape(Some(0), 0);
+		assert_eq!(stream.window(), 1 << 16);
 	}
 
 	fn open_group(session: &Session, options: SendOptions<'_, Group>) -> SendStream {

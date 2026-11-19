@@ -8,7 +8,9 @@
 //!
 //! Ingest's window is the stream receive credit its transport grants, capped at [`AHEAD`]
 //! (see [`window`]), so a hop holds about what its upstream peer can have in flight on
-//! that stream. A local writer, which has no transport, uses [`AHEAD`] itself.
+//! that stream; twice that on a transport that shapes a paced stream's credit to the room
+//! left, which then buffers in the group what the transport no longer does. A local
+//! writer, which has no transport, uses [`AHEAD`] itself.
 //!
 //! Progress is in bytes on one scale per group copy: each frame entering the copy's log
 //! ends where the frames before it, payload and slot, add up to. A frame larger than the
