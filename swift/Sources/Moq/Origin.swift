@@ -216,7 +216,7 @@ public final class OriginConsumer: Sendable {
     }
 
     /// List the paths under a literal prefix matching an optional pattern filter, as each
-    /// becomes present, absent, or offline, or changes availability. A new publisher instance keeps its path present, so use
+    /// becomes present or absent. A new publisher instance keeps its path present, so use
     /// `follow` to see it. Paths with a segment starting with `.` below the prefix are left
     /// out unless `hidden`.
     public func announced(prefix: String = "", filter: String? = nil, hidden: Bool = false) throws -> AnnounceConsumer {
@@ -239,7 +239,7 @@ public final class OriginConsumer: Sendable {
     }
 }
 
-/// A listing of paths as each becomes present, absent, or offline, or changes availability.
+/// A listing of paths as each becomes present or absent.
 /// Iterate directly:
 /// `for try await event in announced { ... }`.
 /// The sequence ends when the origin closes; cancelling the consuming task

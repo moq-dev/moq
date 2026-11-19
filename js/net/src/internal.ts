@@ -548,6 +548,8 @@ export interface ResumeSource {
 	fork(options?: Subscription): Subscriber;
 	/** A fresh reader for a group still cached by one of this reader's copies. */
 	cachedGroup(key: bigint, from?: number): GroupConsumer | undefined;
+	/** As {@link cachedGroup} from its first frame, judged by the budget of the copy it comes from. */
+	judgedGroup(key: bigint): GroupConsumer | undefined;
 	/** Let go of every copy. */
 	close(abort?: Error): void;
 }
@@ -876,6 +878,11 @@ export const hooks: {
 	staleAt: (subscriber: Subscriber, key: bigint) => Expiry;
 	/** A group the subscriber's track still caches, as a fresh read handle. */
 	cachedGroup: (subscriber: Subscriber, key: bigint, from?: number) => GroupConsumer | undefined;
+	/**
+	 * As {@link cachedGroup} from its first frame, the reader given up once the subscription's
+	 * budget gives up on it, judged by the route copy it is read from when routed.
+	 */
+	judgedGroup: (subscriber: Subscriber, key: bigint) => GroupConsumer | undefined;
 	/** Whether {@link cachedGroup} would find the group, without making a read handle. */
 	holdsGroup: (subscriber: Subscriber, key: bigint) => boolean;
 	/**
@@ -979,6 +986,8 @@ export const hooks: {
 	releaseGroupReader: (group: GroupConsumer, abort?: Error) => void;
 	/** Settles once a group reader read or released everything it holds, its {@link GroupConsumer.done}. Assigned by `group.ts`. */
 	groupDone: (group: GroupConsumer) => GetPromise<Error | null>;
+	/** Settles once the reader releases the group (`close` or an abort), however far it read. */
+	groupReleased: (group: GroupConsumer) => Promise<void>;
 	/** Whether a group reader still reads the copy it was mirrored from, not one its recovery moved it to. */
 	readsMirrored: (group: GroupConsumer) => boolean;
 	/**
@@ -1004,11 +1013,6 @@ export const hooks: {
 	expireGroup: (group: GroupConsumer, expiry: Expiry) => void;
 	/** The failure that ends a group's reader, as its `closed` would settle, without building that handle. */
 	groupFailed: (group: GroupConsumer) => Error | undefined;
-	/**
-	 * Whether the subscription's budget gave the group up, rather than its copy failing or the
-	 * cache evicting it. Mirrors the Rust crate-private `group::Consumer::is_expired`.
-	 */
-	groupExpired: (group: GroupConsumer) => boolean;
 	/**
 	 * Carry a group across its logical track's route changes. Attached before the group is handed
 	 * out, so its `closed` never settles on a failure the recovery continues past.
@@ -1258,6 +1262,9 @@ export const hooks: {
 	cachedGroup: () => {
 		throw new Error("track.ts not loaded");
 	},
+	judgedGroup: () => {
+		throw new Error("track.ts not loaded");
+	},
 	holdsGroup: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -1378,6 +1385,9 @@ export const hooks: {
 	releaseGroupReader: () => {
 		throw new Error("group.ts not loaded");
 	},
+	groupReleased: () => {
+		throw new Error("group.ts not loaded");
+	},
 	groupDone: () => {
 		throw new Error("group.ts not loaded");
 	},
@@ -1412,9 +1422,6 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	groupFailed: () => {
-		throw new Error("group.ts not loaded");
-	},
-	groupExpired: () => {
 		throw new Error("group.ts not loaded");
 	},
 	recoverGroup: () => {

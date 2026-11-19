@@ -59,8 +59,7 @@ Moq.connect("https://relay.example.com", ClientConfig(tls = ClientTls(roots = li
         // each new run, or null once it goes offline.
         val announce = when (event) {
             is AnnounceEventPresent -> event.announce
-            // Absent, offline, or a change in availability.
-            else -> return@collect
+            is AnnounceEventAbsent -> return@collect
         }
         // Prefixes stay origin-relative; captures is a list of wildcard matches, empty without wildcards.
         println(announce.captures)

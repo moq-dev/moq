@@ -443,7 +443,7 @@ describe("Backpressure", () => {
 	it("counts a frame still decoding where its output lands", () => {
 		const gate = new Backpressure(1000, true, Duration.millis(2000));
 		gate.observe(ms(0), false);
-		gate.decoded(ms(520), ms(500));
+		gate.decoded(ms(520), ms(20));
 		gate.inserted(ms(480), ms(500));
 		const signal = new AbortController().signal;
 		expect(Bun.peek.status(gate.wait(ms(520), signal))).toBe("fulfilled");
@@ -580,7 +580,7 @@ describe("AudioBuffer steering", () => {
 		const { buffer, sent } = fake(100);
 		try {
 			buffer.received(Duration.millis(1000));
-			buffer.decoded(ms(1020), ms(1014));
+			buffer.decoded(ms(1020), ms(6));
 			buffer.received(Duration.millis(1040));
 			expect(sent.slice(1)).toEqual([
 				{ type: "received", end: 1_000_000 },
@@ -826,6 +826,31 @@ describe("AudioBuffer steering", () => {
 			context.sounding = 1.17;
 			state(ms(5050), true, 0, 1.2);
 			expect(buffer.timestamp.peek()).toBe(ms(5050));
+		} finally {
+			buffer.close();
+			clock.close();
+		}
+	});
+
+	// Opus output lands on the ring a pre-skip before its frame timestamp, at its presentation time, so
+	// the clock maps onto the ring unshifted and the playhead reports the ring's position: only a frame
+	// timestamp, as `received` takes, moves back by the pre-skip.
+	it("plays and reports the ring at presentation time under a pre-skip", () => {
+		const clock = started();
+		const { buffer, sent, state, context } = fake(100, {
+			clock: { position: () => 5000, out: { reference: new Signal<number | undefined>(0) } },
+		});
+		try {
+			buffer.decoded(ms(5020), ms(6.5));
+			buffer.received(Duration.millis(5020));
+			context.currentTime = 1;
+			context.sounding = 1;
+			state(ms(5000), false, 0, 1);
+			expect(sent.filter((msg) => msg.type === "clock")).toEqual([
+				{ type: "clock", timestamp: 5_000_000, time: 1 },
+			]);
+			expect(sent).toContainEqual({ type: "received", end: 5_013_500 });
+			expect(buffer.timestamp.peek()).toBe(ms(5000));
 		} finally {
 			buffer.close();
 			clock.close();

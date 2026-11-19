@@ -14,9 +14,9 @@ Recurring child of the [vendor sync](/quest/m3/vendor-sync/README.md), which
 says how each run works and recurs. Decided 2026-10-27 (maintainer): the hard
 fork never merges upstream, so checking upstream is recurring work.
 Decided 2026-11-18 (maintainer, /quest-plan): compatibility with quinn's API
-is not a goal, so moq-quic's API changes freely
-([quic-streams](/quest/m2/outcome-enums/quic-streams.md)), and a fix is
-ported to the fork's shape.
+is not a goal, so moq-quic's API changes freely (as
+[moq-dev/moq#9152](https://github.com/moq-dev/moq/pull/9152) did to its
+streams), and a fix is ported to the fork's shape.
 
 Last checked (2026-11-03): quinn `main` through
 [`aea1e538`](https://github.com/quinn-rs/quinn/commit/aea1e5384927258887119fa1dc4fe3f23f1182c7)

@@ -410,6 +410,11 @@ type Span = {
 	looking?: Lookup;
 	/** A time start the groups held can't place yet: the span reads only the groups from that time until it can. */
 	waiting: boolean;
+	/**
+	 * A relative start counting back past every group held asks no miss below this: the oldest group
+	 * held when it was placed, since which of the older ones it reaches is unknown.
+	 */
+	reach?: bigint;
 };
 
 /**
@@ -467,13 +472,6 @@ export class Window {
 	#named: { start: bigint; count: number }[] = [];
 	#unnamed = 0;
 	/**
-	 * The spans counting back past every group held, which may ask a miss from the lowest group held
-	 * since they were placed, and that group. They reached every group held since, so an older group
-	 * arriving widens what they ask, and eviction narrows nothing.
-	 */
-	#unfloored: number[] = [];
-	#reached: bigint | undefined;
-	/**
 	 * The subscriber's Min Age, which reaches a live join back from the live edge. Only a pending
 	 * window reads it, when it places its ranges, so a join already started stays where it started.
 	 */
@@ -519,16 +517,7 @@ export class Window {
 			for (const index of reaching) this.#placeRange(index, latest, holdings);
 			for (let position = placed; position < this.#spans.length; position++) moved.push(position);
 		}
-		let shrank = this.#waiting.size > 0 && this.#startWaiting(holdings, moved);
-		// A span counting back past every group held asks misses from the lowest group held since it
-		// was placed, so it asks more once an older group arrives, and evicting the oldest costs nothing.
-		const oldest = this.#unfloored.length > 0 ? holdings.nextStart(0n) : undefined;
-		if (oldest !== undefined) {
-			// With no group held, they asked from where they start.
-			if (this.#reached === undefined) shrank = true;
-			else if (oldest < this.#reached) moved.push(...this.#unfloored);
-			this.#reached = min(this.#reached ?? oldest, oldest);
-		}
+		const shrank = this.#waiting.size > 0 && this.#startWaiting(holdings, moved);
 		if (shrank) this.#rebuild();
 		else if (moved.length === 0) return false;
 		else this.#grow(moved);
@@ -637,8 +626,8 @@ export class Window {
 
 	/**
 	 * The part of {@link runs} a miss may ask a fill for: all of it but what starts before a time
-	 * start that fell before every group held, or below the lowest group held since a relative start
-	 * counted back past them all. Mirrors the Rust `Window::missable`.
+	 * start that fell before every group held, or below the oldest group held when a relative start
+	 * counting back past them all was placed. Mirrors the Rust `Window::missable`.
 	 */
 	missable(from = 0n, end = UNBOUNDED): Run[] {
 		if (from >= end) return [];
@@ -717,16 +706,15 @@ export class Window {
 	}
 
 	/**
-	 * What rebuilding from the spans would read, may ask a miss for, and name as its start, given the
-	 * lowest group held since they were placed, for a test to check the runs grown span by span
-	 * against.
+	 * What rebuilding from the spans would read, may ask a miss for, and name as its start, for a test
+	 * to check the runs grown span by span against.
 	 */
-	fresh(reached: bigint | undefined): { runs: Run[]; missable: Run[]; named: bigint | undefined } {
+	fresh(): { runs: Run[]; missable: Run[]; named: bigint | undefined } {
 		const groups: Run[] = [];
 		const missable: Run[] = [];
 		let named: bigint | undefined;
 		for (const span of this.#spans) {
-			const [reads, asks] = spanReads(span, reached);
+			const [reads, asks] = spanReads(span);
 			if (reads) groups.push(reads);
 			if (asks) missable.push(asks);
 			if (span.floored) named = min(named ?? span.start, span.start);
@@ -757,8 +745,6 @@ export class Window {
 		this.#reaching = [];
 		this.#named = [];
 		this.#unnamed = 0;
-		this.#unfloored = [];
-		this.#reached = holdings.nextStart(0n);
 		for (let index = 0; index < this.ranges.length; index++) {
 			if (!isEmpty(this.ranges[index])) this.#placeRange(index, latest, holdings);
 		}
@@ -806,6 +792,7 @@ export class Window {
 		const below = at === undefined || !asked ? undefined : unresolved(at, start.group, start.floored, holdings);
 		const looking = at !== undefined && below !== undefined ? { time: at, below } : undefined;
 		if (looking) this.#looking.add(looking.time, this.#spans.length);
+		const counted = !start.floored && relative(anchor) !== undefined;
 		this.#push({
 			index,
 			anchor,
@@ -814,11 +801,11 @@ export class Window {
 			floored: start.floored,
 			looking,
 			waiting: false,
+			reach: counted ? (holdings.nextStart(0n) ?? start.group) : undefined,
 		});
 	}
 
 	#push(span: Span): void {
-		if (reachesOldest(span)) this.#unfloored.push(this.#spans.length);
 		this.#spans.push(span);
 		this.#name(this.#spans.length - 1);
 	}
@@ -860,7 +847,7 @@ export class Window {
 		const groups: Run[] = [];
 		const missable: Run[] = [];
 		for (const span of this.#spans) {
-			const [reads, asks] = spanReads(span, this.#reached);
+			const [reads, asks] = spanReads(span);
 			if (reads) groups.push(reads);
 			if (asks) missable.push(asks);
 		}
@@ -873,7 +860,7 @@ export class Window {
 	#grow(positions: readonly number[]): void {
 		this.#updateSettled();
 		for (const position of positions) {
-			const [reads, asks] = spanReads(this.#spans[position], this.#reached);
+			const [reads, asks] = spanReads(this.#spans[position]);
 			if (reads) insert(this.#runs, reads);
 			if (asks) insert(this.#missable, asks);
 		}
@@ -936,9 +923,8 @@ class ByTime {
 	}
 }
 
-// What `span` reads, and the part of it a miss may ask for, each undefined for none, given the
-// lowest group held since it was placed.
-function spanReads(span: Span, reached: bigint | undefined): [Run | undefined, Run | undefined] {
+// What `span` reads, and the part of it a miss may ask for, each undefined for none.
+function spanReads(span: Span): [Run | undefined, Run | undefined] {
 	// A span still looking up its start reads nothing until it knows which group that is.
 	if (span.looking) return [undefined, undefined];
 	// A span waiting on its time start reads from that time meanwhile, and may ask a miss there, as
@@ -956,18 +942,12 @@ function spanReads(span: Span, reached: bigint | undefined): [Run | undefined, R
 	// A time start before every group held reaches back to the group containing it, which is unknown
 	// here, so it asks no miss below its time: every key from there on is in range, the key at the
 	// time itself being the containing group if it exists. A relative one counting back past every
-	// group held asks none below the lowest group held since, since which of them it reaches is unknown.
+	// group held asks none below its reach.
 	let reach = span.start;
 	if (!span.floored && span.anchor !== undefined) {
-		reach = time(span.anchor) ?? reached ?? span.start;
+		reach = time(span.anchor) ?? span.reach ?? span.start;
 	}
 	return [{ start: span.start, end: span.end }, reach < span.end ? { start: reach, end: span.end } : undefined];
-}
-
-// Whether `span` counts back past every group held, so what it asks follows the lowest group held
-// since it was placed.
-function reachesOldest(span: Span): boolean {
-	return !span.floored && relative(span.anchor) !== undefined;
 }
 
 // The first index in `[0, length)` for which `past` holds, `past` being false then true.

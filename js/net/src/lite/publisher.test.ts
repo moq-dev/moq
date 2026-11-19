@@ -1407,21 +1407,25 @@ test("lite draft-06: a reported cut stays dropped when re-created", async () => 
 // A group stream that never completes after its FIN still holds the connection. Like the
 // Rust `GroupServe`, the publisher waits on it only while the age budget keeps the group:
 // the newest group is never stale, and once its successor arrived a full budget ago the
-// stream is reset with `Old` and the group dropped.
-test("lite draft-06: a group stream that never completes is reset once the group goes stale", async () => {
+// stream is reset with `Old` and the group dropped. Lite-07 resets it too, though its
+// GROUP_END already went out: stale bytes must not hold the send window.
+test.each([
+	["draft-06", Version.DRAFT_06],
+	["draft-07", Version.DRAFT_07],
+])("lite %s: a group stream that never completes is reset once the group goes stale", async (_, version) => {
 	const clock = new Manual();
 	const installed = clock.install();
 	const budget = 1_000;
 	// The track's max age caps the subscription's budget.
 	const sub = await servedSubscription({
-		version: Version.DRAFT_06,
+		version,
 		startGroup: 0n,
 		maxAge: Duration.millis(budget),
 	});
 	try {
 		sub.serve(0n);
 		expect(await sub.servedSequence()).toBe(0n);
-		expect("start" in (await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06))).toBe(true);
+		expect("start" in (await decodeSubscribeResponse(sub.client.reader, version))).toBe(true);
 
 		let reason: unknown;
 		const reset = sub.stall().then((value) => {
@@ -1440,7 +1444,7 @@ test("lite draft-06: a group stream that never completes is reset once the group
 		await clock.advance(Duration.millis(1));
 		await reset;
 		expect(toStreamCode(fromTransport(reason))).toBe(StreamCode.Old);
-		const resp = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
+		const resp = await decodeSubscribeResponse(sub.client.reader, version);
 		if (!("drop" in resp)) throw new Error("expected SUBSCRIBE_DROP");
 		expect([resp.drop.start, resp.drop.end]).toEqual([1n, 2n]);
 	} finally {
@@ -1461,14 +1465,14 @@ async function holesToEnd(reader: Reader): Promise<unknown[]> {
 	}
 }
 
-// A lite-07 stream that expired as stale is closed rather than reset, and accounts for its group, so
-// no drop names it: a final drop the reader reaches for it later does not go out over it (one still
-// arriving, as a relay's copy from upstream, is cut by it), and a widening that admits it again does
-// not re-offer it (one cached whole, whose FIN went out first).
+// A lite-07 stream that expires as stale resets with OLD, whether its group is still arriving (as a
+// relay's copy from upstream) or went out whole with its FIN unacknowledged, and is named in one stale
+// drop: a final drop the reader reaches for it later does not go out over it, and a widening that
+// admits it again does not re-offer it, since every drop is final.
 test.each([
 	["still arriving", true],
-	["cached whole", false],
-])("lite draft-07: an expired stream %s stays dropped", async (_, arriving) => {
+	["sent whole", false],
+])("lite draft-07: an expired stream %s resets and is dropped once", async (_, arriving) => {
 	const clock = new Manual();
 	const installed = clock.install();
 	const budget = 1_000;
@@ -1486,9 +1490,9 @@ test.each([
 		// The restated range resolves at once.
 		expect("started" in (await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_07))).toBe(true);
 
-		let reset = false;
-		void sub.stall(true).then(() => {
-			reset = true;
+		let reset: unknown;
+		void sub.stall().then((reason) => {
+			reset = reason;
 		});
 		if (arriving) sub.track.createGroup(1n).writeFrame(textFrame("hello", Timestamp.fromMillis(1)));
 		else sub.serve(1n);
@@ -1499,28 +1503,25 @@ test.each([
 		expect(await sub.servedSequence()).toBe(2n);
 		await clock.advance(Duration.millis(budget));
 		await flush();
-		expect(reset).toBe(false);
+		expect(toStreamCode(fromTransport(reset))).toBe(StreamCode.Old);
 
 		hooks.dropTrackGroups(sub.track, 1n, 2n, { error: new StreamError(StreamCode(70), { message: "cut" }) });
 		await update(budget * 100, 1n);
-		expect("started" in (await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_07))).toBe(true);
 		await flush();
 		sub.serve(3n);
 		expect(await sub.servedSequence()).toBe(3n);
 		sub.track.finish();
 		sub.track.close();
-		expect(await holesToEnd(sub.client.reader)).toEqual([]);
-		expect(reset).toBe(false);
+		expect(await holesToEnd(sub.client.reader)).toEqual([["drop", 1n, 2n]]);
 	} finally {
 		await sub.close();
 		installed.close();
 	}
 });
 
-// A lite-07 stream whose group expires mid-frame waits for that frame before it closes, and resets
-// with the frame's failure when the frame fails instead: a FIN would cut the frame short. Mirrors the
-// Rust `GroupServe`, which closes an expired stream only at a frame boundary.
-test("lite draft-07: an expired stream resets when its frame in flight fails", async () => {
+// A lite-07 stream whose group expires mid-frame resets with OLD at once rather than wait for the
+// frame, as the Rust `GroupServe` does.
+test("lite draft-07: a stream expiring mid-frame resets at once", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
 	const budget = 1_000;
@@ -1538,7 +1539,7 @@ test("lite draft-07: an expired stream resets when its frame in flight fails", a
 		expect("started" in (await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_07))).toBe(true);
 
 		let reset: unknown;
-		void sub.stall(true).then((reason) => {
+		void sub.stall().then((reason) => {
 			reset = reason;
 		});
 		const group = sub.track.createGroup(1n);
@@ -1549,14 +1550,10 @@ test("lite draft-07: an expired stream resets when its frame in flight fails", a
 		await clock.advance(Duration.millis(budget * 10));
 		sub.serve(2n);
 		expect(await sub.servedSequence()).toBe(2n);
+		expect(reset).toBeUndefined();
 		await clock.advance(Duration.millis(budget));
 		await flush();
-		expect(reset).toBeUndefined();
-
-		const cut = new Error("frame cut");
-		frame.abort(cut);
-		await flush();
-		expect(reset).toBe(cut);
+		expect(toStreamCode(fromTransport(reset))).toBe(StreamCode.Old);
 	} finally {
 		await sub.close();
 		installed.close();
@@ -3445,6 +3442,69 @@ test("lite draft-07: a fetch whose budget gives up partway resets as too old", a
 	} finally {
 		resets.mockRestore();
 		open.finish();
+		publisher.close();
+		client.close();
+		broadcast.close();
+		origin.close();
+	}
+});
+
+// A fetch sent whole whose FIN the requester has yet to acknowledge still holds the connection, so
+// it resets as too old once its budget gives the group up, as the Rust `FetchServe` does.
+test("lite draft-07: a fetch sent whole resets as too old when it goes stale unacknowledged", async () => {
+	const pair = createMockTransportPair(ALPN_07_WIP);
+	const origin = new OriginProducer();
+	const publisher = new Publisher(pair.server, Version.DRAFT_07, randomHop(), origin.consume());
+	const broadcast = publish(origin, Path.from("live"));
+	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	const frame = (ms: number) => ({ payload: new TextEncoder().encode("x"), timestamp: Timestamp.fromMillis(ms) });
+	const whole = track.createGroup(0n);
+	whole.writeFrame(frame(0));
+	whole.finish();
+
+	const client = await Stream.open(pair.client, { version: Version.DRAFT_07 });
+	const incoming = pair.server.incomingBidirectionalStreams.getReader();
+	const accepted = await incoming.read();
+	incoming.releaseLock();
+	if (accepted.done) throw new Error("publisher never accepted the fetch stream");
+	// The FIN is never acknowledged: the close stays pending until the stream resets.
+	const inner = accepted.value.writable.getWriter();
+	let reset: unknown;
+	const writable = new WritableStream<Uint8Array>({
+		start(controller) {
+			controller.signal.addEventListener("abort", () => {
+				reset = controller.signal.reason;
+				void inner.abort(controller.signal.reason);
+			});
+		},
+		write: (chunk) => inner.write(chunk),
+		close: () => new Promise(() => undefined),
+	});
+	const server = new Stream({ readable: accepted.value.readable, writable, version: Version.DRAFT_07 });
+
+	try {
+		const msg = new Fetch({
+			broadcast: Path.from("live"),
+			track: "video",
+			priority: 0,
+			maxDelay: 500,
+			group: 0n,
+		});
+		const serving = publisher.runFetch(msg, server);
+		// The whole group and its FIN go out before any successor arrives.
+		await client.reader.u8();
+		await flush();
+		expect(reset).toBeUndefined();
+
+		// Then the track runs a second past its successor, with the FIN still unacknowledged.
+		for (const ms of [1000, 2000]) {
+			const group = track.createGroup(BigInt(ms / 1000));
+			group.writeFrame(frame(ms));
+			group.finish();
+		}
+		await serving;
+		expect(toStreamCode(fromTransport(reset))).toBe(StreamCode.Old);
+	} finally {
 		publisher.close();
 		client.close();
 		broadcast.close();

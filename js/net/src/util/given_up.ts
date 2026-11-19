@@ -43,8 +43,8 @@ export class GivenUp implements GetPromise<Error> {
 	async write(write: () => Promise<unknown>, cancel?: Promise<false>): Promise<Error | undefined> {
 		// Judged afresh rather than read from the watch: a wall-clock deadline can pass before
 		// its timer wakes the watch.
-		const stop = this.#stop ?? reason(this.#group);
-		if (stop) return stop;
+		this.#check();
+		if (this.#stop) return this.#stop;
 		const done = write().then(() => true as const);
 		const result = await race(cancel === undefined ? [done, this] : [done, this, cancel]);
 		return result === true || result === false ? undefined : result;

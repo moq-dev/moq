@@ -28,7 +28,7 @@ use std::{
 use rangemap::{RangeInclusiveSet, RangeMap, RangeSet};
 
 use super::super::delivered::Delivered;
-use super::super::subscription::Layered;
+use super::super::subscription::Cover;
 pub(super) use super::fill::Asking;
 use super::fill::{Ask, FillState, Join};
 use super::{Drift, Order, Position, TrackState};
@@ -81,10 +81,10 @@ pub(super) struct Misses {
 	given_up: RangeSet<u64>,
 	/// The window revision and cap what this holds was last clipped to, with the window's
 	/// missable groups then, `None` while every group was.
-	clipped: Option<(u64, Option<u64>, Option<Layered>)>,
+	clipped: Option<(u64, Option<u64>, Option<Cover>)>,
 	/// The window's missable groups the last probe judged against, `None` while every group
-	/// was, so a move of only its time ends' runs judges only what they moved over.
-	view: Option<Layered>,
+	/// was, so a moved window diffs this snapshot against its own and judges only what moved.
+	view: Option<Cover>,
 	/// Where the track leaves what it evicts that this reader judged cached, once it judged.
 	inbox: Option<Inbox>,
 	/// The track's eviction count this reader last emptied its inbox at.
@@ -457,7 +457,7 @@ impl Misses {
 	pub fn retain(
 		&mut self,
 		(from, revision, cap): (u64, u64, Option<u64>),
-		view: Option<&Layered>,
+		view: Option<&Cover>,
 		admitted: impl FnOnce() -> RangeInclusiveSet<u64>,
 	) {
 		let clipped = self.clipped.replace((revision, cap, view.cloned()));
@@ -469,7 +469,7 @@ impl Misses {
 			Some((clipped, at, _)) if (*clipped, *at) == (revision, cap) => Some(Vec::new()),
 			Some((_, at, Some(old))) if *at == cap => {
 				let highest = self.highest().unwrap_or(lowest);
-				view.and_then(|view| old.gained(view, from, highest))
+				view.map(|view| old.gained(view, from, highest))
 			}
 			_ => None,
 		};
@@ -694,7 +694,7 @@ impl Misses {
 		&mut self,
 		state: &TrackState,
 		id: (u64, u64, Option<u64>),
-		view: Option<&Layered>,
+		view: Option<&Cover>,
 		named: Option<u64>,
 		bound: Option<u64>,
 		mut target: impl FnMut(RangeInclusive<u64>) -> RangeInclusiveSet<u64>,
@@ -762,14 +762,14 @@ impl Misses {
 			state.cache.watch_wall(at, waiter);
 			return asks;
 		}
-		// A window that moved only its time ends' runs keeps its fixed runs, so only what those
-		// runs moved over is judged again below.
-		let layered = match (&self.view, view) {
-			(Some(old), Some(view)) if old.shares_fixed(view) => Some((old.clone(), view)),
+		// A window that moved keeps most of its runs, so only what it moved over is judged again
+		// below.
+		let diffed = match (&self.view, view) {
+			(Some(old), Some(view)) => Some((old.clone(), view)),
 			_ => None,
 		};
 		let terms = self.at.is_none_or(|previous| {
-			(previous.1 != at.1 && layered.is_none())
+			(previous.1 != at.1 && diffed.is_none())
 				|| previous.2 != at.2
 				|| previous.4 != at.4
 				|| previous.5 != at.5
@@ -834,16 +834,16 @@ impl Misses {
 				}
 				self.deferred.remove(0..low);
 			}
-			// What the time ends' runs no longer cover is forgotten, and what they newly cover
+			// What the window no longer covers is forgotten, and what it newly covers
 			// judged, within what the probe judges: from the floor up to the newest group,
 			// below the cap.
 			let last = id.2.map_or(Some(top), |cap| cap.checked_sub(1).map(|cap| cap.min(top)));
-			if let Some((old, view)) = &layered
+			if let Some((old, view)) = &diffed
 				&& let Some(last) = last
 				&& self.at.is_some_and(|previous| previous.1 != at.1)
 			{
 				let half = |run: RangeInclusive<u64>| *run.start()..run.end().saturating_add(1);
-				for run in old.gained(view, low, last).into_iter().flatten().map(half) {
+				for run in old.gained(view, low, last).into_iter().map(half) {
 					for set in [
 						&mut self.judged,
 						&mut self.refused,
@@ -854,7 +854,7 @@ impl Misses {
 					}
 					self.deferred.remove(run);
 				}
-				for run in view.gained(old, low, last).into_iter().flatten().map(half) {
+				for run in view.gained(old, low, last).into_iter().map(half) {
 					for fresh in self.judged.gaps(&run) {
 						candidates.insert(fresh);
 					}
@@ -1101,7 +1101,7 @@ impl Misses {
 		state: &TrackState,
 		id: (u64, u64, Option<u64>),
 		at: JudgedAt,
-		view: Option<&Layered>,
+		view: Option<&Cover>,
 		target: &mut impl FnMut(RangeInclusive<u64>) -> RangeInclusiveSet<u64>,
 		taken: &Delivered,
 		drift: &Drift,
@@ -2144,7 +2144,7 @@ mod tests {
 	/// cache in any order, on either clock, against a window of one run or several.
 	#[test]
 	fn expiring_by_successor_matches_each_stretch_judged_alone() {
-		use super::super::super::subscription::{Layered, Runs};
+		use super::super::super::subscription::Cover;
 		use crate::Timestamp;
 
 		/// The old judgement: each stretch between the live groups cached in a wanted run, by
@@ -2194,11 +2194,13 @@ mod tests {
 				.unwrap();
 			let mut groups = Vec::new();
 			let budget = Duration::from_millis(50 + next(200));
-			let runs = |count: u64| {
-				Runs::new((0..1 + next(count)).map(|_| {
-					let start = next(KEYS);
-					start..=start + next(6)
-				}))
+			let runs = |count: u64| -> Vec<_> {
+				(0..1 + next(count))
+					.map(|_| {
+						let start = next(KEYS);
+						start..=start + next(6)
+					})
+					.collect()
 			};
 			let servable = match next(3) {
 				0 => Servable::ALL,
@@ -2206,8 +2208,8 @@ mod tests {
 					start: next(8),
 					end: Some(KEYS - next(8)),
 				},
-				_ => Servable::layered(
-					Layered::new(Arc::new(runs(6)), runs(2)),
+				_ => Servable::covering(
+					Cover::new(runs(6).into_iter().chain(runs(2))),
 					(next(3) == 0).then(|| next(KEYS + 2)),
 					&Servable::NONE,
 				),
@@ -2267,13 +2269,13 @@ mod tests {
 		assert!(judged > 100, "only {judged} stale runs judged");
 	}
 
-	/// A window whose time ends move only their runs over the same fixed runs is followed by
-	/// what those runs moved over, and ends up judging and holding exactly what judging the
-	/// whole window again would: the second reader below is handed an unshared copy of the
-	/// same fixed runs on each move, so it always judges the window whole.
+	/// A window edited from the one before is followed by what the edit moved over, and ends
+	/// up judging and holding exactly what judging the whole window again would: the second
+	/// reader below forgets its last window before each move, so it always judges the window
+	/// whole.
 	#[kio::test]
-	async fn a_moved_layer_is_judged_as_the_whole_window_would_be() {
-		use super::super::super::subscription::{Layered, Runs};
+	async fn a_moved_window_is_judged_as_the_whole_window_would_be() {
+		use super::super::super::subscription::Cover;
 
 		let seed = std::cell::Cell::new(0x2545_f491_4f6c_dd1d_u64);
 		let next = |bound: u64| {
@@ -2285,11 +2287,13 @@ mod tests {
 			x % bound
 		};
 		const KEYS: u64 = 40;
-		let runs = |count: u64| {
-			Runs::new((0..next(count + 1)).map(|_| {
-				let start = next(KEYS);
-				start..=start + next(5)
-			}))
+		let runs = |count: u64| -> Vec<_> {
+			(0..next(count + 1))
+				.map(|_| {
+					let start = next(KEYS);
+					start..=start + next(5)
+				})
+				.collect()
 		};
 		let snapshot = |misses: &Misses| {
 			let sets = [
@@ -2325,7 +2329,9 @@ mod tests {
 			}
 			let fills = track.state.read().fills.clone();
 			fills.lock().add_handler();
-			let fixed = Arc::new(runs(6));
+			let fixed = runs(6);
+			let mut shared = Cover::new(fixed.clone());
+			let mut moving: Vec<RangeInclusive<u64>> = Vec::new();
 			let cap = (next(3) == 0).then(|| next(KEYS + 4));
 			let asking = Asking {
 				priority: 0,
@@ -2336,8 +2342,14 @@ mod tests {
 			let (mut given_moved, mut given_whole) = (Vec::new(), Vec::new());
 			for revision in 0..8 {
 				let layer = runs(3);
-				let shared = Layered::new(fixed.clone(), layer.clone());
-				let unshared = Layered::new(Arc::new((*fixed).clone()), layer);
+				for run in std::mem::replace(&mut moving, layer.clone()) {
+					shared.add(run, -1);
+				}
+				for run in &layer {
+					shared.add(run.clone(), 1);
+				}
+				let unshared = Cover::new(fixed.iter().chain(&layer).cloned());
+				(whole.view, whole.clipped) = (None, None);
 				let id = (0, revision, cap);
 				for (misses, view, given_up) in [
 					(&mut moved, &shared, &mut given_moved),
@@ -2380,17 +2392,12 @@ mod tests {
 				assert_eq!(
 					snapshot(&moved),
 					snapshot(&whole),
-					"round {round} revision {revision}: {fixed:?} under {:?}",
-					shared_layer(&moved)
+					"round {round} revision {revision}: {fixed:?} under {moving:?}",
 				);
 				assert_eq!(given_moved, given_whole, "round {round} revision {revision}");
 			}
 		}
 		assert!(asked > 100, "only {asked} runs asked");
-
-		fn shared_layer(misses: &Misses) -> Option<Runs> {
-			misses.view.as_ref().map(|view| view.layer().clone())
-		}
 	}
 
 	/// A reader waiting on many fills looks only at the ones that answered, yet each still

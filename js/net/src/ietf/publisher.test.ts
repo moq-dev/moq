@@ -21,6 +21,7 @@ import { hooks } from "../internal.ts";
 import { createMockTransportPair, manual, SessionBroadcast, settlesWithin } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
+import { Front } from "../resume.ts";
 import { Cursor, Reader, Stream, Writer } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import type { Producer as TrackProducer } from "../track.ts";
@@ -2303,6 +2304,7 @@ function fixture(
 	version: IetfVersion = V22,
 	grant?: Signal<Grant | undefined>,
 	pair = createMockTransportPair(ALPNS[version]),
+	routed = false,
 ): {
 	pair: ReturnType<typeof createMockTransportPair>;
 	pub: Publisher;
@@ -2313,7 +2315,20 @@ function fixture(
 } {
 	const session = new NativeSession(pair.server, version, false);
 	const { pub, origin } = publisher(pair.server, { session, grant });
-	const broadcast = publish(origin, Path.from("test"));
+	let broadcast: BroadcastProducer;
+	let front: Front | undefined;
+	if (routed) {
+		// Served through a front, so every subscriber is a resume reader over its route copies.
+		broadcast = new BroadcastProducer();
+		front = new Front();
+		front.serve(broadcast.consume());
+		const dynamic = origin.claim(Path.from("test"));
+		void (async () => {
+			for await (const request of dynamic.requested()) request.serve(front.consumer);
+		})();
+	} else {
+		broadcast = publish(origin, Path.from("test"));
+	}
 	const uni = pair.client.incomingUnidirectionalStreams.getReader() as ReadableStreamDefaultReader<
 		ReadableStream<Uint8Array>
 	>;
@@ -2326,6 +2341,7 @@ function fixture(
 		version,
 		close: () => {
 			uni.releaseLock();
+			front?.consumer.close();
 			origin.close();
 		},
 	};
@@ -4397,7 +4413,8 @@ test("draft-22: an update fills its snapshot under its own request ID", async ()
 
 test("draft-22: an empty newer group is not an object in Largest or a relative fill", async () => {
 	const fx = fixture();
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	// No max age, so the superseded group stays fresh enough to fill.
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 	writeGroup(track, 2);
 	const empty = hooks.appendNext(track);
 	const { client, ok } = await runSubscribe(
@@ -4570,6 +4587,153 @@ test("draft-22: cancellation releases a fill parked on flow control", async () =
 		fx.close();
 	}
 });
+
+// A fill whose FIN waits on an acknowledgement still holds the connection, so the subscriber
+// leaving resets it, as it does a fill still writing, rather than leave it to the session.
+test("draft-22: cancellation resets a fill whose FIN is unacknowledged", async () => {
+	const fx = fixture();
+	const finished = Promise.withResolvers<void>();
+	let reset = false;
+	const unacknowledged = new WritableStream<Uint8Array>({
+		start(controller) {
+			controller.signal.addEventListener("abort", () => {
+				reset = true;
+			});
+		},
+		close() {
+			finished.resolve();
+			return new Promise<void>(() => {});
+		},
+	});
+	spyOn(fx.pair.server, "createUnidirectionalStream").mockImplementationOnce(async () => unacknowledged);
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	writeGroup(track, 1);
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 0n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "absolute", startGroup: 10n, startObject: 0n },
+			fill: { filter: { kind: "unfiltered" }, rangeFilters: false },
+		}),
+	);
+	try {
+		await finished.promise;
+		expect(reset).toBe(false);
+		client.close();
+		while (track.subscription.peek() !== undefined) await track.subscription.changed();
+		expect(reset).toBe(true);
+	} finally {
+		client.close();
+		track.finish();
+		track.close();
+		fx.close();
+	}
+});
+
+// A fill of a group still open ends at Largest Object, so a failure of a later frame upstream,
+// while its FIN waits on an acknowledgement, is outside what it served and leaves it whole.
+test("draft-22: a later frame failing leaves a fill whose FIN is unacknowledged", async () => {
+	const fx = fixture();
+	const finished = Promise.withResolvers<void>();
+	let reset = false;
+	const unacknowledged = new WritableStream<Uint8Array>({
+		start(controller) {
+			controller.signal.addEventListener("abort", () => {
+				reset = true;
+			});
+		},
+		close() {
+			finished.resolve();
+			return new Promise<void>(() => {});
+		},
+	});
+	spyOn(fx.pair.server, "createUnidirectionalStream").mockImplementationOnce(async () => unacknowledged);
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	const group = hooks.appendNext(track);
+	group.writeFrame({ payload: new TextEncoder().encode("0.0"), timestamp: Timestamp.fromMillis(0) });
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 0n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "absolute", startGroup: 10n, startObject: 0n },
+			fill: { filter: { kind: "relative", groups: 1n }, rangeFilters: false },
+		}),
+	);
+	try {
+		await finished.promise;
+		group.abort(new Error("upstream failed"));
+		// A task turn drains every microtask the failure schedules.
+		await yieldNow();
+		expect(reset).toBe(false);
+	} finally {
+		client.close();
+		track.finish();
+		track.close();
+		fx.close();
+	}
+});
+
+// A fill whose FIN waits on an acknowledgement resets once its group goes stale under the
+// subscription's budget, as the Rust fill does, rather than hold the connection for stale bytes.
+// Routed through an instance, the fill reads a resume reader whose own timeline stays empty, so
+// the group is judged by the copy that holds it.
+test.each(["plain", "routed"])(
+	"draft-22: a %s fill whose FIN is unacknowledged resets once its group goes stale",
+	async (route) => {
+		const fx = fixture(V22, undefined, undefined, route === "routed");
+		const finished = Promise.withResolvers<void>();
+		let reset = false;
+		const resets = Promise.withResolvers<void>();
+		const unacknowledged = new WritableStream<Uint8Array>({
+			start(controller) {
+				controller.signal.addEventListener("abort", () => {
+					reset = true;
+					resets.resolve();
+				});
+			},
+			close() {
+				finished.resolve();
+				return new Promise<void>(() => {});
+			},
+		});
+		spyOn(fx.pair.server, "createUnidirectionalStream").mockImplementationOnce(async () => unacknowledged);
+		const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: Duration.millis(500) });
+		writeGroup(track, 1);
+		const { client } = await runSubscribe(
+			fx,
+			new Subscribe({
+				requestId: 0n,
+				trackNamespace: Path.from("test"),
+				trackName: "video",
+				subscriberPriority: 0,
+				filter: { kind: "absolute", startGroup: 10n, startObject: 0n },
+				fill: { filter: { kind: "unfiltered" }, rangeFilters: false },
+			}),
+		);
+		try {
+			await finished.promise;
+			expect(reset).toBe(false);
+			// The track runs a second past the filled group's successor.
+			for (const ms of [1000, 2000]) {
+				const group = hooks.appendNext(track);
+				group.writeFrame({ payload: new TextEncoder().encode("edge"), timestamp: Timestamp.fromMillis(ms) });
+				group.finish();
+			}
+			await resets.promise;
+		} finally {
+			client.close();
+			track.finish();
+			track.close();
+			fx.close();
+		}
+	},
+);
 
 // A fill reads the cache through forks of its own, ranked at the converted subscriber
 // priority. Copied unconverted, wire 100 would raise the track's aggregate from 27 to 100,
