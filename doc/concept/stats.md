@@ -454,7 +454,7 @@ neighbours':
 
 | Field | Counts | A rise during a rollout means |
 | --- | --- | --- |
-| `changed` | Times a route to a relay changed on what the peer sent or how its session ended. | The mesh churns through this peer: links flapping, or two releases ranking routes differently. |
+| `changed` | Times a route to a relay changed on what the peer sent or how its session ended, counting only changes that alter how its broadcasts are served (not a move to another path of the same rank). | The mesh churns through this peer: links flapping, or two releases ranking routes differently. |
 | `rewritten` | Broadcasts rewritten into the origin behind those changes: every broadcast the relay still claims, once per change. | Each change is costing the relay work in proportion to what lies behind it. Divide by `changed` for the cost of one. |
 | `sent` / `received` | DEAD (a relay-to-relay session closed) and DRAIN (a relay sent GOAWAY) withdrawals, by kind. | Relays restarting or draining. A DRAIN rate without matching DEADs is a drain that never finishes. |
 | `refused` | Refused routes and claims by reason: `path` (a path this relay cannot hold), `scope` (outside the session's root or grant, or what the relay serves), `looped` (the way already crosses this relay, or exceeds the hop limit). | `path` or `looped`: the releases disagree on route content. `scope`: a grant narrower than what the peer announces. |

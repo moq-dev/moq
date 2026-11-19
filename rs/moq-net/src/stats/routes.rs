@@ -150,9 +150,10 @@ kinds!(
 #[serde(default)]
 #[non_exhaustive]
 pub struct Routes {
-	/// Times a route to a relay changed on what the peer sent or how its session ended.
-	/// A burst of messages changing one relay's route before the node acts on them
-	/// counts once.
+	/// Times the routes to a relay changed what they give the ways to its claims, on what
+	/// the peer sent or how its session ended. A move to another path of the same rank
+	/// changes nothing, and a burst of messages changing one relay's routes before the
+	/// node acts on them counts once.
 	pub changed: u64,
 	/// Broadcasts rewritten into the origin behind those changes: every broadcast the
 	/// relay still claims as the node acts on the change, each once per pass. A route

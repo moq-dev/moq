@@ -23,11 +23,14 @@ const MAX_BYTES = 4096;
 const utf8 = new TextEncoder();
 
 /**
- * Throw on a root `@moq/net`'s `Path.from` refuses: one longer than 4096 bytes, with a `\` before
- * anything but `\` or `/`, or with a leading, trailing, or doubled `/` no `\` escapes.
+ * Throw on a root `@moq/net`'s `Path.from` refuses: one longer than 4096 bytes, with a lone
+ * surrogate, with a `\` before anything but `\` or `/`, or with a leading, trailing, or doubled
+ * `/` no `\` escapes.
  */
 export function validate(root: string): void {
 	const invalid = (reason: string) => new Error(`invalid root ${JSON.stringify(root)} ${reason}`);
+	// The `u` flag reads a pair as one scalar, so only a lone surrogate matches.
+	if (/\p{Surrogate}/u.test(root)) throw invalid("contains a lone surrogate");
 	if (utf8.encode(root).length > MAX_BYTES) throw invalid(`is longer than ${MAX_BYTES} bytes`);
 	if (/\\(?![\\/])/.test(root.replaceAll("\\\\", ""))) {
 		throw invalid("contains a `\\` that escapes neither `\\` nor `/`");

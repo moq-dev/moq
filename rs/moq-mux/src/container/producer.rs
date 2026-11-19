@@ -1179,8 +1179,9 @@ where
 		self.producer.estimate()
 	}
 
-	/// Release the track's cache, reporting `err` to readers that have not drained it; see
-	/// [`moq_net::track::Finished::abort`].
+	/// Abort the track with `err`; see [`moq_net::track::Finished::abort`]. Readers still draining get the end
+	/// the track declared instead once every group below it finished: the clean end after [`Producer::finish`],
+	/// or the error [`Producer::fail`] gave.
 	pub fn abort(self, err: moq_net::Error) {
 		self.producer.abort(err);
 	}
