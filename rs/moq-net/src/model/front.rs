@@ -201,6 +201,10 @@ struct Track {
 	/// re-splice is awaited. A refusal of that re-splice, or the front ending first, reports
 	/// this instead: the source closing is what ended the track.
 	lost: Option<Error>,
+	/// What the copy died of when its source closed under it with nothing serving the
+	/// track. A front ending before another source splices it reports this, but unlike
+	/// [`Self::lost`] a refusal does not: the next source's answer is its own verdict.
+	closed: Option<Error>,
 	/// Whether anyone reads the track: a copy is only spliced in for a reader.
 	wanted: bool,
 	/// A detached source whose copy still feeds the track until the serving source's
@@ -303,7 +307,8 @@ impl Front {
 	/// Why `track`'s serving copy died, while its re-splice is still awaited. A track the
 	/// front ends meanwhile ends with this rather than the front's end.
 	pub(super) fn lost(&self, track: &str) -> Option<Error> {
-		self.tracks.get(track)?.lost.clone()
+		let track = self.tracks.get(track)?;
+		track.lost.clone().or_else(|| track.closed.clone())
 	}
 
 	/// Whether the front is over.
@@ -346,6 +351,7 @@ impl Front {
 						refused: HashSet::new(),
 						refusal: None,
 						lost: None,
+						closed: None,
 						wanted: false,
 						ended: None,
 						draining: None,
@@ -613,6 +619,7 @@ impl Front {
 			Ok(()) => {
 				track.draining = None;
 				track.lost = None;
+				track.closed = None;
 				track.stranded = None;
 				track.state = TrackState::Spliced { source };
 				actions.push(Action::Splice {
@@ -667,7 +674,7 @@ impl Front {
 					&& serving.is_none()
 					&& track.ended.is_none()
 				{
-					track.lost.get_or_insert(err);
+					track.closed.get_or_insert(err);
 				}
 				return;
 			}
@@ -916,6 +923,7 @@ impl Front {
 			TrackState::Idle | TrackState::Querying { .. } => {
 				track.state = TrackState::Parked { since: now };
 				track.lost = None;
+				track.closed = None;
 				// An ended track has nothing to drop.
 				if track.ended.is_none() {
 					actions.push(Action::Park { track: name });
@@ -1332,6 +1340,35 @@ mod tests {
 			}],
 		);
 		assert!(front.lost("video").is_none());
+	}
+
+	/// The session that serves the claim next frames the track differently: its verdict
+	/// ends the track, not the closed session's error.
+	#[test]
+	fn a_closed_claims_next_session_refusing_ends_with_its_verdict() {
+		let mut front = orphaned();
+		front.step(Event::Selected {
+			best: Some(claim(2)),
+			serving_closing: false,
+		});
+		front.step(Event::Resolved {
+			route: 2,
+			result: Ok(200),
+		});
+		assert_actions(
+			front.step(Event::TrackInfo {
+				track: name("video"),
+				source: 200,
+				closing: false,
+				result: Ok(info().with_compression(track::Compression::Deflate)),
+				retry: None,
+			}),
+			&[Action::Abort {
+				track: name("video"),
+				err: Error::Unsupported,
+				retry: None,
+			}],
+		);
 	}
 
 	/// Nothing serves the claim again: the front ends, and its track with what ended the
