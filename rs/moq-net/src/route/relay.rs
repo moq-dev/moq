@@ -440,6 +440,8 @@ pub(crate) struct Changes<I> {
 	pub routes: BTreeSet<NodeId>,
 	/// The broadcasts whose claims, or what the reader shows of them, may have changed.
 	pub broadcasts: BTreeSet<Broadcast<I>>,
+	/// Claims a neighbour gave whose chain this node never takes, each taken as lost.
+	pub looped: u64,
 }
 
 impl<I> Default for Changes<I> {
@@ -447,6 +449,7 @@ impl<I> Default for Changes<I> {
 		Self {
 			routes: BTreeSet::new(),
 			broadcasts: BTreeSet::new(),
+			looped: 0,
 		}
 	}
 }
@@ -2012,7 +2015,12 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		for (broadcast, change) in changes {
 			self.visit();
 			let change = match change {
-				Change::Live(claim) if !self.takes(&claim.chain) => Change::Lost,
+				Change::Live(claim) if !self.takes(&claim.chain) => {
+					if let Some(log) = &mut self.log {
+						log.looped += 1;
+					}
+					Change::Lost
+				}
 				// Unavailable is only ever news of a run this neighbour gave before: one first
 				// seen unavailable, which nothing can serve, is not there until it is
 				// available. A neighbour that moved to it no longer gives the run it gave.

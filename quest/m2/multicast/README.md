@@ -38,8 +38,8 @@ children, the two flaws it found,
 [a reader resuming on a detour learned after its session closed](/quest/m2/multicast/detour-resume.md)
 and [a route moving behind one next hop resending a group](/quest/m2/multicast/resend.md),
 whose fix changes the wire,
-[route counters](/quest/m2/multicast/route-counters.md), and
-[the mesh replay](/quest/m2/multicast/mesh-replay.md), and on
+[the mesh replay](/quest/m2/multicast/mesh-replay.md), and
+[draining dialed links](/quest/m2/multicast/drain-dialed-links.md), and on
 [route layer acceptance](/quest/m2/cluster-routes/acceptance.md) retiring
 the lite-06 mitigations. After the cut come warmth's wire
 ([cache-aware routing](/quest/m3/cache-routing/README.md)),
