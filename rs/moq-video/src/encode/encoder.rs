@@ -184,6 +184,21 @@ pub struct Config {
 	/// How the encoder trades latency for compression. Defaults to
 	/// [`Preset::LowLatency`].
 	pub preset: Preset,
+	/// The finest quantizer (0-51, lower is finer) the software H.264 encoder's
+	/// rate control may pick. `None` (the default) keeps the encoder's own floor:
+	/// 22 for openh264, which keeps quality constant under the cap, so a calm
+	/// scene spends less than it rather than buying detail no one sees.
+	///
+	/// Lower it to let the rate control code a picture finer when the cap
+	/// allows, or set `Some(0)` for no floor beyond the codec's own (openh264
+	/// never codes finer than 12). What that costs depends on the content: a
+	/// detailed calm scene spends more of the cap, while very simple content
+	/// can come out smaller and cheaper to encode and decode. Values above 51
+	/// act as 51.
+	///
+	/// Only openh264 reads it. The hardware backends keep their own quality
+	/// controls, tuned per device.
+	pub qp_floor: Option<u8>,
 	/// The color space of the input frames, written into the bitstream's VUI so a
 	/// decoder doesn't have to guess. `None` uses [`Color::infer`], which is both
 	/// what the crate's own RGB conversions produce and what a player falls back
@@ -239,6 +254,7 @@ impl Config {
 			codec: Codec::default(),
 			kind: Kind::Auto,
 			preset: Preset::default(),
+			qp_floor: None,
 			color: None,
 			resize: None,
 			#[cfg(target_os = "linux")]
