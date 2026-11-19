@@ -51,7 +51,7 @@ export class Format {
 		return this.kind !== "data" && frame.payload.byteLength === 0 ? frame.timestamp : undefined;
 	}
 
-	/** Decode one moq-net frame into its LOC frames. On a data track an object with no bytes is the discontinuity marker, so it decodes to no frame. Throws on malformed input. */
+	/** Decode one moq-net frame into its LOC frames. On a data track an object with no bytes is an older publisher's discontinuity marker, so it decodes to no frame. Throws on malformed input. */
 	decode(frame: Uint8Array): Frame[] {
 		if (this.kind === "data" && frame.byteLength === 0) return [];
 		const [propsLen, afterLen] = Moq.Varint.decode(frame);

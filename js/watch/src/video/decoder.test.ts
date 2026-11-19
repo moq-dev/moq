@@ -643,7 +643,7 @@ it("clears the picture once no rendition is selectable", async () => {
 	}
 });
 
-// A marker from older history cannot make older groups newer.
+// A declared end, which from older history cannot make older groups newer.
 function marker(group: bigint, end: number): Read {
 	return { kind: "end", group, end: Duration.micros(end) };
 }
@@ -1388,7 +1388,7 @@ describe("Decoder stalls", () => {
 		}
 	});
 
-	// A publisher that stops cleanly finishes the track instead of writing an end marker.
+	// A publisher that stops cleanly finishes the track instead of declaring an end.
 	it("a finished track holds its last picture without a stall, and ends once that picture is due", async () => {
 		const { clock, feeds, playback, stalls, close } = await cold();
 		try {

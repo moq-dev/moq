@@ -302,13 +302,13 @@ function configured(): Promise<AudioEncoderConfig> {
 	});
 }
 
-// An Encoder wired to a fake capture feed, recording each written frame as [timestamp, payload bytes]
-// and how many frames each group carries.
+// An Encoder wired to a fake capture feed, recording each written frame as [timestamp, payload bytes],
+// each group end no frame continues as [end, "end"], and how many frames each group carries.
 async function setup(order = new Order(), codec?: Codec, join?: Duration) {
 	const configuring = configured();
 
 	const track = new Moq.Track.Producer("audio").accept({ timescale: Moq.Time.Timescale.MICRO });
-	const written: [number, number][] = [];
+	const written: [number, number | "end"][] = [];
 	const groups: number[] = [];
 	const appended: ReturnType<typeof track.appendGroup>[] = [];
 	const writes = { onWrite: undefined as (() => void) | undefined };
@@ -320,10 +320,20 @@ async function setup(order = new Order(), codec?: Codec, join?: Duration) {
 		const writeFrame = group.writeFrame.bind(group);
 		group.writeFrame = (frame) => {
 			const [timestamp, payload] = Moq.Varint.decode(frame.payload);
+			// A group starting where the last one ended continues it, which a reader reads no end for.
+			const last = written.at(-1);
+			if (last?.[1] === "end" && last[0] === timestamp) written.pop();
 			written.push([timestamp, payload.byteLength]);
 			groups[index]++;
 			writeFrame(frame);
 			writes.onWrite?.();
+		};
+		const finishAt = group.finishAt.bind(group);
+		group.finishAt = (end) => {
+			const finished = finishAt(end);
+			written.push([Number(end), "end"]);
+			writes.onWrite?.();
+			return finished;
 		};
 		return group;
 	};
@@ -377,9 +387,9 @@ async function setup(order = new Order(), codec?: Codec, join?: Duration) {
 }
 
 // The encoder outlives a demand gap, so chunks it held when demand disappeared surface after the
-// resume. Written after the marker, they would put pre-gap media on the live edge, and a rounding
-// step below the marker aborts every subscriber. The resumed chunks have to carry the capture clock,
-// not the encoder's gap-blind one, or they trail the next gap's marker and are dropped as pre-gap.
+// resume. Written after the end, they would put pre-gap media on the live edge, and a rounding
+// step below the end aborts every subscriber. The resumed chunks have to carry the capture clock,
+// not the encoder's gap-blind one, or they trail the next gap's end and are dropped as pre-gap.
 test("an on-demand gap marks where submitted audio ends and drops the chunks held across it", async () => {
 	using _webcodecs = installFakeWebCodecs();
 	FakeAudioEncoder.LAG = 2;
@@ -414,7 +424,7 @@ test("an on-demand gap marks where submitted audio ends and drops the chunks hel
 	expect(written).toEqual([
 		[18_700, 1],
 		[38_700, 1],
-		[98_699, 0],
+		[98_700, "end"],
 		[138_700, 1],
 		[158_700, 1],
 	]);
@@ -450,7 +460,7 @@ test("disabling with a subscriber attached marks where the submitted audio ends"
 		[40_000, 1],
 		[60_000, 1],
 		[80_000, 1],
-		[99_999, 0],
+		[100_000, "end"],
 		[140_000, 1],
 		[160_000, 1],
 		[180_000, 1],
@@ -459,7 +469,7 @@ test("disabling with a subscriber attached marks where the submitted audio ends"
 });
 
 // A codec that still holds chunks at a capture gap stamps them, and the input after the gap, as one
-// contiguous run. Stamping from what was submitted keeps each on its capture clock, and the marker
+// contiguous run. Stamping from what was submitted keeps each on its capture clock, and the end
 // waits behind the held chunks rather than dropping them as pre-gap.
 test("a capture gap marks where the audio before it ends, after the chunks the codec holds", async () => {
 	using _webcodecs = installFakeWebCodecs();
@@ -476,14 +486,14 @@ test("a capture gap marks where the audio before it ends, after the chunks the c
 	};
 
 	await push(20_000, 4); // two written, two held
-	await push(200_000, 4); // the held two, the marker, then two more written and two held
+	await push(200_000, 4); // the held two, the end, then two more written and two held
 
 	expect(written).toEqual([
 		[20_000, 1],
 		[40_000, 1],
 		[60_000, 1],
 		[80_000, 1],
-		[99_999, 0],
+		[100_000, "end"],
 		[200_000, 1],
 		[220_000, 1],
 	]);
@@ -600,8 +610,9 @@ test("re-enabling with a changed sample rate probes again", async () => {
 	expect(encoder.out.catalog.peek()?.enabled).toBeUndefined();
 });
 
-// Push-to-talk: a mute sends nothing and ends the utterance with a marker, while the rendition stays
-// enabled and its track stays the same, so a listener hears the next press with no catalog update.
+// Push-to-talk: a mute sends nothing and ends the utterance's group whole where its audio stops,
+// while the rendition stays enabled and its track stays the same, so a listener hears the next press
+// with no catalog update.
 test("muting sends nothing and marks where the audio ends, keeping the rendition enabled", async () => {
 	using _webcodecs = installFakeWebCodecs();
 	using env = await setup();
@@ -632,7 +643,7 @@ test("muting sends nothing and marks where the audio ends, keeping the rendition
 	expect(written).toEqual([
 		[20_000, 1],
 		[40_000, 1],
-		[59_999, 0],
+		[60_000, "end"],
 		[120_000, 1],
 		[140_000, 1],
 	]);
@@ -673,7 +684,7 @@ test("a voice source sends nothing while its talker is silent", async () => {
 	// 200 ms of hangover, then the end is declared where the sent audio stops.
 	await push(160_000, 15, false);
 	await push(460_000, 2, true);
-	expect(written).toEqual([...frames(80_000, 14), [359_999, 0], ...frames(440_000, 3)]);
+	expect(written).toEqual([...frames(80_000, 14), [360_000, "end"], ...frames(440_000, 3)]);
 	expect(encoder.out.active.peek()).toBe(true);
 
 	// A mute in the middle of a word ends it there, and unmuting into silence sends nothing.
@@ -684,7 +695,7 @@ test("a voice source sends nothing while its talker is silent", async () => {
 	await settle();
 	await push(1_000_000, 5, false);
 	await push(1_100_000, 1, true);
-	expect(written).toEqual([[499_999, 0], ...frames(1_080_000, 2)]);
+	expect(written).toEqual([[500_000, "end"], ...frames(1_080_000, 2)]);
 
 	// A mute between two captures that leaves no gap still starts the gate shut: the hangover from
 	// before it sends nothing after the declared end.
@@ -695,7 +706,7 @@ test("a voice source sends nothing while its talker is silent", async () => {
 	await settle();
 	await push(1_120_000, 5, false);
 	await push(1_220_000, 1, true);
-	expect(written).toEqual([[1_119_999, 0], ...frames(1_200_000, 2)]);
+	expect(written).toEqual([[1_120_000, "end"], ...frames(1_200_000, 2)]);
 });
 
 // A long frame whose first 20 ms is still inside the hangover is sent, and the gate shuts behind
@@ -720,7 +731,7 @@ test("a voice source declares its end after the last frame the hangover sends", 
 	}
 	await feed.drain();
 	const frames = Array.from({ length: 5 }, (_, i): [number, number] => [i * 60_000, 1]);
-	expect(written).toEqual([...frames, [299_999, 0]]);
+	expect(written).toEqual([...frames, [300_000, "end"]]);
 });
 
 // With `idle="release"` a mute closes the microphone, taking its format away. The rendition stays
@@ -785,7 +796,7 @@ test("audio resumed after a multi-second mute carries its capture timestamps", a
 		[40_000, 1],
 		[60_000, 1],
 		[80_000, 1],
-		[99_999, 0],
+		[100_000, "end"],
 		[5_100_000, 1],
 		[5_120_000, 1],
 		[5_140_000, 1],
@@ -795,7 +806,7 @@ test("audio resumed after a multi-second mute carries its capture timestamps", a
 });
 
 // Closing tears down the subscription and the pipeline, which both end the epoch; cleanups run
-// last-in, first-out, so the marker lands once and before the rendition closes the track.
+// last-in, first-out, so the end lands once and before the rendition closes the track.
 test("closing with a subscriber attached marks the end once before the track closes", async () => {
 	using _webcodecs = installFakeWebCodecs();
 	using env = await setup();
@@ -813,7 +824,7 @@ test("closing with a subscriber attached marks the end once before the track clo
 		[40_000, 1],
 		[60_000, 1],
 		[80_000, 1],
-		[99_999, 0],
+		[100_000, "end"],
 	]);
 	expect(track.closed.peek()).toBeDefined();
 });
@@ -890,11 +901,11 @@ test("a join packs frames until the minimum and restarts after a break", async (
 	await push(2);
 
 	expect(written.map(([timestamp]) => timestamp)).toEqual([
-		20_000, 40_000, 60_000, 80_000, 100_000, 120_000, 140_000, 159_999, 200_000, 220_000,
+		20_000, 40_000, 60_000, 80_000, 100_000, 120_000, 140_000, 160_000, 200_000, 220_000,
 	]);
-	// 120ms opens the next group, closing the five frames at 20-100ms. The break ends that group
-	// early, so resumed frames start a fresh group after the marker.
-	expect(groups).toEqual([5, 2, 1, 2]);
+	// 120ms opens the next group, closing the five frames at 20-100ms. The break ends the second
+	// whole where its audio stops, so resumed frames start a fresh group, with no marker group between.
+	expect(groups).toEqual([5, 2, 2]);
 });
 
 test("default audio groups carry twenty milliseconds", async () => {
@@ -1755,7 +1766,7 @@ test.each([false, true])("audio retained before a disable is encoded on demand (
 			expect(encoder.out.stats.peek().frames).toBe(0);
 			return;
 		}
-		// The history is encoded and its marker follows at once, since nothing else is owed while disabled.
+		// The history is encoded and its end follows at once, since nothing else is owed while disabled.
 		expect(encoder.out.stats.peek().frames).toBe(4);
 		const reader = late.ordered();
 		for (let index = 0; index < 4; index++) {
@@ -1774,7 +1785,7 @@ test.each([false, true])("audio retained before a disable is encoded on demand (
 });
 
 // Re-enabled before anyone wanted it, the retained audio stays ahead of the break: all of it is
-// encoded before the marker, then the resumed audio starts a fresh epoch.
+// encoded before the end, then the resumed audio starts a fresh epoch.
 test("audio retained across a disable and re-enable is served before the break", async () => {
 	using _webcodecs = installFakeWebCodecs();
 	const clock = new Manual();
@@ -1816,26 +1827,25 @@ test("audio retained across a disable and re-enable is served before the break",
 		if (!net) throw new Error("expected network broadcast");
 		late = net.track("audio").subscribe({ delay: { max: Duration.millis(1000) } });
 		await settle(20);
-		// The four retained frames, then the marker, then the three resumed.
+		// The four retained frames, the last ending whole at the break, then the three resumed.
 		expect(encoder.out.stats.peek().frames).toBe(7);
 		expect(discontinuity.mock.calls.map(([end]) => end)).toEqual([Duration.micros(80_000)]);
 		const reader = late.ordered();
-		const read: [number, number][] = [];
+		const read: [number, bigint | undefined][] = [];
 		while (read.length < 6) {
 			const group = await reader.nextGroup();
 			const frame = await group?.readFrame();
 			if (!frame) throw new Error("expected a frame");
-			const [timestamp, payload] = Moq.Varint.decode(frame.payload);
-			read.push([timestamp, payload.byteLength]);
+			read.push([Moq.Varint.decode(frame.payload)[0], group?.end]);
 			group?.close();
 		}
 		expect(read).toEqual([
-			[0, 1],
-			[20_000, 1],
-			[40_000, 1],
-			[60_000, 1],
-			[79_999, 0],
-			[200_000, 1],
+			[0, 20_000n],
+			[20_000, 40_000n],
+			[40_000, 60_000n],
+			[60_000, 80_000n],
+			[200_000, 220_000n],
+			[220_000, 240_000n],
 		]);
 	} finally {
 		discontinuity.mockRestore();
@@ -1887,23 +1897,23 @@ test("a capture gap inside replayed audio keeps every frame on both sides of it"
 		expect(encoder.out.stats.peek().frames).toBe(8);
 		expect(discontinuity.mock.calls.map(([end]) => end)).toEqual([Duration.micros(80_000)]);
 		const reader = late.ordered();
-		const read: [number, number][] = [];
+		const read: [number, bigint | undefined][] = [];
 		while (read.length < 7) {
 			const group = await reader.nextGroup();
 			const frame = await group?.readFrame();
 			if (!frame) throw new Error("expected a frame");
-			const [timestamp, payload] = Moq.Varint.decode(frame.payload);
-			read.push([timestamp, payload.byteLength]);
+			read.push([Moq.Varint.decode(frame.payload)[0], group?.end]);
 			group?.close();
 		}
+		// The audio before the gap ends whole where it stops.
 		expect(read).toEqual([
-			[0, 1],
-			[20_000, 1],
-			[40_000, 1],
-			[60_000, 1],
-			[79_999, 0],
-			[200_000, 1],
-			[220_000, 1],
+			[0, 20_000n],
+			[20_000, 40_000n],
+			[40_000, 60_000n],
+			[60_000, 80_000n],
+			[200_000, 220_000n],
+			[220_000, 240_000n],
+			[240_000, 260_000n],
 		]);
 	} finally {
 		discontinuity.mockRestore();

@@ -57,7 +57,6 @@ export namespace Legacy {
 		constructor(config: AudioConfig | VideoConfig | "audio" | "video" | "data");
 		decode(frame: Uint8Array): Frame[];
 		end(frame: Frame): Net.Clock.Duration | undefined;
-		finishGroup(group: Net.Group.Producer, end?: Net.Clock.Duration): void;
 		readonly kind: "audio" | "video" | "data";
 	}
 	export { Frame };

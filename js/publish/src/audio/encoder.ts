@@ -231,12 +231,12 @@ export class Encoder {
 	#live: { track: Moq.Track.Producer; producer: Container.Legacy.Producer; start?: Duration } | undefined;
 
 	// Where the next frame submitted to the AudioEncoder starts, i.e. the exclusive end of the
-	// newest one, where an epoch's discontinuity marker goes. Cleared once the marker is written.
+	// newest one, where an epoch ends at a break. Cleared once the epoch ends there.
 	#next: Duration | undefined;
 
-	// The newest epoch's marker. The AudioEncoder outlives a track gap too brief to skip a frame,
+	// Where the newest epoch ended. The AudioEncoder outlives a track gap too brief to skip a frame,
 	// so chunks it still held when the track went away surface after the resume; they sit below the
-	// marker and are dropped.
+	// end and are dropped.
 	#floor: Duration | undefined;
 
 	// The end of the newest retained frame replayed into the encoder. Chunks below it are history
@@ -671,15 +671,14 @@ export class Encoder {
 		return opus;
 	}
 
-	// End the epoch with a discontinuity marker (see Container.Legacy.Producer.discontinuity) at `end`,
-	// by default where the submitted media ends, so a subscriber that stays across the break, or joins
-	// during it, doesn't read the audio before it as live. A marker at or below the newest one is
-	// already covered by it.
+	// End the epoch at `end` (see Container.Legacy.Producer.discontinuity), by default where the
+	// submitted media ends, so a subscriber that stays across the break, or joins during it, does not
+	// read the audio before it as live. An end at or below the newest one has no audio left to end.
 	#cut(end = this.#next): void {
 		if (end === undefined) return;
 		if (this.#next?.le(end)) this.#next = undefined;
 		if (this.#floor !== undefined && end.le(this.#floor)) return;
-		// The epoch ends here even when no track is left to mark, so whatever the codec still owes for
+		// The epoch ends here even when no track is left to end, so whatever the codec still owes for
 		// it stays off the next track.
 		this.#floor = end;
 		const live = this.#live;
@@ -725,13 +724,13 @@ export class Encoder {
 					? new Gate({ sampleRate: config.sampleRate, frame: frameDuration(resolved) })
 					: undefined;
 
-				// What the codec still owes, in submission order: each input's timestamp, or a break whose
-				// marker goes down once every chunk before it is out. Chunks are stamped from here, never
+				// What the codec still owes, in submission order: each input's timestamp, or a break that
+				// ends the epoch once every chunk before it is out. Chunks are stamped from here, never
 				// by the codec: Chrome and Firefox stamp input after a gap as if it were contiguous.
 				// Every browser emits one chunk per input, in order, so a codec that holds a chunk only
 				// delays its stamp, and a break needs no flush.
 				const owed: ({ timestamp: Duration } | { cut: Duration })[] = [];
-				// Write the marker of every break the codec has caught up with.
+				// End the epoch at every break the codec has caught up with.
 				const settle = () => {
 					for (let next = owed[0]; next && "cut" in next; next = owed[0]) {
 						owed.shift();
@@ -817,7 +816,7 @@ export class Encoder {
 				});
 
 				// End the epoch where the submitted audio ends, once the codec has emitted all of it: a
-				// marker placed while chunks are still owed would drop them as pre-gap.
+				// group ended while chunks are still owed would drop them as pre-gap.
 				const cut = () => {
 					if (contiguous === undefined) return;
 					owed.push({ cut: contiguous });
@@ -826,7 +825,7 @@ export class Encoder {
 				};
 
 				// Encode one frame ending at `end`, breaking the timeline first if it does not continue the
-				// last one. Timestamps round to whole microseconds, so a chunk's timestamp and the marker
+				// last one. Timestamps round to whole microseconds, so a chunk's timestamp and the end
 				// placed at the next frame's start agree exactly. `end` is the framer's start for the next
 				// frame, since adding a fractional frame duration to a rounded start can land a microsecond off.
 				const submit = (data: AudioFrame, end: Duration) => {

@@ -121,6 +121,13 @@ export type Read =
 	 * The publisher declared that its media stops at `end`: it paused, switched source, or finished.
 	 * Frames that follow from the same `group` are the stopped encoder's final packets (an audio
 	 * codec's drain), whose output at or past `end` is padding. The next group starts fresh.
+	 *
+	 * A group the publisher ended whole at `end` reads as one unless the next group starts there:
+	 * ahead of a later group's frames, or once nothing continued it by the time a continuing group
+	 * would be a whole max delay late (see {@link ConsumerProps.delay}), or the
+	 * {@link ConsumerProps.playhead} reaches `end`. A continuing group is due once the media past the
+	 * group's newest frame has played since that frame landed. An empty payload opening a group, such
+	 * as an audio group's terminal marker, reads as one at once.
 	 */
 	| { kind: "end"; group: bigint; end: Duration };
 
@@ -143,11 +150,16 @@ interface Group {
 	empty: boolean; // no wire frame was published; empty groups mean nothing
 	media: boolean; // a decodable (non-marker) frame was buffered
 	bare?: boolean; // a data track's marker group: one object with no bytes
+	scale?: Moq.Time.Timescale; // The track's timescale its wire frames carry, undefined while none arrived
 	// Timestamps in microseconds, kept as numbers since every frame updates them.
 	start?: number; // First decoded timestamp
 	minMedia?: number; // Lowest decodable timestamp
 	latest?: number; // The timestamp of the latest known frame
 	end?: number; // The furthest presentation point so far, i.e. max(timestamp + duration)
+	newest?: number; // The newest media timestamp
+	landed?: Instant; // When the frame carrying the newest media timestamp landed
+	last?: number; // The last media timestamp in decode order, to tell a reordered tail
+	timed?: boolean; // A marker or the group's own end timed its last frame
 	fault?: Error; // The payload that failed to decode, an error after the buffered frames are delivered.
 	index: number; // Media frames decoded so far: the first is a keyframe by protocol invariant
 	charged: number; // What this group holds against the max buffer
@@ -158,6 +170,21 @@ interface Group {
 interface Spans {
 	min: (number | undefined)[];
 	max: (number | undefined)[];
+}
+
+// A group's whole end, read as an end unless the group after it starts there. Mirrors Rust's `Declared`.
+interface Declared {
+	group: bigint; // The group that ended
+	end: number; // Where it ended, in microseconds
+	scale: Moq.Time.Timescale; // Its track's timescale, which the next group's start is keyed in
+	// When the next group is due: its newest frame's arrival plus the media left past that frame. The
+	// wait for a continuing group runs from here.
+	since: Instant;
+}
+
+// `key`, a timestamp in `scale` units such as a group start, in microseconds.
+function keyMicros(key: bigint, scale: Moq.Time.Timescale): number {
+	return (Number(key) * 1_000_000) / scale;
 }
 
 // Two adjacent groups are treated as timeline-contiguous when the next group's first PTS is within
@@ -246,6 +273,11 @@ export class Consumer {
 	#mediaGroup?: bigint;
 	// Media went missing since the last item read, so the next one is preceded by a gap.
 	#lost = false;
+	// The end the last group read was finished whole at, which reads as an end unless the next group
+	// continues it.
+	#ending?: Declared;
+	// The group whose end a marker already read as one, so its whole end is not read again.
+	#marked?: bigint;
 	// The furthest presentation point read so far: max(timestamp + duration), endpoints included.
 	// Undefined until the first item, so a loss before it is no gap.
 	#edge?: number;
@@ -287,11 +319,12 @@ export class Consumer {
 	 * floor. Starts at the predecessor's estimate, or the cold-start estimate without one.
 	 */
 	readonly spread: Getter<Duration>;
-	// The newest group opened by a declared end, until a later group's first frame tells the jitter
-	// estimator the silence is over. Not at the marker itself: the stopped encoder's final packets may
-	// follow it in its own group, and they belong to the speech before the silence.
-	#declared?: bigint;
-	#mediaSequence?: bigint;
+	// The newest group that declared an end, until a later group's first frame tells the jitter
+	// estimator the silence is over. Not at the end itself: the stopped encoder's final packets may
+	// follow a marker in its own group, and they belong to the speech before the silence.
+	#silent?: bigint;
+	// The newest group the estimator observed media in, whose whole end a later group may start past.
+	#mediaGroupSeen?: Moq.Group.Consumer;
 
 	#signals = new Effect();
 	#closed = new Once<Error | null>();
@@ -508,10 +541,10 @@ export class Consumer {
 					return;
 				}
 				const arrived = (wire.arrived ?? now()).since(Instant.ZERO).asMillis();
-				if (this.#format.kind === "data" && decoded.length === 0) this.#declare(group.start);
+				if (this.#format.kind === "data" && decoded.length === 0) this.#silence(group.start);
 				for (const sample of decoded) {
 					const marker = this.#format.end?.(sample) !== undefined;
-					this.#note(group.start, marker, media, sample.timestamp, arrived);
+					this.#note(group, wire.timestamp.scale, marker, media, sample.timestamp, arrived);
 					if (!marker) media = true;
 				}
 			}
@@ -522,23 +555,40 @@ export class Consumer {
 		}
 	}
 
-	// Observe one decoded sample of group `sequence` for the arrival estimate: media is observed,
-	// and a marker ahead of any media (`media` false) declares an end.
-	#note(sequence: bigint, marker: boolean, media: boolean, timestamp: Duration, arrived: number): void {
+	// Observe one decoded sample of `group`, whose wire frames carry `scale`, for the arrival estimate:
+	// media is observed, and a marker ahead of any media (`media` false) declares an end.
+	#note(
+		group: Moq.Group.Consumer,
+		scale: Moq.Time.Timescale | undefined,
+		marker: boolean,
+		media: boolean,
+		timestamp: Duration,
+		arrived: number,
+	): void {
+		const sequence = group.start;
 		// Observed before any gap handling or age budget: a target derived from what survives the
 		// budget would only ever confirm the budget it was cut to.
 		if (!marker) {
-			if (this.#mediaSequence === undefined || sequence > this.#mediaSequence) this.#mediaSequence = sequence;
-			if (this.#declared !== undefined && sequence > this.#declared) {
+			const seen = this.#mediaGroupSeen;
+			if (seen === undefined || sequence > seen.start) {
+				// The media group before this one ended whole short of where this one starts, which
+				// declares the silence between. Its end may not have landed yet, which misses it.
+				const whole = seen?.end;
+				if (seen && whole !== undefined && scale !== undefined) {
+					if (!ptsContiguous(keyMicros(whole, scale), keyMicros(sequence, scale))) this.#silence(seen.start);
+				}
+				this.#mediaGroupSeen = group;
+			}
+			if (this.#silent !== undefined && sequence > this.#silent) {
 				this.#jitter.end();
-				this.#declared = undefined;
+				this.#silent = undefined;
 			}
 			this.#jitter.observe(arrived, timestamp.asMillis());
 			const spread = this.#jitter.measured;
 			if (spread !== this.#spread.peek().asMillis()) this.#spread.set(Duration.millis(spread));
 		} else if (!media) {
 			// Only a marker ahead of any media declares an end; one after it is a frame's endpoint.
-			this.#declare(sequence);
+			this.#silence(sequence);
 		}
 	}
 
@@ -623,9 +673,10 @@ export class Consumer {
 	}
 
 	// Note an end the publisher declared in group `sequence`, which a later group's first frame resumes from.
-	#declare(sequence: bigint): void {
-		if (this.#mediaSequence !== undefined && sequence < this.#mediaSequence) return;
-		if (this.#declared === undefined || sequence > this.#declared) this.#declared = sequence;
+	#silence(sequence: bigint): void {
+		const seen = this.#mediaGroupSeen?.start;
+		if (seen !== undefined && sequence < seen) return;
+		if (this.#silent === undefined || sequence > this.#silent) this.#silent = sequence;
 	}
 
 	// Decode one wire frame into `group`, charging what it buffers. A payload that fails to decode sets
@@ -652,8 +703,9 @@ export class Consumer {
 				return;
 			}
 			group.bare = decoded.length === 0;
-			if (group.bare && !this.#ordered) this.#declare(group.consumer.start);
+			if (group.bare && !this.#ordered) this.#silence(group.consumer.start);
 		}
+		group.scale ??= wire.timestamp.scale;
 
 		// Decoded payloads are views of the wire payload, which stays allocated until the last of them is
 		// read, so that one also holds whatever of it the views leave out, such as a large header.
@@ -661,7 +713,7 @@ export class Consumer {
 		for (const sample of decoded) {
 			const marker = this.#format.end?.(sample) !== undefined;
 			// Observed here, as it comes off the transport, unless #observe sees every arrival instead.
-			if (!this.#ordered) this.#note(group.consumer.start, marker, group.media, sample.timestamp, arrived);
+			if (!this.#ordered) this.#note(group.consumer, group.scale, marker, group.media, sample.timestamp, arrived);
 			const frame: ReceivedFrame = {
 				arrival,
 				payload: sample.payload,
@@ -684,6 +736,11 @@ export class Consumer {
 				if (group.minMedia === undefined || at < group.minMedia) {
 					group.minMedia = at;
 				}
+				if (group.newest === undefined || at >= group.newest) {
+					group.newest = at;
+					group.landed = arrival;
+				}
+				group.last = at;
 			}
 
 			group.start ??= at;
@@ -721,8 +778,19 @@ export class Consumer {
 	// timeline from a real gap. A group with no frames (empty, or errored before the first one) says
 	// nothing about the timeline, so it leaves the last known end in place rather than wiping it.
 	#pass(group: Group, next: bigint | undefined): void {
+		this.#whole(group);
 		if (group.end !== undefined) this.#presentedEnd = group.end;
 		this.#active = next;
+	}
+
+	// Where `group` ends, in microseconds, once its producer finished it whole, which also raises how
+	// far it presents: its end can pass what its frames reach when they carry no duration.
+	#whole(group: Group): number | undefined {
+		const end = group.consumer.end;
+		if (end === undefined || group.scale === undefined) return undefined;
+		const whole = keyMicros(end, group.scale);
+		if (group.end === undefined || whole > group.end) group.end = whole;
+		return whole;
 	}
 
 	// Skip the oldest groups while the buffered span exceeds the max delay. Returns true if any was skipped.
@@ -994,7 +1062,8 @@ export class Consumer {
 	 * Errors come in delivery order: a payload that fails to decode throws after the items ahead of it,
 	 * and skipping a malformed group throws rather than reading as a gap. After buffered groups drain,
 	 * a finished track returns undefined and an aborted track throws. Only a reset or evicted group reads
-	 * as a gap.
+	 * as a gap. A group ended whole reads as an end unless the next group starts where it ended; a gap
+	 * after it says the same, so it reads no end.
 	 */
 	async next(): Promise<Read | undefined> {
 		if (this.#next) {
@@ -1015,6 +1084,8 @@ export class Consumer {
 			}
 			if (this.#groups.length === 0) {
 				if (ended !== undefined) {
+					// The track's own end says where the media stops.
+					this.#ending = undefined;
 					if (ended instanceof Error) throw ended;
 					return undefined;
 				}
@@ -1103,17 +1174,26 @@ export class Consumer {
 			const head = this.#groups.at(0);
 			if (starting === undefined && head && this.#active !== undefined && head.consumer.start <= this.#active) {
 				const seq = head.consumer.start;
+				// The group after a declared end has started: one starting at the end continues the media,
+				// and a later one resumes it after a pause the end declared. A loss reads as the gap instead.
+				const declared = this.#ending;
+				this.#ending = undefined;
+				if (declared && !this.#lost && !ptsContiguous(declared.end, keyMicros(seq, declared.scale))) {
+					return this.#declare(declared);
+				}
 				const frame = head.frames.shift();
 				if (frame) {
 					this.#refund(head, head.costs.shift() ?? 0);
 					const end = this.#format.end?.(frame);
 					if (end !== undefined) {
+						head.timed = true;
 						this.#updateBuffered();
 						// A trailing endpoint is the last frame's duration: it moves the edge, nothing else.
 						if (seq === this.#mediaGroup) {
 							this.#advance(end.asMicros());
 							continue;
 						}
+						this.#marked = seq;
 						return this.#emit({ kind: "end", group: seq, end });
 					}
 					this.#mediaGroup = seq;
@@ -1146,6 +1226,23 @@ export class Consumer {
 				const settled = this.#ended(head);
 				if (settled !== undefined) {
 					this.#groups.shift();
+					const whole = this.#whole(head);
+					const scale = head.scale;
+					const declared = head.media ? whole : undefined;
+					// The group's end times its last frame, as a duration marker did, unless one already has.
+					// A reordered tail does not present last, so the end does not bound it.
+					if (declared !== undefined && head.last === head.newest && !head.timed) {
+						head.timed = true;
+						this.#advance(declared);
+					}
+					// Media ending whole stops at its end unless the next group continues it, which is due
+					// once the media left past its newest frame has played since that landed.
+					this.#ending = undefined;
+					if (declared !== undefined && scale !== undefined && this.#marked !== seq) {
+						const left = Duration.micros(Math.max(0, declared - (head.newest ?? declared)));
+						const since = (head.landed ?? now()).saturatingAdd(left);
+						this.#ending = { group: seq, end: declared, scale, since };
+					}
 					if (seq === this.#active) {
 						// Advance to the next buffered group's actual sequence, but ONLY if it continues this
 						// group's timeline. Some encoders number groups non-sequentially with large gaps (not
@@ -1176,6 +1273,14 @@ export class Consumer {
 				if (this.#tryPressureSkip()) continue;
 			}
 
+			// No group continued a declared end in time: the media stopped there. A finished track says
+			// so itself, above.
+			const declared = this.#ending;
+			if (declared && this.#endWait(declared, this.#delay.peek()) === 0) {
+				this.#ending = undefined;
+				return this.#declare(declared);
+			}
+
 			if (this.#notify) {
 				throw new Error("multiple calls to next not supported");
 			}
@@ -1186,22 +1291,27 @@ export class Consumer {
 			if (abort.aborted) return undefined;
 			let timer: Effect | undefined;
 			const since = starting ?? this.#hole;
-			if (since !== undefined) {
+			const ending = this.#ending;
+			if (since !== undefined || ending !== undefined) {
 				timer = new Effect();
 				timer.run((effect) => {
 					const delay = effect.get(this.#delay);
-					// A clock that jumps moves when it reaches the group past a hole.
+					// A clock that jumps moves when it reaches the group past a hole, or a declared end.
 					if (this.#playhead) effect.get(this.#playhead.anchor);
-					// The start waits out its reach, and a hole the wait, which an unlimited one never does.
-					const budget = starting === undefined ? this.#holeWait(delay) : this.#reach(delay);
-					let left = Number.isFinite(budget)
-						? Duration.micros(budget).saturatingSub(now().since(since))
-						: undefined;
-					// A hole also ends once the playout clock reaches the first group past it.
-					const passing = starting === undefined ? this.#passed(this.#bound()) : undefined;
-					if (passing !== undefined) left = Duration.micros(Math.min(passing, left?.asMicros() ?? passing));
+					// In microseconds.
+					let left: number | undefined;
+					if (since !== undefined) {
+						// The start waits out its reach, and a hole the wait, which an unlimited one never does.
+						const budget = starting === undefined ? this.#holeWait(delay) : this.#reach(delay);
+						if (Number.isFinite(budget)) left = Math.max(0, budget - now().since(since).asMicros());
+						// A hole also ends once the playout clock reaches the first group past it.
+						const passing = starting === undefined ? this.#passed(this.#bound()) : undefined;
+						if (passing !== undefined) left = Math.min(passing, left ?? passing);
+					}
+					const due = ending && this.#endWait(ending, delay);
+					if (due !== undefined) left = Math.min(due, left ?? due);
 					if (left === undefined) return;
-					effect.timer(() => this.#notify?.(), left);
+					effect.timer(() => this.#notify?.(), Duration.micros(left));
 				});
 			}
 
@@ -1231,6 +1341,25 @@ export class Consumer {
 		const playhead = this.#playhead?.now()?.asMicros();
 		if (bound === undefined || playhead === undefined) return undefined;
 		return Math.max(0, bound - playhead);
+	}
+
+	// How long until a declared end no group continued reads as one, in microseconds: until a
+	// continuing group would be a whole max delay late, past which the reader would give it up as stale
+	// anyway, or until the playout clock reaches the end, whichever is first. Zero once due, undefined
+	// when neither ever comes.
+	#endWait(declared: Declared, delay: Moq.Track.Delay): number | undefined {
+		const max = maxMicros(delay);
+		let left = Number.isFinite(max)
+			? declared.since.saturatingAdd(Duration.micros(max)).since(now()).asMicros()
+			: undefined;
+		const passing = this.#passed(declared.end);
+		if (passing !== undefined) left = Math.min(passing, left ?? passing);
+		return left;
+	}
+
+	// Read a declared end as the end of its group's media.
+	#declare(declared: Declared): Read {
+		return this.#emit({ kind: "end", group: declared.group, end: Duration.micros(declared.end) });
 	}
 
 	// How long a missing group is waited for, in microseconds: the min delay, the reader's own buffer,

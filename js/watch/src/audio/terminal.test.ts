@@ -93,8 +93,8 @@ test("a gap reapplies Opus pre-skip in the resumed epoch", () => {
 test("an endpoint does not trim media resumed in a later group", () => {
 	const terminal = new Terminal();
 	terminal.update(frame(0n, 0));
-	// A discontinuity marker: its own group, ending the epoch at the live edge.
-	expect(terminal.update(end(1n, 20_000))).toBe(false);
+	// The group ended whole and nothing continued it, which ends the epoch at its end.
+	expect(terminal.update(end(0n, 20_000))).toBe(false);
 	// The next group comes from a fresh encoder.
 	expect(terminal.update(frame(2n, 5_000_000))).toBe(true);
 	expect(terminal.end).toBeUndefined();
