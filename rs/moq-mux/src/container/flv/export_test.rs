@@ -1729,6 +1729,98 @@ async fn a_track_leaving_the_catalog_is_read_to_its_end() {
 	assert_eq!(audio_frames, 2, "the leaving track's tail went out");
 }
 
+/// A capture that loses its microphone fails the audio track, keeps it listed while it drains,
+/// and lists the reopened one under a new name, either before or after a reader sees the failure.
+/// The FLV audio goes on with the replacement while the video plays on.
+#[tokio::test(start_paused = true)]
+async fn a_failed_rendition_continues_on_its_replacement() {
+	use hang::catalog::{AAC, AudioConfig, Container, H264, VideoConfig};
+	use moq_net::Timestamp;
+
+	for listed_first in [false, true] {
+		let mut producer = moq_net::broadcast::Info::new().produce();
+		let consumer = producer.consume();
+		let mut catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
+		let mut video_config = VideoConfig::new(H264 {
+			profile: 0x42,
+			constraints: 0xc0,
+			level: 0x1f,
+			inline: false,
+		});
+		video_config.container = Container::Legacy;
+		video_config.description = Some(Bytes::from(avcc()));
+		let mut audio_config = AudioConfig::new(AAC { profile: 2 }, 44100, 2);
+		audio_config.container = Container::Legacy;
+		audio_config.description = Some(Bytes::from_static(&ASC));
+
+		let legacy = || crate::catalog::hang::Container::Legacy(crate::container::Kind::Data);
+		let mut add = |name: &str, video: bool| {
+			let track = producer.create_track(producer.unique_name(name), timed()).unwrap();
+			let mut modify = catalog.modify().unwrap();
+			if video {
+				modify.video.renditions.insert(track.name().to_string(), video_config.clone());
+			} else {
+				modify.audio.renditions.insert(track.name().to_string(), audio_config.clone());
+			}
+			crate::container::Producer::new(track, legacy())
+		};
+		let mut video = add(".avc1", true);
+		let mut audio = add(".aac", false);
+		let failed = audio.name().to_string();
+		let frame = |timestamp_ms: u64, payload: &'static [u8], keyframe| crate::container::Frame {
+			timestamp: Timestamp::from_millis(timestamp_ms).unwrap(),
+			duration: None,
+			payload: Bytes::from_static(payload),
+			keyframe,
+		};
+		video.write(frame(0, &[0, 0, 0, 1, 0x65], true)).unwrap();
+		audio.write(frame(0, &[0xde, 0xad], true)).unwrap();
+
+		let mut exporter = open_export(crate::source::announced(&consumer).await)
+			.await
+			.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY))
+			.with_replay();
+		let mut exported = Vec::new();
+		assert!(drain_until_idle(&mut exporter, &mut exported).await.is_none());
+
+		let mut replacement = None;
+		if listed_first {
+			replacement = Some(add(".aac", false));
+			assert!(drain_until_idle(&mut exporter, &mut exported).await.is_none());
+		}
+		audio.abort(moq_net::Error::Transport("audio device lost".into()));
+		video.write(frame(33, &[0, 0, 0, 1, 0x41], false)).unwrap();
+		assert!(drain_until_idle(&mut exporter, &mut exported).await.is_none());
+		let mut replacement = replacement.unwrap_or_else(|| add(".aac", false));
+		assert!(drain_until_idle(&mut exporter, &mut exported).await.is_none());
+		for ms in [100, 123] {
+			replacement.write(frame(ms, &[0xbe, 0xef], true)).unwrap();
+			assert!(drain_until_idle(&mut exporter, &mut exported).await.is_none());
+		}
+		catalog.modify().unwrap().audio.renditions.remove(&failed);
+		video.write(frame(166, &[0, 0, 0, 1, 0x41], false)).unwrap();
+		let _finished = replacement.finish().unwrap();
+		let _finished = video.finish().unwrap();
+		catalog.finish().unwrap();
+
+		let end = drain_until_idle(&mut exporter, &mut exported).await;
+		assert!(matches!(end, Some(Ok(()))), "listed first: {listed_first}: {end:?}");
+		let tags = parse_tags(&exported);
+		let audio: Vec<&[u8]> = tags
+			.iter()
+			.filter(|t| t.tag_type == super::TAG_AUDIO && t.body[1] == super::AAC_RAW)
+			.map(|t| &t.body[2..])
+			.collect();
+		assert_eq!(
+			audio,
+			[&[0xde, 0xad][..], &[0xbe, 0xef], &[0xbe, 0xef]],
+			"listed first: {listed_first}"
+		);
+		let video = tags.iter().filter(|t| t.tag_type == super::TAG_VIDEO).count();
+		assert!(video >= 3, "the video played on: {video} tags");
+	}
+}
+
 async fn drain_exporter_chunks<S: crate::catalog::Stream>(mut exporter: Export<S>, chunks: usize) -> Vec<u8> {
 	let mut exported = Vec::new();
 	for _ in 0..chunks {

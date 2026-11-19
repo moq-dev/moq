@@ -157,6 +157,11 @@ pub struct Export<S: Stream> {
 
 	/// True once the file header and sequence headers have been emitted.
 	header_emitted: bool,
+	/// The latest catalog, where a track that failed after the header finds a rendition to
+	/// continue on.
+	listed: Catalog,
+	/// Renditions a track left after theirs failed, never picked again while still listed.
+	replaced: std::collections::HashSet<String>,
 	/// Milliseconds added to every tag's timestamps, so the decode times a declared reorder
 	/// depth puts before a group's earliest presentation still fit FLV's unsigned clock.
 	shift: u32,
@@ -191,7 +196,7 @@ struct FlvTrack {
 	pending: Option<(crate::jitter::Arrival<Frame>, Bill)>,
 	/// When the source was last empty, bounding the next frame's arrival.
 	empty: kio::clock::Instant,
-	finished: bool,
+	read: Read,
 	/// The FLV payload shape (legacy CodecID vs enhanced FourCC) to mux this
 	/// track as, fixed from its catalog codec when it's bound.
 	flavor: Flavor,
@@ -212,12 +217,35 @@ struct FlvTrack {
 	announced: Option<Bytes>,
 }
 
+/// Whether a track still reads its source.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Read {
+	Live,
+	/// The track ended, cleanly or as a sibling instance went.
+	Finished,
+	/// The track itself failed. Another rendition of its kind and codec may continue it.
+	Lost,
+}
+
 impl FlvTrack {
 	/// Read `source`, the track the catalog moved this rendition to.
 	fn rebind(&mut self, source: ExportSource) {
 		self.source = source.continuing(&self.source);
-		self.finished = false;
+		self.read = Read::Live;
 		self.empty = kio::clock::now();
+	}
+
+	/// Continue this failed track on rendition `name`, read from `source`, returning the
+	/// rendition it read before.
+	fn replace(&mut self, name: String, source: ExportSource) -> String {
+		tracing::info!(track = %name, replaces = %self.name, "continuing a failed rendition");
+		self.rebind(source);
+		std::mem::replace(&mut self.name, name)
+	}
+
+	/// Nothing more is read: the track ended or failed.
+	fn finished(&self) -> bool {
+		self.read != Read::Live
 	}
 
 	/// The tag timestamp of a frame presented at `pts` on the tag clock, on the inferred clock.
@@ -366,6 +394,8 @@ impl<S: Stream> Export<S> {
 			video: Vec::new(),
 			audio: Vec::new(),
 			header_emitted: false,
+			listed: Catalog::default(),
+			replaced: Default::default(),
 			shift: 0,
 		}
 	}
@@ -422,7 +452,7 @@ impl<S: Stream> Export<S> {
 			}
 			// The catalog closed and nothing more can resolve a codec config (no
 			// tracks arrived, or every bound track ended first): there's no header.
-			if self.catalog.is_none() && (!self.has_tracks() || self.tracks().all(|t| t.finished)) {
+			if self.catalog.is_none() && (!self.has_tracks() || self.tracks().all(FlvTrack::finished)) {
 				return Poll::Ready(Ok(None));
 			}
 			return Poll::Pending;
@@ -437,7 +467,7 @@ impl<S: Stream> Export<S> {
 		}
 
 		// 5. End-of-stream once every subscribed track is drained.
-		if self.has_tracks() && self.tracks().all(|t| t.finished && t.pending.is_none()) {
+		if self.has_tracks() && self.tracks().all(|t| t.finished() && t.pending.is_none()) {
 			if self.catalog.is_none() {
 				return Poll::Ready(Ok(None));
 			}
@@ -476,6 +506,7 @@ impl<S: Stream> Export<S> {
 
 	/// Read each track within its jitter window, preserving ingress timing before buffering.
 	fn fill(&mut self, waiter: &kio::Waiter) -> crate::Result<()> {
+		let mut lost = Vec::new();
 		for kind in [0, 1] {
 			let count = if kind == 0 { self.video.len() } else { self.audio.len() };
 			for index in 0..count {
@@ -495,10 +526,18 @@ impl<S: Stream> Export<S> {
 					let (arrival, bill) = if let Some(pending) = track.pending.take() {
 						pending
 					} else {
-						if track.finished {
+						if track.finished() {
 							break;
 						}
-						let frame = match track.source.poll_event(waiter)? {
+						let event = match track.source.poll_event(waiter) {
+							Poll::Ready(Err(err)) if track.source.lost() => {
+								track.read = Read::Lost;
+								lost.push((track.name.clone(), err));
+								break;
+							}
+							event => event?,
+						};
+						let frame = match event {
 							Poll::Ready(Some(Event::Frame { frame, .. })) => frame,
 							// A group that ended or was cut short holds frames no later one can precede.
 							Poll::Ready(Some(Event::GroupEnd | Event::Cut { .. })) => {
@@ -507,7 +546,7 @@ impl<S: Stream> Export<S> {
 							}
 							Poll::Ready(Some(Event::FrameEnd { .. })) => continue,
 							Poll::Ready(None) => {
-								track.finished = true;
+								track.read = Read::Finished;
 								break;
 							}
 							Poll::Pending => {
@@ -560,12 +599,96 @@ impl<S: Stream> Export<S> {
 					&mut self.audio[index]
 				};
 				// Nothing settles the frames held when a track ends, so they keep their own arrival.
-				if track.finished && self.header_emitted {
+				if track.finished() && self.header_emitted {
 					track.release((kind, index), None, self.shift, true, &mut self.jitter)?;
 				}
 			}
 		}
+		for (name, err) in lost {
+			self.survive(&name, err)?;
+		}
 		Ok(())
+	}
+
+	/// Whether the export outlives the failure of track `name`, which [`Self::fill`] ended.
+	///
+	/// A listed rendition of its kind and codec continues it at once. Otherwise, while another
+	/// track still reads, only that rendition ends: a publisher that loses a source, such as a
+	/// microphone, may list a replacement, which continues it then. With nothing left reading,
+	/// the failure is the export's, as before.
+	fn survive(&mut self, name: &str, err: crate::Error) -> crate::Result<()> {
+		self.replace_lost()?;
+		if self.tracks().all(FlvTrack::finished) {
+			return Err(err);
+		}
+		if self.tracks().any(|track| track.name == name && track.read == Read::Lost) {
+			tracing::warn!(track = name, %err, "rendition failed; the export keeps its other media");
+		}
+		Ok(())
+	}
+
+	/// Continue each track that failed after the header on a listed rendition no track reads,
+	/// of its kind and codec, best first: the header fixed the tag shape, so a rendition of
+	/// another codec cannot continue it.
+	fn replace_lost(&mut self) -> crate::Result<()> {
+		if !self.header_emitted {
+			return Ok(());
+		}
+		for index in 0..self.video.len() {
+			let track = &self.video[index];
+			if track.read != Read::Lost {
+				continue;
+			}
+			let Some((name, config)) = self
+				.listed
+				.video
+				.ranked()
+				.find(|(name, config)| {
+					video_flavor(config).ok() == Some(track.flavor) && self.unread(&self.video, name, &config.container)
+				})
+				.map(|(name, config)| (name.clone(), config.clone()))
+			else {
+				continue;
+			};
+			let Some(source) = ExportSource::for_video(&self.source, &name, &config, self.delay)? else {
+				continue;
+			};
+			let track = &mut self.video[index];
+			track.fallback_description = fallback_description(&config);
+			track.dts_reserve = dts_reserve(&config);
+			track.config = Some(config);
+			self.replaced.insert(track.replace(name, source));
+		}
+		for index in 0..self.audio.len() {
+			let track = &self.audio[index];
+			if track.read != Read::Lost {
+				continue;
+			}
+			let Some((name, config)) = self
+				.listed
+				.audio
+				.ranked()
+				.find(|(name, config)| {
+					audio_flavor(config).ok() == Some(track.flavor) && self.unread(&self.audio, name, &config.container)
+				})
+				.map(|(name, config)| (name.clone(), config.clone()))
+			else {
+				continue;
+			};
+			let Some(source) = ExportSource::for_audio(&self.source, &name, &config, self.delay)? else {
+				continue;
+			};
+			self.replaced.insert(self.audio[index].replace(name, source));
+		}
+		Ok(())
+	}
+
+	/// Whether rendition `name`, carried in `container`, is free to continue a failed track among
+	/// `tracks`: none reads it, and none left it after it failed.
+	fn unread(&self, tracks: &[FlvTrack], name: &str, container: &Container) -> bool {
+		matches!(container, Container::Legacy | Container::Loc)
+			&& !self.replaced.contains(name)
+			&& !tracks.iter().any(|track| track.name == name)
 	}
 
 	fn update_catalog(&mut self, mut catalog: Catalog) -> crate::Result<()> {
@@ -594,6 +717,11 @@ impl<S: Stream> Export<S> {
 			self.bind_audio(&catalog)?;
 		} else {
 			self.rebind(&catalog)?;
+			self.replaced.retain(|name| {
+				catalog.video.renditions.contains_key(name) || catalog.audio.renditions.contains_key(name)
+			});
+			self.listed = catalog.clone();
+			self.replace_lost()?;
 			if self.multitrack
 				&& (catalog.video.renditions.len() > self.video.len()
 					|| catalog.audio.renditions.len() > self.audio.len())
@@ -689,7 +817,7 @@ impl<S: Stream> Export<S> {
 				source,
 				pending: None,
 				empty: kio::clock::now(),
-				finished: false,
+				read: Read::Live,
 				flavor,
 				fallback_description,
 				config: Some(config.clone()),
@@ -738,7 +866,7 @@ impl<S: Stream> Export<S> {
 				source,
 				pending: None,
 				empty: kio::clock::now(),
-				finished: false,
+				read: Read::Live,
 				flavor,
 				fallback_description: None,
 				config: None,
