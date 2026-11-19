@@ -392,7 +392,9 @@ fn stamp(chain: &mut Vec<Id>, me: Id, forwards: bool) {
 /// How claims of one precedence order at a node, lower first: the rank of the claim
 /// joined with `route`, the route to its announcer `origin`, or none for the node's own;
 /// then one no marked link reached, which more neighbours may be told, as a route is
-/// chosen; the fewer relays that took it on its way here; and the claimant.
+/// chosen; the fewer relays that took it on its way here; and the claimant. It reads only
+/// the route's rank and mark, which [`Ways`] records, so a route change that moves the
+/// closest claim is logged ([`Router::relog`]).
 pub(crate) fn claim_order<A: Item>(claim: &Claim<A>, route: Option<&Offer>, origin: NodeId) -> ClaimOrder {
 	let (rank, marked) = match route {
 		Some(route) => claim.joined(route),
@@ -5261,5 +5263,68 @@ mod tests {
 		});
 		assert!(told, "the upstream was told nothing: {out:?}");
 		assert_eq!(router.pick(&room), Some(node(5)), "the unmarked claim is closest");
+	}
+
+	/// A route that turns marked at the same rank, through the same session and path,
+	/// changes which of two equal-rank claims is closest, so it is logged as a change to
+	/// the ways (#9114 logs only those) and the closest way moves with it. Node 4's claim
+	/// reaches this node over a link it marked and node 5's over one it did not; then node
+	/// 5's route turns marked, and node 4's gains an unmarked one.
+	#[test]
+	fn a_route_flipping_which_claim_is_unmarked_reaches_its_followers() {
+		let mut router: Router<usize, u64, Run> = Router::new(node(1), debounce(HOP));
+		router.follow();
+		router
+			.connect(
+				2,
+				Port {
+					upstream: true,
+					..port(Role::Routing(node(2)))
+				},
+			)
+			.unwrap();
+		router.recv(2, Msg::Edited).unwrap();
+		open(&mut router, 3, Role::Routing(node(3)));
+		router.drain();
+
+		let room = (p("live"), 7);
+		for (origin, via) in [(4, 2), (5, 3)] {
+			router.recv(via, route(origin, via as Id, 1)).unwrap();
+			let claims = Msg::Claims {
+				origin: node(origin),
+				changes: vec![(room.clone(), claim(run(0), 0))],
+				floor: 1,
+			};
+			router.recv(via, claims).unwrap();
+		}
+		router.drain();
+		router.changes();
+		assert_eq!(router.pick(&room), Some(node(5)), "the unmarked claim is closest");
+
+		let closest = |router: &Router<usize, u64, Run>| {
+			(router.ways(&room).into_iter())
+				.filter(|way| way.closest)
+				.map(|way| (way.origin, way.next, way.claim.marked))
+				.collect::<Vec<_>>()
+		};
+		let mut marked = route(5, 3, 1);
+		if let Msg::Route { offer: Some(offer), .. } = &mut marked {
+			offer.marked = true;
+		}
+		router.recv(3, marked).unwrap();
+		router.drain();
+		assert_eq!(
+			router.changes().routes,
+			BTreeSet::from([node(5)]),
+			"the mark alone moved"
+		);
+		assert_eq!(router.pick(&room), Some(node(4)), "both marked: the lower Node ID");
+		assert_eq!(closest(&router), vec![(node(4), Next::Via(2), true)]);
+
+		router.recv(3, route(4, 3, 1)).unwrap();
+		router.drain();
+		assert_eq!(router.changes().routes, BTreeSet::from([node(4)]), "an unmarked route");
+		assert_eq!(router.pick(&room), Some(node(4)), "the unmarked claim is closest");
+		assert_eq!(closest(&router), vec![(node(4), Next::Via(3), false)]);
 	}
 }
