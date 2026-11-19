@@ -3,12 +3,13 @@
 //! any link drops.
 //!
 //! Three real relays on loopback: C dials A, and L dials both. L drains, so A and C
-//! each hear L's GOAWAY themselves and send the other a DRAIN for it, while L, which
-//! sent the GOAWAY, sends none. Every link stays up until L's drain deadline, so no
-//! relay counts a DEAD until then.
+//! each hear L's GOAWAY themselves, and the first to hear it sends the other a DRAIN
+//! for it, while L, which sent the GOAWAY, sends none. Every link stays up until L's
+//! drain deadline, so no relay counts a DEAD until then.
 
 use std::time::Duration;
 
+use moq_net::origin::{Cost, RouteKind};
 use moq_net::stats::{Registry, Routes, Withdrawal};
 use moq_relay::{Config, Relay, shutdown};
 
@@ -98,6 +99,32 @@ impl Node {
 			.sum()
 	}
 
+	/// Publish the broadcast `name` from this relay.
+	fn publish(&self, name: &str) -> moq_net::origin::Route {
+		self.origin
+			.route(name, moq_net::origin::RouteOptions::default())
+			.expect("create broadcast")
+	}
+
+	/// Resolve once this relay's route for `name` comes straight from its publisher: one
+	/// unpriced link, costing 1, where a route through another neighbour costs 2. The
+	/// relay forwards that route to its other neighbours as it takes it.
+	async fn direct(&self, name: &str) {
+		let mut routes = self.origin.consume().routes();
+		kio::clock::timeout(TIMEOUT, async {
+			loop {
+				let event = routes.next().await.expect("origin open");
+				let live = matches!(event.kind, RouteKind::Start | RouteKind::Update | RouteKind::Restart);
+				let route = &event.announce;
+				if live && route.prefix.as_str() == name && route.route.cost() == Cost::new(1) {
+					return;
+				}
+			}
+		})
+		.await
+		.unwrap_or_else(|_| panic!("timed out taking a direct route to {name}"));
+	}
+
 	/// Resolve once this relay has an active route for `name`.
 	async fn learns(&self, name: &str) {
 		kio::clock::timeout(TIMEOUT, self.origin.consume().follow(name, None).unwrap().available())
@@ -119,54 +146,57 @@ impl Node {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_draining_relay_drains_the_links_it_dialed() {
+	kio::clock::host_time(); // real relays on real sockets
 	moq_tokio::crypto::install_default().unwrap();
 
+	// A and C first, until each learns the other's broadcast over the one link between
+	// them: their route exchange is then up, so each forwards L's routes to the other as
+	// it learns them, which is what a DRAIN for L is later sent along.
 	let a = Node::start("a", &[], Duration::ZERO).await;
 	let c = Node::start("c", &[a.port], Duration::ZERO).await;
-	let l = Node::start("l", &[a.port, c.port], DRAIN).await;
-	let _route = l
-		.origin
-		.route("l", moq_net::origin::RouteOptions::default())
-		.expect("create broadcast");
+	let _a = a.publish("a");
+	let _c = c.publish("c");
+	a.learns("c").await;
+	c.learns("a").await;
 
-	// The triangle is up: A accepted C and L, C dialed A and accepted L, and L dialed both.
-	a.learns("l").await;
-	c.learns("l").await;
+	// Then L, dialing both, until each neighbour takes L's route straight from L and so
+	// has forwarded it to the other.
+	let l = Node::start("l", &[a.port, c.port], DRAIN).await;
+	let _l = l.publish("l");
 	kio::clock::timeout(TIMEOUT, async {
-		while a.active() < 2 || c.active() < 2 || l.active() < 2 {
+		while l.active() < 2 {
 			tokio::task::yield_now().await;
 		}
 	})
 	.await
-	.unwrap_or_else(|_| {
-		panic!(
-			"every link connects: A {}, C {}, L {}",
-			a.active(),
-			c.active(),
-			l.active()
-		)
-	});
+	.expect("L dials both");
+	a.direct("l").await;
+	c.direct("l").await;
 
-	let started = tokio::time::Instant::now();
+	let started = kio::clock::now();
 	l.trigger.start();
 
-	// Each neighbour hears the GOAWAY on the link L dialed and tells the other.
-	let drain = |node: &Node| {
-		let routes = node.routes();
-		routes.sent.count(Withdrawal::Drain) > 0 && routes.received.count(Withdrawal::Drain) > 0
+	// Each neighbour hears the GOAWAY on the link L dialed and tells the other, unless the
+	// other told it first: a DRAIN never goes back to the neighbour it came from. Either
+	// way the link between them carries one, and each one sent arrives.
+	let told = || {
+		let (a, c) = (a.routes(), c.routes());
+		let (a_sent, c_sent) = (a.sent.count(Withdrawal::Drain), c.sent.count(Withdrawal::Drain));
+		a_sent + c_sent > 0
+			&& a_sent == c.received.count(Withdrawal::Drain)
+			&& c_sent == a.received.count(Withdrawal::Drain)
 	};
 	kio::clock::timeout(TIMEOUT, async {
-		while !(drain(&a) && drain(&c)) {
+		while !told() {
 			tokio::task::yield_now().await;
 		}
 	})
 	.await
 	.unwrap_or_else(|_| {
 		panic!(
-			"each neighbour told the other that L drains: A {:?}, C {:?}, L {:?}",
+			"no DRAIN for L crossed between A and C: A {:?}, C {:?}",
 			a.routes(),
-			c.routes(),
-			l.routes()
+			c.routes()
 		)
 	});
 
