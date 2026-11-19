@@ -394,6 +394,11 @@ pub enum MoqError {
 
 /// What to do after a request failed, as [`moq_error_retry`] answers it. Mirrors
 /// moq-net's `Retry` and js/net's `retry`.
+///
+/// It judges the request, not the session: a session closed with any code, an auth refusal
+/// included, answers [`Self::Same`], since whether the session comes back is the
+/// connection's call. A caller deciding whether to reconnect checks [`moq_error_is_auth`]
+/// first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum MoqRetry {
 	/// The source failed to deliver rather than judging the request, so asking it again may
@@ -412,7 +417,8 @@ impl MoqError {
 	/// Rebuilds the moq-net error this one came from, so moq-net's table decides. Any other
 	/// local failure, [`Self::Internal`] included, repeats on every attempt, except a failed
 	/// dial, a transport failure before the session existed, and [`Self::Busy`], which asks
-	/// the caller to try again.
+	/// the caller to try again. A session close answers [`MoqRetry::Same`] whatever its code,
+	/// so a caller deciding whether to reconnect checks [`Self::is_auth`] first.
 	pub fn retry(&self) -> MoqRetry {
 		let err = match self {
 			Self::Protocol { details } => match details.scope {
@@ -453,7 +459,8 @@ impl MoqError {
 }
 
 /// What to do after a request failed with `err`: ask the same source again, find another
-/// route, or give up.
+/// route, or give up. A session close answers `Same` whatever its code, so check
+/// [`moq_error_is_auth`] first before reconnecting.
 #[uniffi::export]
 pub fn moq_error_retry(err: MoqError) -> MoqRetry {
 	err.retry()
