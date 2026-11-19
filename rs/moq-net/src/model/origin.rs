@@ -3915,7 +3915,8 @@ impl kio::Task for FeedOwnClaims {
 }
 
 /// The driver's task firing the route node's timers on the origin's clock: a claim no
-/// route reaches going offline. It ends once nothing owns the origin.
+/// route reaches going offline. It ends once nothing owns the origin, letting go of what
+/// closed sessions left behind, since no timer would take it offline after.
 struct RouteTimer {
 	node: crate::route::Node,
 	deadline: crate::time::Deadline,
@@ -3927,6 +3928,7 @@ impl kio::Task for RouteTimer {
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		if self.origin.poll_orphaned(waiter).is_ready() {
+			self.node.release_orphans();
 			return Poll::Ready(());
 		}
 		loop {

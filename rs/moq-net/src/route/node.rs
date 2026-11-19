@@ -424,6 +424,23 @@ impl Node {
 		}
 	}
 
+	/// Let go of everything closed sessions left behind, which nothing serves again once
+	/// nothing owns the origin: each claim goes offline, so no reader waits on it.
+	pub fn release_orphans(&self) {
+		let mut locked = self.lock();
+		let state = &mut *locked;
+		state.lanes.retain(|_, slots| {
+			slots.retain(|_, slot| match slot.orphan.take() {
+				Some(orphan) => {
+					state.released.push((orphan, false));
+					false
+				}
+				None => true,
+			});
+			!slots.is_empty()
+		});
+	}
+
 	/// Fire the router's timers due by the origin's clock.
 	pub fn timeout(&self) {
 		let mut state = self.lock();
