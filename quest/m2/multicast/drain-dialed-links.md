@@ -17,9 +17,14 @@ microseconds. Its neighbours count a DEAD and no DRAIN.
 `rs/moq-relay/src/shutdown.rs` drains only accepted sessions; the dial loop in
 `rs/moq-relay/src/cluster.rs` closes its sessions with the process.
 
-Agent's recommendation: m3, not a blocker of the lite-07 cut. The mesh already
-recovers from DEAD as it does from a crash; this only makes a planned restart
-cheaper than an unplanned one.
+Decided 2026-11-19 (coordinator, under the maintainer's pick that day to
+merge on the coordinator's recommendation): ✅ kept, and under this epic, so
+the lite-07 cut waits on it (rejected: m3, as the implementer recommended;
+dropping it). A deployment that rolls one relay at a time restarts every
+relay on purpose, and until this lands each of those restarts is a crash to
+the neighbours the relay dialed.
+[The mesh replay](/quest/m2/multicast/mesh-replay.md) measures a roll, and
+without this it measures crashes.
 
 - Hand the shutdown observer to the cluster dial loop, so it sends GOAWAY on
   its live session, stops redialing, and holds the drain open until the session
