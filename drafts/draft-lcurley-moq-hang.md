@@ -198,7 +198,7 @@ The `timescale` field is the units per second for `wall`, defaulting to 1000000 
 A zero `timescale` is invalid, as is a `wall` outside the JSON-safe integer range; both are refused rather than truncated.
 
 The mapping is fixed for the broadcast.
-A discontinuity marker is a delivery event, not a new epoch, and a system-clock adjustment never retimes the mapping.
+A pause is a delivery event, not a new epoch, and a system-clock adjustment never retimes the mapping.
 
 ### Interval {#sync-interval}
 The `interval` field promises that every audio and video track starts a group at least this often outside a pause, in milliseconds rounded up: it is the longest group, such as a video GOP, any of them publishes.
@@ -903,17 +903,20 @@ The `kind` field selects the framing; a consumer MUST ignore a rendition whose `
 A container without a string `kind`, or with a recognized `kind` missing its fields, makes the rendition malformed ({{malformed}}).
 Every container shares the same group rules:
 
-Each group MUST start with a keyframe, except a group that contains only a discontinuity marker.
+Each group MUST start with a keyframe.
 If the codec does not support delta frames (e.g. audio), a group MAY consist of multiple keyframes.
 Otherwise, a group MUST consist of a single keyframe followed by zero or more delta frames.
 
-A group with no decodable frames is a walk-now discontinuity: one empty codec payload and no media.
-An empty payload is data on a data track, so in every container a data track's marker is one object with no bytes, which is no frame; it ends at the furthest point the consumer has read.
-On an audio or video track an object with no bytes is malformed, and so is one sharing its group with any other object.
-A consumer MUST NOT submit the marker to a decoder.
+Where a group's media ends is the transport's group end, the exclusive end timestamp a group finished whole carries ({{moql}}), not a frame.
+It is the last frame's exclusive end, so a publisher that knows it SHOULD end each audio and video group whole, such as at the next keyframe's timestamp.
+A publisher MAY estimate an unknown final duration from the frame cadence, but MUST NOT use batching or reorder delay as that duration.
+For reordered video, the group's presentation end does not necessarily bound the last frame in decode order, so the publisher ends the group whole only when that frame's exclusive end is known.
+
+A group end below the next group's start declares a pause: the media stops at that end and resumes where the next group starts.
+A next group starting at the end, within 1 ms, continues the media.
+A consumer learns of a pause once the next group starts, and MAY treat the media as stopped once its own playout reaches the end with no group continuing it.
+A publisher that stops producing and may resume on the same track (e.g. an encoder idle for lack of demand) SHOULD end its last group whole when it stops, so the group before the pause does not reach across the gap and read as live.
 Empty groups (zero objects) are permitted and mean nothing.
-After a discontinuity the timeline continues forward.
-A publisher that stops producing and may resume on the same track (e.g. an encoder idle for lack of demand) SHOULD publish a discontinuity marker when it stops, so the group before the pause does not reach across the gap and read as live.
 The first timestamp of a group MUST NOT be lower than the first timestamp of any group with a lower sequence, and no frame of a group may be lower than the first timestamp of the group before it; a group that breaks either is malformed.
 A group MAY start at the same timestamp as the previous group.
 Frames MAY present below the previous group's content (B-frames, or a keyframe overlapping the previous group's last frame).
@@ -927,18 +930,11 @@ The default, used when the `container` field is absent.
 Each frame starts with a timestamp, a QUIC variable-length integer (62-bit max) encoded in microseconds.
 The remainder of the payload is codec specific; see the WebCodecs specification for specifics.
 
-For video, a frame with an empty codec payload is the exclusive end of the frame before it, not media.
-A video publisher SHOULD end each group with one when the exclusive end is known.
-A publisher MAY estimate an unknown final duration from the frame cadence, but MUST NOT use batching or reorder delay as that duration.
-For reordered video, the group presentation endpoint does not necessarily bound the preceding frame in decode order; the publisher omits the marker unless that frame's exclusive end is known.
-A consumer MUST skip it and MUST NOT submit it to a decoder.
-It does not mean the track ended.
-
-For audio, an empty codec payload retains its terminal-trimming meaning: its timestamp is the exclusive endpoint of the source media.
-When a codec must receive additional packets to emit buffered source samples, the marker MUST precede those terminal packets in the same group.
+For audio, an empty codec payload is a terminal marker: its timestamp is the exclusive endpoint of the source media.
+When a codec must receive additional packets to emit buffered source samples, the marker MUST open their group, ahead of those terminal packets, since a group end arrives only after them.
 A consumer MUST NOT submit the marker to the codec decoder, MUST decode the terminal packets, and MUST discard decoded samples at or after the endpoint until a later group begins.
-Audio publishers do not append per-group duration markers because the codec defines each packet's duration.
-Data tracks retain empty payloads as data, without endpoint semantics.
+A video publisher writes no empty codec payload; a consumer reading one from an earlier draft's publisher MUST NOT submit it to a decoder.
+Data tracks retain empty payloads as data.
 
 For example, h.264 with no `description` field would be annex.b encoded, while h.264 with a `description` field would be AVCC encoded.
 For AAC (`mp4a.40.*`), each nonempty codec payload MUST be one complete ADTS frame when `description` is absent; with an AudioSpecificConfig in `description`, it MUST be one raw AAC access unit without an ADTS header.
@@ -961,9 +957,8 @@ A consumer MUST feed `init` to the decoder before the first frame.
 Each frame is a Low Overhead Container frame {{!I-D.ietf-moq-loc}}: a property block, carrying the timestamp among other properties, followed by the codec payload.
 The codec payload uses the same framing as {{legacy}}.
 
-For audio and video, consumers accept empty codec payload metadata with the same video-duration and audio-terminal-trimming meanings as the legacy container.
+An empty codec payload has the same audio terminal-trimming meaning as in the legacy container.
 Data tracks retain empty payloads as data.
-A consumer MUST NOT submit it to a decoder.
 
 
 # Compression {#compression}
@@ -1082,7 +1077,7 @@ This document has no IANA actions.
 - Specified MSF text metadata preservation and refusal of unrepresentable text packaging during gateway conversion.
 - Added optional `bitrate`, `jitter`, and `delay` fields to `json` and `binary` track entries, `delay` measured only from payloads stamped with their capture time on the broadcast clock.
 - Replaced the live-edge floor with monotonic group starts: a group may overlap the previous group's content but not start before it.
-- A data track marks a discontinuity with a group of one object with no bytes, since its empty payload is data. An object with no bytes on an audio or video track, or sharing its group, is malformed.
+- A group's end is the transport's: the exclusive end timestamp of a group finished whole times its last frame, and a group end below the next group's start declares a pause. Removed the video duration marker, the discontinuity marker group, and the data track's discontinuity object. An audio terminal marker opens its group ahead of the codec's drain packets.
 - Timed CMAF samples from the frame timestamp, which is the fragment's earliest presentation time; `tfdt` is only relative within the fragment, and places the samples of an untimed frame. A timed CMAF track counts in its `mdhd` ticks, and a fragment's runs lie back to back in its `mdat`, each `data_offset` counting from its `moof`.
 - A `loc` frame's codec payload uses the `legacy` framing.
 
