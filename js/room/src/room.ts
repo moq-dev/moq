@@ -95,10 +95,9 @@ export class Room {
 			const local = this.identity.peek();
 			if (local && parsed.identity === local) continue;
 
-			// A held path keeps its participant; only presence changes membership.
 			if (update.kind === "present") {
 				this.#add(parsed.identity, parsed.kind, Moq.Path.from(covered));
-			} else if (update.kind === "absent" || update.kind === "offline") {
+			} else {
 				this.#remove(parsed.identity, parsed.kind);
 			}
 		}
