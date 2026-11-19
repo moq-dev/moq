@@ -24,7 +24,7 @@ use crate::{
 	priority::{Priority, PriorityHandle, PriorityQueue},
 	track::Order,
 	transport::poll::{GroupOf, SendGroup as _, SendOptions},
-	util::Idle,
+	util::{Idle, SendCell},
 };
 
 use super::Version;
@@ -261,7 +261,9 @@ pub(super) struct Publisher {
 	// A dedicated accept handle: the poll interface takes `&mut self`, and the
 	// shared context stays behind the Arc for the per-stream children.
 	accept: Transport,
-	children: kio::Tasks<Control>,
+	// Each control child reaches the whole track model: the cell proves `Send + Sync` once
+	// here, so the session driver's proof stays within the default recursion limit.
+	children: SendCell<kio::Tasks<Control>>,
 	/// Aborts the session on a publication outside our grant (dialing side only).
 	enforce: Option<Enforce>,
 }
@@ -303,7 +305,7 @@ impl Publisher {
 			}),
 			runtime: config.runtime,
 			accept,
-			children: kio::Tasks::new(),
+			children: SendCell::default(),
 		}
 	}
 }

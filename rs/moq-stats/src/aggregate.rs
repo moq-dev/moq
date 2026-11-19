@@ -364,6 +364,7 @@ impl Mergeable for Presence {
 			|| self.announces_peak < prev.announces_peak
 			|| self.subscriptions_peak < prev.subscriptions_peak
 			|| self.routes_refused < prev.routes_refused
+			|| self.routes.regressed(&prev.routes)
 	}
 }
 

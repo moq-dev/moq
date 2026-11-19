@@ -78,6 +78,14 @@ pub(in crate::model) trait Holdings {
 	/// held: `None` once fewer are held than that.
 	fn back(&self, latest: u64, back: u64) -> Option<u64>;
 
+	/// Where the publisher reported starting a range counting `back` groups before `latest`,
+	/// which a relative start, but never an end, takes over [`Self::back`]: a delivery start
+	/// may sit past the group counted, such as above groups too stale for the budget.
+	fn reported_start(&self, latest: u64, back: u64) -> Option<u64> {
+		let _ = (latest, back);
+		None
+	}
+
 	/// Whether nothing more can arrive here, so a time start nothing contains reaches back
 	/// to the oldest group rather than wait.
 	fn complete(&self) -> bool;
@@ -813,7 +821,10 @@ fn start(anchor: Anchor, latest: Option<u64>, holdings: &impl Holdings) -> Start
 		Anchor::Oldest => Start::At(0, false),
 		Anchor::Relative(back) => match latest {
 			None => Start::Pending,
-			Some(latest) => match holdings.back(latest, back) {
+			Some(latest) => match holdings
+				.reported_start(latest, back)
+				.or_else(|| holdings.back(latest, back))
+			{
 				Some(group) => Start::At(group, true),
 				// Fewer groups are held than it counts back, so reach back to the oldest.
 				None => Start::At(0, false),

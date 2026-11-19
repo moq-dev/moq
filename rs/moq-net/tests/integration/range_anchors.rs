@@ -241,3 +241,63 @@ async fn a_relative_start_reports_the_publishers_start_over_a_frameless_newest_g
 	assert_eq!(group.map(|group| group.start), Some(5));
 	let _track = track.finish().unwrap();
 }
+
+/// A lite-07 copy holds only part of the track, so a relative start counts back as its
+/// publisher did rather than over the groups the copy holds: a sparse request mixing a time
+/// range and a relative one reads every group it names. Mirrors the `@moq/net`
+/// `integration: lite-07 serves sparse and relative ranges`.
+#[kio::test]
+async fn a_sparse_request_counts_its_relative_start_back_as_the_publisher_did() {
+	let publisher = produce_origin(1);
+	let broadcast = publisher
+		.route("room", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
+	let track = broadcast
+		.broadcast()
+		.create_track(
+			"data",
+			Info::default().with_timescale(Timescale::MILLI).with_max_age(FOREVER),
+		)
+		.unwrap();
+	broadcast.announce().unwrap();
+	for key in 0..10 {
+		let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
+		group.write_frame(millis(key), &b"x"[..]).unwrap();
+		group.finish().unwrap();
+	}
+
+	let subscriber = produce_origin(2);
+	let _pair = peer("moq-lite-07-wip".parse::<Version>().unwrap(), &publisher, &subscriber).await;
+	let remote = kio::clock::timeout(TIMEOUT, subscriber.consume().follow("room", None).unwrap().available())
+		.await
+		.expect("resolve timeout")
+		.expect("broadcast resolves")
+		.unwrap();
+	let subscription = Subscription::default()
+		.with_delay(Delay::default().with_max(FOREVER))
+		.with_order(Order::Ascending)
+		.with_ranges([
+			range(Anchor::Time(1), Some(Anchor::Time(2))),
+			range(Anchor::Relative(2), Some(Anchor::Time(8))),
+		]);
+	let mut reader = kio::clock::timeout(TIMEOUT, remote.track("data").unwrap().subscribe(subscription))
+		.await
+		.expect("subscribe timeout")
+		.unwrap();
+
+	let mut read = Vec::new();
+	for _ in 0..4 {
+		let group = kio::clock::timeout(TIMEOUT, reader.recv_group())
+			.await
+			.expect("group timeout")
+			.unwrap();
+		read.push(group.map(|group| group.start));
+	}
+	assert_eq!(read, [Some(1), Some(2), Some(7), Some(8)]);
+	let end = kio::clock::timeout(TIMEOUT, reader.recv_group())
+		.await
+		.expect("end timeout")
+		.unwrap();
+	assert_eq!(end.map(|group| group.start), None, "the ranges are covered");
+	let _track = track.finish().unwrap();
+}
