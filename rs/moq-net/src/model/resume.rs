@@ -1622,11 +1622,15 @@ impl Reader {
 
 	/// Whether the window and the local bounds name a group from `floor` up to `key` the reader
 	/// lacks and that may yet land on copy `index`: one outside the local bounds never lands on a
-	/// copy, nor one that copy declares skipped.
+	/// copy, nor one that copy declares skipped, nor any on a failed copy, which receives nothing
+	/// more.
 	fn owes_below(&mut self, index: usize, floor: u64, key: u64, delivered: &Delivered) -> bool {
+		let copy = self.copies[index].track.clone();
+		if matches!(copy.poll_complete(&kio::Waiter::noop()), Poll::Ready(Err(_))) {
+			return false;
+		}
 		let (start, cap) = self.groups;
 		let key = cap.map_or(key, |cap| key.min(cap));
-		let copy = self.copies[index].track.clone();
 		self.window()
 			.runs(floor.max(start))
 			.take_while(|run| *run.start() < key)
@@ -5781,6 +5785,52 @@ mod test {
 		write(&b, 80);
 		write(&b, 120);
 		routes.serve(b.consume());
+		assert_eq!(drain(&mut sub, true), [120]);
+	}
+
+	/// A failed copy receives nothing more, so a window group under its cursor is no reason to
+	/// hold it: it hands out what it holds and its failure is judged.
+	#[test]
+	fn an_ordered_reader_does_not_hold_a_failed_copy_for_a_group_it_can_no_longer_receive() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = received_copy();
+		a.anchored();
+		routes.serve(a.consume());
+		write(&a, 10);
+		let mut open = a.create_group(group::Info { start: 100 }).unwrap();
+		open.write_frame(ts(100), b"x".as_ref()).unwrap();
+		let subscription = Subscription::default()
+			.with_delay(Delay::default().with_max(None))
+			.with_ranges([
+				track::Range {
+					start: Anchor::Time(10),
+					end: Some(Anchor::Time(30)),
+				},
+				track::Range {
+					start: Anchor::Time(100),
+					end: Some(Anchor::Time(200)),
+				},
+			]);
+		let mut sub = logical
+			.consume()
+			.subscribe(subscription)
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		assert_eq!(peek(&mut sub, true).key(), 10);
+		assert_eq!(drain(&mut sub, true), [10]);
+
+		// The replacement places time 100 at group 80, which the window leaves out, then fails
+		// without 11 to 30 ever landing on it.
+		a.clone().abort(Error::Cancel).unwrap();
+		let b = copy();
+		write(&b, 80);
+		write(&b, 120);
+		routes.serve(b.consume());
+		// Open, it may still receive 11 to 30, so its cursor stays on 80.
+		assert_eq!(drain(&mut sub, true), [0u64; 0]);
+		b.clone().abort(Error::Cancel).unwrap();
 		assert_eq!(drain(&mut sub, true), [120]);
 	}
 

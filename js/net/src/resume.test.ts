@@ -2124,6 +2124,90 @@ test("an ordered resumed reader owes no window group its copy declares skipped",
 	}
 });
 
+// A failed copy receives nothing more, so a window group under its cursor is no reason to hold it:
+// it hands out what it holds and its failure is judged.
+test("an ordered resumed reader does not hold a failed copy for a group it can no longer receive", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	ta.write(10n);
+	ta.write(100n, 1, false);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe({
+		delay: { max: null },
+		ranges: [
+			{ start: { time: 10n }, end: { time: 30n } },
+			{ start: { time: 100n }, end: { time: 200n } },
+		],
+	});
+	const ordered = sub.ordered();
+	try {
+		await settle();
+		expect(ordered.tryNextGroup()?.start).toBe(10n);
+		// The replacement places time 100 at group 80, which the window leaves out, then fails
+		// without 11 to 30 ever landing on it.
+		ta.producer.abort(new StreamError(StreamCode.SessionClosed));
+		tb.write(80n);
+		tb.write(120n);
+		front.serve(b.consume());
+		await settle();
+		tb.producer.abort(new StreamError(StreamCode.SessionClosed));
+		await settle();
+		expect(ordered.tryNextGroup()?.start).toBe(120n);
+	} finally {
+		ordered.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+	}
+});
+
+// A copy's take may pass the group it offered, such as one missing its head, and return a later one:
+// the reader judges the group it got against its window, not the one offered.
+test("a resumed reader drops a taken group outside its window when the offered one was passed", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	ta.write(10n);
+	ta.write(100n, 1, false);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe({
+		delay: { max: null },
+		ranges: [
+			{ start: { time: 10n }, end: { time: 10n } },
+			{ start: { time: 100n }, end: { time: 200n } },
+		],
+	});
+	try {
+		await settle();
+		expect(hooks.servingResolved(sub).map((range) => range?.start)).toEqual([10n, 100n]);
+		// The replacement holds group 10 from frame 1 only, which a bounded copy gives up with no fill to
+		// ask, and places time 100 at group 80, which the window leaves out.
+		const tb = b.createTrack("seq", { maxAge: null });
+		const tail = hooks.receiveGroup(tb, { start: 10n, offset: 1 });
+		tail.writeFrame({ payload: enc.encode("10.1"), timestamp: Timestamp.unscaled(10n) });
+		tail.finish();
+		for (const key of [80n, 120n]) {
+			const group = tb.createGroup(key);
+			group.writeFrame({ payload: enc.encode(`${key}.0`), timestamp: Timestamp.unscaled(key) });
+			group.finish();
+		}
+		ta.producer.abort(new StreamError(StreamCode.SessionClosed));
+		front.serve(b.consume());
+		await settle();
+		// Group 10 still goes out from the failed copy that holds it whole; 80 never does.
+		expect(drain(sub)).toEqual([10n, 120n]);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+	}
+});
+
 test("a routed read right after an update picks its group under the new preferences", async () => {
 	const front = new Front();
 	const a = new BroadcastProducer();

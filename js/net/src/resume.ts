@@ -750,9 +750,11 @@ class Reader implements ResumeSource {
 	/**
 	 * Whether the reader's window and cursor name a group from `floor` up to `key` that `delivered`
 	 * lacks and that may yet land on `copy`: one outside the cursor never lands on a copy, nor one
-	 * `copy` declares skipped. Mirrors the Rust `Reader::owes_below`.
+	 * `copy` declares skipped, nor any on a failed copy, which receives nothing more. Mirrors the
+	 * Rust `Reader::owes_below`.
 	 */
 	#owesBelow(copy: Copy, floor: bigint, key: bigint, delivered: Delivered): boolean {
+		if (copy.sub.closed.peek() instanceof Error) return false;
 		const cursor = this.#shell.cursor.peek();
 		return this.#window()
 			.runs(max(floor, cursor.start), min(key, cursor.end ?? key))
@@ -974,16 +976,30 @@ class Reader implements ResumeSource {
 		// The lowest group any copy holds next, in either order: a replaced copy's buffered group
 		// comes before a later one the serving copy already has. Arrival order still delivers a
 		// lower group that truly arrives later.
-		const { next, owing } = this.#lowest(ordered, delivered);
-		if (next) {
+		let owing: Copy[];
+		for (;;) {
+			const lowest = this.#lowest(ordered, delivered);
+			owing = lowest.owing;
+			const next = lowest.next;
+			if (!next) break;
 			const recv = take(next, ordered, this.#newest === undefined ? undefined : this.#newest + 1n);
 			if (recv.kind === "group") {
-				this.#observe(next, recv.group.start);
+				// The take may pass the offered group, such as one missing its head, for a later one
+				// the window leaves out: judge the group it got.
+				const key = recv.group.start;
+				const deliverable = this.#deliverable(next, key, delivered);
+				if (!deliverable || !this.#inWindow(key)) {
+					if (deliverable) this.#skip(next, key);
+					recv.group.close();
+					continue;
+				}
+				this.#observe(next, key);
 				return { kind: "group", group: this.#handOut(next, recv.group) };
 			}
 			// The lowest buffered group keeps its place while its copy waits on a hole.
 			// A newer copy must not pass it and permanently discard it from sequence order.
 			if (ordered && recv.kind === "idle") return recv;
+			break;
 		}
 		// The failed copies holding a group back for a placement, which still report their failure.
 		const held = new Set<Copy>();
