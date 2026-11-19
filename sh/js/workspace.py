@@ -13,6 +13,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 DEPENDENCIES = ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies")
 SOURCES = (".ts", ".tsx", ".mts", ".cts", ".js", ".mjs", ".cjs")
+# Tooling every package runs from its scripts by path, which no manifest edge records, so a change
+# to it checks every package.
+SHARED = ("js/common",)
 # A string literal climbing out of its directory, like a test reading a shared corpus.
 RELATIVE = re.compile(r"""["'`]((?:\.\./)+[^"'`$?\s]*)""")
 # A `tsc` invocation that emits from a project, however the build script spells it.
@@ -78,7 +81,7 @@ def selection(root, paths):
             for name, p in packages.items()
             if path == p["directory"] or path.startswith(p["directory"] + "/")
         ]
-        if not owners:
+        if not owners or any(path == shared or path.startswith(shared + "/") for shared in SHARED):
             fallback = True
             break
         name, directory = max(owners, key=lambda owner: len(owner[1]))

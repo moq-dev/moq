@@ -1,0 +1,63 @@
+# The nightly script, which a deployment's own mesh can replay too: an event that
+# names no relay takes the one with the most links, and a roll covers every relay
+# in the mesh file's order. See README.md for every key.
+#
+# The mesh starts on the newest release, rolls onto this checkout one relay at a
+# time, takes its faults all on lite-07, and rolls back.
+start = "old"
+
+# A cut or a crash lasts past the relays' 10s QUIC idle timeout, so each ends a session.
+down = "15s"
+# An event is over once no route or announce message moved for `quiet` and every
+# reader with a route is reading; one that takes longer than `settle` fails a reader.
+quiet = "3s"
+settle = "60s"
+# A reader that read nothing for this long is unfed.
+stall = "3s"
+
+[[events]]
+kind = "roll"
+to = "new"
+
+[[events]]
+kind = "reopen-link"
+
+[[events]]
+kind = "reopen-relay"
+times = 2
+
+[[events]]
+kind = "kill"
+
+[[events]]
+kind = "end-source"
+
+[[events]]
+kind = "roll"
+to = "old"
+
+# Mid-roll, a relay still on the release ends a front at its session's close rather than wait
+# for the detour, leaving a follow holding a track that ended. It lasts until the release cut
+# ships the fix.
+[[known]]
+check = "unfed"
+kind = "stuck"
+event = "roll"
+quest = "/quest/m3/release/cut.md"
+
+# Mid-roll, a new relay accepts an old neighbour's subscribe that arrives as the neighbour
+# withdraws its echo of the broadcast, then forwards nothing. `half-roll.toml` reproduces it
+# and lists nothing known.
+[[known]]
+check = "unfed"
+kind = "starved"
+event = "roll"
+quest = "/quest/m2/multicast/roll-echo-stall.md"
+
+# On lite-07 alone, a reader behind a reopened link or a crashed relay starves when its relay
+# asked a neighbour whose own route had not returned yet. After the roll entry, so a roll's
+# starved reader stays with roll-echo-stall. `reopen.toml` reproduces it and lists nothing known.
+[[known]]
+check = "unfed"
+kind = "starved"
+quest = "/quest/m2/multicast/reopen-starve.md"

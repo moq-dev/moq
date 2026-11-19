@@ -118,21 +118,21 @@ pub enum moq_audio_format {
 
 /// A single video codec [moq_publish_video] can parse.
 ///
-/// H.264 and H.265 appear twice each because the framing differs, not just the
-/// codec: AVC1/HVC1 are length-prefixed with an out-of-band config record,
-/// while AVC3/HEV1 are Annex-B with the parameter sets inline.
+/// H.264 and H.265 appear twice each because the input framing differs:
+/// AVC1/HVC1 are length-prefixed with an out-of-band config record, while
+/// H264/H265 are a raw Annex B elementary stream with the parameter sets inline.
 #[repr(C)]
 #[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum moq_video_format {
 	/// H.264, length-prefixed NALUs with an out-of-band avcC.
 	MOQ_VIDEO_FORMAT_AVC1 = 0,
-	/// H.264, Annex-B with inline SPS/PPS.
-	MOQ_VIDEO_FORMAT_AVC3 = 1,
+	/// H.264, a raw Annex B elementary stream with inline SPS/PPS.
+	MOQ_VIDEO_FORMAT_H264 = 1,
 	/// H.265, length-prefixed NALUs with an out-of-band hvcC.
 	MOQ_VIDEO_FORMAT_HVC1 = 2,
-	/// H.265, Annex-B with inline parameter sets.
-	MOQ_VIDEO_FORMAT_HEV1 = 3,
+	/// H.265, a raw Annex B elementary stream with inline parameter sets.
+	MOQ_VIDEO_FORMAT_H265 = 3,
 	/// AV1.
 	MOQ_VIDEO_FORMAT_AV01 = 4,
 	/// VP8.
@@ -377,9 +377,9 @@ fn video_format_from_u32(value: u32) -> Result<moq_mux::import::VideoFormat, Err
 	use moq_mux::import::VideoFormat;
 	Ok(match value {
 		v if v == moq_video_format::MOQ_VIDEO_FORMAT_AVC1 as u32 => VideoFormat::Avc1,
-		v if v == moq_video_format::MOQ_VIDEO_FORMAT_AVC3 as u32 => VideoFormat::Avc3,
+		v if v == moq_video_format::MOQ_VIDEO_FORMAT_H264 as u32 => VideoFormat::H264,
 		v if v == moq_video_format::MOQ_VIDEO_FORMAT_HVC1 as u32 => VideoFormat::Hvc1,
-		v if v == moq_video_format::MOQ_VIDEO_FORMAT_HEV1 as u32 => VideoFormat::Hev1,
+		v if v == moq_video_format::MOQ_VIDEO_FORMAT_H265 as u32 => VideoFormat::H265,
 		v if v == moq_video_format::MOQ_VIDEO_FORMAT_AV01 as u32 => VideoFormat::Av01,
 		v if v == moq_video_format::MOQ_VIDEO_FORMAT_VP8 as u32 => VideoFormat::Vp8,
 		v if v == moq_video_format::MOQ_VIDEO_FORMAT_VP9 as u32 => VideoFormat::Vp9,
@@ -1174,20 +1174,12 @@ pub enum moq_announce_kind {
 	/// A route now covers the path, which was absent. Another instance taking it over keeps it
 	/// present: follow it with [moq_origin_follow] to see the broadcast change.
 	MOQ_ANNOUNCE_KIND_PRESENT = 0,
-	/// The origin withdrew the path: no route covers it any more.
+	/// No route covers the path any more, whether its origin withdrew it or this origin let
+	/// go of it.
 	MOQ_ANNOUNCE_KIND_ABSENT = 1,
-	/// This origin let go of the path, and no route covers it any more: the session it arrived
-	/// on closed, or the network lost every path to it. Its origin may still serve it.
-	MOQ_ANNOUNCE_KIND_OFFLINE = 2,
-	/// The present path lost every usable path to its origin but may recover one: it stays
-	/// present while requests for it may fail.
-	MOQ_ANNOUNCE_KIND_UNAVAILABLE = 3,
-	/// The present path recovered a usable path: request it again.
-	MOQ_ANNOUNCE_KIND_AVAILABLE = 4,
 }
 
-/// An announce event from an origin: a path becoming present, absent, or offline, or its
-/// availability changing.
+/// An announce event from an origin: a path becoming present or absent.
 #[repr(C)]
 pub struct moq_announce_event {
 	/// The covered prefix, relative to the origin, NOT NULL terminated
@@ -1204,8 +1196,8 @@ pub struct moq_announce_event {
 	/// Which event this is.
 	pub kind: moq_announce_kind,
 
-	/// The route serving the prefix. On `MOQ_ANNOUNCE_KIND_ABSENT` and
-	/// `MOQ_ANNOUNCE_KIND_OFFLINE` it carries the last advertised route.
+	/// The route serving the prefix. On `MOQ_ANNOUNCE_KIND_ABSENT` it carries the last
+	/// advertised route.
 	pub route: moq_route_info,
 }
 
