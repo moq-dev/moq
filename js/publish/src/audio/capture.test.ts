@@ -1,4 +1,5 @@
 import { expect, mock, spyOn, test } from "bun:test";
+import { Manual } from "@moq/clock/test";
 import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import * as MediaClock from "../media-clock";
@@ -302,9 +303,9 @@ function installGatedWebAudio(addModule: () => Promise<void> = () => Promise.res
 		connect(): void {}
 		disconnect(): void {}
 		// What the processor posts once the graph renders a quantum.
-		render(): void {
+		render(timestamp = 0): void {
 			this.port.dispatchEvent(
-				new MessageEvent("message", { data: { timestamp: 0, channels: [new Float32Array(128)] } }),
+				new MessageEvent("message", { data: { timestamp, channels: [new Float32Array(128)] } }),
 			);
 		}
 	}
@@ -639,5 +640,48 @@ test("a failed encoder stays failed until the capture source changes", async () 
 		track.close();
 		await settle();
 		error.mockRestore();
+	}
+});
+
+// A host sleep stops the worklet's sample count while the media clock jumps the gap, so each quantum
+// takes the jump too, or audio would land behind video by the sleep and expire from the encoder's
+// backlog as it arrives.
+test("microphone audio takes the media clock's suspend jumps", async () => {
+	using webaudio = installGatedWebAudio();
+	webaudio.gesture();
+	const capture = new Capture({ enabled: true, source: new Signal(fakeSource()) as never });
+	const effect = new Effect();
+	// biome-ignore lint/style/noRestrictedGlobals: a suspend is the wall clock jumping past performance.now().
+	const host = Date;
+	const wall = host.now;
+	try {
+		await settle();
+		const frames = capture.out.frames.peek()?.subscribe(effect);
+		if (!frames) throw new Error("no capture frames");
+		const reader = frames.getReader();
+		const worklet = webaudio.worklets[0];
+		const quantum = (128 / 48_000) * 1_000_000;
+
+		worklet.render(worklet.zero);
+		expect((await reader.read()).value?.timestamp.asMicros()).toBe(worklet.zero);
+
+		// An hour asleep: the wall clock moved on while the monotonic clock and the sample count stood.
+		const asleep = 3_600_000;
+		spyOn(host, "now").mockImplementation(() => wall() + asleep);
+		worklet.render(worklet.zero + quantum);
+		const after = (await reader.read()).value?.timestamp.asMicros() ?? 0;
+		// Date.now() reads whole milliseconds, so the jump is the sleep within a couple of them.
+		expect(Math.abs(after - (worklet.zero + quantum) - asleep * 1_000)).toBeLessThan(3_000);
+		expect(Math.abs(after - MediaClock.now().asMicros())).toBeLessThan(1_000_000);
+	} finally {
+		mock.restore();
+		effect.close();
+		capture.close();
+		await settle();
+		// The sleep left the page's timeline an hour past the restored wall clock; another clock's
+		// origin starts a new one, so later tests start on the wall clock again.
+		const installed = new Manual().install();
+		MediaClock.now();
+		installed.close();
 	}
 });

@@ -13,6 +13,7 @@ import {
 import { hosted } from "../assets";
 import { Fanout } from "../fanout";
 import * as MediaClock from "../media-clock";
+import { follow } from "../media-timeline";
 // A blob: URL, or a hosted file when assets() is set; see vite-plugin-worklet.
 import CaptureWorklet from "./capture-worklet.ts?worklet";
 import { isSampleSource, normalizeSource, type SampleSource, type Source, type SourceConfig } from "./types";
@@ -289,6 +290,9 @@ export class Capture {
 		return new ReadableStream<AudioFrame>(
 			{
 				start: (controller) => {
+					// The worklet counts samples, which stop while the host sleeps, so each frame also
+					// takes the media clock's suspend jumps, or audio would land behind video by the sleep.
+					const jumps = follow();
 					effect.event(worklet.port, "message", (event: Event) => {
 						const posted = (event as MessageEvent<WorkletFrame>).data;
 						const channelCount = posted.channels.length;
@@ -302,7 +306,7 @@ export class Capture {
 
 						if ((controller.desiredSize ?? 0) > 0)
 							controller.enqueue({
-								timestamp: Duration.micros(posted.timestamp),
+								timestamp: Duration.micros(posted.timestamp + jumps()),
 								channels: posted.channels,
 							});
 					});

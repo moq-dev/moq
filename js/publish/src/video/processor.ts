@@ -277,7 +277,9 @@ function videoProcessor(track: StreamTrack): ReadableStream<VideoFrame> {
 					handle = video.requestVideoFrameCallback((now, metadata) => {
 						// captureTime is the frame's capture instant; both it and now are DOM timestamps,
 						// which the host clock shares, so they map onto the media clock audio uses too.
-						const at = Instant.ZERO.saturatingAdd(Duration.millis(metadata.captureTime ?? now));
+						const at = Instant.ZERO.saturatingAdd(
+							Duration.millis(Math.max(metadata.captureTime ?? now, 0)),
+						);
 						controller.enqueue(new VideoFrame(video, { timestamp: MediaClock.capture(at).asMicros() }));
 						resolve();
 					});

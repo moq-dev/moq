@@ -80,10 +80,23 @@ pub(crate) fn suspended() -> std::time::Duration {
 
 #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
 mod platform {
-	/// How far `sleeping` reads ahead of `awake`, read second so the gap never comes out short.
+	/// How far `sleeping` reads ahead of `awake`.
+	///
+	/// A preemption between two reads would count as sleep, and callers keep the largest gap they
+	/// see, so it would stick. `sleeping` is read between two `awake` reads instead, and the gap
+	/// taken against the later one, so it errs short by at most that bracket, the tightest of a few.
 	pub(super) fn gap(sleeping: libc::clockid_t, awake: libc::clockid_t) -> std::time::Duration {
-		let awake = read(awake);
-		read(sleeping).saturating_sub(awake)
+		let sample = |_| {
+			let before = read(awake);
+			let ahead = read(sleeping);
+			let after = read(awake);
+			(after.saturating_sub(before), ahead.saturating_sub(after))
+		};
+		let (_, gap) = (0..3)
+			.map(sample)
+			.min_by_key(|&(bracket, _)| bracket)
+			.expect("three samples");
+		gap
 	}
 
 	fn read(clock: libc::clockid_t) -> std::time::Duration {
@@ -439,11 +452,15 @@ mod tests {
 		runtime.block_on(async {
 			let wall = crate::clock::wall();
 			tokio::time::advance(Duration::from_secs(3600)).await;
+			// A runtime sharing the host's origin, as when another test took it first, maps through
+			// the host's wall and monotonic clocks, read at slightly different instants, so the hour
+			// holds to within their read jitter rather than exactly.
+			let hour = Duration::from_secs(3600);
+			let near = |moved: Duration| moved.abs_diff(hour) < Duration::from_millis(1);
 			let moved = crate::clock::wall().saturating_duration_since(wall);
-			assert!(moved >= Duration::from_secs(3600), "{moved:?}");
-			assert!(moved < Duration::from_secs(3601), "{moved:?}");
-			let captured = crate::clock::Clock::current().wall();
-			assert!(captured.saturating_duration_since(wall) >= Duration::from_secs(3600));
+			assert!(near(moved), "{moved:?}");
+			let captured = crate::clock::Clock::current().wall().saturating_duration_since(wall);
+			assert!(near(captured), "{captured:?}");
 		});
 
 		let host = super::wall();

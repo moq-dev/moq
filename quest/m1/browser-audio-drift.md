@@ -22,6 +22,11 @@ Since the media clock slews toward UTC, browser audio now drifts against
 video by the device's error against UTC, which adds the host oscillator's own
 error (seconds a day on macOS and Windows) to the device's against the host.
 Native capture already steers against the slewed `moq_mux::Clock`.
+Suspends are handled: each quantum takes the media clock's suspend jumps
+(`follow` in `js/publish/src/media-timeline.ts`). Where `performance.now()`
+counts sleep (unverified; Windows' `QueryPerformanceCounter` does), the media
+clock sees no jump, so the sample count falls behind by the sleep; the
+re-anchoring below covers that as a sustained lag.
 
 Recommended: the native fix's shape. Compare each quantum's sample-count
 time with the media clock (`MediaClock.capture`) at capture (`AudioContext.getOutputTimestamp()`
