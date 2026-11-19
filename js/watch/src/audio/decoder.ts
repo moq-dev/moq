@@ -1094,7 +1094,7 @@ export class Decoder {
 		try {
 			landed = this.#place(sample);
 		} finally {
-			if (!preroll) this.#ring.peek()?.decoded(decoded, landed);
+			if (!preroll) this.#ring.peek()?.decoded(decoded, landed === undefined ? undefined : this.#terminal.delay);
 		}
 		return landed;
 	}
