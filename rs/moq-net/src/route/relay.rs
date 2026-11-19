@@ -2302,12 +2302,18 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		}
 	}
 
-	/// Whether `via`'s copy of `origin`'s claims holds `broadcast`. A neighbour routes to
-	/// `origin` before its claims reach it, and refuses a request for one it has not heard.
+	/// Whether `via`'s copy of `origin`'s claims holds `broadcast` as this node knows it:
+	/// available, and of the same precedence. A neighbour routes to `origin` before its claims
+	/// reach it, and refuses a request for a claim it has not heard, or heard only unavailable
+	/// or in an older revision.
 	fn holds(&self, origin: NodeId, via: N, broadcast: &Broadcast<I>) -> bool {
+		let Some(known) = (self.known.get(&origin)).and_then(|known| known.items.get(broadcast)) else {
+			return false;
+		};
 		(self.heard.get(&origin))
 			.and_then(|offers| offers.get(&via))
-			.is_some_and(|heard| heard.items.contains_key(broadcast))
+			.and_then(|heard| heard.items.get(broadcast))
+			.is_some_and(|heard| !heard.unavailable && precedence(&heard.item) == precedence(&known.item))
 	}
 
 	/// The neighbour a request for `origin`'s claim of `broadcast` leaves by: the route to
@@ -3222,6 +3228,41 @@ mod tests {
 		assert_eq!(ways(&router), [(Next::Via(3), true)]);
 		assert_eq!(router.step(node(5), &broadcast), Some(Next::Via(3)));
 		router.recv(2, claims(1)).unwrap();
+		assert_eq!(ways(&router), [(Next::Via(2), true), (Next::Via(3), false)]);
+		assert_eq!(router.step(node(5), &broadcast), Some(Next::Via(2)));
+	}
+
+	/// A neighbour whose copy holds the claim only unavailable refuses a request for it too,
+	/// though this node knows it available from another. Its copy catching up makes it a way.
+	#[test]
+	fn a_request_skips_a_neighbour_that_holds_the_claim_unavailable() {
+		let mut router = Router::<usize, u64, Run>::new(node(1), debounce(HOP));
+		open(&mut router, 2, Role::Routing(node(2)));
+		open(&mut router, 3, Role::Routing(node(3)));
+		let broadcast = (p("live"), 7);
+		let claims = |unavailable, floor| Msg::Claims {
+			origin: node(5),
+			changes: vec![(
+				broadcast.clone(),
+				match claim(run(1), 0) {
+					Change::Live(claim) => Change::Live(Claim { unavailable, ..claim }),
+					other => other,
+				},
+			)],
+			floor,
+		};
+		router.recv(2, route(5, 2, 1)).unwrap();
+		router.recv(3, route(5, 3, 2)).unwrap();
+		router.recv(2, claims(true, 1)).unwrap();
+		router.recv(3, claims(false, 2)).unwrap();
+		let ways = |router: &Router<usize, u64, Run>| {
+			(router.ways(&broadcast).into_iter())
+				.map(|way| (way.next, way.closest))
+				.collect::<Vec<_>>()
+		};
+		assert_eq!(ways(&router), [(Next::Via(3), true)]);
+		assert_eq!(router.step(node(5), &broadcast), Some(Next::Via(3)));
+		router.recv(2, claims(false, 3)).unwrap();
 		assert_eq!(ways(&router), [(Next::Via(2), true), (Next::Via(3), false)]);
 		assert_eq!(router.step(node(5), &broadcast), Some(Next::Via(2)));
 	}
