@@ -317,6 +317,11 @@ impl Unit {
 		self.count() - self.sent
 	}
 
+	/// A copy of the program tables, led by the media or repeated by the grid.
+	fn is_tables(&self) -> bool {
+		self.tables.is_some() || self.repeat
+	}
+
 	fn pid_at(&self, packet: usize) -> u16 {
 		pid(&self.packets[packet * TsPacket::SIZE..])
 	}
@@ -1282,7 +1287,7 @@ impl Schedule {
 		}
 
 		let clock = self.clock;
-		let mut take = self.admit(index, usize::MAX);
+		let (mut take, admitted) = self.admit(index, usize::MAX);
 		// A placed PES is due only once released, which may come after its due slot. A unit
 		// forced out takes the tables ahead of it that hold it back along.
 		let mut forced: Vec<bool> = self
@@ -1301,6 +1306,13 @@ impl Schedule {
 				}
 			}
 		}
+		// A copy of the tables forced out goes whole, so every other copy on its way finishes
+		// with it, leaving none part-way for it to interrupt.
+		if (0..self.units.len()).any(|i| forced[i] && self.units[i].is_tables()) {
+			for (i, unit) in self.units.iter().enumerate() {
+				forced[i] |= unit.is_tables() && (unit.sent > 0 || take[i] > 0);
+			}
+		}
 		for ((unit, take), forced) in self.units.iter_mut().zip(take.iter_mut()).zip(forced) {
 			if forced && *take < unit.remaining() {
 				if self.buffers.get(&unit.pid).is_some_and(|buffer| buffer.size.is_some()) {
@@ -1314,13 +1326,22 @@ impl Schedule {
 		let mut keyframe = false;
 		let mut units = Vec::new();
 		let mut begun = 0;
-		// Tables already on their way finish ahead of any copy forced out beside them, as the
-		// padded layout's `held_back` keeps them.
-		let mut order: Vec<usize> = (0..self.units.len()).collect();
-		order.sort_by_key(|&i| {
-			let unit = &self.units[i];
-			unit.sent == 0 || (unit.tables.is_none() && !unit.repeat)
-		});
+		// The copies of the tables go out together where the first stands in the queue: any on
+		// its way first, then as admitted, then any forced out, so the one left part-way is last.
+		let tables = |i: &usize| self.units[*i].is_tables() && take[*i] > 0;
+		let mut copies: Vec<usize> = (0..self.units.len())
+			.filter(|i| tables(i) && self.units[*i].sent > 0)
+			.collect();
+		copies.extend(admitted.iter().filter(|i| tables(i) && self.units[**i].sent == 0));
+		copies.extend((0..self.units.len()).filter(|i| tables(i) && !admitted.contains(i) && self.units[*i].sent == 0));
+		let mut order = Vec::new();
+		for i in 0..self.units.len() {
+			if !tables(&i) {
+				order.push(i);
+			} else if !copies.is_empty() {
+				order.append(&mut copies);
+			}
+		}
 		for i in order {
 			let (unit, take) = (&mut self.units[i], take[i]);
 			if take == 0 {
@@ -1331,7 +1352,7 @@ impl Schedule {
 				begun += usize::from(unit.tables.is_some());
 				// Only the tables muxed ahead of a frame that wrote nothing, or repeated, are no
 				// access unit.
-				if unit.tables.is_none() && !unit.repeat && unit.packets_on(0..unit.count(), unit.pid) > 0 {
+				if !unit.is_tables() && unit.packets_on(0..unit.count(), unit.pid) > 0 {
 					units.extend(std::iter::repeat_n(unit.pid, unit.frames.len().max(1)));
 				}
 			}
@@ -1374,7 +1395,7 @@ impl Schedule {
 		let pending = self.units.iter().any(|unit| unit.repeat);
 		// Only media still to go out is repeated around: a clock running on without it, through
 		// a stall or as a tail ahead of a switch, carries only the clock.
-		let flowing = self.units.iter().any(|unit| unit.tables.is_none() && !unit.repeat);
+		let flowing = self.units.iter().any(|unit| !unit.is_tables());
 		if self.opening || self.revising || pending || !flowing || self.repeated.is_some_and(|last| period <= last) {
 			return;
 		}
@@ -1680,7 +1701,7 @@ impl Schedule {
 				if unit.sent == 0 {
 					out.keyframe |= unit.keyframe;
 					out.begun += usize::from(unit.tables.is_some());
-					if unit.tables.is_none() && !unit.repeat && unit.packets_on(0..unit.count(), unit.pid) > 0 {
+					if !unit.is_tables() && unit.packets_on(0..unit.count(), unit.pid) > 0 {
 						out.units
 							.extend(std::iter::repeat_n(unit.pid, unit.frames.len().max(1)));
 					}
@@ -1784,8 +1805,10 @@ impl Schedule {
 	/// How many of each unit's packets slot `index` carries, at most `budget` in all.
 	///
 	/// Earliest deadline first across PIDs. A PID whose unit stops short (its buffers full,
-	/// or not yet released) takes nothing more this slot, so each keeps its own order.
-	fn admit(&mut self, index: u128, mut budget: usize) -> Vec<usize> {
+	/// or not yet released) takes nothing more this slot, so each keeps its own order; a copy
+	/// of the tables stopping part-way stops every other copy, whichever lane it rides. Also
+	/// returns the units in the order they were admitted.
+	fn admit(&mut self, index: u128, mut budget: usize) -> (Vec<usize>, Vec<usize>) {
 		// Unpadded layout has no exact packet clock until the slot is assembled, so it
 		// retains units until their decode instant is behind the opening grid point.
 		let mut occupancy: FxHashMap<u16, usize> = FxHashMap::default();
@@ -1803,13 +1826,15 @@ impl Schedule {
 		let mut take = vec![0; self.units.len()];
 		let mut carried: FxHashMap<u16, usize> = FxHashMap::default();
 		let mut stopped: Vec<u16> = Vec::new();
+		let mut parted = false;
+		let mut admitted = Vec::new();
 		let mut holding = self.holding(|i| self.units[i].remaining());
 		for i in order {
 			let unit = &self.units[i];
 			if budget == 0 {
 				break;
 			}
-			if stopped.contains(&unit.pid) {
+			if stopped.contains(&unit.pid) || (parted && unit.is_tables()) {
 				continue;
 			}
 			let size = self.buffers.get(&unit.pid).and_then(|buffer| buffer.size);
@@ -1844,8 +1869,12 @@ impl Schedule {
 					n += 1;
 				}
 			}
+			if n > 0 {
+				admitted.push(i);
+			}
 			if n < unit.remaining() {
 				stopped.push(unit.pid);
+				parted |= n > 0 && unit.is_tables();
 			} else if unit.tables.is_some() {
 				take[i] = n;
 				holding = self.holding(|j| self.units[j].remaining() - take[j]);
@@ -1859,7 +1888,7 @@ impl Schedule {
 				unit.held += unit.packets_on(unit.sent..unit.sent + n, unit.pid) * PAYLOAD;
 			}
 		}
-		take
+		(take, admitted)
 	}
 }
 
@@ -2382,25 +2411,43 @@ mod tests {
 		}
 	}
 
-	/// Unpadded too, a revision waits for a repeat already on its way, so no table of the old
-	/// version follows one of the new: whether a media-led copy shares every slot with it, or
-	/// one falls due beside its remainder and is forced out with it.
+	/// Unpadded, no copy of the tables interrupts another part-way through a section: the grid's
+	/// repeats and the copies the media leads lay each PMT whole before the next begins, however
+	/// they share the slots, whatever the send-ahead window, and with a frame falling due late.
 	#[test]
-	fn a_revision_waits_for_a_begun_repeat_unpadded() {
+	fn no_copy_interrupts_another_unpadded() {
 		let every: Vec<u128> = (0..2_000).step_by(40).collect();
-		let due: Vec<u128> = [0, 40, 50].into_iter().chain((80..2_000).step_by(40)).collect();
-		for (frames, leads) in [(every.clone(), every), (due, vec![0, 40, 50])] {
-			let mut schedule = Schedule::new(Duration::ZERO);
+		let late: Vec<u128> = [0, 40, 50].into_iter().chain((80..2_000).step_by(40)).collect();
+		let leads = [
+			every.clone(),
+			vec![0, 1_000, 1_040],
+			vec![0, 40, 50, 1_000],
+			vec![0, 120, 130, 140],
+		];
+		let mut cases = Vec::new();
+		for window in [0, 100, 500, 1_000] {
+			for count in [2, 6, 11, 20, 60] {
+				for frames in [&every, &late] {
+					cases.extend(leads.iter().map(|leads| (window, count, frames, leads)));
+				}
+			}
+		}
+		for (window, count, frames, leads) in cases {
+			let mut schedule = Schedule::new(Duration::from_millis(window));
 			schedule.set_tables(100);
 			schedule.set_clock(1);
 			schedule.set_buffer(1, VIDEO);
-			let psi = |mark: u8| Psi {
-				packets: marked_tables(mark, 11),
+			// Each PMT packet carries its place in the section.
+			let mut packets = marked_tables(1, count);
+			for (n, packet) in packets.as_chunks_mut::<{ TsPacket::SIZE }>().0.iter_mut().enumerate() {
+				packet[5] = n.saturating_sub(1) as u8;
+			}
+			schedule.set_psi(Psi {
+				packets,
 				flagged: None,
 				clock: 1,
-			};
-			schedule.set_psi(psi(1));
-			for &ms in &frames {
+			});
+			for &ms in frames {
 				if leads.contains(&ms) {
 					schedule.lead(Tables {
 						rate: None,
@@ -2409,22 +2456,22 @@ mod tests {
 				}
 				schedule.push(1, timing(ms), unit(1, 1), ms % 1_000 == 0).unwrap();
 			}
-			let mut marks = Vec::new();
-			let mut revised = false;
+			let mut places = Vec::new();
 			while let Some(slot) = schedule.next(Some(slot(ms(4_000)))).unwrap() {
-				marks.extend(table_marks(&slot));
-				let begun = schedule.units.iter().any(|unit| unit.repeat && unit.sent > 0);
-				if !revised && begun {
-					schedule.set_psi(psi(2));
-					revised = true;
-				}
+				let packets = slot.packets.as_chunks::<{ TsPacket::SIZE }>().0;
+				places.extend(
+					packets
+						.iter()
+						.filter(|packet| pid(*packet) == 100)
+						.map(|packet| packet[5]),
+				);
 			}
-			assert!(revised, "{leads:?}: a repeat began");
-			let first = marks.iter().position(|&mark| mark == 2).expect("the revision goes out");
-			assert!(
-				marks[first..].iter().all(|&mark| mark == 2),
-				"{leads:?}: an old table follows the new: {marks:?}"
-			);
+			assert!(places.len() > count, "{window} {count} {leads:?}: the tables repeat");
+			let interrupted = places
+				.iter()
+				.enumerate()
+				.position(|(n, &place)| usize::from(place) != n % count);
+			assert_eq!(interrupted, None, "{window} {count} {leads:?}: {places:?}");
 		}
 	}
 
