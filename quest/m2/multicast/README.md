@@ -73,6 +73,10 @@ The maintainer's requirements, which every child is judged against:
     moq-transport node is always an endpoint.
 12. No global view. With competing claims each node uses its closest, and
     nothing elects a leader.
+    Narrowed 2026-11-18 inside one trusted domain, for judging
+    [the node layer](/quest/m3/node-layer.md): a node may know its domain's
+    topology, but nothing elects a leader and competing claims resolve to
+    the closest.
 13. A secondary route may carry metadata only, so a stalled primary is found
     without waiting on QUIC keep-alives, where a node opts in.
 14. No approach is assumed: earlier attempts are evidence, not constraints.
