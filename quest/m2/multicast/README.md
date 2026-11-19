@@ -31,8 +31,13 @@ a marked Node ID, and marked the lite-06 churn mitigations; and
 chain name its announcing relay, then each grant's exporter and adopter.
 Its proof is
 `rs/moq-net/verify/route-algebra/`, and the quests written against the old
-wire were retargeted or deleted. The lite-07 cut still waits on this epic's
-children, [the uncovered cases](/quest/m2/multicast/accept.md),
+wire were retargeted or deleted.
+[moq-dev/moq#9111](https://github.com/moq-dev/moq/pull/9111) ran the cases no
+test covered on real sessions. The lite-07 cut still waits on this epic's
+children, the two flaws it found,
+[a reader resuming on a detour learned after its session closed](/quest/m2/multicast/detour-resume.md)
+and [a route moving behind one next hop resending a group](/quest/m2/multicast/resend.md),
+whose fix changes the wire,
 [the mesh replay](/quest/m2/multicast/mesh-replay.md), and
 [draining dialed links](/quest/m2/multicast/drain-dialed-links.md), and on
 [route layer acceptance](/quest/m2/cluster-routes/acceptance.md) retiring

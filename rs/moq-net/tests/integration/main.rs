@@ -70,6 +70,7 @@ mod relay_upstream_close;
 mod replacement;
 mod request_caps;
 mod route_acceptance;
+mod route_audit;
 mod route_change;
 mod route_cluster;
 mod route_failover;
