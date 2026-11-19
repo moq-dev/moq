@@ -2329,7 +2329,7 @@ export class Subscriber {
 	#bindDatagrams(source: broadcast.Consumer, track: track.Producer, info: Partial<datagram.Info>) {
 		const pending = this.#datagramRequests.get(source);
 		const entry = pending?.get(track.name);
-		let producer: datagram.Producer;
+		let producer: datagram.Producer | undefined;
 		try {
 			producer = entry ? entry.request.accept(info) : wireOf(source).createDatagrams(track.name, info, false);
 		} catch (err) {
@@ -2337,6 +2337,8 @@ export class Subscriber {
 			console.debug(`serving the stream track without datagrams: ${reason(err)}`);
 			return;
 		}
+		// A live datagram track already holds the name.
+		if (!producer) return;
 		pending?.delete(track.name);
 		entry?.accepted.set(true);
 		let held: track.Subscriber | undefined;

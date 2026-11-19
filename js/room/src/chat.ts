@@ -32,7 +32,9 @@ export class Publisher {
 
 	/** Create the chat track on a broadcast. */
 	static create(broadcast: Broadcast.Producer): Publisher {
-		return new Publisher(broadcast.createTrack(TRACK, info()));
+		const track = broadcast.createTrack(TRACK, info());
+		if (!track) throw new Error(`the track ${TRACK} already exists`);
+		return new Publisher(track);
 	}
 
 	/** Publish a chat window over an existing track. */

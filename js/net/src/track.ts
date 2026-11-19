@@ -2915,6 +2915,8 @@ type Drift = {
 	// track's bare starts count as milliseconds, as the Rust `age` reads them.
 	presentation?: { key: bigint; at: number };
 	end?: bigint;
+	// Judged against the whole track rather than this reader's window, as a fetch is.
+	whole: boolean;
 };
 
 // An ordered read's state, mirroring the Rust `Ordered`: a group read and held back because a gap
@@ -3139,10 +3141,10 @@ export class Subscriber {
 	// handler could take it.
 	#lookups: { time: bigint; lookup?: Lookup }[] = [];
 
-	#drift(): Drift {
+	#drift(whole = this.#fetchBudget !== undefined): Drift {
 		// A fetch judges its group against the whole track, as the Rust `fetch_group` does: a
 		// newer group outside its one-group window still supersedes it.
-		const end = this.#fetchBudget === undefined ? this.#cursor.peek().end : undefined;
+		const end = whole ? undefined : this.#cursor.peek().end;
 		const timeline = this.#state.timeline;
 		let presentation: Drift["presentation"];
 		const info = this.#state.info.peek();
@@ -3152,7 +3154,7 @@ export class Subscriber {
 		const scaleless = info !== undefined && info.timescale == null;
 		for (let i = (end === undefined ? timeline.length : timelineIndex(timeline, end)) - 1; i >= 0; i--) {
 			const group = timeline[i];
-			if (hooks.groupFailed(group) || !this.#judges(group.start)) continue;
+			if (hooks.groupFailed(group) || !this.#judges(group.start, whole)) continue;
 			if (scaleless) {
 				if (!hooks.groupStarted(group)) continue;
 				presentation = { key: group.start, at: Number(group.start) };
@@ -3172,6 +3174,19 @@ export class Subscriber {
 			bounded: fresh !== undefined && requested >= fresh,
 			presentation,
 			end,
+			whole,
+		};
+	}
+
+	// {@link #drift} as a fetch judges its group, against the whole track, under the fetch's own
+	// budget in milliseconds in place of this reader's, still capped by the track's max age.
+	#driftWithin(budget: number): Drift {
+		const drift = this.#drift(true);
+		const fresh = this.#state.info.peek()?.maxAge?.asMillis();
+		return {
+			...drift,
+			budget: fresh === undefined ? budget : Math.min(budget, fresh),
+			bounded: fresh !== undefined && budget >= fresh,
 		};
 	}
 
@@ -3183,30 +3198,35 @@ export class Subscriber {
 	// last timestamp says where it starts presenting, not where it ends. A group whose header
 	// landed without a frame is not content yet, so the next one is the bound; an unstamped
 	// successor leaves the reach unbounded.
-	#successor(key: bigint, end?: bigint): GroupConsumer | undefined {
-		return this.#after(key, end, hooks.groupStarted);
+	#successor(key: bigint, end?: bigint, whole?: boolean): GroupConsumer | undefined {
+		return this.#after(key, end, hooks.groupStarted, whole);
 	}
 
 	// The group after `key` that starts its wall clock: like {@link #successor}, but
 	// counting a group before its first frame. Its header arrived, so a relay ages the group
 	// before it as the origin does, even if its first frame never comes.
-	#arrival(key: bigint, end?: bigint): GroupConsumer | undefined {
-		return this.#after(key, end, () => true);
+	#arrival(key: bigint, end?: bigint, whole?: boolean): GroupConsumer | undefined {
+		return this.#after(key, end, () => true, whole);
 	}
 
 	// Whether group `key` counts toward the drift edge: inside the window, or anywhere for a
-	// fetch.
-	#judges(key: bigint): boolean {
-		return this.#fetchBudget !== undefined || this.#window.contains(key);
+	// fetch or when judging the `whole` track.
+	#judges(key: bigint, whole = this.#fetchBudget !== undefined): boolean {
+		return whole || this.#window.contains(key);
 	}
 
 	// The first servable group after `key` below `end` that `counts`.
-	#after(key: bigint, end: bigint | undefined, counts: (group: GroupConsumer) => boolean): GroupConsumer | undefined {
+	#after(
+		key: bigint,
+		end: bigint | undefined,
+		counts: (group: GroupConsumer) => boolean,
+		whole?: boolean,
+	): GroupConsumer | undefined {
 		const timeline = this.#state.timeline;
 		for (let i = timelineIndex(timeline, key + 1n); i < timeline.length; i++) {
 			const successor = timeline[i];
 			if (end !== undefined && successor.start >= end) break;
-			if (hooks.groupFailed(successor) || !this.#judges(successor.start)) continue;
+			if (hooks.groupFailed(successor) || !this.#judges(successor.start, whole)) continue;
 			if (counts(successor)) return successor;
 		}
 		return undefined;
@@ -3240,7 +3260,7 @@ export class Subscriber {
 	// from another copy, or outliving this subscriber. Once closed, only the wall clock judges
 	// it, from the arrivals kept at close.
 	#staleAt(key: bigint, drift: Drift, wake = false, held?: Superseded): boolean {
-		const arrival = this.#arrivals ? undefined : this.#arrival(key, drift.end);
+		const arrival = this.#arrivals ? undefined : this.#arrival(key, drift.end, drift.whole);
 		let arrived = this.#arrivals
 			? this.#keptSupersededAt(key, drift, held)
 			: this.#supersededAt(arrival, drift, held);
@@ -3254,7 +3274,7 @@ export class Subscriber {
 		// A closed subscriber keeps no timeline to bound the reach with.
 		if (this.#arrivals) return false;
 
-		const reach = this.#reach(key, drift.end);
+		const reach = this.#reach(key, drift.end, drift.whole);
 		return (
 			drift.presentation !== undefined &&
 			drift.presentation.key > key &&
@@ -3282,10 +3302,10 @@ export class Subscriber {
 	// The furthest presentation time, in milliseconds, group `key` could still reach: its own
 	// end once finished whole, else where its immediate successor below `end` begins, undefined
 	// when nothing proves where it stops. Mirrors the Rust `TrackState::reach`.
-	#reach(key: bigint, end: bigint | undefined): number | undefined {
+	#reach(key: bigint, end: bigint | undefined, whole?: boolean): number | undefined {
 		const own = this.#held(key)?.end;
 		if (own !== undefined) return this.#presented(own);
-		const successor = this.#successor(key, end);
+		const successor = this.#successor(key, end, whole);
 		if (!successor) return undefined;
 		const info = this.#state.info.peek();
 		if (info !== undefined && info.timescale == null) return this.#presented(successor.start);
@@ -4315,8 +4335,7 @@ export class Subscriber {
 			return subscriber.#window.starts(from);
 		};
 		hooks.servingResolved = (subscriber) => {
-			const resumed = subscriber.#resume?.resolved();
-			if (resumed) return resumed;
+			if (subscriber.#resume) return subscriber.#resume.resolved();
 			subscriber.#settle();
 			return subscriber.#window.resolved();
 		};
@@ -4355,10 +4374,11 @@ export class Subscriber {
 			(subscriber.#state.closed.peek() !== undefined || subscriber.#complete()) &&
 			!hooks.hasUnreadGroup(subscriber, start, end, delivered);
 		hooks.awaitsFill = (subscriber) => subscriber.#fillWait;
-		hooks.staleAt = (subscriber, key) => {
+		hooks.staleAt = (subscriber, key, budget) => {
 			const held: Superseded = {};
+			const drift = budget === undefined ? () => subscriber.#drift() : () => subscriber.#driftWithin(budget);
 			return {
-				expired: () => subscriber.#staleAt(key, subscriber.#drift(), true, held),
+				expired: () => subscriber.#staleAt(key, drift(), true, held),
 				changed: subscriber.#expiryChanged(),
 			};
 		};
@@ -4565,7 +4585,7 @@ export class Subscriber {
 	floor(): bigint | undefined {
 		let start: bigint | undefined;
 		if (this.#resume) {
-			for (const range of this.#resume.resolved() ?? [undefined]) {
+			for (const range of this.#resume.resolved()) {
 				if (!range?.floored) return undefined;
 				start = start === undefined ? range.start : min(start, range.start);
 			}
@@ -5720,6 +5740,7 @@ export class Ordered {
 	}
 
 	/** Resolve this track's immutable publisher properties; see {@link Subscriber.info}. */
+	// fallow-ignore-next-line unused-class-member
 	info(): Promise<Info> {
 		return this.#subscriber.info();
 	}
@@ -5745,6 +5766,7 @@ export class Ordered {
 	}
 
 	/** Whether the publisher declared every start in `[start, end)` skipped; see {@link Subscriber.isSkipped}. */
+	// fallow-ignore-next-line unused-class-member
 	isSkipped(start: bigint, end: bigint): boolean {
 		return this.#subscriber.isSkipped(start, end);
 	}

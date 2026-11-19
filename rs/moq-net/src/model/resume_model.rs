@@ -569,7 +569,7 @@ impl Model {
 							fill.refuse_groups(group..group + 1, Error::Stream(GIVE_UP));
 						} else if written == 0 || written < from || held.into_iter().any(|part| part.from <= from) {
 							fill.refuse_groups(group..group + 1, Error::NotFound);
-						} else if let Ok(writer) = fill.accept(group, None) {
+						} else if let Ok(Some(writer)) = fill.accept(group, None) {
 							// The fill starts at the frame its readers want, which may not exist yet.
 							copy.groups.entry(group).or_default().push(Part {
 								from,

@@ -8,6 +8,7 @@
 
 import { Duration } from "@moq/clock";
 import { Producer as BroadcastProducer } from "../src/broadcast.ts";
+import { defined } from "../src/defined.test-util.ts";
 import { Producer as GroupProducer } from "../src/group.ts";
 import { hooks } from "../src/internal.ts";
 import { Front } from "../src/resume.ts";
@@ -46,7 +47,7 @@ async function measure(readers: number, swaps: number | undefined, fork = false)
 	const sources: { broadcast: BroadcastProducer; write: () => void }[] = [];
 	const source = () => {
 		const broadcast = new BroadcastProducer();
-		const track = broadcast.createTrack("seq");
+		const track = defined(broadcast.createTrack("seq"));
 		// Every route's copy holds the same groups under the same sequences.
 		const write = () => {
 			const group = track.createGroup(sequence);
@@ -143,7 +144,7 @@ async function measureFlaps(readers: number, flaps: number): Promise<number> {
 	const front = new Front();
 	const sources = [new BroadcastProducer(), new BroadcastProducer()];
 	const handles = sources.map((source) => source.consume());
-	const tracks = sources.map((source) => source.createTrack("seq"));
+	const tracks = sources.map((source) => defined(source.createTrack("seq")));
 	const groups = tracks.map((track) => {
 		const group = hooks.appendNext(track);
 		group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.start) });

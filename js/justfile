@@ -35,6 +35,12 @@ check:
 check-changed list:
     python3 ../sh/js/workspace.py check '{{ list }}'
 
+# Find unused files, exports, types, class members, and dependencies in the whole
+# workspace; .fallowrc.jsonc lists the entry points no plugin finds.
+dead-code:
+    uv run --no-project python ../sh/js/install.py frozen
+    bun fallow dead-code --root ..
+
 # Validate the Worker deploy bundles outside the Bun workspace.
 workers:
     ../sh/js/workers.sh

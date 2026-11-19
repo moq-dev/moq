@@ -310,6 +310,7 @@ export class Consumer {
 	}
 
 	/** Settles once the stream closes: `null` on a clean close, or the abort {@link Error}. */
+	// fallow-ignore-next-line unused-class-member
 	get closed(): GetPromise<Error | null> {
 		return this.#routes.closed;
 	}

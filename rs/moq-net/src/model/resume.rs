@@ -1667,15 +1667,23 @@ impl Reader {
 		}
 	}
 
-	/// Whether the window names a group from `floor` up to `key` the reader lacks.
-	fn owes_below(&mut self, floor: u64, key: u64, delivered: &Delivered) -> bool {
+	/// Whether the window and the local bounds name a group from `floor` up to `key` the reader
+	/// lacks and that may yet land on copy `index`: one outside the local bounds never lands on a
+	/// copy, nor one that copy declares skipped, nor any on a failed copy, which receives nothing
+	/// more.
+	fn owes_below(&mut self, index: usize, floor: u64, key: u64, delivered: &Delivered) -> bool {
+		let copy = self.copies[index].track.clone();
+		if matches!(copy.poll_complete(&kio::Waiter::noop()), Poll::Ready(Err(_))) {
+			return false;
+		}
+		let (start, cap) = self.groups;
+		let key = cap.map_or(key, |cap| key.min(cap));
 		self.window()
-			.runs(floor)
+			.runs(floor.max(start))
 			.take_while(|run| *run.start() < key)
-			.any(|run| {
-				!delivered
-					.gaps(*run.start()..run.end().saturating_add(1).min(key))
-					.is_empty()
+			.flat_map(|run| delivered.gaps(*run.start()..run.end().saturating_add(1).min(key)))
+			.any(|gap| {
+				track::first_open(std::iter::once(gap.start..=gap.end - 1), |at| copy.hole_end(at, false)).is_some()
 			})
 	}
 
@@ -1828,7 +1836,7 @@ impl Reader {
 							// would lose it, though it may yet land on this copy: leave it there.
 							// The peek returned the held group, so only the copy's arrivals wake
 							// the read when the owed one lands: one already landed is peeked again.
-							if ordered && deliverable && self.owes_below(floor, key, delivered) {
+							if ordered && deliverable && self.owes_below(index, floor, key, delivered) {
 								let copy = &self.copies[index];
 								if copy.track.poll_arrived(arrivals, waiter).is_ready() {
 									arrivals = copy.track.arrived();
@@ -4152,7 +4160,7 @@ mod test {
 		assert!(reading.read_frame().now_or_never().is_none());
 		let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
 		assert_eq!((request.key(), request.frame_start()), (0, 2));
-		let mut rest = request.accept(None).unwrap();
+		let mut rest = request.accept(None).unwrap().expect("a fresh group");
 		rest.write_frame(ts(2), frames[2].clone()).unwrap();
 		rest.finish().unwrap();
 		assert_eq!(read(&mut reading).as_ref(), Some(&frames[2]));
@@ -4240,7 +4248,7 @@ mod test {
 		filler.finish().unwrap();
 		assert!(handoff.head().is_none(), "the shrink reclaimed the head");
 
-		let mut rest = request.accept(None).unwrap();
+		let mut rest = request.accept(None).unwrap().expect("a fresh group");
 		rest.write_frame(ts(1), frame()).unwrap();
 		rest.finish().unwrap();
 		let res = reading.read_frame().now_or_never().expect("fails instead of spinning");
@@ -4442,7 +4450,7 @@ mod test {
 
 		let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
 		assert_eq!((request.key(), request.frame_start()), (0, 1));
-		let mut rest = request.accept(None).unwrap();
+		let mut rest = request.accept(None).unwrap().expect("a fresh group");
 		rest.write_frame(ts(1), b"b".as_ref()).unwrap();
 		rest.finish().unwrap();
 		a.abort(Error::Stream(StreamError::App(5))).unwrap();
@@ -4618,7 +4626,7 @@ mod test {
 		assert!(fetched.read_frame().now_or_never().is_none());
 		let pending = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
 		assert!(fetched.read_frame().now_or_never().is_none());
-		let mut rest = pending.accept(None).unwrap();
+		let mut rest = pending.accept(None).unwrap().expect("a fresh group");
 		rest.write_frame(ts(1), b"b".as_ref()).unwrap();
 		rest.finish().unwrap();
 		assert_eq!(read(&mut fetched), Some(b"b".to_vec()));
@@ -4867,7 +4875,10 @@ mod test {
 			.unwrap();
 
 		let copy = request.accept(crate::track::Info::timed());
-		let mut group = fill.accept(0, crate::track::Info::timed()).unwrap();
+		let mut group = fill
+			.accept(0, crate::track::Info::timed())
+			.unwrap()
+			.expect("a fresh group");
 		group.write_frame(ts(0), b"early".as_ref()).unwrap();
 		group.finish().unwrap();
 		assert!(
@@ -4894,7 +4905,10 @@ mod test {
 		assert!((&mut fetching).now_or_never().is_none());
 		let fill = refused_dynamic.requested_groups().now_or_never().unwrap().unwrap();
 		let wrong = refused.accept(crate::track::Info::timed());
-		let mut group = fill.accept(0, crate::track::Info::timed()).unwrap();
+		let mut group = fill
+			.accept(0, crate::track::Info::timed())
+			.unwrap()
+			.expect("a fresh group");
 		group.write_frame(ts(0), b"wrong".as_ref()).unwrap();
 		group.finish().unwrap();
 		drop(staged);
@@ -4909,7 +4923,10 @@ mod test {
 			.expect("asked again of the next route")
 			.unwrap();
 		let copy = request.accept(crate::track::Info::timed());
-		let mut group = fill.accept(0, crate::track::Info::timed()).unwrap();
+		let mut group = fill
+			.accept(0, crate::track::Info::timed())
+			.unwrap()
+			.expect("a fresh group");
 		group.write_frame(ts(0), b"right".as_ref()).unwrap();
 		group.finish().unwrap();
 		let _logical = logical.accept(crate::track::Info::timed());
@@ -5017,7 +5034,10 @@ mod test {
 		assert!((&mut fetching).now_or_never().is_none());
 		let fill = dynamic.requested_groups().now_or_never().unwrap().unwrap();
 		let _staged_copy = request.accept(crate::track::Info::timed());
-		let mut group = fill.accept(0, crate::track::Info::timed()).unwrap();
+		let mut group = fill
+			.accept(0, crate::track::Info::timed())
+			.unwrap()
+			.expect("a fresh group");
 		group.write_frame(ts(0), b"x".as_ref()).unwrap();
 		group.finish().unwrap();
 		assert!((&mut fetching).now_or_never().is_none());
@@ -5035,7 +5055,10 @@ mod test {
 			.now_or_never()
 			.expect("asked of the serving copy")
 			.unwrap();
-		let mut group = fill.accept(0, crate::track::Info::timed()).unwrap();
+		let mut group = fill
+			.accept(0, crate::track::Info::timed())
+			.unwrap()
+			.expect("a fresh group");
 		group.write_frame(ts(0), b"x".as_ref()).unwrap();
 		group.finish().unwrap();
 		let mut fetched = fetching.now_or_never().expect("answered").unwrap();
@@ -5298,7 +5321,7 @@ mod test {
 		assert!(reading.read_frame().now_or_never().is_none());
 		let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
 		assert_eq!((request.key(), request.frame_start()), (0, 2));
-		let mut rest = request.accept(None).unwrap();
+		let mut rest = request.accept(None).unwrap().expect("a fresh group");
 		rest.write_frame(ts(2), b"c".as_ref()).unwrap();
 		rest.finish().unwrap();
 		assert_eq!(read(&mut reading), Some(b"c".to_vec()));
@@ -5334,7 +5357,7 @@ mod test {
 		assert!(reading.read_frame().now_or_never().is_none());
 		let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
 		assert_eq!(request.frame_start(), 1);
-		let mut rest = request.accept(None).unwrap();
+		let mut rest = request.accept(None).unwrap().expect("a fresh group");
 		rest.write_frame(ts(1), b"b".as_ref()).unwrap();
 		rest.finish().unwrap();
 		assert_eq!(read(&mut reading), Some(b"b".to_vec()));
@@ -5367,7 +5390,7 @@ mod test {
 		assert!(fetched.read_frame().now_or_never().is_none());
 		let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
 		assert_eq!(request.frame_start(), 1);
-		let mut rest = request.accept(None).unwrap();
+		let mut rest = request.accept(None).unwrap().expect("a fresh group");
 		rest.write_frame(ts(1), b"b".as_ref()).unwrap();
 		rest.finish().unwrap();
 		assert_eq!(read(&mut fetched), Some(b"b".to_vec()));
@@ -5784,6 +5807,148 @@ mod test {
 		assert_eq!(read(&mut sub), ["group 0", "group 5"]);
 		write(&b, 3);
 		assert_eq!(read(&mut sub), ["gap 3..4 (old)"]);
+	}
+
+	/// A group the window names under the local floor never lands on a copy, so it is no reason
+	/// to hold an ordered copy's cursor on a group the window leaves out.
+	#[test]
+	fn an_ordered_reader_owes_no_window_group_under_its_local_floor() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = received_copy();
+		a.anchored();
+		routes.serve(a.consume());
+		write(&a, 10);
+		let mut open = a.create_group(group::Info { start: 100 }).unwrap();
+		open.write_frame(ts(100), b"x".as_ref()).unwrap();
+		let subscription = Subscription::default()
+			.with_delay(Delay::default().with_max(None))
+			.with_ranges([
+				track::Range {
+					start: Anchor::Time(10),
+					end: Some(Anchor::Time(10)),
+				},
+				track::Range {
+					start: Anchor::Time(100),
+					end: Some(Anchor::Time(200)),
+				},
+			]);
+		let mut sub = logical
+			.consume()
+			.subscribe(subscription)
+			.now_or_never()
+			.unwrap()
+			.unwrap()
+			.with_range(60..);
+		// The window resolves before any group is read.
+		assert_eq!(peek(&mut sub, true).key(), 100);
+		let starts: Vec<_> = sub
+			.resolved_keys([0, 1])
+			.into_iter()
+			.map(|at| at.map(|at| at.start))
+			.collect();
+		assert_eq!(starts, [Some(10), Some(100)]);
+
+		// The replacement places time 100 at group 80, the newest it holds at or before it, which
+		// the window leaves out. Group 10 is still owed, but under the local floor.
+		a.clone().abort(Error::Cancel).unwrap();
+		// Published in order, so its ordered cursor waits on no group between.
+		let b = copy();
+		write(&b, 80);
+		write(&b, 120);
+		routes.serve(b.consume());
+		assert_eq!(drain(&mut sub, true), [120]);
+	}
+
+	/// A window group the replacement declares skipped never lands on it, so it is no reason to
+	/// hold its ordered cursor on a group the window leaves out.
+	#[test]
+	fn an_ordered_reader_owes_no_window_group_its_copy_declares_skipped() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = received_copy();
+		a.anchored();
+		routes.serve(a.consume());
+		write(&a, 10);
+		let mut open = a.create_group(group::Info { start: 100 }).unwrap();
+		open.write_frame(ts(100), b"x".as_ref()).unwrap();
+		let subscription = Subscription::default()
+			.with_delay(Delay::default().with_max(None))
+			.with_ranges([
+				track::Range {
+					start: Anchor::Time(10),
+					end: Some(Anchor::Time(30)),
+				},
+				track::Range {
+					start: Anchor::Time(100),
+					end: Some(Anchor::Time(200)),
+				},
+			]);
+		let mut sub = logical
+			.consume()
+			.subscribe(subscription)
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		assert_eq!(peek(&mut sub, true).key(), 10);
+		assert_eq!(drain(&mut sub, true), [10]);
+
+		// The replacement places time 100 at group 80, which the window leaves out, and skips the
+		// rest of the first range. Published in order, so its ordered cursor waits on no group
+		// between.
+		a.clone().abort(Error::Cancel).unwrap();
+		let b = copy();
+		b.skip_groups(11..31);
+		write(&b, 80);
+		write(&b, 120);
+		routes.serve(b.consume());
+		assert_eq!(drain(&mut sub, true), [120]);
+	}
+
+	/// A failed copy receives nothing more, so a window group under its cursor is no reason to
+	/// hold it: it hands out what it holds and its failure is judged.
+	#[test]
+	fn an_ordered_reader_does_not_hold_a_failed_copy_for_a_group_it_can_no_longer_receive() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = received_copy();
+		a.anchored();
+		routes.serve(a.consume());
+		write(&a, 10);
+		let mut open = a.create_group(group::Info { start: 100 }).unwrap();
+		open.write_frame(ts(100), b"x".as_ref()).unwrap();
+		let subscription = Subscription::default()
+			.with_delay(Delay::default().with_max(None))
+			.with_ranges([
+				track::Range {
+					start: Anchor::Time(10),
+					end: Some(Anchor::Time(30)),
+				},
+				track::Range {
+					start: Anchor::Time(100),
+					end: Some(Anchor::Time(200)),
+				},
+			]);
+		let mut sub = logical
+			.consume()
+			.subscribe(subscription)
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		assert_eq!(peek(&mut sub, true).key(), 10);
+		assert_eq!(drain(&mut sub, true), [10]);
+
+		// The replacement places time 100 at group 80, which the window leaves out, then fails
+		// without 11 to 30 ever landing on it.
+		a.clone().abort(Error::Cancel).unwrap();
+		let b = copy();
+		write(&b, 80);
+		write(&b, 120);
+		routes.serve(b.consume());
+		// Open, it may still receive 11 to 30, so its cursor stays on 80.
+		assert_eq!(drain(&mut sub, true), [0u64; 0]);
+		b.clone().abort(Error::Cancel).unwrap();
+		assert_eq!(drain(&mut sub, true), [120]);
 	}
 
 	/// A late arrival the reader's ranges leave out is no gap of its own: it is neither reported
@@ -7093,7 +7258,7 @@ mod test {
 			assert!(reading.read_frame().now_or_never().is_none());
 			let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
 			assert_eq!((request.key(), request.frame_start()), (8, 1));
-			let mut rest = request.accept(None).unwrap();
+			let mut rest = request.accept(None).unwrap().expect("a fresh group");
 			assert!(reading.read_frame().now_or_never().is_none());
 
 			// The serving copy's first group bounds the replaced one, which is let go.
@@ -8617,7 +8782,7 @@ mod test {
 		assert!(kio::Task::poll(&mut *fetching, &waiter).is_pending());
 		let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
 		assert_eq!(request.frame_start(), 0, "the cold copy fills from the head");
-		let mut group = request.accept(None).unwrap();
+		let mut group = request.accept(None).unwrap().expect("a fresh group");
 		for frame in 0..4u8 {
 			group.write_frame(ts(0), vec![frame]).unwrap();
 		}
@@ -8934,7 +9099,7 @@ mod test {
 
 		let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
 		assert_eq!((request.key(), request.frame_start()), (0, 1));
-		let mut rest = request.accept(None).unwrap();
+		let mut rest = request.accept(None).unwrap().expect("a fresh group");
 		rest.write_frame(ts(1), b"b".as_ref()).unwrap();
 		rest.finish().unwrap();
 		assert_eq!(read(&mut fetched), Some(b"b".to_vec()));
@@ -9062,7 +9227,7 @@ mod test {
 			open.abort(Error::Stream(code.clone())).unwrap();
 			assert!(reading.read_frame().now_or_never().is_none(), "{code:?}");
 			let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
-			let mut rest = request.accept(None).unwrap();
+			let mut rest = request.accept(None).unwrap().expect("a fresh group");
 			rest.write_frame(ts(1), b"b".as_ref()).unwrap();
 			rest.finish().unwrap();
 			assert_eq!(read(&mut reading), Some(b"b".to_vec()), "{code:?}");

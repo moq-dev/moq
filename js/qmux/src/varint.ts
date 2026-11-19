@@ -2,7 +2,6 @@ import { TransportCode, TransportError } from "./error.ts";
 
 export class VarInt {
 	static readonly MAX = (1n << 62n) - 1n;
-	static readonly MAX_SIZE = 8;
 	readonly value: bigint;
 
 	constructor(value: bigint) {

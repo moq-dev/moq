@@ -63,6 +63,7 @@ window.runRecovery = async (packets) => {
 	const route = origin.route(name);
 	// Every group is written before the decoder reads from the first, so none may go stale.
 	const track = route.broadcast.createTrack("video", { timescale: Moq.Time.Timescale.MICRO, maxAge: null });
+	if (!track) throw new Error("the track already exists");
 	let group: Moq.Group.Producer | undefined;
 	for (const packet of packets) {
 		if (group?.start !== BigInt(packet.group)) {

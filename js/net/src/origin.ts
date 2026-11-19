@@ -2966,6 +2966,7 @@ export class Route {
 	 * Swap the credential the advertising request carries; see {@link RouteOptions.auth}.
 	 * Undefined advertises under the session's scope. Throws once the route or its broadcast closed.
 	 */
+	// fallow-ignore-next-line unused-class-member
 	setAuth(auth?: Credential): void {
 		this.#control.change({ auth });
 	}
@@ -3062,6 +3063,7 @@ export class Claim {
 	 * Swap the credential the advertising request carries; see {@link RouteOptions.auth}.
 	 * Undefined advertises under the session's scope. Throws once the claim or the origin closed.
 	 */
+	// fallow-ignore-next-line unused-class-member
 	setAuth(auth?: Credential): void {
 		this.#control.change({ auth });
 	}

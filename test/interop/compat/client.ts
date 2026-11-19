@@ -108,11 +108,10 @@ function budget(millis: number): Record<string, unknown> {
 	const broadcast = new Moq.Broadcast.Producer();
 	try {
 		for (const spelling of spellings.slice(0, -1)) {
+			const track = broadcast.createTrack(`probe-${Object.keys(spelling)[0]}`);
+			if (!track) throw new Error("the probe track already exists");
 			try {
-				broadcast
-					.createTrack(`probe-${Object.keys(spelling)[0]}`)
-					.subscribe(spelling as Moq.Track.Subscription)
-					.close();
+				track.subscribe(spelling as Moq.Track.Subscription).close();
 				return spelling;
 			} catch (err) {
 				if (!(err instanceof TypeError)) throw err;
@@ -325,6 +324,7 @@ if (command === "sign") {
 			: (origin as unknown as Released).createBroadcast(path);
 	const broadcast = ("broadcast" in publication ? publication.broadcast : publication) as Moq.Broadcast.Producer;
 	const track = broadcast.createTrack("data", { timescale: Moq.Time.Timescale.MICRO });
+	if (!track) throw new Error("the track already exists");
 	publication.announce();
 	const connection = await connect({
 		url: new URL(args[0]),

@@ -5,6 +5,7 @@ import { Signal } from "@moq/signals";
 import type { Grant } from "../src/auth.ts";
 import { Producer as BroadcastProducer } from "../src/broadcast.ts";
 import { BroadcastCache } from "../src/consume.ts";
+import { defined } from "../src/defined.test-util.ts";
 import { toHop, WireRoute } from "../src/hop.ts";
 import * as Instance from "../src/instance.ts";
 import { Publisher } from "../src/lite/publisher.ts";
@@ -100,7 +101,7 @@ console.log("tracks,listings,create_remove_and_read_us");
 for (const trackCount of [8, 128, 1024]) {
 	for (const listingCount of [1, 8, 32]) {
 		const broadcast = new BroadcastProducer();
-		for (let index = 0; index < trackCount; index++) broadcast.createTrack(`held-${index}`);
+		for (let index = 0; index < trackCount; index++) defined(broadcast.createTrack(`held-${index}`));
 		const listings = Array.from({ length: listingCount }, () => broadcast.consume().tracks());
 		// Past each listing's initial set and SYNCED.
 		for (const listing of listings) {
@@ -108,7 +109,7 @@ for (const trackCount of [8, 128, 1024]) {
 		}
 		const start = performance.now();
 		for (let index = 0; index < listed; index++) {
-			broadcast.createTrack(`new-${index}`);
+			defined(broadcast.createTrack(`new-${index}`));
 			for (const listing of listings) {
 				const event = await listing.next();
 				if (event?.kind !== "added" || event.name !== `new-${index}`) throw new Error("listing missed a track");

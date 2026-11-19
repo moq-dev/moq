@@ -78,6 +78,7 @@ test("the observer shares playback demand and closes without ending playback", a
 	const publishedRoute = origin.route(Path.from("tone.hang"), { hidden: true });
 	const published = publishedRoute.broadcast;
 	const track = published.createTrack("audio", { timescale: Time.Timescale.MILLI });
+	if (!track) throw new Error("the track already exists");
 	publishedRoute.announce();
 	const source = new Broadcast({ origin, name: Path.from("tone.hang"), follow: false, catalogFormat: "manual" });
 	const capture = new Capture({
@@ -125,6 +126,7 @@ test("the observer asks for the decoder's delay plus its stretch and warmup, not
 	const publishedRoute = origin.route(Path.from("tone.hang"), { hidden: true });
 	const published = publishedRoute.broadcast;
 	const track = published.createTrack("audio", { timescale: Time.Timescale.MILLI });
+	if (!track) throw new Error("the track already exists");
 	publishedRoute.announce();
 	const source = new Broadcast({ origin, name: Path.from("tone.hang"), follow: false, catalogFormat: "manual" });
 	const capture = new Capture({
@@ -155,6 +157,7 @@ test("the observer reads the publisher's largest group as its subscription began
 	const publishedRoute = origin.route(Path.from("tone.hang"), { hidden: true });
 	const published = publishedRoute.broadcast;
 	const track = published.createTrack("audio", { timescale: Time.Timescale.MILLI });
+	if (!track) throw new Error("the track already exists");
 	publishedRoute.announce();
 	const frame = (group: Group.Producer, micros: number) =>
 		group.writeFrame({
@@ -201,6 +204,7 @@ async function captureGroupEnd(end: (group: Group.Producer) => void): Promise<st
 	const publishedRoute = origin.route(Path.from("tone.hang"), { hidden: true });
 	const published = publishedRoute.broadcast;
 	const track = published.createTrack("audio", { timescale: Time.Timescale.MILLI });
+	if (!track) throw new Error("the track already exists");
 	publishedRoute.announce();
 	const source = new Broadcast({ origin, name: Path.from("tone.hang"), follow: false, catalogFormat: "manual" });
 	const capture = new Capture({
