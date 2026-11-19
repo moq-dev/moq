@@ -879,8 +879,8 @@ class Reader implements ResumeSource {
 			// A newer copy must not pass it and permanently discard it from sequence order.
 			if (ordered && recv.kind === "idle") return recv;
 		}
-		// A failed copy holding a group back for a placement, which still reports its failure.
-		let held: Copy | undefined;
+		// The failed copies holding a group back for a placement, which still report their failure.
+		const held = new Set<Copy>();
 		// The serving copy first: it is the one that keeps delivering.
 		for (let index = this.#copies.length - 1; index >= 0; index--) {
 			const copy = this.#copies[index];
@@ -891,7 +891,7 @@ class Reader implements ResumeSource {
 				// a group, so its route did not refuse the track.
 				if (this.#waits(copy) && hooks.peekGroup(copy.sub, ordered, newest) !== undefined) {
 					copy.delivered = true;
-					held = copy;
+					held.add(copy);
 					break;
 				}
 				const recv = take(copy, ordered, newest);
@@ -922,7 +922,7 @@ class Reader implements ResumeSource {
 		}
 		return this.#end((copy) => {
 			if (typeof copy.done === "number") return null;
-			const failed = copy === held ? copy.sub.closed.peek() : undefined;
+			const failed = held.has(copy) ? copy.sub.closed.peek() : undefined;
 			return copy.done ?? (failed instanceof Error ? failed : undefined);
 		});
 	}

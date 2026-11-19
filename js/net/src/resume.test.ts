@@ -4426,3 +4426,43 @@ test("a failed copy holding a group back is still subscribed afresh", async () =
 	sub.close();
 	close();
 });
+
+// As above, with the fresh copy failing too while it holds a group back: the read asks again.
+test("failed copies holding groups back are each subscribed afresh", async () => {
+	const { a, active, close } = await setup();
+	const ta = copy(a);
+	hooks.receiveTrack(ta.producer);
+	ta.write(64n);
+	const sub = active.track("seq").subscribe({ delay: { max: null }, ranges: [{ start: { time: 66n } }] });
+	const read: bigint[] = [];
+	const poll = async () => {
+		for (let attempt = 0; attempt < 10 && read.length < 2; attempt++) {
+			await settle();
+			for (let group = sub.tryRecvGroup(); group; group = sub.tryRecvGroup()) {
+				read.push(group.start);
+				group.close();
+			}
+		}
+	};
+	await poll();
+	expect(read).toEqual([]);
+
+	ta.producer.abort(new StreamError(StreamCode.Internal));
+	const retry = copy(a);
+	hooks.receiveTrack(retry.producer);
+	retry.write(65n);
+	await poll();
+	expect(read).toEqual([]);
+
+	retry.producer.abort(new StreamError(StreamCode.Internal));
+	const again = copy(a);
+	hooks.receiveTrack(again.producer);
+	again.write(66n);
+	again.write(67n);
+	await poll();
+	expect(read).toEqual([66n, 67n]);
+	expect(sub.closed.peek()).toBeUndefined();
+
+	sub.close();
+	close();
+});
