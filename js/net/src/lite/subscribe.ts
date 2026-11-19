@@ -202,12 +202,16 @@ async function encodeSpan(w: Writer, version: Version, span: Span, ranges?: read
 		return;
 	}
 
-	// A lite-07 range covers whole groups: a slice of one is a FETCH.
-	if (span.startFrame !== 0 || span.endFrame !== undefined)
+	// A lite-07 range starts partway through a group as a Position, but ends only at one: a
+	// slice of a group is a FETCH.
+	if (span.endFrame !== undefined || (span.startFrame !== 0 && span.startGroup === undefined))
 		throw new Error("frame bounds not supported for this version");
 	await w.u53(1);
 	const range: WireRange = {};
-	if (span.startGroup !== undefined) range.start = { time: span.startGroup };
+	if (span.startGroup !== undefined)
+		range.start = span.startFrame
+			? { absolute: span.startGroup, frame: span.startFrame }
+			: { time: span.startGroup };
 	if (span.endGroup !== undefined) range.end = { time: span.endGroup };
 	await encodeRange(w, range);
 }

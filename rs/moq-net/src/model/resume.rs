@@ -7,7 +7,8 @@
 //! [`Subscriber`]: nothing is copied, and with one route it is a passthrough.
 //!
 //! When the front switches, each reader subscribes to the new copy from the newest group
-//! it handed out. A replaced copy keeps delivering until the new copy delivers its first
+//! it handed out, past the frames of it a copy holds, which that copy adopts once the rest
+//! lands so a later reader finds the group whole. A replaced copy keeps delivering until the new copy delivers its first
 //! group, then is bounded just below it (or at the newest group handed out, if later), so a
 //! group only the old route got after the switch is not lost. It is kept while it may still
 //! deliver a group under its bound the reader lacks (unread, or still landing within the

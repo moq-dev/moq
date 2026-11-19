@@ -154,8 +154,8 @@ impl Version {
 	}
 
 	/// Whether SUBSCRIBE, SUBSCRIBE_UPDATE, FETCH, and GROUP carry frame indices
-	/// alongside their group keys, so a subscription or fetch can start and end
-	/// partway through a group. Added in lite-06.
+	/// alongside their group keys, so a subscription or fetch can start partway through a
+	/// group. Added in lite-06; lite-07 bounds only a range's start.
 	///
 	/// Older versions only address whole groups, so a route change has to wait for the
 	/// next group before it can resume.

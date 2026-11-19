@@ -189,11 +189,18 @@ test("lite-07 carries the span as its only range, exclusive at the end", async (
 			new Reader(undefined, await encodeMessage(Version.DRAFT_07, msg), Version.DRAFT_07),
 			Version.DRAFT_07,
 		);
-	// A range covers whole groups: a slice of one is a FETCH.
+	// A range ends only at a group: a slice of one is a FETCH.
 	await expect(encodeMessage(Version.DRAFT_07, message)).rejects.toThrow("frame bounds not supported");
 	await expect(encodeMessage(Version.DRAFT_07, new Subscribe({ ...message, startFrame: 0 }))).rejects.toThrow(
 		"frame bounds not supported",
 	);
+	// It starts partway through one as a Position.
+	const resumed = await decode(new Subscribe({ ...message, endFrame: undefined }));
+	expect([resumed.startGroup, resumed.startFrame, resumed.ranges]).toEqual([
+		3n,
+		2,
+		[{ start: { absolute: 3n, frame: 2 }, end: { time: 9n } }],
+	]);
 	const whole = await decode(new Subscribe({ ...message, startFrame: 0, endFrame: undefined }));
 	expect([whole.startGroup, whole.startFrame, whole.endGroup, whole.endFrame]).toEqual([3n, 0, 9n, undefined]);
 	const open = await decode(

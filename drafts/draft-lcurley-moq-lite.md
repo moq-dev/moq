@@ -1549,7 +1549,7 @@ The publisher starts from what it holds and never fetches to reach further back,
 A Range covers whole Groups but for a Position `Start`; a subscriber reads a slice of a Group with FETCH (see [Positions](#positions)).
 A Group that another Range also covers is delivered whole, since each Group is delivered once.
 A subscriber resuming a Track on a new subscription, such as a relay moving to another route, starts at the Position past the frames it holds, so no frame it holds is sent again.
-The Group Stream of a Group that ended at or before `Frame` carries no FRAME, only how the Group ended.
+The Group Stream of a Group that ended at `Frame` carries no FRAME, only how the Group ended.
 
 ## SUBSCRIBE_UPDATE {#subscribe-update}
 A subscriber can modify a subscription with a SUBSCRIBE_UPDATE message.
