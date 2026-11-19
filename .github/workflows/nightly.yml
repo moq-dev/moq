@@ -239,6 +239,12 @@ jobs:
             recipe: obs test
           - name: libmoq C fixtures
             recipe: rs c-tests
+          # Reports what each fault costs a six-relay mesh; fails only on an unfed reader,
+          # a broadcast shown after its source ended, or a mesh that never goes quiet.
+          - name: Mesh replay
+            recipe: test mesh-replay --broadcasts 4,32 --report target/bench/nightly/mesh-replay
+            artifact: mesh-replay
+            artifact-path: target/bench/nightly/mesh-replay
 
     steps:
       - name: Checkout
