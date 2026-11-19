@@ -490,8 +490,12 @@ impl Front {
 			// The winning route's answer is final, even while another source serves:
 			// asking a sibling or a shorter prefix instead would turn one refusal into
 			// a request per candidate.
+			// A closed source's error gives way to it too: the route's answer is its own verdict.
 			Err(Refusal { err, standing: true }) => {
 				self.upstream = None;
+				for track in self.tracks.values_mut() {
+					track.closed = None;
+				}
 				self.end(err, actions);
 			}
 		}
@@ -656,6 +660,8 @@ impl Front {
 	) {
 		let strands = self.strands();
 		let serving = self.serving.map(|(serving, _)| serving);
+		// Nothing serves or is being asked, but a claim the front lost may still resume it.
+		let waiting = serving.is_none() && self.upstream.is_none() && self.waiting();
 		let Some(track) = self.tracks.get_mut(&name) else {
 			return;
 		};
@@ -720,6 +726,13 @@ impl Front {
 				track.state = TrackState::Idle;
 				track.lost = Some(err);
 				self.fail_over(name, actions);
+			}
+			// A copy the closed source answered after its close died while the front waits on
+			// the claim it served: as for a draining copy, what it died of ends the track
+			// unless a session that serves the claim next resumes it.
+			Err(err) if delivered && waiting => {
+				track.state = TrackState::Idle;
+				track.closed.get_or_insert(err);
 			}
 			// The route lost the content, which another route of the instance continues:
 			// wait for one rather than ask this route again, which can only refuse. A copy
@@ -1393,6 +1406,79 @@ mod tests {
 		assert_eq!(
 			front.lost("video").map(|err| err.to_string()),
 			Some(Error::Session(crate::SessionError::Cancel).to_string())
+		);
+	}
+
+	/// The route that serves the claim next refuses the broadcast: every track ends with
+	/// that refusal, as its requesters do, not the closed session's error.
+	#[test]
+	fn a_closed_claims_next_route_refusing_ends_with_its_verdict() {
+		let mut front = orphaned();
+		front.step(Event::Selected {
+			best: Some(claim(2)),
+			serving_closing: false,
+		});
+		assert_actions(refuse(&mut front, 2), &[Action::End { err: Error::NotFound }]);
+		assert!(front.lost("video").is_none());
+	}
+
+	/// The closed source answers a query it was asked before its close, and the copy it
+	/// splices then dies while the front waits on its claim: the track waits too, and the
+	/// session that serves the claim next resumes it.
+	#[test]
+	fn a_copy_spliced_after_its_claim_closed_dying_waits_for_the_detour() {
+		let mut front = querying(claim(1), 100);
+		front.step(Event::SourceClosed { source: 100 });
+		assert_actions(
+			front.step(Event::Selected {
+				best: None,
+				serving_closing: false,
+			}),
+			&[],
+		);
+		assert_actions(
+			front.step(Event::TrackInfo {
+				track: name("video"),
+				source: 100,
+				closing: true,
+				result: Ok(info()),
+				retry: None,
+			}),
+			&[Action::Splice {
+				track: name("video"),
+				source: 100,
+			}],
+		);
+		assert_actions(
+			front.step(Event::TrackEnded {
+				track: name("video"),
+				source: 100,
+				closing: true,
+				result: Err(Error::Session(crate::SessionError::Cancel)),
+				delivered: true,
+			}),
+			&[],
+		);
+		assert_eq!(
+			front.lost("video").map(|err| err.to_string()),
+			Some(Error::Session(crate::SessionError::Cancel).to_string())
+		);
+		assert_actions(
+			front.step(Event::Selected {
+				best: Some(claim(2)),
+				serving_closing: false,
+			}),
+			&[Action::Request { route: 2 }],
+		);
+		assert_actions(
+			front.step(Event::Resolved {
+				route: 2,
+				result: Ok(200),
+			}),
+			&[Action::Query {
+				track: name("video"),
+				source: 200,
+			}],
 		);
 	}
 
@@ -2897,7 +2983,7 @@ mod tests {
 				best: Some(remote(1)),
 				serving_closing: false,
 			},
-			// A claim, which its source closing leaves to be asked again.
+			// A claim, which its source closing leaves excluded but waited on.
 			Event::Selected {
 				best: Some(claim(2)),
 				serving_closing: false,
