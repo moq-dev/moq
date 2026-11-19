@@ -54,6 +54,15 @@ Replay a counterexample by adding it to the `regressions` test.
    Rust fails, the drop rule is wrong: fix it in both languages. If Rust
    passes, fix how JS reads its clock.
 
+3. **`Copy.dropped` has no Rust counterpart.** A group the JS window drops
+   raises its copy's resume point (`resumePoint`), so widening backfills it;
+   Rust's `poll_lowest` drops it and its `backfill`/`backfill_gaps` read only
+   `copy.floor`. Check whether a Rust serving copy with no floor can offer a
+   cached group below a window a replaced copy placed. If it can, Rust loses
+   that group on widening: port the mechanism. If not, write down on
+   `Copy.dropped` why JS reaches that shape and Rust does not. Raised by
+   Pullfrog on [moq-dev/moq#9115](https://github.com/moq-dev/moq/pull/9115).
+
 Nightly's seed 1218508351 (run
 [44342367698](https://github.com/moq-dev/moq/actions/runs/44342367698)), which
 `quest/m0/nightly/js-resume-window.md` tracked, passes 4096 cases since
