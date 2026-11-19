@@ -180,6 +180,54 @@ async fn sparse_ranges_reach_the_publisher_on_lite07() {
 	}
 }
 
+/// A live viewer's fresh lite-07 copy, cached nothing yet, asks its upstream for the live
+/// edge, not every group from the oldest, directly or through a relay.
+#[kio::test]
+async fn a_live_viewer_asks_lite07_upstream_for_the_live_edge() {
+	let version: Version = "moq-lite-07-wip".parse().unwrap();
+	for relay in [false, true] {
+		let publisher = produce_origin(1);
+		let broadcast = publisher
+			.route("bcast", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let track = broadcast.broadcast().create_track("quiet", timed()).unwrap();
+		broadcast.announce().unwrap();
+
+		let relay_origin = produce_origin(2);
+		let subscriber = produce_origin(3);
+		let mut sessions = Vec::new();
+		if relay {
+			let mut options = MockConnectOptions::new(version);
+			options.server_publish = Some(publisher.consume());
+			options.client_subscribe = Some(relay_origin.clone());
+			sessions.push(connect_mock(options).await);
+		}
+		let mut options = MockConnectOptions::new(version);
+		options.server_publish = Some(match relay {
+			true => relay_origin.consume(),
+			false => publisher.consume(),
+		});
+		options.client_subscribe = Some(subscriber.clone());
+		sessions.push(connect_mock(options).await);
+
+		let consumer = subscriber.consume();
+		let remote = kio::clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
+			.await
+			.expect("resolve timeout")
+			.expect("broadcast resolves")
+			.unwrap();
+
+		let _live = subscribe(&remote, Subscription::default().with_ranges([Range::live()])).await;
+		kio::clock::timeout(TIMEOUT, crate::support::wanted(track.demand()))
+			.await
+			.expect("no subscriber appeared")
+			.unwrap();
+		let asked = track.subscription().expect("the publisher holds the demand").ranges;
+		assert_eq!(asked, [Range::live()], "relay={relay}");
+		drop((track, sessions, relay_origin, subscriber, broadcast, publisher));
+	}
+}
+
 /// A subscriber from group 4 merged with a live one doesn't floor the shared subscription
 /// at 4: the live one still gets group 3.
 #[kio::test]

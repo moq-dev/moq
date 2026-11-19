@@ -906,8 +906,8 @@ impl<'a> Epochs<'a> {
 /// neither draining (see [`RouteInfo::draining`]) nor unavailable (see
 /// [`RouteInfo::available`]), so a peer that sent a GOAWAY or a held route ranks below
 /// every other eligible route and serves only as a last resort. Then the route layer's
-/// selected route ahead of its alternates. Then the higher link [`Priority`], so
-/// metrics from different operators are never compared. Then an identified chain (no 0) outranks an anonymous one regardless
+/// closest way to a broadcast ahead of its others ([`Lane::primary`]). Then the higher
+/// link [`Priority`], so metrics from different operators are never compared. Then an identified chain (no 0) outranks an anonymous one regardless
 /// of cost, then the cheapest cost, then a broadcast published on this origin (it serves
 /// what is here, not a claim that has to ask), then the shortest hop chain, then a hash
 /// of the instance and `path`, so every node converges on the same winner, then, among
@@ -936,9 +936,12 @@ fn route_order(path: &Path, entry: &RouteEntry) -> RouteOrder {
 		// ranks below a broader one: a stream presents a broader claim at the request,
 		// where it ties an exact claim for the path.
 		entry.lane.above,
-		// The route layer's closest claim ahead of another node's of the same broadcast.
-		!entry.lane.primary,
 		entry.draining || !entry.available,
+		// The route layer's closest way ahead of its others to the same broadcast. Below
+		// availability, since the route layer marks every way to a broadcast available or
+		// none: a live instance's other way outranks a dead one held unavailable while a
+		// route change moves its closest way to another session.
+		!entry.lane.primary,
 		// A lite-07 route ranks by the lowest priority of any link on its path.
 		Reverse(match entry.lane.priority {
 			Some(priority) => entry.priority.min(Priority::new(priority)),
@@ -1647,8 +1650,8 @@ struct Horizon {
 /// through that node's routes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) enum NodeFilter {
-	/// Every route. Of the route layer's, the primary ones rank first (see [`Lane`]), so
-	/// a wider covering route serves only while no narrower one does.
+	/// Every route. Of the route layer's, the most specific claim ranks first and then each
+	/// broadcast's closest way (see [`Lane`]).
 	#[default]
 	Any,
 	/// Only the routes this node serves itself.
@@ -2614,7 +2617,7 @@ impl Producer {
 				announcement: entry,
 				control: kio::Lock::new(control),
 				forwarded: false,
-				_keepalive: self.tasks.keepalive(),
+				keepalive: std::sync::Mutex::new(Some(self.tasks.keepalive())),
 			}),
 			broadcast: source.clone(),
 		};
@@ -2839,7 +2842,7 @@ impl Producer {
 				announcement,
 				control: kio::Lock::new(control),
 				forwarded,
-				_keepalive: self.tasks.keepalive(),
+				keepalive: std::sync::Mutex::new(Some(self.tasks.keepalive())),
 			}),
 			server: serve,
 			publisher,
@@ -3177,8 +3180,8 @@ struct RouteState {
 	/// the route ([`RouteKind::Offline`]), not that its origin ended it.
 	forwarded: bool,
 	/// A route is lifecycle work: the origin's driver keeps running for as long as one
-	/// lives, even once every producer handle is gone.
-	_keepalive: Keepalive,
+	/// lives, even once every producer handle is gone. `None` once [`Claim::disown`]ed.
+	keepalive: std::sync::Mutex<Option<Keepalive>>,
 }
 
 /// What a route advertises when it announces, changed under one lock so concurrent
@@ -3915,7 +3918,8 @@ impl kio::Task for FeedOwnClaims {
 }
 
 /// The driver's task firing the route node's timers on the origin's clock: a claim no
-/// route reaches going offline. It ends once nothing owns the origin.
+/// route reaches going offline. It ends once nothing owns the origin, letting go of what
+/// closed sessions left behind, since no timer would take it offline after.
 struct RouteTimer {
 	node: crate::route::Node,
 	deadline: crate::time::Deadline,
@@ -3927,6 +3931,7 @@ impl kio::Task for RouteTimer {
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		if self.origin.poll_orphaned(waiter).is_ready() {
+			self.node.release_orphans();
 			return Poll::Ready(());
 		}
 		loop {
@@ -4198,7 +4203,7 @@ impl DriverState {
 		// `route` holds across its attach: a concurrent create either
 		// finishes before this (the walk below cleans its entry up) or observes
 		// `closed` and fails with `Closed`.
-		let (servers, cursors, fronts) = {
+		let (servers, cursors, fronts, route_node) = {
 			let mut shared = self.shared.lock();
 			shared.closed = true;
 			// Fronts and parked requesters observe `closed` on their next pass.
@@ -4214,8 +4219,12 @@ impl DriverState {
 			for listener in &shared.listeners {
 				listener.queue.close();
 			}
-			(servers, cursors, fronts)
+			// The node holds what closed sessions left behind, and each of those holds this
+			// state: let go of it, or the two keep each other alive. Dropped outside the
+			// lock, since an orphan's release takes it.
+			(servers, cursors, fronts, shared.route_node.take())
 		};
+		drop(route_node);
 
 		// Reject requesters still parked on a remote front's channel: its watcher
 		// was cancelled above and will never resolve them.
@@ -6933,6 +6942,19 @@ struct PendingFront {
 }
 
 impl Claim {
+	/// Stop keeping the origin's driver running: what a closed session left behind is no
+	/// owner, and goes with the origin.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn disown(&self) {
+		let keepalive = self
+			.state
+			.keepalive
+			.lock()
+			.unwrap_or_else(|err| err.into_inner())
+			.take();
+		drop(keepalive);
+	}
+
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(super) fn request_validity(&self, path: &Path) -> Option<Selection> {
 		let shared = &self.state.announcement.shared;
@@ -7699,7 +7721,10 @@ impl Consumer {
 		}
 		let claims = Arc::new(std::sync::Mutex::new(claims));
 		let created = (node, Arc::downgrade(&claims));
-		shared.route_node = Some(created.clone());
+		// A torn-down origin keeps no node: nothing would let go of it again.
+		if !shared.closed {
+			shared.route_node = Some(created.clone());
+		}
 		drop(shared);
 		self.tasks.push(FeedOwnClaims {
 			claims,
@@ -11000,6 +11025,47 @@ mod tests {
 			announced.try_next().is_none(),
 			"the broader claim at a higher epoch must not replace the exact one in the announcement"
 		);
+	}
+
+	/// A restarted publisher's dead instance, held unavailable, never wins back the path from
+	/// its live replacement while the replacement's closest way moves to another session:
+	/// the old way is demoted before the session taking over serves the new one.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_dead_instance_never_outranks_a_live_one_between_its_ways() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let mut announced = consumer.routes();
+		let route = |instance: &crate::Instance, node, primary, available, cost| {
+			RouteInfo::new()
+				.with_instance(instance.clone(), 0)
+				.with_hops(hops(&[node]))
+				.with_node(Some(node_id(node)))
+				.with_lane(Lane {
+					primary,
+					priority: Some(0),
+					..Lane::default()
+				})
+				.with_available(available)
+				.with_cost(cost)
+		};
+		let (dead, live) = (crate::Instance::random(), crate::Instance::random());
+
+		// The dead instance is cheaper, and still the closest way to its own claim.
+		let _dead = producer
+			.forward("room/alice", route(&dead, 10, true, false, 1))
+			.unwrap();
+		let way = producer.forward("room/alice", route(&live, 11, true, true, 5)).unwrap();
+		assert_eq!(announced.expect_next_active("room/alice").await.instance(), &live);
+
+		way.update(route(&live, 11, false, true, 5)).unwrap();
+		assert!(
+			announced.try_next().is_none(),
+			"the live instance's demoted way keeps the path"
+		);
+		let _pending = consumer.request("room/alice", None);
+		let request = queued(&way).await;
+		assert_eq!(request.path().as_str(), "room/alice");
 	}
 
 	/// A draining route ranks below every other eligible one, even on a preferred link

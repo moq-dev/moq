@@ -350,7 +350,8 @@ pub enum Error {
 		previous: moq_net::Timestamp,
 	},
 
-	/// The init segment fixes the track set, so a rendition that joins later can't be written.
+	/// The init segment fixes the track set, so a rendition that joins later can't be written,
+	/// unless it continues a declared track of its medium that failed.
 	#[error("rendition {0} joined after the init segment; restart the export to include it")]
 	TrackAdded(String),
 
