@@ -14,8 +14,8 @@ its other upstreams when it gains demand, once the conditions below hold. A
 relay that sends no rank or warm signal is treated as cold and behaves as it
 does today, and a relay it pulls through takes its route. Relays export how many
 upstream copies they hold and what each choice was for. The wire lands on
-lite-07-wip if the port is ready when the cut's other blockers clear, and
-otherwise in the first wip version after the cut.
+lite-07-wip if the port has landed and passed the mesh replay when the cut
+is made, and otherwise in the first wip version after the cut.
 
 ## Plan
 
@@ -56,8 +56,9 @@ starts now, and the cut does not wait for it** (rejected: blocking the cut
 on warmth; starting only after the cut, as decided 2026-11-17). The cut now
 waits on [the mesh replay](/quest/m2/multicast/mesh-replay.md) and the
 flaws the audit found, so the port has that long. If it has landed and been
-through the mesh replay when they clear, its wire is in lite-07; if not,
-lite-07 freezes without it and the wire moves to the next wip version. The
+through the mesh replay when the cut is made, its wire is in lite-07; if
+not, lite-07 freezes without it and the wire moves to the next wip version.
+[The cut](/quest/m2/lite07-finalize.md) checks it as one of its steps. The
 reason for the change: a deployment expects warm pulls to cut what its
 backbone carries by a large part, and a release is the only way its
 production mesh gets them.
