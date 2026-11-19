@@ -188,6 +188,20 @@ describe("Window", () => {
 		expect(covered(ended, held.held)).toEqual(keys(0n, 8n));
 	});
 
+	test("a relative start past every group asks from the lowest group held since", () => {
+		const held = new Keys([33n, 66n, 99n]);
+		const window = new Window([range(relative(10n))], 99n, held);
+		expect(window.missable()).toEqual([{ start: 33n, end: UNBOUNDED }]);
+		held.held.add(20n);
+		expect(window.settle(99n, held)).toBe(true);
+		expect(window.missable()).toEqual([{ start: 20n, end: UNBOUNDED }]);
+		// Evicting the oldest narrows nothing: the start reached it.
+		held.held.delete(20n);
+		held.held.delete(33n);
+		expect(window.settle(99n, held)).toBe(false);
+		expect(window.missable()).toEqual([{ start: 20n, end: UNBOUNDED }]);
+	});
+
 	test("relative anchors count groups back from the latest", () => {
 		let held = new Keys([0n, 33n, 66n, 99n]);
 		let window = new Window([range(relative(2n), relative(1n))], 99n, held);
@@ -555,6 +569,8 @@ test("window: settling by steps matches trying every start and rebuilding from t
 		keys.looks = random(2) === 0;
 		const fast = new Window(ranges, undefined, keys);
 		const full = new Window(ranges, undefined, blind(keys));
+		// The lowest group held since the spans were placed.
+		let reached = keys.nextStart(0n);
 		for (let step = random(24); step > 0; step--) {
 			const value = BigInt(random(48));
 			const op = random(5);
@@ -570,12 +586,16 @@ test("window: settling by steps matches trying every start and rebuilding from t
 			} else if (op === 3) keys.done = true;
 			else if (op === 4) keys.held.delete(keys.nextStart(0n) ?? 0n);
 			const latest = [...keys.held].sort(ascending).at(-1);
+			const placing = fast.pending;
 			fast.settle(latest, keys);
 			full.settle(latest, blind(keys));
 			expect(seen(fast)).toEqual(seen(full));
 			// A window waiting on a latest group reads everything, with no spans yet.
 			if (fast.pending) continue;
-			const fresh = fast.fresh(keys);
+			const oldest = keys.nextStart(0n);
+			if (placing || reached === undefined) reached = oldest;
+			else if (oldest !== undefined && oldest < reached) reached = oldest;
+			const fresh = fast.fresh(reached);
 			expect(fast.runs()).toEqual(fresh.runs);
 			expect(fast.missable()).toEqual(fresh.missable);
 			expect(fast.named()).toBe(fresh.named);

@@ -198,11 +198,12 @@ pub(in crate::model) struct Window {
 	/// without a walk.
 	named: BTreeMap<u64, usize>,
 	unnamed: usize,
-	/// The spans counting back past every group held, which may ask a miss from the oldest
-	/// group held (see [`Span::reads`]), and that group as of the last time they were read:
-	/// a settle that finds it moved reads them again.
+	/// The spans counting back past every group held, which may ask a miss from the lowest
+	/// group held since they were placed (see [`Span::reads`]), and that group. They reached
+	/// every group held since, so an older group arriving widens what they ask, and eviction
+	/// narrows nothing.
 	unfloored: Vec<usize>,
-	oldest: Option<u64>,
+	reached: Option<u64>,
 }
 
 /// One non-empty range, resolved.
@@ -257,7 +258,7 @@ impl Window {
 			named: BTreeMap::new(),
 			unnamed: 0,
 			unfloored: Vec::new(),
-			oldest: None,
+			reached: None,
 		};
 		window.place(latest, holdings)?;
 		Ok(window)
@@ -312,22 +313,24 @@ impl Window {
 			moved.extend(placed..self.spans.len());
 		}
 		let mut shrank = !self.waiting.is_empty() && self.start_waiting(holdings, &mut moved);
-		// A span counting back past every group held asks misses from the oldest one, so it
-		// reads more once an older group arrives and less once that group leaves.
-		if !self.unfloored.is_empty() {
-			let oldest = holdings.next_start(0);
-			if oldest != self.oldest {
-				match (oldest, self.oldest) {
-					(Some(oldest), Some(was)) if oldest < was => moved.extend_from_slice(&self.unfloored),
-					_ => shrank = true,
-				}
-				self.oldest = oldest;
+		// A span counting back past every group held asks misses from the lowest group held
+		// since it was placed, so it asks more once an older group arrives, and evicting the
+		// oldest one costs nothing.
+		if !self.unfloored.is_empty()
+			&& let Some(oldest) = holdings.next_start(0)
+		{
+			match self.reached {
+				Some(reached) if oldest >= reached => {}
+				Some(_) => moved.extend_from_slice(&self.unfloored),
+				// With no group held, they asked from where they start.
+				None => shrank = true,
 			}
+			self.reached = Some(self.reached.map_or(oldest, |reached| reached.min(oldest)));
 		}
 		match (shrank, moved.is_empty()) {
-			(true, _) => self.rebuild(holdings),
+			(true, _) => self.rebuild(),
 			(false, true) => return false,
-			(false, false) => self.grow(moved, holdings),
+			(false, false) => self.grow(moved),
 		}
 		true
 	}
@@ -515,7 +518,7 @@ impl Window {
 
 	/// The groups in range from `from` on that a miss may ask for, lowest first: all of
 	/// them but those starting before a time start that fell before every group held, or
-	/// below the oldest group held when a relative start counted back past them all.
+	/// below the lowest group held since a relative start counted back past them all.
 	pub fn missable(&self, from: u64) -> impl Iterator<Item = ops::RangeInclusive<u64>> + '_ {
 		self.from(&self.missable, from)
 	}
@@ -579,7 +582,7 @@ impl Window {
 			(span.looking, span.start, span.floored) = (None, start, floored);
 			self.name(index);
 		}
-		self.grow(found, holdings);
+		self.grow(found);
 		true
 	}
 
@@ -597,6 +600,7 @@ impl Window {
 		self.named.clear();
 		self.unnamed = 0;
 		self.unfloored.clear();
+		self.reached = holdings.next_start(0);
 		self.pending = false;
 		for index in 0..self.ranges.len() {
 			if !self.ranges[index].is_empty() {
@@ -605,7 +609,7 @@ impl Window {
 		}
 		// Each span waiting was just tried against these holdings.
 		self.waited = holdings.unplaced().map(|unplaced| unplaced.mark);
-		self.rebuild(holdings);
+		self.rebuild();
 		Ok(())
 	}
 
@@ -729,13 +733,12 @@ impl Window {
 
 	/// The groups in range: every span that knows where it starts, through its end, and
 	/// every span waiting on a time start from that time.
-	fn rebuild(&mut self, holdings: &impl Holdings) {
+	fn rebuild(&mut self) {
 		self.covered = None;
-		self.oldest = holdings.next_start(0);
 		self.update_settled();
 		let (mut groups, mut missable) = (Vec::new(), Vec::new());
 		for span in &self.spans {
-			let (reads, asks) = span.reads(holdings);
+			let (reads, asks) = span.reads(self.reached);
 			groups.extend(reads);
 			missable.extend(asks);
 		}
@@ -746,10 +749,10 @@ impl Window {
 	/// Take in the spans at `positions`, each now reading at least what it did before: their
 	/// runs layer over the groups, so a change to a few spans costs them, not every range,
 	/// and what reads the groups diffs only the layer.
-	fn grow(&mut self, positions: impl IntoIterator<Item = usize>, holdings: &impl Holdings) {
+	fn grow(&mut self, positions: impl IntoIterator<Item = usize>) {
 		self.update_settled();
 		for position in positions {
-			let (reads, asks) = self.spans[position].reads(holdings);
+			let (reads, asks) = self.spans[position].reads(self.reached);
 			if let Some(run) = reads {
 				// A coverage check resumes where it stopped, so groups added below that are
 				// checked again.
@@ -766,8 +769,9 @@ impl Window {
 }
 
 impl Span {
-	/// The groups this span reads, and those of them a miss may ask for.
-	fn reads(&self, holdings: &impl Holdings) -> (Option<ops::RangeInclusive<u64>>, Option<ops::RangeInclusive<u64>>) {
+	/// The groups this span reads, and those of them a miss may ask for, given the lowest
+	/// group held since it was placed.
+	fn reads(&self, reached: Option<u64>) -> (Option<ops::RangeInclusive<u64>>, Option<ops::RangeInclusive<u64>>) {
 		// A span still looking up its start reads nothing until it knows which group that is.
 		if self.looking.is_some() {
 			return (None, None);
@@ -791,17 +795,17 @@ impl Span {
 		// which is unknown here, so it asks no miss below its time: every key from there
 		// on is in range, the key at the time itself being the containing group if it
 		// exists. A relative one counting back past every group held asks none below the
-		// oldest, since which of them it reaches is unknown.
+		// lowest group held since, since which of them it reaches is unknown.
 		let reach = match (self.anchor, self.floored) {
 			(Anchor::Time(time), false) => time,
-			(Anchor::Relative(_), false) => holdings.next_start(0).unwrap_or(self.start),
+			(Anchor::Relative(_), false) => reached.unwrap_or(self.start),
 			_ => self.start,
 		};
 		(Some(self.start..=last), (reach <= last).then_some(reach..=last))
 	}
 
-	/// Whether it counts back past every group held, so what it asks follows the oldest
-	/// group held (see [`Self::reads`]).
+	/// Whether it counts back past every group held, so what it asks follows the lowest
+	/// group held since it was placed (see [`Self::reads`]).
 	fn reaches_oldest(&self) -> bool {
 		matches!((self.anchor, self.floored), (Anchor::Relative(_), false))
 	}
@@ -1023,14 +1027,11 @@ mod tests {
 	}
 
 	/// What `window` reads and may ask a miss for, and the lowest start its spans name,
-	/// worked out from its spans afresh.
-	fn rebuilt(
-		window: &Window,
-		holdings: &impl Holdings,
-	) -> (RangeInclusiveSet<u64>, RangeInclusiveSet<u64>, Option<u64>) {
+	/// worked out from its spans afresh, given the lowest group held since they were placed.
+	fn rebuilt(window: &Window, reached: Option<u64>) -> (RangeInclusiveSet<u64>, RangeInclusiveSet<u64>, Option<u64>) {
 		let (mut groups, mut missable) = (RangeInclusiveSet::new(), RangeInclusiveSet::new());
 		for span in &window.spans {
-			let (reads, asks) = span.reads(holdings);
+			let (reads, asks) = span.reads(reached);
 			groups.extend(reads);
 			missable.extend(asks);
 		}
@@ -1081,6 +1082,8 @@ mod tests {
 			};
 			let mut fast = Window::new(&ranges, None, None, &keys).unwrap();
 			let mut full = Window::new(&ranges, None, None, &Blind(&keys)).unwrap();
+			// The lowest group held since the spans were placed.
+			let mut reached = None;
 			for (op, value) in ops {
 				match op {
 					0 => drop(keys.held.insert(value)),
@@ -1098,6 +1101,7 @@ mod tests {
 					_ => drop(keys.held.pop_first()),
 				}
 				let latest = keys.held.last().copied();
+				let placing = fast.is_pending();
 				fast.settle(latest, &keys);
 				full.settle(latest, &Blind(&keys));
 				proptest::prop_assert_eq!(seen(&fast), seen(&full));
@@ -1105,7 +1109,13 @@ mod tests {
 				if fast.is_pending() {
 					continue;
 				}
-				let (groups, missable, named) = rebuilt(&fast, &keys);
+				let oldest = keys.held.first().copied();
+				reached = match (placing, reached, oldest) {
+					(false, Some(reached), Some(oldest)) => Some(oldest.min(reached)),
+					(false, Some(reached), None) => Some(reached),
+					_ => oldest,
+				};
+				let (groups, missable, named) = rebuilt(&fast, reached);
 				proptest::prop_assert!(fast.runs(0).eq(groups.iter().cloned()));
 				proptest::prop_assert!(fast.missable(0).eq(missable.iter().cloned()));
 				proptest::prop_assert_eq!(fast.lowest_named(), named);
@@ -1238,6 +1248,22 @@ mod tests {
 			assert!(Window::new(&[open], None, None, &keys).unwrap().is_pending());
 			assert_eq!(Window::new(&[open], None, Some(5), &keys).unwrap().start(), None);
 		}
+	}
+
+	/// A relative start counting back past every group held asks misses from the lowest
+	/// group held since it was placed: an older group arriving widens that, and evicting the
+	/// oldest narrows nothing, since the start reached it.
+	#[test]
+	fn a_relative_start_past_every_group_asks_from_the_lowest_reached() {
+		let mut keys = Keys::new([33, 66, 99]);
+		let mut window = Window::new(&[range(Anchor::Relative(10), None)], None, Some(99), &keys).unwrap();
+		assert_eq!(window.missable(0).next(), Some(33..=u64::MAX));
+		keys.held.insert(20);
+		assert!(window.settle(Some(99), &keys));
+		assert_eq!(window.missable(0).next(), Some(20..=u64::MAX));
+		keys.held.retain(|key| *key > 33);
+		assert!(!window.settle(Some(99), &keys));
+		assert_eq!(window.missable(0).next(), Some(20..=u64::MAX));
 	}
 
 	/// No hop can place the oldest group as an end, so it is refused.
