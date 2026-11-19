@@ -582,15 +582,15 @@ export class Window {
 	}
 
 	/**
-	 * The times of the time starts still waiting on the groups held that may resolve below `key`:
-	 * the group containing each starts at or before its time, so it may still land below `key`.
-	 * Mirrors the Rust `Window::waiting_below`.
+	 * The times in `[start, end)` of the time starts still waiting on the groups held. The group
+	 * containing each starts at or before its time, so one at or past a read's floor and below a
+	 * group may still land between them. Mirrors the Rust `Window::waiting_in`.
 	 */
-	waitingBelow(key: bigint): bigint[] {
+	waitingIn(start: bigint, end: bigint): bigint[] {
 		const times: bigint[] = [];
 		for (const entry of this.#waiting.all) {
-			if (entry.time >= key) break;
-			times.push(entry.time);
+			if (entry.time >= end) break;
+			if (entry.time >= start) times.push(entry.time);
 		}
 		return times;
 	}

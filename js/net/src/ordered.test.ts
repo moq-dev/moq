@@ -440,14 +440,18 @@ test("a folded time start wakes its read when the grace for a gap below it passe
 	try {
 		const producer = receivedTrack();
 		// An oldest-group reader holds the feed open from its answered start, 1000.
-		const oldest = producer.subscribe({ delay: { max: Duration.millis(50) } });
+		const oldest = producer.subscribe({ delay: { max: Duration.secs(1) } });
 		hooks.startTrack(producer, { start: 1000n });
 		hooks.timeStarts(producer, [[0n, 1000n]]);
-		// Group 1000's stream reset before its header: only 2000 and the skips below it land.
-		producer.skipGroups(1001n, 2000n);
+		// Group 1000's stream reset before its header: only 1800, 2000, and the skips around them
+		// land, 1800 last, so the read's own budget for the time runs out after the gap's grace.
+		producer.skipGroups(1001n, 1800n);
+		producer.skipGroups(1801n, 2000n);
 		put(producer, 2000n, false);
+		clock.jump(Duration.millis(10));
+		put(producer, 1800n, false);
 		const ordered = producer
-			.subscribe({ delay: { max: Duration.millis(50) }, ranges: [{ start: { time: 1500n } }] })
+			.subscribe({ delay: { max: Duration.secs(1) }, ranges: [{ start: { time: 1500n } }] })
 			.ordered();
 		expect(items(ordered)).toEqual([]);
 		let read: bigint | undefined;
@@ -456,17 +460,77 @@ test("a folded time start wakes its read when the grace for a gap below it passe
 		});
 		// Let the read settle into its wait, so only a timer can wake it.
 		await flush();
-		clock.jump(Duration.millis(49));
+		clock.jump(Duration.millis(989));
 		await flush();
 		expect(read).toBeUndefined();
 		clock.jump(Duration.millis(1));
 		await flush();
+		// 1800 came a full budget after 2000 superseded it.
 		expect(read).toBe(2000n);
 		await next;
 		oldest.close();
 	} finally {
 		installed.close();
 	}
+});
+
+test("a waiting time start holds an ordered read only within its budget", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		const producer = receivedTrack();
+		put(producer, 2000n, false);
+		const ordered = producer
+			.subscribe({ delay: { max: Duration.millis(100) }, ranges: [{ start: { time: 1500n } }] })
+			.ordered();
+		expect(items(ordered)).toEqual([]);
+		let read: bigint | undefined;
+		const next = ordered.nextGroup().then((group) => {
+			read = group?.start;
+		});
+		await flush();
+		clock.jump(Duration.millis(99));
+		await flush();
+		expect(read).toBeUndefined();
+		clock.jump(Duration.millis(1));
+		await flush();
+		expect(read).toBe(2000n);
+		await next;
+	} finally {
+		installed.close();
+	}
+});
+
+test("a waiting time start below an ordered read's own floor holds nothing", () => {
+	const producer = receivedTrack();
+	put(producer, 2000n, false);
+	const ordered = producer
+		.subscribe({ delay: { max: null }, ranges: [{ start: { time: 1500n } }] })
+		.withRange({ start: { included: 2000n } })
+		.ordered();
+	expect(items(ordered)).toEqual(["group 2000"]);
+});
+
+test("a skip is no group to place a waiting time start from", () => {
+	const producer = receivedTrack();
+	// GROUP 2000 says the group before it is 1000, which is still on its way.
+	producer.skipGroups(1001n, 2000n);
+	put(producer, 2000n, false);
+	const ordered = producer.subscribe({ delay: { max: null }, ranges: [{ start: { time: 1500n } }] }).ordered();
+	expect(items(ordered)).toEqual([]);
+	put(producer, 1000n, false);
+	expect(items(ordered)).toEqual(["group 1000", "group 2000"]);
+});
+
+test("a folded time start never places below the range covering it", () => {
+	const producer = receivedTrack();
+	put(producer, 500n, false);
+	hooks.timeStarts(producer, [[1000n, 1200n, 1500n]]);
+	// The covering range's first group was given up, and nothing lies between it and the time.
+	drop(producer, 1200n, 1201n);
+	producer.skipGroups(1201n, 1600n);
+	const subscriber = producer.subscribe({ delay: { max: null }, ranges: [{ start: { time: 1500n } }] });
+	expect(hooks.servingResolved(subscriber)).toEqual([{ start: 1200n, end: undefined, floored: true }]);
 });
 
 // Run every pending microtask and the ones they queue, as a timer firing would.

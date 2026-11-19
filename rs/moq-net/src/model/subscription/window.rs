@@ -354,15 +354,19 @@ impl Window {
 		!self.waiting.is_empty()
 	}
 
-	/// Whether a time start still waiting on the groups held may resolve below `key`: the
-	/// group containing its time starts at or before it, so it may still land below `key`.
-	pub fn waits_below(&self, key: u64) -> bool {
-		self.waiting_below(key).next().is_some()
-	}
-
-	/// The times of the waiting time starts before `key`, as [`Self::waits_below`] finds them.
-	pub fn waiting_below(&self, key: u64) -> impl Iterator<Item = u64> + '_ {
-		self.waiting.range(..(key, 0)).map(|&(time, _)| time)
+	/// The times in `times` of the time starts still waiting on the groups held. The group
+	/// containing each starts at or before its time, so one at or past a read's floor and
+	/// below a group may still land between them.
+	pub fn waiting_in<R: ops::RangeBounds<u64> + 'static>(&self, times: R) -> impl Iterator<Item = u64> + '_ {
+		let from = match times.start_bound() {
+			ops::Bound::Included(&start) => start,
+			ops::Bound::Excluded(&start) => start.saturating_add(1),
+			ops::Bound::Unbounded => 0,
+		};
+		self.waiting
+			.range((from, 0)..)
+			.map(|&(time, _)| time)
+			.take_while(move |time| times.contains(time))
 	}
 
 	/// Resolve what the groups now held settle: relative anchors once `latest` exists, and

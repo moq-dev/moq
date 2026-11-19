@@ -1065,17 +1065,19 @@ interface TimeStart {
 	through?: bigint;
 }
 
-// Whether a received copy's live feed may land nothing more at or below `time` that could contain
-// it, counting from `from` or its first arrival at or below `time`; assigned in the producer's
-// static block. Mirrors the Rust `TrackState::landed_through`.
-let landedThrough: (producer: Producer, time: bigint, from: bigint | undefined) => boolean;
+// Where a received copy's live feed landed every key it could through `time`, counting from
+// `covering`, where a range covering the time started, or else its first arrival at or below
+// `time`: the group containing the time starts there or past it. Undefined while a key may still
+// land, or with neither to count from. Assigned in the producer's static block. Mirrors the Rust
+// `TrackState::landing_from` and `TrackState::landed_through`.
+let landedFrom: (producer: Producer, time: bigint, covering: bigint | undefined) => bigint | undefined;
 
 // When a received copy's time start at `time`, waiting to be placed, next may place itself with no
-// change to wake its readers: the grace of the lowest gap {@link landedThrough} still waits on
+// change to wake its readers: the grace of the lowest gap {@link landedFrom} still waits on
 // folds. Mirrors the Rust `TrackState::time_start_folds`.
 let timeStartFolds: (producer: Producer, time: bigint) => Instant | undefined;
 
-// The times {@link landedThrough} may place on a received copy, wherever its groups and drops leave
+// The times {@link landedFrom} may place on a received copy, wherever its groups and drops leave
 // them: from the lowest time a first arrival or a reported range reaches, up to the farthest key
 // one of them may still land. Mirrors the Rust `TrackState::landing_span`.
 let landingSpan: (producer: Producer) => Run | undefined;
@@ -1416,6 +1418,10 @@ export class Producer {
 	// subscription's grace after a later arrival opened it, as the session's tail does, so this
 	// holds only the gaps still worth waiting for.
 	#arrivals = new Ledger();
+	// The lowest key the live feed delivered a group at. Unlike the arrivals' first key, never one
+	// a drop, a skip, or a forgotten run accounted, so a group starts there. Mirrors the Rust
+	// `first_arrival`.
+	#firstArrival: bigint | undefined;
 	// What this track's own publisher produced since its last append, which skips every
 	// key below it that never arrived and was not given up: the producer moved on. The
 	// arrivals cannot say so, since a gap folds into them once nobody waits for it. Only
@@ -1637,9 +1643,13 @@ export class Producer {
 			// The answer may place a time start an ordered read waits at.
 			for (const state of [producer.#state, ...producer.#sinks]) state.timelineChanged.update((rev) => rev + 1);
 		};
-		landedThrough = (producer, time, from) => producer.#landingThrough(time, from) === undefined;
+		landedFrom = (producer, time, covering) => {
+			const from = producer.#landingFrom(time, covering);
+			if (from === undefined || producer.#landingThrough(time, from) !== undefined) return undefined;
+			return from;
+		};
 		landingSpan = (producer) => {
-			const first = producer.#arrivals.first();
+			const first = producer.#firstArrival;
 			const reach = producer.#timeStartReach;
 			const asked = reach && reach.lowest + 1n;
 			const start = first === undefined ? asked : asked === undefined ? first : min(first, asked);
@@ -1653,7 +1663,8 @@ export class Producer {
 		};
 		timeStartFolds = (producer, time) => {
 			if (!producer.#wire || producer.#timeStarts.has(time)) return undefined;
-			return producer.#landingThrough(time, coveringStart(producer.#timeStarts, time))?.folds;
+			const from = producer.#landingFrom(time, coveringStart(producer.#timeStarts, time));
+			return from === undefined ? undefined : producer.#landingThrough(time, from)?.folds;
 		};
 		hooks.relativeStarts = (producer, starts) => {
 			producer.#relativeStarts = new Map([...starts].map(([back, start, latest]) => [back, { start, latest }]));
@@ -1761,13 +1772,18 @@ export class Producer {
 		};
 	}
 
-	// Undefined once {@link landedThrough} holds, else the lowest gap it still waits on, with when
-	// its grace folds, if it ever does.
-	#landingThrough(time: bigint, from: bigint | undefined): { folds?: Instant } | undefined {
-		const first = this.#arrivals.first();
-		const start = from ?? (first !== undefined && first <= time ? first : undefined);
-		if (start === undefined) return {};
-		const landing = this.#landing({ start, end: time + 1n, floor: true, grace: this.#grace() }).next();
+	// Where the group containing `time` starts at the earliest: `covering`, or else the feed's first
+	// arrival at or below `time`. Each is a group; a skip or a forgotten run names none. Mirrors the
+	// Rust `TrackState::landing_from`.
+	#landingFrom(time: bigint, covering: bigint | undefined): bigint | undefined {
+		const first = this.#firstArrival;
+		return covering ?? (first !== undefined && first <= time ? first : undefined);
+	}
+
+	// Undefined once the live feed landed every key it could from `from` through `time`, else the
+	// lowest gap it still waits on, with when its grace folds, if it ever does.
+	#landingThrough(time: bigint, from: bigint): { folds?: Instant } | undefined {
+		const landing = this.#landing({ start: from, end: time + 1n, floor: true, grace: this.#grace() }).next();
 		return landing.done ? undefined : { folds: landing.value.folds };
 	}
 
@@ -2418,7 +2434,10 @@ export class Producer {
 		insertKey(this.#keys, group.start);
 		this.#fills.arrived(group.start);
 		this.#advance(group.start, !fetched);
-		if (!fetched) this.#arrive(group.start);
+		if (!fetched) {
+			this.#firstArrival = this.#firstArrival === undefined ? group.start : min(this.#firstArrival, group.start);
+			this.#arrive(group.start);
+		}
 		this.#produce(group.start);
 		// A newer group demotes the live edge to an evictable one.
 		const edge = this.#edgeEntry();
@@ -3731,12 +3750,16 @@ export class Subscriber {
 						return { group: below };
 					}
 					if (below === undefined && drops.covers(0n, time + 1n)) return "before";
-					// The live feed accounted for every key it could land through the time, so the group
-					// containing it came already: the newest one held, or one since evicted.
-					if (producer && landedThrough(producer, time, covering)) {
-						return below !== undefined ? { group: below } : "before";
-					}
-					return "unknown";
+					// The live feed accounted for every key it could land from a group at `from` through the
+					// time, so the group containing it came already, at `from` or past it: the newest one held
+					// there, or `from` itself when nothing after it through the time was a group. A group held
+					// below it, such as one fetched, is not it. Else it was evicted, and reaching back to the
+					// oldest group looks it up.
+					const from = producer && landedFrom(producer, time, covering);
+					if (from === undefined) return "unknown";
+					if (below !== undefined && below >= from) return { group: below };
+					if (from <= time && drops.covers(from + 1n, time + 1n)) return { group: from };
+					return "before";
 				}
 				if (below !== undefined) return { group: below };
 				// Every key at or before it is gone, so whichever group held it will never arrive.
@@ -5487,18 +5510,23 @@ export class Subscriber {
 	}
 
 	// In order, the group a waiting time start resolves to comes first: it starts at or before that
-	// time, below `key`, and may still land. Its landing, the answer placing the start, or the grace
-	// for a gap below it folding wakes the read; a closed track places the start.
-	#waitTimeStart(key: bigint): boolean {
-		const waiting = this.#window.waitingBelow(key);
-		if (waiting.length === 0) return false;
+	// time, below `key`, and may still land at or past the read's floor `start`, until the budget
+	// gives up on it as on an owed group. Its landing, the answer placing the start, the grace for a
+	// gap below it folding, or that verdict wakes the read; a closed track places the start.
+	// Mirrors the Rust `Cursor::poll_time_start`.
+	#waitTimeStart(start: bigint, key: bigint, drift: Drift): boolean {
 		const producer = this.#state.producer;
-		for (const time of waiting) {
+		let waits = false;
+		for (const time of this.#window.waitingIn(start, key)) {
+			// Its successor is this group's or one below: the group containing the time is judged as an
+			// owed group at it would be.
+			if (this.#staleAt(time, drift, true)) continue;
 			const folds = producer && timeStartFolds(producer, time);
 			if (folds !== undefined) this.#wakeAt(folds.since(Instant.ZERO).asNanos());
+			waits = true;
 		}
-		this.#state.waitingOrdered = true;
-		return true;
+		if (waits) this.#state.waitingOrdered = true;
+		return waits;
 	}
 
 	// A missing group the subscription still owes holds sequence order until it lands,
@@ -5535,8 +5563,8 @@ export class Subscriber {
 		for (const group of this.#state.groups.peek()) {
 			if (group.start < start || !this.#window.contains(group.start)) continue;
 			if (cursor.end !== undefined && group.start >= cursor.end) return undefined;
-			if (ordered && this.#waitTimeStart(group.start)) return undefined;
 			if (!this.#delivered.has(group.start) && !this.#staleAt(group.start, drift)) {
+				if (ordered && this.#waitTimeStart(start, group.start, drift)) return undefined;
 				return group.start;
 			}
 		}
@@ -5582,7 +5610,6 @@ export class Subscriber {
 				index++;
 				continue;
 			}
-			if (this.#waitTimeStart(group.start)) return { kind: "idle" };
 			// Every frame this group could still hold is past the budget, so keep
 			// scanning: one pass walks a whole backlog off rather than replaying it.
 			if (this.#staleAt(group.start, drift)) {
@@ -5600,6 +5627,7 @@ export class Subscriber {
 				group.close();
 				continue;
 			}
+			if (this.#waitTimeStart(start, group.start, drift)) return { kind: "idle" };
 			if (this.#waitOwed(start, group.start, drift)) return { kind: "idle" };
 			// A group missing its head comes from the fill asked for it, in its turn.
 			if (this.#lacksHead(group)) {

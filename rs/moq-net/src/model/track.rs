@@ -736,6 +736,9 @@ pub(crate) struct TrackState {
 	// away a subscription's grace after a later arrival opened it, as the session's tail
 	// does, so this holds only the gaps still worth waiting for.
 	arrivals: Ledger,
+	// The lowest key the live feed delivered a group at. Unlike the arrivals' first key, never
+	// one a forgotten drop or skip accounted, so a group starts there.
+	first_arrival: Option<u64>,
 	// What `arrivals` bills to the pool, [`ledger::RUN_OVERHEAD`] per gap. Paying eviction
 	// debt folds its oldest gaps early, so an unbounded grace holds no more gaps than the
 	// pool would.
@@ -1311,13 +1314,22 @@ impl TrackState {
 				Containing::Group(key)
 			}
 			None if self.dropped_cover(0..time.saturating_add(1)) => Containing::Before,
-			// The live feed accounted for every key it could land through the time, so the
-			// group containing it came already: the newest one held, or one since evicted, which
-			// reaches back to the oldest group as on the publisher's own track.
-			held if self.landed_through(time, covering) => {
-				held.map_or(Containing::Before, |(&key, _)| Containing::Group(key))
-			}
-			_ => Containing::Unknown,
+			// The live feed accounted for every key it could land from a group at `from`
+			// through the time, so the group containing it came already, at `from` or past it:
+			// the newest one held there, or `from` itself when nothing after it through the
+			// time was a group. A group held below it, such as one fetched, is not it. Else it
+			// was evicted, and reaching back to the oldest group, as on the publisher's own
+			// track, looks it up.
+			held => match self.landing_from(time, covering) {
+				Some(from) if self.landed_through(time, from) => match held {
+					Some((&key, _)) if key >= from => Containing::Group(key),
+					_ if from <= time && self.dropped_cover(from.saturating_add(1)..time.saturating_add(1)) => {
+						Containing::Group(from)
+					}
+					_ => Containing::Before,
+				},
+				_ => Containing::Unknown,
+			},
 		}
 	}
 
@@ -1339,7 +1351,7 @@ impl TrackState {
 		if !self.readable() {
 			return Unplaced::NONE;
 		}
-		let first = self.arrivals.first();
+		let first = self.first_arrival;
 		let asked = self.time_starts.keys().next().map(|asked| asked.saturating_add(1));
 		let Some(lowest) = first.into_iter().chain(asked).min() else {
 			return Unplaced::NONE;
@@ -1362,29 +1374,34 @@ impl TrackState {
 		if !self.anchors.received() || self.time_starts.contains_key(&time) {
 			return None;
 		}
-		self.landing_through(time, self.covering_start(time)).flatten()
+		let from = self.landing_from(time, self.covering_start(time))?;
+		self.landing_through(time, from).flatten()
+	}
+
+	/// Where the group containing `time` starts at the earliest, which [`Self::landed_through`]
+	/// counts from: `covering`, where a range covering the time started, or else the feed's
+	/// first arrival at or below `time`. Each is a group, so the one containing the time is
+	/// there or past it, and a range added below changes nothing of it. A skip or a forgotten
+	/// drop names no group. Arrival order is not key order, so with neither, a lower key may
+	/// still land.
+	fn landing_from(&self, time: u64, covering: Option<u64>) -> Option<u64> {
+		covering.or_else(|| self.first_arrival.filter(|&first| first <= time))
 	}
 
 	/// Whether the live feed may land nothing more at or below `time` that could contain it:
-	/// every key from `from`, where a range covering the time started, or else from the feed's
-	/// first arrival at or below `time`, through `time` arrived, was dropped, or is no longer
-	/// waited for. A covering range that started past the time served nothing at or before
-	/// it. Either names where the feed's groups begin, so a range added below changes nothing
-	/// of the group containing the time. Arrival order is not key order, so with neither, a
-	/// lower key may still land.
-	fn landed_through(&self, time: u64, from: Option<u64>) -> bool {
+	/// every key from `from` (see [`Self::landing_from`]) through `time` arrived, was dropped,
+	/// or is no longer waited for. A covering range that started past the time served nothing
+	/// at or before it.
+	fn landed_through(&self, time: u64, from: u64) -> bool {
 		self.landing_through(time, from).is_none()
 	}
 
 	/// `None` once [`Self::landed_through`] holds, else `Some` of when the arrival grace of the
 	/// lowest gap it still waits on folds, if it ever does.
-	fn landing_through(&self, time: u64, from: Option<u64>) -> Option<Option<crate::time::Instant>> {
+	fn landing_through(&self, time: u64, from: u64) -> Option<Option<crate::time::Instant>> {
 		if !self.readable() {
 			return Some(None);
 		}
-		let Some(from) = from.or_else(|| self.arrivals.first().filter(|&first| first <= time)) else {
-			return Some(None);
-		};
 		self.find_landable(from..time.saturating_add(1), true, self.arrival_grace(), |_, folds| {
 			Some(folds)
 		})
@@ -2836,6 +2853,7 @@ impl TrackState {
 	/// Record that the live feed delivered `key`, then fold the gaps that aged out.
 	fn record_arrival(&mut self, key: u64, now: crate::time::Instant) {
 		self.arrivals.arrive(key, now);
+		self.first_arrival = Some(self.first_arrival.map_or(key, |first| first.min(key)));
 		if !self.anchors.received()
 			&& self.appended.is_none_or(|appended| key >= appended)
 			&& let Some(end) = key.checked_add(1)
@@ -9486,6 +9504,53 @@ impl Cursor {
 		})
 	}
 
+	/// Pending while a time start in `times` waits to be placed and the group containing it,
+	/// at or before its time and so below `times.end`, may still land at or past the read's
+	/// floor `times.start` within the drift budget. Its landing, the answer placing the start,
+	/// the grace for a gap below it folding, or the budget giving up on it wakes us; a closed
+	/// track places it. `Ready(true)` when a change placed one meanwhile, so the caller looks
+	/// again.
+	fn poll_time_start(&mut self, times: ops::Range<u64>, drift: &Drift, waiter: &kio::Waiter) -> Poll<bool> {
+		if self.filter.window.is_settled() || self.filter.window.waiting_in(times.clone()).next().is_none() {
+			return Poll::Ready(false);
+		}
+		let window = &self.filter.window;
+		let waited = std::cell::RefCell::new(Vec::new());
+		let closed = self
+			.poll(waiter, |state| {
+				waited.borrow_mut().clear();
+				// An unjudgeable old gap cannot hold a finite read, as for an owed group.
+				let floor = times.start.max(state.cache_floor(drift.budget));
+				for time in window.waiting_in(floor..times.end) {
+					// Its successor is this group's or one below: the group containing the
+					// time is judged as an owed group at it would be.
+					if state.poll_drifted(time, &drift.edge.servable, drift.budget, None, waiter) {
+						continue;
+					}
+					if let Some(folds) = state.time_start_folds(time) {
+						state.cache.watch_wall(folds, waiter);
+					}
+					waited.borrow_mut().push(time);
+				}
+				Poll::<Result<()>>::Pending
+			})
+			.is_ready();
+		let waited = waited.into_inner();
+		if closed || waited.is_empty() {
+			return Poll::Ready(false);
+		}
+		// Registered before syncing again, so a change placing one meanwhile is not missed.
+		self.sync();
+		let window = &self.filter.window;
+		if waited
+			.iter()
+			.any(|&time| window.waiting_in(time..=time).next().is_none())
+		{
+			return Poll::Ready(true);
+		}
+		Poll::Pending
+	}
+
 	/// Whether the drift budget says to skip `group`, against a [`Drift`] already resolved
 	/// for this poll.
 	fn poll_stale(&self, group: &group::Consumer, drift: &Drift, waiter: &kio::Waiter) -> Poll<Result<bool>> {
@@ -10142,31 +10207,6 @@ impl Cursor {
 					floor = floor.max(self.floor()).max(group.start.saturating_add(1));
 					continue;
 				}
-				// In order means the group a waiting time start resolves to comes first: it
-				// starts at or before that time, below this group, and may still land. Its
-				// landing, the answer placing the start, or the grace for a gap below it folding
-				// wakes us. Registered before syncing again, so a change placing it meanwhile is
-				// not missed; a closed track places it.
-				if self.filter.window.waits_below(group.start) {
-					let window = &self.filter.window;
-					let closed = self
-						.poll(waiter, |state| {
-							for time in window.waiting_below(group.start) {
-								if let Some(folds) = state.time_start_folds(time) {
-									state.cache.watch_wall(folds, waiter);
-								}
-							}
-							Poll::<Result<()>>::Pending
-						})
-						.is_ready();
-					self.sync();
-					if !self.filter.window.waits_below(group.start) {
-						continue;
-					}
-					if !closed {
-						return Poll::Pending;
-					}
-				}
 			}
 
 			// Skip a group the budget has given up on and keep scanning, so one poll
@@ -10178,6 +10218,12 @@ impl Cursor {
 				// group's latest observed content.
 				self.seek_pending.insert(group.start, (group.content(), drift.budget));
 				floor = group.start.saturating_add(1);
+				continue;
+			}
+
+			// In order means the group a waiting time start resolves to comes first, until the
+			// budget gives up on it.
+			if ready!(self.poll_time_start(from..group.start, &drift, waiter)) {
 				continue;
 			}
 
@@ -10921,9 +10967,21 @@ impl Subscriber {
 		let start = ready!(Consumer::poll_state_start(&cursor.state, waiter));
 		cursor.sync();
 		if cursor.filter.window.is_waiting() {
-			// Registered before syncing again, so a change placing it after this wakes it. A
-			// closed track places it at once, since nothing more can arrive.
-			let closed = cursor.state.poll(waiter, |_| Poll::<()>::Pending).is_ready();
+			// Registered before syncing again, so a change placing it after this wakes it, as
+			// does the grace for a gap below one folding. A closed track places it at once,
+			// since nothing more can arrive.
+			let window = &cursor.filter.window;
+			let closed = cursor
+				.state
+				.poll(waiter, |state| {
+					for time in window.waiting_in(..) {
+						if let Some(folds) = state.time_start_folds(time) {
+							state.cache.watch_wall(folds, waiter);
+						}
+					}
+					Poll::<()>::Pending
+				})
+				.is_ready();
 			cursor.sync();
 			if !closed && cursor.filter.window.is_waiting() {
 				return Poll::Pending;
@@ -15914,7 +15972,8 @@ mod test {
 
 	/// A time start folded into an open range waits out the grace of a gap below its time,
 	/// where the group containing it may still land, and that grace folding alone wakes an
-	/// ordered read parked on it, with no change to the track.
+	/// ordered read parked on it, with no change to the track: the group after the time
+	/// arrived later than the gap opened, so the read's own budget runs out after it.
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_folded_time_start_wakes_its_read_when_a_gap_below_folds() {
@@ -15925,9 +15984,14 @@ mod test {
 		elapse(&producer, Duration::ZERO);
 		producer.start_resolved(1000).unwrap();
 		producer.time_starts([(0, 1000, None)]);
-		// Group 1000's stream reset before its header: only 2000 and the skips below it land.
-		producer.skip_groups(1001..2000);
+		// Group 1000's stream reset before its header: only 1800, 2000, and the skips around
+		// them land, 1800 last.
+		producer.skip_groups(1001..1800);
+		producer.skip_groups(1801..2000);
 		write_group(&producer, 2000);
+		elapse(&producer, Duration::from_millis(10));
+		write_group(&producer, 1800);
+		let grace = grace - Duration::from_millis(10);
 		let mut ordered = producer
 			.subscribe(replay().with_ranges([Range {
 				start: Anchor::Time(1500),
@@ -15953,7 +16017,167 @@ mod test {
 				Item::Gap { .. } => {}
 			}
 		}
+		// 1800 came a full budget after 2000 superseded it.
 		assert_eq!(read, [2000]);
+	}
+
+	/// A start [`Subscriber::poll_start`] waits on, folded into an open range, wakes it when the
+	/// grace of a gap below its time folds, with no change to the track.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_folded_time_start_wakes_poll_start_when_a_gap_below_folds() {
+		let grace = replay().budget();
+		let mut producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		elapse(&producer, Duration::ZERO);
+		producer.start_resolved(1000).unwrap();
+		producer.time_starts([(0, 1000, None)]);
+		producer.skip_groups(1001..2000);
+		write_group(&producer, 2000);
+		let mut subscriber = producer.subscribe(replay().with_ranges([Range {
+			start: Anchor::Time(1500),
+			end: None,
+		}]));
+
+		let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+		let waiter = kio::Waiter::new(futures::task::waker(Arc::new(FlagWake(woken.clone()))));
+		assert!(subscriber.poll_start(&waiter).is_pending(), "1000 may still land");
+		elapse(&producer, grace - Duration::from_millis(1));
+		assert!(!woken.load(Ordering::SeqCst), "woken before the grace");
+		assert!(subscriber.poll_start(&waiter).is_pending());
+		elapse(&producer, Duration::from_millis(1));
+		assert!(woken.load(Ordering::SeqCst), "the grace never woke the start");
+		assert!(subscriber.poll_start(&waiter).is_ready());
+	}
+
+	/// A finite budget gives up on the group a waiting time start resolves to as it would on an
+	/// owed one: once the later group it holds is a full budget old, an ordered read hands it
+	/// out rather than wait for an answer that may never come.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_waiting_time_start_holds_a_read_only_within_its_budget() {
+		let budget = Duration::from_millis(100);
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		elapse(&producer, Duration::ZERO);
+		write_group(&producer, 2000);
+		let mut ordered = producer
+			.subscribe(
+				Subscription::default()
+					.with_ranges([Range {
+						start: Anchor::Time(1500),
+						end: None,
+					}])
+					.with_delay(Delay::default().with_max(budget)),
+			)
+			.ordered();
+
+		let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+		let waiter = kio::Waiter::new(futures::task::waker(Arc::new(FlagWake(woken.clone()))));
+		assert!(
+			ordered.poll_next_group(&waiter).is_pending(),
+			"the group at 1500 may land"
+		);
+		elapse(&producer, budget - Duration::from_millis(1));
+		assert!(!woken.load(Ordering::SeqCst), "woken before the budget");
+		assert!(ordered.poll_next_group(&waiter).is_pending());
+		elapse(&producer, Duration::from_millis(1));
+		assert!(woken.load(Ordering::SeqCst), "the budget never woke the read");
+		let mut read = Vec::new();
+		while let Poll::Ready(item) = ordered.poll_next_group(&waiter) {
+			if let Item::Group(group) = item.unwrap().expect("an item") {
+				read.push(group.start);
+				break;
+			}
+		}
+		assert_eq!(read, [2000]);
+	}
+
+	/// A waiting time start below an ordered read's own floor holds nothing: the group
+	/// containing its time starts at or before it, which the read never hands out.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_waiting_time_start_below_the_read_floor_holds_nothing() {
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		write_group(&producer, 2000);
+		let mut ordered = producer
+			.subscribe(
+				Subscription::default()
+					.with_ranges([Range {
+						start: Anchor::Time(1500),
+						end: None,
+					}])
+					.with_delay(Delay::default().with_max(None)),
+			)
+			.with_range(2000..)
+			.ordered();
+		match ordered.next_group().now_or_never() {
+			Some(Ok(Some(Item::Group(group)))) => assert_eq!(group.start, 2000),
+			other => panic!("2000 waited: {:?}", other.map(|res| res.map(|item| item.is_some()))),
+		}
+	}
+
+	/// A skip, even one forgotten into the feed's accounting, names no group, so it can't stand
+	/// in for the feed's first arrival a waiting time start counts from: the group containing
+	/// the time may still land below it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_forgotten_skip_is_no_group_to_place_a_time_start_from() {
+		let mut producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		// Asked from the live edge, so the feed's accounting starts wherever it lands.
+		producer.request_start(None).unwrap();
+		// GROUP 2000 says the group before it is 1000, which is still on its way.
+		producer.skip_groups(1001..2000);
+		write_group(&producer, 2000);
+		producer.forget_drops(1001..2000);
+		assert_eq!(
+			producer.state.read().arrivals.first(),
+			Some(1001),
+			"the skip is accounted"
+		);
+		assert_eq!(producer.state.read().containing(1500), Containing::Unknown);
+		let mut ordered = producer
+			.subscribe(
+				Subscription::default()
+					.with_ranges([Range {
+						start: Anchor::Time(1500),
+						end: None,
+					}])
+					.with_delay(Delay::default().with_max(None)),
+			)
+			.ordered();
+		let mut next = || match ordered.next_group().now_or_never() {
+			None => None,
+			Some(Ok(Some(Item::Group(group)))) => Some(group.start),
+			Some(res) => panic!("not a group: {:?}", res.map(|item| item.is_some())),
+		};
+		assert_eq!(next(), None, "1000 may still land");
+		write_group(&producer, 1000);
+		assert_eq!(next(), Some(1000));
+		assert_eq!(next(), Some(2000));
+	}
+
+	/// A time start folded into a range that started at a group since cut places at that
+	/// range's start, never at an older group held below it, which the range doesn't serve.
+	#[test]
+	fn a_folded_time_start_never_places_below_its_covering_range() {
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		write_group(&producer, 500);
+		producer.time_starts([(1000, 1200, Some(1500))]);
+		let cut = producer.create_group(group::Info { start: 1200 }).unwrap();
+		cut.abort(Error::Cancel).unwrap();
+		producer.modify().unwrap().reclaim_aborted(1200);
+		producer.skip_groups(1201..1600);
+		assert!(!producer.state.read().lookup.contains_key(&1200), "1200 is cut");
+		assert_eq!(producer.state.read().containing(1500), Containing::Group(1200));
 	}
 
 	/// A lite-07 copy holds only part of the track, so a relative start counts back as its
