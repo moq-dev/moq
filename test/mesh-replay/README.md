@@ -91,6 +91,9 @@ where a new relay sits between a new one and an old one.
 - **unfed**: once an event settles, a reader whose relay shows its live broadcast read
   nothing for `stall`. `stuck` means its follow holds a broadcast whose track ended and
   never handed out another; `starved` means it holds one whose groups stopped.
+- **unrouted**: at the start, before any fault, a reader's relay does not show a live
+  broadcast, so nothing behind it would be tested. A mesh with a link marked `upstream`
+  may hide a route, so there it is only reported, as after every other event.
 - **shown**: once an event settles, a relay still shows a broadcast whose publisher stopped.
 - **hung**: a rolled relay still had not exited 20s after its 10s drain, so the run killed it.
 - **died**: once an event settles, a relay, publisher, reader, or shaper the run meant to

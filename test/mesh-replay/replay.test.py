@@ -268,5 +268,24 @@ class BuildTest(unittest.TestCase):
         self.assertNotIn("upstream", relay.config(old))
 
 
+class EventTest(unittest.TestCase):
+    def test_a_roll_repeats_its_times(self):
+        from types import SimpleNamespace
+
+        rolls = []
+        run = SimpleNamespace(roll=lambda to, relays, suffix: rolls.append((to, suffix)))
+        replay.Run.run_event(run, {"kind": "roll", "to": "new", "relays": ["a"], "times": 2})
+        self.assertEqual(rolls, [("new", " (1/2)"), ("new", " (2/2)")])
+
+    def test_only_an_unmarked_mesh_start_needs_every_route(self):
+        from types import SimpleNamespace
+
+        plain = SimpleNamespace(mesh=SimpleNamespace(links=[replay.Link("a", "b", None, False, {})]))
+        marked = SimpleNamespace(mesh=SimpleNamespace(links=[replay.Link("a", "b", None, True, {})]))
+        self.assertTrue(replay.Run.baseline(plain, "start"))
+        self.assertFalse(replay.Run.baseline(plain, "kill"))
+        self.assertFalse(replay.Run.baseline(marked, "start"))
+
+
 if __name__ == "__main__":
     unittest.main()

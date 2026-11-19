@@ -748,7 +748,7 @@ class Run:
         start = time.time()
         print(f"[{time.strftime('%H:%M:%S')}] {name}", flush=True)
         restored = apply()
-        quiet_at, fed_at, unfed, unrouted = self.settle(restored)
+        quiet_at, fed_at, unfed, unrouted = self.settle(restored, self.baseline(kind))
         end = time.time()
         after = self.snapshot()
         self.readers()
@@ -807,9 +807,15 @@ class Run:
         self.events.append(report)
         return report
 
-    def settle(self, restored: float) -> tuple[float | None, float | None, list[dict], list[dict]]:
+    def baseline(self, kind: str) -> bool:
+        """Whether every reader must have a route: at the start, before any fault, unless a link
+        marked upstream may hide one."""
+        return kind == "start" and not any(link.upstream for link in self.mesh.links)
+
+    def settle(self, restored: float, routed: bool) -> tuple[float | None, float | None, list[dict], list[dict]]:
         """Wait, up to `settle`, until no route or announce counter moved for `quiet` and every
-        reader with a route is reading. Returns when each happened, or None, and who was not."""
+        reader with a route is reading, and with `routed`, every reader has a route. Returns when
+        each happened, or None, and who was not."""
         deadline = restored + self.script.settle
         quiet_at = fed_at = None
         while True:
@@ -817,7 +823,7 @@ class Run:
             last = max(self.changed(), restored)
             quiet_at = last if now - last >= self.script.quiet else None
             unfed, unrouted = self.hungry(now)
-            if unfed:
+            if unfed or (routed and unrouted):
                 fed_at = None
             elif fed_at is None:
                 fed_at = now
@@ -912,6 +918,9 @@ class Run:
         report["unrouted"] = len(unrouted)
         if unrouted:
             report["unrouted_detail"] = unrouted[:20]
+            # A baseline with a reader left unrouted tests nothing behind it.
+            if self.baseline(report["kind"]):
+                self.violation(report, "unrouted", unrouted)
         for kind in ("stuck", "starved"):
             items = [item for item in unfed if item["kind"] == kind]
             if items:
@@ -945,7 +954,7 @@ class Run:
 
     # ── faults ──
 
-    def roll(self, to: str, relays: list[str]) -> None:
+    def roll(self, to: str, relays: list[str], suffix: str = "") -> None:
         build = self.builds[to]
         for name in relays:
             relay = self.relays[name]
@@ -969,7 +978,7 @@ class Run:
                 relay.start(build)
                 return time.time()
 
-            report = self.measure(f"roll {name} to {to}", "roll", apply, {name}, relay=name, to=to)
+            report = self.measure(f"roll {name} to {to}{suffix}", "roll", apply, {name}, relay=name, to=to)
             if hung:
                 self.violation(report, "hung", hung)
             after = self.snapshot()
@@ -1024,12 +1033,12 @@ class Run:
 
     def run_event(self, event: dict) -> None:
         kind = event["kind"]
-        if kind == "roll":
-            self.roll(event["to"], event["relays"])
-            return
-        relay = self.relays[event["relay"]]
         for attempt in range(event["times"]):
             suffix = f" ({attempt + 1}/{event['times']})" if event["times"] > 1 else ""
+            if kind == "roll":
+                self.roll(event["to"], event["relays"], suffix)
+                continue
+            relay = self.relays[event["relay"]]
             if kind == "reopen-link":
                 link = next(x for x in self.mesh.links if x.name == event["link"])
                 self.measure(
