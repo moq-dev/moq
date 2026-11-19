@@ -2016,15 +2016,12 @@ impl<R: Request> RequestServe<R> {
 						return Poll::Ready(Ok(()));
 					}
 				}
-				RequestState::Finish { finished, stale } => {
+				RequestState::Finish { finished, .. } => {
 					// Those bytes hold the connection until acknowledged, so a reply gone stale
 					// while it waits is reset rather than left to stall the streams behind it.
 					if !*finished {
 						let Poll::Ready(flushed) = stream.writer.poll_flush(waiter) else {
-							return match stale.as_mut().is_some_and(|group| group.poll_expired(waiter)) {
-								true => Poll::Ready(Err(Error::Old)),
-								false => Poll::Pending,
-							};
+							return self.poll_stale(waiter);
 						};
 						flushed?;
 						stream.writer.finish()?;
@@ -2037,16 +2034,10 @@ impl<R: Request> RequestServe<R> {
 						ready!(self.poll_closed(waiter))?;
 					}
 					let stream = self.stream.as_mut().expect("stream present");
-					let Poll::Ready(closed) = stream.writer.poll_close(waiter) else {
-						let RequestState::Finish { stale, .. } = &mut self.state else {
-							unreachable!()
-						};
-						return match stale.as_mut().is_some_and(|group| group.poll_expired(waiter)) {
-							true => Poll::Ready(Err(Error::Old)),
-							false => Poll::Pending,
-						};
+					return match stream.writer.poll_close(waiter) {
+						Poll::Ready(closed) => Poll::Ready(closed),
+						Poll::Pending => self.poll_stale(waiter),
 					};
-					return Poll::Ready(closed);
 				}
 			}
 		}
@@ -2065,6 +2056,17 @@ impl<R: Request> RequestServe<R> {
 			self.malformed = matches!(err, Error::Decode(_));
 		}
 		Poll::Ready(res)
+	}
+
+	/// Ready with `Old` once a finishing reply's group goes stale while its bytes wait.
+	fn poll_stale(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		let RequestState::Finish { stale: Some(group), .. } = &mut self.state else {
+			return Poll::Pending;
+		};
+		match group.poll_expired(waiter) {
+			true => Poll::Ready(Err(Error::Old)),
+			false => Poll::Pending,
+		}
 	}
 
 	/// Ready once the requester closes its send direction, `Ok` for a FIN. Updates until then

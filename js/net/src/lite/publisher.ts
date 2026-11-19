@@ -1264,6 +1264,7 @@ export class Publisher {
 			// A FETCH requester leaves early by resetting its stream or losing its session, which
 			// lets go of a lookup still waiting on the answer.
 			let group: group.Consumer | undefined;
+			let givenUp: GivenUp | undefined;
 			try {
 				// The timescale is immutable, so serve exactly what TRACK_INFO advertised. Both
 				// come off the same front, so the metadata and the frames are one generation.
@@ -1295,7 +1296,7 @@ export class Publisher {
 				// The FETCH's own budget gives the group up, while a write waits on flow control and
 				// while its FIN waits for the acknowledgement, as the Rust `FetchServe` does: stale
 				// bytes must not hold the send window ahead of the streams behind them.
-				const givenUp = new GivenUp(group);
+				givenUp = new GivenUp(group);
 				try {
 					await this.#runFetchGroup(group, stream.writer, {
 						stamp: stamping(this.version, info),
@@ -1315,9 +1316,9 @@ export class Publisher {
 				}
 			} catch (err: unknown) {
 				const e = error(err);
-				console.warn(
-					`fetch error: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group} error=${reason(e)}`,
-				);
+				// Giving up a group past its budget is routine, as in Rust's `RequestServe`.
+				const log = e === givenUp?.peek() ? console.debug : console.warn;
+				log(`fetch error: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group} error=${reason(e)}`);
 				if (group) hooks.releaseGroupReader(group, e);
 				stream.abort(e);
 			}
