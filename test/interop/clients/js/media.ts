@@ -62,6 +62,7 @@ import { type Capabilities, capturePath, missing, probe, type Role } from "./src
 import {
 	ALT_AUDIO,
 	AUDIBLE_RMS,
+	audioPlays,
 	CHANGED_SAMPLE_RATE,
 	FAULTS,
 	KEYFRAME_INTERVAL_MS,
@@ -360,10 +361,9 @@ async function waitForLive(
 			}
 			lag = fixture.frameId - state.frameId;
 			first ??= lag;
-			audio =
-				state.audioContext === "running" && !state.audioStalled
-					? "playing"
-					: `${state.audioContext ?? "not built"}${state.audioStalled ? " and buffering" : ""}`;
+			audio = audioPlays(state)
+				? "playing"
+				: `${state.audioContext ?? "not built"}${state.audioStalled ? " and buffering" : ""}${state.audioTimestamp ? "" : " with nothing anchored"}`;
 			moved = frame !== undefined && state.frameId !== frame;
 			if (moved && !started) {
 				started = true;
@@ -394,15 +394,17 @@ async function waitForLive(
  *
  * A player shows its first frame as soon as it decodes, then holds that frame silent while it buffers
  * up to its sync delay, which rises past 400ms under load. A window opened on that held frame counts
- * the buffering as missing tone. Only the ring filling opens the window, never a tone, so silence
- * still fails {@link assertMedia} rather than this wait.
+ * the buffering as missing tone. A resume onto the fixture's on-demand audio first reads the epoch
+ * its encoder ended while unwatched, a declared silence rather than a stall, until the retained audio
+ * it encodes again arrives. Only the ring playing anchored audio opens the window, never a tone, so
+ * silence still fails {@link assertMedia} rather than this wait.
  */
 async function measurePlayback(player: Page, playerErrors: BrowserErrors, label: string): Promise<void> {
 	await waitForState(player, playerErrors, {
 		deadline: Date.now() + SETTLE_MS,
 		assertion: "playback starts",
 		description: `${label}: the audio buffer to fill to the player's delay and play`,
-		predicate: (state) => state.audioContext === "running" && !state.audioStalled,
+		predicate: audioPlays,
 	});
 	await (await observe(player, playerErrors, label)).grade();
 }
