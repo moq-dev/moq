@@ -93,7 +93,7 @@ test("closing the subscriber suppresses probe stream warnings", async () => {
 // Drives a Subscriber's announce stream directly: the harness plays the peer, writing
 // forged announce messages into the stream the subscriber opens. On lite-07 they are the
 // peer's Announce Stream instead, delivered in order as the session does.
-function announceHarness(version: Version, origin = 1n) {
+function announceHarness(version: Version, origin = 1n, grant?: Signal<Grant | undefined>) {
 	const routed = version === Version.DRAFT_07;
 	const reading = Promise.withResolvers<void>();
 	let inbound!: ReadableStreamDefaultController<Uint8Array>;
@@ -130,7 +130,7 @@ function announceHarness(version: Version, origin = 1n) {
 		},
 	} as unknown as WebTransport;
 
-	const subscriber = new Subscriber(quic, version, toHop(origin));
+	const subscriber = new Subscriber(quic, version, toHop(origin), undefined, undefined, undefined, grant);
 
 	const send = async (f: (w: Writer) => Promise<void>) => {
 		const written: Uint8Array[] = [];
@@ -439,6 +439,37 @@ test("a lite-07 restart replaces the instance, and the next consume subscribes f
 
 	held.close();
 	announced.close();
+	subscriber.close();
+});
+
+// The peer answers a prefix wider than our grant region by region, so a region the grant gains
+// under a prefix already asked for is sent without a new prefix: the subscriber edits nothing, and
+// a reader of the region waits for that edit's answer, which follows the region's claims.
+test("a lite-07 region granted under a wider prefix syncs at the next answer", async () => {
+	const v = Version.DRAFT_07;
+	const subscribe = (...paths: string[]): Grant => ({
+		publish: new Path.Patterns([]),
+		subscribe: new Path.Patterns(paths.map((path) => Path.Pattern.subtree(path))),
+	});
+	const grant = new Signal<Grant | undefined>(subscribe("a"));
+	const { subscriber, send, ok, settle } = announceHarness(v, 1n, grant);
+	const everything = subscriber.routes();
+	await settle();
+	await ok();
+	await send((w) => encodeAnnounceBroadcast(w, { status: "synced", prefix: 0n }, v));
+	expect(everything.synced.peek()).toBe(true);
+
+	grant.set(subscribe("a", "b"));
+	const b = subscriber.routes(Path.Pattern.subtree(Path.from("b")));
+	await settle();
+	expect(b.synced.peek()).toBe(false);
+	await send((w) => claimer(v)(w, Path.from("b/x"), { instance: Instance.random(), hops: [] }));
+	await ok();
+	expect(await b.next()).toMatchObject({ prefix: Path.from("b/x"), kind: "start" });
+	expect(b.synced.peek()).toBe(true);
+
+	b.close();
+	everything.close();
 	subscriber.close();
 });
 
