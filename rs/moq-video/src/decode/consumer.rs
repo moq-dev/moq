@@ -1066,8 +1066,9 @@ mod tests {
 
 	/// A declared end drains the decoder, so the stopped encoder's last picture
 	/// comes out ahead of the end while the publisher is still paused, rather
-	/// than when the fresh encoder's first picture pushes it through.
-	#[tokio::test]
+	/// than when the fresh encoder's first picture pushes it through. With nothing
+	/// after it, the end reads once a continuing group would be a max delay late.
+	#[tokio::test(start_paused = true)]
 	async fn an_end_drains_the_pictures_before_it() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
@@ -1136,9 +1137,7 @@ mod tests {
 		let _finished = producer.finish().unwrap();
 		read(&mut consumer).await;
 		read(&mut consumer).await;
-		// The discontinuity marker starts a microsecond before the content's end, so content
-		// resuming there still starts a later group.
-		assert_eq!(reads, ["frame 100000", "end 133332", "frame 200000", "none"]);
+		assert_eq!(reads, ["frame 100000", "end 133333", "frame 200000", "none"]);
 	}
 
 	/// Every read until the track is done, as text: a codec error is one read too.
@@ -1207,7 +1206,7 @@ mod tests {
 
 		assert_eq!(
 			read_all(&mut consumer).await,
-			["error", "frame 100000", "end 133332", "error", "frame 200000"]
+			["error", "frame 100000", "end 133333", "error", "frame 200000"]
 		);
 	}
 

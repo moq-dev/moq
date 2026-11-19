@@ -2695,6 +2695,8 @@ mod tests {
 
 	/// Groups lost past a declared end were the fresh encoder's, so the packet after them
 	/// still comes from it: its pre-skip is trimmed, leaving its media at the packet's stamp.
+	/// The end reads as one only because the publisher declared skipped every start up to past
+	/// it; a lost group that could have started at the end might have continued it.
 	#[tokio::test(start_paused = true)]
 	async fn a_loss_after_a_declared_end_trims_the_fresh_encoders_pre_skip() {
 		assert_eq!(after_loss(true, None).await[0], (1_000_000, 960 - 312));
@@ -2735,6 +2737,9 @@ mod tests {
 				if declared {
 					producer.discontinuity().unwrap();
 					encoder = Encoder::new(&config).unwrap();
+					// The publisher declares the pause skipped, so the run left where the lost
+					// groups could start lies past the end.
+					producer.track().skip_groups(20_001..990_000);
 				}
 				producer.seek(1_000_000).unwrap();
 			}
@@ -2747,7 +2752,9 @@ mod tests {
 						keyframe: true,
 					})
 					.unwrap();
-				producer.cut(None).unwrap();
+				// Each group ends where its packet does, as the encoder cuts it.
+				let end = epoch * 1_000_000 + (packet + 1) * 20_000;
+				producer.cut(Some(Timestamp::from_micros(end).unwrap())).unwrap();
 			}
 		}
 		let _finished = producer.finish().unwrap();
@@ -2796,9 +2803,8 @@ mod tests {
 	/// sample count either way, and an unoptimized Opus codec takes minutes over
 	/// the whole corpus. [`opus_states_its_own_frame_duration`] covers Opus. The
 	/// lowest common rate keeps each packet small, since only its duration counts.
-	/// With `hole`, the publisher leaves the starts between each end marker and what resumes
-	/// undeclared, so whatever lay there may have been lost: a group after the marker that never
-	/// arrived.
+	/// With `hole`, the publisher leaves the start just before what resumes undeclared, so a group
+	/// may have been lost there, past the end.
 	async fn replay(case: &crate::jitter::tests::Case, hole: bool) -> Vec<f64> {
 		use crate::jitter::tests::duration;
 
@@ -2840,17 +2846,15 @@ mod tests {
 		for (index, (&arrival, &media)) in case.arrival.iter().zip(&case.media).enumerate() {
 			// The track's timescale is microseconds, so this is also the packet group's start.
 			let micros = media as u64 * 1000;
-			// The marker goes out as the utterance stops, so it is read during the silence
-			// rather than alongside what resumes it.
-			if case.ends.contains(&index) {
+			// The utterance stops; the end is read once the packet resuming it starts later.
+			let ended = case.ends.contains(&index);
+			if ended {
 				producer.discontinuity().unwrap();
-				match consumer.read().await.unwrap() {
-					Some(Read::End { .. }) => {}
-					other => panic!("packet {index} is preceded by {other:?}, not its end"),
-				}
-				// A seek creates the group without appending it, so nothing declares the starts
-				// before it skipped.
+				// A seek creates the group without appending it, so the start just before it stays
+				// undeclared: a group lost there would begin past the end, so the end still reads.
 				if hole {
+					let previous = case.media[index - 1] as u64 * 1000;
+					producer.track().skip_groups(previous + 1..micros - 1);
 					producer.seek(micros).unwrap();
 				}
 			}
@@ -2863,8 +2867,20 @@ mod tests {
 					keyframe: true,
 				})
 				.unwrap();
-			producer.cut(None).unwrap();
+			// A group ending whole declares a pause once the next starts later, so only the packet
+			// before a listed end says where it stops; any other gap stays undeclared.
+			let end = case
+				.ends
+				.contains(&(index + 1))
+				.then(|| Timestamp::from_micros(micros + (case.frame * 1000.0) as u64).unwrap());
+			producer.cut(end).unwrap();
 
+			if ended {
+				match consumer.read().await.unwrap() {
+					Some(Read::End { .. }) => {}
+					other => panic!("packet {index} is preceded by {other:?}, not its end"),
+				}
+			}
 			next_frame(&mut consumer)
 				.await
 				.unwrap()
@@ -2879,8 +2895,8 @@ mod tests {
 	/// container hands a packet over, media from its timestamp, and the frame term
 	/// from what the codec decoded. `reorder` and `backlog` are left to the
 	/// estimator's own test, since the container refuses a timestamp that runs
-	/// backwards. `silence` publishes a discontinuity marker ahead of each frame its
-	/// `ends` lists, so the consumer has to find the declared end on its own.
+	/// backwards. `silence` ends a group below the next ahead of each frame its `ends`
+	/// lists, so the consumer has to find the declared end on its own.
 	#[tokio::test]
 	async fn the_decode_path_conforms_to_the_corpus() {
 		for name in [
@@ -3428,7 +3444,8 @@ mod tests {
 					keyframe: true,
 				})
 				.unwrap();
-			producer.cut(None).unwrap();
+			let end = Timestamp::from_scale((packet + 1) * frame_size as u64, 48_000).unwrap();
+			producer.cut(Some(end)).unwrap();
 		};
 		write(
 			&mut producer,
@@ -3441,9 +3458,11 @@ mod tests {
 			crate::single(encoder.encode_all(&pcm).unwrap()).payload,
 		);
 		producer.discontinuity().unwrap();
+		// Resumed a packet later, as a re-anchored clock leaves the pause in the timeline: one
+		// starting where the media stopped would continue it.
 		write(
 			&mut producer,
-			2,
+			3,
 			crate::single(encoder.encode_all(&pcm).unwrap()).payload,
 		);
 		let _finished = producer.finish().unwrap();
