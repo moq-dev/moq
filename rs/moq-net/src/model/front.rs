@@ -45,9 +45,8 @@ pub(super) struct Candidate {
 	/// a carried instance says the answer is the same stream. A minted one names the
 	/// announcement, and the route could answer with whatever stream now wins upstream.
 	pub carried: bool,
-	/// Whether the route is a lite-07 claim. A session that closes leaves its claims in
-	/// the table, unavailable, until another session serves them or the claim's debounce
-	/// runs out, and a request through one waits for either.
+	/// Whether the route is a lite-07 claim, which the route layer keeps in the table
+	/// through its debounce once its session closes; see [`Front::waiting`].
 	pub claim: bool,
 }
 
@@ -244,6 +243,8 @@ pub(super) struct Front {
 	upstream: Option<Candidate>,
 	/// Routes excluded from selection: their source ended while still advertised.
 	excluded: HashSet<u64>,
+	/// The excluded routes that are claims, while the table still shows them.
+	orphans: HashSet<u64>,
 	/// Whether the parked requesters were resolved (the first source attached).
 	resolved: bool,
 	tracks: BTreeMap<Arc<str>, Track>,
@@ -272,6 +273,7 @@ impl Front {
 			serving_closing: false,
 			upstream: None,
 			excluded: HashSet::new(),
+			orphans: HashSet::new(),
 			resolved: false,
 			tracks: BTreeMap::new(),
 			parked: BTreeSet::new(),
@@ -292,6 +294,16 @@ impl Front {
 	/// Forget excluded routes that left the table (a reconnect is a fresh entry).
 	pub(super) fn retain_routes(&mut self, standing: impl Fn(u64) -> bool) {
 		self.excluded.retain(|route| standing(*route));
+		self.orphans.retain(|route| self.excluded.contains(route));
+	}
+
+	/// Whether a selection that finds no route leaves the front waiting rather than ending.
+	/// A claim whose source closed with its session stays in the table, unavailable, until
+	/// another session serves it, a detour that may be learned only a round trip later and
+	/// always arrives as another route, or until its debounce runs out. Its own route is
+	/// never asked again: it would re-request the broadcast that just ended.
+	pub(super) fn waiting(&self) -> bool {
+		!self.orphans.is_empty()
 	}
 
 	/// The route the attached source came through, if any.
@@ -443,6 +455,8 @@ impl Front {
 				self.upstream = Some(candidate);
 				actions.push(Action::Request { route: candidate.route });
 			}
+			// Nothing serves the path yet, but a claim it lost may still come back on a detour.
+			None if self.waiting() => self.upstream = None,
 			// Nothing serves the path: the front is over, even with a live source. Its
 			// route left the table and nothing replaced it, so it serves nobody new;
 			// a later announcement gets a fresh front.
@@ -528,10 +542,10 @@ impl Front {
 		}
 		// A standing route can outlive the source it produced. Asking it again
 		// would re-request the broadcast that just ended; another route may still
-		// resume it. A claim is asked again: the request waits until another session
-		// serves the claim, which the front then resumes on, or the claim goes.
-		if !candidate.claim {
-			self.excluded.insert(candidate.route);
+		// resume it.
+		self.excluded.insert(candidate.route);
+		if candidate.claim {
+			self.orphans.insert(candidate.route);
 		}
 		self.serving = None;
 		self.serving_closing = false;
@@ -1258,8 +1272,8 @@ mod tests {
 		}
 	}
 
-	/// A front whose claim's session closed under `video` before its copy failed, and that
-	/// asks the claim again, which waits until another session serves it or the claim goes.
+	/// A front whose claim's session closed under `video` before its copy failed, with no
+	/// other route yet: it waits on the claim the table still shows, never asking it again.
 	fn orphaned() -> Front {
 		let mut front = serving(claim(1), 100);
 		assert_actions(
@@ -1272,13 +1286,14 @@ mod tests {
 				Action::Reselect,
 			],
 		);
-		assert!(front.excluded_routes().is_empty());
+		assert_eq!(front.excluded_routes(), &HashSet::from([1]));
+		assert!(front.waiting());
 		assert_actions(
 			front.step(Event::Selected {
-				best: Some(claim(1)),
+				best: None,
 				serving_closing: false,
 			}),
-			&[Action::Request { route: 1 }],
+			&[],
 		);
 		assert_actions(
 			front.step(Event::TrackEnded {
@@ -1289,17 +1304,6 @@ mod tests {
 				delivered: true,
 			}),
 			&[],
-		);
-		// The claim went, whether a session took it over or it ran out its debounce.
-		assert_actions(
-			front.step(Event::Resolved {
-				route: 1,
-				result: Err(Refusal {
-					err: Error::Unroutable,
-					standing: false,
-				}),
-			}),
-			&[Action::Reselect],
 		);
 		front
 	}
@@ -1376,6 +1380,9 @@ mod tests {
 	#[test]
 	fn a_closed_claim_nothing_resumes_ends_with_the_sessions_error() {
 		let mut front = orphaned();
+		// The claim's debounce ran out: it left the table.
+		front.retain_routes(|_| false);
+		assert!(!front.waiting());
 		assert_actions(
 			front.step(Event::Selected {
 				best: None,
