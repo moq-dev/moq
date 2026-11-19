@@ -1114,13 +1114,17 @@ impl Connection {
 	/// At `timeout` the session is closed with [`moq_net::Error::GoawayTimeout`] on
 	/// this side's own timer, so a peer stalling the GOAWAY's write cannot hold it
 	/// open. A predecessor still finishing a handover closes as in
-	/// [`close`](Self::close), and tokens stay presented until both end. Returns `Ok`
+	/// [`close`](Self::close), unless no replacement has connected yet and it is the
+	/// session that serves, and tokens stay presented until both end. Returns `Ok`
 	/// when nothing was live or the peer left before `timeout`, whatever its close
 	/// code, and [`moq_net::Error::GoawayTimeout`] when `timeout` closed the session.
 	pub async fn drain(self, timeout: Duration) -> crate::Result<()> {
 		let running = self.task.running.upgrade();
 		let deadline = kio::clock::now().saturating_add(timeout);
 		let (session, predecessor) = self.stop();
+		// A predecessor that still serves, its replacement not yet connected, drains as the
+		// live session rather than closing on its handover deadline.
+		let predecessor = predecessor.filter(|(predecessor, _)| session.as_ref() != Some(predecessor));
 		let session = async move {
 			let Some(session) = session else {
 				return Ok(());
@@ -1147,7 +1151,8 @@ impl Connection {
 	}
 
 	/// Refuse redials for every clone and stop the loop, returning the live session
-	/// and any predecessor still finishing a handover, with its deadline.
+	/// and any predecessor still finishing a handover, with its deadline. Until its
+	/// replacement connects, the predecessor is the live session itself.
 	fn stop(
 		&self,
 	) -> (
@@ -1160,11 +1165,11 @@ impl Connection {
 			*closed = Some(moq_net::Error::Cancel);
 			let state = self.state.read();
 			let session = state.lifecycle.live().map(|live| live.session.clone());
-			let predecessor = state.lifecycle.predecessor();
-			(
-				session,
-				predecessor.map(|predecessor| (predecessor.session.clone(), predecessor.deadline)),
-			)
+			let predecessor = state
+				.lifecycle
+				.predecessor()
+				.map(|predecessor| (predecessor.session.clone(), predecessor.deadline));
+			(session, predecessor)
 		};
 		self.task.handle.abort();
 		taken
@@ -3011,6 +3016,64 @@ mod tests {
 			.unwrap()
 			.unwrap();
 		assert_eq!(g1.start, 1, "the drained session stopped delivering");
+	}
+
+	/// A drain while a GOAWAY handover still waits for its replacement sends this side's
+	/// GOAWAY on the session that serves, which is also the handover's predecessor, and
+	/// holds it to the timeout instead of closing it as the predecessor.
+	#[tokio::test]
+	async fn a_drain_mid_handover_holds_the_serving_session() {
+		kio::clock::host_time(); // real TCP sockets
+		const WAIT: Duration = Duration::from_secs(10);
+		const DRAIN: Duration = Duration::from_secs(3);
+
+		let origin = crate::origin::spawn();
+		let (addr, mut accepted, _task) = serve(origin).await;
+
+		// Unique to this test: the table is process-wide.
+		const HOST: &str = "drain-mid-handover.test";
+		crate::resolve::hosts::point(HOST, [addr]);
+
+		let mut config = crate::connect::Config::default();
+		config.goaway.handover = Some((WAIT * 3).into());
+		config.backoff.initial = Some((FAST).into());
+		config.backoff.healthy = Some((FAST).into());
+		let connection = config
+			.init(Default::default())
+			.unwrap()
+			.connect(url(&format!("tcp://{HOST}:1/")));
+		let monitor = connection.monitor();
+		let session = kio::clock::timeout(WAIT, accepted.recv()).await.unwrap().unwrap();
+		outlast_fast().await;
+
+		// The replacement can never connect, so the drained session keeps serving.
+		let dead = dead().await;
+		crate::resolve::hosts::point(HOST, dead.socket_addrs(|| None).unwrap());
+		session.goaway(moq_net::goaway::Goaway::new()).unwrap();
+		let mut state = monitor.state();
+		while !matches!(state.phase, Phase::Migrating { .. }) {
+			state = kio::clock::timeout(WAIT, monitor.state_changed(state.revision))
+				.await
+				.unwrap()
+				.unwrap();
+		}
+
+		let started = kio::clock::now();
+		let drained = tokio::spawn(connection.drain(DRAIN));
+		let draining = session.draining();
+		kio::clock::timeout(WAIT, kio::wait(|waiter| draining.poll(waiter)))
+			.await
+			.expect("the peer never heard the GOAWAY")
+			.expect("the session closed without one");
+		assert!(
+			kio::clock::timeout(DRAIN / 2, session.closed()).await.is_err(),
+			"the serving session closed as its own predecessor"
+		);
+		assert!(
+			kio::clock::timeout(WAIT, drained).await.unwrap().unwrap().is_err(),
+			"the drain timeout did not close the session"
+		);
+		assert!(started.elapsed() >= DRAIN, "closed after {:?}", started.elapsed());
 	}
 
 	/// Under [`Restart::Handoff`] an empty-URI GOAWAY that drains a session before it is
