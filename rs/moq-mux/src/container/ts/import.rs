@@ -9760,6 +9760,42 @@ pub(super) mod test {
 		damaged_video_recovers("pes").await;
 	}
 
+	/// PES boundaries need not fall on NALs, so the first PES after a continuity break can open
+	/// inside a NAL that began in the lost one. Its bytes up to the next start code are dropped,
+	/// not decoded, and the stream recovers at its next keyframe.
+	#[tokio::test(start_paused = true)]
+	async fn a_pes_opening_mid_nal_after_a_break_is_dropped() {
+		let mut mux = Mux {
+			out: synth_pmt(&[(StreamType::H264, VIDEO)], false),
+			..Default::default()
+		};
+		mux.gop(VIDEO, 90_000);
+		// The PES holding the NAL's start is lost, and the next carries only its tail.
+		mux.cc(VIDEO);
+		let cc = mux.cc(VIDEO);
+		mux.out.extend(video_pes(
+			VIDEO,
+			cc,
+			90_000 + 5 * FRAME,
+			None,
+			&[0x9a, 0xbc, 0xde, 0xf0],
+		));
+		mux.gop(VIDEO, 90_000 + 8 * FRAME);
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		import
+			.decode(&mux.out)
+			.expect("a NAL's lost start is loss, not a decode error");
+		import.finish_in_place().unwrap();
+		let name = catalog.snapshot().video.renditions.keys().next().unwrap().clone();
+		let frames = read_track(&consumer, &name, crate::container::Kind::Video).await;
+		// Nothing proved the first GOP's last picture whole before the break, so it goes too.
+		assert_eq!(frames.len(), 7, "both GOPs, around the break");
+	}
+
 	/// A NAL that does not parse ends the import with the cause, wherever it sits in its
 	/// access unit, after the pictures ahead of it published.
 	#[tokio::test(start_paused = true)]
@@ -10034,19 +10070,17 @@ pub(super) mod test {
 			.position(|bytes| bytes[..4] == [0, 0, 0, 1] && bytes[4] & 0x1f == 5)
 			.unwrap();
 		au[nal + 4] |= 0x80;
-		for au in [au, vec![0], vec![0, 0], vec![0, 0, 0]] {
-			let mut broadcast = moq_net::broadcast::Info::new().produce();
-			let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
-			let mut import = super::Import::new(broadcast, catalog.reserve());
-			let mut packet = video_pes(VIDEO, 0, 90_000, None, &au);
-			let start = 5 + usize::from(packet[4]);
-			packet[start + 4..start + 6].fill(0);
-			let mut data = synth_pmt(&[(StreamType::H264, VIDEO)], false);
-			data.extend(packet);
-			import.decode(&data).expect("the PES has not ended yet");
-			import.finish_in_place().expect_err("the final AU does not decode");
-			assert!(catalog.snapshot().video.renditions.is_empty());
-		}
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		let mut packet = video_pes(VIDEO, 0, 90_000, None, &au);
+		let start = 5 + usize::from(packet[4]);
+		packet[start + 4..start + 6].fill(0);
+		let mut data = synth_pmt(&[(StreamType::H264, VIDEO)], false);
+		data.extend(packet);
+		import.decode(&data).expect("the PES has not ended yet");
+		import.finish_in_place().expect_err("the final AU does not decode");
+		assert!(catalog.snapshot().video.renditions.is_empty());
 	}
 
 	/// An invalid trailing Opus control header ends the import before any packet of its PES

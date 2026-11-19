@@ -105,6 +105,10 @@ pub(super) struct Assembly {
 	ending: bool,
 	parameters: bool,
 	retained: Option<Retained>,
+	/// No start code has been seen since a join or a break. ISO 13818-1 doesn't align PES to
+	/// NALs, so the first PES after either can open mid-NAL; its bytes before the first start
+	/// code belong to a NAL that began in a PES this stream never got.
+	acquiring: bool,
 }
 
 impl Assembly {
@@ -121,6 +125,7 @@ impl Assembly {
 			ending: false,
 			parameters: false,
 			retained: None,
+			acquiring: true,
 		}
 	}
 
@@ -170,6 +175,20 @@ impl Assembly {
 		loop {
 			if self.tail.is_empty() {
 				return if eof { self.emit() } else { Ok(None) };
+			}
+			if self.acquiring {
+				match find_start_code(&self.tail) {
+					Some((at, _)) => {
+						self.discard(at)?;
+						self.acquiring = false;
+					}
+					None => {
+						// Keep only what could begin a start code the next PES completes.
+						let keep = if eof { 0 } else { 3 };
+						self.discard(self.tail.len().saturating_sub(keep))?;
+						return Ok(None);
+					}
+				}
 			}
 			let start = after_start_code(&self.tail).map_err(crate::Error::from)?;
 			let Some(start) = start else {
@@ -257,16 +276,7 @@ impl Assembly {
 			};
 			self.current.extend_from_slice(&START_CODE);
 			self.current.extend_from_slice(&nal);
-			let mut remaining = consumed;
-			while remaining > 0 {
-				let span = self.spans.front_mut().expect("consumed bytes have an owner");
-				let take = remaining.min(span.len);
-				span.len -= take;
-				remaining -= take;
-				if span.len == 0 {
-					self.spans.pop_front();
-				}
-			}
+			self.spend(consumed);
 			self.account()?;
 			if self.ending {
 				if self.has_slice {
@@ -279,6 +289,26 @@ impl Assembly {
 				self.account()?;
 			}
 		}
+	}
+
+	/// Release the ownership of `len` bytes taken from the front of the tail.
+	fn spend(&mut self, mut len: usize) {
+		while len > 0 {
+			let span = self.spans.front_mut().expect("consumed bytes have an owner");
+			let take = len.min(span.len);
+			span.len -= take;
+			len -= take;
+			if span.len == 0 {
+				self.spans.pop_front();
+			}
+		}
+	}
+
+	/// Drop `len` bytes from the front of the tail, with their timestamps and charges.
+	fn discard(&mut self, len: usize) -> Result<()> {
+		self.tail.advance(len);
+		self.spend(len);
+		self.account()
 	}
 
 	fn emit(&mut self) -> Result<Option<Unit>> {
@@ -319,6 +349,7 @@ impl Assembly {
 		self.ending = false;
 		self.parameters = false;
 		self.retained = None;
+		self.acquiring = true;
 	}
 }
 
@@ -511,6 +542,43 @@ mod tests {
 		assembly.reset();
 		assert_eq!(staging.bytes.load(Ordering::Relaxed), 0);
 		assert_eq!(staging.units.load(Ordering::Relaxed), 0);
+	}
+
+	#[test]
+	fn a_pes_opening_mid_nal_is_acquired_at_its_first_start_code() {
+		// The orphan bytes end in a partial start code the next PES completes, at a join and
+		// after a break alike.
+		for reset in [false, true] {
+			let staging = Arc::default();
+			let mut assembly = Assembly::new(Codec::Avc);
+			if reset {
+				assembly
+					.push(pending(&staging, &[0, 0, 1, 0x65, 0x80, 0x11], Some(90_000)))
+					.unwrap();
+				assert!(assembly.next(false).unwrap().is_none());
+				assembly.reset();
+			}
+			assembly
+				.push(pending(&staging, &[0x9a, 0xbc, 0xde, 0xf0, 0, 0, 0], Some(180_000)))
+				.unwrap();
+			assert!(assembly.next(false).unwrap().is_none());
+			assert_eq!(
+				staging.bytes.load(Ordering::Relaxed),
+				3,
+				"only a possible start code is kept"
+			);
+			assembly.push(pending(&staging, &[1, 0x65, 0x80, 0x22], None)).unwrap();
+			let unit = assembly
+				.next(true)
+				.unwrap()
+				.expect("the picture after the orphan bytes");
+			assert_eq!(unit.data.as_ref(), [START_CODE.as_ref(), &[0x65, 0x80, 0x22]].concat());
+			assert_eq!(unit.pts.unwrap().as_secs().unwrap(), 2, "its PES's timestamp");
+			drop(unit);
+			assembly.reset();
+			assert_eq!(staging.bytes.load(Ordering::Relaxed), 0);
+			assert_eq!(staging.units.load(Ordering::Relaxed), 0);
+		}
 	}
 
 	#[test]
