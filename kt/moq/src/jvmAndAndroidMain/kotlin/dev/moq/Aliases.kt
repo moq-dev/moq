@@ -105,8 +105,7 @@ typealias Following = uniffi.moq.MoqFollowing
 typealias Announce = uniffi.moq.MoqAnnounce
 
 /**
- * What an [AnnounceConsumer] yields: [AnnounceEventPresent], [AnnounceEventUnavailable],
- * [AnnounceEventAvailable], [AnnounceEventAbsent], or [AnnounceEventOffline].
+ * What an [AnnounceConsumer] yields: [AnnounceEventPresent] or [AnnounceEventAbsent].
  *
  * Another publisher instance taking a path over keeps it present: hold a [Following] to see the
  * broadcast change.
@@ -119,22 +118,10 @@ typealias AnnounceEvent = uniffi.moq.MoqAnnounceEvent
 typealias AnnounceEventPresent = uniffi.moq.MoqAnnounceEvent.Present
 
 /**
- * The present path lost every usable path to its origin but may recover one: it stays present while
- * requests for it may fail.
+ * No route covers the path any more, whether its origin withdrew it or this side let go of it;
+ * carries its last route.
  */
-typealias AnnounceEventUnavailable = uniffi.moq.MoqAnnounceEvent.Unavailable
-
-/** The present path recovered a usable path: request it again. */
-typealias AnnounceEventAvailable = uniffi.moq.MoqAnnounceEvent.Available
-
-/** The origin withdrew the path; carries its last route. */
 typealias AnnounceEventAbsent = uniffi.moq.MoqAnnounceEvent.Absent
-
-/**
- * This side let go of the path, which its origin may still serve: the session it arrived on closed,
- * or the network lost every path to it. Carries its last route.
- */
-typealias AnnounceEventOffline = uniffi.moq.MoqAnnounceEvent.Offline
 
 // Broadcast / track / group producers and consumers.
 /** The write side of a broadcast: publish tracks into it. */

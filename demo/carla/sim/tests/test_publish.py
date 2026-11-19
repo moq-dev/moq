@@ -228,9 +228,6 @@ class Announcements(Scripted):
     async def absent(self, driver: str) -> None:
         await self.send(moq.AnnounceEventAbsent(SimpleNamespace(captures=[driver])))
 
-    async def offline(self, driver: str) -> None:
-        await self.send(moq.AnnounceEventOffline(SimpleNamespace(captures=[driver])))
-
 
 class Run:
     """One driver run's broadcast: its `control` track hands out what `send` queues."""
@@ -359,13 +356,13 @@ def test_a_driver_whose_broadcast_goes_absent_loses_the_lease() -> None:
     asyncio.run(watching(scenario))
 
 
-def test_a_driver_this_side_lets_go_of_loses_the_lease() -> None:
+def test_a_driver_that_returns_is_followed_afresh() -> None:
     async def scenario(relay: Relay, drivers, commands: asyncio.Queue, gate: Drive) -> None:
         await relay.announcements.present("abc")
         await relay.following("abc").run(DRIVE)
         await next_command(commands, gate)
 
-        await relay.announcements.offline("abc")
+        await relay.announcements.absent("abc")
         assert (await next_command(commands, gate)).kind == "driver_left"
         assert gate.driver is None
 

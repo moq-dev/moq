@@ -27,8 +27,8 @@ internal constructor(
         session.publish().route(path, options)
 
     /**
-     * List the paths matching [config] as each becomes present, absent, or offline, or changes
-     * availability; prefixes stay relative to the origin. Collect `announced(config).updates()` for
+     * List the paths matching [config] as each becomes present or absent; prefixes stay
+     * relative to the origin. Collect `announced(config).updates()` for
      * a [Flow] of [AnnounceEvent] that cancels the handle when collection ends. A new publisher
      * instance keeps its path present, so use [follow] to see it.
      */

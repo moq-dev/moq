@@ -25,10 +25,6 @@ class AnnounceEventAbsent(AnnounceEvent):
     pass
 
 
-class AnnounceEventOffline(AnnounceEvent):
-    pass
-
-
 class SnapshotProducer:
     """Records every published value; demand comes from the wrapped track."""
 
@@ -53,7 +49,6 @@ moq.Compression = SimpleNamespace(deflate=lambda: "deflate")
 moq.is_shutdown = lambda err: False
 moq.AnnounceEventPresent = AnnounceEventPresent
 moq.AnnounceEventAbsent = AnnounceEventAbsent
-moq.AnnounceEventOffline = AnnounceEventOffline
 moq.Timestamp = lambda value, scale: SimpleNamespace(value=value, scale=scale)
 moq.TrackInfo = lambda **kwargs: SimpleNamespace(**kwargs)
 
