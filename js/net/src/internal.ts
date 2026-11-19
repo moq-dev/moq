@@ -33,7 +33,7 @@ import type {
 } from "./track.ts";
 import { max, min } from "./util/key.ts";
 import * as Varint from "./varint.ts";
-import type { Resolved, Window } from "./window.ts";
+import type { Holdings, Resolved, Window } from "./window.ts";
 import type { Advertised, Advertisements } from "./wire.ts";
 
 /** A null {@link Delay.max} in milliseconds, which the model holds as the largest value every peer can read. */
@@ -703,6 +703,8 @@ export const hooks: {
 	subscriberEnd: (subscriber: Subscriber) => Position | undefined;
 	/** The error that end carries, if the track does not end cleanly. Assigned by `track.ts`. */
 	subscriberEndError: (subscriber: Subscriber) => Error | undefined;
+	/** What this subscriber resolves its ranges against, for a test. Assigned by `track.ts`. */
+	subscriberHoldings: (subscriber: Subscriber) => Holdings;
 	/**
 	 * How many keys just below `key` the publisher declared it never produced: the skip run
 	 * ending at `key`, which a moq-transport Prior Group ID Gap names. Mirrors the Rust
@@ -872,8 +874,11 @@ export const hooks: {
 	 * subscriber's own record. Mirrors the Rust crate-private `track::Subscriber::record_mut`.
 	 */
 	wire: (subscriber: Subscriber) => WireRecord;
-	/** Whether this subscriber's budget gives up on `key`, judged by its successor; see {@link expireGroup}. */
-	staleAt: (subscriber: Subscriber, key: bigint) => Expiry;
+	/**
+	 * Whether this subscriber's budget, or `budget` in milliseconds when given, gives up on `key`,
+	 * judged by its successor; see {@link expireGroup}.
+	 */
+	staleAt: (subscriber: Subscriber, key: bigint, budget?: number) => Expiry;
 	/** A group the subscriber's track still caches, as a fresh read handle. */
 	cachedGroup: (subscriber: Subscriber, key: bigint, from?: number) => GroupConsumer | undefined;
 	/**
@@ -1009,6 +1014,8 @@ export const hooks: {
 	arriveGroup: (group: GroupConsumer, at: Instant) => void;
 	/** Keep applying a subscription's drift policy after it hands a group out. */
 	expireGroup: (group: GroupConsumer, expiry: Expiry) => void;
+	/** The drift policy a group carries, if any; see {@link expireGroup}. */
+	groupExpiry: (group: GroupConsumer) => Expiry | undefined;
 	/** The failure that ends a group's reader, as its `closed` would settle, without building that handle. */
 	groupFailed: (group: GroupConsumer) => Error | undefined;
 	/**
@@ -1129,6 +1136,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	subscriberEndError: () => {
+		throw new Error("track.ts not loaded");
+	},
+	subscriberHoldings: () => {
 		throw new Error("track.ts not loaded");
 	},
 	skippedBelow: () => {
@@ -1414,6 +1424,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	expireGroup: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupExpiry: () => {
 		throw new Error("group.ts not loaded");
 	},
 	groupFailed: () => {

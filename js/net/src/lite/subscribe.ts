@@ -480,11 +480,6 @@ export class LiveRanges {
 		return [...this.#live];
 	}
 
-	/** Whether the publisher reports where each range starts, which lite-07 does by Range ID. */
-	get reportsStarts(): boolean {
-		return hasRanges(this.#version);
-	}
-
 	/**
 	 * Apply a received lite-07 `update`'s edit, returning every live range by Range ID: the same
 	 * array as last time while nothing changed. Throws {@link ProtocolViolation} for an edit it

@@ -6162,12 +6162,15 @@ impl TrackRun {
 }
 
 /// A bounded lite-07 subscription's run loop still waiting on SUBSCRIBE_START, for the
-/// `publisher` bench: a wake that finds nothing new ends in the coverage check.
+/// `publisher` bench: a wake that finds nothing new ends in the coverage check, and a drop
+/// gives up one more of its ranges.
 #[cfg(any(test, feature = "fuzz"))]
 pub struct CoverageBench {
 	run: TrackRun,
 	writer: Writer<crate::transport::boxed::SendStream, Version>,
 	track: track::Producer,
+	/// The drops not given up yet, the next one last.
+	drops: Vec<(Range<u64>, StreamError)>,
 	_peer: crate::transport::memory::Session,
 }
 
@@ -6175,15 +6178,24 @@ pub struct CoverageBench {
 impl CoverageBench {
 	/// Subscribe to `ranges` one-group ranges, then give up the first `skipped` of them, one
 	/// wake each. A range is left open, so the start never resolves and nothing is covered.
-	///
-	/// Each range starts at a time no group held places, so it may reach back to the group
-	/// before it: giving a range up gives that group up too.
 	pub fn new(ranges: u64, skipped: u64) -> Self {
 		assert!(skipped < ranges, "a range must stay open");
+		let mut this = Self::spread(ranges, skipped);
+		this.give_up(skipped);
+		this.check(skipped);
+		this
+	}
+
+	/// Subscribe to `ranges` one-group ranges, ready to give up the first `drops` of them
+	/// with [`Self::give_up`].
+	///
+	/// Each range starts at a time no group held places, so it may reach back to the group
+	/// before it: giving a range up gives that group up too, which starts the range.
+	pub fn spread(ranges: u64, drops: u64) -> Self {
 		// Every other group, so no two ranges merge into one run.
 		let wire = (0..ranges).map(|range| 2 * range..2 * range + 1);
 		// Alternating errors keep adjacent drops separate entries in the skipped record.
-		let drops = (0..skipped)
+		let drops = (0..drops.min(ranges))
 			.map(|range| {
 				let err = match range % 2 {
 					0 => StreamError::NotFound,
@@ -6193,6 +6205,15 @@ impl CoverageBench {
 			})
 			.collect();
 		Self::build(wire, drops)
+	}
+
+	/// Give up the next `count` drops, each followed by every wake it causes.
+	pub fn give_up(&mut self, count: u64) {
+		for _ in 0..count {
+			let (groups, err) = self.drops.pop().expect("a drop left to give up");
+			self.track.drop_groups(groups, err);
+			while self.step().is_ready() {}
+		}
 	}
 
 	/// Subscribe to one range of `skipped + 1` groups, then give up all but the last, one
@@ -6207,7 +6228,10 @@ impl CoverageBench {
 				(group..group + 1, err)
 			})
 			.collect();
-		Self::build(std::iter::once(0..skipped + 1), drops)
+		let mut this = Self::build(std::iter::once(0..skipped + 1), drops);
+		this.give_up(skipped);
+		this.check(skipped);
+		this
 	}
 
 	fn build(wire: impl Iterator<Item = Range<u64>>, drops: Vec<(Range<u64>, StreamError)>) -> Self {
@@ -6248,24 +6272,27 @@ impl CoverageBench {
 			outcomes: Default::default(),
 			object_records: false,
 		};
+		let mut drops = drops;
+		drops.reverse();
 		let mut this = Self {
 			run: TrackRun::new(ctx, subscriber, bounds, 0, steer),
 			writer: Writer::new(stream, version),
 			track,
+			drops,
 			_peer: peer,
 		};
-		let skipped = drops.len();
-		for (groups, err) in drops {
-			this.track.drop_groups(groups, err);
-			while this.step().is_ready() {}
-		}
-		assert!(this.run.start.resolved().is_none(), "no group resolves a start");
+		while this.step().is_ready() {}
+		this
+	}
+
+	/// Each of the `skipped` drops is held as its own entry, and no start resolved.
+	fn check(&self, skipped: u64) {
+		assert!(self.run.start.resolved().is_none(), "no group resolves a start");
 		assert_eq!(
-			this.run.start.skipped().expect("unresolved").iter().count(),
+			self.run.start.skipped().expect("unresolved").iter().count() as u64,
 			skipped,
 			"each drop is its own entry"
 		);
-		this
 	}
 
 	/// One wake with nothing new to serve.

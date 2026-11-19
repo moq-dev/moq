@@ -108,7 +108,7 @@ export interface Quantum {
  * raised-cosine level, with pauses of 100 to 400 ms between some. The floor stays above the harness's
  * -60 dBFS silence classifier, and no sample is exactly zero, which the output tap reads as missing.
  */
-export class Speech {
+class Speech {
 	readonly #rate: number;
 	readonly #origin: number;
 	#samples = new Float32Array(0);

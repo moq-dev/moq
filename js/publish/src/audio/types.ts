@@ -33,7 +33,7 @@ export interface SourceConfig {
  * A stream of samples from something that isn't a capture device, e.g. a demuxed file.
  *
  * Samples are delivered in presentation order and consumed by the encoder, which closes each one.
- * Stamp their timestamps against `@moq/clock`'s `now()` in microseconds, the same epoch capture uses, so audio
+ * Stamp their timestamps with `MediaClock.now()` in microseconds, the clock capture uses, so audio
  * and video stay in sync.
  */
 export interface SampleSource {

@@ -33,12 +33,12 @@ Its proof is
 `rs/moq-net/verify/route-algebra/`, and the quests written against the old
 wire were retargeted or deleted.
 [moq-dev/moq#9111](https://github.com/moq-dev/moq/pull/9111) ran the cases no
-test covered on real sessions; of the two flaws it found, a route moving
-behind one next hop no longer resends a group, since a lite-07 range may
-start partway through one. The lite-07 cut still waits on this epic's
-children, the other flaw,
-[a reader resuming on a detour learned after its session closed](/quest/m2/multicast/detour-resume.md),
-and two flaws the mesh replay found,
+test covered on real sessions. It found two flaws, both now fixed:
+[moq-dev/moq#9154](https://github.com/moq-dev/moq/pull/9154) lets a front ride
+through a lost claim's debounce, so a reader resumes on a detour learned after
+its session closed, and a route moving behind one next hop no longer resends a
+group, since a lite-07 range may start partway through one. The lite-07 cut
+still waits on this epic's children, the two flaws the mesh replay found,
 [feeding an old relay's subscription mid-roll](/quest/m2/multicast/roll-echo-stall.md)
 and [a reader starving after a lite-07 link reopens](/quest/m2/multicast/reopen-starve.md);
 and on

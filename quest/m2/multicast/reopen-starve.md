@@ -58,4 +58,3 @@ Not a wire change.
 ## Related
 
 - [roll-echo-stall](/quest/m2/multicast/roll-echo-stall.md) - the mid-roll starvation, through a lite-06 neighbour
-- [detour-resume](/quest/m2/multicast/detour-resume.md) - a front that ends, rather than waits, when its session closes before the detour arrives

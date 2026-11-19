@@ -65,6 +65,7 @@ nom-181b0d20215bb231 = { package = "nom", version = "8" }
 num-bigint = { version = "0.4" }
 num-complex = { version = "0.4" }
 num-integer = { version = "0.1", features = ["i128"] }
+num-rational = { version = "0.4", default-features = false, features = ["num-bigint-std", "std"] }
 num-traits = { version = "0.2", features = ["i128"] }
 object_store = { version = "0.14", default-features = false, features = ["aws-base", "azure-base", "fs", "gcp-base", "reqwest"] }
 once_cell = { version = "1" }
@@ -153,6 +154,7 @@ nom-181b0d20215bb231 = { package = "nom", version = "8" }
 num-bigint = { version = "0.4" }
 num-complex = { version = "0.4" }
 num-integer = { version = "0.1", features = ["i128"] }
+num-rational = { version = "0.4", default-features = false, features = ["num-bigint-std", "std"] }
 num-traits = { version = "0.2", features = ["i128"] }
 object_store = { version = "0.14", default-features = false, features = ["aws-base", "azure-base", "fs", "gcp-base", "reqwest"] }
 once_cell = { version = "1" }
