@@ -277,14 +277,20 @@ class EventTest(unittest.TestCase):
         replay.Run.run_event(run, {"kind": "roll", "to": "new", "relays": ["a"], "times": 2})
         self.assertEqual(rolls, [("new", " (1/2)"), ("new", " (2/2)")])
 
-    def test_only_an_unmarked_mesh_start_needs_every_route(self):
+    def test_the_start_needs_every_route_unless_an_applied_mark_may_hide_one(self):
         from types import SimpleNamespace
 
-        plain = SimpleNamespace(mesh=SimpleNamespace(links=[replay.Link("a", "b", None, False, {})]))
-        marked = SimpleNamespace(mesh=SimpleNamespace(links=[replay.Link("a", "b", None, True, {})]))
-        self.assertTrue(replay.Run.baseline(plain, "start"))
-        self.assertFalse(replay.Run.baseline(plain, "kill"))
-        self.assertFalse(replay.Run.baseline(marked, "start"))
+        def run(upstream, build):
+            relays = {"a": SimpleNamespace(build=replay.Build(build, "relay", []))}
+            return SimpleNamespace(
+                mesh=SimpleNamespace(links=[replay.Link("a", "b", None, upstream, {})]), relays=relays
+            )
+
+        self.assertTrue(replay.Run.baseline(run(False, "new"), "start"))
+        self.assertFalse(replay.Run.baseline(run(False, "new"), "kill"))
+        self.assertFalse(replay.Run.baseline(run(True, "new"), "start"))
+        # The old build is written no mark, so nothing may hide its routes.
+        self.assertTrue(replay.Run.baseline(run(True, "old"), "start"))
 
 
 if __name__ == "__main__":

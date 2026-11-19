@@ -808,9 +808,11 @@ class Run:
         return report
 
     def baseline(self, kind: str) -> bool:
-        """Whether every reader must have a route: at the start, before any fault, unless a link
-        marked upstream may hide one."""
-        return kind == "start" and not any(link.upstream for link in self.mesh.links)
+        """Whether every reader must have a route: at the start, before any fault, unless an
+        upstream mark its dialer's build applies (the new build's only) may hide one."""
+        return kind == "start" and not any(
+            link.upstream and getattr(self.relays[link.dial].build, "name", None) == "new" for link in self.mesh.links
+        )
 
     def settle(self, restored: float, routed: bool) -> tuple[float | None, float | None, list[dict], list[dict]]:
         """Wait, up to `settle`, until no route or announce counter moved for `quiet` and every
