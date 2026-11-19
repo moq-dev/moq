@@ -18,20 +18,8 @@
  * @module
  */
 
-import { Duration, Instant, now as instant, origin, wall } from "@moq/clock";
-import { Slew } from "./slew";
-
-// The timeline, and the installed clock's origin it counts from: another clock starts a new one.
-let current: { origin: number; slew: Slew } | undefined;
-
-function read(): { at: Instant; reading: number } {
-	const at = instant();
-	const zero = origin().asUnixMillis();
-	if (current?.origin !== zero) current = { origin: zero, slew: new Slew() };
-	// Where the wall clock puts this instant, in microseconds from instant zero.
-	const target = (wall().asUnixMillis() - zero) * 1000;
-	return { at, reading: current.slew.read(at.since(Instant.ZERO).asMicros(), target) };
-}
+import { Duration, type Instant } from "@moq/clock";
+import { read } from "./media-timeline";
 
 /** The current timestamp on the media clock, since instant zero. */
 export function now(): Duration {

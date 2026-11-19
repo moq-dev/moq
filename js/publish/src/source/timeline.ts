@@ -1,6 +1,6 @@
 import { Duration, Instant } from "@moq/clock";
 import * as MediaClock from "../media-clock";
-import { GAP } from "../slew";
+import { jumped } from "../media-timeline";
 
 /**
  * Maps a file's presentation timeline onto our clock, repeating it forever.
@@ -15,6 +15,8 @@ export class Timeline {
 	readonly #duration: Duration;
 	// How far the file is placed past the installed clock on the media clock, in microseconds.
 	#shift: number;
+	// The media clock's suspend jumps, in microseconds, as of the last stamp.
+	#jumped: number;
 
 	/**
 	 * Anchor a file of `duration` seconds at clock time `zero`.
@@ -24,6 +26,7 @@ export class Timeline {
 	constructor(zero: Instant, duration: number) {
 		this.#zero = zero;
 		this.#shift = MediaClock.capture(zero).asMicros() - zero.since(Instant.ZERO).asMicros();
+		this.#jumped = jumped();
 		this.#duration = Number.isFinite(duration) && duration > 0 ? Duration.secs(duration) : Duration.ZERO;
 	}
 
@@ -49,10 +52,13 @@ export class Timeline {
 	 * media clock jumps a suspend ahead of it: the file then jumps with it, rather than publish late.
 	 */
 	stamp(at: Instant): Duration {
-		const instant = at.since(Instant.ZERO).asMicros();
-		const shift = MediaClock.capture(at).asMicros() - instant;
-		if (shift - this.#shift > GAP) this.#shift = shift;
-		return Duration.micros(Math.max(instant + this.#shift, 0));
+		// Read first, so a jump since the last stamp is counted.
+		MediaClock.now();
+		const gap = jumped() - this.#jumped;
+		// A new timeline (another clock installed) starts its count over; only a rise is a jump.
+		if (gap > 0) this.#shift += gap;
+		this.#jumped = jumped();
+		return Duration.micros(Math.max(at.since(Instant.ZERO).asMicros() + this.#shift, 0));
 	}
 
 	/** The file timestamp and pass due at the given clock time, the inverse of {@link at}. */

@@ -55,6 +55,7 @@ test("a forward wall jump past two seconds is a suspend the timeline jumps", () 
 	const reading = host.slew.read(host.at, host.wall);
 	expect(reading).toBe(host.reading + TICK + 3600e6 + TICK / 2000);
 	expect(reading - host.wall).toBe(error + TICK / 2000);
+	expect(host.slew.jumped).toBe(3600e6);
 });
 
 test("another clock starts a new timeline on the wall clock", () => {

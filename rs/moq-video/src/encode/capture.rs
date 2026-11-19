@@ -544,8 +544,10 @@ async fn capture_loop<S: CaptureSource>(
 		let Some(mut camera) = wait_capture(&demand, on_demand, source.open(capture)).await? else {
 			continue;
 		};
-		// How far a reopened stream is shifted past the previous one's last timestamp.
-		let mut lead = 0u64;
+		// The broadcast clock's lead over this stream's timeline, in microseconds, sampled per frame.
+		let mut offset: Option<i128> = None;
+		// How far this stream is shifted past the previous one's last timestamp, set by its first frame.
+		let mut lead: Option<i128> = None;
 		// Prefer an explicit --fps, otherwise the camera's reported rate, falling
 		// back only if the backend doesn't expose one.
 		let framerate = capture
@@ -604,22 +606,31 @@ async fn capture_loop<S: CaptureSource>(
 				producer.report_skipped(skipped - reported);
 			}
 			reported = Some(skipped);
-			// Capture timestamps use a private monotonic timeline. Both clocks are sampled per frame,
-			// so each queued frame maps to the broadcast clock by acquisition, not dequeue, time, and
-			// the stream follows that clock's slew toward the wall clock and its jump across a suspend.
-			let offset =
-				u64::try_from(clock.now().as_micros()?.saturating_sub(camera.now().as_micros()?)).unwrap_or(u64::MAX);
-			let mut mapped = map_capture_timestamp(offset.saturating_add(lead), frame.timestamp)?;
+			// Capture timestamps use a private monotonic timeline. The offset to the broadcast clock is
+			// sampled per frame, so each queued frame maps by acquisition, not dequeue, time, and the
+			// stream follows the clock's slew toward the wall clock and its jump across a suspend.
+			let before = camera.now().as_micros()? as i128;
+			let media = clock.now().as_micros()? as i128;
+			let after = camera.now().as_micros()? as i128;
+			// Reads straddling a stall would skew it, so those keep the last offset.
+			if offset.is_none() || after - before <= STALL {
+				offset = Some(media - (before + after) / 2);
+			}
+			let mut micros = frame.timestamp.as_micros()? as i128 + offset.unwrap_or_default();
 			// A camera never rewinds its own stream, but a reopened one maps from the shared clock,
 			// which the previous stream can lead: a device re-anchor floors just past its last
 			// timestamp, ahead of arrival. Shift the new stream past it, keeping its spacing.
-			if let Some(last) = last
-				&& mapped <= last
-			{
-				let behind = u64::try_from(last.as_micros()? - mapped.as_micros()?).unwrap_or(u64::MAX);
-				lead = lead.saturating_add(behind).saturating_add(1);
-				mapped = map_capture_timestamp(offset.saturating_add(lead), frame.timestamp)?;
+			let last_micros = last.map(|last| last.as_micros()).transpose()?.map(|last| last as i128);
+			let lead = *lead.get_or_insert_with(|| match last_micros {
+				Some(last) if micros <= last => last - micros + 1,
+				_ => 0,
+			});
+			micros += lead;
+			// Nor does a frame land at or below the last, which only that frame is held to.
+			if let Some(last) = last_micros {
+				micros = micros.max(last + 1);
 			}
+			let mapped = map_capture_timestamp(micros)?;
 			last = Some(mapped);
 			frame.timestamp = mapped;
 			// A backend that cannot cut leaves every group to its cadence.
@@ -671,9 +682,14 @@ async fn capture_loop<S: CaptureSource>(
 	}
 }
 
-fn map_capture_timestamp(epoch_micros: u64, timestamp: Timestamp) -> Result<Timestamp, Error> {
-	let capture_micros = u64::try_from(timestamp.as_micros()?).unwrap_or(u64::MAX);
-	Ok(Timestamp::from_micros(epoch_micros.saturating_add(capture_micros))?)
+/// The most two camera readings may straddle for the broadcast clock read between them to place it.
+const STALL: i128 = 1_000;
+
+/// A broadcast clock reading in microseconds, zero before PTS zero.
+fn map_capture_timestamp(micros: i128) -> Result<Timestamp, Error> {
+	Ok(Timestamp::from_micros(
+		u64::try_from(micros.max(0)).unwrap_or(u64::MAX),
+	)?)
 }
 
 #[cfg(test)]
@@ -703,10 +719,8 @@ mod tests {
 	}
 
 	#[test]
-	fn capture_clock_mapping_is_monotonic() {
-		let first = map_capture_timestamp(10_000, Timestamp::from_micros(2_000).unwrap()).unwrap();
-		let second = map_capture_timestamp(10_000, Timestamp::from_micros(2_001).unwrap()).unwrap();
-		assert!(second > first);
+	fn a_capture_before_pts_zero_maps_to_zero() {
+		assert_eq!(map_capture_timestamp(-5).unwrap().as_micros().unwrap(), 0);
 	}
 
 	/// Clock fixtures: the real capture loop, fed by a synthetic camera against a pinned
