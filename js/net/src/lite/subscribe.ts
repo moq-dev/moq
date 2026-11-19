@@ -130,11 +130,12 @@ interface Span {
 
 /**
  * One end of a lite-07 range: a model {@link Anchor}, or a group by its start (`absolute`), as
- * the Rust `lite::Anchor` holds. The wire has no absolute anchor: a group's start is its time, so
- * `absolute` goes out as a time, an end (exclusive) as the time just before it, and decodes as one.
+ * the Rust `lite::Anchor` holds. A group's start is its time, so `absolute` goes out as a time, an
+ * end (exclusive) as the time just before it, and decodes as one. A start partway through the
+ * group, at a nonzero `frame`, goes out as a Position; an end there can't.
  */
 export type WireAnchor =
-	| { absolute: bigint; relative?: never; time?: never }
+	| { absolute: bigint; frame?: number; relative?: never; time?: never }
 	| { relative: bigint; absolute?: never; time?: never }
 	| { time: bigint; absolute?: never; relative?: never };
 
@@ -150,12 +151,17 @@ export function toWireRanges(ranges: readonly Range[]): WireRange[] {
 }
 
 /**
- * The lite-07 type and value of a range's start or `end`, `undefined` for none. Both time ends are
+ * The lite-07 type and values of a range's start or `end`, none for none. Both time ends are
  * inclusive, so an absolute end, exclusive, goes out as the time just before it; one at group 0
- * holds nothing a time can say.
+ * holds nothing a time can say. A start partway through a group is a Position: its start, then
+ * the frame.
  */
-function wireAnchor(anchor: WireAnchor | undefined, end: boolean): [number, bigint?] {
+function wireAnchor(anchor: WireAnchor | undefined, end: boolean): [number, ...bigint[]] {
 	if (anchor?.absolute !== undefined) {
+		if (anchor.frame) {
+			if (end) throw new Error("a range ends only at a group");
+			return [3, anchor.absolute, BigInt(anchor.frame)];
+		}
 		if (!end) return [1, anchor.absolute];
 		if (anchor.absolute === 0n) throw new Error(EMPTY_RANGE);
 		return [1, anchor.absolute - 1n];
@@ -171,9 +177,9 @@ async function encodeRange(w: Writer, range: WireRange) {
 		[range.start, false],
 		[range.end, true],
 	] as const) {
-		const [kind, value] = wireAnchor(anchor, end);
+		const [kind, ...values] = wireAnchor(anchor, end);
 		await w.u53(kind);
-		if (value !== undefined) await w.u62(value);
+		for (const value of values) await w.u62(value);
 	}
 }
 
@@ -235,8 +241,11 @@ export function requestedRanges(msg: Span & { ranges?: WireRange[] }): Range[] {
 	return [range];
 }
 
-/** Decode one lite-07 range end, `undefined` for none: a time, inclusive as an end, or a count back. */
-async function decodeAnchor(r: Reader): Promise<WireAnchor | undefined> {
+/**
+ * Decode one lite-07 range end, `undefined` for none: a time, inclusive as an end, a count back,
+ * or a start partway through a group, never at frame 0, which a time says.
+ */
+async function decodeAnchor(r: Reader, end: boolean): Promise<WireAnchor | undefined> {
 	const kind = await r.u53();
 	switch (kind) {
 		case 0:
@@ -245,6 +254,13 @@ async function decodeAnchor(r: Reader): Promise<WireAnchor | undefined> {
 			return { time: await r.u62() };
 		case 2:
 			return { relative: await r.u62() };
+		case 3: {
+			if (end) throw new ProtocolViolation("a range ends partway through a group");
+			const absolute = await r.u62();
+			const frame = await r.u53();
+			if (frame === 0) throw new ProtocolViolation("a position at frame 0");
+			return { absolute, frame };
+		}
 		default:
 			throw new ProtocolViolation(`unknown range anchor: ${kind}`);
 	}
@@ -252,8 +268,8 @@ async function decodeAnchor(r: Reader): Promise<WireAnchor | undefined> {
 
 /** Decode one lite-07 range: its start, then its end. */
 async function decodeRange(r: Reader): Promise<WireRange> {
-	const start = await decodeAnchor(r);
-	const end = await decodeAnchor(r);
+	const start = await decodeAnchor(r, false);
+	const end = await decodeAnchor(r, true);
 	const range: WireRange = {};
 	if (start) range.start = start;
 	if (end) range.end = end;
@@ -270,7 +286,9 @@ async function decodeRanges(r: Reader): Promise<WireRange[]> {
 
 /**
  * Lite-07 `ranges` and the one span covering every one of them, which the subscriber narrows
- * again. A range covers whole groups, so the span bounds no frame.
+ * again. A range covers whole groups but for a Position start, whose frame the span keeps when
+ * the span starts there and no other range may cover that group: each group is delivered once.
+ * A Position above the span's start goes whole, as more than it asked.
  */
 export function spanOf(version: Version, ranges: readonly WireRange[]): Span & { ranges: WireRange[] } {
 	let start: bigint | undefined;
@@ -293,9 +311,24 @@ export function spanOf(version: Version, ranges: readonly WireRange[]): Span & {
 	return {
 		ranges: [...ranges],
 		startGroup: canonicalStartGroup(version, start, 0),
-		startFrame: 0,
+		startFrame: start === undefined ? 0 : positionFrame(ranges, start),
 		endGroup: end === undefined ? undefined : end - 1n,
 	};
+}
+
+/** The frame a Position start asks group `group` from, 0 unless no other range may cover it. */
+function positionFrame(ranges: readonly WireRange[], group: bigint): number {
+	let frame = 0;
+	let covering = 0;
+	for (const range of ranges) {
+		const from = range.start?.absolute ?? range.start?.time;
+		const to = range.end?.absolute ?? (range.end?.time === undefined ? undefined : range.end.time + 1n);
+		// Unknown ends, such as a count back, may cover it.
+		if ((from !== undefined && from > group) || (to !== undefined && to <= group)) continue;
+		covering++;
+		if (range.start?.absolute === group && range.start.frame) frame = range.start.frame;
+	}
+	return covering === 1 ? frame : 0;
 }
 
 /**
@@ -340,8 +373,8 @@ export function rangeSize(range: WireRange): number {
 	const anchor = (anchor: WireAnchor | undefined, end: boolean): number => {
 		// An end at group 0 can't go out, which encoding refuses; size it as the smallest.
 		if (end && anchor?.absolute === 0n) return size(1) + size(0);
-		const [kind, value] = wireAnchor(anchor, end);
-		return size(kind) + (value === undefined ? 0 : size(value));
+		const [kind, ...values] = wireAnchor(anchor, end);
+		return values.reduce((total, value) => total + size(value), size(kind));
 	};
 	return anchor(range.start, false) + anchor(range.end, true);
 }
@@ -349,7 +382,7 @@ export function rangeSize(range: WireRange): number {
 /** A range's anchors as a key, so equal ranges compare equal. */
 function rangeKey(range: WireRange): string {
 	const anchor = (anchor: WireAnchor | undefined) => {
-		if (anchor?.absolute !== undefined) return `a${anchor.absolute}`;
+		if (anchor?.absolute !== undefined) return `a${anchor.absolute}.${anchor.frame ?? 0}`;
 		if (anchor?.relative !== undefined) return `r${anchor.relative}`;
 		if (anchor?.time !== undefined) return `t${anchor.time}`;
 		return "-";

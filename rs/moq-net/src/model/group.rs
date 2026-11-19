@@ -402,7 +402,7 @@ impl Handoff {
 
 impl Head {
 	/// How many frames it holds from the group's first, or `None` when it starts later.
-	pub(super) fn from_first(&self) -> Option<u64> {
+	pub(super) fn frames_from_first(&self) -> Option<u64> {
 		(self.start == 0 && !self.entries.is_empty()).then_some(self.entries.len() as u64)
 	}
 

@@ -8,6 +8,7 @@ import {
 	encodeSubscribeResponse,
 	inclusiveGroupEnd,
 	LiveRanges,
+	rangeSize,
 	requestedRanges,
 	Subscribe,
 	SubscribeDrop,
@@ -239,9 +240,41 @@ test("a lite-07 list decodes its time and relative anchors", async () => {
 
 	// An update may add no range, retiring some or none.
 	expect((await update([0])).ranges).toEqual([]);
-	// Any other type is a violation.
+	// Any other type is a violation, and so is a Position at frame 0 or as an end.
 	await expect(update([1, 3, 0, 0])).rejects.toThrow(ProtocolViolation);
+	await expect(update([1, 1, 0, 3, 7, 4])).rejects.toThrow(ProtocolViolation);
 	await expect(update([1, 4, 0, 0])).rejects.toThrow(ProtocolViolation);
+});
+
+test("a lite-07 range may start partway through a group, which the span keeps", async () => {
+	const position = { start: { absolute: 7n, frame: 4 } };
+	const update = new SubscribeUpdate({ priority: 0, ranges: [position] });
+	const bytes = await encodeMessage(Version.DRAFT_07, update);
+	// One range: type 3, start 7, frame 4, then no end, and an absent wanted group.
+	expect(Array.from(bytes.slice(-6))).toEqual([1, 3, 7, 4, 0, 0]);
+	expect(rangeSize(position)).toBe(4);
+	const got = await SubscribeUpdate.decode(new Reader(undefined, bytes, Version.DRAFT_07), Version.DRAFT_07);
+	expect(got.ranges).toEqual([position]);
+	const span = spanOf(Version.DRAFT_07, got.ranges ?? []);
+	expect([span.startGroup, span.startFrame]).toEqual([7n, 4]);
+	// The model reads the group whole: the publisher cuts the frames.
+	expect(requestedRanges(span)).toEqual([{ start: { time: 7n } }]);
+
+	// Another range that may cover the group asks for it whole, since a group is delivered once.
+	for (const other of [{ start: { time: 3n } }, { start: { relative: 0n } }, { end: { time: 9n } }]) {
+		expect(spanOf(Version.DRAFT_07, [position, other]).startFrame).toBe(0);
+	}
+	expect(spanOf(Version.DRAFT_07, [position, { start: { time: 9n } }]).startFrame).toBe(4);
+	// The span qualifies only its lowest start, so a Position above another range's goes whole.
+	expect(spanOf(Version.DRAFT_07, [position, { start: { time: 1n }, end: { time: 3n } }]).startFrame).toBe(0);
+
+	// An end there can't go out.
+	await expect(
+		encodeMessage(
+			Version.DRAFT_07,
+			new SubscribeUpdate({ priority: 0, ranges: [{ end: { absolute: 9n, frame: 2 } }] }),
+		),
+	).rejects.toThrow("a range ends only at a group");
 });
 
 test("lite-07 sends an absolute anchor as a time, an end as the time before it", async () => {

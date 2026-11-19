@@ -1524,7 +1524,7 @@ impl Reader {
 		let key = key?;
 		(self.copies.iter())
 			.filter_map(|copy| copy.track.peek_group(key)?.handoff().head())
-			.filter_map(|head| Some((head.from_first()?, head)))
+			.filter_map(|head| Some((head.frames_from_first()?, head)))
 			.max_by_key(|(frames, _)| *frames)
 			.map(|(frames, head)| (Position::new(key, frames), head))
 	}
