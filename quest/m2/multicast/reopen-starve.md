@@ -54,6 +54,3 @@ so it is a lite-07 regression on a link flap or a crash, which a deployment
 sees daily.
 
 Not a wire change.
-
-## Related
-

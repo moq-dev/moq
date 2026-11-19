@@ -1022,7 +1022,12 @@ mod tests {
 			window.runs(0).collect::<Vec<_>>(),
 			window.missable(0).collect::<Vec<_>>(),
 			(window.floor(), window.start(), window.named(), window.end()),
-			(window.resolved(), lookups, window.is_settled(), !window.waiting.is_empty()),
+			(
+				window.resolved(),
+				lookups,
+				window.is_settled(),
+				!window.waiting.is_empty(),
+			),
 		)
 	}
 
