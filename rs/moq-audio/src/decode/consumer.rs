@@ -351,10 +351,9 @@ impl Consumer {
 	/// The playout delay to hold ahead of the playhead right now: the fixed
 	/// [`Delay::min`], or with [`Options::estimate`] the estimate from every frame read so far.
 	///
-	/// The estimate measures when [`read`](Self::read) hands each packet over, so
-	/// it is only as honest as the caller is prompt: read as soon as the previous
-	/// frame is handled and let the playback buffer absorb the jitter, rather than
-	/// pacing reads to the speaker.
+	/// The estimate measures when each packet landed in this node's cache
+	/// ([`moq_mux::container::Consumer::arrival`]), so neither a hole the container waits out nor
+	/// a late read holds the packets behind it as jitter.
 	pub fn delay(&self) -> Duration {
 		from_millis(self.target.millis())
 	}
@@ -709,7 +708,10 @@ impl Consumer {
 					match &read {
 						Encoded::Frame { frame, .. } => {
 							if let Some(scale) = frame.timestamp.scale() {
-								let arrival = jitter::millis(now().duration_since(self.origin));
+								// When the packet landed, not when it was read: a hole the container
+								// waits out holds the packets behind it, which arrived on time.
+								let arrived = self.track.arrival().unwrap_or_else(now);
+								let arrival = jitter::millis(arrived.duration_since(self.origin));
 								let media = frame.timestamp.value() as f64 * 1000.0 / scale.as_u64() as f64;
 								self.target.observe(arrival, media);
 							}
@@ -913,13 +915,8 @@ impl Consumer {
 	}
 }
 
-/// The receiver's monotonic clock, which a test can pin to replay a recorded
-/// arrival trace without waiting it out.
+/// The receiver's monotonic clock.
 fn now() -> Instant {
-	#[cfg(test)]
-	if let Some(now) = tests::CLOCK.get() {
-		return now;
-	}
 	Instant::now()
 }
 
@@ -2781,12 +2778,6 @@ mod tests {
 		after
 	}
 
-	thread_local! {
-		/// A pinned receiver clock for [`now`], so a test replays an arrival trace
-		/// instantly. Thread-local because a `tokio::test` runs on one thread.
-		pub(super) static CLOCK: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
-	}
-
 	/// Replay a corpus trace through the whole decode path, one PCM packet per group
 	/// written at its recorded arrival and read straight back, and return the
 	/// consumer's delay after each packet in milliseconds.
@@ -2817,7 +2808,6 @@ mod tests {
 		);
 
 		let origin = Instant::now();
-		CLOCK.set(Some(origin));
 		let mut consumer = Consumer::new(
 			&subscriber,
 			&catalog,
@@ -2853,7 +2843,8 @@ mod tests {
 					producer.seek(micros).unwrap();
 				}
 			}
-			CLOCK.set(Some(origin.saturating_add(duration(arrival))));
+			// On tokio's paused clock, which moq-net's landing times follow.
+			tokio::time::advance(duration(arrival).saturating_sub(origin.elapsed())).await;
 			producer
 				.write(moq_mux::container::Frame {
 					timestamp: Timestamp::from_micros(micros).unwrap(),
@@ -2870,7 +2861,6 @@ mod tests {
 				.expect("one decoded frame per packet");
 			series.push(crate::jitter::millis(consumer.delay()));
 		}
-		CLOCK.set(None);
 		series
 	}
 
@@ -2880,7 +2870,7 @@ mod tests {
 	/// estimator's own test, since the container refuses a timestamp that runs
 	/// backwards. `silence` publishes a discontinuity marker ahead of each frame its
 	/// `ends` lists, so the consumer has to find the declared end on its own.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn the_decode_path_conforms_to_the_corpus() {
 		for name in [
 			"advertised",
@@ -3043,9 +3033,94 @@ mod tests {
 		assert_eq!(dropped, lost);
 	}
 
+	/// A hole the container waits out up to the max delay holds the packets behind it, which
+	/// landed on time: the estimate observes when they landed, not when they were read, so the
+	/// wait reads as no jitter.
+	#[tokio::test(start_paused = true)]
+	async fn a_hole_waited_out_to_the_max_delay_leaves_the_estimate() {
+		use moq_mux::container::Container as _;
+
+		let publisher = origin(1);
+		let route = publisher
+			.route("bcast", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let mut track = route
+			.broadcast()
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		route.announce().unwrap();
+		let container = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio);
+		let payload: Bytes = vec![0u8; 160 * size_of::<f32>()].into();
+		let mut write = |sequence: u64| {
+			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
+			let frame = moq_mux::container::Frame {
+				timestamp: Timestamp::from_micros(sequence * 20_000).unwrap(),
+				duration: None,
+				payload: payload.clone(),
+				keyframe: true,
+			};
+			container.write(&mut group, &[frame]).unwrap();
+			group.finish().unwrap();
+		};
+
+		// A received copy: its feed owes the missing group, so the reader waits for it.
+		let relay = origin(2);
+		let _link = link(&publisher, &relay).await;
+		let remote = relay
+			.consume()
+			.follow("bcast", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
+		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 8_000, 1);
+		let max = Duration::from_secs(2);
+		let options = Options {
+			delay: Delay {
+				max: Some(max),
+				..Delay::default()
+			},
+			estimate: true,
+			..Options::new()
+		};
+		let mut consumer = Consumer::new(&remote, &catalog, "audio", options).await.unwrap();
+
+		write(0);
+		next_frame(&mut consumer).await.unwrap().expect("the first packet");
+		let estimate = consumer.delay();
+
+		// Packet 1 never arrives; the ones after it land on time, 20 ms apart.
+		for sequence in 2..6 {
+			tokio::time::advance(Duration::from_millis(if sequence == 2 { 40 } else { 20 })).await;
+			write(sequence);
+		}
+		let since = kio::clock::now();
+		assert!(matches!(consumer.read().await.unwrap(), Some(Read::Gap { .. })));
+		assert!(since.elapsed() >= max / 2, "the hole was not waited: {:?}", since.elapsed());
+		for _ in 2..6 {
+			next_frame(&mut consumer)
+				.await
+				.unwrap()
+				.expect("a packet past the hole");
+		}
+		// Steady arrivals after it, read as they land, close the interval that measured the wait.
+		let resumed = 6 + (since.elapsed().as_millis() / 20) as u64;
+		for sequence in resumed..resumed + 100 {
+			write(sequence);
+			next_frame(&mut consumer).await.unwrap().expect("a steady packet");
+			tokio::time::advance(Duration::from_millis(20)).await;
+		}
+		assert!(
+			consumer.delay() <= estimate,
+			"the wait read as jitter: {:?} after, {estimate:?} before",
+			consumer.delay()
+		);
+	}
+
 	/// A group lost between a declared end and what resumes leaves the end declared, as the
 	/// browser's consumer does: the estimator measures the same as when nothing was lost.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_declared_end_survives_a_lost_group() {
 		let case = crate::jitter::tests::case("silence");
 		assert!(!case.ends.is_empty());

@@ -733,6 +733,38 @@ for (const [where, payloads] of [
 	});
 }
 
+// A step onto a group whose first payload failed to decode raises the error rather than waiting for a
+// timestamp that frame will never give, while the group's other frames are still unread.
+test("Consumer raises a decode error at the head of an open group past a hole", async () => {
+	const failingFormat: ContainerFormat = {
+		decode(frame: Uint8Array): Frame[] {
+			if (frame[0] === 0xff) throw new Error("malformed");
+			return [{ payload: frame, timestamp: Duration.micros(frame[0]), keyframe: false }];
+		},
+	};
+	const track = new Track.Producer("test");
+	const consumer = new Consumer(replay(track), { format: failingFormat, delay: { max: Duration.millis(500) } });
+
+	const g0 = track.createGroup(0n);
+	g0.writeFrame({ payload: new Uint8Array([0x01]), timestamp: Time.Timestamp.fromMicros(1) });
+	g0.finish();
+	expect(await consumer.next()).toMatchObject({ kind: "frame", group: 0n });
+
+	// A sparse key the live local track never declared the keys below skipped, left open.
+	const g10 = track.createGroup(10n);
+	g10.writeFrame({ payload: new Uint8Array([0xff]), timestamp: Time.Timestamp.fromMicros(2) });
+	g10.writeFrame({ payload: new Uint8Array([0x03]), timestamp: Time.Timestamp.fromMicros(3) });
+
+	const timeout = new Promise<string>((resolve) => setTimeout(() => resolve("hung"), 1000));
+	const read = consumer.next().then(
+		() => "read",
+		(err: Error) => err.message,
+	);
+	expect(await Promise.race([read, timeout])).toBe("malformed");
+	consumer.close();
+	track.close();
+});
+
 // Errors come in delivery order, so a decode error waits behind the items ahead of it, a gap included.
 test("Consumer delivers everything ahead of a decode error", async () => {
 	const track = new Track.Producer("test");

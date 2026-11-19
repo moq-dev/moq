@@ -934,8 +934,15 @@ export class Consumer {
 						this.#ordered.isSkipped(this.#active, head.consumer.start) ||
 						ptsContiguous(this.#presentedEnd, first);
 					const empty = head.empty && head.consumer.done;
+					// A payload that failed to decode gives no timestamp, so its fault settles the step,
+					// for the read below to raise.
 					const known =
-						contiguous || head.gap || first !== undefined || head.consumer.done || ended !== undefined;
+						contiguous ||
+						head.gap ||
+						first !== undefined ||
+						head.fault !== undefined ||
+						head.consumer.done ||
+						ended !== undefined;
 					if (known) {
 						if (!contiguous && (head.gap || !empty)) {
 							this.#lost = true;
