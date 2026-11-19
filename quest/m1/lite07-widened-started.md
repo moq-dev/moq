@@ -27,3 +27,9 @@ merge queue runs only the tests for changed files, so it landed unseen.
   SUBSCRIBE_STARTED under #9045's fitting. If it does, fix `#declare` or
   the update path; if a covering superset now legitimately keeps the start,
   rewrite the test to that rule, mirrored by the Rust test that covers it.
+
+Decided 2026-11-19 (coordinator, maintainer away, merge granted): keep this
+follow-up while [moq-dev/moq#9147](https://github.com/moq-dev/moq/pull/9147),
+which fixes it, is open. #9147 finds #9045 changed only timing (an async encode
+before the update's declaration) and fixes the test; it should delete this
+quest when it lands.

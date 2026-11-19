@@ -22,7 +22,8 @@ resolves at once (`Window::new` in `model/subscription/window.rs`), and
 
 - Reproduce first: the second-reader case above, as a `range_anchors.rs`
   integration test, and the same in `js/net/src/integration.test.ts`.
-- Recommendation: on a received copy, count back over the cache only where
+- Decided 2026-11-19 (coordinator, maintainer away, merge granted), taking
+  the recommendation: on a received copy, count back over the cache only where
   the copy holds every group from the counted one to its latest (received
   contiguously since it went live), and otherwise leave the relative start
   waiting, as a time start waits (`Start::Waiting`), until the range's
