@@ -1308,12 +1308,11 @@ impl TrackState {
 	/// Hold `head` for group `key` until it arrives, or return the copies of it already
 	/// cached, to adopt it with this state's lock released; see [`Consumer::lend_head`].
 	fn lend(&self, key: u64, head: &Arc<group::Head>) -> Vec<group::Handle> {
-		if let Some(slot) = self.lookup.get(&key) {
-			return slot.copies().cloned().collect();
-		}
 		// Under the caller's read guard, so the group cannot arrive before the loan is held.
+		// Held even when copies are cached: one arriving to displace them once the guard is
+		// released, before they adopt the head, takes the loan as it lands.
 		(self.lent.lock().unwrap_or_else(PoisonError::into_inner)).lend(key, head, &self.cache);
-		Vec::new()
+		(self.lookup.get(&key)).map_or_else(Vec::new, |slot| slot.copies().cloned().collect())
 	}
 
 	/// How many keys just below `key` the publisher declared it never produced: the skip
@@ -16135,6 +16134,35 @@ mod test {
 		consumer.lend_head(3, head(3));
 		consumer.lend_head(4, head(4));
 		assert_eq!(lent(&producer), [3, 4]);
+	}
+
+	/// A loan for a group the copy already caches still stands for a copy of it that lands
+	/// later and displaces the cached one, which adopts it as it lands.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_displacing_arrival_takes_the_loan() {
+		let producer = track_producer("test", Info::timed());
+		let consumer = producer.consume();
+		let Received::Group(late) = producer.create_group_at(group::Info { start: 5 }, 2).unwrap() else {
+			panic!("nothing else holds group 5");
+		};
+		let mut prefix = group::Info { start: 5 }.produce();
+		prefix
+			.write_frame(Timestamp::from_millis(5).unwrap(), bytes::Bytes::new())
+			.unwrap();
+		// One frame does not reach the cached copy's first, so that copy cannot adopt it.
+		consumer.lend_head(5, prefix.consume().handoff().head().unwrap());
+		assert_eq!(consumer.peek_group(5).expect("cached").first_frame(), 2);
+
+		let Received::Group(wider) = producer.create_group_at(group::Info { start: 5 }, 1).unwrap() else {
+			panic!("a copy from frame 1 displaces one from frame 2");
+		};
+		assert_eq!(
+			consumer.peek_group(5).expect("cached").first_frame(),
+			0,
+			"whole once visible"
+		);
+		drop((late, wider));
 	}
 
 	/// A copy lent the heads of two groups its readers resumed it at holds each whole as it
