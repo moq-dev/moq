@@ -2371,6 +2371,9 @@ export class Front {
 					adopt: () => {
 						current.release();
 						current = next.source;
+						// Its fetch may hold its subscription until its reader lets go, and the
+						// reader is now `fetched.group`.
+						void hooks.groupReleased(fetched.group).then(() => next.group.close());
 					},
 					discard: () => {
 						next.group.close();
