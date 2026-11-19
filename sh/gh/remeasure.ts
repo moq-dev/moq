@@ -24,8 +24,20 @@ export function changedPins(
 	);
 }
 
-// What wire-compat leaves at the top of its run to explain the matrix it measured.
-const RUN_EVIDENCE = new Set(["versions.json", "measured", "current-help", "released-help", "resolved-js.lock"]);
+// What wire-compat leaves at the top of its run to explain the matrix it scheduled and measured.
+const RUN_EVIDENCE = new Set([
+	"versions.json",
+	"shared",
+	"controls",
+	"measured",
+	"current-help",
+	"released-help",
+	"resolved-js.lock",
+]);
+
+// The logs, plus the small files a cell's verdict compared: the observed track and group,
+// each FETCH's output, and the encoder stats a tone check reads.
+const CELL_EVIDENCE = /\.(log|track|fetch|stats|\d+\.json)$/;
 
 /** Copy the logs and reports from harness RUNS into DEST, leaving the staged binaries and installs behind. */
 export function keepEvidence(runs: string, dest: string) {
@@ -36,7 +48,7 @@ export function keepEvidence(runs: string, dest: string) {
 		const path = relative(runs, join(entry.parentPath, entry.name));
 		const parts = path.split(sep);
 		if (parts.includes("node_modules")) continue;
-		if (!entry.name.endsWith(".log") && !(parts.length === 2 && RUN_EVIDENCE.has(entry.name))) continue;
+		if (!CELL_EVIDENCE.test(entry.name) && !(parts.length === 2 && RUN_EVIDENCE.has(entry.name))) continue;
 		mkdirSync(dirname(join(dest, path)), { recursive: true });
 		copyFileSync(join(runs, path), join(dest, path));
 	}

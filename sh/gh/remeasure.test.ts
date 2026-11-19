@@ -19,12 +19,19 @@ test("kept evidence is the logs and the matrix inputs, not build output", () => 
 	const runs = `${directory}/runs`;
 	const kept = [
 		"wire-compat-a/versions.json",
+		"wire-compat-a/shared",
+		"wire-compat-a/controls",
 		"wire-compat-a/measured",
 		"wire-compat-a/current-help",
 		"wire-compat-a/released-help",
 		"wire-compat-a/resolved-js.lock",
 		"interop-b/relay.log",
 		"interop-b/moq-lite-03/pub-rust.log",
+		"interop-b/fetch-a.track",
+		"interop-b/fetch-a.0.json",
+		"interop-b/fetch-a.1.json",
+		"interop-b/data-a.fetch",
+		"interop-b/rust-rust-audio.stats",
 	];
 	const dropped = [
 		"wire-compat-a/current/moq",
@@ -33,6 +40,8 @@ test("kept evidence is the logs and the matrix inputs, not build output", () => 
 		"wire-compat-a/key.jwk",
 		"interop-b/bin/moq",
 		"interop-b/tone-avc.mov",
+		"interop-b/rust-rust-audio.wav",
+		"interop-b/c-build.json",
 		"interop-b/moq-lite-03/versions.json",
 	];
 	try {
