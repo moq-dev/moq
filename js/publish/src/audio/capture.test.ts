@@ -746,3 +746,72 @@ test("a stalled page keeps the microphone's timeline", async () => {
 		installed.close();
 	}
 });
+
+// A page still stalled for five seconds after a four second sleep: the backlog it then delivers was
+// rendered from the moment the host woke, so the timeline takes the jump on the first quantum
+// rendered after the sleep, not on whichever reaches the page first.
+test("a page stalled past a suspend takes the jump where the audio thread woke", async () => {
+	// The host clock, driven by hand: a suspend moves the wall clock while the monotonic one stands,
+	// which a Manual clock can't express, since its wall time anchors its origin.
+	// biome-ignore lint/style/noRestrictedGlobals: a suspend is the wall clock jumping past performance.now().
+	const [host, monotonic] = [Date, performance];
+	const [wall0, mono0] = [host.now(), monotonic.now()];
+	let elapsed = 0;
+	let slept = 0;
+	using webaudio = installGatedWebAudio();
+	webaudio.gesture();
+	const capture = new Capture({ enabled: true, source: new Signal(fakeSource()) as never });
+	const effect = new Effect();
+	try {
+		await settle();
+		spyOn(monotonic, "now").mockImplementation(() => mono0 + elapsed);
+		spyOn(host, "now").mockImplementation(() => wall0 + elapsed + slept);
+		const reader = capture.out.frames.peek()?.subscribe(effect).getReader();
+		if (!reader) throw new Error("no capture frames");
+		const worklet = webaudio.worklets[0];
+		const frames: { start: number; end: number }[] = [];
+		const render = async (rendered?: number) => {
+			worklet.render(rendered, 480);
+			const frame = (await reader.read()).value;
+			if (!frame) throw new Error("no frame");
+			const start = frame.timestamp.asMicros();
+			frames.push({ start, end: start + (frame.channels[0].length / 48_000) * 1_000_000 });
+		};
+
+		for (let i = 0; i < 1_000; i++) {
+			await render();
+			elapsed += 10;
+		}
+		// One quantum rendered just before the sleep, then five seconds of rendering after it before the
+		// page catches up.
+		const asleep = host.now();
+		slept = 4_000;
+		const awake = host.now();
+		elapsed += 5_000;
+		await render(asleep);
+		for (let i = 0; i < 500; i++) await render(awake + i * 10);
+		for (let i = 0; i < 1_000; i++) {
+			await render();
+			elapsed += 10;
+		}
+
+		expect(frames.length).toBe(2_501);
+		const gaps = frames
+			.slice(1)
+			.map((frame, i) => ({ at: i + 1, gap: frame.start - frames[i].end }))
+			.filter(({ gap }) => Math.abs(gap) > 1);
+		// The one gap is the sleep, after the quantum in flight across it.
+		expect(gaps.map(({ at }) => at)).toEqual([1_001]);
+		expect(Math.abs(gaps[0].gap - 4_000_000)).toBeLessThan(20_000);
+	} finally {
+		mock.restore();
+		effect.close();
+		capture.close();
+		await settle();
+		// The sleep left the page's timeline ahead of the restored wall clock; another clock's origin
+		// starts a new one, so later tests start on the wall clock again.
+		const installed = new Manual().install();
+		MediaClock.now();
+		installed.close();
+	}
+});

@@ -48,6 +48,10 @@ export interface Format {
 // pushes on the audio thread and can't be told to wait. Roughly 85ms at 48kHz.
 const QUEUE = 32;
 
+// How far apart two quanta's render times may be, in milliseconds, before the audio thread was
+// asleep between them. Half the media clock's suspend threshold, and far past any render callback.
+const SKIP = 1_000;
+
 // The rate to run the capture graph at when nothing asks for another.
 //
 // Fixed rather than derived from the codec, because one capture feeds every rendition and they can
@@ -295,16 +299,13 @@ export class Capture {
 					// The sample count stops while the host sleeps, so the timeline also takes the media
 					// clock's suspend jumps, or audio would land behind video by the sleep.
 					const jumps = follow();
-					// The latest jump, the total before it, and a wall time in the middle of its gap: a
-					// quantum rendered before then was in flight across the suspend, captured before it.
-					let jump = { total: jumps(), before: 0, at: 0 };
+					// The jumps the timeline has taken, and when the last quantum was rendered.
+					let jumped = 0;
+					let rendered: number | undefined;
 					const stamper = new Stamper(sampleRate);
 					effect.event(worklet.port, "message", (event: Event) => {
 						const arrived = MediaClock.capture(now()).asMicros();
 						const at = wall().asUnixMillis();
-						const total = jumps();
-						if (total !== jump.total)
-							jump = { total, before: jump.total, at: at - (total - jump.total) / 2_000 };
 						const posted = (event as MessageEvent<WorkletFrame>).data;
 						const channelCount = posted.channels.length;
 						if (!channelCount) return;
@@ -318,7 +319,11 @@ export class Capture {
 						// The quantum's first sample was captured at least its own length before it was rendered.
 						const delay = Math.max(at - posted.rendered, 0) * 1_000;
 						const captured = arrived - delay - (posted.channels[0].length / sampleRate) * 1_000_000;
-						const jumped = posted.rendered < jump.at ? jump.before : jump.total;
+						// The audio thread's wall time skips the suspend too, so the jump lands on the first
+						// quantum rendered after it, however late that reaches this thread: one in flight across
+						// it was captured before.
+						if (rendered !== undefined && posted.rendered - rendered > SKIP) jumped = jumps();
+						rendered = posted.rendered;
 						const frame = stamper.push(posted.channels, captured, jumped);
 						if (frame && (controller.desiredSize ?? 0) > 0) controller.enqueue(frame);
 					});
