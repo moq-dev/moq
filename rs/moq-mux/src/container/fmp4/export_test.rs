@@ -1,11 +1,13 @@
 //! Tests for the fMP4 exporter.
 
+use std::future::Future;
 use std::io::Cursor;
+use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
 use mp4_atom::{DecodeMaybe, Encode};
 
-use crate::container::test_util::{IDR, Live, PPS, SPS, raw_frame, video_frame};
+use crate::container::test_util::{IDR, Live, PPS, SPS, Woken, raw_frame, video_frame};
 
 /// A millisecond track: the frames written here carry timestamps.
 fn timed() -> moq_net::track::Info {
@@ -1549,7 +1551,7 @@ async fn a_rendition_joining_after_the_init_fails() {
 /// The replacement continues the declared audio track while the video plays on.
 #[tokio::test(start_paused = true)]
 async fn a_failed_rendition_continues_on_its_replacement() {
-	for listed_first in [false, true] {
+	for (listed_first, retired_unread) in [(false, false), (true, false), (false, true)] {
 		let (mut live, audio) = live_av();
 		let failed = audio.name().to_string();
 		let mut audio = audio;
@@ -1567,8 +1569,15 @@ async fn a_failed_rendition_continues_on_its_replacement() {
 		}
 		audio.abort(moq_net::Error::Transport("audio device lost".into()));
 		live.track.write(video_frame(100_000, true)).unwrap();
-		fragments.extend(drain_now(&mut exporter).await);
+		// Unless the publisher retires the failed rendition in the snapshot that lists its
+		// replacement, before the export reads the failure.
+		if !retired_unread {
+			fragments.extend(drain_now(&mut exporter).await);
+		}
 		let mut replacement = replacement.unwrap_or_else(|| add_opus(&mut live).0);
+		if retired_unread {
+			live.catalog.modify().unwrap().audio.renditions.remove(&failed);
+		}
 		// A replacement is new content, read from its live edge, as a moved rendition is.
 		fragments.extend(drain_now(&mut exporter).await);
 		write_audio(&mut replacement, 1_000_000, 5);
@@ -1591,6 +1600,48 @@ async fn a_failed_rendition_continues_on_its_replacement() {
 	}
 }
 
+/// An audio-only export whose replacement was listed before the failure reads it from the poll
+/// that continues the failed track: nothing else would wake the export for its first frames.
+#[tokio::test(start_paused = true)]
+async fn a_continued_track_wakes_the_export() {
+	let mut config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+	config.container = hang::catalog::Container::Legacy;
+	let mut live = Live::audio(config);
+	write_audio(&mut live.track, 0, 6);
+	// One fragment per frame, so nothing of the failed track is left to write when it fails.
+	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await)
+		.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY))
+		.with_fragment_duration(std::time::Duration::ZERO);
+	chunk_now(&mut exporter).await.init().expect("init");
+	drain_now(&mut exporter).await;
+	let (mut replacement, _) = add_opus(&mut live);
+	drain_now(&mut exporter).await;
+
+	let woken = Arc::new(Woken::default());
+	let waker = std::task::Waker::from(woken.clone());
+	let mut cx = std::task::Context::from_waker(&waker);
+	let mut next = Box::pin(exporter.next_chunk());
+	assert!(next.as_mut().poll(&mut cx).is_pending());
+	live.track.abort(moq_net::Error::Transport("audio device lost".into()));
+	// The failure wakes the export, whose next poll continues the track on the replacement.
+	assert!(woken.take(), "the failure woke the export");
+	assert!(next.as_mut().poll(&mut cx).is_pending());
+	write_audio(&mut replacement, 1_000_000, 6);
+	kio::clock::sleep(std::time::Duration::from_millis(10)).await;
+	assert!(woken.take(), "the replacement's frames woke the export");
+	let chunk = kio::clock::timeout(std::time::Duration::from_secs(1), next)
+		.await
+		.expect("the export wrote the replacement")
+		.expect("exporter failed")
+		.expect("a chunk");
+	let samples = samples_per_track(&[chunk.fragment().expect("a fragment")]);
+	assert_eq!(
+		samples.keys().copied().collect::<Vec<_>>(),
+		[1],
+		"the declared track: {samples:?}"
+	);
+}
+
 /// A rendition that joins after the init waits only while a declared track of its medium could
 /// still fail: once that one ends cleanly, it is a track the init never declared.
 #[tokio::test(start_paused = true)]
@@ -1609,6 +1660,40 @@ async fn a_spare_rendition_fails_once_its_medium_ends_cleanly() {
 	assert!(
 		matches!(&err, crate::Error::Cmaf(crate::container::fmp4::Error::TrackAdded(added)) if *added == name),
 		"{err:?}"
+	);
+}
+
+/// A video that fails before supplying its codec configuration leaves the init to the audio,
+/// which plays on without it.
+#[tokio::test(start_paused = true)]
+async fn a_track_failing_before_its_config_leaves_the_init_to_the_rest() {
+	let (mut live, mut audio) = live_av();
+	// The baseline catalog would describe the video without its SPS.
+	wait_for_sps(&mut live);
+	write_audio(&mut audio, 0, 5);
+	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await)
+		.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY));
+	let early = kio::clock::timeout(std::time::Duration::from_millis(1), exporter.next_chunk()).await;
+	assert!(early.is_err(), "the init waits on the video's config: {early:?}");
+	live.track.abort(moq_net::Error::Transport("camera lost".into()));
+	write_audio(&mut audio, 100_000, 5);
+	let _finished = audio.finish().unwrap();
+	live.catalog.finish().unwrap();
+
+	let init = chunk_now(&mut exporter).await.init().expect("init");
+	let mut cursor = Cursor::new(init.as_ref());
+	let mut handlers = Vec::new();
+	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).expect("decode init") {
+		if let mp4_atom::Any::Moov(moov) = atom {
+			handlers.extend(moov.trak.iter().map(|trak| trak.mdia.hdlr.handler.to_string()));
+		}
+	}
+	assert_eq!(handlers, ["soun"], "only the audio is declared");
+	let fragments = drain_now(&mut exporter).await;
+	assert_eq!(
+		samples_per_track(&fragments).values().sum::<usize>(),
+		10,
+		"the audio went out"
 	);
 }
 

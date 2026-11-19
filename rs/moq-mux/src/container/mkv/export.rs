@@ -280,6 +280,17 @@ impl MkvTrack {
 	}
 }
 
+/// Whether the header can declare `track`, read for rendition `name`: its codec config, and a
+/// video track's geometry, are known.
+fn declarable(catalog: &Catalog, name: &str, track: &MkvTrack) -> bool {
+	track.source.header_ready()
+		&& catalog
+			.video
+			.renditions
+			.get(name)
+			.is_none_or(|config| track.source.video_geometry_ready(config))
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TrackKind {
 	Video,
@@ -452,14 +463,22 @@ impl<S: Stream> Export<S> {
 			return Poll::Pending;
 		}
 
+		// A frame released into the open cluster returns nothing, yet may be what kept its track
+		// from reading on: read again, since a track whose end already arrived wakes nothing.
+		let mut released = false;
 		loop {
 			let (name, frame) = match self.held.take() {
 				Some(held) => held,
 				None => match self.jitter.poll_next(waiter) {
 					Poll::Ready(ready) => (ready.track, ready.item),
+					Poll::Pending if std::mem::take(&mut released) => {
+						self.fill(waiter)?;
+						continue;
+					}
 					Poll::Pending => break,
 				},
 			};
+			released = true;
 			if let Some(chunk) = self.feed_frame(&name, frame)? {
 				return Poll::Ready(Ok(Some(chunk)));
 			}
@@ -614,11 +633,16 @@ impl<S: Stream> Export<S> {
 				track.release(name, &mut self.jitter, true)?;
 			}
 		}
+		let mut continued = false;
 		for (name, err) in lost {
-			self.survive(&name, err)?;
+			continued |= self.survive(&name, err)?;
 		}
-		// A track that ended may have been the last a spare could continue.
-		self.settle_spares()
+		// A track that ended may have been the last a spare could continue. A continued track's
+		// new source is read now, since nothing else would wake the export for it.
+		if self.settle_spares()? || continued {
+			return self.fill(waiter);
+		}
+		Ok(())
 	}
 
 	/// Whether the export outlives the failure of track `name`, which [`Self::fill`] ended.
@@ -626,37 +650,33 @@ impl<S: Stream> Export<S> {
 	/// A spare of its kind continues it at once. Otherwise, while another track still reads,
 	/// only that rendition ends: a publisher that loses a source, such as a microphone, may
 	/// list a replacement, which continues it then. With nothing left reading, the failure is
-	/// the export's, as before.
-	fn survive(&mut self, name: &str, err: crate::Error) -> Result<()> {
-		self.settle_spares()?;
+	/// the export's, as before. Returns whether a spare continued a track.
+	fn survive(&mut self, name: &str, err: crate::Error) -> Result<bool> {
+		let continued = self.settle_spares()?;
 		if self.tracks.values().all(MkvTrack::finished) {
 			return Err(err);
 		}
 		if self.tracks.get(name).is_some_and(|track| track.read == Read::Lost) {
 			tracing::warn!(track = name, %err, "rendition failed; the export keeps its other media");
 		}
-		Ok(())
+		Ok(continued)
 	}
 
 	/// Continue each failed track with a spare of its kind, holding the other spares while a
 	/// track of their kind still reads. A spare with neither is a rendition the header never
-	/// declared, which fails the export.
-	fn settle_spares(&mut self) -> Result<()> {
+	/// declared, which fails the export. Returns whether a spare continued a track, whose new
+	/// source has yet to be polled.
+	fn settle_spares(&mut self) -> Result<bool> {
 		let Some(catalog) = self.catalog_snapshot.as_ref() else {
-			return Ok(());
+			return Ok(false);
 		};
 		let mut names: Vec<String> = self.spares.iter().cloned().collect();
 		names.sort();
+		let mut continued = false;
 		for name in names {
-			let (kind, source) = match (catalog.video.renditions.get(&name), catalog.audio.renditions.get(&name)) {
-				(Some(config), _) => (
-					TrackKind::Video,
-					ExportSource::for_video(&self.source, &name, config, self.delay),
-				),
-				(None, Some(config)) => (
-					TrackKind::Audio,
-					ExportSource::for_audio(&self.source, &name, config, self.delay),
-				),
+			let kind = match (catalog.video.renditions.get(&name), catalog.audio.renditions.get(&name)) {
+				(Some(_), _) => TrackKind::Video,
+				(None, Some(_)) => TrackKind::Audio,
 				(None, None) => continue,
 			};
 			let failed = self
@@ -665,31 +685,40 @@ impl<S: Stream> Export<S> {
 				.filter(|(_, track)| track.kind == kind && track.read == Read::Lost)
 				.map(|(key, track)| (track.track_number, key.clone()))
 				.min();
-			if let Some((_, key)) = failed {
-				let Some(source) = source? else {
-					continue;
-				};
-				self.spares.remove(&name);
-				let track = self.tracks.get_mut(&key).expect("a failed track");
-				tracing::info!(track = %name, replaces = %track.rendition, "continuing a failed rendition");
-				track.rebind(&key, source, &mut self.jitter)?;
-				let failed = std::mem::replace(&mut track.rendition, name);
-				if kind == TrackKind::Video {
-					track.config = catalog.video.renditions.get(&track.rendition).cloned();
-					track.reorder = None;
+			let Some((_, key)) = failed else {
+				if !self
+					.tracks
+					.values()
+					.any(|track| track.kind == kind && !track.finished())
+				{
+					return Err(Error::HeaderAddedTrack(name).into());
 				}
-				self.replaced.insert(failed);
 				continue;
+			};
+			let source = match kind {
+				TrackKind::Video => {
+					ExportSource::for_video(&self.source, &name, &catalog.video.renditions[&name], self.delay)?
+				}
+				TrackKind::Audio => {
+					ExportSource::for_audio(&self.source, &name, &catalog.audio.renditions[&name], self.delay)?
+				}
+			};
+			let Some(source) = source else {
+				continue;
+			};
+			self.spares.remove(&name);
+			let track = self.tracks.get_mut(&key).expect("a failed track");
+			tracing::info!(track = %name, replaces = %track.rendition, "continuing a failed rendition");
+			track.rebind(&key, source, &mut self.jitter)?;
+			let failed = std::mem::replace(&mut track.rendition, name);
+			if kind == TrackKind::Video {
+				track.config = catalog.video.renditions.get(&track.rendition).cloned();
+				track.reorder = None;
 			}
-			if !self
-				.tracks
-				.values()
-				.any(|track| track.kind == kind && !track.finished())
-			{
-				return Err(Error::HeaderAddedTrack(name).into());
-			}
+			self.replaced.insert(failed);
+			continued = true;
 		}
-		Ok(())
+		Ok(continued)
 	}
 
 	fn update_catalog(&mut self, mut catalog: Catalog) -> Result<()> {
@@ -752,7 +781,7 @@ impl<S: Stream> Export<S> {
 				}
 			}
 			self.catalog_snapshot = Some(catalog);
-			return self.settle_spares();
+			return self.settle_spares().map(|_| ());
 		}
 
 		// Nothing went out yet, so a rendition that left the catalog is dropped, and one the
@@ -807,13 +836,17 @@ impl<S: Stream> Export<S> {
 		let Some(catalog) = self.catalog_snapshot.as_ref() else {
 			return false;
 		};
-		!self.tracks.is_empty()
-			&& self.tracks.values().all(|t| t.source.header_ready())
-			&& catalog.video.renditions.iter().all(|(name, config)| {
-				self.tracks
-					.get(name)
-					.is_some_and(|track| track.source.video_geometry_ready(config))
-			})
+		// A track that ended before its codec config can't be declared, and holds nothing back.
+		self.tracks.iter().any(|(name, track)| declarable(catalog, name, track))
+			&& self
+				.tracks
+				.iter()
+				.all(|(name, track)| track.finished() || declarable(catalog, name, track))
+			&& catalog
+				.video
+				.renditions
+				.keys()
+				.all(|name| self.tracks.contains_key(name))
 	}
 
 	fn build_header(&mut self) -> Result<Bytes> {
@@ -836,6 +869,13 @@ impl<S: Stream> Export<S> {
 		let video = catalog.video.renditions.keys().map(|name| (name, TrackKind::Video));
 		let audio = catalog.audio.renditions.keys().map(|name| (name, TrackKind::Audio));
 		for (name, kind) in video.chain(audio) {
+			if self
+				.tracks
+				.get(name)
+				.is_some_and(|track| track.finished() && !declarable(catalog, name, track))
+			{
+				continue;
+			}
 			let track = self.tracks.get_mut(name).ok_or_else(|| match kind {
 				TrackKind::Video => Error::MissingVideoTrack(name.clone()),
 				TrackKind::Audio => Error::MissingAudioTrack(name.clone()),

@@ -9163,6 +9163,55 @@ async fn a_failed_rendition_is_replaced_while_the_rest_plays_on() {
 	);
 }
 
+/// A video that fails before supplying its codec configuration leaves the program to the audio,
+/// which plays on without it.
+#[tokio::test(start_paused = true)]
+async fn a_track_failing_before_its_config_leaves_the_header_to_the_rest() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	let vtrack = broadcast
+		.create_track("0.avc3", hang::container::track_info(hang::catalog::PRIORITY.video))
+		.unwrap();
+	let mut cfg = VideoConfig::new(H264 {
+		profile: 0x42,
+		constraints: 0xc0,
+		level: 0x1f,
+		inline: true,
+	});
+	cfg.container = Container::Legacy;
+	catalog
+		.modify()
+		.unwrap()
+		.video
+		.renditions
+		.insert("0.avc3".to_string(), cfg);
+	let video = Producer::new(vtrack, HangContainer::Legacy(crate::container::Kind::Data));
+	let mut audio = aac_rendition(&mut broadcast, &mut catalog, "0.aac");
+
+	let mut export = open_export(crate::source::announced(&consumer).await, RECORDING_MAX_AGE)
+		.await
+		.unwrap()
+		.with_replay();
+	for ms in (0..100).step_by(20) {
+		write_aac(&mut audio, ms);
+	}
+	let mut frames = poll_frames(&mut export);
+	assert_eq!(pes_count(&frames), 0, "the program waits on the video's config");
+
+	video.abort(moq_net::Error::Transport("camera lost".into()));
+	for ms in (100..200).step_by(20) {
+		write_aac(&mut audio, ms);
+	}
+	let _finished = audio.finish().unwrap();
+	catalog.finish().unwrap();
+
+	let (rest, end) = drain_to_end(&mut export).await;
+	end.expect("a video failing before its config does not end the export");
+	frames.extend(rest);
+	assert_eq!(pes_count(&frames), 10, "every audio frame went out");
+}
+
 /// Publish an empty catalog at `live` under `route`.
 fn publish_live<E: crate::catalog::hang::CatalogExt>(
 	origin: &moq_net::origin::Producer,

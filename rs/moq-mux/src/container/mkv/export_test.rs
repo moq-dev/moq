@@ -1017,6 +1017,67 @@ async fn a_failed_rendition_continues_on_its_replacement() {
 	}
 }
 
+/// An audio-only export whose replacement was listed before the failure reads it from the poll
+/// that continues the failed track: nothing else would wake the export for its first frames.
+#[tokio::test(start_paused = true)]
+async fn a_continued_track_wakes_the_export() {
+	use std::future::Future;
+
+	let mut config = hang::catalog::AudioConfig::new(hang::catalog::AAC { profile: 2 }, 44100, 2);
+	config.description = Some(Bytes::from_static(&[0x12, 0x10]));
+	let mut live = Live::audio(config);
+	live.track.write(raw_frame(0, b"old", true)).unwrap();
+	let mut exporter = crate::container::mkv::Export::new(live.source().await, live.catalog_stream().await)
+		.with_fragment_duration(std::time::Duration::ZERO);
+	let mut out = drain_now(&mut exporter).await.unwrap();
+	let mut replacement = add_aac(&mut live);
+	out.extend(drain_now(&mut exporter).await.unwrap());
+
+	let woken = std::sync::Arc::new(crate::container::test_util::Woken::default());
+	let waker = std::task::Waker::from(woken.clone());
+	let mut cx = std::task::Context::from_waker(&waker);
+	let mut next = Box::pin(exporter.next());
+	assert!(next.as_mut().poll(&mut cx).is_pending());
+	live.track.abort(moq_net::Error::Transport("audio device lost".into()));
+	assert!(woken.take(), "the failure woke the export");
+	assert!(next.as_mut().poll(&mut cx).is_pending());
+	replacement.write(raw_frame(200_000, b"new", true)).unwrap();
+	kio::clock::sleep(std::time::Duration::from_millis(10)).await;
+	assert!(woken.take(), "the replacement's frames woke the export");
+	drop(next);
+
+	let _finished = replacement.finish().unwrap();
+	live.catalog.finish().unwrap();
+	while let Some(chunk) = exporter.next().await.unwrap() {
+		out.extend_from_slice(&chunk);
+	}
+	let payloads: Vec<Vec<u8>> = blocks(out).into_iter().map(|(_, payload)| payload).collect();
+	assert_eq!(payloads, [b"old".to_vec(), b"new".to_vec()]);
+}
+
+/// A video track that fails before its codec configuration declares nothing, so the header goes
+/// out with the audio that still plays.
+#[tokio::test(start_paused = true)]
+async fn a_track_failing_before_its_config_leaves_the_header_to_the_rest() {
+	let mut live = Live::avc3();
+	let mut audio = add_aac(&mut live);
+	audio.write(raw_frame(0, b"aud", true)).unwrap();
+	let mut exporter = crate::container::mkv::Export::new(live.source().await, live.catalog_stream().await);
+	assert!(
+		drain_now(&mut exporter).await.unwrap().is_empty(),
+		"the header waits on the video"
+	);
+	live.track.abort(moq_net::Error::Transport("camera lost".into()));
+	audio.write(raw_frame(20_000, b"aud", true)).unwrap();
+	let _finished = audio.finish().unwrap();
+	live.catalog.finish().unwrap();
+	let mut out = Vec::new();
+	while let Some(chunk) = exporter.next().await.unwrap() {
+		out.extend_from_slice(&chunk);
+	}
+	assert_eq!(blocks(out).len(), 2, "the audio went out");
+}
+
 /// A rendition that joins after the header waits only while a declared track of its kind could
 /// still fail: once that one ends cleanly, it is a track the header never declared.
 #[tokio::test(start_paused = true)]

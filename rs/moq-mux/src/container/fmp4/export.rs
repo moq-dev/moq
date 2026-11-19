@@ -915,11 +915,15 @@ impl<S: Stream> Export<S> {
 					}
 				}
 			}
+			let mut continued = false;
 			for (name, err) in lost {
-				self.survive(&name, err)?;
+				continued |= self.survive(&name, err)?;
 			}
-			// A track that ended may have been the last a spare could continue.
-			self.settle_spares()?;
+			// A track that ended may have been the last a spare could continue. A continued track's
+			// new source is read before parking, since nothing else would wake the export for it.
+			if self.settle_spares()? || continued {
+				continue;
+			}
 
 			// 3. Emit the init segment once every track can be described, then the
 			// fragments queued while it waited.
@@ -1215,7 +1219,7 @@ impl<S: Stream> Export<S> {
 		}
 		self.replaced.retain(|name| listed.contains(name));
 		self.spares = spares;
-		self.settle_spares()
+		self.settle_spares().map(|_| ())
 	}
 
 	/// Whether the export outlives the failure of track `name`, which ended it.
@@ -1224,7 +1228,9 @@ impl<S: Stream> Export<S> {
 	/// only that rendition ends: a publisher that loses a source, such as a microphone, may list
 	/// a replacement, which continues it then. With nothing left reading, the failure is the
 	/// export's, as before.
-	fn survive(&mut self, name: &str, err: crate::Error) -> Result<()> {
+	///
+	/// Returns whether a spare continued a track, whose new source has yet to be polled.
+	fn survive(&mut self, name: &str, err: crate::Error) -> Result<bool> {
 		// Before the init a track that could not be described declares nothing.
 		if !self.init.written()
 			&& let Some(track) = self.tracks.get(name)
@@ -1232,7 +1238,7 @@ impl<S: Stream> Export<S> {
 		{
 			self.tracks.remove(name);
 		}
-		self.settle_spares()?;
+		let continued = self.settle_spares()?;
 		if !self
 			.tracks
 			.values()
@@ -1243,48 +1249,72 @@ impl<S: Stream> Export<S> {
 		if self.tracks.get(name).is_some_and(Fmp4Track::lost) {
 			tracing::warn!(track = name, %err, "rendition failed; the export keeps its other media");
 		}
-		Ok(())
+		Ok(continued)
 	}
 
 	/// Continue each failed track with a spare of its medium, holding the other spares while a
-	/// track of their medium still reads. A spare with neither is a new rendition the init never
-	/// declared, which fails the export.
-	fn settle_spares(&mut self) -> Result<()> {
+	/// track of their medium still reads. Failing that, a spare continues a declared track of its
+	/// medium that left the catalog, which may have failed unread as its rendition left: a
+	/// publisher can retire the failed rendition in the snapshot that lists its replacement. A
+	/// spare with none of these is a new rendition the init never declared, which fails the
+	/// export. Returns whether a spare continued a track, whose new source has yet to be polled.
+	fn settle_spares(&mut self) -> Result<bool> {
 		let mut names: Vec<String> = self.spares.keys().cloned().collect();
 		names.sort();
+		let mut continued = false;
 		for name in names {
 			let is_video = self.spares[&name].is_video();
-			let failed = self
-				.tracks
-				.iter()
-				.filter(|(_, track)| track.is_video == is_video && track.lost())
-				.map(|(failed, track)| (track.track_id, failed.clone()))
-				.min();
-			if let Some((_, failed)) = failed {
-				let config = self.spares.remove(&name).expect("a listed spare");
-				let Some(source) = config.subscribe(&self.source, &name, self.delay)? else {
-					continue;
-				};
-				let mut track = self.tracks.remove(&failed).expect("a failed track");
-				let Phase::Lost(previous) = std::mem::replace(&mut track.phase, Phase::Stopped) else {
-					unreachable!("picked a lost track");
-				};
-				tracing::info!(track = %name, replaces = %failed, "continuing a failed rendition");
-				track.moved();
-				track.rejoin(&name, config, source.continuing(&previous.source))?;
-				self.tracks.insert(name.clone(), track);
-				self.replaced.insert(failed);
-				continue;
-			}
+			let medium = |track: &Fmp4Track| track.is_video == is_video;
+			let pick = |tracks: &HashMap<String, Fmp4Track>, phase: fn(&Phase) -> bool| {
+				tracks
+					.iter()
+					.filter(|(_, track)| medium(track) && phase(&track.phase))
+					.map(|(key, track)| (track.track_id, key.clone()))
+					.min()
+					.map(|(_, key)| key)
+			};
 			let reading = self
 				.tracks
 				.values()
-				.any(|track| track.is_video == is_video && matches!(track.phase, Phase::Reading(_)));
-			if !reading {
+				.any(|track| medium(track) && matches!(track.phase, Phase::Reading(_)));
+			let lost = pick(&self.tracks, |phase| matches!(phase, Phase::Lost(_)));
+			let track = match lost {
+				Some(key) => self.tracks.remove(&key).map(|track| (key, track)),
+				None if reading => continue,
+				None => match pick(&self.tracks, |phase| matches!(phase, Phase::Departed(_))) {
+					Some(key) => self.tracks.remove(&key).map(|track| (key, track)),
+					None => pick(&self.departed, |_| true).and_then(|key| self.departed.remove_entry(&key)),
+				},
+			};
+			let Some((previous, mut track)) = track else {
 				return Err(Error::TrackAdded(name).into());
-			}
+			};
+			let config = self.spares.remove(&name).expect("a listed spare");
+			let Some(source) = config.subscribe(&self.source, &name, self.delay)? else {
+				// The catalog entry names no track to read, so the declared track stays as it was.
+				match track.phase {
+					Phase::Departed(_) if track.subscription().is_none() && track.buffer.is_empty() => {
+						self.departed.insert(previous, track)
+					}
+					_ => self.tracks.insert(previous, track),
+				};
+				continue;
+			};
+			let source = match std::mem::replace(&mut track.phase, Phase::Stopped) {
+				Phase::Lost(failed) => {
+					self.replaced.insert(previous.clone());
+					source.continuing(&failed.source)
+				}
+				Phase::Departed(resume) => source.resuming(&resume),
+				_ => unreachable!("picked a lost or departed track"),
+			};
+			tracing::info!(track = %name, replaces = %previous, "continuing a declared rendition");
+			track.moved();
+			track.rejoin(&name, config, source)?;
+			self.tracks.insert(name, track);
+			continued = true;
 		}
-		Ok(())
+		Ok(continued)
 	}
 
 	/// The bytes of media the export holds between its sources and the output.

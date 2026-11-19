@@ -607,8 +607,13 @@ impl<S: Stream> Export<S> {
 				}
 			}
 		}
+		let mut continued = false;
 		for (name, err) in lost {
-			self.survive(&name, err)?;
+			continued |= self.survive(&name, err)?;
+		}
+		// A continued track's new source is read now, since nothing else would wake the export for it.
+		if continued {
+			return self.fill(waiter);
 		}
 		Ok(())
 	}
@@ -618,9 +623,9 @@ impl<S: Stream> Export<S> {
 	/// A listed rendition of its kind and codec continues it at once. Otherwise, while another
 	/// track still reads, only that rendition ends: a publisher that loses a source, such as a
 	/// microphone, may list a replacement, which continues it then. With nothing left reading,
-	/// the failure is the export's, as before.
-	fn survive(&mut self, name: &str, err: crate::Error) -> crate::Result<()> {
-		self.replace_lost()?;
+	/// the failure is the export's, as before. Returns whether a track continued on another rendition.
+	fn survive(&mut self, name: &str, err: crate::Error) -> crate::Result<bool> {
+		let continued = self.replace_lost()?;
 		if self.tracks().all(FlvTrack::finished) {
 			return Err(err);
 		}
@@ -630,16 +635,18 @@ impl<S: Stream> Export<S> {
 		{
 			tracing::warn!(track = name, %err, "rendition failed; the export keeps its other media");
 		}
-		Ok(())
+		Ok(continued)
 	}
 
 	/// Continue each track that failed after the header on a listed rendition no track reads,
 	/// of its kind and codec, best first: the header fixed the tag shape, so a rendition of
-	/// another codec cannot continue it.
-	fn replace_lost(&mut self) -> crate::Result<()> {
+	/// another codec cannot continue it. Returns whether a track continued, whose new source has
+	/// yet to be polled.
+	fn replace_lost(&mut self) -> crate::Result<bool> {
 		if !self.header_emitted {
-			return Ok(());
+			return Ok(false);
 		}
+		let mut continued = false;
 		for index in 0..self.video.len() {
 			let track = &self.video[index];
 			if track.read != Read::Lost {
@@ -664,6 +671,7 @@ impl<S: Stream> Export<S> {
 			track.dts_reserve = dts_reserve(&config);
 			track.config = Some(config);
 			self.replaced.insert(track.replace(name, source));
+			continued = true;
 		}
 		for index in 0..self.audio.len() {
 			let track = &self.audio[index];
@@ -685,8 +693,9 @@ impl<S: Stream> Export<S> {
 				continue;
 			};
 			self.replaced.insert(self.audio[index].replace(name, source));
+			continued = true;
 		}
-		Ok(())
+		Ok(continued)
 	}
 
 	/// Whether rendition `name`, carried in `container`, is free to continue a failed track among
@@ -718,15 +727,14 @@ impl<S: Stream> Export<S> {
 				track.config = Some(config.clone());
 			}
 		}
+		self.replaced
+			.retain(|name| catalog.video.renditions.contains_key(name) || catalog.audio.renditions.contains_key(name));
+		self.listed = catalog.clone();
 		if !self.header_emitted {
 			self.bind_video(&catalog)?;
 			self.bind_audio(&catalog)?;
 		} else {
 			self.rebind(&catalog)?;
-			self.replaced.retain(|name| {
-				catalog.video.renditions.contains_key(name) || catalog.audio.renditions.contains_key(name)
-			});
-			self.listed = catalog.clone();
 			self.replace_lost()?;
 			if self.multitrack
 				&& (catalog.video.renditions.len() > self.video.len()
@@ -885,11 +893,12 @@ impl<S: Stream> Export<S> {
 		Ok(())
 	}
 
-	/// Header is ready once at least one track is bound and every bound track's
-	/// [`ExportSource`] has resolved its codec config (from the catalog
-	/// `description` or synthesized by the Avc3 transform).
+	/// Header is ready once a bound track and every bound track still reading has resolved its
+	/// codec config through its [`ExportSource`] (from the catalog `description` or synthesized by
+	/// the Avc3 transform).
 	fn header_ready(&self) -> bool {
-		self.has_tracks() && self.tracks().all(|t| t.source.header_ready())
+		// A track that ended before its codec config has no sequence header, and holds nothing back.
+		self.tracks().any(|t| t.source.header_ready()) && self.tracks().all(|t| t.finished() || t.source.header_ready())
 	}
 
 	/// Build the FLV file header plus every bound track's sequence-header tag.
@@ -899,11 +908,13 @@ impl<S: Stream> Export<S> {
 		// FLV file header: signature, version 1, type flags, data offset = 9.
 		out.put_slice(b"FLV");
 		out.put_u8(1);
+		// A track that ended before its codec config is left out: it has nothing to announce.
+		let declared = |track: &FlvTrack| !track.finished() || track.source.header_ready();
 		let mut flags = 0u8;
-		if !self.video.is_empty() {
+		if self.video.iter().any(declared) {
 			flags |= 0x01;
 		}
-		if !self.audio.is_empty() {
+		if self.audio.iter().any(declared) {
 			flags |= 0x04;
 		}
 		out.put_u8(flags);
@@ -911,14 +922,16 @@ impl<S: Stream> Export<S> {
 		// PreviousTagSize0 is always zero.
 		out.put_u32(0);
 
-		for track in self.video.iter().chain(&self.audio) {
+		for track in self.video.iter().chain(&self.audio).filter(|track| declared(track)) {
 			if let Some(config) = track.config_record()? {
 				let (tag_type, body) = self.sequence_header(track, &config);
 				write_tag(&mut out, tag_type, 0, &body)?;
 			}
 		}
 		for track in self.video.iter_mut().chain(&mut self.audio) {
-			track.announced = track.config_record()?;
+			if declared(track) {
+				track.announced = track.config_record()?;
+			}
 		}
 		// A group decodes its first `reorder` frames a millisecond apart before its earliest
 		// presentation, so the deepest declaration bounds how far before zero a DTS can fall.

@@ -3129,10 +3129,13 @@ where
 		}
 	}
 
-	/// Header is ready when every track's [`ExportSource`] has resolved its
-	/// codec config (from the catalog `description`, or built by the transform).
+	/// Header is ready when a track, and every track still reading, has resolved its codec
+	/// config through its [`ExportSource`] (from the catalog `description`, or built by the
+	/// transform). A track that ended before its config holds nothing back.
 	fn header_ready(&self) -> bool {
-		self.program.tracks.values().all(|t| t.source.header_ready())
+		let tracks = &self.program.tracks;
+		tracks.values().any(|t| t.source.header_ready())
+			&& tracks.values().all(|t| t.read != Read::Live || t.source.header_ready())
 	}
 
 	/// Every video track has buffered its first frame (the keyframe) or finished.
