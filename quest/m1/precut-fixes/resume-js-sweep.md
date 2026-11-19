@@ -44,10 +44,22 @@ Replay a counterexample by adding it to the `regressions` test.
    `[1, 3)` as arrived, "the gap below it too, given up early as a fold would",
    so the backfill copy is let go before group 1 lands. Rust's model never
    forgets that drop because its pool tick (`Pool::now`) moves only when the
-   pool driver polls, while JS's `Pool.now()` reads the clock on demand. Decide
-   whether the forget rule or the JS clock is wrong: Rust in production polls
-   its pool and may share the defect. Seed 6 fails the same way at 16,450
-   cases, also a give-up followed by `expire`.
+   pool driver polls, while JS's `Pool.now()` reads the clock on demand. Rust in
+   production polls its pool and may share the defect. Seed 6 fails the same
+   way at 16,450 cases, also a give-up followed by `expire`.
+
+   Decided 2026-11-19 (coordinator, maintainer away, merge granted): decide by
+   test. Port this expired-drop counterexample (seeds 6 and 7) to a Rust test
+   driven by a clock that advances only when polled, the way JS reads it. If
+   Rust fails, the drop rule is wrong: fix it in both languages. If Rust
+   passes, fix how JS reads its clock.
+
+Nightly's seed 1218508351 (run
+[44342367698](https://github.com/moq-dev/moq/actions/runs/44342367698)), which
+`quest/m0/nightly/js-resume-window.md` tracked, passes 4096 cases since
+[moq-dev/moq#9115](https://github.com/moq-dev/moq/pull/9115). That quest's
+partial branch `fix/js-resume-window-wip` (`0f1b73d365`) is superseded by
+#9115's window port and holds nothing more; delete it when this quest lands.
 
 Public API: none. Wire: none.
 
