@@ -15,6 +15,7 @@ questions to a harness. For builds and CI selection, see the
 | [registry smoke](smoke/README.md) | `just test smoke` | published packages install and interoperate; see the guide for matrix selection |
 | [browser media](interop/README.md) | `just test media` | browser capture and playback deliver video and audio through publication lifecycle changes |
 | [failure drills](drill/README.md) | `just test drill` | relay and transport failures terminate or recover as expected |
+| [mesh replay](mesh-replay/README.md) | `just test mesh-replay` | how long a mesh of real relays takes to feed every reader again and go quiet after link reopens, a crash, and a roll between the newest release and this checkout, and the control traffic each costs; the guide lists what fails a run |
 | [ts](ts/README.md) | `just test ts` | the subscriber's `export ts` output is IRD-compliant |
 | [native-play](native-play/README.md) | `just test native-play` | the shipped headless player follows overlapping publishers and fallback through decoded PCM on a private Linux null audio device |
 | [audio-quality](audio-quality/README.md) | `just test audio-quality` | browser and native audio playout stay within budget over an impaired path |

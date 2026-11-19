@@ -929,6 +929,18 @@ class Reader implements ResumeSource {
 		return undefined;
 	}
 
+	judgedGroup(key: bigint): GroupConsumer | undefined {
+		for (let index = this.#copies.length - 1; index >= 0; index--) {
+			const copy = this.#copies[index];
+			const group = hooks.cachedGroup(copy.sub, key);
+			if (!group) continue;
+			// Judged by the copy it is read from: this reader's own timeline stays empty.
+			hooks.expireGroup(group, hooks.staleAt(copy.sub, key));
+			return this.#handOut(copy, group);
+		}
+		return undefined;
+	}
+
 	/**
 	 * `copy` handed out `key`. The serving copy's first group bounds the copies it replaced
 	 * just below it: what they hold under it may be groups the new route never has, and what
@@ -2549,6 +2561,9 @@ export class Front {
 					adopt: () => {
 						current.release();
 						current = next.source;
+						// Its fetch may hold its subscription until its reader lets go, and the
+						// reader is now `fetched.group`.
+						void hooks.groupReleased(fetched.group).then(() => next.group.close());
 					},
 					discard: () => {
 						next.group.close();

@@ -42,7 +42,6 @@ Fix whatever it finds that the sweep did not.
 ## Required
 
 - [Dead export and manifest sweep](/quest/m1/js-dead-code/sweep.md) - clears the findings known today, so this PR holds only the tool and what it newly finds
-- [js/common becomes a workspace](/quest/m1/js-dead-code/common-workspace.md) - without it, every tool misattributes the plugin imports
 
 ## Related
 

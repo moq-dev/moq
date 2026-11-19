@@ -1,7 +1,7 @@
+import { worklet } from "@moq/common/vite-plugin-worklet";
 import tailwindcss from "@tailwindcss/vite";
 import { resolve } from "path";
 import { defineConfig } from "vite";
-import { worklet } from "../../js/common/vite-plugin-worklet.ts";
 import { consoleOverlay } from "./console-overlay.ts";
 import { openTabs } from "./open-tabs.ts";
 

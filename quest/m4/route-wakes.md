@@ -56,8 +56,10 @@ record lives here, in m4 (rejected: moving this quest to m3; a separate m3
 quest for the record alone). It replaces that morning's decision to keep it
 in m3 with the benches. The measured cost above is about 4 µs a write, so
 the worst flap seen on a deployed mesh costs one relay a fraction of a
-second, and [the mesh replay](/quest/m2/multicast/mesh-replay.md) measures
-it on that mesh's graph before its links move to lite-07.
+second. The mesh replay (`just test mesh-replay --mesh <its graph>`) counts
+the route changes and rewrites a flap causes on that mesh's graph, which at
+that cost bounds the time, before its links move to lite-07; it does not time
+the writes itself.
 
 Decisions:
 

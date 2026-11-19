@@ -282,7 +282,7 @@ async def test_video_publish_consume():
     route = origin.route("video-test")
     broadcast = route.broadcast
     media = moq.media.TrackProducer.video(
-        broadcast, moq.media.VideoInit(format=moq.media.VideoFormat.AVC3, data=h264_init())
+        broadcast, moq.media.VideoInit(format=moq.media.VideoFormat.H264, data=h264_init())
     )
 
     consumer = origin.consume()
@@ -321,7 +321,7 @@ async def test_video_publish_named_track():
     broadcast = route.broadcast
     media = moq.media.TrackProducer.video(
         broadcast,
-        moq.media.VideoInit(format=moq.media.VideoFormat.AVC3, data=h264_init()),
+        moq.media.VideoInit(format=moq.media.VideoFormat.H264, data=h264_init()),
         target=moq.media.Named("hd"),
     )
     assert media.demand().name == "hd"

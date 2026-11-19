@@ -549,7 +549,7 @@ impl Pad {
 					&mut broadcast,
 					reserved,
 					requested,
-					import::VideoFormat::Avc3,
+					import::VideoFormat::H264,
 					&[],
 					container,
 				)?;
@@ -560,7 +560,7 @@ impl Pad {
 					&mut broadcast,
 					reserved,
 					requested,
-					import::VideoFormat::Hev1,
+					import::VideoFormat::H265,
 					&[],
 					container,
 				)?;
@@ -722,7 +722,7 @@ impl Pad {
 		init: &[u8],
 		container: hang::catalog::Container,
 	) -> Result<(import::Track, String)> {
-		let name = Self::track_name(broadcast, requested, &format!(".{format}"));
+		let name = Self::track_name(broadcast, requested, format.track_suffix());
 		let request = broadcast
 			.reserve_track(name.clone())
 			.with_context(|| format!("cannot reserve track {name}"))?;
@@ -741,7 +741,7 @@ impl Pad {
 		init: &[u8],
 		container: hang::catalog::Container,
 	) -> Result<(import::Track, String)> {
-		let name = Self::track_name(broadcast, requested, &format!(".{format}"));
+		let name = Self::track_name(broadcast, requested, format.track_suffix());
 		let request = broadcast
 			.reserve_track(name.clone())
 			.with_context(|| format!("cannot reserve track {name}"))?;

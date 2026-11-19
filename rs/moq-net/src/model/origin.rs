@@ -1633,7 +1633,7 @@ struct Horizon {
 	/// hidden. `Some(UNKNOWN)` marks an anonymous peer: no hop is excluded, but
 	/// local-only broadcasts are not advertised. `None` is a local reader.
 	exclude: Option<Hop>,
-	/// Hide the routes that entered from a cluster peer ([`Consumer::local_view`]).
+	/// Hide the routes that entered from a cluster peer ([`Consumer::local`]).
 	local: bool,
 	/// Hide the routes learned on an upstream link, because this reader is one
 	/// ([`Link::Upstream`]): a relay never transits between two upstreams.
@@ -2617,7 +2617,7 @@ impl Producer {
 				announcement: entry,
 				control: kio::Lock::new(control),
 				forwarded: false,
-				_keepalive: self.tasks.keepalive(),
+				keepalive: std::sync::Mutex::new(Some(self.tasks.keepalive())),
 			}),
 			broadcast: source.clone(),
 		};
@@ -2842,7 +2842,7 @@ impl Producer {
 				announcement,
 				control: kio::Lock::new(control),
 				forwarded,
-				_keepalive: self.tasks.keepalive(),
+				keepalive: std::sync::Mutex::new(Some(self.tasks.keepalive())),
 			}),
 			server: serve,
 			publisher,
@@ -3180,8 +3180,8 @@ struct RouteState {
 	/// the route ([`RouteKind::Offline`]), not that its origin ended it.
 	forwarded: bool,
 	/// A route is lifecycle work: the origin's driver keeps running for as long as one
-	/// lives, even once every producer handle is gone.
-	_keepalive: Keepalive,
+	/// lives, even once every producer handle is gone. `None` once [`Claim::disown`]ed.
+	keepalive: std::sync::Mutex<Option<Keepalive>>,
 }
 
 /// What a route advertises when it announces, changed under one lock so concurrent
@@ -3918,7 +3918,8 @@ impl kio::Task for FeedOwnClaims {
 }
 
 /// The driver's task firing the route node's timers on the origin's clock: a claim no
-/// route reaches going offline. It ends once nothing owns the origin.
+/// route reaches going offline. It ends once nothing owns the origin, letting go of what
+/// closed sessions left behind, since no timer would take it offline after.
 struct RouteTimer {
 	node: crate::route::Node,
 	deadline: crate::time::Deadline,
@@ -3930,6 +3931,7 @@ impl kio::Task for RouteTimer {
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		if self.origin.poll_orphaned(waiter).is_ready() {
+			self.node.release_orphans();
 			return Poll::Ready(());
 		}
 		loop {
@@ -4201,7 +4203,7 @@ impl DriverState {
 		// `route` holds across its attach: a concurrent create either
 		// finishes before this (the walk below cleans its entry up) or observes
 		// `closed` and fails with `Closed`.
-		let (servers, cursors, fronts) = {
+		let (servers, cursors, fronts, route_node) = {
 			let mut shared = self.shared.lock();
 			shared.closed = true;
 			// Fronts and parked requesters observe `closed` on their next pass.
@@ -4217,8 +4219,12 @@ impl DriverState {
 			for listener in &shared.listeners {
 				listener.queue.close();
 			}
-			(servers, cursors, fronts)
+			// The node holds what closed sessions left behind, and each of those holds this
+			// state: let go of it, or the two keep each other alive. Dropped outside the
+			// lock, since an orphan's release takes it.
+			(servers, cursors, fronts, shared.route_node.take())
 		};
+		drop(route_node);
 
 		// Reject requesters still parked on a remote front's channel: its watcher
 		// was cancelled above and will never resolve them.
@@ -6936,6 +6942,19 @@ struct PendingFront {
 }
 
 impl Claim {
+	/// Stop keeping the origin's driver running: what a closed session left behind is no
+	/// owner, and goes with the origin.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn disown(&self) {
+		let keepalive = self
+			.state
+			.keepalive
+			.lock()
+			.unwrap_or_else(|err| err.into_inner())
+			.take();
+		drop(keepalive);
+	}
+
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(super) fn request_validity(&self, path: &Path) -> Option<Selection> {
 		let shared = &self.state.announcement.shared;
@@ -7702,7 +7721,10 @@ impl Consumer {
 		}
 		let claims = Arc::new(std::sync::Mutex::new(claims));
 		let created = (node, Arc::downgrade(&claims));
-		shared.route_node = Some(created.clone());
+		// A torn-down origin keeps no node: nothing would let go of it again.
+		if !shared.closed {
+			shared.route_node = Some(created.clone());
+		}
 		drop(shared);
 		self.tasks.push(FeedOwnClaims {
 			claims,
@@ -7805,21 +7827,14 @@ impl Consumer {
 	}
 
 	/// A view of the routes that entered here: every route a handle marked
-	/// [`Link::Peer`] or [`Link::Upstream`] handle announced is hidden from [`Self::announced`] and never
-	/// resolved by [`Self::request`].
+	/// [`Link::Peer`] or [`Link::Upstream`] announced is hidden from [`Self::announced`]
+	/// and never resolved by [`Self::request`].
 	///
 	/// On a relay, this is what the relay ingests itself, from clients and
-	/// in-process producers, as opposed to what its cluster peers forward.
-	///
-	/// Public only behind the `test-support` feature: a test's door, not an API.
-	#[cfg(feature = "test-support")]
-	pub fn local(self) -> Self {
-		self.local_view()
-	}
-
-	/// See [`Self::local`].
-	#[cfg_attr(not(test), allow(dead_code, reason = "only tests read the local view"))]
-	pub(crate) fn local_view(mut self) -> Self {
+	/// in-process producers, as opposed to what its cluster peers forward. An embedder
+	/// that records, republishes, or meters each broadcast once, on the node that
+	/// ingests it, reads this view.
+	pub fn local(mut self) -> Self {
 		self.horizon.local = true;
 		self
 	}
@@ -9488,7 +9503,7 @@ mod tests {
 
 		// A local view never waits on a peer's routes.
 		let _peer = producer.clone().with_link(Link::Peer).snapshot("room");
-		assert!(producer.consume().local_view().routes().is_synced());
+		assert!(producer.consume().local().routes().is_synced());
 		assert!(!producer.consume().routes().is_synced());
 	}
 
@@ -13396,7 +13411,7 @@ mod tests {
 	async fn local_view_hides_peer_routes() {
 		let producer = origin(1).produce();
 		let peer = producer.clone().with_link(Link::Peer);
-		let mut local = producer.consume().local_view().routes();
+		let mut local = producer.consume().local().routes();
 
 		let _forwarded = peer
 			.forward("remote", RouteInfo::new().with_hops(hops(&[7])).with_via(origin(7)))
@@ -13423,7 +13438,7 @@ mod tests {
 		// while the full view queues the request on the peer's route.
 		let err = producer
 			.consume()
-			.local_view()
+			.local()
 			.request("remote/alice", None)
 			.now_or_never()
 			.expect("unroutable")
@@ -17305,7 +17320,7 @@ mod tests {
 			.consume()
 			.scope("project", &Patterns::from("**/*.chat".parse::<Pattern>().unwrap()))
 			.unwrap()
-			.local_view()
+			.local()
 			.with_stats(
 				registry
 					.tier(stats::Tier::default())
@@ -17317,7 +17332,7 @@ mod tests {
 		let resolved = consumer.request("cam.chat", None).await.unwrap();
 		let original = producer
 			.consume()
-			.local_view()
+			.local()
 			.request("project/cam.chat", None)
 			.await
 			.unwrap();

@@ -4302,6 +4302,12 @@ export class Subscriber {
 			const producer = subscriber.#state.producer;
 			return producer && cachedMirror(producer, key, from);
 		};
+		hooks.judgedGroup = (subscriber, key) => {
+			if (subscriber.#resume) return subscriber.#resume.judgedGroup(key);
+			const group = hooks.cachedGroup(subscriber, key);
+			if (group) hooks.expireGroup(group, hooks.staleAt(subscriber, key));
+			return group;
+		};
 		hooks.holdsGroup = (subscriber, key) => {
 			const producer = subscriber.#state.producer;
 			return producer !== undefined && cachedHolds(producer, key);

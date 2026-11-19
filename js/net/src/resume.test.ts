@@ -2,7 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { Duration, yieldNow } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { Signal } from "@moq/signals";
-import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
+import { Consumer as BroadcastConsumer, Producer as BroadcastProducer, type FetchFrom } from "./broadcast.ts";
 import { NotFound, SessionCode, SessionError, StreamCode, StreamError } from "./error.ts";
 import { type Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { WireRoute } from "./hop.ts";
@@ -1986,6 +1986,35 @@ test("a fetched group continues from the next route once its own fails", async (
 	stalled.abort(new StreamError(StreamCode.SessionClosed));
 	expect(dec.decode((await group.readFrame())?.payload)).toBe("5.1");
 	expect(await group.readFrame()).toBeUndefined();
+
+	front.consumer.close();
+	a.close();
+	b.close();
+});
+
+test("a held fetch lets go of the route it resumed onto once its reader releases the group", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	const stalled = ta.write(5n, 1, false);
+	front.serve(a.consume());
+	// Held, as the lite publisher asks while a FETCH reply waits for its acknowledgement.
+	const held: track.FetchGroupOptions & FetchFrom = { held: true };
+	const group = await front.consumer.track("seq").fetchGroup(5n, held);
+	expect(dec.decode((await group.readFrame())?.payload)).toBe("5.0");
+
+	tb.write(5n, 2);
+	front.serve(b.consume());
+	stalled.abort(new StreamError(StreamCode.SessionClosed));
+	expect(dec.decode((await group.readFrame())?.payload)).toBe("5.1");
+	expect(await group.readFrame()).toBeUndefined();
+	await settle();
+	expect(tb.producer.demand().wanted.peek()).toBe(true);
+
+	group.close();
+	await unwanted(tb.producer.demand());
 
 	front.consumer.close();
 	a.close();
