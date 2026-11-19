@@ -2805,13 +2805,19 @@ mod tests {
 	/// The fleet drain: a relay withdrawn from DNS sends an empty-URI GOAWAY with a
 	/// deadline, and the client lands on a healthy relay by resolving the configured
 	/// name again. The drained relay still accepts, so a cached resolve would land
-	/// right back on it. The live track hands over at a group boundary, and the old
-	/// session closes at our handover cap, well before the peer's own deadline.
+	/// right back on it. The drained session keeps delivering the live track until it
+	/// closes at our handover cap, well before the peer's own deadline.
+	///
+	/// The sockets are real but the clock is manual, so the cap passes only when the
+	/// test moves it: a slow host cannot close the drained session before it delivers.
+	/// Over moq-lite-06 the subscription stays on the drained session, since each
+	/// session's announcement serves an instance of its own.
 	#[tokio::test]
 	async fn a_fleet_drain_redials_through_a_fresh_resolve() {
-		const WAIT: Duration = Duration::from_secs(10);
+		use futures::FutureExt;
 		const HANDOVER: Duration = Duration::from_millis(500);
 		const DEADLINE: Duration = Duration::from_secs(30);
+		let clock = kio::clock::Manual::new().install(&tokio::runtime::Handle::current());
 
 		// Two relays of one fleet, serving the same live broadcast.
 		let origin = crate::origin::spawn();
@@ -2827,8 +2833,6 @@ mod tests {
 		let subscriber = crate::origin::spawn();
 		let mut config = crate::connect::Config::default();
 		config.goaway.handover = Some((HANDOVER).into());
-		// A session younger than the healthy bar counts as redirected immediately and
-		// waits out a backoff, which this test is not about.
 		config.backoff.initial = Some((FAST).into());
 		config.backoff.healthy = Some((FAST).into());
 		let client = config
@@ -2838,31 +2842,29 @@ mod tests {
 		let url: Url = format!("tcp://{HOST}:1/").parse().unwrap();
 		let _connection = client.connect(url);
 
-		let session_a = kio::clock::timeout(WAIT, accepted_a.recv()).await.unwrap().unwrap();
+		let session_a = accepted_a.recv().await.unwrap();
 
-		let consumer = subscriber.consume();
-		let cam = kio::clock::timeout(WAIT, consumer.follow("cam", None).unwrap().available())
-			.await
+		let cam = subscriber
+			.consume()
+			.follow("cam", None)
 			.unwrap()
+			.available()
+			.await
 			.unwrap()
 			.unwrap();
 		let mut sub = cam.track("video").unwrap().subscribe(None).await.unwrap();
 
-		let mut group = track
-			.append_group(
-				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
-			)
-			.unwrap();
+		let mut group = track.append_group(moq_net::Timestamp::from_millis(0).unwrap()).unwrap();
 		group
-			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"g0".as_ref())
+			.write_frame(moq_net::Timestamp::from_millis(0).unwrap(), b"g0".as_ref())
 			.unwrap();
 		group.finish().unwrap();
-		let g0 = kio::clock::timeout(WAIT, sub.recv_group())
-			.await
-			.unwrap()
-			.unwrap()
-			.unwrap();
+		let g0 = sub.recv_group().await.unwrap().unwrap();
 		assert_eq!(g0.start, 0);
+
+		// A session younger than the healthy bar counts as redirected immediately and
+		// waits out a backoff, which this test is not about.
+		clock.advance(FAST);
 
 		// Withdraw A from DNS, then drain it.
 		crate::resolve::hosts::point(HOST, [addr_b]);
@@ -2871,34 +2873,30 @@ mod tests {
 			.goaway(moq_net::goaway::Goaway::new().with_timeout(Some(DEADLINE)))
 			.unwrap();
 
-		let _session_b = kio::clock::timeout(WAIT, accepted_b.recv())
+		let _session_b = accepted_b
+			.recv()
 			.await
-			.expect("never redialed through the fresh resolve")
-			.unwrap();
+			.expect("never redialed through the fresh resolve");
 
-		let mut group = track
-			.append_group(
-				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
-			)
-			.unwrap();
+		let mut group = track.append_group(moq_net::Timestamp::from_millis(1).unwrap()).unwrap();
 		group
-			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"g1".as_ref())
+			.write_frame(moq_net::Timestamp::from_millis(1).unwrap(), b"g1".as_ref())
 			.unwrap();
 		group.finish().unwrap();
-		let mut g1 = kio::clock::timeout(WAIT, sub.recv_group())
-			.await
-			.unwrap()
-			.unwrap()
-			.unwrap();
-		assert_eq!(g1.start, 1, "delivery resumes at the next group after the swap");
+		let mut g1 = sub.recv_group().await.unwrap().unwrap();
+		assert_eq!(g1.start, 1, "delivery continues at the next group during the handover");
 		assert_eq!(g1.read_frame().await.unwrap().unwrap().payload[..], b"g1"[..]);
-
-		kio::clock::timeout(WAIT, session_a.closed())
-			.await
-			.expect("the drained session never closed");
 		assert!(
-			drained.elapsed() < DEADLINE,
-			"the old session outlived the handover cap and waited for the peer's deadline"
+			session_a.closed().now_or_never().is_none(),
+			"the drained session closed before its handover cap while still serving"
+		);
+
+		clock.advance(HANDOVER);
+		session_a.closed().await;
+		assert_eq!(
+			drained.elapsed(),
+			HANDOVER,
+			"the old session closed at the handover cap, not the peer's deadline"
 		);
 		assert!(
 			accepted_a.try_recv().is_err(),
