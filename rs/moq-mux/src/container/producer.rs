@@ -1128,8 +1128,8 @@ impl<C: Container, R> std::ops::Deref for Producer<C, R> {
 mod tests {
 	use super::*;
 	use crate::catalog::hang::Container;
-	use moq_net::Timestamp;
 	use bytes::Bytes;
+	use moq_net::Timestamp;
 
 	/// Mint a standalone track for tests via a throwaway broadcast, since tracks are
 	/// born from their broadcast (no public `track::Producer::new`).
@@ -1616,7 +1616,11 @@ mod tests {
 			assert_eq!(producer.live_edge(), Some(Timestamp::from_micros(ended).unwrap()));
 			let _finished = producer.finish().unwrap();
 
-			assert_eq!(collect_ends(consumer).await, vec![Some(ended)], "cut({end:?}) then discontinuity");
+			assert_eq!(
+				collect_ends(consumer).await,
+				vec![Some(ended)],
+				"cut({end:?}) then discontinuity"
+			);
 		}
 	}
 

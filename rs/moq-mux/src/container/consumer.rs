@@ -3291,7 +3291,11 @@ mod tests {
 			matches!(read, Some(Read::End { group: 0, end }) if end == ts(40_000)),
 			"{read:?}"
 		);
-		assert_eq!(landed.elapsed(), Duration::from_millis(20) + max, "due, then a max delay late");
+		assert_eq!(
+			landed.elapsed(),
+			Duration::from_millis(20) + max,
+			"due, then a max delay late"
+		);
 
 		// The talker resumes later: a fresh group, no gap.
 		write_whole(&mut track, &[5_000_000], 5_020_000);
@@ -3303,7 +3307,10 @@ mod tests {
 	#[kio::test]
 	async fn an_export_waits_for_the_next_group_to_read_an_end() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
-		let mut reader = audio_reader(&track, Delay::default().with_min(Duration::ZERO).with_max(Duration::ZERO));
+		let mut reader = audio_reader(
+			&track,
+			Delay::default().with_min(Duration::ZERO).with_max(Duration::ZERO),
+		);
 		write_whole(&mut track, &[0], 20_000);
 
 		async fn next(

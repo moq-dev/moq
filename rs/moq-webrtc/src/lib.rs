@@ -336,7 +336,10 @@ mod tests {
 			.expect("WHEP negotiation timed out")
 			.unwrap();
 		at += 20_000;
-		assert_eq!(flowing!(&mut *old, at, OPUS_PACKET, next_payload(&mut played)), OPUS_PACKET);
+		assert_eq!(
+			flowing!(&mut *old, at, OPUS_PACKET, next_payload(&mut played)),
+			OPUS_PACKET
+		);
 
 		let _new = take_over(&origin).await;
 		push(&mut *old, at, OLD_PACKET);
@@ -458,7 +461,8 @@ mod tests {
 		let (_new, mut viewer) = raw_view_on(url, udp).await;
 		let _new_session = sessions.recv().await.unwrap();
 		let mut at = 40_000;
-		let played = flowing!(&mut *bridge, at, NEW_PACKET, received(&mut viewer)).expect("the new session never played");
+		let played =
+			flowing!(&mut *bridge, at, NEW_PACKET, received(&mut viewer)).expect("the new session never played");
 		assert!([OPUS_PACKET, NEW_PACKET].contains(&played.as_slice()), "{played:?}");
 		http.abort();
 	}

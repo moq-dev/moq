@@ -1304,7 +1304,10 @@ async fn unlaced_block_duration_does_not_use_track_default() {
 	}
 	assert_eq!(last, Some(40_000));
 	let (end, scale) = end.expect("the group ends whole");
-	assert_eq!(moq_net::Timestamp::new(end, scale).unwrap().as_micros().unwrap(), 80_000);
+	assert_eq!(
+		moq_net::Timestamp::new(end, scale).unwrap().as_micros().unwrap(),
+		80_000
+	);
 }
 
 /// The SPS outranks the Colour element, which still fills what the SPS leaves unsaid: here the

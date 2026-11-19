@@ -68,9 +68,10 @@ impl<F: Container> GroupConsumer<F> {
 								super::close_duration(last, bound);
 							}
 						} else {
-							self.latest = Some(self.latest.map_or(frame.timestamp, |latest| {
-								super::later(latest, frame.timestamp)
-							}));
+							self.latest = Some(
+								self.latest
+									.map_or(frame.timestamp, |latest| super::later(latest, frame.timestamp)),
+							);
 							self.pending.push_back(frame);
 						}
 					}

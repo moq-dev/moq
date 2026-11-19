@@ -111,7 +111,8 @@ impl Import {
 		let payload = frame.into_bytes();
 		// The packet states its own duration, so a cut without an end still ends the group whole
 		// where the packet does, which shows a reader whether the next group continues it.
-		let duration = super::packet_samples(&payload).and_then(|samples| moq_net::Timestamp::from_scale(samples.into(), 48_000).ok());
+		let duration = super::packet_samples(&payload)
+			.and_then(|samples| moq_net::Timestamp::from_scale(samples.into(), 48_000).ok());
 		self.track.write(Frame {
 			timestamp,
 			payload,
