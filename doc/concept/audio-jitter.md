@@ -586,6 +586,13 @@ interval in progress and any open stall, folds into the continued histogram as
 if that interval closed at the switch, judged by the outgoing track's join: a switch most often follows an outage,
 and would otherwise drop the outage's one observation.
 
+A subscription the viewer stops and starts again on the same path, as a pause or
+a hidden tab does, continues the same way. The stop says nothing about the path,
+as a [declared silence](#declared-silence) says nothing about it. Starting over
+would give the first outage after the resume a tenth of the histogram, so one
+late flush would hold the target near its own lateness for a half-life. A
+continued histogram gives that outage only `1 - FORGET`.
+
 ## At the speaker
 
 Audio is placed on the clock where it is heard, not where it is rendered. The
@@ -687,7 +694,7 @@ that interval is [stalled](#one-observation-per-stall), whose stall owns them.
 the work: after 1024 folds the retained weight is about 2e-8, so the cap changes
 no output an `f64` can represent.
 
-A receiver coming back from a pause is not cold: the evidence that survived
+A subscription whose arrivals stop and come back is not cold: the evidence that survived
 keeps decaying at the base rate. Only the weight the prior regained is replaced
 quickly, the same way it is at cold start, since it stands for no evidence at
 all.

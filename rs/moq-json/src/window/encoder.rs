@@ -376,7 +376,8 @@ impl<T: Serialize> Encoder<T> {
 		// Serialize before touching the window, so a value that can't be encoded leaves the encoder
 		// exactly as it was. Reading the record back out of its own bytes keeps the stored copy
 		// identical to what a push would have put on the wire.
-		let bytes = serde_json::to_vec(value)?;
+		// A header nests each record two containers deep, in its object and its `records` array.
+		let bytes = crate::strict::to_vec(value, 2)?;
 		let record: Value = serde_json::from_slice(&bytes)?;
 		if self.range().end >= MAX_INDEX {
 			return Err(crate::Error::Json("window index exceeds the safe integer range".into()));

@@ -32,8 +32,8 @@ name: Nightly
 # for the full set, so it rotates (see sh/rs/mutants.sh).
 #
 # `route-proof` type-checks the route rule's convergence proof with Agda, about
-# two minutes. The Rust side of its binding, the generated `Vectors.agda`, is
-# checked current by every PR's tests; the proof itself only changes when the
+# two minutes. The Rust side of its binding, the generated `Vectors.agda` and
+# `ClaimVectors.agda`, is checked current by every PR's tests; the proof itself only changes when the
 # rule does, which review checks.
 #
 # `quic-interop` runs moq-quic against other QUIC stacks through the QUIC
@@ -405,6 +405,7 @@ jobs:
         # `test route-sweep` checks random lite-07 meshes against the route rules from a fresh seed; PRs run a fixed 8.
         # It also runs the router's handoff sweeps over 20,000 fixed scenarios; PRs run 150.
         # It also runs the bandwidth probe's acceptance suite, of which PRs run the short cases.
+        # `test route-race` races a lite-07 relay's session tasks in seeded orders from a fresh seed; PRs run a fixed 16.
         # `test drill impaired` runs the relay drills over a freshly seeded shaper; PRs run loopback.
         # `rs cli-export` runs moq-cli's export process tests, which take tens of seconds of real time.
         # `rs hls-conformance` probes every segment moq-hls serves with ffprobe, against its playlists and manifest.
@@ -415,7 +416,7 @@ jobs:
         # `rs v4l2` streams moq-video's V4L2 capture from the kernel's vivid
         # virtual camera, a module load no pull request job should make.
         # `js worklet-matrix` loads `?worklet` output through the bundlers pinned in test/worklet.
-        recipe: ["gh test-integration", "rs doctest --workspace", "test drill-sensitivity", "rs uring", "test drain", "test json-properties", "test resume-model", "test route-sweep", "rs quic-sim", "rs rung-disable", "test drill impaired", "rs cli-export", "rs hls-conformance", "rs quic-stress", "rs audio-devices", "rs multicast", "rs render-sw", "test qmux", "rs v4l2", "js worklet-matrix"]
+        recipe: ["gh test-integration", "rs doctest --workspace", "test drill-sensitivity", "rs uring", "test drain", "test json-properties", "test resume-model", "test route-sweep", "test route-race", "rs quic-sim", "rs rung-disable", "test drill impaired", "rs cli-export", "rs hls-conformance", "rs quic-stress", "rs audio-devices", "rs multicast", "rs render-sw", "test qmux", "rs v4l2", "js worklet-matrix"]
         include:
           # Miri interprets kio's and moq-net's in-memory unsafe and moq-sock's and moq-uring's
           # control-message walks; too slow for the merge gate.

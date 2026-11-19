@@ -235,9 +235,10 @@ audit:
 
 # Outside nextest because the staticlib link alone outlasts its hang budget.
 
-# Compile and run libmoq's C fixtures, and the C doc samples, against libmoq.a. Must run on Unix.
-c-tests:
-    sh/rs/c-tests.sh
+# Compile and run libmoq's C fixtures, and the C doc samples, against libmoq.a; `--syntax` only compiles them against moq.h. Must run on Unix.
+[positional-arguments]
+c-tests *args:
+    sh/rs/c-tests.sh "$@"
 
 # The workspace-hack would supply third-party features a crate forgets to
 # declare, so CI runs this after `cargo hakari disable && cargo update

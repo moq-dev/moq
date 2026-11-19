@@ -163,7 +163,7 @@ export type Sample = {
 	audioBytes: number;
 	/** `AudioContext.state`, absent until the graph exists. */
 	audioContext?: string;
-	/** Playback timestamp reported by the render worklet, in milliseconds. */
+	/** Playback timestamp reported by the render worklet, in milliseconds, 0 until a frame anchors the ring. */
 	audioTimestamp?: number;
 	/** Whether the audio buffer is waiting to refill. */
 	audioStalled: boolean;
@@ -229,17 +229,25 @@ export type LongFrame = {
 /** The `window` property each page keeps its {@link LongFrame} log on. */
 export const LONG_FRAMES = "__moqLongFrames";
 
+/**
+ * Whether audio plays: the graph runs, the ring is not refilling, and a frame has anchored it. A
+ * declared silence is not a stall, so a ring that took a publisher's end before any audio, as a
+ * resume onto an on-demand encoder's ended epoch does, reads unstalled while it holds nothing.
+ */
+export function audioPlays(sample: Pick<Sample, "audioContext" | "audioStalled" | "audioTimestamp">): boolean {
+	return sample.audioContext === "running" && !sample.audioStalled && (sample.audioTimestamp ?? 0) > 0;
+}
+
 /** Whether a changed presented frame belongs to playback within the live bound. */
 export function reachesLive(observation: {
 	previous?: number;
 	source: number;
-	sample: Pick<Sample, "frameId" | "audioContext" | "audioStalled">;
+	sample: Pick<Sample, "frameId" | "audioContext" | "audioStalled" | "audioTimestamp">;
 	bound: number;
 }): boolean {
 	const { previous, source, sample, bound } = observation;
 	return (
-		sample.audioContext === "running" &&
-		!sample.audioStalled &&
+		audioPlays(sample) &&
 		previous !== undefined &&
 		sample.frameId !== undefined &&
 		sample.frameId !== previous &&

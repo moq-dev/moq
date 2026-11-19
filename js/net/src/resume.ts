@@ -364,7 +364,10 @@ interface Copy {
 	since?: Instant;
 	/** Groups still read that came from this copy, which keep a replaced copy subscribed. */
 	lease: number;
-	/** It handed out a group, so a failure is its route failing mid-serve rather than refusing. */
+	/**
+	 * It handed out a group, or got one it holds back for a placement, so a failure is its route
+	 * failing mid-serve rather than refusing.
+	 */
 	delivered?: boolean;
 	/**
 	 * One past the highest group the reader's window dropped from it, which it no longer offers
@@ -674,6 +677,10 @@ class Reader implements ResumeSource {
 		}
 		for (const copy of this.#copies) {
 			if (resolution.window.settled) break;
+			// A copy whose delivery failed places a time start past its last group as if nothing
+			// followed, but the front's next copy continues the track: only that copy knows which
+			// group holds it, until the track concludes.
+			if (!this.route.concluded && copyFailed(copy)) continue;
 			if (!copy.from || !sameRanges(copy.from, ranges)) continue;
 			// A closed copy's subscriber is no longer updated, so its own resolution is of the ranges
 			// it had then; the one it took when asked for these answers instead.
@@ -741,12 +748,13 @@ class Reader implements ResumeSource {
 	}
 
 	/**
-	 * Whether the reader's window names a group from `floor` up to `key` that `delivered` lacks.
-	 * Mirrors the Rust `Reader::owes_below`.
+	 * Whether the reader's window and cursor name a group from `floor` up to `key` that `delivered`
+	 * lacks: one outside the cursor never lands on a copy. Mirrors the Rust `Reader::owes_below`.
 	 */
 	#owesBelow(floor: bigint, key: bigint, delivered: Delivered): boolean {
+		const cursor = this.#shell.cursor.peek();
 		return this.#window()
-			.runs(floor, key)
+			.runs(max(floor, cursor.start), min(key, cursor.end ?? key))
 			.some((run) => delivered.gaps(run.start, run.end).length > 0);
 	}
 
@@ -777,6 +785,8 @@ class Reader implements ResumeSource {
 				for (let index = this.#copies.length - 1; index >= 0; index--) {
 					if (this.#resolution.window.settled) break;
 					const copy = this.#copies[index];
+					// As in #window, a failed copy leaves the placement to the copy continuing the track.
+					if (!this.route.concluded && copyFailed(copy)) continue;
 					if (copy.from && sameRanges(copy.from, ranges)) this.#resolve(copy.resolved ?? []);
 				}
 			}
@@ -933,6 +943,12 @@ class Reader implements ResumeSource {
 		return (end === undefined || key < end) && !delivered.has(key);
 	}
 
+	// Whether a failed copy's next group waits for a copy continuing the track to place the
+	// reader's window, which decides whether it goes out. Mirrors the Rust `Reader::poll_lowest`.
+	#waits(copy: Copy): boolean {
+		return !this.route.concluded && copyFailed(copy) && this.#window().pending;
+	}
+
 	tryGroup(ordered: boolean, delivered: Delivered, dispositions: boolean): Recv {
 		this.#delivered = delivered;
 		this.sync();
@@ -948,7 +964,7 @@ class Reader implements ResumeSource {
 		// The lowest group any copy holds next, in either order: a replaced copy's buffered group
 		// comes before a later one the serving copy already has. Arrival order still delivers a
 		// lower group that truly arrives later.
-		const { next, held } = this.#lowest(ordered, delivered);
+		const { next, owing } = this.#lowest(ordered, delivered);
 		if (next) {
 			const recv = take(next, ordered, this.#newest === undefined ? undefined : this.#newest + 1n);
 			if (recv.kind === "group") {
@@ -959,12 +975,22 @@ class Reader implements ResumeSource {
 			// A newer copy must not pass it and permanently discard it from sequence order.
 			if (ordered && recv.kind === "idle") return recv;
 		}
+		// The failed copies holding a group back for a placement, which still report their failure.
+		const held = new Set<Copy>();
 		// The serving copy first: it is the one that keeps delivering.
 		for (let index = this.#copies.length - 1; index >= 0; index--) {
 			const copy = this.#copies[index];
-			if (!this.#feeds(copy) || held.includes(copy)) continue;
+			if (!this.#feeds(copy) || owing.includes(copy)) continue;
 			for (;;) {
-				const recv = take(copy, ordered, this.#newest === undefined ? undefined : this.#newest + 1n);
+				const newest = this.#newest === undefined ? undefined : this.#newest + 1n;
+				// Its group stays there until placed, but how it ran out is still judged below. It got
+				// a group, so its route did not refuse the track.
+				if (this.#waits(copy) && hooks.peekGroup(copy.sub, ordered, newest) !== undefined) {
+					copy.delivered = true;
+					held.add(copy);
+					break;
+				}
+				const recv = take(copy, ordered, newest);
 				if (recv.kind === "group") {
 					const key = recv.group.start;
 					const deliverable = this.#deliverable(copy, key, delivered);
@@ -993,7 +1019,11 @@ class Reader implements ResumeSource {
 			const dropped = this.#tryDrop(delivered);
 			if (dropped) return dropped;
 		}
-		return this.#end((copy) => (typeof copy.done === "number" ? null : copy.done));
+		return this.#end((copy) => {
+			if (typeof copy.done === "number") return null;
+			const failed = held.has(copy) ? copy.sub.closed.peek() : undefined;
+			return copy.done ?? (failed instanceof Error ? failed : undefined);
+		});
 	}
 
 	/**
@@ -1130,9 +1160,9 @@ class Reader implements ResumeSource {
 	// The copy whose next group is the lowest deliverable one in the reader's window, dropping any
 	// it holds next that are not, and the copies whose ordered cursor is left on such a group
 	// because the window still owes a lower one that may yet land there.
-	#lowest(ordered: boolean, delivered: Delivered): { next?: Copy; held: Copy[] } {
+	#lowest(ordered: boolean, delivered: Delivered): { next?: Copy; owing: Copy[] } {
 		let lowest: { copy: Copy; key: bigint } | undefined;
-		const held: Copy[] = [];
+		const owing: Copy[] = [];
 		const floor = ordered ? (delivered.runEnd(0n) ?? 0n) : 0n;
 		for (const copy of this.#copies) {
 			if (!this.#feeds(copy)) continue;
@@ -1142,7 +1172,7 @@ class Reader implements ResumeSource {
 					ordered,
 					this.#newest === undefined ? undefined : this.#newest + 1n,
 				);
-				if (key === undefined) break;
+				if (key === undefined || this.#waits(copy)) break;
 				const deliverable = this.#deliverable(copy, key, delivered);
 				if (deliverable && this.#inWindow(key)) {
 					// A tie goes to the newer copy, so the serving one hands out its first group and
@@ -1152,7 +1182,7 @@ class Reader implements ResumeSource {
 				}
 				// Skipping an ordered cursor past a group the window still owes below would lose it.
 				if (ordered && deliverable && this.#owesBelow(floor, key, delivered)) {
-					held.push(copy);
+					owing.push(copy);
 					break;
 				}
 				const recv = take(copy, ordered, this.#newest === undefined ? undefined : this.#newest + 1n);
@@ -1161,7 +1191,7 @@ class Reader implements ResumeSource {
 				recv.group.close();
 			}
 		}
-		return { next: lowest?.copy, held };
+		return { next: lowest?.copy, owing };
 	}
 
 	/**
@@ -1546,11 +1576,20 @@ class Reader implements ResumeSource {
 		return serving && hooks.holeEnd(serving.sub, key, dropped);
 	}
 
+	// A failed serving copy's own resolution is no placement while the front may still replace it:
+	// the reader's ranges stay as placed, pending until a copy continuing the track places them.
+	// Mirrors the Rust reader answering from its window.
+	#placesNothing(serving: Copy): boolean {
+		return !this.route.concluded && copyFailed(serving);
+	}
+
 	// Each copy asks for the reader's ranges in turn, clamped to its floor and replacement.
 	starts(from: bigint): (bigint | undefined)[] | undefined {
 		this.sync();
 		const serving = this.#serving();
-		return serving && hooks.servingStarts(serving.sub, from);
+		if (!serving) return undefined;
+		if (!this.#placesNothing(serving)) return hooks.servingStarts(serving.sub, from);
+		return this.#window().starts(from);
 	}
 
 	// The reader's ranges as its window resolved them, whichever copy serves.

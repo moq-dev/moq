@@ -16,10 +16,7 @@
 open import Data.Nat.Base using (ℕ)
 open import Relation.Binary.PropositionalEquality using (_≡_)
 
-module Accelerate
-  (relay start : ℕ → ℕ)
-  (relay-start-injective : ∀ {m n} → relay m ≡ relay n → start m ≡ start n → m ≡ n)
-  where
+module Accelerate (relay start mark : ℕ → ℕ) where
 
 open import Data.Bool.Base using (Bool; true; false; _∨_; _∧_; not)
 import Data.Bool.Properties as Bool
@@ -28,7 +25,7 @@ open import Data.List.Base using (List; []; _∷_; map; any; zip; length; foldr;
 open import Data.List.Properties using (tabulate-cong)
 open import Data.List.Relation.Unary.All using (All; []; _∷_)
 import Data.List.Relation.Unary.All as All
-open import Data.Nat.Base using (zero; suc; _<_; _≤ᵇ_)
+open import Data.Nat.Base using (zero; suc; _+_; _<_; _≤ᵇ_; _<ᵇ_)
 import Data.Nat.Properties as ℕ
 open import Data.Product.Base using (_×_; _,_; ∃₂; proj₁; proj₂)
 open import Data.Sum.Base using (_⊎_; inj₁; inj₂)
@@ -40,7 +37,7 @@ open import RoutingLib.Routing.Basics.Path.Uncertified using (Path; Edge)
 open import RoutingLib.Routing.Basics.Path.Uncertified.Properties using (_⇿?_; _∈ₚ?_)
 open import RoutingLib.Routing.Basics.Network using (AdjacencyMatrix)
 
-open import Route relay start relay-start-injective
+open import Route relay start mark
 
 private
   -- A link refuses every route while it is down.
@@ -186,7 +183,8 @@ module _ {n : ℕ} (A : AdjacencyMatrix algebra n) where
       where
       prefix : Bool → Bool
       prefix b = not (Link.up (A i k)) ∨ (null (path x) ∧ not (Link.claimed (A i k)))
-        ∨ (marked x ∧ Link.marked-there (A i k)) ∨ (max-hops ≤ᵇ suc (length (path x))) ∨ b
+        ∨ (marked x ∧ Link.marked-there (A i k)) ∨ (max-hops ≤ᵇ suc (length (path x)))
+        ∨ (metric <ᵇ Link.cost (A i k) + cost x) ∨ elsewhere (toℕ i , toℕ k) (path x) ∨ b
 
     -- One step across a link of A takes a sound route as `plain` does.
     neutral : ∀ i k w → Sound w → extend (A i k) (toℕ i , toℕ k) w ≡ extend (plain i k) (toℕ i , toℕ k) w
@@ -197,7 +195,7 @@ module _ {n : ℕ} (A : AdjacencyMatrix algebra n) where
     ... | yes _ | yes _ = refl
     ... | yes _ | no  _ rewrite same-refusal i k x holds with refuses (plain i k) (toℕ i , toℕ k) x in eq
     ...   | true  = refl
-    ...   | false rewrite no-drain (map proj₂ (path x)) = cong (λ d → valid (route d _ _ _ _ _)) drained
+    ...   | false rewrite no-drain (map proj₂ (path x)) = cong (λ d → valid (route _ d _ _ _ _ _)) drained
       where
       up = refuses-up (plain i k) (toℕ i , toℕ k) x eq
       -- What the drains add, given the route is already draining where they would.
