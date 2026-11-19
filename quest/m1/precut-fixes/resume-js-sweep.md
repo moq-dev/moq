@@ -71,7 +71,3 @@ partial branch `fix/js-resume-window-wip` (`0f1b73d365`) is superseded by
 #9115's window port and holds nothing more; delete it when this quest lands.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [Resume window mutants](/quest/m0/nightly/resume-window-mutants.md) - the same nightly's Rust side
