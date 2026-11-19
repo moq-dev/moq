@@ -197,15 +197,16 @@ fetch() {
         bash "$DIR/interop.sh" --publishers rust --subscribers rust
 }
 
+# TEMPORARY migration, delete once the released CLI names it `h264`: releases before
+# it name the Annex-B import `avc3`. Probed once, so a release with the rename needs no edit.
+if "$RELEASED" import h264 --help >/dev/null 2>&1; then released_annexb=h264; else released_annexb=avc3; fi
+annexb_import() {
+    [[ "$1" == "$RELEASED" ]] && echo "$released_annexb" || echo h264
+}
+
 # The released CLI's fMP4 import restamps media on its arrival clock, so its tone
 # does not start at timestamp zero and its decodes cannot be held to the tone's
 # phase (see phase_checked in interop.sh). Its readers' phase is still checked.
-# TEMPORARY migration, delete once the released CLI names it `h264`: the released CLI's Annex-B
-# import is `import avc3`.
-annexb_import() {
-    [[ "$1" == "$RELEASED" ]] && echo avc3 || echo h264
-}
-
 live_publisher() {
     [[ "$1" == "$RELEASED" ]] && echo 1 || echo 0
 }
