@@ -58,9 +58,11 @@ session to `b`, until the next fault moved its route (1 path at 4 broadcasts;
 a ring that started on the new build starved nothing, so it takes the roll
 first. Check it once the mid-roll case is fixed.
 
+Decided 2026-11-19 (coordinator, to which the maintainer delegated the call
+while away): ✅ the lite-07 cut waits on it (rejected: cutting without it).
 It needs an old relay, so it lasts only as long as a roll does, but every roll
 passes through it, once per relay, and a starved viewer sees a live broadcast
-that never plays. Recommended: under this epic, so the lite-07 cut waits on it,
-since the cut ships by roll. Whether the cut waits is the maintainer's call.
+that never plays; letting a deployment roll lite-07 out safely is the reason
+for the cut.
 
 Not a wire change.
