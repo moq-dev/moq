@@ -40,9 +40,14 @@ and [a route moving behind one next hop resending a group](/quest/m2/multicast/r
 whose fix changes the wire,
 and [the mesh replay](/quest/m2/multicast/mesh-replay.md), and on
 [route layer acceptance](/quest/m2/cluster-routes/acceptance.md) retiring
-the lite-06 mitigations. After the cut come warmth's wire
-([cache-aware routing](/quest/m3/cache-routing/README.md)),
-[route health](/quest/m3/route-health/README.md), and
+the lite-06 mitigations. It does not wait on
+[warmth's port](/quest/m3/cache-routing/select.md): its wire joins lite-07
+only if the port has landed and passed the mesh replay when the cut is made,
+and otherwise moves to the first wip version after it (maintainer,
+2026-11-19). The port is measured and not yet built, pending the maintainer
+(the coordinating session, under the maintainer's delegation, 2026-11-19).
+After the cut come
+[route health](/quest/m3/route-health/README.md) and
 [outbound federation](/quest/m3/cluster-routing/federation.md).
 
 Decided 2026-11-15 (maintainer, /quest-plan), after an audit of the lite-07
