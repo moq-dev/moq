@@ -1860,6 +1860,30 @@ mod tests {
 			Path::from_static("vanity/room")
 		);
 	}
+
+	/// The signer and `Path::new` agree on every root spelled with `a`, `/`, and `\` up to
+	/// seven bytes, so a token is never issued for a root the relay refuses, nor refused for
+	/// one it accepts.
+	#[test]
+	fn a_signer_issues_exactly_the_roots_a_path_accepts() {
+		let key = moq_auth::Key::generate(moq_auth::Algorithm::HS256, None).unwrap();
+		let mut frontier = vec![String::new()];
+		let mut roots = frontier.clone();
+		for _ in 0..7 {
+			frontier = frontier
+				.iter()
+				.flat_map(|root| ['a', '/', '\\'].map(|c| format!("{root}{c}")))
+				.collect();
+			roots.extend(frontier.iter().cloned());
+		}
+		assert_eq!(roots.len(), 3280);
+		for root in roots {
+			let claims = moq_auth::Claims::default()
+				.with_root(&root)
+				.with_publish([moq_auth::Pattern::all()]);
+			assert_eq!(key.sign(&claims).is_ok(), Path::new(&root).is_ok(), "{root:?}");
+		}
+	}
 }
 
 #[cfg(test)]

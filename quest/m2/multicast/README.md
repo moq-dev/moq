@@ -39,7 +39,7 @@ through a lost claim's debounce, so a reader resumes on a detour learned after
 its session closed, and a route moving behind one next hop no longer resends a
 group, since a lite-07 range may start partway through one. The lite-07 cut
 still waits on this epic's children, a flaw the mesh replay found,
-[a lite-07 front that stops delivering after it switches copies](/quest/m2/multicast/splice-stall.md).
+[a lite-07 reader its relay refuses as unroutable and never re-asks](/quest/m2/multicast/splice-stall.md).
 It does not wait on
 [warmth's port](/quest/m3/cache-routing/select.md): its wire joins lite-07
 only if the port has landed and passed the mesh replay when the cut is made,

@@ -35,7 +35,8 @@ const ScopeFields = {
  * `root` is optional on the wire to match the Rust `moq-auth` crate, which omits it
  * when the scope sits at the top level. A legacy `put`/`get` prefix scope reads as the
  * subtree patterns it meant. A scope bounds paths, never bitrate, so a capped role is
- * refused, as is a root `Key.sign` would refuse. Any other field is refused.
+ * refused, as is a malformed root (see `Path.validate`). The stricter `Path.signable` applies
+ * only where a scope is minted, so keys minted before it still load. Any other field is refused.
  */
 export const ScopeSchema = z
 	.pipe(
