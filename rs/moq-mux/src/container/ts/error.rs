@@ -1,7 +1,8 @@
 /// Why a TS import or export stopped.
 ///
-/// A damaged packet, PES, or access unit is not one: the importer counts it in its
-/// [`stats`](super::stats) and carries on.
+/// A packet lost or flagged by the transport error indicator is not one: the importer counts
+/// the unit it breaks in its [`stats`](super::stats) and carries on. An intact packet, header,
+/// or unit that does not parse is one: [`Error::Malformed`].
 #[derive(Clone, Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {

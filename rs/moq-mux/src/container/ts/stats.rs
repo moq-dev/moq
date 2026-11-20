@@ -183,7 +183,8 @@ pub struct Stream {
 	/// stream with a clock field only the PTS and DTS of are rebased (ESCR, a
 	/// `pack_header_field`, a TREF), PES-level scrambling, an unbounded non-video PES, or a
 	/// header export refuses, whose track ends and leaves the catalog. Once for each
-	/// TS-scrambled packet on a carried stream, which the raw lane could carry. And once for
+	/// TS-scrambled packet on a carried stream, which the raw lane could carry, and each
+	/// PES-scrambled PES on a decoded one. And once for
 	/// each packet on a PID no table claims ([`Snapshot::streams`]). Export stays zero.
 	#[serde(skip_serializing_if = "is_zero")]
 	pub refused: u64,
