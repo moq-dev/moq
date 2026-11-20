@@ -939,14 +939,10 @@ export class Consumer {
 						ptsContiguous(this.#presentedEnd, first);
 					const empty = head.empty && head.consumer.done;
 					// A payload that failed to decode gives no timestamp, so its fault settles the step,
-					// for the read below to raise.
+					// for the read below to raise. The read's own end says nothing of where an open head
+					// starts, and reading waits on the head either way.
 					const known =
-						contiguous ||
-						head.gap ||
-						first !== undefined ||
-						head.fault !== undefined ||
-						head.consumer.done ||
-						ended !== undefined;
+						contiguous || head.gap || first !== undefined || head.fault !== undefined || head.consumer.done;
 					if (known) {
 						// A gap an empty group carries still marks the next frame, which follows the loss.
 						if (head.gap && !contiguous) {

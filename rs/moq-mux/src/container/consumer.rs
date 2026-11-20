@@ -1868,7 +1868,7 @@ mod tests {
 
 	/// An endpoint looked ahead in the next group is delivered though that group then aborts: it is
 	/// decoded, so only a group holding nothing at all is reaped.
-	#[tokio::test(start_paused = true)]
+	#[kio::test]
 	async fn a_looked_ahead_endpoint_outlives_its_groups_abort() {
 		let track = track_producer("gaps", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		let subscription = track.subscribe(
@@ -2193,13 +2193,13 @@ mod tests {
 
 	/// A join's backlog the ordered reader gives up as stale, never handing it to this reader, still
 	/// reports when it landed: its gap carries the landing.
-	#[tokio::test(start_paused = true)]
+	#[kio::test]
 	async fn a_stale_backlog_the_ordered_reader_gives_up_reports_when_it_landed() {
 		let mut track = track_producer("data", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		let landed = kio::clock::now();
 		write_group(&mut track, 0, &[ts(0)]);
 		write_group(&mut track, 1, &[ts(20_000)]);
-		tokio::time::advance(Duration::from_millis(100)).await;
+		kio::clock::sim::advance(Duration::from_millis(100)).await;
 		write_group(&mut track, 2, &[ts(40_000)]);
 		let subscriber = track.subscribe(
 			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(50))),

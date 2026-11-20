@@ -164,7 +164,8 @@ extension type Delay._(MoqDelay _delay) implements MoqDelay {
   /// Both default to zero, moq-net's default. An explicit null `min` leaves it unstated, which a
   /// decoder starts as zero (a catalog warmup or an audio decoder's playout delay still states a
   /// `min` to the publisher), and an explicit null `max` sets no subscriber limit. A `min` past
-  /// `max` starts at the group covering the point `max` behind the live edge.
+  /// `max` starts a cold join no further back than the group covering the point `max` behind the
+  /// live edge.
   Delay({Duration? min = Duration.zero, Duration? max = Duration.zero})
     : this._(MoqDelay(min: min, max: max));
 }

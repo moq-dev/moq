@@ -115,7 +115,7 @@ observe(arrival, media):
         push (arrival, media) onto history
 
     fastest = min over history of (entry.arrival - entry.media)
-    if first observation: start = arrival; joined = arrival
+    if first observation: start = arrival; joined = max(joined, arrival)
     elif media + fastest < start:       # produced before the subscription: backlog
         joined = max(joined, arrival)
 
@@ -165,7 +165,7 @@ settle():                               # a stall is one observation
         fold(stall.bucket); fold(nothing) min(stall.span, IDLE_MAX) times; close it
 
 backlog(arrival):                       # a backlog group skipped unread arrived
-    if not first observation and open:
+    if open:                            # before the first observation too: it may land later
         joined = max(joined, arrival)
 
 end():                                  # a declared end precedes the next observation

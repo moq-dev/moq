@@ -29,8 +29,8 @@ pub struct MoqDelay {
 	/// alone. A media consumer starts an unstated minimum as zero, while the subscription keeps
 	/// it unstated, so it never pulls the aggregate across subscribers to zero, unless a catalog
 	/// warmup or an audio decoder's playout delay states one. moq-lite-07 sends it upstream. A
-	/// `min` past `max` starts at the group covering the point `max` behind the live edge, since
-	/// the publisher serves no older group. An audio decoder refuses a `min` beyond the track's
+	/// `min` past `max` starts a cold join no further back than the group covering the point `max`
+	/// behind the live edge, since the publisher serves no older group. An audio decoder refuses a `min` beyond the track's
 	/// max age instead.
 	pub min: Option<Duration>,
 	/// How far a non-latest group may fall behind the live edge before it is skipped, and how

@@ -185,3 +185,38 @@ test("Consumer reads one-packet Opus groups at sparse sequences back to back", a
 	track.finish();
 	track.close();
 });
+
+// The ordered read can finish while its last group is still open, before that group's first frame
+// lands. The finish says nothing of where that frame starts, so a step onto the group waits for it,
+// and a frame continuing the timeline reads on without a gap.
+test("Consumer judges a step onto a frameless group by its first frame, not the track's finish", async () => {
+	const track = new Track.Producer("test");
+	const config = AudioConfigSchema.parse({
+		codec: "opus",
+		container: { kind: "legacy" },
+		sampleRate: 48_000,
+		numberOfChannels: 2,
+	});
+	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(5000) } }), {
+		format: new LegacyFormat(config),
+		delay: { min: null, max: Duration.millis(5000) },
+	});
+	// One 20 ms CELT packet per group.
+	const packet = new Uint8Array([31 << 3, 0]);
+	const first = track.createGroup(0n);
+	first.writeFrame({ payload: encodeLegacyFrame(0, packet), timestamp: Time.Timestamp.fromMicros(0) });
+	first.finish();
+	expect(await poll(consumer.next())).toMatchObject({ kind: "frame", group: 0n });
+
+	// Key 1 is never written, and the track finishes while group 2 is open and still empty.
+	const last = track.createGroup(2n);
+	track.finish();
+	const next = consumer.next();
+	expect(await poll(next)).toBe("pending");
+	last.writeFrame({ payload: encodeLegacyFrame(20_000, packet), timestamp: Time.Timestamp.fromMicros(20_000) });
+	last.finish();
+	expect(await poll(next)).toMatchObject({ kind: "frame", group: 2n });
+
+	consumer.close();
+	track.close();
+});
