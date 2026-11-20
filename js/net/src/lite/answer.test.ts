@@ -318,7 +318,8 @@ async function run(c: Case) {
 					const add: { prefix: Path.Valid; hidden: boolean }[] = [];
 					for (const [index, hidden] of step.add) {
 						const prefix = PREFIXES[index];
-						if (set.some((other) => Path.hasPrefix(other, prefix) || Path.hasPrefix(prefix, other))) continue;
+						if (set.some((other) => Path.hasPrefix(other, prefix) || Path.hasPrefix(prefix, other)))
+							continue;
 						set.push(prefix);
 						add.push({ prefix, hidden });
 					}
