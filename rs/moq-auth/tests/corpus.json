@@ -239,6 +239,12 @@
 			"key": "scoped",
 			"payload": { "root": "project", "publish": ["other/**"] },
 			"claims": null
+		},
+		{
+			"name": "root_a_signer_now_refuses",
+			"key": "hs256",
+			"payload": { "root": "a\\//b", "publish": ["**"] },
+			"claims": { "root": "a\\//b", "publish": ["**"], "subscribe": [] }
 		}
 	],
 	"jwk": [
@@ -271,6 +277,16 @@
 				"scope": { "root": "a//b", "publish": ["**"] }
 			},
 			"valid": false
+		},
+		{
+			"name": "scope_root_a_signer_now_refuses",
+			"jwk": {
+				"kty": "oct",
+				"alg": "HS256",
+				"k": "Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68",
+				"scope": { "root": "a\\//b", "publish": ["**"] }
+			},
+			"valid": true
 		},
 		{
 			"name": "scope_root_with_a_stray_escape",
@@ -666,5 +682,24 @@
 		{ "name": "null_peer", "grant": { "publish": ["**"], "peer": null }, "valid": false },
 		{ "name": "positional", "grant": [["**"]], "valid": false },
 		{ "name": "null_grant", "grant": null, "valid": false }
+	],
+	"roots": [
+		{ "root": "", "signable": true },
+		{ "root": "demo/room", "signable": true },
+		{ "root": ".hidden/x", "signable": true },
+		{ "root": "a\\\\b", "signable": true },
+		{ "root": "a\\/b", "signable": true },
+		{ "root": "\\/a", "signable": true },
+		{ "root": "a\\/b/c", "signable": true },
+		{ "root": "/demo", "signable": false },
+		{ "root": "demo/", "signable": false },
+		{ "root": "demo//room", "signable": false },
+		{ "root": "a\\b", "signable": false },
+		{ "root": "a\\", "signable": false },
+		{ "root": "a\\/", "signable": false },
+		{ "root": "\\/", "signable": false },
+		{ "root": "a\\//b", "signable": false },
+		{ "root": "a\\\\\\//b", "signable": false },
+		{ "root": "\\//a", "signable": false }
 	]
 }
