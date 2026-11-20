@@ -242,10 +242,10 @@ async fn every_wire_carries_the_live_and_oldest_starts() {
 
 /// A publisher counts a relative start back from its newest group, which may hold no frame yet
 /// and so counts neither in the largest it reports nor where the copy resolves the start. The
-/// copy reports the publisher's start instead, where a reader waiting on each group in key
-/// starts, rather than one below that never arrives.
+/// copy keeps the publisher's start instead, so a reader waiting on each group in key starts
+/// there rather than waiting below it for groups that never arrive.
 #[kio::test]
-async fn a_relative_start_reports_the_publishers_start_over_a_frameless_newest_group() {
+async fn an_ordered_reader_starts_at_the_publishers_start_over_a_frameless_newest_group() {
 	let publisher = produce_origin(1);
 	let broadcast = publisher
 		.route("room", moq_net::origin::RouteOptions::hidden())
@@ -277,26 +277,23 @@ async fn a_relative_start_reports_the_publishers_start_over_a_frameless_newest_g
 	let mut reader = kio::clock::timeout(TIMEOUT, remote.track("data").unwrap().subscribe(subscription))
 		.await
 		.expect("subscribe timeout")
-		.unwrap();
-
-	let start = kio::clock::timeout(TIMEOUT, reader.start())
-		.await
-		.expect("start timeout");
-	assert_eq!(
-		start,
-		Some(5),
-		"the publisher's resolved start, counting its frameless newest group"
-	);
+		.unwrap()
+		.ordered();
 
 	newest
 		.write_frame(moq_net::Timestamp::unscaled(newest.start), &b"x"[..])
 		.unwrap();
 	newest.finish().unwrap();
-	let group = kio::clock::timeout(TIMEOUT, reader.recv_group())
+	// Waiting on each group in key, the reader starts where the publisher resolved the start,
+	// counting its frameless newest group, with nothing below it owed or given up.
+	let item = kio::clock::timeout(TIMEOUT, reader.next_item())
 		.await
 		.expect("group timeout")
 		.unwrap();
-	assert_eq!(group.map(|group| group.start), Some(5));
+	let Some(moq_net::track::Item::Group(group)) = item else {
+		panic!("expected group 5 first")
+	};
+	assert_eq!(group.start, 5);
 	let _track = track.finish().unwrap();
 }
 

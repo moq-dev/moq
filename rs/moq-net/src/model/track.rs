@@ -1648,6 +1648,11 @@ impl TrackState {
 		}
 	}
 
+	/// When the latest group cached at `keys` landed here, `None` when none is.
+	fn landed(&self, keys: ops::Range<u64>) -> Option<crate::time::Instant> {
+		self.lookup.range(keys).map(|(_, slot)| slot.arrived).max()
+	}
+
 	/// Whether the live feed's copy of the group at `key` is cached and still serves it.
 	fn holds_group(&self, key: u64) -> bool {
 		self.lookup
@@ -7134,6 +7139,14 @@ impl Consumer {
 		self.with_state(|state| state?.read().previous_start(start))
 	}
 
+	/// When the latest group cached at `keys` landed; see [`Subscriber::landed`].
+	pub(super) fn landed(&self, keys: ops::Range<u64>) -> Option<crate::time::Instant> {
+		if let Some(serving) = self.serving() {
+			return serving.landed(keys);
+		}
+		self.with_state(|state| state.and_then(|state| state.read().landed(keys)))
+	}
+
 	/// Whether the cache holds the group at `key`; see [`Subscriber::holds`].
 	pub(super) fn holds(&self, key: u64) -> bool {
 		if let Some(serving) = self.serving() {
@@ -11081,8 +11094,7 @@ impl Subscriber {
 	/// Pending too while a time start waits on the groups held to place it, since where its
 	/// range starts is unknown until then, unless the floor sits at or past that time, as a
 	/// pre-lite-07 wire's start does: the group containing it is out of range then.
-	#[cfg_attr(feature = "async", kio::wrapper)]
-	pub fn poll_start(&mut self, waiter: &kio::Waiter) -> Poll<Option<u64>> {
+	pub(crate) fn poll_start(&mut self, waiter: &kio::Waiter) -> Poll<Option<u64>> {
 		let cursor = match &mut self.inner {
 			Inner::Plain(cursor) => cursor,
 			Inner::Resume(resume, _) => return resume.poll_start(waiter),
@@ -11171,7 +11183,7 @@ impl Subscriber {
 	/// the groups between are never read, so a reader waiting on each group in key need not
 	/// wait for them. A wire before lite-07 forwards a skip as such a drop. `Some` from there
 	/// while a relative anchor waits on the first group, which can't say yet.
-	pub fn next_in_range(&self, from: u64) -> Option<u64> {
+	pub(crate) fn next_in_range(&self, from: u64) -> Option<u64> {
 		let from = from.max(self.bounds().start);
 		match &self.inner {
 			Inner::Plain(cursor) => {
@@ -11191,7 +11203,7 @@ impl Subscriber {
 	/// It knows only the skips recorded so far, so `false` means "not known skipped": a skip
 	/// still in flight reads `false`, as does one a local producer's cache expired below its
 	/// edge. A reader that asks once treats such a group as one with something before it.
-	pub fn is_skipped(&self, groups: ops::Range<u64>) -> bool {
+	pub(crate) fn is_skipped(&self, groups: ops::Range<u64>) -> bool {
 		let Some(last) = groups.end.checked_sub(1).filter(|last| *last >= groups.start) else {
 			return true;
 		};
@@ -11214,6 +11226,15 @@ impl Subscriber {
 		match &self.inner {
 			Inner::Plain(cursor) => cursor.state.read().previous_start(start),
 			Inner::Resume(resume, _) => resume.previous_start(start),
+		}
+	}
+
+	/// When the latest group the track's cache holds at `keys` landed here, `None` when it
+	/// holds none: a group evicted since leaves no trace.
+	fn landed(&self, keys: ops::Range<u64>) -> Option<crate::time::Instant> {
+		match &self.inner {
+			Inner::Plain(cursor) => cursor.state.read().landed(keys),
+			Inner::Resume(resume, _) => resume.landed(keys),
 		}
 	}
 
@@ -11926,6 +11947,10 @@ pub enum Item {
 		range: ops::Range<u64>,
 		/// Why: what a read of those groups would have ended with.
 		error: Error,
+		/// When the latest of those groups landed here, `None` when none did or the cache
+		/// has since evicted it: a reader timing arrivals learns when what it never read came
+		/// in, such as a join's backlog skipped as stale.
+		landed: Option<crate::time::Instant>,
 	},
 }
 
@@ -12158,7 +12183,8 @@ impl Ordered {
 		self.at = self.at.max(range.end);
 		// Told once: no later drop of these keys is a gap again.
 		self.inner.settle_range(range.clone());
-		Item::Gap { range, error }
+		let landed = self.inner.landed(range.clone());
+		Item::Gap { range, error, landed }
 	}
 
 	/// Narrow subsequent reads to these group keys, as [`Subscriber::with_range`] does: a
@@ -12218,8 +12244,15 @@ impl Ordered {
 		self.inner.poll_largest(waiter)
 	}
 
-	/// Whether the publisher declared every start in `groups` skipped; see
-	/// [`Subscriber::is_skipped`].
+	/// Whether the publisher declared every start in `groups` skipped, never to be produced
+	/// (see [`Producer::skip_groups`], which appending does between groups), so no group can
+	/// arrive there: true for an empty range. Unlike the gaps, this ignores the ranges. A copy
+	/// knows only the skips its wire forwarded.
+	///
+	/// What tells a reader that nothing lies between two groups, or before a track's first.
+	/// It knows only the skips recorded so far, so `false` means "not known skipped": a skip
+	/// still in flight reads `false`, as does one a local producer's cache expired below its
+	/// edge. A reader that asks once treats such a group as one with something before it.
 	pub fn is_skipped(&self, groups: ops::Range<u64>) -> bool {
 		self.inner.is_skipped(groups)
 	}
@@ -13296,7 +13329,7 @@ mod test {
 		while let Some(next) = ordered.next_item().now_or_never() {
 			match next {
 				Ok(Some(Item::Group(group))) => items.push(format!("group {}", group.start)),
-				Ok(Some(Item::Gap { range, error })) => items.push(format!("gap {range:?} ({error})")),
+				Ok(Some(Item::Gap { range, error, .. })) => items.push(format!("gap {range:?} ({error})")),
 				Ok(None) => return items,
 				Err(err) => {
 					items.push(format!("error ({err})"));
@@ -18900,7 +18933,8 @@ mod test {
 			}
 			// The group given up is reported, then the read ends.
 			if given_up {
-				let Poll::Ready(Ok(Some(Item::Gap { range, error }))) = ordered.poll_next_item(&kio::Waiter::noop())
+				let Poll::Ready(Ok(Some(Item::Gap { range, error, .. }))) =
+					ordered.poll_next_item(&kio::Waiter::noop())
 				else {
 					panic!("the given up group is reported")
 				};
@@ -19320,7 +19354,7 @@ mod test {
 			matches!(next, Err(Error::Timeout)),
 			"{:?}",
 			next.map(|i| i.map(|i| match i {
-				Item::Gap { range, error } => format!("{range:?} {error}"),
+				Item::Gap { range, error, .. } => format!("{range:?} {error}"),
 				_ => "group".into(),
 			}))
 		);
@@ -21099,6 +21133,57 @@ mod test {
 			.ordered();
 		assert_eq!(items(&mut ordered), ["gap 0..1 (old)"]);
 		assert!(matches!(ordered.next_item().now_or_never(), Some(Ok(None))));
+	}
+
+	/// A gap says when the latest group it gives up landed: one the read passed as stale or
+	/// that landed behind it, and none for keys that never came.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_gap_reports_when_what_it_gives_up_landed() {
+		fn landed(ordered: &mut Ordered) -> Vec<(String, Option<crate::time::Instant>)> {
+			let mut items = Vec::new();
+			while let Some(next) = ordered.next_item().now_or_never() {
+				match next.unwrap() {
+					Some(Item::Group(group)) => items.push((format!("group {}", group.start), None)),
+					Some(Item::Gap { range, landed, .. }) => items.push((format!("gap {range:?}"), landed)),
+					None => break,
+				}
+			}
+			items
+		}
+
+		let producer = received_producer(None);
+		let first = producer.broadcast.pool.now_wall();
+		put(&producer, 0, None);
+		put(&producer, 1, None);
+		elapse(&producer, Duration::from_millis(100));
+		put(&producer, 2, None);
+		let mut ordered = producer
+			.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(50))))
+			.ordered();
+		producer.drop_groups(3..4, StreamError::DeliveryTimeout);
+		put(&producer, 4, None);
+		assert_eq!(
+			landed(&mut ordered),
+			[
+				("gap 0..1".to_string(), Some(first)),
+				("group 1".to_string(), None),
+				("group 2".to_string(), None),
+				("gap 3..4".to_string(), None),
+				("group 4".to_string(), None),
+			],
+			"group 0 landed before it went stale, and group 3 never did"
+		);
+
+		let producer = track_producer("test", None);
+		let mut ordered = producer.subscribe(replay()).ordered();
+		put(&producer, 0, None);
+		put(&producer, 5, None);
+		assert_eq!(landed(&mut ordered).len(), 2);
+		elapse(&producer, Duration::from_millis(10));
+		let late = producer.broadcast.pool.now_wall();
+		put(&producer, 3, None);
+		assert_eq!(landed(&mut ordered), [("gap 3..4".to_string(), Some(late))]);
 	}
 
 	/// A final drop replaces the part of a stale gap it covers while that gap still waits, so

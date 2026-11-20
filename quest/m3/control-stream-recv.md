@@ -36,7 +36,3 @@ same pattern and leave it out only if it cannot share the reader.
 Public API: none. Wire: none. Cover each reader with a test of the three
 outcomes, as `a_read_tells_a_cut_stream_from_malformed_bytes` does for the
 reader.
-
-## Related
-
-- [moq-net's last pub items with a single container-reader caller go private](/quest/m2/unused-api/net.md) - the rest of the moq-net sweep
