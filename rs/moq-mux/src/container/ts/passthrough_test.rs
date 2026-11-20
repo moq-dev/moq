@@ -784,6 +784,35 @@ async fn a_lone_corrupt_pcr_splices_twice() {
 	assert!((12_300_000..12_450_000).contains(&last), "{last}");
 }
 
+/// A repeated PCR gives the interval before a step no rate, so the splice resumes on the last
+/// object's microsecond, where the marker sits: the group behind it still starts past it.
+#[tokio::test(start_paused = true)]
+async fn a_splice_after_a_repeated_pcr_starts_past_the_marker() {
+	let mut mux = Mux::default();
+	program(&mut mux, 0x100);
+	paced(&mut mux, 0x100, 10_000 * MS, 30, 10, 2);
+	mux.packet(0x100, Flags::pcr(11_160 * MS));
+	mux.fill(0x101, 2);
+	mux.packet(0x100, Flags::pcr(2_000 * MS));
+	mux.fill(0x101, 2);
+	paced(&mut mux, 0x100, 2_040 * MS, 30, 10, 2);
+	let data = mux.bytes();
+	let imported = import(&data, data.len(), None).await.unwrap();
+	assert_suffix(&data, &imported);
+	let [marker] = imported.markers[..] else {
+		panic!("one marker: {:?}", imported.markers);
+	};
+	let groups = imported.groups();
+	let jump = groups
+		.iter()
+		.position(|group| header(&group[0].payload).pcr == Some(2_000 * MS))
+		.expect("the step starts a group");
+	let before = groups[jump - 1].last().unwrap().micros;
+	let after = groups[jump][0].micros;
+	assert!(groups[jump - 1][0].group < marker && marker < groups[jump][0].group);
+	assert!(before < after && after < before + 50_000, "{before} {after}");
+}
+
 /// A break before any group has started is no group start, so the first group still waits for a
 /// random access point.
 #[tokio::test(start_paused = true)]

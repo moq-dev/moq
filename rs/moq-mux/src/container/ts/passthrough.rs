@@ -21,7 +21,7 @@ const TICKS_PER_MICRO: u64 = PCR_HZ / 1_000_000;
 
 /// The longest unflagged step forward taken as elapsed time, in PCR ticks: the media-aware
 /// import's [`LEAP`](super::step::LEAP).
-const LEAP_TICKS: u64 = super::step::LEAP.as_secs() * PCR_HZ;
+const LEAP_TICKS: u64 = super::step::LEAP.as_micros() as u64 * TICKS_PER_MICRO;
 
 /// The most bytes a group holds before its next object starts another, so a source with sparse
 /// random access points still gives a joiner a group it can take whole.
@@ -659,10 +659,13 @@ impl<E: super::Catalog> Passthrough<E> {
 		if object.discontinuity
 			&& let Groups::Writing(group) = &self.groups
 		{
-			// The break's marker may take the microsecond past the newest group's start, as when a
-			// second break follows a one-PCR timebase that gave no rate, and the group behind it
-			// has to start past the marker.
-			ticks = ticks.max((group.ticks / TICKS_PER_MICRO + 2) * TICKS_PER_MICRO);
+			// The break's marker sits on the last object's microsecond, or the one past the newest
+			// group's start when that is later, and the group behind it has to start past the
+			// marker. A splice can resume on either, as after a PCR repeated or a one-PCR timebase,
+			// neither of which gives a rate.
+			let past_object = (self.written / TICKS_PER_MICRO + 1) * TICKS_PER_MICRO;
+			let past_group = (group.ticks / TICKS_PER_MICRO + 2) * TICKS_PER_MICRO;
+			ticks = ticks.max(past_object).max(past_group);
 		}
 		self.written = ticks;
 		let timestamp = moq_net::Timestamp::from_micros(ticks / TICKS_PER_MICRO)?;
