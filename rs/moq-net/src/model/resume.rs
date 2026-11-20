@@ -558,13 +558,8 @@ impl Consumer {
 	pub(super) fn subscribe(&self, subscription: track::Preferences) -> Subscriber {
 		let (mirrored, revision) = {
 			let prefs = subscription.read();
-			let mut mirrored = Mirrored {
-				priority: prefs.priority,
-				delay: prefs.delay,
-				order: prefs.order,
-				feed: prefs.feed,
-				..Default::default()
-			};
+			// Only the ranges: the first sync mirrors the scalars, before it asks any copy.
+			let mut mirrored = Mirrored::default();
 			for (key, range) in prefs.ranges() {
 				mirrored.insert(key, range);
 			}
@@ -4357,6 +4352,8 @@ mod test {
 		let held = recv(&mut live);
 		assert_eq!(held.start, 64);
 		drop(held);
+		// The failed copy holds a group at the new start, which still places nothing.
+		write(&ended, 66);
 
 		ended.clone().abort(Error::Cancel).unwrap();
 		let ranges = live.subscription().with_ranges([track::Range {
@@ -4365,6 +4362,7 @@ mod test {
 		}]);
 		live.update(ranges).unwrap();
 		assert_eq!(drain(&mut live, false), Vec::<u64>::new());
+		assert_eq!(live.resolved_range(0), None);
 		let serving = received_copy();
 		routes.serve(serving.consume());
 		write(&serving, 67);
@@ -6900,6 +6898,112 @@ mod test {
 		}
 	}
 
+	/// Replacing ranges below the serving copy's resume point places them where its cache
+	/// holds them, not at that resume point, and the groups between are asked of the route.
+	#[test]
+	fn replaced_ranges_below_the_resume_point_place_where_the_cache_holds_them() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		for key in 0..6 {
+			write(&a, key);
+		}
+		assert_eq!(drain(&mut sub, false), [0, 1, 2, 3, 4, 5]);
+		let b = copy();
+		for key in 0..6 {
+			write(&b, key);
+		}
+		routes.serve(b.consume());
+		write(&b, 6);
+		assert_eq!(drain(&mut sub, false), [6]);
+		assert_eq!(copies(&routes), 1, "the replaced copy is let go");
+
+		let ranges = sub.subscription().with_ranges([track::Range {
+			start: Anchor::Time(2),
+			end: None,
+		}]);
+		sub.update(ranges).unwrap();
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new(), "every group went out");
+		assert_eq!(sub.resolved_range(0).map(|resolved| resolved.start), Some(2));
+	}
+
+	/// A range an edit adds below the serving copy's resume point is asked of the route for
+	/// the groups that resume point cut off, as a whole replacement's would be.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_added_range_below_the_resume_point_backfills_from_the_route() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let late = Subscription::default()
+			.with_delay(Delay::default().with_max(HOUR))
+			.with_ranges([track::Range {
+				start: Anchor::Time(4),
+				end: None,
+			}]);
+		let mut sub = logical.consume().subscribe(late).now_or_never().unwrap().unwrap();
+		for key in 0..6 {
+			write(&a, key);
+		}
+		assert_eq!(drain(&mut sub, false), [4, 5]);
+		let b = copy();
+		for key in 0..6 {
+			write(&b, key);
+		}
+		routes.serve(b.consume());
+		write(&b, 6);
+		assert_eq!(drain(&mut sub, false), [6]);
+		assert_eq!(copies(&routes), 1, "the replaced copy is let go");
+
+		sub.edit(track::Edit {
+			retire: Vec::new(),
+			add: vec![(
+				1,
+				track::Range {
+					start: Anchor::Time(1),
+					end: None,
+				},
+			)],
+			priority: 0,
+			delay: Delay::default().with_max(HOUR),
+			order: track::Order::default(),
+		})
+		.unwrap();
+		let mut read = drain(&mut sub, false);
+		read.sort_unstable();
+		assert_eq!(read, [1, 2, 3]);
+	}
+
+	/// Replacing every range lifts the refusal an [`Anchor::Oldest`] end held.
+	#[test]
+	fn replacing_an_oldest_end_lifts_its_refusal() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		write(&a, 0);
+		routes.serve(a.consume());
+		let refused = Subscription::default()
+			.with_delay(Delay::default().with_max(HOUR))
+			.with_ranges([track::Range {
+				start: Anchor::Time(0),
+				end: Some(Anchor::Oldest),
+			}]);
+		let mut sub = logical.consume().subscribe(refused).now_or_never().unwrap().unwrap();
+		assert!(matches!(
+			sub.poll_recv_group(&kio::Waiter::noop()),
+			Poll::Ready(Err(Error::InvalidRange))
+		));
+		let ranges = sub.subscription().with_ranges([track::Range {
+			start: Anchor::Time(0),
+			end: None,
+		}]);
+		sub.update(ranges).unwrap();
+		assert_eq!(drain(&mut sub, false), [0]);
+	}
+
 	#[test]
 	fn a_fresh_nested_reader_ends_after_its_outer_reader_already_passed_its_groups() {
 		let routes = Producer::new();
@@ -8614,6 +8718,144 @@ mod test {
 			placed += resolved.iter().flatten().count();
 		}
 		assert!(placed > 1000, "the copies placed the ranges: {placed}");
+	}
+
+	/// A new copy asked for a reader whose update has yet to reach its copies, as when
+	/// another thread asks between the update and its mirroring, places the updated live
+	/// join behind the live edge by the updated delay, as the reader would.
+	#[test]
+	fn a_new_copy_places_an_unmirrored_live_join_by_its_delay() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		write(&a, 0);
+		let mut sub = subscribe(&logical, HOUR).with_range(0..1);
+		assert_eq!(recv(&mut sub).start, 0);
+		for key in [1000, 2000, 3000] {
+			write(&a, key);
+		}
+		let behind = Subscription::default()
+			.with_delay(Delay::default().with_min(Duration::from_millis(1500)).with_max(HOUR))
+			.with_ranges([track::Range::live()]);
+		let reader = routes.readers.lock().unwrap().iter().find_map(Weak::upgrade).unwrap();
+		let channel = reader.lock().unwrap().subscription.clone();
+		channel.update(behind).unwrap();
+
+		let b = copy();
+		let _held = routes.subscribe(&b.consume(), logical.subscription().unwrap(), 1);
+		assert_eq!(
+			b.subscription().unwrap().start(),
+			Some(1000),
+			"the newest group 1.5s behind the edge at 3000"
+		);
+	}
+
+	/// As [`a_new_copy_places_an_unmirrored_live_join_by_its_delay`], from a failed copy: its
+	/// cache places nothing, so the new copy is asked for the updated start as given.
+	#[test]
+	fn a_new_copy_takes_no_placement_of_an_unmirrored_range_from_a_failed_copy() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		write(&a, 0);
+		let mut sub = subscribe(&logical, HOUR).with_range(0..1);
+		assert_eq!(recv(&mut sub).start, 0);
+		for key in [1000, 2000] {
+			write(&a, key);
+		}
+		a.clone().abort(Error::Cancel).unwrap();
+		let later = Subscription::default()
+			.with_delay(Delay::default().with_max(HOUR))
+			.with_ranges([track::Range {
+				start: Anchor::Time(1500),
+				end: None,
+			}]);
+		let reader = routes.readers.lock().unwrap().iter().find_map(Weak::upgrade).unwrap();
+		let channel = reader.lock().unwrap().subscription.clone();
+		channel.update(later).unwrap();
+
+		let b = copy();
+		let _held = routes.subscribe(&b.consume(), logical.subscription().unwrap(), 1);
+		assert_eq!(
+			b.subscription().unwrap().start(),
+			Some(1500),
+			"not the failed copy's 1000"
+		);
+	}
+
+	/// A held subscription asked whole resumes where its readers got to, as a new copy is
+	/// asked, and a reader's edit then reaches it as an edit, in the readers' order, even
+	/// while they need the live feed. A change of feed, which only a whole ask carries, keys
+	/// its ranges by position again.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_held_subscription_follows_its_readers_terms_edit_by_edit() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut terms = Subscription::default()
+			.with_delay(Delay::default().with_max(HOUR))
+			.with_order(track::Order::Ascending);
+		terms.feed = true;
+		let mut holder = logical.consume().subscribe(terms).now_or_never().unwrap().unwrap();
+		write(&a, 0);
+		assert_eq!(recv(&mut holder).start, 0);
+
+		let b = copy();
+		let weak = logical.weak();
+		let mut held = super::Held::new(b.consume().subscribe(Subscription::default()));
+		assert!(routes.follow(&mut held, &weak));
+		assert_eq!(
+			b.subscription().unwrap().resume,
+			Some(Position::new(0, 1)),
+			"past the group the reader holds"
+		);
+
+		let revision = held.sub.preferences().read().revision;
+		holder
+			.edit(track::Edit {
+				retire: Vec::new(),
+				add: vec![(
+					1,
+					track::Range {
+						start: Anchor::Time(5),
+						end: None,
+					},
+				)],
+				priority: 0,
+				delay: Delay::default().with_max(HOUR),
+				order: track::Order::Ascending,
+			})
+			.unwrap();
+		assert!(routes.follow(&mut held, &weak));
+		{
+			let asked = held.sub.preferences().read();
+			assert!(asked.changes(revision).is_some(), "asked as an edit, not whole");
+			assert_eq!(asked.subscription().order, track::Order::Ascending);
+		}
+
+		// Retiring the first range leaves the held subscription keyed past it. A feed only
+		// a whole ask carries then keys the same ranges by position again.
+		holder
+			.edit(track::Edit {
+				retire: vec![0],
+				add: Vec::new(),
+				priority: 0,
+				delay: Delay::default().with_max(HOUR),
+				order: track::Order::Ascending,
+			})
+			.unwrap();
+		assert!(routes.follow(&mut held, &weak));
+		let mut unfed = holder.subscription();
+		unfed.feed = false;
+		holder.update(unfed).unwrap();
+		assert!(routes.follow(&mut held, &weak));
+		let asked = held.sub.preferences().read();
+		assert!(!asked.subscription().feed);
+		assert_eq!(asked.ranges().map(|(key, _)| key).collect::<Vec<_>>(), [0]);
 	}
 
 	/// A held subscription following its readers' demand asks, edit by edit, for the ranges
