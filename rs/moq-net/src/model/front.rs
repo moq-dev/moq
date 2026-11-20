@@ -583,6 +583,7 @@ impl Front {
 		result: Result<track::Info, (Error, Option<Duration>)>,
 		actions: &mut Vec<Action>,
 	) {
+		let closing = self.closing(source, closing, result.as_ref().err().map(|(err, _)| err));
 		let serving = self.serving.is_some_and(|(serving, _)| serving == source);
 		let strands = self.strands();
 		let Some(track) = self.tracks.get_mut(&name) else {
@@ -658,6 +659,7 @@ impl Front {
 		delivered: bool,
 		actions: &mut Vec<Action>,
 	) {
+		let closing = self.closing(source, closing, result.as_ref().err());
 		let strands = self.strands();
 		let serving = self.serving.map(|(serving, _)| serving);
 		// Nothing serves or is being asked, but a claim the front lost may still resume it.
@@ -732,7 +734,10 @@ impl Front {
 				} else {
 					track.lost = Some(err);
 				}
-				self.fail_over(name, actions);
+				// A closing source is asked nothing more: its close brings the next route.
+				if !closing {
+					self.fail_over(name, actions);
+				}
 			}
 			// A copy the closed source answered after its close died while the front waits on
 			// the claim it served: as for a draining copy, what it died of ends the track
@@ -865,6 +870,18 @@ impl Front {
 		}
 		track.state = TrackState::Querying { source };
 		actions.push(Action::Query { track: name, source });
+	}
+
+	/// Whether `source` is closing, as the driver read from its broadcast or as `err`, what it
+	/// just failed with, says first: a received source is its session's, which fails the
+	/// copies it carries before it closes their broadcasts. A local source's error is its
+	/// publisher's word, and its broadcast need not close.
+	fn closing(&self, source: u64, closing: bool, err: Option<&Error>) -> bool {
+		closing
+			|| (err.is_some_and(Error::session_ended)
+				&& self
+					.serving
+					.is_some_and(|(serving, candidate)| serving == source && !candidate.local))
 	}
 
 	/// Whether an unroutable end from the serving source judges its route rather than the
@@ -1711,6 +1728,104 @@ mod tests {
 			&[Action::Query {
 				track: name("video"),
 				source: 100,
+			}],
+		);
+	}
+
+	/// A received source's session fails the copies it carries before it closes their
+	/// broadcast. A copy lost with its session's end is that source closing, even while its
+	/// broadcast reads as open and the table still shows its route: the track asks it nothing
+	/// more and takes no answer of its as a verdict, but waits for the next route.
+	#[test]
+	fn a_copy_lost_with_its_session_waits_for_the_next_route() {
+		let mut front = serving(remote(1), 100);
+		assert_actions(
+			front.step(Event::TrackEnded {
+				track: name("video"),
+				source: 100,
+				closing: false,
+				result: Err(Error::IdleTimeout),
+				delivered: true,
+			}),
+			&[],
+		);
+		// The table moving asks again, and the session's end answers.
+		assert_actions(
+			front.step(Event::Selected {
+				best: Some(remote(1)),
+				serving_closing: false,
+			}),
+			&[Action::Query {
+				track: name("video"),
+				source: 100,
+			}],
+		);
+		assert_actions(
+			front.step(Event::TrackInfo {
+				track: name("video"),
+				source: 100,
+				closing: false,
+				result: Err(Error::IdleTimeout),
+				retry: None,
+			}),
+			&[],
+		);
+		assert_actions(
+			front.step(Event::SourceClosed { source: 100 }),
+			&[
+				Action::Detach {
+					source: 100,
+					drain: true,
+				},
+				Action::Reselect,
+			],
+		);
+		assert_actions(
+			front.step(Event::Selected {
+				best: Some(remote(2)),
+				serving_closing: false,
+			}),
+			&[Action::Request { route: 2 }],
+		);
+		assert_actions(
+			front.step(Event::Resolved {
+				route: 2,
+				result: Ok(200),
+			}),
+			&[Action::Query {
+				track: name("video"),
+				source: 200,
+			}],
+		);
+		assert!(!front.ended());
+
+		// A local source's error is its publisher's word, whose broadcast need not close: the
+		// track asks again, and the answer is a verdict.
+		let mut front = serving(local(1), 100);
+		let query = [Action::Query {
+			track: name("video"),
+			source: 100,
+		}];
+		let lost = Event::TrackEnded {
+			track: name("video"),
+			source: 100,
+			closing: false,
+			result: Err(Error::IdleTimeout),
+			delivered: true,
+		};
+		assert_actions(front.step(lost), &query);
+		assert_actions(
+			front.step(Event::TrackInfo {
+				track: name("video"),
+				source: 100,
+				closing: false,
+				result: Err(Error::IdleTimeout),
+				retry: None,
+			}),
+			&[Action::Abort {
+				track: name("video"),
+				err: Error::IdleTimeout,
+				retry: None,
 			}],
 		);
 	}
