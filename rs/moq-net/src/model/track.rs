@@ -36,8 +36,8 @@ mod fill;
 mod hole;
 mod miss;
 pub(super) use fill::Asking;
-use fill::FillState;
 pub use fill::FillGroups;
+use fill::FillState;
 pub(crate) use hole::Hole;
 
 #[cfg_attr(not(feature = "async"), allow(unused_imports, reason = "async-only"))]
@@ -846,7 +846,7 @@ pub(crate) struct TrackState {
 	// [`Self::deferred`]). A woken waker may read this track, so none fires under its lock.
 	deferred: Vec<kio::WaiterList>,
 
-	// The fills readers queued for groups they miss (see [`Fill`]), same reasoning: a miss
+	// The fills readers queued for groups they miss (see [`FillGroups`]), same reasoning: a miss
 	// queues here and a `Requests` drains.
 	fills: kio::Shared<FillState>,
 
@@ -3976,7 +3976,7 @@ impl TrackState {
 		Ok(None)
 	}
 
-	/// Insert a group a [`Fill`] answered, setting the track's [`Info`]
+	/// Insert a group a [`FillGroups`] answered, setting the track's [`Info`]
 	/// if it isn't accepted yet. The group's timescale comes from that info, so a
 	/// fetch can serve an as-yet-unaccepted track (e.g. a relay with no live
 	/// subscription). The group lands in the cache so a waiting
@@ -9748,10 +9748,9 @@ impl Cursor {
 			let time = lookup.time;
 			let answer = match &lookup.join {
 				None => None,
-				Some(join) => match join
-					.outcome()
-					.poll(waiter, |outcome| outcome.time_start(time).map_or(Poll::Pending, Poll::Ready))
-				{
+				Some(join) => match join.outcome().poll(waiter, |outcome| {
+					outcome.time_start(time).map_or(Poll::Pending, Poll::Ready)
+				}) {
 					Poll::Ready(Ok(group)) => group,
 					// Ended unanswered: its handler couldn't tell.
 					Poll::Ready(Err(closed)) => closed.time_start(time).flatten(),

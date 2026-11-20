@@ -30,7 +30,7 @@ struct TrackRequest {
 /// several times the size of a fill.
 enum Request {
 	Track(Box<TrackRequest>),
-	Fill(moq_net::track::Fill),
+	Fill(moq_net::track::FillGroups),
 	Datagram(DatagramRequest),
 }
 
@@ -1059,12 +1059,6 @@ impl Publish {
 				Request::Track(request) => State::lock().publish.track_request.insert(*request)?,
 				Request::Datagram(request) => State::lock().publish.datagram_request.insert(request)?,
 				Request::Fill(fill) => {
-					// A lookup of a time owes no group, and a request names one: drop it
-					// unanswered, as a handler that can't resolve times does, so the reader
-					// falls back to the groups held.
-					let moq_net::track::Fill::Groups(fill) = fill else {
-						continue;
-					};
 					let mut serve = Box::pin(Self::serve_fill(callback, Arc::new(fill)));
 					fills.push(move |waiter: &kio::Waiter| waiter.poll_future(serve.as_mut()));
 					continue;

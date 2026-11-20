@@ -169,7 +169,7 @@ Decided 2026-10-16 (maintainer interview):
   draft's 32 MiB interop cap. The
   [m1 compression migration](https://github.com/moq-dev/moq/pull/7046) deleted the flate packages. There is no new page.
 
-A flight's fill is the `track::Requests` fill (`track::Fill`). A handler serves a range by writing into a
+A flight's fill is the `track::Requests` fill (`track::FillGroups`). A handler serves a range by writing into a
 group producer bounded to that range, the same API as a live write, so an
 origin can regenerate data from disk or an archive.
 
