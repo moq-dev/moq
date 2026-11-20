@@ -182,6 +182,8 @@ pub(in crate::lite) struct Answer {
 	live: HashMap<Named, (u64, Claim)>,
 	/// The session is leaving: nothing more is sent.
 	withdrawn: bool,
+	/// The peer was sent a route or a claim, which only this stream can end.
+	announced: bool,
 	/// Why the last error closes the session, when the route layer said.
 	cause: Option<RouteClose>,
 }
@@ -228,6 +230,7 @@ impl Answer {
 			told: BTreeMap::new(),
 			live: HashMap::new(),
 			withdrawn: false,
+			announced: false,
 			cause: None,
 		}
 	}
@@ -558,6 +561,12 @@ impl Answer {
 		}
 	}
 
+	/// Whether the peer was ever sent a route or a claim. One that never was holds nothing
+	/// a finished stream ends, so a draining close need not wait for it.
+	pub(in crate::lite) fn announced(&self) -> bool {
+		self.announced
+	}
+
 	/// The session is leaving: let go of the node, so nothing more is queued. Finishing
 	/// the stream ends everything the peer was sent.
 	pub(in crate::lite) fn withdraw(&mut self) {
@@ -765,6 +774,7 @@ impl Answer {
 						claims: HashMap::new(),
 					}
 				});
+				self.announced = true;
 				writer.buffer(&Wire::Route { offer })
 			}
 			None => {
@@ -910,6 +920,7 @@ impl Answer {
 				})?;
 				let announce = announce.expect("lite-07 assigns announce ids");
 				self.live.insert(key, (announce, claim));
+				self.announced = true;
 			}
 			(Some((announce, held)), Some(claim)) => {
 				let id = *announce;
