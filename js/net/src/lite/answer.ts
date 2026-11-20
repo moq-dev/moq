@@ -13,6 +13,7 @@
 import { type GetPromise, type Getter, race } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { ProtocolViolation } from "../error.ts";
+import type * as Instance from "../instance.ts";
 import { coveringPrefixes, hiddenBelow, presented, scopeHead } from "../internal.ts";
 import * as Path from "../path.ts";
 import { type Advertised, type Advertisements, type OriginConsumer, sameInstance } from "../wire.ts";
@@ -229,10 +230,21 @@ export class Answer {
 		// Whether the advertisement a claim the peer holds came from is still in the table, as when
 		// its presentation moved: the claim is lost to the peer rather than ended, since its publisher
 		// never withdrew it. Another path's advertisement of the same instance proves nothing.
-		const stillAdvertised = (sent: Sent) =>
-			[...(table?.values() ?? [])].some((candidates) =>
-				candidates.some((snap) => snap.identity === sent.snap.identity && sameInstance(snap, sent.snap)),
-			);
+		// Indexed once per diff, and only when a claim leaves.
+		let advertisements: Map<object, Set<Instance.Valid | undefined>> | undefined;
+		const stillAdvertised = (sent: Sent) => {
+			if (!advertisements) {
+				advertisements = new Map();
+				for (const candidates of table?.values() ?? []) {
+					for (const snap of candidates) {
+						const instances = advertisements.get(snap.identity) ?? new Set();
+						instances.add(snap.route.instance);
+						advertisements.set(snap.identity, instances);
+					}
+				}
+			}
+			return advertisements.get(sent.snap.identity)?.has(sent.snap.route.instance) ?? false;
+		};
 		const ids = [...this.#prefixes.keys()].sort((a, b) => (a < b ? -1 : 1));
 		for (const id of table ? ids : []) {
 			const prefix = this.#prefixes.get(id);
@@ -282,10 +294,16 @@ export class Answer {
 }
 
 // The regions `patterns` confine the peer to, none within another, or undefined when they allow
-// every path. Mirrors rs/moq-net's `interest_prefixes`.
+// every path. A head too long or deep to be a path holds none. Mirrors rs/moq-net's
+// `interest_prefixes`.
 function regions(patterns: Path.Patterns): Path.Valid[] | undefined {
 	if (patterns.contains(Path.Pattern.all())) return undefined;
-	const heads = new Set(patterns.toArray().map(scopeHead));
+	const heads = new Set(
+		patterns
+			.toArray()
+			.map(scopeHead)
+			.filter((head) => Path.check(head) === undefined),
+	);
 	return [...heads].filter((head) => ![...heads].some((other) => other !== head && Path.hasPrefix(other, head)));
 }
 
