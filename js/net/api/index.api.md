@@ -758,6 +758,7 @@ export namespace Track {
 		error: Error;
 		group?: never;
 		kind: "gap";
+		landed?: Clock.Instant;
 		start: bigint;
 	};
 	export type Order = "ascending" | "descending";
@@ -834,14 +835,11 @@ export namespace Track {
 		finished(): Promise<Track.Position>;
 		floor(): bigint | undefined;
 		info(): Promise<Track.Info>;
-		isSkipped(start: bigint, end: bigint): boolean;
 		largest(): Promise<Track.Position | undefined>;
 		readonly name: string;
-		nextInRange(from: bigint): bigint | undefined;
 		ordered(): Track.Ordered;
 		recvGroup(): Promise<Group.Consumer | undefined>;
 		refresh(options?: Track.RefreshOptions): Promise<void>;
-		start(): Promise<bigint | undefined>;
 		get subscription(): Signals.Getter<Track.Subscription | undefined>;
 		update(options: Track.Subscription): void;
 		withRange(groups: Track.Groups): this;

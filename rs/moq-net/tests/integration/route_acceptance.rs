@@ -1,7 +1,7 @@
 #![cfg(feature = "async")]
 
 //! Acceptance of lite-07's route rule on real sessions with time mocked: the topology
-//! fixtures of the routes epic's acceptance quest (`quest/m2/cluster-routes/acceptance.md`)
+//! fixtures of the routes epic's acceptance quest
 //! and the three from routing prior art (the epic's Plan item 30).
 //!
 //! The rule's own fixtures live in `path_routes.rs`, whose helpers these share.

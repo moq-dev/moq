@@ -69,7 +69,7 @@ Max(S) == CHOOSE x \in S : \A y \in S : y <= x
 
 VARIABLES
     org,     \* the origin's track: frames written per group, and whether it ended
-    alive,   \* which relays are up
+    alive,   \* each relay "up", "shown" (dead, its route still in the table), or "down"
     deaths,  \* relays that died
     cp,      \* cp[e]: the copy at e[1] of the track e[2] serves, and e[2]'s reader for it
     front,   \* front[r]: the route r serves from, how its track ended, the route it
@@ -173,7 +173,12 @@ Answering(u) ==
     IF front[u].end = "ok" /\ Live(<<u, front[u].last>>)
     THEN <<u, front[u].last>>
     ELSE Serving(u)
-Routable(w) == IF w = "O" THEN TRUE ELSE alive[w] /\ front[w].end # "err"
+Routable(w) == IF w = "O" THEN TRUE ELSE alive[w] = "up" /\ front[w].end # "err"
+\* A route still in the table: a dead relay's route stays until its session's close is
+\* seen (a claim's debounce). Its copies have failed and nothing new is asked through
+\* it, but a front holds a track rather than end it while it shows: a session fails the
+\* copies it carries before it closes their sources, and that loss judges no track.
+Shows(w) == Routable(w) \/ (w # "O" /\ alive[w] = "shown")
 
 \* A complete copy (`TrackState::is_complete` once every group below the end
 \* finished): its upstream ended it, and every group it asked holds every frame.
@@ -215,7 +220,7 @@ Exhausted(e, g) == SrcFr(e[2], cp[e].src[g], g) <= cp[e].fr[g]
 
 Init ==
     /\ org = [fr |-> [g \in Groups |-> -1], fin |-> FALSE]
-    /\ alive = [r \in Relays |-> TRUE]
+    /\ alive = [r \in Relays |-> "up"]
     /\ deaths = 0
     \* The client subscribed through E, E through A, and A to the origin.
     /\ cp = [e \in Edges |->
@@ -314,7 +319,7 @@ Abort(e, g) ==
     /\ SrcDead(u, cp[e].src[g], g)
     /\ Holders(u, e, g) = {}
     /\ \/ front[u].end = "err"
-       \/ front[u].end = "ok" /\ ~Live(Serving(u)) /\ \A w \in Up(u) : ~Routable(w)
+       \/ front[u].end = "ok" /\ ~Live(Serving(u)) /\ \A w \in Up(u) : ~Shows(w)
        \/ cp[e].src[g] = front[u].cur /\ Live(Serving(u))
     /\ cp' = [cp EXCEPT ![e].bad = @ \cup {g}]
     /\ UNCHANGED <<org, alive, deaths, front, left>>
@@ -363,12 +368,13 @@ FrontFinish(u) ==
     /\ front' = [front EXCEPT ![u].end = "ok", ![u].last = front[u].cur]
     /\ UNCHANGED <<org, alive, deaths, cp, left>>
 
-\* No route is left: the front fails the track, and every reader with it.
+\* No route is left, not even one still shown: the front fails the track, and every
+\* reader with it.
 FrontFail(u) ==
     /\ u \in Relays
     /\ front[u].end = "open"
     /\ ~Live(Serving(u)) \/ ~Routable(front[u].cur)
-    /\ \A w \in Up(u) : ~Routable(w)
+    /\ \A w \in Up(u) : ~Shows(w)
     /\ front' = [front EXCEPT ![u].end = "err"]
     /\ cp' = [e \in Edges |->
                 IF e[2] = u /\ Live(e) THEN [cp[e] EXCEPT !.st = "failed"] ELSE cp[e]]
@@ -426,18 +432,25 @@ Forget(u) ==
     /\ cp' = [e \in Edges |-> IF e[1] = u THEN Gone ELSE cp[e]]
     /\ UNCHANGED <<org, alive, deaths, left>>
 
-\* A relay dies: copies downstream of it fail, and its own vanish.
+\* A relay dies: copies downstream of it fail, and its own vanish. Its route still
+\* shows until `Withdraw`.
 Die(r) ==
     /\ r \in Mortal
-    /\ alive[r]
+    /\ alive[r] = "up"
     /\ deaths < MaxDeaths
-    /\ alive' = [alive EXCEPT ![r] = FALSE]
+    /\ alive' = [alive EXCEPT ![r] = "shown"]
     /\ deaths' = deaths + 1
     /\ cp' = [e \in Edges |->
                 IF e[1] = r THEN Gone
                 ELSE IF e[2] = r /\ Live(e) THEN [cp[e] EXCEPT !.st = "failed"]
                 ELSE cp[e]]
     /\ UNCHANGED <<org, front, left>>
+
+\* A dead relay's route leaves the table.
+Withdraw(r) ==
+    /\ alive[r] = "shown"
+    /\ alive' = [alive EXCEPT ![r] = "down"]
+    /\ UNCHANGED <<org, deaths, cp, front, left>>
 
 \* The client unsubscribes.
 Unsubscribe ==
@@ -469,7 +482,7 @@ Next ==
         \/ \E w \in Up(u) : Switch(u, w) \/ LetGo(u, w)
         \/ \E g \in Groups : Ask(u, g)
     \/ \E e \in Edges : EndOk(e)
-    \/ \E r \in Mortal : Die(r)
+    \/ \E r \in Mortal : Die(r) \/ Withdraw(r)
     \/ Unsubscribe
     \/ Done
 
@@ -485,12 +498,13 @@ CleanEndIsComplete == Live(CE) /\ cp[CE].fin => \A g \in Groups : cp[CE].fr[g] >
 \* The client's track ends cleanly only after the origin ended it.
 CleanEndIsDeclared == cp[CE].fin => org.fin
 
-\* A group the client started fails only once no route is left to continue it.
-NoSkipWhileHeld == cp[CE].bad # {} => front["E"].end = "err"
+\* A group the client started fails only once no route is left to continue it: E's
+\* track failed, or it finished and no route of E's still shows.
+NoSkipWhileHeld == cp[CE].bad # {} => front["E"].end = "err" \/ \A w \in Up("E") : ~Shows(w)
 
 \* A finished read holds every frame of every group, unless E lost every route.
 SettledIsWhole ==
-    (Finished /\ ~left /\ cp[CE].st = "live") =>
+    (Finished /\ ~left /\ cp[CE].st = "live" /\ \E w \in Up("E") : Shows(w)) =>
         \A g \in Groups : cp[CE].fr[g] = F
 
 TypeOK ==
@@ -499,5 +513,6 @@ TypeOK ==
         /\ cp[e].bad \subseteq Groups
         /\ \A g \in Groups : cp[e].fr[g] \in -1 .. F /\ cp[e].lent[g] \in 0 .. F
     /\ \A r \in Relays : front[r].end \in {"open", "ok", "err"}
+    /\ \A r \in Relays : alive[r] \in {"up", "shown", "down"}
 
 =============================================================================

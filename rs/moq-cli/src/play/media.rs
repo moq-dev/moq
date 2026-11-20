@@ -1466,13 +1466,8 @@ mod tests {
 		let played = recorder.played();
 		let first = played.iter().find(|part| part.sample == 0.5).unwrap();
 		assert_eq!(first.utterance, 1);
-		let waited = first.from - pressed;
-		if lost {
-			// The ordered read first waits within its age budget for the lost group.
-			assert!(waited > delay && waited < 2 * delay, "{played:?}");
-		} else {
-			assert_eq!(waited, delay, "{played:?}");
-		}
+		// A local track owes nothing, so the ordered read waits for no lost group.
+		assert_eq!(first.from - pressed, delay, "{played:?}");
 		let new: Vec<_> = played.iter().filter(|part| part.sample == 0.5).collect();
 		assert_eq!(
 			new.iter().map(|part| part.to - part.from).sum::<Duration>(),

@@ -427,6 +427,7 @@ export class Subscriber {
 				slots: this.#announces,
 				drained: (route) => this.#drained(route),
 				goaway,
+				grant,
 				send: (msg) => stream.send(msg),
 			});
 		}

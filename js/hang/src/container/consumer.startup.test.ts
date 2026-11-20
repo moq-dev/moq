@@ -6,13 +6,14 @@ import { defined } from "../defined.test-util.ts";
 import { Consumer, type Read } from "./consumer.ts";
 import { encodeFrame, Format } from "./legacy.ts";
 
+// A consumer at `maxDelay` on a local track, which owes no missing group until a fill handler opens.
 function setup(maxDelay = 100) {
 	const clock = new Manual();
 	const installed = clock.install();
 	// Drain the in-memory readers and their continuations without moving time.
 	const flush = () => clock.advance(Duration.ZERO);
 	const track = new Track.Producer("video");
-	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(30_000) } }), {
+	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(maxDelay) } }), {
 		format: new Format("video"),
 		delay: { min: null, max: Duration.millis(maxDelay) },
 	});
@@ -112,13 +113,16 @@ test("Consumer preserves a declared marker before its first media across a hole"
 	expect(warn).not.toHaveBeenCalled();
 });
 
-test.each([false, true])("Consumer still waits for a gap after media (playhead reset: %s)", async (reset) => {
+test.each([false, true])("Consumer still waits for a gap after media (playhead reset: %p)", async (reset) => {
 	const { track, consumer, results, warn, flush } = setup(1000);
 	const first = defined(track.createGroup(16n));
 	write(first, 0);
 	first.finish();
 	await flush();
 	expect(items(results)).toEqual(["16@0"]);
+	// From here its missing groups an unserved fill owes, as a session's feed would, so the ordered
+	// read waits out the max delay for each hole.
+	track.requests();
 
 	if (reset) {
 		const marker = defined(track.createGroup(17n));
@@ -131,10 +135,13 @@ test.each([false, true])("Consumer still waits for a gap after media (playhead r
 	const later = defined(track.createGroup(sequence));
 	write(later, 50_000);
 	await flush();
-	expect(consumer.buffered.peek().length).toBeGreaterThan(0);
+	// The ordered read holds the group past the hole until the hole resolves, so none of it is buffered.
+	expect(consumer.buffered.peek()).toEqual([]);
 	expect(frames(results)).toHaveLength(1);
 
-	// Supply the missing, timestamp-contiguous bridge and prove the queued frame survives.
+	// Supply the missing, timestamp-contiguous bridge and prove the queued frame survives. The key
+	// below it was never produced, as an appending publisher declares.
+	track.skipGroups(sequence - 2n, sequence - 1n);
 	const bridge = defined(track.createGroup(sequence - 1n));
 	write(bridge, 0);
 	bridge.finish();

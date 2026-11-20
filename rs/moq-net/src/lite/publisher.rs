@@ -3789,6 +3789,283 @@ mod announce_test {
 		assert!(matches!(refused, Err(Error::ProtocolViolation)), "{refused:?}");
 	}
 
+	/// A lite-07 prefix wider than the grant is answered region by region: a claim above a
+	/// region is presented at the region, and nothing outside the grant is told. A grant
+	/// change is answered before the ANNOUNCE_OK of the next edit, even one that changes
+	/// nothing, mounts beneath a newly granted region included; a narrowing loses what it
+	/// no longer shows.
+	#[kio::test]
+	async fn a_lite07_prefix_wider_than_the_grant_is_answered_region_by_region() {
+		let path = |path: &str| crate::Path::new(path).unwrap();
+		let subtrees = |paths: &[&str]| -> crate::Patterns {
+			paths
+				.iter()
+				.map(|path| crate::Pattern::subtree(path).unwrap())
+				.collect()
+		};
+		let origin = Hop::new(1).unwrap().produce();
+		let _above = origin.announce("a", origin::RouteInfo::new()).unwrap();
+		let _ax = origin.announce("a/b/x", origin::RouteInfo::new()).unwrap();
+		let _cy = origin.announce("c/y", origin::RouteInfo::new()).unwrap();
+		let _outside = origin.announce("d/z", origin::RouteInfo::new()).unwrap();
+		let _cam = origin.announce("src/cam", origin::RouteInfo::new()).unwrap();
+		let consumer = (origin.mount("e/m", "src").unwrap())
+			.scope("", &crate::Patterns::from(crate::Pattern::all()))
+			.unwrap()
+			.consume();
+		let auth = crate::auth::Link::new(false);
+		let limit = |paths: &[&str]| crate::auth::Grant {
+			publish: crate::Patterns::default(),
+			subscribe: subtrees(paths),
+			expires: None,
+		};
+		auth.handle().authorize(&limit(&["a/b"]));
+		let mut answer = super::routed::Answer::alone_on(consumer, auth.clone());
+		let log = Log::default();
+		let mut wire = Wire {
+			writes: log.writes.clone(),
+			cursor: 0,
+			version: Version::Lite07,
+		};
+		let mut writer = Writer::new(
+			crate::transport::boxed::SendStream::new(SinkSend::new(log)),
+			Version::Lite07,
+		);
+		let waiter = kio::Waiter::noop();
+		let mut sent = |answer: &mut super::routed::Answer| {
+			answer.drain(&mut writer).unwrap();
+			assert!(writer.poll_flush(&waiter).is_ready());
+			wire.take_announces()
+		};
+		// The paths the peer is told, each with how far above it its claim is.
+		let mut decoder = lite::AnnounceDecoder::default();
+		let mut started = |msgs: &[lite::AnnounceBroadcast]| -> Vec<(String, u64)> {
+			let mut told = Vec::new();
+			for msg in msgs {
+				match msg {
+					lite::AnnounceBroadcast::Start { suffix, claim, .. } => {
+						let path = decoder.start(Some(suffix.clone())).unwrap().unwrap();
+						told.push((path.to_string(), claim.item.above));
+					}
+					lite::AnnounceBroadcast::End { id, .. } => {
+						decoder.end(*id).unwrap();
+					}
+					_ => {}
+				}
+			}
+			told.sort();
+			told
+		};
+
+		answer.request(false, Vec::new(), vec![(path(""), true)]).unwrap();
+		let first = sent(&mut answer);
+		assert_eq!(first[0], lite::AnnounceBroadcast::Ok);
+		let told = started(&first);
+		// `a` covers the region from one segment above it; `c/y` and `d/z` lie outside.
+		assert_eq!(told, [("a/b".to_string(), 1), ("a/b/x".to_string(), 0)], "{first:?}");
+		assert_eq!(first.last(), Some(&lite::AnnounceBroadcast::Synced { prefix: 0 }));
+
+		// The grant widens to `c` and the mount point `e`, unread until the next edit: the
+		// edit changes nothing, and its ANNOUNCE_OK follows both.
+		auth.handle().authorize(&limit(&["a/b", "c", "e"]));
+		answer.request(false, Vec::new(), Vec::new()).unwrap();
+		let widened = sent(&mut answer);
+		let ok = widened.iter().position(|msg| *msg == lite::AnnounceBroadcast::Ok);
+		assert_eq!(ok, Some(widened.len() - 1), "{widened:?}");
+		let told = started(&widened);
+		assert_eq!(
+			told,
+			[("c/y".to_string(), 0), ("e/m/cam".to_string(), 0)],
+			"{widened:?}"
+		);
+
+		// Narrowed back, what it no longer shows is lost.
+		auth.handle().authorize(&limit(&["a/b"]));
+		answer.poll_permit(&waiter).unwrap();
+		let narrowed = sent(&mut answer);
+		let lost = narrowed
+			.iter()
+			.filter(|msg| matches!(msg, lite::AnnounceBroadcast::End { lost: true, .. }));
+		assert_eq!(lost.count(), 2, "{narrowed:?}");
+
+		// Widened to everything, the root replaces the region as what is read: `a/b/x` is
+		// told again by the wider read rather than ended, and only the claim above the
+		// region moves, lost where it was presented and told at its own path.
+		auth.handle().authorize(&limit(&[""]));
+		answer.poll_permit(&waiter).unwrap();
+		let whole = sent(&mut answer);
+		let ends: Vec<_> = (whole.iter())
+			.filter_map(|msg| match msg {
+				lite::AnnounceBroadcast::End { lost, .. } => Some(*lost),
+				_ => None,
+			})
+			.collect();
+		assert_eq!(ends, [true], "{whole:?}");
+		let told = started(&whole);
+		assert!(told.contains(&("a".to_string(), 0)), "{whole:?}");
+		assert!(!told.iter().any(|(path, _)| path == "a/b/x"), "{whole:?}");
+	}
+
+	/// Grant changes queued before the answer drains each move the reads they queued, in
+	/// order: one that keeps the regions keeps a mount and its claim, though a later one
+	/// replaces that mount, and the claim every grant shows is never ended.
+	#[kio::test]
+	async fn lite07_grant_changes_queued_back_to_back_apply_in_order() {
+		let path = |path: &str| crate::Path::new(path).unwrap();
+		let origin = Hop::new(1).unwrap().produce();
+		let _cam = origin.announce("src/m", origin::RouteInfo::new()).unwrap();
+		let consumer = (origin.mount("a", "src").unwrap())
+			.scope("", &crate::Patterns::from(crate::Pattern::all()))
+			.unwrap()
+			.consume();
+		let auth = crate::auth::Link::new(false);
+		let limit = |pattern: &str| crate::auth::Grant {
+			publish: crate::Patterns::default(),
+			subscribe: crate::Patterns::from(pattern.parse::<crate::Pattern>().unwrap()),
+			expires: None,
+		};
+		auth.handle().authorize(&limit("a/*"));
+		let mut answer = super::routed::Answer::alone_on(consumer, auth.clone());
+		let log = Log::default();
+		let mut wire = Wire {
+			writes: log.writes.clone(),
+			cursor: 0,
+			version: Version::Lite07,
+		};
+		let mut writer = Writer::new(
+			crate::transport::boxed::SendStream::new(SinkSend::new(log)),
+			Version::Lite07,
+		);
+		let waiter = kio::Waiter::noop();
+		let mut sent = |answer: &mut super::routed::Answer| {
+			answer.drain(&mut writer).unwrap();
+			assert!(writer.poll_flush(&waiter).is_ready());
+			wire.take_announces()
+		};
+
+		answer.request(false, Vec::new(), vec![(path(""), true)]).unwrap();
+		let first = sent(&mut answer);
+		let starts = first
+			.iter()
+			.filter(|msg| matches!(msg, lite::AnnounceBroadcast::Start { .. }));
+		assert_eq!(starts.count(), 1, "{first:?}");
+
+		// `a/**` keeps the region `a`; `a/m/**` then reads `a/m` in place of `a`.
+		auth.handle().authorize(&limit("a/**"));
+		answer.poll_permit(&waiter).unwrap();
+		auth.handle().authorize(&limit("a/m/**"));
+		answer.poll_permit(&waiter).unwrap();
+		let changed = sent(&mut answer);
+		let ends = changed
+			.iter()
+			.filter(|msg| matches!(msg, lite::AnnounceBroadcast::End { .. }));
+		assert_eq!(ends.count(), 0, "{changed:?}");
+	}
+
+	/// A grant that narrows before a prefix's SYNCED replaces the mount its initial set
+	/// waits on with one beneath the narrower region, and SYNCED waits for that one too.
+	#[kio::test]
+	async fn a_lite07_mount_replaced_before_synced_still_holds_it() {
+		let path = |path: &str| crate::Path::new(path).unwrap();
+		let origin = Hop::new(1).unwrap().produce();
+		let _cam = origin.announce("src/m/cam", origin::RouteInfo::new()).unwrap();
+		let consumer = (origin.mount("a", "src").unwrap())
+			.scope("", &crate::Patterns::from(crate::Pattern::all()))
+			.unwrap()
+			.consume();
+		let auth = crate::auth::Link::new(false);
+		let limit = |pattern: &str| crate::auth::Grant {
+			publish: crate::Patterns::default(),
+			subscribe: crate::Patterns::from(pattern.parse::<crate::Pattern>().unwrap()),
+			expires: None,
+		};
+		auth.handle().authorize(&limit("a/**"));
+		let mut answer = super::routed::Answer::alone_on(consumer, auth.clone());
+		let log = Log::default();
+		let mut wire = Wire {
+			writes: log.writes.clone(),
+			cursor: 0,
+			version: Version::Lite07,
+		};
+		let mut writer = Writer::new(
+			crate::transport::boxed::SendStream::new(SinkSend::new(log)),
+			Version::Lite07,
+		);
+		let waiter = kio::Waiter::noop();
+
+		answer.request(false, Vec::new(), vec![(path(""), true)]).unwrap();
+		// Narrowed before the mount at `a` sent its initial set: `a/m` is read in its place.
+		auth.handle().authorize(&limit("a/m/**"));
+		answer.poll_permit(&waiter).unwrap();
+		answer.drain(&mut writer).unwrap();
+		assert!(writer.poll_flush(&waiter).is_ready());
+		let msgs = wire.take_announces();
+		let start = msgs
+			.iter()
+			.position(|msg| matches!(msg, lite::AnnounceBroadcast::Start { .. }));
+		let synced = msgs
+			.iter()
+			.position(|msg| *msg == lite::AnnounceBroadcast::Synced { prefix: 0 });
+		assert!(start.is_some() && start < synced, "{msgs:?}");
+	}
+
+	/// A claim at a path the scope does not match, but above paths it does, is shown where
+	/// it is presented: `a` under `a/*`, at the region and at its own path. One beneath
+	/// every path the scope matches stays hidden, and so does `a` from a handle scoped to
+	/// `a/*/x`, which shares no path with the scope.
+	#[kio::test]
+	async fn a_lite07_claim_above_what_the_scope_matches_is_shown() {
+		let path = |path: &str| crate::Path::new(path).unwrap();
+		let origin = Hop::new(1).unwrap().produce();
+		let _a = origin.announce("a", origin::RouteInfo::new()).unwrap();
+		let _deep = origin.announce("a/x/y", origin::RouteInfo::new()).unwrap();
+		let _b = origin.announce("b", origin::RouteInfo::new()).unwrap();
+		let auth = crate::auth::Link::new(false);
+		auth.handle().authorize(&crate::auth::Grant {
+			publish: crate::Patterns::default(),
+			subscribe: crate::Patterns::from("a/*".parse::<crate::Pattern>().unwrap()),
+			expires: None,
+		});
+		let waiter = kio::Waiter::noop();
+		let disjoint = (origin.consume())
+			.scope("", &crate::Patterns::from("a/*/x".parse::<crate::Pattern>().unwrap()))
+			.unwrap();
+		let shown = [("a".to_string(), 0)];
+		for (consumer, asked, expected) in [
+			(origin.consume(), "", &shown[..]),
+			(origin.consume(), "a", &shown[..]),
+			(disjoint, "", &[][..]),
+		] {
+			let log = Log::default();
+			let mut wire = Wire {
+				writes: log.writes.clone(),
+				cursor: 0,
+				version: Version::Lite07,
+			};
+			let mut writer = Writer::new(
+				crate::transport::boxed::SendStream::new(SinkSend::new(log)),
+				Version::Lite07,
+			);
+			let mut answer = super::routed::Answer::alone_on(consumer, auth.clone());
+			answer.request(false, Vec::new(), vec![(path(asked), true)]).unwrap();
+			answer.drain(&mut writer).unwrap();
+			assert!(writer.poll_flush(&waiter).is_ready());
+			let msgs = wire.take_announces();
+			let mut decoder = lite::AnnounceDecoder::default();
+			let told: Vec<(String, u64)> = (msgs.iter())
+				.filter_map(|msg| match msg {
+					lite::AnnounceBroadcast::Start { suffix, claim, .. } => {
+						let path = decoder.start(Some(suffix.clone())).unwrap().unwrap();
+						Some((path.to_string(), claim.item.above))
+					}
+					_ => None,
+				})
+				.collect();
+			assert_eq!(told, expected, "{asked:?}: {msgs:?}");
+			assert_eq!(msgs.last(), Some(&lite::AnnounceBroadcast::Synced { prefix: 0 }));
+		}
+	}
+
 	/// A lite-07 edit removing a prefix and adding it again, as a peer changing its
 	/// Hidden opt-in does, tells what a mount beneath it presents again under the new
 	/// Prefix ID: both ends dropped the claim with the prefix, so nothing ends.

@@ -55,9 +55,10 @@ async fn import(data: &[u8]) -> Imported {
 			moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(RECORDING)),
 		)
 		.await
-		.unwrap();
+		.unwrap()
+		.ordered();
 	let mut objects = Vec::new();
-	while let Some(mut group) = kio::clock::timeout(Duration::from_secs(1), track.recv_group())
+	while let Some(mut group) = kio::clock::timeout(Duration::from_secs(1), track.next_group())
 		.await
 		.unwrap()
 		.unwrap()

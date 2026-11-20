@@ -194,6 +194,8 @@ test("Consumer measures each skip's span over every group left, not just the new
 test("a blocking group is kept until its successor starts a budget behind the newest", async () => {
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
 	const track = new Track.Producer("tone");
+	// An unserved fill owes the groups in flight, as a session's feed would.
+	track.requests();
 	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(30_000) } }), {
 		format: new Format("data"),
 		delay: { min: null, max: Duration.millis(150) },

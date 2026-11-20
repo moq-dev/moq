@@ -1720,7 +1720,7 @@ mod tests {
 			);
 			match ordered.next_item().await.unwrap().unwrap() {
 				track::Item::Group(group) => assert_eq!(group.start, second.start, "{version}"),
-				track::Item::Gap { range, error } => panic!("{version}: groups {range:?} given up: {error}"),
+				track::Item::Gap { range, error, .. } => panic!("{version}: groups {range:?} given up: {error}"),
 			}
 		}
 	}
