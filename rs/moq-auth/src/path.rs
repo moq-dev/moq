@@ -6,15 +6,16 @@
 //! boundary rules must stay identical to `moq_net::Path`, which the relay applies to
 //! the same strings. `moq_net::Path` refuses the empty segments [`normalize`] drops, so
 //! a string spelled with one is refused there rather than read as another path. Minting
-//! checks a root with [`validate`] instead, so a token never names a path no peer can spell.
+//! checks a root with [`signable`] instead, so a token never names a path no peer can spell.
 //!
-//! Every function below but [`validate`] assumes its arguments are already [`normalize`]d.
+//! Every function below but [`validate`] and [`signable`] assumes its arguments are already [`normalize`]d.
 
 /// The most bytes a path may hold, matching `moq_net::Path::MAX_BYTES`.
 const MAX_BYTES: usize = 4096;
 
-/// Refuse a root `moq_net::Path::new` would: one longer than 4096 bytes, with a `\` before
-/// anything but `\` or `/`, or with a leading, trailing, or doubled `/` no `\` escapes.
+/// Refuse a root longer than 4096 bytes, with a `\` before anything but `\` or `/`, or with
+/// a leading, trailing, or doubled `/` no `\` escapes. Verifying a key's scope checks this,
+/// so keys minted before [`signable`] tightened it still load.
 pub fn validate(root: &str) -> crate::Result<()> {
 	let invalid = |reason: &str| Err(crate::Error::InvalidRoot(format!("{root:?} {reason}")));
 	if root.len() > MAX_BYTES {
@@ -29,6 +30,21 @@ pub fn validate(root: &str) -> crate::Result<()> {
 	}
 	if moq_pattern::parts(root).any(str::is_empty) {
 		return invalid("contains an empty segment");
+	}
+	Ok(())
+}
+
+/// Refuse a root `moq_net::Path::new` would, so a token or key scope is never minted for a
+/// root no session can dial.
+pub fn signable(root: &str) -> crate::Result<()> {
+	validate(root)?;
+	// TEMPORARY MIGRATION, delete with `moq_net::Path`'s at the next version cut: the previous
+	// release splits at every `/`, escaped or not, so `moq_net::Path` refuses a `//` or a
+	// trailing `/` even when a `\` escapes it.
+	if root.ends_with('/') || root.contains("//") {
+		return Err(crate::Error::InvalidRoot(format!(
+			"{root:?} contains a `//` or a trailing `/`, which the previous release re-spells"
+		)));
 	}
 	Ok(())
 }

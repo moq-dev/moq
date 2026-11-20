@@ -172,9 +172,8 @@ function parse(jwk: string): Key {
  * A field {@link Claims} lacks is refused, the wire's `exp` and the legacy `put`/`get`
  * included.
  *
- * Throws on a root spelled with an empty segment, a `\` escaping anything but `\` or
- * `/`, or more than 4096 bytes. Verifying stays lenient on the empty segments, so tokens
- * minted before stay valid.
+ * Throws on a root `@moq/net`'s `Path.from` refuses, so a token is never minted for a root
+ * no session can dial. Verifying never checks the root, so tokens minted before stay valid.
  */
 async function sign(key: Key, claims: Claims): Promise<string> {
 	ensureOperationSupported(key, "sign");
@@ -186,7 +185,7 @@ async function sign(key: Key, claims: Claims): Promise<string> {
 	} catch (error) {
 		throw new Error(`Invalid claims: ${error instanceof Error ? error.message : "unknown error"}`);
 	}
-	Path.validate(parsed.root);
+	Path.signable(parsed.root);
 	ensureClaimsWithinScope(key, parsed);
 
 	const joseKey = await importJoseKey(key);

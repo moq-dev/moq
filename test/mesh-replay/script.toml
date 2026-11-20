@@ -45,9 +45,9 @@ kind = "stuck"
 event = "roll"
 quest = "/quest/m3/release/cut.md"
 
-# On lite-07 alone, a front that switched copies after a reopened link or a crashed relay can
-# deliver a group only every 15-25s on an unchanged route. Not on a roll, so a roll's starved
-# reader still fails. `reopen.toml` reproduces it and lists nothing known.
+# On lite-07 alone, a relay can answer a reader's live subscription Unroutable after a reopened
+# link or a crashed relay while still showing the broadcast, and the reader never asks again.
+# Not on a roll, so a roll's starved reader still fails. `reopen.toml` lists nothing known.
 [[known]]
 check = "unfed"
 kind = "starved"

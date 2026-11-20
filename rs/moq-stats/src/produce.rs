@@ -1699,13 +1699,8 @@ mod tests {
 				.await
 				.unwrap()
 				.ordered();
-			let mut reading = loop {
-				match ordered.next_group().await.unwrap().unwrap() {
-					track::Item::Group(group) => break group,
-					// Keys below where the subscription began were never this reader's.
-					track::Item::Gap { .. } => continue,
-				}
-			};
+			// Keys below where the subscription began were never this reader's.
+			let mut reading = ordered.next_group().await.unwrap().unwrap();
 			assert_eq!(reading.read_frame().await.unwrap().unwrap().payload, b"{}".as_slice());
 			first.write_frame(at(2), b"{\"a\":1}".to_vec()).unwrap();
 			assert_eq!(
@@ -1723,7 +1718,7 @@ mod tests {
 				reading.read_frame().await.unwrap().is_none(),
 				"{version}: the group ends cleanly"
 			);
-			match ordered.next_group().await.unwrap().unwrap() {
+			match ordered.next_item().await.unwrap().unwrap() {
 				track::Item::Group(group) => assert_eq!(group.start, second.start, "{version}"),
 				track::Item::Gap { range, error, .. } => panic!("{version}: groups {range:?} given up: {error}"),
 			}
@@ -2004,7 +1999,7 @@ mod tests {
 	/// The same, without blocking: `None` once nothing more is buffered.
 	fn try_next_frame(track: &mut track::Ordered) -> Option<moq_net::frame::Frame> {
 		use futures::FutureExt;
-		let mut group = track.next_group().now_or_never()?.expect("ok")?.group()?;
+		let mut group = track.next_group().now_or_never()?.expect("ok")?;
 		group.read_frame().now_or_never()?.expect("ok")
 	}
 
@@ -3289,7 +3284,7 @@ mod tests {
 			let mut track = subscribe(broadcast, &name).await;
 			let mut first = None;
 			while let Some(group) = futures::FutureExt::now_or_never(track.next_group()) {
-				let start = group.unwrap().unwrap().group().expect("a group").start;
+				let start = group.unwrap().unwrap().start;
 				first = Some(first.map_or(start, |first: u64| first.min(start)));
 			}
 			let first = first.expect("a run's first group is listed");

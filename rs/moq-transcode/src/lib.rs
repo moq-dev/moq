@@ -587,7 +587,7 @@ mod tests {
 			group.finish().unwrap();
 
 			for (name, subscriber) in &mut subscribers {
-				let mut group = subscriber.next_group().await.unwrap().unwrap().group().unwrap();
+				let mut group = subscriber.next_group().await.unwrap().unwrap();
 				assert_eq!(group.start, sequence, "{name} changed the group start");
 				let mut received = Vec::new();
 				while let Some(payload) = group.read_frame().await.unwrap() {
@@ -1097,7 +1097,7 @@ mod tests {
 			.await
 			.unwrap()
 			.ordered();
-		let mut group = subscriber.next_group().await.unwrap().unwrap().group().unwrap();
+		let mut group = subscriber.next_group().await.unwrap().unwrap();
 		assert!(group.start <= 1, "unexpected sequence {}", group.start);
 		let payload = group.read_frame().await.unwrap().unwrap();
 		let frame = hang::container::Frame::decode(payload.payload).unwrap();
@@ -1200,11 +1200,7 @@ mod tests {
 			.await
 			.unwrap()
 			.ordered();
-		let mut group = loop {
-			if let Some(group) = live.next_group().await.unwrap().unwrap().group() {
-				break group;
-			}
-		};
+		let mut group = live.next_group().await.unwrap().unwrap();
 		assert!(group.read_frame().await.unwrap().is_some());
 
 		transcoder.abort();
@@ -1253,7 +1249,7 @@ mod tests {
 		assert!(update.encoding);
 
 		// Real frames, so the counters are counting encoding rather than intent.
-		let mut group = subscriber.next_group().await.unwrap().unwrap().group().unwrap();
+		let mut group = subscriber.next_group().await.unwrap().unwrap();
 		group.read_frame().await.unwrap().unwrap();
 		assert!(rendition.frames() > 0);
 		assert!(rendition.bytes() > 0);
@@ -2191,11 +2187,7 @@ mod tests {
 			.await
 			.unwrap()
 			.ordered();
-		let group = loop {
-			if let Some(group) = subscriber.next_group().await.unwrap().unwrap().group() {
-				break group;
-			}
-		};
+		let group = subscriber.next_group().await.unwrap().unwrap();
 		let served = timestamps(group).await;
 		assert_eq!(served, (166_665_001, expected(1)));
 		live.abort();

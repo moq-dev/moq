@@ -10,6 +10,7 @@ Trust this checkout's source over published API references, which may describe a
 
 - The same identity (ex. broadcast+track+group+frame) always has the same content. Use a new identity for new content.
 - A publisher that breaks that, such as by reusing or restarting group sequences, hurts only its own broadcast. Code spends no cycles detecting it: the violation must only never panic, cost unbounded work, or affect other broadcasts.
+- A cache only makes things faster: what a subscription delivers never depends on what a copy happens to hold, as with HTTP. A copy answers from its cache only what it can prove upstream would answer, such as a time placed between held groups linked by Previous Start; anything else updates the upstream subscription and waits for its answer.
 - Never match on errors; it's brittle.
 - moq-lite and moq-net take priority over moq-transport and other IETF drafts, which are a low-effort compatibility layer. Ignore their requirements (even MUSTs) that add cost without a clear behavioral benefit, and never add API for functionality only they have.
 

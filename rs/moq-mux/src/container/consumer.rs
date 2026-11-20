@@ -1024,7 +1024,7 @@ impl<F: Container> Consumer<F> {
 				self.gated = true;
 				return Poll::Pending;
 			}
-			let next = match ready!(self.subscriber().poll_next_group(waiter)) {
+			let next = match ready!(self.subscriber().poll_next_item(waiter)) {
 				Ok(next) => next,
 				Err(err) => {
 					if let Reader::Reading(track) = std::mem::replace(&mut self.reader, Reader::Ended) {

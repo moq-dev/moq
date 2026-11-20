@@ -495,7 +495,8 @@ impl TrackInner {
 					waiter.waker().wake_by_ref();
 					return Poll::Ready(Ok(Some(group)));
 				}
-				poll_group(&mut ordered.track, waiter).map(|r| r.map_err(Into::into))
+				// The bindings report no gaps, so a group the track gave up on is passed over.
+				ordered.track.poll_next_group(waiter).map_err(Into::into)
 			}
 			Err(e) => Poll::Ready(Err(e)),
 		}
@@ -515,7 +516,7 @@ impl TrackInner {
 		loop {
 			let group = match &mut ordered.pending {
 				Some(group) => group,
-				None => match ready!(poll_group(&mut ordered.track, waiter)) {
+				None => match ready!(ordered.track.poll_next_group(waiter)) {
 					Ok(Some(group)) => ordered.pending.insert(group),
 					Ok(None) => return Poll::Ready(Ok(None)),
 					Err(err) => return Poll::Ready(Err(err.into())),
@@ -730,20 +731,5 @@ impl MoqGroupConsumer {
 	/// Terminal: the group and whatever it still buffers are released here, not when the handle is.
 	pub fn cancel(&self) {
 		self.reads.cancel();
-	}
-}
-
-/// The next group of an ordered read. The bindings report no gaps, so a group the track
-/// gave up on is passed over.
-fn poll_group(
-	track: &mut moq_net::track::Ordered,
-	waiter: &kio::Waiter,
-) -> Poll<Result<Option<moq_net::group::Consumer>, moq_net::Error>> {
-	loop {
-		match ready!(track.poll_next_group(waiter))? {
-			Some(moq_net::track::Item::Group(group)) => return Poll::Ready(Ok(Some(group))),
-			Some(moq_net::track::Item::Gap { .. }) => continue,
-			None => return Poll::Ready(Ok(None)),
-		}
 	}
 }

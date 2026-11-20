@@ -667,13 +667,16 @@ impl Model {
 		while reader.end.is_none() {
 			let polled = match reader.cursor.as_mut().unwrap() {
 				Cursor::Arrival(sub) => sub.poll_recv_group(&waiter),
-				Cursor::Ordered(sub) => match sub.poll_next_group(&waiter) {
+				Cursor::Ordered(sub) => match sub.poll_next_item(&waiter) {
 					// An ordered read reports its drops in turn.
 					Poll::Ready(Ok(Some(track::Item::Gap { range, error, .. }))) => {
 						reader.report_drop(index, range, &format!("{error:?}"))?;
 						continue;
 					}
-					polled => polled.map(|res| res.map(|item| item.map(|item| item.group().expect("a group")))),
+					Poll::Ready(Ok(Some(track::Item::Group(group)))) => Poll::Ready(Ok(Some(group))),
+					Poll::Ready(Ok(None)) => Poll::Ready(Ok(None)),
+					Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+					Poll::Pending => Poll::Pending,
 				},
 			};
 			match polled {

@@ -16623,13 +16623,12 @@ mod stitch_tests {
 		let mut next = h.stream().await;
 		h.subscriber.clone().recv_group(&mut next).await.expect("next group");
 		// The refused group comes back as a gap, then the next group.
-		let Poll::Ready(Ok(Some(track::Item::Gap { range, .. }))) = ordered.poll_next_group(&kio::Waiter::noop())
-		else {
+		let Poll::Ready(Ok(Some(track::Item::Gap { range, .. }))) = ordered.poll_next_item(&kio::Waiter::noop()) else {
 			panic!("the refused group is not reported");
 		};
 		assert!(range.contains(&KEY), "{range:?}");
 		let group = match ordered.poll_next_group(&kio::Waiter::noop()) {
-			Poll::Ready(Ok(Some(track::Item::Group(group)))) => group,
+			Poll::Ready(Ok(Some(group))) => group,
 			Poll::Ready(_) => panic!("no next group"),
 			Poll::Pending => panic!("the ordered reader still waits on the refused group"),
 		};

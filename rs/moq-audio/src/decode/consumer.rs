@@ -430,13 +430,15 @@ impl Consumer {
 					self.boundary = Some(Duration::try_from(timestamp)?);
 					self.started = true;
 					// Groups lost past a declared end were the fresh encoder's, so the packet
-					// after them still comes from it.
+					// after them still comes from it, and decodes as its first, unprimed: a wire
+					// before lite-07 names the run the publisher skipped across its silence a
+					// drop, so after every pause this gap is that silence, not lost media.
 					let fresh = self.end.is_some();
 					self.restart()?;
+					self.warmup_pending = !self.warmup.is_zero();
 					if fresh {
 						self.fresh_encoder();
 					}
-					self.warmup_pending = !self.warmup.is_zero();
 					self.ready.push_back(Read::Gap { timestamp, duration });
 					continue;
 				}
@@ -799,10 +801,12 @@ impl Consumer {
 	}
 
 	/// Expect a fresh encoder's packets: its pre-skip is trimmed again, and the stopped
-	/// encoder's history primes none of its warmup.
+	/// encoder's history primes none of its warmup. Its first packet needs no warmup either, so
+	/// one a join or a gap left pending is dropped.
 	fn fresh_encoder(&mut self) {
 		self.decoder.reapply_delay();
 		self.primed = Duration::ZERO;
+		self.warmup_pending = false;
 	}
 
 	/// Reset resampling state at a hole, returning whatever the resampler was still
@@ -1196,6 +1200,9 @@ mod tests {
 		Lost,
 		/// A timestamp jump across contiguous groups.
 		Undeclared,
+		/// A declared end, then a seek past the starts after it, as a wire before lite-07 delivers
+		/// the run a publisher skipped across a pause.
+		DeclaredGap,
 	}
 
 	/// Decodes `first` packets, then six more a second later, past a `cut` in the timeline.
@@ -1218,6 +1225,10 @@ mod tests {
 					Break::Declared => producer.discontinuity().unwrap(),
 					Break::Lost => producer.seek(1_000_000).unwrap(),
 					Break::Undeclared => {}
+					Break::DeclaredGap => {
+						producer.discontinuity().unwrap();
+						producer.seek(1_000_000).unwrap();
+					}
 				}
 			}
 			for packet in 0..if epoch == 0 { first } else { 6 } {
@@ -1521,6 +1532,21 @@ mod tests {
 			]
 		);
 		assert_eq!(frames, 8 * 960);
+	}
+
+	/// A join during a pause reaches a fresh encoder's first packet, which needs no warmup, past a
+	/// gap or not.
+	#[tokio::test(start_paused = true)]
+	async fn a_join_during_a_pause_trims_no_warmup() {
+		for cut in [Break::Declared, Break::DeclaredGap] {
+			let (stamps, frames) = warmup_output(cut, 0).await;
+			assert_eq!(
+				stamps,
+				[1_000_000, 1_020_000, 1_040_000, 1_060_000, 1_080_000, 1_100_000],
+				"{cut:?}"
+			);
+			assert_eq!(frames, 6 * 960, "{cut:?}");
+		}
 	}
 
 	/// The codec's history primes it across a gap, so only the warmup it falls short of is trimmed.
@@ -2696,12 +2722,13 @@ mod tests {
 		assert_eq!(after_loss(true, None).await[0], (1_000_000, 960 - 312));
 	}
 
-	/// The stopped encoder's history primes none of the fresh encoder's warmup, so a loss of
-	/// its first groups trims the whole warmup after them.
+	/// A gap after a declared end reaches the fresh encoder's first packet, which plays from its
+	/// own stamp rather than a warmup later: before lite-07 the run skipped across every pause
+	/// arrives as a drop, so priming there would clip the start of each utterance.
 	#[tokio::test(start_paused = true)]
-	async fn a_loss_after_a_declared_end_trims_the_whole_warmup() {
+	async fn a_gap_after_a_declared_end_trims_no_warmup() {
 		let warmup = Some(Duration::from_millis(10));
-		assert_eq!(after_loss(true, warmup).await[0].0, 1_010_000);
+		assert_eq!(after_loss(true, warmup).await[0], (1_000_000, 960 - 312));
 	}
 
 	/// Decodes two Opus packets, then, past lost groups and a declared end if `declared`, one

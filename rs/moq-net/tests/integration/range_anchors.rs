@@ -228,14 +228,14 @@ async fn an_ordered_reader_starts_at_the_publishers_start_over_a_frameless_newes
 	newest.finish().unwrap();
 	// Waiting on each group in key, the reader starts where the publisher resolved the start,
 	// counting its frameless newest group, with nothing below it owed or given up.
-	let item = kio::clock::timeout(TIMEOUT, reader.next_group())
+	let item = kio::clock::timeout(TIMEOUT, reader.next_item())
 		.await
 		.expect("group timeout")
 		.unwrap();
-	assert_eq!(
-		item.and_then(moq_net::track::Item::group).map(|group| group.start),
-		Some(5)
-	);
+	let Some(moq_net::track::Item::Group(group)) = item else {
+		panic!("expected group 5 first")
+	};
+	assert_eq!(group.start, 5);
 	let _track = track.finish().unwrap();
 }
 

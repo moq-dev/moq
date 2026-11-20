@@ -111,13 +111,10 @@ async fn import_onto(
 	let mut objects = Vec::new();
 	let mut markers = Vec::new();
 	let mut starts = Vec::new();
-	while let Some(item) = kio::clock::timeout(Duration::from_secs(1), track.next_group())
+	while let Some(mut group) = kio::clock::timeout(Duration::from_secs(1), track.next_group())
 		.await
 		.expect("the track stalled")?
 	{
-		let moq_net::track::Item::Group(mut group) = item else {
-			continue;
-		};
 		starts.push(group.start);
 		while let Some(frame) = group.read_frame().await? {
 			if frame.payload.is_empty() {
