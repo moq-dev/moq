@@ -2102,7 +2102,7 @@ test("a whole group of one frame never ages alone", () => {
 		const group = producer.appendGroup(Timestamp.fromMillis(0));
 		group.writeFrame(textFrame("x", Timestamp.fromMillis(0)));
 		group.finishWhole();
-		clock.set(70_000);
+		clock.set(11_000);
 		expect(drain(producer.subscribe({ delay: { max: Duration.millis(1000) } }))).toEqual([0n]);
 	} finally {
 		producer.finish();

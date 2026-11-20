@@ -54,7 +54,7 @@ import {
 } from "./internal.ts";
 import { grace, Ledger } from "./ledger.ts";
 import { rescale } from "./rescale.ts";
-import { floorAt, Timescale, Timestamp } from "./time.ts";
+import { floorAt, Timescale, type Timestamp } from "./time.ts";
 import { checkEnd, checkKey, max, min, UNBOUNDED } from "./util/key.ts";
 import { checkName } from "./util/utf8.ts";
 import { bounded, type Holdings, joinsLive, rangesOf, UNHELD, Window, wireSpan } from "./window.ts";
@@ -3306,14 +3306,16 @@ export class Subscriber {
 	#endedAt(key: bigint): Instant | undefined {
 		const group = this.#held(key);
 		if (!group?.whole || group.frameCount < 2) return undefined;
+		// Undefined for a copy not held from frame 0: a tail's first timestamp is not the group's.
 		const start = hooks.groupTimestamp(group);
 		const latest = hooks.groupLatest(group);
-		if (start === undefined || latest?.scale === undefined) return undefined;
-		// In the track's units, as Rust divides them.
+		const scale = latest?.scale;
+		if (start === undefined || latest === undefined || scale === undefined) return undefined;
+		// In the track's units, as Rust divides them, and as a span: the reach itself may not fit.
 		const interval = Math.floor((latest.value - start.value) / (group.frameCount - 1));
 		if (interval <= 0) return undefined;
-		const reach = new Timestamp(latest.value + interval, latest.scale);
-		return hooks.groupArrived(group).checkedAdd(Duration.millis(reach.asMillis() - start.asMillis()));
+		const span = ((latest.value - start.value + interval) * 1000) / scale;
+		return hooks.groupArrived(group).checkedAdd(Duration.millis(span));
 	}
 
 	// When the wall clock starts: the cached `arrival`'s arrival, or that of the one `held`

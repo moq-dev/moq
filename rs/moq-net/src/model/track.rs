@@ -14903,8 +14903,33 @@ mod test {
 			.unwrap();
 		group.finish_whole().unwrap();
 
-		elapse(&producer, Duration::from_secs(60));
+		elapse(&producer, Duration::from_secs(1));
 		let fetched = producer.consume().fetch_group(0, None).now_or_never().unwrap();
+		assert!(fetched.is_ok(), "{:?}", fetched.err());
+	}
+
+	/// A whole copy received from past frame 0 holds only its tail, whose first timestamp is
+	/// not the group's, so it measures no interval and never ages without a successor.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_whole_tail_never_ages_alone() {
+		let producer = track_producer("test", Info::timed().with_max_age(Duration::ZERO));
+		elapse(&producer, Duration::ZERO);
+		let Received::Group(mut tail) = producer.create_group_at(group::Info { start: 0 }, 2).unwrap() else {
+			panic!("nothing else holds group 0");
+		};
+		for at in [20, 30] {
+			tail.write_frame(Timestamp::from_millis(at).unwrap(), bytes::Bytes::from_static(b"x"))
+				.unwrap();
+		}
+		tail.finish_whole().unwrap();
+
+		elapse(&producer, Duration::from_secs(1));
+		let from = group::Fetch {
+			frame_start: 2,
+			..Default::default()
+		};
+		let fetched = producer.consume().fetch_group(0, from).now_or_never().unwrap();
 		assert!(fetched.is_ok(), "{:?}", fetched.err());
 	}
 

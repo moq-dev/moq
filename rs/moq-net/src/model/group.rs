@@ -3125,9 +3125,11 @@ impl Handle {
 
 	/// How far a group finished whole presents: one frame past its highest frame timestamp, a
 	/// frame being its mean interval from its first frame's timestamp to its highest. `None`
-	/// when it is not whole, or when its frames measure no interval (one frame, or all at one
-	/// timestamp). Only a whole group's frames prove where it stops, and they are the same at
-	/// every copy, so its reach never depends on which copy judges it.
+	/// when it is not whole, when this copy does not hold it from frame 0 (a tail's first
+	/// timestamp is not the group's), or when its frames measure no interval (one frame, or
+	/// all at one timestamp). Only a whole group's frames prove where it stops, and they are
+	/// the same at every copy holding them all, so its reach never depends on which copy
+	/// judges it.
 	pub(super) fn whole_reach(&self) -> Option<Timestamp> {
 		let state = self.state.read();
 		let Outcome::Finished(frames, true) = state.outcome else {
@@ -3136,7 +3138,7 @@ impl Handle {
 		let Timeline::Timed { start, latest } = state.timeline else {
 			return None;
 		};
-		if state.origin == Origin::Unverified {
+		if state.origin == Origin::Unverified || state.offset != 0 {
 			return None;
 		}
 		let gaps = u64::try_from(frames.checked_sub(1)?).ok()?;
