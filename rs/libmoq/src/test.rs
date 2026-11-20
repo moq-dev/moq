@@ -5457,13 +5457,18 @@ fn a_group_request_nobody_reads_is_withdrawn() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// A C handler knows its groups only by key, so rejecting a reader's time start says no group
+/// A C handler knows its groups only by key, so freeing a reader's time start says no group
 /// starts at that time: the reader reads on from it, or from the group held just below it,
 /// rather than failing. That includes a time just past a held group, whose fill asks only the
-/// time's own key.
+/// time's own key. Aborting it instead says serving it failed, which fails the reader and
+/// records nothing, so a later reader asks again.
 #[test]
-fn a_rejected_time_start_reads_on() {
-	for (time, held, first) in [(7, &[10][..], 10), (5, &[4, 10][..], 4)] {
+fn a_freed_time_start_reads_on_and_an_aborted_one_fails() {
+	for (time, held, first) in [
+		(7, &[10][..], Some(10)),
+		(5, &[4, 10][..], Some(4)),
+		(7, &[10][..], None),
+	] {
 		let origin = id(moq_origin_create());
 		let broadcast = publish_broadcast(origin, b"track-dynamic-time-start");
 		let name = b"data";
@@ -5514,6 +5519,45 @@ fn a_rejected_time_start_reads_on() {
 		let mut start = 0u64;
 		assert_eq!(unsafe { moq_group_request_start(request, &mut start) }, 0);
 		assert_eq!(start, time);
+		let Some(first) = first else {
+			assert_eq!(moq_group_request_abort(request, 9), 0);
+			for _ in 0..2 {
+				assert!(
+					matches!(reader.poll_recv_group(&waiter), std::task::Poll::Ready(Err(_))),
+					"not group 10, which the cache holds past the time"
+				);
+			}
+			// Nothing recorded the time's key dropped, so a fresh reader asks for it again.
+			let mut again = {
+				let mut state = State::lock();
+				let producer = state.publish.track_producer(Id::try_from(track).unwrap()).unwrap();
+				producer.subscribe(
+					moq_net::track::Subscription::default()
+						.with_delay(moq_net::track::Delay::default().with_max(None))
+						.with_ranges([moq_net::track::Range {
+							start: moq_net::track::Anchor::Time(time),
+							end: None,
+						}]),
+				)
+			};
+			let request = id(group_cb.recv_reading(&mut again));
+			assert_eq!(unsafe { moq_group_request_start(request, &mut start) }, 0);
+			assert_eq!(start, time);
+			assert_eq!(moq_group_request_free(request), 0);
+			drop((reader, again));
+			assert_eq!(moq_publish_requests_cancel(dynamic), 0);
+			let terminal = loop {
+				match group_cb.recv() {
+					code if code > 0 => drop(moq_group_request_free(id(code))),
+					code => break code,
+				}
+			};
+			assert_eq!(terminal, 0);
+			assert_eq!(moq_publish_track_finish(track), 0);
+			assert_eq!(moq_publish_close(broadcast), 0);
+			assert_eq!(moq_origin_close(origin), 0);
+			continue;
+		};
 		assert_eq!(moq_group_request_free(request), 0);
 		// The keys after it up to the next group held are asked as misses, rejected too.
 		let group = loop {

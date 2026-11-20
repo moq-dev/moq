@@ -1191,15 +1191,21 @@ impl Publish {
 		self.insert_group(group)
 	}
 
-	/// Reject a group request like [`Self::group_request_free`]; `error_code` is not delivered.
+	/// Refuse a group request, failing the readers waiting on it now as not found, so a later
+	/// reader asks again; `error_code` is not delivered. A reader's time start fails with it
+	/// until its ranges change, as serving it failed.
 	pub fn group_request_abort(&mut self, request: Id, _error_code: u16) -> Result<(), Error> {
-		self.group_request_free(request)
+		let request = self.group_request.remove(request).ok_or(Error::NotFound)?;
+		request
+			.fill
+			.refuse_groups(request.start..request.start + 1, moq_net::Error::NotFound);
+		Ok(())
 	}
 
-	/// Drop a group request, failing the readers waiting on it as not found. The group is
-	/// refused rather than dropped, so a later reader asks again. A reader's time start is
-	/// dropped instead: a C handler knows its groups only by key, so one lacking the time's key
-	/// says no group starts there, and its reader starts at the group below rather than failing.
+	/// Free a group request unanswered: refused as [`Self::group_request_abort`] refuses it,
+	/// except a reader's time start, which is dropped. A C handler knows its groups only by
+	/// key, so one lacking the time's key says no group starts there, and its reader starts at
+	/// the group below rather than failing.
 	pub fn group_request_free(&mut self, request: Id) -> Result<(), Error> {
 		let request = self.group_request.remove(request).ok_or(Error::NotFound)?;
 		let fill = &request.fill;

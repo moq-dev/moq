@@ -4164,12 +4164,13 @@ pub extern "C" fn moq_group_request_accept(request: u32) -> i32 {
 	})
 }
 
-/// Reject a group request, failing the readers waiting on it now as not found.
+/// Reject a group request, as serving it failed, failing the readers waiting on it now as not
+/// found.
 ///
 /// A later reader of the group asks again. A request for a reader's time start, a time no
-/// cached group places, says instead that no group starts there, so that reader starts at the
-/// group below it. The error code is not delivered. Consumes the request handle. Returns a
-/// zero on success, or a negative code on failure.
+/// cached group places, fails that reader until its ranges change; free it instead when you
+/// have no group there. The error code is not delivered. Consumes the request handle. Returns
+/// a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_group_request_abort(request: u32, error_code: u16) -> i32 {
 	ffi::enter(move || {
@@ -4178,7 +4179,11 @@ pub extern "C" fn moq_group_request_abort(request: u32, error_code: u16) -> i32 
 	})
 }
 
-/// Free a group request without accepting it, which rejects it like [moq_group_request_abort].
+/// Free a group request without accepting it, as you have no such group, which rejects it like
+/// [moq_group_request_abort].
+///
+/// A request for a reader's time start says instead that no group starts at that time, so the
+/// reader starts at the group held below it, or at the time when none is, rather than failing.
 ///
 /// Returns a zero on success, or a negative code if the handle is unknown.
 #[unsafe(no_mangle)]
