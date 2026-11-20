@@ -1,6 +1,7 @@
 //! A draining relay drains the cluster links it dialed, as it does those it accepted:
 //! each peer hears its GOAWAY and tells the others the relay is draining, and the
-//! relay closes each link once nothing reads through it.
+//! relay closes each link once its accepted sessions have left and nothing reads
+//! through it.
 //!
 //! Three real relays on loopback: C dials A, and L dials both. L drains, so A and C
 //! each hear L's GOAWAY themselves, and the first to hear it sends the other a DRAIN
@@ -314,6 +315,70 @@ async fn a_dialed_link_still_read_at_the_deadline_is_forced() {
 	);
 
 	drop(reader);
+	c.stop().await;
+	a.stop().await;
+}
+
+/// A publisher's session to the relay at `port`, publishing the broadcast `name`.
+fn publisher(port: u16, name: &str) -> (moq_tokio::Connection, moq_net::origin::Route) {
+	let mut config = moq_tokio::connect::Config::default();
+	config.bind = Some("127.0.0.1:0".parse().unwrap());
+	config.tls.insecure = Some(true);
+	config.websocket.enabled = Some(false);
+	config.version = vec!["moq-lite-07-wip".parse().unwrap()];
+	let origin = moq_tokio::origin::spawn();
+	let broadcast = origin.route(name, moq_net::origin::RouteOptions::default()).unwrap();
+	let url: url::Url = format!("https://127.0.0.1:{port}/").parse().unwrap();
+	let connection = config
+		.init(Default::default())
+		.unwrap()
+		.with_publisher(origin.consume())
+		// Redials the draining relay once and keeps serving there, as a publisher
+		// whose replacement relay has yet to come up.
+		.with_restart(moq_tokio::Restart::Handoff)
+		.connect(url);
+	(connection, broadcast)
+}
+
+/// A link nothing reads through still announces the broadcast of a publisher that is yet
+/// to leave the draining relay, so a neighbour whose only route is that link keeps it,
+/// and the relay exits once the publisher leaves.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dialed_link_announces_until_the_relays_publishers_leave() {
+	const DRAIN: Duration = Duration::from_secs(600);
+	let Mesh { a, c, l, reader, .. } = Mesh::start(DRAIN).await;
+	drop(reader);
+
+	let (publisher, _broadcast) = publisher(l.port, "p");
+	a.learns("p").await;
+	let mut routes = a.origin.consume().routes();
+
+	let started = kio::clock::now();
+	l.trigger.start();
+	// Long past an idle link's close, were the publisher not held to.
+	let withdrawn = kio::clock::timeout(Duration::from_secs(2), async {
+		loop {
+			let event = routes.next().await.expect("origin open");
+			let gone = matches!(event.kind, RouteKind::End | RouteKind::Offline);
+			if gone && event.announce.prefix.as_str() == "p" {
+				return;
+			}
+		}
+	})
+	.await;
+	assert!(withdrawn.is_err(), "A lost p while its publisher was still on L");
+	assert!(!l.running.is_finished(), "L exited under a publisher");
+
+	publisher.close().await.expect("publisher closes");
+	let observer = l.shutdown.clone();
+	l.stop().await;
+	assert!(started.elapsed() < DRAIN, "L held its links to the deadline");
+	assert_eq!(
+		observer.drained().await.forced,
+		0,
+		"a link closed on its own counted as forced"
+	);
+
 	c.stop().await;
 	a.stop().await;
 }

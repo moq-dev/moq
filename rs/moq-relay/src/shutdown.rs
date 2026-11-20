@@ -148,6 +148,8 @@ struct State {
 	forced: usize,
 	/// Sessions already closed before the deadline but still reporting at it.
 	ending: usize,
+	/// Dialed cluster links in `tally.open`, so the rest are accepted sessions.
+	links: usize,
 	/// The most recent counted session finished reporting.
 	last_left: Option<Instant>,
 }
@@ -277,9 +279,21 @@ impl Observer {
 	///
 	/// A cluster link the relay dials is counted the same way, from before its first dial.
 	pub fn serve(&self) -> Serving {
+		self.serve_as(false)
+	}
+
+	/// Count a cluster link this relay dials, as [`serve`](Self::serve) does a session.
+	pub(crate) fn serve_link(&self) -> Serving {
+		self.serve_as(true)
+	}
+
+	fn serve_as(&self, link: bool) -> Serving {
 		let counted = self.deadline().is_none_or(|deadline| Instant::now() < deadline);
 		if counted {
-			self.state.send_modify(|state| state.tally.open += 1);
+			self.state.send_modify(|state| {
+				state.tally.open += 1;
+				state.links += usize::from(link);
+			});
 		}
 		Serving {
 			_active: self.admission.enter(),
@@ -287,8 +301,16 @@ impl Observer {
 				true => Count::Open,
 				false => Count::Uncounted,
 			},
+			link,
 			shutdown: self.clone(),
 		}
+	}
+
+	/// Resolve once every accepted session has closed, leaving only dialed links open.
+	async fn accepted_left(&self) {
+		let mut state = self.state.subscribe();
+		// The sender lives in `self`, so this cannot close.
+		let _ = state.wait_for(|state| state.tally.open == state.links).await;
 	}
 
 	/// The sessions counted so far.
@@ -409,14 +431,27 @@ impl Observer {
 
 	/// Drain a cluster link this relay dialed as [`drain`](Self::drain) does an
 	/// accepted session: it stops redialing and sends a GOAWAY. A neighbour never
-	/// leaves such a link, so it closes once nothing reads through it, which the
-	/// GOAWAY hastens by moving the neighbour's readers to other routes, or at the
-	/// deadline.
+	/// leaves such a link, so it closes once every accepted session has left and
+	/// nothing reads through it, or at the deadline. Until then it keeps announcing
+	/// the broadcasts of publishers still moving off this relay, so a neighbour whose
+	/// only route is this link never sees them withdrawn mid-handover. The GOAWAY
+	/// meanwhile moves the neighbour's readers to other routes.
 	async fn drain_link(&self, link: moq_tokio::Connection, counted: bool) {
 		let now = Instant::now();
 		let deadline = self.deadline().unwrap_or(now.saturating_add(self.drain_timeout));
 		let _draining = counted.then(|| self.draining(deadline));
-		if let Err(err) = link.drain(deadline.saturating_duration_since(now)).await {
+		let hold = link.hold();
+		let drain = link.drain(deadline.saturating_duration_since(now));
+		tokio::pin!(drain);
+		let res = tokio::select! {
+			biased;
+			res = &mut drain => res,
+			() = self.accepted_left() => {
+				drop(hold);
+				drain.await
+			}
+		};
+		if let Err(err) = res {
 			tracing::debug!(%err, "dialed link did not leave before the drain deadline");
 		}
 	}
@@ -429,6 +464,8 @@ pub struct Serving {
 	// admission prevents while it is held before the SETUP reply.
 	_active: Option<moq_net::server::Admitted>,
 	count: Count,
+	/// A cluster link this relay dialed, counted in [`State::links`] while open.
+	link: bool,
 	pub(crate) shutdown: Observer,
 }
 
@@ -461,9 +498,11 @@ impl Serving {
 			return;
 		}
 		self.count = Count::Ending(Instant::now());
+		let link = self.link;
 		self.shutdown.state.send_modify(|state| {
 			state.tally.open -= 1;
 			state.tally.ending += 1;
+			state.links -= usize::from(link);
 		});
 	}
 }
@@ -482,7 +521,10 @@ impl Drop for Serving {
 		self.shutdown.state.send_modify(|state| {
 			match closed {
 				Some(_) => state.tally.ending -= 1,
-				None => state.tally.open -= 1,
+				None => {
+					state.tally.open -= 1;
+					state.links -= usize::from(self.link);
+				}
 			}
 			state.ending += usize::from(ending);
 			state.last_left = Some(state.last_left.map_or(now, |last| last.max(now)));

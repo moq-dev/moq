@@ -385,8 +385,11 @@ and is force-closed if it is still connected when the window ends. The cluster
 links the relay dialed are drained the same way and stop redialing, so a
 neighbour hears the relay is draining and moves its routes before the link
 closes. A neighbour keeps serving such a link rather than leave it, so the
-relay closes the link itself once nothing reads through it, or at the end of
-the window, where a link still read counts as force-closed. Accepted
+relay closes the link itself once its accepted connections have left and
+nothing reads through it, or at the end of the window, where a link still open
+counts as force-closed. Until then the link keeps announcing the broadcasts of
+publishers still connected to the relay, so neighbours don't lose them while
+those publishers move. Accepted
 connections still handshaking or awaiting authorization hold the drain until
 they finish, fail, or reach that same deadline, where any still pending is
 refused or closed. Public HTTP/1.1 connections hold the drain from TCP accept

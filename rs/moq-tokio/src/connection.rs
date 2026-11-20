@@ -938,6 +938,24 @@ struct Task {
 	/// A graceful close retains the loop's resources while its sessions drain.
 	running: std::sync::Weak<Running>,
 	closed: CloseGuard,
+	/// How many [`Hold`]s keep a drained session open while it is idle.
+	holds: kio::Producer<usize>,
+}
+
+/// Keeps a [`Connection::drain`] from closing its idle session until this drops.
+///
+/// From [`Connection::hold`]. The drain still closes the session at its timeout.
+#[must_use = "the drain may close the idle session once this drops"]
+pub struct Hold {
+	holds: kio::Producer<usize>,
+}
+
+impl Drop for Hold {
+	fn drop(&mut self) {
+		if let Ok(mut holds) = self.holds.write() {
+			*holds -= 1;
+		}
+	}
 }
 
 /// Resources owned by the loop, retained by a graceful close until its sessions drain.
@@ -1018,6 +1036,7 @@ impl Connection {
 				handle: task,
 				running: task_running,
 				closed,
+				holds: kio::Producer::default(),
 			}),
 			state,
 			auth,
@@ -1081,12 +1100,23 @@ impl Connection {
 		Ok(session.and(predecessor)?)
 	}
 
+	/// Keep a [`drain`](Self::drain) from closing the session for carrying nothing
+	/// until the returned guard drops, such as while the session still announces
+	/// broadcasts whose publishers have yet to move elsewhere.
+	pub fn hold(&self) -> Hold {
+		let holds = self.task.holds.clone();
+		if let Ok(mut count) = holds.write() {
+			*count += 1;
+		}
+		Hold { holds }
+	}
+
 	/// Stop the loop for every clone and drain the live session with an empty-URI
 	/// GOAWAY ("reconnect to me"), until the peer closes it or it carries no
-	/// subscription or fetch ([`moq_net::Session::idle`]), when this side closes it as
-	/// [`close`](Self::close) does. A peer relay never closes it on its own: it ranks
-	/// the session's routes below every other and keeps serving it, so its readers
-	/// move to another route and the session goes idle.
+	/// subscription or fetch ([`moq_net::Session::idle`]) and no [`Hold`] is left,
+	/// when this side closes it as [`close`](Self::close) does. A peer relay never
+	/// closes it on its own: it ranks the session's routes below every other and
+	/// keeps serving it, so its readers move to another route and the session goes idle.
 	///
 	/// At `timeout` the session is closed with [`moq_net::Error::GoawayTimeout`] on
 	/// this side's own timer, so a peer stalling the GOAWAY's write, or still reading
@@ -1100,6 +1130,7 @@ impl Connection {
 	pub async fn drain(self, timeout: Duration) -> crate::Result<()> {
 		let running = self.task.running.upgrade();
 		let deadline = kio::clock::now().saturating_add(timeout);
+		let holds = self.task.holds.consume();
 		let (session, predecessor) = self.stop();
 		// A predecessor that still serves, its replacement not yet connected, drains as the
 		// live session rather than closing on its handover deadline. A distinct one closes
@@ -1124,7 +1155,14 @@ impl Connection {
 					session.closed().await;
 					Err(moq_net::Error::GoawayTimeout)
 				}
-				() = session.idle() => {
+				() = async {
+					// The task owns a producer, so the count never closes.
+					let _ = holds.wait(|count| match **count {
+						0 => Poll::Ready(()),
+						_ => Poll::Pending,
+					}).await;
+					session.idle().await
+				} => {
 					tracing::debug!("drained session carries nothing; closing");
 					close_by(session, deadline).await
 				}
@@ -3128,6 +3166,48 @@ mod tests {
 		kio::clock::timeout(WAIT, session.closed())
 			.await
 			.expect("the peer still holds the session");
+	}
+
+	/// A [`Hold`] keeps a drained session open while it carries nothing, and the drain
+	/// closes it once the hold drops.
+	#[tokio::test]
+	async fn a_hold_keeps_an_idle_drained_session_open() {
+		kio::clock::host_time(); // real TCP sockets
+		const WAIT: Duration = Duration::from_secs(10);
+		const DRAIN: Duration = Duration::from_secs(600);
+
+		let origin = crate::origin::spawn();
+		let (addr, mut accepted, _task) = serve(origin).await;
+		let connection = crate::connect::Config::default()
+			.init(Default::default())
+			.unwrap()
+			.connect(url(&format!("tcp://{addr}/")));
+		let session = kio::clock::timeout(WAIT, accepted.recv()).await.unwrap().unwrap();
+		let connection = kio::clock::timeout(WAIT, connection.established())
+			.await
+			.unwrap()
+			.unwrap();
+
+		let hold = connection.hold();
+		let drained = tokio::spawn(connection.drain(DRAIN));
+		let draining = session.draining();
+		kio::clock::timeout(WAIT, kio::wait(|waiter| draining.poll(waiter)))
+			.await
+			.expect("the peer never heard the GOAWAY")
+			.expect("the session closed without one");
+		assert!(
+			kio::clock::timeout(Duration::from_millis(500), session.closed())
+				.await
+				.is_err(),
+			"closed while held"
+		);
+
+		drop(hold);
+		kio::clock::timeout(WAIT, drained)
+			.await
+			.expect("the released session was held open")
+			.unwrap()
+			.expect("the idle close failed");
 	}
 
 	/// Under [`Restart::Handoff`] an empty-URI GOAWAY that drains a session before it is

@@ -2319,7 +2319,7 @@ impl Cluster {
 		}
 		// Counted by the relay's drain before the first dial, so a drain that starts
 		// while the session connects still waits for it.
-		let serving = self.shutdown.serve();
+		let serving = self.shutdown.serve_link();
 		// The GOAWAY lifecycle lives in the reconnect loop: on an upstream GOAWAY it
 		// dials the replacement while the old session keeps serving, so the old
 		// routes stay attached and the origin hands live tracks over at a group
