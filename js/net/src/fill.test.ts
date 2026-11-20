@@ -1673,6 +1673,50 @@ test("fill: a lookup answered below the eviction watermark starts the range ther
 	}
 });
 
+test("fill: a time start whose floor's group is evicted while it is out is asked again from below", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		const broadcast = new BroadcastProducer();
+		const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
+		const requests = track.requests();
+		const write = (n: bigint) => {
+			const group = track.createGroup(n);
+			group.writeFrame({ payload: enc.encode(`g${n}`), timestamp: Timestamp.fromMillis(Number(n)) });
+			group.finish();
+		};
+		write(1n);
+		write(9n);
+		const reader = track.subscribe({
+			ranges: [{ start: { time: 7n }, end: { time: 7n } }],
+			delay: { max: null },
+			order: "ascending",
+		});
+		const next = reader.ordered().nextGroup();
+		const first = defined(await requests.requestedFill());
+		expect([first.start, first.floor]).toEqual([7n, 2n]);
+		// Idle past the cache window, so the next write evicts every group but the new edge.
+		clock.jump(Duration.millis(DEFAULT_EXPIRY.asMillis() + 1000));
+		write(10n);
+		// The index says 1 holds the time, below the floor: nothing from 2 does.
+		first.dropGroups(2n, 8n);
+		first.close();
+		const again = defined(await requests.requestedFill());
+		expect([again.start, again.floor]).toEqual([7n, 0n]);
+		const found = defined(again.accept(1n));
+		found.writeFrame({ payload: enc.encode("g1"), timestamp: Timestamp.fromMillis(1) });
+		found.finish();
+		again.close();
+		expect((await next)?.start).toBe(1n);
+
+		reader.close();
+		requests.close();
+		broadcast.close();
+	} finally {
+		installed.close();
+	}
+});
+
 test("fill: a lookup's answer is read at once, before its first frame: its key is its start", async () => {
 	const { broadcast, track } = timed();
 	const requests = track.requests();

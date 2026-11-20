@@ -323,6 +323,27 @@ describe("Window", () => {
 		expect(window.found(500n, undefined, held)).toBe(false);
 	});
 
+	test("an eviction during a lookup looks it up again", () => {
+		const held = new Keys([4000n, 9000n]);
+		held.looks = true;
+		let window = new Window([range(time(8500n))], 9000n, held);
+		expect(window.lookups()).toEqual([{ time: 8500n, floor: 4001n }]);
+		held.held.delete(4000n);
+		expect(window.found(8500n, undefined, held)).toBe(true);
+		// Looked up from below, reading nothing meanwhile.
+		expect(window.lookups()).toEqual([{ time: 8500n, floor: 0n }]);
+		expect(window.contains(9000n)).toBe(false);
+		held.held.add(4000n);
+		expect(window.found(8500n, 4000n, held)).toBe(true);
+		expect(window.resolved()[0]?.start).toBe(4000n);
+
+		// With nothing evicted, an empty answer starts where the groups held say.
+		window = new Window([range(time(8500n))], 9000n, held);
+		expect(window.found(8500n, undefined, held)).toBe(true);
+		expect(window.lookups()).toHaveLength(0);
+		expect(window.resolved()[0]?.start).toBe(4000n);
+	});
+
 	test("a skipped gap needs no lookup", () => {
 		const held = new Keys([0n, 33n, 66n]);
 		held.looks = true;

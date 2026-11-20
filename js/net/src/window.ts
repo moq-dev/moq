@@ -744,8 +744,9 @@ export class Window {
 	/**
 	 * The lookup of time start `time` answered with `group`, the group containing it: its spans
 	 * start there, once that group is held. Undefined, or an answer not held, means the history
-	 * couldn't tell, or holds no group there, so they start where the groups held say. Returns
-	 * whether the groups in range moved. Mirrors the Rust `Window::found`.
+	 * couldn't tell, or holds no group there, so they start where the groups held say, unless the
+	 * cache since evicted the group their floor was past: then they look it up again from lower
+	 * down. Returns whether the groups in range moved. Mirrors the Rust `Window::found`.
 	 */
 	found(at: bigint, group: bigint | undefined, holdings: Holdings = UNHELD): boolean {
 		const found = this.#looking.take(at);
@@ -757,9 +758,14 @@ export class Window {
 			const span = this.#spans.get(key);
 			if (!span) continue;
 			this.#uncount(key, span);
+			const asked = span.looking?.floor;
 			span.looking = undefined;
 			span.start = start ?? 0n;
 			span.floored = start !== undefined;
+			if (held === undefined && asked !== undefined) {
+				const floor = unresolved(at, span.start, span.floored, holdings);
+				if (floor !== undefined && floor < asked) span.looking = { time: at, floor };
+			}
 			this.#count(key, span);
 		}
 		return true;

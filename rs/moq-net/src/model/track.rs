@@ -8677,6 +8677,8 @@ struct Cursor {
 /// A time start a [`Cursor`]'s window looks up through a fill.
 struct Lookup {
 	time: u64,
+	/// The oldest key the fill asks from; a lower one is a new look-up.
+	floor: u64,
 	/// The fill looking it up, `None` once its answer was taken in.
 	join: Option<fill::Join>,
 }
@@ -9715,29 +9717,46 @@ impl Cursor {
 	///
 	/// Indexed by time, so a pass costs O(L log L) in the lookups out rather than O(L²).
 	fn look_up(&mut self, waiter: &kio::Waiter) {
+		let mut moved = false;
+		// An answer the window takes in may look its time up again from lower down.
+		while self.look_up_pass(waiter, &mut moved) {}
+		if moved {
+			self.filter.revision += 1;
+			self.update_servable();
+		}
+	}
+
+	/// One pass of [`Self::look_up`]: returns whether the window looks up a time again.
+	fn look_up_pass(&mut self, waiter: &kio::Waiter, moved: &mut bool) -> bool {
 		// The first span looking a time up sets the floor its fill asks from.
 		let mut lookups = BTreeMap::new();
 		for (time, floor) in self.filter.window.lookups() {
 			lookups.entry(time).or_insert(floor);
 		}
 		if lookups.is_empty() && self.filter.lookups.iter().all(|lookup| lookup.join.is_none()) {
-			return;
+			return false;
 		}
 		let asking = &asking(&self.subscription);
 		let fills = self.state.read().fills.clone();
-		let asked: BTreeSet<u64> = self.filter.lookups.iter().map(|lookup| lookup.time).collect();
+		let asked: BTreeSet<(u64, u64)> = self
+			.filter
+			.lookups
+			.iter()
+			.map(|lookup| (lookup.time, lookup.floor))
+			.collect();
 		for (&time, &floor) in &lookups {
-			if asked.contains(&time) {
+			if asked.contains(&(time, floor)) {
 				continue;
 			}
 			let join = fills.lock().time_start(&fills, time, floor, *asking);
-			self.filter.lookups.push(Lookup { time, join });
+			self.filter.lookups.push(Lookup { time, floor, join });
 		}
-		let mut moved = false;
+		let mut again = false;
 		for lookup in &mut self.filter.lookups {
-			// The window stops looking once replaced; with no join, nothing can answer. An
-			// answer taken in below stops only the spans looking up that time.
-			if !lookups.contains_key(&lookup.time) {
+			// The window stops looking once replaced, or looks again from lower down; with no
+			// join, nothing can answer. An answer taken in below stops only the spans looking
+			// up that time.
+			if lookups.get(&lookup.time) != Some(&lookup.floor) {
 				lookup.join = None;
 				continue;
 			}
@@ -9759,12 +9778,10 @@ impl Cursor {
 			};
 			let state = self.state.read();
 			lookup.join = None;
-			moved |= self.filter.window.found(lookup.time, answer, &*state);
+			*moved |= self.filter.window.found(lookup.time, answer, &*state);
+			again |= self.filter.window.lookups().any(|(time, _)| time == lookup.time);
 		}
-		if moved {
-			self.filter.revision += 1;
-			self.update_servable();
-		}
+		again
 	}
 
 	/// Ask fills for what this cursor misses from `from`, and take in what they answered,
@@ -26004,6 +26021,38 @@ mod test {
 		write_filled(start.accept(6, None), 6);
 		drop(start);
 		assert_eq!(drain_groups(&mut subscriber), [6]);
+
+		// The group the floor was past evicted while the start was out, the handler's answer
+		// below the floor is asked again from lower down rather than lost.
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		for key in 0..10 {
+			write_group(&producer, key);
+		}
+		for key in 5..9 {
+			evict(&producer, key);
+		}
+		let mut subscriber = producer.subscribe(replay().with_ranges([Range {
+			start: Anchor::Time(7),
+			end: Some(Anchor::Time(7)),
+		}]));
+		assert_eq!(drain_groups(&mut subscriber), Vec::<u64>::new());
+		let Poll::Ready(Ok(start)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the time start asks for its group");
+		};
+		assert_eq!(start.floor(), 5);
+		evict(&producer, 4);
+		// The index says 4 holds the time, below the floor: nothing from 5 does.
+		start.drop_groups(5..8);
+		drop(start);
+		assert_eq!(drain_groups(&mut subscriber), Vec::<u64>::new());
+		let Poll::Ready(Ok(start)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the time start asks again from below");
+		};
+		assert_eq!((start.start().group, start.floor()), (7, 4));
+		write_filled(start.accept(4, None), 4);
+		drop(start);
+		assert_eq!(drain_groups(&mut subscriber), [4]);
 	}
 
 	/// A time end walking the history a handler serves takes no group the live feed

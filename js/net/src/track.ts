@@ -3122,9 +3122,9 @@ export class Subscriber {
 	// Bumped whenever the fills this reader joined are rejudged, which may withdraw groups it reads
 	// again by the time it looks (a narrowing undone in one turn moves no signal), so it asks anew.
 	#fillMoves = new Signal(0);
-	// The time starts this reader asked its fills to look up, each with its fill, absent when no
-	// handler could take it.
-	#lookups: { time: bigint; lookup?: Lookup }[] = [];
+	// The time starts this reader asked its fills to look up, each with the floor it asked from and
+	// its fill, absent when no handler could take it.
+	#lookups: { time: bigint; floor: bigint; lookup?: Lookup }[] = [];
 
 	#drift(whole = this.#fetchBudget !== undefined): Drift {
 		// A fetch judges its group against the whole track, as the Rust `fetch_group` does: a
@@ -3787,12 +3787,24 @@ export class Subscriber {
 	// once, and take in the answers. Returns whether the groups in range moved. Mirrors the Rust
 	// `Cursor::look_up`.
 	#lookUp(): boolean {
+		let moved = false;
+		// An answer the window takes in may look its time up again from lower down.
+		for (let again = true; again; ) {
+			const pass = this.#lookUpPass();
+			moved ||= pass.moved;
+			again = pass.again;
+		}
+		return moved;
+	}
+
+	// One pass of `#lookUp`, which says whether the window looks up a time again.
+	#lookUpPass(): { moved: boolean; again: boolean } {
 		const wanted = this.#window.lookups();
-		if (wanted.length === 0 && this.#lookups.length === 0) return false;
+		if (wanted.length === 0 && this.#lookups.length === 0) return { moved: false, again: false };
 		const producer = this.#state.producer;
-		// The window stops looking once replaced.
+		// The window stops looking once replaced, or looks again from lower down.
 		this.#lookups = this.#lookups.filter((lookup) => {
-			if (wanted.some((want) => want.time === lookup.time)) return true;
+			if (wanted.some((want) => want.time === lookup.time && want.floor === lookup.floor)) return true;
 			lookup.lookup?.leave();
 			return false;
 		});
@@ -3800,9 +3812,10 @@ export class Subscriber {
 			if (this.#lookups.some((lookup) => lookup.time === time)) continue;
 			// With no handler open any more, nothing can answer.
 			const lookup = producer && fillsOf(producer).timeStart(time, floor, this.#askerOf());
-			this.#lookups.push({ time, lookup });
+			this.#lookups.push({ time, floor, lookup });
 		}
 		let moved = false;
+		let again = false;
 		for (const lookup of [...this.#lookups]) {
 			const answer = lookup.lookup?.answer();
 			if (answer === undefined && lookup.lookup && !lookup.lookup.done()) continue;
@@ -3818,8 +3831,9 @@ export class Subscriber {
 			this.#lookups.splice(this.#lookups.indexOf(lookup), 1);
 			lookup.lookup?.leave();
 			if (this.#window.found(lookup.time, answer, holdings)) moved = true;
+			if (this.#window.lookups().some((want) => want.time === lookup.time)) again = true;
 		}
-		return moved;
+		return { moved, again };
 	}
 
 	// Narrow the local bounds to the window into the hull every read starts from.
