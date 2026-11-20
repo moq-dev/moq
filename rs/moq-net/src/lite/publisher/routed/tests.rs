@@ -726,3 +726,44 @@ fn a_claim_is_shown_only_where_its_route_can_serve() {
 	assert!(told(None, "m/q/y").is_empty());
 	assert_eq!(told(None, "m/q/x"), ["m/q/x"]);
 }
+
+/// A claim is judged by the routes as they stand: one hidden because its route serves only
+/// `c/private/**` is shown once another route of its instance serves `c/public/**`, at the
+/// next grant change, which judges it again.
+#[test]
+fn a_claim_is_judged_by_the_routes_as_they_stand() {
+	let origin = Hop::new(1).unwrap().produce();
+	let instance: Instance = "cam".parse().unwrap();
+	let route = |scope: &[&str], cost: u64| {
+		let producer = origin.scope("", &patterns(scope)).unwrap();
+		let info = origin::RouteInfo::new()
+			.with_instance(instance.clone(), 0)
+			.with_cost(cost);
+		producer.announce("c", info).unwrap()
+	};
+	let _private = route(&["c/private/**"], 1);
+	let auth = crate::auth::Link::new(false);
+	let public = |extra: &[&str]| crate::auth::Grant {
+		publish: Patterns::default(),
+		subscribe: patterns(&[&["c/public/**"], extra].concat()),
+		expires: None,
+	};
+	auth.handle().authorize(&public(&[]));
+	let mut answer = Answer::alone_on(origin.consume(), auth.clone());
+	let (mut writer, mut peer) = stream();
+	answer.request(false, Vec::new(), vec![(path(""), false)]).unwrap();
+	let starts = |msgs: &[AnnounceBroadcast]| {
+		msgs.iter()
+			.filter(|msg| matches!(msg, AnnounceBroadcast::Start { .. }))
+			.count()
+	};
+	let first = sent(&mut answer, &mut writer, &mut peer);
+	assert_eq!(starts(&first), 0, "{first:?}");
+
+	let _public = route(&["c/public/**"], 5);
+	origin.route_node();
+	auth.handle().authorize(&public(&["x/**"]));
+	answer.poll_permit(&kio::Waiter::noop()).unwrap();
+	let regranted = sent(&mut answer, &mut writer, &mut peer);
+	assert_eq!(starts(&regranted), 1, "{regranted:?}");
+}

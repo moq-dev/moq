@@ -132,12 +132,12 @@ struct Parts {
 	add: Vec<(Path, bool)>,
 }
 
-/// A claim the node told: the key that told it, the claim, and what its route may serve, as
-/// the handle names it, or `None` when the origin holds no route for it to judge.
+/// A claim the node told: the key that told it, the claim, and the absolute, origin-side
+/// prefix it claims, above the path it is told at, where its routes are announced.
 struct Told {
 	source: Source,
 	claim: Claim,
-	reach: Option<crate::Patterns>,
+	prefix: Path,
 }
 
 /// A route the peer holds: its Route ID, and the Announce ID of each claim under it.
@@ -840,24 +840,21 @@ impl Answer {
 		(path, instance): node::Broadcast,
 		change: Change,
 	) -> Result<(), Error> {
-		// What its route may serve, looked up where the claim's own prefix is, above the path
-		// it is told at, and named as the handle names it.
-		let reach = match &change {
+		// Where its routes are announced: its own prefix, above the path it is told at.
+		let prefix = match &change {
 			Change::Live(claim) => {
 				let above = usize::try_from(claim.item.above).unwrap_or(usize::MAX);
-				let prefix = path.head(path.depth().saturating_sub(above)).unwrap_or_default();
-				self.origin.reach(&prefix, &instance)
+				path.head(path.depth().saturating_sub(above)).unwrap_or_default()
 			}
-			_ => None,
+			_ => Path::default(),
 		};
 		// Named as the handle names it: beneath the mount point for a mount, and never a
 		// claim the origin holds beneath a mount for the session's own.
-		let (named, change, reach) = match self.mounts.get(&source).map(|mount| &mount.mount) {
+		let (named, change) = match self.mounts.get(&source).map(|mount| &mount.mount) {
 			Some(mount) => {
 				let Some(named) = mount.name(&path) else {
 					return Ok(());
 				};
-				let reach = reach.map(|reach| mount.name_patterns(&reach));
 				// A claim above the target covers all of the mount, so as the handle names
 				// it, it is no more above the path than the mount point is.
 				let beneath = mount.beneath(&named);
@@ -868,15 +865,15 @@ impl Answer {
 					}
 					change => change,
 				};
-				(named, change, reach)
+				(named, change)
 			}
 			None if self.origin.shadows(&path) => return Ok(()),
-			None => (path, change, reach),
+			None => (path, change),
 		};
 		let key = (named, instance);
 		let lost = match change {
 			Change::Live(claim) => {
-				self.told.insert(key.clone(), Told { source, claim, reach });
+				self.told.insert(key.clone(), Told { source, claim, prefix });
 				false
 			}
 			change => {
@@ -916,12 +913,25 @@ impl Answer {
 		(prefix.hidden || !suffix.is_hidden()) && self.origin.reaches_any(path, &allowed)
 	}
 
+	/// What the routes of the told claim serving `instance` may serve now, as the handle names
+	/// it, or `None` when the origin holds none to judge it by, as for a neighbour's claim no
+	/// session serves here yet. Looked up at each judgment, so any change to the claim, the
+	/// grant, or the peer's prefixes judges it by the routes as they stand.
+	fn reach(&self, instance: &Instance, told: &Told) -> Option<crate::Patterns> {
+		let reach = self.origin.reach(&told.prefix, instance)?;
+		match self.mounts.get(&told.source) {
+			Some(mount) => Some(mount.mount.name_patterns(&reach)),
+			None => Some(reach),
+		}
+	}
+
 	/// Bring the peer's claim `key` in line with what the node told and the answer
 	/// shows. A claim that goes is `lost`, or else ended.
 	fn sync(&mut self, writer: &mut Writer, key: Named, lost: bool) -> Result<(), Error> {
 		let depth = self.depth(&key.0);
 		let told = self.told.get(&key);
-		let wanted = (told.filter(|told| self.shows(&key.0, told.reach.as_ref()))).map(|told| {
+		let shown = |told: &&Told| self.shows(&key.0, self.reach(&key.1, told).as_ref());
+		let wanted = told.filter(shown).map(|told| {
 			let mut claim = told.claim.clone();
 			claim.item.above = claim.item.above.min(depth);
 			claim
