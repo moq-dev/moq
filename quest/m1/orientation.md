@@ -19,6 +19,9 @@ Decided 2026-11-20 (maintainer, /quest-plan):
 - ✅ with no viewport, the catalog's ranking decides, so a publisher whose
   original is portrait ranks portrait first (rejected: always landscape; an
   error when orientations mix and none is asked for).
+- ✅ that ranking is `VideoConfig::preference`, which orientation filters
+  before, so preference ranks within an orientation (rejected: a separate
+  catalog field marking the main orientation).
 
 Orientation filters first (`js/watch/src/video/source.ts`), so a phone in
 portrait takes the best portrait rendition that fits its rate. It runs before
