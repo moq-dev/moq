@@ -417,6 +417,51 @@ async fn a_descriptor_change_revises_the_entry_and_keeps_the_clock() {
 	);
 }
 
+/// A catalog update between a retagged rendition retiring and its replacement listing leaves
+/// the replacement its recorded PID, which the clock kept waiting for it.
+#[tokio::test(start_paused = true)]
+async fn a_catalog_update_before_the_replacement_lists_keeps_its_pid() {
+	let (mut broadcast, consumer, mut catalog) = broadcast();
+	let (name, mut old) = aac_track(&mut broadcast, &mut catalog, Some(AUDIO_PID));
+	let mut frames = Vec::new();
+	let start = kio::clock::now();
+	let mut export = export_of(&consumer).await;
+	live(&mut export, &mut frames, start, &mut [(&mut old, 0x21)], 0, 3_000).await;
+
+	// The retag: the old rendition leaves and ends, the new one is cataloged on its PID.
+	remove(&mut catalog, &name);
+	let (_, mut new) = aac_track(&mut broadcast, &mut catalog, Some(AUDIO_PID));
+	let _finished = old.finish().unwrap();
+	kio::clock::sleep(DELAY * 2).await;
+	settle(&mut export, &mut frames).await;
+	// Another snapshot before the new rendition's first frame.
+	let (_, mut other) = aac_track(&mut broadcast, &mut catalog, None);
+	settle(&mut export, &mut frames).await;
+	live(
+		&mut export,
+		&mut frames,
+		start,
+		&mut [(&mut new, 0x22), (&mut other, 0x23)],
+		6_000,
+		8_000,
+	)
+	.await;
+	let _finished = new.finish().unwrap();
+	let _finished = other.finish().unwrap();
+	catalog.finish().unwrap();
+	drain(&mut export, &mut frames).await;
+
+	assert!(
+		!marks(&frames, AUDIO_PID, &[0x22]).is_empty(),
+		"the replacement left its PID"
+	);
+	let clocks: Vec<u16> = packets(&frames)
+		.filter(|packet| packet[3] & 0x20 != 0 && packet[4] > 0 && packet[5] & 0x10 != 0)
+		.map(pid)
+		.collect();
+	assert!(clocks.iter().all(|&clock| clock == AUDIO_PID), "the clock left its PID");
+}
+
 /// A listed track keeps the descriptors its packets went out under: a catalog revising them
 /// under the same name revises nothing, as a revised stream comes under a new name.
 #[tokio::test(start_paused = true)]
