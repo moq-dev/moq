@@ -31,11 +31,12 @@ const SPREAD: Duration = Duration::from_millis(100);
 /// next, with the PCR time of its first byte on the catalog clock. The release holds every
 /// object until that time plus the delay on the jitter buffer's clock, which follows the
 /// source's, then spreads its packets evenly up to the next object's time, seven at a time
-/// (a UDP datagram's worth), so the output keeps the source's rate whatever the arrival jitter,
-/// and two releases fed the same objects write the same bytes at the same times. An object whose
-/// successor is not yet buffered, or more than ISO 13818-1's 100 ms PCR interval ahead, goes out
-/// whole. An object that arrives past its
-/// deadline is dropped and counted; the output shows a continuity error there, since nothing
+/// (a UDP datagram's worth), so the output keeps the source's rate whatever the arrival jitter.
+/// An object whose successor is not yet buffered when it comes due, or is more than ISO
+/// 13818-1's 100 ms PCR interval ahead, goes out whole. Two releases fed the same objects write
+/// the same bytes; where each held an object's successor when it came due, at the same times
+/// too, so a delay longer than the arrival jitter by a PCR interval keeps them in step. An
+/// object that arrives past its deadline is dropped and counted; the output shows a continuity error there, since nothing
 /// is rewritten, and carries on with the next object. A flagged forward jump, which the
 /// importer declares with a discontinuity marker, opens a new clock, so the output does not
 /// wait it out; the bytes carry the jump.
@@ -58,7 +59,7 @@ pub struct Release {
 	replay: bool,
 }
 
-/// An object's runs, due evenly from its own time to the next object's.
+/// An object's runs, each due at its first byte's time on the way from the object's time to the next's.
 struct Spread {
 	frame: Frame,
 	start: Instant,
@@ -91,9 +92,14 @@ impl Spread {
 		}
 	}
 
-	/// When run `i` is due.
+	/// How far into the object run `i` starts, as a fraction of its bytes.
+	fn share(&self, i: usize, of: u128) -> u128 {
+		of * (i * RUN) as u128 / self.frame.payload.len().max(1) as u128
+	}
+
+	/// When run `i` is due: the time of its first byte, at the object's rate to the next.
 	fn due(&self, i: usize) -> Instant {
-		let offset = self.span.as_nanos() * i as u128 / self.runs as u128;
+		let offset = self.share(i, self.span.as_nanos());
 		self.start.saturating_add(Duration::from_nanos(offset as u64))
 	}
 
@@ -111,7 +117,7 @@ impl Spread {
 		let mut timestamp = self.frame.timestamp;
 		if let (Some(end), Some(scale)) = (self.end, timestamp.scale()) {
 			let (start, end) = (timestamp.value(), end.value());
-			let value = start + ((end - start) as u128 * self.sent as u128 / self.runs as u128) as u64;
+			let value = start + self.share(self.sent, (end - start) as u128) as u64;
 			timestamp = moq_net::Timestamp::new(value, scale).unwrap_or(timestamp);
 		}
 		self.sent += due;
