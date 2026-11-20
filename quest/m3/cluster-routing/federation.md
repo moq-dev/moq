@@ -73,8 +73,8 @@ Decided 2026-11-06 (maintainer; the agent picked the children): require
 only the route children federation builds on, session integration (landed
 in [moq-dev/moq#8023](https://github.com/moq-dev/moq/pull/8023) and
 [moq-dev/moq#8293](https://github.com/moq-dev/moq/pull/8293)) and
-[acceptance](/quest/m2/cluster-routes/acceptance.md), not the whole
-[route epic](/quest/m2/cluster-routes/README.md). Federation is
+acceptance (finished in [moq-dev/moq#9202](https://github.com/moq-dev/moq/pull/9202)), not the whole
+route epic. Federation is
 relay-to-relay: its consumer, Kixel's mesh relay node (downstream, in
 kixel-ai/kixel.ai), is a Rust relay too. Rejected: session integration
 alone, which drops the proven contract the wire rule below relies on.
@@ -82,10 +82,6 @@ alone, which drops the proven contract the wire rule below relies on.
 Public API: report any peer configuration or admission change. Wire: the
 lite-07 draft's Claims and Routing as they ship; any change requires draft
 and Rust/JS parity. Run `just check`, `just test interop --all`, and `just drafts check`.
-
-## Required
-
-- [Route layer acceptance](/quest/m2/cluster-routes/acceptance.md) - the forwarding and partition fixtures this reuses, proven on the implementation
 
 ## Related
 
