@@ -33,7 +33,9 @@ async fn finish(
 ///
 /// Disables Nagle: the session already batches records and flushes once per batch,
 /// so Nagle has nothing left to coalesce and would only hold a batch's tail until
-/// the peer's delayed ACK.
+/// the peer's delayed ACK. A session started with the returned handle holds the
+/// kernel's unsent queue to about one congestion window (`TCP_NOTSENT_LOWAT`), so
+/// what it has not sent yet stays where a reset stream can still drop it.
 ///
 /// For a socket whose session starts elsewhere, such as
 /// `tls::Server::accept_established`.
@@ -61,10 +63,11 @@ mod tests {
 	use super::*;
 	use crate::Version;
 
-	/// Both ends of a session disable Nagle. The client half is `finish`, since
-	/// `connect` is only `TcpStream::connect` in front of it.
+	/// Both ends of a session disable Nagle and hold the kernel's unsent queue to the
+	/// congestion window. The client half is `finish`, since `connect` is only
+	/// `TcpStream::connect` in front of it.
 	#[tokio::test]
-	async fn sessions_disable_nagle() {
+	async fn sessions_prepare_their_sockets() {
 		let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
 		let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
 		let (server, _) = listener.accept().unwrap();
@@ -84,6 +87,13 @@ mod tests {
 		let _server = server.unwrap();
 		for probe in probes {
 			assert!(probe.nodelay().unwrap());
+			#[cfg(any(target_os = "linux", target_os = "macos"))]
+			{
+				// The kernel's default leaves the queue unbounded. The window the mark came from
+				// moves slightly once the handshake settles the MSS.
+				let (lowat, window) = crate::socket::unsent_bound(&probe);
+				assert!((window / 2..=window * 2).contains(&lowat), "{lowat} vs {window}");
+			}
 		}
 	}
 }

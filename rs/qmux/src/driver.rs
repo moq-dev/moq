@@ -21,6 +21,7 @@ use crate::transport::Transport;
 pub(crate) const CLOSE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// The most bytes read, or queued for writing, before the driver turns to the other direction.
+/// Writes stop sooner at the transport's unsent bound, when it has one.
 const BATCH_BYTES: usize = 64 * 1024;
 
 /// Rounds of reading and writing in one poll before the driver yields to its executor.
@@ -52,22 +53,27 @@ impl<T: Transport> Driver<T> {
 			woken: AtomicBool::new(true),
 			task: Mutex::new(None),
 		});
+		let socket = inner.socket_stats.clone();
+		let mut run = Run {
+			inner,
+			transport,
+			timer: Timer::default(),
+			inbound: Vec::new(),
+			reading: true,
+			unflushed: false,
+			room: true,
+			phase: Phase::Open,
+			sent_bytes: 0,
+			received_bytes: 0,
+			socket,
+			batch: BATCH_BYTES,
+		};
+		run.limit_unsent();
 		Self {
 			park: kio::Park::default(),
 			recv: kio::Waiter::new(Waker::from(recv_wake.clone())),
 			recv_wake,
-			run: Run {
-				inner,
-				transport,
-				timer: Timer::default(),
-				inbound: Vec::new(),
-				reading: true,
-				unflushed: false,
-				room: true,
-				phase: Phase::Open,
-				sent_bytes: 0,
-				received_bytes: 0,
-			},
+			run,
 		}
 	}
 }
@@ -203,6 +209,12 @@ struct Run<T> {
 	phase: Phase,
 	sent_bytes: u64,
 	received_bytes: u64,
+	/// The connection underneath, which bounds what it holds unsent.
+	socket: Option<crate::SharedSocketStats>,
+	/// The most bytes queued for writing in one step: [`BATCH_BYTES`], or less to stay
+	/// within the socket's unsent bound, since what the transport has taken can no longer be
+	/// dropped.
+	batch: usize,
 }
 
 impl<T: Transport> Run<T> {
@@ -294,7 +306,7 @@ impl<T: Transport> Run<T> {
 		// `poll_transmit` parks us until a handle queues something.
 		let mut written = 0;
 		let mut blocked = false;
-		while self.room && written < BATCH_BYTES {
+		while self.room && written < self.batch {
 			match self.transport.poll_ready(waiter) {
 				Poll::Ready(Ok(())) => {}
 				Poll::Ready(Err(err)) => return Step::Failed(err),
@@ -342,6 +354,11 @@ impl<T: Transport> Run<T> {
 			false => true,
 		};
 		self.unflushed = !flushed;
+		if blocked || !flushed {
+			// The window may have moved since the socket's bound was last set. Setting it
+			// before parking means a raised bound wakes the flush that just went pending.
+			self.limit_unsent();
+		}
 		let had_room = std::mem::replace(&mut self.room, flushed && !blocked);
 		self.set_stalled(!self.room);
 
@@ -356,7 +373,7 @@ impl<T: Transport> Run<T> {
 		// Each step already wrote what the records it read made the connection say, so go again
 		// only when a batch cut a direction short, or the transport has room again for what the
 		// connection held back meanwhile.
-		if more_to_read || (self.room && (written >= BATCH_BYTES || !had_room)) {
+		if more_to_read || (self.room && (written >= self.batch || !had_room)) {
 			return Step::Progress;
 		}
 		let deadline = match (deadline, closing) {
@@ -366,6 +383,13 @@ impl<T: Transport> Run<T> {
 		match self.timer.poll(waiter, deadline) {
 			true => Step::Progress,
 			false => Step::Idle,
+		}
+	}
+
+	/// Bound the socket's unsent bytes to its congestion window, and each batch to match.
+	fn limit_unsent(&mut self) {
+		if let Some(bound) = self.socket.as_ref().and_then(|socket| socket.limit_unsent()) {
+			self.batch = bound.clamp(1, BATCH_BYTES);
 		}
 	}
 
