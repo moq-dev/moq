@@ -34,7 +34,7 @@ import type {
 } from "./track.ts";
 import { max, min } from "./util/key.ts";
 import * as Varint from "./varint.ts";
-import type { Holdings, Resolved, Window } from "./window.ts";
+import type { Holdings, Resolved } from "./window.ts";
 import type { Advertised, Advertisements } from "./wire.ts";
 
 /** A null {@link Delay.max} in milliseconds, which the model holds as the largest value every peer can read. */
@@ -498,11 +498,11 @@ export interface ResumeSource {
 	 */
 	tryDrop(delivered: Delivered, passing?: bigint): (Recv & { kind: "drop" }) | undefined;
 	/**
-	 * Whether the reader's bounded `window` has nothing left to deliver, judged by the serving
-	 * copy against what it and the logical reader (`delivered`) handed out. A copy that may still
+	 * Whether the reader's bounded window has nothing left to deliver, judged by the serving copy
+	 * against what it and the logical reader (`delivered`) handed out. A copy that may still
 	 * deliver keeps it open. Mirrors the Rust `Reader::exhausted`.
 	 */
-	exhausted(delivered: Delivered, window: Window): boolean;
+	exhausted(delivered: Delivered): boolean;
 	/** Wake once a read may go differently; fires at most once. */
 	changed(fn: () => void): Dispose;
 	/** Forget the gaps in `delivered` below each group past the budget, judged on the newest copy. */
