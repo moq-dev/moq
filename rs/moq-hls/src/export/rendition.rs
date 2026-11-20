@@ -2139,8 +2139,7 @@ impl Follow {
 	) -> Option<Result<()>> {
 		// A group's place is its start, or its first frame's container pts where the session
 		// carries no timeline.
-		let Some(first) =
-			first.and_then(|frame| first_frame(&self.container, group.start, frame, self.probe.as_mut()))
+		let Some(first) = first.and_then(|frame| first_frame(&self.container, group.start, frame, self.probe.as_mut()))
 		else {
 			tracing::warn!(track = %self.track, group = group.start, "skipping a group without a timed first frame");
 			return None;

@@ -226,9 +226,17 @@ test("Consumer buffers groups at sparse starts as one range", async () => {
 	const packet = new Uint8Array([31 << 3, 0]);
 	for (const [name, format, create] of [
 		// No duration: only the declared skips prove nothing is missing.
-		["declared", new LegacyFormat("data"), (track: Track.Producer, start: number) => track.appendGroup(Time.Timestamp.fromMicros(start))],
+		[
+			"declared",
+			new LegacyFormat("data"),
+			(track: Track.Producer, start: number) => track.appendGroup(Time.Timestamp.fromMicros(start)),
+		],
 		// Nothing declared: each 20 ms packet ends where the next group starts.
-		["contiguous", new LegacyFormat(opus), (track: Track.Producer, start: number) => track.createGroup(BigInt(start))],
+		[
+			"contiguous",
+			new LegacyFormat(opus),
+			(track: Track.Producer, start: number) => track.createGroup(BigInt(start)),
+		],
 	] as const) {
 		const track = micro();
 		const delay = { min: Duration.millis(100), max: Duration.millis(5000) };
@@ -236,7 +244,10 @@ test("Consumer buffers groups at sparse starts as one range", async () => {
 		const consumer = new Consumer(track.subscribe({ delay }), { format, delay });
 		for (const start of [0, 20_000, 40_000]) {
 			const group = create(track, start);
-			group.writeFrame({ payload: encodeLegacyFrame(start, packet), timestamp: Time.Timestamp.fromMicros(start) });
+			group.writeFrame({
+				payload: encodeLegacyFrame(start, packet),
+				timestamp: Time.Timestamp.fromMicros(start),
+			});
 			group.finish();
 		}
 		await clock.advance(Duration.ZERO);

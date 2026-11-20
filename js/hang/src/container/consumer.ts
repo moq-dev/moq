@@ -796,7 +796,8 @@ export class Consumer {
 			const ended = this.#ended(first);
 			const truncated = ended instanceof Error;
 			// The publisher declares the starts it never produced, so a run it skipped holds no group.
-			const declared = next !== undefined && this.#track.isSkipped(first.consumer.start + 1n, next.consumer.start);
+			const declared =
+				next !== undefined && this.#track.isSkipped(first.consumer.start + 1n, next.consumer.start);
 			const continued = (ended === null && declared) || ptsContiguous(first.end ?? this.#presentedEnd, nextStart);
 			if (marker || discarded || truncated || !continued) this.#lost = true;
 			skipped++;
