@@ -826,9 +826,9 @@ pub enum moq_refresh {
 #[derive(Clone, Copy, Default)]
 pub struct moq_delay {
 	/// The target latency in microseconds: the playout or jitter-buffer delay held behind
-	/// the live edge, where a cold join starts. A missing group is waited for the max alone.
-	/// moq-lite-07 sends it upstream. A `min_us` past the max starts at the max, since the
-	/// publisher serves nothing older. Ignored when `min_unstated` is set.
+	/// the live edge, where a cold join starts. A missing group is given up by the max alone.
+	/// moq-lite-07 sends it upstream. A `min_us` past the max starts at the group covering the
+	/// point the max behind the live edge, since the publisher serves no older group. Ignored when `min_unstated` is set.
 	pub min_us: u64,
 	/// How far a non-latest group may fall behind the live edge before it is skipped, in
 	/// microseconds. Zero skips immediately. Enforced by the publisher's cache and by any

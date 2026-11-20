@@ -25,14 +25,16 @@ fn raw_frame(frame: moq_net::frame::Frame) -> MoqFrame {
 #[derive(Clone, Copy, Debug, uniffi::Record)]
 pub struct MoqDelay {
 	/// The target latency: the playout or jitter-buffer delay held behind the live edge, where
-	/// a cold join starts, or null to leave it unstated. A missing group is waited for `max`
+	/// a cold join starts, or null to leave it unstated. A missing group is given up by `max`
 	/// alone. A media consumer starts an unstated minimum as zero, while the subscription keeps
 	/// it unstated, so it never pulls the aggregate across subscribers to zero, unless a catalog
 	/// warmup or an audio decoder's playout delay states one. moq-lite-07 sends it upstream. A
-	/// `min` past `max` starts at `max`, since the publisher serves nothing older.
+	/// `min` past `max` starts at the group covering the point `max` behind the live edge, since
+	/// the publisher serves no older group. An audio decoder refuses a `min` beyond the track's
+	/// max age instead.
 	pub min: Option<Duration>,
 	/// How far a non-latest group may fall behind the live edge before it is skipped, and how
-	/// long a missing group is waited for, or null for no subscriber limit, leaving the
+	/// far newer media may run past a missing group before it is given up, or null for no subscriber limit, leaving the
 	/// publisher's max age alone to bound it. `0` skips immediately; a larger value tolerates
 	/// that much reordering. It bounds lateness only, never the start.
 	///

@@ -207,7 +207,8 @@ typealias Subscription = uniffi.moq.MoqSubscription
  * cold join starts, null to leave it unstated (a decoder starts it as zero; a catalog warmup or an
  * audio decoder's playout delay still states a `min` to the publisher), and `max`, null for no
  * subscriber limit, is how far a non-latest group may fall behind before it is skipped, and how
- * long a decoder waits for a missing group. A `min` past `max` starts at `max`.
+ * far newer media may run past a missing group before a decoder gives it up. A `min` past `max`
+ * starts at the group covering the point `max` behind the live edge.
  */
 typealias Delay = uniffi.moq.MoqDelay
 

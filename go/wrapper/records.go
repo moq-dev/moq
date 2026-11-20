@@ -76,8 +76,8 @@ type DatagramInfo = ffi.MoqDatagramInfo
 // starts at the newest group and skips a superseded group at once.
 type Delay struct {
 	// Min is the target latency: the playout or jitter-buffer delay held behind the live edge,
-	// where a cold join starts. A missing group is waited for Max alone. A Min past Max starts at
-	// Max, since the publisher serves nothing older. moq-lite-07 sends it upstream.
+	// where a cold join starts. A missing group is given up by Max alone. A Min past Max starts at
+	// the group covering the point Max behind the live edge, since the publisher serves no older group. moq-lite-07 sends it upstream.
 	Min time.Duration
 	// MinUnstated leaves Min unstated, ignoring it. A decoder starts it as zero, while the
 	// subscription keeps it unstated, so it never pulls the aggregate across subscribers to
