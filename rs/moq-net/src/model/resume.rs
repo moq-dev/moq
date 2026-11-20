@@ -4737,6 +4737,47 @@ mod test {
 		}
 	}
 
+	/// An ordered read that ran out under a lowered cap passes only what lies below it, on a
+	/// front's reader as on a plain one: raising the cap reads the rest of a finished track.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_ordered_read_ended_under_a_cap_reads_on_once_it_rises() {
+		let subscription = Subscription::default()
+			.with_delay(Delay::default().with_max(HOUR))
+			.with_ranges([track::Range::groups(0..3)]);
+		for routed in [false, true] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			routes.serve(a.consume());
+			for sequence in 0..3 {
+				write(&a, sequence);
+			}
+			let _finished = a.clone().finish().unwrap();
+			let track = if routed { &logical } else { &a };
+			let sub = track
+				.consume()
+				.subscribe(subscription.clone())
+				.now_or_never()
+				.unwrap()
+				.unwrap();
+			let mut ordered = sub.ordered().with_range(..1);
+			let noop = kio::Waiter::noop();
+			let next = |ordered: &mut track::Ordered| match ordered.poll_next_group(&noop) {
+				Poll::Ready(Ok(group)) => Some(group.map(|group| group.start)),
+				_ => None,
+			};
+			assert_eq!(next(&mut ordered), Some(Some(0)), "routed={routed}");
+			assert_eq!(next(&mut ordered), Some(None), "routed={routed}: nothing below the cap");
+			let mut ordered = ordered.with_range(..);
+			let mut rest = Vec::new();
+			while let Poll::Ready(Ok(Some(group))) = ordered.poll_next_group(&noop) {
+				rest.push(group.start);
+			}
+			assert_eq!(rest, [1, 2], "routed={routed}");
+		}
+	}
+
 	/// A front's reader counts the groups its budget skips, as a plain reader does.
 	#[test]
 	fn a_front_reader_counts_the_groups_its_budget_skips() {

@@ -10225,7 +10225,8 @@ impl Cursor {
 	}
 
 	/// Pass every key below `end` for good, as an ordered read whose bounded window ran out
-	/// at `end`: a group created there later is late, so later reads end at once too.
+	/// at `end`, or at its cap below that: a group created there later is late, so later reads
+	/// end at once too.
 	fn pass_end(&mut self, end: u64) {
 		self.skip_ordered(end);
 		self.record.delivered.forget_below(end);
@@ -10738,7 +10739,7 @@ impl Subscriber {
 							break match !self.parks && cursor.is_exhausted(&[], 0, ordered) {
 								true => {
 									if ordered && let Some(end) = cursor.filter.window.end() {
-										cursor.pass_end(end);
+										cursor.pass_end(cursor.end_key.map_or(end, |cap| cap.min(end)));
 									}
 									Poll::Ready(Ok(None))
 								}
@@ -10760,15 +10761,18 @@ impl Subscriber {
 			}
 			Inner::Resume(resume, logical) => {
 				let polled = resume.poll_peek_group(ordered, self.parks, &logical.record.delivered, waiter);
+				// As a plain cursor's [`Cursor::pass_end`], below the cap: a read that ran out under
+				// a lowered cap, its window or the track having ended, still owes what lies above it.
 				if ordered
 					&& matches!(polled, Poll::Ready(Ok(None)))
 					&& let Some(end) = resume.window_end()
-					&& !logical.record.delivered.covers(0..end)
 				{
-					// As a plain cursor's [`Cursor::pass_end`]: what it handed out moved, which
-					// nothing it parked on notifies.
-					resume.disarm();
-					logical.record.delivered.forget_below(end);
+					let end = resume.bounds().end.map_or(end, |cap| cap.min(end));
+					if !logical.record.delivered.covers(0..end) {
+						// What it handed out moved, which nothing it parked on notifies.
+						resume.disarm();
+						logical.record.delivered.forget_below(end);
+					}
 				}
 				polled.map(|res| res.map(|candidate| candidate.map(|candidate| Reserved::Resume(Box::new(candidate)))))
 			}

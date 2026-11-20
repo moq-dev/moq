@@ -5350,12 +5350,15 @@ export class Subscriber {
 	}
 
 	// Pass every key below the bounded window's end for good, as an ordered read that ran out of it:
-	// a group created there later is late, so later reads end at once too. Mirrors the Rust
+	// a group created there later is late, so later reads end at once too. Only below the cap: a read
+	// that ran out under a lowered cap still owes what lies above it. Mirrors the Rust
 	// `Cursor::pass_end`.
 	#passEnd(): void {
 		// A resumed reader's ranges resolve on the copy serving it.
-		const end = this.#resume ? this.#resume.servingEnd() : this.#window.end();
-		if (end === undefined) return;
+		const window = this.#resume ? this.#resume.servingEnd() : this.#window.end();
+		if (window === undefined) return;
+		const cap = this.#cursor.peek().end;
+		const end = cap === undefined ? window : min(cap, window);
 		const floor = this.#delivered.runEnd(0n) ?? 0n;
 		this.#delivered.forgetBelow(end);
 		const forgot = this.#delivered.runEnd(0n) ?? 0n;
