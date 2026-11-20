@@ -652,21 +652,31 @@ impl Permit {
 		Some(both)
 	}
 
-	/// The prefixes holding what this grant shows that `before`'s did not, judged pattern
-	/// by pattern, so one may be spurious but none is missed. Empty for a narrowing.
+	/// The patterns this grant holds that `before`'s does not contain, judged pattern by
+	/// pattern, so one may be spurious but none is missed, each with the prefix holding
+	/// what it shows. Empty for a narrowing.
 	#[cfg(feature = "async")]
-	pub(crate) fn gained(&self, before: &Self) -> Vec<crate::Path> {
+	pub(crate) fn gained(&self, before: &Self) -> Vec<(moq_pattern::Pattern, crate::Path)> {
 		let Some(before) = &before.granted else {
 			return Vec::new();
 		};
-		let Some(granted) = &self.granted else {
-			return vec![crate::Path::empty()];
+		let granted = match &self.granted {
+			Some(granted) => granted.clone(),
+			None => Patterns::from(moq_pattern::Pattern::all()),
 		};
-		let gained: Patterns = (granted.iter())
+		(granted.iter())
 			.filter(|pattern| !before.contains(pattern))
-			.cloned()
-			.collect();
-		crate::model::interest_prefixes(&gained)
+			.filter_map(|pattern| {
+				let head = crate::model::interest_prefixes(&Patterns::from(pattern.clone()));
+				Some((pattern.clone(), head.into_iter().next()?))
+			})
+			.collect()
+	}
+
+	/// Whether the peer's grant holds `pattern` whole.
+	#[cfg(feature = "async")]
+	pub(crate) fn grants(&self, pattern: &moq_pattern::Pattern) -> bool {
+		self.granted.as_ref().is_none_or(|granted| granted.contains(pattern))
 	}
 
 	/// Whether the peer granted both the same, whatever limit either set.

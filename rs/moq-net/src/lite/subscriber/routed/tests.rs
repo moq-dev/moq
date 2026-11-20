@@ -315,6 +315,12 @@ async fn a_grant_change_unsyncs_only_the_readers_it_can_show_more() {
 		synced(&everything) && synced(&a),
 		"a narrowing keeps every reader synced"
 	);
+
+	// Two gains before an answer hold only what each shows.
+	routed.limit(&granting(&["a", "b"])).unwrap();
+	routed.limit(&granting(&["a", "b", "c"])).unwrap();
+	assert!(!synced(&everything));
+	assert!(synced(&a), "neither gain shows `a` anything new");
 }
 
 /// A grant change that shows more within a prefix asked, though within no reader's, still
@@ -354,11 +360,11 @@ async fn a_grant_change_under_a_coarsened_ask_holds_the_readers_that_arrive() {
 	assert!(synced(&reader));
 }
 
-/// A peer that leaves an edit unanswered while its grant keeps changing holds one
-/// prefix per want, however many changes it sends; and a region too deep to lie beneath
-/// the session's root shows nothing there, holding no reader back.
+/// A peer that leaves an edit unanswered while its grant keeps changing holds one prefix
+/// per want and pattern it still grants, however many changes it sends; and a region too
+/// deep to lie beneath the session's root shows nothing there, holding no reader back.
 #[kio::test]
-async fn grant_changes_hold_at_most_one_prefix_per_want() {
+async fn grant_changes_hold_only_what_the_grant_still_shows() {
 	let (mut subscriber, _consumer) = subscriber();
 	subscriber.origin = subscriber
 		.origin
@@ -371,28 +377,27 @@ async fn grant_changes_hold_at_most_one_prefix_per_want() {
 				.collect(),
 		)
 	};
-	let mut routed = Routed::new(&subscriber, 1, &granting(&["a/**".to_string()]), None, None).unwrap();
+	let held = ["a/**".to_string(), "c/**".to_string()];
+	let mut routed = Routed::new(&subscriber, 1, &granting(&held[..1]), None, None).unwrap();
 	routed.want(Path::empty(), subscriber.origin.snapshot(""));
 	routed.want(Path::from_static("a"), subscriber.origin.snapshot("a"));
 	pump(&mut routed, &subscriber);
 	let stream = routed.stream();
 	// The answer never comes.
-	routed
-		.limit(&granting(&["a/**".to_string(), "c/**".to_string()]))
-		.unwrap();
+	routed.limit(&granting(&held)).unwrap();
 	assert!(matches!(stream.try_wire(), Some(Msg::Ask(_))));
+	// Each gain the grant takes back again lets go of what it held.
 	for i in 0..64 {
-		routed
-			.limit(&granting(&["a/**".to_string(), format!("b{i}/*/**")]))
-			.unwrap();
-		routed.limit(&granting(&["a/**".to_string()])).unwrap();
+		let mut more = held.to_vec();
+		more.push(format!("b{i}/*/**"));
+		routed.limit(&granting(&more)).unwrap();
+		routed.limit(&granting(&held)).unwrap();
 	}
-	assert_eq!(routed.gained.len(), 1, "only the whole tree gained");
+	assert_eq!(routed.gained.len(), 1, "only `c` is held, for the whole tree");
 
-	let deep = "x".repeat(crate::Path::MAX_BYTES);
-	routed
-		.limit(&granting(&["a/**".to_string(), format!("{deep}/**")]))
-		.unwrap();
+	let mut deep = held.to_vec();
+	deep.push(format!("{}/**", "x".repeat(crate::Path::MAX_BYTES)));
+	routed.limit(&granting(&deep)).unwrap();
 	assert_eq!(routed.gained.len(), 1);
 }
 

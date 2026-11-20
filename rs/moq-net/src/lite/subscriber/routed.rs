@@ -172,10 +172,9 @@ pub(in crate::lite) struct Routed {
 	wants: BTreeMap<Path, Option<crate::model::Snapshot>>,
 	/// The prefixes asked of the peer.
 	asked: BTreeMap<u64, Asked>,
-	/// By want, the prefix within it that a grant change newly shows something in,
-	/// relative to the root, holding the origin's readers there unsynced until an answer
-	/// after the change is in. One per want, however often the grant changes.
-	gained: BTreeMap<Path, (Path, crate::model::Snapshot)>,
+	/// What grant changes newly show within the wants, held until an answer after them is
+	/// in. One per want and pattern the grant still holds, however often it changes.
+	gained: Vec<Gain>,
 	/// The grant showed more since the last edit: the next is sent even when it changes
 	/// nothing, since its ANNOUNCE_OK follows what the change shows under a wider prefix.
 	regranted: bool,
@@ -203,6 +202,18 @@ pub(in crate::lite) struct Routed {
 	ready: kio::Queue<ServedKey>,
 	/// Why the last error closes the session, when the route layer said.
 	cause: Option<RouteClose>,
+}
+
+/// What a grant change newly shows within a want: the readers at `held` wait for an
+/// answer after it.
+struct Gain {
+	want: Path,
+	/// The pattern of the grant that showed it.
+	pattern: crate::Pattern,
+	/// The deeper of the want and what the pattern shows, relative to the root.
+	held: Path,
+	/// Holds the readers until dropped.
+	_snapshot: crate::model::Snapshot,
 }
 
 /// The absolute prefixes a session asks a peer that grants `permit` for, to serve
@@ -344,7 +355,7 @@ impl Routed {
 			origin: subscriber.origin.clone(),
 			wants: BTreeMap::new(),
 			asked: BTreeMap::new(),
-			gained: BTreeMap::new(),
+			gained: Vec::new(),
 			regranted: false,
 			next_prefix: 0,
 			edits: VecDeque::new(),
@@ -389,7 +400,7 @@ impl Routed {
 	/// The origin no longer wants `prefix` of the peer.
 	pub(in crate::lite) fn unwant(&mut self, prefix: &Path) {
 		self.wants.remove(prefix);
-		self.gained.remove(prefix);
+		self.gained.retain(|gain| gain.want != *prefix);
 		self.reask();
 	}
 
@@ -444,7 +455,7 @@ impl Routed {
 				*snapshot = None;
 			}
 		}
-		self.gained.retain(|_, (prefix, _)| !answered(prefix));
+		self.gained.retain(|gain| !answered(&gain.held));
 	}
 
 	/// The peer finished its stream: it is leaving, and answers nothing more.
@@ -808,9 +819,12 @@ impl Routed {
 		// for it. Elsewhere, and on a narrowing, nothing new can arrive, and a reader stays
 		// synced.
 		if !permit.same_grant(&self.permit) {
+			// What a pattern the grant no longer holds showed is gone, so nothing of it is
+			// left to arrive.
+			self.gained.retain(|gain| permit.grants(&gain.pattern));
 			let overlaps = |a: &Path, b: &Path| a.has_prefix(b) || b.has_prefix(a);
 			let asking = self.stream.asking();
-			for region in permit.gained(&self.permit) {
+			for (pattern, region) in permit.gained(&self.permit) {
 				// Too deep to lie beneath the root, it shows nothing here.
 				let Ok(absolute) = self.root.join(&region) else {
 					continue;
@@ -820,21 +834,20 @@ impl Routed {
 				}
 				for want in self.wants.keys().filter(|want| overlaps(want, &region)) {
 					self.regranted = true;
-					let mut within = match region.has_prefix(want) {
+					// Held already for an earlier change the pattern made.
+					if (self.gained.iter()).any(|gain| gain.want == *want && gain.pattern == pattern) {
+						continue;
+					}
+					let held = match region.has_prefix(want) {
 						true => region.clone(),
 						false => want.clone(),
 					};
-					// One hold per want: the prefix both gains lie within, which holds every
-					// reader either would.
-					if let Some((held, _)) = self.gained.get(want) {
-						let shared = route::ancestors(held).rev().find(|above| within.has_prefix(above));
-						within = shared.unwrap_or_default();
-						if within == *held {
-							continue;
-						}
-					}
-					let snapshot = self.origin.snapshot(within.clone());
-					self.gained.insert(want.clone(), (within, snapshot));
+					self.gained.push(Gain {
+						want: want.clone(),
+						pattern: pattern.clone(),
+						_snapshot: self.origin.snapshot(held.clone()),
+						held,
+					});
 				}
 			}
 		}
