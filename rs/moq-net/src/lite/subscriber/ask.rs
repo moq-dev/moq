@@ -13,10 +13,9 @@ use crate::{
 /// A SUBSCRIBE of its own for the relative ranges a finished copy's readers wait on their
 /// publisher to start (see [`track::Producer::asks`]): the subscription that fed the copy is
 /// over, so nothing else can carry them, and the copy never counts them over the groups it
-/// holds. Its SUBSCRIBE_START answers them, and the groups it delivers land in the copy, so a
-/// reader gets what a cold copy would. It FINs once the publisher declared the end and every
-/// group from the lowest start up to it is accounted for and read, then waits for the
-/// publisher's FIN in reply.
+/// holds. The groups it delivers land in the copy, and its SUBSCRIBE_START answers the readers
+/// once every group a range owes below the publisher's end is accounted for and read. It then
+/// FINs and waits for the publisher's FIN in reply.
 pub(super) struct Ask {
 	serve: TrackServe,
 	serving: track::Producer,
@@ -89,17 +88,29 @@ impl Ask {
 					}
 				},
 				AskState::Active { sub, finished } => {
-					if !*finished && let (Some(started), Some(end)) = (sub.started, &sub.end) {
-						let owed = started.unwrap_or(end.group)..end.group;
+					if !*finished
+						&& sub.started.is_some()
+						&& let Some(end) = &sub.end
+					{
+						let owed: Vec<_> = sub
+							.live
+							.iter()
+							.filter_map(|(id, range)| Some(owed(range, (*sub.starts.get(&id)?)?, end.group)))
+							.collect();
 						let settled = sub
 							.tail
 							.consume()
-							.poll(waiter, |tail| match tail.covers(owed.clone()) && !tail.is_reading() {
-								true => Poll::Ready(()),
-								false => Poll::Pending,
+							.poll(waiter, |tail| {
+								match owed.iter().all(|owed| tail.covers(owed.clone())) && !tail.is_reading() {
+									true => Poll::Ready(()),
+									false => Poll::Pending,
+								}
 							})
 							.is_ready();
 						if settled {
+							// Only now: the copy's own tail settled long ago, so a reader started
+							// earlier could run out at a group still arriving.
+							sub.report_starts(&self.serving);
 							let _ = sub.stream.writer.finish();
 							*finished = true;
 						}
@@ -119,7 +130,6 @@ impl Ask {
 								sub.edges.insert(id, edge);
 							}
 							sub.started = Some(start.starts.iter().flatten().min().copied());
-							sub.report_starts(&self.serving);
 						}
 						Recv::Message(lite::SubscribeResponse::Drop(dropped)) => {
 							if let Ok(mut tail) = sub.tail.write() {
@@ -188,4 +198,16 @@ impl Drop for Ask {
 			self.end();
 		}
 	}
+}
+
+/// The groups `range`, delivered from `start`, owes below the track's exclusive `end`.
+fn owed(range: &lite::Range, start: u64, end: u64) -> std::ops::Range<u64> {
+	let until = match range.end {
+		// Stops just before it, taking the group it falls in when partway through one.
+		Some(lite::Anchor::Absolute(at)) => at.group.saturating_add(u64::from(at.frame > 0)),
+		// Includes the group containing it.
+		Some(lite::Anchor::Time(time)) => time.saturating_add(1),
+		_ => end,
+	};
+	start..until.min(end).max(start)
 }

@@ -2941,9 +2941,9 @@ export class Subscriber {
 
 	// Ask where the relative starts `copy`'s readers wait on begin, on a lite-07 SUBSCRIBE of its own:
 	// the subscription that fed the finished copy is over, so nothing else can carry them, and the copy
-	// never counts them over the groups it holds. Its SUBSCRIBE_START answers them, and the groups it
-	// delivers land in the copy, so a reader gets what a cold copy would. It FINs once the publisher
-	// declared the end and every group from the lowest start up to it is accounted for and read.
+	// never counts them over the groups it holds. The groups it delivers land in the copy, and its
+	// SUBSCRIBE_START answers the readers once every group a range owes below the publisher's end is
+	// accounted for and read. It then FINs.
 	// Rejects when it fails, leaving its readers no answer. Mirrors the Rust `ask::Ask`.
 	async #askFinished(broadcast: Path.Valid, consumed: Consumed, copy: SubscribeEntry): Promise<void> {
 		const producer = copy.track;
@@ -2997,12 +2997,21 @@ export class Subscriber {
 				new Deadline(),
 			);
 			stream = opened;
-			const finish = async () => {
-				const covered = () =>
-					entry.start !== undefined &&
-					entry.end !== undefined &&
-					entry.tail.covers(entry.start ?? entry.end, entry.end);
-				await entry.tail.settle(covered, hooks.trackReleased(producer));
+			// Every group a range owes below the publisher's end, from where it starts up to its own end.
+			const covered = (end: bigint) =>
+				entry.start !== undefined &&
+				entry.live.ids().every((id) => {
+					const start = entry.starts.get(id);
+					const range = entry.live.get(id);
+					if (start === undefined || range === undefined) return true;
+					const until = range.end?.absolute ?? (range.end?.time !== undefined ? range.end.time + 1n : end);
+					return entry.tail.covers(start, max(start, min(until, end)));
+				});
+			// The readers take the answer only once those groups are in, since the copy's own tail settled
+			// long ago and a reader started earlier could run out at one still arriving. Then FIN.
+			const finish = async (end: bigint) => {
+				await entry.tail.settle(() => covered(end), hooks.trackReleased(producer));
+				hooks.relativeStarts(producer, this.#counted(entry));
 				fin = true;
 				opened.writer.close();
 			};
@@ -3027,12 +3036,11 @@ export class Subscriber {
 						null,
 					);
 					entry.tail.touch();
-					hooks.relativeStarts(producer, this.#counted(entry));
 				} else if ("finish" in resp) {
 					if (entry.end !== undefined) throw new ProtocolViolation("duplicate SUBSCRIBE_FINISH");
 					entry.end = resp.finish.group;
 					entry.tail.touch();
-					void finish().catch(() => {});
+					void finish(entry.end).catch(() => {});
 				} else if ("drop" in resp) {
 					entry.tail.account(resp.drop.start, resp.drop.end);
 				} else if ("skip" in resp) {

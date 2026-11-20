@@ -690,6 +690,8 @@ for (const [from, closed] of [
 		// The first reader holds the finished copy.
 		const first = subscribe([{ start: { time: from } }]);
 		let later: ReturnType<typeof subscribe> | undefined;
+		let short: ReturnType<typeof subscribe> | undefined;
+		let next: ReturnType<typeof subscribe> | undefined;
 		try {
 			const held: bigint[] = [];
 			for (let key = from; key <= 10n; key++) held.push(key);
@@ -706,7 +708,14 @@ for (const [from, closed] of [
 			}
 			later = subscribe([{ start: { relative: 5n } }]);
 			expect(await read(later)).toEqual([5n, 6n, 7n, 8n, 9n, 10n]);
+			// An ask ending before the track does is over at its own end, so the next one still goes out.
+			short = subscribe([{ start: { relative: 4n }, end: { time: 6n } }]);
+			expect(await read(short)).toEqual([6n]);
+			next = subscribe([{ start: { relative: 3n } }]);
+			expect(await read(next)).toEqual([7n, 8n, 9n, 10n]);
 		} finally {
+			next?.close();
+			short?.close();
 			later?.close();
 			first.close();
 			remote.close();

@@ -680,6 +680,18 @@ async fn a_relative_start_on_a_finished_copy_reads_the_publishers_groups() {
 			.expect("subscribe timeout")
 			.unwrap();
 		assert_eq!(read(&mut later).await, [5, 6, 7, 8, 9, 10], "holding from {from}");
+		// An ask ending before the track does is over at its own end, so the next one still goes
+		// out.
+		for (ranges, expected) in [
+			(range(Anchor::Relative(4), Some(Anchor::Time(6))), vec![6]),
+			(range(Anchor::Relative(3), None), vec![7, 8, 9, 10]),
+		] {
+			let mut reader = kio::clock::timeout(TIMEOUT, subscribe(vec![ranges]))
+				.await
+				.expect("subscribe timeout")
+				.unwrap();
+			assert_eq!(read(&mut reader).await, expected, "holding from {from}");
+		}
 		drop(first);
 	}
 }
