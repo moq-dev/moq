@@ -7,7 +7,7 @@ and `moq play` prefer the renditions shaped like their viewport, and switch
 when it rotates or is resized past square. A broadcast whose renditions share
 one orientation selects as today. A consumer with no viewport, such as
 moq-mux's export, a recorder, or a restream, takes the catalog's ranking
-(`VideoConfig::preference`, then hang's `ranked` order).
+(hang's `ranked` order, highest `VideoConfig::preference` first).
 
 ## Plan
 
@@ -20,9 +20,13 @@ Decided 2026-11-20 (maintainer, /quest-plan):
   original is portrait ranks portrait first (rejected: always landscape; an
   error when orientations mix and none is asked for).
 
-Orientation filters before the existing pixel, dimension, and bitrate
-selection (`js/watch/src/video/source.ts`), so a phone in portrait takes the
-best portrait rendition that fits its rate. A square rendition matches either.
+Orientation filters first (`js/watch/src/video/source.ts`), so a phone in
+portrait takes the best portrait rendition that fits its rate. It runs before
+the preference tier (`preferredRenditions`), not only before the pixel,
+dimension, and bitrate selection: a publisher ranks its secondary orientation
+with a lower `preference`, which that tier drops today as a decode fallback,
+so update `preference`'s docs in hang (Rust and JS) to say so. A square
+rendition matches either.
 
 Found by [moq-dev/studio#200](https://github.com/moq-dev/studio/pull/200),
 which publishes a portrait program beside the landscape one; the studio moves
