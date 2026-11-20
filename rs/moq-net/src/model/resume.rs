@@ -4372,6 +4372,53 @@ mod test {
 		assert_eq!(read, [66, 67]);
 	}
 
+	/// A switch off a failed copy asks the next for the reader's ranges as the reader placed
+	/// them, not where the failed copy's cache placed them.
+	#[test]
+	fn a_switch_off_a_failed_copy_asks_for_ranges_as_the_reader_placed_them() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let ended = received_copy();
+		routes.serve(ended.consume());
+		write(&ended, 64);
+		let mut live = subscribe(&logical, HOUR);
+		assert_eq!(recv(&mut live).start, 64);
+		write(&ended, 66);
+		ended.clone().abort(Error::Cancel).unwrap();
+		// The failed copy would place this inside group 64.
+		let ranges = live.subscription().with_ranges([track::Range {
+			start: Anchor::Time(65),
+			end: None,
+		}]);
+		live.update(ranges).unwrap();
+
+		let serving = received_copy();
+		routes.serve(serving.consume());
+		assert_eq!(serving.subscription().unwrap().start(), Some(65));
+	}
+
+	/// A route returned to after the reader moved on is asked to resume past what the reader
+	/// now holds, which only a whole ask carries.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_returning_route_resumes_past_the_reader_now() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		write(&a, 0);
+		assert_eq!(recv(&mut sub).start, 0);
+
+		let b = copy();
+		routes.serve(b.consume());
+		assert_eq!(b.subscription().unwrap().resume, Some(Position::new(0, 1)));
+		write(&b, 1);
+		assert_eq!(recv(&mut sub).start, 1);
+		routes.serve(a.consume());
+		assert_eq!(a.subscription().unwrap().resume, Some(Position::new(1, 1)));
+	}
+
 	/// A failed copy's group held back for a placement goes out in key order once a later copy
 	/// in the same pass places the window below it, rather than being passed over.
 	#[kio::test]
