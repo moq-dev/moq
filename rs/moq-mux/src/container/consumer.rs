@@ -1103,10 +1103,11 @@ impl<F: Container> Consumer<F> {
 	// from a group that raced it, and at the latest as the start is decided, before anything is
 	// dropped against it.
 	fn join(&mut self, waiter: &kio::Waiter) {
-		self.poll_largest(waiter);
-		if self.joined.is_none() {
-			self.joined = self.largest;
+		if self.joined.is_some() {
+			return;
 		}
+		self.poll_largest(waiter);
+		self.joined = self.largest;
 	}
 
 	// Drop the pending groups `pick` selects without delivering them. A drop must not hide what
