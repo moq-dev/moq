@@ -553,6 +553,8 @@ export interface ResumeSource {
 	cachedGroup(key: bigint, from?: number): GroupConsumer | undefined;
 	/** As {@link cachedGroup} from its first frame, judged by the budget of the copy it comes from. */
 	judgedGroup(key: bigint): GroupConsumer | undefined;
+	/** When the latest group any copy caches in `[start, end)` landed; see `hooks.landed`. */
+	landed(start: bigint, end: bigint): Instant | undefined;
 	/** Let go of every copy. */
 	close(abort?: Error): void;
 }
@@ -909,6 +911,11 @@ export const hooks: {
 	judgedGroup: (subscriber: Subscriber, key: bigint) => GroupConsumer | undefined;
 	/** Whether {@link cachedGroup} would find the group, without making a read handle. */
 	holdsGroup: (subscriber: Subscriber, key: bigint) => boolean;
+	/**
+	 * When the latest group the subscriber's track caches in `[start, end)` landed, undefined when
+	 * it caches none; a routed reader asks every copy. Mirrors the Rust `Subscriber::landed`.
+	 */
+	landed: (subscriber: Subscriber, start: bigint, end: bigint) => Instant | undefined;
 	/**
 	 * The start of the group before `start` on the subscriber's track, as a lite-07 GROUP's
 	 * Previous Start names it: just below the run of starts declared skipped directly under
@@ -1301,6 +1308,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	holdsGroup: () => {
+		throw new Error("track.ts not loaded");
+	},
+	landed: () => {
 		throw new Error("track.ts not loaded");
 	},
 	previousStart: () => {

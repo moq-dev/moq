@@ -25,18 +25,18 @@ fn raw_frame(frame: moq_net::frame::Frame) -> MoqFrame {
 #[derive(Clone, Copy, Debug, uniffi::Record)]
 pub struct MoqDelay {
 	/// The target latency: the playout or jitter-buffer delay held behind the live edge, where
-	/// a cold join starts, and how long a media consumer waits for a missing group, or null to
-	/// leave it unstated. A media consumer starts an unstated minimum as zero and waits a
-	/// missing group for `max` instead (an audio decoder floors it at zero and waits only its
-	/// playout estimate, which can be larger), while the subscription keeps it unstated, so it
-	/// never pulls the aggregate across subscribers to zero, unless a catalog warmup or an
-	/// audio decoder's playout delay states one. moq-lite-07 sends it upstream. A `min`
-	/// past `max` starts and waits at `max`, since the publisher serves nothing older.
+	/// a cold join starts, or null to leave it unstated. A missing group is given up by `max`
+	/// alone. A media consumer starts an unstated minimum as zero, while the subscription keeps
+	/// it unstated, so it never pulls the aggregate across subscribers to zero, unless a catalog
+	/// warmup or an audio decoder's playout delay states one. moq-lite-07 sends it upstream. A
+	/// `min` past `max` starts a cold join no further back than the group covering the point `max`
+	/// behind the live edge, since the publisher serves no older group. An audio decoder refuses a `min` beyond the track's
+	/// max age instead.
 	pub min: Option<Duration>,
-	/// How far a non-latest group may fall behind the live edge before it is skipped, or null
-	/// for no subscriber limit, leaving the publisher's max age alone to bound it. `0` skips
-	/// immediately; a larger value tolerates that much reordering. It bounds lateness only,
-	/// never the start.
+	/// How far a non-latest group may fall behind the live edge before it is skipped, and how
+	/// far newer media may run past a missing group before it is given up, or null for no subscriber limit, leaving the
+	/// publisher's max age alone to bound it. `0` skips immediately; a larger value tolerates
+	/// that much reordering. It bounds lateness only, never the start.
 	///
 	/// Enforced both by the publisher's cache (sent on the wire) and by any local buffering,
 	/// such as [`MoqMediaTrackConsumer`]'s jitter buffer. It caps every range.

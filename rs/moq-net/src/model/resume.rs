@@ -1298,6 +1298,13 @@ impl Subscriber {
 		serving.previous_start(start)
 	}
 
+	/// When the latest group any copy caches at `keys` landed: a group a replaced copy
+	/// delivered landed all the same.
+	pub(super) fn landed(&self, keys: std::ops::Range<u64>) -> Option<crate::time::Instant> {
+		let copies: Vec<_> = self.reader().copies.iter().map(|copy| copy.track.clone()).collect();
+		copies.iter().filter_map(|track| track.landed(keys.clone())).max()
+	}
+
 	/// Whether the serving copy holds the group at `key`; see [`track::Subscriber::holds`].
 	pub(super) fn holds(&self, key: u64) -> bool {
 		let serving = self.reader().copies.last().map(|copy| copy.track.clone());
@@ -6633,7 +6640,7 @@ mod test {
 			while let Poll::Ready(Ok(Some(item))) = sub.poll_next_item(&waiter) {
 				items.push(match item {
 					track::Item::Group(group) => format!("group {}", group.start),
-					track::Item::Gap { range, error } => format!("gap {range:?} ({error})"),
+					track::Item::Gap { range, error, .. } => format!("gap {range:?} ({error})"),
 				});
 			}
 			items
@@ -6664,7 +6671,7 @@ mod test {
 			while let Poll::Ready(Ok(Some(item))) = sub.poll_next_item(&waiter) {
 				items.push(match item {
 					track::Item::Group(group) => format!("group {}", group.start),
-					track::Item::Gap { range, error } => format!("gap {range:?} ({error})"),
+					track::Item::Gap { range, error, .. } => format!("gap {range:?} ({error})"),
 				});
 			}
 			items
@@ -6833,7 +6840,7 @@ mod test {
 			while let Poll::Ready(Ok(Some(item))) = sub.poll_next_item(&waiter) {
 				items.push(match item {
 					track::Item::Group(group) => format!("group {}", group.start),
-					track::Item::Gap { range, error } => format!("gap {range:?} ({error})"),
+					track::Item::Gap { range, error, .. } => format!("gap {range:?} ({error})"),
 				});
 			}
 			items

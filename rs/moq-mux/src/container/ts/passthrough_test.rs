@@ -106,11 +106,12 @@ async fn import_onto(
 			moq_net::track::Subscription::default()
 				.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY)),
 		)
-		.await?;
+		.await?
+		.ordered();
 	let mut objects = Vec::new();
 	let mut markers = Vec::new();
 	let mut starts = Vec::new();
-	while let Some(mut group) = kio::clock::timeout(Duration::from_secs(1), track.recv_group())
+	while let Some(mut group) = kio::clock::timeout(Duration::from_secs(1), track.next_group())
 		.await
 		.expect("the track stalled")?
 	{
