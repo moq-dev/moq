@@ -4367,6 +4367,10 @@ export class Subscriber {
 			// A relative anchor still pending reads every group, so a fill asked below would claim
 			// the history it never names. Mirrors the Rust `cursor.sync()` in `poll_start`.
 			subscriber.#settle();
+			// A relative start still waiting on its publisher's report names no group yet, so where it
+			// starts can't be answered; a closed track answers at once, since nothing more can arrive.
+			// Mirrors the Rust `is_counting` in `poll_start`.
+			if (subscriber.#window.isCounting() && subscriber.#state.closed.peek() === undefined) return "pending";
 			const producer = subscriber.#state.producer;
 			const start = producer && sourceStart(producer);
 			if (start === "pending") return start;

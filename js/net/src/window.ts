@@ -569,6 +569,11 @@ export class Window {
 		return this.#pending.size > 0;
 	}
 
+	/** Whether a relative start still waits on its publisher to say where it starts. Mirrors the Rust `is_counting`. */
+	isCounting(): boolean {
+		return this.#counting.size > 0;
+	}
+
 	/**
 	 * The ranges whose relative start waits on its publisher to say where it starts, which a received
 	 * copy asks its upstream for. Mirrors the Rust `Window::counting`.

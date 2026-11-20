@@ -5867,6 +5867,30 @@ test("a received copy counts a relative start back as its publisher did", async 
 	expect(later.floor()).toBeUndefined();
 });
 
+// A relay serving a reader whose relative start still waits on its publisher's report can't say
+// where that range starts, so the feed's start stays pending rather than answer the range as empty,
+// until the report arrives or the copy closes. Mirrors the Rust `is_counting` in `poll_start`.
+test("a received copy's feed start waits on a relative start still counting", async () => {
+	const report = (close: boolean) => {
+		const producer = receivedTrack({ timescale: Timescale.MILLI });
+		hooks.reportsStarts(producer);
+		for (let key = 0n; key < 10n; key++) putGroup(producer, key, Number(key));
+		const reader = producer.subscribe({
+			delay: { max: null },
+			ranges: [
+				{ start: { time: 1n }, end: { time: 2n } },
+				{ start: { relative: 2n }, end: { time: 8n } },
+			],
+		});
+		expect(hooks.sourceStart(reader)).toBe("pending");
+		if (close) producer.close();
+		else hooks.relativeStarts(producer, [[2n, { at: 7n }, 9n]]);
+		return hooks.sourceStart(reader);
+	};
+	expect(report(false)).not.toBe("pending");
+	expect(report(true)).not.toBe("pending");
+});
+
 // Whatever groups a lite-07 copy holds, a reader's relative start lands only where its publisher
 // reported it, or waits: the cache never moves it. Mirrors the Rust
 // `a_copys_cache_never_moves_a_relative_start`.

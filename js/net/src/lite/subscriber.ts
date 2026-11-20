@@ -2756,6 +2756,10 @@ export class Subscriber {
 		// What the fills asked with the last update, and the priority it carried.
 		let sentFills: Run[] = [];
 		let sentPriority = msg.priority;
+		// The revision of the asks the last update carried, as many of them as fit: answers moving the
+		// readers change it again, which asks for the rest. Mirrors the Rust `asks_seen`.
+		let sentAsks: number | undefined;
+		const asksChanged = hooks.asksChanged(track);
 		const asked = hooks.demandAsked(track.demand());
 		const edge = hooks.producerLargest(track);
 		for (;;) {
@@ -2777,18 +2781,20 @@ export class Subscriber {
 			const priority = Math.max(current?.priority ?? 0, fills?.priority ?? -128);
 			// The relative ranges readers wait on the publisher to start, each asked as a range of its own
 			// (see `RangeOwner`), alongside a demand that covers their groups.
+			const asksRevision = asksChanged.peek();
 			const asks = hasRanges(this.version) ? this.#asks(entry) : [];
+			const askedAll = sentAsks === asksRevision || (asks.length === 0 && entry.askIds.size === 0);
 			if (
 				current === undefined ||
 				(refresh === undefined &&
 					priority === sentPriority &&
 					sameRuns(fillGroups, sentFills) &&
-					this.#asked(entry, asks) &&
+					askedAll &&
 					this.#sameSubscription(current, lastSent))
 			) {
 				// Each wake releases the quiet signals too, including when termination wins.
 				const next = await race([
-					Signal.race(hooks.requested(track), asked, edge, entry.fillsChanged, hooks.asksChanged(track)),
+					Signal.race(hooks.requested(track), asked, edge, entry.fillsChanged, asksChanged),
 					stopped,
 				]);
 				if (next === null) return;
@@ -2831,10 +2837,19 @@ export class Subscriber {
 					start: { absolute: run.start },
 					end: { absolute: run.end },
 				}));
+				// An ask for a range the demand adds here takes no range of its own: the publisher answers
+				// the demand's from its latest group too. Mirrors the Rust `SubStream::edit`.
+				const fed = new Set<string>();
+				for (const id of entry.live.ids()) {
+					const range = entry.live.get(id);
+					if (range && !entry.fillIds.has(id) && !entry.askIds.has(id)) fed.add(wireRangeKey(range));
+				}
+				const added = new Set(fitted.ranges.map(wireRangeKey).filter((key) => !fed.has(key)));
+				const ownAsks = askRanges.filter((range) => !added.has(wireRangeKey(range)));
 				// The demand's ranges, the asks', then the fills'.
 				const edited = entry.live.edit(
-					[...fitted.ranges, ...askRanges, ...fillRanges],
-					{ asks: askRanges.length, fills: fillRanges.length },
+					[...fitted.ranges, ...ownAsks, ...fillRanges],
+					{ asks: ownAsks.length, fills: fillRanges.length },
 					(id) => this.#ownerOf(entry, id),
 				);
 				edit = edited;
@@ -2886,6 +2901,7 @@ export class Subscriber {
 			lastSent = { ...current };
 			sentFills = fillGroups;
 			sentPriority = priority;
+			sentAsks = asksRevision;
 			console.debug(`subscribe update: id=${id} broadcast=${broadcast} track=${track.name}`);
 		}
 	}
@@ -2899,7 +2915,8 @@ export class Subscriber {
 	}
 
 	// Who asked for the live range `id`. An ask its publisher answered counting from before the copy's
-	// latest group is stale: a reader waiting on it joined since. Mirrors the Rust `SubStream::edit`.
+	// latest group is stale when the asks change: a reader waiting on it joined since. Mirrors the
+	// Rust `SubStream::edit`.
 	#ownerOf(entry: SubscribeEntry, id: bigint): RangeOwner {
 		if (entry.fillIds.has(id)) return "fill";
 		if (!entry.askIds.has(id)) return "demand";
@@ -2907,17 +2924,6 @@ export class Subscriber {
 		const edge = entry.edges.get(id);
 		const stale = entry.starts.has(id) && largest !== undefined && (edge === undefined || edge < largest);
 		return stale ? "stale" : "ask";
-	}
-
-	// Whether the live asks' ranges are `asks`, none of them stale.
-	#asked(entry: SubscribeEntry, asks: readonly WireRange[]): boolean {
-		const live = new Set<string>();
-		for (const id of entry.askIds) {
-			const range = entry.live.get(id);
-			if (!range || this.#ownerOf(entry, id) === "stale") return false;
-			live.add(wireRangeKey(range));
-		}
-		return live.size === asks.length && asks.every((range) => live.has(wireRangeKey(range)));
 	}
 
 	// Declare where a lite-07 feed starts: the lowest start the live ranges report, or the

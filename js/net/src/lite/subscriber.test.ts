@@ -28,7 +28,7 @@ import { GRACE } from "../ledger.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
-import type { Producer } from "../track.ts";
+import type { Producer, Range as TrackRange, Subscriber as TrackSubscriber } from "../track.ts";
 import { SEGMENT_BYTES } from "../util/limits.ts";
 import { Budget } from "../util/yield.ts";
 import * as Varint from "../varint.ts";
@@ -2878,6 +2878,78 @@ test("a widened range's SUBSCRIBE_STARTED resolves the feed's start", async () =
 		expect(await track.start()).toBe(1n);
 	} finally {
 		track.close();
+		broadcast.close();
+		subscriber.close();
+	}
+});
+
+// A reader of a lite-07 copy whose relative start no report answers asks the copy's upstream for
+// its range, in an update of its own, and once SUBSCRIBE_STARTED answers it the copy retires the
+// ask: one update each way, however many groups arrive in between. The demand's own range, added
+// fresh, answers the first reader with no ask. Mirrors the Rust
+// `a_lite07_ask_the_demand_adds_takes_no_range_of_its_own`.
+test("a lite-07 copy asks upstream for a relative start once, and retires the ask once answered", async () => {
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, toHop(1n));
+	const broadcast = subscriber.consume(Path.from("room"));
+	const subscribe = (ranges: TrackRange[]) => broadcast.track("video").subscribe({ delay: { max: null }, ranges });
+	const live = subscribe([{ start: { time: 0n } }]);
+	const readers: TrackSubscriber[] = [];
+	const group = async (key: bigint) => {
+		await subscriber.runGroup(new Group({ subscribe: 0n, key }), await groupStream(Number(key), version));
+		(await live.recvGroup())?.close();
+		await drainReactions();
+	};
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version, 1000);
+		const request = await opened(1);
+		const sent = new Reader(request.outbound, undefined, version);
+		expect(await sent.u53()).toBe(StreamId.Subscribe);
+		await Subscribe.decode(sent, version);
+		await request.reading;
+		await respond(request, version, [{ start: new SubscribeStart([0n]) }]);
+		for (const key of [0n, 1n, 2n]) await group(key);
+
+		// The demand adds the first reader's range, which its answer starts.
+		const first = subscribe([{ start: { relative: 1n } }]);
+		readers.push(first);
+		const demanded = await SubscribeUpdate.decode(sent, version);
+		expect([demanded.remove, demanded.ranges]).toEqual([[], [{ start: { relative: 1n } }]]);
+		await respond(request, version, [{ started: new SubscribeStarted(1n, 1n) }]);
+		await drainReactions();
+		expect(first.floor()).toBe(1n);
+
+		// A later reader counting from group 3 can't use that answer, counted from 2, so it asks.
+		await group(3n);
+		const later = subscribe([{ start: { relative: 1n } }]);
+		readers.push(later);
+		// Waiting on a group, as a reader does, so the answer settles it.
+		const waiting = later.recvGroup();
+		const asked = await SubscribeUpdate.decode(sent, version);
+		expect([asked.remove, asked.ranges]).toEqual([[], [{ start: { relative: 1n } }]]);
+		// A group arriving while the ask is out asks nothing again.
+		await group(4n);
+		await respond(request, version, [{ started: new SubscribeStarted(2n, 3n) }]);
+		const retired = await SubscribeUpdate.decode(sent, version);
+		expect([retired.remove, retired.ranges]).toEqual([[2n], []]);
+		(await waiting)?.close();
+		expect(later.floor()).toBe(3n);
+
+		// Nothing more to say.
+		await drainReactions();
+		const more = await Promise.race([
+			SubscribeUpdate.decode(sent, version).then(() => "update"),
+			(async () => {
+				for (let i = 0; i < 5; i++) await drainReactions();
+				return "quiet";
+			})(),
+		]);
+		expect(more).toBe("quiet");
+	} finally {
+		for (const reader of readers) reader.close();
+		live.close();
 		broadcast.close();
 		subscriber.close();
 	}

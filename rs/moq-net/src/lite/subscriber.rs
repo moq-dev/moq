@@ -4021,6 +4021,74 @@ mod tests {
 		assert!(!sub.fill_ids.contains(&2), "forgotten once started");
 	}
 
+	/// An ask for a relative range the demand adds in the same edit takes no range of its own,
+	/// since the publisher answers the demand's from its latest group too; one for a range the
+	/// demand already has live does, since that one's answer may predate the reader.
+	#[kio::test]
+	async fn a_lite07_ask_the_demand_adds_takes_no_range_of_its_own() {
+		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), Version::Lite07)
+			.await
+			.unwrap();
+		let live = lite::Range {
+			start: Some(lite::Anchor::Time(0)),
+			end: None,
+		};
+		let back = lite::Range {
+			start: Some(lite::Anchor::Relative(1)),
+			end: None,
+		};
+		let mut sub = SubStream {
+			order: crate::track::Order::Descending,
+			stream,
+			id: 0,
+			max_delay: None,
+			stale_budget: Duration::ZERO,
+			min_delay: None,
+			start: Some(0),
+			priority: 0,
+			requested: Some(0),
+			live: lite::LiveRanges::new(Version::Lite07, &[live]),
+			demand: Some(Subscription::default()),
+			fill_ids: Default::default(),
+			ask_ids: Default::default(),
+			fill_groups: Default::default(),
+			tail: Default::default(),
+			started: Some(Some(0)),
+			finishing: None,
+			parked: false,
+			starts: [(0, Some(0))].into(),
+			edges: Default::default(),
+			declared: None,
+			end: None,
+			wanted: None,
+			unanswered: None,
+			_working: crate::session::Work::default().start(),
+		};
+
+		let (edit, _) = sub.edit(&[live, back, back], 1, 0, Some(3)).unwrap();
+		assert_eq!(
+			edit,
+			lite::RangeEdit::Edit {
+				remove: vec![],
+				add: vec![back]
+			},
+			"the demand's range answers the ask"
+		);
+		assert!(sub.ask_ids.is_empty());
+
+		// The demand's range is live now, so another reader's ask takes one of its own.
+		let (edit, _) = sub.edit(&[live, back, back], 1, 0, Some(5)).unwrap();
+		assert_eq!(
+			edit,
+			lite::RangeEdit::Edit {
+				remove: vec![],
+				add: vec![back]
+			}
+		);
+		assert_eq!(sub.ask_ids.iter().copied().collect::<Vec<_>>(), [2]);
+	}
+
 	/// A lite-07 range an update adds owes nothing known until SUBSCRIBE_STARTED says where it
 	/// starts, and then owes from there; one retired since owes nothing.
 	#[kio::test]
@@ -10314,9 +10382,10 @@ impl SubStream {
 
 	/// Edit the live ranges into `ranges`: the demand's, then `asks` asks', then `fills` held
 	/// fills', forgetting the starts of those retired. A fill or ask asking for what a demand
-	/// range does still takes a range of its own, so each Range ID stays one owner's. An ask
-	/// its publisher answered counting from before `latest`, the copy's latest group, is
-	/// asked again: a reader waiting on it joined since.
+	/// range does still takes a range of its own, so each Range ID stays one owner's, except an
+	/// ask for a range the demand adds here: the publisher answers that one from its latest
+	/// group too. An ask its publisher answered counting from before `latest`, the copy's
+	/// latest group, is asked again: a reader waiting on it joined since.
 	/// Returns the edit, and whether it changed anything.
 	fn edit(
 		&mut self,
@@ -10327,9 +10396,18 @@ impl SubStream {
 	) -> Result<(lite::RangeEdit, bool), Error> {
 		let before: Vec<_> = self.live.iter().map(|(id, _)| id).collect();
 		let demand = ranges.len().saturating_sub(asks + fills);
+		let fed: std::collections::HashSet<_> = self
+			.live
+			.iter()
+			.filter(|(id, _)| self.feeds(*id))
+			.map(|(_, range)| *range)
+			.collect();
+		let added: std::collections::HashSet<_> =
+			ranges[..demand].iter().filter(|range| !fed.contains(range)).collect();
 		let keyed: Vec<_> = ranges
 			.iter()
 			.enumerate()
+			.filter(|(index, range)| !(demand..demand + asks).contains(index) || !added.contains(range))
 			.map(|(index, range)| {
 				let owner = match index {
 					index if index < demand => Owner::Demand,
