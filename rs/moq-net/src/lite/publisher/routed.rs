@@ -132,14 +132,6 @@ struct Parts {
 	add: Vec<(Path, bool)>,
 }
 
-/// A claim the node told: the key that told it, the claim, and the absolute, origin-side
-/// prefix it claims, above the path it is told at, where its routes are announced.
-struct Told {
-	source: Source,
-	claim: Claim,
-	prefix: Path,
-}
-
 /// A route the peer holds: its Route ID, and the Announce ID of each claim under it.
 struct Sent {
 	id: u64,
@@ -175,7 +167,8 @@ pub(in crate::lite) struct Answer {
 	/// The latest marker answered the peer's edit, so the SYNCED after it count.
 	answering: bool,
 	/// How many reads a grant change added have yet to send their initial set, before
-	/// what it no longer shows goes: a claim a wider read tells again is kept.
+	/// what it no longer shows goes and what it now shows starts: a claim a wider read tells
+	/// again is kept. Every prefix's SYNCED waits for that too.
 	regranting: Option<usize>,
 	/// The ANNOUNCE_REQUESTs of an edit that continues.
 	parts: Option<Parts>,
@@ -185,7 +178,7 @@ pub(in crate::lite) struct Answer {
 	next_route: u64,
 	/// Every claim the node told for any other peer, as the handle names it, before
 	/// filtering, with the key that told it.
-	told: BTreeMap<Named, Told>,
+	told: BTreeMap<Named, (Source, Claim)>,
 	/// The claims such a peer holds: their Announce ID, and what it was sent.
 	live: HashMap<Named, (u64, Claim)>,
 	/// The session is leaving: nothing more is sent.
@@ -538,14 +531,13 @@ impl Answer {
 						let holds = std::mem::replace(&mut mount.holds, Holds::Nothing);
 						holds.synced().then_some(mount.prefix)
 					}
-					// What a grant change reads: once all of it is in, what the change no longer
-					// shows goes. A prefix not yet synced waits for it too.
+					// What a grant change reads: once all of it is in, the claims and the SYNCED
+					// held back for it settle. A prefix not yet synced waits for its own reads too.
 					None if !self.answering => {
 						if let Some(left) = self.regranting.as_mut() {
 							*left = left.saturating_sub(1);
 							if *left == 0 {
-								self.regranting = None;
-								self.resync(writer)?;
+								self.settle(writer)?;
 							}
 						}
 						(self.prefixes.iter())
@@ -678,8 +670,11 @@ impl Answer {
 		added: usize,
 		regions: Option<&[Path]>,
 	) -> Result<(), Error> {
+		// The mounts that go below may release a prefix, whose SYNCED waits for the claims
+		// this change shows in the reads it keeps.
+		self.regranting = Some(added);
 		let mut gone: Vec<Named> = (self.told.iter())
-			.filter(|(key, told)| told.source == MAIN && removed.iter().any(|read| route::within(&key.0, read)))
+			.filter(|(key, (source, _))| *source == MAIN && removed.iter().any(|read| route::within(&key.0, read)))
 			.map(|(key, _)| key.clone())
 			.collect();
 		let ids: Vec<u64> = self.prefixes.keys().copied().collect();
@@ -719,7 +714,7 @@ impl Answer {
 				}
 				gone.extend(
 					(self.told.iter())
-						.filter(|(_, told)| told.source == source)
+						.filter(|(_, (told, _))| *told == source)
 						.map(|(key, _)| key.clone()),
 				);
 			}
@@ -730,12 +725,24 @@ impl Answer {
 		}
 		self.main.flush();
 		match added {
-			0 => self.resync(writer),
-			added => {
-				self.regranting = Some(added);
-				Ok(())
-			}
+			0 => self.settle(writer),
+			_ => Ok(()),
 		}
+	}
+
+	/// All a grant change reads is in: bring every claim in line with it, then send each
+	/// SYNCED held back for it.
+	fn settle(&mut self, writer: &mut Writer) -> Result<(), Error> {
+		self.regranting = None;
+		self.resync(writer)?;
+		let ready: Vec<u64> = (self.prefixes.iter())
+			.filter(|(_, prefix)| !prefix.synced && prefix.waiting == 0)
+			.map(|(id, _)| *id)
+			.collect();
+		for id in ready {
+			self.synced(writer, id, 0)?;
+		}
+		Ok(())
 	}
 
 	/// Bring every claim the peer holds or the node told in line with the grant.
@@ -750,13 +757,14 @@ impl Answer {
 	}
 
 	/// `keys` of those answering the prefix with Prefix ID `id` sent their initial set:
-	/// SYNCED goes out once every one has.
+	/// SYNCED goes out once every one has, and no grant change is still reading.
 	fn synced(&mut self, writer: &mut Writer, id: u64, keys: usize) -> Result<(), Error> {
+		let regranting = self.regranting.is_some();
 		let Some(prefix) = self.prefixes.get_mut(&id).filter(|prefix| !prefix.synced) else {
 			return Ok(());
 		};
 		prefix.waiting = prefix.waiting.saturating_sub(keys);
-		if prefix.waiting > 0 {
+		if prefix.waiting > 0 || regranting {
 			return Ok(());
 		}
 		prefix.synced = true;
@@ -840,14 +848,6 @@ impl Answer {
 		(path, instance): node::Broadcast,
 		change: Change,
 	) -> Result<(), Error> {
-		// Where its routes are announced: its own prefix, above the path it is told at.
-		let prefix = match &change {
-			Change::Live(claim) => {
-				let above = usize::try_from(claim.item.above).unwrap_or(usize::MAX);
-				path.head(path.depth().saturating_sub(above)).unwrap_or_default()
-			}
-			_ => Path::default(),
-		};
 		// Named as the handle names it: beneath the mount point for a mount, and never a
 		// claim the origin holds beneath a mount for the session's own.
 		let (named, change) = match self.mounts.get(&source).map(|mount| &mount.mount) {
@@ -873,12 +873,12 @@ impl Answer {
 		let key = (named, instance);
 		let lost = match change {
 			Change::Live(claim) => {
-				self.told.insert(key.clone(), Told { source, claim, prefix });
+				self.told.insert(key.clone(), (source, claim));
 				false
 			}
 			change => {
 				// Another key may show it now, as when a mount took its place.
-				if self.told.get(&key).is_some_and(|told| told.source == source) {
+				if self.told.get(&key).is_some_and(|(told, _)| *told == source) {
 					self.told.remove(&key);
 				}
 				change == Change::Lost
@@ -894,10 +894,9 @@ impl Answer {
 		path.parts().count().saturating_sub(self.origin.root().parts().count()) as u64
 	}
 
-	/// Whether the peer is shown the claim at the absolute `path`, whose route may serve
-	/// `reach`: the permit, this handle, and the route all allow some path it covers, the
-	/// same one. An intersection too large to spell allows nothing, never more.
-	fn shows(&self, path: &Path, reach: Option<&crate::Patterns>) -> bool {
+	/// Whether the peer is shown the claim at the absolute `path`: the permit and this
+	/// handle allow some path it covers, the same one.
+	fn shows(&self, path: &Path) -> bool {
 		let Some((_, prefix)) = self.region(path) else {
 			return false;
 		};
@@ -905,34 +904,15 @@ impl Answer {
 		let (Some(suffix), Some(relative)) = (within, path.strip_prefix(self.origin.root())) else {
 			return false;
 		};
-		let mut allowed = self.permit.beneath(relative.as_str());
-		if let Some(reach) = reach {
-			let reach = reach.rebase(self.origin.root().as_str());
-			allowed = allowed.intersect(&reach).unwrap_or_default();
-		}
-		(prefix.hidden || !suffix.is_hidden()) && self.origin.reaches_any(path, &allowed)
-	}
-
-	/// What the routes of the told claim serving `instance` may serve now, as the handle names
-	/// it, or `None` when the origin holds none to judge it by, as for a neighbour's claim no
-	/// session serves here yet. Looked up at each judgment, so any change to the claim, the
-	/// grant, or the peer's prefixes judges it by the routes as they stand.
-	fn reach(&self, instance: &Instance, told: &Told) -> Option<crate::Patterns> {
-		let reach = self.origin.reach(&told.prefix, instance)?;
-		match self.mounts.get(&told.source) {
-			Some(mount) => Some(mount.mount.name_patterns(&reach)),
-			None => Some(reach),
-		}
+		(prefix.hidden || !suffix.is_hidden()) && self.origin.reaches_any(path, &self.permit.beneath(relative.as_str()))
 	}
 
 	/// Bring the peer's claim `key` in line with what the node told and the answer
 	/// shows. A claim that goes is `lost`, or else ended.
 	fn sync(&mut self, writer: &mut Writer, key: Named, lost: bool) -> Result<(), Error> {
 		let depth = self.depth(&key.0);
-		let told = self.told.get(&key);
-		let shown = |told: &&Told| self.shows(&key.0, self.reach(&key.1, told).as_ref());
-		let wanted = told.filter(shown).map(|told| {
-			let mut claim = told.claim.clone();
+		let wanted = (self.told.get(&key)).filter(|_| self.shows(&key.0)).map(|(_, claim)| {
+			let mut claim = claim.clone();
 			claim.item.above = claim.item.above.min(depth);
 			claim
 		});

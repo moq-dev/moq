@@ -2018,14 +2018,6 @@ impl Mounted {
 		self.mount.name(path)
 	}
 
-	/// The absolute, origin-side `patterns` as the handle names what they match at or
-	/// beneath the target: beneath the mount point. A name past the wire limits matches nothing.
-	pub fn name_patterns(&self, patterns: &Patterns) -> Patterns {
-		(patterns.rebase(self.mount.target.as_str()))
-			.rooted(self.mount.at.as_str())
-			.unwrap_or_default()
-	}
-
 	/// How many segments the handle-side `path` lies beneath the mount point: the most a
 	/// claim read through the mount can be above it. A claim covering the whole target, which
 	/// is broader than the mount point as the handle sees it, covers no more than that.
@@ -7851,19 +7843,6 @@ impl Consumer {
 		}
 		let ours = self.scope.allowed.rebase(self.root().as_str());
 		allowed.iter().any(|pattern| ours.overlaps(pattern))
-	}
-
-	/// What the live routes announced exactly at the absolute `prefix` serving `instance` may
-	/// serve, absolute: each route's [`RouteEntry::reach`]. `None` when the table holds none,
-	/// as for a neighbour's claim no session serves here yet.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn reach(&self, prefix: &Path, instance: &Instance) -> Option<Patterns> {
-		let state = self.shared.lock();
-		let mut entries = (state.routes.at(prefix))
-			.filter(|entry| entry.instance == *instance && entry.live())
-			.peekable();
-		entries.peek()?;
-		Some(entries.flat_map(|entry| entry.reach.iter().cloned()).collect())
 	}
 
 	/// Whether the absolute `path` lies beneath one of this handle's mounts, where the

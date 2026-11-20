@@ -26,9 +26,9 @@ use crate::lite::{self, AnnounceBroadcast, Version, subscriber::route_stream::Wr
 use crate::model::ProduceTest;
 use crate::{Hop, Instance, Path, Pattern, Patterns, origin};
 
-/// Where claims are announced: some above what grants and prefixes name, one hidden, and
-/// some beneath the mount target `s`.
-const PATHS: &[&str] = &["a", "a/x", "a/.h", "a/m/x", "b", "b/c", "s", "s/x"];
+/// Where claims are announced: some above what grants and prefixes name, some deeper than a
+/// grant's `*` shows, one hidden, and some beneath the mount target `s`.
+const PATHS: &[&str] = &["a", "a/x", "a/x/y", "a/.h", "a/m/x", "b", "b/c", "b/c/d", "s", "s/x"];
 
 /// The scopes claims are announced through, which bound what each may serve.
 const SCOPES: &[&[&str]] = &[&["**"], &["*/x"]];
@@ -42,6 +42,7 @@ const GRANTS: &[&[&str]] = &[
 	&["a/*"],
 	&["a/m/**"],
 	&["a/**", "b/**"],
+	&["a/**", "b/*"],
 	&[],
 ];
 
@@ -95,6 +96,8 @@ enum Op {
 	},
 	/// Send one thing the session's key queued.
 	Main,
+	/// Send everything the session's key queued.
+	Drain,
 	/// Send one thing a mount queued.
 	Mount(usize),
 }
@@ -127,6 +130,7 @@ fn op() -> impl Strategy<Value = Op> {
 		3 => (any::<u8>(), proptest::collection::vec((prefix(), any::<bool>()), 0..3))
 			.prop_map(|(remove, add)| Op::Edit { remove, add }),
 		5 => Just(Op::Main),
+		2 => Just(Op::Drain),
 		3 => (0..4usize).prop_map(Op::Mount),
 	]
 }
@@ -232,8 +236,14 @@ fn flush(writer: &mut Writer) {
 	assert!(writer.poll_flush(&kio::Waiter::noop()).is_ready());
 }
 
-/// What a fresh answer on `consumer` under `grant` tells for `prefix`, once it settles.
-fn shown(consumer: &origin::Consumer, grant: Option<usize>, prefix: &Path, hidden: bool) -> BTreeSet<Held> {
+/// What a fresh answer on `consumer` under `grant` reads and tells for `prefix`, once it settles.
+struct View {
+	reads: BTreeSet<Path>,
+	shown: BTreeSet<Held>,
+}
+
+/// What a fresh answer on `consumer` under `grant` reads and tells for `prefix`, once it settles.
+fn shown(consumer: &origin::Consumer, grant: Option<usize>, prefix: &Path, hidden: bool) -> View {
 	let auth = crate::auth::Link::new(false);
 	if let Some(index) = grant {
 		auth.handle().authorize(&self::grant(index));
@@ -258,7 +268,13 @@ fn shown(consumer: &origin::Consumer, grant: Option<usize>, prefix: &Path, hidde
 			_ => {}
 		}
 	}
-	peer.holds()
+	let reads = (answer.prefixes.values().next())
+		.map(|prefix| prefix.reads.clone())
+		.unwrap_or_default();
+	View {
+		reads,
+		shown: peer.holds(),
+	}
 }
 
 /// A prefix in effect: its path, its Hidden, and the step that asked for it.
@@ -300,6 +316,8 @@ struct Sim {
 	prefixes: BTreeMap<u64, Asked>,
 	next_prefix: u64,
 	edit: Option<Edit>,
+	/// The prefixes in effect whose SYNCED went out.
+	synced: BTreeSet<u64>,
 }
 
 impl Sim {
@@ -331,6 +349,7 @@ impl Sim {
 			prefixes: BTreeMap::new(),
 			next_prefix: 0,
 			edit: None,
+			synced: BTreeSet::new(),
 		}
 	}
 
@@ -352,7 +371,7 @@ impl Sim {
 	}
 
 	fn apply(&mut self, op: &Op) -> Result<(), TestCaseError> {
-		if !matches!(op, Op::Main | Op::Mount(_)) {
+		if !matches!(op, Op::Main | Op::Drain | Op::Mount(_)) {
 			self.step += 1;
 		}
 		match op {
@@ -437,6 +456,10 @@ impl Sim {
 				self.send(op)?;
 				return Ok(());
 			}
+			Op::Drain => {
+				while self.send(&Op::Main)? {}
+				return Ok(());
+			}
 		}
 		// The origin feeds its node what changed, as its driver would.
 		self.origin.route_node();
@@ -497,6 +520,9 @@ impl Sim {
 				}
 				AnnounceBroadcast::Ok => {
 					let edit = self.edit.take().expect("an ANNOUNCE_OK answers an edit");
+					for id in &edit.remove {
+						self.synced.remove(id);
+					}
 					let removed: Vec<Path> = (edit.remove.iter())
 						.filter_map(|id| self.prefixes.remove(id))
 						.map(|asked| asked.path)
@@ -513,7 +539,10 @@ impl Sim {
 						);
 					}
 				}
-				AnnounceBroadcast::Synced { prefix } => self.synced(prefix)?,
+				AnnounceBroadcast::Synced { prefix } => {
+					prop_assert!(self.synced.insert(prefix), "a second SYNCED for {prefix}");
+					self.synced(prefix)?;
+				}
 				msg => prop_assert!(false, "a claims-only peer is sent {msg:?}"),
 			}
 		}
@@ -522,8 +551,9 @@ impl Sim {
 
 	/// SYNCED for `id` went out: every claim the grant in effect shows under it, there before
 	/// the read that tells it started, has had its Start. That read started with the edit
-	/// adding the prefix, or with the latest grant change in effect that showed the claim
-	/// there when the one before did not.
+	/// adding the prefix, or with the latest grant change in effect that read it when the one
+	/// before did not. A change that keeps the read only judges again what it told, so a claim
+	/// announced after the read started is a live change, whenever it comes.
 	fn synced(&self, id: u64) -> Result<(), TestCaseError> {
 		let asked = self.prefixes.get(&id).expect("SYNCED names a prefix in effect");
 		let effect = self.grants.len() - 1 - self.unanswered();
@@ -531,21 +561,24 @@ impl Sim {
 		let first = (self.grants.iter().rposition(|(step, _)| *step <= asked.at))
 			.unwrap_or(0)
 			.min(effect);
-		let views: Vec<BTreeSet<Held>> = (self.grants[first..].iter())
+		let views: Vec<View> = (self.grants[first..].iter())
 			.map(|(_, grant)| shown(&self.consumer, *grant, &asked.path, asked.hidden))
 			.collect();
 		let view = |index: usize| &views[index - first];
 		let held = self.peer.holds();
-		for claim in view(effect) {
+		for claim in &view(effect).shown {
 			// A change queued behind the one in effect may only take claims away.
-			if (effect + 1..self.grants.len()).any(|later| !view(later).contains(claim)) {
+			if (effect + 1..self.grants.len()).any(|later| !view(later).shown.contains(claim)) {
 				continue;
 			}
+			let (path, instance) = claim;
+			// The read that tells it: the one it lies in, or the one it is presented at.
+			let read =
+				|index: usize| (view(index).reads.iter()).find(|read| path.has_prefix(read) || read.has_prefix(path));
 			let since = (first + 1..=effect)
 				.rev()
-				.find(|index| !view(index - 1).contains(claim))
+				.find(|index| read(*index).is_none_or(|read| !view(index - 1).reads.contains(read)))
 				.map_or(asked.at, |index| self.grants[index].0);
-			let (path, instance) = claim;
 			let old = (self.claims.values()).any(|held| held.instance == *instance && held.at < since);
 			prop_assert!(
 				!old || held.contains(claim),
@@ -583,9 +616,14 @@ fn run(case: &Case) -> Result<(), TestCaseError> {
 			}
 		}
 		if !sent && !sim.send(&Op::Main)? {
-			return Ok(());
+			break;
 		}
 	}
+	// Once everything is out, every prefix in effect has had its SYNCED.
+	for (id, asked) in &sim.prefixes {
+		prop_assert!(sim.synced.contains(id), "no SYNCED for {:?} once drained", asked.path);
+	}
+	Ok(())
 }
 
 /// Runs the cases `MOQ_ANSWER_SEED` and `MOQ_ANSWER_CASES` pick.
@@ -637,13 +675,25 @@ fn a_grant_change_before_synced_holds_it_for_what_is_read_instead() {
 	auth.handle().authorize(&grant(2));
 	answer.poll_permit(&kio::Waiter::noop()).unwrap();
 	msgs.extend(sent(&mut answer, &mut writer, &mut peer));
-	let start = msgs
-		.iter()
-		.position(|msg| matches!(msg, AnnounceBroadcast::Start { .. }));
-	let synced = msgs
-		.iter()
-		.position(|msg| *msg == AnnounceBroadcast::Synced { prefix: 0 });
-	assert!(start.is_some() && start < synced, "{msgs:?}");
+	assert_eq!(events(&mut peer, &msgs), ["b/c", "SYNCED 0"], "{msgs:?}");
+}
+
+/// What the peer reads in `msgs`, in order: the path of each Start, and each SYNCED.
+fn events(peer: &mut Peer, msgs: &[AnnounceBroadcast]) -> Vec<String> {
+	let mut events = Vec::new();
+	for msg in msgs {
+		match msg {
+			AnnounceBroadcast::Start { suffix, instance, .. } => {
+				events.push(peer.start(suffix, instance).0.to_string());
+			}
+			AnnounceBroadcast::End { id, .. } => {
+				peer.end(*id);
+			}
+			AnnounceBroadcast::Synced { prefix } => events.push(format!("SYNCED {prefix}")),
+			_ => {}
+		}
+	}
+	events
 }
 
 /// A re-price queued before the grant revokes the claim is judged by the new grant, and
@@ -676,94 +726,49 @@ fn a_change_queued_before_a_revocation_ends_its_claim_as_lost() {
 	assert_eq!(ends, [true], "{revoked:?}");
 }
 
-/// A claim is shown only where its own route, the handle, and the grant share a path it
-/// covers: a route scoped to `a/*/x` at `a` serves neither `a/q/y` nor anything under the
-/// grant `a/*` or `a/q/y/**`, and one scoped to `a/private/**` serves nothing under
-/// `a/public/**`. Through a mount, the route's reach is named as the handle names it.
+/// A claim the old grant hid inside a read the new grant keeps is started before the SYNCED
+/// of a prefix that another read of the change releases first: `a` waits on the mount at
+/// `a/drop` when the grant moves from `a/u/*/old` to `a/u/*/new`, and SYNCED for `a` follows
+/// `a/u/z/new`, though the read of `a/v` finishes before that of `b`.
 #[test]
-fn a_claim_is_shown_only_where_its_route_can_serve() {
+fn a_grant_change_shows_what_it_keeps_before_synced() {
 	let origin = Hop::new(1).unwrap().produce();
-	let scoped = |scope: &[&str], at: &str| {
-		let producer = origin.scope("", &patterns(scope)).unwrap();
-		producer.announce(at, origin::RouteInfo::new()).unwrap()
-	};
-	let _x = scoped(&["a/*/x"], "a");
-	let _private = scoped(&["c/private/**"], "c");
-	let _target = scoped(&["s/*/x"], "s");
+	let _new = origin.announce("a/u/z/new", origin::RouteInfo::new()).unwrap();
 	let consumer = origin
-		.mount("m", "s")
+		.mount("a/drop", "s")
 		.unwrap()
 		.scope("", &patterns(&["**"]))
 		.unwrap()
 		.consume();
-	let told = |grant: Option<&[&str]>, prefix: &str| -> Vec<String> {
-		let auth = crate::auth::Link::new(false);
-		if let Some(grant) = grant {
-			auth.handle().authorize(&crate::auth::Grant {
-				publish: Patterns::default(),
-				subscribe: patterns(grant),
-				expires: None,
-			});
-		}
-		let mut answer = Answer::alone_on(consumer.clone(), auth);
-		let (mut writer, mut peer) = stream();
-		answer.request(false, Vec::new(), vec![(path(prefix), false)]).unwrap();
-		let mut told = Vec::new();
-		for msg in sent(&mut answer, &mut writer, &mut peer) {
-			if let AnnounceBroadcast::Start { suffix, instance, .. } = msg {
-				told.push(peer.start(&suffix, &instance).0.to_string());
-			}
-		}
-		told
-	};
-	assert!(told(None, "a/q/y").is_empty());
-	assert_eq!(told(None, "a/q/x"), ["a/q/x"]);
-	assert!(told(Some(&["a/*"]), "").is_empty());
-	assert!(told(Some(&["a/q/y/**"]), "").is_empty());
-	assert_eq!(told(Some(&["a/q/x/**"]), ""), ["a/q/x"]);
-	assert!(told(Some(&["c/public/**"]), "").is_empty());
-	assert_eq!(told(Some(&["c/private/**"]), ""), ["c/private"]);
-	assert!(told(None, "m/q/y").is_empty());
-	assert_eq!(told(None, "m/q/x"), ["m/q/x"]);
-}
-
-/// A claim is judged by the routes as they stand: one hidden because its route serves only
-/// `c/private/**` is shown once another route of its instance serves `c/public/**`, at the
-/// next grant change, which judges it again.
-#[test]
-fn a_claim_is_judged_by_the_routes_as_they_stand() {
-	let origin = Hop::new(1).unwrap().produce();
-	let instance: Instance = "cam".parse().unwrap();
-	let route = |scope: &[&str], cost: u64| {
-		let producer = origin.scope("", &patterns(scope)).unwrap();
-		let info = origin::RouteInfo::new()
-			.with_instance(instance.clone(), 0)
-			.with_cost(cost);
-		producer.announce("c", info).unwrap()
-	};
-	let _private = route(&["c/private/**"], 1);
 	let auth = crate::auth::Link::new(false);
-	let public = |extra: &[&str]| crate::auth::Grant {
-		publish: Patterns::default(),
-		subscribe: patterns(&[&["c/public/**"], extra].concat()),
-		expires: None,
+	let authorize = |subscribe: &[&str]| {
+		auth.handle().authorize(&crate::auth::Grant {
+			publish: Patterns::default(),
+			subscribe: patterns(subscribe),
+			expires: None,
+		})
 	};
-	auth.handle().authorize(&public(&[]));
-	let mut answer = Answer::alone_on(origin.consume(), auth.clone());
+	authorize(&["a/u/*/old", "a/drop/**"]);
+	let mut answer = Answer::alone_on(consumer, auth.clone());
 	let (mut writer, mut peer) = stream();
-	answer.request(false, Vec::new(), vec![(path(""), false)]).unwrap();
-	let starts = |msgs: &[AnnounceBroadcast]| {
-		msgs.iter()
-			.filter(|msg| matches!(msg, AnnounceBroadcast::Start { .. }))
-			.count()
-	};
-	let first = sent(&mut answer, &mut writer, &mut peer);
-	assert_eq!(starts(&first), 0, "{first:?}");
+	answer
+		.request(false, Vec::new(), vec![(path("a"), false), (path("b"), false)])
+		.unwrap();
+	// The session's key answers the edit; the mount at `a/drop` has yet to send its initial set.
+	answer.main.flush();
+	while let Some(msg) = answer.main.try_wire() {
+		answer.output(&mut writer, msg).unwrap();
+	}
+	flush(&mut writer);
+	let first = peer.take();
+	assert_eq!(events(&mut peer, &first), ["SYNCED 1"], "{first:?}");
 
-	let _public = route(&["c/public/**"], 5);
-	origin.route_node();
-	auth.handle().authorize(&public(&["x/**"]));
+	authorize(&["a/u/*/new", "a/v/**", "b/**"]);
 	answer.poll_permit(&kio::Waiter::noop()).unwrap();
 	let regranted = sent(&mut answer, &mut writer, &mut peer);
-	assert_eq!(starts(&regranted), 1, "{regranted:?}");
+	assert_eq!(
+		events(&mut peer, &regranted),
+		["a/u/z/new", "SYNCED 0"],
+		"{regranted:?}"
+	);
 }
