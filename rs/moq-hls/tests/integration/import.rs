@@ -45,8 +45,7 @@ fn groups(track: &mut moq_net::track::Ordered) -> Vec<u64> {
 	let mut out = Vec::new();
 	loop {
 		let mut group = match track.poll_next_group(&kio::Waiter::noop()) {
-			Poll::Ready(Ok(Some(moq_net::track::Item::Group(group)))) => group,
-			Poll::Ready(Ok(Some(moq_net::track::Item::Gap { .. }))) => continue,
+			Poll::Ready(Ok(Some(group))) => group,
 			Poll::Pending | Poll::Ready(Ok(None)) => return out,
 			Poll::Ready(Err(err)) => panic!("the imported track failed: {err}"),
 		};

@@ -59,7 +59,7 @@ async fn round(abort: bool, ordered: bool) -> (Vec<u64>, Option<Error>) {
 		let mut consumer = consumer.ordered();
 		loop {
 			match consumer.next_group().await {
-				Ok(Some(item)) => got.push(item.group().expect("a group").start),
+				Ok(Some(item)) => got.push(item.start),
 				Ok(None) => return (got, None),
 				Err(err) => return (got, Some(err)),
 			}

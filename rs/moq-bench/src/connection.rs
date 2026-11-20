@@ -894,12 +894,7 @@ mod tests {
 			.await
 			.unwrap()
 			.ordered();
-		let mut group = sub
-			.next_group()
-			.await
-			.unwrap()
-			.and_then(moq_net::track::Item::group)
-			.expect("a group");
+		let mut group = sub.next_group().await.unwrap().expect("a group");
 
 		let keyframe = group.read_frame().await.unwrap().expect("keyframe");
 		let header: serde_json::Value = serde_json::from_slice(&keyframe.payload).unwrap();
@@ -946,12 +941,7 @@ mod tests {
 			.await
 			.unwrap()
 			.ordered();
-		let mut group = sub
-			.next_group()
-			.await
-			.unwrap()
-			.and_then(moq_net::track::Item::group)
-			.expect("a group");
+		let mut group = sub.next_group().await.unwrap().expect("a group");
 
 		// Just the keyframe, then the group ends.
 		assert!(group.read_frame().await.unwrap().is_some(), "keyframe");
@@ -983,12 +973,7 @@ mod tests {
 		tokio::time::advance(Duration::from_millis(250)).await;
 
 		let mut sub = consumer.track(TRACK).unwrap().subscribe(None).await.unwrap().ordered();
-		let mut group = sub
-			.next_group()
-			.await
-			.unwrap()
-			.and_then(moq_net::track::Item::group)
-			.expect("a group");
+		let mut group = sub.next_group().await.unwrap().expect("a group");
 		let keyframe = group.read_frame().await.unwrap().expect("keyframe").payload;
 
 		assert_eq!(keyframe.len(), 300, "keyframe padded to the rolled frame size");
@@ -1021,12 +1006,7 @@ mod tests {
 		tokio::time::advance(Duration::from_millis(250)).await;
 
 		let mut sub = consumer.track(TRACK).unwrap().subscribe(None).await.unwrap().ordered();
-		let mut group = sub
-			.next_group()
-			.await
-			.unwrap()
-			.and_then(moq_net::track::Item::group)
-			.expect("a group");
+		let mut group = sub.next_group().await.unwrap().expect("a group");
 		let keyframe = group.read_frame().await.unwrap().expect("keyframe").payload;
 
 		assert!(keyframe.len() > 50, "header is the floor; no truncation to fit");
