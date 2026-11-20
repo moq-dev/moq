@@ -275,14 +275,22 @@ async fn a_draining_relay_closes_its_dialed_links_once_nothing_reads_them() {
 	assert!(!mesh.l.running.is_finished(), "L exited under a reader");
 
 	// The draining relay, which sent the GOAWAY, names itself in no DRAIN.
-	assert_eq!(mesh.l.routes().sent.count(Withdrawal::Drain), 0, "the draining relay sent a DRAIN");
+	assert_eq!(
+		mesh.l.routes().sent.count(Withdrawal::Drain),
+		0,
+		"the draining relay sent a DRAIN"
+	);
 
 	let Mesh { a, c, l, reader, .. } = mesh;
 	drop(reader);
 	let observer = l.shutdown.clone();
 	l.stop().await;
 	assert!(started.elapsed() < DRAIN, "L held its links to the deadline");
-	assert_eq!(observer.drained().await.forced, 0, "a link closed on its own counted as forced");
+	assert_eq!(
+		observer.drained().await.forced,
+		0,
+		"a link closed on its own counted as forced"
+	);
 
 	c.stop().await;
 	a.stop().await;
@@ -300,7 +308,10 @@ async fn a_dialed_link_still_read_at_the_deadline_is_forced() {
 	let Mesh { a, c, l, reader, .. } = mesh;
 	l.stop().await;
 	assert!(started.elapsed() >= DRAIN, "L left before its drain deadline");
-	assert!(observer.drained().await.forced > 0, "the read link was not counted as forced");
+	assert!(
+		observer.drained().await.forced > 0,
+		"the read link was not counted as forced"
+	);
 
 	drop(reader);
 	c.stop().await;

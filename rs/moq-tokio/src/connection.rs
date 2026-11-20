@@ -3007,7 +3007,11 @@ mod tests {
 		origin: &moq_net::origin::Producer,
 		subscriber: &moq_net::origin::Producer,
 		name: &str,
-	) -> (moq_net::origin::Route, moq_net::track::Producer, moq_net::track::Subscriber) {
+	) -> (
+		moq_net::origin::Route,
+		moq_net::track::Producer,
+		moq_net::track::Subscriber,
+	) {
 		const WAIT: Duration = Duration::from_secs(10);
 		let broadcast = origin.route(name, moq_net::origin::RouteOptions::default()).unwrap();
 		let track = broadcast.broadcast().create_track("video", timed()).unwrap();
@@ -3109,7 +3113,9 @@ mod tests {
 			.expect("the peer never heard the GOAWAY")
 			.expect("the session closed without one");
 		assert!(
-			kio::clock::timeout(Duration::from_millis(500), session.closed()).await.is_err(),
+			kio::clock::timeout(Duration::from_millis(500), session.closed())
+				.await
+				.is_err(),
 			"closed while a reader still read through it"
 		);
 
