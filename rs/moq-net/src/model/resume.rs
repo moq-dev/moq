@@ -695,6 +695,25 @@ impl Holdings for Placed {
 	}
 }
 
+/// Where `range` resolved, as `at`, on a copy whose resume point is `floor`. One above the
+/// range's time start asked the copy from the floor, so its resolution says nothing of which
+/// group the range starts at, nor of an end under the floor too. The range is placed at its
+/// own anchors, which names the groups under the floor that only a backfill reads. Mirrors the
+/// JS `unraised`.
+fn unraised(range: &track::Range, floor: Option<u64>, at: Resolved) -> Resolved {
+	match (floor, range.start) {
+		(Some(floor), Anchor::Time(start)) if start < floor => Resolved {
+			start,
+			end: match range.end {
+				Some(Anchor::Time(end)) if end < floor => Some(end + 1),
+				_ => at.end,
+			},
+			floored: true,
+		},
+		_ => at,
+	}
+}
+
 /// Whether `copy` lost its route, so an error read from it is no verdict on what it carried.
 /// A terminal track verdict, unlike a delivery failure, still judges its content.
 fn copy_failed(copy: &track::Consumer) -> bool {
@@ -1818,11 +1837,12 @@ impl Reader {
 			if !concluded && copy_failed(&copy.track) {
 				continue;
 			}
-			let cap = copy.end();
+			let (cap, floor) = (copy.end(), copy.floor);
 			let Sub::Ready(sub) = &mut copy.sub else {
 				continue;
 			};
 			let keys = self.window.unsettled();
+			let mirrored = &self.mirrored;
 			// A failover cap at or below where a range starts empties the copy's range, which
 			// then says nothing of where the reader's own range starts. One at or below where
 			// it ends cut that end short, so it says nothing of where the reader's range ends.
@@ -1831,8 +1851,10 @@ impl Reader {
 				.copied()
 				.zip(sub.resolved_ranges(keys.iter().copied()))
 				.filter_map(|(key, resolved)| {
-					let resolved = resolved
-						.filter(|resolved| cap.is_none() || resolved.end.is_none_or(|end| end > resolved.start))?;
+					let resolved = unraised(mirrored.ranges.get(&key)?, floor, resolved?);
+					if cap.is_some() && resolved.end.is_some_and(|end| end <= resolved.start) {
+						return None;
+					}
 					Some((
 						key,
 						Resolved {

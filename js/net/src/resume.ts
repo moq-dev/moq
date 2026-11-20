@@ -375,6 +375,14 @@ interface Copy {
 	/**
 	 * One past the highest group the reader's window dropped from it, which it no longer offers
 	 * though a widened window may name it again: a resume point, as {@link Copy.floor} is.
+	 *
+	 * The Rust reader has no counterpart, since it never reaches this shape. Its front keeps a track
+	 * being read on its source until that copy ends, so a copy it replaced has stopped placing the
+	 * window by the time the next one subscribes. That copy subscribes with the window's resolution,
+	 * so its own ranges hold back what the window leaves out, still cached for a widening to offer.
+	 * This front moves a track being read as soon as a better route of its instance answers. A copy
+	 * it replaced, still delivering, can then place the window after the serving copy subscribed with
+	 * nothing resolved, and that copy offers a group the window leaves out: the reader takes it.
 	 */
 	dropped?: bigint;
 }
@@ -406,10 +414,9 @@ function resumePoint(copy: Pick<Copy, "floor" | "dropped">): bigint | undefined 
 
 /**
  * Where `range` resolved, as `at`, on a copy whose resume point is `floor`. One above the range's
- * time start asked the copy from the floor, so its resolution says nothing of
- * which group the range starts at, nor of an end under the floor too. The range is placed at its
- * own anchors, which names the groups under the floor that only a backfill reads. Mirrors the
- * Rust `unraised`.
+ * time start asked the copy from the floor, so its resolution says nothing of which group the
+ * range starts at, nor of an end under the floor too. The range is placed at its own anchors,
+ * which names the groups under the floor that only a backfill reads. Mirrors the Rust `unraised`.
  */
 function unraised(range: track.Range | undefined, floor: bigint | undefined, at: Resolved): Resolved {
 	const start = range?.start?.time;
@@ -708,9 +715,9 @@ class Reader implements ResumeSource {
 			// A failover cap at or below where a range starts empties the copy's range, which then
 			// says nothing of where the reader's own range starts. One at or below where it ends cut
 			// that end short, so it says nothing of where the reader's range ends.
-			const resolved = own.map((own, index) => {
-				if (!own) return undefined;
-				const at = unraised(ranges[index], copy.floor, own);
+			const resolved = own.map((placed, index) => {
+				if (!placed) return undefined;
+				const at = unraised(ranges[index], copy.floor, placed);
 				if (cap !== undefined && at.end !== undefined && at.end <= at.start) return undefined;
 				return cap === undefined || (at.end !== undefined && at.end < cap) ? at : { ...at, end: undefined };
 			});
