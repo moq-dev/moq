@@ -4241,7 +4241,7 @@ test("a lite-07 grant head too long for a path presents nothing", async () => {
 			msgs.push(msg);
 			if (msg.status === "synced") break;
 		}
-		expect(msgs.flatMap((msg) => (msg.status === "start" ? [msg.suffix] : []))).toEqual(["c/y"]);
+		expect(msgs.flatMap((msg) => (msg.status === "start" ? [msg.suffix] : []))).toEqual([Path.from("c/y")]);
 	} finally {
 		for (const broadcast of broadcasts) broadcast.close();
 		close();
