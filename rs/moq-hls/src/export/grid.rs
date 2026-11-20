@@ -129,8 +129,8 @@ pub(crate) enum Slot {
 		start: Timestamp,
 		/// Where its `EXTINF` ends: the next segment's start.
 		end: Timestamp,
-		/// Where its last group's content ends, the next group's pts, when known: a fallback for
-		/// timing its last sample.
+		/// Where its last group's content ends, the next group's first frame, when known: a
+		/// fallback for timing its last sample.
 		content: Option<Timestamp>,
 	},
 	/// A grid slot no group starts a segment in (`EXT-X-GAP`).
@@ -152,7 +152,10 @@ pub(crate) enum Slot {
 #[derive(Clone, Copy, Debug)]
 struct Group {
 	start: u64,
+	/// Where the grid places it.
 	pts: Timestamp,
+	/// Its first frame's pts, where the media before it ends.
+	media: Timestamp,
 }
 
 /// The segment collecting groups, completed once a group lands in a later one.
@@ -280,9 +283,9 @@ impl Grid {
 		Timestamp::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX)).unwrap_or(Timestamp::ZERO)
 	}
 
-	/// The group keyed `start` is placed at `pts`, after every group already fed. Returns
-	/// the segments it completes.
-	pub fn group(&mut self, start: u64, pts: Timestamp) -> Vec<Slot> {
+	/// The group keyed `start` is placed at `pts`, after every group already fed, and its first
+	/// frame is at `media`, which ends the content before it. Returns the segments it completes.
+	pub fn group(&mut self, start: u64, pts: Timestamp, media: Timestamp) -> Vec<Slot> {
 		let mut out = Vec::new();
 		// A group starting before the one before it, even within one slot, can't share a segment
 		// or a numbering with what came before, since its media would run backwards.
@@ -295,7 +298,7 @@ impl Grid {
 			let segment = self.segment(pending.pts, Some(pts)).expect("bounded");
 			self.place(pending, segment, &mut out);
 		}
-		let group = Group { start, pts };
+		let group = Group { start, pts, media };
 		// A group starting on a line needs no end to place, so the segment before it completes now.
 		match self.segment(pts, None) {
 			Some(segment) => self.place(group, segment, &mut out),
@@ -399,7 +402,7 @@ impl Grid {
 			pts: open.pts,
 			start: self.start(open.segment, open.pts),
 			end: start(open.segment + 1),
-			content: Some(open.stop.unwrap_or(group.pts)),
+			content: Some(open.stop.unwrap_or(group.media)),
 		});
 		let first = (open.segment + 1).max(segment.saturating_sub(self.max_gaps));
 		for gap in first..segment {
@@ -469,7 +472,7 @@ mod test {
 		let mut grid = Grid::new(Duration::from_millis(length_ms), 256);
 		let mut slots = Vec::new();
 		for (sequence, start) in starts.iter().enumerate() {
-			slots.extend(grid.group(sequence as u64, ms(*start)));
+			slots.extend(grid.group(sequence as u64, ms(*start), ms(*start)));
 		}
 		slots.extend(grid.finish(Some(ms(end)), Some(ms(end))));
 		listed(slots)
@@ -640,7 +643,7 @@ mod test {
 					let mut grid = Grid::new(Duration::from_millis(length), 256);
 					let mut slots = Vec::new();
 					for (sequence, start) in starts.iter().enumerate().skip(join) {
-						slots.extend(grid.group(sequence as u64, ms(*start)));
+						slots.extend(grid.group(sequence as u64, ms(*start), ms(*start)));
 					}
 					slots.extend(grid.finish(Some(ms(end - 1)), Some(ms(end))));
 					// Frames read before the next group starts, in any order, list the same
@@ -648,7 +651,7 @@ mod test {
 					let mut early = Grid::new(Duration::from_millis(length), 256);
 					let mut early_slots = Vec::new();
 					for (sequence, start) in starts.iter().enumerate().skip(join) {
-						early_slots.extend(early.group(sequence as u64, ms(*start)));
+						early_slots.extend(early.group(sequence as u64, ms(*start), ms(*start)));
 						let until = starts.get(sequence + 1).copied().unwrap_or(end);
 						for _ in 0..3 {
 							early_slots.extend(early.reach(ms(start + next(until - start))));
@@ -679,8 +682,8 @@ mod test {
 	fn a_late_join_numbers_like_an_early_one() {
 		let early = run(2000, &[0, 7000, 7200], 7400);
 		let mut grid = Grid::new(Duration::from_secs(2), 256);
-		let mut late = grid.group(1, ms(7000));
-		late.extend(grid.group(2, ms(7200)));
+		let mut late = grid.group(1, ms(7000), ms(7000));
+		late.extend(grid.group(2, ms(7200), ms(7200)));
 		late.extend(grid.finish(Some(ms(7400)), Some(ms(7400))));
 		assert_eq!(listed(late), [(3, 1..3, 6000, 7400)]);
 		assert_eq!(early.last(), Some(&(3, 1..3, 6000, 7400)));
@@ -690,22 +693,22 @@ mod test {
 	#[test]
 	fn a_segment_completes_once_a_later_one_starts() {
 		let mut grid = Grid::new(Duration::from_secs(2), 256);
-		assert!(grid.group(0, ms(0)).is_empty());
+		assert!(grid.group(0, ms(0), ms(0)).is_empty());
 		assert!(
-			grid.group(1, ms(1000)).is_empty(),
+			grid.group(1, ms(1000), ms(1000)).is_empty(),
 			"its successor may still reach the next line"
 		);
-		assert_eq!(listed(grid.group(2, ms(2000))), [(0, 0..2, 0, 2000)]);
-		assert!(grid.group(3, ms(3500)).is_empty());
+		assert_eq!(listed(grid.group(2, ms(2000), ms(2000))), [(0, 0..2, 0, 2000)]);
+		assert!(grid.group(3, ms(3500), ms(3500)).is_empty());
 		assert_eq!(
-			listed(grid.group(4, ms(4500))),
+			listed(grid.group(4, ms(4500), ms(4500))),
 			[(1, 2..3, 2000, 3500)],
 			"3.5s reaches 4s"
 		);
 
 		// A frame past the next line settles the newest group without its successor.
 		let mut grid = Grid::new(Duration::from_secs(2), 256);
-		assert!(grid.group(0, ms(500)).is_empty());
+		assert!(grid.group(0, ms(500), ms(500)).is_empty());
 		assert!(
 			grid.reach(ms(1900)).is_empty(),
 			"short of the line, it may still end before it"
@@ -719,14 +722,14 @@ mod test {
 			"it opens segment 1, which nothing completes yet"
 		);
 		assert!(!grid.pending());
-		assert!(grid.group(1, ms(2500)).is_empty());
+		assert!(grid.group(1, ms(2500), ms(2500)).is_empty());
 		assert_eq!(
 			listed(grid.reach(ms(4100))),
 			[(1, 0..1, 500, 2500)],
 			"listed at 4.1s rather than when group 2 starts at 4.5s"
 		);
 		assert!(grid.reach(ms(4200)).is_empty(), "already placed");
-		assert!(grid.group(2, ms(4500)).is_empty());
+		assert!(grid.group(2, ms(4500), ms(4500)).is_empty());
 		assert_eq!(
 			listed(grid.finish(Some(ms(5000)), Some(ms(5000)))),
 			[(2, 1..3, 2500, 5000)]
@@ -737,8 +740,8 @@ mod test {
 	#[test]
 	fn a_long_pause_lists_at_most_the_newest_gaps() {
 		let mut grid = Grid::new(Duration::from_secs(2), 3);
-		grid.group(0, ms(0));
-		let slots = listed(grid.group(1, ms(3_600_000)));
+		grid.group(0, ms(0), ms(0));
+		let slots = listed(grid.group(1, ms(3_600_000), ms(3_600_000)));
 		assert_eq!(slots.len(), 4);
 		assert_eq!(slots[0], (0, 0..1, 0, 2000));
 		assert_eq!(slots[1].0, 1797);
@@ -749,8 +752,8 @@ mod test {
 	#[test]
 	fn a_rewind_within_a_slot_resets() {
 		let mut grid = Grid::new(Duration::from_secs(2), 256);
-		assert!(grid.group(0, ms(10_500)).is_empty());
-		assert_eq!(grid.group(1, ms(10_200)), [Slot::Reset]);
+		assert!(grid.group(0, ms(10_500), ms(10_500)).is_empty());
+		assert_eq!(grid.group(1, ms(10_200), ms(10_200)), [Slot::Reset]);
 		assert_eq!(
 			listed(grid.finish(Some(ms(10_400)), Some(ms(10_400)))),
 			[(5, 1..2, 10_000, 10_400)],
@@ -772,31 +775,37 @@ mod test {
 				.collect()
 		};
 		let mut grid = Grid::new(Duration::from_secs(2), 256);
-		grid.group(0, ms(0));
-		grid.group(1, ms(1000));
+		grid.group(0, ms(0), ms(0));
+		grid.group(1, ms(1000), ms(1000));
 		assert!(content(grid.stop(ms(1500))).is_empty(), "the slot is still open");
-		assert_eq!(content(grid.group(2, ms(8000))), [Some(1500)]);
+		assert_eq!(content(grid.group(2, ms(8000), ms(8000))), [Some(1500)]);
 
 		// The track ending after a marker ends at the marker.
 		let mut grid = Grid::new(Duration::from_secs(2), 256);
-		grid.group(0, ms(0));
+		grid.group(0, ms(0), ms(0));
 		grid.stop(ms(700));
 		assert_eq!(listed(grid.finish(None, None)), [(0, 0..1, 0, 700)]);
 
 		// Content resuming within the slot runs on to whatever ends it.
 		let mut grid = Grid::new(Duration::from_secs(2), 256);
-		grid.group(0, ms(0));
+		grid.group(0, ms(0), ms(0));
 		grid.stop(ms(300));
-		grid.group(1, ms(1000));
-		assert_eq!(content(grid.group(2, ms(2000))), [Some(2000)]);
+		grid.group(1, ms(1000), ms(1000));
+		assert_eq!(content(grid.group(2, ms(2000), ms(2000))), [Some(2000)]);
+
+		// A group placed at a start below its first frame ends the content before it at that frame,
+		// not at its start: the last sample keeps its whole duration.
+		let mut grid = Grid::new(Duration::from_secs(2), 256);
+		grid.group(0, ms(0), ms(100));
+		assert_eq!(content(grid.group(2000, ms(2000), ms(2100))), [Some(2100)]);
 	}
 
 	/// A group going back past the open slot resets the numbering.
 	#[test]
 	fn a_rewind_resets() {
 		let mut grid = Grid::new(Duration::from_secs(2), 256);
-		grid.group(0, ms(10_000));
-		assert_eq!(grid.group(1, ms(0)), [Slot::Reset]);
+		grid.group(0, ms(10_000), ms(10_000));
+		assert_eq!(grid.group(1, ms(0), ms(0)), [Slot::Reset]);
 		assert_eq!(
 			listed(grid.finish(Some(ms(2000)), Some(ms(2000)))),
 			[(0, 1..2, 0, 2000)]

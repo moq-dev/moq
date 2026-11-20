@@ -2152,12 +2152,12 @@ impl Follow {
 				self.reading = false;
 				(self.grid.stop(at), (group.start, None), None)
 			}
-			First::Media(pts, reach, declared) => {
+			First::Media(pts, media, reach, declared) => {
 				let sequence = group.start;
 				if let Some((_, previous, _)) = &self.latest {
 					self.spacing = pts.checked_sub(*previous).ok().map(super::span).or(self.spacing);
 				}
-				let mut slots = self.grid.group(sequence, pts);
+				let mut slots = self.grid.group(sequence, pts, media);
 				// A fragment carrying the whole group may already pass the next line.
 				if let Some(newest) = reach.newest() {
 					slots.extend(self.grid.reach(newest));
@@ -2596,9 +2596,9 @@ impl Reach {
 
 /// What a group's first frame holds.
 enum First {
-	/// Media: its place, the group's start or else its first sample's pts, with what its samples reach
-	/// and the picture size its keyframe declares.
-	Media(moq_net::Timestamp, Reach, Option<(u32, u32)>),
+	/// Media: its place, the group's start or else its first sample's pts, then its first sample's
+	/// pts, with what its samples reach and the picture size its keyframe declares.
+	Media(moq_net::Timestamp, moq_net::Timestamp, Reach, Option<(u32, u32)>),
 	/// A discontinuity marker, a frame with no payload: the content stops at its timestamp.
 	Marker(moq_net::Timestamp),
 }
@@ -2631,7 +2631,7 @@ fn first_frame(
 	let size = probe.and_then(|probe| probe.picture_size(first).ok().flatten());
 	let mut reach = Reach::default();
 	reach.add(decoded);
-	Some(First::Media(place, reach, size))
+	Some(First::Media(place, pts, reach, size))
 }
 
 /// The row listing `slot`, starting a new discontinuity when `broken`.
