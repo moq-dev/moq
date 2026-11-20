@@ -454,11 +454,17 @@ impl Session {
 		self.goaway.consumer()
 	}
 
-	/// Ready once the session carries no subscription or fetch, in either direction.
+	/// Resolve once the session carries no subscription or fetch, in either direction.
 	///
-	/// Ready at once while it carries none. A track request still being set up, waiting
+	/// Resolves at once while it carries none. A track request still being set up, waiting
 	/// on authorization or the track's info, counts too. Announcements and the other
 	/// control streams don't, so a session can be idle while it still serves discovery.
+	/// A session that sent a GOAWAY can then close without cutting any reader off.
+	pub async fn idle(&self) {
+		kio::wait(|waiter| self.poll_idle(waiter)).await
+	}
+
+	/// Poll form of [`idle`](Self::idle).
 	pub(crate) fn poll_idle(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.work.poll_idle(waiter)
 	}

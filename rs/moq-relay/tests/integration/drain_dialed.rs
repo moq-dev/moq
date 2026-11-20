@@ -1,11 +1,11 @@
 //! A draining relay drains the cluster links it dialed, as it does those it accepted:
-//! each peer hears its GOAWAY and tells the others the relay is draining, well before
-//! any link drops.
+//! each peer hears its GOAWAY and tells the others the relay is draining, and the
+//! relay closes each link once nothing reads through it.
 //!
 //! Three real relays on loopback: C dials A, and L dials both. L drains, so A and C
 //! each hear L's GOAWAY themselves, and the first to hear it sends the other a DRAIN
-//! for it, while L, which sent the GOAWAY, sends none. Every link stays up until L's
-//! drain deadline, so no relay counts a DEAD until then.
+//! for it, while L, which sent the GOAWAY, sends none. A reader at A reads L's
+//! broadcast, so a link stays up while it reads, and L exits once it stops.
 
 use std::time::Duration;
 
@@ -16,8 +16,10 @@ use moq_relay::{Config, Relay, shutdown};
 /// Only a hang reaches it.
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-/// How long L holds its drain open. Long enough that every DRAIN lands well inside it.
-const DRAIN: Duration = Duration::from_secs(2);
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
 
 /// One relay running on the test runtime.
 struct Node {
@@ -147,88 +149,160 @@ impl Node {
 	}
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_draining_relay_drains_the_links_it_dialed() {
-	kio::clock::host_time(); // real relays on real sockets
-	moq_tokio::crypto::install_default().unwrap();
+/// A and C linked, then L dialing both and draining over `drain`, with a reader at A
+/// reading L's broadcast `l` through L's links.
+struct Mesh {
+	a: Node,
+	c: Node,
+	l: Node,
+	_broadcasts: [moq_net::origin::Route; 3],
+	track: moq_net::track::Producer,
+	reader: moq_net::track::Subscriber,
+}
 
-	// A and C first, until each learns the other's broadcast over the one link between
-	// them: their route exchange is then up, so each forwards L's routes to the other as
-	// it learns them, which is what a DRAIN for L is later sent along.
-	let a = Node::start("a", &[], Duration::ZERO).await;
-	let c = Node::start("c", &[a.port], Duration::ZERO).await;
-	let _a = a.publish("a");
-	let _c = c.publish("c");
-	a.learns("c").await;
-	c.learns("a").await;
+impl Mesh {
+	async fn start(drain: Duration) -> Self {
+		kio::clock::host_time(); // real relays on real sockets
+		moq_tokio::crypto::install_default().unwrap();
 
-	// Then L, dialing both, until each neighbour takes L's route straight from L and so
-	// has forwarded it to the other.
-	let l = Node::start("l", &[a.port, c.port], DRAIN).await;
-	let _l = l.publish("l");
-	kio::clock::timeout(TIMEOUT, async {
-		while l.active() < 2 {
-			tokio::task::yield_now().await;
+		// A and C first, until each learns the other's broadcast over the one link between
+		// them: their route exchange is then up, so each forwards L's routes to the other as
+		// it learns them, which is what a DRAIN for L is later sent along.
+		let a = Node::start("a", &[], Duration::ZERO).await;
+		let c = Node::start("c", &[a.port], Duration::ZERO).await;
+		let broadcast_a = a.publish("a");
+		let broadcast_c = c.publish("c");
+		a.learns("c").await;
+		c.learns("a").await;
+
+		// Then L, dialing both, until each neighbour takes L's route straight from L and so
+		// has forwarded it to the other.
+		let l = Node::start("l", &[a.port, c.port], drain).await;
+		let broadcast_l = l.publish("l");
+		let track = broadcast_l.broadcast().create_track("video", timed()).unwrap();
+		kio::clock::timeout(TIMEOUT, async {
+			while l.active() < 2 {
+				tokio::task::yield_now().await;
+			}
+		})
+		.await
+		.expect("L dials both");
+		a.direct("l").await;
+		c.direct("l").await;
+
+		let remote = kio::clock::timeout(TIMEOUT, a.origin.consume().follow("l", None).unwrap().available())
+			.await
+			.expect("A learns l")
+			.expect("resolves")
+			.expect("announced");
+		let reader = remote.track("video").unwrap().subscribe(None).await.unwrap();
+		let mut mesh = Self {
+			a,
+			c,
+			l,
+			_broadcasts: [broadcast_a, broadcast_c, broadcast_l],
+			track,
+			reader,
+		};
+		mesh.reads().await;
+		mesh
+	}
+
+	/// Write a group at L and wait for the reader at A to receive it.
+	async fn reads(&mut self) {
+		let sequence = self.track.largest().map_or(0, |largest| largest.group + 1);
+		let mut group = self
+			.track
+			.append_group(moq_net::Timestamp::from_millis(sequence).unwrap())
+			.unwrap();
+		group
+			.write_frame(moq_net::Timestamp::from_millis(sequence).unwrap(), b"l".as_ref())
+			.unwrap();
+		group.finish().unwrap();
+		loop {
+			let group = kio::clock::timeout(TIMEOUT, self.reader.recv_group())
+				.await
+				.expect("the reader at A starved")
+				.expect("the read failed")
+				.expect("the track ended");
+			if group.start >= sequence {
+				return;
+			}
 		}
-	})
-	.await
-	.expect("L dials both");
-	a.direct("l").await;
-	c.direct("l").await;
+	}
+
+	/// Each neighbour hears the GOAWAY on the link L dialed and tells the other, unless the
+	/// other told it first: a DRAIN never goes back to the neighbour it came from. Either
+	/// way the link between them carries one, and each one sent arrives.
+	async fn told(&self) {
+		let told = || {
+			let (a, c) = (self.a.routes(), self.c.routes());
+			let (a_sent, c_sent) = (a.sent.count(Withdrawal::Drain), c.sent.count(Withdrawal::Drain));
+			a_sent + c_sent > 0
+				&& a_sent == c.received.count(Withdrawal::Drain)
+				&& c_sent == a.received.count(Withdrawal::Drain)
+		};
+		kio::clock::timeout(TIMEOUT, async {
+			while !told() {
+				tokio::task::yield_now().await;
+			}
+		})
+		.await
+		.unwrap_or_else(|_| {
+			panic!(
+				"no DRAIN for L crossed between A and C: A {:?}, C {:?}",
+				self.a.routes(),
+				self.c.routes()
+			)
+		});
+	}
+}
+
+/// L holds a link while the reader at A reads through it, and exits once it stops,
+/// long before its deadline, with nothing force-closed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_draining_relay_closes_its_dialed_links_once_nothing_reads_them() {
+	// Far past every wait below, so only links closing on their own let L exit in time.
+	const DRAIN: Duration = Duration::from_secs(600);
+	let mut mesh = Mesh::start(DRAIN).await;
 
 	let started = kio::clock::now();
-	l.trigger.start();
+	mesh.l.trigger.start();
+	mesh.told().await;
 
-	// Each neighbour hears the GOAWAY on the link L dialed and tells the other, unless the
-	// other told it first: a DRAIN never goes back to the neighbour it came from. Either
-	// way the link between them carries one, and each one sent arrives.
-	let told = || {
-		let (a, c) = (a.routes(), c.routes());
-		let (a_sent, c_sent) = (a.sent.count(Withdrawal::Drain), c.sent.count(Withdrawal::Drain));
-		a_sent + c_sent > 0
-			&& a_sent == c.received.count(Withdrawal::Drain)
-			&& c_sent == a.received.count(Withdrawal::Drain)
-	};
-	kio::clock::timeout(TIMEOUT, async {
-		while !told() {
-			tokio::task::yield_now().await;
-		}
-	})
-	.await
-	.unwrap_or_else(|_| {
-		panic!(
-			"no DRAIN for L crossed between A and C: A {:?}, C {:?}",
-			a.routes(),
-			c.routes()
-		)
-	});
-
-	// ...before any link dropped: L holds them open to its deadline.
-	assert!(started.elapsed() < DRAIN, "the DRAINs took {:?}", started.elapsed());
-	for (name, node) in [("A", &a), ("C", &c)] {
-		let routes = node.routes();
-		assert_eq!(
-			routes.sent.count(Withdrawal::Dead),
-			0,
-			"{name} sent a DEAD before L left"
-		);
-		assert_eq!(
-			routes.received.count(Withdrawal::Dead),
-			0,
-			"{name} received a DEAD before L left"
-		);
-	}
-	assert!(!l.running.is_finished(), "L exited before its drain deadline");
+	// The reader still reads, so L still serves it.
+	mesh.reads().await;
+	assert!(!mesh.l.running.is_finished(), "L exited under a reader");
 
 	// The draining relay, which sent the GOAWAY, names itself in no DRAIN.
-	let sent = l.routes().sent.count(Withdrawal::Drain);
+	assert_eq!(mesh.l.routes().sent.count(Withdrawal::Drain), 0, "the draining relay sent a DRAIN");
+
+	let Mesh { a, c, l, reader, .. } = mesh;
+	drop(reader);
 	let observer = l.shutdown.clone();
 	l.stop().await;
-	// The links it held to the deadline by design are no session it failed to drain.
-	assert_eq!(observer.drained().await.forced, 0, "the held links counted as forced");
-	assert_eq!(sent, 0, "the draining relay sent a DRAIN");
-	assert!(started.elapsed() >= DRAIN, "L left before its drain deadline");
+	assert!(started.elapsed() < DRAIN, "L held its links to the deadline");
+	assert_eq!(observer.drained().await.forced, 0, "a link closed on its own counted as forced");
 
+	c.stop().await;
+	a.stop().await;
+}
+
+/// A link a reader still reads through at the deadline is closed by it, and counted as
+/// forced like any session that never left.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dialed_link_still_read_at_the_deadline_is_forced() {
+	const DRAIN: Duration = Duration::from_secs(2);
+	let mesh = Mesh::start(DRAIN).await;
+
+	let started = kio::clock::now();
+	let observer = mesh.l.shutdown.clone();
+	let Mesh { a, c, l, reader, .. } = mesh;
+	l.stop().await;
+	assert!(started.elapsed() >= DRAIN, "L left before its drain deadline");
+	assert!(observer.drained().await.forced > 0, "the read link was not counted as forced");
+
+	drop(reader);
 	c.stop().await;
 	a.stop().await;
 }

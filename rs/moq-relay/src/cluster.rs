@@ -3546,7 +3546,7 @@ mod tests {
 	}
 
 	/// Once the relay drains, no source change replaces, releases, or adds a dial, so
-	/// each link's own task finishes its drain to the deadline.
+	/// each link's own task finishes its drain.
 	#[tokio::test]
 	async fn mesh_freezes_its_dials_once_the_relay_drains() {
 		let (trigger, shutdown) = crate::shutdown::Observer::new(Duration::from_secs(10));

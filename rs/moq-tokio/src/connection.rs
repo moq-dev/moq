@@ -19,9 +19,14 @@ pub use moq_net::reconnect::Restart;
 
 /// Close a predecessor still finishing a handover, aborting it at its deadline.
 async fn close_predecessor(predecessor: Option<(moq_net::Session, kio::clock::Instant)>) -> Result<(), moq_net::Error> {
-	let Some((session, deadline)) = predecessor else {
-		return Ok(());
-	};
+	match predecessor {
+		Some((session, deadline)) => close_by(session, deadline).await,
+		None => Ok(()),
+	}
+}
+
+/// Close `session` after draining its queued data, aborting it at `deadline`.
+async fn close_by(session: moq_net::Session, deadline: kio::clock::Instant) -> Result<(), moq_net::Error> {
 	let abort = session.clone();
 	let mut close = std::pin::pin!(session.close());
 	tokio::select! {
@@ -1077,18 +1082,21 @@ impl Connection {
 	}
 
 	/// Stop the loop for every clone and drain the live session with an empty-URI
-	/// GOAWAY ("reconnect to me"), waiting for the peer to close it. A peer relay
-	/// does not close it on its own: it ranks the session's routes below every other
-	/// and keeps serving it until this side closes it.
+	/// GOAWAY ("reconnect to me"), until the peer closes it or it carries no
+	/// subscription or fetch ([`moq_net::Session::idle`]), when this side closes it as
+	/// [`close`](Self::close) does. A peer relay never closes it on its own: it ranks
+	/// the session's routes below every other and keeps serving it, so its readers
+	/// move to another route and the session goes idle.
 	///
 	/// At `timeout` the session is closed with [`moq_net::Error::GoawayTimeout`] on
-	/// this side's own timer, so a peer stalling the GOAWAY's write cannot hold it
-	/// open. A predecessor still finishing a handover closes as in
-	/// [`close`](Self::close), aborted by `timeout` if its handover deadline is later,
-	/// unless no replacement has connected yet and it is the session that serves.
-	/// Tokens stay presented until both end. Returns `Ok`
+	/// this side's own timer, so a peer stalling the GOAWAY's write, or still reading
+	/// through the session, cannot hold it open. A predecessor still finishing a
+	/// handover closes as in [`close`](Self::close), aborted by `timeout` if its
+	/// handover deadline is later, unless no replacement has connected yet and it is
+	/// the session that serves. Tokens stay presented until both end. Returns `Ok`
 	/// when nothing was live or the peer left before `timeout`, whatever its close
-	/// code, and [`moq_net::Error::GoawayTimeout`] when `timeout` closed the session.
+	/// code, the close's result when the session went idle first, and
+	/// [`moq_net::Error::GoawayTimeout`] when `timeout` closed the session.
 	pub async fn drain(self, timeout: Duration) -> crate::Result<()> {
 		let running = self.task.running.upgrade();
 		let deadline = kio::clock::now().saturating_add(timeout);
@@ -1115,6 +1123,10 @@ impl Connection {
 					session.abort(moq_net::Error::GoawayTimeout);
 					session.closed().await;
 					Err(moq_net::Error::GoawayTimeout)
+				}
+				() = session.idle() => {
+					tracing::debug!("drained session carries nothing; closing");
+					close_by(session, deadline).await
 				}
 			}
 		};
@@ -2989,9 +3001,29 @@ mod tests {
 		assert_eq!(g1.start, 1, "the drained session stopped delivering");
 	}
 
+	/// A subscription to a track `origin` publishes, read through `subscriber`, so the
+	/// session carrying it is not idle while the returned subscriber lives.
+	async fn reading(
+		origin: &moq_net::origin::Producer,
+		subscriber: &moq_net::origin::Producer,
+		name: &str,
+	) -> (moq_net::origin::Route, moq_net::track::Producer, moq_net::track::Subscriber) {
+		const WAIT: Duration = Duration::from_secs(10);
+		let broadcast = origin.route(name, moq_net::origin::RouteOptions::default()).unwrap();
+		let track = broadcast.broadcast().create_track("video", timed()).unwrap();
+		let remote = kio::clock::timeout(WAIT, subscriber.consume().follow(name, None).unwrap().available())
+			.await
+			.unwrap()
+			.unwrap()
+			.unwrap();
+		let sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
+		(broadcast, track, sub)
+	}
+
 	/// A drain while a GOAWAY handover still waits for its replacement sends this side's
 	/// GOAWAY on the session that serves, which is also the handover's predecessor, and
-	/// holds it to the timeout instead of closing it as the predecessor.
+	/// holds it while it carries a subscription, to the timeout, instead of closing it
+	/// as the predecessor.
 	#[tokio::test]
 	async fn a_drain_mid_handover_holds_the_serving_session() {
 		kio::clock::host_time(); // real TCP sockets
@@ -2999,12 +3031,13 @@ mod tests {
 		const DRAIN: Duration = Duration::from_secs(3);
 
 		let origin = crate::origin::spawn();
-		let (addr, mut accepted, _task) = serve(origin).await;
+		let (addr, mut accepted, _task) = serve(origin.clone()).await;
 
 		// Unique to this test: the table is process-wide.
 		const HOST: &str = "drain-mid-handover.test";
 		crate::resolve::hosts::point(HOST, [addr]);
 
+		let subscriber = crate::origin::spawn();
 		let mut config = crate::connect::Config::default();
 		config.goaway.handover = Some((WAIT * 3).into());
 		config.backoff.initial = Some((FAST).into());
@@ -3012,9 +3045,11 @@ mod tests {
 		let connection = config
 			.init(Default::default())
 			.unwrap()
+			.with_subscriber(subscriber.clone())
 			.connect(url(&format!("tcp://{HOST}:1/")));
 		let monitor = connection.monitor();
 		let session = kio::clock::timeout(WAIT, accepted.recv()).await.unwrap().unwrap();
+		let _reading = reading(&origin, &subscriber, "cam").await;
 		outlast_fast().await;
 
 		// The replacement can never connect, so the drained session keeps serving.
@@ -3045,6 +3080,48 @@ mod tests {
 			"the drain timeout did not close the session"
 		);
 		assert!(started.elapsed() >= DRAIN, "closed after {:?}", started.elapsed());
+	}
+
+	/// A drained session that a peer relay keeps serving closes once nothing reads through
+	/// it, well before the drain's timeout, and the drain reports that clean close.
+	#[tokio::test]
+	async fn a_drain_closes_the_session_once_it_carries_nothing() {
+		kio::clock::host_time(); // real TCP sockets
+		const WAIT: Duration = Duration::from_secs(10);
+		// Far past every wait below, so only the idle close can end the drain in time.
+		const DRAIN: Duration = Duration::from_secs(600);
+
+		let origin = crate::origin::spawn();
+		let (addr, mut accepted, _task) = serve(origin.clone()).await;
+		let subscriber = crate::origin::spawn();
+		let connection = crate::connect::Config::default()
+			.init(Default::default())
+			.unwrap()
+			.with_subscriber(subscriber.clone())
+			.connect(url(&format!("tcp://{addr}/")));
+		let session = kio::clock::timeout(WAIT, accepted.recv()).await.unwrap().unwrap();
+		let reading = reading(&origin, &subscriber, "cam").await;
+
+		let drained = tokio::spawn(connection.drain(DRAIN));
+		let draining = session.draining();
+		kio::clock::timeout(WAIT, kio::wait(|waiter| draining.poll(waiter)))
+			.await
+			.expect("the peer never heard the GOAWAY")
+			.expect("the session closed without one");
+		assert!(
+			kio::clock::timeout(Duration::from_millis(500), session.closed()).await.is_err(),
+			"closed while a reader still read through it"
+		);
+
+		drop(reading);
+		kio::clock::timeout(WAIT, drained)
+			.await
+			.expect("the idle session was held open")
+			.unwrap()
+			.expect("the idle close failed");
+		kio::clock::timeout(WAIT, session.closed())
+			.await
+			.expect("the peer still holds the session");
 	}
 
 	/// Under [`Restart::Handoff`] an empty-URI GOAWAY that drains a session before it is
