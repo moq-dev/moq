@@ -3403,18 +3403,16 @@ where
 	}
 
 	/// Rebuild the PMT from the listed tracks, leading the next frame muxed when it changed. The
-	/// clock stays on its PID unless the stream carrying it retired.
+	/// clock stays on its PID unless the stream carrying it retired with no track the catalog
+	/// lists taking the PID over: a rendition the source reopens (a language retag) can retire
+	/// before the one replacing it lists with its first frame.
 	fn revise(&mut self) -> Result<()> {
 		let Some(psi) = self.program.psi.as_ref() else {
 			return Ok(());
 		};
 		let current = psi.pcr_pid().context("PMT without a clock")?;
 		let kept = psi.own_clock() == Some(current)
-			|| self
-				.program
-				.tracks
-				.values()
-				.any(|track| track.listed && track.pid == current);
+			|| (self.program.tracks.values()).any(|track| track.pid == current && (track.listed || track.cataloged));
 		let pcr_pid = match kept {
 			true => current,
 			false => self.pick_clock()?,
