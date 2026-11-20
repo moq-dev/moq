@@ -88,7 +88,10 @@ export class Terminal {
 	/** Apply one ordered consumer read and report whether a codec epoch ended before it. */
 	update(read: Update): boolean {
 		if (read.kind === "gap") {
-			this.#prime = true;
+			// A gap after a declared end reaches the fresh encoder's first frame, which decodes unprimed
+			// as after any declared end: a wire before lite-07 names the run the publisher skipped
+			// across its silence a drop, so after every pause this gap is that silence, not lost media.
+			if (this.#end === undefined) this.#prime = true;
 			this.#before = undefined;
 			this.#preroll = [];
 			this.#prerollEnd = undefined;

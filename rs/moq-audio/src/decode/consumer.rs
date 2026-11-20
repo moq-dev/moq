@@ -431,13 +431,15 @@ impl Consumer {
 					self.boundary = Some(Duration::try_from(timestamp)?);
 					self.started = true;
 					// Groups lost past a declared end were the fresh encoder's, so the packet
-					// after them still comes from it.
+					// after them still comes from it, and decodes as its first, unprimed: a wire
+					// before lite-07 names the run the publisher skipped across its silence a
+					// drop, so after every pause this gap is that silence, not lost media.
 					let fresh = self.end.is_some();
 					self.restart()?;
-					if fresh {
-						self.fresh_encoder();
+					match fresh {
+						true => self.fresh_encoder(),
+						false => self.warmup_pending = !self.warmup.is_zero(),
 					}
-					self.warmup_pending = !self.warmup.is_zero();
 					self.ready.push_back(Read::Gap { timestamp, duration });
 					continue;
 				}
@@ -2700,12 +2702,13 @@ mod tests {
 		assert_eq!(after_loss(true, None).await[0], (1_000_000, 960 - 312));
 	}
 
-	/// The stopped encoder's history primes none of the fresh encoder's warmup, so a loss of
-	/// its first groups trims the whole warmup after them.
+	/// A gap after a declared end reaches the fresh encoder's first packet, which plays from its
+	/// own stamp rather than a warmup later: before lite-07 the run skipped across every pause
+	/// arrives as a drop, so priming there would clip the start of each utterance.
 	#[tokio::test(start_paused = true)]
-	async fn a_loss_after_a_declared_end_trims_the_whole_warmup() {
+	async fn a_gap_after_a_declared_end_trims_no_warmup() {
 		let warmup = Some(Duration::from_millis(10));
-		assert_eq!(after_loss(true, warmup).await[0].0, 1_010_000);
+		assert_eq!(after_loss(true, warmup).await[0], (1_000_000, 960 - 312));
 	}
 
 	/// Decodes two Opus packets, then, past lost groups and a declared end if `declared`, one
