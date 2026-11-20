@@ -4284,10 +4284,11 @@ test("a lite-07 claim above what the grant matches is shown", async () => {
 // A scoped claim is shown only where its scope and the grant share a path: one at `a` scoped to
 // `a/*/x` serves something `a/**` grants, and nothing `a/*` does.
 test("a lite-07 scoped claim sharing no path with the grant is hidden", async () => {
-	for (const [granted, told] of [
+	const cases: [string, string[]][] = [
 		["a/*", []],
 		["a/**", ["a"]],
-	] as const) {
+	];
+	for (const [granted, told] of cases) {
 		const origin = new OriginProducer();
 		const grant = new Signal<Grant | undefined>({
 			publish: new Path.Patterns([Path.Pattern.parse(granted)]),
@@ -4304,7 +4305,7 @@ test("a lite-07 scoped claim sharing no path with the grant is hidden", async ()
 				msgs.push(msg);
 				if (msg.status === "synced") break;
 			}
-			expect(msgs.flatMap((msg) => (msg.status === "start" ? [msg.suffix] : []))).toEqual([...told]);
+			expect(msgs.flatMap((msg) => (msg.status === "start" ? [msg.suffix] : []))).toEqual(told.map((path) => Path.from(path)));
 		} finally {
 			claim.close();
 			close();
