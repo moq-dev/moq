@@ -4571,29 +4571,30 @@ mod tests {
 		assert_eq!(consumer.warmup, DELAY_MAX);
 	}
 
-	/// An unlimited max delay keeps the subscription unlimited, and the start still reaches the
-	/// earlier group the join owes.
+	/// An unlimited max delay keeps the subscription unlimited and skips nothing: a reader of the
+	/// oldest group reads all of the history the copy holds, even past the min delay's reach.
 	#[tokio::test(start_paused = true)]
-	async fn an_unlimited_max_delay_still_reaches_the_min_delay() {
+	async fn an_unlimited_max_delay_reads_all_history() {
 		let mut copy = Received::with_info(hang::container::track_info(hang::catalog::PRIORITY.video)).await;
+		write_group(&mut copy.track, 3, &[ts(3_000_000)]);
 		write_group(&mut copy.track, 4, &[ts(4_500_000)]);
 		write_group(&mut copy.track, 5, &[ts(5_000_000)]);
-		let subscriber = copy
-			.subscribe_with(moq_net::track::Subscription::default().with_delay(Delay::default().with_max(None)))
-			.await;
-		let mut consumer = Playout::new(
+		let playout = Playout::new(
 			Delay {
 				min: Some(Duration::from_millis(500)),
 				max: None,
 			},
 			Duration::ZERO,
-		)
-		.consumer(subscriber, Container::Legacy(crate::container::Kind::Data));
+		);
+		let subscriber = copy
+			.subscribe_with(playout.subscription(moq_net::track::Subscription::default()))
+			.await;
+		let mut consumer = playout.consumer(subscriber, Container::Legacy(crate::container::Kind::Data));
 		assert_eq!(subscribed(&consumer).subscription().delay.max, None);
 		let _track = copy.track.finish().unwrap();
 		let frames = read_all(&mut consumer).await.unwrap();
 		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros().unwrap()).collect();
-		assert_eq!(micros, vec![4_500_000, 5_000_000]);
+		assert_eq!(micros, vec![3_000_000, 4_500_000, 5_000_000]);
 	}
 
 	/// A subscription without a max delay reaches back for history, so it starts at once.

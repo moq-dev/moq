@@ -385,8 +385,9 @@ impl Consumer {
 		backpressure
 	}
 
-	/// When the packet behind the latest decoded frame arrived, which a gate held
-	/// encoded may have kept well before [`read`](Self::read) handed the frame over.
+	/// When the packet behind the latest decoded frame landed in this node's cache
+	/// ([`moq_mux::container::Consumer::arrival`]), which a hole or a gate holding it encoded
+	/// may have kept well before [`read`](Self::read) handed the frame over.
 	pub fn arrival(&self) -> Option<kio::clock::Instant> {
 		self.arrived
 	}
@@ -707,20 +708,21 @@ impl Consumer {
 					}
 					// Every packet the container hands over is an arrival, including one the
 					// decoder will refuse, so it is observed before anything can fail.
+					// When the packet landed, not when it was read: a hole the container waits out
+					// holds the packets behind it, which arrived on time. The estimator and the
+					// gate's hold both count from it.
+					let landed = self.track.arrival().unwrap_or_else(now);
 					match &read {
 						Encoded::Frame { frame, .. } => {
 							if let Some(scale) = frame.timestamp.scale() {
-								// When the packet landed, not when it was read: a hole the container
-								// waits out holds the packets behind it, which arrived on time.
-								let arrived = self.track.arrival().unwrap_or_else(now);
-								let arrival = jitter::millis(arrived.duration_since(self.origin));
+								let arrival = jitter::millis(landed.duration_since(self.origin));
 								let media = frame.timestamp.value() as f64 * 1000.0 / scale.as_u64() as f64;
 								self.target.observe(arrival, media);
 							}
 						}
 						_ => self.breaks += 1,
 					}
-					self.pending.push_back((read, kio::clock::Instant::now()));
+					self.pending.push_back((read, landed));
 				}
 				Some(Ok(None)) => self.ended = Some(None),
 				Some(Err(err)) => self.ended = Some(Some(err.into())),
@@ -3061,8 +3063,8 @@ mod tests {
 	}
 
 	/// A hole the container waits out up to the max delay holds the packets behind it, which
-	/// landed on time: the estimate observes when they landed, not when they were read, so the
-	/// wait reads as no jitter.
+	/// landed on time: the estimate and [`Consumer::arrival`] use when they landed, not when
+	/// they were read, so the wait reads as no jitter.
 	#[tokio::test(start_paused = true)]
 	async fn a_hole_waited_out_to_the_max_delay_leaves_the_estimate() {
 		use moq_mux::container::Container as _;
@@ -3135,6 +3137,12 @@ mod tests {
 				.unwrap()
 				.expect("a packet past the hole");
 		}
+		// They report when they landed too, which a gate's hold counts from.
+		assert!(
+			consumer.arrival().is_some_and(|arrived| arrived <= since),
+			"a packet past the hole reports when it was read: {:?}, read from {since:?}",
+			consumer.arrival()
+		);
 		// Steady arrivals after it, read as they land, close the interval that measured the wait.
 		let resumed = 6 + (since.elapsed().as_millis() / 20) as u64;
 		for sequence in resumed..resumed + 100 {
