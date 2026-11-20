@@ -89,15 +89,19 @@ vars == <<org, alive, deaths, cp, front, left>>
 (*  bad    groups the upstream aborted mid-read.                           *)
 (*  fin    the upstream's reader ended the subscription cleanly.           *)
 (*  src    src[g]: the upstream's copy its reader reads g from (`Recover`).*)
+(*  lent   lent[g]: frames of g a switch lent it, which it holds from the  *)
+(*         moment g is handed out, asking the upstream only for the rest.  *)
 (***************************************************************************)
 
 Fresh(ask) ==
     [st |-> "live", ask |-> ask, fetch |-> {}, fr |-> [g \in Groups |-> -1],
-     bad |-> {}, fin |-> FALSE, src |-> [g \in Groups |-> None]]
+     bad |-> {}, fin |-> FALSE, src |-> [g \in Groups |-> None],
+     lent |-> [g \in Groups |-> 0]]
 
 Gone ==
     [st |-> "none", ask |-> {}, fetch |-> {}, fr |-> [g \in Groups |-> -1],
-     bad |-> {}, fin |-> FALSE, src |-> [g \in Groups |-> None]]
+     bad |-> {}, fin |-> FALSE, src |-> [g \in Groups |-> None],
+     lent |-> [g \in Groups |-> 0]]
 
 Live(e) == cp[e].st = "live"
 Held(e) == cp[e].st # "none"
@@ -126,6 +130,30 @@ ResumeAsk(e) ==
         gaps == {g \in cp[e].ask : g < newest /\ cp[e].fr[g] = -1}
         from == IF got = {} THEN 0 ELSE IF gaps # {} THEN Min(gaps) ELSE newest
     IN {g \in cp[e].ask : g >= from}
+
+\* Where a switch at u resumes its readers (`Producer::subscription`, `Reader::resume_at`):
+\* each open reader's newest group, past the most frames of it a copy at u holds, when it
+\* lacks no group below it; the lowest of those, as a set of one, or none when any reader
+\* resumes nothing.
+Resume(u) ==
+    LET readers == {e \in Downs(u) : Live(e) /\ ~cp[e].fin}
+        At(e) ==
+            LET got == {g \in Groups : cp[e].fr[g] >= 0}
+                newest == Max(got)
+                gaps == {g \in cp[e].ask : g < newest /\ cp[e].fr[g] = -1}
+                held == Max({SrcFr(u, s, newest) : s \in Srcs(u)} \cup {0})
+            IN IF got = {} \/ gaps # {} \/ held = 0 THEN {} ELSE {<<newest, held>>}
+        at == UNION {At(e) : e \in readers}
+    IN IF readers = {} \/ \E e \in readers : At(e) = {} THEN {}
+       ELSE {CHOOSE p \in at : \A q \in at : p[1] < q[1] \/ (p[1] = q[1] /\ p[2] <= q[2])}
+
+\* A copy asked to resume a group past the frames held is lent them, unless it already
+\* holds that group (`lend_head`); of two loans the longer stands.
+Lend(u, c) ==
+    IF Resume(u) = {} THEN c
+    ELSE LET p == CHOOSE p \in Resume(u) : TRUE IN
+         IF c.fr[p[1]] >= 0 THEN c
+         ELSE [c EXCEPT !.lent[p[1]] = IF @ > p[2] THEN @ ELSE p[2]]
 
 \* A downstream copy still reads the track at its upstream: its subscription is open, or
 \* a group it was handed or fetched is not over (`TrackWeak::is_held`).
@@ -219,7 +247,7 @@ HandOut(e, g, s) ==
     /\ ~cp[e].fin \/ g \in cp[e].fetch
     /\ s \in Srcs(e[2])
     /\ SrcFr(e[2], s, g) >= 0
-    /\ cp' = [cp EXCEPT ![e].fr[g] = 0, ![e].src[g] = s]
+    /\ cp' = [cp EXCEPT ![e].fr[g] = cp[e].lent[g], ![e].src[g] = s]
     /\ UNCHANGED <<org, alive, deaths, front, left>>
 
 \* The next frame of a group crosses the hop.
@@ -320,9 +348,10 @@ Switch(u, w) ==
     /\ usable => front[u].sw < MaxSwitches
     /\ front' = [front EXCEPT ![u].cur = w, ![u].sw = @ + (IF usable THEN 1 ELSE 0)]
     /\ cp' = [cp EXCEPT ![e1] =
-                IF Live(e1) /\ ~cp[e1].fin /\ open THEN [@ EXCEPT !.ask = Demand(u)]
+                IF Live(e1) /\ ~cp[e1].fin /\ open THEN Lend(u, [@ EXCEPT !.ask = Demand(u)])
                 ELSE IF Live(e1) THEN @
-                ELSE Fresh(IF open THEN Demand(u) ELSE {})]
+                ELSE IF open THEN Lend(u, Fresh(Demand(u)))
+                ELSE Fresh({})]
     /\ UNCHANGED <<org, alive, deaths, left>>
 
 \* The serving copy completed: the front ends the track (`Action::Finish`).
@@ -468,7 +497,7 @@ TypeOK ==
     /\ \A e \in Edges :
         /\ cp[e].st \in {"none", "live", "failed"}
         /\ cp[e].bad \subseteq Groups
-        /\ \A g \in Groups : cp[e].fr[g] \in -1 .. F
+        /\ \A g \in Groups : cp[e].fr[g] \in -1 .. F /\ cp[e].lent[g] \in 0 .. F
     /\ \A r \in Relays : front[r].end \in {"open", "ok", "err"}
 
 =============================================================================

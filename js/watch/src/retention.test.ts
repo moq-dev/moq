@@ -5,6 +5,7 @@ import { Container } from "@moq/hang";
 import * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 import { Derived, Effect, Signal } from "@moq/signals";
+import { defined } from "./defined.test-util.ts";
 import { nextMedia, subscribeMedia } from "./media";
 import { Sync } from "./sync";
 
@@ -95,7 +96,7 @@ test("a long subscription through the player path leaves nothing behind", async 
 	const broadcast = new Moq.Broadcast.Producer();
 	// The track's cache keeps every group here for its fixed 30s idle window whatever maxAge the
 	// track declares, and holds no reactions or listeners while it does.
-	const track = broadcast.createTrack("audio", { timescale: Time.Timescale.MILLI });
+	const track = defined(broadcast.createTrack("audio", { timescale: Time.Timescale.MILLI }));
 	const format = new Container.Legacy.Format("audio");
 	const producer = new Container.Legacy.Producer(track, format);
 

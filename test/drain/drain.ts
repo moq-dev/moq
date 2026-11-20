@@ -112,6 +112,7 @@ const published = new Moq.Origin.Producer();
 const broadcastRoute = published.route(path, { hidden: true });
 const broadcast = broadcastRoute.broadcast;
 const track = broadcast.createTrack(trackName, { timescale: Moq.Time.Timescale.MILLI });
+if (!track) throw new Error("the track already exists");
 // The instance the publication mints is what says B's route serves the same stream as A's.
 broadcastRoute.announce();
 const publisher = new Moq.Connection({

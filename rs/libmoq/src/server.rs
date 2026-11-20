@@ -30,7 +30,10 @@ pub struct Server {
 impl Server {
 	/// Serve `server`, delivering each incoming session as a request handle via `callback`.
 	pub fn listen(&mut self, server: moq_tokio::Server, callback: OnStatus) -> Result<Id, Error> {
-		let addr = server.local_addr()?.to_string();
+		let addr = server
+			.local_addr()
+			.ok_or(moq_tokio::Error::NoBackend("no QUIC listener configured"))?
+			.to_string();
 		let fingerprints = server.certificates().fingerprints();
 		let (task, closed) = Task::new(callback);
 		let id = self.task.insert(ServerEntry {

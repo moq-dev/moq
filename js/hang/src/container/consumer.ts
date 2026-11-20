@@ -72,9 +72,9 @@ export interface ConsumerProps {
 	 * to feed the estimate: every frame as it lands, late media the ordered read gives up included.
 	 * Without it the consumer reads `track.ordered()`, and the estimate learns from the frames that
 	 * read hands out and from when each group it gives up as a join's backlog landed. Either way the
-	 * ordered read decides every hole: a missing group is a hole once it reports a gap, and never
-	 * waited for here. Its `delay.max` is how long a hole is waited for, so size it to what the player
-	 * can still play late.
+	 * ordered read decides every hole: a missing group is a hole once it reports a gap and the media
+	 * after it does not continue the timeline, and never waited for here. Its `delay.max` is how long
+	 * a hole is waited for, so size it to what the player can still play late.
 	 */
 	ordered?: Moq.Track.Ordered;
 }
@@ -210,6 +210,9 @@ export class Consumer {
 	#mediaGroup?: bigint;
 	// Media went missing since the last item read, so the next one is preceded by a gap.
 	#lost = false;
+	// The ordered reader gave up on keys since the last item read: a loss only if the next item does
+	// not continue the timeline, since a publisher keying groups by timestamp never produced most keys.
+	#gapped?: { from: bigint; to: bigint };
 	// The furthest presentation point read so far: max(timestamp + duration), endpoints included.
 	// Undefined until the first item, so a loss before it is no gap.
 	#edge?: number;
@@ -764,8 +767,9 @@ export class Consumer {
 		const nextStart = next?.frames.at(0)?.timestamp.asMicros();
 		if (!next || nextStart === undefined || active.end < nextStart) return false;
 
+		// Routine for a group of one frame whose stream finishes after the next one starts, and nothing
+		// is lost, so it says nothing.
 		this.#groups.shift();
-		console.warn(`skipping covered group: ${active.consumer.start} -> ${next.consumer.start}`);
 		this.#pass(active, next.consumer.start);
 
 		this.#discard(active);
@@ -944,7 +948,11 @@ export class Consumer {
 						head.consumer.done ||
 						ended !== undefined;
 					if (known) {
-						if (!contiguous && (head.gap || !empty)) {
+						// A gap an empty group carries still marks the next frame, which follows the loss.
+						if (head.gap && !contiguous) {
+							// The head's first frame may not have landed yet, so the next item read decides.
+							this.#gapped = { from: this.#gapped?.from ?? this.#active, to: head.consumer.start };
+						} else if (!contiguous && !empty) {
 							this.#lost = true;
 							// Before the first media, nothing was read to lose.
 							if (this.#start !== undefined)
@@ -1020,7 +1028,7 @@ export class Consumer {
 					// A data track's marker carries no timestamp, so it ends where this reader got to.
 					// Before the first item there is nothing to end.
 					if (head.bare && !truncated && this.#edge !== undefined) {
-						return this.#emit({ kind: "end", group: seq, end: Duration.micros(this.#edge) });
+						return this.#emit({ kind: "end", group: seq, end: Duration.micros(this.#edge) }, false);
 					}
 					continue;
 				}
@@ -1079,12 +1087,19 @@ export class Consumer {
 		return this.#warmed === undefined || (this.#edge ?? 0) < this.#warmed;
 	}
 
-	// Return `read`, or a gap ahead of it when media went missing after an earlier item.
-	#emit(read: Exclude<Read, { kind: "gap" }>): Read {
+	// Return `read`, or a gap ahead of it when media went missing after an earlier item. An untimed
+	// read, a data marker ending where this reader got to, cannot show the timeline continues past a gap.
+	#emit(read: Exclude<Read, { kind: "gap" }>, timed = true): Read {
 		const resume = (read.kind === "frame" ? read.frame.timestamp : read.end).asMicros();
 		const edge = this.#edge;
-		const lost = this.#lost;
+		const gapped = this.#gapped;
+		this.#gapped = undefined;
+		let lost = this.#lost;
 		this.#lost = false;
+		if (gapped && edge !== undefined && (!timed || !ptsContiguous(edge, resume))) {
+			lost = true;
+			console.warn(`skipping missing groups: track=${this.#track.name} ${gapped.from} -> ${gapped.to}`);
+		}
 		this.#advance(read.kind === "frame" ? resume + (read.frame.duration?.asMicros() ?? 0) : resume);
 		if (!lost || edge === undefined) return read;
 

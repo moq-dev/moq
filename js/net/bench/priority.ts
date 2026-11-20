@@ -1,5 +1,6 @@
 /** Sweep subscriptions and simultaneous streams when a group or joining fill changes rank. */
 import { Producer } from "../src/broadcast.ts";
+import { defined } from "../src/defined.test-util.ts";
 import { Priority } from "../src/priority.ts";
 import type { Writer } from "../src/stream.ts";
 
@@ -9,7 +10,7 @@ for (const subscriptions of [1, 16, 128]) {
 	for (const streams of [4, 16, 64]) {
 		const broadcast = new Producer();
 		const queues = Array.from({ length: subscriptions }, (_, index) => {
-			const track = broadcast.createTrack(`track-${index}`);
+			const track = defined(broadcast.createTrack(`track-${index}`));
 			const subscriber = track.subscribe();
 			const priority = new Priority(subscriber);
 			const writers = Array.from({ length: streams }, (_, stream) => {

@@ -9987,8 +9987,9 @@ mod tests {
 /// The ranges a SUBSCRIBE carries for `subscription`, without the empty ones.
 ///
 /// A group ID is the group's start, so a time anchor goes out as the group ID it names,
-/// on every version: a time start as the start, and a time end as the exclusive group past
-/// it, which lite-07 carries as the inclusive time again (see [`lite::Anchor::Absolute`]).
+/// on every version: a time start as the start, from the frame it resumes at (see
+/// [`Subscription::resume`]), and a time end as the exclusive group past it, which lite-07
+/// carries as the inclusive time again (see [`lite::Anchor::Absolute`]).
 /// `None` when nothing is left to ask for, which no wire can say. The caller narrows a
 /// subscription for a wire without ranges to the one span it carries first (see
 /// [`wire_span`]).
@@ -10006,7 +10007,11 @@ fn wire_ranges(subscription: &Subscription) -> Option<Vec<lite::Range>> {
 		let start = match range.start {
 			Anchor::Oldest => None,
 			Anchor::Relative(back) => Some(lite::Anchor::Relative(back)),
-			Anchor::Time(time) => Some(lite::Anchor::Absolute(Position::group(time))),
+			// A switch resumes the group it starts at past the frames the readers hold.
+			Anchor::Time(time) => Some(lite::Anchor::Absolute(match subscription.resume {
+				Some(resume) if resume.group == time => resume,
+				_ => Position::group(time),
+			})),
 		};
 		// The copy resolves a relative end itself, against the groups it receives past it, so
 		// it asks through the live edge. SUBSCRIBE_START names a resolved start, but nothing
@@ -10144,7 +10149,9 @@ impl SubStream {
 	/// Tell the copy where the publisher started each live range: one asked from a group's
 	/// start, which a reader's time start there resolves to when the copy holds no group at
 	/// it, and one counting back, which the copy, holding only part of the track, can't count.
-	/// Lite-07 only, where each range's start is reported.
+	/// One asked from the oldest group counts as asked from time 0, so its start places any
+	/// earlier time start a reader joining it asks. Lite-07 only, where each range's start is
+	/// reported.
 	fn report_starts(&self, serving: &track::Producer) {
 		if !self.live.reports_starts() {
 			return;
@@ -10156,7 +10163,8 @@ impl SubStream {
 				continue;
 			};
 			match range.start {
-				Some(lite::Anchor::Absolute(time)) if time.frame == 0 => times.push((time.group, *start)),
+				Some(lite::Anchor::Absolute(time)) => times.push((time.group, *start)),
+				None => times.push((0, *start)),
 				Some(lite::Anchor::Relative(back)) => {
 					if let Some(Some(latest)) = self.edges.get(&id) {
 						relative.push((back, *start, *latest));
@@ -10900,6 +10908,10 @@ impl TrackServe {
 		if let Some(newest) = newest.filter(|_| idle) {
 			subscription = subscription.with_start(newest);
 		}
+		// A wire without frame bounds asks the group whole.
+		if !self.subscriber.version.has_frame_bounds() {
+			subscription.resume = None;
+		}
 		wire_ranges(&subscription).map(|ranges| (subscription, ranges))
 	}
 
@@ -11404,8 +11416,7 @@ impl SharedDatagrams {
 		let producer = serve
 			.source
 			.as_ref()?
-			.create_unlisted_datagrams(serve.name.as_str(), info)
-			.ok()?;
+			.create_unlisted_datagrams(serve.name.as_str(), info)?;
 		let key = (serve.path.clone(), serve.name.clone());
 		serve.subscriber.legacy_datagrams.lock().insert(
 			key.clone(),
@@ -13491,10 +13502,15 @@ impl kio::Task for FetchServeRun {
 							end: frame_end,
 						},
 					) {
-						Ok(producer) => producer,
+						Ok(Some(producer)) => producer,
+						// Already served, as by a concurrent fetch.
+						Ok(None) => {
+							tracing::debug!(track = %self.serve.name, group = self.group, "fetch already served");
+							cancel(stream);
+							return Poll::Ready(());
+						}
 						Err(err) => {
-							// Already served (a concurrent fetch) or the track closed. Nothing failed
-							// upstream: we only stopped wanting the answer.
+							// The track closed. Nothing failed upstream: we only stopped wanting the answer.
 							tracing::debug!(track = %self.serve.name, group = self.group, %err, "fetch not served");
 							cancel(stream);
 							return Poll::Ready(());

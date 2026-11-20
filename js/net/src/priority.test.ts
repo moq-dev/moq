@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { Producer as BroadcastProducer } from "./broadcast.ts";
+import { defined } from "./defined.test-util.ts";
 import { Version } from "./lite/version.ts";
 import { Priority, sendOrder } from "./priority.ts";
 import { type SendStream, Writer } from "./stream.ts";
@@ -70,7 +71,7 @@ test("out of range ranks stay inside their own bits", () => {
 // group already on the wire keeps writing after the track stops handing out new ones.
 function ranking(options: Subscription = {}) {
 	const broadcast = new BroadcastProducer();
-	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	const subscriber = track.subscribe(options);
 
 	// The send order lands on the underlying stream, exactly as it would on a real one.

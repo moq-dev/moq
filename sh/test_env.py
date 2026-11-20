@@ -14,7 +14,6 @@ def dispatch_env(**overrides):
         "CHECK_MODULES",
         "CHECK_FAIL_FAST",
         "CHECK_TIMES",
-        "JS_TEST_REPORTS",
         "GITHUB_BASE_REF",
         "GITHUB_ACTIONS",
         "GITHUB_STEP_SUMMARY",

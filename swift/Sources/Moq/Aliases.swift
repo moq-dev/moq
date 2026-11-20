@@ -148,11 +148,12 @@ public typealias Position = MoqFFI.MoqPosition
 // Nested rather than top-level: a module-level `Range` would shadow `Swift.Range`
 // in every file that imports Moq.
 extension Subscription {
-    /// A span of a track to deliver: from `start` up to `end`, or onward when `end` is `nil`.
+    /// A span of a track to deliver: from `start` through `end`, or onward when `end` is `nil`.
+    /// Every end includes its whole group.
     public typealias Range = MoqFFI.MoqRange
-    /// Where one end of a `Range` falls: `.oldest` (a start only), `.absolute(group:)`,
-    /// `.relative(groups:)` back from the latest group, or `.time(timestamp:)` for the group
-    /// containing an unscaled time in the track's timescale (a scaled one is refused).
+    /// Where one end of a `Range` falls: `.oldest` (a start only), `.relative(groups:)` back
+    /// from the latest group, or `.time(timestamp:)` for the group containing an unscaled time
+    /// in the track's timescale (a scaled one is refused).
     public typealias Anchor = MoqFFI.MoqAnchor
     /// Which pending group the publisher sends first: `.ascending` or `.descending`.
     public typealias Order = MoqFFI.MoqOrder

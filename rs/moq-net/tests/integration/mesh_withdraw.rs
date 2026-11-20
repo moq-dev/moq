@@ -168,11 +168,11 @@ pub(super) const PRODUCTION_LATENCY_MS: &[u64] = &[
 ];
 
 /// One withdrawal on a partial mesh retracts everywhere once. A relay two hops
-/// from the publisher's hears only that its neighbor withdrew, and must not
-/// fall back to, and re-advertise, another path derived from the same
-/// announcement. Holding route updates (`origin::Config::with_update_hold`) lets the
-/// withdrawal remove those paths first; with link latency and no hold, each
-/// withdrawal here costs tens of thousands of announcements.
+/// from the publisher's must not fall back to, and re-advertise, another path to
+/// the withdrawn claim. Over hop chains, with link latency and no update hold, each
+/// withdrawal here cost tens of thousands of announcements. Lite-07 holds nothing:
+/// the claim's own withdrawal is final, and a relay holding a copy of it through
+/// each neighbour drops every copy at once.
 #[kio::test]
 async fn partial_mesh_withdraw_retracts_once() {
 	let version: Version = "moq-lite-07-wip".parse().unwrap();
@@ -218,8 +218,8 @@ const fn ms(millis: u64) -> Duration {
 	Duration::from_millis(millis)
 }
 
-/// Eight relays where, without the retraction quarantine, relays 1 and 5
-/// retract a broadcast published on relay 7 and then announce it again.
+/// Eight relays where, over hop chains without the retraction quarantine, relays 1
+/// and 5 retract a broadcast published on relay 7 and then announce it again.
 #[rustfmt::skip]
 const STALE_PATHS: &[Link] = &[
 	((0, 1), ms(35)), ((1, 2), ms(90)), ((0, 3), ms(129)), ((2, 4), ms(140)), ((1, 5), ms(137)), ((4, 6), ms(148)),
@@ -227,9 +227,10 @@ const STALE_PATHS: &[Link] = &[
 ];
 
 /// A relay that already retracted a withdrawn broadcast must not announce it
-/// again. Its neighbors, two or more hops from the publisher's relay, still hunt
-/// through stale paths; one that falls back to a path not through this relay
-/// offers it as a new route after the relay forgot the withdrawal.
+/// again. Over hop chains its neighbors, two or more hops from the publisher's
+/// relay, still hunt through stale paths, and one that falls back to a path not
+/// through this relay offers it as a new route after the relay forgot the
+/// withdrawal. On lite-07 the claim's withdrawal is final, so none offers one.
 #[kio::test]
 async fn retracted_relay_ignores_a_stale_path() {
 	let version: Version = "moq-lite-07-wip".parse().unwrap();
@@ -354,9 +355,10 @@ impl Cluster {
 }
 
 /// #4349: a publisher on one relay cleanly closes a broadcast, and a client
-/// watching from another relay sees one retraction and no re-announce. On the
-/// release before the retraction quarantine (#5376), this client saw it
-/// retracted, announced, and retracted again. See [`slow_ring_retracts_once`].
+/// watching from another relay sees one retraction and no re-announce, with no
+/// update hold or retraction quarantine, which lite-07 routes skip. Lite-06 still
+/// re-announces: see [`cross_node_close_reannounces_on_lite06`] and
+/// [`slow_ring_retracts_once`].
 #[kio::test]
 async fn cross_node_close_retracts_once_lite07() {
 	cross_node_close_retracts_once("moq-lite-07-wip").await;
@@ -383,22 +385,23 @@ async fn cross_node_close_retracts_once(version: &str) {
 	}
 }
 
-/// The positive control for [`cross_node_close_retracts_once`]: without the
-/// update hold and the quarantine, the client sees the broadcast come back
-/// before it ends.
+/// The lite-06 residual of [`cross_node_close_retracts_once`]: the client sees the
+/// broadcast come back before it ends, with the update hold and the quarantine or
+/// without. Each lite-06 relay mints its own instance for what a neighbor
+/// announces, so falling back onto a stale path is a restart, which the hold does
+/// not absorb, under an instance the quarantine does not recognize.
 #[kio::test]
-async fn cross_node_close_without_hold_reannounces() {
-	let mut cluster = Cluster::new(
-		"moq-lite-06",
-		STALE_PATHS,
+async fn cross_node_close_reannounces_on_lite06() {
+	for config in [
+		origin::Config::default(),
 		origin::Config::default().with_update_hold(Duration::ZERO),
-		7,
-		1,
-	)
-	.await;
-	let (broadcast, _) = cluster.publish("room/a").await;
-	let (client, _) = cluster.close("room/a", broadcast).await;
-	assert_eq!(client, [Kind::End, Kind::Start, Kind::End]);
+	] {
+		let hold = config.update_hold();
+		let mut cluster = Cluster::new("moq-lite-06", STALE_PATHS, config, 7, 1).await;
+		let (broadcast, _) = cluster.publish("room/a").await;
+		let (client, _) = cluster.close("room/a", broadcast).await;
+		assert_eq!(client, [Kind::End, Kind::Start, Kind::End], "hold {hold:?}");
+	}
 }
 
 /// Relay 3 hears a broadcast published on relay 0 first over the longer, faster
@@ -505,6 +508,11 @@ async fn mesh_retracts_once() {
 /// On a lite-06 mesh each relay mints its own instance for what a neighbor
 /// announces, so the move to the late, shorter path is another instance: the
 /// watching client sees the live broadcast retracted and announced again.
+///
+/// Lite-06 keeps it. Its wire carries no instance, so a relay cannot tell a move
+/// between neighbors from its publisher restarting, and keeping the instance
+/// across the move would give a restarted broadcast its old identity. A mesh on
+/// lite-07 updates in place: [`late_better_path_updates_in_place`].
 #[kio::test]
 async fn residual_late_better_path_restarts_on_lite06() {
 	let (published, closed) = late_better_path("moq-lite-06", "moq-lite-06").await;

@@ -101,12 +101,19 @@ inline long long RunningCapKbps(const std::string &id, obs_data_t *settings)
 	return peak.kbps;
 }
 
+inline bool IsVaapi(const std::string &id)
+{
+	return id.find("vaapi") != std::string::npos;
+}
+
 // The setting that holds an encoder's free-form options, which OBS applies after its own
 // rate settings, or null when it has none.
 inline const char *EncoderOptionsKey(const std::string &id)
 {
 	if (id == "obs_x264")
 		return "x264opts";
+	if (IsVaapi(id))
+		return "ffmpeg_opts";
 	return IsNvenc(id) ? "opts" : nullptr;
 }
 
@@ -114,7 +121,9 @@ inline const char *EncoderOptionsKey(const std::string &id)
 // For x264, `vbv-maxrate` and `vbv-bufsize` replace the VBV (0 disables it), `bitrate`
 // replaces the rate mode, and `qp` or a `crf` of 0 (lossless) drops the VBV for constant QP.
 // For NVENC, `maxBitRate`, `averageBitRate`, and `vbvBufferSize` replace the rate it was
-// given. The plugin never rewrites the text, so these can override the cap.
+// given. For VA-API, whose rate mode FFmpeg infers from the settings, `rc_mode` picks
+// another and `qp` turns it into constant QP. The plugin never rewrites the text, so these
+// can override the cap.
 inline std::vector<std::string> RateOptions(const std::string &id, obs_data_t *settings)
 {
 	const char *key = EncoderOptionsKey(id);
@@ -122,6 +131,7 @@ inline std::vector<std::string> RateOptions(const std::string &id, obs_data_t *s
 	if (!key)
 		return found;
 	const bool x264 = id == "obs_x264";
+	const bool vaapi = IsVaapi(id);
 	std::istringstream input(obs_data_get_string(settings, key));
 	std::string option;
 	while (input >> option) {
@@ -132,9 +142,15 @@ inline std::vector<std::string> RateOptions(const std::string &id, obs_data_t *s
 		const size_t assign = option.find('=');
 		const bool lossless = name == "crf" && assign != std::string::npos &&
 				      std::atof(option.c_str() + assign + 1) <= 0;
-		if (x264 ? name == "vbv-maxrate" || name == "vbv-bufsize" || name == "bitrate" || name == "qp" ||
-				    lossless
-			 : name == "maxBitRate" || name == "averageBitRate" || name == "vbvBufferSize")
+		bool rate;
+		if (x264)
+			rate = name == "vbv-maxrate" || name == "vbv-bufsize" || name == "bitrate" || name == "qp" ||
+			       lossless;
+		else if (vaapi)
+			rate = name == "rc-mode" || name == "qp";
+		else
+			rate = name == "maxBitRate" || name == "averageBitRate" || name == "vbvBufferSize";
+		if (rate)
 			found.push_back(option);
 	}
 	return found;
@@ -158,8 +174,8 @@ struct MoQCap {
 //    the user wrote them, and the options in them that set a rate are reported in `overridden`.
 //  - NVENC keeps CBR and VBR, with `max_bitrate` at the cap and the average under it, and
 //    otherwise runs CQVBR (constant quality under `max_bitrate`).
-//  - Everything else runs CBR at the cap: its quality modes carry no hard peak, or depend
-//    on a driver or a Mac to check.
+//  - Everything else runs CBR at the cap: its quality modes carry no hard peak (VA-API's
+//    QVBR was measured past the cap on Mesa and Intel drivers), or need a Mac to check.
 // The quality level is the encoder's own default. An unset rate mode (a fresh dock profile)
 // takes the quality mode where there is one without being reported as replaced.
 inline MoQCap EnforceCap(const std::string &id, obs_data_t *read, obs_data_t *write, long long cap_kbps)

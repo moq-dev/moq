@@ -108,7 +108,7 @@ impl Shared {
 		let pending = this.state.lock().datagram_requests.remove(&key);
 		let producer = match pending {
 			Some((_, request)) => request.accept(info),
-			None => source.create_unlisted_datagrams(key.1, info).ok()?,
+			None => source.create_unlisted_datagrams(key.1, info)?,
 		};
 		Some(Self {
 			producer,

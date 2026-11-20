@@ -6,7 +6,7 @@ use std::{
 	time::Duration,
 };
 
-use super::{Anchor, Delay, Order, Range, Subscription, TrackState, clamp_combined};
+use super::{Anchor, Delay, Order, Position, Range, Subscription, TrackState, clamp_combined};
 
 mod ranges;
 use ranges::Ranges;
@@ -23,6 +23,10 @@ pub(super) struct Subscriptions {
 	descending: usize,
 	/// Subscribers that need the live feed; see [`Subscription::feed`].
 	feed: usize,
+	/// Where resuming subscribers resume; see [`Subscription::resume`].
+	resumes: BTreeMap<Position, usize>,
+	/// How many subscribers resume, so the aggregate asks without summing [`Self::resumes`].
+	resuming: usize,
 	/// The lowest group consumers want while no refresh is pending, never lowered.
 	wanted: u64,
 	/// A request for a group past every key written, until a group answers it or its
@@ -60,17 +64,31 @@ pub(super) enum Requested {
 }
 
 /// Everything the aggregate holds besides its ranges.
-type Scalars = (i8, Delay, Order, bool);
+type Scalars = (i8, Delay, Order, bool, Option<Position>);
 
 impl Subscriptions {
 	pub(super) fn combined(&self) -> Option<Subscription> {
-		let (priority, delay, order, feed) = self.scalars()?;
+		let (priority, delay, order, feed, resume) = self.scalars()?;
 		Some(Subscription {
 			priority,
 			delay,
 			ranges: self.ranges.union(),
 			order,
 			feed,
+			resume,
+		})
+	}
+
+	/// [`Self::combined`] without its ranges, costing none of them.
+	pub(super) fn terms(&self) -> Option<Subscription> {
+		let (priority, delay, order, feed, resume) = self.scalars()?;
+		Some(Subscription {
+			priority,
+			delay,
+			ranges: Vec::new(),
+			order,
+			feed,
+			resume,
 		})
 	}
 
@@ -96,6 +114,11 @@ impl Subscriptions {
 					Order::Descending
 				},
 				self.feed != 0,
+				// A subscriber asking for the whole group outweighs any resuming one.
+				match self.resuming == self.count {
+					true => self.resumes.first_key_value().map(|(resume, _)| *resume),
+					false => None,
+				},
 			)
 		})
 	}
@@ -264,6 +287,10 @@ impl Subscriptions {
 			}
 			self.descending += usize::from(new.order == Order::Descending);
 			self.feed += usize::from(new.feed);
+			if let Some(resume) = new.resume {
+				add(&mut self.resumes, resume);
+				self.resuming += 1;
+			}
 			self.count += 1;
 		}
 		if let Some(old) = &old {
@@ -277,6 +304,10 @@ impl Subscriptions {
 			}
 			self.descending -= usize::from(old.order == Order::Descending);
 			self.feed -= usize::from(old.feed);
+			if let Some(resume) = old.resume {
+				remove(&mut self.resumes, resume);
+				self.resuming -= 1;
+			}
 			self.count -= 1;
 		}
 		if reshaped || self.scalars() != prev {
@@ -336,6 +367,7 @@ pub(super) struct Contribution {
 	delay: Delay,
 	order: Order,
 	feed: bool,
+	resume: Option<Position>,
 }
 
 impl Contribution {
@@ -364,6 +396,7 @@ pub(in crate::model) struct Prefs {
 	pub delay: Delay,
 	pub order: Order,
 	pub feed: bool,
+	pub resume: Option<Position>,
 	/// In key order, which is the order given: a whole replacement keys by position, and each
 	/// key an edit adds is past every key before it.
 	ranges: BTreeMap<u64, Range>,
@@ -386,6 +419,7 @@ impl Prefs {
 			delay: value.delay,
 			order: value.order,
 			feed: value.feed,
+			resume: value.resume,
 			ranges: BTreeMap::new(),
 			joining: 0,
 			revision: 0,
@@ -406,6 +440,7 @@ impl Prefs {
 			ranges: self.ranges.values().copied().collect(),
 			order: self.order,
 			feed: self.feed,
+			resume: self.resume,
 		}
 	}
 
@@ -446,6 +481,7 @@ impl Prefs {
 			delay: self.delay,
 			order: self.order,
 			feed: self.feed,
+			resume: self.resume,
 		}
 	}
 
@@ -473,10 +509,23 @@ impl Prefs {
 		}
 	}
 
+	/// Key the ranges by `keys`, one per range in the order held, keeping each range: every
+	/// reader resolves them all again.
+	fn rekey(&mut self, keys: impl IntoIterator<Item = u64>) {
+		let ranges = std::mem::take(&mut self.ranges);
+		let count = ranges.len();
+		self.ranges = keys.into_iter().zip(ranges.into_values()).collect();
+		debug_assert_eq!(self.ranges.len(), count, "one key per range");
+		self.revision += 1;
+		self.log.clear();
+		self.base = self.revision;
+	}
+
 	/// Replace every preference, rekeying the ranges by position when they change: every
 	/// reader resolves them all again.
 	fn replace(&mut self, next: Subscription) {
-		(self.priority, self.delay, self.order, self.feed) = (next.priority, next.delay, next.order, next.feed);
+		(self.priority, self.delay, self.order, self.feed, self.resume) =
+			(next.priority, next.delay, next.order, next.feed, next.resume);
 		if self.ranges.values().eq(&next.ranges) {
 			return;
 		}
@@ -532,6 +581,7 @@ impl Preferences {
 			delay: next.delay,
 			order: next.order,
 			feed: next.feed,
+			resume: next.resume,
 		};
 		if contribution == next_contribution && old == next.ranges {
 			return Ok(());
@@ -599,6 +649,14 @@ impl Preferences {
 }
 
 impl Preferences {
+	/// Key the ranges by `keys`, one per range in the order held, as [`Edit`]s then name
+	/// them. The ranges stay as they are, so the aggregate does too.
+	pub(in crate::model) fn rekey(&self, keys: impl IntoIterator<Item = u64>) -> crate::Result<()> {
+		let mut value = self.0.value.write().map_err(|_| crate::Error::Closed)?;
+		value.rekey(keys);
+		Ok(())
+	}
+
 	pub(in crate::model) fn same_channel(&self, other: &Self) -> bool {
 		self.0.value.same_channel(&other.0.value)
 	}
@@ -701,6 +759,9 @@ mod tests {
 					Order::Descending
 				},
 				feed: rng.random_bool(0.25),
+				resume: rng
+					.random_bool(0.5)
+					.then(|| Position::new(rng.random_range(0..8), rng.random_range(1..4))),
 			};
 			match (&mut slots[index], rng.random_range(0..3)) {
 				(slot @ None, _) => *slot = Some((producer.subscribe(next.clone()), next)),

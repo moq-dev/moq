@@ -48,6 +48,7 @@ try {
 		const track = subscriber.consume(Path.from("room")).track("data").subscribe();
 		try {
 			const request = await Stream.accept(pair.server, version);
+			if (!request) throw new Error("the group was already answered");
 			assert(request);
 			assert.equal(await request.reader.u53(), Subscribe.id);
 			await Subscribe.decode(request.reader, version);

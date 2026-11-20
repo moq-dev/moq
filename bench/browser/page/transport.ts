@@ -39,6 +39,7 @@ async function publish(config: Transport): Promise<void> {
 		timescale: Moq.Time.Timescale.MILLI,
 		maxAge: Duration.millis(600_000),
 	});
+	if (!track) throw new Error("the track already exists");
 	const demand = track.demand().wanted;
 	publication.announce();
 	const connection = await Moq.Connection.connect({
