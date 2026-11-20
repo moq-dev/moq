@@ -289,6 +289,9 @@ export class Reload {
 	/** Protocol versions to offer, most preferred first, kept across retries and redirects. */
 	readonly versions?: readonly string[];
 
+	/** The URL query parameter that carries the connection credential (not reactive); see {@link ConnectProps.credentialParam}. */
+	readonly credentialParam?: string;
+
 	/** WebTransport options applied to each connection attempt (not reactive). */
 	webtransport?: WebTransportProps;
 
@@ -413,6 +416,7 @@ export class Reload {
 		this.goaway = props?.goaway ?? {};
 		this.redirect = this.#redirect;
 		this.versions = normalizeVersions(props);
+		this.credentialParam = props?.credentialParam;
 		this.webtransport = props?.webtransport;
 		this.websocket = props?.websocket;
 		// Validated here, like the versions, rather than by every attempt.
@@ -605,6 +609,7 @@ export class Reload {
 							{
 								url: dialing,
 								tokens,
+								credentialParam: this.credentialParam,
 								// A redirect names the relay; a fallback URL pinned for the old one does not follow.
 								websocket: this.#redirect.peek()
 									? { ...this.websocket, url: undefined }
@@ -810,6 +815,7 @@ export class Reload {
 				await sleep(delay.mul(0.5 + Math.random() / 2), { signal });
 				const props = {
 					tokens: this.tokens.peek(),
+					credentialParam: this.credentialParam,
 					versions: this.versions,
 					webtransport: this.webtransport,
 					websocket: this.#redirect.peek() ? undefined : this.websocket,

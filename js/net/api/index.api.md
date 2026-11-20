@@ -161,6 +161,7 @@ export namespace Connection {
 	export interface ConnectProps {
 		auth?: Auth.Handle;
 		consume?: Origin.Producer;
+		credentialParam?: string;
 		implementation?: string;
 		publish?: Origin.Consumer;
 		signal?: AbortSignal;
@@ -188,6 +189,7 @@ export namespace Connection {
 	export interface Props {
 		backoff?: Connection.Backoff;
 		consume?: Origin.Producer;
+		credentialParam?: string;
 		enabled?: boolean | Signals.Signal<boolean>;
 		goaway?: Connection.Handover;
 		publish?: Origin.Consumer;

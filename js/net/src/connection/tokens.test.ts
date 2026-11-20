@@ -9,16 +9,19 @@ import type { Session } from "./session.ts";
 import { credential, extra, fallback, Held, hold } from "./tokens.ts";
 
 const URL_ = new URL("https://relay.example.com/room");
+// Every offered version carries a SETUP token, or one does not and the URL carries it too.
+const SETUP = { setupToken: true };
+const URL_CARRIED = { setupToken: false };
 
 test("versions with a SETUP token keep the credential out of the URL", () => {
-	const dial = credential(URL_, ["a", "b"], true);
+	const dial = credential(URL_, ["a", "b"], SETUP);
 	expect(dial.url.href).toBe(URL_.href);
 	expect(dial.setup).toBe("a");
 	expect(extra(dial, ["a", "b", "b"])).toEqual(["b"]);
 });
 
 test("an older offered version puts the credential in the URL too", () => {
-	const dial = credential(new URL("https://relay.example.com/room?x=1"), ["a b"], false);
+	const dial = credential(new URL("https://relay.example.com/room?x=1"), ["a b"], URL_CARRIED);
 	expect(dial.url.href).toBe("https://relay.example.com/room?x=1&jwt=a+b");
 	expect(dial.setup).toBe("a b");
 	expect(extra(dial, ["a b"])).toEqual([]);
@@ -26,7 +29,7 @@ test("an older offered version puts the credential in the URL too", () => {
 
 test("a URL credential sends every other token on AUTH", () => {
 	const url = new URL("https://relay.example.com/room?jwt=peer");
-	const dial = credential(url, ["a", "peer"], false);
+	const dial = credential(url, ["a", "peer"], URL_CARRIED);
 	expect(dial.url.href).toBe(url.href);
 	expect(dial.setup).toBeUndefined();
 	expect(extra(dial, ["a", "peer"])).toEqual(["a"]);
@@ -35,20 +38,41 @@ test("a URL credential sends every other token on AUTH", () => {
 test("a WebSocket fallback presents the credential its own URL decides", () => {
 	const ws = new URL("wss://ws.example.com/room");
 	// Its own `jwt` is its connection credential, so the configured token rides AUTH, not SETUP.
-	const own = fallback(URL_, new URL("wss://ws.example.com/room?jwt=b"), ["a"], true);
+	const own = fallback(URL_, new URL("wss://ws.example.com/room?jwt=b"), ["a"], SETUP);
 	expect(own.setup).toBeUndefined();
 	expect(extra(own, ["a"])).toEqual(["a"]);
 	// Without one it inherits the primary URL's, or else takes the configured tokens.
-	expect(fallback(new URL("https://relay.example.com/room?jwt=p"), ws, ["a"], true).url.href).toBe(
+	expect(fallback(new URL("https://relay.example.com/room?jwt=p"), ws, ["a"], SETUP).url.href).toBe(
 		`${ws.href}?jwt=p`,
 	);
-	const configured = fallback(URL_, ws, ["a"], false);
+	const configured = fallback(URL_, ws, ["a"], URL_CARRIED);
 	expect(configured.url.href).toBe(`${ws.href}?jwt=a`);
 	expect(configured.setup).toBe("a");
 });
 
+test("a credential parameter carries the first token alone, in place of SETUP and jwt", () => {
+	const carrier = { setupToken: false, param: "credential" };
+	const url = new URL("https://relay.example.com/room?x=1&credential=stale");
+	const dial = credential(url, ["a b", "c"], carrier);
+	// Replaced, not repeated, and never also in SETUP.
+	expect(dial.url.href).toBe("https://relay.example.com/room?x=1&credential=a+b");
+	expect(dial.setup).toBeUndefined();
+	expect(dial.connection).toBe("a b");
+	expect(extra(dial, ["a b", "c"])).toEqual(["c"]);
+	// The configured URL is untouched, so a new credential for each dial changes no key.
+	expect(url.searchParams.get("credential")).toBe("stale");
+
+	// A URL's own jwt still decides, and the WebSocket fallback follows the same carrier.
+	const peer = credential(new URL("https://relay.example.com/room?jwt=peer"), ["a"], carrier);
+	expect(peer.url.searchParams.get("credential")).toBeNull();
+	expect(peer.connection).toBe("peer");
+	const ws = fallback(URL_, new URL("wss://ws.example.com/room"), ["a"], carrier);
+	expect(ws.url.href).toBe("wss://ws.example.com/room?credential=a");
+	expect(ws.setup).toBeUndefined();
+});
+
 test("no tokens present nothing", () => {
-	const dial = credential(URL_, [], false);
+	const dial = credential(URL_, [], URL_CARRIED);
 	expect(dial.url.href).toBe(URL_.href);
 	expect(dial.setup).toBeUndefined();
 });
@@ -89,7 +113,7 @@ function handle() {
 
 test("a replaced token is withdrawn only once its replacement answers", async () => {
 	const { fake, answers, closed, answer } = handle();
-	const held = new Held(fake, credential(URL_, ["connection"], true));
+	const held = new Held(fake, credential(URL_, ["connection"], SETUP));
 	held.update(["connection", "old"]);
 	expect([...answers.keys()]).toEqual(["old"]);
 	await answer("old");
@@ -104,7 +128,7 @@ test("a replaced token is withdrawn only once its replacement answers", async ()
 
 test("a token replaced before its answer is withdrawn at once", async () => {
 	const { fake, closed, answer } = handle();
-	const held = new Held(fake, credential(URL_, ["connection"], true));
+	const held = new Held(fake, credential(URL_, ["connection"], SETUP));
 	held.update(["connection", "old"]);
 	await answer("old");
 	held.update(["connection", "first"]);
@@ -119,12 +143,12 @@ test("sessions sharing an auth handle present each configured token once", async
 	const { fake, closed, presented, answer } = handle();
 	const first = { auth: fake } as unknown as Session;
 	const second = { auth: fake } as unknown as Session;
-	hold(first, credential(URL_, ["connection", "a"], true), ["connection", "a"]);
+	hold(first, credential(URL_, ["connection", "a"], SETUP), ["connection", "a"]);
 	await answer("a");
 
 	// A reconnect on the same handle, whose credential now comes from the URL.
 	const url = new URL("https://relay.example.com/room?jwt=peer");
-	hold(second, credential(url, ["connection", "a"], true), ["connection", "a"]);
+	hold(second, credential(url, ["connection", "a"], SETUP), ["connection", "a"]);
 	expect(presented).toEqual(["a", "connection"]);
 	expect(closed).toEqual([]);
 });

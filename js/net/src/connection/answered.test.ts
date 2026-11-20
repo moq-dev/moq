@@ -143,6 +143,65 @@ test("a close that refuses the connection credential answers a session without A
 	}
 });
 
+test("a credential in a URL parameter is judged for each dial like a token", async () => {
+	using clock = manual();
+	const original = globalThis.WebTransport;
+	const dialed: URL[] = [];
+	const served: MockTransport[] = [];
+	// A relay that reads its credential from the URL and refuses "revoked" in band.
+	globalThis.WebTransport = function StubWebTransport(target: string | URL) {
+		const url = new URL(target);
+		dialed.push(url);
+		const pair = createMockTransportPair(Lite.ALPN_07_WIP);
+		served.push(pair.server);
+		void acceptSession({ transport: pair.server, url }).then(async (session) => {
+			const requests = session.auth.requests();
+			for (;;) {
+				const request = await requests.next();
+				if (!request) break;
+				if (url.searchParams.get("credential") === "revoked") {
+					request.reject(SessionCode.Unauthorized, "no");
+					pair.server.close({ closeCode: SessionCode.Unauthorized, reason: "no" });
+				} else request.accept(GRANT);
+			}
+		});
+		return pair.client;
+	} as unknown as typeof WebTransport;
+	const tokens = new Signal<readonly string[]>(["first"]);
+	const reload = new Reload({
+		url: URL_,
+		versions: ["moq-lite-07-wip"],
+		websocket: { enabled: false },
+		tokens,
+		credentialParam: "credential",
+		backoff: DELAY,
+	});
+	try {
+		await clock.drive(reload.answered());
+		expect(dialed[0]?.searchParams.get("credential")).toBe("first");
+		expect(dialed[0]?.searchParams.has("jwt")).toBe(false);
+		// The configured URL stays the key, so a new credential never starts another sequence.
+		expect(reload.url.peek()?.href).toBe(URL_.href);
+
+		// The relay drops the session; the redial presents the replacement, which it refuses.
+		served[0]?.close({ closeCode: 0, reason: "restart" });
+		await clock.drive(waitFor(reload.established, (established) => established === undefined));
+		tokens.set(["revoked"]);
+		const err = await clock.drive(refusal(reload.answered()));
+		expect(err?.code).toBe(SessionCode.Unauthorized);
+		expect(dialed.at(-1)?.searchParams.get("credential")).toBe("revoked");
+
+		// The loop is still live, and the next credential is judged on its own.
+		tokens.set(["second"]);
+		await clock.drive(reload.answered());
+		expect(dialed.at(-1)?.searchParams.get("credential")).toBe("second");
+		expect(reload.error.peek()).toBeUndefined();
+	} finally {
+		reload.close();
+		globalThis.WebTransport = original;
+	}
+});
+
 test("a lite-07 session up past the healthy bar without an AUTH_OK never reads as connected", async () => {
 	using clock = manual();
 	const original = globalThis.WebTransport;

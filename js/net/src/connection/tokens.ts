@@ -15,21 +15,31 @@ export interface Presentation {
 	connection?: string;
 }
 
+/** Where a dial carries its connection credential. @internal */
+export interface Carrier {
+	/** Whether every offered version carries a SETUP token, so the URL needs none. */
+	setupToken: boolean;
+	/** The URL query parameter that carries it in place of SETUP and `jwt`. */
+	param?: string;
+}
+
 /**
  * Decide what one dial presents.
  *
  * A URL that already carries a `jwt` keeps it (a per-peer credential), so every token rides
- * AUTH. Otherwise the first token is the connection credential: it rides SETUP, and the URL
- * too when `setupToken` is false, since the URL is fixed before the version is negotiated.
+ * AUTH. Otherwise the first token is the connection credential: it rides the carrier's
+ * `param` alone when it names one, else SETUP, and the URL's `jwt` too when no `setupToken`
+ * is carried, since the URL is fixed before the version is negotiated.
  *
  * @internal
  */
-export function credential(url: URL, tokens: readonly string[], setupToken: boolean): Presentation {
+export function credential(url: URL, tokens: readonly string[], carrier: Carrier): Presentation {
 	const jwt = url.searchParams.get("jwt");
 	if (jwt) return { url, connection: jwt };
 	const first = tokens[0];
 	if (first === undefined) return { url };
-	return { url: setupToken ? url : withJwt(url, first), setup: first, connection: first };
+	if (carrier.param !== undefined) return { url: withParam(url, carrier.param, first), connection: first };
+	return { url: carrier.setupToken ? url : withJwt(url, first), setup: first, connection: first };
 }
 
 /**
@@ -41,16 +51,23 @@ export function credential(url: URL, tokens: readonly string[], setupToken: bool
  *
  * @internal
  */
-export function fallback(primary: URL, url: URL, tokens: readonly string[], setupToken: boolean): Presentation {
+export function fallback(primary: URL, url: URL, tokens: readonly string[], carrier: Carrier): Presentation {
 	const inherited = primary.searchParams.get("jwt");
-	if (inherited && !url.searchParams.get("jwt")) return credential(withJwt(url, inherited), tokens, setupToken);
-	return credential(url, tokens, setupToken);
+	if (inherited && !url.searchParams.get("jwt")) return credential(withJwt(url, inherited), tokens, carrier);
+	return credential(url, tokens, carrier);
 }
 
 /** `url` with `jwt` appended to its query. @internal */
 function withJwt(url: URL, jwt: string): URL {
 	const next = new URL(url);
 	next.searchParams.append("jwt", jwt);
+	return next;
+}
+
+/** `url` with `param` set to `value`, replacing any it carried, so a credential never repeats. */
+function withParam(url: URL, param: string, value: string): URL {
+	const next = new URL(url);
+	next.searchParams.set(param, value);
 	return next;
 }
 
