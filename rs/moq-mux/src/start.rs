@@ -73,4 +73,3 @@ pub(crate) fn after(track: &moq_net::track::Producer, timestamp: moq_net::Timest
 		(start, _, _) => Ok(start.value()),
 	}
 }
-

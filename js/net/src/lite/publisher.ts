@@ -2638,7 +2638,8 @@ export class Publisher {
 			}
 
 			// Lite-07 ends a whole group with GROUP_END.
-			if (hasGroupEnd(this.version) && whole && group.whole) await write(() => stream.write(groupEnd(stream.version)));
+			if (hasGroupEnd(this.version) && whole && group.whole)
+				await write(() => stream.write(groupEnd(stream.version)));
 			stream.close();
 			group.close();
 			// A stream that fails after its FIN may have lost its header, so report it for a DROP.

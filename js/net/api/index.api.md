@@ -400,7 +400,6 @@ export namespace Group {
 		close(): void;
 		get closed(): Signals.GetPromise<Error | null>;
 		get done(): boolean;
-		get end(): bigint | undefined;
 		get frameCount(): number;
 		nextFrame(): Promise<Frame.Consumer | undefined>;
 		readFrame(): Promise<Group.Frame | undefined>;
@@ -415,6 +414,7 @@ export namespace Group {
 		tryReadFrameIndex(): {
 			index: number;
 		} & Group.Frame | undefined;
+		get whole(): boolean;
 	}
 	export interface Finished {
 		readonly closed: Signals.GetPromise<Error | null>;
@@ -436,7 +436,7 @@ export namespace Group {
 		consume(): Group.Consumer;
 		createFrame(info: Frame.Info): Frame.Producer;
 		finish(): Group.Finished;
-		finishAt(end: bigint): Group.Finished;
+		finishWhole(): Group.Finished;
 		readonly start: bigint;
 		writeFrame(frame: Group.Frame): void;
 	}
