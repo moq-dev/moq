@@ -544,11 +544,7 @@ async fn connect_tls_override(
 	if let Some(stats) = stats {
 		upgraded = upgraded.with_socket_stats(stats);
 	}
-	upgraded
-		.connect()
-		.await
-		.map(crate::spawn_qmux)
-		.map_err(Error::connect)
+	upgraded.connect().await.map(crate::spawn_qmux).map_err(Error::connect)
 }
 
 /// The most response header bytes [`upgrade`] reads before giving up on the server.
@@ -840,11 +836,7 @@ impl Listener {
 			if let Some(stats) = stats {
 				upgraded = upgraded.with_socket_stats(stats);
 			}
-			let session = upgraded
-				.accept()
-				.await
-				.map(crate::spawn_qmux)
-				.map_err(Error::accept)?;
+			let session = upgraded.accept().await.map(crate::spawn_qmux).map_err(Error::accept)?;
 			Ok((session, url, Accepted { remote: addr, protocol }))
 		}
 	}
