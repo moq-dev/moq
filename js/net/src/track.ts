@@ -4232,16 +4232,19 @@ export class Subscriber {
 	// {@link #drained}. A wire publisher's reader never ends there.
 	#exhausted(): boolean {
 		if (this.#parks) return false;
-		if (this.#resume) return this.#resume.exhausted(this.#delivered);
-		return this.#drained([this.#delivered]);
+		const ordered = this.#mode === "ordered";
+		if (this.#resume) return this.#resume.exhausted(this.#delivered, ordered);
+		return this.#drained([this.#delivered], ordered);
 	}
 
 	// Whether a bounded window has nothing left to deliver: every group in its ranges was handed
 	// out (in any of `taken`), dropped, or never will be, as one skipped as stale, one below where
 	// the feed started, or a hole the feed no longer owes. An open window always has more, and so
-	// does one the cap keeps a group out of, since the reader may raise it again. Mirrors the
-	// Rust `Cursor::is_exhausted`.
-	#drained(taken: readonly Delivered[]): boolean {
+	// does one the cap keeps a group out of, since the reader may raise it again. A local
+	// producer may still create any group it did not skip, so only an `ordered` read, which hands
+	// out the group it created above a hole before any created later below, passes that hole.
+	// Mirrors the Rust `Cursor::is_exhausted`.
+	#drained(taken: readonly Delivered[], ordered: boolean): boolean {
 		const end = this.#window.end();
 		if (end === undefined) return false;
 		// A fill still owes a group it reads.
@@ -4250,6 +4253,7 @@ export class Subscriber {
 		const cursor = this.#cursor.peek();
 		const producer = this.#state.producer;
 		const received = max(this.#state.received.peek(), ((producer && fillEdge(producer)) ?? -1n) + 1n);
+		const local = producer !== undefined && !wireFed(producer);
 		// A received stale run that does not settle this reader is unknown to it (see `settles`):
 		// the reader still wants those groups, however the feed accounted for them.
 		const budget = this.#drift().budget;
@@ -4269,15 +4273,19 @@ export class Subscriber {
 				}));
 				const drops = overlapping.filter((run) => settles(run, budget, coverage));
 				const unknown = overlapping.filter((run) => !settles(run, budget, coverage));
-				for (const open of runGaps(drops, gap.start, gap.end)) {
+				// A miss this reader gave up on is never wanted again.
+				const opens = runGaps(drops, gap.start, gap.end).flatMap((run) =>
+					runGaps(this.#givenUp, run.start, run.end),
+				);
+				for (const open of opens) {
 					if (unknown.some((run) => run.start < open.end && open.start < run.end)) return false;
 					// Cached under the local floor, which lowering offers again, unless a key-order read
 					// already passed it: an ordered take let go of it, so it is not held.
 					const under = { start: max(open.start, this.#nextKey), end: min(open.end, cursor.start) };
 					if (producer && under.start < under.end && cachedIn(producer, under.start, under.end).length > 0)
 						return false;
-					// Not received yet, so it may still arrive.
-					if (open.end > received) return false;
+					// Not received yet, so it may still arrive; a local producer may still create it.
+					if (open.end > received || (local && !ordered)) return false;
 					// Held, so a read still hands it out, skips it, or waits for the cap to rise.
 					const index = timelineIndex(held, open.start);
 					if (held[index] && held[index].start < open.end) return false;
@@ -4327,10 +4335,10 @@ export class Subscriber {
 		};
 		// A route copy judged for the logical reader that handed out `delivered`: what the copy
 		// handed out itself counts too. A copy that is itself a front judges across its own copies.
-		hooks.exhaustedFor = (subscriber, delivered) =>
+		hooks.exhaustedFor = (subscriber, delivered, ordered) =>
 			subscriber.#resume
-				? subscriber.#resume.exhausted(subscriber.#delivered.union(delivered))
-				: subscriber.#drained([subscriber.#delivered, delivered]);
+				? subscriber.#resume.exhausted(subscriber.#delivered.union(delivered), ordered)
+				: subscriber.#drained([subscriber.#delivered, delivered], ordered);
 		hooks.tryDrop = (subscriber) => subscriber.#tryDrop();
 		// A reader following route copies leaves its ranges to the serving copy, which resolves
 		// their anchors against the groups it holds, then narrows them to its own local bounds.
@@ -5111,7 +5119,11 @@ export class Subscriber {
 					}
 				}
 				this.#handOut(recv.group.start, ordered);
-			} else if (recv.kind === "idle" && this.#exhausted()) return { kind: "done" };
+			} else if (recv.kind === "done" || (recv.kind === "idle" && this.#exhausted())) {
+				// As the Rust front's reader: whatever ended it, an ordered read passed its range.
+				if (ordered) this.#passEnd();
+				return { kind: "done" };
+			}
 			return recv;
 		}
 	}
@@ -5348,6 +5360,35 @@ export class Subscriber {
 		return undefined;
 	}
 
+	// Pass every key below the bounded window's end for good, as an ordered read that ran out of it:
+	// a group created there later is late, so later reads end at once too. Only below the cap: a read
+	// that ran out under a lowered cap still owes what lies above it. Mirrors the Rust
+	// `Cursor::pass_end`.
+	#passEnd(): void {
+		// A resumed reader's ranges resolve on the copy serving it.
+		const window = this.#resume ? this.#resume.servingEnd() : this.#window.end();
+		if (window === undefined) return;
+		const cap = this.#cursor.peek().end;
+		const end = cap === undefined ? window : min(cap, window);
+		// Passing the keys hands them out as far as #delivered knows, so first take what the copies
+		// gave up there, as a group handed out does.
+		if (this.#resume) {
+			for (
+				let drop = this.#resume.tryDrop(this.#delivered, end);
+				drop;
+				drop = this.#resume.tryDrop(this.#delivered, end)
+			) {
+				this.#queueResumedDrop(drop);
+			}
+		}
+		const floor = this.#delivered.runEnd(0n) ?? 0n;
+		this.#delivered.forgetBelow(end);
+		const forgot = this.#delivered.runEnd(0n) ?? 0n;
+		if (forgot > floor) this.#stoppedReading(floor, forgot);
+		if (!this.#resume) this.#nextKey = max(this.#nextKey, end);
+		this.#fold(forgot);
+	}
+
 	// Take `given` from the gap at `index` as an item, which the read has now moved past. What lies
 	// below `given`, which the bounds leave out, and from `resume` on stay gaps.
 	#takeGap(items: Items, index: number, given: Run, resume: bigint): Item {
@@ -5572,7 +5613,10 @@ export class Subscriber {
 		const end = this.#state.end.peek()?.at;
 		// A time start still looked up may yet take in a group held already.
 		if (this.#window.lookups().length > 0) return { kind: "idle" };
-		if (this.#exhausted()) return { kind: "done" };
+		if (this.#exhausted()) {
+			this.#passEnd();
+			return { kind: "done" };
+		}
 		if (
 			!this.#parked(groups) &&
 			!this.#starting(groups, start) &&
@@ -5849,8 +5893,11 @@ export class Ordered {
 	 * group whose every frame is further behind the live edge than `delay.max` (the default
 	 * subscription's zero keeps only what nothing newer has superseded). Honors the bounds set by
 	 * {@link withRange}. Like {@link Subscriber.recvGroup}, a read whose ranges all end
-	 * finishes once nothing in them is left to deliver. Later reads return `undefined`
-	 * immediately too; widening the ranges with {@link update} reads on above the last key returned.
+	 * finishes once nothing in them is left to deliver; on a local track that includes a key
+	 * below a group the producer created, which this read hands out first. Later reads return `undefined`
+	 * immediately too; widening the ranges with {@link update} reads on above the end the read
+	 * passed (or the cap, when that was lower), so a group created below that end afterward is
+	 * never handed out.
 	 */
 	nextGroup(): Promise<GroupConsumer | undefined> {
 		return ordered_.nextGroup(this.#subscriber);

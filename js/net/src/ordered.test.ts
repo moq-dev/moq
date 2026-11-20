@@ -5,8 +5,8 @@ import { Duration, now, sleep } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { StreamCode, StreamError } from "./error.ts";
 import { hooks, staleHole } from "./internal.ts";
-import { textFrame } from "./mock.ts";
-import { Timestamp } from "./time.ts";
+import { manual, settlesWithin, textFrame } from "./mock.ts";
+import { Timescale, Timestamp } from "./time.ts";
 import { type Ordered, Producer as TrackProducer } from "./track.ts";
 
 // A session-fed copy owes holes; an in-process producer does not.
@@ -435,3 +435,80 @@ test("a read returning only gaps keeps its handed-out record compact", () => {
 	}
 	expect(hooks.deliveredRuns(sub)).toBe(1);
 });
+
+// Mirrors the Rust `a_time_end_between_*` tests in `track.rs`.
+const between = { ranges: [{ start: { time: 1500n }, end: { time: 1999n } }], delay: { max: Duration.millis(30_000) } };
+
+test("a time end between two groups ends an ordered read once the publisher created one past it", async () => {
+	using clock = manual();
+	const producer = new TrackProducer("test");
+	const ordered = producer.subscribe(between).ordered();
+	const arrival = producer.subscribe(between);
+	put(producer, 1000n, false);
+	expect((await ordered.nextGroup())?.start).toBe(1000n);
+	expect((await arrival.recvGroup())?.start).toBe(1000n);
+	const end = ordered.nextGroup();
+	expect(await settlesWithin(end, clock)).toBe(false);
+	// Handing out 2000 would pass every start below it; an arrival read waits, since 1500 may still come.
+	put(producer, 2000n, false);
+	expect(await end).toBeUndefined();
+	const waiting = arrival.recvGroup();
+	expect(await settlesWithin(waiting, clock)).toBe(false);
+	// The ended read passed every key below its end: a group created there now is late.
+	put(producer, 1500n, false);
+	expect(await ordered.nextGroup()).toBeUndefined();
+	expect((await waiting)?.start).toBe(1500n);
+
+	// A group created between before a read reaches the end is still read. The time start now
+	// resolves to 1500, which contains it.
+	const later = producer.subscribe(between).ordered();
+	expect((await later.nextGroup())?.start).toBe(1500n);
+	put(producer, 1600n, false);
+	expect((await later.nextGroup())?.start).toBe(1600n);
+	expect(await later.nextGroup()).toBeUndefined();
+});
+
+test("a time end between appended groups ends either read at once", async () => {
+	const producer = new TrackProducer("test");
+	for (const key of [1000n, 2000n]) {
+		const group = producer.appendGroup(Timestamp.unscaled(key));
+		group.writeFrame(textFrame("x", Timestamp.unscaled(key)));
+		group.finish();
+	}
+	const arrival = producer.subscribe(between);
+	expect((await arrival.recvGroup())?.start).toBe(1000n);
+	expect(await arrival.recvGroup()).toBeUndefined();
+	const ordered = producer.subscribe(between).ordered();
+	expect((await ordered.nextGroup())?.start).toBe(1000n);
+	expect(await ordered.nextGroup()).toBeUndefined();
+});
+
+test("a time end between received groups ends an ordered read only once the skip is proven", async () => {
+	using clock = manual();
+	const producer = receivedTrack();
+	put(producer, 1000n, false);
+	put(producer, 2000n, false);
+	const ordered = producer.subscribe(between).ordered();
+	expect((await ordered.nextGroup())?.start).toBe(1000n);
+	const end = ordered.nextGroup();
+	expect(await settlesWithin(end, clock)).toBe(false);
+	producer.skipGroups(1001n, 2000n);
+	expect(await end).toBeUndefined();
+});
+
+// Mirrors the Rust `an_ordered_read_ended_past_a_stale_group_reports_it_first`.
+test("an ordered read whose window ends past a group it passed as stale reports it first", () =>
+	withClock((clock) => {
+		const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
+		const first = producer.createGroup(0n);
+		first.writeFrame(textFrame("x", Timestamp.fromMillis(0)));
+		first.finishAt(10n);
+		clock.jump(Duration.millis(100));
+		put(producer, 100n);
+		const ordered = producer
+			.subscribe({ delay: { max: Duration.millis(50) }, ranges: [{ start: { time: 0n }, end: { time: 49n } }] })
+			.ordered();
+		expect(items(ordered)).toEqual(["gap 0..1 (old)"]);
+		expect(ordered.tryNextItem()).toBeUndefined();
+		expect(ordered.tryNextGroup()).toBeUndefined();
+	}));

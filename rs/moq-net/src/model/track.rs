@@ -9292,7 +9292,11 @@ impl Cursor {
 	/// cap keeps a group out of, since a reader may raise a cap again. Groups under `from` are
 	/// not judged: a time start resolves to the group containing it, which may lie under a
 	/// copy's resume point.
-	fn is_exhausted(&self, logical: &[&Delivered], from: u64) -> bool {
+	///
+	/// An `ordered` read of the track's own publisher also passes a key below a group that
+	/// publisher created (see [`Self::passes`]). A received copy never does: only what its
+	/// feed proved, such as a GROUP's Previous Start, accounts for a key there.
+	fn is_exhausted(&self, logical: &[&Delivered], from: u64, ordered: bool) -> bool {
 		let taken: Vec<&Delivered> = std::iter::once(&self.record.delivered)
 			.chain(logical.iter().copied())
 			.collect();
@@ -9306,6 +9310,7 @@ impl Cursor {
 		let coverage = self.coverage();
 		let state = self.state.read();
 		let budget = clamp_max_delay(self.subscription.read().budget(), state.max_age_bound());
+		let passes = ordered && !state.anchors.received();
 		let accounted = |gap: ops::Range<u64>| {
 			let mut left = RangeSet::new();
 			left.insert(gap.clone());
@@ -9329,7 +9334,7 @@ impl Cursor {
 			for key in self.seek_pending.range(gap).map(|(key, _)| *key) {
 				left.remove(key..key + 1);
 			}
-			left.is_empty()
+			left.iter().all(|open| passes && Self::passes(&state, open))
 		};
 		self.filter
 			.window
@@ -9339,6 +9344,15 @@ impl Cursor {
 				let run = *run.start()..run.end().checked_add(1).map_or(end, |next| next.min(end));
 				Delivered::gaps_in_all(&taken, run).into_iter().all(&accounted)
 			})
+	}
+
+	/// Whether an ordered read of its track's own publisher passes `gap` without a group: that
+	/// publisher created one at its last key or past it, which the read hands out (or would,
+	/// were it in range and still held) before any created later below it, and no group the
+	/// read may still hand out, or wait on a cap for, lies in it.
+	fn passes(state: &TrackState, gap: &ops::Range<u64>) -> bool {
+		state.max_key.is_some_and(|max| max >= gap.end - 1)
+			&& !state.lookup.range(gap.clone()).any(|(_, slot)| slot.visible)
 	}
 
 	/// Whether group `key`, at or above [`Self::floor`], is one this cursor reads now:
@@ -10230,6 +10244,15 @@ impl Cursor {
 		self.forget_heads_below(floor);
 	}
 
+	/// Pass every key below `end` for good, as an ordered read whose bounded window ran out
+	/// at `end`, or at its cap below that: a group created there later is late, so later reads
+	/// end at once too. The groups it stepped over as stale are given up for good with them.
+	fn pass_end(&mut self, end: u64) {
+		self.commit_seek_stale(end);
+		self.skip_ordered(end);
+		self.record.delivered.forget_below(end);
+	}
+
 	/// Let go of the heads asked below `next`, which an ordered read never goes back for:
 	/// one still out would keep the read waiting on a fill it no longer polls.
 	fn forget_heads_below(&mut self, next: u64) {
@@ -10734,8 +10757,13 @@ impl Subscriber {
 						Poll::Pending => {
 							// A read that only skipped since its last hand-out settles its write-offs too.
 							cursor.retire_written_off();
-							break match !self.parks && cursor.is_exhausted(&[], 0) {
-								true => Poll::Ready(Ok(None)),
+							break match !self.parks && cursor.is_exhausted(&[], 0, ordered) {
+								true => {
+									if ordered && let Some(end) = cursor.filter.window.end() {
+										cursor.pass_end(cursor.end_key.map_or(end, |cap| cap.min(end)));
+									}
+									Poll::Ready(Ok(None))
+								}
 								false => Poll::Pending,
 							};
 						}
@@ -10752,24 +10780,32 @@ impl Subscriber {
 				idle.finish(&mut cursor.idle, walk, polled.is_pending());
 				polled
 			}
-			Inner::Resume(resume, logical) => resume
-				.poll_peek_group(ordered, self.parks, &logical.record.delivered, waiter)
-				.map(|res| res.map(|candidate| candidate.map(|candidate| Reserved::Resume(Box::new(candidate))))),
+			Inner::Resume(resume, logical) => {
+				let polled = resume.poll_peek_group(ordered, self.parks, &mut logical.record.delivered, waiter);
+				polled.map(|res| res.map(|candidate| candidate.map(|candidate| Reserved::Resume(Box::new(candidate)))))
+			}
 		}
 	}
 
 	/// Whether this route copy's bounded window has nothing left for the logical readers that
 	/// handed out `logical`: what this copy took itself, wrote off, or gave up counts too.
 	/// It judges from its resume point `from`: the logical reader judges what lies under it.
-	pub(super) fn exhausted_for(&mut self, logical: &[&Delivered], from: Option<u64>, waiter: &kio::Waiter) -> bool {
+	/// An `ordered` read also ends where [`Cursor::is_exhausted`] says one does.
+	pub(super) fn exhausted_for(
+		&mut self,
+		logical: &[&Delivered],
+		from: Option<u64>,
+		ordered: bool,
+		waiter: &kio::Waiter,
+	) -> bool {
 		match &mut self.inner {
-			Inner::Plain(cursor) => cursor.is_exhausted(logical, from.unwrap_or(0)),
+			Inner::Plain(cursor) => cursor.is_exhausted(logical, from.unwrap_or(0), ordered),
 			// A copy that is another front's logical track judges across its own copies.
 			Inner::Resume(resume, own) => {
 				let mut taken = Vec::with_capacity(logical.len() + 1);
 				taken.push(&own.record.delivered);
 				taken.extend_from_slice(logical);
-				resume.exhausted(&taken, waiter)
+				resume.exhausted(&taken, ordered, waiter)
 			}
 		}
 	}
@@ -11956,9 +11992,11 @@ impl Ordered {
 	/// Honors the group range set by [`Subscriber::with_range`] before [`Subscriber::ordered`]:
 	/// a group past the cap stays in the producer's cache and becomes eligible again if
 	/// the cap rises or is removed. Ranges that all end end the read once they are
-	/// accounted for, as for [`Subscriber::poll_recv_group`].
+	/// accounted for, as for [`Subscriber::poll_recv_group`]. On a locally produced track that
+	/// includes a key below a group the producer created, which this read hands out first.
 	/// Later reads return `Ok(None)` immediately too; widening the ranges with
-	/// [`Self::update`] resumes reading above the last key returned.
+	/// [`Self::update`] resumes reading above the end the read passed (or the cap, when that
+	/// was lower), so a group created below that end afterward is never handed out.
 	///
 	/// Returns `Ok(Some(item))` when a group or gap is available, `Ok(None)` when the track is
 	/// finished (including an abort after its declared end settled, see [`Producer::abort`])
@@ -13344,6 +13382,106 @@ mod test {
 		assert_eq!(read_groups(|waiter| arrival.poll_recv_group(waiter)), want);
 		let mut ordered = bounded().ordered();
 		assert_eq!(read_groups(|waiter| ordered.poll_next_group(waiter)), want);
+	}
+
+	/// A time end between two groups ends an ordered read once the track's own publisher
+	/// created a group past it, waking the read parked there: handing that group out would have
+	/// passed the starts between. An arrival read keeps waiting, since the publisher may still
+	/// create a group between, until it says it won't (see the next test).
+	#[test]
+	fn a_time_end_between_groups_ends_an_ordered_read_at_the_next() {
+		let producer = track_producer("test", None);
+		let range = Range {
+			start: Anchor::Time(1_500),
+			end: Some(Anchor::Time(1_999)),
+		};
+		let bounded = || producer.subscribe(replay().with_ranges([range]));
+		let mut ordered = bounded().ordered();
+		let mut arrival = bounded();
+		let _first = framed(&producer, 1_000, 1).finish().unwrap();
+		let noop = kio::Waiter::noop();
+		assert!(matches!(ordered.poll_next_group(&noop), Poll::Ready(Ok(Some(group))) if group.start == 1_000));
+		assert!(matches!(arrival.poll_recv_group(&noop), Poll::Ready(Ok(Some(group))) if group.start == 1_000));
+
+		let woken = Arc::new(AtomicBool::new(false));
+		let waiter = kio::Waiter::new(futures::task::waker(Arc::new(FlagWake(woken.clone()))));
+		assert!(
+			ordered.poll_next_group(&waiter).is_pending(),
+			"a group may still come below the end"
+		);
+		let _past = framed(&producer, 2_000, 1).finish().unwrap();
+		assert!(woken.load(Ordering::SeqCst), "the group past the end wakes the read");
+		assert!(matches!(ordered.poll_next_group(&noop), Poll::Ready(Ok(None))));
+		assert!(arrival.poll_recv_group(&noop).is_pending(), "1500 may still be created");
+		// The ended read passed every key below its end: a group created there now is late.
+		let _late = framed(&producer, 1_500, 1).finish().unwrap();
+		assert!(matches!(ordered.poll_next_group(&noop), Poll::Ready(Ok(None))));
+		assert!(matches!(arrival.poll_recv_group(&noop), Poll::Ready(Ok(Some(group))) if group.start == 1_500));
+
+		// A group created between before a read reaches the end is still read. The time start
+		// now resolves to 1500, which contains it.
+		let mut later = bounded().ordered();
+		assert!(matches!(later.poll_next_group(&noop), Poll::Ready(Ok(Some(group))) if group.start == 1_500));
+		let _between = framed(&producer, 1_600, 1).finish().unwrap();
+		assert!(matches!(later.poll_next_group(&noop), Poll::Ready(Ok(Some(group))) if group.start == 1_600));
+		assert!(matches!(later.poll_next_group(&noop), Poll::Ready(Ok(None))));
+	}
+
+	/// An appending publisher says it will not go back, so the starts between its groups are
+	/// skipped and a time end between two of them ends a read in either order at once.
+	#[test]
+	fn a_time_end_between_appended_groups_ends_either_read() {
+		let producer = track_producer("test", None);
+		for key in [1_000, 2_000] {
+			let mut group = producer.append_group(crate::Timestamp::unscaled(key)).unwrap();
+			group.write_frame(crate::Timestamp::unscaled(key), &b"x"[..]).unwrap();
+			group.finish().unwrap();
+		}
+		let range = Range {
+			start: Anchor::Time(1_500),
+			end: Some(Anchor::Time(1_999)),
+		};
+		let bounded = || producer.subscribe(replay().with_ranges([range]));
+		let want = vec![(1_000, vec![0])];
+		let mut arrival = bounded();
+		assert_eq!(read_groups(|waiter| arrival.poll_recv_group(waiter)), want);
+		assert!(matches!(
+			arrival.poll_recv_group(&kio::Waiter::noop()),
+			Poll::Ready(Ok(None))
+		));
+		let mut ordered = bounded().ordered();
+		assert_eq!(read_groups(|waiter| ordered.poll_next_group(waiter)), want);
+		assert!(matches!(
+			ordered.poll_next_group(&kio::Waiter::noop()),
+			Poll::Ready(Ok(None))
+		));
+	}
+
+	/// A received copy ends an ordered read between two groups only on what its feed proves:
+	/// a hole it may still land waits, and the starts between skipped, as a GROUP's Previous
+	/// Start says, end it.
+	#[cfg(feature = "async")]
+	#[test]
+	fn a_time_end_between_received_groups_ends_only_once_proven() {
+		let producer = received_producer(None);
+		producer.anchored();
+		let _groups: Vec<_> = [1_000, 2_000]
+			.into_iter()
+			.map(|key| framed(&producer, key, 1).finish().unwrap())
+			.collect();
+		let range = Range {
+			start: Anchor::Time(1_500),
+			end: Some(Anchor::Time(1_999)),
+		};
+		let mut ordered = producer.subscribe(replay().with_ranges([range])).ordered();
+		let noop = kio::Waiter::noop();
+		assert!(matches!(ordered.poll_next_group(&noop), Poll::Ready(Ok(Some(group))) if group.start == 1_000));
+		assert!(
+			ordered.poll_next_group(&noop).is_pending(),
+			"the feed may still land 1500"
+		);
+		producer.skip_groups(1_001..2_000);
+		assert!(matches!(ordered.poll_next_group(&noop), Poll::Ready(Ok(None))));
 	}
 
 	/// A drop outside a reader's ranges is reported once a group arriving places a time start
@@ -20972,6 +21110,29 @@ mod test {
 			.subscribe(Subscription::default().with_delay(Delay::default().with_max(budget)))
 			.ordered();
 		assert_eq!(items(&mut ordered), ["gap 0..1 (old)", "group 1", "group 2", "pending"]);
+	}
+
+	/// An ordered read whose bounded window runs out past a group it stepped over as stale
+	/// reports that gap before its end, and counts it: passing the end gives the group up.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_ordered_read_ended_past_a_stale_group_reports_it_first() {
+		let producer = track_producer("test", Info::timed());
+		elapse(&producer, Duration::ZERO);
+		let mut group = producer.create_group(group::Info { start: 0 }).unwrap();
+		group.write_frame(Timestamp::ZERO, &b"x"[..]).unwrap();
+		group.finish_at(10).unwrap();
+		elapse(&producer, Duration::from_millis(100));
+		put(&producer, 100, Some(100));
+		let mut ordered = producer
+			.subscribe(
+				Subscription::default()
+					.with_delay(Delay::default().with_max(Duration::from_millis(50)))
+					.with_ranges([Range::groups(0..50)]),
+			)
+			.ordered();
+		assert_eq!(items(&mut ordered), ["gap 0..1 (old)"]);
+		assert!(matches!(ordered.next_item().now_or_never(), Some(Ok(None))));
 	}
 
 	/// A gap says when the latest group it gives up landed: one the read passed as stale or
