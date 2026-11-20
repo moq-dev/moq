@@ -628,7 +628,13 @@ impl Window {
 				(None, _) => (0, false),
 			};
 			if held.is_none() {
-				span.looking = unresolved(time, span.start, span.floored, holdings)
+				let floor = match span.floored {
+					true => unresolved(time, span.start, true, holdings),
+					// Nothing held at or before the time any more, maybe nothing at all: the group
+					// containing it may start anywhere below the floor asked.
+					false => holdings.looks_up().then_some(0),
+				};
+				span.looking = floor
 					.filter(|floor| asked.is_some_and(|asked| *floor < asked))
 					.map(|floor| Looking { time, floor });
 			}
@@ -1477,6 +1483,17 @@ mod tests {
 		keys.held.insert(4000);
 		assert!(window.found(8500, Some(4000), &keys));
 		assert_eq!(window.resolved()[0].map(|resolved| resolved.start), Some(4000));
+
+		// Even with the cache emptied.
+		let mut window = Window::new(&[range(time(8500), None)], None, Some(9000), &keys).unwrap();
+		let all = std::mem::take(&mut keys.held);
+		assert!(window.found(8500, None, &keys));
+		assert_eq!(
+			window.lookups().collect::<Vec<_>>(),
+			[(8500, 0)],
+			"looked up from below"
+		);
+		keys.held = all;
 
 		// With nothing evicted, an empty answer starts where the groups held say.
 		let mut window = Window::new(&[range(time(8500), None)], None, Some(9000), &keys).unwrap();

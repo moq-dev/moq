@@ -337,6 +337,14 @@ describe("Window", () => {
 		expect(window.found(8500n, 4000n, held)).toBe(true);
 		expect(window.resolved()[0]?.start).toBe(4000n);
 
+		// Even with the cache emptied.
+		window = new Window([range(time(8500n))], 9000n, held);
+		const all = held.held;
+		held.held = new Set();
+		expect(window.found(8500n, undefined, held)).toBe(true);
+		expect(window.lookups()).toEqual([{ time: 8500n, floor: 0n }]);
+		held.held = all;
+
 		// With nothing evicted, an empty answer starts where the groups held say.
 		window = new Window([range(time(8500n))], 9000n, held);
 		expect(window.found(8500n, undefined, held)).toBe(true);

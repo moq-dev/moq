@@ -763,7 +763,13 @@ export class Window {
 			span.start = start ?? 0n;
 			span.floored = start !== undefined;
 			if (held === undefined && asked !== undefined) {
-				const floor = unresolved(at, span.start, span.floored, holdings);
+				// Nothing held at or before the time any more, maybe nothing at all: the group containing
+				// it may start anywhere below the floor asked.
+				const floor = span.floored
+					? unresolved(at, span.start, true, holdings)
+					: holdings.looksUp?.()
+						? 0n
+						: undefined;
 				if (floor !== undefined && floor < asked) span.looking = { time: at, floor };
 			}
 			this.#count(key, span);
