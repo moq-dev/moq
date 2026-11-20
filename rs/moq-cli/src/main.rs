@@ -1573,7 +1573,7 @@ mod tests {
 			"--listen-tcp-bind",
 			&addr,
 			"--auth-public",
-			"**",
+			"",
 			"import",
 			"ts",
 		])
@@ -1635,7 +1635,7 @@ mod tests {
 			"--listen-tcp-bind",
 			"127.0.0.1:0",
 			"--auth-public",
-			"**",
+			"",
 			"import",
 			"ts",
 		])

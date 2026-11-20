@@ -997,16 +997,6 @@ rust_connect() {
     esac
 }
 
-# The pattern a cell's token grants its publisher, or its subscribers, on <broadcast>. The `auto`
-# pass mints patterns no prefix could carry, so AUTH must deliver them as minted. A pinned
-# pass may be moq-transport, whose requests name prefixes alone, so it grants the
-# broadcast's subtree.
-publish_grant() {
-    if [[ "$VERSION" == auto ]]; then printf '%s' "$1"; else printf '%s/**' "$1"; fi
-}
-subscribe_grant() {
-    if [[ "$VERSION" == auto ]]; then printf '**/%s' "$1"; else printf '%s/**' "$1"; fi
-}
 
 # moq-cli logs each grant it receives over AUTH at debug, under `moq_net::auth`.
 CLI_LOG="info,${RUST_LOG:+$RUST_LOG,}moq_net::auth=debug"
@@ -1016,9 +1006,9 @@ CLI_LOG="info,${RUST_LOG:+$RUST_LOG,}moq_net::auth=debug"
 AUTH_VERSION="${INTEROP_VERSION:-moq-lite-07-wip}"
 
 # The `auth granted` line a token minted with at most one publish and one
-# subscribe pattern implies. Every client that prints one dials $AUTH_VERSION,
+# subscribe prefix implies. Every client that prints one dials $AUTH_VERSION,
 # which carries AUTH, so a client that prints nothing never got its grant.
-# Each pattern is a JSON string, so a `\` in one reads `\\`.
+# Each prefix is a JSON string, so a `\` in one reads `\\`.
 grant_line() {
     local publish="${1//\\/\\\\}" subscribe="${2//\\/\\\\}"
     publish="${publish:+\"$publish\"}" subscribe="${subscribe:+\"$subscribe\"}"
@@ -1535,7 +1525,7 @@ run_cell() {
 }
 
 # run_round <round> <broadcast> <pub_pid> <expect> <from>: every subscriber dials with a
-# token for <broadcast> alone (see subscribe_grant), and must see media with the tone its
+# token for <broadcast>'s prefix, and must see media with the tone its
 # publisher sends (expect=media), time out (nothing), or fail its audio check (wrong-tone).
 # <round> names the publisher in the output and the logs, and <from> is the relay log
 # line the round's connections start on.
@@ -1557,8 +1547,8 @@ run_round() {
     tone=$(publisher_tone "$publisher")
     codecs=$(publisher_codecs "$publisher")
     IFS=',' read -r -a renditions <<<"$codecs"
-    sub_url=$(token_url --subscribe "$(subscribe_grant "$broadcast")")
-    sub_grant=$(grant_line "" "**/$broadcast")
+    sub_url=$(token_url --subscribe "$broadcast")
+    sub_grant=$(grant_line "" "$broadcast")
     for sub in "${SUB_LIST[@]}"; do
         if is_broken "$sub"; then
             echo "  FAIL  $pub -> $sub (subscriber client unavailable)"
@@ -1772,7 +1762,7 @@ run_finishes() {
         # The fixture and its .health sibling share a parent, so one prefix grant covers both:
         # moq-transport requests name prefixes alone.
         broadcast="$name-$$-$RANDOM/fixture.hang"
-        grant="${broadcast%/*}/**"
+        grant="${broadcast%/*}"
         ack="$LOGS/$name-ack"
         local pids=() fds=() names=() all_ready=1 all_clean=1 publisher_ok=1
         late=0
@@ -1900,9 +1890,9 @@ run_drop_pair() {
     fi
     mkfifo "$fifo"
     exec 9<>"$fifo"
-    harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_tail_publisher "$fifo" "$pub" publish "$broadcast" "$(token_url --publish "$(publish_grant "$broadcast")")" "$version" drop
+    harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_tail_publisher "$fifo" "$pub" publish "$broadcast" "$(token_url --publish "$broadcast")" "$version" drop
     pid="$HARNESS_PID"
-    harness_spawn "$name-sub" "$LOGS/$name-sub.log" run_tail_client "$sub" subscribe "$broadcast" "$(token_url --subscribe "$(subscribe_grant "$broadcast")")" "$version" drop
+    harness_spawn "$name-sub" "$LOGS/$name-sub.log" run_tail_client "$sub" subscribe "$broadcast" "$(token_url --subscribe "$broadcast")" "$version" drop
     subscriber_pid="$HARNESS_PID"
     harness_wait "$subscriber_pid" || true
     if grep -qx 'tail drop clean end=4 groups=0,2,3 bytes=786432' "$LOGS/$name-sub.log"; then
@@ -1974,14 +1964,14 @@ run_tail_pair() {
     exec 9<>"$fifo"
     from=$(relay_next_line)
     # Each side's token grants this broadcast alone, like a media round's.
-    harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_tail_publisher "$fifo" "$pub" publish "$broadcast" "$(token_url --publish "$(publish_grant "$broadcast")")" "$version" "$mode"
+    harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_tail_publisher "$fifo" "$pub" publish "$broadcast" "$(token_url --publish "$broadcast")" "$version" "$mode"
     pid="$HARNESS_PID"
     if [[ "$mode" == datagram ]]; then
         # Subscription metadata confirms the alias is bound. An acknowledgement per datagram
         # avoids testing a best-effort receive buffer's burst capacity.
         mkfifo "$LOGS/datagram-ack"
         exec 8<>"$LOGS/datagram-ack"
-        harness_spawn "$name-sub" "$LOGS/$name-sub.log" run_tail_subscriber "$LOGS/datagram-ack" "$sub" subscribe "$broadcast" "$(token_url --subscribe "$(subscribe_grant "$broadcast")")" "$version" "$mode"
+        harness_spawn "$name-sub" "$LOGS/$name-sub.log" run_tail_subscriber "$LOGS/datagram-ack" "$sub" subscribe "$broadcast" "$(token_url --subscribe "$broadcast")" "$version" "$mode"
         subscriber_pid="$HARNESS_PID"
         local ack sequence
         if read -r -t "$TIMEOUT" ack <&8 && [[ "$ack" == "datagram ready" ]]; then
@@ -1993,7 +1983,7 @@ run_tail_pair() {
         exec 8>&-
         rm "$LOGS/datagram-ack"
     else
-        harness_spawn "$name-sub" "$LOGS/$name-sub.log" run_tail_client "$sub" subscribe "$broadcast" "$(token_url --subscribe "$(subscribe_grant "$broadcast")")" "$version" "$mode"
+        harness_spawn "$name-sub" "$LOGS/$name-sub.log" run_tail_client "$sub" subscribe "$broadcast" "$(token_url --subscribe "$broadcast")" "$version" "$mode"
         subscriber_pid="$HARNESS_PID"
     fi
     harness_wait "$subscriber_pid" || true
@@ -2041,10 +2031,10 @@ run_late_pair() {
     mkfifo "$fifo" "$heads"
     exec 9<>"$fifo"
     from=$(relay_next_line)
-    harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_tail_publisher "$fifo" "$pub" publish "$broadcast" "$(token_url --publish "$(publish_grant "$broadcast")")" "$version" late
+    harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_tail_publisher "$fifo" "$pub" publish "$broadcast" "$(token_url --publish "$broadcast")" "$version" late
     pid="$HARNESS_PID"
     exec 8<>"$heads"
-    harness_spawn "$name-sub" "$LOGS/$name-sub.log" run_tail_subscriber "$heads" "$sub" subscribe "$broadcast" "$(token_url --subscribe "$(subscribe_grant "$broadcast")")" "$version" late
+    harness_spawn "$name-sub" "$LOGS/$name-sub.log" run_tail_subscriber "$heads" "$sub" subscribe "$broadcast" "$(token_url --subscribe "$broadcast")" "$version" late
     subscriber_pid="$HARNESS_PID"
     if read -r -t "$TIMEOUT" head <&8 && [[ "$head" == "late head" ]]; then
         printf 'late tail\n' >&9
@@ -2106,7 +2096,7 @@ run_fetch_round() {
     from=$(relay_next_line)
     mkfifo "$fifo"
     exec 9<>"$fifo"
-    harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_tail_publisher "$fifo" "$pub" publish "$broadcast" "$(token_url --publish "$(publish_grant "$broadcast")")" "$version" "$mode"
+    harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_tail_publisher "$fifo" "$pub" publish "$broadcast" "$(token_url --publish "$broadcast")" "$version" "$mode"
     pid="$HARNESS_PID"
     if run_fetch_subscriber "$sub" "$broadcast" "$version" "$name"; then
         printf 'clean end\n' >&9
@@ -2146,12 +2136,12 @@ run_fetch_round() {
 run_fetch_subscriber() {
     local sub="$1" broadcast="$2" version="$3" name="$4"
     if [[ "$sub" != rust ]]; then
-        run_tail_client "$sub" subscribe "$broadcast" "$(token_url --subscribe "$(subscribe_grant "$broadcast")")" "$version" fetch >"$LOGS/$name-sub.log" 2>&1 &&
+        run_tail_client "$sub" subscribe "$broadcast" "$(token_url --subscribe "$broadcast")" "$version" fetch >"$LOGS/$name-sub.log" 2>&1 &&
             grep -qx 'fetch clean group=1 frames=3 bytes=196608' "$LOGS/$name-sub.log"
         return
     fi
     # At debug, a failed fetch says whether it went on the wire and how the relay answered it.
-    RUST_LOG="info,${RUST_LOG:+$RUST_LOG,}moq_net=debug" timeout -k 3 "$TIMEOUT" "$MOQ" --connect "$(token_url --subscribe "$(subscribe_grant "$broadcast")")" ${version:+--connect-version "$version"} \
+    RUST_LOG="info,${RUST_LOG:+$RUST_LOG,}moq_net=debug" timeout -k 3 "$TIMEOUT" "$MOQ" --connect "$(token_url --subscribe "$broadcast")" ${version:+--connect-version "$version"} \
         --broadcast "$broadcast" fetch tail --group 1 --json >"$LOGS/$name.json" 2>"$LOGS/$name-sub.log" &&
         python3 - "$LOGS/$name.json" <<'PYCODE'
 import base64, json, sys
@@ -2247,9 +2237,9 @@ run_matrix() {
             overall=1
             continue
         fi
-        # The exact broadcast, not its subtree.
+        # The broadcast's prefix, which AUTH_OK must deliver as minted.
         from=$(relay_next_line)
-        start_publisher "$pub" "$pub" "$broadcast" "$(token_url --publish "$(publish_grant "$broadcast")")"
+        start_publisher "$pub" "$pub" "$broadcast" "$(token_url --publish "$broadcast")"
         run_round "$pub" "$broadcast" "$PUB_PID" media "$from"
         if why=$(check_grant "$pub" "$LOGS/pub-$pub.log" "$(grant_line "$broadcast" "")"); then
             if prints_grant "$pub"; then
@@ -2270,7 +2260,7 @@ run_matrix() {
         broadcast="interop-swapped-$$-${RANDOM}.hang"
         echo "=== publisher: rust  broadcast: $broadcast (tone $SWAPPED_TONE, subscribers expect $STEREO_TONE) ==="
         from=$(relay_next_line)
-        start_publisher rust-swapped rust "$broadcast" "$(token_url --publish "$(publish_grant "$broadcast")")" "$SWAPPED_TONE"
+        start_publisher rust-swapped rust "$broadcast" "$(token_url --publish "$broadcast")" "$SWAPPED_TONE"
         run_round rust-swapped "$broadcast" "$PUB_PID" wrong-tone "$from"
     fi
 
@@ -2279,7 +2269,7 @@ run_matrix() {
     for pub in "${PUB_LIST[@]}"; do
         if ! enforces_grant "$pub" || is_broken "$pub"; then continue; fi
         broadcast="interop-denied-${pub}-$$-${RANDOM}.hang"
-        allowed="interop-allowed-*.hang"
+        allowed="interop-allowed"
         echo "=== publisher: $pub  broadcast: $broadcast (token grants only $allowed) ==="
         from=$(relay_next_line)
         start_publisher "$pub-denied" "$pub" "$broadcast" "$(token_url --publish "$allowed")"

@@ -209,10 +209,10 @@ Unauthorized and naming the path, and every subscriber must time out. The
 browser publisher enforces its grant too, but its driver reports no session
 error to read.
 
-Tokens use patterns no prefix could carry, so every cell checks that AUTH\_OK
-delivers them as minted: a publisher is granted its exact broadcast, a subscriber
-`**/name` (a leading `**` matching zero segments), and the refused publisher
-`interop-allowed-*.hang`.
+Every cell checks that AUTH\_OK delivers its token's grant as minted: a
+publisher and its subscribers are granted their broadcast's prefix, and the
+refused publisher `interop-allowed`, a prefix that does not cover its
+broadcast.
 
 ## moq-transport
 
@@ -252,14 +252,11 @@ The standalone control endpoints use OS-assigned ports and production QMux,
 SETUP codecs, and request sessions. They verify their negotiated version directly.
 The datagram and query lanes through moq-relay use their usual version-log check.
 
-Some cases change shape on moq-transport:
-
-- moq-net subscribes there from the largest group, not from a requested range,
-  so a tail reader started before the publisher's groups may begin past group 0.
-  The tails take any contiguous run of groups through group 3, each verified
-  byte for byte, and still require the clean end at 4.
-- Requests name prefixes alone, so pinned passes mint `name/**` for both roles
-  instead of the exact and `**/name` patterns above.
+The tails change shape on moq-transport: moq-net subscribes there from the
+largest group, not from a requested range, so a tail reader started before the
+publisher's groups may begin past group 0. The tails take any contiguous run of
+groups through group 3, each verified byte for byte, and still require the clean
+end at 4.
 
 The browser pins through the `versions` attribute on `<moq-watch>` and
 `<moq-publish>`, and GStreamer through the `versions` property on `moqsrc`.
