@@ -278,15 +278,19 @@ async function subscribe(url: URL, broadcast: string, read: Read) {
 
 const [command, ...args] = process.argv.slice(2);
 if (command === "sign") {
-	const key = Auth.Key.parse(readFileSync(args[0], "utf8"));
-	console.log(await Auth.Key.sign(key, { root: "compat", publish: ["video/**"], subscribe: ["**"] }));
+	// The grant is spelled per release: prefixes now, the equivalent patterns before.
+	const [path, publish, subscribe] = args;
+	const key = Auth.Key.parse(readFileSync(path, "utf8"));
+	console.log(await Auth.Key.sign(key, { root: "compat", publish: [publish], subscribe: [subscribe] }));
 } else if (command === "verify") {
-	const key = Auth.Key.parse(readFileSync(args[0], "utf8"));
-	const claims = await Auth.Key.verify(key, readFileSync(args[1], "utf8").trim());
+	// The grant this release should read back, spelled as `sign` takes it.
+	const [path, token, publish, subscribe] = args;
+	const key = Auth.Key.parse(readFileSync(path, "utf8"));
+	const claims = await Auth.Key.verify(key, readFileSync(token, "utf8").trim());
 	if (
 		claims.root !== "compat" ||
-		JSON.stringify(claims.publish) !== '["video/**"]' ||
-		JSON.stringify(claims.subscribe) !== '["**"]'
+		JSON.stringify(claims.publish) !== JSON.stringify([publish]) ||
+		JSON.stringify(claims.subscribe) !== JSON.stringify([subscribe])
 	) {
 		throw new Error(`token scope changed: ${JSON.stringify(claims)}`);
 	}

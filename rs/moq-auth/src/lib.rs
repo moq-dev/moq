@@ -13,9 +13,10 @@
 //! - [`Claims`], [`Key`], and [`KeySet`]: the JWT a client presents in its query, with
 //!   the keys that sign and verify it. `moq auth generate|sign|verify` is the CLI.
 //!
-//! Grants and claims name paths with [`Pattern`]s from `moq-pattern`, re-exported here:
-//! `foo` is one broadcast, `foo/**` is a subtree, `**` is everything. Each role is an
-//! [`Access`]: its patterns, and optionally a bitrate cap, a [`Rate`].
+//! Grants and claims name paths with [`Prefixes`] from `moq-pattern`, re-exported here:
+//! `foo` is `foo` and everything beneath it, and the empty prefix is everything. A grant
+//! holds no wildcard: `foo/**`, `**`, or `*` is refused where it is parsed or signed.
+//! Each role is an [`Access`]: its prefixes, and optionally a bitrate cap, a [`Rate`].
 //!
 //! The lease `poll_*` methods are always available. Enable the `async` feature for their
 //! generated async wrappers (`changed`, `closed`, and `revalidate_requested`) and
@@ -64,7 +65,7 @@ pub use error::*;
 pub use grant::*;
 pub use key::*;
 pub use key_id::*;
-pub use moq_pattern::{InvalidPattern, Pattern, Patterns, Segment, Specificity};
+pub use moq_pattern::{InvalidPattern, InvalidPrefix, Prefix, Prefixes};
 pub use rate::*;
 pub use request::*;
 pub use set::*;

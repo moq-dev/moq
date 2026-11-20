@@ -1,5 +1,5 @@
 use kio::clock::Wall;
-use moq_pattern::Patterns;
+use moq_pattern::Prefixes;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -114,7 +114,7 @@ impl<'de> Deserialize<'de> for Link {
 
 impl Grant {
 	/// A grant of these patterns, uncapped, with no other restrictions.
-	pub fn new(publish: impl Into<Patterns>, subscribe: impl Into<Patterns>) -> Self {
+	pub fn new(publish: impl Into<Prefixes>, subscribe: impl Into<Prefixes>) -> Self {
 		Self {
 			publish: Access::new(publish),
 			subscribe: Access::new(subscribe),
@@ -163,14 +163,14 @@ impl Grant {
 mod tests {
 	use super::*;
 
-	fn patterns(texts: &[&str]) -> Patterns {
+	fn prefixes(texts: &[&str]) -> Prefixes {
 		texts.iter().map(|text| text.parse().unwrap()).collect()
 	}
 
 	fn full() -> Grant {
 		Grant {
-			publish: Access::new(patterns(&["alice/**"])).with_rate(crate::Rate::from_bps(8_000_000).unwrap()),
-			subscribe: Access::new(patterns(&["**"])),
+			publish: Access::new(prefixes(&["alice"])).with_rate(crate::Rate::from_bps(8_000_000).unwrap()),
+			subscribe: Access::new(prefixes(&[""])),
 			root: Some("pid/room".into()),
 			mounts: BTreeMap::new(),
 			expires: Some(Wall::UNIX_EPOCH + Duration::from_secs(4_102_444_800)),
@@ -199,9 +199,9 @@ mod tests {
 		assert_eq!(json["revalidate"], 60);
 		assert_eq!(
 			json["publish"],
-			serde_json::json!({"path": ["alice/**"], "rate": 8_000_000})
+			serde_json::json!({"path": ["alice"], "rate": 8_000_000})
 		);
-		assert_eq!(json["subscribe"], serde_json::json!(["**"]));
+		assert_eq!(json["subscribe"], serde_json::json!([""]));
 		assert_eq!(json["link"], "upstream");
 		assert_eq!(serde_json::from_value::<Grant>(json).unwrap(), grant);
 	}
@@ -212,7 +212,7 @@ mod tests {
 	fn serializes_to_the_cross_language_vector() {
 		assert_eq!(
 			serde_json::to_string(&full()).unwrap(),
-			r#"{"publish":{"path":["alice/**"],"rate":8000000},"subscribe":["**"],"root":"pid/room","expires":4102444800,"revalidate":60,"tier":"websocket","label":"project/key/123","link":"upstream","peer":true}"#
+			r#"{"publish":{"path":["alice"],"rate":8000000},"subscribe":[""],"root":"pid/room","expires":4102444800,"revalidate":60,"tier":"websocket","label":"project/key/123","link":"upstream","peer":true}"#
 		);
 	}
 
@@ -221,10 +221,10 @@ mod tests {
 	#[test]
 	fn an_unknown_field_is_refused() {
 		for json in [
-			r#"{"publish":["**"],"publish_rate":8000}"#,
-			r#"{"publish":["**"],"upstream":true}"#,
-			r#"{"publish":["**"],"future":{}}"#,
-			r#"{"publish":["**"],"link":"downstream"}"#,
+			r#"{"publish":[""],"publish_rate":8000}"#,
+			r#"{"publish":[""],"upstream":true}"#,
+			r#"{"publish":[""],"future":{}}"#,
+			r#"{"publish":[""],"link":"downstream"}"#,
 		] {
 			assert!(serde_json::from_str::<Grant>(json).is_err(), "{json}");
 		}
@@ -235,38 +235,38 @@ mod tests {
 	#[test]
 	fn peer_is_an_alias_for_a_link() {
 		let read = |json: &str| serde_json::from_str::<Grant>(json).map(|grant| grant.link);
-		assert_eq!(read(r#"{"publish":["**"],"peer":true}"#).unwrap(), Some(Link::Peer));
-		assert_eq!(read(r#"{"publish":["**"],"peer":false}"#).unwrap(), None);
-		assert_eq!(read(r#"{"publish":["**"],"link":"peer"}"#).unwrap(), Some(Link::Peer));
+		assert_eq!(read(r#"{"publish":[""],"peer":true}"#).unwrap(), Some(Link::Peer));
+		assert_eq!(read(r#"{"publish":[""],"peer":false}"#).unwrap(), None);
+		assert_eq!(read(r#"{"publish":[""],"link":"peer"}"#).unwrap(), Some(Link::Peer));
 		assert_eq!(
-			read(r#"{"publish":["**"],"link":"upstream","peer":true}"#).unwrap(),
+			read(r#"{"publish":[""],"link":"upstream","peer":true}"#).unwrap(),
 			Some(Link::Upstream)
 		);
-		assert!(read(r#"{"publish":["**"],"link":"upstream","peer":false}"#).is_err());
-		assert!(read(r#"{"publish":["**"],"link":null}"#).is_err());
+		assert!(read(r#"{"publish":[""],"link":"upstream","peer":false}"#).is_err());
+		assert!(read(r#"{"publish":[""],"link":null}"#).is_err());
 
-		let mut grant = Grant::new(patterns(&["**"]), Patterns::default());
+		let mut grant = Grant::new(prefixes(&[""]), Prefixes::default());
 		grant.link = Some(Link::Peer);
 		assert_eq!(
 			serde_json::to_string(&grant).unwrap(),
-			r#"{"publish":["**"],"link":"peer","peer":true}"#
+			r#"{"publish":[""],"link":"peer","peer":true}"#
 		);
 	}
 
 	#[test]
 	fn mounts_round_trip_as_an_object() {
-		let mut grant = Grant::new(Patterns::default(), patterns(&["**"]));
+		let mut grant = Grant::new(Prefixes::default(), prefixes(&[""]));
 		grant.mounts.insert(".svc".into(), ".svc/pid".into());
 		let json = serde_json::to_string(&grant).unwrap();
-		assert_eq!(json, r#"{"subscribe":["**"],"mounts":{".svc":".svc/pid"}}"#);
+		assert_eq!(json, r#"{"subscribe":[""],"mounts":{".svc":".svc/pid"}}"#);
 		assert_eq!(serde_json::from_str::<Grant>(&json).unwrap(), grant);
 	}
 
 	#[test]
 	fn empty_fields_are_omitted_and_defaulted() {
-		let grant = Grant::new(patterns(&["**"]), Patterns::default());
-		assert_eq!(serde_json::to_string(&grant).unwrap(), r#"{"publish":["**"]}"#);
-		assert_eq!(serde_json::from_str::<Grant>(r#"{"publish":["**"]}"#).unwrap(), grant);
+		let grant = Grant::new(prefixes(&[""]), Prefixes::default());
+		assert_eq!(serde_json::to_string(&grant).unwrap(), r#"{"publish":[""]}"#);
+		assert_eq!(serde_json::from_str::<Grant>(r#"{"publish":[""]}"#).unwrap(), grant);
 	}
 
 	#[kio::test]
@@ -279,7 +279,7 @@ mod tests {
 			"a cap on no paths admits nothing"
 		);
 
-		let mut grant = Grant::new(patterns(&["**"]), Patterns::default());
+		let mut grant = Grant::new(prefixes(&[""]), Prefixes::default());
 		grant.validate().unwrap();
 
 		grant.revalidate = Some(Duration::from_secs(1));
@@ -308,14 +308,14 @@ mod tests {
 
 	#[test]
 	fn validate_refuses_an_invalid_stats_label() {
-		let mut grant = Grant::new(patterns(&["**"]), Patterns::default());
+		let mut grant = Grant::new(prefixes(&[""]), Prefixes::default());
 		grant.label = Some("project/*".into());
 		assert!(matches!(grant.validate(), Err(crate::Error::InvalidLabel(_))));
 	}
 
 	#[test]
 	fn validate_refuses_a_tier_a_metrics_label_would_escape() {
-		let mut grant = Grant::new(patterns(&["**"]), Patterns::default());
+		let mut grant = Grant::new(prefixes(&[""]), Prefixes::default());
 		for tier in ["a\"b", "a\\b", "a\nb"] {
 			grant.tier = Some(tier.into());
 			assert!(
@@ -333,7 +333,7 @@ mod tests {
 	async fn deadline_is_the_exact_expiry() {
 		let start = kio::clock::now();
 		let now = kio::clock::wall();
-		let mut grant = Grant::new(patterns(&["**"]), Patterns::default());
+		let mut grant = Grant::new(prefixes(&[""]), Prefixes::default());
 		assert_eq!(grant.deadline(), None);
 
 		grant.expires = Some(now + Duration::from_secs(10));
@@ -352,7 +352,7 @@ mod tests {
 	/// not overflow the instant.
 	#[kio::test]
 	async fn the_last_expiry_fits_the_clock() {
-		let mut last = Grant::new(patterns(&["**"]), Patterns::default());
+		let mut last = Grant::new(prefixes(&[""]), Prefixes::default());
 		last.expires = Some(Wall::UNIX_EPOCH.saturating_add(Duration::MAX));
 		let json = serde_json::to_value(&last).unwrap();
 		assert_eq!(json["expires"], 18_446_744_073u64);

@@ -251,7 +251,7 @@ final class SmokeTests: XCTestCase {
         }
         defer { watchdog.cancel() }
 
-        let everything = Grant(publish: ["**"], subscribe: ["**"], expires: nil)
+        let everything = Grant(publish: [""], subscribe: [""], expires: nil)
         for side in [session, peer] {
             for try await grant in side.grants() where grant == everything {
                 break

@@ -585,7 +585,7 @@ mod tests {
 		config.listen.tls.generate = vec!["localhost".into()];
 		config.web.ws = true;
 		config.web.http.listen = Some("127.0.0.1:0".parse().unwrap());
-		config.auth.public = vec![moq_auth::Pattern::all()];
+		config.auth.public = vec![moq_auth::Prefix::all()];
 		config.drain_timeout = Some((window).into());
 		let relay = crate::Relay::load(config).await.unwrap().with_signals(false);
 		let addr = relay.web_addrs().http.unwrap();
@@ -704,7 +704,7 @@ mod tests {
 		});
 		let admission = admissions.next().await.unwrap();
 		trigger.start();
-		let all = moq_auth::Pattern::all;
+		let all = moq_auth::Prefix::all;
 		let (_lease, consumer) = moq_auth::lease::Producer::new(moq_auth::Grant::new(all(), all()));
 		admission.grant(consumer);
 		// The relay accepts the session and drains it at once, so the one-shot loop may already

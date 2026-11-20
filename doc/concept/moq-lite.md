@@ -189,12 +189,19 @@ explicit opt-in on the announce request. On moq-transport that opt-in is the
 [hidden](/draft/moq-hidden) extension; a peer that never declares it receives
 every authorized namespace, dot-prefixed ones included.
 
-## Path patterns
+## Grants and filters
 
-Patterns describe sets of literal paths. They are how a token scopes what a
-session may publish and subscribe to, and how a consumer filters the
-announcements it is told about. They never travel as announcements: the wire
-carries prefixes, and each side filters locally.
+A grant, what a token or an origin scope lets a session publish and subscribe
+to, is a set of path prefixes. A prefix covers its path and everything beneath
+it: `room` covers `room`, `room/alice`, and `room/alice/cam`, but not `roomy`.
+The empty prefix covers everything. A grant holds no wildcard: `room/**`, `**`,
+`*`, or `cam-*.hang` is refused where the grant is parsed or made, so write
+`room` for `room/**` and the empty prefix for `**`. Since every grant covers
+whole subtrees, a route a grant admits always serves whole subtrees too.
+
+Patterns are discovery filters: they pick which announcements a consumer lists,
+and never widen or narrow what it may request. They never travel as
+announcements: the wire carries prefixes, and each side filters locally.
 
 A pattern matches the whole path. `room` matches only `room`, while `room/**`
 matches `room` and every descendant. Segments are separated by `/`:
@@ -214,7 +221,7 @@ there is no escape for a literal `*`. The empty pattern matches the empty path.
 A subscriber watching under a root sees advertisements named relative to that
 root. When several routes advertise one prefix, each reader sees the best route
 its scope can use. A listing reports only routes whose literal name matches its
-patterns: under `**/*.chat`, a claim at `room` is left out even though it could
+filter: under `**/*.chat`, a claim at `room` is left out even though it could
 serve `room/lobby.chat`, and so is a route above the root. Requests still
 resolve through such covering routes, and a session still forwards them to its
 peer, which routes through them. Code that routes or forwards opts in with the
@@ -224,9 +231,8 @@ JS.
 ## Authorization
 
 On moq-lite 07 (`moq-lite-07-wip`, opt-in) each side presents a token on its
-own Auth stream and learns what it may publish and subscribe to: a union of
-[path patterns](#path-patterns), delivered exactly as issued rather than widened
-to a prefix. Right after setup both sides present the credential the connection
+own Auth stream and learns what it may publish and subscribe to: a set of
+[path prefixes](#grants-and-filters), delivered exactly as issued. Right after setup both sides present the credential the connection
 already carried (the URL token, a client certificate, or nothing), so a
 publisher learns before anyone subscribes whether its broadcasts can reach the
 peer. More tokens can be added without reconnecting; the session's scope is the

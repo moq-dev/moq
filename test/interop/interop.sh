@@ -940,7 +940,7 @@ echo "starting relay on 127.0.0.1:${PORT}..."
 if [[ "$COMPAT" -eq 1 ]]; then
     # Anonymous, offering only the pinned version, which comes from the executable's
     # advertised CLI choices.
-    sed -e "s|:4443\"|:${PORT}\"|g" -e '/^version = \[/,/^\]/d' -e 's|^url = "http://127.0.0.1:4440/"|public = "**"|' \
+    sed -e "s|:4443\"|:${PORT}\"|g" -e '/^version = \[/,/^\]/d' -e 's|^url = "http://127.0.0.1:4440/"|public = ""|' \
         "$INTEROP_DIR/interop.toml" >"$HARNESS_RUN/relay.toml"
     sed -i "/\[listen\]/a version = [\"${INTEROP_VERSION}\"]" "$HARNESS_RUN/relay.toml"
     [[ "$(grep -c '^version = ' "$HARNESS_RUN/relay.toml")" == 1 && "$(grep -c '^public = ' "$HARNESS_RUN/relay.toml")" == 1 ]] || {
@@ -2339,7 +2339,7 @@ run_claims_case() {
         return
     fi
     harness_spawn "$name" "$LOGS/$name.log" timeout -k 3 "$TIMEOUT" "${command[@]}" "$CLIENTS/js-native/claims.ts" \
-        "$(token_url --publish "$prefix/**")" "$(token_url --subscribe "$prefix/**")" "$prefix" "$transport"
+        "$(token_url --publish "$prefix")" "$(token_url --subscribe "$prefix")" "$prefix" "$transport"
     # Judged by its printed marker, as run_native is: the addon can crash during Bun's exit
     # teardown after every assertion has passed.
     harness_wait "$HARNESS_PID" || true
@@ -2399,7 +2399,7 @@ run_replacement_case() {
     [[ "$runtime" != js-native-node ]] || command=(node --import tsx)
     harness_spawn "$name" "$LOGS/$name.log" timeout -k 3 "$TIMEOUT" \
         "${command[@]}" "$CLIENTS/js-native/replace.ts" \
-        "$(token_url --publish "$prefix/**")" "$(token_url --subscribe "$prefix/**")" "$prefix" "$transport"
+        "$(token_url --publish "$prefix")" "$(token_url --subscribe "$prefix")" "$prefix" "$transport"
     # Judged by its printed marker, as run_native is: the addon can crash during Bun's exit
     # teardown after every assertion has passed.
     harness_wait "$HARNESS_PID" || true
@@ -2454,10 +2454,10 @@ run_catalog_fanout() {
     from=$(relay_next_line)
     before=$(relay_inflated) || why="relay metrics unavailable"
     # Subtree grants, which a moq-transport request can name too.
-    harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_catalog_publisher "$fifo" "$(token_url --publish "$broadcast/**")" "$broadcast"
+    harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_catalog_publisher "$fifo" "$(token_url --publish "$broadcast")" "$broadcast"
     pid="$HARNESS_PID"
     for version in "${CATALOG_VERSIONS[@]}"; do
-        harness_spawn "$name-$version" "$LOGS/$name-$version.log" run_catalog_reader "$runtime" "$(token_url --subscribe "$broadcast/**")" "$broadcast" "$version"
+        harness_spawn "$name-$version" "$LOGS/$name-$version.log" run_catalog_reader "$runtime" "$(token_url --subscribe "$broadcast")" "$broadcast" "$version"
         readers+=("$HARNESS_PID")
     done
     for reader in "${readers[@]}"; do harness_wait "$reader" || true; done
@@ -2521,9 +2521,9 @@ run_hls_grid() {
     mkfifo "$fifo"
     exec 9<>"$fifo"
     for publisher in rust "$runtime"; do
-        harness_spawn "$name-$publisher-pub" "$LOGS/$name-$publisher-pub.log" run_hls_publisher "$fifo" "$publisher" "$(token_url --publish "$broadcast-$publisher/**")" "$broadcast-$publisher"
+        harness_spawn "$name-$publisher-pub" "$LOGS/$name-$publisher-pub.log" run_hls_publisher "$fifo" "$publisher" "$(token_url --publish "$broadcast-$publisher")" "$broadcast-$publisher"
         pid="$HARNESS_PID"
-        harness_spawn "$name-$publisher-read" "$LOGS/$name-$publisher-read.log" timeout -k 3 "$TIMEOUT" "$EXAMPLES/interop-hls" read "$(token_url --subscribe "$broadcast-$publisher/**")" "$broadcast-$publisher"
+        harness_spawn "$name-$publisher-read" "$LOGS/$name-$publisher-read.log" timeout -k 3 "$TIMEOUT" "$EXAMPLES/interop-hls" read "$(token_url --subscribe "$broadcast-$publisher")" "$broadcast-$publisher"
         harness_wait "$HARNESS_PID" || why="${why:-$publisher groups unreadable}"
         printf 'clean end\n' >&9
         harness_wait "$pid" || true
@@ -2621,7 +2621,7 @@ run_tails() {
 
 if [[ "$MEDIA" -eq 1 ]]; then
     # One token for the whole run: every media case publishes and watches its own broadcast.
-    MEDIA_URL=$(token_url --publish '**' --subscribe '**')
+    MEDIA_URL=$(token_url --publish '' --subscribe '')
     # Media output and lifecycle, browser to browser, against the deterministic fixture. The
     # negative controls below inject a defect and name the assertion that has to catch it; each
     # passes only by failing there, which is what keeps the positive run from being vacuous.

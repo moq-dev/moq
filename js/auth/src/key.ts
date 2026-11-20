@@ -168,7 +168,7 @@ function parse(jwk: string): Key {
  * `issued` is written only when the claims carry one, so an unset field stays off the
  * wire rather than being stamped with the current time; nor is an `id` invented.
  *
- * Takes each role as {@link Claims} spell it: its patterns, or `{path, rate}` when capped.
+ * Takes each role as {@link Claims} spell it: its prefixes, or `{path, rate}` when capped.
  * A field {@link Claims} lacks is refused, the wire's `exp` and the legacy `put`/`get`
  * included.
  *

@@ -1,14 +1,14 @@
 //! The JSON encoding of the grants in [`Claims`](crate::Claims) and [`Scope`](crate::Scope).
 //!
-//! Grants are written as `publish` and `subscribe` pattern lists. They were once prefix
-//! lists named `put` and `get`, which are still read: a prefix `p` means exactly the
-//! pattern `p/**` (and `""` means `**`). One document never mixes the two encodings.
+//! Grants are written as `publish` and `subscribe` prefix lists. They were once named
+//! `put` and `get`, which are still read as the same prefixes, with their slashes
+//! normalized as they always were. One document never mixes the two encodings.
 //!
 //! A role with a bitrate cap is written as an object, `{"path": [...], "rate": bps}`,
 //! which every older reader refuses rather than drop the cap.
 
 use crate::{Access, Link};
-use moq_pattern::{Pattern, Patterns};
+use moq_pattern::{Pattern, Prefix, Prefixes};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{DurationSeconds, serde_as};
 use std::collections::BTreeMap;
@@ -24,9 +24,9 @@ pub(crate) struct Claims {
 	root: String,
 	// The legacy grants, read and never written.
 	#[serde(deserialize_with = "present", skip_serializing)]
-	put: Option<Prefixes>,
+	put: Option<Legacy>,
 	#[serde(deserialize_with = "present", skip_serializing)]
-	get: Option<Prefixes>,
+	get: Option<Legacy>,
 	#[serde(deserialize_with = "present")]
 	publish: Option<Access>,
 	#[serde(deserialize_with = "present")]
@@ -75,8 +75,8 @@ impl TryFrom<Claims> for crate::Claims {
 
 	fn try_from(wire: Claims) -> Result<Self, Self::Error> {
 		let grants = Grants {
-			put: wire.put.map(Prefixes::into_vec),
-			get: wire.get.map(Prefixes::into_vec),
+			put: wire.put.map(Legacy::into_vec),
+			get: wire.get.map(Legacy::into_vec),
 			publish: wire.publish,
 			subscribe: wire.subscribe,
 		};
@@ -106,14 +106,14 @@ pub(crate) struct Scope {
 	#[serde(deserialize_with = "present", skip_serializing)]
 	get: Option<Vec<String>>,
 	#[serde(deserialize_with = "present")]
-	publish: Option<Patterns>,
+	publish: Option<Prefixes>,
 	#[serde(deserialize_with = "present")]
-	subscribe: Option<Patterns>,
+	subscribe: Option<Prefixes>,
 }
 
 impl From<crate::Scope> for Scope {
 	fn from(scope: crate::Scope) -> Self {
-		let paths = |patterns: Patterns| (!patterns.is_empty()).then_some(patterns);
+		let paths = |prefixes: Prefixes| (!prefixes.is_empty()).then_some(prefixes);
 		Self {
 			root: scope.root,
 			put: None,
@@ -147,12 +147,12 @@ impl TryFrom<Scope> for crate::Scope {
 /// Legacy claims wrote a single prefix as a bare string.
 #[derive(Deserialize)]
 #[serde(untagged)]
-enum Prefixes {
+enum Legacy {
 	One(String),
 	Many(Vec<String>),
 }
 
-impl Prefixes {
+impl Legacy {
 	fn into_vec(self) -> Vec<String> {
 		match self {
 			Self::One(prefix) => vec![prefix],
@@ -295,15 +295,16 @@ impl Grants {
 			return Err("mixes the legacy put/get fields with publish/subscribe".to_string());
 		}
 
-		let subtrees = |prefixes: Option<Vec<String>>| -> Result<Access, String> {
-			let path: Patterns = prefixes
-				.unwrap_or_default()
-				.iter()
-				.map(|prefix| Pattern::subtree(prefix).map_err(|err| format!("legacy prefix {prefix:?}: {err}")))
-				.collect::<Result<_, _>>()?;
+		// A legacy prefix had its slashes trimmed and collapsed, as a broadcast path does.
+		let legacy = |prefix: &String| -> Result<Prefix, String> {
+			let normalized = Pattern::literal(prefix).map_err(|err| format!("legacy prefix {prefix:?}: {err}"))?;
+			Prefix::try_from(normalized.as_str()).map_err(|err| format!("legacy prefix {prefix:?}: {err}"))
+		};
+		let prefixes = |prefixes: Option<Vec<String>>| -> Result<Access, String> {
+			let path: Prefixes = prefixes.unwrap_or_default().iter().map(legacy).collect::<Result<_, _>>()?;
 			Ok(Access::new(path))
 		};
-		Ok((subtrees(self.put)?, subtrees(self.get)?))
+		Ok((prefixes(self.put)?, prefixes(self.get)?))
 	}
 }
 

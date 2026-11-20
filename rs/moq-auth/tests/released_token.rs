@@ -1,15 +1,17 @@
 //! The token and grant encodings released issuers and verifiers depend on.
 //!
-//! Tokens are written in the documented shape, `root`, `publish`, and `subscribe`, which
-//! every moq-auth release reads. Tokens minted by `moq-token`, the format before
-//! patterns, are still read: each `put`/`get` prefix `p` grants the subtree `p/**`.
+//! Tokens are written in the documented shape, `root`, `publish`, and `subscribe`, each a
+//! list of prefixes. A release that read those lists as patterns reads a prefix `p` as the
+//! one path `p`, so it grants less than the token, never more. Tokens minted by
+//! `moq-token`, the format before patterns, are still read: each `put`/`get` entry is the
+//! same prefix.
 //! Published moq-auth 0.2.1 refuses a role written as an object, so a capped role is a
 //! shape it refuses in full rather than misread.
 
 use moq_auth::{Algorithm, Claims, Key};
 use serde_json::{Value, json};
 
-fn patterns(texts: &[&str]) -> moq_auth::Patterns {
+fn prefixes(texts: &[&str]) -> moq_auth::Prefixes {
 	texts.iter().map(|text| text.parse().unwrap()).collect()
 }
 
@@ -32,28 +34,29 @@ fn grant(claims: &Claims) -> Value {
 }
 
 #[test]
-fn grants_are_written_as_patterns() {
+fn grants_are_written_as_prefixes() {
 	for (claims, expected) in [
 		(
 			Claims::default()
 				.with_root("room")
-				.with_publish(patterns(&["alice/**"]))
-				.with_subscribe(patterns(&["**"])),
-			json!({"root": "room", "publish": ["alice/**"], "subscribe": ["**"]}),
+				.with_publish(prefixes(&["alice"]))
+				.with_subscribe(prefixes(&[""])),
+			json!({"root": "room", "publish": ["alice"], "subscribe": [""]}),
 		),
 		(
-			Claims::default().with_root("room").with_publish(patterns(&["alice"])),
+			Claims::default().with_root("room").with_publish(prefixes(&["alice"])),
 			json!({"root": "room", "publish": ["alice"]}),
 		),
 		(
-			Claims::default().with_subscribe(patterns(&["*/chat"])),
-			json!({"subscribe": ["*/chat"]}),
+			Claims::default().with_subscribe(prefixes(&["room/chat", "lobby/chat"])),
+			json!({"subscribe": ["lobby/chat", "room/chat"]}),
 		),
 		(
+			// A member beneath another adds nothing, so it is never written.
 			Claims::default()
 				.with_root("room")
-				.with_publish(patterns(&["alice", "*/chat"])),
-			json!({"root": "room", "publish": ["*/chat", "alice"]}),
+				.with_publish(prefixes(&["bob", "alice/cam", "alice"])),
+			json!({"root": "room", "publish": ["alice", "bob"]}),
 		),
 	] {
 		assert_eq!(wire(&claims), expected, "{claims:?}");
@@ -63,9 +66,23 @@ fn grants_are_written_as_patterns() {
 	}
 }
 
+/// Claims minted with patterns, between moq-dev/moq#3746 and prefix grants, are refused
+/// loudly rather than read as a narrower or wider grant. `tests/corpus.json` holds a signed one.
+#[test]
+fn wildcard_claims_are_refused() {
+	for payload in [
+		json!({"publish": ["alice/**"]}),
+		json!({"subscribe": ["**"]}),
+		json!({"subscribe": ["*/chat"]}),
+	] {
+		let err = serde_json::from_value::<Claims>(payload.clone()).unwrap_err();
+		assert!(err.to_string().contains("wildcard"), "{payload}: {err}");
+	}
+}
+
 /// A token `@moq/auth` minted in the `moq-token` prefix form, before tokens were patterns.
 #[test]
-fn legacy_prefixes_verify_as_subtrees() {
+fn legacy_prefixes_verify_as_prefixes() {
 	let key: Key = r#"{"kty":"oct","alg":"HS256","k":"xm6xsSkfFqzPU3KfcbAcF2_h0OkStxQ_nNqVPYl0ync","kid":"js-test-key","key_ops":["sign","verify"]}"#
 		.parse()
 		.unwrap();
@@ -73,12 +90,12 @@ fn legacy_prefixes_verify_as_subtrees() {
 	let token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImpzLXRlc3Qta2V5In0.eyJyb290IjoibGl2ZSIsInB1dCI6WyJjYW1lcmExIl0sImdldCI6WyJjYW1lcmExIiwiY2FtZXJhMiJdLCJpYXQiOjE3NzUxNzY3NTR9.tHNQtHh_HCIKxXOexDCM7AkjqWzbULLZzjEckfOGRfY";
 
 	let claims = key.verify(token).unwrap();
-	assert_eq!(claims.publish.path, patterns(&["camera1/**"]));
-	assert_eq!(claims.subscribe.path, patterns(&["camera1/**", "camera2/**"]));
+	assert_eq!(claims.publish.path, prefixes(&["camera1"]));
+	assert_eq!(claims.subscribe.path, prefixes(&["camera1", "camera2"]));
 	// Signed again, it is written in the documented shape.
 	assert_eq!(
 		wire(&claims),
-		json!({"root": "live", "publish": ["camera1/**"], "subscribe": ["camera1/**", "camera2/**"], "iat": 1775176754}),
+		json!({"root": "live", "publish": ["camera1"], "subscribe": ["camera1", "camera2"], "iat": 1775176754}),
 	);
 }
 
@@ -88,16 +105,16 @@ fn legacy_prefixes_verify_as_subtrees() {
 fn capped_roles_are_written_as_objects() {
 	let rate = moq_auth::Rate::from_bps(8_000_000).unwrap();
 	let claims = Claims::default()
-		.with_publish(patterns(&["alice/**"]))
-		.with_subscribe(patterns(&["**"]));
+		.with_publish(prefixes(&["alice"]))
+		.with_subscribe(prefixes(&[""]));
 	for (claims, expected) in [
 		(
 			claims.clone().with_publish_rate(rate),
-			json!({"publish": {"path": ["alice/**"], "rate": 8_000_000}, "subscribe": ["**"]}),
+			json!({"publish": {"path": ["alice"], "rate": 8_000_000}, "subscribe": [""]}),
 		),
 		(
 			claims.with_subscribe_rate(rate),
-			json!({"publish": ["alice/**"], "subscribe": {"path": ["**"], "rate": 8_000_000}}),
+			json!({"publish": ["alice"], "subscribe": {"path": [""], "rate": 8_000_000}}),
 		),
 	] {
 		assert_eq!(wire(&claims), expected, "{claims:?}");

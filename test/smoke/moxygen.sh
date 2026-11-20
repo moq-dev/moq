@@ -106,7 +106,7 @@ echo "starting moq-dev relay on 127.0.0.1:${PORT}..."
     --listen-tls-cert "$TMP/localhost.crt" --listen-tls-key "$TMP/localhost.key" \
     --web-https-listen "127.0.0.1:${PORT}" \
     --web-https-cert "$TMP/localhost.crt" --web-https-key "$TMP/localhost.key" \
-    --auth-public "**" >"$TMP/relay.log" 2>&1 &
+    --auth-public "" >"$TMP/relay.log" 2>&1 &
 RELAY_PID=$!
 
 ready=0

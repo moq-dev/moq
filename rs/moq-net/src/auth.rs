@@ -31,7 +31,7 @@
 //! Older moq-lite versions and moq-transport carry no AUTH exchange: there the grant stays
 //! `None`. On moq-transport a [`Credential`] is still answered, with a grant that stays
 //! unknown, since a request that names it carries its token; on moq-lite without AUTH its
-//! answer is [`Error::Unsupported`]. moq-lite carries a grant's patterns as they are, and refuses one
+//! answer is [`Error::Unsupported`]. moq-lite carries a grant's prefixes as they are, and refuses one
 //! too large for a single AUTH_OK rather than trim it.
 
 use std::{
@@ -42,7 +42,7 @@ use std::{
 
 use bytes::Bytes;
 
-use crate::{Error, Patterns, Result, SessionError, time::Instant};
+use crate::{Error, Prefixes, Result, SessionError, time::Instant};
 
 mod tokens;
 
@@ -83,15 +83,16 @@ pub(crate) enum Answer {
 /// What a peer lets this side do, in this side's own paths.
 ///
 /// The paths are relative to the session's root, the same paths the session
-/// announces and subscribes with. `Grant::default()` grants nothing; set the
-/// fields on it to grant more.
+/// announces and subscribes with. Each is a set of prefixes, each covering its whole
+/// subtree: the empty prefix grants everything. `Grant::default()` grants nothing; set
+/// the fields on it to grant more.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Grant {
 	/// The broadcasts this side may publish to the peer.
-	pub publish: Patterns,
+	pub publish: Prefixes,
 	/// The broadcasts this side may subscribe to from the peer.
-	pub subscribe: Patterns,
+	pub subscribe: Prefixes,
 	/// When the grant lapses, or `None` for never.
 	pub expires: Option<Instant>,
 }
@@ -100,8 +101,8 @@ impl Grant {
 	/// A grant of everything that never expires.
 	pub fn all() -> Self {
 		Self {
-			publish: crate::Pattern::all().into(),
-			subscribe: crate::Pattern::all().into(),
+			publish: Prefixes::all(),
+			subscribe: Prefixes::all(),
 			expires: None,
 		}
 	}
@@ -125,18 +126,10 @@ impl Grant {
 	}
 
 	/// The paths both grants allow, lapsing at the earlier expiry.
-	///
-	/// Fails closed: an intersection too large to hold grants nothing, never more.
 	fn intersect(&self, other: &Self) -> Self {
-		let both = |a: &Patterns, b: &Patterns| {
-			a.intersect(b).unwrap_or_else(|err| {
-				tracing::warn!(%err, "grant intersection too large; granting nothing");
-				Patterns::new()
-			})
-		};
 		Self {
-			publish: both(&self.publish, &other.publish),
-			subscribe: both(&self.subscribe, &other.subscribe),
+			publish: self.publish.intersect(&other.publish),
+			subscribe: self.subscribe.intersect(&other.subscribe),
 			expires: earliest(self.expires, other.expires),
 		}
 	}
@@ -436,9 +429,9 @@ impl Attached {
 		}
 	}
 
-	/// The union's and the scope's patterns for `direction`, each `None` while
+	/// The union's and the scope's prefixes for `direction`, each `None` while
 	/// unrestricted.
-	fn parts(&self, direction: Direction) -> (Option<&Patterns>, Option<&Patterns>) {
+	fn parts(&self, direction: Direction) -> (Option<&Prefixes>, Option<&Prefixes>) {
 		// The peer's grant names what we may do; the scope names what the peer may,
 		// so what we send is what the peer may subscribe to, and the other way around.
 		match direction {
@@ -462,7 +455,7 @@ impl Attached {
 		}
 	}
 
-	/// Whether `direction` allows `path` right now, without copying the patterns.
+	/// Whether `direction` allows `path` right now, without copying the prefixes.
 	fn allows(&self, direction: Direction, path: &str) -> bool {
 		let (granted, limit) = self.parts(direction);
 		granted.is_none_or(|granted| granted.matches(path)) && limit.is_none_or(|limit| limit.matches(path))
@@ -569,14 +562,14 @@ impl State {
 /// while unrestricted.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Permit {
-	granted: Option<Patterns>,
-	limit: Option<Patterns>,
+	granted: Option<Prefixes>,
+	limit: Option<Prefixes>,
 }
 
 impl Permit {
 	/// A permit limiting the peer to `limit`, with no grant of its own.
 	#[cfg(test)]
-	pub(crate) fn limited(limit: Patterns) -> Self {
+	pub(crate) fn limited(limit: Prefixes) -> Self {
 		Self {
 			granted: None,
 			limit: Some(limit),
@@ -585,30 +578,25 @@ impl Permit {
 
 	/// A permit the peer granted `granted`, with no limit of our own.
 	#[cfg(test)]
-	pub(crate) fn granting(granted: Patterns) -> Self {
+	pub(crate) fn granting(granted: Prefixes) -> Self {
 		Self {
 			granted: Some(granted),
 			limit: None,
 		}
 	}
 
-	/// Whether both allow `path`.
+	/// Whether both allow `path`, and so every path beneath it.
 	pub(crate) fn matches(&self, path: &str) -> bool {
 		self.granted(path) && self.within_limit(path)
 	}
 
-	/// The paths at or beneath `prefix` both allow, which a claim there covers: under
-	/// `a/*`, those beneath `a`, though not `a` itself. An intersection too large to spell
-	/// allows nothing, never more.
-	pub(crate) fn beneath(&self, prefix: &str) -> Patterns {
-		let Ok(subtree) = moq_pattern::Pattern::subtree(prefix) else {
-			return Patterns::new();
-		};
-		let mut beneath = Patterns::from(subtree);
-		for patterns in [&self.granted, &self.limit].into_iter().flatten() {
-			beneath = beneath.intersect(patterns).unwrap_or_default();
-		}
-		beneath
+	/// The paths `scope` holds that both allow too.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn within(&self, scope: Prefixes) -> Prefixes {
+		[&self.granted, &self.limit]
+			.into_iter()
+			.flatten()
+			.fold(scope, |scope, prefixes| scope.intersect(prefixes))
 	}
 
 	/// Whether the peer's grant alone allows `path`.
@@ -620,17 +608,6 @@ impl Permit {
 	/// own grant does not decide.
 	pub(crate) fn within_limit(&self, path: &str) -> bool {
 		self.limit.as_ref().is_none_or(|limit| limit.matches(path))
-	}
-
-	/// Whether this allows every path at or beneath `prefix`, judged pattern by
-	/// pattern, so a `false` may be spurious but a `true` never is.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn covers_subtree(&self, prefix: &str) -> bool {
-		let Ok(subtree) = moq_pattern::Pattern::subtree(prefix) else {
-			return false;
-		};
-		let covers = |patterns: &Option<Patterns>| patterns.as_ref().is_none_or(|patterns| patterns.contains(&subtree));
-		covers(&self.granted) && covers(&self.limit)
 	}
 
 	/// The prefixes the peer's grant confines this direction to, or `None` while it
@@ -645,50 +622,41 @@ impl Permit {
 	/// while neither does: every path both allow lies within one of them.
 	#[cfg(feature = "async")]
 	pub(crate) fn regions(&self) -> Option<Vec<crate::Path>> {
-		let granted = self.granted.as_ref().and_then(confining);
-		let limit = self.limit.as_ref().and_then(confining);
-		let (granted, limit) = match (granted, limit) {
-			(None, None) => return None,
-			(Some(one), None) | (None, Some(one)) => return Some(one),
-			(Some(granted), Some(limit)) => (granted, limit),
-		};
-		// Of two regions one lies within the other, or they share nothing.
-		let mut both: Vec<crate::Path> = (granted.iter())
-			.flat_map(|a| limit.iter().map(move |b| (a, b)))
-			.filter_map(|(a, b)| match () {
-				_ if a.has_prefix(b) => Some(a.clone()),
-				_ if b.has_prefix(a) => Some(b.clone()),
-				_ => None,
-			})
-			.collect();
-		both.sort();
-		both.dedup();
-		Some(both)
+		// Neither confining anything leaves every path; otherwise what both allow can never
+		// be every path.
+		fn confines(prefixes: &Option<Prefixes>) -> Option<&Prefixes> {
+			prefixes.as_ref().filter(|prefixes| !prefixes.matches(""))
+		}
+		match (confines(&self.granted), confines(&self.limit)) {
+			(None, None) => None,
+			(Some(one), None) | (None, Some(one)) => confining(one),
+			(Some(granted), Some(limit)) => confining(&granted.intersect(limit)),
+		}
 	}
 
 	/// What the peer granted, or `None` when it grants everything.
 	#[cfg(feature = "async")]
-	pub(crate) fn grant(&self) -> Option<&Patterns> {
+	pub(crate) fn grant(&self) -> Option<&Prefixes> {
 		self.granted.as_ref()
 	}
 
-	/// The patterns of the grant that `covered` does not contain, judged pattern by
-	/// pattern, so one may be spurious but none is missed, each with the prefix holding
+	/// The prefixes of the grant that `covered` does not cover, each as the path holding
 	/// what it shows. `None` covers everything.
 	#[cfg(feature = "async")]
-	pub(crate) fn beyond(&self, covered: Option<&Patterns>) -> Vec<(moq_pattern::Pattern, crate::Path)> {
+	pub(crate) fn beyond(&self, covered: Option<&Prefixes>) -> Vec<(crate::Prefix, crate::Path)> {
 		let Some(covered) = covered else {
 			return Vec::new();
 		};
 		let granted = match &self.granted {
 			Some(granted) => granted.clone(),
-			None => Patterns::from(moq_pattern::Pattern::all()),
+			None => Prefixes::all(),
 		};
-		(granted.iter())
-			.filter(|pattern| !covered.contains(pattern))
-			.filter_map(|pattern| {
-				let head = crate::model::interest_prefixes(&Patterns::from(pattern.clone()));
-				Some((pattern.clone(), head.into_iter().next()?))
+		(granted.into_iter())
+			.filter(|prefix| !covered.matches(prefix.as_str()))
+			.filter_map(|prefix| {
+				// A prefix too long for a path covers nothing a peer could name.
+				let region = crate::Path::new(prefix.as_str()).ok()?;
+				Some((prefix, region))
 			})
 			.collect()
 	}
@@ -705,10 +673,9 @@ impl Permit {
 		self.limit == other.limit
 	}
 
-	/// Whether this allows everything `other` does, judged part by part, so a `false`
-	/// may be spurious but a `true` never is.
+	/// Whether this allows everything `other` does.
 	pub(crate) fn covers(&self, other: &Self) -> bool {
-		let covers = |this: &Option<Patterns>, other: &Option<Patterns>| match (this, other) {
+		let covers = |this: &Option<Prefixes>, other: &Option<Prefixes>| match (this, other) {
 			(None, _) => true,
 			(Some(_), None) => false,
 			(Some(this), Some(other)) => this.covers(other),
@@ -717,13 +684,13 @@ impl Permit {
 	}
 }
 
-/// The prefixes `patterns` confine paths to, or `None` when they allow every path.
+/// The paths `prefixes` confine every path to, or `None` when they allow every path. A
+/// prefix too long for a path confines to nothing a peer could name, so it drops.
 #[cfg(feature = "async")]
-fn confining(patterns: &Patterns) -> Option<Vec<crate::Path>> {
-	let everything = moq_pattern::Pattern::subtree("").ok()?;
-	match patterns.contains(&everything) {
+fn confining(prefixes: &Prefixes) -> Option<Vec<crate::Path>> {
+	match prefixes.matches("") {
 		true => None,
-		false => Some(crate::model::interest_prefixes(patterns)),
+		false => Some(prefixes.iter().filter_map(|prefix| crate::Path::new(prefix.as_str()).ok()).collect()),
 	}
 }
 
@@ -1172,7 +1139,7 @@ impl Link {
 	pub(crate) fn granted(&self, id: u64, grant: Grant) {
 		// One parseable line per AUTH_OK, so the grant the peer actually sent is observable
 		// without an API; the interop harness checks it against the token it minted.
-		let list = |patterns: &Patterns| format!("{:?}", patterns.iter().map(|p| p.to_string()).collect::<Vec<_>>());
+		let list = |prefixes: &Prefixes| format!("{:?}", prefixes.iter().map(|p| p.to_string()).collect::<Vec<_>>());
 		tracing::debug!(
 			publish = %list(&grant.publish),
 			subscribe = %list(&grant.subscribe),
@@ -2103,31 +2070,29 @@ fn refuse(issue: &kio::Shared<Issue>, code: SessionError, reason: String) {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum RequestKind {
 	/// The peer reads a track: a SUBSCRIBE, a FETCH, or a TRACK_STATUS. Covered by the
-	/// grant's `subscribe` patterns.
+	/// grant's `subscribe` prefixes.
 	Subscribe,
 	/// A PUBLISH_NAMESPACE: the peer announces a namespace it will publish under. Its
-	/// `publish` patterns must cover the whole namespace.
+	/// `publish` prefixes must cover the whole namespace.
 	PublishNamespace,
 	/// A SUBSCRIBE_NAMESPACE: the peer discovers only the broadcasts the token allows
 	/// beneath the requested prefix.
 	Discover,
-	/// A PUBLISH: the peer offers a track. Covered by the grant's `publish` patterns.
+	/// A PUBLISH: the peer offers a track. Covered by the grant's `publish` prefixes.
 	Publish,
 }
 
 impl RequestKind {
 	/// Whether `grant`, issued to the peer that presented the token, covers this request at
 	/// `path`. A grant names what its holder may do, so a request to read is covered by its
-	/// `subscribe` patterns and a request to announce by its `publish` patterns. An announce
-	/// routes everything beneath its namespace, so the grant must cover that whole subtree.
+	/// `subscribe` prefixes and a request to announce by its `publish` prefixes. An announce
+	/// routes everything beneath its namespace, which a prefix covering the namespace covers
+	/// too.
 	pub(crate) fn covers(self, grant: &Grant, path: &str) -> bool {
 		match self {
 			Self::Subscribe => grant.subscribe.matches(path),
 			Self::Discover => !grant.subscribe.is_empty(),
-			Self::Publish => grant.publish.matches(path),
-			Self::PublishNamespace => {
-				crate::Pattern::subtree(path).is_ok_and(|subtree| grant.publish.contains(&subtree))
-			}
+			Self::Publish | Self::PublishNamespace => grant.publish.matches(path),
 		}
 	}
 }
@@ -2719,7 +2684,7 @@ impl Gate {
 		}
 		let mut permit = permit.expect("a session epoch is never u64::MAX");
 		permit.limit = Some(if ended {
-			Patterns::new()
+			Prefixes::new()
 		} else {
 			match self.direction {
 				Direction::Publish => token.grant.subscribe.clone(),
@@ -2860,7 +2825,7 @@ pub(crate) fn unauthorized_reason(path: &crate::Path) -> String {
 #[derive(Default)]
 pub(crate) struct Enforce {
 	epoch: u64,
-	permit: Option<Patterns>,
+	permit: Option<Prefixes>,
 	/// Every broadcast admitted so far, still announced.
 	live: std::collections::HashSet<crate::Path>,
 	setup: bool,
@@ -3072,7 +3037,7 @@ mod tests {
 		{
 			let issue = serving.issue.read();
 			assert_eq!(issue.outbox.len(), 1, "grants piled up");
-			assert!(matches!(issue.outbox.front(), Some(Reply::Grant(grant)) if grant.publish == patterns(&["99"])));
+			assert!(matches!(issue.outbox.front(), Some(Reply::Grant(grant)) if grant.publish == prefixes(&["99"])));
 		}
 		issued.revoke(SessionError::Unauthorized, "revoked");
 		let issue = serving.issue.read();
@@ -3150,17 +3115,14 @@ mod tests {
 		assert!(requests.poll_next(&kio::Waiter::noop()).is_pending());
 	}
 
-	fn patterns(prefixes: &[&str]) -> Patterns {
-		prefixes
-			.iter()
-			.map(|prefix| crate::Pattern::subtree(prefix).unwrap())
-			.collect()
+	fn prefixes(texts: &[&str]) -> Prefixes {
+		texts.iter().map(|text| crate::Prefix::try_from(*text).unwrap()).collect()
 	}
 
 	fn grant(publish: &[&str], subscribe: &[&str]) -> Grant {
 		Grant {
-			publish: patterns(publish),
-			subscribe: patterns(subscribe),
+			publish: prefixes(publish),
+			subscribe: prefixes(subscribe),
 			expires: None,
 		}
 	}
@@ -3170,8 +3132,8 @@ mod tests {
 	#[test]
 	fn the_granted_regions_follow_the_grant_alone() {
 		let permit = |granted: Option<&[&str]>, limit: Option<&[&str]>| Permit {
-			granted: granted.map(patterns),
-			limit: limit.map(patterns),
+			granted: granted.map(prefixes),
+			limit: limit.map(prefixes),
 		};
 		let path = crate::Path::from_static;
 		assert_eq!(permit(None, None).granted_regions(), None);
@@ -3189,14 +3151,13 @@ mod tests {
 	}
 
 	/// What a publisher shows its peer lies within the regions of the grant and the limit
-	/// together, the deeper of any two nested; and two grants with the same regions can
-	/// still differ, as `a/*` and `a/**` do.
+	/// together, the deeper of any two nested.
 	#[cfg(feature = "async")]
 	#[test]
 	fn the_regions_follow_the_grant_and_the_limit() {
 		let permit = |granted: Option<&[&str]>, limit: Option<&[&str]>| Permit {
-			granted: granted.map(patterns),
-			limit: limit.map(patterns),
+			granted: granted.map(prefixes),
+			limit: limit.map(prefixes),
 		};
 		let path = crate::Path::from_static;
 		assert_eq!(permit(None, None).regions(), None);
@@ -3206,31 +3167,24 @@ mod tests {
 			permit(Some(&["a", "c/d"]), Some(&["a/b", "c", "e"])).regions(),
 			Some(vec![path("a/b"), path("c/d")])
 		);
-
-		let one = |pattern: &str| Permit {
-			granted: Some(Patterns::from(pattern.parse::<crate::Pattern>().unwrap())),
-			limit: None,
-		};
-		assert_eq!(one("a/*").granted_regions(), one("a/**").granted_regions());
-		assert!(!one("a/*").same_grant(&one("a/**")));
+		assert_eq!(permit(Some(&[""]), Some(&[""])).regions(), None, "neither confines");
+		assert_eq!(permit(Some(&["a"]), Some(&["b"])).regions(), Some(vec![]), "nothing in both");
 	}
 
-	/// A permit allows what both allow beneath a path, the same paths: beneath `a` under
-	/// `a/*`, but nothing beneath `a/b` under `a/*/x` granted and `a/*/y` limited.
+	/// A permit allows within a scope what the scope, the grant, and the limit all allow:
+	/// the deepest of any nested prefixes.
 	#[test]
-	fn a_permit_allows_what_both_allow_beneath() {
-		let permit = |granted: Option<&str>, limit: Option<&str>| Permit {
-			granted: granted.map(|pattern| Patterns::from(pattern.parse::<crate::Pattern>().unwrap())),
-			limit: limit.map(|pattern| Patterns::from(pattern.parse::<crate::Pattern>().unwrap())),
+	fn a_permit_allows_what_all_three_allow() {
+		let permit = |granted: Option<&[&str]>, limit: Option<&[&str]>| Permit {
+			granted: granted.map(prefixes),
+			limit: limit.map(prefixes),
 		};
-		let reaches = |permit: Permit, prefix: &str| !permit.beneath(prefix).is_empty();
-		assert!(reaches(permit(Some("a/*"), None), "a"));
-		assert!(reaches(permit(None, Some("a/*")), ""));
-		assert!(!reaches(permit(Some("a/*"), None), "a/b/c"));
-		assert!(!reaches(permit(None, Some("a/*")), "b"));
-		assert!(reaches(permit(Some("a/*/x"), Some("a/b/*")), "a"));
-		assert!(!reaches(permit(Some("a/*/x"), Some("a/*/y")), "a/b"));
-		assert!(reaches(permit(None, None), "a"));
+		let within = |permit: Permit, scope: &[&str]| permit.within(prefixes(scope));
+		assert_eq!(within(permit(Some(&["a/b"]), None), &[""]), prefixes(&["a/b"]));
+		assert_eq!(within(permit(None, Some(&["a"])), &["a/b", "c"]), prefixes(&["a/b"]));
+		assert_eq!(within(permit(Some(&["a"]), Some(&["a/b/c"])), &["a/b"]), prefixes(&["a/b/c"]));
+		assert!(within(permit(Some(&["a/x"]), Some(&["a/y"])), &["a"]).is_empty());
+		assert_eq!(within(permit(None, None), &["a"]), prefixes(&["a"]));
 	}
 
 	/// A limit replaces the last one, narrower or wider, and applies to a version
@@ -4030,8 +3984,8 @@ mod request_token_tests {
 
 	fn subscribe_only(prefix: &str) -> Grant {
 		Grant {
-			publish: Patterns::new(),
-			subscribe: crate::Pattern::subtree(prefix).unwrap().into(),
+			publish: Prefixes::new(),
+			subscribe: crate::Prefix::try_from(prefix).unwrap().into(),
 			expires: None,
 		}
 	}
@@ -4123,8 +4077,8 @@ mod request_token_tests {
 
 	fn grant_in(runtime: &crate::time::Deadlines, secs: u64) -> Grant {
 		Grant {
-			publish: Patterns::new(),
-			subscribe: crate::Pattern::all().into(),
+			publish: Prefixes::new(),
+			subscribe: Prefixes::all(),
 			expires: runtime.now().checked_add(Duration::from_secs(secs)),
 		}
 	}
@@ -4428,13 +4382,13 @@ mod request_token_tests {
 	#[test]
 	fn request_coverage_is_from_the_presenters_side() {
 		let read_only = Grant {
-			publish: Patterns::new(),
-			subscribe: crate::Pattern::all().into(),
+			publish: Prefixes::new(),
+			subscribe: Prefixes::all(),
 			expires: None,
 		};
 		let write_only = Grant {
-			publish: crate::Pattern::all().into(),
-			subscribe: Patterns::new(),
+			publish: Prefixes::all(),
+			subscribe: Prefixes::new(),
 			expires: None,
 		};
 		assert!(RequestKind::Subscribe.covers(&read_only, "room"));
@@ -4443,31 +4397,22 @@ mod request_token_tests {
 		assert!(!RequestKind::PublishNamespace.covers(&read_only, "room"));
 	}
 
-	/// An announce routes its whole namespace, so a grant naming only the namespace itself
-	/// does not cover it, while one naming its subtree does.
+	/// An announce routes its whole namespace, which the prefix naming it covers, and a
+	/// namespace beneath it too, but not one above it or beside it.
 	#[test]
 	fn an_announce_needs_its_whole_subtree() {
-		let exact = Grant {
-			publish: crate::Pattern::literal("room").unwrap().into(),
-			subscribe: Patterns::new(),
+		let room = Grant {
+			publish: crate::Prefix::try_from("room").unwrap().into(),
+			subscribe: Prefixes::new(),
 			expires: None,
 		};
-		let subtree = Grant {
-			publish: crate::Pattern::subtree("room").unwrap().into(),
-			subscribe: Patterns::new(),
-			expires: None,
-		};
-		assert!(!RequestKind::PublishNamespace.covers(&exact, "room"));
-		assert!(RequestKind::PublishNamespace.covers(&subtree, "room"));
-		assert!(RequestKind::PublishNamespace.covers(&subtree, "room/cam"));
-		assert!(!RequestKind::PublishNamespace.covers(&subtree, "other"));
-		// A SUBSCRIBE names one broadcast, which the exact grant's twin covers.
-		let read = Grant {
-			publish: Patterns::new(),
-			subscribe: crate::Pattern::literal("room").unwrap().into(),
-			expires: None,
-		};
-		assert!(RequestKind::Subscribe.covers(&read, "room"));
+		assert!(RequestKind::PublishNamespace.covers(&room, "room"));
+		assert!(RequestKind::PublishNamespace.covers(&room, "room/cam"));
+		assert!(!RequestKind::PublishNamespace.covers(&room, ""));
+		assert!(!RequestKind::PublishNamespace.covers(&room, "other"));
+		assert!(!RequestKind::PublishNamespace.covers(&room, "roomy"));
+		// A path no prefix can spell is still covered by the prefix above it.
+		assert!(RequestKind::PublishNamespace.covers(&room, "room/cam-*"));
 	}
 
 	/// An acceptor-side revoke ends the request before the deadline, and does not close the

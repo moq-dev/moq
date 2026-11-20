@@ -18,7 +18,7 @@ import type { BroadcastCache } from "../consume.ts";
 import { error, ProtocolViolation } from "../error.ts";
 import { routesEqual, WireRoute } from "../hop.ts";
 import type * as Instance from "../instance.ts";
-import { bestCandidate, coveringPrefixes, hiddenBelow, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
+import { bestCandidate, coveringPrefixes, hiddenBelow, scopeCaptures, scopeOverlaps } from "../internal.ts";
 import * as Path from "../path.ts";
 import { SlotMap, type Slots } from "../util/limits.ts";
 import {
@@ -116,7 +116,7 @@ export class Routed {
 	 * nothing, since its ANNOUNCE_OK follows what the change shows under a wider prefix. */
 	#regranted = false;
 	/** What our grant lets us subscribe to, as last seen. */
-	#granted?: Path.Patterns;
+	#granted?: Path.Prefixes;
 
 	// Each live claim holds one of the session's announce slots.
 	#claims: SlotMap<bigint, Live>;
@@ -545,14 +545,13 @@ function presentedAt(reader: Reader, path: Path.Valid): Path.Valid | undefined {
 	return Path.hasPrefix(path, reader.prefix) ? reader.prefix : undefined;
 }
 
-// The prefixes holding what the grant `next` shows that `before` did not, judged pattern by
-// pattern, so one may be spurious but none is missed. Empty for a narrowing. Mirrors rs/moq-net's
-// `Permit::gained`.
-function gained(before: Path.Patterns | undefined, next: Path.Patterns | undefined): Path.Valid[] {
+// The prefixes holding what the grant `next` shows that `before` did not: each of its prefixes
+// `before` does not cover. Empty for a narrowing. Mirrors rs/moq-net's `Permit::gained`.
+function gained(before: Path.Prefixes | undefined, next: Path.Prefixes | undefined): Path.Valid[] {
 	if (!before) return [];
 	if (!next) return [Path.empty()];
 	return next
 		.toArray()
-		.filter((pattern) => !before.contains(pattern))
-		.map(scopeHead);
+		.filter((prefix) => !before.matches(prefix.text))
+		.map((prefix) => prefix.text as Path.Valid);
 }

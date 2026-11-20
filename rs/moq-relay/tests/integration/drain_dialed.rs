@@ -58,7 +58,7 @@ impl Node {
 		tokio::spawn(async move {
 			let mut leases = Vec::new();
 			while let Some(admission) = admissions.next().await {
-				let mut grant = moq_auth::Grant::new(moq_auth::Pattern::all(), moq_auth::Pattern::all());
+				let mut grant = moq_auth::Grant::new(moq_auth::Prefix::all(), moq_auth::Prefix::all());
 				grant.link = Some(moq_auth::Link::Peer);
 				let (lease, consumer) = moq_auth::lease::Producer::new(grant);
 				admission.grant(consumer);

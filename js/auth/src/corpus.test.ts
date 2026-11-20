@@ -2,7 +2,7 @@
 // parsers cannot disagree on a token, key, key set, grant, or signable root without both failing.
 import { describe, expect, test } from "bun:test";
 import * as jose from "jose";
-import { type Access, type Claims, patterns } from "./claims.ts";
+import { type Access, type Claims, prefixes } from "./claims.ts";
 import { GrantSchema } from "./contract.ts";
 import { Key } from "./key.ts";
 import { KeySet } from "./set.ts";
@@ -18,13 +18,13 @@ const corpus = (await Bun.file(new URL("../../../rs/moq-auth/tests/corpus.json",
 	roots: { root: string; signable: boolean }[];
 };
 
-// The claims as the corpus writes them: patterns reduced, absent roles empty, a capped role
+// The claims as the corpus writes them: prefixes reduced, absent roles empty, a capped role
 // as its wire object, and times and the token ID only when present.
 function canonical(claims: Claims): unknown {
 	const role = (access: Access | undefined) =>
 		access === undefined || Array.isArray(access)
-			? patterns(access).toJSON()
-			: { path: patterns(access.path).toJSON(), rate: access.rate };
+			? prefixes(access).toJSON()
+			: { path: prefixes(access.path).toJSON(), rate: access.rate };
 	return {
 		root: claims.root,
 		publish: role(claims.publish),
@@ -84,7 +84,7 @@ describe("roots", () => {
 	const key = Key.parse(JSON.stringify(corpus.keys.hs256));
 	for (const { root, signable } of corpus.roots) {
 		test(JSON.stringify(root), async () => {
-			const signed = Key.sign(key, { root, publish: ["**"] });
+			const signed = Key.sign(key, { root, publish: [""] });
 			if (signable) await signed;
 			else await expect(signed).rejects.toThrow();
 		});

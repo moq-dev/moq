@@ -34,6 +34,17 @@ replaces it.
 
 These land with the next breaking release.
 
+- **Grants are prefixes.** A token, key scope, `moq auth serve` rule, relay
+  public rule, origin scope, and auth-server grant lists path prefixes, each
+  covering its path and everything beneath it. A wildcard is refused where it is
+  parsed: rewrite `foo/**` as `foo` and `**` as the empty prefix `""`. A bare
+  `foo` minted since grants became patterns widens from one broadcast to its
+  subtree. Released issuers write a subtree grant as `put`/`get`, which keeps its
+  meaning. A released relay reads a new token's prefix as one exact path, so
+  upgrade relays before the issuers that mint their tokens. An upgraded relay
+  refuses a released auth server's `**`, so upgrade an auth server and the relays
+  it answers together.
+
 - **WebRTC moves to `moq-webrtc`.** The `moq-rtc` crate is renamed
   `moq-webrtc`: replace `moq_rtc::` with `moq_webrtc::`. Its last release stays
   on crates.io. Nothing changes on the wire.

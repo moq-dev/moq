@@ -23,8 +23,11 @@ program
 	.option("--public <path>", "Path to save the public key (for asymmetric algorithms)")
 	.option("--base64", "Output as base64url instead of JSON", false)
 	.option("--root <root>", "Root path for the optional key scope", "")
-	.option("--publish <pattern...>", "Publish patterns the key may grant (foo/** for a subtree)")
-	.option("--subscribe <pattern...>", "Subscribe patterns the key may grant (foo/** for a subtree)")
+	.option("--publish <prefix...>", 'Publish prefixes the key may grant, each with its subtree ("" for everything)')
+	.option(
+		"--subscribe <prefix...>",
+		'Subscribe prefixes the key may grant, each with its subtree ("" for everything)',
+	)
 	.action(async (options) => {
 		try {
 			const algorithm = options.algorithm as Algorithm;
@@ -70,8 +73,11 @@ program
 	.description("Sign a token to stdout")
 	.requiredOption("--key <path>", "Path to the key file")
 	.option("--root <root>", "Root path for the token", "")
-	.option("--publish <pattern...>", "Patterns the holder may publish (foo/** for a subtree)")
-	.option("--subscribe <pattern...>", "Patterns the holder may subscribe to (foo/** for a subtree)")
+	.option("--publish <prefix...>", 'Prefixes the holder may publish, each with its subtree ("" for everything)')
+	.option(
+		"--subscribe <prefix...>",
+		'Prefixes the holder may subscribe to, each with its subtree ("" for everything)',
+	)
 	.addOption(
 		new Option("--expires <timestamp>", "Expiration time as unix timestamp, instead of --ttl from now")
 			.argParser(parseUnixTimestamp)

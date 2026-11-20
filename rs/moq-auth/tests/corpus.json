@@ -12,7 +12,7 @@
 			"key_ops": ["verify"],
 			"kty": "OKP",
 			"crv": "Ed25519",
-			"x": "S9n3tEG677fSNpa0Ftf46OPBte5y1pTwvm4fPkEw_Z8",
+			"x": "qu5t7m2T44BXaiUVEQrtZoUNGMLQqPwyTus-H8JagFA",
 			"kid": "dfab9113ea85dc27"
 		},
 		"js_hs256": {
@@ -39,33 +39,39 @@
 			"kty": "oct",
 			"k": "pLDMYsYrp6vZLQbefVzHXN6P4wc1ADTLn4L7xzi1Qm4",
 			"kid": "e396f70014db9fe9",
-			"scope": { "root": "project", "publish": ["live/**"], "subscribe": ["watch/**"] }
+			"scope": { "root": "project", "publish": ["live"], "subscribe": ["watch"] }
 		}
 	},
 	"tokens": [
 		{
 			"name": "rust_hs256",
 			"key": "hs256",
+			"token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiIsImtpZCI6ImQ1NWIxZjEzZTZiZGEyODEifQ.eyJyb290IjoiZGVtbyIsInB1Ymxpc2giOlsiYWxpY2UiXSwic3Vic2NyaWJlIjpbImJvYiJdfQ.yKTcU2z7euqevlly1CiC4EZEQ3MM1BwkKPrnEZXWfkc",
+			"claims": { "root": "demo", "publish": ["alice"], "subscribe": ["bob"] }
+		},
+		{
+			"name": "minted_with_wildcards",
+			"key": "hs256",
 			"token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiIsImtpZCI6ImQ1NWIxZjEzZTZiZGEyODEifQ.eyJyb290IjoiZGVtbyIsInB1Ymxpc2giOlsiYWxpY2UvKioiXSwic3Vic2NyaWJlIjpbImJvYi8qKiJdfQ.OuaQY4hHKpBLvTK-9ZUv2oxiqXTGisng-cg2GcqrgdY",
-			"claims": { "root": "demo", "publish": ["alice/**"], "subscribe": ["bob/**"] }
+			"claims": null
 		},
 		{
 			"name": "rust_hs256_empty_root",
 			"key": "hs256",
-			"token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiIsImtpZCI6ImQ1NWIxZjEzZTZiZGEyODEifQ.eyJwdWJsaXNoIjpbImFsaWNlLyoqIl0sInN1YnNjcmliZSI6WyJib2IvKioiXX0.f1uYbrxNNyGg_0TkRWXHRhU0K_HKlOjeiddwHqppK-0",
-			"claims": { "root": "", "publish": ["alice/**"], "subscribe": ["bob/**"] }
+			"token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiIsImtpZCI6ImQ1NWIxZjEzZTZiZGEyODEifQ.eyJwdWJsaXNoIjpbImFsaWNlIl0sInN1YnNjcmliZSI6WyJib2IiXX0.PZPVb8pZfDRHWQyEaJRSmYUOipw6AQNRG5rJm-Klax0",
+			"claims": { "root": "", "publish": ["alice"], "subscribe": ["bob"] }
 		},
 		{
 			"name": "rust_eddsa",
 			"key": "eddsa",
-			"token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJFZERTQSIsImtpZCI6ImRmYWI5MTEzZWE4NWRjMjcifQ.eyJyb290Ijoicm9vbSIsInB1Ymxpc2giOlsic3RyZWFtMS8qKiIsInN0cmVhbTIvKioiXSwic3Vic2NyaWJlIjpbImZlZWQxLyoqIl19.dpZ_p-eyKxaw6bRZp7sfKjmao04MwPuPqbu744bucPjiQVNfGZodfeyEk-fsY79fa9YSbjM1m6DPw3Wg7pzRBA",
-			"claims": { "root": "room", "publish": ["stream1/**", "stream2/**"], "subscribe": ["feed1/**"] }
+			"token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJFZERTQSIsImtpZCI6ImRmYWI5MTEzZWE4NWRjMjcifQ.eyJyb290Ijoicm9vbSIsInB1Ymxpc2giOlsic3RyZWFtMSIsInN0cmVhbTIiXSwic3Vic2NyaWJlIjpbImZlZWQxIl19.g2aBeFIrej9jfZz4pQUPwX3GjZVROoTuvWdFSb4l55i5FLL9xfdEf2vUH83hdYo4og1i2OT8Wm0vnPGdwyhsCw",
+			"claims": { "root": "room", "publish": ["stream1", "stream2"], "subscribe": ["feed1"] }
 		},
 		{
 			"name": "rust_scoped",
 			"key": "scoped",
-			"token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiIsImtpZCI6ImUzOTZmNzAwMTRkYjlmZTkifQ.eyJyb290IjoicHJvamVjdCIsInB1Ymxpc2giOlsibGl2ZS9yb29tLyoqIl0sInN1YnNjcmliZSI6WyJ3YXRjaC8qKiJdfQ.JHx-OFoj5chiC33R6zVeaeHYUPCTEYKBfCETPLwrwtc",
-			"claims": { "root": "project", "publish": ["live/room/**"], "subscribe": ["watch/**"] }
+			"token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiIsImtpZCI6ImUzOTZmNzAwMTRkYjlmZTkifQ.eyJyb290IjoicHJvamVjdCIsInB1Ymxpc2giOlsibGl2ZS9yb29tIl0sInN1YnNjcmliZSI6WyJ3YXRjaCJdfQ.2neixYP5xthkSZPqsu4EU72GemV4oom3yGAXTs0iMYY",
+			"claims": { "root": "project", "publish": ["live/room"], "subscribe": ["watch"] }
 		},
 		{
 			"name": "js_hs256",
@@ -79,65 +85,65 @@
 			"token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImpzLXRlc3Qta2V5In0.eyJyb290IjoibGl2ZSIsInB1dCI6WyJjYW1lcmExIl0sImdldCI6WyJjYW1lcmExIiwiY2FtZXJhMiJdLCJpYXQiOjE3NzUxNzY3NTR9.tHNQtHh_HCIKxXOexDCM7AkjqWzbULLZzjEckfOGRfY",
 			"claims": {
 				"root": "live",
-				"publish": ["camera1/**"],
-				"subscribe": ["camera1/**", "camera2/**"],
+				"publish": ["camera1"],
+				"subscribe": ["camera1", "camera2"],
 				"iat": 1775176754
 			}
 		},
 		{
 			"name": "js_eddsa",
 			"key": "js_eddsa",
-			"token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6ImpzLWVkZHNhLWtleSJ9.eyJyb290Ijoic3RyZWFtIiwicHVibGlzaCI6WyJ2aWRlby8qKiJdLCJpYXQiOjE3NzUxNzY3NTZ9.Vq00rznemlwxsGLdAR8EJs1J8cgXhaiuEiCysmCxnWbDemIFxS6kTNv3kp6LKnokp-mpHiRpO24Nv7b47jcIAQ",
-			"claims": { "root": "stream", "publish": ["video/**"], "subscribe": [], "iat": 1775176756 }
+			"token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6ImpzLWVkZHNhLWtleSJ9.eyJyb290Ijoic3RyZWFtIiwicHVibGlzaCI6WyJ2aWRlbyJdLCJpYXQiOjE3NzUxNzY3NTZ9.F1q_MKWxwliM6mdM9f00zf4ekb3UmkEGzkbNyimF4hFcEkGrmvclVhHCKZnPpzSpgau9HZrtWPjub-_imZh0AA",
+			"claims": { "root": "stream", "publish": ["video"], "subscribe": [], "iat": 1775176756 }
 		},
 		{
 			"name": "eddsa_token_under_an_hs256_key",
 			"key": "hs256",
-			"token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJFZERTQSIsImtpZCI6ImRmYWI5MTEzZWE4NWRjMjcifQ.eyJyb290Ijoicm9vbSIsInB1Ymxpc2giOlsic3RyZWFtMS8qKiIsInN0cmVhbTIvKioiXSwic3Vic2NyaWJlIjpbImZlZWQxLyoqIl19.dpZ_p-eyKxaw6bRZp7sfKjmao04MwPuPqbu744bucPjiQVNfGZodfeyEk-fsY79fa9YSbjM1m6DPw3Wg7pzRBA",
+			"token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJFZERTQSIsImtpZCI6ImRmYWI5MTEzZWE4NWRjMjcifQ.eyJyb290Ijoicm9vbSIsInB1Ymxpc2giOlsic3RyZWFtMSIsInN0cmVhbTIiXSwic3Vic2NyaWJlIjpbImZlZWQxIl19.g2aBeFIrej9jfZz4pQUPwX3GjZVROoTuvWdFSb4l55i5FLL9xfdEf2vUH83hdYo4og1i2OT8Wm0vnPGdwyhsCw",
 			"claims": null
 		},
 		{
 			"name": "tampered_signature",
 			"key": "hs256",
-			"token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiIsImtpZCI6ImQ1NWIxZjEzZTZiZGEyODEifQ.eyJyb290IjoiZGVtbyIsInB1Ymxpc2giOlsiYWxpY2UvKioiXSwic3Vic2NyaWJlIjpbImJvYi8qKiJdfQ.OuaQY4hHKpBLvTK-9ZUv2oxiqXTGisng-cg2GcqrgdA",
+			"token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiIsImtpZCI6ImQ1NWIxZjEzZTZiZGEyODEifQ.eyJyb290IjoiZGVtbyIsInB1Ymxpc2giOlsiYWxpY2UiXSwic3Vic2NyaWJlIjpbImJvYiJdfQ.yKTcU2z7euqevlly1CiC4EZEQ3MM1BwkKPrnEZXWfkA",
 			"claims": null
 		},
 		{ "name": "not_a_jwt", "key": "hs256", "token": "not-a-jwt", "claims": null },
 		{
 			"name": "times_at_the_range_bounds",
 			"key": "hs256",
-			"payload": { "root": "demo", "publish": ["**"], "exp": 18446744073, "iat": 0, "nbf": 0 },
-			"claims": { "root": "demo", "publish": ["**"], "subscribe": [], "exp": 18446744073, "iat": 0, "nbf": 0 }
+			"payload": { "root": "demo", "publish": [""], "exp": 18446744073, "iat": 0, "nbf": 0 },
+			"claims": { "root": "demo", "publish": [""], "subscribe": [], "exp": 18446744073, "iat": 0, "nbf": 0 }
 		},
-		{ "name": "null_exp", "key": "hs256", "payload": { "publish": ["**"], "exp": null }, "claims": null },
-		{ "name": "null_iat", "key": "hs256", "payload": { "publish": ["**"], "iat": null }, "claims": null },
-		{ "name": "null_nbf", "key": "hs256", "payload": { "publish": ["**"], "nbf": null }, "claims": null },
-		{ "name": "negative_iat", "key": "hs256", "payload": { "publish": ["**"], "iat": -1 }, "claims": null },
+		{ "name": "null_exp", "key": "hs256", "payload": { "publish": [""], "exp": null }, "claims": null },
+		{ "name": "null_iat", "key": "hs256", "payload": { "publish": [""], "iat": null }, "claims": null },
+		{ "name": "null_nbf", "key": "hs256", "payload": { "publish": [""], "nbf": null }, "claims": null },
+		{ "name": "negative_iat", "key": "hs256", "payload": { "publish": [""], "iat": -1 }, "claims": null },
 		{
 			"name": "fractional_exp",
 			"key": "hs256",
-			"payload": { "publish": ["**"], "exp": 4102444800.5 },
+			"payload": { "publish": [""], "exp": 4102444800.5 },
 			"claims": null
 		},
-		{ "name": "string_exp", "key": "hs256", "payload": { "publish": ["**"], "exp": "4102444800" }, "claims": null },
+		{ "name": "string_exp", "key": "hs256", "payload": { "publish": [""], "exp": "4102444800" }, "claims": null },
 		{
 			"name": "exp_past_the_clock",
 			"key": "hs256",
-			"payload": { "publish": ["**"], "exp": 18446744074 },
+			"payload": { "publish": [""], "exp": 18446744074 },
 			"claims": null
 		},
-		{ "name": "expired", "key": "hs256", "payload": { "publish": ["**"], "exp": 1 }, "claims": null },
+		{ "name": "expired", "key": "hs256", "payload": { "publish": [""], "exp": 1 }, "claims": null },
 		{
 			"name": "not_yet_valid",
 			"key": "hs256",
-			"payload": { "publish": ["**"], "nbf": 4102444800 },
+			"payload": { "publish": [""], "nbf": 4102444800 },
 			"claims": null
 		},
 		{
 			"name": "legacy_prefixes",
 			"key": "hs256",
 			"payload": { "root": "demo", "put": "alice", "get": ["", "bob"] },
-			"claims": { "root": "demo", "publish": ["alice/**"], "subscribe": ["**"] }
+			"claims": { "root": "demo", "publish": ["alice"], "subscribe": [""] }
 		},
 		{
 			"name": "legacy_prefix_with_a_wildcard",
@@ -148,31 +154,31 @@
 		{
 			"name": "mixed_encodings",
 			"key": "hs256",
-			"payload": { "put": ["alice"], "subscribe": ["**"] },
+			"payload": { "put": ["alice"], "subscribe": [""] },
 			"claims": null
 		},
 		{
 			"name": "registered_claims_are_ignored",
 			"key": "hs256",
-			"payload": { "publish": ["**"], "iss": "issuer", "sub": 7 },
-			"claims": { "root": "", "publish": ["**"], "subscribe": [] }
+			"payload": { "publish": [""], "iss": "issuer", "sub": 7 },
+			"claims": { "root": "", "publish": [""], "subscribe": [] }
 		},
 		{
 			"name": "token_id",
 			"key": "hs256",
-			"payload": { "publish": ["**"], "jti": "550e8400-e29b-41d4-a716-446655440000" },
-			"claims": { "root": "", "publish": ["**"], "subscribe": [], "jti": "550e8400-e29b-41d4-a716-446655440000" }
+			"payload": { "publish": [""], "jti": "550e8400-e29b-41d4-a716-446655440000" },
+			"claims": { "root": "", "publish": [""], "subscribe": [], "jti": "550e8400-e29b-41d4-a716-446655440000" }
 		},
 		{
 			"name": "token_id_at_the_length_bound",
 			"key": "hs256",
 			"payload": {
-				"publish": ["**"],
+				"publish": [""],
 				"jti": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
 			},
 			"claims": {
 				"root": "",
-				"publish": ["**"],
+				"publish": [""],
 				"subscribe": [],
 				"jti": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
 			}
@@ -181,7 +187,7 @@
 			"name": "token_id_past_the_length_bound",
 			"key": "hs256",
 			"payload": {
-				"publish": ["**"],
+				"publish": [""],
 				"jti": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 			},
 			"claims": null
@@ -189,62 +195,67 @@
 		{
 			"name": "token_id_not_a_string",
 			"key": "hs256",
-			"payload": { "publish": ["**"], "jti": ["x"] },
+			"payload": { "publish": [""], "jti": ["x"] },
 			"claims": null
 		},
-		{ "name": "null_token_id", "key": "hs256", "payload": { "publish": ["**"], "jti": null }, "claims": null },
-		{ "name": "empty_token_id", "key": "hs256", "payload": { "publish": ["**"], "jti": "" }, "claims": null },
+		{ "name": "null_token_id", "key": "hs256", "payload": { "publish": [""], "jti": null }, "claims": null },
+		{ "name": "empty_token_id", "key": "hs256", "payload": { "publish": [""], "jti": "" }, "claims": null },
 		{
 			"name": "token_id_with_a_space",
 			"key": "hs256",
-			"payload": { "publish": ["**"], "jti": "a b" },
+			"payload": { "publish": [""], "jti": "a b" },
 			"claims": null
 		},
 		{
 			"name": "token_id_beyond_ascii",
 			"key": "hs256",
-			"payload": { "publish": ["**"], "jti": "caf\u00e9" },
+			"payload": { "publish": [""], "jti": "caf\u00e9" },
 			"claims": null
 		},
-		{ "name": "unknown_claim", "key": "hs256", "payload": { "publish": ["**"], "aud": "relay" }, "claims": null },
+		{ "name": "unknown_claim", "key": "hs256", "payload": { "publish": [""], "aud": "relay" }, "claims": null },
 		{ "name": "grants_nothing", "key": "hs256", "payload": { "publish": [], "subscribe": [] }, "claims": null },
-		{ "name": "null_role", "key": "hs256", "payload": { "publish": null, "subscribe": ["**"] }, "claims": null },
+		{ "name": "null_role", "key": "hs256", "payload": { "publish": null, "subscribe": [""] }, "claims": null },
 		{
 			"name": "capped_role",
 			"key": "hs256",
-			"payload": { "publish": { "path": ["alice/**"], "rate": 1000 }, "subscribe": ["**"] },
-			"claims": { "root": "", "publish": { "path": ["alice/**"], "rate": 1000 }, "subscribe": ["**"] }
+			"payload": { "publish": { "path": ["alice"], "rate": 1000 }, "subscribe": [""] },
+			"claims": { "root": "", "publish": { "path": ["alice"], "rate": 1000 }, "subscribe": [""] }
 		},
 		{
 			"name": "misspelled_cap",
 			"key": "hs256",
-			"payload": { "publish": { "path": ["alice/**"], "rat": 1000 } },
+			"payload": { "publish": { "path": ["alice"], "rat": 1000 } },
 			"claims": null
 		},
 		{
 			"name": "zero_rate",
 			"key": "hs256",
-			"payload": { "publish": { "path": ["**"], "rate": 0 } },
+			"payload": { "publish": { "path": [""], "rate": 0 } },
 			"claims": null
 		},
-		{ "name": "invalid_pattern", "key": "hs256", "payload": { "publish": ["**/a/**"] }, "claims": null },
+		{ "name": "wildcard_subtree", "key": "hs256", "payload": { "publish": ["alice/**"] }, "claims": null },
+		{ "name": "wildcard_everything", "key": "hs256", "payload": { "subscribe": ["**"] }, "claims": null },
+		{ "name": "wildcard_segment", "key": "hs256", "payload": { "subscribe": ["*/chat"] }, "claims": null },
+		{ "name": "wildcard_in_a_segment", "key": "hs256", "payload": { "publish": ["cam-*.hang"] }, "claims": null },
+		{ "name": "wildcard_in_a_capped_role", "key": "hs256", "payload": { "publish": { "path": ["**"], "rate": 1000 } }, "claims": null },
+		{ "name": "malformed_prefix", "key": "hs256", "payload": { "publish": ["alice/"] }, "claims": null },
 		{
 			"name": "minted_root_with_boundary_slashes",
 			"key": "hs256",
-			"payload": { "root": "/demo/", "publish": ["**"] },
-			"claims": { "root": "/demo/", "publish": ["**"], "subscribe": [] }
+			"payload": { "root": "/demo/", "publish": [""] },
+			"claims": { "root": "/demo/", "publish": [""], "subscribe": [] }
 		},
 		{
 			"name": "outside_the_key_scope",
 			"key": "scoped",
-			"payload": { "root": "project", "publish": ["other/**"] },
+			"payload": { "root": "project", "publish": ["other"] },
 			"claims": null
 		},
 		{
 			"name": "root_a_signer_now_refuses",
 			"key": "hs256",
-			"payload": { "root": "a\\//b", "publish": ["**"] },
-			"claims": { "root": "a\\//b", "publish": ["**"], "subscribe": [] }
+			"payload": { "root": "a\\//b", "publish": [""] },
+			"claims": { "root": "a\\//b", "publish": [""], "subscribe": [] }
 		}
 	],
 	"jwk": [
@@ -259,12 +270,22 @@
 			"valid": true
 		},
 		{
+			"name": "scope_with_a_wildcard",
+			"jwk": {
+				"kty": "oct",
+				"alg": "HS256",
+				"k": "Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68",
+				"scope": { "root": "demo", "publish": ["room/**"] }
+			},
+			"valid": false
+		},
+		{
 			"name": "scope_root_with_a_leading_slash",
 			"jwk": {
 				"kty": "oct",
 				"alg": "HS256",
 				"k": "Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68",
-				"scope": { "root": "/demo", "publish": ["**"] }
+				"scope": { "root": "/demo", "publish": [""] }
 			},
 			"valid": false
 		},
@@ -274,7 +295,7 @@
 				"kty": "oct",
 				"alg": "HS256",
 				"k": "Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68",
-				"scope": { "root": "a//b", "publish": ["**"] }
+				"scope": { "root": "a//b", "publish": [""] }
 			},
 			"valid": false
 		},
@@ -284,7 +305,7 @@
 				"kty": "oct",
 				"alg": "HS256",
 				"k": "Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68",
-				"scope": { "root": "a\\//b", "publish": ["**"] }
+				"scope": { "root": "a\\//b", "publish": [""] }
 			},
 			"valid": true
 		},
@@ -294,7 +315,7 @@
 				"kty": "oct",
 				"alg": "HS256",
 				"k": "Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68",
-				"scope": { "root": "a\\b", "publish": ["**"] }
+				"scope": { "root": "a\\b", "publish": [""] }
 			},
 			"valid": false
 		},
@@ -314,7 +335,7 @@
 				"kty": "oct",
 				"alg": "HS256",
 				"k": "Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68",
-				"scope": { "publish": { "path": ["**"], "rate": 1000 } }
+				"scope": { "publish": { "path": [""], "rate": 1000 } }
 			},
 			"valid": false
 		},
@@ -344,7 +365,7 @@
 				"kty": "oct",
 				"alg": "HS256",
 				"k": "Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68",
-				"scope": { "root": null, "publish": ["**"] }
+				"scope": { "root": null, "publish": [""] }
 			},
 			"valid": false
 		},
@@ -420,7 +441,7 @@
 				"alg": "ES256",
 				"key_ops": ["verify"],
 				"crv": "Ed25519",
-				"x": "S9n3tEG677fSNpa0Ftf46OPBte5y1pTwvm4fPkEw_Z8"
+				"x": "qu5t7m2T44BXaiUVEQrtZoUNGMLQqPwyTus-H8JagFA"
 			},
 			"valid": false
 		},
@@ -488,7 +509,7 @@
 		},
 		{
 			"name": "a_repeated_scope_member",
-			"jwk": "{\"scope\":{\"root\":\"a\",\"root\":\"b\",\"publish\":[\"**\"]},\"kty\":\"oct\",\"alg\":\"HS256\",\"k\":\"jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA\"}",
+			"jwk": "{\"scope\":{\"root\":\"a\",\"root\":\"b\",\"publish\":[\"\"]},\"kty\":\"oct\",\"alg\":\"HS256\",\"k\":\"jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA\"}",
 			"valid": false
 		},
 		{
@@ -640,47 +661,49 @@
 		}
 	],
 	"grants": [
-		{ "name": "bounded", "grant": { "publish": ["**"], "expires": 4102444800, "revalidate": 60 }, "valid": true },
-		{ "name": "unbounded", "grant": { "subscribe": ["**"] }, "valid": true },
-		{ "name": "null_expires", "grant": { "publish": ["**"], "expires": null }, "valid": false },
-		{ "name": "negative_expires", "grant": { "publish": ["**"], "expires": -1 }, "valid": false },
-		{ "name": "fractional_expires", "grant": { "publish": ["**"], "expires": 4102444800.5 }, "valid": false },
-		{ "name": "expires_past_the_clock", "grant": { "publish": ["**"], "expires": 18446744074 }, "valid": false },
-		{ "name": "revalidate_without_expires", "grant": { "publish": ["**"], "revalidate": 60 }, "valid": false },
+		{ "name": "bounded", "grant": { "publish": [""], "expires": 4102444800, "revalidate": 60 }, "valid": true },
+		{ "name": "unbounded", "grant": { "subscribe": [""] }, "valid": true },
+		{ "name": "null_expires", "grant": { "publish": [""], "expires": null }, "valid": false },
+		{ "name": "negative_expires", "grant": { "publish": [""], "expires": -1 }, "valid": false },
+		{ "name": "fractional_expires", "grant": { "publish": [""], "expires": 4102444800.5 }, "valid": false },
+		{ "name": "expires_past_the_clock", "grant": { "publish": [""], "expires": 18446744074 }, "valid": false },
+		{ "name": "revalidate_without_expires", "grant": { "publish": [""], "revalidate": 60 }, "valid": false },
 		{ "name": "grants_nothing", "grant": { "expires": 4102444800 }, "valid": false },
-		{ "name": "invalid_tier", "grant": { "publish": ["**"], "tier": "a b" }, "valid": false },
-		{ "name": "unknown_field", "grant": { "publish": ["**"], "future": true }, "valid": false },
-		{ "name": "flat_rate", "grant": { "publish": ["**"], "publish_rate": 8000 }, "valid": false },
+		{ "name": "invalid_tier", "grant": { "publish": [""], "tier": "a b" }, "valid": false },
+		{ "name": "unknown_field", "grant": { "publish": [""], "future": true }, "valid": false },
+		{ "name": "flat_rate", "grant": { "publish": [""], "publish_rate": 8000 }, "valid": false },
 		{
 			"name": "legacy_upstream_flag",
-			"grant": { "publish": ["**"], "peer": true, "upstream": true },
+			"grant": { "publish": [""], "peer": true, "upstream": true },
 			"valid": false
 		},
 		{
 			"name": "capped_role",
-			"grant": { "publish": { "path": ["alice/**"], "rate": 8000 }, "subscribe": ["**"] },
+			"grant": { "publish": { "path": ["alice"], "rate": 8000 }, "subscribe": [""] },
 			"valid": true
 		},
 		{ "name": "cap_on_nothing", "grant": { "publish": { "path": [], "rate": 8000 } }, "valid": false },
-		{ "name": "misspelled_cap", "grant": { "publish": { "path": ["**"], "rat": 8000 } }, "valid": false },
-		{ "name": "link_peer", "grant": { "publish": ["**"], "link": "peer" }, "valid": true },
-		{ "name": "link_upstream", "grant": { "publish": ["**"], "link": "upstream", "peer": true }, "valid": true },
-		{ "name": "peer_alias", "grant": { "publish": ["**"], "peer": true }, "valid": true },
-		{ "name": "not_a_peer", "grant": { "publish": ["**"], "peer": false }, "valid": true },
+		{ "name": "misspelled_cap", "grant": { "publish": { "path": [""], "rat": 8000 } }, "valid": false },
+		{ "name": "link_peer", "grant": { "publish": [""], "link": "peer" }, "valid": true },
+		{ "name": "link_upstream", "grant": { "publish": [""], "link": "upstream", "peer": true }, "valid": true },
+		{ "name": "peer_alias", "grant": { "publish": [""], "peer": true }, "valid": true },
+		{ "name": "not_a_peer", "grant": { "publish": [""], "peer": false }, "valid": true },
 		{
 			"name": "link_disagrees_with_peer",
-			"grant": { "publish": ["**"], "link": "upstream", "peer": false },
+			"grant": { "publish": [""], "link": "upstream", "peer": false },
 			"valid": false
 		},
-		{ "name": "unknown_link", "grant": { "publish": ["**"], "link": "downstream" }, "valid": false },
-		{ "name": "null_link", "grant": { "publish": ["**"], "link": null }, "valid": false },
-		{ "name": "null_root", "grant": { "publish": ["**"], "root": null }, "valid": false },
-		{ "name": "null_revalidate", "grant": { "publish": ["**"], "revalidate": null }, "valid": false },
-		{ "name": "null_tier", "grant": { "publish": ["**"], "tier": null }, "valid": false },
-		{ "name": "null_label", "grant": { "publish": ["**"], "label": null }, "valid": false },
-		{ "name": "null_mounts", "grant": { "publish": ["**"], "mounts": null }, "valid": false },
-		{ "name": "null_peer", "grant": { "publish": ["**"], "peer": null }, "valid": false },
-		{ "name": "positional", "grant": [["**"]], "valid": false },
+		{ "name": "unknown_link", "grant": { "publish": [""], "link": "downstream" }, "valid": false },
+		{ "name": "null_link", "grant": { "publish": [""], "link": null }, "valid": false },
+		{ "name": "null_root", "grant": { "publish": [""], "root": null }, "valid": false },
+		{ "name": "null_revalidate", "grant": { "publish": [""], "revalidate": null }, "valid": false },
+		{ "name": "null_tier", "grant": { "publish": [""], "tier": null }, "valid": false },
+		{ "name": "null_label", "grant": { "publish": [""], "label": null }, "valid": false },
+		{ "name": "null_mounts", "grant": { "publish": [""], "mounts": null }, "valid": false },
+		{ "name": "null_peer", "grant": { "publish": [""], "peer": null }, "valid": false },
+		{ "name": "positional", "grant": [[""]], "valid": false },
+		{ "name": "wildcard_grant", "grant": { "publish": ["**"] }, "valid": false },
+		{ "name": "wildcard_member", "grant": { "subscribe": ["room", "lobby/*"] }, "valid": false },
 		{ "name": "null_grant", "grant": null, "valid": false }
 	],
 	"roots": [

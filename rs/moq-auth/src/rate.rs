@@ -94,8 +94,8 @@ mod tests {
 	fn caps_survive_signing_but_scopes_refuse_them() {
 		let wire = serde_json::json!({
 			"root": "room",
-			"publish": {"path": ["alice/**"], "rate": 8000},
-			"subscribe": {"path": ["bob/**"], "rate": 16000},
+			"publish": {"path": ["alice"], "rate": 8000},
+			"subscribe": {"path": ["bob"], "rate": 16000},
 		});
 		assert!(serde_json::from_value::<crate::Scope>(wire.clone()).is_err());
 		let claims: crate::Claims = serde_json::from_value(wire).unwrap();
@@ -104,7 +104,7 @@ mod tests {
 		assert_eq!(claims.publish.rate, Some(Rate::from_bps(8000).unwrap()));
 		assert_eq!(claims.subscribe.rate, Some(Rate::from_bps(16000).unwrap()));
 		let scope: crate::Scope =
-			serde_json::from_str(r#"{"root":"room","publish":["**"],"subscribe":["**"]}"#).unwrap();
+			serde_json::from_str(r#"{"root":"room","publish":[""],"subscribe":[""]}"#).unwrap();
 		assert!(scope.allows(&claims));
 	}
 }

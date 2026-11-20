@@ -73,7 +73,7 @@ describe("sign", () => {
 	});
 
 	function payload(...args: string[]) {
-		const result = Bun.spawnSync(["bun", CLI, "sign", "--key", key, "--publish", "**", ...args]);
+		const result = Bun.spawnSync(["bun", CLI, "sign", "--key", key, "--publish", "", ...args]);
 		expect(result.exitCode).toBe(0);
 		const encoded = result.stdout.toString().trim().split(".")[1];
 		return JSON.parse(Buffer.from(encoded, "base64url").toString());
@@ -110,7 +110,7 @@ describe("sign", () => {
 	test("writes a jti only when --id gives one", () => {
 		expect(payload()).not.toHaveProperty("jti");
 		expect(payload("--id", "t-1").jti).toBe("t-1");
-		const invalid = Bun.spawnSync(["bun", CLI, "sign", "--key", key, "--publish", "**", "--id", "a b"]);
+		const invalid = Bun.spawnSync(["bun", CLI, "sign", "--key", key, "--publish", "", "--id", "a b"]);
 		expect(invalid.exitCode).not.toBe(0);
 	});
 });

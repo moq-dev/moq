@@ -74,7 +74,7 @@ func TestSessionAuthReadsTheGrant(t *testing.T) {
 		t.Fatal("no request")
 	}
 
-	everything := moq.Grant{Publish: []string{"**"}, Subscribe: []string{"**"}}
+	everything := moq.Grant{Publish: []string{""}, Subscribe: []string{""}}
 	awaitGrant(t, ctx, client.Session(), everything)
 
 	var session *moq.Session

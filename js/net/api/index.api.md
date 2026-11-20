@@ -35,8 +35,8 @@ export namespace Auth {
 	}
 	export interface Grant {
 		expires?: Clock.Wall;
-		publish: Path.Patterns;
-		subscribe: Path.Patterns;
+		publish: Path.Prefixes;
+		subscribe: Path.Prefixes;
 	}
 	export class Handle {
 		constructor();
@@ -204,7 +204,7 @@ export namespace Connection {
 	export type Redirect = "follow" | "same-host" | "ignore";
 	export interface Session {
 		abort(): void;
-		announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
+		announced(filter?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
 		readonly auth: Auth.Handle;
 		close(): Promise<void>;
 		readonly closed: Signals.GetPromise<Error | null>;
@@ -247,7 +247,7 @@ export class Connection {
 	constructor(props?: Connection.Props);
 	static readonly accept: ({ ... }: Connection.AcceptProps) => Promise<Connection.Session>;
 	readonly allocator: Signals.Getter<Bandwidth.Handle | undefined>;
-	announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
+	announced(filter?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
 	answered(): Promise<void>;
 	readonly auth: Signals.Getter<Auth.Handle | undefined>;
 	static readonly certificateHash: (cert: string | BufferSource) => Promise<Uint8Array<ArrayBuffer>>;
@@ -473,7 +473,7 @@ export namespace Origin {
 		withdraw(): void;
 	}
 	export class Consumer implements Origin.Reader {
-		announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
+		announced(filter?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
 		get closed(): Signals.GetPromise<Error | null>;
 		get discovery(): Signals.Getter<boolean | undefined>;
 		follow(path: Path.Valid, options?: Origin.FollowOptions): Origin.Following;
@@ -491,7 +491,7 @@ export namespace Origin {
 	}
 	export class Producer implements Origin.Table {
 		constructor();
-		announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
+		announced(filter?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
 		claim(prefix: Path.Valid, options?: Origin.RouteOptions): Origin.Claim;
 		close(abort?: Error): void;
 		get closed(): Signals.GetPromise<Error | null>;
@@ -500,10 +500,10 @@ export namespace Origin {
 		follow(path: Path.Valid, options?: Origin.FollowOptions): Origin.Following;
 		request(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
 		route(path: Path.Valid, options?: Origin.RouteOptions): Origin.Route;
-		scope(root: Path.Valid, patterns: Path.Patterns): Origin.Producer;
+		scope(root: Path.Valid, prefixes: Path.Prefixes): Origin.Producer;
 	}
 	export interface Reader {
-		announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
+		announced(filter?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
 		readonly closed: Signals.GetPromise<Error | null>;
 		readonly discovery: Signals.Getter<boolean | undefined>;
 		follow(path: Path.Valid, options?: Origin.FollowOptions): Origin.Following;
@@ -558,8 +558,11 @@ export namespace Origin {
 
 export namespace Path {
 	export { InvalidPattern } from "@moq/pattern";
+	export { InvalidPrefix } from "@moq/pattern";
 	export { Pattern } from "@moq/pattern";
 	export { Patterns } from "@moq/pattern";
+	export { Prefix } from "@moq/pattern";
+	export { Prefixes } from "@moq/pattern";
 	export type Relative = string & {
 		__brand: "Relative";
 	};

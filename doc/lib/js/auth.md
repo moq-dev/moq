@@ -15,9 +15,10 @@ contract with one import. It also generates keys, signs and verifies JWTs, and
 checks a connection path against a token's claims exactly as `moq auth serve`
 does. A grant can label its session's stats independently of its authorization
 root. Tokens are interchangeable with the Rust side. Grants and claims are
-[`Pattern`](https://www.npmjs.com/package/@moq/pattern) unions: `foo` is one
-broadcast, `foo/**` is a subtree, `**` is everything. A claim or grant role is
-an `Access`: its pattern array, or `{ path, rate }` with a bitrate cap. A
+[`Prefix`](https://www.npmjs.com/package/@moq/pattern) sets: `foo` covers `foo`
+and everything beneath it, and the empty prefix is everything. A wildcard such
+as `foo/**` or `*` is refused. A claim or grant role is an `Access`: its prefix
+array, or `{ path, rate }` with a bitrate cap. A
 `Grant` is typed as its wire shape, so a typed `Grant` is the JSON to answer
 with, and the relay refuses a field it does not know. `Claims` spell a token's
 `exp`, `iat`, `nbf`, and `jti` as `expires`, `issued`, `notBefore`, and `id`, as
@@ -27,7 +28,7 @@ paths only.
 ```bash
 bun add @moq/auth
 bunx @moq/auth generate --out root.jwk
-bunx @moq/auth sign --key root.jwk --root "rooms/123" --publish 'alice/**'
+bunx @moq/auth sign --key root.jwk --root "rooms/123" --publish alice
 ```
 
 Mint tokens on a server, never in the browser, and prefer asymmetric keys so

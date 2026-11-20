@@ -547,7 +547,7 @@ async fn connect(client: &moq_tokio::Client, port: u16) -> moq_tokio::Connection
 fn relay_config() -> Config {
 	// Fully public auth: any no-JWT stream client gets the whole root.
 	let mut auth = auth::Config::default();
-	auth.public = vec![moq_auth::Pattern::all()];
+	auth.public = vec![moq_auth::Prefix::all()];
 
 	let mut config = Config::default();
 	config.listen.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));

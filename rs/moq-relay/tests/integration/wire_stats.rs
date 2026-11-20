@@ -40,7 +40,7 @@ async fn wire_sources(io_uring: bool) {
 	config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.listen.tls.cert = vec![cert_path];
 	config.listen.tls.key = vec![key_path];
-	config.auth.public = vec![moq_auth::Pattern::all()];
+	config.auth.public = vec![moq_auth::Prefix::all()];
 	config.stats.enabled = true;
 	config.internal.listen = Some("127.0.0.1:0".parse().unwrap());
 	config.stats.interval = Some(Duration::from_secs(3600).into());

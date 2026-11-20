@@ -171,7 +171,7 @@ export const GrantSchema: ZodMiniObject<{
 	tier: ZodMiniOptional<ZodMiniString<string>>;
 }, $strict>;
 
-export { InvalidPattern } from "@moq/pattern";
+export { InvalidPrefix } from "@moq/pattern";
 
 export const Key: {
 	generate: (algorithm: Algorithm, kid?: string) => Promise<Key>;
@@ -577,12 +577,6 @@ export const OperationSchema: ZodMiniEnum<{
 	verify: "verify";
 }>;
 
-export { Pattern } from "@moq/pattern";
-
-export const PatternListSchema: ZodMiniArray<ZodMiniString<string>>;
-
-export { Patterns } from "@moq/pattern";
-
 export type Peer = infer<typeof PeerSchema>;
 
 export const PeerSchema: ZodMiniObject<{
@@ -594,9 +588,15 @@ export const PeerSchema: ZodMiniObject<{
 }, $strip>;
 
 export interface Permissions {
-	publish: Patterns;
-	subscribe: Patterns;
+	publish: Prefixes;
+	subscribe: Prefixes;
 }
+
+export { Prefix } from "@moq/pattern";
+
+export const PrefixListSchema: ZodMiniArray<ZodMiniString<string>>;
+
+export { Prefixes } from "@moq/pattern";
 
 export type PublicKey = Omit<AsymmetricKey, "d" | "p" | "q" | "dp" | "dq" | "qi">;
 
@@ -828,10 +828,6 @@ export const ScopeSchema: ZodMiniPipe<ZodMiniObject<{
 	subscribe?: string[] | undefined;
 }>>;
 
-export { Segment } from "@moq/pattern";
-
-export { Specificity } from "@moq/pattern";
-
 export type SymmetricKey = Extract<Key, {
 	kty: "oct";
 }>;
@@ -863,7 +859,5 @@ export const TransportSchema: ZodMiniPipe<ZodMiniString<string>, ZodMiniCatch<Zo
 	webtransport: "webtransport";
 }>>>;
 
-export { compareSpecificity } from "@moq/pattern";
-
-export function patterns(texts: readonly string[] | undefined): Patterns;
+export function prefixes(texts: readonly string[] | undefined): Prefixes;
 ```

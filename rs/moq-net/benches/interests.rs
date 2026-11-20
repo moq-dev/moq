@@ -15,7 +15,7 @@
 //! Run with `cargo bench -p moq-net --features fuzz --bench interests`.
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use moq_net::{Pattern, Patterns, fuzz, origin};
+use moq_net::{Prefixes, fuzz, origin};
 
 /// `(watches, sessions)` shapes.
 const SHAPES: [(usize, usize); 4] = [(10, 10), (1_000, 10), (10, 1_000), (1_000, 1_000)];
@@ -51,7 +51,7 @@ fn table(watches: usize, sessions: usize) -> Table {
 fn scoped(producer: &origin::Producer, prefix: &str) -> origin::Consumer {
 	producer
 		.consume()
-		.scope(prefix, &Patterns::from(Pattern::all()))
+		.scope(prefix, &Prefixes::all())
 		.unwrap()
 }
 

@@ -73,8 +73,8 @@ Runs in the browser and, over WebSocket, in Node, Bun, and Deno; see
 [server-side](/lib/js/#server-side). The WebSocket fallback and the moq-transport stack load
 on demand as separate chunks, so a moq-lite session WebTransport wins within its head start
 never downloads them.
-Path patterns are on the
-[concept page](/concept/moq-lite#path-patterns).
+Grant prefixes and discovery-filter patterns are on the
+[concept page](/concept/moq-lite#grants-and-filters).
 
 Groups retain a 32 MiB live tail without limiting their lifetime or frame count.
 Readers that fall behind the shed front receive `Evicted`; tracks that

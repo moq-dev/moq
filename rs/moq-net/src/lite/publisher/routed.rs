@@ -451,7 +451,7 @@ impl Answer {
 	/// Whether the grant and this handle show the peer the whole tree, as a routing peer
 	/// must be.
 	pub(in crate::lite) fn whole(&self) -> bool {
-		self.origin.root().is_empty() && self.origin.covers(&Path::empty()) && self.permit.covers_subtree("")
+		self.origin.root().is_empty() && self.origin.covers(&Path::empty()) && self.permit.matches("")
 	}
 
 	/// Ready once the peer reads its stream too slowly for what the node queued.
@@ -895,7 +895,8 @@ impl Answer {
 	}
 
 	/// Whether the peer is shown the claim at the absolute `path`: the permit and this
-	/// handle allow some path it covers, the same one.
+	/// handle allow some path it covers, the same one, which prefixes always meet as one
+	/// whole subtree.
 	fn shows(&self, path: &Path) -> bool {
 		let Some((_, prefix)) = self.region(path) else {
 			return false;
@@ -904,7 +905,9 @@ impl Answer {
 		let (Some(suffix), Some(relative)) = (within, path.strip_prefix(self.origin.root())) else {
 			return false;
 		};
-		(prefix.hidden || !suffix.is_hidden()) && self.origin.reaches_any(path, &self.permit.beneath(relative.as_str()))
+		(prefix.hidden || !suffix.is_hidden())
+			&& self.origin.reaches(path)
+			&& self.permit.within(self.origin.allowed()).overlaps(relative.as_str())
 	}
 
 	/// Bring the peer's claim `key` in line with what the node told and the answer

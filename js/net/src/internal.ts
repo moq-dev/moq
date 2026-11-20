@@ -128,7 +128,6 @@ export function presented(
 ): Map<Path.Valid, Advertised> {
 	const out = new Map<Path.Valid, Advertised>();
 	let rootLen = -1;
-	const requested = Path.Pattern.subtree(prefix);
 	for (const [covered, candidates] of table) {
 		if (!carries(covered)) continue;
 		if (Path.hasPrefix(covered, prefix)) {
@@ -136,7 +135,7 @@ export function presented(
 			// A scoped route covers only what it claims, so the best one that can serve the prefix wins.
 			const snap = firstEligible(
 				candidates,
-				(candidate) => (!candidate.claim || candidate.claim.overlaps(requested)) && shows(candidate, prefix),
+				(candidate) => (!candidate.claim || candidate.claim.overlaps(prefix)) && shows(candidate, prefix),
 			);
 			if (!snap) continue;
 			rootLen = covered.length;
@@ -174,6 +173,23 @@ export function firstEligible<T extends { readonly route: WireRoute; readonly pr
 	}
 	const epochs = new Map([...byPrefix].map(([prefix, routes]) => [prefix, new Epochs(routes)]));
 	return admitted.find((candidate) => !epochs.get(candidate.prefix)?.supersedes(candidate.route));
+}
+
+/**
+ * What of `path`'s subtree every one of `scopes` serves: undefined when all of it, and otherwise
+ * the prefixes beneath `path` that all of them share, possibly none. Asked about a path rather
+ * than a {@link Path.Prefix}, so a path no prefix can spell still gets an answer.
+ */
+export function within(path: Path.Valid, scopes: Iterable<Path.Prefixes | undefined>): Path.Prefixes | undefined {
+	let out: Path.Prefixes | undefined;
+	for (const scope of scopes) {
+		if (!scope || scope.matches(path)) continue;
+		const beneath = new Path.Prefixes(
+			scope.toArray().filter((member) => Path.hasPrefix(path, member.text as Path.Valid)),
+		);
+		out = out ? out.intersect(beneath) : beneath;
+	}
+	return out;
 }
 
 /** Whether the announced prefix's subtree overlaps `scope`. */

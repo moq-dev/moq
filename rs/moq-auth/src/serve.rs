@@ -819,14 +819,14 @@ async fn handle(State(server): State<Server>, Json(request): Json<Request>) -> R
 mod tests {
 	use super::*;
 	use crate::{Algorithm, Bytes, Claims, Client, Error, Peer, Transport, lease::Reason};
-	use moq_pattern::Patterns;
+	use moq_pattern::Prefixes;
 
-	fn patterns(texts: &[&str]) -> Patterns {
+	fn prefixes(texts: &[&str]) -> Prefixes {
 		texts.iter().map(|text| text.parse().unwrap()).collect()
 	}
 
 	fn rules(publish: &[&str], subscribe: &[&str]) -> Permissions {
-		Permissions::new(patterns(publish), patterns(subscribe))
+		Permissions::new(prefixes(publish), prefixes(subscribe))
 	}
 
 	fn request(path: &str) -> Request {
@@ -857,7 +857,7 @@ mod tests {
 
 		let (dir, key) = key_dir();
 		let root = "root\nforged-root\r\x1b[31m";
-		let jwt = sign(&key, root, &["**"], &[], None);
+		let jwt = sign(&key, root, &[""], &[], None);
 		let policy = Policy {
 			keys: Some(Keys::Dir(dir.path().into())),
 			..Default::default()
@@ -892,7 +892,7 @@ mod tests {
 	#[kio::test]
 	async fn default_expiry_uses_the_ambient_wall() {
 		let policy = Policy {
-			public: rules(&["**"], &[]),
+			public: rules(&[""], &[]),
 			expires: Some(Duration::from_secs(30)),
 			..Default::default()
 		};
@@ -940,8 +940,8 @@ mod tests {
 
 	fn rule(publish: &[&str], subscribe: &[&str]) -> Rule {
 		Rule {
-			publish: Some(patterns(publish).into()),
-			subscribe: Some(patterns(subscribe).into()),
+			publish: Some(prefixes(publish).into()),
+			subscribe: Some(prefixes(subscribe).into()),
 			..Default::default()
 		}
 	}
@@ -964,8 +964,8 @@ mod tests {
 	fn sign(key: &Key, root: &str, publish: &[&str], subscribe: &[&str], expires: Option<kio::clock::Wall>) -> String {
 		let claims = Claims::default()
 			.with_root(root)
-			.with_publish(patterns(publish))
-			.with_subscribe(patterns(subscribe))
+			.with_publish(prefixes(publish))
+			.with_subscribe(prefixes(subscribe))
 			.with_expires(expires);
 		key.sign(&claims).unwrap()
 	}
@@ -1011,11 +1011,11 @@ mod tests {
 			.as_secs()
 			+ 600;
 		let exp = kio::clock::Wall::UNIX_EPOCH + Duration::from_secs(secs);
-		let jwt = sign(&key, "demo/room", &["alice/**"], &["**"], Some(exp));
+		let jwt = sign(&key, "demo/room", &["alice"], &[""], Some(exp));
 
 		let grant = policy.decide(&with_token(request("/demo/room/"), &jwt)).await.unwrap();
-		assert_eq!(grant.publish.path, patterns(&["alice/**"]));
-		assert_eq!(grant.subscribe.path, patterns(&["**"]));
+		assert_eq!(grant.publish.path, prefixes(&["alice"]));
+		assert_eq!(grant.subscribe.path, prefixes(&[""]));
 		assert_eq!(grant.expires, Some(exp));
 		assert_eq!(grant.revalidate, None);
 		assert_eq!(grant.tier.as_deref(), Some("gold"));
@@ -1025,7 +1025,7 @@ mod tests {
 	#[tokio::test]
 	async fn the_secret_guards_the_route() {
 		let server = Server::new(Policy {
-			public: rules(&["**"], &[]),
+			public: rules(&[""], &[]),
 			..Default::default()
 		})
 		.unwrap()
@@ -1085,7 +1085,7 @@ mod tests {
 			expires: Some(Duration::from_secs(3600)),
 			..Default::default()
 		};
-		let jwt = sign(&key, "demo", &["**"], &[], None);
+		let jwt = sign(&key, "demo", &[""], &[], None);
 		let before = kio::clock::wall();
 		let grant = policy.decide(&with_token(request("/demo"), &jwt)).await.unwrap();
 		let expires = grant.expires.unwrap();
@@ -1100,15 +1100,15 @@ mod tests {
 			keys: Some(Keys::Dir(dir.path().into())),
 			..Default::default()
 		};
-		let jwt = sign(&key, "demo", &["alice/**"], &["**"], None);
+		let jwt = sign(&key, "demo", &["alice"], &[""], None);
 		let grant = policy.decide(&with_token(request("/demo/alice"), &jwt)).await.unwrap();
-		assert_eq!(grant.publish.path, patterns(&["**"]));
-		assert_eq!(grant.subscribe.path, patterns(&["**"]));
+		assert_eq!(grant.publish.path, prefixes(&[""]));
+		assert_eq!(grant.subscribe.path, prefixes(&[""]));
 
 		let err = policy.decide(&with_token(request("/other"), &jwt)).await.unwrap_err();
 		assert!(matches!(err, Denial::RootMismatch { .. }), "{err}");
 
-		let jwt = sign(&key, "", &[], &["demo/**"], None);
+		let jwt = sign(&key, "", &[], &["demo"], None);
 		let err = policy.decide(&with_token(request("/other"), &jwt)).await.unwrap_err();
 		assert!(matches!(err, Denial::NoAccess { .. }), "{err}");
 	}
@@ -1118,7 +1118,7 @@ mod tests {
 		let (dir, key) = key_dir();
 		let policy = Policy {
 			keys: Some(Keys::Dir(dir.path().into())),
-			public: rules(&["**"], &["**"]),
+			public: rules(&[""], &[""]),
 			..Default::default()
 		};
 
@@ -1126,7 +1126,7 @@ mod tests {
 		let jwt = sign(
 			&key,
 			"demo",
-			&["**"],
+			&[""],
 			&[],
 			Some(kio::clock::wall() - Duration::from_secs(1)),
 		);
@@ -1135,19 +1135,19 @@ mod tests {
 
 		// Signed by a stranger.
 		let stranger = Key::generate(Algorithm::HS256, Some(KeyId::decode("kid1").unwrap())).unwrap();
-		let jwt = sign(&stranger, "demo", &["**"], &[], None);
+		let jwt = sign(&stranger, "demo", &[""], &[], None);
 		let err = policy.decide(&with_token(request("/demo"), &jwt)).await.unwrap_err();
 		assert!(matches!(err, Denial::InvalidToken(_)), "{err}");
 
 		// Unknown kid, and no kid at all.
 		let other = Key::generate(Algorithm::HS256, Some(KeyId::decode("kid2").unwrap())).unwrap();
-		let jwt = sign(&other, "demo", &["**"], &[], None);
+		let jwt = sign(&other, "demo", &[""], &[], None);
 		assert_eq!(
 			policy.decide(&with_token(request("/demo"), &jwt)).await.unwrap_err(),
 			Denial::UnknownKey
 		);
 		let bare = Key::generate(Algorithm::HS256, None).unwrap();
-		let jwt = sign(&bare, "demo", &["**"], &[], None);
+		let jwt = sign(&bare, "demo", &[""], &[], None);
 		assert_eq!(
 			policy.decide(&with_token(request("/demo"), &jwt)).await.unwrap_err(),
 			Denial::MissingKeyId
@@ -1157,7 +1157,7 @@ mod tests {
 		let err = policy.decide(&with_token(request("/demo"), "nope")).await.unwrap_err();
 		assert!(matches!(err, Denial::MalformedToken(_)), "{err}");
 		let keyless = Policy {
-			public: rules(&["**"], &["**"]),
+			public: rules(&[""], &[""]),
 			..Default::default()
 		};
 		assert_eq!(
@@ -1179,7 +1179,7 @@ mod tests {
 			keys: Some(Keys::Dir(dir.path().into())),
 			..Default::default()
 		};
-		let old = with_token(request("/demo"), &sign(&key, "demo", &["**"], &[], None));
+		let old = with_token(request("/demo"), &sign(&key, "demo", &[""], &[], None));
 		policy.decide(&old).await.unwrap();
 
 		// Rewritten at the same size and modification time, the cached key still answers.
@@ -1195,7 +1195,7 @@ mod tests {
 		file.set_modified(before.modified().unwrap() + Duration::from_secs(1))
 			.unwrap();
 		assert!(matches!(policy.decide(&old).await, Err(Denial::InvalidToken(_))));
-		let new = with_token(request("/demo"), &sign(&rotated, "demo", &["**"], &[], None));
+		let new = with_token(request("/demo"), &sign(&rotated, "demo", &[""], &[], None));
 		policy.decide(&new).await.unwrap();
 
 		// A removed file forgets its key.
@@ -1213,13 +1213,13 @@ mod tests {
 			keys: Some(Keys::File(path)),
 			..Default::default()
 		};
-		let jwt = sign(&key, "demo", &["**"], &[], None);
+		let jwt = sign(&key, "demo", &[""], &[], None);
 		assert!(policy.decide(&with_token(request("/demo"), &jwt)).await.is_ok());
 
 		let mut wrong = key.export();
 		wrong.kid = Some(KeyId::decode("unexpected").unwrap());
 		let wrong = wrong.import().unwrap();
-		let mismatched = sign(&wrong, "demo", &["**"], &[], None);
+		let mismatched = sign(&wrong, "demo", &[""], &[], None);
 		assert_eq!(
 			policy
 				.decide(&with_token(request("/demo"), &mismatched))
@@ -1243,7 +1243,7 @@ mod tests {
 			keys: Some(Keys::Set(path)),
 			..Default::default()
 		};
-		let jwt = sign(&key, "demo", &["**"], &[], None);
+		let jwt = sign(&key, "demo", &[""], &[], None);
 		assert!(policy.decide(&with_token(request("/demo"), &jwt)).await.is_ok());
 
 		// The same file read as a single key is no key, whatever the set cached.
@@ -1257,7 +1257,7 @@ mod tests {
 		let mut wrong = key.export();
 		wrong.kid = Some(KeyId::decode("kid2").unwrap());
 		let wrong = wrong.import().unwrap();
-		let mismatched = sign(&wrong, "demo", &["**"], &[], None);
+		let mismatched = sign(&wrong, "demo", &[""], &[], None);
 		assert!(matches!(
 			policy.decide(&with_token(request("/demo"), &mismatched)).await,
 			Err(Denial::InvalidToken(_))
@@ -1267,7 +1267,7 @@ mod tests {
 	#[tokio::test]
 	async fn gateway_transports_count_toward_session_limits() {
 		let server = Server::new(Policy {
-			public: rules(&["**"], &[]),
+			public: rules(&[""], &[]),
 			limits: Limits {
 				remote: Some(1),
 				..Default::default()
@@ -1310,16 +1310,16 @@ mod tests {
 			keys: Some(Keys::Dir(dir.path().into())),
 			..Default::default()
 		};
-		let jwt = sign(&key, "demo", &["alice/**"], &[], None);
+		let jwt = sign(&key, "demo", &["alice"], &[], None);
 		let grant = policy
 			.decide(&with_setup_token(request("/demo"), Token::OUT_OF_BAND, &jwt))
 			.await
 			.unwrap();
-		assert_eq!(grant.publish.path, patterns(&["alice/**"]));
+		assert_eq!(grant.publish.path, prefixes(&["alice"]));
 
 		// And refused like one: a stranger's key never falls through to public.
 		let stranger = Key::generate(Algorithm::HS256, Some(KeyId::decode("kid1").unwrap())).unwrap();
-		let forged = sign(&stranger, "demo", &["**"], &[], None);
+		let forged = sign(&stranger, "demo", &[""], &[], None);
 		let err = policy
 			.decide(&with_setup_token(request("/demo"), Token::OUT_OF_BAND, &forged))
 			.await
@@ -1341,10 +1341,10 @@ mod tests {
 		let (dir, key) = key_dir();
 		let policy = Policy {
 			keys: Some(Keys::Dir(dir.path().into())),
-			public: rules(&["**"], &["**"]),
+			public: rules(&[""], &[""]),
 			..Default::default()
 		};
-		let jwt = sign(&key, "demo", &["**"], &[], None);
+		let jwt = sign(&key, "demo", &[""], &[], None);
 		let err = policy
 			.decide(&with_setup_token(request("/demo"), Token::CAT, &jwt))
 			.await
@@ -1364,10 +1364,10 @@ mod tests {
 			keys: Some(Keys::Dir(dir.path().into())),
 			..Default::default()
 		};
-		let jwt = sign(&key, "demo", &["**"], &[], None);
+		let jwt = sign(&key, "demo", &[""], &[], None);
 		let request = with_setup_token(with_token(request("/demo"), &jwt), Token::OUT_OF_BAND, &jwt);
 		let grant = policy.decide(&request).await.unwrap();
-		assert_eq!(grant.publish.path, patterns(&["**"]));
+		assert_eq!(grant.publish.path, prefixes(&[""]));
 	}
 
 	/// An attachment is its `token` alone: the dialed query's `jwt` is the connection's, so
@@ -1382,13 +1382,13 @@ mod tests {
 		.unwrap();
 		// The connection dialed with a credential that has since expired.
 		let expired = Some(kio::clock::Wall::UNIX_EPOCH + Duration::from_secs(1));
-		let dialed = sign(&key, "demo", &["**"], &[], expired);
-		let attached = sign(&key, "demo", &[], &["**"], None);
+		let dialed = sign(&key, "demo", &[""], &[], expired);
+		let attached = sign(&key, "demo", &[], &[""], None);
 		let mut attach = with_setup_token(with_token(request("/demo"), &dialed), Token::OUT_OF_BAND, &attached);
 		attach.auth = Some("attachment".into());
 		attach.event = Event::Attach;
 		let grant = server.answer(&attach).await.unwrap().unwrap();
-		assert_eq!(grant.subscribe.path, patterns(&["**"]));
+		assert_eq!(grant.subscribe.path, prefixes(&[""]));
 		assert!(
 			grant.publish.path.is_empty(),
 			"the dialed query's grant leaked into the attachment"
@@ -1422,13 +1422,13 @@ mod tests {
 			..Default::default()
 		})
 		.unwrap();
-		let attached = sign(&key, "demo", &[], &["**"], None);
+		let attached = sign(&key, "demo", &[], &[""], None);
 		let mut attach = with_token(request("/demo"), &attached);
 		attach.auth = Some("attachment".into());
 		for event in [Event::Attach, Event::Revalidate] {
 			attach.event = event;
 			let grant = server.answer(&attach).await.unwrap().unwrap();
-			assert_eq!(grant.subscribe.path, patterns(&["**"]));
+			assert_eq!(grant.subscribe.path, prefixes(&[""]));
 			assert!(grant.publish.path.is_empty());
 		}
 	}
@@ -1441,8 +1441,8 @@ mod tests {
 			keys: Some(Keys::Dir(dir.path().into())),
 			..Default::default()
 		};
-		let setup = sign(&key, "demo", &["**"], &[], None);
-		let query = sign(&key, "demo", &[], &["**"], None);
+		let setup = sign(&key, "demo", &[""], &[], None);
+		let query = sign(&key, "demo", &[], &[""], None);
 		let different = with_setup_token(with_token(request("/demo"), &query), Token::OUT_OF_BAND, &setup);
 		assert_eq!(policy.decide(&different).await.unwrap_err(), Denial::TwoTokens);
 
@@ -1457,10 +1457,10 @@ mod tests {
 		let (dir, key) = key_dir();
 		let policy = Policy {
 			keys: Some(Keys::Dir(dir.path().into())),
-			public: rules(&["**"], &["**"]),
+			public: rules(&[""], &[""]),
 			..Default::default()
 		};
-		let jwt = sign(&key, "demo", &["**"], &[], None);
+		let jwt = sign(&key, "demo", &[""], &[], None);
 
 		let mut request = request("/demo");
 		request.query = Some(format!("a=1&jwt={jwt}"));
@@ -1497,12 +1497,12 @@ mod tests {
 		);
 
 		let policy = Policy {
-			mtls: rules(&["**"], &["**"]),
+			mtls: rules(&[""], &[""]),
 			..Default::default()
 		};
 		let not_after = kio::clock::wall() + Duration::from_secs(86400 * 30);
 		let grant = policy.decide(&with_peer(request("/"), Some(not_after))).await.unwrap();
-		assert_eq!(grant.publish.path, patterns(&["**"]));
+		assert_eq!(grant.publish.path, prefixes(&[""]));
 		assert_eq!(grant.expires, Some(not_after));
 
 		// A certificate without a bound gets none by default, like 0.14.
@@ -1520,7 +1520,7 @@ mod tests {
 	#[tokio::test]
 	async fn certificate_rules_scope_by_the_nearest_named_certificate() {
 		let policy = Policy {
-			mtls: rules(&["shared/**"], &[]),
+			mtls: rules(&["shared"], &[]),
 			mtls_link: Some(Link::Peer),
 			tier: Some("base".into()),
 			certificates: certificates([
@@ -1530,16 +1530,16 @@ mod tests {
 						tier: Some("affiliate".into()),
 						link: Some(RuleLink::None),
 						publish: Some(
-							Access::new(patterns(&["affiliate/**"]))
+							Access::new(prefixes(&["affiliate"]))
 								.with_rate(crate::Rate::from_bps(1_000_000).unwrap()),
 						),
-						..rule(&[], &["affiliate/**"])
+						..rule(&[], &["affiliate"])
 					},
 				),
 				(
 					"vip",
 					Rule {
-						subscribe: Some(patterns(&["**"]).into()),
+						subscribe: Some(prefixes(&[""]).into()),
 						..Default::default()
 					},
 				),
@@ -1552,8 +1552,8 @@ mod tests {
 			.decide(&with_chain(request("/"), "alice", &["affiliate-ca", "root"]))
 			.await
 			.unwrap();
-		assert_eq!(grant.publish.path, patterns(&["affiliate/**"]));
-		assert_eq!(grant.subscribe.path, patterns(&["affiliate/**"]));
+		assert_eq!(grant.publish.path, prefixes(&["affiliate"]));
+		assert_eq!(grant.subscribe.path, prefixes(&["affiliate"]));
 		assert_eq!(grant.tier.as_deref(), Some("affiliate"));
 		assert_eq!(grant.publish.rate, crate::Rate::from_bps(1_000_000).ok());
 		assert_eq!(grant.link, None, "the rule drops the shared link role");
@@ -1564,8 +1564,8 @@ mod tests {
 			.decide(&with_chain(request("/"), "vip", &["affiliate-ca", "root"]))
 			.await
 			.unwrap();
-		assert_eq!(grant.publish.path, patterns(&["shared/**"]));
-		assert_eq!(grant.subscribe.path, patterns(&["**"]));
+		assert_eq!(grant.publish.path, prefixes(&["shared"]));
+		assert_eq!(grant.subscribe.path, prefixes(&[""]));
 		assert_eq!(grant.tier.as_deref(), Some("base"));
 		assert_eq!(grant.publish.rate, None);
 		assert_eq!(grant.link, Some(Link::Peer));
@@ -1575,14 +1575,14 @@ mod tests {
 			.decide(&with_chain(request("/"), "bob", &["other-ca"]))
 			.await
 			.unwrap();
-		assert_eq!(grant.publish.path, patterns(&["shared/**"]));
+		assert_eq!(grant.publish.path, prefixes(&["shared"]));
 		assert!(grant.subscribe.path.is_empty());
 
 		// A relay that predates the chain reports only the leaf, which a leaf rule matches.
 		let mut legacy = with_chain(request("/"), "vip", &[]);
 		legacy.tls.as_mut().unwrap().chain.clear();
 		let grant = policy.decide(&legacy).await.unwrap();
-		assert_eq!(grant.subscribe.path, patterns(&["**"]));
+		assert_eq!(grant.subscribe.path, prefixes(&[""]));
 
 		// A rule that grants nothing refuses, even where the shared grant would admit.
 		let revoked = Policy {
@@ -1607,26 +1607,26 @@ mod tests {
 	#[tokio::test]
 	async fn an_update_applies_at_the_next_recheck_and_a_bad_one_is_refused() {
 		let provisioned = Policy {
-			certificates: certificates([("alice", rule(&["**"], &["**"]))]),
+			certificates: certificates([("alice", rule(&[""], &[""]))]),
 			..Default::default()
 		};
 		let server = Server::new(provisioned.clone()).unwrap();
 		let mut session = with_chain(request("/"), "alice", &["ca"]);
 		assert_eq!(
 			server.answer(&session).await.unwrap().unwrap().publish.path,
-			patterns(&["**"])
+			prefixes(&[""])
 		);
 
 		session.event = Event::Revalidate;
 		server
 			.update(Policy {
-				certificates: certificates([("alice", rule(&["alice/**"], &[]))]),
+				certificates: certificates([("alice", rule(&["alice"], &[]))]),
 				..Default::default()
 			})
 			.unwrap();
 		assert_eq!(
 			server.answer(&session).await.unwrap().unwrap().publish.path,
-			patterns(&["alice/**"])
+			prefixes(&["alice"])
 		);
 
 		let invalid = Policy {
@@ -1634,7 +1634,7 @@ mod tests {
 				"alice",
 				Rule {
 					tier: Some("not a tier!".into()),
-					..rule(&["**"], &["**"])
+					..rule(&[""], &[""])
 				},
 			)]),
 			..Default::default()
@@ -1642,7 +1642,7 @@ mod tests {
 		assert!(server.update(invalid).is_err());
 		assert_eq!(
 			server.answer(&session).await.unwrap().unwrap().publish.path,
-			patterns(&["alice/**"])
+			prefixes(&["alice"])
 		);
 
 		server.update(Policy::default()).unwrap();
@@ -1671,8 +1671,8 @@ mod tests {
 		let (dir, key) = key_dir();
 		let policy = Policy {
 			keys: Some(Keys::Dir(dir.path().into())),
-			public: rules(&["**"], &["**"]),
-			mtls: rules(&["**"], &["**"]),
+			public: rules(&[""], &[""]),
+			mtls: rules(&[""], &[""]),
 			mtls_link: Some(Link::Peer),
 			..Default::default()
 		};
@@ -1688,7 +1688,7 @@ mod tests {
 		grant.validate().unwrap();
 		let grant = policy.decide(&request("/")).await.unwrap();
 		assert_eq!(grant.link, None);
-		let jwt = sign(&key, "", &["**"], &[], None);
+		let jwt = sign(&key, "", &[""], &[], None);
 		let grant = policy.decide(&with_token(request("/"), &jwt)).await.unwrap();
 		assert_eq!(grant.link, None);
 	}
@@ -1703,7 +1703,7 @@ mod tests {
 			(Some(Link::Upstream), Some(true)),
 		] {
 			let policy = Policy {
-				mtls: rules(&["**"], &["**"]),
+				mtls: rules(&[""], &[""]),
 				mtls_link: link,
 				..Default::default()
 			};
@@ -1723,10 +1723,10 @@ mod tests {
 		let (dir, key) = key_dir();
 		let policy = Policy {
 			keys: Some(Keys::Dir(dir.path().into())),
-			mtls: rules(&["**"], &["**"]),
+			mtls: rules(&[""], &[""]),
 			..Default::default()
 		};
-		let jwt = sign(&key, "demo", &["**"], &[], None);
+		let jwt = sign(&key, "demo", &[""], &[], None);
 		for request in [
 			with_peer(with_token(request("/demo"), &jwt), None),
 			with_peer(with_token(request("/demo"), "garbage"), None),
@@ -1741,41 +1741,42 @@ mod tests {
 	#[tokio::test]
 	async fn anonymous_gets_the_public_rules() {
 		let policy = Policy {
-			public: rules(&[], &["anon/**"]),
+			public: rules(&[], &["anon"]),
 			..Default::default()
 		};
 		let grant = policy.decide(&request("/")).await.unwrap();
-		assert_eq!(grant.subscribe.path, patterns(&["anon/**"]));
+		assert_eq!(grant.subscribe.path, prefixes(&["anon"]));
 		assert!(grant.publish.path.is_empty());
 		// Never re-checked or closed by default, like 0.14.
 		assert_eq!(grant.expires, None);
 		assert_eq!(grant.revalidate, None);
 	}
 
-	/// The rules are rooted at `/`, not at the dialed path: `anon/**` scopes a session
-	/// dialed anywhere to `anon/`, and refuses one dialed outside it. Bare `**` reads
-	/// the same either way, which is how rooting them at the dialed path went unnoticed.
+	/// The rules are rooted at `/`, not at the dialed path: `anon` scopes a session
+	/// dialed anywhere to `anon/`, and refuses one dialed outside it. The empty prefix
+	/// reads the same either way, which is how rooting them at the dialed path went
+	/// unnoticed.
 	#[tokio::test]
 	async fn public_and_mtls_rules_are_rooted_at_slash() {
 		let policy = Policy {
-			public: rules(&["anon/**"], &["anon/**", "*/chat"]),
-			mtls: rules(&["origin/*"], &["origin/*"]),
+			public: rules(&["anon"], &["anon", "lobby/chat"]),
+			mtls: rules(&["origin"], &["origin"]),
 			..Default::default()
 		};
 
 		for (path, publish, subscribe) in [
-			("/", &["anon/**"][..], &["anon/**", "*/chat"][..]),
-			("/anon", &["**"], &["**", "chat"]),
-			("/anon/room", &["**"], &["**"]),
-			("/rooms", &[], &["chat"]),
+			("/", &["anon"][..], &["anon", "lobby/chat"][..]),
+			("/anon", &[""], &[""]),
+			("/anon/room", &[""], &[""]),
+			("/lobby", &[], &["chat"]),
 		] {
 			let grant = policy.decide(&request(path)).await.unwrap();
-			assert_eq!(grant.publish.path, patterns(publish), "{path}");
-			assert_eq!(grant.subscribe.path, patterns(subscribe), "{path}");
+			assert_eq!(grant.publish.path, prefixes(publish), "{path}");
+			assert_eq!(grant.subscribe.path, prefixes(subscribe), "{path}");
 			assert_eq!(grant.root, None, "{path}");
 		}
 
-		// Before, `/rooms/123` got `rooms/123/anon/**`: into any room, anonymously.
+		// Before, `/rooms/123` got `rooms/123/anon`: into any room, anonymously.
 		for path in ["/rooms/123", "/other/room", "/anonymous/room"] {
 			assert_eq!(
 				policy.decide(&request(path)).await.unwrap_err(),
@@ -1787,7 +1788,7 @@ mod tests {
 		}
 
 		let grant = policy.decide(&with_peer(request("/origin/edge0"), None)).await.unwrap();
-		assert_eq!(grant.publish.path, patterns(&[""]));
+		assert_eq!(grant.publish.path, prefixes(&[""]));
 		let err = policy.decide(&with_peer(request("/anon"), None)).await.unwrap_err();
 		assert!(matches!(err, Denial::NoAccess { .. }), "{err}");
 	}
@@ -1796,7 +1797,7 @@ mod tests {
 	async fn limits_count_connect_end_and_aging() {
 		tokio::time::pause();
 		let server = Server::new(Policy {
-			public: rules(&["**"], &["**"]),
+			public: rules(&[""], &[""]),
 			limits: Limits {
 				token: None,
 				remote: Some(2),
@@ -1893,7 +1894,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_bound_past_the_clock_is_refused() {
 		let endless = Policy {
-			public: rules(&["**"], &["**"]),
+			public: rules(&[""], &[""]),
 			expires: Some(Duration::MAX),
 			..Default::default()
 		};
@@ -1909,7 +1910,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_cadence_past_the_clock_keeps_every_slot() {
 		let server = Server::new(Policy {
-			public: rules(&["**"], &["**"]),
+			public: rules(&[""], &[""]),
 			limits: Limits {
 				token: None,
 				remote: Some(1),
@@ -1930,7 +1931,7 @@ mod tests {
 	#[tokio::test]
 	async fn no_limits_keep_no_sessions() {
 		let server = Server::new(Policy {
-			public: rules(&["**"], &["**"]),
+			public: rules(&[""], &[""]),
 			..Default::default()
 		})
 		.unwrap();
@@ -1952,7 +1953,7 @@ mod tests {
 			..limited()
 		})
 		.unwrap();
-		let jwt = sign(&key, "demo", &["**"], &[], None);
+		let jwt = sign(&key, "demo", &[""], &[], None);
 
 		server.answer(&with_token(request("/demo"), &jwt)).await.unwrap();
 		let mut mapped = with_token(request("/demo"), &jwt);
@@ -1967,7 +1968,7 @@ mod tests {
 		let other = sign(
 			&key,
 			"demo",
-			&["**"],
+			&[""],
 			&[],
 			Some(kio::clock::wall() + Duration::from_secs(60)),
 		);
@@ -2002,7 +2003,7 @@ mod tests {
 			..limited()
 		})
 		.unwrap();
-		let jwt = sign(&key, "demo", &["**"], &[], None);
+		let jwt = sign(&key, "demo", &[""], &[], None);
 
 		let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
 		let (input, signature) = jwt.rsplit_once('.').unwrap();
@@ -2042,12 +2043,12 @@ mod tests {
 		})
 		.unwrap();
 		let exp = Some(kio::clock::wall() + Duration::from_secs(60));
-		let a = sign(&key, "demo", &["**"], &[], None);
-		let b = sign(&key, "demo", &["**"], &[], exp);
+		let a = sign(&key, "demo", &[""], &[], None);
+		let b = sign(&key, "demo", &[""], &[], exp);
 		let c = sign(
 			&key,
 			"demo",
-			&["**"],
+			&[""],
 			&[],
 			Some(kio::clock::wall() + Duration::from_secs(61)),
 		);
@@ -2100,7 +2101,7 @@ mod tests {
 	#[tokio::test]
 	async fn the_client_admits_and_reads_the_refusal() {
 		let (client, ended) = serve(Policy {
-			public: rules(&["**"], &[]),
+			public: rules(&[""], &[]),
 			limits: Limits {
 				token: None,
 				remote: Some(1),
@@ -2110,7 +2111,7 @@ mod tests {
 		.await;
 
 		let consumer = client.connect(request("/demo")).await.unwrap();
-		assert_eq!(consumer.grant().publish.path, patterns(&["**"]));
+		assert_eq!(consumer.grant().publish.path, prefixes(&[""]));
 
 		let err = client.connect(request("/demo")).await.unwrap_err();
 		assert!(matches!(err, Error::Refused(_)), "{err}");
@@ -2134,9 +2135,9 @@ mod tests {
 				..Default::default()
 			})
 			.await;
-			let expired_jwt = sign(&key, "tenant", &["media/**"], &[], expired);
-			let valid_jwt = sign(&key, "tenant", &["media/**"], &[], None);
-			let forged_jwt = sign(&stranger, "forged", &["**"], &[], expired);
+			let expired_jwt = sign(&key, "tenant", &["media"], &[], expired);
+			let valid_jwt = sign(&key, "tenant", &["media"], &[], None);
+			let forged_jwt = sign(&stranger, "forged", &[""], &[], expired);
 			for (path, token, reason, root) in [
 				(
 					"/attacker/path",
@@ -2181,8 +2182,8 @@ mod tests {
 			.clone()
 			.with_scope(crate::Scope {
 				root: "tenant".into(),
-				publish: patterns(&["allowed/**"]),
-				subscribe: Patterns::default(),
+				publish: prefixes(&["allowed"]),
+				subscribe: Prefixes::new(),
 			})
 			.unwrap();
 		scoped.to_file(dir.path().join("kid1.jwk")).unwrap();
@@ -2194,7 +2195,7 @@ mod tests {
 		let token = sign(
 			&key,
 			"attacker",
-			&["**"],
+			&[""],
 			&[],
 			Some(kio::clock::Wall::UNIX_EPOCH + Duration::from_secs(1)),
 		);
@@ -2215,7 +2216,7 @@ mod tests {
 		let path = dir.path().join("auth.sock");
 		let listener = tokio::net::UnixListener::bind(&path).unwrap();
 		let server = Server::new(Policy {
-			public: rules(&["**"], &["**"]),
+			public: rules(&[""], &[""]),
 			..Default::default()
 		})
 		.unwrap();
@@ -2225,6 +2226,6 @@ mod tests {
 		let url = format!("unix://{}", url.path()).parse().unwrap();
 		let client = Client::new(url, None).unwrap();
 		let consumer = client.connect(request("/")).await.unwrap();
-		assert_eq!(consumer.grant().subscribe.path, patterns(&["**"]));
+		assert_eq!(consumer.grant().subscribe.path, prefixes(&[""]));
 	}
 }

@@ -1,6 +1,6 @@
 //! Matching a pattern union, swept over union size and path depth.
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use moq_pattern::{Pattern, Patterns};
+use moq_pattern::{Pattern, Patterns, Prefix, Prefixes};
 
 fn matching(c: &mut Criterion) {
 	let mut group = c.benchmark_group("pattern-matching");
@@ -142,7 +142,47 @@ fn algebra(c: &mut Criterion) {
 			});
 		}
 	}
+	// The grant `AUTH_OK` carries: prefixes reduce in one sort and one sweep on any shape.
+	for bytes in [4096, 16384, MAX_MESSAGE] {
+		let (message, previous) = prefix_grant(bytes);
+		let size = wire(&message);
+		assert!(size <= bytes && size * 16 > bytes * 15, "prefix fills {size} of {bytes} bytes");
+		let message: Vec<Prefix> = message.iter().map(|text| text.parse().unwrap()).collect();
+		let reduced: Prefixes = message.iter().cloned().collect();
+		assert_eq!(reduced.len(), message.len(), "prefix members are disjoint");
+		assert!(previous.covers(&reduced));
+		group.throughput(Throughput::Bytes(size as u64));
+		group.bench_function(BenchmarkId::new("collect-prefix", bytes), |b| {
+			b.iter(|| std::hint::black_box(message.iter().cloned().collect::<Prefixes>().len()));
+		});
+		group.bench_function(BenchmarkId::new("covers-prefix", bytes), |b| {
+			b.iter(|| std::hint::black_box(previous.covers(&reduced)));
+		});
+		group.bench_function(BenchmarkId::new("intersect-prefix", bytes), |b| {
+			b.iter(|| std::hint::black_box(previous.intersect(&reduced).len()));
+		});
+	}
 	group.finish();
+}
+
+/// Distinct prefix members two segments beneath a shared parent, filling at most `bytes`
+/// encoded and given in reverse order so collecting sorts them, with a previous grant of
+/// their parents. Mirrors the prefix rows of `js/pattern/bench/algebra.ts`.
+fn prefix_grant(bytes: usize) -> (Vec<String>, Prefixes) {
+	let (mut texts, mut parents) = (Vec::new(), Vec::new());
+	let mut size = 0;
+	for index in 0.. {
+		let parent = format!("room/{index:05}");
+		let text = format!("{parent}/cam");
+		size += varint(text.len()) + text.len();
+		if varint(texts.len() + 1) + size > bytes {
+			break;
+		}
+		texts.push(text);
+		parents.push(parent.parse::<Prefix>().unwrap());
+	}
+	texts.reverse();
+	(texts, parents.into_iter().collect())
 }
 
 /// The largest moq-lite control message, and so the largest `AUTH_OK`.
@@ -162,7 +202,8 @@ fn wire(texts: &[String]) -> usize {
 	varint(texts.len()) + texts.iter().map(|text| varint(text.len()) + text.len()).sum::<usize>()
 }
 
-/// A peer grant shaped against the union index, filling one message.
+/// A pattern union shaped against the union index, filling one message. No peer sends a
+/// pattern union since `AUTH_OK` carries prefixes, so these measure local discovery filters.
 ///
 /// Containment between patterns with wildcards reduces to Orthogonal Vectors, so some shape
 /// costs more than linear time against any index; these are the two worst known against

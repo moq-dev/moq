@@ -197,11 +197,11 @@ export type Request = z.infer<typeof RequestSchema>;
  */
 export const GrantSchema = z
 	.strictObject({
-		/** What the session may publish, relative to the root: patterns, or `{path, rate}` with a bitrate cap. */
+		/** What the session may publish, relative to the root: prefixes, or `{path, rate}` with a bitrate cap. */
 		publish: z.optional(AccessSchema),
-		/** What the session may subscribe to, relative to the root: patterns, or `{path, rate}` with a bitrate cap. */
+		/** What the session may subscribe to, relative to the root: prefixes, or `{path, rate}` with a bitrate cap. */
 		subscribe: z.optional(AccessSchema),
-		/** The path the patterns are relative to, replacing the dialed one. Absent means the dialed path. */
+		/** The path the prefixes are relative to, replacing the dialed one. Absent means the dialed path. */
 		root: z.optional(z.string()),
 		/** Subtrees read from elsewhere: each path, relative to the root, resolves at the absolute path it maps to. Read-only. */
 		mounts: z.optional(z.record(z.string(), z.string())),

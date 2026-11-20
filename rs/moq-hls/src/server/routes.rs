@@ -475,10 +475,7 @@ mod tests {
 
 		let restricted = origin
 			.consume()
-			.scope(
-				"",
-				&moq_net::Patterns::from("room/live".parse::<moq_net::Pattern>().unwrap()),
-			)
+			.scope("", &moq_net::Prefixes::from("room/live".parse::<moq_net::Prefix>().unwrap()))
 			.unwrap();
 		let app = Server::new(restricted, Default::default()).unwrap().router();
 		let start = kio::clock::now();
@@ -772,11 +769,11 @@ mod tests {
 		write_three_gops(&mut allowed);
 		write_three_gops(&mut denied);
 
-		let patterns = ["room/live", "room/source"]
+		let prefixes = ["room/live", "room/source"]
 			.into_iter()
-			.map(|path| path.parse::<moq_net::Pattern>().unwrap())
+			.map(|path| path.parse::<moq_net::Prefix>().unwrap())
 			.collect();
-		let restricted = origin.consume().scope("", &patterns).unwrap();
+		let restricted = origin.consume().scope("", &prefixes).unwrap();
 		let server = Server::new(restricted, Default::default()).unwrap();
 		let broadcaster = server.broadcaster("room/live").await.unwrap();
 		broadcaster.ready().await;
@@ -840,10 +837,7 @@ mod tests {
 		// an allowed sibling to wake the server into reporting the typed refusal.
 		let only_catalog = origin
 			.consume()
-			.scope(
-				"",
-				&moq_net::Patterns::from("room/live".parse::<moq_net::Pattern>().unwrap()),
-			)
+			.scope("", &moq_net::Prefixes::from("room/live".parse::<moq_net::Prefix>().unwrap()))
 			.unwrap();
 		let all_denied = Server::new(only_catalog, Default::default()).unwrap();
 		all_denied.broadcaster("room/live").await.unwrap().ready().await;

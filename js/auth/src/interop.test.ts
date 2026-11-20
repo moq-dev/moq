@@ -13,7 +13,7 @@ describe("Rust-serialized contract", () => {
 	const RUST_INVALID_END =
 		'{"id":"00ff","event":"end","reason":"invalid","duration":1.5,"bytes":{"sent":10,"received":20},"node":"relay-1","relay":"moq-relay/0.22.0","transport":"websocket","remote":"203.0.113.9:4433","path":"/demo/room","query":"jwt=abc","implementation":"moq-net-js/0.4.2"}';
 	const RUST_GRANT =
-		'{"publish":{"path":["alice/**"],"rate":8000000},"subscribe":["**"],"root":"pid/room","expires":4102444800,"revalidate":60,"tier":"websocket","label":"project/key/123","link":"upstream","peer":true}';
+		'{"publish":{"path":["alice"],"rate":8000000},"subscribe":[""],"root":"pid/room","expires":4102444800,"revalidate":60,"tier":"websocket","label":"project/key/123","link":"upstream","peer":true}';
 
 	test("parse a request a Rust relay sent", () => {
 		const request = RequestSchema.parse(JSON.parse(RUST_REQUEST));
@@ -51,8 +51,8 @@ describe("Rust-serialized contract", () => {
 
 	test("a grant typed here is what a Rust relay reads", () => {
 		const grant: Grant = {
-			publish: { path: ["alice/**"], rate: 8_000_000 },
-			subscribe: ["**"],
+			publish: { path: ["alice"], rate: 8_000_000 },
+			subscribe: [""],
 			root: "pid/room",
 			expires: 4102444800,
 			revalidate: 60,
