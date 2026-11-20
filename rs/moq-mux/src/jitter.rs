@@ -440,7 +440,8 @@ pub(crate) struct Ready<K, T> {
 	pub generation: u64,
 	pub item: T,
 	decode: Decode,
-	deadline: Instant,
+	/// When it was due, on the clock that follows the source's.
+	pub deadline: Instant,
 	/// Whether it is the first frame of its track to go out.
 	pub first: bool,
 	bytes: usize,
