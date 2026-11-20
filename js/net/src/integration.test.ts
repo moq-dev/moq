@@ -582,6 +582,74 @@ test("integration: lite-07 counts a later relative start back to where the oldes
 	}
 });
 
+// A relative start on a lite-07 copy never resolves against the groups the copy holds: over a copy
+// holding groups 9 and 10, a reader counting 5 back starts where the publisher counts to, not at 9.
+// While the subscription that delivered them is live, the copy asks it for the reader's range, and
+// the publisher counts back from its latest group, 10, to 5. Once it is gone, the copy subscribes
+// again and the reader waits for that answer, counted back from the Largest it reports: 11, written
+// while the copy was idle, so 6. Mirrors the Rust
+// `a_relative_start_never_resolves_against_the_groups_a_copy_holds`.
+for (const live of [true, false]) {
+	test(`integration: lite-07 never resolves a relative start against the groups a copy holds (live: ${live})`, async () => {
+		const pair = createMockTransportPair(Lite.ALPN_07_WIP);
+		const origin = new OriginProducer();
+		const [client, server] = await Promise.all([
+			connect(url, { transport: pair.client }),
+			accept(pair.server, url, { publish: origin.consume() }),
+		]);
+
+		const broadcast = publish(origin, Path.from("test"));
+		const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
+		const write = (key: bigint) => {
+			const group = producer.createGroup(key);
+			group.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.fromMillis(Number(key)) });
+			group.finish();
+		};
+		for (let key = 0n; key <= 10n; key++) write(key);
+
+		const remote = wireOf(client).consume(Path.from("test"));
+		const subscribe = (ranges: TrackRange[]) =>
+			remote.track("video").subscribe({ delay: { max: null }, order: "ascending", ranges });
+		const read = async (reader: ReturnType<typeof subscribe>) => {
+			const got: bigint[] = [];
+			for (;;) {
+				const group = await withTimeout(reader.recvGroup(), Duration.millis(2_000), "group timed out");
+				if (!group) return got.sort((a, b) => Number(a - b));
+				got.push(group.start);
+			}
+		};
+		let later: ReturnType<typeof subscribe> | undefined;
+		try {
+			// The copy holds groups 9 and 10.
+			const first = subscribe([{ start: { time: 9n }, end: { time: 10n } }]);
+			expect(await read(first)).toEqual([9n, 10n]);
+			let end = 10n;
+			if (!live) {
+				// Its upstream subscription leaves with its last reader, and the track moves on.
+				first.close();
+				await withTimeout(
+					(async () => {
+						while (producer.subscription.peek() !== undefined) await yieldNow();
+					})(),
+					Duration.millis(2_000),
+					"the upstream subscription never left",
+				);
+				write(11n);
+				end = 11n;
+			}
+			later = subscribe([{ start: { relative: 5n }, end: { time: end } }]);
+			expect(await read(later)).toEqual(live ? [5n, 6n, 7n, 8n, 9n, 10n] : [6n, 7n, 8n, 9n, 10n, 11n]);
+			first.close();
+		} finally {
+			later?.close();
+			remote.close();
+			broadcast.close();
+			client.abort();
+			server.abort();
+		}
+	});
+}
+
 // A publisher counts a relative start back from its newest group, which may hold no frame yet and
 // so counts neither in the largest it reports nor where the copy resolves the start. The copy reports
 // the publisher's start, where a reader waiting on each group in sequence starts. Mirrors the Rust

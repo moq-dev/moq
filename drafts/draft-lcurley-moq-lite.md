@@ -1530,7 +1530,8 @@ Which fields follow, and what the Anchor names:
 
 Any other value is a PROTOCOL_VIOLATION.
 Both ends include the Group they name, so a Range from Time `a` to Time `b` delivers every Group from the one containing `a` through the one containing `b`.
-The publisher resolves a Relative or Time Anchor against the Track as it holds it.
+The publisher resolves a Relative or Time Anchor against the Track as it holds it, except a Relative `Start` of one or more `Groups Back` on a relay, which never depends on the part of the Track the relay holds.
+A relay resolves one to the `Range Start` its upstream reported for a Range with the same `Start`, counted from the same latest Group or a newer one: when none has, it asks its upstream for such a Range in its SUBSCRIBE or a SUBSCRIBE_UPDATE, and resolves the Range only once that answer arrives.
 A Range resolves once: an update that leaves it live does not resolve it again.
 
 A `Start` is a floor, not a request; `Subscriber Max Age` and `Subscriber Min Age` are the only things that ask for data.

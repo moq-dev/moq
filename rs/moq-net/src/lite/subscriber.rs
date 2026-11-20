@@ -10342,7 +10342,10 @@ impl SubStream {
 		let (fill_ids, ask_ids, starts, edges) = (&self.fill_ids, &self.ask_ids, &self.starts, &self.edges);
 		let owner = |id| match () {
 			_ if fill_ids.contains(&id) => Owner::Fill,
-			_ if ask_ids.contains(&id) && starts.contains_key(&id) && edges.get(&id).is_some_and(|edge| *edge < latest) => {
+			_ if ask_ids.contains(&id)
+				&& starts.contains_key(&id)
+				&& edges.get(&id).is_some_and(|edge| *edge < latest) =>
+			{
 				Owner::Stale
 			}
 			_ if ask_ids.contains(&id) => Owner::Ask,
@@ -10774,9 +10777,7 @@ impl TrackServe {
 		// The relative ranges readers wait on the publisher to start, each asked as a range of
 		// its own (see `Owner::Ask`), alongside a demand that covers their groups.
 		let mut asks = match (ranged, &request) {
-			(true, Some(_)) => {
-				wire_ranges(&Subscription::default().with_ranges(producer.asks())).unwrap_or_default()
-			}
+			(true, Some(_)) => wire_ranges(&Subscription::default().with_ranges(producer.asks())).unwrap_or_default(),
 			_ => Vec::new(),
 		};
 		// A relative end goes upstream open, so two asks may carry the same range.

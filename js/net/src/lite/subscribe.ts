@@ -359,7 +359,7 @@ export function rangeSize(range: WireRange): number {
 }
 
 /** A range's anchors as a key, so equal ranges compare equal. */
-function rangeKey(range: WireRange): string {
+export function wireRangeKey(range: WireRange): string {
 	const anchor = (anchor: WireAnchor | undefined) => {
 		if (anchor?.absolute !== undefined) return `a${anchor.absolute}`;
 		if (anchor?.relative !== undefined) return `r${anchor.relative}`;
@@ -374,6 +374,13 @@ export interface Applied {
 	retired: bigint[];
 	added: [bigint, WireRange][];
 }
+
+/**
+ * Who a live range on a lite-07 subscription asks for: the demand, a reader waiting on the publisher
+ * to start a relative range, or a fill. A `"stale"` ask was answered before the copy's latest group,
+ * so no wanted range keeps it. Mirrors the Rust `Owner`.
+ */
+export type RangeOwner = "demand" | "ask" | "stale" | "fill";
 
 /**
  * A subscription's live ranges by Range ID, which both ends of a Subscribe Stream keep: the
@@ -475,39 +482,42 @@ export class LiveRanges {
 	 * changes one range sends only that one, and the publisher keeps where the rest resolved.
 	 * Before lite-07 replaced ranges take fresh Range IDs.
 	 *
-	 * The last `fills` of `ranges` ask for fills, and `isFill` names the live ones that do: a fill
-	 * asking for what a demand range does still takes a range of its own, so each Range ID stays
-	 * the demand's or a fill's. `fillIds` are the Range IDs the added fill ranges took.
+	 * The demand's ranges come first, then `asks` asks', then `fills` fills', and `ownerOf` names who
+	 * asked for each live one: an ask or fill asking for what a demand range does still takes a range
+	 * of its own, so each Range ID stays one owner's, and a live range `ownerOf` calls stale is kept
+	 * for no one. `askIds` and `fillIds` are the Range IDs the added asks' and fills' ranges took.
 	 */
 	edit(
 		ranges: readonly WireRange[],
-		fills = 0,
-		isFill: (id: bigint) => boolean = () => false,
-	): { remove: bigint[]; add: WireRange[]; fillIds: bigint[] } {
+		{ asks = 0, fills = 0 }: { asks?: number; fills?: number } = {},
+		ownerOf: (id: bigint) => RangeOwner = () => "demand",
+	): { remove: bigint[]; add: WireRange[]; askIds: bigint[]; fillIds: bigint[] } {
 		if (ranges.length === 0) throw new Error(EMPTY_RANGE);
 		if (!hasRanges(this.#version)) {
 			const same =
 				ranges.length === this.#live.size &&
-				this.ranges().every((range, index) => rangeKey(range) === rangeKey(ranges[index]));
+				this.ranges().every((range, index) => wireRangeKey(range) === wireRangeKey(ranges[index]));
 			if (!same) {
 				this.#live.clear();
 				this.#add(ranges);
 			}
-			return { remove: [], add: [...ranges], fillIds: [] };
+			return { remove: [], add: [...ranges], askIds: [], fillIds: [] };
 		}
-		const demand = ranges.length - fills;
-		const key = (range: WireRange, fill: boolean) => `${fill ? "f" : "d"}${rangeKey(range)}`;
+		const demand = ranges.length - asks - fills;
+		const owner = (index: number): RangeOwner =>
+			index < demand ? "demand" : index < demand + asks ? "ask" : "fill";
+		const key = (range: WireRange, owner: RangeOwner) => `${owner}:${wireRangeKey(range)}`;
 		// Each live range keeps at most one wanted copy, so duplicates edit like any other.
 		const wanted = new Map<string, number>();
 		ranges.forEach((range, index) => {
-			const k = key(range, index >= demand);
+			const k = key(range, owner(index));
 			wanted.set(k, (wanted.get(k) ?? 0) + 1);
 		});
 		const remove: bigint[] = [];
 		// The bytes the live ranges take once the edit applies.
 		let size = this.#size;
 		for (const [id, range] of this.#live) {
-			const k = key(range, isFill(id));
+			const k = key(range, ownerOf(id));
 			const count = wanted.get(k) ?? 0;
 			if (count > 0) {
 				wanted.set(k, count - 1);
@@ -518,22 +528,25 @@ export class LiveRanges {
 		}
 		// In the order asked for, so the publisher numbers them the way this side does.
 		const add: WireRange[] = [];
+		const askIds: bigint[] = [];
 		const fillIds: bigint[] = [];
 		const first = this.#next;
 		ranges.forEach((range, index) => {
-			const k = key(range, index >= demand);
+			const k = key(range, owner(index));
 			const count = wanted.get(k) ?? 0;
 			if (count === 0) return;
 			wanted.set(k, count - 1);
 			add.push(range);
-			if (index >= demand) fillIds.push(first + BigInt(add.length - 1));
+			const id = first + BigInt(add.length - 1);
+			if (owner(index) === "ask") askIds.push(id);
+			if (owner(index) === "fill") fillIds.push(id);
 		});
 		// Checked before anything changes, so a refused edit leaves the ranges as last sent.
 		for (const range of add) size += rangeSize(range);
 		if (size > Message.MAX_MESSAGE_SIZE) throw new Error("too many ranges for one SUBSCRIBE");
 		for (const id of remove) this.#remove(id);
 		this.#add(add);
-		return { remove, add, fillIds };
+		return { remove, add, askIds, fillIds };
 	}
 }
 

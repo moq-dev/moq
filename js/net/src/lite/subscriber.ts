@@ -86,11 +86,13 @@ import {
 	EMPTY_RANGE,
 	inclusiveGroupEnd,
 	LiveRanges,
+	type RangeOwner,
 	requestedRange,
 	Subscribe,
 	SubscribeUpdate,
 	toWireRanges,
 	type WireRange,
+	wireRangeKey,
 } from "./subscribe.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
 import { decodeTracksEventMaybe, Tracks as TracksMessage } from "./tracks.ts";
@@ -237,6 +239,9 @@ interface SubscribeEntry {
 	// The Range IDs of the fills' live ranges; the rest are the demand's, which alone say where the
 	// live feed starts.
 	fillIds: Set<bigint>;
+	// The Range IDs of the asks' live ranges: a relative range a reader of the copy waits on the
+	// publisher to start (see `hooks.asks`), which says nothing of the live feed either.
+	askIds: Set<bigint>;
 	// The groups the fills' ranges ask for, as last sent: widened with the demand's ranges until
 	// they fit, so a run may cover more than the fills ask.
 	fillGroups: readonly Run[];
@@ -1711,6 +1716,7 @@ export class Subscriber {
 			sent: 0,
 			stream: { kind: "setup" },
 			fillIds: new Set(),
+			askIds: new Set(),
 			fillGroups: [],
 			fillsChanged: new Signal(0),
 		};
@@ -2189,6 +2195,7 @@ export class Subscriber {
 			stream: { kind: "setup" },
 			filling: true,
 			fillIds: new Set(),
+			askIds: new Set(),
 			fillGroups: [],
 			fillsChanged: new Signal(0),
 		};
@@ -2768,16 +2775,20 @@ export class Subscriber {
 			const fills = entry.fills?.ask;
 			const fillGroups = fills?.groups ?? [];
 			const priority = Math.max(current?.priority ?? 0, fills?.priority ?? -128);
+			// The relative ranges readers wait on the publisher to start, each asked as a range of its own
+			// (see `RangeOwner`), alongside a demand that covers their groups.
+			const asks = hasRanges(this.version) ? this.#asks(entry) : [];
 			if (
 				current === undefined ||
 				(refresh === undefined &&
 					priority === sentPriority &&
 					sameRuns(fillGroups, sentFills) &&
+					this.#asked(entry, asks) &&
 					this.#sameSubscription(current, lastSent))
 			) {
 				// Each wake releases the quiet signals too, including when termination wins.
 				const next = await race([
-					Signal.race(hooks.requested(track), asked, edge, entry.fillsChanged),
+					Signal.race(hooks.requested(track), asked, edge, entry.fillsChanged, hooks.asksChanged(track)),
 					stopped,
 				]);
 				if (next === null) return;
@@ -2810,7 +2821,9 @@ export class Subscriber {
 					maxDelay: wireMaxDelay(current),
 					minDelay: minDelayOf(current),
 				});
-				const budget = Fit.budget(fields, entry.live.next(), demanded.length + fillGroups.length);
+				const budget = Fit.budget(fields, entry.live.next(), demanded.length + asks.length + fillGroups.length);
+				// The asks that don't fit wait for those sent to be answered, which retires them.
+				const askRanges = Fit.take(budget, asks);
 				const fitted = Fit.fit(demanded, fillGroups, entry.fills?.avoid() ?? [], budget);
 				// A fill's range starting past its run speaks only while that run is asked whole.
 				entry.fills?.retireSkipped(fitted.fills);
@@ -2818,9 +2831,11 @@ export class Subscriber {
 					start: { absolute: run.start },
 					end: { absolute: run.end },
 				}));
-				// The demand's ranges, then the fills'.
-				const edited = entry.live.edit([...fitted.ranges, ...fillRanges], fillRanges.length, (id) =>
-					entry.fillIds.has(id),
+				// The demand's ranges, the asks', then the fills'.
+				const edited = entry.live.edit(
+					[...fitted.ranges, ...askRanges, ...fillRanges],
+					{ asks: askRanges.length, fills: fillRanges.length },
+					(id) => this.#ownerOf(entry, id),
 				);
 				edit = edited;
 				for (const id of entry.starts.keys())
@@ -2830,6 +2845,8 @@ export class Subscriber {
 					}
 				for (const id of entry.fillIds) if (!entry.live.get(id)) entry.fillIds.delete(id);
 				for (const id of edited.fillIds) entry.fillIds.add(id);
+				for (const id of entry.askIds) if (!entry.live.get(id)) entry.askIds.delete(id);
+				for (const id of edited.askIds) entry.askIds.add(id);
 				// The groups a fill newly asks for wait a fresh grace too.
 				for (const run of fitted.fills)
 					for (const gap of runGaps(entry.fillGroups, run.start, run.end))
@@ -2873,6 +2890,36 @@ export class Subscriber {
 		}
 	}
 
+	// The relative ranges the copy's readers wait on the publisher to start, as wire ranges, once each.
+	#asks(entry: SubscribeEntry): WireRange[] {
+		const asks = new Map<string, WireRange>();
+		// A relative end goes upstream open, so two asks may carry the same range.
+		for (const range of toWireRanges(wireRanges(hooks.asks(entry.track)))) asks.set(wireRangeKey(range), range);
+		return [...asks.values()];
+	}
+
+	// Who asked for the live range `id`. An ask its publisher answered counting from before the copy's
+	// latest group is stale: a reader waiting on it joined since. Mirrors the Rust `SubStream::edit`.
+	#ownerOf(entry: SubscribeEntry, id: bigint): RangeOwner {
+		if (entry.fillIds.has(id)) return "fill";
+		if (!entry.askIds.has(id)) return "demand";
+		const largest = hooks.producerLargest(entry.track).peek()?.group;
+		const edge = entry.edges.get(id);
+		const stale = entry.starts.has(id) && largest !== undefined && (edge === undefined || edge < largest);
+		return stale ? "stale" : "ask";
+	}
+
+	// Whether the live asks' ranges are `asks`, none of them stale.
+	#asked(entry: SubscribeEntry, asks: readonly WireRange[]): boolean {
+		const live = new Set<string>();
+		for (const id of entry.askIds) {
+			const range = entry.live.get(id);
+			if (!range || this.#ownerOf(entry, id) === "stale") return false;
+			live.add(wireRangeKey(range));
+		}
+		return live.size === asks.length && asks.every((range) => live.has(wireRangeKey(range)));
+	}
+
 	// Declare where a lite-07 feed starts: the lowest start the live ranges report, or the
 	// requested floor, pending, while SUBSCRIBE_START or a range's SUBSCRIBE_STARTED has yet to
 	// say where one starts. Mirrors the Rust `SubStream::declare`.
@@ -2913,7 +2960,7 @@ export class Subscriber {
 
 		for (const id of entry.live.ids()) {
 			// Only the demand's ranges say where the live feed starts.
-			if (entry.fillIds.has(id)) continue;
+			if (entry.fillIds.has(id) || entry.askIds.has(id)) continue;
 			if (!entry.starts.has(id)) {
 				pending = true;
 				break;

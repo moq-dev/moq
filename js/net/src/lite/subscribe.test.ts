@@ -604,7 +604,7 @@ test("lite-07 updates edit only the changed ranges", async () => {
 	const live = new LiveRanges(version, [a, b]);
 	const step = async (ranges: WireRange[], remove: bigint[], add: WireRange[]) => {
 		const edit = sent.edit(ranges);
-		expect(edit).toEqual({ remove, add, fillIds: [] });
+		expect(edit).toEqual({ remove, add, askIds: [], fillIds: [] });
 		const update = new SubscribeUpdate({ priority: 0, remove: edit.remove, ranges: edit.add });
 		const got = await SubscribeUpdate.decode(
 			new Reader(undefined, await encodeMessage(version, update), version),
@@ -660,7 +660,7 @@ test("lite-07 a refused edit leaves the ranges as sent", () => {
 	expect(() => live.edit(wide)).toThrow("too many ranges");
 	expect(live.entries()).toEqual([[0n, {}]]);
 	expect(live.next()).toBe(1n);
-	expect(live.edit(wide.slice(0, 2))).toEqual({ remove: [0n], add: wide.slice(0, 2), fillIds: [] });
+	expect(live.edit(wide.slice(0, 2))).toEqual({ remove: [0n], add: wide.slice(0, 2), askIds: [], fillIds: [] });
 });
 
 test("SUBSCRIBE_STARTED is type 4 on lite-07 and unknown before it", async () => {

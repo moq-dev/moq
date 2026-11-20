@@ -5803,54 +5803,100 @@ test("the counted aggregates match a full fold of every subscriber", async () =>
 	}
 });
 
-// A lite-07 copy holding part of the track counts a relative start back only through the groups it
-// holds, or as its publisher reported, and reads nothing at a gap until one of those can count it,
-// or nothing more arrives. Mirrors the Rust `a_received_copy_counts_a_relative_start_back_as_its_publisher_did`.
+// A lite-07 copy holds only part of the track, so a relative start counts back only as its publisher
+// reported, from the same latest group or a newer one, and reads nothing until it does, whatever
+// groups the copy holds or receives: its reader asks for that report. Mirrors the Rust
+// `a_received_copy_counts_a_relative_start_back_as_its_publisher_did`.
 test("a received copy counts a relative start back as its publisher did", async () => {
 	const producer = receivedTrack({ timescale: Timescale.MILLI });
 	hooks.reportsStarts(producer);
-	for (const key of [1n, 2n, 7n, 8n, 9n, 10n]) putGroup(producer, key, Number(key));
-	producer.skipGroups(3n, 7n);
-	// Counting 4 back from 10, the publisher had no group to deliver before 11.
-	hooks.relativeStarts(producer, [[4n, { past: 11n }, 10n]]);
-	putGroup(producer, 11n, 11);
-	const subscribe = (start: bigint, end?: bigint) =>
+	for (const key of [1n, 2n, 9n]) putGroup(producer, key, Number(key));
+	hooks.relativeStarts(producer, [[2n, { at: 7n }, 9n]]);
+	const back = (back: bigint, end?: bigint) =>
 		producer.subscribe({
 			delay: { max: null },
-			ranges: [{ start: { relative: start }, end: end === undefined ? undefined : { time: end } }],
+			ranges: [{ start: { relative: back }, end: end === undefined ? undefined : { time: end } }],
 		});
 
-	// Counting from a newer latest group only starts later, so the empty report still holds, where
-	// the groups held would count back to group 7.
-	const empty = subscribe(4n, 8n);
+	const reported = back(2n);
+	expect(drain(reported)).toEqual([9n]);
+	expect(reported.floor()).toBe(7n);
+	const latest = back(0n);
+	expect(drain(latest)).toEqual([9n]);
+	expect(latest.floor()).toBe(9n);
+	// Group 8 may sit below 9, so it reads nothing meanwhile, and asks for a report.
+	const unreported = back(1n);
+	expect(drain(unreported)).toEqual([]);
+	expect(unreported.floor()).toBeUndefined();
+	expect(hooks.asks(producer)).toEqual([{ start: { relative: 1n } }]);
+
+	// Holding every group in between counts nothing either.
+	putGroup(producer, 8n, 8);
+	await settle();
+	expect(drain(unreported)).toEqual([]);
+
+	// A report counted from a newer latest group starts it, as the publisher placed it then.
+	putGroup(producer, 10n, 10);
+	hooks.relativeStarts(producer, [
+		[2n, { at: 7n }, 9n],
+		[1n, { at: 9n }, 10n],
+	]);
+	await settle();
+	expect(unreported.floor()).toBe(9n);
+	expect(drain(unreported).sort((a, b) => Number(a - b))).toEqual([9n, 10n]);
+	expect(hooks.asks(producer)).toEqual([]);
+	// But one from an older latest group says nothing of a reader counting from a newer one.
+	const later = back(2n);
+	expect(drain(later)).toEqual([]);
+	expect(reported.floor()).toBe(7n);
+
+	// A publisher with no group to deliver in a range ending at 10 has none in one ending sooner, but
+	// says nothing of one ending later.
+	hooks.relativeStarts(producer, [[5n, { past: 10n }, 10n]]);
+	const empty = back(5n, 8n);
 	expect(drain(empty)).toEqual([]);
 	expect(await empty.recvGroup()).toBeUndefined();
+	const longer = back(5n, 10n);
+	expect(drain(longer)).toEqual([]);
+	expect(longer.floor()).toBeUndefined();
 
-	// Through the starts skipped, group 0 may sit below 1, so it reads nothing meanwhile.
-	const gap = subscribe(7n);
-	expect(drain(gap)).toEqual([]);
-	// Once the copy reaches its end, nothing more can arrive, so it counts over the groups held.
-	hooks.endTrack(producer, { group: 12n, frame: 0 });
+	// Nothing counts over the groups held once the copy ends either.
+	hooks.endTrack(producer, { group: 11n, frame: 0 });
 	await settle();
-	expect(drain(gap)).toEqual([1n, 2n, 7n, 8n, 9n, 10n, 11n]);
-	expect(await gap.recvGroup()).toBeUndefined();
+	expect(drain(later)).toEqual([]);
+	expect(later.floor()).toBeUndefined();
 });
 
-// A failed group a new copy replaces leaves no gap the cache made, so a relative start counting into
-// the gap below it still waits. Mirrors the Rust `a_received_copy_waits_on_a_gap_a_displaced_group_left`.
-test("a received copy waits on a gap a replaced group left", () => {
-	const producer = receivedTrack({ timescale: Timescale.MILLI });
-	hooks.reportsStarts(producer);
-	for (const key of [1n, 2n]) putGroup(producer, key, Number(key));
-	const failed = producer.createGroup(9n);
-	failed.writeFrame(textFrame("x", Timestamp.fromMillis(9)));
-	failed.abort(new Error("reset"));
-	putGroup(producer, 9n, 9);
-
-	const reader = producer.subscribe({
-		delay: { max: null },
-		ranges: [{ start: { relative: 2n }, end: { time: 8n } }],
-	});
-	expect(drain(reader)).toEqual([]);
-	expect(reader.floor()).toBeUndefined();
+// Whatever groups a lite-07 copy holds, a reader's relative start lands only where its publisher
+// reported it, or waits: the cache never moves it. Mirrors the Rust
+// `a_copys_cache_never_moves_a_relative_start`.
+test("a copy's cache never moves a relative start", async () => {
+	let seed = 0x9e3779b9;
+	const next = (n: number) => {
+		seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+		return (seed >>> 16) % n;
+	};
+	for (let run = 0; run < 64; run++) {
+		const held = new Set<bigint>();
+		for (let i = next(12); i > 0; i--) held.add(BigInt(next(16)));
+		const back = BigInt(next(6));
+		// Unreported half the time.
+		const report = next(2) === 0 ? undefined : BigInt(next(17));
+		const producer = receivedTrack({ timescale: Timescale.MILLI });
+		hooks.reportsStarts(producer);
+		for (const key of [...held].sort((a, b) => Number(a - b))) putGroup(producer, key, Number(key));
+		putGroup(producer, 16n, 16);
+		if (report !== undefined) hooks.relativeStarts(producer, [[back, { at: report }, 16n]]);
+		const reader = producer.subscribe({ delay: { max: null }, ranges: [{ start: { relative: back } }] });
+		await settle();
+		const expected = back === 0n ? 16n : report;
+		const at_ = { held: [...held], back, report };
+		expect({ ...at_, floor: reader.floor() }).toEqual({ ...at_, floor: expected });
+		expect({ ...at_, asked: hooks.asks(producer).length }).toEqual({
+			...at_,
+			asked: expected === undefined ? 1 : 0,
+		});
+		reader.close();
+		producer.close();
+	}
 });

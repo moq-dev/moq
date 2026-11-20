@@ -337,10 +337,11 @@ export interface Holdings {
 	back(latest: bigint, back: bigint): bigint | undefined;
 	/**
 	 * Where a range counting `back` groups before `latest`, up to the exclusive `end` ({@link UNBOUNDED}
-	 * for none), starts, which a relative start, but never an end, takes over {@link back}: where the publisher reported starting it, since a delivery
-	 * start may sit past the group counted, such as above groups too stale for the budget, or
-	 * `"unknown"` while a received copy can count it neither that way nor over its own groups yet.
-	 * Undefined, or absent, counts it with {@link back}. Mirrors the Rust `Holdings::counted_start`.
+	 * for none), starts, which a relative start, but never an end, takes over {@link back}: on a
+	 * received copy, where its publisher reported starting one counted from `latest` or a newer
+	 * group, since the copy holds only part of the track and a delivery start may sit past the group
+	 * counted, or `"unknown"` until it reports one. Undefined, or absent, counts it with
+	 * {@link back}. Mirrors the Rust `Holdings::counted_start`.
 	 */
 	countedStart?(latest: bigint, back: bigint, end: bigint): Containing | undefined;
 	/** Whether nothing more can arrive here, so a time start nothing contains reaches back to the oldest group rather than wait. */
@@ -472,11 +473,11 @@ export class Window {
 	 */
 	#reaching = new Set<bigint>();
 	/**
-	 * The ranges, by key, whose relative start the groups held can't count back to yet (see
-	 * {@link Holdings.countedStart}), so they read nothing yet: a group held may sit below where the
-	 * publisher counted to.
+	 * The ranges, by key, whose relative start waits on its publisher to say where it counted back to
+	 * (see {@link Holdings.countedStart}), each with the latest group it counted from then, so they
+	 * read nothing yet: a group held may sit below where the publisher started.
 	 */
-	#counting = new Set<bigint>();
+	#counting = new Map<bigint, bigint>();
 	// How many spans name each start, and how many name none: see {@link start}.
 	#named = new Counts<bigint>();
 	#unnamed = 0;
@@ -569,11 +570,19 @@ export class Window {
 	}
 
 	/**
-	 * The keys of the ranges still waiting on a relative anchor, a live join's reach back, or a
-	 * time start. Mirrors the Rust `Window::unsettled`.
+	 * The ranges whose relative start waits on its publisher to say where it starts, which a received
+	 * copy asks its upstream for. Mirrors the Rust `Window::counting`.
+	 */
+	counting(): Range[] {
+		return [...this.#counting.keys()].flatMap((key) => this.#ranges.get(key) ?? []);
+	}
+
+	/**
+	 * The keys of the ranges still waiting on a relative anchor, its publisher's report, a live
+	 * join's reach back, or a time start. Mirrors the Rust `Window::unsettled`.
 	 */
 	unsettled(): Set<bigint> {
-		const keys = new Set([...this.#pending, ...this.#reaching]);
+		const keys = new Set([...this.#pending, ...this.#reaching, ...this.#counting.keys()]);
 		for (const entry of this.#waiting.all()) for (const key of entry.keys) keys.add(key);
 		for (const entry of this.#looking.all()) for (const key of entry.keys) keys.add(key);
 		return keys;
@@ -603,13 +612,13 @@ export class Window {
 			for (const key of reaching) this.#placeRange(key, latest, holdings);
 			moved = this.#spans.size > placed;
 		}
-		// Counted from the latest group now, as the publisher counts from its own latest when the
-		// range reaches it.
-		if (this.#counting.size > 0 && latest !== undefined) {
+		// Each from the latest group it first counted from: a report counted from that one or a newer
+		// one starts it.
+		if (this.#counting.size > 0) {
 			const placed = this.#spans.size;
 			const counting = [...this.#counting];
 			this.#counting.clear();
-			for (const key of counting) this.#placeRange(key, latest, holdings);
+			for (const [key, since] of counting) this.#placeRange(key, since, holdings);
 			if (this.#spans.size > placed) moved = true;
 		}
 		if (this.#waiting.size > 0 && this.#startWaiting(holdings)) moved = true;
@@ -806,8 +815,8 @@ export class Window {
 		return this.#named.first();
 	}
 
-	// Whether a time start, a join's reach back, or a relative start waits on the groups held to
-	// place it.
+	// Whether a time start or a join's reach back waits on the groups held to place it, or a
+	// relative start on its publisher.
 	#unplaced(): boolean {
 		return this.#waiting.size > 0 || this.#reaching.size > 0 || this.#counting.size > 0;
 	}
@@ -859,7 +868,8 @@ export class Window {
 			return;
 		}
 		if (start === "counting") {
-			this.#counting.add(key);
+			// Counting needs a latest group to count from.
+			if (latest !== undefined) this.#counting.set(key, latest);
 			return;
 		}
 		if (start === "waiting") {
@@ -1042,7 +1052,8 @@ function joins(range: Range, min: Duration | undefined, holdings: Holdings): Dur
  * The first group a range starts at, and whether it names that group rather than reaching back to
  * the oldest one. `"pending"` while it waits on a latest group, reading everything meanwhile,
  * `"waiting"` for a time start the groups held can't place yet, and `"counting"` for a relative
- * start they can't count back to yet, reading nothing meanwhile. Mirrors the Rust `start`.
+ * start its publisher has yet to say where it starts, reading nothing meanwhile. Mirrors the Rust
+ * `start`.
  */
 function startOf(
 	anchor: Anchor | undefined,

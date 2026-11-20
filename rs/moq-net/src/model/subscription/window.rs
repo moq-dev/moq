@@ -1323,7 +1323,10 @@ mod tests {
 			.edit([], &[(2, range(Anchor::Relative(3), None))], Some(9), &keys)
 			.unwrap();
 		assert!(window.is_counting());
-		assert_eq!(window.counting().collect::<Vec<_>>(), [range(Anchor::Relative(3), None)]);
+		assert_eq!(
+			window.counting().collect::<Vec<_>>(),
+			[range(Anchor::Relative(3), None)]
+		);
 		window.edit([2], &[], Some(9), &keys).unwrap();
 		assert_eq!(window.counting().count(), 0);
 		assert!(window.is_settled());

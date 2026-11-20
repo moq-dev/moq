@@ -43,6 +43,25 @@ export function budget(fields: number, next: bigint, count: number): Budget {
 	};
 }
 
+/**
+ * The longest prefix of `ranges` fitting half of what `budget` has left, which it then takes: the
+ * other half stays for the demand and fills, which {@link fit} can only widen so far. Mirrors the
+ * Rust `Budget::take`.
+ */
+export function take(budget: Budget, ranges: readonly WireRange[]): WireRange[] {
+	const room = Math.floor(budget.bytes / 2);
+	let used = 0;
+	const taken: WireRange[] = [];
+	for (const range of ranges) {
+		const bytes = cost(budget, range);
+		if (bytes === undefined || used + bytes > room) break;
+		used += bytes;
+		taken.push(range);
+	}
+	budget.bytes -= used;
+	return taken;
+}
+
 /** What `range` costs, or undefined when it can't go out. */
 function cost(budget: Budget, range: WireRange): number | undefined {
 	// An end at group 0 asks for nothing, which encoding refuses.

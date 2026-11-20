@@ -58,7 +58,7 @@ import { rescale } from "./rescale.ts";
 import { floorAt, Timescale, type Timestamp } from "./time.ts";
 import { checkEnd, checkKey, max, min, UNBOUNDED } from "./util/key.ts";
 import { checkName } from "./util/utf8.ts";
-import { bounded, type Holdings, joinsLive, rangesOf, UNHELD, Window, wireSpan } from "./window.ts";
+import { bounded, type Holdings, joinsLive, rangeKey, rangesOf, UNHELD, Window, wireSpan } from "./window.ts";
 import { type Broadcast as BroadcastWire, registerTrackConsumer } from "./wire.ts";
 
 export { type Fill, FillGroups, FillLookup, Requests } from "./fill.ts";
@@ -1004,6 +1004,10 @@ let fillFloor: (producer: Producer, named: bigint | undefined) => bigint | undef
 // The keys of the groups the producer caches, sorted: what relative and time anchors resolve
 // against, as the Rust `TrackState::lookup` keys; assigned in its static block.
 let keysOf: (producer: Producer) => readonly bigint[];
+// Count `ranges`, in a stable order, as the relative ranges the reader reading through `sink` waits
+// on the publisher to start, in place of those counted before; see `hooks.asks`. Assigned in the
+// producer's static block.
+let askStarts: (producer: Producer, sink: TrackState, ranges: readonly Range[]) => void;
 // How a received copy resolves its readers' time anchors, as its wire tells it; assigned in the
 // producer's static block. See `hooks.startsAtKeys` and `hooks.timeStarts`.
 let timeAnchors: (producer: Producer) => {
@@ -1012,8 +1016,6 @@ let timeAnchors: (producer: Producer) => {
 	/** The newest of `starts` past the time its range asked from, 0 when none is. */
 	past: bigint;
 	relative: ReadonlyMap<bigint, { start: CountedStart; latest?: bigint }>;
-	/** The highest key of any group that left the cache. */
-	uncached: bigint | undefined;
 	/** Whether its publisher reports where each range starts (lite-07), which `relative` holds. */
 	reported: boolean;
 	/** Bumped whenever the others, or whether the producer is a received copy, change. */
@@ -1289,13 +1291,14 @@ export class Producer {
 	#startsPast = 0n;
 	// On a lite-07 copy, where the publisher started each live range counting back, by its count.
 	#relativeStarts = new Map<bigint, { start: CountedStart; latest?: bigint }>();
-	// The highest key of any group the cache evicted, rather than one a new copy replaced: a received
-	// copy counting a relative start back can't tell a gap at or below it from one it never held.
-	// Mirrors the Rust `TrackState::uncached`.
-	#uncached?: bigint;
-	// Whether a copy's publisher reports where each range starts, so a relative start the copy
-	// can't count back over its own groups waits for that. Mirrors the Rust `Anchors::Reported`.
+	// Whether a copy's publisher reports where each range starts, so a relative start waits for that
+	// rather than count over the groups held. Mirrors the Rust `Anchors::Reported`.
 	#reportsStarts = false;
+	// The relative ranges each reader waits on the publisher to start, which the copy's subscription
+	// asks upstream for. Mirrors the Rust `Subscriptions::asks`.
+	#readerAsks = new Map<TrackState, readonly Range[]>();
+	// Bumped whenever a reader's entry in `#readerAsks` changes. Mirrors the Rust `asks_revision`.
+	#asksChanged = new Signal(0);
 	// Counts changes to how a time start is placed other than by groups arriving or drops: the wire,
 	// `#timeStarts`, and `#startsAtKeys`. Mirrors the Rust `TrackState::placing`.
 	#placing = 0;
@@ -1394,8 +1397,6 @@ export class Producer {
 			evict: (entry) => {
 				this.#evict(entry);
 				this.#uncache(entry, true);
-				// Gone for good, unlike a group a new copy replaces at once.
-				this.#uncached = max(this.#uncached ?? entry.group.start, entry.group.start);
 			},
 			settle: () => this.#settle(),
 			expireDrops: (now) => this.#expireDrops(now),
@@ -1535,7 +1536,6 @@ export class Producer {
 			past: producer.#startsPast,
 			relative: producer.#relativeStarts,
 			reported: producer.#reportsStarts,
-			uncached: producer.#uncached,
 			placing: producer.#placing,
 		});
 		hooks.startsAtKeys = (producer) => {
@@ -1549,6 +1549,23 @@ export class Producer {
 				if (asked < start && start > producer.#startsPast) producer.#startsPast = start;
 			}
 			producer.#placing++;
+		};
+		hooks.asks = (producer) => {
+			const asks = new Map<string, Range>();
+			for (const ranges of producer.#readerAsks.values())
+				for (const range of ranges) asks.set(rangeKey(range), range);
+			return [...asks.values()];
+		};
+		hooks.asksChanged = (producer) => producer.#asksChanged;
+		askStarts = (producer, sink, ranges) => {
+			const last = producer.#readerAsks.get(sink) ?? [];
+			const same =
+				last.length === ranges.length &&
+				last.every((range, index) => rangeKey(range) === rangeKey(ranges[index]));
+			if (same) return;
+			if (ranges.length === 0) producer.#readerAsks.delete(sink);
+			else producer.#readerAsks.set(sink, ranges);
+			producer.#asksChanged.update((revision) => revision + 1);
 		};
 		hooks.reportsStarts = (producer) => {
 			producer.#reportsStarts = true;
@@ -2092,6 +2109,7 @@ export class Producer {
 	// Take `sink` out of the aggregates.
 	#leave(sink: TrackState): void {
 		sink.update.watch = undefined;
+		askStarts(this, sink, []);
 		this.#moved(sink, { before: sink.update.contribution(), gone: [...sink.update.ranges()], came: [] });
 		this.#counted.delete(sink);
 		this.#subscribed();
@@ -3648,10 +3666,23 @@ export class Subscriber {
 		this.#moved();
 	}
 
-	// The window moved: narrow the bounds to it.
+	// The window moved: narrow the bounds to it, and ask for the relative starts it waits on.
 	#moved(): void {
 		this.#revision++;
 		this.#bound();
+		this.#ask();
+	}
+
+	// Count the relative ranges the window waits on the publisher to start, which a received copy's
+	// subscription asks upstream for. Mirrors the Rust `Asked::set`.
+	#ask(): void {
+		const producer = this.#state.producer;
+		if (!producer || this.#left) return;
+		const counting = this.#window.counting().sort((a, b) => {
+			const [x, y] = [rangeKey(a), rangeKey(b)];
+			return x < y ? -1 : x > y ? 1 : 0;
+		});
+		askStarts(producer, this.#state, counting);
 	}
 
 	// The groups this reader's track holds, by start, for resolving its relative and time anchors:
@@ -3736,54 +3767,26 @@ export class Subscriber {
 				return { runs, mark };
 			},
 			nextStart: (from) => keys[keyIndex(keys, from)],
-			// A lite-07 copy holds only part of the track, so it starts where its publisher did,
-			// counting from the same latest group: a newer one moved the live edge. One its wire still
-			// feeds counts only through the groups it holds and the starts skipped between them, since
-			// any other gap may hold groups it never saw, and waits on the report there; once nothing
-			// feeds it, over the groups held. Mirrors the Rust `TrackState::counted_start`.
+			// A lite-07 copy holds only part of the track, so it starts only where its publisher
+			// reported starting, counting from the same latest group or a newer one, and waits for that
+			// report otherwise, whatever it holds: its reader asks upstream for one (see `hooks.asks`).
+			// The latest group itself needs no count. Mirrors the Rust `TrackState::counted_start`.
 			countedStart: (latest, back, end) => {
-				const reported = receivedCopy(producer) ? anchors.relative.get(back) : undefined;
-				if (reported?.latest !== undefined && reported.latest <= latest) {
-					const { at, past } = reported.start;
-					if (at !== undefined && reported.latest === latest) return { group: at };
-					// Past a range ending no earlier than this one, so this one holds no group either.
-					// Counting from a newer latest group only starts later, so it holds there too.
-					if (past !== undefined && end <= past) return { group: end };
-				}
-				// Nothing more arrives once the copy closes or completes, so no report can settle it
-				// either.
-				if (
-					!anchors.reported ||
-					!receivedCopy(producer) ||
-					state.closed.peek() !== undefined ||
-					this.#complete()
-				)
-					return undefined;
-				// Each step lands on a group held, so a huge count walks the cache once.
-				let at = latest;
-				for (let step = 0n; step < back; step++) {
-					if (at === 0n) return "before";
-					let below = at - 1n;
-					const run = drops.at(below);
-					if (run?.skip === true) {
-						// Skipped down to 0: no group sits below.
-						if (run.start === 0n) return "before";
-						below = run.start - 1n;
-					}
-					if (keys[keyIndex(keys, below)] !== below) {
-						// The publisher delivers nothing below where a range from group 0 started, so a count
-						// reaching below it starts there.
-						const floor = anchors.starts.get(0n);
-						if (floor !== undefined && below < floor) return { group: floor };
-						// The cache may have made this gap, which no report or arrival fills, so count over
-						// the groups held, as a publisher that let them go does.
-						return anchors.uncached !== undefined && below <= anchors.uncached ? undefined : "unknown";
-					}
-					at = below;
-				}
-				return { group: at };
+				if (!anchors.reported || !receivedCopy(producer)) return undefined;
+				if (back === 0n) return { group: latest };
+				const reported = anchors.relative.get(back);
+				const { at, past } = reported?.start ?? {};
+				if (at !== undefined && reported?.latest !== undefined && reported.latest >= latest)
+					return { group: at };
+				// Past a range ending no earlier than this one, so this one holds no group either. Counting
+				// from another latest group starts no earlier, so it holds there too.
+				if (past !== undefined && end <= past) return { group: end };
+				return "unknown";
 			},
 			back: (latest, back) => {
+				// Keys that are group IDs count back by ID, as a moq-transport joining FETCH does, so the
+				// count never depends on what this copy holds.
+				if (anchors.atKeys) return latest > back ? latest - back : 0n;
 				if (back === 0n) return latest;
 				// Bounded by the cache: a huge count reaches back to the oldest.
 				const index = BigInt(keyIndex(keys, latest)) - back;

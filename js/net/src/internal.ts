@@ -27,6 +27,7 @@ import type {
 	InfoInit,
 	Position,
 	Producer,
+	Range,
 	Request,
 	Subscriber,
 	Subscription,
@@ -760,16 +761,28 @@ export const hooks: {
 	/**
 	 * Tell a lite-07 copy where its publisher started each live range counting back, as
 	 * `[back, start, latest]` triples, replacing the last set: the copy holds only part of the
-	 * track, so a reader's relative start counts back as the publisher did, until a group past
-	 * the `latest` it counted from moves the live edge. Assigned by `track.ts`.
+	 * track, so a reader's relative start counting back from `latest`, or an older group, starts
+	 * where the publisher did. Assigned by `track.ts`.
 	 */
 	relativeStarts: (producer: Producer, starts: Iterable<readonly [bigint, CountedStart, bigint | undefined]>) => void;
 	/**
 	 * Mark a received copy whose publisher reports where each range starts (lite-07), so a reader's
-	 * relative start the copy can't count back over its own groups waits for {@link relativeStarts}.
-	 * Mirrors the Rust `Producer::reported`; assigned by `track.ts`.
+	 * relative start waits for {@link relativeStarts} rather than count over the groups held, and
+	 * asks for it (see {@link asks}). Mirrors the Rust `Producer::reported`; assigned by `track.ts`.
 	 */
 	reportsStarts: (producer: Producer) => void;
+	/**
+	 * The relative ranges a lite-07 copy's readers wait on its publisher to start, which its
+	 * subscription asks upstream for, each as a range of its own, so the publisher reports where it
+	 * starts. Mirrors the Rust `Producer::asks`; assigned by `track.ts`.
+	 */
+	asks: (producer: Producer) => readonly Range[];
+	/**
+	 * Bumped whenever a reader starts or stops waiting on one of {@link asks}, even one another
+	 * reader already waits on: that reader may have joined after the last answer. Mirrors the Rust
+	 * `Producer::poll_asks_changed`; assigned by `track.ts`.
+	 */
+	asksChanged: (producer: Producer) => Getter<number>;
 	/** Mint a track {@link Request}; assigned by `track.ts`. */
 	makeRequest: (options: TrackRequestOptions) => Request;
 	/**
@@ -1189,6 +1202,12 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	reportsStarts: () => {
+		throw new Error("track.ts not loaded");
+	},
+	asks: () => {
+		throw new Error("track.ts not loaded");
+	},
+	asksChanged: () => {
 		throw new Error("track.ts not loaded");
 	},
 	relativeStarts: () => {

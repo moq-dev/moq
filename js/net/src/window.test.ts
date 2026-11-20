@@ -188,15 +188,19 @@ describe("Window", () => {
 		expect(covered(ended, held.held)).toEqual(keys(0n, 8n));
 	});
 
-	test("a relative start the groups held can't count yet reads nothing until counted", () => {
+	test("a relative start reads nothing until counted", () => {
 		const held = new Keys([1n, 2n, 9n]);
 		let counted: Containing = "unknown";
+		let countedFrom: bigint | undefined;
 		const counting: Holdings = {
 			resolves: () => true,
 			containing: (at) => held.containing(at),
 			nextStart: (from) => held.nextStart(from),
 			back: (latest, back) => held.back(latest, back),
-			countedStart: () => counted,
+			countedStart: (latest) => {
+				countedFrom = latest;
+				return counted;
+			},
 			complete: () => false,
 		};
 		const window = new Window([range(relative(2n), time(8n)), range(time(1n), time(1n))], 9n, counting);
@@ -205,14 +209,14 @@ describe("Window", () => {
 		expect(covered(window, keys(0n, 10n))).toEqual([1n]);
 		expect([window.floor(), window.start(), window.end()]).toEqual([undefined, undefined, undefined]);
 		expect(window.resolved()[0]).toBeUndefined();
+		expect(window.counting()).toEqual([range(relative(2n), time(8n))]);
 
-		// Nothing to count from while the latest group is unknown.
+		// A report counted from the latest group it first counted from, or a newer one, starts it.
 		counted = { group: 7n };
-		expect(window.settle(undefined, counting)).toBe(false);
-		expect(window.settled).toBe(false);
-
-		expect(window.settle(9n, counting)).toBe(true);
+		expect(window.settle(12n, counting)).toBe(true);
+		expect(countedFrom).toBe(9n);
 		expect(window.settled).toBe(true);
+		expect(window.counting()).toEqual([]);
 		expect(covered(window, keys(0n, 10n))).toEqual([1n, 7n, 8n]);
 		expect([window.start(), window.end()]).toEqual([1n, 9n]);
 
