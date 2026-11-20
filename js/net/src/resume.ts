@@ -1084,7 +1084,7 @@ class Reader implements ResumeSource {
 	 * cursor. A backfill still to ask is not judged yet, and a route between copies has nothing to
 	 * judge. Mirrors the Rust `Reader::exhausted`.
 	 */
-	exhausted(delivered: Delivered, window: Window): boolean {
+	exhausted(delivered: Delivered, window: Window, ordered: boolean): boolean {
 		this.sync();
 		if (this.#closed || this.#ended || this.#resumed) return false;
 		const serving = this.#copies.at(-1);
@@ -1102,7 +1102,7 @@ class Reader implements ResumeSource {
 				}
 			}
 		}
-		return hooks.exhaustedFor(serving.sub, delivered);
+		return hooks.exhaustedFor(serving.sub, delivered, ordered);
 	}
 
 	tryDrop(delivered: Delivered, passing?: bigint): (Recv & { kind: "drop" }) | undefined {

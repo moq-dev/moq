@@ -4204,16 +4204,19 @@ export class Subscriber {
 	// {@link #drained}. A wire publisher's reader never ends there.
 	#exhausted(): boolean {
 		if (this.#parks) return false;
-		if (this.#resume) return this.#resume.exhausted(this.#delivered, this.#window);
-		return this.#drained([this.#delivered]);
+		const ordered = this.#mode === "ordered";
+		if (this.#resume) return this.#resume.exhausted(this.#delivered, this.#window, ordered);
+		return this.#drained([this.#delivered], ordered);
 	}
 
 	// Whether a bounded window has nothing left to deliver: every group in its ranges was handed
 	// out (in any of `taken`), dropped, or never will be, as one skipped as stale, one below where
 	// the feed started, or a hole the feed no longer owes. An open window always has more, and so
-	// does one the cap keeps a group out of, since the reader may raise it again. Mirrors the
-	// Rust `Cursor::is_exhausted`.
-	#drained(taken: readonly Delivered[]): boolean {
+	// does one the cap keeps a group out of, since the reader may raise it again. A local
+	// producer may still create any group it did not skip, so only an `ordered` read, which hands
+	// out the group it created above a hole before any created later below, passes that hole.
+	// Mirrors the Rust `Cursor::is_exhausted`.
+	#drained(taken: readonly Delivered[], ordered: boolean): boolean {
 		const end = this.#window.end();
 		if (end === undefined) return false;
 		// A fill still owes a group it reads.
@@ -4221,6 +4224,7 @@ export class Subscriber {
 		const held = this.#state.groups.peek();
 		const producer = this.#state.producer;
 		const received = max(this.#state.received.peek(), ((producer && fillEdge(producer)) ?? -1n) + 1n);
+		const local = producer !== undefined && !wireFed(producer);
 		// A received stale run that does not settle this reader is unknown to it (see `settles`):
 		// the reader still wants those groups, however the feed accounted for them.
 		const budget = this.#drift().budget;
@@ -4240,10 +4244,14 @@ export class Subscriber {
 				}));
 				const drops = overlapping.filter((run) => settles(run, budget, coverage));
 				const unknown = overlapping.filter((run) => !settles(run, budget, coverage));
-				for (const open of runGaps(drops, gap.start, gap.end)) {
+				// A miss this reader gave up on is never wanted again.
+				const opens = runGaps(drops, gap.start, gap.end).flatMap((run) =>
+					runGaps(this.#givenUp, run.start, run.end),
+				);
+				for (const open of opens) {
 					if (unknown.some((run) => run.start < open.end && open.start < run.end)) return false;
-					// Not received yet, so it may still arrive.
-					if (open.end > received) return false;
+					// Not received yet, so it may still arrive; a local producer may still create it.
+					if (open.end > received || (local && !ordered)) return false;
 					// Held, so a read still hands it out, skips it, or waits for the cap to rise.
 					const index = timelineIndex(held, open.start);
 					if (held[index] && held[index].start < open.end) return false;
@@ -4293,10 +4301,10 @@ export class Subscriber {
 		};
 		// A route copy judged for the logical reader that handed out `delivered`: what the copy
 		// handed out itself counts too. A copy that is itself a front judges across its own copies.
-		hooks.exhaustedFor = (subscriber, delivered) =>
+		hooks.exhaustedFor = (subscriber, delivered, ordered) =>
 			subscriber.#resume
-				? subscriber.#resume.exhausted(subscriber.#delivered.union(delivered), subscriber.#window)
-				: subscriber.#drained([subscriber.#delivered, delivered]);
+				? subscriber.#resume.exhausted(subscriber.#delivered.union(delivered), subscriber.#window, ordered)
+				: subscriber.#drained([subscriber.#delivered, delivered], ordered);
 		hooks.tryDrop = (subscriber) => subscriber.#tryDrop();
 		// A reader following route copies leaves its ranges to the serving copy, which resolves
 		// their anchors against the groups it holds, then narrows them to its own local bounds.
@@ -5828,7 +5836,8 @@ export class Ordered {
 	 * group whose every frame is further behind the live edge than `delay.max` (the default
 	 * subscription's zero keeps only what nothing newer has superseded). Honors the bounds set by
 	 * {@link withRange}. Like {@link Subscriber.recvGroup}, a read whose ranges all end
-	 * finishes once nothing in them is left to deliver. Later reads return `undefined`
+	 * finishes once nothing in them is left to deliver; on a local track that includes a key
+	 * below a group the producer created, which this read hands out first. Later reads return `undefined`
 	 * immediately too; widening the ranges with {@link update} reads on above the last key returned.
 	 */
 	nextGroup(): Promise<GroupConsumer | undefined> {

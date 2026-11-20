@@ -4831,3 +4831,30 @@ test("failed copies holding groups back are each subscribed afresh", async () =>
 	sub.close();
 	close();
 });
+
+// Mirrors the Rust `a_time_end_between_groups_ends_an_ordered_read_at_the_next` integration test,
+// through a front serving the publisher's own track: its copy passes on what that publisher created.
+test("a time end between two groups ends an ordered read through a front at the next", async () => {
+	const front = new Front();
+	const source = new BroadcastProducer();
+	const handle = source.consume();
+	front.serve(handle);
+	const track = copy(source);
+	for (const key of [1000n, 2000n, 3000n]) track.write(key);
+	const between = {
+		ranges: [{ start: { time: 1500n }, end: { time: 1999n } }],
+		delay: { max: Duration.millis(3_600_000) },
+	};
+	const ordered = front.consumer.track("seq").subscribe(between).ordered();
+	expect((await ordered.nextGroup())?.start).toBe(1000n);
+	expect(await ordered.nextGroup()).toBeUndefined();
+	// An arrival read waits: the publisher may still create 1500.
+	const arrival = front.consumer.track("seq").subscribe(between);
+	expect((await arrival.recvGroup())?.start).toBe(1000n);
+	expect(await isPending(arrival.recvGroup())).toBe(true);
+	ordered.close();
+	arrival.close();
+	front.consumer.close();
+	handle.close();
+	source.close();
+});

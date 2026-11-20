@@ -498,9 +498,10 @@ export interface ResumeSource {
 	/**
 	 * Whether the reader's bounded `window` has nothing left to deliver, judged by the serving
 	 * copy against what it and the logical reader (`delivered`) handed out. A copy that may still
-	 * deliver keeps it open. Mirrors the Rust `Reader::exhausted`.
+	 * deliver keeps it open, and an `ordered` reader passes what the copy's own publisher
+	 * created past. Mirrors the Rust `Reader::exhausted`.
 	 */
-	exhausted(delivered: Delivered, window: Window): boolean;
+	exhausted(delivered: Delivered, window: Window, ordered: boolean): boolean;
 	/** Wake once a read may go differently; fires at most once. */
 	changed(fn: () => void): Dispose;
 	/** Forget the gaps in `delivered` below each group past the budget, judged on the newest copy. */
@@ -875,9 +876,10 @@ export const hooks: {
 	parked: (subscriber: Subscriber) => Subscriber;
 	/**
 	 * Whether a route copy's bounded window has nothing left for the logical reader that handed
-	 * out `delivered`, counting what the copy handed out itself. Mirrors the Rust `exhausted_for`.
+	 * out `delivered`, counting what the copy handed out itself, read in key order when
+	 * `ordered`. Mirrors the Rust `exhausted_for`.
 	 */
-	exhaustedFor: (subscriber: Subscriber, delivered: Delivered) => boolean;
+	exhaustedFor: (subscriber: Subscriber, delivered: Delivered, ordered: boolean) => boolean;
 	/** How many runs of handed-out groups a subscriber remembers: one per gap, plus the floor. Tests only. */
 	deliveredRuns: (subscriber: Subscriber) => number;
 	/** How many runs a subscriber's record of what it reported holds. Tests only. */

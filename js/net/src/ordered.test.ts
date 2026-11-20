@@ -5,7 +5,7 @@ import { Duration, sleep } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { StreamCode, StreamError } from "./error.ts";
 import { hooks, staleHole } from "./internal.ts";
-import { textFrame } from "./mock.ts";
+import { manual, settlesWithin, textFrame } from "./mock.ts";
 import { Timestamp } from "./time.ts";
 import { type Ordered, Producer as TrackProducer } from "./track.ts";
 
@@ -404,4 +404,58 @@ test("a read returning only gaps keeps its handed-out record compact", () => {
 		expect(items(ordered)).toEqual([`gap ${i * 20n}..${i * 20n + 1n} (delivery timeout)`]);
 	}
 	expect(hooks.deliveredRuns(sub)).toBe(1);
+});
+
+// Mirrors the Rust `a_time_end_between_*` tests in `track.rs`.
+const between = { ranges: [{ start: { time: 1500n }, end: { time: 1999n } }], delay: { max: Duration.millis(30_000) } };
+
+test("a time end between two groups ends an ordered read once the publisher created one past it", async () => {
+	using clock = manual();
+	const producer = new TrackProducer("test");
+	const ordered = producer.subscribe(between).ordered();
+	const arrival = producer.subscribe(between);
+	put(producer, 1000n, false);
+	expect((await ordered.nextGroup())?.start).toBe(1000n);
+	expect((await arrival.recvGroup())?.start).toBe(1000n);
+	const end = ordered.nextGroup();
+	expect(await settlesWithin(end, clock)).toBe(false);
+	// Handing out 2000 would pass every start below it; an arrival read waits, since 1500 may still come.
+	put(producer, 2000n, false);
+	expect(await end).toBeUndefined();
+	expect(await settlesWithin(arrival.recvGroup(), clock)).toBe(false);
+
+	// A group created between before a read reaches the end is still read.
+	const later = producer.subscribe(between).ordered();
+	expect((await later.nextGroup())?.start).toBe(1000n);
+	put(producer, 1600n, false);
+	expect((await later.nextGroup())?.start).toBe(1600n);
+	expect(await later.nextGroup()).toBeUndefined();
+});
+
+test("a time end between appended groups ends either read at once", async () => {
+	const producer = new TrackProducer("test");
+	for (const key of [1000n, 2000n]) {
+		const group = producer.appendGroup(Timestamp.unscaled(key));
+		group.writeFrame(textFrame("x", Timestamp.unscaled(key)));
+		group.finish();
+	}
+	const arrival = producer.subscribe(between);
+	expect((await arrival.recvGroup())?.start).toBe(1000n);
+	expect(await arrival.recvGroup()).toBeUndefined();
+	const ordered = producer.subscribe(between).ordered();
+	expect((await ordered.nextGroup())?.start).toBe(1000n);
+	expect(await ordered.nextGroup()).toBeUndefined();
+});
+
+test("a time end between received groups ends an ordered read only once the skip is proven", async () => {
+	using clock = manual();
+	const producer = receivedTrack();
+	put(producer, 1000n, false);
+	put(producer, 2000n, false);
+	const ordered = producer.subscribe(between).ordered();
+	expect((await ordered.nextGroup())?.start).toBe(1000n);
+	const end = ordered.nextGroup();
+	expect(await settlesWithin(end, clock)).toBe(false);
+	producer.skipGroups(1001n, 2000n);
+	expect(await end).toBeUndefined();
 });

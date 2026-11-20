@@ -48,6 +48,28 @@ fn millis(ms: u64) -> Timestamp {
 /// to `range` reads oldest first: through the publisher's own origin with no `version`,
 /// otherwise over one session on it.
 async fn read(version: Option<&str>, range: Range) -> Result<Vec<u64>, Error> {
+	read_as(version, range, Read::default()).await.map(|read| read.groups)
+}
+
+/// How [`read_as`] publishes and reads.
+#[derive(Clone, Copy, Default)]
+struct Read {
+	/// The publisher appends each group, saying it will not go back below it.
+	append: bool,
+	/// The subscriber reads in key order.
+	ordered: bool,
+}
+
+/// What [`read_as`] read.
+#[derive(Debug, PartialEq)]
+struct Groups {
+	groups: Vec<u64>,
+	/// The read ended, rather than waited out [`TIMEOUT`].
+	ended: bool,
+}
+
+/// [`read`], published and read as `how` says.
+async fn read_as(version: Option<&str>, range: Range, how: Read) -> Result<Groups, Error> {
 	let publisher = produce_origin(1);
 	let broadcast = publisher
 		.route("room", moq_net::origin::RouteOptions::hidden())
@@ -61,7 +83,10 @@ async fn read(version: Option<&str>, range: Range) -> Result<Vec<u64>, Error> {
 		.unwrap();
 	broadcast.announce().unwrap();
 	for key in (0..5).map(|second| second * 1000) {
-		let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
+		let mut group = match how.append {
+			true => track.append_group(millis(key)).unwrap(),
+			false => track.create_group(moq_net::group::Info { start: key }).unwrap(),
+		};
 		group.write_frame(millis(key), &b"x"[..]).unwrap();
 		group.finish().unwrap();
 	}
@@ -89,15 +114,33 @@ async fn read(version: Option<&str>, range: Range) -> Result<Vec<u64>, Error> {
 		.with_delay(Delay::default().with_max(FOREVER))
 		.with_order(Order::Ascending)
 		.with_ranges([range]);
-	let mut reader = kio::clock::timeout(TIMEOUT, remote.track("data").unwrap().subscribe(subscription))
+	let reader = kio::clock::timeout(TIMEOUT, remote.track("data").unwrap().subscribe(subscription))
 		.await
 		.expect("subscribe timeout")?;
 
-	let mut read = Vec::new();
-	while let Ok(group) = kio::clock::timeout(TIMEOUT, reader.recv_group()).await {
+	let mut read = Groups {
+		groups: Vec::new(),
+		ended: false,
+	};
+	let mut ordered = None;
+	let mut arrival = None;
+	match how.ordered {
+		true => ordered = Some(reader.ordered()),
+		false => arrival = Some(reader),
+	}
+	loop {
+		let next = match (&mut ordered, &mut arrival) {
+			(Some(ordered), _) => kio::clock::timeout(TIMEOUT, ordered.next_group()).await,
+			(_, Some(arrival)) => kio::clock::timeout(TIMEOUT, arrival.recv_group()).await,
+			_ => unreachable!(),
+		};
+		let Ok(group) = next else { break };
 		match group? {
-			Some(group) => read.push(group.start),
-			None => break,
+			Some(group) => read.groups.push(group.start),
+			None => {
+				read.ended = true;
+				break;
+			}
 		}
 	}
 	let _track = track.finish().unwrap();
@@ -300,4 +343,38 @@ async fn a_sparse_request_counts_its_relative_start_back_as_the_publisher_did() 
 		.unwrap();
 	assert_eq!(end.map(|group| group.start), None, "the ranges are covered");
 	let _track = track.finish().unwrap();
+}
+
+/// A time end between two groups ends an ordered read once the publisher created a group past
+/// it: handing that group out would have passed the starts between. Through the publisher's own
+/// origin that is its own state. A lite-07 copy ends there only on what its wire proves, the
+/// starts between skipped, which a GROUP's Previous Start says of an appending publisher. A
+/// publisher creating groups out of order says nothing, so the copy, and any arrival read of a
+/// track created that way, waits for a group that may still come.
+#[kio::test]
+async fn a_time_end_between_groups_ends_an_ordered_read_at_the_next() {
+	let between = range(Anchor::Time(1500), Some(Anchor::Time(1999)));
+	let ordered = |append| Read { append, ordered: true };
+	let arrival = |append| Read { append, ordered: false };
+	let lite07 = Some("moq-lite-07-wip");
+	for (version, how, ended) in [
+		(None, ordered(false), true),
+		(None, ordered(true), true),
+		(None, arrival(false), false),
+		(None, arrival(true), true),
+		(lite07, ordered(true), true),
+		(lite07, arrival(true), true),
+		(lite07, ordered(false), false),
+	] {
+		let read = read_as(version, between, how).await.unwrap();
+		let label = (version, how.append, how.ordered);
+		assert_eq!(
+			read,
+			Groups {
+				groups: vec![1000],
+				ended
+			},
+			"{label:?}"
+		);
+	}
 }

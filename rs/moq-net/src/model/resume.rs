@@ -1161,9 +1161,9 @@ impl Subscriber {
 
 	/// Whether this reader's bounded window has nothing left for the readers that handed out
 	/// `taken`, the first of which is its own; see [`Reader::exhausted`].
-	pub(super) fn exhausted(&mut self, taken: &[&Delivered], waiter: &kio::Waiter) -> bool {
+	pub(super) fn exhausted(&mut self, taken: &[&Delivered], ordered: bool, waiter: &kio::Waiter) -> bool {
 		let mut reader = self.reader();
-		!reader.let_go(taken[0], waiter) && reader.exhausted(taken, waiter)
+		!reader.let_go(taken[0], waiter) && reader.exhausted(taken, ordered, waiter)
 	}
 
 	/// Hand out the group a [`Self::poll_peek_group`] reserved.
@@ -2522,7 +2522,7 @@ impl Reader {
 		}
 		let drained = self.bound_at_end();
 		let waits = self.let_go(delivered, waiter);
-		if !parks && !waits && self.exhausted(&[delivered], waiter) {
+		if !parks && !waits && self.exhausted(&[delivered], ordered, waiter) {
 			return Some(Poll::Ready(Ok(None)));
 		}
 		match self.poll_end(waiter, |copy| copy.done.clone().map(|done| done.map(|_| ()))) {
@@ -2540,7 +2540,7 @@ impl Reader {
 	/// resume point was the copies' it replaced, each let go once it had nothing more, and a
 	/// backfill still out is not judged yet. A route between copies has nothing to judge.
 	/// `taken` holds the logical readers' records, the reader's own first.
-	fn exhausted(&mut self, taken: &[&Delivered], waiter: &kio::Waiter) -> bool {
+	fn exhausted(&mut self, taken: &[&Delivered], ordered: bool, waiter: &kio::Waiter) -> bool {
 		if self.resumed.is_some() {
 			return false;
 		}
@@ -2575,7 +2575,7 @@ impl Reader {
 				sub: Sub::Ready(sub),
 				floor,
 				..
-			}) if Some(*generation) == self.generation => sub.exhausted_for(taken, *floor, waiter),
+			}) if Some(*generation) == self.generation => sub.exhausted_for(taken, *floor, ordered, waiter),
 			_ => false,
 		}
 	}
