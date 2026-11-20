@@ -59,7 +59,9 @@
 //! claimant too, and fails closed while that one is unavailable or lost. It leaves toward
 //! another node only through a neighbour whose own copy of that node's claims holds the
 //! claim: a route can arrive before the claims behind it, and a neighbour refuses a request
-//! for a claim it has not heard. Among the claims
+//! for a claim it has not heard. While none does, and the node still routes to that node and
+//! knows the claim available, the request waits: the node shows the claim available, so it
+//! never answers it unroutable. Among the claims
 //! of one Instance at one path, only the one shown closest to its own path, at the newest
 //! epoch among those, may serve, reachable or not, as `model::origin` ranks them; a
 //! route's rank chooses among those alone. A route whose cost a link would carry past the
@@ -2536,6 +2538,25 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 				}
 			}
 		}
+	}
+
+	/// Whether a request for `broadcast` naming `origin`, which [`Self::step`] has nowhere
+	/// to send, waits for a way rather than fails: this node routes to `origin` and knows its
+	/// claim available, as it tells its neighbours, but no neighbour's copy holds it yet. A
+	/// route arrives before the claims behind it, and a copy that held the claim can leave
+	/// with its session while this node's own copy stays, so nothing it shows changes when
+	/// a way appears: a request it refused now would never be asked again.
+	pub fn awaits(&self, origin: NodeId, (path, instance): &Broadcast<I>) -> bool {
+		if self.is_self(origin) || !self.best.contains_key(&origin) {
+			return false;
+		}
+		let Some(known) = self.known.get(&origin) else {
+			return false;
+		};
+		(ancestors(path).rev())
+			.map(|above| (above, instance.clone()))
+			.find(|claim| known.items.contains_key(claim))
+			.is_some_and(|claim| (self.claims_of(&claim)).any(|(by, claim)| by == origin && !claim.unavailable))
 	}
 
 	/// Whether `via`'s copy of `origin`'s claims holds `broadcast` as this node knows it:
