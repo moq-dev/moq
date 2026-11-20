@@ -404,6 +404,20 @@ function resumePoint(copy: Pick<Copy, "floor" | "dropped">): bigint | undefined 
 	return copy.dropped === undefined ? copy.floor : max(copy.floor ?? 0n, copy.dropped);
 }
 
+/**
+ * Where `range` resolved, as `at`, on a copy whose resume point is `floor`. One above the range's
+ * time start asked the copy from the floor, so its resolution says nothing of
+ * which group the range starts at, nor of an end under the floor too. The range is placed at its
+ * own anchors, which names the groups under the floor that only a backfill reads. Mirrors the
+ * Rust `unraised`.
+ */
+function unraised(range: track.Range | undefined, floor: bigint | undefined, at: Resolved): Resolved {
+	const start = range?.start?.time;
+	if (floor === undefined || start === undefined || start >= floor) return at;
+	const end = range?.end?.time;
+	return { ...at, start, end: end !== undefined && end < floor ? end + 1n : at.end, floored: true };
+}
+
 /** The first group past where `copy` was replaced: 0 for one replaced before any group. */
 function copyEnd(copy: Pick<Copy, "until">): bigint | undefined {
 	if (copy.until === undefined) return undefined;
@@ -694,8 +708,10 @@ class Reader implements ResumeSource {
 			// A failover cap at or below where a range starts empties the copy's range, which then
 			// says nothing of where the reader's own range starts. One at or below where it ends cut
 			// that end short, so it says nothing of where the reader's range ends.
-			const resolved = own.map((at) => {
-				if (!at || (cap !== undefined && at.end !== undefined && at.end <= at.start)) return undefined;
+			const resolved = own.map((own, index) => {
+				if (!own) return undefined;
+				const at = unraised(ranges[index], copy.floor, own);
+				if (cap !== undefined && at.end !== undefined && at.end <= at.start) return undefined;
 				return cap === undefined || (at.end !== undefined && at.end < cap) ? at : { ...at, end: undefined };
 			});
 			this.#resolve(resolved);
@@ -1420,9 +1436,11 @@ class Reader implements ResumeSource {
 			// From where it was asked to start, or else from what it first got.
 			const start = max(cursor.start, copy.floor ?? 0n);
 			const floor = copy.floor !== undefined;
-			// A group still to land is waited for once something superseded it, as a gap is.
-			const land = { start, end, floor, grace: wait, delivered };
-			if (copy.since !== undefined && hooks.mayLand(copy.sub, land)) return "wait";
+			// A group still to land in the reader's window is waited for once something superseded
+			// it, as a gap is.
+			const lands = (run: { start: bigint; end: bigint }) =>
+				hooks.mayLand(copy.sub, { ...run, floor, grace: wait, delivered });
+			if (copy.since !== undefined && this.#window().runs(start, end).some(lands)) return "wait";
 			if (hooks.hasUnreadGroup(copy.sub, cursor.start, end, delivered)) return "keep";
 		}
 		if (copy.lease > 0) return "keep";
