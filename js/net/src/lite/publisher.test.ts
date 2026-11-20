@@ -4305,7 +4305,9 @@ test("a lite-07 scoped claim sharing no path with the grant is hidden", async ()
 				msgs.push(msg);
 				if (msg.status === "synced") break;
 			}
-			expect(msgs.flatMap((msg) => (msg.status === "start" ? [msg.suffix] : []))).toEqual(told.map((path) => Path.from(path)));
+			expect(msgs.flatMap((msg) => (msg.status === "start" ? [msg.suffix] : []))).toEqual(
+				told.map((path) => Path.from(path)),
+			);
 		} finally {
 			claim.close();
 			close();
