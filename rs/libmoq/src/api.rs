@@ -4166,8 +4166,10 @@ pub extern "C" fn moq_group_request_accept(request: u32) -> i32 {
 
 /// Reject a group request, failing the readers waiting on it now as not found.
 ///
-/// A later reader of the group asks again. The error code is not delivered. Consumes the
-/// request handle. Returns a zero on success, or a negative code on failure.
+/// A later reader of the group asks again. A request for a reader's time start, a time no
+/// cached group places, says instead that no group starts there, so that reader starts at the
+/// group below it. The error code is not delivered. Consumes the request handle. Returns a
+/// zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_group_request_abort(request: u32, error_code: u16) -> i32 {
 	ffi::enter(move || {

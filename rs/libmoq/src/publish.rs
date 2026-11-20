@@ -1197,12 +1197,17 @@ impl Publish {
 	}
 
 	/// Drop a group request, failing the readers waiting on it as not found. The group is
-	/// refused rather than dropped, so a later reader asks again.
+	/// refused rather than dropped, so a later reader asks again. A reader's time start is
+	/// dropped instead: a C handler knows its groups only by key, so one lacking the time's key
+	/// says no group starts there, and its reader starts at the group below rather than failing.
 	pub fn group_request_free(&mut self, request: Id) -> Result<(), Error> {
 		let request = self.group_request.remove(request).ok_or(Error::NotFound)?;
-		request
-			.fill
-			.refuse_groups(request.start..request.start + 1, moq_net::Error::NotFound);
+		let fill = &request.fill;
+		let groups = request.start..request.start + 1;
+		match fill.floor() < fill.start().group {
+			true => fill.drop_groups(groups),
+			false => fill.refuse_groups(groups, moq_net::Error::NotFound),
+		}
 		Ok(())
 	}
 

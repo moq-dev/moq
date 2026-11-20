@@ -1773,12 +1773,20 @@ test("fill: a refused time start fails its reader until its ranges change", asyn
 	await expect(next).rejects.toBe(refusal);
 	await expect(ordered.nextGroup()).rejects.toBe(refusal);
 
+	// An edit replacing it resolves every range again, each by its Range ID.
 	const times = lookups(requests, (ms) => ms);
-	reader.update(fromTime(3n));
+	hooks.editSubscriber(reader, {
+		retire: [0n],
+		add: [[1n, { start: { time: 3n } }]],
+		priority: 0,
+		order: "ascending",
+		delay: { max: null },
+	});
 	const got: bigint[] = [];
 	for (let i = 0; i < 3; i++) got.push((await ordered.nextGroup())?.start ?? -1n);
 	expect(got).toEqual([3n, 4n, 5n]);
 	expect(times).toEqual([3n]);
+	expect(hooks.servingResolvedKeys(reader, [1n])[0]?.start).toBe(3n);
 
 	reader.close();
 	requests.close();
