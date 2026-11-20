@@ -2130,16 +2130,18 @@ impl Follow {
 		}
 	}
 
-	/// Place a group by its first frame and list what that places; `Some` once the watch is done.
+	/// Place a group by its start and list what that places; `Some` once the watch is done.
 	fn first(
 		&mut self,
 		rendition: &Weak<Rendition>,
 		group: moq_net::group::Consumer,
 		first: Option<moq_net::frame::Frame>,
 	) -> Option<Result<()>> {
-		// A group's place is its first frame's pts: the transport's stamp, or the container's own
-		// where the session carries none.
-		let Some(first) = first.and_then(|frame| first_frame(&self.container, frame, self.probe.as_mut())) else {
+		// A group's place is its start, or its first frame's container pts where the session
+		// carries no timeline.
+		let Some(first) =
+			first.and_then(|frame| first_frame(&self.container, group.start, frame, self.probe.as_mut()))
+		else {
 			tracing::warn!(track = %self.track, group = group.start, "skipping a group without a timed first frame");
 			return None;
 		};
@@ -2595,39 +2597,42 @@ impl Reach {
 
 /// What a group's first frame holds.
 enum First {
-	/// Media: its pts, the transport's stamp or else its first sample's, with what its samples reach
+	/// Media: its place, the group's start or else its first sample's pts, with what its samples reach
 	/// and the picture size its keyframe declares.
 	Media(moq_net::Timestamp, Reach, Option<(u32, u32)>),
 	/// A discontinuity marker, a frame with no payload: the content stops at its timestamp.
 	Marker(moq_net::Timestamp),
 }
 
-/// The first frame of a group, or `None` when it can't be read. `probe` reads its picture size; one
-/// it can't parse declares none, leaving the hand-over to arrival order.
+/// The first frame of the group keyed `start`, or `None` when it can't be read. `probe` reads its
+/// picture size; one it can't parse declares none, leaving the hand-over to arrival order.
 fn first_frame(
 	container: &moq_mux::catalog::hang::Container,
+	start: u64,
 	frame: moq_net::frame::Frame,
 	probe: Option<&mut Muxer>,
 ) -> Option<First> {
 	use moq_mux::container::Container as _;
+	let scale = frame.timestamp.scale();
 	let stamp = frame.timestamp;
 	let decoded = container.decode(frame).ok()?;
 	let first = decoded.first()?;
 	// A scale-less session carries the group key, not a time, so the container's own is used.
-	let pts = if stamp.scale().is_some() {
-		stamp
-	} else {
-		first.timestamp
-	};
+	let pts = if scale.is_some() { stamp } else { first.timestamp };
 	// The grid places only times.
 	pts.scale()?;
 	if first.payload.is_empty() {
 		return Some(First::Marker(pts));
 	}
+	// A timed track keys each group by its start, which may sit below its first frame.
+	let place = match scale {
+		Some(scale) => moq_net::Timestamp::new(start, scale).ok()?,
+		None => pts,
+	};
 	let size = probe.and_then(|probe| probe.picture_size(first).ok().flatten());
 	let mut reach = Reach::default();
 	reach.add(decoded);
-	Some(First::Media(pts, reach, size))
+	Some(First::Media(place, reach, size))
 }
 
 /// The row listing `slot`, starting a new discontinuity when `broken`.

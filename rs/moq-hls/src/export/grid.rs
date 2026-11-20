@@ -7,9 +7,10 @@
 //! Every rendition numbers its segments on it, so they share segment numbers while each cuts its
 //! boundaries at its own groups.
 //!
-//! A group spans from its first frame's pts to the next group's. It belongs to one segment: the
-//! first line it contains, so segment N starts at the group containing pts N × length; or, if it
-//! contains none, the line it starts after, `floor(pts / length)`. A group off the grid is placed
+//! A group spans from its start to the next group's: its key on a timed track, or its first
+//! frame's pts where the session carries no timeline. It belongs to one segment: the first line it
+//! contains, so segment N starts at the group containing pts N × length; or, if it contains none,
+//! the line it starts after, `floor(start / length)`. A group off the grid is placed
 //! once its successor starts, or sooner once one of its own frames passes the next line, since it
 //! then contains that line unless its successor overlaps it; the segment before it completes then,
 //! not a group later. A keyframe may overlap the previous group's last frames (a TS content join
@@ -23,7 +24,7 @@
 //! B = [7s, 7.2s) starts segment 3. An edge joining at B derives that from B's and its successor's
 //! timestamps, without A.
 //!
-//! A segment starts at its first group's pts, or at its line when that group starts after it, as
+//! A segment starts at its first group's start, or at its line when that group starts after it, as
 //! a group resuming from a pause does, and a gap at its line; its `EXTINF` runs to the next
 //! segment's start. Every segment then starts after the line before its own and ends at or before
 //! the next, so every `EXTINF` fits twice the segment length, the target duration. A group overrunning the segment length is listed at its first line, so its
@@ -279,7 +280,7 @@ impl Grid {
 		Timestamp::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX)).unwrap_or(Timestamp::ZERO)
 	}
 
-	/// The group keyed `start` has its first frame at `pts`, after every group already fed. Returns
+	/// The group keyed `start` is placed at `pts`, after every group already fed. Returns
 	/// the segments it completes.
 	pub fn group(&mut self, start: u64, pts: Timestamp) -> Vec<Slot> {
 		let mut out = Vec::new();
