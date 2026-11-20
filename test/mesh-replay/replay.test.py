@@ -215,6 +215,41 @@ class KnownTest(unittest.TestCase):
         self.assertNotIn("known", run.violations[0])
         self.assertEqual(run.violations[1]["known"], "/q.md")
 
+    def test_a_strand_keeps_the_event_it_began_in(self):
+        follow = replay.Follow(last=5.0)
+        run = SimpleNamespace(
+            script=SimpleNamespace(known=[{"check": "unfed", "event": "kill", "quest": "/q.md"}]),
+            relays={
+                "a": SimpleNamespace(
+                    name="a",
+                    readout=SimpleNamespace(paths={"replay/b/0": follow}),
+                    publisher=SimpleNamespace(alive=True),
+                    # Not alive, so the check asks it nothing over HTTP.
+                    proc=SimpleNamespace(alive=False),
+                )
+            },
+            procs=lambda: [],
+            violations=[],
+            strands={},
+        )
+        run.violation = lambda *args: replay.Run.violation(run, *args)
+        unfed = [{"reader": "a", "path": "replay/b/0", "kind": "starved"}]
+
+        def check(kind):
+            report = {"name": kind, "kind": kind}
+            replay.Run.check(run, report, unfed, [])
+            return report["violations"][0]
+
+        self.assertEqual(check("kill")["known"], "/q.md")
+        # Unread since the kill, so the next event carries the kill's strand and its known entry.
+        carried = check("end-source")
+        self.assertEqual((carried["began"], carried["known"]), ("kill", "/q.md"))
+        # Read once since: a new strand, which no entry excuses.
+        follow.last = 9.0
+        fresh = check("roll")
+        self.assertNotIn("began", fresh)
+        self.assertNotIn("known", fresh)
+
 
 class ProcTest(unittest.TestCase):
     def test_only_an_exit_the_run_did_not_ask_for_is_a_death(self):
