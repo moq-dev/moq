@@ -242,3 +242,27 @@ test("a fresh encoder after a declared end takes no pre-roll from the stopped on
 	expect(terminal.preroll()).toEqual([]);
 	expect(terminal.span(opus(2_000_000)).frames).toBe(0);
 });
+
+test("a gap after a declared end reaches the fresh encoder's first frame unprimed", () => {
+	const terminal = new Terminal();
+	terminal.clear(0, 80_000);
+	terminal.update(frame(0n, 0));
+	terminal.decoded(packet(0), Duration.micros(20_000));
+	terminal.update(end(1n, 20_000));
+	// Before lite-07 the run the publisher skipped across the silence arrives as a drop.
+	terminal.update(gap);
+	expect(terminal.update(frame(2n, 1_000_000))).toBe(true);
+	expect(terminal.preroll()).toEqual([]);
+	expect(terminal.span(opus(1_000_000)).frames).toBe(960);
+});
+
+test("a join during a pause plays the fresh encoder's first frame whole, past a gap or not", () => {
+	for (const gapped of [false, true]) {
+		const terminal = new Terminal();
+		terminal.clear(0, 80_000);
+		terminal.update(end(1n, 20_000));
+		if (gapped) terminal.update(gap);
+		expect(terminal.update(frame(2n, 1_000_000))).toBe(true);
+		expect(terminal.span(opus(1_000_000)).frames).toBe(960);
+	}
+});
