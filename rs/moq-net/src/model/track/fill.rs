@@ -47,9 +47,9 @@ struct Pending {
 	end: u64,
 	// Exclusive frame cap in the last group; None asks through the original end.
 	frame_end: Option<u64>,
-	// The oldest key the first group may start at: below `start` for a time start, whose
-	// group is the newest one starting at or before it.
-	floor: u64,
+	// For a time start, the oldest key its group, the newest starting at or before the
+	// time, may start at.
+	floor: Option<u64>,
 	// What its joins ask with now, shared with them and its handler.
 	asks: kio::Shared<Asks>,
 	queued: bool,
@@ -602,7 +602,7 @@ impl FillState {
 					start,
 					end: groups.end,
 					frame_end: if groups.end == ask.end { ask.frame_end } else { None },
-					floor: start.group,
+					floor: None,
 					asks,
 					queued: true,
 					flight: false,
@@ -654,7 +654,7 @@ impl FillState {
 						start: Position { group: key, frame },
 						end: groups.end,
 						frame_end: None,
-						floor: key,
+						floor: None,
 						asks: kio::Shared::new(asks),
 						queued: true,
 						flight: true,
@@ -719,7 +719,7 @@ impl FillState {
 				start: Position::group(time),
 				end: groups.end,
 				frame_end: None,
-				floor: floor.min(time),
+				floor: Some(floor.min(time)),
 				asks,
 				queued: true,
 				flight: false,
@@ -934,8 +934,8 @@ struct Inner {
 	end: u64,
 	// Exclusive frame cap in the last group; None asks through the original end.
 	frame_end: Option<u64>,
-	// The oldest key the first group may start at; see [`FillGroups::floor`].
-	floor: u64,
+	// A time start's floor; see [`FillGroups::floor`].
+	floor: Option<u64>,
 	// Answered with a copy of its own rather than the cache's; see [`FillState::fly`].
 	flight: bool,
 	asks: kio::Shared<Asks>,
@@ -960,7 +960,14 @@ impl FillGroups {
 	/// or past the time when the floor is 0. A [refusal](Self::refuse_groups) fails the reader
 	/// with its error until its ranges change.
 	pub fn floor(&self) -> u64 {
-		self.inner.floor
+		self.inner.floor.unwrap_or(self.inner.start.group)
+	}
+
+	/// Whether it answers a reader's time start, whose first group is the one containing the
+	/// time from the [`floor`](Self::floor) through it, even when the floor is the time
+	/// itself: a drop then says no group starts there, and a refusal fails the reader.
+	pub fn is_time_start(&self) -> bool {
+		self.inner.floor.is_some()
 	}
 
 	/// Whether a [`Consumer::fetch_group`](super::Consumer::fetch_group) asked or joined it,
@@ -1297,7 +1304,7 @@ impl FillGroups {
 
 impl Inner {
 	fn contains(&self, key: u64) -> bool {
-		(self.floor..self.end).contains(&key)
+		(self.floor.unwrap_or(self.start.group)..self.end).contains(&key)
 	}
 
 	fn is_wanted(&self, key: u64) -> bool {

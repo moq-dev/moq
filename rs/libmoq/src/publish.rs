@@ -1204,7 +1204,7 @@ impl Publish {
 		let request = self.group_request.remove(request).ok_or(Error::NotFound)?;
 		let fill = &request.fill;
 		let groups = request.start..request.start + 1;
-		match fill.floor() < fill.start().group {
+		match fill.is_time_start() {
 			true => fill.drop_groups(groups),
 			false => fill.refuse_groups(groups, moq_net::Error::NotFound),
 		}

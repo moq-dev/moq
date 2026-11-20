@@ -5458,71 +5458,95 @@ fn a_group_request_nobody_reads_is_withdrawn() {
 }
 
 /// A C handler knows its groups only by key, so rejecting a reader's time start says no group
-/// starts at that time: the reader reads on from it rather than failing.
+/// starts at that time: the reader reads on from it, or from the group held just below it,
+/// rather than failing. That includes a time just past a held group, whose fill asks only the
+/// time's own key.
 #[test]
 fn a_rejected_time_start_reads_on() {
-	let origin = id(moq_origin_create());
-	let broadcast = publish_broadcast(origin, b"track-dynamic-time-start");
-	let name = b"data";
-	let track =
-		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
-	let group_cb = Callback::new();
-	let dynamic = id(unsafe { moq_publish_track_requests(track, Some(channel_callback), group_cb.ptr) });
+	for (time, held, first) in [(7, &[10][..], 10), (5, &[4, 10][..], 4)] {
+		let origin = id(moq_origin_create());
+		let broadcast = publish_broadcast(origin, b"track-dynamic-time-start");
+		let name = b"data";
+		// Timed in milliseconds, with no publisher age limit, so the groups behind the live one
+		// stay fresh.
+		let info = moq_track_info {
+			priority: 0,
+			max_age_us: 0,
+			max_age_unlimited: true,
+			timescale: 1000,
+			timescale_present: true,
+			refresh: 0,
+			refresh_present: false,
+			refresh_interval_us: 0,
+			refresh_interval_present: false,
+			compression: 0,
+		};
+		let track = id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), &info) });
+		let group_cb = Callback::new();
+		let dynamic = id(unsafe { moq_publish_track_requests(track, Some(channel_callback), group_cb.ptr) });
 
-	let mut reader = {
-		let mut state = State::lock();
-		let producer = state.publish.track_producer(Id::try_from(track).unwrap()).unwrap();
-		let reader = producer.subscribe(
-			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(None))
-				.with_ranges([moq_net::track::Range {
-					start: moq_net::track::Anchor::Time(7),
-					end: None,
-				}]),
-		);
-		producer.start_at(10).unwrap();
-		let mut group = producer.create_group(moq_net::group::Info { start: 10 }).unwrap();
-		group
-			.write_frame(moq_net::Timestamp::from_millis(10).unwrap(), &b"live"[..])
-			.unwrap();
-		group.finish().unwrap();
-		reader
-	};
-	let request = id(group_cb.recv_reading(&mut reader));
-	let mut start = 0u64;
-	assert_eq!(unsafe { moq_group_request_start(request, &mut start) }, 0);
-	assert_eq!(start, 7);
-	assert_eq!(moq_group_request_free(request), 0);
-	// The keys from the time up to the live group are asked as misses, rejected too.
-	let waiter = kio::Waiter::noop();
-	let group = loop {
-		match reader.poll_recv_group(&waiter) {
-			std::task::Poll::Ready(Ok(Some(group))) => break group,
-			std::task::Poll::Ready(res) => panic!(
-				"the reader reads on: {:?}",
-				res.map(|group| group.map(|group| group.start))
-			),
-			std::task::Poll::Pending => {}
-		}
-		if let Ok(code) = group_cb.rx.recv_timeout(std::time::Duration::from_millis(10)) {
-			assert_eq!(moq_group_request_free(id(code)), 0);
-		}
-	};
-	assert_eq!(group.start, 10);
+		// Subscribed once the groups are held, which then place the time or ask for it.
+		let mut reader = {
+			let mut state = State::lock();
+			let producer = state.publish.track_producer(Id::try_from(track).unwrap()).unwrap();
+			producer.start_at(held[0]).unwrap();
+			for &key in held {
+				let mut group = producer.create_group(moq_net::group::Info { start: key }).unwrap();
+				group
+					.write_frame(moq_net::Timestamp::from_millis(key).unwrap(), &b"live"[..])
+					.unwrap();
+				group.finish().unwrap();
+			}
+			producer.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(None))
+					.with_order(moq_net::track::Order::Ascending)
+					.with_ranges([moq_net::track::Range {
+						start: moq_net::track::Anchor::Time(time),
+						end: None,
+					}]),
+			)
+		};
+		// Nothing is read before the time start is answered.
+		let waiter = kio::Waiter::noop();
+		assert!(reader.poll_recv_group(&waiter).is_pending());
+		let request = id(group_cb.recv_reading(&mut reader));
+		let mut start = 0u64;
+		assert_eq!(unsafe { moq_group_request_start(request, &mut start) }, 0);
+		assert_eq!(start, time);
+		assert_eq!(moq_group_request_free(request), 0);
+		// The keys after it up to the next group held are asked as misses, rejected too.
+		let group = loop {
+			match reader.poll_recv_group(&waiter) {
+				std::task::Poll::Ready(Ok(Some(group))) => break group,
+				std::task::Poll::Ready(res) => {
+					panic!(
+						"the reader reads on: {:?}",
+						res.map(|group| group.map(|group| group.start))
+					)
+				}
+				std::task::Poll::Pending => {}
+			}
+			if let Ok(code) = group_cb.rx.recv_timeout(std::time::Duration::from_millis(10)) {
+				assert_eq!(moq_group_request_free(id(code)), 0);
+			}
+		};
+		assert_eq!(group.start, first, "time {time}");
 
-	drop(reader);
-	assert_eq!(moq_publish_requests_cancel(dynamic), 0);
-	// A miss asked before the reader left may still be queued ahead of the terminal.
-	let terminal = loop {
-		match group_cb.recv() {
-			code if code > 0 => drop(moq_group_request_free(id(code))),
-			code => break code,
-		}
-	};
-	assert_eq!(terminal, 0);
-	assert_eq!(moq_publish_track_finish(track), 0);
-	assert_eq!(moq_publish_close(broadcast), 0);
-	assert_eq!(moq_origin_close(origin), 0);
+		drop(reader);
+		assert_eq!(moq_publish_requests_cancel(dynamic), 0);
+		// A miss asked before the reader left may still be queued ahead of the terminal.
+		let terminal = loop {
+			match group_cb.recv() {
+				code if code > 0 => drop(moq_group_request_free(id(code))),
+				code => break code,
+			}
+		};
+		assert_eq!(terminal, 0);
+		assert_eq!(moq_publish_track_finish(track), 0);
+		assert_eq!(moq_publish_close(broadcast), 0);
+		assert_eq!(moq_origin_close(origin), 0);
+	}
 }
 
 /// Rejecting a group request fails only the readers waiting on it: the group is not named

@@ -9939,6 +9939,9 @@ impl Cursor {
 		if let Some(err) = &self.filter.refused {
 			return Poll::Ready(Err(err.clone()));
 		}
+		// Or answered, moving the window over groups the walk passed while it read nothing,
+		// which nothing wakes it for once the window settles.
+		self.admit();
 		if let Some(misses) = &mut self.misses {
 			misses.pick_up();
 		}
@@ -26081,6 +26084,51 @@ mod test {
 		assert_eq!(drain_groups(&mut subscriber), [4]);
 	}
 
+	/// A time start just past a held group asks only the time's own key, from a floor at the
+	/// time itself: still a time start, which a drop starts at the held group below.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_time_start_just_past_a_held_group_drops_to_it() {
+		for ordered in [false, true] {
+			let producer = track_producer("test", Info::timed());
+			let dynamic = producer.requests();
+			write_group(&producer, 4);
+			write_group(&producer, 10);
+			let subscriber = producer.subscribe(replay().with_order(Order::Ascending).with_ranges([Range {
+				start: Anchor::Time(5),
+				end: None,
+			}]));
+			let waiter = kio::Waiter::noop();
+			let (mut arrival, mut keyed) = match ordered {
+				true => (None, Some(subscriber.ordered())),
+				false => (Some(subscriber), None),
+			};
+			let mut read = || match (&mut arrival, &mut keyed) {
+				(Some(subscriber), _) => drain_groups(subscriber),
+				(_, Some(ordered)) => drain_ordered(ordered),
+				_ => unreachable!("one reader"),
+			};
+			assert_eq!(read(), Vec::<u64>::new());
+			let Poll::Ready(Ok(start)) = dynamic.poll_requested_fill(&waiter) else {
+				panic!("the time start asks for its group");
+			};
+			assert_eq!(
+				(start.start().group, start.floor(), start.is_time_start()),
+				(5, 5, true)
+			);
+			start.drop_groups(5..6);
+			drop(start);
+			let mut got = read();
+			while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) {
+				assert!(!fill.is_time_start(), "a miss");
+				fill.drop_groups(fill.start().group..fill.end());
+				drop(fill);
+				got.extend(read());
+			}
+			assert_eq!(got, [4, 10], "ordered {ordered}");
+		}
+	}
+
 	/// A handler refusing a time start fails its reader with that refusal, rather than
 	/// starting where the groups held happen to say, until its ranges change, which asks again.
 	#[test]
@@ -26126,7 +26174,8 @@ mod test {
 		};
 		write_filled(start.accept(6, None), 6);
 		drop(start);
-		assert_eq!(drain_groups(&mut subscriber), [6, 9]);
+		// In arrival order: 9 was cached before the fill brought 6.
+		assert_eq!(drain_groups(&mut subscriber), [9, 6]);
 	}
 
 	/// A time end walking the history a handler serves takes no group the live feed

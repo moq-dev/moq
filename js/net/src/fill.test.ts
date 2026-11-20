@@ -1757,6 +1757,42 @@ test("fill: a time start dropped from 0 starts the range at its time, asking not
 	broadcast.close();
 });
 
+test("fill: a time start just past a held group, dropped, starts at that group", async () => {
+	// Mirrors the Rust `a_time_start_just_past_a_held_group_drops_to_it`: the floor is the time
+	// itself, so the fill asks only its own key, and its drop starts the reader at group 4, which the
+	// walk passed while the lookup was out.
+	for (const ordered of [false, true]) {
+		const broadcast = new BroadcastProducer();
+		const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
+		for (const n of [4n, 10n]) {
+			const group = track.createGroup(n);
+			group.writeFrame({ payload: enc.encode(`g${n}`), timestamp: Timestamp.fromMillis(Number(n)) });
+			group.finish();
+		}
+		const requests = track.requests();
+		const floors: bigint[][] = [];
+		void (async () => {
+			for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
+				floors.push([fill.start, fill.floor]);
+				fill.dropGroups(fill.start, fill.end);
+				fill.close();
+			}
+		})();
+		const reader = track.subscribe(fromTime(5n));
+		const got: bigint[] = [];
+		if (ordered) {
+			const keys = reader.ordered();
+			for (let i = 0; i < 2; i++) got.push((await keys.nextGroup())?.start ?? -1n);
+		} else for (let i = 0; i < 2; i++) got.push((await reader.recvGroup())?.start ?? -1n);
+		expect(got).toEqual([4n, 10n]);
+		expect(floors[0]).toEqual([5n, 5n]);
+
+		reader.close();
+		requests.close();
+		broadcast.close();
+	}
+});
+
 test("fill: a refused time start fails its reader until its ranges change", async () => {
 	const { broadcast, track } = timed();
 	const requests = track.requests();
