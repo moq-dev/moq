@@ -1076,15 +1076,15 @@ class Reader implements ResumeSource {
 	}
 
 	/**
-	 * Whether the reader's bounded `window` has nothing left to deliver, once no replaced copy may
-	 * still deliver a group under its bound. The serving copy reads every group of the window from
-	 * its resume point, so it judges those, against what it and the reader (`delivered`) handed
-	 * out. What lies under its resume point was the copies' it replaced, each let go once it had
-	 * nothing more, though one there that the local floor or cap keeps out stays owed, as on one
+	 * Whether the reader's bounded {@link #window} has nothing left to deliver, once no replaced
+	 * copy may still deliver a group under its bound. The serving copy reads every group of the
+	 * window from its resume point, so it judges those, against what it and the reader (`delivered`)
+	 * handed out. What lies under its resume point was the copies' it replaced, each let go once it
+	 * had nothing more, though one there that the local floor or cap keeps out stays owed, as on one
 	 * cursor. A backfill still to ask is not judged yet, and a route between copies has nothing to
 	 * judge. Mirrors the Rust `Reader::exhausted`.
 	 */
-	exhausted(delivered: Delivered, window: Window): boolean {
+	exhausted(delivered: Delivered): boolean {
 		this.sync();
 		if (this.#closed || this.#ended || this.#resumed) return false;
 		const serving = this.#copies.at(-1);
@@ -1092,9 +1092,12 @@ class Reader implements ResumeSource {
 			return false;
 		}
 		if (this.#letGo(delivered)) return false;
+		// The reader's own window, as its copies placed it: the subscriber's leaves its anchors to them.
+		const window = this.#window();
 		const end = window.end();
+		if (end === undefined || window.pending) return false;
 		const resumed = resumePoint(serving);
-		if (resumed !== undefined && end !== undefined) {
+		if (resumed !== undefined) {
 			const cursor = this.#shell.cursor.peek();
 			for (const run of window.runs(window.floor() ?? 0n, min(resumed, end))) {
 				for (const gap of delivered.gaps(run.start, run.end)) {

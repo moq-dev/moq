@@ -1434,12 +1434,20 @@ export class Producer {
 	// them again, and a reader that wants one asks a fill or judges it by its budget. A reclaim
 	// never adds a run to the arrivals: a run touching no accounted one takes the gap below it
 	// too, given up early as a fold would. Nothing below the tail's floor is accounted, since
-	// accounting it would lower the floor onto gaps nobody waited for. Mirrors the Rust
+	// accounting it would lower the floor onto gaps nobody waited for. Without a declared start
+	// the first arrival stands in for that floor, which a lower arrival still moves down, so a
+	// run reaching it extends it down instead: that opens no gap. Mirrors the Rust
 	// `TrackState::forget_drops`.
 	#forgot(forgotten: readonly Run[]): void {
 		const feed = this.#feedStart();
+		const declared = feed === "pending" ? this.#wire?.served?.requested : feed;
 		for (const run of forgotten) {
-			const floor = (feed === "pending" ? this.#wire?.served?.requested : feed) ?? this.#arrivals.first() ?? 0n;
+			const first = this.#arrivals.first();
+			if (declared === undefined && first !== undefined && run.start < first && first <= run.end) {
+				this.#arrive(run.start, run.end);
+				continue;
+			}
+			const floor = declared ?? first ?? 0n;
 			let start = max(run.start, floor);
 			if (start >= run.end) continue;
 			// The highest run starting at or below the run's end touches it when it ends at or past
@@ -1701,9 +1709,10 @@ export class Producer {
 		if (hole.stale === undefined) this.#fills.dropped(start, end);
 		for (const run of runs) this.#setDrops(run.start, run.end, hole);
 		for (const group of arriving) group.abort(hole.error);
-		// A pending tail owes nothing the publisher gave up. A stale verdict is not receipt: a new
-		// upstream subscription supersedes it, leaving those groups unknown again, as in Rust.
-		if (hole.stale === undefined) this.#arrive(start, end);
+		// A pending tail owes nothing the publisher gave up (see `#owes`). The arrivals leave the
+		// run out while it is held, as in Rust: arriving it would open a gap below it, dated now,
+		// which folds before a group still landing there arrives.
+		this.#owe();
 		// Giving up the last keys below the end reaches it, as writing them would.
 		this.#endLargest();
 		return runs;
@@ -2671,7 +2680,9 @@ export class Producer {
 	// for, since an update gets no fresh START: a moved floor stands on its own, and moving
 	// back restores the START. Without either, the first arrival stands in for it.
 	// Until the START arrives, the feed start is pending; the requested floor still bounds it.
+	// A local track has no feed, so what its subscribers ask bounds nothing, as in Rust.
 	#feedStart(): bigint | "pending" | undefined {
+		if (!this.#wire) return undefined;
 		const ranges = this.#requested.peek()?.ranges;
 		const requested = ranges && wireSpan(ranges).start;
 		const served = this.#wire?.served;
@@ -2708,9 +2719,14 @@ export class Producer {
 	#owes(final: bigint): boolean {
 		if (!this.#wire || !this.#state.end.peek()?.tail) return false;
 		const feed = this.#feedStart();
-		const floor = (feed === "pending" ? this.#wire?.served?.requested : feed) ?? this.#arrivals.first();
-		if (floor === undefined) return final > 0n;
-		return !this.#arrivals.covers(min(floor, final), final);
+		const floor = (feed === "pending" ? this.#wire?.served?.requested : feed) ?? this.#arrivals.first() ?? 0n;
+		// A key the publisher gave up is owed no more. A stale verdict is not receipt: a new
+		// upstream subscription supersedes it, leaving those groups unknown again, as in Rust.
+		const drops = this.#state.drops;
+		return this.#arrivals.gaps(min(floor, final), final).some((gap) => {
+			const given = drops.overlapping(gap.start, gap.end).filter((run) => run.stale === undefined);
+			return runGaps(given, gap.start, gap.end).length > 0;
+		});
 	}
 
 	#declareEnd(end: Position, error: Error | undefined, tail: boolean): void {
@@ -4204,7 +4220,7 @@ export class Subscriber {
 	// {@link #drained}. A wire publisher's reader never ends there.
 	#exhausted(): boolean {
 		if (this.#parks) return false;
-		if (this.#resume) return this.#resume.exhausted(this.#delivered, this.#window);
+		if (this.#resume) return this.#resume.exhausted(this.#delivered);
 		return this.#drained([this.#delivered]);
 	}
 
@@ -4219,6 +4235,7 @@ export class Subscriber {
 		// A fill still owes a group it reads.
 		if (this.#askFills(this.#window.floor() ?? 0n, end) !== undefined) return false;
 		const held = this.#state.groups.peek();
+		const cursor = this.#cursor.peek();
 		const producer = this.#state.producer;
 		const received = max(this.#state.received.peek(), ((producer && fillEdge(producer)) ?? -1n) + 1n);
 		// A received stale run that does not settle this reader is unknown to it (see `settles`):
@@ -4242,6 +4259,11 @@ export class Subscriber {
 				const unknown = overlapping.filter((run) => !settles(run, budget, coverage));
 				for (const open of runGaps(drops, gap.start, gap.end)) {
 					if (unknown.some((run) => run.start < open.end && open.start < run.end)) return false;
+					// Cached under the local floor, which lowering offers again, unless a key-order read
+					// already passed it: an ordered take let go of it, so it is not held.
+					const under = { start: max(open.start, this.#nextKey), end: min(open.end, cursor.start) };
+					if (producer && under.start < under.end && cachedIn(producer, under.start, under.end).length > 0)
+						return false;
 					// Not received yet, so it may still arrive.
 					if (open.end > received) return false;
 					// Held, so a read still hands it out, skips it, or waits for the cap to rise.
@@ -4295,7 +4317,7 @@ export class Subscriber {
 		// handed out itself counts too. A copy that is itself a front judges across its own copies.
 		hooks.exhaustedFor = (subscriber, delivered) =>
 			subscriber.#resume
-				? subscriber.#resume.exhausted(subscriber.#delivered.union(delivered), subscriber.#window)
+				? subscriber.#resume.exhausted(subscriber.#delivered.union(delivered))
 				: subscriber.#drained([subscriber.#delivered, delivered]);
 		hooks.tryDrop = (subscriber) => subscriber.#tryDrop();
 		// A reader following route copies leaves its ranges to the serving copy, which resolves
