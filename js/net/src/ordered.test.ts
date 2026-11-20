@@ -5,7 +5,8 @@ import { Duration, sleep } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { StreamCode, StreamError } from "./error.ts";
 import { hooks, NO_MAX_DELAY, staleHole } from "./internal.ts";
-import { textFrame } from "./mock.ts";
+import { rejectGroups } from "./fill.ts";
+import { requestedGroups, textFrame } from "./mock.ts";
 import { Timestamp } from "./time.ts";
 import { type Ordered, Producer as TrackProducer } from "./track.ts";
 
@@ -578,6 +579,27 @@ test("a stale verdict a capped ordered read rejects leaves its time start waitin
 	expect(items(ordered)).toEqual(["gap 1500..1600 (delivery timeout)"]);
 });
 
+test("a refusal judged stale under a narrower budget leaves a widened read's time start waiting", async () => {
+	const producer = receivedTrack();
+	const requests = producer.requests();
+	put(producer, 2000n, false);
+	hooks.dropTrackGroups(producer, 1000n, 1500n, staleHole(10_000));
+	drop(producer, 1500n, 1600n);
+	const subscriber = producer
+		.subscribe({ delay: { max: Duration.millis(100) } })
+		.withRange({ start: { included: 1000n }, end: { excluded: 1600n } });
+	const ordered = subscriber.ordered();
+	// Capped, so the stale run does not settle it: it asks the run again.
+	expect(items(ordered)).toEqual([]);
+	const fill = await requestedGroups(requests);
+	expect([fill?.start, fill?.end]).toEqual([1000n, 1500n]);
+	if (fill) rejectGroups(fill, 1000n, 1500n, new StreamError(StreamCode.Old), { budget: 100, everyone: false });
+	// Widened past the refusal's budget, with a time start nothing held places.
+	subscriber.update({ delay: { max: null }, ranges: [{ start: { time: 1500n } }] });
+	expect(items(ordered)).toEqual([]);
+	requests.close();
+});
+
 test("an empty answer never extends the reach of a start reported for its time", () => {
 	for (const emptyFirst of [false, true]) {
 		const producer = receivedTrack();
@@ -617,25 +639,6 @@ test("a folded time start never places below the range covering it", () => {
 	producer.skipGroups(1201n, 1600n);
 	const subscriber = producer.subscribe({ delay: { max: null }, ranges: [{ start: { time: 1500n } }] });
 	expect(hooks.servingResolved(subscriber)).toEqual([{ start: 1200n, end: undefined, floored: true }]);
-});
-
-test("a range answered empty releases no capped ordered read", () => {
-	const producer = receivedTrack();
-	put(producer, 1850n, false);
-	put(producer, 2000n, false);
-	hooks.timeStarts(producer, [[1000n, undefined, 1800n]], 100);
-	// GROUP 1850 says nothing lies between the time and it.
-	producer.skipGroups(1000n, 1850n);
-	const read = (cap: bigint | undefined) =>
-		items(
-			producer
-				.subscribe({ delay: { max: Duration.millis(100) }, ranges: [{ start: { time: 1000n } }] })
-				.withRange(cap === undefined ? {} : { end: { excluded: cap } })
-				.ordered(),
-		);
-	expect(read(undefined)[0]).toEqual("group 1850");
-	// The cap keeps it from the groups the answer rests on.
-	expect(read(1900n)).toEqual([]);
 });
 
 test("a range answered empty holds back no later group within its budget, though it places nothing", () => {

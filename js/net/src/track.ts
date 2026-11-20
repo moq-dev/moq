@@ -1024,11 +1024,11 @@ let timeAnchors: (producer: Producer) => {
 type TimeStart = ({ start: bigint; empty?: never } | { start?: never; empty: number }) & { through?: bigint };
 
 // Whether a received copy's range asked from `time`, or the one upstream folded it into, had no
-// group to deliver to a reader judging under `budget` with `coverage`: the live feed brings it none
-// of the range's groups. The answer is a staleness verdict, so it holds only for a reader it settles
-// (see {@link settles}). Assigned in the producer's static block. Mirrors the Rust
-// `TrackState::answered_empty`.
-let answeredEmpty: (producer: Producer, time: bigint, budget: number, coverage: Coverage) => boolean;
+// group to deliver to a reader within `budget`: the live feed brings it none of the range's groups.
+// Upstream judges a range by its terms on the wire, never a reader's local bounds, so a reader
+// within the budget it was asked with gets the same answer from it. Assigned in the producer's
+// static block. Mirrors the Rust `TrackState::answered_empty`.
+let answeredEmpty: (producer: Producer, time: bigint, budget: number) => boolean;
 
 // Where a received copy's live feed landed every key it could through `time`, counting from
 // `covering`, where a range covering the time started, or else its first arrival at or below
@@ -1141,13 +1141,9 @@ function reaches(received: bigint, drops: DropSet, end: End, refused: readonly R
  * above it. Mirrors the Rust `settles`.
  */
 function settles(run: DropRun, budget: number, coverage: Coverage): boolean {
-	return run.stale === undefined || staleSettles(run.start, run.stale, budget, coverage);
-}
-
-// Whether a staleness verdict at `start` judged under `stale` settles a reader; see {@link settles}.
-function staleSettles(start: bigint, stale: number, budget: number, coverage: Coverage): boolean {
-	if (budget > stale || coverage === undefined || coverage.cap !== undefined) return false;
-	const above = start + 1n;
+	if (run.stale === undefined) return true;
+	if (budget > run.stale || coverage === undefined || coverage.cap !== undefined) return false;
+	const above = run.start + 1n;
 	const held = coverage.runs.find((run) => run.start <= above && above < run.end);
 	return held !== undefined && held.end >= UNBOUNDED;
 }
@@ -1666,9 +1662,9 @@ export class Producer {
 			const end = next.done ? UNBOUNDED : next.value.start;
 			return end > start ? { start, end } : undefined;
 		};
-		answeredEmpty = (producer, time, budget, coverage) => {
+		answeredEmpty = (producer, time, budget) => {
 			const reported = producer.#timeStarts.get(time) ?? coveringStart(producer.#timeStarts, time);
-			return reported?.empty !== undefined && staleSettles(time, reported.empty, budget, coverage);
+			return reported?.empty !== undefined && budget <= reported.empty;
 		};
 		timeStartFolds = (producer, time) => {
 			// A reported start places it. An empty answer places nothing, as for `containing`, so a
@@ -5634,7 +5630,7 @@ export class Subscriber {
 	}
 
 	// The runs of `[start, end)` this reader has a verdict on: a drop that settles it, or what its
-	// own fills answered, a group or a refusal, or it gave up. A stale verdict that does not settle it
+	// own fills answered, a group or a refusal within its budget, or it gave up. A stale verdict that does not settle it
 	// is none: the reader asks the group again, and only that answer counts. Mirrors the Rust
 	// `Misses::unanswered`.
 	#verdicts(start: bigint, end: bigint, drift: Drift, coverage: Coverage): Run[] {
@@ -5644,9 +5640,12 @@ export class Subscriber {
 				insertRun(runs, drop.start, drop.end);
 			}
 		}
-		for (const run of [...this.#state.refused.peek(), ...this.#givenUp]) {
+		// A refusal judged stale under a narrower budget is asked again once this reader widened.
+		for (const run of this.#state.refused.peek()) {
+			if (run.stale !== undefined && drift.budget > run.stale) continue;
 			if (run.start < end && start < run.end) insertRun(runs, run.start, run.end);
 		}
+		for (const run of intersect(this.#givenUp, start, end)) insertRun(runs, run.start, run.end);
 		const timeline = this.#state.timeline;
 		for (let i = timelineIndex(timeline, start); i < timeline.length && timeline[i].start < end; i++) {
 			const group = timeline[i];
@@ -5676,7 +5675,7 @@ export class Subscriber {
 			}
 			// Its range had no group to deliver, so the feed lands none of it. Its successor is this
 			// group's or one below: the group containing the time is judged as an owed group at it would be.
-			if (producer && answeredEmpty(producer, time, drift.budget, coverage)) continue;
+			if (producer && answeredEmpty(producer, time, drift.budget)) continue;
 			if (this.#staleAt(time, drift, true)) continue;
 			const folds = producer && timeStartFolds(producer, time);
 			if (folds !== undefined) this.#wakeAt(folds.since(Instant.ZERO).asNanos());

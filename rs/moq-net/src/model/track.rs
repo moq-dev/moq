@@ -1471,15 +1471,16 @@ impl TrackState {
 	}
 
 	/// Whether the range asked from `time`, or the one upstream folded it into, had no group to
-	/// deliver to a reader under `drift`: the live feed brings it none of the range's groups. The
-	/// answer is a staleness verdict, so it holds only for a reader it settles (see [`settles`]).
-	fn answered_empty(&self, time: u64, drift: &Drift) -> bool {
+	/// deliver to a reader within `budget`: the live feed brings it none of the range's groups.
+	/// Upstream judges a range by its terms on the wire, never a reader's local bounds, so a
+	/// reader within the budget it was asked with gets the same answer from it.
+	fn answered_empty(&self, time: u64, budget: Duration) -> bool {
 		let reported = self
 			.time_starts
 			.get(&time)
 			.copied()
 			.or_else(|| self.covering_start(time));
-		matches!(reported, Some(TimeStart { answer: Answer::Empty(asked), .. }) if drift.settles(time, &Hole::stale(asked)))
+		matches!(reported, Some(TimeStart { answer: Answer::Empty(asked), .. }) if budget <= asked)
 	}
 
 	/// The range asked from an earlier time that reaches `time`, which upstream folded a range
@@ -9904,7 +9905,7 @@ impl Cursor {
 					// Its range had no group to deliver, so the feed lands none of it. Its
 					// successor is this group's or one below: the group containing the time is
 					// judged as an owed group at it would be.
-					if state.answered_empty(time, drift)
+					if state.answered_empty(time, drift.budget)
 						|| state.poll_drifted(time, &drift.edge.servable, drift.budget, None, waiter)
 					{
 						continue;
@@ -16444,38 +16445,38 @@ mod test {
 		assert_eq!(read(1500, None), None, "a wider reader may still get 1000");
 	}
 
-	/// A range answered empty is a staleness verdict, so it releases only a reader it settles:
-	/// one capped below the live edge, though within its budget, keeps waiting.
+	/// A range answered empty releases a reader within its budget whatever that reader's own
+	/// bounds: the range's wire end, or none past it, leaves it no group to wait for. Here the
+	/// publisher holds only 66, so a reader asking `Time(10)..Time(20)` and `Time(66)..` reads it.
 	#[test]
 	#[cfg(feature = "async")]
-	fn an_empty_range_releases_no_capped_read() {
-		let budget = Duration::from_millis(100);
+	fn an_empty_bounded_range_holds_back_no_later_range() {
 		let producer = track_producer("test", Info::timed());
 		producer.received();
 		producer.anchored();
-		write_group(&producer, 1850);
-		write_group(&producer, 2000);
-		producer.time_starts([(1000, None, Some(1800))], budget);
-		let read = |cap: u64| {
-			let mut ordered = producer
-				.subscribe(
-					Subscription::default()
-						.with_ranges([Range {
-							start: Anchor::Time(1000),
+		write_group(&producer, 66);
+		producer.time_starts([(10, None, Some(20)), (66, Some(66), None)], Duration::MAX);
+		let mut ordered = producer
+			.subscribe(
+				Subscription::default()
+					.with_ranges([
+						Range {
+							start: Anchor::Time(10),
+							end: Some(Anchor::Time(20)),
+						},
+						Range {
+							start: Anchor::Time(66),
 							end: None,
-						}])
-						.with_delay(Delay::default().with_max(Some(budget))),
-				)
-				.with_range(..cap)
-				.ordered();
-			match ordered.next_group().now_or_never() {
-				Some(Ok(Some(Item::Group(group)))) => Some(group.start),
-				None => None,
-				Some(res) => panic!("not a group: {:?}", res.map(|item| item.is_some())),
-			}
-		};
-		assert_eq!(read(u64::MAX), Some(1850));
-		assert_eq!(read(1900), None, "the cap keeps it from the groups the answer rests on");
+						},
+					])
+					.with_delay(Delay::default().with_max(None)),
+			)
+			.ordered();
+		match ordered.next_group().now_or_never() {
+			Some(Ok(Some(Item::Group(group)))) => assert_eq!(group.start, 66),
+			None => panic!("the empty range holds back 66"),
+			Some(res) => panic!("not a group: {:?}", res.map(|item| item.is_some())),
+		}
 	}
 
 	/// A lite-07 copy places a time start that upstream folded into an earlier range by that
