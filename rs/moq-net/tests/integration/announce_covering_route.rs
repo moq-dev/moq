@@ -113,6 +113,8 @@ async fn remote_ietf_peer_hears_the_covering_route() {
 /// A relay forwards a claim at `room` through a scope granting `room/lobby.chat`, since the
 /// claim covers it, so a request for `room/lobby.chat` is served across both hops. A
 /// `**/*.chat` listing at the far end shows only literal matches, so the claim stays out of it.
+/// lite-07 tells a claim at the scope's region instead, here `room/lobby.chat` itself, which the
+/// listing then matches.
 #[kio::test]
 async fn relays_route_a_covering_claim_that_listings_omit() {
 	let scope: Prefixes = ["lobby.chat", "room/lobby.chat"]
@@ -127,6 +129,14 @@ async fn relays_route_a_covering_claim_that_listings_omit() {
 		"moq-transport-18",
 		"moq-transport-22",
 	] {
+		// lite-07 tells the claim at the scope's region, which the listing matches.
+		let (expect_listed, expect_covering): (&[&str], &[&str]) = match version {
+			"moq-lite-07-wip" => (
+				&["Start lobby.chat", "Start room/lobby.chat"],
+				&["Start lobby.chat", "Start room/lobby.chat"],
+			),
+			_ => (&["Start lobby.chat"], &["Start lobby.chat", "Start room"]),
+		};
 		let version: Version = version.parse().unwrap();
 		let publisher = produce_origin(1);
 		let claim = publisher
@@ -153,10 +163,12 @@ async fn relays_route_a_covering_claim_that_listings_omit() {
 		let mut listed = scoped.routes();
 		let mut covering = scoped.clone().covering().routes();
 		kio::clock::sleep(SETTLE).await;
-		assert_eq!(drain(&mut listed), ["Start lobby.chat"], "{version}");
+		let mut routes = drain(&mut listed);
+		routes.sort();
+		assert_eq!(routes, expect_listed, "{version}");
 		let mut routes = drain(&mut covering);
 		routes.sort();
-		assert_eq!(routes, ["Start lobby.chat", "Start room"], "{version}");
+		assert_eq!(routes, expect_covering, "{version}");
 
 		// The claim is asked once something subscribes beneath it.
 		let broadcast = kio::clock::timeout(SETTLE, scoped.request("room/lobby.chat", None))

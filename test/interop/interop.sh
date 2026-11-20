@@ -997,7 +997,6 @@ rust_connect() {
     esac
 }
 
-
 # moq-cli logs each grant it receives over AUTH at debug, under `moq_net::auth`.
 CLI_LOG="info,${RUST_LOG:+$RUST_LOG,}moq_net::auth=debug"
 
