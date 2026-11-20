@@ -5063,7 +5063,13 @@ impl kio::Task for FrontServe {
 					Event::TrackInfo { track, source, .. } => Some((track.clone(), *source)),
 					_ => None,
 				};
-				for action in self.front.step(event) {
+				// Every transition, for telling how a front ended a track in a run that failed.
+				let traced = tracing::enabled!(tracing::Level::DEBUG).then(|| format!("{event:?}"));
+				let actions = self.front.step(event);
+				if let Some(event) = traced {
+					tracing::debug!(path = %self.path, %event, ?actions, "front step");
+				}
+				for action in actions {
 					match action {
 						Action::Reselect => {
 							let event = self.select();
