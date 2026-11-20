@@ -27,7 +27,7 @@ quest gate just rs tla moq-net/verify/failover/FailoverChain.tla -config rs/moq-
 quest gate just rs tla moq-net/verify/failover/FailoverChain.tla -config rs/moq-net/verify/failover/Mesh.cfg -simulate num=200000 -depth 100
 ```
 
-The first checks every rule with `E` failing over between `A` and `B`, one death, and one switch per relay, with a client that stays, so a deadlock is a playback hang: about 3.8M states. The second lets the client leave at any point, so a deadlock is a relay still holding a copy after it left; leaving is always possible there, which is why it cannot stand in for the first: about 4.1M states. Each takes about three minutes and passes at the sync commit. The third adds `B`'s route through `A`, so the route also moves at the middle hop, after `B`'s track ended too (`Action::Reroute`). It is too large to exhaust (past 139M distinct states at depth 38 after an hour, its queue still growing), so its `Simulate:` line samples 800k random behaviors in about 7 minutes, and Nightly samples new ones each run. An exhaustive run passed every state through depth 37. Before the reroute, a sample that size missed the depth-31 hang that BFS found after about 48M states, so a passing sample is weak evidence: check a change at the middle hop by running it without the `-simulate` arguments for as long as it takes.
+The first checks every rule with `E` failing over between `A` and `B`, one death, and one switch per relay, with a client that stays, so a deadlock is a playback hang: about 6.0M states. The second lets the client leave at any point, so a deadlock is a relay still holding a copy after it left; leaving is always possible there, which is why it cannot stand in for the first: about 6.6M states. Each takes about three minutes and passes at the sync commit. The third adds `B`'s route through `A`, so the route also moves at the middle hop, after `B`'s track ended too (`Action::Reroute`). It is too large to exhaust (past 139M distinct states at depth 38 after an hour, its queue still growing), so its `Simulate:` line samples 800k random behaviors in about 7 minutes, and Nightly samples new ones each run. An exhaustive run passed every state through depth 37. Before the reroute, a sample that size missed the depth-31 hang that BFS found after about 48M states, so a passing sample is weak evidence: check a change at the middle hop by running it without the `-simulate` arguments for as long as it takes.
 
 ## Reading a failure
 
@@ -35,7 +35,7 @@ Follow Reading a failure in `rs/moq-net/verify/README.md`. Replay the path on th
 
 ## Coverage
 
-Sync commit: `61f89568394638553a519d7d8cfc0019385dd3a0`, plus [moq-dev/moq#9048](https://github.com/moq-dev/moq/pull/9048), which mirrored the code since 88572c583e and kept a finished track a read holds past its linger, and [moq-dev/moq#9155](https://github.com/moq-dev/moq/pull/9155), which resumes the newest group past the frames held and lends them to the new copy (`Resume`, `Lend`). Run `git log 61f8956839.. -- rs/moq-net/src/model/resume.rs rs/moq-net/src/model/front.rs rs/moq-net/src/model/origin.rs rs/moq-net/src/model/track.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
+Sync commit: `61f89568394638553a519d7d8cfc0019385dd3a0`, plus [moq-dev/moq#9048](https://github.com/moq-dev/moq/pull/9048), which mirrored the code since 88572c583e and kept a finished track a read holds past its linger, and [moq-dev/moq#9155](https://github.com/moq-dev/moq/pull/9155), which resumes the newest group past the frames held and lends them to the new copy (`Resume`, `Lend`), and the splice-stall fix, which holds a track while a dead relay's route still shows, since a session fails its copies before it closes their sources (`Shows`, `Withdraw`). Run `git log 61f8956839.. -- rs/moq-net/src/model/resume.rs rs/moq-net/src/model/front.rs rs/moq-net/src/model/origin.rs rs/moq-net/src/model/track.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
 
 | Code | Model |
 | --- | --- |
@@ -47,6 +47,7 @@ Sync commit: `61f89568394638553a519d7d8cfc0019385dd3a0`, plus [moq-dev/moq#9048]
 | `rs/moq-net/src/model/resume.rs` `Recover::poll_fetch`, `Fetching`; `rs/moq-net/src/model/track.rs` `fetch_group` | `Ask` |
 | `rs/moq-net/src/model/front.rs` `track_ended`, `Action::Finish`; `rs/moq-net/src/model/origin.rs` `TrackIo::end` | `FrontFinish`, `Whole` |
 | `rs/moq-net/src/model/front.rs` failover and its unroutable end, `Action::Reroute` | `Switch`, `FrontFail` |
+| `rs/moq-net/src/model/front.rs` `Front::closing`; `rs/moq-net/src/error.rs` `Error::session_ended` | `Shows`, `Withdraw`, `FrontFail` |
 | `rs/moq-net/src/model/resume.rs` `Route::answering`, `Phase::Finished` | `Answering`, `LetGo` |
 | `rs/moq-net/src/model/front.rs` `Action::Forget`; `rs/moq-net/src/model/track.rs` `TrackWeak::is_held`, `TrackWeak::poll_held_changed` | `Forget`, `Reads` |
 
