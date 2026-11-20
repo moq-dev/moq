@@ -10226,8 +10226,9 @@ impl Cursor {
 
 	/// Pass every key below `end` for good, as an ordered read whose bounded window ran out
 	/// at `end`, or at its cap below that: a group created there later is late, so later reads
-	/// end at once too.
+	/// end at once too. The groups it stepped over as stale are given up for good with them.
 	fn pass_end(&mut self, end: u64) {
+		self.commit_seek_stale(end);
 		self.skip_ordered(end);
 		self.record.delivered.forget_below(end);
 	}
@@ -10760,20 +10761,7 @@ impl Subscriber {
 				polled
 			}
 			Inner::Resume(resume, logical) => {
-				let polled = resume.poll_peek_group(ordered, self.parks, &logical.record.delivered, waiter);
-				// As a plain cursor's [`Cursor::pass_end`], below the cap: a read that ran out under
-				// a lowered cap, its window or the track having ended, still owes what lies above it.
-				if ordered
-					&& matches!(polled, Poll::Ready(Ok(None)))
-					&& let Some(end) = resume.window_end()
-				{
-					let end = resume.bounds().end.map_or(end, |cap| cap.min(end));
-					if !logical.record.delivered.covers(0..end) {
-						// What it handed out moved, which nothing it parked on notifies.
-						resume.disarm();
-						logical.record.delivered.forget_below(end);
-					}
-				}
+				let polled = resume.poll_peek_group(ordered, self.parks, &mut logical.record.delivered, waiter);
 				polled.map(|res| res.map(|candidate| candidate.map(|candidate| Reserved::Resume(Box::new(candidate)))))
 			}
 		}
@@ -11975,7 +11963,8 @@ impl Ordered {
 	/// accounted for, as for [`Subscriber::poll_recv_group`]. On a locally produced track that
 	/// includes a key below a group the producer created, which this read hands out first.
 	/// Later reads return `Ok(None)` immediately too; widening the ranges with
-	/// [`Self::update`] resumes reading above the last key returned.
+	/// [`Self::update`] resumes reading above the end the read passed (or the cap, when that
+	/// was lower), so a group created below that end afterward is never handed out.
 	///
 	/// Returns `Ok(Some(item))` when a group or gap is available, `Ok(None)` when the track is
 	/// finished (including an abort after its declared end settled, see [`Producer::abort`])
@@ -21080,6 +21069,29 @@ mod test {
 			.subscribe(Subscription::default().with_delay(Delay::default().with_max(budget)))
 			.ordered();
 		assert_eq!(items(&mut ordered), ["gap 0..1 (old)", "group 1", "group 2", "pending"]);
+	}
+
+	/// An ordered read whose bounded window runs out past a group it stepped over as stale
+	/// reports that gap before its end, and counts it: passing the end gives the group up.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_ordered_read_ended_past_a_stale_group_reports_it_first() {
+		let producer = track_producer("test", Info::timed());
+		elapse(&producer, Duration::ZERO);
+		let mut group = producer.create_group(group::Info { start: 0 }).unwrap();
+		group.write_frame(Timestamp::ZERO, &b"x"[..]).unwrap();
+		group.finish_at(10).unwrap();
+		elapse(&producer, Duration::from_millis(100));
+		put(&producer, 100, Some(100));
+		let mut ordered = producer
+			.subscribe(
+				Subscription::default()
+					.with_delay(Delay::default().with_max(Duration::from_millis(50)))
+					.with_ranges([Range::groups(0..50)]),
+			)
+			.ordered();
+		assert_eq!(items(&mut ordered), ["gap 0..1 (old)"]);
+		assert!(matches!(ordered.next_item().now_or_never(), Some(Ok(None))));
 	}
 
 	/// A final drop replaces the part of a stale gap it covers while that gap still waits, so

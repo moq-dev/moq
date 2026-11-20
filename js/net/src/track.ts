@@ -5359,6 +5359,17 @@ export class Subscriber {
 		if (window === undefined) return;
 		const cap = this.#cursor.peek().end;
 		const end = cap === undefined ? window : min(cap, window);
+		// Passing the keys hands them out as far as #delivered knows, so first take what the copies
+		// gave up there, as a group handed out does.
+		if (this.#resume) {
+			for (
+				let drop = this.#resume.tryDrop(this.#delivered, end);
+				drop;
+				drop = this.#resume.tryDrop(this.#delivered, end)
+			) {
+				this.#queueResumedDrop(drop);
+			}
+		}
 		const floor = this.#delivered.runEnd(0n) ?? 0n;
 		this.#delivered.forgetBelow(end);
 		const forgot = this.#delivered.runEnd(0n) ?? 0n;
@@ -5863,7 +5874,9 @@ export class Ordered {
 	 * {@link withRange}. Like {@link Subscriber.recvGroup}, a read whose ranges all end
 	 * finishes once nothing in them is left to deliver; on a local track that includes a key
 	 * below a group the producer created, which this read hands out first. Later reads return `undefined`
-	 * immediately too; widening the ranges with {@link update} reads on above the last key returned.
+	 * immediately too; widening the ranges with {@link update} reads on above the end the read
+	 * passed (or the cap, when that was lower), so a group created below that end afterward is
+	 * never handed out.
 	 */
 	nextGroup(): Promise<GroupConsumer | undefined> {
 		return ordered_.nextGroup(this.#subscriber);

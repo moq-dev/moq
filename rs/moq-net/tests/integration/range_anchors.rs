@@ -153,7 +153,8 @@ async fn read_as(version: Option<&str>, range: Range, how: Read) -> Result<Group
 			(_, Some(arrival)) => kio::clock::timeout(TIMEOUT, arrival.recv_group()).await,
 			_ => unreachable!(),
 		};
-		if let Ok(Ok(Some(group))) = next {
+		// An error or a wait fails the test; a group handed out shows in the groups read.
+		if let Some(group) = next.expect("an ended read answers at once")? {
 			read.groups.push(group.start);
 		}
 	}

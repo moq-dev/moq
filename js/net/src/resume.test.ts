@@ -4863,3 +4863,30 @@ test("a time end between two groups ends an ordered read through a front at the 
 	handle.close();
 	source.close();
 });
+
+// An ordered read through a front that ends past a group its copy gave up, as one missing its head
+// with no fill to ask, returns that gap before the end.
+test("an ordered read through a front returns the gap its copy gave up before ending", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const ta = defined(a.createTrack("seq", { maxAge: null }));
+	const tail = hooks.receiveGroup(ta, { start: 0n, offset: 1 });
+	tail.writeFrame({ payload: enc.encode("0.1"), timestamp: Timestamp.unscaled(0n) });
+	tail.finish();
+	const past = ta.createGroup(2n);
+	past.writeFrame({ payload: enc.encode("2.0"), timestamp: Timestamp.unscaled(2n) });
+	past.finish();
+	front.serve(a.consume());
+	const ordered = front.consumer
+		.track("seq")
+		.subscribe({ delay: { max: null }, ranges: [{ start: { time: 0n }, end: { time: 1n } }] })
+		.ordered();
+	try {
+		expect(await ordered.nextItem()).toMatchObject({ kind: "gap", start: 0n, end: 1n });
+		expect(await ordered.nextItem()).toBeUndefined();
+	} finally {
+		ordered.close();
+		front.consumer.close();
+		a.close();
+	}
+});

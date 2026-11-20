@@ -1119,11 +1119,16 @@ impl Subscriber {
 	/// deadline. What the reader changes itself (its range, what it handed out) disarms it.
 	/// Another handle's read that follows the route or the preferences first only applies
 	/// a change that already woke this one.
+	///
+	/// An `ordered` read that ends passes every key below its window's end, or its cap below
+	/// that, in `delivered` for good, as [`track::Cursor::pass_end`] does: a group created
+	/// there later is late. The end is the one the read ended at, taken under the same lock,
+	/// so a range widened meanwhile is still read.
 	pub(super) fn poll_peek_group(
 		&mut self,
 		ordered: bool,
 		parks: bool,
-		delivered: &Delivered,
+		delivered: &mut Delivered,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<Candidate>>> {
 		let walk = Walk::new(ordered);
@@ -1131,19 +1136,38 @@ impl Subscriber {
 			return Poll::Pending;
 		}
 		let mut idle = Idle::start(&mut self.idle, waiter);
-		let polled = {
+		let (polled, passed) = {
 			let waiter = idle.waiter();
 			let mut reader = self.reader();
 			// Registered before looking, so a route change from here on wakes the read,
 			// even on a path that parks without looking at the route.
 			reader.route.register(waiter);
-			loop {
+			let polled = loop {
 				if let Some(result) = reader.poll_lowest(ordered, parks, delivered, waiter) {
 					break result;
 				}
-			}
+			};
+			// Below the cap: a read that ran out under a lowered cap, its window or the track
+			// having ended, still owes what lies above it.
+			let cap = reader.groups.1;
+			let window = reader.window();
+			let end = window.end().filter(|_| !window.is_pending());
+			let passed = match (ordered, &polled, end) {
+				(true, Poll::Ready(Ok(None)), Some(end)) => {
+					let end = cap.map_or(end, |cap| cap.min(end));
+					let moved = !delivered.covers(0..end);
+					delivered.forget_below(end);
+					moved
+				}
+				_ => false,
+			};
+			(polled, passed)
 		};
 		idle.finish(&mut self.idle, walk, polled.is_pending());
+		// What it handed out moved, which nothing it parked on notifies.
+		if passed {
+			Idle::disarm(&mut self.idle);
+		}
 		polled
 	}
 
@@ -1388,13 +1412,6 @@ impl Subscriber {
 		let mut reader = self.reader();
 		reader.learn_end(None);
 		reader.declared_error.clone()
-	}
-
-	/// The exclusive end of the reader's ranges, once they all end and resolved.
-	pub(super) fn window_end(&self) -> Option<u64> {
-		let mut reader = self.reader();
-		let window = reader.window();
-		window.end().filter(|_| !window.is_pending())
 	}
 
 	/// The local group filter, as [`track::Subscriber::poll_largest`] reports within it.
@@ -6628,6 +6645,45 @@ mod test {
 		assert_eq!(read(&mut sub), ["group 6"]);
 	}
 
+	/// A front's ordered read that ends past a group its copy gave up, as one missing its head
+	/// with no fill to ask, returns that gap before the end.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_front_returns_the_gap_its_copy_gave_up_before_ending() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		let track::Received::Group(mut rest) = a.create_group_at(group::Info { start: 0 }, 1).unwrap() else {
+			panic!("nothing else holds the group");
+		};
+		rest.write_frame(ts(0), b"x".as_ref()).unwrap();
+		rest.finish().unwrap();
+		write(&a, 2);
+		routes.serve(a.consume());
+		let mut sub = logical
+			.consume()
+			.subscribe(
+				Subscription::default()
+					.with_delay(Delay::default().with_max(HOUR))
+					.with_ranges([track::Range::groups(0..2)]),
+			)
+			.now_or_never()
+			.unwrap()
+			.unwrap()
+			.ordered();
+		let waiter = kio::Waiter::noop();
+		let mut items = Vec::new();
+		let end = loop {
+			match sub.poll_next_item(&waiter) {
+				Poll::Ready(Ok(Some(track::Item::Group(group)))) => items.push(format!("group {}", group.start)),
+				Poll::Ready(Ok(Some(track::Item::Gap { range, .. }))) => items.push(format!("gap {range:?}")),
+				end => break end,
+			}
+		};
+		assert_eq!(items, ["gap 0..1"]);
+		assert!(matches!(end, Poll::Ready(Ok(None))), "the read ends");
+	}
+
 	/// A front served by another front reports a late arrival on the inner copy too.
 	#[test]
 	fn a_nested_front_reports_a_late_arrival_as_a_gap() {
@@ -9397,8 +9453,8 @@ mod test {
 		};
 		let preferences = track::Preferences::from(ranges(5));
 		let mut sub = routes.consume().subscribe(preferences.clone());
-		let delivered = Delivered::default();
-		let Poll::Ready(Ok(Some(candidate))) = sub.poll_peek_group(false, false, &delivered, &kio::Waiter::noop())
+		let mut delivered = Delivered::default();
+		let Poll::Ready(Ok(Some(candidate))) = sub.poll_peek_group(false, false, &mut delivered, &kio::Waiter::noop())
 		else {
 			panic!("a group to reserve")
 		};

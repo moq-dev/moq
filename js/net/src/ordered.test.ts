@@ -6,7 +6,7 @@ import { Manual } from "@moq/clock/test";
 import { StreamCode, StreamError } from "./error.ts";
 import { hooks, staleHole } from "./internal.ts";
 import { manual, settlesWithin, textFrame } from "./mock.ts";
-import { Timestamp } from "./time.ts";
+import { Timescale, Timestamp } from "./time.ts";
 import { type Ordered, Producer as TrackProducer } from "./track.ts";
 
 // A session-fed copy owes holes; an in-process producer does not.
@@ -465,3 +465,20 @@ test("a time end between received groups ends an ordered read only once the skip
 	producer.skipGroups(1001n, 2000n);
 	expect(await end).toBeUndefined();
 });
+
+// Mirrors the Rust `an_ordered_read_ended_past_a_stale_group_reports_it_first`.
+test("an ordered read whose window ends past a group it passed as stale reports it first", () =>
+	withClock((clock) => {
+		const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
+		const first = producer.createGroup(0n);
+		first.writeFrame(textFrame("x", Timestamp.fromMillis(0)));
+		first.finishAt(10n);
+		clock.jump(Duration.millis(100));
+		put(producer, 100n);
+		const ordered = producer
+			.subscribe({ delay: { max: Duration.millis(50) }, ranges: [{ start: { time: 0n }, end: { time: 49n } }] })
+			.ordered();
+		expect(items(ordered)).toEqual(["gap 0..1 (old)"]);
+		expect(ordered.tryNextItem()).toBeUndefined();
+		expect(ordered.tryNextGroup()).toBeUndefined();
+	}));
