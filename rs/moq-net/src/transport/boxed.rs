@@ -966,7 +966,10 @@ impl<T: poll::RecvStream + Send + Sync> ErasedRecv for Budgeted<T> {
 			true => pacing.window,
 			// A shaped stream holds a stream window less once paused, so its group holds it
 			// instead, and a paced reader has as much buffered ahead as before.
-			false => (pacing.window + pacing.stream).min(crate::model::pace::AHEAD),
+			false => pacing
+				.window
+				.saturating_add(pacing.stream)
+				.min(crate::model::pace::AHEAD),
 		}
 	}
 

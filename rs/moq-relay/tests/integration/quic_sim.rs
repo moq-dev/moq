@@ -357,6 +357,14 @@ async fn bulk(tracks: usize, chunk: usize, read: usize) {
 				// A consumer draining at about 64 MB/s, slower than the writer.
 				kio::clock::sleep(Duration::from_micros(chunk as u64 / 64)).await;
 			}
+			// A group read whole ends cleanly right after, never with more or a failure.
+			if read == BULK {
+				let end = group
+					.read_frame()
+					.await
+					.unwrap_or_else(|err| panic!("{name} end: {err}"));
+				assert!(end.is_none(), "{name} carries more than {BULK} bytes");
+			}
 		}
 	};
 	let writes = futures::future::join_all(sources.into_iter().map(write));

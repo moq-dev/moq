@@ -505,7 +505,8 @@ impl Stream<'_> {
 	/// A reader about to stop taking shrinks its window first, so the stream holds little
 	/// while it waits. Credit already granted stays granted, so a smaller window holds only
 	/// once the reader takes what was granted before it. A larger window, up to the
-	/// connection's, grants its credit right away. A reader waiting on a larger unit still
+	/// connection's, grants the added credit once it is an eighth of the window, as a read
+	/// would, or at once when a reader waits for it. A reader waiting on a larger unit still
 	/// gets room for it.
 	pub fn set_window(&mut self, window: u64) -> u64 {
 		let stream_receive_window = self.state.stream_receive_window;
