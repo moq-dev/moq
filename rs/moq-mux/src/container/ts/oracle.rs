@@ -85,27 +85,53 @@ impl<'a> Admitted<'a> {
 	/// Grade what a release wrote, and when, against the admitted interval it opened.
 	///
 	/// The release must open on the first object of a group, write every object at its exact
-	/// position after that in order and stamped as published, and write each within `tolerance`
-	/// of its PCR time on the clock its first object set.
+	/// position after that in order, whole, its first run stamped as published, and write each
+	/// run within `tolerance` of its PCR time on the clock its first object set.
 	pub fn grade(&self, released: &[(Instant, Frame)], tolerance: Duration) -> Loss {
 		let Some((start, opened)) = released.first() else {
 			panic!("the release wrote nothing");
 		};
-		let mut matched = Vec::with_capacity(released.len());
+		let mut matched: Vec<usize> = Vec::with_capacity(released.len());
+		let mut runs = Vec::with_capacity(released.len());
 		let mut next = 0;
+		let mut written = 0;
 		for (i, (_, frame)) in released.iter().enumerate() {
+			if let Some(&found) = matched.last()
+				&& written < self.objects[found].payload.len()
+			{
+				let at = self.offsets[found] + written;
+				assert!(
+					written + frame.payload.len() <= self.objects[found].payload.len()
+						&& self.source[at..].starts_with(&frame.payload),
+					"released run {i} does not continue object {found} at packet {}",
+					at / PACKET
+				);
+				written += frame.payload.len();
+				runs.push(found);
+				continue;
+			}
 			let micros = frame.timestamp.as_micros().unwrap() as u64;
 			let Some(found) = (next..self.objects.len()).find(|&j| self.objects[j].micros == micros) else {
-				panic!("released object {i} at {micros} us is no published object after the one before it");
+				panic!("released run {i} at {micros} us opens no published object after the one before it");
 			};
 			let offset = self.offsets[found];
 			assert!(
-				self.source[offset..].starts_with(&frame.payload) && frame.payload == self.objects[found].payload,
-				"released object {i} is not the source's packets {}.. verbatim",
+				frame.payload.len() <= self.objects[found].payload.len()
+					&& self.source[offset..].starts_with(&frame.payload),
+				"released run {i} is not the source's packets {}.. verbatim",
 				offset / PACKET
 			);
 			matched.push(found);
+			runs.push(found);
+			written = frame.payload.len();
 			next = found + 1;
+		}
+		if let Some(&last) = matched.last() {
+			assert_eq!(
+				written,
+				self.objects[last].payload.len(),
+				"object {last} goes out whole"
+			);
 		}
 
 		let first = matched[0];
@@ -116,7 +142,7 @@ impl<'a> Admitted<'a> {
 		);
 
 		let origin = opened.timestamp.as_micros().unwrap() as i128;
-		for ((at, frame), j) in released.iter().zip(&matched) {
+		for ((at, frame), j) in released.iter().zip(&runs) {
 			let out = at.duration_since(*start).as_micros() as i128;
 			let lag = out - (frame.timestamp.as_micros().unwrap() as i128 - origin);
 			assert!(

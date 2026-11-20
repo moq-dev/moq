@@ -253,6 +253,35 @@ async fn a_capture_is_released_byte_identical_on_its_own_pcr() {
 	}
 }
 
+/// Each object goes out across its PCR interval, a UDP datagram's worth at a time, not in one
+/// burst: only one whose successor is more than 100 ms on, or the last, is written whole.
+#[tokio::test(start_paused = true)]
+async fn an_object_is_spread_across_its_pcr_interval() {
+	const RUN: usize = 7 * 188;
+	let imported = import(KYRION).await;
+	let source = crate::source::announced(&imported.consumer).await;
+	let release = Release::new(source, CatalogFormat::Hang, RECORDING)
+		.await
+		.unwrap()
+		.with_replay();
+	let (released, _) = drain(release).await;
+
+	let admitted = Admitted::new(KYRION, &imported.objects);
+	assert_eq!(admitted.grade(&released, TOLERANCE), Loss::default());
+	let spread = imported
+		.objects
+		.windows(2)
+		.filter(|pair| pair[0].payload.len() > RUN && pair[1].micros - pair[0].micros <= 100_000)
+		.count();
+	assert!(spread > 0, "the capture has objects to spread");
+	let bursts = released.iter().filter(|(_, run)| run.payload.len() > RUN).count();
+	assert!(
+		bursts <= imported.objects.len() - spread,
+		"{bursts} writes over {RUN} bytes, {spread} of {} objects to spread",
+		imported.objects.len()
+	);
+}
+
 /// The capture, then the capture again with its PCRs moved by `step` 90 kHz ticks around the
 /// 33-bit wrap and its first PCR flagged as a discontinuity when `flagged`.
 fn stepped(step: i64, flagged: bool) -> Vec<u8> {
@@ -528,6 +557,20 @@ fn pids(data: &[u8]) -> std::collections::BTreeSet<u16> {
 		.collect()
 }
 
+/// The next `len` bytes `release` writes, run by run.
+async fn rest(release: &mut Release, len: usize) -> Vec<u8> {
+	let mut out = Vec::with_capacity(len);
+	while out.len() < len {
+		let run = kio::clock::timeout(STALL, release.next())
+			.await
+			.expect("every arrived object is released")
+			.unwrap()
+			.unwrap();
+		out.extend_from_slice(&run.payload);
+	}
+	out
+}
+
 /// Objects received while a sink stalls stay in the source and retain their arrival bound.
 #[tokio::test(start_paused = true)]
 async fn a_backlog_stays_in_the_source_until_due() {
@@ -544,23 +587,24 @@ async fn a_backlog_stays_in_the_source_until_due() {
 		});
 		let source = crate::source::announced(&republished.consumer).await;
 		let mut release = Release::new(source, CatalogFormat::Hang, delay).await.unwrap();
-		let first = release.next().await.unwrap().unwrap();
+		let opened = release.next().await.unwrap().unwrap();
 		let first = objects
 			.iter()
-			.position(|object| object.payload == first.payload)
+			.position(|object| object.micros == opened.timestamp.as_micros().unwrap() as u64)
 			.unwrap();
+		let remainder = rest(&mut release, objects[first].payload.len() - opened.payload.len()).await;
+		assert!(
+			[&opened.payload[..], &remainder].concat() == objects[first].payload,
+			"{delay:?}: the first object"
+		);
 		let acquired = release.buffered();
 
 		// The publisher keeps its capture pace while the sink stops polling. Sleeping
 		// on the paused clock lets each publication wake at its own scheduled instant.
 		kio::clock::sleep(RECORDING).await;
 		for (index, object) in objects.iter().enumerate().skip(first + 1) {
-			let output = kio::clock::timeout(STALL, release.next())
-				.await
-				.expect("every arrived object is released")
-				.unwrap()
-				.unwrap();
-			assert!(output.payload == object.payload, "{delay:?}: object {index}");
+			let output = rest(&mut release, object.payload.len()).await;
+			assert!(output == object.payload, "{delay:?}: object {index}");
 			assert!(
 				release.buffered() <= acquired.max(1),
 				"{delay:?}: {} objects buffered after acquiring with {acquired}",
