@@ -214,6 +214,7 @@ the version that ships them.
 ## Required
 
 - [Cache-aware multicast](/quest/m2/multicast/README.md) - lite-07 carries the redesigned route layer: routes to forwarding nodes, no holds or doubt, claims crossing trust boundaries by a chain, and no Route Key
+- [A lite-07 claim's reach follows every route that serves it](/quest/m2/lite07-claim-reach-routes.md) - a peer is never left without a claim some route can serve, nor shown one none can (maintainer, 2026-11-20)
 
 ## Related
 

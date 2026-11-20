@@ -19,6 +19,11 @@ only at the claim's next change, grant change, or edit:
 Found by the local review of [moq-dev/moq#9229](https://github.com/moq-dev/moq/pull/9229),
 which carried the reach to `Answer::shows`.
 
+Decided 2026-11-20 (maintainer, on #9229): ✅ the lite-07 cut waits on this
+quest, and #9229 lands without it (rejected: fixing it after the cut; holding
+#9229 until it is fixed). #9229 can leave hidden a claim a costlier route of
+its instance could serve, which main showed.
+
 - Recommended: carry the reach with the claim inside the node (on its `Attr`, never on the
   wire), so the node tells every answer when it changes and the origin lookup goes. The
   origin's own claims take it from the feeder cursor (`OwnClaims` in
