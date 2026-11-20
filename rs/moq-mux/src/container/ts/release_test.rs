@@ -282,6 +282,42 @@ async fn an_object_is_spread_across_its_pcr_interval() {
 	);
 }
 
+/// The oracle times each run from the source, not from its stamp: the same runs written in one
+/// burst at their object's time fail it, stamped as released or with the object's time.
+#[tokio::test(start_paused = true)]
+async fn runs_written_in_one_burst_fail_the_grade() {
+	let imported = import(KYRION).await;
+	let source = crate::source::announced(&imported.consumer).await;
+	let release = Release::new(source, CatalogFormat::Hang, RECORDING)
+		.await
+		.unwrap()
+		.with_replay();
+	let (released, _) = drain(release).await;
+	let admitted = Admitted::new(KYRION, &imported.objects);
+
+	for restamp in [false, true] {
+		let mut burst = released.clone();
+		let mut opening = burst[0].clone();
+		for (at, run) in &mut burst {
+			let micros = run.timestamp.as_micros().unwrap() as u64;
+			if imported.objects.iter().any(|object| object.micros == micros) {
+				opening = (*at, run.clone());
+				continue;
+			}
+			*at = opening.0;
+			if restamp {
+				run.timestamp = opening.1.timestamp;
+			}
+		}
+		let graded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| admitted.grade(&burst, TOLERANCE)));
+		assert!(
+			graded.is_err(),
+			"a burst stamped {}",
+			if restamp { "as its object" } else { "as released" }
+		);
+	}
+}
+
 /// The capture, then the capture again with its PCRs moved by `step` 90 kHz ticks around the
 /// 33-bit wrap and its first PCR flagged as a discontinuity when `flagged`.
 fn stepped(step: i64, flagged: bool) -> Vec<u8> {

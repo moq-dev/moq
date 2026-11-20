@@ -85,13 +85,16 @@ impl<'a> Admitted<'a> {
 	/// Grade what a release wrote, and when, against the admitted interval it opened.
 	///
 	/// The release must open on the first object of a group, write every object at its exact
-	/// position after that in order, whole, its first run stamped as published, and write each
-	/// run within `tolerance` of its PCR time on the clock its first object set.
+	/// position after that in order, whole, its first run stamped as published. Each run must be
+	/// stamped, and written on the clock its first object set, within `tolerance` of its first
+	/// byte's time: the object's PCR time, and for a later run the share of the way to the next
+	/// object written that its bytes before it are of the object's.
 	pub fn grade(&self, released: &[(Instant, Frame)], tolerance: Duration) -> Loss {
 		let Some((start, opened)) = released.first() else {
 			panic!("the release wrote nothing");
 		};
 		let mut matched: Vec<usize> = Vec::with_capacity(released.len());
+		// Each run's object, and its first byte's offset in it.
 		let mut runs = Vec::with_capacity(released.len());
 		let mut next = 0;
 		let mut written = 0;
@@ -106,8 +109,8 @@ impl<'a> Admitted<'a> {
 					"released run {i} does not continue object {found} at packet {}",
 					at / PACKET
 				);
+				runs.push((matched.len() - 1, written));
 				written += frame.payload.len();
-				runs.push(found);
 				continue;
 			}
 			let micros = frame.timestamp.as_micros().unwrap() as u64;
@@ -122,7 +125,7 @@ impl<'a> Admitted<'a> {
 				offset / PACKET
 			);
 			matched.push(found);
-			runs.push(found);
+			runs.push((matched.len() - 1, 0));
 			written = frame.payload.len();
 			next = found + 1;
 		}
@@ -142,12 +145,26 @@ impl<'a> Admitted<'a> {
 		);
 
 		let origin = opened.timestamp.as_micros().unwrap() as i128;
-		for ((at, frame), j) in released.iter().zip(&runs) {
-			let out = at.duration_since(*start).as_micros() as i128;
-			let lag = out - (frame.timestamp.as_micros().unwrap() as i128 - origin);
+		for (i, ((at, frame), &(m, offset))) in released.iter().zip(&runs).enumerate() {
+			let j = matched[m];
+			let object = &self.objects[j];
+			let mut due = object.micros as i128;
+			if offset > 0 {
+				let Some(&next) = matched.get(m + 1) else {
+					panic!("released run {i} spreads object {j}, which no object follows");
+				};
+				let span = self.objects[next].micros as i128 - due;
+				due += span * offset as i128 / object.payload.len() as i128;
+			}
+			let stamp = frame.timestamp.as_micros().unwrap() as i128 - due;
+			assert!(
+				stamp.unsigned_abs() <= tolerance.as_micros(),
+				"released run {i} of object {j} is stamped {stamp} us off its first byte's time"
+			);
+			let lag = at.duration_since(*start).as_micros() as i128 - (due - origin);
 			assert!(
 				lag.unsigned_abs() <= tolerance.as_micros(),
-				"object {j} goes out {lag} us off its PCR time"
+				"released run {i} of object {j} goes out {lag} us off its first byte's time"
 			);
 		}
 
