@@ -1864,7 +1864,7 @@ mod tests {
 	/// decoded, so only a group holding nothing at all is reaped.
 	#[tokio::test(start_paused = true)]
 	async fn a_looked_ahead_endpoint_outlives_its_groups_abort() {
-		let mut track = track_producer("gaps", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let track = track_producer("gaps", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		let subscription = track.subscribe(
 			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10))),
 		);
@@ -1881,7 +1881,10 @@ mod tests {
 				}],
 			)
 			.unwrap();
-		assert!(matches!(consumer.read().await.unwrap(), Some(Read::Frame { group: 0, .. })));
+		assert!(matches!(
+			consumer.read().await.unwrap(),
+			Some(Read::Frame { group: 0, .. })
+		));
 		let mut next = track.create_group(moq_net::group::Info { start: 1 }).unwrap();
 		write_marker(&mut next, ts(20_000));
 		// Group 0 is still open, so the read blocks and looks ahead into group 1.
