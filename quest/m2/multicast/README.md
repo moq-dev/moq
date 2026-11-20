@@ -33,14 +33,12 @@ Its proof is
 `rs/moq-net/verify/route-algebra/`, and the quests written against the old
 wire were retargeted or deleted.
 [moq-dev/moq#9111](https://github.com/moq-dev/moq/pull/9111) ran the cases no
-test covered on real sessions, and
-[moq-dev/moq#9154](https://github.com/moq-dev/moq/pull/9154) fixed the first
-flaw it found: a front now rides through a lost claim's debounce, so a reader
-resumes on a detour learned after its session closed. The lite-07 cut still
-waits on this epic's children, the other flaw,
-[a route moving behind one next hop resending a group](/quest/m2/multicast/resend.md),
-whose fix changes the wire,
-and a flaw the mesh replay found,
+test covered on real sessions. It found two flaws, both now fixed:
+[moq-dev/moq#9154](https://github.com/moq-dev/moq/pull/9154) lets a front ride
+through a lost claim's debounce, so a reader resumes on a detour learned after
+its session closed, and a route moving behind one next hop no longer resends a
+group, since a lite-07 range may start partway through one. The lite-07 cut
+still waits on this epic's children, a flaw the mesh replay found,
 [a lite-07 reader its relay refuses as unroutable and never re-asks](/quest/m2/multicast/splice-stall.md);
 and on
 [route layer acceptance](/quest/m2/cluster-routes/acceptance.md)'s

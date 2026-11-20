@@ -2035,6 +2035,46 @@ test("lite draft-06: a queued frame floor applies before the next group pop", as
 	}
 });
 
+// A lite-07 update adding a range that starts partway through a group serves that group from its
+// frame, and one that adds a second range covering the next Position's group serves it whole: the
+// frame starts follow the live ranges by Range ID, edit by edit.
+test("lite-07 an update moves frame starts with the live ranges", async () => {
+	const version = Version.DRAFT_07;
+	const sub = await servedSubscription({
+		version,
+		frames: ["a", "b", "c"],
+		maxAge: Duration.millis(3_600_000),
+		ranges: [{ start: { absolute: 0n }, end: { absolute: 1n } }],
+	});
+	try {
+		sub.serve(0n);
+		expect(await sub.servedGroup()).toMatchObject({ key: 0n, frameStart: 0, payloads: ["a", "b", "c"] });
+
+		// Range ID 1 resumes group 1 past its first two frames.
+		await replayUpdate({ priority: 0, ranges: [{ start: { absolute: 1n, frame: 2 } }] }).encode(
+			sub.client.writer,
+			version,
+		);
+		// An update that adds an unrelated range leaves that Position live.
+		await replayUpdate({ priority: 0, ranges: [{ start: { absolute: 9n } }] }).encode(sub.client.writer, version);
+		await flush();
+		sub.serve(1n);
+		expect(await sub.servedGroup()).toMatchObject({ key: 1n, frameStart: 2, payloads: ["c"] });
+
+		// Retired, and replaced by a Position on group 2 that another range also covers: whole.
+		await replayUpdate({
+			priority: 0,
+			remove: [1n],
+			ranges: [{ start: { absolute: 2n, frame: 1 } }, { start: { time: 2n } }],
+		}).encode(sub.client.writer, version);
+		await flush();
+		sub.serve(2n);
+		expect(await sub.servedGroup()).toMatchObject({ key: 2n, frameStart: 0, payloads: ["a", "b", "c"] });
+	} finally {
+		await sub.close();
+	}
+});
+
 // The update and group are both ready when the write unblocks. Control is drained first, then
 // the group is popped and positioned synchronously under the new frame cap.
 test("lite draft-06: a queued frame update applies before the next group pop", async () => {
