@@ -4269,7 +4269,9 @@ test("a lite-07 claim above what the grant matches is shown", async () => {
 				msgs.push(msg);
 				if (msg.status === "synced") break;
 			}
-			const told = msgs.flatMap((msg) => (msg.status === "start" ? [`${msg.suffix} above ${msg.claim.above}`] : []));
+			const told = msgs.flatMap((msg) =>
+				msg.status === "start" ? [`${msg.suffix} above ${msg.claim.above}`] : [],
+			);
 			expect(told).toEqual(["a above 0"]);
 		} finally {
 			for (const broadcast of broadcasts) broadcast.close();
