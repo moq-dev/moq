@@ -1689,17 +1689,18 @@ run_finish_publisher() {
 # leaving a WebSocket fallback that won a slow race would move it to a second session mid-read.
 # shellcheck disable=SC2329  # invoked indirectly via harness_spawn
 run_finish_gst() {
-    local broadcast="$1" url="$2" out="$3" version pid deadline budget count
+    local broadcast="$1" url="$2" out="$3" version pid window deadline count
     version=$(cell_version gst)
-    # The read phase's deadline, as the other readers get; SECONDS counts whole seconds.
-    deadline=$((SECONDS + ${TIMEOUT%.*} * 2))
-    [[ "$TIMEOUT" != *.* ]] || deadline=$((deadline + 2))
+    # The read phase, as the other readers get; SECONDS counts whole seconds, so a fractional
+    # timeout rounds up.
+    window=$((${TIMEOUT%.*} * 2))
+    [[ "$TIMEOUT" != *.* ]] || window=$((window + 2))
+    deadline=$((SECONDS + window))
     # A finished track's last group ages out its max delay after it ends, so moqsrc's 1 s default
     # drops the tail whenever gst-launch takes longer than that to start. Like the other finish
     # readers it grants the whole read phase: how late it joins is not the delivery under test.
-    budget=$(awk -v t="$TIMEOUT" 'BEGIN { print int(t * 2000) }')
     GST_PLUGIN_PATH_1_0="$GST_PLUGIN_DIR" GST_REGISTRY_1_0="$HARNESS_RUN/gst-run-registry.bin" \
-        gst-launch-1.0 -v moqsrc name=s url="$url" broadcast="$broadcast" max-delay="$budget" ${version:+connect-version="$version"} connect-websocket-enabled=false \
+        gst-launch-1.0 -v moqsrc name=s url="$url" broadcast="$broadcast" max-delay="$((window * 1000))" ${version:+connect-version="$version"} connect-websocket-enabled=false \
         s.video_0 ! identity name=frames silent=false ! fakesink >"$out" 2>&1 &
     pid=$!
     count=0
@@ -1838,6 +1839,11 @@ run_finishes() {
                     causes[i]="no finish marker"
                 fi
             done
+        elif [[ "$late" -eq 1 ]]; then
+            # gst never started, but its cell still fails with the row's cause.
+            pids+=("")
+            fds+=("")
+            names+=(gst)
         fi
         for i in "${!causes[@]}"; do failed+=("${names[$i]}"); done
         [[ ${#failed[@]} -eq 0 ]] || row="reader failed: ${failed[*]}"
