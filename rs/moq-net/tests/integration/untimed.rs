@@ -300,7 +300,7 @@ async fn a_fetched_untimed_frame_arrives_untimed() {
 		let _track = request.accept(untimed());
 		let request = match futures::future::select(std::pin::pin!(groups.requested_fill()), &mut waiting).await {
 			futures::future::Either::Left((request, _)) => {
-				support::groups(request.expect("the fetch reaches the publisher"))
+				request.expect("the fetch reaches the publisher")
 			}
 			futures::future::Either::Right(_) => panic!("nothing answered the fetch"),
 		};

@@ -47,8 +47,9 @@ struct Pending {
 	end: u64,
 	// Exclusive frame cap in the last group; None asks through the original end.
 	frame_end: Option<u64>,
-	// The time a lookup asks for, which owes no group.
-	time: Option<u64>,
+	// The oldest key the first group may start at: below `start` for a time start, whose
+	// group is the newest one starting at or before it.
+	floor: u64,
 	// What its joins ask with now, shared with them and its handler.
 	asks: kio::Shared<Asks>,
 	queued: bool,
@@ -212,9 +213,14 @@ impl Outcome {
 		self.accepted.contains(&key)
 	}
 
-	/// The lowest group accepted: a lookup's answer.
-	pub(super) fn first_accepted(&self) -> Option<u64> {
-		self.accepted.iter().next().map(|run| run.start)
+	/// Where a time start's fill says its group is, once `time`'s key is answered: the group
+	/// accepted, or `None` when it was refused or dropped instead.
+	pub(super) fn time_start(&self, time: u64) -> Option<Option<u64>> {
+		let first = self.accepted.iter().next().map(|run| run.start);
+		match first.is_some() || self.resolved.contains(&time) {
+			true => Some(first),
+			false => None,
+		}
 	}
 
 	/// The partial copy accepted for `key`, if it still holds `frames`.
@@ -286,8 +292,6 @@ pub(super) struct Ask {
 	pub end: u64,
 	pub frame_end: Option<u64>,
 	pub asking: Asking,
-	/// A lookup of the group holding this time within the run, which owes none of it.
-	pub time: Option<u64>,
 	/// Asked by a fetch rather than a reader's miss, so a fetch-only handler takes it.
 	pub fetch: bool,
 }
@@ -475,15 +479,6 @@ impl FillState {
 		if span.is_empty() {
 			return (joins, unfillable);
 		}
-		if let Some(time) = ask.time {
-			// A lookup joins nothing and nothing joins it: it owes no group, so no other
-			// reader's run is answered through it.
-			match self.handlers {
-				0 => unfillable.push(span),
-				_ => joins.push(self.queue_lookup(shared, ask, time)),
-			}
-			return (joins, unfillable);
-		}
 		let covered: Vec<(ops::Range<u64>, u64)> = self
 			.covers
 			.overlapping(&span)
@@ -581,7 +576,7 @@ impl FillState {
 					start,
 					end: groups.end,
 					frame_end: if groups.end == ask.end { ask.frame_end } else { None },
-					time: None,
+					floor: start.group,
 					asks,
 					queued: true,
 					flight: false,
@@ -633,7 +628,7 @@ impl FillState {
 						start: Position { group: key, frame },
 						end: groups.end,
 						frame_end: None,
-						time: None,
+						floor: key,
 						asks: kio::Shared::new(asks),
 						queued: true,
 						flight: true,
@@ -660,42 +655,56 @@ impl FillState {
 		})
 	}
 
-	/// Queue a fill looking up `time` within `ask`'s run, with the join waiting on its answer.
-	fn queue_lookup(&mut self, shared: &kio::Shared<FillState>, ask: &Ask, time: u64) -> Join {
+	/// Queue a fill of the group containing `time`, a reader's time start no held group
+	/// resolves, with the join waiting on its answer: the group starting at `time`, or else the
+	/// newest one before it, starting at or after `floor`. It joins nothing and nothing joins
+	/// it, since an answer below `time` says nothing of the keys another reader asks. `None`
+	/// while no handler can take it.
+	pub(super) fn time_start(
+		&mut self,
+		shared: &kio::Shared<FillState>,
+		time: u64,
+		floor: u64,
+		asking: Asking,
+	) -> Option<Join> {
+		let groups = time..time.checked_add(1)?;
+		if self.handlers == 0 {
+			return None;
+		}
 		let id = self.next;
 		self.next += 1;
 		let result = kio::Producer::<Outcome>::default();
 		let mut asks = Asks::default();
-		asks.add(&ask.asking);
+		asks.add(&asking);
 		let asks = kio::Shared::new(asks);
 		let join = Join {
 			fills: shared.clone(),
 			id,
-			groups: ask.start.group..ask.end,
-			held: RangeSet::new(),
+			groups: groups.clone(),
+			held: RangeSet::from_iter([groups.clone()]),
 			outcome: Some(result.consume()),
 			attempt: result.weak(),
-			asking: ask.asking,
+			asking,
 			asks: asks.clone(),
 		};
 		self.pending.insert(
 			id,
 			Pending {
-				start: ask.start,
-				end: ask.end,
+				start: Position::group(time),
+				end: groups.end,
 				frame_end: None,
-				time: Some(time),
+				floor: floor.min(time),
 				asks,
 				queued: true,
 				flight: false,
 				fetch: false,
-				wants: RangeMap::new(),
+				wants: RangeMap::from_iter([(groups, 1)]),
 				unseen: RangeSet::new(),
 				result,
 			},
 		);
 		self.queue.push_back(id);
-		join
+		Some(join)
 	}
 
 	/// Count a join out of reading `groups` of fill `id`. What nobody reads any more is no
@@ -805,7 +814,7 @@ pub(super) fn poll_requested(
 	state: &kio::Producer<TrackState>,
 	fills: &kio::Shared<FillState>,
 	waiter: &kio::Waiter,
-) -> Poll<Result<Fill>> {
+) -> Poll<Result<FillGroups>> {
 	// Prefer serving a queued fill, even if the track has since aborted.
 	if let Poll::Ready(mut guard) = fills.poll(waiter, |fills| match fills.has_queued() {
 		true => Poll::Ready(()),
@@ -813,11 +822,11 @@ pub(super) fn poll_requested(
 	}) {
 		let id = guard.pop().expect("predicate guaranteed a fill");
 		let pending = guard.pending.get(&id).expect("popped fill is pending");
-		let (start, end, frame_end, time, flight) = (
+		let (start, end, frame_end, floor, flight) = (
 			pending.start,
 			pending.end,
 			pending.frame_end,
-			pending.time,
+			pending.floor,
 			pending.flight,
 		);
 		let (asks, result) = (pending.asks.clone(), pending.result.clone());
@@ -830,14 +839,14 @@ pub(super) fn poll_requested(
 			start,
 			end,
 			frame_end,
+			floor,
 			flight,
 			asks,
 			result,
 		};
-		let inner = Arc::new(SendCell::new(inner));
-		return Poll::Ready(Ok(match time {
-			Some(time) => Fill::Lookup(FillLookup { inner, time }),
-			None => Fill::Groups(FillGroups { inner, prev: None }),
+		return Poll::Ready(Ok(FillGroups {
+			inner: Arc::new(SendCell::new(inner)),
+			prev: None,
 		}));
 	}
 
@@ -852,19 +861,12 @@ pub(super) fn poll_requested(
 	}
 }
 
-/// What readers ask a [`Requests`](super::Requests) handler for: a run of groups to serve, or a
-/// time to look up.
-pub enum Fill {
-	/// Groups readers miss.
-	Groups(FillGroups),
-	/// A time a reader's range starts at that no cached group resolves.
-	Lookup(FillLookup),
-}
-
 /// A run of groups readers miss, for a [`Requests`](super::Requests) handler to serve.
 ///
 /// It names `start.group` up to the exclusive [`end`](Self::end), the first group from
-/// [`start`](Self::start)'s frame. Its [`priority`](Self::priority),
+/// [`start`](Self::start)'s frame. A reader's time start that no group the cache holds places
+/// asks for the group containing that time as a fill one key wide, from the time, whose first
+/// group may start below it: see [`floor`](Self::floor). Its [`priority`](Self::priority),
 /// [`max_delay`](Self::max_delay), and [`order`](Self::order) follow its readers as they
 /// change, so read them as each group is served. The handler calls [`accept`](Self::accept) for each group
 /// it has and [`drop_groups`](Self::drop_groups) for the rest, one group at a time as
@@ -906,64 +908,30 @@ struct Inner {
 	end: u64,
 	// Exclusive frame cap in the last group; None asks through the original end.
 	frame_end: Option<u64>,
+	// The oldest key the first group may start at; see [`FillGroups::floor`].
+	floor: u64,
 	// Answered with a copy of its own rather than the cache's; see [`FillState::fly`].
 	flight: bool,
 	asks: kio::Shared<Asks>,
 	result: kio::Producer<Outcome>,
 }
 
-/// A time a reader's range starts at that no group the cache holds resolves, for a
-/// [`Requests`](super::Requests) handler to look up: [`accept`](Self::accept) the group
-/// containing it, the newest one starting at or before it, or the oldest group when every group
-/// starts after it. The reader's range then starts there.
-///
-/// A lookup owes no group, so it waits only on its first accept. Dropped unanswered, as a
-/// handler that can't resolve times does, the reader's range reaches back to the newest group
-/// the cache holds at or before the time, or, with none, reads every group the cache holds and
-/// asks none starting before the time.
-pub struct FillLookup {
-	inner: Arc<SendCell<Inner>>,
-	time: u64,
-}
-
-impl FillLookup {
-	/// The time to look up, in the track's timescale (a bare start on a scale-less track).
-	pub fn time(&self) -> u64 {
-		self.time
-	}
-
-	/// The most urgent delivery priority among the readers waiting on it now.
-	pub fn priority(&self) -> i8 {
-		self.inner.asks.read().priority()
-	}
-
-	/// The most tolerant age budget among the readers waiting on it now, or `None` for the
-	/// publisher's max age alone. Each reader still enforces its own.
-	pub fn max_delay(&self) -> Option<Duration> {
-		self.inner.max_delay()
-	}
-
-	/// Insert group `key`, the one containing [`time`](Self::time), into the track's cache,
-	/// handing it to the readers waiting on the lookup, and return a [`group::Producer`] to fill.
-	///
-	/// `info` sets the track's [`Info`] if it hasn't been accepted yet, and is ignored otherwise.
-	/// Returns `None` if the group was already answered or cached. Errors with
-	/// [`Error::Skipped`] if the track skipped it, or the track's abort error.
-	pub fn accept(&self, key: u64, info: impl Into<Option<Info>>) -> Result<Option<group::Producer>> {
-		self.inner.accept(key, info.into())
-	}
-
-	/// The groups the answer may lie in, which a test checks the lookup was asked over.
-	#[cfg(all(test, feature = "async"))]
-	pub(crate) fn span(&self) -> ops::Range<u64> {
-		self.inner.start.group..self.inner.end
-	}
-}
-
 impl FillGroups {
 	/// The first group to fill, and the frame within it to start from.
 	pub fn start(&self) -> Position {
 		self.inner.start
+	}
+
+	/// The oldest group the first group may start at: [`start`](Self::start)'s, unless that is a
+	/// reader's time start no group the cache holds places. Then the first group is the one
+	/// containing that time: the group starting at it, or else the newest one starting before
+	/// it, at or after the floor. A handler knowing its groups only by key serves that key as
+	/// any other; one that can tell which group holds the time, as from an index, may
+	/// [`accept`](Self::accept) that group instead, or [`drop_groups`](Self::drop_groups) the
+	/// key when none does. The reader starts where the answer says; left unanswered or
+	/// refused, it starts where the groups the cache holds say.
+	pub fn floor(&self) -> u64 {
+		self.inner.floor
 	}
 
 	/// Whether a [`Consumer::fetch_group`](super::Consumer::fetch_group) asked or joined it,
@@ -1010,11 +978,12 @@ impl FillGroups {
 	/// it, and return a [`group::Producer`] to fill.
 	///
 	/// The group starts at [`start`](Self::start)'s frame when it is the first group, so the
-	/// frames written keep the indices they have in the group. `info` sets the track's
-	/// [`Info`] if it hasn't been accepted yet (a fetch with no live subscription), and is
-	/// ignored otherwise. Returns `None` if the group was already answered or cached. Errors
-	/// with [`Error::InvalidRange`] outside the fill, [`Error::Skipped`] if the track skipped
-	/// it, or the track's abort error.
+	/// frames written keep the indices they have in the group. A key from the
+	/// [`floor`](Self::floor) up to the start's answers the start with that group, from its
+	/// first frame. `info` sets the track's [`Info`] if it hasn't been accepted yet (a fetch
+	/// with no live subscription), and is ignored otherwise. Returns `None` if the group was
+	/// already answered or cached. Errors with [`Error::InvalidRange`] outside the fill,
+	/// [`Error::Skipped`] if the track skipped it, or the track's abort error.
 	pub fn accept(&self, key: u64, info: impl Into<Option<Info>>) -> Result<Option<group::Producer>> {
 		self.inner.accept(key, info.into())
 	}
@@ -1299,7 +1268,7 @@ impl FillGroups {
 
 impl Inner {
 	fn contains(&self, key: u64) -> bool {
-		(self.start.group..self.end).contains(&key)
+		(self.floor..self.end).contains(&key)
 	}
 
 	fn is_wanted(&self, key: u64) -> bool {
@@ -1370,7 +1339,13 @@ impl Inner {
 		let Some(end) = key.checked_add(1) else {
 			return Err(Error::InvalidRange);
 		};
-		if self.result.read().resolved.contains(&key) {
+		// A key below the start answers the start, so no other group starts from it through
+		// the start.
+		let answered = match key < self.start.group {
+			true => key..self.start.group + 1,
+			false => key..end,
+		};
+		if self.result.read().resolved.overlaps(&answered) {
 			return Ok(None);
 		}
 		// Written for a reader that has yet to pick it up, which the next group waits on.
@@ -1405,6 +1380,7 @@ impl Inner {
 		}
 		if let Ok(mut outcome) = self.result.write() {
 			outcome.accept(key..end);
+			outcome.resolved.insert(answered);
 			if let Ok(Some(group)) = &res
 				&& (self.flight || frames.start > 0 || frames.end.is_some())
 			{

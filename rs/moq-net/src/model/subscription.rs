@@ -213,9 +213,10 @@ pub enum Anchor {
 	///
 	/// Resolved from the starts of the groups the serving hop holds. When none starts at
 	/// or before it, a hop whose [`Requests`](crate::track::Requests) handler serves its
-	/// history looks the start up there (see [`FillLookup`](crate::track::FillLookup)),
-	/// reading nothing until it answers; otherwise, or when the handler can't tell, a start
-	/// reaches back to the oldest group. While no group is held at all it waits for one,
+	/// history asks it for the group containing the time (see
+	/// [`FillGroups::floor`](crate::track::FillGroups::floor)), reading nothing until it
+	/// answers; otherwise, or when the handler can't tell, a start reaches back to the oldest
+	/// group. While no group is held at all it waits for one,
 	/// reading nothing of its range meanwhile. An end includes every group starting at or
 	/// before it.
 	///

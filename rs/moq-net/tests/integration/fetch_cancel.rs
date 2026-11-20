@@ -66,7 +66,7 @@ async fn abandoned_fetch_reaches_the_publisher(version: &str, relays: u64, stage
 	let _track = request.accept(timed());
 	let mut request = match futures::future::select(std::pin::pin!(groups.requested_fill()), &mut waiting).await {
 		futures::future::Either::Left((request, _)) => {
-			support::groups(request.expect("the fetch reaches the publisher"))
+			request.expect("the fetch reaches the publisher")
 		}
 		futures::future::Either::Right(_) => panic!("nothing answered the fetch"),
 	};
@@ -200,7 +200,7 @@ async fn a_refetch_within_the_linger_stays_on_the_relay(version: &str) {
 	let _track = request.accept(timed());
 	let request = match futures::future::select(std::pin::pin!(groups.requested_fill()), &mut waiting).await {
 		futures::future::Either::Left((request, _)) => {
-			support::groups(request.expect("the fetch reaches the publisher"))
+			request.expect("the fetch reaches the publisher")
 		}
 		futures::future::Either::Right(_) => panic!("nothing answered the fetch"),
 	};

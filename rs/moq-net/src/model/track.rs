@@ -37,7 +37,7 @@ mod hole;
 mod miss;
 pub(super) use fill::Asking;
 use fill::FillState;
-pub use fill::{Fill, FillGroups, FillLookup};
+pub use fill::FillGroups;
 pub(crate) use hole::Hole;
 
 #[cfg_attr(not(feature = "async"), allow(unused_imports, reason = "async-only"))]
@@ -5685,11 +5685,11 @@ impl Finished {
 /// Most tracks never serve old content, so this capability lives on a dedicated
 /// handle rather than [`Producer`]: a relay creates one (via
 /// [`Producer::requests`] or [`Request::requests`]) to pull past groups
-/// from upstream. While at least one is alive a reader's miss queues a [`Fill`] for it
+/// from upstream. While at least one is alive a reader's miss queues a [`FillGroups`] for it
 /// to serve; with none, the miss is named dropped, and a cache-miss
 /// [`Consumer::fetch_group`] on an accepted track fails fast with [`Error::NotFound`].
-/// Keep taking fills until it drops: a reader waits on its [`FillLookup`] until it is
-/// answered or dropped, so a handle left alive but unread stalls that reader.
+/// Keep taking fills until it drops: a reader waits on its fill until it is answered or
+/// dropped, so a handle left alive but unread stalls that reader.
 ///
 /// A live handle also lets a reader at a frame a group copy shed replay it: a [`FillGroups`] of
 /// that one group from that frame asks for a flight, a copy of its own paced by the readers
@@ -5738,33 +5738,22 @@ impl Requests {
 		&self.name
 	}
 
-	/// The next [`Fill`] readers ask: a run of groups they miss, to serve via
-	/// [`FillGroups::accept`] and [`FillGroups::drop_groups`], or a time to look up.
+	/// The next run of groups readers miss, to serve via [`FillGroups::accept`] and
+	/// [`FillGroups::drop_groups`], including the group containing a reader's time start that
+	/// no group the cache holds places (see [`FillGroups::floor`]).
 	///
 	/// A relay fetches the run upstream; an origin serves the groups its cache evicted
 	/// from its own store, as `moq-archive` does. Errors once the track is aborted.
 	#[cfg_attr(feature = "async", kio::wrapper)]
-	pub fn poll_requested_fill(&self, waiter: &kio::Waiter) -> Poll<Result<Fill>> {
+	pub fn poll_requested_fill(&self, waiter: &kio::Waiter) -> Poll<Result<FillGroups>> {
 		fill::poll_requested(&self.state, &self.fills, waiter)
-	}
-
-	/// [`Self::poll_requested_fill`] for a handler that can't resolve times: each lookup is
-	/// dropped unanswered, so its reader falls back to the groups held.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	#[cfg_attr(feature = "async", kio::wrapper)]
-	pub(crate) fn poll_requested_groups(&self, waiter: &kio::Waiter) -> Poll<Result<FillGroups>> {
-		loop {
-			if let Fill::Groups(fill) = ready!(self.poll_requested_fill(waiter))? {
-				return Poll::Ready(Ok(fill));
-			}
-		}
 	}
 
 	/// The next fill, which a test expects to name a single group.
 	#[cfg(test)]
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub(crate) fn poll_requested_fill_group(&self, waiter: &kio::Waiter) -> Poll<Result<GroupFill>> {
-		self.poll_requested_groups(waiter).map_ok(|fill| {
+		self.poll_requested_fill(waiter).map_ok(|fill| {
 			assert_eq!(fill.end() - fill.start().group, 1, "a one-group fill");
 			fill.group(fill.start().group)
 		})
@@ -7473,7 +7462,6 @@ fn queue(fills: &kio::Shared<FillState>, key: u64, request: &FetchOptions) -> Op
 			// One group either way, so it never turns a wider fill it joins newest first.
 			order: Order::Ascending,
 		},
-		time: None,
 		fetch: true,
 	};
 	// The handler gate is atomic with a handler dropping (no fill stranded on a queue
@@ -9722,15 +9710,15 @@ impl Cursor {
 		}))
 	}
 
-	/// Look up each time start the window can't resolve from the cache, once, and take in
-	/// the answers, parking `waiter` on the lookups still out.
+	/// Ask a fill for the group containing each time start the window can't resolve from the
+	/// cache, once, and take in the answers, parking `waiter` on the fills still out.
 	///
 	/// Indexed by time, so a pass costs O(L log L) in the lookups out rather than O(L²).
 	fn look_up(&mut self, waiter: &kio::Waiter) {
-		// The first span looking a time up sets how far its lookup reaches.
+		// The first span looking a time up sets the floor its fill asks from.
 		let mut lookups = BTreeMap::new();
-		for (time, reach) in self.filter.window.lookups() {
-			lookups.entry(time).or_insert(reach);
+		for (time, floor) in self.filter.window.lookups() {
+			lookups.entry(time).or_insert(floor);
 		}
 		if lookups.is_empty() && self.filter.lookups.iter().all(|lookup| lookup.join.is_none()) {
 			return;
@@ -9738,23 +9726,12 @@ impl Cursor {
 		let asking = &asking(&self.subscription);
 		let fills = self.state.read().fills.clone();
 		let asked: BTreeSet<u64> = self.filter.lookups.iter().map(|lookup| lookup.time).collect();
-		for (&time, &reach) in &lookups {
+		for (&time, &floor) in &lookups {
 			if asked.contains(&time) {
 				continue;
 			}
-			let ask = fill::Ask {
-				start: Position::group(0),
-				end: reach,
-				frame_end: None,
-				asking: *asking,
-				time: Some(time),
-				fetch: false,
-			};
-			let (joins, _) = fills.lock().join(&fills, &ask);
-			self.filter.lookups.push(Lookup {
-				time,
-				join: joins.into_iter().next(),
-			});
+			let join = fills.lock().time_start(&fills, time, floor, *asking);
+			self.filter.lookups.push(Lookup { time, join });
 		}
 		let mut moved = false;
 		for lookup in &mut self.filter.lookups {
@@ -9768,14 +9745,16 @@ impl Cursor {
 			if let Some(join) = &mut lookup.join {
 				join.update(asking);
 			}
+			let time = lookup.time;
 			let answer = match &lookup.join {
 				None => None,
-				Some(join) => match join.outcome().poll(waiter, |outcome| {
-					outcome.first_accepted().map_or(Poll::Pending, Poll::Ready)
-				}) {
-					Poll::Ready(Ok(group)) => Some(group),
+				Some(join) => match join
+					.outcome()
+					.poll(waiter, |outcome| outcome.time_start(time).map_or(Poll::Pending, Poll::Ready))
+				{
+					Poll::Ready(Ok(group)) => group,
 					// Ended unanswered: its handler couldn't tell.
-					Poll::Ready(Err(closed)) => closed.first_accepted(),
+					Poll::Ready(Err(closed)) => closed.time_start(time).flatten(),
 					Poll::Pending => continue,
 				},
 			};
@@ -14173,7 +14152,7 @@ mod test {
 		let consumer = producer.consume();
 		let fetch = consumer.fetch_group(u64::MAX, None).now_or_never();
 		assert!(matches!(fetch, Some(Err(Error::NotFound))));
-		assert!(dynamic.requested_groups().now_or_never().is_none(), "nothing to fill");
+		assert!(dynamic.requested_fill().now_or_never().is_none(), "nothing to fill");
 	}
 
 	#[test]
@@ -15492,7 +15471,7 @@ mod test {
 			);
 			let waiter = kio::Waiter::noop();
 			assert_eq!(read_now(&mut reader, false), None);
-			let Poll::Ready(Ok(fill)) = requests.poll_requested_groups(&waiter) else {
+			let Poll::Ready(Ok(fill)) = requests.poll_requested_fill(&waiter) else {
 				panic!("cached: {cached}: missing history must be requested");
 			};
 			assert_eq!(
@@ -15547,7 +15526,7 @@ mod test {
 		let mut reader = producer.subscribe(unlimited.clone());
 		let waiter = kio::Waiter::noop();
 		assert_eq!(read_now(&mut reader, true), None);
-		let Poll::Ready(Ok(fill)) = requests.poll_requested_groups(&waiter) else {
+		let Poll::Ready(Ok(fill)) = requests.poll_requested_fill(&waiter) else {
 			panic!("missing history must be requested");
 		};
 		assert_eq!(
@@ -15663,7 +15642,7 @@ mod test {
 					assert_eq!(read_now(&mut reader, ordered), Some(Some(3)));
 				}
 				assert_eq!(read_now(&mut reader, ordered), None, "the missing run is owed");
-				let Poll::Ready(Ok(fill)) = requests.poll_requested_groups(&waiter) else {
+				let Poll::Ready(Ok(fill)) = requests.poll_requested_fill(&waiter) else {
 					panic!("the missing history was never requested");
 				};
 				assert_eq!((fill.start(), fill.end()), (Position::group(1), 3));
@@ -25212,10 +25191,10 @@ mod test {
 		let first = consumer.fetch_group(3, None);
 		let second = consumer.fetch_group(3, None);
 		let waiter = kio::Waiter::noop();
-		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&waiter) else {
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("one fill for both fetches");
 		};
-		assert!(dynamic.poll_requested_groups(&waiter).is_pending(), "the second joined");
+		assert!(dynamic.poll_requested_fill(&waiter).is_pending(), "the second joined");
 		assert_eq!((fill.start(), fill.end()), (Position::group(3), 4));
 		assert_eq!(fill.wanted(), Some(3));
 		drop(first);
@@ -25238,7 +25217,7 @@ mod test {
 		let consumer = producer.consume();
 		let mut fetch = consumer.fetch_group(3, None);
 		let waiter = kio::Waiter::noop();
-		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&waiter) else {
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("the fill is ready");
 		};
 		let group = fill.accept(3, Info::timed()).unwrap().expect("a fresh group");
@@ -25294,7 +25273,7 @@ mod test {
 			read.push(group.start);
 		}
 		assert_eq!(read, [2, 3]);
-		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&waiter) else {
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("below the start is a miss");
 		};
 		assert_eq!((fill.start().group, fill.end()), (0, 2));
@@ -25310,7 +25289,7 @@ mod test {
 		elapse(&producer, Duration::from_secs(31));
 		assert_eq!(drained_drops(&mut subscriber), [(1, 2)]);
 		assert!(
-			dynamic.poll_requested_groups(&waiter).is_pending(),
+			dynamic.poll_requested_fill(&waiter).is_pending(),
 			"a refusal is not asked again"
 		);
 	}
@@ -25339,7 +25318,7 @@ mod test {
 		let waiter = kio::Waiter::noop();
 		assert_eq!(drain_groups(&mut subscriber), [2, 3]);
 		assert!(
-			dynamic.poll_requested_groups(&waiter).is_pending(),
+			dynamic.poll_requested_fill(&waiter).is_pending(),
 			"below the start is no miss"
 		);
 		assert!(drained_drops(&mut subscriber).is_empty());
@@ -25347,7 +25326,7 @@ mod test {
 		// The re-offer of a widened budget.
 		write(&producer, 1);
 		assert_eq!(drain_groups(&mut subscriber), [1]);
-		assert!(dynamic.poll_requested_groups(&waiter).is_pending());
+		assert!(dynamic.poll_requested_fill(&waiter).is_pending());
 	}
 
 	/// Below a start its publisher resolved, a reader asks for the history its budget
@@ -25368,7 +25347,7 @@ mod test {
 			drained_drops(&mut reader).is_empty(),
 			"nothing below the start is given up unasked"
 		);
-		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&waiter) else {
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("the reader asks below the start");
 		};
 		assert_eq!((fill.start().group, fill.end()), (0, 2));
@@ -25389,13 +25368,13 @@ mod test {
 		let waiter = kio::Waiter::noop();
 		assert_eq!(drain_groups(&mut reader), [2, 3]);
 		assert!(
-			dynamic.poll_requested_groups(&waiter).is_pending(),
+			dynamic.poll_requested_fill(&waiter).is_pending(),
 			"below a declared start is no miss"
 		);
 
 		producer.start_resolved(2).unwrap();
 		assert!(reader.poll_recv_group(&waiter).is_pending());
-		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&waiter) else {
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("the reader asks below the resolved start");
 		};
 		assert_eq!((fill.start().group, fill.end()), (0, 2));
@@ -25409,7 +25388,7 @@ mod test {
 		let (producer, dynamic, mut first) = started_late();
 		let waiter = kio::Waiter::noop();
 		while let Poll::Ready(Ok(Some(_))) = first.poll_recv_group(&waiter) {}
-		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&waiter) else {
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("below the start is a miss");
 		};
 		while let Some(key) = fill.wanted() {
@@ -25423,7 +25402,7 @@ mod test {
 		read.sort();
 		assert_eq!(read, [0, 1, 2, 3]);
 		assert!(
-			dynamic.poll_requested_groups(&waiter).is_pending(),
+			dynamic.poll_requested_fill(&waiter).is_pending(),
 			"the cache answers it"
 		);
 	}
@@ -25441,7 +25420,7 @@ mod test {
 			write_group(&producer, 2);
 			let waiter = kio::Waiter::noop();
 			while let Poll::Ready(Ok(Some(_))) = subscriber.poll_recv_group(&waiter) {}
-			let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&waiter) else {
+			let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 				panic!("below the start is a miss");
 			};
 			while let Some(key) = fill.wanted() {
@@ -25473,7 +25452,7 @@ mod test {
 		};
 		assert_eq!(next(&mut subscriber), None, "groups 0 and 1 are being filled");
 		// The handler takes the fill and never answers it.
-		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&waiter) else {
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("below the start is a miss");
 		};
 		elapse(&producer, Duration::from_secs(29));
@@ -25502,7 +25481,7 @@ mod test {
 			"group 0 is being filled"
 		);
 		// The handler takes the fill and never answers it.
-		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&waiter) else {
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("below the start is a miss");
 		};
 		assert_eq!((fill.start().group, fill.end()), (0, 10));
@@ -25539,7 +25518,7 @@ mod test {
 		write_group(&producer, 10);
 		let waiter = kio::Waiter::noop();
 		let fetch = producer.consume().fetch_group(3, None);
-		let Poll::Ready(Ok(first)) = dynamic.poll_requested_groups(&waiter) else {
+		let Poll::Ready(Ok(first)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("below the start is a miss");
 		};
 		let group = first.accept(3, None).unwrap().expect("a fresh group");
@@ -25552,7 +25531,7 @@ mod test {
 			subscriber.poll_next_group(&waiter).is_pending(),
 			"group 0 is being filled"
 		);
-		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&waiter) else {
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("the aborted group is a miss again");
 		};
 		assert_eq!((fill.start().group, fill.end()), (0, 10));
@@ -25578,7 +25557,7 @@ mod test {
 				..Default::default()
 			},
 		);
-		let Poll::Ready(Ok(first)) = dynamic.poll_requested_groups(&waiter) else {
+		let Poll::Ready(Ok(first)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("an evicted group is a miss");
 		};
 		first.refuse_groups(3..4, Error::Unsupported);
@@ -25592,7 +25571,7 @@ mod test {
 			subscriber.poll_next_group(&waiter).is_pending(),
 			"group 3 is being filled"
 		);
-		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&waiter) else {
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("the source may still have group 3");
 		};
 		assert!(fill.is_wanted(3));
@@ -25611,7 +25590,7 @@ mod test {
 		evict(&producer, 3);
 		let waiter = kio::Waiter::noop();
 		let fetch = producer.consume().fetch_group(3, None);
-		let Poll::Ready(Ok(first)) = dynamic.poll_requested_groups(&waiter) else {
+		let Poll::Ready(Ok(first)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("an evicted group is a miss");
 		};
 		first.group(3).reject(Error::NotFound);
@@ -25625,7 +25604,7 @@ mod test {
 			subscriber.poll_next_group(&waiter).is_pending(),
 			"group 3 is being filled"
 		);
-		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&waiter) else {
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("the source may still have part of group 3");
 		};
 		assert!(fill.is_wanted(3));
@@ -25644,7 +25623,7 @@ mod test {
 		write_group(&producer, 10);
 		let waiter = kio::Waiter::noop();
 		while let Poll::Ready(Ok(Some(_))) = subscriber.poll_recv_group(&waiter) {}
-		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&waiter) else {
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("below the start is a miss");
 		};
 		// The window inside `FillGroups::accept` between caching the group and publishing the answer.
@@ -25675,7 +25654,7 @@ mod test {
 			subscriber.poll_next_group(&waiter).is_pending(),
 			"group 0 is being filled"
 		);
-		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&waiter) else {
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("below the start is a miss");
 		};
 		let _writing = fill.accept(0, None).unwrap().expect("a fresh group");
@@ -25701,7 +25680,7 @@ mod test {
 		write_group(&producer, 10);
 		let noop = kio::Waiter::noop();
 		while let Poll::Ready(Ok(Some(_))) = subscriber.poll_recv_group(&noop) {}
-		let Poll::Ready(Ok(mut fill)) = dynamic.poll_requested_groups(&noop) else {
+		let Poll::Ready(Ok(mut fill)) = dynamic.poll_requested_fill(&noop) else {
 			panic!("below the start is a miss");
 		};
 		let (flag, waiter) = Flag::waiter();
@@ -25748,7 +25727,7 @@ mod test {
 		write_group(&producer, 1);
 		let noop = kio::Waiter::noop();
 		while let Poll::Ready(Ok(Some(_))) = subscriber.poll_recv_group(&noop) {}
-		let Poll::Ready(Ok(mut fill)) = dynamic.poll_requested_groups(&noop) else {
+		let Poll::Ready(Ok(mut fill)) = dynamic.poll_requested_fill(&noop) else {
 			panic!("below the start is a miss");
 		};
 		let (flag, waiter) = Flag::waiter();
@@ -25777,7 +25756,7 @@ mod test {
 		write_group(&producer, 10);
 		let waiter = kio::Waiter::noop();
 		while let Poll::Ready(Ok(Some(_))) = subscriber.poll_recv_group(&waiter) {}
-		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&waiter) else {
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("below the start is a miss");
 		};
 		assert_eq!(fill.wanted(), Some(9));
@@ -25820,7 +25799,7 @@ mod test {
 		write_group(&producer, 10);
 		let waiter = kio::Waiter::noop();
 		while let Poll::Ready(Ok(Some(_))) = subscriber.poll_recv_group(&waiter) {}
-		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&waiter) else {
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("below the start is a miss");
 		};
 		let _writing = [
@@ -25857,7 +25836,7 @@ mod test {
 		write_group(&producer, 10);
 		let waiter = kio::Waiter::noop();
 		while let Poll::Ready(Ok(Some(_))) = subscriber.poll_recv_group(&waiter) {}
-		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&waiter) else {
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("below the start is a miss");
 		};
 		let group = fill.group(9);
@@ -25874,10 +25853,11 @@ mod test {
 		);
 	}
 
-	/// A time start before every group held looks up its group through a fill that owes
-	/// none: a handler that can't resolve times drops it, and the start reaches back to the
-	/// group containing its time, which is unknown, so it asks no fill below the time itself:
-	/// every key from there is in range. Another range still asks for its own misses.
+	/// A time start before every group held asks a fill for the group containing its time,
+	/// one key wide from the time and floored at 0, which no other reader joins: a handler
+	/// that can't tell refuses it, and the start reaches back to that group, which is unknown,
+	/// so it asks no fill below the time itself: every key from there is in range. Another
+	/// range still asks for its own misses.
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_time_start_before_the_cache_asks_nothing_below_it() {
@@ -25898,16 +25878,18 @@ mod test {
 		assert_eq!(
 			drain_groups(&mut subscriber),
 			Vec::<u64>::new(),
-			"the time start waits on its lookup"
+			"the time start waits on its fill"
 		);
-		let Poll::Ready(Ok(Fill::Lookup(lookup))) = dynamic.poll_requested_fill(&waiter) else {
-			panic!("the time start is looked up");
+		let Poll::Ready(Ok(start)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the time start asks for its group");
 		};
-		assert_eq!((lookup.time(), lookup.span()), (5, 0..10));
-		drop(lookup);
+		assert_eq!((start.start(), start.floor(), start.end()), (Position::group(5), 0, 6));
+		assert_eq!(start.wanted(), Some(5), "a handler knowing only keys serves the time's");
+		start.refuse_groups(5..6, Error::NotFound);
+		drop(start);
 		let mut read = drain_groups(&mut subscriber);
 		let mut asked = Vec::new();
-		while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&waiter) {
+		while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) {
 			asked.push((fill.start().group, fill.end()));
 			while let Some(key) = fill.wanted() {
 				write_filled(fill.accept(key, None), key);
@@ -25919,7 +25901,7 @@ mod test {
 		assert_eq!(read, [10, 0, 1, 5, 6, 7, 8, 9]);
 	}
 
-	/// A time start before every group held starts at the group its lookup answers, whose key
+	/// A time start before every group held starts at the group its fill answers, whose key
 	/// says where it starts, asking nothing below it; the misses past it through the time end
 	/// are filled.
 	#[test]
@@ -25939,17 +25921,17 @@ mod test {
 			Vec::<u64>::new(),
 			"nothing reads until it is found"
 		);
-		let Poll::Ready(Ok(Fill::Lookup(lookup))) = dynamic.poll_requested_fill(&waiter) else {
-			panic!("the time start is looked up");
+		let Poll::Ready(Ok(start)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the time start asks for its group");
 		};
-		assert_eq!(lookup.time(), 5);
-		let found = lookup.accept(5, None);
-		drop(lookup);
+		assert_eq!(start.start().group, 5);
+		let found = start.accept(5, None);
+		drop(start);
 		let mut read = drain_groups(&mut subscriber);
 		assert_eq!(read, [5], "the group found is read at once: its key is its start");
 		write_filled(found, 5);
 		// The misses past the start, through the end.
-		while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&waiter) {
+		while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) {
 			while let Some(key) = fill.wanted() {
 				assert!(key >= 5, "group {key} is below the looked-up start");
 				write_filled(fill.accept(key, None), key);
@@ -25959,6 +25941,70 @@ mod test {
 		}
 		// The misses come newest first, as the reader orders them.
 		assert_eq!(read, [5, 7, 6]);
+	}
+
+	/// A handler that can tell which group holds a time, as from an index, answers a time
+	/// start with a group starting below it, down to the floor: the reader starts there and
+	/// asks the keys after it as misses. Below the floor is outside the fill, since the
+	/// cache holds a newer group at or before the time there.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_time_start_is_answered_by_the_group_below_it() {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let mut subscriber = producer.subscribe(replay().with_order(Order::Ascending).with_ranges([Range {
+			start: Anchor::Time(7),
+			end: Some(Anchor::Time(8)),
+		}]));
+		producer.start_at(10).unwrap();
+		write_group(&producer, 10);
+		let waiter = kio::Waiter::noop();
+		assert_eq!(drain_groups(&mut subscriber), Vec::<u64>::new());
+		let Poll::Ready(Ok(start)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the time start asks for its group");
+		};
+		assert_eq!((start.start().group, start.floor()), (7, 0));
+		write_filled(start.accept(4, None), 4);
+		assert!(start.accept(7, None).unwrap().is_none(), "the start is answered");
+		assert_eq!(start.wanted(), None);
+		drop(start);
+		let mut read = drain_groups(&mut subscriber);
+		let mut asked = Vec::new();
+		while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) {
+			asked.push((fill.start().group, fill.end()));
+			// The index says 5 through 7 hold none, as the answer did.
+			fill.drop_groups(5..8);
+			while let Some(key) = fill.wanted() {
+				write_filled(fill.accept(key, None), key);
+			}
+			drop(fill);
+			read.extend(drain_groups(&mut subscriber));
+		}
+		assert_eq!(asked, [(5, 9)]);
+		assert_eq!(read, [4, 8]);
+
+		// Past a group held below the time, the floor is past it too.
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		for key in 0..10 {
+			write_group(&producer, key);
+		}
+		for key in 5..9 {
+			evict(&producer, key);
+		}
+		let mut subscriber = producer.subscribe(replay().with_ranges([Range {
+			start: Anchor::Time(7),
+			end: Some(Anchor::Time(7)),
+		}]));
+		assert_eq!(drain_groups(&mut subscriber), Vec::<u64>::new());
+		let Poll::Ready(Ok(start)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the time start asks for its group");
+		};
+		assert_eq!((start.start().group, start.floor()), (7, 5));
+		assert!(matches!(start.accept(4, None), Err(Error::InvalidRange)));
+		write_filled(start.accept(6, None), 6);
+		drop(start);
+		assert_eq!(drain_groups(&mut subscriber), [6]);
 	}
 
 	/// A time end walking the history a handler serves takes no group the live feed
@@ -25981,14 +26027,14 @@ mod test {
 		}]));
 		let waiter = kio::Waiter::noop();
 		assert_eq!(drain_groups(&mut subscriber), Vec::<u64>::new());
-		let Poll::Ready(Ok(Fill::Lookup(lookup))) = dynamic.poll_requested_fill(&waiter) else {
-			panic!("the time start in the evicted gap is looked up");
+		let Poll::Ready(Ok(start)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the time start in the evicted gap asks for its group");
 		};
-		assert_eq!(lookup.time(), 5);
-		write_filled(lookup.accept(5, None), 5);
-		drop(lookup);
+		assert_eq!((start.start().group, start.floor()), (5, 5));
+		write_filled(start.accept(5, None), 5);
+		drop(start);
 		let mut read = drain_groups(&mut subscriber);
-		while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&waiter) {
+		while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) {
 			while let Some(key) = fill.wanted() {
 				write_filled(fill.accept(key, None), key);
 			}
@@ -26032,7 +26078,7 @@ mod test {
 					None => ended = true,
 				}
 			}
-			let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&kio::Waiter::noop()) else {
+			let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&kio::Waiter::noop()) else {
 				break;
 			};
 			while let Some(key) = fill.wanted() {
@@ -26055,7 +26101,7 @@ mod test {
 		write_group(&producer, 100);
 		let waiter = kio::Waiter::noop();
 		while let Poll::Ready(Ok(Some(_))) = subscriber.poll_recv_group(&waiter) {}
-		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&waiter) else {
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("below the start is a miss");
 		};
 		assert_eq!((fill.start().group, fill.end()), (0, 100));
@@ -26081,7 +26127,7 @@ mod test {
 		write_group(&producer, 10);
 		let waiter = kio::Waiter::noop();
 		while let Poll::Ready(Ok(Some(_))) = narrowed.poll_recv_group(&waiter) {}
-		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&waiter) else {
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("below the start is a miss");
 		};
 		narrowed.update(descending(Range::groups(0..8))).unwrap();
@@ -26089,7 +26135,7 @@ mod test {
 
 		let mut later = producer.subscribe(descending(Range::groups(0..)));
 		while let Poll::Ready(Ok(Some(_))) = later.poll_recv_group(&waiter) {}
-		let Poll::Ready(Ok(again)) = dynamic.poll_requested_groups(&waiter) else {
+		let Poll::Ready(Ok(again)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("what the first fill stopped owing is asked afresh");
 		};
 		assert_eq!((again.start().group, again.end()), (8, 10));
@@ -26113,7 +26159,7 @@ mod test {
 		let waiter = kio::Waiter::noop();
 		while let Poll::Ready(Ok(Some(_))) = subscriber.poll_recv_group(&waiter) {}
 		let mut asked = Vec::new();
-		while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&waiter) {
+		while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) {
 			asked.push((fill.start().group, fill.end()));
 		}
 		assert_eq!(asked, [(5, 6), (0, 2)]);
@@ -26139,7 +26185,7 @@ mod test {
 		evict(&producer, 0);
 		evict(&producer, 1);
 		assert_eq!(drain_groups(&mut subscriber), [2]);
-		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&waiter) else {
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("group 1 is a miss now");
 		};
 		assert_eq!((fill.start().group, fill.end()), (1, 2), "group 0 was taken");
@@ -26147,7 +26193,7 @@ mod test {
 		write_filled(fill.accept(1, None), 1);
 		drop(fill);
 		assert_eq!(drain_groups(&mut subscriber), [1]);
-		assert!(dynamic.poll_requested_groups(&waiter).is_pending());
+		assert!(dynamic.poll_requested_fill(&waiter).is_pending());
 		assert!(drained_drops(&mut subscriber).is_empty(), "nothing was given up");
 		let Inner::Plain(cursor) = &subscriber.inner else {
 			unreachable!("a plain subscription");
@@ -26194,7 +26240,7 @@ mod test {
 		evict(&producer, 3);
 		let _ = next(&mut reader);
 		let mut asked = Vec::new();
-		while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&waiter) {
+		while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) {
 			asked.push((fill.start().group, fill.end()));
 		}
 		assert!(
@@ -26276,7 +26322,7 @@ mod test {
 		evict(&producer, 0);
 		evict(&producer, 1);
 		assert!(drained_drops(&mut subscriber).is_empty());
-		assert!(dynamic.poll_requested_groups(&waiter).is_pending(), "both were taken");
+		assert!(dynamic.poll_requested_fill(&waiter).is_pending(), "both were taken");
 	}
 
 	/// An ordered reader waits on the refill of a group evicted at or above its next
@@ -26299,7 +26345,7 @@ mod test {
 		evict(&producer, 1);
 		evict(&producer, 2);
 		assert_eq!(next(&mut subscriber), None, "group 1 comes before 3");
-		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&waiter) else {
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("groups 1 and 2 are misses now");
 		};
 		assert_eq!((fill.start().group, fill.end()), (1, 3));
@@ -26331,7 +26377,7 @@ mod test {
 		evict(&producer, 1);
 		evict(&producer, 2);
 		assert_eq!(next(&mut subscriber), None, "group 1 comes before 3");
-		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&waiter) else {
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("groups 1 and 2 are misses now");
 		};
 		write_filled(fill.accept(2, None), 2);
@@ -26342,7 +26388,7 @@ mod test {
 		write_filled(fill.accept(1, None), 1);
 		drop(fill);
 		assert_eq!([next(&mut subscriber), next(&mut subscriber)], [Some(1), Some(3)]);
-		assert!(dynamic.poll_requested_groups(&waiter).is_pending(), "refilled once");
+		assert!(dynamic.poll_requested_fill(&waiter).is_pending(), "refilled once");
 	}
 
 	/// A refill evicted again before its reader took it is given up rather than asked a
@@ -26360,7 +26406,7 @@ mod test {
 		assert!(matches!(subscriber.poll_recv_group(&waiter), Poll::Ready(Ok(Some(_)))));
 		evict(&producer, 1);
 		assert_eq!(drain_groups(&mut subscriber), [2]);
-		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&waiter) else {
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("group 1 is a miss now");
 		};
 		assert_eq!(fill.wanted(), Some(1));
@@ -26368,7 +26414,7 @@ mod test {
 		drop(fill);
 		evict(&producer, 1);
 		assert!(drain_groups(&mut subscriber).is_empty());
-		assert!(dynamic.poll_requested_groups(&waiter).is_pending(), "refilled once");
+		assert!(dynamic.poll_requested_fill(&waiter).is_pending(), "refilled once");
 		assert_eq!(drained_drops(&mut subscriber), [(1, 2)]);
 	}
 
@@ -26392,7 +26438,7 @@ mod test {
 		let mut refilled = 0;
 		let mut fills = Vec::new();
 		let mut serve = || {
-			while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&waiter) {
+			while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) {
 				fills.push(fill);
 			}
 			fills.retain_mut(|fill| {
@@ -26494,7 +26540,7 @@ mod test {
 		write(producer.create_group(group::Info { start: GROUPS }).map(Some), GROUPS);
 		let waiter = kio::Waiter::noop();
 		assert!(subscriber.poll_next_group(&waiter).is_pending(), "group 0 is a miss");
-		let Poll::Ready(Ok(mut fill)) = dynamic.poll_requested_groups(&waiter) else {
+		let Poll::Ready(Ok(mut fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("the reader asked for the batch");
 		};
 		assert_eq!((fill.start().group, fill.end()), (0, GROUPS));
@@ -26530,7 +26576,7 @@ mod test {
 		write_group(&producer, 4);
 		let waiter = kio::Waiter::noop();
 		assert!(ordered.poll_next_group(&waiter).is_pending(), "group 0 is a miss");
-		let Poll::Ready(Ok(mut fill)) = dynamic.poll_requested_groups(&waiter) else {
+		let Poll::Ready(Ok(mut fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("the reader asked for the batch");
 		};
 		assert_eq!(fill.order(), Order::Descending);
@@ -26559,7 +26605,7 @@ mod test {
 		write_group(&producer, 4);
 		let waiter = kio::Waiter::noop();
 		assert!(subscriber.poll_next_group(&waiter).is_pending(), "group 0 is a miss");
-		let Poll::Ready(Ok(mut fill)) = dynamic.poll_requested_groups(&waiter) else {
+		let Poll::Ready(Ok(mut fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("the reader asked for the batch");
 		};
 		assert_eq!(fill.poll_wanted_changed(&waiter), Poll::Ready(Some(0)));
@@ -26594,14 +26640,14 @@ mod test {
 			subscriber.poll_recv_group(&waiter).is_pending(),
 			"groups 0..4 are a miss"
 		);
-		let Poll::Ready(Ok(mut fill)) = dynamic.poll_requested_groups(&waiter) else {
+		let Poll::Ready(Ok(mut fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("the reader asked for the batch");
 		};
 		assert_eq!((fill.start().group, fill.end()), (0, 4));
 		let mut fetch = producer.consume().fetch_group(2, None);
 		assert!(kio::Task::poll(&mut *fetch, &waiter).is_pending());
 		assert!(
-			dynamic.poll_requested_groups(&waiter).is_pending(),
+			dynamic.poll_requested_fill(&waiter).is_pending(),
 			"the fetch joined the batch"
 		);
 
@@ -26669,7 +26715,7 @@ mod test {
 		write_group(&producer, 4);
 		let waiter = kio::Waiter::noop();
 		while let Poll::Ready(Ok(Some(_))) = middle.poll_recv_group(&waiter) {}
-		let Poll::Ready(Ok(taken)) = dynamic.poll_requested_groups(&waiter) else {
+		let Poll::Ready(Ok(taken)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("group 5 is a miss");
 		};
 		assert_eq!((taken.start().group, taken.end()), (5, 6));
@@ -26677,7 +26723,7 @@ mod test {
 		let mut subscriber = producer.subscribe(replay().with_range(0..).with_order(Order::Descending));
 		while let Poll::Ready(Ok(Some(_))) = subscriber.poll_recv_group(&waiter) {}
 		let mut asked = Vec::new();
-		while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&waiter) {
+		while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) {
 			asked.push((fill.start().group, fill.end()));
 		}
 		assert_eq!(asked, [(6, 8), (0, 4)]);
@@ -26691,7 +26737,7 @@ mod test {
 		let waiter = kio::Waiter::noop();
 		assert!(drained_drops(&mut subscriber).is_empty());
 		while let Poll::Ready(Ok(Some(_))) = subscriber.poll_recv_group(&waiter) {}
-		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&waiter) else {
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("below the start is a miss");
 		};
 		fill.drop_groups(0..2);
@@ -26712,7 +26758,7 @@ mod test {
 		let (producer, dynamic, mut subscriber) = started_late();
 		let waiter = kio::Waiter::noop();
 		while let Poll::Ready(Ok(Some(_))) = subscriber.poll_recv_group(&waiter) {}
-		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&waiter) else {
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("below the start is a miss");
 		};
 		fill.drop_groups(0..2);
@@ -26780,13 +26826,13 @@ mod test {
 		elapse(&producer, Duration::from_secs(31));
 		assert_eq!(drained_drops(&mut subscriber), [(0, 2)]);
 		assert!(
-			dynamic.poll_requested_groups(&waiter).is_pending(),
+			dynamic.poll_requested_fill(&waiter).is_pending(),
 			"the miss asked nothing"
 		);
 
 		let mut fetch = producer.consume().fetch_group(1, None);
 		assert!(kio::Task::poll(&mut *fetch, &waiter).is_pending());
-		let Poll::Ready(Ok(fill)) = dynamic.clone().poll_requested_groups(&waiter) else {
+		let Poll::Ready(Ok(fill)) = dynamic.clone().poll_requested_fill(&waiter) else {
 			panic!("the fetch is taken");
 		};
 		assert_eq!((fill.start().group, fill.end()), (1, 2));
@@ -26831,7 +26877,7 @@ mod test {
 		write_group(&producer, WIDE);
 		assert_eq!(drain_groups(&mut subscriber), [WIDE]);
 
-		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&kio::Waiter::noop()) else {
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&kio::Waiter::noop()) else {
 			panic!("the miss below the start is asked");
 		};
 		for refused in 1..=REFUSED {
@@ -26861,13 +26907,13 @@ mod test {
 		let _ = ascending.poll_recv_group(&kio::Waiter::noop());
 		let _ = descending.poll_recv_group(&kio::Waiter::noop());
 
-		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&kio::Waiter::noop()) else {
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&kio::Waiter::noop()) else {
 			panic!("the miss below the start is asked");
 		};
 		assert_eq!((fill.start().group, fill.end()), (0, 4));
 		assert_eq!(fill.order(), Order::Descending);
 		assert!(
-			dynamic.poll_requested_groups(&kio::Waiter::noop()).is_pending(),
+			dynamic.poll_requested_fill(&kio::Waiter::noop()).is_pending(),
 			"both readers share the fill"
 		);
 	}
@@ -26884,7 +26930,7 @@ mod test {
 		producer.start_at(6).unwrap();
 		write_group(&producer, 6);
 		let _ = descending.poll_recv_group(&kio::Waiter::noop());
-		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&kio::Waiter::noop()) else {
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&kio::Waiter::noop()) else {
 			panic!("the miss below the start is asked");
 		};
 		assert_eq!(fill.order(), Order::Descending);
@@ -26923,7 +26969,7 @@ mod test {
 
 		subscriber.update(subscriber.subscription().with_priority(3)).unwrap();
 		assert!(subscriber.poll_recv_group(&waiter).is_pending());
-		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&waiter) else {
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("the miss below the start is asked");
 		};
 		assert_eq!((fill.start().group, fill.end()), (0, 4));
@@ -26961,7 +27007,7 @@ mod test {
 			_ => panic!("the read ended"),
 		};
 		assert_eq!(next(), None, "group 0 is being filled");
-		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&waiter) else {
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("below the start is a miss");
 		};
 		write_filled(fill.accept(0, None), 0);
@@ -26980,7 +27026,7 @@ mod test {
 		let (producer, dynamic, mut subscriber) = started_late();
 		let waiter = kio::Waiter::noop();
 		while let Poll::Ready(Ok(Some(_))) = subscriber.poll_recv_group(&waiter) {}
-		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&waiter) else {
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("the gap is a miss");
 		};
 		drop(subscriber);
@@ -26994,7 +27040,7 @@ mod test {
 		let consumer = producer.consume();
 		let mut fetch = consumer.fetch_group(3, None);
 		let waiter = kio::Waiter::noop();
-		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&waiter) else {
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("the fill is ready");
 		};
 		match drop_all {
@@ -28127,7 +28173,7 @@ mod test {
 		let waiter = kio::Waiter::noop();
 		assert_eq!(drain_groups(&mut subscriber), [3]);
 		assert!(
-			dynamic.poll_requested_groups(&waiter).is_pending(),
+			dynamic.poll_requested_fill(&waiter).is_pending(),
 			"the stale run settles the reader"
 		);
 
@@ -28135,7 +28181,7 @@ mod test {
 			.update(narrow.with_delay(Delay::default().with_max(Duration::from_secs(60))))
 			.unwrap();
 		assert!(subscriber.poll_next_group(&waiter).is_pending());
-		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&waiter) else {
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("the wider budget asks for the stale run");
 		};
 		assert_eq!((fill.start().group, fill.end()), (0, 3));
@@ -28168,7 +28214,7 @@ mod test {
 		// A reader of the run alone, which the verdict does not settle, waits on the same fill.
 		let mut bounded = producer.subscribe(terms().with_ranges([Range::groups(0..3)]));
 		assert!(drain_groups(&mut bounded).is_empty());
-		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&waiter) else {
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("a fill is asked below the start");
 		};
 		fill.reject_groups(0..3, Error::Old);
@@ -28179,7 +28225,7 @@ mod test {
 			[(0, 3)],
 			"the readers waiting now are refused"
 		);
-		assert!(dynamic.poll_requested_groups(&waiter).is_pending());
+		assert!(dynamic.poll_requested_fill(&waiter).is_pending());
 		assert_eq!(
 			producer.state.read().drops.get(&0),
 			Some(&Hole::stale(max_age)),
@@ -28190,7 +28236,7 @@ mod test {
 		assert_eq!(drain_groups(&mut later), [3]);
 		assert_eq!(drained_drops(&mut later), [(0, 3)]);
 		assert!(
-			dynamic.poll_requested_groups(&waiter).is_pending(),
+			dynamic.poll_requested_fill(&waiter).is_pending(),
 			"the verdict is not asked again"
 		);
 
@@ -28198,7 +28244,7 @@ mod test {
 		let mut again = producer.subscribe(terms());
 		assert_eq!(drain_groups(&mut again), [3]);
 		assert!(
-			matches!(dynamic.poll_requested_groups(&waiter), Poll::Ready(Ok(_))),
+			matches!(dynamic.poll_requested_fill(&waiter), Poll::Ready(Ok(_))),
 			"a forgotten verdict is asked again"
 		);
 	}
@@ -28227,7 +28273,7 @@ mod test {
 		let mut open = reader(budget, Range::groups(0..));
 		assert_eq!(open.poll_drop(&waiter), Poll::Ready((0..2, Hole::stale(budget))));
 		assert_eq!(drain_groups(&mut open), [3]);
-		assert!(dynamic.poll_requested_groups(&waiter).is_pending(), "nothing is asked");
+		assert!(dynamic.poll_requested_fill(&waiter).is_pending(), "nothing is asked");
 
 		let mut bounded = reader(budget, Range::groups(0..2));
 		assert!(
@@ -28238,7 +28284,7 @@ mod test {
 		assert_eq!(drain_groups(&mut wider), [3]);
 		assert!(wider.poll_drop(&waiter).is_pending(), "it still wants the groups");
 		let mut asked = Vec::new();
-		while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&waiter) {
+		while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) {
 			asked.push((fill.start().group, fill.end()));
 		}
 		assert_eq!(asked, [(0, 2)], "one fill, which both join");
@@ -28268,7 +28314,7 @@ mod test {
 		let waiter = kio::Waiter::noop();
 		let mut first = reader();
 		assert!(first.poll_recv_group(&waiter).is_pending());
-		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&waiter) else {
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("the unsettled stale run is asked for");
 		};
 		assert_eq!((fill.start().group, fill.end()), (0, 2));
@@ -28542,7 +28588,7 @@ mod test {
 		};
 		assert_eq!(first.start, 0);
 		assert!(
-			dynamic.poll_requested_groups(&waiter).is_pending(),
+			dynamic.poll_requested_fill(&waiter).is_pending(),
 			"a dropped run asks no fill"
 		);
 
@@ -28550,7 +28596,7 @@ mod test {
 		pool.sweep();
 		assert!(producer.state.read().drops.is_empty(), "the run expired");
 		let _ = subscriber.poll_recv_group(&waiter);
-		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&waiter) else {
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("the forgotten run is asked of a fill");
 		};
 		assert_eq!(fill.start().group..fill.end(), 1..2);
@@ -28569,7 +28615,7 @@ mod test {
 		producer.start_at(START).unwrap();
 		write_group(&producer, START);
 		assert_eq!(drain_groups(&mut subscriber), [START]);
-		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&kio::Waiter::noop()) else {
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&kio::Waiter::noop()) else {
 			panic!("the miss below the start is asked");
 		};
 		// Nothing arrives once the feed ends, so a refusal is a verdict on the track.
@@ -29021,7 +29067,7 @@ mod test {
 		live.start_at(1).unwrap();
 		live.write_frame(live.key_time(), &b"delta"[..]).unwrap();
 		let _fetch = consumer.fetch_group(0, None);
-		let fill = dynamic.requested_groups().await.unwrap();
+		let fill = dynamic.requested_fill().await.unwrap();
 		let mut head = fill.accept(0, Info::timed()).unwrap().expect("a fresh group");
 		head.write_frame(head.key_time(), &b"snapshot"[..]).unwrap();
 
@@ -30224,7 +30270,7 @@ mod test {
 
 		// Frame 0 was shed: the late reader asks the handler for a flight from it.
 		assert_eq!(read_numbered(&mut late), None);
-		let fill = match requests.poll_requested_groups(&kio::Waiter::noop()) {
+		let fill = match requests.poll_requested_fill(&kio::Waiter::noop()) {
 			Poll::Ready(fill) => fill.unwrap(),
 			Poll::Pending => panic!("a flight is asked"),
 		};
@@ -30349,7 +30395,7 @@ mod test {
 	/// The next fill asked of `requests`, if any.
 	#[cfg(feature = "async")]
 	fn asked(requests: &Requests) -> Option<FillGroups> {
-		match requests.poll_requested_groups(&kio::Waiter::noop()) {
+		match requests.poll_requested_fill(&kio::Waiter::noop()) {
 			Poll::Ready(fill) => Some(fill.unwrap()),
 			Poll::Pending => None,
 		}
@@ -30924,14 +30970,14 @@ mod test {
 		let mut reader = producer.subscribe(replay().with_order(Order::Ascending).with_range(0..2));
 		assert_eq!(read_now(&mut reader, false), None);
 		assert!(
-			dynamic.requested_groups().now_or_never().is_none(),
+			dynamic.requested_fill().now_or_never().is_none(),
 			"an idle copy a feed may still answer asks nothing"
 		);
 
 		producer.set_unfed(true);
 		assert_eq!(read_now(&mut reader, false), None, "the fill is out");
 		let fill = dynamic
-			.requested_groups()
+			.requested_fill()
 			.now_or_never()
 			.expect("the holes are asked at once")
 			.unwrap();
