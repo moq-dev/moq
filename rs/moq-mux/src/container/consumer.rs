@@ -573,6 +573,12 @@ impl<F: Container> Consumer<F> {
 	}
 
 	fn poll_event_once(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Event>, F::Error>> {
+		// Where the publisher stood as the subscription began, read as soon as its answer reports a
+		// largest, before a group the reader waits on lets later ones raise it. A largest not yet in
+		// range takes the first one that is.
+		if self.joined.is_none() {
+			self.join(waiter);
+		}
 		// Grab any new groups from the track, recording whether the track is finished.
 		let finished = self.poll_read_finish(waiter).is_ready();
 
@@ -2242,6 +2248,55 @@ mod tests {
 			));
 			assert_eq!(reader.backlog(), backlog.then_some(landed), "joined at {joined}");
 		}
+	}
+
+	/// The join's boundary is where the publisher stood as it answered, though the groups it owes
+	/// are held up while the publisher moves on: the first item the ordered reader hands out comes
+	/// after the largest has passed it.
+	#[tokio::test(start_paused = true)]
+	async fn the_join_is_the_answer_though_the_first_group_is_held() {
+		use crate::container::test_util::{Link, origin};
+
+		let (publisher, subscriber) = (origin(1), origin(2));
+		// SETUP and the Announce Stream take the first two uni streams, so every group waits.
+		let link = Link::held(&publisher, &subscriber, 2).await;
+		let route = publisher
+			.route("room", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let mut track = route
+			.broadcast()
+			.create_track("data", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		route.announce().unwrap();
+		let remote = subscriber
+			.consume()
+			.follow("room", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
+		write_group(&mut track, 0, &[ts(0)]);
+		let subscription = remote
+			.track("data")
+			.unwrap()
+			.subscribe(
+				moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(1))),
+			)
+			.await
+			.unwrap();
+		let mut reader = Consumer::new(subscription, Container::Legacy(crate::container::Kind::Audio));
+		carried().await;
+		assert!(reader.poll_read(&kio::Waiter::noop()).is_pending());
+		write_group(&mut track, 1, &[ts(20_000)]);
+		write_group(&mut track, 2, &[ts(40_000)]);
+		link.open();
+		carried().await;
+		assert!(matches!(
+			reader.read().await.unwrap(),
+			Some(Read::Frame { group: 0, .. })
+		));
+		assert_eq!(reader.joined, Some(0));
 	}
 
 	/// The join's boundary is where the publisher stood as it answered, not the newer largest by the
