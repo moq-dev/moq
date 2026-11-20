@@ -2877,9 +2877,9 @@ export class Subscriber {
 	// requested floor, pending, while SUBSCRIBE_START or a range's SUBSCRIBE_STARTED has yet to
 	// say where one starts. Mirrors the Rust `SubStream::declare`.
 	#declare(entry: SubscribeEntry): void {
-		// Where the publisher started each live range asked from a group's start or the oldest group,
-		// which a reader's time start there resolves to when the copy holds no group at it. Mirrors the Rust
-		// `report_time_starts`.
+		// Where the publisher started each live range asked from a group's start, which a reader's
+		// time start there resolves to when the copy holds no group at it, and one asked from the
+		// oldest group as asked from 0. Mirrors the Rust `SubStream::report_starts`.
 		const times: [bigint, bigint][] = [];
 		// And each one counting back, which the copy, holding only part of the track, can't count,
 		// with the latest group it counted back from.

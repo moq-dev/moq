@@ -4665,6 +4665,31 @@ test("a group an inner front hands out already failed still continues on the out
 	b.close();
 });
 
+// Mirrors `a_routed_reader_places_a_range_past_one_still_waiting` in rs/moq-net/src/model/resume.rs:
+// a range the copy placed is placed on the reader too while an earlier one still waits on a time
+// start, so a publisher names its start.
+test("a routed reader places a range past one still waiting", async () => {
+	const a = new BroadcastProducer();
+	const ta = copy(a);
+	hooks.receiveTrack(ta.producer);
+	const front = new Front();
+	front.serve(a.consume());
+	ta.write(64n);
+	const sub = front.consumer
+		.track("seq")
+		.subscribe({ delay: { max: null }, ranges: [{ start: { time: 66n } }, { start: { time: 64n } }] });
+	try {
+		await settle();
+		const resolved = hooks.servingResolved(sub);
+		expect(resolved[0]).toBeUndefined();
+		expect(resolved[1]?.start).toBe(64n);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		a.close();
+	}
+});
+
 // Mirrors `an_ended_copy_leaves_a_time_start_to_the_serving_copy` in rs/moq-net/src/model/resume.rs:
 // a copy that failed holds nothing past its last group, so it reaches a time start past that group
 // back to its oldest. The copy continuing the track places it where the track holds it.
