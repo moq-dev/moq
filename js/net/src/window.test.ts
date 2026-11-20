@@ -300,7 +300,7 @@ describe("Window", () => {
 		const held = new Keys([4000n, 9000n]);
 		held.looks = true;
 		let window = new Window([range(time(8500n))], 9000n, held);
-		expect(window.lookups()).toEqual([{ time: 8500n, below: 9000n }]);
+		expect(window.lookups()).toEqual([{ time: 8500n, floor: 4001n }]);
 		expect([window.settled, window.contains(9000n), window.resolved()]).toEqual([false, false, [undefined]]);
 		held.held.add(8000n);
 		expect(window.found(8500n, 8000n, held)).toBe(true);
@@ -313,7 +313,7 @@ describe("Window", () => {
 		expect(new Window([range(time(8000n))], 9000n, held).lookups()).toHaveLength(0);
 
 		window = new Window([range(time(500n))], 9000n, held);
-		expect(window.lookups()).toEqual([{ time: 500n, below: 4000n }]);
+		expect(window.lookups()).toEqual([{ time: 500n, floor: 0n }]);
 		expect(window.found(500n, undefined, held)).toBe(true);
 		expect(window.resolved()).toEqual([{ start: 0n, end: undefined, floored: false }]);
 		expect(window.contains(4000n)).toBe(true);
@@ -347,7 +347,7 @@ describe("Window", () => {
 		const held = new Keys([4000n, 9000n]);
 		held.looks = true;
 		const window = new Window([range(time(500n), time(3000n))], 9000n, held);
-		expect(window.lookups()).toEqual([{ time: 500n, below: 4000n }]);
+		expect(window.lookups()).toEqual([{ time: 500n, floor: 0n }]);
 		expect(window.found(500n, undefined, held)).toBe(true);
 		expect(window.settled).toBe(true);
 		expect(window.resolved()).toEqual([{ start: 0n, end: 3001n, floored: false }]);
