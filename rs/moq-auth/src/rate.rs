@@ -103,8 +103,7 @@ mod tests {
 		let claims = key.verify(&key.sign(&claims).unwrap()).unwrap();
 		assert_eq!(claims.publish.rate, Some(Rate::from_bps(8000).unwrap()));
 		assert_eq!(claims.subscribe.rate, Some(Rate::from_bps(16000).unwrap()));
-		let scope: crate::Scope =
-			serde_json::from_str(r#"{"root":"room","publish":[""],"subscribe":[""]}"#).unwrap();
+		let scope: crate::Scope = serde_json::from_str(r#"{"root":"room","publish":[""],"subscribe":[""]}"#).unwrap();
 		assert!(scope.allows(&claims));
 	}
 }

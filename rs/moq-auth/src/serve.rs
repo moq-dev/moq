@@ -1530,8 +1530,7 @@ mod tests {
 						tier: Some("affiliate".into()),
 						link: Some(RuleLink::None),
 						publish: Some(
-							Access::new(prefixes(&["affiliate"]))
-								.with_rate(crate::Rate::from_bps(1_000_000).unwrap()),
+							Access::new(prefixes(&["affiliate"])).with_rate(crate::Rate::from_bps(1_000_000).unwrap()),
 						),
 						..rule(&[], &["affiliate"])
 					},

@@ -930,9 +930,7 @@ struct Listing {
 
 impl Listing {
 	async fn new(node: &origin::Producer, prefix: &str) -> Self {
-		let routes = (node.consume().scope(prefix, &Prefixes::all()))
-			.unwrap()
-			.routes();
+		let routes = (node.consume().scope(prefix, &Prefixes::all())).unwrap().routes();
 		let listing = Self { routes };
 		// The request, its answer, and the initial set.
 		kio::clock::sleep(DEBOUNCE).await;

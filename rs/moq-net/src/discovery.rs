@@ -95,7 +95,10 @@ impl Discovery {
 			// goes out. A prefix too long for a path names nothing to ask about.
 			false => {
 				let granted = origin.allowed();
-				for prefix in granted.iter().filter_map(|prefix| crate::Path::new(prefix.as_str()).ok()) {
+				for prefix in granted
+					.iter()
+					.filter_map(|prefix| crate::Path::new(prefix.as_str()).ok())
+				{
 					let snapshot = origin.snapshot(&prefix);
 					discovery.requests.insert(prefix.clone(), Request::default());
 					discovery.changes.push_back(Change::Open(prefix, snapshot));

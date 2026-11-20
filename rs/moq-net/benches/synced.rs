@@ -45,10 +45,7 @@ fn table(streams: usize, consumers: usize) -> Table {
 }
 
 fn scoped(producer: &origin::Producer, prefix: &str) -> origin::Consumer {
-	producer
-		.consume()
-		.scope(prefix, &Prefixes::all())
-		.unwrap()
+	producer.consume().scope(prefix, &Prefixes::all()).unwrap()
 }
 
 fn bench_land(c: &mut Criterion) {

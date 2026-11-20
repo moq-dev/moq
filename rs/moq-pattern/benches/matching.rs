@@ -146,7 +146,10 @@ fn algebra(c: &mut Criterion) {
 	for bytes in [4096, 16384, MAX_MESSAGE] {
 		let (message, previous) = prefix_grant(bytes);
 		let size = wire(&message);
-		assert!(size <= bytes && size * 16 > bytes * 15, "prefix fills {size} of {bytes} bytes");
+		assert!(
+			size <= bytes && size * 16 > bytes * 15,
+			"prefix fills {size} of {bytes} bytes"
+		);
 		let message: Vec<Prefix> = message.iter().map(|text| text.parse().unwrap()).collect();
 		let reduced: Prefixes = message.iter().cloned().collect();
 		assert_eq!(reduced.len(), message.len(), "prefix members are disjoint");

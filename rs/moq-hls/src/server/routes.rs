@@ -475,7 +475,10 @@ mod tests {
 
 		let restricted = origin
 			.consume()
-			.scope("", &moq_net::Prefixes::from("room/live".parse::<moq_net::Prefix>().unwrap()))
+			.scope(
+				"",
+				&moq_net::Prefixes::from("room/live".parse::<moq_net::Prefix>().unwrap()),
+			)
 			.unwrap();
 		let app = Server::new(restricted, Default::default()).unwrap().router();
 		let start = kio::clock::now();
@@ -837,7 +840,10 @@ mod tests {
 		// an allowed sibling to wake the server into reporting the typed refusal.
 		let only_catalog = origin
 			.consume()
-			.scope("", &moq_net::Prefixes::from("room/live".parse::<moq_net::Prefix>().unwrap()))
+			.scope(
+				"",
+				&moq_net::Prefixes::from("room/live".parse::<moq_net::Prefix>().unwrap()),
+			)
 			.unwrap();
 		let all_denied = Server::new(only_catalog, Default::default()).unwrap();
 		all_denied.broadcaster("room/live").await.unwrap().ready().await;

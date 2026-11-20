@@ -11,9 +11,30 @@ const claims = (permissions: string) =>
 	`Claims { root: "compat", ${permissions} expires: None, issued: None, not_before: None, }`;
 
 for (const [name, permissions, changes] of [
-	["Prefixes", prefixes, [["video", "audio"], ['[""', '["private"']]],
-	["Patterns", patterns, [["video/**", "audio/**"], ['Pattern("**")', 'Pattern("private/**")']]],
-	["Access", access, [["video/**", "audio/**"], ['Pattern("**")', 'Pattern("private/**")']]],
+	[
+		"Prefixes",
+		prefixes,
+		[
+			["video", "audio"],
+			['[""', '["private"'],
+		],
+	],
+	[
+		"Patterns",
+		patterns,
+		[
+			["video/**", "audio/**"],
+			['Pattern("**")', 'Pattern("private/**")'],
+		],
+	],
+	[
+		"Access",
+		access,
+		[
+			["video/**", "audio/**"],
+			['Pattern("**")', 'Pattern("private/**")'],
+		],
+	],
 ] as const) {
 	test(`verifies ${name} claims`, () => {
 		expect(() => verify(claims(permissions))).not.toThrow();

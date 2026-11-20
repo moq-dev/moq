@@ -301,7 +301,11 @@ impl Grants {
 			Prefix::try_from(normalized.as_str()).map_err(|err| format!("legacy prefix {prefix:?}: {err}"))
 		};
 		let prefixes = |prefixes: Option<Vec<String>>| -> Result<Access, String> {
-			let path: Prefixes = prefixes.unwrap_or_default().iter().map(legacy).collect::<Result<_, _>>()?;
+			let path: Prefixes = prefixes
+				.unwrap_or_default()
+				.iter()
+				.map(legacy)
+				.collect::<Result<_, _>>()?;
 			Ok(Access::new(path))
 		};
 		Ok((prefixes(self.put)?, prefixes(self.get)?))

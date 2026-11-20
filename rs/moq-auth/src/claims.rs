@@ -640,7 +640,11 @@ mod tests {
 
 	#[test]
 	fn test_claims_refuse_a_malformed_prefix() {
-		for json in [r#"{"publish":["/a"]}"#, r#"{"publish":["a/"]}"#, r#"{"publish":["a//b"]}"#] {
+		for json in [
+			r#"{"publish":["/a"]}"#,
+			r#"{"publish":["a/"]}"#,
+			r#"{"publish":["a//b"]}"#,
+		] {
 			assert!(serde_json::from_str::<Claims>(json).is_err(), "{json}");
 		}
 	}

@@ -267,7 +267,17 @@ mod tests {
 	/// refused like any other malformed prefix.
 	#[test]
 	fn invalid_prefixes_are_refused() {
-		for text in ["**", "room/**", "*", "room/*/cam", "cam-*.hang", "/room", "room/", "room//a", r"a\b"] {
+		for text in [
+			"**",
+			"room/**",
+			"*",
+			"room/*/cam",
+			"cam-*.hang",
+			"/room",
+			"room/",
+			"room//a",
+			r"a\b",
+		] {
 			let mut buf = Vec::new();
 			let mut w = Encoder::new(&mut buf, Version::Lite07.into());
 			w.varint(AUTH_OK).unwrap();

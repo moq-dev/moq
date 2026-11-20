@@ -377,10 +377,7 @@ async fn a_grant_change_under_a_coarsened_ask_holds_the_readers_that_arrive() {
 #[kio::test]
 async fn grant_changes_hold_only_what_the_grant_still_shows() {
 	let (mut subscriber, _consumer) = subscriber();
-	subscriber.origin = subscriber
-		.origin
-		.scope("r", &crate::Prefixes::all())
-		.unwrap();
+	subscriber.origin = subscriber.origin.scope("r", &crate::Prefixes::all()).unwrap();
 	let granting = |prefixes: &[String]| {
 		Permit::granting(
 			(prefixes.iter())

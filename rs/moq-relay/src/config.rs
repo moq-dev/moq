@@ -1826,7 +1826,10 @@ ws = false
 		}
 		let all = Some((moq_auth::Prefixes::all(), moq_auth::Prefixes::all()));
 
-		for args in [&["moq-relay", "--auth-public", ""][..], &["moq-relay", "--auth-public="]] {
+		for args in [
+			&["moq-relay", "--auth-public", ""][..],
+			&["moq-relay", "--auth-public="],
+		] {
 			let config = Config::parse_and_merge(args.iter().copied()).expect("cli load");
 			assert_eq!(everything(&config), all, "{args:?}");
 		}
@@ -1872,7 +1875,10 @@ ws = false
 		std::fs::write(&path, "[auth]\npublic = \"**\"\n").unwrap();
 		let args = [std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
 		let err = Config::parse_and_merge(args).unwrap_err();
-		assert!(format!("{err:#}").contains("the empty prefix covers every path"), "{err:#}");
+		assert!(
+			format!("{err:#}").contains("the empty prefix covers every path"),
+			"{err:#}"
+		);
 	}
 
 	/// The variables a QUIC-LB setting could also be read from, current and released.

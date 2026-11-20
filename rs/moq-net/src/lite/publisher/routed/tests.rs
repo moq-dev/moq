@@ -60,7 +60,10 @@ fn path(path: &str) -> Path {
 }
 
 fn prefixes(members: &[&str]) -> Prefixes {
-	members.iter().map(|member| Prefix::try_from(*member).unwrap()).collect()
+	members
+		.iter()
+		.map(|member| Prefix::try_from(*member).unwrap())
+		.collect()
 }
 
 fn grant(index: usize) -> crate::auth::Grant {

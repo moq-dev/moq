@@ -48,6 +48,7 @@ These land with the next breaking release.
 - **WebRTC moves to `moq-webrtc`.** The `moq-rtc` crate is renamed
   `moq-webrtc`: replace `moq_rtc::` with `moq_webrtc::`. Its last release stays
   on crates.io. Nothing changes on the wire.
+
 - **The default priority byte moves again.** Priorities are signed in every
   API, -128 to 127 with 0 unset, so nobody has to know that 127 is the middle
   of a byte. The wire keeps one byte and one urgency on both protocols, so an
@@ -56,44 +57,54 @@ These land with the next breaking release.
   hang's media priorities now sit above that default rather than below it.
   Mixed versions only differ in how an unset priority ranks against a set one,
   so upgrade publishers and players in either order.
+
 - **moq-transport drafts 14 through 17, 19, and 21 are dropped.** Rust and
   JavaScript speak moq-transport drafts 18, 20, and 22, and the `moql` SETUP
   negotiates moq-lite only. Before upgrading, move peers that offer only
   dropped drafts to draft 18, 20, or 22, or a moq-lite version, so they can
   still connect.
+
 - **WebSocket needs a QMux subprotocol** (#6231). Relays answer a WebSocket
   upgrade that offers no `qmux-NN` subprotocol with 400 instead of falling back
   to the legacy `webtransport` format, so upgrade such clients before relays.
+
 - **Data-track breaks are an object with no bytes** (#5815). A hang data
   track (TS private PES, sections, passthrough, text) marks a discontinuity with a
   group of one empty object instead of a skipped group. Older consumers fail
   to decode it, so upgrade exporters and players before publishers.
+
 - **Auth requests name `webtransport`** (#5293). Relays report a WebTransport
   session as `webtransport` instead of `quic`, and older auth servers reject the
   new value, so upgrade auth servers before relays.
+
 - **Auth roles are pattern arrays.** Uncapped tokens and grants keep their
   format. An object role, including one with a `rate` cap, is refused; use
   pattern arrays for `publish` and `subscribe`.
+
 - **The join interval replaces archive timelines.** The hang catalog's root
   `archive` section is gone, and the root `clock` moved to `sync.clock`. The
   catalog's `sync.interval`, the longest GOP of any track, is the grid an
   HLS exporter numbers segments on from the media tracks themselves; Rust
   publishers and `@moq/publish` declare it. Neither side reads the other's
   shape, so upgrade HLS exporters and their publishers together.
+
 - **Announce restarts.** On moq-lite 07 another instance at a path starts
   before the one it replaces ends, and `ANNOUNCE_UPDATE` carries a higher epoch
   of the same one. lite-06's `ANNOUNCE_RESTART` is named `ANNOUNCE_UPDATE`, as
   it always meant. Elsewhere, a restart is still an end then a start.
+
 - **Publisher instances ride the route.** moq-lite 07 carries the instance and
   epoch after the path in `ANNOUNCE_START`, and the
   pinned instance in `TRACK`, `TRACKS`, `SUBSCRIBE`, and `FETCH`. Older wires
   carry none, so the receiving session mints an instance per announcement:
   default lite-06 sessions, including cluster GOAWAY redials, lose seamless
   cross-route failover until lite-07 is the default.
+
 - **Route cost is one value** (#4661). Upgraded nodes write lite-06's cold
   cost at 2^62-1, so an older relay that still ranks on `(warm, cold)` breaks
   equal-warm ties against routes that crossed an upgraded node. It is only a
   tie-break and ends once the fleet is upgraded.
+
 - **A track is timed or untimed, and nothing fills in a timestamp on
   receive.** Tracks from moq-lite before 05, and moq-transport tracks without
   `TIMESCALE` arrive untimed instead of
@@ -101,6 +112,7 @@ These land with the next breaking release.
   carry a send time instead, which their receivers pass through as the track's
   time; see [untimed tracks](/concept/moq-lite#subscriptions). A new subscriber with no
   start on an untimed track starts at the latest group.
+
 - **Max age and max delay count wall-clock time too.** A superseded group is
   stale once its successor arrived a full budget ago, as well as by media
   time, so an untimed track is no longer exempt. With the default zero

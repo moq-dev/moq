@@ -690,7 +690,12 @@ impl Permit {
 fn confining(prefixes: &Prefixes) -> Option<Vec<crate::Path>> {
 	match prefixes.matches("") {
 		true => None,
-		false => Some(prefixes.iter().filter_map(|prefix| crate::Path::new(prefix.as_str()).ok()).collect()),
+		false => Some(
+			prefixes
+				.iter()
+				.filter_map(|prefix| crate::Path::new(prefix.as_str()).ok())
+				.collect(),
+		),
 	}
 }
 
@@ -3116,7 +3121,10 @@ mod tests {
 	}
 
 	fn prefixes(texts: &[&str]) -> Prefixes {
-		texts.iter().map(|text| crate::Prefix::try_from(*text).unwrap()).collect()
+		texts
+			.iter()
+			.map(|text| crate::Prefix::try_from(*text).unwrap())
+			.collect()
 	}
 
 	fn grant(publish: &[&str], subscribe: &[&str]) -> Grant {
@@ -3168,7 +3176,11 @@ mod tests {
 			Some(vec![path("a/b"), path("c/d")])
 		);
 		assert_eq!(permit(Some(&[""]), Some(&[""])).regions(), None, "neither confines");
-		assert_eq!(permit(Some(&["a"]), Some(&["b"])).regions(), Some(vec![]), "nothing in both");
+		assert_eq!(
+			permit(Some(&["a"]), Some(&["b"])).regions(),
+			Some(vec![]),
+			"nothing in both"
+		);
 	}
 
 	/// A permit allows within a scope what the scope, the grant, and the limit all allow:
@@ -3182,7 +3194,10 @@ mod tests {
 		let within = |permit: Permit, scope: &[&str]| permit.within(prefixes(scope));
 		assert_eq!(within(permit(Some(&["a/b"]), None), &[""]), prefixes(&["a/b"]));
 		assert_eq!(within(permit(None, Some(&["a"])), &["a/b", "c"]), prefixes(&["a/b"]));
-		assert_eq!(within(permit(Some(&["a"]), Some(&["a/b/c"])), &["a/b"]), prefixes(&["a/b/c"]));
+		assert_eq!(
+			within(permit(Some(&["a"]), Some(&["a/b/c"])), &["a/b"]),
+			prefixes(&["a/b/c"])
+		);
 		assert!(within(permit(Some(&["a/x"]), Some(&["a/y"])), &["a"]).is_empty());
 		assert_eq!(within(permit(None, None), &["a"]), prefixes(&["a"]));
 	}

@@ -20,7 +20,10 @@ impl fmt::Display for InvalidPrefix {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
 			Self::Wildcard(text) if text == "**" => {
-				write!(f, "`**` is a wildcard: grants are prefixes, and the empty prefix covers every path")
+				write!(
+					f,
+					"`**` is a wildcard: grants are prefixes, and the empty prefix covers every path"
+				)
 			}
 			Self::Wildcard(text) => match text.strip_suffix("/**").filter(|head| !head.contains('*')) {
 				Some(head) => write!(
@@ -149,7 +152,11 @@ fn normalize(path: &str) -> std::borrow::Cow<'_, str> {
 	if parts(path).all(|part| !part.is_empty()) {
 		return path.into();
 	}
-	parts(path).filter(|part| !part.is_empty()).collect::<Vec<_>>().join("/").into()
+	parts(path)
+		.filter(|part| !part.is_empty())
+		.collect::<Vec<_>>()
+		.join("/")
+		.into()
 }
 
 /// Segment-by-segment order of two canonical paths.
@@ -272,7 +279,11 @@ impl Prefixes {
 		}
 		// Everything beneath the new member sorts right after where it goes.
 		let at = self.0.partition_point(|member| member < &prefix);
-		let end = at + self.0[at..].iter().take_while(|member| prefix.matches(&member.text)).count();
+		let end = at
+			+ self.0[at..]
+				.iter()
+				.take_while(|member| prefix.matches(&member.text))
+				.count();
 		self.0.splice(at..end, [prefix]);
 		true
 	}
@@ -312,7 +323,9 @@ impl Prefixes {
 			return true;
 		}
 		// Members beneath it sort right after it.
-		let at = self.0.partition_point(|member| order(&member.text, path) == Ordering::Less);
+		let at = self
+			.0
+			.partition_point(|member| order(&member.text, path) == Ordering::Less);
 		self.0.get(at).is_some_and(|member| beneath(&member.text, path))
 	}
 
@@ -437,9 +450,21 @@ mod tests {
 			let err = text.parse::<Prefix>().unwrap_err();
 			assert_eq!(err, InvalidPrefix::Wildcard(text.to_string()), "{text}");
 		}
-		assert!(InvalidPrefix::Wildcard("**".into()).to_string().contains("empty prefix"));
-		assert!(InvalidPrefix::Wildcard("anon/**".into()).to_string().contains("`anon` covers"));
-		assert!(InvalidPrefix::Wildcard("a/*/b".into()).to_string().contains("holds a wildcard"));
+		assert!(
+			InvalidPrefix::Wildcard("**".into())
+				.to_string()
+				.contains("empty prefix")
+		);
+		assert!(
+			InvalidPrefix::Wildcard("anon/**".into())
+				.to_string()
+				.contains("`anon` covers")
+		);
+		assert!(
+			InvalidPrefix::Wildcard("a/*/b".into())
+				.to_string()
+				.contains("holds a wildcard")
+		);
 	}
 
 	#[test]
@@ -560,7 +585,10 @@ mod tests {
 	fn patterns_cover_the_same_paths() {
 		let set = prefixes(&["a", ""]);
 		assert_eq!(set.patterns(), Patterns::from(Pattern::all()));
-		assert_eq!(prefixes(&["a/b"]).patterns(), Patterns::from(Pattern::subtree("a/b").unwrap()));
+		assert_eq!(
+			prefixes(&["a/b"]).patterns(),
+			Patterns::from(Pattern::subtree("a/b").unwrap())
+		);
 		let deep = ["a"; Pattern::MAX_SEGMENTS].join("/");
 		assert_eq!(prefix(&deep).pattern(), Pattern::literal(&deep).unwrap());
 	}
@@ -589,7 +617,8 @@ mod tests {
 					.collect()
 			})
 			.collect();
-		let covered = |set: &Prefixes| -> Vec<&str> { paths.iter().copied().filter(|path| set.matches(path)).collect() };
+		let covered =
+			|set: &Prefixes| -> Vec<&str> { paths.iter().copied().filter(|path| set.matches(path)).collect() };
 		let brute = |set: &Prefixes, path: &str| set.iter().any(|member| member.matches(path));
 		for a in &sets {
 			for path in &paths {
@@ -597,15 +626,31 @@ mod tests {
 				let p = prefix(path);
 				let beneath: Vec<_> = paths.iter().filter(|other| p.matches(other)).collect();
 				// Covering a path covers its whole subtree.
-				assert_eq!(a.matches(path), beneath.iter().all(|other| brute(a, other)), "{a:?} covers {path}");
-				assert_eq!(a.overlaps(path), beneath.iter().any(|other| brute(a, other)), "{a:?} overlaps {path}");
+				assert_eq!(
+					a.matches(path),
+					beneath.iter().all(|other| brute(a, other)),
+					"{a:?} covers {path}"
+				);
+				assert_eq!(
+					a.overlaps(path),
+					beneath.iter().any(|other| brute(a, other)),
+					"{a:?} overlaps {path}"
+				);
 			}
 			for b in &sets {
 				let both = a.intersect(b);
-				let want: Vec<&str> = paths.iter().copied().filter(|path| brute(a, path) && brute(b, path)).collect();
+				let want: Vec<&str> = paths
+					.iter()
+					.copied()
+					.filter(|path| brute(a, path) && brute(b, path))
+					.collect();
 				assert_eq!(covered(&both), want, "{a:?} & {b:?}");
 				let a_paths = covered(a);
-				assert_eq!(a.covers(b), covered(b).iter().all(|path| a_paths.contains(path)), "{a:?} covers {b:?}");
+				assert_eq!(
+					a.covers(b),
+					covered(b).iter().all(|path| a_paths.contains(path)),
+					"{a:?} covers {b:?}"
+				);
 			}
 		}
 	}

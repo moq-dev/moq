@@ -7721,10 +7721,7 @@ impl Consumer {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn node_id(&self, subscribe: &Producer) -> Option<crate::route::NodeId> {
 		let whole = |root: &Path, scope: &OriginScope| {
-			root.is_empty()
-				&& scope.allowed.matches("")
-				&& scope.excluded.is_empty()
-				&& scope.mounts.is_empty()
+			root.is_empty() && scope.allowed.matches("") && scope.excluded.is_empty() && scope.mounts.is_empty()
 		};
 		let routing = self.proxy
 			&& subscribe.link() != Link::Local
@@ -8266,7 +8263,10 @@ impl Consumer {
 		let scope = self.scope.narrow(&rooted).ok_or(Error::Unauthorized)?;
 		// A filter too intricate to narrow with the scope lists nothing it can name; refuse
 		// it rather than list less than asked.
-		let listed = self.listed.intersect(&rooted.patterns()).map_err(|_| Error::Unauthorized)?;
+		let listed = self
+			.listed
+			.intersect(&rooted.patterns())
+			.map_err(|_| Error::Unauthorized)?;
 		Ok(Consumer {
 			scope,
 			listed,
@@ -9257,7 +9257,10 @@ mod tests {
 
 	/// The scope granting these prefixes: each spelled as its subtree pattern.
 	fn scopes(prefixes: &[&str]) -> Prefixes {
-		prefixes.iter().map(|prefix| Prefix::try_from(*prefix).unwrap()).collect()
+		prefixes
+			.iter()
+			.map(|prefix| Prefix::try_from(*prefix).unwrap())
+			.collect()
 	}
 
 	/// A track whose outcome is already an error still serves its finished history through
@@ -9576,10 +9579,7 @@ mod tests {
 	#[test]
 	fn only_overlapping_snapshots_hold() {
 		let producer = origin(1).produce();
-		let room = producer
-			.consume()
-			.scope("room", &Prefixes::all())
-			.unwrap();
+		let room = producer.consume().scope("room", &Prefixes::all()).unwrap();
 
 		let other = producer.snapshot("other");
 		assert!(room.routes().is_synced(), "a disjoint prefix");
@@ -9698,10 +9698,7 @@ mod tests {
 		announced.assert_next_wait();
 
 		// Naming the dot segment lists what is under it, by root or by pattern.
-		let mut announced = consumer
-			.scope(".stats", &Prefixes::all())
-			.unwrap()
-			.routes();
+		let mut announced = consumer.scope(".stats", &Prefixes::all()).unwrap().routes();
 		announced.expect_next_active("node").await;
 		announced.assert_next_wait();
 		let mut announced = consumer.scope("", &scopes(&["room/.internal"])).unwrap().routes();
@@ -9851,11 +9848,7 @@ mod tests {
 		announced.assert_next_wait();
 
 		// Rooted inside the mount, the claim covers the root itself.
-		let mut inside = project
-			.scope(".svc", &Prefixes::all())
-			.unwrap()
-			.covering()
-			.routes();
+		let mut inside = project.scope(".svc", &Prefixes::all()).unwrap().covering().routes();
 		inside.expect_next_active("").await;
 		inside.expect_next_active("foo").await;
 		inside.assert_next_wait();
@@ -10395,10 +10388,7 @@ mod tests {
 		let producer = origin(1).produce();
 		let _a = producer.announce("room/alice", RouteInfo::new()).unwrap();
 
-		let consumer = producer
-			.consume()
-			.scope("room", &Prefixes::all())
-			.unwrap();
+		let consumer = producer.consume().scope("room", &Prefixes::all()).unwrap();
 		let mut announced = consumer.routes();
 		announced.expect_next_active("alice").await;
 	}
@@ -11270,10 +11260,7 @@ mod tests {
 		let _broad = producer.announce("room", RouteInfo::new().with_cost(1)).unwrap();
 		let _narrow = producer.announce("room/alice", RouteInfo::new().with_cost(9)).unwrap();
 
-		let consumer = producer
-			.consume()
-			.scope("room/alice", &Prefixes::all())
-			.unwrap();
+		let consumer = producer.consume().scope("room/alice", &Prefixes::all()).unwrap();
 		let mut announced = consumer.routes();
 		let route = announced.expect_next_active("").await;
 		assert_eq!(route.cost, Cost::new(9));
@@ -12836,10 +12823,7 @@ mod tests {
 			.unwrap()
 			.covering()
 			.routes();
-		let mut rooted = consumer
-			.scope("room/live", &Prefixes::all())
-			.unwrap()
-			.routes();
+		let mut rooted = consumer.scope("room/live", &Prefixes::all()).unwrap().routes();
 
 		let chat = producer
 			.scope("", &scopes(&["room/live/chat"]))
@@ -17391,10 +17375,7 @@ mod tests {
 	#[kio::test]
 	async fn announced_keeps_lifecycle_and_filters_before_rerooting() {
 		let producer = origin(1).produce();
-		let consumer = producer
-			.consume()
-			.scope("room/alice", &Prefixes::all())
-			.unwrap();
+		let consumer = producer.consume().scope("room/alice", &Prefixes::all()).unwrap();
 		let broad = producer.announce("room", RouteInfo::new()).unwrap();
 		let mut selected = consumer.routes();
 		selected.assert_next_wait();

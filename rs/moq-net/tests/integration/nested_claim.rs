@@ -121,12 +121,7 @@ async fn a_claim_above_a_rooted_export_keeps_the_session() {
 	let _published = publish(&source, "", "root");
 
 	let mut options = MockConnectOptions::new(lite07());
-	options.server_publish = Some(
-		source
-			.consume()
-			.scope("tenant", &Prefixes::all())
-			.unwrap(),
-	);
+	options.server_publish = Some(source.consume().scope("tenant", &Prefixes::all()).unwrap());
 	options.client_subscribe = Some(relay.clone());
 	let pair = connect_mock(options).await;
 	settle().await;

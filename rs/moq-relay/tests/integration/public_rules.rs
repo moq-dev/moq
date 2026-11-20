@@ -185,7 +185,11 @@ async fn anon_rules_admit_under_anon_and_refuse_elsewhere() {
 /// prefix to write instead, rather than read as a narrower or wider grant.
 #[test]
 fn a_wildcard_public_rule_is_refused() {
-	for (rule, hint) in [("anon/**", "`anon` covers"), ("**", "the empty prefix"), ("*", "wildcard")] {
+	for (rule, hint) in [
+		("anon/**", "`anon` covers"),
+		("**", "the empty prefix"),
+		("*", "wildcard"),
+	] {
 		let err = rule.parse::<moq_auth::Prefix>().unwrap_err().to_string();
 		assert!(err.contains(hint), "{rule}: {err}");
 	}
@@ -233,10 +237,7 @@ async fn auth_server_public_rules_are_rooted_at_slash() {
 
 	let mut policy = moq_auth::serve::Policy::default();
 	policy.keys = Some(moq_auth::serve::Keys::File(key_path));
-	policy.public = moq_auth::Permissions::new(
-		moq_auth::Prefixes::new(),
-		"event".parse::<moq_auth::Prefix>().unwrap(),
-	);
+	policy.public = moq_auth::Permissions::new(moq_auth::Prefixes::new(), "event".parse::<moq_auth::Prefix>().unwrap());
 	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 	let server_url: url::Url = format!("http://{}/", listener.local_addr().unwrap()).parse().unwrap();
 	let server = moq_auth::serve::Server::new(policy).unwrap();

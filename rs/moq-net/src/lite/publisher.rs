@@ -3660,10 +3660,7 @@ mod announce_test {
 		let origin = Hop::new(1).unwrap().produce();
 		let root = "r".repeat(100);
 		let _route = origin.announce(format!("{root}/x"), origin::RouteInfo::new()).unwrap();
-		let consumer = origin
-			.consume()
-			.scope(root.as_str(), &crate::Prefixes::all())
-			.unwrap();
+		let consumer = origin.consume().scope(root.as_str(), &crate::Prefixes::all()).unwrap();
 		let prefix = crate::Path::new(&"p".repeat(crate::Path::MAX_BYTES - 50)).unwrap();
 		let mut answer = super::routed::Answer::alone(consumer);
 		let log = Log::default();
@@ -3908,7 +3905,10 @@ mod announce_test {
 		let auth = crate::auth::Link::new(false);
 		let limit = |prefixes: &[&str]| crate::auth::Grant {
 			publish: crate::Prefixes::new(),
-			subscribe: prefixes.iter().map(|prefix| crate::Prefix::try_from(*prefix).unwrap()).collect(),
+			subscribe: prefixes
+				.iter()
+				.map(|prefix| crate::Prefix::try_from(*prefix).unwrap())
+				.collect(),
 			expires: None,
 		};
 		auth.handle().authorize(&limit(&["a", "x"]));
@@ -11824,10 +11824,7 @@ mod tests {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
 			let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let root = "r".repeat(crate::Path::MAX_BYTES - 2);
-			let scoped = origin
-				.consume()
-				.scope(root.as_str(), &crate::Prefixes::all())
-				.unwrap();
+			let scoped = origin.consume().scope(root.as_str(), &crate::Prefixes::all()).unwrap();
 
 			let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
 			peer_setup.set(crate::lite::Setup::default()).unwrap();

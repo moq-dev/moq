@@ -237,7 +237,12 @@
 		{ "name": "wildcard_everything", "key": "hs256", "payload": { "subscribe": ["**"] }, "claims": null },
 		{ "name": "wildcard_segment", "key": "hs256", "payload": { "subscribe": ["*/chat"] }, "claims": null },
 		{ "name": "wildcard_in_a_segment", "key": "hs256", "payload": { "publish": ["cam-*.hang"] }, "claims": null },
-		{ "name": "wildcard_in_a_capped_role", "key": "hs256", "payload": { "publish": { "path": ["**"], "rate": 1000 } }, "claims": null },
+		{
+			"name": "wildcard_in_a_capped_role",
+			"key": "hs256",
+			"payload": { "publish": { "path": ["**"], "rate": 1000 } },
+			"claims": null
+		},
 		{ "name": "malformed_prefix", "key": "hs256", "payload": { "publish": ["alice/"] }, "claims": null },
 		{
 			"name": "minted_root_with_boundary_slashes",

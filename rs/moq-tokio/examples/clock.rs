@@ -99,9 +99,8 @@ async fn main() -> anyhow::Result<()> {
 			tracing::info!(broadcast = %config.broadcast, "waiting for broadcast to be online");
 
 			let path = moq_net::Path::new(&config.broadcast)?;
-			let scope = moq_net::Prefixes::from(
-				moq_net::Prefix::try_from(path.as_str()).context("invalid broadcast name")?,
-			);
+			let scope =
+				moq_net::Prefixes::from(moq_net::Prefix::try_from(path.as_str()).context("invalid broadcast name")?);
 			let consumer = origin
 				.scope("", &scope)
 				.context("not allowed to consume broadcast")?

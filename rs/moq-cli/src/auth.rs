@@ -1059,10 +1059,7 @@ mod tests {
 		.policy()
 		.unwrap();
 		assert!(matches!(&policy.keys, Some(Keys::Dir(dir)) if dir == std::path::Path::new("/keys")));
-		assert_eq!(
-			policy.public.subscribe,
-			["anon".parse().unwrap()].into_iter().collect()
-		);
+		assert_eq!(policy.public.subscribe, ["anon".parse().unwrap()].into_iter().collect());
 		assert!(policy.public.publish.is_empty());
 		assert_eq!(policy.mtls.publish, ["".parse().unwrap()].into_iter().collect());
 		assert_eq!(policy.mtls_link, Some(moq_auth::Link::Upstream));

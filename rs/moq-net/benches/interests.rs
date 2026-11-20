@@ -49,10 +49,7 @@ fn table(watches: usize, sessions: usize) -> Table {
 }
 
 fn scoped(producer: &origin::Producer, prefix: &str) -> origin::Consumer {
-	producer
-		.consume()
-		.scope(prefix, &Prefixes::all())
-		.unwrap()
+	producer.consume().scope(prefix, &Prefixes::all()).unwrap()
 }
 
 fn bench_uncovered(c: &mut Criterion) {

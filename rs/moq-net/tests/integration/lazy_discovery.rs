@@ -198,11 +198,7 @@ async fn asks_only_about_the_watched_prefix() {
 #[kio::test]
 async fn a_new_session_asks_about_existing_watches() {
 	let subscriber = produce_origin(2);
-	let mut watch = subscriber
-		.consume()
-		.scope("b", &Prefixes::all())
-		.unwrap()
-		.routes();
+	let mut watch = subscriber.consume().scope("b", &Prefixes::all()).unwrap().routes();
 	let lazy = Lazy::with("moq-lite-07-wip", subscriber).await;
 	assert_eq!(synced(&mut watch).await, ["y"]);
 	assert_eq!(lazy.requests(), 1);
