@@ -407,6 +407,31 @@ fn an_orphan_is_released_when_the_reader_lets_go() {
 	assert_eq!(left.load(Ordering::SeqCst), Left::LOST);
 }
 
+/// Once nothing owns the origin, the node releases each orphan as lost, and a session
+/// still open keeps serving its claims.
+#[test]
+fn releasing_orphans_keeps_the_open_sessions_claims() {
+	let (node, _clock) = node();
+	let (room, other) = (cast("room"), cast("other"));
+	let first = publisher(&node, 1);
+	let second = publisher(&node, 2);
+	let _viewer = viewer(&node, 3);
+	announce(&first, &room, live(0));
+	announce(&second, &other, live(0));
+	confirm(&first);
+	confirm(&second);
+	let left = Arc::new(AtomicU8::new(Left::HELD));
+	first.orphan(node.me(), &room, Box::new(Left(left.clone())));
+	drop(first);
+
+	node.release_orphans();
+	assert_eq!(left.load(Ordering::SeqCst), Left::LOST);
+	assert_eq!(
+		node.poll_forward(3, None, &other, &kio::Waiter::noop()),
+		Poll::Ready(Some(Via::Route { node: node.me() }))
+	);
+}
+
 /// A session that returns before the debounce runs out takes the claim over: the orphan
 /// is released only once the new session serves it, so the origin never drops the claim.
 #[test]

@@ -64,6 +64,10 @@ exclude_re = [
     # `Weak::upgrade`, and `subscribe` sweeps the list again.
     'replace > with >= in Producer::serve_from$',
     'replace == with != in Consumer::subscribe$',
+    # Ranges a reader asks again unchanged, once its log no longer reaches back: asked whole
+    # they place and backfill as before, and each copy's replace of equal ranges is a no-op,
+    # so treating them as unchanged only saves that work.
+    'replace match guard ranges == self.mirrored.ranges with false in Reader::sync$',
     # Dead: every write of `until` also writes `since`, so the superseded check
     # never runs. `ResumeReader.tla` models it, so it goes with the model.
     'replace >= with < in Copy::retains$',

@@ -108,6 +108,8 @@ export interface OriginConsumer {
 	demand(path: Path.Valid, instance?: Instance.Valid, signal?: AbortSignal): Promise<broadcast.Consumer | undefined>;
 	/** Whether the handle's scope admits everything beneath the root-relative `prefix`. */
 	covers(prefix: Path.Valid): boolean;
+	/** The root-relative paths the handle's scope admits; unset for every path. */
+	readonly allowed?: Path.Patterns;
 }
 
 /** One originated advertisement exposed to the publishing wire. */

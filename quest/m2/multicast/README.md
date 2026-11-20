@@ -39,10 +39,8 @@ through a lost claim's debounce, so a reader resumes on a detour learned after
 its session closed, and a route moving behind one next hop no longer resends a
 group, since a lite-07 range may start partway through one. The lite-07 cut
 still waits on this epic's children, a flaw the mesh replay found,
-[a lite-07 reader its relay refuses as unroutable and never re-asks](/quest/m2/multicast/splice-stall.md);
-and on
-[route layer acceptance](/quest/m2/cluster-routes/acceptance.md)'s
-scoped subscriber whose grant is too wide to ask for. It does not wait on
+[a lite-07 reader its relay refuses as unroutable and never re-asks](/quest/m2/multicast/splice-stall.md).
+It does not wait on
 [warmth's port](/quest/m3/cache-routing/select.md): its wire joins lite-07
 only if the port has landed and passed the mesh replay when the cut is made,
 and otherwise moves to the first wip version after it (maintainer,
@@ -137,7 +135,7 @@ Settled:
    one. Redundant ingest is two relays claiming one Instance. This removes
    the Route Key Parameter with its proof, qualified Node IDs, and routes per
    prefix, and reverses Plan items 18 and 26 of
-   [Routes and announces](/quest/m2/cluster-routes/README.md) (rejected:
+   Routes and announces (rejected:
    every publisher an origin node, as today; measuring both, which doubles
    the prototype).
 4. ✅ **Evidence, not timers.** The route layer is a plain path vector with
@@ -348,6 +346,5 @@ Lessons from the history that bind every child:
 
 ## Related
 
-- [Routes and announces](/quest/m2/cluster-routes/README.md) - the path rule this replaced, and the acceptance fixtures the cut still waits on
 - [Cache-aware routing](/quest/m3/cache-routing/README.md) - implements the warmth pick
 - [Route health](/quest/m3/route-health/README.md) - the metadata-only secondary

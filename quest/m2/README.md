@@ -103,7 +103,8 @@ Decided 2026-11-12 (maintainer, /quest-audit before the cut):
   the capture selections. None
   is on the routes chain, which stays the critical path.
 - ✅ Under the path rule a route keeps one sticky down-only flag beside its
-  path; see the [routes epic](/quest/m2/cluster-routes/README.md). The
+  path; see the routes epic, finished in
+  [moq-dev/moq#9202](https://github.com/moq-dev/moq/pull/9202). The
   route layer that replaced it keeps the flag as a route's mark
   ([cache-aware multicast](/quest/m2/multicast/README.md) item 6).
 
@@ -285,7 +286,7 @@ what would need a breaking release had it landed right after the cut:
   returned to m2 on 2026-11-15 (maintainer, on
   [moq-dev/moq#8832](https://github.com/moq-dev/moq/pull/8832)) and became
   the request quest of [cache-aware multicast](/quest/m2/multicast/README.md);
-  media consumers (now [start placement](/quest/m2/time-addressing/start-placement.md)) to m3 (its API
+  media consumers (later start placement) to m3 (its API
   breaks ride the model; dropping hang's markers is tolerated by readers),
   until it returned to m2 on 2026-11-16;
   [moq-transport time addressing](https://github.com/moq-dev/moq/pull/8918) to m4
@@ -305,8 +306,9 @@ what would need a breaking release had it landed right after the cut:
   router key per announce stream, which the route model doesn't check, and
   keep the reopen-and-hand-over machinery for its lifetime (rejected: moving
   both to lite-08).
-- ✅ [Route acceptance](/quest/m2/cluster-routes/acceptance.md) stays in
-  the routes epic and gates the cut, per the 2026-10-13 rule that routes'
+- ✅ Route acceptance stays in
+  the routes epic and gates the cut (both finished in
+  [moq-dev/moq#9202](https://github.com/moq-dev/moq/pull/9202)), per the 2026-10-13 rule that routes'
   tier and partition tests run before it (maintainer; rejected: moving it to
   m3 and fixing late routing flaws in lite-08).
 - ✅ Group drops split: its lite-07 wire question
