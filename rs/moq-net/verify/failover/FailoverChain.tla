@@ -498,12 +498,13 @@ CleanEndIsComplete == Live(CE) /\ cp[CE].fin => \A g \in Groups : cp[CE].fr[g] >
 \* The client's track ends cleanly only after the origin ended it.
 CleanEndIsDeclared == cp[CE].fin => org.fin
 
-\* A group the client started fails only once no route is left to continue it.
-NoSkipWhileHeld == cp[CE].bad # {} => front["E"].end = "err"
+\* A group the client started fails only once no route is left to continue it: E's
+\* track failed, or it finished and no route of E's still shows.
+NoSkipWhileHeld == cp[CE].bad # {} => front["E"].end = "err" \/ \A w \in Up("E") : ~Shows(w)
 
 \* A finished read holds every frame of every group, unless E lost every route.
 SettledIsWhole ==
-    (Finished /\ ~left /\ cp[CE].st = "live") =>
+    (Finished /\ ~left /\ cp[CE].st = "live" /\ \E w \in Up("E") : Shows(w)) =>
         \A g \in Groups : cp[CE].fr[g] = F
 
 TypeOK ==
