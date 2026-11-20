@@ -185,9 +185,9 @@ export class Consumer {
 	#observing: boolean;
 	// The ordered read gave up on groups since the last one it returned.
 	#gap = false;
-	// When each gap given up before the join's boundary was known landed, by its first key: told to
+	// When each gap given up before the join's boundary was known landed, by the key it ends at: told to
 	// the estimate once the boundary is known, or dropped once the first group is handed out.
-	#unjoined?: { start: bigint; landed: Instant }[] = [];
+	#unjoined?: { end: bigint; landed: Instant }[] = [];
 	#format: Format;
 	#delay: Getter<Moq.Track.Delay>;
 	#maxBuffer: number;
@@ -326,7 +326,7 @@ export class Consumer {
 				if (this.#tuned.peek() === undefined) this.#tuned.set(true);
 				if (item.kind === "gap") {
 					this.#gap = true;
-					if (item.landed) this.#backlog(item.start, item.landed);
+					if (item.landed) this.#backlog(item.end, item.landed);
 					continue;
 				}
 				// Delivery starts at the first group: the reader already skipped what is too stale to
@@ -349,25 +349,25 @@ export class Consumer {
 		}
 	}
 
-	// Tell the estimate when groups the ordered read gave up from `start` on landed, if the publisher's
-	// largest as the subscription began reached them: they were produced before it, a join's backlog,
-	// so the estimate learns when the backlog finished arriving though nothing of it was read. One
-	// produced since, such as an outage's, is no backlog. The estimate observes every arrival itself
-	// when `#track` feeds it.
-	#backlog(start: bigint, landed: Instant): void {
+	// Tell the estimate when the groups the ordered read gave up below `end` landed, if the publisher's
+	// largest as the subscription began reached them all: they were produced before it, a join's
+	// backlog, so the estimate learns when the backlog finished arriving though nothing of it was read.
+	// One produced since, such as an outage's, is no backlog, and a gap reaching past the join may
+	// land as one, so it folds nothing. The estimate observes every arrival itself when `#track` feeds it.
+	#backlog(end: bigint, landed: Instant): void {
 		if (this.#observing) return;
 		if (this.#joined === undefined) {
-			this.#unjoined?.push({ start, landed });
+			this.#unjoined?.push({ end, landed });
 			return;
 		}
-		if (start <= this.#joined) this.#jitter.backlog(landed.since(Instant.ZERO).asMillis());
+		if (end - 1n <= this.#joined) this.#jitter.backlog(landed.since(Instant.ZERO).asMillis());
 	}
 
 	// The join's boundary is known: judge the gaps given up before it was.
 	#joinBacklog(): void {
 		const unjoined = this.#unjoined ?? [];
 		this.#unjoined = undefined;
-		for (const { start, landed } of unjoined) this.#backlog(start, landed);
+		for (const { end, landed } of unjoined) this.#backlog(end, landed);
 	}
 
 	// Buffer a group in sequence order and watch it for frames.

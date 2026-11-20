@@ -457,7 +457,8 @@ impl<F: Container> Consumer<F> {
 	/// was produced before. Its frames were never read, so a caller timing
 	/// [`arrival`](Self::arrival)s learns when a join's backlog finished arriving even when the
 	/// reader skipped it: one the ordered reader gave up as stale or late (see
-	/// [`Item::Gap`](moq_net::track::Item::Gap)'s `landed`), or one a skip here passed over.
+	/// [`Item::Gap`](moq_net::track::Item::Gap)'s `landed`), or one a skip here passed over. A gap
+	/// reaching past the join counts for none of it, since its landing may be a later group's.
 	pub fn backlog(&self) -> Option<Instant> {
 		self.backlog
 	}
@@ -1033,9 +1034,10 @@ impl<F: Container> Consumer<F> {
 			let group = match next {
 				Some(moq_net::track::Item::Group(group)) => group,
 				// What the ordered reader gave up was never read, so it is backlog when produced before
-				// the subscription.
+				// the subscription. Its landing is the latest group's, so a gap reaching past the join
+				// may report one produced since, and folds nothing.
 				Some(moq_net::track::Item::Gap { range, landed, .. }) => {
-					if self.joined.is_some_and(|joined| range.start <= joined) {
+					if self.joined.is_some_and(|joined| range.end.saturating_sub(1) <= joined) {
 						self.backlog = self.backlog.max(landed);
 					}
 					continue;
@@ -2166,6 +2168,44 @@ mod tests {
 			Some(Read::Frame { group: 1, .. })
 		));
 		assert_eq!(reader.backlog(), Some(landed), "group 0 went stale unread");
+	}
+
+	/// A gap's landing is when the latest group it gives up landed, so only a gap wholly at or below
+	/// the join is backlog: one reaching past it may report a group produced after the subscription.
+	#[tokio::test(start_paused = true)]
+	async fn a_gap_reaching_past_the_join_folds_no_backlog() {
+		let budget = Duration::from_secs(2);
+		for (joined, backlog) in [(151, false), (152, true)] {
+			let mut copy = Received::new().await;
+			let mut reader = copy
+				.reader(Delay::default().with_min(Duration::from_millis(100)).with_max(budget))
+				.await;
+			write_group(&mut copy.track, 150, &[ts(0)]);
+			carried().await;
+			assert!(matches!(
+				reader.read().await.unwrap(),
+				Some(Read::Frame { group: 150, .. })
+			));
+			// Where the publisher stood as the subscription began.
+			reader.joined = Some(joined);
+			write_group(&mut copy.track, 151, &[ts(20_000)]);
+			tokio::time::advance(Duration::from_millis(10)).await;
+			let landed = kio::clock::now();
+			write_group(&mut copy.track, 152, &[ts(40_000)]);
+			write_group(&mut copy.track, 153, &[ts(60_000)]);
+			carried().await;
+			// Groups 151 and 152 wait unread until their successors landed a budget ago, so both are
+			// given up as one stale gap, landing when 152 did.
+			tokio::time::advance(budget + Duration::from_millis(1)).await;
+			write_group(&mut copy.track, 154, &[ts(80_000)]);
+			carried().await;
+			assert!(matches!(reader.read().await.unwrap(), Some(Read::Gap { .. })));
+			assert!(matches!(
+				reader.read().await.unwrap(),
+				Some(Read::Frame { group: 153, .. })
+			));
+			assert_eq!(reader.backlog(), backlog.then_some(landed), "joined at {joined}");
+		}
 	}
 
 	/// The join's boundary is where the publisher stood as it answered, not the newer largest by the

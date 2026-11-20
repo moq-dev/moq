@@ -202,6 +202,37 @@ test("a gap given up at or below the join tells the estimate when it landed", as
 	}
 });
 
+// The same gap when the publisher stood at group 151: its landing is 152's, produced since the
+// subscription began, so a gap reaching past the join is no backlog.
+test("a gap reaching past the join folds nothing", async () => {
+	const { track, subscriber, answer, write } = joining(150n, () => 151n);
+	const reported: number[] = [];
+	const backlog = spyOn(Jitter.prototype, "backlog").mockImplementation((arrival: number) => {
+		reported.push(arrival);
+	});
+	const consumer = new Consumer(subscriber, {
+		format: new Format("audio"),
+		delay: { min: Duration.millis(100), max: Duration.millis(2000) },
+	});
+	try {
+		answer();
+		write(150, 0);
+		expect(await consumer.next()).toMatchObject({ kind: "frame", group: 150n });
+		await clock.advance(Duration.millis(10));
+		write(152, 40);
+		write(153, 60);
+		await clock.advance(Duration.millis(2001));
+		expect(await consumer.next()).toMatchObject({ kind: "gap" });
+		expect(await consumer.next()).toMatchObject({ kind: "frame", group: 153n });
+		expect(reported).toEqual([]);
+	} finally {
+		backlog.mockRestore();
+		consumer.close();
+		track.finish();
+		track.close();
+	}
+});
+
 // The publisher answers that it stood at group 200, then its largest moves to 210 before the first
 // group reaches this consumer. Group 206, given up with hole 205, was produced after the subscription
 // began, so it is no backlog.
