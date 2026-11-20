@@ -731,6 +731,14 @@ pub(crate) struct TrackState {
 	// the read guard a first frame holds, so it needs its own lock, never contended.
 	bounds: Mutex<BTreeMap<u64, Timestamp>>,
 
+	// The frames of each group a reader already held when it asked this copy to resume that
+	// group past them, by key, which the group adopts as it arrives (see
+	// [`Consumer::lend_head`]). Filled through a read guard, so it needs its own lock. One per
+	// group, taken as that group arrives or dropped as it is given up or the track tears down,
+	// so it holds only the groups readers resumed this copy at that are still to come, each
+	// billed to the pool, which reclaims it as it would a failed copy's head.
+	lent: Mutex<Lent>,
+
 	// The key and start of the highest-key group that left the cache holding a
 	// checked start (see [`group::Origin::Bound`]). Eviction is not a key prefix, so a
 	// group above it is checked against it as well as its cached neighbors; one at or below
@@ -789,6 +797,9 @@ pub(crate) struct TrackState {
 	// The highest start in `time_starts`, so the times its ranges may place are bounded
 	// without a walk of them all.
 	highest_time_start: Option<u64>,
+	// The newest start in `time_starts` past the time its range asked from, kept as it is
+	// replaced: [`Holdings::unplaced`] reads it on every settle of every reader.
+	starts_past: Option<u64>,
 	// Where the upstream publisher started each of a lite-07 copy's live wire ranges counting
 	// back, by how many groups each counted, with the latest group it counted from: the copy
 	// holds only part of the track, so it can't count back over its own groups. Replaced whole
@@ -1165,9 +1176,20 @@ impl Holdings for TrackState {
 		}
 	}
 
-	/// Exactly the times [`Self::containing`] can't place, but those `time_starts` places.
+	/// Only times [`Self::containing`] can't place, but those `time_starts` places directly.
+	/// It leaves out the times below the newest start the publisher reported past an earlier
+	/// range's time: `containing_received` places those once no held group precedes them,
+	/// which an eviction brings about without changing the mark. A consistent publisher
+	/// reports its oldest group for each such range, so the run then still starts where its
+	/// unknown times do.
 	fn unplaced(&self) -> Option<Unplaced> {
 		let none = Unplaced::NONE;
+		let past = self.starts_past.filter(|_| self.anchors == Anchors::Wire);
+		// The times below every held group that no inference from an earlier range places.
+		let unheld = |run: ops::RangeInclusive<u64>| match past {
+			Some(past) => (*run.start()).max(past)..=*run.end(),
+			None => run,
+		};
 		// The times at or after `from` whose keys from `from` through them drops do not all
 		// cover. As in `dropped_cover`, the last time checks the keys below it only, so a run
 		// from the last key covers nothing and leaves nothing unplaced.
@@ -1182,7 +1204,7 @@ impl Holdings for TrackState {
 		} else {
 			match (self.lookup.first_key_value(), self.lookup.last_key_value()) {
 				// Before any group, only a time whose keys down to 0 were all dropped is placed.
-				(None, _) | (_, None) => [uncovered(0), none],
+				(None, _) | (_, None) => [unheld(uncovered(0)), none],
 				(Some(_), Some(_)) if self.anchors != Anchors::Wire => [none.clone(), none],
 				// A copy places a time below its groups only once the keys down to 0 were
 				// dropped, and one above them only once the keys down to the newest were.
@@ -1191,7 +1213,7 @@ impl Holdings for TrackState {
 					let below = *below.start()..=(*below.end()).min(first.saturating_sub(1));
 					let below = match first {
 						0 => none.clone(),
-						_ => below,
+						_ => unheld(below),
 					};
 					let above = match last.checked_add(1) {
 						Some(next) => uncovered(next),
@@ -1293,7 +1315,80 @@ impl Holdings for TrackState {
 	}
 }
 
+/// The heads lent to a copy for the groups its readers resumed it at, by key, each held as a
+/// failed copy's head is (see [`group::Handoff::lent`]); see [`Consumer::lend_head`].
+#[derive(Default)]
+struct Lent {
+	loans: BTreeMap<u64, Arc<group::Handoff>>,
+	/// How many loans it holds before it next forgets those the pool reclaimed: twice what
+	/// the last pass kept, so a pass costs no more than the loans added since.
+	prune_at: usize,
+}
+
+impl Lent {
+	/// Hold `head` for group `key`, billed to `cache`. Of two loans for one group the longer
+	/// stands.
+	fn lend(&mut self, key: u64, head: &Arc<group::Head>, cache: &Arc<cache::Track>) {
+		let held = |head: &group::Head| head.frames_from_first().unwrap_or_default();
+		let standing = self.loans.get(&key).and_then(|loan| loan.head());
+		if standing.is_some_and(|slot| held(&slot) >= held(head)) {
+			return;
+		}
+		// Forget the loans the pool reclaimed, so the map grows no further than twice the loans
+		// it bills, however many groups readers resume a copy at that never arrive.
+		if self.loans.len() >= self.prune_at {
+			self.loans.retain(|_, loan| loan.head().is_some());
+			self.prune_at = 2 * self.loans.len() + 1;
+		}
+		if let Some(loan) = group::Handoff::lent(head.clone(), cache) {
+			self.loans.insert(key, loan);
+		}
+	}
+
+	/// The head lent for group `key`, unless its pool reclaimed it.
+	fn take(&mut self, key: u64) -> Option<Arc<group::Head>> {
+		self.loans.remove(&key)?.head()
+	}
+
+	/// The head lent for group `key`, left in place, unless its pool reclaimed it.
+	fn peek(&self, key: u64) -> Option<Arc<group::Head>> {
+		self.loans.get(&key)?.head()
+	}
+
+	fn retain(&mut self, keep: impl Fn(u64) -> bool) {
+		self.loans.retain(|key, _| keep(*key));
+	}
+}
+
 impl TrackState {
+	/// The head lent for group `key`, taken; see [`Consumer::lend_head`].
+	fn take_lent(&self, key: u64) -> Option<Arc<group::Head>> {
+		self.lent.lock().unwrap_or_else(PoisonError::into_inner).take(key)
+	}
+
+	/// The head lent for group `key`, left for an arrival that can adopt it.
+	fn peek_lent(&self, key: u64) -> Option<Arc<group::Head>> {
+		self.lent.lock().unwrap_or_else(PoisonError::into_inner).peek(key)
+	}
+
+	/// Hold `head` for group `key` until it arrives, or return the copies of it already
+	/// cached, to adopt it with this state's lock released; see [`Consumer::lend_head`].
+	fn lend(&self, key: u64, head: &Arc<group::Head>) -> Vec<group::Handle> {
+		// Under the caller's read guard, so the group cannot arrive before the loan is held.
+		// Held even when copies are cached: one arriving to displace them once the guard is
+		// released, before they adopt the head, takes the loan as it lands.
+		(self.lent.lock().unwrap_or_else(PoisonError::into_inner)).lend(key, head, &self.cache);
+		(self.lookup.get(&key)).map_or_else(Vec::new, |slot| slot.copies().cloned().collect())
+	}
+
+	/// Drop the loan for `key` once a cached copy holds that group from its first frame:
+	/// nothing displaces that copy, so the loan has nothing left to complete.
+	fn settle_loan(&self, key: u64) {
+		if self.covering_group(key, 0).is_some() {
+			self.take_lent(key);
+		}
+	}
+
 	/// How many keys just below `key` the publisher declared it never produced: the skip
 	/// run that ends at `key`, as a moq-transport Prior Group ID Gap names it.
 	fn skipped_below(&self, key: u64) -> u64 {
@@ -1314,6 +1409,14 @@ impl TrackState {
 	/// or where the publisher reports starting the range it asked from `time`. A group past
 	/// it says the feed went by: one between still in flight, a stream overtaken, would
 	/// only add that group to the reader's range.
+	///
+	/// With no group held at or before `time`, a range asked from an earlier time, or from
+	/// the oldest group (reported as time 0), that the publisher started past `time` says
+	/// the same: no group starts at or before it. A reader joining a copy that another
+	/// reader already asks from further back adds no range of its own, so that is the only
+	/// report its time start gets. A group the copy still holds there is a group the
+	/// publisher has since expired, so it wins: the time still waits to learn whether it
+	/// contains it.
 	fn containing_received(&self, time: u64) -> Containing {
 		if self.lookup.contains_key(&time) {
 			return Containing::Group(time);
@@ -1348,12 +1451,15 @@ impl TrackState {
 			// The live feed accounted for every key it could land from a group at `from`
 			// through the time, so the group containing it came already, at `from` or past it:
 			// the newest one held there, or `from` itself when nothing after it through the
-			// time was a group. A group held below it, such as one fetched, is not it. Else it
-			// was evicted, and reaching back to the oldest group, as on the publisher's own
-			// track, looks it up.
+			// time was a group. A group held below a `from` at or before the time is not it,
+			// since `from` is a group itself. One held below a covering range that started
+			// past the time may be one the publisher expired under the budget it was asked
+			// with, so it may still contain the time, which waits. Else it was evicted, and
+			// reaching back to the oldest group, as on the publisher's own track, looks it up.
 			held => match self.landing_from(time, covering) {
 				Some(from) if self.landed_through(time, from) => match held {
 					Some((&key, _)) if key >= from => Containing::Group(key),
+					Some(_) if from > time => Containing::Unknown,
 					_ if from <= time && self.dropped_cover(from.saturating_add(1)..time.saturating_add(1)) => {
 						Containing::Group(from)
 					}
@@ -1778,6 +1884,12 @@ impl TrackState {
 	/// Keep the change index aligned with the range map, including the neighbours an
 	/// insertion coalesces and the two pieces a removal can leave.
 	fn change_drops(&mut self, groups: ops::Range<u64>, hole: Option<Hole>) {
+		// A group skipped never arrives to take the head lent for it. A drop, stale or not, can
+		// still be followed by the group, so its loan stands until the pool reclaims it.
+		if hole == Some(Hole::Skip) {
+			let lent = self.lent.get_mut().unwrap_or_else(PoisonError::into_inner);
+			lent.retain(|key| !groups.contains(&key));
+		}
 		if hole.as_ref().is_none_or(|hole| hole.stale_budget().is_none())
 			&& self
 				.drops
@@ -2857,6 +2969,8 @@ impl TrackState {
 	/// reader that already pulled one ends with `err` too and its writer fails.
 	fn tear_down(&mut self, err: Error) -> (Option<Position>, OpenGroups) {
 		self.release_ingress();
+		// Nothing arrives after this to take a lent head.
+		*self.lent.get_mut().unwrap_or_else(PoisonError::into_inner) = Lent::default();
 		let resume = self.resume_position();
 		let groups = self
 			.lookup
@@ -4720,10 +4834,28 @@ impl Producer {
 		if let Some(content) = content {
 			group.handle().share_content(content);
 		}
+		// Before any reader can see it, so none takes it without the head (lock order is track
+		// then group), settled once the track lock is released. A whole copy needs no loan,
+		// and drops it; one the head does not reach leaves it for a wider arrival.
+		let adopted = if start == 0 {
+			state.take_lent(info.start);
+			None
+		} else {
+			let adopted = state
+				.peek_lent(info.start)
+				.and_then(|head| group.handle().take_head(&head));
+			if adopted.is_some() {
+				state.take_lent(info.start);
+			}
+			adopted
+		};
 		state.cap(&group.handle())?;
 		state.commit_group(&group.handle());
 		let deferred = state.deferred();
 		drop(state);
+		if let Some(adopted) = adopted {
+			group.handle().settle_head(adopted);
+		}
 		deferred.wake();
 		Ok(Received::Group(group))
 	}
@@ -5025,6 +5157,10 @@ impl Producer {
 			&& state.time_starts != starts
 		{
 			state.highest_time_start = starts.values().filter_map(TimeStart::start).max();
+			state.starts_past = starts
+				.iter()
+				.filter_map(|(&asked, reported)| reported.start().filter(|&start| asked < start))
+				.max();
 			state.time_starts = starts;
 			state.placing += 1;
 		}
@@ -6886,6 +7022,24 @@ impl Consumer {
 		})
 	}
 
+	/// Lend `head` to group `key` of this copy: to the copies it caches now, or else to the
+	/// first that arrives, which then holds it whole if it arrives partway through. Of two
+	/// loans for one group the longer stands; see [`group::Handle::adopt_head`].
+	pub(super) fn lend_head(&self, key: u64, head: Arc<group::Head>) {
+		let copies = self.with_state(|state| state.map_or_else(Vec::new, |state| state.read().lend(key, &head)));
+		if copies.is_empty() {
+			return;
+		}
+		for group in copies {
+			group.adopt_head(&head);
+		}
+		self.with_state(|state| {
+			if let Some(state) = state {
+				state.read().settle_loan(key);
+			}
+		});
+	}
+
 	/// Lend `head` to the cached copies of group `key`; see
 	/// [`group::Handle::adopt_head`].
 	pub(super) fn adopt_head(&self, key: u64, head: &group::Head) {
@@ -7409,6 +7563,18 @@ pub struct Subscribing {
 }
 
 impl Subscribing {
+	/// Lend `head` to group `key` of the subscribed copy; see [`Consumer::lend_head`].
+	pub(super) fn lend_head(&self, key: u64, head: Arc<group::Head>) {
+		let copies = self.state.read().lend(key, &head);
+		if copies.is_empty() {
+			return;
+		}
+		for group in copies {
+			group.adopt_head(&head);
+		}
+		self.state.read().settle_loan(key);
+	}
+
 	/// Resolve the same track's info with this subscription already registered.
 	pub(super) fn info(&self) -> Resolving {
 		Resolving {
@@ -11200,7 +11366,8 @@ impl Subscriber {
 	/// none: groups arrive newest first, so the first to arrive is not the oldest served.
 	///
 	/// Pending too while a time start waits on the groups held to place it, since where its
-	/// range starts is unknown until then.
+	/// range starts is unknown until then, unless the floor sits at or past that time, as a
+	/// pre-lite-07 wire's start does: the group containing it is out of range then.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_start(&mut self, waiter: &kio::Waiter) -> Poll<Option<u64>> {
 		let cursor = match &mut self.inner {
@@ -11209,15 +11376,15 @@ impl Subscriber {
 		};
 		let start = ready!(Consumer::poll_state_start(&cursor.state, waiter));
 		cursor.sync();
-		if cursor.filter.window.is_waiting() {
+		if cursor.filter.window.is_waiting_above(cursor.min_key) {
 			// Registered before syncing again, so a change placing it after this wakes it, as
 			// does the grace for a gap below one folding. A closed track places it at once,
 			// since nothing more can arrive.
-			let window = &cursor.filter.window;
+			let (window, floor) = (&cursor.filter.window, cursor.min_key);
 			let closed = cursor
 				.state
 				.poll(waiter, |state| {
-					for time in window.waiting_in(..) {
+					for time in window.waiting_in(floor.saturating_add(1)..) {
 						if let Some(folds) = state.time_start_folds(time) {
 							state.cache.watch_wall(folds, waiter);
 						}
@@ -11226,7 +11393,7 @@ impl Subscriber {
 				})
 				.is_ready();
 			cursor.sync();
-			if !closed && cursor.filter.window.is_waiting() {
+			if !closed && cursor.filter.window.is_waiting_above(cursor.min_key) {
 				return Poll::Pending;
 			}
 		}
@@ -11271,6 +11438,22 @@ impl Subscriber {
 					.collect()
 			}
 			Inner::Resume(resume, _) => resume.resolved_keys(keys),
+		}
+	}
+
+	/// This subscriber's ranges keyed in `keys` while their time starts wait on the groups
+	/// held to place them, or on its route copies for a reader following them: each one's
+	/// time, and the exclusive end it resolved to. `None` for one that resolved.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn waiting_keys(&mut self, keys: impl IntoIterator<Item = u64>) -> Vec<Option<(u64, Option<u64>)>> {
+		match &mut self.inner {
+			Inner::Plain(cursor) => {
+				cursor.sync();
+				keys.into_iter()
+					.map(|key| cursor.filter.window.waiting_key(key))
+					.collect()
+			}
+			Inner::Resume(resume, _) => resume.waiting_keys(keys),
 		}
 	}
 
@@ -12759,14 +12942,15 @@ mod test {
 	}
 
 	proptest::proptest! {
-		/// The times a track reports unplaced are exactly those its `containing` can't place,
-		/// but for the ones a copy's reported time starts place, on its own groups or on a
-		/// lite-07 copy's, through groups arriving and every way keys are given up. A lite-07
-		/// copy leaves out what its feed's accounting may place, which the window tries each
-		/// time: every time it places that way lies there.
+		/// The times a track reports unplaced are only those its `containing` can't place, but
+		/// for the ones a copy's reported time starts place, after each step: through groups
+		/// arriving and leaving, and every way keys are given up. A time it leaves out lies below
+		/// the newest start reported past an earlier range's time, which may place it once no held
+		/// group precedes it, or where a lite-07 copy's feed accounting may place it, which the
+		/// window tries each time.
 		#[test]
-		fn unplaced_matches_containing(
-			ops in proptest::collection::vec((0u8..5, 0u64..40, 1u64..8), 0..24),
+		fn unplaced_holds_only_what_containing_cant_place(
+			ops in proptest::collection::vec((0u8..6, 0u64..40, 1u64..8), 0..24),
 			wire: bool,
 			starts in proptest::collection::vec(
 				(0u64..48, proptest::option::of(0u64..48), proptest::option::of(0u64..56)),
@@ -12779,6 +12963,36 @@ mod test {
 				producer.anchored();
 				producer.time_starts(starts.clone(), Duration::MAX);
 			}
+			// A range answered with no group to deliver places nothing.
+			let reported: BTreeSet<u64> = starts
+				.iter()
+				.filter(|(_, start, _)| start.is_some())
+				.map(|(time, ..)| *time)
+				.collect();
+			let past = starts
+				.iter()
+				.filter_map(|&(asked, start, _)| start.filter(|&start| asked < start))
+				.max();
+			let check = |producer: &Producer| -> std::result::Result<(), proptest::test_runner::TestCaseError> {
+				let state = producer.state.read();
+				let unplaced = state.unplaced().expect("a track always tells");
+				let landing = state.landing_span();
+				for time in (0..64).chain([u64::MAX - 1, u64::MAX]) {
+					let inside = unplaced.runs.iter().any(|run| run.contains(&time));
+					let unknown = state.containing(time) == Containing::Unknown;
+					if wire && reported.contains(&time) {
+						proptest::prop_assert!(!unknown, "a reported start places {}", time);
+					} else if wire && landing.contains(&time) {
+						proptest::prop_assert!(!inside, "the runs leave {} to be tried", time);
+					} else if inside {
+						proptest::prop_assert!(unknown, "{} is unplaced but placed", time);
+					} else if unknown {
+						proptest::prop_assert!(wire && past.is_some_and(|past| time < past), "{} is left out", time);
+					}
+				}
+				Ok(())
+			};
+			check(&producer)?;
 			for (op, start, len) in ops {
 				let groups = start..start + len;
 				match op {
@@ -12786,29 +13000,17 @@ mod test {
 					1 => producer.skip_groups(groups),
 					2 => drop(producer.create_group(group::Info { start })),
 					3 => producer.modify().unwrap().forget_drops(groups),
+					// Evict the first group held from `start`, as expiry does.
+					4 => {
+						let held = producer.state.read().lookup.range(start..).next().map(|(&key, _)| key);
+						if let Some(key) = held {
+							producer.modify().unwrap().evict_group(key, Error::Evicted);
+						}
+					}
 					// A group at the last key that can start one, past every time but the last.
 					_ => drop(producer.create_group(group::Info { start: u64::MAX - 1 })),
 				}
-			}
-			let state = producer.state.read();
-			let unplaced = state.unplaced().expect("a track always tells");
-			// A range answered with no group to deliver places nothing.
-			let reported: BTreeSet<u64> = starts
-				.iter()
-				.filter(|(_, start, _)| start.is_some())
-				.map(|(time, ..)| *time)
-				.collect();
-			let landing = state.landing_span();
-			for time in (0..64).chain([u64::MAX - 1, u64::MAX]) {
-				let inside = unplaced.runs.iter().any(|run| run.contains(&time));
-				let unknown = state.containing(time) == Containing::Unknown;
-				if wire && reported.contains(&time) {
-					proptest::prop_assert!(!unknown, "a reported start places {}", time);
-				} else if wire && landing.contains(&time) {
-					proptest::prop_assert!(!inside, "the runs leave {} to be tried", time);
-				} else {
-					proptest::prop_assert_eq!(inside, unknown, "at {}", time);
-				}
+				check(&producer)?;
 			}
 		}
 
@@ -16780,6 +16982,137 @@ mod test {
 		assert_eq!(producer.state.read().containing(1500), Containing::Group(1200));
 	}
 
+	/// A reader joining a lite-07 copy that another reader already asks from further back adds
+	/// no range of its own, so its publisher reports no start for the reader's time. The start
+	/// of a range asked from earlier, or from the oldest group, places it: past the time, no
+	/// group starts at or before it, and a publisher serving the reader learns where delivery
+	/// starts. At or before the time, a group between may still arrive.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_received_copy_places_a_time_start_by_an_earlier_range() {
+		let from = |time| {
+			Subscription::default()
+				.with_ranges([Range {
+					start: Anchor::Time(time),
+					end: None,
+				}])
+				.with_delay(Delay::default().with_max(None))
+		};
+		let placed = |subscriber: &mut Subscriber| {
+			subscriber.resolved_ranges([0])[0].map(|resolved| (resolved.start, resolved.floored))
+		};
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		write_group(&producer, 1000);
+
+		let mut before = producer.subscribe(from(500));
+		let mut after = producer.subscribe(from(1500));
+		assert_eq!(placed(&mut before), None);
+		assert!(before.poll_start(&kio::Waiter::noop()).is_pending());
+
+		// Only a range asked from a later time: says nothing of 500.
+		producer.time_starts([(700, Some(1000), None)], Duration::MAX);
+		assert_eq!(placed(&mut before), None);
+
+		// The range asked from the oldest group started at 1000.
+		producer.time_starts([(0, Some(1000), None)], Duration::MAX);
+		assert_eq!(placed(&mut before), Some((0, false)));
+		assert!(before.poll_start(&kio::Waiter::noop()).is_ready());
+		assert_eq!(drain(&mut before), vec![1000]);
+		assert_eq!(placed(&mut after), None, "a group past 1000 may still arrive");
+	}
+
+	/// A group the copy still holds at or before a time start outranks a start reported for an
+	/// earlier range: the publisher expiring it says nothing of whether it contains the time.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_received_copy_keeps_a_held_group_over_an_earlier_range() {
+		let from = |time| {
+			Subscription::default()
+				.with_ranges([Range {
+					start: Anchor::Time(time),
+					end: None,
+				}])
+				.with_delay(Delay::default().with_max(None))
+		};
+		let placed = |subscriber: &mut Subscriber| {
+			subscriber.resolved_ranges([0])[0].map(|resolved| (resolved.start, resolved.floored))
+		};
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		write_group(&producer, 2000);
+
+		let mut reader = producer.subscribe(from(2500));
+		producer.time_starts([(0, Some(3000), None)], Duration::MAX);
+		assert_eq!(placed(&mut reader), None, "the held 2000 may contain 2500");
+
+		write_group(&producer, 3000);
+		assert_eq!(placed(&mut reader), Some((2000, true)));
+		assert_eq!(drain(&mut reader), vec![2000, 3000]);
+	}
+
+	/// Once the copy evicts the group it held before a time start, the start of a range asked
+	/// from earlier places the time: no reported start changed, but the waiting reader still
+	/// starts.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_received_copy_places_a_time_start_once_the_group_before_it_is_evicted() {
+		let from = |time| {
+			Subscription::default()
+				.with_ranges([Range {
+					start: Anchor::Time(time),
+					end: None,
+				}])
+				.with_delay(Delay::default().with_max(None))
+		};
+		let placed = |subscriber: &mut Subscriber| {
+			subscriber.resolved_ranges([0])[0].map(|resolved| (resolved.start, resolved.floored))
+		};
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		write_group(&producer, 2000);
+
+		let mut reader = producer.subscribe(from(2500));
+		producer.time_starts([(0, Some(3000), None)], Duration::MAX);
+		assert_eq!(placed(&mut reader), None, "the held 2000 may contain 2500");
+
+		producer.evict(2000);
+		write_group(&producer, 3000);
+		assert_eq!(placed(&mut reader), Some((0, false)));
+		assert_eq!(drain(&mut reader), vec![3000]);
+	}
+
+	/// A floor at or past a time start, as a pre-lite-07 wire's start sets, keeps out the group
+	/// containing that time unless it starts there, so where the range starts waits on nothing
+	/// a lite-07 copy has yet to place. Without the floor, it waits.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_floor_at_a_time_start_waits_on_no_placing() {
+		let from = |time| {
+			Subscription::default()
+				.with_ranges([Range {
+					start: Anchor::Time(time),
+					end: None,
+				}])
+				.with_delay(Delay::default().with_max(None))
+		};
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		write_group(&producer, 1000);
+
+		let mut open = producer.subscribe(from(500));
+		assert!(open.poll_start(&kio::Waiter::noop()).is_pending());
+		let mut floored = producer.subscribe(from(500)).with_range(500..);
+		assert!(floored.poll_start(&kio::Waiter::noop()).is_ready());
+		let mut below = producer.subscribe(from(500)).with_range(499..);
+		assert!(below.poll_start(&kio::Waiter::noop()).is_pending());
+		assert_eq!(drain(&mut floored), vec![1000]);
+	}
+
 	/// A lite-07 copy holds only part of the track, so a relative start counts back as its
 	/// publisher reported, not over the groups the copy holds, until a group past the latest
 	/// the publisher counted from moves the live edge.
@@ -17136,6 +17469,178 @@ mod test {
 		assert!(matches!(next.as_mut().poll(&mut cx), Poll::Ready(Err(Error::Old))));
 		head.finish().unwrap();
 		edge.finish().unwrap();
+	}
+
+	/// A copy whose readers keep resuming it at groups that never arrive keeps no more than
+	/// twice the loans its pool bills: those the pool reclaimed are forgotten as loans grow.
+	#[test]
+	#[cfg(feature = "async")]
+	fn reclaimed_loans_leave_the_copy() {
+		let pool = cache::Pool::new(cache::Config::default().with_expiry(Duration::from_secs(1)));
+		let producer = track_producer_pooled("test", pool.clone());
+		let consumer = producer.consume();
+		let head = |start: u64| {
+			let mut prefix = group::Info { start }.produce();
+			prefix
+				.write_frame(Timestamp::from_millis(start).unwrap(), bytes::Bytes::new())
+				.unwrap();
+			prefix.consume().handoff().head().unwrap()
+		};
+		let lent = |producer: &Producer| {
+			producer
+				.state
+				.read()
+				.lent
+				.lock()
+				.unwrap()
+				.loans
+				.keys()
+				.copied()
+				.collect::<Vec<_>>()
+		};
+		consumer.lend_head(1, head(1));
+		consumer.lend_head(2, head(2));
+		assert_eq!(lent(&producer), [1, 2]);
+		pool.step(Duration::from_secs(2));
+		pool.sweep();
+		assert_eq!(pool.used(), 0, "the sweep reclaimed both");
+		// Forgotten once the loans double since the last pass, so a pass costs what was added.
+		consumer.lend_head(3, head(3));
+		consumer.lend_head(4, head(4));
+		assert_eq!(lent(&producer), [3, 4]);
+	}
+
+	/// A loan for a group the copy already caches still stands for a copy of it that lands
+	/// later and displaces the cached one, which adopts it as it lands.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_displacing_arrival_takes_the_loan() {
+		let producer = track_producer("test", Info::timed());
+		let consumer = producer.consume();
+		let Received::Group(late) = producer.create_group_at(group::Info { start: 5 }, 2).unwrap() else {
+			panic!("nothing else holds group 5");
+		};
+		let mut prefix = group::Info { start: 5 }.produce();
+		prefix
+			.write_frame(Timestamp::from_millis(5).unwrap(), bytes::Bytes::new())
+			.unwrap();
+		// One frame does not reach the cached copy's first, so that copy cannot adopt it.
+		consumer.lend_head(5, prefix.consume().handoff().head().unwrap());
+		assert_eq!(consumer.peek_group(5).expect("cached").first_frame(), 2);
+
+		let Received::Group(wider) = producer.create_group_at(group::Info { start: 5 }, 1).unwrap() else {
+			panic!("a copy from frame 1 displaces one from frame 2");
+		};
+		assert_eq!(
+			consumer.peek_group(5).expect("cached").first_frame(),
+			0,
+			"whole once visible"
+		);
+		drop((late, wider));
+	}
+
+	/// An arrival the head does not reach leaves the loan for a later, wider one.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_arrival_that_cannot_adopt_leaves_the_loan() {
+		let producer = track_producer("test", Info::timed());
+		let consumer = producer.consume();
+		let mut prefix = group::Info { start: 5 }.produce();
+		prefix
+			.write_frame(Timestamp::from_millis(5).unwrap(), bytes::Bytes::new())
+			.unwrap();
+		consumer.lend_head(5, prefix.consume().handoff().head().unwrap());
+		let Received::Group(late) = producer.create_group_at(group::Info { start: 5 }, 2).unwrap() else {
+			panic!("nothing else holds group 5");
+		};
+		assert_eq!(
+			consumer.peek_group(5).expect("cached").first_frame(),
+			2,
+			"one frame does not reach frame 2"
+		);
+		let Received::Group(wider) = producer.create_group_at(group::Info { start: 5 }, 1).unwrap() else {
+			panic!("a copy from frame 1 displaces one from frame 2");
+		};
+		assert_eq!(
+			consumer.peek_group(5).expect("cached").first_frame(),
+			0,
+			"whole once visible"
+		);
+		drop((late, wider));
+	}
+
+	/// A drop is not final: a group arriving after one still takes the head lent for it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_stale_drop_keeps_the_loan() {
+		let producer = track_producer("test", Info::timed());
+		let consumer = producer.consume();
+		let mut prefix = group::Info { start: 7 }.produce();
+		for _ in 0..2 {
+			prefix
+				.write_frame(Timestamp::from_millis(7).unwrap(), bytes::Bytes::new())
+				.unwrap();
+		}
+		consumer.lend_head(7, prefix.consume().handoff().head().unwrap());
+		producer.give_up(7..8, Hole::stale(Duration::from_millis(1)));
+		let Received::Group(late) = producer.create_group_at(group::Info { start: 7 }, 2).unwrap() else {
+			panic!("a stale drop does not refuse the group");
+		};
+		assert_eq!(
+			consumer.peek_group(7).expect("cached").first_frame(),
+			0,
+			"whole once visible"
+		);
+		drop(late);
+	}
+
+	/// A copy lent the heads of two groups its readers resumed it at holds each whole as it
+	/// arrives partway through, from the moment a reader can see it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn lent_heads_complete_each_group_as_it_arrives() {
+		let producer = track_producer("test", Info::timed());
+		let consumer = producer.consume();
+		let head = |start: u64, frames: u64| {
+			let mut prefix = group::Info { start }.produce();
+			for _ in 0..frames {
+				prefix
+					.write_frame(Timestamp::from_millis(start).unwrap(), bytes::Bytes::new())
+					.unwrap();
+			}
+			prefix.consume().handoff().head().unwrap()
+		};
+		consumer.lend_head(7, head(7, 2));
+		consumer.lend_head(9, head(9, 1));
+		// A shorter loan for the same group leaves the longer one standing.
+		consumer.lend_head(7, head(7, 1));
+		// A group given up drops its loan.
+		consumer.lend_head(8, head(8, 1));
+		producer.skip_groups(8..9);
+		assert!(
+			!producer
+				.modify()
+				.unwrap()
+				.lent
+				.get_mut()
+				.unwrap()
+				.loans
+				.contains_key(&8)
+		);
+		// So does every one still waiting once the copy tears down.
+		let aborted = track_producer("aborted", Info::timed());
+		let reader = aborted.consume();
+		reader.lend_head(3, head(3, 1));
+		aborted.abort(Error::Cancel).unwrap();
+		assert!(reader.with_state(|state| state.unwrap().read().lent.lock().unwrap().loans.is_empty()));
+		for (key, at) in [(7, 2), (9, 1)] {
+			let Received::Group(group) = producer.create_group_at(group::Info { start: key }, at).unwrap() else {
+				panic!("nothing else holds group {key}");
+			};
+			let seen = consumer.peek_group(key).expect("cached");
+			assert_eq!(seen.first_frame(), 0, "group {key} is whole once visible");
+			drop(group);
+		}
 	}
 
 	#[test]

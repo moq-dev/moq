@@ -58,5 +58,5 @@ Not a wire change.
 
 - [reopen-starve](https://github.com/moq-dev/moq/pull/9179) - a request
   refused before the neighbour's claims returned, and never asked again
-- [roll-echo-stall](/quest/m2/multicast/roll-echo-stall.md) - a time start a
+- [roll-echo-stall](https://github.com/moq-dev/moq/pull/9174) - a time start a
   shared copy never places

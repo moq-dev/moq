@@ -154,8 +154,8 @@ impl Version {
 	}
 
 	/// Whether SUBSCRIBE, SUBSCRIBE_UPDATE, FETCH, and GROUP carry frame indices
-	/// alongside their group keys, so a subscription or fetch can start and end
-	/// partway through a group. Added in lite-06.
+	/// alongside their group keys, so a subscription or fetch can start partway through a
+	/// group. Added in lite-06; lite-07 bounds only a range's start.
 	///
 	/// Older versions only address whole groups, so a route change has to wait for the
 	/// next group before it can resume.
@@ -164,12 +164,6 @@ impl Version {
 			self,
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05
 		)
-	}
-
-	/// Whether GROUP carries `Frame Start`, the index of the stream's first frame. Lite-06 only:
-	/// earlier versions have no frame bounds, and a lite-07 subscription reads whole groups.
-	pub(crate) fn has_group_frame_start(self) -> bool {
-		matches!(self, Self::Lite06)
 	}
 
 	/// Whether SUBSCRIBE and SUBSCRIBE_UPDATE carry the subscriber's `Group Order`.

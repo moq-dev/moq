@@ -1680,6 +1680,29 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 	}
 }
 
+// A relay's copy already asks from the oldest group, so a downstream asking from time 2 adds no
+// range upstream and gets no start of its own. The oldest range starting at 6 still places it:
+// the source holds nothing at or before 2.
+test("lite draft-07: a time start a copy's oldest range covers starts where that range did", async () => {
+	const sub = await servedSubscription({ version: Version.DRAFT_07, startGroup: 2n });
+	// The relay's own reader, asking from the oldest group, which the copy's demand then starts at.
+	const local = sub.track.subscribe({ delay: { max: Duration.millis(60_000) } });
+	try {
+		hooks.receiveTrack(sub.track);
+		await flush();
+		hooks.timeStarts(sub.track, [[0n, 6n]], NO_MAX_DELAY);
+		hooks.startTrack(sub.track, { start: 6n });
+		sub.serve(6n);
+		expect(await sub.servedSequence()).toBe(6n);
+		const response = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_07);
+		if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
+		expect(response.start.starts[0]).toBe(6n);
+	} finally {
+		local.close();
+		await sub.close();
+	}
+});
+
 // A relay's group stream can beat the upstream START on its own stream. Resolving from that
 // group would give up the backlog the START still promises, so the first group waits for it.
 for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
@@ -2008,6 +2031,46 @@ test("lite draft-06: a queued frame floor applies before the next group pop", as
 	} finally {
 		ranges.mockRestore();
 		sub.release();
+		await sub.close();
+	}
+});
+
+// A lite-07 update adding a range that starts partway through a group serves that group from its
+// frame, and one that adds a second range covering the next Position's group serves it whole: the
+// frame starts follow the live ranges by Range ID, edit by edit.
+test("lite-07 an update moves frame starts with the live ranges", async () => {
+	const version = Version.DRAFT_07;
+	const sub = await servedSubscription({
+		version,
+		frames: ["a", "b", "c"],
+		maxAge: Duration.millis(3_600_000),
+		ranges: [{ start: { absolute: 0n }, end: { absolute: 1n } }],
+	});
+	try {
+		sub.serve(0n);
+		expect(await sub.servedGroup()).toMatchObject({ key: 0n, frameStart: 0, payloads: ["a", "b", "c"] });
+
+		// Range ID 1 resumes group 1 past its first two frames.
+		await replayUpdate({ priority: 0, ranges: [{ start: { absolute: 1n, frame: 2 } }] }).encode(
+			sub.client.writer,
+			version,
+		);
+		// An update that adds an unrelated range leaves that Position live.
+		await replayUpdate({ priority: 0, ranges: [{ start: { absolute: 9n } }] }).encode(sub.client.writer, version);
+		await flush();
+		sub.serve(1n);
+		expect(await sub.servedGroup()).toMatchObject({ key: 1n, frameStart: 2, payloads: ["c"] });
+
+		// Retired, and replaced by a Position on group 2 that another range also covers: whole.
+		await replayUpdate({
+			priority: 0,
+			remove: [1n],
+			ranges: [{ start: { absolute: 2n, frame: 1 } }, { start: { time: 2n } }],
+		}).encode(sub.client.writer, version);
+		await flush();
+		sub.serve(2n);
+		expect(await sub.servedGroup()).toMatchObject({ key: 2n, frameStart: 0, payloads: ["a", "b", "c"] });
+	} finally {
 		await sub.close();
 	}
 });

@@ -10041,8 +10041,9 @@ mod tests {
 /// The ranges a SUBSCRIBE carries for `subscription`, without the empty ones.
 ///
 /// A group ID is the group's start, so a time anchor goes out as the group ID it names,
-/// on every version: a time start as the start, and a time end as the exclusive group past
-/// it, which lite-07 carries as the inclusive time again (see [`lite::Anchor::Absolute`]).
+/// on every version: a time start as the start, from the frame it resumes at (see
+/// [`Subscription::resume`]), and a time end as the exclusive group past it, which lite-07
+/// carries as the inclusive time again (see [`lite::Anchor::Absolute`]).
 /// `None` when nothing is left to ask for, which no wire can say. The caller narrows a
 /// subscription for a wire without ranges to the one span it carries first (see
 /// [`wire_span`]).
@@ -10060,7 +10061,11 @@ fn wire_ranges(subscription: &Subscription) -> Option<Vec<lite::Range>> {
 		let start = match range.start {
 			Anchor::Oldest => None,
 			Anchor::Relative(back) => Some(lite::Anchor::Relative(back)),
-			Anchor::Time(time) => Some(lite::Anchor::Absolute(Position::group(time))),
+			// A switch resumes the group it starts at past the frames the readers hold.
+			Anchor::Time(time) => Some(lite::Anchor::Absolute(match subscription.resume {
+				Some(resume) if resume.group == time => resume,
+				_ => Position::group(time),
+			})),
 		};
 		// The copy resolves a relative end itself, against the groups it receives past it, so
 		// it asks through the live edge. SUBSCRIBE_START names a resolved start, but nothing
@@ -10195,11 +10200,11 @@ impl SubStream {
 		Some((start, self.started.is_none()))
 	}
 
-	/// Tell the copy where the publisher started each live range: one asked from a group's
-	/// start or the oldest group, with how far it reaches, which a reader's time start there or
-	/// folded into it resolves to when the copy holds no group at it, and one counting back,
-	/// which the copy, holding only part of the track, can't count. Lite-07 only, where each
-	/// range's start is reported.
+	/// Tell the copy where the publisher started each live range: one asked from a group, or
+	/// from the oldest group as time 0, with how far it reaches, which a reader's time start
+	/// there or folded into it resolves to when the copy holds no group at it, and one
+	/// counting back, which the copy, holding only part of the track, can't count. Lite-07
+	/// only, where each range's start is reported.
 	fn report_starts(&self, serving: &track::Producer) {
 		if !self.live.reports_starts() {
 			return;
@@ -10230,7 +10235,7 @@ impl SubStream {
 			};
 			let asked = match range.start {
 				None => 0,
-				Some(lite::Anchor::Absolute(time)) if time.frame == 0 => time.group,
+				Some(lite::Anchor::Absolute(time)) => time.group,
 				Some(lite::Anchor::Relative(back)) => {
 					if let (Some(start), Some(Some(latest))) = (start, self.edges.get(&id)) {
 						relative.push((back, start, *latest));
@@ -10979,6 +10984,10 @@ impl TrackServe {
 					.all(|range| range.end.is_none() && matches!(range.start, Anchor::Oldest | Anchor::Relative(0))));
 		if let Some(newest) = newest.filter(|_| idle) {
 			subscription = subscription.with_start(newest);
+		}
+		// A wire without frame bounds asks the group whole.
+		if !self.subscriber.version.has_frame_bounds() {
+			subscription.resume = None;
 		}
 		wire_ranges(&subscription).map(|ranges| (subscription, ranges))
 	}

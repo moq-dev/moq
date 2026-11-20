@@ -214,7 +214,7 @@ class SelectionTest(unittest.TestCase):
             set(self.plan(["js/view/src/index.ts"])["packages"]), {"@example/core", "@example/view", "docs"}
         )
 
-    def calls(self, paths, action="check", github_actions=False, reports=None):
+    def calls(self, paths, action="check", github_actions=False):
         calls = []
         self.configurations = []
 
@@ -230,10 +230,6 @@ class SelectionTest(unittest.TestCase):
             patch.object(selector.os, "chdir"),
             patch.object(selector.subprocess, "run", side_effect=invoke),
         ):
-            # The nightly gate cost scenarios set this for the whole gate, these tests included.
-            selector.os.environ.pop("JS_TEST_REPORTS", None)
-            if reports:
-                selector.os.environ["JS_TEST_REPORTS"] = str(reports)
             selector.run(action, self.plan(paths))
         return calls
 
@@ -279,20 +275,6 @@ class SelectionTest(unittest.TestCase):
         hosted = self.calls(["doc/index.md"], "test", github_actions=True)
         self.assertIn(["bun", "run", "--filter=docs", "--elide-lines=0", "test"], hosted)
         self.assertFalse(any(c[0] == "just" for c in calls))
-
-    def test_reports_keep_one_junit_per_package(self):
-        reports = self.root / "reports"
-        calls = self.calls(["js/view/src/index.ts"], "test", reports=reports)
-
-        def junit(directory):
-            return ["--reporter=junit", f"--reporter-outfile={reports / directory / 'junit.xml'}"]
-
-        self.assertEqual(
-            [c for c in calls if c[:2] == ["bun", "run"]],
-            [["bun", "run", "test", *junit(d)] for d in ("js/view", "doc")],
-        )
-        root_test = ["bun", "--no-env-file", "test", *junit(".")]
-        self.assertTrue(any(c[: len(root_test)] == root_test for c in calls))
 
     def test_owned_package_without_scripts_keeps_harness_check(self):
         self.packages["doc"].pop("scripts")

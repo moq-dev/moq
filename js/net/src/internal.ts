@@ -708,6 +708,8 @@ export const hooks: {
 	subscriberEndError: (subscriber: Subscriber) => Error | undefined;
 	/** What this subscriber resolves its ranges against, for a test. Assigned by `track.ts`. */
 	subscriberHoldings: (subscriber: Subscriber) => Holdings;
+	/** The times a received copy's feed accounting may place, for a test. Assigned by `track.ts`. */
+	landingSpan: (producer: Producer) => Run | undefined;
 	/**
 	 * How many keys just below `key` the publisher declared it never produced: the skip run
 	 * ending at `key`, which a moq-transport Prior Group ID Gap names. Mirrors the Rust
@@ -1171,6 +1173,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	subscriberHoldings: () => {
+		throw new Error("track.ts not loaded");
+	},
+	landingSpan: () => {
 		throw new Error("track.ts not loaded");
 	},
 	skippedBelow: () => {

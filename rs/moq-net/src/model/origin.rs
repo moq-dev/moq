@@ -3155,7 +3155,7 @@ struct Serving {
 ///
 /// // Fill the catalog before readers can find it.
 /// let route = origin.route("live/alice", RouteOptions::hidden())?;
-/// let _catalog = route.broadcast().create_track("catalog.json", None)?;
+/// let _catalog = route.broadcast().create_track("catalog.json", None).ok_or(moq_net::Error::Duplicate)?;
 /// route.announce()?; // visible now, same instance
 /// route.set_cost(5)?; // re-prices in place
 /// route.withdraw(); // hidden; announce() again continues the same stream
@@ -4516,10 +4516,9 @@ fn follow_demand(
 			}
 		}
 		None => {
-			*held = weak.subscription().and_then(|(subscription, subscribers)| {
-				let sub = copy?.subscribe(routes.subscription(subscription, subscribers));
-				Some(super::resume::Held::new(sub))
-			});
+			*held = weak
+				.subscription()
+				.and_then(|(subscription, subscribers)| Some(routes.subscribe(copy?, subscription, subscribers)));
 		}
 	}
 }
@@ -5220,11 +5219,10 @@ impl kio::Task for FrontServe {
 								Some(Ok(lookup)) => {
 									// Subscribe before the query exposes upstream demand, and query
 									// that same instance even if the broadcast changes meanwhile.
-									let sub = io.weak.subscription().map(|(demand, subscribers)| {
-										super::resume::Held::new(
-											lookup.subscribe(io.routes.subscription(demand, subscribers)),
-										)
-									});
+									let sub = io
+										.weak
+										.subscription()
+										.map(|(demand, subscribers)| io.routes.subscribe(&lookup, demand, subscribers));
 									let query = match &sub {
 										Some(sub) => sub.info(),
 										None => lookup.info().into_inner(),

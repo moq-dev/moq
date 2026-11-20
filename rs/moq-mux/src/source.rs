@@ -372,7 +372,7 @@ impl Source {
 	/// [`Error::EscapingBroadcast`](crate::Error::EscapingBroadcast).
 	///
 	/// This is the async counterpart to the poll-driven container exporters: consumers
-	/// that wrap a raw [`moq_net::track::Subscriber`] themselves (e.g. the WebRTC egress)
+	/// that wrap a raw [`moq_net::track::Subscriber`] themselves
 	/// use it to honor cross-broadcast renditions without reimplementing the path math.
 	#[cfg(feature = "async")]
 	pub async fn subscribe_track(

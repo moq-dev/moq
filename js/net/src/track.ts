@@ -1008,6 +1008,8 @@ let keysOf: (producer: Producer) => readonly bigint[];
 let timeAnchors: (producer: Producer) => {
 	atKeys: boolean;
 	starts: ReadonlyMap<bigint, TimeStart>;
+	/** The newest start in `starts` past the time its range asked from, 0 when none is. */
+	past: bigint;
 	relative: ReadonlyMap<bigint, { start: bigint; latest?: bigint }>;
 	/** Bumped whenever the others, or whether the producer is a received copy, change. */
 	placing: number;
@@ -1349,6 +1351,9 @@ export class Producer {
 	// The lowest time and highest start in `#timeStarts`, so the times its ranges may place are
 	// bounded without a walk of them all.
 	#timeStartReach: { lowest: bigint; highest?: bigint } | undefined;
+	// The newest start in `#timeStarts` past the time its range asked from, kept as it is
+	// replaced: a reader's `unplaced` reads it on every settle. Mirrors the Rust `starts_past`.
+	#startsPast = 0n;
 	// On a lite-07 copy, where the publisher started each live range counting back, by its count.
 	#relativeStarts = new Map<bigint, { start: bigint; latest?: bigint }>();
 	// Counts changes to how a time start is placed other than by groups arriving or drops: the wire,
@@ -1589,6 +1594,7 @@ export class Producer {
 		timeAnchors = (producer) => ({
 			atKeys: producer.#startsAtKeys,
 			starts: producer.#timeStarts,
+			past: producer.#startsPast,
 			relative: producer.#relativeStarts,
 			placing: producer.#placing,
 		});
@@ -1633,6 +1639,11 @@ export class Producer {
 				reach = { lowest: reach ? min(reach.lowest, asked) : asked, highest };
 			}
 			producer.#timeStartReach = reach;
+			producer.#startsPast = 0n;
+			for (const [asked, reported] of merged) {
+				const start = reported.start;
+				if (start !== undefined && asked < start && start > producer.#startsPast) producer.#startsPast = start;
+			}
 			producer.#placing++;
 			// The answer may place a time start an ordered read waits at.
 			for (const state of [producer.#state, ...producer.#sinks]) state.timelineChanged.update((rev) => rev + 1);
@@ -3826,11 +3837,14 @@ export class Subscriber {
 					// The live feed accounted for every key it could land from a group at `from` through the
 					// time, so the group containing it came already, at `from` or past it: the newest one held
 					// there, or `from` itself when nothing after it through the time was a group. A group held
-					// below it, such as one fetched, is not it. Else it was evicted, and reaching back to the
-					// oldest group looks it up.
+					// below a `from` at or before the time is not it, since `from` is a group itself. One held
+					// below a covering range that started past the time may be one the publisher expired under
+					// the budget it was asked with, so it may still contain the time, which waits. Else it was
+					// evicted, and reaching back to the oldest group looks it up.
 					const from = producer && landedFrom(producer, time, covering);
 					if (from === undefined) return "unknown";
 					if (below !== undefined && below >= from) return { group: below };
+					if (below !== undefined && from > time) return "unknown";
 					if (from <= time && drops.covers(from + 1n, time + 1n)) return { group: from };
 					return "before";
 				}
@@ -3846,14 +3860,20 @@ export class Subscriber {
 				const runs: Run[] = [];
 				const first = keys[0];
 				const last = keys.at(-1);
+				// `containing` places a time below every held group from a start reported past an
+				// earlier range's time, which an eviction brings about without moving the mark, so a
+				// run there starts past the newest such start. Mirrors the Rust `TrackState::unplaced`.
+				const past = wire ? anchors.past : 0n;
+				const unheld = (run: Run | undefined): Run | undefined =>
+					run && run.start < past ? { start: past, end: run.end } : run;
 				if (anchors.atKeys || state.fetch) {
 					// Every time starts a group.
 				} else if (first === undefined || last === undefined) {
-					const open = uncovered(0n);
+					const open = unheld(uncovered(0n));
 					if (open) runs.push(open);
 				} else if (wire) {
 					// Below every group, up to the first, and above the last, past the drops after it.
-					const below = uncovered(0n);
+					const below = unheld(uncovered(0n));
 					if (below && below.start < first) runs.push({ start: below.start, end: first });
 					const above = uncovered(last + 1n);
 					if (above) runs.push(above);
@@ -4437,6 +4457,7 @@ export class Subscriber {
 		hooks.subscriberEnd = (subscriber) =>
 			subscriber.#resume ? subscriber.#resume.end() : subscriber.#state.end.peek()?.at;
 		hooks.subscriberHoldings = (subscriber) => subscriber.#holdings();
+		hooks.landingSpan = (producer) => landingSpan(producer);
 		hooks.subscriberEndError = (subscriber) =>
 			subscriber.#resume ? subscriber.#resume.endError() : subscriber.#state.end.peek()?.error;
 		hooks.askSubscriber = (subscriber, ask) => {

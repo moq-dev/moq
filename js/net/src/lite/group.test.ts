@@ -219,23 +219,25 @@ test("a scale-less lite-07 FRAME carries its group's start", async () => {
 });
 
 // GROUP carries the previous group's start plus one on lite-07, 0 when unknown, and passes over the
-// starts strictly between; earlier versions carry nothing. Only lite-06 carries a Frame Start.
+// starts strictly between; earlier versions carry nothing. Lite-06 on carries a Frame Start.
 test("a lite-07 GROUP carries its Previous Start plus one", async () => {
 	const encode = (previous: bigint | undefined, version: Version) =>
 		Writer.collect(version, (w) => new Group({ subscribe: 1n, key: 7n, previous }).encode(w, version));
-	expect(Array.from(await encode(4n, Version.DRAFT_07))).toEqual([3, 1, 7, 5]);
-	expect(Array.from(await encode(undefined, Version.DRAFT_07))).toEqual([3, 1, 7, 0]);
+	expect(Array.from(await encode(4n, Version.DRAFT_07))).toEqual([4, 1, 7, 5, 0]);
+	expect(Array.from(await encode(undefined, Version.DRAFT_07))).toEqual([4, 1, 7, 0, 0]);
 	expect(Array.from(await encode(4n, Version.DRAFT_06))).toEqual([3, 1, 7, 0]);
 	const partial = (version: Version) =>
 		Writer.collect(version, (w) => new Group({ subscribe: 1n, key: 7n, frameStart: 4 }).encode(w, version));
 	expect(Array.from(await partial(Version.DRAFT_06))).toEqual([3, 1, 7, 4]);
-	await expect(partial(Version.DRAFT_07)).rejects.toThrow();
+	expect(Array.from(await partial(Version.DRAFT_07))).toEqual([4, 1, 7, 0, 4]);
+	await expect(partial(Version.DRAFT_05)).rejects.toThrow();
 
 	const decode = (bytes: number[], version: Version) =>
 		Group.decode(streamOf([new Uint8Array(bytes)], version), version);
-	const group = await decode([3, 1, 7, 5], Version.DRAFT_07);
+	const group = await decode([4, 1, 7, 5, 0], Version.DRAFT_07);
 	expect([group.previous, group.passedOver(), group.frameStart]).toEqual([4n, { start: 5n, end: 7n }, 0]);
-	expect((await decode([3, 1, 7, 0], Version.DRAFT_07)).passedOver()).toEqual({ start: 7n, end: 7n });
+	expect((await decode([4, 1, 7, 0, 2], Version.DRAFT_07)).frameStart).toBe(2);
+	expect((await decode([4, 1, 7, 0, 0], Version.DRAFT_07)).passedOver()).toEqual({ start: 7n, end: 7n });
 	expect((await decode([3, 1, 7, 0], Version.DRAFT_06)).previous).toBeUndefined();
 });
 
