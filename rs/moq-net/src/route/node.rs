@@ -422,7 +422,8 @@ impl Node {
 	/// Where a request for `broadcast` goes that the peer of the session `tag` names sent
 	/// naming `named`, or no node: here, along a claim the origin serves, or `None` when
 	/// nothing reaches it or the way would lead back to the peer. Waits while the session
-	/// it leaves on has yet to serve the claim.
+	/// it leaves on has yet to serve the claim, and while the node shows the claim available
+	/// but no neighbour's copy holds it yet.
 	pub fn poll_forward(
 		&self,
 		tag: u64,
@@ -1003,7 +1004,12 @@ impl State {
 			return Some(None);
 		};
 		let Some(next) = self.router.step(origin, broadcast) else {
-			return Some(None);
+			// Shown available with no way yet: hold the request rather than answer it
+			// unroutable, which nothing this node shows would ever make its sender retry.
+			return match self.router.awaits(origin, broadcast) {
+				true => None,
+				false => Some(None),
+			};
 		};
 		let (Next::Via(session) | Next::Local(session)) = next;
 		let (path, instance) = broadcast;
