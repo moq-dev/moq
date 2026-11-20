@@ -29,8 +29,6 @@ replaced, or while another route may hold more, recovers the next frame from
 the replacement as a stall does. It ends the group only once a copy holds it
 whole, or the replacement also has nothing past that frame. A group read to a
 GROUP_END is whole and ends as today.
-[moq-dev/moq#9221](https://github.com/moq-dev/moq/pull/9221) turns the whole
-marker into a flag (`is_whole`), so build on whichever has landed.
 
 Add the reproduction in both languages, and the case to the resume models
 (`/verify-resume`), whose oracles should require every frame some route held.

@@ -11933,8 +11933,19 @@ pub struct Ordered {
 	/// Whether the drop record exists. It holds only what happened after it began, so it
 	/// starts before the first read.
 	started: bool,
-	/// The read that last parked, answered again until something it parked on fires.
-	idle: Option<Box<idle::Idle>>,
+	/// The read that last parked or ended, answered again until something it registered on
+	/// fires.
+	idle: Option<Box<idle::Idle<Rest>>>,
+}
+
+/// The answer an [`Ordered`] read repeats while nothing it registered on fired.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Rest {
+	/// It parked.
+	Pending,
+	/// It ended cleanly, which only new ranges undo: a caller polling past the end, as one
+	/// reading the groups it holds does, pays nothing for it.
+	End,
 }
 
 /// What [`Ordered::poll_next_item`] returns next.
@@ -12004,12 +12015,28 @@ impl Ordered {
 	/// Every gap is returned before the end, even a clean one.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next_item(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Item>>> {
-		if idle::Idle::parked(&self.idle, (), waiter) {
+		if idle::Idle::parked(&self.idle, Rest::Pending, waiter) {
 			return Poll::Pending;
+		}
+		if idle::Idle::parked(&self.idle, Rest::End, waiter) {
+			return Poll::Ready(Ok(None));
 		}
 		let mut idle = idle::Idle::start(&mut self.idle, waiter);
 		let polled = self.poll_item(idle.waiter());
-		idle.finish(&mut self.idle, (), polled.is_pending());
+		let rest = match &polled {
+			Poll::Pending => Some(Rest::Pending),
+			Poll::Ready(Ok(None)) => {
+				// The ranges are what can move past an end, as a widening update does through
+				// a [`Control`], whose write wakes this registration.
+				let _ = self
+					.inner
+					.preferences()
+					.poll_ref(idle.waiter(), |_| Poll::<()>::Pending);
+				Some(Rest::End)
+			}
+			Poll::Ready(_) => None,
+		};
+		idle.finish(&mut self.idle, rest.unwrap_or(Rest::Pending), rest.is_some());
 		polled
 	}
 
@@ -13455,6 +13482,28 @@ mod test {
 			ordered.poll_next_group(&kio::Waiter::noop()),
 			Poll::Ready(Ok(None))
 		));
+	}
+
+	/// An ended ordered read answers its end again until a [`Control`], which leaves the read
+	/// itself alone, widens its ranges.
+	#[test]
+	fn an_ended_ordered_read_reopens_when_a_control_widens_it() {
+		let producer = track_producer("test", Info::timed());
+		for key in 0..3 {
+			write_group(&producer, key);
+		}
+		let mut ordered = producer.subscribe(replay().with_range(0..1)).ordered();
+		let control = ordered.control();
+		let noop = kio::Waiter::noop();
+		assert!(matches!(ordered.poll_next_group(&noop), Poll::Ready(Ok(Some(group))) if group.start == 0));
+		for _ in 0..2 {
+			assert!(matches!(ordered.poll_next_group(&noop), Poll::Ready(Ok(None))));
+		}
+		control.update(replay().with_range(0..3)).unwrap();
+		for key in 1..3 {
+			assert!(matches!(ordered.poll_next_group(&noop), Poll::Ready(Ok(Some(group))) if group.start == key));
+		}
+		assert!(matches!(ordered.poll_next_group(&noop), Poll::Ready(Ok(None))));
 	}
 
 	/// A received copy ends an ordered read between two groups only on what its feed proves:

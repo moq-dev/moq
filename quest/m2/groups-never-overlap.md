@@ -7,8 +7,10 @@ every frame of any higher group, so a reader bounds a group that isn't whole
 by the lowest timestamp it knows in a higher group. Frames within a group may
 still reorder (B-frames, open-GOP leading pictures). Sources that overlap
 today, such as a TS content join, publish without ending the broadcast and
-without rewriting a timestamp. The moq-lite and hang drafts state the rule,
-and the producers and every importer keep it, in Rust and JS.
+without rewriting a timestamp. The hang draft states the rule, and the
+producers and every importer keep it, in Rust and JS.
+[Group times](/quest/m2/time-addressing/group-times.md) puts it in the moq-lite
+draft, as spans from a group's lowest frame to its End that never overlap.
 
 ## Plan
 
@@ -63,9 +65,9 @@ before the lite-07 cut):
   frame 0). Conforming HEVC and H.264 already keep it, since a leading picture
   follows every picture of the previous GOP in output order. Only a splice can
   break it.
-- ✅ The moq-lite draft states it as a publisher MUST in lite-07, and the cut
-  waits on this quest (moved from m3): the cut publishes the rule, and
-  first-party producers break it today.
+- ✅ The cut waits on this quest (moved from m3): lite-07 publishes the rule
+  as a publisher MUST through group times, and first-party producers break
+  it today.
 
 Recommended for a splice: a frame after the keyframe that would present at or
 before the previous group's newest frame, such as a RASL picture, is dropped.
@@ -81,10 +83,10 @@ continues the group, and a TS import across a content join, including leading
 pictures, publishes groups whose frames all precede every frame of the next
 group.
 
-Public API: none expected. Wire: none; the moq-lite and hang drafts' group rule
-tightens.
+Public API: none expected. Wire: none; the hang draft's group rule tightens.
 
 ## Related
 
+- [Group Streams carry each time once](/quest/m2/time-addressing/group-times.md) - states the rule in the moq-lite draft, with GROUP_END's End closing each span
 - [An incomplete group expires by the lowest timestamp of a higher group](/quest/m3/expire-by-higher-min.md) - the expiry bound this rule makes safe
 - [An fMP4 group start never rewinds the decode timeline](/quest/m3/fmp4-group-start-tfdt.md) - a keyframe repeating its predecessor's timestamp would now continue the group; check which of its cases remain
