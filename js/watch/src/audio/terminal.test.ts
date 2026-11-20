@@ -255,3 +255,14 @@ test("a gap after a declared end reaches the fresh encoder's first frame unprime
 	expect(terminal.preroll()).toEqual([]);
 	expect(terminal.span(opus(1_000_000)).frames).toBe(960);
 });
+
+test("a join during a pause plays the fresh encoder's first frame whole, past a gap or not", () => {
+	for (const gapped of [false, true]) {
+		const terminal = new Terminal();
+		terminal.clear(0, 80_000);
+		terminal.update(end(1n, 20_000));
+		if (gapped) terminal.update(gap);
+		expect(terminal.update(frame(2n, 1_000_000))).toBe(true);
+		expect(terminal.span(opus(1_000_000)).frames).toBe(960);
+	}
+});
