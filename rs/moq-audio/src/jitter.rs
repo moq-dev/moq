@@ -673,23 +673,19 @@ pub(crate) mod tests {
 	/// it did either way, so the frames held behind it fold nothing.
 	#[test]
 	fn holds_a_backlog_skipped_before_the_first_observation_until_the_join_starts() {
-		let traces: Vec<Vec<f64>> = [None, Some(0), Some(1)]
-			.into_iter()
-			.map(|at| {
-				let mut target = Target::new(Duration::ZERO, true, None);
-				(0..100)
-					.map(|i| {
-						if at == Some(i) {
-							target.backlog(1000.0);
-						}
-						let late = if (5..10).contains(&i) { 200.0 } else { 0.0 };
-						target.observe(500.0 + i as f64 * 20.0 + late, i as f64 * 20.0);
-						target.millis()
-					})
-					.collect()
-			})
-			.collect();
-		let [plain, early, late] = &traces[..] else { unreachable!() };
+		let [plain, early, late] = [None, Some(0), Some(1)].map(|at| {
+			let mut target = Target::new(Duration::ZERO, true, None);
+			(0..100)
+				.map(|i| {
+					if at == Some(i) {
+						target.backlog(1000.0);
+					}
+					let late = if (5..10).contains(&i) { 200.0 } else { 0.0 };
+					target.observe(500.0 + i as f64 * 20.0 + late, i as f64 * 20.0);
+					target.millis()
+				})
+				.collect::<Vec<_>>()
+		});
 		assert_eq!(early, late);
 		assert_ne!(late, plain);
 	}
