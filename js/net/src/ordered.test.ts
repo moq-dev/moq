@@ -501,8 +501,9 @@ test("an ordered read whose window ends past a group it passed as stale reports 
 	withClock((clock) => {
 		const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
 		const first = producer.createGroup(0n);
-		first.writeFrame(textFrame("x", Timestamp.fromMillis(0)));
-		first.finishAt(10n);
+		// Two frames 5ms apart: whole, it presents until 10ms.
+		for (const millis of [0, 5]) first.writeFrame(textFrame("x", Timestamp.fromMillis(millis)));
+		first.finishWhole();
 		clock.jump(Duration.millis(100));
 		put(producer, 100n);
 		const ordered = producer

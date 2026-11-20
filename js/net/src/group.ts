@@ -725,8 +725,8 @@ export class Producer {
 
 	/**
 	 * Ends the group whole, returning it as {@link Finished}: it holds every frame it will ever
-	 * have. A whole group with no successor ages from one mean frame interval past its highest
-	 * frame timestamp, as the Rust `group::Producer::finish_whole`.
+	 * have. A whole group also ages from one mean frame interval past its highest frame
+	 * timestamp, so it ages out without a successor, as the Rust `group::Producer::finish_whole`.
 	 */
 	finishWhole(): Finished {
 		if (this.#state.closed.peek() === undefined) this.#state.whole = true;

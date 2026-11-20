@@ -2323,12 +2323,13 @@ impl TrackState {
 	}
 
 	/// When group `key`, finished whole, stops presenting on the wall clock: its arrival plus
-	/// the span from its first frame's timestamp to how far its frames present, which stands
+	/// how long a copy holding all its frames presents (a fetched head may, beside a live tail),
+	/// which stands
 	/// in for a successor arriving, so the last group of a paused or finished track ages out
 	/// without one (see [`group::Producer::finish_whole`]).
 	fn ended_at(&self, key: u64) -> Option<crate::time::Instant> {
 		let slot = self.lookup.get(&key)?;
-		let span = slot.group.whole_reach()?.checked_sub(slot.group.timestamp()?).ok()?;
+		let span = slot.copies().find_map(group::Handle::whole_span)?;
 		slot.arrived.checked_add(age(span)?)
 	}
 
@@ -2370,13 +2371,16 @@ impl TrackState {
 	///
 	/// The wall-clock twin of [`Self::reach`], re-read the same way rather than latched:
 	/// a group that lands between the two restarts the clock, and an aborted successor
-	/// hands it to the next one. The clock is read only once there is a successor,
-	/// so judging the newest group, the common case, costs no clock read.
+	/// hands it to the next one. A group finished whole also ages from its own frames, and
+	/// the earlier of the two counts. The clock is read only once either exists, so judging
+	/// the newest unfinished group, the common case, costs no clock read.
 	fn superseded(&self, key: u64, servable: &Servable, budget: Duration) -> bool {
-		match self.arrival(key, servable) {
-			Some(successor) => self.aged(successor.arrived, budget),
-			None => self.ended_at(key).is_some_and(|ended| self.aged(ended, budget)),
-		}
+		let successor = self.arrival(key, servable).map(|slot| slot.arrived);
+		successor
+			.into_iter()
+			.chain(self.ended_at(key))
+			.min()
+			.is_some_and(|arrived| self.aged(arrived, budget))
 	}
 
 	/// Whether a full `budget` passed since a successor `arrived`, or since a group finished
@@ -2498,11 +2502,10 @@ impl TrackState {
 		// is observed or wakes us, and armed for whichever successor this pass selected, so
 		// re-selecting re-arms it.
 		let arrival = self.watch_abort(waiter, |state| state.arrival(key, servable));
-		// A group finished whole ages from its own frames without one; see [`Self::ended_at`].
-		let Some(arrived) = self
-			.superseded_at(arrival, servable, superseded)
-			.or_else(|| self.ended_at(key))
-		else {
+		// A group finished whole ages from its own frames, or its successor's arrival if earlier,
+		// so a late successor never revives it; see [`Self::ended_at`].
+		let successor = self.superseded_at(arrival, servable, superseded);
+		let Some(arrived) = successor.into_iter().chain(self.ended_at(key)).min() else {
 			return false;
 		};
 		if let Some(deadline) = arrived.checked_add(budget) {
@@ -15088,6 +15091,89 @@ mod test {
 		assert!(fetched.is_ok(), "{:?}", fetched.err());
 	}
 
+	/// A successor landing after a whole group aged out on its own frames does not restart
+	/// its clock: the group stays old rather than coming back for another budget.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_late_successor_never_revives_a_whole_group() {
+		let producer = track_producer("test", Info::timed().with_max_age(Duration::from_millis(10)));
+		elapse(&producer, Duration::ZERO);
+		let mut group = producer.append_group(Timestamp::ZERO).unwrap();
+		for at in [0, 20, 40] {
+			group
+				.write_frame(Timestamp::from_millis(at).unwrap(), bytes::Bytes::from_static(b"x"))
+				.unwrap();
+		}
+		group.finish_whole().unwrap();
+
+		// It presents until 60ms, so a 10ms budget ages it at 70ms; the successor lands later.
+		elapse(&producer, Duration::from_millis(100));
+		put(&producer, 100, Some(100));
+		let fetched = producer.consume().fetch_group(0, None).now_or_never().unwrap();
+		assert!(matches!(fetched, Err(Error::Old)), "{:?}", fetched.err());
+	}
+
+	/// A mean frame interval below one unit rounds up rather than to zero: three frames over
+	/// one second, on a track counting whole seconds, still present until 2s.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_whole_group_rounds_a_sub_unit_interval_up() {
+		let info = Info::default()
+			.with_timescale(Timescale::SECOND)
+			.with_max_age(Duration::ZERO);
+		let producer = track_producer("test", info);
+		elapse(&producer, Duration::ZERO);
+		let mut group = producer.append_group(Timestamp::ZERO).unwrap();
+		for at in [0, 0, 1] {
+			group
+				.write_frame(Timestamp::from_secs(at).unwrap(), bytes::Bytes::from_static(b"x"))
+				.unwrap();
+		}
+		group.finish_whole().unwrap();
+
+		let consumer = producer.consume();
+		elapse(&producer, Duration::from_millis(1999));
+		let fetched = consumer.fetch_group(0, None).now_or_never().unwrap();
+		assert!(fetched.is_ok(), "before its end: {:?}", fetched.err());
+		elapse(&producer, Duration::from_millis(1));
+		let fetched = consumer.fetch_group(0, None).now_or_never().unwrap();
+		assert!(matches!(fetched, Err(Error::Old)), "{:?}", fetched.err());
+	}
+
+	/// A live copy fed from frame 1 measures nothing, but a fetched head holding the whole
+	/// group does, so the group ages from the head's frames as the origin's copy would.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_whole_fetched_head_ages_beside_a_live_tail() {
+		let info = Info::timed().with_max_age(Duration::ZERO);
+		let producer = track_producer("test", info.clone());
+		elapse(&producer, Duration::ZERO);
+		let dynamic = producer.requests();
+		let consumer = producer.consume();
+		let mut live = producer.create_group(group::Info { start: 0 }).unwrap();
+		live.start_at(1).unwrap();
+		live.write_frame(Timestamp::from_millis(20).unwrap(), bytes::Bytes::from_static(b"x"))
+			.unwrap();
+
+		let fetch = consumer.fetch_group(0, None);
+		let request = dynamic.requested_fill_group().await.unwrap();
+		let mut head = request.accept(info).unwrap().expect("a fresh group");
+		for at in [0, 20, 40] {
+			head.write_frame(Timestamp::from_millis(at).unwrap(), bytes::Bytes::from_static(b"x"))
+				.unwrap();
+		}
+		head.finish_whole().unwrap();
+		assert_eq!(fetch.await.unwrap().index(), 0);
+
+		// Three frames over 40ms: a 20ms mean interval, so it presents until 60ms.
+		elapse(&producer, Duration::from_millis(59));
+		let fetched = consumer.fetch_group(0, None).now_or_never().unwrap();
+		assert!(fetched.is_ok(), "before its end: {:?}", fetched.err());
+		elapse(&producer, Duration::from_millis(1));
+		let fetched = consumer.fetch_group(0, None).now_or_never().unwrap();
+		assert!(matches!(fetched, Err(Error::Old)), "{:?}", fetched.err());
+	}
+
 	/// A whole copy received from past frame 0 holds only its tail, whose first timestamp is
 	/// not the group's, so it measures no interval and never ages without a successor.
 	#[kio::test]
@@ -21167,7 +21253,12 @@ mod test {
 		let producer = track_producer("test", Info::timed());
 		elapse(&producer, Duration::ZERO);
 		let mut group = producer.create_group(group::Info { start: 0 }).unwrap();
-		group.write_frame(Timestamp::ZERO, &b"x"[..]).unwrap();
+		// Two frames 5ms apart: whole, it presents until 10ms.
+		for at in [0, 5] {
+			group
+				.write_frame(Timestamp::from_millis(at).unwrap(), &b"x"[..])
+				.unwrap();
+		}
 		group.finish_whole().unwrap();
 		elapse(&producer, Duration::from_millis(100));
 		put(&producer, 100, Some(100));

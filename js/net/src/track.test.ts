@@ -2092,6 +2092,52 @@ test.each([true, false])("a last group finished whole=%s ages from its highest f
 	}
 });
 
+// A mean frame interval below one unit rounds up rather than to zero: three frames over one second,
+// on a track counting whole seconds, still present until 2s. Mirrors the Rust
+// `a_whole_group_rounds_a_sub_unit_interval_up`.
+test("a whole group rounds a sub-unit interval up", () => {
+	const clock = manualTime(10_000);
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.SECOND, maxAge: Duration.ZERO });
+	try {
+		const group = producer.appendGroup(new Timestamp(0, Timescale.SECOND));
+		for (const secs of [0, 0, 1]) group.writeFrame(textFrame("x", new Timestamp(secs, Timescale.SECOND)));
+		group.finishWhole();
+
+		clock.set(11_999);
+		expect(drain(producer.subscribe({ delay: { max: Duration.millis(1000) } }))).toEqual([0n]);
+		clock.set(12_000);
+		expect(drain(producer.subscribe({ delay: { max: Duration.millis(1000) } }))).toEqual([]);
+	} finally {
+		producer.finish();
+		producer.close();
+		clock.installed.close();
+	}
+});
+
+// A successor landing after a whole group aged out on its own frames does not restart its clock:
+// the group stays old rather than coming back for another budget. Mirrors the Rust
+// `a_late_successor_never_revives_a_whole_group`.
+test("a late successor never revives a whole group", () => {
+	const clock = manualTime(10_000);
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Duration.millis(10) });
+	try {
+		const group = producer.appendGroup(Timestamp.fromMillis(0));
+		for (const millis of [0, 20, 40]) group.writeFrame(textFrame("x", Timestamp.fromMillis(millis)));
+		group.finishWhole();
+
+		// It presents until 60ms, so a 10ms budget ages it at 70ms; the successor lands later.
+		clock.set(10_100);
+		const next = producer.appendGroup(Timestamp.fromMillis(100));
+		next.writeFrame(textFrame("x", Timestamp.fromMillis(100)));
+		next.finish();
+		expect(drain(producer.subscribe({ delay: { max: Duration.millis(1000) } }))).toEqual([100n]);
+	} finally {
+		producer.finish();
+		producer.close();
+		clock.installed.close();
+	}
+});
+
 // A whole group whose frames measure no interval, one frame here, says nothing about how long it
 // presents, so like a closed one it never ages without a successor. Mirrors the Rust
 // `a_whole_group_of_one_frame_never_ages_alone`.

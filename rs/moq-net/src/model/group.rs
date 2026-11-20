@@ -2284,10 +2284,9 @@ impl Producer {
 	/// End the group whole, returning the [`Finished`] group: it holds every frame it will
 	/// ever have, so no more can be written, but it can still be read or aborted.
 	///
-	/// A whole group with no successor ages from one mean frame interval past its highest frame
-	/// timestamp, so the last group of a paused or finished track ages out (see
-	/// [`track::Info::max_age`]). Fails
-	/// with the abort error if the group was already aborted.
+	/// A whole group also ages from one mean frame interval past its highest frame timestamp,
+	/// so the last group of a paused or finished track ages out without a successor (see
+	/// [`track::Info::max_age`]). Fails with the abort error if the group was already aborted.
 	pub fn finish_whole(self) -> Result<Finished> {
 		self.end(true)
 	}
@@ -3123,14 +3122,13 @@ impl Handle {
 		}
 	}
 
-	/// How far a group finished whole presents: one frame past its highest frame timestamp, a
-	/// frame being its mean interval from its first frame's timestamp to its highest. `None`
-	/// when it is not whole, when this copy does not hold it from frame 0 (a tail's first
-	/// timestamp is not the group's), or when its frames measure no interval (one frame, or
-	/// all at one timestamp). Only a whole group's frames prove where it stops, and they are
-	/// the same at every copy holding them all, so its reach never depends on which copy
-	/// judges it.
-	pub(super) fn whole_reach(&self) -> Option<Timestamp> {
+	/// How long a group finished whole presents, from its first frame's timestamp to one frame
+	/// past its highest, a frame being its mean interval rounded up to a whole unit. `None` when
+	/// it is not whole, when this copy does not hold it from frame 0 (a tail's first timestamp
+	/// is not the group's), or when its frames span no time (one frame, or all at one
+	/// timestamp). Only a whole group's frames prove where it stops, and they are the same at
+	/// every copy holding them all, so its span never depends on which copy judges it.
+	pub(super) fn whole_span(&self) -> Option<Timestamp> {
 		let state = self.state.read();
 		let Outcome::Finished(frames, true) = state.outcome else {
 			return None;
@@ -3142,11 +3140,12 @@ impl Handle {
 			return None;
 		}
 		let gaps = u64::try_from(frames.checked_sub(1)?).ok()?;
-		let interval = latest.value().checked_sub(start.value())?.checked_div(gaps)?;
-		if interval == 0 {
+		let span = latest.value().checked_sub(start.value())?;
+		if gaps == 0 || span == 0 {
 			return None;
 		}
-		latest.checked_add(Timestamp::new(interval, latest.scale()?).ok()?).ok()
+		// Rounded up, so a mean below one unit still counts and the bound stays an upper one.
+		Timestamp::new(span.checked_add(span.div_ceil(gaps))?, latest.scale()?).ok()
 	}
 
 	/// The group's full cached footprint (payload plus fixed overhead, and a compressed

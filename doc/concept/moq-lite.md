@@ -342,9 +342,11 @@ subscription there starts at the live group.
 
 A group ends one of three ways: finished, so it is whole; closed, so every
 frame written arrives but it may have held more, as when a relay stops sending
-a group that went stale; or aborted with an error. A finished group with no
-successor ages from one frame past its highest frame timestamp, so the last
-group of a paused track still ages out. Over the work-in-progress moq-lite 07 each group also
+a group that went stale; or aborted with an error. A finished group also
+ages from one frame past its highest frame timestamp, a frame being its mean
+interval, so the last group of a paused track still ages out. That needs a
+timed track, at least two frame timestamps apart, and the group held from its
+first frame; otherwise it ages only once a successor arrives. Over the work-in-progress moq-lite 07 each group also
 names the start of the group before it, so a reader sees a gap at once; older
 moq-lite versions say neither whether a group is whole nor the previous start.
 

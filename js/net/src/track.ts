@@ -3277,8 +3277,10 @@ export class Subscriber {
 		let arrived = this.#arrivals
 			? this.#keptSupersededAt(key, drift, held)
 			: this.#supersededAt(arrival, drift, held);
-		// A group finished whole ages from its own frames without a successor.
-		if (arrived === undefined && !this.#arrivals) arrived = this.#endedAt(key);
+		// A group finished whole ages from its own frames, or its successor's arrival if earlier: a
+		// late successor never revives a group its frames already aged out.
+		const ended = this.#arrivals ? undefined : this.#endedAt(key);
+		if (ended !== undefined) arrived = arrived?.min(ended) ?? ended;
 		if (arrived === undefined) return false;
 		// Plain arithmetic: an unenforced budget is infinite, which no duration brand holds.
 		const deadline = arrived.since(Instant.ZERO).asNanos() + drift.budget * 1_000_000;
@@ -3326,11 +3328,11 @@ export class Subscriber {
 
 	// When group `key`, finished whole, stops presenting on the wall clock: its arrival plus the
 	// span from its first frame's timestamp to one frame past its highest, a frame being its mean
-	// interval, which stands in for a successor arriving, so the last group of a paused or finished
-	// track ages out without one. Undefined when it is not whole, or its frames measure no interval
-	// (one frame, or all at one timestamp). Only a whole group's frames prove where it stops, and
+	// interval rounded up to a whole unit, which stands in for a successor arriving, so the last
+	// group of a paused or finished track ages out without one. Undefined when it is not whole, or
+	// its frames span no time (one frame, or all at one timestamp). Only a whole group's frames prove where it stops, and
 	// they are the same at every copy. Mirrors the Rust `TrackState::ended_at` and
-	// `Handle::whole_reach`.
+	// `Handle::whole_span`.
 	#endedAt(key: bigint): Instant | undefined {
 		const group = this.#held(key);
 		if (!group?.whole || group.frameCount < 2) return undefined;
@@ -3340,9 +3342,10 @@ export class Subscriber {
 		const scale = latest?.scale;
 		if (start === undefined || latest === undefined || scale === undefined) return undefined;
 		// In the track's units, as Rust divides them, and as a span: the reach itself may not fit.
-		const interval = Math.floor((latest.value - start.value) / (group.frameCount - 1));
-		if (interval <= 0) return undefined;
-		const span = ((latest.value - start.value + interval) * 1000) / scale;
+		// Rounded up, so a mean below one unit still counts and the bound stays an upper one.
+		const frames = latest.value - start.value;
+		if (frames <= 0) return undefined;
+		const span = ((frames + Math.ceil(frames / (group.frameCount - 1))) * 1000) / scale;
 		return hooks.groupArrived(group).checkedAdd(Duration.millis(span));
 	}
 
