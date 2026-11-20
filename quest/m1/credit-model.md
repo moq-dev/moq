@@ -65,6 +65,6 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Paused-stream allowance](/quest/m1/paused-allowance.md) - the design this model checks before it merges
+- [Unsealed frame credit](/quest/m4/unsealed-frame-credit.md) - returns credit as bytes are read, which the model must then cover
 - [Overcommitted receive-window cells](/quest/m3/receive-windows-evicted.md) - the benchmark side of the same mechanism
 - [Send-credit stall counters](/quest/m3/send-credit-stalls.md) - what an operator sees when the sender waits on credit
