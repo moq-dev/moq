@@ -143,6 +143,20 @@ async fn read_as(version: Option<&str>, range: Range, how: Read) -> Result<Group
 			}
 		}
 	}
+	// A read that ended passed its range: a group the publisher creates there now is late.
+	if read.ended && !how.append {
+		let mut late = track.create_group(moq_net::group::Info { start: 1500 }).unwrap();
+		late.write_frame(millis(1500), &b"x"[..]).unwrap();
+		late.finish().unwrap();
+		let next = match (&mut ordered, &mut arrival) {
+			(Some(ordered), _) => kio::clock::timeout(TIMEOUT, ordered.next_group()).await,
+			(_, Some(arrival)) => kio::clock::timeout(TIMEOUT, arrival.recv_group()).await,
+			_ => unreachable!(),
+		};
+		if let Ok(Ok(Some(group))) = next {
+			read.groups.push(group.start);
+		}
+	}
 	let _track = track.finish().unwrap();
 	Ok(read)
 }
@@ -350,7 +364,8 @@ async fn a_sparse_request_counts_its_relative_start_back_as_the_publisher_did() 
 /// origin that is its own state. A lite-07 copy ends there only on what its wire proves, the
 /// starts between skipped, which a GROUP's Previous Start says of an appending publisher. A
 /// publisher creating groups out of order says nothing, so the copy, and any arrival read of a
-/// track created that way, waits for a group that may still come.
+/// track created that way, waits for a group that may still come. A group created below the
+/// end after an ordered read ended is late, as for any key the read passed.
 #[kio::test]
 async fn a_time_end_between_groups_ends_an_ordered_read_at_the_next() {
 	let between = range(Anchor::Time(1500), Some(Anchor::Time(1999)));

@@ -4851,7 +4851,12 @@ test("a time end between two groups ends an ordered read through a front at the 
 	// An arrival read waits: the publisher may still create 1500.
 	const arrival = front.consumer.track("seq").subscribe(between);
 	expect((await arrival.recvGroup())?.start).toBe(1000n);
-	expect(await isPending(arrival.recvGroup())).toBe(true);
+	const waiting = arrival.recvGroup();
+	expect(await isPending(waiting)).toBe(true);
+	// The ended ordered read passed its range: a group created there now is late.
+	track.write(1500n);
+	expect(await ordered.nextGroup()).toBeUndefined();
+	expect((await waiting)?.start).toBe(1500n);
 	ordered.close();
 	arrival.close();
 	front.consumer.close();

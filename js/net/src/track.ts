@@ -5108,7 +5108,11 @@ export class Subscriber {
 					}
 				}
 				this.#handOut(recv.group.start, ordered);
-			} else if (recv.kind === "idle" && this.#exhausted()) return { kind: "done" };
+			} else if (recv.kind === "done" || (recv.kind === "idle" && this.#exhausted())) {
+				// As the Rust front's reader: whatever ended it, an ordered read passed its range.
+				if (ordered) this.#passEnd();
+				return { kind: "done" };
+			}
 			return recv;
 		}
 	}
@@ -5345,6 +5349,21 @@ export class Subscriber {
 		return undefined;
 	}
 
+	// Pass every key below the bounded window's end for good, as an ordered read that ran out of it:
+	// a group created there later is late, so later reads end at once too. Mirrors the Rust
+	// `Cursor::pass_end`.
+	#passEnd(): void {
+		// A resumed reader's ranges resolve on the copy serving it.
+		const end = this.#resume ? this.#resume.servingEnd() : this.#window.end();
+		if (end === undefined) return;
+		const floor = this.#delivered.runEnd(0n) ?? 0n;
+		this.#delivered.forgetBelow(end);
+		const forgot = this.#delivered.runEnd(0n) ?? 0n;
+		if (forgot > floor) this.#stoppedReading(floor, forgot);
+		if (!this.#resume) this.#nextKey = max(this.#nextKey, end);
+		this.#fold(forgot);
+	}
+
 	// Take `given` from the gap at `index` as an item, which the read has now moved past. What lies
 	// below `given`, which the bounds leave out, and from `resume` on stay gaps.
 	#takeGap(items: Items, index: number, given: Run, resume: bigint): Item {
@@ -5568,7 +5587,10 @@ export class Subscriber {
 		const end = this.#state.end.peek()?.at;
 		// A time start still looked up may yet take in a group held already.
 		if (this.#window.lookups().length > 0) return { kind: "idle" };
-		if (this.#exhausted()) return { kind: "done" };
+		if (this.#exhausted()) {
+			this.#passEnd();
+			return { kind: "done" };
+		}
 		if (
 			!this.#parked(groups) &&
 			!this.#starting(groups, start) &&

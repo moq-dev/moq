@@ -10224,6 +10224,13 @@ impl Cursor {
 		self.forget_heads_below(floor);
 	}
 
+	/// Pass every key below `end` for good, as an ordered read whose bounded window ran out
+	/// at `end`: a group created there later is late, so later reads end at once too.
+	fn pass_end(&mut self, end: u64) {
+		self.skip_ordered(end);
+		self.record.delivered.forget_below(end);
+	}
+
 	/// Let go of the heads asked below `next`, which an ordered read never goes back for:
 	/// one still out would keep the read waiting on a fill it no longer polls.
 	fn forget_heads_below(&mut self, next: u64) {
@@ -10729,7 +10736,12 @@ impl Subscriber {
 							// A read that only skipped since its last hand-out settles its write-offs too.
 							cursor.retire_written_off();
 							break match !self.parks && cursor.is_exhausted(&[], 0, ordered) {
-								true => Poll::Ready(Ok(None)),
+								true => {
+									if ordered && let Some(end) = cursor.filter.window.end() {
+										cursor.pass_end(end);
+									}
+									Poll::Ready(Ok(None))
+								}
 								false => Poll::Pending,
 							};
 						}
@@ -10746,9 +10758,20 @@ impl Subscriber {
 				idle.finish(&mut cursor.idle, walk, polled.is_pending());
 				polled
 			}
-			Inner::Resume(resume, logical) => resume
-				.poll_peek_group(ordered, self.parks, &logical.record.delivered, waiter)
-				.map(|res| res.map(|candidate| candidate.map(|candidate| Reserved::Resume(Box::new(candidate))))),
+			Inner::Resume(resume, logical) => {
+				let polled = resume.poll_peek_group(ordered, self.parks, &logical.record.delivered, waiter);
+				if ordered
+					&& matches!(polled, Poll::Ready(Ok(None)))
+					&& let Some(end) = resume.window_end()
+					&& !logical.record.delivered.covers(0..end)
+				{
+					// As a plain cursor's [`Cursor::pass_end`]: what it handed out moved, which
+					// nothing it parked on notifies.
+					resume.disarm();
+					logical.record.delivered.forget_below(end);
+				}
+				polled.map(|res| res.map(|candidate| candidate.map(|candidate| Reserved::Resume(Box::new(candidate)))))
+			}
 		}
 	}
 
@@ -13357,10 +13380,15 @@ mod test {
 		assert!(woken.load(Ordering::SeqCst), "the group past the end wakes the read");
 		assert!(matches!(ordered.poll_next_group(&noop), Poll::Ready(Ok(None))));
 		assert!(arrival.poll_recv_group(&noop).is_pending(), "1500 may still be created");
+		// The ended read passed every key below its end: a group created there now is late.
+		let _late = framed(&producer, 1_500, 1).finish().unwrap();
+		assert!(matches!(ordered.poll_next_group(&noop), Poll::Ready(Ok(None))));
+		assert!(matches!(arrival.poll_recv_group(&noop), Poll::Ready(Ok(Some(group))) if group.start == 1_500));
 
-		// A group created between before a read reaches the end is still read.
+		// A group created between before a read reaches the end is still read. The time start
+		// now resolves to 1500, which contains it.
 		let mut later = bounded().ordered();
-		assert!(matches!(later.poll_next_group(&noop), Poll::Ready(Ok(Some(group))) if group.start == 1_000));
+		assert!(matches!(later.poll_next_group(&noop), Poll::Ready(Ok(Some(group))) if group.start == 1_500));
 		let _between = framed(&producer, 1_600, 1).finish().unwrap();
 		assert!(matches!(later.poll_next_group(&noop), Poll::Ready(Ok(Some(group))) if group.start == 1_600));
 		assert!(matches!(later.poll_next_group(&noop), Poll::Ready(Ok(None))));

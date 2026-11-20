@@ -422,11 +422,17 @@ test("a time end between two groups ends an ordered read once the publisher crea
 	// Handing out 2000 would pass every start below it; an arrival read waits, since 1500 may still come.
 	put(producer, 2000n, false);
 	expect(await end).toBeUndefined();
-	expect(await settlesWithin(arrival.recvGroup(), clock)).toBe(false);
+	const waiting = arrival.recvGroup();
+	expect(await settlesWithin(waiting, clock)).toBe(false);
+	// The ended read passed every key below its end: a group created there now is late.
+	put(producer, 1500n, false);
+	expect(await ordered.nextGroup()).toBeUndefined();
+	expect((await waiting)?.start).toBe(1500n);
 
-	// A group created between before a read reaches the end is still read.
+	// A group created between before a read reaches the end is still read. The time start now
+	// resolves to 1500, which contains it.
 	const later = producer.subscribe(between).ordered();
-	expect((await later.nextGroup())?.start).toBe(1000n);
+	expect((await later.nextGroup())?.start).toBe(1500n);
 	put(producer, 1600n, false);
 	expect((await later.nextGroup())?.start).toBe(1600n);
 	expect(await later.nextGroup()).toBeUndefined();

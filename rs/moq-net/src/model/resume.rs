@@ -1390,6 +1390,13 @@ impl Subscriber {
 		reader.declared_error.clone()
 	}
 
+	/// The exclusive end of the reader's ranges, once they all end and resolved.
+	pub(super) fn window_end(&self) -> Option<u64> {
+		let mut reader = self.reader();
+		let window = reader.window();
+		window.end().filter(|_| !window.is_pending())
+	}
+
 	/// The local group filter, as [`track::Subscriber::poll_largest`] reports within it.
 	pub(super) fn bounds(&self) -> track::Bounds {
 		let mut reader = self.reader();
