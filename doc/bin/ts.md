@@ -24,7 +24,7 @@ moq ... --broadcast event.hang export ts --passthrough > out.ts
 
 | | Semantic | Passthrough (`--passthrough`) |
 | --- | --- | --- |
-| On the wire | One track per elementary stream, plus the PSI and SI the import keeps, in the [`mpegts`](/draft/moq-mpegts) catalog section | One [`m2ts`](/concept/hang#transport-streams) track of whole 188-byte packets |
+| On the wire | One track per elementary stream, plus the PSI and SI the import keeps, in the [`mpegts`](/draft/moq-mpegts) catalog section | One [passthrough](/concept/hang#transport-streams) track of whole 188-byte packets, named in the same section |
 | Output | A rebuilt TS: same media, programs, descriptors and kept SI; new packetization, PCR and table cadence | The source's packets, byte for byte, from the first group on |
 | Browsers and `moq play` | Watch the video and AAC or Opus audio; MP2, AC-3 and E-AC-3 play only where the player has a decoder for them, which `moq play` does not | Have nothing to decode |
 | A relay | Drops and prioritizes per track | Caches and drops whole runs of packets |
@@ -197,9 +197,11 @@ what the network drops, so random packet loss alone loses no content.
   the output decodes, or meets the T-STD, across the gap.
 
 Damage in the source is the importer's concern, not MoQ's. In semantic mode a
-damaged packet is dropped on its own PID, so video freezes until its next
-keyframe while the other tracks carry on, and feed health (stalled streams,
-TR 101 290 counters) is logged and reported without changing what publishes.
+lost packet, or one the receiver flagged with the transport error indicator, is
+dropped on its own PID, so video freezes until its next keyframe while the
+other tracks carry on, and feed health (stalled streams, TR 101 290 counters)
+is logged and reported without changing what publishes. A media unit that
+arrives whole but does not decode ends the import with the cause.
 Passthrough carries damaged packets as they came.
 
 ## Evidence
@@ -258,7 +260,8 @@ details each grader and its negative controls.
 | Semantic: a congested and an overflowing path shed whole groups, stay T-STD compliant, keep their latency | `just test ts --headroom --rate 7000000`, with `--queue 250ms` | Nightly only |
 | Passthrough: a missing group leaves its time out and counts one gap; a cut group loses only its tail; a late run is dropped alone | [`release_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/release_test.rs) `a_group_never_delivered_leaves_its_time_out`, `a_group_cut_short_loses_only_its_tail`, `an_object_past_its_deadline_is_a_gap_in_that_release_only` | PR |
 | Passthrough: an overflowing path keeps surviving packets in place through the source's last | `just test ts --passthrough --rate 7000000 --queue 250ms` | Nightly only |
-| Source damage drops only the damaged PID's unit | [`import.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/import.rs) `damaged_h264_nal_recovers`, `video_drops_a_partial_access_unit_across_a_continuity_break` | PR |
+| Source damage drops only the damaged PID's unit | [`import.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/import.rs) `damaged_tei_recovers`, `video_drops_a_partial_access_unit_across_a_continuity_break` | PR |
+| A whole unit that does not decode ends the import | [`import.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/import.rs) `undecodable_nal_ends_the_import`, `malformed_opus_pes_ends_the_import_unpublished` | PR |
 
 ### Not claimed
 

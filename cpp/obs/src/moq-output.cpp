@@ -894,9 +894,9 @@ void MoQOutput::VideoInit(obs_encoder_t *encoder)
 	// with inline parameter sets, which is what OBS hands us.
 	moq::VideoInit config{};
 	if (strcmp(codec, "h264") == 0) {
-		config.format = moq::VideoFormat::kAvc3;
+		config.format = moq::VideoFormat::kH264;
 	} else if (strcmp(codec, "hevc") == 0) {
-		config.format = moq::VideoFormat::kHev1;
+		config.format = moq::VideoFormat::kH265;
 	} else if (strcmp(codec, "av1") == 0) {
 		config.format = moq::VideoFormat::kAv01;
 	} else {

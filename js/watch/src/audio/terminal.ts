@@ -109,7 +109,9 @@ export class Terminal {
 		this.#epoch ??= timestamp;
 		if (this.#prime) {
 			const primed = this.#reprime(timestamp);
-			this.#before = timestamp + Math.max(0, this.#warmup - primed);
+			// On the timeline `span` maps output onto, where this frame's output lands: a pre-skip early,
+			// since an Opus packet decodes to the encoder's lookahead before its timestamp.
+			this.#before = timestamp - this.delay + Math.max(0, this.#warmup - primed);
 			this.#prime = false;
 		}
 		return reset;

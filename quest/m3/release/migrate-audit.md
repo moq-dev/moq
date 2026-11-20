@@ -40,6 +40,19 @@ m1 quest on 2026-10-22.
   drop it, or correct it against the published moq-auth. `sh/migrate.sh`
   refuses that edit outside the cut, so
   [moq-dev/moq#8947](https://github.com/moq-dev/moq/pull/8947) left it here.
+  Drop `rs/moq-net/MIGRATE.md`'s "Origins prove a route key" too: no
+  release had `origin::Config::route_key` or
+  `poll::Session::export_keying_material`, and
+  [moq-dev/moq#8987](https://github.com/moq-dev/moq/pull/8987) and
+  [moq-dev/moq#9053](https://github.com/moq-dev/moq/pull/9053) removed
+  them.
+  And both `js/net/MIGRATE.md` and `rs/moq-net/MIGRATE.md` say, under "A
+  timed track refuses a group that rewinds (#5803)", that a track received
+  over moq-transport stays unchecked, which
+  [moq-dev/moq#9028](https://github.com/moq-dev/moq/pull/9028) overturned:
+  a group received over moq-transport is checked too, since its time is its
+  Group ID, and only a moq-lite-05/06 copy keeps its timestamps unchecked,
+  so "serves both on" becomes "serves it on".
 - Run the API-diff report on the cut PR and read the diff of the
   hand-written binding wrappers (`py/moq-rs`, `kt/moq`, `dart/moq`,
   `go/wrapper`, `swift`, `cpp/moq`, `cpp/obs`) and of each binary's flags,

@@ -8,6 +8,7 @@
 import { expect, test } from "bun:test";
 import { Duration } from "@moq/clock";
 import { accept, connect, type Session } from "./connection/index.ts";
+import { defined } from "./defined.test-util.ts";
 import type { Producer as GroupProducer } from "./group.ts";
 import { FetchHeader } from "./ietf/fetch.ts";
 import * as Ietf from "./ietf/index.ts";
@@ -147,7 +148,7 @@ async function backlog(protocol: string, order: Order, update?: Order) {
 
 	const broadcastRoute = origin.route(Path.from("test"));
 	const broadcast = broadcastRoute.broadcast;
-	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	const video = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 	const groups = [0, 1, 2].map(() => writeGroup(video));
 
 	const remote = wireOf(client).consume(Path.from("test"));
@@ -200,7 +201,7 @@ test.each(["ascending", "descending"] as const)("ietf serves GROUP_ORDER %s", as
 
 	const broadcastRoute = origin.route(Path.from("test"));
 	const broadcast = broadcastRoute.broadcast;
-	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	const video = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 
 	const remote = wireOf(client).consume(Path.from("test"));
 	const subscriber = remote.track("video").subscribe({ delay: { max: MAX_DELAY }, order });
@@ -267,7 +268,7 @@ test("ietf keeps a closing group stream ranked until it settles", async () => {
 
 	const broadcastRoute = origin.route(Path.from("test"));
 	const broadcast = broadcastRoute.broadcast;
-	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	const video = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 
 	const remote = wireOf(client).consume(Path.from("test"));
 	const subscriber = remote.track("video").subscribe({ delay: { max: MAX_DELAY }, order: "descending" });
@@ -307,7 +308,7 @@ test("a shared track aggregates descending and serves each subscriber in its own
 
 	const broadcastRoute = origin.route(Path.from("test"));
 	const broadcast = broadcastRoute.broadcast;
-	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	const video = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 
 	const ascendingRemote = wireOf(ascending.client).consume(Path.from("test"));
 	const ascendingTrack = ascendingRemote.track("video").subscribe({ delay: { max: MAX_DELAY }, order: "ascending" });

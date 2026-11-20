@@ -139,10 +139,9 @@ async def test_client_reconnects_and_resumes_announcements():
                 assert state.connects == 1
                 assert session.stats().version is not None
 
-                # Kill the transport under the client, like a relay restart, once past
-                # the 1s healthy bar so the drop redials rather than ending the session.
+                # Kill the transport under the client, like a relay restart. CONNECTED
+                # means the peer accepted the session, so the drop redials.
                 await asyncio.wait_for(accepted.wait(), timeout=10)
-                await asyncio.sleep(1)
                 sessions[0].cancel(0)
 
                 # Nothing accepts the redial until the gate opens, so DISCONNECTED
@@ -586,7 +585,7 @@ async def test_client_context_keeps_the_body_error():
                     reader = await asyncio.wait_for(consumer.subscribe_track("data"), timeout=5.0)
                     reading.append(asyncio.create_task(drain(reader)))
                     demand = track.demand()
-                    while await asyncio.wait_for(demand.wanted_changed(), timeout=5.0) is None:
+                    while not await asyncio.wait_for(demand.wanted_changed(), timeout=5.0):
                         pass
                     raise ZeroDivisionError("boom")
             # The error exits the context without draining, but the session is over.

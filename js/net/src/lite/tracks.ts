@@ -60,7 +60,7 @@ export class Tracks {
  * A listed track's info on a Tracks Stream: the TRACK_INFO a Track Stream would answer, or with
  * `datagrams`, the DATAGRAMS_INFO a Datagrams Stream would.
  */
-export type Listed = { datagrams?: false; info: TrackInfo } | { datagrams: true; info: DatagramsInfo };
+type Listed = { datagrams?: false; info: TrackInfo } | { datagrams: true; info: DatagramsInfo };
 
 /**
  * One event the publisher sends on a Tracks Stream: TRACKS_ADD with the listed track's kind and

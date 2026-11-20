@@ -15,7 +15,7 @@ export namespace Announce {
 		get synced(): Signals.Getter<boolean>;
 	}
 	export type Event = {
-		kind: "present" | "unavailable" | "available" | "absent" | "offline";
+		kind: "present" | "absent";
 	} & Announce.Announce;
 	export interface Options {
 		covering?: boolean;
@@ -108,8 +108,8 @@ export namespace Broadcast {
 		close(): void;
 		get closed(): Signals.GetPromise<null>;
 		consume(): Broadcast.Consumer;
-		createDatagrams(name: string, info?: Partial<Datagram.Info>): Datagram.Producer;
-		createTrack(name: string, info?: Track.InfoInit): Track.Producer;
+		createDatagrams(name: string, info?: Partial<Datagram.Info>): Datagram.Producer | undefined;
+		createTrack(name: string, info?: Track.InfoInit): Track.Producer | undefined;
 		removeTrack(name: string): void;
 		track(name: string): Track.Consumer;
 	}
@@ -687,7 +687,8 @@ export namespace Track {
 	export class Demand {
 		get closed(): Signals.GetPromise<Error | null>;
 		readonly name: string;
-		get wanted(): Signals.Getter<bigint | undefined>;
+		get refresh(): Signals.Getter<boolean>;
+		get wanted(): Signals.Getter<boolean>;
 	}
 	export interface FetchGroupOptions {
 		maxDelay?: Clock.Duration;
@@ -697,7 +698,7 @@ export namespace Track {
 	export type Fill = Track.FillGroups | Track.FillLookup;
 	export class FillGroups {
 		[Symbol.dispose](): void;
-		accept(start: bigint, info?: Track.Info): Group.Producer;
+		accept(start: bigint, info?: Track.Info): Group.Producer | undefined;
 		close(): void;
 		dropGroups(start: bigint, end: bigint): void;
 		readonly end: bigint;
@@ -714,7 +715,7 @@ export namespace Track {
 	}
 	export class FillLookup {
 		[Symbol.dispose](): void;
-		accept(start: bigint, info?: Track.Info): Group.Producer;
+		accept(start: bigint, info?: Track.Info): Group.Producer | undefined;
 		close(): void;
 		readonly kind: "lookup";
 		get maxDelay(): Clock.Duration | null;
@@ -739,15 +740,26 @@ export namespace Track {
 		compression: Track.Compression;
 		maxAge: Clock.Duration | null;
 		priority: number;
-		refresh: number | null;
+		refresh: Track.Refresh;
 		timescale: Time.Timescale | null;
 	}
-	export interface InfoInit extends Partial<Track.Info> {
+	export interface InfoInit extends Partial<Omit<Track.Info, "refresh">> {
 		maxAge?: Clock.Duration | null;
+		refresh?: Partial<Track.Refresh>;
 	}
 	export interface InfoOptions {
 		signal?: AbortSignal;
 	}
+	export type Item = {
+		group: Group.Consumer;
+		kind: "group";
+	} | {
+		end: bigint;
+		error: Error;
+		group?: never;
+		kind: "gap";
+		start: bigint;
+	};
 	export type Order = "ascending" | "descending";
 	export class Ordered {
 		close(abort?: Error): void;
@@ -758,14 +770,17 @@ export namespace Track {
 		largest(): Promise<Track.Position | undefined>;
 		readonly name: string;
 		nextGroup(): Promise<Group.Consumer | undefined>;
+		nextItem(): Promise<Track.Item | undefined>;
 		readFrame(): Promise<{
 			frame: number;
 			group: bigint;
 		} & Group.Frame | undefined>;
 		readJson(): Promise<unknown | undefined>;
 		readString(): Promise<string | undefined>;
+		refresh(options?: Track.RefreshOptions): Promise<void>;
 		get subscription(): Signals.Getter<Track.Subscription | undefined>;
 		tryNextGroup(): Group.Consumer | undefined;
+		tryNextItem(): Track.Item | undefined;
 		update(options: Track.Subscription): void;
 		withRange(groups: Track.Groups): this;
 	}
@@ -800,6 +815,13 @@ export namespace Track {
 		end?: Track.Anchor;
 		start?: Track.Anchor;
 	}
+	export interface Refresh {
+		interval: Clock.Duration | null;
+		ratio: number | null;
+	}
+	export interface RefreshOptions {
+		signal?: AbortSignal;
+	}
 	export class Requests {
 		[Symbol.dispose](): void;
 		close(): void;
@@ -818,6 +840,7 @@ export namespace Track {
 		nextInRange(from: bigint): bigint | undefined;
 		ordered(): Track.Ordered;
 		recvGroup(): Promise<Group.Consumer | undefined>;
+		refresh(options?: Track.RefreshOptions): Promise<void>;
 		start(): Promise<bigint | undefined>;
 		get subscription(): Signals.Getter<Track.Subscription | undefined>;
 		update(options: Track.Subscription): void;

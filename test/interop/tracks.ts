@@ -25,10 +25,16 @@ if (input.mode === "answer") {
 	const origin = new OriginProducer();
 	const broadcastRoute = origin.route(Path.from("room"));
 	const broadcast = broadcastRoute.broadcast;
-	broadcast.createTrack("a", { timescale: Timescale.MILLI, maxAge: Duration.millis(3000), priority: 9, refresh: 4 });
+	broadcast.createTrack("a", {
+		timescale: Timescale.MILLI,
+		maxAge: Duration.millis(3000),
+		priority: 9,
+		refresh: { ratio: 4, interval: Duration.millis(1500) },
+	});
 	broadcast.createTrack("b");
 	// A namespace apart from the track of the same name.
 	const datagrams = broadcast.createDatagrams("a", { timescale: Timescale.MILLI, priority: 2 });
+	if (!datagrams) throw new Error("the track already exists");
 
 	const publisher = new Publisher(createMockTransportPair().server, version, randomHop(), origin.consume());
 	const stream = new Stream({

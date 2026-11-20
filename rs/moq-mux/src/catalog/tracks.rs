@@ -74,7 +74,7 @@ use super::hang::{Catalog, CatalogExt};
 /// let info = moq_net::track::Info::default()
 ///     .with_timescale(moq_net::Timescale::MILLI)
 ///     .with_compression(moq_net::track::Compression::Deflate);
-/// let track = broadcast.create_track("telemetry", info)?;
+/// let track = broadcast.create_track("telemetry", info).ok_or(moq_net::Error::Duplicate)?;
 /// // The producer fixes the mode, so the one passed here is only a placeholder.
 /// let entry = Mavlink { config: JsonConfig::new(Mode::Stream), sysid: 1 };
 /// let mut telemetry = catalog.json_stream::<serde_json::Value>(track, entry)?;
@@ -610,7 +610,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		info: moq_net::track::Info,
 		interval: Option<std::time::Duration>,
 	) -> crate::Result<crate::container::Producer<super::hang::Container, C>> {
-		let track = self.catalog.fresh_track(&self.name, info)?;
+		let track = self.catalog.fresh_track(&self.name, info);
 		let rendition = self.catalog.rendition(track.name())?;
 		self.catalog.media(track, container, rendition, None, interval)
 	}

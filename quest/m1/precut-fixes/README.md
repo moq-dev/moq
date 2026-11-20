@@ -2,7 +2,7 @@
 
 ## Goal
 
-Every defect the 2026-11-17 pre-cut correctness audit found is fixed on `main` before the `0.22.0` cut,
+Every defect assigned to this epic by the November 17 and 18 pre-cut audits is fixed on `main` before the `0.22.0` cut,
 so the cut publishes none of them.
 
 ## Plan
@@ -20,14 +20,27 @@ lite-07 sequence addressing, socket endpoints, moq-e2ee).
 Decided 2026-11-17 (maintainer, [moq-dev/moq#9010](https://github.com/moq-dev/moq/pull/9010#issuecomment-6959731587)): ✅ every finding gates the cut, including those `release` already ships,
 so they all live in this epic, which the cut requires (rejected: gating only
 what `release` lacks, the agent's /quest-afk recommendation; gating none).
-The one exception: ✅ [ts-step-damage](/quest/m1/ts-step-damage.md) is a
+The one exception: ✅ ts-step-damage (a lone TS stream's timestamp step) was a
 standalone low-priority m1 quest outside the gate, since it was read from
 source with no field report (rejected: keeping it in the gate; deleting it).
+Deleted 2026-11-19 (maintainer, /quest-complete): with no field report, an
+import that ends with the cause, as it has since
+[moq-dev/moq#9170](https://github.com/moq-dev/moq/pull/9170), is the right
+behavior for an unexplained step.
 ✅ Every quest the audit added stays in m1 (rejected: only this epic in m1).
 
 Each child reproduces its finding before fixing it: most were read from
 source, not run. The reviewers' reports were scratch and are not kept; each
 quest carries what its implementer needs.
+
+Decided 2026-11-18 (maintainer, release audit interview): ✅ a fresh audit of
+[release](https://github.com/moq-dev/moq/commit/c636e03df1) through
+[main](https://github.com/moq-dev/moq/commit/d0ce553674), independently of the prior review.
+✅ Hold the cut for the seven correctness findings, resolve the DVR retention and scoped discovery
+findings, and settle the SDK contracts before publication. The ranged-reader failure reproduced
+on the audited head. The empty-token dial and file-pacing defects can ship as patches because their
+fixes preserve the published contract (rejected: holding the cut for every reproduced defect).
+This policy adds to the November 17 decisions.
 
 ## Related
 

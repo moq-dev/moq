@@ -8,6 +8,7 @@ import { Duration, Elapsed, sleep, timeout } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { DEFAULT_EXPIRY } from "../cache.ts";
 import { accept as acceptSession, connect as connectSession } from "../connection/index.ts";
+import { defined } from "../defined.test-util.ts";
 import { StreamCode, StreamError } from "../error.ts";
 import type { Consumer as GroupConsumer } from "../group.ts";
 import { hooks } from "../internal.ts";
@@ -37,7 +38,7 @@ async function peers(alpn: string) {
 	]);
 	const publication = origin.route(Path.from("room"));
 	const broadcast = publication.broadcast;
-	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 	const requests = track.requests();
 	void (async () => {
 		for (let fill = await requestedGroups(requests); fill; fill = await requestedGroups(requests)) {
@@ -46,7 +47,7 @@ async function peers(alpn: string) {
 					fill.dropGroups(1n, 2n);
 					continue;
 				}
-				write(fill.accept(key), key, "old");
+				write(defined(fill.accept(key)), key, "old");
 			}
 			fill.close();
 		}
@@ -250,7 +251,7 @@ test("copy fill: a filled group stops downloading once every reader left or pass
 		acceptSession({ transport: pair.server, url, publish: origin.consume() }),
 	]);
 	const publication = origin.route(Path.from("room"));
-	const track = publication.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	const track = defined(publication.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 	write(track.createGroup(1n), 1n, "live");
 	// The archive answers group 0 with one frame and keeps it open.
 	const requests = track.requests();
@@ -259,7 +260,7 @@ test("copy fill: a filled group stops downloading once every reader left or pass
 		const fill = await requestedGroups(requests);
 		if (fill?.kind !== "groups") throw new Error("no fill of groups");
 		fills.push(fill);
-		const group = fill.accept(0n);
+		const group = defined(fill.accept(0n));
 		group.writeFrame({ payload: enc.encode("old 0"), timestamp: Timestamp.fromMillis(0) });
 		return group;
 	})();
@@ -317,7 +318,7 @@ test("copy fill: a filled group nobody holds any more stops downloading", async 
 		acceptSession({ transport: pair.server, url, publish: origin.consume() }),
 	]);
 	const publication = origin.route(Path.from("room"));
-	const track = publication.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	const track = defined(publication.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 	write(track.createGroup(1n), 1n, "live");
 	// The archive answers group 0 with one frame and never finishes it.
 	const requests = track.requests();
@@ -326,7 +327,7 @@ test("copy fill: a filled group nobody holds any more stops downloading", async 
 		const fill = await requestedGroups(requests);
 		if (fill?.kind !== "groups") throw new Error("no fill of groups");
 		fills.push(fill);
-		const group = fill.accept(0n);
+		const group = defined(fill.accept(0n));
 		group.writeFrame({ payload: enc.encode("old 0"), timestamp: Timestamp.fromMillis(0) });
 		return group;
 	})();
@@ -388,7 +389,7 @@ test("copy fill: a group reset to make room ends", async () => {
 		acceptSession({ transport: pair.server, url, publish: origin.consume() }),
 	]);
 	const publication = origin.route(Path.from("room"));
-	const track = publication.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	const track = defined(publication.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 	write(track.createGroup(2n), 2n, "live");
 	// The archive answers group 0 with one frame and keeps it open, so its stream is still open, and
 	// group 1 whole.
@@ -398,9 +399,9 @@ test("copy fill: a group reset to make room ends", async () => {
 		const fill = await requestedGroups(requests);
 		if (fill?.kind !== "groups") throw new Error("no fill of groups");
 		fills.push(fill);
-		const group = fill.accept(0n);
+		const group = defined(fill.accept(0n));
 		group.writeFrame({ payload: enc.encode("old 0"), timestamp: Timestamp.fromMillis(0) });
-		write(fill.accept(1n), 1n, "old");
+		write(defined(fill.accept(1n)), 1n, "old");
 		return group;
 	})();
 	const remote = wireOf(client).consume(Path.from("room"));
@@ -491,7 +492,7 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 			acceptSession({ transport: pair.server, url, publish: origin.consume() }),
 		]);
 		const broadcast = origin.route(Path.from("room")).broadcast;
-		const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+		const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 		write(track.createGroup(3n), 3n, "live");
 		// The archive has group 2 once `archived`, and never refuses it as lost.
 		let archived = false;
@@ -503,7 +504,7 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 						fill.refuseGroups(key, key + 1n, new StreamError(StreamCode.NotFound));
 						continue;
 					}
-					const group = fill.accept(key);
+					const group = defined(fill.accept(key));
 					for (let frame = 0; frame < 5; frame++)
 						group.writeFrame({ payload: enc.encode(`c${frame}`), timestamp: Timestamp.fromMillis(2000) });
 					group.finish();

@@ -18,7 +18,10 @@ WebCodecs output painted to a canvas and drives the player's pause/resume contro
 The native JS tail lanes also resolve on-demand claims on lite-07, under Node
 and Bun over WebSocket and WebTransport. Fresh readers request or follow the
 claim's own path and child paths. A reader-first case checks that an absent
-request ends while its follower waits for the publisher to arrive.
+request ends while its follower waits for the publisher to arrive. A browser forwards
+nothing and knows no node, so every request `@moq/net` sends names Node ID 0, leaving the
+relay to pick the claim's node: these lanes are where a relay answers that end to end,
+since a Rust client always names one.
 
 Every publisher also sends an Opus tone, one sine per channel, and every subscriber
 decodes it. Python and C++ send a mono 440 Hz tone; the rest send 440 Hz left and
@@ -124,8 +127,8 @@ released relays and clients, skip it.
 Whenever the browser subscriber is in the run, the matrix ends with a close-code
 case: Chromium dials the relay with a token its public rules refuse, and
 `WebTransport.closed` must carry the relay's code and reason. A WebSocket-only
-`Connection` counts the refused session as connected, but it never stayed up
-past the healthy bar, so the handle must stop at it without redialing and
+`Connection` never reports the refused session as connected, since the relay
+never accepted its credential, and must stop at it without redialing and
 publish the same session error. Chromium treats a
 server's HTTP/3 control stream ending as fatal, so a server that ends it under
 the close capsule loses both; no Rust peer is that strict.
@@ -373,9 +376,9 @@ It runs the cells planned breaks cover
 without letting them fail the run, then rewrites `compat/planned-breaks.json`:
 a break with a failing cell is re-pinned to the releases just measured, and one
 with none is deleted. It prints each break's failing cells; the release workflow
-copies that report into the pin-update PR body and retains failure artifacts for
-seven days. Reasons describe why a break is allowed; the measured pins and PR
-body record its current extent.
+copies that report into the pin-update PR body and retains the report, versions,
+and every cell's logs and verdict inputs (not the staged binaries or media) for
+seven days. Reasons describe why a break is allowed; the measured pins and PR body record its current extent.
 
 ## Media QA
 

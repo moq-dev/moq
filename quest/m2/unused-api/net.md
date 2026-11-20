@@ -71,9 +71,15 @@ Steps:
 - `origin::Consumer::covering` stays `pub`: moq.pro and moq-net's own
   `benches/origin.rs` call it.
 
+The reader reads gaps through `Ordered::next_item` once
+[ordered-gaps](/quest/m2/outcome-enums/ordered-gaps.md) lands, since
+`next_group` then yields groups alone (decided 2026-11-18, maintainer,
+/quest-plan); whichever lands second makes the switch.
+
 Public API: breaking, removals only unless step 1 adds `Ordered` inputs.
 Wire: none.
 
 ## Related
 
-- [Browser audio holes](/quest/m2/audio-playout/browser-audio-hole-skip.md) - the browser counterpart of the reader moving onto `Gap`
+- [Ordered gaps](/quest/m2/outcome-enums/ordered-gaps.md) - splits `Ordered` into `next_group` and the `next_item` this reader uses
+- [Browser audio holes](/quest/m2/audio-playout/browser-audio-hole-skip.md) - grading the browser counterpart, which already reads `Gap`s

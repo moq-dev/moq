@@ -355,6 +355,7 @@ impl Config {
 		self.check_runtime()?;
 		self.check_handoff()?;
 		self.stats.check(&self.cluster)?;
+		self.cluster.check_dials()?;
 		self.check_lan()?;
 
 		self.quic
@@ -996,6 +997,26 @@ max_streams = 64
 		}
 		resolve("[stats]\nenabled = true\n");
 
+		// A setting only a dialed peer or API reads is refused with none to read it.
+		refuse(
+			"[cluster.api]\nroot = [\"api.pem\"]\n",
+			"--cluster-api-root requires --cluster-api-url",
+		);
+		resolve("[cluster.api]\nurl = \"https://api.example/peers\"\nroot = [\"api.pem\"]\n");
+		for alone in [
+			"[cluster]\ntoken = \"cluster.jwt\"\n",
+			"[cluster]\nnode = \"https://a.example\"\nconnect = [\"https://a.example\"]\ntoken = \"cluster.jwt\"\n",
+			"[cluster]\ntoken = \"cluster.jwt\"\n[cluster.lan]\nenabled = true\n",
+		] {
+			refuse(alone, "--cluster-token requires a peer to dial");
+		}
+		for peers in [
+			"connect = [\"https://b.example\"]\n",
+			"api.url = \"https://api.example/peers\"\n",
+		] {
+			resolve(&format!("[cluster]\ntoken = \"cluster.jwt\"\n{peers}"));
+		}
+
 		// Embedders build a cluster without resolving, so it refuses the same.
 		let cluster: cluster::Config = toml::from_str("node = \"https://a.example\"\n").expect("parse");
 		let stats: crate::stats::Config = toml::from_str("enabled = true\n").expect("parse");
@@ -1095,7 +1116,12 @@ max_streams = 64
 		let tracked = String::from_utf8(tracked.stdout).unwrap();
 		for area in ["demo/relay", "packaging", "test"] {
 			let mut checked = 0;
-			for name in tracked.split('\0').filter(|name| name.starts_with(area)) {
+			// test/mesh-replay/ holds mesh topologies and event scripts, not relay configs; the
+			// replay writes each relay's config at run time.
+			for name in tracked
+				.split('\0')
+				.filter(|name| name.starts_with(area) && !name.starts_with("test/mesh-replay/"))
+			{
 				let path = root.join(name);
 				if path.extension().is_none_or(|ext| ext != "toml")
 					|| matches!(

@@ -42,16 +42,18 @@ impl Producer {
 	///
 	/// # Errors
 	///
-	/// [`Error::Identity`] if `semantic` exceeds 65535 bytes, or a net error if the broadcast
+	/// [`Error::Identity`] if `semantic` exceeds 65535 bytes. `None` while the broadcast
 	/// already holds it.
 	pub fn create_track(
 		&self,
 		semantic: &str,
 		info: impl Into<Option<moq_net::track::Info>>,
-	) -> Result<track::Producer> {
+	) -> Result<Option<track::Producer>> {
 		let name = self.generation.name(semantic)?;
-		let track = self.inner.create_track(name.as_str(), info)?;
-		self.generation.produce(track, semantic)
+		let Some(track) = self.inner.create_track(name.as_str(), info) else {
+			return Ok(None);
+		};
+		self.generation.produce(track, semantic).map(Some)
 	}
 
 	/// Reserve the track for `semantic` under its physical name, to accept once it is wanted.
@@ -62,16 +64,18 @@ impl Producer {
 	/// # Errors
 	///
 	/// Same as [`Self::create_track`].
-	pub fn reserve_track(&self, semantic: &str) -> Result<track::Request> {
+	pub fn reserve_track(&self, semantic: &str) -> Result<Option<track::Request>> {
 		let name = self.generation.name(semantic)?;
-		let request = self.inner.reserve_track(name.as_str())?;
+		let Some(request) = self.inner.reserve_track(name.as_str()) else {
+			return Ok(None);
+		};
 		match self.generation.claim(semantic, Domain::Group) {
-			Ok(claim) => Ok(track::Request::new(
+			Ok(claim) => Ok(Some(track::Request::new(
 				request,
 				self.generation.clone(),
 				claim,
 				semantic.to_string(),
-			)),
+			))),
 			Err(err) => {
 				request.reject(moq_net::Error::Cancel);
 				Err(err)
@@ -87,12 +91,18 @@ impl Producer {
 	///
 	/// # Errors
 	///
-	/// [`Error::Identity`] if `semantic` exceeds 65535 bytes, or a net error if the broadcast
+	/// [`Error::Identity`] if `semantic` exceeds 65535 bytes. `None` while the broadcast
 	/// already holds a live datagram track of that name.
-	pub fn create_datagrams(&self, semantic: &str, info: moq_net::datagram::Info) -> Result<datagram::Producer> {
+	pub fn create_datagrams(
+		&self,
+		semantic: &str,
+		info: moq_net::datagram::Info,
+	) -> Result<Option<datagram::Producer>> {
 		let name = self.generation.name(semantic)?;
-		let track = self.inner.create_datagrams(name.as_str(), info)?;
-		self.generation.produce_datagrams(track, semantic)
+		let Some(track) = self.inner.create_datagrams(name.as_str(), info) else {
+			return Ok(None);
+		};
+		self.generation.produce_datagrams(track, semantic).map(Some)
 	}
 
 	/// Create a handler for requests to tracks nobody created or reserved, named by their

@@ -236,6 +236,8 @@ enum Reader<E> {
 	/// An error ended the reader, which reads as finished from then on. The subscription is
 	/// released, and the publisher's demand with it.
 	Ended,
+	/// The track's own failure ended the reader once its groups drained, as [`Self::Ended`] does.
+	Lost,
 }
 
 /// How a [`Consumer`]'s cursor chooses its first group.
@@ -576,18 +578,25 @@ impl<F: Container> Consumer<F> {
 		Poll::Ready(Ok(Some(item)))
 	}
 
+	/// Whether the error that ended the reader was its track's own failure, rather than its media.
+	pub(crate) fn lost(&self) -> bool {
+		matches!(self.reader, Reader::Lost)
+	}
+
 	/// Read media or a clean group boundary without waiting for a successor group.
 	pub(crate) fn poll_event(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Event>, F::Error>> {
 		// An error ended the reader, which reads as finished from then on: a decode error has
 		// already consumed the frame it came from, so reading on would skip it.
-		if let Reader::Ended = self.reader {
+		if let Reader::Ended | Reader::Lost = self.reader {
 			return Poll::Ready(Ok(None));
 		}
 		let event = ready!(self.poll_event_inner(waiter));
 		if event.is_err() {
 			// Nothing more is read, so release the subscription and the groups it holds rather
 			// than pin the publisher's demand and cache for as long as the caller keeps this.
-			self.reader = Reader::Ended;
+			if !matches!(self.reader, Reader::Lost) {
+				self.reader = Reader::Ended;
+			}
 			self.pending.clear();
 		}
 		Poll::Ready(event)
@@ -877,7 +886,7 @@ impl<F: Container> Consumer<F> {
 					Reader::Reading(track) | Reader::Failed(track, _) => {
 						track.next_in_range(self.current).is_none_or(|next| next >= sequence)
 					}
-					Reader::Ended => false,
+					Reader::Ended | Reader::Lost => false,
 				};
 				// The groups past the hole already fill the max buffer, so it can hold none of what
 				// would arrive into it.
@@ -968,7 +977,7 @@ impl<F: Container> Consumer<F> {
 
 			if finished && self.pending.is_empty() {
 				if let Reader::Failed(..) = self.reader
-					&& let Reader::Failed(_, err) = std::mem::replace(&mut self.reader, Reader::Ended)
+					&& let Reader::Failed(_, err) = std::mem::replace(&mut self.reader, Reader::Lost)
 				{
 					// The caller only gets the bare error, with nothing to say which track died.
 					tracing::warn!(track = &*self.name, error = ?err, "track failed; ending the reader");
@@ -1177,7 +1186,7 @@ impl<F: Container> Consumer<F> {
 	fn subscriber(&mut self) -> &mut moq_net::track::Subscriber {
 		match &mut self.reader {
 			Reader::Reading(track) | Reader::Failed(track, _) => track,
-			Reader::Ended => unreachable!("read only until an error ends the reader"),
+			Reader::Ended | Reader::Lost => unreachable!("read only until an error ends the reader"),
 		}
 	}
 
@@ -1216,7 +1225,7 @@ impl<F: Container> Consumer<F> {
 
 	/// Receive group handles and wait for the track and every received group to finish.
 	pub(crate) fn poll_received(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		if let Reader::Ended = self.reader {
+		if let Reader::Ended | Reader::Lost = self.reader {
 			return Poll::Ready(());
 		}
 		ready!(self.poll_read_finish(waiter));
@@ -1402,7 +1411,7 @@ impl<F: Container> Consumer<F> {
 	pub fn is_skipped(&self, groups: std::ops::Range<u64>) -> bool {
 		match &self.reader {
 			Reader::Reading(track) | Reader::Failed(track, _) => track.is_skipped(groups),
-			Reader::Ended => false,
+			Reader::Ended | Reader::Lost => false,
 		}
 	}
 
@@ -1414,15 +1423,11 @@ impl<F: Container> Consumer<F> {
 	/// a missing group is waited for from now on. A min past the max starts at the max, since the
 	/// publisher serves nothing older.
 	pub fn set_delay(&mut self, delay: Delay) {
+		self.set_skip(delay);
 		// An ended reader has no subscription left to tune.
 		let (Reader::Reading(track) | Reader::Failed(track, _)) = &mut self.reader else {
 			return;
 		};
-		self.min_delay = delay.min;
-		self.max_delay = delay
-			.max
-			.unwrap_or(std::time::Duration::MAX)
-			.min(track.info().max_age.unwrap_or(std::time::Duration::MAX));
 		// The transport enforces the same budget on the subscription itself, so a
 		// tolerance set here has to reach it: otherwise moq-net skips the very groups
 		// this consumer was told to wait for, before they ever get here. It keeps the
@@ -1431,6 +1436,25 @@ impl<F: Container> Consumer<F> {
 		if track.subscription().delay != delay {
 			let subscription = track.subscription().with_delay(delay);
 			let _ = track.update(subscription);
+		}
+	}
+
+	/// Skip at `delay`, clamped like [`set_delay`](Self::set_delay), leaving the subscription's
+	/// delay as it is. A delay past the subscription's skips nothing later, since the transport
+	/// drops a group first.
+	pub(crate) fn skipping_at(mut self, delay: Delay) -> Self {
+		self.set_skip(delay);
+		self
+	}
+
+	// Wait and skip at `delay`, its max clamped to the track's max age.
+	fn set_skip(&mut self, delay: Delay) {
+		if let Reader::Reading(track) | Reader::Failed(track, _) = &self.reader {
+			self.min_delay = delay.min;
+			self.max_delay = delay
+				.max
+				.unwrap_or(std::time::Duration::MAX)
+				.min(track.info().max_age.unwrap_or(std::time::Duration::MAX));
 		}
 	}
 
@@ -1788,7 +1812,7 @@ impl<F: Container> Drop for GroupBuffer<F> {
 const MARKER_COST: usize = std::mem::size_of::<(usize, Timestamp)>();
 
 /// What a buffered frame holds against the max buffer: its payload and its own entry.
-fn frame_cost(frame: &Frame) -> usize {
+pub(crate) fn frame_cost(frame: &Frame) -> usize {
 	std::mem::size_of::<(Frame, Instant, usize)>() + frame.payload.len()
 }
 
@@ -1810,7 +1834,7 @@ mod tests {
 	fn subscribed<F: ContainerTrait>(consumer: &Consumer<F>) -> &moq_net::track::Subscriber {
 		match &consumer.reader {
 			Reader::Reading(track) | Reader::Failed(track, _) => track,
-			Reader::Ended => panic!("the reader ended"),
+			Reader::Ended | Reader::Lost => panic!("the reader ended"),
 		}
 	}
 	use std::time::Duration;
@@ -3976,7 +4000,7 @@ mod tests {
 			let mut track = source.broadcast().create_track("video", info.clone()).unwrap();
 			source.announce().unwrap();
 			let mut demand = track.demand();
-			while demand.wanted_changed().await.unwrap().is_none() {}
+			while !demand.wanted_changed().await.unwrap() {}
 			if sequence == 1 {
 				assert_eq!(consumer.read_frame().await.unwrap().unwrap().timestamp, ts(0));
 			}
@@ -4824,7 +4848,7 @@ mod tests {
 
 		let read = read_past_frames(&mut consumer).await;
 		assert!(matches!(read, Err(crate::Error::UnknownFormat(_))), "{read:?}");
-		assert!(track.demand().wanted().is_none(), "the ended reader still subscribes");
+		assert!(!track.demand().wanted(), "the ended reader still subscribes");
 		assert!(!malformed_demand.wanted(), "the ended reader still holds its group");
 		assert!(!later.demand().wanted(), "the ended reader still holds a later group");
 	}

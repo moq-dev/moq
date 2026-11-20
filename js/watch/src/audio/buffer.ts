@@ -4,7 +4,16 @@ import { Peak, ringHold, ringSamples } from "./latency";
 import type { Clock, Data, End, Init, Latency, Playing, Reading, Received, Reset, State, Truncate } from "./render";
 
 // The stretch's 30 ms processing window, in microseconds. @internal
-export const WINDOW = 30_000;
+const WINDOW = 30_000;
+
+/**
+ * How long an ordered reader waits for a missing group before giving it up as a gap: what the ring
+ * holds of the delay, plus how far the ring lets audio trail the clock before skipping it, never less
+ * than one stretch window. A group landing any later could no longer play.
+ */
+export function holeWait(held: Duration, bound: Duration): Duration {
+	return held.add(bound.max(Duration.micros(WINDOW)));
+}
 
 // The least move, in milliseconds, of how far the worklet renders ahead of what sounds that is reported.
 const LEAD_STEP = 5;
@@ -136,12 +145,12 @@ export class Backpressure {
 	}
 
 	/**
-	 * Note that the decoder produced output ending at `end`, which lands in the ring up to `landed`
-	 * unless it was discarded. It answers the oldest frame still decoding and every one it reaches
-	 * past: a decoder may emit nothing for a frame.
+	 * Note that the decoder produced output ending at `end`, which lands in the ring `offset` behind it
+	 * (the codec's pre-skip, not what a trim removed) unless it was discarded. It answers the oldest
+	 * frame still decoding and every one it reaches past: a decoder may emit nothing for a frame.
 	 */
-	decoded(end: number, landed?: number): void {
-		if (landed !== undefined) this.#offset = end - landed;
+	decoded(end: number, offset?: number): void {
+		if (offset !== undefined) this.#offset = offset;
 		let answered = 0;
 		while (answered < this.#decoding.length && (answered === 0 || this.#decoding[answered] < end)) answered++;
 		this.#decoding.splice(0, answered);
@@ -286,7 +295,7 @@ export class AudioBuffer {
 	#context: AudioContext;
 
 	readonly #timestamp = new Signal<number>(0);
-	/** The playback timestamp sounding now, as of the worklet's last report. */
+	/** The presentation timestamp sounding now, as of the worklet's last report. */
 	readonly timestamp: Getter<number> = this.#timestamp;
 
 	readonly #output = new Signal<Duration>(Duration.ZERO);
@@ -511,7 +520,9 @@ export class AudioBuffer {
 		}
 		// A reference move is a step of the clock, not where a reading landed, so the offset takes it whole.
 		const moved = last !== undefined && reference !== undefined ? (last - reference) * 1000 : 0;
-		const offset = position * 1000 - this.#backpressure.offset - heard * 1_000_000;
+		// The ring already holds presentation time (Opus output lands a pre-skip before its frame
+		// timestamp), so the clock maps onto it unshifted.
+		const offset = position * 1000 - heard * 1_000_000;
 		const previous = this.#offset === undefined ? undefined : this.#offset + moved;
 		this.#offset =
 			previous !== undefined && Math.abs(offset - previous) < JUMP ? Math.max(offset, previous - FALL) : offset;
@@ -529,10 +540,10 @@ export class AudioBuffer {
 
 	/**
 	 * Note that the decoder produced output ending at `end` on its own timeline, which lands in the ring
-	 * up to `landed` unless it was discarded.
+	 * `offset` behind it unless it was discarded.
 	 */
-	decoded(end: number, landed?: number): void {
-		this.#backpressure.decoded(end, landed);
+	decoded(end: number, offset?: number): void {
+		this.#backpressure.decoded(end, offset);
 	}
 
 	/** Note that the decoder closed or reset, dropping every frame still decoding. */

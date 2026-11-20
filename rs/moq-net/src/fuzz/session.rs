@@ -947,10 +947,6 @@ impl poll::Session for Recorder {
 	fn receive_window(&self) -> Option<crate::transport::ReceiveWindow> {
 		self.inner.receive_window()
 	}
-
-	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
-		self.inner.export_keying_material(label, context)
-	}
 }
 
 impl Recorder {
@@ -985,7 +981,7 @@ impl poll::SendStream for Recorded<memory::SendStream> {
 		self.inner.offset()
 	}
 
-	fn poll_acked(&self, waiter: &kio::Waiter, offset: &u64) -> Poll<Result<poll::Acked, Self::Error>> {
+	fn poll_acked(&self, waiter: &kio::Waiter, offset: &u64) -> Poll<Result<(), Self::Error>> {
 		self.inner.poll_acked(waiter, offset)
 	}
 

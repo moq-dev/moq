@@ -803,7 +803,7 @@ export class Subscriber {
 			return;
 		}
 
-		if (!known && (bounded(request.subscription.ranges ?? [{}]) || request.demand().wanted.peek() === undefined)) {
+		if (!known && (bounded(request.subscription.ranges ?? [{}]) || !request.demand().wanted.peek())) {
 			await this.#runHistory(broadcast, request, valid);
 			return;
 		}
@@ -862,7 +862,7 @@ export class Subscriber {
 					priority = result.priority;
 					break;
 				}
-				if (hooks.demandReleased(demand).peek() === undefined && demand.wanted.peek() !== undefined) continue;
+				if (hooks.demandReleased(demand).peek() === undefined && demand.wanted.peek()) continue;
 				throw abandoned;
 			}
 			console.debug(`subscribe ok: id=${requestId} broadcast=${broadcast} track=${request.name}`);
@@ -970,11 +970,7 @@ export class Subscriber {
 			const demand = producer.demand();
 			for (;;) {
 				const reason = await race([done, unwanted(demand).then(() => idle), historical]);
-				if (
-					reason === idle &&
-					hooks.demandReleased(demand).peek() === undefined &&
-					demand.wanted.peek() !== undefined
-				)
+				if (reason === idle && hooks.demandReleased(demand).peek() === undefined && demand.wanted.peek())
 					continue;
 				terminal = reason;
 				break;
@@ -2332,7 +2328,7 @@ export class Subscriber {
 	#bindDatagrams(source: broadcast.Consumer, track: track.Producer, info: Partial<datagram.Info>) {
 		const pending = this.#datagramRequests.get(source);
 		const entry = pending?.get(track.name);
-		let producer: datagram.Producer;
+		let producer: datagram.Producer | undefined;
 		try {
 			producer = entry ? entry.request.accept(info) : wireOf(source).createDatagrams(track.name, info, false);
 		} catch (err) {
@@ -2340,6 +2336,8 @@ export class Subscriber {
 			console.debug(`serving the stream track without datagrams: ${reason(err)}`);
 			return;
 		}
+		// A live datagram track already holds the name.
+		if (!producer) return;
 		pending?.delete(track.name);
 		entry?.accepted.set(true);
 		let held: track.Subscriber | undefined;

@@ -4,6 +4,7 @@ import Order
 import Increasing
 import Route
 import Claim
-import Sim
+import Named
 import Vectors
+import ClaimVectors
 import Accelerate

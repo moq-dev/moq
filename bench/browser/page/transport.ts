@@ -39,6 +39,7 @@ async function publish(config: Transport): Promise<void> {
 		timescale: Moq.Time.Timescale.MILLI,
 		maxAge: Duration.millis(600_000),
 	});
+	if (!track) throw new Error("the track already exists");
 	const demand = track.demand().wanted;
 	publication.announce();
 	const connection = await Moq.Connection.connect({
@@ -55,7 +56,7 @@ async function publish(config: Transport): Promise<void> {
 		origin.close();
 	});
 	writer = (async () => {
-		while (demand.peek() === undefined && track.closed.peek() === undefined)
+		while (!demand.peek() && track.closed.peek() === undefined)
 			await Promise.race([demand.changed(), track.closed]);
 		if (track.closed.peek() !== undefined) return;
 		for (let start = 0; start < config.frames; start += config.group) {

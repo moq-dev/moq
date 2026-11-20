@@ -856,6 +856,19 @@ impl Config {
 			|| self.api.url.is_some()
 	}
 
+	/// Refuse a setting that only a dialed peer or API reads, set with none to read it.
+	pub(crate) fn check_dials(&self) -> anyhow::Result<()> {
+		anyhow::ensure!(
+			self.api.root.is_empty() || self.api.url.is_some(),
+			"--cluster-api-root requires --cluster-api-url"
+		);
+		anyhow::ensure!(
+			self.token.is_none() || self.dials_statics(),
+			"--cluster-token requires a peer to dial: --cluster-connect naming another relay, or --cluster-api-url (LAN peers never receive it)"
+		);
+		Ok(())
+	}
+
 	/// Released spellings this config was parsed from, each paired with what replaced it.
 	pub fn deprecated(&self) -> moq_tokio::cli::Deprecated {
 		let mut found = moq_tokio::cli::Deprecated::default();
@@ -905,7 +918,7 @@ impl Config {
 /// so a rack or a home lab meshes with no seed list and no shared rendezvous.
 /// A LAN peer authenticates with its mDNS credential on `/.cluster/<credential>`
 /// and is never handed [`Config::token`].
-#[derive(usage_rs::Args, Clone, Debug, serde::Serialize, serde::Deserialize, Default)]
+#[derive(usage_rs::Args, Clone, serde::Serialize, serde::Deserialize, Default)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde_with::skip_serializing_none]
 #[serde(default, deny_unknown_fields)]
@@ -951,6 +964,17 @@ pub struct LanConfig {
 		setting = "cluster.lan.app"
 	)]
 	pub app: Option<moq_tokio::mdns::App>,
+}
+
+impl std::fmt::Debug for LanConfig {
+	/// Redact an inline key: [`crate::Config::load`] traces the whole resolved config.
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("LanConfig")
+			.field("enabled", &self.enabled)
+			.field("secret", &self.secret.as_deref().map(moq_tokio::secret::Redacted))
+			.field("app", &self.app)
+			.finish()
+	}
 }
 
 impl LanConfig {
@@ -1036,6 +1060,12 @@ pub struct Options {
 	/// that one is gone. `None` publishes from the start. Counters still accumulate
 	/// meanwhile, and the first publish carries them.
 	pub stats_hold: Option<tokio::sync::oneshot::Receiver<()>>,
+
+	/// The relay's drain, which every peer link this cluster dialed joins: once it
+	/// starts, each link stops redialing and sends its peer a GOAWAY, and the drain
+	/// holds it open until the peer leaves or the deadline passes. `None` closes
+	/// dialed links only on [`Cluster::close`].
+	pub shutdown: Option<crate::shutdown::Observer>,
 
 	/// How peers are reached in place of the network, for tests on `kio::clock::sim`:
 	/// every peer dial becomes a [`Dial`](moq_tokio::sim::Dial) the test routes.
@@ -1261,6 +1291,11 @@ impl Mesh {
 
 	/// Apply one source's change to the dial set.
 	fn apply(&mut self, command: DialCommand) {
+		// Once the relay drains, the dial set is frozen: replacing or releasing a dial
+		// would drop its link mid-drain, and a new one would only return at once.
+		if self.cluster.shutdown.deadline().is_some() {
+			return;
+		}
 		let mut dial = dialer(&self.cluster, &self.token);
 		match command {
 			DialCommand::Api(desired) => self.dialed.reconcile_api(&desired, &mut dial),
@@ -1329,6 +1364,8 @@ pub struct Cluster {
 	dial: Option<Arc<moq_tokio::Client>>,
 	/// Every dial client, shared by all clones, for [`Self::close`].
 	dialers: Dialers,
+	/// The drain each dialed link joins; see [`Options::shutdown`].
+	shutdown: crate::shutdown::Observer,
 	/// Bound listen port and optional generated-certificate fingerprint.
 	advertise: Option<LanAdvertise>,
 	/// Set by [`Self::start`] when LAN discovery is on, so inbound
@@ -1442,6 +1479,7 @@ impl Cluster {
 			peer,
 			stats,
 			stats_hold,
+			shutdown,
 			#[cfg(feature = "test-support")]
 			network,
 			#[cfg(feature = "test-support")]
@@ -1459,6 +1497,7 @@ impl Cluster {
 		crate::configured_tier(config.tier.clone()).context("invalid --cluster-tier")?;
 		peer.quic.validate()?;
 		config.lan.validate()?;
+		config.check_dials()?;
 		stats.check(&config)?;
 		let mut work = kio::Tasks::new();
 		let mut origin_config = origin::Config::default();
@@ -1506,6 +1545,7 @@ impl Cluster {
 			sim,
 			dial: None,
 			dialers: Dialers::new(),
+			shutdown: shutdown.unwrap_or_else(crate::shutdown::Observer::disabled),
 			advertise: None,
 			lan_auth: Arc::new(std::sync::OnceLock::new()),
 			nodes,
@@ -2136,39 +2176,48 @@ impl Cluster {
 		token: ClusterToken,
 		dial: &crate::nodes::Dial,
 	) -> anyhow::Result<()> {
-		// Sessions shorter than this are treated as churn: we keep backing off
-		// instead of resetting, otherwise a peer that rejects us instantly would
-		// turn into a tight reconnect loop.
-		let stable_threshold = std::time::Duration::from_secs(10);
-
 		let mut redial = Redial::default();
+		let mut shutdown = self.shutdown.clone();
 
 		loop {
-			let started = kio::clock::now();
+			// A draining relay dials nothing new: its peers would only be drained again.
+			if shutdown.deadline().is_some() {
+				return Ok(());
+			}
+			let mut connected = false;
 			let (result, presented) = match Self::dial_addrs(target, &token) {
-				Ok((addrs, presented)) => (self.run_remote_once(&addrs, target, dial).await, presented),
+				Ok((addrs, presented)) => (
+					self.run_remote_once(&addrs, target, dial, &mut connected).await,
+					presented,
+				),
 				Err(err) => (Err(err), None),
 			};
 			dial.disconnected();
-			let elapsed = started.elapsed();
 
-			match result {
-				Ok(()) if elapsed >= stable_threshold => redial = Redial::default(),
-				Ok(()) => tracing::warn!(?elapsed, "cluster peer session closed cleanly but quickly; backing off"),
-				Err(err) => {
-					tracing::warn!(%err, "cluster peer error; will retry");
-					// The session's own reconnects reuse the token it started with, so a
-					// failure after the file rotated is most likely that token expiring:
-					// present the new one at once instead of after a backoff.
-					if presented.is_some() && token.read().ok().flatten() != presented {
-						tracing::info!("cluster token rotated; redialing with it");
-						continue;
-					}
+			// An attempt ends in an error, its own reconnects having given up, or drained.
+			let err = match result {
+				Ok(()) => return Ok(()),
+				Err(err) => err,
+			};
+			tracing::warn!(%err, "cluster peer error; will retry");
+			// The session's own reconnects reuse the token it started with, so a
+			// failure after the file rotated is most likely that token expiring:
+			// present the new one at once instead of after a backoff.
+			if presented.is_some() && token.read().ok().flatten() != presented {
+				tracing::info!("cluster token rotated; redialing with it");
+				// An attempt that connected starts the backoff over, even when it skips the wait.
+				if connected {
+					redial = Redial::default();
 				}
+				continue;
 			}
 
-			let wait = redial.next(&mut kio::clock::rng());
-			kio::clock::sleep(wait).await;
+			let wait = redial.next(connected, &mut kio::clock::rng());
+			tokio::select! {
+				biased;
+				() = shutdown.started() => return Ok(()),
+				() = kio::clock::sleep(wait) => {}
+			}
 		}
 	}
 
@@ -2196,18 +2245,21 @@ impl Cluster {
 		Ok((addrs, presented))
 	}
 
-	/// One session to `target` over `addrs`, which carry any credential.
+	/// One session to `target` over `addrs`, which carry any credential. It runs until the
+	/// session gives up, or until the relay's drain has drained it, and sets `connected`
+	/// once the peer has accepted it.
 	async fn run_remote_once(
 		&self,
 		addrs: &moq_tokio::Addrs,
 		target: &DialTarget,
 		dial: &crate::nodes::Dial,
+		connected: &mut bool,
 	) -> anyhow::Result<()> {
 		// Each attempt is its own session, so it gets its own id. Matches the span an
 		// accepted connection runs under, so both directions log the same way.
 		let id = self.next_connection_id();
 		// A panic fails this attempt like any other error, so the peer is redialed.
-		moq_tokio::panic::isolate(self.run_remote_session(id, addrs, target, dial))
+		moq_tokio::panic::isolate(self.run_remote_session(id, addrs, target, dial, connected))
 			.instrument(tracing::info_span!("conn", id))
 			.await
 			.context("cluster peer session panicked")?
@@ -2219,6 +2271,7 @@ impl Cluster {
 		addrs: &moq_tokio::Addrs,
 		target: &DialTarget,
 		dial: &crate::nodes::Dial,
+		connected: &mut bool,
 	) -> anyhow::Result<()> {
 		// The peer URL may carry the cluster JWT in its query, so neither the log
 		// line nor the node label below may show the raw URL.
@@ -2264,6 +2317,9 @@ impl Cluster {
 		if let Some(cost) = target.cost {
 			client = client.with_cost(cost);
 		}
+		// Counted by the relay's drain before the first dial, so a drain that starts
+		// while the session connects still waits for it.
+		let serving = self.shutdown.serve();
 		// The GOAWAY lifecycle lives in the reconnect loop: on an upstream GOAWAY it
 		// dials the replacement while the old session keeps serving, so the old
 		// routes stay attached and the origin hands live tracks over at a group
@@ -2291,10 +2347,20 @@ impl Cluster {
 			.connect(addrs.clone());
 		let monitor = reconnect.monitor();
 		let mut observation = monitor.state();
+		let mut shutdown = self.shutdown.clone();
 		loop {
 			dial.observe(id, &observation);
-			observation = monitor.state_changed(observation.revision).await?;
+			*connected |= observation.connects > 0;
+			tokio::select! {
+				biased;
+				() = shutdown.started() => break,
+				changed = monitor.state_changed(observation.revision) => observation = changed?,
+			}
 		}
+		// Drained like an accepted session, so the peer hears GOAWAY and moves its
+		// routes before this relay goes, rather than seeing the link drop as a crash.
+		serving.drain_link(reconnect).await;
+		Ok(())
 	}
 
 	/// A peer client from the dial template, with the [`Options::peer`] QUIC
@@ -2535,7 +2601,12 @@ impl Redial {
 	const CAP: std::time::Duration = std::time::Duration::from_secs(30);
 
 	/// A wait drawn uniformly below the ceiling, which then doubles up to [`Self::CAP`].
-	fn next(&mut self, rng: &mut impl rand::RngExt) -> std::time::Duration {
+	/// An attempt that `connected` starts over at [`Self::FIRST`]: the peer was reachable,
+	/// so what ended it is new, not the outage the ceiling grew through.
+	fn next(&mut self, connected: bool, rng: &mut impl rand::RngExt) -> std::time::Duration {
+		if connected {
+			*self = Self::default();
+		}
 		let wait = self.ceiling.mul_f64(rng.random());
 		self.ceiling = (self.ceiling * 2).min(Self::CAP);
 		wait
@@ -2884,7 +2955,7 @@ mod tests {
 		let ceilings = [1, 2, 4, 8, 16, 30, 30].map(std::time::Duration::from_secs);
 		let mut redials: Vec<Redial> = (0..1000).map(|_| Redial::default()).collect();
 		for ceiling in ceilings {
-			let waits: Vec<_> = redials.iter_mut().map(|redial| redial.next(&mut rng)).collect();
+			let waits: Vec<_> = redials.iter_mut().map(|redial| redial.next(false, &mut rng)).collect();
 			assert!(waits.iter().all(|wait| *wait <= ceiling), "a wait passed {ceiling:?}");
 			// Uniform over the range: every tenth of it is hit, so none is a lockstep.
 			for tenth in 0..10 {
@@ -2895,6 +2966,21 @@ mod tests {
 				);
 			}
 		}
+	}
+
+	/// A peer that was reachable redials from the first ceiling, so a flap after a
+	/// long outage does not wait out the 30 s the outage grew it to.
+	#[test]
+	fn redial_resets_after_an_attempt_that_connected() {
+		use rand::SeedableRng;
+		let mut rng = rand::rngs::StdRng::seed_from_u64(1);
+		let mut redial = Redial::default();
+		for _ in 0..8 {
+			redial.next(false, &mut rng);
+		}
+		assert_eq!(redial.ceiling, Redial::CAP);
+		assert!(redial.next(true, &mut rng) <= Redial::FIRST);
+		assert_eq!(redial.ceiling, Redial::FIRST * 2);
 	}
 
 	/// `?cost=` is read and stripped (it rides SETUP, not the URL), other
@@ -3457,6 +3543,52 @@ mod tests {
 
 		mesh.apply(DialCommand::Api(HashMap::new()));
 		assert!(nodes.snapshot().nodes.is_empty(), "a removed peer takes its history");
+	}
+
+	/// Once the relay drains, no source change replaces, releases, or adds a dial, so
+	/// each link's own task finishes its drain to the deadline.
+	#[tokio::test]
+	async fn mesh_freezes_its_dials_once_the_relay_drains() {
+		let (trigger, shutdown) = crate::shutdown::Observer::new(Duration::from_secs(10));
+		let mut options = Options::new(Config::default());
+		options.shutdown = Some(shutdown);
+		let mut mesh = Mesh {
+			cluster: Cluster::spawn(options).expect("cluster"),
+			token: ClusterToken::default(),
+			dialed: DialMap::new(None),
+			sources: kio::Tasks::new(),
+			commands: DialCommands::default(),
+		};
+		let api = |peers: &[&str]| {
+			DialCommand::Api(
+				peers
+					.iter()
+					.map(|peer| {
+						let target = DialTarget::parse(peer).unwrap();
+						(target.key.clone(), target)
+					})
+					.collect(),
+			)
+		};
+		mesh.apply(api(&["https://a.example/?cost=1", "https://b.example/"]));
+		let task = mesh.dialed.entries[&key("https://a.example/")].task;
+
+		trigger.start();
+		mesh.apply(api(&["https://a.example/?cost=2", "https://c.example/"]));
+		assert_eq!(
+			mesh.dialed.entries[&key("https://a.example/")].task,
+			task,
+			"a changed target must not replace a draining dial"
+		);
+		assert!(
+			mesh.dialed.contains(&key("https://b.example/")),
+			"a removed peer must keep draining"
+		);
+		assert!(
+			!mesh.dialed.contains(&key("https://c.example/")),
+			"a draining relay dials nothing new"
+		);
+		assert_eq!(mesh.dialed.tasks.len(), 2);
 	}
 
 	/// A dial task's panic ends the mesh with it, rather than unwinding the task
@@ -4084,7 +4216,7 @@ mod tests {
 			.expect("origin closed");
 		assert_eq!(update.prefix.as_str(), "from-node");
 		// The dialer marks what the peer forwards: it entered at `node`, not here.
-		assert_eq!(update.route.source(), origin::Source::Peer(node.origin.node().get()));
+		assert_eq!(update.route.entered_from(), Some(node.origin.node().get()));
 
 		let _from_fp = fingerprint
 			.origin
@@ -4098,10 +4230,7 @@ mod tests {
 				.expect("origin closed");
 			if update.prefix.as_str() == "from-fingerprint" {
 				// The acceptor marks a LAN peer the same way.
-				assert_eq!(
-					update.route.source(),
-					origin::Source::Peer(fingerprint.origin.node().get())
-				);
+				assert_eq!(update.route.entered_from(), Some(fingerprint.origin.node().get()));
 				break;
 			}
 		}
@@ -4110,7 +4239,7 @@ mod tests {
 		let mut local = node.origin.consume().local().routes();
 		let update = try_next_announced(&mut local).expect("from-node is local");
 		assert_eq!(update.prefix.as_str(), "from-node");
-		assert_eq!(update.route.source(), origin::Source::Local);
+		assert_eq!(update.route.entered_from(), None);
 		assert!(
 			try_next_announced(&mut local).is_none(),
 			"a peer's broadcast is not local"
@@ -4631,9 +4760,9 @@ mod tests {
 		let mut announced = cluster.origin.consume().routes();
 		let forwarded = try_next_announced(&mut announced).expect("forwarded");
 		assert_eq!(forwarded.prefix.as_str(), "forwarded");
-		assert!(matches!(forwarded.route.source(), origin::Source::Peer(_)));
+		assert!(forwarded.route.entered_from().is_some());
 		let ingest = try_next_announced(&mut announced).expect("ingest");
-		assert_eq!(ingest.route.source(), origin::Source::Local);
+		assert_eq!(ingest.route.entered_from(), None);
 
 		let mut local = cluster.origin.consume().local().routes();
 		assert_eq!(

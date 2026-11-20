@@ -6106,5 +6106,446 @@
 			}
 		},
 		"refused": true
+	},
+	{
+		"name": "stats and echo name their tracks",
+		"catalog": {
+			"video": { "renditions": { "ok": { "codec": "avc1.64001f" } } },
+			"stats": { "track": "stats.json" },
+			"echo": { "path": "viewers" }
+		},
+		"video": ["ok"]
+	},
+	{
+		"name": "echo path with a leading slash",
+		"catalog": { "video": { "renditions": { "ok": { "codec": "avc1.64001f" } } }, "echo": { "path": "/viewers" } },
+		"refused": true
+	},
+	{
+		"name": "echo path with a trailing slash",
+		"catalog": { "video": { "renditions": { "ok": { "codec": "avc1.64001f" } } }, "echo": { "path": "viewers/" } },
+		"refused": true
+	},
+	{
+		"name": "echo path with an empty segment",
+		"catalog": {
+			"video": { "renditions": { "ok": { "codec": "avc1.64001f" } } },
+			"echo": { "path": "a//viewers" }
+		},
+		"refused": true
+	},
+	{
+		"name": "echo path with a lone backslash",
+		"catalog": {
+			"video": { "renditions": { "ok": { "codec": "avc1.64001f" } } },
+			"echo": { "path": "a\\viewers" }
+		},
+		"refused": true
+	},
+	{
+		"name": "video broadcast with a leading slash",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": { "codec": "avc1.64001f" },
+					"probe": { "codec": "avc1.64001f", "broadcast": "/source" }
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "video broadcast with a trailing slash",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": { "codec": "avc1.64001f" },
+					"probe": { "codec": "avc1.64001f", "broadcast": "source/" }
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "video broadcast with an empty segment",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": { "codec": "avc1.64001f" },
+					"probe": { "codec": "avc1.64001f", "broadcast": "a//source" }
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "video broadcast with a lone backslash",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": { "codec": "avc1.64001f" },
+					"probe": { "codec": "avc1.64001f", "broadcast": "a\\source" }
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "video broadcast relative",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": { "codec": "avc1.64001f" },
+					"probe": {
+						"codec": "avc1.64001f",
+						"broadcast": "./source",
+						"instance": "abc",
+						"track": "hd",
+						"version": 4
+					}
+				}
+			}
+		},
+		"video": ["ok", "probe"]
+	},
+	{
+		"name": "include missing broadcast",
+		"catalog": { "video": { "renditions": { "ok": { "codec": "avc1.64001f" } } }, "include": { "a": {} } },
+		"refused": true
+	},
+	{
+		"name": "include broadcast with a leading slash",
+		"catalog": {
+			"video": { "renditions": { "ok": { "codec": "avc1.64001f" } } },
+			"include": { "a": { "broadcast": "/a" } }
+		},
+		"refused": true
+	},
+	{
+		"name": "include empty instance",
+		"catalog": {
+			"video": { "renditions": { "ok": { "codec": "avc1.64001f" } } },
+			"include": { "a": { "broadcast": "./a", "instance": "" } }
+		},
+		"refused": true
+	},
+	{
+		"name": "sync clock timescale zero",
+		"catalog": {
+			"video": { "renditions": { "ok": { "codec": "avc1.64001f" } } },
+			"sync": { "clock": { "wall": 1000, "timescale": 0 } }
+		},
+		"refused": true
+	},
+	{
+		"name": "sync clock wall beyond 2^53",
+		"catalog": {
+			"video": { "renditions": { "ok": { "codec": "avc1.64001f" } } },
+			"sync": { "clock": { "wall": 9007199254740992 } }
+		},
+		"refused": true
+	},
+	{
+		"name": "sync clock missing wall",
+		"catalog": {
+			"video": { "renditions": { "ok": { "codec": "avc1.64001f" } } },
+			"sync": { "clock": { "timescale": 1000 } }
+		},
+		"refused": true
+	},
+	{
+		"name": "sync clock with a timescale",
+		"catalog": {
+			"video": { "renditions": { "ok": { "codec": "avc1.64001f" } } },
+			"sync": { "clock": { "wall": 1000, "timescale": 90000 } }
+		},
+		"video": ["ok"]
+	},
+	{
+		"name": "json unknown mode is kept for selection to skip",
+		"catalog": { "json": { "tracks": { "ok": { "mode": "snapshot" }, "probe": { "mode": "future" } } } },
+		"json": ["ok", "probe"]
+	},
+	{
+		"name": "binary unknown mode is kept for selection to skip",
+		"catalog": { "binary": { "tracks": { "ok": { "mode": "stream" }, "probe": { "mode": "future" } } } },
+		"binary": ["ok", "probe"]
+	},
+	{ "name": "json missing mode", "catalog": { "json": { "tracks": { "probe": {} } } }, "refused": true },
+	{
+		"name": "json mode not a string",
+		"catalog": { "json": { "tracks": { "probe": { "mode": 5 } } } },
+		"refused": true
+	},
+	{
+		"name": "json every field",
+		"catalog": {
+			"json": {
+				"tracks": {
+					"probe": {
+						"version": 4,
+						"mode": "stream",
+						"schema": "https://example.com/s.json",
+						"broadcast": "./x",
+						"instance": "i",
+						"track": "t",
+						"bitrate": 1,
+						"jitter": 2,
+						"delay": 3
+					}
+				}
+			}
+		},
+		"json": ["probe"]
+	},
+	{
+		"name": "binary every field",
+		"catalog": {
+			"binary": {
+				"tracks": {
+					"probe": { "mode": "snapshot", "mime": "image/jpeg", "bitrate": 1, "jitter": 2, "delay": 3 }
+				}
+			}
+		},
+		"binary": ["probe"]
+	},
+	{
+		"name": "json compression field is unknown",
+		"catalog": { "json": { "tracks": { "probe": { "mode": "snapshot", "compression": "deflate" } } } },
+		"json": ["probe"]
+	},
+	{
+		"name": "text unknown format is kept for selection to skip",
+		"catalog": { "text": { "renditions": { "ok": { "format": "vtt" }, "probe": { "format": "future" } } } },
+		"text": ["ok", "probe"]
+	},
+	{
+		"name": "text unknown role is kept",
+		"catalog": {
+			"text": {
+				"renditions": { "probe": { "format": "vtt", "role": "descriptions", "lang": "en", "label": "x" } }
+			}
+		},
+		"text": ["probe"]
+	},
+	{
+		"name": "text missing format",
+		"catalog": { "text": { "renditions": { "probe": { "role": "caption" } } } },
+		"refused": true
+	},
+	{
+		"name": "video unknown stereo is absent",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": { "codec": "avc1.64001f" },
+					"probe": { "codec": "avc1.64001f", "stereo": "anaglyph" }
+				}
+			}
+		},
+		"video": ["ok", "probe"]
+	},
+	{
+		"name": "video stalled is ignored",
+		"catalog": {
+			"video": {
+				"renditions": { "ok": { "codec": "avc1.64001f" }, "probe": { "codec": "avc1.64001f", "stalled": true } }
+			}
+		},
+		"video": ["ok", "probe"]
+	},
+	{
+		"name": "video equirectangular VR180",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": { "codec": "avc1.64001f" },
+					"probe": {
+						"codec": "avc1.64001f",
+						"projection": { "kind": "equirectangular", "fov": 180 },
+						"stereo": "left-right"
+					}
+				}
+			}
+		},
+		"video": ["ok", "probe"]
+	},
+	{
+		"name": "video projection fov zero",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": { "codec": "avc1.64001f" },
+					"probe": { "codec": "avc1.64001f", "projection": { "kind": "equirectangular", "fov": 0 } }
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "video color",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": { "codec": "avc1.64001f" },
+					"probe": {
+						"codec": "avc1.64001f",
+						"color": {
+							"primaries": 9,
+							"transfer": 16,
+							"matrix": 9,
+							"range": "limited",
+							"mastering": {
+								"red": { "x": 0.708, "y": 0.292 },
+								"green": { "x": 0.17, "y": 0.797 },
+								"blue": { "x": 0.131, "y": 0.046 },
+								"white": { "x": 0.3127, "y": 0.329 },
+								"maxLuminance": 1000,
+								"minLuminance": 0.0001
+							},
+							"contentLight": { "maxCll": 1000, "maxFall": 400 }
+						}
+					}
+				}
+			}
+		},
+		"video": ["ok", "probe"]
+	},
+	{
+		"name": "video color unknown range",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": { "codec": "avc1.64001f" },
+					"probe": { "codec": "avc1.64001f", "color": { "range": "studio" } }
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "video interlaced",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": { "codec": "avc1.64001f" },
+					"probe": { "codec": "avc1.64001f", "interlaced": true }
+				}
+			}
+		},
+		"video": ["ok", "probe"]
+	},
+	{
+		"name": "video displayAspect alone",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": { "codec": "avc1.64001f" },
+					"probe": { "codec": "avc1.64001f", "displayAspectWidth": 16 }
+				}
+			}
+		},
+		"video": ["ok", "probe"]
+	},
+	{
+		"name": "audio ambisonic with 1 channel",
+		"catalog": {
+			"audio": {
+				"renditions": {
+					"probe": { "codec": "opus", "sampleRate": 48000, "numberOfChannels": 1, "layout": "ambisonic" }
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "audio pcm",
+		"catalog": {
+			"audio": {
+				"renditions": {
+					"probe": { "codec": "pcm", "sampleRate": 48000, "numberOfChannels": 2, "bitrate": 3072000 }
+				}
+			}
+		},
+		"audio": ["probe"]
+	},
+	{
+		"name": "version 3 entry is read",
+		"catalog": {
+			"video": {
+				"renditions": { "ok": { "codec": "avc1.64001f" }, "probe": { "codec": "avc1.64001f", "version": 3 } }
+			}
+		},
+		"video": ["ok", "probe"]
+	},
+	{
+		"name": "root version 4 is read",
+		"catalog": { "video": { "renditions": { "ok": { "codec": "avc1.64001f" } } }, "version": 4 },
+		"video": ["ok"]
+	},
+	{
+		"name": "root version 3 is read",
+		"catalog": { "video": { "renditions": { "ok": { "codec": "avc1.64001f" } } }, "version": 3 },
+		"video": ["ok"]
+	},
+	{
+		"name": "json bitrate beyond 2^53",
+		"catalog": { "json": { "tracks": { "probe": { "mode": "snapshot", "bitrate": 9007199254740992 } } } },
+		"refused": true
+	},
+	{
+		"name": "json bitrate 2^53 - 1",
+		"catalog": { "json": { "tracks": { "probe": { "mode": "snapshot", "bitrate": 9007199254740991 } } } },
+		"json": ["probe"]
+	},
+	{
+		"name": "json jitter beyond 2^53",
+		"catalog": { "json": { "tracks": { "probe": { "mode": "snapshot", "jitter": 9007199254740992 } } } },
+		"refused": true
+	},
+	{
+		"name": "json jitter 2^53 - 1",
+		"catalog": { "json": { "tracks": { "probe": { "mode": "snapshot", "jitter": 9007199254740991 } } } },
+		"json": ["probe"]
+	},
+	{
+		"name": "json delay beyond 2^53",
+		"catalog": { "json": { "tracks": { "probe": { "mode": "snapshot", "delay": 9007199254740992 } } } },
+		"refused": true
+	},
+	{
+		"name": "json delay 2^53 - 1",
+		"catalog": { "json": { "tracks": { "probe": { "mode": "snapshot", "delay": 9007199254740991 } } } },
+		"json": ["probe"]
+	},
+	{
+		"name": "binary bitrate beyond 2^53",
+		"catalog": { "binary": { "tracks": { "probe": { "mode": "snapshot", "bitrate": 9007199254740992 } } } },
+		"refused": true
+	},
+	{
+		"name": "binary bitrate 2^53 - 1",
+		"catalog": { "binary": { "tracks": { "probe": { "mode": "snapshot", "bitrate": 9007199254740991 } } } },
+		"binary": ["probe"]
+	},
+	{
+		"name": "binary jitter beyond 2^53",
+		"catalog": { "binary": { "tracks": { "probe": { "mode": "snapshot", "jitter": 9007199254740992 } } } },
+		"refused": true
+	},
+	{
+		"name": "binary jitter 2^53 - 1",
+		"catalog": { "binary": { "tracks": { "probe": { "mode": "snapshot", "jitter": 9007199254740991 } } } },
+		"binary": ["probe"]
+	},
+	{
+		"name": "binary delay beyond 2^53",
+		"catalog": { "binary": { "tracks": { "probe": { "mode": "snapshot", "delay": 9007199254740992 } } } },
+		"refused": true
+	},
+	{
+		"name": "binary delay 2^53 - 1",
+		"catalog": { "binary": { "tracks": { "probe": { "mode": "snapshot", "delay": 9007199254740991 } } } },
+		"binary": ["probe"]
 	}
 ]

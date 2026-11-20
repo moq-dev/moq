@@ -77,7 +77,7 @@ extension Json {
         }
 
         /// Abort the track with an application error code, but only while nobody wants it: call it
-        /// once `TrackDemand.wantedChanged()` returns nil. Returns true once the track is closed,
+        /// once `TrackDemand.wantedChanged()` returns false. Returns true once the track is closed,
         /// and false, leaving the track open, when a reader joined since; keep serving and wait for
         /// the next nil on a fresh `demand()`: one that already returned nil misses a reader
         /// that came and went, and waits on.
@@ -110,6 +110,7 @@ extension Json {
         /// its delay, so a superseded snapshot it may still need stays deliverable that long and
         /// `next()` yields it.
         public init(broadcast: BroadcastConsumer, name: String, priority: Int8 = 0, delay: TimeInterval = 0) throws {
+            try checkDuration(delay, "delay")
             let config = MoqJsonSnapshotConsumerConfig(priority: priority, delay: delay)
             ffi = try MoqJsonSnapshotConsumer(broadcast: broadcast.ffi, name: name, config: config)
         }
@@ -162,7 +163,7 @@ extension Json {
         }
 
         /// Abort the track with an application error code, but only while nobody wants it: call it
-        /// once `TrackDemand.wantedChanged()` returns nil. Returns true once the track is closed,
+        /// once `TrackDemand.wantedChanged()` returns false. Returns true once the track is closed,
         /// and false, leaving the track open, when a reader joined since; keep serving and wait for
         /// the next nil on a fresh `demand()`: one that already returned nil misses a reader
         /// that came and went, and waits on.
@@ -254,7 +255,7 @@ extension Json {
         }
 
         /// Abort the track with an application error code, but only while nobody wants it: call it
-        /// once `TrackDemand.wantedChanged()` returns nil. Returns true once the track is closed,
+        /// once `TrackDemand.wantedChanged()` returns false. Returns true once the track is closed,
         /// and false, leaving the track open, when a reader joined since; keep serving and wait for
         /// the next nil on a fresh `demand()`: one that already returned nil misses a reader
         /// that came and went, and waits on.

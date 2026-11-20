@@ -174,8 +174,8 @@ fn renewal(c: &mut Criterion) {
 					|b, &(sessions, routes)| {
 						let _guard = runtime.enter();
 						// No hold, so an iteration times the renewal rather than the origin batching it.
-						let mut config = origin::Config::new(std::num::NonZeroU64::new(2).unwrap());
-						config.update_hold = Duration::ZERO;
+						let config =
+							origin::Config::new(std::num::NonZeroU64::new(2).unwrap()).with_update_hold(Duration::ZERO);
 						let (origin, driver) = origin::Producer::new(config);
 						harness::spawn(driver);
 						let mut publishers = runtime.block_on(join_all((0..sessions).map(|_| publisher(&origin))));
@@ -248,8 +248,8 @@ fn waiting(c: &mut Criterion) {
 				&(tokens, paths),
 				|b, &(tokens, paths)| {
 					let _guard = runtime.enter();
-					let mut config = origin::Config::new(std::num::NonZeroU64::new(2).unwrap());
-					config.update_hold = Duration::ZERO;
+					let config =
+						origin::Config::new(std::num::NonZeroU64::new(2).unwrap()).with_update_hold(Duration::ZERO);
 					let (publish, driver) = origin::Producer::new(config);
 					harness::spawn(driver);
 					let (receive, driver) =
@@ -341,8 +341,8 @@ fn shared_requests(c: &mut Criterion) {
 				&(tokens, requests),
 				|b, &(tokens, requests)| {
 					let _guard = runtime.enter();
-					let mut config = origin::Config::new(std::num::NonZeroU64::new(2).unwrap());
-					config.update_hold = Duration::ZERO;
+					let config =
+						origin::Config::new(std::num::NonZeroU64::new(2).unwrap()).with_update_hold(Duration::ZERO);
 					let (origin, driver) = origin::Producer::new(config);
 					harness::spawn(driver);
 					let (client, _server, mut pending, receive) = runtime.block_on(publisher(&origin));

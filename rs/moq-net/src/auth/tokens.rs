@@ -229,7 +229,7 @@ pub(super) struct Configured {
 /// How the latest dial's session answers its connection credential.
 enum Connected {
 	/// The version has no AUTH, so the peer accepted it with its handshake, or with its
-	/// SETUP when the session [awaits it](super::Link::await_setup).
+	/// SETUP when the session [awaits it](super::Link::await_acceptance).
 	Accepted { link: u64 },
 	/// Its own AUTH stream on that session.
 	Slot { link: u64, id: u64 },
@@ -252,12 +252,14 @@ impl Configured {
 			Connected::Slot { link, id } => (link, id),
 			Connected::Accepted { link } => {
 				let link = state.links.get(link)?;
-				return match (link.accepted, &link.closed) {
-					(true, _) => Some(Ok(())),
+				let awaiting = link.acceptance == super::Acceptance::Awaiting;
+				return match (awaiting, &link.closed) {
+					// Accepted, or a version that never answers, whose live session counts as accepting it.
+					(false, _) => Some(Ok(())),
 					// Closed before accepting it: the close is the answer, since the connection
 					// keeps redialing with the same credential and nothing else would answer.
-					(false, Some(err)) => Some(Err(err.clone())),
-					(false, None) => None,
+					(true, Some(err)) => Some(Err(err.clone())),
+					(true, None) => None,
 				};
 			}
 		};
@@ -791,7 +793,7 @@ mod tests {
 		let presented = set.preview(&"moqt://relay.example.com/".parse().unwrap());
 		set.commit(&presented);
 		let link = Link::attach(&set.handle, false, false).unwrap();
-		link.await_setup();
+		link.await_acceptance();
 		set.connect(link.id(), None);
 		link
 	}
@@ -823,7 +825,7 @@ mod tests {
 		let presented = set.preview(&"moqt://relay.example.com/".parse().unwrap());
 		set.commit(&presented);
 		let link = Link::attach(&set.handle, false, false).unwrap();
-		link.await_setup();
+		link.await_acceptance();
 		link.close(Error::Session(SessionError::Unauthorized));
 		set.connect(link.id(), None);
 		refused(&set, SessionError::Unauthorized);

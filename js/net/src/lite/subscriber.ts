@@ -73,6 +73,7 @@ import { Datagram as DatagramMessage, Datagrams, DatagramsInfo, DatagramsUpdate 
 import { closeViolation } from "./error.ts";
 import { Fetch as FetchMessage } from "./fetch.ts";
 import { dropped, passing, RangeFills, type RecoveryHandle, type Refusal, type Refused, refuseRun } from "./fills.ts";
+import * as Fit from "./fit.ts";
 import { type Group as GroupMessage, readFrames } from "./group.ts";
 import { Probe } from "./probe.ts";
 import { Routed } from "./routed.ts";
@@ -84,7 +85,7 @@ import {
 	EMPTY_RANGE,
 	inclusiveGroupEnd,
 	LiveRanges,
-	requestedRanges,
+	requestedRange,
 	Subscribe,
 	SubscribeUpdate,
 	toWireRanges,
@@ -235,8 +236,9 @@ interface SubscribeEntry {
 	// The Range IDs of the fills' live ranges; the rest are the demand's, which alone say where the
 	// live feed starts.
 	fillIds: Set<bigint>;
-	// The groups the fills' ranges ask for, as last sent.
-	fillGroups: Run[];
+	// The groups the fills' ranges ask for, as last sent: widened with the demand's ranges until
+	// they fit, so a run may cover more than the fills ask.
+	fillGroups: readonly Run[];
 	// Bumped as what the fills ask changes, for the update loop.
 	fillsChanged: Signal<number>;
 	// Until the SUBSCRIBE's first response (lite-05+); see `Unanswered`.
@@ -1490,11 +1492,7 @@ export class Subscriber {
 			let reason_: unknown;
 			for (;;) {
 				reason_ = await race([done, unwanted(demand).then(() => idle)]);
-				if (
-					reason_ === idle &&
-					hooks.demandReleased(demand).peek() === undefined &&
-					demand.wanted.peek() !== undefined
-				)
+				if (reason_ === idle && hooks.demandReleased(demand).peek() === undefined && demand.wanted.peek())
 					continue;
 				break;
 			}
@@ -1590,7 +1588,9 @@ export class Subscriber {
 				settle = resolve;
 			}),
 		);
-		const sending = this.#sendSubscribe(state, this.#withRanges(msg, ranges), deadline);
+		const sending = this.#fitted(this.#withRanges(msg, ranges)).then((msg) =>
+			this.#sendSubscribe(state, msg, deadline),
+		);
 		try {
 			// Either failing fails the subscription: a reset TRACK rejects the request, so the
 			// origin can try another route, and the caller resets the SUBSCRIBE.
@@ -1631,6 +1631,39 @@ export class Subscriber {
 	#withRanges(msg: Subscribe, ranges: readonly track.Range[]): Subscribe {
 		if (hasRanges(this.version)) msg.ranges = toWireRanges(ranges);
 		return msg;
+	}
+
+	// `msg` with its lite-07 ranges widened until they fit, as the Rust `pipeline` does: the union of
+	// a relay's readers' ranges need not fit one message though each reader's does.
+	async #fitted(msg: Subscribe): Promise<Subscribe> {
+		if (!msg.ranges || !hasRanges(this.version)) return msg;
+		const fields = await this.#subscribeFields(msg, msg);
+		msg.ranges = [...Fit.fit(msg.ranges, [], [], Fit.budget(fields, 0n, msg.ranges.length)).ranges];
+		return msg;
+	}
+
+	// The bytes a SUBSCRIBE like `msg` under `terms` takes besides its ranges, at the widest id,
+	// measured with the smallest range, since it carries at least one. Mirrors the Rust
+	// `subscribe_fields`.
+	async #subscribeFields(
+		msg: Subscribe,
+		terms: { priority: number; order?: track.Order; maxDelay: number | null; minDelay?: number },
+	): Promise<number> {
+		const widest = new Subscribe({
+			...msg,
+			priority: terms.priority,
+			order: terms.order,
+			maxDelay: terms.maxDelay,
+			minDelay: terms.minDelay,
+			id: (1n << 64n) - 1n,
+			ranges: [{}],
+		});
+		try {
+			return (await Writer.collect(this.version, (w) => widest.encode(w, this.version))).byteLength;
+		} catch {
+			// One that can't go out leaves no room, and fails as it would have.
+			return Number.POSITIVE_INFINITY;
+		}
 	}
 
 	// Register a subscription's accepted copy, asking for `ranges`, so incoming groups and
@@ -1686,28 +1719,31 @@ export class Subscriber {
 			const datagrams = request
 				? request.accept(info)
 				: wireOf(state.consumer).createDatagrams(producer.name, info, false);
-			entry.datagrams = { producer: datagrams, timescale: framing.scale };
-			entry.legacyKey = state.legacyKey;
-			this.#datagrams.set(id, entry.datagrams);
-			this.#legacyDatagrams.set(state.legacyKey, entry.datagrams);
-			let held: track.Subscriber | undefined;
-			const sync = () => {
-				const priority = datagrams.priority.peek();
-				if (priority === undefined) {
+			// Undefined while a live datagram track already holds the name: serve the stream track alone.
+			if (datagrams) {
+				entry.datagrams = { producer: datagrams, timescale: framing.scale };
+				entry.legacyKey = state.legacyKey;
+				this.#datagrams.set(id, entry.datagrams);
+				this.#legacyDatagrams.set(state.legacyKey, entry.datagrams);
+				let held: track.Subscriber | undefined;
+				const sync = () => {
+					const priority = datagrams.priority.peek();
+					if (priority === undefined) {
+						held?.close();
+						held = undefined;
+					} else if (held) {
+						held.update({ priority });
+					} else {
+						held = producer.subscribe({ priority });
+					}
+				};
+				const dispose = datagrams.priority.subscribe(sync);
+				sync();
+				entry.datagramDemand = () => {
+					dispose();
 					held?.close();
-					held = undefined;
-				} else if (held) {
-					held.update({ priority });
-				} else {
-					held = producer.subscribe({ priority });
-				}
-			};
-			const dispose = datagrams.priority.subscribe(sync);
-			sync();
-			entry.datagramDemand = () => {
-				dispose();
-				held?.close();
-			};
+				};
+			}
 		}
 
 		this.#subscribes.set(id, entry);
@@ -1794,7 +1830,10 @@ export class Subscriber {
 			// matches what the upstream advertises (relays re-serve with the same bound).
 			maxAge: info.maxAge === undefined ? null : Duration.millis(info.maxAge),
 			priority: info.priority,
-			refresh: info.refresh ?? null,
+			refresh: {
+				ratio: info.refresh ?? null,
+				interval: info.refreshInterval === undefined ? null : Duration.millis(info.refreshInterval),
+			},
 			compression: info.compress ? "deflate" : "none",
 			// Lite-05/06 timestamps may be send times, so the copy's groups skip the rewind check.
 			...(hasMediaTime(this.version) ? {} : { unchecked: true }),
@@ -2343,11 +2382,11 @@ export class Subscriber {
 			cancel.abort();
 			return;
 		}
-		let group: netGroup.Producer;
+		let group: netGroup.Producer | undefined;
 		try {
 			// The live feed may have brought it meanwhile, or every reader left.
-			if (!fill.isWanted(key)) throw new StreamError(StreamCode.Cancel, { message: "cancel" });
-			group = fill.accept(key);
+			if (fill.isWanted(key)) group = fill.accept(key);
+			if (!group) throw new StreamError(StreamCode.Cancel, { message: "cancel" });
 		} catch (err) {
 			stream.abort(error(err));
 			return;
@@ -2650,7 +2689,7 @@ export class Subscriber {
 				if (!entry.starts.has(id)) return false;
 				const at = entry.starts.get(id);
 				if (at === undefined) continue;
-				const [model] = requestedRanges({ startFrame: 0, ranges: [range] });
+				const model = requestedRange(range);
 				owed.push({ ...model, start: { time: at } });
 			}
 			// Each starts at the group its publisher reported starting it at.
@@ -2701,17 +2740,17 @@ export class Subscriber {
 		};
 
 		// The wanted group is subscription state: an update announces each new one past our
-		// largest, and every later update restates it. Joins asking for the same group
+		// largest, and every later update restates it. Requests asking for the same group
 		// coalesce into that one update.
 		let sentWanted: bigint | undefined;
 		// What the fills asked with the last update, and the priority it carried.
 		let sentFills: Run[] = [];
 		let sentPriority = msg.priority;
-		const demand = track.demand();
+		const asked = hooks.demandAsked(track.demand());
 		const edge = hooks.producerLargest(track);
 		for (;;) {
 			const largest = edge.peek()?.group;
-			const wanted = demand.wanted.peek();
+			const wanted = asked.peek();
 			const refresh =
 				hasRefresh(this.version) &&
 				largest !== undefined &&
@@ -2735,7 +2774,7 @@ export class Subscriber {
 			) {
 				// Each wake releases the quiet signals too, including when termination wins.
 				const next = await race([
-					Signal.race(hooks.requested(track), demand.wanted, edge, entry.fillsChanged),
+					Signal.race(hooks.requested(track), asked, edge, entry.fillsChanged),
 					stopped,
 				]);
 				if (next === null) return;
@@ -2758,13 +2797,26 @@ export class Subscriber {
 			// Lite-07 edits the live ranges: a range already live keeps its Range ID, and where it
 			// started. The retired ones owe nothing more.
 			let edit: { remove: bigint[]; add: WireRange[] } | undefined;
-			const fillRanges: WireRange[] = fillGroups.map((run) => ({
-				start: { absolute: run.start },
-				end: { absolute: run.end },
-			}));
 			if (hasRanges(this.version)) {
+				// The demand's ranges and the fills' groups, widened together until they fit. The fills
+				// keep their exact ask, so what they ask next is compared with that, not the wire.
+				const demanded = toWireRanges(ranges);
+				const fields = await this.#subscribeFields(msg, {
+					priority,
+					order: current.order,
+					maxDelay: wireMaxDelay(current),
+					minDelay: minDelayOf(current),
+				});
+				const budget = Fit.budget(fields, entry.live.next(), demanded.length + fillGroups.length);
+				const fitted = Fit.fit(demanded, fillGroups, entry.fills?.avoid() ?? [], budget);
+				// A fill's range starting past its run speaks only while that run is asked whole.
+				entry.fills?.retireSkipped(fitted.fills);
+				const fillRanges: WireRange[] = fitted.fills.map((run) => ({
+					start: { absolute: run.start },
+					end: { absolute: run.end },
+				}));
 				// The demand's ranges, then the fills'.
-				const edited = entry.live.edit([...toWireRanges(ranges), ...fillRanges], fillRanges.length, (id) =>
+				const edited = entry.live.edit([...fitted.ranges, ...fillRanges], fillRanges.length, (id) =>
 					entry.fillIds.has(id),
 				);
 				edit = edited;
@@ -2776,10 +2828,10 @@ export class Subscriber {
 				for (const id of entry.fillIds) if (!entry.live.get(id)) entry.fillIds.delete(id);
 				for (const id of edited.fillIds) entry.fillIds.add(id);
 				// The groups a fill newly asks for wait a fresh grace too.
-				for (const run of fillGroups)
+				for (const run of fitted.fills)
 					for (const gap of runGaps(entry.fillGroups, run.start, run.end))
 						entry.tail.demand(gap.start, gap.end);
-				entry.fillGroups = fillGroups;
+				entry.fillGroups = fitted.fills;
 				entry.floor = span.start;
 				// Pending while a range the update adds awaits SUBSCRIBE_STARTED.
 				this.#declare(entry);
@@ -2823,8 +2875,8 @@ export class Subscriber {
 	// say where one starts. Mirrors the Rust `SubStream::declare`.
 	#declare(entry: SubscribeEntry): void {
 		// Where the publisher started each live range asked from a group's start, which a reader's
-		// time start there resolves to when the copy holds no group at it. Mirrors the Rust
-		// `report_time_starts`.
+		// time start there resolves to when the copy holds no group at it, and one asked from the
+		// oldest group as asked from 0. Mirrors the Rust `SubStream::report_starts`.
 		const times: [bigint, bigint][] = [];
 		// And each one counting back, which the copy, holding only part of the track, can't count,
 		// with the latest group it counted back from.
@@ -2837,6 +2889,7 @@ export class Subscriber {
 			if (at === undefined) continue;
 			if (time !== undefined) times.push([time, at]);
 			else if (back !== undefined) relative.push([back, at, entry.edges.get(id)]);
+			else if (range !== undefined && range.start === undefined) times.push([0n, at]);
 		}
 		hooks.timeStarts(entry.track, times);
 		hooks.relativeStarts(entry.track, relative);

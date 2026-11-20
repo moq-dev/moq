@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { Duration } from "@moq/clock";
 import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
+import { defined } from "../defined.test-util.ts";
 import { TRACK } from "./format";
 import {
 	checkRenditions,
@@ -56,7 +57,7 @@ test("the shared containment check covers every section carrying a broadcast ref
 
 test("watch yields a catalog with many renditions", async () => {
 	const broadcast = new Moq.Broadcast.Producer();
-	const track = broadcast.createTrack(TRACK, { timescale: Moq.Time.Timescale.MILLI });
+	const track = defined(broadcast.createTrack(TRACK, { timescale: Moq.Time.Timescale.MILLI }));
 	const producer = new Json.Snapshot.Producer<Root>({ track, deltas: false });
 	const consumer = watch(broadcast.consume())[Symbol.asyncIterator]();
 	producer.update(catalog(1000), Moq.Time.Timestamp.now());
@@ -68,7 +69,7 @@ test("watch yields a catalog with many renditions", async () => {
 
 test("watch refuses a catalog needing a newer reader", async () => {
 	const broadcast = new Moq.Broadcast.Producer();
-	const track = broadcast.createTrack(TRACK, { timescale: Moq.Time.Timescale.MILLI });
+	const track = defined(broadcast.createTrack(TRACK, { timescale: Moq.Time.Timescale.MILLI }));
 	const producer = new Json.Snapshot.Producer<Root>({ track, deltas: false });
 	const consumer = watch(broadcast.consume())[Symbol.asyncIterator]();
 	producer.update({ version: VERSION + 1 }, Moq.Time.Timestamp.now());
@@ -90,7 +91,7 @@ async function watchRequested(root: Root) {
 	const origin = new Moq.Origin.Producer();
 	const broadcastRoute = origin.route(Moq.Path.from("room/alice"), { hidden: true });
 	const broadcast = broadcastRoute.broadcast;
-	const track = broadcast.createTrack(TRACK, { timescale: Moq.Time.Timescale.MILLI });
+	const track = defined(broadcast.createTrack(TRACK, { timescale: Moq.Time.Timescale.MILLI }));
 	const producer = new Json.Snapshot.Producer<Root>({ track, deltas: false });
 	broadcastRoute.announce();
 	const request = origin.request(Moq.Path.from("room/alice"));
@@ -119,7 +120,7 @@ test("watch accepts a sibling reference under the same root and yields it unreso
 
 test("watch on a standalone broadcast refuses any parent reference", async () => {
 	const broadcast = new Moq.Broadcast.Producer();
-	const track = broadcast.createTrack(TRACK, { timescale: Moq.Time.Timescale.MILLI });
+	const track = defined(broadcast.createTrack(TRACK, { timescale: Moq.Time.Timescale.MILLI }));
 	const producer = new Json.Snapshot.Producer<Root>({ track, deltas: false });
 	const consumer = watch(broadcast.consume())[Symbol.asyncIterator]();
 	producer.update(referencing("../bob"), Moq.Time.Timestamp.now());
@@ -130,7 +131,7 @@ test("watch on a standalone broadcast refuses any parent reference", async () =>
 
 test("watch yields each catalog update with the timestamp it takes effect at", async () => {
 	const broadcast = new Moq.Broadcast.Producer();
-	const track = broadcast.createTrack(TRACK, { timescale: Moq.Time.Timescale.MILLI });
+	const track = defined(broadcast.createTrack(TRACK, { timescale: Moq.Time.Timescale.MILLI }));
 	const producer = new Json.Snapshot.Producer<Root>({ track, deltas: false });
 	const consumer = watch(broadcast.consume())[Symbol.asyncIterator]();
 	for (const [count, ms] of [
@@ -156,7 +157,9 @@ test("a holding watcher reads every update it may still play, in order", async (
 		[Duration.millis(1001), [1000, 2000, 3000]],
 	] as const) {
 		const broadcast = new Moq.Broadcast.Producer();
-		const track = broadcast.createTrack(TRACK, { timescale: Moq.Time.Timescale.MILLI, maxAge: Duration.secs(30) });
+		const track = defined(
+			broadcast.createTrack(TRACK, { timescale: Moq.Time.Timescale.MILLI, maxAge: Duration.secs(30) }),
+		);
 		const producer = new Json.Snapshot.Producer<Root>({ track, deltas: false });
 		// Subscribed before the updates land, as a live reader is; all three arrive before it reads.
 		const updates = watch(broadcast.consume(), { delay })[Symbol.asyncIterator]();

@@ -5,10 +5,14 @@
 //! (inline SPS/PPS) as length-prefixed NALU + out-of-band avcC, which is
 //! what every CMAF and MKV consumer expects. [`Export`] subscribes to a
 //! catalog-narrowed H.264 rendition and emits an Annex-B elementary
-//! stream; [`Split`] does the byte-level framing for the Annex-B (avc3)
-//! wire shape and [`Import`] is the pure frame publisher that resolves the
-//! catalog. avc1 (length-prefixed NALU) has no stream framing; wrap one
-//! access unit with `avc1_frame`.
+//! stream; [`Split`] does the byte-level framing of an Annex-B stream and
+//! [`Import`] is the pure frame publisher that resolves the catalog.
+//! Length-prefixed NALU has no stream framing; wrap one access unit with
+//! `avc1_frame`.
+//!
+//! The catalog's `description` decides the framing (an avcC means
+//! length-prefixed, none means Annex-B); avc1 and avc3 only say whether the
+//! parameter sets may also ride in band.
 
 mod export;
 mod import;
@@ -548,8 +552,8 @@ pub(crate) fn avcc_params(avcc: &[u8]) -> Result<(usize, Vec<Bytes>)> {
 	Ok((record.length_size.into(), params))
 }
 
-/// Transform H.264 frames from Annex-B (inline SPS/PPS, "avc3") to
-/// length-prefixed NALU (out-of-band AVCDecoderConfigurationRecord, "avc1").
+/// Transform H.264 frames from Annex-B (inline SPS/PPS) to length-prefixed
+/// NALU with an out-of-band AVCDecoderConfigurationRecord ("avc1").
 ///
 /// The avcC is synthesized from the active SPS+PPS and exposed via
 /// [`Self::avcc`]. Once it returns `Some`, all subsequent calls to

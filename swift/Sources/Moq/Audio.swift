@@ -36,6 +36,7 @@ public enum Audio {
             track: String? = nil,
             bandwidth: Allocator? = nil
         ) throws {
+            try checkDuration(output.frameDuration, "frameDuration")
             ffi = try MoqAudioProducer(
                 catalog: catalog.ffi,
                 options: MoqAudioProducerOptions(
@@ -63,7 +64,7 @@ public enum Audio {
         }
 
         /// Abort the track with an application error code, but only while nobody wants it: call it
-        /// once `TrackDemand.wantedChanged()` returns nil. Returns true once the track is closed,
+        /// once `TrackDemand.wantedChanged()` returns false. Returns true once the track is closed,
         /// and false, leaving the track open, when a reader joined since; keep serving and wait for
         /// the next nil on a fresh `demand()`: one that already returned nil misses a reader
         /// that came and went, and waits on.
@@ -97,7 +98,9 @@ public enum Audio {
             rendition: Media.Audio,
             output: DecoderOutput
         ) async throws -> Consumer {
-            Consumer(
+            try checkAudio(rendition)
+            try checkDelay(output.delay)
+            return Consumer(
                 try await MoqAudioConsumer.subscribe(
                     broadcast: broadcast.ffi,
                     id: id,
@@ -134,7 +137,10 @@ public enum Audio {
         let ffi: MoqAudioEncoder
 
         /// Open a codec-only encoder.
-        public init(output: EncoderOutput) throws { ffi = try MoqAudioEncoder(output: output) }
+        public init(output: EncoderOutput) throws {
+            try checkDuration(output.frameDuration, "frameDuration")
+            ffi = try MoqAudioEncoder(output: output)
+        }
 
         /// Samples per channel each `encode` call takes.
         public var frameSize: UInt64 {

@@ -49,12 +49,18 @@ group is observed when the stall clears. A missing group, one that has delivered
 no frame, is waited for only the playout delay, the subscription's `delay.min`,
 since past that it would play late: a reordered backlog's holes waited out to the whole budget
 would delay the frames behind them, which the estimator would measure as
-jitter. The browser player waits less still, only until the group past the hole
-trails its clock by the stretch threshold, past which the ring would skip the
-hole's audio anyway: a viewer resuming behind a replayed backlog, which arrives
-newest first, would otherwise hold the live audio for the backlog's oldest group,
-while a late burst that fills a hole a moment after the group past it lands
-still plays it. A caller that estimates keeps the budget past the target, which is why
+jitter. The browser player leaves the hole to the transport: it reads its audio
+through an ordered track reader whose own `delay.max` is what the ring holds of
+the delay plus the stretch threshold, past which the ring would skip the hole's
+audio anyway, and plays each gap that reader reports as the hole. The reader
+gives up on a missing group by the same two clocks as any stale group: once the
+newest frame is that far past where the group after it starts, or that group
+arrived that long ago. A late burst that fills a hole a moment after the group
+past it lands still plays it, and a viewer resuming behind a replayed backlog
+does not hold the live audio for the backlog's oldest group. That reader's
+budget is its own: a second subscription to the same track, read in arrival
+order, observes every frame its own wider budget receives, so the late groups
+the reader gives up on are still measured. A caller that estimates keeps the budget past the target, which is why
 `moq play` waits on a stalled audio group for the delay plus the estimate's 2 s
 ceiling. The observation is also only as honest as
 the caller is prompt: `read()` is timed when it resolves, so a player drains it
@@ -69,8 +75,7 @@ the target: the estimate creeps up one bucket at a time while the frames it
 should have measured go unplayed. Both implementations subscribe with the delay
 plus the estimate's own 2 s ceiling, whatever the player's `stretch` setting:
 `moq play` through its age budget, and the browser through the audio
-subscription alone, since its container consumer observes each frame before
-applying the local budget. So any lateness the estimator can measure is
+subscription it observes arrivals on, beside the narrower ordered one it plays. So any lateness the estimator can measure is
 observed at once. A buffered browser player keeps its subscription at least the
 delay plus its lookahead.
 Browser video keeps the shared budget, because a longer one fetches whole stale
@@ -581,6 +586,13 @@ interval in progress and any open stall, folds into the continued histogram as
 if that interval closed at the switch, judged by the outgoing track's join: a switch most often follows an outage,
 and would otherwise drop the outage's one observation.
 
+A subscription the viewer stops and starts again on the same path, as a pause or
+a hidden tab does, continues the same way. The stop says nothing about the path,
+as a [declared silence](#declared-silence) says nothing about it. Starting over
+would give the first outage after the resume a tenth of the histogram, so one
+late flush would hold the target near its own lateness for a half-life. A
+continued histogram gives that outage only `1 - FORGET`.
+
 ## At the speaker
 
 Audio is placed on the clock where it is heard, not where it is rendered. The
@@ -682,7 +694,7 @@ that interval is [stalled](#one-observation-per-stall), whose stall owns them.
 the work: after 1024 folds the retained weight is about 2e-8, so the cap changes
 no output an `f64` can represent.
 
-A receiver coming back from a pause is not cold: the evidence that survived
+A subscription whose arrivals stop and come back is not cold: the evidence that survived
 keeps decaying at the base rate. Only the weight the prior regained is replaced
 quickly, the same way it is at cold start, since it stands for no evidence at
 all.

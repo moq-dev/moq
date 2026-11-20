@@ -2,6 +2,7 @@ import { expect, jest, onTestFinished, test } from "bun:test";
 import { Duration, now } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import * as Connection from "../connection/index.ts";
+import { defined } from "../defined.test-util.ts";
 import { StreamCode } from "../error.ts";
 import { hooks } from "../internal.ts";
 import { GRACE } from "../ledger.ts";
@@ -606,9 +607,9 @@ async function publishing(version: IetfVersion) {
 	const publication = origin.route(Path.from("room"));
 	const broadcast = publication.broadcast;
 	// Written once, before anyone subscribed, and left open: only the head can deliver it.
-	const catalog = broadcast.createTrack("catalog.json", { timescale: Timescale.MILLI });
+	const catalog = defined(broadcast.createTrack("catalog.json", { timescale: Timescale.MILLI }));
 	hooks.appendNext(catalog).writeFrame(textFrame("catalog"));
-	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const video = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	const group = hooks.appendNext(video);
 	group.writeFrame(textFrame("v0"));
 	group.writeFrame(textFrame("v1"));

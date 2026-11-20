@@ -274,13 +274,14 @@ impl<'a> Message<'a> for Setup {
 			if !version.has_routes() {
 				return Err(EncodeError::Version);
 			}
-			if node.relay == 0 {
+			if node.relay == 0 || node.marked {
 				return Err(EncodeError::InvalidState);
 			}
 			let mut value = Vec::new();
 			let mut body = Encoder::new(&mut value, version.into());
 			body.varint(node.relay)?;
 			body.varint(node.start)?;
+			body.bool(false);
 			params.set_bytes(PARAM_HOP, value);
 		}
 		if let Some(implementation) = &self.implementation {
@@ -353,10 +354,12 @@ impl<'a> Message<'a> for ReceivedSetup {
 					let mut body = Decoder::new(value, version.into());
 					let relay = body.varint()?;
 					let start = body.varint()?;
-					if relay == 0 || !body.is_empty() {
+					// A session's node is never a marked identity, which holds none.
+					let marked = body.bool()?;
+					if relay == 0 || marked || !body.is_empty() {
 						return Err(DecodeError::InvalidValue);
 					}
-					(None, Some(crate::route::NodeId { relay, start }))
+					(None, Some(crate::route::NodeId::new(relay, start)))
 				}
 			},
 			false => {
@@ -489,7 +492,7 @@ impl PeerSetup {
 
 	/// Tell `link` once the peer's SETUP arrives that it accepted the connection credential.
 	pub fn accepting(self, link: crate::auth::Link) -> Self {
-		link.await_setup();
+		link.await_acceptance();
 		self.0.lock().accept = Some(link);
 		self
 	}
@@ -927,7 +930,11 @@ mod tests {
 		let version = Version::Lite07;
 		let msg = Setup {
 			hop: Some(crate::Hop::new(42).unwrap()),
-			node: Some(crate::route::NodeId { relay: 7, start: 3 }),
+			node: Some(crate::route::NodeId {
+				relay: 7,
+				start: 3,
+				marked: false,
+			}),
 			..Default::default()
 		};
 		let got = Setup::decode_slice(&msg.encode_bytes(version).unwrap(), version)
@@ -940,8 +947,9 @@ mod tests {
 			"only lite-07 carries a Node ID"
 		);
 
-		// A Node ID of 0 names nobody, a start must follow it, and nothing may follow that.
-		for value in [&[0, 3][..], &[7], &[7, 3, 1]] {
+		// A Node ID of 0 names nobody, a start and Marked must follow it, a session's node
+		// is never marked, and nothing may follow that.
+		for value in [&[0, 3, 0][..], &[7], &[7, 3], &[7, 3, 1], &[7, 3, 2], &[7, 3, 0, 1]] {
 			let mut params = Parameters::default();
 			params.set_bytes(super::PARAM_HOP, value.to_vec());
 			let mut data = Vec::new();

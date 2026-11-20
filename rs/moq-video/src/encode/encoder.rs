@@ -22,11 +22,13 @@ use crate::{Color, Device, Error, Frame, FrameRate, Size};
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Codec {
-	/// H.264 / AVC, Annex-B with in-band SPS/PPS (the "avc3" shape). The widest
+	/// H.264 / AVC, Annex-B with in-band SPS/PPS, published as avc3 with no
+	/// description. The widest
 	/// support and the default.
 	#[default]
 	H264,
-	/// H.265 / HEVC, Annex-B with in-band VPS/SPS/PPS (the "hev1" shape).
+	/// H.265 / HEVC, Annex-B with in-band VPS/SPS/PPS, published as hev1
+	/// with no description.
 	H265,
 }
 
@@ -378,7 +380,7 @@ pub(crate) fn default_bitrate(size: Size, framerate: FrameRate, codec: Codec) ->
 /// Video encoder. Build one with [`Encoder::new`], submit raw [`Frame`]s via
 /// [`encode`](Self::encode), [`receive`](Self::receive) the resulting
 /// [`Encoded`] access units until it returns `None`, and publish them through a
-/// [`Producer`](super::Producer) built for the same [`Codec`].
+/// [`Publisher`](super::Publisher) built for the same [`Codec`].
 ///
 /// An encoder is bound to the thread that opens it. Use [`Sink`](super::Sink)
 /// when the owner can move between threads.
@@ -475,8 +477,7 @@ impl Encoder {
 	///
 	/// Returns [`Error::BitrateUnsupported`] if this backend can't retune while
 	/// running. That's not fatal: the encoder keeps running at its current rate,
-	/// so a caller driving a control loop should stop adapting rather than stop
-	/// encoding.
+	/// so a caller driving a control loop keeps encoding, and may try again later.
 	pub fn set_bitrate(&mut self, bitrate: moq_net::bandwidth::Rate) -> Result<(), Error> {
 		if bitrate == self.bitrate {
 			return Ok(());
@@ -490,7 +491,7 @@ impl Encoder {
 		Ok(())
 	}
 
-	/// The codec this encoder emits. A [`Producer`](super::Producer) must be
+	/// The codec this encoder emits. A [`Publisher`](super::Publisher) must be
 	/// built for the same codec to publish its packets.
 	pub fn codec(&self) -> Codec {
 		self.codec
@@ -823,7 +824,7 @@ mod tests {
 			"encoded timestamp outside the fed set: {micros:?}"
 		);
 
-		// The first packet must start with an Annex-B start code so the avc3
+		// The first packet must start with an Annex-B start code so the Annex-B
 		// importer can find the inline SPS/PPS.
 		let packets = payloads(&frames);
 		let first = &packets[0];

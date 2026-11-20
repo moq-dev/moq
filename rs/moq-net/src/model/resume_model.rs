@@ -569,7 +569,7 @@ impl Model {
 							fill.refuse_groups(group..group + 1, Error::Stream(GIVE_UP));
 						} else if written == 0 || written < from || held.into_iter().any(|part| part.from <= from) {
 							fill.refuse_groups(group..group + 1, Error::NotFound);
-						} else if let Ok(writer) = fill.accept(group, None) {
+						} else if let Ok(Some(writer)) = fill.accept(group, None) {
 							// The fill starts at the frame its readers want, which may not exist yet.
 							copy.groups.entry(group).or_default().push(Part {
 								from,
@@ -694,9 +694,7 @@ impl Model {
 					}
 					// Only an arrival cursor says where its range resolved.
 					let resolved = match reader.cursor.as_mut().unwrap() {
-						Cursor::Arrival(sub) => {
-							sub.resolved().first().copied().flatten().map(|resolved| resolved.start)
-						}
+						Cursor::Arrival(sub) => sub.resolved_range(0).map(|resolved| resolved.start),
 						Cursor::Ordered(_) => None,
 					};
 					if !reader.admits(key, resolved) {
@@ -1031,6 +1029,30 @@ fn regressions() {
 		drops,
 	};
 	let cases = [
+		// After a failover, a range moved back resolves from the first copy to answer it,
+		// even a replaced one under a failover cap, so the groups below that cap stay owed.
+		Case {
+			ops: vec![
+				Op::Up { instance: 0, slot: 1 },
+				Op::Join {
+					reader: 2,
+					spec: spec(false, Budget::Hour, None, false),
+				},
+				Op::Write {
+					instance: 0,
+					slot: 1,
+					group: Some(7),
+					frames: 2,
+				},
+				Op::Up { instance: 0, slot: 0 },
+				Op::Down { instance: 0, slot: 1 },
+				Op::Ranges {
+					reader: 2,
+					range: Some((1, 8)),
+				},
+			],
+			finish: false,
+		},
 		// A time start on a received copy that never reports its live edge waits for a group
 		// rather than reading everything, so it stops at its end.
 		Case {
@@ -1418,6 +1440,76 @@ fn regressions() {
 					slot: 1,
 					group: 5,
 				},
+			],
+			finish: false,
+		},
+		// The serving route ends while a replaced copy holds the read open for a group under
+		// its bound: groups in range still in flight on the ended route land, and are read.
+		Case {
+			ops: vec![
+				Op::Join {
+					reader: 1,
+					spec: spec(false, Budget::Hour, None, false),
+				},
+				Op::Up { instance: 0, slot: 1 },
+				Op::Join {
+					reader: 0,
+					spec: spec(false, Budget::Hour, Some((6, 8)), false),
+				},
+				Op::Write {
+					instance: 0,
+					slot: 0,
+					group: None,
+					frames: 1,
+				},
+				Op::Write {
+					instance: 0,
+					slot: 1,
+					group: Some(11),
+					frames: 1,
+				},
+				Op::Write {
+					instance: 0,
+					slot: 1,
+					group: Some(2),
+					frames: 1,
+				},
+				Op::End { instance: 0, slot: 1 },
+			],
+			finish: false,
+		},
+		// The same for a reader without a range, once the serving copy's first group bounds
+		// the replaced one below the groups still in flight.
+		Case {
+			ops: vec![
+				Op::Join {
+					reader: 1,
+					spec: spec(false, Budget::Hour, None, false),
+				},
+				Op::Up { instance: 0, slot: 1 },
+				Op::Join {
+					reader: 0,
+					spec: spec(false, Budget::Hour, None, false),
+				},
+				Op::Write {
+					instance: 0,
+					slot: 0,
+					group: None,
+					frames: 1,
+				},
+				Op::Write {
+					instance: 0,
+					slot: 1,
+					group: Some(2),
+					frames: 1,
+				},
+				Op::Write {
+					instance: 0,
+					slot: 1,
+					group: Some(11),
+					frames: 1,
+				},
+				Op::End { instance: 0, slot: 1 },
 			],
 			finish: false,
 		},

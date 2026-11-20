@@ -63,10 +63,9 @@ public typealias RouteInfo = MoqFFI.MoqRouteInfo
 /// Resolve a path with `OriginConsumer.request`.
 public typealias Announce = MoqFFI.MoqAnnounce
 /// What an `AnnounceConsumer` yields, each carrying an `Announce`: `.present` once a route
-/// covers the path, `.unavailable` and `.available` as a present path loses and recovers a
-/// usable path to its origin, `.absent` once the origin withdraws it, and `.offline` once this
-/// side lets go of it, which its origin may still serve. Another publisher instance taking a
-/// path over keeps it present: hold a `Following` to see the broadcast change.
+/// covers the path, and `.absent` once none does, whether its origin withdrew it or this side
+/// let go of it. Another publisher instance taking a path over keeps it present: hold a
+/// `Following` to see the broadcast change.
 public typealias AnnounceEvent = MoqFFI.MoqAnnounceEvent
 /// Per-subscription delivery preferences: priority, delay, the ranges of the track to
 /// deliver, and group ordering.
@@ -81,9 +80,14 @@ public typealias Subscription = MoqFFI.MoqSubscription
 public typealias Delay = MoqFFI.MoqDelay
 /// Options for fetching one complete group by start.
 public typealias FetchGroupOptions = MoqFFI.MoqFetchGroupOptions
-/// Publisher-side track properties: priority, group ordering, max age,
-/// and timescale.
+/// Publisher-side track properties: priority, max age, refresh, timescale,
+/// and compression.
 public typealias TrackInfo = MoqFFI.MoqTrackInfo
+/// When a subscriber asks a track's publisher for a new group, which `TrackDemand.refresh()`
+/// reports: a join once the newest group outweighs `ratio` times its first frame (any join
+/// when `nil`), waiting out `interval` (`nil` for no wait), which caps how often the publisher
+/// makes groups however many subscribers ask. A bare `TrackRefresh()` asks for nothing.
+public typealias TrackRefresh = MoqFFI.MoqTrackRefresh
 /// How a track's frames are compressed on the wire: `Compression.deflate()`, or `nil` in `TrackInfo`
 /// for none. Compare a received one with `==` or by `name()`.
 public typealias Compression = MoqFFI.MoqCompression
@@ -94,8 +98,9 @@ public typealias ConnectionStats = MoqFFI.MoqConnectionStats
 
 /// Retry pacing for the automatic reconnect; see `Client(backoff:)`. A `nil`
 /// field keeps its default, zero means zero (retry at once, or give up at the
-/// first failure), and `maxUnlimited` lifts the ceiling. Until a session has
-/// stayed up past 1s or been drained by a GOAWAY, a failed dial or a closed
+/// first failure), and `maxUnlimited` lifts the ceiling. Until the peer has
+/// accepted a session's credential or drained a session with a GOAWAY
+/// (or, on moq-lite 03/04, which never answer it, a session stayed up 1s), a failed dial or a closed
 /// session, such as a refused credential, ends the connection with its error
 /// rather than retrying.
 public typealias Backoff = MoqFFI.MoqBackoff
@@ -145,11 +150,12 @@ public typealias Position = MoqFFI.MoqPosition
 // Nested rather than top-level: a module-level `Range` would shadow `Swift.Range`
 // in every file that imports Moq.
 extension Subscription {
-    /// A span of a track to deliver: from `start` up to `end`, or onward when `end` is `nil`.
+    /// A span of a track to deliver: from `start` through `end`, or onward when `end` is `nil`.
+    /// Every end includes its whole group.
     public typealias Range = MoqFFI.MoqRange
-    /// Where one end of a `Range` falls: `.oldest` (a start only), `.absolute(group:)`,
-    /// `.relative(groups:)` back from the latest group, or `.time(timestamp:)` for the group
-    /// containing an unscaled time in the track's timescale (a scaled one is refused).
+    /// Where one end of a `Range` falls: `.oldest` (a start only), `.relative(groups:)` back
+    /// from the latest group, or `.time(timestamp:)` for the group containing an unscaled time
+    /// in the track's timescale (a scaled one is refused).
     public typealias Anchor = MoqFFI.MoqAnchor
     /// Which pending group the publisher sends first: `.ascending` or `.descending`.
     public typealias Order = MoqFFI.MoqOrder

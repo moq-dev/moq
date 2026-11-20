@@ -234,10 +234,10 @@ export function hasRouteCost(version: Version): boolean {
 	}
 }
 
-/** Whether SUBSCRIBE, SUBSCRIBE_UPDATE, and FETCH carry frame indices alongside
- * their group keys, so a subscription or fetch can start and end partway through a
- * group. Added in lite-06. Older versions only address whole groups, so a route change
- * has to wait for the next group before it can resume.
+/** Whether SUBSCRIBE, SUBSCRIBE_UPDATE, FETCH, and GROUP carry frame indices alongside
+ * their group keys, so a subscription or fetch can start partway through a group. Added in
+ * lite-06; lite-07 bounds only a range's start. Older versions only address whole groups, so a
+ * route change has to wait for the next group before it can resume.
  *
  * SUBSCRIBE_OK is deliberately not in that list: the resolved start frame follows from
  * its group plus the subscriber's own request, so it needs no frame field. */
@@ -253,12 +253,6 @@ export function hasFrameBounds(version: Version): boolean {
 		default:
 			return true;
 	}
-}
-
-/** Whether GROUP carries `Frame Start`, the index of the stream's first frame. Lite-06 only:
- * earlier versions have no frame bounds, and a lite-07 subscription reads whole groups. */
-export function hasGroupFrameStart(version: Version): boolean {
-	return version === Version.DRAFT_06;
 }
 
 /** Whether SUBSCRIBE and SUBSCRIBE_UPDATE carry the subscriber's `Group Order`. Added in
@@ -472,7 +466,7 @@ export function hasAnnounceCompression(version: Version): boolean {
 	}
 }
 
-/** Whether TRACK_INFO carries the refresh ratio and SUBSCRIBE_UPDATE a wanted group. Added in lite-07.
+/** Whether TRACK_INFO carries the refresh ratio and interval, and SUBSCRIBE_UPDATE a wanted group. Added in lite-07.
  * Older peers see a track that never refreshes. */
 export function hasRefresh(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-07+ behavior.
@@ -730,9 +724,8 @@ export function hasLengthFirst(version: Version): boolean {
 
 /**
  * Whether GROUP carries the previous group's `Previous Start`, and a Group or Fetch Stream ends a
- * finished group with GROUP_END and a closed one with a bare FIN. A publisher then closes an
- * expired group's stream rather than resetting it. Added in lite-07; earlier versions end every
- * group with a bare FIN.
+ * finished group with GROUP_END and a closed one with a bare FIN. Added in lite-07; earlier
+ * versions end every group with a bare FIN.
  */
 export function hasGroupEnd(version: Version): boolean {
 	switch (version) {

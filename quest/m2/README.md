@@ -26,15 +26,17 @@ removal, a rename, or a wire, catalog, or format change that is free until
   is finished; Subscriber Min Age stays and
   gains its reader, reversing 2026-11-14; and
   [lite-07 by start](https://github.com/moq-dev/moq/pull/8908) carries the
-  smaller wire fixes. [Refresh](/quest/m2/refresh-interval.md) and
+  smaller wire fixes. Refresh ([moq-dev/moq#9054](https://github.com/moq-dev/moq/pull/9054)) and
   group drops took simpler contracts.
   [moq-transport time addressing](https://github.com/moq-dev/moq/pull/8918)
   returned from m4, and the two moq-transport interop quests in m3 were
   deleted. Kept as they are: datagram tracks with their lite-05/06 bridge,
   all seven lite versions, the hidden `.` path prefix, and the route plan
-  of [cache-aware multicast](/quest/m2/multicast/README.md), whose
-  [switch](/quest/m2/multicast/switch.md) also settles the public route API
-  and retires the moq-cluster draft.
+  of [cache-aware multicast](/quest/m2/multicast/README.md), whose switch
+  settled the public route API in
+  [moq-dev/moq#9053](https://github.com/moq-dev/moq/pull/9053). The
+  moq-cluster draft stays, since third-party relays ship it, rewritten to
+  what the binding sends.
 - **moq-net API.** [Socket endpoints](https://github.com/moq-dev/moq/pull/9029) leave for Kixel, and the
   demos return to their earlier format.
 - **Unused API.** [One sweep per area](/quest/m2/unused-api/README.md), each
@@ -42,12 +44,11 @@ removal, a rename, or a wire, catalog, or format change that is free until
 - **Auth and crypto.** End-to-end encryption is its own unpublished crate again
   ([moq-dev/moq#8947](https://github.com/moq-dev/moq/pull/8947)); its
   [finished format](/quest/m3/e2ee-format.md) follows in m3.
-- **Catalog, drafts, and formats.** [hang-04](/quest/m2/hang04/README.md)
-  (the `sync` section, a version per entry, no video `warmup`, `m2ts` under
+- **Catalog, drafts, and formats.** hang-04 (done: the `sync` section, a version per entry, no video `warmup`, the TS passthrough under
   `mpegts`, one strict rule);
-  [declared ends](/quest/m2/time-addressing/consumers.md), back from m3.
-- **Native media and gateways.** [The video producer](/quest/m2/video-producer.md) and
-  [upstream str0m](https://github.com/moq-dev/moq/pull/8963), which reverses the
+  declared ends, back from m3, which became
+  [a whole marker](/quest/m2/time-addressing/group-end-whole.md) on 2026-11-19.
+- **Native media and gateways.** [Upstream str0m](https://github.com/moq-dev/moq/pull/8963), which reverses the
   2026-10-30 vendoring.
 - **Bindings.** The C API as `libmoq` (done), reversing 2026-10-25.
   The bindings break twice by decision: at 0.22, and again at
@@ -102,7 +103,9 @@ Decided 2026-11-12 (maintainer, /quest-audit before the cut):
   the capture selections. None
   is on the routes chain, which stays the critical path.
 - ✅ Under the path rule a route keeps one sticky down-only flag beside its
-  path; see the [routes epic](/quest/m2/cluster-routes/README.md).
+  path; see the [routes epic](/quest/m2/cluster-routes/README.md). The
+  route layer that replaced it keeps the flag as a route's mark
+  ([cache-aware multicast](/quest/m2/multicast/README.md) item 6).
 
 Carried from m1's Plan before the re-cut, where "m1" means the whole pre-cut
 milestone, now m1 and m2:
@@ -282,15 +285,16 @@ what would need a breaking release had it landed right after the cut:
   returned to m2 on 2026-11-15 (maintainer, on
   [moq-dev/moq#8832](https://github.com/moq-dev/moq/pull/8832)) and became
   the request quest of [cache-aware multicast](/quest/m2/multicast/README.md);
-  [media consumers](/quest/m2/time-addressing/consumers.md) to m3 (its API
+  media consumers (now [start placement](/quest/m2/time-addressing/start-placement.md)) to m3 (its API
   breaks ride the model; dropping hang's markers is tolerated by readers),
   until it returned to m2 on 2026-11-16;
   [moq-transport time addressing](https://github.com/moq-dev/moq/pull/8918) to m4
   (low-priority compatibility, no named consumer), until it returned to m2
   on 2026-11-16; and the
-  [Playwright bump](/quest/m1/playwright-pin.md) to m1, which the release
-  cut requires in place of lite07-finalize (its strict interop lane needs
-  Chromium 158), with lite07-finalize checking Chromium 158 once by hand. The E2EE nonce
+  Playwright bump to m1, which the release cut required in place of
+  lite07-finalize (its strict interop lane needed Chromium 158), with
+  lite07-finalize checking Chromium 158 once by hand; deleted with the route
+  key lane it served. The E2EE nonce
   quest was removed: the nonce already binds the wire ID, which becomes the
   start, and lite-07 by start rewords the draft. Rejected for each: staying
   in m2.

@@ -26,6 +26,7 @@ export class Consumer {
 export interface ConsumerProps {
 	delay?: Signals.GetterInit<Net.Track.Delay>;
 	format: Format;
+	ordered?: Net.Track.Ordered;
 	playhead?: Playhead;
 	predecessor?: Consumer;
 	warmup?: Net.Clock.Duration;

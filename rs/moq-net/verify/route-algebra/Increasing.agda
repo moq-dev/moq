@@ -1,15 +1,16 @@
 --------------------------------------------------------------------------------
 -- The algebra both levels of the route rule share, and the theorem it buys.
 --
--- A route is invalid or carries whether it is draining, a penalty (the lowest
--- priority on its path, counted down from the highest), a cost, whether a marked
--- link is on its path, its path, and whatever else a level carries in `extra`.
--- Routes rank by draining, then penalty, then cost, then unmarked before marked,
--- then the shorter path, then a fixed order on paths, then `extra`. Crossing a
--- link (`extend`) refuses a route whose path does not start at the link's far end
--- or already names its near end, refuses whatever the link's own filter refuses,
--- and otherwise can only make the route draining, raise its penalty, add to its
--- cost, mark it, and prepend the link to its path.
+-- A route is invalid or carries what leads its rank (`lead`: nothing for a route,
+-- a claim's precedence), whether it is draining, a penalty (the lowest priority on
+-- its path, counted down from the highest), a cost, whether a marked link is on its
+-- path, its path, and whatever else a level carries in `extra`. Routes rank by
+-- lead, then draining, then penalty, then cost, then unmarked before marked, then
+-- the shorter path, then a fixed order on the path and `extra` together. Crossing a
+-- link (`extend`) refuses a route whose path does not start at the link's far end or
+-- already names its near end, refuses whatever the link's own filter refuses, and
+-- otherwise can only raise the lead, make the route draining, raise its penalty, add
+-- to its cost, mark it, prepend the link to its path, and set `extra`.
 --
 -- Any such algebra is an increasing path algebra, so Daggitt and Griffin's
 -- Theorem 5 applies: on every network, from every state, with messages delayed,
@@ -21,18 +22,20 @@
 --------------------------------------------------------------------------------
 
 open import Data.Bool.Base using (Bool; true; false; _∨_; if_then_else_)
-open import Data.List.Base using (List; []; _∷_)
+open import Data.List.Base using (List; []; _∷_; length)
 open import Data.Nat.Base using (ℕ; zero; suc; _+_; _⊔_; z≤n; _^_)
+open import Data.Product.Base using (_×_; _,_)
 
 open import RoutingLib.Routing.Basics.Path.Uncertified using (Path; Edge)
 
 open import Order
 
 module Increasing
-  -- What else a route carries, ordered, with the trivial route's value least.
-  {E : Set} (OE : Ordered E) (e₀ : E) (e₀-least : ∀ e → Ordered._≤_ OE e₀ e)
-  -- How paths of equal length order.
-  (OP : Ordered Path)
+  -- What leads the rank, ordered, with the trivial route's value least.
+  {C : Set} (OC : Ordered C) (c₀ : C) (c₀-least : ∀ c → Ordered._≤_ OC c₀ c)
+  -- What else a route carries, and how routes whose paths are of equal length order,
+  -- with the trivial route least among those with an empty path.
+  {E : Set} (e₀ : E) (OT : Ordered (Path × E)) (OT-least : ∀ e → Ordered._≤_ OT ([] , e₀) ([] , e))
   where
 
 import Algebra.Construct.NaturalChoice.Min as Min
@@ -41,7 +44,7 @@ import Data.Bool.Base as Boolᵇ
 open import Data.Empty using (⊥-elim)
 open import Data.Fin.Base using (toℕ)
 import Data.Nat.Properties as ℕ
-open import Data.Product.Base using (_×_; _,_; proj₁; proj₂)
+open import Data.Product.Base using (proj₁; proj₂)
 open import Data.Sum.Base using (_⊎_; inj₁; inj₂)
 open import Level using (0ℓ)
 open import Relation.Binary.Bundles using (TotalOrder)
@@ -53,7 +56,7 @@ open import Relation.Nullary.Negation.Core using (¬_; contradiction)
 
 open import RoutingLib.Routing.Algebra
 import RoutingLib.Routing.Basics.Path.UncertifiedI as PathI
-open import RoutingLib.Routing.Basics.Path.Uncertified.Properties using (_⇿?_; _∈ₚ?_; p≉i∷p)
+open import RoutingLib.Routing.Basics.Path.Uncertified.Properties using (_⇿?_; _∈ₚ?_)
 open import RoutingLib.Routing.VectorBased.Convergence.Results
 
 ------------------------------------------------------------------------
@@ -62,6 +65,7 @@ open import RoutingLib.Routing.VectorBased.Convergence.Results
 record Valid : Set where
   constructor route
   field
+    lead     : C
     draining : Bool
     penalty  : ℕ
     cost     : ℕ
@@ -77,7 +81,7 @@ data Weight : Set where
 
 -- The route a node has to itself.
 trivial : Weight
-trivial = valid (route false 0 0 false [] e₀)
+trivial = valid (route c₀ false 0 0 false [] e₀)
 
 ------------------------------------------------------------------------
 -- What crossing a link does
@@ -88,6 +92,8 @@ record Policy : Set₁ where
     -- The link that is down.
     down     : Link
     -- What the link adds.
+    rise     : Link → C → C
+    rise-≥   : ∀ f c → Ordered._≤_ OC c (rise f c)
     cost     : Link → ℕ
     penalty  : Link → ℕ
     drains   : Link → Bool
@@ -99,8 +105,8 @@ record Policy : Set₁ where
     -- Whether the link refuses the route, from the link and the route as offered.
     refuses  : Link → Edge → Valid → Bool
     down-refuses : ∀ e v → refuses down e v ≡ true
-    -- How the link changes the rest.
-    tag      : Link → E → E
+    -- What the route carries beyond the link, from the link and the route as offered.
+    tag      : Link → Edge → Valid → E
 
 module Rule (P : Policy) where
 
@@ -116,30 +122,35 @@ module Rule (P : Policy) where
   ... | no  _ | _     = invalid
   ... | yes _ | yes _ = invalid
   ... | yes _ | no  _ = if refuses f (i , j) v then invalid else valid (route
+    (P.rise f (lead v))
     (draining v ∨ drains f ∨ marks f (i , j) (path v))
     (P.penalty f ⊔ penalty v)
     (P.cost f + cost v)
     (marked v ∨ P.marked f)
     ((i , j) ∷ path v)
-    (tag f (extra v)))
+    (tag f (i , j) v))
 
   ------------------------------------------------------------------------
   -- The order
 
+  -- The shorter path first, then by OT.
+  OL : Ordered (Path × E)
+  OL = keyed (λ pe → length (proj₁ pe) , pe) (cong proj₂) (lex nat OT)
+
   private
-    key : Valid → Bool × ℕ × ℕ × Bool × Path × E
-    key v = draining v , penalty v , cost v , marked v , path v , extra v
+    key : Valid → C × Bool × ℕ × ℕ × Bool × Path × E
+    key v = lead v , draining v , penalty v , cost v , marked v , path v , extra v
 
-    O₅ = lex (shortlex OP) OE
-    O₄ = lex bool O₅
+    O₅ = lex bool OL
+    O₄ = lex nat O₅
     O₃ = lex nat O₄
-    O₂ = lex nat O₃
+    O₂ = lex bool O₃
 
-    OK : Ordered (Bool × ℕ × ℕ × Bool × Path × E)
-    OK = lex bool O₂
+    OK : Ordered (C × Bool × ℕ × ℕ × Bool × Path × E)
+    OK = lex OC O₂
 
   OV : Ordered Valid
-  OV = keyed key (λ eq → cong (λ (d , q , c , m , p , x) → route d q c m p x) eq) OK
+  OV = keyed key (λ eq → cong (λ (l , d , q , c , m , p , x) → route l d q c m p x) eq) OK
 
   private
     module OV = Ordered OV
@@ -209,19 +220,23 @@ module Rule (P : Policy) where
     ≤-∨ false b = Bool.≤-minimum b
     ≤-∨ true  b = Bool.≤-reflexive refl
 
-    []-least : ∀ p → Ordered._≤_ (shortlex OP) [] p
-    []-least []      = Ordered.refl (shortlex OP)
-    []-least (e ∷ p) = inj₁ (z≤n , λ ())
+    []-least : ∀ p x → Ordered._≤_ OL ([] , e₀) (p , x)
+    []-least []      x = lex-≤ nat OT z≤n λ _ → OT-least x
+    []-least (e ∷ p) x = inj₁ (z≤n , λ ())
+
+    -- A path is below itself with one more link in front, whatever either carries.
+    longer : ∀ e p x y → Ordered._≤_ OL (p , x) (e ∷ p , y)
+    longer e p x y = inj₁ (ℕ.n≤1+n (length p) , ℕ.<⇒≢ (ℕ.n<1+n (length p)))
 
   trivial-least : Minimum _≤ᵣ_ trivial
   trivial-least invalid = below-invalid
   trivial-least (valid w) = below
-    (lex-≤ bool O₂ (Bool.≤-minimum (draining w)) λ _ →
-     lex-≤ nat O₃ z≤n λ _ →
+    (lex-≤ OC O₂ (c₀-least (lead w)) λ _ →
+     lex-≤ bool O₃ (Bool.≤-minimum (draining w)) λ _ →
      lex-≤ nat O₄ z≤n λ _ →
-     lex-≤ bool O₅ (Bool.≤-minimum (marked w)) λ _ →
-     lex-≤ (shortlex OP) OE ([]-least (path w)) λ _ →
-     e₀-least (extra w))
+     lex-≤ nat O₅ z≤n λ _ →
+     lex-≤ bool OL (Bool.≤-minimum (marked w)) λ _ →
+     []-least (path w) (extra w))
 
   invalid-greatest : Maximum _≤ᵣ_ invalid
   invalid-greatest _ = below-invalid
@@ -237,12 +252,12 @@ module Rule (P : Policy) where
   ... | yes _ | no  _ with refuses f (i , j) v
   ...   | true  = below-invalid
   ...   | false = below
-    (lex-≤ bool O₂ (≤-∨ (draining v) _) λ _ →
-     lex-≤ nat O₃ (ℕ.m≤n⊔m (P.penalty f) (penalty v)) λ _ →
-     lex-≤ nat O₄ (ℕ.m≤n+m (cost v) (P.cost f)) λ _ →
-     lex-≤ bool O₅ (≤-∨ (marked v) _) λ _ →
-     lex-≤ (shortlex OP) OE (shortlex-∷ OP (i , j) (path v)) λ eq →
-     contradiction eq p≉i∷p)
+    (lex-≤ OC O₂ (P.rise-≥ f (lead v)) λ _ →
+     lex-≤ bool O₃ (≤-∨ (draining v) _) λ _ →
+     lex-≤ nat O₄ (ℕ.m≤n⊔m (P.penalty f) (penalty v)) λ _ →
+     lex-≤ nat O₅ (ℕ.m≤n+m (cost v) (P.cost f)) λ _ →
+     lex-≤ bool OL (≤-∨ (marked v) _) λ _ →
+     longer (i , j) (path v) (extra v) (tag f (i , j) v))
 
   ------------------------------------------------------------------------
   -- The routing algebra

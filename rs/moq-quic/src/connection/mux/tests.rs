@@ -67,14 +67,14 @@ fn read_all(conn: &mut Connection, id: StreamId) -> (Vec<u8>, bool) {
 	let mut data = Vec::new();
 	let mut fin = false;
 	loop {
-		match chunks.next(usize::MAX) {
-			Ok(Some(chunk)) => data.extend_from_slice(&chunk.bytes),
-			Ok(None) => {
+		match chunks.try_next(usize::MAX) {
+			Poll::Ready(Ok(Some(chunk))) => data.extend_from_slice(&chunk.bytes),
+			Poll::Ready(Ok(None)) => {
 				fin = true;
 				break;
 			}
-			Err(recv::Error::Blocked) => break,
-			Err(err) => panic!("read failed: {err}"),
+			Poll::Pending => break,
+			Poll::Ready(Err(err)) => panic!("read failed: {err}"),
 		}
 	}
 	chunks.finalize();
@@ -159,7 +159,7 @@ fn credit_returns_for_unread_and_stopped_streams() {
 			// Stopped before the rest arrives, which then arrives anyway
 			0 => {
 				pair.server.recv_stream(accepted).stop(VarInt::from_u32(1)).unwrap();
-				let _ = pair.client.send_stream(id).write(&mut &chunk[..]);
+				let _ = pair.client.send_stream(id).try_write(&mut &chunk[..]);
 			}
 			// Read to the end
 			_ => {
@@ -318,15 +318,6 @@ fn rejects_oversized_records() {
 			transport_error(&mut server).code,
 			TransportErrorCode::FRAME_ENCODING_ERROR
 		);
-
-		// The same, refused by the transport before it was read
-		let mut server = Connection::new(config(version), Side::Server, now);
-		server.handle_oversized();
-		assert_eq!(
-			transport_error(&mut server).code,
-			TransportErrorCode::FRAME_ENCODING_ERROR
-		);
-		assert!(server.transmit(now).is_some(), "CONNECTION_CLOSE");
 	}
 }
 
@@ -485,7 +476,8 @@ fn reset_stream_at_delivers_the_prefix() {
 	};
 	chunks.finalize();
 	assert!(data.starts_with(b"header"), "{data:?} {err:?}");
-	assert_eq!(err, recv::Error::Reset(VarInt::from_u32(9)));
+	assert_eq!(err, recv::Error::Reset);
+	assert_eq!(recv.received_reset(), Ok(Some(VarInt::from_u32(9))));
 }
 
 #[test]

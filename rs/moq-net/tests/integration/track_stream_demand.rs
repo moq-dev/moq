@@ -55,8 +55,8 @@ macro_rules! record_track {
 		drop(kio::clock::sim::spawn(async move {
 			let mut was = false;
 			while let Ok(wanted) = demand.wanted_changed().await {
-				if wanted.is_some() != was {
-					was = wanted.is_some();
+				if wanted != was {
+					was = wanted;
 					log.borrow_mut().push(was);
 				}
 			}
@@ -226,7 +226,7 @@ async fn bare_handle_is_lazy(version: &str, relays: usize) {
 		"{label}: the query never reached the publisher"
 	);
 	let track = requests.borrow()[0].0.clone();
-	assert!(track.demand().wanted().is_some(), "{label}: a held query let go");
+	assert!(track.demand().wanted(), "{label}: a held query let go");
 	drop(query);
 	kio::clock::timeout(TIMEOUT, crate::support::unwanted(track.demand()))
 		.await
@@ -243,10 +243,7 @@ async fn bare_handle_is_lazy(version: &str, relays: usize) {
 		.unwrap_or_else(|_| panic!("{label}: no group arrived"))
 		.unwrap()
 		.expect("the track is live");
-	assert!(
-		track.demand().wanted().is_some(),
-		"{label}: the subscription is not demand"
-	);
+	assert!(track.demand().wanted(), "{label}: the subscription is not demand");
 	drop(subscriber);
 	kio::clock::timeout(TIMEOUT, crate::support::unwanted(track.demand()))
 		.await

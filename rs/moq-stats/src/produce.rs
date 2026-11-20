@@ -509,9 +509,9 @@ impl<T: Serialize> Snapshot<T> {
 	/// means the value was unchanged, the interval already has a group for a snapshot, or
 	/// the track already ended, and nothing was written.
 	///
-	/// A frame over the group budget aborts the track with
-	/// [`moq_net::Error::FrameTooLarge`]: skipping it would leave readers on the
-	/// previous snapshot with no sign it stopped tracking.
+	/// Any encoder error, such as a frame over the group budget, aborts the group and the
+	/// track with the cause: skipping it would leave readers on the previous snapshot with no
+	/// sign it stopped tracking.
 	fn update(&mut self, value: &T, stamp: Stamp) -> moq_json::Result<Option<usize>> {
 		#[cfg(feature = "bench")]
 		{
@@ -523,24 +523,28 @@ impl<T: Serialize> Snapshot<T> {
 		// A joiner wants a group past the newest, so open this tick's with a snapshot, even of an
 		// unchanged value. Answered once per tick rather than at once: a joiner waits at most one
 		// interval, the same as for any change.
-		if let (Some(wanted), Some(largest)) = (self.track.demand().wanted(), self.largest)
-			&& wanted > largest
-		{
+		if self.largest.is_some()
+			&& matches!(
+				self.track.demand().poll_refresh(&kio::Waiter::noop()),
+				std::task::Poll::Ready(Ok(()))
+			) {
 			self.encoder.reset();
 		}
 		let frame = match self.encoder.update(value) {
 			Ok(Some(frame)) => frame,
 			Ok(None) => return Ok(None),
-			// The encoder refuses a frame past the group budget before anything is written.
-			Err(moq_json::Error::Net(moq_net::Error::FrameTooLarge)) => {
-				let err = moq_net::Error::FrameTooLarge;
+			Err(err) => {
+				// The track carries a moq-net error; a value that won't serialize has no wire code.
+				let reason = match &err {
+					moq_json::Error::Net(err) => err.clone(),
+					_ => moq_net::StreamError::Internal.into(),
+				};
 				if let Some(group) = self.group.take() {
-					let _ = group.abort(err.clone());
+					let _ = group.abort(reason.clone());
 				}
-				let _ = self.track.clone().abort(err.clone());
-				return Err(err.into());
+				let _ = self.track.clone().abort(reason);
+				return Err(err);
 			}
-			Err(err) => return Err(err),
 		};
 		let len = frame.payload.len();
 		let timestamp = stamp.timestamp;
@@ -612,7 +616,7 @@ fn info() -> track::Info {
 	track::Info::default()
 		.with_timescale(moq_net::Timescale::MILLI)
 		.with_compression(moq_net::track::Compression::Deflate)
-		.with_refresh(8)
+		.with_refresh(moq_net::track::Refresh::default().with_ratio(8))
 		.with_max_age(None)
 }
 
@@ -627,7 +631,9 @@ fn config() -> moq_json::snapshot::Config {
 
 impl<V: Serialize> Output<V> {
 	fn create(broadcast: &broadcast::Producer, name: &str) -> Result<Self, moq_net::Error> {
-		Ok(Self::new(broadcast.create_track(name, info())?))
+		Ok(Self::new(
+			broadcast.create_track(name, info()).ok_or(moq_net::Error::Duplicate)?,
+		))
 	}
 
 	/// Publish on the track `request` asked for, or create `name` without one.
@@ -651,7 +657,7 @@ impl<V: Serialize> Output<V> {
 
 	/// Whether anyone wants the output.
 	fn is_wanted(&self) -> bool {
-		self.snapshot.demand().wanted().is_some()
+		self.snapshot.demand().wanted()
 	}
 
 	/// Publish this drain's entries (`{}` when there are none) and clear them
@@ -927,7 +933,9 @@ impl BucketTrack {
 		// an earlier epoch's, and its first MoQ group is where they start.
 		let epoch = Epoch::mint();
 		let name = crate::bucket_track(bucket, &epoch);
-		let track = broadcast.create_track(name.as_str(), info())?;
+		let track = broadcast
+			.create_track(name.as_str(), info())
+			.ok_or(moq_net::Error::Duplicate)?;
 		Ok(Self {
 			name,
 			snapshot: Snapshot::new(track, config()).fresh(),
@@ -1464,7 +1472,7 @@ mod tests {
 		let frame = |n| Frame {
 			entries: vec![(Path::from_static("a"), n)],
 		};
-		let wanted = |track: &track::Producer| track.demand().wanted();
+		let refreshing = |track: &track::Producer| track.demand().poll_refresh(&kio::Waiter::noop()).is_ready();
 
 		// A 7 byte snapshot and nine 7 byte deltas: past eight snapshots.
 		for n in 0..10 {
@@ -1472,7 +1480,7 @@ mod tests {
 		}
 		assert_eq!(snapshot.largest, Some(5_000));
 		let _late = track.subscribe(None);
-		assert_eq!(wanted(&track), Some(5_001), "the join asks for a fresh group");
+		assert!(refreshing(&track), "the join asks for a fresh group");
 
 		// The interval already has its group, so the snapshot waits for the next one.
 		assert!(snapshot.update(&frame(9), stamp(5)).unwrap().is_none());

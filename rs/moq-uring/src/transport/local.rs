@@ -117,10 +117,6 @@ impl<S: poll::Session> poll::Session for Local<S> {
 	fn set_limits(&self, limits: moq::Limits) -> Result<(), moq::LimitsError> {
 		self.0.set_limits(limits)
 	}
-
-	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
-		self.0.export_keying_material(label, context)
-	}
 }
 
 impl<T: poll::SendStream> poll::SendStream for Local<T> {
@@ -132,7 +128,7 @@ impl<T: poll::SendStream> poll::SendStream for Local<T> {
 		self.0.offset()
 	}
 
-	fn poll_acked(&self, waiter: &kio::Waiter, offset: &Self::Offset) -> Poll<Result<poll::Acked, Self::Error>> {
+	fn poll_acked(&self, waiter: &kio::Waiter, offset: &Self::Offset) -> Poll<Result<(), Self::Error>> {
 		self.0.poll_acked(waiter, offset)
 	}
 

@@ -21,11 +21,21 @@ so it only needs to stay green.
   default on Chromium, and its child quest restores it on Firefox. Decided 2026-11-09 (maintainer, AFK, accepting the
   recommendation): close this quest on a pass, which the maintainer set with
   those cases skipped; the pass that closes it runs all but `replacement`.
-  Release remeasure now updates stale planned-break pins after publication
-  and requests landing through the main merge queue. Check its run and PR
-  when a scheduled run reports stale pins.
+  Release remeasure measures stale planned-break pins after publication and
+  opens the pin PR on its `release-remeasure` branch.
 
 ## Plan
+
+Found 2026-11-19 by the Nightly triage of run
+[44562804083](https://github.com/moq-dev/moq/actions/runs/44562804083):
+`Media (firefox player)` fails the `replacement` case on `moq-lite-07-wip`
+(`FAIL live replacement plays: waiting for the new run's picture and
+synchronized tone within 1039ms ... "audioStalled":true,"rms":0`). It was the
+first night the case ran on Firefox, since on 2026-11-17 and 2026-11-18 the
+job failed earlier on "after resume", which
+[moq-dev/moq#9141](https://github.com/moq-dev/moq/pull/9141) fixed. This
+epic owns the replacement case's history; reproduce it before planning a
+child.
 
 Decided 2026-11-12 (maintainer), since green scheduled Interop is this epic's goal and stale pins caused four of the last six red runs:
 

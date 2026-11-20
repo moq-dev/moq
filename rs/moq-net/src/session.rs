@@ -226,6 +226,14 @@ impl PartialEq for Session {
 
 impl Eq for Session {}
 
+impl std::fmt::Debug for Session {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Session")
+			.field("version", &self.version())
+			.finish_non_exhaustive()
+	}
+}
+
 impl Session {
 	/// Returns the negotiated protocol version.
 	pub fn version(&self) -> Version {
@@ -470,6 +478,19 @@ impl Session {
 	/// The connection credential this side presents on AUTH, or `None` when this session offers no AUTH.
 	pub(crate) fn credential(&self) -> Option<&auth::Credential> {
 		self.credential.as_ref()
+	}
+
+	/// Ready once the peer accepted the connection credential: with its SETUP, or on
+	/// moq-lite-07-wip the AUTH_OK to the connection's own credential. Ready at once when the
+	/// handshake already carried that answer, and never on moq-lite 03/04, which have none.
+	pub(crate) fn poll_accepted(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.link.poll_accepted(waiter)
+	}
+
+	/// Whether the peer never answers the connection credential, as on moq-lite 03/04, so
+	/// only uptime suggests it took the credential.
+	pub(crate) fn is_silent(&self) -> bool {
+		self.link.is_silent()
 	}
 
 	/// This session's side of its [`auth`](Self::auth) handle.

@@ -1015,15 +1015,15 @@ mod tests {
 		catalog.video.renditions.insert("video".to_string(), config.clone());
 		renditions.sync(&upstream, &catalog);
 		settle().await;
-		assert!(first.demand().wanted().is_some(), "the listed track is held");
-		assert!(second.demand().wanted().is_none());
+		assert!(first.demand().wanted(), "the listed track is held");
+		assert!(!second.demand().wanted());
 
 		config.track = Some("second".to_string());
 		catalog.video.renditions.insert("video".to_string(), config);
 		renditions.sync(&upstream, &catalog);
 		settle().await;
-		assert!(first.demand().wanted().is_none(), "the old track is released");
-		assert!(second.demand().wanted().is_some(), "the new track is held");
+		assert!(!first.demand().wanted(), "the old track is released");
+		assert!(second.demand().wanted(), "the new track is held");
 	}
 
 	// A container this export can't read is no rendition: the hang catalog skips one it doesn't

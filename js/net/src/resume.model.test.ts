@@ -16,6 +16,7 @@ import { Duration } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import fc from "fast-check";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
+import { defined } from "./defined.test-util.ts";
 import { NotFound, StreamCode, StreamError, TooFarBehind } from "./error.ts";
 import type { Frame, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { toHop, WireRoute } from "./hop.ts";
@@ -469,7 +470,7 @@ class Model {
 		});
 		const serving = wireOf(this.origin).receive(PATH, route);
 		const broadcast = new BroadcastProducer();
-		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+		const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 		void (async () => {
 			for await (const request of serving.requested()) {
 				request.serve(Upstream.of(broadcast, (key, local) => this.fill(instance, slot, key, local)));
@@ -1076,6 +1077,116 @@ test("regressions", async () => {
 				{ kind: "write", instance: 1, slot: 2, group: 1, frames: 1 },
 				{ kind: "down", instance: 1, slot: 2 },
 				{ kind: "end", instance: 1, slot: 1 },
+			],
+			finish: false,
+		},
+		// The serving route ends while a replaced copy holds the read open for a group under its
+		// bound: groups in range still in flight on the ended route land, and are read. Mirrors
+		// the Rust case.
+		{
+			ops: [
+				{ kind: "join", reader: 1, spec: spec(false, "hour", undefined, false) },
+				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "join", reader: 0, spec: spec(false, "hour", [6, 8], false) },
+				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "write", instance: 0, slot: 1, group: 11, frames: 1 },
+				{ kind: "write", instance: 0, slot: 1, group: 2, frames: 1 },
+				{ kind: "end", instance: 0, slot: 1 },
+			],
+			finish: false,
+		},
+		// The same for a reader without a range, once the serving copy's first group bounds the
+		// replaced one below the groups still in flight.
+		{
+			ops: [
+				{ kind: "join", reader: 1, spec: spec(false, "hour", undefined, false) },
+				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "join", reader: 0, spec: spec(false, "hour", undefined, false) },
+				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "write", instance: 0, slot: 1, group: 2, frames: 1 },
+				{ kind: "write", instance: 0, slot: 1, group: 11, frames: 1 },
+				{ kind: "end", instance: 0, slot: 1 },
+			],
+			finish: false,
+		},
+		// A copy places a time start against the groups it holds, which may put it below where the
+		// reader's window did: the window decides, so the read hands out no group under it.
+		{
+			ops: [
+				{ kind: "join", reader: 0, spec: spec(false, "hour", [1, 3], false) },
+				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "write", instance: 0, slot: 0, group: 1, frames: 2 },
+				{ kind: "write", instance: 0, slot: 0, group: 0, frames: 1 },
+				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+			],
+			finish: false,
+		},
+		// After a failover, ranges replaced resolve from the newest copy to answer them, not from a
+		// replaced one whose cache lacks the group they start at.
+		{
+			ops: [
+				{ kind: "join", reader: 2, spec: spec(false, "hour", undefined, false) },
+				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "up", instance: 0, slot: 2 },
+				{ kind: "write", instance: 0, slot: 2, group: 2, frames: 1 },
+				{ kind: "ranges", reader: 2, range: [2, 3] },
+				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+			],
+			finish: false,
+		},
+		// Ranges replaced once the only route went down resolve on the closed copy, which places them
+		// against the groups it holds, so the read hands out no buffered group they leave out.
+		{
+			ops: [
+				{ kind: "up", instance: 1, slot: 1 },
+				{ kind: "write", instance: 1, slot: 1, group: 3, frames: 1 },
+				{ kind: "join", reader: 1, spec: spec(false, "hour", [1, 3], false) },
+				{ kind: "write", instance: 1, slot: 1, group: 2, frames: 1 },
+				{ kind: "down", instance: 1, slot: 1 },
+				{ kind: "ranges", reader: 1, range: [1, 2] },
+			],
+			finish: false,
+		},
+		// After a failover, a range moved back resolves from the first copy to answer it, even a
+		// replaced one under a failover cap, so the groups below that cap stay owed. Mirrors the
+		// Rust case.
+		{
+			ops: [
+				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "join", reader: 2, spec: spec(false, "hour", undefined, false) },
+				{ kind: "write", instance: 0, slot: 1, group: 7, frames: 2 },
+				{ kind: "up", instance: 0, slot: 0 },
+				{ kind: "down", instance: 0, slot: 1 },
+				{ kind: "ranges", reader: 2, range: [1, 8] },
+			],
+			finish: false,
+		},
+		// A group the window dropped from a copy with no resume point is asked of its route again
+		// once the ranges widen to name it.
+		{
+			ops: [
+				{ kind: "up", instance: 1, slot: 0 },
+				{ kind: "join", reader: 0, spec: spec(false, "hour", [3, 4], false) },
+				{ kind: "up", instance: 1, slot: 2 },
+				{ kind: "write", instance: 1, slot: 0, group: 3, frames: 1 },
+				{ kind: "write", instance: 1, slot: 2, group: undefined, frames: 1 },
+				{ kind: "down", instance: 1, slot: 0 },
+				{ kind: "ranges", reader: 0, range: undefined },
+			],
+			finish: false,
+		},
+		// Ranges widened below the serving copy's resume point ask its route for the groups they
+		// newly cover, as a route change does.
+		{
+			ops: [
+				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "join", reader: 3, spec: spec(false, "hour", [1, 3], false) },
+				{ kind: "write", instance: 0, slot: 1, group: 1, frames: 1 },
+				{ kind: "write", instance: 0, slot: 1, group: undefined, frames: 1 },
+				{ kind: "write", instance: 0, slot: 1, group: undefined, frames: 1 },
+				{ kind: "down", instance: 0, slot: 1 },
+				{ kind: "ranges", reader: 3, range: undefined },
+				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
 			],
 			finish: false,
 		},

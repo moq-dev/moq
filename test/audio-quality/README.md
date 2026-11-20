@@ -128,7 +128,10 @@ untraced control and never use traced rows to calibrate quality budgets.
 To replay a capture, put its arrivals, final environment configuration, and `largest` (the
 observer's join, `environment.largest` in `<tag>.page.json`) into the version 4
 `Trace` below, subtract the first arrival's `at` from every arrival and from the last sample's
-`at` for the duration, and supply the observed minimum RTT as a diagnostic. Replay measures the
+`at` for the duration, and supply the observed minimum RTT as a diagnostic. A publisher that keys
+groups by timestamp never produces the keys between them, so the replay declares those skipped where
+one group's media ends as the next begins, as each group's append does on the wire, and leaves a hole
+in the media owed. Replay measures the
 target from the arrivals and holds the configuration constant; compare the raw samples when it
 changed during the live run. The observer only
 records frames delivered under the player's maximum age, so a replay cannot recover groups the
@@ -226,8 +229,9 @@ receives it, with the same transport, container, and codec-duration readers over
 on the delay, so the replay decides those again.
 
 `replay.ts` plays a trace through the player's own `Container.Consumer` and ring on a simulated
-clock ([`js/watch/src/audio/replay.ts`](../../js/watch/src/audio/replay.ts)), whose consumer is told
-the trace's `largest` as a wire subscriber is told by the publisher, at the "auto" delay a
+clock ([`js/watch/src/audio/replay.ts`](../../js/watch/src/audio/replay.ts)), whose consumer reads
+the groups through an ordered reader and observes every arrival through a second subscription, as
+the browser player does, at the "auto" delay a
 real `Sync` resolves from the playout target that consumer measures, and reads each quantum through
 the tap's classifier. The consumer makes the player's group ordering, max delay skips, and
 discontinuity resets again at that delay, and the ring follows the delay as it moves; a group's stream is taken to finish with its last recorded frame. Every
@@ -256,8 +260,8 @@ microphone, instead of publishing Chromium's fake capture device. Name the brows
 the trace's `source` before checking it in.
 
 Version 4 adds `largest`, the publisher's largest group as the subscription began, which a wire
-subscriber learns from the publisher's answer and the replay's consumer needs to tell a group it
-skips unread as the join's backlog. The recorder and the `--capture` observer read it the way
+subscriber learns from the publisher's answer. The replay no longer reads it: its consumer observes
+every arrival, the join's backlog included, through its second subscription. The recorder and the `--capture` observer read it the way
 `js/hang`'s consumer does: once the track's info or first group shows the subscription established
 and its start resolved, so a cached group racing the answer, or live groups landing after it, do not
 set it. No earlier recording kept the answer, and re-recording needs a person at the microphone and

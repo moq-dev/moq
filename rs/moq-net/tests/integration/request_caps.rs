@@ -143,7 +143,7 @@ async fn flow_control_bounds_the_subscriptions_a_peer_holds() {
 			.collect();
 		kio::clock::sleep(Duration::from_secs(1)).await;
 
-		let held = tracks.iter().filter(|track| track.demand().wanted().is_some()).count();
+		let held = tracks.iter().filter(|track| track.demand().wanted()).count();
 		assert!(held > 0, "{version}: nothing was subscribed");
 		assert!(held <= BOUND, "{version}: the server holds {held} subscriptions");
 		assert!(

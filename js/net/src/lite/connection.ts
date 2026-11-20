@@ -27,7 +27,7 @@ import { Goaway } from "./goaway.ts";
 import { Group } from "./group.ts";
 import { Publisher } from "./publisher.ts";
 import { SessionInfo } from "./session.ts";
-import { hasClientParameters, ProbeLevel, type Role, Setup } from "./setup.ts";
+import { hasClientParameters, ProbeLevel, Setup } from "./setup.ts";
 import { DataType, StreamId } from "./stream.ts";
 import { Subscribe } from "./subscribe.ts";
 import { Subscriber } from "./subscriber.ts";
@@ -137,10 +137,6 @@ export class Connection implements Session {
 	// The transport closed, so a stream breaking says nothing about the peer.
 	#transportClosed = false;
 
-	// Mirrors the role out of #peerSetup, so the public surface exposes the peer's declared
-	// direction without handing out the whole SETUP (whose probe level gates our own streams).
-	#peerRole = new Signal<Role | undefined>(undefined);
-
 	// Written by the Subscriber as PROBE messages arrive.
 	#probe = new Observed<Probe>({});
 
@@ -162,19 +158,6 @@ export class Connection implements Session {
 
 	// How the session ended: `fromClose` of the transport's close, settled after auth lets go of it.
 	#closed = new Once<Error | null>();
-
-	/**
-	 * The {@link Role} the peer advertised in its SETUP, for a server deciding whether the
-	 * peer's authorization grants the direction it intends to use.
-	 *
-	 * `undefined` until the peer's SETUP arrives, and forever on pre-lite-05 versions, which
-	 * carry no in-band role. {@link Role.Both} is the absence of the parameter, so it is what
-	 * a peer reports when it declines to declare a direction, sends a value we don't
-	 * recognize, or is a server (which never sends one).
-	 */
-	get peerRole(): Getter<Role | undefined> {
-		return this.#peerRole;
-	}
 
 	/**
 	 * Creates a new Connection instance.
@@ -225,6 +208,9 @@ export class Connection implements Session {
 			draining: () => this.#goaway.peek() !== undefined || this.#phase.kind !== "open",
 			// Without AUTH, the server checks a client's credential before its SETUP, which the client reads after going live.
 			awaiting: client && hasSetupStream(version) && !hasAuth(version),
+			// Lite-03/04 have neither, so the peer refuses the credential only by closing the
+			// session. Lite-01/02 answered in the negotiation SETUP already read.
+			silent: client && (version === Version.DRAFT_03 || version === Version.DRAFT_04),
 		});
 		// Left before anything observes the close, so a successor on the same handle never
 		// finds this session still active.
@@ -595,8 +581,7 @@ export class Connection implements Session {
 			if (!this.#client && setup.path !== undefined)
 				throw new ProtocolViolation("Path on a URI-carrying binding");
 			this.#peerSetup.set(setup);
-			this.#auth.accepted();
-			this.#peerRole.set(setup.role);
+			this.#auth.accept();
 			this.#peerImplementation.resolve(setup.implementation);
 		} else {
 			throw new Error(`unknown stream type: ${typ.toString()}`);

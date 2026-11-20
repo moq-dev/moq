@@ -12,15 +12,17 @@
 //! It tracks the crate's internals, so it can change in any release. See `fuzz/README.md` for the workflow.
 
 mod ingest;
+mod mesh;
 mod request;
 mod session;
 
 pub use ingest::ingest;
+pub use mesh::{RouteMesh, RouteShape, RouteTally};
 pub use request::request;
 pub use session::{session_ietf, session_lite};
 
 /// Lite-07 publisher run loops for the publisher bench.
-pub use crate::lite::CoverageBench;
+pub use crate::lite::{CoverageBench, UpdateBench};
 
 use bytes::Bytes;
 
@@ -463,6 +465,7 @@ fn announce_claim(chain: &[u64]) -> crate::route::node::Claim {
 		draining: false,
 		unavailable: false,
 		chain: chain.to_vec(),
+		marked: false,
 	}
 }
 
@@ -605,7 +608,11 @@ fn route_clock() -> kio::clock::Deadlines {
 
 /// The forwarding node of the relay `relay`.
 fn route_id(relay: u64) -> crate::route::NodeId {
-	crate::route::NodeId { relay, start: 1 }
+	crate::route::NodeId {
+		relay,
+		start: 1,
+		marked: false,
+	}
 }
 
 /// A link to a neighbour in `role`.
@@ -632,6 +639,7 @@ fn route_claim(epoch: u64, cost: u64) -> crate::route::node::Claim {
 		draining: false,
 		unavailable: false,
 		chain: Vec::new(),
+		marked: false,
 	}
 }
 
@@ -664,7 +672,7 @@ impl RouteNode {
 	/// A node holding `claims` claims of its own under `live/`, answering one session
 	/// per prefix in `streams`, each already sent its initial set.
 	pub fn new(claims: usize, streams: &[&str]) -> Self {
-		let node = crate::route::Node::new(route_id(1), route_clock());
+		let node = crate::route::Node::new(route_id(1), true, route_clock());
 		let instance = crate::Instance::random();
 		for i in 0..claims {
 			let path = Path::new(&format!("live/{i}")).unwrap();
@@ -728,7 +736,7 @@ impl RouteRelay {
 	/// A relay that already heard the origin's `claims` claims under `live/` on each of
 	/// `streams` sessions, and told them to each of `answers` sessions.
 	fn new(claims: usize, streams: usize, answers: usize) -> Self {
-		let node = crate::route::Node::new(route_id(2), route_clock());
+		let node = crate::route::Node::new(route_id(2), true, route_clock());
 		let answer = (0..answers as u64)
 			.map(|i| {
 				let stream = node.connect(i + 1, route_leaf()).unwrap();
@@ -899,7 +907,7 @@ pub struct RouteFollower {
 impl RouteFollower {
 	/// A node asking for `prefixes` prefixes `live/{k}`, each holding `claims` claims.
 	pub fn new(prefixes: usize, claims: usize) -> Self {
-		let node = crate::route::Node::new(route_id(2), route_clock());
+		let node = crate::route::Node::new(route_id(2), true, route_clock());
 		let stream = node.connect(1, route_leaf()).unwrap();
 		let follower = Self {
 			node,
@@ -1414,7 +1422,7 @@ impl Default for Messages {
 				starts: vec![Some(1_234)],
 			}),
 			lite_info: lite::TrackInfo {
-				refresh: None,
+				refresh: crate::track::Refresh::default(),
 				priority: 1,
 				max_age: Some(Duration::from_secs(10)),
 				timescale: Some(crate::Timescale::MICRO),
@@ -1824,10 +1832,10 @@ const TYPED_LITE_SEEDS: &[(u8, &[u8])] = &[
 	(30, &[7, 0, 0, 0, 0, 0, 0, 0]),
 	(27, &[0, 3, 0, 0, 0]),
 	// ROUTE, ROUTE_END, DEAD, DRAIN, ANNOUNCE_FLOOR, ANNOUNCE_REQUEST, ANNOUNCE_OK.
-	(5, &[7, 7, 1, 7, 1, 0, 0, 0x80, 1]),
+	(5, &[7, 8, 1, 7, 1, 0, 0, 0, 0x80, 1]),
 	(5, &[8, 1, 0]),
-	(5, &[9, 5, 7, 1, 2, 9, 1]),
-	(5, &[10, 2, 7, 1]),
+	(5, &[9, 7, 7, 1, 0, 2, 9, 1, 0]),
+	(5, &[10, 3, 7, 1, 0]),
 	(5, &[3, 2, 0, 1]),
 	(5, &[5, 4, 0, 1, 0, 0]),
 	(5, &[6, 0]),

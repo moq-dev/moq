@@ -35,7 +35,8 @@ async fn main() -> anyhow::Result<()> {
 	let route = origin.route("handover", moq_net::origin::RouteOptions::default())?;
 	let mut track = route
 		.broadcast()
-		.create_track("video", moq_net::track::Info::default())?;
+		.create_track("video", moq_net::track::Info::default())
+		.context("the track already exists")?;
 	let (mut first, first_url) = endpoint(&origin, version).await?;
 	let (mut second, second_url) = endpoint(&origin, version).await?;
 	let script = concat!(
@@ -55,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
 	let session = first.accept().await.context("first accept")?.ok().await?;
 	ensure!(session.version() == version, "wrong first negotiated version");
 	let mut demand = track.demand();
-	while demand.wanted_changed().await?.is_none() {}
+	while !demand.wanted_changed().await? {}
 	write(&mut track, 0)?;
 	// A JS acknowledgement, not a timer, determines when the first group was read.
 	ensure!(

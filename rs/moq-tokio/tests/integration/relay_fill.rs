@@ -159,10 +159,13 @@ fn groups(range: std::ops::Range<u64>) -> BTreeMap<u64, String> {
 async fn relay(version: Version) -> anyhow::Result<()> {
 	let publisher = moq_tokio::origin::spawn();
 	let broadcast = publisher.route("history", moq_net::origin::RouteOptions::hidden())?;
-	let track = broadcast.broadcast().create_track(
-		"video",
-		Info::default().with_timescale(Timescale::MILLI).with_max_age(None),
-	)?;
+	let track = broadcast
+		.broadcast()
+		.create_track(
+			"video",
+			Info::default().with_timescale(Timescale::MILLI).with_max_age(None),
+		)
+		.expect("a free name");
 	for sequence in 0..GROUPS {
 		let mut group = track.create_group(moq_net::group::Info { start: sequence })?;
 		group.write_frame(

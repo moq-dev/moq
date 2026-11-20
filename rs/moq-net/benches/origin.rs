@@ -489,8 +489,7 @@ fn bench_announce_duplicate(c: &mut Criterion) {
 		let id = BenchmarkId::from_parameter(format!("{duplicates}d_{subscribers}s"));
 		group.bench_function(id, |b| {
 			// No hold, so an iteration times the ranking rather than the origin batching it.
-			let mut config = origin::Config::default();
-			config.update_hold = Duration::ZERO;
+			let config = origin::Config::default().with_update_hold(Duration::ZERO);
 			let (producer, _driver) = origin::Producer::new(config);
 			let consumer = producer.consume();
 			// Every peer announces the one path, each under its own hop chain so
@@ -542,8 +541,7 @@ fn bench_reprice_duplicate(c: &mut Criterion) {
 			let id = BenchmarkId::from_parameter(format!("{duplicates}d_{subscribers}s_cost{incumbent_cost}"));
 			group.bench_function(id, |b| {
 				// No hold, so an iteration times the ranking rather than the origin batching it.
-				let mut config = origin::Config::default();
-				config.update_hold = Duration::ZERO;
+				let config = origin::Config::default().with_update_hold(Duration::ZERO);
 				let (producer, _driver) = origin::Producer::new(config);
 				let _routes: Vec<_> = (1..=duplicates)
 					.map(|peer| {

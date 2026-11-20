@@ -85,10 +85,7 @@ impl Default for Config {
 
 /// Create two connected sessions: streams one opens, the other accepts.
 pub fn pair(config: Config) -> (Session, Session) {
-	let mut secret = [0; 32];
-	rand::RngExt::fill(&mut kio::clock::rng(), &mut secret);
 	let conn = Arc::new(Conn {
-		secret: rind::hkdf::Salt::new(&rind::hkdf::HKDF_SHA256, &[]).extract(&secret),
 		close: Default::default(),
 		incoming: [Incoming::default(), Incoming::default()],
 		config,
@@ -168,8 +165,6 @@ fn closed(close: &Close) -> Option<Error> {
 /// State shared by both sides of a pair.
 struct Conn {
 	config: Config,
-	/// What both sides export keying material from, standing in for a TLS handshake's secret.
-	secret: rind::hkdf::Prk,
 	close: Close,
 	/// What each side has yet to accept.
 	incoming: [Incoming; 2],
@@ -489,18 +484,6 @@ impl poll::Session for Session {
 	fn receive_window(&self) -> Option<super::ReceiveWindow> {
 		Some(super::ReceiveWindow::new(None, self.conn().config.stream_buffer as u64))
 	}
-
-	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
-		// Length-prefixed, so no label and context pair collides with another.
-		let lengths = [u8::try_from(label.len()).ok()?, u8::try_from(context.len()).ok()?];
-		let mut output = [0; 32];
-		self.conn()
-			.secret
-			.expand(&[&lengths, label, context], output.len())
-			.fill(&mut output)
-			.expect("32 bytes fit HKDF-SHA256");
-		Some(output)
-	}
 }
 
 /// One direction of a stream: the messages its writer queued for its reader.
@@ -574,9 +557,9 @@ impl Channel {
 
 	/// Whether the reader took every byte before `offset`, which stands in for an
 	/// acknowledgement, failing once a reset or stop means it never will.
-	fn acked(&self, offset: u64) -> Poll<Result<poll::Acked, Error>> {
+	fn acked(&self, offset: u64) -> Poll<Result<(), Error>> {
 		if offset <= self.taken {
-			return Poll::Ready(Ok(poll::Acked::Delivered));
+			return Poll::Ready(Ok(()));
 		}
 		match self.end {
 			Some(End::Reset(_)) => Poll::Ready(Err(Error::Closed)),
@@ -620,7 +603,7 @@ impl poll::SendStream for SendStream {
 
 	/// Delivered once the reader took every byte before `offset`, which stands in for an
 	/// acknowledgement as it does for [`poll_closed`](poll::SendStream::poll_closed).
-	fn poll_acked(&self, waiter: &kio::Waiter, offset: &u64) -> Poll<Result<poll::Acked, Error>> {
+	fn poll_acked(&self, waiter: &kio::Waiter, offset: &u64) -> Poll<Result<(), Error>> {
 		// Check the close first, so bytes taken before it still count below.
 		let closed = poll_close(&self.close, waiter);
 		if let Poll::Ready(channel) = self.channel.poll(waiter, |channel| channel.acked(*offset).map(drop)) {
@@ -1230,10 +1213,7 @@ mod tests {
 		let acked = |send: &SendStream, offset: u64| send.poll_acked(&noop(), &offset);
 		let (a, b) = pair(Config::default());
 		let (mut send, mut recv) = uni(&a, &b);
-		assert!(matches!(
-			acked(&send, send.offset()),
-			Poll::Ready(Ok(poll::Acked::Delivered))
-		));
+		assert!(matches!(acked(&send, send.offset()), Poll::Ready(Ok(()))));
 
 		ready(write(&mut send, &Bytes::from_static(b"one"))).unwrap();
 		let one = send.offset();
@@ -1248,11 +1228,11 @@ mod tests {
 		assert!(send.poll_acked(&waiter, &one).is_pending());
 		assert_eq!(text(read(&mut recv, 4)), "one");
 		assert!(count.0.load(Ordering::Relaxed) > 0, "the read did not wake the writer");
-		assert!(matches!(acked(&send, one), Poll::Ready(Ok(poll::Acked::Delivered))));
+		assert!(matches!(acked(&send, one), Poll::Ready(Ok(()))));
 		assert!(acked(&send, two).is_pending());
 
 		send.reset(1);
-		assert!(matches!(acked(&send, one), Poll::Ready(Ok(poll::Acked::Delivered))));
+		assert!(matches!(acked(&send, one), Poll::Ready(Ok(()))));
 		assert!(matches!(acked(&send, two), Poll::Ready(Err(Error::Closed))));
 
 		let (mut send, mut recv) = uni(&a, &b);

@@ -18,6 +18,19 @@ fn micros(value: u64) -> moq_timestamp {
 	}
 }
 
+/// An anchor at the group containing `value`, unscaled in the track's timescale.
+fn time(value: u64) -> moq_anchor {
+	moq_anchor {
+		kind: moq_anchor_kind::MOQ_ANCHOR_TIME as u32,
+		groups: 0,
+		timestamp: moq_timestamp {
+			value,
+			scale: 0,
+			has_scale: false,
+		},
+	}
+}
+
 /// The timestamp a read points at, which is never NULL.
 fn read_timestamp(timestamp: *const moq_timestamp) -> moq_timestamp {
 	*unsafe { timestamp.as_ref() }.expect("a read always carries a timestamp")
@@ -889,7 +902,7 @@ fn publish_media_owns_its_rendition_before_the_first_keyframe() {
 	// nothing until a keyframe lands.
 	let media = id(publish_video(
 		broadcast,
-		moq_video_format::MOQ_VIDEO_FORMAT_AVC3,
+		moq_video_format::MOQ_VIDEO_FORMAT_H264,
 		&[],
 		None,
 	));
@@ -2008,6 +2021,8 @@ fn publish_track_invalid_broadcast() {
 		timescale_present: false,
 		refresh: 0,
 		refresh_present: false,
+		refresh_interval_us: 0,
+		refresh_interval_present: false,
 		compression: 0,
 	};
 	assert!(unsafe { moq_publish_track(0, name.as_ptr() as *const c_char, name.len(), &info) } < 0);
@@ -2043,6 +2058,8 @@ fn publish_track_with_info_rejects_invalid_timescale() {
 		timescale_present: true,
 		refresh: 0,
 		refresh_present: false,
+		refresh_interval_us: 0,
+		refresh_interval_present: false,
 		compression: 0,
 	};
 
@@ -2062,6 +2079,8 @@ fn track_info_max_age() {
 		timescale_present: false,
 		refresh: 0,
 		refresh_present: false,
+		refresh_interval_us: 0,
+		refresh_interval_present: false,
 		compression: 0,
 	};
 	let max_age = |info: moq_track_info| moq_net::track::Info::try_from(&info).unwrap().max_age;
@@ -2700,6 +2719,8 @@ fn raw_track_subscription_options_and_update() {
 		timescale_present: true,
 		refresh: 0,
 		refresh_present: false,
+		refresh_interval_us: 0,
+		refresh_interval_present: false,
 		compression: 0,
 	};
 	let track =
@@ -2718,23 +2739,18 @@ fn raw_track_subscription_options_and_update() {
 	let consume = request_broadcast(origin, path);
 
 	let frame_cb = Callback::new();
-	let absolute = |group| moq_anchor {
-		kind: moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32,
-		group,
-		timestamp: moq_timestamp::default(),
-	};
-	// An absolute anchor is a group's start, in the track's microseconds, and an absolute end
-	// is exclusive. The open range starts at the group containing 100 s, the newest one held:
-	// `two`, and every group after it.
+	// A time anchor names the group containing it, in the track's microseconds, and an end
+	// includes its group. The open range starts at the group containing 100 s, the newest one
+	// held: `two`, and every group after it.
 	let ranges = [
 		moq_range {
-			start: absolute(20_000),
-			end: absolute(20_001),
+			start: time(20_000),
+			end: time(20_000),
 			end_present: true,
 		},
 		moq_range {
-			start: absolute(100_000_000),
-			end: absolute(0),
+			start: time(100_000_000),
+			end: time(0),
 			end_present: false,
 		},
 	];
@@ -2779,7 +2795,7 @@ fn raw_track_subscription_options_and_update() {
 	// Replace both ranges with one that ends at `three`, so the read ends once it reads it
 	// and never sees `four`.
 	let bounded = [moq_range {
-		end: absolute(60_001),
+		end: time(60_000),
 		..ranges[0]
 	}];
 	let update = moq_subscription {
@@ -2818,6 +2834,8 @@ fn raw_track_time_anchor() {
 		timescale_present: true,
 		refresh: 0,
 		refresh_present: false,
+		refresh_interval_us: 0,
+		refresh_interval_present: false,
 		compression: 0,
 	};
 	let track =
@@ -2835,20 +2853,8 @@ fn raw_track_time_anchor() {
 
 	let frame_cb = Callback::new();
 	let ranges = [moq_range {
-		start: moq_anchor {
-			kind: moq_anchor_kind::MOQ_ANCHOR_TIME as u32,
-			group: 0,
-			timestamp: moq_timestamp {
-				value: 30_000,
-				scale: 0,
-				has_scale: false,
-			},
-		},
-		end: moq_anchor {
-			kind: moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32,
-			group: 0,
-			timestamp: moq_timestamp::default(),
-		},
+		start: time(30_000),
+		end: time(0),
 		end_present: false,
 	}];
 	let subscription = moq_subscription {
@@ -2892,6 +2898,62 @@ fn raw_track_time_anchor() {
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// A time end includes the group starting at it, so `Time(t - 1)` is a former exclusive end at
+/// `t`. A non-NULL empty list asks for nothing, unlike NULL, and a zeroed anchor names no kind.
+#[test]
+fn subscription_ranges_parse() {
+	let parse = |ranges: &[moq_range], null: bool| {
+		let subscription = moq_subscription {
+			priority: 0,
+			delay: moq_delay::default(),
+			ranges: if null { std::ptr::null() } else { ranges.as_ptr() },
+			ranges_len: ranges.len(),
+			order: 0,
+		};
+		unsafe { crate::api::parse_subscription(&subscription) }.map(|subscription| subscription.ranges)
+	};
+	let span = moq_range {
+		start: time(1_500),
+		end: time(1_999),
+		end_present: true,
+	};
+	assert_eq!(
+		parse(&[span], false).unwrap(),
+		vec![moq_net::track::Range {
+			start: moq_net::track::Anchor::Time(1_500),
+			end: Some(moq_net::track::Anchor::Time(1_999)),
+		}]
+	);
+	assert_eq!(parse(&[], false).unwrap(), Vec::new());
+	assert_eq!(
+		parse(&[], true).unwrap(),
+		moq_net::track::Subscription::default().ranges,
+		"NULL keeps the default"
+	);
+
+	let zeroed = moq_anchor {
+		kind: 0,
+		groups: 0,
+		timestamp: moq_timestamp::default(),
+	};
+	assert!(matches!(
+		parse(&[moq_range { start: zeroed, ..span }], false),
+		Err(crate::Error::InvalidCode)
+	));
+	// An absent end is never read.
+	assert!(
+		parse(
+			&[moq_range {
+				end: zeroed,
+				end_present: false,
+				..span
+			}],
+			false
+		)
+		.is_ok()
+	);
 }
 
 /// An update with a scaled time anchor is refused at the call, keeping its ranges: a time
@@ -2940,14 +3002,10 @@ fn raw_track_update_refuses_a_scaled_time_anchor() {
 	let ranges = [moq_range {
 		start: moq_anchor {
 			kind: moq_anchor_kind::MOQ_ANCHOR_TIME as u32,
-			group: 0,
+			groups: 0,
 			timestamp: micros(0),
 		},
-		end: moq_anchor {
-			kind: moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32,
-			group: 0,
-			timestamp: moq_timestamp::default(),
-		},
+		end: time(0),
 		end_present: false,
 	}];
 	let update = moq_subscription {
@@ -3792,6 +3850,8 @@ fn publish_finish_serves_finished_tracks_until_closed() {
 		timescale_present: false,
 		refresh: 0,
 		refresh_present: false,
+		refresh_interval_us: 0,
+		refresh_interval_present: false,
 		compression: 0,
 	};
 	let track = id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), &info) });
@@ -4587,15 +4647,19 @@ fn track_demand_follows_subscribers() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// Read a demand watcher's wanted group, or `None` while nobody subscribes.
-fn demand_wanted(watcher: u32) -> Option<u64> {
-	let mut group = u64::MAX;
-	let mut present = true;
+/// Read whether anyone consumes a demand watcher's track.
+fn demand_wanted(watcher: u32) -> bool {
+	let mut wanted = false;
+	assert_eq!(unsafe { moq_publish_demand_wanted(watcher, &mut wanted) }, 0);
+	wanted
+}
+
+/// Start waiting for a demand watcher's track to be asked for a new group.
+fn demand_refresh(watcher: u32, cb: &Callback) {
 	assert_eq!(
-		unsafe { moq_publish_demand_wanted(watcher, &mut group, &mut present) },
+		unsafe { moq_publish_demand_refresh(watcher, Some(channel_callback), cb.ptr) },
 		0
 	);
-	present.then_some(group)
 }
 
 /// Cancel a raw track subscription, freeing the frames delivered before its terminal.
@@ -4612,7 +4676,7 @@ fn cancel_track(consumer: u32, cb: &Callback) {
 }
 
 #[test]
-fn track_demand_reports_the_wanted_group() {
+fn track_demand_reports_wanted_and_refresh() {
 	let origin = id(moq_origin_create());
 	let broadcast = publish_broadcast(origin, b"track-demand-wanted");
 	let name = b"data";
@@ -4624,6 +4688,8 @@ fn track_demand_reports_the_wanted_group() {
 		timescale_present: false,
 		refresh: 0,
 		refresh_present: true,
+		refresh_interval_us: 0,
+		refresh_interval_present: false,
 		compression: 0,
 	};
 	let track = id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), &info) });
@@ -4631,14 +4697,17 @@ fn track_demand_reports_the_wanted_group() {
 	let demand_cb = Callback::new();
 	let watcher = id(unsafe { moq_publish_track_demand(track, Some(channel_callback), demand_cb.ptr) });
 	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_UNWANTED as i32);
-	assert_eq!(demand_wanted(watcher), None);
+	assert!(!demand_wanted(watcher));
 
-	// The first subscriber of a track with no group wants group 0.
+	// Nobody asks for a group until the first subscriber of a track with none does.
+	let refresh_cb = Callback::new();
+	demand_refresh(watcher, &refresh_cb);
 	let consume = consume_local(broadcast);
 	let first_cb = Callback::new();
 	let first = consume_track(consume, name, &first_cb);
 	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_WANTED as i32);
-	assert_eq!(demand_wanted(watcher), Some(0));
+	assert!(demand_wanted(watcher));
+	assert_eq!(refresh_cb.recv(), moq_demand::MOQ_DEMAND_REFRESH as i32);
 
 	// A delta after the first frame puts the group past a `refresh` of 0.
 	let group = id(unsafe { moq_publish_track_group(track, &micros(0)) });
@@ -4649,26 +4718,93 @@ fn track_demand_reports_the_wanted_group() {
 		);
 	}
 
-	// A joiner asks for the next group, and the callback repeats USED to say so.
+	// The group answered the first request, so the next wait lasts until a joiner asks.
+	demand_refresh(watcher, &refresh_cb);
 	let second_cb = Callback::new();
 	let second = consume_track(consume, name, &second_cb);
-	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_WANTED as i32);
-	assert_eq!(demand_wanted(watcher), Some(1));
+	assert_eq!(refresh_cb.recv(), moq_demand::MOQ_DEMAND_REFRESH as i32);
 
+	// The joiner left the track wanted, so the watcher's next report is the last one leaving.
 	cancel_track(first, &first_cb);
 	cancel_track(second, &second_cb);
 	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_UNWANTED as i32);
-	assert_eq!(demand_wanted(watcher), None);
+	assert!(!demand_wanted(watcher));
 
+	// A wait still pending when the track ends reports the watcher's end.
+	demand_refresh(watcher, &refresh_cb);
 	assert_eq!(moq_publish_track_finish(track), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(demand_cb.recv_terminal(), 0);
-	let (mut group, mut present) = (0, false);
+	assert_eq!(refresh_cb.recv_terminal(), 0);
+	let mut wanted = false;
 	assert!(
-		unsafe { moq_publish_demand_wanted(watcher, &mut group, &mut present) } < 0,
+		unsafe { moq_publish_demand_wanted(watcher, &mut wanted) } < 0,
 		"the watcher is gone after its terminal"
 	);
+	assert!(
+		unsafe { moq_publish_demand_refresh(watcher, Some(channel_callback), refresh_cb.ptr) } < 0,
+		"no wait starts on a finished watcher"
+	);
 
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// A raw track's refresh fires once the publisher reads the request, and a cancelled one fires
+/// `0` instead.
+#[test]
+fn track_refresh_fires_once_sent() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"track-refresh");
+	let name = b"data";
+	let info = moq_track_info {
+		priority: 0,
+		max_age_us: 0,
+		max_age_unlimited: false,
+		timescale: 0,
+		timescale_present: false,
+		refresh: 0,
+		refresh_present: true,
+		refresh_interval_us: 0,
+		refresh_interval_present: false,
+		compression: 0,
+	};
+	let track = id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), &info) });
+	let demand_cb = Callback::new();
+	let watcher = id(unsafe { moq_publish_track_demand(track, Some(channel_callback), demand_cb.ptr) });
+
+	// A delta after the first frame puts the group past a `refresh` of 0. Reading both frames
+	// shows the subscription is live.
+	let consume = consume_local(broadcast);
+	let track_cb = Callback::new();
+	let consumer = consume_track(consume, name, &track_cb);
+	let group = id(unsafe { moq_publish_track_group(track, &micros(0)) });
+	for timestamp_us in [0, 1_000] {
+		assert_eq!(
+			unsafe { moq_publish_group_frame(group, name.as_ptr(), name.len(), &micros(timestamp_us)) },
+			0
+		);
+		assert_eq!(moq_consume_track_frame_free(id(track_cb.recv())), 0);
+	}
+
+	// Nothing reads the demand yet, so a cancelled request is never sent.
+	let refresh_cb = Callback::new();
+	let refresh = id(unsafe { moq_consume_track_refresh(consumer, Some(channel_callback), refresh_cb.ptr) });
+	assert_eq!(moq_consume_track_refresh_cancel(refresh), 0);
+	assert_eq!(refresh_cb.recv(), 0);
+	assert!(moq_consume_track_refresh_cancel(refresh) < 0, "the wait is gone");
+
+	// The publisher reading the request sends it.
+	id(unsafe { moq_consume_track_refresh(consumer, Some(channel_callback), refresh_cb.ptr) });
+	let asked_cb = Callback::new();
+	demand_refresh(watcher, &asked_cb);
+	assert_eq!(asked_cb.recv(), moq_demand::MOQ_DEMAND_REFRESH as i32);
+	assert_eq!(refresh_cb.recv(), moq_refresh::MOQ_REFRESH_SENT as i32);
+
+	cancel_track(consumer, &track_cb);
+	assert_eq!(moq_publish_track_finish(track), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	while demand_cb.recv() > 0 {}
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
@@ -5271,6 +5407,8 @@ fn a_group_request_nobody_reads_is_withdrawn() {
 		timescale_present: false,
 		refresh: 0,
 		refresh_present: false,
+		refresh_interval_us: 0,
+		refresh_interval_present: false,
 		compression: 0,
 	};
 	let track = id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), &info) });
@@ -6222,7 +6360,7 @@ fn video_publish_consume() {
 	let broadcast = publish_broadcast(origin, path);
 
 	let init = h264_init();
-	let format = moq_video_format::MOQ_VIDEO_FORMAT_AVC3;
+	let format = moq_video_format::MOQ_VIDEO_FORMAT_H264;
 	let media = id(publish_video(broadcast, format, &init, None));
 
 	let consume = request_broadcast(origin, path);
@@ -7247,7 +7385,7 @@ fn video_raw_decode() {
 	// The init's SPS/PPS only seed catalog metadata; avc3 frames carry their own
 	// inline parameter sets, so the decoder reads the true 320x240 from the wire.
 	let init = h264_init();
-	let format = moq_video_format::MOQ_VIDEO_FORMAT_AVC3;
+	let format = moq_video_format::MOQ_VIDEO_FORMAT_H264;
 	let media = id(publish_video(broadcast, format, &init, None));
 
 	let consume = request_broadcast(origin, path);
@@ -8303,6 +8441,96 @@ fn encode_video_bitrate_caps_the_reservation() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
+/// Finishing an encoder releases its claim, whatever reservation handle the caller keeps.
+#[test]
+fn encode_finish_releases_a_reservation_the_caller_keeps() {
+	let (bandwidth, estimate) = test_allocator();
+	estimate
+		.set(Some(moq_net::bandwidth::Rate::from_bps(4_000_000)))
+		.unwrap();
+	let origin = id(moq_origin_create());
+	let path = b"finish-releases";
+	let broadcast = publish_broadcast(origin, path);
+	let consume = request_broadcast(origin, path);
+
+	let input = moq_video_encoder_input {
+		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
+		width: 320,
+		height: 240,
+		framerate: moq_video_frame_rate {
+			numerator: 30,
+			denominator: 1,
+		},
+	};
+	let output = moq_video_encoder_output {
+		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
+		bitrate: 4_000_000,
+		join_us: 0,
+		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
+		encoder: std::ptr::null(),
+		encoder_len: 0,
+	};
+	let video = id(unsafe {
+		moq_encode_video(
+			broadcast,
+			&input,
+			&output,
+			&moq_video_encode_options { bandwidth, lower: 0 },
+		)
+	});
+	let audio_input = moq_audio_encoder_input {
+		format: moq_audio_sample_format::MOQ_AUDIO_SAMPLE_FORMAT_F32 as u32,
+		sample_rate: 48_000,
+		channels: 1,
+	};
+	let audio_output = moq_audio_encoder_output {
+		codec: c"opus".as_ptr(),
+		codec_len: 4,
+		sample_rate: 0,
+		channels: 0,
+		bitrate: 0,
+		frame_duration_us: 0,
+	};
+	let audio =
+		id(unsafe { moq_encode_audio(broadcast, c"audio".as_ptr(), 5, &audio_input, &audio_output, bandwidth) });
+	let video_claim = id(moq_encode_video_reservation(video));
+	let audio_claim = id(moq_encode_audio_reservation(audio));
+
+	let (_, video_cb) = subscribe_named_track(consume, b"0.avc3");
+	let (_, audio_cb) = subscribe_named_track(consume, b"audio");
+	let sibling_track = publish_named_track(broadcast, b"sibling");
+	let (sibling_sub, sibling_cb) = subscribe_named_track(consume, b"sibling");
+	let sibling = id(moq_allocator_reserve(bandwidth, sibling_track, 4_000_000));
+	// Media outranks a default track, so its tier takes the whole estimate.
+	wait_rate(sibling, 0);
+
+	assert_eq!(moq_encode_video_finish(video), 0);
+	assert_eq!(moq_encode_audio_finish(audio), 0);
+	assert_eq!(rate(sibling), Some(4_000_000));
+	for claim in [video_claim, audio_claim] {
+		assert_eq!(rate(claim), None);
+		assert_eq!(moq_reservation_update(claim, 1_000_000), 0);
+		let policy = moq_rate_policy {
+			max_bps: 1_000_000,
+			lower_bps: 0,
+			has_lower: false,
+		};
+		assert!(moq_rate_control_create(claim, policy) < 0);
+		assert_eq!(moq_reservation_close(claim), 0);
+	}
+
+	assert_eq!(moq_reservation_close(sibling), 0);
+	// Finishing ended the media subscriptions; only the sibling's is still open.
+	assert_eq!(moq_consume_track_cancel(sibling_sub), 0);
+	for cb in [video_cb, audio_cb, sibling_cb] {
+		let _ = cb.recv_terminal();
+	}
+	assert_eq!(moq_allocator_close(bandwidth), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
 /// A simulcast rung needs a bandwidth allocator and a bitrate above its lower rendition's.
 #[test]
 fn encode_video_rung_needs_a_grant_and_a_band() {
@@ -8336,72 +8564,6 @@ fn encode_video_rung_needs_a_grant_and_a_band() {
 	assert_eq!(moq_encode_video_finish(high), 0);
 	assert_eq!(moq_encode_video_finish(low), 0);
 	assert_eq!(moq_allocator_close(bandwidth), 0);
-	assert_eq!(moq_publish_close(broadcast), 0);
-	assert_eq!(moq_origin_close(origin), 0);
-}
-
-/// A rung watches its lower rendition's own ceiling, which wakes it when that moves or
-/// ends, so it notices even when the lower rendition reserves nothing it shares.
-#[test]
-fn encode_video_ceiling_wakes_a_rung_above() {
-	struct Flag(std::sync::atomic::AtomicBool);
-	impl std::task::Wake for Flag {
-		fn wake(self: std::sync::Arc<Self>) {
-			self.0.store(true, std::sync::atomic::Ordering::SeqCst);
-		}
-	}
-
-	let origin = id(moq_origin_create());
-	let broadcast = publish_broadcast(origin, b"rung");
-	let input = moq_video_encoder_input {
-		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
-		width: 320,
-		height: 240,
-		framerate: moq_video_frame_rate {
-			numerator: 30,
-			denominator: 1,
-		},
-	};
-	let output = moq_video_encoder_output {
-		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
-		bitrate: 500_000,
-		join_us: 0,
-		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
-		encoder: std::ptr::null(),
-		encoder_len: 0,
-	};
-	// No allocator, so nothing it does moves a reservation a rung would share.
-	let low = id(unsafe { moq_encode_video(broadcast, &input, &output, std::ptr::null()) });
-	let ceiling = State::lock()
-		.video
-		.producer(Id::try_from(low).unwrap())
-		.unwrap()
-		.lock()
-		.as_ref()
-		.unwrap()
-		.ceiling
-		.consume();
-
-	let flag = std::sync::Arc::new(Flag(std::sync::atomic::AtomicBool::new(false)));
-	let waiter = kio::Waiter::new(std::task::Waker::from(flag.clone()));
-	let arm = || ceiling.poll(&waiter, |_| std::task::Poll::<()>::Pending).is_pending();
-	assert!(arm());
-
-	assert_eq!(moq_encode_video_bitrate(low, 400_000), 0);
-	assert!(
-		flag.0.swap(false, std::sync::atomic::Ordering::SeqCst),
-		"a moved ceiling wakes the rung"
-	);
-	assert_eq!(*ceiling.read(), moq_net::bandwidth::Rate::from_bps(400_000));
-	assert!(arm());
-
-	assert_eq!(moq_encode_video_finish(low), 0);
-	assert!(
-		flag.0.load(std::sync::atomic::Ordering::SeqCst),
-		"an ended rendition wakes the rung"
-	);
-	assert!(!arm(), "the ceiling closes with the rendition");
-
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
@@ -8500,8 +8662,7 @@ fn announce_route_crosses_a_relay_session() {
 
 	assert_eq!(moq_origin_announced_cancel(task), 0);
 	assert_eq!(announced_cb.recv_announce_terminal(), 0);
-	// Each client first: closed by its peer before it was healthy, it would end on its own.
-	// Its peer gone, the accepted session ends too.
+	// Each client's close ends its accepted session too.
 	for (client, client_cb, accepted, accepted_cb) in [
 		(downstream_client, &downstream_client_cb, downstream, &downstream_cb),
 		(upstream_client, &upstream_client_cb, upstream, &upstream_cb),
@@ -8617,7 +8778,6 @@ fn a_minted_instance_pins_request_and_follow() {
 	assert_eq!(moq_origin_announced_free(announced), 0);
 	assert_eq!(moq_origin_announced_cancel(task), 0);
 	assert_eq!(announced_cb.recv_announce_terminal(), 0);
-	// The client first: closed by its peer before it was healthy, it would end on its own.
 	assert_eq!(moq_session_close(client), 0);
 	client_cb.recv_terminal();
 	// Its peer gone, the accepted session ends too, which releases its handle.
@@ -8734,6 +8894,8 @@ fn server_accepts_a_session() {
 	assert_eq!((terminal.failure, terminal.connects), (0, 1));
 	assert!(moq_consume_track_cancel(consumer) < 0, "the consumer ended");
 	assert_eq!(moq_consume_close(consumed), 0);
+	// The server answered the client's credential, so its close leaves the client redialing
+	// rather than ended, and the handle is still there to close.
 	assert_eq!(moq_session_close(client), 0);
 	client_cb.recv_terminal();
 
@@ -8769,9 +8931,9 @@ fn server_rejects_a_session() {
 	assert_eq!(moq_session_request_reject(request, 403), 0);
 	assert!(moq_session_request_free(request) < 0, "reject consumes the request");
 
-	// The rejection closes a session the transport already established, so the client
-	// sees it connect first. Refused before it was healthy, the session then ends with the
-	// rejection rather than redialing, as a refused first dial does.
+	// The rejection closes a session the transport already established. Closed before the
+	// server answered its credential, the session ends with the rejection rather than
+	// redialing, as a refused first dial does.
 	let terminal = client_cb.recv_terminal();
 	let protocol = terminal.protocol.expect("the terminal snapshot names the rejection");
 	assert_eq!(protocol.scope, moq_error_scope::MOQ_ERROR_SCOPE_SESSION as u32);
@@ -9159,7 +9321,7 @@ fn track_request_media_carries_hints() {
 	let h264 = h264_init();
 	let video_config = moq_video_init {
 		lower: 0,
-		format: moq_video_format::MOQ_VIDEO_FORMAT_AVC3 as u32,
+		format: moq_video_format::MOQ_VIDEO_FORMAT_H264 as u32,
 		init: h264.as_ptr(),
 		init_len: h264.len(),
 		label: std::ptr::null(),
@@ -9214,7 +9376,7 @@ fn invalid_hints_are_refused() {
 	let video = |hint: moq_video_hint| {
 		let config = moq_video_init {
 			lower: 0,
-			format: moq_video_format::MOQ_VIDEO_FORMAT_AVC3 as u32,
+			format: moq_video_format::MOQ_VIDEO_FORMAT_H264 as u32,
 			init: h264.as_ptr(),
 			init_len: h264.len(),
 			label: std::ptr::null(),
@@ -9330,7 +9492,7 @@ fn preencoded_rungs_and_rate_control() {
 	let broadcast = publish_broadcast(origin, b"preencoded-rungs");
 	let init = h264_init();
 	let config = |lower| moq_video_init {
-		format: moq_video_format::MOQ_VIDEO_FORMAT_AVC3 as u32,
+		format: moq_video_format::MOQ_VIDEO_FORMAT_H264 as u32,
 		init: init.as_ptr(),
 		init_len: init.len(),
 		label: std::ptr::null(),
@@ -9795,13 +9957,8 @@ fn a_credential_rides_every_reconnect() {
 	let _first = first.accept(moq_net::auth::Grant::all());
 	assert_eq!(answer.recv().0, 0);
 
-	// The server ends the session once it was healthy; the client redials and presents the
-	// token again.
-	#[expect(
-		clippy::disallowed_methods,
-		reason = "the test thread has no runtime; the C API's session ages on the real clock"
-	)]
-	std::thread::sleep(Duration::from_secs(1));
+	// The server ends the session the client saw connected, so accepted; the client redials
+	// and presents the token again.
 	server.admit();
 	let again = server.token();
 	assert_eq!(again.token().as_ref(), b"kept", "the reconnect presents it again");

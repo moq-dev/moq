@@ -120,6 +120,13 @@
 //! refusals and readers. Each reader consumes each refusal before the next, so the cost per
 //! refusal must not grow with the history of answers.
 //!
+//! `track_high_key` writes one group below a far-ahead key every reader already took, behind
+//! a backlog of groups written there before, swept over the readers and the backlog: the
+//! protected live edge must pin none of it, and a reader never hands out a group under its
+//! floor, so a walk over the backlog on each write shows up as a slope over it. Every
+//! iteration adds to the backlog too, so such a walk also lifts every point far above one
+//! reader's constant.
+//!
 //! Run with `cargo bench -p moq-net --bench track`.
 
 #![expect(
@@ -337,6 +344,95 @@ impl Fanout {
 			assert!(matches!(subscriber.poll_recv_group(waiter), Poll::Pending));
 		}
 	}
+}
+
+/// A track whose readers took a far-ahead key, as the publisher writes on below it.
+struct HighKey {
+	_broadcast: broadcast::Producer,
+	track: track::Producer,
+	subscribers: Vec<track::Subscriber>,
+	waiter: kio::Waiter,
+	payload: Bytes,
+	next: u64,
+}
+
+impl HighKey {
+	fn new(subscribers: usize, backlog: usize) -> Self {
+		let mut info = broadcast::Info::default();
+		let config = cache::Config::default()
+			.with_capacity(CACHE_CAPACITY)
+			.with_expiry(cache::DEFAULT_EXPIRY);
+		info.pool = cache::Pool::new(config);
+		let broadcast = broadcast::Producer::new(info);
+		let track = broadcast
+			.create_track("bench", moq_net::track::Info::default().with_max_age(None))
+			.unwrap();
+		// Each reads from the far-ahead key on, so every later group lands below its floor.
+		let mut subscribers: Vec<_> = (0..subscribers)
+			.map(|_| track.subscribe(None).with_range(HIGH..))
+			.collect();
+		let waiter = kio::Waiter::noop();
+		let mut high = Self {
+			_broadcast: broadcast,
+			track,
+			subscribers: Vec::new(),
+			waiter,
+			payload: Bytes::from(vec![0; PAYLOAD]),
+			next: 0,
+		};
+		high.write(HIGH);
+		for subscriber in &mut subscribers {
+			let Poll::Ready(Ok(Some(group))) = subscriber.poll_recv_group(&high.waiter) else {
+				unreachable!("the far-ahead group must be ready");
+			};
+			black_box(group);
+		}
+		high.subscribers = subscribers;
+		for _ in 0..backlog {
+			high.step();
+		}
+		high
+	}
+
+	fn write(&self, key: u64) {
+		let mut group = self.track.create_group(moq_net::group::Info { start: key }).unwrap();
+		group
+			.write_frame(Timestamp::unscaled(key), self.payload.clone())
+			.unwrap();
+		group.finish().unwrap();
+	}
+
+	/// Write the next group below the far-ahead key and wake every reader, none of which
+	/// hands it out.
+	fn step(&mut self) {
+		self.write(self.next);
+		self.next += 1;
+		for subscriber in &mut self.subscribers {
+			assert!(subscriber.poll_recv_group(&self.waiter).is_pending());
+		}
+	}
+}
+
+/// The far-ahead key `track_high_key` jumps to first.
+const HIGH: u64 = 1 << 40;
+
+/// Groups written below the far-ahead key before `track_high_key` measures.
+const BACKLOG: [usize; 3] = [0, 1024, 16_384];
+
+fn bench_high_key(c: &mut Criterion) {
+	let mut group = c.benchmark_group("track_high_key");
+	for subscribers in FANOUT {
+		for backlog in BACKLOG {
+			group.throughput(Throughput::Elements(subscribers as u64));
+			// Criterion calls the closure once per sample, so the fixture is built on the first call and kept.
+			let mut fixture = None;
+			group.bench_function(BenchmarkId::new(format!("{subscribers}r"), backlog), |b| {
+				let high = fixture.get_or_insert_with(|| HighKey::new(subscribers, backlog));
+				b.iter(|| high.step());
+			});
+		}
+	}
+	group.finish();
 }
 
 /// A cached aborted prefix followed by one live group.
@@ -2080,7 +2176,7 @@ impl RangeFills {
 					continue;
 				};
 				while let Some(key) = fill.wanted() {
-					let mut group = fill.accept(key, None).unwrap();
+					let mut group = fill.accept(key, None).unwrap().expect("a fresh group");
 					group
 						.write_frame(Timestamp::from_millis(key).unwrap(), Bytes::from_static(b"x"))
 						.unwrap();
@@ -2232,6 +2328,7 @@ criterion_group!(
 	bench_fanout,
 	bench_fanout_frame,
 	bench_evict_fanout,
+	bench_high_key,
 	bench_fetch_expiry,
 	bench_fetch_budgets,
 	bench_fetch_park,

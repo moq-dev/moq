@@ -6,18 +6,18 @@
 # the route for good: the groups caught in the flap and every burst after it
 # never arrive. A steady link never drops, so only the flap drill depends on it.
 diff --git a/rs/moq-relay/src/cluster.rs b/rs/moq-relay/src/cluster.rs
-index 844ee1e1ba..73ee5dde72 100644
+index 24082409c0..4371686fd6 100644
 --- a/rs/moq-relay/src/cluster.rs
 +++ b/rs/moq-relay/src/cluster.rs
-@@ -2303,6 +2303,11 @@ impl Cluster {
- 		let mut observation = monitor.state();
+@@ -2346,6 +2346,11 @@ impl Cluster {
  		loop {
  			dial.observe(id, &observation);
+ 			*connected |= observation.connects > 0;
 +			// MUTATION: a lost peer link is never redialed.
 +			if matches!(observation.phase, moq_tokio::connection::Phase::Disconnected { .. }) {
 +				drop(reconnect);
 +				return std::future::pending().await;
 +			}
- 			observation = monitor.state_changed(observation.revision).await?;
- 		}
- 	}
+ 			tokio::select! {
+ 				biased;
+ 				() = shutdown.started() => break,
