@@ -36,7 +36,7 @@ Follow Reading a failure in `rs/moq-net/verify/README.md`. Replay the path on th
 
 ## Coverage
 
-Sync commit: `1a34abe43717e1815108de792e04c86a44a971bc`, plus the splice-stall fix, which holds a track while a dead relay's route still shows, since a session closes its sources before it fails their copies (`Shows`, `Withdraw`). Run `git log 1a34abe437.. -- rs/moq-net/src/model/resume.rs rs/moq-net/src/model/front.rs rs/moq-net/src/model/origin.rs rs/moq-net/src/model/track.rs rs/moq-net/src/lite/subscriber.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
+Sync commit: `46059266ec9e149c37147577bc40ca3a7cea556a`, plus the splice-stall fix, which holds a track while a dead relay's route still shows, since a session closes its sources before it fails their copies (`Shows`, `Withdraw`). Run `git log 46059266ec.. -- rs/moq-net/src/model/resume.rs rs/moq-net/src/model/front.rs rs/moq-net/src/model/origin.rs rs/moq-net/src/model/track.rs rs/moq-net/src/lite/subscriber.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
 
 | Code | Model |
 | --- | --- |
