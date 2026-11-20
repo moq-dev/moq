@@ -395,7 +395,11 @@ impl HighKey {
 	}
 
 	fn write(&self, key: u64) {
-		let mut group = self.track.create_group(moq_net::group::Info { start: key }).unwrap().unwrap();
+		let mut group = self
+			.track
+			.create_group(moq_net::group::Info { start: key })
+			.unwrap()
+			.unwrap();
 		group
 			.write_frame(Timestamp::unscaled(key), self.payload.clone())
 			.unwrap();
@@ -1424,7 +1428,11 @@ impl Sparse {
 			true => at(key),
 			false => moq_net::Timestamp::unscaled(key),
 		};
-		let mut group = self.track.create_group(moq_net::group::Info { start: key }).unwrap().unwrap();
+		let mut group = self
+			.track
+			.create_group(moq_net::group::Info { start: key })
+			.unwrap()
+			.unwrap();
 		group.write_frame(timestamp, Bytes::from_static(b"x")).unwrap();
 		group.finish().unwrap();
 		let Poll::Ready(Ok(Some(read))) = self.sub.poll_recv_group(&kio::Waiter::noop()) else {
@@ -1645,7 +1653,10 @@ impl GapFlush {
 			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(3600))),
 		);
 		let mut hand_out = |key: u64| {
-			let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap().unwrap();
+			let mut group = track
+				.create_group(moq_net::group::Info { start: key })
+				.unwrap()
+				.unwrap();
 			group.write_frame(at(key), Bytes::from_static(b"x")).unwrap();
 			let Poll::Ready(Ok(Some(read))) = sub.poll_recv_group(&kio::Waiter::noop()) else {
 				panic!("the group is cached");
@@ -1674,7 +1685,8 @@ impl GapFlush {
 		let mut group = self
 			.track
 			.create_group(moq_net::group::Info { start: TWO_HOURS })
-			.unwrap().unwrap();
+			.unwrap()
+			.unwrap();
 		group.write_frame(at(TWO_HOURS), Bytes::from_static(b"x")).unwrap();
 		let Poll::Ready(Ok(Some(read))) = self.sub.poll_recv_group(&kio::Waiter::noop()) else {
 			panic!("the group is cached");

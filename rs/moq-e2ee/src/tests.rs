@@ -1240,7 +1240,11 @@ fn grouped_authentication_ends_track() {
 	let mut key = pair.generation.key(semantic, Domain::Group).unwrap();
 	let mut payload = key.protect(1, 0, b"ok", MAX_GROUPED_PAYLOAD).unwrap().to_vec();
 	payload[0] ^= 1;
-	let mut bad = pair.net.create_group(moq_net::group::Info { start: 1 }).unwrap().unwrap();
+	let mut bad = pair
+		.net
+		.create_group(moq_net::group::Info { start: 1 })
+		.unwrap()
+		.unwrap();
 	bad.write_frame(ms(2), payload).unwrap();
 	bad.finish().unwrap();
 
@@ -1307,14 +1311,22 @@ fn grouped_failure_wakes_pending_reads_and_releases_demand() {
 	// One authentic frame, then silence. The group and the track stay open.
 	let semantic = pair.semantic.as_str();
 	let mut key = pair.generation.key(semantic, Domain::Group).unwrap();
-	let mut open = pair.net.create_group(moq_net::group::Info { start: 0 }).unwrap().unwrap();
+	let mut open = pair
+		.net
+		.create_group(moq_net::group::Info { start: 0 })
+		.unwrap()
+		.unwrap();
 	let open_demand = open.demand();
 	open.write_frame(ms(1), key.protect(0, 0, b"ok", MAX_GROUPED_PAYLOAD).unwrap())
 		.unwrap();
 
 	let mut payload = key.protect(1, 0, b"nope", MAX_GROUPED_PAYLOAD).unwrap().to_vec();
 	payload[0] ^= 1;
-	let mut bad = pair.net.create_group(moq_net::group::Info { start: 1 }).unwrap().unwrap();
+	let mut bad = pair
+		.net
+		.create_group(moq_net::group::Info { start: 1 })
+		.unwrap()
+		.unwrap();
 	let bad_demand = bad.demand();
 	bad.write_frame(ms(2), payload).unwrap();
 

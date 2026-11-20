@@ -2,9 +2,9 @@ import { expect, spyOn, test } from "bun:test";
 import { Duration } from "@moq/clock";
 import { Time, Track, Varint } from "@moq/net";
 import { Signal } from "@moq/signals";
+import { defined } from "../defined.test-util.ts";
 import { Consumer } from "./consumer.ts";
 import { Format } from "./legacy.ts";
-import { defined } from "../defined.test-util.ts";
 
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 

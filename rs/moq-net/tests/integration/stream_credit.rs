@@ -513,7 +513,10 @@ async fn a_shed_late_group_lets_a_newer_group_through() {
 
 		// Group 1 waits for credit it cannot make room for, and group 0 ranks below it.
 		for key in [1, 0] {
-			let mut late = track.create_group(moq_net::group::Info { start: key }).unwrap().unwrap();
+			let mut late = track
+				.create_group(moq_net::group::Info { start: key })
+				.unwrap()
+				.unwrap();
 			late.write_frame(late.at_start(), b"late".as_slice()).unwrap();
 			late.finish().unwrap();
 		}

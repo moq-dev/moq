@@ -3,12 +3,12 @@
 import { expect, test } from "bun:test";
 import { Duration, sleep } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
+import { defined } from "./defined.test-util.ts";
 import { StreamCode, StreamError } from "./error.ts";
 import { hooks, staleHole } from "./internal.ts";
 import { textFrame } from "./mock.ts";
 import { Timestamp } from "./time.ts";
 import { type Ordered, Producer as TrackProducer } from "./track.ts";
-import { defined } from "./defined.test-util.ts";
 
 // A session-fed copy owes holes; an in-process producer does not.
 function receivedTrack() {

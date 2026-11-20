@@ -1917,7 +1917,10 @@ mod tests {
 
 	/// Write a finished group with explicit sequence and timestamps (Container::Legacy(crate::container::Kind::Data) format).
 	fn write_group(track: &mut moq_net::track::Producer, sequence: u64, timestamps: &[Timestamp]) {
-		let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap().unwrap();
+		let mut group = track
+			.create_group(moq_net::group::Info { start: sequence })
+			.unwrap()
+			.unwrap();
 		for &timestamp in timestamps {
 			let frame = Frame {
 				timestamp,
@@ -2012,7 +2015,10 @@ mod tests {
 	}
 
 	fn write_marker_group(track: &mut moq_net::track::Producer, sequence: u64, timestamp: Timestamp) {
-		let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap().unwrap();
+		let mut group = track
+			.create_group(moq_net::group::Info { start: sequence })
+			.unwrap()
+			.unwrap();
 		Container::Legacy(crate::container::Kind::Audio)
 			.write(
 				&mut group,
@@ -2116,7 +2122,10 @@ mod tests {
 			Container::Legacy(crate::container::Kind::Data),
 		);
 		write_group(&mut track, 0, &[ts(0), ts(10_000)]);
-		let mut group = track.create_group(moq_net::group::Info { start: 20_000 }).unwrap().unwrap();
+		let mut group = track
+			.create_group(moq_net::group::Info { start: 20_000 })
+			.unwrap()
+			.unwrap();
 		group.write_frame(ts(20_000), Bytes::new()).unwrap();
 		group.finish().unwrap();
 		let _track = track.finish().unwrap();
@@ -2952,7 +2961,10 @@ mod tests {
 		let mut reader = Consumer::new(subscription, Container::Legacy(crate::container::Kind::Video));
 		let wire = Container::Legacy(crate::container::Kind::Video);
 		for (sequence, start) in [(0, 0), (1, 33_000)] {
-			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap().unwrap();
+			let mut group = track
+				.create_group(moq_net::group::Info { start: sequence })
+				.unwrap()
+				.unwrap();
 			let frame = |timestamp: u64, payload| Frame {
 				timestamp: ts(timestamp),
 				payload,
@@ -3049,7 +3061,8 @@ mod tests {
 		write_group(&mut track, 0, &[ts(0)]);
 		track
 			.create_group(moq_net::group::Info { start: 1 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		write_group(&mut track, 2, &[ts(1_000)]);
@@ -5976,10 +5989,16 @@ mod tests {
 			),
 			DurationWire,
 		);
-		let mut group0 = track.create_group(moq_net::group::Info { start: 1_000_000 }).unwrap().unwrap();
+		let mut group0 = track
+			.create_group(moq_net::group::Info { start: 1_000_000 })
+			.unwrap()
+			.unwrap();
 		write_duration_frame(&mut group0, ts(0), ts(33_000));
 		group0.finish().unwrap();
-		let mut group1 = track.create_group(moq_net::group::Info { start: 1_090_000 }).unwrap().unwrap();
+		let mut group1 = track
+			.create_group(moq_net::group::Info { start: 1_090_000 })
+			.unwrap()
+			.unwrap();
 		write_duration_frame(&mut group1, ts(33_000), ts(33_000));
 		group1.finish().unwrap();
 		let _track = track.finish().unwrap();
@@ -6070,7 +6089,10 @@ mod tests {
 		sequence: u64,
 		timestamp: Timestamp,
 	) -> moq_net::group::Producer {
-		let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap().unwrap();
+		let mut group = track
+			.create_group(moq_net::group::Info { start: sequence })
+			.unwrap()
+			.unwrap();
 		Container::Legacy(crate::container::Kind::Data)
 			.write(
 				&mut group,
@@ -6388,7 +6410,10 @@ mod tests {
 		let mut consumer = container_max_delay_only(track.subscribe(None), max_delay);
 		consumer.set_max_buffer(4096);
 		for sequence in 0..2u64 {
-			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap().unwrap();
+			let mut group = track
+				.create_group(moq_net::group::Info { start: sequence })
+				.unwrap()
+				.unwrap();
 			Container::Legacy(crate::container::Kind::Data)
 				.write(
 					&mut group,
@@ -6427,7 +6452,10 @@ mod tests {
 	async fn a_hole_in_a_drained_backlog_is_late_from_the_earliest_arrival_past_it() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let marker = |track: &mut moq_net::track::Producer, sequence: u64| {
-			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap().unwrap();
+			let mut group = track
+				.create_group(moq_net::group::Info { start: sequence })
+				.unwrap()
+				.unwrap();
 			group.write_frame(ts(sequence * 10_000), Bytes::new()).unwrap();
 			group.finish().unwrap();
 		};
@@ -6484,7 +6512,10 @@ mod tests {
 			Container::Legacy(crate::container::Kind::Data),
 		);
 		for sequence in 0..256 {
-			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap().unwrap();
+			let mut group = track
+				.create_group(moq_net::group::Info { start: sequence })
+				.unwrap()
+				.unwrap();
 			Container::Legacy(crate::container::Kind::Data)
 				.write(
 					&mut group,

@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { Duration, yieldNow } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { Signal } from "@moq/signals";
+import { defined } from "./defined.test-util.ts";
 import { FrameTooLarge, StreamCode, StreamError } from "./error.ts";
 import { encodable } from "./flate/group.ts";
 import { Producer } from "./group.ts";
@@ -9,7 +10,6 @@ import { hooks, type Replacement } from "./internal.ts";
 import { textFrame } from "./mock.ts";
 import { Timestamp } from "./time.ts";
 import { Producer as TrackProducer } from "./track.ts";
-import { defined } from "./defined.test-util.ts";
 
 const dec = new TextDecoder();
 

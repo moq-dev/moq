@@ -3417,7 +3417,10 @@ mod test {
 		let mut subscriber = producer.subscribe(None);
 
 		let write = |producer: &mut track::Producer, key: u64| {
-			let mut group = producer.create_group(crate::group::Info { start: key }).unwrap().unwrap();
+			let mut group = producer
+				.create_group(crate::group::Info { start: key })
+				.unwrap()
+				.unwrap();
 			group.write_frame(group.key_time(), b"x".to_vec()).unwrap();
 			group.finish().unwrap();
 		};
@@ -3454,7 +3457,10 @@ mod test {
 		);
 
 		let write = |producer: &mut track::Producer, key: u64| {
-			let mut group = producer.create_group(crate::group::Info { start: key }).unwrap().unwrap();
+			let mut group = producer
+				.create_group(crate::group::Info { start: key })
+				.unwrap()
+				.unwrap();
 			group.write_frame(group.key_time(), b"x".to_vec()).unwrap();
 			group.finish().unwrap();
 		};
@@ -3480,7 +3486,8 @@ mod test {
 		// The last group is 6 (exclusive 7), but only group 5 has been produced so far.
 		producer
 			.create_group(group::Info { start: 5 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		producer.finish_at(track::Position::group(7)).unwrap();
@@ -3502,7 +3509,8 @@ mod test {
 		// then the track finishes.
 		producer
 			.create_group(group::Info { start: 6 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		match recv_next(&mut subscriber, false).await.unwrap() {
@@ -3558,7 +3566,8 @@ mod test {
 
 		producer
 			.create_group(group::Info { start: 2 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		match recv_next(&mut subscriber, false).await.unwrap() {
@@ -3569,7 +3578,8 @@ mod test {
 		// Group 1 lands after group 2 was already served.
 		producer
 			.create_group(group::Info { start: 1 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		match recv_next(&mut subscriber, false).now_or_never() {

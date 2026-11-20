@@ -2,9 +2,9 @@ import { expect, onTestFinished, spyOn, test } from "bun:test";
 import { Duration } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { type Group, Error as NetError, StreamCode, Time, Track } from "@moq/net";
+import { defined } from "../defined.test-util.ts";
 import { Consumer, type Read } from "./consumer.ts";
 import { encodeFrame, Format } from "./legacy.ts";
-import { defined } from "../defined.test-util.ts";
 
 function setup(maxDelay = 100) {
 	const clock = new Manual();

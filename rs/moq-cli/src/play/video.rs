@@ -864,7 +864,8 @@ mod tests {
 		let write = |sequence, stamps: Vec<u64>| {
 			let mut group = published
 				.create_group(moq_net::group::Info { start: sequence })
-				.unwrap().unwrap();
+				.unwrap()
+				.unwrap();
 			let frames: Vec<_> = stamps
 				.into_iter()
 				.enumerate()
@@ -1303,7 +1304,8 @@ mod tests {
 		let write = |sequence: u64| {
 			let mut group = published
 				.create_group(moq_net::group::Info { start: sequence })
-				.unwrap().unwrap();
+				.unwrap()
+				.unwrap();
 			format().write(&mut group, &[frame(sequence * 100, true)]).unwrap();
 			group.finish().unwrap();
 		};

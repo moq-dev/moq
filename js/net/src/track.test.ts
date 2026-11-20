@@ -3,6 +3,7 @@ import { Duration, Instant, Wall, yieldNow } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { race } from "@moq/signals";
 import { DEFAULT_EXPIRY } from "./cache.ts";
+import { defined } from "./defined.test-util.ts";
 import { ProtocolViolation, Skipped, StreamCode, StreamError, TimestampMismatch, TooFarBehind } from "./error.ts";
 import type { Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { Version as IetfVersion } from "./ietf/version.ts";
@@ -21,7 +22,6 @@ import {
 } from "./track.ts";
 import { unwanted } from "./util/demand.ts";
 import { LIVE, rangesStart, union } from "./window.ts";
-import { defined } from "./defined.test-util.ts";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();

@@ -1,4 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
+import { defined } from "../defined.test-util.ts";
 import { StreamCode } from "../error.ts";
 import { Producer as Group } from "../group.ts";
 import { hooks } from "../internal.ts";
@@ -7,7 +8,6 @@ import { Producer as Track } from "../track.ts";
 import { Decoder } from "./decoder.ts";
 import { Encoder } from "./encoder.ts";
 import { encodable } from "./group.ts";
-import { defined } from "../defined.test-util.ts";
 
 const payload = new TextEncoder().encode("one shared compression window ".repeat(100));
 

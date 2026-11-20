@@ -827,7 +827,10 @@ mod tests {
 		.unwrap();
 		let wire = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
 		let write = |sequence, stamps: &[u64]| {
-			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap().unwrap();
+			let mut group = track
+				.create_group(moq_net::group::Info { start: sequence })
+				.unwrap()
+				.unwrap();
 			let frames: Vec<_> = stamps
 				.iter()
 				.enumerate()
@@ -1243,7 +1246,10 @@ mod tests {
 		.unwrap();
 		let wire = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
 		let write = |sequence, stamps: &[u64]| {
-			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap().unwrap();
+			let mut group = track
+				.create_group(moq_net::group::Info { start: sequence })
+				.unwrap()
+				.unwrap();
 			let frames: Vec<_> = stamps
 				.iter()
 				.enumerate()
@@ -1530,7 +1536,8 @@ mod tests {
 			landed.push(Instant::now());
 			let mut group = track
 				.create_group(moq_net::group::Info { start: sequence as u64 })
-				.unwrap().unwrap();
+				.unwrap()
+				.unwrap();
 			wire.write(
 				&mut group,
 				&[moq_mux::container::Frame {

@@ -6476,9 +6476,8 @@ impl OpenGroup {
 		// Stats (groups/frames/bytes) are counted in the model as the group is written,
 		// through the tagged `track::Producer`.
 		// A stream for a group the copy already holds is refused: the model has one producer per group.
-		let create = |track: &mut track::Producer| {
-			track.create_group(group::Info { start: key })?.ok_or(Error::Duplicate)
-		};
+		let create =
+			|track: &mut track::Producer| track.create_group(group::Info { start: key })?.ok_or(Error::Duplicate);
 
 		loop {
 			match self.step {
@@ -17289,7 +17288,12 @@ mod stitch_tests {
 				let dynamic = run.track.requests();
 				let consumer = run.track.consume();
 				run.track.start_at(last + 1).unwrap();
-				run.track.create_group((last + 1).into()).unwrap().unwrap().finish().unwrap();
+				run.track
+					.create_group((last + 1).into())
+					.unwrap()
+					.unwrap()
+					.finish()
+					.unwrap();
 				// From group 0, which a time start names whatever is held, so the history below
 				// the feed is asked as a miss rather than looked up.
 				let mut reading = consumer

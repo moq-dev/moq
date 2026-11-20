@@ -2,12 +2,12 @@ import { expect, test } from "bun:test";
 import { Duration, yieldNow } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import * as cache from "./cache.ts";
+import { defined } from "./defined.test-util.ts";
 import { StreamCode, StreamError, TooFarBehind } from "./error.ts";
 import { hooks, staleHole } from "./internal.ts";
 import { groupsOf } from "./mock.ts";
 import { Timestamp } from "./time.ts";
 import { Producer as TrackProducer } from "./track.ts";
-import { defined } from "./defined.test-util.ts";
 
 // Run `fn` on a manual clock, stepped in milliseconds.
 async function withClock(fn: (clock: { advance: (ms: number) => Promise<void> }) => Promise<void> | void) {

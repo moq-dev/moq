@@ -46,7 +46,10 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 /// Four frames starting at `key` seconds, so a group created late still starts
 /// below the one after it.
 fn write_group(track: &moq_net::track::Producer, key: u64) {
-	let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap().unwrap();
+	let mut group = track
+		.create_group(moq_net::group::Info { start: key })
+		.unwrap()
+		.unwrap();
 	for frame in 0..4 {
 		let timestamp = Timestamp::from_millis(key * 1000 + frame).unwrap();
 		group.write_frame(timestamp, &b"x"[..]).unwrap();

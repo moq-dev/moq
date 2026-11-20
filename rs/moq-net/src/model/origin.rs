@@ -15274,7 +15274,8 @@ mod tests {
 		let mut group = rig
 			.incumbent_track
 			.create_group(crate::group::Info { start: 5 })
-			.unwrap().unwrap();
+			.unwrap()
+			.unwrap();
 		group.write_frame(group.key_time(), b"five".as_ref()).unwrap();
 		group.finish().unwrap();
 		assert_eq!(rig.subscription.recv_group().await.unwrap().unwrap().start, 5);

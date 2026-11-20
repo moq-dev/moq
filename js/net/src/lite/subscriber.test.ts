@@ -7,6 +7,7 @@ import type { Grant } from "../auth.ts";
 import type { AuthSession } from "../auth_session.ts";
 import { Viewers } from "../bandwidth.ts";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
+import { defined } from "../defined.test-util.ts";
 import {
 	error,
 	fromTransport,
@@ -63,7 +64,6 @@ import {
 import { Minted, Subscriber } from "./subscriber.ts";
 import { Track, TrackInfo } from "./track.ts";
 import { hasLengthFirst, Version, versionName } from "./version.ts";
-import { defined } from "../defined.test-util.ts";
 
 test("closing the subscriber suppresses probe stream warnings", async () => {
 	let readable!: ReadableStreamDefaultController<Uint8Array>;

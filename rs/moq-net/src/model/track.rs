@@ -12702,7 +12702,8 @@ mod test {
 		let producer = track_producer("test", Info::default());
 		producer
 			.create_group(group::Info { start: 0 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		let open = producer.create_group(group::Info { start: 1 }).unwrap().unwrap();
@@ -12876,7 +12877,8 @@ mod test {
 		let waiter = kio::Waiter::noop();
 		producer
 			.create_group(group::Info { start: 1 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		assert!(feed.poll_group(0, &waiter).is_pending());
@@ -12978,7 +12980,8 @@ mod test {
 		framed.finish().unwrap();
 		producer
 			.create_group(group::Info { start: 5 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		producer.finish_at(Position::group(6)).unwrap();
@@ -14459,7 +14462,8 @@ mod test {
 		let waiter = kio::Waiter::noop();
 		producer
 			.create_group(group::Info { start: high })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		let Poll::Ready(Ok(Some(group))) = subscriber.poll_recv_group(&waiter) else {
@@ -14472,7 +14476,8 @@ mod test {
 			elapse(&producer, cache::DEFAULT_EXPIRY + Duration::from_secs(1));
 			producer
 				.create_group(group::Info { start: key })
-				.unwrap().unwrap()
+				.unwrap()
+				.unwrap()
 				.finish()
 				.unwrap();
 			// Below the reader's floor: never handed out.
@@ -17649,7 +17654,8 @@ mod test {
 		// Nothing below the floor is waited for, and a group above it reads at once.
 		producer
 			.create_group(group::Info { start: 3 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		assert_eq!(subscriber.assert_group().start, 3);
@@ -18441,7 +18447,8 @@ mod test {
 		// Arrive: seq 5, then seq 3.
 		producer
 			.create_group(group::Info { start: 5 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 
@@ -18450,7 +18457,8 @@ mod test {
 		// Seq 3 arrives late; max_key is still 5 (at front).
 		producer
 			.create_group(group::Info { start: 3 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 
@@ -18468,7 +18476,8 @@ mod test {
 		// Seq 2 arrives late, triggering eviction.
 		producer
 			.create_group(group::Info { start: 2 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 
@@ -18705,12 +18714,14 @@ mod test {
 		let mut producer = track_producer("test", Info::timed());
 		producer
 			.create_group(group::Info { start: 0 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		producer
 			.create_group(group::Info { start: 2 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		producer.finish_at(Position::group(4)).unwrap();
@@ -18801,7 +18812,8 @@ mod test {
 		let mut ordered = producer.subscribe(replay()).ordered();
 		producer
 			.create_group(group::Info { start: 1 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		let finished = producer.finish().unwrap();
@@ -18968,7 +18980,8 @@ mod test {
 		let mut producer = track_producer("test", Info::timed());
 		producer
 			.create_group(group::Info { start: 5 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 
@@ -18994,7 +19007,8 @@ mod test {
 		// The trailing group arrives (below the boundary), then the track completes.
 		producer
 			.create_group(group::Info { start: 6 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		assert_eq!(consumer.assert_group().start, 6);
@@ -19016,7 +19030,8 @@ mod test {
 		for key in 0..2 {
 			producer
 				.create_group(group::Info { start: key })
-				.unwrap().unwrap()
+				.unwrap()
+				.unwrap()
 				.finish()
 				.unwrap();
 		}
@@ -19241,7 +19256,8 @@ mod test {
 			producer.start_at(0).unwrap();
 			producer
 				.create_group(group::Info { start: 1 })
-				.unwrap().unwrap()
+				.unwrap()
+				.unwrap()
 				.finish()
 				.unwrap();
 			assert_eq!(arrival.assert_group().start, 1);
@@ -19292,7 +19308,8 @@ mod test {
 			producer.finish_at(Position::group(2)).unwrap();
 			producer
 				.create_group(group::Info { start: arrived })
-				.unwrap().unwrap()
+				.unwrap()
+				.unwrap()
 				.finish()
 				.unwrap();
 			assert_eq!(arrival.assert_group().start, arrived);
@@ -19305,7 +19322,8 @@ mod test {
 
 			producer
 				.create_group(group::Info { start: missing })
-				.unwrap().unwrap()
+				.unwrap()
+				.unwrap()
 				.finish()
 				.unwrap();
 			assert_eq!(arrival.assert_group().start, missing);
@@ -19328,7 +19346,8 @@ mod test {
 			elapse(&producer, grace / 2);
 			producer
 				.create_group(group::Info { start: key })
-				.unwrap().unwrap()
+				.unwrap()
+				.unwrap()
 				.finish()
 				.unwrap();
 			assert_eq!(arrival.assert_group().start, key);
@@ -19368,7 +19387,8 @@ mod test {
 		producer.finish_at(Position::group(2)).unwrap();
 		producer
 			.create_group(group::Info { start: 1 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		assert_eq!(arrival.assert_group().start, 1);
@@ -19386,7 +19406,8 @@ mod test {
 		producer.finish_at(Position::group(3)).unwrap();
 		producer
 			.create_group(group::Info { start: 2 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		assert_eq!(arrival.assert_group().start, 2);
@@ -19415,7 +19436,8 @@ mod test {
 		let mut arrival = producer.subscribe(replay());
 		producer
 			.create_group(group::Info { start: 0 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		assert_eq!(arrival.assert_group().start, 0);
@@ -19430,7 +19452,8 @@ mod test {
 		let mut arrival = producer.subscribe(replay());
 		producer
 			.create_group(group::Info { start: 1 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		assert_eq!(arrival.assert_group().start, 1);
@@ -19499,7 +19522,8 @@ mod test {
 		for key in [1, 0] {
 			producer
 				.create_group(group::Info { start: key })
-				.unwrap().unwrap()
+				.unwrap()
+				.unwrap()
 				.finish()
 				.unwrap();
 		}
@@ -19523,7 +19547,8 @@ mod test {
 			for key in [0, 2] {
 				producer
 					.create_group(group::Info { start: key })
-					.unwrap().unwrap()
+					.unwrap()
+					.unwrap()
 					.finish()
 					.unwrap();
 				assert_eq!(arrival.assert_group().start, key);
@@ -19550,7 +19575,8 @@ mod test {
 		for key in [0, 1] {
 			producer
 				.create_group(group::Info { start: key })
-				.unwrap().unwrap()
+				.unwrap()
+				.unwrap()
 				.finish()
 				.unwrap();
 			assert_eq!(arrival.assert_group().start, key);
@@ -19558,7 +19584,8 @@ mod test {
 		elapse(&producer, cache::DEFAULT_EXPIRY + Duration::from_secs(1));
 		producer
 			.create_group(group::Info { start: 2 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		assert!(!producer.state.read().lookup.contains_key(&0), "group 0 was evicted");
@@ -19706,7 +19733,8 @@ mod test {
 		for key in [0, 2] {
 			producer
 				.create_group(group::Info { start: key })
-				.unwrap().unwrap()
+				.unwrap()
+				.unwrap()
 				.finish()
 				.unwrap();
 		}
@@ -19731,7 +19759,8 @@ mod test {
 		let demand = producer.demand();
 		producer
 			.create_group(group::Info { start: 5 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		producer.finish_at(Position::group(6)).unwrap();
@@ -19772,7 +19801,8 @@ mod test {
 		for key in 0..2 {
 			producer
 				.create_group(group::Info { start: key })
-				.unwrap().unwrap()
+				.unwrap()
+				.unwrap()
 				.finish()
 				.unwrap();
 		}
@@ -19801,7 +19831,8 @@ mod test {
 		let mut consumer = producer.subscribe(None);
 		producer
 			.create_group(group::Info { start: 0 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		drop(producer);
@@ -19935,7 +19966,8 @@ mod test {
 		for key in 0..2 {
 			producer
 				.create_group(group::Info { start: key })
-				.unwrap().unwrap()
+				.unwrap()
+				.unwrap()
 				.finish()
 				.unwrap();
 		}
@@ -19959,7 +19991,8 @@ mod test {
 		for key in [0, 2] {
 			producer
 				.create_group(group::Info { start: key })
-				.unwrap().unwrap()
+				.unwrap()
+				.unwrap()
 				.finish()
 				.unwrap();
 		}
@@ -19985,7 +20018,8 @@ mod test {
 		let producer = track_producer("test", Info::timed());
 		producer
 			.create_group(group::Info { start: 1 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		let producer = producer.finish().unwrap();
@@ -21160,7 +21194,8 @@ mod test {
 		// Seq 5 arrives first.
 		producer
 			.create_group(group::Info { start: 5 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		let group = consumer
@@ -21174,19 +21209,22 @@ mod test {
 		// Seq 3 arrives late, skipped because 3 <= 5.
 		producer
 			.create_group(group::Info { start: 3 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		// Seq 4 arrives late and is also skipped.
 		producer
 			.create_group(group::Info { start: 4 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		// Seq 7 arrives and is returned, after the groups it passed are reported.
 		producer
 			.create_group(group::Info { start: 7 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 
@@ -21202,12 +21240,14 @@ mod test {
 		// Seq 3 arrives first, then seq 5. Both should be returned in arrival order.
 		producer
 			.create_group(group::Info { start: 3 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		producer
 			.create_group(group::Info { start: 5 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 
@@ -21242,7 +21282,8 @@ mod test {
 		for key in [u64::MAX - 2, u64::MAX - 1] {
 			producer
 				.create_group(group::Info { start: key })
-				.unwrap().unwrap()
+				.unwrap()
+				.unwrap()
 				.finish()
 				.unwrap();
 		}
@@ -21291,7 +21332,8 @@ mod test {
 				for key in [1, 2] {
 					producer
 						.create_group(group::Info { start: key })
-						.unwrap().unwrap()
+						.unwrap()
+						.unwrap()
 						.finish()
 						.unwrap();
 				}
@@ -21324,7 +21366,8 @@ mod test {
 			for key in [1, 3] {
 				producer
 					.create_group(group::Info { start: key })
-					.unwrap().unwrap()
+					.unwrap()
+					.unwrap()
 					.finish()
 					.unwrap();
 			}
@@ -21349,7 +21392,8 @@ mod test {
 		for key in [1, 2] {
 			producer
 				.create_group(group::Info { start: key })
-				.unwrap().unwrap()
+				.unwrap()
+				.unwrap()
 				.finish()
 				.unwrap();
 		}
@@ -21374,7 +21418,8 @@ mod test {
 			for key in [2, 1] {
 				producer
 					.create_group(group::Info { start: key })
-					.unwrap().unwrap()
+					.unwrap()
+					.unwrap()
 					.finish()
 					.unwrap();
 			}
@@ -21405,12 +21450,14 @@ mod test {
 		// Out-of-order arrivals: seq 5 first, then seq 3.
 		producer
 			.create_group(group::Info { start: 5 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		producer
 			.create_group(group::Info { start: 3 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 
@@ -21437,7 +21484,8 @@ mod test {
 		for s in 0..6 {
 			producer
 				.create_group(group::Info { start: s })
-				.unwrap().unwrap()
+				.unwrap()
+				.unwrap()
 				.finish()
 				.unwrap();
 		}
@@ -21465,7 +21513,8 @@ mod test {
 		for s in 0..6 {
 			producer
 				.create_group(group::Info { start: s })
-				.unwrap().unwrap()
+				.unwrap()
+				.unwrap()
 				.finish()
 				.unwrap();
 		}
@@ -21497,7 +21546,8 @@ mod test {
 		for s in 0..3 {
 			producer
 				.create_group(group::Info { start: s })
-				.unwrap().unwrap()
+				.unwrap()
+				.unwrap()
 				.finish()
 				.unwrap();
 		}
@@ -21511,12 +21561,14 @@ mod test {
 		consumer.set_range(..2);
 		producer
 			.create_group(group::Info { start: 3 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		producer
 			.create_group(group::Info { start: 4 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		assert!(
@@ -21541,28 +21593,33 @@ mod test {
 		// Out-of-order arrivals all within the cap.
 		producer
 			.create_group(group::Info { start: 2 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		producer
 			.create_group(group::Info { start: 5 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		producer
 			.create_group(group::Info { start: 3 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		// One beyond the cap; should be held even though it arrived in the middle.
 		producer
 			.create_group(group::Info { start: 8 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		producer
 			.create_group(group::Info { start: 4 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 
@@ -21591,7 +21648,8 @@ mod test {
 		for s in 0..3 {
 			producer
 				.create_group(group::Info { start: s })
-				.unwrap().unwrap()
+				.unwrap()
+				.unwrap()
 				.finish()
 				.unwrap();
 		}
@@ -21627,17 +21685,20 @@ mod test {
 		// Reordered burst: the beyond-cap group arrives first.
 		producer
 			.create_group(group::Info { start: 2 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		producer
 			.create_group(group::Info { start: 0 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		producer
 			.create_group(group::Info { start: 1 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 
@@ -21657,31 +21718,36 @@ mod test {
 		consumer.set_range(2..=2);
 		producer
 			.create_group(group::Info { start: 2 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		assert_eq!(consumer.recv_group().await.unwrap().unwrap().start, 2);
 		consumer.set_range(..4);
 		producer
 			.create_group(group::Info { start: 1 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		producer
 			.create_group(group::Info { start: 3 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		assert_eq!(consumer.recv_group().await.unwrap().unwrap().start, 3);
 		consumer.set_range(0..=4);
 		producer
 			.create_group(group::Info { start: 0 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		producer
 			.create_group(group::Info { start: 4 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		assert_eq!(consumer.recv_group().await.unwrap().unwrap().start, 4);
@@ -21698,7 +21764,8 @@ mod test {
 		consumer.set_range(..1);
 		producer
 			.create_group(group::Info { start: 1 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		assert!(
@@ -21709,7 +21776,8 @@ mod test {
 		consumer.set_range(2..);
 		producer
 			.create_group(group::Info { start: 2 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		assert_eq!(
@@ -21730,7 +21798,8 @@ mod test {
 
 		producer
 			.create_group(group::Info { start: 0 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		assert_eq!(consumer.recv_group().now_or_never().unwrap().unwrap().unwrap().start, 0);
@@ -21761,12 +21830,14 @@ mod test {
 		let mut consumer = producer.subscribe(replay());
 		producer
 			.create_group(group::Info { start: 0 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		producer
 			.create_group(group::Info { start: 1 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 
@@ -21794,7 +21865,8 @@ mod test {
 		for s in 0..3 {
 			producer
 				.create_group(group::Info { start: s })
-				.unwrap().unwrap()
+				.unwrap()
+				.unwrap()
 				.finish()
 				.unwrap();
 		}
@@ -21871,7 +21943,8 @@ mod test {
 		));
 		producer
 			.create_group(group::Info { start: u64::MAX - 1 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		assert!(matches!(producer.append_next(), Err(Error::BoundsExceeded(_))));
@@ -22473,7 +22546,8 @@ mod test {
 		// can find it settled.
 		producer
 			.create_group(group::Info { start: 1 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		producer.finish_at(Position::group(2)).unwrap();
@@ -23212,7 +23286,8 @@ mod test {
 			// The feed delivered group 1 and never group 0, which a fetch asks of the source.
 			producer
 				.create_group(group::Info { start: 1 })
-				.unwrap().unwrap()
+				.unwrap()
+				.unwrap()
 				.finish()
 				.unwrap();
 
@@ -27284,7 +27359,8 @@ mod test {
 				3 => {
 					producer
 						.create_group(group::Info { start: key })
-						.unwrap().unwrap()
+						.unwrap()
+						.unwrap()
 						.finish()
 						.unwrap();
 				}
@@ -27466,7 +27542,8 @@ mod test {
 		req.accept(None).unwrap().expect("a fresh group").finish().unwrap();
 		producer
 			.create_group(group::Info { start: 0 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		let mut late = producer.subscribe(replay().with_ranges([Range::live()]));
@@ -27549,7 +27626,9 @@ mod test {
 	/// A group `key` whose first frame lands at `millis`, or the write's refusal. A
 	/// refused group is aborted, as a caller would.
 	fn start_at_millis(producer: &Producer, key: u64, millis: u64) -> Result<group::Producer> {
-		let mut group = producer.create_group(group::Info { start: key })?.expect("a fresh group");
+		let mut group = producer
+			.create_group(group::Info { start: key })?
+			.expect("a fresh group");
 		match group.write_frame(Timestamp::from_millis(millis).unwrap(), &b"x"[..]) {
 			Ok(()) => Ok(group),
 			Err(err) => {
@@ -27890,7 +27969,8 @@ mod test {
 		for key in 0..1000 {
 			producer
 				.create_group(group::Info { start: key })
-				.unwrap().unwrap()
+				.unwrap()
+				.unwrap()
 				.finish()
 				.unwrap();
 		}
@@ -29043,7 +29123,8 @@ mod test {
 		cut.abort(Error::App(5)).unwrap();
 		producer
 			.create_group(group::Info { start: 1 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		let _producer = producer.finish().unwrap();
@@ -29082,7 +29163,8 @@ mod test {
 			group.abort(err.clone()).unwrap();
 			producer
 				.create_group(group::Info { start: 1 })
-				.unwrap().unwrap()
+				.unwrap()
+				.unwrap()
 				.finish()
 				.unwrap();
 			assert_eq!(subscriber.assert_group().start, 1, "{err:?}");
@@ -29102,7 +29184,8 @@ mod test {
 		cut.abort(Error::App(5)).unwrap();
 		producer
 			.create_group(group::Info { start: 1 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		let _live = producer.create_group(group::Info { start: 2 }).unwrap().unwrap();
@@ -29139,7 +29222,8 @@ mod test {
 		let mut ordered = producer.subscribe(replay()).ordered().with_range(..1);
 		producer
 			.create_group(group::Info { start: 0 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		let mut cut = producer.create_group(group::Info { start: 1 }).unwrap().unwrap();
@@ -29228,7 +29312,12 @@ mod test {
 		for order in [Order::Ascending, Order::Descending] {
 			let producer = track_producer("test", Info::timed());
 			let _groups: Vec<_> = (2..10)
-				.map(|second| producer.create_group(group::Info { start: second * 1000 }).unwrap().unwrap())
+				.map(|second| {
+					producer
+						.create_group(group::Info { start: second * 1000 })
+						.unwrap()
+						.unwrap()
+				})
 				.collect();
 			let since = [Range {
 				start: Anchor::Time(2500),

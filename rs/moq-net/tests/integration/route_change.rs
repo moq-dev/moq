@@ -980,7 +980,11 @@ async fn redundant_pair_follows_the_next_instance(version: &str, loss: Loss) {
 	let mut rx = read(first.track("video").unwrap().subscribe(prefs.clone()).await.unwrap());
 	let write = |replicas: &mut Vec<Replica>, key: u64| {
 		for replica in replicas.iter_mut() {
-			let mut group = replica.track.create_group(moq_net::group::Info { start: key }).unwrap().unwrap();
+			let mut group = replica
+				.track
+				.create_group(moq_net::group::Info { start: key })
+				.unwrap()
+				.unwrap();
 			group
 				.write_frame(
 					Timestamp::from_micros(1_000_000 + key * 1_000).unwrap(),

@@ -1362,7 +1362,8 @@ mod tests {
 		track.start_at(HOUR).unwrap();
 		track
 			.create_group(moq_net::group::Info { start: HOUR })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		let waiter = kio::Waiter::noop();

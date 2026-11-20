@@ -1658,7 +1658,11 @@ mod tests {
 		}
 
 		fn write(&mut self, start: u64, micros: u64) {
-			let mut group = self.track.create_group(moq_net::group::Info { start }).unwrap().unwrap();
+			let mut group = self
+				.track
+				.create_group(moq_net::group::Info { start })
+				.unwrap()
+				.unwrap();
 			hang::container::Frame {
 				timestamp: moq_net::Timestamp::from_micros(micros).unwrap(),
 				payload: bytes::Bytes::from_static(b"frame"),

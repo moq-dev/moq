@@ -82,7 +82,10 @@ async fn a_newcomer_on_a_warm_relay_gets_the_backfill() {
 			)
 			.unwrap();
 		for key in 0..GROUPS {
-			let mut group = source.create_group(moq_net::group::Info { start: key }).unwrap().unwrap();
+			let mut group = source
+				.create_group(moq_net::group::Info { start: key })
+				.unwrap()
+				.unwrap();
 			group
 				.write_frame(Timestamp::from_millis(key * 1000).unwrap(), &b"x"[..])
 				.unwrap();

@@ -3,6 +3,7 @@ import { Duration } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { accept } from "./connection/accept.ts";
 import { connect } from "./connection/connect.ts";
+import { defined } from "./defined.test-util.ts";
 import { ConnectTimeout } from "./error.ts";
 import { Producer as GroupProducer } from "./group.ts";
 import { Connection as LiteConnection } from "./lite/connection.ts";
@@ -10,7 +11,6 @@ import { ALPN_03, ALPN_04, Version } from "./lite/version.ts";
 import { createMockTransportPair } from "./mock.ts";
 import { Timestamp } from "./time.ts";
 import { Producer as TrackProducer } from "./track.ts";
-import { defined } from "./defined.test-util.ts";
 
 test("group read handles independently replay buffered and future frames", async () => {
 	const group = new GroupProducer(0n);

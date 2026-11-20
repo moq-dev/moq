@@ -4,10 +4,10 @@ import { Manual } from "@moq/clock/test";
 import * as Container from "@moq/hang/container";
 import { Time, Track, Varint } from "@moq/net";
 import { Signal } from "@moq/signals";
+import { defined } from "../defined.test-util.ts";
 import { STRETCH } from "../sync";
 import { maxDelay, target } from "./latency";
 import { AudioRingBuffer } from "./ring-buffer";
-import { defined } from "../defined.test-util.ts";
 
 // Replay recorded-shape arrival traces through the ring and count what a listener would hear:
 // quanta rendered short (an underrun) and samples the ring threw away (a skip). The ring is sized

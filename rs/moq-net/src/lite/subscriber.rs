@@ -5701,7 +5701,11 @@ mod tests {
 			group.finish().map(drop)
 		};
 		let arrive = |serving: &mut ServeLoop, key| {
-			let group = serving.serving.create_group(crate::group::Info { start: key }).unwrap().unwrap();
+			let group = serving
+				.serving
+				.create_group(crate::group::Info { start: key })
+				.unwrap()
+				.unwrap();
 			(group, Reading::open(&tail, Some(key), now()))
 		};
 
@@ -5806,7 +5810,11 @@ mod tests {
 				groups: first..last + 1,
 			})
 		};
-		let mut group = serving.serving.create_group(crate::group::Info { start: 5 }).unwrap().unwrap();
+		let mut group = serving
+			.serving
+			.create_group(crate::group::Info { start: 5 })
+			.unwrap()
+			.unwrap();
 		group
 			.write_frame(crate::Timestamp::from_millis(5).unwrap(), &b"x"[..])
 			.unwrap();
@@ -8193,7 +8201,11 @@ mod tests {
 		let established = h.wire().len();
 
 		let arrive = |serving: &ServeLoop, key| {
-			let mut group = serving.serving.create_group(group::Info { start: key }).unwrap().unwrap();
+			let mut group = serving
+				.serving
+				.create_group(group::Info { start: key })
+				.unwrap()
+				.unwrap();
 			for frame in [&b"key"[..], b"abc", b"d"] {
 				group
 					.write_frame(crate::Timestamp::unscaled(group.start), frame)

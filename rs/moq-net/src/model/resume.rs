@@ -5530,7 +5530,11 @@ mod test {
 		group.write_frame(ts(0), b"a".as_ref()).unwrap();
 		group.finish().unwrap();
 		// Groups 1 and 2 are missing below the end: a fetch asks for them.
-		a.create_group(group::Info { start: 3 }).unwrap().unwrap().finish().unwrap();
+		a.create_group(group::Info { start: 3 })
+			.unwrap()
+			.unwrap()
+			.finish()
+			.unwrap();
 		let last = a.consume();
 		let a = a.finish().unwrap();
 		routes.end(Ok(()));
@@ -10566,7 +10570,8 @@ mod test {
 					let mut sub = subscribe(&logical, Duration::from_secs(if widen { 2 } else { 10 }));
 					let b = copy();
 					// Both routes carry the same content, including the unfinished payload.
-					let writers = [&a, &b].map(|source| source.create_group(group::Info { start: 0 }).unwrap().unwrap());
+					let writers =
+						[&a, &b].map(|source| source.create_group(group::Info { start: 0 }).unwrap().unwrap());
 					// Each group's writer, held open by its unfinished frame when chunked.
 					let _writers: Vec<_> = writers
 						.into_iter()

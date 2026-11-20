@@ -2033,7 +2033,8 @@ mod test {
 		// The new consumer should receive the new group, which continues past the first's.
 		producer2
 			.create_group(crate::group::Info { start: 1 })
-			.unwrap().unwrap()
+			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		track2.assert_group();

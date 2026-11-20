@@ -21755,8 +21755,18 @@ mod range_tests {
 			"video",
 			crate::track::Info::timed(),
 		);
-		track.create_group(group::Info { start: 7 }).unwrap().unwrap().finish().unwrap();
-		track.create_group(group::Info { start: 8 }).unwrap().unwrap().finish().unwrap();
+		track
+			.create_group(group::Info { start: 7 })
+			.unwrap()
+			.unwrap()
+			.finish()
+			.unwrap();
+		track
+			.create_group(group::Info { start: 8 })
+			.unwrap()
+			.unwrap()
+			.finish()
+			.unwrap();
 
 		// Next Group against a live edge of 8 asks for 9, which does not exist yet.
 		let mut subscriber = track.subscribe(None);
@@ -21767,7 +21777,12 @@ mod range_tests {
 		);
 
 		// The group it asked for is what it gets once published.
-		track.create_group(group::Info { start: 9 }).unwrap().unwrap().finish().unwrap();
+		track
+			.create_group(group::Info { start: 9 })
+			.unwrap()
+			.unwrap()
+			.finish()
+			.unwrap();
 		let group = subscriber.recv_group().await.unwrap().expect("group 9");
 		assert_eq!(group.start, 9);
 	}

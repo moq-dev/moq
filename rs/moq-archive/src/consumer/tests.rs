@@ -1136,7 +1136,10 @@ async fn a_reader_follows_a_real_dvr_through_its_rotations() {
 		sleep(Duration::from_millis(1)).await;
 	}
 	let write = |sequence: u64| {
-		let mut group = video.create_group(group::Info { start: sequence * 1000 }).unwrap().unwrap();
+		let mut group = video
+			.create_group(group::Info { start: sequence * 1000 })
+			.unwrap()
+			.unwrap();
 		let pts = Timestamp::from_millis(sequence * 1000).unwrap();
 		group.write_frame(pts, Bytes::from(format!("{sequence}"))).unwrap();
 		group.finish().unwrap();

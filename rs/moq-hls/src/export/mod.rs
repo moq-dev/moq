@@ -3630,7 +3630,8 @@ mod tests {
 			let mut group = self
 				.track
 				.create_group(moq_net::group::Info { start: sequence })
-				.unwrap().unwrap();
+				.unwrap()
+				.unwrap();
 			for index in 0..frames.max(1) {
 				let micros = (pts_ms + index * INTERVAL.as_millis() as u64 / 10) * 1_000;
 				let frame = vp8_frame(micros, index == 0);
@@ -3655,7 +3656,8 @@ mod tests {
 			let mut group = self
 				.track
 				.create_group(moq_net::group::Info { start: sequence })
-				.unwrap().unwrap();
+				.unwrap()
+				.unwrap();
 			let mut payload = KEYFRAME.to_vec();
 			payload[6..8].copy_from_slice(&width.to_le_bytes());
 			payload[8..10].copy_from_slice(&height.to_le_bytes());
@@ -3678,7 +3680,8 @@ mod tests {
 			let mut group = self
 				.track
 				.create_group(moq_net::group::Info { start: sequence })
-				.unwrap().unwrap();
+				.unwrap()
+				.unwrap();
 			let frame = vp8_frame(pts_ms * 1_000, true);
 			hang::container::Frame {
 				timestamp: frame.timestamp,
@@ -4065,7 +4068,10 @@ mod tests {
 				.step_by(100)
 				.map(|ms| vp8_frame(ms * 1_000, ms == pts_ms))
 				.collect();
-			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap().unwrap();
+			let mut group = track
+				.create_group(moq_net::group::Info { start: sequence })
+				.unwrap()
+				.unwrap();
 			let bytes = muxer.fragment(sequence as u32, &frames, None).unwrap();
 			group.write_frame(frames[0].timestamp, bytes).unwrap();
 			group.finish().unwrap();

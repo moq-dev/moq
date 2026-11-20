@@ -1736,7 +1736,10 @@ async fn resume_overlap(shape: ResumeShape, ordered: bool) -> ResumeOverlap {
 			.unwrap();
 		let track = broadcast.broadcast().create_track("0", timed()).unwrap();
 		for key in order {
-			let mut group = track.create_group(moq_net::group::Info { start: key as u64 }).unwrap().unwrap();
+			let mut group = track
+				.create_group(moq_net::group::Info { start: key as u64 })
+				.unwrap()
+				.unwrap();
 			group.write_frame(at(key as u64), b"f".as_ref()).unwrap();
 			group.finish().unwrap();
 		}

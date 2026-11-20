@@ -5429,7 +5429,10 @@ fn a_group_request_nobody_reads_is_withdrawn() {
 		let producer = state.publish.track_producer(Id::try_from(track).unwrap()).unwrap();
 		let reader = producer.subscribe(ascending(7, None));
 		producer.start_at(10).unwrap();
-		let mut group = producer.create_group(moq_net::group::Info { start: 10 }).unwrap().unwrap();
+		let mut group = producer
+			.create_group(moq_net::group::Info { start: 10 })
+			.unwrap()
+			.unwrap();
 		group
 			.write_frame(moq_net::Timestamp::from_millis(10).unwrap(), &b"live"[..])
 			.unwrap();
@@ -5474,7 +5477,10 @@ fn a_rejected_group_request_binds_only_its_readers() {
 		let mut state = State::lock();
 		let producer = state.publish.track_producer(Id::try_from(track).unwrap()).unwrap();
 		producer.start_at(10).unwrap();
-		let mut group = producer.create_group(moq_net::group::Info { start: 10 }).unwrap().unwrap();
+		let mut group = producer
+			.create_group(moq_net::group::Info { start: 10 })
+			.unwrap()
+			.unwrap();
 		group
 			.write_frame(moq_net::Timestamp::from_millis(10).unwrap(), &b"live"[..])
 			.unwrap();
