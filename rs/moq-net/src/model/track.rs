@@ -1308,6 +1308,11 @@ impl Lent {
 		self.loans.remove(&key)?.head()
 	}
 
+	/// The head lent for group `key`, left in place, unless its pool reclaimed it.
+	fn peek(&self, key: u64) -> Option<Arc<group::Head>> {
+		self.loans.get(&key)?.head()
+	}
+
 	fn retain(&mut self, keep: impl Fn(u64) -> bool) {
 		self.loans.retain(|key, _| keep(*key));
 	}
@@ -1317,6 +1322,11 @@ impl TrackState {
 	/// The head lent for group `key`, taken; see [`Consumer::lend_head`].
 	fn take_lent(&self, key: u64) -> Option<Arc<group::Head>> {
 		self.lent.lock().unwrap_or_else(PoisonError::into_inner).take(key)
+	}
+
+	/// The head lent for group `key`, left for an arrival that can adopt it.
+	fn peek_lent(&self, key: u64) -> Option<Arc<group::Head>> {
+		self.lent.lock().unwrap_or_else(PoisonError::into_inner).peek(key)
 	}
 
 	/// Hold `head` for group `key` until it arrives, or return the copies of it already
@@ -4622,10 +4632,18 @@ impl Producer {
 		}
 		// Before any reader can see it, so none takes it without the head (lock order is track
 		// then group), settled once the track lock is released. A whole copy needs no loan,
-		// and drops it.
-		let adopted = match state.take_lent(info.start) {
-			Some(head) if start != 0 => group.handle().take_head(&head),
-			_ => None,
+		// and drops it; one the head does not reach leaves it for a wider arrival.
+		let adopted = if start == 0 {
+			state.take_lent(info.start);
+			None
+		} else {
+			let adopted = state
+				.peek_lent(info.start)
+				.and_then(|head| group.handle().take_head(&head));
+			if adopted.is_some() {
+				state.take_lent(info.start);
+			}
+			adopted
 		};
 		state.cap(&group.handle())?;
 		state.commit_group(&group.handle());
@@ -16497,6 +16515,36 @@ mod test {
 		consumer.lend_head(5, prefix.consume().handoff().head().unwrap());
 		assert_eq!(consumer.peek_group(5).expect("cached").first_frame(), 2);
 
+		let Received::Group(wider) = producer.create_group_at(group::Info { start: 5 }, 1).unwrap() else {
+			panic!("a copy from frame 1 displaces one from frame 2");
+		};
+		assert_eq!(
+			consumer.peek_group(5).expect("cached").first_frame(),
+			0,
+			"whole once visible"
+		);
+		drop((late, wider));
+	}
+
+	/// An arrival the head does not reach leaves the loan for a later, wider one.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_arrival_that_cannot_adopt_leaves_the_loan() {
+		let producer = track_producer("test", Info::timed());
+		let consumer = producer.consume();
+		let mut prefix = group::Info { start: 5 }.produce();
+		prefix
+			.write_frame(Timestamp::from_millis(5).unwrap(), bytes::Bytes::new())
+			.unwrap();
+		consumer.lend_head(5, prefix.consume().handoff().head().unwrap());
+		let Received::Group(late) = producer.create_group_at(group::Info { start: 5 }, 2).unwrap() else {
+			panic!("nothing else holds group 5");
+		};
+		assert_eq!(
+			consumer.peek_group(5).expect("cached").first_frame(),
+			2,
+			"one frame does not reach frame 2"
+		);
 		let Received::Group(wider) = producer.create_group_at(group::Info { start: 5 }, 1).unwrap() else {
 			panic!("a copy from frame 1 displaces one from frame 2");
 		};

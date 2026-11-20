@@ -207,13 +207,17 @@ impl Producer {
 			return (demand, None);
 		};
 		let mut ranges = Vec::new();
+		let mut heads = Vec::with_capacity(readers.len());
 		for reader in &readers {
+			// Ranges and resume under one lock, so a reader moving on between them cannot ask
+			// a range from one group and resume past another.
 			let mut reader = reader.lock().unwrap_or_else(PoisonError::into_inner);
 			let preferences: Vec<_> = reader.subscription.read().ranges().collect();
 			ranges.extend(reader.resumed(&preferences).into_iter().map(|(_, range)| range));
+			heads.push(reader.held_at(reader.newest));
 		}
 		demand.ranges = ranges;
-		let resume = resume_of(&readers);
+		let resume = resume_of(heads);
 		demand.resume = resume.as_ref().map(|(resume, _)| *resume);
 		(demand, resume.map(|(_, head)| head))
 	}
@@ -241,12 +245,20 @@ impl Producer {
 					..Default::default()
 				};
 				let mut ranges = Vec::new();
+				let mut heads = Vec::with_capacity(readers.len());
 				for reader in &readers {
-					ranges.extend(fold.fold(reader, None).into_iter().map(|(_, range)| range));
+					// Ranges and resume under one lock, as `asked` takes them.
+					let mut locked = reader.lock().unwrap_or_else(PoisonError::into_inner);
+					ranges.extend(
+						fold.fold_locked(reader, &mut locked, None)
+							.into_iter()
+							.map(|(_, range)| range),
+					);
+					heads.push(locked.held_at(locked.newest));
 				}
 				// Asked whole, it resumes where the readers got to, as a new copy is asked. An edit
 				// keeps that resume, as a reader's own copy does.
-				let resume = resume_of(&readers);
+				let resume = resume_of(heads);
 				if let Some((resume, head)) = &resume {
 					held.sub.lend_head(resume.group, head.clone());
 				}
@@ -1437,12 +1449,8 @@ impl Candidate {
 /// Where every reader resumes the newest group it handed out, past the frames a copy holds
 /// of it, the lowest of those and the frames; `None` unless every reader resumes, as in a
 /// track's own demand.
-fn resume_of(readers: &[Arc<Mutex<Reader>>]) -> Option<(Position, Arc<group::Head>)> {
-	(readers.iter())
-		.map(|reader| {
-			let reader = reader.lock().unwrap_or_else(PoisonError::into_inner);
-			reader.held_at(reader.newest)
-		})
+fn resume_of(held: Vec<Option<(Position, Arc<group::Head>)>>) -> Option<(Position, Arc<group::Head>)> {
+	(held.into_iter())
 		.reduce(|a, b| a.zip(b).map(|(a, b)| if b.0 < a.0 { b } else { a }))
 		.flatten()
 }
@@ -1492,6 +1500,16 @@ impl Fold {
 	/// each under the held key it now has.
 	fn fold(&mut self, reader: &Arc<Mutex<Reader>>, keys: Option<BTreeSet<u64>>) -> Vec<(u64, track::Range)> {
 		let mut locked = reader.lock().unwrap_or_else(PoisonError::into_inner);
+		self.fold_locked(reader, &mut locked, keys)
+	}
+
+	/// [`Self::fold`] with `reader` already locked as `locked`.
+	fn fold_locked(
+		&mut self,
+		reader: &Arc<Mutex<Reader>>,
+		locked: &mut Reader,
+		keys: Option<BTreeSet<u64>>,
+	) -> Vec<(u64, track::Range)> {
 		let (preferences, revision) = {
 			let current = locked.subscription.read();
 			let preferences: Vec<_> = match &keys {
@@ -1504,7 +1522,6 @@ impl Fold {
 			(preferences, current.revision)
 		};
 		let resumed = locked.resumed(&preferences);
-		drop(locked);
 		let folded = self
 			.readers
 			.entry(Arc::as_ptr(reader) as usize)
