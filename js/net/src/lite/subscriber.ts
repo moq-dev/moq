@@ -1512,6 +1512,18 @@ export class Subscriber {
 
 			// Only a received SUBSCRIBE_FINISH, or before lite-05 a FIN, declares the track's end: a
 			// subscription nobody wants anymore is a released copy, not finished content.
+			// A reader still waiting on its publisher to start a relative range asks on a subscription of
+			// its own before the finished copy closes, one at a time: an answer moving the readers changes
+			// the asks again. Once closed, a later reader asks with a copy of its own.
+			if (tailSettled && entry.end !== undefined && hasRanges(this.version)) {
+				const asksChanged = hooks.asksChanged(producer);
+				for (let asked: number | undefined; hooks.asks(producer).length > 0; ) {
+					// The same asks after an answer are ones it could not settle.
+					if (asked === asksChanged.peek()) break;
+					asked = asksChanged.peek();
+					await this.#askFinished(broadcast, consumed, entry);
+				}
+			}
 			if (tailSettled && entry.stream.kind === "finished") producer.finish();
 			hooks.releaseTrack(producer);
 		} catch (err) {
@@ -2927,6 +2939,142 @@ export class Subscriber {
 		return stale ? "stale" : "ask";
 	}
 
+	// Ask where the relative starts `copy`'s readers wait on begin, on a lite-07 SUBSCRIBE of its own:
+	// the subscription that fed the finished copy is over, so nothing else can carry them, and the copy
+	// never counts them over the groups it holds. Its SUBSCRIBE_START answers them, and the groups it
+	// delivers land in the copy, so a reader gets what a cold copy would. It FINs once the publisher
+	// declared the end and every group from the lowest start up to it is accounted for and read.
+	// Rejects when it fails, leaving its readers no answer. Mirrors the Rust `ask::Ask`.
+	async #askFinished(broadcast: Path.Valid, consumed: Consumed, copy: SubscribeEntry): Promise<void> {
+		const producer = copy.track;
+		const id = this.#subscribeNext++;
+		const ranges = wireRanges(hooks.asks(producer));
+		const terms = { ...hooks.requested(producer).peek(), order: "ascending" as const };
+		const msg = this.#withRanges(
+			this.#subscribeMessage(id, broadcast, consumed, producer.name, terms, ranges),
+			ranges,
+		);
+		// The asks that don't fit wait for those sent to be answered, which retires them.
+		if (msg.ranges) {
+			const fields = await this.#subscribeFields(msg, msg);
+			msg.ranges = Fit.take(Fit.budget(fields, 0n, msg.ranges.length), msg.ranges);
+		}
+		const entry: SubscribeEntry = {
+			track: producer,
+			staleBudget: msg.maxDelay ?? NO_MAX_DELAY,
+			compress: copy.compress,
+			timescale: copy.timescale,
+			tail: new Tail({ grace: () => hooks.tailGrace(producer) }),
+			requested: msg.startGroup,
+			floor: msg.startGroup,
+			asked: ranges,
+			live: new LiveRanges(this.version, msg.ranges ?? []),
+			starts: new Map(),
+			edges: new Map(),
+			sent: 0,
+			// Its responses are read here, which owns this stream's end.
+			stream: { kind: "setup" },
+			fillIds: new Set(),
+			askIds: new Set(),
+			fillGroups: [],
+			fillsChanged: new Signal(0),
+		};
+		this.#subscribes.set(id, entry);
+		let stream: Stream | undefined;
+		// Whether our FIN went out: the answer arrived and every group it owes is in, so a reset after
+		// it, such as the publisher cutting a response short, costs nothing.
+		let fin = false;
+		try {
+			if (this.#denied(broadcast)) throw unauthorized(broadcast);
+			const opened = await this.#exchange(
+				{ sendOrder: sendOrder({ priority: msg.priority }), version: this.version },
+				async (stream) => {
+					await stream.writer.u53(StreamId.Subscribe);
+					await msg.encode(stream.writer, this.version);
+					return stream;
+				},
+				consumed.valid,
+				new Deadline(),
+			);
+			stream = opened;
+			const finish = async () => {
+				const covered = () =>
+					entry.start !== undefined &&
+					entry.end !== undefined &&
+					entry.tail.covers(entry.start ?? entry.end, entry.end);
+				await entry.tail.settle(covered, hooks.trackReleased(producer));
+				fin = true;
+				opened.writer.close();
+			};
+			for (;;) {
+				const resp = await decodeSubscribeResponseMaybe(opened.reader, this.version);
+				if (!resp) {
+					// The publisher FINs in reply to ours, or once it finished the track.
+					if (fin || entry.end !== undefined) break;
+					throw new ProtocolViolation("ask subscribe ended without SUBSCRIBE_FINISH");
+				}
+				if ("start" in resp) {
+					if (entry.start !== undefined || BigInt(resp.start.starts.length) !== entry.live.initial)
+						throw new ProtocolViolation("unexpected ask SUBSCRIBE_OK");
+					const edge = resp.start.largest?.position.group;
+					resp.start.starts.forEach((start, index) => {
+						entry.starts.set(BigInt(index), start);
+						entry.edges.set(BigInt(index), edge);
+					});
+					entry.start = resp.start.starts.reduce<bigint | null>(
+						(lowest, start) =>
+							start === undefined || (lowest !== null && lowest <= start) ? lowest : start,
+						null,
+					);
+					entry.tail.touch();
+					hooks.relativeStarts(producer, this.#counted(entry));
+				} else if ("finish" in resp) {
+					if (entry.end !== undefined) throw new ProtocolViolation("duplicate SUBSCRIBE_FINISH");
+					entry.end = resp.finish.group;
+					entry.tail.touch();
+					void finish().catch(() => {});
+				} else if ("drop" in resp) {
+					entry.tail.account(resp.drop.start, resp.drop.end);
+				} else if ("skip" in resp) {
+					this.#skipped(entry, resp.skip.start, resp.skip.end, "SUBSCRIBE_SKIP");
+				} else {
+					throw new ProtocolViolation("unexpected ask subscribe response");
+				}
+			}
+			opened.close();
+		} catch (err) {
+			closeViolation(this.#quic, err);
+			stream?.abort(error(err));
+			if (!fin) throw err;
+		} finally {
+			this.#subscribes.delete(id);
+			entry.tail.close();
+		}
+	}
+
+	// Where the publisher started each of `entry`'s live ranges counting back, which the copy, holding
+	// only part of the track, can't count, with the latest group it counted back from.
+	#counted(entry: SubscribeEntry): [bigint, CountedStart, bigint | undefined][] {
+		const relative: [bigint, CountedStart, bigint | undefined][] = [];
+		for (const id of entry.live.ids()) {
+			const range = entry.live.get(id);
+			const back = range?.start?.relative;
+			if (back === undefined || !entry.starts.has(id)) continue;
+			// Undefined for a range with no group to deliver.
+			const at = entry.starts.get(id);
+			const latest = entry.edges.get(id);
+			// With no group to deliver, the start lies at or past the range's exclusive end: an
+			// absolute end names it, a time end includes its group, and an open one the latest.
+			const end = range?.end;
+			const past =
+				end?.absolute ??
+				(end?.time !== undefined ? end.time + 1n : latest === undefined ? undefined : latest + 1n);
+			const start = at !== undefined ? { at } : past !== undefined ? { past } : undefined;
+			if (start) relative.push([back, start, latest]);
+		}
+		return relative;
+	}
+
 	// Declare where a lite-07 feed starts: the lowest start the live ranges report, or the
 	// requested floor, pending, while SUBSCRIBE_START or a range's SUBSCRIBE_STARTED has yet to
 	// say where one starts. Mirrors the Rust `SubStream::declare`.
@@ -2935,32 +3083,17 @@ export class Subscriber {
 		// time start there resolves to when the copy holds no group at it, and one asked from the
 		// oldest group as asked from 0. Mirrors the Rust `SubStream::report_starts`.
 		const times: [bigint, bigint][] = [];
-		// And each one counting back, which the copy, holding only part of the track, can't count,
-		// with the latest group it counted back from.
-		const relative: [bigint, CountedStart, bigint | undefined][] = [];
 		for (const id of entry.live.ids()) {
 			const range = entry.live.get(id);
 			if (range === undefined || !entry.starts.has(id)) continue;
 			// One from the oldest group is asked from group 0.
 			const time = range.start === undefined ? 0n : (range.start.time ?? range.start.absolute);
-			const back = range.start?.relative;
 			// Undefined for a range with no group to deliver.
 			const at = entry.starts.get(id);
 			if (time !== undefined && at !== undefined) times.push([time, at]);
-			else if (back !== undefined) {
-				const latest = entry.edges.get(id);
-				// With no group to deliver, the start lies at or past the range's exclusive end: an
-				// absolute end names it, a time end includes its group, and an open one the latest.
-				const end = range?.end;
-				const past =
-					end?.absolute ??
-					(end?.time !== undefined ? end.time + 1n : latest === undefined ? undefined : latest + 1n);
-				const start = at !== undefined ? { at } : past !== undefined ? { past } : undefined;
-				if (start) relative.push([back, start, latest]);
-			}
 		}
 		hooks.timeStarts(entry.track, times);
-		hooks.relativeStarts(entry.track, relative);
+		hooks.relativeStarts(entry.track, this.#counted(entry));
 
 		let start: bigint | null = null;
 		let pending = entry.start === undefined;

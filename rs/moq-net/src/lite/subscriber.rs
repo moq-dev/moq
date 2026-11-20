@@ -21,6 +21,7 @@ use crate::tail::{self, Reading, Settle, Tail};
 
 use kio::Lock;
 
+mod ask;
 mod fills;
 use fills::{FillAsk, RangeFills};
 mod fit;
@@ -6064,13 +6065,14 @@ mod tests {
 			crate::track::Info::timed(),
 		);
 		let track = serve_loop.serving.clone();
-		let finished = FinishedServe {
-			serving: Some(serve_loop.serving),
-			demand: serve_loop.demand,
-			dynamic: serve_loop.dynamic.fetches_only(),
-			fetches: serve_loop.fetches,
-			closed: serve_loop.closed,
-		};
+		let finished = FinishedServe::new(
+			&serve,
+			serve_loop.serving,
+			serve_loop.demand,
+			serve_loop.dynamic.fetches_only(),
+			serve_loop.fetches,
+			serve_loop.closed,
+		);
 		// A reader holds the finished copy.
 		let _reader = broadcast
 			.consume()
@@ -11608,13 +11610,37 @@ struct FinishedServe {
 	dynamic: track::Requests,
 	fetches: kio::Tasks<FillServeRun>,
 	closed: Transport,
+	/// Lite-07: the subscription asking where the readers' relative starts begin, which no
+	/// other subscription is left to carry.
+	ask: Option<ask::Ask>,
+	/// Whether the readers' asks changed since the last [`ask::Ask`] went out, or none has.
+	ask_due: bool,
 }
 
 impl FinishedServe {
+	fn new(
+		serve: &TrackServe,
+		serving: track::Producer,
+		demand: track::Demand,
+		dynamic: track::Requests,
+		fetches: kio::Tasks<FillServeRun>,
+		closed: Transport,
+	) -> Self {
+		Self {
+			serving: Some(serving),
+			demand,
+			dynamic,
+			fetches,
+			closed,
+			ask: None,
+			ask_due: serve.subscriber.version.has_ranges(),
+		}
+	}
+
 	/// Ready once nobody reads the copy and no fetch is in flight, or the session closed.
 	fn poll(&mut self, serve: &TrackServe, waiter: &kio::Waiter) -> Poll<()> {
 		loop {
-			let Some(serving) = &self.serving else {
+			let Some(serving) = &mut self.serving else {
 				return Poll::Ready(());
 			};
 			match self.dynamic.poll_requested_groups(waiter) {
@@ -11631,6 +11657,29 @@ impl FinishedServe {
 				Poll::Pending => {}
 			}
 			let _ = self.fetches.poll(waiter);
+			// A reader waiting on the publisher to start a relative range asks on a subscription
+			// of its own, one at a time: an answer moving the readers changes the asks again.
+			if serve.subscriber.version.has_ranges() && serving.poll_asks_changed(waiter).is_ready() {
+				self.ask_due = true;
+			}
+			if let Some(ask) = &mut self.ask
+				&& let Poll::Ready(res) = ask.poll(waiter)
+			{
+				self.ask = None;
+				// Its readers have no answer coming, as when a live copy's subscription fails.
+				if let Err(err) = res {
+					if let Some(serving) = self.serving.take() {
+						let _ = serving.abort(err);
+					}
+					return Poll::Ready(());
+				}
+			}
+			if self.ask.is_none() && std::mem::take(&mut self.ask_due) {
+				self.ask = ask::Ask::new(serve, serving);
+				if self.ask.is_some() {
+					continue;
+				}
+			}
 			// The groups it already holds stay readable, its clean end too once settled.
 			if let Poll::Ready(err) = self.closed.poll_closed(waiter) {
 				if let Some(serving) = self.serving.take() {
@@ -12063,13 +12112,14 @@ impl TrackServeRun {
 								// A reader's miss in flight is settled by the tail instead.
 								let mut fetches = serve_loop.fetches;
 								fetches.retain(|run| run.fill.is_fetch());
-								self.finished = Some(FinishedServe {
-									serving: Some(serve_loop.serving),
-									demand: serve_loop.demand,
-									dynamic: serve_loop.dynamic.fetches_only(),
+								self.finished = Some(FinishedServe::new(
+									&self.serve,
+									serve_loop.serving,
+									serve_loop.demand,
+									serve_loop.dynamic.fetches_only(),
 									fetches,
-									closed: serve_loop.closed,
-								});
+									serve_loop.closed,
+								));
 							}
 							if let Some(datagrams) = &mut self.datagrams {
 								datagrams.end(Ok(()));

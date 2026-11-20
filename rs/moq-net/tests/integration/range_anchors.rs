@@ -612,6 +612,78 @@ async fn a_relative_start_never_resolves_against_the_groups_a_copy_holds() {
 	}
 }
 
+/// A finished copy has no upstream subscription left to carry a later reader's relative start,
+/// so the copy asks again with a subscription of its own, and the reader still reads what the
+/// publisher counts back to rather than nothing: the same groups a cold copy reads. Mirrors the
+/// `@moq/net` `integration: lite-07 starts a relative start on a finished copy where the
+/// publisher does`.
+#[kio::test]
+async fn a_relative_start_on_a_finished_copy_reads_the_publishers_groups() {
+	// Whether the copy holds every group the reader counts back to or only some.
+	for from in [0, 9] {
+		let publisher = produce_origin(1);
+		let broadcast = publisher
+			.route("room", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let track = broadcast
+			.broadcast()
+			.create_track(
+				"data",
+				Info::default().with_timescale(Timescale::MILLI).with_max_age(FOREVER),
+			)
+			.unwrap();
+		broadcast.announce().unwrap();
+		for key in 0..=10 {
+			let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
+			group.write_frame(millis(key), &b"x"[..]).unwrap();
+			group.finish().unwrap();
+		}
+		let _track = track.finish().unwrap();
+
+		let subscriber = produce_origin(2);
+		let _pair = peer("moq-lite-07-wip".parse::<Version>().unwrap(), &publisher, &subscriber).await;
+		let remote = kio::clock::timeout(TIMEOUT, subscriber.consume().follow("room", None).unwrap().available())
+			.await
+			.expect("resolve timeout")
+			.expect("broadcast resolves")
+			.unwrap();
+		let subscribe = |ranges: Vec<Range>| {
+			let subscription = Subscription::default()
+				.with_delay(Delay::default().with_max(FOREVER))
+				.with_order(Order::Ascending)
+				.with_ranges(ranges);
+			remote.track("data").unwrap().subscribe(subscription)
+		};
+		let read = async |reader: &mut moq_net::track::Subscriber| {
+			let mut read = Vec::new();
+			while let Some(group) = kio::clock::timeout(TIMEOUT, reader.recv_group())
+				.await
+				.expect("group timeout")
+				.unwrap()
+			{
+				read.push(group.start);
+			}
+			read.sort_unstable();
+			read
+		};
+
+		// The first reader holds the finished copy.
+		let mut first = kio::clock::timeout(TIMEOUT, subscribe(vec![range(Anchor::Time(from), None)]))
+			.await
+			.expect("subscribe timeout")
+			.unwrap();
+		assert_eq!(read(&mut first).await, (from..=10).collect::<Vec<_>>());
+		// Its subscription is over by now.
+		kio::clock::sleep(Duration::from_secs(1)).await;
+		let mut later = kio::clock::timeout(TIMEOUT, subscribe(vec![range(Anchor::Relative(5), None)]))
+			.await
+			.expect("subscribe timeout")
+			.unwrap();
+		assert_eq!(read(&mut later).await, [5, 6, 7, 8, 9, 10], "holding from {from}");
+		drop(first);
+	}
+}
+
 /// A time end between two groups ends an ordered read once the publisher created a group past
 /// it: handing that group out would have passed the starts between. Through the publisher's own
 /// origin that is its own state. A lite-07 copy ends there only on what its wire proves, the

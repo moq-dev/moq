@@ -333,8 +333,9 @@ A relative anchor counts the groups back from the latest one. It resolves on
 the hop that publishes the track, and over moq-lite-07, which carries it
 upstream and reports the live edge. A moq-lite-07 copy never counts a relative
 start over the groups it happens to hold: it takes the start its publisher
-reports for the same range, asking upstream for one when none has, so a reader
-reads the same groups from a warm relay as from a cold one. A Rust
+reports for the same range, asking upstream for one when none has, even once the
+track ended, so a reader reads the same groups from a warm relay as from a cold
+one. A Rust
 moq-transport copy counts a relative anchor back by group ID from the Largest
 Object its live join reports, as a joining FETCH does. Older moq-lite versions refuse relative anchors
 other than the live and default starts. Older moq-lite versions and

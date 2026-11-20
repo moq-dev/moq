@@ -10027,11 +10027,27 @@ impl Cursor {
 		(misses.lowest_wanted(), misses.has_filled(), misses.is_waiting())
 	}
 
-	/// Whether a fill still owes this cursor a group, so the end of the feed is not its end.
+	/// Whether a fill still owes this cursor a group, or a relative start waits on its
+	/// publisher's report while a producer remains to record it, as a finished copy asks for
+	/// one: either way the end of the feed is not its end.
 	fn awaits_fill(&self) -> bool {
-		self.misses.as_ref().is_some_and(|misses| misses.is_waiting())
+		self.awaits_report()
+			|| self.misses.as_ref().is_some_and(|misses| misses.is_waiting())
 			|| self.filter.window.lookups().next().is_some()
 			|| self.heads.as_ref().is_some_and(|heads| !heads.fetching.is_empty())
+	}
+
+	/// Whether a relative start waits on its publisher's report while a producer remains to
+	/// record it.
+	fn awaits_report(&self) -> bool {
+		self.filter.window.is_counting() && !self.state.read().outcome.is_released()
+	}
+
+	/// Wake on the track's next change while [`Self::awaits_report`], which a report is.
+	fn park_on_report(&self, waiter: &kio::Waiter) {
+		if self.awaits_report() {
+			let _ = self.state.poll(waiter, |_| Poll::<()>::Pending);
+		}
 	}
 
 	/// Move past the group `peeked` found and hand it out: the exact group, even if its
@@ -10099,7 +10115,9 @@ impl Cursor {
 						continue;
 					}
 					let Some((producer, found_index)) = ready!(polled)? else {
-						// The feed ended, but a fill still owes a group. Its answer wakes us.
+						// The feed ended, but a fill still owes a group. Its answer wakes us, as the
+						// report a relative start waits on does.
+						self.park_on_report(waiter);
 						if self.awaits_fill() {
 							return Poll::Pending;
 						}
@@ -10401,7 +10419,9 @@ impl Cursor {
 				continue;
 			}
 			let Some(producer) = ready!(polled)? else {
-				// The feed ended, but a fill still owes a group. Its answer wakes us.
+				// The feed ended, but a fill still owes a group. Its answer wakes us, as the report
+				// a relative start waits on does.
+				self.park_on_report(waiter);
 				if self.awaits_fill() {
 					return Poll::Pending;
 				}
@@ -11205,10 +11225,11 @@ impl Subscriber {
 		let unplaced = |window: &Window, floor| window.is_waiting_above(floor) || window.is_counting();
 		if unplaced(&cursor.filter.window, cursor.min_key) {
 			// Registered before syncing again, so a change placing it after this wakes it. A
-			// closed track places it at once, since nothing more can arrive.
+			// closed track places it at once, since nothing more can arrive, except a relative
+			// start a finished copy still asks its publisher for.
 			let closed = cursor.state.poll(waiter, |_| Poll::<()>::Pending).is_ready();
 			cursor.sync();
-			if !closed && unplaced(&cursor.filter.window, cursor.min_key) {
+			if (!closed || cursor.awaits_report()) && unplaced(&cursor.filter.window, cursor.min_key) {
 				return Poll::Pending;
 			}
 		}
@@ -16478,9 +16499,17 @@ mod test {
 			Some((9, Some(9)))
 		);
 
-		// Nothing counts over the groups held once the copy ends either.
-		let _finished = producer.finish().unwrap();
+		// Nothing counts over the groups held once the copy ends either, and its reader waits for
+		// the report rather than end with nothing: a finished copy asks on a subscription of its
+		// own.
+		producer.finish_shared().unwrap();
 		assert_eq!(placed(&mut later), None);
+		assert!(later.recv_group().now_or_never().is_none(), "waits for the report");
+		assert!(later.poll_start(&kio::Waiter::noop()).is_pending(), "so does its start");
+		assert!(producer.asks().contains(&back(2).ranges[0]), "and asks for it");
+		producer.relative_starts([(2, CountedStart::At(9), 11)]);
+		assert_eq!(read(&mut later), vec![9, 10, 11]);
+		assert!(matches!(later.recv_group().now_or_never(), Some(Ok(None))), "then ends");
 	}
 
 	proptest::proptest! {

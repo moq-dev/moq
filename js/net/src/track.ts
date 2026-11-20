@@ -5064,6 +5064,9 @@ export class Subscriber {
 		if (this.#askFills(start, end ?? UNBOUNDED, drift) !== undefined) return { kind: "idle" };
 		// A time start still looked up may yet take in a group held already.
 		if (this.#window.lookups().length > 0) return { kind: "idle" };
+		// So may a relative start its publisher has yet to report, which a finished copy still asks
+		// for. Mirrors the Rust `Cursor::awaits_report`.
+		if (this.#window.isCounting()) return { kind: "idle" };
 		// A bounded window ends once nothing in it is left to deliver, as in Rust.
 		if (this.#exhausted()) return { kind: "done" };
 		if (!this.#complete() || this.#starting(groups)) return { kind: "idle" };
@@ -5708,6 +5711,8 @@ export class Subscriber {
 		const end = this.#state.end.peek()?.at;
 		// A time start still looked up may yet take in a group held already.
 		if (this.#window.lookups().length > 0) return { kind: "idle" };
+		// So may a relative start its publisher has yet to report, while a producer remains to record it.
+		if (this.#window.isCounting() && this.#state.closed.peek() === undefined) return { kind: "idle" };
 		if (this.#exhausted()) {
 			this.#passEnd();
 			return { kind: "done" };
