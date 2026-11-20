@@ -147,7 +147,9 @@ datagram) at a time, so the output keeps the source's rate and two exporters
 emit the same bytes. A run whose successor has not arrived when it comes due,
 or is more than 100 ms on, goes out whole, so the timing matches between
 exporters only where each had the successor: a `--delay` longer than the
-arrival jitter by a PCR interval. It takes neither
+arrival jitter by a PCR interval. Runs that come due while stdout blocks go
+out together once it drains, so a stalled reader sees a burst whatever the
+delay. It takes neither
 `--follow`, `--stitch` nor `--mux-rate`. Only the hang catalog names the
 track, so an `.msf` broadcast needs `--catalog-format hang`. The encoding is in
 [draft-lcurley-moq-mpegts](/draft/moq-mpegts).
@@ -251,7 +253,7 @@ details each grader and its negative controls.
 | Scrambled input groups and paces like its clear twin | [`passthrough_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/passthrough_test.rs) `a_scrambled_twin_groups_and_paces_the_same` | PR |
 | `randomAccess` false for several programs or video streams | [`passthrough_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/passthrough_test.rs) `two_programs_on_one_clock_publish_no_random_access`, `two_video_streams_in_one_program_publish_no_random_access` | PR |
 | Clock: wrap, flagged jump, step back refused, 192/204-byte packets refused | [`passthrough_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/passthrough_test.rs) | PR |
-| Export releases each run byte-identical on its own PCR, whatever the delivery skew, spread across its PCR interval | [`release_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/release_test.rs) `a_capture_is_released_byte_identical_on_its_own_pcr`, `releases_fed_with_different_skew_write_the_same_bytes`, `an_object_is_spread_across_its_pcr_interval`, `runs_written_in_one_burst_fail_the_grade` | PR |
+| Export releases each run byte-identical on its own PCR, whatever the delivery skew, spread across its PCR interval where the next is buffered within 100 ms | [`release_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/release_test.rs) `a_capture_is_released_byte_identical_on_its_own_pcr`, `releases_fed_with_different_skew_write_the_same_bytes`, `an_object_is_spread_across_its_pcr_interval`, `runs_written_in_one_burst_fail_the_grade` | PR |
 
 ### Acquisition and loss
 
