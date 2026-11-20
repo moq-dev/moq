@@ -4,8 +4,9 @@
 //! the track is held, and on a copy received over a wire that tells it enough to resolve
 //! the anchor the same way. Every wire carries a time anchor, as the group ID with that key,
 //! but only lite-07 resolves a time start to the group containing it: an older wire's
-//! publisher starts at the first group at or after it. A moq-transport copy resolves a
-//! relative anchor from the Largest Object its live join reports. A copy received over any
+//! publisher starts at the first group at or after it. A moq-transport copy counts a
+//! relative anchor back by group ID from the Largest Object its live join reports. A copy
+//! received over any
 //! other wire refuses a relative anchor other than the live start instead of resolving it
 //! against the part of the track it happens to hold.
 
@@ -142,6 +143,17 @@ async fn each_wire_refuses_only_the_anchors_it_drops() {
 			// not the group containing it.
 			if let (false, Anchor::Time(start)) = (resolves, range.start) {
 				held.retain(|&key| key >= start);
+			}
+			// A moq-transport copy counts a relative anchor back by group ID, as a joining FETCH
+			// does, never over the groups it holds: these groups' IDs are their starts, a second
+			// apart, so two back from 4000 is 3998.
+			if transport {
+				if let Anchor::Relative(back) = range.start {
+					held.retain(|&key| key >= 4000 - back);
+				}
+				if let Some(Anchor::Relative(back)) = range.end {
+					held.retain(|&key| key <= 4000 - back);
+				}
 			}
 			let mut result = read(version, range).await;
 			// Any other wire carries time anchors and the live start, and drops the rest.
@@ -386,10 +398,11 @@ async fn a_later_relative_start_on_a_partial_copy_reads_only_its_groups() {
 	let _track = track.finish().unwrap();
 }
 
-/// A copy reading a track from its oldest group learns where the publisher's groups start, so
-/// a later reader counting back past them starts there, as the publisher does, rather than
-/// wait on a group below that never arrives. Mirrors the `@moq/net` `integration: lite-07
-/// counts a later relative start back to where the oldest range started`.
+/// A later reader's relative start on a copy reading a track from its oldest group, which
+/// already delivers every group the reader asks for, still asks the publisher where it starts,
+/// and starts there: counting back past group 1, at group 1. Mirrors the `@moq/net`
+/// `integration: lite-07 counts a later relative start back to where the oldest range
+/// started`.
 #[kio::test]
 async fn a_later_relative_start_counts_back_to_where_the_oldest_range_started() {
 	let publisher = produce_origin(1);
@@ -453,4 +466,93 @@ async fn a_later_relative_start_counts_back_to_where_the_oldest_range_started() 
 	);
 	drop(oldest);
 	let _track = track.finish().unwrap();
+}
+
+/// A relative start on a lite-07 copy never resolves against the groups the copy holds: over a
+/// copy holding groups 9 and 10, a reader counting 5 back starts where the publisher counts
+/// to, not at 9. While the subscription that delivered them is live, the copy asks it for the
+/// reader's range, and the publisher counts back from its latest group, 10, to 5. Once it is
+/// gone, the copy subscribes again and the reader waits for that answer, counted back from the
+/// Largest it reports: 11, written while the copy was idle, so 6. Mirrors the `@moq/net`
+/// `integration: lite-07 never resolves a relative start against the groups a copy holds`.
+#[kio::test]
+async fn a_relative_start_never_resolves_against_the_groups_a_copy_holds() {
+	for live in [true, false] {
+		let publisher = produce_origin(1);
+		let broadcast = publisher
+			.route("room", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let track = broadcast
+			.broadcast()
+			.create_track(
+				"data",
+				Info::default().with_timescale(Timescale::MILLI).with_max_age(FOREVER),
+			)
+			.unwrap();
+		broadcast.announce().unwrap();
+		let write = |key: u64| {
+			let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
+			group.write_frame(millis(key), &b"x"[..]).unwrap();
+			group.finish().unwrap();
+		};
+		for key in 0..=10 {
+			write(key);
+		}
+
+		let subscriber = produce_origin(2);
+		let _pair = peer("moq-lite-07-wip".parse::<Version>().unwrap(), &publisher, &subscriber).await;
+		let remote = kio::clock::timeout(TIMEOUT, subscriber.consume().follow("room", None).unwrap().available())
+			.await
+			.expect("resolve timeout")
+			.expect("broadcast resolves")
+			.unwrap();
+		let subscribe = |ranges: Vec<Range>| {
+			let subscription = Subscription::default()
+				.with_delay(Delay::default().with_max(FOREVER))
+				.with_order(Order::Ascending)
+				.with_ranges(ranges);
+			remote.track("data").unwrap().subscribe(subscription)
+		};
+		let read = async |reader: &mut moq_net::track::Subscriber| {
+			let mut read = Vec::new();
+			loop {
+				let group = kio::clock::timeout(TIMEOUT, reader.recv_group())
+					.await
+					.expect("group timeout")
+					.unwrap();
+				match group {
+					Some(group) => read.push(group.start),
+					None => break,
+				}
+			}
+			read.sort_unstable();
+			read
+		};
+
+		// The copy holds groups 9 and 10.
+		let mut first = kio::clock::timeout(TIMEOUT, subscribe(vec![range(Anchor::Time(9), Some(Anchor::Time(10)))]))
+			.await
+			.expect("subscribe timeout")
+			.unwrap();
+		assert_eq!(read(&mut first).await, [9, 10]);
+		let (expected, end) = match live {
+			true => (vec![5, 6, 7, 8, 9, 10], 10),
+			false => {
+				// Its upstream subscription leaves with its last reader, and the track moves on.
+				drop(first);
+				kio::clock::sleep(Duration::from_secs(1)).await;
+				write(11);
+				(vec![6, 7, 8, 9, 10, 11], 11)
+			}
+		};
+		let mut later = kio::clock::timeout(
+			TIMEOUT,
+			subscribe(vec![range(Anchor::Relative(5), Some(Anchor::Time(end)))]),
+		)
+		.await
+		.expect("subscribe timeout")
+		.unwrap();
+		assert_eq!(read(&mut later).await, expected, "live: {live}");
+		let _track = track.finish().unwrap();
+	}
 }

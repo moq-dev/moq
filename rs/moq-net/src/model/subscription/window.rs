@@ -83,11 +83,11 @@ pub(in crate::model) trait Holdings {
 	fn back(&self, latest: u64, back: u64) -> Option<u64>;
 
 	/// Where a range counting `back` groups before `latest`, up to the exclusive `end`, starts,
-	/// which a relative start, but never an end, takes over [`Self::back`]: where the publisher
-	/// reported starting it,
-	/// since a delivery start may sit past the group counted, such as above groups too stale
-	/// for the budget, or [`Containing::Unknown`] while a received copy can count it neither
-	/// that way nor over its own groups yet. `None` counts it with [`Self::back`].
+	/// which a relative start, but never an end, takes over [`Self::back`]: on a received copy,
+	/// where its publisher reported starting one counted from `latest` or a newer group, since
+	/// the copy holds only part of the track and a delivery start may sit past the group
+	/// counted, or [`Containing::Unknown`] until it reports one. `None` counts it with
+	/// [`Self::back`].
 	fn counted_start(&self, latest: u64, back: u64, end: Option<u64>) -> Option<Containing> {
 		let _ = (latest, back, end);
 		None
@@ -193,10 +193,10 @@ pub(in crate::model) struct Window {
 	/// The ranges of a live join whose reach back waits on the groups held to measure the
 	/// live edge, which read nothing meanwhile: a group held is no reason to start at it.
 	reaching: BTreeSet<u64>,
-	/// The ranges whose relative anchor the groups held can't count back to yet (see
-	/// [`Holdings::back`]), which read nothing meanwhile: a group held may sit below where
-	/// the publisher counted to.
-	counting: BTreeSet<u64>,
+	/// The ranges whose relative start waits on its publisher to say where it counted back to
+	/// (see [`Holdings::counted_start`]), each with the latest group it counted from then,
+	/// which read nothing meanwhile: a group held may sit below where the publisher started.
+	counting: BTreeMap<u64, u64>,
 	/// The groups the spans cover, shared with what reads them.
 	groups: Cover,
 	/// The part of `groups` a miss may ask for: see [`Self::missable`].
@@ -268,7 +268,7 @@ impl Window {
 			waiting: BTreeSet::new(),
 			waited: None,
 			reaching: BTreeSet::new(),
-			counting: BTreeSet::new(),
+			counting: BTreeMap::new(),
 			groups: Cover::default(),
 			missable: Cover::default(),
 			covered: None,
@@ -349,9 +349,15 @@ impl Window {
 		self.waiting.last().is_some_and(|&(time, _)| time > floor)
 	}
 
-	/// Whether a relative anchor still waits on the groups held to count back to it.
+	/// Whether a relative start still waits on its publisher to say where it starts.
 	pub fn is_counting(&self) -> bool {
 		!self.counting.is_empty()
+	}
+
+	/// The ranges whose relative start waits on its publisher to say where it starts, which a
+	/// received copy asks its upstream for.
+	pub fn counting(&self) -> impl Iterator<Item = Range> + '_ {
+		self.counting.keys().map(|key| self.ranges[key])
 	}
 
 	/// Resolve what the groups now held settle: relative anchors once `latest` exists, and
@@ -375,12 +381,12 @@ impl Window {
 			}
 			moved = self.spans.len() > placed;
 		}
-		// Counted from the latest group now, as an edit placing them now would: the publisher
-		// counts from its own latest when the range reaches it.
-		if !self.counting.is_empty() && latest.is_some() {
+		// Each from the latest group it first counted from: a report counted from that one or
+		// a newer one starts it.
+		if !self.counting.is_empty() {
 			let placed = self.spans.len();
-			for key in std::mem::take(&mut self.counting) {
-				self.place_range(key, latest, holdings);
+			for (key, since) in std::mem::take(&mut self.counting) {
+				self.place_range(key, Some(since), holdings);
 			}
 			moved |= self.spans.len() > placed;
 		}
@@ -519,11 +525,12 @@ impl Window {
 	}
 
 	/// The keys of the ranges not yet settled, which keep [`Self::is_settled`] false: waiting
-	/// on a first group, on the groups held to place or count back to a start, or on a lookup. Costs those.
+	/// on a first group, on the groups held to place a start, on a publisher to say where a
+	/// relative one starts, or on a lookup. Costs those.
 	pub fn unsettled(&self) -> BTreeSet<u64> {
 		let mut keys = self.pending.clone();
 		keys.extend(self.reaching.iter().copied());
-		keys.extend(self.counting.iter().copied());
+		keys.extend(self.counting.keys().copied());
 		keys.extend(self.waiting.iter().map(|(_, key)| *key));
 		keys.extend(self.looking.iter().map(|(_, key)| *key));
 		keys
@@ -709,8 +716,8 @@ impl Window {
 				self.pending.insert(key);
 				return;
 			}
-			Start::Counting => {
-				self.counting.insert(key);
+			Start::Counting(since) => {
+				self.counting.insert(key, since);
 				return;
 			}
 			// Reads only the groups from its time until the groups held place it; see
@@ -732,8 +739,8 @@ impl Window {
 		self.count(key, Span::new(anchor, start, end, floored, looking), holdings);
 	}
 
-	/// Whether a time start, a join's reach back, or a relative anchor waits on the groups
-	/// held to place it.
+	/// Whether a time start or a join's reach back waits on the groups held to place it, or a
+	/// relative start on its publisher.
 	fn unplaced(&self) -> bool {
 		!self.waiting.is_empty() || !self.reaching.is_empty() || !self.counting.is_empty()
 	}
@@ -894,8 +901,9 @@ enum Start {
 	Waiting,
 	/// Waiting on a latest group, reading everything meanwhile.
 	Pending,
-	/// A relative start the groups held can't count back to yet, reading nothing meanwhile.
-	Counting,
+	/// A relative start counted from this latest group that its publisher has yet to say
+	/// where it starts, reading nothing meanwhile.
+	Counting(u64),
 }
 
 /// Where `anchor` starts a range ending at the exclusive `end`.
@@ -913,7 +921,7 @@ fn start(anchor: Anchor, latest: Option<u64>, end: Option<u64>, holdings: &impl 
 				Containing::Group(group) => Start::At(group, true),
 				// Fewer groups are held than it counts back, so reach back to the oldest.
 				Containing::Before => Start::At(0, false),
-				Containing::Unknown => Start::Counting,
+				Containing::Unknown => Start::Counting(latest),
 			},
 		},
 		// No group starts before 0, so time 0 names group 0 whatever is held.
@@ -989,6 +997,8 @@ mod tests {
 		dropped: u64,
 		/// What a relative start counts back to, when not over the groups held.
 		counted: Option<Containing>,
+		/// The latest group the last relative start was counted from.
+		counted_from: std::cell::Cell<Option<u64>>,
 	}
 
 	impl Keys {
@@ -1035,7 +1045,8 @@ mod tests {
 			self.held.range(..latest).rev().nth(back as usize).copied()
 		}
 
-		fn counted_start(&self, _: u64, _: u64, _: Option<u64>) -> Option<Containing> {
+		fn counted_start(&self, latest: u64, _: u64, _: Option<u64>) -> Option<Containing> {
+			self.counted_from.set(Some(latest));
 			self.counted
 		}
 
@@ -1280,9 +1291,10 @@ mod tests {
 		}
 	}
 
-	/// A relative start the groups held can't count yet reads nothing, rather than every group
-	/// as one waiting on a latest group does, and starts once they can, counted from the
-	/// latest group then. An end still counts over the groups held.
+	/// A relative start its publisher has yet to say where it starts reads nothing, rather than
+	/// every group as one waiting on a latest group does, and starts once it says, counted
+	/// from the latest group it first counted from, however far the live edge moved since.
+	/// An end still counts over the groups held.
 	#[test]
 	fn a_relative_start_reads_nothing_until_counted() {
 		let mut keys = Keys::new([1, 2, 9]);
@@ -1297,12 +1309,9 @@ mod tests {
 		);
 		assert_eq!(window.resolved_key(0), None);
 
-		// Nothing to count from while the latest group is unknown.
 		keys.counted = Some(Containing::Group(7));
-		assert!(!window.settle(None, &keys));
-		assert!(window.is_counting());
-
-		assert!(window.settle(Some(9), &keys));
+		assert!(window.settle(Some(12), &keys));
+		assert_eq!(keys.counted_from.get(), Some(9), "from where it first counted");
 		assert!(window.is_settled() && !window.is_counting());
 		assert_eq!(covered(&window, 0..10), vec![1, 7, 8]);
 		assert_eq!(window.start(), Some(1));
@@ -1314,7 +1323,9 @@ mod tests {
 			.edit([], &[(2, range(Anchor::Relative(3), None))], Some(9), &keys)
 			.unwrap();
 		assert!(window.is_counting());
+		assert_eq!(window.counting().collect::<Vec<_>>(), [range(Anchor::Relative(3), None)]);
 		window.edit([2], &[], Some(9), &keys).unwrap();
+		assert_eq!(window.counting().count(), 0);
 		assert!(window.is_settled());
 
 		// Counting back past every group the track holds reaches back to the oldest.

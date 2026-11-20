@@ -49,6 +49,23 @@ impl Budget {
 		}
 	}
 
+	/// The longest prefix of `ranges` fitting half of what is left, which it then takes: the
+	/// other half stays for the demand and fills, which [`fit`] can only widen so far.
+	pub fn take(&mut self, ranges: Vec<Range>) -> Vec<Range> {
+		let room = self.bytes / 2;
+		let mut used = 0;
+		let mut taken = Vec::new();
+		for range in ranges {
+			match self.cost(&range).map(|cost| used + cost) {
+				Some(next) if next <= room => used = next,
+				_ => break,
+			}
+			taken.push(range);
+		}
+		self.bytes -= used;
+		taken
+	}
+
 	/// What `range` costs, or `None` when it can't go out.
 	fn cost(&self, range: &Range) -> Option<usize> {
 		Some(lite::range_size(range, self.form)? + self.id)

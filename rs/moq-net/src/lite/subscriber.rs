@@ -3214,6 +3214,7 @@ mod tests {
 			live: lite::LiveRanges::new(Version::Lite04, &[lite::Range::OLDEST]),
 			demand: Some(Subscription::default()),
 			fill_ids: Default::default(),
+			ask_ids: Default::default(),
 			fill_groups: Default::default(),
 			tail: tail.clone(),
 			started: None,
@@ -3376,6 +3377,7 @@ mod tests {
 				live: lite::LiveRanges::new(Version::Lite04, &[lite::Range::span(Some(floor), 0, None, None)]),
 				demand: Some(Subscription::default()),
 				fill_ids: Default::default(),
+				ask_ids: Default::default(),
 				fill_groups: Default::default(),
 				tail: Default::default(),
 				started: None,
@@ -3855,6 +3857,7 @@ mod tests {
 			live: lite::LiveRanges::new(VERSION, &[lite::Range::span(Some(2), 0, None, None)]),
 			demand: Some(Subscription::default()),
 			fill_ids: Default::default(),
+			ask_ids: Default::default(),
 			fill_groups: Default::default(),
 			tail: Default::default(),
 			started: None,
@@ -3877,7 +3880,7 @@ mod tests {
 		// An update moves the floor and the ranges together, as `begin_subscription` does.
 		let update = |sub: &mut SubStream, start: Option<u64>, ranges: Vec<lite::Range>| {
 			sub.start = start;
-			sub.edit(&ranges, 0).unwrap();
+			sub.edit(&ranges, 0, 0, None).unwrap();
 		};
 		sub.started = Some(None);
 		update(&mut sub, Some(1), vec![lite::Range::span(Some(1), 0, None, None)]);
@@ -3894,6 +3897,8 @@ mod tests {
 				lite::Range::span(Some(6), 0, None, None),
 			],
 			0,
+			0,
+			None,
 		)
 		.unwrap();
 		assert_eq!(
@@ -3972,6 +3977,7 @@ mod tests {
 			live: lite::LiveRanges::new(Version::Lite07, &[demand]),
 			demand: Some(Subscription::default()),
 			fill_ids: Default::default(),
+			ask_ids: Default::default(),
 			fill_groups: Default::default(),
 			tail: Default::default(),
 			started: Some(Some(4)),
@@ -3988,18 +3994,18 @@ mod tests {
 		assert_eq!(sub.fill_range(0), None, "the demand's range is no fill");
 
 		// The same bounds again, as a fill.
-		sub.edit(&[demand, demand], 1).unwrap();
+		sub.edit(&[demand, demand], 0, 1, None).unwrap();
 		assert_eq!(sub.fill_range(0), None, "the demand keeps its range");
 		assert_eq!(sub.fill_range(1), Some(4..8), "the copy the edit added is the fill");
 
 		// Another fill joins, and the first keeps its Range ID.
 		let other = groups(10..12);
-		sub.edit(&[demand, demand, other], 2).unwrap();
+		sub.edit(&[demand, demand, other], 0, 2, None).unwrap();
 		assert_eq!(sub.fill_ids.iter().copied().collect::<Vec<_>>(), [1, 2]);
 
 		// The demand moves away while the fill stays: the fill keeps Range ID 1.
 		let moved = lite::Range::span(Some(20), 0, None, None);
-		sub.edit(&[moved, demand, other], 2).unwrap();
+		sub.edit(&[moved, demand, other], 0, 2, None).unwrap();
 		assert_eq!(sub.fill_ids.iter().copied().collect::<Vec<_>>(), [1, 2]);
 		assert_eq!(sub.fill_range(1), Some(4..8));
 		assert_eq!(sub.fill_range(3), None, "the demand's new range is no fill");
@@ -4007,11 +4013,11 @@ mod tests {
 		// Before SUBSCRIBE_START, a fill an update retires keeps its Range ID, since the start
 		// still names it, and it must not count as the demand's.
 		sub.started = None;
-		sub.edit(&[moved, demand], 1).unwrap();
+		sub.edit(&[moved, demand], 0, 1, None).unwrap();
 		assert_eq!(sub.fill_range(2), None, "retired");
 		assert!(sub.fill_ids.contains(&2), "still a fill's");
 		sub.started = Some(Some(4));
-		sub.edit(&[moved, demand], 1).unwrap();
+		sub.edit(&[moved, demand], 0, 1, None).unwrap();
 		assert!(!sub.fill_ids.contains(&2), "forgotten once started");
 	}
 
@@ -4041,6 +4047,7 @@ mod tests {
 			live: lite::LiveRanges::new(Version::Lite07, &[first]),
 			demand: Some(Subscription::default()),
 			fill_ids: Default::default(),
+			ask_ids: Default::default(),
 			fill_groups: Default::default(),
 			tail: Default::default(),
 			started: Some(Some(4)),
@@ -4061,7 +4068,7 @@ mod tests {
 			start: Some(lite::Anchor::Relative(2)),
 			end: None,
 		};
-		let (edit, changed) = sub.edit(&[first, back], 0).unwrap();
+		let (edit, changed) = sub.edit(&[first, back], 0, 0, None).unwrap();
 		assert!(changed);
 		assert_eq!(
 			edit,
@@ -4075,7 +4082,7 @@ mod tests {
 		assert_eq!(sub.owed(None), Some(vec![4..10, 1..10]));
 
 		// Retiring the first range forgets its start.
-		sub.edit(&[back], 0).unwrap();
+		sub.edit(&[back], 0, 0, None).unwrap();
 		assert_eq!(sub.starts.keys().copied().collect::<Vec<_>>(), [1]);
 		assert_eq!(sub.owed(Some(8)), Some(vec![1..8]));
 	}
@@ -5563,6 +5570,7 @@ mod tests {
 			live: lite::LiveRanges::new(version, &[lite::Range::OLDEST]),
 			demand: Some(Subscription::default()),
 			fill_ids: Default::default(),
+			ask_ids: Default::default(),
 			fill_groups: Default::default(),
 			tail: tail.clone(),
 			started: None,
@@ -7351,6 +7359,7 @@ mod tests {
 			subscription: Subscription::default(),
 			demand: Some(Subscription::default()),
 			demand_ranges: vec![lite::Range::OLDEST],
+			asks: 0,
 			ranges: vec![lite::Range::OLDEST],
 		};
 		let establish = serve.prepare_establish(&mut serving.serving, wire, &Default::default());
@@ -7517,6 +7526,7 @@ mod tests {
 			subscription: Subscription::default(),
 			demand: Some(Subscription::default()),
 			demand_ranges: vec![lite::Range::OLDEST],
+			asks: 0,
 			ranges: vec![lite::Range::OLDEST],
 		};
 		let reader = serving.serving.subscribe(None);
@@ -7582,6 +7592,7 @@ mod tests {
 				subscription: Subscription::default(),
 				demand: Some(Subscription::default()),
 				demand_ranges: vec![lite::Range::OLDEST],
+				asks: 0,
 				ranges: vec![lite::Range::OLDEST],
 			};
 			let establish = serve.prepare_establish(&mut serving.serving, wire, &Default::default());
@@ -10070,6 +10081,10 @@ struct SubStream {
 	/// and until SUBSCRIBE_START even once retired, since it answers every range the
 	/// SUBSCRIBE carried.
 	fill_ids: std::collections::BTreeSet<u64>,
+	/// The Range IDs of the asks' ranges: a relative range a reader of the copy waits on the
+	/// publisher to start (see [`track::Producer::asks`]), which says nothing of the live feed
+	/// either. Kept like [`Self::fill_ids`].
+	ask_ids: std::collections::BTreeSet<u64>,
 	/// The groups the ranges ask for fills.
 	fill_groups: rangemap::RangeSet<u64>,
 	priority: i8,
@@ -10130,7 +10145,7 @@ impl SubStream {
 			return None;
 		}
 		let mut start: Option<u64> = None;
-		for (id, _) in self.live.iter().filter(|(id, _)| !self.fill_ids.contains(id)) {
+		for (id, _) in self.live.iter().filter(|(id, _)| self.feeds(*id)) {
 			match self.starts.get(&id) {
 				// A range with no group there serves nothing to start from.
 				Some(Some(at)) => start = Some(start.map_or(*at, |start| start.min(*at))),
@@ -10292,31 +10307,76 @@ impl SubStream {
 		}
 	}
 
-	/// Edit the live ranges into `ranges`, the last `fills` of which are the held fills',
-	/// forgetting the starts of those retired. A fill asking for what a demand range does
-	/// still takes a range of its own, so each Range ID stays the demand's or a fill's.
+	/// Whether the live range `id` is the demand's, which alone says where the live feed is.
+	fn feeds(&self, id: u64) -> bool {
+		!self.fill_ids.contains(&id) && !self.ask_ids.contains(&id)
+	}
+
+	/// Edit the live ranges into `ranges`: the demand's, then `asks` asks', then `fills` held
+	/// fills', forgetting the starts of those retired. A fill or ask asking for what a demand
+	/// range does still takes a range of its own, so each Range ID stays one owner's. An ask
+	/// its publisher answered counting from before `latest`, the copy's latest group, is
+	/// asked again: a reader waiting on it joined since.
 	/// Returns the edit, and whether it changed anything.
-	fn edit(&mut self, ranges: &[lite::Range], fills: usize) -> Result<(lite::RangeEdit, bool), Error> {
+	fn edit(
+		&mut self,
+		ranges: &[lite::Range],
+		asks: usize,
+		fills: usize,
+		latest: Option<u64>,
+	) -> Result<(lite::RangeEdit, bool), Error> {
 		let before: Vec<_> = self.live.iter().map(|(id, _)| id).collect();
-		let demand = ranges.len().saturating_sub(fills);
+		let demand = ranges.len().saturating_sub(asks + fills);
 		let keyed: Vec<_> = ranges
 			.iter()
 			.enumerate()
-			.map(|(index, range)| (index >= demand, *range))
+			.map(|(index, range)| {
+				let owner = match index {
+					index if index < demand => Owner::Demand,
+					index if index < demand + asks => Owner::Ask,
+					_ => Owner::Fill,
+				};
+				(owner, *range)
+			})
 			.collect();
-		let fill_ids = &self.fill_ids;
-		let (edit, added) = self.live.edit_keyed(&keyed, |id| fill_ids.contains(&id))?;
+		let (fill_ids, ask_ids, starts, edges) = (&self.fill_ids, &self.ask_ids, &self.starts, &self.edges);
+		let owner = |id| match () {
+			_ if fill_ids.contains(&id) => Owner::Fill,
+			_ if ask_ids.contains(&id) && starts.contains_key(&id) && edges.get(&id).is_some_and(|edge| *edge < latest) => {
+				Owner::Stale
+			}
+			_ if ask_ids.contains(&id) => Owner::Ask,
+			_ => Owner::Demand,
+		};
+		let (edit, added) = self.live.edit_keyed(&keyed, owner)?;
 		let changed = !self.live.iter().map(|(id, _)| id).eq(before);
 		let live = &self.live;
 		self.starts.retain(|id, _| live.get(*id).is_some());
 		self.edges.retain(|id, _| live.get(*id).is_some());
 		if self.started.is_some() {
 			self.fill_ids.retain(|id| live.get(*id).is_some());
+			self.ask_ids.retain(|id| live.get(*id).is_some());
 		}
-		self.fill_ids
-			.extend(added.into_iter().filter(|(_, fill)| *fill).map(|(id, _)| id));
+		for (id, owner) in added {
+			match owner {
+				Owner::Fill => self.fill_ids.insert(id),
+				Owner::Ask => self.ask_ids.insert(id),
+				Owner::Demand | Owner::Stale => false,
+			};
+		}
 		Ok((edit, changed))
 	}
+}
+
+/// Who a live range on a lite-07 subscription asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Owner {
+	Demand,
+	/// A reader waiting on the publisher to start a relative range.
+	Ask,
+	/// An ask answered before the copy's latest group, which no wanted range keeps.
+	Stale,
+	Fill,
 }
 
 #[expect(
@@ -10711,6 +10771,17 @@ impl TrackServe {
 			(pref, _) => pref,
 		};
 		let request = self.wire_request(pref, producer.idle_newest().filter(|_| opening));
+		// The relative ranges readers wait on the publisher to start, each asked as a range of
+		// its own (see `Owner::Ask`), alongside a demand that covers their groups.
+		let mut asks = match (ranged, &request) {
+			(true, Some(_)) => {
+				wire_ranges(&Subscription::default().with_ranges(producer.asks())).unwrap_or_default()
+			}
+			_ => Vec::new(),
+		};
+		// A relative end goes upstream open, so two asks may carry the same range.
+		let mut seen = std::collections::HashSet::new();
+		asks.retain(|range| seen.insert(*range));
 		// The demand's ranges and the fills' groups, widened together until they fit.
 		let (request, groups) = match ranged {
 			true => {
@@ -10722,9 +10793,11 @@ impl TrackServe {
 					Some((demand, ranges)) => (Some(demand), ranges),
 					None => (None, Vec::new()),
 				};
-				let count = demand_ranges.len() + fills.groups.iter().count();
+				let count = demand_ranges.len() + asks.len() + fills.groups.iter().count();
 				let fields = self.subscribe_fields(demand.as_ref().unwrap_or(&fills.subscription()));
-				let budget = fit::Budget::new(self.subscriber.version, fields, next, count);
+				let mut budget = fit::Budget::new(self.subscriber.version, fields, next, count);
+				// The asks that don't fit wait for those sent to be answered, which retires them.
+				asks = budget.take(asks);
 				let (demand_ranges, groups) = fit::fit(demand_ranges, &fills.groups, &range_fills.avoid(), budget)?;
 				// A fill's range starting past its run speaks only while that run is asked whole.
 				range_fills.retire_skipped(&groups);
@@ -10736,16 +10809,18 @@ impl TrackServe {
 			true => &range_fills.ask,
 			false => &none,
 		};
-		// What goes on the wire: the demand's ranges, then the fills', under the demand's
-		// parameters. The demand alone sets the floor.
+		// What goes on the wire: the demand's ranges, the asks', then the fills', under the
+		// demand's parameters. The demand alone sets the floor.
 		let request = match request {
 			Some((demand, demand_ranges)) => {
 				let mut ranges = demand_ranges.clone();
+				ranges.extend(asks.iter().copied());
 				ranges.extend(FillAsk::wire(&groups));
 				Some(Wire {
 					subscription: fills.merge(demand.clone()),
 					demand: Some(demand),
 					demand_ranges,
+					asks: asks.len(),
 					ranges,
 				})
 			}
@@ -10754,6 +10829,7 @@ impl TrackServe {
 				subscription: fills.subscription(),
 				demand: None,
 				demand_ranges: Vec::new(),
+				asks: 0,
 				ranges: FillAsk::wire(&groups).collect(),
 			}),
 		};
@@ -10772,6 +10848,7 @@ impl TrackServe {
 							subscription,
 							demand,
 							demand_ranges,
+							asks,
 							ranges,
 						} = wire;
 						// Downstream preferences changed: forward them upstream as a
@@ -10791,7 +10868,8 @@ impl TrackServe {
 						// So do changed ranges that keep the floor, such as a widening that joins
 						// two: each gap they reach waits a fresh grace, which only delays giving up
 						// on one still owed.
-						let (edit, changed) = active.edit(&ranges, ranges.len() - demand_ranges.len())?;
+						let fills = ranges.len() - demand_ranges.len() - asks;
+						let (edit, changed) = active.edit(&ranges, asks, fills, producer.latest_live())?;
 						let widened = (changed && demand.is_some())
 							.then(|| subscription.start().or(active.started.flatten()).unwrap_or(0)..u64::MAX);
 						if let Ok(mut tail) = active.tail.write() {
@@ -10951,6 +11029,7 @@ impl TrackServe {
 			subscription,
 			demand,
 			demand_ranges,
+			asks,
 			ranges,
 		} = wire;
 		// One asking only for fills is no live feed, so it leaves the floor alone.
@@ -10968,6 +11047,7 @@ impl TrackServe {
 		);
 		establish.demand = demand;
 		establish.demand_ranges = demand_ranges;
+		establish.asks = asks;
 		establish.fill_groups = fills.clone();
 		establish
 	}
@@ -11037,6 +11117,7 @@ impl TrackServe {
 			id,
 			demand: Some(subscription.clone()),
 			demand_ranges: ranges.clone(),
+			asks: 0,
 			fill_groups: Default::default(),
 			fills_changed: false,
 			subscription,
@@ -11064,6 +11145,7 @@ impl TrackServe {
 			subscription: subscription.clone(),
 			demand: Some(subscription),
 			demand_ranges: ranges.clone(),
+			asks: 0,
 			ranges,
 		};
 		let mut est = Box::new(self.prepare_establish(producer, wire, &Default::default()));
@@ -11146,6 +11228,8 @@ struct Wire {
 	subscription: Subscription,
 	demand: Option<Subscription>,
 	demand_ranges: Vec<lite::Range>,
+	/// How many asks follow the demand's ranges in `ranges`, before the fills'.
+	asks: usize,
 	ranges: Vec<lite::Range>,
 }
 
@@ -11167,11 +11251,13 @@ struct Establish {
 	demand: Option<Subscription>,
 	/// The demand's ranges, which come first on the wire.
 	demand_ranges: Vec<lite::Range>,
+	/// How many asks follow them, before the fills' ranges.
+	asks: usize,
 	/// Fill preferences changed while opening and need an update once active.
 	fills_changed: bool,
 	/// The groups it asks for fills.
 	fill_groups: rangemap::RangeSet<u64>,
-	/// The ranges the SUBSCRIBE carries: the demand's, then the fills'.
+	/// The ranges the SUBSCRIBE carries: the demand's, the asks', then the fills'.
 	ranges: Vec<lite::Range>,
 	tail: kio::Producer<Tail>,
 	/// Its group streams stay parked once it is active; see [`SubStream::parked`].
@@ -11250,8 +11336,9 @@ impl Establish {
 			start: self.subscription.start(),
 			live: lite::LiveRanges::new(self.serve.subscriber.version, &self.ranges),
 			demand: self.demand.clone(),
-			// The ranges take Range IDs in order, the demand's first.
-			fill_ids: (self.demand_ranges.len() as u64..self.ranges.len() as u64).collect(),
+			// The ranges take Range IDs in order: the demand's, the asks', then the fills'.
+			ask_ids: (self.demand_ranges.len() as u64..(self.demand_ranges.len() + self.asks) as u64).collect(),
+			fill_ids: ((self.demand_ranges.len() + self.asks) as u64..self.ranges.len() as u64).collect(),
 			fill_groups: self.fill_groups.clone(),
 			priority: self.subscription.priority,
 			order: self.subscription.order,
@@ -12524,8 +12611,8 @@ impl ServeLoop {
 							}
 							self.range_fills.skip(groups, skipped);
 						}
-						// A fill an update retired since says nothing of the live feed either.
-						None if active.fill_ids.contains(&id) => {}
+						// Nor does an ask, or a fill an update retired since.
+						None if !active.feeds(id) => {}
 						// Only the demand's ranges say where the live feed is served from. No range
 						// starting anywhere leaves nothing owed.
 						None => {
@@ -12546,9 +12633,10 @@ impl ServeLoop {
 				{
 					self.serving.report_edge(largest.position.group);
 				}
-				// Only a live fill's Range ID matters from here.
+				// Only a live fill's or ask's Range ID matters from here.
 				let live = &active.live;
 				active.fill_ids.retain(|id| live.get(*id).is_some());
+				active.ask_ids.retain(|id| live.get(*id).is_some());
 				// One asking only for fills feeds nothing live.
 				if active.demand.is_some() && serve.subscriber.version.has_largest() {
 					// A bounded feed that never delivers Largest goes live at the
@@ -12934,6 +13022,13 @@ impl ServeLoop {
 						}
 						Poll::Ready(Err(err)) => return Poll::Ready(ServeEnd::GiveBack(err)),
 						Poll::Pending => {}
+					}
+					// A reader waiting on the publisher to start a relative range asks upstream.
+					if serve.subscriber.version.has_ranges() && self.serving.poll_asks_changed(waiter).is_ready() {
+						if let Err(err) = self.begin(serve, self.serving.subscription()) {
+							return Poll::Ready(ServeEnd::GiveBack(err));
+						}
+						continue;
 					}
 
 					// The wanted group is subscription state: an update announces each new one

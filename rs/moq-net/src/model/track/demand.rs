@@ -20,6 +20,12 @@ pub(super) struct Subscriptions {
 	// Only stated minimums count, so an unstated one never reads as zero.
 	min_delay: BTreeMap<Duration, usize>,
 	ranges: Ranges,
+	/// The relative ranges readers of a received copy wait on its publisher to say where they
+	/// start, counted: its session asks each upstream as a range of its own.
+	asks: BTreeMap<Range, usize>,
+	/// Bumped whenever a reader starts or stops waiting on one of `asks`, even one another
+	/// reader already waits on: that reader may have joined after the last answer.
+	asks_revision: u64,
 	descending: usize,
 	/// Subscribers that need the live feed; see [`Subscription::feed`].
 	feed: usize,
@@ -300,6 +306,33 @@ impl Subscriptions {
 
 	pub(super) fn len(&self) -> usize {
 		self.count
+	}
+
+	/// Count `came` and uncount `gone` among [`Self::asks`].
+	fn ask(&mut self, gone: &[Range], came: &[Range]) -> kio::WaiterList {
+		for range in came {
+			add(&mut self.asks, *range);
+		}
+		for range in gone {
+			remove(&mut self.asks, *range);
+		}
+		self.asks_revision += 1;
+		self.waiters.take()
+	}
+
+	/// Ready once a reader started or stopped waiting on one of [`Self::asks`] since `seen`.
+	pub(super) fn poll_asks(&mut self, seen: &mut u64, waiter: &kio::Waiter) -> Poll<()> {
+		if *seen == self.asks_revision {
+			waiter.register(&mut self.waiters);
+			return Poll::Pending;
+		}
+		*seen = self.asks_revision;
+		Poll::Ready(())
+	}
+
+	/// The ranges readers wait on their publisher to start.
+	pub(super) fn asks(&self) -> Vec<Range> {
+		self.asks.keys().copied().collect()
 	}
 }
 
@@ -631,6 +664,14 @@ impl Preferences {
 		Ok(())
 	}
 
+	/// What this subscriber's reader counts among the track's asks, none yet.
+	pub(in crate::model) fn asked(&self) -> Asked {
+		Asked {
+			subscriptions: self.0.subscriptions.clone(),
+			ranges: Vec::new(),
+		}
+	}
+
 	pub(in crate::model) fn same_channel(&self, other: &Self) -> bool {
 		self.0.value.same_channel(&other.0.value)
 	}
@@ -645,6 +686,35 @@ impl Preferences {
 		F: FnOnce(&kio::Ref<'_, Prefs>) -> Poll<R>,
 	{
 		self.0.value.poll_ref(waiter, f)
+	}
+}
+
+/// The relative ranges one reader waits on its publisher to start, counted among the track's
+/// asks while held.
+pub(in crate::model) struct Asked {
+	subscriptions: Option<kio::Lock<Subscriptions>>,
+	/// Sorted, so the same ranges compare equal however the reader keys them.
+	ranges: Vec<Range>,
+}
+
+impl Asked {
+	/// Count `ranges` in place of those counted before.
+	pub(in crate::model) fn set(&mut self, mut ranges: Vec<Range>) {
+		ranges.sort_unstable();
+		if ranges == self.ranges {
+			return;
+		}
+		let ranges = std::mem::replace(&mut self.ranges, ranges);
+		if let Some(subs) = &self.subscriptions {
+			let mut wakes = subs.lock().ask(&ranges, &self.ranges);
+			wakes.wake();
+		}
+	}
+}
+
+impl Drop for Asked {
+	fn drop(&mut self) {
+		self.set(Vec::new());
 	}
 }
 

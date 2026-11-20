@@ -30,7 +30,7 @@ use rangemap::{RangeInclusiveSet, RangeMap, RangeSet};
 mod demand;
 pub(crate) use demand::Edit;
 pub(super) use demand::Preferences;
-use demand::Subscriptions;
+use demand::{Asked, Subscriptions};
 
 mod fill;
 mod hole;
@@ -600,7 +600,7 @@ enum Anchors {
 	/// time anchors as group starts, so they resolve here as at the publisher.
 	Wire,
 	/// A [`Self::Wire`] copy whose publisher also reports where each range starts (lite-07),
-	/// so a relative anchor the copy can't count back over its own groups waits for that.
+	/// so a relative start waits for that report rather than count over the groups held.
 	Reported,
 }
 
@@ -745,10 +745,6 @@ pub(crate) struct TrackState {
 	// group above it is checked against it as well as its cached neighbors; one at or below
 	// it may have lost its lower bound. One entry, so nothing grows with the cache.
 	evicted: Option<(u64, Timestamp)>,
-	// The highest key of any group that left the cache for good (evicted or reclaimed, not
-	// displaced by a copy that holds or sends it again), checked start or not: a received copy
-	// counting a relative start back can't tell a gap at or below it from one it never held.
-	uncached: Option<u64>,
 
 	// The key of the newest cached group: the live edge, protected from
 	// eviction by never entering the eviction order until no producer remains.
@@ -1232,6 +1228,11 @@ impl Holdings for TrackState {
 	}
 
 	fn back(&self, latest: u64, back: u64) -> Option<u64> {
+		// Keys that are group IDs count back by ID, as a moq-transport joining FETCH does, so
+		// the count never depends on what this copy holds.
+		if self.starts_at_keys {
+			return Some(latest.saturating_sub(back));
+		}
 		let Some(back) = back.checked_sub(1) else {
 			return Some(latest);
 		};
@@ -1240,25 +1241,27 @@ impl Holdings for TrackState {
 		self.lookup.range(..latest).rev().nth(back).map(|(&key, _)| key)
 	}
 
-	/// A received copy starts where its publisher did, counting from the same latest group: a
-	/// newer one moved the live edge, which the copy then counts from itself. A lite-07 copy
-	/// that may still learn where, from a report or the groups between, counts only where it
-	/// holds them (see [`Self::counted_received`]); once it can't, over the groups held.
+	/// A lite-07 copy holds only part of the track, so it starts only where its publisher
+	/// reported starting, counting from the same latest group or a newer one, and waits for
+	/// that report otherwise, whatever it holds: a reader asks its upstream for one (see
+	/// [`Producer::poll_asks_changed`]). The latest group itself needs no count.
 	fn counted_start(&self, latest: u64, back: u64, end: Option<u64>) -> Option<Containing> {
+		if self.anchors != Anchors::Reported {
+			return None;
+		}
+		if back == 0 {
+			return Some(Containing::Group(latest));
+		}
 		let reported = self
 			.relative_starts
 			.get(&back)
 			.and_then(|reported| match reported.start {
-				CountedStart::At(start) => (reported.latest == latest).then_some(start),
+				CountedStart::At(start) => (reported.latest >= latest).then_some(start),
 				// Past a range ending no earlier than this one, so this one holds no group either.
-				// Counting from a newer latest group only starts later, so it holds there too.
-				CountedStart::Past(past) => end.filter(|end| reported.latest <= latest && *end <= past),
-			})
-			.map(Containing::Group);
-		// Nothing more arrives once the copy is released, complete, or unfed, so no report can
-		// settle it either.
-		let learns = self.anchors == Anchors::Reported && !self.outcome.is_released() && !self.nothing_arrives();
-		reported.or_else(|| learns.then(|| self.counted_received(latest, back)).flatten())
+				// Counting from another latest group starts no earlier, so it holds there too.
+				CountedStart::Past(past) => end.filter(|end| *end <= past),
+			});
+		Some(reported.map_or(Containing::Unknown, Containing::Group))
 	}
 
 	fn complete(&self) -> bool {
@@ -1373,44 +1376,6 @@ impl TrackState {
 			}
 			_ => Containing::Unknown,
 		}
-	}
-
-	/// The group `back` groups before `latest` on a received copy, counted only through the
-	/// groups it holds and the starts its publisher declared skipped between them: any other
-	/// gap may hold groups the copy never saw, such as one below what a first reader asked
-	/// for, so the count is [`Containing::Unknown`] there, unless a range from group 0
-	/// started above it. A gap the cache may have made is one
-	/// no report or arrival fills, so it is `None` there, to count over the groups held as a
-	/// publisher that let them go does. Each step lands on a group held, so a huge count walks
-	/// the cache once.
-	fn counted_received(&self, latest: u64, back: u64) -> Option<Containing> {
-		let mut at = latest;
-		for _ in 0..back {
-			let Some(below) = at.checked_sub(1) else {
-				return Some(Containing::Before);
-			};
-			let below = match self.drops.get_key_value(&below) {
-				Some((run, Hole::Skip)) => match run.start.checked_sub(1) {
-					Some(below) => below,
-					// Skipped down to 0: no group sits below.
-					None => return Some(Containing::Before),
-				},
-				_ => below,
-			};
-			if !self.lookup.contains_key(&below) {
-				// The publisher delivers nothing below where a range from group 0 started, so
-				// a count reaching below it starts there.
-				if let Some(&start) = self.time_starts.get(&0)
-					&& below < start
-				{
-					return Some(Containing::Group(start));
-				}
-				let uncached = self.uncached.is_some_and(|uncached| below <= uncached);
-				return (!uncached).then_some(Containing::Unknown);
-			}
-			at = below;
-		}
-		Some(Containing::Group(at))
 	}
 
 	/// Whether drops, for whatever reason, cover every key in `keys`. An empty run is covered.
@@ -1576,7 +1541,6 @@ impl TrackState {
 	/// it for the readers that judged it cached to judge again.
 	fn evict_group(&mut self, key: u64, err: Error) {
 		let slot = self.uncache(key).expect("a cached group");
-		self.let_go(key);
 		slot.abort(err);
 		let landed = self
 			.inboxes
@@ -1586,12 +1550,6 @@ impl TrackState {
 		if landed {
 			self.evictions += 1;
 		}
-	}
-
-	/// Record that group `key` left the cache for good, with nothing holding or sending it
-	/// again: a gap at or below it may be one the cache made.
-	fn let_go(&mut self, key: u64) {
-		self.uncached = self.uncached.max(Some(key));
 	}
 
 	/// [`Self::uncache`] a group that another copy displaces rather than one that ends, so a
@@ -1912,11 +1870,7 @@ impl TrackState {
 	/// Remove an aborted slot, keeping a cut as a drop: reclaiming it must not erase a
 	/// disposition a relay still has to forward.
 	fn reclaim_aborted(&mut self, key: u64) {
-		let slot = self.uncache(key);
-		if slot.is_some() {
-			self.let_go(key);
-		}
-		if let Some(slot) = slot
+		if let Some(slot) = self.uncache(key)
 			&& slot.visible
 			&& let Some(err) = slot.verdict()
 			&& let Some(end) = key.checked_add(1)
@@ -4502,6 +4456,8 @@ pub struct Producer {
 	broadcast: Arc<broadcast::Info>,
 	state: kio::Producer<TrackState>,
 	prev_subscription: Option<Subscription>,
+	// The revision of the asks [`Self::poll_asks_changed`] last reported.
+	asks_seen: u64,
 	// Shared with every clone and every `Requests`: its `Drop` is the teardown.
 	alive: Arc<Alive>,
 }
@@ -4538,6 +4494,7 @@ impl Producer {
 			state,
 			broadcast,
 			prev_subscription: None,
+			asks_seen: 0,
 			alive,
 		}
 	}
@@ -4897,7 +4854,7 @@ impl Producer {
 	}
 
 	/// [`Self::anchored`], for a wire whose publisher also reports where each range starts:
-	/// a relative anchor the copy can't count back over its own groups waits for that report.
+	/// a relative start waits for that report, which its reader asks for.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn reported(&self) {
 		self.set_anchors(Anchors::Reported);
@@ -4940,7 +4897,8 @@ impl Producer {
 
 	/// Record where the upstream publisher started each of this lite-07 copy's live wire
 	/// ranges counting back, as `(back, start, latest)` triples, replacing the last set. A
-	/// reader's relative start counting back `back` groups from `latest` resolves to `start`.
+	/// reader's relative start counting back `back` groups from `latest`, or from an older
+	/// group, resolves to `start`.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn relative_starts(&self, starts: impl IntoIterator<Item = (u64, CountedStart, u64)>) {
 		let mut merged = BTreeMap::<u64, RelativeStart>::new();
@@ -5586,6 +5544,23 @@ impl Producer {
 		drop(state);
 
 		poll_combined_changed(&subs, bound, &mut self.prev_subscription, waiter).map(Ok)
+	}
+
+	/// Ready once a reader of this lite-07 copy starts or stops waiting on its publisher to
+	/// start a relative range (see [`Self::asks`]): its session asks upstream for each as a
+	/// range of its own, so the publisher reports where it starts.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn poll_asks_changed(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		let subs = self.state.read().subscriptions.clone();
+		subs.lock().poll_asks(&mut self.asks_seen, waiter)
+	}
+
+	/// The relative ranges this copy's readers wait on its publisher to start; see
+	/// [`Self::poll_asks_changed`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn asks(&self) -> Vec<Range> {
+		let subs = self.state.read().subscriptions.clone();
+		subs.lock().asks()
 	}
 
 	/// Count `seen` as the aggregate already acted on, so
@@ -8616,6 +8591,9 @@ struct Cursor {
 	cache: Arc<cache::Track>,
 
 	subscription: Preferences,
+	/// The relative ranges its window waits on the publisher to start, which a received
+	/// copy's session asks upstream for.
+	asked: Asked,
 	/// Arrival-order cursor used by `recv_group`.
 	index: usize,
 	/// Minimum key to return from any `recv` method. Set by `set_range`.
@@ -9026,10 +9004,13 @@ impl Cursor {
 		};
 		let live = Arc::<Live>::default();
 		let published = Published::new(Servable::of(&filter.window, &live), filter.resolved, None);
+		let mut asked = subscription.asked();
+		asked.set(filter.window.counting().collect());
 		Self {
 			state,
 			cache,
 			subscription,
+			asked,
 			min_key: 0,
 			filter: Box::new(filter),
 			index: 0,
@@ -9230,6 +9211,7 @@ impl Cursor {
 			self.filter.revision += 1;
 			self.update_servable();
 		}
+		self.asked.set(self.filter.window.counting().collect());
 		moved
 	}
 
@@ -12434,6 +12416,7 @@ impl Request {
 				broadcast: self.broadcast,
 				state: self.state,
 				prev_subscription: None,
+				asks_seen: 0,
 				alive: self.alive,
 			}),
 			_dynamic: self._dynamic,
@@ -16083,10 +16066,9 @@ mod test {
 		assert_eq!(drain(&mut floored), vec![1000]);
 	}
 
-	/// A lite-07 copy holds only part of the track, so a relative anchor counts back as its
-	/// publisher reported, or through the groups it holds and the starts skipped between them,
-	/// and otherwise reads nothing until one of those can count it. Once nothing more can
-	/// arrive, it counts over the groups held.
+	/// A lite-07 copy holds only part of the track, so a relative start counts back only as its
+	/// publisher reported, from the same latest group or a newer one, and reads nothing until
+	/// it does, whatever groups the copy holds or receives: its reader asks for that report.
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_received_copy_counts_a_relative_start_back_as_its_publisher_did() {
@@ -16115,9 +16097,12 @@ mod test {
 
 		let mut reported = producer.subscribe(back(2));
 		assert_eq!(placed(&mut reported), Some(7), "the publisher's start, not group 1");
+		let mut latest = producer.subscribe(back(0));
+		assert_eq!(placed(&mut latest), Some(9), "the latest group needs no count");
 		let mut unreported = producer.subscribe(back(1));
 		assert_eq!(placed(&mut unreported), None, "group 8 may sit below 9");
 		assert_eq!(read(&mut unreported), Vec::<u64>::new(), "reads nothing meanwhile");
+		assert_eq!(producer.asks(), back(1).ranges, "and asks for a report");
 		// A reported start is where delivery began, which may sit past the group counted, and
 		// nothing reports an end, so a relative end counts over the groups held.
 		let mut ended = producer.subscribe(
@@ -16130,22 +16115,19 @@ mod test {
 		);
 		assert_eq!(ended.resolved_range(0).and_then(|resolved| resolved.end), Some(2));
 
+		// Holding every group in between counts nothing either.
 		write_group(&producer, 8);
-		assert_eq!(placed(&mut unreported), Some(8), "counted through the groups held");
-		assert_eq!(read(&mut unreported), vec![8, 9]);
-		write_group(&producer, 7);
+		assert_eq!(placed(&mut unreported), None, "holding group 8 says nothing");
 
-		// Starts the publisher skipped hold no group to count.
-		producer.skip_groups(3..7);
-		let mut skipped = producer.subscribe(back(3));
-		assert_eq!(placed(&mut skipped), Some(2));
-		let mut gap = producer.subscribe(back(6));
-		assert_eq!(placed(&mut gap), None, "group 0 may sit below 1");
-
-		// A newer group moved the live edge, so a later reader counts back from it.
+		// A report counted from a newer latest group starts it, as the publisher placed it then.
 		write_group(&producer, 10);
+		producer.relative_starts([(2, CountedStart::At(7), 9), (1, CountedStart::At(9), 10)]);
+		assert_eq!(placed(&mut unreported), Some(9));
+		assert_eq!(read(&mut unreported), vec![9, 10]);
+		assert!(producer.asks().is_empty(), "answered, so asked no more");
+		// But one from an older latest group says nothing of a reader counting from a newer one.
 		let mut later = producer.subscribe(back(2));
-		assert_eq!(placed(&mut later), Some(8));
+		assert_eq!(placed(&mut later), None);
 		assert_eq!(
 			placed(&mut reported),
 			Some(7),
@@ -16169,59 +16151,52 @@ mod test {
 			Some((9, Some(9)))
 		);
 		let mut longer = producer.subscribe(until(10));
-		assert_eq!(placed(&mut longer), Some(1), "counted through the groups held instead");
+		assert_eq!(placed(&mut longer), None);
 
-		// Counting from a newer latest group only starts later, so the empty report still holds,
-		// where the groups held would count back to group 2.
+		// Counting from a newer latest group only starts later, so the empty report still holds.
 		write_group(&producer, 11);
 		let mut newer = producer.subscribe(until(8));
 		assert_eq!(
 			newer.resolved_range(0).map(|resolved| (resolved.start, resolved.end)),
 			Some((9, Some(9)))
 		);
-		assert_eq!(placed(&mut gap), Some(1), "counted from 11 through the groups held");
-		let mut deeper = producer.subscribe(back(7));
-		assert_eq!(placed(&mut deeper), None, "group 0 may sit below 1");
 
-		// Nothing more can arrive once the copy reaches its end, though its producer is still
-		// held, so it counts over the groups held, fewer than it asks: it reaches back to the
-		// oldest.
+		// Nothing counts over the groups held once the copy ends either.
 		let _finished = producer.finish().unwrap();
-		assert_eq!(placed(&mut deeper), Some(0));
-		assert_eq!(read(&mut deeper), vec![1, 2, 7, 8, 9, 10, 11]);
+		assert_eq!(placed(&mut later), None);
 	}
 
-	/// A group an idle copy displaces is sent again by the next feed, so the gap it leaves is
-	/// not one the cache made: a relative start counting into it still waits.
-	#[test]
-	#[cfg(feature = "async")]
-	fn a_received_copy_waits_on_a_gap_a_displaced_group_left() {
-		let mut producer = track_producer("test", Info::timed());
-		producer.received();
-		producer.reported();
-		for key in [1, 2] {
-			write_group(&producer, key);
+	proptest::proptest! {
+		/// Whatever groups a lite-07 copy holds, a reader's relative start lands only where its
+		/// publisher reported it, or waits: the cache never moves it.
+		#[test]
+		fn a_copys_cache_never_moves_a_relative_start(
+			held in proptest::collection::btree_set(0u64..16, 0..12),
+			back in 0u64..6,
+			reported in proptest::option::of(0u64..17),
+		) {
+			let producer = track_producer("test", Info::timed());
+			producer.received();
+			producer.reported();
+			for key in held.iter().copied().chain([16]) {
+				write_group(&producer, key);
+			}
+			producer.report_edge(16);
+			if let Some(start) = reported {
+				producer.relative_starts([(back, CountedStart::At(start), 16)]);
+			}
+			let mut reader = producer.subscribe(
+				Subscription::default()
+					.with_ranges([Range { start: Anchor::Relative(back), end: None }])
+					.with_delay(Delay::default().with_max(None)),
+			);
+			let expected = match back {
+				0 => Some(16),
+				_ => reported,
+			};
+			proptest::prop_assert_eq!(reader.resolved_range(0).map(|resolved| resolved.start), expected);
+			proptest::prop_assert_eq!(producer.asks().is_empty(), expected.is_some());
 		}
-		let mut open = producer.create_group(group::Info { start: 9 }).unwrap();
-		open.write_frame(Timestamp::from_millis(9).unwrap(), &b"x"[..]).unwrap();
-		producer.report_edge(9);
-		producer.set_idle();
-		producer.set_live(Some(Position::group(9)), None).unwrap();
-		write_group(&producer, 9);
-
-		let mut reader = producer.subscribe(
-			Subscription::default()
-				.with_ranges([Range {
-					start: Anchor::Relative(2),
-					end: Some(Anchor::Time(8)),
-				}])
-				.with_delay(Delay::default().with_max(None)),
-		);
-		assert_eq!(
-			reader.resolved_range(0).map(|resolved| resolved.start),
-			None,
-			"group 8 may sit below 9"
-		);
 	}
 
 	/// Ranges counting back the same number of groups report together: a start holds for every
@@ -16249,40 +16224,6 @@ mod test {
 			past(7, 10),
 			"a newer latest moved the count"
 		);
-	}
-
-	/// A gap the cache made in a lite-07 copy is one no report or arrival fills, so a relative
-	/// start counting into it counts over the groups held, as a publisher that let them go does,
-	/// while a gap above everything the cache let go of still waits.
-	#[test]
-	#[cfg(feature = "async")]
-	fn a_received_copy_counts_a_relative_start_to_a_gap_the_cache_made() {
-		let back = |back| {
-			Subscription::default()
-				.with_ranges([Range {
-					start: Anchor::Relative(back),
-					end: None,
-				}])
-				.with_delay(Delay::default().with_max(None))
-		};
-		let placed = |subscriber: &mut Subscriber| subscriber.resolved_range(0).map(|resolved| resolved.start);
-		let producer = track_producer("test", Info::timed());
-		producer.received();
-		producer.reported();
-		for key in [1, 5, 8, 9] {
-			write_group(&producer, key);
-		}
-		producer.skip_groups(6..8);
-		producer.report_edge(9);
-
-		evict(&producer, 1);
-		let mut unknown = producer.subscribe(back(3));
-		assert_eq!(placed(&mut unknown), None, "groups the copy never held may sit below 5");
-
-		evict(&producer, 8);
-		let mut evicted = producer.subscribe(back(1));
-		assert_eq!(placed(&mut evicted), Some(5), "group 5 is the one held before 9");
-		assert_eq!(placed(&mut unknown), Some(0), "fewer are held than it counts");
 	}
 
 	#[test]
