@@ -186,7 +186,7 @@ export class Consumer {
 	// The ordered read gave up on groups since the last one it returned.
 	#gap = false;
 	// When each gap given up before the join's boundary was known landed, by the key it ends at: told to
-	// the estimate once the boundary is known, or dropped once the first group is handed out.
+	// the estimate once the boundary is known. Only gaps ahead of the first group are kept, which bounds it.
 	#unjoined?: { end: bigint; landed: Instant }[] = [];
 	#format: Format;
 	#delay: Getter<Moq.Track.Delay>;
@@ -331,11 +331,7 @@ export class Consumer {
 				}
 				// Delivery starts at the first group: the reader already skipped what is too stale to
 				// play, and waited for the groups below it that its feed owed.
-				if (this.#active === undefined) {
-					this.#active = item.group.start;
-					// What the join's boundary has not judged by now it never judges.
-					this.#unjoined = undefined;
-				}
+				if (this.#active === undefined) this.#active = item.group.start;
 				this.#add(item.group, this.#gap);
 				this.#gap = false;
 			}
@@ -357,7 +353,8 @@ export class Consumer {
 	#backlog(end: bigint, landed: Instant): void {
 		if (this.#observing) return;
 		if (this.#joined === undefined) {
-			this.#unjoined?.push({ end, landed });
+			// Only gaps ahead of the first group wait for it, which bounds the list a peer can grow.
+			if (this.#active === undefined) this.#unjoined?.push({ end, landed });
 			return;
 		}
 		if (end - 1n <= this.#joined) this.#jitter.backlog(landed.since(Instant.ZERO).asMillis());

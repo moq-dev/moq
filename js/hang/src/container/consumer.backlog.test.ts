@@ -137,7 +137,7 @@ test("late groups dropped from the start hold no join open", async () => {
  * A track whose ordered read's info resolves once `answer` is called, and whose largest is what
  * `largest` says when asked. Its feed owes every key from `from`, as a session's would.
  */
-function joining(from: bigint, largest: () => bigint) {
+function joining(from: bigint, largest: () => bigint | Promise<bigint>) {
 	const track = new Track.Producer("audio");
 	track.requests();
 	const subscriber = track.subscribe({ delay: { max: Duration.millis(2000) } });
@@ -157,7 +157,7 @@ function joining(from: bigint, largest: () => bigint) {
 	const ordered = () =>
 		proxy(subscriber.ordered(), {
 			info: () => answered.then(() => ({})),
-			largest: async () => ({ group: largest(), frame: 0 }),
+			largest: async () => ({ group: await largest(), frame: 0 }),
 		});
 	const write = (sequence: number, media: number) => {
 		const group = track.createGroup(BigInt(sequence));
@@ -259,6 +259,43 @@ test("the join's boundary is the publisher's answer, not the largest by the firs
 		expect(await consumer.next()).toMatchObject({ kind: "gap" });
 		expect(await consumer.next()).toMatchObject({ kind: "frame", group: 207n });
 		expect(reported).toEqual([]);
+	} finally {
+		backlog.mockRestore();
+		consumer.close();
+		track.finish();
+		track.close();
+	}
+});
+
+// A cached backlog: group 150 went stale behind 151 before the subscription, so the read gives it up and
+// hands out 151 at once, both before the publisher's largest is known. The gap still waits for that
+// boundary rather than being dropped with the first group.
+test("a gap given up before the join's boundary is known still tells the estimate", async () => {
+	let settle!: (largest: bigint) => void;
+	const known = new Promise<bigint>((resolve) => {
+		settle = resolve;
+	});
+	const { track, subscriber, answer, write } = joining(150n, () => known);
+	const reported: number[] = [];
+	const backlog = spyOn(Jitter.prototype, "backlog").mockImplementation((arrival: number) => {
+		reported.push(arrival);
+	});
+	const landed = now().since(Instant.ZERO).asMillis();
+	write(150, 0);
+	await clock.advance(Duration.millis(10));
+	write(151, 20);
+	await clock.advance(Duration.millis(2001));
+	const consumer = new Consumer(subscriber, {
+		format: new Format("audio"),
+		delay: { min: Duration.millis(100), max: Duration.millis(2000) },
+	});
+	try {
+		answer();
+		expect(await consumer.next()).toMatchObject({ kind: "frame", group: 151n });
+		expect(reported).toEqual([]);
+		settle(200n);
+		await clock.advance(Duration.ZERO);
+		expect(reported).toEqual([landed]);
 	} finally {
 		backlog.mockRestore();
 		consumer.close();
