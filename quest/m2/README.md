@@ -285,7 +285,7 @@ what would need a breaking release had it landed right after the cut:
   returned to m2 on 2026-11-15 (maintainer, on
   [moq-dev/moq#8832](https://github.com/moq-dev/moq/pull/8832)) and became
   the request quest of [cache-aware multicast](/quest/m2/multicast/README.md);
-  media consumers (now [start placement](/quest/m2/time-addressing/start-placement.md)) to m3 (its API
+  media consumers (later start placement) to m3 (its API
   breaks ride the model; dropping hang's markers is tolerated by readers),
   until it returned to m2 on 2026-11-16;
   [moq-transport time addressing](https://github.com/moq-dev/moq/pull/8918) to m4

@@ -654,7 +654,7 @@ A second group would present a gap as if it were a complete log; ending the trac
 
 A consumer MUST NOT skip to the newest group, since a later group does not supersede an earlier one the way a `snapshot` group does.
 It reads the one group the track carries, and MUST fail the read if the track carries a second, since whatever would have completed the first group is gone and yielding the remainder would present that gap as a continuous log.
-This is why a consumer takes groups in arrival order rather than by ascending sequence: groups are separate streams, so a second group MAY arrive with a lower sequence than the first, and skipping it would report a truncated log as a whole one.
+This is why a consumer takes groups in arrival order rather than by ascending start: groups are separate streams, so a second group MAY arrive with a lower start than the first, and skipping it would report a truncated log as a whole one.
 
 A consumer MUST NOT wait for the first group to end before it looks for a second.
 A publisher that opens a second group while the first is still open is broken in exactly the way this rule exists to catch, and a consumer that only checks at the group boundary waits forever on a group that publisher may never finish.
@@ -914,11 +914,11 @@ A consumer MUST NOT submit the marker to a decoder.
 Empty groups (zero objects) are permitted and mean nothing.
 After a discontinuity the timeline continues forward.
 A publisher that stops producing and may resume on the same track (e.g. an encoder idle for lack of demand) SHOULD publish a discontinuity marker when it stops, so the group before the pause does not reach across the gap and read as live.
-The first timestamp of a group MUST NOT be lower than the first timestamp of any group with a lower sequence, and no frame of a group may be lower than the first timestamp of the group before it; a group that breaks either is malformed.
+The first timestamp of a group MUST NOT be lower than the first timestamp of any group with a lower start, and no frame of a group may be lower than the first timestamp of the group before it; a group that breaks either is malformed.
 A group MAY start at the same timestamp as the previous group.
 Frames MAY present below the previous group's content (B-frames, or a keyframe overlapping the previous group's last frame).
 A publisher whose source restarts below the previous group's start begins a new broadcast instead.
-A delivered sequence hole is a playhead event unless the boundary is contiguous within 1 ms.
+A hole between delivered groups is a playhead event unless the publisher declared the starts between them skipped or the boundary is contiguous within 1 ms.
 A consumer re-applies startup delay and skip at a playhead event; it does not reset codec state.
 
 ## legacy
@@ -982,7 +982,7 @@ The grid draws a line at every multiple of that segment length in presentation t
 An edge derives the length from the interval alone, so every edge agrees.
 A broadcast without `sync.interval` is not served as HLS or DASH.
 
-A group spans from its first frame's timestamp to the next group's.
+A group spans from its start to the next group's start, or from its first frame's timestamp where the track has no timescale.
 It belongs to one segment: the first line it contains, so segment N starts at the group containing N times the segment length, or, when it contains none, the line it starts after.
 A segment holds whole groups, since one starting mid-group is not independent.
 Every rendition numbers its segments on the one grid, so they share segment numbers while each cuts its boundaries at its own groups.
@@ -1046,6 +1046,7 @@ This document has no IANA actions.
 ## moq-hang-04
 {:numbered="false"}
 
+- An HLS or DASH edge places a group on the segment grid by its start rather than its first frame's timestamp, and a hole between groups whose skipped starts the publisher declared is no playhead event.
 - A reader refuses a JSON frame in which an object repeats a member name.
 - A catalog update takes effect at its frame's timestamp on the media timeline, not when a consumer reads it, and a publisher keeps superseded catalog groups as fresh as its media's for consumers behind the live edge; an untimed catalog track's updates apply on arrival.
 - Removed `catalog.json.z` and the data track `compression` field: compression is a track property the transport carries ({{compression}}), so each compressed track is one name, and the catalog, `stats` and `echo` snapshots, and JSON data tracks SHOULD be compressed.

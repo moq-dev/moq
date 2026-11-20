@@ -174,3 +174,79 @@ test("Consumer reads one-packet Opus groups at sparse sequences back to back", a
 	track.finish();
 	track.close();
 });
+
+// A track at hang's microsecond timescale, whose groups are keyed by their start timestamps.
+function micro(): Track.Producer {
+	return new Track.Producer("test").accept({ timescale: Time.Timescale.MICRO, maxAge: null });
+}
+
+// Groups keyed by their start timestamps are never consecutive integers. Appending declares the starts
+// between them skipped, so a slow head the age skip passes is no loss when the next group follows it,
+// even where frames carry no duration to prove the timeline unbroken.
+test("Consumer reads on without a gap past an aged group the publisher's skips follow", async () => {
+	const track = micro();
+	const consumer = new Consumer(track.subscribe(), {
+		format: new LegacyFormat("data"),
+		delay: { max: Duration.millis(500) },
+	});
+	const append = (timestamps: number[]) => {
+		const group = track.appendGroup(Time.Timestamp.fromMicros(timestamps[0]));
+		for (const timestamp of timestamps) {
+			group.writeFrame({
+				payload: encodeLegacyFrame(timestamp, new Uint8Array([0x01])),
+				timestamp: Time.Timestamp.fromMicros(timestamp),
+			});
+		}
+		return group;
+	};
+
+	const first = append([0, 100_000, 200_000, 300_000, 400_000]);
+	for (let i = 0; i < 5; i++) expect((await nextFrame(consumer))?.group).toBe(0n);
+	first.finish();
+	await clock.advance(Duration.ZERO);
+	// Far past the first group's last frame, and past the age bound, so the age skip passes it.
+	append([1_000_000, 2_000_000]).finish();
+	await clock.advance(Duration.ZERO);
+	expect(await poll(consumer.next())).toMatchObject({ kind: "frame", group: 1_000_000n });
+
+	consumer.close();
+	track.finish();
+	track.close();
+});
+
+// A buffered range runs across group boundaries wherever nothing lies between: the starts between were
+// declared skipped, or the next group starts where the media before it ends.
+test("Consumer buffers groups at sparse starts as one range", async () => {
+	const opus = AudioConfigSchema.parse({
+		codec: "opus",
+		container: { kind: "legacy" },
+		sampleRate: 48_000,
+		numberOfChannels: 2,
+	});
+	const packet = new Uint8Array([31 << 3, 0]);
+	for (const [name, format, create] of [
+		// No duration: only the declared skips prove nothing is missing.
+		["declared", new LegacyFormat("data"), (track: Track.Producer, start: number) => track.appendGroup(Time.Timestamp.fromMicros(start))],
+		// Nothing declared: each 20 ms packet ends where the next group starts.
+		["contiguous", new LegacyFormat(opus), (track: Track.Producer, start: number) => track.createGroup(BigInt(start))],
+	] as const) {
+		const track = micro();
+		const delay = { min: Duration.millis(100), max: Duration.millis(5000) };
+		// Reaching back past the first group, so the start keeps every one.
+		const consumer = new Consumer(track.subscribe({ delay }), { format, delay });
+		for (const start of [0, 20_000, 40_000]) {
+			const group = create(track, start);
+			group.writeFrame({ payload: encodeLegacyFrame(start, packet), timestamp: Time.Timestamp.fromMicros(start) });
+			group.finish();
+		}
+		await clock.advance(Duration.ZERO);
+		expect(
+			consumer.buffered.peek().map((range) => [range.start.asMicros(), range.end.asMicros()]),
+			name,
+		).toEqual([[0, 40_000]]);
+
+		consumer.close();
+		track.finish();
+		track.close();
+	}
+});

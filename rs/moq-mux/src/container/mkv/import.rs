@@ -200,10 +200,10 @@ impl Media {
 		}
 	}
 
-	fn seek(&mut self, sequence: u64) -> crate::Result<()> {
+	fn seek(&mut self, start: u64) -> crate::Result<()> {
 		match self {
-			Self::Video(track) => track.seek(sequence),
-			Self::Audio(track) => track.seek(sequence),
+			Self::Video(track) => track.seek(start),
+			Self::Audio(track) => track.seek(start),
 		}
 	}
 
@@ -920,8 +920,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			}
 			BlockState::Skip => {}
 		}
-		if let Some(sequence) = self.seek.take() {
-			self.seek(sequence)?;
+		if let Some(start) = self.seek.take() {
+			self.seek(start)?;
 		}
 		Ok(())
 	}
