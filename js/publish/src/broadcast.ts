@@ -228,7 +228,7 @@ export class Broadcast {
 	 *
 	 * Set the returned rendition's `config` to a {@link Catalog.TextConfig}, then write one cue per
 	 * group into its `track` with `Hang.Container.Legacy.Producer` (each cue is a keyframe, so it opens
-	 * its own group). See the module docs for the cue framing. Stamp cues with `@moq/clock`'s `now()` in
+	 * its own group). See the module docs for the cue framing. Stamp cues with `MediaClock.now()` in
 	 * microseconds, the broadcast clock the catalog advertises.
 	 */
 	text(name: string): Rendition<Catalog.TextConfig> {
@@ -515,6 +515,7 @@ export class Broadcast {
 					// Catalog JSON is small and repetitive.
 					compression: "deflate",
 				});
+				if (!track) throw new Error(`the track ${Broadcast.CATALOG_TRACK} already exists`);
 				effect.cleanup(() => {
 					track.finish();
 					track.close();
@@ -564,6 +565,7 @@ export class Broadcast {
 						entry.name,
 						rendition.kind === "video" ? { ...info, refresh: VIDEO_REFRESH } : info,
 					);
+					if (!entry.track) throw new Error(`the track ${entry.name} already exists`);
 				}
 				entry.owner = rendition;
 				const served = entry.track;

@@ -14,6 +14,7 @@ import { Listing, listTracks, makeLister, type Tracks } from "./listing.ts";
 import * as Path from "./path.ts";
 import * as track from "./track.ts";
 import { untilAborted } from "./util/abort.ts";
+import { checkName } from "./util/utf8.ts";
 import { registerWire, trackOf, wireOf } from "./wire.ts";
 
 export { type Listed, Tracks, type TracksEvent } from "./listing.ts";
@@ -85,7 +86,7 @@ function createDatagrams(
 	name: string,
 	info: Partial<datagram.Info>,
 	listed = true,
-): datagram.Producer {
+): datagram.Producer | undefined {
 	if (state.closed.peek() !== undefined) throw new Error("broadcast is closed");
 	// A request its readers closed waits for async cleanup; serve the name fresh instead.
 	const queued = state.datagramRequested
@@ -97,7 +98,7 @@ function createDatagrams(
 		producer = queued.accept(info);
 	} else {
 		const existing = state.datagrams.get(name);
-		if (existing?.closed.peek() === undefined && existing) throw new Error(`duplicate datagram track: ${name}`);
+		if (existing?.closed.peek() === undefined && existing) return undefined;
 		producer = new datagram.Producer(name).accept(info);
 		state.datagrams.set(name, producer);
 		void producer.closed.then(() => {
@@ -341,7 +342,9 @@ async function fetchGroup(
 					// now: an in-progress group must keep receiving frames for its lifetime
 					// (mirrors Rust poll_fetch), and a failed group's unread frames stay in the
 					// cache's reach, expirable, until the caller lets them go.
-					void hooks.groupDone(recv.group).then(() => subscriber.close());
+					void (
+						(options as FetchFrom).held ? hooks.groupReleased(recv.group) : hooks.groupDone(recv.group)
+					).then(() => subscriber.close());
 					return recv.group;
 				case "drop":
 					// Its own reason, so a stale verdict stays OLD: a relay's fill asking under this
@@ -368,6 +371,12 @@ async function fetchGroup(
  */
 export interface FetchFrom {
 	frameStart?: number;
+	/**
+	 * Keep the fetch's subscription, which judges the group's budget, until the reader releases
+	 * the group rather than once it reads the end: a publisher still owed an acknowledgement
+	 * resets a response that goes stale meanwhile.
+	 */
+	held?: boolean;
 }
 
 // Settles once a read of `subscriber` may go differently.
@@ -470,16 +479,18 @@ export class Producer {
 	}
 
 	/**
-	 * Create a track, insert it into the broadcast, and return its producer.
+	 * Create a track, insert it into the broadcast, and return its producer, or `undefined` while
+	 * an open track or a live request holds the name.
 	 *
 	 * A request still queued for the name is answered with this track, so its subscribers read
 	 * from the returned producer. A request a handler has already taken stays a duplicate.
 	 * An append on the track throws if it would reuse a key an earlier track of the name
-	 * wrote in this broadcast, so a replacement writes its first group explicitly. Throws if an
-	 * open track or a live request already holds the name. `info` resolves as
-	 * {@link track.Producer.accept} does, so an omitted `maxAge` is zero, the live edge only.
+	 * wrote in this broadcast, so a replacement writes its first group explicitly. Throws if the
+	 * broadcast is closed, or if the name holds a lone surrogate, which UTF-8 cannot carry. `info`
+	 * resolves as {@link track.Producer.accept} does, so an omitted `maxAge` is zero, the live
+	 * edge only.
 	 */
-	createTrack(name: string, info: track.InfoInit = {}): track.Producer {
+	createTrack(name: string, info: track.InfoInit = {}): track.Producer | undefined {
 		if (this.#state.closed.peek() !== undefined) {
 			throw new Error("broadcast is closed");
 		}
@@ -497,7 +508,7 @@ export class Producer {
 		// A request a handler already pulled stays duplicate, as in Rust.
 		const live = [this.#state.tracks.get(name), this.#state.requests.get(name)];
 		if (live.some((existing) => existing && hooks.trackReleased(existing).peek() === undefined)) {
-			throw new Error(`duplicate track: ${name}`);
+			return undefined;
 		}
 
 		const producer = createProducer(this.#state, name).accept(info);
@@ -505,8 +516,11 @@ export class Producer {
 		return producer;
 	}
 
-	/** Create a live datagram track in a namespace separate from stream tracks. */
-	createDatagrams(name: string, info: Partial<datagram.Info> = {}): datagram.Producer {
+	/**
+	 * Create a live datagram track in a namespace separate from stream tracks, or `undefined`
+	 * while a live datagram track holds the name.
+	 */
+	createDatagrams(name: string, info: Partial<datagram.Info> = {}): datagram.Producer | undefined {
 		return createDatagrams(this.#state, name, info);
 	}
 
@@ -672,6 +686,7 @@ export class Consumer {
 
 	/** Read a datagram track live from now, independently of any same-name stream track. */
 	datagrams(name: string): datagram.Consumer {
+		checkName(name);
 		return wireOf(this).datagrams(name);
 	}
 

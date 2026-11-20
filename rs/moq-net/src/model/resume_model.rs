@@ -569,7 +569,7 @@ impl Model {
 							fill.refuse_groups(group..group + 1, Error::Stream(GIVE_UP));
 						} else if written == 0 || written < from || held.into_iter().any(|part| part.from <= from) {
 							fill.refuse_groups(group..group + 1, Error::NotFound);
-						} else if let Ok(writer) = fill.accept(group, None) {
+						} else if let Ok(Some(writer)) = fill.accept(group, None) {
 							// The fill starts at the frame its readers want, which may not exist yet.
 							copy.groups.entry(group).or_default().push(Part {
 								from,
@@ -697,9 +697,7 @@ impl Model {
 					}
 					// Only an arrival cursor says where its range resolved.
 					let resolved = match reader.cursor.as_mut().unwrap() {
-						Cursor::Arrival(sub) => {
-							sub.resolved().first().copied().flatten().map(|resolved| resolved.start)
-						}
+						Cursor::Arrival(sub) => sub.resolved_range(0).map(|resolved| resolved.start),
 						Cursor::Ordered(_) => None,
 					};
 					if !reader.admits(key, resolved) {

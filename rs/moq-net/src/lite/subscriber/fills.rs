@@ -876,7 +876,7 @@ mod tests {
 		// The lowered start asks for them again, and they arrive.
 		let (mut reader, fill) = ask(&producer, &requests);
 		for key in 0..3 {
-			let mut group = fill.accept(key, None).unwrap();
+			let mut group = fill.accept(key, None).unwrap().expect("a fresh group");
 			group
 				.write_frame(crate::Timestamp::from_millis(key * 1000).unwrap(), b"x".as_slice())
 				.unwrap();

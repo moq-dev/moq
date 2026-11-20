@@ -914,6 +914,11 @@ const UNAVAILABLE: [(&str, &str); 5] = [
 /// And where a claim moves to another node, the router forwards the new node's route
 /// before the old node's withdrawal at every hop, so some readers never see it offline
 /// and never start it again: fewer of each, by as many.
+///
+/// And a request follows a claim only through a neighbour whose copy of the claimant's
+/// claims holds it, where the prototype follows the route alone. While links flap, a
+/// neighbour's route can arrive before its copy of the claims, and a request through it
+/// would come back: fewer loops.
 #[test]
 fn the_router_gives_the_prototypes_answers() {
 	let mut out = Vec::new();
@@ -934,6 +939,7 @@ fn the_router_gives_the_prototypes_answers() {
 				"settle_rounds" => unavailable && b.rounds == a.rounds + 1,
 				"starts" => unavailable && b.sent.starts < a.sent.starts,
 				"offline" => unavailable && b.sent.offline < a.sent.offline,
+				"loops" if b.loops < a.loops => true,
 				"loops" => unavailable && shape.name == "three_meshes_ring" && b.loops == a.loops + 1,
 				_ => false,
 			};

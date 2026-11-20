@@ -37,5 +37,6 @@ export class Canvas2D {
 		ctx.restore();
 	}
 
+	// fallow-ignore-next-line unused-class-member
 	close() {}
 }

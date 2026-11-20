@@ -1245,7 +1245,9 @@ async fn raw_track_update_does_not_wait_for_pending_read() {
 				max: Some(Duration::from_millis(25)),
 			},
 			ranges: Some(vec![MoqRange {
-				start: MoqAnchor::Absolute { group: 0 },
+				start: MoqAnchor::Time {
+					timestamp: MoqTimestamp::unscaled(0),
+				},
 				end: None,
 			}]),
 			order: None,
@@ -2254,7 +2256,7 @@ async fn typed_abort_unwanted_keeps_a_late_reader() {
 	let stream = MoqMediaTrackStreamProducer::video(
 		&broadcast,
 		named("stream"),
-		video_init(MoqVideoFormat::Avc3, Vec::new()),
+		video_init(MoqVideoFormat::H264, Vec::new()),
 	)
 	.unwrap();
 	typed_abort_unwanted(
@@ -3294,7 +3296,7 @@ async fn video_publish_named_track() {
 		.await
 		.unwrap();
 
-	let init = || video_init(MoqVideoFormat::Avc3, h264_init());
+	let init = || video_init(MoqVideoFormat::H264, h264_init());
 	let hd = MoqMediaTrackProducer::video(
 		&broadcast,
 		MoqMediaTarget::Named {
@@ -3351,13 +3353,13 @@ async fn video_rung_sits_below_its_lower_and_disables() {
 		name: Some(name.into()),
 	};
 	let low =
-		MoqMediaTrackProducer::video(&broadcast, named("low"), video_init(MoqVideoFormat::Avc3, h264_init())).unwrap();
+		MoqMediaTrackProducer::video(&broadcast, named("low"), video_init(MoqVideoFormat::H264, h264_init())).unwrap();
 	let high = MoqMediaTrackProducer::video(
 		&broadcast,
 		named("high"),
 		MoqVideoInit {
 			lower: Some(MoqMediaProducer::Track { producer: low.clone() }),
-			..video_init(MoqVideoFormat::Avc3, h264_init())
+			..video_init(MoqVideoFormat::H264, h264_init())
 		},
 	)
 	.unwrap();
@@ -3401,14 +3403,14 @@ async fn stream_rung_is_funded_after_its_lower_and_resumes_at_a_keyframe() {
 		name: Some(name.into()),
 	};
 	let low =
-		MoqMediaTrackStreamProducer::video(&broadcast, named("low"), video_init(MoqVideoFormat::Avc3, h264_init()))
+		MoqMediaTrackStreamProducer::video(&broadcast, named("low"), video_init(MoqVideoFormat::H264, h264_init()))
 			.unwrap();
 	let high = MoqMediaTrackStreamProducer::video(
 		&broadcast,
 		named("high"),
 		MoqVideoInit {
 			lower: Some(MoqMediaProducer::Stream { producer: low.clone() }),
-			..video_init(MoqVideoFormat::Avc3, h264_init())
+			..video_init(MoqVideoFormat::H264, h264_init())
 		},
 	)
 	.unwrap();
@@ -3489,7 +3491,7 @@ async fn video_track_demand_follows_a_new_level() {
 		MoqMediaTarget::Named {
 			name: Some("hd".into()),
 		},
-		video_init(MoqVideoFormat::Avc3, h264_init()),
+		video_init(MoqVideoFormat::H264, h264_init()),
 	)
 	.unwrap();
 	let keyframe = |level: u8| {
@@ -3525,7 +3527,7 @@ async fn track_stream_producer_publishes_its_last_access_unit() {
 		MoqMediaTarget::Named {
 			name: Some("video".into()),
 		},
-		video_init(MoqVideoFormat::Avc3, Vec::new()),
+		video_init(MoqVideoFormat::H264, Vec::new()),
 	)
 	.unwrap();
 	let track = consumer.subscribe_track("video".into(), None).await.unwrap();
@@ -3573,7 +3575,7 @@ async fn requested_track_keeps_its_name() {
 		MoqMediaTarget::Requested {
 			request: request.clone(),
 		},
-		video_init(MoqVideoFormat::Avc3, h264_init()),
+		video_init(MoqVideoFormat::H264, h264_init()),
 	)
 	.unwrap();
 	assert_eq!(media.demand().unwrap().name(), "requested");
@@ -4448,7 +4450,7 @@ async fn video_publish_consume() {
 	let media = MoqMediaTrackProducer::video(
 		&broadcast,
 		MoqMediaTarget::Named { name: None },
-		video_init(MoqVideoFormat::Avc3, init),
+		video_init(MoqVideoFormat::H264, init),
 	)
 	.unwrap();
 
@@ -5475,7 +5477,7 @@ async fn a_failed_finish_ends_the_track_with_its_cause() {
 		MoqMediaTarget::Named {
 			name: Some("video".into()),
 		},
-		video_init(MoqVideoFormat::Avc3, h264_init()),
+		video_init(MoqVideoFormat::H264, h264_init()),
 	)
 	.unwrap();
 	let reader = consumer.subscribe_track("video".into(), None).await.unwrap();
@@ -8886,15 +8888,16 @@ fn shutdown_waits_for_an_in_place_poll() {
 
 	let (entered, entered_rx) = std::sync::mpsc::channel();
 	let (release, release_rx) = std::sync::mpsc::channel::<()>();
-	let poller = std::thread::spawn(move || {
+	let poller = std::thread::spawn(move || -> Result<(), MoqError> {
 		let task = crate::ffi::Task::new(());
 		let run = task.run(|_| async move {
 			entered.send(()).unwrap();
 			// Holds this poll open while shutdown starts on another thread.
 			release_rx.recv().unwrap();
-			kio::clock::sleep(Duration::from_millis(1)).await;
-			// Even if the sleep is already due, only the shutdown may finish this call.
-			std::future::pending::<Result<(), MoqError>>().await
+			// Arms a timer on tokio's host driver, which shutdown must not stop under this poll.
+			// The clock never reaches its last instant, so only the shutdown finishes this call.
+			kio::clock::sleep_until(kio::clock::now().saturating_add(Duration::MAX)).await;
+			unreachable!("the clock reached its last instant")
 		});
 		tokio::runtime::Builder::new_current_thread()
 			.build()
@@ -9692,16 +9695,17 @@ async fn route_and_claim_credentials_ride_the_moq_transport_announce() {
 		.unwrap();
 }
 
-/// A time anchor starts at the group containing it, and a scale-less track compares it with
-/// bare starts. Its time is unscaled, in the track's timescale: a scaled one is refused rather
-/// than read in units the subscription can't check.
+/// A time start is the group containing it and a time end includes the groups starting at or
+/// before it, so a former exclusive end at `t` is `Time(t - 1)`. A scale-less track
+/// compares a time with bare starts. Its time is unscaled, in the track's timescale: a scaled
+/// one is refused rather than read in units the subscription can't check.
 #[tokio::test]
-async fn time_anchors_start_at_the_containing_group() {
+async fn time_anchors_select_the_containing_groups() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast
 		.publish_track("events".into(), Some(unlimited_info()))
 		.unwrap();
-	for timestamp_us in [0, 1_000, 2_000] {
+	for timestamp_us in [0, 1_000, 2_000, 3_000] {
 		// Each group starts at its frame's time, in the track's microseconds.
 		let group = track.create_group(timestamp_us).unwrap();
 		group
@@ -9713,19 +9717,23 @@ async fn time_anchors_start_at_the_containing_group() {
 		group.finish().unwrap();
 	}
 
-	let since = |timestamp_us| MoqSubscription {
+	let time = |timestamp_us| MoqAnchor::Time {
+		timestamp: MoqTimestamp::unscaled(timestamp_us),
+	};
+	let subscription = |ranges| MoqSubscription {
 		priority: 0,
 		delay: MoqDelay {
 			min: Some(Duration::ZERO),
 			max: Some(Duration::from_secs(10)),
 		},
-		ranges: Some(vec![MoqRange {
-			start: MoqAnchor::Time {
-				timestamp: MoqTimestamp::unscaled(timestamp_us),
-			},
-			end: None,
-		}]),
+		ranges,
 		order: Some(MoqOrder::Ascending),
+	};
+	let between = |start, end: Option<u64>| {
+		subscription(Some(vec![MoqRange {
+			start: time(start),
+			end: end.map(time),
+		}]))
 	};
 	let scaled = MoqRange {
 		start: MoqAnchor::Time { timestamp: us(1_500) },
@@ -9735,17 +9743,43 @@ async fn time_anchors_start_at_the_containing_group() {
 		scaled.resolve(),
 		Err(MoqError::Protocol { details }) if details.kind == MoqProtocolKind::TimestampMismatch
 	));
-	let consumer = track.consume(Some(since(1_500))).unwrap();
-	let mut starts = Vec::new();
-	for _ in 0..2 {
-		let group = kio::clock::timeout(TIMEOUT, consumer.recv_group())
+
+	// Every group a read hands out before it ends, by start. Start order ends at the first
+	// group past the range, where arrival order waits for a straggler until it ages out.
+	let starts = async |subscription| {
+		let consumer = track.consume(Some(subscription)).unwrap();
+		let mut starts = Vec::new();
+		while let Some(group) = kio::clock::timeout(TIMEOUT, consumer.next_group())
 			.await
 			.expect("timed out waiting for a cached group")
 			.unwrap()
-			.expect("expected a group");
-		starts.push(group.start());
-	}
-	assert_eq!(starts, vec![1_000, 2_000]);
+		{
+			starts.push(group.start());
+		}
+		starts
+	};
+	assert_eq!(starts(between(1_500, Some(2_000))).await, vec![1_000, 2_000]);
+	// What a former exclusive end at 2000 becomes: every group starting before 2000.
+	let migrated = MoqRange {
+		start: time(1_500),
+		end: Some(time(1_999)),
+	};
+	assert_eq!(
+		migrated.resolve().unwrap(),
+		moq_net::track::Range {
+			start: moq_net::track::Anchor::Time(1_500),
+			end: Some(moq_net::track::Anchor::Time(1_999)),
+		}
+	);
+	// An exclusive end at 0 asked for nothing: an empty list, unlike the omitted default.
+	assert_eq!(starts(subscription(Some(Vec::new()))).await, Vec::<u64>::new());
+
+	let open = track.consume(Some(subscription(None))).unwrap();
+	kio::clock::timeout(TIMEOUT, open.next_group())
+		.await
+		.expect("timed out waiting for a cached group")
+		.unwrap()
+		.expect("omitted ranges read the track");
 
 	let untimed = broadcast
 		.publish_track(
@@ -9757,7 +9791,7 @@ async fn time_anchors_start_at_the_containing_group() {
 		)
 		.unwrap();
 	let consumer = untimed.consume(None).unwrap();
-	consumer.update(since(0)).unwrap();
+	consumer.update(between(0, None)).unwrap();
 }
 
 // Frame-only controls keep checking payloads independently of the breaks between frames.

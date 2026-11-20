@@ -38,9 +38,10 @@ lints [moq-dev/moq#6576](https://github.com/moq-dev/moq/pull/6576).
   declarations whose name appears only at the definition.
 - Unconditional dead-code suppressions are `expect`, so a stale one fails the
   build; check what the `cfg_attr` ones still guard.
-- Knip needs explicit entries for Bun tests, `*.browser.ts`, benches,
-  examples, worklets, TSX, `test/*` clients, and repo-root scripts, and
-  `ignore` for `rs/**/test_data`.
+- JS dead code is gated: `just js dead-code` runs fallow over the workspace
+  with the entries `.fallowrc.jsonc` lists. Review its
+  `fallow-ignore-next-line` suppressions, which mark public members with no
+  caller here.
 - Trace a CLI flag through the config merge, not prose or examples. Hidden
   deprecated spellings (`--client-*`, `--server-*`, the relay's legacy auth
   fields) fail with migration guidance on purpose.

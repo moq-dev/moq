@@ -1,6 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { yieldNow } from "@moq/clock";
 import { exchangeSetup } from "../connection/handshake.ts";
+import { defined } from "../defined.test-util.ts";
 import { SessionCode } from "../error.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
@@ -429,7 +430,7 @@ for (const [version, alpn] of [[Version.DRAFT_22, ALPN.DRAFT_22]] as const) {
 			const origin = new OriginProducer();
 			const broadcastRoute = origin.route(Path.from("room"));
 			const broadcast = broadcastRoute.broadcast;
-			broadcast.createTrack("video", { timescale: Timescale.MILLI });
+			defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 			const connection = new Connection({
 				url: new URL("https://example.com"),
 				quic: pair.server,
@@ -464,7 +465,7 @@ async function serving(version: IetfVersion, alpn: string) {
 	const origin = new OriginProducer();
 	const broadcastRoute = origin.route(Path.from("room"));
 	const broadcast = broadcastRoute.broadcast;
-	broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	const connection = new Connection({
 		url: new URL("https://example.com"),
 		quic: pair.server,

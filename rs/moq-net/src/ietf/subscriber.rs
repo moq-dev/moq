@@ -587,12 +587,8 @@ impl RangeWriter {
 				fill.drop_groups(key..key + 1);
 				None
 			}
-			false => match fill.accept(key, None) {
-				Ok(producer) => Some(crate::recv::Group::new(producer)),
-				// Delivered since it was asked: this fetch's copy is a duplicate.
-				Err(Error::Duplicate) => None,
-				Err(err) => return Err(err),
-			},
+			// None once delivered since it was asked: this fetch's copy is a duplicate.
+			false => fill.accept(key, None)?.map(crate::recv::Group::new),
 		};
 		if let Some(producer) = &producer {
 			let handle = producer.handle().clone();

@@ -15,7 +15,7 @@ export namespace Announce {
 		get synced(): Signals.Getter<boolean>;
 	}
 	export type Event = {
-		kind: "present" | "unavailable" | "available" | "absent" | "offline";
+		kind: "present" | "absent";
 	} & Announce.Announce;
 	export interface Options {
 		covering?: boolean;
@@ -108,8 +108,8 @@ export namespace Broadcast {
 		close(): void;
 		get closed(): Signals.GetPromise<null>;
 		consume(): Broadcast.Consumer;
-		createDatagrams(name: string, info?: Partial<Datagram.Info>): Datagram.Producer;
-		createTrack(name: string, info?: Track.InfoInit): Track.Producer;
+		createDatagrams(name: string, info?: Partial<Datagram.Info>): Datagram.Producer | undefined;
+		createTrack(name: string, info?: Track.InfoInit): Track.Producer | undefined;
 		removeTrack(name: string): void;
 		track(name: string): Track.Consumer;
 	}
@@ -698,7 +698,7 @@ export namespace Track {
 	export type Fill = Track.FillGroups | Track.FillLookup;
 	export class FillGroups {
 		[Symbol.dispose](): void;
-		accept(start: bigint, info?: Track.Info): Group.Producer;
+		accept(start: bigint, info?: Track.Info): Group.Producer | undefined;
 		close(): void;
 		dropGroups(start: bigint, end: bigint): void;
 		readonly end: bigint;
@@ -715,7 +715,7 @@ export namespace Track {
 	}
 	export class FillLookup {
 		[Symbol.dispose](): void;
-		accept(start: bigint, info?: Track.Info): Group.Producer;
+		accept(start: bigint, info?: Track.Info): Group.Producer | undefined;
 		close(): void;
 		readonly kind: "lookup";
 		get maxDelay(): Clock.Duration | null;

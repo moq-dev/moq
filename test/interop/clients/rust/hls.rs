@@ -75,11 +75,15 @@ async fn main() -> anyhow::Result<()> {
 		let route = origin.route(path, moq_net::origin::RouteOptions::hidden())?;
 		let mut broadcast = route.broadcast().clone();
 		let mut catalog = moq_mux::catalog::Producer::<()>::new(&mut broadcast, Default::default())?;
-		let track = broadcast.create_track("video", catalog.track_info(hang::catalog::PRIORITY.video))?;
+		let track = broadcast
+			.create_track("video", catalog.track_info(hang::catalog::PRIORITY.video))
+			.context("the track already exists")?;
 		let config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		// Each producer owns its catalog entry, so both stay alive until the reader is done.
 		let video_track = write(catalog.video(track, Container::Legacy(Kind::Video), config)?, video())?;
-		let track = broadcast.create_track("audio", catalog.track_info(hang::catalog::PRIORITY.audio))?;
+		let track = broadcast
+			.create_track("audio", catalog.track_info(hang::catalog::PRIORITY.audio))
+			.context("the track already exists")?;
 		let config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
 		let audio_track = write(catalog.audio(track, Container::Legacy(Kind::Audio), config)?, audio())?;
 		catalog.finish()?;

@@ -1114,7 +1114,7 @@ fn replay_flights(ctx: &Flights, payloads: &[Bytes], readers: usize, apart: usiz
 		}
 		while let Poll::Ready(Ok(track::Fill::Groups(fill))) = ctx.requests.poll_requested_fill(&waiter) {
 			let start = fill.start();
-			let group = fill.accept(start.group, None).unwrap();
+			let group = fill.accept(start.group, None).unwrap().expect("a fresh group");
 			let demand = group.demand();
 			served += 1;
 			flights.push(Flight {

@@ -237,7 +237,7 @@ Repeat the two-relay smoke with the candidate and the last published relay. Put 
 in turn, then publish from each side, discover it from the other, fetch and compare a frame, and
 observe withdrawal. All four paths passed on lite-06 with 0.17.17 and audited main at d0ce553674.
 Re-run the existing cut checks on the resolved merge and version bump. After publication,
-use the manual `just test wire-compat --remeasure` procedure while the automated update is broken.
+check that Release remeasure opened or updated its pin PR, as RELEASE.md describes.
 
 ## Required
 

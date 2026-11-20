@@ -2,6 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { Duration } from "@moq/clock";
 import type { Manual } from "@moq/clock/test";
 import { exchangeSetup } from "../connection/handshake.ts";
+import { defined } from "../defined.test-util.ts";
 import { ProtocolViolation, SessionCode, StreamCode, StreamError } from "../error.ts";
 import { createMockTransportPair, manual } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
@@ -64,7 +65,7 @@ async function serving(version: IetfVersion, alpn: string) {
 	const origin = new OriginProducer();
 	const broadcastRoute = origin.route(Path.from("room"));
 	const broadcast = broadcastRoute.broadcast;
-	broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	const connection = new Connection({
 		url: new URL("https://example.com"),
 		quic: pair.server,

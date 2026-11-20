@@ -6,6 +6,7 @@
  */
 
 import type { Dispose } from "@moq/signals";
+import { hooks } from "./internal.ts";
 import type { Writer } from "./stream.ts";
 import type * as track from "./track.ts";
 
@@ -110,12 +111,12 @@ export class Priority {
 	constructor(track: track.Subscriber, publisher = 0) {
 		this.#track = track;
 		this.#publisher = publisher;
-		this.#dispose = track.subscription.subscribe(() => this.#rerank());
+		this.#dispose = hooks.preferences(track).revision.subscribe(() => this.#rerank());
 	}
 
 	/** The send order for a stream starting at this group and object, before it opens. */
 	rank(key: bigint, object: number): number {
-		const subscription = this.#track.subscription.peek();
+		const subscription = hooks.preferences(this.#track).scalars();
 		return sendOrder({
 			priority: subscription?.priority ?? 0,
 			publisher: this.#publisher,
@@ -179,7 +180,7 @@ export class Priority {
 	// Sorted once, so ranking every stream costs one sort rather than a scan per stream: a
 	// stream's position is how many sort strictly ahead of it.
 	#rerank() {
-		const subscription = this.#track.subscription.peek();
+		const subscription = hooks.preferences(this.#track).scalars();
 		const priority = subscription?.priority ?? 0;
 		const order = subscription?.order ?? "descending";
 		const queue = [...this.#streams].sort(([, a], [, b]) => compareStarts(a, b, order));

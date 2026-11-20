@@ -118,21 +118,21 @@ pub enum moq_audio_format {
 
 /// A single video codec [moq_publish_video] can parse.
 ///
-/// H.264 and H.265 appear twice each because the framing differs, not just the
-/// codec: AVC1/HVC1 are length-prefixed with an out-of-band config record,
-/// while AVC3/HEV1 are Annex-B with the parameter sets inline.
+/// H.264 and H.265 appear twice each because the input framing differs:
+/// AVC1/HVC1 are length-prefixed with an out-of-band config record, while
+/// H264/H265 are a raw Annex B elementary stream with the parameter sets inline.
 #[repr(C)]
 #[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum moq_video_format {
 	/// H.264, length-prefixed NALUs with an out-of-band avcC.
 	MOQ_VIDEO_FORMAT_AVC1 = 0,
-	/// H.264, Annex-B with inline SPS/PPS.
-	MOQ_VIDEO_FORMAT_AVC3 = 1,
+	/// H.264, a raw Annex B elementary stream with inline SPS/PPS.
+	MOQ_VIDEO_FORMAT_H264 = 1,
 	/// H.265, length-prefixed NALUs with an out-of-band hvcC.
 	MOQ_VIDEO_FORMAT_HVC1 = 2,
-	/// H.265, Annex-B with inline parameter sets.
-	MOQ_VIDEO_FORMAT_HEV1 = 3,
+	/// H.265, a raw Annex B elementary stream with inline parameter sets.
+	MOQ_VIDEO_FORMAT_H265 = 3,
 	/// AV1.
 	MOQ_VIDEO_FORMAT_AV01 = 4,
 	/// VP8.
@@ -377,9 +377,9 @@ fn video_format_from_u32(value: u32) -> Result<moq_mux::import::VideoFormat, Err
 	use moq_mux::import::VideoFormat;
 	Ok(match value {
 		v if v == moq_video_format::MOQ_VIDEO_FORMAT_AVC1 as u32 => VideoFormat::Avc1,
-		v if v == moq_video_format::MOQ_VIDEO_FORMAT_AVC3 as u32 => VideoFormat::Avc3,
+		v if v == moq_video_format::MOQ_VIDEO_FORMAT_H264 as u32 => VideoFormat::H264,
 		v if v == moq_video_format::MOQ_VIDEO_FORMAT_HVC1 as u32 => VideoFormat::Hvc1,
-		v if v == moq_video_format::MOQ_VIDEO_FORMAT_HEV1 as u32 => VideoFormat::Hev1,
+		v if v == moq_video_format::MOQ_VIDEO_FORMAT_H265 as u32 => VideoFormat::H265,
 		v if v == moq_video_format::MOQ_VIDEO_FORMAT_AV01 as u32 => VideoFormat::Av01,
 		v if v == moq_video_format::MOQ_VIDEO_FORMAT_VP8 as u32 => VideoFormat::Vp8,
 		v if v == moq_video_format::MOQ_VIDEO_FORMAT_VP9 as u32 => VideoFormat::Vp9,
@@ -901,31 +901,29 @@ pub struct moq_subscription {
 	pub order: u32,
 }
 
-/// A span of a track to deliver: from `start` up to `end`, or onward without one.
+/// A span of a track to deliver: from `start` through `end`, or onward without one.
 ///
-/// A relative or time start is the first frame of its group, and a relative or time end
-/// includes its whole group. An absolute end is exclusive.
+/// Every start is the first frame of its group, and every end includes its whole group.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct moq_range {
 	/// Where delivery starts.
 	pub start: moq_anchor,
-	/// Where delivery stops, read only when `end_present` is true.
+	/// Where delivery stops, including its group, read only when `end_present` is true.
 	pub end: moq_anchor,
 	/// Whether `end` is present. When false, the range follows the live edge.
 	pub end_present: bool,
 }
 
-/// Where one end of a [moq_range] falls. Zeroing it means group 0.
+/// Where one end of a [moq_range] falls. A zeroed one names no kind and is refused.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct moq_anchor {
 	/// `moq_anchor_kind` discriminant.
 	pub kind: u32,
-	/// The group's start, in its track's timescale, or with `MOQ_ANCHOR_RELATIVE` how many
-	/// groups before the latest one (0 is the latest, and an offset past every group held
-	/// reaches back to the oldest).
-	pub group: u64,
+	/// Read only with `MOQ_ANCHOR_RELATIVE`: how many groups before the latest one (0 is the
+	/// latest, and an offset past every group held reaches back to the oldest).
+	pub groups: u64,
 	/// The time, read only with `MOQ_ANCHOR_TIME`: unscaled (`has_scale` false), with `value` in
 	/// the track's timescale. A scaled one is refused with a timestamp mismatch.
 	pub timestamp: moq_timestamp,
@@ -936,11 +934,14 @@ pub struct moq_anchor {
 #[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 #[derive(Clone, Copy, Debug)]
 pub enum moq_anchor_kind {
-	/// The group starting at `group`, delivered from its first frame.
-	MOQ_ANCHOR_ABSOLUTE = 0,
-	/// A count of groups back from the latest one.
+	/// A count of `groups` back from the latest one.
 	MOQ_ANCHOR_RELATIVE = 1,
-	/// The group containing a time: the newest one starting at or before it.
+	/// The group containing a time: the newest one starting at or before it. A group is named
+	/// by its start, so its start names exactly it. As an end, it includes every group
+	/// starting at or before the time.
+	///
+	/// Over a session older than moq-lite-07, a start between two groups reaches the
+	/// publisher as the first group at or after it, missing the one containing it.
 	MOQ_ANCHOR_TIME = 2,
 	/// The oldest group still around, as far back as `delay.max_us` allows. A start only.
 	MOQ_ANCHOR_OLDEST = 3,
@@ -957,13 +958,11 @@ pub enum moq_order {
 	MOQ_ORDER_ASCENDING = 1,
 }
 
-/// `anchor` as a start. A group is named by its start, so an absolute group names that time.
-/// A time must be unscaled, in the track's timescale: the timescale is unknown here, so a scaled
-/// one is refused rather than read in the wrong units.
+/// `anchor` as moq-net reads it. A time must be unscaled, in the track's timescale: the
+/// timescale is unknown here, so a scaled one is refused rather than read in the wrong units.
 fn parse_anchor(anchor: &moq_anchor) -> Result<moq_net::track::Anchor, Error> {
 	Ok(match anchor.kind {
-		v if v == moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32 => moq_net::track::Anchor::Time(anchor.group),
-		v if v == moq_anchor_kind::MOQ_ANCHOR_RELATIVE as u32 => moq_net::track::Anchor::Relative(anchor.group),
+		v if v == moq_anchor_kind::MOQ_ANCHOR_RELATIVE as u32 => moq_net::track::Anchor::Relative(anchor.groups),
 		v if v == moq_anchor_kind::MOQ_ANCHOR_TIME as u32 => match anchor.timestamp.has_scale {
 			false => moq_net::track::Anchor::Time(anchor.timestamp.value),
 			true => return Err(moq_net::Error::TimestampMismatch.into()),
@@ -971,17 +970,6 @@ fn parse_anchor(anchor: &moq_anchor) -> Result<moq_net::track::Anchor, Error> {
 		v if v == moq_anchor_kind::MOQ_ANCHOR_OLDEST as u32 => moq_net::track::Anchor::Oldest,
 		_ => return Err(Error::InvalidCode),
 	})
-}
-
-/// `anchor` as an end, or `None` for an absolute end at group 0, which holds nothing. An
-/// absolute end is exclusive, so it ends with the group before it.
-fn parse_end(anchor: &moq_anchor) -> Result<Option<moq_net::track::Anchor>, Error> {
-	match anchor.kind {
-		v if v == moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32 => {
-			Ok(anchor.group.checked_sub(1).map(moq_net::track::Anchor::Time))
-		}
-		_ => parse_anchor(anchor).map(Some),
-	}
 }
 
 /// # Safety
@@ -1003,19 +991,13 @@ pub(crate) unsafe fn parse_subscription(
 		let ranges = ranges
 			.iter()
 			.map(|range| {
-				let start = parse_anchor(&range.start)?;
-				let end = match range.end_present {
-					// One ending before group 0 holds nothing, so it is dropped.
-					true => match parse_end(&range.end)? {
-						Some(end) => Some(end),
-						None => return Ok(None),
-					},
-					false => None,
-				};
-				Ok(Some(moq_net::track::Range { start, end }))
+				Ok(moq_net::track::Range {
+					start: parse_anchor(&range.start)?,
+					end: range.end_present.then(|| parse_anchor(&range.end)).transpose()?,
+				})
 			})
 			.collect::<Result<Vec<_>, Error>>()?;
-		out = out.with_ranges(ranges.into_iter().flatten());
+		out = out.with_ranges(ranges);
 	}
 	Ok(out)
 }
@@ -1174,20 +1156,12 @@ pub enum moq_announce_kind {
 	/// A route now covers the path, which was absent. Another instance taking it over keeps it
 	/// present: follow it with [moq_origin_follow] to see the broadcast change.
 	MOQ_ANNOUNCE_KIND_PRESENT = 0,
-	/// The origin withdrew the path: no route covers it any more.
+	/// No route covers the path any more, whether its origin withdrew it or this origin let
+	/// go of it.
 	MOQ_ANNOUNCE_KIND_ABSENT = 1,
-	/// This origin let go of the path, and no route covers it any more: the session it arrived
-	/// on closed, or the network lost every path to it. Its origin may still serve it.
-	MOQ_ANNOUNCE_KIND_OFFLINE = 2,
-	/// The present path lost every usable path to its origin but may recover one: it stays
-	/// present while requests for it may fail.
-	MOQ_ANNOUNCE_KIND_UNAVAILABLE = 3,
-	/// The present path recovered a usable path: request it again.
-	MOQ_ANNOUNCE_KIND_AVAILABLE = 4,
 }
 
-/// An announce event from an origin: a path becoming present, absent, or offline, or its
-/// availability changing.
+/// An announce event from an origin: a path becoming present or absent.
 #[repr(C)]
 pub struct moq_announce_event {
 	/// The covered prefix, relative to the origin, NOT NULL terminated
@@ -1204,8 +1178,8 @@ pub struct moq_announce_event {
 	/// Which event this is.
 	pub kind: moq_announce_kind,
 
-	/// The route serving the prefix. On `MOQ_ANNOUNCE_KIND_ABSENT` and
-	/// `MOQ_ANNOUNCE_KIND_OFFLINE` it carries the last advertised route.
+	/// The route serving the prefix. On `MOQ_ANNOUNCE_KIND_ABSENT` it carries the last
+	/// advertised route.
 	pub route: moq_route_info,
 }
 

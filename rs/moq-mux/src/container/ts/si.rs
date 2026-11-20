@@ -441,10 +441,9 @@ impl Entry {
 			None => {
 				let info = track_info(max_age);
 				self.track.insert(
-					match broadcast.create_track(format!("{pid:#06x}-{table_id:#04x}.si"), info.clone()) {
-						Ok(track) => track,
-						Err(_) => broadcast.unique_track(".si", info)?,
-					},
+					broadcast
+						.create_track(format!("{pid:#06x}-{table_id:#04x}.si"), info.clone())
+						.unwrap_or_else(|| broadcast.unique_track(".si", info)),
 				)
 			}
 		};

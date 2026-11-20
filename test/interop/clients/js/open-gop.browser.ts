@@ -3,8 +3,8 @@ import { expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { worklet } from "@moq/common/vite-plugin-worklet";
 import { build } from "vite";
-import { worklet } from "../../../../js/common/vite-plugin-worklet";
 import { launch, open, throwPageErrors, waitFor } from "./harness";
 import type { Packet } from "./open-gop/main";
 

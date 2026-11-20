@@ -31,16 +31,25 @@ a marked Node ID, and marked the lite-06 churn mitigations; and
 chain name its announcing relay, then each grant's exporter and adopter.
 Its proof is
 `rs/moq-net/verify/route-algebra/`, and the quests written against the old
-wire were retargeted or deleted. The lite-07 cut still waits on this epic's
-children, [the uncovered cases](/quest/m2/multicast/accept.md),
-[route counters](/quest/m2/multicast/route-counters.md), and
-[the mesh replay](/quest/m2/multicast/mesh-replay.md), and on
-[route layer acceptance](/quest/m2/cluster-routes/acceptance.md) retiring
-the lite-06 mitigations. After the cut come warmth's wire
-([cache-aware routing](/quest/m3/cache-routing/README.md)),
-[route benches](/quest/m3/route-benches.md),
-[the proof binding](/quest/m3/route-proof-binding.md),
-[route health](/quest/m3/route-health/README.md), and
+wire were retargeted or deleted.
+[moq-dev/moq#9111](https://github.com/moq-dev/moq/pull/9111) ran the cases no
+test covered on real sessions. It found two flaws, both now fixed:
+[moq-dev/moq#9154](https://github.com/moq-dev/moq/pull/9154) lets a front ride
+through a lost claim's debounce, so a reader resumes on a detour learned after
+its session closed, and a route moving behind one next hop no longer resends a
+group, since a lite-07 range may start partway through one. The lite-07 cut
+still waits on this epic's children, a flaw the mesh replay found,
+[a lite-07 reader its relay refuses as unroutable and never re-asks](/quest/m2/multicast/splice-stall.md);
+and on
+[route layer acceptance](/quest/m2/cluster-routes/acceptance.md)'s
+scoped subscriber whose grant is too wide to ask for. It does not wait on
+[warmth's port](/quest/m3/cache-routing/select.md): its wire joins lite-07
+only if the port has landed and passed the mesh replay when the cut is made,
+and otherwise moves to the first wip version after it (maintainer,
+2026-11-19). The port is measured and not yet built, pending the maintainer
+(the coordinating session, under the maintainer's delegation, 2026-11-19).
+After the cut come
+[route health](/quest/m3/route-health/README.md) and
 [outbound federation](/quest/m3/cluster-routing/federation.md).
 
 Decided 2026-11-15 (maintainer, /quest-plan), after an audit of the lite-07
@@ -74,6 +83,18 @@ The maintainer's requirements, which every child is judged against:
     moq-transport node is always an endpoint.
 12. No global view. With competing claims each node uses its closest, and
     nothing elects a leader.
+    Narrowed 2026-11-18 inside one trusted domain, for judging node layers
+    under MoQ: a node may know its domain's topology, but nothing elects a
+    leader and competing claims resolve to the closest. The node-layer
+    bake-off ([moq-dev/moq#9149](https://github.com/moq-dev/moq/pull/9149))
+    kept the path vector: link state sent more route messages on every link
+    or relay failure but a 12-relay partition (up to 60 times at 32 relays;
+    a publisher moving costs it claim floods, not route messages), with fewer readers unfed after a partition or a hub dying
+    slowly but more after a transit dies, and held fewer copies of each
+    claim. A flat domain over a network that routes underneath sends nothing
+    for link events that network absorbs, but notices a partition only by
+    keep-alives and fans out only with warm routes across every pair of
+    relays.
 13. A secondary route may carry metadata only, so a stalled primary is found
     without waiting on QUIC keep-alives, where a node opts in.
 14. No approach is assumed: earlier attempts are evidence, not constraints.

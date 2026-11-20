@@ -244,7 +244,7 @@ fn is_public_transport(transport: moq_tokio::Transport, public_quic: bool) -> bo
 
 /// Serve ordinary clients from an already-bound listener, each through its lease.
 fn spawn_serve(tasks: &mut JoinSet<anyhow::Result<()>>, mut listener: moq_tokio::Listener, serving: Serving) {
-	if let Ok(addr) = listener.local_addr() {
+	if let Some(addr) = listener.local_addr() {
 		tracing::info!(%addr, "listening");
 	}
 	tasks.spawn(async move {

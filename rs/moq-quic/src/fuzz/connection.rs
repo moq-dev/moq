@@ -776,7 +776,7 @@ impl Pair {
 		let data: Vec<u8> = (sent.len..sent.len + len)
 			.map(|offset| stream_byte(side, id, offset))
 			.collect();
-		if let Ok(written) = conn.send_stream(id).write(&mut &data[..]) {
+		if let Poll::Ready(Ok(written)) = conn.send_stream(id).try_write(&mut &data[..]) {
 			sent.len += written as u64;
 		}
 	}
@@ -832,9 +832,10 @@ fn read(peer: &mut Peer, sent: &HashMap<(Side, StreamId), Sent>, id: StreamId, m
 
 	let offset = peer.read.entry(id).or_default();
 	let mut budget = max;
+	let mut reset = false;
 	while budget > 0 {
-		match chunks.next(budget) {
-			Ok(Some(chunk)) => {
+		match chunks.try_next(budget) {
+			Poll::Ready(Ok(Some(chunk))) => {
 				let end = *offset + chunk.bytes.len() as u64;
 				if !forged {
 					let written = sent.get(&(writer, id)).map_or(0, |sent| sent.len);
@@ -847,7 +848,7 @@ fn read(peer: &mut Peer, sent: &HashMap<(Side, StreamId), Sent>, id: StreamId, m
 				*offset = end;
 				budget -= chunk.bytes.len();
 			}
-			Ok(None) => {
+			Poll::Ready(Ok(None)) => {
 				let sent = sent.get(&(writer, id));
 				if !forged {
 					assert!(sent.is_some_and(|sent| sent.fin), "finished a stream never finished");
@@ -859,12 +860,24 @@ fn read(peer: &mut Peer, sent: &HashMap<(Side, StreamId), Sent>, id: StreamId, m
 				}
 				break;
 			}
-			Err(recv::Error::Blocked | recv::Error::Reset(_)) => break,
-			Err(err) => unreachable!("{err}"),
+			// Nothing more yet, or ever once the connection is lost.
+			Poll::Pending | Poll::Ready(Err(recv::Error::ConnectionLost)) => break,
+			Poll::Ready(Err(recv::Error::Reset)) => {
+				reset = true;
+				break;
+			}
+			Poll::Ready(Err(err)) => unreachable!("{err}"),
 		}
 	}
 
 	chunks.finalize();
+	// Asking for the code frees the stream, as an application learning of the reset would.
+	if reset {
+		assert!(
+			stream.received_reset().expect("reset").is_some(),
+			"a reset read has a code"
+		);
+	}
 }
 
 /// Odd streams are read through leases, since a plain read would skip what a lease holds.
@@ -881,16 +894,16 @@ fn lease(peer: &mut Peer, sent: &HashMap<(Side, StreamId), Sent>, id: StreamId, 
 	let Some((_, conn)) = &mut peer.conn else {
 		return;
 	};
-	let mut lease = match conn.recv_stream(id).lease(want) {
-		Ok(lease) => lease,
-		Err(recv::Error::Evicted) => {
+	let mut lease = match conn.recv_stream(id).try_lease(want) {
+		Poll::Ready(Ok(lease)) => lease,
+		Poll::Ready(Err(recv::Error::Evicted)) => {
 			conn.recv_stream(id)
 				.stop(0u32.into())
 				.expect("an evicted stream stops once");
 			return;
 		}
 		// Waiting, reset, or stopped: nothing to check yet.
-		Err(_) => return,
+		_ => return,
 	};
 	let offset = peer.read.entry(id).or_default();
 	let n = max.min(lease.remaining());

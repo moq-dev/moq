@@ -3548,9 +3548,11 @@ async fn reconnect_retries_a_rejection_after_a_healthy_session() {
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
 	config.backoff.healthy = Some(HEALTHY.into());
-	let mut connection = config.init(Default::default()).unwrap().connect(url);
-	let status = kio::clock::timeout(TIMEOUT, connection.status()).await.unwrap();
-	assert_eq!(status.unwrap(), moq_tokio::Status::Connected);
+	let connection = config.init(Default::default()).unwrap().connect(url);
+	let connection = kio::clock::timeout(TIMEOUT, connection.established())
+		.await
+		.unwrap()
+		.unwrap();
 	kio::clock::timeout(TIMEOUT, accepts.recv()).await.unwrap().unwrap();
 	kio::clock::sleep(HEALTHY).await;
 	end_first.send(()).unwrap();
@@ -3628,11 +3630,8 @@ async fn abort_carries_its_code_to_the_peer() {
 
 /// The next route and whether it is active.
 async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
-	loop {
-		return match announced.next().await? {
-			moq_net::announce::Event::Present(route) => Some((route, true)),
-			moq_net::announce::Event::Absent(route) | moq_net::announce::Event::Offline(route) => Some((route, false)),
-			moq_net::announce::Event::Available(_) | moq_net::announce::Event::Unavailable(_) => continue,
-		};
+	match announced.next().await? {
+		moq_net::announce::Event::Present(route) => Some((route, true)),
+		moq_net::announce::Event::Absent(route) => Some((route, false)),
 	}
 }

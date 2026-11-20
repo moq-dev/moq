@@ -14,7 +14,10 @@ async function main() {
 	// Create the "chat" track up front. A subscriber is served directly from this
 	// track, no requested() round-trip needed. Mirrors Rust's create_track.
 	// Each frame is stamped with the time it was written, so the track declares a timescale.
-	void publishTrack(broadcast.createTrack("chat", { timescale: Moq.Time.Timescale.MILLI }));
+	// Undefined only while another track holds the name, which a fresh broadcast never has.
+	const track = broadcast.createTrack("chat", { timescale: Moq.Time.Timescale.MILLI });
+	if (!track) throw new Error("the chat track already exists");
+	void publishTrack(track);
 	console.log("Published broadcast: my-broadcast");
 
 	await connection.closed;

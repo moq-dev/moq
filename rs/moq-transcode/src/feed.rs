@@ -36,8 +36,8 @@ const CAPACITY: usize = 16;
 /// One item of the shared live feed, in stream order.
 #[derive(Clone)]
 pub(crate) enum Item {
-	/// A new source group started; the frames that follow belong to it. Carries the start of the
-	/// output group mirroring it (see [`crate::rung::output_start`]).
+	/// A new source group started; the frames that follow belong to it. Carries its key, which
+	/// the output group mirroring it shares.
 	Group(u64),
 	/// A decoded frame of the current group. Cloning is cheap (`Arc`), and a GPU
 	/// frame stays on the GPU for every receiving rung.
@@ -203,16 +203,9 @@ async fn decode(inner: &Inner, sender: &broadcast::Sender<Item>) -> Result<(), E
 	let mut subscriber = inner.broadcast.track(&inner.name)?.subscribe(subscription).await?;
 
 	while let Some(mut group) = subscriber.recv_group().await? {
-		let Some(start) = crate::rung::output_start(group.start, group.timescale()) else {
-			tracing::debug!(
-				group = group.start,
-				"skipping a source group past the output's timescale"
-			);
-			continue;
-		};
 		// Sends only fail with zero receivers, which is fine: teardown aborts
 		// this task at the next await anyway.
-		let _ = sender.send(Item::Group(start));
+		let _ = sender.send(Item::Group(group.start));
 
 		let mut first = true;
 		let complete = loop {

@@ -1,5 +1,6 @@
 import { expect, mock, test } from "bun:test";
 import { Instant, now, origin } from "@moq/clock";
+import * as MediaClock from "../media-clock.ts";
 import type { FromWorker, ToWorker } from "./capture-worker.ts";
 
 // Whether the fake worker claims a native MediaStreamTrackProcessor, how much its source clock
@@ -104,7 +105,7 @@ test("captures through the worker, transferring a clone", async () => {
 	spawned.length = 0;
 
 	// Bracket the whole call, which spawns the worker.
-	const before = now().since(Instant.ZERO).asMicros();
+	const before = MediaClock.now().asMicros();
 
 	const track = new FakeTrack();
 	const stream = TrackProcessor(track as unknown as Parameters<typeof TrackProcessor>[0]);
@@ -115,7 +116,7 @@ test("captures through the worker, transferring a clone", async () => {
 
 	const first = await reader.read();
 	const second = await reader.read();
-	const after = now().since(Instant.ZERO).asMicros();
+	const after = MediaClock.now().asMicros();
 	for (let i = 0; i < 20; i++) await Promise.resolve();
 	expect(spawned[0].pulls).toBe(2);
 
@@ -128,7 +129,7 @@ test("captures through the worker, transferring a clone", async () => {
 	expect(worker.started).toBeDefined();
 	expect(worker.started).not.toBe(track);
 
-	// The camera's epoch is dropped: the first frame lands on the wall clock reading the worker took
+	// The camera's epoch is dropped: the first frame lands on the media clock reading the worker took
 	// when it read the frame, which is bounded by our own two readings.
 	expect(first.value?.timestamp).toBeGreaterThanOrEqual(before);
 	expect(first.value?.timestamp).toBeLessThanOrEqual(after);

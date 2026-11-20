@@ -102,11 +102,19 @@ export function encodeFrame(source: Uint8Array | Source, timestamp: Duration): U
 	return data;
 }
 
-// Whether a group starting at `timestamp` microseconds starts past every group on `track`: hang
-// pins its tracks' timescale to microseconds (see `trackInfo`), so the start is the timestamp.
+// `timestamp` microseconds as a group start on `track`: its value in the track's timescale,
+// rounded down as moq-net converts. Legacy frames are timed, so a track whose timescale is unknown
+// or absent refuses it. Mirrors the Rust `moq_mux::start`.
+function keyOf(track: Moq.Track.Producer, timestamp: number): bigint {
+	const scale = track.timescale;
+	if (!scale) throw new Moq.Error.TimestampMismatch();
+	return BigInt(Time.floorAt(Time.Timestamp.fromMicros(timestamp), scale));
+}
+
+// Whether a group starting at `timestamp` microseconds starts past every group on `track`.
 function startsPast(track: Moq.Track.Producer, timestamp: number): boolean {
 	const largest = track.largest();
-	return largest === undefined || BigInt(timestamp) > largest.group;
+	return largest === undefined || keyOf(track, timestamp) > largest.group;
 }
 
 // The wire carries whole microseconds, rounded down as moq-net's timestamps are.
@@ -174,7 +182,10 @@ export class Producer {
 			this.#close(rewound ? undefined : timestamp);
 			if (rewound) this.#interval = undefined;
 			// A track's first group says nothing came before it, so a reader can tell it is the first.
-			if (this.#track.largest() === undefined && timestamp > 0) this.#track.skipGroups(0n, BigInt(timestamp));
+			if (this.#track.largest() === undefined) {
+				const start = keyOf(this.#track, timestamp);
+				if (start > 0n) this.#track.skipGroups(0n, start);
+			}
 			this.#group = this.#track.appendGroup(Time.Timestamp.fromMicros(timestamp));
 			this.#floor = this.#start;
 			this.#start = timestamp;
@@ -220,36 +231,42 @@ export class Producer {
 		// The live edge once the open group closes, which raises it to the furthest point written.
 		const written = this.#group && this.#end !== undefined ? this.#end : undefined;
 		const edge = end ?? (written === undefined ? this.#liveEdge : Math.max(this.#liveEdge ?? written, written));
-		// The marker starts one microsecond before the live edge, so media resuming right at the edge
-		// still starts after it, but not below the newest frame, which it would otherwise claim to end
-		// before; and past the newest group, since starts strictly increase.
-		let timestamp: number | undefined;
+		// The marker starts one unit of the track's timescale before the live edge, so media resuming
+		// right at the edge still starts after it, but not below the newest frame, which it would
+		// otherwise claim to end before; and past the newest group, since starts strictly increase.
+		let marker: Time.Timestamp | undefined;
 		if (!this.#marked && edge !== undefined) {
+			let start = keyOf(this.#track, edge) - 1n;
+			const newest = keyOf(this.#track, this.#newest ?? 0);
+			if (start < newest) start = newest;
 			const largest = this.#track.largest()?.group;
-			timestamp = Math.max(edge - 1, this.#newest ?? 0);
-			if (largest !== undefined && BigInt(timestamp) <= largest) timestamp = Number(largest + 1n);
+			if (largest !== undefined && start <= largest) start = largest + 1n;
+			// keyOf vouched for the timescale.
+			marker = new Time.Timestamp(Number(start), this.#track.timescale as Time.Timescale);
 		}
 		// The open group ends whole at the marker, so a reader can tell the marker follows it.
-		this.#close(end, timestamp);
+		this.#close(end, marker);
 		this.#interval = undefined;
-		if (timestamp === undefined) return;
+		if (marker === undefined) return;
 
-		const group = this.#track.appendGroup(Time.Timestamp.fromMicros(timestamp));
+		// The wire stamps whole microseconds, rounded down like every other conversion here.
+		const timestamp = Time.floorAt(marker, Time.Timescale.MICRO);
+		const group = this.#track.appendGroup(marker);
 		group.writeFrame({
 			payload:
 				this.#format.kind === "data"
 					? new Uint8Array()
 					: encodeFrame(new Uint8Array(), Duration.micros(timestamp)),
-			timestamp: Time.Timestamp.fromMicros(timestamp),
+			timestamp: marker,
 		});
 		group.finish();
 		this.#liveEdge = this.#liveEdge === undefined ? timestamp : Math.max(this.#liveEdge, timestamp);
 		this.#marked = true;
 	}
 
-	// Flush and close the current group at the supplied or estimated end timestamp, whole at `whole`
-	// when a marker follows it.
-	#close(end?: number, whole?: number) {
+	// Flush and close the current group at the supplied or estimated end timestamp, whole at the
+	// `whole` marker start when one follows it.
+	#close(end?: number, whole?: Time.Timestamp) {
 		if (!this.#group) return;
 		if (
 			this.#format.kind === "video" &&
@@ -265,8 +282,9 @@ export class Producer {
 		const bound = this.#reordered ? undefined : end;
 		this.#format.finishGroup(this.#group, bound === undefined ? undefined : Duration.micros(bound));
 		// A group ends whole where its content stops, which bounds its reach without a successor.
-		const at = whole ?? bound;
-		if (at !== undefined && BigInt(at) > this.#group.start) this.#group.finishAt(BigInt(at));
+		const at =
+			whole !== undefined ? BigInt(whole.value) : bound === undefined ? undefined : keyOf(this.#track, bound);
+		if (at !== undefined && at > this.#group.start) this.#group.finishAt(at);
 		else this.#group.finish();
 		this.#group = undefined;
 		if (this.#end !== undefined) {
@@ -289,6 +307,7 @@ export class Producer {
 	 * Abort the current group and the track with `err`, which readers see in place of a clean end. A
 	 * no-op after {@link finish}: the track is already complete.
 	 */
+	// fallow-ignore-next-line unused-class-member
 	abort(err: Error) {
 		this.#group?.abort(err);
 		this.#group = undefined;
