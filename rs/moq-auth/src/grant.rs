@@ -16,6 +16,9 @@ use crate::Access;
 /// A field this reader does not know is refused, as an unknown claim is: a field added
 /// later may narrow the grant, and reading past it would widen the session. A server
 /// tells which fields a relay reads from [`Request::relay`](crate::Request::relay).
+///
+/// Each prefix is written as the subtree pattern a relay before 0.22 reads (`alice/**`,
+/// `**`), and read back alike, as [`Claims`](crate::Claims) are.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(try_from = "crate::wire::Object<crate::wire::Grant>", into = "crate::wire::Grant")]
 #[non_exhaustive]
@@ -199,9 +202,9 @@ mod tests {
 		assert_eq!(json["revalidate"], 60);
 		assert_eq!(
 			json["publish"],
-			serde_json::json!({"path": ["alice"], "rate": 8_000_000})
+			serde_json::json!({"path": ["alice/**"], "rate": 8_000_000})
 		);
-		assert_eq!(json["subscribe"], serde_json::json!([""]));
+		assert_eq!(json["subscribe"], serde_json::json!(["**"]));
 		assert_eq!(json["link"], "upstream");
 		assert_eq!(serde_json::from_value::<Grant>(json).unwrap(), grant);
 	}
@@ -212,7 +215,7 @@ mod tests {
 	fn serializes_to_the_cross_language_vector() {
 		assert_eq!(
 			serde_json::to_string(&full()).unwrap(),
-			r#"{"publish":{"path":["alice"],"rate":8000000},"subscribe":[""],"root":"pid/room","expires":4102444800,"revalidate":60,"tier":"websocket","label":"project/key/123","link":"upstream","peer":true}"#
+			r#"{"publish":{"path":["alice/**"],"rate":8000000},"subscribe":["**"],"root":"pid/room","expires":4102444800,"revalidate":60,"tier":"websocket","label":"project/key/123","link":"upstream","peer":true}"#
 		);
 	}
 
@@ -249,7 +252,7 @@ mod tests {
 		grant.link = Some(Link::Peer);
 		assert_eq!(
 			serde_json::to_string(&grant).unwrap(),
-			r#"{"publish":[""],"link":"peer","peer":true}"#
+			r#"{"publish":["**"],"link":"peer","peer":true}"#
 		);
 	}
 
@@ -258,15 +261,26 @@ mod tests {
 		let mut grant = Grant::new(Prefixes::default(), prefixes(&[""]));
 		grant.mounts.insert(".svc".into(), ".svc/pid".into());
 		let json = serde_json::to_string(&grant).unwrap();
-		assert_eq!(json, r#"{"subscribe":[""],"mounts":{".svc":".svc/pid"}}"#);
+		assert_eq!(json, r#"{"subscribe":["**"],"mounts":{".svc":".svc/pid"}}"#);
 		assert_eq!(serde_json::from_str::<Grant>(&json).unwrap(), grant);
 	}
 
 	#[test]
 	fn empty_fields_are_omitted_and_defaulted() {
 		let grant = Grant::new(prefixes(&[""]), Prefixes::default());
-		assert_eq!(serde_json::to_string(&grant).unwrap(), r#"{"publish":[""]}"#);
+		assert_eq!(serde_json::to_string(&grant).unwrap(), r#"{"publish":["**"]}"#);
 		assert_eq!(serde_json::from_str::<Grant>(r#"{"publish":[""]}"#).unwrap(), grant);
+	}
+
+	/// TEMPORARY MIGRATION (see `wire::alias`): a released auth server's subtree patterns
+	/// read as their prefixes, and any other wildcard refuses the grant.
+	#[test]
+	fn subtree_patterns_read_as_prefixes() {
+		let grant: Grant = serde_json::from_str(r#"{"publish":["alice/**"],"subscribe":["**"]}"#).unwrap();
+		assert_eq!(grant, Grant::new(prefixes(&["alice"]), prefixes(&[""])));
+		for json in [r#"{"publish":["alice/*"]}"#, r#"{"subscribe":["**/chat"]}"#] {
+			assert!(serde_json::from_str::<Grant>(json).is_err(), "{json}");
+		}
 	}
 
 	#[kio::test]

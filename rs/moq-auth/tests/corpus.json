@@ -50,10 +50,10 @@
 			"claims": { "root": "demo", "publish": ["alice"], "subscribe": ["bob"] }
 		},
 		{
-			"name": "minted_with_wildcards",
+			"name": "minted_with_subtree_patterns",
 			"key": "hs256",
 			"token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiIsImtpZCI6ImQ1NWIxZjEzZTZiZGEyODEifQ.eyJyb290IjoiZGVtbyIsInB1Ymxpc2giOlsiYWxpY2UvKioiXSwic3Vic2NyaWJlIjpbImJvYi8qKiJdfQ.OuaQY4hHKpBLvTK-9ZUv2oxiqXTGisng-cg2GcqrgdY",
-			"claims": null
+			"claims": { "root": "demo", "publish": ["alice"], "subscribe": ["bob"] }
 		},
 		{
 			"name": "rust_hs256_empty_root",
@@ -233,16 +233,36 @@
 			"payload": { "publish": { "path": [""], "rate": 0 } },
 			"claims": null
 		},
-		{ "name": "wildcard_subtree", "key": "hs256", "payload": { "publish": ["alice/**"] }, "claims": null },
-		{ "name": "wildcard_everything", "key": "hs256", "payload": { "subscribe": ["**"] }, "claims": null },
-		{ "name": "wildcard_segment", "key": "hs256", "payload": { "subscribe": ["*/chat"] }, "claims": null },
-		{ "name": "wildcard_in_a_segment", "key": "hs256", "payload": { "publish": ["cam-*.hang"] }, "claims": null },
 		{
-			"name": "wildcard_in_a_capped_role",
+			"name": "subtree_pattern",
+			"key": "hs256",
+			"payload": { "publish": ["alice/**"] },
+			"claims": { "root": "", "publish": ["alice"], "subscribe": [] }
+		},
+		{
+			"name": "everything_pattern",
+			"key": "hs256",
+			"payload": { "subscribe": ["**"] },
+			"claims": { "root": "", "publish": [], "subscribe": [""] }
+		},
+		{
+			"name": "subtree_pattern_beside_an_exact_path",
+			"key": "hs256",
+			"payload": { "publish": ["alice/**", "bob", "alice/cam"] },
+			"claims": { "root": "", "publish": ["alice", "bob"], "subscribe": [] }
+		},
+		{
+			"name": "subtree_pattern_in_a_capped_role",
 			"key": "hs256",
 			"payload": { "publish": { "path": ["**"], "rate": 1000 } },
-			"claims": null
+			"claims": { "root": "", "publish": { "path": [""], "rate": 1000 }, "subscribe": [] }
 		},
+		{ "name": "wildcard_segment", "key": "hs256", "payload": { "subscribe": ["*/chat"] }, "claims": null },
+		{ "name": "wildcard_in_a_segment", "key": "hs256", "payload": { "publish": ["cam-*.hang"] }, "claims": null },
+		{ "name": "wildcard_before_a_subtree", "key": "hs256", "payload": { "publish": ["a/*/**"] }, "claims": null },
+		{ "name": "globstar_before_a_path", "key": "hs256", "payload": { "publish": ["**/a"] }, "claims": null },
+		{ "name": "subtree_of_a_leading_slash", "key": "hs256", "payload": { "publish": ["/**"] }, "claims": null },
+		{ "name": "subtree_of_an_escape", "key": "hs256", "payload": { "publish": ["a\\/**"] }, "claims": null },
 		{ "name": "malformed_prefix", "key": "hs256", "payload": { "publish": ["alice/"] }, "claims": null },
 		{
 			"name": "minted_root_with_boundary_slashes",
@@ -275,12 +295,22 @@
 			"valid": true
 		},
 		{
+			"name": "scope_with_subtree_patterns",
+			"jwk": {
+				"kty": "oct",
+				"alg": "HS256",
+				"k": "Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68",
+				"scope": { "root": "demo", "publish": ["room/**"], "subscribe": ["**"] }
+			},
+			"valid": true
+		},
+		{
 			"name": "scope_with_a_wildcard",
 			"jwk": {
 				"kty": "oct",
 				"alg": "HS256",
 				"k": "Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68",
-				"scope": { "root": "demo", "publish": ["room/**"] }
+				"scope": { "root": "demo", "publish": ["*/room"] }
 			},
 			"valid": false
 		},
@@ -707,7 +737,8 @@
 		{ "name": "null_mounts", "grant": { "publish": [""], "mounts": null }, "valid": false },
 		{ "name": "null_peer", "grant": { "publish": [""], "peer": null }, "valid": false },
 		{ "name": "positional", "grant": [[""]], "valid": false },
-		{ "name": "wildcard_grant", "grant": { "publish": ["**"] }, "valid": false },
+		{ "name": "subtree_patterns", "grant": { "publish": ["**"], "subscribe": ["room/**", "lobby"] }, "valid": true },
+		{ "name": "subtree_pattern_in_a_capped_role", "grant": { "publish": { "path": ["room/**"], "rate": 1000 } }, "valid": true },
 		{ "name": "wildcard_member", "grant": { "subscribe": ["room", "lobby/*"] }, "valid": false },
 		{ "name": "null_grant", "grant": null, "valid": false }
 	],

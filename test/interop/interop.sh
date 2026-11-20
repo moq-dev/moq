@@ -939,8 +939,13 @@ echo "starting relay on 127.0.0.1:${PORT}..."
 # committed file never has to be edited for a run.
 if [[ "$COMPAT" -eq 1 ]]; then
     # Anonymous, offering only the pinned version, which comes from the executable's
-    # advertised CLI choices.
-    sed -e "s|:4443\"|:${PORT}\"|g" -e '/^version = \[/,/^\]/d' -e 's|^url = "http://127.0.0.1:4440/"|public = ""|' \
+    # advertised CLI choices. TEMPORARY MIGRATION, delete once `release` ships prefix grants:
+    # a released relay's help does not yet say "Prefixes an anonymous session", and it refuses
+    # the empty prefix at startup, reading only `**` as everything.
+    relay_help=$("$RELAY" --help 2>&1 | tr -s '[:space:]' ' ')
+    everything='""'
+    [[ "$relay_help" == *"Prefixes an anonymous session"* ]] || everything='"**"'
+    sed -e "s|:4443\"|:${PORT}\"|g" -e '/^version = \[/,/^\]/d' -e "s|^url = \"http://127.0.0.1:4440/\"|public = ${everything}|" \
         "$INTEROP_DIR/interop.toml" >"$HARNESS_RUN/relay.toml"
     sed -i "/\[listen\]/a version = [\"${INTEROP_VERSION}\"]" "$HARNESS_RUN/relay.toml"
     [[ "$(grep -c '^version = ' "$HARNESS_RUN/relay.toml")" == 1 && "$(grep -c '^public = ' "$HARNESS_RUN/relay.toml")" == 1 ]] || {

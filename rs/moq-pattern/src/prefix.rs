@@ -25,7 +25,10 @@ impl fmt::Display for InvalidPrefix {
 					"`**` is a wildcard: grants are prefixes, and the empty prefix covers every path"
 				)
 			}
-			Self::Wildcard(text) => match text.strip_suffix("/**").filter(|head| !head.contains('*')) {
+			Self::Wildcard(text) => match text
+				.strip_suffix("/**")
+				.filter(|head| !head.is_empty() && !head.contains('*'))
+			{
 				Some(head) => write!(
 					f,
 					"`{text}` is a wildcard: grants are prefixes, and `{head}` covers `{head}` and every path beneath it"

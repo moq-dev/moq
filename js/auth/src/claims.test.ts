@@ -32,15 +32,32 @@ test("claims read legacy put/get prefixes as the same prefixes", () => {
 	expect(ScopeSchema.parse({ root: "demo", put: ["room"] }).publish).toEqual(["room"]);
 });
 
-test("every grant refuses a wildcard with the prefix to write instead", () => {
-	for (const text of ["**", "alice/**", "*", "cam-*.hang", "a*", "room/*/cam"]) {
+// TEMPORARY MIGRATION (see `readPrefix` in wire.ts): released signers and auth servers spell a
+// subtree as a pattern, which reads as its prefix.
+test("every grant reads a subtree pattern as its prefix", () => {
+	for (const [text, prefix] of [
+		["**", ""],
+		["alice/**", "alice"],
+		["a\\/b/**", "a\\/b"],
+	]) {
+		expect(ClaimsSchema.parse({ publish: [text] }).publish, text).toEqual([prefix]);
+		expect(ClaimsSchema.parse({ subscribe: { path: [text], rate: 8000 } }).subscribe, text).toEqual({
+			path: [prefix],
+			rate: 8000,
+		});
+		expect(ScopeSchema.parse({ subscribe: [text] }).subscribe, text).toEqual([prefix]);
+		expect(GrantSchema.parse({ publish: [text] }).publish, text).toEqual([prefix ? `${prefix}/**` : "**"]);
+	}
+});
+
+test("every grant refuses any other wildcard", () => {
+	for (const text of ["*", "cam-*.hang", "a*", "room/*/cam", "room/*/**", "**/room", "/**", "a\\/**"]) {
 		expect(ClaimsSchema.safeParse({ publish: [text] }).success, text).toBe(false);
 		expect(ClaimsSchema.safeParse({ subscribe: { path: [text], rate: 8000 } }).success, text).toBe(false);
 		expect(ScopeSchema.safeParse({ subscribe: [text] }).success, text).toBe(false);
 		expect(GrantSchema.safeParse({ publish: [text] }).success, text).toBe(false);
 	}
-	expect(() => ClaimsSchema.parse({ publish: ["alice/**"] })).toThrow(/write \\"alice\\" for its subtree/);
-	expect(() => GrantSchema.parse({ subscribe: ["**"] })).toThrow(/write the empty prefix \\"\\" for everything/);
+	expect(() => ClaimsSchema.parse({ publish: ["room/*/**"] })).toThrow(/wildcards are refused/);
 });
 
 test("claims refuse mixed encodings and wildcard legacy prefixes", () => {
@@ -52,20 +69,26 @@ test("claims refuse mixed encodings and wildcard legacy prefixes", () => {
 	expect(() => ScopeSchema.parse({ root: "demo", put: "room" })).toThrow();
 });
 
+// TEMPORARY MIGRATION (see `readPrefix` in wire.ts): spelled as the subtree patterns a release
+// before 0.22 reads.
 test("grants are written as publish and subscribe, never legacy put and get", () => {
 	expect(encodeGrants({ root: "live", publish: ["camera1"], subscribe: [""] })).toEqual({
 		root: "live",
-		publish: ["camera1"],
-		subscribe: [""],
+		publish: ["camera1/**"],
+		subscribe: ["**"],
 	});
 	expect(encodeGrants({ root: "live", publish: ["camera1"], subscribe: [] })).toEqual({
 		root: "live",
-		publish: ["camera1"],
+		publish: ["camera1/**"],
 	});
+	// Nothing lies beneath a prefix of the most segments a path holds, so it is written as its literal.
+	const deepest = Array(32).fill("a").join("/");
+	expect(encodeGrants({ publish: [deepest] })).toEqual({ publish: [deepest] });
+	expect(ClaimsSchema.parse(encodeGrants({ publish: [deepest] })).publish).toEqual([deepest]);
 });
 
 test("claims read the registered names and write them back", () => {
-	const wire = { root: "live", publish: [""], exp: 4102444800, iat: 1, nbf: 2, jti: "abc-123" };
+	const wire = { root: "live", publish: ["**"], exp: 4102444800, iat: 1, nbf: 2, jti: "abc-123" };
 	const claims = ClaimsSchema.parse(wire);
 	expect(claims).toEqual({
 		root: "live",
@@ -190,7 +213,7 @@ test("a capped role keeps its cap in the role and never encodes as a prefix", ()
 		const encoded = encodeGrants(claims);
 		expect(encoded).not.toHaveProperty("put");
 		expect(encoded).not.toHaveProperty("get");
-		expect(encoded[role]).toEqual({ path: ["alice"], rate: 8000 });
+		expect(encoded[role]).toEqual({ path: ["alice/**"], rate: 8000 });
 	}
 	expect(() => ClaimsSchema.parse({ publish: { path: [""], rate: 0 } })).toThrow(/rate must be a positive integer/);
 });

@@ -5,7 +5,7 @@ import { wall } from "@moq/clock";
 import { Command, Option } from "commander";
 import { base64url } from "jose";
 import type { Algorithm } from "./algorithm.ts";
-import { Claims, type Scope, ScopeSchema } from "./claims.ts";
+import { Claims, prefixes, type Scope, ScopeSchema } from "./claims.ts";
 import { Key } from "./key.ts";
 import * as Path from "./path.ts";
 import { encodeGrants } from "./wire.ts";
@@ -34,8 +34,11 @@ program
 			let key = await Key.generate(algorithm, options.id);
 			if (options.publish || options.subscribe) {
 				// Parse rather than cast, so a useless scope fails here like it does
-				// in the Rust CLI instead of writing an unusable key to disk.
+				// in the Rust CLI instead of writing an unusable key to disk. Flags take
+				// prefixes alone; only a key file reads the subtree patterns releases wrote.
 				Path.signable(options.root);
+				prefixes(options.publish);
+				prefixes(options.subscribe);
 				const scope: Scope = ScopeSchema.parse({
 					root: options.root,
 					...(options.publish && { publish: options.publish }),

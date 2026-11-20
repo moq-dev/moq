@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 /// scopes existed keep working.
 ///
 /// Legacy `put`/`get` scopes load as the same prefixes; a scope is always written as
-/// `publish` and `subscribe`.
+/// `publish` and `subscribe`, spelled as [`Claims`] are.
 #[derive(Debug, Serialize, Deserialize, Default, Clone, PartialEq, Eq)]
 #[serde(try_from = "crate::wire::Object<crate::wire::Scope>", into = "crate::wire::Scope")]
 pub struct Scope {
@@ -100,7 +100,7 @@ impl Permissions {
 /// [`Key::sign`](crate::Key::sign), and scope it to a connection with
 /// [`authorize`](Self::authorize). A prefix covers its path and everything beneath it:
 /// `alice` is `alice` and every broadcast under it, and the empty prefix is everything
-/// under the root. A grant holds no wildcard: `alice/**` or `*` fails to parse.
+/// under the root. A [`Prefix`] holds no wildcard: `alice/**` or `*` fails to parse.
 ///
 /// ```no_run
 /// let claims = moq_auth::Claims::default()
@@ -109,8 +109,10 @@ impl Permissions {
 ///     .with_subscribe([moq_auth::Prefix::all()]);
 /// ```
 ///
-/// Grants are written as `publish` and `subscribe`. Legacy `moq-token` claims are read
-/// too: each `put`/`get` entry is the same prefix. A capped role is written as
+/// Grants are written as `publish` and `subscribe`, each prefix spelled as the subtree
+/// pattern a release before 0.22 reads (`alice/**`, `**`), and read back alike; any
+/// other wildcard fails verification. Legacy `moq-token` claims are read too: each
+/// `put`/`get` entry is the same prefix. A capped role is written as
 /// `{"path": [...], "rate": bps}`, which every older verifier refuses rather than drop
 /// the cap. The registered `iss` and `sub` claims are read and ignored; any other field
 /// fails verification, since it might narrow the grant, and a misspelled `root` would
@@ -453,17 +455,18 @@ mod tests {
 		assert_eq!(scope.subscribe, prefixes(&[""]));
 	}
 
+	/// TEMPORARY MIGRATION (see `wire::alias`): written as the subtree patterns a release
+	/// before 0.22 reads.
 	#[test]
-	fn scope_writes_prefixes() {
+	fn scope_writes_subtree_patterns() {
 		let both = Scope {
 			root: "demo".into(),
 			publish: prefixes(&["room"]),
 			subscribe: prefixes(&[""]),
 		};
-		assert_eq!(
-			serde_json::to_string(&both).unwrap(),
-			r#"{"root":"demo","publish":["room"],"subscribe":[""]}"#
-		);
+		let json = serde_json::to_string(&both).unwrap();
+		assert_eq!(json, r#"{"root":"demo","publish":["room/**"],"subscribe":["**"]}"#);
+		assert_eq!(serde_json::from_str::<Scope>(&json).unwrap(), both);
 
 		let publish = Scope {
 			root: "demo".into(),
@@ -472,17 +475,20 @@ mod tests {
 		};
 		assert_eq!(
 			serde_json::to_string(&publish).unwrap(),
-			r#"{"root":"demo","publish":["room"]}"#
+			r#"{"root":"demo","publish":["room/**"]}"#
 		);
 	}
 
 	#[test]
+	fn scope_reads_bare_prefixes() {
+		let scope: Scope = serde_json::from_str(r#"{"root":"demo","publish":["room"],"subscribe":[""]}"#).unwrap();
+		assert_eq!(scope.publish, prefixes(&["room"]));
+		assert_eq!(scope.subscribe, prefixes(&[""]));
+	}
+
+	#[test]
 	fn scope_refuses_a_wildcard() {
-		for json in [
-			r#"{"publish":["room/**"]}"#,
-			r#"{"publish":["**"]}"#,
-			r#"{"subscribe":["*/chat"]}"#,
-		] {
+		for json in [r#"{"publish":["room/*"]}"#, r#"{"subscribe":["*/chat"]}"#] {
 			let err = serde_json::from_str::<Scope>(json).unwrap_err();
 			assert!(err.to_string().contains("wildcard"), "{json}: {err}");
 		}
@@ -554,7 +560,7 @@ mod tests {
 		};
 		assert_eq!(
 			serde_json::to_string(&claims).unwrap(),
-			r#"{"root":"live","publish":["camera1"],"subscribe":["camera1","camera2"]}"#
+			r#"{"root":"live","publish":["camera1/**"],"subscribe":["camera1/**","camera2/**"]}"#
 		);
 	}
 
@@ -579,7 +585,7 @@ mod tests {
 		let json = serde_json::to_string(&subtrees).unwrap();
 		assert_eq!(
 			json,
-			r#"{"root":"live","publish":["camera1"],"subscribe":[""],"jti":"abc-123"}"#
+			r#"{"root":"live","publish":["camera1/**"],"subscribe":["**"],"jti":"abc-123"}"#
 		);
 		let back: Claims = serde_json::from_str(&json).unwrap();
 		assert_eq!(back.publish, subtrees.publish);
@@ -620,18 +626,27 @@ mod tests {
 		assert!(serde_json::from_str::<Claims>(r#"{"put":["a/*"]}"#).is_err());
 	}
 
+	/// TEMPORARY MIGRATION (see `wire::alias`): the subtree patterns released issuers
+	/// write read as their prefixes, and a bare member as its prefix too.
 	#[test]
-	fn test_claims_refuse_a_wildcard_loudly() {
-		// A grant written as a pattern says so, and names the prefix to write instead.
-		let err = serde_json::from_str::<Claims>(r#"{"publish":["alice/**"]}"#).unwrap_err();
-		assert!(err.to_string().contains("`alice` covers `alice`"), "{err}");
-		let err = serde_json::from_str::<Claims>(r#"{"subscribe":["**"]}"#).unwrap_err();
-		assert!(err.to_string().contains("the empty prefix"), "{err}");
+	fn test_claims_read_subtree_patterns() {
+		let claims: Claims = serde_json::from_str(
+			r#"{"publish":["alice/**","bob"],"subscribe":{"path":["**"],"rate":1000}}"#,
+		)
+		.unwrap();
+		assert_eq!(claims.publish.path, prefixes(&["alice", "bob"]));
+		assert_eq!(claims.subscribe.path, prefixes(&[""]));
+	}
+
+	#[test]
+	fn test_claims_refuse_any_other_wildcard() {
 		for json in [
 			r#"{"publish":["*"]}"#,
 			r#"{"publish":["cam-*.hang"]}"#,
 			r#"{"publish":["a/**/b"]}"#,
-			r#"{"publish":{"path":["a/**"],"rate":1000}}"#,
+			r#"{"publish":["a/*/**"]}"#,
+			r#"{"publish":["/**"]}"#,
+			r#"{"publish":{"path":["*/a"],"rate":1000}}"#,
 		] {
 			let err = serde_json::from_str::<Claims>(json).unwrap_err();
 			assert!(err.to_string().contains("wildcard"), "{json}: {err}");

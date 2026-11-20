@@ -12,8 +12,10 @@ owns its re-check and expiry clock through `due()`, `update()`, and `failed()`.
 `Key::verify` checks signature, algorithm, key ID, strict claims, key scope, expiry, and not-before.
 
 Grants and claims name paths with prefixes: `foo` covers `foo` and everything
-beneath it, and the empty prefix is everything. A wildcard such as `foo/**` or
-`*` is refused where a grant is parsed or signed.
+beneath it, and the empty prefix is everything. A `Prefix` refuses a wildcard
+such as `foo/**` or `*`. Tokens, key scopes, and grants spell each prefix as the
+subtree pattern releases before 0.22 read, `foo/**` or `**`, and read that
+spelling back as the prefix; any other wildcard there is refused.
 
 ## Quick Usage (symmetric keys)
 

@@ -15,7 +15,10 @@
 //!
 //! Grants and claims name paths with [`Prefixes`] from `moq-pattern`, re-exported here:
 //! `foo` is `foo` and everything beneath it, and the empty prefix is everything. A grant
-//! holds no wildcard: `foo/**`, `**`, or `*` is refused where it is parsed or signed.
+//! holds no wildcard: a [`Prefix`] refuses `foo/**`, `**`, and `*`. Until the next two
+//! version migrations, a token, key scope, or [`Grant`] is written with each prefix as
+//! the subtree pattern releases before 0.22 read, `foo/**` or `**`, and reads one back
+//! as its prefix; any other wildcard there is refused.
 //! Each role is an [`Access`]: its prefixes, and optionally a bitrate cap, a [`Rate`].
 //!
 //! The lease `poll_*` methods are always available. Enable the `async` feature for their

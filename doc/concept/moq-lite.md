@@ -195,8 +195,10 @@ A grant, what a token or an origin scope lets a session publish and subscribe
 to, is a set of path prefixes. A prefix covers its path and everything beneath
 it: `room` covers `room`, `room/alice`, and `room/alice/cam`, but not `roomy`.
 The empty prefix covers everything. A grant holds no wildcard: `room/**`, `**`,
-`*`, or `cam-*.hang` is refused where the grant is parsed or made, so write
-`room` for `room/**` and the empty prefix for `**`. Since every grant covers
+`*`, or `cam-*.hang` is refused where the grant is made, so write `room` for
+`room/**` and the empty prefix for `**`. Tokens and auth server grants spell a
+prefix as `room/**` or `**` until releases before 0.22 retire, since those read
+a bare member as one path. Since every grant covers
 whole subtrees, a route a grant admits always serves whole subtrees too.
 
 Patterns are discovery filters: they pick which announcements a consumer lists,

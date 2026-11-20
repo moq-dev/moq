@@ -292,8 +292,12 @@ the relay opens the window once it admits the session.
 Grants are [prefixes](https://docs.rs/moq-pattern) relative to `root`: `foo`
 covers `foo` and everything beneath it, and the empty prefix `""` covers
 everything. A grant takes no wildcard: `foo/**`, `**`, `live/*`, or `cam-*.hang`
-is refused wherever a grant is read, in tokens, key scopes, `moq auth serve`
-rules, and relay config, with a message naming the prefix to write instead.
+is refused in `moq auth serve` rules, relay config, and CLI flags, with a
+message naming the prefix to write instead. Tokens, key scopes, and auth
+server grants spell each prefix as the subtree pattern releases before 0.22
+read, `foo/**` and `**`, and read that spelling back as the prefix, so they work
+with relays and verifiers on either side of the upgrade; any other wildcard
+there is refused.
 Matching is on path boundaries (`foo` covers `foo/bar` but not `foobar`), and the relay
 announces, publishes, and resolves only paths inside the grant. `moq auth
 serve` authorizes the token at the dialed path: the path may equal the root,

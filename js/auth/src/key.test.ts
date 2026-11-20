@@ -724,13 +724,13 @@ test("sign - writes iat and jti only when the claims carry them", async () => {
 
 	// Unset stays off the wire, matching the Rust crate rather than stamping now().
 	const withoutIat = await Key.sign(key, { root: "test-path", publish: ["test-pub"] });
-	expect(decodePayload(withoutIat)).toEqual({ root: "test-path", publish: ["test-pub"] });
+	expect(decodePayload(withoutIat)).toEqual({ root: "test-path", publish: ["test-pub/**"] });
 
 	// A caller-supplied time and ID are written under their registered names.
 	const withIat = await Key.sign(key, { root: "test-path", publish: ["test-pub"], issued: 1700000000, id: "t-1" });
 	expect(decodePayload(withIat)).toEqual({
 		root: "test-path",
-		publish: ["test-pub"],
+		publish: ["test-pub/**"],
 		iat: 1700000000,
 		jti: "t-1",
 	});
@@ -811,11 +811,15 @@ test("verify - a legacy put/get prefix token reads as subtrees", async () => {
 	expect(claims.subscribe).toEqual([""]);
 });
 
-test("sign - prefix grants are written as they are", async () => {
+// TEMPORARY MIGRATION (see `readPrefix` in wire.ts): a release before 0.22 reads a bare member
+// as one exact path, so each prefix is written as its subtree pattern.
+test("sign - prefix grants are written as the subtree patterns every release reads", async () => {
 	const key = Key.parse(encodeJwk(testKey));
 	const token = await Key.sign(key, { root: "test-path", publish: ["alice"], subscribe: [""] });
 	const payload = JSON.parse(Buffer.from(token.split(".")[1], "base64url").toString());
-	expect(payload).toEqual({ root: "test-path", publish: ["alice"], subscribe: [""] });
+	expect(payload).toEqual({ root: "test-path", publish: ["alice/**"], subscribe: ["**"] });
+	const claims = await Key.verify(key, token);
+	expect([claims.publish, claims.subscribe]).toEqual([["alice"], [""]]);
 });
 
 test("a wildcard is refused at signing and at verification", async () => {
@@ -828,7 +832,8 @@ test("a wildcard is refused at signing and at verification", async () => {
 	);
 	await expect(Key.sign(key, { root: "test-path", publish: { path: ["cam-*.hang"], rate: 8000 } })).rejects.toThrow();
 
-	// A token minted before grants dropped wildcards no longer verifies, rather than read differently.
+	// A token minted with patterns verifies when each is a subtree, and is refused otherwise,
+	// rather than read differently.
 	const secret = await crypto.subtle.importKey(
 		"raw",
 		Buffer.from(testKey.k, "base64url"),
@@ -836,11 +841,12 @@ test("a wildcard is refused at signing and at verification", async () => {
 		false,
 		["sign"],
 	);
-	for (const publish of [["**"], ["alice/**"], ["room/*/cam"]]) {
-		const old = await new SignJWT({ root: "test-path", publish })
-			.setProtectedHeader({ alg: "HS256", kid: testKey.kid })
-			.sign(secret);
-		await expect(Key.verify(key, old)).rejects.toThrow();
+	const mint = (publish: string[]) =>
+		new SignJWT({ root: "test-path", publish }).setProtectedHeader({ alg: "HS256", kid: testKey.kid }).sign(secret);
+	expect((await Key.verify(key, await mint(["**", "alice/**"]))).publish).toEqual(["", "alice"]);
+	expect((await Key.verify(key, await mint(["alice/**", "bob"]))).publish).toEqual(["alice", "bob"]);
+	for (const publish of [["room/*/cam"], ["*/chat"], ["room/*/**"]]) {
+		await expect(Key.verify(key, await mint(publish))).rejects.toThrow();
 	}
 });
 

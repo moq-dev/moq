@@ -44,11 +44,16 @@ for (const [name, permissions, changes] of [
 	});
 }
 
-test("a released verifier reads a current token's prefixes as exact paths", () => {
+test("a released verifier that read a prefix as one exact path fails", () => {
 	const exact = 'publish: Patterns([Pattern("video"),]), subscribe: Patterns([Pattern(""),]),';
-	expect(() => verify(claims(exact), "exact")).not.toThrow();
 	expect(() => verify(claims(exact))).toThrow("token scope changed");
-	expect(() => verify(claims(patterns), "exact")).toThrow("token scope changed");
+});
+
+test("verifies a scope given as lists", () => {
+	const two = 'publish: Prefixes(["audio","video",],), subscribe: Prefixes(["",],),';
+	expect(() => verify(claims(two), "audio,video", "")).not.toThrow();
+	expect(() => verify(claims(two))).toThrow("token scope changed");
+	expect(() => verify(claims(prefixes), "audio,video", "")).toThrow("token scope changed");
 });
 
 test("refuses a wildcard it cannot read as a prefix", () => {

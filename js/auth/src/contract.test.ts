@@ -144,7 +144,11 @@ test("a grant round trips and is validated", () => {
 		tier: "websocket",
 		label: "project/key/123",
 	});
-	expect(grant.publish).toEqual(["alice"]);
+	// TEMPORARY MIGRATION (see `readPrefix` in wire.ts): spelled as a relay before 0.22 reads it,
+	// which parses back to itself.
+	expect(grant.publish).toEqual(["alice/**"]);
+	expect(grant.subscribe).toEqual(["**"]);
+	expect(GrantSchema.parse(grant)).toEqual(grant);
 
 	expect(() => GrantSchema.parse({})).toThrow(/name something/);
 	expect(() => GrantSchema.parse({ publish: [""], revalidate: 60 })).toThrow(/must expire/);
@@ -159,7 +163,10 @@ test("a grant round trips and is validated", () => {
 test("a capped grant is typed as the relay reads it", () => {
 	// Typed, so a server cannot put the cap anywhere the relay would skip it.
 	const grant: Grant = { publish: { path: ["alice"], rate: 8_000_000 }, subscribe: [""] };
-	expect(GrantSchema.parse(JSON.parse(JSON.stringify(grant)))).toEqual(grant);
+	expect(GrantSchema.parse(JSON.parse(JSON.stringify(grant)))).toEqual({
+		publish: { path: ["alice/**"], rate: 8_000_000 },
+		subscribe: ["**"],
+	});
 	// A cap alone names nothing.
 	expect(() => GrantSchema.parse({ publish: { path: [], rate: 8000 } })).toThrow(/name something/);
 });

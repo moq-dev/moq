@@ -53,23 +53,32 @@ struct Capped<P> {
 	rate: Rate,
 }
 
-impl Serialize for Access {
-	fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+impl Access {
+	/// Write the role in its wire shape, with `path` standing in for its prefix list.
+	pub(crate) fn serialize_as<P: Serialize, S: serde::Serializer>(
+		&self,
+		path: P,
+		serializer: S,
+	) -> Result<S::Ok, S::Error> {
 		match self.rate {
-			None => self.path.serialize(serializer),
-			Some(rate) => Capped { path: &self.path, rate }.serialize(serializer),
+			None => path.serialize(serializer),
+			Some(rate) => Capped { path, rate }.serialize(serializer),
 		}
 	}
-}
 
-impl<'de> Deserialize<'de> for Access {
-	fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+	/// Read the role from its wire shape, its prefix list read as `P`.
+	pub(crate) fn deserialize_as<'de, P, D>(deserializer: D) -> Result<Self, D::Error>
+	where
+		P: Deserialize<'de> + Into<Prefixes>,
+		D: Deserializer<'de>,
+	{
 		use serde::de::value::{MapAccessDeserializer, SeqAccessDeserializer};
+		use std::marker::PhantomData;
 
 		// Dispatch on the shape, so a bad prefix or cap reports its own error rather
 		// than an untagged enum's "matched no variant".
-		struct Visitor;
-		impl<'de> serde::de::Visitor<'de> for Visitor {
+		struct Visitor<P>(PhantomData<P>);
+		impl<'de, P: Deserialize<'de> + Into<Prefixes>> serde::de::Visitor<'de> for Visitor<P> {
 			type Value = Access;
 
 			fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -77,14 +86,26 @@ impl<'de> Deserialize<'de> for Access {
 			}
 
 			fn visit_seq<A: serde::de::SeqAccess<'de>>(self, seq: A) -> Result<Access, A::Error> {
-				Ok(Access::new(Prefixes::deserialize(SeqAccessDeserializer::new(seq))?))
+				Ok(Access::new(P::deserialize(SeqAccessDeserializer::new(seq))?))
 			}
 
 			fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> Result<Access, A::Error> {
-				let Capped { path, rate } = Capped::<Prefixes>::deserialize(MapAccessDeserializer::new(map))?;
+				let Capped { path, rate } = Capped::<P>::deserialize(MapAccessDeserializer::new(map))?;
 				Ok(Access::new(path).with_rate(rate))
 			}
 		}
-		deserializer.deserialize_any(Visitor)
+		deserializer.deserialize_any(Visitor::<P>(PhantomData))
+	}
+}
+
+impl Serialize for Access {
+	fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+		self.serialize_as(&self.path, serializer)
+	}
+}
+
+impl<'de> Deserialize<'de> for Access {
+	fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		Self::deserialize_as::<Prefixes, D>(deserializer)
 	}
 }

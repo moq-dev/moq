@@ -1877,11 +1877,11 @@ mod tests {
 		assert!(key.verify(&key.sign(&inside).unwrap()).is_ok());
 		assert!(matches!(key.sign(&outside), Err(crate::Error::ScopeExceeded)));
 
-		// Written back as the pattern it reads as.
+		// Written back as the subtree pattern every release reads it as (`wire::alias`).
 		assert!(
 			serde_json::to_string(&key)
 				.unwrap()
-				.contains(r#""scope":{"root":"demo","publish":["room"]}"#)
+				.contains(r#""scope":{"root":"demo","publish":["room/**"]}"#)
 		);
 	}
 

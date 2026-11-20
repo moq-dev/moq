@@ -143,8 +143,8 @@ pub struct Rule {
 /// A malformed or expired token is a refusal, never a fall through.
 ///
 /// The anonymous and mTLS rules name what they grant from `/`, like a token with an
-/// empty root: `anon/**` admits a session dialed at `/`, `/anon`, or `/anon/room`,
-/// each scoped to `anon/`, and refuses one dialed at `/other`.
+/// empty root: `anon` admits a session dialed at `/`, `/anon`, or `/anon/room`,
+/// each scoped to `anon`, and refuses one dialed at `/other`.
 ///
 /// The JWT is the `jwt` query parameter or a SETUP token of type 0
 /// ([`Token::OUT_OF_BAND`]), verified alike. A credential attached in band is only the

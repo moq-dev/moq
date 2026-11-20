@@ -8,7 +8,15 @@
 import { Prefixes } from "@moq/pattern";
 import * as z from "zod/mini";
 import * as Path from "./path.ts";
-import { AccessSchema, decodeGrants, PrefixListSchema, paths, TokenIdSchema, UnixSecondsSchema } from "./wire.ts";
+import {
+	AccessSchema,
+	decodeGrants,
+	paths,
+	TokenIdSchema,
+	UnixSecondsSchema,
+	WireAccessSchema,
+	WirePrefixListSchema,
+} from "./wire.ts";
 
 export { type Access, AccessSchema, PrefixListSchema, TokenIdSchema } from "./wire.ts";
 
@@ -20,28 +28,26 @@ export function prefixes(texts: readonly string[] | undefined): Prefixes {
 	return Prefixes.parse(texts ?? []);
 }
 
-const ScopeFields = {
-	/** The root that `publish` and `subscribe` are relative to. Defaults to the empty string. */
-	root: z._default(z.string(), ""),
-	/** Prefixes this key may grant to publishers, relative to `root`. */
-	publish: z.optional(PrefixListSchema),
-	/** Prefixes this key may grant to subscribers, relative to `root`. */
-	subscribe: z.optional(PrefixListSchema),
-};
 
 /**
  * The immutable ceiling on what a key may grant, embedded in its JWK.
  *
  * `root` is optional on the wire to match the Rust `moq-auth` crate, which omits it
  * when the scope sits at the top level. A legacy `put`/`get` scope reads as the same
- * prefixes. A scope bounds paths, never bitrate, so a capped role is
+ * prefixes, and so does a member spelled as a subtree pattern, `foo/**` or `**`, as released
+ * signers wrote it. A scope bounds paths, never bitrate, so a capped role is
  * refused, as is a malformed root (see `Path.validate`). The stricter `Path.signable` applies
  * only where a scope is minted, so keys minted before it still load. Any other field is refused.
  */
 export const ScopeSchema = z
 	.pipe(
 		z.strictObject({
-			...ScopeFields,
+			/** The root that `publish` and `subscribe` are relative to. Defaults to the empty string. */
+			root: z._default(z.string(), ""),
+			/** Prefixes this key may grant to publishers, relative to `root`. */
+			publish: z.optional(WirePrefixListSchema),
+			/** Prefixes this key may grant to subscribers, relative to `root`. */
+			subscribe: z.optional(WirePrefixListSchema),
 			put: z.optional(z.array(z.string())),
 			get: z.optional(z.array(z.string())),
 		}),
@@ -123,7 +129,9 @@ const LegacyPrefixListSchema = z.union([z.string(), z.array(z.string())]);
  * `root` is optional on the wire: a token scoped to the top-level path omits it, so
  * it defaults to the empty string to match the Rust `moq-auth` crate. Legacy `moq-token`
  * claims read too, each `put`/`get` prefix as the same prefix; signing always
- * writes `publish` and `subscribe`. `exp`, `iat`, `nbf`, and `jti` read as `expires`,
+ * writes `publish` and `subscribe`, each prefix spelled as the subtree pattern a release before
+ * 0.22 reads (`foo/**`, `**`), and a member spelled that way reads back as its prefix. Any other
+ * wildcard fails verification. `exp`, `iat`, `nbf`, and `jti` read as `expires`,
  * `issued`, `notBefore`, and `id`. The registered `iss` and `sub` claims are read and
  * dropped; any other field fails verification.
  */
@@ -131,8 +139,8 @@ export const ClaimsSchema = z.pipe(
 	z.pipe(
 		z.strictObject({
 			root: z.optional(z.string()),
-			publish: z.optional(AccessSchema),
-			subscribe: z.optional(AccessSchema),
+			publish: z.optional(WireAccessSchema),
+			subscribe: z.optional(WireAccessSchema),
 			exp: z.optional(UnixSecondsSchema),
 			iat: z.optional(UnixSecondsSchema),
 			nbf: z.optional(UnixSecondsSchema),

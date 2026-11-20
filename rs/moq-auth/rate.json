@@ -8,13 +8,13 @@
 			},
 			"claims": {
 				"root": "room",
-				"publish": { "path": ["alice"], "rate": 8000000 },
-				"subscribe": [""]
+				"publish": { "path": ["alice/**"], "rate": 8000000 },
+				"subscribe": ["**"]
 			},
 			"grant": {
 				"root": "room",
-				"publish": { "path": ["alice"], "rate": 8000000 },
-				"subscribe": [""]
+				"publish": { "path": ["alice/**"], "rate": 8000000 },
+				"subscribe": ["**"]
 			}
 		},
 		{
@@ -24,11 +24,11 @@
 			},
 			"claims": {
 				"root": "room",
-				"subscribe": { "path": ["bob"], "rate": 1 }
+				"subscribe": { "path": ["bob/**"], "rate": 1 }
 			},
 			"grant": {
 				"root": "room",
-				"subscribe": { "path": ["bob"], "rate": 1 }
+				"subscribe": { "path": ["bob/**"], "rate": 1 }
 			}
 		},
 		{
@@ -38,11 +38,11 @@
 			},
 			"claims": {
 				"root": "room",
-				"publish": { "path": [""], "rate": 9007199254740991 }
+				"publish": { "path": ["**"], "rate": 9007199254740991 }
 			},
 			"grant": {
 				"root": "room",
-				"publish": { "path": [""], "rate": 9007199254740991 }
+				"publish": { "path": ["**"], "rate": 9007199254740991 }
 			}
 		},
 		{
@@ -54,12 +54,12 @@
 			"claims": {
 				"root": "room",
 				"publish": { "path": [], "rate": 8000 },
-				"subscribe": [""]
+				"subscribe": ["**"]
 			},
 			"grant": {
 				"root": "room",
 				"publish": { "path": [], "rate": 8000 },
-				"subscribe": [""]
+				"subscribe": ["**"]
 			}
 		}
 	],

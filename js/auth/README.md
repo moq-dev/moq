@@ -7,8 +7,10 @@ contract, the relay flags, and worked examples, see the
 [Authentication Documentation](../../doc/bin/relay/auth.md).
 
 Grants and claims name paths with prefixes from `@moq/pattern`: `foo` is `foo`
-and everything beneath it, and the empty prefix `""` is everything. A grant takes
-no wildcard, so `foo/**`, `**`, and `cam-*` are refused. A role is an `Access`:
+and everything beneath it, and the empty prefix `""` is everything. Signing takes
+no wildcard, so `foo/**`, `**`, and `cam-*` are refused. Tokens, key scopes, and
+`GrantSchema`'s output spell each prefix as the subtree pattern releases before
+0.22 read, `foo/**` or `**`, and read that spelling back. A role is an `Access`:
 its prefixes, or `{"path": [...], "rate": bps}` with a bitrate cap, read and
 written as it is.
 

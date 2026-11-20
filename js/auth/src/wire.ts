@@ -4,7 +4,9 @@
  * Grants are written as `publish` and `subscribe` prefix lists. They were once named
  * `put` and `get`, which are still read as the same prefixes. A role with a bitrate cap is
  * written as an object, `{"path": [...], "rate": bps}`, which every older reader refuses
- * rather than drop the cap. Must stay in lockstep with `wire.rs` in the Rust `moq-auth` crate.
+ * rather than drop the cap. Until the version migrations {@link readPrefix} names, a prefix
+ * is written and read as the subtree pattern releases before 0.22 spell it. Must stay in
+ * lockstep with `wire.rs` in the Rust `moq-auth` crate.
  *
  * @module
  */
@@ -24,6 +26,44 @@ export const PrefixListSchema = z.array(
 				Prefix.parse(text);
 			} catch (error) {
 				ctx.addIssue({ code: "custom", message: error instanceof Error ? error.message : String(error) });
+			}
+		}),
+	),
+);
+
+/**
+ * TEMPORARY MIGRATION: the prefix a grant member names, as releases before 0.22 spell it.
+ * Mirrors `alias` in the Rust crate's `wire.rs`.
+ *
+ * Those releases read a member as a pattern: a bare `foo` is the one path `foo`, and `""` the
+ * root alone. So every list one of them reads, in a token, a key scope, or an auth server's
+ * grant, is written as the same subtrees in pattern form ({@link writtenAccess}), and a member
+ * spelled that way, `foo/**` or `**`, reads back as its prefix. Any other wildcard is still
+ * refused, and nothing else takes the alias: `Key.sign`'s claims and the CLI's flags stay strict.
+ *
+ * Deleted in two steps (`quest/m4/grant-alias-delete.md`): the first version migration after
+ * 0.22 writes bare prefixes, and the one after it deletes the read, once tokens and key scopes
+ * minted with `/**` have expired or been re-minted.
+ */
+function readPrefix(text: string): string {
+	const head = text === "**" ? "" : text.length > 3 && text.endsWith("/**") ? text.slice(0, -3) : text;
+	// A wildcard left in the head names something other than one subtree; parsing all of it says so.
+	return Prefix.parse(head.includes("*") ? text : head).text;
+}
+
+/**
+ * TEMPORARY MIGRATION (see {@link readPrefix}): a prefix list as a token, key scope, or grant
+ * spells it, read as its prefixes.
+ */
+export const WirePrefixListSchema = z.array(
+	z.pipe(
+		z.string(),
+		z.transform((text, ctx) => {
+			try {
+				return readPrefix(text);
+			} catch (error) {
+				ctx.issues.push({ code: "custom", message: error instanceof Error ? error.message : String(error), input: text });
+				return text;
 			}
 		}),
 	),
@@ -61,6 +101,22 @@ export const AccessSchema = z.union([
 ]);
 /** A value parsed by {@link AccessSchema}. */
 export type Access = z.output<typeof AccessSchema>;
+
+/** TEMPORARY MIGRATION (see {@link readPrefix}): a role as a token or grant spells it, read as its prefixes. */
+export const WireAccessSchema = z.union([
+	WirePrefixListSchema,
+	z.strictObject({ path: WirePrefixListSchema, rate: RateSchema }),
+]);
+
+/**
+ * TEMPORARY MIGRATION (see {@link readPrefix}): `access` with each prefix spelled as the subtree
+ * pattern a release before 0.22 reads, `foo/**` or `**`. A prefix as deep as a path may be is its
+ * literal, which a release reads as that one path: nothing lies beneath it.
+ */
+export function writtenAccess(access: Access): Access {
+	const spell = (texts: string[]) => texts.map((text) => Prefix.parse(text).pattern().toString());
+	return Array.isArray(access) ? spell(access) : { ...access, path: spell(access.path) };
+}
 
 /** The prefixes `access` reaches, empty when the role is absent. */
 export function paths(access: Access | undefined): string[] {
@@ -113,13 +169,16 @@ export function decodeGrants<T extends WireGrants>(wire: T, ctx: { issues: unkno
 	}
 }
 
-/** Omit a role that grants nothing and carries no cap, as both libraries write it. */
+/**
+ * Omit a role that grants nothing and carries no cap, as both libraries write it, and spell the
+ * rest as {@link writtenAccess} does.
+ */
 export function encodeGrants<T extends { publish?: Access; subscribe?: Access }>(
 	grants: T,
 ): Omit<T, "publish" | "subscribe"> & { publish?: Access; subscribe?: Access } {
 	const { publish, subscribe, ...rest } = grants;
 	const kept = (access: Access | undefined) =>
-		access !== undefined && (!Array.isArray(access) || access.length > 0) ? access : undefined;
+		access !== undefined && (!Array.isArray(access) || access.length > 0) ? writtenAccess(access) : undefined;
 	const pub = kept(publish);
 	const sub = kept(subscribe);
 	return { ...rest, ...(pub && { publish: pub }), ...(sub && { subscribe: sub }) };

@@ -6,9 +6,12 @@
 //!
 //! A role with a bitrate cap is written as an object, `{"path": [...], "rate": bps}`,
 //! which every older reader refuses rather than drop the cap.
+//!
+//! Until the version migrations [`alias`] names, a prefix is written and read as the
+//! subtree pattern releases before 0.22 spell it: `foo/**`, and `**` for the empty prefix.
 
 use crate::{Access, Link};
-use moq_pattern::{Pattern, Prefix, Prefixes};
+use moq_pattern::{InvalidPrefix, Pattern, Prefix, Prefixes};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{DurationSeconds, serde_as};
 use std::collections::BTreeMap;
@@ -28,9 +31,9 @@ pub(crate) struct Claims {
 	#[serde(deserialize_with = "present", skip_serializing)]
 	get: Option<Legacy>,
 	#[serde(deserialize_with = "present")]
-	publish: Option<Access>,
+	publish: Option<alias::Role>,
 	#[serde(deserialize_with = "present")]
-	subscribe: Option<Access>,
+	subscribe: Option<alias::Role>,
 	#[serde(with = "seconds", skip_serializing_if = "Option::is_none")]
 	exp: Option<kio::clock::Wall>,
 	#[serde(with = "seconds", skip_serializing_if = "Option::is_none")]
@@ -58,8 +61,8 @@ impl From<crate::Claims> for Claims {
 			root: claims.root,
 			put: None,
 			get: None,
-			publish: written(claims.publish),
-			subscribe: written(claims.subscribe),
+			publish: written(claims.publish).map(alias::Role),
+			subscribe: written(claims.subscribe).map(alias::Role),
 			exp: claims.expires,
 			iat: claims.issued,
 			nbf: claims.not_before,
@@ -77,8 +80,8 @@ impl TryFrom<Claims> for crate::Claims {
 		let grants = Grants {
 			put: wire.put.map(Legacy::into_vec),
 			get: wire.get.map(Legacy::into_vec),
-			publish: wire.publish,
-			subscribe: wire.subscribe,
+			publish: wire.publish.map(|role| role.0),
+			subscribe: wire.subscribe.map(|role| role.0),
 		};
 		let (publish, subscribe) = grants.decode()?;
 		Ok(Self {
@@ -106,14 +109,14 @@ pub(crate) struct Scope {
 	#[serde(deserialize_with = "present", skip_serializing)]
 	get: Option<Vec<String>>,
 	#[serde(deserialize_with = "present")]
-	publish: Option<Prefixes>,
+	publish: Option<alias::List>,
 	#[serde(deserialize_with = "present")]
-	subscribe: Option<Prefixes>,
+	subscribe: Option<alias::List>,
 }
 
 impl From<crate::Scope> for Scope {
 	fn from(scope: crate::Scope) -> Self {
-		let paths = |prefixes: Prefixes| (!prefixes.is_empty()).then_some(prefixes);
+		let paths = |prefixes: Prefixes| (!prefixes.is_empty()).then_some(alias::List(prefixes));
 		Self {
 			root: scope.root,
 			put: None,
@@ -132,8 +135,8 @@ impl TryFrom<Scope> for crate::Scope {
 		let grants = Grants {
 			put: wire.put,
 			get: wire.get,
-			publish: wire.publish.map(Access::new),
-			subscribe: wire.subscribe.map(Access::new),
+			publish: wire.publish.map(|list| Access::new(list.0)),
+			subscribe: wire.subscribe.map(|list| Access::new(list.0)),
 		};
 		let (publish, subscribe) = grants.decode()?;
 		Ok(Self {
@@ -319,10 +322,10 @@ impl Grants {
 #[derive(Serialize, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Grant {
-	#[serde(skip_serializing_if = "Access::is_unset")]
-	publish: Access,
-	#[serde(skip_serializing_if = "Access::is_unset")]
-	subscribe: Access,
+	#[serde(skip_serializing_if = "alias::Role::is_unset")]
+	publish: alias::Role,
+	#[serde(skip_serializing_if = "alias::Role::is_unset")]
+	subscribe: alias::Role,
 	#[serde(deserialize_with = "present")]
 	root: Option<String>,
 	#[serde(skip_serializing_if = "BTreeMap::is_empty")]
@@ -346,8 +349,8 @@ pub(crate) struct Grant {
 impl From<crate::Grant> for Grant {
 	fn from(grant: crate::Grant) -> Self {
 		Self {
-			publish: grant.publish,
-			subscribe: grant.subscribe,
+			publish: alias::Role(grant.publish),
+			subscribe: alias::Role(grant.subscribe),
 			root: grant.root,
 			mounts: grant.mounts,
 			expires: grant.expires,
@@ -373,8 +376,8 @@ impl TryFrom<Grant> for crate::Grant {
 			(Some(link), Some(false)) => return Err(format!("`link` is {link} but `peer` is false")),
 		};
 		Ok(Self {
-			publish: wire.publish,
-			subscribe: wire.subscribe,
+			publish: wire.publish.0,
+			subscribe: wire.subscribe.0,
 			root: wire.root,
 			mounts: wire.mounts,
 			expires: wire.expires,
@@ -383,5 +386,140 @@ impl TryFrom<Grant> for crate::Grant {
 			label: wire.label,
 			link,
 		})
+	}
+}
+
+/// TEMPORARY MIGRATION: grant lists as releases before 0.22 spell them.
+///
+/// Those releases read a member as a pattern: a bare `foo` is the one path `foo`, and `""`
+/// the root alone. So every list one of them reads, in a token, a key scope, or an auth
+/// server's grant, is written as the same subtrees in pattern form, `foo/**` and `**`, and
+/// a member spelled that way reads back as its prefix. Any other wildcard is still
+/// refused, and nothing else takes the alias: configs, flags, origin scopes, and AUTH_OK
+/// stay strict. `@moq/auth`'s `wire.ts` mirrors this.
+///
+/// Deleted in two steps (`quest/m4/grant-alias-delete.md`): the first
+/// version migration after 0.22 writes bare prefixes, and the one after it deletes the
+/// read, once tokens and key scopes minted with `/**` have expired or been re-minted.
+pub(crate) mod alias {
+	use super::*;
+
+	/// The prefix a member names: `foo/**` is `foo`, `**` the empty prefix, and anything
+	/// else is parsed as a prefix.
+	pub(crate) fn read(text: &str) -> Result<Prefix, InvalidPrefix> {
+		let head = match text.strip_suffix("/**") {
+			Some(head) if !head.is_empty() => head,
+			_ if text == "**" => "",
+			_ => text,
+		};
+		// A wildcard left in the head names something other than one subtree.
+		if head.contains('*') {
+			return Err(InvalidPrefix::Wildcard(text.to_string()));
+		}
+		head.parse()
+	}
+
+	/// Prefixes spelled as the subtree patterns they cover. A prefix as deep as a path may
+	/// be is its literal, which a release reads as that one path: nothing lies beneath it.
+	struct Written<'a>(&'a Prefixes);
+
+	impl Serialize for Written<'_> {
+		fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+			serializer.collect_seq(self.0.iter().map(Prefix::pattern))
+		}
+	}
+
+	/// A key scope's prefix list.
+	pub(crate) struct List(pub(crate) Prefixes);
+
+	impl From<List> for Prefixes {
+		fn from(list: List) -> Self {
+			list.0
+		}
+	}
+
+	impl Serialize for List {
+		fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+			Written(&self.0).serialize(serializer)
+		}
+	}
+
+	impl<'de> Deserialize<'de> for List {
+		fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+			let texts = Vec::<String>::deserialize(deserializer)?;
+			let prefixes = texts.iter().map(|text| read(text)).collect::<Result<_, _>>();
+			prefixes.map(List).map_err(serde::de::Error::custom)
+		}
+	}
+
+	/// A token's or grant's role.
+	#[derive(Default)]
+	pub(crate) struct Role(pub(crate) Access);
+
+	impl Role {
+		pub(crate) fn is_unset(&self) -> bool {
+			self.0.is_unset()
+		}
+	}
+
+	impl Serialize for Role {
+		fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+			self.0.serialize_as(Written(&self.0.path), serializer)
+		}
+	}
+
+	impl<'de> Deserialize<'de> for Role {
+		fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+			Access::deserialize_as::<List, D>(deserializer).map(Role)
+		}
+	}
+
+	#[cfg(test)]
+	mod tests {
+		use super::*;
+
+		#[test]
+		fn reads_subtree_patterns_as_their_prefix() {
+			for (text, prefix) in [
+				("**", ""),
+				("foo/**", "foo"),
+				("foo/bar/**", "foo/bar"),
+				(r"a\/b/**", r"a\/b"),
+				(r"a\\/**", r"a\\"),
+				("foo", "foo"),
+				("", ""),
+			] {
+				assert_eq!(read(text).unwrap().as_str(), prefix, "{text}");
+			}
+		}
+
+		#[test]
+		fn refuses_every_other_wildcard() {
+			for text in ["/**", "*", "*/chat", "foo/*", "foo/*/**", "**/foo", "foo/**/**", "cam-*.hang", r"a\/**"] {
+				assert!(read(text).is_err(), "{text}");
+			}
+			// The rest is still a prefix, so its slashes are checked.
+			for text in ["/foo/**", "foo//**", "foo/", "/foo"] {
+				assert!(read(text).is_err(), "{text}");
+			}
+		}
+
+		#[test]
+		fn writes_the_subtree_each_prefix_covers() {
+			let prefixes: Prefixes = ["", "foo"].into_iter().map(|text| text.parse().unwrap()).collect();
+			assert_eq!(serde_json::to_value(List(prefixes)).unwrap(), serde_json::json!(["**"]));
+			let prefixes: Prefixes = ["foo", r"a\/b"].into_iter().map(|text| text.parse().unwrap()).collect();
+			assert_eq!(
+				serde_json::to_value(List(prefixes)).unwrap(),
+				serde_json::json!([r"a\/b/**", "foo/**"])
+			);
+			// Nothing lies beneath a prefix of the most segments a path holds, and a pattern
+			// one segment longer is refused, so it is written as the literal.
+			let deepest = vec!["a"; Pattern::MAX_SEGMENTS].join("/");
+			let list = List(Prefixes::from(deepest.parse::<Prefix>().unwrap()));
+			assert_eq!(serde_json::to_value(&list).unwrap(), serde_json::json!([deepest]));
+			let read: List = serde_json::from_value(serde_json::to_value(&list).unwrap()).unwrap();
+			assert_eq!(read.0, list.0);
+		}
 	}
 }

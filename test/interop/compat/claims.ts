@@ -23,12 +23,12 @@ export function scope(text: string): [string | undefined, string[], string[]] {
 }
 
 /**
- * Verify the scope every compat token grants: the `video` subtree to publish and everything to
- * subscribe, or with `read` "exact", the paths a released verifier reads a current token's
- * prefixes as.
+ * Verify the scope a compat token grants beneath `compat`: by default the `video` subtree to
+ * publish and everything to subscribe, else `publish` and `subscribe`, each a comma-separated
+ * list of prefixes. A verifier that read a prefix as one exact path fails it.
  */
-export function verify(text: string, read: "prefix" | "exact" = "prefix") {
-	const expected = read === "exact" ? ["compat", ["=video"], ["="]] : ["compat", ["video"], [""]];
+export function verify(text: string, publish = "video", subscribe = "") {
+	const expected = ["compat", publish.split(","), subscribe.split(",")];
 	const claims = scope(text);
 	if (JSON.stringify(claims) !== JSON.stringify(expected)) {
 		throw new Error(`token scope changed: ${JSON.stringify(claims)}`);
@@ -36,7 +36,5 @@ export function verify(text: string, read: "prefix" | "exact" = "prefix") {
 }
 
 if (import.meta.main) {
-	const read = process.argv[3] ?? "prefix";
-	if (read !== "prefix" && read !== "exact") throw new Error(`unknown read ${read}`);
-	verify(readFileSync(process.argv[2], "utf8"), read);
+	verify(readFileSync(process.argv[2], "utf8"), process.argv[3], process.argv[4]);
 }

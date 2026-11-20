@@ -283,14 +283,15 @@ if (command === "sign") {
 	const key = Auth.Key.parse(readFileSync(path, "utf8"));
 	console.log(await Auth.Key.sign(key, { root: "compat", publish: [publish], subscribe: [subscribe] }));
 } else if (command === "verify") {
-	// The grant this release should read back, spelled as `sign` takes it.
+	// The grant this release should read back, spelled as `sign` takes it, each role a
+	// comma-separated list.
 	const [path, token, publish, subscribe] = args;
 	const key = Auth.Key.parse(readFileSync(path, "utf8"));
 	const claims = await Auth.Key.verify(key, readFileSync(token, "utf8").trim());
 	if (
 		claims.root !== "compat" ||
-		JSON.stringify(claims.publish) !== JSON.stringify([publish]) ||
-		JSON.stringify(claims.subscribe) !== JSON.stringify([subscribe])
+		JSON.stringify(claims.publish) !== JSON.stringify(publish.split(",")) ||
+		JSON.stringify(claims.subscribe) !== JSON.stringify(subscribe.split(","))
 	) {
 		throw new Error(`token scope changed: ${JSON.stringify(claims)}`);
 	}
