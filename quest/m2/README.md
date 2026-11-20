@@ -47,8 +47,9 @@ removal, a rename, or a wire, catalog, or format change that is free until
   [finished format](/quest/m3/e2ee-format.md) follows in m3.
 - **Catalog, drafts, and formats.** hang-04 (done: the `sync` section, a version per entry, no video `warmup`, the TS passthrough under
   `mpegts`, one strict rule);
-  declared ends, back from m3, which became
-  [a whole marker](/quest/m2/time-addressing/group-end-whole.md) on 2026-11-19.
+  declared ends, back from m3, which became a whole marker on 2026-11-19
+  and [an end again](/quest/m2/time-addressing/group-times.md) on
+  2026-11-20.
 - **Native media and gateways.** [Upstream str0m](https://github.com/moq-dev/moq/pull/8963), which reverses the
   2026-10-30 vendoring.
 - **Bindings.** The C API as `libmoq` (done), reversing 2026-10-25.
@@ -60,6 +61,20 @@ binding user needs it, and a path segment's leading `.` is the one marker
 allowed inside a value. Not reopened: AUTH_ERROR's retry codes (2026-11-14)
 and AUTH_OK's rate fields, which wait for lite-08
 ([rate grant](/quest/m5/rate-grant.md)).
+
+Decided 2026-11-20 (maintainer, /quest-plan of a pre-cut audit of the
+lite-07 and hang-04 wire changes): the cut also waits on what that audit
+found. Each fix is so that a subscription, frame, or catalog entry means
+the same whichever relay or reader serves it:
+[no relative anchors](/quest/m2/time-addressing/no-relative-anchors.md),
+with Min Age placing a live join;
+[scale-less tracks aging by arrival](/quest/m2/time-addressing/scale-less-arrival.md);
+[Group Streams carrying each time once](/quest/m2/time-addressing/group-times.md),
+with GROUP_END's end back as a delta; and
+[the hang-04 text](/quest/m2/hang-04-text.md) on entry versions and HLS
+overruns. [moq-dev/moq#9198](https://github.com/moq-dev/moq/pull/9198) and
+[moq-dev/moq#9221](https://github.com/moq-dev/moq/pull/9221) closed, since
+relative starts and the bare GROUP_END are gone.
 
 Decided 2026-11-15 (maintainer, /quest-plan on the whole route layer): ✅ the
 cut waits on [cache-aware multicast](/quest/m2/multicast/README.md), which
