@@ -4,6 +4,8 @@
 //! H.264 access units (SPS/PPS inline ahead of each keyframe) and returns packed
 //! I420.
 
+mod output_order;
+
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, VecDeque};
 
@@ -307,6 +309,9 @@ impl Backend for Openh264 {
 		}
 		self.picture_in(timestamp);
 
+		// openh264 holds a picture of a Main or High stream until the next one
+		// even when the SPS rules reordering out; relabelled, it does not.
+		let access_unit = output_order::relabel(&access_unit).unwrap_or(access_unit);
 		// `None` means the decoder took the access unit but has no picture yet:
 		// parameter sets only, or a picture its reordering buffer is holding.
 		// The timestamp is corrected below, once the borrow of the decoder ends.
@@ -538,6 +543,93 @@ mod tests {
 			}
 		}
 		assert!(recovered > 0, "the second GOP never recovered clean pictures");
+	}
+
+	/// A Main stream whose SPS rules reordering out comes out picture by
+	/// picture, as a Baseline one does, though openh264 itself would hold each
+	/// picture until the next: libx264's with picture order count type 2, and
+	/// moq-vaapi's with type 0 and a VUI that bounds reordering at 0 frames.
+	/// The pictures are the ones openh264 decodes from the stream as it is.
+	#[test]
+	fn a_main_stream_without_reordering_is_not_held_back() {
+		for (name, stream) in [
+			("libx264", &include_bytes!("../test_data/main_64x64_yellow_5f.h264")[..]),
+			(
+				"moq-vaapi",
+				&include_bytes!("../test_data/main_poc0_64x64_pattern_5f.h264")[..],
+			),
+		] {
+			let units = crate::decode::conformance::split(stream);
+			assert_eq!(units.len(), 5, "{name}: the fixture split wrongly");
+
+			let mut unchanged = new_decoder().expect("the software decoder always opens");
+			let mut expected = Vec::new();
+			for unit in &units {
+				if let Some(yuv) = unchanged.decode(&unit.payload).expect("decode") {
+					expected.push(pixels(&picture(&yuv, unit.timestamp).unwrap()));
+				}
+			}
+			for yuv in unchanged.flush_remaining().expect("flush") {
+				expected.push(pixels(&picture(&yuv, Timestamp::ZERO).unwrap()));
+			}
+			assert_eq!(expected.len(), units.len(), "{name}: openh264 lost a picture");
+
+			let mut decoder = open();
+			for (index, unit) in units.into_iter().enumerate() {
+				let decoded = decoder
+					.decode_all(unit.payload, unit.timestamp, unit.keyframe)
+					.expect("decode");
+				let timestamps: Vec<_> = decoded.iter().map(|frame| frame.timestamp).collect();
+				assert_eq!(
+					timestamps,
+					[unit.timestamp],
+					"{name}: access unit {index} was held back"
+				);
+				assert!(
+					pixels(&decoded[0]) == expected[index],
+					"{name}: picture {index} differs"
+				);
+			}
+			assert!(decoder.flush_all().expect("flush").is_empty(), "{name}");
+		}
+	}
+
+	/// A relabelled stream keeps decoding through a change of SPS and of picture
+	/// size, back and forth. A relabelled SPS turns on openh264's SVC checks for
+	/// the rest of the decoder's life, the picture width among them, so this
+	/// changes size after one, and goes through a Baseline sequence that is not
+	/// relabelled itself on the way.
+	#[test]
+	fn a_relabelled_stream_changes_size() {
+		let sequences: [&'static [u8]; 4] = [
+			include_bytes!("../test_data/main_64x64_yellow_5f.h264"),
+			include_bytes!("../test_data/seq_100x66_pattern_5f.h264"),
+			include_bytes!("../test_data/main_poc0_64x64_pattern_5f.h264"),
+			include_bytes!("../test_data/seq_100x66_pattern_5f.h264"),
+		];
+		let mut decoder = open();
+		let mut at = 0;
+		for stream in sequences {
+			let mut alone = open();
+			for unit in crate::decode::conformance::split(stream) {
+				let expected = alone
+					.decode_all(unit.payload.clone(), unit.timestamp, unit.keyframe)
+					.expect("decode");
+				let timestamp = Timestamp::from_micros(at * FRAME_MICROS).expect("timestamp");
+				at += 1;
+				let decoded = decoder
+					.decode_all(unit.payload, timestamp, unit.keyframe)
+					.expect("decode");
+				assert_eq!(
+					decoded.len(),
+					1,
+					"access unit {at} came out as {} pictures",
+					decoded.len()
+				);
+				assert!(pixels(&decoded[0]) == pixels(&expected[0]), "picture {at} differs");
+			}
+		}
+		assert!(decoder.flush_all().expect("flush").is_empty());
 	}
 
 	/// A malformed stream can code pictures OpenH264 never returns. The bound on
