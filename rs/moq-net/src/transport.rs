@@ -148,7 +148,8 @@ impl Metrics for Untracked {}
 /// connection credit it was granted, counted against the shared `connection` window, so the
 /// session pauses only as many streams as fit in half of it; the rest keep reading. A
 /// transport that shapes a stream's credit ([`poll::RecvStream::set_window`]) holds a paused
-/// one to little more than a 128th of the connection window, and any other to its `stream`
+/// one to a small allowance, which shrinks with each stream the session shapes yet sums to
+/// under that half however many there are, so every one pauses; any other holds its `stream`
 /// window. See [`poll::Session::receive_window`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]

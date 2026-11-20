@@ -140,8 +140,9 @@ pub const DEFAULT_MAX_STREAMS: u64 = 10_000;
 /// Bounds how much unread data and incomplete messages one peer can make us buffer across
 /// all of its streams, which the backends otherwise leave unlimited. It has to be at least moq-net's
 /// `transport::MIN_RECEIVE_WINDOW`, one 1 MiB segment. 4 MiB sustains about 270 Mbps at a
-/// 100 ms RTT, room for any one viewer or publisher, and lets a session pause about 40
-/// group streams for slow readers (half the window, about 48 KiB each).
+/// 100 ms RTT, room for any one viewer or publisher, and lets a session pause any number of
+/// group streams for slow readers: half the window is split among them, the first taking the
+/// most.
 pub const DEFAULT_RECEIVE_WINDOW: u64 = 4 << 20;
 const _: () = assert!(DEFAULT_RECEIVE_WINDOW >= moq_net::transport::MIN_RECEIVE_WINDOW);
 

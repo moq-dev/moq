@@ -247,10 +247,25 @@ fn concurrent_groups_carry_bulk_transfers_losslessly() {
 	memory::run(|| bulk(SESSIONS, 64 * 1024, 1024 * 1024));
 }
 
+/// [`concurrent_groups_carry_bulk_transfers_losslessly`] at [`MANY`] sessions, past what any
+/// fixed credit per paused stream fits in half the connection window. Every one still
+/// pauses, since a paused stream holds a share of that half set by its slot, not by how many
+/// pause.
+#[test]
+#[ignore = "a hundred bulk transfers, about a minute in debug: run in release by `just rs quic-sim`"]
+fn many_groups_carry_bulk_transfers_losslessly() {
+	memory::run(|| bulk(MANY, 64 * 1024, 1024 * 1024));
+}
+
 /// How many bulk transfers share one connection in
 /// [`concurrent_groups_carry_bulk_transfers_losslessly`]: well past the two that pause when
 /// each paused stream holds its whole stream window.
 const SESSIONS: usize = 12;
+
+/// How many share one in [`many_groups_carry_bulk_transfers_losslessly`]. Past a couple of
+/// hundred, the frames in flight at once each hold credit until they seal, and that fills
+/// the connection window whatever the paused streams hold.
+const MANY: usize = 100;
 
 /// Write `tracks` tracks of one group each, [`BULK`] bytes in `chunk`-byte frames, through
 /// one relay, and read the first `read` bytes of each slower than they are written,

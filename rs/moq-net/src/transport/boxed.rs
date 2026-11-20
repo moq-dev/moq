@@ -6,6 +6,7 @@
 //! awaits them. Each transport only instantiates the thin forwarding impls below.
 
 use std::any::Any;
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::task::{Poll, ready};
@@ -32,6 +33,7 @@ impl Session {
 	pub(crate) fn new<S: poll::Boxable>(session: S) -> Self {
 		let inner: Arc<Shared<dyn ErasedSession>> = Arc::new(Shared {
 			paused: AtomicU64::new(0),
+			slots: Mutex::default(),
 			session,
 		});
 		Self {
@@ -145,6 +147,8 @@ pub(super) struct Shared<S: ?Sized> {
 	/// The connection credit held by streams this session stopped reading to pace a group's
 	/// writer, at most half the connection window; see [`ReceiveWindow`].
 	paused: AtomicU64,
+	/// The slots of the streams this session shapes the credit of; see [`Pacing::allowance`].
+	slots: Mutex<Slots>,
 	session: S,
 }
 
@@ -161,8 +165,26 @@ impl Shared<dyn ErasedSession> {
 	}
 }
 
-/// How many streams half the connection window holds paused, each at its [`Pacing::allowance`].
-const PAUSED: u64 = 64;
+/// The slots of a session's shaped streams, the lowest free one first, so a session with few
+/// streams gives each a large allowance.
+#[derive(Default)]
+struct Slots {
+	next: u64,
+	free: BTreeSet<u64>,
+}
+
+impl Slots {
+	fn take(&mut self) -> u64 {
+		self.free.pop_first().unwrap_or_else(|| {
+			self.next += 1;
+			self.next - 1
+		})
+	}
+
+	fn give(&mut self, slot: u64) {
+		self.free.insert(slot);
+	}
+}
 
 /// How ingest paces a stream under its session's receive windows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -172,9 +194,9 @@ struct Pacing {
 	window: u64,
 	/// The stream's full receive credit.
 	stream: u64,
-	/// The credit a paced stream lets the peer send past the room its group has left, so a
-	/// paused one holds about this much; zero without a connection window to share.
-	allowance: u64,
+	/// What the session's paused streams may hold together, half its connection window; zero
+	/// without one to share.
+	cap: u64,
 }
 
 impl Pacing {
@@ -184,17 +206,26 @@ impl Pacing {
 			return Self {
 				window,
 				stream: 0,
-				allowance: 0,
+				cap: 0,
 			};
 		};
-		let allowance = receive
-			.connection
-			.map_or(0, |connection| (connection.get() / 2 / PAUSED).min(receive.stream));
 		Self {
 			window,
 			stream: receive.stream,
-			allowance,
+			cap: receive.connection.map_or(0, |connection| connection.get() / 2),
 		}
+	}
+
+	/// The credit a paced stream in `slot` lets the peer send past the room its group has
+	/// left, so a paused one holds about this much.
+	///
+	/// Credit once granted cannot be taken back, so a paused stream holds its allowance until
+	/// it resumes, however many streams pause after it. The cap is therefore split by slot,
+	/// not by how many are paused: slot `i` gets `cap / ((i + 1) * (i + 2))`, which sums to
+	/// under the cap over any number of slots, so every stream fits at its own allowance.
+	fn allowance(&self, slot: u64) -> u64 {
+		let share = slot.saturating_add(1).saturating_mul(slot.saturating_add(2));
+		(self.cap / share).min(self.stream)
 	}
 }
 
@@ -490,6 +521,7 @@ impl RecvStream {
 			pacing: OnceLock::new(),
 			shaped: None,
 			unshaped: false,
+			slot: None,
 		}))
 	}
 
@@ -535,6 +567,8 @@ struct Budgeted<T> {
 	shaped: Option<u64>,
 	/// The transport cannot set a stream's window, so a paused stream holds its full credit.
 	unshaped: bool,
+	/// The stream's slot among the session's shaped streams, until it drops.
+	slot: Option<u64>,
 }
 
 impl<T> Budgeted<T> {
@@ -545,6 +579,31 @@ impl<T> Budgeted<T> {
 			&& let Some(shared) = self.session.upgrade()
 		{
 			shared.paused.fetch_sub(held, Ordering::AcqRel);
+		}
+	}
+
+	/// The credit this stream lets the peer send past the room its group has left, from its
+	/// slot, taking one on first use; see [`Pacing::allowance`].
+	fn allowance(&mut self, pacing: &Pacing) -> u64 {
+		let slot = match self.slot {
+			Some(slot) => slot,
+			None => {
+				let Some(shared) = self.session.upgrade() else {
+					return 0;
+				};
+				let slot = shared.slots.lock().expect("slots poisoned").take();
+				*self.slot.insert(slot)
+			}
+		};
+		pacing.allowance(slot)
+	}
+
+	/// Give the slot back, once the stream drops or its transport cannot shape credit.
+	fn free(&mut self) {
+		if let Some(slot) = self.slot.take()
+			&& let Some(shared) = self.session.upgrade()
+		{
+			shared.slots.lock().expect("slots poisoned").give(slot);
 		}
 	}
 
@@ -568,6 +627,9 @@ impl<T: poll::RecvStream> Budgeted<T> {
 		}
 		let credit = self.stream.set_window(window);
 		self.unshaped = credit.is_none();
+		if self.unshaped {
+			self.free();
+		}
 		self.shaped = credit.map(|_| window);
 		credit
 	}
@@ -576,6 +638,7 @@ impl<T: poll::RecvStream> Budgeted<T> {
 impl<T> Drop for Budgeted<T> {
 	fn drop(&mut self) {
 		self.release();
+		self.free();
 	}
 }
 
@@ -890,7 +953,7 @@ impl<T: poll::RecvStream + Send + Sync> ErasedRecv for Budgeted<T> {
 
 	fn window(&self) -> u64 {
 		let pacing = self.pacing();
-		match self.unshaped || pacing.allowance == 0 {
+		match self.unshaped || pacing.cap == 0 {
 			true => pacing.window,
 			// A shaped stream holds a stream window less once paused, so its group holds it
 			// instead, and a paced reader has as much buffered ahead as before.
@@ -901,16 +964,19 @@ impl<T: poll::RecvStream + Send + Sync> ErasedRecv for Budgeted<T> {
 	fn shape(&mut self, room: Option<u64>, unsealed: u64) {
 		let pacing = self.pacing();
 		// Nothing is shared without a connection window, so nothing needs to stay small.
-		if pacing.allowance == 0 || self.unshaped {
+		if pacing.cap == 0 || self.unshaped {
 			return;
 		}
+		let allowance = self.allowance(&pacing);
 		let target = match room {
-			Some(room) => room.max(unsealed).saturating_add(pacing.allowance).min(pacing.stream),
+			Some(room) => room.max(unsealed).saturating_add(allowance).min(pacing.stream),
 			None => pacing.stream,
 		};
-		// Only a move of half an allowance is worth the transport's lock: the charge at a pause
-		// is what the stream holds, not this target.
-		if self.shaped.unwrap_or(pacing.stream).abs_diff(target) >= pacing.allowance / 2 {
+		let current = self.shaped.unwrap_or(pacing.stream);
+		// Credit granted stays granted, so a window left above its target is credit the stream
+		// holds once paused, and a smaller one always pays for the transport's lock. A larger
+		// one only does once it moves half an allowance.
+		if target < current || target - current >= allowance / 2 {
 			Budgeted::set_window(self, target);
 		}
 	}
@@ -935,15 +1001,20 @@ impl<T: poll::RecvStream + Send + Sync> ErasedRecv for Budgeted<T> {
 		// taking the transport's lock.
 		let least = match self.unshaped {
 			true => receive.stream,
-			false => pacing.allowance,
+			false => 0,
 		};
-		if shared.paused.load(Ordering::Acquire).saturating_add(least) > connection / 2 {
+		if shared.paused.load(Ordering::Acquire).saturating_add(least) > pacing.cap {
 			return false;
 		}
 		// A transport that shapes says what the stream holds; any other holds its full credit.
-		let charge = Budgeted::set_window(self, pacing.allowance)
-			.unwrap_or(receive.stream)
-			.min(connection);
+		let credit = match self.unshaped {
+			true => None,
+			false => {
+				let allowance = self.allowance(&pacing);
+				Budgeted::set_window(self, allowance)
+			}
+		};
+		let charge = credit.unwrap_or(receive.stream).min(connection);
 		// Refused, it reads on and sheds, still holding only its shaped credit, so it may pause
 		// once others resume.
 		if !shared.reserve(charge, connection) {
@@ -1228,10 +1299,9 @@ mod test {
 		assert!(streams.iter_mut().all(|stream| stream.pause()));
 	}
 
-	/// A stream that records each window it is set to, and holds `credit` once set.
+	/// A stream that records each window it is set to, and holds that much credit once set.
 	struct Shaping {
 		windows: Arc<Mutex<Vec<u64>>>,
-		credit: u64,
 	}
 
 	impl poll::RecvStream for Shaping {
@@ -1248,65 +1318,85 @@ mod test {
 
 		fn set_window(&mut self, window: u64) -> Option<u64> {
 			self.windows.lock().unwrap().push(window);
-			Some(self.credit)
+			Some(window)
 		}
 	}
 
-	/// A stream on a transport that shapes credit lets the peer send what its group has room
-	/// for plus an allowance, a 128th of the connection window, and pauses holding what the
-	/// transport says it holds, so many fit where a stream window each would not.
-	#[test]
-	fn a_shaped_stream_pauses_at_the_credit_it_holds() {
-		const CONNECTION: u64 = 128 * 1024;
-		const STREAM: u64 = 64 * 1024;
-		const ALLOWANCE: u64 = CONNECTION / 128;
+	const CONNECTION: u64 = 128 * 1024;
+	const STREAM: u64 = 64 * 1024;
+	/// What a session's paused streams may hold together in these tests.
+	const CAP: u64 = CONNECTION / 2;
 
+	fn shaping_session() -> Session {
 		let gate = kio::Producer::new(true);
-		let session = Session::new(
+		Session::new(
 			SinkSession::accepted_bi(gate.consume())
 				.with_receive_window(ReceiveWindow::new(std::num::NonZeroU64::new(CONNECTION), STREAM)),
-		);
-		let shaping = |credit| {
-			let windows = Arc::new(Mutex::new(Vec::new()));
-			let stream = Shaping {
-				windows: windows.clone(),
-				credit,
-			};
-			(RecvStream::budgeted(stream, session.budget()), windows)
-		};
+		)
+	}
 
-		let (mut stream, windows) = shaping(0);
+	fn shaping(session: &Session) -> (RecvStream, Arc<Mutex<Vec<u64>>>) {
+		let windows = Arc::new(Mutex::new(Vec::new()));
+		let stream = Shaping {
+			windows: windows.clone(),
+		};
+		(RecvStream::budgeted(stream, session.budget()), windows)
+	}
+
+	/// A stream on a transport that shapes credit lets the peer send what its group has room
+	/// for plus the allowance of its slot, and pauses holding what the transport says it holds.
+	#[test]
+	fn a_shaped_stream_pauses_at_the_credit_it_holds() {
+		let session = shaping_session();
+		let (mut first, first_windows) = shaping(&session);
+		let (mut stream, windows) = shaping(&session);
 		assert_eq!(
 			stream.window(),
 			2 * STREAM,
 			"its group holds what the transport does not"
 		);
-		stream.shape(None, 0);
-		assert!(windows.lock().unwrap().is_empty(), "already at its full credit");
+		// The first to shape takes the first slot, the next the second: a sixth of the cap.
+		first.shape(None, 0);
+		assert!(first_windows.lock().unwrap().is_empty(), "already at its full credit");
+		let allowance = CAP / 6;
 		stream.shape(Some(10_000), 0);
 		stream.shape(Some(9_800), 0);
 		stream.shape(Some(100), 2_000);
 		stream.shape(None, 0);
 		assert_eq!(
 			*windows.lock().unwrap(),
-			[10_000 + ALLOWANCE, 2_000 + ALLOWANCE, STREAM],
+			[10_000 + allowance, 2_000 + allowance, STREAM],
 			"skipping a move under half an allowance, and never short of the segment's rest"
 		);
 
-		// Two holding 30 KB each fit in half the window, a third does not.
-		let mut paused: Vec<_> = (0..3).map(|_| shaping(30_000)).collect();
-		assert!(paused[0].0.pause());
-		assert!(paused[1].0.pause());
-		assert!(!paused[2].0.pause(), "a third would hold 90 of 64 KiB");
-		for (_, windows) in &paused {
-			assert_eq!(
-				*windows.lock().unwrap(),
-				[ALLOWANCE],
-				"shrunk to the allowance to pause"
-			);
+		// Each pauses at its allowance: the first a half of the cap, the second a sixth.
+		assert!(first.pause());
+		assert!(stream.pause());
+		assert_eq!(*first_windows.lock().unwrap(), [CAP / 2]);
+		assert_eq!(windows.lock().unwrap().last(), Some(&allowance));
+		first.resume();
+		stream.resume();
+	}
+
+	/// However many streams pause at once, and however they arrive, every one fits: the
+	/// allowances of any number of slots add up to under the cap, and a stream that ends gives
+	/// its slot, and so its allowance, to the next.
+	#[test]
+	fn any_number_of_shaped_streams_pause() {
+		let session = shaping_session();
+		let mut streams: Vec<_> = (0..1000).map(|_| shaping(&session)).collect();
+		for (stream, _) in &mut streams {
+			assert!(stream.pause(), "every stream fits");
 		}
-		paused[0].0.resume();
-		assert!(paused[2].0.pause(), "a resumed stream returned its share");
+		let held = streams.iter().map(|(_, w)| *w.lock().unwrap().last().unwrap());
+		assert!(held.sum::<u64>() <= CAP, "within the cap");
+
+		// The lowest free slot goes first: a new stream takes the one just given back.
+		let (_, windows) = streams.remove(2);
+		let allowance = *windows.lock().unwrap().last().unwrap();
+		let (mut stream, windows) = shaping(&session);
+		assert!(stream.pause());
+		assert_eq!(*windows.lock().unwrap(), [allowance]);
 	}
 
 	/// A stream paces at the credit its session grants it, so a hop holds about what its
@@ -1320,7 +1410,12 @@ mod test {
 			SinkSession::accepted_bi(gate.consume())
 				.with_receive_window(ReceiveWindow::new(std::num::NonZeroU64::new(100), 20)),
 		);
-		assert_eq!(accept(&session).window(), 20);
+		// One that shares a window paces at a stream window more until its transport turns
+		// out unable to shape credit, so its paused streams hold the stream window instead.
+		let mut stream = accept(&session);
+		assert_eq!(stream.window(), 2 * 20);
+		stream.shape(Some(0), 0);
+		assert_eq!(stream.window(), 20);
 
 		let session = Session::new(
 			SinkSession::accepted_bi(gate.consume()).with_receive_window(ReceiveWindow::new(None, u64::MAX)),
@@ -1329,17 +1424,6 @@ mod test {
 
 		let session = Session::new(SinkSession::accepted_bi(gate.consume()));
 		assert_eq!(accept(&session).window(), AHEAD);
-
-		// One that shares a window paces at a stream window more until its transport turns
-		// out unable to shape credit, so its paused streams hold the stream window instead.
-		let session = Session::new(
-			SinkSession::accepted_bi(gate.consume())
-				.with_receive_window(ReceiveWindow::new(std::num::NonZeroU64::new(1 << 20), 1 << 16)),
-		);
-		let mut stream = accept(&session);
-		assert_eq!(stream.window(), 2 << 16);
-		stream.shape(Some(0), 0);
-		assert_eq!(stream.window(), 1 << 16);
 	}
 
 	fn open_group(session: &Session, options: SendOptions<'_, Group>) -> SendStream {
@@ -1526,7 +1610,8 @@ mod test {
 			receive_window: std::num::NonZeroU64::new(100),
 		};
 		session.set_limits(limits).unwrap();
-		assert_eq!(early.window(), 20);
+		// The widened window, and a stream window more while it may yet shape credit.
+		assert_eq!(early.window(), 2 * 20);
 	}
 
 	/// A transport that reports no window never pauses a stream, since nothing bounds what
