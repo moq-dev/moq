@@ -109,9 +109,10 @@ mod unix {
 		/// Delivery-rate samples, filtered so app-limited ones cannot lower the estimate.
 		#[cfg(target_os = "linux")]
 		rate: std::sync::Mutex<RateFilter>,
-		/// The `TCP_NOTSENT_LOWAT` last set, so an unchanged window costs no `setsockopt`.
+		/// The congestion window the unsent bound was last set from, so an unchanged window
+		/// costs no `setsockopt`.
 		/// Zero until the first, since a live socket's window never is.
-		lowat: AtomicU32,
+		window: AtomicU32,
 	}
 
 	impl TcpStats {
@@ -129,7 +130,7 @@ mod unix {
 				fd,
 				#[cfg(target_os = "linux")]
 				rate: Default::default(),
-				lowat: AtomicU32::new(0),
+				window: AtomicU32::new(0),
 			}
 		}
 
@@ -243,7 +244,13 @@ mod unix {
 			len >= offset + size
 		}
 
-		pub const TCP_NOTSENT_LOWAT: libc::c_int = 25;
+		/// Linux stops a write once the unsent bytes reach `TCP_NOTSENT_LOWAT`, so the mark is
+		/// the window itself.
+		pub const UNSENT_BOUND: (libc::c_int, libc::c_int) = (libc::IPPROTO_TCP, libc::TCP_NOTSENT_LOWAT);
+
+		pub fn unsent_bound(window: u64) -> u64 {
+			window
+		}
 
 		/// The congestion window in bytes: segments times the sending MSS.
 		pub fn congestion_window(fd: BorrowedFd<'_>) -> Option<u64> {
@@ -307,7 +314,14 @@ mod unix {
 			len >= offset + size
 		}
 
-		pub const TCP_NOTSENT_LOWAT: libc::c_int = 0x201;
+		/// macOS takes `TCP_NOTSENT_LOWAT` only as a readiness hint, and a write fills the
+		/// whole send buffer regardless, so bound the buffer instead. It holds what is in
+		/// flight, up to a window, as well as what is unsent: two windows leave one unsent.
+		pub const UNSENT_BOUND: (libc::c_int, libc::c_int) = (libc::SOL_SOCKET, libc::SO_SNDBUF);
+
+		pub fn unsent_bound(window: u64) -> u64 {
+			window.saturating_mul(2)
+		}
 
 		/// The congestion window, which macOS already counts in bytes.
 		pub fn congestion_window(fd: BorrowedFd<'_>) -> Option<u64> {
@@ -317,15 +331,17 @@ mod unix {
 		}
 	}
 
-	/// Set `TCP_NOTSENT_LOWAT`, which bounds the bytes the kernel takes beyond what it has sent.
-	fn set_notsent_lowat(fd: BorrowedFd<'_>, mark: u32) -> io::Result<()> {
-		let value = libc::c_int::try_from(mark).unwrap_or(libc::c_int::MAX);
+	/// Bound the bytes the kernel takes beyond what it has sent to about `window`.
+	fn set_unsent_bound(fd: BorrowedFd<'_>, window: u32) -> io::Result<()> {
+		let bound = sys::unsent_bound(u64::from(window));
+		let value = libc::c_int::try_from(bound).unwrap_or(libc::c_int::MAX);
+		let (level, name) = sys::UNSENT_BOUND;
 		// SAFETY: `value` is a live `c_int` and the length says so; the kernel only reads it.
 		let rc = unsafe {
 			libc::setsockopt(
 				fd.as_raw_fd(),
-				libc::IPPROTO_TCP,
-				sys::TCP_NOTSENT_LOWAT,
+				level,
+				name,
 				(&value as *const libc::c_int).cast(),
 				size_of::<libc::c_int>() as libc::socklen_t,
 			)
@@ -382,37 +398,39 @@ mod unix {
 
 		fn limit_unsent(&self) -> Option<usize> {
 			let window = sys::congestion_window(self.borrow()).filter(|&window| window > 0)?;
-			let mark = u32::try_from(window).unwrap_or(u32::MAX);
+			let window = u32::try_from(window).unwrap_or(u32::MAX);
 			// Linux wakes writers on a changed mark, so a raised one frees a parked write at once.
-			if self.lowat.load(Ordering::Relaxed) != mark {
+			if self.window.load(Ordering::Relaxed) != window {
 				// Only a socket already torn down refuses it, and its session is ending anyway.
-				set_notsent_lowat(self.borrow(), mark).ok()?;
-				self.lowat.store(mark, Ordering::Relaxed);
+				set_unsent_bound(self.borrow(), window).ok()?;
+				self.window.store(window, Ordering::Relaxed);
 			}
-			usize::try_from(mark).ok()
+			usize::try_from(window).ok()
 		}
 	}
 
-	/// `socket`'s `TCP_NOTSENT_LOWAT` and congestion window, in bytes.
+	/// The option bounding `socket`'s unsent bytes, and the value its congestion window
+	/// calls for.
 	#[cfg(test)]
 	pub(crate) fn unsent_bound<S: AsFd>(socket: &S) -> (u64, u64) {
 		let fd = socket.as_fd();
 		let mut value: libc::c_int = 0;
 		let mut len = size_of::<libc::c_int>() as libc::socklen_t;
 		// SAFETY: `value` is a live `c_int` and `len` says so.
+		let (level, name) = sys::UNSENT_BOUND;
 		let rc = unsafe {
 			libc::getsockopt(
 				fd.as_raw_fd(),
-				libc::IPPROTO_TCP,
-				sys::TCP_NOTSENT_LOWAT,
+				level,
+				name,
 				(&mut value as *mut libc::c_int).cast(),
 				&mut len,
 			)
 		};
 		assert_eq!(rc, 0, "{}", io::Error::last_os_error());
 		let window = sys::congestion_window(fd).expect("a TCP socket");
-		// The kernel's unbounded default reads back as -1.
-		(u64::try_from(value).unwrap_or(u64::MAX), window)
+		// Linux's unbounded default reads back as -1.
+		(u64::try_from(value).unwrap_or(u64::MAX), sys::unsent_bound(window))
 	}
 
 	/// Pin the field offsets against the kernel's struct.

@@ -34,8 +34,9 @@ async fn finish(
 /// Disables Nagle: the session already batches records and flushes once per batch,
 /// so Nagle has nothing left to coalesce and would only hold a batch's tail until
 /// the peer's delayed ACK. A session started with the returned handle holds the
-/// kernel's unsent queue to about one congestion window (`TCP_NOTSENT_LOWAT`), so
-/// what it has not sent yet stays where a reset stream can still drop it.
+/// kernel's unsent queue to about one congestion window (`TCP_NOTSENT_LOWAT` on
+/// Linux, a send buffer of two windows on macOS), so what it has not sent yet
+/// stays where a reset stream can still drop it.
 ///
 /// For a socket whose session starts elsewhere, such as
 /// `tls::Server::accept_established`.
@@ -89,10 +90,11 @@ mod tests {
 			assert!(probe.nodelay().unwrap());
 			#[cfg(any(target_os = "linux", target_os = "macos"))]
 			{
-				// The kernel's default leaves the queue unbounded. The window the mark came from
-				// moves slightly once the handshake settles the MSS.
-				let (lowat, window) = crate::socket::unsent_bound(&probe);
-				assert!((window / 2..=window * 2).contains(&lowat), "{lowat} vs {window}");
+				// The kernel's default bounds nothing (Linux) or autotunes well below it (macOS).
+				// The window the bound came from moves slightly once the handshake settles the
+				// MSS, and macOS rounds a send buffer up.
+				let (set, expected) = crate::socket::unsent_bound(&probe);
+				assert!((expected * 3 / 4..=expected * 2).contains(&set), "{set} vs {expected}");
 			}
 		}
 	}
