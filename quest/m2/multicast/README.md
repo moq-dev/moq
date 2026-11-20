@@ -41,7 +41,7 @@ waits on this epic's children, the other flaw,
 [a route moving behind one next hop resending a group](/quest/m2/multicast/resend.md),
 whose fix changes the wire,
 and a flaw the mesh replay found,
-[a lite-07 front that stops delivering after it switches copies](/quest/m2/multicast/splice-stall.md);
+[a lite-07 reader its relay refuses as unroutable and never re-asks](/quest/m2/multicast/splice-stall.md);
 and on
 [route layer acceptance](/quest/m2/cluster-routes/acceptance.md)'s
 scoped subscriber whose grant is too wide to ask for. It does not wait on
