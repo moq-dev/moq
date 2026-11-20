@@ -91,4 +91,4 @@ Wire: lite-07-wip only.
 ## Related
 
 - [Latest readers join live by their Min Age](/quest/m4/readers-range-live.md) - the readers that floor at the largest group move to this join
-- [lite-07 Group Streams carry each time once](/quest/m2/time-addressing/group-end-whole.md) - a time inside a skipped span belongs to no group, which changes where a time start lands
+- [lite-07 Group Streams carry each time once](/quest/m2/time-addressing/group-times.md) - a time inside a skipped span belongs to no group, which changes where a time start lands

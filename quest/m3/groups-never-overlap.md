@@ -60,5 +60,5 @@ Public API: none expected. Wire: none; the draft's group rule tightens.
 
 ## Related
 
-- [Group Streams carry each time once](/quest/m2/time-addressing/group-end-whole.md) - lite-07 states that a group's span, from its lowest frame to GROUP_END's end, never overlaps another's; this quest makes hang's producers and importers keep it
+- [Group Streams carry each time once](/quest/m2/time-addressing/group-times.md) - lite-07 states that a group's span, from its lowest frame to GROUP_END's end, never overlaps another's; this quest makes hang's producers and importers keep it
 - [An fMP4 group start never rewinds the decode timeline](/quest/m3/fmp4-group-start-tfdt.md) - a keyframe repeating its predecessor's timestamp would now continue the group; check which of its cases remain
