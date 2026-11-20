@@ -521,6 +521,7 @@ impl RecvStream {
 			pacing: OnceLock::new(),
 			shaped: None,
 			unshaped: false,
+			probed: false,
 			slot: None,
 		}))
 	}
@@ -529,7 +530,7 @@ impl RecvStream {
 	/// the credit the stream may hold, so a paced hop buffers about what its peer can have
 	/// in flight on it, and on a transport that shapes credit a stream window more, which a
 	/// paused stream no longer holds in the transport.
-	pub(crate) fn window(&self) -> u64 {
+	pub(crate) fn window(&mut self) -> u64 {
 		self.0.window()
 	}
 
@@ -567,6 +568,8 @@ struct Budgeted<T> {
 	shaped: Option<u64>,
 	/// The transport cannot set a stream's window, so a paused stream holds its full credit.
 	unshaped: bool,
+	/// Whether the transport has been asked yet to set the stream's window.
+	probed: bool,
 	/// The stream's slot among the session's shaped streams, until it drops.
 	slot: Option<u64>,
 }
@@ -745,7 +748,7 @@ trait ErasedRecv: Send + Sync {
 	fn stop(&mut self, code: u32);
 	fn poll_reset(&mut self, waiter: &kio::Waiter) -> Poll<Error>;
 	fn set_window(&mut self, window: u64) -> Option<u64>;
-	fn window(&self) -> u64;
+	fn window(&mut self) -> u64;
 	fn shape(&mut self, room: Option<u64>, unsealed: u64);
 	fn pause(&mut self) -> bool;
 	fn resume(&mut self);
@@ -951,8 +954,14 @@ impl<T: poll::RecvStream + Send + Sync> ErasedRecv for Budgeted<T> {
 		poll::RecvStream::set_window(&mut self.stream, window)
 	}
 
-	fn window(&self) -> u64 {
+	fn window(&mut self) -> u64 {
 		let pacing = self.pacing();
+		// Whether the transport shapes credit decides the window, so ask before the first one
+		// rather than learn it from the first shaping that moves.
+		if pacing.cap > 0 && !self.probed {
+			self.probed = true;
+			Budgeted::set_window(self, pacing.stream);
+		}
 		match self.unshaped || pacing.cap == 0 {
 			true => pacing.window,
 			// A shaped stream holds a stream window less once paused, so its group holds it
@@ -1362,11 +1371,12 @@ mod test {
 		stream.shape(Some(10_000), 0);
 		stream.shape(Some(9_800), 0);
 		stream.shape(Some(100), 2_000);
+		stream.shape(Some(100), 2_100);
 		stream.shape(None, 0);
 		assert_eq!(
 			*windows.lock().unwrap(),
-			[10_000 + allowance, 2_000 + allowance, STREAM],
-			"skipping a move under half an allowance, and never short of the segment's rest"
+			[STREAM, 10_000 + allowance, 9_800 + allowance, 2_000 + allowance, STREAM,],
+			"asked once, then a smaller window always applies, a larger only past half an allowance, and never short of the segment's rest"
 		);
 
 		// Each pauses at its allowance: the first a half of the cap, the second a sixth.
@@ -1410,12 +1420,7 @@ mod test {
 			SinkSession::accepted_bi(gate.consume())
 				.with_receive_window(ReceiveWindow::new(std::num::NonZeroU64::new(100), 20)),
 		);
-		// One that shares a window paces at a stream window more until its transport turns
-		// out unable to shape credit, so its paused streams hold the stream window instead.
-		let mut stream = accept(&session);
-		assert_eq!(stream.window(), 2 * 20);
-		stream.shape(Some(0), 0);
-		assert_eq!(stream.window(), 20);
+		assert_eq!(accept(&session).window(), 20, "a transport that cannot shape credit");
 
 		let session = Session::new(
 			SinkSession::accepted_bi(gate.consume()).with_receive_window(ReceiveWindow::new(None, u64::MAX)),
@@ -1605,13 +1610,12 @@ mod test {
 			SinkSession::accepted_bi(gate.consume())
 				.with_receive_window(ReceiveWindow::new(std::num::NonZeroU64::new(10), 20)),
 		);
-		let early = accept(&session);
+		let mut early = accept(&session);
 		let limits = Limits {
 			receive_window: std::num::NonZeroU64::new(100),
 		};
 		session.set_limits(limits).unwrap();
-		// The widened window, and a stream window more while it may yet shape credit.
-		assert_eq!(early.window(), 2 * 20);
+		assert_eq!(early.window(), 20);
 	}
 
 	/// A transport that reports no window never pauses a stream, since nothing bounds what

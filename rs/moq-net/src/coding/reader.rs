@@ -80,7 +80,7 @@ pub(crate) trait Pause {
 	/// How far the group's writer reads this stream ahead of its fastest reader before
 	/// pausing: the stream's receive credit, capped at the live tail's ahead half (see
 	/// [`crate::model::pace::window`]). A stream outside any session takes the cap.
-	fn window(&self) -> u64 {
+	fn window(&mut self) -> u64 {
 		crate::model::pace::AHEAD
 	}
 
@@ -100,7 +100,7 @@ pub(crate) trait Pause {
 }
 
 impl Pause for crate::transport::boxed::RecvStream {
-	fn window(&self) -> u64 {
+	fn window(&mut self) -> u64 {
 		crate::transport::boxed::RecvStream::window(self)
 	}
 
@@ -1309,7 +1309,7 @@ mod tests {
 	struct CreditedLease<'a>(&'a mut Credited);
 
 	impl Pause for Credited {
-		fn window(&self) -> u64 {
+		fn window(&mut self) -> u64 {
 			match self.window {
 				0 => crate::model::pace::AHEAD,
 				window => window,
