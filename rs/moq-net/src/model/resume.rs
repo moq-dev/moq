@@ -7,7 +7,8 @@
 //! [`Subscriber`]: nothing is copied, and with one route it is a passthrough.
 //!
 //! When the front switches, each reader subscribes to the new copy from the newest group
-//! it handed out. A replaced copy keeps delivering until the new copy delivers its first
+//! it handed out, past the frames of it a copy holds, which that copy adopts once the rest
+//! lands so a later reader finds the group whole. A replaced copy keeps delivering until the new copy delivers its first
 //! group, then is bounded just below it (or at the newest group handed out, if later), so a
 //! group only the old route got after the switch is not lost. It is kept while it may still
 //! deliver a group under its bound the reader lacks (unread, or still landing within the
@@ -180,20 +181,45 @@ impl Producer {
 	}
 
 	/// The readers' demand on a new copy, with each reader resuming where it got to.
-	pub(super) fn subscription(&self, mut demand: Subscription, subscribers: usize) -> Subscription {
+	#[cfg(test)]
+	pub(super) fn subscription(&self, demand: Subscription, subscribers: usize) -> Subscription {
+		self.asked(demand, subscribers).0
+	}
+
+	/// Subscribe `copy` to the readers' demand, with each reader resuming where it got to,
+	/// lending it the frames held of the group the demand resumes past.
+	pub(super) fn subscribe(&self, copy: &track::Consumer, demand: Subscription, subscribers: usize) -> Held {
+		let (demand, head) = self.asked(demand, subscribers);
+		let resume = demand.resume;
+		let sub = copy.subscribe(demand);
+		// Once subscribed, so the copy's state exists to hold the loan.
+		if let (Some(head), Some(resume)) = (head, resume) {
+			sub.lend_head(resume.group, head);
+		}
+		Held::new(sub)
+	}
+
+	/// [`Self::subscribe`]'s demand, and the head it resumes past.
+	fn asked(&self, mut demand: Subscription, subscribers: usize) -> (Subscription, Option<Arc<group::Head>>) {
 		// A subscription not yet polled still needs the original ranges, so never narrow the
 		// aggregate until every contribution is here.
 		let Some(readers) = self.readers(subscribers) else {
-			return demand;
+			return (demand, None);
 		};
 		let mut ranges = Vec::new();
-		for reader in readers {
+		let mut resume = Resume::default();
+		for reader in &readers {
+			// Ranges and resume under one lock, so a reader moving on between them cannot ask
+			// a range from one group and resume past another.
 			let mut reader = reader.lock().unwrap_or_else(PoisonError::into_inner);
 			let preferences: Vec<_> = reader.subscription.read().ranges().collect();
 			ranges.extend(reader.resumed(&preferences).into_iter().map(|(_, range)| range));
+			resume.add(&reader);
 		}
 		demand.ranges = ranges;
-		demand
+		let resume = resume.lowest();
+		demand.resume = resume.as_ref().map(|(resume, _)| *resume);
+		(demand, resume.map(|(_, head)| head))
 	}
 
 	/// Keep `held` asking for the readers' demand of `weak`, as [`Self::subscription`] folds
@@ -219,10 +245,29 @@ impl Producer {
 					..Default::default()
 				};
 				let mut ranges = Vec::new();
+				let mut resume = Resume::default();
 				for reader in &readers {
-					ranges.extend(fold.fold(reader, None).into_iter().map(|(_, range)| range));
+					// Ranges and resume under one lock, as `asked` takes them.
+					let mut locked = reader.lock().unwrap_or_else(PoisonError::into_inner);
+					ranges.extend(
+						fold.fold_locked(reader, &mut locked, None)
+							.into_iter()
+							.map(|(_, range)| range),
+					);
+					resume.add(&locked);
 				}
-				let _ = held.sub.update(Subscription { ranges, ..terms });
+				// Asked whole, it resumes where the readers got to, as a new copy is asked. An edit
+				// keeps that resume, as a reader's own copy does.
+				let resume = resume.lowest();
+				if let Some((resume, head)) = &resume {
+					held.sub.lend_head(resume.group, head.clone());
+				}
+				let resume = resume.map(|(resume, _)| resume);
+				let _ = held.sub.update(Subscription {
+					ranges,
+					resume,
+					..terms
+				});
 				let keyed = held
 					.sub
 					.preferences()
@@ -663,6 +708,9 @@ struct Copy {
 	sub: Sub,
 	/// Where the subscription was asked to start, so demand updates never ask for less.
 	floor: Option<u64>,
+	/// The frames of the group at `floor` the reader already held when this copy was asked,
+	/// so it asks for that group from the next frame; see [`Reader::resume_at`].
+	resume: Option<Position>,
 	/// The reader's ranges resolved, by the reader's key, so clamping never widens one: as
 	/// the serving copy had them when this one was subscribed, until this one answers. A
 	/// range left out is not resolved. The copy's own subscription keys each range as the
@@ -695,19 +743,23 @@ enum Sub {
 	Ready(Box<track::Subscriber>),
 }
 
+/// Where a copy is asked from: no earlier than `floor`, up to the exclusive `end`, and the
+/// group at `floor` from past the frames held of it.
+struct Span {
+	floor: Option<u64>,
+	end: Option<u64>,
+	resume: Option<Position>,
+}
+
 impl Copy {
 	/// Subscribe to `track` for `reader`, from `floor` up to the exclusive `end`, each range
 	/// clamped by where `resolved` places it, keyed as the reader keys it.
-	fn subscribe(
-		track: &track::Consumer,
-		reader: &Mirrored,
-		floor: Option<u64>,
-		end: Option<u64>,
-		resolved: &BTreeMap<u64, Resolved>,
-	) -> Sub {
+	fn subscribe(track: &track::Consumer, reader: &Mirrored, at: Span, resolved: &BTreeMap<u64, Resolved>) -> Sub {
 		// The wire request carries the floor from the first message: some sessions read the
 		// demand only once.
-		let pending = track.subscribe(reader.wire(floor, end, resolved));
+		let mut wire = reader.wire(at.floor, at.end, resolved);
+		wire.resume = at.resume;
+		let pending = track.subscribe(wire);
 		// Keyed by position as subscribed: the reader's own keys from then on.
 		if !reader.ranges.keys().copied().eq(0..reader.ranges.len() as u64) {
 			let _ = pending.preferences().rekey(reader.ranges.keys().copied());
@@ -765,22 +817,28 @@ impl Copy {
 					),
 					Sub::Pending(_) => BTreeMap::new(),
 				};
-				let wire = reader.wire(self.floor, self.end(), &self.resolved);
-				let _ = match &mut self.sub {
-					Sub::Pending(pending) => pending.update(wire),
-					Sub::Ready(sub) => sub.update(wire),
-				};
-				// Keyed by position as replaced: the reader's own keys from then on.
-				let keyed = self
-					.preferences()
-					.read()
-					.ranges()
-					.map(|(key, _)| key)
-					.eq(reader.ranges.keys().copied());
-				if !keyed {
-					let _ = self.preferences().rekey(reader.ranges.keys().copied());
-				}
+				self.ask_whole(reader);
 			}
+		}
+	}
+
+	/// Ask for every range as [`Self::wire`] has it, and the resume, in one replacement.
+	fn ask_whole(&mut self, reader: &Mirrored) {
+		let mut wire = reader.wire(self.floor, self.end(), &self.resolved);
+		wire.resume = self.resume;
+		let _ = match &mut self.sub {
+			Sub::Pending(pending) => pending.update(wire),
+			Sub::Ready(sub) => sub.update(wire),
+		};
+		// Keyed by position as replaced: the reader's own keys from then on.
+		let keyed = self
+			.preferences()
+			.read()
+			.ranges()
+			.map(|(key, _)| key)
+			.eq(reader.ranges.keys().copied());
+		if !keyed {
+			let _ = self.preferences().rekey(reader.ranges.keys().copied());
 		}
 	}
 
@@ -1388,6 +1446,38 @@ impl Candidate {
 	}
 }
 
+/// Where every reader resumes the newest group it handed out, past the frames a copy holds
+/// of it: the lowest of those and the frames, folded in one reader at a time so only the
+/// lowest head is kept. `None` unless every reader resumes, as in a track's own demand.
+#[derive(Default)]
+enum Resume {
+	#[default]
+	Empty,
+	Lowest(Position, Arc<group::Head>),
+	/// A reader resumes nothing, so neither does the aggregate.
+	Whole,
+}
+
+impl Resume {
+	fn add(&mut self, reader: &Reader) {
+		if matches!(self, Self::Whole) {
+			return;
+		}
+		*self = match (std::mem::take(self), reader.held_at(reader.newest)) {
+			(_, None) => Self::Whole,
+			(Self::Lowest(at, head), Some((next, _))) if at <= next => Self::Lowest(at, head),
+			(_, Some((next, head))) => Self::Lowest(next, head),
+		};
+	}
+
+	fn lowest(self) -> Option<(Position, Arc<group::Head>)> {
+		match self {
+			Self::Lowest(at, head) => Some((at, head)),
+			_ => None,
+		}
+	}
+}
+
 /// A subscription on a copy asking for its readers' demand, as [`Producer::subscription`]
 /// folds it, kept current by [`Producer::follow`].
 pub(super) struct Held {
@@ -1433,6 +1523,16 @@ impl Fold {
 	/// each under the held key it now has.
 	fn fold(&mut self, reader: &Arc<Mutex<Reader>>, keys: Option<BTreeSet<u64>>) -> Vec<(u64, track::Range)> {
 		let mut locked = reader.lock().unwrap_or_else(PoisonError::into_inner);
+		self.fold_locked(reader, &mut locked, keys)
+	}
+
+	/// [`Self::fold`] with `reader` already locked as `locked`.
+	fn fold_locked(
+		&mut self,
+		reader: &Arc<Mutex<Reader>>,
+		locked: &mut Reader,
+		keys: Option<BTreeSet<u64>>,
+	) -> Vec<(u64, track::Range)> {
 		let (preferences, revision) = {
 			let current = locked.subscription.read();
 			let preferences: Vec<_> = match &keys {
@@ -1445,7 +1545,6 @@ impl Fold {
 			(preferences, current.revision)
 		};
 		let resumed = locked.resumed(&preferences);
-		drop(locked);
 		let folded = self
 			.readers
 			.entry(Arc::as_ptr(reader) as usize)
@@ -1528,6 +1627,7 @@ impl Mirrored {
 			ranges,
 			order: self.order,
 			feed: self.feed,
+			resume: None,
 		}
 	}
 
@@ -1987,6 +2087,7 @@ impl Reader {
 			// Resume where a fresh copy would: a group it buffered while replaced, below the
 			// newest another route handed out, is not handed out.
 			copy.floor = copy.floor.max(self.newest);
+			let resume = self.resume_at(copy.floor, &copy.track);
 			let start = copy.start(self.groups.0);
 			if let (Sub::Ready(sub), Some(_)) = (&mut copy.sub, copy.floor) {
 				sub.set_range((
@@ -1995,16 +2096,30 @@ impl Reader {
 				));
 			}
 			copy.resolved = resolved;
-			copy.send(&self.mirrored, self.mirrored.ranges.keys().copied());
+			match resume == copy.resume {
+				true => copy.send(&self.mirrored, self.mirrored.ranges.keys().copied()),
+				// An edit carries no resume, so a new one is asked whole.
+				false => {
+					copy.resume = resume;
+					copy.ask_whole(&self.mirrored);
+				}
+			}
 			self.copies.push(copy);
 			return;
 		}
 		let floor = self.newest;
+		let resume = self.resume_at(floor, &track);
+		let span = Span {
+			floor,
+			end: None,
+			resume,
+		};
 		self.copies.push(Copy {
 			generation,
-			sub: Copy::subscribe(&track, &self.mirrored, floor, None, &resolved),
+			sub: Copy::subscribe(&track, &self.mirrored, span, &resolved),
 			track,
 			floor,
+			resume,
 			resolved,
 			replaced: false,
 			until: None,
@@ -2014,6 +2129,29 @@ impl Reader {
 			feeds: true,
 		});
 		self.learn_end(None);
+	}
+
+	/// Ask `track` to resume group `key` past the frames held of it (see [`Self::held_at`]),
+	/// lending it those frames, so once the rest arrives it holds the group whole for a
+	/// reader that joins later, after the copies holding them are gone.
+	fn resume_at(&self, key: Option<u64>, track: &track::Consumer) -> Option<Position> {
+		let (resume, head) = self.held_at(key)?;
+		track.lend_head(resume.group, head);
+		Some(resume)
+	}
+
+	/// Where a new copy asked from group `key` resumes it: past the most frames of it a copy
+	/// holds from its first, which the reader already has or reads locally, and those frames.
+	/// A route switch behind the same next hop then sends none of them again, only the rest of
+	/// a group still arriving, and nothing of a finished one. `None` while no copy holds its
+	/// first frame.
+	fn held_at(&self, key: Option<u64>) -> Option<(Position, Arc<group::Head>)> {
+		let key = key?;
+		(self.copies.iter())
+			.filter_map(|copy| copy.track.peek_group(key)?.handoff().head())
+			.filter_map(|head| Some((head.frames_from_first()?, head)))
+			.max_by_key(|(frames, _)| *frames)
+			.map(|(frames, head)| (Position::new(key, frames), head))
 	}
 
 	/// One logical track has one end, whichever route first reports it.
@@ -2735,10 +2873,17 @@ impl Reader {
 			return;
 		}
 		let floor = Some(lowered.start);
+		let span = Span {
+			floor,
+			end: Some(lowered.end),
+			resume: None,
+		};
 		let copy = Copy {
 			generation,
-			sub: Copy::subscribe(&track, &self.mirrored, floor, Some(lowered.end), &resolved),
+			sub: Copy::subscribe(&track, &self.mirrored, span, &resolved),
 			floor,
+			// Below every group handed out, so the reader holds none of the first.
+			resume: None,
 			resolved,
 			// Bounded from the start: everything it may deliver is older than what the reader
 			// already read, so it is waited for no longer than the reader's budget.
@@ -4636,6 +4781,126 @@ mod test {
 			sub.recv_group().now_or_never().is_none(),
 			"the group was handed out twice"
 		);
+	}
+
+	/// A switch asks the new copy for the newest group handed out from past the frames the
+	/// copies hold of it, never again from its first: the rest of one still arriving, and
+	/// nothing of a finished one. The reader reads the group on from the part the new copy
+	/// gets, every frame once.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_switch_resumes_the_newest_group_past_the_frames_held() {
+		let routes = Producer::new();
+		let track = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&track, Duration::from_secs(10));
+
+		let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+		open.write_frame(ts(0), b"a".as_ref()).unwrap();
+		open.write_frame(ts(1), b"b".as_ref()).unwrap();
+		let mut reading = recv(&mut sub);
+		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+
+		let b = copy();
+		routes.serve(b.consume());
+		assert_eq!(read(&mut reading), Some(b"b".to_vec()));
+		let asked = b.subscription().expect("subscribed");
+		assert_eq!(asked.start(), Some(0));
+		assert_eq!(asked.resume, Some(Position::new(0, 2)), "past the two frames held");
+
+		// The new copy gets only the rest, and the reader reads on from it.
+		let mut rest = b.create_group(group::Info { start: 0 }).unwrap();
+		rest.start_at(2).unwrap();
+		rest.write_frame(ts(2), b"c".as_ref()).unwrap();
+		rest.finish().unwrap();
+		assert_eq!(read(&mut reading), Some(b"c".to_vec()));
+		assert_eq!(read(&mut reading), None);
+		assert!(sub.recv_group().now_or_never().is_none(), "handed out twice");
+
+		// A finished group is resumed past its every frame, so none of it is sent again.
+		write(&b, 1);
+		assert_eq!(recv(&mut sub).start, 1);
+		let c = copy();
+		routes.serve(c.consume());
+		assert_eq!(c.subscription().expect("subscribed").resume, Some(Position::new(1, 1)));
+
+		// A reader holding none of the group asks for it whole, and outweighs one resuming.
+		let routes = Producer::new();
+		let front = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut first = subscribe(&front, HOUR);
+		let mut second = subscribe(&front, HOUR);
+		write(&a, 5);
+		assert_eq!(recv(&mut first).start, 5);
+		let demand = front.subscription().unwrap();
+		assert_eq!(routes.subscription(demand.clone(), 2).resume, None);
+		assert_eq!(recv(&mut second).start, 5);
+		assert_eq!(routes.subscription(demand, 2).resume, Some(Position::new(5, 1)));
+	}
+
+	/// A copy asked past the frames a reader held of a group adopts them once the rest lands,
+	/// so a reader joining after the copy that held them is gone reads the group whole.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_resumed_copy_holds_the_group_whole_for_a_later_reader() {
+		let routes = Producer::new();
+		let track = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut holder = subscribe(&track, HOUR);
+		write(&a, 0);
+		assert_eq!(recv(&mut holder).start, 0);
+
+		let b = copy();
+		routes.serve(b.consume());
+		assert_eq!(b.subscription().unwrap().resume, Some(Position::new(0, 1)));
+		// As a session receives it, partway through. The holder never polls again, so the
+		// copy takes the head on arrival, not from the holder's reads.
+		let track::Received::Group(rest) = b.create_group_at(group::Info { start: 0 }, 1).unwrap() else {
+			panic!("nothing else holds the group");
+		};
+		rest.finish().unwrap();
+		drop(a);
+
+		let mut late = subscribe(&track, HOUR);
+		let mut group = recv(&mut late);
+		assert_eq!(group.start, 0);
+		assert_eq!(read(&mut group), Some(b"x".to_vec()));
+		assert_eq!(read(&mut group), None);
+	}
+
+	/// The subscription an origin opens on a new copy before serving it, which it then holds
+	/// for the readers, lends the head it resumes past, as a reader's own does.
+	/// Otherwise a reader moving on before the switch lends the next group's head instead,
+	/// and the copy caches the group the query resumed without its head.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_query_resuming_a_new_copy_lends_it_the_head() {
+		let routes = Producer::new();
+		let track = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut holder = subscribe(&track, HOUR);
+		write(&a, 0);
+		assert_eq!(recv(&mut holder).start, 0);
+
+		let b = copy();
+		let _held = routes.subscribe(&b.consume(), track.subscription().unwrap(), 1);
+		assert_eq!(b.subscription().unwrap().resume, Some(Position::new(0, 1)));
+		write(&a, 1);
+		assert_eq!(recv(&mut holder).start, 1);
+		routes.serve(b.consume());
+
+		for key in [0, 1] {
+			let track::Received::Group(rest) = b.create_group_at(group::Info { start: key }, 1).unwrap() else {
+				panic!("nothing else holds group {key}");
+			};
+			rest.finish().unwrap();
+			let cached = b.consume().peek_group(key).expect("cached");
+			assert_eq!(cached.first_frame(), 0, "group {key} is whole once visible");
+		}
 	}
 
 	/// Routes that close without concluding read like a conclusion: a reader stalled

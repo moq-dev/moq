@@ -703,6 +703,14 @@ pub(crate) struct TrackState {
 	// the read guard a first frame holds, so it needs its own lock, never contended.
 	bounds: Mutex<BTreeMap<u64, Timestamp>>,
 
+	// The frames of each group a reader already held when it asked this copy to resume that
+	// group past them, by key, which the group adopts as it arrives (see
+	// [`Consumer::lend_head`]). Filled through a read guard, so it needs its own lock. One per
+	// group, taken as that group arrives or dropped as it is given up or the track tears down,
+	// so it holds only the groups readers resumed this copy at that are still to come, each
+	// billed to the pool, which reclaims it as it would a failed copy's head.
+	lent: Mutex<Lent>,
+
 	// The key and start of the highest-key group that left the cache holding a
 	// checked start (see [`group::Origin::Bound`]). Eviction is not a key prefix, so a
 	// group above it is checked against it as well as its cached neighbors; one at or below
@@ -1265,7 +1273,80 @@ impl Holdings for TrackState {
 	}
 }
 
+/// The heads lent to a copy for the groups its readers resumed it at, by key, each held as a
+/// failed copy's head is (see [`group::Handoff::lent`]); see [`Consumer::lend_head`].
+#[derive(Default)]
+struct Lent {
+	loans: BTreeMap<u64, Arc<group::Handoff>>,
+	/// How many loans it holds before it next forgets those the pool reclaimed: twice what
+	/// the last pass kept, so a pass costs no more than the loans added since.
+	prune_at: usize,
+}
+
+impl Lent {
+	/// Hold `head` for group `key`, billed to `cache`. Of two loans for one group the longer
+	/// stands.
+	fn lend(&mut self, key: u64, head: &Arc<group::Head>, cache: &Arc<cache::Track>) {
+		let held = |head: &group::Head| head.frames_from_first().unwrap_or_default();
+		let standing = self.loans.get(&key).and_then(|loan| loan.head());
+		if standing.is_some_and(|slot| held(&slot) >= held(head)) {
+			return;
+		}
+		// Forget the loans the pool reclaimed, so the map grows no further than twice the loans
+		// it bills, however many groups readers resume a copy at that never arrive.
+		if self.loans.len() >= self.prune_at {
+			self.loans.retain(|_, loan| loan.head().is_some());
+			self.prune_at = 2 * self.loans.len() + 1;
+		}
+		if let Some(loan) = group::Handoff::lent(head.clone(), cache) {
+			self.loans.insert(key, loan);
+		}
+	}
+
+	/// The head lent for group `key`, unless its pool reclaimed it.
+	fn take(&mut self, key: u64) -> Option<Arc<group::Head>> {
+		self.loans.remove(&key)?.head()
+	}
+
+	/// The head lent for group `key`, left in place, unless its pool reclaimed it.
+	fn peek(&self, key: u64) -> Option<Arc<group::Head>> {
+		self.loans.get(&key)?.head()
+	}
+
+	fn retain(&mut self, keep: impl Fn(u64) -> bool) {
+		self.loans.retain(|key, _| keep(*key));
+	}
+}
+
 impl TrackState {
+	/// The head lent for group `key`, taken; see [`Consumer::lend_head`].
+	fn take_lent(&self, key: u64) -> Option<Arc<group::Head>> {
+		self.lent.lock().unwrap_or_else(PoisonError::into_inner).take(key)
+	}
+
+	/// The head lent for group `key`, left for an arrival that can adopt it.
+	fn peek_lent(&self, key: u64) -> Option<Arc<group::Head>> {
+		self.lent.lock().unwrap_or_else(PoisonError::into_inner).peek(key)
+	}
+
+	/// Hold `head` for group `key` until it arrives, or return the copies of it already
+	/// cached, to adopt it with this state's lock released; see [`Consumer::lend_head`].
+	fn lend(&self, key: u64, head: &Arc<group::Head>) -> Vec<group::Handle> {
+		// Under the caller's read guard, so the group cannot arrive before the loan is held.
+		// Held even when copies are cached: one arriving to displace them once the guard is
+		// released, before they adopt the head, takes the loan as it lands.
+		(self.lent.lock().unwrap_or_else(PoisonError::into_inner)).lend(key, head, &self.cache);
+		(self.lookup.get(&key)).map_or_else(Vec::new, |slot| slot.copies().cloned().collect())
+	}
+
+	/// Drop the loan for `key` once a cached copy holds that group from its first frame:
+	/// nothing displaces that copy, so the loan has nothing left to complete.
+	fn settle_loan(&self, key: u64) {
+		if self.covering_group(key, 0).is_some() {
+			self.take_lent(key);
+		}
+	}
+
 	/// How many keys just below `key` the publisher declared it never produced: the skip
 	/// run that ends at `key`, as a moq-transport Prior Group ID Gap names it.
 	fn skipped_below(&self, key: u64) -> u64 {
@@ -1642,6 +1723,12 @@ impl TrackState {
 	/// Keep the change index aligned with the range map, including the neighbours an
 	/// insertion coalesces and the two pieces a removal can leave.
 	fn change_drops(&mut self, groups: ops::Range<u64>, hole: Option<Hole>) {
+		// A group skipped never arrives to take the head lent for it. A drop, stale or not, can
+		// still be followed by the group, so its loan stands until the pool reclaims it.
+		if hole == Some(Hole::Skip) {
+			let lent = self.lent.get_mut().unwrap_or_else(PoisonError::into_inner);
+			lent.retain(|key| !groups.contains(&key));
+		}
 		if hole.as_ref().is_none_or(|hole| hole.stale_budget().is_none())
 			&& self
 				.drops
@@ -2721,6 +2808,8 @@ impl TrackState {
 	/// reader that already pulled one ends with `err` too and its writer fails.
 	fn tear_down(&mut self, err: Error) -> (Option<Position>, OpenGroups) {
 		self.release_ingress();
+		// Nothing arrives after this to take a lent head.
+		*self.lent.get_mut().unwrap_or_else(PoisonError::into_inner) = Lent::default();
 		let resume = self.resume_position();
 		let groups = self
 			.lookup
@@ -4541,10 +4630,28 @@ impl Producer {
 		if let Some(content) = content {
 			group.handle().share_content(content);
 		}
+		// Before any reader can see it, so none takes it without the head (lock order is track
+		// then group), settled once the track lock is released. A whole copy needs no loan,
+		// and drops it; one the head does not reach leaves it for a wider arrival.
+		let adopted = if start == 0 {
+			state.take_lent(info.start);
+			None
+		} else {
+			let adopted = state
+				.peek_lent(info.start)
+				.and_then(|head| group.handle().take_head(&head));
+			if adopted.is_some() {
+				state.take_lent(info.start);
+			}
+			adopted
+		};
 		state.cap(&group.handle())?;
 		state.commit_group(&group.handle());
 		let deferred = state.deferred();
 		drop(state);
+		if let Some(adopted) = adopted {
+			group.handle().settle_head(adopted);
+		}
 		deferred.wake();
 		Ok(Received::Group(group))
 	}
@@ -6681,6 +6788,24 @@ impl Consumer {
 		})
 	}
 
+	/// Lend `head` to group `key` of this copy: to the copies it caches now, or else to the
+	/// first that arrives, which then holds it whole if it arrives partway through. Of two
+	/// loans for one group the longer stands; see [`group::Handle::adopt_head`].
+	pub(super) fn lend_head(&self, key: u64, head: Arc<group::Head>) {
+		let copies = self.with_state(|state| state.map_or_else(Vec::new, |state| state.read().lend(key, &head)));
+		if copies.is_empty() {
+			return;
+		}
+		for group in copies {
+			group.adopt_head(&head);
+		}
+		self.with_state(|state| {
+			if let Some(state) = state {
+				state.read().settle_loan(key);
+			}
+		});
+	}
+
 	/// Lend `head` to the cached copies of group `key`; see
 	/// [`group::Handle::adopt_head`].
 	pub(super) fn adopt_head(&self, key: u64, head: &group::Head) {
@@ -7204,6 +7329,18 @@ pub struct Subscribing {
 }
 
 impl Subscribing {
+	/// Lend `head` to group `key` of the subscribed copy; see [`Consumer::lend_head`].
+	pub(super) fn lend_head(&self, key: u64, head: Arc<group::Head>) {
+		let copies = self.state.read().lend(key, &head);
+		if copies.is_empty() {
+			return;
+		}
+		for group in copies {
+			group.adopt_head(&head);
+		}
+		self.state.read().settle_loan(key);
+	}
+
 	/// Resolve the same track's info with this subscription already registered.
 	pub(super) fn info(&self) -> Resolving {
 		Resolving {
@@ -16319,6 +16456,178 @@ mod test {
 		assert!(matches!(next.as_mut().poll(&mut cx), Poll::Ready(Err(Error::Old))));
 		head.finish().unwrap();
 		edge.finish().unwrap();
+	}
+
+	/// A copy whose readers keep resuming it at groups that never arrive keeps no more than
+	/// twice the loans its pool bills: those the pool reclaimed are forgotten as loans grow.
+	#[test]
+	#[cfg(feature = "async")]
+	fn reclaimed_loans_leave_the_copy() {
+		let pool = cache::Pool::new(cache::Config::default().with_expiry(Duration::from_secs(1)));
+		let producer = track_producer_pooled("test", pool.clone());
+		let consumer = producer.consume();
+		let head = |start: u64| {
+			let mut prefix = group::Info { start }.produce();
+			prefix
+				.write_frame(Timestamp::from_millis(start).unwrap(), bytes::Bytes::new())
+				.unwrap();
+			prefix.consume().handoff().head().unwrap()
+		};
+		let lent = |producer: &Producer| {
+			producer
+				.state
+				.read()
+				.lent
+				.lock()
+				.unwrap()
+				.loans
+				.keys()
+				.copied()
+				.collect::<Vec<_>>()
+		};
+		consumer.lend_head(1, head(1));
+		consumer.lend_head(2, head(2));
+		assert_eq!(lent(&producer), [1, 2]);
+		pool.step(Duration::from_secs(2));
+		pool.sweep();
+		assert_eq!(pool.used(), 0, "the sweep reclaimed both");
+		// Forgotten once the loans double since the last pass, so a pass costs what was added.
+		consumer.lend_head(3, head(3));
+		consumer.lend_head(4, head(4));
+		assert_eq!(lent(&producer), [3, 4]);
+	}
+
+	/// A loan for a group the copy already caches still stands for a copy of it that lands
+	/// later and displaces the cached one, which adopts it as it lands.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_displacing_arrival_takes_the_loan() {
+		let producer = track_producer("test", Info::timed());
+		let consumer = producer.consume();
+		let Received::Group(late) = producer.create_group_at(group::Info { start: 5 }, 2).unwrap() else {
+			panic!("nothing else holds group 5");
+		};
+		let mut prefix = group::Info { start: 5 }.produce();
+		prefix
+			.write_frame(Timestamp::from_millis(5).unwrap(), bytes::Bytes::new())
+			.unwrap();
+		// One frame does not reach the cached copy's first, so that copy cannot adopt it.
+		consumer.lend_head(5, prefix.consume().handoff().head().unwrap());
+		assert_eq!(consumer.peek_group(5).expect("cached").first_frame(), 2);
+
+		let Received::Group(wider) = producer.create_group_at(group::Info { start: 5 }, 1).unwrap() else {
+			panic!("a copy from frame 1 displaces one from frame 2");
+		};
+		assert_eq!(
+			consumer.peek_group(5).expect("cached").first_frame(),
+			0,
+			"whole once visible"
+		);
+		drop((late, wider));
+	}
+
+	/// An arrival the head does not reach leaves the loan for a later, wider one.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_arrival_that_cannot_adopt_leaves_the_loan() {
+		let producer = track_producer("test", Info::timed());
+		let consumer = producer.consume();
+		let mut prefix = group::Info { start: 5 }.produce();
+		prefix
+			.write_frame(Timestamp::from_millis(5).unwrap(), bytes::Bytes::new())
+			.unwrap();
+		consumer.lend_head(5, prefix.consume().handoff().head().unwrap());
+		let Received::Group(late) = producer.create_group_at(group::Info { start: 5 }, 2).unwrap() else {
+			panic!("nothing else holds group 5");
+		};
+		assert_eq!(
+			consumer.peek_group(5).expect("cached").first_frame(),
+			2,
+			"one frame does not reach frame 2"
+		);
+		let Received::Group(wider) = producer.create_group_at(group::Info { start: 5 }, 1).unwrap() else {
+			panic!("a copy from frame 1 displaces one from frame 2");
+		};
+		assert_eq!(
+			consumer.peek_group(5).expect("cached").first_frame(),
+			0,
+			"whole once visible"
+		);
+		drop((late, wider));
+	}
+
+	/// A drop is not final: a group arriving after one still takes the head lent for it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_stale_drop_keeps_the_loan() {
+		let producer = track_producer("test", Info::timed());
+		let consumer = producer.consume();
+		let mut prefix = group::Info { start: 7 }.produce();
+		for _ in 0..2 {
+			prefix
+				.write_frame(Timestamp::from_millis(7).unwrap(), bytes::Bytes::new())
+				.unwrap();
+		}
+		consumer.lend_head(7, prefix.consume().handoff().head().unwrap());
+		producer.give_up(7..8, Hole::stale(Duration::from_millis(1)));
+		let Received::Group(late) = producer.create_group_at(group::Info { start: 7 }, 2).unwrap() else {
+			panic!("a stale drop does not refuse the group");
+		};
+		assert_eq!(
+			consumer.peek_group(7).expect("cached").first_frame(),
+			0,
+			"whole once visible"
+		);
+		drop(late);
+	}
+
+	/// A copy lent the heads of two groups its readers resumed it at holds each whole as it
+	/// arrives partway through, from the moment a reader can see it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn lent_heads_complete_each_group_as_it_arrives() {
+		let producer = track_producer("test", Info::timed());
+		let consumer = producer.consume();
+		let head = |start: u64, frames: u64| {
+			let mut prefix = group::Info { start }.produce();
+			for _ in 0..frames {
+				prefix
+					.write_frame(Timestamp::from_millis(start).unwrap(), bytes::Bytes::new())
+					.unwrap();
+			}
+			prefix.consume().handoff().head().unwrap()
+		};
+		consumer.lend_head(7, head(7, 2));
+		consumer.lend_head(9, head(9, 1));
+		// A shorter loan for the same group leaves the longer one standing.
+		consumer.lend_head(7, head(7, 1));
+		// A group given up drops its loan.
+		consumer.lend_head(8, head(8, 1));
+		producer.skip_groups(8..9);
+		assert!(
+			!producer
+				.modify()
+				.unwrap()
+				.lent
+				.get_mut()
+				.unwrap()
+				.loans
+				.contains_key(&8)
+		);
+		// So does every one still waiting once the copy tears down.
+		let aborted = track_producer("aborted", Info::timed());
+		let reader = aborted.consume();
+		reader.lend_head(3, head(3, 1));
+		aborted.abort(Error::Cancel).unwrap();
+		assert!(reader.with_state(|state| state.unwrap().read().lent.lock().unwrap().loans.is_empty()));
+		for (key, at) in [(7, 2), (9, 1)] {
+			let Received::Group(group) = producer.create_group_at(group::Info { start: key }, at).unwrap() else {
+				panic!("nothing else holds group {key}");
+			};
+			let seen = consumer.peek_group(key).expect("cached");
+			assert_eq!(seen.first_frame(), 0, "group {key} is whole once visible");
+			drop(group);
+		}
 	}
 
 	#[test]
