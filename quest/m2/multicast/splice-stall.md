@@ -40,23 +40,26 @@ Decided 2026-11-20 by the maintainer:
 
 What [moq-dev/moq#9219](https://github.com/moq-dev/moq/pull/9219) did:
 
-- Closed one way a hop broke that rule. A lite session fails the copies it
-  carries before it closes the broadcasts they came from. A front that saw a
-  copy die with its session's end (`IdleTimeout`, `Session`, `Transport`) from a
-  source whose broadcast still read as open asked that source again and took
-  its answer as the track's verdict. Relayed, that end reads as Unroutable.
-  The front now counts a received serving source as closing on such an error
-  (`Front::closing`, `Error::session_ended`) and holds the track for the next
-  route. `/verify-failover` models the window: a dead relay's route still
-  shows until it leaves the table (`Shows`, `Withdraw`).
+- Closed one way a hop broke that rule. A front reads whether a source is
+  closing from its broadcast, and takes a failure from a source still open as
+  the track's verdict. A lite session could fail the copies it carries, or a
+  query waiting on TRACK_INFO, before it closed the broadcasts they came from:
+  a front that saw a copy die that way asked the dying source again and ended
+  the track with its answer, which a relay passes on as Unroutable. The lite
+  subscriber now closes a source before failing its tracks with the session's
+  end (`TrackServe::close_if_ending`, `SubscriberDriver::abort`), so the front
+  holds the track for the next route. It reads the session's state, not the
+  error, since a stream's own reset can carry the same error. The IETF
+  subscriber is unchanged. `/verify-failover` models the window: a dead relay's
+  route still shows until it leaves the table (`Shows`, `Withdraw`).
 - Added a debug line for every front step (`moq_net::model`), so a failing run
   shows how a front ended a track.
 
 That race was not confirmed as this failure. On an unloaded host, 59 base runs
 and 24 fixed runs passed, and no reader got Unroutable during the single link
 reopen in any of them. Holding the drain open 2s after the transport closed
-did not make the base fail either. Traced relays show the source closing
-before its copies end. Debug runs on the CI host at load 70 or more starve
+did not make the base fail either. Traced relays showed the source closing
+before its copies end, the order the fix now guarantees. Debug runs on the CI host at load 70 or more starve
 readers by load alone: sessions to the detours idle-time out too.
 
 Next steps: capture one failure with

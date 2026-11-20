@@ -597,14 +597,6 @@ impl Error {
 	pub(crate) fn transient(&self) -> bool {
 		self.retry() == Retry::Same
 	}
-
-	/// Whether the session that carried the failed request ended: the route it came through
-	/// is gone, which a relay passes on as `Unroutable`. A session fails the copies it carries
-	/// before it closes the broadcasts they came from, so this says the source is closing
-	/// before its broadcast does.
-	pub(crate) fn session_ended(&self) -> bool {
-		matches!(self, Self::Session(_) | Self::Transport(_) | Self::IdleTimeout)
-	}
 }
 
 /// What a caller does after a request fails, as [`Error::retry`] answers it.
