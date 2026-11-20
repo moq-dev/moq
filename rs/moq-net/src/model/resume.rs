@@ -207,17 +207,17 @@ impl Producer {
 			return (demand, None);
 		};
 		let mut ranges = Vec::new();
-		let mut heads = Vec::with_capacity(readers.len());
+		let mut resume = Resume::default();
 		for reader in &readers {
 			// Ranges and resume under one lock, so a reader moving on between them cannot ask
 			// a range from one group and resume past another.
 			let mut reader = reader.lock().unwrap_or_else(PoisonError::into_inner);
 			let preferences: Vec<_> = reader.subscription.read().ranges().collect();
 			ranges.extend(reader.resumed(&preferences).into_iter().map(|(_, range)| range));
-			heads.push(reader.held_at(reader.newest));
+			resume.add(&reader);
 		}
 		demand.ranges = ranges;
-		let resume = resume_of(heads);
+		let resume = resume.lowest();
 		demand.resume = resume.as_ref().map(|(resume, _)| *resume);
 		(demand, resume.map(|(_, head)| head))
 	}
@@ -245,7 +245,7 @@ impl Producer {
 					..Default::default()
 				};
 				let mut ranges = Vec::new();
-				let mut heads = Vec::with_capacity(readers.len());
+				let mut resume = Resume::default();
 				for reader in &readers {
 					// Ranges and resume under one lock, as `asked` takes them.
 					let mut locked = reader.lock().unwrap_or_else(PoisonError::into_inner);
@@ -254,11 +254,11 @@ impl Producer {
 							.into_iter()
 							.map(|(_, range)| range),
 					);
-					heads.push(locked.held_at(locked.newest));
+					resume.add(&locked);
 				}
 				// Asked whole, it resumes where the readers got to, as a new copy is asked. An edit
 				// keeps that resume, as a reader's own copy does.
-				let resume = resume_of(heads);
+				let resume = resume.lowest();
 				if let Some((resume, head)) = &resume {
 					held.sub.lend_head(resume.group, head.clone());
 				}
@@ -1447,12 +1447,35 @@ impl Candidate {
 }
 
 /// Where every reader resumes the newest group it handed out, past the frames a copy holds
-/// of it, the lowest of those and the frames; `None` unless every reader resumes, as in a
-/// track's own demand.
-fn resume_of(held: Vec<Option<(Position, Arc<group::Head>)>>) -> Option<(Position, Arc<group::Head>)> {
-	(held.into_iter())
-		.reduce(|a, b| a.zip(b).map(|(a, b)| if b.0 < a.0 { b } else { a }))
-		.flatten()
+/// of it: the lowest of those and the frames, folded in one reader at a time so only the
+/// lowest head is kept. `None` unless every reader resumes, as in a track's own demand.
+#[derive(Default)]
+enum Resume {
+	#[default]
+	Empty,
+	Lowest(Position, Arc<group::Head>),
+	/// A reader resumes nothing, so neither does the aggregate.
+	Whole,
+}
+
+impl Resume {
+	fn add(&mut self, reader: &Reader) {
+		if matches!(self, Self::Whole) {
+			return;
+		}
+		*self = match (std::mem::take(self), reader.held_at(reader.newest)) {
+			(_, None) => Self::Whole,
+			(Self::Lowest(at, head), Some((next, _))) if at <= next => Self::Lowest(at, head),
+			(_, Some((next, head))) => Self::Lowest(next, head),
+		};
+	}
+
+	fn lowest(self) -> Option<(Position, Arc<group::Head>)> {
+		match self {
+			Self::Lowest(at, head) => Some((at, head)),
+			_ => None,
+		}
+	}
 }
 
 /// A subscription on a copy asking for its readers' demand, as [`Producer::subscription`]
