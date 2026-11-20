@@ -11802,7 +11802,7 @@ impl Drop for Ticket {
 /// Created by [`Subscriber::ordered`], which consumes the subscriber, so a track is read
 /// one way or the other and never both. Every group it returns has a higher key
 /// than the last, so a late arrival (network reordering, or a gap the cache filled after
-/// the fact) is reported as a [gap](Item::Gap) rather than delivered out of turn.
+/// the fact) is skipped, or reported as a [gap](Item::Gap), rather than delivered out of turn.
 ///
 /// # Age and skipping
 ///
@@ -11833,7 +11833,7 @@ impl Drop for Ticket {
 /// ordered moq-transport FETCH. A moq-transport SUBSCRIBE signals no gaps, so there a group
 /// lost in transit can hold the ordered reader at its hole until the track ends.
 ///
-/// A group this reader gives up on is not lost silently: it comes back as an
+/// A group this reader gives up on is not lost silently: [`Self::poll_next_item`] returns it as an
 /// [`Item::Gap`], so a reader that paces on what was sent counts the loss instead of
 /// waiting for a group that will never come. That is every group the publisher or a relay
 /// dropped, the transport evicted, the budget aged out, a fetch could not find, or that
@@ -11862,7 +11862,7 @@ pub struct Ordered {
 	idle: Option<Box<idle::Idle>>,
 }
 
-/// What an [`Ordered`] read returns next.
+/// What [`Ordered::poll_next_item`] returns next.
 pub enum Item {
 	/// A group, with a higher key than any group returned before.
 	Group(group::Consumer),
@@ -11873,16 +11873,6 @@ pub enum Item {
 		/// Why: what a read of those groups would have ended with.
 		error: Error,
 	},
-}
-
-impl Item {
-	/// The group, or `None` for a gap.
-	pub fn group(self) -> Option<group::Consumer> {
-		match self {
-			Self::Group(group) => Some(group),
-			Self::Gap { .. } => None,
-		}
-	}
 }
 
 impl Ordered {
@@ -11901,6 +11891,22 @@ impl Ordered {
 		self.inner.broadcast()
 	}
 
+	/// The next group with a higher key than any previously returned, passing over any gap
+	/// [`Self::poll_next_item`] would report below it.
+	///
+	/// Returns `Ok(Some(group))` when a group is available, and otherwise ends as
+	/// [`Self::poll_next_item`] does.
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_next_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
+		loop {
+			match ready!(self.poll_next_item(waiter)?) {
+				Some(Item::Group(group)) => return Poll::Ready(Ok(Some(group))),
+				Some(Item::Gap { .. }) => continue,
+				None => return Poll::Ready(Ok(None)),
+			}
+		}
+	}
+
 	/// The next group with a higher key than any previously returned, or a gap this reader
 	/// gave up on (see [Gaps](Self#gaps)).
 	///
@@ -11916,7 +11922,7 @@ impl Ordered {
 	/// or the ranges are read, or the error when the track has been aborted short of its end.
 	/// Every gap is returned before the end, even a clean one.
 	#[cfg_attr(feature = "async", kio::wrapper)]
-	pub fn poll_next_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Item>>> {
+	pub fn poll_next_item(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Item>>> {
 		if idle::Idle::parked(&self.idle, (), waiter) {
 			return Poll::Pending;
 		}
@@ -13231,7 +13237,7 @@ mod test {
 	#[cfg(feature = "async")]
 	fn items(ordered: &mut Ordered) -> Vec<String> {
 		let mut items = Vec::new();
-		while let Some(next) = ordered.next_group().now_or_never() {
+		while let Some(next) = ordered.next_item().now_or_never() {
 			match next {
 				Ok(Some(Item::Group(group))) => items.push(format!("group {}", group.start)),
 				Ok(Some(Item::Gap { range, error })) => items.push(format!("gap {range:?} ({error})")),
@@ -13247,10 +13253,6 @@ mod test {
 	}
 
 	/// An ordered read that expects no gap, as the groups it returns.
-	fn groups_only(polled: Poll<Result<Option<Item>>>) -> Poll<Result<Option<group::Consumer>>> {
-		polled.map(|res| res.map(|item| item.map(|item| item.group().expect("a group, not a gap"))))
-	}
-
 	fn read_groups(
 		mut next: impl FnMut(&kio::Waiter) -> Poll<Result<Option<group::Consumer>>>,
 	) -> Vec<(u64, Vec<u64>)> {
@@ -13290,7 +13292,7 @@ mod test {
 		let mut arrival = bounded();
 		assert_eq!(read_groups(|waiter| arrival.poll_recv_group(waiter)), want);
 		let mut ordered = bounded().ordered();
-		assert_eq!(read_groups(|waiter| groups_only(ordered.poll_next_group(waiter))), want);
+		assert_eq!(read_groups(|waiter| ordered.poll_next_group(waiter)), want);
 	}
 
 	/// A drop outside a reader's ranges is reported once a group arriving places a time start
@@ -17519,10 +17521,8 @@ mod test {
 	#[cfg(feature = "async")]
 	fn drain_ordered(subscriber: &mut Ordered) -> Vec<u64> {
 		let mut keys = Vec::new();
-		while let Some(Ok(Some(item))) = subscriber.next_group().now_or_never() {
-			if let Item::Group(group) = item {
-				keys.push(group.start);
-			}
+		while let Some(Ok(Some(group))) = subscriber.next_group().now_or_never() {
+			keys.push(group.start);
 		}
 		keys
 	}
@@ -18791,7 +18791,7 @@ mod test {
 			}
 			let _producer = producer.finish().unwrap();
 			for key in 0..3 {
-				let Poll::Ready(Ok(Some(Item::Group(group)))) = ordered.poll_next_group(&kio::Waiter::noop()) else {
+				let Poll::Ready(Ok(Some(Item::Group(group)))) = ordered.poll_next_item(&kio::Waiter::noop()) else {
 					panic!("group {key}, given_up={given_up}")
 				};
 				assert_eq!(group.start, key);
@@ -18802,7 +18802,7 @@ mod test {
 			}
 			// The group given up is reported, then the read ends.
 			if given_up {
-				let Poll::Ready(Ok(Some(Item::Gap { range, error }))) = ordered.poll_next_group(&kio::Waiter::noop())
+				let Poll::Ready(Ok(Some(Item::Gap { range, error }))) = ordered.poll_next_item(&kio::Waiter::noop())
 				else {
 					panic!("the given up group is reported")
 				};
@@ -18866,23 +18866,9 @@ mod test {
 		late.write_frame(late.key_time(), &b"late"[..]).unwrap();
 		let late = late.finish().unwrap();
 		assert_eq!(late.frame_count(), 1);
-		let first = ordered
-			.next_group()
-			.now_or_never()
-			.expect("group 0")
-			.unwrap()
-			.unwrap()
-			.group()
-			.unwrap();
+		let first = ordered.next_group().now_or_never().expect("group 0").unwrap().unwrap();
 		assert_eq!(first.start, 0);
-		let second = ordered
-			.next_group()
-			.now_or_never()
-			.expect("group 1")
-			.unwrap()
-			.unwrap()
-			.group()
-			.unwrap();
+		let second = ordered.next_group().now_or_never().expect("group 1").unwrap().unwrap();
 		assert_eq!(second.start, 1);
 		let done = ordered.next_group().now_or_never().expect("end").unwrap();
 		assert!(done.is_none(), "the finished track ends after its late group");
@@ -19098,7 +19084,7 @@ mod test {
 		let mut ordered = producer.subscribe(replay().with_range(0..)).ordered();
 		for key in 0..2 {
 			assert_eq!(arrival.assert_group().start, key);
-			assert_eq!(ordered.next_group().await.unwrap().unwrap().group().unwrap().start, key);
+			assert_eq!(ordered.next_group().await.unwrap().unwrap().start, key);
 		}
 		assert!(matches!(arrival.recv_group().await, Err(Error::App(7))));
 		assert!(matches!(ordered.next_group().await, Err(Error::App(7))));
@@ -19136,7 +19122,7 @@ mod test {
 		let mut reader = producer.subscribe(replay().with_range(0..)).ordered();
 		let _finished = producer.clone().fail(Error::App(7)).unwrap();
 		for key in 0..3 {
-			assert_eq!(reader.next_group().await.unwrap().unwrap().group().unwrap().start, key);
+			assert_eq!(reader.next_group().await.unwrap().unwrap().start, key);
 		}
 		assert!(matches!(reader.next_group().await, Err(Error::App(7))));
 		assert!(matches!(producer.append_next(), Err(Error::Closed)));
@@ -19217,11 +19203,11 @@ mod test {
 		// The last group's own stream remains open independently of the track end.
 		assert_eq!(arrival.assert_group().start, 2);
 		// They are reported as one gap, since nothing was produced below the group.
-		let Some(Item::Gap { range, .. }) = ordered.next_group().await.unwrap() else {
+		let Some(Item::Gap { range, .. }) = ordered.next_item().await.unwrap() else {
 			panic!("the missing groups are reported")
 		};
 		assert_eq!(range, 0..2);
-		assert_eq!(ordered.next_group().await.unwrap().unwrap().group().unwrap().start, 2);
+		assert_eq!(ordered.next_group().await.unwrap().unwrap().start, 2);
 		assert!(arrival.recv_group().now_or_never().unwrap().unwrap().is_none());
 		assert!(ordered.next_group().now_or_never().unwrap().unwrap().is_none());
 
@@ -19231,7 +19217,7 @@ mod test {
 			arrival.recv_group().now_or_never().unwrap(),
 			Err(Error::Timeout)
 		));
-		let next = ordered.next_group().now_or_never().unwrap();
+		let next = ordered.next_item().now_or_never().unwrap();
 		assert!(
 			matches!(next, Err(Error::Timeout)),
 			"{:?}",
@@ -19855,7 +19841,7 @@ mod test {
 			.next_group()
 			.now_or_never()
 			.expect("should not block")
-			.map(|item| item.map(|item| item.group().expect("a group").start));
+			.map(|item| item.map(|item| item.start));
 		assert!(matches!(res, Err(Error::Timeout)), "expected the abort, got {res:?}");
 	}
 
@@ -19986,7 +19972,7 @@ mod test {
 			.next_group()
 			.now_or_never()
 			.expect("should not block")
-			.map(|item| item.map(|item| item.group().expect("a group").start));
+			.map(|item| item.map(|item| item.start));
 		assert!(matches!(end, Ok(None)), "expected the clean end, got {end:?}");
 	}
 
@@ -20014,7 +20000,7 @@ mod test {
 			.next_group()
 			.now_or_never()
 			.expect("should not block")
-			.map(|item| item.map(|item| item.group().expect("a group").start));
+			.map(|item| item.map(|item| item.start));
 		assert!(
 			matches!(end, Ok(None)),
 			"capped at the end: expected the clean end, got {end:?}"
@@ -20038,7 +20024,7 @@ mod test {
 			.next_group()
 			.now_or_never()
 			.expect("should not block")
-			.map(|item| item.map(|item| item.group().expect("a group").start));
+			.map(|item| item.map(|item| item.start));
 		assert!(
 			matches!(end, Ok(None)),
 			"gap below the cap: expected the clean end, got {end:?}"
@@ -20876,7 +20862,7 @@ mod test {
 
 		// A group handed out and then cut is read as the failure it is, never reported twice.
 		let cut = producer.create_group(group::Info { start: 7 }).unwrap();
-		let Poll::Ready(Ok(Some(Item::Group(read)))) = ordered.poll_next_group(&kio::Waiter::noop()) else {
+		let Poll::Ready(Ok(Some(Item::Group(read)))) = ordered.poll_next_item(&kio::Waiter::noop()) else {
 			panic!("group 7 is ready")
 		};
 		assert_eq!(read.start, 7);
@@ -21022,7 +21008,7 @@ mod test {
 		put(&producer, 2, None);
 		producer.drop_groups(0..2, StreamError::DeliveryTimeout);
 		producer.drop_groups(3..6, StreamError::DeliveryTimeout);
-		let first = ordered.next_group().now_or_never().expect("ready").unwrap().unwrap();
+		let first = ordered.next_item().now_or_never().expect("ready").unwrap().unwrap();
 		assert!(matches!(first, Item::Gap { range, .. } if range == (0..2)));
 		ordered.set_range(4..5);
 		assert_eq!(items(&mut ordered), ["gap 4..5 (delivery timeout)", "pending"]);
@@ -21097,7 +21083,7 @@ mod test {
 		put(&producer, 2, None);
 		producer.drop_groups(0..2, StreamError::DeliveryTimeout);
 		producer.drop_groups(3..6, StreamError::DeliveryTimeout);
-		let first = ordered.next_group().now_or_never().expect("ready").unwrap().unwrap();
+		let first = ordered.next_item().now_or_never().expect("ready").unwrap().unwrap();
 		assert!(matches!(first, Item::Gap { range, .. } if range == (0..2)));
 		ordered.set_range(..2);
 		assert_eq!(
@@ -21117,7 +21103,7 @@ mod test {
 		put(&producer, 2, None);
 		put(&producer, 3, None);
 		producer.drop_groups(0..2, StreamError::DeliveryTimeout);
-		let first = ordered.next_group().now_or_never().expect("ready").unwrap().unwrap();
+		let first = ordered.next_item().now_or_never().expect("ready").unwrap().unwrap();
 		assert!(matches!(first, Item::Gap { range, .. } if range == (0..2)));
 		ordered.set_range(3..);
 		assert_eq!(
@@ -21125,6 +21111,37 @@ mod test {
 			["group 3", "pending"],
 			"a floor raised over the held group passes it"
 		);
+	}
+
+	/// `next_group` passes over every gap `next_item` reports, trailing ones included, and ends
+	/// where it does.
+	#[test]
+	#[cfg(feature = "async")]
+	fn next_group_passes_the_gaps_next_item_reports() {
+		let mut producer = track_producer("test", None);
+		let mut every = producer.subscribe(replay()).ordered();
+		let mut groups = producer.subscribe(replay()).ordered();
+		put(&producer, 2, None);
+		put(&producer, 4, None);
+		producer.drop_groups(0..2, StreamError::DeliveryTimeout);
+		producer.drop_groups(3..4, StreamError::DeliveryTimeout);
+		producer.drop_groups(5..7, StreamError::DeliveryTimeout);
+		producer.finish_at(Position::group(7)).unwrap();
+		assert_eq!(
+			items(&mut every),
+			[
+				"gap 0..2 (delivery timeout)",
+				"group 2",
+				"gap 3..4 (delivery timeout)",
+				"group 4",
+				"gap 5..7 (delivery timeout)",
+			]
+		);
+		let mut read = Vec::new();
+		while let Some(group) = groups.next_group().now_or_never().expect("ready").unwrap() {
+			read.push(group.start);
+		}
+		assert_eq!(read, [2, 4]);
 	}
 
 	/// A gap a moved range only partly covers returns that part, and the rest stays for the
@@ -21137,7 +21154,7 @@ mod test {
 		put(&producer, 2, None);
 		producer.drop_groups(0..2, StreamError::DeliveryTimeout);
 		producer.drop_groups(3..6, StreamError::DeliveryTimeout);
-		let first = ordered.next_group().now_or_never().expect("ready").unwrap().unwrap();
+		let first = ordered.next_item().now_or_never().expect("ready").unwrap().unwrap();
 		assert!(matches!(first, Item::Gap { range, .. } if range == (0..2)));
 		ordered.set_range(..4);
 		assert_eq!(
@@ -21203,9 +21220,7 @@ mod test {
 			.now_or_never()
 			.expect("should not block")
 			.expect("would have errored")
-			.expect("track should not be closed")
-			.group()
-			.expect("a group");
+			.expect("track should not be closed");
 		assert_eq!(group.start, 5);
 
 		// Seq 3 arrives late, skipped because 3 <= 5.
@@ -21253,9 +21268,7 @@ mod test {
 			.now_or_never()
 			.expect("should not block")
 			.expect("would have errored")
-			.expect("track should not be closed")
-			.group()
-			.expect("a group");
+			.expect("track should not be closed");
 		assert_eq!(group.start, 3);
 
 		let group = consumer
@@ -21263,9 +21276,7 @@ mod test {
 			.now_or_never()
 			.expect("should not block")
 			.expect("would have errored")
-			.expect("track should not be closed")
-			.group()
-			.expect("a group");
+			.expect("track should not be closed");
 		assert_eq!(group.start, 5);
 	}
 
@@ -21462,9 +21473,7 @@ mod test {
 			.now_or_never()
 			.expect("should not block")
 			.expect("would have errored")
-			.expect("track should not be closed")
-			.group()
-			.expect("a group");
+			.expect("track should not be closed");
 		assert_eq!(group.start, 3);
 
 		// The plain handle walks arrivals, so it still starts at seq 5.
@@ -21488,42 +21497,9 @@ mod test {
 		consumer.set_range(..3);
 
 		// Groups 0, 1, 2 are within the cap.
-		assert_eq!(
-			consumer
-				.next_group()
-				.now_or_never()
-				.unwrap()
-				.unwrap()
-				.unwrap()
-				.group()
-				.unwrap()
-				.start,
-			0
-		);
-		assert_eq!(
-			consumer
-				.next_group()
-				.now_or_never()
-				.unwrap()
-				.unwrap()
-				.unwrap()
-				.group()
-				.unwrap()
-				.start,
-			1
-		);
-		assert_eq!(
-			consumer
-				.next_group()
-				.now_or_never()
-				.unwrap()
-				.unwrap()
-				.unwrap()
-				.group()
-				.unwrap()
-				.start,
-			2
-		);
+		assert_eq!(consumer.next_group().now_or_never().unwrap().unwrap().unwrap().start, 0);
+		assert_eq!(consumer.next_group().now_or_never().unwrap().unwrap().unwrap().start, 1);
+		assert_eq!(consumer.next_group().now_or_never().unwrap().unwrap().unwrap().start, 2);
 
 		// Group 3 is beyond the cap: next_group parks even though cached groups exist.
 		assert!(
@@ -21547,86 +21523,20 @@ mod test {
 		}
 
 		consumer.set_range(..2);
-		assert_eq!(
-			consumer
-				.next_group()
-				.now_or_never()
-				.unwrap()
-				.unwrap()
-				.unwrap()
-				.group()
-				.unwrap()
-				.start,
-			0
-		);
-		assert_eq!(
-			consumer
-				.next_group()
-				.now_or_never()
-				.unwrap()
-				.unwrap()
-				.unwrap()
-				.group()
-				.unwrap()
-				.start,
-			1
-		);
+		assert_eq!(consumer.next_group().now_or_never().unwrap().unwrap().unwrap().start, 0);
+		assert_eq!(consumer.next_group().now_or_never().unwrap().unwrap().unwrap().start, 1);
 		assert!(consumer.next_group().now_or_never().is_none(), "capped at 2");
 
 		// Raise the cap; previously-blocked cached groups become available again.
 		consumer.set_range(..5);
-		assert_eq!(
-			consumer
-				.next_group()
-				.now_or_never()
-				.unwrap()
-				.unwrap()
-				.unwrap()
-				.group()
-				.unwrap()
-				.start,
-			2
-		);
-		assert_eq!(
-			consumer
-				.next_group()
-				.now_or_never()
-				.unwrap()
-				.unwrap()
-				.unwrap()
-				.group()
-				.unwrap()
-				.start,
-			3
-		);
-		assert_eq!(
-			consumer
-				.next_group()
-				.now_or_never()
-				.unwrap()
-				.unwrap()
-				.unwrap()
-				.group()
-				.unwrap()
-				.start,
-			4
-		);
+		assert_eq!(consumer.next_group().now_or_never().unwrap().unwrap().unwrap().start, 2);
+		assert_eq!(consumer.next_group().now_or_never().unwrap().unwrap().unwrap().start, 3);
+		assert_eq!(consumer.next_group().now_or_never().unwrap().unwrap().unwrap().start, 4);
 		assert!(consumer.next_group().now_or_never().is_none(), "capped at 5");
 
 		// Remove the cap; everything remaining flows.
 		consumer.set_range(..);
-		assert_eq!(
-			consumer
-				.next_group()
-				.now_or_never()
-				.unwrap()
-				.unwrap()
-				.unwrap()
-				.group()
-				.unwrap()
-				.start,
-			5
-		);
+		assert_eq!(consumer.next_group().now_or_never().unwrap().unwrap().unwrap().start, 5);
 		assert!(consumer.next_group().now_or_never().is_none(), "no more groups");
 	}
 
@@ -21645,42 +21555,9 @@ mod test {
 		}
 
 		// Drain everything with no cap.
-		assert_eq!(
-			consumer
-				.next_group()
-				.now_or_never()
-				.unwrap()
-				.unwrap()
-				.unwrap()
-				.group()
-				.unwrap()
-				.start,
-			0
-		);
-		assert_eq!(
-			consumer
-				.next_group()
-				.now_or_never()
-				.unwrap()
-				.unwrap()
-				.unwrap()
-				.group()
-				.unwrap()
-				.start,
-			1
-		);
-		assert_eq!(
-			consumer
-				.next_group()
-				.now_or_never()
-				.unwrap()
-				.unwrap()
-				.unwrap()
-				.group()
-				.unwrap()
-				.start,
-			2
-		);
+		assert_eq!(consumer.next_group().now_or_never().unwrap().unwrap().unwrap().start, 0);
+		assert_eq!(consumer.next_group().now_or_never().unwrap().unwrap().unwrap().start, 1);
+		assert_eq!(consumer.next_group().now_or_never().unwrap().unwrap().unwrap().start, 2);
 
 		// Lower the cap below the cursor. New groups beyond the cap are blocked.
 		consumer.set_range(..2);
@@ -21701,30 +21578,8 @@ mod test {
 
 		// Restoring the cap to no-limit (or any value >= cursor) releases them.
 		consumer.set_range(..);
-		assert_eq!(
-			consumer
-				.next_group()
-				.now_or_never()
-				.unwrap()
-				.unwrap()
-				.unwrap()
-				.group()
-				.unwrap()
-				.start,
-			3
-		);
-		assert_eq!(
-			consumer
-				.next_group()
-				.now_or_never()
-				.unwrap()
-				.unwrap()
-				.unwrap()
-				.group()
-				.unwrap()
-				.start,
-			4
-		);
+		assert_eq!(consumer.next_group().now_or_never().unwrap().unwrap().unwrap().start, 3);
+		assert_eq!(consumer.next_group().now_or_never().unwrap().unwrap().unwrap().start, 4);
 	}
 
 	#[test]
@@ -21764,71 +21619,16 @@ mod test {
 			.unwrap();
 
 		// next_group walks in key order through everything <= cap.
-		assert_eq!(
-			consumer
-				.next_group()
-				.now_or_never()
-				.unwrap()
-				.unwrap()
-				.unwrap()
-				.group()
-				.unwrap()
-				.start,
-			2
-		);
-		assert_eq!(
-			consumer
-				.next_group()
-				.now_or_never()
-				.unwrap()
-				.unwrap()
-				.unwrap()
-				.group()
-				.unwrap()
-				.start,
-			3
-		);
-		assert_eq!(
-			consumer
-				.next_group()
-				.now_or_never()
-				.unwrap()
-				.unwrap()
-				.unwrap()
-				.group()
-				.unwrap()
-				.start,
-			4
-		);
-		assert_eq!(
-			consumer
-				.next_group()
-				.now_or_never()
-				.unwrap()
-				.unwrap()
-				.unwrap()
-				.group()
-				.unwrap()
-				.start,
-			5
-		);
+		assert_eq!(consumer.next_group().now_or_never().unwrap().unwrap().unwrap().start, 2);
+		assert_eq!(consumer.next_group().now_or_never().unwrap().unwrap().unwrap().start, 3);
+		assert_eq!(consumer.next_group().now_or_never().unwrap().unwrap().unwrap().start, 4);
+		assert_eq!(consumer.next_group().now_or_never().unwrap().unwrap().unwrap().start, 5);
 		// Now blocked: 8 is still beyond the cap.
 		assert!(consumer.next_group().now_or_never().is_none());
 
 		// Raise the cap; cached seq 8 is finally served.
 		consumer.set_range(..11);
-		assert_eq!(
-			consumer
-				.next_group()
-				.now_or_never()
-				.unwrap()
-				.unwrap()
-				.unwrap()
-				.group()
-				.unwrap()
-				.start,
-			8
-		);
+		assert_eq!(consumer.next_group().now_or_never().unwrap().unwrap().unwrap().start, 8);
 	}
 
 	/// `recv_group` (arrival order) honors the `end_at` cap like `next_group`: a group
@@ -22086,26 +21886,8 @@ mod test {
 			group.finish().unwrap();
 		}
 
-		assert_eq!(
-			consumer
-				.next_group()
-				.now_or_never()
-				.unwrap()
-				.unwrap()
-				.unwrap()
-				.group()
-				.unwrap()
-				.start,
-			0
-		);
-		let mut last = consumer
-			.next_group()
-			.now_or_never()
-			.unwrap()
-			.unwrap()
-			.unwrap()
-			.group()
-			.unwrap();
+		assert_eq!(consumer.next_group().now_or_never().unwrap().unwrap().unwrap().start, 0);
+		let mut last = consumer.next_group().now_or_never().unwrap().unwrap().unwrap();
 		assert_eq!(last.start, 1);
 		last = last.with_range(..end.frame);
 		assert_eq!(
@@ -22146,15 +21928,7 @@ mod test {
 			.unwrap();
 		assert!(matches!(producer.append_next(), Err(Error::BoundsExceeded(_))));
 		assert_eq!(
-			consumer
-				.next_group()
-				.now_or_never()
-				.unwrap()
-				.unwrap()
-				.unwrap()
-				.group()
-				.unwrap()
-				.start,
+			consumer.next_group().now_or_never().unwrap().unwrap().unwrap().start,
 			u64::MAX - 1
 		);
 		// The track's end lands on the reserved key.
@@ -22809,14 +22583,7 @@ mod test {
 		assert_eq!(cut.start, 0);
 		assert!(matches!(cut.with_range(200..).read_frame().await, Err(Error::App(5))));
 		arrival.assert_no_group();
-		let cut = ordered
-			.next_group()
-			.now_or_never()
-			.unwrap()
-			.unwrap()
-			.unwrap()
-			.group()
-			.unwrap();
+		let cut = ordered.next_group().now_or_never().unwrap().unwrap().unwrap();
 		assert_eq!(cut.start, 0);
 		assert!(matches!(cut.with_range(200..).read_frame().await, Err(Error::App(5))));
 		assert!(
@@ -23275,7 +23042,7 @@ mod test {
 		let mut sub = producer.subscribe(replay().with_range(0..2)).ordered();
 		let reading = kio::clock::sim::spawn(async move {
 			let mut read = Vec::new();
-			while let Some(item) = sub.next_group().await.unwrap() {
+			while let Some(item) = sub.next_item().await.unwrap() {
 				read.push(match item {
 					Item::Group(group) => format!("group {}", group.start),
 					Item::Gap { range, .. } => format!("gap {range:?}"),
@@ -26819,7 +26586,7 @@ mod test {
 			write_filled(fill.accept(key, None), key);
 			served.push(key);
 			while let Poll::Ready(Ok(Some(item))) = ordered.poll_next_group(&waiter) {
-				read.push(item.group().expect("a group").start);
+				read.push(item.start);
 			}
 		}
 		assert_eq!(served, [3, 2, 1, 0]);
@@ -29341,14 +29108,7 @@ mod test {
 		assert_eq!(arrival.assert_group().start, 1);
 		assert!(matches!(arrival.recv_group().now_or_never(), Some(Ok(None))));
 
-		let mut first = ordered
-			.next_group()
-			.now_or_never()
-			.unwrap()
-			.unwrap()
-			.unwrap()
-			.group()
-			.unwrap();
+		let mut first = ordered.next_group().now_or_never().unwrap().unwrap().unwrap();
 		assert_eq!(first.start, 0);
 		assert!(matches!(first.read_frame().now_or_never(), Some(Err(Error::App(5)))));
 		assert_eq!(drain_ordered(&mut ordered), [1]);
@@ -29452,14 +29212,7 @@ mod test {
 
 		assert_eq!(drain_ordered(&mut ordered), [0]);
 		ordered = ordered.with_range(..);
-		let mut reoffered = ordered
-			.next_group()
-			.now_or_never()
-			.unwrap()
-			.unwrap()
-			.unwrap()
-			.group()
-			.unwrap();
+		let mut reoffered = ordered.next_group().now_or_never().unwrap().unwrap().unwrap();
 		assert_eq!(reoffered.start, 1);
 		assert!(matches!(
 			reoffered.read_frame().now_or_never(),

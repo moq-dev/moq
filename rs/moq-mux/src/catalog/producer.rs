@@ -1541,7 +1541,7 @@ mod test {
 				.await
 				.unwrap()
 				.ordered();
-			let mut group = track.next_group().await.unwrap().unwrap().group().unwrap();
+			let mut group = track.next_group().await.unwrap().unwrap();
 			let frame = group.read_frame().await.unwrap().unwrap();
 			let wire: serde_json::Value = serde_json::from_slice(&frame.payload).unwrap();
 			assert_eq!(wire["tracks"][0]["namespace"], expected);
@@ -2342,11 +2342,7 @@ mod test {
 		home.block_on(async {
 			for (name, mut track) in readers {
 				let (mut stamps, mut starts) = (Vec::new(), Vec::<u128>::new());
-				while let Some(item) = track.next_group().await.unwrap() {
-					// Nothing exists below the first group, which the read reports as a gap.
-					let moq_net::track::Item::Group(mut group) = item else {
-						continue;
-					};
+				while let Some(mut group) = track.next_group().await.unwrap() {
 					let first = stamps.len();
 					while let Some(frame) = group.read_frame().await.unwrap() {
 						stamps.push(frame.timestamp.as_micros().unwrap());

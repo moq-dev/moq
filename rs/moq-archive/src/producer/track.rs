@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use kio::clock::Instant;
-use moq_net::track::{Anchor, Delay, Item, Order, Position, Range, Subscription};
+use moq_net::track::{Anchor, Delay, Order, Position, Range, Subscription};
 use moq_net::{StreamError, Timescale, group};
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt, PutMode, PutPayload};
@@ -219,11 +219,8 @@ impl<S: ObjectStore> Track<S> {
 					}
 					None => {
 						// A group the track gave up on is stored as the hole it leaves.
-						while let Poll::Ready(next) = ordered.poll_next_group(waiter) {
-							match next {
-								Ok(Some(Item::Gap { .. })) => continue,
-								next => return Poll::Ready(Event::Next(next.map(|item| item.and_then(Item::group)))),
-							}
+						if let Poll::Ready(next) = ordered.poll_next_group(waiter) {
+							return Poll::Ready(Event::Next(next));
 						}
 					}
 				}

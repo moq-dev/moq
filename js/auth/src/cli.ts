@@ -7,6 +7,7 @@ import { base64url } from "jose";
 import type { Algorithm } from "./algorithm.ts";
 import { Claims, type Scope, ScopeSchema } from "./claims.ts";
 import { Key } from "./key.ts";
+import * as Path from "./path.ts";
 import { encodeGrants } from "./wire.ts";
 
 const program = new Command();
@@ -31,6 +32,7 @@ program
 			if (options.publish || options.subscribe) {
 				// Parse rather than cast, so a useless scope fails here like it does
 				// in the Rust CLI instead of writing an unusable key to disk.
+				Path.signable(options.root);
 				const scope: Scope = ScopeSchema.parse({
 					root: options.root,
 					...(options.publish && { publish: options.publish }),

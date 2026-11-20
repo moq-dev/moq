@@ -650,15 +650,15 @@ impl Key {
 
 	/// Sign the claims with this key, returning the encoded token.
 	///
-	/// Fails with [`Error::InvalidRoot`](crate::Error::InvalidRoot) on a root spelled with an
-	/// empty segment, a `\` escaping anything but `\` or `/`, or more than 4096 bytes.
-	/// Verifying stays lenient on the empty segments, so tokens minted before stay valid.
+	/// Fails with [`Error::InvalidRoot`](crate::Error::InvalidRoot) on a root `moq_net::Path::new`
+	/// refuses, so a token is never minted for a root no session can dial. Verifying never
+	/// checks the root, so tokens minted before stay valid.
 	pub fn sign(&self, payload: &Claims) -> crate::Result<String> {
 		if !self.operations.contains(&KeyOperation::Sign) {
 			return Err(KeyError::SignUnsupported.into());
 		}
 
-		crate::path::validate(&payload.root)?;
+		crate::path::signable(&payload.root)?;
 		payload.validate()?;
 		self.validate_scope(payload)?;
 
@@ -680,6 +680,7 @@ impl Key {
 	/// The scope is validated here, and it is the only way to set one, so a key can never carry a
 	/// scope that permits nothing, nor a root [`sign`](Self::sign) would refuse.
 	pub fn with_scope(mut self, scope: crate::Scope) -> crate::Result<Self> {
+		crate::path::signable(&scope.root)?;
 		scope.validate()?;
 		self.jwk.scope = Some(scope);
 		Ok(self)
