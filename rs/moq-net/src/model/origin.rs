@@ -8176,8 +8176,18 @@ impl Consumer {
 		// List the path itself, which still sees every route whose claim covers it: the
 		// rest of the origin never wakes it, and a route claiming only paths beneath it (a
 		// scoped dynamic at the same prefix) never masks the one that serves it, just as a
-		// request skips it.
-		let consumer = self.filter(&Pattern::literal(path.as_str())?)?;
+		// request skips it. A lookup answers to the scope alone, so it starts from the
+		// scope's subtrees rather than this handle's discovery filters.
+		let rooted = Pattern::literal(path.as_str())?
+			.rooted(self.root.as_str())
+			.map_err(|_| BoundsExceeded)?;
+		let listed = self
+			.scope
+			.allowed
+			.patterns()
+			.intersect(&rooted.into())
+			.map_err(|_| Error::Unauthorized)?;
+		let consumer = Consumer { listed, ..self.clone() };
 
 		// Untagged: this is a lookup, not egress announce forwarding, so it must not drive
 		// the announce guards. Hiding narrows discovery, not lookup, so a hidden path
@@ -11437,6 +11447,32 @@ mod tests {
 		broadcast.announce().unwrap();
 		let resolved = resolving.await.expect("resolves once announced").unwrap();
 		assert_eq!(resolved.info().path.as_str(), "room/alice");
+		drop(broadcast);
+	}
+
+	/// A discovery filter narrows what a handle lists, never what it resolves: a path the
+	/// filter leaves out still follows and requests through the scope alone.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_filter_never_narrows_a_lookup() {
+		let producer = origin(1).produce();
+		let broadcast = producer.route("b", RouteOptions::hidden()).unwrap();
+		broadcast.announce().unwrap();
+		let consumer = producer.consume().filter(&"a".parse().unwrap()).unwrap();
+		consumer.routes().assert_next_wait();
+
+		let mut following = consumer.follow("b", None).unwrap();
+		let followed = kio::clock::timeout(Duration::from_secs(1), following.available())
+			.await
+			.expect("follows a path the filter leaves out")
+			.unwrap()
+			.expect("the followed broadcast");
+		assert_eq!(followed.info().path.as_str(), "b");
+		let requested = kio::clock::timeout(Duration::from_secs(1), consumer.request("b", None))
+			.await
+			.expect("requests a path the filter leaves out")
+			.unwrap();
+		assert_eq!(requested.info().path.as_str(), "b");
 		drop(broadcast);
 	}
 

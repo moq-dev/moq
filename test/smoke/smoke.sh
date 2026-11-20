@@ -656,11 +656,15 @@ if [[ ${#EXTERNAL_RELAYS[@]} -eq 0 ]]; then
     # smoke.toml is the source of truth; rewrite its port into a scratch copy so a
     # busy 4443 (a dev relay, a parallel run) doesn't require editing the committed file.
     # Relays before 0.15 (no --listen flag) reject the renamed keys, so they get the
-    # legacy layout until every channel ships 0.15.
+    # legacy layout until every channel ships 0.15. Relays since then took pattern
+    # grants until their help began "Prefixes an anonymous session", so they get the
+    # `**` rule until every channel reads prefixes.
     relay_config="$SMOKE_DIR/smoke.toml"
     relay_help=$("$RELAY" --help 2>&1 || true)
     if ! grep -q -- '--listen\b' <<<"$relay_help"; then
         relay_config="$SMOKE_DIR/smoke-legacy.toml"
+    elif ! tr -s '[:space:]' ' ' <<<"$relay_help" | grep -q 'Prefixes an anonymous session'; then
+        relay_config="$SMOKE_DIR/smoke-patterns.toml"
     fi
     echo "relay config: $(basename "$relay_config")"
     sed "s/4443/${PORT}/g" "$relay_config" >"$TMP/relay.toml"

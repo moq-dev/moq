@@ -1135,6 +1135,9 @@ max_streams = 64
 				if path.file_name().unwrap() == "smoke-legacy.toml" {
 					let error = result.expect_err("the published legacy fixture must be refused");
 					assert!(error.to_string().contains("[server]"), "{}: {error}", path.display());
+				} else if path.file_name().unwrap() == "smoke-patterns.toml" {
+					let error = result.expect_err("the published pattern fixture must be refused");
+					assert!(error.to_string().contains("wildcard"), "{}: {error}", path.display());
 				} else {
 					result.unwrap_or_else(|error| panic!("{}: {error}", path.display()));
 				}
