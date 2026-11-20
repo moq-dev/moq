@@ -1159,11 +1159,6 @@ export class Subscriber {
 			for (;;) {
 				const fill = await untilAborted(requests.requestedFill(), signal);
 				if (!fill) break;
-				// FETCH asks by group alone, so a lookup goes unanswered and its reader falls back.
-				if (fill.kind === "lookup") {
-					fill.close();
-					continue;
-				}
 				const run = async () => {
 					try {
 						// The join may already bring a miss in this run. Let it answer first instead
