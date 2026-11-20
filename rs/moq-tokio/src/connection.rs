@@ -1155,14 +1155,19 @@ impl Connection {
 					session.closed().await;
 					Err(moq_net::Error::GoawayTimeout)
 				}
-				() = async {
-					// The task owns a producer, so the count never closes.
-					let _ = holds.wait(|count| match **count {
+				// Both re-checked on every wake, so a hold taken once the count read zero,
+				// while the session still carried work, still holds it.
+				() = kio::wait(|waiter| {
+					let released = holds.poll(waiter, |count| match **count {
 						0 => Poll::Ready(()),
 						_ => Poll::Pending,
-					}).await;
-					session.idle().await
-				} => {
+					});
+					let idle = session.poll_idle(waiter);
+					match (released, idle) {
+						(Poll::Ready(_), Poll::Ready(())) => Poll::Ready(()),
+						_ => Poll::Pending,
+					}
+				}) => {
 					tracing::debug!("drained session carries nothing; closing");
 					close_by(session, deadline).await
 				}
@@ -3195,6 +3200,50 @@ mod tests {
 			.await
 			.expect("the peer never heard the GOAWAY")
 			.expect("the session closed without one");
+		assert!(
+			kio::clock::timeout(Duration::from_millis(500), session.closed())
+				.await
+				.is_err(),
+			"closed while held"
+		);
+
+		drop(hold);
+		kio::clock::timeout(WAIT, drained)
+			.await
+			.expect("the released session was held open")
+			.unwrap()
+			.expect("the idle close failed");
+	}
+
+	/// A [`Hold`] taken once a drain is waiting on a session's last reader still holds the
+	/// session open after that reader leaves.
+	#[tokio::test]
+	async fn a_hold_taken_mid_drain_still_holds() {
+		kio::clock::host_time(); // real TCP sockets
+		const WAIT: Duration = Duration::from_secs(10);
+		const DRAIN: Duration = Duration::from_secs(600);
+
+		let origin = crate::origin::spawn();
+		let (addr, mut accepted, _task) = serve(origin.clone()).await;
+		let subscriber = crate::origin::spawn();
+		let connection = crate::connect::Config::default()
+			.init(Default::default())
+			.unwrap()
+			.with_subscriber(subscriber.clone())
+			.connect(url(&format!("tcp://{addr}/")));
+		let session = kio::clock::timeout(WAIT, accepted.recv()).await.unwrap().unwrap();
+		let reading = reading(&origin, &subscriber, "cam").await;
+
+		let clone = connection.clone();
+		let drained = tokio::spawn(connection.drain(DRAIN));
+		let draining = session.draining();
+		kio::clock::timeout(WAIT, kio::wait(|waiter| draining.poll(waiter)))
+			.await
+			.expect("the peer never heard the GOAWAY")
+			.expect("the session closed without one");
+
+		let hold = clone.hold();
+		drop(reading);
 		assert!(
 			kio::clock::timeout(Duration::from_millis(500), session.closed())
 				.await
