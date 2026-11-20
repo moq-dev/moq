@@ -211,9 +211,25 @@ The padding paragraph above is superseded: lite-07 freezes with no Padding
 type, and [the padding probes](/quest/m5/probe-padding.md) bring one back in
 the version that ships them.
 
+Decided 2026-11-20 (maintainer, /quest-plan auditing the cache, timestamp,
+and switching rules in `rs/moq-net/AGENTS.md` before the cut):
+
+- ✅ The cut waits for [groups never overlap](/quest/m2/groups-never-overlap.md)
+  (rejected: after the cut). The draft gains a publisher MUST that every frame
+  of a lower group presents before every frame of a higher one, which expiry
+  relies on, and first-party producers break it today.
+- ✅ [The frame cap](/quest/m1/switch-frame-cap.md) is not Required, like the
+  warmth port: if it has landed when the cut is made, its Position end is in
+  lite-07, and otherwise it moves to the next wip version.
+- The audit's other gaps change no wire and don't gate the cut: a relay
+  asking upstream for a Min Age join and a missing group head, the switch's
+  group cap, a replaced copy's short group, and expiry by a higher group's
+  lowest timestamp.
+
 ## Required
 
 - [Cache-aware multicast](/quest/m2/multicast/README.md) - lite-07 carries the redesigned route layer: routes to forwarding nodes, no holds or doubt, claims crossing trust boundaries by a chain, and no Route Key
+- [Groups never overlap](/quest/m2/groups-never-overlap.md) - the draft's publisher MUST that every frame of a lower group presents before every frame of a higher one, kept by first-party producers
 
 ## Related
 
