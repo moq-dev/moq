@@ -1497,7 +1497,8 @@ mod tests {
 		// 4000 evicted while the lookup was out, or 8000 arrived between, as another reader's
 		// fill brings it.
 		for held in [&[9000][..], &[4000, 8000, 9000]] {
-			let mut window = Window::new(&[range(time(8500), None)], None, Some(9000), &history(&[4000, 9000])).unwrap();
+			let mut window =
+				Window::new(&[range(time(8500), None)], None, Some(9000), &history(&[4000, 9000])).unwrap();
 			assert_eq!(window.lookups().collect::<Vec<_>>(), [(8500, 4001)]);
 			assert!(window.found(8500, Found::Dropped { floor: 4001 }, &history(held)));
 			assert_eq!(window.lookups().count(), 0, "answered, not looked up again");
