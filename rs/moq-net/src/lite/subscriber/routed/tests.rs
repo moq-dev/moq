@@ -317,6 +317,43 @@ async fn a_grant_change_unsyncs_only_the_readers_it_can_show_more() {
 	);
 }
 
+/// A grant change that shows more within a prefix asked, though within no reader's, still
+/// sends an edit: a reader arriving there before its answer waits for it, since the peer
+/// may already have sent what the change shows.
+#[kio::test]
+async fn a_grant_change_under_a_coarsened_ask_holds_the_readers_that_arrive() {
+	let (subscriber, consumer) = subscriber();
+	let granting = |patterns: &[&str]| {
+		Permit::granting(
+			(patterns.iter())
+				.map(|pattern| pattern.parse::<crate::Pattern>().unwrap())
+				.collect(),
+		)
+	};
+	let mut routed = Routed::new(&subscriber, 1, &granting(&["a/*"]), None, None).unwrap();
+	// Too many to ask for one by one: the session asks for `a`.
+	for want in prefixes("a", 17, 4000) {
+		routed.want(want.clone(), subscriber.origin.snapshot(want));
+	}
+	pump(&mut routed, &subscriber);
+	let asked: Vec<u64> = routed.asked.keys().copied().collect();
+	assert_eq!(asked.len(), 1);
+	routed.receive(Wire::Synced { prefix: asked[0] }).unwrap();
+	routed.release();
+
+	routed.limit(&granting(&["a/*", "a/new/**"])).unwrap();
+	let fresh = Path::from_static("a/new/x");
+	let reader = consumer.scope(fresh.as_str(), &crate::Patterns::from(crate::Pattern::all()));
+	let reader = reader.unwrap().routes();
+	routed.want(fresh.clone(), subscriber.origin.snapshot(fresh));
+	routed.release();
+	let synced = |routes: &crate::origin::Routes| routes.poll_synced(&kio::Waiter::noop()).is_ready();
+	assert!(!synced(&reader), "the change's answer is still to come");
+	pump(&mut routed, &subscriber);
+	routed.release();
+	assert!(synced(&reader));
+}
+
 /// A forwarding neighbour's claims wait for the floor that closes their batch, and are
 /// served under the route the floor names.
 #[kio::test]

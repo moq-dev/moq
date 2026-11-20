@@ -800,17 +800,26 @@ impl Routed {
 			};
 		}
 		let same = permit.same_limit(&self.permit);
-		// What a grant change newly shows within a want may already be in the peer's
-		// answer, unheard here: the readers there wait again, for the answer to an edit,
-		// which follows the change. Elsewhere, and on a narrowing, nothing new can arrive,
-		// and a reader stays synced.
+		// What a grant change newly shows within a prefix asked may already be in the
+		// peer's answer, unheard here: the next edit goes, since its answer follows the
+		// change, and the readers there and any reader arriving before that answer wait
+		// for it. Elsewhere, and on a narrowing, nothing new can arrive, and a reader stays
+		// synced.
 		if !permit.same_grant(&self.permit) {
+			let asking = self.stream.asking();
 			for region in permit.gained(&self.permit) {
-				for want in self.wants.keys() {
-					let within = match () {
-						_ if region.has_prefix(want) => region.clone(),
-						_ if want.has_prefix(&region) => want.clone(),
-						_ => continue,
+				let overlaps = |prefix: &Path| region.has_prefix(prefix) || prefix.has_prefix(&region);
+				if (self.root.join(&region).ok()).is_some_and(|region| {
+					asking
+						.iter()
+						.any(|asked| asked.has_prefix(&region) || region.has_prefix(asked))
+				}) {
+					self.regranted = true;
+				}
+				for want in self.wants.keys().filter(|want| overlaps(want)) {
+					let within = match region.has_prefix(want) {
+						true => region.clone(),
+						false => want.clone(),
 					};
 					self.gained.push((within.clone(), self.origin.snapshot(within)));
 					self.regranted = true;

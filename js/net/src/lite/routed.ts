@@ -145,21 +145,21 @@ export class Routed {
 	}
 
 	// Note a grant change, read as it is set rather than when its listeners run, so a reader
-	// attached between the two waits too. What it newly shows within a reader's prefix may already
-	// be in the peer's answer, unheard here: that reader waits again, for the answer to an edit,
-	// which follows the change. Elsewhere, and on a narrowing, nothing new can arrive, and a reader
-	// stays synced. Mirrors rs/moq-net.
+	// attached between the two waits too. What it newly shows within a prefix asked may already be
+	// in the peer's answer, unheard here: the next edit goes, since its answer follows the change,
+	// and the readers there and any reader arriving before that answer wait for it. Elsewhere, and
+	// on a narrowing, nothing new can arrive, and a reader stays synced. Mirrors rs/moq-net.
 	#regrant(): void {
 		const next = this.#session.grant?.peek()?.subscribe;
 		const granted = this.#granted;
 		if (next === granted || (next && granted?.equals(next))) return;
 		this.#granted = next;
 		const regions = gained(granted, next);
+		const overlaps = (prefix: Path.Valid) =>
+			regions.some((region) => Path.hasPrefix(region, prefix) || Path.hasPrefix(prefix, region));
+		if ([...this.#asked.values()].some((asked) => overlaps(asked.path))) this.#regranted = true;
 		for (const reader of this.#readers) {
-			const overlaps = regions.some(
-				(region) => Path.hasPrefix(region, reader.prefix) || Path.hasPrefix(reader.prefix, region),
-			);
-			if (!overlaps) continue;
+			if (!overlaps(reader.prefix)) continue;
 			this.#regranted = true;
 			if (!reader.synced) continue;
 			reader.synced = false;

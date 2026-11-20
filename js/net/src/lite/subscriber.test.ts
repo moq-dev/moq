@@ -493,6 +493,44 @@ test("a lite-07 region granted under a wider prefix syncs at the next answer", a
 	subscriber.close();
 });
 
+// Readers too many to ask for one by one are asked for at the root. A grant change that shows more
+// within it, though within no reader's prefix, still sends an edit: a reader arriving there before
+// its answer waits for it, since the peer may already have sent what the change shows.
+test("a lite-07 grant change under a coarsened ask holds the readers that arrive", async () => {
+	const v = Version.DRAFT_07;
+	const grant = (...patterns: string[]): Grant => ({
+		publish: new Path.Patterns([]),
+		subscribe: new Path.Patterns(patterns.map((pattern) => Path.Pattern.parse(pattern))),
+	});
+	const signal = new Signal<Grant | undefined>(grant("a/*"));
+	const { subscriber, send, ok, settle } = announceHarness(v, 1n, signal);
+	const readers = Array.from({ length: 17 }, (_, i) =>
+		subscriber.routes(Path.Pattern.subtree(Path.from(`a/${i}${"x".repeat(4000)}`))),
+	);
+	// The first reader is asked for alone, and the rest then move the ask to the root.
+	await settle();
+	await ok();
+	await settle();
+	await ok();
+	await send((w) => encodeAnnounceBroadcast(w, { status: "synced", prefix: 1n }, v));
+	await settle();
+	expect(readers.every((reader) => reader.synced.peek())).toBe(true);
+
+	signal.set(grant("a/*", "b/**"));
+	// Noticed before the reader arrives, while no reader's prefix holds `b`.
+	await settle();
+	const b = subscriber.routes(Path.Pattern.subtree(Path.from("b")));
+	await settle();
+	expect(b.synced.peek()).toBe(false);
+	await ok();
+	await settle();
+	expect(b.synced.peek()).toBe(true);
+
+	b.close();
+	for (const reader of readers) reader.close();
+	subscriber.close();
+});
+
 // A claim whose path cannot be resolved lies in a prefix this side cannot name, so removing
 // another prefix leaves it for the peer to end by its id.
 test("a lite-07 unresolved claim outlives another prefix's removal", async () => {
