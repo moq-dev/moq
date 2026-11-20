@@ -62,7 +62,11 @@ export const WirePrefixListSchema = z.array(
 			try {
 				return readPrefix(text);
 			} catch (error) {
-				ctx.issues.push({ code: "custom", message: error instanceof Error ? error.message : String(error), input: text });
+				ctx.issues.push({
+					code: "custom",
+					message: error instanceof Error ? error.message : String(error),
+					input: text,
+				});
 				return text;
 			}
 		}),

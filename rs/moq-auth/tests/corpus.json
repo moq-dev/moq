@@ -737,8 +737,16 @@
 		{ "name": "null_mounts", "grant": { "publish": [""], "mounts": null }, "valid": false },
 		{ "name": "null_peer", "grant": { "publish": [""], "peer": null }, "valid": false },
 		{ "name": "positional", "grant": [[""]], "valid": false },
-		{ "name": "subtree_patterns", "grant": { "publish": ["**"], "subscribe": ["room/**", "lobby"] }, "valid": true },
-		{ "name": "subtree_pattern_in_a_capped_role", "grant": { "publish": { "path": ["room/**"], "rate": 1000 } }, "valid": true },
+		{
+			"name": "subtree_patterns",
+			"grant": { "publish": ["**"], "subscribe": ["room/**", "lobby"] },
+			"valid": true
+		},
+		{
+			"name": "subtree_pattern_in_a_capped_role",
+			"grant": { "publish": { "path": ["room/**"], "rate": 1000 } },
+			"valid": true
+		},
 		{ "name": "wildcard_member", "grant": { "subscribe": ["room", "lobby/*"] }, "valid": false },
 		{ "name": "null_grant", "grant": null, "valid": false }
 	],

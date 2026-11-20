@@ -42,7 +42,9 @@ The relay reads a grant as strictly as a token's [claims](#claims): a field it
 does not know refuses the session, since a field added later may narrow the
 grant. A relay before 0.22 sends no `relay` and ignores a field it does not
 know, enforcing the grant without it, so a server branches on `relay` before
-sending a field newer than 0.22. Such a relay reads `peer: true` in place of
+sending a field newer than 0.22. Such a relay reads a bare `foo` as one path, so
+`moq_auth` and `@moq/auth`'s `GrantSchema` spell each prefix as `foo/**` or `**`,
+which every relay reads as the subtree. It also reads `peer: true` in place of
 `link` and knows no upstream: `moq_auth` writes `peer: true` beside every `link`, so that
 relay admits an upstream as a plain peer, which can carry traffic between two upstreams.
 Where that matters, refuse the session when the request has no `relay` (or one older than 0.22),

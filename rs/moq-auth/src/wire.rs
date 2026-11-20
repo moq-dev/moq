@@ -495,7 +495,17 @@ pub(crate) mod alias {
 
 		#[test]
 		fn refuses_every_other_wildcard() {
-			for text in ["/**", "*", "*/chat", "foo/*", "foo/*/**", "**/foo", "foo/**/**", "cam-*.hang", r"a\/**"] {
+			for text in [
+				"/**",
+				"*",
+				"*/chat",
+				"foo/*",
+				"foo/*/**",
+				"**/foo",
+				"foo/**/**",
+				"cam-*.hang",
+				r"a\/**",
+			] {
 				assert!(read(text).is_err(), "{text}");
 			}
 			// The rest is still a prefix, so its slashes are checked.

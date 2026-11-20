@@ -76,9 +76,17 @@ fn released_patterns_read_as_prefixes() {
 	for (payload, publish, subscribe) in [
 		// What `moq auth sign --root compat --publish 'video/**' --publish bob` writes in
 		// moq 0.14.17, since one member is not a subtree.
-		(json!({"root": "compat", "publish": ["bob", "video/**"]}), &["bob", "video"][..], &[][..]),
+		(
+			json!({"root": "compat", "publish": ["bob", "video/**"]}),
+			&["bob", "video"][..],
+			&[][..],
+		),
 		(json!({"subscribe": ["**"]}), &[], &[""]),
-		(json!({"publish": {"path": ["alice/**"], "rate": 8_000_000}}), &["alice"], &[]),
+		(
+			json!({"publish": {"path": ["alice/**"], "rate": 8_000_000}}),
+			&["alice"],
+			&[],
+		),
 	] {
 		let claims = serde_json::from_value::<Claims>(payload.clone()).unwrap();
 		assert_eq!(claims.publish.path, prefixes(publish), "{payload}");
@@ -111,7 +119,10 @@ fn key_scopes_are_written_as_subtree_patterns() {
 		subscribe: prefixes(&[""]),
 	};
 	let wire = serde_json::to_value(&scope).unwrap();
-	assert_eq!(wire, json!({"root": "compat", "publish": ["video/**"], "subscribe": ["**"]}));
+	assert_eq!(
+		wire,
+		json!({"root": "compat", "publish": ["video/**"], "subscribe": ["**"]})
+	);
 	assert_eq!(serde_json::from_value::<moq_auth::Scope>(wire).unwrap(), scope);
 	let released = json!({"root": "compat", "put": ["video"], "get": [""]});
 	assert_eq!(serde_json::from_value::<moq_auth::Scope>(released).unwrap(), scope);

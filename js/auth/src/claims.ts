@@ -28,7 +28,6 @@ export function prefixes(texts: readonly string[] | undefined): Prefixes {
 	return Prefixes.parse(texts ?? []);
 }
 
-
 /**
  * The immutable ceiling on what a key may grant, embedded in its JWK.
  *

@@ -630,10 +630,8 @@ mod tests {
 	/// write read as their prefixes, and a bare member as its prefix too.
 	#[test]
 	fn test_claims_read_subtree_patterns() {
-		let claims: Claims = serde_json::from_str(
-			r#"{"publish":["alice/**","bob"],"subscribe":{"path":["**"],"rate":1000}}"#,
-		)
-		.unwrap();
+		let claims: Claims =
+			serde_json::from_str(r#"{"publish":["alice/**","bob"],"subscribe":{"path":["**"],"rate":1000}}"#).unwrap();
 		assert_eq!(claims.publish.path, prefixes(&["alice", "bob"]));
 		assert_eq!(claims.subscribe.path, prefixes(&[""]));
 	}
