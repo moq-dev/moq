@@ -5543,7 +5543,6 @@ impl kio::Task for FrontServe {
 				}
 				FrontStep::SourceClosed(source) => Event::SourceClosed { source },
 				FrontStep::Info(name, source, result) => {
-					let closing = self.sources.get(&source).is_some_and(|s| s.is_closing());
 					let Some(io) = self.tracks.get_mut(&name) else { continue };
 					let Some(asked) = io.query.take() else { continue };
 					let retry = asked.query.retry();
@@ -5557,6 +5556,9 @@ impl kio::Task for FrontServe {
 						},
 						Err(err) => Err(err),
 					};
+					// Read after the copy's outcome: a subscriber closes a source before it fails
+					// that source's copies, so a failure seen above is already reflected here.
+					let closing = self.sources.get(&source).is_some_and(|s| s.is_closing());
 					// Staged only while the track has a reader, or a read holds the finished
 					// track: without one the machine will not splice, and a held copy would
 					// keep the source subscribed.

@@ -56,8 +56,9 @@ What [moq-dev/moq#9219](https://github.com/moq-dev/moq/pull/9219) did:
   shows how a front ended a track.
 
 That race was not confirmed as this failure. On an unloaded host, 59 base runs
-and 24 fixed runs passed, and no reader got Unroutable during the single link
-reopen in any of them. Holding the drain open 2s after the transport closed
+passed, as did 21 release runs of the fix that landed (and 24 debug runs of an
+earlier, error-based fix it replaced), and no reader got Unroutable during the
+single link reopen in any of them. Holding the drain open 2s after the transport closed
 did not make the base fail either. Traced relays showed the source closing
 before its copies end, the order the fix now guarantees. Debug runs on the CI host at load 70 or more starve
 readers by load alone: sessions to the detours idle-time out too.
