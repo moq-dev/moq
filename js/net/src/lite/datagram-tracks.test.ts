@@ -1,4 +1,5 @@
 import { expect, onTestFinished, spyOn, test } from "bun:test";
+import { AsyncLocalStorage } from "node:async_hooks";
 import * as clock from "@moq/clock";
 import { yieldNow } from "@moq/clock";
 import { Signal } from "@moq/signals";
@@ -478,23 +479,24 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 // A track's end waits a host task for the datagrams received with it. A session close in
 // between finishes the track rather than cutting it off: the publisher already ended it.
 for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
-	// flaky: quest/m0/flaky/a-session-close-right-after-a-datagram-tracks-end-keeps-the-2.md
-	const testEnd = test.skipIf(alpn === ALPN_06);
-	testEnd(`${alpn}: a session close right after a datagram track's end keeps the end`, async () => {
+	test(`${alpn}: a session close right after a datagram track's end keeps the end`, async () => {
 		const source = new Origin();
 		const publication = source.route(path, { hidden: true });
 		const datagrams = defined(publication.broadcast.createDatagrams("audio"));
 		publication.announce();
 		const pair = createMockTransportPair(alpn);
+		// Tags the client's tasks: the publisher, or an earlier test's session woken by a late host
+		// timer, also yields host tasks.
+		const clientTask = new AsyncLocalStorage<true>();
 		const [client, server] = await Promise.all([
-			connect({ url, transport: pair.client }),
+			clientTask.run(true, () => connect({ url, transport: pair.client })),
 			accept({ url, transport: pair.server, publish: source.consume() }),
 		]);
-		const remote = wireOf(client).consume(path);
-		const reader = remote.datagrams("audio");
+		const remote = clientTask.run(true, () => wireOf(client).consume(path));
+		const reader = clientTask.run(true, () => remote.datagrams("audio"));
 		reader.setPriority(5);
-		// Only the end's routing yields a host task after the finish below: the receive loop's
-		// budget never runs out here.
+		// Only the end's routing yields a client host task after the finish below: the receive
+		// loop's budget never runs out here.
 		const budget = spyOn(Budget.prototype, "poll").mockImplementation(() => undefined);
 		let routing: ReturnType<typeof spyOn> | undefined;
 		// Runs even when the test times out with a wait still pending.
@@ -513,7 +515,7 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 		const received = Promise.withResolvers<void>();
 		const hostTask = clock.yieldNow;
 		routing = spyOn(clock, "yieldNow").mockImplementation(() => {
-			received.resolve();
+			if (clientTask.getStore()) received.resolve();
 			return hostTask();
 		});
 		datagrams.finish();
