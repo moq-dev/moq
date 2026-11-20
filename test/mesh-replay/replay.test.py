@@ -244,6 +244,9 @@ class KnownTest(unittest.TestCase):
         # Unread since the kill, so the next event carries the kill's strand and its known entry.
         carried = check("end-source")
         self.assertEqual((carried["began"], carried["known"]), ("kill", "/q.md"))
+        # Its source stopped, so it is not unfed; unread still, it carries on once the source is back.
+        replay.Run.check(run, {"name": "end", "kind": "end-source"}, [], [])
+        self.assertEqual(check("end-source")["began"], "kill")
         # Read once since: a new strand, which no entry excuses.
         follow.last = 9.0
         fresh = check("roll")

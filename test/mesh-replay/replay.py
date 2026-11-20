@@ -930,14 +930,16 @@ class Run:
                 self.violation(report, "unrouted", unrouted)
         # A reader still unfed from an earlier event, having read nothing since, is that event's
         # strand: it keeps that event's known entry rather than failing every later event again.
-        strands, groups = {}, {}
+        # A strand ends only with a read, so one whose source stopped meanwhile is kept for later.
+        def last(reader: str, path: str) -> float | None:
+            follow = self.relays[reader].readout.paths.get(path)
+            return follow.last if follow else None
+
+        strands = {key: began for key, began in self.strands.items() if began["last"] == last(*key)}
+        groups = {}
         for item in unfed:
             key = (item["reader"], item["path"])
-            follow = self.relays[item["reader"]].readout.paths.get(item["path"])
-            last = follow.last if follow else None
-            began = self.strands.get(key)
-            if began is None or began["last"] != last:
-                began = {"name": report["name"], "kind": report["kind"], "last": last}
+            began = strands.get(key) or {"name": report["name"], "kind": report["kind"], "last": last(*key)}
             strands[key] = began
             groups.setdefault((began["name"], item["kind"]), (began, []))[1].append(item)
         self.strands = strands

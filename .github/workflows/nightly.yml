@@ -247,10 +247,11 @@ jobs:
           # Reports what each fault costs a mesh of real relays, swept over relays and
           # broadcasts per relay; fails only on an unfed reader, a broadcast shown after its
           # source ended, or a mesh that never goes quiet. About 10 minutes a cell. A failed
-          # run keeps its directory, so its relay and reader logs ride along.
+          # run keeps its directory under the hidden .tmp/, so its relay and reader logs ride along.
           - name: Mesh replay (4 relays)
             recipe: test mesh-replay --mesh test/mesh-replay/ring4.toml --broadcasts 4,32 --report target/bench/nightly/mesh-replay
             artifact: mesh-replay-ring4
+            hidden-files: true
             artifact-path: |
               target/bench/nightly/mesh-replay
               .tmp/harness/mesh-replay-*/*/*.log
@@ -258,6 +259,7 @@ jobs:
           - name: Mesh replay (6 relays)
             recipe: test mesh-replay --mesh test/mesh-replay/ring6.toml --broadcasts 4,32 --report target/bench/nightly/mesh-replay
             artifact: mesh-replay-ring6
+            hidden-files: true
             artifact-path: |
               target/bench/nightly/mesh-replay
               .tmp/harness/mesh-replay-*/*/*.log
@@ -305,6 +307,7 @@ jobs:
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact-path }}
+          include-hidden-files: ${{ matrix.hidden-files || false }}
           retention-days: 45
 
       # Only scheduled runs serve as a later run's base.
