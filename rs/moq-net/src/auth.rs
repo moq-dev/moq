@@ -597,6 +597,23 @@ impl Permit {
 		self.granted(path) && self.within_limit(path)
 	}
 
+	/// Whether both allow some path at or beneath `prefix`: a claim there covers a path
+	/// they allow, as one at `a` does under `a/*`.
+	pub(crate) fn reaches(&self, prefix: &str) -> bool {
+		if self.matches(prefix) {
+			return true;
+		}
+		let Ok(subtree) = moq_pattern::Pattern::subtree(prefix) else {
+			return false;
+		};
+		// An intersection too large to spell reaches nothing, never more.
+		let beneath = match &self.granted {
+			Some(granted) => granted.intersect(&Patterns::from(subtree)).unwrap_or_default(),
+			None => Patterns::from(subtree),
+		};
+		(beneath.iter()).any(|pattern| self.limit.as_ref().is_none_or(|limit| limit.overlaps(pattern)))
+	}
+
 	/// Whether the peer's grant alone allows `path`.
 	pub(crate) fn granted(&self, path: &str) -> bool {
 		self.granted.as_ref().is_none_or(|granted| granted.matches(path))
@@ -3199,6 +3216,22 @@ mod tests {
 		};
 		assert_eq!(one("a/*").granted_regions(), one("a/**").granted_regions());
 		assert!(!one("a/*").same_grant(&one("a/**")));
+	}
+
+	/// A permit reaches a path when both allow one at or beneath it, the same one: `a`
+	/// under `a/*`, but not `a/b` under `a/*/x` granted and `a/*/y` limited.
+	#[test]
+	fn a_permit_reaches_what_both_allow_beneath() {
+		let permit = |granted: Option<&str>, limit: Option<&str>| Permit {
+			granted: granted.map(|pattern| Patterns::from(pattern.parse::<crate::Pattern>().unwrap())),
+			limit: limit.map(|pattern| Patterns::from(pattern.parse::<crate::Pattern>().unwrap())),
+		};
+		assert!(permit(Some("a/*"), None).reaches("a"));
+		assert!(permit(None, Some("a/*")).reaches(""));
+		assert!(!permit(Some("a/*"), None).reaches("a/b/c"));
+		assert!(!permit(None, Some("a/*")).reaches("b"));
+		assert!(permit(Some("a/*/x"), Some("a/b/*")).reaches("a"));
+		assert!(!permit(Some("a/*/x"), Some("a/*/y")).reaches("a/b"));
 	}
 
 	/// A limit replaces the last one, narrower or wider, and applies to a version

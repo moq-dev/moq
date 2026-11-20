@@ -3952,6 +3952,101 @@ mod announce_test {
 		assert_eq!(ends.count(), 0, "{changed:?}");
 	}
 
+	/// A grant that narrows before a prefix's SYNCED replaces the mount its initial set
+	/// waits on with one beneath the narrower region, and SYNCED waits for that one too.
+	#[kio::test]
+	async fn a_lite07_mount_replaced_before_synced_still_holds_it() {
+		let path = |path: &str| crate::Path::new(path).unwrap();
+		let origin = Hop::new(1).unwrap().produce();
+		let _cam = origin.announce("src/m/cam", origin::RouteInfo::new()).unwrap();
+		let consumer = (origin.mount("a", "src").unwrap())
+			.scope("", &crate::Patterns::from(crate::Pattern::all()))
+			.unwrap()
+			.consume();
+		let auth = crate::auth::Link::new(false);
+		let limit = |pattern: &str| crate::auth::Grant {
+			publish: crate::Patterns::default(),
+			subscribe: crate::Patterns::from(pattern.parse::<crate::Pattern>().unwrap()),
+			expires: None,
+		};
+		auth.handle().authorize(&limit("a/**"));
+		let mut answer = super::routed::Answer::alone_on(consumer, auth.clone());
+		let log = Log::default();
+		let mut wire = Wire {
+			writes: log.writes.clone(),
+			cursor: 0,
+			version: Version::Lite07,
+		};
+		let mut writer = Writer::new(
+			crate::transport::boxed::SendStream::new(SinkSend::new(log)),
+			Version::Lite07,
+		);
+		let waiter = kio::Waiter::noop();
+
+		answer.request(false, Vec::new(), vec![(path(""), true)]).unwrap();
+		// Narrowed before the mount at `a` sent its initial set: `a/m` is read in its place.
+		auth.handle().authorize(&limit("a/m/**"));
+		answer.poll_permit(&waiter).unwrap();
+		answer.drain(&mut writer).unwrap();
+		assert!(writer.poll_flush(&waiter).is_ready());
+		let msgs = wire.take_announces();
+		let start = msgs
+			.iter()
+			.position(|msg| matches!(msg, lite::AnnounceBroadcast::Start { .. }));
+		let synced = msgs
+			.iter()
+			.position(|msg| *msg == lite::AnnounceBroadcast::Synced { prefix: 0 });
+		assert!(start.is_some() && start < synced, "{msgs:?}");
+	}
+
+	/// A claim at a path the scope does not match, but above paths it does, is shown where
+	/// it is presented: `a` under `a/*`, at the region and at its own path. One beneath
+	/// every path the scope matches stays hidden.
+	#[kio::test]
+	async fn a_lite07_claim_above_what_the_scope_matches_is_shown() {
+		let path = |path: &str| crate::Path::new(path).unwrap();
+		let origin = Hop::new(1).unwrap().produce();
+		let _a = origin.announce("a", origin::RouteInfo::new()).unwrap();
+		let _deep = origin.announce("a/x/y", origin::RouteInfo::new()).unwrap();
+		let _b = origin.announce("b", origin::RouteInfo::new()).unwrap();
+		let auth = crate::auth::Link::new(false);
+		auth.handle().authorize(&crate::auth::Grant {
+			publish: crate::Patterns::default(),
+			subscribe: crate::Patterns::from("a/*".parse::<crate::Pattern>().unwrap()),
+			expires: None,
+		});
+		let waiter = kio::Waiter::noop();
+		for asked in ["", "a"] {
+			let log = Log::default();
+			let mut wire = Wire {
+				writes: log.writes.clone(),
+				cursor: 0,
+				version: Version::Lite07,
+			};
+			let mut writer = Writer::new(
+				crate::transport::boxed::SendStream::new(SinkSend::new(log)),
+				Version::Lite07,
+			);
+			let mut answer = super::routed::Answer::alone_on(origin.consume(), auth.clone());
+			answer.request(false, Vec::new(), vec![(path(asked), true)]).unwrap();
+			answer.drain(&mut writer).unwrap();
+			assert!(writer.poll_flush(&waiter).is_ready());
+			let msgs = wire.take_announces();
+			let mut decoder = lite::AnnounceDecoder::default();
+			let told: Vec<(String, u64)> = (msgs.iter())
+				.filter_map(|msg| match msg {
+					lite::AnnounceBroadcast::Start { suffix, claim, .. } => {
+						let path = decoder.start(Some(suffix.clone())).unwrap().unwrap();
+						Some((path.to_string(), claim.item.above))
+					}
+					_ => None,
+				})
+				.collect();
+			assert_eq!(told, [("a".to_string(), 0)], "{asked:?}: {msgs:?}");
+			assert_eq!(msgs.last(), Some(&lite::AnnounceBroadcast::Synced { prefix: 0 }));
+		}
+	}
+
 	/// A lite-07 edit removing a prefix and adding it again, as a peer changing its
 	/// Hidden opt-in does, tells what a mount beneath it presents again under the new
 	/// Prefix ID: both ends dropped the claim with the prefix, so nothing ends.

@@ -69,8 +69,22 @@ enum Holds {
 	/// Everything else the session's key queued, since a grant change made it: the
 	/// ANNOUNCE_OK of the peer's next edit must follow it.
 	Main,
+	/// Both, since a grant change made it before its prefix's SYNCED.
+	Both,
 	/// Nothing: it is in.
 	Nothing,
+}
+
+impl Holds {
+	/// Whether it holds back its prefix's SYNCED.
+	fn synced(self) -> bool {
+		matches!(self, Self::Synced | Self::Both)
+	}
+
+	/// Whether it holds back what the session's key queued.
+	fn main(self) -> bool {
+		matches!(self, Self::Main | Self::Both)
+	}
 }
 
 /// What a marker on the session's key answers.
@@ -430,7 +444,7 @@ impl Answer {
 	/// Whether what the session's key queued waits for the initial set of a mount a grant
 	/// change made, so the peer's next ANNOUNCE_OK follows it.
 	pub(in crate::lite) fn holding(&self) -> bool {
-		self.mounts.values().any(|mount| mount.holds == Holds::Main)
+		self.mounts.values().any(|mount| mount.holds.main())
 	}
 
 	/// Whether the grant and this handle show the peer the whole tree, as a routing peer
@@ -514,7 +528,7 @@ impl Answer {
 				let id = match self.mounts.get_mut(&source) {
 					Some(mount) => {
 						let holds = std::mem::replace(&mut mount.holds, Holds::Nothing);
-						(holds == Holds::Synced).then_some(mount.prefix)
+						holds.synced().then_some(mount.prefix)
 					}
 					// What a grant change reads starts after its prefix's SYNCED, and once all
 					// of it is in, what the change no longer shows goes.
@@ -666,7 +680,21 @@ impl Answer {
 				.unwrap_or_default();
 			let dropped: Vec<Path> = prefix.reads.difference(&reads).cloned().collect();
 			let added: Vec<Path> = reads.difference(&prefix.reads).cloned().collect();
-			self.prefixes.get_mut(&id).expect("listed above").reads = reads;
+			// Before its SYNCED, the prefix waits for the mounts read in place of those that go,
+			// counted before the ones that go release it.
+			let holds = match prefix.synced {
+				true => Holds::Main,
+				false => Holds::Both,
+			};
+			let mut mounted = 0;
+			for read in added {
+				mounted += self.mount(id, read, holds)?;
+			}
+			let prefix = self.prefixes.get_mut(&id).expect("listed above");
+			prefix.reads = reads;
+			if !prefix.synced {
+				prefix.waiting += mounted;
+			}
 			// The mounts beneath a read the grant no longer shows go with it.
 			let sources: Vec<Source> = (self.mounts.iter())
 				.filter(|(_, mount)| mount.prefix == id && dropped.contains(&mount.read))
@@ -675,7 +703,7 @@ impl Answer {
 			for source in sources {
 				let mount = self.mounts.remove(&source).expect("listed above");
 				// Its initial set no longer holds the prefix back.
-				if mount.holds == Holds::Synced {
+				if mount.holds.synced() {
 					self.synced(writer, id, 1)?;
 				}
 				gone.extend(
@@ -683,9 +711,6 @@ impl Answer {
 						.filter(|(_, (told, _))| *told == source)
 						.map(|(key, _)| key.clone()),
 				);
-			}
-			for read in added {
-				self.mount(id, read, Holds::Main)?;
 			}
 		}
 		// Forgotten without ending yet: a wider read may tell the claim again.
@@ -850,7 +875,8 @@ impl Answer {
 		path.parts().count().saturating_sub(self.origin.root().parts().count()) as u64
 	}
 
-	/// Whether the peer is shown the claim at the absolute `path`.
+	/// Whether the peer is shown the claim at the absolute `path`: the permit allows some
+	/// path it covers.
 	fn shows(&self, path: &Path) -> bool {
 		let Some((_, prefix)) = self.region(path) else {
 			return false;
@@ -859,7 +885,7 @@ impl Answer {
 		let (Some(suffix), Some(relative)) = (within, path.strip_prefix(self.origin.root())) else {
 			return false;
 		};
-		(prefix.hidden || !suffix.is_hidden()) && self.origin.reaches(path) && self.permit.matches(relative.as_str())
+		(prefix.hidden || !suffix.is_hidden()) && self.origin.reaches(path) && self.permit.reaches(relative.as_str())
 	}
 
 	/// Bring the peer's claim `key` in line with what the node told and the answer

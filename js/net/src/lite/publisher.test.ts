@@ -4249,6 +4249,36 @@ test("a lite-07 grant head too long for a path presents nothing", async () => {
 	}
 });
 
+// A claim at a path the grant does not match, but above paths it does, is shown where it is
+// presented: `a` under `a/*`, at the region and at its own path. One beneath every path the grant
+// matches stays hidden.
+test("a lite-07 claim above what the grant matches is shown", async () => {
+	for (const asked of ["", "a"]) {
+		const origin = new OriginProducer();
+		const grant = new Signal<Grant | undefined>({
+			publish: new Path.Patterns([Path.Pattern.parse("a/*")]),
+			subscribe: new Path.Patterns([]),
+		});
+		const broadcasts = ["a", "a/x/y", "b"].map((path) => publish(origin, Path.from(path)));
+		const { next, ok, close } = routedAnswer(origin, grant, Path.from(asked));
+		try {
+			await ok();
+			const msgs: AnnounceBroadcast[] = [];
+			for (;;) {
+				const msg = await next();
+				msgs.push(msg);
+				if (msg.status === "synced") break;
+			}
+			const told = msgs.flatMap((msg) => (msg.status === "start" ? [`${msg.suffix} above ${msg.claim.above}`] : []));
+			expect(told).toEqual(["a above 0"]);
+		} finally {
+			for (const broadcast of broadcasts) broadcast.close();
+			close();
+			origin.close();
+		}
+	}
+});
+
 // A claim whose route is withdrawn ends, not lost, though another path still advertises the same
 // named instance: only the advertisement the claim came from proves it moved.
 test("a lite-07 withdrawn claim ends though its instance lives on elsewhere", async () => {

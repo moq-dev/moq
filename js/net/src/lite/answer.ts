@@ -7,8 +7,9 @@
 // it removed, and the answer then tells what the added prefixes cover.
 //
 // A prefix wider than our grant is answered region by region, as if the peer had asked for each
-// granted region inside it: a claim above a region is presented at the region, where the grant
-// covers it. A grant change is answered before the ANNOUNCE_OK of the next edit.
+// granted region inside it: a claim above a region is presented at the region. A claim is shown
+// where the grant covers some path beneath it. A grant change is answered before the ANNOUNCE_OK of
+// the next edit.
 
 import { type GetPromise, type Getter, race } from "@moq/signals";
 import type { Grant } from "../auth.ts";
@@ -226,7 +227,9 @@ export class Answer {
 		// The claims the peer is shown, by their path from the session's root: the table under each
 		// prefix, less the hidden ones it did not ask for and whatever our grant does not let us publish.
 		const latest = new Map<Path.Valid, Advertised>();
-		const shows = (path: Path.Valid) => !grant || grant.publish.matches(path);
+		// A claim is shown where the grant lets us publish some path it covers, as one at `a` serves
+		// `a/*` though `a` itself is not granted.
+		const shows = (path: Path.Valid) => !grant || grant.publish.overlaps(Path.Pattern.subtree(path));
 		// Whether the advertisement a claim the peer holds came from is still in the table, as when
 		// its presentation moved: the claim is lost to the peer rather than ended, since its publisher
 		// never withdrew it. Another path's advertisement of the same instance proves nothing.
