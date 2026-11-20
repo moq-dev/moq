@@ -142,7 +142,10 @@ where the next frame would take the group past the relay's cache bound. Any
 step back ends the import.
 
 `export ts --passthrough` writes each run `--delay` after its time on the
-source clock, so two exporters emit the same bytes. It takes neither
+source clock, spread evenly up to the next run's time seven packets (a UDP
+datagram) at a time, so the output keeps the source's rate and two exporters
+emit the same bytes. A run whose successor is not yet buffered, or more than
+100 ms on, goes out whole. It takes neither
 `--follow`, `--stitch` nor `--mux-rate`. Only the hang catalog names the
 track, so an `.msf` broadcast needs `--catalog-format hang`. The encoding is in
 [draft-lcurley-moq-mpegts](/draft/moq-mpegts).
@@ -246,7 +249,7 @@ details each grader and its negative controls.
 | Scrambled input groups and paces like its clear twin | [`passthrough_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/passthrough_test.rs) `a_scrambled_twin_groups_and_paces_the_same` | PR |
 | `randomAccess` false for several programs or video streams | [`passthrough_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/passthrough_test.rs) `two_programs_on_one_clock_publish_no_random_access`, `two_video_streams_in_one_program_publish_no_random_access` | PR |
 | Clock: wrap, flagged jump, step back refused, 192/204-byte packets refused | [`passthrough_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/passthrough_test.rs) | PR |
-| Export releases each run byte-identical on its own PCR, whatever the delivery skew | [`release_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/release_test.rs) `a_capture_is_released_byte_identical_on_its_own_pcr`, `releases_fed_with_different_skew_write_the_same_bytes` | PR |
+| Export releases each run byte-identical on its own PCR, whatever the delivery skew, spread across its PCR interval | [`release_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/release_test.rs) `a_capture_is_released_byte_identical_on_its_own_pcr`, `releases_fed_with_different_skew_write_the_same_bytes`, `an_object_is_spread_across_its_pcr_interval` | PR |
 
 ### Acquisition and loss
 

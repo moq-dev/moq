@@ -585,8 +585,8 @@ impl Subscribe {
 		};
 		let mut sampled = kio::clock::now();
 		let mut reported = (0, 0, 0, 0);
-		while let Some(object) = release.next().await? {
-			stdout.write_all(&object.payload).await?;
+		while let Some(run) = release.next().await? {
+			stdout.write_all(&run.payload).await?;
 			stdout.flush().await?;
 
 			if sampled.elapsed() >= moq_mux::container::ts::stats::Log::INTERVAL {
