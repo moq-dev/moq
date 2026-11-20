@@ -4,6 +4,7 @@ import { Manual } from "@moq/clock/test";
 import { type Group, Time, Track } from "@moq/net";
 import { Consumer, type Read } from "./consumer.ts";
 import { encodeFrame, Format } from "./legacy.ts";
+import { defined } from "../defined.test-util.ts";
 
 const BUDGET = 500;
 
@@ -61,7 +62,7 @@ function write(group: Group.Producer, timestamp: number) {
 }
 
 function group(track: Track.Producer, sequence: bigint, timestamps: number[]): Group.Producer {
-	const group = track.createGroup(sequence);
+	const group = defined(track.createGroup(sequence));
 	for (const timestamp of timestamps) write(group, timestamp);
 	return group;
 }

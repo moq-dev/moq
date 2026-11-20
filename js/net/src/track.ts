@@ -1359,7 +1359,7 @@ export class Producer {
 			name,
 			accept: (key, info) => {
 				if (info !== undefined && this.#state.info.peek() === undefined) this.accept(info);
-				return this.#createGroup(key, 0, true);
+				return this.#createGroup(key, 0, true) ?? duplicate(key);
 			},
 			drop: (start, end, hole) => {
 				this.#drop(start, end, hole);
@@ -1502,7 +1502,7 @@ export class Producer {
 			producer.#placing++;
 		};
 		hooks.receiveGroup = (producer, { start: sequence, offset: start, fill }) =>
-			producer.#createGroup(sequence, start, fill);
+			producer.#createGroup(sequence, start, fill) ?? duplicate(sequence);
 		hooks.arrivingGroup = (producer, key) => {
 			const group = producer.#cached.get(key)?.group;
 			if (!group || group.closed.peek() !== undefined) return undefined;
@@ -2529,17 +2529,17 @@ export class Producer {
 	 * key already skipped throws {@link Skipped}, and the reserved key 2^64-1 a
 	 * `RangeError`.
 	 *
-	 * Throws on a key that is still cached: a live duplicate would fan out to every
-	 * subscriber twice. An aborted incarnation is evicted so a fresh group can serve the
+	 * Returns `undefined` for a key that is still cached: a live duplicate would fan out to
+	 * every subscriber twice. An aborted incarnation is evicted so a fresh group can serve the
 	 * key again. Best effort (mirrors Rust): nothing remembers a key whose cache
 	 * entry is already gone, so a long-evicted key is accepted as new. Its frames are
 	 * checked like {@link appendGroup}'s.
 	 */
-	createGroup(key: bigint): GroupProducer {
+	createGroup(key: bigint): GroupProducer | undefined {
 		return this.#createGroup(key, 0);
 	}
 
-	#createGroup(key: bigint, start: number, fetched = false): GroupProducer {
+	#createGroup(key: bigint, start: number, fetched = false): GroupProducer | undefined {
 		this.#writable(key);
 		// A skip says the key will never be produced, so it is final. A drop is not: a
 		// publisher may re-create a group it cut or aborted.
@@ -2554,9 +2554,7 @@ export class Producer {
 			this.#unlink(existing);
 			this.#uncache(existing);
 		} else if (existing) {
-			if (!failed) {
-				throw new Error(`duplicate group: key=${key}`);
-			}
+			if (!failed) return undefined;
 			// A mirror the failed copy kept open, held for a duplicate, is the new copy's to continue.
 			for (const [sink, mirror] of existing.mirrors) {
 				if (mirror.closed.peek() !== undefined || !hooks.readsMirrored(mirror)) continue;
@@ -2914,6 +2912,12 @@ function late(): Hole {
 	return { error: new StreamError(StreamCode.Old, { message: "group landed after the read passed it" }) };
 }
 
+// Refuse a copy of `key` the track already holds, where a caller has already ruled it out or a
+// received copy collides with one the cache answers from.
+function duplicate(key: bigint): never {
+	throw new Error(`duplicate group: key=${key}`);
+}
+
 // A group missing its head that no fill could serve.
 function headless(): Hole {
 	return { error: new StreamError(StreamCode.NotFound, { message: "group head never served" }) };
@@ -2981,7 +2985,7 @@ export interface Finished {
 	/** The track's info, once accepted. */
 	info(): Promise<Info>;
 	/** Create an older group below the end, which arrived late; see {@link Producer.createGroup}. */
-	createGroup(key: bigint): GroupProducer;
+	createGroup(key: bigint): GroupProducer | undefined;
 	/** Serve the groups readers miss below the end; see {@link Producer.requests}. */
 	requests(): Requests;
 	/** Subscribe to this in-process track; see {@link Producer.subscribe}. */

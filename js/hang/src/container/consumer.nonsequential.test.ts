@@ -5,6 +5,7 @@ import { type Group, Time, Track, Varint } from "@moq/net";
 import { AudioConfigSchema } from "../catalog/audio.ts";
 import { Consumer } from "./consumer.ts";
 import { Format as LegacyFormat } from "./legacy.ts";
+import { defined } from "../defined.test-util.ts";
 
 // Standalone from consumer.test.ts so it only pulls the Legacy format, not the CMAF decoder.
 
@@ -64,7 +65,7 @@ test("Consumer waits on a non-sequential hang group because it has no per-frame 
 	});
 
 	// Group A at a large sequence, completed so the cursor advances past it.
-	const a = track.createGroup(1_000_000n);
+	const a = defined(track.createGroup(1_000_000n));
 	a.writeFrame({
 		payload: encodeLegacyFrame(0, new Uint8Array([0x01])),
 		timestamp: Time.Timestamp.fromMicros(0),
@@ -81,7 +82,7 @@ test("Consumer waits on a non-sequential hang group because it has no per-frame 
 	// Open group B at a large jump (+90_000, NOT +1) with a frame far past A's last PTS, and leave it
 	// open. Legacy has no duration, so A's end is unknown -- B could be continuous, or group 1_000_001
 	// could still be coming. We cannot tell, so B must NOT surface yet.
-	const b = track.createGroup(1_090_000n);
+	const b = defined(track.createGroup(1_090_000n));
 	b.writeFrame({
 		payload: encodeLegacyFrame(1_000_000, new Uint8Array([0x02])),
 		timestamp: Time.Timestamp.fromMicros(1_000_000),
@@ -113,7 +114,7 @@ test("Consumer reads on without a gap past a group it skipped", async () => {
 		}
 	};
 
-	const first = track.createGroup(0n);
+	const first = defined(track.createGroup(0n));
 	write(first, [0, 100_000, 200_000, 300_000, 400_000]);
 	for (let i = 0; i < 5; i++) expect((await nextFrame(consumer))?.group).toBe(0n);
 	// The first group finishes, read to its end but not yet passed, followed by an adjacent empty group
@@ -121,9 +122,9 @@ test("Consumer reads on without a gap past a group it skipped", async () => {
 	// frame, so the age skip passes the first group cleanly, then the empty one, which ends without a
 	// frame and leaves only the skipped group's end to show the timeline goes on.
 	first.finish();
-	const empty = track.createGroup(1n);
+	const empty = defined(track.createGroup(1n));
 	await clock.advance(Duration.ZERO);
-	const last = track.createGroup(20n);
+	const last = defined(track.createGroup(20n));
 	write(last, [400_000, 1_000_000]);
 	last.finish();
 	empty.finish();
@@ -155,7 +156,7 @@ test("Consumer reads one-packet Opus groups at sparse sequences back to back", a
 	// never arrives.
 	const packet = new Uint8Array([31 << 3, 0]);
 	const publish = (start: number) => {
-		const group = track.createGroup(BigInt(start));
+		const group = defined(track.createGroup(BigInt(start)));
 		group.writeFrame({ payload: encodeLegacyFrame(start, packet), timestamp: Time.Timestamp.fromMicros(start) });
 		group.finish();
 	};

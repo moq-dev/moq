@@ -3,6 +3,7 @@ import { Duration } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { type Group, Time, Track } from "@moq/net";
 import { hooks } from "../src/internal.ts";
+import { defined } from "../src/defined.test-util.ts";
 
 /** Read live frames after a retained window, checking every delivered payload. */
 export async function run(): Promise<void> {
@@ -87,7 +88,7 @@ export async function run(): Promise<void> {
 								}
 								// A frameless candidate beyond one owed group keeps the ordered
 								// cursor parked while frames advance its presentation edge.
-								track.createGroup(BigInt(retained + 2));
+								defined(track.createGroup(BigInt(retained + 2)));
 								waiting.push(...ordered);
 							}
 							let start = 0;

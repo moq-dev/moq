@@ -980,7 +980,7 @@ async fn redundant_pair_follows_the_next_instance(version: &str, loss: Loss) {
 	let mut rx = read(first.track("video").unwrap().subscribe(prefs.clone()).await.unwrap());
 	let write = |replicas: &mut Vec<Replica>, key: u64| {
 		for replica in replicas.iter_mut() {
-			let mut group = replica.track.create_group(moq_net::group::Info { start: key }).unwrap();
+			let mut group = replica.track.create_group(moq_net::group::Info { start: key }).unwrap().unwrap();
 			group
 				.write_frame(
 					Timestamp::from_micros(1_000_000 + key * 1_000).unwrap(),
@@ -1333,7 +1333,7 @@ async fn producer_replaced(version: &str) {
 		.unwrap();
 
 	// The application owns where the replacement starts, so it continues explicitly.
-	let mut group = second.create_group(moq_net::group::Info { start: 2 }).unwrap();
+	let mut group = second.create_group(moq_net::group::Info { start: 2 }).unwrap().unwrap();
 	for frame in 0..FRAMES {
 		group.write_frame(group.at_start(), payload(2, frame)).unwrap();
 		assert_eq!(next(&mut rx).await, (2, payload(2, frame)), "{version}");

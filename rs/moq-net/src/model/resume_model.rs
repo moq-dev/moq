@@ -509,7 +509,7 @@ impl Model {
 		}
 		let parts = copy.groups.entry(group).or_default();
 		if !parts.iter().any(|part| part.from == 0)
-			&& let Ok(writer) = copy.track.create_group(group::Info { start: group })
+			&& let Ok(Some(writer)) = copy.track.create_group(group::Info { start: group })
 		{
 			parts.push(Part {
 				from: 0,

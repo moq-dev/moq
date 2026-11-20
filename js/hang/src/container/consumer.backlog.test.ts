@@ -10,6 +10,7 @@ import { race } from "@moq/signals";
 import { Consumer } from "./consumer.ts";
 import { Jitter } from "./jitter.ts";
 import { Format } from "./legacy.ts";
+import { defined } from "../defined.test-util.ts";
 
 let clock: Manual;
 let installed: Installed;
@@ -42,7 +43,7 @@ async function play(events: Event[], backlog: (group: number) => boolean): Promi
 	try {
 		for (const [at, sequence, media] of events) {
 			await clock.advance(Duration.millis(base + at).saturatingSub(now().since(Instant.ZERO)));
-			const group = track.createGroup(BigInt(sequence));
+			const group = defined(track.createGroup(BigInt(sequence)));
 			const payload = new Uint8Array([...Varint.encode(media * 1000), 1]);
 			group.writeFrame({ payload, timestamp: Time.Timestamp.fromMicros(media * 1000) });
 			group.finish();
@@ -151,7 +152,7 @@ test("the join's boundary is the publisher's answer, not a group that raced it",
 		delay: { min: Duration.millis(100), max: Duration.millis(2000) },
 	});
 	const write = (sequence: number, media: number) => {
-		const group = track.createGroup(BigInt(sequence));
+		const group = defined(track.createGroup(BigInt(sequence)));
 		const payload = new Uint8Array([...Varint.encode(media * 1000), 1]);
 		group.writeFrame({ payload, timestamp: Time.Timestamp.fromMicros(media * 1000) });
 		group.finish();
@@ -209,7 +210,7 @@ test("the join's boundary is the publisher's answer, not the largest by the firs
 		delay: { max: Duration.millis(2000) },
 	});
 	const write = (sequence: number, media: number) => {
-		const group = track.createGroup(BigInt(sequence));
+		const group = defined(track.createGroup(BigInt(sequence)));
 		const payload = new Uint8Array([...Varint.encode(media * 1000), 1]);
 		group.writeFrame({ payload, timestamp: Time.Timestamp.fromMicros(media * 1000) });
 		group.finish();
@@ -241,7 +242,7 @@ test("a range capped below the largest still delivers", async () => {
 	// largest: the consumer reports no backlog, but delivers what it can read.
 	const track = new Track.Producer("audio");
 	for (let sequence = 0; sequence <= 5; sequence++) {
-		const group = track.createGroup(BigInt(sequence));
+		const group = defined(track.createGroup(BigInt(sequence)));
 		const media = sequence * 20;
 		group.writeFrame({
 			payload: new Uint8Array([...Varint.encode(media * 1000), 1]),

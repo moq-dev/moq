@@ -7,6 +7,7 @@ import { Signal } from "@moq/signals";
 import { STRETCH } from "../sync";
 import { maxDelay, target } from "./latency";
 import { AudioRingBuffer } from "./ring-buffer";
+import { defined } from "../defined.test-util.ts";
 
 // Replay recorded-shape arrival traces through the ring and count what a listener would hear:
 // quanta rendered short (an underrun) and samples the ring threw away (a skip). The ring is sized
@@ -104,7 +105,7 @@ async function measure(t: Arrival[], budget: (target: Duration) => Duration): Pr
 			clock.jump(Duration.millis(arrival).saturatingSub(clock.now().since(Instant.ZERO)));
 			for (; next < t.length && t[next].arrival === arrival; next++) {
 				const media = t[next].media * 1000;
-				const group = track.createGroup(BigInt(next));
+				const group = defined(track.createGroup(BigInt(next)));
 				group.writeFrame({ payload: encode(media), timestamp: Time.Timestamp.fromMicros(media) });
 				group.finish();
 			}

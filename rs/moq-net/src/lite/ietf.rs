@@ -856,7 +856,7 @@ mod hop_tests {
 			info.properties = track_properties.clone();
 			let track = broadcast.broadcast().create_track("video", info).unwrap();
 
-			let mut group = track.create_group(group::Info { start: 0 }).unwrap();
+			let mut group = track.create_group(group::Info { start: 0 }).unwrap().unwrap();
 			group
 				.set_wire(group::Wire {
 					sparse: false,
@@ -1108,7 +1108,7 @@ mod hop_tests {
 			.broadcast()
 			.create_track("video", track::Info::timed().with_timescale(Timescale::MILLI))
 			.unwrap();
-		let mut first = track.create_group(0u64.into()).unwrap();
+		let mut first = track.create_group(0u64.into()).unwrap().unwrap();
 		first.write_frame(ts(5), b"key".to_vec()).unwrap();
 		first.write_frame(ts(6), b"delta".to_vec()).unwrap();
 		first.finish().unwrap();
@@ -1146,7 +1146,7 @@ mod hop_tests {
 				..track::Info::timed()
 			};
 			let track = broadcast.broadcast().create_track("video", info).unwrap();
-			let mut head = track.create_group(0u64.into()).unwrap();
+			let mut head = track.create_group(0u64.into()).unwrap().unwrap();
 			head.write_frame(ts(100), b"frame".to_vec()).unwrap();
 			head.finish().unwrap();
 			let (downstream, sessions) = test_hop(&upstream, "room", offer).await;
@@ -1193,7 +1193,7 @@ mod hop_tests {
 			// acquire native moq-lite checks merely because it crossed a negotiated hop;
 			// without the extension, the copy is checked, so it advances instead.
 			let start = if negotiated { ts(50) } else { ts(150) };
-			let mut group = track.create_group(1u64.into()).unwrap();
+			let mut group = track.create_group(1u64.into()).unwrap().unwrap();
 			group.write_frame(start, b"frame".to_vec()).unwrap();
 			group.finish().unwrap();
 			let mut received = recv(&mut subscriber).await;

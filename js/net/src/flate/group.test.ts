@@ -7,6 +7,7 @@ import { Producer as Track } from "../track.ts";
 import { Decoder } from "./decoder.ts";
 import { Encoder } from "./encoder.ts";
 import { encodable } from "./group.ts";
+import { defined } from "../defined.test-util.ts";
 
 const payload = new TextEncoder().encode("one shared compression window ".repeat(100));
 
@@ -99,7 +100,7 @@ for (const readPlain of [false, true]) {
 
 test("empty frames preserve the window", async () => {
 	const track = new Track("compressed").accept({ compression: "deflate" });
-	const group = track.createGroup(0n);
+	const group = defined(track.createGroup(0n));
 	group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.start) });
 	group.writeFrame({ payload: new Uint8Array(), timestamp: Timestamp.unscaled(group.start) });
 	const reader = group.mirror();

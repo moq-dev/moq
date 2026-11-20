@@ -8,6 +8,7 @@ import { hooks, staleHole } from "./internal.ts";
 import { textFrame } from "./mock.ts";
 import { Timestamp } from "./time.ts";
 import { type Ordered, Producer as TrackProducer } from "./track.ts";
+import { defined } from "./defined.test-util.ts";
 
 // A session-fed copy owes holes; an in-process producer does not.
 function receivedTrack() {
@@ -18,7 +19,7 @@ function receivedTrack() {
 
 // A finished one-frame group, presenting at its key in milliseconds on a timed track.
 function put(producer: TrackProducer, key: bigint, timed = true) {
-	const group = producer.createGroup(key);
+	const group = defined(producer.createGroup(key));
 	group.writeFrame(textFrame("x", timed ? Timestamp.fromMillis(Number(key)) : Timestamp.unscaled(key)));
 	group.finish();
 }
@@ -71,7 +72,7 @@ test("an ordered read reports what it gives up, in key order, but no skip", () =
 	expect(items(ordered)).toEqual(["group 0", "gap 1..3 (delivery timeout)", "group 3", "group 6"]);
 
 	// A group handed out and then dropped is never reported again.
-	const cut = producer.createGroup(7n);
+	const cut = defined(producer.createGroup(7n));
 	const read = ordered.tryNextItem();
 	expect(read?.group?.start).toBe(7n);
 	drop(producer, 7n, 8n);

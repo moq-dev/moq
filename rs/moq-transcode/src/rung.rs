@@ -476,28 +476,24 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 					// Mirror the source group so fetches and rendition
 					// switches map 1:1.
 					let info = moq_net::group::Info { start };
-					current = match producer.create_group(info) {
-						Ok(output) => Some(Writing(Some(output))),
-						// A fetch task is already serving this group (a consumer
-						// fetched a group at the live edge before the live loop
-						// reached it). The fetch is authoritative and its group
-						// reaches every subscriber through the shared track cache,
-						// so skip it here. Residual: if that fetch then fails and
-						// aborts the group, this rung skips one GOP until the next
-						// keyframe.
-						//
-						// The two paths stay separate writers on purpose. This one
-						// rides the shared feed (one decoder for every rung) and keeps
-						// its encoder's rate control across groups; a fetch decodes one
-						// past group on its own, at whatever pace the source serves it,
-						// with a fresh codec pair. Folding the fetch into this loop
-						// would either stall the live edge behind a past group's decode
-						// or give up the shared decode, and the track cache already
-						// settles who writes a group: the first `create_group` or
-						// `accept` wins, and the other sees `Duplicate`.
-						Err(moq_net::Error::Duplicate) => None,
-						Err(err) => return Err(err.into()),
-					};
+					// `None`: a fetch task is already serving this group (a consumer
+					// fetched a group at the live edge before the live loop
+					// reached it). The fetch is authoritative and its group
+					// reaches every subscriber through the shared track cache,
+					// so skip it here. Residual: if that fetch then fails and
+					// aborts the group, this rung skips one GOP until the next
+					// keyframe.
+					//
+					// The two paths stay separate writers on purpose. This one
+					// rides the shared feed (one decoder for every rung) and keeps
+					// its encoder's rate control across groups; a fetch decodes one
+					// past group on its own, at whatever pace the source serves it,
+					// with a fresh codec pair. Folding the fetch into this loop
+					// would either stall the live edge behind a past group's decode
+					// or give up the shared decode, and the track cache already
+					// settles who writes a group: the first `create_group` or
+					// `accept` wins, and the other gets `None`.
+					current = producer.create_group(info)?.map(|output| Writing(Some(output)));
 				}
 				Some(Item::Frame(frame)) => {
 					// No open group: attached mid-group, skipped a duplicate, or
@@ -1215,7 +1211,7 @@ mod tests {
 		};
 		let mut reader = track.subscribe(ascending(7));
 		track.start_at(10).unwrap();
-		let mut live = track.create_group(moq_net::group::Info { start: 10 }).unwrap();
+		let mut live = track.create_group(moq_net::group::Info { start: 10 }).unwrap().unwrap();
 		live.write_frame(moq_net::Timestamp::from_millis(10).unwrap(), &b"x"[..])
 			.unwrap();
 		live.finish().unwrap();
@@ -1366,7 +1362,7 @@ mod tests {
 		track.start_at(HOUR).unwrap();
 		track
 			.create_group(moq_net::group::Info { start: HOUR })
-			.unwrap()
+			.unwrap().unwrap()
 			.finish()
 			.unwrap();
 		let waiter = kio::Waiter::noop();
@@ -1436,7 +1432,7 @@ mod tests {
 				.with_order(moq_net::track::Order::Ascending),
 		);
 		track.start_at(10).unwrap();
-		let mut live = track.create_group(moq_net::group::Info { start: 10 }).unwrap();
+		let mut live = track.create_group(moq_net::group::Info { start: 10 }).unwrap().unwrap();
 		live.write_frame(moq_net::Timestamp::from_millis(10).unwrap(), &b"x"[..])
 			.unwrap();
 		live.finish().unwrap();
@@ -1659,7 +1655,7 @@ mod tests {
 		let track = broadcast
 			.create_track("video/120p", hang::container::track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
-		let mut group = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
+		let mut group = track.create_group(moq_net::group::Info { start: 0 }).unwrap().unwrap();
 		let guard = active.attach(&active.rendition(&rung));
 
 		// The second frame cannot be expressed in the container's timescale, so it

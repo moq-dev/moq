@@ -9,6 +9,7 @@ import { hooks, type Replacement } from "./internal.ts";
 import { textFrame } from "./mock.ts";
 import { Timestamp } from "./time.ts";
 import { Producer as TrackProducer } from "./track.ts";
+import { defined } from "./defined.test-util.ts";
 
 const dec = new TextDecoder();
 
@@ -138,7 +139,7 @@ test("a group read late keeps the instant it joined, alone, on a track, or resum
 		const alone = new Producer(0n);
 		const track = new TrackProducer("test");
 		const subscriber = track.subscribe();
-		const live = track.createGroup(0n);
+		const live = defined(track.createGroup(0n));
 		live.writeFrame(textFrame("a"));
 		clock.jump(Duration.millis(1000));
 

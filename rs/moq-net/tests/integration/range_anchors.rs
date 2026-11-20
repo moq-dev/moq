@@ -61,7 +61,7 @@ async fn read(version: Option<&str>, range: Range) -> Result<Vec<u64>, Error> {
 		.unwrap();
 	broadcast.announce().unwrap();
 	for key in (0..5).map(|second| second * 1000) {
-		let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
+		let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap().unwrap();
 		group.write_frame(millis(key), &b"x"[..]).unwrap();
 		group.finish().unwrap();
 	}
@@ -198,13 +198,13 @@ async fn a_relative_start_reports_the_publishers_start_over_a_frameless_newest_g
 		.unwrap();
 	broadcast.announce().unwrap();
 	for key in 0..5 {
-		let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
+		let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap().unwrap();
 		group
 			.write_frame(moq_net::Timestamp::unscaled(group.start), &b"x"[..])
 			.unwrap();
 		group.finish().unwrap();
 	}
-	let mut newest = track.create_group(moq_net::group::Info { start: 5 }).unwrap();
+	let mut newest = track.create_group(moq_net::group::Info { start: 5 }).unwrap().unwrap();
 
 	let subscriber = produce_origin(2);
 	let _pair = peer("moq-lite-07-wip".parse::<Version>().unwrap(), &publisher, &subscriber).await;
@@ -261,7 +261,7 @@ async fn a_sparse_request_counts_its_relative_start_back_as_the_publisher_did() 
 		.unwrap();
 	broadcast.announce().unwrap();
 	for key in 0..10 {
-		let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
+		let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap().unwrap();
 		group.write_frame(millis(key), &b"x"[..]).unwrap();
 		group.finish().unwrap();
 	}

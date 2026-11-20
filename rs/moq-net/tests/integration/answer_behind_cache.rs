@@ -20,7 +20,7 @@ fn produce_origin(hop: u64) -> origin::Producer {
 }
 
 fn write_group(track: &track::Producer, payload: &'static [u8]) {
-	let mut group = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
+	let mut group = track.create_group(moq_net::group::Info { start: 0 }).unwrap().unwrap();
 	group
 		.write_frame(moq_net::Timestamp::unscaled(group.start), payload)
 		.unwrap();
@@ -133,7 +133,7 @@ async fn a_reset_newest_group_answers_the_group_before(version: &str) {
 		.create_track("audio", track::Info::default().with_timescale(None))
 		.unwrap();
 	route.announce().unwrap();
-	let mut g0 = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
+	let mut g0 = track.create_group(moq_net::group::Info { start: 0 }).unwrap().unwrap();
 	g0.write_frame(moq_net::Timestamp::unscaled(g0.start), &b"0a"[..])
 		.unwrap();
 
@@ -161,7 +161,7 @@ async fn a_reset_newest_group_answers_the_group_before(version: &str) {
 			.unwrap();
 		assert_eq!(next_group(&mut subscriber).await.unwrap(), (0, b"0a".to_vec()));
 		g0.finish().unwrap();
-		let mut g1 = track.create_group(moq_net::group::Info { start: 1 }).unwrap();
+		let mut g1 = track.create_group(moq_net::group::Info { start: 1 }).unwrap().unwrap();
 		g1.write_frame(moq_net::Timestamp::unscaled(g1.start), &b"1a"[..])
 			.unwrap();
 		assert_eq!(next_group(&mut subscriber).await.unwrap(), (1, b"1a".to_vec()));
@@ -191,7 +191,7 @@ async fn a_reset_newest_group_answers_the_group_before(version: &str) {
 		.unwrap();
 	// The upper relay answers the resubscription before the feed moves on.
 	kio::clock::sleep(Duration::from_secs(1)).await;
-	let mut g2 = track.create_group(moq_net::group::Info { start: 2 }).unwrap();
+	let mut g2 = track.create_group(moq_net::group::Info { start: 2 }).unwrap().unwrap();
 	g2.write_frame(moq_net::Timestamp::unscaled(g2.start), &b"2a"[..])
 		.unwrap();
 	loop {

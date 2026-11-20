@@ -48,7 +48,7 @@ impl Held {
 				for key in 1..=groups as u64 {
 					track
 						.create_group(group::Info { start: key })
-						.unwrap()
+						.unwrap().unwrap()
 						.finish()
 						.unwrap();
 				}

@@ -1506,7 +1506,7 @@ mod tests {
 
 		// Closed groups follow, and transmuxing one caches the init.
 		for group in 2..5 {
-			let mut writing = media.create_group(group.into()).unwrap();
+			let mut writing = media.create_group(group.into()).unwrap().unwrap();
 			write_keyframe(&mut writing, group);
 			writing.finish().unwrap();
 		}
@@ -1580,9 +1580,9 @@ mod tests {
 		sequence: u64,
 	) -> (moq_net::track::Producer, moq_net::group::Producer) {
 		let media = broadcast.create_track(name, timed()).unwrap();
-		let mut open = media.create_group(sequence.into()).unwrap();
+		let mut open = media.create_group(sequence.into()).unwrap().unwrap();
 		write_keyframe(&mut open, sequence);
-		let mut next = media.create_group((sequence + 1).into()).unwrap();
+		let mut next = media.create_group((sequence + 1).into()).unwrap().unwrap();
 		write_keyframe(&mut next, sequence + 1);
 		next.finish().unwrap();
 		(media, open)
@@ -1631,11 +1631,11 @@ mod tests {
 		let (origin, broadcast, _catalog, _video0) = inline_sibling().await;
 		let media = broadcast.broadcast().create_track("video1", timed()).unwrap();
 		for sequence in 0..3 {
-			let mut group = media.create_group(sequence.into()).unwrap();
+			let mut group = media.create_group(sequence.into()).unwrap().unwrap();
 			write_keyframe(&mut group, sequence);
 			group.finish().unwrap();
 		}
-		let mut open = media.create_group(3u64.into()).unwrap();
+		let mut open = media.create_group(3u64.into()).unwrap().unwrap();
 		write_keyframe(&mut open, 3);
 
 		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
@@ -1870,7 +1870,7 @@ mod tests {
 		);
 
 		for sequence in 0..3 {
-			let mut group = media.create_group(sequence.into()).unwrap();
+			let mut group = media.create_group(sequence.into()).unwrap().unwrap();
 			write_keyframe(&mut group, sequence);
 			group.finish().unwrap();
 		}
@@ -1888,7 +1888,7 @@ mod tests {
 			.unwrap();
 		let media = broadcast.broadcast().create_track("video1", timed()).unwrap();
 		for sequence in 0..4 {
-			let mut group = media.create_group(sequence.into()).unwrap();
+			let mut group = media.create_group(sequence.into()).unwrap().unwrap();
 			write_keyframe(&mut group, sequence);
 			group.finish().unwrap();
 		}
@@ -3630,7 +3630,7 @@ mod tests {
 			let mut group = self
 				.track
 				.create_group(moq_net::group::Info { start: sequence })
-				.unwrap();
+				.unwrap().unwrap();
 			for index in 0..frames.max(1) {
 				let micros = (pts_ms + index * INTERVAL.as_millis() as u64 / 10) * 1_000;
 				let frame = vp8_frame(micros, index == 0);
@@ -3655,7 +3655,7 @@ mod tests {
 			let mut group = self
 				.track
 				.create_group(moq_net::group::Info { start: sequence })
-				.unwrap();
+				.unwrap().unwrap();
 			let mut payload = KEYFRAME.to_vec();
 			payload[6..8].copy_from_slice(&width.to_le_bytes());
 			payload[8..10].copy_from_slice(&height.to_le_bytes());
@@ -3678,7 +3678,7 @@ mod tests {
 			let mut group = self
 				.track
 				.create_group(moq_net::group::Info { start: sequence })
-				.unwrap();
+				.unwrap().unwrap();
 			let frame = vp8_frame(pts_ms * 1_000, true);
 			hang::container::Frame {
 				timestamp: frame.timestamp,
@@ -4065,7 +4065,7 @@ mod tests {
 				.step_by(100)
 				.map(|ms| vp8_frame(ms * 1_000, ms == pts_ms))
 				.collect();
-			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
+			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap().unwrap();
 			let bytes = muxer.fragment(sequence as u32, &frames, None).unwrap();
 			group.write_frame(frames[0].timestamp, bytes).unwrap();
 			group.finish().unwrap();
@@ -4644,7 +4644,7 @@ mod tests {
 			"one group per millisecond of the interval"
 		);
 		for sequence in 0..=cap {
-			let mut group = media.track.create_group(sequence.into()).unwrap();
+			let mut group = media.track.create_group(sequence.into()).unwrap().unwrap();
 			let frame = vp8_frame(sequence, true);
 			hang::container::Frame {
 				timestamp: frame.timestamp,

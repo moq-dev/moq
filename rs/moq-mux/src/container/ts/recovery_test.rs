@@ -955,7 +955,7 @@ async fn run(recording: &Recording, arm: &Arm) -> Run {
 			let group = open[t].get_or_insert_with(|| {
 				kept[t] = 0;
 				let info = moq_net::group::Info { start: *sequence };
-				producers[t].create_group(info).unwrap()
+				producers[t].create_group(info).unwrap().unwrap()
 			});
 			assert_eq!(group.start, *sequence, "a schedule interleaves groups of track {t}");
 			group

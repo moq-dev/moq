@@ -1025,6 +1025,7 @@ async fn broadcast_route_migration() {
 	for sequence in 0..2u64 {
 		let mut group = track_a
 			.create_group(moq_net::group::Info { start: sequence })
+			.unwrap()
 			.expect("create group");
 		group
 			.write_frame(
@@ -1051,6 +1052,7 @@ async fn broadcast_route_migration() {
 	for sequence in 2..4u64 {
 		let mut group = track_b
 			.create_group(moq_net::group::Info { start: sequence })
+			.unwrap()
 			.expect("create group");
 		group
 			.write_frame(
@@ -1152,6 +1154,7 @@ async fn broadcast_route_migration() {
 	{
 		let mut group = standby_track
 			.create_group(moq_net::group::Info { start: 4 })
+			.unwrap()
 			.expect("create group");
 		group
 			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"b4".as_ref())
@@ -1209,6 +1212,7 @@ async fn rejoin_skips_a_stale_warm_cache(version: &str) {
 	let write = |track: &moq_net::track::Producer, sequence: u64, at: u64| {
 		let mut group = track
 			.create_group(moq_net::group::Info { start: sequence })
+			.unwrap()
 			.expect("create group");
 		group.write_frame(ms(at), b"frame".as_ref()).expect("write frame");
 		group.finish().expect("finish group");
@@ -1475,6 +1479,7 @@ async fn route_reannounce_test(version: Option<&str>) {
 	{
 		let mut group = track
 			.create_group(moq_net::group::Info { start: 0 })
+			.unwrap()
 			.expect("create group");
 		group
 			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"g0".as_ref())
@@ -1549,6 +1554,7 @@ async fn route_reannounce_test(version: Option<&str>) {
 	{
 		let mut group = track
 			.create_group(moq_net::group::Info { start: 1 })
+			.unwrap()
 			.expect("create group");
 		group
 			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"g1".as_ref())

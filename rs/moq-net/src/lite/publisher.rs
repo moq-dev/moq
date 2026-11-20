@@ -3417,7 +3417,7 @@ mod test {
 		let mut subscriber = producer.subscribe(None);
 
 		let write = |producer: &mut track::Producer, key: u64| {
-			let mut group = producer.create_group(crate::group::Info { start: key }).unwrap();
+			let mut group = producer.create_group(crate::group::Info { start: key }).unwrap().unwrap();
 			group.write_frame(group.key_time(), b"x".to_vec()).unwrap();
 			group.finish().unwrap();
 		};
@@ -3454,7 +3454,7 @@ mod test {
 		);
 
 		let write = |producer: &mut track::Producer, key: u64| {
-			let mut group = producer.create_group(crate::group::Info { start: key }).unwrap();
+			let mut group = producer.create_group(crate::group::Info { start: key }).unwrap().unwrap();
 			group.write_frame(group.key_time(), b"x".to_vec()).unwrap();
 			group.finish().unwrap();
 		};
@@ -3480,7 +3480,7 @@ mod test {
 		// The last group is 6 (exclusive 7), but only group 5 has been produced so far.
 		producer
 			.create_group(group::Info { start: 5 })
-			.unwrap()
+			.unwrap().unwrap()
 			.finish()
 			.unwrap();
 		producer.finish_at(track::Position::group(7)).unwrap();
@@ -3502,7 +3502,7 @@ mod test {
 		// then the track finishes.
 		producer
 			.create_group(group::Info { start: 6 })
-			.unwrap()
+			.unwrap().unwrap()
 			.finish()
 			.unwrap();
 		match recv_next(&mut subscriber, false).await.unwrap() {
@@ -3558,7 +3558,7 @@ mod test {
 
 		producer
 			.create_group(group::Info { start: 2 })
-			.unwrap()
+			.unwrap().unwrap()
 			.finish()
 			.unwrap();
 		match recv_next(&mut subscriber, false).await.unwrap() {
@@ -3569,7 +3569,7 @@ mod test {
 		// Group 1 lands after group 2 was already served.
 		producer
 			.create_group(group::Info { start: 1 })
-			.unwrap()
+			.unwrap().unwrap()
 			.finish()
 			.unwrap();
 		match recv_next(&mut subscriber, false).now_or_never() {
@@ -7254,7 +7254,7 @@ mod serve_group_test {
 			"video",
 			crate::track::Info::timed(),
 		);
-		let mut group = track.create_group(group::Info { start: 3 }).unwrap();
+		let mut group = track.create_group(group::Info { start: 3 }).unwrap().unwrap();
 		group.start_at(5).unwrap();
 		group.write_frame(group.key_time(), b"tail".to_vec()).unwrap();
 		let starting = |frame| Frames {
@@ -7273,7 +7273,7 @@ mod serve_group_test {
 		assert!(position_group(group.consume(), &starting(2)).is_none());
 
 		// The offset belongs to the start group only; a later group is served whole.
-		let mut other = track.create_group(group::Info { start: 4 }).unwrap();
+		let mut other = track.create_group(group::Info { start: 4 }).unwrap().unwrap();
 		other.write_frame(other.key_time(), b"whole".to_vec()).unwrap();
 		let consumer = position_group(other.consume(), &starting(5)).unwrap();
 		assert_eq!(consumer.index(), 0);
@@ -7287,7 +7287,7 @@ mod serve_group_test {
 			"video",
 			crate::track::Info::timed(),
 		);
-		let mut group = track.create_group(group::Info { start: 7 }).unwrap();
+		let mut group = track.create_group(group::Info { start: 7 }).unwrap().unwrap();
 		for i in 0..4u8 {
 			group.write_frame(group.key_time(), vec![i]).unwrap();
 		}
@@ -7367,7 +7367,7 @@ mod serve_group_test {
 			"test",
 			crate::track::Info::timed(),
 		);
-		let mut group = track.create_group(group::Info { start: 0 }).unwrap();
+		let mut group = track.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		group
 			.write_frame(Timestamp::from_millis(0).unwrap(), b"hello".as_slice())
 			.unwrap();
@@ -7481,7 +7481,7 @@ mod serve_group_test {
 				"test",
 				crate::track::Info::timed(),
 			);
-			let mut group = track.create_group(group::Info { start: 0 }).unwrap();
+			let mut group = track.create_group(group::Info { start: 0 }).unwrap().unwrap();
 			group
 				.write_frame(Timestamp::from_millis(2).unwrap(), b"x".as_slice())
 				.unwrap();
@@ -7950,7 +7950,7 @@ mod serve_group_test {
 		);
 		let (mut run, mut writer, log) = lite_run(version, SinkSession::gated_open_uni(gate.consume()), subscriber);
 
-		let mut group = track.create_group(group::Info { start: 0 }).unwrap();
+		let mut group = track.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		group.write_frame(group.key_time(), b"x".as_slice()).unwrap();
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		assert_eq!(run.machines(), 1, "group 0 waits for credit");
@@ -8089,7 +8089,7 @@ mod serve_group_test {
 			"test",
 			crate::track::Info::timed(),
 		);
-		let mut group = track.create_group(group::Info { start: 0 }).unwrap();
+		let mut group = track.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		group
 			.write_frame(Timestamp::from_millis(0).unwrap(), b"hello".as_slice())
 			.unwrap();
@@ -8186,7 +8186,7 @@ mod serve_group_test {
 			"test",
 			crate::track::Info::timed(),
 		);
-		let mut group = track.create_group(group::Info { start: 0 }).unwrap();
+		let mut group = track.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		group.write_frame(group.key_time(), b"hello".as_slice()).unwrap();
 		let consumer = group.consume();
 		group.finish().unwrap();
@@ -8360,7 +8360,7 @@ mod serve_group_test {
 	}
 
 	fn write_group(track: &mut track::Producer, key: u64, millis: u64) {
-		let mut group = track.create_group(group::Info { start: key }).unwrap();
+		let mut group = track.create_group(group::Info { start: key }).unwrap().unwrap();
 		group
 			.write_frame(Timestamp::from_millis(millis).unwrap(), b"x".as_slice())
 			.unwrap();
@@ -8540,7 +8540,7 @@ mod serve_group_test {
 		let log = Log::default();
 		let (mut run, mut writer, _) = lite07_run(SinkSession::new(log.clone()).with_unacked_fin(), subscriber);
 
-		let mut group = track.create_group(group::Info { start: 0 }).unwrap();
+		let mut group = track.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		for millis in 0..FRAMES as u64 {
 			group
 				.write_frame(Timestamp::from_millis(millis).unwrap(), vec![0u8; PAYLOAD])
@@ -9376,7 +9376,7 @@ mod serve_group_test {
 				"test",
 				crate::track::Info::timed(),
 			);
-			let mut group = track.create_group(group::Info { start: 0 }).unwrap();
+			let mut group = track.create_group(group::Info { start: 0 }).unwrap().unwrap();
 			group
 				.write_frame(Timestamp::from_millis(0).unwrap(), b"x".as_slice())
 				.unwrap();
@@ -9655,7 +9655,7 @@ mod serve_group_test {
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		assert!(run.start.resolved().is_some());
 
-		let group = track.create_group(group::Info { start: 1 }).unwrap();
+		let group = track.create_group(group::Info { start: 1 }).unwrap().unwrap();
 		group.abort(Error::App(1)).unwrap();
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		assert_eq!(drops(&mut writer, &log, version).await, [(1, 1)]);
@@ -9812,7 +9812,7 @@ mod serve_group_test {
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		assert!(run.start.resolved().is_some());
 
-		let group = track.create_group(group::Info { start: 1 }).unwrap();
+		let group = track.create_group(group::Info { start: 1 }).unwrap().unwrap();
 		group.abort(Error::App(1)).unwrap();
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		assert_eq!(drops(&mut writer, &log, version).await, [(1, 1)]);
@@ -9882,7 +9882,7 @@ mod serve_group_test {
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		assert!(run.start.resolved().is_some());
 
-		let mut headless = track.create_group(group::Info { start: 1 }).unwrap();
+		let mut headless = track.create_group(group::Info { start: 1 }).unwrap().unwrap();
 		headless.start_at(1).unwrap();
 		headless
 			.write_frame(Timestamp::from_millis(1).unwrap(), b"x".as_slice())
@@ -10705,7 +10705,7 @@ mod serve_group_test {
 		let mut relay = RelayRun::new(&mut track, 5);
 
 		// Group 5's first frame is gone.
-		let mut headless = track.create_group(group::Info { start: 5 }).unwrap();
+		let mut headless = track.create_group(group::Info { start: 5 }).unwrap().unwrap();
 		headless.start_at(1).unwrap();
 		headless
 			.write_frame(Timestamp::from_millis(5).unwrap(), b"x".as_slice())
@@ -10733,7 +10733,7 @@ mod serve_group_test {
 
 		track.drop_groups(4..5, StreamError::Old);
 		// Group 5's first frame is gone.
-		let mut headless = track.create_group(group::Info { start: 5 }).unwrap();
+		let mut headless = track.create_group(group::Info { start: 5 }).unwrap().unwrap();
 		headless.start_at(1).unwrap();
 		headless
 			.write_frame(Timestamp::from_millis(5).unwrap(), b"x".as_slice())
@@ -12009,7 +12009,7 @@ mod tests {
 
 		fn write(track: &mut track::Producer, keys: &[u64]) {
 			for &key in keys {
-				let mut group = track.create_group(group::Info { start: key }).unwrap();
+				let mut group = track.create_group(group::Info { start: key }).unwrap().unwrap();
 				group.write_frame(group.key_time(), b"x".as_slice()).unwrap();
 				group.finish().unwrap();
 			}
@@ -12255,7 +12255,7 @@ mod tests {
 			.unwrap();
 		let track =
 			request.accept(crate::track::Info::timed().with_refresh(crate::track::Refresh::default().with_ratio(1)));
-		let mut group = track.create_group(group::Info { start: 1 }).unwrap();
+		let mut group = track.create_group(group::Info { start: 1 }).unwrap().unwrap();
 		for frame in [&b"key"[..], b"abc", b"d"] {
 			group.write_frame(group.key_time(), frame).unwrap();
 		}
@@ -12269,7 +12269,7 @@ mod tests {
 
 		// The asked-for group arrives, over the ratio too. A restated wanted group is now
 		// stale, so it is not another join.
-		let mut group = track.create_group(group::Info { start: 2 }).unwrap();
+		let mut group = track.create_group(group::Info { start: 2 }).unwrap().unwrap();
 		for frame in [&b"key"[..], b"abc", b"d"] {
 			group.write_frame(group.key_time(), frame).unwrap();
 		}
@@ -12420,7 +12420,7 @@ mod tests {
 		let mut appended = 0;
 		tasks.push(Box::new(move |waiter: &kio::Waiter| {
 			for _ in 0..BATCH.min(GROUPS - appended) {
-				let mut group = producer.create_group(group::Info { start: appended }).unwrap();
+				let mut group = producer.create_group(group::Info { start: appended }).unwrap().unwrap();
 				group
 					.write_frame(crate::Timestamp::from_millis(appended).unwrap(), b"x".as_slice())
 					.unwrap();
@@ -13051,7 +13051,7 @@ mod tests {
 		let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
 		broadcast.announce().unwrap();
 		let track = broadcast.broadcast().create_track("video", info).unwrap();
-		let mut group = track.create_group(group::Info { start: 0 }).unwrap();
+		let mut group = track.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		for (millis, payload) in [(0, &b"key"[..]), (33, b"delta")] {
 			group
 				.write_frame(crate::Timestamp::from_millis(millis).unwrap(), payload)

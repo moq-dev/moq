@@ -7,6 +7,7 @@ import { hooks, staleHole } from "./internal.ts";
 import { groupsOf } from "./mock.ts";
 import { Timestamp } from "./time.ts";
 import { Producer as TrackProducer } from "./track.ts";
+import { defined } from "./defined.test-util.ts";
 
 // Run `fn` on a manual clock, stepped in milliseconds.
 async function withClock(fn: (clock: { advance: (ms: number) => Promise<void> }) => Promise<void> | void) {
@@ -138,7 +139,7 @@ test("a kept local skip expires once the edge passes it or the track closes", as
 		expect(dropsHeld(closed)).toEqual([0n]);
 
 		// The write's own expiry scan finds the skip.
-		passed.createGroup(10n).finish();
+		defined(passed.createGroup(10n)).finish();
 		expect(dropsHeld(passed)).toEqual([]);
 
 		closed.close();
@@ -152,8 +153,8 @@ test("a kept local skip expires once the edge passes it or the track closes", as
 test("a final drop leaves a finished group", async () => {
 	const producer = pooled(new cache.Pool());
 	hooks.receiveTrack(producer);
-	producer.createGroup(0n).finish();
-	const open = producer.createGroup(1n);
+	defined(producer.createGroup(0n)).finish();
+	const open = defined(producer.createGroup(1n));
 	hooks.dropTrackGroups(producer, 0n, 2n, { error: new StreamError(StreamCode.Cancel) });
 
 	expect(dropsHeld(producer)).toEqual([1n]);
@@ -170,9 +171,9 @@ test("a forgotten stale run is asked of a fill", async () => {
 		const producer = pooled(pool);
 		hooks.receiveTrack(producer);
 		const requests = producer.requests();
-		producer.createGroup(0n).finish();
+		defined(producer.createGroup(0n)).finish();
 		hooks.dropTrackGroups(producer, 1n, 3n, staleHole(500));
-		producer.createGroup(3n).finish();
+		defined(producer.createGroup(3n)).finish();
 		await clock.advance(2_000);
 
 		const reader = producer.subscribe({
@@ -245,7 +246,7 @@ test("a reached end outlives its forgotten skip", async () => {
 		const pool = new cache.Pool({ expiry: Duration.millis(1_000) });
 		const producer = pooled(pool);
 		hooks.receiveTrack(producer);
-		producer.createGroup(0n).finish();
+		defined(producer.createGroup(0n)).finish();
 		hooks.skipTrackGroups(producer, 1n, 3n);
 		hooks.endTrack(producer, { group: 3n, frame: 0 });
 		const done = (reader: ReturnType<TrackProducer["subscribe"]>) => {

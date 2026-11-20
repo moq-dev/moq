@@ -154,7 +154,7 @@ async fn a_start_group_arrives_whole() {
 							false => moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 						};
 						let published = publish(info);
-						let mut group = published.track.create_group(moq_net::group::Info { start: 5 }).unwrap();
+						let mut group = published.track.create_group(moq_net::group::Info { start: 5 }).unwrap().unwrap();
 						write(&mut group, 0..head);
 						let mut fixture = relay(
 							published,

@@ -911,12 +911,14 @@ impl MoqTrackProducer {
 	/// Create a group starting at `start`, in the track's timescale, which names it.
 	///
 	/// Use this for sparse or replayed tracks: unlike [`append_group`](Self::append_group), it
-	/// declares nothing below it skipped.
+	/// declares nothing below it skipped. A start another live group holds is refused.
 	pub fn create_group(&self, start: u64) -> Result<Arc<MoqGroupProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut phase = self.phase.lock().unwrap();
 		let raw = phase.raw()?;
-		let group = raw.create_group(moq_net::group::Info { start })?;
+		let group = raw
+			.create_group(moq_net::group::Info { start })?
+			.ok_or(moq_net::Error::Duplicate)?;
 		Ok(Arc::new(MoqGroupProducer::from_inner(group)))
 	}
 

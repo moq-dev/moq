@@ -2033,7 +2033,7 @@ mod test {
 		// The new consumer should receive the new group, which continues past the first's.
 		producer2
 			.create_group(crate::group::Info { start: 1 })
-			.unwrap()
+			.unwrap().unwrap()
 			.finish()
 			.unwrap();
 		track2.assert_group();
@@ -2051,7 +2051,7 @@ mod test {
 
 		let track = consumer.track("media").unwrap().subscribe(None);
 		let first = dynamic.assert_request().accept(crate::track::Info::timed());
-		let mut group = first.create_group(crate::group::Info { start: 8 }).unwrap();
+		let mut group = first.create_group(crate::group::Info { start: 8 }).unwrap().unwrap();
 		group.write_frame(at(1000), b"a".as_slice()).unwrap();
 		group.finish().unwrap();
 		let first = first.finish().unwrap();

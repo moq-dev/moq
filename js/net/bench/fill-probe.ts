@@ -16,7 +16,7 @@ for (const runs of [250, 1000, 4000, 16000]) {
 		const track = defined(broadcast.createTrack("video", { maxAge: null }));
 		// 2 and 3 are read up front, so the only gaps any fill is asked for are the drops below.
 		for (const sequence of [2n, 3n]) {
-			const live = track.createGroup(sequence);
+			const live = defined(track.createGroup(sequence));
 			live.writeFrame({ payload: new Uint8Array([0]), timestamp: Timestamp.unscaled(live.start) });
 			live.finish();
 		}
@@ -44,7 +44,7 @@ for (const runs of [250, 1000, 4000, 16000]) {
 			const sequence = BigInt(4 + 2 * i);
 			hooks.dropTrackGroups(track, sequence, sequence + 1n, staleHole(60_000));
 			for (const sub of subs) sub.tryRecvGroup();
-			const group = track.createGroup(sequence + 1n);
+			const group = defined(track.createGroup(sequence + 1n));
 			group.writeFrame({ payload: new Uint8Array([0]), timestamp: Timestamp.unscaled(group.start) });
 			group.finish();
 			for (const sub of subs) {

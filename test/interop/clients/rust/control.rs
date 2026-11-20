@@ -15,7 +15,9 @@ async fn main() -> anyhow::Result<()> {
 		.broadcast()
 		.create_track("video", moq_net::track::Info::default().with_priority(2))
 		.context("the track already exists")?;
-	let mut group = track.create_group(moq_net::group::Info { start: 4 })?;
+	let mut group = track
+		.create_group(moq_net::group::Info { start: 4 })?
+		.context("the group already exists")?;
 	for byte in [1, 2] {
 		group.write_frame(moq_net::Timestamp::unscaled(group.start), vec![byte])?;
 	}

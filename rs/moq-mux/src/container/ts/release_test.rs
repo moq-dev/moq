@@ -149,7 +149,7 @@ fn republish_cut(
 					track.skip_groups(run);
 				}
 				let info = moq_net::group::Info { start: object.group };
-				group = Some((object.group, track.create_group(info).unwrap()));
+				group = Some((object.group, track.create_group(info).unwrap().unwrap()));
 			}
 			let timestamp = moq_net::Timestamp::from_micros(object.micros).unwrap();
 			let group = &mut group.as_mut().unwrap().1;

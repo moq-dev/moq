@@ -82,7 +82,11 @@ impl Live {
 				open
 			}
 			None => {
-				let group = self.producer.create_group(group::Info { start: sequence })?;
+				// A held start is a sequence the archive already gave.
+				let group = self
+					.producer
+					.create_group(group::Info { start: sequence })?
+					.ok_or(Error::Sequence)?;
 				let open = self.open.insert(Open {
 					group,
 					sequence,

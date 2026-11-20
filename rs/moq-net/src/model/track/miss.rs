@@ -1657,7 +1657,7 @@ mod tests {
 			for key in [0, 2] {
 				track
 					.create_group(crate::group::Info { start: key })
-					.unwrap()
+					.unwrap().unwrap()
 					.finish()
 					.unwrap();
 			}
@@ -1718,7 +1718,7 @@ mod tests {
 		for key in [4, 0] {
 			track
 				.create_group(crate::group::Info { start: key })
-				.unwrap()
+				.unwrap().unwrap()
 				.finish()
 				.unwrap();
 		}
@@ -1767,7 +1767,7 @@ mod tests {
 		// again, and reclaiming the cut removes the cached incarnation before the probe.
 		track
 			.create_group(crate::group::Info { start: 2 })
-			.unwrap()
+			.unwrap().unwrap()
 			.abort(Error::Cancel)
 			.unwrap();
 		track.drop_groups(2..3, crate::StreamError::Old);
@@ -1792,7 +1792,7 @@ mod tests {
 		drop(state);
 		track
 			.create_group(crate::group::Info { start: 2 })
-			.unwrap()
+			.unwrap().unwrap()
 			.finish()
 			.unwrap();
 		let state = track.state.read();
@@ -1863,7 +1863,7 @@ mod tests {
 		for key in [4, 0] {
 			track
 				.create_group(crate::group::Info { start: key })
-				.unwrap()
+				.unwrap().unwrap()
 				.finish()
 				.unwrap();
 		}
@@ -1909,7 +1909,7 @@ mod tests {
 		// still a hole: the refusal stands and the hole is given up, not asked again.
 		track
 			.create_group(crate::group::Info { start: 2 })
-			.unwrap()
+			.unwrap().unwrap()
 			.abort(Error::Cancel)
 			.unwrap();
 		let state = track.state.read();
@@ -1940,7 +1940,7 @@ mod tests {
 		for key in [0, 2, 4] {
 			track
 				.create_group(crate::group::Info { start: key })
-				.unwrap()
+				.unwrap().unwrap()
 				.finish()
 				.unwrap();
 		}
@@ -1991,7 +1991,7 @@ mod tests {
 		drop(state);
 		track
 			.create_group(crate::group::Info { start: 1 })
-			.unwrap()
+			.unwrap().unwrap()
 			.finish()
 			.unwrap();
 		let state = track.state.read();
@@ -2052,7 +2052,7 @@ mod tests {
 		for key in 0..3 {
 			track
 				.create_group(crate::group::Info { start: key })
-				.unwrap()
+				.unwrap().unwrap()
 				.finish()
 				.unwrap();
 		}
@@ -2110,7 +2110,7 @@ mod tests {
 
 		track
 			.create_group(crate::group::Info { start: 4 })
-			.unwrap()
+			.unwrap().unwrap()
 			.finish()
 			.unwrap();
 		let state = track.state.read();
@@ -2223,7 +2223,7 @@ mod tests {
 				let key = next(KEYS);
 				match next(6) {
 					0..=2 => {
-						if let Ok(mut group) = track.create_group(crate::group::Info { start: key }) {
+						if let Ok(Some(mut group)) = track.create_group(crate::group::Info { start: key }) {
 							if next(4) > 0 {
 								group
 									.write_frame(at(key * 20), bytes::Bytes::from_static(b"x"))
@@ -2320,7 +2320,7 @@ mod tests {
 			for &key in keys.iter().rev() {
 				track
 					.create_group(crate::group::Info { start: key })
-					.unwrap()
+					.unwrap().unwrap()
 					.finish()
 					.unwrap();
 			}
@@ -2426,7 +2426,7 @@ mod tests {
 		for key in [0, 2, 4, 6, 8] {
 			track
 				.create_group(crate::group::Info { start: key })
-				.unwrap()
+				.unwrap().unwrap()
 				.finish()
 				.unwrap();
 		}
@@ -2502,7 +2502,7 @@ mod tests {
 		track.start_at(8).unwrap();
 		track
 			.create_group(crate::group::Info { start: 8 })
-			.unwrap()
+			.unwrap().unwrap()
 			.finish()
 			.unwrap();
 		let track = track.finish().unwrap();

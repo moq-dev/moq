@@ -7,6 +7,7 @@ import { Time, Track } from "@moq/net";
 import { u53 } from "../catalog/integers.ts";
 import { Consumer, type Read } from "./consumer.ts";
 import { encodeFrame, Format } from "./legacy.ts";
+import { defined } from "../defined.test-util.ts";
 
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 
@@ -44,7 +45,7 @@ function setup(wait: number, opus = false) {
 	})();
 	// One finished group holding a 20 ms frame at `ms`.
 	const write = (sequence: bigint, ms: number) => {
-		const group = track.createGroup(sequence);
+		const group = defined(track.createGroup(sequence));
 		group.writeFrame({
 			payload: encodeFrame(opus ? OPUS : new Uint8Array([1]), Duration.millis(ms)),
 			timestamp: Time.Timestamp.fromMillis(ms),
@@ -104,7 +105,7 @@ test("a gap the reader reports before an empty group still reads as a gap before
 		t.write(0n, 0);
 		// Group 2 holds nothing. The hole at 1 ages from group 2's arrival, while group 2 ages from
 		// group 3's later one, so the reader hands out the empty group 2 with the gap on it.
-		t.track.createGroup(2n).finish();
+		defined(t.track.createGroup(2n)).finish();
 		await t.clock.advance(Duration.millis(90));
 		t.write(3n, 60);
 		await t.clock.advance(Duration.millis(10));
@@ -159,7 +160,7 @@ test("a gap over keys that held no media is no loss", async () => {
 		// Keyed by timestamp in microseconds, with the keys between never declared skipped. The group
 		// past them opens before its frame lands, and the reader gives the keys up while it waits.
 		t.write(0n, 0);
-		const group = t.track.createGroup(20_000n);
+		const group = defined(t.track.createGroup(20_000n));
 		await t.clock.advance(Duration.millis(100));
 		// A later group the reader hands out at once wakes the consumer before the frame says nothing
 		// was missing.
@@ -193,7 +194,7 @@ test("an open group that never delivers a frame is passed once the reader's wait
 	try {
 		t.write(0n, 0);
 		// Opened, never written or finished.
-		t.track.createGroup(1n);
+		defined(t.track.createGroup(1n));
 		// Group 2 lands at 20 ms. The reader expires the open group a wait after its successor landed.
 		for (let i = 2; i <= 6; i++) {
 			await t.clock.advance(Duration.millis(20));
