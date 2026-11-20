@@ -9,6 +9,7 @@ import { defined } from "../defined.test-util.ts";
 import { fromTransport, ProtocolViolation, SessionCode, StreamCode, StreamError, toStreamCode } from "../error.ts";
 import { Consumer as GroupConsumer, type Producer as GroupProducer } from "../group.ts";
 import { randomHop } from "../hop.ts";
+import * as Instance from "../instance.ts";
 import { hooks, NO_MAX_DELAY, staleHole } from "../internal.ts";
 import { createMockTransportPair, manual, settlesWithin, textFrame } from "../mock.ts";
 import { lines } from "../open.ts";
@@ -4216,6 +4217,29 @@ test("a lite-07 prefix wider than the grant is answered region by region", async
 		expect(moved.filter((msg) => msg.status === "endedId")).toEqual([{ status: "endedId", id: 0n, lost: true }]);
 	} finally {
 		for (const broadcast of broadcasts) broadcast.close();
+		close();
+		origin.close();
+	}
+});
+
+// A claim whose route is withdrawn ends, not lost, though another path still advertises the same
+// named instance: only the advertisement the claim came from proves it moved.
+test("a lite-07 withdrawn claim ends though its instance lives on elsewhere", async () => {
+	const origin = new OriginProducer();
+	const instance = { id: Instance.random(), epoch: 0n };
+	const a = origin.route(Path.from("a"), { instance });
+	const b = origin.route(Path.from("b"), { instance });
+	const { next, ok, close } = routedAnswer(origin);
+	try {
+		await ok();
+		for (;;) if ((await next()).status === "synced") break;
+		a.withdraw();
+		let msg = await next();
+		while (msg.status !== "endedId") msg = await next();
+		expect(msg).toEqual({ status: "endedId", id: 0n, lost: false });
+	} finally {
+		a.broadcast.close();
+		b.broadcast.close();
 		close();
 		origin.close();
 	}

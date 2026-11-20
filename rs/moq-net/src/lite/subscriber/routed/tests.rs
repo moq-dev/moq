@@ -354,6 +354,48 @@ async fn a_grant_change_under_a_coarsened_ask_holds_the_readers_that_arrive() {
 	assert!(synced(&reader));
 }
 
+/// A peer that leaves an edit unanswered while its grant keeps changing holds one
+/// prefix per want, however many changes it sends; and a region too deep to lie beneath
+/// the session's root shows nothing there, holding no reader back.
+#[kio::test]
+async fn grant_changes_hold_at_most_one_prefix_per_want() {
+	let (mut subscriber, _consumer) = subscriber();
+	subscriber.origin = subscriber
+		.origin
+		.scope("r", &crate::Patterns::from(crate::Pattern::all()))
+		.unwrap();
+	let granting = |patterns: &[String]| {
+		Permit::granting(
+			(patterns.iter())
+				.map(|pattern| pattern.parse::<crate::Pattern>().unwrap())
+				.collect(),
+		)
+	};
+	let mut routed = Routed::new(&subscriber, 1, &granting(&["a/**".to_string()]), None, None).unwrap();
+	routed.want(Path::empty(), subscriber.origin.snapshot(""));
+	routed.want(Path::from_static("a"), subscriber.origin.snapshot("a"));
+	pump(&mut routed, &subscriber);
+	let stream = routed.stream();
+	// The answer never comes.
+	routed
+		.limit(&granting(&["a/**".to_string(), "c/**".to_string()]))
+		.unwrap();
+	assert!(matches!(stream.try_wire(), Some(Msg::Ask(_))));
+	for i in 0..64 {
+		routed
+			.limit(&granting(&["a/**".to_string(), format!("b{i}/*/**")]))
+			.unwrap();
+		routed.limit(&granting(&["a/**".to_string()])).unwrap();
+	}
+	assert_eq!(routed.gained.len(), 1, "only the whole tree gained");
+
+	let deep = "x".repeat(crate::Path::MAX_BYTES);
+	routed
+		.limit(&granting(&["a/**".to_string(), format!("{deep}/**")]))
+		.unwrap();
+	assert_eq!(routed.gained.len(), 1);
+}
+
 /// A forwarding neighbour's claims wait for the floor that closes their batch, and are
 /// served under the route the floor names.
 #[kio::test]

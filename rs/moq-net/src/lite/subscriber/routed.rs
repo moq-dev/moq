@@ -172,9 +172,10 @@ pub(in crate::lite) struct Routed {
 	wants: BTreeMap<Path, Option<crate::model::Snapshot>>,
 	/// The prefixes asked of the peer.
 	asked: BTreeMap<u64, Asked>,
-	/// What a grant change newly shows within a want, relative to the root, each holding
-	/// the origin's readers there unsynced until an answer after the change is in.
-	gained: Vec<(Path, crate::model::Snapshot)>,
+	/// By want, the prefix within it that a grant change newly shows something in,
+	/// relative to the root, holding the origin's readers there unsynced until an answer
+	/// after the change is in. One per want, however often the grant changes.
+	gained: BTreeMap<Path, (Path, crate::model::Snapshot)>,
 	/// The grant showed more since the last edit: the next is sent even when it changes
 	/// nothing, since its ANNOUNCE_OK follows what the change shows under a wider prefix.
 	regranted: bool,
@@ -343,7 +344,7 @@ impl Routed {
 			origin: subscriber.origin.clone(),
 			wants: BTreeMap::new(),
 			asked: BTreeMap::new(),
-			gained: Vec::new(),
+			gained: BTreeMap::new(),
 			regranted: false,
 			next_prefix: 0,
 			edits: VecDeque::new(),
@@ -388,6 +389,7 @@ impl Routed {
 	/// The origin no longer wants `prefix` of the peer.
 	pub(in crate::lite) fn unwant(&mut self, prefix: &Path) {
 		self.wants.remove(prefix);
+		self.gained.remove(prefix);
 		self.reask();
 	}
 
@@ -442,7 +444,7 @@ impl Routed {
 				*snapshot = None;
 			}
 		}
-		self.gained.retain(|(prefix, _)| !answered(prefix));
+		self.gained.retain(|_, (prefix, _)| !answered(prefix));
 	}
 
 	/// The peer finished its stream: it is leaving, and answers nothing more.
@@ -806,23 +808,33 @@ impl Routed {
 		// for it. Elsewhere, and on a narrowing, nothing new can arrive, and a reader stays
 		// synced.
 		if !permit.same_grant(&self.permit) {
+			let overlaps = |a: &Path, b: &Path| a.has_prefix(b) || b.has_prefix(a);
 			let asking = self.stream.asking();
 			for region in permit.gained(&self.permit) {
-				let overlaps = |prefix: &Path| region.has_prefix(prefix) || prefix.has_prefix(&region);
-				if (self.root.join(&region).ok()).is_some_and(|region| {
-					asking
-						.iter()
-						.any(|asked| asked.has_prefix(&region) || region.has_prefix(asked))
-				}) {
+				// Too deep to lie beneath the root, it shows nothing here.
+				let Ok(absolute) = self.root.join(&region) else {
+					continue;
+				};
+				if asking.iter().any(|asked| overlaps(asked, &absolute)) {
 					self.regranted = true;
 				}
-				for want in self.wants.keys().filter(|want| overlaps(want)) {
-					let within = match region.has_prefix(want) {
+				for want in self.wants.keys().filter(|want| overlaps(want, &region)) {
+					self.regranted = true;
+					let mut within = match region.has_prefix(want) {
 						true => region.clone(),
 						false => want.clone(),
 					};
-					self.gained.push((within.clone(), self.origin.snapshot(within)));
-					self.regranted = true;
+					// One hold per want: the prefix both gains lie within, which holds every
+					// reader either would.
+					if let Some((held, _)) = self.gained.get(want) {
+						let shared = route::ancestors(held).rev().find(|above| within.has_prefix(above));
+						within = shared.unwrap_or_default();
+						if within == *held {
+							continue;
+						}
+					}
+					let snapshot = self.origin.snapshot(within.clone());
+					self.gained.insert(want.clone(), (within, snapshot));
 				}
 			}
 		}

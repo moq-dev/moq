@@ -226,10 +226,13 @@ export class Answer {
 		// prefix, less the hidden ones it did not ask for and whatever our grant does not let us publish.
 		const latest = new Map<Path.Valid, Advertised>();
 		const shows = (path: Path.Valid) => !grant || grant.publish.matches(path);
-		// The instances the table still advertises: a claim the peer holds of one is lost to it
-		// rather than ended, since its publisher never withdrew it.
+		// Whether the advertisement a claim the peer holds came from is still in the table, as when
+		// its presentation moved: the claim is lost to the peer rather than ended, since its publisher
+		// never withdrew it. Another path's advertisement of the same instance proves nothing.
 		const stillAdvertised = (sent: Sent) =>
-			[...(table?.values() ?? [])].some((candidates) => candidates.some((snap) => sameInstance(snap, sent.snap)));
+			[...(table?.values() ?? [])].some((candidates) =>
+				candidates.some((snap) => snap.identity === sent.snap.identity && sameInstance(snap, sent.snap)),
+			);
 		const ids = [...this.#prefixes.keys()].sort((a, b) => (a < b ? -1 : 1));
 		for (const id of table ? ids : []) {
 			const prefix = this.#prefixes.get(id);
