@@ -7161,6 +7161,109 @@ fn leases_hold_one_stream_window() {
 	assert_eq!(pair.server_recv(server_ch, s).lease(0).err(), Some(recv::Error::Closed));
 }
 
+/// A reader can let the peer send less than the stream window past what it took, so a
+/// reader about to stop holds less: credit already granted stays granted, a smaller window
+/// limits what is granted next, and a larger one grants at once. Each change reports the
+/// connection credit the stream may hold.
+#[test]
+fn a_smaller_window_limits_the_next_grant() {
+	const WINDOW: usize = 4000;
+	const STREAM: usize = 1000;
+	let _guard = subscribe();
+	let mut transport = transport::Config::default();
+	transport.limits.receive_window = NonZeroU64::new(WINDOW as u64);
+	transport.limits.stream_receive_window = NonZeroU64::new(STREAM as u64);
+	let mut pair = Pair::new(
+		Default::default(),
+		server::Config {
+			transport,
+			..server_config()
+		},
+	);
+	let chs = pair.connect();
+	let (client_ch, server_ch) = chs;
+	let s = pair
+		.client_streams(client_ch)
+		.open(Dir::Uni, Default::default())
+		.unwrap();
+	let msg = vec![0xAB; WINDOW];
+	let all = msg.len();
+	let mut sent = 0;
+	let take_all = |pair: &mut Pair| {
+		let mut recv = pair.server_recv(server_ch, s);
+		let mut lease = recv.lease(0).unwrap();
+		lease.advance(lease.remaining());
+		recv.release(lease);
+	};
+
+	assert_eq!(pump_leased(&mut pair, chs, s, (&msg, 100), &mut sent), 100);
+	take_all(&mut pair);
+	assert_eq!(
+		pair.server_recv(server_ch, s).set_window(200),
+		(STREAM - 100) as u64,
+		"the first stream window stays granted"
+	);
+	assert_eq!(pump_leased(&mut pair, chs, s, (&msg, all), &mut sent), STREAM - 100);
+
+	take_all(&mut pair);
+	assert_eq!(
+		pump_leased(&mut pair, chs, s, (&msg, all), &mut sent),
+		200,
+		"only the smaller window"
+	);
+	assert_eq!(pair.server_recv(server_ch, s).set_window(200), 200, "all of it arrived");
+
+	assert_eq!(pair.server_recv(server_ch, s).set_window(STREAM as u64), STREAM as u64);
+	assert_eq!(
+		pump_leased(&mut pair, chs, s, (&msg, all), &mut sent),
+		STREAM - 200,
+		"a larger window grants at once"
+	);
+}
+
+/// A window set on a bidirectional stream this side opened, before anything arrived on it,
+/// holds once the first grant is spent.
+#[test]
+fn a_window_holds_on_a_stream_opened_locally() {
+	const STREAM: usize = 1000;
+	let _guard = subscribe();
+	let mut client = client_config();
+	client.transport.limits.stream_receive_window = NonZeroU64::new(STREAM as u64);
+	let mut pair = Pair::default();
+	let (client_ch, server_ch) = pair.connect_with(client);
+	let s = pair
+		.client_streams(client_ch)
+		.open(Dir::Bi, Default::default())
+		.unwrap();
+	assert_eq!(
+		pair.client_recv(client_ch, s).set_window(200),
+		STREAM as u64,
+		"the first stream window stays granted"
+	);
+
+	pair.client_send(client_ch, s).write(&mut &b"x"[..]).unwrap();
+	pair.drive();
+	assert_matches!(pair.server_streams(server_ch).accept(Dir::Bi), Some(stream) if stream == s);
+	let msg = vec![0xAB; 2 * STREAM];
+	let mut sent = 0;
+	let mut send = |pair: &mut Pair| {
+		let before = sent;
+		while let Poll::Ready(Ok(n)) = pair.server_send(server_ch, s).try_write(&mut &msg[sent..]) {
+			sent += n;
+		}
+		pair.drive();
+		sent - before
+	};
+	assert_eq!(send(&mut pair), STREAM);
+
+	let mut recv = pair.client_recv(client_ch, s);
+	let mut lease = recv.lease(0).unwrap();
+	lease.advance(lease.remaining());
+	recv.release(lease);
+	pair.drive();
+	assert_eq!(send(&mut pair), 200, "only the smaller window");
+}
+
 /// Lease `want` bytes of `s` once they arrive, driving the pair until they do, and hand them
 /// back unread.
 fn await_unit(

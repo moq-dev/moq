@@ -31,7 +31,7 @@ pub(super) struct Leased {
 	lent: u64,
 	/// Bytes whose connection credit is withheld: `len`, plus bytes taken or advanced past but
 	/// not yet released.
-	held: u64,
+	pub(super) held: u64,
 	/// How the stream ended, once the last byte is leased.
 	end: Option<End>,
 	priority: i64,
@@ -496,6 +496,30 @@ impl Stream<'_> {
 		state.lent = 0;
 		// What the reader took returns its stream credit.
 		self.queue_max_stream_data()
+	}
+
+	/// Let the peer send at most `window` bytes past what the reader took, rather than the
+	/// connection's stream receive window, returning the connection credit the stream may hold
+	/// from now on: what arrived and was not released, and what the peer may still send.
+	///
+	/// A reader about to stop taking shrinks its window first, so the stream holds little
+	/// while it waits. Credit already granted stays granted, so a smaller window holds only
+	/// once the reader takes what was granted before it. A larger window, up to the
+	/// connection's, grants the added credit once it is an eighth of the window, as a read
+	/// would, or at once when a reader waits for it. A reader waiting on a larger unit still
+	/// gets room for it.
+	pub fn set_window(&mut self, window: u64) -> u64 {
+		let stream_receive_window = self.state.stream_receive_window;
+		let Some(slot) = self.state.recv.get_mut(&self.id) else {
+			return 0;
+		};
+		// A stream this side opened has no receive state until something arrives or reads it.
+		let recv = get_or_insert_recv(slot, self.state.initial_stream_receive_window);
+		recv.set_window(window);
+		let credit = recv.credit(stream_receive_window);
+		let transmit = self.queue_max_stream_data();
+		self.transmit(transmit);
+		credit
 	}
 
 	/// Rank this stream for eviction: when the connection window is stuck, the stream with the

@@ -144,11 +144,13 @@ impl Metrics for Untracked {}
 /// stops reading still holds.
 ///
 /// A session's ingest stops reading a group's stream while the group's fastest reader is far
-/// behind, so flow control pushes back to the publisher. Such a paused stream keeps up to
-/// `stream` bytes it has not read, plus what it read of a frame's unsealed segment, counted
-/// against the shared `connection` window, so the session pauses only as many streams as fit
-/// in half of it; the rest keep reading. See
-/// [`poll::Session::receive_window`].
+/// behind, so flow control pushes back to the publisher. Such a paused stream holds the
+/// connection credit it was granted, counted against the shared `connection` window, so the
+/// session pauses only as many streams as fit in half of it; the rest keep reading. A
+/// transport that shapes a stream's credit ([`poll::RecvStream::set_window`]) holds a paused
+/// one to a small allowance, which shrinks with each stream the session shapes yet sums to
+/// under that half however many there are, so every one pauses; any other holds its `stream`
+/// window. See [`poll::Session::receive_window`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ReceiveWindow {
@@ -923,6 +925,19 @@ pub mod poll {
 		fn poll_reset(&mut self, waiter: &kio::Waiter) -> Poll<Self::Error> {
 			let _ = waiter;
 			Poll::Pending
+		}
+
+		/// Let the peer send at most `window` bytes past what the reader took, rather than the
+		/// stream's full receive credit, returning the connection credit the stream may hold from
+		/// now on: the bytes that arrived and were not released, and those the peer may still send.
+		///
+		/// A session pacing a stream (see [`Session::receive_window`]) shrinks its window as the
+		/// group runs out of room, so the stream holds little once paused, and many fit in the
+		/// connection window. Credit already granted stays granted. `None` when the transport
+		/// cannot, the default, whose paused streams hold their full stream credit.
+		fn set_window(&mut self, window: u64) -> Option<u64> {
+			let _ = window;
+			None
 		}
 
 		/// Poll for the next chunk, up to `max` bytes, or `None` once the peer finished the

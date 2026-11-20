@@ -1390,6 +1390,13 @@ impl Producer {
 			.poll_paced(waiter, self.buf.written(Ordering::Acquire) as u64, window)
 	}
 
+	/// How many more bytes of this frame the group's writer may take before
+	/// [`Self::poll_ready`] holds it at `window`, or `None` while nothing would.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn room(&self, window: u64) -> Option<u64> {
+		self.group().room(self.buf.written(Ordering::Acquire) as u64, window)
+	}
+
 	/// Publish what has been written so far, waking consumers parked on the group.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn notify(&self) {

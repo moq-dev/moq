@@ -198,6 +198,13 @@ impl Stream {
 		conn.inner.recv_stream(self.reader.id).set_priority(priority);
 	}
 
+	/// Let the peer send at most `window` bytes past what the reader took, returning the
+	/// connection credit the stream may hold. See `moq_quic`'s `RecvStream::set_window`.
+	pub fn set_window(&mut self, window: u64) -> u64 {
+		let mut conn = self.reader.conn.state.lock();
+		conn.inner.recv_stream(self.reader.id).set_window(window)
+	}
+
 	/// Stop accepting data
 	///
 	/// Discards unread data and notifies the peer to stop transmitting.
