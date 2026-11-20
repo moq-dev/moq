@@ -250,4 +250,3 @@ check that Release remeasure opened or updated its pin PR, as RELEASE.md describ
 - [Interop and Video pass on main](/quest/m0/interop-green/README.md) - the cut PR's release gate runs `interop.yml`, which failed on `main` every day through 2026-11-12
 - [Nightly passes on main](/quest/m0/nightly/README.md) - the release gate runs `features.yml`, red in the 2026-11-12 Nightly
 - [Claim new npm names](/quest/m3/release/npm-first-publish.md) - trusted publishing can publish every new `@moq/*` package
-- [Pre-cut correctness fixes](/quest/m1/precut-fixes/README.md) - both pre-cut audits' required fixes have landed

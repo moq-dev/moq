@@ -82,12 +82,12 @@ impl<E: crate::container::ts::Catalog> ContainerImpl<E> {
 		}
 	}
 
-	fn seek(&mut self, sequence: u64) -> Result<()> {
+	fn seek(&mut self, start: u64) -> Result<()> {
 		match self {
-			ContainerImpl::Fmp4(decoder) => decoder.seek(sequence),
-			ContainerImpl::Mkv(decoder) => decoder.seek(sequence),
-			ContainerImpl::Ts(decoder) => decoder.seek(sequence).map_err(Into::into),
-			ContainerImpl::Flv(decoder) => decoder.seek(sequence),
+			ContainerImpl::Fmp4(decoder) => decoder.seek(start),
+			ContainerImpl::Mkv(decoder) => decoder.seek(start),
+			ContainerImpl::Ts(decoder) => decoder.seek(start).map_err(Into::into),
+			ContainerImpl::Flv(decoder) => decoder.seek(start),
 		}
 	}
 }

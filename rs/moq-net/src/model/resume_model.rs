@@ -1516,6 +1516,68 @@ fn regressions() {
 			],
 			finish: false,
 		},
+		// A time start under the serving copy's resume point is placed where it names, not at
+		// the floor that raised it, so the read waits on a group the local floor keeps out.
+		Case {
+			ops: vec![
+				Op::Join {
+					reader: 2,
+					spec: spec(false, Budget::Hour, None, false),
+				},
+				Op::Write {
+					instance: 0,
+					slot: 0,
+					group: Some(8),
+					frames: 3,
+				},
+				Op::Up { instance: 0, slot: 1 },
+				Op::Down { instance: 0, slot: 0 },
+				Op::Bounds {
+					reader: 2,
+					range: Some((8, 9)),
+				},
+				Op::Ranges {
+					reader: 2,
+					range: Some((7, 9)),
+				},
+				Op::Read { reader: 0 },
+			],
+			finish: false,
+		},
+		// Ranges widened under the resume point of a copy whose failover cap cut their end short
+		// start where they name, and keep their own end.
+		Case {
+			ops: vec![
+				Op::Up { instance: 1, slot: 0 },
+				Op::Join {
+					reader: 1,
+					spec: spec(false, Budget::Hour, Some((3, 7)), false),
+				},
+				Op::Up { instance: 1, slot: 1 },
+				Op::Write {
+					instance: 1,
+					slot: 1,
+					group: Some(3),
+					frames: 1,
+				},
+				Op::Write {
+					instance: 1,
+					slot: 1,
+					group: Some(5),
+					frames: 3,
+				},
+				Op::Down { instance: 1, slot: 1 },
+				Op::Ranges {
+					reader: 1,
+					range: Some((1, 7)),
+				},
+				Op::Join {
+					reader: 0,
+					spec: spec(false, Budget::Hour, None, false),
+				},
+			],
+			finish: false,
+		},
 	];
 	for case in cases {
 		if let Err(err) = run(&case) {

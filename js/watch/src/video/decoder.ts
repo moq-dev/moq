@@ -836,7 +836,7 @@ class Rendition {
 				const { frame } = next;
 
 				// An older keyframe would replace the codec references needed by live deltas. Group
-				// sequences only grow within a subscription, so neither a hole nor an endpoint
+				// starts only grow within a subscription, so neither a hole nor an endpoint
 				// resets this guard. Rejected payloads still count as received bytes.
 				const stale = latest !== undefined && next.group < latest;
 				const accepted = !stale && recovery.accept(frame);
@@ -914,7 +914,7 @@ class Rendition {
 				const { frame } = next;
 
 				// An older keyframe would replace the codec references needed by live deltas. Group
-				// sequences only grow within a subscription, so neither a hole nor an endpoint
+				// starts only grow within a subscription, so neither a hole nor an endpoint
 				// resets this guard. Rejected payloads still count as received bytes.
 				const stale = latest !== undefined && next.group < latest;
 				const accepted = !stale && recovery.accept(frame);

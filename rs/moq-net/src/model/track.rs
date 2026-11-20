@@ -1875,12 +1875,19 @@ impl TrackState {
 	/// A reclaim never adds a run to the arrivals, so forgetting a flood of fragments costs
 	/// nothing there: a run touching no accounted one takes the gap below it too, given up
 	/// early as a fold would. Nothing below the tail's floor is accounted, since nothing waits
-	/// on it and accounting it would lower the floor onto gaps nobody waited for.
+	/// on it and accounting it would lower the floor onto gaps nobody waited for. Without a
+	/// declared start the first arrival stands in for that floor, which a lower arrival still
+	/// moves down, so a run reaching it extends it down instead: that opens no gap.
 	fn forget_drops(&mut self, run: ops::Range<u64>) {
 		self.change_drops(run.clone(), None);
 		self.forgotten.record(run.clone());
 		let floor = self.tail_floor();
-		let start = run.start.max(floor);
+		let reaches = self.start == Start::Unknown
+			&& self
+				.arrivals
+				.first()
+				.is_some_and(|first| run.start < first && first <= run.end);
+		let start = if reaches { run.start } else { run.start.max(floor) };
 		if start >= run.end {
 			return;
 		}
@@ -28525,6 +28532,19 @@ mod test {
 		assert!(producer.state.read().drops.is_empty());
 		assert_eq!(pool.used(), used);
 		assert!(local.state.read().skipped(5), "a local skip above the edge stays");
+	}
+
+	/// A forgotten run reaching a local track's first arrival extends it down, so a group
+	/// landing below it later opens no gap over the run for a reader to wait on.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_forgotten_run_under_the_first_arrival_stays_accounted() {
+		let producer = track_producer("test", Info::timed());
+		producer.give_up(1..2, Hole::drop(StreamError::Cancel));
+		write_group(&producer, 2);
+		producer.forget_drops(1..2);
+		write_group(&producer, 0);
+		assert!(producer.state.read().arrivals.covers(0..3), "group 1 is not waited for");
 	}
 
 	/// A received copy whose end a dropped gap let it reach stays ended once that run expires,
