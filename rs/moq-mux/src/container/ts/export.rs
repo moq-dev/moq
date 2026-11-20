@@ -2539,7 +2539,19 @@ where
 		let pmt_pid = self.pmt_pid();
 		let mut taken: Vec<u16> = vec![0x0000, 0x1FFF];
 		taken.extend(self.pmt_pids());
-		taken.extend(self.program.psi.as_ref().and_then(|psi| psi.own_clock()));
+		// The clock's own PID is taken, unless it waits for the track on it to list (a retag's
+		// replacement, [`Self::revise`]): that track alone may keep it.
+		let clock = self.program.psi.as_ref().and_then(|psi| psi.own_clock());
+		let holder = clock.and_then(|pid| {
+			(self.program.tracks.iter())
+				.find(|(_, track)| track.cataloged && !track.listed && track.pid == pid)
+				.map(|(name, _)| name.clone())
+		});
+		let reserved =
+			|name: &str, pid: u16| holder.as_deref().is_some_and(|holder| holder != name) && Some(pid) == clock;
+		if holder.is_none() {
+			taken.extend(clock);
+		}
 		taken.extend(
 			self.program
 				.tracks
@@ -2562,6 +2574,7 @@ where
 		for &name in &joining {
 			if let Some(pid) = mpegts.tracks.get(name).map(|t| t.pid)
 				&& !taken.contains(&pid)
+				&& !reserved(name, pid)
 			{
 				taken.push(pid);
 				pids.insert(name.clone(), pid);
@@ -2570,7 +2583,7 @@ where
 		for &name in &joining {
 			if !pids.contains_key(name) {
 				let mut pid = FIRST_ES_PID;
-				while taken.contains(&pid) || draining.contains(&pid) {
+				while taken.contains(&pid) || draining.contains(&pid) || reserved(name, pid) {
 					pid += 1;
 				}
 				taken.push(pid);
@@ -3402,18 +3415,16 @@ where
 	}
 
 	/// Rebuild the PMT from the listed tracks, leading the next frame muxed when it changed. The
-	/// clock stays on its PID unless the stream carrying it retired.
+	/// clock stays on its PID unless the stream carrying it retired with no track the catalog
+	/// lists taking the PID over: a rendition the source reopens (a language retag) can retire
+	/// before the one replacing it lists with its first frame.
 	fn revise(&mut self) -> Result<()> {
 		let Some(psi) = self.program.psi.as_ref() else {
 			return Ok(());
 		};
 		let current = psi.pcr_pid().context("PMT without a clock")?;
 		let kept = psi.own_clock() == Some(current)
-			|| self
-				.program
-				.tracks
-				.values()
-				.any(|track| track.listed && track.pid == current);
+			|| (self.program.tracks.values()).any(|track| track.pid == current && (track.listed || track.cataloged));
 		let pcr_pid = match kept {
 			true => current,
 			false => self.pick_clock()?,

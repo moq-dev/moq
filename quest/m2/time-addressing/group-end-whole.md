@@ -80,4 +80,3 @@ Wire: lite-07-wip only, which is unpublished.
 ## Related
 
 - [Start placement](/quest/m2/time-addressing/start-placement.md) - the by-start conversions the old consumers quest also held
-- [Salvage from #9192](/quest/m2/time-addressing/branch-salvage.md) - pieces of the closed branch that stand alone
