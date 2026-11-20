@@ -8,6 +8,7 @@ import { Duration, Instant, now, sleepUntil } from "@moq/clock";
 import { Derived, type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import * as cache from "./cache.ts";
 import { Delivered } from "./delivered.ts";
+import { type Change, type Edit, Prefs, Subscriptions } from "./demand.ts";
 import { DropSet, Runs } from "./drops.ts";
 import {
 	GroupTooLarge,
@@ -23,6 +24,7 @@ import { type Asker, FillState, type Lookup, type Requests, requestsOf } from ".
 import { type Frame, type Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import type { IetfVersion } from "./ietf/version.ts";
 import {
+	type Ask,
 	cutRun,
 	type DropRun,
 	dropAt,
@@ -54,21 +56,11 @@ import { grace, Ledger } from "./ledger.ts";
 import { rescale } from "./rescale.ts";
 import { floorAt, Timescale, type Timestamp } from "./time.ts";
 import { checkEnd, checkKey, max, min, UNBOUNDED } from "./util/key.ts";
-import {
-	bounded,
-	type Holdings,
-	isWire,
-	joinsLive,
-	rangesOf,
-	sameRanges,
-	UNHELD,
-	union,
-	Window,
-	wireSpan,
-} from "./window.ts";
+import { checkName } from "./util/utf8.ts";
+import { bounded, type Found, type Holdings, joinsLive, rangesOf, UNHELD, Window, wireSpan } from "./window.ts";
 import { type Broadcast as BroadcastWire, registerTrackConsumer } from "./wire.ts";
 
-export { type Fill, FillGroups, FillLookup, Requests } from "./fill.ts";
+export { FillGroups, Requests } from "./fill.ts";
 export { rescale, rescaleIn } from "./rescale.ts";
 
 // The group a non-blocking read takes, skipping drops and throwing the track's error;
@@ -82,6 +74,22 @@ function taken(read: () => Recv, ended: () => undefined): GroupConsumer | undefi
 		if (recv.kind !== "drop") return undefined;
 	}
 }
+
+/** What {@link Ordered.nextItem} returns next. Mirrors the Rust `track::Item`. */
+export type Item =
+	/** A group, with a higher key than any group or gap returned before. */
+	| { kind: "group"; group: GroupConsumer }
+	/**
+	 * Groups `[start, end)` this reader gave up on, which it will not return, with what a read of
+	 * them would have ended with. `group` is absent, so `item?.group` reads a group or nothing.
+	 * `landed` is when the latest of those groups landed here, undefined when none did or the cache
+	 * has since evicted it: a reader timing arrivals learns when what it never read came in, such
+	 * as a join's backlog skipped as stale.
+	 */
+	| { kind: "gap"; start: bigint; end: bigint; error: Error; landed?: Instant; group?: never };
+
+// What an ordered read found: an item, or the same idle, end, and error as a group read.
+type ItemRecv = Item | { kind: "idle" } | { kind: "done" } | { kind: "error"; error: Error };
 
 // The unset priority, the midpoint of the signed range: moq-lite carries it as 128 and
 // moq-transport as 127, one urgency on both.
@@ -166,14 +174,8 @@ export interface Info {
 	maxAge: Duration | null;
 	/** Tie-break priority between subscriptions of equal subscriber priority (`-128..=127`, higher first). */
 	priority: number;
-	/**
-	 * How many times its first frame a group's later stored bytes may grow before a joining
-	 * subscriber asks for a new group, or `null` to never ask. A join against a newest group
-	 * whose bytes after its first frame exceed this many times the first frame moves
-	 * {@link Demand.wanted} past it. The joiner still receives the cached group while the new
-	 * one is pending. `0` asks on any join after a delta. An integer in `0..2^32`.
-	 */
-	refresh: number | null;
+	/** When a reader asks for a new group: on a live join, on a {@link Subscriber.refresh}, or both. See {@link Refresh}. */
+	refresh: Refresh;
 	/** The original moq-transport publisher's draft, whose timestamps may rewind. @internal */
 	ietf?: IetfVersion;
 	/**
@@ -185,11 +187,49 @@ export interface Info {
 }
 
 /**
- * What an author supplies to create a track: any {@link Info} field. `compression` defaults to
- * `"none"`, `timescale` and `refresh` to `null`, `priority` to `0`, and `maxAge` to zero. A
- * received {@link Info} serves onward unchanged.
+ * When a reader of a track asks its publisher for a new group, which TRACK_INFO carries on
+ * lite-07. Mirrors the Rust `track::Refresh`.
+ *
+ * A track opting in starts each group with an independent frame (a snapshot or a keyframe)
+ * that the frames after it build on, so a new group is something the publisher can make on
+ * request. A request asks for a group starting past the newest one; every hop judges it
+ * against its own cache, which holds the same group, and requests made while one is pending
+ * coalesce into it. The reader still receives the cached group while the new one is pending.
+ *
+ * A live join asks when the newest group outweighs {@link Refresh.ratio} (any join without one).
+ * {@link Subscriber.refresh} asks regardless of the ratio on a track with an {@link Refresh.interval},
+ * and like a join otherwise. Either request waits out the interval: it takes effect only once
+ * the newest group arrived at least that long ago, so the interval caps how often the
+ * publisher makes groups however many readers ask. A track with no group asks for its first at
+ * once. Both `null` (the default) asks for nothing.
  */
-export interface InfoInit extends Partial<Info> {
+export interface Refresh {
+	/**
+	 * How many times its first frame a group's later bytes may grow before a live join asks for
+	 * a new group, or `null` to judge no ratio: then any join asks, if the track sets an interval.
+	 * `0` asks on any join once a delta follows the first frame. An integer in `0..2^32`.
+	 */
+	ratio: number | null;
+	/**
+	 * How long after the newest group arrived a request may ask for another, or `null` for at
+	 * once. Measured on each hop's own clock from when the group reached it (or, at the
+	 * publisher, was created), as {@link Info.maxAge} expiry measures it. A request made sooner
+	 * waits until then. Carried as milliseconds like {@link Info.maxAge}.
+	 */
+	interval: Duration | null;
+}
+
+/**
+ * What an author supplies to create a track: any {@link Info} field. `compression` defaults to
+ * `"none"`, `timescale` to `null`, `refresh` to never, `priority` to `0`, and `maxAge` to
+ * zero. A received {@link Info} serves onward unchanged.
+ */
+export interface InfoInit extends Partial<Omit<Info, "refresh">> {
+	/**
+	 * When a reader asks for a new group; see {@link Info.refresh}. An omitted field is `null`.
+	 * The interval is rounded up to a whole millisecond like {@link maxAge}.
+	 */
+	refresh?: Partial<Refresh>;
 	/**
 	 * The publisher max age; see {@link Info.maxAge}. Omitted is zero, so readers get only the
 	 * live edge; `null` sets no publisher limit (the wire omits it). A track whose readers reach
@@ -212,7 +252,7 @@ export function authoredInfo(init: InfoInit = {}): Info {
 		timescale: init.timescale == null ? null : Timescale(init.timescale),
 		maxAge: maxAge === null ? null : wireMillis("maxAge", maxAge),
 		priority: priorityValue(init.priority ?? DEFAULT_PRIORITY),
-		refresh: init.refresh == null ? null : refreshRatio(init.refresh),
+		refresh: authoredRefresh(init.refresh),
 		...(init.ietf === undefined ? {} : { ietf: init.ietf }),
 		...(init.unchecked ? { unchecked: true } : {}),
 	};
@@ -239,11 +279,18 @@ function priorityValue(value: number): number {
 	return value;
 }
 
-function refreshRatio(value: number): number {
-	if (!Number.isInteger(value) || value < 0 || value > 0xffff_ffff) {
-		throw new RangeError(`refresh must be an integer in 0..2^32: ${value}`);
+function authoredRefresh(init: Partial<Refresh> = {}): Refresh {
+	const ratio = init.ratio ?? null;
+	if (ratio !== null && (!Number.isInteger(ratio) || ratio < 0 || ratio > 0xffff_ffff)) {
+		throw new RangeError(`refresh ratio must be an integer in 0..2^32: ${ratio}`);
 	}
-	return value;
+	const interval = init.interval == null ? null : wireMillis("refresh interval", init.interval);
+	return { ratio, interval };
+}
+
+// Whether a track asks for new groups at all.
+function refreshes(refresh: Refresh): boolean {
+	return refresh.ratio !== null || refresh.interval !== null;
 }
 
 /** An explicitly included or excluded group key. */
@@ -273,9 +320,9 @@ export interface Groups {
  * reaches back to the oldest as a start, and ends before them all as an end.
  *
  * A time start resolves from the starts of the groups the serving hop holds. When none starts at
- * or before it, a hop whose fill handler serves its history looks the start up there (see
- * {@link FillLookup}), reading nothing until it answers; otherwise, or when the handler can't
- * tell, it reaches back to the oldest group. While no group is held at all it waits for one,
+ * or before it, a hop whose fill handler serves its history asks it for the group containing the
+ * time (see {@link FillGroups.floor}), reading nothing until it answers; otherwise, or when the
+ * handler can't tell, it reaches back to the oldest group. While no group is held at all it waits for one,
  * reading only the groups from its time meanwhile.
  *
  * Older moq-lite versions carry only time anchors, as group IDs, the live start, and the oldest
@@ -309,9 +356,9 @@ export interface Delay {
 	/**
 	 * The target latency, the playout or jitter-buffer delay held behind the live edge. Omitted
 	 * means `0`; `null` means not stated, which a peer whose wire cannot carry it (moq-lite
-	 * before 07, moq-transport) sends. A media consumer also waits this long for a missing group,
-	 * since past it the group would play late, and starts an unstated minimum as `0` but waits a
-	 * missing group for {@link Delay.max} instead.
+	 * before 07, moq-transport) sends. It only sets where a reader starts: a missing group is given
+	 * up by {@link Delay.max} alone, whatever the minimum. A media consumer starts an unstated
+	 * minimum as `0`.
 	 *
 	 * A live join, `{ start: { relative: 0n } }` with no end, starts this far behind the live edge:
 	 * at the newest group that began at or before the live edge minus this, so a player's buffer
@@ -433,41 +480,6 @@ function orderOf(order: Order | undefined): Order {
 	return order;
 }
 
-// The larger of two minimums, ignoring one that went unstated (`null`).
-function largest(a: Duration | null | undefined, b: Duration | null | undefined): Duration | null {
-	if (a === null || a === undefined) return b ?? null;
-	if (b === null || b === undefined) return a;
-	return a.max(b);
-}
-
-// Aggregate the preferences of `states`, matching Rust's Subscription::poll_combined.
-function combineSubscriptions(states: Iterable<TrackState>): Subscription | undefined {
-	let combined: Subscription | undefined;
-	for (const state of states) {
-		const subscription = state.update.peek();
-		if (!subscription) continue;
-		if (!combined) {
-			combined = { ...subscription };
-			continue;
-		}
-
-		combined.priority = Math.max(combined.priority ?? 0, subscription.priority ?? 0);
-		combined.delay = {
-			max: Duration.millis(Math.max(maxDelayOf(combined), maxDelayOf(subscription))),
-			// The largest stated, so an upstream starts far enough back for the reader that buffers most.
-			min: largest(combined.delay?.min, subscription.delay?.min),
-		};
-		// One live subscriber held behind another's backlog is worse than a backlog sent late.
-		combined.order =
-			combined.order === "ascending" && subscription.order === "ascending" ? "ascending" : "descending";
-
-		// A range above the live edge never hides the latest group from a merged live subscriber.
-		combined.ranges = [...(combined.ranges ?? []), ...(subscription.ranges ?? [])];
-	}
-	if (combined) combined.ranges = union(combined.ranges ?? []);
-	return combined;
-}
-
 /**
  * A request for a track the peer wants, delivered to the publishing wire layer.
  *
@@ -499,11 +511,8 @@ export class Request {
 		hooks.requestWanted = (request) => {
 			const wanted = request.#producer.demand().wanted;
 			request.#wanted ??= request.#lookups
-				? new Derived(
-						[wanted, request.#lookups.pending],
-						(group, lookups) => group !== undefined || lookups > 0,
-					)
-				: new Derived([wanted], (group) => group !== undefined);
+				? new Derived([wanted, request.#lookups.pending], (subscribed, lookups) => subscribed || lookups > 0)
+				: wanted;
 			return request.#wanted;
 		};
 		hooks.keepRequest = (request) => {
@@ -561,6 +570,16 @@ export class Request {
 /** Options for {@link Consumer.info}. */
 export interface InfoOptions {
 	/** Abandons the lookup, rejecting with the signal's reason; aborting after it resolves has no effect. */
+	signal?: AbortSignal;
+}
+
+/** Options for {@link Subscriber.refresh}. */
+export interface RefreshOptions {
+	/**
+	 * Withdraws this caller's request if it is not sent yet, rejecting with the signal's reason.
+	 * An already-aborted signal rejects before anything is asked, and aborting after it resolves
+	 * has no effect.
+	 */
 	signal?: AbortSignal;
 }
 
@@ -756,6 +775,9 @@ class TrackState {
 	 */
 	reads?: (key: bigint) => boolean;
 	groups = new Signal<GroupConsumer[]>([]);
+	// How many groups were mirrored in, whatever this sink reads: one arriving after its reader
+	// ran out is still in flight below the end.
+	arrived = 0;
 	// Keys the upstream publisher gave up, with why: an incoming SUBSCRIBE_SKIP or
 	// SUBSCRIBE_DROP, or a producer cut. Kept apart from the cache so reclaim cannot
 	// erase a disposition a downstream publisher still has to forward, and as runs so a wide
@@ -801,7 +823,7 @@ class TrackState {
 	// The producer's outcome, settled by its close or by a reached and settled end, whichever
 	// is first. Only the producer's own state uses it.
 	outcome = new Once<Error | null>();
-	update: Signal<Subscription | undefined>;
+	update: Prefs;
 	/** Resolved once the producer commits the immutable properties. */
 	info = new Signal<Info | undefined>(undefined);
 	/** Newest group head, frame, or location reported by the publisher. */
@@ -816,7 +838,7 @@ class TrackState {
 	largestFinished = false;
 
 	constructor(subscription?: Subscription) {
-		this.update = new Signal(subscription === undefined ? undefined : subscriptionDefaults(subscription));
+		this.update = new Prefs(subscription === undefined ? undefined : subscriptionDefaults(subscription));
 	}
 }
 
@@ -945,14 +967,14 @@ function removeKey(keys: bigint[], key: bigint): void {
 let cachedMirror: (producer: Producer, key: bigint, from: number) => GroupConsumer | undefined;
 // Whether the producer still caches a group that has not failed; assigned in its static block.
 let cachedHolds: (producer: Producer, key: bigint) => boolean;
-// Whether group `key` is cached as a copy from frame 0 that has not written it yet, so its
-// start may still land, as the Rust `Slot::may_start` says.
-let cachedMayStart: (producer: Producer, key: bigint) => boolean;
 // Whether the producer is a copy a session receives, whose handler fetches by group alone.
 let receivedCopy: (producer: Producer) => boolean;
 // The keys in `[start, end)` the producer caches, unsorted, costing the smaller of the span
 // and the cache; assigned in its static block.
 let cachedIn: (producer: Producer, start: bigint, end: bigint) => bigint[];
+// When the latest group the producer caches in `[start, end)` landed, undefined when it caches
+// none; assigned in its static block.
+let cachedLanded: (producer: Producer, start: bigint, end: bigint) => Instant | undefined;
 // Mirror the cached groups in `[start, end)` that `offer` accepts into a sink again, cut ones
 // included as a fresh sink gets them, for a reader whose floor moved below them; assigned in
 // the producer's static block.
@@ -968,10 +990,14 @@ let reofferCached: (
 let reofferKeys: (producer: Producer, sink: TrackState, keys: readonly bigint[]) => void;
 // Whether a group may still land on the producer's live feed; assigned in its static block.
 let mayLand: (producer: Producer, land: Land) => boolean;
-// Recompute the producer's aggregates now, for a sink that just became a fetch; assigned in its
+// Take a sink that just became a fetch out of the producer's live aggregate; assigned in its
 // static block.
-let resubscribe: (producer: Producer) => void;
+let unlive: (producer: Producer, sink: TrackState) => void;
+// Where a session's live feed starts owing groups, if known: it owes none below.
+let feedFloor: (producer: Producer) => bigint | undefined;
 let owedRuns: (producer: Producer, start: bigint, end: bigint) => Iterable<Run & { folds?: Instant }>;
+// Whether a wire subscription feeds the producer, so it owes every group it has not accounted for.
+let wireFed: (producer: Producer) => boolean;
 let owedGroup: (producer: Producer, start: bigint, end: bigint) => { key: bigint; folds?: Instant } | undefined;
 let fillEdge: (producer: Producer) => bigint | undefined;
 let sourceStart: (producer: Producer) => bigint | "pending" | undefined;
@@ -985,7 +1011,11 @@ let keysOf: (producer: Producer) => readonly bigint[];
 let timeAnchors: (producer: Producer) => {
 	atKeys: boolean;
 	starts: ReadonlyMap<bigint, bigint>;
+	/** The newest of `starts` past the time its range asked from, 0 when none is. */
+	past: bigint;
 	relative: ReadonlyMap<bigint, { start: bigint; latest?: bigint }>;
+	/** Bumped whenever the others, or whether the producer is a received copy, change. */
+	placing: number;
 };
 
 /** The groups a reader reads, and the exclusive end it stops at; undefined before its ranges resolve. */
@@ -1066,52 +1096,122 @@ let fillsOf: (producer: Producer) => FillState;
 let makeOrdered: (subscriber: Subscriber) => Ordered;
 let ordered_: {
 	nextGroup(subscriber: Subscriber): Promise<GroupConsumer | undefined>;
-	tryNextGroup(subscriber: Subscriber): Recv;
+	nextItem(subscriber: Subscriber): Promise<Item | undefined>;
+	tryItem(subscriber: Subscriber): ItemRecv;
 	ended(subscriber: Subscriber): undefined;
 	readFrame(subscriber: Subscriber): Promise<({ group: bigint; frame: number } & Frame) | undefined>;
 	readString(subscriber: Subscriber): Promise<string | undefined>;
 	readJson(subscriber: Subscriber): Promise<unknown | undefined>;
+	isSkipped(subscriber: Subscriber, start: bigint, end: bigint): boolean;
 };
 
+// A pending request for a group past every key written. Mirrors the Rust `demand::Pending`.
+interface PendingRefresh {
+	// When it takes effect: at once, or once the track's refresh interval has passed.
+	at: Instant;
+	// {@link Subscriber.refresh} callers waiting for it to be sent. The last to abort before then
+	// withdraws it, unless it is `kept`.
+	callers: number;
+	// A join, a shed read, or a peer asked too, and none of those withdraws.
+	kept: boolean;
+	// Whatever serves the track (an upstream session or the local publisher) read it.
+	sent: boolean;
+	// Settles each waiting caller: resolves it, or rejects it with the track's close.
+	settles: Set<(err?: Error) => void>;
+}
+
+// A getter that reports each value read from it, so a pending refresh is sent once whatever
+// serves the track reads it.
+class Read<T> implements Getter<T> {
+	#source: Getter<T>;
+	#read: (value: T) => void;
+
+	constructor(source: Getter<T>, read: (value: T) => void) {
+		this.#source = source;
+		this.#read = read;
+	}
+
+	peek(): T {
+		const value = this.#source.peek();
+		this.#read(value);
+		return value;
+	}
+
+	changed(): Promise<T>;
+	changed(fn: (value: T) => void): Dispose;
+	changed(fn?: (value: T) => void): Promise<T> | Dispose {
+		if (!fn) {
+			return this.#source.changed().then((value) => {
+				this.#read(value);
+				return value;
+			});
+		}
+		return this.#source.changed((value) => {
+			this.#read(value);
+			fn(value);
+		});
+	}
+
+	subscribe(fn: (value: T) => void): Dispose {
+		return this.#source.subscribe((value) => {
+			this.#read(value);
+			fn(value);
+		});
+	}
+}
+
 // Constructs a Demand from within this module; assigned in the class's static block.
-let makeDemand: (name: string, wanted: Getter<bigint | undefined>, state: TrackState) => Demand;
+let makeDemand: (name: string, signals: DemandSignals, state: TrackState) => Demand;
+
+// What a producer reports through its {@link Demand}.
+interface DemandSignals {
+	wanted: Getter<boolean>;
+	refresh: Getter<boolean>;
+	asked: Getter<bigint | undefined>;
+}
 
 /**
  * A watch-only view of a track's subscriber demand, from {@link Producer.demand}. Mirrors the
  * Rust `Demand`.
  *
  * Lets a publisher gate work (on-demand capture or encoding) on whether anyone is subscribed,
- * without the ability to write groups or close the track. The consumer wire watches it to tear an
- * idle upstream subscription down instead of downloading to nobody.
+ * and open a group when a reader asks for one, without the ability to write groups or close the
+ * track. The consumer wire watches it to tear an idle upstream subscription down instead of
+ * downloading to nobody.
  */
 export class Demand {
 	/** The track name. */
 	readonly name: string;
 
-	#wanted: Getter<bigint | undefined>;
+	#signals: DemandSignals;
 	#state: TrackState;
 
-	private constructor(name: string, wanted: Getter<bigint | undefined>, state: TrackState) {
+	private constructor(name: string, signals: DemandSignals, state: TrackState) {
 		this.name = name;
-		this.#wanted = wanted;
+		this.#signals = signals;
 		this.#state = state;
 	}
 
 	static {
-		makeDemand = (name, wanted, state) => new Demand(name, wanted, state);
+		makeDemand = (name, signals, state) => new Demand(name, signals, state);
 		hooks.demandPriority = (demand) => demand.#state.info.peek()?.priority ?? DEFAULT_PRIORITY;
 		hooks.demandReleased = (demand) => demand.#state.closed;
+		hooks.demandAsked = (demand) => demand.#signals.asked;
+	}
+
+	/** Whether anyone subscribes to the open track. Watch it (`effect.get` / `.peek()`) to follow demand. */
+	get wanted(): Getter<boolean> {
+		return this.#signals.wanted;
 	}
 
 	/**
-	 * The group subscribers want: `undefined` while nobody subscribes, otherwise the key
-	 * the next group should have at least. A publisher opens a group whenever it passes its
-	 * largest. The first subscriber of a track with no group wants `0`, and a join judged by
-	 * {@link Info.refresh} wants the next free key until a group lands there. It never goes back. Watch it
-	 * (`effect.get` / `.peek()`) to follow demand.
+	 * Whether a subscriber asks for a new group: the first group of a track with none written, or
+	 * a live join or {@link Subscriber.refresh} judged by {@link Info.refresh}, once its interval
+	 * has passed. The next group appended clears it, so a publisher waits for it to turn true,
+	 * opens a group (a keyframe or a snapshot), and waits again.
 	 */
-	get wanted(): Getter<bigint | undefined> {
-		return this.#wanted;
+	get refresh(): Getter<boolean> {
+		return this.#signals.refresh;
 	}
 
 	/**
@@ -1152,10 +1252,14 @@ export class Producer {
 	// `max_sequence`, and where the next append lands.
 	#received = 0n;
 	#subscribing = new Signal(false);
+	// The aggregate across every subscriber, fetches included: what the wire asks for.
+	#requested = new Subscriptions();
 	// The aggregate across live subscribers only. A fetch's preferences judge just the group it
 	// asks for, so a publisher sizing what it serves (such as how much retained media to replay)
-	// must not see them. The wire's aggregate, `#state.update`, keeps them.
-	#live = new Signal<Subscription | undefined>(undefined);
+	// must not see them. The wire's aggregate, `#requested`, keeps them.
+	#live = new Subscriptions();
+	// The sinks counted in `#live`.
+	#counted = new Set<TrackState>();
 
 	// Recently written source groups, in arrival order, retained for replay to late subscribers
 	// until the cache pool evicts them once idle. A set, so evicting a run of
@@ -1179,8 +1283,14 @@ export class Producer {
 	// Where the upstream publisher started each of a lite-07 copy's live wire ranges, by the time
 	// it asked from. Mirrors the Rust `TrackState::time_starts`.
 	#timeStarts = new Map<bigint, bigint>();
+	// The newest start in `#timeStarts` past the time its range asked from, kept as it is
+	// replaced: a reader's `unplaced` reads it on every settle. Mirrors the Rust `starts_past`.
+	#startsPast = 0n;
 	// On a lite-07 copy, where the publisher started each live range counting back, by its count.
 	#relativeStarts = new Map<bigint, { start: bigint; latest?: bigint }>();
+	// Counts changes to how a time start is placed other than by groups arriving or drops: the wire,
+	// `#timeStarts`, and `#startsAtKeys`. Mirrors the Rust `TrackState::placing`.
+	#placing = 0;
 	// The highest-key checked start evicted. Eviction is not a key prefix, so a
 	// group above it is checked against it as well as its cached neighbors; one at or below
 	// it may have lost its lower bound. One entry, so nothing grows with the cache.
@@ -1198,13 +1308,22 @@ export class Producer {
 	// One independent downstream state per live subscriber.
 	#sinks = new Set<TrackState>();
 
-	// The group subscribers want while any is attached, watched through {@link demand}.
-	#wanted = new Signal<bigint | undefined>(undefined);
+	// Whether any subscriber is attached, watched through {@link demand}.
+	#wanted = new Signal(false);
+	// Whether one asks for a new group now; see {@link Demand.refresh}.
+	#refreshing = new Signal(false);
+	// The group start asked for while it is past every key written; see `hooks.demandAsked`.
+	#asked = new Signal<bigint | undefined>(undefined);
 	// The lowest group they want while no refresh is pending, never lowered.
 	#floor = 0n;
-	// A join over the refresh ratio asked for a group past every key written, and none
-	// has landed yet.
-	#refresh = false;
+	// A request for a group past every key written, until a group answers it or its callers
+	// withdraw it. Read against `#received` rather than stored as a key, so a key written
+	// without answering it can never leave the ask behind.
+	#pending?: PendingRefresh;
+	// The last pending refresh {@link #refreshing} notified as due.
+	#announced?: PendingRefresh;
+	// Wakes a deferred refresh once it comes due.
+	#refreshTimer?: { at: Instant; abort: AbortController };
 	#demand: Demand;
 	// Only real objects or upstream metadata advance this, never the head of an empty group.
 	#objectLargest?: Position;
@@ -1214,8 +1333,8 @@ export class Producer {
 	#wire?: Wire;
 	// The misses its readers asked of a {@link Requests} handle.
 	#fills: FillState;
-	// The keys the live feed delivered, as a group or a drop, and the stale runs a reclaim
-	// forgot: what a pending tail is judged by. Eviction never touches it. A gap folds away a
+	// The keys the live feed delivered as a group, and the drops a reclaim forgot, which `drops`
+	// no longer holds: what a pending tail is judged by. Eviction never touches it. A gap folds away a
 	// subscription's grace after a later arrival opened it, as the session's tail does, so this
 	// holds only the gaps still worth waiting for.
 	#arrivals = new Ledger();
@@ -1228,8 +1347,18 @@ export class Producer {
 	#appended?: bigint;
 
 	constructor(name: string) {
+		checkName(name);
 		this.name = name;
-		this.#demand = makeDemand(name, this.#wanted, this.#state);
+		// Whatever serves the track reading a request sends it.
+		this.#demand = makeDemand(
+			name,
+			{
+				wanted: this.#wanted,
+				refresh: new Read(this.#refreshing, (asking) => asking && this.#sent()),
+				asked: new Read(this.#asked, (asked) => asked !== undefined && this.#sent()),
+			},
+			this.#state,
+		);
 		this.#fills = new FillState({
 			name,
 			accept: (key, info) => {
@@ -1309,13 +1438,18 @@ export class Producer {
 	// them again, and a reader that wants one asks a fill or judges it by its budget. A reclaim
 	// never adds a run to the arrivals: a run touching no accounted one takes the gap below it
 	// too, given up early as a fold would. Nothing below the tail's floor is accounted, since
-	// accounting it would lower the floor onto gaps nobody waited for. Mirrors the Rust
+	// accounting it would lower the floor onto gaps nobody waited for. Without a declared start
+	// the first arrival stands in for that floor, which a lower arrival still moves down, so a
+	// run reaching it extends it down instead: that opens no gap. Mirrors the Rust
 	// `TrackState::forget_drops`.
 	#forgot(forgotten: readonly Run[]): void {
 		const feed = this.#feedStart();
+		const declared = feed === "pending" ? this.#wire?.served?.requested : feed;
 		for (const run of forgotten) {
-			const floor = (feed === "pending" ? this.#wire?.served?.requested : feed) ?? this.#arrivals.first() ?? 0n;
-			let start = max(run.start, floor);
+			const first = this.#arrivals.first();
+			const floor = declared ?? first ?? 0n;
+			const reaches = declared === undefined && first !== undefined && run.start < first && first <= run.end;
+			let start = reaches ? run.start : max(run.start, floor);
 			if (start >= run.end) continue;
 			// The highest run starting at or below the run's end touches it when it ends at or past
 			// its start; otherwise it is the run below.
@@ -1350,10 +1484,11 @@ export class Producer {
 			producer.#account = producer.#openAccount(pool);
 		};
 		hooks.subscribing = (producer) => producer.#subscribing;
-		hooks.requested = (producer) => producer.#state.update;
-		resubscribe = (producer) => producer.#updateSubscription();
+		hooks.requested = (producer) => producer.#requested;
+		unlive = (producer, sink) => producer.#unlive(sink);
 		hooks.cacheTrack = (producer) => {
 			producer.#wire = undefined;
+			producer.#placing++;
 			// Nothing feeds the tail anymore, so it owes nothing and readers end at the boundary.
 			for (const state of [producer.#state, ...producer.#sinks]) state.owed.set(false);
 			producer.#endLargest();
@@ -1373,6 +1508,7 @@ export class Producer {
 				: undefined;
 		hooks.receiveTrack = (producer, starts = {}) => {
 			producer.#wire = { starts, served: producer.#wire?.served };
+			producer.#placing++;
 		};
 		hooks.receiveGroup = (producer, { start: sequence, offset: start, fill }) =>
 			producer.#createGroup(sequence, start, fill);
@@ -1391,19 +1527,28 @@ export class Producer {
 		timeAnchors = (producer) => ({
 			atKeys: producer.#startsAtKeys,
 			starts: producer.#timeStarts,
+			past: producer.#startsPast,
 			relative: producer.#relativeStarts,
+			placing: producer.#placing,
 		});
 		hooks.startsAtKeys = (producer) => {
 			producer.#startsAtKeys = true;
+			producer.#placing++;
 		};
 		hooks.timeStarts = (producer, starts) => {
 			producer.#timeStarts = new Map(starts);
+			producer.#startsPast = 0n;
+			for (const [asked, start] of producer.#timeStarts) {
+				if (asked < start && start > producer.#startsPast) producer.#startsPast = start;
+			}
+			producer.#placing++;
 		};
 		hooks.relativeStarts = (producer, starts) => {
 			producer.#relativeStarts = new Map([...starts].map(([back, start, latest]) => [back, { start, latest }]));
 		};
 		hooks.producerLargest = (producer) => producer.#state.largest;
-		hooks.joinProducer = (producer) => producer.#join();
+		hooks.askProducer = (producer, ask) => producer.#ask(ask);
+		hooks.requestProducer = (producer, signal) => producer.#request(signal);
 		hooks.endTrack = (producer, end, error) => producer.#endPending(end, error);
 		hooks.tailGrace = (producer) => producer.#grace();
 		hooks.releaseTrack = (producer) => producer.#close(undefined);
@@ -1440,10 +1585,6 @@ export class Producer {
 			const entry = producer.#cached.get(key);
 			return entry !== undefined && !(entry.group.closed.peek() instanceof Error);
 		};
-		cachedMayStart = (producer, key) => {
-			const entry = producer.#cached.get(key);
-			return entry !== undefined && hooks.groupMayStart(entry.group);
-		};
 		receivedCopy = (producer) => producer.#wire !== undefined;
 		cachedIn = (producer, start, end) => {
 			if (end - start <= BigInt(producer.#cached.size)) {
@@ -1452,6 +1593,14 @@ export class Producer {
 				return found;
 			}
 			return [...producer.#cached.keys()].filter((key) => key >= start && key < end);
+		};
+		cachedLanded = (producer, start, end) => {
+			let landed: Instant | undefined;
+			for (const key of cachedIn(producer, start, end)) {
+				const arrived = producer.#cached.get(key)?.arrived;
+				if (arrived && (!landed || arrived.gt(landed))) landed = arrived;
+			}
+			return landed;
 		};
 		cachedMirror = (producer, key, from) => {
 			const entry = producer.#cached.get(key);
@@ -1482,10 +1631,15 @@ export class Producer {
 			}
 		};
 		mayLand = (producer, land) => producer.#landable(land) !== undefined;
+		wireFed = (producer) => producer.#wire !== undefined;
+		feedFloor = (producer) => {
+			if (!producer.#wire) return undefined;
+			const feed = producer.#feedStart();
+			return feed === "pending" ? producer.#wire.served?.requested : feed;
+		};
 		owedRuns = (producer, start, end) => {
 			if (!producer.#wire) return [];
-			const feed = producer.#feedStart();
-			const floor = feed === "pending" ? producer.#wire.served?.requested : feed;
+			const floor = feedFloor(producer);
 			return producer.#landing({
 				start: max(start, floor ?? 0n),
 				end,
@@ -1560,9 +1714,10 @@ export class Producer {
 		if (hole.stale === undefined) this.#fills.dropped(start, end);
 		for (const run of runs) this.#setDrops(run.start, run.end, hole);
 		for (const group of arriving) group.abort(hole.error);
-		// A pending tail owes nothing the publisher gave up. A stale verdict is not receipt: a new
-		// upstream subscription supersedes it, leaving those groups unknown again, as in Rust.
-		if (hole.stale === undefined) this.#arrive(start, end);
+		// A pending tail owes nothing the publisher gave up (see `#owes`). The arrivals leave the
+		// run out while it is held, as in Rust: arriving it would open a gap below it, dated now,
+		// which folds before a group still landing there arrives.
+		this.#owe();
 		// Giving up the last keys below the end reaches it, as writing them would.
 		this.#endLargest();
 		return runs;
@@ -1637,7 +1792,9 @@ export class Producer {
 		this.#state.info.set(resolved);
 		// Propagate to any sink handed out before accept (the on-demand path).
 		for (const sink of this.#sinks) sink.info.set(resolved);
-		this.#updateSubscription();
+		// The info bounds the tail's grace, which judges what it still owes.
+		this.#settle();
+		this.#owe();
 		return this;
 	}
 
@@ -1668,7 +1825,7 @@ export class Producer {
 	 * never need one; a publisher backed by storage opens one to serve its history. Mirrors the
 	 * Rust `Producer::requests`.
 	 *
-	 * While one is open, each run of misses queues a {@link Fill}, which readers missing the same
+	 * While one is open, each run of misses queues a {@link FillGroups}, which readers missing the same
 	 * groups share; with none open, a miss is given up and {@link Consumer.fetchGroup} of an
 	 * uncached group fails with `NotFound`. A reader only asks for what its budget still wants,
 	 * so a reader at the live edge never asks. The track stays one track: answered groups land
@@ -1678,24 +1835,144 @@ export class Producer {
 		return requestsOf(this.#fills);
 	}
 
-	// A subscriber joined at the live edge: ask for a group past every key written when
-	// the newest group's bytes after its first frame exceed the refresh ratio times the first
-	// frame.
-	#join(): void {
-		const ratio = this.#state.info.peek()?.refresh;
-		const latest = this.#state.latest;
-		if (ratio == null || latest === undefined) return;
-		const group = this.#cached.get(latest)?.group;
-		if (!group || !hooks.overRefresh(group, ratio)) return;
-		this.#refresh = true;
+	// Ask for a group past every key written, judged by the track's refresh: a live join only
+	// when the newest group outweighs the ratio, and any request only once the newest group is
+	// at least the interval old. A request made sooner is deferred until then, and one made
+	// while a request is pending coalesces into it, the earliest taking effect.
+	#ask(ask: Ask): void {
+		const at = this.#asks(ask);
+		if (at !== undefined) this.#pend(at, true);
+	}
+
+	// {@link #ask} for a {@link Subscriber.refresh} caller, resolving once the request is sent or
+	// a group answers it. Aborting `signal` before then withdraws this caller's request.
+	#request(signal?: AbortSignal): Promise<void> {
+		if (signal?.aborted) return Promise.reject(signal.reason);
+		// A closed track never sends another request, so the caller ends as a pending one would.
+		const closed = this.#state.closed.peek();
+		if (closed !== undefined) return Promise.reject(closed ?? this.#closedBeforeSent());
+		// A caller joining a request already sent has nothing left to wait for.
+		if (this.#pending?.sent) return Promise.resolve();
+		const at = this.#asks("refresh");
+		if (at === undefined) return Promise.resolve();
+		const pending = this.#pend(at, false);
+		return new Promise((resolve, reject) => {
+			const abort = () => {
+				pending.settles.delete(settle);
+				this.#withdraw(pending);
+				reject(signal?.reason);
+			};
+			const settle = (err?: Error) => {
+				signal?.removeEventListener("abort", abort);
+				if (err) reject(err);
+				else resolve();
+			};
+			pending.settles.add(settle);
+			signal?.addEventListener("abort", abort, { once: true });
+		});
+	}
+
+	// Coalesce a request taking effect at `at` into the pending one, the earliest taking effect.
+	#pend(at: Instant, kept: boolean): PendingRefresh {
+		const current = this.#pending;
+		const pending = current ?? { at, callers: 0, kept: false, sent: false, settles: new Set() };
+		this.#pending = pending;
+		pending.kept ||= kept;
+		if (!kept) pending.callers++;
+		// Only a new request, or an earlier one, changes what is asked for.
+		if (current?.at.le(at)) return pending;
+		pending.at = at;
+		this.#reportWanted();
+		return pending;
+	}
+
+	// A caller of `pending` gave up: the last caller withdraws a request not yet sent, unless
+	// something else that never withdraws asked too.
+	#withdraw(pending: PendingRefresh): void {
+		if (this.#pending !== pending || pending.sent) return;
+		pending.callers--;
+		if (pending.callers > 0 || pending.kept) return;
+		this.#endRefresh();
 		this.#reportWanted();
 	}
 
-	// Report the wanted group while anyone subscribes: the next free key while a refresh
-	// is pending.
+	// Whatever serves the track read the group asked for: a due refresh is sent, resolving its
+	// callers.
+	#sent(): void {
+		const pending = this.#pending;
+		if (!pending || pending.sent || !pending.at.le(now())) return;
+		pending.sent = true;
+		for (const settle of pending.settles) settle();
+		pending.settles.clear();
+	}
+
+	// The pending refresh ended, answered or withdrawn, or the track closed with `err`.
+	#endRefresh(err?: Error): void {
+		const pending = this.#pending;
+		this.#pending = undefined;
+		for (const settle of pending?.settles ?? []) settle(err);
+	}
+
+	// What a refresh caller sees when the track closes cleanly before its request is sent.
+	#closedBeforeSent(): Error {
+		return new StreamError(StreamCode.Cancel, { message: `track ${this.name} closed before the refresh was sent` });
+	}
+
+	// When a request as `ask` takes effect, if the track's refresh lets it ask at all.
+	#asks(ask: Ask): Instant | undefined {
+		const refresh = this.#state.info.peek()?.refresh;
+		const latest = this.#state.latest;
+		if (!refresh || !refreshes(refresh) || latest === undefined) return undefined;
+		const entry = this.#cached.get(latest);
+		// The interval alone judges a refresh on a track that declares one, and a shed read
+		// cannot decode on whatever the ratio says.
+		const ratio = ask === "join" || (ask === "refresh" && refresh.interval === null) ? refresh.ratio : null;
+		if (ratio !== null && !(entry && hooks.overRefresh(entry.group, ratio))) return undefined;
+		const current = now();
+		if (refresh.interval === null || !entry) return current;
+		// `undefined` when no instant reaches it.
+		return entry.arrived.checkedAdd(refresh.interval)?.max(current);
+	}
+
+	// Report the demand: whether anyone subscribes, and the group start asked for while it is
+	// past every key written, which is the next free key once a pending refresh is due. A
+	// deferred one arms a wakeup to report again when it comes due.
 	#reportWanted(): void {
-		const wanted = this.#refresh ? max(this.#received, this.#floor) : this.#floor;
-		this.#wanted.set(this.#sinks.size > 0 ? wanted : undefined);
+		const current = now();
+		const request = this.#pending;
+		const pending = request?.at;
+		const due = pending?.le(current) === true;
+		const start = due ? max(this.#received, this.#floor) : this.#floor;
+		const asked = start >= this.#received ? start : undefined;
+		const wanted = this.#sinks.size > 0;
+		this.#asked.set(asked);
+		this.#wanted.set(wanted);
+		const refreshing = wanted && asked !== undefined;
+		// A request due in the batch that ended the last one leaves the level unchanged, so it
+		// notifies anyway: the publisher must read it to send it.
+		if (refreshing && request !== undefined && due && request !== this.#announced) {
+			this.#announced = request;
+			this.#refreshing.set(true, true);
+		} else {
+			this.#refreshing.set(refreshing);
+		}
+
+		const armed = this.#refreshTimer;
+		if (pending !== undefined && !due && armed?.at.eq(pending)) return;
+		armed?.abort.abort();
+		this.#refreshTimer = undefined;
+		if (pending === undefined || due || this.#state.closed.peek() !== undefined) return;
+		const timer = { at: pending, abort: new AbortController() };
+		this.#refreshTimer = timer;
+		// A deferred refresh is never a reason to hold a Node/Bun process open.
+		void sleepUntil(pending, { signal: timer.abort.signal, ref: false }).then(
+			() => {
+				if (this.#refreshTimer !== timer) return;
+				this.#refreshTimer = undefined;
+				this.#reportWanted();
+			},
+			() => {},
+		);
 	}
 
 	// Register a downstream sink: seed its info, replay the retained window, and (while
@@ -1714,14 +1991,13 @@ export class Producer {
 
 		const closed = this.#state.closed.peek();
 		if (closed === undefined) {
-			if (joinsLive(sink.update.peek()?.ranges)) this.#join();
+			if (joinsLive(sink.update.peek()?.ranges)) this.#ask("join");
 			this.#sinks.add(sink);
 			this.#reportWanted();
 
-			// Forward subscription updates from the sink's Subscriber to the producer's own
-			// state, which the wire layer (or the serving application) watches.
-			const forward = sink.update.subscribe(() => this.#updateSubscription());
-			this.#updateSubscription();
+			// Count the sink's preferences into the aggregates, which the wire layer (or the serving
+			// application) watches, and move them by each change it makes.
+			this.#join(sink);
 
 			// Drop the sink once its consumer goes away, closing its mirrors so source
 			// groups stop teeing into them, so a long-lived producer doesn't leak. This
@@ -1730,10 +2006,9 @@ export class Producer {
 			const dispose = sink.closed.subscribe((c) => {
 				if (c === undefined) return;
 				const abort = c instanceof Error ? c : undefined;
-				forward();
 				this.#sinks.delete(sink);
 				if (sink.asker) this.#fills.leave(sink.asker);
-				this.#updateSubscription();
+				this.#leave(sink);
 				// Update demand: once the last subscriber leaves, the consumer wire (watching
 				// {@link Demand.wanted}) tears the upstream down instead of downloading to nobody.
 				this.#reportWanted();
@@ -1768,21 +2043,48 @@ export class Producer {
 		}
 	}
 
-	// Recompute from every sink because an update or close can narrow as well as widen the
-	// aggregates. The wire layer observes `#state.update` and emits SUBSCRIBE_UPDATE.
+	// Count `sink`'s preferences into the aggregates, then move them by each change it makes, so a
+	// change costs what it moved rather than every subscriber's ranges. The wire layer observes
+	// `#requested` and emits SUBSCRIBE_UPDATE.
 	//
 	// The max delay is the subscribers' own, not clamped to the track's maxAge: the publisher
 	// applies its own, as each reader's budget does, so the demand asked upstream is the same
 	// before and after the info lands.
-	#updateSubscription(): void {
-		const live = [...this.#sinks].filter((sink) => !sink.fetch);
-		this.#subscribing.set(live.some((sink) => sink.closed.peek() === undefined));
-		const combined = combineSubscriptions(this.#sinks);
+	#join(sink: TrackState): void {
+		this.#moved(sink, { after: sink.update.contribution(), gone: [], came: [...sink.update.ranges()] }, true);
+		sink.update.watch = (change) => this.#moved(sink, change);
+		this.#subscribed();
+	}
+
+	// Take `sink` out of the aggregates.
+	#leave(sink: TrackState): void {
+		sink.update.watch = undefined;
+		this.#moved(sink, { before: sink.update.contribution(), gone: [...sink.update.ranges()], came: [] });
+		this.#counted.delete(sink);
+		this.#subscribed();
+	}
+
+	// Take a sink that became a fetch out of the live aggregate, before anyone sees it there.
+	#unlive(sink: TrackState): void {
+		if (!this.#counted.delete(sink)) return;
+		this.#live.replace({ before: sink.update.contribution(), gone: [...sink.update.ranges()], came: [] });
+		this.#subscribed();
+	}
+
+	// Move the aggregates by `sink`'s `change`, counting it live when `joining` a live sink.
+	#moved(sink: TrackState, change: Change, joining = false): void {
+		// Settled before the demand moves, which may reopen the outcome.
 		this.#settle();
-		this.#state.update.set(combined);
-		this.#live.set(combineSubscriptions(live));
+		const requested = this.#requested.replace(change);
+		if (joining && !sink.fetch) this.#counted.add(sink);
+		const live = this.#counted.has(sink) && this.#live.replace(change);
 		// The requested floor bounds what a pending tail owes.
-		this.#owe();
+		if (requested || live) this.#owe();
+	}
+
+	// Whether a reader beyond one-shot fetches subscribes.
+	#subscribed(): void {
+		this.#subscribing.set([...this.#counted].some((sink) => sink.closed.peek() === undefined));
 	}
 
 	// Mirror a cached source group into a sink. The mirror fills synchronously as the
@@ -1796,6 +2098,7 @@ export class Producer {
 		entry.mirrors.set(sink, dst);
 		if (sink.reads?.(dst.start) === false) hooks.groupReads(dst, false);
 		timelineInsert(sink.timeline, dst);
+		sink.arrived++;
 		void dst.readable().then(() => sink.timelineChanged.update((revision) => revision + 1));
 		sink.latest = max(sink.latest ?? 0n, dst.start);
 		sink.received.set(max(sink.received.peek(), dst.start + 1n));
@@ -2074,11 +2377,11 @@ export class Producer {
 		if (this.#keptDrops() > kept) this.#rearmDrops(kept);
 		this.#advanceLargest({ group: key, frame: 0 });
 		this.#endLargest();
-		if (!this.#refresh || key < next) return;
-		if (answers) {
-			this.#refresh = false;
+		if (this.#pending && key >= next && answers) {
+			this.#endRefresh();
 			this.#floor = max(this.#floor, key);
 		}
+		// Even unanswered, the first key written ends the ask for the first group.
 		this.#reportWanted();
 	}
 
@@ -2352,8 +2655,7 @@ export class Producer {
 	// The grace the session's tail uses, from the max delay the track's subscribers ask for,
 	// bounded by how long the publisher keeps a superseded group fresh. The demand asked upstream is not.
 	#grace(): Duration {
-		const update = this.#state.update.peek();
-		const maxDelay = Duration.millis(update ? maxDelayOf(update) : 0);
+		const maxDelay = Duration.millis(this.#requested.maxDelay());
 		const maxAge = this.#state.info.peek()?.maxAge;
 		return grace(maxAge == null ? maxDelay : maxDelay.min(maxAge));
 	}
@@ -2383,8 +2685,10 @@ export class Producer {
 	// for, since an update gets no fresh START: a moved floor stands on its own, and moving
 	// back restores the START. Without either, the first arrival stands in for it.
 	// Until the START arrives, the feed start is pending; the requested floor still bounds it.
+	// A local track has no feed, so what its subscribers ask bounds nothing, as in Rust.
 	#feedStart(): bigint | "pending" | undefined {
-		const ranges = this.#state.update.peek()?.ranges;
+		if (!this.#wire) return undefined;
+		const ranges = this.#requested.peek()?.ranges;
 		const requested = ranges && wireSpan(ranges).start;
 		const served = this.#wire?.served;
 		if (!served || served.requested !== requested) return requested;
@@ -2407,7 +2711,7 @@ export class Producer {
 		if (start === undefined || start === 0n) return undefined;
 		if (wire.starts.fillsFromStart) return start;
 		// The START applies only while the demand keeps the floor it answered, as `#feedStart`.
-		const ranges = this.#state.update.peek()?.ranges;
+		const ranges = this.#requested.peek()?.ranges;
 		const served = wire.served;
 		const resolved =
 			wire.starts.resolvesStart === true &&
@@ -2420,9 +2724,14 @@ export class Producer {
 	#owes(final: bigint): boolean {
 		if (!this.#wire || !this.#state.end.peek()?.tail) return false;
 		const feed = this.#feedStart();
-		const floor = (feed === "pending" ? this.#wire?.served?.requested : feed) ?? this.#arrivals.first();
-		if (floor === undefined) return final > 0n;
-		return !this.#arrivals.covers(min(floor, final), final);
+		const floor = (feed === "pending" ? this.#wire?.served?.requested : feed) ?? this.#arrivals.first() ?? 0n;
+		// A key the publisher gave up is owed no more. A stale verdict is not receipt: a new
+		// upstream subscription supersedes it, leaving those groups unknown again, as in Rust.
+		const drops = this.#state.drops;
+		return this.#arrivals.gaps(min(floor, final), final).some((gap) => {
+			const given = drops.overlapping(gap.start, gap.end).filter((run) => run.stale === undefined);
+			return runGaps(given, gap.start, gap.end).length > 0;
+		});
 	}
 
 	#declareEnd(end: Position, error: Error | undefined, tail: boolean): void {
@@ -2533,6 +2842,9 @@ export class Producer {
 		// Not evicted: a reader already holding one keeps its frames and sees the abort.
 		const open = [...this.#cache].filter((entry) => entry.group.closed.peek() === undefined);
 		const kept = this.#keptDrops();
+		this.#refreshTimer?.abort.abort();
+		this.#refreshTimer = undefined;
+		this.#endRefresh(abort ?? this.#closedBeforeSent());
 		closeTrackState(this.#state, abort);
 		if (this.#keptDrops() > kept) this.#rearmDrops(kept);
 		if (this.#state.outcome.peek() === undefined)
@@ -2609,7 +2921,24 @@ type Drift = {
 	// track's bare starts count as milliseconds, as the Rust `age` reads them.
 	presentation?: { key: bigint; at: number };
 	end?: bigint;
+	// Judged against the whole track rather than this reader's window, as a fetch is.
+	whole: boolean;
 };
+
+// An ordered read's state, mirroring the Rust `Ordered`: a group read and held back because a gap
+// below it goes first, the gaps found and not returned yet (sorted and disjoint), and one past
+// the highest key returned, as a group or the end of a gap.
+type Items = { held?: GroupConsumer; gaps: DropRun[]; at: bigint };
+
+// A group that landed after an ordered read passed its key.
+function late(): Hole {
+	return { error: new StreamError(StreamCode.Old, { message: "group landed after the read passed it" }) };
+}
+
+// A group missing its head that no fill could serve.
+function headless(): Hole {
+	return { error: new StreamError(StreamCode.NotFound, { message: "group head never served" }) };
+}
 
 // The successor a handed-out group was last judged by, so the group stays judgeable once the
 // cache evicts both. Each reader keeps its own, so the memory is bounded by the groups held.
@@ -2754,6 +3083,14 @@ export class Subscriber {
 		coverage?: Coverage;
 	};
 	#reported = new Runs<Reported>(sameReport);
+	// Everything below was settled for good and folded out of #reported: handed out, told, or
+	// passed, so nothing there is reported again. Mirrors the Rust `Record::floor`, which folds
+	// under pool pressure; a key-order read folds at where it is instead (see #fold).
+	#floor = 0n;
+	// A wire publisher reads #reported as what its wire was told, so it never folds.
+	#wired = false;
+	// What an ordered read owes before its next group; unset before its first read. See #tryItem.
+	#items?: Items;
 	// The group the frame-level helpers are currently draining, acquired through the
 	// key cursor so frame reads and {@link Ordered.nextGroup} share one floor.
 	#frameGroup?: GroupConsumer;
@@ -2806,14 +3143,17 @@ export class Subscriber {
 	// Bumped whenever the fills this reader joined are rejudged, which may withdraw groups it reads
 	// again by the time it looks (a narrowing undone in one turn moves no signal), so it asks anew.
 	#fillMoves = new Signal(0);
-	// The time starts this reader asked its fills to look up, each with its fill, absent when no
-	// handler could take it.
-	#lookups: { time: bigint; lookup?: Lookup }[] = [];
+	// The time starts this reader asked its fills to look up, each with the floor it asked from and
+	// its fill, absent when no handler could take it.
+	#lookups: { time: bigint; floor: bigint; lookup?: Lookup }[] = [];
+	// A time start's refusal, which every read fails with until the ranges change. Mirrors the Rust
+	// `Filter::refused`.
+	#refusal?: Error;
 
-	#drift(): Drift {
+	#drift(whole = this.#fetchBudget !== undefined): Drift {
 		// A fetch judges its group against the whole track, as the Rust `fetch_group` does: a
 		// newer group outside its one-group window still supersedes it.
-		const end = this.#fetchBudget === undefined ? this.#cursor.peek().end : undefined;
+		const end = whole ? undefined : this.#cursor.peek().end;
 		const timeline = this.#state.timeline;
 		let presentation: Drift["presentation"];
 		const info = this.#state.info.peek();
@@ -2823,7 +3163,7 @@ export class Subscriber {
 		const scaleless = info !== undefined && info.timescale == null;
 		for (let i = (end === undefined ? timeline.length : timelineIndex(timeline, end)) - 1; i >= 0; i--) {
 			const group = timeline[i];
-			if (hooks.groupFailed(group) || !this.#judges(group.start)) continue;
+			if (hooks.groupFailed(group) || !this.#judges(group.start, whole)) continue;
 			if (scaleless) {
 				if (!hooks.groupStarted(group)) continue;
 				presentation = { key: group.start, at: Number(group.start) };
@@ -2835,7 +3175,7 @@ export class Subscriber {
 			break;
 		}
 
-		const update = this.#state.update.peek();
+		const update = this.#state.update.scalars();
 		const requested = this.#fetchBudget ?? (update ? maxDelayOf(update) : 0);
 		const fresh = info?.maxAge?.asMillis();
 		return {
@@ -2843,6 +3183,19 @@ export class Subscriber {
 			bounded: fresh !== undefined && requested >= fresh,
 			presentation,
 			end,
+			whole,
+		};
+	}
+
+	// {@link #drift} as a fetch judges its group, against the whole track, under the fetch's own
+	// budget in milliseconds in place of this reader's, still capped by the track's max age.
+	#driftWithin(budget: number): Drift {
+		const drift = this.#drift(true);
+		const fresh = this.#state.info.peek()?.maxAge?.asMillis();
+		return {
+			...drift,
+			budget: fresh === undefined ? budget : Math.min(budget, fresh),
+			bounded: fresh !== undefined && budget >= fresh,
 		};
 	}
 
@@ -2854,30 +3207,35 @@ export class Subscriber {
 	// last timestamp says where it starts presenting, not where it ends. A group whose header
 	// landed without a frame is not content yet, so the next one is the bound; an unstamped
 	// successor leaves the reach unbounded.
-	#successor(key: bigint, end?: bigint): GroupConsumer | undefined {
-		return this.#after(key, end, hooks.groupStarted);
+	#successor(key: bigint, end?: bigint, whole?: boolean): GroupConsumer | undefined {
+		return this.#after(key, end, hooks.groupStarted, whole);
 	}
 
 	// The group after `key` that starts its wall clock: like {@link #successor}, but
 	// counting a group before its first frame. Its header arrived, so a relay ages the group
 	// before it as the origin does, even if its first frame never comes.
-	#arrival(key: bigint, end?: bigint): GroupConsumer | undefined {
-		return this.#after(key, end, () => true);
+	#arrival(key: bigint, end?: bigint, whole?: boolean): GroupConsumer | undefined {
+		return this.#after(key, end, () => true, whole);
 	}
 
 	// Whether group `key` counts toward the drift edge: inside the window, or anywhere for a
-	// fetch.
-	#judges(key: bigint): boolean {
-		return this.#fetchBudget !== undefined || this.#window.contains(key);
+	// fetch or when judging the `whole` track.
+	#judges(key: bigint, whole = this.#fetchBudget !== undefined): boolean {
+		return whole || this.#window.contains(key);
 	}
 
 	// The first servable group after `key` below `end` that `counts`.
-	#after(key: bigint, end: bigint | undefined, counts: (group: GroupConsumer) => boolean): GroupConsumer | undefined {
+	#after(
+		key: bigint,
+		end: bigint | undefined,
+		counts: (group: GroupConsumer) => boolean,
+		whole?: boolean,
+	): GroupConsumer | undefined {
 		const timeline = this.#state.timeline;
 		for (let i = timelineIndex(timeline, key + 1n); i < timeline.length; i++) {
 			const successor = timeline[i];
 			if (end !== undefined && successor.start >= end) break;
-			if (hooks.groupFailed(successor) || !this.#judges(successor.start)) continue;
+			if (hooks.groupFailed(successor) || !this.#judges(successor.start, whole)) continue;
 			if (counts(successor)) return successor;
 		}
 		return undefined;
@@ -2911,7 +3269,7 @@ export class Subscriber {
 	// from another copy, or outliving this subscriber. Once closed, only the wall clock judges
 	// it, from the arrivals kept at close.
 	#staleAt(key: bigint, drift: Drift, wake = false, held?: Superseded): boolean {
-		const arrival = this.#arrivals ? undefined : this.#arrival(key, drift.end);
+		const arrival = this.#arrivals ? undefined : this.#arrival(key, drift.end, drift.whole);
 		let arrived = this.#arrivals
 			? this.#keptSupersededAt(key, drift, held)
 			: this.#supersededAt(arrival, drift, held);
@@ -2925,7 +3283,7 @@ export class Subscriber {
 		// A closed subscriber keeps no timeline to bound the reach with.
 		if (this.#arrivals) return false;
 
-		const reach = this.#reach(key, drift.end);
+		const reach = this.#reach(key, drift.end, drift.whole);
 		return (
 			drift.presentation !== undefined &&
 			drift.presentation.key > key &&
@@ -2953,10 +3311,10 @@ export class Subscriber {
 	// The furthest presentation time, in milliseconds, group `key` could still reach: its own
 	// end once finished whole, else where its immediate successor below `end` begins, undefined
 	// when nothing proves where it stops. Mirrors the Rust `TrackState::reach`.
-	#reach(key: bigint, end: bigint | undefined): number | undefined {
+	#reach(key: bigint, end: bigint | undefined, whole?: boolean): number | undefined {
 		const own = this.#held(key)?.end;
 		if (own !== undefined) return this.#presented(own);
-		const successor = this.#successor(key, end);
+		const successor = this.#successor(key, end, whole);
 		if (!successor) return undefined;
 		const info = this.#state.info.peek();
 		if (info !== undefined && info.timescale == null) return this.#presented(successor.start);
@@ -3041,7 +3399,8 @@ export class Subscriber {
 		hooks.refreshGroup(group);
 		const held: Superseded = {};
 		hooks.onShedRead(group, () => {
-			if (this.#state.latest === group.start && this.#state.producer) hooks.joinProducer(this.#state.producer);
+			if (this.#state.latest === group.start && this.#state.producer)
+				hooks.askProducer(this.#state.producer, "shed");
 		});
 		hooks.expireGroup(group, {
 			expired: () => this.#staleAt(group.start, this.#drift(), true, held),
@@ -3056,7 +3415,7 @@ export class Subscriber {
 			this.#state.groups,
 			this.#state.timelineChanged,
 			this.#wall.revision,
-			this.#state.update,
+			this.#state.update.revision,
 			this.#state.info,
 			this.#cursor,
 			this.#state.closed,
@@ -3079,6 +3438,7 @@ export class Subscriber {
 		const forgot = this.#delivered.runEnd(0n) ?? 0n;
 		if (forgot > floor) this.#stoppedReading(floor, forgot);
 		if (key >= forgot) this.#stoppedReading(key, key + 1n);
+		if (ordered) this.#fold(forgot);
 	}
 
 	// This reader stopped reading `[start, end)` for good: clip what it asked there, and judge
@@ -3223,6 +3583,7 @@ export class Subscriber {
 
 	// The publisher's view of this reader's record.
 	#wireRecord(): WireRecord {
+		this.#wired = true;
 		const reported = this.#reported;
 		return {
 			told: (key) => reported.at(key) !== undefined,
@@ -3252,12 +3613,15 @@ export class Subscriber {
 
 	// Resolve this reader's ranges again, as when they are replaced.
 	#resolve(): void {
-		const update = this.#state.update.peek();
-		this.#window = new Window(
-			update?.ranges ?? [{}],
+		const update = this.#state.update;
+		const scalars = update.scalars();
+		this.#refusal = undefined;
+		// By the keys the ranges hold, which an edit's Range IDs set, as the Rust `Change::All` has it.
+		this.#window = Window.keyed(
+			scalars ? update.entries() : [[0n, {}]],
 			this.#latestGroup(),
 			this.#holdings(),
-			update?.delay?.min ?? undefined,
+			scalars?.delay.min ?? undefined,
 		);
 		// Leaves the lookups the old ranges asked, which a settled window never reads again.
 		if (this.#lookups.length > 0) this.#lookUp();
@@ -3278,17 +3642,16 @@ export class Subscriber {
 		const producer = state.producer;
 		if (this.#resume || !producer) return UNHELD;
 		const keys = keysOf(producer);
-		// Whether drops of a kind `kind` accepts cover every key in `[start, end)`. An empty run is.
-		const covered = (start: bigint, end: bigint, kind: (run: DropRun) => boolean) => {
-			if (start >= end) return true;
-			let at = start;
-			for (const run of state.drops.overlapping(start, end)) {
-				if (!kind(run) || run.start > at) return false;
-				at = run.end;
-			}
-			return at >= end;
-		};
+		const drops = state.drops;
 		const anchors = timeAnchors(producer);
+		// A lite-07 copy holds only part of the track: a group held before a time contains it only
+		// once nothing between them is still to arrive.
+		const wire = receivedCopy(producer) && !state.dropsAnchors.peek();
+		// The times from `from` on that the drops from there leave open.
+		const uncovered = (from: bigint): Run | undefined => {
+			const start = drops.coveredFrom(from);
+			return start < UNBOUNDED ? { start, end: UNBOUNDED } : undefined;
+		};
 		return {
 			resolves: () => true,
 			containing: (time) => {
@@ -3300,28 +3663,66 @@ export class Subscriber {
 				// A lite-07 copy holds only part of the track: a group held before `time` contains it
 				// only once nothing between them is still to arrive. Mirrors the Rust
 				// `TrackState::containing_received`.
-				if (receivedCopy(producer) && !state.dropsAnchors.peek()) {
+				if (wire) {
 					if (below === time) return { group: time };
 					const start = anchors.starts.get(time);
 					// The publisher serves nothing at or before it, as for a time older than every group.
 					if (start !== undefined) return start <= time ? { group: start } : "before";
-					if (below !== undefined && (covered(below + 1n, time + 1n, () => true) || index < keys.length)) {
+					if (below !== undefined && (drops.covers(below + 1n, time + 1n) || index < keys.length)) {
 						return { group: below };
 					}
-					if (below === undefined && covered(0n, time + 1n, () => true)) return "before";
+					if (below === undefined) {
+						if (drops.covers(0n, time + 1n)) return "before";
+						// A range asked from an earlier time, or from the oldest group (as 0), that the
+						// publisher started past it says the same, while the copy holds no group there.
+						if (anchors.past > time) {
+							for (const [asked, start] of anchors.starts) {
+								if (asked < time && start > time) return "before";
+							}
+						}
+					}
 					return "unknown";
 				}
 				if (below !== undefined) return { group: below };
 				// Every key at or before it is gone, so whichever group held it will never arrive.
-				if (covered(0n, time + 1n, () => true)) return "before";
+				if (drops.covers(0n, time + 1n)) return "before";
 				return keys.length === 0 ? "unknown" : "before";
 			},
+			// The "unknown" times of `containing`, apart from those `anchors.starts` places, which the
+			// mark covers. Mirrors the Rust `Holdings::unplaced for TrackState`.
+			unplaced: () => {
+				const mark = anchors.placing * 4 + (state.dropsAnchors.peek() ? 2 : 0) + (state.fetch ? 1 : 0);
+				const runs: Run[] = [];
+				const first = keys[0];
+				const last = keys.at(-1);
+				// `containing` places a time below every held group from a start reported past an
+				// earlier range's time, which an eviction brings about without moving the mark, so a
+				// run there starts past the newest such start. Mirrors the Rust `TrackState::unplaced`.
+				const past = wire ? anchors.past : 0n;
+				const unheld = (run: Run | undefined): Run | undefined =>
+					run && run.start < past ? { start: past, end: run.end } : run;
+				if (anchors.atKeys || state.fetch) {
+					// Every time starts a group.
+				} else if (first === undefined || last === undefined) {
+					const open = unheld(uncovered(0n));
+					if (open) runs.push(open);
+				} else if (wire) {
+					// Below every group, up to the first, and above the last, past the drops after it.
+					const below = unheld(uncovered(0n));
+					if (below && below.start < first) runs.push({ start: below.start, end: first });
+					const above = uncovered(last + 1n);
+					if (above) runs.push(above);
+				}
+				return { runs, mark };
+			},
 			nextStart: (from) => keys[keyIndex(keys, from)],
-			back: (latest, back) => {
-				// A lite-07 copy holds only part of the track, so it counts back as its publisher did,
-				// from the latest group the publisher counted from: a newer one moved the live edge.
+			// A lite-07 copy holds only part of the track, so it starts where its publisher did,
+			// counting from the same latest group: a newer one moved the live edge.
+			reportedStart: (latest, back) => {
 				const reported = receivedCopy(producer) ? anchors.relative.get(back) : undefined;
-				if (reported !== undefined && reported.latest === latest) return reported.start;
+				return reported !== undefined && reported.latest === latest ? reported.start : undefined;
+			},
+			back: (latest, back) => {
 				if (back === 0n) return latest;
 				// Bounded by the cache: a huge count reaches back to the oldest.
 				const index = BigInt(keyIndex(keys, latest)) - back;
@@ -3334,7 +3735,15 @@ export class Subscriber {
 			reachBack: (_latest, min) => this.#reachBack(min),
 			// Skip runs coalesce, so a gap between two held groups is one run unless the cache
 			// evicted a group inside it.
-			neverProduced: (start, end) => covered(start, end, (run) => run.skip === true),
+			neverProduced: (start, end) => {
+				if (start >= end) return true;
+				let at = start;
+				for (const run of drops.overlapping(start, end)) {
+					if (run.skip !== true || run.start > at) return false;
+					at = run.end;
+				}
+				return at >= end;
+			},
 		};
 	}
 
@@ -3390,54 +3799,72 @@ export class Subscriber {
 	// one exists, and a time start as groups arrive. Returns the refusal of ranges this copy cannot
 	// resolve, which every read reports.
 	#settle(): Error | undefined {
-		const ranges = this.#window.ranges;
-		if (this.#state.dropsAnchors.peek() && !ranges.every(isWire)) {
+		if (this.#state.dropsAnchors.peek() && !this.#window.wired) {
 			return new Error("a relative or time anchor other than the live start needs moq-lite-07");
 		}
-		if (this.#resume || this.#window.settled) return undefined;
+		if (this.#refusal || this.#resume || this.#window.settled) return this.#refusal;
 		// The live feed had no group when the ranges resolved, so the newest one then was the first.
 		const latest = this.#window.pending ? this.#state.first : this.#latestGroup();
 		const looked = this.#lookUp();
 		if (this.#window.settle(latest, this.#holdings()) || looked) this.#moved();
-		return undefined;
+		return this.#refusal;
 	}
 
-	// Look up each time start the window can't resolve from the cache, once, and take in the
-	// answers. Returns whether the groups in range moved. Mirrors the Rust `Cursor::look_up`.
+	// Ask a fill for the group containing each time start the window can't resolve from the cache,
+	// once, and take in the answers. A refused one fails the reads until the ranges change. Returns
+	// whether the groups in range moved. Mirrors the Rust `Cursor::look_up`.
 	#lookUp(): boolean {
+		if (this.#refusal) return false;
+		let moved = false;
+		// An answer the window takes in may look its time up again from lower down.
+		for (let again = true; again; ) {
+			const pass = this.#lookUpPass();
+			moved ||= pass.moved;
+			again = pass.again;
+		}
+		return moved;
+	}
+
+	// One pass of `#lookUp`, which says whether the window looks up a time again.
+	#lookUpPass(): { moved: boolean; again: boolean } {
 		const wanted = this.#window.lookups();
-		if (wanted.length === 0 && this.#lookups.length === 0) return false;
+		if (wanted.length === 0 && this.#lookups.length === 0) return { moved: false, again: false };
 		const producer = this.#state.producer;
-		// The window stops looking once replaced.
+		// The window stops looking once replaced, or looks again from lower down.
 		this.#lookups = this.#lookups.filter((lookup) => {
-			if (wanted.some((want) => want.time === lookup.time)) return true;
+			if (wanted.some((want) => want.time === lookup.time && want.floor === lookup.floor)) return true;
 			lookup.lookup?.leave();
 			return false;
 		});
-		for (const { time, below } of wanted) {
+		for (const { time, floor } of wanted) {
 			if (this.#lookups.some((lookup) => lookup.time === time)) continue;
 			// With no handler open any more, nothing can answer.
-			const lookup = producer && fillsOf(producer).lookup(time, below, this.#askerOf());
-			this.#lookups.push({ time, lookup });
+			const lookup = producer && fillsOf(producer).timeStart(time, floor, this.#askerOf());
+			this.#lookups.push({ time, floor, lookup });
 		}
 		let moved = false;
+		let again = false;
 		for (const lookup of [...this.#lookups]) {
 			const answer = lookup.lookup?.answer();
 			if (answer === undefined && lookup.lookup && !lookup.lookup.done()) continue;
-			// The answer counts once held.
-			const holdings = this.#holdings();
-			if (
-				answer !== undefined &&
-				producer &&
-				holdings.nextStart(answer) !== answer &&
-				cachedMayStart(producer, answer)
-			)
-				continue;
 			this.#lookups.splice(this.#lookups.indexOf(lookup), 1);
 			lookup.lookup?.leave();
-			if (this.#window.found(lookup.time, answer, holdings)) moved = true;
+			// Where the time falls is unknown, so the reads fail rather than guess from the cache. The
+			// ranges resolve afresh once they change, asking again.
+			if (answer?.kind === "refused") {
+				this.#refusal = answer.error;
+				return { moved: true, again: false };
+			}
+			const found: Found =
+				answer === undefined
+					? { kind: "unanswered" }
+					: answer.kind === "group"
+						? answer
+						: { kind: "dropped", floor: lookup.floor };
+			if (this.#window.found(lookup.time, found, this.#holdings())) moved = true;
+			if (this.#window.lookups().some((want) => want.time === lookup.time)) again = true;
 		}
-		return moved;
+		return { moved, again };
 	}
 
 	// Narrow the local bounds to the window into the hull every read starts from.
@@ -3500,9 +3927,9 @@ export class Subscriber {
 	#askerOf(): Asker {
 		this.#state.asker ??= {
 			wants: (start, end) => this.#wants(start, end),
-			priority: () => this.#state.update.peek()?.priority ?? 0,
+			priority: () => this.#state.update.scalars()?.priority ?? 0,
 			maxDelay: () => this.#drift().budget,
-			order: () => this.#state.update.peek()?.order ?? "descending",
+			order: () => this.#state.update.scalars()?.order ?? "descending",
 			refuse: (start, end, error, stale) => {
 				// A budget's verdict is no eviction: a widening asks it afresh, never through the
 				// one refill an evicted answer is allowed, as the Rust `Misses::resolve` retries it.
@@ -3823,23 +4250,28 @@ export class Subscriber {
 	// {@link #drained}. A wire publisher's reader never ends there.
 	#exhausted(): boolean {
 		if (this.#parks) return false;
-		if (this.#resume) return this.#resume.exhausted(this.#delivered, this.#window);
-		return this.#drained([this.#delivered]);
+		const ordered = this.#mode === "ordered";
+		if (this.#resume) return this.#resume.exhausted(this.#delivered, ordered);
+		return this.#drained([this.#delivered], ordered);
 	}
 
 	// Whether a bounded window has nothing left to deliver: every group in its ranges was handed
 	// out (in any of `taken`), dropped, or never will be, as one skipped as stale, one below where
 	// the feed started, or a hole the feed no longer owes. An open window always has more, and so
-	// does one the cap keeps a group out of, since the reader may raise it again. Mirrors the
-	// Rust `Cursor::is_exhausted`.
-	#drained(taken: readonly Delivered[]): boolean {
+	// does one the cap keeps a group out of, since the reader may raise it again. A local
+	// producer may still create any group it did not skip, so only an `ordered` read, which hands
+	// out the group it created above a hole before any created later below, passes that hole.
+	// Mirrors the Rust `Cursor::is_exhausted`.
+	#drained(taken: readonly Delivered[], ordered: boolean): boolean {
 		const end = this.#window.end();
 		if (end === undefined) return false;
 		// A fill still owes a group it reads.
 		if (this.#askFills(this.#window.floor() ?? 0n, end) !== undefined) return false;
 		const held = this.#state.groups.peek();
+		const cursor = this.#cursor.peek();
 		const producer = this.#state.producer;
 		const received = max(this.#state.received.peek(), ((producer && fillEdge(producer)) ?? -1n) + 1n);
+		const local = producer !== undefined && !wireFed(producer);
 		// A received stale run that does not settle this reader is unknown to it (see `settles`):
 		// the reader still wants those groups, however the feed accounted for them.
 		const budget = this.#drift().budget;
@@ -3859,10 +4291,19 @@ export class Subscriber {
 				}));
 				const drops = overlapping.filter((run) => settles(run, budget, coverage));
 				const unknown = overlapping.filter((run) => !settles(run, budget, coverage));
-				for (const open of runGaps(drops, gap.start, gap.end)) {
+				// A miss this reader gave up on is never wanted again.
+				const opens = runGaps(drops, gap.start, gap.end).flatMap((run) =>
+					runGaps(this.#givenUp, run.start, run.end),
+				);
+				for (const open of opens) {
 					if (unknown.some((run) => run.start < open.end && open.start < run.end)) return false;
-					// Not received yet, so it may still arrive.
-					if (open.end > received) return false;
+					// Cached under the local floor, which lowering offers again, unless a key-order read
+					// already passed it: an ordered take let go of it, so it is not held.
+					const under = { start: max(open.start, this.#nextKey), end: min(open.end, cursor.start) };
+					if (producer && under.start < under.end && cachedIn(producer, under.start, under.end).length > 0)
+						return false;
+					// Not received yet, so it may still arrive; a local producer may still create it.
+					if (open.end > received || (local && !ordered)) return false;
 					// Held, so a read still hands it out, skips it, or waits for the cap to rise.
 					const index = timelineIndex(held, open.start);
 					if (held[index] && held[index].start < open.end) return false;
@@ -3881,14 +4322,15 @@ export class Subscriber {
 		makeSubscriber = (name, state) => new Subscriber(name, state);
 		hooks.subscriberEnd = (subscriber) =>
 			subscriber.#resume ? subscriber.#resume.end() : subscriber.#state.end.peek()?.at;
+		hooks.subscriberHoldings = (subscriber) => subscriber.#holdings();
 		hooks.subscriberEndError = (subscriber) =>
 			subscriber.#resume ? subscriber.#resume.endError() : subscriber.#state.end.peek()?.error;
+		hooks.askSubscriber = (subscriber, ask) => {
+			if (subscriber.#resume) subscriber.#resume.ask(ask);
+			else if (subscriber.#state.producer) hooks.askProducer(subscriber.#state.producer, ask);
+		};
 		hooks.skippedBelow = (subscriber, key) =>
 			subscriber.#resume ? subscriber.#resume.skippedBelow(key) : skippedBelow(subscriber.#state, key);
-		hooks.joinSubscriber = (subscriber) => {
-			if (subscriber.#resume) subscriber.#resume.join();
-			else if (subscriber.#state.producer) hooks.joinProducer(subscriber.#state.producer);
-		};
 		hooks.sourceStart = (subscriber) => {
 			if (subscriber.#resume) return subscriber.#resume.start();
 			// A relative anchor still pending reads every group, so a fill asked below would claim
@@ -3911,10 +4353,10 @@ export class Subscriber {
 		};
 		// A route copy judged for the logical reader that handed out `delivered`: what the copy
 		// handed out itself counts too. A copy that is itself a front judges across its own copies.
-		hooks.exhaustedFor = (subscriber, delivered) =>
+		hooks.exhaustedFor = (subscriber, delivered, ordered) =>
 			subscriber.#resume
-				? subscriber.#resume.exhausted(subscriber.#delivered.union(delivered), subscriber.#window)
-				: subscriber.#drained([subscriber.#delivered, delivered]);
+				? subscriber.#resume.exhausted(subscriber.#delivered.union(delivered), ordered)
+				: subscriber.#drained([subscriber.#delivered, delivered], ordered);
 		hooks.tryDrop = (subscriber) => subscriber.#tryDrop();
 		// A reader following route copies leaves its ranges to the serving copy, which resolves
 		// their anchors against the groups it holds, then narrows them to its own local bounds.
@@ -3937,11 +4379,29 @@ export class Subscriber {
 			return subscriber.#window.starts(from);
 		};
 		hooks.servingResolved = (subscriber) => {
-			const resumed = subscriber.#resume?.resolved();
-			if (resumed) return resumed;
+			if (subscriber.#resume) return subscriber.#resume.resolved();
 			subscriber.#settle();
 			return subscriber.#window.resolved();
 		};
+		hooks.servingResolvedKeys = (subscriber, keys) => {
+			if (keys.length === 0) return [];
+			const resumed = subscriber.#resume?.resolved();
+			if (resumed) {
+				// A reader following route copies resolves its ranges by position, in key order, so
+				// they are built and walked once for every key asked.
+				const at = new Map<bigint, number>();
+				let index = 0;
+				for (const [held] of subscriber.#state.update.entries()) at.set(held, index++);
+				return keys.map((key) => {
+					const index = at.get(key);
+					return index === undefined ? undefined : resumed[index];
+				});
+			}
+			subscriber.#settle();
+			return keys.map((key) => subscriber.#window.resolvedKey(key));
+		};
+		hooks.editSubscriber = (subscriber, edit) => subscriber.#edit(edit);
+		hooks.preferences = (subscriber) => subscriber.#state.update;
 		hooks.resolveRanges = (subscriber, subscription) =>
 			new Window(
 				subscription.ranges ?? [{}],
@@ -3958,8 +4418,10 @@ export class Subscriber {
 			return subscriber.#peekGroup(ordered);
 		};
 		hooks.forgetPastBudget = (subscriber, delivered) => subscriber.#forgetPastBudget(delivered);
+		hooks.fold = (subscriber, at) => subscriber.#fold(at);
 		hooks.wire = (subscriber) => subscriber.#wireRecord();
 		hooks.deliveredRuns = (subscriber) => subscriber.#delivered.runs;
+		hooks.reportedRuns = (subscriber) => subscriber.#reported.size;
 		hooks.handedOut = (subscriber, key) => subscriber.#delivered.has(key);
 		hooks.hasUnreadGroup = (subscriber, start, end, delivered) =>
 			subscriber.#state.groups
@@ -3975,10 +4437,11 @@ export class Subscriber {
 			(subscriber.#state.closed.peek() !== undefined || subscriber.#complete()) &&
 			!hooks.hasUnreadGroup(subscriber, start, end, delivered);
 		hooks.awaitsFill = (subscriber) => subscriber.#fillWait;
-		hooks.staleAt = (subscriber, key) => {
+		hooks.staleAt = (subscriber, key, budget) => {
 			const held: Superseded = {};
+			const drift = budget === undefined ? () => subscriber.#drift() : () => subscriber.#driftWithin(budget);
 			return {
-				expired: () => subscriber.#staleAt(key, subscriber.#drift(), true, held),
+				expired: () => subscriber.#staleAt(key, drift(), true, held),
 				changed: subscriber.#expiryChanged(),
 			};
 		};
@@ -3986,6 +4449,17 @@ export class Subscriber {
 			if (subscriber.#resume) return subscriber.#resume.cachedGroup(key, from);
 			const producer = subscriber.#state.producer;
 			return producer && cachedMirror(producer, key, from);
+		};
+		hooks.judgedGroup = (subscriber, key) => {
+			if (subscriber.#resume) return subscriber.#resume.judgedGroup(key);
+			const group = hooks.cachedGroup(subscriber, key);
+			if (group) hooks.expireGroup(group, hooks.staleAt(subscriber, key));
+			return group;
+		};
+		hooks.landed = (subscriber, start, end) => {
+			if (subscriber.#resume) return subscriber.#resume.landed(start, end);
+			const producer = subscriber.#state.producer;
+			return producer && cachedLanded(producer, start, end);
 		};
 		hooks.holdsGroup = (subscriber, key) => {
 			const producer = subscriber.#state.producer;
@@ -4054,6 +4528,7 @@ export class Subscriber {
 			return stop;
 		};
 		hooks.latestKey = (subscriber) => (subscriber.#resume ? subscriber.#resume.latest() : subscriber.#state.latest);
+		hooks.arrived = (subscriber) => (subscriber.#resume ? 0 : subscriber.#state.arrived);
 		hooks.bufferedLargest = (subscriber) => subscriber.#bufferedLargest();
 		hooks.objectLargest = (subscriber) => {
 			if (subscriber.#resume) return subscriber.#resume.objectLargest();
@@ -4102,19 +4577,20 @@ export class Subscriber {
 			// Its group resolves by start now; see `#holdings`.
 			subscriber.#resolve();
 			// The sink joined as a live subscriber; leave the live aggregate before anyone sees it.
-			if (subscriber.#state.producer) resubscribe(subscriber.#state.producer);
-			const update = subscriber.#state.update.peek();
-			if (update) subscriber.#state.update.set(update, true);
+			if (subscriber.#state.producer) unlive(subscriber.#state.producer, subscriber.#state);
+			if (subscriber.#state.update.scalars()) subscriber.#state.update.touch();
 		};
 		// The key cursor lives here (it shares the buffer and the drift anchor with
 		// the arrival cursor); `Ordered` is the handle that reaches it.
 		ordered_ = {
 			nextGroup: (subscriber) => subscriber.#nextGroup(),
-			tryNextGroup: (subscriber) => subscriber.#tryNextGroup(),
+			nextItem: (subscriber) => subscriber.#nextItem(),
+			tryItem: (subscriber) => subscriber.#tryItem(),
 			ended: (subscriber) => subscriber.#ended(),
 			readFrame: (subscriber) => subscriber.#readFrame(),
 			readString: (subscriber) => subscriber.#readString(),
 			readJson: (subscriber) => subscriber.#readJson(),
+			isSkipped: (subscriber, start, end) => subscriber.#isSkipped(start, end),
 		};
 	}
 
@@ -4177,7 +4653,7 @@ export class Subscriber {
 	floor(): bigint | undefined {
 		let start: bigint | undefined;
 		if (this.#resume) {
-			for (const range of this.#resume.resolved() ?? [undefined]) {
+			for (const range of this.#resume.resolved()) {
 				if (!range?.floored) return undefined;
 				start = start === undefined ? range.start : min(start, range.start);
 			}
@@ -4189,25 +4665,6 @@ export class Subscriber {
 	}
 
 	/**
-	 * Where the source's feed starts once its publisher resolved it, raised to this reader's own
-	 * floor: the first group a publisher tells its peer it serves, or lower where a fill this
-	 * reader waits on starts. Undefined when the source declares none and no fill is out.
-	 *
-	 * Where a reader that waits on each group in key starts when {@link floor} names none:
-	 * groups arrive newest first, so the first to arrive is not the oldest served. A copy says
-	 * only once subscribed upstream, so ask once {@link info} resolves or a group arrives. Mirrors
-	 * the Rust `Subscriber::poll_start`.
-	 */
-	async start(): Promise<bigint | undefined> {
-		for (;;) {
-			const start = hooks.sourceStart(this);
-			if (start !== "pending") return start;
-			if (this.#state.closed.peek() !== undefined) return undefined;
-			await this.#wait();
-		}
-	}
-
-	/**
 	 * The lowest group at or above `from` this subscriber's ranges and {@link withRange} floor
 	 * cover, past the starts the publisher declared skipped (see {@link Producer.appendGroup}) and
 	 * those given up for good, undefined when none does: the groups between are never read, so a
@@ -4215,7 +4672,7 @@ export class Subscriber {
 	 * a skip as such a drop. `from` itself while a relative anchor waits on the first group, which
 	 * can't say yet. Mirrors the Rust `Subscriber::next_in_range`.
 	 */
-	nextInRange(from: bigint): bigint | undefined {
+	#nextInRange(from: bigint): bigint | undefined {
 		from = max(from, this.#local.start);
 		if (this.#resume) {
 			// Without a serving copy nothing says yet.
@@ -4228,18 +4685,8 @@ export class Subscriber {
 		return firstOpen(this.#window.runs(from), (key) => holeEnd(drops, key, true));
 	}
 
-	/**
-	 * Whether the publisher declared every start in `[start, end)` skipped, never to be produced
-	 * (which {@link Producer.appendGroup} does between groups), so no group can arrive there: true
-	 * for an empty range. Unlike {@link nextInRange}, this ignores the subscriber's ranges. A copy
-	 * knows only the skips its wire forwarded.
-	 *
-	 * What tells a reader that nothing lies between two groups, or before a track's first. It
-	 * knows only the skips recorded so far, so `false` means "not known skipped": a skip still in
-	 * flight reads `false`, as does one a local producer's cache expired below its edge. Mirrors
-	 * the Rust `Subscriber::is_skipped`.
-	 */
-	isSkipped(start: bigint, end: bigint): boolean {
+	// Whether the publisher declared every start in `[start, end)` skipped; see Ordered.isSkipped.
+	#isSkipped(start: bigint, end: bigint): boolean {
 		if (end <= start) return true;
 		const run = [{ start, end }];
 		if (this.#resume) {
@@ -4382,6 +4829,9 @@ export class Subscriber {
 		});
 		if (this.#frameGroup) hooks.releaseGroupReader(this.#frameGroup, abort);
 		this.#frameGroup = undefined;
+		// A group an ordered read holds behind a gap is buffered too, so the read ends without it.
+		if (this.#items?.held) hooks.releaseGroupReader(this.#items.held, abort);
+		if (this.#items) this.#items.held = undefined;
 		this.#state.timeline.length = 0;
 		this.#wall.timer?.abort();
 		this.#wall.timer = undefined;
@@ -4558,7 +5008,7 @@ export class Subscriber {
 	// The first part of `[from, to)` nothing already reported blocks, now reported, with why,
 	// replacing what it goes out over. Mirrors the Rust `Record::report`.
 	#reportRun(from: bigint, to: bigint, hole: Hole): (Recv & { kind: "drop" }) | undefined {
-		const start = from;
+		const start = max(from, this.#floor);
 		if (start >= to) return undefined;
 		const blocked = this.#reported.overlapping(start, to).filter((reported) => blocksHole(reported, hole));
 		const [gap] = runGaps(blocked, start, to);
@@ -4673,8 +5123,25 @@ export class Subscriber {
 				this.#queueResumedDrop(recv);
 				continue;
 			}
-			if (recv.kind === "group") this.#handOut(recv.group.start, ordered);
-			else if (recv.kind === "idle" && this.#exhausted()) return { kind: "done" };
+			if (recv.kind === "group") {
+				// Passing the keys below it hands them out as far as #delivered knows, so first take what
+				// the copies gave up there: a session-fed copy reports a key it passed to take this group.
+				if (ordered) {
+					const key = recv.group.start;
+					for (
+						let drop = resume.tryDrop(this.#delivered, key);
+						drop;
+						drop = resume.tryDrop(this.#delivered, key)
+					) {
+						this.#queueResumedDrop(drop);
+					}
+				}
+				this.#handOut(recv.group.start, ordered);
+			} else if (recv.kind === "done" || (recv.kind === "idle" && this.#exhausted())) {
+				// As the Rust front's reader: whatever ended it, an ordered read passed its range.
+				if (ordered) this.#passEnd();
+				return { kind: "done" };
+			}
 			return recv;
 		}
 	}
@@ -4737,7 +5204,7 @@ export class Subscriber {
 			this.#state.dropsAnchors.changed(fn),
 			this.#cursor.changed(fn),
 			// A widened budget re-offers the groups it skipped as stale.
-			this.#state.update.changed(fn),
+			this.#state.update.revision.changed(fn),
 			this.#state.closed.changed(fn),
 			this.#state.end.changed(fn),
 			this.#state.received.changed(fn),
@@ -4774,12 +5241,13 @@ export class Subscriber {
 	}
 
 	// The key cursor behind {@link Ordered}, which owns the only public door to it.
-	async #nextGroup(): Promise<GroupConsumer | undefined> {
+	async #nextItem(): Promise<Item | undefined> {
 		for (;;) {
-			const recv = this.#tryNextGroup();
+			const recv = this.#tryItem();
 			switch (recv.kind) {
 				case "group":
-					return recv.group;
+				case "gap":
+					return recv;
 				case "done":
 					return this.#ended();
 				case "error":
@@ -4787,6 +5255,245 @@ export class Subscriber {
 			}
 			await this.#wait();
 		}
+	}
+
+	// The next group in key order, past any gap.
+	async #nextGroup(): Promise<GroupConsumer | undefined> {
+		for (;;) {
+			const item = await this.#nextItem();
+			if (!item || item.kind === "group") return item?.group;
+		}
+	}
+
+	// The synchronous half of #nextItem: the next group, or a gap the read gave up on below it,
+	// as the Rust `Ordered::poll_item` merges them. Every gap goes out before the end.
+	#tryItem(): ItemRecv {
+		let items = this.#items;
+		if (!items) {
+			items = this.#items = { gaps: [], at: 0n };
+			// The drop record starts before the first read, so the cursor keeps what it gives up.
+			this.#findGaps(items);
+		}
+		const read = this.#readHeld(items);
+		this.#findGaps(items);
+		switch (read.kind) {
+			case "group": {
+				const key = read.group.start;
+				const lowest = this.#lowestGap(items);
+				// The gap lies wholly below it, or around it: the part below goes first.
+				if (lowest && lowest.span.start < key) {
+					// What lies above the group, or above the run when it ends before it, waits.
+					const resume = lowest.span.end <= key ? lowest.span.end : key + 1n;
+					const below = { start: lowest.span.start, end: min(lowest.span.end, key) };
+					items.held = read.group;
+					return this.#takeGap(items, lowest.index, below, resume);
+				}
+				// A group handed out is no gap, even one a drop also named, as a cut group is.
+				if (lowest && lowest.span.start === key) this.#cutGap(items, lowest.index, key, key + 1n);
+				items.at = max(items.at, key + 1n);
+				this.#fold(this.#delivered.runEnd(0n) ?? 0n);
+				return read;
+			}
+			case "done":
+			case "error": {
+				const lowest = this.#lowestGap(items);
+				if (lowest) return this.#takeGap(items, lowest.index, lowest.span, lowest.span.end);
+				return read;
+			}
+			case "drop":
+				// Only a read with dispositions reports a drop, which this one finds through the record.
+				throw new Error("an ordered read took a drop");
+			default: {
+				// What the read still owes lies above the gap, so the gap goes first.
+				const lowest = this.#lowestGap(items);
+				if (!lowest) return { kind: "idle" };
+				const owed = this.#nextInRange(items.at);
+				const ready = lowest.span.start <= items.at || owed === undefined || owed >= lowest.span.start;
+				return ready ? this.#takeGap(items, lowest.index, lowest.span, lowest.span.end) : { kind: "idle" };
+			}
+		}
+	}
+
+	// The group held behind a gap, while the bounds still cover it, else the cursor's next. A group
+	// read is settled, so no later cut or drop of it is a gap.
+	#readHeld(items: Items): Recv {
+		const held = items.held;
+		if (held) {
+			items.held = undefined;
+			if (this.#covered(held.start, held.start + 1n).length > 0) return { kind: "group", group: held };
+			// The bounds moved off it. With nothing they cover above, it waits for them to widen again,
+			// still polling the cursor so the read sees the track or itself end; otherwise the read
+			// passes it.
+			if (this.#covered(held.start, UNBOUNDED).length === 0) {
+				const read = this.#tryNextGroup();
+				// A clean end keeps it, as the buffer keeps a group past the cap, for a raise to read.
+				if (read.kind === "error") held.close();
+				else items.held = held;
+				return read.kind === "done" || read.kind === "error" ? read : { kind: "idle" };
+			}
+			held.close();
+		}
+		const read = this.#tryNextGroup();
+		if (read.kind === "group") this.#settled(read.group.start, read.group.start + 1n);
+		return read;
+	}
+
+	// The parts of `[start, end)` this reader's ranges and bounds cover now.
+	#covered(start: bigint, end: bigint): Run[] {
+		const cursor = this.#cursor.peek();
+		const from = max(start, cursor.start);
+		const to = cursor.end === undefined ? end : min(end, cursor.end);
+		if (from >= to) return [];
+		if (this.#resume) return this.#resume.runs(from, to) ?? [{ start: from, end: to }];
+		return this.#window.runs(from, to);
+	}
+
+	// Take every run the record gave up into the gaps waiting, in whatever order they come. A drop
+	// replaces what it overlaps, and a skip was never a group, so it removes them. Runs come lowest
+	// first, so one past every gap waiting is appended without copying the rest.
+	#findGaps(items: Items): void {
+		for (let dropped = this.#tryDrop(); dropped; dropped = this.#tryDrop()) {
+			const last = items.gaps.at(-1);
+			if (!last || last.end <= dropped.start) {
+				if (dropped.skip) continue;
+				const gap = { start: dropped.start, end: dropped.end, error: dropped.error };
+				if (last && last.end === gap.start && sameHole(last, gap)) last.end = gap.end;
+				else items.gaps.push(gap);
+				continue;
+			}
+			items.gaps = dropped.skip
+				? removeRun(items.gaps, dropped.start, dropped.end)
+				: insertDrop(items.gaps, dropped.start, dropped.end, { error: dropped.error });
+		}
+	}
+
+	// The lowest gap waiting that the bounds cover, as its index and the first part of it they cover,
+	// since they may have moved since it was found. A gap they exclude waits, in case they widen.
+	#lowestGap(items: Items): { index: number; span: Run } | undefined {
+		for (let index = 0; index < items.gaps.length; index++) {
+			const gap = items.gaps[index];
+			const [span] = this.#covered(gap.start, gap.end);
+			if (span) return { index, span };
+		}
+		return undefined;
+	}
+
+	// Pass every key below the bounded window's end for good, as an ordered read that ran out of it:
+	// a group created there later is late, so later reads end at once too. Only below the cap: a read
+	// that ran out under a lowered cap still owes what lies above it. Mirrors the Rust
+	// `Cursor::pass_end`.
+	#passEnd(): void {
+		// A resumed reader's ranges resolve on the copy serving it.
+		const window = this.#resume ? this.#resume.servingEnd() : this.#window.end();
+		if (window === undefined) return;
+		const cap = this.#cursor.peek().end;
+		const end = cap === undefined ? window : min(cap, window);
+		// Passing the keys hands them out as far as #delivered knows, so first take what the copies
+		// gave up there, as a group handed out does.
+		if (this.#resume) {
+			for (
+				let drop = this.#resume.tryDrop(this.#delivered, end);
+				drop;
+				drop = this.#resume.tryDrop(this.#delivered, end)
+			) {
+				this.#queueResumedDrop(drop);
+			}
+		}
+		const floor = this.#delivered.runEnd(0n) ?? 0n;
+		this.#delivered.forgetBelow(end);
+		const forgot = this.#delivered.runEnd(0n) ?? 0n;
+		if (forgot > floor) this.#stoppedReading(floor, forgot);
+		if (!this.#resume) this.#nextKey = max(this.#nextKey, end);
+		this.#fold(forgot);
+	}
+
+	// Take `given` from the gap at `index` as an item, which the read has now moved past. What lies
+	// below `given`, which the bounds leave out, and from `resume` on stay gaps.
+	#takeGap(items: Items, index: number, given: Run, resume: bigint): Item {
+		const error = this.#cutGap(items, index, given.start, resume);
+		items.at = max(items.at, given.end);
+		// Told once: no later drop of these keys is a gap again.
+		this.#settled(given.start, given.end);
+		// Passed for good, as a group handed out is: an ordered read never goes back, so no group
+		// below its end is handed out after it, whether it lands late here or on a resumed
+		// reader's copy, and a fill no longer owes it there.
+		const floor = this.#delivered.runEnd(0n) ?? 0n;
+		this.#delivered.forgetBelow(given.end);
+		const forgot = this.#delivered.runEnd(0n) ?? 0n;
+		if (forgot > floor) this.#stoppedReading(floor, forgot);
+		if (!this.#resume) this.#nextKey = max(this.#nextKey, given.end);
+		this.#fold(forgot);
+		const landed = hooks.landed(this, given.start, given.end);
+		return { kind: "gap", start: given.start, end: given.end, error, landed };
+	}
+
+	// Remove `[from, resume)` from the gap at `index`, returning its error.
+	#cutGap(items: Items, index: number, from: bigint, resume: bigint): Error {
+		const gap = items.gaps[index];
+		const kept: DropRun[] = [];
+		if (gap.start < from) kept.push({ ...gap, end: from });
+		if (gap.end > resume) kept.push({ ...gap, start: resume });
+		items.gaps.splice(index, 1, ...kept);
+		return gap.error;
+	}
+
+	// Record `[start, end)` as settled: handed out, or told as a gap.
+	#settled(start: bigint, end: bigint): void {
+		start = max(start, this.#floor);
+		if (start < end) this.#reported.set(start, end, { start, end, kind: "settled" });
+	}
+
+	// Fold the record below `at`, where a key-order read is, into the floor, held below every run
+	// still to report there: a run given up and not reported yet, and a gap found and not returned
+	// that the read may still reach.
+	// The record then holds only what lies ahead of the read, bounded however long it plays. A
+	// session-fed read loses nothing, since every key it passed was handed out or reported; a group
+	// a local track produces below the floor is told as nothing, where Rust, folding only under pool
+	// pressure, would report it Old. A wire publisher's record is what its wire was told, which it
+	// keeps.
+	#fold(at: bigint): void {
+		if (this.#wired) return;
+		const items = this.#items;
+		if (items) {
+			// A gap the bounds left out below where the read is can never come in key order, and an
+			// ordered read never goes back, so it is dropped rather than held for a widening.
+			if ((items.gaps[0]?.start ?? items.at) < items.at) items.gaps = removeRun(items.gaps, 0n, items.at);
+			at = min(at, items.at);
+			for (const gap of items.gaps) at = min(at, gap.start);
+		}
+		for (const run of this.#pending) if (run.end > this.#floor) at = min(at, run.start);
+		if (at <= this.#floor) return;
+		this.#floor = at;
+		this.#reported.set(0n, at);
+	}
+
+	// The key cursor passes `[start, end)` to hand out the group at `end`. Each key there that the
+	// track owed and no group or drop accounts for was given up, whether the budget convicted it or
+	// the tail's grace folded it, so it is stale. A wire-fed copy's feed owes every key from where it
+	// starts, and a fill what this reader asked it for. Below the first group passed is where the
+	// read joined, which is no gap.
+	#passOwed(start: bigint, end: bigint, drift: Drift): void {
+		const producer = this.#state.producer;
+		if (start >= end || this.#nextKey === 0n || !this.#dropsSeen || !producer) return;
+		const owed = [...intersect(this.#asked, start, end), ...intersect(this.#givenUp, start, end)];
+		if (wireFed(producer)) owed.push(...this.#window.runs(max(start, feedFloor(producer) ?? 0n), end));
+		// Only a drop that settles this reader reports the key; a stale verdict under a tighter budget
+		// does not, so the key is still this reader's to give up.
+		const { drops, refused } = this.#state;
+		const coverage = this.#coverage();
+		for (const run of owed) {
+			const settled = givenUp(drops, refused.peek(), run.start, run.end, (drop) =>
+				settles(drop, drift.budget, coverage),
+			).filter((drop) => settles({ ...drop, start: max(drop.start, run.start) }, drift.budget, coverage));
+			for (const passed of runGaps(settled, run.start, run.end)) {
+				this.#giveUp(passed, staleHole(drift.budget));
+			}
+		}
+	}
+
+	// Keep a run the key cursor gave up, once the drop record started, so a read reports it.
+	#giveUp(run: Run, hole: Hole): void {
+		if (this.#dropsSeen) this.#pending = insertDrop(this.#pending, run.start, run.end, hole);
 	}
 
 	// A missing group the subscription still owes holds sequence order until it lands,
@@ -4850,7 +5557,13 @@ export class Subscriber {
 		const groups = this.#state.groups.peek();
 		const cursor = this.#cursor.peek();
 		let start = max(cursor.start, this.#nextKey);
-		while (groups.length > 0 && groups[0].start < start) groups.shift()?.close();
+		// A group landing after the read passed its key is old: the read never goes back.
+		for (let group = groups[0]; group && group.start < start; group = groups[0]) {
+			groups.shift();
+			group.close();
+			// The record tells nothing twice, so a key already handed out or given up stays told.
+			this.#giveUp({ start: group.start, end: group.start + 1n }, late());
+		}
 		// One anchor for the whole pass, so walking a backlog off stays linear.
 		const drift = this.#drift();
 
@@ -4866,6 +5579,9 @@ export class Subscriber {
 			// Every frame this group could still hold is past the budget, so keep
 			// scanning: one pass walks a whole backlog off rather than replaying it.
 			if (this.#staleAt(group.start, drift)) {
+				// Passing it passes the owed keys below it too, which the budget gives up with it.
+				this.#passOwed(start, group.start, drift);
+				this.#giveUp({ start: group.start, end: group.start + 1n }, staleHole(drift.budget));
 				const passed = this.#nextKey;
 				this.#pass(groups, index);
 				// The cursor passed what lies below it, which a fill no longer owes this reader.
@@ -4885,7 +5601,9 @@ export class Subscriber {
 					this.#fillWait = true;
 					return { kind: "idle" };
 				}
-				// Given up: past it, as past any group no fill can serve.
+				// Given up: past it, as past any group no fill can serve, and the owed keys below it.
+				this.#passOwed(start, group.start, drift);
+				this.#giveUp({ start: group.start, end: group.start + 1n }, headless());
 				const passed = this.#nextKey;
 				this.#pass(groups, index);
 				this.#stoppedReading(passed, this.#nextKey);
@@ -4894,6 +5612,7 @@ export class Subscriber {
 				group.close();
 				continue;
 			}
+			this.#passOwed(start, group.start, drift);
 			this.#pass(groups, index);
 			this.#handOut(group.start, true);
 			return { kind: "group", group: this.#guard(group) };
@@ -4912,7 +5631,10 @@ export class Subscriber {
 		const end = this.#state.end.peek()?.at;
 		// A time start still looked up may yet take in a group held already.
 		if (this.#window.lookups().length > 0) return { kind: "idle" };
-		if (this.#exhausted()) return { kind: "done" };
+		if (this.#exhausted()) {
+			this.#passEnd();
+			return { kind: "done" };
+		}
 		if (
 			!this.#parked(groups) &&
 			!this.#starting(groups, start) &&
@@ -5006,6 +5728,58 @@ export class Subscriber {
 	}
 
 	/**
+	 * Ask the publisher for a group starting after the newest one this node holds, judged by the
+	 * track's {@link Info.refresh}, resolving once the request is sent. Mirrors the Rust
+	 * `Subscriber::refresh`.
+	 *
+	 * The request is made now. It is sent once the newest group is old enough, when whatever
+	 * serves this node's copy reads it: the session forwarding it upstream, or a local publisher
+	 * watching {@link Demand.refresh}. Concurrent requests coalesce into one, and all of them
+	 * resolve when it is sent. Aborting `options.signal` before then withdraws this caller's
+	 * request and rejects with the signal's reason; one already sent stays sent. It resolves at
+	 * once when there is nothing to send: a track that does not refresh, a ratio the newest group
+	 * is under, a track with no group yet (whose first is already asked for), or a request
+	 * already sent. It also resolves when a newer group lands first, which answers it. It rejects
+	 * if the track closes before then. A resumed reader asks the copy serving it, and asks the next
+	 * one if that copy closes first.
+	 *
+	 * The answer arrives like any other group: the first group this subscriber receives that
+	 * starts after the newest held when it was called. A group already on its way when the
+	 * request reached the publisher answers it, so across hops "made after this call" is best
+	 * effort; a reader that needs that puts its own marker in the frame.
+	 */
+	refresh(options?: RefreshOptions): Promise<void> {
+		if (this.#resume) return this.#resume.refresh(options?.signal);
+		const producer = this.#state.producer;
+		if (options?.signal?.aborted) return Promise.reject(options.signal.reason);
+		return producer ? hooks.requestProducer(producer, options?.signal) : Promise.resolve();
+	}
+
+	// Edit the ranges by key, as `hooks.editSubscriber` does: only the ranges it adds resolve, and
+	// every other stays where it resolved. Mirrors the Rust `Subscriber::edit`.
+	#edit(edit: Edit): void {
+		const { ranges: _, ...scalars } = subscriptionDefaults({
+			priority: edit.priority,
+			delay: edit.delay,
+			order: edit.order,
+			ranges: [],
+		}) as Required<Subscription>;
+		const add = edit.add.map(([key, range]) => [key, rangesOf([range])[0]] as const);
+		const reordered = scalars.order !== this.#state.update.scalars()?.order;
+		const moved = this.#state.update.edit({ retire: edit.retire, add, ...scalars });
+		// A live join not yet started reaches back by the Min Age stated when it starts.
+		this.#window.min = scalars.delay.min ?? undefined;
+		// A refused time start resolves every range again, as the Rust `Filter::stale` has it.
+		if (moved && this.#refusal) this.#resolve();
+		else if (moved) {
+			this.#window.edit(edit.retire, add, this.#latestGroup(), this.#holdings());
+			// Leaves the lookups the retired ranges asked, which a settled window never reads again.
+			if (this.#lookups.length > 0) this.#lookUp();
+			this.#moved();
+		} else if (reordered) this.#fillsMoved();
+	}
+
+	/**
 	 * Update this subscription's options (e.g. priority), triggering a SUBSCRIBE_UPDATE to the
 	 * publisher. Replacing the ranges resolves them again, without redelivering groups already
 	 * read; an arrival reader can receive the unread groups it still holds that the new ranges
@@ -5014,9 +5788,8 @@ export class Subscriber {
 	 */
 	update(options: Subscription) {
 		const subscription = subscriptionDefaults(options);
-		const replaced = !sameRanges(subscription.ranges ?? [], this.#window.ranges);
-		const reordered = subscription.order !== this.#state.update.peek()?.order;
-		this.#state.update.set(subscription);
+		const reordered = subscription.order !== this.#state.update.scalars()?.order;
+		const replaced = this.#state.update.set(subscription);
 		if (replaced) this.#resolve();
 		// A live join not yet started reaches back by the Min Age stated when it starts.
 		else this.#window.min = subscription.delay?.min ?? undefined;
@@ -5031,7 +5804,8 @@ export class Subscriber {
  * Created by {@link Subscriber.ordered}, which takes the subscription over: the two
  * cursors draw from one buffer, so a track is read one way or the other and never both.
  * Every group this returns has a higher key than the last, so a late arrival is
- * skipped rather than delivered out of turn.
+ * reported as a gap rather than delivered out of turn, as is every group the read gives up on
+ * (see {@link Ordered.nextGroup}).
  *
  * `delay.max` applies as this cursor reads, exactly as it does on the arrival cursor: a
  * group is skipped once its reach, where its immediate successor begins, is that far
@@ -5065,6 +5839,7 @@ export class Ordered {
 	}
 
 	/** Resolve this track's immutable publisher properties; see {@link Subscriber.info}. */
+	// fallow-ignore-next-line unused-class-member
 	info(): Promise<Info> {
 		return this.#subscriber.info();
 	}
@@ -5089,15 +5864,26 @@ export class Ordered {
 		return this.#subscriber.finished();
 	}
 
-	/** Whether the publisher declared every start in `[start, end)` skipped; see {@link Subscriber.isSkipped}. */
+	/**
+	 * Whether the publisher declared every start in `[start, end)` skipped, never to be produced
+	 * (which {@link Producer.appendGroup} does between groups), so no group can arrive there: true
+	 * for an empty range. Unlike the gaps, this ignores the ranges. A copy knows only the skips its
+	 * wire forwarded.
+	 *
+	 * What tells a reader that nothing lies between two groups, or before a track's first. It
+	 * knows only the skips recorded so far, so `false` means "not known skipped": a skip still in
+	 * flight reads `false`, as does one a local producer's cache expired below its edge. Mirrors
+	 * the Rust `Ordered::is_skipped`.
+	 */
 	isSkipped(start: bigint, end: bigint): boolean {
-		return this.#subscriber.isSkipped(start, end);
+		return ordered_.isSkipped(this.#subscriber, start, end);
 	}
 
 	/**
 	 * Limit subsequent reads to these groups and return this reader for chaining; see
 	 * {@link Subscriber.withRange}. An ordered read never goes back, so lowering the floor
-	 * below a group it already returned offers nothing.
+	 * below a group it already returned offers nothing, not even a gap it passed while the
+	 * range left it out.
 	 */
 	withRange(groups: Groups): this {
 		this.#subscriber.withRange(groups);
@@ -5109,20 +5895,29 @@ export class Ordered {
 		this.#subscriber.update(options);
 	}
 
+	/** Ask for a group newer than the newest held; see {@link Subscriber.refresh}. */
+	refresh(options?: RefreshOptions): Promise<void> {
+		return this.#subscriber.refresh(options);
+	}
+
 	/** Close the track (optionally with an error), closing any pending groups. Idempotent. */
 	close(abort?: Error) {
 		this.#subscriber.close(abort);
 	}
 
 	/**
-	 * Return the next group with a strictly-greater sequence number than the last returned.
+	 * Return the next group with a strictly-greater sequence number than the last returned,
+	 * passing any gap {@link nextItem} would report below it. Mirrors the Rust `next_group`.
 	 *
 	 * Late arrivals (key at or below the last returned) are silently skipped, as is a
 	 * group whose every frame is further behind the live edge than `delay.max` (the default
 	 * subscription's zero keeps only what nothing newer has superseded). Honors the bounds set by
 	 * {@link withRange}. Like {@link Subscriber.recvGroup}, a read whose ranges all end
-	 * finishes once nothing in them is left to deliver. Later reads return `undefined`
-	 * immediately too; widening the ranges with {@link update} reads on above the last key returned.
+	 * finishes once nothing in them is left to deliver; on a local track that includes a key
+	 * below a group the producer created, which this read hands out first. Later reads return `undefined`
+	 * immediately too; widening the ranges with {@link update} reads on above the end the read
+	 * passed (or the cap, when that was lower), so a group created below that end afterward is
+	 * never handed out.
 	 */
 	nextGroup(): Promise<GroupConsumer | undefined> {
 		return ordered_.nextGroup(this.#subscriber);
@@ -5134,10 +5929,47 @@ export class Ordered {
 	 * `poll_next_group`.
 	 */
 	tryNextGroup(): GroupConsumer | undefined {
-		return taken(
-			() => ordered_.tryNextGroup(this.#subscriber),
-			() => ordered_.ended(this.#subscriber),
-		);
+		for (;;) {
+			const item = this.tryNextItem();
+			if (item?.kind !== "gap") return item?.group;
+		}
+	}
+
+	/**
+	 * The next group, as {@link nextGroup} returns it, or a gap this reader gave up on below it.
+	 * Mirrors the Rust `next_item` and its `Item`.
+	 *
+	 * A gap is every group the publisher or a relay dropped, the transport evicted, `delay.max`
+	 * aged out, a fill could not find, or that landed after the read passed its key. It carries
+	 * the keys it spans and is returned once, after any group the read still owes below it and
+	 * before the next group above it, or when the track ends. Keys the publisher declared skipped
+	 * were never groups, so they are no gap, and nor is a key a local track never produced.
+	 * Unlike Rust, nor is a group a local track produces after the read moved past its key: the
+	 * read keeps no record below where it is, so its memory stays bounded. A session-fed track
+	 * reports such a key at the latest when the read passes it.
+	 */
+	nextItem(): Promise<Item | undefined> {
+		return ordered_.nextItem(this.#subscriber);
+	}
+
+	/**
+	 * Take the next item as {@link nextItem} would, without waiting: `undefined` when nothing
+	 * is ready right now, which is not by itself the end of the track. Mirrors the Rust
+	 * `poll_next_item`.
+	 */
+	tryNextItem(): Item | undefined {
+		const recv = ordered_.tryItem(this.#subscriber);
+		switch (recv.kind) {
+			case "group":
+			case "gap":
+				return recv;
+			case "error":
+				throw recv.error;
+			case "done":
+				return ordered_.ended(this.#subscriber);
+			default:
+				return undefined;
+		}
 	}
 
 	/**

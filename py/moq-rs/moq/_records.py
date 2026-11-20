@@ -31,6 +31,7 @@ from moq_ffi import (
     MoqSubscription,
     MoqTimestamp,
     MoqTrackInfo,
+    MoqTrackRefresh,
     MoqVideoDecodedFrame,
     MoqVideoPixelFormat,
     MoqVideoSurface,
@@ -147,17 +148,16 @@ class Datagram:
 class Anchor:
     """Where one end of a :class:`Range` falls, mirroring moq-net's ``track::Anchor``.
 
-    Build one with ``Anchor.OLDEST()``, ``Anchor.ABSOLUTE(group=...)``,
-    ``Anchor.RELATIVE(groups=...)``, or ``Anchor.TIME(timestamp=...)``.
+    Build one with ``Anchor.OLDEST()``, ``Anchor.RELATIVE(groups=...)``, or
+    ``Anchor.TIME(timestamp=...)``.
     """
 
     OLDEST: ClassVar[type[_AnchorOldest]]
-    ABSOLUTE: ClassVar[type[_AnchorAbsolute]]
     RELATIVE: ClassVar[type[_AnchorRelative]]
     TIME: ClassVar[type[_AnchorTime]]
 
     def _ffi(self) -> MoqAnchor:
-        raise TypeError("build an Anchor with Anchor.OLDEST, Anchor.ABSOLUTE, Anchor.RELATIVE, or Anchor.TIME")
+        raise TypeError("build an Anchor with Anchor.OLDEST, Anchor.RELATIVE, or Anchor.TIME")
 
 
 # The generated variants subclass MoqAnchor only at runtime, so each _ffi casts for pyright.
@@ -167,16 +167,6 @@ class _AnchorOldest(Anchor):
 
     def _ffi(self) -> MoqAnchor:
         return cast(MoqAnchor, MoqAnchor.OLDEST())
-
-
-@dataclass(frozen=True)
-class _AnchorAbsolute(Anchor):
-    """This group, delivered from its first frame."""
-
-    group: int
-
-    def _ffi(self) -> MoqAnchor:
-        return cast(MoqAnchor, MoqAnchor.ABSOLUTE(group=self.group))
 
 
 @dataclass(frozen=True)
@@ -193,7 +183,8 @@ class _AnchorRelative(Anchor):
 class _AnchorTime(Anchor):
     """The group containing this time: :meth:`Timestamp.unscaled` in the track's timescale.
 
-    A scaled timestamp is refused, since the subscription can't check its scale against the track.
+    As an end it includes every group starting at or before the time. A scaled timestamp is
+    refused, since the subscription can't check its scale against the track.
     """
 
     timestamp: Timestamp
@@ -203,7 +194,6 @@ class _AnchorTime(Anchor):
 
 
 Anchor.OLDEST = _AnchorOldest
-Anchor.ABSOLUTE = _AnchorAbsolute
 Anchor.RELATIVE = _AnchorRelative
 Anchor.TIME = _AnchorTime
 
@@ -212,8 +202,7 @@ Anchor.TIME = _AnchorTime
 class Range:
     """A span of a track to deliver, from ``start`` to ``end``, ``None`` to keep following the live edge.
 
-    A relative or time start is the first frame of its group, and a relative or time end
-    includes its whole group. An absolute end is exclusive.
+    Every start is the first frame of its group, and every end includes its whole group.
     """
 
     start: Anchor
@@ -228,13 +217,13 @@ class Delay:
     """How far behind the live edge a subscriber or decoder plays, mirroring moq-net's ``track::Delay``.
 
     ``min`` is the target latency: the playout or jitter-buffer delay held behind the
-    live edge, where a cold join starts, and how long a decoder waits for a missing group.
-    ``None`` leaves it unstated, which a decoder starts as zero, waiting a missing group for
-    ``max`` instead (an audio decoder floors it at zero and waits only its playout estimate,
-    which can be larger), while the subscription keeps it unstated, so it never pulls the
-    aggregate across subscribers to zero, unless a catalog warmup or an audio decoder's
-    playout delay states one. A ``min`` past ``max`` starts at ``max``.
-    ``max`` is how far a non-latest group may fall behind before it is skipped; zero
+    live edge, where a cold join starts. ``None`` leaves it unstated, which a decoder starts
+    as zero, while the subscription keeps it unstated, so it never pulls the aggregate across
+    subscribers to zero, unless a catalog warmup or an audio decoder's playout delay states
+    one. A ``min`` past ``max`` starts a cold join no further back than the
+    group covering the point ``max`` behind the live edge.
+    ``max`` is how far a non-latest group may fall behind before it is skipped, and how far newer
+    media may run past a missing group before a decoder gives it up; zero
     skips at once, ``None`` sets no subscriber limit and leaves the publisher's max age
     alone to bound it, and it caps every range.
 
@@ -300,6 +289,32 @@ def _subscription(subscription: Subscription | None) -> MoqSubscription | None:
 
 
 @dataclass(frozen=True)
+class TrackRefresh:
+    """When a subscriber asks a track's publisher for a new group, mirroring moq-net's ``track::Refresh``.
+
+    A track opting in starts each group with an independent frame (a keyframe or a snapshot),
+    so a new group is something the publisher can make on request; it hears the request
+    through :meth:`TrackDemand.refresh`. ``ratio`` is how many times its first frame a group's
+    later bytes may grow before a joining subscriber asks; zero asks on any join once a frame
+    follows the first, and ``None`` leaves joins to ``interval`` alone. ``interval`` is how long
+    after the newest group arrived a request may ask for another, ``None`` for no wait; it caps
+    how often the publisher makes groups however many subscribers ask.
+
+    A bare ``TrackRefresh()`` asks for nothing.
+    """
+
+    ratio: int | None = None
+    interval: timedelta | None = None
+
+    @classmethod
+    def _from_ffi(cls, refresh: MoqTrackRefresh) -> TrackRefresh:
+        return cls(ratio=refresh.ratio, interval=refresh.interval)
+
+    def _ffi(self) -> MoqTrackRefresh:
+        return MoqTrackRefresh(ratio=self.ratio, interval=self.interval)
+
+
+@dataclass(frozen=True)
 class TrackInfo:
     """Publisher-side track properties, mirroring moq-net's ``track::Info``.
 
@@ -307,8 +322,7 @@ class TrackInfo:
     ties between subscriptions of equal subscriber priority. ``max_age`` is how long a
     superseded group stays fresh: the default zero serves only the live edge, and
     ``None`` sets no publisher limit, leaving only the cache to bound it. ``refresh`` is
-    how many times its first frame a group's later bytes may grow before a joining
-    subscriber asks for a new group, ``None`` to never ask. ``timescale`` is ticks per second:
+    when a subscriber asks for a new group, never by default. ``timescale`` is ticks per second:
     ``None`` means the track is untimed, on both publish and receive.
     ``compression`` compresses each group on the wire to peers that support it, ``None``
     sending frames as written; readers always see the original frames.
@@ -316,7 +330,7 @@ class TrackInfo:
 
     priority: int = 0
     max_age: timedelta | None = timedelta(0)
-    refresh: int | None = None
+    refresh: TrackRefresh = TrackRefresh()
     timescale: int | None = None
     compression: MoqCompression | None = None
 
@@ -324,7 +338,7 @@ class TrackInfo:
         return MoqTrackInfo(
             priority=self.priority,
             max_age=self.max_age,
-            refresh=self.refresh,
+            refresh=self.refresh._ffi(),
             timescale=self.timescale,
             compression=self.compression,
         )
@@ -334,7 +348,7 @@ class TrackInfo:
         return TrackInfo(
             priority=info.priority,
             max_age=info.max_age,
-            refresh=info.refresh,
+            refresh=TrackRefresh._from_ffi(info.refresh),
             timescale=info.timescale,
             compression=info.compression,
         )
@@ -348,7 +362,8 @@ def _track_info(info: TrackInfo | None) -> MoqTrackInfo | None:
 class Backoff:
     """Retry pacing for the automatic reconnect.
 
-    Until a session has stayed up past 1s or been drained by a GOAWAY, a failed dial or
+    Until the peer has accepted a session's credential or drained a session with a GOAWAY
+    (or, on moq-lite 03/04, which never answer it, a session stayed up 1s), a failed dial or
     a closed session, such as a refused credential, ends the connection with its error
     rather than retrying.
 

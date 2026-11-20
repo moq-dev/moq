@@ -148,7 +148,7 @@ impl<I: DeferredImport> DeferredVideo<I> {
 		catalog: moq_mux::catalog::Producer,
 		suffix: &str,
 	) -> Result<Self> {
-		let track = broadcast.unique_track(suffix, catalog.track_info(hang::catalog::PRIORITY.video))?;
+		let track = broadcast.unique_track(suffix, catalog.track_info(hang::catalog::PRIORITY.video));
 		Ok(Self {
 			state: DeferredState::Pending(Box::new(PendingVideo { track, catalog })),
 		})
@@ -244,13 +244,13 @@ pub struct Track {
 
 /// Codec-specific per-frame transform.
 enum TrackConvert {
-	/// Opus / VP8 / VP9 / AV1, plus inline-parameter H.264 (avc3) and H.265
-	/// (hev1): the stored bitstream is already in the shape str0m's
-	/// packetizer wants, so it passes through untouched.
+	/// Opus / VP8 / VP9 / AV1, plus H.264 / H.265 with no configuration record
+	/// (Annex-B carrying its parameter sets): the stored bitstream is already in
+	/// the shape str0m's packetizer wants, so it passes through untouched.
 	Passthrough,
-	/// Out-of-band-parameter H.264 (avc1) and H.265 (hvc1): length-prefixed
-	/// NALU rewritten to Annex-B, with the cached parameter sets (SPS+PPS,
-	/// plus VPS for H.265) prepended to every keyframe. Both codecs share this
+	/// H.264 / H.265 with a configuration record: length-prefixed NALU
+	/// rewritten to Annex-B, with the record's parameter sets (SPS+PPS, plus VPS
+	/// for H.265, empty when they all ride in band) prepended to every keyframe. Both codecs share this
 	/// path; only the config record parsed to build it differs (avcC vs hvcC).
 	/// Mirrors moq-mux's `h264::Export` / `h265::Export`.
 	LengthPrefixed { length_size: usize, keyframe_prefix: Bytes },
@@ -270,8 +270,10 @@ impl Track {
 	}
 
 	/// Video track from a subscribed `track` consumer. Codec inferred from
-	/// `config.codec`; for H.264 / H.265 the bitstream shape (inline vs out-of-band
-	/// parameter sets) is inferred from `config.description` (avc1/hvc1 vs avc3/hev1).
+	/// `config.codec`; for H.264 / H.265 the framing comes from `config.description`
+	/// (a record means length-prefixed, none means Annex-B), and the codec prefix
+	/// says whether the parameter sets may ride in band (avc3/hev1) or only in the
+	/// record (avc1/hvc1).
 	pub fn video(mut track: moq_net::track::Subscriber, config: &VideoConfig) -> Result<Self> {
 		let container: moq_mux::catalog::hang::Container = config.try_into()?;
 		let bill = track.bill();
@@ -281,8 +283,8 @@ impl Track {
 			hang::catalog::VideoCodec::VP8 => TrackConvert::Passthrough,
 			hang::catalog::VideoCodec::VP9(_) => TrackConvert::Passthrough,
 			hang::catalog::VideoCodec::AV1(_) => TrackConvert::Passthrough,
-			hang::catalog::VideoCodec::H264(_) => h264_convert(config)?,
-			hang::catalog::VideoCodec::H265(_) => h265_convert(config)?,
+			hang::catalog::VideoCodec::H264(h264) => h264_convert(config, h264.inline)?,
+			hang::catalog::VideoCodec::H265(h265) => h265_convert(config, h265.in_band)?,
 			other => return Err(crate::Error::UnsupportedCodec(format!("{other:?}"))),
 		};
 
@@ -329,18 +331,17 @@ impl Track {
 
 /// Build the per-frame transform for an H.264 rendition.
 ///
-/// avc3 (inline SPS/PPS, empty `description`) passes through. avc1 (out-of-band
-/// avcC in `description`) parses the avcC and prebuilds the Annex-B SPS+PPS
-/// prefix to prepend ahead of every keyframe.
-fn h264_convert(config: &VideoConfig) -> Result<TrackConvert> {
+/// No `description` passes through as Annex-B. An avcC parses into the Annex-B
+/// SPS+PPS prefix to prepend ahead of every keyframe; `in_band` (avc3) lets it
+/// list none, as an avc3 track's record may, since the samples carry them.
+fn h264_convert(config: &VideoConfig, in_band: bool) -> Result<TrackConvert> {
 	let Some(avcc) = config.description.as_ref().filter(|d| !d.is_empty()) else {
 		return Ok(TrackConvert::Passthrough);
 	};
 	let params = moq_mux::codec::h264::Avcc::parse(avcc).map_err(moq_mux::Error::from)?;
-	// Without SPS+PPS the keyframe prefix would be empty and every keyframe
-	// would reach the peer without inline parameter sets, i.e. undecodable.
-	// Fail loudly instead, matching moq-mux's `h264::Export`.
-	if params.sps.is_empty() || params.pps.is_empty() {
+	// An avc1 record without SPS+PPS leaves every keyframe without parameter
+	// sets, i.e. undecodable. Fail loudly instead, matching moq-mux's `h264::Export`.
+	if !in_band && (params.sps.is_empty() || params.pps.is_empty()) {
 		return Err(moq_mux::Error::H264(moq_mux::codec::h264::Error::MissingParamSets {
 			name: "WebRTC rendition".to_string(),
 			sps: params.sps.len(),
@@ -357,17 +358,16 @@ fn h264_convert(config: &VideoConfig) -> Result<TrackConvert> {
 
 /// Build the per-frame transform for an H.265 rendition.
 ///
-/// The H.265 analogue of [`h264_convert`]: hev1 (inline VPS/SPS/PPS) passes
-/// through; hvc1 (out-of-band hvcC) parses the hvcC and prebuilds the Annex-B
-/// VPS+SPS+PPS prefix to prepend ahead of every keyframe.
-fn h265_convert(config: &VideoConfig) -> Result<TrackConvert> {
+/// The H.265 analogue of [`h264_convert`], with a VPS+SPS+PPS prefix; `in_band`
+/// (hev1) lets the hvcC list none.
+fn h265_convert(config: &VideoConfig, in_band: bool) -> Result<TrackConvert> {
 	let Some(hvcc) = config.description.as_ref().filter(|d| !d.is_empty()) else {
 		return Ok(TrackConvert::Passthrough);
 	};
 	let params = moq_mux::codec::h265::Hvcc::parse(hvcc).map_err(moq_mux::Error::from)?;
-	// Same reasoning as `h264_convert`: a keyframe with no inline VPS/SPS/PPS
-	// is undecodable, so reject an hvcC that omits any of them.
-	if params.vps.is_empty() || params.sps.is_empty() || params.pps.is_empty() {
+	// Same reasoning as `h264_convert`: an hvc1 keyframe with no VPS/SPS/PPS is
+	// undecodable, so reject an hvc1 hvcC that omits any of them.
+	if !in_band && (params.vps.is_empty() || params.sps.is_empty() || params.pps.is_empty()) {
 		return Err(moq_mux::Error::H265(moq_mux::codec::h265::Error::MissingParamSets {
 			name: "WebRTC rendition".to_string(),
 			vps: params.vps.len(),
@@ -446,7 +446,7 @@ mod tests {
 	#[test]
 	fn h264_avc3_passthrough() {
 		let cfg = config(h264(true), None);
-		assert!(matches!(h264_convert(&cfg).unwrap(), TrackConvert::Passthrough));
+		assert!(matches!(h264_convert(&cfg, true).unwrap(), TrackConvert::Passthrough));
 	}
 
 	#[test]
@@ -458,7 +458,7 @@ mod tests {
 		let TrackConvert::LengthPrefixed {
 			length_size,
 			keyframe_prefix,
-		} = h264_convert(&cfg).unwrap()
+		} = h264_convert(&cfg, false).unwrap()
 		else {
 			panic!("expected LengthPrefixed");
 		};
@@ -471,7 +471,7 @@ mod tests {
 	#[test]
 	fn h265_hev1_passthrough() {
 		let cfg = config(h265(true), None);
-		assert!(matches!(h265_convert(&cfg).unwrap(), TrackConvert::Passthrough));
+		assert!(matches!(h265_convert(&cfg, true).unwrap(), TrackConvert::Passthrough));
 	}
 
 	#[test]
@@ -484,7 +484,7 @@ mod tests {
 		let TrackConvert::LengthPrefixed {
 			length_size,
 			keyframe_prefix,
-		} = h265_convert(&cfg).unwrap()
+		} = h265_convert(&cfg, false).unwrap()
 		else {
 			panic!("expected LengthPrefixed");
 		};
@@ -503,6 +503,33 @@ mod tests {
 		// 6-byte header (numSPS = 0 in the low 5 bits of byte 5) + a zero PPS count.
 		let avcc = Bytes::from(vec![1, 0x42, 0, 0x1f, 0xff, 0xe0, 0x00]);
 		let cfg = config(h264(false), Some(avcc));
-		assert!(h264_convert(&cfg).is_err(), "missing SPS/PPS must error");
+		assert!(h264_convert(&cfg, false).is_err(), "missing SPS/PPS must error");
+	}
+
+	/// An avc3 / hev1 record may list no parameter sets, as the fMP4 export
+	/// writes one: the samples carry them, so the record only sets the framing.
+	#[test]
+	fn in_band_record_without_param_sets_is_length_prefixed() {
+		let avcc = Bytes::from(vec![1, 0x42, 0, 0x1f, 0xff, 0xe0, 0x00]);
+		let TrackConvert::LengthPrefixed {
+			length_size,
+			keyframe_prefix,
+		} = h264_convert(&config(h264(true), Some(avcc)), true).unwrap()
+		else {
+			panic!("expected LengthPrefixed");
+		};
+		assert_eq!(length_size, 4);
+		assert!(keyframe_prefix.is_empty());
+
+		// configurationVersion 1, a zeroed profile block, 4-byte lengths, no arrays.
+		let mut hvcc = vec![0u8; 23];
+		hvcc[0] = 1;
+		hvcc[21] = 0xff;
+		let TrackConvert::LengthPrefixed { keyframe_prefix, .. } =
+			h265_convert(&config(h265(true), Some(Bytes::from(hvcc))), true).unwrap()
+		else {
+			panic!("expected LengthPrefixed");
+		};
+		assert!(keyframe_prefix.is_empty());
 	}
 }

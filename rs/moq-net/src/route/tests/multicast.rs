@@ -94,6 +94,7 @@ fn own() -> Claim<()> {
 		draining: false,
 		unavailable: false,
 		chain: Vec::new(),
+		marked: false,
 	}
 }
 
@@ -138,10 +139,12 @@ impl RelaySim {
 			true => NodeId {
 				relay: node as Id | generation << 32,
 				start: 1,
+				marked: false,
 			},
 			false => NodeId {
 				relay: node as Id,
 				start: generation + 1,
+				marked: false,
 			},
 		}
 	}
@@ -183,8 +186,7 @@ impl RelaySim {
 	pub fn truth(&self, origin: NodeId, floor: Rev) -> Option<&relay::Claims<Id, ()>> {
 		let current = (0..self.spots.len())
 			.filter_map(|node| self.router(node))
-			.find(|router| router.me() == origin)
-			.map(Router::history);
+			.find_map(|router| router.history(origin));
 		let history = current.or_else(|| self.histories.get(&origin).map(Vec::as_slice))?;
 		history.get(usize::try_from(floor).ok()?)
 	}
@@ -359,7 +361,10 @@ impl RelaySim {
 		self.restarts[node] += 1;
 		if let Spot::Relay(router) = &self.spots[node] {
 			self.spent += router.work_done();
-			self.histories.insert(router.me(), router.history().to_vec());
+			for id in [router.me(), router.me_marked()] {
+				let history = router.history(id).expect("an identity of its own").to_vec();
+				self.histories.insert(id, history);
+			}
 			self.spots[node] = Spot::Relay(Box::new(self.fresh(node)));
 		}
 	}
@@ -905,6 +910,15 @@ const UNAVAILABLE: [(&str, &str); 5] = [
 /// two ends of one grant to each other for a moment, each on the copy of the claim that
 /// came the other way round (`home_dies`); the adopter's unavailable is one more message
 /// delivered while that lasts, and it clears in the same round.
+///
+/// And where a claim moves to another node, the router forwards the new node's route
+/// before the old node's withdrawal at every hop, so some readers never see it offline
+/// and never start it again: fewer of each, by as many.
+///
+/// And a request follows a claim only through a neighbour whose copy of the claimant's
+/// claims holds it, where the prototype follows the route alone. While links flap, a
+/// neighbour's route can arrive before its copy of the claims, and a request through it
+/// would come back: fewer loops.
 #[test]
 fn the_router_gives_the_prototypes_answers() {
 	let mut out = Vec::new();
@@ -915,12 +929,17 @@ fn the_router_gives_the_prototypes_answers() {
 		for ((failure, kept), (_, relay)) in kept.iter().zip(&relay) {
 			let (a, b) = (&kept.cost, &relay.cost);
 			let unavailable = UNAVAILABLE.contains(&(failure.as_str(), shape.name));
+			// Each reader that never saw the claim go offline also never started it again.
+			let kept_up = b.sent.starts < a.sent.starts
+				&& a.sent.starts - b.sent.starts == a.sent.offline.saturating_sub(b.sent.offline);
 			let excused = |field: &str| match field {
+				"starts" | "offline" if kept_up => true,
 				"claim_items" if a.sent.claims > b.sent.claims => true,
 				"claim_items" => unavailable,
 				"settle_rounds" => unavailable && b.rounds == a.rounds + 1,
 				"starts" => unavailable && b.sent.starts < a.sent.starts,
 				"offline" => unavailable && b.sent.offline < a.sent.offline,
+				"loops" if b.loops < a.loops => true,
 				"loops" => unavailable && shape.name == "three_meshes_ring" && b.loops == a.loops + 1,
 				_ => false,
 			};
@@ -952,6 +971,45 @@ pub(super) fn quiesce(sim: &mut RelaySim) {
 		}
 	}
 	panic!("never settles");
+}
+
+/// A claim that crosses a grant and comes back over another is refused by the relay it
+/// left by and by the relay that announced it, since its chain names both: only the
+/// adopters named it before, so the exporter took the echo and announced it as its own,
+/// and the announcer kept it once its publisher left, a request there going round both
+/// meshes. Mesh 0-1 grants the claim to mesh 2-3 at 1, and 3 grants it back to `back`
+/// over a dearer grant, so 3 holds 2's copy rather than one of its own.
+#[test]
+fn a_claim_never_comes_back_over_a_grant() {
+	for back in [1, 0] {
+		let mut sim = RelaySim::new(5, relay::debounce(HOP));
+		sim.client(4);
+		sim.publish(4, 100);
+		sim.link(4, 0, 1, Tie::Peer);
+		sim.link(0, 1, 1, Tie::Peer);
+		sim.link(2, 3, 1, Tie::Peer);
+		sim.link(1, 2, 1, Tie::Scoped);
+		sim.link(3, back, 10, Tie::Scoped);
+		sim.claim(4, "live", true);
+		quiesce(&mut sim);
+		let broadcast = (p("live"), 100);
+		let echo = |sim: &RelaySim| sim.router(back).expect("a relay").own().1.contains_key(&broadcast);
+		assert_eq!(
+			sim.chase(3, 100, &p("live")),
+			Some((vec![2, 1, 0, 4], true)),
+			"back {back}"
+		);
+		match back {
+			1 => assert!(!echo(&sim), "the exporter took the echo"),
+			_ => {
+				// Only the announcer's own publisher leaving shows whether it held an echo.
+				sim.auto = false;
+				sim.claim(4, "live", false);
+				sim.deliver(4, 0);
+				assert!(!echo(&sim), "the announcer kept the echo");
+			}
+		}
+	}
 }
 
 /// Two relays that share a draining neighbour and a scoped link each hold the other's

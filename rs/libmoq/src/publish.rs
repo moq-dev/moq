@@ -9,10 +9,12 @@ use crate::ffi::OnStatus;
 use crate::task::Task;
 use crate::{Error, Id, NonZeroSlab, State, moq_demand};
 
-/// A demand watcher's task, plus a handle to peek the wanted group from its callback.
+/// A demand watcher's task, plus a handle to read and wait on its track's demand.
 struct DemandEntry {
 	task: Task,
 	demand: moq_net::track::Demand,
+	/// Dropped with the entry once the watcher ends, which ends its refresh waits.
+	alive: kio::Producer<()>,
 }
 
 /// A subscriber's request for a track the broadcast has not declared, kept with the
@@ -28,7 +30,7 @@ struct TrackRequest {
 /// several times the size of a fill.
 enum Request {
 	Track(Box<TrackRequest>),
-	Fill(moq_net::track::Fill),
+	Fill(moq_net::track::FillGroups),
 	Datagram(DatagramRequest),
 }
 
@@ -514,8 +516,8 @@ impl Publish {
 			..
 		} = self.broadcast(broadcast)?;
 		let broadcast = broadcast.clone();
-		let name = broadcast.unique_name(&format!(".{}", init.format));
-		let request = broadcast.reserve_track(name)?;
+		let name = broadcast.unique_name(init.format.track_suffix());
+		let request = broadcast.reserve_track(name).ok_or(moq_net::Error::Duplicate)?;
 
 		let track = import::Track::audio(request, catalog.reserve().with_interval(interval), init)?;
 		let children = children.clone();
@@ -536,8 +538,8 @@ impl Publish {
 			..
 		} = self.broadcast(broadcast)?;
 		let broadcast = broadcast.clone();
-		let name = broadcast.unique_name(&format!(".{}", init.format));
-		let request = broadcast.reserve_track(name)?;
+		let name = broadcast.unique_name(init.format.track_suffix());
+		let request = broadcast.reserve_track(name).ok_or(moq_net::Error::Duplicate)?;
 
 		let priority = init.priority;
 		let track = import::Track::video(request, catalog.reserve().with_interval(interval), init)?;
@@ -816,7 +818,7 @@ impl Publish {
 	/// Insert or replace a top-level application catalog section by name.
 	///
 	/// `value` is any JSON document. Errors if `name` is a HANG root (`video`, `audio`, `sync`, `text`,
-	/// `json`, `binary`, `stats`, `echo`, `include`, `m2ts`, or the retired `archive`, `clock`,
+	/// `json`, `binary`, `stats`, `echo`, `include`, or the retired `archive`, `clock`,
 	/// `media`, and `timeline`) or an MSF root (`version`,
 	/// `generatedAt`, `isComplete`, `tracks`, or `initDataList`). The catalog is republished
 	/// automatically.
@@ -866,8 +868,8 @@ impl Publish {
 
 	/// Watch a track's subscriber demand, reporting the current state and every change.
 	///
-	/// `on_demand` fires with a [`moq_demand`] value immediately and again on each change of the
-	/// wanted group, then once with a terminal code: `0` when the track ends or the watcher is
+	/// `on_demand` fires with a [`moq_demand`] value immediately and again on each change, then
+	/// once with a terminal code: `0` when the track ends or the watcher is
 	/// closed, negative when the track aborts. Seeding with the current state is what makes a late
 	/// registration safe: a track that went unused before the watcher existed still reports it.
 	pub fn demand(&mut self, demand: moq_net::track::Demand, on_demand: OnStatus) -> Result<Id, Error> {
@@ -875,6 +877,7 @@ impl Publish {
 		let id = self.demand.insert(DemandEntry {
 			task,
 			demand: demand.clone(),
+			alive: kio::Producer::new(()),
 		})?;
 
 		tokio::spawn(async move {
@@ -913,8 +916,8 @@ impl Publish {
 				}
 			};
 			let state = match next {
-				Ok(Some(_)) => moq_demand::MOQ_DEMAND_WANTED,
-				Ok(None) => moq_demand::MOQ_DEMAND_UNWANTED,
+				Ok(true) => moq_demand::MOQ_DEMAND_WANTED,
+				Ok(false) => moq_demand::MOQ_DEMAND_UNWANTED,
 				Err(moq_net::Error::Dropped) => return Ok(()),
 				Err(err) => return Err(err.into()),
 			};
@@ -922,9 +925,41 @@ impl Publish {
 		}
 	}
 
-	/// The group a demand watcher's subscribers want right now, until its terminal callback.
-	pub fn demand_wanted(&self, watcher: Id) -> Result<Option<u64>, Error> {
+	/// Whether anyone consumes a demand watcher's track right now, until its terminal callback.
+	pub fn demand_wanted(&self, watcher: Id) -> Result<bool, Error> {
 		Ok(self.demand.get(watcher).ok_or(Error::NotFound)?.demand.wanted())
+	}
+
+	/// Call `on_refresh` once a subscriber of a demand watcher's track asks for a new group:
+	/// [`moq_demand::MOQ_DEMAND_REFRESH`], or `0` once the watcher ended first, or negative once
+	/// the track aborted.
+	pub fn demand_refresh(&self, watcher: Id, on_refresh: OnStatus) -> Result<(), Error> {
+		let entry = self.demand.get(watcher).ok_or(Error::NotFound)?;
+		let demand = entry.demand.clone();
+		let alive = entry.alive.consume();
+		tokio::spawn(async move {
+			let res = crate::ffi::run(async move {
+				tokio::select! {
+					biased;
+					// The watcher's end first, so a cancelled wait never takes a later request.
+					// A track that aborted still reports why, read without waiting.
+					_ = alive.closed() => match demand.poll_closed(&kio::Waiter::noop()) {
+						std::task::Poll::Ready(Err(moq_net::Error::Dropped)) => Ok(0),
+						std::task::Poll::Ready(Err(err)) => Err(err.into()),
+						_ => Ok(0),
+					},
+					res = demand.refresh() => match res {
+						Ok(()) => Ok(moq_demand::MOQ_DEMAND_REFRESH as i32),
+						// The track ended without an abort, as the watcher reports it.
+						Err(moq_net::Error::Dropped) => Ok(0),
+						Err(err) => Err(err.into()),
+					},
+				}
+			})
+			.await;
+			on_refresh.call(res);
+		});
+		Ok(())
 	}
 
 	/// Stop a demand watcher. The task still delivers its terminal callback.
@@ -1024,12 +1059,6 @@ impl Publish {
 				Request::Track(request) => State::lock().publish.track_request.insert(*request)?,
 				Request::Datagram(request) => State::lock().publish.datagram_request.insert(request)?,
 				Request::Fill(fill) => {
-					// A lookup of a time owes no group, and a request names one: drop it
-					// unanswered, as a handler that can't resolve times does, so the reader
-					// falls back to the groups held.
-					let moq_net::track::Fill::Groups(fill) = fill else {
-						continue;
-					};
 					let mut serve = Box::pin(Self::serve_fill(callback, Arc::new(fill)));
 					fills.push(move |waiter: &kio::Waiter| waiter.poll_future(serve.as_mut()));
 					continue;
@@ -1155,22 +1184,36 @@ impl Publish {
 	/// indices they have in the group rather than restarting at 0.
 	pub fn group_request_accept(&mut self, request: Id) -> Result<Id, Error> {
 		let request = self.group_request.remove(request).ok_or(Error::NotFound)?;
-		let group = request.fill.accept(request.start, None)?;
+		let group = request
+			.fill
+			.accept(request.start, None)?
+			.ok_or(moq_net::Error::Duplicate)?;
 		self.insert_group(group)
 	}
 
-	/// Reject a group request like [`Self::group_request_free`]; `error_code` is not delivered.
+	/// Refuse a group request, failing the readers waiting on it now as not found, so a later
+	/// reader asks again; `error_code` is not delivered. A reader's time start fails with it
+	/// until its ranges change, as serving it failed.
 	pub fn group_request_abort(&mut self, request: Id, _error_code: u16) -> Result<(), Error> {
-		self.group_request_free(request)
-	}
-
-	/// Drop a group request, failing the readers waiting on it as not found. The group is
-	/// refused rather than dropped, so a later reader asks again.
-	pub fn group_request_free(&mut self, request: Id) -> Result<(), Error> {
 		let request = self.group_request.remove(request).ok_or(Error::NotFound)?;
 		request
 			.fill
 			.refuse_groups(request.start..request.start + 1, moq_net::Error::NotFound);
+		Ok(())
+	}
+
+	/// Free a group request unanswered: refused as [`Self::group_request_abort`] refuses it,
+	/// except a reader's time start, which is dropped. A C handler knows its groups only by
+	/// key, so one lacking the time's key says no group starts there, and its reader starts at
+	/// the group below rather than failing.
+	pub fn group_request_free(&mut self, request: Id) -> Result<(), Error> {
+		let request = self.group_request.remove(request).ok_or(Error::NotFound)?;
+		let fill = &request.fill;
+		let groups = request.start..request.start + 1;
+		match fill.is_time_start() {
+			true => fill.drop_groups(groups),
+			false => fill.refuse_groups(groups, moq_net::Error::NotFound),
+		}
 		Ok(())
 	}
 
@@ -1183,7 +1226,7 @@ impl Publish {
 		let children = self.children(broadcast)?;
 		let broadcast = self.producer(broadcast)?;
 		let info = info.unwrap_or_default();
-		let track = broadcast.create_track(name, info)?;
+		let track = broadcast.create_track(name, info).ok_or(moq_net::Error::Duplicate)?;
 		let raw = Kept {
 			inner: track,
 			children: children.clone(),
@@ -1298,8 +1341,11 @@ impl Publish {
 		let mut info = moq_net::track::Info::default()
 			.with_timescale(moq_net::Timescale::MILLI)
 			.with_compression(moq_net::track::Compression::Deflate);
-		info.refresh = refresh;
-		let track = broadcast.producer.create_track(name, info)?;
+		info.refresh = moq_net::track::Refresh::default().with_ratio(refresh);
+		let track = broadcast
+			.producer
+			.create_track(name, info)
+			.ok_or(moq_net::Error::Duplicate)?;
 		let producer = publish(&broadcast.catalog, track)?;
 		Ok(Data {
 			producer,
@@ -1849,7 +1895,10 @@ struct DatagramDemand {
 impl Publish {
 	pub fn datagrams(&mut self, broadcast: Id, name: &str, info: moq_net::datagram::Info) -> Result<Id, Error> {
 		let children = self.children(broadcast)?;
-		let producer = self.producer(broadcast)?.create_datagrams(name, info)?;
+		let producer = self
+			.producer(broadcast)?
+			.create_datagrams(name, info)
+			.ok_or(moq_net::Error::Duplicate)?;
 		let entry = Datagrams {
 			producer,
 			children: children.clone(),

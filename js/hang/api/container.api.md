@@ -26,7 +26,7 @@ export class Consumer {
 export interface ConsumerProps {
 	delay?: Signals.GetterInit<Net.Track.Delay>;
 	format: Format;
-	playhead?: Playhead;
+	ordered?: Net.Track.Ordered;
 	predecessor?: Consumer;
 	warmup?: Net.Clock.Duration;
 }
@@ -78,11 +78,6 @@ export namespace Legacy {
 export * as Loc from "@moq/loc";
 
 export const MAX_AGE: Net.Clock.Duration;
-
-export interface Playhead {
-	readonly anchor: Signals.Getter<unknown>;
-	now(): Net.Clock.Duration | undefined;
-}
 
 export type Read = {
 	frame: ReceivedFrame;

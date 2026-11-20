@@ -7,8 +7,8 @@ section: renditions keyed by name, each with a mime (`image/png` for
 lossless, and lossy formats such as `image/jpeg`), a width, and a height,
 one image per group. Rust (`hang`) and `@moq/hang` both read and write it.
 A moq-video producer scales and encodes the newest captured or decoded
-frame into each rendition whenever its track
-[refreshes](/quest/m2/refresh-interval.md), so a reader that arrives or asks
+frame into each rendition whenever its track refreshes (`track::Refresh`
+with an interval, from [moq-dev/moq#9054](https://github.com/moq-dev/moq/pull/9054)), so a reader that arrives or asks
 gets a current still, and the publisher encodes no more than one per
 interval. Before any reader has asked there is no still: the first reader's
 join asks for the first one at once, and the interval applies from then on.
@@ -54,7 +54,7 @@ Recommendations for the PR:
   encode, so at the publisher a still always follows the request that
   made it. Across relays `refresh()` promises only a group newer than the
   newest the asking node held (decided 2026-11-16 on
-  [refresh](/quest/m2/refresh-interval.md): no request counter and no tag
+  refresh, [moq-dev/moq#9054](https://github.com/moq-dev/moq/pull/9054): no request counter and no tag
   on groups), so a remote caller that needs "after my action" reads until
   the still's timestamp passes the time of its action. A capture that
   delivers frames only on change (PipeWire does) has its last frame as the
@@ -69,7 +69,3 @@ Recommendations for the PR:
   once someone needs them.
 
 Public API: additive. Wire: the hang catalog gains an optional section.
-
-## Required
-
-- [Refresh a track by interval, and on request](/quest/m2/refresh-interval.md) - what makes a one-image group refresh on demand

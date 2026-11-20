@@ -447,7 +447,14 @@ async fn drain_on_the_trigger(version: Option<moq_net::Version>) {
 
 	// Hold the next real connection at authentication. Its admission keeps the
 	// drain open even after the first session leaves, without an unrelated peer.
-	let arriving = tokio::spawn(connect(client, url));
+	// Reconnecting, so the GOAWAY that lands with the relay's acceptance leaves the drained
+	// session readable as the predecessor, where a one-shot loop ends on it.
+	let arriving = tokio::spawn(async move {
+		kio::clock::timeout(TIMEOUT, client.with_reconnect(true).connect(url).established())
+			.await
+			.expect("connect timeout")
+			.expect("connect failed")
+	});
 	let pending = admissions.next().await.expect("pending admission");
 	// The relay fixes its deadline inside `start`, so these bracket it: what is
 	// left of each bounds what the relay tells the arrival from below and above.
@@ -506,10 +513,8 @@ async fn drain_on_the_trigger(version: Option<moq_net::Version>) {
 			"{label}: an arrival mid-drain got {timeout:?}, short of the {least:?} left of the window"
 		);
 	}
-	kio::clock::timeout(TIMEOUT, arrival.closed())
-		.await
-		.unwrap_or_else(|_| panic!("{label}: the arrival never closed"))
-		.expect("a one-shot session leaves cleanly on GOAWAY");
+	// A reconnecting arrival would redial the draining relay, so leave instead.
+	drop(arrival);
 
 	// `run` joins the worker threads before returning, so returning at all is
 	// the clean join; the rebind proves every worker let go of the port.

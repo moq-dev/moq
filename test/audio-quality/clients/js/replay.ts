@@ -141,7 +141,6 @@ for (const { row, trace } of rows) {
 		rate,
 		delay: "auto",
 		config: trace.config as unknown as Catalog.AudioConfig,
-		largest: trace.largest,
 		duration: trace.duration,
 	});
 	let last: Reading | undefined;

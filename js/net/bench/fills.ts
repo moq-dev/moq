@@ -1,5 +1,6 @@
 /** Sweep cached groups against independent peers requesting draft-22 fills. */
 import { Duration } from "@moq/clock";
+import { defined } from "../src/defined.test-util.ts";
 import { FetchHeader } from "../src/ietf/fetch";
 import * as Filter from "../src/ietf/filter";
 import { Parameters } from "../src/ietf/parameters";
@@ -22,7 +23,7 @@ for (const groups of [2, 16, 128]) {
 	for (const subscribers of [1, 8]) {
 		const origin = new Producer();
 		const publication = origin.route(Path.from("fills"));
-		const track = publication.broadcast.createTrack("video", { maxAge: Duration.millis(60_000) });
+		const track = defined(publication.broadcast.createTrack("video", { maxAge: Duration.millis(60_000) }));
 		for (let i = 0; i < groups; i++) {
 			const group = hooks.appendNext(track);
 			group.writeFrame({ payload: new Uint8Array([i % 256]), timestamp: Timestamp.unscaled(group.start) });

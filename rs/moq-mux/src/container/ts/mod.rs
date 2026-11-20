@@ -19,7 +19,7 @@
 //! only the newest group.
 //!
 //! [`Passthrough`] is the other shape: it publishes the multiplex whole, every packet
-//! verbatim on one track named by the hang catalog's `m2ts` section, for what
+//! verbatim on one track named by [`Mpegts::passthrough`], for what
 //! demultiplexing cannot carry (TS-level scrambling, PSI and SI as authored), and
 //! [`Release`] writes that track back out on a fixed delay.
 
@@ -47,7 +47,9 @@ mod unclaimed;
 // they read as `ts::Catalog`, `ts::Mpegts`, ... instead of stuttering under `catalog`.
 mod catalog;
 
-pub use catalog::{Catalog, Descriptor, Ext, Framing, Mpegts, PesPacket, Program, SiEntry, Track, Verbatim};
+pub use catalog::{
+	Catalog, Descriptor, Ext, Framing, Mpegts, PassthroughTrack, PesPacket, Program, SiEntry, Track, Verbatim,
+};
 pub use error::Error;
 pub use export::Export;
 pub use follower::Follower;

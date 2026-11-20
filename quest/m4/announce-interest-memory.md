@@ -28,8 +28,10 @@ is about 10k times N times a few hundred bytes. Incoming announces are
 bounded by `session::Limits`; outgoing interest streams are not.
 
 Since [one route stream](https://github.com/moq-dev/moq/pull/8835),
-lite-07 holds one interest stream per side, so what remains exposed is
-lite-05/06 and moq-transport.
+lite-07 holds one interest stream per side, and since
+[moq-dev/moq#8987](https://github.com/moq-dev/moq/pull/8987) its sessions
+read the route layer (`route::node`) rather than an origin cursor each, so
+what remains exposed is lite-05/06 and moq-transport.
 
 Decided 2026-11-15 (maintainer, /quest-complete): ✅ a `session::Limits` cap
 on interest streams for lite-05/06 and moq-transport now, counted like
@@ -46,4 +48,4 @@ Public API: additive, a new `session::Limits` field. Wire: none.
 
 ## Related
 
-- [Cluster routing](/quest/m3/cluster-routing/README.md) - reshapes the route table this walks
+- [Route wakes](/quest/m4/route-wakes.md) - the origin route table these cursors walk

@@ -277,10 +277,13 @@ async fn sni_test() {
 	let fingerprints = server.certificates().fingerprints();
 	assert_eq!(fingerprints.len(), 2, "expected both certificates to be served");
 
-	// Keep accepting so the client handshakes complete, then drop the server.
+	// Keep accepting and holding each session, so the client sees it accepted.
 	let server_handle = tokio::spawn(async move {
 		let mut server = server;
-		while server.accept().await.is_ok() {}
+		let mut sessions = Vec::new();
+		while let Ok(request) = server.accept().await {
+			sessions.push(request.ok().await);
+		}
 	});
 
 	let dial = |host_name: &str, fingerprint: &str| {
@@ -783,7 +786,7 @@ async fn quic_client_close_drains_migrated_predecessor() {
 				.init(quic)
 				.expect("failed to init client")
 				.with_publisher(origin.consume());
-			let mut connection = client.connect(url).established().await.expect("client connect failed");
+			let connection = client.connect(url).established().await.expect("client connect failed");
 
 			while track.subscription().is_none() {
 				track.subscription_changed().await.expect("track closed");
@@ -791,8 +794,10 @@ async fn quic_client_close_drains_migrated_predecessor() {
 			subscribed_tx.send(()).unwrap();
 
 			// Once the replacement is live, only the predecessor serves the subscription.
-			while connection.connects() < 2 || !connection.connected() {
-				connection.status().await.expect("connection stopped");
+			let monitor = connection.monitor();
+			let mut seen = monitor.state();
+			while seen.connects < 2 || !matches!(seen.phase, moq_tokio::connection::Phase::Connected { .. }) {
+				seen = monitor.state_changed(seen.revision).await.expect("connection stopped");
 			}
 			migrated_tx.send(()).unwrap();
 
@@ -929,7 +934,7 @@ async fn quic_client_close_keeps_predecessor_handover() {
 				.init(quic)
 				.expect("failed to init client")
 				.with_publisher(origin.consume());
-			let mut connection = client.connect(url).established().await.expect("client connect failed");
+			let connection = client.connect(url).established().await.expect("client connect failed");
 
 			while track.subscription().is_none() {
 				track.subscription_changed().await.expect("track closed");
@@ -937,7 +942,11 @@ async fn quic_client_close_keeps_predecessor_handover() {
 			subscribed_tx.send(()).unwrap();
 
 			// Close while the old session is still inside its handover window.
-			while connection.status().await.expect("connection stopped") != moq_tokio::Status::Migrating {}
+			let monitor = connection.monitor();
+			let mut seen = monitor.state();
+			while !matches!(seen.phase, moq_tokio::connection::Phase::Migrating { .. }) {
+				seen = monitor.state_changed(seen.revision).await.expect("connection stopped");
+			}
 			let start = kio::clock::now();
 			let err = connection.close().await.expect_err("the predecessor cannot drain");
 			let elapsed = start.elapsed();
@@ -1166,11 +1175,8 @@ async fn quic_windows() {
 
 /// The next route and whether it is active.
 async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
-	loop {
-		return match announced.next().await? {
-			moq_net::announce::Event::Present(route) => Some((route, true)),
-			moq_net::announce::Event::Absent(route) | moq_net::announce::Event::Offline(route) => Some((route, false)),
-			moq_net::announce::Event::Available(_) | moq_net::announce::Event::Unavailable(_) => continue,
-		};
+	match announced.next().await? {
+		moq_net::announce::Event::Present(route) => Some((route, true)),
+		moq_net::announce::Event::Absent(route) => Some((route, false)),
 	}
 }

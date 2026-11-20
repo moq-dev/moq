@@ -162,6 +162,18 @@ func (t *TrackConsumer) Update(subscription Subscription) error {
 	return t.inner.Update(sub)
 }
 
+// Refresh asks the publisher for a group newer than the newest held, and
+// returns once the request is sent. It is judged by the track's TrackRefresh:
+// sent once the newest group is old enough, when whatever serves the track
+// reads it (the session forwarding it upstream, or a local publisher blocked in
+// TrackDemand.Refresh). Concurrent calls share one request and all return when
+// it is sent. Cancelling ctx before then withdraws this call's request. It
+// returns at once when there is nothing to send, or when a newer group lands
+// first. The new group arrives through the normal reads, such as NextGroup.
+func (t *TrackConsumer) Refresh(ctx context.Context) error {
+	return bridge.CallErr(ctx, nil, t.inner.Refresh)
+}
+
 // Groups ranges over groups in start order.
 func (t *TrackConsumer) Groups(ctx context.Context) iter.Seq2[*GroupConsumer, error] {
 	return bridge.Seq(ctx, t.inner.Cancel, t.NextGroup)

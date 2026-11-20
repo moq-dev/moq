@@ -13,8 +13,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 DEPENDENCIES = ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies")
 SOURCES = (".ts", ".tsx", ".mts", ".cts", ".js", ".mjs", ".cjs")
+# Tooling every package runs from its scripts by path, which no manifest edge records, so a change
+# to it checks every package.
+SHARED = ("js/common",)
 # A string literal climbing out of its directory, like a test reading a shared corpus.
 RELATIVE = re.compile(r"""["'`]((?:\.\./)+[^"'`$?\s]*)""")
+# A `tsc` invocation that emits from a project, however the build script spells it.
+TSC = re.compile(r"(?:^|[\s;&|])tsc\s+-[bp]\s")
 
 
 def inputs(root, directory):
@@ -76,7 +81,7 @@ def selection(root, paths):
             for name, p in packages.items()
             if path == p["directory"] or path.startswith(p["directory"] + "/")
         ]
-        if not owners:
+        if not owners or any(path == shared or path.startswith(shared + "/") for shared in SHARED):
             fallback = True
             break
         name, directory = max(owners, key=lambda owner: len(owner[1]))
@@ -102,9 +107,30 @@ def selection(root, paths):
     return {
         "packages": {name: packages[name] for name in sorted(selected)},
         "workspaces": [p["directory"] for p in packages.values()],
+        "manifests": {name: p["manifest"] for name, p in packages.items()},
         "inputs": sorted(set().union(*(p["inputs"] for p in packages.values()))),
         "all": fallback,
     }
+
+
+def node_loaded(manifest):
+    """Whether a published package emits its JS with `tsc` rather than vite, so Node must load it as published."""
+    build = manifest.get("scripts", {}).get("build", "")
+    return not manifest.get("private") and bool(TSC.search(build)) and "vite build" not in build
+
+
+def runtime_closure(manifests, names):
+    """The workspace packages a consumer of these installs alongside them."""
+    found = set()
+    pending = list(names)
+    while pending:
+        manifest = manifests[pending.pop()]
+        for field in ("dependencies", "peerDependencies"):
+            for dep in manifest.get(field, {}):
+                if dep in manifests and dep not in found:
+                    found.add(dep)
+                    pending.append(dep)
+    return found
 
 
 def unmapped(root, paths):
@@ -150,40 +176,20 @@ def run(action, plan):
 
     command("uv", "run", "--no-project", "python", str(ROOT / "sh/js/install.py"), "frozen")
     if action == "test":
-        # JS_TEST_REPORTS=DIR keeps each test file's time in a JUnit report under DIR at
-        # its package's path, for the nightly gate cost scenarios. Every test script is
-        # `bun test`, which takes the reporter flags; the packages then run in turn.
         # The root run skips `.env`, which Bun would load from here, so a developer's file
         # can't change a result; the packages run from their own directories, which have none.
-        # Bun resolves the outfile from each package's directory, so anchor it here.
-        report_dir = os.environ.get("JS_TEST_REPORTS")
-        report_dir = report_dir and Path(report_dir).absolute()
-
-        def junit(directory):
-            if not report_dir:
-                return []
-            (report_dir / directory).mkdir(parents=True, exist_ok=True)
-            return ["--reporter=junit", f"--reporter-outfile={report_dir / directory / 'junit.xml'}"]
-
         command("python3", "sh/js/playwright.test.py")
         command(
             "bun",
             "--no-env-file",
             "test",
-            *junit("."),
             "js/common/api.test.ts",
             "js/common/constructors.test.ts",
             "js/common/deps.test.ts",
             "js/common/worklet.test.ts",
             "js/common/release.test.ts",
         )
-        if not report_dir:
-            scripts("test")
-            return
-        for package in packages.values():
-            if "test" in package["manifest"].get("scripts", {}):
-                directory = package["directory"]
-                command("bun", "run", "test", *junit(directory), cwd=ROOT / directory)
+        scripts("test")
         return
     if action == "build":
         scripts("build")
@@ -233,9 +239,14 @@ def run(action, plan):
             Path(name).unlink()
     scripts("build")
     reports()
-    for name in ("@moq/msf", "@moq/hang"):
-        if name in packages:
-            command("node", "sh/js/dist-imports.test.mjs", packages[name]["directory"] + "/dist")
+    # Node rejects an extensionless relative import that Bun and bundlers accept, and plain `tsc`
+    # rewrites only those ending in `.ts`, so load every published `tsc` build under Node.
+    loaded = [name for name, package in packages.items() if node_loaded(package["manifest"])]
+    if loaded:
+        # The check loads each workspace dependency from its dist, so build the unselected ones.
+        if missing := sorted(runtime_closure(plan["manifests"], loaded) - set(packages)):
+            command("bun", "run", *(f"--filter={name}" for name in missing), "--elide-lines=0", "build")
+        command("node", "sh/js/dist-imports.test.mjs", *(packages[name]["directory"] for name in loaded))
     for name in ("@moq/watch", "@moq/publish"):
         if name in packages:
             path = "./" + packages[name]["directory"] + "/dist/index.js"

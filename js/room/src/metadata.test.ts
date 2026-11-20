@@ -4,6 +4,7 @@ import * as Net from "@moq/net";
 import type * as Publish from "@moq/publish";
 import { Effect, Signal } from "@moq/signals";
 import type * as Watch from "@moq/watch";
+import { defined } from "./defined.test-util.ts";
 import { consume, type ExtendedCatalog, type Preview, serve, TRACK, userFields } from "./metadata.ts";
 
 // Drain queued effects and their asynchronous subscription continuations.
@@ -49,10 +50,10 @@ test("metadata clears when entries disappear or broadcast becomes inactive", asy
 	});
 	const active = new Signal<Net.Broadcast.Consumer | undefined>(net.consume());
 	const user = new Json.Snapshot.Producer({
-		track: net.createTrack(TRACK.user, { timescale: Net.Time.Timescale.MILLI }),
+		track: defined(net.createTrack(TRACK.user, { timescale: Net.Time.Timescale.MILLI })),
 	});
 	const preview = new Json.Snapshot.Producer({
-		track: net.createTrack(TRACK.preview, { timescale: Net.Time.Timescale.MILLI }),
+		track: defined(net.createTrack(TRACK.preview, { timescale: Net.Time.Timescale.MILLI })),
 	});
 	user.update({ name: "Alice" }, Net.Time.Timestamp.now());
 	preview.update({ info: { video: true } }, Net.Time.Timestamp.now());
@@ -84,10 +85,10 @@ test("metadata refuses values that do not match their schema and keeps the last 
 	const active = new Signal<Net.Broadcast.Consumer | undefined>(net.consume());
 	// Unvalidated producers, standing in for a remote publisher that sends anything.
 	const user = new Json.Snapshot.Producer<unknown>({
-		track: net.createTrack(TRACK.user, { timescale: Net.Time.Timescale.MILLI }),
+		track: defined(net.createTrack(TRACK.user, { timescale: Net.Time.Timescale.MILLI })),
 	});
 	const preview = new Json.Snapshot.Producer<unknown>({
-		track: net.createTrack(TRACK.preview, { timescale: Net.Time.Timescale.MILLI }),
+		track: defined(net.createTrack(TRACK.preview, { timescale: Net.Time.Timescale.MILLI })),
 	});
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
 	const consumed = consume({ out: { catalog, active } } as unknown as Watch.Broadcast);

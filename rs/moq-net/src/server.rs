@@ -1679,9 +1679,6 @@ mod tests {
 		fn poll_closed(&self, _waiter: &kio::Waiter) -> std::task::Poll<Self::Error> {
 			std::task::Poll::Pending
 		}
-		fn export_keying_material(&self, _label: &[u8], _context: &[u8]) -> Option<[u8; 32]> {
-			Some([9; 32])
-		}
 	}
 
 	#[derive(Clone, Default)]

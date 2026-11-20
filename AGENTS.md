@@ -10,6 +10,7 @@ Trust this checkout's source over published API references, which may describe a
 
 - The same identity (ex. broadcast+track+group+frame) always has the same content. Use a new identity for new content.
 - A publisher that breaks that, such as by reusing or restarting group sequences, hurts only its own broadcast. Code spends no cycles detecting it: the violation must only never panic, cost unbounded work, or affect other broadcasts.
+- A cache only makes things faster: what a subscription delivers never depends on what a copy happens to hold, as with HTTP. A copy answers from its cache only what it can prove upstream would answer, such as a time placed between held groups linked by Previous Start; anything else updates the upstream subscription and waits for its answer.
 - Never match on errors; it's brittle.
 - moq-lite and moq-net take priority over moq-transport and other IETF drafts, which are a low-effort compatibility layer. Ignore their requirements (even MUSTs) that add cost without a clear behavioral benefit, and never add API for functionality only they have.
 
@@ -27,6 +28,7 @@ The API is the most important thing to get right: a bad shape costs a breaking c
 - Replace a callback parameter with a handle, an event, or a Producer/Consumer split.
 - Nest related API, configuration, and output fields under their shared role.
 - Mirror API names across Rust, JS, and the bindings.
+- Code outside `moq-net` may report the negotiated protocol version but never branches on it: a behavior that differs by version is moq-net's to hide, so change its API instead.
 - Keep package boundaries modular and reusable; prefer a module in an existing package over a one-off package.
 - Never mark a special case inside a value: not a huge number like `u64::MAX` (it is the longest varint), and not a reserved prefix or character in a string. Use 0, a separate message or type, a typed field, or a boolean. The one exception is a path segment's leading `.`, which hides the path from announce discovery.
 - Enforce a policy where the thing is created, not where it is checked: the signer bounds a token's lifetime, and the verifier accepts what a valid token carries. Don't add `allow-*` opt-out flags; move or generalize the rule.

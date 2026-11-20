@@ -90,6 +90,7 @@ public enum Video {
             bandwidth: Allocator? = nil,
             lower: Producer? = nil
         ) throws {
+            try checkDuration(output.join, "join")
             ffi = try MoqVideoProducer(
                 catalog: catalog.ffi,
                 options: MoqVideoProducerOptions(
@@ -136,7 +137,7 @@ public enum Video {
         }
 
         /// Abort the track with an application error code, but only while nobody wants it: call it
-        /// once `TrackDemand.wantedChanged()` returns nil. Returns true once the track is closed,
+        /// once `TrackDemand.wantedChanged()` returns false. Returns true once the track is closed,
         /// and false, leaving the track open, when a reader joined since; keep serving and wait for
         /// the next nil on a fresh `demand()`: one that already returned nil misses a reader
         /// that came and went, and waits on.
@@ -171,7 +172,8 @@ public enum Video {
             rendition: Media.Video,
             output: DecoderOutput = DecoderOutput()
         ) async throws -> Consumer {
-            Consumer(
+            try checkDelay(output.delay)
+            return Consumer(
                 try await MoqVideoConsumer.subscribe(
                     broadcast: broadcast.ffi,
                     id: id,
@@ -205,6 +207,7 @@ public enum Video {
 
         /// Open a codec-only encoder.
         public init(input: EncoderInput, output: EncoderOutput) throws {
+            try checkDuration(output.join, "join")
             ffi = try MoqVideoEncoder(input: input, output: output)
         }
 

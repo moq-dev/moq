@@ -147,6 +147,12 @@ its counters run from its start, and its first publish carries them. A reader
 treats each instance as its own set of counters. The instance rides moq-lite 07
 announcements; over anything else the receiving session mints one per
 announcement, so a reader sees the same change as an end and a start at the path.
+A minted instance also changes on every reconnect, so it cannot tell a restart from a
+redial. When a minted instance follows a minted one while the departed one is still
+within the aggregating reader's grace ([`Config::grace`](https://docs.rs/moq-stats/latest/moq_stats/aggregate/struct.Config.html#structfield.grace)),
+its first frame decides: counters that continue are the same node, and a new bucket
+epoch or a counter going down is a restart, which adds to the old counters. A return
+after the grace starts over, so its earlier traffic counts twice.
 An aggregating reader pins each node's subscription to its instance.
 
 Every bucket shares the node's broadcast, so a token scoped to the stats prefix
@@ -360,7 +366,13 @@ limit: the track then ends with `FRAME_TOO_LARGE` instead of going stale.
     "sessions_refused": { "refused": 0, "unavailable": 0, "request": 0, "forbidden": 0, "membership": 0, "expired": 0 },
     "sessions_failed": { "idle_timeout": 1, "transport": 0, "application": 0, "expired": 0 },
     "announces_peak": 40, "subscriptions_peak": 900,
-    "wire_tx": 2048, "wire_rx": 1024, "routes_refused": 0
+    "wire_tx": 2048, "wire_rx": 1024, "routes_refused": 0,
+    "routes": {
+      "changed": 4, "rewritten": 120,
+      "sent": { "dead": 1, "drain": 0 }, "received": { "dead": 0, "drain": 1 },
+      "refused": { "path": 0, "scope": 0, "looped": 0 },
+      "closed": { "stalled": 0, "overrun": 0, "malformed": 0, "role": 0, "unasked": 0, "regressed": 0, "other": 0 }
+    }
   }
 }
 ```
@@ -430,10 +442,28 @@ never goes down while the track lives. Summing
 nodes or labels takes the largest.
 
 `routes_refused` counts the routes and claims that the label's moq-lite-07
-sessions forwarded and the relay refused, such as a route with a flag this
-release does not know. The relay withdraws each one and keeps the session, so a
-neighbour on a newer release costs only that route. A rising count during a
-rollout means the releases disagree on route content.
+sessions forwarded and the relay refused, keeping the session: the total of
+`routes.refused`. The relay withdraws each one, so a neighbour on a newer
+release costs only that route.
+
+`routes` counts what the label's moq-lite-07 sessions did on the route layer,
+each under the label of the session whose peer caused it. Its size never
+depends on how many broadcasts or relays the mesh has. When rolling a mesh onto
+a new release one relay at a time, compare a canary's rates with its
+neighbours':
+
+| Field | Counts | A rise during a rollout means |
+| --- | --- | --- |
+| `changed` | Times a route to a relay changed on what the peer sent or how its session ended, counting only changes that alter how its broadcasts are served (not a move to another path of the same rank). | The mesh churns through this peer: links flapping, or two releases ranking routes differently. |
+| `rewritten` | Broadcasts rewritten into the origin behind those changes: every broadcast the relay still claims, once per change. | Each change is costing the relay work in proportion to what lies behind it. Divide by `changed` for the cost of one. |
+| `sent` / `received` | DEAD (a relay-to-relay session closed) and DRAIN (a relay sent GOAWAY) withdrawals, by kind. | Relays restarting or draining. A DRAIN rate without matching DEADs is a drain that never finishes. |
+| `refused` | Refused routes and claims by reason: `path` (a path this relay cannot hold), `scope` (outside the session's root or grant, or what the relay serves), `looped` (the way already crosses this relay, or exceeds the hop limit). | `path` or `looped`: the releases disagree on route content. `scope`: a grant narrower than what the peer announces. |
+| `closed` | Sessions the route layer closed, by kind: `stalled` (the peer stopped reading its route stream), `overrun` (it read too slowly for what changed), `malformed` (it sent what the rule never builds, or broke the stream), `role` (what its role never sends), `unasked` (its stream fell out of step), `regressed` (its relay restarted with an older start, or two relays share an id), `other` (such as announcing past the session's cap). | Anything here on a canary that its neighbours lack: the releases disagree on the route wire. `stalled` and `overrun` alone point at an overloaded peer. |
+
+A route that ended takes its claims with it, so they count as claims ending
+rather than in `rewritten`. On moq-lite-07 a route change updates a broadcast
+in place: the broadcast's `announces_started` and `announces_ended` count it
+coming and going, not its routes changing.
 
 ### Counters
 

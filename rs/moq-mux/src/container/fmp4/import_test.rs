@@ -1675,11 +1675,8 @@ async fn starts(consumer: &moq_net::broadcast::Consumer, track: &str) -> Vec<u64
 		.ordered();
 	let timescale = track.info().timescale;
 	let mut starts = Vec::new();
-	while let Some(item) = track.next_group().await.unwrap() {
-		// Nothing exists below the first group, which the read reports as a gap.
-		if let moq_net::track::Item::Group(group) = item {
-			starts.push(micros(group.start, timescale));
-		}
+	while let Some(group) = track.next_group().await.unwrap() {
+		starts.push(micros(group.start, timescale));
 	}
 	starts
 }
@@ -2904,7 +2901,12 @@ async fn a_moov_with_nothing_selected_releases_its_reservation() {
 	assert!(clocks.drain().is_empty(), "nothing servable is published");
 
 	catalog
-		.mutate(|catalog| catalog.m2ts = Some(hang::catalog::M2ts::new("input.m2ts")))
+		.mutate(|catalog| {
+			catalog.json.tracks.insert(
+				"input.json".to_string(),
+				hang::catalog::JsonConfig::new(hang::catalog::Mode::Snapshot),
+			);
+		})
 		.unwrap();
 	assert_eq!(clocks.drain().len(), 1, "no reservation still gates the catalog");
 }

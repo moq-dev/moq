@@ -124,8 +124,8 @@ use timer::{Timer, TimerTable};
 /// - B. Handlers for incoming events from the network or system, named `handle_*`.
 /// - C. State machine mutators, for incoming commands from the application. For convenience we
 ///   refer to this as "performing I/O" below, however as per the design of this library none of the
-///   functions actually perform system-level I/O. For example, [`read`](recv::Stream::read) and
-///   [`write`](send::Stream::write), but also things like [`reset`](send::Stream::reset).
+///   functions actually perform system-level I/O. For example, [`read`](recv::Stream::read),
+///   but also things like [`reset`](send::Stream::reset).
 /// - D. Polling functions for outgoing events or actions for the caller to
 ///   take, named `poll_*`.
 ///
@@ -1473,7 +1473,7 @@ impl Connection {
 	/// This does not ensure delivery of outstanding data. It is the application's responsibility to
 	/// call this only when all important communications have been completed, e.g. by calling
 	/// [`send::Stream::finish`] on outstanding streams and waiting for
-	/// [`send::Stream::poll_end`].
+	/// [`send::Stream::poll_stopped`].
 	///
 	/// If [`Streams::send_streams`] returns 0, all outstanding stream data has been
 	/// delivered. There may still be data from the peer that has not been received.
@@ -1588,12 +1588,16 @@ impl Connection {
 		self.crypto.peer_identity()
 	}
 
-	/// 32 bytes of keying material exported from the TLS session (RFC 8446 section 7.5) under
-	/// `label` and `context`, or `None` before the handshake completes.
-	pub fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
-		let mut output = [0; 32];
-		self.crypto.export_keying_material(&mut output, label, context).ok()?;
-		Some(output)
+	/// Fill `output` with keying material exported from the TLS session (RFC 5705), using
+	/// `label` and `context` for domain separation
+	#[cfg(test)]
+	pub(crate) fn export_keying_material(
+		&self,
+		output: &mut [u8],
+		label: &[u8],
+		context: &[u8],
+	) -> Result<(), crypto::ExportKeyingMaterialError> {
+		self.crypto.export_keying_material(output, label, context)
 	}
 
 	/// Whether the connection is in the process of being established
@@ -1614,6 +1618,16 @@ impl Connection {
 	/// [`Error::LocallyClosed`] when the local application closed it via [`close()`](Self::close).
 	pub fn is_closed(&self) -> bool {
 		self.state.is_closed()
+	}
+
+	/// Whether a CONNECTION_CLOSE is due that [`poll_transmit`](Self::poll_transmit) has yet to hand
+	/// over
+	///
+	/// Closing owes the peer one, as does each packet the peer sends on the current path during
+	/// the closing period; a loss with nothing to answer, such as an idle timeout or a stateless
+	/// reset, owes none. Once a closed connection owes none, everything it had to send is out.
+	pub fn owes_close(&self) -> bool {
+		self.state.owes_close()
 	}
 
 	/// Whether there is no longer any need to keep the connection around
@@ -3286,17 +3300,18 @@ impl Connection {
 						));
 					}
 
-					use crate::cid_queue::InsertError;
-					match self.rem_cids.insert(frame) {
-						Ok(None) => {}
-						Ok(Some((retired, reset_token))) => {
+					use crate::cid_queue::Inserted;
+					let inserted = self
+						.rem_cids
+						.insert(frame)
+						.map_err(|_| TransportError::CONNECTION_ID_LIMIT_ERROR(""))?;
+					match inserted {
+						Inserted::Queued => {}
+						Inserted::Advanced { retired, reset_token } => {
 							self.spaces[SpaceId::Data].pending.retire_cids(retired)?;
 							self.set_reset_token(reset_token);
 						}
-						Err(InsertError::ExceedsLimit) => {
-							return Err(TransportError::CONNECTION_ID_LIMIT_ERROR(""));
-						}
-						Err(InsertError::Retired) => {
+						Inserted::Stale => {
 							trace!("discarding already-retired");
 							// RETIRE_CONNECTION_ID might not have been previously sent if e.g. a
 							// range of connection IDs larger than the active connection ID limit
@@ -4466,6 +4481,13 @@ impl State {
 
 	fn is_drained(&self) -> bool {
 		matches!(*self, Self::Drained)
+	}
+
+	fn owes_close(&self) -> bool {
+		match self {
+			Self::Closed(state::Closed { send_close, .. }) | Self::Draining { send_close } => *send_close,
+			Self::Handshake(_) | Self::Established | Self::Drained => false,
+		}
 	}
 }
 

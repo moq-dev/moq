@@ -2,6 +2,7 @@
 
 pub mod harness;
 pub mod mock;
+pub mod schedule;
 
 use std::ops::{Bound, RangeBounds};
 
@@ -48,15 +49,6 @@ impl AtStart for group::Producer {
 	}
 }
 
-/// A fill the test expects to name groups rather than look up a time.
-#[allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
-pub fn groups(fill: track::Fill) -> track::FillGroups {
-	let track::Fill::Groups(fill) = fill else {
-		panic!("a run of groups, not a time lookup");
-	};
-	fill
-}
-
 /// The groups from the one containing `keys`' start through the one containing its end, as
 /// time anchors: on a track whose groups start at consecutive keys, the groups with those keys.
 ///
@@ -76,20 +68,17 @@ pub fn keys(keys: impl RangeBounds<u64>) -> track::Range {
 	track::Range { start, end }
 }
 
-/// Wait until anyone wants the track, returning the group they want.
+/// Wait until anyone wants the track.
 #[allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
-pub async fn wanted(mut demand: track::Demand) -> moq_net::Result<u64> {
-	loop {
-		if let Some(wanted) = demand.wanted_changed().await? {
-			return Ok(wanted);
-		}
-	}
+pub async fn wanted(mut demand: track::Demand) -> moq_net::Result<()> {
+	while !demand.wanted_changed().await? {}
+	Ok(())
 }
 
 /// Wait until nobody wants the track.
 #[allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
 pub async fn unwanted(mut demand: track::Demand) -> moq_net::Result<()> {
-	while demand.wanted_changed().await?.is_some() {}
+	while demand.wanted_changed().await? {}
 	Ok(())
 }
 

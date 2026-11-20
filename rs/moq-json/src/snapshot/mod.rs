@@ -202,10 +202,10 @@ mod test {
 	fn demand_follows_subscribers() {
 		let (producer, _track) = producer(Config::default());
 		let demand = producer.demand();
-		assert_eq!(demand.wanted(), None);
+		assert!(!demand.wanted());
 
 		let _consumer = producer.consume();
-		assert_eq!(demand.wanted(), Some(0));
+		assert!(demand.wanted());
 	}
 
 	/// Drain newest states currently available from a plaintext consumer without blocking.
@@ -507,7 +507,10 @@ mod test {
 	/// With nobody joining, deltas pile up in one group however far they outweigh the snapshot.
 	#[test]
 	fn deltas_never_roll_without_a_joiner() {
-		let (mut producer, mut track) = producer_on(cfg(true), moq_net::track::Info::default().with_refresh(1));
+		let (mut producer, mut track) = producer_on(
+			cfg(true),
+			moq_net::track::Info::default().with_refresh(moq_net::track::Refresh::default().with_ratio(1)),
+		);
 		for n in 0..=10 {
 			producer.update(&json!({ "n": n }), key()).unwrap();
 		}
@@ -546,7 +549,10 @@ mod test {
 	#[test]
 	fn a_joiner_over_the_ratio_gets_a_fresh_snapshot() {
 		let waiter = kio::Waiter::noop();
-		let (mut producer, _track) = producer_on(cfg(true), moq_net::track::Info::default().with_refresh(1));
+		let (mut producer, _track) = producer_on(
+			cfg(true),
+			moq_net::track::Info::default().with_refresh(moq_net::track::Refresh::default().with_ratio(1)),
+		);
 
 		// A 13 byte snapshot and a 7 byte delta: under the ratio.
 		producer
@@ -583,7 +589,10 @@ mod test {
 	#[test]
 	fn a_refresh_reuses_the_newest_timestamp() {
 		let ms = |n| moq_net::Timestamp::from_millis(n).unwrap();
-		let (mut producer, _track) = producer_on(cfg(true), timed().with_refresh(1));
+		let (mut producer, _track) = producer_on(
+			cfg(true),
+			timed().with_refresh(moq_net::track::Refresh::default().with_ratio(1)),
+		);
 		producer.update(&json!({ "n": 0 }), ms(100)).unwrap();
 		for n in 1..=3 {
 			producer.update(&json!({ "n": n }), ms(100 + n)).unwrap();
@@ -605,7 +614,10 @@ mod test {
 	#[test]
 	fn a_refresh_after_older_updates_waits_for_a_later_one() {
 		let ms = |n| moq_net::Timestamp::from_millis(n).unwrap();
-		let (mut producer, _track) = producer_on(cfg(true), timed().with_refresh(1));
+		let (mut producer, _track) = producer_on(
+			cfg(true),
+			timed().with_refresh(moq_net::track::Refresh::default().with_ratio(1)),
+		);
 		for (n, at) in [130, 110, 120, 115].into_iter().enumerate() {
 			producer.update(&json!({ "n": n }), ms(at)).unwrap();
 		}
@@ -631,7 +643,10 @@ mod test {
 	#[test]
 	fn a_refresh_after_a_rejected_update_restates_the_last_written_value() {
 		let ms = |n| moq_net::Timestamp::from_millis(n).unwrap();
-		let (mut producer, track) = producer_on(cfg(true), timed().with_refresh(1));
+		let (mut producer, track) = producer_on(
+			cfg(true),
+			timed().with_refresh(moq_net::track::Refresh::default().with_ratio(1)),
+		);
 		for n in 0..=3 {
 			producer.update(&json!({ "n": n }), ms(100 + n)).unwrap();
 		}
@@ -670,7 +685,10 @@ mod test {
 	/// `refresh` resolves on a join over the ratio and errors once the track closes.
 	#[test]
 	fn refresh_resolves_on_a_join_and_errors_on_close() {
-		let (mut producer, _track) = producer_on(cfg(true), moq_net::track::Info::default().with_refresh(1));
+		let (mut producer, _track) = producer_on(
+			cfg(true),
+			moq_net::track::Info::default().with_refresh(moq_net::track::Refresh::default().with_ratio(1)),
+		);
 		producer.update(&json!({ "n": 0 }), key()).unwrap();
 		producer.update(&json!({ "n": 1 }), key()).unwrap();
 		producer.update(&json!({ "n": 2 }), key()).unwrap();
@@ -683,6 +701,20 @@ mod test {
 		// A clone finishes, so the shared state refuses this handle's refresh.
 		let _finished = producer.clone().finish().unwrap();
 		assert!(matches!(producer.refresh().now_or_never(), Some(Err(_))));
+	}
+
+	/// A refresh waiting for the first update ends once a clone finishes the track.
+	#[test]
+	fn a_refresh_before_the_first_update_ends_with_the_track() {
+		let (producer, _track) = producer_on(
+			cfg(true),
+			moq_net::track::Info::default().with_refresh(moq_net::track::Refresh::default().with_ratio(1)),
+		);
+		let (waiter, flag) = crate::refresh::flagged();
+		assert!(producer.poll_refresh(&waiter).is_pending());
+		let _finished = producer.clone().finish().unwrap();
+		assert!(flag.take(), "the finish wakes it");
+		assert!(matches!(producer.poll_refresh(&waiter), std::task::Poll::Ready(Err(_))));
 	}
 
 	#[test]
@@ -1078,13 +1110,8 @@ mod test {
 		));
 
 		let waiter = kio::Waiter::noop();
-		let mut group = loop {
-			let Poll::Ready(Ok(Some(item))) = subscriber.poll_next_group(&waiter) else {
-				panic!("the group was published, so a subscriber sees it");
-			};
-			if let Some(group) = item.group() {
-				break group;
-			}
+		let Poll::Ready(Ok(Some(mut group))) = subscriber.poll_next_group(&waiter) else {
+			panic!("the group was published, so a subscriber sees it");
 		};
 		assert!(
 			matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(None))),
@@ -1260,7 +1287,10 @@ mod test {
 	/// the restated group alone.
 	#[test]
 	fn a_compressed_refresh_opens_a_fresh_group() {
-		let (mut producer, mut track) = producer_on(cfg(true), compressed().with_refresh(1));
+		let (mut producer, mut track) = producer_on(
+			cfg(true),
+			compressed().with_refresh(moq_net::track::Refresh::default().with_ratio(1)),
+		);
 		for n in 0..=40 {
 			producer
 				.update(&json!({ "n": n }), moq_net::Timestamp::unscaled(n))

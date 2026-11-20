@@ -10,6 +10,7 @@ import { ConnectTimeout, SessionCode, SessionError, StreamCode, toTransport } fr
 import { WireRoute } from "../hop.ts";
 // Loaded up front: a session imports it on first use, which takes host turns a Manual clock cannot wait out.
 import "../ietf/connection.ts";
+import { defined } from "../defined.test-util.ts";
 import { ALPN as IetfALPN } from "../ietf/version.ts";
 import { hooks } from "../internal.ts";
 import * as Lite from "../lite/index.ts";
@@ -443,25 +444,29 @@ for (const code of [SessionCode.Unauthorized, SessionCode.MalformedAuthToken, Se
 
 /**
  * Stub WebTransport for lite-06, which carries the credential in the URL: refuses `refused`
- * once `release` resolves, and accepts any other credential, recording each dialed jwt.
+ * once `release` resolves, never having sent the SETUP that would accept it, and accepts any
+ * other credential, recording each dialed jwt.
  */
 function refusing(refused: string, release: Promise<void>) {
 	const dialed = new Signal<readonly (string | null)[]>([]);
+	// The server sides of the sessions it accepted.
+	const served: MockTransport[] = [];
 	const stub = function StubWebTransport(target: string | URL) {
 		const jwt = new URL(target).searchParams.get("jwt");
 		dialed.update((jwts) => [...jwts, jwt]);
 		const pair = createMockTransportPair(Lite.ALPN_06);
-		void accept(pair.server, new URL(target)).then(async () => {
-			if (jwt !== refused) return;
-			await release;
-			pair.server.close({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" });
-		});
+		if (jwt === refused) {
+			void release.then(() => pair.server.close({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" }));
+		} else {
+			served.push(pair.server);
+			void accept(pair.server, new URL(target));
+		}
 		return pair.client;
 	};
-	return { dialed, stub: stub as unknown as typeof WebTransport };
+	return { dialed, served, stub: stub as unknown as typeof WebTransport };
 }
 
-test("a first session refused before it is healthy stops the URL, even for replaced tokens", async () => {
+test("a first session refused before its credential is accepted stops the URL, even for replaced tokens", async () => {
 	using clock = manual();
 	const original = globalThis.WebTransport;
 	const { promise: release, resolve } = Promise.withResolvers<void>();
@@ -476,18 +481,59 @@ test("a first session refused before it is healthy stops the URL, even for repla
 		tokens,
 		backoff: { initial: Duration.millis(1), multiplier: 2, max: Duration.millis(1), timeout: null },
 	});
+	const statuses: string[] = [];
+	const unsubscribe = reload.status.subscribe((status) => statuses.push(status));
 	try {
-		await clock.drive(waitFor(reload.established, (established) => established !== undefined));
+		await clock.drive(waitFor(dialed, (dialed) => dialed.length > 0));
+		await clock.advance(Duration.millis(10));
 		tokens.set(["new"]);
 		resolve();
-		// The refusal arrives after the session was accepted, as a relay rejects a token on
-		// moq-lite 03 or later, yet it stops the URL like a failed first attempt.
+		// The refusal arrives once the session is live, before the server's SETUP, as a relay
+		// rejects a token on moq-lite 03 or later, and stops the URL like a failed first attempt.
 		const err = await clock.drive(waitFor(reload.error, (error) => error !== undefined));
 		expect(err).toBeInstanceOf(SessionError);
 		expect((err as SessionError).code).toBe(SessionCode.Unauthorized);
 		await clock.advance(Duration.millis(100));
 		expect(dialed.peek()).toEqual(["old"]);
 		expect(reload.established.peek()).toBeUndefined();
+		// The refused session never read as connected.
+		expect(statuses).not.toContain("connected");
+	} finally {
+		unsubscribe();
+		reload.close();
+		globalThis.WebTransport = original;
+	}
+});
+
+test("a first session dropped right after the peer accepted its credential redials", async () => {
+	using clock = manual();
+	const original = globalThis.WebTransport;
+	const dials = new Signal(0);
+	let first: ReturnType<typeof createMockTransportPair> | undefined;
+	const accepted = Promise.withResolvers<void>();
+	const stub = function StubWebTransport(target: string | URL) {
+		dials.update((n) => n + 1);
+		const pair = createMockTransportPair(Lite.ALPN_06);
+		first ??= pair;
+		void accept(pair.server, new URL(target)).then(() => accepted.resolve());
+		return pair.client;
+	};
+	globalThis.WebTransport = stub as unknown as typeof WebTransport;
+
+	const reload = new Reload({
+		url: new URL("https://example.com/"),
+		versions: ["moq-lite-06"],
+		websocket: { enabled: false },
+		backoff: { initial: Duration.millis(1), multiplier: 2, max: Duration.millis(1), timeout: null },
+	});
+	try {
+		const established = await clock.drive(waitFor(reload.established, (session) => session !== undefined));
+		await clock.drive(accepted.promise);
+		// The server's SETUP accepted the credential, long before the healthy bar.
+		await clock.drive(waitFor(wireOf(established as Session).auth.accepted, (yes) => yes));
+		first?.server.close({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" });
+		await clock.drive(waitFor(dials, (n) => n >= 2));
+		expect(reload.error.peek()).toBeUndefined();
 	} finally {
 		reload.close();
 		globalThis.WebTransport = original;
@@ -498,10 +544,10 @@ test("a refused credential keeps redialing until the tokens change", async () =>
 	using clock = manual();
 	const original = globalThis.WebTransport;
 	const { promise: release, resolve } = Promise.withResolvers<void>();
-	const { dialed, stub } = refusing("old", release);
+	const { dialed, served, stub } = refusing("old", release);
 	globalThis.WebTransport = stub;
 
-	const tokens = new Signal<readonly string[]>(["old"]);
+	const tokens = new Signal<readonly string[]>(["ok"]);
 	const reload = new Reload({
 		url: new URL("https://example.com/"),
 		versions: ["moq-lite-06"],
@@ -510,12 +556,19 @@ test("a refused credential keeps redialing until the tokens change", async () =>
 		backoff: { initial: Duration.millis(1), multiplier: 2, max: Duration.millis(1), timeout: null },
 	});
 	try {
-		// Refused only once a session was healthy: until then, a refusal stops the URL.
+		// The server's SETUP accepts the first credential, which establishes the URL: until
+		// then, a refusal stops it.
 		await clock.drive(waitFor(reload.established, (established) => established !== undefined));
-		await clock.advance(Duration.millis(1000));
+		tokens.set(["old"]);
+		served[0]?.close({ closeCode: 0, reason: "restart" });
 		resolve();
-		await clock.drive(waitFor(dialed, (jwts) => jwts.length >= 3));
-		expect(dialed.peek().every((jwt) => jwt === "old")).toBe(true);
+		await clock.drive(waitFor(dialed, (jwts) => jwts.length >= 4));
+		expect(
+			dialed
+				.peek()
+				.slice(1)
+				.every((jwt) => jwt === "old"),
+		).toBe(true);
 		expect(reload.error.peek()).toBeUndefined();
 		tokens.set(["new"]);
 		await clock.drive(waitFor(dialed, (jwts) => jwts.includes("new")));
@@ -815,7 +868,7 @@ for (const [name, teardown] of Object.entries(teardowns)) {
 		if (!origin) throw new Error("no origin");
 		const broadcastRoute = origin.route(Path.from("room"));
 		const broadcast = broadcastRoute.broadcast;
-		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+		const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 		await waitUntil(() => dials.length > 0);
 		const first = dials[0];
 		if (!first) throw new Error("no first dial");
@@ -902,7 +955,7 @@ for (const [name, drainEnd] of Object.entries(drainEnds)) {
 		const origin = new OriginProducer();
 		const broadcastRoute = origin.route(Path.from("room"));
 		const broadcast = broadcastRoute.broadcast;
-		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+		const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 		const reload = new Reload({
 			url: new URL("https://example.com/a"),
 			websocket: { enabled: false },
@@ -962,7 +1015,7 @@ test("a retired GOAWAY predecessor still closes by its handover cap", async () =
 	const origin = new OriginProducer();
 	const broadcastRoute = origin.route(Path.from("room"));
 	const broadcast = broadcastRoute.broadcast;
-	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	const reload = new Reload({
 		url: new URL("https://example.com/"),
 		websocket: { enabled: false },
@@ -1045,7 +1098,7 @@ test("closing the loop keeps the tokens until the session drains", async () => {
 	await reload.auth.add("token").answered;
 	const broadcastRoute = origin.route(Path.from("room"));
 	const broadcast = broadcastRoute.broadcast;
-	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	const first = dials[0];
 	if (!first) throw new Error("no first dial");
 	const remote = wireOf(await first.server).consume(Path.from("room"));

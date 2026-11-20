@@ -107,7 +107,17 @@ const browser = await chromium.launch({
 	headless: true,
 	executablePath: process.env.BROWSER_BIN,
 	// Retention is counted after full collections the page asks for, against an unrounded heap size.
-	args: benchmark === "resume-history" ? ["--js-flags=--expose-gc", "--enable-precise-memory-info"] : [],
+	// Optimizing compiles stay on the main thread: a queued background job holds its closure's
+	// context strongly, so a route a hot closure captured stays reachable until the job lands.
+	// The delay only slows background jobs, so it is inert here, but it fails every cold run
+	// rather than an occasional one if compiles ever go concurrent again.
+	args:
+		benchmark === "resume-history"
+			? [
+					"--js-flags=--expose-gc --no-concurrent-recompilation --concurrent-recompilation-delay=300",
+					"--enable-precise-memory-info",
+				]
+			: [],
 });
 const samples: { round: number; variant: string; rows: string[] }[] = [];
 const traced: { variant: string; rows: string[] }[] = [];

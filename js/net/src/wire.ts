@@ -17,6 +17,7 @@ import type { Lister, Tracks } from "./listing.ts";
 import type * as origin from "./origin.ts";
 import type * as Path from "./path.ts";
 import type * as track from "./track.ts";
+import { checkName } from "./util/utf8.ts";
 
 /** The protocol-facing operations behind a broadcast handle. */
 export interface Broadcast {
@@ -25,7 +26,7 @@ export interface Broadcast {
 	datagrams(name: string): datagram.Consumer;
 	liveDatagrams(name: string): datagram.Consumer | undefined;
 	/** Create a datagram track, listed unless `listed` is false, as a session's track riding a stream track's subscription. */
-	createDatagrams(name: string, info: Partial<datagram.Info>, listed?: boolean): datagram.Producer;
+	createDatagrams(name: string, info: Partial<datagram.Info>, listed?: boolean): datagram.Producer | undefined;
 	requestedDatagrams(): Promise<datagram.Request | undefined>;
 	subscribe(name: string, options?: track.Subscription): track.Subscriber;
 	/** The track's properties; `hold` keeps the track wanted until it aborts, the way a held TRACK stream does, and aborting it before the answer abandons the lookup. */
@@ -107,6 +108,8 @@ export interface OriginConsumer {
 	demand(path: Path.Valid, instance?: Instance.Valid, signal?: AbortSignal): Promise<broadcast.Consumer | undefined>;
 	/** Whether the handle's scope admits everything beneath the root-relative `prefix`. */
 	covers(prefix: Path.Valid): boolean;
+	/** The root-relative paths the handle's scope admits; unset for every path. */
+	readonly allowed?: Path.Patterns;
 }
 
 /** One originated advertisement exposed to the publishing wire. */
@@ -215,5 +218,6 @@ export function registerTrackConsumer(factory: (name: string, source: Broadcast)
 /** Create a track handle backed by a broadcast's private wire view. */
 export function trackOf(name: string, source: broadcast.Producer | broadcast.Consumer): track.Consumer {
 	if (!makeTrack) throw new Error("track module is not loaded");
+	checkName(name);
 	return makeTrack(name, wireOf(source));
 }

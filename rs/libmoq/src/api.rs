@@ -118,21 +118,21 @@ pub enum moq_audio_format {
 
 /// A single video codec [moq_publish_video] can parse.
 ///
-/// H.264 and H.265 appear twice each because the framing differs, not just the
-/// codec: AVC1/HVC1 are length-prefixed with an out-of-band config record,
-/// while AVC3/HEV1 are Annex-B with the parameter sets inline.
+/// H.264 and H.265 appear twice each because the input framing differs:
+/// AVC1/HVC1 are length-prefixed with an out-of-band config record, while
+/// H264/H265 are a raw Annex B elementary stream with the parameter sets inline.
 #[repr(C)]
 #[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum moq_video_format {
 	/// H.264, length-prefixed NALUs with an out-of-band avcC.
 	MOQ_VIDEO_FORMAT_AVC1 = 0,
-	/// H.264, Annex-B with inline SPS/PPS.
-	MOQ_VIDEO_FORMAT_AVC3 = 1,
+	/// H.264, a raw Annex B elementary stream with inline SPS/PPS.
+	MOQ_VIDEO_FORMAT_H264 = 1,
 	/// H.265, length-prefixed NALUs with an out-of-band hvcC.
 	MOQ_VIDEO_FORMAT_HVC1 = 2,
-	/// H.265, Annex-B with inline parameter sets.
-	MOQ_VIDEO_FORMAT_HEV1 = 3,
+	/// H.265, a raw Annex B elementary stream with inline parameter sets.
+	MOQ_VIDEO_FORMAT_H265 = 3,
 	/// AV1.
 	MOQ_VIDEO_FORMAT_AV01 = 4,
 	/// VP8.
@@ -377,9 +377,9 @@ fn video_format_from_u32(value: u32) -> Result<moq_mux::import::VideoFormat, Err
 	use moq_mux::import::VideoFormat;
 	Ok(match value {
 		v if v == moq_video_format::MOQ_VIDEO_FORMAT_AVC1 as u32 => VideoFormat::Avc1,
-		v if v == moq_video_format::MOQ_VIDEO_FORMAT_AVC3 as u32 => VideoFormat::Avc3,
+		v if v == moq_video_format::MOQ_VIDEO_FORMAT_H264 as u32 => VideoFormat::H264,
 		v if v == moq_video_format::MOQ_VIDEO_FORMAT_HVC1 as u32 => VideoFormat::Hvc1,
-		v if v == moq_video_format::MOQ_VIDEO_FORMAT_HEV1 as u32 => VideoFormat::Hev1,
+		v if v == moq_video_format::MOQ_VIDEO_FORMAT_H265 as u32 => VideoFormat::H265,
 		v if v == moq_video_format::MOQ_VIDEO_FORMAT_AV01 as u32 => VideoFormat::Av01,
 		v if v == moq_video_format::MOQ_VIDEO_FORMAT_VP8 as u32 => VideoFormat::Vp8,
 		v if v == moq_video_format::MOQ_VIDEO_FORMAT_VP9 as u32 => VideoFormat::Vp9,
@@ -732,9 +732,19 @@ pub struct moq_track_info {
 
 	/// A joining subscriber asks for a new group once the newest group's bytes after its
 	/// first frame exceed `refresh` times that frame. `0` asks once any frame follows the first.
+	/// [moq_publish_demand_refresh] reports the request.
 	pub refresh: u32,
-	/// Whether `refresh` is set. When false, a joining subscriber never asks for a new group.
+	/// Whether `refresh` is set. When false, a join asks only when `refresh_interval_present`
+	/// is set, and then on every join.
 	pub refresh_present: bool,
+
+	/// How long after the newest group arrived a request for a new group may take effect, in
+	/// microseconds: a join asking sooner waits until then, which caps how often the publisher
+	/// makes groups however many subscribers ask. Sent as milliseconds.
+	/// Ignored unless `refresh_interval_present` is set.
+	pub refresh_interval_us: u64,
+	/// Whether `refresh_interval_us` is set. When false, a request takes effect at once.
+	pub refresh_interval_present: bool,
 
 	/// `moq_compression` discriminant: how each group is compressed on the wire to peers that
 	/// support it. Zero sends frames as written. Readers always see the original frames.
@@ -764,9 +774,13 @@ impl TryFrom<&moq_track_info> for moq_net::track::Info {
 		if info.timescale_present {
 			out = out.with_timescale(moq_net::Timescale::new(info.timescale)?);
 		}
-		if info.refresh_present {
-			out = out.with_refresh(info.refresh);
-		}
+		let refresh = moq_net::track::Refresh::default()
+			.with_ratio(info.refresh_present.then_some(info.refresh))
+			.with_interval(
+				info.refresh_interval_present
+					.then(|| std::time::Duration::from_micros(info.refresh_interval_us)),
+			);
+		out = out.with_refresh(refresh);
 		let compression = match info.compression {
 			v if v == moq_compression::MOQ_COMPRESSION_NONE as u32 => moq_net::track::Compression::None,
 			v if v == moq_compression::MOQ_COMPRESSION_DEFLATE as u32 => moq_net::track::Compression::Deflate,
@@ -779,16 +793,28 @@ impl TryFrom<&moq_track_info> for moq_net::track::Info {
 /// Whether a published track has subscribers, as reported by a demand watcher.
 ///
 /// The positive values an `on_demand` callback receives; `0` and negative codes are
-/// the terminal statuses every callback shares. [moq_publish_demand_wanted] reads which
-/// group the subscribers want.
+/// the terminal statuses every callback shares. [moq_publish_demand_refresh] waits for a
+/// subscriber to ask for a new group.
 #[repr(C)]
 #[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 #[derive(Clone, Copy, Debug)]
 pub enum moq_demand {
-	/// At least one subscriber wants the track. Repeats when the wanted group moves.
+	/// At least one subscriber wants the track.
 	MOQ_DEMAND_WANTED = 1,
 	/// No subscriber wants the track.
 	MOQ_DEMAND_UNWANTED = 2,
+	/// A subscriber asks for a new group; only [moq_publish_demand_refresh] reports it.
+	MOQ_DEMAND_REFRESH = 3,
+}
+
+/// What a [moq_consume_track_refresh] callback receives besides the terminal statuses every
+/// callback shares.
+#[repr(C)]
+#[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
+#[derive(Clone, Copy, Debug)]
+pub enum moq_refresh {
+	/// The request was sent, or there was nothing to send.
+	MOQ_REFRESH_SENT = 1,
 }
 
 /// How far behind the live edge a subscriber or media consumer plays: where it starts, and how
@@ -800,9 +826,9 @@ pub enum moq_demand {
 #[derive(Clone, Copy, Default)]
 pub struct moq_delay {
 	/// The target latency in microseconds: the playout or jitter-buffer delay held behind
-	/// the live edge, where a cold join starts, and how long a media consumer waits for a
-	/// missing group. moq-lite-07 sends it upstream. A `min_us` past the max starts and waits
-	/// at the max, since the publisher serves nothing older. Ignored when `min_unstated` is set.
+	/// the live edge, where a cold join starts. A missing group is given up by the max alone.
+	/// moq-lite-07 sends it upstream. A `min_us` past the max starts a cold join no further back than the
+	/// group covering the point the max behind the live edge, since the publisher serves no older group. Ignored when `min_unstated` is set.
 	pub min_us: u64,
 	/// How far a non-latest group may fall behind the live edge before it is skipped, in
 	/// microseconds. Zero skips immediately. Enforced by the publisher's cache and by any
@@ -811,11 +837,9 @@ pub struct moq_delay {
 	pub max_us: u64,
 	/// No subscriber max: wait on a stalled group as long as the publisher's max age allows.
 	pub max_unlimited: bool,
-	/// Leave the minimum unstated. A media consumer starts it as zero and waits a missing group
-	/// for the max instead (an audio decoder floors it at zero and waits only its playout
-	/// estimate, which can be larger), while the subscription keeps it unstated, so it never
-	/// pulls the aggregate across subscribers to zero, unless a catalog warmup or an audio
-	/// decoder's playout delay states one.
+	/// Leave the minimum unstated. A media consumer starts it as zero, while the subscription
+	/// keeps it unstated, so it never pulls the aggregate across subscribers to zero, unless a
+	/// catalog warmup or an audio decoder's playout delay states one.
 	pub min_unstated: bool,
 }
 
@@ -875,31 +899,29 @@ pub struct moq_subscription {
 	pub order: u32,
 }
 
-/// A span of a track to deliver: from `start` up to `end`, or onward without one.
+/// A span of a track to deliver: from `start` through `end`, or onward without one.
 ///
-/// A relative or time start is the first frame of its group, and a relative or time end
-/// includes its whole group. An absolute end is exclusive.
+/// Every start is the first frame of its group, and every end includes its whole group.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct moq_range {
 	/// Where delivery starts.
 	pub start: moq_anchor,
-	/// Where delivery stops, read only when `end_present` is true.
+	/// Where delivery stops, including its group, read only when `end_present` is true.
 	pub end: moq_anchor,
 	/// Whether `end` is present. When false, the range follows the live edge.
 	pub end_present: bool,
 }
 
-/// Where one end of a [moq_range] falls. Zeroing it means group 0.
+/// Where one end of a [moq_range] falls. A zeroed one names no kind and is refused.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct moq_anchor {
 	/// `moq_anchor_kind` discriminant.
 	pub kind: u32,
-	/// The group's start, in its track's timescale, or with `MOQ_ANCHOR_RELATIVE` how many
-	/// groups before the latest one (0 is the latest, and an offset past every group held
-	/// reaches back to the oldest).
-	pub group: u64,
+	/// Read only with `MOQ_ANCHOR_RELATIVE`: how many groups before the latest one (0 is the
+	/// latest, and an offset past every group held reaches back to the oldest).
+	pub groups: u64,
 	/// The time, read only with `MOQ_ANCHOR_TIME`: unscaled (`has_scale` false), with `value` in
 	/// the track's timescale. A scaled one is refused with a timestamp mismatch.
 	pub timestamp: moq_timestamp,
@@ -910,11 +932,14 @@ pub struct moq_anchor {
 #[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 #[derive(Clone, Copy, Debug)]
 pub enum moq_anchor_kind {
-	/// The group starting at `group`, delivered from its first frame.
-	MOQ_ANCHOR_ABSOLUTE = 0,
-	/// A count of groups back from the latest one.
+	/// A count of `groups` back from the latest one.
 	MOQ_ANCHOR_RELATIVE = 1,
-	/// The group containing a time: the newest one starting at or before it.
+	/// The group containing a time: the newest one starting at or before it. A group is named
+	/// by its start, so its start names exactly it. As an end, it includes every group
+	/// starting at or before the time.
+	///
+	/// Over a session older than moq-lite-07, a start between two groups reaches the
+	/// publisher as the first group at or after it, missing the one containing it.
 	MOQ_ANCHOR_TIME = 2,
 	/// The oldest group still around, as far back as `delay.max_us` allows. A start only.
 	MOQ_ANCHOR_OLDEST = 3,
@@ -931,13 +956,11 @@ pub enum moq_order {
 	MOQ_ORDER_ASCENDING = 1,
 }
 
-/// `anchor` as a start. A group is named by its start, so an absolute group names that time.
-/// A time must be unscaled, in the track's timescale: the timescale is unknown here, so a scaled
-/// one is refused rather than read in the wrong units.
+/// `anchor` as moq-net reads it. A time must be unscaled, in the track's timescale: the
+/// timescale is unknown here, so a scaled one is refused rather than read in the wrong units.
 fn parse_anchor(anchor: &moq_anchor) -> Result<moq_net::track::Anchor, Error> {
 	Ok(match anchor.kind {
-		v if v == moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32 => moq_net::track::Anchor::Time(anchor.group),
-		v if v == moq_anchor_kind::MOQ_ANCHOR_RELATIVE as u32 => moq_net::track::Anchor::Relative(anchor.group),
+		v if v == moq_anchor_kind::MOQ_ANCHOR_RELATIVE as u32 => moq_net::track::Anchor::Relative(anchor.groups),
 		v if v == moq_anchor_kind::MOQ_ANCHOR_TIME as u32 => match anchor.timestamp.has_scale {
 			false => moq_net::track::Anchor::Time(anchor.timestamp.value),
 			true => return Err(moq_net::Error::TimestampMismatch.into()),
@@ -945,17 +968,6 @@ fn parse_anchor(anchor: &moq_anchor) -> Result<moq_net::track::Anchor, Error> {
 		v if v == moq_anchor_kind::MOQ_ANCHOR_OLDEST as u32 => moq_net::track::Anchor::Oldest,
 		_ => return Err(Error::InvalidCode),
 	})
-}
-
-/// `anchor` as an end, or `None` for an absolute end at group 0, which holds nothing. An
-/// absolute end is exclusive, so it ends with the group before it.
-fn parse_end(anchor: &moq_anchor) -> Result<Option<moq_net::track::Anchor>, Error> {
-	match anchor.kind {
-		v if v == moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32 => {
-			Ok(anchor.group.checked_sub(1).map(moq_net::track::Anchor::Time))
-		}
-		_ => parse_anchor(anchor).map(Some),
-	}
 }
 
 /// # Safety
@@ -977,19 +989,13 @@ pub(crate) unsafe fn parse_subscription(
 		let ranges = ranges
 			.iter()
 			.map(|range| {
-				let start = parse_anchor(&range.start)?;
-				let end = match range.end_present {
-					// One ending before group 0 holds nothing, so it is dropped.
-					true => match parse_end(&range.end)? {
-						Some(end) => Some(end),
-						None => return Ok(None),
-					},
-					false => None,
-				};
-				Ok(Some(moq_net::track::Range { start, end }))
+				Ok(moq_net::track::Range {
+					start: parse_anchor(&range.start)?,
+					end: range.end_present.then(|| parse_anchor(&range.end)).transpose()?,
+				})
 			})
 			.collect::<Result<Vec<_>, Error>>()?;
-		out = out.with_ranges(ranges.into_iter().flatten());
+		out = out.with_ranges(ranges);
 	}
 	Ok(out)
 }
@@ -1148,20 +1154,12 @@ pub enum moq_announce_kind {
 	/// A route now covers the path, which was absent. Another instance taking it over keeps it
 	/// present: follow it with [moq_origin_follow] to see the broadcast change.
 	MOQ_ANNOUNCE_KIND_PRESENT = 0,
-	/// The origin withdrew the path: no route covers it any more.
+	/// No route covers the path any more, whether its origin withdrew it or this origin let
+	/// go of it.
 	MOQ_ANNOUNCE_KIND_ABSENT = 1,
-	/// This origin let go of the path, and no route covers it any more: the session it arrived
-	/// on closed, or the network lost every path to it. Its origin may still serve it.
-	MOQ_ANNOUNCE_KIND_OFFLINE = 2,
-	/// The present path lost every usable path to its origin but may recover one: it stays
-	/// present while requests for it may fail.
-	MOQ_ANNOUNCE_KIND_UNAVAILABLE = 3,
-	/// The present path recovered a usable path: request it again.
-	MOQ_ANNOUNCE_KIND_AVAILABLE = 4,
 }
 
-/// An announce event from an origin: a path becoming present, absent, or offline, or its
-/// availability changing.
+/// An announce event from an origin: a path becoming present or absent.
 #[repr(C)]
 pub struct moq_announce_event {
 	/// The covered prefix, relative to the origin, NOT NULL terminated
@@ -1178,8 +1176,8 @@ pub struct moq_announce_event {
 	/// Which event this is.
 	pub kind: moq_announce_kind,
 
-	/// The route serving the prefix. On `MOQ_ANNOUNCE_KIND_ABSENT` and
-	/// `MOQ_ANNOUNCE_KIND_OFFLINE` it carries the last advertised route.
+	/// The route serving the prefix. On `MOQ_ANNOUNCE_KIND_ABSENT` it carries the last
+	/// advertised route.
 	pub route: moq_route_info,
 }
 
@@ -1190,7 +1188,8 @@ pub struct moq_announce_event {
 pub enum moq_connection_phase {
 	/// No connection has been established yet.
 	MOQ_CONNECTION_PHASE_CONNECTING = 0,
-	/// A connection is serving.
+	/// A connection is serving: its peer accepted the credential, or on moq-lite 03/04, which
+	/// never answer it, the session stayed up 1s. A refused session never reaches this phase.
 	MOQ_CONNECTION_PHASE_CONNECTED = 1,
 	/// No connection is serving while the session redials.
 	MOQ_CONNECTION_PHASE_DISCONNECTED = 2,
@@ -1793,7 +1792,8 @@ unsafe fn connect_session(
 /// You should call [moq_session_close], even on error, to free up resources.
 ///
 /// Once connected, the session reconnects automatically with exponential backoff if the
-/// connection drops. Until a session has stayed up past 1s or been drained by a GOAWAY, a
+/// connection drops. Until the peer has accepted a session's credential or drained a session with a GOAWAY
+/// (or, on moq-lite 03/04, which never answer it, a session stayed up 1s), a
 /// failed dial or a closed session, such as a refused credential, ends it instead, with that error as the terminal
 /// snapshot's failure. Published broadcasts are re-announced and consumers re-subscribed on
 /// each reconnect, since the origins outlive the underlying connection.
@@ -3183,8 +3183,7 @@ pub extern "C" fn moq_publish_media_finish(export: u32) -> i32 {
 /// the encode, but leaves nothing from before the first subscriber.
 ///
 /// `on_demand` fires right away with the current [moq_demand] state, again on every
-/// change, including a move of the wanted group that [moq_publish_demand_wanted] reads,
-/// then exactly once more with a terminal code: `0` (the track ended or the watcher was
+/// change, then exactly once more with a terminal code: `0` (the track ended or the watcher was
 /// stopped with [moq_publish_demand_cancel]) or a negative error. After the terminal
 /// (`<= 0`) callback, `user_data` is never touched again. Reporting the current state
 /// first means a track that went unused before the watcher existed still reports it.
@@ -3242,26 +3241,47 @@ pub extern "C" fn moq_publish_demand_cancel(watcher: u32) -> i32 {
 	})
 }
 
-/// Read the group a demand watcher's subscribers want, typically from its `on_demand` callback.
-///
-/// `present` is false while nobody subscribes. Otherwise subscribers want `group` or later:
-/// once `group` passes the largest group written, start a new one (a keyframe). `group`
-/// never goes back, so once a group reaches it nothing is pending until a joiner asks again.
+/// Read whether anyone consumes a demand watcher's track right now: a subscription, fetch, or a
+/// group one of them was handed and has not finished reading.
 ///
 /// Returns zero on success, or a negative code once the watcher's terminal callback fired.
 ///
 /// # Safety
-/// - `group` and `present` must be valid pointers.
+/// - `wanted` must be a valid pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_publish_demand_wanted(watcher: u32, group: *mut u64, present: *mut bool) -> i32 {
+pub unsafe extern "C" fn moq_publish_demand_wanted(watcher: u32, wanted: *mut bool) -> i32 {
 	ffi::enter(move || {
 		let watcher = ffi::parse_id(watcher)?;
-		let group = unsafe { group.as_mut() }.ok_or(Error::InvalidPointer)?;
-		let present = unsafe { present.as_mut() }.ok_or(Error::InvalidPointer)?;
-		let wanted = State::lock().publish.demand_wanted(watcher)?;
-		*group = wanted.unwrap_or(0);
-		*present = wanted.is_some();
+		let wanted = unsafe { wanted.as_mut() }.ok_or(Error::InvalidPointer)?;
+		*wanted = State::lock().publish.demand_wanted(watcher)?;
 		Ok(())
+	})
+}
+
+/// Wait until a subscriber of a demand watcher's track asks for a new group: the first group of
+/// a track with none, or a join judged by the [moq_track_info] `refresh` fields once the
+/// interval passed.
+///
+/// `on_refresh` fires exactly once: `MOQ_DEMAND_REFRESH` once a new group is asked for, at once
+/// while a request is pending; `0` when the watcher ended first (cancelled, or the track ended);
+/// or a negative code when the track aborted. The next group written answers the request, so a
+/// publisher writes a group starting with a keyframe or a snapshot, then waits again.
+///
+/// Returns zero once the wait started, or a negative code, in which case `on_refresh` never
+/// fires.
+///
+/// # Safety
+/// - `on_refresh` must be non-NULL, and `user_data` valid until it fires.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_demand_refresh(
+	watcher: u32,
+	on_refresh: ffi::moq_status_callback,
+	user_data: *mut c_void,
+) -> i32 {
+	ffi::enter(move || {
+		let watcher = ffi::parse_id(watcher)?;
+		let on_refresh = unsafe { ffi::OnStatus::new(user_data, on_refresh)? };
+		State::lock().publish.demand_refresh(watcher, on_refresh)
 	})
 }
 
@@ -3816,8 +3836,7 @@ pub extern "C" fn moq_publish_track_finish_at(track: u32, final_start: u64) -> i
 /// The newest content a raw track holds: its newest group, at that group's newest frame.
 ///
 /// `present` is false before any group was written; `frame` is 0 while the newest group is
-/// empty. A publisher compares it with [moq_publish_demand_wanted]'s group to tell whether a
-/// join is already served by a group it wrote. Returns zero, or a negative code on failure.
+/// empty. Returns zero, or a negative code on failure.
 ///
 /// # Safety
 /// - `group`, `frame`, and `present` must point at writable values.
@@ -4143,10 +4162,13 @@ pub extern "C" fn moq_group_request_accept(request: u32) -> i32 {
 	})
 }
 
-/// Reject a group request, failing the readers waiting on it now as not found.
+/// Reject a group request, as serving it failed, failing the readers waiting on it now as not
+/// found.
 ///
-/// A later reader of the group asks again. The error code is not delivered. Consumes the
-/// request handle. Returns a zero on success, or a negative code on failure.
+/// A later reader of the group asks again. A request for a reader's time start, a time no
+/// cached group places, fails that reader until its ranges change; free it instead when you
+/// have no group there. The error code is not delivered. Consumes the request handle. Returns
+/// a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_group_request_abort(request: u32, error_code: u16) -> i32 {
 	ffi::enter(move || {
@@ -4155,7 +4177,11 @@ pub extern "C" fn moq_group_request_abort(request: u32, error_code: u16) -> i32 
 	})
 }
 
-/// Free a group request without accepting it, which rejects it like [moq_group_request_abort].
+/// Free a group request without accepting it, as you have no such group, which rejects it like
+/// [moq_group_request_abort].
+///
+/// A request for a reader's time start says instead that no group starts at that time, so the
+/// reader starts at the group held below it, or at the time when none is, rather than failing.
 ///
 /// Returns a zero on success, or a negative code if the handle is unknown.
 #[unsafe(no_mangle)]
@@ -5049,6 +5075,50 @@ pub extern "C" fn moq_consume_track_frame_free(frame: u32) -> i32 {
 	ffi::enter(move || {
 		let frame = ffi::parse_id(frame)?;
 		State::lock().consume.raw_frame_close(frame)
+	})
+}
+
+/// Ask a raw track's publisher for a group starting after the newest one held, judged by the
+/// track's [moq_track_info] `refresh` fields. The new group arrives through the
+/// [moq_consume_track] callback like any other.
+///
+/// The request is sent once the newest group is old enough, when whatever serves the track
+/// reads it: the session forwarding it upstream, or a local publisher waiting in
+/// [moq_publish_demand_refresh]. Concurrent calls share one request.
+///
+/// `on_refresh` fires exactly once: `MOQ_REFRESH_SENT` once the request is sent, or at once
+/// when there is nothing to send (a track that does not refresh, a ratio the newest group is
+/// under, a subscription with no group yet, or a request already sent), or when a newer group
+/// lands first; `0` once [moq_consume_track_refresh_cancel] withdrew it or the subscription
+/// ended first; or a negative code when the track aborted.
+///
+/// Returns a non-zero handle to the wait, or a negative code, in which case `on_refresh` never
+/// fires.
+///
+/// # Safety
+/// - `on_refresh` must be non-NULL, and `user_data` valid until it fires.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_consume_track_refresh(
+	track: u32,
+	on_refresh: ffi::moq_status_callback,
+	user_data: *mut c_void,
+) -> i32 {
+	ffi::enter(move || {
+		let track = ffi::parse_id(track)?;
+		let on_refresh = unsafe { ffi::OnStatus::new(user_data, on_refresh)? };
+		State::lock().consume.raw_track_refresh(track, on_refresh)
+	})
+}
+
+/// Withdraw a [moq_consume_track_refresh] request not yet sent. One already sent stays sent.
+///
+/// Returns zero on success, or a negative code if the wait already ended. Its `on_refresh`
+/// still fires once, with `0` unless the request was sent first.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_consume_track_refresh_cancel(refresh: u32) -> i32 {
+	ffi::enter(move || {
+		let refresh = ffi::parse_id(refresh)?;
+		State::lock().consume.raw_track_refresh_close(refresh)
 	})
 }
 

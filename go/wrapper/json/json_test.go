@@ -242,8 +242,8 @@ func TestDemand(t *testing.T) {
 	if name := snapshotDemand.Name(); name != "status" {
 		t.Fatalf("Name = %q, want status", name)
 	}
-	if wanted := snapshotDemand.Wanted(); wanted != nil {
-		t.Fatalf("Wanted = %d before any subscriber", *wanted)
+	if snapshotDemand.Wanted() {
+		t.Fatal("Wanted before any subscriber")
 	}
 
 	snapshotConsumer, err := moqjson.NewSnapshotConsumer(consumer, "status", moqjson.SnapshotConsumerOptions{})
@@ -337,7 +337,7 @@ func untilWanted(ctx context.Context, demand *moq.TrackDemand, wanted bool) erro
 		if err != nil {
 			return err
 		}
-		if (next != nil) == wanted {
+		if next == wanted {
 			return nil
 		}
 	}

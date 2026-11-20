@@ -2671,10 +2671,14 @@ async fn one_shot_connect_surfaces_the_session_close() {
 	let accepts = Arc::new(AtomicUsize::new(0));
 	let server_accepts = accepts.clone();
 	let pub_origin = moq_tokio::origin::spawn();
+	// Each session is aborted once the client is established on it: one aborted sooner is a
+	// refusal, which `established` reports instead.
+	let (established, mut wait_established) = tokio::sync::mpsc::unbounded_channel::<()>();
 	let server_handle = tokio::spawn(async move {
 		while let Ok(request) = server.accept().await {
 			server_accepts.fetch_add(1, Ordering::SeqCst);
 			let session = request.with_publisher(&pub_origin).ok().await?;
+			wait_established.recv().await;
 			session.abort(moq_net::Error::Cancel);
 		}
 		Ok::<_, anyhow::Error>(())
@@ -2693,6 +2697,7 @@ async fn one_shot_connect_surfaces_the_session_close() {
 		.await
 		.expect("connect timed out")
 		.expect("connect failed");
+	established.send(()).unwrap();
 
 	// The server aborts the session; one-shot mode turns that into the terminal error.
 	kio::clock::timeout(TIMEOUT, connection.closed())
@@ -3346,9 +3351,12 @@ async fn goaway_timeout_force_close_moq_transport_22_quic() {
 	let client = client_config.init(Default::default()).expect("failed to init client");
 	let url: url::Url = format!("moqt://localhost:{}", addr.port()).parse().unwrap();
 
+	// Sent once the client is established, so the one-shot loop is not over before it is.
+	let (established, wait_established) = tokio::sync::oneshot::channel::<()>();
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("no incoming connection");
 		let session = request.with_publisher(&pub_origin).ok().await?;
+		let _ = wait_established.await;
 
 		session
 			.goaway(moq_net::goaway::Goaway::new().with_timeout(Some(Duration::from_millis(200))))
@@ -3366,6 +3374,7 @@ async fn goaway_timeout_force_close_moq_transport_22_quic() {
 
 	// Observe the GOAWAY but do NOT leave.
 	let draining = connection.draining().expect("connected");
+	established.send(()).unwrap();
 	let goaway = kio::clock::timeout(TIMEOUT, kio::wait(|waiter| draining.poll(waiter)))
 		.await
 		.expect("goaway timed out")
@@ -3444,10 +3453,10 @@ async fn zero_initial_backoff_still_gives_up_on_a_flapping_peer() {
 }
 
 /// A rejection at the MoQ layer lands after the transport handshake, so the dial
-/// itself succeeds and the rejection arrives as the session's close. That close
-/// rides the specified UNAUTHORIZED session code, so it decodes back into a typed
-/// error rather than an opaque transport string, even in one-shot mode where the
-/// session ending is what ends the connection.
+/// itself succeeds and the rejection arrives as the session's close, before the client
+/// ever reports it connected. That close rides the specified UNAUTHORIZED session code, so
+/// it decodes back into a typed error rather than an opaque transport string, which
+/// `established` returns.
 #[tokio::test]
 async fn session_close_surfaces_a_rejection_code() {
 	let (mut server, addr) = test_server().await;
@@ -3460,14 +3469,11 @@ async fn session_close_surfaces_a_rejection_code() {
 		Ok::<_, anyhow::Error>(())
 	});
 
-	let (_client, connection) = kio::clock::timeout(TIMEOUT, connect_once(test_client(), url))
-		.await
-		.expect("connect timed out")
-		.expect("connect failed");
-	let err = kio::clock::timeout(TIMEOUT, connection.closed())
-		.await
-		.expect("close timed out")
-		.expect_err("a rejected session must surface as an error");
+	let err = expect_connect_err(
+		kio::clock::timeout(TIMEOUT, connect_once(test_client(), url))
+			.await
+			.expect("connect timed out"),
+	);
 	assert_connect_error(&err, moq_tokio::ConnectError::Unauthorized);
 
 	server_handle.abort();
@@ -3475,7 +3481,8 @@ async fn session_close_surfaces_a_rejection_code() {
 
 /// The same rejection of a first session under the reconnect loop ends it with the code,
 /// as a refused first dial does: on these versions the refusal arrives after ALPN, so the
-/// session connected first, yet redialing would only present the same credential again.
+/// transport connected first, yet redialing would only present the same credential again.
+/// The refused session never reports as connected.
 #[tokio::test]
 async fn reconnect_ends_on_a_first_session_rejection() {
 	for code in [
@@ -3501,6 +3508,11 @@ async fn reconnect_ends_on_a_first_session_rejection() {
 			.await
 			.unwrap_or_else(|_| panic!("{code:?} kept the loop redialing"))
 			.expect_err("a rejected first session must surface as an error");
+		assert_eq!(
+			connection.connects(),
+			0,
+			"{code:?} showed the refused session as connected"
+		);
 		server_handle.abort();
 		let mut count = 0;
 		while accepts.try_recv().is_ok() {
@@ -3536,9 +3548,11 @@ async fn reconnect_retries_a_rejection_after_a_healthy_session() {
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
 	config.backoff.healthy = Some(HEALTHY.into());
-	let mut connection = config.init(Default::default()).unwrap().connect(url);
-	let status = kio::clock::timeout(TIMEOUT, connection.status()).await.unwrap();
-	assert_eq!(status.unwrap(), moq_tokio::Status::Connected);
+	let connection = config.init(Default::default()).unwrap().connect(url);
+	let connection = kio::clock::timeout(TIMEOUT, connection.established())
+		.await
+		.unwrap()
+		.unwrap();
 	kio::clock::timeout(TIMEOUT, accepts.recv()).await.unwrap().unwrap();
 	kio::clock::sleep(HEALTHY).await;
 	end_first.send(()).unwrap();
@@ -3616,11 +3630,8 @@ async fn abort_carries_its_code_to_the_peer() {
 
 /// The next route and whether it is active.
 async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
-	loop {
-		return match announced.next().await? {
-			moq_net::announce::Event::Present(route) => Some((route, true)),
-			moq_net::announce::Event::Absent(route) | moq_net::announce::Event::Offline(route) => Some((route, false)),
-			moq_net::announce::Event::Available(_) | moq_net::announce::Event::Unavailable(_) => continue,
-		};
+	match announced.next().await? {
+		moq_net::announce::Event::Present(route) => Some((route, true)),
+		moq_net::announce::Event::Absent(route) => Some((route, false)),
 	}
 }

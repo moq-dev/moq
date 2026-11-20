@@ -225,7 +225,7 @@ impl Subscriber {
 	///
 	/// `options.latency` is the muxer's delay, but no less than [`MIN_DELAY`]: the output runs
 	/// that far behind the source, a frame arriving later is dropped, and a stalled group is
-	/// skipped after half of it. We reuse the locally configured SRT receive latency for
+	/// skipped once it falls that far behind the newest content. We reuse the locally configured SRT receive latency for
 	/// it, the same budget an SRT hop gives a packet. It's the configured value,
 	/// not the handshake result (srt-tokio doesn't expose the negotiated latency),
 	/// so a peer that requests a higher receive latency gets a larger actual

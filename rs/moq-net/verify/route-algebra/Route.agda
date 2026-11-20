@@ -1,11 +1,16 @@
 --------------------------------------------------------------------------------
--- Routes between forwarding nodes, as the multicast epic's rule ranks and
--- extends them (`rs/moq-net/src/route/tests/multi.rs`, every `Tune` the epic
--- picked on: floor, epoch, batch, drain, claimed).
+-- Routes between forwarding nodes, as `route::relay::Router` ranks and extends
+-- them (`rs/moq-net/src/route/relay.rs`).
 --
--- A node is one start of one relay: a restart is a new node, as a restarted
--- relay names itself afresh. `relay` and `start` read the two back from a node,
--- since the floor files a closed session by relays and orders it by start.
+-- A node is a Node ID: one start of one relay, a restart being a new node as a
+-- restarted relay names itself afresh, and each start's marked identity, which
+-- announces what the node took over a marked link. `relay`, `start`, and `mark`
+-- read the three back from a node: the floor files a closed session by relays and
+-- orders it by start, a node refuses a path naming another start of its relay,
+-- and equal routes order by the neighbour's Node ID.
+--
+-- A node's marked identity is a node whose one link is from the node itself: up,
+-- free, marked, at session 0, so its route there is the node's marked route.
 --
 -- A route at node i is what i would offer: its path names i first, then i's next
 -- hop, and so on to the forwarding node it leads to. `extra` carries, beside each
@@ -15,7 +20,7 @@
 
 open import Data.Bool.Base using (Bool; true; false; _∨_; _∧_; not; if_then_else_)
 open import Data.List.Base using (List; []; _∷_; map; any; zip; null; length)
-open import Data.Nat.Base using (ℕ; suc; _≡ᵇ_; _<ᵇ_; _≤ᵇ_)
+open import Data.Nat.Base using (ℕ; suc; _+_; _≡ᵇ_; _<ᵇ_; _≤ᵇ_)
 open import Data.Product.Base using (_×_; _,_; proj₁; proj₂)
 open import Relation.Binary.PropositionalEquality using (_≡_; refl; cong)
 
@@ -23,15 +28,13 @@ open import RoutingLib.Routing.Basics.Path.Uncertified using (Path; Edge)
 
 open import Order
 
-module Route
-  (relay start : ℕ → ℕ)
-  (relay-start-injective : ∀ {m n} → relay m ≡ relay n → start m ≡ start n → m ≡ n)
-  where
+module Route (relay start mark : ℕ → ℕ) where
 
-import Data.Bool.Properties as Bool
 open import Data.List.Properties using (map-injective)
 open import Data.List.Relation.Binary.Lex.Core using (base; halt)
 open import Data.Product.Properties using (,-injectiveˡ; ,-injectiveʳ)
+open import Data.Unit.Base using (⊤; tt)
+import Data.Unit.Properties as Unit
 
 -- The longest path a node takes, counting the node it leads to (`MAX_HOPS`).
 max-hops : ℕ
@@ -54,21 +57,27 @@ e₀-least : ∀ e → Ordered._≤_ OE e₀ e
 e₀-least []      = base _
 e₀-least (_ ∷ _) = halt
 
--- Among equal ranks and lengths, by the neighbour: its relay, then its start.
--- No two candidates at one node share a neighbour, so the rest of the path
--- never decides between them.
+-- Among equal ranks and lengths, by the neighbour's Node ID: its relay, then its
+-- start, then unmarked first, as `NodeId` orders. No two candidates at one node
+-- share a neighbour, so the rest of the path never decides between them.
 OP : Ordered Path
-OP = keyed (map neighbour) (map-injective neighbour-injective) (list (lex nat (lex nat nat)))
+OP = keyed (map neighbour) (map-injective neighbour-injective) (list (lex nat (lex nat (lex nat (lex nat nat)))))
   where
-  neighbour : Edge → ℕ × ℕ × ℕ
-  neighbour (a , b) = a , relay b , start b
+  neighbour : Edge → ℕ × ℕ × ℕ × ℕ × ℕ
+  neighbour (a , b) = a , relay b , start b , mark b , b
 
   neighbour-injective : ∀ {x y} → neighbour x ≡ neighbour y → x ≡ y
   neighbour-injective {a , b} {c , d} eq with ,-injectiveˡ eq
-  ... | refl = cong (a ,_) (relay-start-injective
-    (,-injectiveˡ (,-injectiveʳ eq)) (,-injectiveʳ (,-injectiveʳ eq)))
+  ... | refl = cong (a ,_) (,-injectiveʳ (,-injectiveʳ (,-injectiveʳ (,-injectiveʳ eq))))
 
-open import Increasing OE e₀ e₀-least OP public
+-- Nothing leads a route's rank.
+OC : Ordered ⊤
+OC = record { _≤_ = _≡_ ; isDecTotalOrder = Unit.≡-isDecTotalOrder }
+
+OT : Ordered (Path × Extra)
+OT = lex OP OE
+
+open import Increasing OC tt (λ _ → refl) e₀ OT (λ e → lex-≤ OP OE (Ordered.refl OP) λ _ → e₀-least e) public
 
 ------------------------------------------------------------------------
 -- The link
@@ -110,16 +119,31 @@ closed fs ((a , b) , s) = any at-or-below fs
   at-or-below (floor n f st se) =
     (relay a ≡ᵇ n) ∧ (relay b ≡ᵇ f) ∧ ((start a <ᵇ st) ∨ ((start a ≡ᵇ st) ∧ (s ≤ᵇ se)))
 
+-- The largest cost a route carries (`Metric`).
+metric : ℕ
+metric = 18446744073709551615
+
+-- Whether a path at j names another start of i's relay.
+elsewhere : Edge → Path → Bool
+elsewhere (i , j) p = any other (j ∷ map proj₂ p)
+  where
+  other : ℕ → Bool
+  other n = (relay n ≡ᵇ relay i) ∧ not (start n ≡ᵇ start i)
+
 -- A link refuses a route when it is down, when the route is the neighbour's
 -- route to itself and the neighbour announces no claim, when the route crossed a
 -- marked link and this one is marked at the neighbour, when the path would grow
--- past `max-hops`, or when it names a session the receiver knows closed.
+-- past `max-hops`, when the cost would pass the metric, when the path names
+-- another start of the receiver's relay, or when it names a session the receiver
+-- knows closed.
 refuses : Link → Edge → Valid → Bool
-refuses f _ v =
+refuses f e v =
   not (L.up f)
   ∨ (null (path v) ∧ not (L.claimed f))
   ∨ (marked v ∧ L.marked-there f)
   ∨ (max-hops ≤ᵇ suc (length (path v)))
+  ∨ (metric <ᵇ L.cost f + cost v)
+  ∨ elsewhere e (path v)
   ∨ any (closed (L.floors f)) (zip (path v) (extra v))
 
 -- The receiver ranks a route draining when it names a node known draining.
@@ -130,6 +154,8 @@ policy : Policy
 policy = record
   { Link         = Link
   ; down         = link false 0 0 false [] [] false false false 0
+  ; rise         = λ _ c → c
+  ; rise-≥       = λ _ _ → refl
   ; cost         = L.cost
   ; penalty      = L.penalty
   ; drains       = L.drains
@@ -137,7 +163,7 @@ policy = record
   ; marked       = L.marked-here
   ; refuses      = refuses
   ; down-refuses = λ _ _ → refl
-  ; tag          = λ f ss → L.session f ∷ ss
+  ; tag          = λ f _ v → L.session f ∷ extra v
   }
 
 open Rule policy public

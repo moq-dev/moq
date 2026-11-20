@@ -109,7 +109,9 @@ export class Terminal {
 		this.#epoch ??= timestamp;
 		if (this.#prime) {
 			const primed = this.#reprime(timestamp);
-			this.#before = timestamp + Math.max(0, this.#warmup - primed);
+			// On the timeline `span` maps output onto, where this frame's output lands: a pre-skip early,
+			// since an Opus packet decodes to the encoder's lookahead before its timestamp.
+			this.#before = timestamp - this.delay + Math.max(0, this.#warmup - primed);
 			this.#prime = false;
 		}
 		return reset;
@@ -186,7 +188,10 @@ export class Terminal {
 		this.#end = undefined;
 		this.#endGroup = undefined;
 		this.#before = undefined;
-		// A fresh encoder's first packets need no frames of the stopped one ahead of them.
+		// A fresh encoder's first packets need no frames of the stopped one ahead of them, and no
+		// warmup a join or a gap left pending: a wire before lite-07 names the run the publisher
+		// skipped across its silence a drop, so after every pause a gap reaches this frame too.
+		this.#prime = false;
 		this.#forget();
 		this.#resetEpoch();
 	}

@@ -134,7 +134,9 @@ pub struct Config {
 	/// leaving each track's own window in force.
 	pub cache_duration: Option<Duration>,
 
-	/// How long an announce cursor holds a changed route before delivering it.
+	/// How long an announce cursor holds a changed route that arrived over a hop chain
+	/// before delivering it: a [`lite06_churn`] mitigation. A moq-lite-07 route and one
+	/// published here never wait.
 	///
 	/// A new route, a removed one, and another instance are delivered at once; only an
 	/// update waits, and a newer change during the wait replaces it. When a publisher
@@ -149,16 +151,36 @@ pub struct Config {
 	/// a retraction, an announcement from the same publisher (first hop, instance and
 	/// epoch) on a strictly worse route waits. A republish ranks the same and a restart
 	/// carries a new instance or epoch, so neither waits. Zero disables this too.
-	pub update_hold: Duration,
+	pub(crate) update_hold: Duration,
 }
 
-/// The default [`Config::update_hold`].
-pub(super) const DEFAULT_UPDATE_HOLD: Duration = Duration::from_millis(300);
+/// Lite-06 churn: the mitigations an announce cursor applies while a withdrawal hunts
+/// through a lite-06 mesh's hop-chain paths, which go with lite-06. They are the update
+/// hold and the retraction quarantine ([`Config::update_hold`]) and the same-clock dedup
+/// of a retraction's queue entry ([`Routes::quarantine`]). The cursor every version
+/// shares applies them, to the routes [`hunts`](lite06_churn::hunts) picks out alone, so
+/// a reader of a lite-06 mesh keeps them whatever version it speaks; each site names this
+/// module, so deleting it finds them all.
+pub(super) mod lite06_churn {
+	use std::time::Duration;
 
-/// How long a cursor holds back a stale path to a prefix it retracted; see
-/// [`Config::update_hold`]. Path hunting after a withdrawal settles within it on
-/// random meshes with links of up to 250 ms.
-const RETRACT_QUARANTINE: Duration = Duration::from_secs(2);
+	/// The default [`Config::update_hold`](super::Config::update_hold).
+	pub(crate) const DEFAULT_UPDATE_HOLD: Duration = Duration::from_millis(300);
+
+	/// How long a cursor holds back a stale path to a prefix it retracted; see
+	/// [`Config::update_hold`](super::Config::update_hold). Path hunting after a
+	/// withdrawal settles within it on random meshes with links of up to 250 ms.
+	pub(super) const RETRACT_QUARANTINE: Duration = Duration::from_secs(2);
+
+	/// Whether a route arrived over a hop chain (moq-lite-03 to 06, or moq-transport),
+	/// whose withdrawals hunt through stale paths: the only routes these mitigations
+	/// hold. A moq-lite-07 route names the node claiming it, whose withdrawal is final,
+	/// and one published here crossed no hop.
+	pub(super) fn hunts(hops: &super::Hops, node: Option<crate::route::NodeId>) -> bool {
+		node.is_none() && !hops.is_empty()
+	}
+}
+use lite06_churn::{DEFAULT_UPDATE_HOLD, RETRACT_QUARANTINE};
 
 impl Default for Config {
 	/// A fresh random node with no byte target and the default idle expiry.
@@ -181,6 +203,23 @@ impl Config {
 			node,
 			..Self::default()
 		}
+	}
+
+	/// Hold route updates for `hold` rather than the default; see the field's notes.
+	///
+	/// Behind the `test-support` feature: a test's door, not an API.
+	#[cfg(feature = "test-support")]
+	pub fn with_update_hold(mut self, hold: Duration) -> Self {
+		self.update_hold = hold;
+		self
+	}
+
+	/// How long announce cursors hold a changed route; see [`Self::with_update_hold`].
+	///
+	/// Behind the `test-support` feature: a test's door, not an API.
+	#[cfg(feature = "test-support")]
+	pub fn update_hold(&self) -> Duration {
+		self.update_hold
 	}
 }
 
@@ -522,6 +561,12 @@ pub struct RouteInfo {
 
 	/// Whether a usable path reaches the route's origin; see [`Self::available`].
 	pub(crate) available: bool,
+
+	/// The lite-07 route layer reached it across a marked link, though the session it
+	/// arrived on is not one: it is hidden from an upstream reader, as a route learned on
+	/// a [`Link::Upstream`] handle is, so this origin never carries it between two
+	/// upstreams. Local, like [`Self::via`]: never forwarded.
+	pub(crate) marked: bool,
 }
 
 impl RouteInfo {
@@ -540,6 +585,7 @@ impl RouteInfo {
 			lane: Lane::default(),
 			draining: false,
 			available: true,
+			marked: false,
 		}
 	}
 }
@@ -559,6 +605,10 @@ pub(crate) struct Lane {
 	/// exactly there. The longer prefix wins, so a claim at 0 outranks every broader one.
 	/// A path has at most 32 segments, so a byte holds it, and the route entry stays small.
 	pub above: u8,
+	/// Which showing of the claim the route layer serves: a new one each time the claim
+	/// is shown again after every copy of it left, so a copy retired late never retires
+	/// the copies a later showing serves. See [`Claim::retire`].
+	pub lifecycle: u64,
 }
 
 impl Default for Lane {
@@ -567,6 +617,7 @@ impl Default for Lane {
 			primary: true,
 			priority: None,
 			above: 0,
+			lifecycle: 0,
 		}
 	}
 }
@@ -577,7 +628,7 @@ impl Default for Lane {
 /// client and a peer relay each append one hop. The origin records it from the
 /// handle that announced the route; see [`Producer::with_link`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub enum Source {
+pub(crate) enum Source {
 	/// Announced on this origin: by an in-process producer or a client session.
 	#[default]
 	Local,
@@ -679,6 +730,13 @@ impl RouteInfo {
 		self
 	}
 
+	/// Hide the route from upstream readers, or not; see [`Self::marked`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn with_marked(mut self, marked: bool) -> Self {
+		self.marked = marked;
+		self
+	}
+
 	/// Whether this route passed through an anonymous hop.
 	///
 	/// True when the chain holds a 0 anywhere, including Lite03 hop-count
@@ -692,8 +750,21 @@ impl RouteInfo {
 	}
 
 	/// Where the route entered this origin.
-	pub fn source(&self) -> Source {
+	#[cfg(test)]
+	pub(crate) fn source(&self) -> Source {
 		self.source
+	}
+
+	/// The hop id of the session the route entered this origin from, 0 when that session
+	/// named none, or `None` for a route announced here.
+	///
+	/// Behind the `test-support` feature: a test's door, not an API.
+	#[cfg(feature = "test-support")]
+	pub fn entered_from(&self) -> Option<u64> {
+		match self.source {
+			Source::Local => None,
+			Source::Peer(hop) => Some(hop),
+		}
 	}
 }
 
@@ -851,8 +922,8 @@ impl<'a> Epochs<'a> {
 /// neither draining (see [`RouteInfo::draining`]) nor unavailable (see
 /// [`RouteInfo::available`]), so a peer that sent a GOAWAY or a held route ranks below
 /// every other eligible route and serves only as a last resort. Then the route layer's
-/// selected route ahead of its alternates. Then the higher link [`Priority`], so
-/// metrics from different operators are never compared. Then an identified chain (no 0) outranks an anonymous one regardless
+/// closest way to a broadcast ahead of its others ([`Lane::primary`]). Then the higher
+/// link [`Priority`], so metrics from different operators are never compared. Then an identified chain (no 0) outranks an anonymous one regardless
 /// of cost, then the cheapest cost, then a broadcast published on this origin (it serves
 /// what is here, not a claim that has to ask), then the shortest hop chain, then a hash
 /// of the instance and `path`, so every node converges on the same winner, then, among
@@ -881,9 +952,12 @@ fn route_order(path: &Path, entry: &RouteEntry) -> RouteOrder {
 		// ranks below a broader one: a stream presents a broader claim at the request,
 		// where it ties an exact claim for the path.
 		entry.lane.above,
-		// The route layer's closest claim ahead of another node's of the same broadcast.
-		!entry.lane.primary,
 		entry.draining || !entry.available,
+		// The route layer's closest way ahead of its others to the same broadcast. Below
+		// availability, since the route layer marks every way to a broadcast available or
+		// none: a live instance's other way outranks a dead one held unavailable while a
+		// route change moves its closest way to another session.
+		!entry.lane.primary,
 		// A lite-07 route ranks by the lowest priority of any link on its path.
 		Reverse(match entry.lane.priority {
 			Some(priority) => entry.priority.min(Priority::new(priority)),
@@ -958,7 +1032,8 @@ impl Quarantine {
 	/// first hop, instance and epoch, ranked strictly worse. A republish ranks the same
 	/// and a restart carries a new instance or epoch, so neither waits.
 	fn holds(&self, meta: &RouteMeta) -> bool {
-		self.publisher.is_some_and(|hop| meta.0.iter().next() == Some(&hop))
+		lite06_churn::hunts(&meta.0, meta.6)
+			&& self.publisher.is_some_and(|hop| meta.0.iter().next() == Some(&hop))
 			&& meta.3 == self.instance.0
 			&& meta.4 == self.instance.1
 			&& (meta.1, meta.0.len()) > self.rank
@@ -1044,11 +1119,12 @@ struct OriginConsumerState {
 	/// The entries held back, by when a poll looks at them again.
 	parked: BTreeMap<(Instant, u64), Path>,
 	next_seq: u64,
-	/// Prefixes whose most recently delivered update was an announce. A pending
-	/// `Announce` is ambiguous on its own: it is an unseen initial announce (a
-	/// retraction cancels it entirely) or a metadata update on a route the
-	/// consumer already observed (a retraction must still be delivered).
-	delivered: BTreeSet<Path>,
+	/// Prefixes whose most recently delivered update was an announce, with the
+	/// instance it named. A pending `Announce` is ambiguous on its own: it is an
+	/// unseen initial announce (a retraction cancels it entirely) or a metadata
+	/// update on a route the consumer already observed (a retraction must still be
+	/// delivered). The instance tells a restart back to it from one onto another.
+	delivered: BTreeMap<Path, Instance>,
 	/// Set by the origin's teardown: the cursor drains `pending`, then reports
 	/// the end instead of parking forever on a table that can never fire again.
 	ended: bool,
@@ -1080,7 +1156,7 @@ impl OriginConsumerState {
 	fn owe(&mut self) {
 		self.owed = 0;
 		for (prefix, pending) in &mut self.pending {
-			pending.owed = !self.delivered.contains(prefix)
+			pending.owed = !self.delivered.contains_key(prefix)
 				|| matches!(
 					pending.update,
 					Some(PendingUpdate::Unannounce(..) | PendingUpdate::UnannounceAnnounce { .. })
@@ -1162,8 +1238,11 @@ impl OriginConsumerState {
 			Some(PendingUpdate::Unannounce(old, gone) | PendingUpdate::UnannounceAnnounce { old, gone, .. }) => {
 				PendingUpdate::UnannounceAnnounce { old, gone, new: meta }
 			}
+			// Back to the instance the consumer holds, before it saw the restart away:
+			// one continuous stream, so a metadata update.
+			_ if self.delivered.get(&prefix) == Some(&meta.0.3) => PendingUpdate::Announce(meta),
 			Some(PendingUpdate::Restart(_)) => PendingUpdate::Restart(meta),
-			_ if self.delivered.contains(&prefix) => PendingUpdate::Restart(meta),
+			_ if self.delivered.contains_key(&prefix) => PendingUpdate::Restart(meta),
 			// The consumer never saw the old instance, so this is its first announce.
 			_ => PendingUpdate::Announce(meta),
 		};
@@ -1175,7 +1254,7 @@ impl OriginConsumerState {
 		match self.pending.get_mut(&prefix).and_then(|pending| pending.update.take()) {
 			// The pending announce was never delivered and neither was any earlier
 			// one, so the pair cancels entirely, and nothing is owed for it.
-			Some(PendingUpdate::Announce(_)) if !self.delivered.contains(&prefix) => {
+			Some(PendingUpdate::Announce(_)) if !self.delivered.contains_key(&prefix) => {
 				let pending = self.remove(&prefix).unwrap();
 				self.owed -= usize::from(pending.owed);
 			}
@@ -1243,7 +1322,9 @@ impl OriginConsumerState {
 			}
 			let pending = self.pending.get_mut(prefix).unwrap();
 			let wake = match pending.update.as_ref().unwrap() {
-				PendingUpdate::Announce(_) if self.delivered.contains(prefix) => {
+				PendingUpdate::Announce((meta, _))
+					if self.delivered.contains_key(prefix) && lite06_churn::hunts(&meta.0, meta.6) =>
+				{
 					// The clock reads the driver's last advance, which may be stale: anchor
 					// the hold on the first advance after the update arrived, by waking the
 					// driver.
@@ -1301,14 +1382,14 @@ impl OriginConsumerState {
 		let ((meta, captures), kind) = match pending.update.unwrap() {
 			PendingUpdate::Announce(meta) => {
 				// The consumer has seen this prefix before, so it is a metadata update.
-				let kind = match self.delivered.insert(prefix.clone()) {
-					true => RouteKind::Start,
-					false => RouteKind::Update,
+				let kind = match self.delivered.insert(prefix.clone(), meta.0.3.clone()) {
+					None => RouteKind::Start,
+					Some(_) => RouteKind::Update,
 				};
 				(meta, kind)
 			}
 			PendingUpdate::Restart(meta) => {
-				self.delivered.insert(prefix.clone());
+				self.delivered.insert(prefix.clone(), meta.0.3.clone());
 				(meta, RouteKind::Restart)
 			}
 			PendingUpdate::Unannounce(meta, gone) => {
@@ -1338,6 +1419,7 @@ impl OriginConsumerState {
 				draining: false,
 				available: meta.7,
 				lane: Lane::default(),
+				marked: false,
 			},
 		};
 		(RouteEvent { kind, announce }, owed)
@@ -1373,6 +1455,8 @@ struct RouteEntry {
 	local: bool,
 	/// The link the entry arrived on, from the handle that inserted it.
 	link: Link,
+	/// The route crossed a marked link before it; see [`RouteInfo::marked`].
+	marked: bool,
 	/// The forwarding node whose claim the route follows; see [`RouteInfo::node`].
 	node: Option<crate::route::NodeId>,
 	/// The route layer's route it follows; see [`RouteInfo::lane`].
@@ -1398,6 +1482,9 @@ struct RouteEntry {
 	/// The route was derived from that peer's advertisement, so it serves nobody
 	/// until the peer announces again. See [`Claim::withdrawn`].
 	stale: bool,
+	/// The route layer let go of the claim this entry follows through another of its
+	/// copies, whose own retraction is on its way. See [`Claim::retire`].
+	retired: bool,
 	/// [`prefix_claim`] of [`Self::prefix`], built once at announce time.
 	///
 	/// The announce sync evaluates a route's claim once per (cursor, route) pair,
@@ -1431,7 +1518,7 @@ impl RouteEntry {
 
 	/// Whether cursors see the entry and requests resolve through it.
 	fn live(&self) -> bool {
-		self.advertised && !self.stale
+		self.advertised && !self.stale && !self.retired
 	}
 
 	fn is_anonymous(&self) -> bool {
@@ -1585,8 +1672,8 @@ struct Horizon {
 /// through that node's routes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) enum NodeFilter {
-	/// Every route. Of the route layer's, the primary ones rank first (see [`Lane`]), so
-	/// a wider covering route serves only while no narrower one does.
+	/// Every route. Of the route layer's, the most specific claim ranks first and then each
+	/// broadcast's closest way (see [`Lane`]).
 	#[default]
 	Any,
 	/// Only the routes this node serves itself.
@@ -1613,6 +1700,7 @@ impl Horizon {
 	/// Whether `entry` may be observed or served through this horizon.
 	fn admits(&self, entry: &RouteEntry) -> bool {
 		self.admits_link(entry.link)
+			&& !(self.upstream && entry.marked)
 			&& entry.visible_to(self.exclude)
 			&& self.max_hops.is_none_or(|max| entry.hops.len() < max.get())
 			&& self.node.admits(entry.node)
@@ -1655,8 +1743,7 @@ pub enum Link {
 	/// Here: an in-process producer or a client session.
 	#[default]
 	Local,
-	/// A cluster peer: every route it announces reports [`Source::Peer`], and
-	/// [`Consumer::local`] hides it.
+	/// A cluster peer: the routes it announces entered from a peer, not here.
 	Peer,
 	/// An upstream peer: a [`Self::Peer`] whose routes are never offered to another
 	/// upstream, so this origin never carries traffic between two upstreams.
@@ -2552,7 +2639,7 @@ impl Producer {
 				announcement: entry,
 				control: kio::Lock::new(control),
 				forwarded: false,
-				_keepalive: self.tasks.keepalive(),
+				keepalive: std::sync::Mutex::new(Some(self.tasks.keepalive())),
 			}),
 			broadcast: source.clone(),
 		};
@@ -2777,7 +2864,7 @@ impl Producer {
 				announcement,
 				control: kio::Lock::new(control),
 				forwarded,
-				_keepalive: self.tasks.keepalive(),
+				keepalive: std::sync::Mutex::new(Some(self.tasks.keepalive())),
 			}),
 			server: serve,
 			publisher,
@@ -3010,6 +3097,7 @@ impl Announcing {
 				via,
 				local: self.local,
 				link: self.link,
+				marked: route.marked,
 				node: route.node,
 				lane: route.lane.clone(),
 				draining: route.draining,
@@ -3018,6 +3106,7 @@ impl Announcing {
 				source: serving.source.clone(),
 				advertised: serving.advertised,
 				stale,
+				retired: false,
 				claim: claim.clone(),
 				reach: reach(&self.scope, claim),
 				lends: serving.lends,
@@ -3066,7 +3155,7 @@ struct Serving {
 ///
 /// // Fill the catalog before readers can find it.
 /// let route = origin.route("live/alice", RouteOptions::hidden())?;
-/// let _catalog = route.broadcast().create_track("catalog.json", None)?;
+/// let _catalog = route.broadcast().create_track("catalog.json", None).ok_or(moq_net::Error::Duplicate)?;
 /// route.announce()?; // visible now, same instance
 /// route.set_cost(5)?; // re-prices in place
 /// route.withdraw(); // hidden; announce() again continues the same stream
@@ -3114,8 +3203,8 @@ struct RouteState {
 	/// the route ([`RouteKind::Offline`]), not that its origin ended it.
 	forwarded: bool,
 	/// A route is lifecycle work: the origin's driver keeps running for as long as one
-	/// lives, even once every producer handle is gone.
-	_keepalive: Keepalive,
+	/// lives, even once every producer handle is gone. `None` once [`Claim::disown`]ed.
+	keepalive: std::sync::Mutex<Option<Keepalive>>,
 }
 
 /// What a route advertises when it announces, changed under one lock so concurrent
@@ -3509,6 +3598,15 @@ impl Claim {
 		self.state.announcement.retract(Retract::Withdrawn);
 	}
 
+	/// The route layer let go of the claim this follows: every copy of it the table holds,
+	/// each of the same node, instance and [`Lane::lifecycle`] at any epoch, goes with this one
+	/// under one lock, rather than readers seeing the rest in turn as their sessions
+	/// retract them. They end with `ended`, else go offline.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn retire(self, ended: bool) {
+		self.state.announcement.retract(Retract::Retired { ended });
+	}
+
 	/// Retire a route its announcer ended without a hop chain to stale, such as a
 	/// moq-transport PUBLISH_NAMESPACE_DONE: readers see it end, not go offline.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
@@ -3537,6 +3635,9 @@ enum Retract {
 	Ended,
 	/// A peer withdrew it, which also stales the routes derived through that peer.
 	Withdrawn,
+	/// The route layer let go of the claim it follows: see [`Claim::retire`]. Ended, it
+	/// stales as [`Self::Withdrawn`] does.
+	Retired { ended: bool },
 }
 
 /// The write half of an advertisement: a live claim that paths under a
@@ -3639,6 +3740,7 @@ impl AnnounceProducer {
 			entry.lane = route.lane.clone();
 			entry.draining = route.draining;
 			entry.available = route.available;
+			entry.marked = route.marked;
 			entry.advertised = true;
 			let claim = entry.claim.clone();
 			shared.sync_route(prefix, &claim, Gone::End);
@@ -3701,6 +3803,7 @@ impl AnnounceProducer {
 			lane: entry.lane.clone(),
 			draining: entry.draining,
 			available: entry.available,
+			marked: entry.marked,
 		})
 	}
 
@@ -3755,24 +3858,32 @@ impl AnnounceProducer {
 				continue;
 			};
 			servers.extend(entry.server.clone());
+			if let Retract::Retired { .. } = how {
+				shared.retire_copies(&entry);
+			}
 			// A peer remains reachable while any of its sessions advertises this
 			// prefix. Remove this session's route before testing the remaining
 			// claims, under the same lock, so overlapping withdrawals cannot
-			// invalidate a newer advertisement or miss the last withdrawal.
-			if how == Retract::Withdrawn
+			// invalidate a newer advertisement or miss the last withdrawal. A live copy
+			// of the same lite-07 claim, such as one a later showing serves over another
+			// chain, says its claimant still advertises it too.
+			let same_claim = |other: &RouteEntry| {
+				entry.node.is_some() && other.node == entry.node && other.instance == entry.instance
+			};
+			if matches!(how, Retract::Withdrawn | Retract::Retired { ended: true })
 				&& let Some(&peer) = entry.hops.iter().last()
 				&& peer != Hop::UNKNOWN
 				&& !shared
 					.routes
 					.at(prefix)
-					.any(|other| other.live() && other.hops.iter().last() == Some(&peer))
+					.any(|other| other.live() && (other.hops.iter().last() == Some(&peer) || same_claim(other)))
 			{
 				shared.withdrawn.entry(prefix.clone()).or_default().insert(peer);
 				shared.restale(prefix);
 			}
 			let gone = match how {
-				Retract::Lost => Gone::Offline,
-				Retract::Ended | Retract::Withdrawn => Gone::End,
+				Retract::Lost | Retract::Retired { ended: false } => Gone::Offline,
+				Retract::Ended | Retract::Withdrawn | Retract::Retired { ended: true } => Gone::End,
 			};
 			shared.sync_route(&entry.prefix, &entry.claim, gone);
 			if entry.advertised
@@ -3850,7 +3961,8 @@ impl kio::Task for FeedOwnClaims {
 }
 
 /// The driver's task firing the route node's timers on the origin's clock: a claim no
-/// route reaches going offline. It ends once nothing owns the origin.
+/// route reaches going offline. It ends once nothing owns the origin, letting go of what
+/// closed sessions left behind, since no timer would take it offline after.
 struct RouteTimer {
 	node: crate::route::Node,
 	deadline: crate::time::Deadline,
@@ -3862,6 +3974,7 @@ impl kio::Task for RouteTimer {
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		if self.origin.poll_orphaned(waiter).is_ready() {
+			self.node.release_orphans();
 			return Poll::Ready(());
 		}
 		loop {
@@ -3968,6 +4081,7 @@ impl OwnClaims {
 			// Kept, so the claim that crossed into lite-07 here is still recognized
 			// wherever it leaves for lite-06 again. A hop that names nobody says nothing.
 			chain: route.hops.iter().map(|hop| hop.id()).filter(|id| *id != 0).collect(),
+			marked: false,
 		};
 		// Only a route published here has crossed no node.
 		let learned = !route.hops.is_empty();
@@ -4132,7 +4246,7 @@ impl DriverState {
 		// `route` holds across its attach: a concurrent create either
 		// finishes before this (the walk below cleans its entry up) or observes
 		// `closed` and fails with `Closed`.
-		let (servers, cursors, fronts) = {
+		let (servers, cursors, fronts, route_node) = {
 			let mut shared = self.shared.lock();
 			shared.closed = true;
 			// Fronts and parked requesters observe `closed` on their next pass.
@@ -4148,8 +4262,12 @@ impl DriverState {
 			for listener in &shared.listeners {
 				listener.queue.close();
 			}
-			(servers, cursors, fronts)
+			// The node holds what closed sessions left behind, and each of those holds this
+			// state: let go of it, or the two keep each other alive. Dropped outside the
+			// lock, since an orphan's release takes it.
+			(servers, cursors, fronts, shared.route_node.take())
 		};
+		drop(route_node);
 
 		// Reject requesters still parked on a remote front's channel: its watcher
 		// was cancelled above and will never resolve them.
@@ -4228,7 +4346,7 @@ struct Asked {
 	/// SUBSCRIBE_OK), and read the demand only then, so the readers' demand rides the
 	/// query. Kept once spliced until the last reader leaves, so the copy is never left
 	/// with nobody subscribed while readers are still subscribing to it on their own.
-	sub: Option<kio::Pending<track::Subscribing>>,
+	sub: Option<super::resume::Held>,
 	/// The copy staged for fetches while its info is in flight, withdrawn if it is never
 	/// spliced.
 	staged: super::resume::Staged,
@@ -4252,7 +4370,7 @@ struct TrackIo {
 	/// The source whose copy serves the track, the copy, and the query holding it; plus the
 	/// subscription that query made.
 	copy: Option<(u64, track::Consumer, track::Resolving)>,
-	held: Option<kio::Pending<track::Subscribing>>,
+	held: Option<super::resume::Held>,
 	/// Whether the track had a reader as of the last demand edge.
 	wanted: bool,
 }
@@ -4288,6 +4406,16 @@ impl Logical {
 }
 
 impl TrackIo {
+	/// Whether anyone reads the track: a reader of the open track, or anything still holding
+	/// a finished one whose reads move with the front, such as a fetch of a group below its
+	/// end. A track that failed or concluded owes its holders nothing.
+	fn read(&self) -> bool {
+		match self.routes.moves() {
+			true => self.weak.is_held(),
+			false => self.weak.is_wanted(),
+		}
+	}
+
 	/// Serve the track from `asked`'s copy, accepting it with that copy's info first.
 	fn splice(&mut self, asked: Asked) {
 		self.ready.wake_by_ref();
@@ -4359,7 +4487,7 @@ struct InFlight {
 	// subscription, which follows their demand as it did while the front served it.
 	logical: Logical,
 	query: track::Resolving,
-	held: Option<kio::Pending<track::Subscribing>>,
+	held: Option<super::resume::Held>,
 }
 
 /// Keep the query's subscription on a copy following the readers' demand, and let it go
@@ -4367,7 +4495,7 @@ struct InFlight {
 /// aggregate from the copy's source: a shorter budget, or a demoted priority. With `copy`,
 /// a reader arriving subscribes it too.
 fn follow_demand(
-	held: &mut Option<kio::Pending<track::Subscribing>>,
+	held: &mut Option<super::resume::Held>,
 	copy: Option<&track::Consumer>,
 	accepted: Option<&mut track::Producer>,
 	weak: &track::TrackWeak,
@@ -4377,17 +4505,21 @@ fn follow_demand(
 	if held.is_none() && copy.is_none() {
 		return;
 	}
+	// Woken by the demand changing, which `follow` reads from each reader's own edits.
 	if let Some(accepted) = accepted {
-		while let Poll::Ready(Ok(_)) = accepted.poll_subscription_changed(waiter) {}
+		accepted.watch_subscription(waiter);
 	}
-	match (weak.subscription(), held.as_mut()) {
-		(Some((subscription, subscribers)), Some(hold)) => {
-			let _ = hold.update(routes.subscription(subscription, subscribers));
+	match held {
+		Some(hold) => {
+			if !routes.follow(hold, weak) {
+				*held = None;
+			}
 		}
-		(Some((subscription, subscribers)), None) => {
-			*held = copy.map(|copy| copy.subscribe(routes.subscription(subscription, subscribers)));
+		None => {
+			*held = weak
+				.subscription()
+				.and_then(|(subscription, subscribers)| Some(routes.subscribe(copy?, subscription, subscribers)));
 		}
-		(None, _) => *held = None,
 	}
 }
 
@@ -4488,7 +4620,7 @@ impl kio::Task for FrontServeRun {
 		}
 		for mut io in std::mem::take(in_flight) {
 			if let Logical::Requested(request) = &mut io.logical {
-				while let Poll::Ready(Some(_)) = request.poll_subscription_changed(waiter) {}
+				request.watch_subscription(waiter);
 				match io.query.poll_ok(waiter) {
 					Poll::Ready(Ok(info)) => io.logical.accept(info),
 					Poll::Ready(Err(err)) => {
@@ -4708,11 +4840,13 @@ impl FrontServe {
 			route: entry.id,
 			local: entry.local,
 			carried: !entry.instance.is_minted(),
+			claim: entry.node.is_some(),
 		});
-		// No candidate irreversibly ends this front. Leave the cache under the same lock
-		// a lookup takes, before a route can return and a newcomer join the broadcast the
-		// end actions are about to close. Existing requesters keep their original verdict.
-		if best.is_none() {
+		// No candidate irreversibly ends this front, unless it waits on a claim. Leave the
+		// cache under the same lock a lookup takes, before a route can return and a newcomer
+		// join the broadcast the end actions are about to close. Existing requesters keep
+		// their original verdict.
+		if best.is_none() && !self.front.waiting() {
 			table
 				.fronts
 				.remove_if(&(self.path.clone(), self.horizon, self.pin.clone()), |front| {
@@ -4873,13 +5007,14 @@ impl FrontServe {
 					let delivered = copy.latest_key().is_some();
 					return Some(FrontStep::Ended(name.clone(), *source, result, delivered));
 				}
-				// Watch the demand edge in whichever direction is unmet. Only `Pending`
-				// parks, so an answer steps and the handler looks again, polling anew when
-				// nothing changed. A closed track is unread: it owes one `Unwanted` if
-				// recorded read, and is no edge after.
-				let edge = match io.wanted {
-					true => io.weak.poll_unwanted(waiter).is_ready(),
-					false => matches!(io.weak.poll_wanted(waiter), Poll::Ready(Ok(()))),
+				// Watch the demand edge in whichever direction is unmet (`TrackIo::read`).
+				// Only `Pending` parks, so an answer steps and the handler looks again,
+				// polling anew when nothing changed. Any other closed track is unread: it owes
+				// one `Unwanted` if recorded read, and is no edge after.
+				let edge = match (io.routes.moves(), io.wanted) {
+					(true, wanted) => io.weak.poll_held_changed(waiter, wanted).is_ready(),
+					(false, true) => io.weak.poll_unwanted(waiter).is_ready(),
+					(false, false) => matches!(io.weak.poll_wanted(waiter), Poll::Ready(Ok(()))),
 				};
 				if edge {
 					return Some(FrontStep::Demand(name.clone()));
@@ -4928,7 +5063,13 @@ impl kio::Task for FrontServe {
 					Event::TrackInfo { track, source, .. } => Some((track.clone(), *source)),
 					_ => None,
 				};
-				for action in self.front.step(event) {
+				// Every transition, for telling how a front ended a track in a run that failed.
+				let traced = tracing::enabled!(tracing::Level::DEBUG).then(|| format!("{event:?}"));
+				let actions = self.front.step(event);
+				if let Some(event) = traced {
+					tracing::debug!(path = %self.path, %event, ?actions, "front step");
+				}
+				for action in actions {
 					match action {
 						Action::Reselect => {
 							let event = self.select();
@@ -5084,9 +5225,10 @@ impl kio::Task for FrontServe {
 								Some(Ok(lookup)) => {
 									// Subscribe before the query exposes upstream demand, and query
 									// that same instance even if the broadcast changes meanwhile.
-									let sub = io.weak.subscription().map(|(demand, subscribers)| {
-										lookup.subscribe(io.routes.subscription(demand, subscribers))
-									});
+									let sub = io
+										.weak
+										.subscription()
+										.map(|(demand, subscribers)| io.routes.subscribe(&lookup, demand, subscribers));
 									let query = match &sub {
 										Some(sub) => sub.info(),
 										None => lookup.info().into_inner(),
@@ -5178,11 +5320,12 @@ impl kio::Task for FrontServe {
 						}
 						Action::Forget { track: name } => {
 							// A reader that looked the track up since the machine decided keeps
-							// it. Feed its `Wanted` edge here: the demand poll only sees the
-							// current level, so a reader gone before the next poll would
-							// otherwise leave the track unread with no linger armed.
+							// it, as does one still holding it once it finished. Feed its `Wanted`
+							// edge here: the demand poll only sees the current level, so a reader
+							// gone before the next poll would otherwise leave the track unread
+							// with no linger armed.
 							if let Some(io) = self.tracks.get_mut(&name)
-								&& !io.weak.abort_unwanted(Error::Cancel)
+								&& (!io.weak.abort_unwanted(Error::Cancel) || io.read())
 							{
 								if !io.wanted {
 									io.wanted = true;
@@ -5400,7 +5543,6 @@ impl kio::Task for FrontServe {
 				}
 				FrontStep::SourceClosed(source) => Event::SourceClosed { source },
 				FrontStep::Info(name, source, result) => {
-					let closing = self.sources.get(&source).is_some_and(|s| s.is_closing());
 					let Some(io) = self.tracks.get_mut(&name) else { continue };
 					let Some(asked) = io.query.take() else { continue };
 					let retry = asked.query.retry();
@@ -5414,6 +5556,9 @@ impl kio::Task for FrontServe {
 						},
 						Err(err) => Err(err),
 					};
+					// Read after the copy's outcome: a subscriber closes a source before it fails
+					// that source's copies, so a failure seen above is already reflected here.
+					let closing = self.sources.get(&source).is_some_and(|s| s.is_closing());
 					// Staged only while the track has a reader, or a read holds the finished
 					// track: without one the machine will not splice, and a held copy would
 					// keep the source subscribed.
@@ -5457,7 +5602,7 @@ impl kio::Task for FrontServe {
 					let Some(io) = self.tracks.get_mut(&name) else { continue };
 					// Read again: the edge may have flipped back since it fired, and the next
 					// wait parks on it.
-					if io.weak.is_wanted() == io.wanted {
+					if io.read() == io.wanted {
 						continue;
 					}
 					io.wanted = !io.wanted;
@@ -6405,6 +6550,24 @@ impl OriginState {
 			.is_some_and(|peers| hops.iter().any(|hop| peers.contains(hop)))
 	}
 
+	/// Retire every other copy at its prefix of the claim `entry` follows: the same
+	/// forwarding node, instance and showing ([`Lane::lifecycle`]), at any epoch, since a
+	/// copy whose session has yet to take a newer epoch would otherwise be left as the
+	/// fallback. See [`Claim::retire`].
+	fn retire_copies(&mut self, entry: &RouteEntry) {
+		let Some(node) = entry.node else {
+			return;
+		};
+		for other in self.routes.at_mut(&entry.prefix) {
+			if other.node == Some(node)
+				&& other.instance == entry.instance
+				&& other.lane.lifecycle == entry.lane.lifecycle
+			{
+				other.retired = true;
+			}
+		}
+	}
+
 	/// Recompute which entries at `prefix` are stale after its withdrawals changed.
 	fn restale(&mut self, prefix: &Path) {
 		let peers = self.withdrawn.get(prefix);
@@ -6855,6 +7018,19 @@ struct PendingFront {
 }
 
 impl Claim {
+	/// Stop keeping the origin's driver running: what a closed session left behind is no
+	/// owner, and goes with the origin.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn disown(&self) {
+		let keepalive = self
+			.state
+			.keepalive
+			.lock()
+			.unwrap_or_else(|err| err.into_inner())
+			.take();
+		drop(keepalive);
+	}
+
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(super) fn request_validity(&self, path: &Path) -> Option<Selection> {
 		let shared = &self.state.announcement.shared;
@@ -7601,7 +7777,9 @@ impl Consumer {
 			timers: self.timers.clone(),
 		};
 		// Built before taking the lock, since opening a cursor takes it.
-		let node = crate::route::Node::origin(self.node(), self.timers.clone());
+		// A relay forwards on every handle (`with_proxy`), and an application on none, so
+		// the creating handle speaks for the origin here, as for `OwnClaims::proxy`.
+		let node = crate::route::Node::origin(self.node(), self.proxy, self.timers.clone());
 		let claims = OwnClaims {
 			routes: own(false).routes(),
 			downstream: own(true).routes(),
@@ -7619,7 +7797,10 @@ impl Consumer {
 		}
 		let claims = Arc::new(std::sync::Mutex::new(claims));
 		let created = (node, Arc::downgrade(&claims));
-		shared.route_node = Some(created.clone());
+		// A torn-down origin keeps no node: nothing would let go of it again.
+		if !shared.closed {
+			shared.route_node = Some(created.clone());
+		}
 		drop(shared);
 		self.tasks.push(FeedOwnClaims {
 			claims,
@@ -7659,6 +7840,17 @@ impl Consumer {
 		self.scope.allowed.overlaps(&subtree)
 			&& !self.scope.excluded.iter().any(|excluded| path.has_prefix(excluded))
 			&& self.scope.mount(path).is_none_or(|mount| mount.resolve(path).is_some())
+	}
+
+	/// [`Self::reaches`], and some path `allowed`, relative to this handle's root, holds
+	/// is in its scope too.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn reaches_any(&self, path: &Path, allowed: &Patterns) -> bool {
+		if !self.reaches(path) {
+			return false;
+		}
+		let ours = self.scope.allowed.rebase(self.root().as_str());
+		allowed.iter().any(|pattern| ours.overlaps(pattern))
 	}
 
 	/// Whether the absolute `path` lies beneath one of this handle's mounts, where the
@@ -7722,11 +7914,13 @@ impl Consumer {
 	}
 
 	/// A view of the routes that entered here: every route a handle marked
-	/// [`Link::Peer`] or [`Link::Upstream`] handle announced is hidden from [`Self::announced`] and never
-	/// resolved by [`Self::request`].
+	/// [`Link::Peer`] or [`Link::Upstream`] announced is hidden from [`Self::announced`]
+	/// and never resolved by [`Self::request`].
 	///
 	/// On a relay, this is what the relay ingests itself, from clients and
-	/// in-process producers, as opposed to what its cluster peers forward.
+	/// in-process producers, as opposed to what its cluster peers forward. An embedder
+	/// that records, republishes, or meters each broadcast once, on the node that
+	/// ingests it, reads this view.
 	pub fn local(mut self) -> Self {
 		self.horizon.local = true;
 		self
@@ -8485,8 +8679,9 @@ impl Routes {
 		}
 	}
 
-	/// Start a retraction's quarantine. A delivered announcement leaves it to
-	/// expire: later ones for the prefix are updates, which it never holds.
+	/// Start a retraction's quarantine, a [`lite06_churn`] mitigation. A delivered
+	/// announcement leaves it to expire: later ones for the prefix are updates, which it
+	/// never holds.
 	fn quarantine(&mut self, event: &RouteEvent, now: Instant) {
 		let RouteEvent {
 			kind: RouteKind::End | RouteKind::Offline,
@@ -8495,7 +8690,7 @@ impl Routes {
 		else {
 			return;
 		};
-		if self.update_hold.is_zero() {
+		if self.update_hold.is_zero() || !lite06_churn::hunts(&update.route.hops, update.route.node) {
 			return;
 		}
 		// An anonymous route names no publisher, so its quarantine holds nothing.
@@ -8521,8 +8716,9 @@ impl Routes {
 			rank: (update.route.cost, update.route.hops.len()),
 		};
 		let replaced = self.retracted.insert(update.prefix.clone(), quarantine);
-		// A prefix retracted again at the same reading is already queued, so churn
-		// between clock readings can't grow the queue past one entry per prefix.
+		// Lite-06 churn (see [`lite06_churn`]): a prefix retracted again at the same
+		// reading is already queued, so churn between clock readings can't grow the queue
+		// past one entry per prefix.
 		if !replaced.is_some_and(|q| q.held == Held::Anchoring(now)) {
 			self.anchoring.push_back((now, update.prefix.clone()));
 		}
@@ -9037,7 +9233,11 @@ mod tests {
 
 	/// The forwarding node of the relay `relay`.
 	fn node_id(relay: u64) -> crate::route::NodeId {
-		crate::route::NodeId { relay, start: 1 }
+		crate::route::NodeId {
+			relay,
+			start: 1,
+			marked: false,
+		}
 	}
 
 	fn hops(ids: &[u64]) -> Hops {
@@ -10024,7 +10224,10 @@ mod tests {
 
 		let fetch = track.consume().fetch_group(0, None);
 		let fill = requests.requested_fill_group().await.unwrap();
-		let mut fetched = fill.accept(crate::track::Info::timed()).unwrap();
+		let mut fetched = fill
+			.accept(crate::track::Info::timed())
+			.unwrap()
+			.expect("a fresh group");
 		fetched
 			.write_frame(crate::Timestamp::ZERO, b"fetched".as_ref())
 			.unwrap();
@@ -10907,6 +11110,47 @@ mod tests {
 		);
 	}
 
+	/// A restarted publisher's dead instance, held unavailable, never wins back the path from
+	/// its live replacement while the replacement's closest way moves to another session:
+	/// the old way is demoted before the session taking over serves the new one.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_dead_instance_never_outranks_a_live_one_between_its_ways() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let mut announced = consumer.routes();
+		let route = |instance: &crate::Instance, node, primary, available, cost| {
+			RouteInfo::new()
+				.with_instance(instance.clone(), 0)
+				.with_hops(hops(&[node]))
+				.with_node(Some(node_id(node)))
+				.with_lane(Lane {
+					primary,
+					priority: Some(0),
+					..Lane::default()
+				})
+				.with_available(available)
+				.with_cost(cost)
+		};
+		let (dead, live) = (crate::Instance::random(), crate::Instance::random());
+
+		// The dead instance is cheaper, and still the closest way to its own claim.
+		let _dead = producer
+			.forward("room/alice", route(&dead, 10, true, false, 1))
+			.unwrap();
+		let way = producer.forward("room/alice", route(&live, 11, true, true, 5)).unwrap();
+		assert_eq!(announced.expect_next_active("room/alice").await.instance(), &live);
+
+		way.update(route(&live, 11, false, true, 5)).unwrap();
+		assert!(
+			announced.try_next().is_none(),
+			"the live instance's demoted way keeps the path"
+		);
+		let _pending = consumer.request("room/alice", None);
+		let request = queued(&way).await;
+		assert_eq!(request.path().as_str(), "room/alice");
+	}
+
 	/// A draining route ranks below every other eligible one, even on a preferred link
 	/// against a demoted one, whatever the costs say.
 	#[kio::test]
@@ -11134,6 +11378,44 @@ mod tests {
 		let other = producer.announce("room/alice", RouteInfo::new()).unwrap();
 		drop(other);
 		announced.expect_next_offline("room/alice").await;
+	}
+
+	/// A restart onto another instance and back before the next poll leaves the instance
+	/// the consumer holds: an update, never a restart to the same instance.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn restart_away_and_back_is_an_update() {
+		let producer = origin(1).produce();
+		let mut announced = producer.consume().routes();
+		let held: crate::Instance = "01900000-0000-7000-8000-000000000002".parse().unwrap();
+		let _held = producer
+			.forward(
+				"room/alice",
+				RouteInfo::new()
+					.with_instance(held.clone(), 0)
+					.with_hops(hops(&[10]))
+					.with_cost(3),
+			)
+			.unwrap();
+		announced.expect_next_active("room/alice").await;
+
+		let other = producer
+			.forward(
+				"room/alice",
+				RouteInfo::new()
+					.with_instance(instance(), 0)
+					.with_hops(hops(&[11]))
+					.with_cost(1),
+			)
+			.unwrap();
+		drop(other);
+		match announced.expect_next().await {
+			RouteEvent {
+				kind: RouteKind::Update,
+				announce,
+			} => assert_eq!(announce.route.instance(), &held),
+			other => panic!("should be an update: got {other:?}"),
+		}
 	}
 
 	#[test]
@@ -12149,7 +12431,10 @@ mod tests {
 		let serving = fetched.clone();
 		let _fetching = kio::clock::sim::spawn(async move {
 			while let Ok(request) = fetches.requested_fill_group().await {
-				let mut group = request.accept(crate::track::Info::timed()).unwrap();
+				let mut group = request
+					.accept(crate::track::Info::timed())
+					.unwrap()
+					.expect("a fresh group");
 				for frame in [b"a", b"b", b"c"] {
 					group.write_frame(group.key_time(), frame.as_ref()).unwrap();
 				}
@@ -12260,7 +12545,7 @@ mod tests {
 
 		// Parked: the source copy goes, the delivered group stays warm. The source
 		// then tears its idle track down, so a returning reader asks it afresh.
-		kio::clock::timeout(Duration::from_secs(1), source.demand().until(|wanted| wanted.is_none()))
+		kio::clock::timeout(Duration::from_secs(1), source.demand().until(|wanted| !wanted))
 			.await
 			.expect("parked")
 			.expect("source open");
@@ -13132,6 +13417,88 @@ mod tests {
 		drop(relayed);
 		announced.expect_next_ended("room").await;
 		assert!(producer.shared.lock().withdrawn.is_empty());
+	}
+
+	/// The route layer letting go of one copy of a lite-07 claim takes every copy of the
+	/// same node, instance and showing with it, a copy still at an older epoch too: a
+	/// cursor sees the claim end or go offline, never a move onto another copy first.
+	/// Another node's claim of the instance stays.
+	#[kio::test]
+	async fn retiring_a_claim_retires_every_copy() {
+		for ended in [true, false] {
+			let producer = origin(1).produce();
+			let peer = producer.clone().with_link(Link::Peer);
+			let mut announced = producer.consume().routes();
+			let copy = |node: u64, cost: u64| {
+				RouteInfo::new()
+					.with_instance(instance(), 0)
+					.with_hops(hops(&[node]))
+					.with_cost(cost)
+					.with_node(Some(node_id(node)))
+			};
+			let near = peer.forward("room", copy(7, 1)).unwrap();
+			let _far = peer.forward("room", copy(7, 2)).unwrap();
+			announced.expect_next_active("room").await;
+			announced.assert_next_wait();
+			near.retire(ended);
+			match ended {
+				true => announced.expect_next_ended("room").await,
+				false => announced.expect_next_offline("room").await,
+			}
+			announced.assert_next_wait();
+
+			// A session that has yet to take the newer epoch still holds the older one.
+			let newer = |node: u64, cost: u64| copy(node, cost).with_instance(instance(), 1);
+			let near = peer.forward("room", newer(7, 1)).unwrap();
+			let _stale = peer.forward("room", copy(7, 2)).unwrap();
+			announced.expect_next_active("room").await;
+			announced.assert_next_wait();
+			near.retire(ended);
+			match ended {
+				true => announced.expect_next_ended("room").await,
+				false => announced.expect_next_offline("room").await,
+			}
+			announced.assert_next_wait();
+
+			let near = peer.forward("room", copy(7, 1)).unwrap();
+			let _other = peer.forward("room", copy(8, 3)).unwrap();
+			announced.expect_next_active("room").await;
+			announced.assert_next_wait();
+			near.retire(ended);
+			let other = announced.expect_next_active("room").await;
+			assert_eq!(other.node, Some(node_id(8)), "ended: {ended}");
+		}
+	}
+
+	/// A copy whose session releases it only after the route layer showed the claim again
+	/// through another session retires its own showing, not the new one, even when the new
+	/// one's chain passes through the old one's last hop.
+	#[kio::test]
+	async fn a_late_retirement_spares_a_later_showing() {
+		for ended in [true, false] {
+			let producer = origin(1).produce();
+			let peer = producer.clone().with_link(Link::Peer);
+			let mut announced = producer.consume().routes();
+			let copy = |chain: &[u64], cost: u64, lifecycle: u64| {
+				RouteInfo::new()
+					.with_instance(instance(), 0)
+					.with_hops(hops(chain))
+					.with_cost(cost)
+					.with_node(Some(node_id(7)))
+					.with_lane(Lane {
+						lifecycle,
+						..Lane::default()
+					})
+			};
+			let old = peer.forward("room", copy(&[7], 1, 1)).unwrap();
+			announced.expect_next_active("room").await;
+			announced.assert_next_wait();
+			let _new = peer.forward("room", copy(&[7, 9], 2, 2)).unwrap();
+			old.retire(ended);
+			let new = announced.expect_next_active("room").await;
+			assert_eq!(new.cost, Cost::from(2), "ended: {ended}");
+			announced.assert_next_wait();
+		}
 	}
 
 	/// Overlapping sessions carrying one instance are independent claims, regardless of
@@ -15441,7 +15808,7 @@ mod tests {
 		drop(group);
 		drop(subscription);
 
-		kio::clock::timeout(Duration::from_secs(1), track.demand().until(|wanted| wanted.is_none()))
+		kio::clock::timeout(Duration::from_secs(1), track.demand().until(|wanted| !wanted))
 			.await
 			.expect("source unused should resolve far below track::IDLE_LINGER")
 			.expect("source closed");
@@ -15463,7 +15830,7 @@ mod tests {
 			.expect("track ended early");
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"cached");
 
-		kio::clock::timeout(Duration::from_secs(1), track.demand().until(|wanted| wanted.is_some()))
+		kio::clock::timeout(Duration::from_secs(1), track.demand().until(|wanted| wanted))
 			.await
 			.expect("returning reader re-splices the source")
 			.expect("source closed");
@@ -15514,7 +15881,7 @@ mod tests {
 		assert_eq!(&tail.payload[..], b"tail");
 		let end = kio::clock::timeout(Duration::from_secs(1), reading.read_frame()).await;
 		assert!(matches!(end, Ok(Ok(None))), "the group should finish: {end:?}");
-		kio::clock::timeout(Duration::from_secs(1), track.demand().until(|wanted| wanted.is_none()))
+		kio::clock::timeout(Duration::from_secs(1), track.demand().until(|wanted| !wanted))
 			.await
 			.expect("the front lets the source go once the held group ends")
 			.expect("source closed");
@@ -15600,7 +15967,7 @@ mod tests {
 		drop(group);
 		drop(subscription);
 
-		kio::clock::timeout(Duration::from_secs(5), track.demand().until(|wanted| wanted.is_none()))
+		kio::clock::timeout(Duration::from_secs(5), track.demand().until(|wanted| !wanted))
 			.await
 			.expect("chained unused should resolve far below track::IDLE_LINGER")
 			.expect("source closed");
@@ -15614,7 +15981,7 @@ mod tests {
 			)
 			.await
 			.expect("resubscribe");
-		kio::clock::timeout(Duration::from_secs(5), track.demand().until(|wanted| wanted.is_some()))
+		kio::clock::timeout(Duration::from_secs(5), track.demand().until(|wanted| wanted))
 			.await
 			.expect("resubscribe should reach the leaf")
 			.expect("source open");
@@ -15629,7 +15996,7 @@ mod tests {
 		drop(group);
 		drop(subscription);
 
-		kio::clock::timeout(Duration::from_secs(5), track.demand().until(|wanted| wanted.is_none()))
+		kio::clock::timeout(Duration::from_secs(5), track.demand().until(|wanted| !wanted))
 			.await
 			.expect("second chained unused should resolve far below track::IDLE_LINGER")
 			.expect("source closed");
@@ -15642,7 +16009,7 @@ mod tests {
 		let fetch = edge_resolved.track("video").unwrap().fetch_group(2, None);
 		let mut fetch = std::pin::pin!(fetch);
 		assert!(futures::poll!(fetch.as_mut()).is_pending(), "fetch should re-splice");
-		kio::clock::timeout(Duration::from_secs(5), track.demand().until(|wanted| wanted.is_some()))
+		kio::clock::timeout(Duration::from_secs(5), track.demand().until(|wanted| wanted))
 			.await
 			.expect("fetch should reach the leaf")
 			.expect("source open");
@@ -15751,7 +16118,7 @@ mod tests {
 			.expect("request");
 
 		drop(subscription);
-		kio::clock::timeout(Duration::from_secs(1), old.demand().until(|wanted| wanted.is_none()))
+		kio::clock::timeout(Duration::from_secs(1), old.demand().until(|wanted| !wanted))
 			.await
 			.expect("the draining source stays subscribed with nobody reading")
 			.expect("open");
@@ -15812,6 +16179,47 @@ mod tests {
 			.await
 			.expect("the fetch fails once the replacement refused the track");
 		assert!(res.is_err(), "{res:?}");
+	}
+
+	/// A finished track that something still reads outlives its linger, so a replacement
+	/// route is still asked for it, for a read that has to move off a dying route. Once
+	/// nothing holds it, it lingers and is forgotten as before.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_held_finished_track_outlives_its_linger() {
+		let (producer, _server, _upstream, old, mut subscription) = remote_front().await;
+		drop(old.finish().unwrap());
+		assert!(matches!(next_group(&mut subscription).await, Ok(None)));
+
+		// Held past the linger: a replacement is asked for the track.
+		kio::clock::sleep(Duration::from_secs(60)).await;
+		let newcomer = producer
+			.route("room/alice", RouteOptions::hidden().with_instance(instance(), 0))
+			.unwrap();
+		let mut handler = newcomer.broadcast().requests();
+		newcomer.announce().unwrap();
+		let request = kio::clock::timeout(Duration::from_secs(1), handler.requested_track())
+			.await
+			.expect("the front rerouted the held track")
+			.expect("request");
+		assert_eq!(request.name(), "video");
+		drop(request);
+
+		// Unheld, it is forgotten after the linger: a later route is asked nothing.
+		drop(subscription);
+		kio::clock::sleep(Duration::from_secs(60)).await;
+		drop(newcomer);
+		let third = producer
+			.route("room/alice", RouteOptions::hidden().with_instance(instance(), 0))
+			.unwrap();
+		let mut handler = third.broadcast().requests();
+		third.announce().unwrap();
+		assert!(
+			kio::clock::timeout(Duration::from_secs(1), handler.requested_track())
+				.await
+				.is_err(),
+			"an unheld finished track was rerouted after its linger"
+		);
 	}
 
 	/// The newcomer answers "video" with matching metadata but aborts before delivering a
@@ -16185,7 +16593,7 @@ mod tests {
 		drop(group);
 
 		drop(subscription);
-		kio::clock::timeout(Duration::from_secs(1), old.demand().until(|wanted| wanted.is_none()))
+		kio::clock::timeout(Duration::from_secs(1), old.demand().until(|wanted| !wanted))
 			.await
 			.expect("parked")
 			.expect("open");
@@ -16230,7 +16638,7 @@ mod tests {
 		let mut open = old.append_next().unwrap();
 		open.write_frame(open.key_time(), b"open".as_ref()).unwrap();
 		drop(subscription);
-		kio::clock::timeout(Duration::from_secs(1), old.demand().until(|wanted| wanted.is_none()))
+		kio::clock::timeout(Duration::from_secs(1), old.demand().until(|wanted| !wanted))
 			.await
 			.expect("parked")
 			.expect("open");
@@ -16261,7 +16669,7 @@ mod tests {
 		let (producer, _server, _upstream, old, subscription) = remote_front().await;
 		let resolved = producer.consume().request("room/alice", None).await.unwrap();
 		drop(subscription);
-		kio::clock::timeout(Duration::from_secs(1), old.demand().until(|wanted| wanted.is_none()))
+		kio::clock::timeout(Duration::from_secs(1), old.demand().until(|wanted| !wanted))
 			.await
 			.expect("parked")
 			.expect("open");
@@ -16672,7 +17080,7 @@ mod tests {
 			.unwrap();
 		let resolved = consumer.request("room/alice", None).await.expect("resolves");
 		let sub = resolved.track("video").unwrap().subscribe(None).await.unwrap();
-		kio::clock::timeout(Duration::from_secs(1), track.demand().until(|wanted| wanted.is_some()))
+		kio::clock::timeout(Duration::from_secs(1), track.demand().until(|wanted| wanted))
 			.await
 			.expect("the front subscribed the source")
 			.unwrap();
@@ -16683,7 +17091,7 @@ mod tests {
 		drop(broadcast);
 		settle(|| resolved.is_closed()).await;
 
-		kio::clock::timeout(Duration::from_secs(5), track.demand().until(|wanted| wanted.is_none()))
+		kio::clock::timeout(Duration::from_secs(5), track.demand().until(|wanted| !wanted))
 			.await
 			.expect("the ended copy must not keep the source subscribed")
 			.unwrap();

@@ -42,10 +42,9 @@ impl<E: CatalogExt> Consumer<E> {
 		// Drain pending groups, keeping only the newest. Remember whether the track is done
 		// so we can distinguish "more groups may arrive" from "no more groups, ever".
 		let track_finished = loop {
+			// Only the newest catalog matters, so a group given up on changes nothing.
 			match self.track.poll_next_group(waiter)? {
-				Poll::Ready(Some(moq_net::track::Item::Group(group))) => self.group = Some(group),
-				// Only the newest catalog matters, so a group given up on changes nothing.
-				Poll::Ready(Some(moq_net::track::Item::Gap { .. })) => {}
+				Poll::Ready(Some(group)) => self.group = Some(group),
 				Poll::Ready(None) => break true,
 				Poll::Pending => break false,
 			}

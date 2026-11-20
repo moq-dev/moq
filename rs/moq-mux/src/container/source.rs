@@ -3,8 +3,8 @@
 //!
 //! Exporters declare what wire shape they want their frames in (currently:
 //! length-prefixed NAL units for H.264/H.265) and call [`ExportSource::poll_read`]
-//! to pull normalized frames. For Annex-B sources (catalog codec marked
-//! `inline: true` / `in_band: true`, empty `description`) the source attaches
+//! to pull normalized frames. For Annex-B sources (no catalog `description`,
+//! whatever the codec string says) the source attaches
 //! an [`Avc1`] / [`Hvc1`] transform that strips parameter sets into an avcC or
 //! hvcC and length-prefixes the rest; frames wait until that record exists. fMP4
 //! instead attaches an [`InBand`] transform, keeping the sets in the samples, when
@@ -76,6 +76,9 @@ enum SourceState {
 	Active(Box<Active>),
 	/// The track ended, the sibling instance it read went, or the source was stopped.
 	Ended,
+	/// The track itself failed: its subscription was refused, or it ended with an error once the
+	/// groups already here were read. Media that failed to decode is the export's own error instead.
+	Lost,
 }
 
 /// How a source subscribes, fixed before its first poll.
@@ -161,6 +164,8 @@ pub(crate) struct ExportSource {
 	state: SourceState,
 	/// Where the subscription starts behind the live edge, and how late a group may fall.
 	delay: moq_net::track::Delay,
+	/// The delay the consumer skips and starts at, if not the one the subscription states.
+	skip: Option<moq_net::track::Delay>,
 	transform: Option<VideoTransform>,
 	/// Resolved codec configuration record (avcC / hvcC / AudioSpecificConfig /
 	/// OpusHead). Some once the codec config is available - from the catalog
@@ -177,6 +182,8 @@ pub(crate) struct ExportSource {
 	markers: u64,
 	/// Whether a frame of the group being read went out and the group has not ended since.
 	open: bool,
+	/// Whether any frame was read, including one the transform absorbed or the splice dropped.
+	read: bool,
 	cuts: u64,
 	// A stopped encoder may still emit final packets in this group on the old timeline.
 	ends: Option<(u64, u64)>,
@@ -237,7 +244,7 @@ impl ExportSource {
 
 	/// Subscribe to a video rendition without attaching any codec-shape
 	/// transform. Payloads pass through untouched (Annex-B stays Annex-B,
-	/// avc1 length-prefixed stays length-prefixed). The Annex-B exporter
+	/// length-prefixed stays length-prefixed). The Annex-B exporter
 	/// uses this to keep parameter sets in-band.
 	///
 	/// Rejects an escaping `broadcast` reference like [`Self::for_video`].
@@ -321,6 +328,7 @@ impl ExportSource {
 			state: target.request(source, media),
 			target,
 			delay,
+			skip: None,
 			transform: None,
 			description: None,
 			video_codec: None,
@@ -329,6 +337,7 @@ impl ExportSource {
 			skips: 0,
 			markers: 0,
 			open: false,
+			read: false,
 			cuts: 0,
 			ends: None,
 			received: source.received(name),
@@ -396,6 +405,14 @@ impl ExportSource {
 		self
 	}
 
+	/// Skip and start at `delay` instead of the subscription's own, which still tells the
+	/// publisher how long to keep a group: for a reader that asks the publisher for more than
+	/// it plays out itself.
+	pub(crate) fn skipping_at(mut self, delay: moq_net::track::Delay) -> Self {
+		self.skip = Some(delay);
+		self
+	}
+
 	/// The subscription options a builder sets. Each builder consumes a source no poll has
 	/// moved out of [`SourceState::Requesting`], since only the constructors hand one out.
 	fn start(&mut self) -> &mut Start {
@@ -423,6 +440,11 @@ impl ExportSource {
 	/// Gaps and declared ends this source has advanced past.
 	pub fn skips(&self) -> u64 {
 		self.skips
+	}
+
+	/// Whether any frame was read, even one that never came out as an [`Event::Frame`].
+	pub(crate) fn read(&self) -> bool {
+		self.read
 	}
 
 	/// The resolved codec-config record, if available.
@@ -505,7 +527,7 @@ impl ExportSource {
 	pub fn poll_received(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		match &mut self.state {
 			SourceState::Active(active) => active.consumer.poll_received(waiter),
-			SourceState::Ended => Poll::Ready(()),
+			SourceState::Ended | SourceState::Lost => Poll::Ready(()),
 			_ => Poll::Pending,
 		}
 	}
@@ -598,7 +620,7 @@ impl ExportSource {
 				{
 					return self.end();
 				}
-				Poll::Ready(Err(err)) => return Poll::Ready(Err(err.into())),
+				Poll::Ready(Err(err)) => return self.lose(err.into()),
 				Poll::Pending => return Poll::Pending,
 			};
 			let priority = self.source.control(track.control())?;
@@ -622,6 +644,10 @@ impl ExportSource {
 				None => track,
 			};
 			let consumer = Consumer::new(track, media).continuing(reached);
+			let consumer = match self.skip {
+				Some(delay) => consumer.skipping_at(delay),
+				None => consumer,
+			};
 			let consumer = match live {
 				true => consumer.live(),
 				false => consumer,
@@ -661,6 +687,7 @@ impl ExportSource {
 					{
 						return self.end();
 					}
+					Poll::Ready(Err(err)) if consumer.lost() => return self.lose(err),
 					Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
 					Poll::Pending => return Poll::Pending,
 				};
@@ -670,6 +697,7 @@ impl ExportSource {
 							self.finish_ends();
 						}
 						self.open = true;
+						self.read = true;
 						self.received.frame(frame.timestamp, frame.payload.len());
 						(frame, arrived)
 					}
@@ -766,6 +794,20 @@ impl ExportSource {
 	fn end(&mut self) -> Poll<crate::Result<Option<Event>>> {
 		self.stop();
 		Poll::Ready(Ok(None))
+	}
+
+	/// Fail the rendition with its track's own error, which [`Self::lost`] then tells apart from
+	/// the export's own errors.
+	fn lose(&mut self, err: crate::Error) -> Poll<crate::Result<Option<Event>>> {
+		self.stop();
+		self.state = SourceState::Lost;
+		Poll::Ready(Err(err))
+	}
+
+	/// Whether the error this source returned was its track failing, which ends only this
+	/// rendition: a publisher that loses a source may list a replacement for it.
+	pub(crate) fn lost(&self) -> bool {
+		matches!(self.state, SourceState::Lost)
 	}
 
 	fn finish_ends(&mut self) {
@@ -1293,8 +1335,7 @@ mod tests {
 	/// A live start begins at the publisher's newest group, even when an older group of the
 	/// backlog the budget serves arrives first. Starting at that older group reads it, then
 	/// skips the groups after it once the next PES moves the live edge a budget past them: a
-	/// gap right after the first frame. Behind a relay holding only that first group, the
-	/// relay passes on the newest group its source named.
+	/// gap right after the first frame.
 	#[tokio::test(start_paused = true)]
 	async fn a_live_start_behind_a_backlog_starts_at_the_newest_group() {
 		use std::time::Duration;
@@ -1382,8 +1423,15 @@ mod tests {
 				timestamps.push(timestamp);
 			}
 
-			// Group 84 was the newest when the export joined.
-			let expected: Vec<u128> = (84..95).map(|sequence| sequence * 24_000).collect();
+			// Group 84 was the newest when the export joined. Behind the relay the ordered reader
+			// hands out nothing until its start is placed, which the held streams delay past the
+			// next two PES, so the newest group by then is the start: either way nothing after it is
+			// skipped.
+			let start = match relay {
+				false => 84,
+				true => 94,
+			};
+			let expected: Vec<u128> = (start..95).map(|sequence| sequence * 24_000).collect();
 			assert_eq!(timestamps, expected, "relay: {relay}");
 			assert_eq!(export.skips(), 0, "relay: {relay}");
 		}

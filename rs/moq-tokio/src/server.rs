@@ -464,7 +464,7 @@ impl Server {
 	/// would accept and handshake sessions that carry nothing.
 	async fn serve(self) -> crate::Result<()> {
 		let mut listener = self.listen().await?;
-		if let Ok(addr) = listener.local_addr() {
+		if let Some(addr) = listener.local_addr() {
 			tracing::info!(%addr, "listening");
 		}
 		loop {
@@ -585,7 +585,7 @@ impl Server {
 		self.streams.serve(&server, &self.admission);
 		loop {
 			// The QUIC endpoint address, reported as a QUIC session's local side.
-			let local = self.local_addr().ok();
+			let local = self.local_addr();
 			let quic_tls = self.quic.as_ref().map(|quic| quic.tls.clone());
 
 			// tokio::select! does not support cfg directives on arms, so we need to create the futures here.
@@ -697,16 +697,9 @@ impl Server {
 	}
 
 	/// The address the QUIC listener bound to, useful when the config asked for
-	/// port 0.
-	///
-	/// Errors with [`Error::NoBackend`] on a stream-only server, which has no
-	/// QUIC listener.
-	pub fn local_addr(&self) -> crate::Result<net::SocketAddr> {
-		if let Some(quic) = self.quic.as_ref() {
-			return Ok(quic.local_addr());
-		}
-		// No QUIC backend (e.g. a stream-only `--listen-tcp-bind`).
-		Err(Error::NoBackend("no QUIC listener configured"))
+	/// port 0, or `None` on a stream-only server, which has no QUIC listener.
+	pub fn local_addr(&self) -> Option<net::SocketAddr> {
+		self.quic.as_ref().map(crate::quic::Server::local_addr)
 	}
 
 	/// Closes the QUIC connections once this server has been handed away.
@@ -786,11 +779,8 @@ impl Listener {
 	}
 
 	/// The address the QUIC listener bound to, useful when the config asked for
-	/// port 0.
-	///
-	/// Errors with [`Error::NoBackend`] on a stream-only server, which has no
-	/// QUIC listener.
-	pub fn local_addr(&self) -> crate::Result<net::SocketAddr> {
+	/// port 0, or `None` on a stream-only server, which has no QUIC listener.
+	pub fn local_addr(&self) -> Option<net::SocketAddr> {
 		self.server.local_addr()
 	}
 
@@ -1849,14 +1839,9 @@ mod tests {
 	/// The next route and whether it is active.
 	#[cfg(unix)]
 	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
-		loop {
-			return match announced.next().await? {
-				moq_net::announce::Event::Present(route) => Some((route, true)),
-				moq_net::announce::Event::Absent(route) | moq_net::announce::Event::Offline(route) => {
-					Some((route, false))
-				}
-				moq_net::announce::Event::Available(_) | moq_net::announce::Event::Unavailable(_) => continue,
-			};
+		match announced.next().await? {
+			moq_net::announce::Event::Present(route) => Some((route, true)),
+			moq_net::announce::Event::Absent(route) => Some((route, false)),
 		}
 	}
 

@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
+use moq_tokio::RedactedUrl;
 use object_store::path::{Path, PathPart};
 use object_store::{ObjectStore, ObjectStoreScheme};
 use url::Url;
@@ -81,7 +82,7 @@ pub async fn export(origin: moq_net::origin::Consumer, prefix: String, args: Exp
 	let mut running = Running::default();
 	let claims = Claims::default();
 
-	tracing::info!(%prefix, store = %args.store, "recording");
+	tracing::info!(%prefix, store = %RedactedUrl::new(&args.store), "recording");
 	notify_ready();
 
 	loop {
@@ -95,15 +96,12 @@ pub async fn export(origin: moq_net::origin::Consumer, prefix: String, args: Exp
 							old.abort();
 						}
 					}
-					moq_net::announce::Event::Absent(announce) | moq_net::announce::Event::Offline(announce) => {
+					moq_net::announce::Event::Absent(announce) => {
 						if let Some(follower) = followers.remove(&announce.prefix) {
 							follower.abort();
 						}
 					}
-					// A follower rides out its path being held.
-					moq_net::announce::Event::Present(_)
-					| moq_net::announce::Event::Available(_)
-					| moq_net::announce::Event::Unavailable(_) => {}
+					moq_net::announce::Event::Present(_) => {}
 				}
 				continue;
 			}
@@ -307,6 +305,7 @@ pub async fn import(
 	instance: moq_net::Instance,
 ) -> anyhow::Result<()> {
 	let store = open(&args.store)?;
+	let url = RedactedUrl::new(&args.store);
 	let mut config = moq_archive::consumer::Config::default();
 	if let Some(refresh) = args.refresh {
 		config = config.with_refresh(refresh.into());
@@ -320,22 +319,32 @@ pub async fn import(
 		.context("failed to create broadcast")?;
 	let consumer = moq_archive::Consumer::open(store, route.broadcast().clone(), config)
 		.await
-		.with_context(|| format!("no readable recording at {}", args.store))?;
+		.with_context(|| format!("no readable recording at {url}"))?;
 	route.announce().context("failed to announce broadcast")?;
 
-	tracing::info!(%name, store = %args.store, "replaying");
+	tracing::info!(%name, store = %url, "replaying");
 	notify_ready();
-	consumer
-		.run()
-		.await
-		.with_context(|| format!("replaying {} failed", args.store))
+	consumer.run().await.with_context(|| format!("replaying {url} failed"))
 }
 
 /// Open the object store `url` names, taking cloud credentials from the `AWS_*`, `GOOGLE_*`,
 /// and `AZURE_*` environment variables, with the prefix the URL names.
+///
+/// A password, query, or fragment is refused: no store reads one, and object_store echoes the
+/// URL it was given in its errors, so refusing them keeps credentials out of every message.
 fn open_store(url: &Url) -> anyhow::Result<(Arc<dyn ObjectStore>, Path)> {
-	let unsupported = || format!("unsupported archive store {url}");
-	let (scheme, prefix) = ObjectStoreScheme::parse(url).with_context(unsupported)?;
+	let redacted = RedactedUrl::new(url).to_string();
+	anyhow::ensure!(
+		url.password().is_none() && url.query().is_none() && url.fragment().is_none(),
+		"archive store {redacted} has a password, query, or fragment, which no store reads; \
+		 pass credentials through the environment instead",
+	);
+	// object_store quotes the URL it was given, userinfo included, so its message is redacted too.
+	let unsupported = |err: anyhow::Error| {
+		let reason = format!("{err:#}").replace(url.as_str(), &redacted);
+		anyhow::anyhow!(reason).context(format!("unsupported archive store {redacted}"))
+	};
+	let (scheme, prefix) = ObjectStoreScheme::parse(url).map_err(|err| unsupported(err.into()))?;
 	// Each cloud builder signs through rind, which `parse_url_opts` has no way to pass.
 	let store: Arc<dyn ObjectStore> = match scheme {
 		ObjectStoreScheme::Local => Arc::new(object_store::local::LocalFileSystem::new()),
@@ -345,7 +354,7 @@ fn open_store(url: &Url) -> anyhow::Result<(Arc<dyn ObjectStore>, Path)> {
 				.with_url(url.as_str())
 				.with_crypto_provider(rind_object_store::default_provider()?)
 				.build()
-				.with_context(unsupported)?,
+				.map_err(|err| unsupported(err.into()))?,
 		),
 		#[cfg(feature = "gcs")]
 		ObjectStoreScheme::GoogleCloudStorage => Arc::new(
@@ -353,7 +362,7 @@ fn open_store(url: &Url) -> anyhow::Result<(Arc<dyn ObjectStore>, Path)> {
 				.with_url(url.as_str())
 				.with_crypto_provider(rind_object_store::default_provider()?)
 				.build()
-				.with_context(unsupported)?,
+				.map_err(|err| unsupported(err.into()))?,
 		),
 		#[cfg(feature = "azure")]
 		ObjectStoreScheme::MicrosoftAzure => Arc::new(
@@ -361,9 +370,9 @@ fn open_store(url: &Url) -> anyhow::Result<(Arc<dyn ObjectStore>, Path)> {
 				.with_url(url.as_str())
 				.with_crypto_provider(rind_object_store::default_provider()?)
 				.build()
-				.with_context(unsupported)?,
+				.map_err(|err| unsupported(err.into()))?,
 		),
-		_ => anyhow::bail!(unsupported()),
+		_ => anyhow::bail!("unsupported archive store {redacted}"),
 	};
 	Ok((store, prefix))
 }
@@ -773,5 +782,33 @@ mod tests {
 		)
 		.unwrap();
 		assert!(literal.as_ref().starts_with("rec/live/a/%2540"), "{literal}");
+	}
+
+	/// A store URL that fails to open is reported without its userinfo or query, whichever
+	/// layer refuses it.
+	#[test]
+	fn a_refused_store_hides_its_credentials() {
+		let mut urls = vec![
+			// Refused up front: no store reads a password, query, or fragment.
+			"s3://user:SECRET@bucket/prefix",
+			"file:///rec?token=SECRET",
+			"file:///rec#SECRET",
+			// Refused by object_store, which quotes the URL it was given.
+			"ftp://SECRET@example.com/rec",
+			// Recognised, but not a store an archive opens.
+			"https://SECRET@example.com/rec",
+		];
+		if cfg!(feature = "azure") {
+			urls.push("az://SECRET@account.example.com/rec");
+		}
+		for url in urls {
+			let url = Url::parse(url).unwrap();
+			let Err(err) = open(&url) else {
+				panic!("{url} opened");
+			};
+			let err = format!("{err:#} {err:?}");
+			assert!(!err.contains("SECRET"), "{err}");
+			assert!(err.contains(&RedactedUrl::new(&url).to_string()), "{err}");
+		}
 	}
 }

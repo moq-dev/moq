@@ -4,11 +4,11 @@ import 'package:moq_ffi/moq_ffi.dart';
 // them the way the Rust API does. These are type aliases, not wrappers: the
 // values are the exact same objects, so every generated method applies
 // unchanged and the prefixed names stay valid. `Delay`, `Subscription`,
-// `TrackInfo`, and `Timestamp` are extension types instead, which are the same
-// objects too but add constructors: an omitted delay bound or max age is the
-// zero moq-net defaults to, where the generated record leaves it null (no
-// limit), and a timestamp is built either scaled or [Timestamp.unscaled], as in
-// Rust.
+// `TrackInfo`, `TrackRefresh`, and `Timestamp` are extension types instead,
+// which are the same objects too but add constructors: an omitted delay bound or
+// max age is the zero moq-net defaults to, where the generated record leaves it
+// null (no limit), an omitted refresh asks for nothing, and a timestamp is built
+// either scaled or [Timestamp.unscaled], as in Rust.
 //
 // Four types are deliberately not aliased, because the unprefixed name is
 // already taken where this package is used:
@@ -89,9 +89,8 @@ typedef Instance = MoqInstance;
 /// A route over a prefix: its origin-relative path, required wildcard captures (empty without wildcards), and route metadata.
 typedef Announce = MoqAnnounce;
 
-/// What an [AnnounceConsumer] yields: [AnnounceEventPresent],
-/// [AnnounceEventUnavailable], [AnnounceEventAvailable], [AnnounceEventAbsent],
-/// or [AnnounceEventOffline].
+/// What an [AnnounceConsumer] yields: [AnnounceEventPresent] or
+/// [AnnounceEventAbsent].
 ///
 /// Another publisher instance taking a path over keeps it present: hold a
 /// [Following] to see the broadcast change.
@@ -100,20 +99,9 @@ typedef AnnounceEvent = MoqAnnounceEvent;
 /// A route now covers the path, which was absent; it may arrive unavailable.
 typedef AnnounceEventPresent = PresentMoqAnnounceEvent;
 
-/// The present path lost every usable path to its origin but may recover one:
-/// it stays present while requests for it may fail.
-typedef AnnounceEventUnavailable = UnavailableMoqAnnounceEvent;
-
-/// The present path recovered a usable path: request it again.
-typedef AnnounceEventAvailable = AvailableMoqAnnounceEvent;
-
-/// The origin withdrew the path; carries its last route.
+/// No route covers the path any more, whether its origin withdrew it or this
+/// side let go of it; carries its last route.
 typedef AnnounceEventAbsent = AbsentMoqAnnounceEvent;
-
-/// This side let go of the path, which its origin may still serve: the session
-/// it arrived on closed, or the network lost every path to it. Carries its last
-/// route.
-typedef AnnounceEventOffline = OfflineMoqAnnounceEvent;
 
 /// The write side of a broadcast: publish tracks into it.
 typedef BroadcastProducer = MoqBroadcastProducer;
@@ -170,13 +158,14 @@ extension type Timestamp._(MoqTimestamp _timestamp) implements MoqTimestamp {
 
 /// How far behind the live edge a subscriber or decoder plays: where it starts, and how late it may fall.
 extension type Delay._(MoqDelay _delay) implements MoqDelay {
-  /// `min` is the target latency, where a cold join starts, and how long a decoder waits for a
-  /// missing group, and `max` is how far a non-latest group may fall behind before it is skipped.
+  /// `min` is the target latency, where a cold join starts, and `max` is how far a non-latest
+  /// group may fall behind before it is skipped, and how far newer media may run past a missing
+  /// group before a decoder gives it up.
   /// Both default to zero, moq-net's default. An explicit null `min` leaves it unstated, which a
-  /// decoder starts as zero, waiting a missing group for `max` instead (an audio decoder floors it
-  /// at zero and waits only its playout estimate, which can be larger; a catalog warmup or an audio
-  /// decoder's playout delay still states a `min` to the publisher), and an
-  /// explicit null `max` sets no subscriber limit. A `min` past `max` starts at `max`.
+  /// decoder starts as zero (a catalog warmup or an audio decoder's playout delay still states a
+  /// `min` to the publisher), and an explicit null `max` sets no subscriber limit. A `min` past
+  /// `max` starts a cold join no further back than the group covering the point `max` behind the
+  /// live edge.
   Delay({Duration? min = Duration.zero, Duration? max = Duration.zero})
     : this._(MoqDelay(min: min, max: max));
 }
@@ -205,10 +194,10 @@ extension type Subscription._(MoqSubscription _subscription)
 /// A null subscription and a bare `Subscription()` mean the same.
 Subscription defaultSubscription() => Subscription._(moqSubscriptionDefaults());
 
-/// A span of a track to deliver: from `start` up to `end`, or onward when `end` is null.
+/// A span of a track to deliver: from `start` through `end`, or onward when `end` is null. Every end includes its whole group.
 typedef Range = MoqRange;
 
-/// Where one end of a [Range] falls: the oldest group (a start only), absolute, relative to the latest group, or the group containing a time.
+/// Where one end of a [Range] falls: the oldest group (a start only), relative to the latest group, or the group containing a time.
 typedef Anchor = MoqAnchor;
 
 /// Which pending group the publisher sends first.
@@ -224,21 +213,34 @@ typedef FetchGroupOptions = MoqFetchGroupOptions;
 /// [TrackInfo] for none. Compare a received one by `name()`.
 typedef Compression = MoqCompression;
 
-/// Delivery settings for a raw track: priority, ordering, latency budget, and timescale.
+/// When a subscriber asks a track's publisher for a new group, which
+/// `TrackDemand.refresh()` reports.
+extension type TrackRefresh._(MoqTrackRefresh _refresh)
+    implements MoqTrackRefresh {
+  /// A join asks once the newest group outweighs `ratio` times its first frame
+  /// (any join when null), waiting out `interval` (null for no wait), which caps
+  /// how often the publisher makes groups however many subscribers ask. A bare
+  /// `TrackRefresh()` asks for nothing.
+  TrackRefresh({int? ratio, Duration? interval})
+    : this._(MoqTrackRefresh(ratio: ratio, interval: interval));
+}
+
+/// Delivery settings for a raw track: priority, max age, refresh, timescale, and compression.
 extension type TrackInfo._(MoqTrackInfo _info) implements MoqTrackInfo {
   /// `maxAge` is how long a superseded group stays fresh, defaulting to zero, moq-net's
   /// default, which serves only the live edge. An explicit null sets no publisher limit.
+  /// An omitted `refresh` asks for nothing.
   TrackInfo({
     int priority = 0,
     Duration? maxAge = Duration.zero,
-    int? refresh,
+    MoqTrackRefresh? refresh,
     int? timescale,
     MoqCompression? compression,
   }) : this._(
          MoqTrackInfo(
            priority: priority,
            maxAge: maxAge,
-           refresh: refresh,
+           refresh: refresh ?? TrackRefresh(),
            timescale: timescale,
            compression: compression,
          ),
@@ -302,8 +304,9 @@ typedef ConnectionState = MoqConnectionState;
 
 /// Retry pacing for the automatic reconnect: initial delay, multiplier, ceiling, and give-up window.
 /// A null field keeps its default, zero means zero (retry at once, or give up
-/// at the first failure), and `maxUnlimited` lifts the ceiling. Until a session
-/// has stayed up past 1s or been drained by a GOAWAY, a failed dial or a closed
+/// at the first failure), and `maxUnlimited` lifts the ceiling. Until the peer
+/// has accepted a session's credential or drained a session with a GOAWAY
+/// (or, on moq-lite 03/04, which never answer it, a session stayed up 1s), a failed dial or a closed
 /// session, such as a refused credential, ends the connection with its error
 /// rather than retrying.
 typedef Backoff = MoqBackoff;

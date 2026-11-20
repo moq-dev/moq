@@ -139,12 +139,26 @@ struct BroadcastState {
 }
 
 impl BroadcastState {
-	/// Insert a track weak handle into the lookup, returning an error if a live
-	/// track already holds the name. A closed entry under the name is reclaimed.
-	fn insert_track(&mut self, weak: track::TrackWeak) -> Result<(), Error> {
-		match self.cache_track(weak) {
-			Some(_) => Err(Error::Duplicate),
-			None => Ok(()),
+	/// Insert a track weak handle into the lookup, returning false if a live track
+	/// already holds the name. A closed entry under the name is reclaimed.
+	fn insert_track(&mut self, weak: track::TrackWeak) -> bool {
+		self.cache_track(weak).is_none()
+	}
+
+	/// Mint a name no live track holds, as [`Producer::unique_name`] documents.
+	fn unique_name(&mut self, suffix: &str) -> String {
+		let separator = if suffix.starts_with(|c: char| c.is_ascii_digit()) {
+			"-"
+		} else {
+			""
+		};
+		loop {
+			let id = self.unique;
+			self.unique = id.checked_add(1).expect("unique track IDs exhausted");
+			let name = format!("{id}{separator}{suffix}");
+			if !self.tracks.contains_key(name.as_str()) {
+				return name;
+			}
 		}
 	}
 
@@ -305,7 +319,8 @@ impl Producer {
 		Demand::new(self.alive.token.consume().weak(), self.state.clone())
 	}
 
-	/// Produce a new track and insert it into the broadcast.
+	/// Produce a new track and insert it into the broadcast, or `None` while a live track
+	/// holds the name.
 	///
 	/// Pass a name and an optional [`track::Info`], so a bare name works:
 	/// `create_track("video", None)` creates an untimed track.
@@ -313,11 +328,17 @@ impl Producer {
 		&self,
 		name: impl Into<Arc<str>>,
 		info: impl Into<Option<track::Info>>,
-	) -> Result<track::Producer, Error> {
-		let name = name.into();
-		let info = info.into().unwrap_or_default();
-		let mut state = self.state.lock();
+	) -> Option<track::Producer> {
+		let state = self.state.lock();
+		self.insert_created(state, name.into(), info.into().unwrap_or_default())
+	}
 
+	fn insert_created(
+		&self,
+		mut state: kio::Mut<'_, BroadcastState>,
+		name: Arc<str>,
+		info: track::Info,
+	) -> Option<track::Producer> {
 		// A consumer may have requested this name before it existed (a live
 		// [`Requests`] queues such requests). Creating the track fulfills that
 		// request: its consumers resolve against this very producer. Without
@@ -330,29 +351,26 @@ impl Producer {
 			// the request from queuing).
 			let _ = state.cache_track(track.weak());
 			let unlist = Unlist::list(&self.state, &mut state.listing, name, Listed::Track(info));
-			return Ok(track.listed(unlist));
+			return Some(track.listed(unlist));
 		}
 
 		let track = track::Producer::new(self.info.clone(), name.clone(), info.clone()).with_stats(self.stats.clone());
-		state.insert_track(track.weak())?;
+		if !state.insert_track(track.weak()) {
+			return None;
+		}
 		let unlist = Unlist::list(&self.state, &mut state.listing, name, Listed::Track(info));
-		Ok(track.listed(unlist))
+		Some(track.listed(unlist))
 	}
 
 	/// Produce a new datagram track and insert it into the broadcast, listed until it ends.
 	///
 	/// Datagram tracks are a namespace apart from stream tracks, so this never conflicts with
-	/// [`Self::create_track`]. Fails with [`Error::Duplicate`] while a live datagram track
-	/// holds the name.
+	/// [`Self::create_track`]. Returns `None` while a live datagram track holds the name.
 	///
 	/// Moq-lite 05 and 06 carry it on its name's stream track subscriptions, but only those
 	/// that start once it exists: create it before, or with, a stream track of the same name.
 	/// See [`datagram`](crate::datagram).
-	pub fn create_datagrams(
-		&self,
-		name: impl Into<Arc<str>>,
-		info: datagram::Info,
-	) -> Result<datagram::Producer, Error> {
+	pub fn create_datagrams(&self, name: impl Into<Arc<str>>, info: datagram::Info) -> Option<datagram::Producer> {
 		self.insert_datagrams(name.into(), info, true)
 	}
 
@@ -364,16 +382,11 @@ impl Producer {
 		&self,
 		name: impl Into<Arc<str>>,
 		info: datagram::Info,
-	) -> Result<datagram::Producer, Error> {
+	) -> Option<datagram::Producer> {
 		self.insert_datagrams(name.into(), info, false)
 	}
 
-	fn insert_datagrams(
-		&self,
-		name: Arc<str>,
-		info: datagram::Info,
-		listed: bool,
-	) -> Result<datagram::Producer, Error> {
+	fn insert_datagrams(&self, name: Arc<str>, info: datagram::Info, listed: bool) -> Option<datagram::Producer> {
 		let mut state = self.state.lock();
 		let producer = match state.datagrams.get(name.as_ref()) {
 			Some(live) => {
@@ -383,9 +396,7 @@ impl Producer {
 					.datagram_requests
 					.iter()
 					.position(|request| live.same_channel(&request.weak()));
-				let Some(queued) = queued else {
-					return Err(Error::Duplicate);
-				};
+				let queued = queued?;
 				let request = state.datagram_requests.remove(queued).expect("found above");
 				request.with_stats(self.stats.clone()).accept(info)
 			}
@@ -396,10 +407,10 @@ impl Producer {
 			}
 		};
 		if !listed {
-			return Ok(producer);
+			return Some(producer);
 		}
 		let unlist = Unlist::list(&self.state, &mut state.listing, name, Listed::Datagrams(info));
-		Ok(producer.listed(unlist))
+		Some(producer.listed(unlist))
 	}
 
 	/// Answer datagram lookups from `source`, the broadcast an origin's front serves from,
@@ -408,7 +419,8 @@ impl Producer {
 		self.state.lock().datagram_source = Some(source);
 	}
 
-	/// Reserve a track by name without finalizing its [`track::Info`].
+	/// Reserve a track by name without finalizing its [`track::Info`], or `None` while a
+	/// live track holds the name.
 	///
 	/// Returns a [`track::Request`] already discoverable by consumers; call
 	/// [`track::Request::accept`] to set its info and start producing. Use this when
@@ -419,12 +431,14 @@ impl Producer {
 	/// Subscribers wait on the name until it is accepted, so a reservation the producer
 	/// ends up never filling has to be dropped or rejected. Ending the broadcast
 	/// resolves whatever is left.
-	pub fn reserve_track(&self, name: impl Into<Arc<str>>) -> Result<track::Request, Error> {
+	pub fn reserve_track(&self, name: impl Into<Arc<str>>) -> Option<track::Request> {
 		let name = name.into();
 		let mut state = self.state.lock();
 		let request = track::Request::new(self.info.clone(), name.clone()).with_stats(self.stats.clone());
-		state.insert_track(request.weak())?;
-		Ok(request.listed(ListOnAccept {
+		if !state.insert_track(request.weak()) {
+			return None;
+		}
+		Some(request.listed(ListOnAccept {
 			state: self.state.clone(),
 			name,
 		}))
@@ -436,19 +450,21 @@ impl Producer {
 	///
 	/// Unlisted controls discovery, not authorization: anyone allowed to subscribe to the
 	/// broadcast can read the track by name.
-	pub fn reserve_unlisted_track(&self, name: impl Into<Arc<str>>) -> Result<track::Request, Error> {
+	pub fn reserve_unlisted_track(&self, name: impl Into<Arc<str>>) -> Option<track::Request> {
 		let mut state = self.state.lock();
 		let request = track::Request::new(self.info.clone(), name.into()).with_stats(self.stats.clone());
-		state.insert_track(request.weak())?;
-		Ok(request)
+		state.insert_track(request.weak()).then_some(request)
 	}
 
 	/// Create a track with a unique name using the given suffix.
 	///
 	/// Uses [`Self::unique_name`]; minted names are never reused, even after closure.
-	pub fn unique_track(&self, suffix: &str, info: impl Into<Option<track::Info>>) -> Result<track::Producer, Error> {
-		let name = self.unique_name(suffix);
-		self.create_track(name, info)
+	pub fn unique_track(&self, suffix: &str, info: impl Into<Option<track::Info>>) -> track::Producer {
+		let mut state = self.state.lock();
+		let name = state.unique_name(suffix);
+		// Minted under the same lock, so no live track can hold the name.
+		self.insert_created(state, name.into(), info.into().unwrap_or_default())
+			.expect("a minted name is free")
 	}
 
 	/// Generate a unique track name from a suffix without creating the track.
@@ -463,20 +479,7 @@ impl Producer {
 	///
 	/// Panics if the broadcast exhausts its `u64` IDs.
 	pub fn unique_name(&self, suffix: &str) -> String {
-		let mut state = self.state.lock();
-		let separator = if suffix.starts_with(|c: char| c.is_ascii_digit()) {
-			"-"
-		} else {
-			""
-		};
-		loop {
-			let id = state.unique;
-			state.unique = id.checked_add(1).expect("unique track IDs exhausted");
-			let name = format!("{id}{separator}{suffix}");
-			if !state.tracks.contains_key(name.as_str()) {
-				return name;
-			}
-		}
+		self.state.lock().unique_name(suffix)
 	}
 
 	/// Create a dynamic producer that handles on-demand track requests from consumers.
@@ -1584,11 +1587,26 @@ mod test {
 	fn unique_names_survive_closed_track_pruning() {
 		let producer = Info::new().produce();
 		let consumer = producer.consume();
-		let track = producer.unique_track(".opus", crate::track::Info::timed()).unwrap();
+		let track = producer.unique_track(".opus", crate::track::Info::timed());
 		assert_eq!(track.name(), "0.opus");
 		drop(track);
 		assert!(matches!(consumer.track("0.opus"), Err(Error::NotFound)));
 		assert_eq!(producer.unique_name(".opus"), "1.opus");
+	}
+
+	/// A live track holds its name against every creator, a minted name skips it, and the
+	/// name frees once the track ends.
+	#[test]
+	fn a_live_name_is_taken_until_its_track_ends() {
+		let producer = Info::new().produce();
+		let track = producer.create_track("0.opus", crate::track::Info::timed()).unwrap();
+		assert!(producer.create_track("0.opus", None).is_none());
+		assert!(producer.reserve_track("0.opus").is_none());
+		assert!(producer.reserve_unlisted_track("0.opus").is_none());
+		assert_eq!(producer.unique_track(".opus", None).name(), "1.opus");
+
+		drop(track);
+		assert!(producer.create_track("0.opus", None).is_some());
 	}
 
 	/// A track handle reads what an open broadcast serves now, so a track that went away
@@ -1835,7 +1853,7 @@ mod test {
 		let mut group = subscriber.assert_group();
 		drop(subscriber);
 		assert_eq!(wanted_changed(&mut demand, &waiter), None, "the group is read");
-		assert!(video.demand().wanted().is_some());
+		assert!(video.demand().wanted());
 
 		let Poll::Ready(Ok(Some(frame))) = group.poll_next_frame(&waiter) else {
 			panic!("the frame was written");
@@ -1846,7 +1864,7 @@ mod test {
 
 		drop(frame);
 		assert!(!writing.demand().wanted());
-		assert_eq!(video.demand().wanted(), None);
+		assert_eq!(video.demand().wanted_start(), None);
 		assert_eq!(wanted_changed(&mut demand, &waiter), Some(false));
 	}
 
@@ -2087,18 +2105,18 @@ mod test {
 		let consumer1 = c1_fut.await.unwrap();
 
 		// The producer should NOT be unused yet because there's a consumer.
-		assert!(producer1.demand().wanted().is_some(), "track producer should be used");
+		assert!(producer1.demand().wanted(), "track producer should be used");
 
 		// A second subscriber reuses the live producer (fast path / dedup).
 		let consumer2 = bc.track("unknown_track").unwrap().subscribe(None).await.unwrap();
 		consumer2.assert_is_clone(&consumer1);
 
 		drop(consumer1);
-		assert!(producer1.demand().wanted().is_some(), "track producer should be used");
+		assert!(producer1.demand().wanted(), "track producer should be used");
 
 		drop(consumer2);
 		assert!(
-			producer1.demand().wanted().is_none(),
+			!producer1.demand().wanted(),
 			"track producer should be unused after all consumers are dropped"
 		);
 
@@ -2119,7 +2137,7 @@ mod test {
 		let consumer4 = c4_fut.await.unwrap();
 		drop(consumer4);
 		assert!(
-			producer2.demand().wanted().is_none(),
+			!producer2.demand().wanted(),
 			"new track producer should be unused after its consumer is dropped"
 		);
 	}
@@ -2336,7 +2354,10 @@ mod test {
 		let track = consumer.track("track1").unwrap();
 		let pending_fetch = track.fetch_group(0, None);
 		let fetch = dynamic.requested_fill_group().await.unwrap();
-		let group = fetch.accept(crate::track::Info::timed()).unwrap();
+		let group = fetch
+			.accept(crate::track::Info::timed())
+			.unwrap()
+			.expect("a fresh group");
 		group.finish().unwrap();
 		pending_fetch.await.unwrap();
 
@@ -2486,7 +2507,7 @@ mod test {
 		let track = producer.create_track("video", crate::track::Info::timed()).unwrap();
 
 		// The unused wake a teardown acts on.
-		assert!(track.demand().wanted().is_none());
+		assert!(!track.demand().wanted());
 
 		// Demand returns in the gap before it commits.
 		let viewer = consumer.track("video").unwrap().subscribe(None);
@@ -2541,10 +2562,7 @@ mod test {
 		let consumer = producer.consume();
 		let _track = producer.create_track("audio", crate::track::Info::timed()).unwrap();
 		let mut datagrams = producer.create_datagrams("audio", datagram::Info::default()).unwrap();
-		assert!(matches!(
-			producer.create_datagrams("audio", datagram::Info::default()),
-			Err(Error::Duplicate)
-		));
+		assert!(producer.create_datagrams("audio", datagram::Info::default()).is_none());
 
 		let mut reader = consumer.datagrams("audio").unwrap();
 		datagrams.append(crate::Timestamp::unscaled(0), "x").unwrap();

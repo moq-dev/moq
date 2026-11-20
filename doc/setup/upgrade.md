@@ -54,7 +54,7 @@ These land with the next breaking release.
   upgrade that offers no `qmux-NN` subprotocol with 400 instead of falling back
   to the legacy `webtransport` format, so upgrade such clients before relays.
 - **Data-track breaks are an object with no bytes** (#5815). A hang data
-  track (TS private PES, sections, `m2ts`, text) marks a discontinuity with a
+  track (TS private PES, sections, passthrough, text) marks a discontinuity with a
   group of one empty object instead of a skipped group. Older consumers fail
   to decode it, so upgrade exporters and players before publishers.
 - **Auth requests name `webtransport`** (#5293). Relays report a WebTransport

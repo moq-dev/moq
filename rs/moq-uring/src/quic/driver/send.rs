@@ -10,7 +10,6 @@ use std::rc::Rc;
 use std::task::{Context, Poll, ready};
 
 use bytes::Buf;
-use moq_quic::send::End;
 
 use super::Shared;
 use crate::quic::{Error as ConnectionError, VarInt, stream};
@@ -89,12 +88,20 @@ impl Stream {
 			return Poll::Ready(Err(Error::Connection(err)));
 		}
 		// moq-quic wakes us once the stream is writable again, or stopped.
-		let written = shared.conn.borrow_mut().send_stream(id).poll_write(waiter, buf);
-		match ready!(written) {
-			Ok(written) => Poll::Ready(Ok(written)),
-			Err(moq_quic::send::Error::Stopped(code)) => Poll::Ready(Err(Error::Stopped(code))),
-			Err(moq_quic::send::Error::ConnectionLost) => Poll::Ready(Err(Error::Connection(shared.lost()))),
-			Err(err) => unreachable!("an open stream failed to write: {err:?}"),
+		let mut conn = shared.conn.borrow_mut();
+		let mut stream = conn.send_stream(id);
+		let err = match ready!(stream.poll_write(waiter, buf)) {
+			Ok(written) => return Poll::Ready(Ok(written)),
+			Err(err) => err,
+		};
+		// An open stream fails only once the peer stopped it or the connection was lost.
+		if let Ok(Some(code)) = stream.stopped() {
+			return Poll::Ready(Err(Error::Stopped(code)));
+		}
+		drop(conn);
+		match shared.closed() {
+			Some(closed) => Poll::Ready(Err(Error::Connection(closed))),
+			None => unreachable!("an open stream failed to write: {err:?}"),
 		}
 	}
 
@@ -315,10 +322,7 @@ impl Half {
 		}
 		// A held stream is never released, and a reset consumes its handle, so only the peer's
 		// stop or the connection's loss leaves its bytes unacknowledged.
-		let stopped = match stream.end() {
-			Ok(Some(End::Stopped(code))) => Some(code),
-			_ => None,
-		};
+		let stopped = stream.stopped().ok().flatten();
 		drop(conn);
 		Poll::Ready(Err(match (stopped, self.shared.closed()) {
 			(Some(code), _) => Error::Stopped(code),
@@ -335,13 +339,15 @@ impl Half {
 
 /// Wait for send stream `id` to end: moq-quic keeps how it ended until its handle releases it.
 fn poll_closed(shared: &Shared, id: stream::Id, waiter: &kio::Waiter) -> Poll<Result<Option<VarInt>, Error>> {
-	let end = shared.conn.borrow_mut().send_stream(id).poll_end(waiter);
-	match ready!(end) {
-		Ok(End::Stopped(code)) => Poll::Ready(Ok(Some(code))),
-		Ok(_) => Poll::Ready(Ok(None)),
-		Err(moq_quic::send::Error::ConnectionLost) => Poll::Ready(Err(Error::Connection(shared.lost()))),
-		// Only a released ID has no end, and the handle releases it only on drop.
-		Err(err) => unreachable!("a held send stream has no end: {err:?}"),
+	let stopped = shared.conn.borrow_mut().send_stream(id).poll_stopped(waiter);
+	let err = match ready!(stopped) {
+		Ok(stopped) => return Poll::Ready(Ok(stopped)),
+		Err(err) => err,
+	};
+	// Only a released ID has no end, and the handle releases it only on drop.
+	match shared.closed() {
+		Some(closed) => Poll::Ready(Err(Error::Connection(closed))),
+		None => unreachable!("a held send stream has no end: {err:?}"),
 	}
 }
 
@@ -349,10 +355,7 @@ impl Drop for Half {
 	fn drop(&mut self) {
 		let mut conn = self.shared.conn.borrow_mut();
 		let mut stream = conn.send_stream(self.id);
-		let stopped = match stream.end() {
-			Ok(Some(End::Stopped(code))) => Some(code),
-			_ => None,
-		};
+		let stopped = stream.stopped().ok().flatten();
 		// A reset fails harmlessly once the connection is gone.
 		let _ = match (&self.state, stopped) {
 			(HalfState::Reset, _) => Ok(()),

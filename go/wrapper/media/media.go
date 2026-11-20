@@ -362,16 +362,16 @@ const (
 
 // VideoFormat values: a single video codec an importer can parse. The two H.26x pairs
 // differ by framing, not codec: Avc1/Hvc1 are length-prefixed with an out-of-band config
-// record, Avc3/Hev1 are Annex-B with the parameter sets inline.
+// record, H264/H265 are a raw Annex B elementary stream with the parameter sets inline.
 const (
 	// VideoFormatAvc1 is H.264 with length-prefixed NALUs and an out-of-band avcC.
 	VideoFormatAvc1 = ffi.MoqVideoFormatAvc1
-	// VideoFormatAvc3 is H.264 in Annex-B with inline SPS/PPS.
-	VideoFormatAvc3 = ffi.MoqVideoFormatAvc3
+	// VideoFormatH264 is H.264 as a raw Annex B elementary stream with inline SPS/PPS.
+	VideoFormatH264 = ffi.MoqVideoFormatH264
 	// VideoFormatHvc1 is H.265 with length-prefixed NALUs and an out-of-band hvcC.
 	VideoFormatHvc1 = ffi.MoqVideoFormatHvc1
-	// VideoFormatHev1 is H.265 in Annex-B with inline parameter sets.
-	VideoFormatHev1 = ffi.MoqVideoFormatHev1
+	// VideoFormatH265 is H.265 as a raw Annex B elementary stream with inline parameter sets.
+	VideoFormatH265 = ffi.MoqVideoFormatH265
 	// VideoFormatAv01 is AV1.
 	VideoFormatAv01 = ffi.MoqVideoFormatAv01
 	// VideoFormatVp8 is VP8.
@@ -452,7 +452,7 @@ func (m *TrackProducer) Seek(start uint64) error {
 }
 
 // AbortUnwanted closes the track with an application error code, but only while
-// nobody wants it: call it once moq.TrackDemand.WantedChanged returns nil. It returns
+// nobody wants it: call it once moq.TrackDemand.WantedChanged returns false. It returns
 // true once the track is closed, and false, leaving the track open, when a reader
 // joined since; keep serving and wait for the next nil on a fresh Demand():
 // one that already returned nil misses a reader that came and went, and waits on.
@@ -531,7 +531,7 @@ func (m *TrackStreamProducer) SetEnabled(enabled bool) error {
 }
 
 // AbortUnwanted closes the track with an application error code, but only while
-// nobody wants it: call it once moq.TrackDemand.WantedChanged returns nil. It returns
+// nobody wants it: call it once moq.TrackDemand.WantedChanged returns false. It returns
 // true once the track is closed, and false, leaving the track open, when a reader
 // joined since; keep serving and wait for the next nil on a fresh Demand():
 // one that already returned nil misses a reader that came and went, and waits on.
@@ -664,7 +664,7 @@ func CatalogSnapshot(ctx context.Context, broadcast *moq.BroadcastConsumer) (*Ca
 	defer consumer.Cancel()
 	snapshot, err := consumer.Next(ctx)
 	if err == nil && snapshot == nil {
-		err = moq.ErrClosed
+		err = ffi.NewMoqErrorClosed()
 	}
 	return snapshot, err
 }

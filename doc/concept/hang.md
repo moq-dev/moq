@@ -157,11 +157,15 @@ Name the section with a namespaced key such as
 
 A broadcast can carry an MPEG transport stream whole instead of demultiplexed
 into renditions, for what demultiplexing cannot carry, such as a scrambled
-service. The root `m2ts` section names the one track holding it:
+service. The `mpegts` section's `passthrough` member names the one track holding
+it:
 
 ```json
 {
-  "m2ts": { "track": "0.m2ts", "randomAccess": true, "muxRate": 2499999 }
+  "mpegts": {
+    "muxRate": 2499999,
+    "passthrough": { "track": "0.m2ts", "randomAccess": true }
+  }
 }
 ```
 
@@ -171,7 +175,8 @@ steps back is a new broadcast. `randomAccess` says whether every published group
 began where a receiver can start decoding, and `muxRate` is the measured
 constant multiplex rate in bits per second, absent for a variable-rate source.
 A player has nothing to decode here. `moq import ts --passthrough` writes this
-section (see [MPEG-TS](/bin/ts#passthrough-mode)); the encoding is in
+member (see [MPEG-TS](/bin/ts#passthrough-mode)); the section, which also
+describes a demultiplexed stream, is in
 [draft-lcurley-moq-mpegts](/draft/moq-mpegts).
 
 ## Container
@@ -214,11 +219,14 @@ independent, so an audio group can end at any frame; the first-party encoders
 put one packet in each unless told otherwise.
 
 The `description` field carries out-of-band codec setup (an `avcC` box for
-H.264). When it is absent, the parameter sets ride inline before each keyframe,
-which is what `avc3`/`hev1` tracks do. Decoders should handle both. CMAF is the
-exception: its samples are always length-prefixed, so an `avc3`/`hev1` CMAF
-track keeps the configuration record as its `description` for the NAL length
-size, even when the parameter sets ride in the samples.
+H.264) and decides the framing. With one, H.264 and H.265 frames are
+length-prefixed by its NAL length size; without one, they are Annex-B and carry
+their parameter sets before each keyframe. The codec string only says where the
+parameter sets live: `avc1`/`hvc1` keep them in the `description`, while
+`avc3`/`hev1` may repeat them in band, with or without one. Decoders should
+handle every combination. CMAF samples are always length-prefixed, so a CMAF
+track always carries the configuration record, even when the parameter sets
+ride in the samples.
 
 ## Your own format
 

@@ -15,7 +15,6 @@ import {
 } from "@moq/signals";
 import { hosted } from "../assets";
 import type { Broadcast } from "../broadcast";
-import { watched } from "../internal";
 import { Estimator, type Order } from "../order";
 import { Slot } from "../publication";
 import type { AudioFrame, Capture, Format } from "./capture";
@@ -37,7 +36,8 @@ const FADE = Duration.millis(50);
 // The WebCodecs/MP4 codec string for AAC-LC. "aac" is our user-facing shorthand.
 const AAC_CODEC = "mp4a.40.2";
 
-import { Duration, Instant, now } from "@moq/clock";
+import { Duration } from "@moq/clock";
+import * as MediaClock from "../media-clock";
 import { Backlog } from "./backlog";
 import { Framer } from "./framer";
 
@@ -192,6 +192,7 @@ export class Encoder {
 	 * A snapshot, for reaching the shared capture format knobs (`audio.capture?.sampleRate`). Read
 	 * {@link in}.capture through an effect instead when you need to react to it being swapped.
 	 */
+	// fallow-ignore-next-line unused-class-member
 	get capture(): Capture | undefined {
 		return this.in.capture.peek();
 	}
@@ -487,7 +488,7 @@ export class Encoder {
 			const fatal = effect.get(this.#out.error);
 
 			const onDemand = effect.get(broadcast.in.onDemand) !== "off";
-			const demanded = !!track && effect.get(track.demand().wanted) !== undefined;
+			const demanded = !!track && effect.get(track.demand().wanted);
 			// Demand from fetches alone carries no subscription, so no budget beyond the retention.
 			this.#budget = replayBudget(track && effect.get(track.subscription));
 			// Not gated on `enabled` or `muted`: a paused rendition takes no capture, but still encodes what it retained.
@@ -512,7 +513,7 @@ export class Encoder {
 			const allocator = effect.get(this.in.bandwidth);
 			if (!enabled || !track || !allocator || effect.get(this.#out.error)) return;
 
-			const demanded = watched(track, effect);
+			const demanded = track.demand().wanted;
 			effect.run((effect) => {
 				if (!effect.get(demanded)) return;
 
@@ -805,7 +806,7 @@ export class Encoder {
 
 				const backlog = new Backlog(retention, config.sampleRate);
 				const deadline = new Signal<Duration | undefined>(undefined);
-				const clock = () => now().since(Instant.ZERO);
+				const clock = MediaClock.now;
 				effect.run((timer) => {
 					const at = timer.get(deadline);
 					if (at === undefined) return;

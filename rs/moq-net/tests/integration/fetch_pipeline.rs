@@ -84,7 +84,6 @@ async fn fetch_ahead(
 	let fill = kio::clock::timeout(TIMEOUT, request.requests().requested_fill())
 		.await
 		.unwrap_or_else(|_| panic!("{version}: the FETCH waited for the info"))
-		.map(support::groups)
 		.unwrap();
 	let held = Held {
 		_publisher: publisher,
@@ -102,7 +101,7 @@ async fn the_first_fetch_goes_out_with_the_info_request() {
 		for relays in [0, 1] {
 			let (request, fill, fetching, _held) = fetch_ahead(version, relays).await;
 			let _track = request.accept(timed());
-			let mut group = fill.accept(0, timed()).unwrap();
+			let mut group = fill.accept(0, timed()).unwrap().expect("a fresh group");
 			group.write_frame(group.at_start(), b"early".as_ref()).unwrap();
 			group.finish().unwrap();
 			let mut fetched = kio::clock::timeout(TIMEOUT, fetching)

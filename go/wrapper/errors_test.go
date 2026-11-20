@@ -3,6 +3,7 @@ package moq_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"moq.dev/moq"
@@ -143,5 +144,17 @@ func TestTrackRevocationIsAuth(t *testing.T) {
 	})
 	if !moq.IsAuthError(err) {
 		t.Fatalf("a track revocation is not an auth error: %v", err)
+	}
+}
+
+func TestShutdownIsCancelledOrClosed(t *testing.T) {
+	if !moq.IsShutdown(fmt.Errorf("read: %w", ffi.NewMoqErrorClosed())) {
+		t.Fatal("a wrapped Closed is not a shutdown")
+	}
+	if !moq.IsShutdown(ffi.NewMoqErrorCancelled()) {
+		t.Fatal("Cancelled is not a shutdown")
+	}
+	if moq.IsShutdown(ffi.NewMoqErrorBusy()) || moq.IsShutdown(context.Canceled) {
+		t.Fatal("a failure counted as a shutdown")
 	}
 }

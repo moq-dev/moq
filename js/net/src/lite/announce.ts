@@ -54,6 +54,7 @@ export const CHAIN_MAX = 31;
 // Claim flags.
 const UNAVAILABLE = 0x1;
 const DRAINING = 0x2;
+const MARKED = 0x4;
 
 /**
  * What a lite-07 claim says beside its path and instance. Mirrors `route::relay::Claim` in
@@ -70,15 +71,17 @@ export interface Claim {
 	unavailable: boolean;
 	/** A node on the way to its publisher sent GOAWAY. */
 	draining: boolean;
+	/** A marked session lies on the way to its publisher, so a relay never tells it over another. */
+	marked: boolean;
 	/** The lowest link priority on the way to its publisher. */
 	priority: number;
-	/** The Node IDs that announced the claim again across a scoped grant or an older version. */
+	/** The Relay of each relay the claim entered or left a routing domain by, oldest first. */
 	chain: bigint[];
 }
 
 /** A claim this origin publishes itself: no cost, at the top priority, announced again by no one. */
 export function ownClaim(epoch: bigint, above = 0n): Claim {
-	return { epoch, cost: 0n, above, unavailable: false, draining: false, priority: 127, chain: [] };
+	return { epoch, cost: 0n, above, unavailable: false, draining: false, marked: false, priority: 127, chain: [] };
 }
 
 /** Whether two claims say the same. */
@@ -89,6 +92,7 @@ export function claimsEqual(a: Claim, b: Claim): boolean {
 		a.above === b.above &&
 		a.unavailable === b.unavailable &&
 		a.draining === b.draining &&
+		a.marked === b.marked &&
 		a.priority === b.priority &&
 		a.chain.length === b.chain.length &&
 		a.chain.every((node, i) => node === b.chain[i])
@@ -259,7 +263,7 @@ async function encodeClaim(w: Writer, claim: Claim) {
 		throw new Error("no node sends that chain");
 	await w.u62(saturate(claim.cost));
 	await w.u62(claim.above);
-	await w.u8((claim.unavailable ? UNAVAILABLE : 0) | (claim.draining ? DRAINING : 0));
+	await w.u8((claim.unavailable ? UNAVAILABLE : 0) | (claim.draining ? DRAINING : 0) | (claim.marked ? MARKED : 0));
 	await w.u8(toWire(claim.priority));
 	await w.u53(claim.chain.length);
 	for (const node of claim.chain) await w.u62(node);
@@ -272,7 +276,7 @@ async function decodeClaim(r: Reader, epoch: bigint): Promise<Claim> {
 	const cost = saturate(await r.u62());
 	const above = await r.u62();
 	const flags = await r.u8();
-	if (flags & ~(UNAVAILABLE | DRAINING)) throw new ProtocolViolation(`unknown claim flags ${flags}`);
+	if (flags & ~(UNAVAILABLE | DRAINING | MARKED)) throw new ProtocolViolation(`unknown claim flags ${flags}`);
 	const priority = fromWire(await r.u8());
 	const count = await r.u62();
 	if (count > BigInt(CHAIN_MAX)) throw new ProtocolViolation(`claim chain of ${count} nodes`);
@@ -288,6 +292,7 @@ async function decodeClaim(r: Reader, epoch: bigint): Promise<Claim> {
 		above,
 		unavailable: (flags & UNAVAILABLE) !== 0,
 		draining: (flags & DRAINING) !== 0,
+		marked: (flags & MARKED) !== 0,
 		priority,
 		chain,
 	};

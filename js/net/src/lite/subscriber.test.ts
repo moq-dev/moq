@@ -93,7 +93,7 @@ test("closing the subscriber suppresses probe stream warnings", async () => {
 // Drives a Subscriber's announce stream directly: the harness plays the peer, writing
 // forged announce messages into the stream the subscriber opens. On lite-07 they are the
 // peer's Announce Stream instead, delivered in order as the session does.
-function announceHarness(version: Version, origin = 1n) {
+function announceHarness(version: Version, origin = 1n, grant?: Signal<Grant | undefined>) {
 	const routed = version === Version.DRAFT_07;
 	const reading = Promise.withResolvers<void>();
 	let inbound!: ReadableStreamDefaultController<Uint8Array>;
@@ -130,7 +130,7 @@ function announceHarness(version: Version, origin = 1n) {
 		},
 	} as unknown as WebTransport;
 
-	const subscriber = new Subscriber(quic, version, toHop(origin));
+	const subscriber = new Subscriber(quic, version, toHop(origin), undefined, undefined, undefined, grant);
 
 	const send = async (f: (w: Writer) => Promise<void>) => {
 		const written: Uint8Array[] = [];
@@ -439,6 +439,95 @@ test("a lite-07 restart replaces the instance, and the next consume subscribes f
 
 	held.close();
 	announced.close();
+	subscriber.close();
+});
+
+// The peer answers a prefix wider than our grant region by region, so a region the grant gains
+// under a prefix already asked for is sent without a new prefix: the subscriber edits nothing, and
+// a reader overlapping the region, synced or not, waits for that edit's answer, which follows the
+// region's claims. A reader the region misses stays synced, and so does every reader on a narrowing.
+test("a lite-07 region granted under a wider prefix syncs at the next answer", async () => {
+	const v = Version.DRAFT_07;
+	const subscribe = (...paths: string[]): Grant => ({
+		publish: new Path.Patterns([]),
+		subscribe: new Path.Patterns(paths.map((path) => Path.Pattern.subtree(path))),
+	});
+	const grant = new Signal<Grant | undefined>(subscribe("a"));
+	const { subscriber, send, ok, settle } = announceHarness(v, 1n, grant);
+	const everything = subscriber.routes();
+	const a = subscriber.routes(Path.Pattern.subtree(Path.from("a")));
+	await settle();
+	await ok();
+	await send((w) => encodeAnnounceBroadcast(w, { status: "synced", prefix: 0n }, v));
+	await settle();
+	expect(everything.synced.peek()).toBe(true);
+	expect(a.synced.peek()).toBe(true);
+
+	grant.set(subscribe("a", "b"));
+	const b = subscriber.routes(Path.Pattern.subtree(Path.from("b")));
+	await settle();
+	expect(b.synced.peek()).toBe(false);
+	// The whole tree holds `b`, which may already be in the peer's answer; `a` cannot gain from it.
+	expect(everything.synced.peek()).toBe(false);
+	expect(a.synced.peek()).toBe(true);
+	await send((w) => claimer(v)(w, Path.from("b/x"), { instance: Instance.random(), hops: [] }));
+	await ok();
+	expect(await b.next()).toMatchObject({ prefix: Path.from("b/x"), kind: "start" });
+	expect(await everything.next()).toMatchObject({ prefix: Path.from("b/x"), kind: "start" });
+	// Synced once each reader asks past the region's claim.
+	void b.next();
+	void everything.next();
+	await settle();
+	expect(b.synced.peek()).toBe(true);
+	expect(everything.synced.peek()).toBe(true);
+
+	// A narrowing shows nothing new: every reader stays synced.
+	grant.set(subscribe("a"));
+	await settle();
+	expect(everything.synced.peek()).toBe(true);
+	expect(a.synced.peek()).toBe(true);
+
+	a.close();
+	b.close();
+	everything.close();
+	subscriber.close();
+});
+
+// Readers too many to ask for one by one are asked for at the root. A grant change that shows more
+// within it, though within no reader's prefix, still sends an edit: a reader arriving there before
+// its answer waits for it, since the peer may already have sent what the change shows.
+test("a lite-07 grant change under a coarsened ask holds the readers that arrive", async () => {
+	const v = Version.DRAFT_07;
+	const grant = (...patterns: string[]): Grant => ({
+		publish: new Path.Patterns([]),
+		subscribe: new Path.Patterns(patterns.map((pattern) => Path.Pattern.parse(pattern))),
+	});
+	const signal = new Signal<Grant | undefined>(grant("a/*"));
+	const { subscriber, send, ok, settle } = announceHarness(v, 1n, signal);
+	const readers = Array.from({ length: 17 }, (_, i) =>
+		subscriber.routes(Path.Pattern.subtree(Path.from(`a/${i}${"x".repeat(4000)}`))),
+	);
+	// The first reader is asked for alone, and the rest then move the ask to the root.
+	await settle();
+	await ok();
+	await settle();
+	await ok();
+	await send((w) => encodeAnnounceBroadcast(w, { status: "synced", prefix: 1n }, v));
+	await settle();
+	expect(readers.every((reader) => reader.synced.peek())).toBe(true);
+
+	signal.set(grant("a/*", "b/**"));
+	// Noticed before the reader arrives, while no reader's prefix holds `b`.
+	await settle();
+	const b = subscriber.routes(Path.Pattern.subtree(Path.from("b")));
+	await settle();
+	expect(b.synced.peek()).toBe(false);
+	await ok();
+	await settle();
+	expect(b.synced.peek()).toBe(true);
+
+	b.close();
+	for (const reader of readers) reader.close();
 	subscriber.close();
 });
 
@@ -2858,18 +2947,24 @@ test("a widened range's SUBSCRIBE_STARTED resolves the feed's start", async () =
 		await opened(0);
 		await answerTrackInfo(streams[0], version);
 		const request = await opened(1);
+		const sent = new Reader(request.outbound, undefined, version);
+		expect(await sent.u53()).toBe(StreamId.Subscribe);
+		await Subscribe.decode(sent, version);
 		await request.reading;
 		expect(hooks.sourceStart(track)).toBe("pending");
 		await respond(request, version, [{ start: new SubscribeStart([undefined]) }]);
 		await drainReactions();
 		expect(hooks.sourceStart(track)).not.toBe("pending");
 		track.update({ ranges: [{ start: { time: 0n }, end: { time: 1n } }] });
-		await drainReactions();
+		// The feed goes pending before the update is written, so reading it waits for both.
+		const update = await SubscribeUpdate.decode(sent, version);
 		expect(hooks.sourceStart(track)).toBe("pending");
-		// The widened range took the next Range ID.
+		// The widened range retires Range ID 0 and takes the next one.
+		expect(update.remove).toEqual([0n]);
+		expect(update.ranges).toHaveLength(1);
 		await respond(request, version, [{ started: new SubscribeStarted(1n, 1n) }]);
 		await drainReactions();
-		expect(await track.start()).toBe(1n);
+		expect(hooks.sourceStart(track)).toBe(1n);
 	} finally {
 		track.close();
 		broadcast.close();
@@ -2979,16 +3074,20 @@ test("a stale drop is recorded under the narrowest budget asked on lite-07", asy
 		await opened(0);
 		await answerTrackInfo(streams[0], version);
 		const stream = await opened(1);
+		const sent = new Reader(stream.outbound, undefined, version);
+		expect(await sent.u53()).toBe(StreamId.Subscribe);
+		await Subscribe.decode(sent, version);
 		await stream.reading;
-		await drainReactions();
 		if (!entry) throw new Error("no subscription");
 		expect(entry.staleBudget).toBe(500);
 
+		// Each update is sent only once the previous write is credited, which may take tasks, so wait
+		// for it on the wire: the budget narrows before its update is written.
 		track.update({ delay: { max: Duration.millis(5000) } });
-		await drainReactions();
+		expect((await SubscribeUpdate.decode(sent, version)).maxDelay).toBe(5000);
 		expect(entry.staleBudget).toBe(500);
 		track.update({ delay: { max: Duration.millis(200) } });
-		await drainReactions();
+		expect((await SubscribeUpdate.decode(sent, version)).maxDelay).toBe(200);
 		expect(entry.staleBudget).toBe(200);
 	} finally {
 		responses.mockRestore();

@@ -55,7 +55,10 @@ impl MoqBroadcastProducer {
 		let _guard = crate::ffi::enter();
 		let info = info.unwrap_or_default().try_into()?;
 		self.with_state(|state| {
-			let producer = state.broadcast.create_datagrams(name, info)?;
+			let producer = state
+				.broadcast
+				.create_datagrams(name, info)
+				.ok_or(moq_net::Error::Duplicate)?;
 			MoqDatagramProducer::child(producer, &state.children)
 		})
 	}

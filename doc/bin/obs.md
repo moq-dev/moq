@@ -57,8 +57,10 @@ it holds whatever else the settings say:
   rewritten either, so `maxBitRate`, `averageBitRate`, or `vbvBufferSize` in them
   can override the cap, and the log warns.
 - Every other encoder runs CBR at the cap: Quick Sync's ICQ and AMF's QVBR have
-  no hard peak, and VA-API's and VideoToolbox's quality modes have not been
-  checked.
+  no hard peak, VA-API's QVBR overshot the cap on the Mesa (AMD) and Intel
+  drivers we measured, and VideoToolbox's quality mode has not been checked.
+  VA-API's `ffmpeg_opts` are never rewritten either, so `rc_mode` or `qp` in
+  them can override the cap, and the log warns.
 
 The log names each setting of yours it replaced. An encoder shared with a
 recording takes the cap too, unless the recording started first: a running

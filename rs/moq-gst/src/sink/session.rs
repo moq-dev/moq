@@ -13,6 +13,8 @@ use gst::glib;
 use gst::prelude::*;
 use gst::subclass::prelude::*;
 
+use moq_tokio::connection::{Monitor, Observation, Phase};
+
 use super::MoqSink as Element;
 
 pub(crate) static RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
@@ -293,8 +295,8 @@ impl Session {
 		// Publish through a background reconnect loop: connect, wait for close, reconnect with backoff.
 		// `timeout = 0` drops the give-up deadline so an unattended publisher outlives relay/QUIC
 		// outages of any length, which is the trade this element wants: a pipeline nobody is watching
-		// should still be publishing when the relay comes back. The loop still ends when no session
-		// stays up past the healthy bar, such as a relay refusing the token, posting the bus error
+		// should still be publishing when the relay comes back. The loop still ends when the relay
+		// never accepted a session, such as when it refuses the token, posting the bus error
 		// below. During an outage the pad threads keep writing (bounded
 		// by moq-net's per-group eviction) and the relay catches up from a group boundary on
 		// reconnect. A bounded policy is available via `ClientConfig::backoff`.
@@ -435,7 +437,7 @@ async fn wait_for_registration(registered: Arc<tokio::sync::Notify>) {
 }
 
 async fn forward_registered(
-	mut reconnect: moq_tokio::Connection,
+	reconnect: moq_tokio::Connection,
 	origin: moq_net::origin::Producer,
 	status: Arc<Status>,
 	completion: CompletionHandle,
@@ -450,28 +452,37 @@ async fn forward_registered(
 	let mut send_bandwidth = reconnect.send_bandwidth();
 	let mut recv_bandwidth = reconnect.recv_bandwidth();
 	let mut connection_stats = reconnect.monitor();
+	let monitor = reconnect.monitor();
+	// None until the first observation, which reports too: a session may connect before
+	// registration ends.
+	let mut revision = None;
 
 	loop {
 		tokio::select! {
-			// Poll status first: on a terminal error it is ready immediately, so we exit rather than
-			// spinning on the bandwidth channels the loop closes as it stops.
+			// Poll the state first: once the loop stops it is ready immediately, so we exit rather
+			// than spinning on the bandwidth channels the loop closes as it stops.
 			biased;
 
-			result = reconnect.status() => match result {
-				Ok(state) => {
-					let connection = match state {
-						moq_tokio::Status::Connected => ConnectionStatus::Connected,
-						_ => ConnectionStatus::Disconnected,
+			result = next_state(&monitor, revision) => match result {
+				Ok(observed) if !matches!(observed.phase, Phase::Closed { .. }) => {
+					revision = Some(observed.revision);
+					// A GOAWAY's migration still serves on the old session.
+					let (connection, version) = match &observed.phase {
+						Phase::Connected { version, .. } | Phase::Migrating { version, .. } => {
+							(ConnectionStatus::Connected, Some(version.to_string()))
+						}
+						_ => (ConnectionStatus::Disconnected, None),
 					};
-					status.set(connection, reconnect.version().map(|v| v.to_string()));
-					match state {
-						moq_tokio::Status::Connected => gst::info!(CAT, "session connected"),
-						moq_tokio::Status::Disconnected => gst::warning!(CAT, "session disconnected, reconnecting"),
+					status.set(connection, version);
+					match observed.phase {
+						Phase::Connected { .. } => gst::info!(CAT, "session connected"),
+						Phase::Migrating { .. } => gst::info!(CAT, "session migrating after a GOAWAY"),
+						Phase::Disconnected { .. } => gst::warning!(CAT, "session disconnected, reconnecting"),
 						_ => {}
 					}
 					notify(&element, &["status", "connected", "moq-version", "connection-stats"]);
 				}
-				Err(_) => {
+				_ => {
 					// `closed` tells a stop from a give-up. A stop is what `Session::stop` asked for: its
 					// abort cannot cancel a poll already in flight, so the loop's end can reach the task
 					// before the task ends.
@@ -503,16 +514,18 @@ async fn forward_registered(
 					Err(_) => return,
 				},
 			result = connection_stats.presence_changed() => match result {
-				Ok(_) => {
-					// A flap that lands back on the reported status (Connected -> Disconnected ->
-					// Connected) never wakes the status arm above, so refresh the cached version
-					// here or moq-version would keep the previous session's value.
-					status.set(status.status(), reconnect.version().map(|v| v.to_string()));
-					notify(&element, &["sessions", "connection-stats", "moq-version"]);
-				}
+				Ok(_) => notify(&element, &["sessions", "connection-stats"]),
 				Err(_) => return,
 			},
 		}
+	}
+}
+
+/// The connection's state at once the first time, then once it changes from revision `after`.
+async fn next_state(monitor: &Monitor, after: Option<u64>) -> moq_tokio::Result<Observation> {
+	match after {
+		None => Ok(monitor.state()),
+		Some(after) => monitor.state_changed(after).await,
 	}
 }
 

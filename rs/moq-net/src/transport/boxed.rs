@@ -395,14 +395,14 @@ impl Listed {
 		open::Rank::new(state.group.as_ref().map(|group| group.read()), state.priority)
 	}
 
-	/// Whether the peer acknowledged everything written to it, never assumed when the transport
-	/// cannot tell.
+	/// Whether the peer acknowledged everything written to it, always so for a transport that
+	/// cannot see acknowledgments.
 	pub(super) fn acknowledged(&self) -> bool {
 		let state = self.lock();
 		let offset = state.stream.offset();
 		matches!(
 			state.stream.poll_acked(&kio::Waiter::noop(), &offset),
-			Poll::Ready(Ok(poll::Acked::Delivered))
+			Poll::Ready(Ok(()))
 		)
 	}
 
@@ -588,7 +588,6 @@ pub(super) trait ErasedSession: Send + Sync {
 	fn probe(&self) -> Option<Probe>;
 	fn receive_window(&self) -> Option<ReceiveWindow>;
 	fn set_limits(&self, limits: Limits) -> Result<(), LimitsError>;
-	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]>;
 }
 
 trait ErasedGroup: Send + Sync {
@@ -606,7 +605,7 @@ trait ErasedSend: Send + Sync {
 	fn reset(&mut self, code: u32);
 	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Error>>;
 	fn offset(&self) -> Offset;
-	fn poll_acked(&self, waiter: &kio::Waiter, offset: &Offset) -> Poll<Result<poll::Acked, Error>>;
+	fn poll_acked(&self, waiter: &kio::Waiter, offset: &Offset) -> Poll<Result<(), Error>>;
 }
 
 trait ErasedRecv: Send + Sync {
@@ -729,10 +728,6 @@ impl<S: poll::Boxable> ErasedSession for S {
 	fn set_limits(&self, limits: Limits) -> Result<(), LimitsError> {
 		poll::Session::set_limits(self, limits)
 	}
-
-	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
-		poll::Session::export_keying_material(self, label, context)
-	}
 }
 
 impl<G: poll::SendGroup + Send + Sync> ErasedGroup for G {
@@ -788,7 +783,7 @@ impl<T: poll::SendStream<Group: Send + Sync, Offset: Send + Sync> + Send + Sync>
 		Offset(Box::new(poll::SendStream::offset(self)))
 	}
 
-	fn poll_acked(&self, waiter: &kio::Waiter, offset: &Offset) -> Poll<Result<poll::Acked, Error>> {
+	fn poll_acked(&self, waiter: &kio::Waiter, offset: &Offset) -> Poll<Result<(), Error>> {
 		let offset = offset
 			.0
 			.downcast_ref::<T::Offset>()
@@ -942,10 +937,6 @@ impl poll::Session for Session {
 	fn set_limits(&self, limits: Limits) -> Result<(), LimitsError> {
 		self.inner.session.set_limits(limits)
 	}
-
-	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
-		self.inner.session.export_keying_material(label, context)
-	}
 }
 
 impl poll::SendStream for SendStream {
@@ -957,7 +948,7 @@ impl poll::SendStream for SendStream {
 		self.get().offset()
 	}
 
-	fn poll_acked(&self, waiter: &kio::Waiter, offset: &Offset) -> Poll<Result<poll::Acked, Error>> {
+	fn poll_acked(&self, waiter: &kio::Waiter, offset: &Offset) -> Poll<Result<(), Error>> {
 		self.get().poll_acked(waiter, offset)
 	}
 
@@ -1204,9 +1195,9 @@ mod test {
 			self.written
 		}
 
-		fn poll_acked(&self, _: &kio::Waiter, offset: &u64) -> Poll<Result<poll::Acked, Self::Error>> {
+		fn poll_acked(&self, _: &kio::Waiter, offset: &u64) -> Poll<Result<(), Self::Error>> {
 			match *offset <= self.acked {
-				true => Poll::Ready(Ok(poll::Acked::Delivered)),
+				true => Poll::Ready(Ok(())),
 				false => Poll::Pending,
 			}
 		}
@@ -1233,8 +1224,8 @@ mod test {
 		}
 	}
 
-	/// A boxed stream hands back the transport's own offset, and reports a transport
-	/// without acknowledgments as unsupported, listed or not.
+	/// A boxed stream hands back the transport's own offset, and a transport without
+	/// acknowledgments answers at once, listed or not.
 	#[test]
 	fn a_boxed_stream_forwards_acknowledgment() {
 		let waiter = kio::Waiter::noop();
@@ -1251,7 +1242,7 @@ mod test {
 		let five = poll::SendStream::offset(&stream);
 		assert!(matches!(
 			poll::SendStream::poll_acked(&stream, &waiter, &three),
-			Poll::Ready(Ok(poll::Acked::Delivered))
+			Poll::Ready(Ok(()))
 		));
 		assert!(poll::SendStream::poll_acked(&stream, &waiter, &five).is_pending());
 
@@ -1260,7 +1251,7 @@ mod test {
 		let offset = poll::SendStream::offset(&listed);
 		assert!(matches!(
 			poll::SendStream::poll_acked(&listed, &waiter, &offset),
-			Poll::Ready(Ok(poll::Acked::Unsupported))
+			Poll::Ready(Ok(()))
 		));
 	}
 
@@ -1291,7 +1282,7 @@ mod test {
 	}
 
 	/// A grouped stream ranks by its group's current priority, and follows a move to another
-	/// group; a transport that cannot tell reports no acknowledgement.
+	/// group; a transport that cannot see acknowledgements reports its bytes acknowledged.
 	#[test]
 	fn a_listed_stream_ranks_by_its_group() {
 		let session = Session::new(SinkSession::new(Default::default()).with_groups());
@@ -1309,12 +1300,12 @@ mod test {
 			open::Rank::Ungrouped { .. } => panic!("the stream is in a group"),
 		};
 		assert_eq!(grouped(&session), (1, 2));
-		assert!(!session.open_streams()[0].1.acknowledged());
 
 		poll::SendGroup::set_priority(&mut low, 3);
 		assert_eq!(grouped(&session), (3, 2));
 		poll::SendStream::set_group(&mut stream, &high);
 		assert_eq!(grouped(&session), (5, 2));
+		assert!(session.open_streams()[0].1.acknowledged());
 	}
 
 	/// A stream accepted while the connection window was held back, such as one buffered

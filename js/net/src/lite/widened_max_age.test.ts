@@ -4,6 +4,7 @@
 import { expect, test } from "bun:test";
 import { Duration } from "@moq/clock";
 import { accept, connect } from "../connection/index.ts";
+import { defined } from "../defined.test-util.ts";
 import { hooks } from "../internal.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
@@ -31,7 +32,7 @@ test("a widened maxDelay re-offers what the publisher skipped below the start", 
 	const origin = new OriginProducer();
 	const publication = origin.route(Path.from("room"));
 	const broadcast = publication.broadcast;
-	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 	// One group per second, so a budget picks how far back a reader reaches.
 	for (let key = 0; key < 10; key++) {
 		const group = hooks.appendNext(producer);
@@ -73,7 +74,7 @@ for (const [version, alpn] of [
 		const origin = new OriginProducer();
 		const publication = origin.route(Path.from("room"));
 		const broadcast = publication.broadcast;
-		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+		const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 		const write = (key: number, millis: number) => {
 			const group = producer.createGroup(BigInt(key));
 			group.writeFrame({ payload: new Uint8Array([key]), timestamp: Timestamp.fromMillis(millis) });
@@ -123,7 +124,7 @@ test("a widening recovers the stale groups for a bounded lite-07 reader", async 
 	const origin = new OriginProducer();
 	const publication = origin.route(Path.from("room"));
 	const broadcast = publication.broadcast;
-	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 	const write = (key: number, millis: number) => {
 		const group = producer.createGroup(BigInt(key));
 		group.writeFrame({ payload: new Uint8Array([key]), timestamp: Timestamp.fromMillis(millis) });

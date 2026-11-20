@@ -59,10 +59,10 @@ impl Subscribe<'_> {
 /// One end of a [`Range`], as the wire carries it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Anchor {
-	/// A position: a start delivers from it, and an end stops just before it. Only lite-06
-	/// bounds a range partway through a group. Lite-07 has no such type: a group's start is its
-	/// time, so it goes out as a [`Anchor::Time`], an end as the time just before it, and
-	/// decodes as one.
+	/// A position: a start delivers from it, and an end stops just before it. Lite-06 bounds
+	/// either end partway through a group. A group's start is its time, so lite-07 sends one
+	/// at a group's first frame as an [`Anchor::Time`], an end as the time just before it, and
+	/// a start partway through a group as its Position type, which only a start may be.
 	Absolute(crate::track::Position),
 	/// The group this many before the latest, included as an end. Lite07+ only, except a
 	/// start of 0 (see [`Range`]).
@@ -310,8 +310,8 @@ fn decode_range_list(r: &mut Decoder<'_>) -> Result<Vec<Range>, DecodeError> {
 	// count the bytes can't back runs out before it costs anything.
 	let mut ranges = Vec::new();
 	for _ in 0..count {
-		let start = decode_anchor(r)?;
-		let end = decode_anchor(r)?;
+		let start = decode_anchor(r, false)?;
+		let end = decode_anchor(r, true)?;
 		ranges.push(Range { start, end });
 	}
 	Ok(ranges)
@@ -322,10 +322,10 @@ fn encode_range_list(w: &mut Encoder<'_>, ranges: &[Range]) -> Result<(), Encode
 	w.varint(ranges.len() as u64)?;
 	for range in ranges {
 		for (anchor, end) in [(range.start, false), (range.end, true)] {
-			let (kind, value) = wire_anchor(anchor, end)?;
+			let (kind, values) = wire_anchor(anchor, end)?;
 			w.varint(kind)?;
-			if let Some(value) = value {
-				w.varint(value)?;
+			for value in values.iter().flatten() {
+				w.varint(*value)?;
 			}
 		}
 	}
@@ -333,42 +333,60 @@ fn encode_range_list(w: &mut Encoder<'_>, ranges: &[Range]) -> Result<(), Encode
 }
 
 /// The bytes a lite-07 range takes on the wire, or `None` when it can't go out.
-fn range_size(range: &Range, form: Form) -> Option<usize> {
+pub(super) fn range_size(range: &Range, form: Form) -> Option<usize> {
 	let size = |value| varint::size(value, form).ok();
 	let anchor = |anchor, end| -> Option<usize> {
-		let (kind, value) = wire_anchor(anchor, end).ok()?;
-		Some(size(kind)? + value.map_or(Some(0), size)?)
+		let (kind, values) = wire_anchor(anchor, end).ok()?;
+		values
+			.iter()
+			.flatten()
+			.try_fold(size(kind)?, |total, value| Some(total + size(*value)?))
 	};
 	Some(anchor(range.start, false)? + anchor(range.end, true)?)
 }
 
 /// Decode one lite-07 range end: its type, then the fields that type carries. Type 0 is no
-/// anchor, the oldest group as a start and the live edge as an end.
-fn decode_anchor(r: &mut Decoder<'_>) -> Result<Option<Anchor>, DecodeError> {
+/// anchor, the oldest group as a start and the live edge as an end. Type 3, a position
+/// partway through a group, is a start only, so `end` refuses it, and so is one at frame 0,
+/// which type 1 says.
+fn decode_anchor(r: &mut Decoder<'_>, end: bool) -> Result<Option<Anchor>, DecodeError> {
 	Ok(match r.varint()? {
 		0 => None,
 		1 => Some(Anchor::Time(r.varint()?)),
 		2 => Some(Anchor::Relative(r.varint()?)),
+		3 if !end => {
+			let group = r.varint()?;
+			let frame = r.varint()?;
+			if frame == 0 {
+				return Err(DecodeError::InvalidValue);
+			}
+			Some(Anchor::Absolute(crate::track::Position { group, frame }))
+		}
 		_ => return Err(DecodeError::InvalidValue),
 	})
 }
 
-/// The lite-07 type and value of a range's start or `end`, the inverse of [`decode_anchor`].
+/// The lite-07 type and values of a range's start or `end`, the inverse of [`decode_anchor`].
 ///
-/// An absolute position goes out as its group's time: a start as is, and an exclusive end as
-/// the inclusive time just before it, an end at group 0 holding nothing a time can say. A
-/// range covers whole groups, so a position partway through one is refused: FETCH reads a
-/// slice of a group.
-fn wire_anchor(anchor: Option<Anchor>, end: bool) -> Result<(u64, Option<u64>), EncodeError> {
+/// An absolute position at a group's first frame goes out as its group's time: a start as
+/// is, and an exclusive end as the inclusive time just before it, an end at group 0 holding
+/// nothing a time can say. A start partway through a group goes out as a position, its
+/// group's start then the frame; an end there is refused, since FETCH reads a slice of a group.
+fn wire_anchor(anchor: Option<Anchor>, end: bool) -> Result<(u64, [Option<u64>; 2]), EncodeError> {
 	Ok(match anchor {
-		None => (0, None),
-		Some(Anchor::Time(time)) => (1, Some(time)),
-		Some(Anchor::Relative(back)) => (2, Some(back)),
-		Some(Anchor::Absolute(position)) if position.frame != 0 => return Err(EncodeError::Version),
-		Some(Anchor::Absolute(position)) if end => {
-			(1, Some(position.group.checked_sub(1).ok_or(EncodeError::InvalidState)?))
-		}
-		Some(Anchor::Absolute(position)) => (1, Some(position.group)),
+		None => (0, [None, None]),
+		Some(Anchor::Time(time)) => (1, [Some(time), None]),
+		Some(Anchor::Relative(back)) => (2, [Some(back), None]),
+		Some(Anchor::Absolute(position)) if position.frame != 0 && end => return Err(EncodeError::Version),
+		Some(Anchor::Absolute(position)) if position.frame != 0 => (3, [Some(position.group), Some(position.frame)]),
+		Some(Anchor::Absolute(position)) if end => (
+			1,
+			[
+				Some(position.group.checked_sub(1).ok_or(EncodeError::InvalidState)?),
+				None,
+			],
+		),
+		Some(Anchor::Absolute(position)) => (1, [Some(position.group), None]),
 	})
 }
 
@@ -841,6 +859,45 @@ pub(crate) struct LiveRanges {
 	initial: u64,
 }
 
+/// A received update's ranges, resolved against the live ones by Range ID.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Applied {
+	/// Lite-07: the Range IDs retired, then each range added with its Range ID, so applying
+	/// it costs the ranges it names.
+	Edit {
+		retired: Vec<u64>,
+		added: Vec<(u64, Range)>,
+	},
+	/// Before lite-07: every live range, numbered afresh.
+	Replace(Vec<(u64, Range)>),
+}
+
+impl Applied {
+	/// This followed by `later`, as one: a range `later` retires that this added never was.
+	/// Holds no more than the ranges live before this and after `later`.
+	pub fn then(self, later: Self) -> Self {
+		match (self, later) {
+			(
+				Self::Edit { mut retired, mut added },
+				Self::Edit {
+					retired: gone,
+					added: came,
+				},
+			) => {
+				let gone: std::collections::BTreeSet<u64> = gone.into_iter().collect();
+				// Each Range ID is added once, so one this added and `later` retired was never live.
+				let fresh: std::collections::BTreeSet<u64> =
+					added.iter().map(|(id, _)| *id).filter(|id| gone.contains(id)).collect();
+				added.retain(|(id, _)| !fresh.contains(id));
+				retired.extend(gone.difference(&fresh));
+				added.extend(came);
+				Self::Edit { retired, added }
+			}
+			(_, later) => later,
+		}
+	}
+}
+
 impl LiveRanges {
 	/// The ranges a SUBSCRIBE carried.
 	pub fn new(version: Version, ranges: &[Range]) -> Self {
@@ -873,7 +930,13 @@ impl LiveRanges {
 		Some(range)
 	}
 
+	/// The Range ID the next range added takes.
+	pub fn next(&self) -> u64 {
+		self.next
+	}
+
 	/// Every live range with its Range ID, in Range ID order.
+	#[cfg(test)]
 	pub fn numbered(&self) -> Vec<(u64, Range)> {
 		self.iter().map(|(id, range)| (id, *range)).collect()
 	}
@@ -910,21 +973,24 @@ impl LiveRanges {
 		self.initial
 	}
 
-	/// Resolve a received edit, returning every live range with its Range ID.
-	pub fn apply(&mut self, edit: RangeEdit) -> Result<Vec<(u64, Range)>, DecodeError> {
-		match edit {
+	/// Resolve a received edit by Range ID, costing the ranges it names.
+	pub fn apply(&mut self, edit: RangeEdit) -> Result<Applied, DecodeError> {
+		let applied = match edit {
 			RangeEdit::Replace(ranges) if !self.version.has_ranges() => {
 				*self = Self::new(self.version, &ranges);
+				Applied::Replace(self.iter().map(|(id, range)| (id, *range)).collect())
 			}
 			RangeEdit::Edit { remove, add } if self.version.has_ranges() => {
-				for id in remove {
+				for id in &remove {
 					// An id never assigned, or already retired (including earlier in this list).
-					self.remove(id).ok_or(DecodeError::InvalidValue)?;
+					self.remove(*id).ok_or(DecodeError::InvalidValue)?;
 				}
+				let added = (self.next..).zip(add.iter().copied()).collect();
 				self.add(add);
+				Applied::Edit { retired: remove, added }
 			}
 			_ => return Err(DecodeError::Version),
-		}
+		};
 		// Asking for nothing is refused like a SUBSCRIBE that does, and a set no SUBSCRIBE
 		// could carry like one too large to send.
 		if self.live.is_empty() {
@@ -933,7 +999,7 @@ impl LiveRanges {
 		if self.size > super::message::MAX_MESSAGE_SIZE {
 			return Err(DecodeError::TooMany);
 		}
-		Ok(self.numbered())
+		Ok(applied)
 	}
 
 	/// The edit that keeps the live ranges as they are.
@@ -1001,15 +1067,26 @@ impl LiveRanges {
 			})
 			.copied()
 			.collect();
+		let add: Vec<Range> = added.iter().map(|(_, range)| *range).collect();
+		// Checked before anything changes, so a refused edit leaves the ranges as last sent.
+		let form = self.version.into();
+		let size = |range: &Range| range_size(range, form).unwrap_or(usize::MAX);
+		let removed = remove
+			.iter()
+			.map(|id| size(&self.live[id]))
+			.fold(0, usize::saturating_add);
+		let size = add
+			.iter()
+			.map(size)
+			.fold(self.size.saturating_sub(removed), usize::saturating_add);
+		if size > super::message::MAX_MESSAGE_SIZE {
+			return Err(EncodeError::TooLarge);
+		}
 		for &id in &remove {
 			self.remove(id);
 		}
-		let ids = (self.next..).zip(added.iter().map(|(key, _)| *key)).collect();
-		let add: Vec<Range> = added.into_iter().map(|(_, range)| range).collect();
+		let ids = (self.next..).zip(added.into_iter().map(|(key, _)| key)).collect();
 		self.add(add.iter().copied());
-		if self.size > super::message::MAX_MESSAGE_SIZE {
-			return Err(EncodeError::TooLarge);
-		}
 		Ok((RangeEdit::Edit { remove, add }, ids))
 	}
 }
@@ -1556,12 +1633,14 @@ mod test {
 		msg.node = Some(crate::route::NodeId {
 			relay: 0x7a3f,
 			start: 9,
+			marked: false,
 		});
 		assert_eq!(
 			roundtrip(&msg, Version::Lite07).node,
 			Some(crate::route::NodeId {
 				relay: 0x7a3f,
-				start: 9
+				start: 9,
+				marked: false,
 			})
 		);
 		assert_eq!(roundtrip(&msg, Version::Lite06).node, None);
@@ -1730,12 +1809,8 @@ mod test {
 		let got = crate::coding::decode_buf(&mut buf.as_ref(), Version::Lite07, |r, v| SubscribeUpdate::decode(r, v))
 			.unwrap();
 		let mut live = LiveRanges::new(Version::Lite07, &[Range::OLDEST]);
-		let resolved: Vec<_> = live
-			.apply(got.ranges)
-			.unwrap()
-			.into_iter()
-			.map(|(_, range)| range)
-			.collect();
+		live.apply(got.ranges).unwrap();
+		let resolved: Vec<_> = live.iter().map(|(_, range)| *range).collect();
 		assert_eq!(resolved, msg.ranges);
 	}
 
@@ -1763,30 +1838,36 @@ mod test {
 		assert!(matches!(encode(&msg, Version::Lite07), Err(EncodeError::InvalidState)));
 	}
 
-	/// A lite-07 range covers whole groups: an absolute anchor is its type and group alone,
-	/// and one partway through a group is refused, since FETCH reads a slice of a group.
+	/// A lite-07 start may fall partway through a group, as its Position type: the group's
+	/// start, then the frame. An end there is refused, since FETCH reads a slice of a group,
+	/// and so is a Position at frame 0, which a Time says.
 	#[test]
-	fn lite07_ranges_cover_whole_groups() {
+	fn lite07_starts_partway_through_a_group() {
 		let mut msg = framed_sample();
 		assert!(matches!(encode(&msg, Version::Lite07), Err(EncodeError::Version)));
 		msg.ranges = vec![Range {
 			start: absolute(7, 4),
 			end: None,
 		}];
-		assert!(matches!(encode(&msg, Version::Lite07), Err(EncodeError::Version)));
+		assert_eq!(roundtrip(&msg, Version::Lite07).ranges, msg.ranges);
+		let position = encode(&msg, Version::Lite07).unwrap();
+		// Type 3, start 7, frame 4, then no end.
+		assert!(position.ends_with(&[1, 3, 7, 4, 0]), "{position:?}");
+		assert_eq!(
+			range_size(&msg.ranges[0], Version::Lite07.into()),
+			Some(4),
+			"the size a range takes counts both fields"
+		);
 
-		msg.ranges = vec![Range {
-			start: absolute(7, 0),
-			end: absolute(9, 0),
-		}];
-		let whole = encode(&msg, Version::Lite07).unwrap();
-		msg.ranges = vec![Range {
-			start: Some(Anchor::Relative(7)),
-			end: Some(Anchor::Relative(9)),
-		}];
-		// The same bytes but the two types: no frame follows either group.
-		let relative = encode(&msg, Version::Lite07).unwrap();
-		assert_eq!(whole.len(), relative.len());
+		let decode = |tail: &[u8]| {
+			let mut wire = position.clone();
+			wire.truncate(position.len() - 5);
+			wire.extend_from_slice(tail);
+			crate::coding::decode_from(&mut wire.as_slice(), Version::Lite07, Subscribe::decode_msg).map(|_| ())
+		};
+		assert!(decode(&[1, 3, 7, 4, 0]).is_ok());
+		assert!(matches!(decode(&[1, 3, 7, 0, 0]), Err(DecodeError::InvalidValue)));
+		assert!(matches!(decode(&[1, 1, 7, 3, 9, 4]), Err(DecodeError::InvalidValue)));
 	}
 
 	/// An update sends only the ranges that changed, and the publisher resolves the same list,
@@ -1824,7 +1905,8 @@ mod test {
 			let buf = update.encode_bytes(version).unwrap();
 			let got =
 				crate::coding::decode_buf(&mut buf.as_ref(), version, |r, v| SubscribeUpdate::decode(r, v)).unwrap();
-			assert_eq!(live.apply(got.ranges).unwrap(), sent.numbered());
+			live.apply(got.ranges).unwrap();
+			assert_eq!(live.numbered(), sent.numbered());
 		};
 
 		let edit = |remove: &[u64], add: &[Range]| RangeEdit::Edit {
@@ -1877,6 +1959,66 @@ mod test {
 			}
 		}
 		assert!(refused, "the live ranges are held to one SUBSCRIBE");
+	}
+
+	/// An edit resolves to the Range IDs it names, and edits waiting to apply fold into one
+	/// that names what stayed retired or added.
+	#[test]
+	fn lite07_an_edit_names_its_range_ids() {
+		let mut live = LiveRanges::new(Version::Lite07, &[Range::OLDEST]);
+		let range = |group| Range {
+			start: absolute(group, 0),
+			end: None,
+		};
+		let first = live
+			.apply(RangeEdit::Edit {
+				remove: vec![0],
+				add: vec![range(4), range(5)],
+			})
+			.unwrap();
+		assert_eq!(
+			first,
+			Applied::Edit {
+				retired: vec![0],
+				added: vec![(1, range(4)), (2, range(5))],
+			}
+		);
+		let second = live
+			.apply(RangeEdit::Edit {
+				remove: vec![1],
+				add: vec![range(6)],
+			})
+			.unwrap();
+		assert_eq!(
+			first.then(second),
+			Applied::Edit {
+				retired: vec![0],
+				added: vec![(2, range(5)), (3, range(6))],
+			}
+		);
+	}
+
+	/// An edit to ranges too large for a SUBSCRIBE is refused before anything changes, so the
+	/// live ranges stay those last sent and the next edit is made against them.
+	#[test]
+	fn lite07_a_refused_edit_leaves_the_ranges_as_sent() {
+		let mut live = LiveRanges::new(Version::Lite07, &[Range::OLDEST]);
+		let wide: Vec<Range> = (0..super::super::message::MAX_MESSAGE_SIZE as u64 / 4)
+			.map(|group| Range {
+				start: absolute(group << 20, 0),
+				end: absolute((group << 20) + 1, 0),
+			})
+			.collect();
+		assert!(matches!(live.edit(&wide), Err(EncodeError::TooLarge)));
+		assert_eq!(live.numbered(), [(0, Range::OLDEST)]);
+		assert_eq!(live.next(), 1);
+		assert_eq!(
+			live.edit(&wide[..2]).unwrap(),
+			RangeEdit::Edit {
+				remove: vec![0],
+				add: wide[..2].to_vec(),
+			}
+		);
 	}
 
 	/// SUBSCRIBE_STARTED is type 4 on lite-07 and unknown before it.

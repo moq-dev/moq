@@ -214,7 +214,7 @@ fn run(session: Session, info: &track::Info, body: &[u8], chunk: usize) -> Optio
 	// Unbounded, so eviction never aborts a group mid-frame.
 	broadcast.pool = cache::Pool::unbounded();
 	let broadcast = broadcast.produce();
-	let track = broadcast.create_track("ingest", info.clone()).ok()?;
+	let track = broadcast.create_track("ingest", info.clone())?;
 
 	let (end, fin, group) = match session {
 		Session::Lite {
@@ -267,15 +267,15 @@ fn run(session: Session, info: &track::Info, body: &[u8], chunk: usize) -> Optio
 	};
 
 	let (group, consumer) = group;
-	// Settle the group as the session does, so the reader below never waits.
-	match &end {
-		Ok(_) => {
-			let _ = group.end(fin);
-		}
+	// Settle the group as the session does, so the reader below never waits. A GROUP_END
+	// the group refuses, such as one before a frame it holds, fails the stream there too.
+	let end = match end {
+		Ok(said) => group.end(fin).map(|()| said),
 		Err(err) => {
 			let _ = group.abort(err.clone());
+			Err(err)
 		}
-	}
+	};
 
 	Some(Ingested {
 		frames: read(consumer, info.compressed()),

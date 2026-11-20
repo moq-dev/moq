@@ -126,7 +126,7 @@ export type Part = {
 };
 
 /** A window of one track's arrivals: when it opened and the earliest reference among them. @internal */
-export type Window = { start: number; least: number };
+type Window = { start: number; least: number };
 
 /**
  * Where the clock's current timeline stands. `idle` has not played and holds nothing back: it is
@@ -471,8 +471,6 @@ export class Sync {
 	readonly #clock: Clock;
 	/** Whether buffered startup has released the media consumers. @internal */
 	readonly playing: Getter<boolean>;
-	/** Changes whenever {@link Sync.now} jumps rather than advancing with the wall clock: a re-anchor, a new delay, or a pause. */
-	readonly anchor: Getter<unknown>;
 
 	#signals = new Effect();
 
@@ -481,10 +479,6 @@ export class Sync {
 		this.in = this.#clock.in;
 		this.out = readonlys(this.#clock.out);
 		this.playing = this.#clock.playing;
-		this.anchor = new Derived(
-			[this.#clock.out.reference, this.#clock.out.delay, this.#clock.playing],
-			(reference, delay, playing) => ({ reference, delay, playing }),
-		);
 
 		this.#signals.run(this.#runInstant.bind(this));
 		this.#signals.run(this.#runDelay.bind(this));

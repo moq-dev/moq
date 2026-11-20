@@ -63,7 +63,7 @@ pub(crate) struct State {
 	/// How far the connection's end has reached the handles' `poll_closed`.
 	///
 	/// A latch of its own rather than moq-quic's `poll_closed`, which resolves a
-	/// local close as soon as it is asked for. Only the driver knows when the
+	/// close before its CONNECTION_CLOSE is sent. Only the driver knows when the
 	/// CONNECTION_CLOSE is staged on the socket, which moq-quic cannot see, and
 	/// a caller may stop driving the worker the moment `poll_closed` resolves,
 	/// so publishing earlier would leave the packet unsent.
@@ -73,8 +73,8 @@ pub(crate) struct State {
 
 /// The connection's terminal error as its handles see it, set once.
 enum End {
-	/// `poll_closed` pends: the connection is open, or this side closed it and the
-	/// driver has yet to stage the CONNECTION_CLOSE (see `Driver::publish_close`).
+	/// `poll_closed` pends: the connection is open, or it owes the peer a
+	/// CONNECTION_CLOSE the driver has yet to stage (see `Driver::publish_close`).
 	Open,
 	/// moq-quic's reason, published by the driver, which runs out the drain.
 	Closed(Error),
@@ -301,12 +301,6 @@ impl Connection {
 	/// is an authenticated peer, and the chain is what names it.
 	pub fn peer_identity(&self) -> Option<Vec<rustls::pki_types::CertificateDer<'static>>> {
 		self.shared.conn.borrow().peer_identity()
-	}
-
-	/// 32 bytes of keying material exported from the TLS session under `label` and `context`,
-	/// or `None` before the handshake completes.
-	pub(crate) fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
-		self.shared.conn.borrow().export_keying_material(label, context)
 	}
 
 	/// The peer's current UDP address, following any migration.
@@ -769,19 +763,20 @@ impl Driver {
 
 	/// Learn whether moq-quic lost the connection, and publish why.
 	///
-	/// The driver publishes a local close once it has staged the
-	/// CONNECTION_CLOSE, so a caller that stops driving the worker the moment
-	/// `poll_closed` resolves has at least handed the packet over.
+	/// A loss that owes the peer a CONNECTION_CLOSE is published once the
+	/// driver has staged it, so a caller that stops driving the worker the
+	/// moment `poll_closed` resolves has at least handed the packet over.
 	fn check_lost(&mut self, waiter: &kio::Waiter) {
-		let lost = self.shared.conn.borrow_mut().poll_closed(waiter);
-		if let Poll::Ready(reason) = lost
-			&& !matches!(reason, moq_quic::connection::Error::LocallyClosed { .. })
+		let mut conn = self.shared.conn.borrow_mut();
+		if let Poll::Ready(reason) = conn.poll_closed(waiter)
+			&& !conn.owes_close()
 		{
+			drop(conn);
 			self.shared.state.borrow_mut().publish(reason.into());
 		}
 	}
 
-	/// Publish the terminal error for a close this side asked for.
+	/// Publish the terminal error for a loss that owed the peer a CONNECTION_CLOSE.
 	///
 	/// Only once the CONNECTION_CLOSE is staged (or the drain is over), since
 	/// an application is free to stop driving the worker the moment
@@ -855,12 +850,13 @@ impl Driver {
 			// Nothing to send registers us until the application queues
 			// something; paced, the timer re-polls us. Either way the buffer
 			// returns to the pool on drop.
+			let owed = conn.owes_close();
 			let Poll::Ready(transmit) = conn.poll_transmit(waiter, self.shared.owner.now(), segments, &mut tx) else {
 				return Poll::Pending;
 			};
 			self.shared.wire.set_sent_bytes(conn.stats().udp_tx.bytes);
-			// Once closed, moq-quic transmits nothing but the CONNECTION_CLOSE.
-			(transmit, conn.is_closed())
+			// This transmit carries the CONNECTION_CLOSE the loss owed.
+			(transmit, owed && !conn.owes_close())
 		};
 		debug_assert_eq!(transmit.size, tx.len());
 

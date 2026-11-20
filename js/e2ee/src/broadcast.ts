@@ -39,19 +39,27 @@ export class Producer {
 	/**
 	 * Create the track for `semantic` under its physical name.
 	 *
-	 * Rejects with {@link Failure} `identity` past 65535 bytes, `reuse` if this generation already
-	 * produced the name (even on another broadcast), or the net error if the broadcast already
-	 * holds it.
+	 * Resolves `undefined` while the broadcast already holds it. Rejects with {@link Failure}
+	 * `identity` past 65535 bytes, or `reuse` if this generation already produced the name (even
+	 * on another broadcast).
 	 */
-	async createTrack(semantic: string, info: NetTrack.InfoInit = {}): Promise<Track.Producer> {
+	async createTrack(semantic: string, info: NetTrack.InfoInit = {}): Promise<Track.Producer | undefined> {
 		const name = await this.generation.name(semantic);
-		return this.generation.produce(this.#inner.createTrack(name, info), semantic);
+		const track = this.#inner.createTrack(name, info);
+		return track && this.generation.produce(track, semantic);
 	}
 
-	/** Create a protected datagram track in its own namespace and sequence space. */
-	async createDatagrams(semantic: string, info: Partial<NetDatagram.Info> = {}): Promise<Datagram.Producer> {
+	/**
+	 * Create a protected datagram track in its own namespace and sequence space, or `undefined`
+	 * while the broadcast already holds a live one of that name.
+	 */
+	async createDatagrams(
+		semantic: string,
+		info: Partial<NetDatagram.Info> = {},
+	): Promise<Datagram.Producer | undefined> {
 		const name = await this.generation.name(semantic);
-		return this.generation.produceDatagrams(this.#inner.createDatagrams(name, info), semantic);
+		const track = this.#inner.createDatagrams(name, info);
+		return track && this.generation.produceDatagrams(track, semantic);
 	}
 
 	/** End the wrapped broadcast, as `@moq/net`'s `close` does. Idempotent. */

@@ -20,6 +20,11 @@ use crate::{Error, Frame, Level};
 /// catalog clock's own correlation. A host that reports no usable capture time, and system audio,
 /// are stamped once by the capture producer before fanout.
 ///
+/// The device counts samples on its own clock, so the encode resamples by up to 2000 ppm to keep
+/// each buffer at its capture instant rather than drift from it by the sample count. Stamps that
+/// stay over 100 ms behind for a second, such as after a suspended host, re-anchor the timeline so
+/// the gap lands in the PTS; over 100 ms ahead, input is dropped until they catch up.
+///
 /// `#[non_exhaustive]`: construct via [`Capture::new`] and set
 /// fields, so new publication settings can be added without changing
 /// [`publish_capture`].
@@ -120,7 +125,7 @@ pub fn publish_capture<E: CatalogExt>(
 ) -> Result<(Publication, Driver), Error> {
 	let clock = catalog.clock();
 	let input = options.capture.input().clone();
-	let producer = Producer::new(&mut broadcast, catalog, input, &options.encode)?;
+	let producer = Producer::capture(&mut broadcast, catalog, input, &options.encode)?;
 	let track_name: Arc<str> = producer.track_name().into();
 	let reservation = options.encode.bandwidth.reserve(&producer.demand(), producer.bitrate());
 	let state = kio::Producer::new(Published {
@@ -444,7 +449,7 @@ struct Retention<'a> {
 impl Retention<'_> {
 	/// Expire retained history, then encode one retained frame if wanted.
 	fn refresh(&self, producer: &mut Producer) -> Result<(), Error> {
-		let active = !self.retain || self.demand.wanted().is_some();
+		let active = !self.retain || self.demand.wanted();
 		producer.set_active(active, self.clock.now())?;
 		if !self.failed {
 			publish_state(self.state, if active { Status::Live } else { Status::Waiting });
@@ -643,7 +648,7 @@ mod tests {
 				{
 					assert!(frame < 1_000, "the viewer never got both renditions listed");
 					samples.try_push(Ok(Samples::plain(vec![0.25; 1920], false))).unwrap();
-					if frame.is_multiple_of(5) && wanted.wanted().is_some() {
+					if frame.is_multiple_of(5) && wanted.wanted() {
 						// A 2s GOP, opening with a keyframe once the capture starts.
 						let keyframe = video.needs_keyframe() || frame.is_multiple_of(100);
 						let payload: &[u8] = match keyframe {

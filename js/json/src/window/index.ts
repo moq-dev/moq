@@ -18,9 +18,9 @@
  * Trimming is therefore an op, not a group boundary, so dropping a record costs one small frame
  * instead of a roll that restates the whole window.
  *
- * The publisher rolls a group when a joiner wants a fresh one: once the ops in the open group
- * outweigh the track's `refresh` ratio times the header that opened it, a join asks for a group past
- * the largest, and the {@link Producer} restates the window there. It also rolls at the frame and
+ * The publisher rolls a group when a reader asks for a fresh one, judged by the track's `refresh`: a
+ * join once the ops in the open group outweigh its ratio times the header that opened it, or a
+ * subscriber's `refresh()`. The {@link Producer} restates the window there. It also rolls at the frame and
  * byte caps, or when the caller cuts. A {@link Consumer} never surfaces a roll.
  * `Config.checkpointRecords` bounds the suffix repeated on each roll for a long-lived window.
  *

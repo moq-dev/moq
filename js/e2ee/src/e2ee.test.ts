@@ -12,6 +12,7 @@ import {
 import * as Protected from "./broadcast.ts";
 import { Credential } from "./credential.ts";
 import type * as Datagram from "./datagram.ts";
+import { defined } from "./defined.test-util.ts";
 import { DATAGRAM, GROUP } from "./derive.ts";
 import { Failure } from "./failure.ts";
 import type * as Generation from "./generation.ts";
@@ -46,7 +47,7 @@ const text = (value: string) => encoder.encode(value);
 // No publisher limit, since the tests read groups a later one has superseded.
 function netTrack(name: string, timed = true): NetTrack.Producer {
 	const timescale = timed ? Time.Timescale.MILLI : undefined;
-	return new Broadcast.Producer().createTrack(name, { timescale, maxAge: null });
+	return defined(new Broadcast.Producer().createTrack(name, { timescale, maxAge: null }));
 }
 
 function subscribe(net: NetTrack.Producer): NetTrack.Subscriber {
@@ -247,7 +248,7 @@ test("a broadcast speaks semantic names and puts physical names on the wire", as
 	const generation = credential().produce();
 	const net = new Broadcast.Producer();
 	const producer = new Protected.Producer(net, generation);
-	const video = await producer.createTrack("video", { timescale: Time.Timescale.MILLI });
+	const video = defined(await producer.createTrack("video", { timescale: Time.Timescale.MILLI }));
 	expect(video.name).toBe(await generation.name("video"));
 
 	const consumer = await new Protected.Consumer(
@@ -435,7 +436,7 @@ test("grouped authentication failure ends the track", async () => {
 test("grouped failure wakes pending reads and releases demand", async () => {
 	const p = await pair("video");
 	const demand = p.net.demand();
-	expect(demand.wanted.peek()).toBeDefined();
+	expect(demand.wanted.peek()).toBe(true);
 
 	// One authentic frame, then silence. The group and the track stay open.
 	const open = p.net.createGroup(0n);
@@ -460,7 +461,7 @@ test("grouped failure wakes pending reads and releases demand", async () => {
 	await p.dg.producer.append(ms(3), text("independent"));
 	expect(datagramText(await datagram)).toBe("independent");
 
-	expect(demand.wanted.peek()).toBeUndefined();
+	expect(demand.wanted.peek()).toBe(false);
 	expect(badDemand.wanted.peek()).toBe(false);
 	expect(open.demand().wanted.peek()).toBe(false);
 	expect(p.net.closed.peek()).toBeUndefined();
@@ -526,7 +527,7 @@ test("closing the track consumer releases demand while a group is held", async (
 	const group = await recvGroup(p.consumer);
 	p.consumer.close();
 	// The unsubscribe lands on the next microtask.
-	while (demand.wanted.peek() !== undefined) await Promise.resolve();
+	while (demand.wanted.peek()) await Promise.resolve();
 
 	// The held group is not failed by the unsubscribe: it ends after what it holds, as in @moq/net.
 	expect(await readText(group)).toBe("ok");
@@ -547,11 +548,11 @@ test("a bad datagram stays an event and keeps demand", async () => {
 	const frame = good.readFrame();
 
 	expect(await p.dg.consumer.recv()).toEqual({ kind: "authentication", sequence: 1n });
-	expect(demand.wanted.peek()).toBeDefined();
+	expect(demand.wanted.peek()).toBe(true);
 
 	await p.dg.producer.insert(2n, ms(3), text("next"));
 	expect(datagramText(await p.dg.consumer.recv())).toBe("next");
-	expect(demand.wanted.peek()).toBeDefined();
+	expect(demand.wanted.peek()).toBe(true);
 
 	await open.writeFrame(ms(4), text("still"));
 	expect(decoder.decode((await frame)?.plaintext)).toBe("still");
@@ -877,9 +878,11 @@ test("produce waits for an unaccepted track's timescale", async () => {
 
 test("a timestamp out of range at the track's timescale spends nothing", async () => {
 	const generation = credential().produce();
-	const net = new Broadcast.Producer().createTrack(await generation.name("video"), {
-		timescale: Time.Timescale.NANO,
-	});
+	const net = defined(
+		new Broadcast.Producer().createTrack(await generation.name("video"), {
+			timescale: Time.Timescale.NANO,
+		}),
+	);
 	const consumer = generation.credential.consume(generation.epoch).consume(subscribe(net), "video");
 	const producer = await generation.produce(net, "video");
 	const huge = new Time.Timestamp(Number.MAX_SAFE_INTEGER, Time.Timescale.MILLI);

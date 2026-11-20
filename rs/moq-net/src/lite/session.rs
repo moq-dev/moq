@@ -307,9 +307,15 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 		.offer_ietf(our_setup.ietf)
 		.with_implementation(peer_implementation.clone());
 	// Without AUTH, the server checks a client's credential before its SETUP, which the
-	// client reads only after going live.
+	// client reads only after going live. With AUTH, the AUTH_OK to the connection's own
+	// credential accepts it. Lite-03/04 have neither, and lite-01/02 answered in the
+	// negotiation SETUP already read.
 	if client && version.has_setup_stream() && !version.has_auth() {
 		peer_setup_slot = peer_setup_slot.accepting(auth.clone());
+	} else if client && version.has_auth() {
+		auth.await_acceptance();
+	} else if client && matches!(version, Version::Lite03 | Version::Lite04) {
+		auth.silent();
 	}
 	// A version without a Setup Stream advertises nothing, so there is nothing to wait for.
 	if !version.has_setup_stream() {

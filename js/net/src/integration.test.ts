@@ -12,6 +12,7 @@ import {
 	connect as connectSession,
 	type Session,
 } from "./connection/index.ts";
+import { defined } from "./defined.test-util.ts";
 import { SessionCode, SessionError, StreamCode, StreamError, TooFarBehind } from "./error.ts";
 import * as Ietf from "./ietf/index.ts";
 import { Publisher as IetfPublisher } from "./ietf/publisher.ts";
@@ -21,6 +22,7 @@ import * as Instance from "./instance.ts";
 import { hooks } from "./internal.ts";
 import * as Lite from "./lite/index.ts";
 import { Publisher as LitePublisher } from "./lite/publisher.ts";
+import { Routed } from "./lite/routed.ts";
 import { createMockTransportPair, manual, settlesWithin, textFrame, waitFor } from "./mock.ts";
 import type { Consumer as OriginConsumer } from "./origin.ts";
 import { Producer as OriginProducer } from "./origin.ts";
@@ -342,7 +344,7 @@ test("integration: lite applies initial and updated group bounds", async () => {
 	]);
 
 	const broadcast = publish(origin, Path.from("test"));
-	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 	for (let key = 0n; key < GROUP_COUNT; key++) hooks.appendNext(producer).finish();
 
 	const remote = wireOf(client).consume(Path.from("test"));
@@ -398,7 +400,7 @@ test("integration: lite refuses an empty requested range on open and on update",
 	]);
 
 	const broadcast = publish(origin, Path.from("test"));
-	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	for (let key = 0; key < GROUP_COUNT; key++) hooks.appendNext(producer).finish();
 
 	const remote = wireOf(client).consume(Path.from("test"));
@@ -452,7 +454,7 @@ test("integration: lite-07 serves sparse and relative ranges", async () => {
 	]);
 
 	const broadcast = publish(origin, Path.from("test"));
-	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 	for (let key = 0; key < 10; key++) hooks.appendNext(producer).finish();
 
 	const remote = wireOf(client).consume(Path.from("test"));
@@ -483,12 +485,13 @@ test("integration: lite-07 serves sparse and relative ranges", async () => {
 });
 
 // A publisher counts a relative start back from its newest group, which may hold no frame yet and
-// so counts neither in the largest it reports nor where the copy resolves the start. The copy reports
-// the publisher's start, where a reader waiting on each group in sequence starts. Mirrors the Rust
-// `a_relative_start_reports_the_publishers_start_over_a_frameless_newest_group`.
+// so counts neither in the largest it reports nor where the copy resolves the start. The copy keeps
+// the publisher's start, so a reader waiting on each group in sequence starts there rather than
+// waiting below it for groups that never arrive. Mirrors the Rust
+// `an_ordered_reader_starts_at_the_publishers_start_over_a_frameless_newest_group`.
 // The newest group lands before the reader asks, as it can under load: a sibling reads it, so the
 // reader's own window has yet to settle on it when it asks where it starts.
-test("integration: lite-07 reports a relative start over a frameless newest group", async () => {
+test("integration: lite-07 starts an ordered read at a relative start over a frameless newest group", async () => {
 	const pair = createMockTransportPair(Lite.ALPN_07_WIP);
 	const origin = new OriginProducer();
 	const [client, server] = await Promise.all([
@@ -497,7 +500,7 @@ test("integration: lite-07 reports a relative start over a frameless newest grou
 	]);
 
 	const broadcast = publish(origin, Path.from("test"));
-	const producer = broadcast.createTrack("video", { maxAge: null });
+	const producer = defined(broadcast.createTrack("video", { maxAge: null }));
 	for (let key = 0; key < 5; key++) {
 		const group = hooks.appendNext(producer);
 		group.writeFrame({ payload: new Uint8Array([key]), timestamp: Timestamp.unscaled(group.start) });
@@ -507,16 +510,16 @@ test("integration: lite-07 reports a relative start over a frameless newest grou
 
 	const remote = wireOf(client).consume(Path.from("test"));
 	const subscription = { delay: { max: null }, ranges: [{ start: { relative: 0n } }] };
-	const reader = remote.track("video").subscribe(subscription);
+	const reader = remote.track("video").subscribe(subscription).ordered();
 	const sibling = remote.track("video").subscribe(subscription);
 	try {
 		// Accepting the track subscribes it upstream, whose answer resolves the start.
 		await reader.info();
 		expect((await sibling.recvGroup())?.start).toBe(5n);
-		expect(await reader.start()).toBe(5n);
 		newest.writeFrame({ payload: new Uint8Array([5]), timestamp: Timestamp.unscaled(newest.start) });
 		newest.finish();
-		expect((await reader.recvGroup())?.start).toBe(5n);
+		const item = await reader.nextItem();
+		expect(item?.kind === "group" ? item.group.start : item).toBe(5n);
 	} finally {
 		sibling.close();
 		reader.close();
@@ -539,7 +542,7 @@ test("integration: lite-07 joins a late relative start at the live edge", async 
 	]);
 
 	const broadcast = publish(origin, Path.from("test"));
-	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 	hooks.appendNext(producer).finish();
 
 	const remote = wireOf(client).consume(Path.from("test"));
@@ -586,7 +589,7 @@ test("integration: lite-07 keeps a covered bounded subscription open", async () 
 	]);
 
 	const broadcast = publish(origin, Path.from("test"));
-	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 	for (const key of [0n, 1n, 2n, 4n, 5n]) producer.createGroup(key).finish();
 
 	const remote = wireOf(client).consume(Path.from("test"));
@@ -638,7 +641,7 @@ test("integration: lite-07 serves a time range", async () => {
 	]);
 
 	const broadcast = publish(origin, Path.from("test"));
-	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 	// Keyed by start, as the wire names a group: one per second.
 	for (let start = 0n; start < 10_000n; start += 1000n) {
 		const group = producer.createGroup(start);
@@ -699,7 +702,7 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 				producer = request.accept({ timescale: Timescale.MILLI });
 				const wanted = producer.demand().wanted;
 				const edge = () => {
-					const now = wanted.peek() !== undefined;
+					const now = wanted.peek();
 					if (edges.at(-1) !== now) edges.push(now);
 				};
 				edge();
@@ -854,7 +857,7 @@ test("integration: a group reset carries the peer's code to the subscriber", asy
 	]);
 
 	const broadcast = publish(origin, Path.from("test"));
-	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 
 	const remote = wireOf(client).consume(Path.from("test"));
 	const track = remote.track("video").subscribe().ordered();
@@ -894,7 +897,7 @@ test("integration: a locally raised group error reaches the peer as its own code
 	]);
 
 	const broadcast = publish(origin, Path.from("test"));
-	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 
 	const remote = wireOf(client).consume(Path.from("test"));
 	const track = remote.track("video").subscribe().ordered();
@@ -997,7 +1000,7 @@ test("integration: lite draft-07 fetches a cached group", async () => {
 	]);
 
 	const broadcast = publish(origin, Path.from("test"));
-	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 
 	const group0 = hooks.appendNext(producer);
 	group0.writeFrame({ payload: enc.encode("alpha"), timestamp: Timestamp.fromMillis(10) });
@@ -1038,7 +1041,7 @@ test.each(["gap", "end"])("integration: lite fetch rejects coalesced misses at %
 	const broadcast = publish(origin, Path.from("test"));
 	let serving: Promise<void> | undefined;
 	if (missing === "gap") {
-		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+		const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 		const group = producer.createGroup(1n);
 		group.finish();
 	} else {
@@ -1083,7 +1086,7 @@ test.each(["frame", "FIN"])("integration: lite fetch waits for the publisher's f
 		accept(pair.server, url, { publish: origin.consume() }),
 	]);
 	const broadcast = publish(origin, Path.from("test"));
-	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	const group = hooks.appendNext(producer);
 	const remote = wireOf(client).consume(Path.from("test"));
 	try {
@@ -1130,7 +1133,7 @@ test("integration: lite draft-05 coalesces concurrent fetches of one group", asy
 	]);
 
 	const broadcast = publish(origin, Path.from("test"));
-	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 
 	const group0 = hooks.appendNext(producer);
 	group0.writeFrame({ payload: enc.encode("alpha"), timestamp: Timestamp.fromMillis(10) });
@@ -1174,7 +1177,7 @@ test("integration: lite draft-07 fetches an in-progress group", async () => {
 	]);
 
 	const broadcast = publish(origin, Path.from("test"));
-	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 
 	// Open the group and write one frame, but leave it open (in-progress).
 	const group0 = hooks.appendNext(producer);
@@ -1215,7 +1218,7 @@ test("integration: lite draft-07 track info follows a republished broadcast", as
 
 	const path = Path.from("test");
 	const first = publish(origin, path);
-	first.createTrack("video", { priority: 1, timescale: Timescale.MILLI, maxAge: Duration.millis(1000) });
+	defined(first.createTrack("video", { priority: 1, timescale: Timescale.MILLI, maxAge: Duration.millis(1000) }));
 
 	const remote = wireOf(client).consume(path);
 	const before = await remote.track("video").info();
@@ -1226,7 +1229,7 @@ test("integration: lite draft-07 track info follows a republished broadcast", as
 	// Replace the broadcast on the same path with one whose track declares different
 	// immutable properties.
 	const second = publish(origin, path);
-	second.createTrack("video", { priority: 7, timescale: Timescale.MICRO, maxAge: Duration.millis(5000) });
+	defined(second.createTrack("video", { priority: 7, timescale: Timescale.MICRO, maxAge: Duration.millis(5000) }));
 
 	const after = await remote.track("video").info();
 	expect(after.priority).toBe(7);
@@ -1257,9 +1260,11 @@ test.each([Lite.ALPN_03, Lite.ALPN_05, Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])(
 		const path = Path.from("test");
 		const broadcast = publish(origin, path);
 		const tracks = {
-			omitted: broadcast.createTrack("omitted", { timescale: Timescale.MILLI }),
-			unlimited: broadcast.createTrack("unlimited", { timescale: Timescale.MILLI, maxAge: null }),
-			explicit: broadcast.createTrack("explicit", { timescale: Timescale.MILLI, maxAge: Duration.millis(5000) }),
+			omitted: defined(broadcast.createTrack("omitted", { timescale: Timescale.MILLI })),
+			unlimited: defined(broadcast.createTrack("unlimited", { timescale: Timescale.MILLI, maxAge: null })),
+			explicit: defined(
+				broadcast.createTrack("explicit", { timescale: Timescale.MILLI, maxAge: Duration.millis(5000) }),
+			),
 		};
 		expect((await tracks.omitted.info()).maxAge).toEqual(Duration.ZERO);
 		expect((await tracks.unlimited.info()).maxAge).toBeNull();
@@ -1300,7 +1305,7 @@ test("integration: lite draft-07 fetch uses the republished track's timescale", 
 
 	const path = Path.from("test");
 	const first = publish(origin, path);
-	const firstTrack = first.createTrack("video", { timescale: Timescale.MILLI });
+	const firstTrack = defined(first.createTrack("video", { timescale: Timescale.MILLI }));
 	const firstGroup = hooks.appendNext(firstTrack);
 	firstGroup.writeFrame({ payload: enc.encode("alpha"), timestamp: Timestamp.fromMillis(10) });
 	firstGroup.finish();
@@ -1310,7 +1315,7 @@ test("integration: lite draft-07 fetch uses the republished track's timescale", 
 	expect((await remote.track("video").info()).timescale).toBe(Timescale.MILLI);
 
 	const second = publish(origin, path);
-	const secondTrack = second.createTrack("video", { timescale: Timescale.MICRO });
+	const secondTrack = defined(second.createTrack("video", { timescale: Timescale.MICRO }));
 	const secondGroup = hooks.appendNext(secondTrack);
 	secondGroup.writeFrame({ payload: enc.encode("beta"), timestamp: Timestamp.fromMicros(1234) });
 	secondGroup.finish();
@@ -1429,7 +1434,7 @@ async function runSubscriberTeardown(protocol: string, version?: number) {
 	]);
 
 	const broadcast = publish(origin, Path.from("test"));
-	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const video = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	video.writeFrame(textFrame("hello"));
 
 	const remote = wireOf(client).consume(Path.from("test"));
@@ -1437,12 +1442,12 @@ async function runSubscriberTeardown(protocol: string, version?: number) {
 	expect(await sub.readString()).toBe("hello");
 
 	// The publisher now has a live downstream reader for the track.
-	await waitFor(video.demand().wanted, (wanted) => wanted !== undefined);
+	await waitFor(video.demand().wanted, (wanted) => wanted);
 
 	// Closing the only subscriber must tear the wire subscription down, so demand drops on the
 	// publisher rather than the relay serving groups to nobody.
 	sub.close();
-	await waitFor(video.demand().wanted, (wanted) => wanted === undefined);
+	await waitFor(video.demand().wanted, (wanted) => !wanted);
 
 	broadcast.close();
 	remote.close();
@@ -1469,7 +1474,7 @@ test("integration: lite fetch teardown when the reader abandons an open group", 
 	]);
 
 	const broadcast = publish(origin, Path.from("test"));
-	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const video = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	const group = hooks.appendNext(video); // deliberately left open: an indefinite group.
 	group.writeFrame(textFrame("hello"));
 
@@ -1509,7 +1514,7 @@ test("integration: lite fan-out keeps the upstream until the last subscriber lea
 	]);
 
 	const broadcast = publish(origin, Path.from("test"));
-	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const video = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	video.writeFrame(textFrame("hello", Timestamp.fromMillis(0)));
 
 	const remote = wireOf(client).consume(Path.from("test"));
@@ -1517,17 +1522,17 @@ test("integration: lite fan-out keeps the upstream until the last subscriber lea
 	const b = remote.track("video").subscribe().ordered();
 	expect(await a.readString()).toBe("hello");
 	expect(await b.readString()).toBe("hello");
-	await waitFor(video.demand().wanted, (wanted) => wanted !== undefined);
+	await waitFor(video.demand().wanted, (wanted) => wanted);
 
 	// Closing one leaves the shared upstream serving the other.
 	a.close();
 	video.writeFrame(textFrame("more", Timestamp.fromMillis(1)));
 	expect(await b.readString()).toBe("more");
-	expect(video.demand().wanted.peek()).toBeDefined();
+	expect(video.demand().wanted.peek()).toBe(true);
 
 	// The last close tears it down.
 	b.close();
-	await waitFor(video.demand().wanted, (wanted) => wanted === undefined);
+	await waitFor(video.demand().wanted, (wanted) => !wanted);
 
 	broadcast.close();
 	remote.close();
@@ -1546,7 +1551,7 @@ test("integration: lite re-subscribe re-opens the upstream after each teardown",
 	]);
 
 	const broadcast = publish(origin, Path.from("test"));
-	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const video = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 
 	const remote = wireOf(client).consume(Path.from("test"));
 
@@ -1554,10 +1559,10 @@ test("integration: lite re-subscribe re-opens the upstream after each teardown",
 		video.writeFrame(textFrame(`hello-${i}`, Timestamp.fromMillis(i)));
 		const sub = remote.track("video").subscribe().ordered();
 		expect(await sub.readString()).toBe(`hello-${i}`);
-		await waitFor(video.demand().wanted, (wanted) => wanted !== undefined);
+		await waitFor(video.demand().wanted, (wanted) => wanted);
 
 		sub.close();
-		await waitFor(video.demand().wanted, (wanted) => wanted === undefined);
+		await waitFor(video.demand().wanted, (wanted) => !wanted);
 	}
 
 	broadcast.close();
@@ -1577,7 +1582,7 @@ test("integration: lite coalesced fetch stays until every reader abandons the op
 	]);
 
 	const broadcast = publish(origin, Path.from("test"));
-	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const video = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	const group = hooks.appendNext(video); // open
 	group.writeFrame(textFrame("hello"));
 
@@ -1618,7 +1623,7 @@ test("integration: lite fetch re-armed by a late reader keeps every frame", asyn
 	]);
 
 	const broadcast = publish(origin, Path.from("test"));
-	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const video = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	const remote = wireOf(client).consume(Path.from("test"));
 
 	for (let delay = 0; delay <= 12; delay++) {
@@ -1659,7 +1664,7 @@ test("integration: lite fetch delivers every frame of a finite multi-frame group
 	]);
 
 	const broadcast = publish(origin, Path.from("test"));
-	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const video = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	const group = hooks.appendNext(video);
 	const count = 50;
 	for (let i = 0; i < count; i++) group.writeFrame(textFrame(`f${i}`));
@@ -2171,7 +2176,7 @@ test("origin: one origin on both directions consumes locally and never echoes", 
 
 	// The client publishes; consuming its own path through the shared origin is local, no wire.
 	const mine = publish(shared, Path.from("from-client"));
-	mine.createTrack("chat", { timescale: Timescale.MILLI });
+	defined(mine.createTrack("chat", { timescale: Timescale.MILLI }));
 	const reader = shared.consume();
 	const loopback = await routed(reader, Path.from("from-client"));
 	if (!loopback) throw new Error("expected a local route");
@@ -2246,17 +2251,39 @@ test("origin: a request discovers the peer cannot announce before resolving blin
 test.each([Lite.ALPN_03, Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 	"%s: closing an announce consumer ends the peer's announce stream",
 	async (alpn) => {
+		// Counts each stream the peer gave back, and wakes the test on each.
+		let ended = 0;
+		let changed = Promise.withResolvers<void>();
+		const end = (count: number) => {
+			ended += count;
+			changed.resolve();
+			changed = Promise.withResolvers<void>();
+		};
 		// Wrap the peer's handler so the test sees when its side of the stream ends.
 		const run = LitePublisher.prototype.runAnnounce;
-		let ended = 0;
 		spyOn(LitePublisher.prototype, "runAnnounce").mockImplementation(function (this: LitePublisher, msg, stream) {
-			return run.call(this, msg, stream).finally(() => ended++);
+			return run.call(this, msg, stream).finally(() => end(1));
 		});
-		// Lite-07 has one Announce Stream, and gives a prefix back with the edit removing it.
+		// Lite-07 has one Announce Stream, and gives a prefix back with the edit removing it. The
+		// edit counts once its ANNOUNCE_OK is in: until then this side still shows the prefix's
+		// claims and holds back its next edit, so a reader opened sooner joins the stale claims and
+		// leaves without the peer ever hearing of it.
 		const request = LitePublisher.prototype.request;
+		const removing: number[] = [];
+		let pending = 0;
 		spyOn(LitePublisher.prototype, "request").mockImplementation(function (this: LitePublisher, more, remove, add) {
-			ended += remove.length;
+			pending += remove.length;
+			if (!more) {
+				removing.push(pending);
+				pending = 0;
+			}
 			request.call(this, more, remove, add);
+		});
+		const receive = Routed.prototype.receive;
+		spyOn(Routed.prototype, "receive").mockImplementation(function (this: Routed, msg) {
+			const done = receive.call(this, msg);
+			if (msg.status === "ok") end(removing.shift() ?? 0);
+			return done;
 		});
 		const pair = createMockTransportPair(alpn);
 		const serverOrigin = new OriginProducer();
@@ -2271,7 +2298,8 @@ test.each([Lite.ALPN_03, Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 			const announced = client.routes(Path.Pattern.subtree(Path.from("room")));
 			expect((await announced.next())?.kind).toBe("start");
 			announced.close();
-			await until(() => ended === i);
+			while (ended < i) await changed.promise;
+			expect(ended).toBe(i);
 		}
 
 		broadcast.close();
@@ -2690,7 +2718,7 @@ test("create then announce is discoverable on the wire", async () => {
 	const announced = client.routes();
 	const broadcastRoute = origin.route(Path.from("later"), { hidden: true });
 	const broadcast = broadcastRoute.broadcast;
-	broadcast.createTrack("chat", { timescale: Timescale.MILLI });
+	defined(broadcast.createTrack("chat", { timescale: Timescale.MILLI }));
 
 	const pending = announced.next();
 	broadcastRoute.announce();
@@ -2713,7 +2741,7 @@ test.each([Lite.ALPN_06, Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_2
 		const consumer = new OriginProducer();
 		const handle = origin.claim(Path.empty());
 		const held = new BroadcastProducer();
-		held.createTrack("chat", { timescale: Timescale.MILLI }).writeFrame(textFrame("hello"));
+		defined(held.createTrack("chat", { timescale: Timescale.MILLI })).writeFrame(textFrame("hello"));
 		const serving = (async () => {
 			for await (const request of handle.requested()) request.serve(held.consume());
 		})();
@@ -3056,7 +3084,7 @@ test("integration: lite-07 drops a group reset to make room, and a FETCH reads i
 	]);
 	const broadcast = publish(origin, Path.from("live"));
 	// Kept, so the older group is never too old for the subscription.
-	const producer = broadcast.createTrack("0", { timescale: Timescale.MILLI, maxAge: null });
+	const producer = defined(broadcast.createTrack("0", { timescale: Timescale.MILLI, maxAge: null }));
 	const remote = wireOf(client).consume(Path.from("live"));
 	const subscriber = remote.track("0").subscribe({ order: "descending", delay: { max: Duration.millis(30_000) } });
 	try {
@@ -3114,7 +3142,7 @@ for (const alpn of [Lite.ALPN_06, Lite.ALPN_07_WIP]) {
 			accept(pair.server, url, { publish: origin.consume() }),
 		]);
 		const broadcast = publish(origin, Path.from("live"));
-		const producer = broadcast.createTrack("0", { timescale: Timescale.MILLI, maxAge: null });
+		const producer = defined(broadcast.createTrack("0", { timescale: Timescale.MILLI, maxAge: null }));
 		const remote = wireOf(client).consume(Path.from("live"));
 		const subscriber = remote
 			.track("0")

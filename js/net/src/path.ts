@@ -5,7 +5,8 @@
  * preventing issues like "foo" matching "foobar".
  *
  * A path is a run of non-empty segments separated by `/`, so it has exactly one spelling:
- * {@link from} throws on a leading, trailing, or doubled slash rather than collapsing it.
+ * {@link from} throws on a leading, trailing, or doubled slash rather than collapsing it, and on
+ * a lone surrogate, which has no UTF-8 bytes of its own.
  * A `\` escapes the `\` or `/` after it, which is how a moq-transport namespace field holding
  * either one is spelled, and any other `\` is refused. An escaped `/` never splits a segment:
  * `a\/b` is one segment, a prefix never ends inside it, and a pattern's `*` matches all of it.
@@ -79,8 +80,8 @@ const utf8 = new TextEncoder();
 /**
  * Build a path by joining components with "/", where an empty component is the root.
  *
- * Throws when a component has a leading, trailing, or doubled `/`, or a `\` before anything
- * but `\` or `/`.
+ * Throws when a component has a leading, trailing, or doubled `/`, a `\` before anything
+ * but `\` or `/`, or a lone surrogate.
  */
 export function from(...paths: string[]): Valid {
 	for (const path of paths) {
@@ -92,6 +93,8 @@ export function from(...paths: string[]): Valid {
 
 // Why `path` is not the one spelling of a path, or undefined when it is.
 function spelling(path: string): string | undefined {
+	// UTF-8 cannot carry a lone surrogate: the encoder writes U+FFFD, another path's bytes.
+	if (!path.isWellFormed()) return "path contains a lone surrogate";
 	if (!path.includes("\\")) {
 		// Without a `\`, every `/` separates.
 		return path.startsWith("/") || path.endsWith("/") || path.includes("//")

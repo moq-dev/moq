@@ -41,13 +41,15 @@ pub struct StatusPublisher {
 
 impl StatusPublisher {
 	pub fn new(broadcast: &mut moq_net::broadcast::Producer) -> anyhow::Result<Self> {
-		let producer = broadcast.create_track(
-			"status",
-			moq_net::track::Info::default()
-				.with_timescale(moq_net::Timescale::MILLI)
-				// A joiner asks for a fresh snapshot once the deltas outweigh eight of them.
-				.with_refresh(8),
-		)?;
+		let producer = broadcast
+			.create_track(
+				"status",
+				moq_net::track::Info::default()
+					.with_timescale(moq_net::Timescale::MILLI)
+					// A joiner asks for a fresh snapshot once the deltas outweigh eight of them.
+					.with_refresh(moq_net::track::Refresh::default().with_ratio(8)),
+			)
+			.ok_or_else(|| anyhow::anyhow!("the status track already exists"))?;
 
 		Ok(Self {
 			producer: moq_json::snapshot::Producer::new(producer, moq_json::snapshot::Config::default()),

@@ -325,6 +325,7 @@ mod test {
 			node: Some(crate::route::NodeId {
 				relay: 0x7a3f,
 				start: 9,
+				marked: false,
 			}),
 			track: "audio".into(),
 			priority: -3,
@@ -337,7 +338,8 @@ mod test {
 			decoded.node,
 			Some(crate::route::NodeId {
 				relay: 0x7a3f,
-				start: 9
+				start: 9,
+				marked: false,
 			})
 		);
 		assert_eq!(decoded.track, "audio");

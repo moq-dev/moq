@@ -7,7 +7,7 @@
 
 /** Re-export of {@link https://www.npmjs.com/package/@moq/loc | @moq/loc}, the LOC container. */
 export * as Loc from "@moq/loc";
-export { Consumer, type ConsumerProps, DELAY_MAX, type Playhead, type Read } from "./consumer.ts";
+export { Consumer, type ConsumerProps, DELAY_MAX, type Read } from "./consumer.ts";
 export type { Format } from "./format.ts";
 /** The legacy varint container. */
 export * as Legacy from "./legacy.ts";

@@ -40,7 +40,7 @@ impl CatalogExt for () {}
 /// The default extension stays `()` (unknown sections dropped); opt into `Extra` explicitly.
 ///
 /// `version`, `video`, `audio`, `sync`, `text`, `archive`, `clock`, `media`, `json`, `binary`,
-/// `stats`, `echo`, `include`, `m2ts`, and the retired `timeline` key are reserved, so decoding and
+/// `stats`, `echo`, `include`, and the retired `timeline` key are reserved, so decoding and
 /// [`set`](Self::set) reject them to keep the wire JSON free of duplicate or retired keys. The
 /// exceptions are a root `clock` and `media`, which each held the clock before `sync`: an older
 /// publisher's is dropped on decode, so its media still plays.
@@ -73,7 +73,7 @@ fn reserved(name: &str) -> bool {
 			| "json" | "binary"
 			| "stats" | "echo"
 			| "include"
-			| "m2ts" | "timeline"
+			| "timeline"
 	) || moq_msf::reserved_root(name)
 }
 
@@ -100,7 +100,7 @@ impl Extra {
 
 	/// Set (or replace) a section. Errors if `name` collides with a reserved member of either
 	/// catalog: hang's root `version` and base sections
-	/// (`video`/`audio`/`sync`/`text`/`archive`/`clock`/`media`/`json`/`binary`/`stats`/`echo`/`include`/`m2ts`),
+	/// (`video`/`audio`/`sync`/`text`/`archive`/`clock`/`media`/`json`/`binary`/`stats`/`echo`/`include`),
 	/// the retired `timeline` key that the wire format forbids beside `archive`, or a root member
 	/// MSF defines ([`moq_msf::reserved_root`]).
 	///
@@ -238,7 +238,7 @@ mod test {
 				.set_section("timeline", serde_json::json!({})),
 			Err(crate::Error::ReservedSection(_))
 		));
-		for name in ["sync", "media", "clock", "stats", "echo", "include", "m2ts"] {
+		for name in ["sync", "media", "clock", "stats", "echo", "include"] {
 			assert!(
 				matches!(
 					producer.modify().unwrap().set_section(name, serde_json::json!({})),

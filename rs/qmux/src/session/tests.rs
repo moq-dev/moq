@@ -178,7 +178,7 @@ async fn read_exact(recv: &mut RecvStream, want: usize) -> Result<Bytes, Error> 
 }
 
 /// What `send` answers about the bytes below `offset`, without waiting.
-fn acked(send: &SendStream, offset: &moq_quic::send::Offset) -> Poll<Result<poll::Acked, Error>> {
+fn acked(send: &SendStream, offset: &moq_quic::send::Offset) -> Poll<Result<(), Error>> {
 	send.poll_acked(&kio::Waiter::noop(), offset)
 }
 
@@ -198,7 +198,7 @@ async fn bytes_count_as_sent_once_the_link_takes_them() {
 		assert_eq!(read_exact(&mut recv, first.len()).await.unwrap(), first, "{version:?}");
 		let went_out = send.offset();
 		assert!(
-			matches!(acked(&send, &went_out), Poll::Ready(Ok(poll::Acked::Sent))),
+			matches!(acked(&send, &went_out), Poll::Ready(Ok(()))),
 			"{version:?}: the link took it"
 		);
 
@@ -210,7 +210,7 @@ async fn bytes_count_as_sent_once_the_link_takes_them() {
 
 		send.reset(1);
 		assert!(
-			matches!(acked(&send, &went_out), Poll::Ready(Ok(poll::Acked::Sent))),
+			matches!(acked(&send, &went_out), Poll::Ready(Ok(()))),
 			"{version:?}: what went out stays sent"
 		);
 		assert!(
@@ -739,6 +739,41 @@ async fn an_oversized_record_is_a_frame_encoding_error() {
 				"no CONNECTION_CLOSE in {sent:02x?}"
 			);
 		}
+	}
+}
+
+/// A WebSocket message over the record limit, which the socket refuses before buffering it,
+/// also closes the connection with a CONNECTION_CLOSE the peer can read.
+#[tokio::test(start_paused = true)]
+async fn an_oversized_websocket_message_is_a_frame_encoding_error() {
+	use futures::{SinkExt, StreamExt};
+	use tokio_tungstenite::{
+		WebSocketStream,
+		tungstenite::{Message, protocol::Role},
+	};
+
+	use crate::transport::WsTransport;
+
+	for version in [Version::QMux01, Version::QMux02] {
+		let config = config(version);
+		let (client, raw) = tokio::io::duplex(PIPE);
+		let ws = WebSocketStream::from_raw_socket(client, Role::Client, Some(crate::ws::capped(&config))).await;
+		let session = spawn(Session::new(WsTransport::new(ws, Address::Uri), Side::Client, config.clone()).unwrap());
+		let mut raw = WebSocketStream::from_raw_socket(raw, Role::Server, None).await;
+		let limit = usize::try_from(config.max_record_size)
+			.unwrap()
+			.max(crate::MAX_FRAME_SIZE);
+		raw.send(Message::Binary(vec![0; limit + 1].into())).await.unwrap();
+
+		let err = session.closed().await;
+		assert!(matches!(err, Error::FrameEncoding), "{version:?}: got {err:?}");
+		let mut closed = false;
+		while let Some(Ok(message)) = raw.next().await {
+			if let Message::Binary(data) = message {
+				closed |= data.windows(2).any(|w| w == [0x1c, 0x07]);
+			}
+		}
+		assert!(closed, "{version:?}: no CONNECTION_CLOSE");
 	}
 }
 

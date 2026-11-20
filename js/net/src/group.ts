@@ -313,10 +313,6 @@ export class Producer {
 		};
 		hooks.groupOffset = (group) => group.#state.offset;
 		hooks.groupHeadless = (group) => group.#state.index > 0 || headShed(group.#state.frames.peek().first);
-		hooks.groupMayStart = (group) => {
-			const state = group.#state;
-			return state.offset === 0 && state.total.peek() === 0 && state.closed.peek() === undefined;
-		};
 		hooks.holdGroup = (group) => {
 			group.#holds++;
 			let held = true;
@@ -995,6 +991,8 @@ export class Consumer {
 	#expired?: Expired;
 	// Closed by its reader, which ends it whatever is left unread.
 	#released = false;
+	// Settles once this reader is released, made only when something waits on it.
+	#releasing?: PromiseWithResolvers<void>;
 	// The arrival of the copy first read, kept once a replacement copy is adopted.
 	#arrived?: Instant;
 	// The last frame handed out to stream before it completed. Cut short, it is lost, so no
@@ -1107,6 +1105,11 @@ export class Consumer {
 		makeConsumer = (state) => new Consumer(state);
 		hooks.releaseGroupReader = (group, abort) => group.#release(abort);
 		hooks.groupDone = (group) => group.#done();
+		hooks.groupReleased = (group) => {
+			if (group.#released) return Promise.resolve();
+			group.#releasing ??= Promise.withResolvers<void>();
+			return group.#releasing.promise;
+		};
 		hooks.readsMirrored = (group) => group.#state === group.#mirrored;
 		hooks.groupReads = (group, reads) => group.#mirrored.reads?.(reads);
 		hooks.groupTimestamp = (group) =>
@@ -1133,8 +1136,8 @@ export class Consumer {
 		hooks.expireGroup = (group, expiry) => {
 			group.#expiry = expiry;
 		};
+		hooks.groupExpiry = (group) => group.#expiry;
 		hooks.groupFailed = (group) => group.#failed();
-		hooks.groupExpired = (group) => group.#expiry?.expired() === true;
 		hooks.recoverGroup = (group, recover) => {
 			group.#recover = recover;
 			// A front serving another front attaches its recovery after the inner one handed the
@@ -1562,6 +1565,7 @@ export class Consumer {
 		this.#recover = undefined;
 		// Closing is terminal for this reader, even with frames still unread.
 		this.#released = true;
+		this.#releasing?.resolve();
 		if (this.#state.closed.peek() === undefined) this.#state.closed.set(abort ?? null);
 		this.#refresh();
 	}
