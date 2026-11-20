@@ -788,6 +788,12 @@ export const hooks: {
 	 * `Producer::poll_asks_changed`; assigned by `track.ts`.
 	 */
 	asksChanged: (producer: Producer) => Getter<number>;
+	/**
+	 * Count an ask a finished lite-07 copy's session sends upstream as out while `asking`, and done
+	 * once not: the groups it delivers land below the end, so a reader waits for them rather than end
+	 * at the boundary. Mirrors the Rust `Producer::asking`; assigned by `track.ts`.
+	 */
+	asking: (producer: Producer, asking: boolean) => void;
 	/** Mint a track {@link Request}; assigned by `track.ts`. */
 	makeRequest: (options: TrackRequestOptions) => Request;
 	/**
@@ -1219,6 +1225,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	asksChanged: () => {
+		throw new Error("track.ts not loaded");
+	},
+	asking: () => {
 		throw new Error("track.ts not loaded");
 	},
 	relativeStarts: () => {

@@ -13,9 +13,10 @@ use crate::{
 /// A SUBSCRIBE of its own for the relative ranges a finished copy's readers wait on their
 /// publisher to start (see [`track::Producer::asks`]): the subscription that fed the copy is
 /// over, so nothing else can carry them, and the copy never counts them over the groups it
-/// holds. The groups it delivers land in the copy, and its SUBSCRIBE_START answers the readers
-/// once every group a range owes below the publisher's end is accounted for and read. It then
-/// FINs and waits for the publisher's FIN in reply.
+/// holds. Its SUBSCRIBE_START answers the readers, and the groups it delivers land in the copy,
+/// which its readers wait for while it is out (see [`track::Producer::asking`]). It FINs once
+/// every group a range owes below the publisher's end is accounted for and read, then waits for
+/// the publisher's FIN in reply.
 pub(super) struct Ask {
 	serve: TrackServe,
 	serving: track::Producer,
@@ -62,6 +63,7 @@ impl Ask {
 		};
 		tracing::debug!(track = %serve.name, ?ranges, "asking where relative starts begin");
 		let establish = serve.register(subscription, ranges, Some(copy));
+		serving.asking(true);
 		Some(Self {
 			serve: serve.clone(),
 			serving: serving.clone(),
@@ -108,9 +110,6 @@ impl Ask {
 							})
 							.is_ready();
 						if settled {
-							// Only now: the copy's own tail settled long ago, so a reader started
-							// earlier could run out at a group still arriving.
-							sub.report_starts(&self.serving);
 							let _ = sub.stream.writer.finish();
 							*finished = true;
 						}
@@ -130,6 +129,8 @@ impl Ask {
 								sub.edges.insert(id, edge);
 							}
 							sub.started = Some(start.starts.iter().flatten().min().copied());
+							// Read as they arrive: the readers wait for the rest while the ask is out.
+							sub.report_starts(&self.serving);
 						}
 						Recv::Message(lite::SubscribeResponse::Drop(dropped)) => {
 							if let Ok(mut tail) = sub.tail.write() {
@@ -183,6 +184,8 @@ impl Ask {
 	/// Stop routing the subscription's streams, resetting it unless our FIN already went out.
 	fn end(&mut self) {
 		let state = std::mem::replace(&mut self.state, AskState::Done);
+		// Its groups are in, or never coming: the readers end at the boundary again.
+		self.serving.asking(false);
 		self.serve.subscriber.remove_subscribe(self.id);
 		match state {
 			AskState::Establish(est) => est.abort(&Error::Cancel),

@@ -1301,6 +1301,8 @@ export class Producer {
 	// Whether a copy's publisher reports where each range starts, so a relative start waits for that
 	// rather than count over the groups held. Mirrors the Rust `Anchors::Reported`.
 	#reportsStarts = false;
+	// The asks a finished copy's session has out (see `hooks.asking`).
+	#asking = 0;
 	// The relative ranges each reader waits on the publisher to start, which the copy's subscription
 	// asks upstream for. Mirrors the Rust `Subscriptions::asks`.
 	#readerAsks = new Map<TrackState, readonly Range[]>();
@@ -1569,6 +1571,12 @@ export class Producer {
 			return [...asks.values()];
 		};
 		hooks.asksChanged = (producer) => producer.#asksChanged;
+		hooks.asking = (producer, asking) => {
+			producer.#asking = Math.max(0, producer.#asking + (asking ? 1 : -1));
+			const end = producer.#state.end.peek();
+			const owed = producer.#asking > 0 || (end?.tail !== undefined && producer.#owes(finalKey(end.at)));
+			for (const state of [producer.#state, ...producer.#sinks]) state.owed.set(owed);
+		};
 		askStarts = (producer, sink, ranges) => {
 			const last = producer.#readerAsks.get(sink) ?? [];
 			const same =
@@ -2736,7 +2744,7 @@ export class Producer {
 	#owe(): void {
 		const end = this.#state.end.peek();
 		if (!end?.tail) return;
-		const owed = this.#owes(finalKey(end.at));
+		const owed = this.#asking > 0 || this.#owes(finalKey(end.at));
 		for (const state of [this.#state, ...this.#sinks]) state.owed.set(owed);
 		this.#endLargest();
 	}

@@ -5860,11 +5860,43 @@ test("a received copy counts a relative start back as its publisher did", async 
 	expect(drain(longer)).toEqual([]);
 	expect(longer.floor()).toBeUndefined();
 
-	// Nothing counts over the groups held once the copy ends either.
+	// Nothing counts over the groups held once the copy ends either, and its reader waits for the
+	// report rather than end with nothing: a finished copy asks on a subscription of its own.
 	hooks.endTrack(producer, { group: 11n, frame: 0 });
 	await settle();
 	expect(drain(later)).toEqual([]);
 	expect(later.floor()).toBeUndefined();
+	let ended = false;
+	void later.recvGroup().then((group) => {
+		ended = group === undefined;
+	});
+	await settle();
+	expect(ended).toBe(false);
+
+	// While the ask is out, a reader waits for the groups it delivers rather than end at the
+	// boundary, reading each as it lands.
+	hooks.asking(producer, true);
+	const joined = producer.subscribe({ delay: { max: null }, ranges: [{ start: { time: 3n } }] });
+	expect(drain(joined).sort((a, b) => Number(a - b))).toEqual([2n, 8n, 9n, 10n]);
+	putGroup(producer, 5n, 5);
+	await settle();
+	expect(drain(joined)).toEqual([5n]);
+	// The rest were never produced, as the ask's GROUP Previous Starts say.
+	for (const [start, end] of [
+		[0n, 1n],
+		[3n, 5n],
+		[6n, 8n],
+	])
+		hooks.skipTrackGroups(producer, start, end);
+	let done = false;
+	void joined.recvGroup().then((group) => {
+		done = group === undefined;
+	});
+	await settle();
+	expect(done).toBe(false);
+	hooks.asking(producer, false);
+	await settle();
+	expect(done).toBe(true);
 });
 
 // A relay serving a reader whose relative start still waits on its publisher's report can't say

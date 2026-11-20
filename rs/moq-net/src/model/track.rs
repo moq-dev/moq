@@ -807,6 +807,9 @@ pub(crate) struct TrackState {
 	// holds only part of the track, so it can't count back over its own groups. Replaced whole
 	// as the ranges change, like `time_starts`.
 	relative_starts: BTreeMap<u64, RelativeStart>,
+	// The asks a finished copy's session has out (see [`Producer::asking`]): their groups may
+	// still land below the end, so no reader ends at it meanwhile.
+	asking: usize,
 	// Counts changes to how a time start is placed other than by groups arriving or drops:
 	// `time_starts`, `anchors`, and `starts_at_keys`. See [`Unplaced::mark`].
 	placing: u64,
@@ -5034,6 +5037,19 @@ impl Producer {
 			&& state.relative_starts != starts
 		{
 			state.relative_starts = starts;
+		}
+	}
+
+	/// Count an ask this finished copy's session sends upstream as out while `asking`, and done
+	/// once not: the groups it delivers land below the end, so a reader waits for them rather
+	/// than end at the boundary, while still reading those already in.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn asking(&self, asking: bool) {
+		if let Ok(mut state) = self.modify() {
+			state.asking = match asking {
+				true => state.asking + 1,
+				false => state.asking.saturating_sub(1),
+			};
 		}
 	}
 
@@ -10037,10 +10053,11 @@ impl Cursor {
 			|| self.heads.as_ref().is_some_and(|heads| !heads.fetching.is_empty())
 	}
 
-	/// Whether a relative start waits on its publisher's report while a producer remains to
-	/// record it.
+	/// Whether a relative start waits on its publisher's report, or an ask's groups may still
+	/// arrive (see [`Producer::asking`]), while a producer remains to record them.
 	fn awaits_report(&self) -> bool {
-		self.filter.window.is_counting() && !self.state.read().outcome.is_released()
+		let state = self.state.read();
+		(self.filter.window.is_counting() || state.asking > 0) && !state.outcome.is_released()
 	}
 
 	/// Wake on the track's next change while [`Self::awaits_report`], which a report is.
@@ -16510,6 +16527,27 @@ mod test {
 		producer.relative_starts([(2, CountedStart::At(9), 11)]);
 		assert_eq!(read(&mut later), vec![9, 10, 11]);
 		assert!(matches!(later.recv_group().now_or_never(), Some(Ok(None))), "then ends");
+
+		// While an ask is out, a reader waits for the groups it delivers rather than end at the
+		// boundary, reading each as it lands.
+		producer.asking(true);
+		let mut joined = producer.subscribe(
+			Subscription::default()
+				.with_ranges([Range {
+					start: Anchor::Time(3),
+					end: None,
+				}])
+				.with_delay(Delay::default().with_max(None)),
+		);
+		assert_eq!(read(&mut joined), vec![2, 8, 9, 10, 11]);
+		assert!(joined.recv_group().now_or_never().is_none(), "waits on the ask");
+		write_group(&producer, 5);
+		assert_eq!(read(&mut joined), vec![5]);
+		producer.asking(false);
+		assert!(
+			matches!(joined.recv_group().now_or_never(), Some(Ok(None))),
+			"then ends"
+		);
 	}
 
 	proptest::proptest! {

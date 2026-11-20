@@ -2941,9 +2941,10 @@ export class Subscriber {
 
 	// Ask where the relative starts `copy`'s readers wait on begin, on a lite-07 SUBSCRIBE of its own:
 	// the subscription that fed the finished copy is over, so nothing else can carry them, and the copy
-	// never counts them over the groups it holds. The groups it delivers land in the copy, and its
-	// SUBSCRIBE_START answers the readers once every group a range owes below the publisher's end is
-	// accounted for and read. It then FINs.
+	// never counts them over the groups it holds. Its SUBSCRIBE_START answers the readers, and the
+	// groups it delivers land in the copy, which its readers wait for while it is out (see
+	// `hooks.asking`). It FINs once every group a range owes below the publisher's end is accounted for
+	// and read.
 	// Rejects when it fails, leaving its readers no answer. Mirrors the Rust `ask::Ask`.
 	async #askFinished(broadcast: Path.Valid, consumed: Consumed, copy: SubscribeEntry): Promise<void> {
 		const producer = copy.track;
@@ -2980,6 +2981,7 @@ export class Subscriber {
 			fillsChanged: new Signal(0),
 		};
 		this.#subscribes.set(id, entry);
+		hooks.asking(producer, true);
 		let stream: Stream | undefined;
 		// Whether our FIN went out: the answer arrived and every group it owes is in, so a reset after
 		// it, such as the publisher cutting a response short, costs nothing.
@@ -3007,11 +3009,9 @@ export class Subscriber {
 					const until = range.end?.absolute ?? (range.end?.time !== undefined ? range.end.time + 1n : end);
 					return entry.tail.covers(start, max(start, min(until, end)));
 				});
-			// The readers take the answer only once those groups are in, since the copy's own tail settled
-			// long ago and a reader started earlier could run out at one still arriving. Then FIN.
+			// FIN once they are in.
 			const finish = async (end: bigint) => {
 				await entry.tail.settle(() => covered(end), hooks.trackReleased(producer));
-				hooks.relativeStarts(producer, this.#counted(entry));
 				fin = true;
 				opened.writer.close();
 			};
@@ -3036,6 +3036,8 @@ export class Subscriber {
 						null,
 					);
 					entry.tail.touch();
+					// Read as they arrive: the readers wait for the rest while the ask is out.
+					hooks.relativeStarts(producer, this.#counted(entry));
 				} else if ("finish" in resp) {
 					if (entry.end !== undefined) throw new ProtocolViolation("duplicate SUBSCRIBE_FINISH");
 					entry.end = resp.finish.group;
@@ -3057,6 +3059,8 @@ export class Subscriber {
 		} finally {
 			this.#subscribes.delete(id);
 			entry.tail.close();
+			// Its groups are in, or never coming: the readers end at the boundary again.
+			hooks.asking(producer, false);
 		}
 	}
 
