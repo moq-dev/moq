@@ -427,8 +427,21 @@ mod tests {
 		let _ = old.await;
 		let (_new, mut viewer) = raw_view_on(url, udp).await;
 		let _new_session = sessions.recv().await.unwrap();
-		push(&mut *bridge, 40_000, NEW_PACKET);
-		let played = received(&mut viewer).await.expect("the new session never played");
+		// The source keeps sending, as a live one does: each packet's group ends whole where the
+		// packet does, so a paused source's last one ages out before a session arriving past its
+		// delay budget reads it.
+		let read = received(&mut viewer);
+		tokio::pin!(read);
+		let mut at = 40_000;
+		let played = loop {
+			push(&mut *bridge, at, NEW_PACKET);
+			at += 20_000;
+			tokio::select! {
+				played = &mut read => break played,
+				_ = kio::clock::sleep(Duration::from_millis(20)) => {}
+			}
+		};
+		let played = played.expect("the new session never played");
 		assert!([OPUS_PACKET, NEW_PACKET].contains(&played.as_slice()), "{played:?}");
 		http.abort();
 	}
