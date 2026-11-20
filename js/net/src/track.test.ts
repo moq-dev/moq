@@ -5657,7 +5657,10 @@ test("track: a reader's unplaced times are only times its holdings can't place",
 		const reported = new Set(starts.map(([time]) => time));
 		let past = 0n;
 		const lowest = new Map<bigint, bigint>();
-		for (const [asked, start] of starts) lowest.set(asked, (lowest.get(asked) ?? start) < start ? (lowest.get(asked) ?? start) : start);
+		for (const [asked, start] of starts) {
+			const held = lowest.get(asked);
+			if (held === undefined || start < held) lowest.set(asked, start);
+		}
 		for (const [asked, start] of lowest) if (asked < start && start > past) past = start;
 		const reader = producer.subscribe();
 		for (let step = random(16); step >= 0; step--) {

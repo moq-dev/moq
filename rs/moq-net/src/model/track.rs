@@ -16860,7 +16860,11 @@ mod test {
 			panic!("not a group fill");
 		};
 		assert_eq!(fill.start().group..fill.end(), 1000..1500);
-		fill.accept(1200, None).unwrap().expect("a fresh group").finish().unwrap();
+		fill.accept(1200, None)
+			.unwrap()
+			.expect("a fresh group")
+			.finish()
+			.unwrap();
 		fill.refuse_groups(1000..1200, Error::Old);
 		fill.refuse_groups(1201..1500, Error::Old);
 		assert_eq!(read(), [Err(1000..1200), Ok(1200), Err(1201..1500), Err(1500..1600)]);

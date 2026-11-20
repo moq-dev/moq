@@ -5668,7 +5668,9 @@ export class Subscriber {
 			if (producer && wireFed(producer)) {
 				// With every key from the floor through the time accounted for, a group still to come
 				// containing it lies below the floor, which the read never hands out.
-				const open = unaccounted(producer, start, time + 1n, (from, to) => this.#verdicts(from, to, drift, coverage));
+				const open = unaccounted(producer, start, time + 1n, (from, to) =>
+					this.#verdicts(from, to, drift, coverage),
+				);
 				if (open === undefined) continue;
 				if (open.folds !== undefined) this.#wakeAt(open.folds.since(Instant.ZERO).asNanos());
 			}
