@@ -59,6 +59,8 @@ test("a credential parameter carries the first token alone, in place of SETUP an
 	expect(dial.setup).toBeUndefined();
 	expect(dial.connection).toBe("a b");
 	expect(extra(dial, ["a b", "c"])).toEqual(["c"]);
+	// A replacement for it waits for the next dial: the relay takes no token of its own kind.
+	expect(extra(dial, ["next", "c"])).toEqual(["c"]);
 	// The configured URL is untouched, so a new credential for each dial changes no key.
 	expect(url.searchParams.get("credential")).toBe("stale");
 

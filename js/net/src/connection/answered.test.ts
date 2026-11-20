@@ -148,6 +148,8 @@ test("a credential in a URL parameter is judged for each dial like a token", asy
 	const original = globalThis.WebTransport;
 	const dialed: URL[] = [];
 	const served: MockTransport[] = [];
+	// What the relay's own auth was asked: the connection's credential, which it takes from the URL.
+	const asked: string[] = [];
 	// A relay that reads its credential from the URL and refuses "revoked" in band.
 	globalThis.WebTransport = function StubWebTransport(target: string | URL) {
 		const url = new URL(target);
@@ -159,6 +161,7 @@ test("a credential in a URL parameter is judged for each dial like a token", asy
 			for (;;) {
 				const request = await requests.next();
 				if (!request) break;
+				asked.push(named(request));
 				if (url.searchParams.get("credential") === "revoked") {
 					request.reject(SessionCode.Unauthorized, "no");
 					pair.server.close({ closeCode: SessionCode.Unauthorized, reason: "no" });
@@ -182,6 +185,18 @@ test("a credential in a URL parameter is judged for each dial like a token", asy
 		expect(dialed[0]?.searchParams.has("jwt")).toBe(false);
 		// The configured URL stays the key, so a new credential never starts another sequence.
 		expect(reload.url.peek()?.href).toBe(URL_.href);
+
+		// A replacement while the session lives waits for the next dial, and rides no AUTH stream
+		// to a relay that takes no token of its own.
+		tokens.set(["rotated"]);
+		let settled = false;
+		const settle = () => {
+			settled = true;
+		};
+		void reload.answered().then(settle, settle);
+		await clock.advance(Duration.millis(10));
+		expect(asked).toEqual(["connection"]);
+		expect(settled).toBe(false);
 
 		// The relay drops the session; the redial presents the replacement, which it refuses.
 		served[0]?.close({ closeCode: 0, reason: "restart" });
