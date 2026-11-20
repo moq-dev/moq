@@ -346,6 +346,14 @@ impl Fall {
 	}
 }
 
+/// A head [`Handle::take_head`] adopted, still to settle with the track and the cache; see
+/// [`Handle::settle_head`].
+#[must_use]
+pub(super) struct Adopted {
+	now: Option<u64>,
+	latest: Option<Timestamp>,
+}
+
 /// The frames a copy of a group holds, from where it starts, which a successor copy of
 /// the same group on another route adopts below where it starts.
 pub(super) struct Head {
@@ -362,9 +370,10 @@ pub(super) struct Head {
 ///
 /// Read from the copy while it holds its frames. Once it fails, its release moves them
 /// here instead, so a plain consumer of the failed copy still reads the abort and pins
-/// nothing, and the frames go with the last reader holding this.
+/// nothing, and the frames go with the last reader holding this. A loan (see
+/// [`Self::lent`]) holds a head with no copy behind it.
 pub(super) struct Handoff {
-	state: kio::ConsumerWeak<GroupState>,
+	state: Option<kio::ConsumerWeak<GroupState>>,
 	salvaged: Mutex<Option<Salvage>>,
 }
 
@@ -379,11 +388,24 @@ impl Handoff {
 	pub(super) fn head(&self) -> Option<Arc<Head>> {
 		// The group's lock first, in `release`'s order: under it the frames are either
 		// still in the copy or already moved here, never in neither.
-		let state = self.state.read();
+		let state = self.state.as_ref().map(|state| state.read());
 		let salvaged = (self.salvaged.lock().unwrap_or_else(PoisonError::into_inner))
 			.as_ref()
 			.map(|salvage| salvage.head.clone());
-		salvaged.or_else(|| state.head().map(Arc::new))
+		salvaged.or_else(|| state?.head().map(Arc::new))
+	}
+
+	/// Hold `head` for a copy of its group still to arrive, which adopts it then, billed to
+	/// that copy's pool and reclaimed like a failed copy's head: under capacity pressure, or
+	/// once idle. `None` when the pool has no room for it.
+	pub(super) fn lent(head: Arc<Head>, cache: &Arc<cache::Track>) -> Option<Arc<Self>> {
+		let bill = cache.hold(head.bytes())?;
+		let handoff = Arc::new(Self {
+			state: None,
+			salvaged: Mutex::new(Some(Salvage { head, bill })),
+		});
+		cache.pool().hold_head(&handoff);
+		Some(handoff)
 	}
 
 	/// Drop the held head when `reclaim`, or once the pool's idle window passed, returning
@@ -401,6 +423,11 @@ impl Handoff {
 }
 
 impl Head {
+	/// How many frames it holds from the group's first, or `None` when it starts later.
+	pub(super) fn frames_from_first(&self) -> Option<u64> {
+		(self.start == 0 && !self.entries.is_empty()).then_some(self.entries.len() as u64)
+	}
+
 	/// Roughly what holding it costs: payloads, fields, and their slots.
 	fn bytes(&self) -> u64 {
 		let payload: u64 = self.entries.iter().map(|entry| entry.frame.payload.len() as u64).sum();
@@ -2726,8 +2753,17 @@ impl Handle {
 	/// compressed group adopts only a compressed head, taking its inflated sizes beside the
 	/// slices, so its plain readers inflate from the adopted frames.
 	pub(super) fn adopt_head(&self, head: &Head) {
+		if let Some(adopted) = self.take_head(head) {
+			self.settle_head(adopted);
+		}
+	}
+
+	/// The part of [`Self::adopt_head`] that touches only this group, so a track can run it
+	/// under its own lock before any reader sees the group: then [`Self::settle_head`], with
+	/// that lock released.
+	pub(super) fn take_head(&self, head: &Head) -> Option<Adopted> {
 		let Ok(mut state) = self.state.write() else {
-			return;
+			return None;
 		};
 		let offset = state.offset;
 		let reaches = head.start.saturating_add(head.entries.len()) >= offset;
@@ -2735,7 +2771,7 @@ impl Handle {
 		// A copy that shed its front holds no run from `offset` for the head to precede.
 		let shed = state.held() != offset;
 		if state.outcome.error().is_some() || state.sparse() || !same_form || shed || head.start >= offset || !reaches {
-			return;
+			return None;
 		}
 		let count = offset - head.start;
 		let entries = &head.entries[..count];
@@ -2749,13 +2785,13 @@ impl Handle {
 		// shed to make room for.
 		let slots = state.slots() + (count * size_of::<Entry>()) as u64;
 		if state.tail().saturating_add(payload + metadata + slots) > MAX_CACHE_BYTES {
-			return;
+			return None;
 		}
 		let mut adopted = Vec::with_capacity(count);
 		for (index, entry) in (head.start..).zip(entries) {
 			let mut entry = entry.clone();
 			if state.canonicalize(index, &mut entry).is_err() {
-				return;
+				return None;
 			}
 			// Below the log, so off this copy's pace scale: taking it reports nothing.
 			entry.end = 0;
@@ -2798,11 +2834,18 @@ impl Handle {
 			wire.last = wire.last.or(Some(offset as u64 - 1));
 		}
 		let extra = metadata + growth + if state.content.is_none() { payload } else { 0 };
-		let now = state.charge.add(extra);
-		drop(state);
+		Some(Adopted {
+			now: state.charge.add(extra),
+			latest: head_latest,
+		})
+	}
+
+	/// Settle a head [`Self::take_head`] adopted with the track and the cache: the group
+	/// counts as content now, as a first frame would make it.
+	pub(super) fn settle_head(&self, adopted: Adopted) {
 		self.start(None);
-		self.cache.settle(now);
-		if let Some(latest) = head_latest {
+		self.cache.settle(adopted.now);
+		if let Some(latest) = adopted.latest {
 			self.cache.wakes().presented(latest);
 		}
 	}
@@ -3981,7 +4024,7 @@ impl Consumer {
 			return handoff;
 		}
 		let shared = Arc::new(Handoff {
-			state: self.cursor.state.weak(),
+			state: Some(self.cursor.state.weak()),
 			salvaged: Mutex::default(),
 		});
 		*handoff = Arc::downgrade(&shared);
@@ -5726,6 +5769,32 @@ mod test {
 		pool.sweep();
 		assert!(handoff.head().is_none(), "the sweep drops a held head past the window");
 		assert_eq!(pool.used(), 0);
+	}
+
+	/// A head lent to a copy for a group still to arrive is billed to that copy's pool like a
+	/// failed copy's held head, and reclaimed the same way: refused when the pool is full, and
+	/// dropped once idle past the window.
+	#[test]
+	fn a_lent_head_is_billed_and_expires_with_the_pool_window() {
+		let source = cache::Track::new(cache::Pool::unbounded(), Default::default(), kio::Weak::new());
+		let mut producer = Producer::new(Info::from(0u64), track::Info::default(), source);
+		producer
+			.write_frame(crate::Timestamp::unscaled(producer.start), Bytes::from_static(b"a"))
+			.unwrap();
+		let head = producer.consume().handoff().head().unwrap();
+
+		let pool = cache::Pool::new(cache::Config::default().with_expiry(std::time::Duration::from_secs(1)));
+		let cache = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
+		let loan = Handoff::lent(head.clone(), &cache).expect("room for it");
+		assert!(pool.used() > 0, "billed while lent");
+		pool.step(std::time::Duration::from_secs(2));
+		pool.sweep();
+		assert!(loan.head().is_none(), "the sweep drops an idle loan");
+		assert_eq!(pool.used(), 0);
+
+		let full = cache::Pool::new(cache::Config::default().with_capacity(1));
+		let cache = cache::Track::new(full, Default::default(), kio::Weak::new());
+		assert!(Handoff::lent(head, &cache).is_none(), "a full pool lends nothing");
 	}
 
 	/// The registry the sweep expires held heads from grows with the heads held, not with

@@ -337,12 +337,7 @@ async fn bulk(tracks: usize, chunk: usize, read: usize) {
 				.await
 				.unwrap();
 			let mut ordered = consumer.ordered();
-			let mut group = ordered
-				.next_group()
-				.await
-				.unwrap()
-				.and_then(moq_net::track::Item::group)
-				.expect("a group");
+			let mut group = ordered.next_group().await.unwrap().expect("a group");
 			for index in 0..read / chunk {
 				let frame = group
 					.read_frame()

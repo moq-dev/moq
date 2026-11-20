@@ -296,3 +296,41 @@ async fn a_client_ca_needs_a_verifying_listener() {
 	};
 	assert!(error.contains("needs a QUIC listener"), "{error}");
 }
+
+/// A token is issued only for a root a session can use: one with an escaped `/`
+/// carries a broadcast beneath it through the relay, and one `moq_net::Path::new`
+/// refuses is never issued. The root is not dialed as a URL path, where `\` reads as `/`.
+#[tokio::test]
+async fn an_issued_root_with_an_escaped_separator_is_dialable() {
+	let dir = tempfile::tempdir().expect("tempdir");
+	let key = moq_auth::Key::generate(moq_auth::Algorithm::HS256, None).expect("generate key");
+	let key_path = dir.path().join("key.jwk");
+	key.to_file(&key_path).expect("write key");
+
+	let mut policy = moq_auth::serve::Policy::default();
+	policy.keys = Some(moq_auth::serve::Keys::File(key_path));
+	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+	let server_url: url::Url = format!("http://{}/", listener.local_addr().unwrap()).parse().unwrap();
+	let server = moq_auth::serve::Server::new(policy).unwrap();
+	tokio::spawn(async move { server.serve(listener).await });
+
+	let mut config = auth::Config::default();
+	config.url = Some(server_url);
+	let (port, relay) = spawn_relay(config).await;
+
+	let all = || ["**".parse::<moq_auth::Pattern>().unwrap()];
+	let refused = moq_auth::Claims::default().with_root(r"cam\//1").with_publish(all());
+	assert!(key.sign(&refused).is_err(), "issued a root moq_net::Path::new refuses");
+
+	let claims = moq_auth::Claims::default()
+		.with_root(r"cam\/1")
+		.with_publish(all())
+		.with_subscribe(all());
+	let jwt = key.sign(&claims).expect("sign");
+	let mut dial = url(port, "/");
+	dial.query_pairs_mut().append_pair("jwt", &jwt);
+	let _publisher = publish(dial.clone(), r"cam\/1/feed.hang").await;
+	assert_eq!(first_broadcast(dial).await, r"cam\/1/feed.hang");
+
+	relay.abort();
+}

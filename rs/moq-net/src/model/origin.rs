@@ -3155,7 +3155,7 @@ struct Serving {
 ///
 /// // Fill the catalog before readers can find it.
 /// let route = origin.route("live/alice", RouteOptions::hidden())?;
-/// let _catalog = route.broadcast().create_track("catalog.json", None)?;
+/// let _catalog = route.broadcast().create_track("catalog.json", None).ok_or(moq_net::Error::Duplicate)?;
 /// route.announce()?; // visible now, same instance
 /// route.set_cost(5)?; // re-prices in place
 /// route.withdraw(); // hidden; announce() again continues the same stream
@@ -4516,10 +4516,9 @@ fn follow_demand(
 			}
 		}
 		None => {
-			*held = weak.subscription().and_then(|(subscription, subscribers)| {
-				let sub = copy?.subscribe(routes.subscription(subscription, subscribers));
-				Some(super::resume::Held::new(sub))
-			});
+			*held = weak
+				.subscription()
+				.and_then(|(subscription, subscribers)| Some(routes.subscribe(copy?, subscription, subscribers)));
 		}
 	}
 }
@@ -5064,7 +5063,13 @@ impl kio::Task for FrontServe {
 					Event::TrackInfo { track, source, .. } => Some((track.clone(), *source)),
 					_ => None,
 				};
-				for action in self.front.step(event) {
+				// Every transition, for telling how a front ended a track in a run that failed.
+				let traced = tracing::enabled!(tracing::Level::DEBUG).then(|| format!("{event:?}"));
+				let actions = self.front.step(event);
+				if let Some(event) = traced {
+					tracing::debug!(path = %self.path, %event, ?actions, "front step");
+				}
+				for action in actions {
 					match action {
 						Action::Reselect => {
 							let event = self.select();
@@ -5220,11 +5225,10 @@ impl kio::Task for FrontServe {
 								Some(Ok(lookup)) => {
 									// Subscribe before the query exposes upstream demand, and query
 									// that same instance even if the broadcast changes meanwhile.
-									let sub = io.weak.subscription().map(|(demand, subscribers)| {
-										super::resume::Held::new(
-											lookup.subscribe(io.routes.subscription(demand, subscribers)),
-										)
-									});
+									let sub = io
+										.weak
+										.subscription()
+										.map(|(demand, subscribers)| io.routes.subscribe(&lookup, demand, subscribers));
 									let query = match &sub {
 										Some(sub) => sub.info(),
 										None => lookup.info().into_inner(),
@@ -5539,7 +5543,6 @@ impl kio::Task for FrontServe {
 				}
 				FrontStep::SourceClosed(source) => Event::SourceClosed { source },
 				FrontStep::Info(name, source, result) => {
-					let closing = self.sources.get(&source).is_some_and(|s| s.is_closing());
 					let Some(io) = self.tracks.get_mut(&name) else { continue };
 					let Some(asked) = io.query.take() else { continue };
 					let retry = asked.query.retry();
@@ -5553,6 +5556,9 @@ impl kio::Task for FrontServe {
 						},
 						Err(err) => Err(err),
 					};
+					// Read after the copy's outcome: a subscriber closes a source before it fails
+					// that source's copies, so a failure seen above is already reflected here.
+					let closing = self.sources.get(&source).is_some_and(|s| s.is_closing());
 					// Staged only while the track has a reader, or a read holds the finished
 					// track: without one the machine will not splice, and a held copy would
 					// keep the source subscribed.
@@ -7834,6 +7840,17 @@ impl Consumer {
 		self.scope.allowed.overlaps(&subtree)
 			&& !self.scope.excluded.iter().any(|excluded| path.has_prefix(excluded))
 			&& self.scope.mount(path).is_none_or(|mount| mount.resolve(path).is_some())
+	}
+
+	/// [`Self::reaches`], and some path `allowed`, relative to this handle's root, holds
+	/// is in its scope too.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn reaches_any(&self, path: &Path, allowed: &Patterns) -> bool {
+		if !self.reaches(path) {
+			return false;
+		}
+		let ours = self.scope.allowed.rebase(self.root().as_str());
+		allowed.iter().any(|pattern| ours.overlaps(pattern))
 	}
 
 	/// Whether the absolute `path` lies beneath one of this handle's mounts, where the

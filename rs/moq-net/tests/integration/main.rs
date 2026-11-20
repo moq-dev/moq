@@ -83,6 +83,7 @@ mod session_close;
 mod session_panic;
 mod settled_end_survives_abort;
 mod setup_negotiation;
+mod shared_copy_start;
 mod slow_joiner;
 mod source_errors;
 mod stream_credit;
@@ -95,6 +96,7 @@ mod subscription_end_integrity;
 #[cfg(feature = "async")]
 mod support;
 mod synced;
+mod time_start_fill;
 mod track_abort_over_session;
 mod track_info_cancel;
 mod track_stream_demand;

@@ -141,12 +141,11 @@ export class Capture {
 
 /**
  * The publisher's largest group as `track`'s subscription began, read the way the container consumer
- * reads it: once the track's info or `tuned`, its first group, shows the subscription established and
- * its start resolved, so a cached group racing the answer, or live groups landing after it, don't set it.
+ * reads it: once the track's info or `tuned`, its first group, shows the subscription established, so
+ * live groups landing after it don't set it.
  */
 export async function joined(track: Track.Subscriber, tuned: Promise<unknown>): Promise<number | undefined> {
 	await Promise.race([track.info().catch(() => undefined), tuned]);
-	await track.start();
 	const largest = await track.largest();
 	return largest === undefined ? undefined : Number(largest.group);
 }

@@ -695,15 +695,14 @@ export namespace Track {
 		priority?: number;
 		signal?: AbortSignal;
 	}
-	export type Fill = Track.FillGroups | Track.FillLookup;
 	export class FillGroups {
 		[Symbol.dispose](): void;
 		accept(start: bigint, info?: Track.Info): Group.Producer | undefined;
 		close(): void;
 		dropGroups(start: bigint, end: bigint): void;
 		readonly end: bigint;
+		readonly floor: bigint;
 		isWanted(key: bigint): boolean;
-		readonly kind: "groups";
 		get maxDelay(): Clock.Duration | null;
 		get order(): Track.Order;
 		get priority(): number;
@@ -712,15 +711,6 @@ export namespace Track {
 		unwanted(key: bigint): Promise<void>;
 		wanted(): bigint | undefined;
 		wantedChanged(): Promise<bigint | undefined>;
-	}
-	export class FillLookup {
-		[Symbol.dispose](): void;
-		accept(start: bigint, info?: Track.Info): Group.Producer | undefined;
-		close(): void;
-		readonly kind: "lookup";
-		get maxDelay(): Clock.Duration | null;
-		get priority(): number;
-		readonly time: bigint;
 	}
 	export interface Finished {
 		abort(error: Error): void;
@@ -758,6 +748,7 @@ export namespace Track {
 		error: Error;
 		group?: never;
 		kind: "gap";
+		landed?: Clock.Instant;
 		start: bigint;
 	};
 	export type Order = "ascending" | "descending";
@@ -826,7 +817,7 @@ export namespace Track {
 		[Symbol.dispose](): void;
 		close(): void;
 		get name(): string;
-		requestedFill(): Promise<Track.Fill | undefined>;
+		requestedFill(): Promise<Track.FillGroups | undefined>;
 	}
 	export class Subscriber {
 		close(abort?: Error): void;
@@ -834,14 +825,11 @@ export namespace Track {
 		finished(): Promise<Track.Position>;
 		floor(): bigint | undefined;
 		info(): Promise<Track.Info>;
-		isSkipped(start: bigint, end: bigint): boolean;
 		largest(): Promise<Track.Position | undefined>;
 		readonly name: string;
-		nextInRange(from: bigint): bigint | undefined;
 		ordered(): Track.Ordered;
 		recvGroup(): Promise<Group.Consumer | undefined>;
 		refresh(options?: Track.RefreshOptions): Promise<void>;
-		start(): Promise<bigint | undefined>;
 		get subscription(): Signals.Getter<Track.Subscription | undefined>;
 		update(options: Track.Subscription): void;
 		withRange(groups: Track.Groups): this;
