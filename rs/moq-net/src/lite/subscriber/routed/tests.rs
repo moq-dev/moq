@@ -321,6 +321,15 @@ async fn a_grant_change_unsyncs_only_the_readers_it_can_show_more() {
 	routed.limit(&granting(&["a", "b", "c"])).unwrap();
 	assert!(!synced(&everything));
 	assert!(synced(&a), "neither gain shows `a` anything new");
+
+	// Narrowed within a gain still unanswered, what it keeps is still held.
+	let bc = consumer.scope("b/c", &all).unwrap().routes();
+	let bd = consumer.scope("b/d", &all).unwrap().routes();
+	routed.limit(&granting(&["a", "b/c"])).unwrap();
+	assert!(!synced(&bc), "`b/c` may still be in the unheard answer");
+	assert!(synced(&bd), "`b/d` is no longer shown");
+	answer(&mut routed, 2);
+	assert!(synced(&everything) && synced(&bc));
 }
 
 /// A grant change that shows more within a prefix asked, though within no reader's, still

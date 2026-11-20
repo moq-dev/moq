@@ -172,8 +172,11 @@ pub(in crate::lite) struct Routed {
 	wants: BTreeMap<Path, Option<crate::model::Snapshot>>,
 	/// The prefixes asked of the peer.
 	asked: BTreeMap<u64, Asked>,
-	/// What grant changes newly show within the wants, held until an answer after them is
-	/// in. One per want and pattern the grant still holds, however often it changes.
+	/// What of the grant the peer's answers already cover, `None` for everything: what
+	/// a grant change shows beyond it may already be in the peer's answer, unheard here.
+	covered: Option<crate::Patterns>,
+	/// What the grant shows beyond `covered` within the wants, held until an answer after
+	/// it is in: one per want and pattern of the grant, however often it changes.
 	gained: Vec<Gain>,
 	/// The grant showed more since the last edit: the next is sent even when it changes
 	/// nothing, since its ANNOUNCE_OK follows what the change shows under a wider prefix.
@@ -355,6 +358,7 @@ impl Routed {
 			origin: subscriber.origin.clone(),
 			wants: BTreeMap::new(),
 			asked: BTreeMap::new(),
+			covered: permit.grant().cloned(),
 			gained: Vec::new(),
 			regranted: false,
 			next_prefix: 0,
@@ -433,9 +437,6 @@ impl Routed {
 	/// answered every request, and sent the initial set of each prefix asked for it.
 	/// The caller serves what the node queued first.
 	pub(in crate::lite) fn release(&mut self) {
-		if self.wants.values().all(|snapshot| snapshot.is_none()) && self.gained.is_empty() {
-			return;
-		}
 		let done = self.finished || self.silent;
 		if !done && !self.stream.answered() {
 			return;
@@ -455,7 +456,23 @@ impl Routed {
 				*snapshot = None;
 			}
 		}
-		self.gained.retain(|gain| !answered(&gain.held));
+		let (released, held): (Vec<Gain>, Vec<Gain>) = std::mem::take(&mut self.gained)
+			.into_iter()
+			.partition(|gain| answered(&gain.held));
+		self.gained = held;
+		// The peer's answers now cover what each released pattern shows, and once nothing
+		// is held, the whole grant.
+		if self.gained.is_empty() {
+			if self.covered.as_ref() != self.permit.grant() {
+				self.covered = self.permit.grant().cloned();
+			}
+		} else if let Some(covered) = self.covered.as_mut() {
+			for gain in released {
+				if !self.gained.iter().any(|held| held.pattern == gain.pattern) {
+					covered.insert(gain.pattern);
+				}
+			}
+		}
 	}
 
 	/// The peer finished its stream: it is leaving, and answers nothing more.
@@ -819,12 +836,17 @@ impl Routed {
 		// for it. Elsewhere, and on a narrowing, nothing new can arrive, and a reader stays
 		// synced.
 		if !permit.same_grant(&self.permit) {
-			// What a pattern the grant no longer holds showed is gone, so nothing of it is
-			// left to arrive.
-			self.gained.retain(|gain| permit.grants(&gain.pattern));
+			// The peer's answers cover only what the new grant still shows of what they did;
+			// past what one intersection can hold, take them to cover nothing, holding more.
+			self.covered = match (self.covered.take(), permit.grant()) {
+				(None, granted) => granted.cloned(),
+				(Some(covered), None) => Some(covered),
+				(Some(covered), Some(granted)) => Some(covered.intersect(granted).unwrap_or_default()),
+			};
 			let overlaps = |a: &Path, b: &Path| a.has_prefix(b) || b.has_prefix(a);
 			let asking = self.stream.asking();
-			for (pattern, region) in permit.gained(&self.permit) {
+			let mut before = std::mem::take(&mut self.gained);
+			for (pattern, region) in permit.beyond(self.covered.as_ref()) {
 				// Too deep to lie beneath the root, it shows nothing here.
 				let Ok(absolute) = self.root.join(&region) else {
 					continue;
@@ -834,8 +856,10 @@ impl Routed {
 				}
 				for want in self.wants.keys().filter(|want| overlaps(want, &region)) {
 					self.regranted = true;
-					// Held already for an earlier change the pattern made.
-					if (self.gained.iter()).any(|gain| gain.want == *want && gain.pattern == pattern) {
+					// Held already: keep its snapshot, so its readers wait on unbroken.
+					let kept = (before.iter()).position(|gain| gain.want == *want && gain.pattern == pattern);
+					if let Some(kept) = kept {
+						self.gained.push(before.swap_remove(kept));
 						continue;
 					}
 					let held = match region.has_prefix(want) {
@@ -850,6 +874,8 @@ impl Routed {
 					});
 				}
 			}
+			// What the grant no longer shows beyond what is covered can bring nothing more.
+			drop(before);
 		}
 		self.permit = permit.clone();
 		self.reask();
