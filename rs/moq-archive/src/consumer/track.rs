@@ -155,8 +155,8 @@ pub(super) async fn serve<S: ObjectStore>(shared: Arc<Shared<S>>, index: Arc<Mut
 /// Answer `fill`'s start at `pts`, a time in the track's timescale, with the group containing
 /// it: the newest group starting at or before it, found among the objects whose keys say they
 /// may hold it. A group starts at its key, as the live cache resolves it. Dropped when the
-/// archive holds none from the fill's floor through it, and refused for now when the store
-/// fails or the group found can't be served.
+/// archive holds none from the fill's floor through it, and refused, failing the reader until
+/// its ranges change, when the store fails or the group found can't be served.
 async fn look_up<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, fill: &FillGroups, pts: u64) {
 	loop {
 		match search(shared, index, pts).await {
