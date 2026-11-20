@@ -82,7 +82,7 @@ for (;;) {
 	const frame = await g.decodeMaybe(decode);
 	if (!frame) break;
 	// Only a length-first frame can be a GROUP_END, and the fixture's frames are not.
-	if ("end" in frame) throw new Error("a fixture frame decoded as GROUP_END");
+	if ("whole" in frame) throw new Error("a fixture frame decoded as GROUP_END");
 	if (!frame.timestamp) throw new Error("a lite-05+ frame decoded without its timestamp");
 	// The fixture's frames fit one segment, so each payload decodes with its header.
 	if (!frame.payload) throw new Error("a fixture frame streamed past its header");
@@ -109,7 +109,7 @@ if (untimed) {
 	for (;;) {
 		const frame = await u.decodeMaybe(frameDecoder({ scale: 0 }));
 		if (!frame) break;
-		if ("end" in frame) throw new Error("a fixture frame decoded as GROUP_END");
+		if ("whole" in frame) throw new Error("a fixture frame decoded as GROUP_END");
 		assert.equal(frame.timestamp, undefined);
 		if (!frame.payload) throw new Error("a fixture frame streamed past its header");
 		untimedFrames.push(frame.payload);
