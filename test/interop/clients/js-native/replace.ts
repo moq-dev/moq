@@ -107,13 +107,12 @@ try {
 		write(sequence);
 		const future = sequence + 1n;
 		// Serve every request until the round ends, not only the fill asserted here: a relay
-		// moving its range below the replacement's first group asks where that time starts,
-		// and an unanswered lookup holds back the subscription that asked.
+		// moving its range below the replacement's first group asks for the group containing
+		// that time, and an unanswered fill holds back the subscription that asked.
 		const filled = Promise.withResolvers<void>();
 		const serving = (async () => {
 			for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
 				try {
-					if (fill.kind === "lookup") continue; // closed unanswered: no time lookups here
 					if (fill.start < sequence) continue; // history the replacement no longer holds
 					assert.equal(fill.start, future);
 					assert.equal(fill.end, future + 1n);

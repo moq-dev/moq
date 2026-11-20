@@ -410,7 +410,8 @@ export class FillState {
 				}
 				// A key below the start answers the start, so no other group starts from it through the
 				// start.
-				const answers = key < pending.start ? pending.start : key;
+				let answers = key;
+				if (answers < pending.start) answers = pending.start;
 				if (pending.resolved.some((run) => run.start <= answers && answers < run.end)) return undefined;
 				// A copy missing its head is replaced from frame 0, as a bounded reader asked. Landing in
 				// the cache answers it, as `arrived` records.

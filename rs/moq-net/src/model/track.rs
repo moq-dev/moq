@@ -4074,7 +4074,7 @@ impl TrackState {
 }
 
 impl TrackState {
-	/// Store a flight a [`Fill`] answered: a copy of group `key` of its own, from the
+	/// Store a flight a [`FillGroups`] answered: a copy of group `key` of its own, from the
 	/// frame its riders start at, which the cache never serves in place of its cached copy.
 	pub(super) fn insert_flight(
 		&mut self,
