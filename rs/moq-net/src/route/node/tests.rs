@@ -829,3 +829,57 @@ fn a_request_waiting_for_a_way_fails_once_its_route_goes() {
 	assert_eq!(node.poll_forward(5, None, &room, &waiter), Poll::Ready(None));
 	assert_eq!(node.poll_forward(5, Some(far), &room, &waiter), Poll::Ready(None));
 }
+
+/// A request waiting for a way to a claim fails once a claim of better precedence outranks
+/// it, as the node then shows the broadcast by that claim, which its sender asks anew.
+#[test]
+fn a_request_waiting_for_a_way_fails_once_its_claim_is_outranked() {
+	let (node, _clock) = node();
+	let room = cast("room");
+	let far = id(9);
+	let route = |via: u64, cost| Msg::Route {
+		origin: far,
+		offer: Some(Offer {
+			path: [
+				Hop { node: far, session: 0 },
+				Hop {
+					node: id(via),
+					session: 1,
+				},
+			]
+			.into(),
+			draining: false,
+			priority: i8::MAX,
+			cost,
+			marked: false,
+		}),
+	};
+	let viewer = viewer(&node, 5);
+	let publisher = publisher(&node, 6);
+	let lagging = node.connect(1, port(Role::Routing(id(7)))).unwrap();
+	lagging.recv(Msg::Edited).unwrap();
+	let ahead = node.connect(2, port(Role::Routing(id(8)))).unwrap();
+	ahead.recv(Msg::Edited).unwrap();
+	lagging.recv(route(7, 1)).unwrap();
+	lagging.flush();
+	ahead.recv(route(8, 2)).unwrap();
+	ahead
+		.recv(Msg::Claims {
+			origin: far,
+			changes: vec![(room.clone(), live(0))],
+			floor: 1,
+		})
+		.unwrap();
+	ahead.flush();
+	confirm(&ahead);
+	drop(ahead);
+	told(&viewer);
+	let (flag, waiter) = flag();
+	assert!(node.poll_forward(5, Some(far), &room, &waiter).is_pending());
+
+	announce(&publisher, &room, live(1));
+	confirm(&publisher);
+	assert!(flag.woken(), "a newer claim arrived");
+	assert_eq!(told(&viewer), [("room".to_string(), true)], "shown by the newer claim");
+	assert_eq!(node.poll_forward(5, Some(far), &room, &waiter), Poll::Ready(None));
+}

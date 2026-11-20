@@ -2542,10 +2542,10 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 
 	/// Whether a request for `broadcast` naming `origin`, which [`Self::step`] has nowhere
 	/// to send, waits for a way rather than fails: this node routes to `origin` and knows its
-	/// claim available, as it tells its neighbours, but no neighbour's copy holds it yet. A
-	/// route arrives before the claims behind it, and a copy that held the claim can leave
-	/// with its session while this node's own copy stays, so nothing it shows changes when
-	/// a way appears: a request it refused now would never be asked again.
+	/// claim available and of the best precedence, so it shows the claim, but no neighbour's
+	/// copy holds it yet. A route arrives before the claims behind it, and a copy that held
+	/// the claim can leave with its session while this node's own copy stays, so nothing it
+	/// shows changes when a way appears: a request it refused now would never be asked again.
 	pub fn awaits(&self, origin: NodeId, (path, instance): &Broadcast<I>) -> bool {
 		if self.is_self(origin) || !self.best.contains_key(&origin) {
 			return false;
@@ -2556,7 +2556,12 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		(ancestors(path).rev())
 			.map(|above| (above, instance.clone()))
 			.find(|claim| known.items.contains_key(claim))
-			.is_some_and(|claim| (self.claims_of(&claim)).any(|(by, claim)| by == origin && !claim.unavailable))
+			.is_some_and(|claim| {
+				// Only a claim of the best precedence there is shown, as in `closest`.
+				let best = (self.claims_of(&claim)).map(|(_, claim)| precedence(&claim.item)).min();
+				(self.claims_of(&claim))
+					.any(|(by, claim)| by == origin && !claim.unavailable && best == Some(precedence(&claim.item)))
+			})
 	}
 
 	/// Whether `via`'s copy of `origin`'s claims holds `broadcast` as this node knows it:

@@ -352,10 +352,11 @@ Lessons from the history that bind every child:
   reads met: the route layer shipped as lite-07's, the route algebra proves
   it, and the bake-off measured it. Recommended: yes. Delete this README,
   first moving the requirements and settled items that m3 quests cite by
-  number (cache-routing, route-health) into those quests, which also lifts
-  this epic from the Required list of
-  [the lite-07 cut](/quest/m2/lite07-finalize.md). An agent cannot take this
-  step: it decides whether the cut still waits on routing.
+  number (cache-routing, route-health) into those quests, and remove every
+  link to it, including its entry in the Required list of
+  [the lite-07 cut](/quest/m2/lite07-finalize.md), which lifts that wait. An
+  agent cannot take this step: it decides whether the cut still waits on
+  routing.
 
 ## Related
 
