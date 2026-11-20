@@ -54,7 +54,9 @@ impl<T: serde::Serialize> ReportTrack<T> {
 			.with_priority(PRIORITY)
 			.with_compression(moq_net::track::Compression::Deflate)
 			.with_refresh(moq_net::track::Refresh::default().with_ratio(8));
-		let track = broadcast.create_track(name, info)?;
+		let track = broadcast
+			.create_track(name, info)
+			.ok_or_else(|| anyhow::anyhow!("the track {name} already exists"))?;
 		Ok(Self {
 			track: Some(moq_json::snapshot::Producer::new(track.clone(), Default::default())),
 			inner: track,
@@ -496,9 +498,7 @@ async fn write_echo(
 				let event = event.context("announcements ended")?;
 				let (announce, active) = match event {
 					moq_net::announce::Event::Present(announce) => (announce, true),
-					moq_net::announce::Event::Absent(announce) | moq_net::announce::Event::Offline(announce) => (announce, false),
-					// A reader rides out its path being held.
-					moq_net::announce::Event::Available(_) | moq_net::announce::Event::Unavailable(_) => continue,
+					moq_net::announce::Event::Absent(announce) => (announce, false),
 				};
 				let path = announce.prefix;
 				if !path.has_prefix(&prefix) || !hang::echo::is_echo(&path) {

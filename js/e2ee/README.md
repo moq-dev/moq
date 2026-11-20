@@ -44,6 +44,8 @@ const route = origin.route(await credential.path("meeting.hang"), {
 const video = await new Broadcast.Producer(route.broadcast, generation).createTrack("video", {
 	timescale: Time.Timescale.MILLI,
 });
+// Undefined while a live track already holds the name.
+if (!video) throw new Error("track name taken");
 route.announce();
 
 const now = Time.Timestamp.now();

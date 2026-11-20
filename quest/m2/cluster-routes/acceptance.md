@@ -2,21 +2,11 @@
 
 ## Goal
 
-The route layer is proven on the implementation, and the mitigations its
-fixtures replace are retired: [moq-dev/moq#5375](https://github.com/moq-dev/moq/pull/5375)'s
-retraction quarantine, [moq-dev/moq#5391](https://github.com/moq-dev/moq/pull/5391)'s
-same-clock queue dedup, and the 300 ms update hold, all marked `lite06_churn` in
-`rs/moq-net/src/model/origin.rs`.
+A lite-07 subscriber whose grant permits more disjoint regions than one
+ANNOUNCE_REQUEST can name either discovers every region or says it cannot:
+no reader sees a region it never asked for as synced and empty.
 
 ## Plan
-
-Before the lite-07 freeze, exercise a scoped subscriber whose permitted, disjoint prefixes
-cannot fit one ANNOUNCE_REQUEST and cannot be widened within the grant. In
-`lite/subscriber/routed.rs`, `asks` can discard a prefix while `release` treats an
-empty set of matching replies as synchronized. Publish inside the last permitted region
-and verify either complete discovery or a surfaced inability to answer. An empty,
-synchronized snapshot for an unasked region is incorrect. The audit traced these branches
-in [moq-dev/moq#8987](https://github.com/moq-dev/moq/pull/8987); confirm the behavior on real sessions and fix it if reproduced.
 
 Decided 2026-11-14 (maintainer, /quest-complete on
 [moq-dev/moq#8768](https://github.com/moq-dev/moq/pull/8768)): ✅ stays in
@@ -25,49 +15,97 @@ tier and partition tests run before the cut (rejected: moving it to m3 and
 fixing late routing flaws in lite-08). A flaw found here is fixed on
 lite-07-wip before it freezes.
 
-The fixtures landed in [moq-dev/moq#8832](https://github.com/moq-dev/moq/pull/8832),
-and the reference model is deleted. On real sessions with time mocked: the
-topology and prior-art fixtures (`tests/integration/route_acceptance.rs`),
-failover liveness and the live-graph tests of
-[moq-dev/moq#4644](https://github.com/moq-dev/moq/pull/4644) (`route_failover.rs`),
-the tiered cluster, partition, and scoped-interest checks (`route_cluster.rs`),
-and mount continuity (`mount.rs`).
-[moq-dev/moq#8987](https://github.com/moq-dev/moq/pull/8987) put lite-07 on
-`route::relay::Router` and rewrote their assertions for it; the old
-router's forwarding and operation-count fixtures went with it, and
-`route/tests/multicast*.rs` covers the new one. The route fan-out quest
-those pinned was deleted
-with the old rule, its one surviving cost moved to
-[route benches](/quest/m3/route-benches.md).
+[moq-dev/moq#9112](https://github.com/moq-dev/moq/pull/9112) confined the
+`lite06_churn` mitigations to routes learned over a hop chain, made a claim
+the route node lets go of leave every copy at once, recorded why lite-06
+keeps its `Start, End, Start` residual, and pointed the Node ID 0 coverage
+at the native JS claims lanes of `just test interop`. What remains:
 
-Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit): the
-switch makes `origin::Config::update_hold` crate-private, since nothing
-outside moq-net sets it, and puts whatever of the three mitigations survives
-here under one named lite-06 marker. So retiring them below changes no
-public API, and one that a lite-06 mesh keeps is already marked temporary.
-[moq-dev/moq#9053](https://github.com/moq-dev/moq/pull/9053) did both: the
-three are marked by the `lite06_churn` module, and still run on every
-version, so gating any that a lite-06 mesh keeps to the lite-06 session
-path is part of retiring them below.
+`auth::residual_lite_07_a_grant_too_wide_to_ask_syncs_without_its_last_region`
+pins the flaw on real sessions. A relay grants its client 18 disjoint
+regions over two tokens; each token's grant fits its own AUTH message, but
+the union does not fit the one ANNOUNCE_REQUEST a subscriber's whole set
+must (`lite::request_fits`, which the publisher enforces). `coarsen` in
+`lite/subscriber/routed.rs` then drops the last region, and `release` treats
+a want no asked prefix overlaps as answered: a whole-tree reader syncs
+without that region's broadcast, and a reader of the region alone syncs
+empty. Fix it per the decision under Waiting, and turn the residual into
+the passing case.
 
-What remains:
+What the publishers do today with an ask wider than the grant (traced in
+code, then run on a server enforcing `r00/a/**` and `r01/b/**` with the
+subscriber forced to ask for the root):
 
-- Retire the quarantine, the dedup, and the hold, now that the fixtures
-  run on the route layer that replaces them. The quarantine
-  is what turns the flaws into a 2 s gap: a relay that shows a held claim
-  offline announces it again only after `RETRACT_QUARANTINE`. The hold and
-  the quarantine sit on the announce cursor, which every version shares, so
-  check what a lite-06 mesh loses without them
-  (`mesh_withdraw::cross_node_close_without_hold_reannounces` is its
-  positive control) before deleting them; if a lite-06 mesh still needs
-  them, retire them for lite-07 routes only.
-- `mesh_withdraw::residual_late_better_path_restarts_on_lite06` pins a
-  lite-06 mesh where each relay mints its own instance, so a client sees
-  `Start, End, Start` while the broadcast stays live. Turn it into an update,
-  or record why a lite-06 mesh keeps it.
-- A request naming Node ID 0 on a lite-07 session: Rust clients always name
-  a node, so only publisher unit tests cover a relay answering 0. Cover it
-  where `js/net` sends it, in `just test interop`.
+- The ask is legal. The draft already says a prefix outside the
+  subscriber's scope "lists nothing and is SYNCED at once"
+  (`doc/draft/moq-lite.md`, Announce). Confining the ask to the grant is
+  only `coarsen`'s choice, from
+  [moq-dev/moq#8987](https://github.com/moq-dev/moq/pull/8987). Neither
+  publisher checks an ask against the grant: both filter each claim by its
+  path (`Answer::shows` in `lite/publisher/routed.rs`, `#changes` in
+  `js/net/src/lite/answer.ts`), and `Answer::poll_permit` re-filters every
+  claim the node told as the grant changes. The root ask got ANNOUNCE_OK,
+  SYNCED, both granted broadcasts, nothing outside the grant, and no close.
+- A claim above a granted region is lost. A publisher presents a broader
+  claim at the requested prefix itself (`relay.rs`, "presented at the
+  prefix itself"). Asked for a region, a service claim at `r00` arrives at
+  `r00/a`, which the grant covers. Asked for the root, it would arrive at
+  `r00`, which the grant does not cover, so the filter drops it. The reader
+  syncs without a claim that serves its region.
+- `js/net`'s subscriber already asks for the root once its readers' set
+  does not fit (`#wanted` in `js/net/src/lite/routed.ts`), ignoring the
+  grant. So a confined JS client with that many readers has this gap
+  against either publisher today.
+
+Decided 2026-11-19 (maintainer, in the coordinating session, on
+[moq-dev/moq#9112](https://github.com/moq-dev/moq/pull/9112)): ✅ D, ask
+wider and answer the granted part (rejected: A, the size exception for
+granted regions; B, the public API change; C, leaving the reader to hang).
+It changes the lite-07-wip draft and both publishers, so it lands before
+the cut. The options as they were put:
+
+- How a subscriber handles a grant too wide for one ANNOUNCE_REQUEST.
+  - (D) Ask wider, answer the granted part. `coarsen` falls back to the
+    regions' longest shared ancestor, up to the root, and never drops a
+    region. Draft: a requested prefix wider than the subscriber's scope is
+    answered as if each granted region inside it were asked: a claim above a
+    region is presented at that region, and SYNCED follows every region's
+    initial set. Add one ordering rule: a publisher answers with a grant
+    change before the ANNOUNCE_OK of the next edit it reads after the
+    AUTH_OK, so a subscriber whose grant widens under a wide ask can send an
+    empty edit and hold new readers until its ANNOUNCE_OK. `rs/moq-net`:
+    the publisher reads each granted region inside an ask through its own
+    node key, as it reads mounts, re-narrowed on each grant change. That
+    also keeps the publisher from reading ungranted subtrees, which bounds
+    its work and leaves SYNCED's timing blind to what it hides. The
+    subscriber's `coarsen` widens instead of dropping. `js/net`: the answer
+    presents a claim above a granted region at the region; the subscriber
+    already falls back to the root, and gains the widening sync. No message
+    field changes and no public API changes. It also fixes JS's existing
+    root fallback.
+  - (A) Exception to the size rule. A subscriber's set may pass one message
+    when each prefix past it is a region the publisher granted. Draft: the
+    exception, plus how both ends derive a grant's regions from its patterns
+    (`interest_prefixes`, wildcards included), plus what happens when a
+    narrowing (an AUTH_OK replacing the grant, an AUTH_ERROR, or a lapse)
+    crosses an edit already sent. The acceptor judges a request when it
+    reads it, so that edit names a region no longer granted, and as written
+    the publisher must close the session. A narrowing between edits leaves
+    the set past the limit until the subscriber's next edit removes the
+    region. `rs/moq-net`: the publisher checks each extra prefix against its
+    grant, and `coarsen` keeps every granted region. `js/net`: the same
+    check, and its subscriber, which knows nothing of the grant today, has
+    to ask by the grant's regions.
+  - (B) API: a reader of an unasked region learns the session cannot answer
+    it, a public change in Rust, JS, and the bindings.
+  - (C) Neither: a reader overlapping an unasked region never syncs, a hang
+    in place of a wrong answer.
+
+  D over A: D keeps the one-message rule whole, never names a region on the
+  wire, so a narrowing cannot turn an honest edit into a violation, and
+  needs no shared rule for deriving regions. It costs a presentation rule
+  and the publisher's narrowing, which JS's root fallback needs anyway. Done
+  once the choice is recorded in Plan.
 
 ## Related
 

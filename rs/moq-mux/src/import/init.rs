@@ -42,13 +42,13 @@ impl AudioInit {
 
 /// What a video importer needs to start: a format, optional init bytes, a label, and hints.
 ///
-/// `format` selects the codec parser (`"avc3"`, `"hev1"`, `"vp8"`, ...). `data` may be empty for a
+/// `format` selects the codec parser (`"h264"`, `"h265"`, `"vp8"`, ...). `data` may be empty for a
 /// format that resolves in band; a [`hint`](Self::hint) can pin fields the stream never reveals
 /// (bitrate) or publish the catalog before the first keyframe. See [`VideoHint`].
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct VideoInit {
-	/// The video format, e.g. `"avc3"` or `"vp8"`.
+	/// The video format, e.g. `"h264"` or `"vp8"`.
 	pub format: VideoFormat,
 	/// Codec init bytes (an avcC, an hvcC, ...). May be empty for a format that resolves in band.
 	pub data: Bytes,

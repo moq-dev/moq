@@ -42,9 +42,9 @@ cursor hold was the earlier mitigation. Main also contains
 retraction quarantine and
 [moq-dev/moq#5391](https://github.com/moq-dev/moq/pull/5391)'s same-clock
 queue dedup. #5375 measured residual stale revivals, so neither longer holds
-nor one passing mesh establish correctness. Retire the mitigations only
-after the incident fixtures and failover tests demonstrate their
-replacement, as [acceptance](/quest/m2/cluster-routes/acceptance.md) does.
+nor one passing mesh establish correctness. All three now hold only routes
+learned over a hop chain, and go with lite-06: lite-07 routes skip them,
+proven by the incident fixtures and failover tests on the route layer.
 
 ## Related
 

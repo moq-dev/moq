@@ -89,9 +89,8 @@ typedef Instance = MoqInstance;
 /// A route over a prefix: its origin-relative path, required wildcard captures (empty without wildcards), and route metadata.
 typedef Announce = MoqAnnounce;
 
-/// What an [AnnounceConsumer] yields: [AnnounceEventPresent],
-/// [AnnounceEventUnavailable], [AnnounceEventAvailable], [AnnounceEventAbsent],
-/// or [AnnounceEventOffline].
+/// What an [AnnounceConsumer] yields: [AnnounceEventPresent] or
+/// [AnnounceEventAbsent].
 ///
 /// Another publisher instance taking a path over keeps it present: hold a
 /// [Following] to see the broadcast change.
@@ -100,20 +99,9 @@ typedef AnnounceEvent = MoqAnnounceEvent;
 /// A route now covers the path, which was absent; it may arrive unavailable.
 typedef AnnounceEventPresent = PresentMoqAnnounceEvent;
 
-/// The present path lost every usable path to its origin but may recover one:
-/// it stays present while requests for it may fail.
-typedef AnnounceEventUnavailable = UnavailableMoqAnnounceEvent;
-
-/// The present path recovered a usable path: request it again.
-typedef AnnounceEventAvailable = AvailableMoqAnnounceEvent;
-
-/// The origin withdrew the path; carries its last route.
+/// No route covers the path any more, whether its origin withdrew it or this
+/// side let go of it; carries its last route.
 typedef AnnounceEventAbsent = AbsentMoqAnnounceEvent;
-
-/// This side let go of the path, which its origin may still serve: the session
-/// it arrived on closed, or the network lost every path to it. Carries its last
-/// route.
-typedef AnnounceEventOffline = OfflineMoqAnnounceEvent;
 
 /// The write side of a broadcast: publish tracks into it.
 typedef BroadcastProducer = MoqBroadcastProducer;
@@ -205,10 +193,10 @@ extension type Subscription._(MoqSubscription _subscription)
 /// A null subscription and a bare `Subscription()` mean the same.
 Subscription defaultSubscription() => Subscription._(moqSubscriptionDefaults());
 
-/// A span of a track to deliver: from `start` up to `end`, or onward when `end` is null.
+/// A span of a track to deliver: from `start` through `end`, or onward when `end` is null. Every end includes its whole group.
 typedef Range = MoqRange;
 
-/// Where one end of a [Range] falls: the oldest group (a start only), absolute, relative to the latest group, or the group containing a time.
+/// Where one end of a [Range] falls: the oldest group (a start only), relative to the latest group, or the group containing a time.
 typedef Anchor = MoqAnchor;
 
 /// Which pending group the publisher sends first.

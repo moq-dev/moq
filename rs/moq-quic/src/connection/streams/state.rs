@@ -1533,7 +1533,7 @@ mod tests {
 					pending: &mut pending,
 					closed: false,
 				};
-				assert_eq!(stream.write(&mut &b"x"[..]), Err(send::Error::Blocked));
+				assert_eq!(stream.try_write(&mut &b"x"[..]), Poll::Pending);
 				stream.reset(0u32.into()).unwrap();
 				sent.push(id);
 
@@ -1542,7 +1542,7 @@ mod tests {
 				let mut stream = recv(&mut server, &mut pending, id);
 				let mut chunks = stream.read().unwrap();
 				assert_eq!(chunks.next(1).unwrap().unwrap().bytes.len(), 1);
-				assert!(matches!(chunks.next(1), Err(recv::Error::Blocked)));
+				assert!(matches!(chunks.try_next(1), Poll::Pending));
 				chunks.finalize();
 				assert!(pending.max_stream_data.contains(&id));
 				recv(&mut server, &mut pending, id).stop(0u32.into()).unwrap();
@@ -1610,8 +1610,8 @@ mod tests {
 				pending: &mut pending,
 				closed: false,
 			};
-			assert_eq!(stream.write(&mut &b"blocked"[..]), Err(send::Error::Blocked));
-			assert_eq!(stream.write(&mut &b"blocked"[..]), Err(send::Error::Blocked));
+			assert_eq!(stream.try_write(&mut &b"blocked"[..]), Poll::Pending);
+			assert_eq!(stream.try_write(&mut &b"blocked"[..]), Poll::Pending);
 			assert_eq!(stream.state.connection_blocked.len(), 1);
 			stream.reset(0u32.into()).unwrap();
 			assert!(
@@ -1647,7 +1647,7 @@ mod tests {
 			pending: &mut pending,
 			closed: false,
 		};
-		assert_eq!(stream.write(&mut &b"blocked"[..]), Err(send::Error::Blocked));
+		assert_eq!(stream.try_write(&mut &b"blocked"[..]), Poll::Pending);
 		stream.finish().unwrap();
 		assert_eq!(stream.write(&mut &b"closed"[..]), Err(send::Error::Closed));
 		server.received_ack_of(frame::StreamMeta {
@@ -1707,10 +1707,10 @@ mod tests {
 			stream.state.received_stop_sending(id, code).unwrap();
 			assert_eq!((write.wakes(), end.wakes()), (1, 1));
 			assert_eq!(stream.poll_end(&end), Poll::Ready(Ok(send::End::Stopped(code))));
-			assert_eq!(stream.write(&mut &b"stopped"[..]), Err(send::Error::Stopped(code)));
-			assert_eq!(stream.write(&mut &[][..]), Err(send::Error::Stopped(code)));
+			assert_eq!(stream.write(&mut &b"stopped"[..]), Err(send::Error::Stopped));
+			assert_eq!(stream.write(&mut &[][..]), Err(send::Error::Stopped));
 			let mut chunk = Bytes::from_static(b"stopped");
-			assert_eq!(stream.write(&mut chunk), Err(send::Error::Stopped(code)));
+			assert_eq!(stream.write(&mut chunk), Err(send::Error::Stopped));
 			assert_eq!(chunk, b"stopped"[..]);
 			assert!(stream.state.connection_blocked.is_empty());
 			assert_eq!(stream.state.write_limit(), 0);
@@ -1743,7 +1743,7 @@ mod tests {
 					pending: &mut pending,
 					closed: false,
 				};
-				assert_eq!(stream.write(&mut &b"x"[..]), Err(send::Error::Blocked));
+				assert_eq!(stream.try_write(&mut &b"x"[..]), Poll::Pending);
 				assert!(stream.poll_write(writer, &mut &b"x"[..]).is_pending());
 				id
 			})
@@ -2084,8 +2084,9 @@ mod tests {
 			pending: &mut pending,
 		};
 		let mut chunks = recv.read().unwrap();
-		assert_eq!(chunks.next(1024).unwrap_err(), crate::recv::Error::Reset(0u32.into()));
+		assert_eq!(chunks.next(1024).unwrap_err(), crate::recv::Error::Reset);
 		chunks.finalize();
+		assert_eq!(recv.received_reset(), Ok(Some(0u32.into())));
 		assert_eq!(client.data_recvd, 4096);
 		assert_eq!(client.local_max_data - initial_max, 4096);
 	}
@@ -2288,7 +2289,7 @@ mod tests {
 		assert_eq!(end.wakes(), 1);
 		assert_eq!(stream.poll_end(&end), Poll::Ready(Ok(send::End::Stopped(error_code))));
 
-		assert_eq!(stream.write(&mut &[][..]), Err(send::Error::Stopped(error_code)));
+		assert_eq!(stream.write(&mut &[][..]), Err(send::Error::Stopped));
 
 		stream.reset(0u32.into()).unwrap();
 		assert_eq!(stream.write(&mut &[][..]), Err(send::Error::Closed));
@@ -3239,7 +3240,7 @@ mod tests {
 		// Check that our full send window is available again
 		assert_eq!(stream.write(&mut &data[..]), Ok(initial_send_len));
 		assert_eq!(stream.write(&mut &data[..]), Ok(initial_send_len));
-		assert_eq!(stream.write(&mut &data[..]), Err(send::Error::Blocked));
+		assert_eq!(stream.try_write(&mut &data[..]), Poll::Pending);
 	}
 
 	#[test]
@@ -3296,7 +3297,7 @@ mod tests {
 		assert_eq!(writer.wakes(), 0);
 
 		// Assert that data is still not accepted
-		assert_eq!(stream.write(&mut &data[..]), Err(send::Error::Blocked));
+		assert_eq!(stream.try_write(&mut &data[..]), Poll::Pending);
 
 		// Ack some data, assert that writes are still not accepted due to outstanding sends
 		stream.state.received_ack_of(frame::StreamMeta {
@@ -3305,7 +3306,7 @@ mod tests {
 			fin: false,
 		});
 
-		assert_eq!(stream.write(&mut &data[..]), Err(send::Error::Blocked));
+		assert_eq!(stream.try_write(&mut &data[..]), Poll::Pending);
 
 		// Ack the rest of the data
 		stream.state.received_ack_of(frame::StreamMeta {
@@ -3320,7 +3321,7 @@ mod tests {
 
 		// Assert that only `smaller_send_window` bytes are accepted
 		assert_eq!(stream.write(&mut &data[..]), Ok(smaller_send_window as usize));
-		assert_eq!(stream.write(&mut &data[..]), Err(send::Error::Blocked));
+		assert_eq!(stream.try_write(&mut &data[..]), Poll::Pending);
 	}
 
 	#[test]
@@ -3361,8 +3362,9 @@ mod tests {
 			.unwrap();
 	}
 
-	/// Read everything readable, returning the byte count and how the read stopped
-	fn drain(state: &mut StreamsState, id: StreamId) -> (u64, recv::Error) {
+	/// Read everything readable, returning the byte count and the reset's code, or pending
+	/// while the bytes a reset still delivers are in flight
+	fn drain(state: &mut StreamsState, id: StreamId) -> (u64, Poll<VarInt>) {
 		let mut pending = Retransmits::default();
 		let mut recv = recv::Stream {
 			id,
@@ -3371,15 +3373,20 @@ mod tests {
 		};
 		let mut chunks = recv.read().unwrap();
 		let mut read = 0;
-		let err = loop {
-			match chunks.next(usize::MAX) {
-				Ok(Some(chunk)) => read += chunk.bytes.len() as u64,
-				Ok(None) => panic!("reset stream finished"),
-				Err(e) => break e,
+		let end = loop {
+			match chunks.try_next(usize::MAX) {
+				Poll::Ready(Ok(Some(chunk))) => read += chunk.bytes.len() as u64,
+				Poll::Ready(Ok(None)) => panic!("reset stream finished"),
+				Poll::Ready(Err(e)) => break Poll::Ready(e),
+				Poll::Pending => break Poll::Pending,
 			}
 		};
 		chunks.finalize();
-		(read, err)
+		let end = end.map(|err| {
+			assert_eq!(err, recv::Error::Reset);
+			recv.received_reset().unwrap().expect("reset")
+		});
+		(read, end)
 	}
 
 	#[test]
@@ -3397,7 +3404,7 @@ mod tests {
 		// Data past the Reliable Size is dropped without counting twice
 		receive(&mut client, id, 4..20);
 		assert_eq!(client.data_recvd, 100);
-		assert_eq!(drain(&mut client, id), (10, crate::recv::Error::Reset(7u32.into())));
+		assert_eq!(drain(&mut client, id), (10, Poll::Ready(7u32.into())));
 		assert_eq!(client.local_max_data - initial_max, 100);
 	}
 
@@ -3408,9 +3415,9 @@ mod tests {
 		let initial_max = client.local_max_data;
 		let _ = client.received_reset(reset_at(id, 7, 20, Some(10))).unwrap();
 		receive(&mut client, id, 4..20);
-		assert_eq!(drain(&mut client, id), (0, crate::recv::Error::Blocked));
+		assert_eq!(drain(&mut client, id), (0, Poll::Pending));
 		receive(&mut client, id, 0..4);
-		assert_eq!(drain(&mut client, id), (10, crate::recv::Error::Reset(7u32.into())));
+		assert_eq!(drain(&mut client, id), (10, Poll::Ready(7u32.into())));
 		assert_eq!(client.local_max_data - initial_max, 20);
 	}
 
@@ -3426,7 +3433,7 @@ mod tests {
 		assert_eq!(client.received_reset(reset_at(id, 7, 20, Some(8))), Ok(false));
 		assert_eq!(client.local_max_data - initial_max, 16);
 		receive(&mut client, id, 0..20);
-		assert_eq!(drain(&mut client, id), (4, crate::recv::Error::Reset(7u32.into())));
+		assert_eq!(drain(&mut client, id), (4, Poll::Ready(7u32.into())));
 		assert_eq!(client.local_max_data - initial_max, 20);
 	}
 
@@ -3439,7 +3446,7 @@ mod tests {
 		receive(&mut client, id, 0..2);
 		let _ = client.received_reset(reset_at(id, 7, 20, Some(10))).unwrap();
 		let _ = client.received_reset(reset_at(id, 7, 20, None)).unwrap();
-		assert_eq!(drain(&mut client, id), (0, crate::recv::Error::Reset(7u32.into())));
+		assert_eq!(drain(&mut client, id), (0, Poll::Ready(7u32.into())));
 		assert_eq!(client.local_max_data - initial_max, 20);
 	}
 
@@ -3776,18 +3783,18 @@ mod tests {
 	/// Lease whatever has arrived on `id`, returning how many bytes are leased.
 	fn lease(client: &mut StreamsState, id: StreamId) -> usize {
 		let mut pending = Retransmits::default();
-		recv(client, &mut pending, id).peek(0).0.unwrap();
+		assert_eq!(recv(client, &mut pending, id).peek(0).0, Poll::Ready(Ok(())));
 		client.check_leases();
 		client.leased(id).unwrap().len()
 	}
 
 	/// Wait on `id` for more than it has leased, as a reader decoding a message would.
-	fn wait(client: &mut StreamsState, id: StreamId, want: usize) -> Result<(), recv::Error> {
+	fn wait(client: &mut StreamsState, id: StreamId, want: usize) -> Poll<Result<(), recv::Error>> {
 		wait_transmit(client, id, want).0
 	}
 
 	/// [`wait`], and whether it queued a frame.
-	fn wait_transmit(client: &mut StreamsState, id: StreamId, want: usize) -> (Result<(), recv::Error>, bool) {
+	fn wait_transmit(client: &mut StreamsState, id: StreamId, want: usize) -> (Poll<Result<(), recv::Error>>, bool) {
 		let mut pending = Retransmits::default();
 		let result = recv(client, &mut pending, id).peek(want);
 		client.check_leases();
@@ -3851,12 +3858,16 @@ mod tests {
 
 		assert_eq!(lease(&mut client, id), 32);
 		assert!(client.leased(id).unwrap().is_fin());
-		assert_eq!(wait(&mut client, id, 64), Ok(()), "a FIN ends the wait short");
+		assert_eq!(
+			wait(&mut client, id, 64),
+			Poll::Ready(Ok(())),
+			"a FIN ends the wait short"
+		);
 
 		release(&mut client, id, 32);
 		assert_eq!(client.local_max_data, initial + 32);
 		assert_eq!(client.credit_stats().leased, 0);
-		assert_eq!(wait(&mut client, id, 1), Ok(()));
+		assert_eq!(wait(&mut client, id, 1), Poll::Ready(Ok(())));
 		assert!(client.leased(id).unwrap().is_fin(), "still finished");
 
 		let pending = stop(&mut client, id, 0);
@@ -3879,7 +3890,7 @@ mod tests {
 
 			if reset_first {
 				reset(&mut client, id, 128);
-				assert_eq!(wait(&mut client, id, 33), Err(recv::Error::Reset(0u32.into())));
+				assert_eq!(wait(&mut client, id, 33), Poll::Ready(Err(recv::Error::Reset)));
 				assert_eq!(client.local_max_data, initial + 128 - 32, "all but the lease");
 			}
 			let _ = stop(&mut client, id, 0);
@@ -3914,13 +3925,16 @@ mod tests {
 		let id = StreamId::new(Side::Server, Dir::Uni, 0);
 		data(&mut client, id, 0, 32, false);
 		let window = client.receive_window as usize;
-		assert!(matches!(wait(&mut client, id, window), Err(recv::Error::Blocked)));
-		assert_eq!(wait(&mut client, id, window + 1), Err(recv::Error::TooLarge));
+		assert!(matches!(wait(&mut client, id, window), Poll::Pending));
+		assert_eq!(
+			wait(&mut client, id, window + 1),
+			Poll::Ready(Err(recv::Error::TooLarge))
+		);
 
 		// Taken bytes do not: a frame past the window waits, and gives way to eviction.
 		let mut pending = Retransmits::default();
 		let _ = recv(&mut client, &mut pending, id).take(10);
-		assert!(matches!(wait(&mut client, id, window - 9), Err(recv::Error::Blocked)));
+		assert!(matches!(wait(&mut client, id, window - 9), Poll::Pending));
 	}
 
 	/// A connection with a 2 * `window` receive window, and its streams 0 and 1.
@@ -4003,7 +4017,7 @@ mod tests {
 		client.set_receive_window(VarInt::from_u64(3 * WINDOW / 2).unwrap());
 
 		let want = WINDOW as usize + 1;
-		assert!(matches!(wait(&mut client, ids[0], want), Err(recv::Error::Blocked)));
+		assert!(matches!(wait(&mut client, ids[0], want), Poll::Pending));
 		assert_eq!(client.credit_stats().evicted, 2);
 		assert_eq!(readers.woken(&mut client), [ids[1], ids[2]]);
 		assert_eq!(client.local_max_data, max_data + WINDOW / 2);
@@ -4049,10 +4063,10 @@ mod tests {
 				let mut pending = Retransmits::default();
 				let mut recv = recv(&mut client, &mut pending, id);
 				match reader {
-					Reader::Wait => assert!(matches!(recv.peek(buffers.len() + 1).0, Err(recv::Error::Blocked))),
-					Reader::Park => recv.peek(1).0.unwrap(),
+					Reader::Wait => assert!(matches!(recv.peek(buffers.len() + 1).0, Poll::Pending)),
+					Reader::Park => assert_eq!(recv.peek(1).0, Poll::Ready(Ok(()))),
 					Reader::Take => {
-						recv.peek(1).0.unwrap();
+						assert_eq!(recv.peek(1).0, Poll::Ready(Ok(())));
 						taken.push(recv.take(usize::MAX));
 					}
 				}
@@ -4092,7 +4106,7 @@ mod tests {
 			data(&mut client, id, 0, 1, false);
 		}
 		for &id in &ids {
-			assert!(matches!(wait(&mut client, id, 2), Err(recv::Error::Blocked)));
+			assert!(matches!(wait(&mut client, id, 2), Poll::Pending));
 		}
 		assert_eq!(client.credit_stats().evicted, 1);
 		assert!(
@@ -4127,10 +4141,7 @@ mod tests {
 
 		// The first stream has data its reader has not looked at, so nothing is evicted yet.
 		for id in [ids[1], ids[2]] {
-			assert!(matches!(
-				wait(&mut client, id, WINDOW as usize + 1),
-				Err(recv::Error::Blocked)
-			));
+			assert!(matches!(wait(&mut client, id, WINDOW as usize + 1), Poll::Pending));
 		}
 		assert_eq!(client.credit_stats().evicted, 0);
 		readers.woken(&mut client);
@@ -4153,16 +4164,10 @@ mod tests {
 		data(&mut client, ids[0], 0, 100, false);
 		data(&mut client, ids[0], 200, (WINDOW - 200) as usize, false);
 		assert_eq!(lease(&mut client, ids[0]), 100);
-		assert!(matches!(
-			wait(&mut client, ids[0], WINDOW as usize),
-			Err(recv::Error::Blocked)
-		));
+		assert!(matches!(wait(&mut client, ids[0], WINDOW as usize), Poll::Pending));
 		data(&mut client, ids[1], 0, WINDOW as usize, false);
 		assert_eq!(lease(&mut client, ids[1]), WINDOW as usize);
-		assert!(matches!(
-			wait(&mut client, ids[1], WINDOW as usize + 1),
-			Err(recv::Error::Blocked)
-		));
+		assert!(matches!(wait(&mut client, ids[1], WINDOW as usize + 1), Poll::Pending));
 		assert_eq!(client.credit_stats().evicted, 0);
 		assert_eq!(client.local_max_data, client.data_recvd, "the peer is blocked");
 
@@ -4197,10 +4202,7 @@ mod tests {
 		let max_data = client.local_max_data;
 		client.set_receive_window(VarInt::from_u64(2 * WINDOW).unwrap());
 		for id in [ids[1], ids[2]] {
-			assert!(matches!(
-				wait(&mut client, id, WINDOW as usize + 1),
-				Err(recv::Error::Blocked)
-			));
+			assert!(matches!(wait(&mut client, id, WINDOW as usize + 1), Poll::Pending));
 		}
 		readers.woken(&mut client);
 
@@ -4237,10 +4239,7 @@ mod tests {
 		for id in [ids[1], ids[2]] {
 			data(&mut client, id, 0, WINDOW as usize, false);
 			assert_eq!(lease(&mut client, id), WINDOW as usize);
-			assert!(matches!(
-				wait(&mut client, id, WINDOW as usize + 1),
-				Err(recv::Error::Blocked)
-			));
+			assert!(matches!(wait(&mut client, id, WINDOW as usize + 1), Poll::Pending));
 		}
 		client.set_receive_window(VarInt::from_u64(2 * WINDOW).unwrap());
 		readers.woken(&mut client);
@@ -4280,22 +4279,16 @@ mod tests {
 		let (mut client, ids) = stuck(WINDOW);
 		data(&mut client, ids[0], 0, WINDOW as usize, false);
 		assert_eq!(lease(&mut client, ids[0]), WINDOW as usize);
-		assert!(matches!(
-			wait(&mut client, ids[0], WINDOW as usize + 1),
-			Err(recv::Error::Blocked)
-		));
+		assert!(matches!(wait(&mut client, ids[0], WINDOW as usize + 1), Poll::Pending));
 		data(&mut client, ids[1], 0, WINDOW as usize, false);
 		assert_eq!(lease(&mut client, ids[1]), WINDOW as usize);
 
 		reset(&mut client, ids[0], WINDOW as u32);
-		assert!(matches!(
-			wait(&mut client, ids[1], WINDOW as usize + 1),
-			Err(recv::Error::Blocked)
-		));
+		assert!(matches!(wait(&mut client, ids[1], WINDOW as usize + 1), Poll::Pending));
 		assert_eq!(client.credit_stats().evicted, 0);
 		assert_eq!(
 			wait(&mut client, ids[0], WINDOW as usize + 1),
-			Err(recv::Error::Reset(0u32.into()))
+			Poll::Ready(Err(recv::Error::Reset))
 		);
 	}
 
@@ -4339,18 +4332,18 @@ mod tests {
 		// Debt as large as one stream's bytes, so the first stop only pays it.
 		client.set_receive_window(VarInt::from_u64(WINDOW).unwrap());
 
-		assert!(matches!(wait(&mut client, ids[0], 1), Err(recv::Error::Blocked)));
+		assert!(matches!(wait(&mut client, ids[0], 1), Poll::Pending));
 		assert_eq!(readers.woken(&mut client), [ids[1]]);
 		assert_eq!(client.credit_stats().evicted, 1);
 		assert_eq!(client.credit_stats().leased, 2 * WINDOW, "taken credit stays held");
-		assert!(matches!(wait(&mut client, ids[0], 1), Err(recv::Error::Blocked)));
+		assert!(matches!(wait(&mut client, ids[0], 1), Poll::Pending));
 		assert_eq!(client.credit_stats().evicted, 1, "waits for the stop");
 		// A reader watching for a reset instead of reading learns of it too.
 		assert_eq!(
 			recv(&mut client, &mut pending, ids[1]).received_reset(),
 			Err(recv::Error::Evicted)
 		);
-		assert_eq!(wait(&mut client, ids[1], 1), Err(recv::Error::Evicted));
+		assert_eq!(wait(&mut client, ids[1], 1), Poll::Ready(Err(recv::Error::Evicted)));
 
 		// The stop pays the debt alone, so eviction resumes with the other stream.
 		readers.unpark(ids[1]);
@@ -4383,8 +4376,8 @@ mod tests {
 		assert_eq!(readers.woken(&mut client), [low, high]);
 		assert_eq!(lease(&mut client, high), WINDOW as usize);
 		assert_eq!(lease(&mut client, low), WINDOW as usize - 1);
-		assert!(matches!(wait(&mut client, high, 2000), Err(recv::Error::Blocked)));
-		assert!(matches!(wait(&mut client, low, 2000), Err(recv::Error::Blocked)));
+		assert!(matches!(wait(&mut client, high, 2000), Poll::Pending));
+		assert!(matches!(wait(&mut client, low, 2000), Poll::Pending));
 		assert!(
 			client.leased(low).is_some() && !client.is_evicted(low),
 			"a byte of credit left"
@@ -4396,9 +4389,9 @@ mod tests {
 		assert_eq!(readers.woken(&mut client), [low]);
 		assert!(client.leased(low).is_some() && !client.is_evicted(low));
 		let blocked = wait_transmit(&mut client, low, 2000);
-		assert_eq!(blocked, (Err(recv::Error::Blocked), true));
+		assert_eq!(blocked, (Poll::Pending, true));
 		assert_eq!(readers.woken(&mut client), [low], "the evicted reader wakes");
-		assert_eq!(wait(&mut client, low, 1), Err(recv::Error::Evicted));
+		assert_eq!(wait(&mut client, low, 1), Poll::Ready(Err(recv::Error::Evicted)));
 		assert_eq!(client.credit_stats().leased, WINDOW);
 		assert_eq!(client.credit_stats().evicted, 1);
 		assert_eq!(client.local_max_data, 3 * WINDOW, "the evicted credit returns");
@@ -4429,8 +4422,8 @@ mod tests {
 		recv(&mut client, &mut pending, high).set_priority(1);
 		assert_eq!(lease(&mut client, high), WINDOW as usize);
 		assert_eq!(lease(&mut client, low), WINDOW as usize - 1);
-		assert!(matches!(wait(&mut client, high, 2000), Err(recv::Error::Blocked)));
-		assert!(matches!(wait(&mut client, low, 2000), Err(recv::Error::Blocked)));
+		assert!(matches!(wait(&mut client, high, 2000), Poll::Pending));
+		assert!(matches!(wait(&mut client, low, 2000), Poll::Pending));
 		data(&mut client, low, WINDOW - 1, 1, false);
 		assert!(client.leased(low).is_some() && !client.is_evicted(low));
 
@@ -4455,8 +4448,8 @@ mod tests {
 		let taken = recv(&mut client, &mut pending, frame).take(usize::MAX);
 		assert_eq!(taken.len(), WINDOW as usize);
 
-		assert_eq!(wait_transmit(&mut client, frame, 1), (Err(recv::Error::Blocked), true));
-		assert_eq!(wait(&mut client, frame, 1), Err(recv::Error::Evicted));
+		assert_eq!(wait_transmit(&mut client, frame, 1), (Poll::Pending, true));
+		assert_eq!(wait(&mut client, frame, 1), Poll::Ready(Err(recv::Error::Evicted)));
 		assert_eq!(client.local_max_data, WINDOW, "the taken bytes are still held");
 		drop(taken);
 		let _ = stop(&mut client, frame, 0);
@@ -4472,8 +4465,8 @@ mod tests {
 		// Never leased again after this: its owner parked.
 		assert_eq!(lease(&mut client, old), WINDOW as usize);
 		data(&mut client, new, 0, WINDOW as usize, false);
-		assert!(matches!(wait(&mut client, new, 2000), Err(recv::Error::Blocked)));
-		assert_eq!(wait(&mut client, new, 1), Err(recv::Error::Evicted));
+		assert!(matches!(wait(&mut client, new, 2000), Poll::Pending));
+		assert_eq!(wait(&mut client, new, 1), Poll::Ready(Err(recv::Error::Evicted)));
 		assert_eq!(lease(&mut client, old), WINDOW as usize);
 	}
 
@@ -4515,7 +4508,7 @@ mod tests {
 		let lease = stream.lease(0).unwrap();
 		assert!(lease.is_fin());
 		stream.restore(lease);
-		assert!(matches!(stream.read().unwrap().next(0), Err(recv::Error::Blocked)));
+		assert!(matches!(stream.read().unwrap().try_next(0), Poll::Pending));
 
 		let mut lease = stream.lease(0).unwrap();
 		assert_eq!(lease.remaining(), 32, "the bytes survive");
@@ -4547,11 +4540,11 @@ mod tests {
 		let mut pending = Retransmits::default();
 		let held = recv(&mut client, &mut pending, old).lease(0).unwrap();
 		data(&mut client, new, 0, WINDOW as usize, false);
-		assert!(matches!(wait(&mut client, new, 2000), Err(recv::Error::Blocked)));
+		assert!(matches!(wait(&mut client, new, 2000), Poll::Pending));
 		assert_eq!(client.credit_stats().evicted, 0);
 
 		recv(&mut client, &mut pending, old).restore(held);
-		assert_eq!(wait(&mut client, new, 1), Err(recv::Error::Evicted));
+		assert_eq!(wait(&mut client, new, 1), Poll::Ready(Err(recv::Error::Evicted)));
 	}
 
 	/// A stream nobody has leased yet may have a reader about to run, so it holds eviction off
@@ -4565,14 +4558,14 @@ mod tests {
 		data(&mut client, fresh, 0, WINDOW as usize, false);
 		let mut pending = Retransmits::default();
 		recv(&mut client, &mut pending, fresh).set_priority(-1);
-		assert!(matches!(wait(&mut client, waiting, 2000), Err(recv::Error::Blocked)));
+		assert!(matches!(wait(&mut client, waiting, 2000), Poll::Pending));
 		assert_eq!(client.credit_stats().evicted, 0);
 
 		assert_eq!(lease(&mut client, fresh), WINDOW as usize);
 		let (blocked, transmit) = wait_transmit(&mut client, fresh, 2000);
-		assert_eq!(blocked, Err(recv::Error::Blocked));
+		assert_eq!(blocked, Poll::Pending);
 		assert!(transmit);
-		assert_eq!(wait(&mut client, fresh, 1), Err(recv::Error::Evicted));
+		assert_eq!(wait(&mut client, fresh, 1), Poll::Ready(Err(recv::Error::Evicted)));
 		assert_eq!(lease(&mut client, waiting), WINDOW as usize);
 	}
 
@@ -4602,7 +4595,7 @@ mod tests {
 		let mut pending = Retransmits::default();
 		assert_eq!(
 			recv(&mut client, &mut pending, waiting).peek(2 * WINDOW),
-			(Err(recv::Error::Blocked), true)
+			(Poll::Pending, true)
 		);
 		assert!(client.leased(parked).is_some() && client.is_evicted(parked));
 		assert!(!pending.max_stream_id[Dir::Uni as usize], "its reader has yet to hear");
@@ -4622,8 +4615,8 @@ mod tests {
 		data(&mut client, b, 0, WINDOW as usize, false);
 		assert_eq!(lease(&mut client, a), WINDOW as usize);
 		release(&mut client, a, 1);
-		assert!(matches!(wait(&mut client, b, 2000), Err(recv::Error::Blocked)));
-		assert!(matches!(wait(&mut client, a, 2000), Err(recv::Error::Blocked)));
+		assert!(matches!(wait(&mut client, b, 2000), Poll::Pending));
+		assert!(matches!(wait(&mut client, a, 2000), Poll::Pending));
 		assert_eq!(client.credit_stats().evicted, 0);
 	}
 
@@ -4657,7 +4650,7 @@ mod tests {
 		assert_eq!(lease(&mut client, id), 10);
 		let mut pending = Retransmits::default();
 		assert!(recv(&mut client, &mut pending, id).stop(0u32.into()).is_ok());
-		assert_eq!(wait(&mut client, id, 0), Err(recv::Error::Closed));
+		assert_eq!(wait(&mut client, id, 0), Poll::Ready(Err(recv::Error::Closed)));
 		assert!(recv(&mut client, &mut pending, id).stop(0u32.into()).is_err());
 		assert!(client.leased(id).is_none());
 	}
@@ -4681,10 +4674,10 @@ mod tests {
 		// One byte taken, so the reader waits for a unit the window can hold.
 		let mut pending = Retransmits::default();
 		let _ = recv(&mut client, &mut pending, waiting).take(1);
-		assert!(matches!(wait(&mut client, waiting, room), Err(recv::Error::Blocked)));
+		assert!(matches!(wait(&mut client, waiting, room), Poll::Pending));
 		assert_eq!(client.credit_stats().evicted, 1);
-		assert_eq!(wait(&mut client, waiting, 1), Err(recv::Error::Evicted));
-		assert_eq!(wait(&mut client, reset_id, 1), Err(recv::Error::Reset(0u32.into())));
+		assert_eq!(wait(&mut client, waiting, 1), Poll::Ready(Err(recv::Error::Evicted)));
+		assert_eq!(wait(&mut client, reset_id, 1), Poll::Ready(Err(recv::Error::Reset)));
 	}
 
 	/// A reset below what a lease already read and partly took leaves those bytes leased, and
@@ -4701,7 +4694,7 @@ mod tests {
 
 		let _ = client.received_reset(reset_at(id, 7, 200, Some(50))).unwrap();
 		assert_eq!(client.local_max_data, initial + 100, "the abandoned tail");
-		assert_eq!(wait(&mut client, id, 41), Err(recv::Error::Reset(7u32.into())));
+		assert_eq!(wait(&mut client, id, 41), Poll::Ready(Err(recv::Error::Reset)));
 		assert_eq!(client.leased(id).unwrap().len(), 40, "read before the reset");
 
 		release(&mut client, id, 0);
@@ -4751,7 +4744,7 @@ mod tests {
 		for index in 0..STREAMS + CYCLES {
 			let id = StreamId::new(Side::Server, Dir::Uni, index);
 			data(&mut client, id, 0, 1, false);
-			assert!(matches!(wait(&mut client, id, 2), Err(recv::Error::Blocked)));
+			assert!(matches!(wait(&mut client, id, 2), Poll::Pending));
 			if index == STREAMS - 1 {
 				client.scans = 0;
 			}
@@ -4781,7 +4774,7 @@ mod tests {
 		let mut pending = Retransmits::default();
 		assert_eq!(
 			recv(&mut client, &mut pending, id).peek(1001),
-			(Err(recv::Error::TooLarge), false)
+			(Poll::Ready(Err(recv::Error::TooLarge)), false)
 		);
 		assert!(pending.max_stream_data.is_empty());
 		let mut stream = recv(&mut client, &mut pending, id);
@@ -4799,7 +4792,7 @@ mod tests {
 		let mut pending = Retransmits::default();
 		assert_eq!(
 			recv(&mut client, &mut pending, id).peek(11),
-			(Err(recv::Error::Reset(0u32.into())), false)
+			(Poll::Ready(Err(recv::Error::Reset)), false)
 		);
 		assert!(!pending.max_stream_id[Dir::Uni as usize]);
 		let pending = stop(&mut client, id, 0);
@@ -4849,11 +4842,8 @@ mod tests {
 			assert_eq!(lease(&mut client, id), WINDOW as usize);
 			let mut pending = Retransmits::default();
 			let _ = recv(&mut client, &mut pending, id).take(1);
-			assert!(matches!(
-				wait(&mut client, id, WINDOW as usize),
-				Err(recv::Error::Blocked)
-			));
-			assert_eq!(wait(&mut client, id, 1), Err(recv::Error::Evicted));
+			assert!(matches!(wait(&mut client, id, WINDOW as usize), Poll::Pending));
+			assert_eq!(wait(&mut client, id, 1), Poll::Ready(Err(recv::Error::Evicted)));
 
 			let mut frames = Retransmits::default();
 			if fin_first {

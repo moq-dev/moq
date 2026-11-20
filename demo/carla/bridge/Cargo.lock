@@ -866,6 +866,7 @@ version = "0.6.2"
 dependencies = [
  "crossbeam-epoch",
  "kio-macros",
+ "libc",
  "rand",
  "smallvec",
  "tokio",

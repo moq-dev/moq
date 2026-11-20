@@ -80,3 +80,50 @@ disk ([moq-dev/moq#9033](https://github.com/moq-dev/moq/pull/9033)), benches
 [moq-dev/moq#9021](https://github.com/moq-dev/moq/pull/9021),
 [moq-dev/moq#9022](https://github.com/moq-dev/moq/pull/9022)), and mutants
 ([moq-dev/moq#9019](https://github.com/moq-dev/moq/pull/9019)).
+
+Decided 2026-11-18 (maintainer, /quest-plan), from the triage of runs
+[44127032469](https://github.com/moq-dev/moq/actions/runs/44127032469) and
+[44342367698](https://github.com/moq-dev/moq/actions/runs/44342367698): four
+more children (JS resume window, audio-quality p50 ceilings, publisher drop
+cost, resume mutants). Owned elsewhere: the firefox player by
+[moq-dev/moq#9141](https://github.com/moq-dev/moq/pull/9141), OBS by
+[moq-dev/moq#9016](https://github.com/moq-dev/moq/pull/9016), and fixes in PRs
+from the same triage: benches
+([moq-dev/moq#9089](https://github.com/moq-dev/moq/pull/9089),
+[moq-dev/moq#9090](https://github.com/moq-dev/moq/pull/9090),
+[moq-dev/moq#9098](https://github.com/moq-dev/moq/pull/9098),
+[moq-dev/moq#9099](https://github.com/moq-dev/moq/pull/9099)), features
+([moq-dev/moq#9091](https://github.com/moq-dev/moq/pull/9091),
+[moq-dev/moq#9092](https://github.com/moq-dev/moq/pull/9092)), quic-interop
+([moq-dev/moq#9096](https://github.com/moq-dev/moq/pull/9096),
+[moq-dev/moq#9097](https://github.com/moq-dev/moq/pull/9097)), fuzz
+([moq-dev/moq#9105](https://github.com/moq-dev/moq/pull/9105),
+[moq-dev/moq#9106](https://github.com/moq-dev/moq/pull/9106)), and route-sweep
+([moq-dev/moq#9108](https://github.com/moq-dev/moq/pull/9108)). The JS audit's
+picomatch advisory was withdrawn upstream.
+
+Decided 2026-11-19 (maintainer, /quest-plan), from the triage of runs
+[44562804083](https://github.com/moq-dev/moq/actions/runs/44562804083) and
+[44342367698](https://github.com/moq-dev/moq/actions/runs/44342367698): seven
+more children (push-to-talk native listener, drain exit, mesh replay
+violations, shared-bench regressions, resume and node mutants, Miri's
+boottime clock, the ingest fuzz bound). Owned elsewhere: quic-interop's
+`handshakecorruption`
+([moq-dev/moq#9097](https://github.com/moq-dev/moq/pull/9097)), the JS
+benches ([moq-dev/moq#9099](https://github.com/moq-dev/moq/pull/9099)),
+features ([moq-dev/moq#9091](https://github.com/moq-dev/moq/pull/9091),
+[moq-dev/moq#9092](https://github.com/moq-dev/moq/pull/9092)), route-sweep's
+empty filter ([moq-dev/moq#9200](https://github.com/moq-dev/moq/pull/9200)),
+the Rust bench targets' step timeout
+([moq-dev/moq#9199](https://github.com/moq-dev/moq/pull/9199)), browser Opus
+`bursty` underruns
+([moq-dev/moq#9191](https://github.com/moq-dev/moq/pull/9191)), and the
+Firefox lite-07 `replacement` stall, noted in
+[interop green](/quest/m0/interop-green/README.md). Fixed on `main`: the JS
+resume model ([moq-dev/moq#9115](https://github.com/moq-dev/moq/pull/9115))
+and the relay session bench's base panic
+([moq-dev/moq#9098](https://github.com/moq-dev/moq/pull/9098), clears once
+the base moves past it). Dropped: the aac `step` `av_lag_ms_p50` of 5.1
+against 5, a one-night move near the threshold, and the Kotlin wrapper's
+Gradle plugin resolution failure, a one-off after two passing nights
+(re-check either if it repeats).

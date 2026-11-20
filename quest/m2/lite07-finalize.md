@@ -58,6 +58,10 @@ was named, and `set_live` covers it.
 The cut:
 
 - Every quest under Required has landed.
+- [The warmth port](/quest/m3/cache-routing/select.md) has either landed and
+  passed the mesh replay (`just test mesh-replay --new <its relay>`), or moved its
+  wire to the next wip version: no open PR still adds warm fields to
+  lite-07-wip, and no warm field is on main that the replay has not run.
 - The identifier becomes `moq-lite-07` in `rs/moq-net` and `js/net`, in the
   draft (whose text already names the rename), and at every site spelling
   the wip ALPN: grep the repository for `moq-lite-07-wip`. A wip peer and a
@@ -117,6 +121,14 @@ Timestamp provenance landed in
 timestamp bound in [#6168](https://github.com/moq-dev/moq/pull/6168).
 
 Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): Required names every quest that may still change lite-07 bytes.
+One exception, decided 2026-11-19 (maintainer, in the coordinating session):
+[the warmth port](/quest/m3/cache-routing/select.md) may add bytes to
+lite-07 and is not under Required, because the cut does not wait for it. The
+cut is made once every Required quest has landed, and the port is judged
+then, by the cut step above: its wire is in lite-07 if the port has landed
+and passed the mesh replay by that moment, and otherwise moves to the next
+wip version. A port that lands in the days between the last Required quest
+and the cut is in, on the same test.
 The explicit `Oldest` anchor rides [time addressing's model](https://github.com/moq-dev/moq/blob/7d1bee79cb8fcb4d816fc53f0547ef8b2b19756a/quest/m2/time-addressing/model.md),
 whose lite-07 encoding [lite-07 by start](https://github.com/moq-dev/moq/pull/8908) carries.
 

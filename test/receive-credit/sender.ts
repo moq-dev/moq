@@ -41,7 +41,9 @@ const broadcast = broadcastRoute.broadcast;
 // No publisher limit, so the open `low` group stays the receiver's to give up on rather than
 // going stale here once a newer group arrives.
 const low = broadcast.createTrack("low", { maxAge: null });
+if (!low) throw new Error("the track already exists");
 const high = broadcast.createTrack("high", { maxAge: null });
+if (!high) throw new Error("the track already exists");
 broadcastRoute.announce();
 
 const session = await Moq.Connection.connect({

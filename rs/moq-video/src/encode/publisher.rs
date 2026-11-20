@@ -254,7 +254,8 @@ impl Finished {
 		self.track.demand()
 	}
 
-	/// Abort the track with `err`, so subscribers that have not drained it see the real cause.
+	/// Abort the track with `err`; see [`moq_net::track::Finished::abort`]. Readers still draining
+	/// get the clean end instead once every group below the end finished.
 	pub fn abort(self, err: moq_net::Error) {
 		self.track.abort(err);
 	}
@@ -454,9 +455,7 @@ mod tests {
 		selected.container = hang::catalog::Container::Loc;
 		selected.preference = -1;
 
-		let track = broadcast
-			.unique_track(".avc3", catalog.track_info(hang::catalog::PRIORITY.video))
-			.unwrap();
+		let track = broadcast.unique_track(".avc3", catalog.track_info(hang::catalog::PRIORITY.video));
 		let _producer = Publisher::new(track, catalog.reserve(), selected).unwrap();
 
 		let (_, published) = rendition(&catalog).expect("the rendition publishes before any frame");
@@ -657,9 +656,7 @@ mod finished {
 			}));
 			let finished: Vec<_> = (0..sources)
 				.map(|_| {
-					let track = broadcast
-						.unique_track(".avc3", catalog.track_info(hang::catalog::PRIORITY.video))
-						.unwrap();
+					let track = broadcast.unique_track(".avc3", catalog.track_info(hang::catalog::PRIORITY.video));
 					let mut producer = Publisher::new(track, catalog.reserve(), rendition.clone()).unwrap();
 					for pts in [0, 33_333] {
 						let pts = moq_net::Timestamp::from_micros(pts).unwrap();

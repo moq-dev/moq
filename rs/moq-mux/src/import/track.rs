@@ -148,9 +148,9 @@ fn not_video(format: AudioFormat) -> crate::Error {
 }
 
 enum TrackKind {
-	/// H.264 Annex-B with inline SPS/PPS, published as avc3. The split owns byte
+	/// H.264 Annex B with inline SPS/PPS, published as avc3. The split owns byte
 	/// parsing; the import publishes.
-	Avc3 {
+	H264 {
 		split: crate::codec::h264::Split,
 		import: crate::codec::h264::Import,
 	},
@@ -161,7 +161,7 @@ enum TrackKind {
 		length_size: usize,
 		import: crate::codec::h264::Import,
 	},
-	Hev1 {
+	H265 {
 		split: crate::codec::h265::Split,
 		import: crate::codec::h265::Import,
 	},
@@ -188,8 +188,8 @@ enum TrackKind {
 macro_rules! import {
 	($kind:expr, $import:ident => $body:expr) => {
 		match $kind {
-			TrackKind::Avc3 { $import, .. } | TrackKind::Avc1 { $import, .. } => $body,
-			TrackKind::Hev1 { $import, .. } | TrackKind::Hvc1 { $import, .. } => $body,
+			TrackKind::H264 { $import, .. } | TrackKind::Avc1 { $import, .. } => $body,
+			TrackKind::H265 { $import, .. } | TrackKind::Hvc1 { $import, .. } => $body,
 			TrackKind::Av01 { $import, .. } => $body,
 			TrackKind::Vp8($import) => $body,
 			TrackKind::Vp9($import) => $body,
@@ -288,17 +288,17 @@ impl Track {
 				let (length_size, import) = build_h264_avc1(track, reserved, data, video_hint(&init, None))?;
 				TrackKind::Avc1 { length_size, import }
 			}
-			VideoFormat::Avc3 => {
+			VideoFormat::H264 => {
 				let (split, import) = build_h264_avc3(track, reserved, data, video_hint(&init, None))?;
-				TrackKind::Avc3 { split, import }
+				TrackKind::H264 { split, import }
 			}
 			VideoFormat::Hvc1 => {
 				let (length_size, import) = build_h265_hvc1(track, reserved, data, video_hint(&init, None))?;
 				TrackKind::Hvc1 { length_size, import }
 			}
-			VideoFormat::Hev1 => {
+			VideoFormat::H265 => {
 				let (split, import) = build_h265(track, reserved, data, video_hint(&init, None))?;
-				TrackKind::Hev1 { split, import }
+				TrackKind::H265 { split, import }
 			}
 			VideoFormat::Av01 => {
 				let (split, import) = build_av1(track, reserved, data, video_hint(&init, None))?;
@@ -361,7 +361,7 @@ impl Track {
 	/// Decode one whole frame.
 	pub fn decode<B: moq_net::IntoBytes>(&mut self, frame: B, pts: Option<moq_net::Timestamp>) -> Result<()> {
 		match self.kind {
-			TrackKind::Avc3 {
+			TrackKind::H264 {
 				ref mut split,
 				ref mut import,
 			} => {
@@ -379,7 +379,7 @@ impl Track {
 				let frame = crate::codec::h264::avc1_frame(frame, length_size, pts)?;
 				import.decode([frame])?;
 			}
-			TrackKind::Hev1 {
+			TrackKind::H265 {
 				ref mut split,
 				ref mut import,
 			} => {
@@ -438,8 +438,8 @@ impl Track {
 		// Each decode flushed its whole frame, so a splitter holds at most a picture its init
 		// carried.
 		let flushed = (|| match &mut self.kind {
-			TrackKind::Avc3 { split, import } => import.decode(split.flush(None)?),
-			TrackKind::Hev1 { split, import } => import.decode(split.flush(None)?),
+			TrackKind::H264 { split, import } => import.decode(split.flush(None)?),
+			TrackKind::H265 { split, import } => import.decode(split.flush(None)?),
 			TrackKind::Av01 { split, import } => import.decode(split.flush(None)?),
 			_ => Ok(()),
 		})();
@@ -448,8 +448,8 @@ impl Track {
 			return Err(err);
 		}
 		let inner = match self.kind {
-			TrackKind::Avc3 { import, .. } | TrackKind::Avc1 { import, .. } => FinishedKind::Video(import.finish()?),
-			TrackKind::Hev1 { import, .. } | TrackKind::Hvc1 { import, .. } => FinishedKind::Video(import.finish()?),
+			TrackKind::H264 { import, .. } | TrackKind::Avc1 { import, .. } => FinishedKind::Video(import.finish()?),
+			TrackKind::H265 { import, .. } | TrackKind::Hvc1 { import, .. } => FinishedKind::Video(import.finish()?),
 			TrackKind::Av01 { import, .. } => FinishedKind::Video(import.finish()?),
 			TrackKind::Vp8(import) => FinishedKind::Video(import.finish()?),
 			TrackKind::Vp9(import) => FinishedKind::Video(import.finish()?),
@@ -484,15 +484,15 @@ impl Track {
 			warned,
 		} = self;
 		let kind = match kind {
-			TrackKind::Avc3 { split, import } => import
+			TrackKind::H264 { split, import } => import
 				.abort_unwanted(err)
-				.map_err(|import| TrackKind::Avc3 { split, import }),
+				.map_err(|import| TrackKind::H264 { split, import }),
 			TrackKind::Avc1 { length_size, import } => import
 				.abort_unwanted(err)
 				.map_err(|import| TrackKind::Avc1 { length_size, import }),
-			TrackKind::Hev1 { split, import } => import
+			TrackKind::H265 { split, import } => import
 				.abort_unwanted(err)
-				.map_err(|import| TrackKind::Hev1 { split, import }),
+				.map_err(|import| TrackKind::H265 { split, import }),
 			TrackKind::Hvc1 { length_size, import } => import
 				.abort_unwanted(err)
 				.map_err(|import| TrackKind::Hvc1 { length_size, import }),
@@ -542,8 +542,8 @@ impl Track {
 	/// [`Error::WrongKind`](crate::Error::WrongKind).
 	pub fn set_enabled(&mut self, enabled: bool) -> Result<()> {
 		match &mut self.kind {
-			TrackKind::Avc3 { import, .. } | TrackKind::Avc1 { import, .. } => import.set_enabled(enabled)?,
-			TrackKind::Hev1 { import, .. } | TrackKind::Hvc1 { import, .. } => import.set_enabled(enabled)?,
+			TrackKind::H264 { import, .. } | TrackKind::Avc1 { import, .. } => import.set_enabled(enabled)?,
+			TrackKind::H265 { import, .. } | TrackKind::Hvc1 { import, .. } => import.set_enabled(enabled)?,
 			TrackKind::Av01 { import, .. } => import.set_enabled(enabled)?,
 			TrackKind::Vp8(import) => import.set_enabled(enabled)?,
 			TrackKind::Vp9(import) => import.set_enabled(enabled)?,
@@ -565,8 +565,8 @@ impl Track {
 	/// Drop the partial access unit of a format split from a byte stream.
 	fn reset_split(&mut self) {
 		match &mut self.kind {
-			TrackKind::Avc3 { split, .. } => split.reset(),
-			TrackKind::Hev1 { split, .. } => split.reset(),
+			TrackKind::H264 { split, .. } => split.reset(),
+			TrackKind::H265 { split, .. } => split.reset(),
 			TrackKind::Av01 { split, .. } => split.reset(),
 			TrackKind::Avc1 { .. }
 			| TrackKind::Hvc1 { .. }
@@ -614,13 +614,13 @@ impl From<crate::codec::mp3::Import> for Track {
 }
 
 enum TrackStreamKind {
-	/// H.264 Annex-B with inline SPS/PPS, published as avc3. The split owns
+	/// H.264 Annex B with inline SPS/PPS, published as avc3. The split owns
 	/// byte parsing; the import publishes.
-	Avc3 {
+	H264 {
 		split: crate::codec::h264::Split,
 		import: crate::codec::h264::Import,
 	},
-	Hev1 {
+	H265 {
 		split: crate::codec::h265::Split,
 		import: crate::codec::h265::Import,
 	},
@@ -634,11 +634,11 @@ enum TrackStreamKind {
 macro_rules! stream {
 	($kind:expr, $split:pat, $import:pat => $body:expr) => {
 		match $kind {
-			TrackStreamKind::Avc3 {
+			TrackStreamKind::H264 {
 				split: $split,
 				import: $import,
 			} => $body,
-			TrackStreamKind::Hev1 {
+			TrackStreamKind::H265 {
 				split: $split,
 				import: $import,
 			} => $body,
@@ -734,11 +734,11 @@ impl TrackStream {
 		let hint = video_hint(&init, None);
 		// Only the self-delimiting codecs can be recovered from a raw byte stream.
 		let kind = match init.format {
-			VideoFormat::Avc3 => TrackStreamKind::Avc3 {
+			VideoFormat::H264 => TrackStreamKind::H264 {
 				split: crate::codec::h264::Split::new(),
 				import: crate::codec::h264::Import::new(track, reserved, hint)?,
 			},
-			VideoFormat::Hev1 => TrackStreamKind::Hev1 {
+			VideoFormat::H265 => TrackStreamKind::H265 {
 				split: crate::codec::h265::Split::new(),
 				import: crate::codec::h265::Import::new(track, reserved, hint)?,
 			},
@@ -763,17 +763,17 @@ impl TrackStream {
 
 	/// Initialize the importer with the given buffer and populate the broadcast.
 	///
-	/// This is not required for self-describing formats like AVC3.
+	/// This is not required for self-describing formats like H264.
 	pub fn initialize(&mut self, data: &[u8]) -> Result<()> {
 		match self.kind {
-			TrackStreamKind::Avc3 {
+			TrackStreamKind::H264 {
 				ref mut split,
 				ref mut import,
 			} => {
 				import.initialize(data)?;
 				publish!(self.gate, import, split.initialize(data)?)?;
 			}
-			TrackStreamKind::Hev1 {
+			TrackStreamKind::H265 {
 				ref mut split,
 				ref mut import,
 			} => {
@@ -867,12 +867,12 @@ impl TrackStream {
 	pub fn abort_unwanted(self, err: moq_net::Error) -> std::result::Result<(), Self> {
 		let Self { kind, gate } = self;
 		let kind = match kind {
-			TrackStreamKind::Avc3 { split, import } => import
+			TrackStreamKind::H264 { split, import } => import
 				.abort_unwanted(err)
-				.map_err(|import| TrackStreamKind::Avc3 { split, import }),
-			TrackStreamKind::Hev1 { split, import } => import
+				.map_err(|import| TrackStreamKind::H264 { split, import }),
+			TrackStreamKind::H265 { split, import } => import
 				.abort_unwanted(err)
-				.map_err(|import| TrackStreamKind::Hev1 { split, import }),
+				.map_err(|import| TrackStreamKind::H265 { split, import }),
 			TrackStreamKind::Av01 { split, import } => import
 				.abort_unwanted(err)
 				.map_err(|import| TrackStreamKind::Av01 { split, import }),
@@ -933,8 +933,8 @@ impl Finished {
 		}
 	}
 
-	/// Release the track's cache, reporting `err` to readers that have not drained it; see
-	/// [`moq_net::track::Finished::abort`].
+	/// Abort the track with `err`; see [`moq_net::track::Finished::abort`]. Readers still draining get the clean end
+	/// instead once every group below the end finished.
 	pub fn abort(self, err: moq_net::Error) {
 		match self.inner {
 			FinishedKind::Video(track) => track.abort(err),
@@ -1365,7 +1365,7 @@ mod tests {
 		let import = Track::video(
 			request,
 			catalog.reserve(),
-			VideoInit::new(VideoFormat::Avc3, h264_init()),
+			VideoInit::new(VideoFormat::H264, h264_init()),
 		)
 		.unwrap();
 
@@ -1721,7 +1721,7 @@ mod tests {
 		let mut stream = TrackStream::video(
 			broadcast.reserve_track("video").unwrap(),
 			catalog.reserve(),
-			VideoInit::new(VideoFormat::Avc3, h264_init()),
+			VideoInit::new(VideoFormat::H264, h264_init()),
 		)
 		.unwrap();
 		let mut track = consumer.track("video").unwrap().subscribe(None).await.unwrap();
@@ -1744,24 +1744,24 @@ mod tests {
 	async fn avc3_init_picture_published_at_finish() {
 		let mut init = h264_init();
 		init.extend_from_slice(&annexb(&[H264_IDR]));
-		init_picture_published_at_finish(VideoFormat::Avc3, init).await;
+		init_picture_published_at_finish(VideoFormat::H264, init).await;
 	}
 
 	#[tokio::test(start_paused = true)]
 	async fn hev1_init_picture_published_at_finish() {
 		use crate::codec::h265::fixtures::{PPS, SPS, VPS};
-		init_picture_published_at_finish(VideoFormat::Hev1, annexb(&[VPS, SPS, PPS, H265_IDR])).await;
+		init_picture_published_at_finish(VideoFormat::H265, annexb(&[VPS, SPS, PPS, H265_IDR])).await;
 	}
 
 	#[tokio::test(start_paused = true)]
 	async fn avc3_init_headers_survive_reset() {
-		headers_survive_reset(VideoFormat::Avc3, h264_init(), annexb(&[H264_IDR])).await;
+		headers_survive_reset(VideoFormat::H264, h264_init(), annexb(&[H264_IDR])).await;
 	}
 
 	#[tokio::test(start_paused = true)]
 	async fn hev1_init_headers_survive_reset() {
 		use crate::codec::h265::fixtures::{PPS, SPS, VPS};
-		headers_survive_reset(VideoFormat::Hev1, annexb(&[VPS, SPS, PPS]), annexb(&[H265_IDR])).await;
+		headers_survive_reset(VideoFormat::H265, annexb(&[VPS, SPS, PPS]), annexb(&[H265_IDR])).await;
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -1826,7 +1826,7 @@ mod tests {
 		let cases = [
 			(VideoFormat::Avc1, avcc, length_prefixed(H264_IDR)),
 			(
-				VideoFormat::Hev1,
+				VideoFormat::H265,
 				Vec::new(),
 				annexb(&[h265::fixtures::VPS, h265::fixtures::SPS, h265::fixtures::PPS, H265_IDR]),
 			),
@@ -1912,9 +1912,9 @@ mod tests {
 
 		let (_, av1_keyframe) = av1_init_and_keyframe();
 		let cases = [
-			(VideoFormat::Avc3, [h264_init(), annexb(&[H264_IDR])].concat(), H264_IDR),
+			(VideoFormat::H264, [h264_init(), annexb(&[H264_IDR])].concat(), H264_IDR),
 			(
-				VideoFormat::Hev1,
+				VideoFormat::H265,
 				annexb(&[h265::fixtures::VPS, h265::fixtures::SPS, h265::fixtures::PPS, H265_IDR]),
 				H265_IDR,
 			),
@@ -1958,7 +1958,7 @@ mod tests {
 		let mut import = TrackStream::video(
 			request,
 			catalog.reserve(),
-			VideoInit::new(VideoFormat::Avc3, Vec::new()),
+			VideoInit::new(VideoFormat::H264, Vec::new()),
 		)
 		.unwrap();
 		// Every group is written before anything reads, which the default

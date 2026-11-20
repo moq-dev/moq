@@ -528,4 +528,21 @@ mod tests {
 			.collect();
 		assert_eq!(crate::fuzz::decode_announces(&bytes, true), golden());
 	}
+
+	/// A lite-06 start for a path that opens with U+FEFF, which is text and not a byte order mark;
+	/// `js/net/src/lite/announce.test.ts` pins its encoder and decoder to the same bytes.
+	const BOM_LITE06: &str = "00150aefbbbf636f6e636572740000ffffffffffffffff";
+
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_leading_bom_is_part_of_the_path() {
+		let announced = vec![crate::fuzz::Announced::Start(
+			Path::from_static("\u{feff}concert"),
+			vec![],
+		)];
+		let encoded = crate::fuzz::encode_announces(&announced, false);
+		let hex: String = encoded.iter().map(|b| format!("{b:02x}")).collect();
+		assert_eq!(hex, BOM_LITE06);
+		assert_eq!(crate::fuzz::decode_announces(&encoded, false), announced);
+	}
 }

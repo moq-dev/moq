@@ -1,0 +1,41 @@
+# The nightly mesh: a ring of six relays with one chord. The longest shortest
+# route crosses three links (a to d, c to f), and every cut leaves a detour.
+# Ring links dial clockwise and the chord dials back, so every relay both dials
+# and accepts a link, and a roll shows both of the ends a drain can reach.
+name = "ring6"
+relays = ["a", "b", "c", "d", "e", "f"]
+
+# Every link queues behind a rate limit until it drops, rather than losing at random.
+[shape]
+delay = "10ms"
+rate = 4000000
+queue = "250ms"
+
+[[links]]
+dial = "a"
+accept = "b"
+
+[[links]]
+dial = "b"
+accept = "c"
+
+[[links]]
+dial = "c"
+accept = "d"
+
+[[links]]
+dial = "d"
+accept = "e"
+
+[[links]]
+dial = "e"
+accept = "f"
+
+[[links]]
+dial = "f"
+accept = "a"
+
+[[links]]
+dial = "e"
+accept = "b"
+cost = 2

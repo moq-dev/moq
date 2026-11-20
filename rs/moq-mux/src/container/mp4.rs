@@ -3,7 +3,7 @@
 //! [`Export`] writes a file that is a valid fragmented MP4 while it grows, so a crash still
 //! leaves a playable file, and [`Export::finish`] turns it into a regular MP4 with its `moov`
 //! at the end without moving any media, the way OBS's hybrid MP4 does. [`repair`] finishes a
-//! file the same way after a crash.
+//! file the same way after a crash, and [`Finish::write`] makes either finish's writes.
 //!
 //! The file starts with `ftyp`, a reserved 16-byte `free` box and the fragmented `moov`, then
 //! the moof+mdat fragments. Finishing appends a `moov` that indexes every sample where it
@@ -31,6 +31,9 @@ use crate::container::fmp4::{self, Chunk, Error};
 /// The reserved box: the size of a 64-bit `mdat` header.
 const RESERVED: u64 = 16;
 
+/// The reserved box as a recording writes it, an empty `free` box.
+const FREE: [u8; RESERVED as usize] = [0, 0, 0, RESERVED as u8, b'f', b'r', b'e', b'e', 0, 0, 0, 0, 0, 0, 0, 0];
+
 /// The `sample_is_non_sync_sample` bit of ISO/IEC 14496-12 sample flags.
 const NON_SYNC: u32 = 0x0001_0000;
 
@@ -56,22 +59,81 @@ pub struct Export<S: Stream> {
 	described: HashMap<u32, Description>,
 }
 
-/// The writes that finish a recording, in order.
+/// The writes that finish a recording, made by [`write`](Self::write).
 #[derive(Clone, Debug)]
 pub struct Finish {
-	/// Where [`moov`](Self::moov) is written, from the start of the file, which is cut there
-	/// first: the end of everything [`Export::poll_next`] returned, or of a repaired file's last
-	/// complete fragment.
-	pub moov_offset: u64,
+	/// Where `moov` is written, from the start of the file, which is cut there first: the end
+	/// of everything [`Export::poll_next`] returned, or of a repaired file's last complete
+	/// fragment.
+	moov_offset: u64,
 
-	/// The regular `moov`, written first.
-	pub moov: Bytes,
+	/// The regular `moov`.
+	moov: Bytes,
 
-	/// Where [`mdat`](Self::mdat) overwrites the reserved box, from the start of the file.
-	pub mdat_offset: u64,
+	/// Where `mdat` overwrites the reserved box, from the start of the file.
+	mdat_offset: u64,
 
-	/// The 64-bit `mdat` header that covers the media, written last.
-	pub mdat: Bytes,
+	/// The 64-bit `mdat` header that covers the media.
+	mdat: Bytes,
+
+	/// Whether a finish cut short left the reserved box a header that skips the fragmented
+	/// `moov`, which must be `free` again before the cut removes the trailing one.
+	reopen: bool,
+}
+
+impl Finish {
+	/// Durably turn the recording in `file` into a regular MP4, so a crash part way leaves a
+	/// file that still plays and that [`repair`] finishes the same way.
+	///
+	/// It makes a repaired file's reserved box `free` again if a finish cut short left it a
+	/// header, cuts the file after the media, appends the `moov`, then overwrites the reserved box,
+	/// its last 8 bytes before its first 8 and syncing before each step that needs the one
+	/// before on disk. Until the last write the box reads as one a player skips, `free` or a
+	/// kind it does not know, never a broken `mdat` header.
+	pub fn write(&self, file: &mut std::fs::File) -> std::io::Result<()> {
+		self.write_to(file)
+	}
+
+	fn write_to(&self, file: &mut impl Disk) -> std::io::Result<()> {
+		if self.reopen {
+			file.write_at(self.mdat_offset, &FREE[..8])?;
+			file.sync()?;
+		}
+		// Cut before the moov lands where the cut bytes were, which could otherwise mix with it.
+		file.set_len(self.moov_offset)?;
+		file.sync()?;
+		file.write_at(self.moov_offset, &self.moov)?;
+		// The size goes into the body of the `free` box, so only the type needs the moov first.
+		let (kind, size) = self.mdat.split_at(8);
+		file.write_at(self.mdat_offset + 8, size)?;
+		file.sync()?;
+		file.write_at(self.mdat_offset, kind)?;
+		file.sync()
+	}
+}
+
+/// What [`Finish::write`] needs from a file.
+trait Disk {
+	fn set_len(&mut self, len: u64) -> std::io::Result<()>;
+	fn write_at(&mut self, offset: u64, data: &[u8]) -> std::io::Result<()>;
+	/// Return once everything written so far is on disk.
+	fn sync(&mut self) -> std::io::Result<()>;
+}
+
+impl Disk for std::fs::File {
+	fn set_len(&mut self, len: u64) -> std::io::Result<()> {
+		std::fs::File::set_len(self, len)
+	}
+
+	fn write_at(&mut self, offset: u64, data: &[u8]) -> std::io::Result<()> {
+		use std::io::Write;
+		self.seek(SeekFrom::Start(offset))?;
+		self.write_all(data)
+	}
+
+	fn sync(&mut self) -> std::io::Result<()> {
+		self.sync_all()
+	}
 }
 
 impl<S: Stream> Export<S> {
@@ -138,9 +200,7 @@ impl<S: Stream> Export<S> {
 
 		let mut data = BytesMut::with_capacity(init.len() + RESERVED as usize);
 		data.put_slice(&init[..split]);
-		data.put_u32(RESERVED as u32);
-		data.put_slice(b"free");
-		data.put_u64(0);
+		data.put_slice(&FREE);
 		data.put_slice(&init[split..]);
 
 		self.index = Some(Index::new(self.written + split as u64, &moov)?);
@@ -195,33 +255,31 @@ impl<S: Stream> Export<S> {
 }
 
 /// Rebuild the writes that finish a recording [`Export`] left unfinished, such as after a
-/// crash or a cut-short finish, or `None` when the file is already a regular MP4.
+/// crash or a cut-short finish, or `None` when the file is already finished.
 ///
 /// The final `moov` indexes every complete fragment, the same as finishing the recording
 /// right after writing the last one. Whatever follows it, such as a partial fragment or
-/// `moov`, is cut, so a repair cut short can itself be repaired.
+/// `moov`, is cut, so a repair cut short can itself be repaired. A file only counts as finished
+/// when its `mdat` header and trailing `moov` are exactly what finishing it writes.
 pub fn repair<F: Read + Seek>(file: &mut F) -> Result<Option<Finish>> {
 	let eof = file.seek(SeekFrom::End(0))?;
 	let Some(ftyp) = Atom::read(file, 0, eof)?.filter(|atom| atom.kind == *b"ftyp") else {
 		return Err(Error::Unrepairable("it does not start with an ftyp box").into());
 	};
-	let Some(reserved) = Atom::read(file, ftyp.end, eof)? else {
+	// Read as bytes, not a box: a finish cut short can leave it half `free` and half `mdat`.
+	let reserved = ftyp.end;
+	let Some(slot) = read_at(file, reserved, RESERVED, eof)? else {
 		return Err(Error::Unrepairable("it ends before its header").into());
 	};
-	if reserved.kind == *b"mdat" {
-		return Ok(None);
-	}
-	if reserved.kind != *b"free" || reserved.end - reserved.start != RESERVED {
-		return Err(Error::Unrepairable("it has no reserved box").into());
-	}
-	let Some(header) = Atom::read(file, reserved.end, eof)?.filter(|atom| atom.kind == *b"moov") else {
+	// A finish never moves the fragmented moov, which the mdat header then covers.
+	let Some(header) = Atom::read(file, reserved + RESERVED, eof)?.filter(|atom| atom.kind == *b"moov") else {
 		return Err(Error::Unrepairable("it has no complete moov after its reserved box").into());
 	};
 	let moov: mp4_atom::Moov = header.decode(file)?;
 	if moov.mvex.is_none() {
 		return Err(Error::Unrepairable("its moov is not fragmented").into());
 	}
-	let mut index = Index::new(reserved.start, &moov)?;
+	let mut index = Index::new(reserved, &moov)?;
 
 	// Where the last complete fragment ends, and the descriptions written since, which only
 	// count once the fragment written with them is complete.
@@ -257,7 +315,7 @@ pub fn repair<F: Read + Seek>(file: &mut F) -> Result<Option<Finish>> {
 					_ => return Err(Error::Unrepairable("a free box holds neither a fragment nor a moov").into()),
 				}
 			}
-			// A finish cut short appended part or all of a moov, which ends the recording.
+			// A finish appends a moov, which ends the recording, or a cut-short one part of it.
 			b"moov" => break,
 			_ => return Err(Error::Unrepairable("it holds a box a recording never writes").into()),
 		};
@@ -267,14 +325,42 @@ pub fn repair<F: Read + Seek>(file: &mut F) -> Result<Option<Finish>> {
 		index.fragment(moof.start, &moof.decode(file)?)?;
 		end = position;
 	}
-	if end < eof {
+	let mut finish = index.finish(end)?;
+
+	// Each byte is the reserved box's or the mdat header's, whichever reached the disk.
+	let torn = slot
+		.iter()
+		.zip(FREE.iter().zip(finish.mdat.iter()))
+		.all(|(&byte, (&free, &mdat))| byte == free || byte == mdat);
+	if !torn {
+		return Err(Error::Unrepairable("its reserved box is neither free nor its mdat header").into());
+	}
+	// The moov a finish appended, unless anything differs, a cut-short one included.
+	let indexed = eof - end == finish.moov.len() as u64
+		&& read_at(file, end, eof - end, eof)?.is_some_and(|trailer| trailer == finish.moov);
+	if indexed && slot == finish.mdat {
+		return Ok(None);
+	}
+	finish.reopen = slot[..8] != FREE[..8];
+	if !indexed && end < eof {
 		tracing::warn!(
 			offset = end,
 			bytes = eof - end,
 			"cutting what follows the last complete fragment"
 		);
 	}
-	Ok(Some(index.finish(end)?))
+	Ok(Some(finish))
+}
+
+/// The `len` bytes at `start`, or `None` when they do not end by `limit`.
+fn read_at<F: Read + Seek>(file: &mut F, start: u64, len: u64, limit: u64) -> Result<Option<Vec<u8>>> {
+	if start.checked_add(len).is_none_or(|end| end > limit) {
+		return Ok(None);
+	}
+	let mut data = vec![0u8; len as usize];
+	file.seek(SeekFrom::Start(start))?;
+	file.read_exact(&mut data)?;
+	Ok(Some(data))
 }
 
 /// One box in a file.
@@ -552,6 +638,7 @@ impl Index {
 			moov: Bytes::from(buf),
 			mdat_offset: self.reserved,
 			mdat: mdat.freeze(),
+			reopen: false,
 		})
 	}
 }
@@ -837,10 +924,123 @@ mod tests {
 
 	/// Make the writes of `finish` to `file`.
 	fn apply(finish: super::Finish, file: &mut Vec<u8>) {
-		file.truncate(finish.moov_offset as usize);
-		file.extend_from_slice(&finish.moov);
-		let offset = finish.mdat_offset as usize;
-		file[offset..offset + finish.mdat.len()].copy_from_slice(&finish.mdat);
+		finish.write_to(file).unwrap();
+	}
+
+	impl super::Disk for Vec<u8> {
+		fn set_len(&mut self, len: u64) -> std::io::Result<()> {
+			self.resize(len as usize, 0);
+			Ok(())
+		}
+
+		fn write_at(&mut self, offset: u64, data: &[u8]) -> std::io::Result<()> {
+			let offset = offset as usize;
+			if self.len() < offset + data.len() {
+				self.resize(offset + data.len(), 0);
+			}
+			self[offset..offset + data.len()].copy_from_slice(data);
+			Ok(())
+		}
+
+		fn sync(&mut self) -> std::io::Result<()> {
+			Ok(())
+		}
+	}
+
+	/// One call a finish made to its file.
+	#[derive(Clone)]
+	enum Op {
+		SetLen(u64),
+		Write(u64, Vec<u8>),
+		Sync,
+	}
+
+	impl super::Disk for Vec<Op> {
+		fn set_len(&mut self, len: u64) -> std::io::Result<()> {
+			self.push(Op::SetLen(len));
+			Ok(())
+		}
+
+		fn write_at(&mut self, offset: u64, data: &[u8]) -> std::io::Result<()> {
+			self.push(Op::Write(offset, data.to_vec()));
+			Ok(())
+		}
+
+		fn sync(&mut self) -> std::io::Result<()> {
+			self.push(Op::Sync);
+			Ok(())
+		}
+	}
+
+	/// Every file a crash while `finish` writes to `file` can leave: what was synced, then each
+	/// call since either lost or made, a write cut short within the box header it starts with
+	/// or its last bytes. A reader sees any other cut as one of those.
+	fn crashes(file: &[u8], finish: &super::Finish) -> Vec<Vec<u8>> {
+		use super::Disk;
+
+		let mut ops = Vec::new();
+		finish.write_to(&mut ops).unwrap();
+		let mut synced = file.to_vec();
+		let mut pending: Vec<Op> = Vec::new();
+		let mut files = vec![synced.clone()];
+		for op in ops {
+			if let Op::Sync = op {
+				for op in pending.drain(..) {
+					made(&mut synced, &op);
+				}
+				continue;
+			}
+			pending.push(op);
+			let mut states = vec![synced.clone()];
+			for op in &pending {
+				let mut next = Vec::new();
+				for state in states {
+					next.push(state.clone());
+					match op {
+						Op::Write(offset, data) => {
+							let header = 1..=data.len().min(16);
+							for len in header.chain(data.len().saturating_sub(16).max(17)..=data.len()) {
+								let mut state = state.clone();
+								state.write_at(*offset, &data[..len]).unwrap();
+								next.push(state);
+							}
+						}
+						op => {
+							let mut state = state;
+							made(&mut state, op);
+							next.push(state);
+						}
+					}
+				}
+				states = next;
+			}
+			files.extend(states);
+		}
+		files.push(synced);
+		files
+	}
+
+	fn made(file: &mut Vec<u8>, op: &Op) {
+		use super::Disk;
+		match op {
+			Op::SetLen(len) => super::Disk::set_len(file, *len).unwrap(),
+			Op::Write(offset, data) => file.write_at(*offset, data).unwrap(),
+			Op::Sync => {}
+		}
+	}
+
+	/// The first `moov` a player reading the file's boxes in order reaches, or `None` when a box
+	/// it can't read comes first.
+	fn played(file: &[u8]) -> Option<&[u8]> {
+		let mut position = 0;
+		while let Some(atom) = super::Atom::read(&mut std::io::Cursor::new(file), position, file.len() as u64).unwrap()
+		{
+			if atom.kind == *b"moov" {
+				return Some(&file[atom.start as usize..atom.end as usize]);
+			}
+			position = atom.end;
+		}
+		None
 	}
 
 	fn repair(file: &[u8]) -> crate::Result<Option<super::Finish>> {
@@ -1314,10 +1514,9 @@ mod tests {
 		assert_eq!(samples(&file, trak(&moov, b"vide")).len(), 9);
 	}
 
-	/// A finish cut short before its mdat header leaves part or all of the moov at the end,
-	/// which the repair cuts and writes again.
-	#[tokio::test(start_paused = true)]
-	async fn an_interrupted_finish_repairs() {
+	/// A recording with audio and video and nothing past its last fragment, and the bytes that
+	/// finish it.
+	async fn recorded() -> (Vec<u8>, super::Finish) {
 		let mut live = Live::avc3();
 		let mut audio = add_opus(&mut live, 0);
 		for i in 0..6u64 {
@@ -1329,22 +1528,120 @@ mod tests {
 		let mut export = export(&live).await;
 		let mut file = Vec::new();
 		record(&mut export, &mut file).await;
-		let finished = export.finish().unwrap().expect("something was written");
+		let finish = export.finish().unwrap().expect("something was written");
+		(file, finish)
+	}
 
-		for appended in [1, 8, finished.moov.len() / 2, finished.moov.len()] {
-			let mut cut = file.clone();
-			cut.extend_from_slice(&finished.moov[..appended]);
-			assert_same(&repair(&cut).unwrap().expect("unfinished"), &finished, appended);
+	/// A crash anywhere in a finish, or in the repair of a recording cut mid-fragment or
+	/// mid-description, or in the repair of any of those crashes, leaves a file a player still
+	/// reads, through the fragmented moov or the final one, and that repairs to the same finish.
+	#[tokio::test(start_paused = true)]
+	async fn a_finish_interrupted_anywhere_plays_and_repairs() {
+		let (file, finish) = recorded().await;
+		let mut finished = file.clone();
+		apply(finish.clone(), &mut finished);
+		let fragmented = played(&file).expect("the unfinished file plays").to_vec();
+
+		let mut cut = file.clone();
+		cut.truncate(file.len() - 3);
+		let partial = repair(&cut).unwrap().expect("unfinished");
+		let mut repaired = cut.clone();
+		apply(partial.clone(), &mut repaired);
+		assert_eq!(kinds(&atoms(&repaired)), ["ftyp", "mdat", "moov"]);
+
+		// Part of a late rendition's description, longer than the final moov.
+		let mut described = file.clone();
+		described.extend_from_slice(&[0, 0, 0x40, 0, b'f', b'r', b'e', b'e']);
+		described.resize(described.len() + 4 * finish.moov.len(), 0);
+
+		for (start, finish, done) in [
+			(&file, &finish, &finished),
+			(&described, &finish, &finished),
+			(&cut, &partial, &repaired),
+		] {
+			for (i, crashed) in crashes(start, finish).iter().enumerate() {
+				let moov = played(crashed).unwrap_or_else(|| panic!("crash {i} left a file no player reads"));
+				assert!(
+					moov == fragmented || moov == finish.moov,
+					"crash {i} plays a broken moov"
+				);
+				let Some(again) = repair(crashed).unwrap_or_else(|err| panic!("crash {i}: {err}")) else {
+					assert_eq!(crashed, done, "crash {i} reported finished");
+					continue;
+				};
+				assert_same(&again, finish, i);
+				// The repair can crash too, and that file still plays and repairs the same. Only
+				// a reserved box no longer `free` makes it write what a finish does not.
+				let reserved = finish.mdat_offset as usize;
+				let reopened = crashed[reserved..reserved + 8] != super::FREE[..8];
+				let twice = if reopened { crashes(crashed, &again) } else { Vec::new() };
+				for (j, twice) in twice.iter().enumerate() {
+					let moov = played(twice).unwrap_or_else(|| panic!("crash {i}, {j} left a file no player reads"));
+					assert!(
+						moov == fragmented || moov == finish.moov,
+						"crash {i}, {j} plays a broken moov"
+					);
+					match repair(twice).unwrap_or_else(|err| panic!("crash {i}, {j}: {err}")) {
+						Some(last) => assert_same(&last, finish, i),
+						None => assert_eq!(twice, done, "crash {i}, {j} reported finished"),
+					}
+				}
+				let mut fixed = crashed.clone();
+				apply(again, &mut fixed);
+				assert_eq!(&fixed, done, "crash {i}");
+			}
+		}
+		assert_eq!(kinds(&atoms(&finished)), ["ftyp", "mdat", "moov"]);
+	}
+
+	/// A finished file counts only when its header and trailing moov are exactly what its
+	/// fragments index. A header torn in either write order, or a moov removed, cut, extended or
+	/// changed, is finished again.
+	#[tokio::test(start_paused = true)]
+	async fn only_a_verified_index_counts_as_finished() {
+		let (file, finish) = recorded().await;
+		let mut finished = file.clone();
+		apply(finish.clone(), &mut finished);
+		assert!(repair(&finished).unwrap().is_none(), "already a regular MP4");
+
+		let reserved = finish.mdat_offset as usize;
+		let header = reserved..reserved + 16;
+		let mut damaged = Vec::new();
+		for len in 0..16 {
+			// The header written first to last, as older recorders did, or last to first.
+			let mut first = finished.clone();
+			first[header.start + len..header.end].copy_from_slice(&super::FREE[len..]);
+			let mut last = finished.clone();
+			last[header.start..header.end - len].copy_from_slice(&super::FREE[..16 - len]);
+			// Bytes the two headers share are written either way.
+			damaged.extend([first, last].into_iter().filter(|torn| *torn != finished));
+		}
+		let moov = finish.moov_offset as usize;
+		for len in [0, 1, 8, finish.moov.len() - 1] {
+			let mut cut = finished.clone();
+			cut.truncate(moov + len);
+			damaged.push(cut);
+		}
+		let mut extended = finished.clone();
+		extended.extend_from_slice(b"junk");
+		damaged.push(extended);
+		// A chunk offset changed, which still decodes.
+		let mut changed = finished.clone();
+		let last = changed.len() - 1;
+		changed[last] ^= 1;
+		damaged.push(changed);
+
+		for (i, file) in damaged.iter().enumerate() {
+			assert_same(&repair(file).unwrap().expect("not finished"), &finish, i);
 		}
 
-		let mut done = file.clone();
-		apply(finished, &mut done);
-		assert_eq!(kinds(&atoms(&done)), ["ftyp", "mdat", "moov"]);
-		assert!(repair(&done).unwrap().is_none(), "already a regular MP4");
+		// A reserved box that is neither is not one a recording wrote.
+		let mut garbage = finished.clone();
+		garbage[header.start + 5] = b'x';
+		assert!(repair(&garbage).is_err());
 
 		// A plain fMP4 has no reserved box for the mdat header.
-		let ftyp = u32::from_be_bytes(file[..4].try_into().unwrap()) as usize;
-		let fmp4 = [&file[..ftyp], &file[ftyp + 16..]].concat();
+		let fmp4 = [&file[..reserved], &file[reserved + 16..]].concat();
 		assert!(repair(&fmp4).is_err());
 	}
 }

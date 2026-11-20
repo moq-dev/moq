@@ -269,7 +269,10 @@ mod tests {
 				},
 				600.0,
 			);
-			assert!(!run.resyncs.is_empty() || run.drops > 0, "{ppm} ppm");
+			// The 1000 ppm left over runs 100 ms off every 100 s, so each direction corrects about
+			// five times. A fast device re-anchors too, once the drops let capture catch up.
+			assert!(run.resyncs.len() >= 4, "{ppm} ppm: {} resyncs", run.resyncs.len());
+			assert_eq!(run.drops > 0, ppm > 0.0, "{ppm} ppm: {} drops", run.drops);
 			assert!(
 				run.worst(0.0) < 1e3 * RESYNC.as_secs_f64() + 15.0,
 				"{ppm} ppm: {:.2} ms",

@@ -655,10 +655,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			return Err(Error::StreamedCmaf.into());
 		}
 
-		let track = self.broadcast.create_track(
-			self.broadcast.unique_name(suffix),
-			self.catalog.track_info(kind.priority()),
-		)?;
+		let track = self
+			.broadcast
+			.unique_track(suffix, self.catalog.track_info(kind.priority()));
 		// Build the media producer before publishing the rendition. It is fallible (its
 		// timeline track can collide), and a rendition published for a track we then fail
 		// to produce would be advertised to consumers but never served.
@@ -1033,8 +1032,8 @@ pub struct Finished<E: crate::catalog::hang::CatalogExt = ()> {
 }
 
 impl<E: crate::catalog::hang::CatalogExt> Finished<E> {
-	/// Release every track's cache, reporting `err` to readers that have not drained it; see
-	/// [`Import::abort`].
+	/// Abort every track with `err`; see [`Import::abort`]. Readers still draining a track get its
+	/// clean end instead once every group below its end finished.
 	pub fn abort(self, err: moq_net::Error) {
 		self.import.abort(err);
 	}

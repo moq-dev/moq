@@ -115,9 +115,10 @@ module py '^(py/|sh/py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/|rs/uniffi-bindgen
 # sh/rs/select.sh widens to the whole workspace for inputs every crate shares.
 # moq-cli builds the Rust interop clients as examples from outside its
 # crate; sh/rs/select.test.py fails when a target's directory is missing.
-# moq-relay's tests read its NixOS module.
-module rs '^(\.cargo/|nix/modules/moq-relay\.nix$|sh/local\.(sh|ts)$|rs/|test/interop/clients/rust/|sh/rs/|Cargo\.(toml|lock)$|clippy\.toml$|rust-toolchain\.toml$|\.config/nextest\.toml$)' \
-    tools='cargo jq' compiles='check fix' fix
+# moq-relay's tests read its NixOS module, and libmoq's lint compiles the C
+# doc samples.
+module rs '^(\.cargo/|nix/modules/moq-relay\.nix$|doc/lib/c/|doc/lib/samples\.sh$|sh/local\.(sh|ts)$|rs/|test/interop/clients/rust/|sh/rs/|Cargo\.(toml|lock)$|clippy\.toml$|rust-toolchain\.toml$|\.config/nextest\.toml$)' \
+    tools='cargo jq cc' compiles='check fix' fix
 # nix/Cargo.nix records each crate's dependencies, features, and targets,
 # read from the manifests, the lockfile, and the files cargo discovers targets
 # from. The pinned crate2nix comes from flake.lock.
@@ -148,6 +149,11 @@ module biome '' \
 # Root Nix inputs own the browser version every npm Playwright pin matches.
 module js '^(js/|bench/browser/|doc/|drafts/|demo/(boy|web|carla/web)/|test/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$|flake\.(nix|lock)$)' \
     tools='bun python3 uv' lane=bun fix
+# fallow over the whole workspace: removing the last use of an export in one
+# package leaves it dead in the package that defines it, which a run scoped to
+# the changed packages would never analyze.
+module dead_code '(\.([mc]?[jt]sx?|vue)|(^|/)package\.json|^bun\.lock|^\.fallowrc\.jsonc)$' \
+    tools='bun uv' lane=bun
 # The recorded-trace replays play through the player's container consumer and
 # ring on a simulated clock: deterministic, seconds long, and only Bun (plus uv
 # for the install step), so they gate every diff that can move a row. It shares
@@ -419,6 +425,7 @@ step() {
     case "$1:$2" in
         check:js) run just js check-changed "$js_list" ;;
         check:workers) run just js workers ;;
+        check:dead_code) run just js dead-code ;;
         check:moq_sh) run just infra moq-sh test ;;
         # The check keeps docs and the isolated default-media lint; the test
         # phase enforces the other clippy checks in its existing build.

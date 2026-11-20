@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import * as Json from "@moq/json";
 import { type Broadcast, Origin, Path, Time } from "@moq/net";
+import { defined } from "./defined.test-util.ts";
 import {
 	Consumer,
 	Nodes,
@@ -17,7 +18,7 @@ let keys = 0n;
 const key = () => Time.Timestamp.unscaled(keys++);
 
 function publish(broadcast: Broadcast.Producer, name: string) {
-	return new Json.Snapshot.Producer<unknown>({ track: broadcast.createTrack(name) });
+	return new Json.Snapshot.Producer<unknown>({ track: defined(broadcast.createTrack(name)) });
 }
 
 test("discovers each node under the prefix", async () => {

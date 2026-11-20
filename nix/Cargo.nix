@@ -12047,7 +12047,10 @@ rec {
             "v1_28"
           ];
         };
-        resolvedDefaultFeatures = [ "default" ];
+        resolvedDefaultFeatures = [
+          "default"
+          "v1_16"
+        ];
       };
       "gstreamer-audio" = rec {
         crateName = "gstreamer-audio";
@@ -12318,6 +12321,120 @@ rec {
           "v1_30" = [ "v1_28" ];
         };
       };
+      "gstreamer-check" = rec {
+        crateName = "gstreamer-check";
+        version = "0.25.0";
+        edition = "2024";
+        sha256 = "1ismmx6kxdd27xhyrjbrqwld21mp62rpr0g0qq2h9hhjhhqhx85w";
+        libName = "gstreamer_check";
+        authors = [
+          "Sebastian Dröge <sebastian@centricular.com>"
+        ];
+        dependencies = [
+          {
+            name = "glib";
+            packageId = "glib";
+          }
+          {
+            name = "gstreamer";
+            packageId = "gstreamer";
+            rename = "gst";
+          }
+          {
+            name = "gstreamer-check-sys";
+            packageId = "gstreamer-check-sys";
+          }
+        ];
+        features = {
+          "v1_16" = [
+            "gst/v1_16"
+            "gstreamer-check-sys/v1_16"
+          ];
+          "v1_18" = [
+            "gst/v1_18"
+            "gstreamer-check-sys/v1_18"
+            "v1_16"
+          ];
+          "v1_20" = [
+            "gst/v1_20"
+            "gstreamer-check-sys/v1_20"
+            "v1_18"
+          ];
+          "v1_22" = [
+            "gst/v1_22"
+            "gstreamer-check-sys/v1_22"
+            "v1_20"
+          ];
+          "v1_24" = [
+            "gst/v1_24"
+            "gstreamer-check-sys/v1_24"
+            "v1_22"
+          ];
+          "v1_26" = [
+            "gst/v1_26"
+            "gstreamer-check-sys/v1_26"
+            "v1_24"
+          ];
+          "v1_28" = [
+            "gst/v1_28"
+            "gstreamer-check-sys/v1_28"
+            "v1_26"
+          ];
+          "v1_30" = [
+            "gst/v1_30"
+            "gstreamer-check-sys/v1_30"
+            "v1_28"
+          ];
+        };
+        resolvedDefaultFeatures = [
+          "default"
+          "v1_16"
+        ];
+      };
+      "gstreamer-check-sys" = rec {
+        crateName = "gstreamer-check-sys";
+        version = "0.25.4";
+        edition = "2024";
+        sha256 = "175y0w12qj68zi47ir4crb0994bxkr0i55vv0haqws46rc2a3vkv";
+        libName = "gstreamer_check_sys";
+        authors = [
+          "Sebastian Dröge <sebastian@centricular.com>"
+        ];
+        dependencies = [
+          {
+            name = "glib-sys";
+            packageId = "glib-sys";
+          }
+          {
+            name = "gobject-sys";
+            packageId = "gobject-sys";
+          }
+          {
+            name = "gstreamer-sys";
+            packageId = "gstreamer-sys";
+          }
+          {
+            name = "libc";
+            packageId = "libc";
+          }
+        ];
+        buildDependencies = [
+          {
+            name = "system-deps";
+            packageId = "system-deps 9.0.0";
+          }
+        ];
+        features = {
+          "v1_18" = [ "v1_16" ];
+          "v1_20" = [ "v1_18" ];
+          "v1_22" = [ "v1_20" ];
+          "v1_24" = [ "v1_22" ];
+          "v1_26" = [ "v1_24" ];
+          "v1_28" = [ "v1_26" ];
+          "v1_30" = [ "v1_28" ];
+        };
+        resolvedDefaultFeatures = [ "v1_16" ];
+      };
       "gstreamer-sys" = rec {
         crateName = "gstreamer-sys";
         version = "0.25.4";
@@ -12362,6 +12479,7 @@ rec {
           "v1_28" = [ "v1_26" ];
           "v1_30" = [ "v1_28" ];
         };
+        resolvedDefaultFeatures = [ "v1_16" ];
       };
       "h2" = rec {
         crateName = "h2";
@@ -16075,6 +16193,17 @@ rec {
             optional = true;
           }
           {
+            name = "libc";
+            packageId = "libc";
+            target =
+              { target, features }:
+              (
+                ("linux" == target."os" or null)
+                || ("android" == target."os" or null)
+                || ("apple" == target."vendor" or null)
+              );
+          }
+          {
             name = "rand";
             packageId = "rand 0.10.3";
           }
@@ -19390,6 +19519,12 @@ rec {
             packageId = "futures";
           }
           {
+            name = "gstreamer-check";
+            packageId = "gstreamer-check";
+            rename = "gst-check";
+            features = [ "v1_16" ];
+          }
+          {
             name = "moq-audio";
             packageId = "moq-audio";
             usesDefaultFeatures = false;
@@ -19691,6 +19826,11 @@ rec {
               "std"
               "handle-panics"
             ];
+          }
+          {
+            name = "serde_json";
+            packageId = "serde_json";
+            features = [ "raw_value" ];
           }
           {
             name = "workspace-hack";
@@ -21612,6 +21752,11 @@ rec {
         ];
         devDependencies = [
           {
+            name = "hang";
+            packageId = "hang";
+            features = [ "async" ];
+          }
+          {
             name = "kio";
             packageId = "kio";
             features = [ "runtime" ];
@@ -22004,7 +22149,10 @@ rec {
           {
             name = "kio";
             packageId = "kio";
-            features = [ "sim" ];
+            features = [
+              "manual"
+              "sim"
+            ];
           }
           {
             name = "moq-congestion";
@@ -59738,6 +59886,15 @@ rec {
             features = [ "i128" ];
           }
           {
+            name = "num-rational";
+            packageId = "num-rational";
+            usesDefaultFeatures = false;
+            features = [
+              "num-bigint-std"
+              "std"
+            ];
+          }
+          {
             name = "num-traits";
             packageId = "num-traits";
             features = [ "i128" ];
@@ -61188,6 +61345,15 @@ rec {
             name = "num-integer";
             packageId = "num-integer";
             features = [ "i128" ];
+          }
+          {
+            name = "num-rational";
+            packageId = "num-rational";
+            usesDefaultFeatures = false;
+            features = [
+              "num-bigint-std"
+              "std"
+            ];
           }
           {
             name = "num-traits";

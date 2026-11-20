@@ -75,6 +75,21 @@ pub(crate) fn hold() -> std::sync::MutexGuard<'static, ()> {
 	GATE.lock().unwrap_or_else(|err| err.into_inner())
 }
 
+/// Held by [`hold_opens`] to stall every codec open.
+static OPEN_GATE: Mutex<()> = Mutex::new(());
+
+/// Stall every open until the returned guard drops, standing in for a hardware encoder that
+/// takes longer than a frame to open, while the encoders already open keep encoding.
+#[cfg(all(not(apple), feature = "openh264", feature = "capture"))]
+pub(crate) fn hold_opens() -> std::sync::MutexGuard<'static, ()> {
+	OPEN_GATE.lock().unwrap_or_else(|err| err.into_inner())
+}
+
+/// Wait out [`hold_opens`].
+fn gate_open() {
+	drop(OPEN_GATE.lock().unwrap_or_else(|err| err.into_inner()));
+}
+
 fn record(what: &'static str) {
 	LOG.lock().unwrap().push((what, std::thread::current().id()));
 }
@@ -101,6 +116,7 @@ pub(crate) fn fail_opens(count: u32) {
 
 /// Record an open, failing it while [`fail_opens`] has any left.
 fn opened() -> Result<(), Error> {
+	gate_open();
 	record("open");
 	let mut failing = FAIL_OPENS.lock().unwrap();
 	if *failing == 0 {
@@ -211,6 +227,7 @@ pub(crate) struct Pipelined {
 #[cfg(feature = "openh264")]
 impl Pipelined {
 	pub(crate) fn open(config: &Config) -> Result<Box<dyn Backend>, Error> {
+		gate_open();
 		Ok(Box::new(Self {
 			inner: super::openh264::Openh264::open(config)?,
 			held: None,
@@ -239,6 +256,9 @@ impl Backend for Pipelined {
 	}
 
 	fn flush(&mut self) -> Result<(), Error> {
+		if std::mem::take(&mut *LOSE_TAIL.lock().unwrap()) {
+			return Err(Error::codec(anyhow::anyhow!("the probe lost its tail")));
+		}
 		self.inner.flush()?;
 		self.hold()?;
 		self.ready.extend(self.held.take());

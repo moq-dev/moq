@@ -1,11 +1,10 @@
 import * as Instance from "../instance.ts";
 import * as Mint from "../mint.ts";
 import type { Reader, Writer } from "../stream.ts";
+import { decodeUtf8 } from "../util/utf8.ts";
 import { hasInstance, hasRoutes, type Version } from "./version.ts";
 
 const encoder = new TextEncoder();
-// `ignoreBOM` keeps a leading U+FEFF, which is instance text like any other, as Rust does.
-const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 /** Encode the instance a request pins as its UTF-8 bytes and minted flag, or empty and unminted
  * for none. Older versions carry nothing, so the peer resolves whichever instance wins the path.
@@ -73,6 +72,6 @@ async function encode(w: Writer, instance: Instance.Valid): Promise<void> {
 }
 
 function decode(bytes: Uint8Array, minted: boolean): Instance.Valid {
-	const named = Instance.parse(decoder.decode(bytes));
+	const named = Instance.parse(decodeUtf8(bytes));
 	return minted ? Mint.mint(named) : named;
 }

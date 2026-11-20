@@ -29,7 +29,9 @@ const serving = (async () => {
 		let broadcast = broadcasts.get(request.path);
 		if (!broadcast) {
 			broadcast = new Moq.Broadcast.Producer();
-			broadcast.createTrack("value", { maxAge: null }).writeFrame({
+			const track = broadcast.createTrack("value", { maxAge: null });
+			if (!track) throw new Error("the track already exists");
+			track.writeFrame({
 				payload: new TextEncoder().encode(request.path),
 				timestamp: Moq.Time.Timestamp.unscaled(0n),
 			});

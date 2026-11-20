@@ -165,13 +165,15 @@ impl Reserved {
 			// The catalog's info carries the microsecond timescale audio hang frames stamp, so
 			// Lite05 subscribers know what scale to expect and the model layer accepts
 			// Frame::timestamp on append, plus whatever max age the catalog declared.
-			Some(name) => broadcast.create_track(name.clone(), catalog.track_info(hang::catalog::PRIORITY.audio))?,
+			Some(name) => broadcast
+				.create_track(name.clone(), catalog.track_info(hang::catalog::PRIORITY.audio))
+				.ok_or_else(|| hang::Error::Duplicate(name.clone()))?,
 			// Mirrors the video side, which derives a unique name from the codec
 			// rather than making every caller invent one.
 			None => broadcast.unique_track(
 				&format!(".{}", options.config.codec),
 				catalog.track_info(hang::catalog::PRIORITY.audio),
-			)?,
+			),
 		};
 		let track = catalog.audio(
 			track,
@@ -944,8 +946,9 @@ impl Finished {
 		self.track.demand()
 	}
 
-	/// Abort the track with `err`, so subscribers that have not drained it see the real cause; see
-	/// [`Producer::abort`].
+	/// Abort the track with `err`; see [`Producer::abort`]. Readers still draining get the end the
+	/// track declared instead once every group below it finished: the clean end after
+	/// [`Producer::finish`], or the capture's error when the source failed.
 	pub fn abort(self, err: moq_net::Error) {
 		self.track.abort(err);
 	}

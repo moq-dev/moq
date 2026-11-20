@@ -19,7 +19,9 @@ try {
 		const publication = origin.route(path, { hidden: true });
 		// One group per track, never finished, so every group the reader receives stays live.
 		for (let i = 0; i < count; i++) {
-			const group = publication.broadcast.createTrack(String(i)).appendGroup(Moq.Time.Timestamp.unscaled(0n));
+			const track = publication.broadcast.createTrack(String(i));
+			if (!track) throw new Error(`the track ${i} already exists`);
+			const group = track.appendGroup(Moq.Time.Timestamp.unscaled(0n));
 			group.writeFrame({
 				payload: new TextEncoder().encode(String(i)),
 				timestamp: Moq.Time.Timestamp.unscaled(group.start),

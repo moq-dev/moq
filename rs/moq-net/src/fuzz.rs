@@ -12,15 +12,17 @@
 //! It tracks the crate's internals, so it can change in any release. See `fuzz/README.md` for the workflow.
 
 mod ingest;
+mod mesh;
 mod request;
 mod session;
 
 pub use ingest::ingest;
+pub use mesh::{RouteMesh, RouteShape, RouteTally};
 pub use request::request;
 pub use session::{session_ietf, session_lite};
 
 /// Lite-07 publisher run loops for the publisher bench.
-pub use crate::lite::CoverageBench;
+pub use crate::lite::{CoverageBench, UpdateBench};
 
 use bytes::Bytes;
 

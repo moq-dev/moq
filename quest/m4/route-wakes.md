@@ -1,4 +1,4 @@
-# [M] A route change wakes only the fronts it affects
+# [L] A route change writes once and wakes only the fronts it affects
 
 ## Goal
 
@@ -37,9 +37,29 @@ Facts from `main` (`rs/moq-net/src/model/origin.rs`, since Wildcard landed in
   exactly the path skips both hashes. A join moves only paths the newcomer
   wins, a leave only paths the leaver was winning.
 - On lite-07 the route layer writes into this table through `route::node`,
-  one write per broadcast whose way changed; a change to one route rewrites
-  every broadcast behind it, which [route benches](/quest/m3/route-benches.md)
-  owns. This quest is the fronts' half: what each write wakes.
+  one write per broadcast whose way changed; a change to one route's cost
+  rewrites every broadcast behind it (`route::node` `State::flush` relanes
+  each, and `Served` carries the cost). This quest owns both halves: one
+  shared record per route in the origin that its broadcasts refer to, so a
+  re-price is one write, and what each write wakes. `routes/reopen/spare`
+  measures the route side (moq-dev/moq#9114): an upstream reopening twice
+  in a row costs 10 origin writes per broadcast behind it, 2.8 s at 16
+  routes of 4,096 broadcasts, linear in each axis; `routes/drain` costs 2
+  per broadcast, 480 ms at the same shape. A route that moves to another
+  path at the same rank through the same session already rewrites nothing;
+  one that moves to another session at the same rank relanes every
+  broadcast its node claims.
+
+Decided 2026-11-18 (maintainer, on
+[moq-dev/moq#9114](https://github.com/moq-dev/moq/pull/9114)): ✅ the origin
+record lives here, in m4 (rejected: moving this quest to m3; a separate m3
+quest for the record alone). It replaces that morning's decision to keep it
+in m3 with the benches. The measured cost above is about 4 µs a write, so
+the worst flap seen on a deployed mesh costs one relay a fraction of a
+second. The mesh replay (`just test mesh-replay --mesh <its graph>`) counts
+the route changes and rewrites a flap causes on that mesh's graph, which at
+that cost bounds the time, before its links move to lite-07; it does not time
+the writes itself.
 
 Decisions:
 
@@ -79,10 +99,9 @@ Decisions:
 
 Decided 2026-10-13: coordinate the index with the route model and per-track
 active/standby selection. Do not build a second route table per track or
-turn one route's cost change into per-broadcast mutations. Whichever
-implementation lands first, this or the origin record in
-[route benches](/quest/m3/route-benches.md), preserves these operation-count
-tests for the next.
+turn one route's cost change into per-broadcast mutations. The origin
+record and the index land together here, keeping these operation-count
+tests.
 
 Verification: `origin/pool_churn` leaves flat in served paths at every pool
 width it already sweeps, and a unit test that counts `select` calls per
@@ -95,7 +114,3 @@ Public API: none. Wire: none.
 ## Required
 
 - [Cache-aware routing](/quest/m3/cache-routing/README.md) - adds the warm pick to how a relay chooses its source, so the index is built once on the final selection
-
-## Related
-
-- [Route benches](/quest/m3/route-benches.md) - the route layer's side: one origin record per route instead of a write per broadcast

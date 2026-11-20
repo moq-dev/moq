@@ -25,20 +25,22 @@ pub enum AudioFormat {
 
 /// A single video codec an importer can parse.
 ///
-/// H.264 and H.265 each appear twice because the framing differs, not just the codec: `avc1`/`hvc1`
-/// are length-prefixed with an out-of-band config record, while `avc3`/`hev1` are Annex-B with the
-/// parameter sets inline.
+/// H.264 and H.265 each appear twice because the input framing differs: `avc1`/`hvc1` are
+/// length-prefixed NAL units with an out-of-band config record, while `h264`/`h265` are a raw Annex B
+/// elementary stream split on start codes, carrying its parameter sets inline. The raw names follow
+/// ffmpeg's `h264`/`hevc` formats rather than `avc3`/`hev1`, which say where parameter sets live, not
+/// how NAL units are framed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum VideoFormat {
 	/// H.264, length-prefixed NALUs with an out-of-band avcC.
 	Avc1,
-	/// H.264, Annex-B with inline SPS/PPS.
-	Avc3,
+	/// H.264, a raw Annex B elementary stream with inline SPS/PPS.
+	H264,
 	/// H.265, length-prefixed NALUs with an out-of-band hvcC.
 	Hvc1,
-	/// H.265, Annex-B with inline parameter sets.
-	Hev1,
+	/// H.265, a raw Annex B elementary stream with inline parameter sets.
+	H265,
 	/// AV1.
 	Av01,
 	/// VP8.
@@ -127,9 +129,9 @@ impl FromStr for Format {
 			"mp3" => Format::Audio(AudioFormat::Mp3),
 
 			"avc1" | "avcc" => Format::Video(VideoFormat::Avc1),
-			"avc3" | "h264" => Format::Video(VideoFormat::Avc3),
+			"h264" => Format::Video(VideoFormat::H264),
 			"hvc1" | "hvcc" => Format::Video(VideoFormat::Hvc1),
-			"hev1" => Format::Video(VideoFormat::Hev1),
+			"h265" | "hevc" => Format::Video(VideoFormat::H265),
 			"av01" | "av1" | "av1c" | "av1C" => Format::Video(VideoFormat::Av01),
 			"vp8" | "vp08" => Format::Video(VideoFormat::Vp8),
 			"vp9" | "vp09" => Format::Video(VideoFormat::Vp9),
@@ -201,11 +203,41 @@ kind_format!(AudioFormat, Audio,
 	Aac => "aac", Opus => "opus", Flac => "flac", Mp3 => "mp3");
 
 kind_format!(VideoFormat, Video,
-	Avc1 => "avc1", Avc3 => "avc3", Hvc1 => "hvc1", Hev1 => "hev1",
+	Avc1 => "avc1", H264 => "h264", Hvc1 => "hvc1", H265 => "h265",
 	Av01 => "av01", Vp8 => "vp8", Vp9 => "vp9");
 
 kind_format!(ContainerFormat, Container,
 	Fmp4 => "fmp4", Mkv => "mkv", Ts => "ts", Flv => "flv");
+
+impl AudioFormat {
+	/// The suffix of a track named after this format, such as `.opus` in `0.opus`.
+	pub fn track_suffix(self) -> &'static str {
+		match self {
+			AudioFormat::Aac => ".aac",
+			AudioFormat::Opus => ".opus",
+			AudioFormat::Flac => ".flac",
+			AudioFormat::Mp3 => ".mp3",
+		}
+	}
+}
+
+impl VideoFormat {
+	/// The suffix of a track named after this format, such as `.avc3` in `0.avc3`.
+	///
+	/// Names the codec family the track publishes rather than the input, so a raw Annex B stream
+	/// is `.avc3` or `.hev1` like every other in-band H.26x track.
+	pub fn track_suffix(self) -> &'static str {
+		match self {
+			VideoFormat::Avc1 => ".avc1",
+			VideoFormat::H264 => ".avc3",
+			VideoFormat::Hvc1 => ".hvc1",
+			VideoFormat::H265 => ".hev1",
+			VideoFormat::Av01 => ".av01",
+			VideoFormat::Vp8 => ".vp8",
+			VideoFormat::Vp9 => ".vp9",
+		}
+	}
+}
 
 #[cfg(test)]
 mod tests {
@@ -216,7 +248,8 @@ mod tests {
 	#[test]
 	fn aliases_resolve_to_one_canonical_name() {
 		for (aliases, canonical) in [
-			(vec!["avc3", "h264"], "avc3"),
+			(vec!["h264"], "h264"),
+			(vec!["h265", "hevc"], "h265"),
 			(vec!["avc1", "avcc"], "avc1"),
 			(vec!["hvc1", "hvcc"], "hvc1"),
 			(vec!["av01", "av1", "av1c", "av1C"], "av01"),
@@ -238,7 +271,7 @@ mod tests {
 	/// boundary, and says which entry point does take it.
 	#[test]
 	fn a_format_of_another_kind_names_the_kind_that_takes_it() {
-		let err = "avc3".parse::<AudioFormat>().unwrap_err();
+		let err = "h264".parse::<AudioFormat>().unwrap_err();
 		assert!(
 			matches!(
 				&err,

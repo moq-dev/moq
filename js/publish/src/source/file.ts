@@ -1,8 +1,9 @@
-import { Instant, now } from "@moq/clock";
+import { now } from "@moq/clock";
 import * as Util from "@moq/hang/util";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { InputAudioTrack, InputVideoTrack, VideoSample } from "mediabunny";
 import { hosted } from "../assets";
+import * as MediaClock from "../media-clock";
 import { pace } from "./pace";
 import { Timeline } from "./timeline";
 import type { Media } from "./types";
@@ -120,7 +121,7 @@ export class File {
 						return;
 					}
 					sent = true;
-					const timestamp = Math.round(now().since(Instant.ZERO).asMicros());
+					const timestamp = Math.round(MediaClock.now().asMicros());
 					controller.enqueue(new VideoFrame(bitmap, { timestamp }));
 				},
 			},

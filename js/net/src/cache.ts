@@ -50,11 +50,6 @@ export class Pool {
 		if (config.expiry !== undefined) this.#expiry = Math.max(1, Math.ceil(config.expiry.divDuration(TICK)));
 	}
 
-	/** The idle window, rounded up to the pool's 100 ms tick, or undefined when idle groups stay. */
-	get expiry(): Duration | undefined {
-		return this.#expiry === undefined ? undefined : TICK.mul(this.#expiry);
-	}
-
 	/** Ticks since the pool first read the clock. */
 	now(): number {
 		const at = now();

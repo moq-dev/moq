@@ -102,6 +102,7 @@ function serveHistory(track: Moq.Track.Producer) {
 			}
 			for (let sequence = fill.wanted(); sequence !== undefined; sequence = fill.wanted()) {
 				const group = fill.accept(sequence);
+				if (!group) throw new Error("the group was already answered");
 				for (const payload of frames(Number(sequence)))
 					group.writeFrame({ payload, timestamp: Moq.Time.Timestamp.unscaled(group.start) });
 				group.finish();
@@ -137,6 +138,7 @@ try {
 		if (datagram) {
 			// Untimed: the OBJECT_DATAGRAM carries no timestamp, so the subscriber checks the payload alone.
 			const track = broadcast.createDatagrams("tail");
+			if (!track) throw new Error("the track already exists");
 			broadcastPublication.announce();
 			const lines = createInterface({ input: process.stdin });
 			const commands = lines[Symbol.asyncIterator]();
@@ -162,6 +164,7 @@ try {
 				maxAge: null,
 				...(status ? { priority: 2 } : {}),
 			});
+			if (!track) throw new Error("the track already exists");
 			if (cached) write(track);
 			if (history) serveHistory(track);
 			let head: Moq.Group.Producer | undefined;

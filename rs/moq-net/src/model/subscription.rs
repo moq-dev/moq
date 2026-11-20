@@ -3,12 +3,12 @@ use std::{
 	time::Duration,
 };
 
-mod runs;
+mod cover;
 mod window;
-pub(super) use runs::{Layered, Runs};
+pub(super) use cover::{Cover, minus};
 pub(crate) use window::Accounted;
 pub(crate) use window::Resolved;
-pub(super) use window::{Containing, Holdings, Unheld, Window};
+pub(super) use window::{Containing, Holdings, Unheld, Unplaced, Window};
 
 /// Subscriber-side preferences for receiving a track.
 ///
@@ -48,6 +48,11 @@ pub struct Subscription {
 	/// answer gives. A session holding no upstream subscription for its copy subscribes again
 	/// for such a reader, whatever its ranges. Aggregated as any: one such reader is enough.
 	pub(crate) feed: bool,
+	/// The frames this reader already holds of the group a range starts at, so that range asks
+	/// for it from the frame after them rather than whole: a route switch resuming on a new
+	/// copy. Only a range whose start is a [`Anchor::Time`] at exactly that group's start uses
+	/// it. Aggregated only when every reader resumes: the lowest position then.
+	pub(crate) resume: Option<Position>,
 }
 
 /// How far behind the live edge a subscriber plays: where it starts, and how late it may fall.
@@ -267,7 +272,7 @@ impl Range {
 	///
 	/// An [`Anchor::Oldest`] end delivers nothing either: every reader holding one is
 	/// refused, so it never reaches the demand asked upstream.
-	pub(super) fn is_empty(&self) -> bool {
+	pub(crate) fn is_empty(&self) -> bool {
 		match (self.start, self.end) {
 			(_, Some(Anchor::Oldest)) => true,
 			(Anchor::Time(start), Some(Anchor::Time(end))) => end < start,
@@ -372,6 +377,7 @@ impl Default for Subscription {
 			ranges: vec![Range::oldest()],
 			order: Order::Descending,
 			feed: false,
+			resume: None,
 		}
 	}
 }
@@ -458,58 +464,40 @@ impl Subscription {
 	fn with_span(self, start: Option<u64>, end: Option<u64>) -> Self {
 		self.with_ranges(Range::span(start, end))
 	}
+}
 
-	/// These preferences with every range raised to start no earlier than `floor` and
-	/// stop before `end`, the exclusive end, without ever widening one.
+impl Range {
+	/// This range raised to start no earlier than `floor` and stop before `end`, the
+	/// exclusive end, without ever widening it.
 	///
-	/// `resolved` names where each range resolved, by index, so a relative or time anchor
-	/// becomes its own group, raised to `floor` or capped at `end`. A start not resolved
-	/// keeps its anchor, since the floor may lie before it, so the caller drops what it
-	/// resolves to below `floor`; an end not resolved becomes the bound.
-	pub(super) fn clamped(&self, floor: Option<u64>, end: Option<u64>, resolved: &[Option<Resolved>]) -> Self {
-		let clamping = floor.is_some() || end.is_some();
-		let ranges = self
-			.ranges
-			.iter()
-			.enumerate()
-			.map(|(index, range)| {
-				let resolved = resolved.get(index).copied().flatten().filter(|_| clamping);
-				let start = match (range.start, resolved) {
-					(Anchor::Oldest | Anchor::Relative(_) | Anchor::Time(_), Some(resolved)) => {
-						Anchor::Time(resolved.start)
-					}
-					(start, _) => start,
-				};
-				let start = match (start, floor) {
-					(Anchor::Time(start), Some(floor)) => Anchor::Time(start.max(floor)),
-					(start, _) => start,
-				};
-				let requested = match (range.end, resolved.and_then(|resolved| resolved.end)) {
-					(Some(Anchor::Relative(_) | Anchor::Time(_)), Some(resolved)) => match resolved.checked_sub(1) {
-						Some(last) => Some(Anchor::Time(last)),
-						None => return Range::EMPTY,
-					},
-					(requested, _) => requested,
-				};
-				let end = match (requested, end.map(|end| end.checked_sub(1))) {
-					(requested, None) => requested,
-					(_, Some(None)) => return Range::EMPTY,
-					(Some(Anchor::Time(requested)), Some(Some(last))) => Some(Anchor::Time(requested.min(last))),
-					(_, Some(Some(last))) => Some(Anchor::Time(last)),
-				};
-				Range { start, end }
-			})
-			.collect();
-		Self { ranges, ..self.clone() }
-	}
-
-	/// Whether a subscriber joins at the live edge: a range counting back from the latest
-	/// group and following it. A fixed start resumes a known group instead, such as a route
-	/// switch picking up where the reader stopped.
-	pub(super) fn joins_live(&self) -> bool {
-		self.ranges
-			.iter()
-			.any(|range| matches!(range.start, Anchor::Oldest | Anchor::Relative(_)) && range.end.is_none())
+	/// `resolved` names where it resolved, so a relative or time anchor becomes its own
+	/// group, raised to `floor` or capped at `end`. A start not resolved keeps its anchor,
+	/// since the floor may lie before it, so the caller drops what it resolves to below
+	/// `floor`; an end not resolved becomes the bound.
+	pub(super) fn clamped(&self, floor: Option<u64>, end: Option<u64>, resolved: Option<Resolved>) -> Self {
+		let resolved = resolved.filter(|_| floor.is_some() || end.is_some());
+		let start = match (self.start, resolved) {
+			(Anchor::Oldest | Anchor::Relative(_) | Anchor::Time(_), Some(resolved)) => Anchor::Time(resolved.start),
+			(start, _) => start,
+		};
+		let start = match (start, floor) {
+			(Anchor::Time(start), Some(floor)) => Anchor::Time(start.max(floor)),
+			(start, _) => start,
+		};
+		let requested = match (self.end, resolved.and_then(|resolved| resolved.end)) {
+			(Some(Anchor::Relative(_) | Anchor::Time(_)), Some(resolved)) => match resolved.checked_sub(1) {
+				Some(last) => Some(Anchor::Time(last)),
+				None => return Self::EMPTY,
+			},
+			(requested, _) => requested,
+		};
+		let end = match (requested, end.map(|end| end.checked_sub(1))) {
+			(requested, None) => requested,
+			(_, Some(None)) => return Self::EMPTY,
+			(Some(Anchor::Time(requested)), Some(Some(last))) => Some(Anchor::Time(requested.min(last))),
+			(_, Some(Some(last))) => Some(Anchor::Time(last)),
+		};
+		Self { start, end }
 	}
 }
 
@@ -570,6 +558,7 @@ impl Combined {
 			combined.order = Order::Descending;
 		}
 		combined.feed |= sub.feed;
+		combined.resume = combined.resume.zip(sub.resume).map(|(a, b)| a.min(b));
 	}
 
 	/// The aggregate, or `None` without a subscriber.

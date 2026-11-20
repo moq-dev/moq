@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
+import { worklet } from "@moq/common/vite-plugin-worklet";
 import type MoqWatch from "@moq/watch/element";
 import type { Locator } from "playwright";
 import { createServer } from "vite";
-import { worklet } from "../../../../js/common/vite-plugin-worklet";
 import { launch, open, pause, waitFor } from "./harness";
 
 test("pause activates its button when a canvas intercepts pointer input", async () => {

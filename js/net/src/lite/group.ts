@@ -8,7 +8,7 @@ import * as Time from "../time.ts";
 import { toNumber } from "../util/bigint.ts";
 import { MAX_FRAME_BYTES } from "../util/limits.ts";
 import * as Message from "./message.ts";
-import { hasGroupEnd, hasGroupFrameStart, type Version } from "./version.ts";
+import { hasFrameBounds, hasGroupEnd, type Version } from "./version.ts";
 
 export class Group {
 	subscribe: bigint;
@@ -26,7 +26,7 @@ export class Group {
 	 *
 	 * 0 (the common case) means the stream carries the group from its beginning. A
 	 * higher value means the leading frames are not here, because the subscription started
-	 * partway into the group. Lite-06 only; other versions always start at 0.
+	 * partway into the group. Lite-06+ only; older versions always start at 0.
 	 */
 	frameStart: number;
 
@@ -60,7 +60,7 @@ export class Group {
 		await w.u62(this.key);
 		// Plus one, so 0 says unknown.
 		if (hasGroupEnd(version)) await w.u62(this.previous === undefined ? 0n : this.previous + 1n);
-		if (hasGroupFrameStart(version)) {
+		if (hasFrameBounds(version)) {
 			await w.u53(this.frameStart);
 		} else if (this.frameStart !== 0) {
 			// The peer would number the frames from 0 and silently misalign the group.
@@ -73,7 +73,7 @@ export class Group {
 		const key = await r.u62();
 		const plusOne = hasGroupEnd(version) ? await r.u62() : 0n;
 		const previous = plusOne === 0n ? undefined : plusOne - 1n;
-		const frameStart = hasGroupFrameStart(version) ? await r.u53() : 0;
+		const frameStart = hasFrameBounds(version) ? await r.u53() : 0;
 		return new Group({ subscribe, key: key, previous, frameStart });
 	}
 

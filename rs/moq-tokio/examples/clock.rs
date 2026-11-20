@@ -70,7 +70,10 @@ async fn main() -> anyhow::Result<()> {
 				.route(&config.broadcast, moq_net::origin::RouteOptions::hidden())
 				.context("failed to create broadcast")?;
 			let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
-			let track = route.broadcast().create_track(track, info)?;
+			let track = route
+				.broadcast()
+				.create_track(track, info)
+				.context("the track already exists")?;
 			route.announce().context("failed to announce broadcast")?;
 			let clock = Publisher::new(track);
 
@@ -119,12 +122,6 @@ async fn main() -> anyhow::Result<()> {
 						}
 						announce::Event::Absent(update) => {
 							tracing::warn!(broadcast = %update.prefix, "broadcast ended, waiting...");
-						}
-						announce::Event::Offline(update) | announce::Event::Unavailable(update) => {
-							tracing::warn!(broadcast = %update.prefix, "broadcast is offline, waiting...");
-						}
-						announce::Event::Available(update) => {
-							tracing::info!(broadcast = %update.prefix, "broadcast is reachable again");
 						}
 					},
 					res = reconnect.closed() => return Ok(res?),

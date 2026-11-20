@@ -932,7 +932,7 @@ test("key IDs share Rust's grammar and 128-character limit", async () => {
 
 test("sign refuses a root no path can spell", async () => {
 	const key = Key.parse(encodeJwk(testKey));
-	for (const root of ["/room", "room/", "a//b", "a\\b", "a\\", "a".repeat(4097)]) {
+	for (const root of ["/room", "room/", "a//b", "a\\b", "a\\", "a".repeat(4097), "a\uD800"]) {
 		await expect(Key.sign(key, { root, publish: ["**"] })).rejects.toThrow("invalid root");
 	}
 	for (const root of ["", "room", "a\\\\b", "a\\/b"]) {
