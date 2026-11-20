@@ -1571,6 +1571,12 @@ export class Producer {
 			return [...asks.values()];
 		};
 		hooks.asksChanged = (producer) => producer.#asksChanged;
+		hooks.evict = (producer, key) => {
+			const entry = producer.#cached.get(key);
+			if (!entry) return;
+			producer.#evict(entry);
+			producer.#uncache(entry, true);
+		};
 		hooks.asking = (producer, asking) => {
 			producer.#asking = Math.max(0, producer.#asking + (asking ? 1 : -1));
 			const end = producer.#state.end.peek();
@@ -1744,15 +1750,19 @@ export class Producer {
 		return undefined;
 	}
 
-	// The gaps an ask out may still fill in `[start, end)`: every one neither held nor given up, up
-	// to the declared end.
+	// The groups an ask out may still deliver in `[start, end)`: every one the copy doesn't hold and
+	// nothing gave up, up to the declared end, including one it held and evicted, which the ask
+	// delivers again. Mirrors the Rust `TrackState::owed`.
 	*#askable(start: bigint, end: bigint): Generator<Run> {
 		if (this.#state.closed.peek() !== undefined) return;
 		const declared = this.#state.end.peek()?.at;
 		if (declared !== undefined) end = min(end, finalKey(declared));
 		const drops = this.#state.drops;
-		for (const gap of this.#arrivals.gaps(start, end)) {
-			yield* runGaps(drops.overlapping(gap.start, gap.end), gap.start, gap.end);
+		let next = start;
+		for (let index = keyIndex(this.#keys, start); next < end; index++) {
+			const key = min(this.#keys[index] ?? end, end);
+			if (key > next) yield* runGaps(drops.overlapping(next, key), next, key);
+			next = key + 1n;
 		}
 	}
 

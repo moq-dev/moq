@@ -794,6 +794,8 @@ export const hooks: {
 	 * at the boundary. Mirrors the Rust `Producer::asking`; assigned by `track.ts`.
 	 */
 	asking: (producer: Producer, asking: boolean) => void;
+	/** Evict group `key` from the cache, as the pool reclaiming it does. Tests only. */
+	evict: (producer: Producer, key: bigint) => void;
 	/** Mint a track {@link Request}; assigned by `track.ts`. */
 	makeRequest: (options: TrackRequestOptions) => Request;
 	/**
@@ -1228,6 +1230,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	asking: () => {
+		throw new Error("track.ts not loaded");
+	},
+	evict: () => {
 		throw new Error("track.ts not loaded");
 	},
 	relativeStarts: () => {

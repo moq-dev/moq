@@ -3500,15 +3500,22 @@ impl TrackState {
 		if !self.anchors.received() || self.outcome.is_released() || !self.readable() {
 			return None;
 		}
-		// An ask out may still deliver any gap the arrivals leave, whatever the feed's floor or
-		// grace (see [`Producer::asking`]).
+		// An ask out may still deliver any group the copy doesn't hold, whatever the feed's floor
+		// or grace, including one it held and evicted, which the ask delivers again (see
+		// [`Producer::asking`]).
 		if self.asking > 0 {
 			let end = groups.end.min(self.final_key().unwrap_or(u64::MAX));
-			return self.arrivals.gaps(groups.start..end).find_map(|(gap, _)| {
-				self.drops
-					.gaps(&gap)
-					.find_map(|open| window.clip(open).map(|run| run.start))
-			});
+			let mut next = groups.start;
+			let held = self.visible.range(groups.start..end).copied().chain([end]);
+			for key in held {
+				if key > next
+					&& let Some(owed) = self.drops.gaps(&(next..key)).find_map(|open| window.clip(open))
+				{
+					return Some(owed.start);
+				}
+				next = key.saturating_add(1);
+			}
+			return None;
 		}
 		let asked = self.start.key().is_some();
 		self.find_landable(groups, asked, self.arrival_grace(), |open, _| {
@@ -16596,6 +16603,51 @@ mod test {
 		assert_eq!(next(), Some(5));
 		// The rest were never produced, as the ask's next GROUP says.
 		producer.skip_received(6..9);
+		assert_eq!(next(), Some(9));
+		assert_eq!(next(), Some(10));
+		producer.asking(false);
+		assert_eq!(next(), Some(u64::MAX), "then ends");
+	}
+
+	/// While a finished copy's ask is out, a reader in key order waits for a group the copy held
+	/// and evicted, which the ask redelivers, rather than pass it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_ordered_read_waits_on_an_evicted_group_an_ask_redelivers() {
+		let mut producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.reported();
+		producer.start_resolved(0).unwrap();
+		for key in 0..=10 {
+			write_group(&producer, key);
+		}
+		producer.report_edge(10);
+		producer.finish_shared().unwrap();
+		for key in 0..9 {
+			producer.evict(key);
+		}
+		producer.asking(true);
+		producer.relative_starts([(5, CountedStart::At(5), 10)]);
+		let mut ordered = producer
+			.subscribe(
+				Subscription::default()
+					.with_ranges([Range {
+						start: Anchor::Relative(5),
+						end: None,
+					}])
+					.with_delay(Delay::default().with_max(None)),
+			)
+			.ordered();
+		let mut next = || match ordered.poll_next_group(&kio::Waiter::noop()) {
+			Poll::Ready(Ok(Some(group))) => Some(group.start),
+			Poll::Ready(Ok(None)) => Some(u64::MAX),
+			_ => None,
+		};
+		assert_eq!(next(), None, "group 5 is coming again");
+		for key in 5..9 {
+			write_group(&producer, key);
+			assert_eq!(next(), Some(key));
+		}
 		assert_eq!(next(), Some(9));
 		assert_eq!(next(), Some(10));
 		producer.asking(false);
