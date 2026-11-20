@@ -1718,6 +1718,9 @@ export class Producer {
 		};
 		owedRuns = (producer, start, end) => {
 			if (!producer.#wire) return [];
+			// An ask out may still deliver any gap the arrivals leave, whatever the feed's floor or grace
+			// (see `hooks.asking`). Mirrors the Rust `TrackState::owed`.
+			if (producer.#asking > 0) return [...producer.#askable(start, end)];
 			const floor = feedFloor(producer);
 			return producer.#landing({
 				start: max(start, floor ?? 0n),
@@ -1739,6 +1742,18 @@ export class Producer {
 			if (!land.delivered?.covers(run.start, run.end)) return { key: run.start, folds: run.folds };
 		}
 		return undefined;
+	}
+
+	// The gaps an ask out may still fill in `[start, end)`: every one neither held nor given up, up
+	// to the declared end.
+	*#askable(start: bigint, end: bigint): Generator<Run> {
+		if (this.#state.closed.peek() !== undefined) return;
+		const declared = this.#state.end.peek()?.at;
+		if (declared !== undefined) end = min(end, finalKey(declared));
+		const drops = this.#state.drops;
+		for (const gap of this.#arrivals.gaps(start, end)) {
+			yield* runGaps(drops.overlapping(gap.start, gap.end), gap.start, gap.end);
+		}
 	}
 
 	*#landing(land: Land): Generator<Run & { folds?: Instant }> {

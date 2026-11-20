@@ -5899,6 +5899,41 @@ test("a received copy counts a relative start back as its publisher did", async 
 	expect(done).toBe(true);
 });
 
+// While a finished copy's ask is out, a reader in key order waits at a gap below where the copy's
+// feed started, which the ask may still fill, rather than pass it. Mirrors the Rust
+// `an_ordered_read_waits_on_the_gaps_an_ask_may_fill`.
+test("an ordered read waits on the gaps an ask may fill", async () => {
+	const producer = receivedTrack({ timescale: Timescale.MILLI });
+	hooks.reportsStarts(producer);
+	hooks.startTrack(producer, { start: 9n });
+	for (const key of [9n, 10n]) putGroup(producer, key, Number(key));
+	hooks.endTrack(producer, { group: 11n, frame: 0 });
+	hooks.asking(producer, true);
+	hooks.relativeStarts(producer, [[5n, { at: 5n }, 10n]]);
+	const ordered = producer.subscribe({ delay: { max: null }, ranges: [{ start: { relative: 5n } }] }).ordered();
+	const got: (bigint | undefined)[] = [];
+	const reading = (async () => {
+		for (;;) {
+			const group = await ordered.nextGroup();
+			got.push(group?.start);
+			if (!group) return;
+		}
+	})();
+	await settle();
+	expect(got).toEqual([]);
+	putGroup(producer, 5n, 5);
+	await settle();
+	expect(got).toEqual([5n]);
+	// The rest were never produced, as the ask's next GROUP says.
+	hooks.skipTrackGroups(producer, 6n, 9n);
+	await settle();
+	expect(got).toEqual([5n, 9n, 10n]);
+	hooks.asking(producer, false);
+	await reading;
+	expect(got).toEqual([5n, 9n, 10n, undefined]);
+	producer.close();
+});
+
 // A relay serving a reader whose relative start still waits on its publisher's report can't say
 // where that range starts, so the feed's start stays pending rather than answer the range as empty,
 // until the report arrives or the copy closes. Mirrors the Rust `is_counting` in `poll_start`.
