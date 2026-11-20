@@ -232,7 +232,7 @@ fn flush(writer: &mut Writer) {
 	assert!(writer.poll_flush(&kio::Waiter::noop()).is_ready());
 }
 
-/// What a fresh answer on `consumer` under `grant` tells for `prefix`, once it is all sent.
+/// What a fresh answer on `consumer` under `grant` tells for `prefix`, once it settles.
 fn shown(consumer: &origin::Consumer, grant: Option<usize>, prefix: &Path, hidden: bool) -> BTreeSet<Held> {
 	let auth = crate::auth::Link::new(false);
 	if let Some(index) = grant {
@@ -244,6 +244,8 @@ fn shown(consumer: &origin::Consumer, grant: Option<usize>, prefix: &Path, hidde
 		.request(false, Vec::new(), vec![(prefix.clone(), hidden)])
 		.unwrap();
 	answer.drain(&mut writer).unwrap();
+	// What it settles to, judged again from scratch, so its own SYNCED proves nothing.
+	answer.resync(&mut writer).unwrap();
 	flush(&mut writer);
 	for msg in peer.take() {
 		match msg {
