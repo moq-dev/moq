@@ -104,8 +104,8 @@ class Pending {
 	done = false;
 	// Bumped on every change to what the fill owes, for its handler to wake on.
 	readonly revision = new Signal(0);
-	// The group a time start's handler accepted.
-	answer?: bigint;
+	// What a time start's handler answered.
+	answer?: TimeStart;
 
 	constructor(start: bigint, end: bigint, floor = start, exclusive = false) {
 		this.start = start;
@@ -276,7 +276,7 @@ export class FillState {
 		const [live] = this.#overlapping(key, key + 1n);
 		if (live) this.#resolve(live.pending, key, key + 1n);
 		for (const pending of this.#starts.get(key) ?? []) {
-			pending.answer = key;
+			pending.answer = { kind: "group", group: key };
 			this.#resolve(pending, key, key + 1n);
 		}
 	}
@@ -327,7 +327,11 @@ export class FillState {
 	removeHandler(): void {
 		this.#handlers--;
 		if (this.#handlers > 0) return;
-		for (const pending of this.#queue.splice(0)) this.#settle(pending);
+		// A time start nobody took is left unanswered, as the Rust `release_queued` ends it.
+		for (const pending of this.#queue.splice(0)) {
+			if (pending.exclusive) this.#finish(pending);
+			else this.#settle(pending);
+		}
 	}
 
 	/**
@@ -378,8 +382,9 @@ export class FillState {
 
 	// Answer what `pending` still owes as dropped, then forget it.
 	#settle(pending: Pending): void {
-		for (const run of pending.owed())
-			this.#track.drop(run.start, run.end, { error: new NotFound(`group ${run.start}`) });
+		const owed = pending.owed();
+		if (pending.exclusive && owed.length > 0) pending.answer ??= { kind: "dropped" };
+		for (const run of owed) this.#track.drop(run.start, run.end, { error: new NotFound(`group ${run.start}`) });
 		this.#finish(pending);
 	}
 
@@ -418,13 +423,15 @@ export class FillState {
 				const group = state.#track.holds(key) === true ? undefined : state.#track.accept(key, info);
 				// A time start's fill is no live part, and a group below its key lands nowhere it owes.
 				if (pending.exclusive && !pending.done) {
-					pending.answer = key;
+					pending.answer = { kind: "group", group: key };
 					state.#resolve(pending, pending.start, pending.end);
 				}
 				return group;
 			},
 			drop: (state, pending, start, end, hole) => {
-				for (const run of pending.owed(start, end)) {
+				const owed = pending.owed(start, end);
+				if (pending.exclusive && owed.length > 0) pending.answer ??= { kind: "dropped" };
+				for (const run of owed) {
 					state.#track.drop(run.start, run.end, hole ?? { error: new NotFound(`group ${run.start}`) });
 				}
 				// A stale verdict settles only readers that read every group above it, so the readers
@@ -434,6 +441,13 @@ export class FillState {
 				else state.#resolve(pending, start, end);
 			},
 			refuse: (state, pending, start, end, error, stale) => {
+				// A time start's refusal reaches its reader through the lookup, as the error its
+				// reads fail with, not as a group given up.
+				if (pending.exclusive) {
+					if (pending.unresolved(start, end).length > 0) pending.answer ??= { kind: "refused", error };
+					state.#resolve(pending, start, end);
+					return;
+				}
 				for (const gap of pending.unresolved(start, end)) {
 					for (const asker of pending.askers) {
 						for (const run of asker.wants(gap.start, gap.end))
@@ -467,13 +481,21 @@ export interface Judged {
 }
 
 /**
+ * What a time start's handler answered: the group containing the time, no group from the floor
+ * through it, or a refusal saying nothing of where it falls. Mirrors the Rust `fill::TimeStart`.
+ *
+ * @internal
+ */
+export type TimeStart = { kind: "group"; group: bigint } | { kind: "dropped" } | { kind: "refused"; error: Error };
+
+/**
  * A reader's time start, from {@link FillState.timeStart}.
  *
  * @internal
  */
 export interface Lookup {
-	/** The group its handler accepted, undefined until one is. */
-	answer(): bigint | undefined;
+	/** What its handler answered, undefined until it does, or when it closed unanswered. */
+	answer(): TimeStart | undefined;
 	/** Whether it is over: answered, or closed unanswered. */
 	done(): boolean;
 	/** Bumped as it changes. */
@@ -616,8 +638,11 @@ export class FillGroups {
 	 * starting at it, or else the newest one starting before it, at or after the floor. A handler
 	 * knowing its groups only by key serves that key as any other; one that can tell which group
 	 * holds the time, as from an index, may {@link accept} that group instead, or
-	 * {@link dropGroups} the key when none does. The reader starts where the answer says; closed
-	 * unanswered or refused, it starts where the groups the cache holds say.
+	 * {@link dropGroups} the key when none does. The reader starts where the answer says, never
+	 * where the cached groups happen to say: a drop, or the fill closed unanswered, says no group
+	 * starts from the floor through the time, so it starts at the group just below the floor, or
+	 * past the time when the floor is 0. A {@link refuseGroups refusal} fails the reader with its
+	 * error until its ranges change.
 	 */
 	readonly floor: bigint;
 

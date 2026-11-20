@@ -430,6 +430,13 @@ export interface Lookup {
 }
 
 /**
+ * What the track's history answered a time start's lookup with: the group containing the time, no
+ * group from `floor`, the oldest key it asked from, through the time, or nothing, with no handler
+ * left to. Mirrors the Rust `window::Found`.
+ */
+export type Found = { kind: "group"; group: bigint } | { kind: "dropped"; floor: bigint } | { kind: "unanswered" };
+
+/**
  * A subscriber's ranges resolved to the group starts it reads, each by the key its caller gave
  * it, so an edit resolves only the ranges it adds and leaves every other where it resolved.
  * Mirrors the Rust `Window`.
@@ -742,35 +749,43 @@ export class Window {
 	}
 
 	/**
-	 * The lookup of time start `time` answered with `group`, the group containing it: its spans
-	 * start there, once that group is held. Undefined, or an answer not held, means the history
-	 * couldn't tell, or holds no group there, so they start where the groups held say, unless the
-	 * cache since evicted the group their floor was past: then they look it up again from lower
-	 * down. Returns whether the groups in range moved. Mirrors the Rust `Window::found`.
+	 * The lookup of time start `at` answered: its spans start where the answer says, never where the
+	 * groups held happen to. Left unanswered because no handler is left, they start where the groups
+	 * held say, as with no handler at all, unless the cache since evicted the group their floor was
+	 * past and a handler is back: then they look it up again from lower down. Returns whether the
+	 * groups in range moved. Mirrors the Rust `Window::found`.
 	 */
-	found(at: bigint, group: bigint | undefined, holdings: Holdings = UNHELD): boolean {
-		const found = this.#looking.take(at);
-		if (found === undefined) return false;
-		const held = group !== undefined && holdings.nextStart(group) === group ? group : undefined;
-		const containing = holdings.containing(at);
-		const start = held ?? (typeof containing === "object" ? containing.group : undefined);
-		for (const key of found) {
+	found(at: bigint, found: Found, holdings: Holdings = UNHELD): boolean {
+		const keys = this.#looking.take(at);
+		if (keys === undefined) return false;
+		for (const key of keys) {
 			const span = this.#spans.get(key);
 			if (!span) continue;
 			this.#uncount(key, span);
 			const asked = span.looking?.floor;
 			span.looking = undefined;
-			span.start = start ?? 0n;
-			span.floored = start !== undefined;
-			if (held === undefined && asked !== undefined) {
-				// Nothing held at or before the time any more, maybe nothing at all: the group containing
-				// it may start anywhere below the floor asked.
-				const floor = span.floored
-					? unresolved(at, span.start, true, holdings)
-					: holdings.looksUp?.()
-						? 0n
-						: undefined;
-				if (floor !== undefined && floor < asked) span.looking = { time: at, floor };
+			if (found.kind === "group") {
+				span.start = found.group;
+				span.floored = true;
+			} else if (found.kind === "dropped") {
+				// A floor is one past the group held below the time, which then holds it; from 0, no
+				// group starts at or before it, so the span reads from the time on.
+				span.start = found.floor > 0n ? found.floor - 1n : at;
+				span.floored = true;
+			} else {
+				const containing = holdings.containing(at);
+				span.start = typeof containing === "object" ? containing.group : 0n;
+				span.floored = typeof containing === "object";
+				if (asked !== undefined) {
+					// Nothing held at or before the time any more, maybe nothing at all: the group containing
+					// it may start anywhere below the floor asked.
+					const floor = span.floored
+						? unresolved(at, span.start, true, holdings)
+						: holdings.looksUp?.()
+							? 0n
+							: undefined;
+					if (floor !== undefined && floor < asked) span.looking = { time: at, floor };
+				}
 			}
 			this.#count(key, span);
 		}

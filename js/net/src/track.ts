@@ -57,7 +57,7 @@ import { rescale } from "./rescale.ts";
 import { floorAt, Timescale, type Timestamp } from "./time.ts";
 import { checkEnd, checkKey, max, min, UNBOUNDED } from "./util/key.ts";
 import { checkName } from "./util/utf8.ts";
-import { bounded, type Holdings, joinsLive, rangesOf, UNHELD, Window, wireSpan } from "./window.ts";
+import { bounded, type Found, type Holdings, joinsLive, rangesOf, UNHELD, Window, wireSpan } from "./window.ts";
 import { type Broadcast as BroadcastWire, registerTrackConsumer } from "./wire.ts";
 
 export { FillGroups, Requests } from "./fill.ts";
@@ -964,9 +964,6 @@ function removeKey(keys: bigint[], key: bigint): void {
 let cachedMirror: (producer: Producer, key: bigint, from: number) => GroupConsumer | undefined;
 // Whether the producer still caches a group that has not failed; assigned in its static block.
 let cachedHolds: (producer: Producer, key: bigint) => boolean;
-// Whether group `key` is cached as a copy from frame 0 that has not written it yet, so its
-// start may still land, as the Rust `Slot::may_start` says.
-let cachedMayStart: (producer: Producer, key: bigint) => boolean;
 // Whether the producer is a copy a session receives, whose handler fetches by group alone.
 let receivedCopy: (producer: Producer) => boolean;
 // The keys in `[start, end)` the producer caches, unsorted, costing the smaller of the span
@@ -1575,10 +1572,6 @@ export class Producer {
 		cachedHolds = (producer, key) => {
 			const entry = producer.#cached.get(key);
 			return entry !== undefined && !(entry.group.closed.peek() instanceof Error);
-		};
-		cachedMayStart = (producer, key) => {
-			const entry = producer.#cached.get(key);
-			return entry !== undefined && hooks.groupMayStart(entry.group);
 		};
 		receivedCopy = (producer) => producer.#wire !== undefined;
 		cachedIn = (producer, start, end) => {
@@ -3125,6 +3118,9 @@ export class Subscriber {
 	// The time starts this reader asked its fills to look up, each with the floor it asked from and
 	// its fill, absent when no handler could take it.
 	#lookups: { time: bigint; floor: bigint; lookup?: Lookup }[] = [];
+	// A time start's refusal, which every read fails with until the ranges change. Mirrors the Rust
+	// `Filter::refused`.
+	#refusal?: Error;
 
 	#drift(whole = this.#fetchBudget !== undefined): Drift {
 		// A fetch judges its group against the whole track, as the Rust `fetch_group` does: a
@@ -3590,6 +3586,7 @@ export class Subscriber {
 	// Resolve this reader's ranges again, as when they are replaced.
 	#resolve(): void {
 		const update = this.#state.update.peek();
+		this.#refusal = undefined;
 		this.#window = new Window(
 			update?.ranges ?? [{}],
 			this.#latestGroup(),
@@ -3775,18 +3772,19 @@ export class Subscriber {
 		if (this.#state.dropsAnchors.peek() && !this.#window.wired) {
 			return new Error("a relative or time anchor other than the live start needs moq-lite-07");
 		}
-		if (this.#resume || this.#window.settled) return undefined;
+		if (this.#refusal || this.#resume || this.#window.settled) return this.#refusal;
 		// The live feed had no group when the ranges resolved, so the newest one then was the first.
 		const latest = this.#window.pending ? this.#state.first : this.#latestGroup();
 		const looked = this.#lookUp();
 		if (this.#window.settle(latest, this.#holdings()) || looked) this.#moved();
-		return undefined;
+		return this.#refusal;
 	}
 
 	// Ask a fill for the group containing each time start the window can't resolve from the cache,
-	// once, and take in the answers. Returns whether the groups in range moved. Mirrors the Rust
-	// `Cursor::look_up`.
+	// once, and take in the answers. A refused one fails the reads until the ranges change. Returns
+	// whether the groups in range moved. Mirrors the Rust `Cursor::look_up`.
 	#lookUp(): boolean {
+		if (this.#refusal) return false;
 		let moved = false;
 		// An answer the window takes in may look its time up again from lower down.
 		for (let again = true; again; ) {
@@ -3819,18 +3817,21 @@ export class Subscriber {
 		for (const lookup of [...this.#lookups]) {
 			const answer = lookup.lookup?.answer();
 			if (answer === undefined && lookup.lookup && !lookup.lookup.done()) continue;
-			// The answer counts once held.
-			const holdings = this.#holdings();
-			if (
-				answer !== undefined &&
-				producer &&
-				holdings.nextStart(answer) !== answer &&
-				cachedMayStart(producer, answer)
-			)
-				continue;
 			this.#lookups.splice(this.#lookups.indexOf(lookup), 1);
 			lookup.lookup?.leave();
-			if (this.#window.found(lookup.time, answer, holdings)) moved = true;
+			// Where the time falls is unknown, so the reads fail rather than guess from the cache. The
+			// ranges resolve afresh once they change, asking again.
+			if (answer?.kind === "refused") {
+				this.#refusal = answer.error;
+				return { moved: true, again: false };
+			}
+			const found: Found =
+				answer === undefined
+					? { kind: "unanswered" }
+					: answer.kind === "group"
+						? answer
+						: { kind: "dropped", floor: lookup.floor };
+			if (this.#window.found(lookup.time, found, this.#holdings())) moved = true;
 			if (this.#window.lookups().some((want) => want.time === lookup.time)) again = true;
 		}
 		return { moved, again };
@@ -5710,7 +5711,9 @@ export class Subscriber {
 		const moved = this.#state.update.edit({ retire: edit.retire, add, ...scalars });
 		// A live join not yet started reaches back by the Min Age stated when it starts.
 		this.#window.min = scalars.delay.min ?? undefined;
-		if (moved) {
+		// A refused time start resolves every range again, as the Rust `Filter::stale` has it.
+		if (moved && this.#refusal) this.#resolve();
+		else if (moved) {
 			this.#window.edit(edit.retire, add, this.#latestGroup(), this.#holdings());
 			// Leaves the lookups the retired ranges asked, which a settled window never reads again.
 			if (this.#lookups.length > 0) this.#lookUp();

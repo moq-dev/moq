@@ -122,6 +122,17 @@ pub(in crate::model) enum Containing {
 	Unknown,
 }
 
+/// What the track's history answered a time start's lookup with; see [`Window::found`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Found {
+	/// The group containing the time.
+	Group(u64),
+	/// No group starts from `floor`, the oldest key the lookup asked from, through the time.
+	Dropped { floor: u64 },
+	/// Nothing answered: no handler was left to.
+	Unanswered,
+}
+
 /// The times a hop's [`Holdings::containing`] can't place, as up to two runs: every time in
 /// them is [`Containing::Unknown`], except the few that `mark` places another way.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -602,32 +613,37 @@ impl Window {
 			.filter_map(|(_, key)| self.spans[key].looking.map(|looking| (looking.time, looking.floor)))
 	}
 
-	/// The lookup of time start `time` answered with the group containing it: its spans start
-	/// there, once that group is held. `None`, or an answer not held, means the history
-	/// couldn't tell, or holds no group there, so they start where the groups held say,
-	/// unless the cache since evicted the group their floor was past: then the history may
+	/// The lookup of time start `time` answered: its spans start where the answer says,
+	/// never where the groups held happen to. Left unanswered because no handler is left,
+	/// they start where the groups held say, as with no handler at all, unless the cache since
+	/// evicted the group their floor was past and a handler is back: then the history may
 	/// hold the answer below that floor, so they look it up again from lower down. Each
 	/// look-up again needs another eviction, so it ends. Returns whether the groups in range
 	/// moved.
-	pub fn found(&mut self, time: u64, group: Option<u64>, holdings: &impl Holdings) -> bool {
-		let found: Vec<u64> = self
+	pub fn found(&mut self, time: u64, found: Found, holdings: &impl Holdings) -> bool {
+		let keys: Vec<u64> = self
 			.looking
 			.range((time, 0)..=(time, u64::MAX))
 			.map(|(_, key)| *key)
 			.collect();
-		if found.is_empty() {
+		if keys.is_empty() {
 			return false;
 		}
-		let held = group.filter(|group| holdings.next_start(*group) == Some(*group));
-		for key in found {
+		for key in keys {
 			let mut span = self.spans.remove(&key).expect("a span looking up its start");
 			self.uncount(key, &span);
 			let asked = span.looking.take().map(|looking| looking.floor);
-			(span.start, span.floored) = match (held, holdings.containing(time)) {
-				(Some(group), _) | (None, Containing::Group(group)) => (group, true),
-				(None, _) => (0, false),
+			(span.start, span.floored) = match found {
+				Found::Group(group) => (group, true),
+				// A floor is one past the group held below the time, which then holds it; from 0,
+				// no group starts at or before it, so the span reads from the time on.
+				Found::Dropped { floor } => (floor.checked_sub(1).unwrap_or(time), true),
+				Found::Unanswered => match holdings.containing(time) {
+					Containing::Group(group) => (group, true),
+					_ => (0, false),
+				},
 			};
-			if held.is_none() {
+			if let Found::Unanswered = found {
 				let floor = match span.floored {
 					true => unresolved(time, span.start, true, holdings),
 					// Nothing held at or before the time any more, maybe nothing at all: the group
@@ -1104,10 +1120,14 @@ mod tests {
 					0 => drop(keys.held.insert(value)),
 					1 => keys.dropped = keys.dropped.max(value),
 					2 => {
-						let Some((time, _)) = fast.lookups().next() else {
+						let Some((time, floor)) = fast.lookups().next() else {
 							continue;
 						};
-						let answer = (value % 2 == 0).then_some(value);
+						let answer = match value % 3 {
+							0 => Found::Group(value),
+							1 => Found::Dropped { floor },
+							_ => Found::Unanswered,
+						};
 						fast.found(time, answer, &keys);
 						full.found(time, answer, &Blind(&keys));
 					}
@@ -1423,8 +1443,8 @@ mod tests {
 	/// With a handler serving the history, a time start the groups held can't place asks a
 	/// fill for its group from past the newest held below it, and reads nothing meanwhile:
 	/// before every start, or with a group the cache evicted possibly starting between the
-	/// newest held at or before it and the time. The answer places it; none leaves what the
-	/// groups held say.
+	/// newest held at or before it and the time. The answer places it: a drop from 0 says no
+	/// group starts at or before it, so it reads from the time on.
 	#[test]
 	fn a_time_start_the_groups_cant_place_is_looked_up() {
 		let mut keys = Keys::new([4000, 9000]);
@@ -1433,7 +1453,7 @@ mod tests {
 		assert_eq!(window.lookups().collect::<Vec<_>>(), [(8500, 4001)]);
 		assert!(!window.is_settled() && !window.contains(9000) && window.resolved() == [None]);
 		keys.held.insert(8000);
-		assert!(window.found(8500, Some(8000), &keys));
+		assert!(window.found(8500, Found::Group(8000), &keys));
 		assert_eq!(
 			window.resolved(),
 			[Some(Resolved {
@@ -1451,21 +1471,50 @@ mod tests {
 
 		let mut window = Window::new(&[range(time(500), None)], None, Some(9000), &keys).unwrap();
 		assert_eq!(window.lookups().collect::<Vec<_>>(), [(500, 0)]);
-		assert!(window.found(500, None, &keys));
+		assert!(window.found(500, Found::Dropped { floor: 0 }, &keys));
 		assert_eq!(
 			window.resolved(),
 			[Some(Resolved {
-				start: 0,
+				start: 500,
 				end: None,
-				floored: false
+				floored: true
 			})]
 		);
 		assert!(window.contains(4000) && !window.missable(0).any(|run| *run.start() < 500));
+		// A group below the time held since is none of the answer's.
+		keys.held.insert(200);
+		assert!(!window.contains(200));
 	}
 
-	/// The group a lookup's floor was past evicted while it was out, an empty answer looks
-	/// the time up again from below, where the history may hold the group containing it,
-	/// rather than starting where the groups still held say.
+	/// A dropped lookup starts at the group its floor was past, which then holds the time,
+	/// whatever the cache holds by the answer: that group evicted, or another arrived between.
+	#[test]
+	fn a_dropped_lookup_starts_below_its_floor() {
+		let history = |held: &[u64]| Keys {
+			looks_up: true,
+			..Keys::new(held.iter().copied())
+		};
+		// 4000 evicted while the lookup was out, or 8000 arrived between, as another reader's
+		// fill brings it.
+		for held in [&[9000][..], &[4000, 8000, 9000]] {
+			let mut window = Window::new(&[range(time(8500), None)], None, Some(9000), &history(&[4000, 9000])).unwrap();
+			assert_eq!(window.lookups().collect::<Vec<_>>(), [(8500, 4001)]);
+			assert!(window.found(8500, Found::Dropped { floor: 4001 }, &history(held)));
+			assert_eq!(window.lookups().count(), 0, "answered, not looked up again");
+			assert_eq!(
+				window.resolved(),
+				[Some(Resolved {
+					start: 4000,
+					end: None,
+					floored: true
+				})]
+			);
+		}
+	}
+
+	/// The group a lookup's floor was past evicted while it was out, a lookup left unanswered
+	/// looks the time up again from below once a handler is back, where the history may hold
+	/// the group containing it, rather than starting where the groups still held say.
 	#[test]
 	fn an_eviction_during_a_lookup_looks_it_up_again() {
 		let mut keys = Keys::new([4000, 9000]);
@@ -1473,7 +1522,7 @@ mod tests {
 		let mut window = Window::new(&[range(time(8500), None)], None, Some(9000), &keys).unwrap();
 		assert_eq!(window.lookups().collect::<Vec<_>>(), [(8500, 4001)]);
 		keys.held.remove(&4000);
-		assert!(window.found(8500, None, &keys));
+		assert!(window.found(8500, Found::Unanswered, &keys));
 		assert_eq!(
 			window.lookups().collect::<Vec<_>>(),
 			[(8500, 0)],
@@ -1481,13 +1530,13 @@ mod tests {
 		);
 		assert!(!window.contains(9000), "reads nothing meanwhile");
 		keys.held.insert(4000);
-		assert!(window.found(8500, Some(4000), &keys));
+		assert!(window.found(8500, Found::Group(4000), &keys));
 		assert_eq!(window.resolved()[0].map(|resolved| resolved.start), Some(4000));
 
 		// Even with the cache emptied.
 		let mut window = Window::new(&[range(time(8500), None)], None, Some(9000), &keys).unwrap();
 		let all = std::mem::take(&mut keys.held);
-		assert!(window.found(8500, None, &keys));
+		assert!(window.found(8500, Found::Unanswered, &keys));
 		assert_eq!(
 			window.lookups().collect::<Vec<_>>(),
 			[(8500, 0)],
@@ -1495,9 +1544,9 @@ mod tests {
 		);
 		keys.held = all;
 
-		// With nothing evicted, an empty answer starts where the groups held say.
+		// With nothing evicted, it starts where the groups held say.
 		let mut window = Window::new(&[range(time(8500), None)], None, Some(9000), &keys).unwrap();
-		assert!(window.found(8500, None, &keys));
+		assert!(window.found(8500, Found::Unanswered, &keys));
 		assert_eq!(window.lookups().count(), 0);
 		assert_eq!(window.resolved()[0].map(|resolved| resolved.start), Some(4000));
 	}
@@ -1522,7 +1571,7 @@ mod tests {
 		keys.looks_up = true;
 		let mut window = Window::new(&[range(time(500), time(3000))], None, Some(9000), &keys).unwrap();
 		assert_eq!(window.lookups().collect::<Vec<_>>(), [(500, 0)]);
-		assert!(window.found(500, None, &keys));
+		assert!(window.found(500, Found::Unanswered, &keys));
 		assert!(window.is_settled());
 		assert_eq!(
 			window.resolved(),

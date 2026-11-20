@@ -8,7 +8,7 @@ mod window;
 pub(super) use cover::{Cover, minus};
 pub(crate) use window::Accounted;
 pub(crate) use window::Resolved;
-pub(super) use window::{Containing, Holdings, Unheld, Unplaced, Window};
+pub(super) use window::{Containing, Found, Holdings, Unheld, Unplaced, Window};
 
 /// Subscriber-side preferences for receiving a track.
 ///

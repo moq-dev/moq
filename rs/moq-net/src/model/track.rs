@@ -23,7 +23,7 @@ use super::record::{Pending, Record, Report};
 use crate::ledger::{self, Ledger};
 
 pub(crate) use super::subscription::Resolved;
-use super::subscription::{Accounted, Containing, Cover, Holdings, Unplaced, Window, minus};
+use super::subscription::{Accounted, Containing, Cover, Found, Holdings, Unplaced, Window, minus};
 pub use super::subscription::{Anchor, Delay, Order, Position, Range, Subscription};
 use rangemap::{RangeInclusiveSet, RangeMap, RangeSet};
 
@@ -9713,10 +9713,14 @@ impl Cursor {
 	}
 
 	/// Ask a fill for the group containing each time start the window can't resolve from the
-	/// cache, once, and take in the answers, parking `waiter` on the fills still out.
+	/// cache, once, and take in the answers, parking `waiter` on the fills still out. A
+	/// refused one fails the reads until the ranges change.
 	///
 	/// Indexed by time, so a pass costs O(L log L) in the lookups out rather than O(L²).
 	fn look_up(&mut self, waiter: &kio::Waiter) {
+		if self.filter.refused.is_some() {
+			return;
+		}
 		let mut moved = false;
 		// An answer the window takes in may look its time up again from lower down.
 		while self.look_up_pass(waiter, &mut moved) {}
@@ -9766,19 +9770,31 @@ impl Cursor {
 			}
 			let time = lookup.time;
 			let answer = match &lookup.join {
-				None => None,
+				None => fill::TimeStart::Unanswered,
 				Some(join) => match join.outcome().poll(waiter, |outcome| {
 					outcome.time_start(time).map_or(Poll::Pending, Poll::Ready)
 				}) {
-					Poll::Ready(Ok(group)) => group,
-					// Ended unanswered: its handler couldn't tell.
-					Poll::Ready(Err(closed)) => closed.time_start(time).flatten(),
+					Poll::Ready(Ok(answer)) => answer,
+					// Ended unanswered: no handler is left to answer it.
+					Poll::Ready(Err(closed)) => closed.time_start(time).unwrap_or(fill::TimeStart::Unanswered),
 					Poll::Pending => continue,
 				},
 			};
-			let state = self.state.read();
 			lookup.join = None;
-			*moved |= self.filter.window.found(lookup.time, answer, &*state);
+			let found = match answer {
+				fill::TimeStart::Group(group) => Found::Group(group),
+				fill::TimeStart::Dropped => Found::Dropped { floor: lookup.floor },
+				fill::TimeStart::Unanswered => Found::Unanswered,
+				// Where the time falls is unknown, so the reads fail rather than guess from the
+				// cache. The ranges resolve afresh once they change, asking again.
+				fill::TimeStart::Refused(err) => {
+					(self.filter.refused, self.filter.stale) = (Some(err), true);
+					*moved = true;
+					return false;
+				}
+			};
+			let state = self.state.read();
+			*moved |= self.filter.window.found(lookup.time, found, &*state);
 			again |= self.filter.window.lookups().any(|(time, _)| time == lookup.time);
 		}
 		again
@@ -9919,6 +9935,10 @@ impl Cursor {
 		let drift = ready!(self.poll_drift(&self.servable, waiter))?;
 		self.reoffer(drift.budget);
 		self.probe(self.floor(), &drift, waiter);
+		// A time start's lookup the probe took in may have been refused.
+		if let Some(err) = &self.filter.refused {
+			return Poll::Ready(Err(err.clone()));
+		}
 		if let Some(misses) = &mut self.misses {
 			misses.pick_up();
 		}
@@ -10226,6 +10246,10 @@ impl Cursor {
 		// One scan for the whole poll, so walking a backlog off stays linear in its size.
 		let drift = ready!(self.poll_drift(&self.servable, waiter))?;
 		self.probe(floor, &drift, waiter);
+		// A time start's lookup the probe took in may have been refused.
+		if let Some(err) = &self.filter.refused {
+			return Poll::Ready(Err(err.clone()));
+		}
 		if let Some(misses) = &mut self.misses {
 			misses.pick_up();
 		}
@@ -25871,8 +25895,8 @@ mod test {
 
 	/// A time start before every group held asks a fill for the group containing its time,
 	/// one key wide from the time and floored at 0, which no other reader joins: a handler
-	/// that can't tell refuses it, and the start reaches back to that group, which is unknown,
-	/// so it asks no fill below the time itself: every key from there is in range. Another
+	/// knowing only keys drops it, saying no group starts at or before the time, so the
+	/// reader asks no fill below the time itself: every key from there is in range. Another
 	/// range still asks for its own misses.
 	#[test]
 	#[cfg(feature = "async")]
@@ -25901,7 +25925,7 @@ mod test {
 		};
 		assert_eq!((start.start(), start.floor(), start.end()), (Position::group(5), 0, 6));
 		assert_eq!(start.wanted(), Some(5), "a handler knowing only keys serves the time's");
-		start.refuse_groups(5..6, Error::NotFound);
+		start.drop_groups(5..6);
 		drop(start);
 		let mut read = drain_groups(&mut subscriber);
 		let mut asked = Vec::new();
@@ -26022,8 +26046,9 @@ mod test {
 		drop(start);
 		assert_eq!(drain_groups(&mut subscriber), [6]);
 
-		// The group the floor was past evicted while the start was out, the handler's answer
-		// below the floor is asked again from lower down rather than lost.
+		// The group the floor was past evicted while the start was out, a drop still starts the
+		// reader there, the group holding the time, which it asks back as a miss rather than
+		// starting wherever the groups still held say.
 		let producer = track_producer("test", Info::timed());
 		let dynamic = producer.requests();
 		for key in 0..10 {
@@ -26046,13 +26071,62 @@ mod test {
 		start.drop_groups(5..8);
 		drop(start);
 		assert_eq!(drain_groups(&mut subscriber), Vec::<u64>::new());
-		let Poll::Ready(Ok(start)) = dynamic.poll_requested_fill(&waiter) else {
-			panic!("the time start asks again from below");
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the start's group is a miss");
 		};
-		assert_eq!((start.start().group, start.floor()), (7, 4));
-		write_filled(start.accept(4, None), 4);
-		drop(start);
+		assert_eq!((fill.start().group, fill.floor()), (4, 4), "a miss, not the time again");
+		write_filled(fill.accept(4, None), 4);
+		fill.drop_groups(5..8);
+		drop(fill);
 		assert_eq!(drain_groups(&mut subscriber), [4]);
+	}
+
+	/// A handler refusing a time start fails its reader with that refusal, rather than
+	/// starting where the groups held happen to say, until its ranges change, which asks again.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_refused_time_start_fails_its_reader() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		for key in 0..10 {
+			write_group(&producer, key);
+		}
+		for key in 5..9 {
+			evict(&producer, key);
+		}
+		let since = replay().with_ranges([Range {
+			start: Anchor::Time(7),
+			end: None,
+		}]);
+		let mut subscriber = producer.subscribe(since);
+		let waiter = kio::Waiter::noop();
+		assert!(subscriber.poll_recv_group(&waiter).is_pending());
+		let Poll::Ready(Ok(start)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the time start asks for its group");
+		};
+		assert_eq!((start.start().group, start.floor()), (7, 5));
+		start.refuse_groups(7..8, Error::Timeout);
+		drop(start);
+		for _ in 0..2 {
+			assert!(
+				matches!(subscriber.poll_recv_group(&waiter), Poll::Ready(Err(Error::Timeout))),
+				"not group 4, which the cache holds below the time"
+			);
+		}
+
+		subscriber
+			.update(replay().with_ranges([Range {
+				start: Anchor::Time(6),
+				end: None,
+			}]))
+			.unwrap();
+		assert!(subscriber.poll_recv_group(&waiter).is_pending());
+		let Poll::Ready(Ok(start)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the time start asks again");
+		};
+		write_filled(start.accept(6, None), 6);
+		drop(start);
+		assert_eq!(drain_groups(&mut subscriber), [6, 9]);
 	}
 
 	/// A time end walking the history a handler serves takes no group the live feed

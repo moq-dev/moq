@@ -1579,9 +1579,9 @@ function timed(): { broadcast: BroadcastProducer; track: Producer } {
 	return { broadcast, track };
 }
 
-// Answer each time start with `lookup(time)`, refusing it when that is undefined, as a handler that
-// can't tell does, and serve every other fill from the archive. Returns the time starts' times, in
-// milliseconds.
+// Answer each time start with `lookup(time)`, dropping it when that is undefined, as a handler whose
+// index holds none there does, and serve every other fill from the archive. Returns the time starts'
+// times, in milliseconds.
 function lookups(requests: Requests, lookup: (time: bigint) => bigint | undefined): bigint[] {
 	const times: bigint[] = [];
 	void (async () => {
@@ -1589,7 +1589,7 @@ function lookups(requests: Requests, lookup: (time: bigint) => bigint | undefine
 			if (fill.floor < fill.start) {
 				times.push(fill.start);
 				const answer = lookup(fill.start);
-				if (answer === undefined) fill.refuseGroups(fill.start, fill.end, new Error("no index"));
+				if (answer === undefined) fill.dropGroups(fill.start, fill.end);
 				else {
 					const group = defined(fill.accept(answer));
 					group.writeFrame({
@@ -1673,7 +1673,7 @@ test("fill: a lookup answered below the eviction watermark starts the range ther
 	}
 });
 
-test("fill: a time start whose floor's group is evicted while it is out is asked again from below", async () => {
+test("fill: a time start dropped after its floor's group is evicted starts at that group", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
 	try {
@@ -1698,15 +1698,18 @@ test("fill: a time start whose floor's group is evicted while it is out is asked
 		// Idle past the cache window, so the next write evicts every group but the new edge.
 		clock.jump(Duration.millis(DEFAULT_EXPIRY.asMillis() + 1000));
 		write(10n);
-		// The index says 1 holds the time, below the floor: nothing from 2 does.
+		// The index says 1 holds the time, below the floor: nothing from 2 does. Mirrors the Rust
+		// `a_time_start_is_answered_by_the_group_below_it`: the reader starts at 1 whatever the cache
+		// holds now, asking it back as a miss rather than the time again.
 		first.dropGroups(2n, 8n);
 		first.close();
-		const again = defined(await requests.requestedFill());
-		expect([again.start, again.floor]).toEqual([7n, 0n]);
-		const found = defined(again.accept(1n));
+		const miss = defined(await requests.requestedFill());
+		expect([miss.start, miss.floor]).toEqual([1n, 1n]);
+		const found = defined(miss.accept(1n));
 		found.writeFrame({ payload: enc.encode("g1"), timestamp: Timestamp.fromMillis(1) });
 		found.finish();
-		again.close();
+		miss.dropGroups(2n, 8n);
+		miss.close();
 		expect((await next)?.start).toBe(1n);
 
 		reader.close();
@@ -1735,19 +1738,47 @@ test("fill: a lookup's answer is read at once, before its first frame: its key i
 	broadcast.close();
 });
 
-test("fill: a time start refused starts the range at its time, asking nothing below it", async () => {
+test("fill: a time start dropped from 0 starts the range at its time, asking nothing below it", async () => {
 	const { broadcast, track } = timed();
 	const requests = track.requests();
 	const times = lookups(requests, () => undefined);
 
-	// Mirrors the Rust `a_time_start_before_the_cache_asks_nothing_below_it`: the group containing
-	// the time is unknown, so every key from the time on is in range, and the archive fills from 2.
+	// Mirrors the Rust `a_time_start_before_the_cache_asks_nothing_below_it`: no group starts at or
+	// before the time, so the range reads from it, and the archive fills from 3, past the key dropped.
 	const reader = track.subscribe(fromTime(2n));
 	const ordered = reader.ordered();
 	const got: bigint[] = [];
-	for (let i = 0; i < 4; i++) got.push((await ordered.nextGroup())?.start ?? -1n);
-	expect(got).toEqual([2n, 3n, 4n, 5n]);
+	for (let i = 0; i < 3; i++) got.push((await ordered.nextGroup())?.start ?? -1n);
+	expect(got).toEqual([3n, 4n, 5n]);
 	expect(times).toEqual([2n]);
+
+	reader.close();
+	requests.close();
+	broadcast.close();
+});
+
+test("fill: a refused time start fails its reader until its ranges change", async () => {
+	const { broadcast, track } = timed();
+	const requests = track.requests();
+	// Mirrors the Rust `a_refused_time_start_fails_its_reader`.
+	const reader = track.subscribe(fromTime(2n));
+	const ordered = reader.ordered();
+	const next = ordered.nextGroup();
+	const start = defined(await requests.requestedFill());
+	expect([start.start, start.floor]).toEqual([2n, 0n]);
+	const refusal = new Error("store down");
+	start.refuseGroups(start.start, start.end, refusal);
+	start.close();
+	// Not group 5, which the cache holds past the time.
+	await expect(next).rejects.toBe(refusal);
+	await expect(ordered.nextGroup()).rejects.toBe(refusal);
+
+	const times = lookups(requests, (ms) => ms);
+	reader.update(fromTime(3n));
+	const got: bigint[] = [];
+	for (let i = 0; i < 3; i++) got.push((await ordered.nextGroup())?.start ?? -1n);
+	expect(got).toEqual([3n, 4n, 5n]);
+	expect(times).toEqual([3n]);
 
 	reader.close();
 	requests.close();

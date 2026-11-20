@@ -213,13 +213,17 @@ impl Outcome {
 		self.accepted.contains(&key)
 	}
 
-	/// Where a time start's fill says its group is, once `time`'s key is answered: the group
-	/// accepted, or `None` when it was refused or dropped instead.
-	pub(super) fn time_start(&self, time: u64) -> Option<Option<u64>> {
-		let first = self.accepted.iter().next().map(|run| run.start);
-		match first.is_some() || self.resolved.contains(&time) {
-			true => Some(first),
-			false => None,
+	/// What a time start's fill answered, once `time`'s key is: `None` while it is out.
+	pub(super) fn time_start(&self, time: u64) -> Option<TimeStart> {
+		if let Some(run) = self.accepted.iter().next() {
+			return Some(TimeStart::Group(run.start));
+		}
+		match self.refused.get(&time) {
+			Some(refusal) if refusal.dropped => Some(TimeStart::Dropped),
+			Some(refusal) => Some(TimeStart::Refused(refusal.err.clone())),
+			// Answered and forgotten: nobody reads it any more.
+			None if self.resolved.contains(&time) => Some(TimeStart::Unanswered),
+			None => None,
 		}
 	}
 
@@ -256,15 +260,35 @@ impl Outcome {
 		self.resolved.insert(groups);
 	}
 
-	fn refuse(&mut self, groups: ops::Range<u64>, err: Error, asked: Option<Duration>) {
+	fn refuse(&mut self, groups: ops::Range<u64>, err: Error, asked: Option<Duration>, dropped: bool) {
 		if groups.is_empty() {
 			return;
 		}
 		let id = self.refusals;
 		self.refusals += 1;
-		self.refused.insert(groups.clone(), Refusal { id, err, asked });
+		self.refused.insert(
+			groups.clone(),
+			Refusal {
+				id,
+				err,
+				asked,
+				dropped,
+			},
+		);
 		self.resolved.insert(groups);
 	}
+}
+
+/// What a time start's fill answered.
+pub(super) enum TimeStart {
+	/// The group containing the time.
+	Group(u64),
+	/// No group from the fill's floor through the time.
+	Dropped,
+	/// Refused with this error, saying nothing of where the time falls.
+	Refused(Error),
+	/// Nothing answers it: no handler is left to.
+	Unanswered,
 }
 
 /// One refusal, equal only to itself: the map keeps a run it refused whole, but never merges
@@ -276,6 +300,8 @@ struct Refusal {
 	// The budget its source was asked under, so a looser reader can tell that an
 	// [`Error::Old`] was not its own.
 	asked: Option<Duration>,
+	// Named dropped, the source's word that it has none of them, rather than refused for now.
+	dropped: bool,
 }
 
 impl PartialEq for Refusal {
@@ -928,8 +954,11 @@ impl FillGroups {
 	/// it, at or after the floor. A handler knowing its groups only by key serves that key as
 	/// any other; one that can tell which group holds the time, as from an index, may
 	/// [`accept`](Self::accept) that group instead, or [`drop_groups`](Self::drop_groups) the
-	/// key when none does. The reader starts where the answer says; left unanswered or
-	/// refused, it starts where the groups the cache holds say.
+	/// key when none does. The reader starts where the answer says, never where the groups
+	/// the cache holds happen to say: a drop, or the fill closed unanswered, says no group
+	/// starts from the floor through the time, so it starts at the group just below the floor,
+	/// or past the time when the floor is 0. A [refusal](Self::refuse_groups) fails the reader
+	/// with its error until its ranges change.
 	pub fn floor(&self) -> u64 {
 		self.inner.floor
 	}
@@ -1402,7 +1431,7 @@ impl Inner {
 				state.drop_unfed(groups.clone(), hole.clone());
 			}
 		}
-		self.refuse(groups, err, asked);
+		self.answer(groups, err, asked, true);
 	}
 
 	/// The part of `groups` inside the fill that a reader still reads and nothing answered yet.
@@ -1431,12 +1460,17 @@ impl Inner {
 	}
 
 	fn refuse(&self, groups: &RangeSet<u64>, err: Error, asked: Option<Duration>) {
+		self.answer(groups, err, asked, false);
+	}
+
+	/// Answer `groups` with `err`, `dropped` when the source has none of them.
+	fn answer(&self, groups: &RangeSet<u64>, err: Error, asked: Option<Duration>, dropped: bool) {
 		if groups.is_empty() {
 			return;
 		}
 		if let Ok(mut outcome) = self.result.write() {
 			for groups in groups.iter() {
-				outcome.refuse(groups.clone(), err.clone(), asked);
+				outcome.refuse(groups.clone(), err.clone(), asked, dropped);
 			}
 		}
 		for groups in groups.iter() {
@@ -1528,7 +1562,7 @@ impl Drop for Inner {
 			}
 			if let Ok(mut outcome) = self.result.write() {
 				for groups in left.iter() {
-					outcome.refuse(groups.clone(), Error::Dropped, asked);
+					outcome.refuse(groups.clone(), Error::Dropped, asked, true);
 				}
 			}
 		}
