@@ -928,6 +928,7 @@ class Run:
             # A baseline with a reader left unrouted tests nothing behind it.
             if self.baseline(report["kind"]):
                 self.violation(report, "unrouted", unrouted)
+
         # A reader still unfed from an earlier event, having read nothing since, is that event's
         # strand: it keeps that event's known entry rather than failing every later event again.
         # A strand ends only with a read, so one whose source stopped meanwhile is kept for later.
