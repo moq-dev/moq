@@ -3084,7 +3084,10 @@ mod tests {
 		let container = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio);
 		let payload: Bytes = vec![0u8; 160 * size_of::<f32>()].into();
 		let write = |sequence: u64| {
-			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap().unwrap();
+			let mut group = track
+				.create_group(moq_net::group::Info { start: sequence })
+				.unwrap()
+				.unwrap();
 			let frame = moq_mux::container::Frame {
 				timestamp: Timestamp::from_micros(sequence * 20_000).unwrap(),
 				duration: None,

@@ -1999,7 +1999,11 @@ mod tests {
 			let mut reader = copy.reader(Delay::default().with_min(None).with_max(budget)).await;
 			write_group(&mut copy.track, 0, &[ts(10_000)]);
 			assert!(matches!(reader.read().await.unwrap(), Some(Read::Frame { .. })));
-			let mut marker = copy.track.create_group(moq_net::group::Info { start: 2 }).unwrap().unwrap();
+			let mut marker = copy
+				.track
+				.create_group(moq_net::group::Info { start: 2 })
+				.unwrap()
+				.unwrap();
 			marker.write_frame(ts(20_000), Bytes::new()).unwrap();
 			marker.finish().unwrap();
 			carried().await;
@@ -2064,7 +2068,11 @@ mod tests {
 			reader.read().await.unwrap(),
 			Some(Read::Frame { group: 2, .. })
 		));
-		let mut marker = copy.track.create_group(moq_net::group::Info { start: 4 }).unwrap().unwrap();
+		let mut marker = copy
+			.track
+			.create_group(moq_net::group::Info { start: 4 })
+			.unwrap()
+			.unwrap();
 		marker.write_frame(ts(30_000), Bytes::new()).unwrap();
 		marker.finish().unwrap();
 		carried().await;
@@ -2533,7 +2541,11 @@ mod tests {
 		};
 
 		// A stalled group 500 ms behind the newest content is still within the max delay.
-		let mut stalled = copy.track.create_group(moq_net::group::Info { start: 0 }).unwrap().unwrap();
+		let mut stalled = copy
+			.track
+			.create_group(moq_net::group::Info { start: 0 })
+			.unwrap()
+			.unwrap();
 		let frame = Frame {
 			timestamp: ts(0),
 			payload: Bytes::from_static(&[0xDE, 0xAD]),
@@ -3496,7 +3508,11 @@ mod tests {
 		write_group(&mut copy.track, 0, &[ts(0)]);
 		carried().await;
 		// The end, then the stopped encoder's final packet, as `moq_audio`'s producer writes them.
-		let mut group = copy.track.create_group(moq_net::group::Info { start: 1 }).unwrap().unwrap();
+		let mut group = copy
+			.track
+			.create_group(moq_net::group::Info { start: 1 })
+			.unwrap()
+			.unwrap();
 		let frame = |timestamp, payload| Frame {
 			timestamp,
 			payload,
@@ -5441,7 +5457,11 @@ mod tests {
 		for sequence in 0..5 {
 			write_group(&mut copy.track, sequence, &[ts(sequence * 100_000)]);
 		}
-		let mut newest = copy.track.create_group(moq_net::group::Info { start: 5 }).unwrap().unwrap();
+		let mut newest = copy
+			.track
+			.create_group(moq_net::group::Info { start: 5 })
+			.unwrap()
+			.unwrap();
 		let subscriber = copy
 			.subscribe_with(
 				moq_net::track::Subscription::default()

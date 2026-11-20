@@ -85,7 +85,10 @@ async fn read_as(version: Option<&str>, range: Range, how: Read) -> Result<Group
 	for key in (0..5).map(|second| second * 1000) {
 		let mut group = match how.append {
 			true => track.append_group(millis(key)).unwrap(),
-			false => track.create_group(moq_net::group::Info { start: key }).unwrap().unwrap(),
+			false => track
+				.create_group(moq_net::group::Info { start: key })
+				.unwrap()
+				.unwrap(),
 		};
 		group.write_frame(millis(key), &b"x"[..]).unwrap();
 		group.finish().unwrap();
@@ -145,7 +148,10 @@ async fn read_as(version: Option<&str>, range: Range, how: Read) -> Result<Group
 	}
 	// A read that ended passed its range: a group the publisher creates there now is late.
 	if read.ended && !how.append {
-		let mut late = track.create_group(moq_net::group::Info { start: 1500 }).unwrap().unwrap();
+		let mut late = track
+			.create_group(moq_net::group::Info { start: 1500 })
+			.unwrap()
+			.unwrap();
 		late.write_frame(millis(1500), &b"x"[..]).unwrap();
 		late.finish().unwrap();
 		let next = match (&mut ordered, &mut arrival) {
