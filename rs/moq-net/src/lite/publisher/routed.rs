@@ -132,6 +132,14 @@ struct Parts {
 	add: Vec<(Path, bool)>,
 }
 
+/// A claim the node told: the key that told it, the claim, and what its route may serve, as
+/// the handle names it, or `None` when the origin holds no route for it to judge.
+struct Told {
+	source: Source,
+	claim: Claim,
+	reach: Option<crate::Patterns>,
+}
+
 /// A route the peer holds: its Route ID, and the Announce ID of each claim under it.
 struct Sent {
 	id: u64,
@@ -177,7 +185,7 @@ pub(in crate::lite) struct Answer {
 	next_route: u64,
 	/// Every claim the node told for any other peer, as the handle names it, before
 	/// filtering, with the key that told it.
-	told: BTreeMap<Named, (Source, Claim)>,
+	told: BTreeMap<Named, Told>,
 	/// The claims such a peer holds: their Announce ID, and what it was sent.
 	live: HashMap<Named, (u64, Claim)>,
 	/// The session is leaving: nothing more is sent.
@@ -671,7 +679,7 @@ impl Answer {
 		regions: Option<&[Path]>,
 	) -> Result<(), Error> {
 		let mut gone: Vec<Named> = (self.told.iter())
-			.filter(|(key, (source, _))| *source == MAIN && removed.iter().any(|read| route::within(&key.0, read)))
+			.filter(|(key, told)| told.source == MAIN && removed.iter().any(|read| route::within(&key.0, read)))
 			.map(|(key, _)| key.clone())
 			.collect();
 		let ids: Vec<u64> = self.prefixes.keys().copied().collect();
@@ -711,7 +719,7 @@ impl Answer {
 				}
 				gone.extend(
 					(self.told.iter())
-						.filter(|(_, (told, _))| *told == source)
+						.filter(|(_, told)| told.source == source)
 						.map(|(key, _)| key.clone()),
 				);
 			}
@@ -832,13 +840,24 @@ impl Answer {
 		(path, instance): node::Broadcast,
 		change: Change,
 	) -> Result<(), Error> {
+		// What its route may serve, looked up where the claim's own prefix is, above the path
+		// it is told at, and named as the handle names it.
+		let reach = match &change {
+			Change::Live(claim) => {
+				let above = usize::try_from(claim.item.above).unwrap_or(usize::MAX);
+				let prefix = path.head(path.depth().saturating_sub(above)).unwrap_or_default();
+				self.origin.reach(&prefix, &instance)
+			}
+			_ => None,
+		};
 		// Named as the handle names it: beneath the mount point for a mount, and never a
 		// claim the origin holds beneath a mount for the session's own.
-		let (named, change) = match self.mounts.get(&source).map(|mount| &mount.mount) {
+		let (named, change, reach) = match self.mounts.get(&source).map(|mount| &mount.mount) {
 			Some(mount) => {
 				let Some(named) = mount.name(&path) else {
 					return Ok(());
 				};
+				let reach = reach.map(|reach| mount.name_patterns(&reach));
 				// A claim above the target covers all of the mount, so as the handle names
 				// it, it is no more above the path than the mount point is.
 				let beneath = mount.beneath(&named);
@@ -849,20 +868,20 @@ impl Answer {
 					}
 					change => change,
 				};
-				(named, change)
+				(named, change, reach)
 			}
 			None if self.origin.shadows(&path) => return Ok(()),
-			None => (path, change),
+			None => (path, change, reach),
 		};
 		let key = (named, instance);
 		let lost = match change {
 			Change::Live(claim) => {
-				self.told.insert(key.clone(), (source, claim));
+				self.told.insert(key.clone(), Told { source, claim, reach });
 				false
 			}
 			change => {
 				// Another key may show it now, as when a mount took its place.
-				if self.told.get(&key).is_some_and(|(told, _)| *told == source) {
+				if self.told.get(&key).is_some_and(|told| told.source == source) {
 					self.told.remove(&key);
 				}
 				change == Change::Lost
@@ -878,9 +897,10 @@ impl Answer {
 		path.parts().count().saturating_sub(self.origin.root().parts().count()) as u64
 	}
 
-	/// Whether the peer is shown the claim at the absolute `path`: the permit and this
-	/// handle allow some path it covers, the same one.
-	fn shows(&self, path: &Path) -> bool {
+	/// Whether the peer is shown the claim at the absolute `path`, whose route may serve
+	/// `reach`: the permit, this handle, and the route all allow some path it covers, the
+	/// same one. An intersection too large to spell allows nothing, never more.
+	fn shows(&self, path: &Path, reach: Option<&crate::Patterns>) -> bool {
 		let Some((_, prefix)) = self.region(path) else {
 			return false;
 		};
@@ -888,15 +908,21 @@ impl Answer {
 		let (Some(suffix), Some(relative)) = (within, path.strip_prefix(self.origin.root())) else {
 			return false;
 		};
-		(prefix.hidden || !suffix.is_hidden()) && self.origin.reaches_any(path, &self.permit.beneath(relative.as_str()))
+		let mut allowed = self.permit.beneath(relative.as_str());
+		if let Some(reach) = reach {
+			let reach = reach.rebase(self.origin.root().as_str());
+			allowed = allowed.intersect(&reach).unwrap_or_default();
+		}
+		(prefix.hidden || !suffix.is_hidden()) && self.origin.reaches_any(path, &allowed)
 	}
 
 	/// Bring the peer's claim `key` in line with what the node told and the answer
 	/// shows. A claim that goes is `lost`, or else ended.
 	fn sync(&mut self, writer: &mut Writer, key: Named, lost: bool) -> Result<(), Error> {
 		let depth = self.depth(&key.0);
-		let wanted = (self.told.get(&key)).filter(|_| self.shows(&key.0)).map(|(_, claim)| {
-			let mut claim = claim.clone();
+		let told = self.told.get(&key);
+		let wanted = (told.filter(|told| self.shows(&key.0, told.reach.as_ref()))).map(|told| {
+			let mut claim = told.claim.clone();
 			claim.item.above = claim.item.above.min(depth);
 			claim
 		});

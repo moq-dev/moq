@@ -673,3 +673,54 @@ fn a_change_queued_before_a_revocation_ends_its_claim_as_lost() {
 		.collect();
 	assert_eq!(ends, [true], "{revoked:?}");
 }
+
+/// A claim is shown only where its own route, the handle, and the grant share a path it
+/// covers: a route scoped to `a/*/x` at `a` serves neither `a/q/y` nor anything under the
+/// grant `a/*` or `a/q/y/**`, and one scoped to `a/private/**` serves nothing under
+/// `a/public/**`. Through a mount, the route's reach is named as the handle names it.
+#[test]
+fn a_claim_is_shown_only_where_its_route_can_serve() {
+	let origin = Hop::new(1).unwrap().produce();
+	let scoped = |scope: &[&str], at: &str| {
+		let producer = origin.scope("", &patterns(scope)).unwrap();
+		producer.announce(at, origin::RouteInfo::new()).unwrap()
+	};
+	let _x = scoped(&["a/*/x"], "a");
+	let _private = scoped(&["c/private/**"], "c");
+	let _target = scoped(&["s/*/x"], "s");
+	let consumer = origin
+		.mount("m", "s")
+		.unwrap()
+		.scope("", &patterns(&["**"]))
+		.unwrap()
+		.consume();
+	let told = |grant: Option<&[&str]>, prefix: &str| -> Vec<String> {
+		let auth = crate::auth::Link::new(false);
+		if let Some(grant) = grant {
+			auth.handle().authorize(&crate::auth::Grant {
+				publish: Patterns::default(),
+				subscribe: patterns(grant),
+				expires: None,
+			});
+		}
+		let mut answer = Answer::alone_on(consumer.clone(), auth);
+		let (mut writer, mut peer) = stream();
+		answer.request(false, Vec::new(), vec![(path(prefix), false)]).unwrap();
+		let mut told = Vec::new();
+		for msg in sent(&mut answer, &mut writer, &mut peer) {
+			if let AnnounceBroadcast::Start { suffix, instance, .. } = msg {
+				told.push(peer.start(&suffix, &instance).0.to_string());
+			}
+		}
+		told
+	};
+	assert!(told(None, "a/q/y").is_empty());
+	assert_eq!(told(None, "a/q/x"), ["a/q/x"]);
+	assert!(told(Some(&["a/*"]), "").is_empty());
+	assert!(told(Some(&["a/q/y/**"]), "").is_empty());
+	assert_eq!(told(Some(&["a/q/x/**"]), ""), ["a/q/x"]);
+	assert!(told(Some(&["c/public/**"]), "").is_empty());
+	assert_eq!(told(Some(&["c/private/**"]), ""), ["c/private"]);
+	assert!(told(None, "m/q/y").is_empty());
+	assert_eq!(told(None, "m/q/x"), ["m/q/x"]);
+}
