@@ -18980,6 +18980,10 @@ mod test {
 		assert_eq!(drain(&mut subscriber), vec![3], "past the edge, live");
 		let mut live = producer.subscribe(replay().with_ranges([Range::live()]));
 		assert_eq!(drain(&mut live), vec![3], "the live edge");
+		// 3 moved the live edge, so 2 lands below it: the fetch gets it, no subscription does.
+		assert_eq!(fill(2).await.unwrap().start, 2);
+		assert!(drain(&mut subscriber).is_empty(), "below the edge, history");
+		assert!(drain(&mut live).is_empty(), "below the edge, history");
 	}
 
 	/// A failed fill answer is no verdict on a gap the feed owes: an ordered reader neither takes
