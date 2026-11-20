@@ -1,4 +1,4 @@
-# Cache-aware multicast routing
+# [S] Cache-aware multicast routing
 
 ## Goal
 
@@ -37,10 +37,11 @@ test covered on real sessions. It found two flaws, both now fixed:
 [moq-dev/moq#9154](https://github.com/moq-dev/moq/pull/9154) lets a front ride
 through a lost claim's debounce, so a reader resumes on a detour learned after
 its session closed, and a route moving behind one next hop no longer resends a
-group, since a lite-07 range may start partway through one. The lite-07 cut
-still waits on this epic's children, a flaw the mesh replay found,
-[a lite-07 reader its relay refuses as unroutable and never re-asks](/quest/m2/multicast/splice-stall.md).
-It does not wait on
+group, since a lite-07 range may start partway through one. The mesh replay
+then found a reader its relay refused as unroutable while still showing the
+broadcast, which never asked again: a lite-07 hop now holds such a request
+(maintainer, 2026-11-20), and a session closes its sources before it fails
+their copies. The lite-07 cut does not wait on
 [warmth's port](/quest/m3/cache-routing/select.md): its wire joins lite-07
 only if the port has landed and passed the mesh replay when the cut is made,
 and otherwise moves to the first wip version after it (maintainer,
@@ -343,6 +344,18 @@ Lessons from the history that bind every child:
   broadcast or per publisher behind it.
 - Nothing ships unexercised: a loop check that never fired cost 32 bounces
   per announce in production.
+
+## Waiting
+
+- Maintainer: whether this epic is done now that its last child,
+  [splice-stall](https://github.com/moq-dev/moq/pull/9231), landed. Its Goal
+  reads met: the route layer shipped as lite-07's, the route algebra proves
+  it, and the bake-off measured it. Recommended: yes. Delete this README,
+  first moving the requirements and settled items that m3 quests cite by
+  number (cache-routing, route-health) into those quests, which also lifts
+  this epic from the Required list of
+  [the lite-07 cut](/quest/m2/lite07-finalize.md). An agent cannot take this
+  step: it decides whether the cut still waits on routing.
 
 ## Related
 
