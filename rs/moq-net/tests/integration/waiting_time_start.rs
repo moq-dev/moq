@@ -148,7 +148,7 @@ impl Fixture {
 async fn read(reader: &mut moq_net::track::Ordered, count: usize) -> Vec<Result<u64, std::ops::Range<u64>>> {
 	let mut items = Vec::new();
 	while items.len() < count {
-		let item = kio::clock::timeout(TIMEOUT, reader.next_group())
+		let item = kio::clock::timeout(TIMEOUT, reader.next_item())
 			.await
 			.unwrap_or_else(|_| panic!("timed out after {items:?}"))
 			.unwrap()

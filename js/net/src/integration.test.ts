@@ -485,12 +485,13 @@ test("integration: lite-07 serves sparse and relative ranges", async () => {
 });
 
 // A publisher counts a relative start back from its newest group, which may hold no frame yet and
-// so counts neither in the largest it reports nor where the copy resolves the start. The copy reports
-// the publisher's start, where a reader waiting on each group in sequence starts. Mirrors the Rust
-// `a_relative_start_reports_the_publishers_start_over_a_frameless_newest_group`.
+// so counts neither in the largest it reports nor where the copy resolves the start. The copy keeps
+// the publisher's start, so a reader waiting on each group in sequence starts there rather than
+// waiting below it for groups that never arrive. Mirrors the Rust
+// `an_ordered_reader_starts_at_the_publishers_start_over_a_frameless_newest_group`.
 // The newest group lands before the reader asks, as it can under load: a sibling reads it, so the
 // reader's own window has yet to settle on it when it asks where it starts.
-test("integration: lite-07 reports a relative start over a frameless newest group", async () => {
+test("integration: lite-07 starts an ordered read at a relative start over a frameless newest group", async () => {
 	const pair = createMockTransportPair(Lite.ALPN_07_WIP);
 	const origin = new OriginProducer();
 	const [client, server] = await Promise.all([
@@ -509,16 +510,16 @@ test("integration: lite-07 reports a relative start over a frameless newest grou
 
 	const remote = wireOf(client).consume(Path.from("test"));
 	const subscription = { delay: { max: null }, ranges: [{ start: { relative: 0n } }] };
-	const reader = remote.track("video").subscribe(subscription);
+	const reader = remote.track("video").subscribe(subscription).ordered();
 	const sibling = remote.track("video").subscribe(subscription);
 	try {
 		// Accepting the track subscribes it upstream, whose answer resolves the start.
 		await reader.info();
 		expect((await sibling.recvGroup())?.start).toBe(5n);
-		expect(await reader.start()).toBe(5n);
 		newest.writeFrame({ payload: new Uint8Array([5]), timestamp: Timestamp.unscaled(newest.start) });
 		newest.finish();
-		expect((await reader.recvGroup())?.start).toBe(5n);
+		const item = await reader.nextItem();
+		expect(item?.kind === "group" ? item.group.start : item).toBe(5n);
 	} finally {
 		sibling.close();
 		reader.close();

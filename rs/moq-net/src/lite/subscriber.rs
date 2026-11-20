@@ -1021,6 +1021,11 @@ impl SubscriberDriver {
 		// Before the subscribe map, so a TRACK_INFO request dropped with this driver
 		// rejects with `err` rather than `Dropped`.
 		self.subscriber.note_end(err);
+		// Before the copies they serve, so each front reads what its copy fails with as its
+		// source going, not as the track's verdict.
+		for source in self.sources.iter() {
+			source.source.close();
+		}
 		self.cleanup.abort(err);
 	}
 
@@ -3337,7 +3342,7 @@ mod tests {
 						.with_delay(Delay::default().with_max(None)),
 				)
 				.ordered();
-			match ordered.next_group().now_or_never() {
+			match ordered.next_item().now_or_never() {
 				Some(Ok(Some(track::Item::Group(group)))) => Some(group.start),
 				None => None,
 				Some(res) => panic!("not a group: {:?}", res.map(|item| item.is_some())),
@@ -7097,6 +7102,84 @@ mod tests {
 		assert!(track < fetch, "a FETCH opened its stream before TRACK");
 	}
 
+	/// The front reads whether a source is closing from its broadcast, and takes a failure from a
+	/// source still open as the track's verdict. So a run that fails its copy, or the query
+	/// still waiting on TRACK_INFO, with the session's end closes the source first: the front
+	/// then waits for the next route rather than end a track its relay still shows.
+	#[kio::test]
+	async fn a_track_failed_with_its_session_closes_its_source_first() {
+		use crate::transport::poll::Session as _;
+		// Lite04 serves at once; Lite05 waits on TRACK_INFO.
+		for version in [Version::Lite04, Version::Lite05] {
+			let (session, peer) = crate::transport::memory::pair(Default::default());
+			let subscriber = pipelining(crate::driver::Transport::new(session.clone()), version);
+			let source = crate::broadcast::Info::new().produce();
+			let consumer = source.consume();
+			let mut dynamic = source.requests();
+			let mut waiting = consumer.track("video").unwrap().subscribe(None);
+			assert!((&mut waiting).now_or_never().is_none(), "waiting on the publisher");
+			let request = dynamic.requested_track().now_or_never().unwrap().expect("request");
+			let mut run = TrackServeRun::new(
+				TrackServe {
+					validity: Default::default(),
+					route: None,
+					source: Some(source.clone()),
+					subscriber,
+					path: Path::from_static("room"),
+					instance: None,
+					node: None,
+					name: "video".to_string(),
+				},
+				request,
+			);
+			assert!(kio::Task::poll(&mut run, &kio::Waiter::noop()).is_pending());
+			assert!(!consumer.is_closed(), "{version:?}: closed before the session ended");
+
+			peer.close(crate::SessionError::Cancel.to_code(), "gone");
+			for _ in 0..4 {
+				let _ = kio::Task::poll(&mut run, &kio::Waiter::noop());
+			}
+			let ended = match (&mut waiting).now_or_never().expect("the track ended") {
+				Ok(mut copy) => copy.recv_group().now_or_never().expect("the copy ended").err(),
+				Err(err) => Some(err),
+			};
+			assert!(ended.is_some(), "{version:?}: the track ended cleanly");
+			assert!(
+				consumer.is_closed(),
+				"{version:?}: failed the track before closing its source"
+			);
+		}
+	}
+
+	/// The session's end aborts every subscription still open, so it closes every source first,
+	/// for the same reason a run does.
+	#[kio::test]
+	async fn the_session_end_closes_its_sources_before_its_subscriptions() {
+		let (session, _peer) = crate::transport::memory::pair(Default::default());
+		let subscriber = pipelining(crate::driver::Transport::new(session), Version::Lite07);
+		let source = crate::broadcast::Info::new().produce();
+		let consumer = source.consume();
+		let route = kio::Producer::new(());
+		let _ = subscriber.sources.try_push(MintedSource {
+			path: Path::from_static("room"),
+			instance: None,
+			node: None,
+			dynamic: source.requests(),
+			source: crate::model::broadcast::SourceGuard::new(source),
+			route: route.consume(),
+		});
+		let mut driver = SubscriberDriver::new(subscriber, Vec::new(), false, route_stream::Publish::idle());
+		let _ = driver.poll(&kio::Waiter::noop());
+		assert_eq!(driver.sources.len(), 1, "the driver took the source");
+		assert!(!consumer.is_closed());
+		driver.abort(&Error::IdleTimeout);
+		assert!(
+			consumer.is_closed(),
+			"aborted its subscriptions before closing its sources"
+		);
+		drop(route);
+	}
+
 	/// A lite-07 source of `room` over `session`, a consumer to list it through, and the
 	/// route that keeps it served.
 	fn listed_source(
@@ -10748,6 +10831,18 @@ struct TrackServe {
 }
 
 impl TrackServe {
+	/// Close the source before failing a copy or a request with the session's end. The front
+	/// reads whether a source is closing from its broadcast, and takes a failure from a source
+	/// still open as the track's verdict: a session that failed its copies before closing their
+	/// sources would end tracks its relay could resume on the next route.
+	fn close_if_ending(&self) {
+		if let Some(source) = &self.source
+			&& self.subscriber.session.poll_ending(&kio::Waiter::noop()).is_ready()
+		{
+			source.close();
+		}
+	}
+
 	/// Watches whether the session still lets us receive this broadcast from the peer:
 	/// our grant, and the ceiling on what the peer may publish.
 	fn gate(&self) -> crate::auth::Gate {
@@ -11441,6 +11536,7 @@ impl FinishedServe {
 			// The groups it already holds stay readable, its clean end too once settled.
 			if let Poll::Ready(err) = self.closed.poll_closed(waiter) {
 				if let Some(serving) = self.serving.take() {
+					serve.close_if_ending();
 					let _ = serving.abort(Error::from_transport(err));
 				}
 				return Poll::Ready(());
@@ -11836,6 +11932,7 @@ impl TrackServeRun {
 							if let Some(pipelined) = pipelined {
 								pipelined.abort(&self.serve, &err);
 							}
+							self.serve.close_if_ending();
 							request.reject(err);
 							return Poll::Ready(());
 						}
@@ -11885,6 +11982,7 @@ impl TrackServeRun {
 							if let Some(datagrams) = &mut self.datagrams {
 								datagrams.end(Err(err.clone()));
 							}
+							self.serve.close_if_ending();
 							let _ = serve_loop.serving.abort(err);
 						}
 					}
@@ -11993,6 +12091,7 @@ impl Drop for TrackServeRun {
 		if let Some(pipelined) = pipelined.take() {
 			pipelined.abort(&self.serve, &err);
 		}
+		self.serve.close_if_ending();
 		request.reject(err);
 	}
 }
