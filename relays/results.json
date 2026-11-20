@@ -1,6 +1,6 @@
 {
-  "generated": "2026-11-19T17:17:12Z",
-  "run_url": "https://github.com/moq-dev/moq/actions/runs/44573983262",
+  "generated": "2026-11-20T16:55:01Z",
+  "run_url": "https://github.com/moq-dev/moq/actions/runs/44776639491",
   "registry": "https://raw.githubusercontent.com/englishm/moq-interop-runner/main/implementations.json",
   "pairs": [
     "rust → rust",
@@ -160,16 +160,16 @@
       "url": "moqt://lminiero.it:9000",
       "transport": "QUIC",
       "required": false,
-      "ok": false,
+      "ok": true,
       "versions": [
         "moq-transport-22"
       ],
       "cells": {
         "rust → rust": {
-          "status": "FAIL",
+          "status": "PASS",
           "pub_version": "moq-transport-22",
           "sub_version": "moq-transport-22",
-          "reason": "connected, nothing subscribed: session terminated err=transport: connection error: closed",
+          "reason": "",
           "sub_log": "moqt_lminiero.it_9000/rust-rust.log",
           "pub_log": "moqt_lminiero.it_9000/pub-rust.log"
         }
@@ -539,7 +539,7 @@
           "status": "FAIL",
           "pub_version": "moq-transport-22",
           "sub_version": "moq-transport-22",
-          "reason": "SUBSCRIBE for 0.avc3, no SUBSCRIBE_OK logged, no objects: track failed; ending the reader track=\"0.avc3\" error=Remote(18)",
+          "reason": "SUBSCRIBE for catalog.json, no SUBSCRIBE_OK logged, no objects: session terminated err=transport: connection error: closed",
           "sub_log": "moqt_moq-ng.cloudflare.mediaoverquic.com_443/rust-rust.log",
           "pub_log": "moqt_moq-ng.cloudflare.mediaoverquic.com_443/pub-rust.log"
         }
@@ -560,7 +560,7 @@
           "status": "FAIL",
           "pub_version": "moq-transport-22",
           "sub_version": "moq-transport-22",
-          "reason": "SUBSCRIBE for 0.avc3, no SUBSCRIBE_OK logged, no objects: track failed; ending the reader track=\"0.avc3\" error=Remote(18)",
+          "reason": "SUBSCRIBE for catalog.json, no SUBSCRIBE_OK logged, no objects: session terminated err=transport: connection error: closed",
           "sub_log": "https_moq-ng.cloudflare.mediaoverquic.com_443/rust-rust.log",
           "pub_log": "https_moq-ng.cloudflare.mediaoverquic.com_443/pub-rust.log"
         },
