@@ -20,7 +20,12 @@ Found by [the mesh replay](/test/mesh-replay/README.md). On main after
 [roll-echo-stall](https://github.com/moq-dev/moq/pull/9174) and
 [reopen-starve](https://github.com/moq-dev/moq/pull/9179), 19 of 20
 `reopen.toml` runs (ring4, 32 broadcasts, debug build) passed. The failing run
-starved 2 reader paths.
+starved 2 reader paths. After
+[resend](https://github.com/moq-dev/moq/pull/9155) landed, 2 of 3 passed. The
+third shows the same strand: `a`'s reader got Unroutable for `c/5` as `a`'s
+links reopened, then read nothing for 73s, across a re-follow of the path.
+That run's 128 paths starved at the kill came while the host ran at 100% CPU,
+so they are load, not this bug.
 
 What that run's logs show. `b`'s reader followed `d/0` and `d/3` through `a`.
 The `a`-`b` link paused, and its session idle-timed out 10s later. At that
