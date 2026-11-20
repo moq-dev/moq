@@ -3672,6 +3672,22 @@ mod tests {
 			self.group(pts_ms, 1);
 		}
 
+		/// Write the group starting at `start_ms` with a single keyframe at `pts_ms`.
+		fn keyed(&mut self, start_ms: u64, pts_ms: u64) {
+			let mut group = self
+				.track
+				.create_group(moq_net::group::Info { start: start_ms })
+				.unwrap();
+			let frame = vp8_frame(pts_ms * 1_000, true);
+			hang::container::Frame {
+				timestamp: frame.timestamp,
+				payload: frame.payload,
+			}
+			.write_to(&mut group)
+			.unwrap();
+			group.finish().unwrap();
+		}
+
 		/// Write the group at `pts_ms` with a single keyframe declaring a `width`x`height`
 		/// picture in band.
 		fn sized(&mut self, pts_ms: u64, (width, height): (u16, u16)) {
@@ -4550,7 +4566,9 @@ mod tests {
 		test.sync();
 		let new = test.rendition("video0");
 		// 6 and 7 finish segment 1 past the retire; 8 to 11 are segment 2, which 12 completes.
-		for sequence in 6..13 {
+		// Group 6 starts at 3s with its keyframe 100ms later.
+		media.keyed(3_000, 3_100);
+		for sequence in 7..13 {
 			media.at(sequence * 500);
 		}
 		let snapshot = test.listed("video0", 2).await;
@@ -4564,6 +4582,11 @@ mod tests {
 			durations,
 			[2_000, 1_000, 2_000],
 			"the predecessor's part ends at the group at 3s"
+		);
+		assert_eq!(
+			old.rows().last().and_then(|row| row.content),
+			Some(Duration::from_millis(3_100)),
+			"its last sample runs to the replacement's first frame"
 		);
 		let id = segments::Id {
 			generation: None,
@@ -4640,6 +4663,20 @@ mod tests {
 			[2_000, 1_000, 2_000],
 			"the predecessor's part ends at the group at 3s"
 		);
+	}
+
+	// A lone last frame borrows the gap between the first frames before it, not between the group
+	// starts: groups keyed below their keyframes by different amounts space their media apart.
+	#[tokio::test(start_paused = true)]
+	async fn a_lone_last_frame_borrows_the_media_spacing() {
+		let test = Groups::with(&["video0"], &[]);
+		let mut media = test.publish("video0");
+		media.keyed(0, 1_900);
+		media.keyed(2_000, 2_100);
+		media.finish();
+		let snapshot = test.listed("video0", 1).await;
+		let durations: Vec<_> = snapshot.segments.iter().map(|s| s.duration.as_millis()).collect();
+		assert_eq!(durations, [2_000, 300], "the last frame at 2.1s runs 200ms");
 	}
 
 	// A segment spanning more groups than one request fetches is listed as a gap, never as a

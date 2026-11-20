@@ -333,8 +333,8 @@ struct Claim {
 	/// [`handover`](Rendition::handover): the groups this instance still lists are those up to it,
 	/// and a replacement on the same track lists only groups past it.
 	boundary: Option<u64>,
-	/// Retired, where the replacement's media starts: the first group past the boundary.
-	theirs_at: Option<moq_net::Timestamp>,
+	/// Retired, where the replacement starts: the first group past the boundary.
+	theirs_at: Option<At>,
 	/// The oldest group no completed segment holds, and the open segment if one is: what a retire
 	/// can still hand over.
 	unplaced: Option<(u64, Option<u64>)>,
@@ -349,8 +349,16 @@ struct Claim {
 #[derive(Clone, Copy)]
 struct Resize {
 	group: u64,
-	pts: moq_net::Timestamp,
+	at: At,
 	size: (u32, u32),
+}
+
+/// Where a group goes on the grid, and where its first frame's media starts: they differ when its
+/// start is below its keyframe.
+#[derive(Clone, Copy, Debug)]
+struct At {
+	place: moq_net::Timestamp,
+	media: moq_net::Timestamp,
 }
 
 /// A single HLS rendition: master-playlist metadata, its window over its media track's groups
@@ -803,7 +811,7 @@ impl Rendition {
 			claim.boundary = claim.seen;
 			if let Some(resized) = self.handover(&claim, successor) {
 				claim.boundary = resized.group.checked_sub(1);
-				claim.theirs_at = Some(resized.pts);
+				claim.theirs_at = Some(resized.at);
 				// No group of the open segment is this instance's, so it lists nothing more.
 				if let Some((first, open)) = claim.unplaced
 					&& first == resized.group
@@ -1985,6 +1993,11 @@ impl kio::Task for InitBuild {
 
 #[cfg(test)]
 impl Rendition {
+	/// The rows this instance lists itself, oldest first.
+	pub(crate) fn rows(&self) -> Vec<segments::Row> {
+		self.live.window().segments
+	}
+
 	/// The current CMAF init segment, whatever its hash, built on first request and cached.
 	pub(crate) async fn latest_init(&self) -> Result<Option<Bytes>> {
 		let mut load = LoadInit::default();
@@ -2087,8 +2100,8 @@ enum Step {
 	End(moq_net::group::Consumer, Option<Reach>),
 }
 
-/// A group read, and its first pts unless it is a marker.
-type Read = (u64, Option<moq_net::Timestamp>);
+/// A group read, and where it starts unless it is a marker.
+type Read = (u64, Option<At>);
 
 /// What a [`WatchMedia`] numbers its groups with, and how far it got.
 struct Follow {
@@ -2102,7 +2115,7 @@ struct Follow {
 	/// The last group a predecessor on the same track read: only later ones are this instance's.
 	after: Option<u64>,
 	grid: grid::Grid,
-	/// The newest group, its first pts, and what its first frame reached, read again for its
+	/// The newest group, its first frame's pts, and what that frame reached, read again for its
 	/// content's end if the track ends after it, and the gap from the group before it.
 	latest: Option<(moq_net::group::Consumer, moq_net::Timestamp, Reach)>,
 	spacing: Option<Duration>,
@@ -2155,16 +2168,16 @@ impl Follow {
 			First::Media(pts, media, reach, declared) => {
 				let sequence = group.start;
 				if let Some((_, previous, _)) = &self.latest {
-					self.spacing = pts.checked_sub(*previous).ok().map(super::span).or(self.spacing);
+					self.spacing = media.checked_sub(*previous).ok().map(super::span).or(self.spacing);
 				}
 				let mut slots = self.grid.group(sequence, pts, media);
 				// A fragment carrying the whole group may already pass the next line.
 				if let Some(newest) = reach.newest() {
 					slots.extend(self.grid.reach(newest));
 				}
-				self.latest = Some((group, pts, reach));
+				self.latest = Some((group, media, reach));
 				self.reading = true;
-				(slots, (sequence, Some(pts)), declared)
+				(slots, (sequence, Some(At { place: pts, media })), declared)
 			}
 		};
 		self.list(rendition, slots, Some(read), size, false)
@@ -2200,10 +2213,10 @@ impl Follow {
 		let boundary = claim.boundary;
 		let theirs = |last: Option<u64>| boundary.is_none_or(|boundary| last.is_some_and(|last| last > boundary));
 		if claim.retired
-			&& let Some((sequence, Some(pts))) = read
+			&& let Some((sequence, Some(at))) = read
 			&& theirs(Some(sequence))
 		{
-			claim.theirs_at = claim.theirs_at.or(Some(pts));
+			claim.theirs_at = claim.theirs_at.or(Some(at));
 		}
 		let theirs_at = claim.theirs_at;
 		for slot in slots {
@@ -2226,15 +2239,16 @@ impl Follow {
 					..
 				} if claim.retired && theirs(groups.last()) => match (boundary, theirs_at) {
 					// The replacement can't list this segment's number again, so this instance
-					// lists the groups it had read, ending where the replacement's media starts.
+					// lists the groups it had read, ending where the replacement's group starts, with
+					// its last sample running to the replacement's first frame.
 					(Some(boundary), Some(at)) if groups.first().is_some_and(|first| first <= boundary) => {
 						let slot = grid::Slot::Media {
 							segment,
 							groups: groups.through(boundary),
 							pts,
 							start,
-							end: at,
-							content: Some(at),
+							end: at.place,
+							content: Some(at.media),
 						};
 						(slot, true)
 					}
@@ -2276,11 +2290,11 @@ impl Follow {
 		if let Some((sequence, _)) = read {
 			claim.seen = Some(sequence);
 		}
-		if let (Some((group, Some(pts))), Some(size)) = (read, size)
+		if let (Some((group, Some(at))), Some(size)) = (read, size)
 			&& claim.size != Some(size)
 		{
 			claim.size = Some(size);
-			claim.resized = Some(Resize { group, pts, size });
+			claim.resized = Some(Resize { group, at, size });
 		}
 		claim.unplaced = grid.unplaced().map(|first| (first, grid.open()));
 		if !claim.retired
