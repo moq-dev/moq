@@ -18,7 +18,7 @@ function track(scale: Time.Timescale): Track.Producer {
 
 // Every group the producer wrote: its start, whole end, and each frame's wire timestamp.
 async function groups(subscriber: Track.Subscriber) {
-	const out: { start: bigint; end?: bigint; frames: number[] }[] = [];
+	const out: { start: bigint; whole: boolean; frames: number[] }[] = [];
 	for (;;) {
 		const group = await subscriber.recvGroup();
 		if (!group) return out;
@@ -28,7 +28,7 @@ async function groups(subscriber: Track.Subscriber) {
 			if (!frame) break;
 			frames.push(Varint.decode(frame.payload)[0]);
 		}
-		out.push({ start: group.start, end: group.end, frames });
+		out.push({ start: group.start, whole: group.whole, frames });
 	}
 }
 
@@ -45,11 +45,11 @@ test("Legacy Producer keys groups in a millisecond track's timescale", async () 
 	producer.finish();
 
 	expect(await groups(subscriber)).toEqual([
-		// Its end marker at the next keyframe, which it ends whole at.
-		{ start: 1n, end: 34n, frames: [1_400, 1_900, 34_700] },
-		{ start: 34n, end: 68n, frames: [34_700, 68_100] },
+		// Its end marker at the next keyframe.
+		{ start: 1n, whole: true, frames: [1_400, 1_900, 34_700] },
+		{ start: 34n, whole: true, frames: [34_700, 68_100] },
 		// Not below the newest frame's millisecond, so the marker starts there.
-		{ start: 68n, end: undefined, frames: [68_000] },
+		{ start: 68n, whole: true, frames: [68_000] },
 	]);
 });
 
@@ -63,10 +63,10 @@ test("Legacy Producer keys groups in a nanosecond track's timescale", async () =
 	producer.finish();
 
 	expect(await groups(subscriber)).toEqual([
-		{ start: 1_000_000n, end: 2_000_000n, frames: [1_000, 2_000] },
-		// Its end marker at 3ms, then whole at the marker one nanosecond before it.
-		{ start: 2_000_000n, end: 2_999_999n, frames: [2_000, 3_000] },
-		{ start: 2_999_999n, end: undefined, frames: [2_999] },
+		{ start: 1_000_000n, whole: true, frames: [1_000, 2_000] },
+		// Its end marker at 3ms, then the marker one nanosecond before it.
+		{ start: 2_000_000n, whole: true, frames: [2_000, 3_000] },
+		{ start: 2_999_999n, whole: true, frames: [2_999] },
 	]);
 });
 

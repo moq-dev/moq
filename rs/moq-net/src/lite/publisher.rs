@@ -6529,23 +6529,18 @@ fn poll_given_up(group: &mut group::Consumer, waiter: &kio::Waiter) -> Option<Er
 }
 
 /// Buffer GROUP_END once a lite-07 stream without the `ietf` extension's object records read
-/// `group` to the end of a finished group: a `Payload Length` of 0, then the group's
-/// exclusive end in its track's timescale. Returns whether it did, so the FIN follows it;
-/// otherwise the FIN alone says the group closed.
+/// `group` to the end of a group finished whole: a `Payload Length` of 0. Returns whether it
+/// did, so the FIN follows it; otherwise the FIN alone says the group closed.
 fn buffer_group_end<W: crate::transport::poll::SendStream>(
 	writer: &mut Writer<W, Version>,
 	version: Version,
 	records: bool,
 	group: &group::Consumer,
 ) -> Result<bool, Error> {
-	if !version.has_group_end() || records {
+	if !version.has_group_end() || records || !group.is_whole() || group.index() < group.frame_count() as u64 {
 		return Ok(false);
 	}
-	let Some(end) = group.end().filter(|_| group.index() >= group.frame_count() as u64) else {
-		return Ok(false);
-	};
 	writer.buffer_varint(0)?;
-	writer.buffer_varint(end)?;
 	Ok(true)
 }
 
@@ -7469,10 +7464,10 @@ mod serve_group_test {
 		(bytes, fin)
 	}
 
-	/// Lite-07 ends a finished group's stream with GROUP_END, a zero `Payload Length` then the
-	/// End, before the FIN; a closed group's ends with the FIN alone.
+	/// Lite-07 ends a whole group's stream with GROUP_END, a zero `Payload Length`, before the
+	/// FIN; a closed group's ends with the FIN alone.
 	#[kio::test]
-	async fn lite07_ends_a_finished_group_with_group_end() {
+	async fn lite07_ends_a_whole_group_with_group_end() {
 		for finished in [true, false] {
 			let log = Log::default();
 			let subscription = lite07_subscription(SinkSession::new(log.clone()));
@@ -7486,7 +7481,7 @@ mod serve_group_test {
 				.write_frame(Timestamp::from_millis(2).unwrap(), b"x".as_slice())
 				.unwrap();
 			match finished {
-				true => group.finish_at(5).unwrap(),
+				true => group.finish_whole().unwrap(),
 				false => group.finish().unwrap(),
 			};
 			let handle = subscription.priority.insert(Priority::new(0, 0, 0));
@@ -7499,7 +7494,7 @@ mod serve_group_test {
 			assert!(fin, "finished={finished}: no FIN");
 			// The frame: its length plus one, the timestamp delta, and the payload.
 			let tail: &[u8] = match finished {
-				true => &[2, 4, b'x', 0, 5],
+				true => &[2, 4, b'x', 0],
 				false => &[2, 4, b'x'],
 			};
 			assert!(bytes.ends_with(tail), "finished={finished}: {bytes:?}");

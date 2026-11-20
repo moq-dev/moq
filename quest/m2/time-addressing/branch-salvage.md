@@ -33,7 +33,7 @@ worth keeping. Research on the branch (head `20c13b1308`) found:
   on the branch that aging is why the WHEP tests changed
   (`rs/moq-webrtc/src/lib.rs` `flowing!`, and `cd42c40e49`). Recommended:
   land it only if something still reads the duration once
-  [GROUP_END has no End](/quest/m2/time-addressing/group-end-whole.md), such
+  [GROUP_END has no End](https://github.com/moq-dev/moq/pull/9221), such
   as hang's duration marker or the HLS export, and say in the PR either way.
 
 The rest of the branch (its end and loss tests, `read_breaks`, the HLS

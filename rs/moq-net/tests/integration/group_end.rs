@@ -1,8 +1,8 @@
 #![cfg(feature = "async")]
 
-//! A group finished whole reaches the next hop with its end, over a subscription and over a
-//! fetch, and a closed one without it. Lite-07 says which with GROUP_END; earlier versions
-//! end every group with a bare FIN, so each arrives closed.
+//! A group finished whole reaches the next hop whole, over a subscription and over a fetch,
+//! and a closed one only closed. Lite-07 says which with GROUP_END; earlier versions end every
+//! group with a bare FIN, so each arrives closed.
 
 use crate::support;
 
@@ -23,7 +23,7 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	producer.with_proxy(true)
 }
 
-/// Group 0 finished at 500ms and group 1000 closed, on a live track that keeps both.
+/// Group 0 finished whole and group 1000 closed, on a live track that keeps both.
 fn publish(origin: &moq_net::origin::Producer) -> (moq_net::origin::Route, moq_net::track::Producer) {
 	let broadcast = origin.route("room", moq_net::origin::RouteOptions::hidden()).unwrap();
 	let track = broadcast
@@ -34,31 +34,31 @@ fn publish(origin: &moq_net::origin::Producer) -> (moq_net::origin::Route, moq_n
 		)
 		.unwrap();
 	broadcast.announce().unwrap();
-	for (start, end) in [(0, Some(500)), (1000, None)] {
+	for (start, whole) in [(0, true), (1000, false)] {
 		let mut group = track.append_group(Timestamp::from_millis(start).unwrap()).unwrap();
 		group
 			.write_frame(Timestamp::from_millis(start).unwrap(), b"x".as_slice())
 			.unwrap();
-		match end {
-			Some(end) => group.finish_at(end).unwrap(),
-			None => group.finish().unwrap(),
+		match whole {
+			true => group.finish_whole().unwrap(),
+			false => group.finish().unwrap(),
 		};
 	}
 	(broadcast, track)
 }
 
-/// Read `group` to its end, returning where it says it ends.
-async fn read_to_end(mut group: moq_net::group::Consumer) -> Option<u64> {
+/// Read `group` to its end, returning whether it says it is whole.
+async fn read_to_end(mut group: moq_net::group::Consumer) -> bool {
 	while kio::clock::timeout(TIMEOUT, group.read_frame())
 		.await
 		.expect("read timeout")
 		.unwrap()
 		.is_some()
 	{}
-	group.end()
+	group.is_whole()
 }
 
-async fn round(version: &str) -> (Vec<(u64, Option<u64>)>, Option<u64>) {
+async fn round(version: &str) -> (Vec<(u64, bool)>, bool) {
 	let publisher = produce_origin(1);
 	let (_broadcast, _track) = publish(&publisher);
 	let client = produce_origin(2);
@@ -120,14 +120,11 @@ async fn round(version: &str) -> (Vec<(u64, Option<u64>)>, Option<u64>) {
 }
 
 #[kio::test]
-async fn a_finished_group_arrives_with_its_end() {
+async fn a_whole_group_arrives_whole() {
 	for version in VERSIONS {
 		let (subscribed, fetched) = round(version).await;
-		let whole = match *version {
-			"moq-lite-07-wip" => Some(500),
-			_ => None,
-		};
-		assert_eq!(subscribed, [(0, whole), (1000, None)], "{version}: subscribed");
+		let whole = *version == "moq-lite-07-wip";
+		assert_eq!(subscribed, [(0, whole), (1000, false)], "{version}: subscribed");
 		assert_eq!(fetched, whole, "{version}: fetched");
 	}
 }

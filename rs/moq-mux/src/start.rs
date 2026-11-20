@@ -74,12 +74,3 @@ pub(crate) fn after(track: &moq_net::track::Producer, timestamp: moq_net::Timest
 	}
 }
 
-/// Where a group ends whole on `track` when its content stops at `timestamp`: `timestamp` in the
-/// track's timescale, or `None` when that doesn't pass `start` or won't convert.
-pub(crate) fn end(track: &moq_net::track::Producer, start: u64, timestamp: moq_net::Timestamp) -> Option<u64> {
-	let end = track.info().rescale(timestamp).ok()?;
-	// A scale-less track's key is no time.
-	end.scale()?;
-	let end = end.value();
-	(end > start).then_some(end)
-}

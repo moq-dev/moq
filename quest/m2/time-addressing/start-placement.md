@@ -17,7 +17,7 @@ its in-band group end markers (empty duration frame, discontinuity marker
 group) on every transport (rejected: readers infer stops from lite-07's
 GROUP_END position). This reverses the 2026-11-16 decision that dropped the
 markers before the cut, and GROUP_END's timestamp goes instead (see
-[group-end-whole](/quest/m2/time-addressing/group-end-whole.md)). So
+[moq-dev/moq#9221](https://github.com/moq-dev/moq/pull/9221)). So
 `Read::End`, `Producer::discontinuity`, `Container::end`, and
 `Container::finish_group` keep their meaning, and the hang draft keeps its
 marker rules.
@@ -53,7 +53,3 @@ reads them as continuous where the media is; an HLS export of a track whose
 first frame sits above its group start lands in the same segment as before.
 
 Public API: none expected; a renamed parameter is not a break. Wire: none.
-
-## Related
-
-- [GROUP_END is a bare whole marker](/quest/m2/time-addressing/group-end-whole.md) - the wire half of the same re-plan

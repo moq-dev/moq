@@ -94,9 +94,9 @@ class GroupState {
 	readonly start: bigint;
 	frames = new Signal(new Queue<Frame>());
 	closed = new Once<Error | null>();
-	// Where the group ends, in its track's timescale, once its producer finished it whole: set
-	// before a clean `closed`, and undefined when it only closed.
-	end?: bigint;
+	// Whether its producer finished the group whole: set before a clean `closed`, and false
+	// when it only closed.
+	whole = false;
 	total = new Signal<number>(0); // The total number of frames in the group thus far
 
 	// Index of the frame at the front of `frames`, advanced by a read: the index the next
@@ -466,7 +466,7 @@ export class Producer {
 		if (dst.closed.peek() !== undefined) return makeConsumer(dst);
 		const closed = this.#state.closed.peek();
 		if (closed !== undefined) {
-			dst.end = this.#state.end;
+			dst.whole = this.#state.whole;
 			dst.closed.set(closed);
 			return makeConsumer(dst);
 		}
@@ -712,8 +712,10 @@ export class Producer {
 	}
 
 	/**
-	 * Ends the group without saying where it ends, returning it as {@link Finished}: every frame
-	 * written reaches its readers, but they can't tell the group is whole. Idempotent, as the
+	 * Closes the group without saying it is whole, returning it as {@link Finished}: every frame
+	 * written reaches its readers, but they can't tell whether frames are missing, so failover
+	 * may continue it from another copy. How a relay ends a group that expired or arrived
+	 * partial; a producer that wrote every frame calls {@link finishWhole}. Idempotent, as the
 	 * Rust `group::Producer::finish`.
 	 */
 	finish(): Finished {
@@ -722,13 +724,12 @@ export class Producer {
 	}
 
 	/**
-	 * Ends the group whole at `end`, the exclusive end of its presentation in the track's
-	 * timescale, returning it as {@link Finished}, as the Rust `group::Producer::finish_at`. An
-	 * `end` at or before the group's start throws {@link TimestampMismatch}.
+	 * Ends the group whole, returning it as {@link Finished}: it holds every frame it will ever
+	 * have. A whole group with no successor ages from one mean frame interval past its highest
+	 * frame timestamp, as the Rust `group::Producer::finish_whole`.
 	 */
-	finishAt(end: bigint): Finished {
-		if (end <= this.start) throw new TimestampMismatch();
-		if (this.#state.closed.peek() === undefined) this.#state.end = end;
+	finishWhole(): Finished {
+		if (this.#state.closed.peek() === undefined) this.#state.whole = true;
 		this.#end(null);
 		return this;
 	}
@@ -780,7 +781,7 @@ export class Producer {
 		if (outcome === undefined) return;
 		for (const mirror of this.#mirrors?.keys() ?? []) {
 			if (mirror.closed.peek() === undefined) {
-				if (outcome === null) mirror.end = this.#state.end;
+				if (outcome === null) mirror.whole = this.#state.whole;
 				mirror.closed.set(outcome);
 			}
 			this.#unmirror(mirror);
@@ -1022,11 +1023,11 @@ export class Consumer {
 	}
 
 	/**
-	 * Where the group ends in its track's timescale, once its producer finished it whole with
-	 * {@link Producer.finishAt}'s `end`: undefined while it is open, or when it ended without one.
+	 * Whether its producer finished the group whole with {@link Producer.finishWhole}: false
+	 * while it is open, aborted, or only closed.
 	 */
-	get end(): bigint | undefined {
-		return this.#state.closed.peek() === null ? this.#state.end : undefined;
+	get whole(): boolean {
+		return this.#state.closed.peek() === null && this.#state.whole;
 	}
 
 	/**

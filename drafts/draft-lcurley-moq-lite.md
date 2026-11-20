@@ -182,7 +182,7 @@ A publisher never creates a Group with start 2^64-1, so every span of starts end
 
 A Group ends in one of three ways:
 
-- Finished: a [GROUP_END](#group-end) names where it ends, so it is whole.
+- Finished: a [GROUP_END](#group-end) says it is whole.
 - Closed: its stream ends (FIN) without a GROUP_END, so every Frame sent on it arrived, but the Group may have held more.
 - Aborted: its stream is reset.
 
@@ -810,12 +810,12 @@ A FETCH can additionally carry `Subscriber Max Age`; it can tighten, but never r
 It is not crucial to aggressively expire groups thanks to [prioritization](#prioritization), but a lower priority group still consumes RAM, bandwidth, and potentially flow control.
 It is RECOMMENDED that an application set conservative limits and only resort to expiration when data is absolutely no longer needed.
 
-A group is never expired until its **successor** has arrived: the next group by start that has arrived at this hop and was not reset.
-The latest group has no successor, so it is never expired.
+A group is never expired until its **successor** has arrived, the next group by start that has arrived at this hop and was not reset, or until it finished (see [GROUP_END](#group-end)).
+The latest group, while it has not finished, has no successor, so it is never expired.
 A group is expired once either of two ages meets the relevant `Max Age`:
 
 - Its **timestamp age** is the difference between the *newest* frame timestamp of the latest group that has at least one frame, and this group's **reach**, defined below.
-- Its **arrival age** is the time elapsed since its successor arrived at this hop.
+- Its **arrival age** is the time elapsed since its successor arrived at this hop. A finished group with no successor ages from its own reach instead: the time elapsed since it arrived at this hop, less the span from its first frame timestamp to its reach.
 
 On a scale-less Track, timestamp age counts bare units as the milliseconds of a Max Age.
 
@@ -825,10 +825,13 @@ Being behind is not itself a reason to expire anything.
 [Prioritization](#prioritization) already transmits newer groups first, so an older group consumes only whatever capacity is left over; it therefore closes the gap faster than the live edge advances, and a receiver that is behind can converge without losing content.
 What cannot be recovered is a group with nothing left worth delivering, and that is what expiration removes.
 
-A group's **reach** is its own end once it finished (see [GROUP_END](#group-end)), and otherwise the first frame timestamp of the next group by start, or unbounded when no later group has presented a frame.
-A group cannot present past its end or where its successor begins, so this is the furthest it could still reach.
-Its frames alone do not bound it: frame durations are not carried on the wire, so a group's last frame timestamp is where that frame *starts* presenting, not where the group ends.
-An unfinished group whose successor has not presented a frame therefore has no timestamp age, because nothing yet proves where it stops.
+A group's **reach** is the first frame timestamp of the next group by start, and otherwise, once it finished, one frame past its own highest frame timestamp, or unbounded when neither exists.
+A group cannot present past where its successor begins, so this is the furthest it could still reach.
+A finished group with no successor holds every frame it will ever have, so its own frames stand in.
+Frame durations are not carried on the wire, so its highest frame timestamp is where its last frame *starts* presenting; one frame is its mean interval instead, the span from its first frame timestamp to its highest divided by one less than its frame count.
+A finished group whose frames measure no interval, one frame or all at one timestamp, has no reach without a successor, so it never expires before one arrives.
+A closed group may have held more frames than arrived, so its frames do not bound it.
+An unfinished or closed group whose successor has not presented a frame therefore has no timestamp age, because nothing yet proves where it stops.
 The group itself needs no timestamp: a zero-frame group (a keep-alive or gap marker) is bounded by its successor's first frame the same way.
 
 Reach is an exclusive bound, so a timestamp age **equal** to Max Age already expires the group: the freshest frame it could still hold sits strictly below its reach, and is therefore strictly older than the budget.
@@ -2236,15 +2239,11 @@ It shares FRAME's leading field, reserving the `Payload Length` value 0 that a F
 ~~~
 GROUP_END Message {
   Payload Length (i) = 0
-  End (i)
 }
 ~~~
 
-**End**:
-The Group's exclusive end: the timestamp where it stops presenting, in the Track's `Timescale`, or a bare number on a scale-less Track.
-It is greater than every frame timestamp in the Group and no greater than the next Group's start; a receiver treats an `End` at or below the Group's start as a malformed Track.
-
 A Group that ends with a GROUP_END is whole: every frame it will ever hold has been sent.
+It carries no end position: where a Group stops presenting is the application's to say, in its frames.
 The publisher FINs the stream right after it, and a receiver treats any byte that follows as a malformed Track.
 A stream that FINs without a GROUP_END carries a closed Group, which may have held more frames than arrived (see [Group](#group)).
 
@@ -2363,7 +2362,7 @@ A stream that FINs without a GROUP_END carries a closed Group, which may have he
 - Added a leading Type to datagrams, 0x0 for a Track Datagram; a receiver discards one of an unknown Type.
 - FRAME and datagrams always carry a timestamp, a bare number on a scale-less Track.
 - Replaced GROUP's `Group Sequence` with `Group Start`, added `Previous Start`, the start of the Group before it, so a subscriber sees the gap before a Group without a SUBSCRIBE_SKIP.
-- Added GROUP_END, a `Payload Length` of 0 followed by the Group's exclusive end: a Group or Fetch Stream ends with it when its Group finished, a FIN alone ends a closed Group whose frames may not all exist, and a reset aborts. A Group's own end bounds its reach.
+- Added GROUP_END, a `Payload Length` of 0: a Group or Fetch Stream ends with it when its Group finished whole, a FIN alone ends a closed Group whose frames may not all exist, and a reset aborts. A finished Group with no successor expires one mean frame interval past its own highest frame timestamp.
 - Expiration also measures a group's arrival age, the time since its successor arrived at this hop.
 - A relay closes a Group it holds only the start of, without a GROUP_END. A publisher resets the Group Stream of a group that expires with OLD, even one whose GROUP_END it sent but is not yet acknowledged, and names the group in a SUBSCRIBE_DROP with OLD.
 - FRAME leads with `Payload Length`, the payload size plus one, in place of the trailing `Message Length`; 0 is malformed.

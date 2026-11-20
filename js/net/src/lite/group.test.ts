@@ -151,19 +151,19 @@ function lite07(...values: (number | bigint)[]): Uint8Array {
 }
 
 // What reading `bytes` as group `start`'s lite-07 frames resolves with, or the error it throws.
-async function readLite07(bytes: Uint8Array, start = 0n, scale = SCALE): Promise<bigint | undefined | unknown> {
+async function readLite07(bytes: Uint8Array, start = 0n, scale = SCALE): Promise<boolean | unknown> {
 	const producer = new Producer(start);
 	return readFrames(streamOf([bytes], Version.DRAFT_07), producer, { scale, lengthFirst: true }).catch(
 		(err: unknown) => err,
 	);
 }
 
-// A lite-07 GROUP_END, a Payload Length of 0 then the End, says where a whole group ends; a stream
-// ending without one only closes it.
-test("a lite-07 GROUP_END says where the group ends", async () => {
+// A lite-07 GROUP_END, a Payload Length of 0, says the group is whole; a stream ending without one
+// only closes it.
+test("a lite-07 GROUP_END says the group is whole", async () => {
 	const frame = [2, 0, 7];
-	expect(await readLite07(lite07(...frame, 0, 500))).toBe(500n);
-	expect(await readLite07(lite07(...frame))).toBeUndefined();
+	expect(await readLite07(lite07(...frame, 0))).toBe(true);
+	expect(await readLite07(lite07(...frame))).toBe(false);
 });
 
 // A publisher that stalls between GROUP_END and its FIN can't hold the read open: the group's own
@@ -173,7 +173,7 @@ test("a lite-07 GROUP_END still waiting for its FIN stops once the group closes"
 	const stream = new Reader(
 		new ReadableStream<Uint8Array>({
 			start(controller) {
-				controller.enqueue(lite07(2, 0, 7, 0, 500));
+				controller.enqueue(lite07(2, 0, 7, 0));
 			},
 		}),
 		undefined,
@@ -184,16 +184,14 @@ test("a lite-07 GROUP_END still waiting for its FIN stops once the group closes"
 	// The frame and GROUP_END arrive together, so once the frame is read the FIN is all that's left.
 	expect((await consumer.readFrame())?.payload).toEqual(new Uint8Array([7]));
 	producer.abort(new Error("evicted"));
-	expect(await done).toBeUndefined();
+	expect(await done).toBe(false);
 });
 
-// An End at or before the group's start, or anything after GROUP_END, is malformed. A malformed
-// FRAME ends only its stream, so it is a stream error rather than a session's protocol violation.
+// Anything after GROUP_END is malformed. A malformed FRAME ends only its stream, so it is a stream
+// error rather than a session's protocol violation.
 test.each([
-	["an End at the group's start", lite07(0, 5), 5n],
-	["an End before the group's start", lite07(0, 4), 5n],
-	["a byte after GROUP_END", lite07(0, 9, 0), 5n],
-	["a frame after GROUP_END", lite07(0, 9, 2, 0, 7), 5n],
+	["a byte after GROUP_END", lite07(0, 0), 5n],
+	["a frame after GROUP_END", lite07(0, 2, 0, 7), 5n],
 ])("a lite-07 GROUP_END with %s is malformed", async (_, bytes, start) => {
 	const err = await readLite07(bytes, start);
 	expect(err).toBeInstanceOf(StreamError);

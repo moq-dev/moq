@@ -91,7 +91,7 @@ impl Producer {
 		Ok(())
 	}
 
-	/// Finish the group without a known end. No more frames will be written.
+	/// Close the group without saying it is whole. No more frames will be written.
 	///
 	/// # Errors
 	///

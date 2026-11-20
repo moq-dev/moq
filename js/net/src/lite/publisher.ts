@@ -138,12 +138,9 @@ export function frameHeader(
 	return concat(parts);
 }
 
-/**
- * Lite-07 GROUP_END, after a finished group's last frame: a zero `Payload Length`, where a frame
- * would start, then the group's exclusive `end` in the track's timescale.
- */
-function groupEnd(version: StreamVersion, end: bigint): Uint8Array {
-	return concat([encodeVarint(0, version), encodeVarint(end, version)]);
+/** Lite-07 GROUP_END, after a whole group's last frame: a zero `Payload Length`, where a frame would start. */
+function groupEnd(version: StreamVersion): Uint8Array {
+	return encodeVarint(0, version);
 }
 
 /** How a lite hop stamps a track's frames and datagrams. */
@@ -2509,10 +2506,9 @@ export class Publisher {
 				else if (frame.payload.length > 0) await stream.write(frame.payload);
 			});
 		}
-		// Lite-07: a response that reached a finished group's end says so before the FIN.
-		const end = group.end;
-		if (hasGroupEnd(this.version) && end !== undefined && hooks.groupIndex(group) >= group.frameCount)
-			await write(() => stream.write(groupEnd(stream.version, end)));
+		// Lite-07: a response that reached a whole group's end says so before the FIN.
+		if (hasGroupEnd(this.version) && group.whole && hooks.groupIndex(group) >= group.frameCount)
+			await write(() => stream.write(groupEnd(stream.version)));
 	}
 
 	/**
@@ -2594,7 +2590,7 @@ export class Publisher {
 			// Whether the cursor ever reached the requested start, which decides how the
 			// end of the group is read below. A received tail may already begin there.
 			let reached = hooks.groupIndex(group) === startFrame;
-			// Whether every frame went out, which a finished group's GROUP_END then claims.
+			// Whether every frame went out, which a whole group's GROUP_END then claims.
 			let whole = false;
 
 			for (;;) {
@@ -2641,9 +2637,8 @@ export class Publisher {
 				});
 			}
 
-			// Lite-07 ends a finished group with GROUP_END.
-			const end = hasGroupEnd(this.version) && whole ? group.end : undefined;
-			if (end !== undefined) await write(() => stream.write(groupEnd(stream.version, end)));
+			// Lite-07 ends a whole group with GROUP_END.
+			if (hasGroupEnd(this.version) && whole && group.whole) await write(() => stream.write(groupEnd(stream.version)));
 			stream.close();
 			group.close();
 			// A stream that fails after its FIN may have lost its header, so report it for a DROP.

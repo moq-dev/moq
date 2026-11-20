@@ -2048,7 +2048,7 @@ export class Subscriber {
 		try {
 			// One guard covers both header waits and a stalled payload. Abandonment aborts
 			// the group before resetting the stream, releasing the shared frame pump too.
-			const end = await untilAbandoned(
+			const whole = await untilAbandoned(
 				group,
 				readFrames(stream.reader, group, {
 					scale: info.timescale ?? 0,
@@ -2057,9 +2057,9 @@ export class Subscriber {
 				}),
 			);
 
-			// Whole at a GROUP_END's end, else without one: every frame sent arrived.
-			if (end === undefined) group.finish();
-			else group.finishAt(end);
+			// Whole after a GROUP_END, else only closed: every frame sent arrived.
+			if (whole) group.finishWhole();
+			else group.finish();
 			stream.close();
 		} catch (err: unknown) {
 			const e = error(err);
@@ -2396,7 +2396,7 @@ export class Subscriber {
 		try {
 			// Once no reader holds the group or waits to pick it up, cancel upstream and abort the
 			// truncated group rather than cache it whole, as the Rust fetch's ingest does.
-			const end = await untilAbandoned(
+			const whole = await untilAbandoned(
 				group,
 				readFrames(stream.reader, group, {
 					scale: framing.timescale,
@@ -2404,9 +2404,9 @@ export class Subscriber {
 					lengthFirst: hasLengthFirst(this.version),
 				}),
 			);
-			// Whole at a GROUP_END's end, else without one: every frame sent arrived.
-			if (end === undefined) group.finish();
-			else group.finishAt(end);
+			// Whole after a GROUP_END, else only closed: every frame sent arrived.
+			if (whole) group.finishWhole();
+			else group.finish();
 			stream.close();
 		} catch (err: unknown) {
 			const e = error(err);
@@ -3033,11 +3033,11 @@ export class Subscriber {
 
 			const format = { scale: timescale, compress: entry.compress, lengthFirst: hasLengthFirst(this.version) };
 			const frames = readFrames(stream, producer, format);
-			const end = await (entry.filling ? untilAbandoned(producer, frames) : frames);
+			const whole = await (entry.filling ? untilAbandoned(producer, frames) : frames);
 
-			// Whole at a GROUP_END's end, else without one: every frame sent arrived.
-			if (end === undefined) producer.finish();
-			else producer.finishAt(end);
+			// Whole after a GROUP_END, else only closed: every frame sent arrived.
+			if (whole) producer.finishWhole();
+			else producer.finish();
 			stream.stop(StreamCode.Cancel);
 		} catch (err: unknown) {
 			// A violation ends the session, which the connection does once it escapes; anything

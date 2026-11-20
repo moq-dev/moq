@@ -1748,11 +1748,10 @@ test("a malformed lite-07 group stream ends only its group", async () => {
 		const zero = new TextEncoder().encode("zero");
 		const first = handStream(version);
 		first.write(await liteFrame(300, zero));
-		// A zero Payload Length, the End, then a byte where only the FIN may follow.
+		// A zero Payload Length, then a byte where only the FIN may follow.
 		first.write(
 			await Writer.collect(version, async (w) => {
 				await w.u53(0);
-				await w.u62(1000n);
 				await w.u53(0);
 			}),
 		);

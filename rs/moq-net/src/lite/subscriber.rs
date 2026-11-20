@@ -1539,8 +1539,11 @@ impl GroupRecv {
 		});
 
 		let res = match res {
-			// Whole at a GROUP_END's end, else closed: every frame sent arrived.
-			Ok(end) => group.end(end),
+			// Whole after a GROUP_END, else closed: every frame sent arrived.
+			Ok(whole) => {
+				group.end(whole);
+				Ok(())
+			}
 			Err(err @ (Error::Cancel | Error::Stream(crate::StreamError::Cancel))) => {
 				let _ = group.abort(err);
 				Ok(())
@@ -1603,10 +1606,8 @@ enum IngestPhase {
 	/// Lite-07: reading the `Payload Length`, the payload size plus one, which leads the
 	/// frame, or 0 for GROUP_END. Stream end here means the group closed incomplete.
 	Length,
-	/// Lite-07: reading GROUP_END's `End`, the group's exclusive end.
-	GroupEnd,
-	/// Lite-07: GROUP_END said where the group ends, so only the stream end may follow.
-	Finished { end: u64 },
+	/// Lite-07: GROUP_END said the group is whole, so only the stream end may follow.
+	Whole,
 	/// Reading the timestamp delta (skipped when frames carry none), after the size on lite-07.
 	/// Stream end here before lite-07 means the group has no more frames.
 	Timing { size: Option<u64> },
@@ -1707,15 +1708,15 @@ impl FrameIngest {
 		}
 	}
 
-	/// `Ready(Ok(end))` once the stream FINs on a frame boundary, with the group's end when a
-	/// GROUP_END preceded the FIN. The caller finishes, closes, or aborts the group; a frame
-	/// cut short mid-payload was already aborted here with the reason.
+	/// `Ready(Ok(whole))` once the stream FINs on a frame boundary, whole when a GROUP_END
+	/// preceded the FIN. The caller finishes, closes, or aborts the group; a frame cut short
+	/// mid-payload was already aborted here with the reason.
 	pub(crate) fn poll<R: crate::transport::poll::RecvStream + crate::coding::Pause>(
 		&mut self,
 		reader: &mut Reader<R, Version>,
 		group: &mut crate::recv::Group,
 		waiter: &kio::Waiter,
-	) -> Poll<Result<Option<u64>, Error>> {
+	) -> Poll<Result<bool, Error>> {
 		let mut budget = kio::coop::Budget::new(32);
 		loop {
 			match &mut self.phase {
@@ -1737,7 +1738,7 @@ impl FrameIngest {
 				}
 				IngestPhase::Object => {
 					let Some(code) = ready!(reader.poll_varint_maybe(waiter))? else {
-						return Poll::Ready(Ok(None));
+						return Poll::Ready(Ok(false));
 					};
 					let records = self.records.as_mut().expect("the Group State came first");
 					let (id, end) = lite::ietf::decode_object(records.prior, code)?;
@@ -1784,11 +1785,11 @@ impl FrameIngest {
 					if ready!(reader.poll_has_more(waiter))? {
 						return Poll::Ready(Err(Error::ProtocolViolation));
 					}
-					return Poll::Ready(Ok(None));
+					return Poll::Ready(Ok(false));
 				}
 				IngestPhase::Length => {
 					let Some(length) = ready!(self.poll_header_varint(reader, true, waiter))? else {
-						return Poll::Ready(Ok(None));
+						return Poll::Ready(Ok(false));
 					};
 					// 0 is GROUP_END, where a frame would start. Under object records a record
 					// precedes every FRAME, and the group's end is the stream's.
@@ -1796,21 +1797,16 @@ impl FrameIngest {
 						if self.records.is_some() {
 							return Poll::Ready(Err(Error::ProtocolViolation));
 						}
-						self.phase = IngestPhase::GroupEnd;
+						self.phase = IngestPhase::Whole;
 						continue;
 					};
 					self.phase = IngestPhase::Timing { size: Some(size) };
 				}
-				IngestPhase::GroupEnd => {
-					let end = ready!(reader.poll_varint(waiter))?;
-					self.phase = IngestPhase::Finished { end };
-				}
-				IngestPhase::Finished { end } => {
-					let end = *end;
+				IngestPhase::Whole => {
 					if ready!(reader.poll_has_more(waiter))? {
 						return Poll::Ready(Err(Error::MalformedTrack));
 					}
-					return Poll::Ready(Ok(Some(end)));
+					return Poll::Ready(Ok(true));
 				}
 				IngestPhase::Timing { size } => {
 					let size = *size;
@@ -1820,7 +1816,7 @@ impl FrameIngest {
 					}
 					// Before lite-07 the timestamp delta doubles as the per-frame sentinel.
 					let Some(zz) = ready!(self.poll_header_varint(reader, size.is_none(), waiter))? else {
-						return Poll::Ready(Ok(None));
+						return Poll::Ready(Ok(false));
 					};
 					let next: u64 = (self.prev_ts as i128 + crate::coding::varint::unzigzag(zz) as i128)
 						.try_into()
@@ -1844,7 +1840,7 @@ impl FrameIngest {
 						true => {
 							let boundary = size.is_none() && !self.framing.stamped();
 							let Some(inflated) = ready!(self.poll_header_varint(reader, boundary, waiter))? else {
-								return Poll::Ready(Ok(None));
+								return Poll::Ready(Ok(false));
 							};
 							Some(inflated)
 						}
@@ -1862,7 +1858,7 @@ impl FrameIngest {
 					let (timestamp, inflated) = (*timestamp, *inflated);
 					let boundary = !self.framing.stamped() && !group.compressed();
 					let Some(size) = ready!(self.poll_header_varint(reader, boundary, waiter))? else {
-						return Poll::Ready(Ok(None));
+						return Poll::Ready(Ok(false));
 					};
 					let header = self.header(group, timestamp, inflated, size)?;
 					self.phase = IngestPhase::Admit { header };
@@ -4626,12 +4622,12 @@ mod tests {
 		}
 	}
 
-	/// GROUP_END finishes the group whole at its End, and a bare FIN closes it with every frame
-	/// sent but no end: each frame is its `Payload Length`, a timestamp delta, and the payload.
+	/// GROUP_END finishes the group whole, and a bare FIN closes it with every frame sent but
+	/// not whole: each frame is its `Payload Length`, a timestamp delta, and the payload.
 	#[kio::test]
 	async fn group_end_finishes_and_a_bare_fin_closes() {
 		let x = u64::from(b'x');
-		for (body, end) in [(&[2, 0, x, 0, 5][..], Some(5)), (&[2, 0, x][..], None)] {
+		for (body, whole) in [(&[2, 0, x, 0][..], true), (&[2, 0, x][..], false)] {
 			let (res, track, _) =
 				receive_lite07(lite07(Some(Timescale::MILLI)), false, lite07_header(0, None), body).await;
 			res.unwrap();
@@ -4641,28 +4637,25 @@ mod tests {
 				b"x"[..]
 			);
 			assert!(group.read_frame().now_or_never().unwrap().unwrap().is_none());
-			assert_eq!(group.end(), end, "{body:?}");
+			assert_eq!(group.is_whole(), whole, "{body:?}");
 		}
 	}
 
-	/// Anything after GROUP_END, an End the group refuses (at or before its start), or a
-	/// zero length under object records, where a record would come first, is refused.
+	/// Anything after GROUP_END, or a zero length under object records, where a record would
+	/// come first, is refused.
 	#[kio::test]
 	async fn group_end_refuses_what_cannot_end_a_group() {
 		let x = u64::from(b'x');
 		for (key, body, reason) in [
-			(0, &[2, 0, x, 0, 5, 0][..], "a byte after GROUP_END"),
-			(0, &[2, 0, x, 0, 5, 2, 0, x], "a frame after GROUP_END"),
-			(5, &[2, 5, x, 0, 5], "an End at the group's start"),
-			(5, &[2, 5, x, 0, 4], "an End before the group's start"),
-			(0, &[0], "a stream ending inside GROUP_END"),
+			(0, &[2, 0, x, 0, 0][..], "a byte after GROUP_END"),
+			(0, &[2, 0, x, 0, 2, 0, x], "a frame after GROUP_END"),
 		] {
 			let (res, track, _) =
 				receive_lite07(lite07(Some(Timescale::MILLI)), false, lite07_header(key, None), body).await;
 			assert!(res.is_err(), "accepted {reason}");
 			if let Some(mut group) = track.consume().peek_group(key) {
 				while let Some(Ok(Some(_))) = group.read_frame().now_or_never() {}
-				assert!(group.end().is_none(), "{reason}: the group finished");
+				assert!(!group.is_whole(), "{reason}: the group finished whole");
 			}
 		}
 		let (res, ..) = receive_ietf(draft18(None), &[0, 0]).await;
@@ -13561,10 +13554,8 @@ impl kio::Task for FetchServeRun {
 						unreachable!()
 					};
 					match res {
-						// Whole at a GROUP_END's end, else closed; an end the group refuses aborts it.
-						Ok(end) => {
-							let _ = producer.end(end);
-						}
+						// Whole after a GROUP_END, else closed.
+						Ok(whole) => producer.end(whole),
 						Err(err) => {
 							let _ = producer.abort(err);
 						}

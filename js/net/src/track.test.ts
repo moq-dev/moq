@@ -2067,6 +2067,50 @@ test("a stalled track serves only its newest group", () => {
 	}
 });
 
+// The last group, finished whole, ages from one mean frame interval past its highest frame
+// timestamp. One only closed may lack later frames, so it never ages without a successor. Mirrors
+// the Rust `a_whole_group_ages_from_its_highest_frame`.
+test.each([true, false])("a last group finished whole=%s ages from its highest frame", (whole) => {
+	const clock = manualTime(10_000);
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Duration.ZERO });
+	try {
+		const group = producer.appendGroup(Timestamp.fromMillis(0));
+		// Out of order, as B-frames are: the highest is not the last written.
+		for (const millis of [0, 40, 20]) group.writeFrame(textFrame("x", Timestamp.fromMillis(millis)));
+		if (whole) group.finishWhole();
+		else group.finish();
+
+		// Three frames over 40ms: a 20ms mean interval, so it presents until 60ms.
+		clock.set(10_059);
+		expect(drain(producer.subscribe({ delay: { max: Duration.millis(1000) } }))).toEqual([0n]);
+		clock.set(10_060);
+		expect(drain(producer.subscribe({ delay: { max: Duration.millis(1000) } }))).toEqual(whole ? [] : [0n]);
+	} finally {
+		producer.finish();
+		producer.close();
+		clock.installed.close();
+	}
+});
+
+// A whole group whose frames measure no interval, one frame here, says nothing about how long it
+// presents, so like a closed one it never ages without a successor. Mirrors the Rust
+// `a_whole_group_of_one_frame_never_ages_alone`.
+test("a whole group of one frame never ages alone", () => {
+	const clock = manualTime(10_000);
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Duration.ZERO });
+	try {
+		const group = producer.appendGroup(Timestamp.fromMillis(0));
+		group.writeFrame(textFrame("x", Timestamp.fromMillis(0)));
+		group.finishWhole();
+		clock.set(70_000);
+		expect(drain(producer.subscribe({ delay: { max: Duration.millis(1000) } }))).toEqual([0n]);
+	} finally {
+		producer.finish();
+		producer.close();
+		clock.installed.close();
+	}
+});
+
 // A peer whose timestamps barely advance never ages a group out on media time. The wall
 // clock still does.
 test("frozen timestamps still age out by wall clock", () => {

@@ -47,7 +47,7 @@ removal, a rename, or a wire, catalog, or format change that is free until
 - **Catalog, drafts, and formats.** hang-04 (done: the `sync` section, a version per entry, no video `warmup`, the TS passthrough under
   `mpegts`, one strict rule);
   declared ends, back from m3, which became
-  [a whole marker](/quest/m2/time-addressing/group-end-whole.md) on 2026-11-19.
+  [a whole marker](https://github.com/moq-dev/moq/pull/9221) on 2026-11-19.
 - **Native media and gateways.** [Upstream str0m](https://github.com/moq-dev/moq/pull/8963), which reverses the
   2026-10-30 vendoring.
 - **Bindings.** The C API as `libmoq` (done), reversing 2026-10-25.

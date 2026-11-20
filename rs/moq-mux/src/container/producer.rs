@@ -738,20 +738,12 @@ where
 	/// returns [`InvalidEnd`](super::InvalidEnd) without flushing or closing the group.
 	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> crate::Result<()> {
 		let marker_at = end.or_else(|| self.estimated_end());
-		self.close(end, marker_at, None)
+		self.close(end, marker_at)
 	}
 
-	/// Close the current group, ending a video track's group with a duration marker at `marker_at`.
-	///
-	/// The group ends whole at `whole`, else at a bound `end` the caller knows, such as the next
-	/// keyframe, else where a media track's duration marker goes, so a reader can tell the group
-	/// starting there continues it.
-	fn close(
-		&mut self,
-		end: Option<moq_net::Timestamp>,
-		marker_at: Option<moq_net::Timestamp>,
-		whole: Option<moq_net::Timestamp>,
-	) -> crate::Result<()> {
+	/// Close the current group whole, ending a video track's group with a duration marker at
+	/// `marker_at`.
+	fn close(&mut self, end: Option<moq_net::Timestamp>, marker_at: Option<moq_net::Timestamp>) -> crate::Result<()> {
 		if self.container.kind() == Kind::Video
 			&& !self.reordered
 			&& let Some((end, previous)) = end.zip(self.previous_timestamp)
@@ -777,10 +769,7 @@ where
 		self.previous_timestamp = None;
 
 		let tail_end = marker_at.filter(|_| !reordered);
-		// Media ends whole where its last frame does, as the duration marker says. A data track's
-		// items have no cadence to estimate that from.
-		let estimated = tail_end.filter(|_| self.container.kind() != Kind::Data);
-		if let Err(err) = self.close_group(whole.or(end).or(estimated), tail_end, reached) {
+		if let Err(err) = self.close_group(tail_end, reached) {
 			// A group that fails to close fails with the cause, rather than staying open for the next
 			// write to continue.
 			self.buffer.clear();
@@ -792,11 +781,10 @@ where
 		self.publish_estimate()
 	}
 
-	/// Flush the buffer into the open group and finish it, raising the live edge to `reached`. With
-	/// a `bound`, the group ends whole there rather than only closing.
+	/// Flush the buffer into the open group and finish it whole, since it holds every frame
+	/// written, raising the live edge to `reached`.
 	fn close_group(
 		&mut self,
-		bound: Option<moq_net::Timestamp>,
 		tail_end: Option<moq_net::Timestamp>,
 		reached: Option<moq_net::Timestamp>,
 	) -> crate::Result<()> {
@@ -805,10 +793,7 @@ where
 			self.container.finish_group(group, tail_end)?;
 		}
 		if let Some(group) = self.group.take() {
-			match bound.and_then(|bound| crate::start::end(&self.inner, group.start, bound)) {
-				Some(end) => group.finish_at(end)?,
-				None => group.finish()?,
-			};
+			group.finish_whole()?;
 			// Only a closed group reaches anything; a cut with none open names a point nothing reached.
 			if let Some(end) = reached {
 				self.raise_live_edge(end);
@@ -918,8 +903,7 @@ where
 		// The marker starts one unit of the track's timescale before the live edge, so media
 		// resuming right at the edge still starts after it, but not below the latest frame, which
 		// it would otherwise claim to end before. Or one unit past the newest group when that
-		// doesn't pass the group's start. The open group ends whole there, so a reader can tell
-		// the marker follows it.
+		// doesn't pass the group's start.
 		let marker = match (self.pending_start, edge) {
 			// A seek keyed the next group. Its marker is stamped at the live edge, or one unit past
 			// the newest group when the edge is unknown or doesn't pass it, since starts strictly
@@ -940,8 +924,7 @@ where
 				Some((start, timestamp, true))
 			}
 		};
-		let whole = marker.and_then(|(_, timestamp, appended)| appended.then_some(timestamp));
-		self.close(None, None, whole)?;
+		self.close(None, None)?;
 		// Nothing is measured across the break: the frames still open on this side have no end, and
 		// the gap to the far side is not a frame duration.
 		self.estimator.discontinuity();
@@ -966,7 +949,7 @@ where
 				}],
 			)?,
 		}
-		group.finish()?;
+		group.finish_whole()?;
 		Ok(())
 	}
 

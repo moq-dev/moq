@@ -2738,7 +2738,9 @@ mod tests {
 					.unwrap();
 			}
 		}
-		let _finished = producer.finish().unwrap();
+		// Left open, as a live burst is: finished whole, its wall-clock expiry would arm a timer
+		// that lets the paused clock run past the instant this measures.
+		let _producer = producer;
 		let catalog = hang::catalog::VideoConfig::new(hang::catalog::H264 {
 			inline: true,
 			profile: 0x42,

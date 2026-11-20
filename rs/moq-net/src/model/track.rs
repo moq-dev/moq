@@ -2281,15 +2281,13 @@ impl TrackState {
 	/// its immediate successor begins, or `None` when nothing proves where it stops.
 	///
 	/// An upper bound, deliberately. A frame's duration is not on the wire, so a group's
-	/// own last timestamp says where it *starts* presenting, not where it ends; only its
-	/// successor's start proves it cannot run past it. The bound is the *immediate*
+	/// own last timestamp says where its last frame *starts* presenting, not where it ends;
+	/// only its successor's start proves it cannot run past it. The bound is the *immediate*
 	/// servable successor's start, so an unstamped successor leaves the reach unbounded
 	/// until it presents its first frame, and so does having no successor in `servable`
-	/// at all.
+	/// at all. Without one, no edge sits above the group to convict it in media time; a
+	/// whole group ages on the wall clock instead (see [`Self::ended_at`]).
 	fn reach(&self, key: u64, servable: &Servable) -> Option<Timestamp> {
-		if let Some(end) = self.own_end(key) {
-			return Some(end);
-		}
 		self.started_at(self.successor(key, servable)?)
 	}
 
@@ -2312,18 +2310,13 @@ impl TrackState {
 		}
 	}
 
-	/// Where group `key` ends, once its producer finished it whole: what bounds its reach
-	/// without a successor (see [`group::Producer::finish_at`]).
-	fn own_end(&self, key: u64) -> Option<Timestamp> {
-		self.presented(self.lookup.get(&key)?.group.end()?)
-	}
-
 	/// When group `key`, finished whole, stops presenting on the wall clock: its arrival plus
-	/// its span, which stands in for a successor arriving, so the last group of a paused or
-	/// finished track ages out without one.
+	/// the span from its first frame's timestamp to how far its frames present, which stands
+	/// in for a successor arriving, so the last group of a paused or finished track ages out
+	/// without one (see [`group::Producer::finish_whole`]).
 	fn ended_at(&self, key: u64) -> Option<crate::time::Instant> {
 		let slot = self.lookup.get(&key)?;
-		let span = self.presented(slot.group.end()?.checked_sub(key)?)?;
+		let span = slot.group.whole_reach()?.checked_sub(slot.group.timestamp()?).ok()?;
 		slot.arrived.checked_add(age(span)?)
 	}
 
@@ -2423,16 +2416,15 @@ impl TrackState {
 	/// delivering, so a group is abandoned only once everything it could still present
 	/// falls outside the budget.
 	///
-	/// A group's reach is bounded by its own end once finished whole, else by its immediate
-	/// successor (see [`Self::reach`]): it cannot present past where the next group begins.
-	/// The candidate itself needs no timestamp: an empty group is bounded by its stamped
-	/// successor the same way.
+	/// A group's reach is bounded by its immediate successor (see [`Self::reach`]): it cannot
+	/// present past where the next group begins. The candidate itself needs no timestamp: an
+	/// empty group is bounded by its stamped successor the same way.
 	///
 	/// The wall clock judges it too: a group is also stale once its successor arrived a
 	/// full `budget` ago (see [`Self::superseded`]), so a peer whose timestamps stop
 	/// advancing or an empty successor that never presents cannot pin a superseded group.
 	/// Media time still convicts first when a burst arrives at once. A group finished whole
-	/// ages from its arrival plus its span instead when no successor arrived, so the last
+	/// ages from its arrival plus its frames' span instead when no successor arrived, so the last
 	/// group of a paused or finished track ages out; one with neither is never convicted.
 	///
 	/// The bound is exclusive, so the comparison is `>=` rather than `>`: the freshest frame
@@ -2494,7 +2486,7 @@ impl TrackState {
 		// is observed or wakes us, and armed for whichever successor this pass selected, so
 		// re-selecting re-arms it.
 		let arrival = self.watch_abort(waiter, |state| state.arrival(key, servable));
-		// A group finished whole ages from its own end without one; see [`Self::ended_at`].
+		// A group finished whole ages from its own frames without one; see [`Self::ended_at`].
 		let Some(arrived) = self
 			.superseded_at(arrival, servable, superseded)
 			.or_else(|| self.ended_at(key))
@@ -2508,9 +2500,6 @@ impl TrackState {
 			return true;
 		}
 		let reach = loop {
-			if let Some(end) = self.own_end(key) {
-				break end;
-			}
 			// An abort can change reach even after the successor is stamped. Unbounded
 			// until a group shows above, or the successor presents its first frame.
 			let Some(successor) = self.watch_abort(waiter, |state| state.successor(key, servable)) else {
@@ -14864,26 +14853,59 @@ mod test {
 		assert!(!subscriber.is_skipped(20..30));
 	}
 
-	/// A group finished whole ages from its own end, which a zero budget waits for too: a
-	/// fetch before the end still gets it, and one after is told it is old.
+	/// The last group, finished whole, ages from one mean frame interval past its highest frame
+	/// timestamp, which a zero budget waits for too: a fetch before it still gets the group, and
+	/// one after is told it is old. A group only closed may lack later frames, so it never ages
+	/// without a successor.
 	#[kio::test]
 	#[cfg(feature = "async")]
-	async fn a_whole_group_ages_only_once_it_ends() {
+	async fn a_whole_group_ages_from_its_highest_frame() {
+		for whole in [true, false] {
+			let producer = track_producer("test", Info::timed().with_max_age(Duration::ZERO));
+			elapse(&producer, Duration::ZERO);
+			let mut group = producer.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
+			// Out of order, as B-frames are: the highest is not the last written.
+			for at in [0, 40, 20] {
+				group
+					.write_frame(Timestamp::from_millis(at).unwrap(), bytes::Bytes::from_static(b"x"))
+					.unwrap();
+			}
+			match whole {
+				true => group.finish_whole().unwrap(),
+				false => group.finish().unwrap(),
+			};
+
+			let consumer = producer.consume();
+			// Three frames over 40ms: a 20ms mean interval, so it presents until 60ms.
+			elapse(&producer, Duration::from_millis(59));
+			let fetched = consumer.fetch_group(0, None).now_or_never().unwrap();
+			assert!(fetched.is_ok(), "whole={whole}, before its end: {:?}", fetched.err());
+			elapse(&producer, Duration::from_millis(1));
+			let fetched = consumer.fetch_group(0, None).now_or_never().unwrap();
+			match whole {
+				true => assert!(matches!(fetched, Err(Error::Old)), "{:?}", fetched.err()),
+				false => assert!(fetched.is_ok(), "a closed group aged: {:?}", fetched.err()),
+			}
+		}
+	}
+
+	/// A whole group whose frames measure no interval, one frame here, says nothing about how
+	/// long it presents, so like a closed one it never ages without a successor: a reader still
+	/// subscribed reads it however late, rather than losing it the moment it finishes.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_whole_group_of_one_frame_never_ages_alone() {
 		let producer = track_producer("test", Info::timed().with_max_age(Duration::ZERO));
 		elapse(&producer, Duration::ZERO);
 		let mut group = producer.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
 		group
 			.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"x"))
 			.unwrap();
-		group.finish_at(40).unwrap();
+		group.finish_whole().unwrap();
 
-		let consumer = producer.consume();
-		elapse(&producer, Duration::from_millis(39));
-		let fetched = consumer.fetch_group(0, None).now_or_never().unwrap();
-		assert!(fetched.is_ok(), "before its end: {:?}", fetched.err());
-		elapse(&producer, Duration::from_millis(1));
-		let fetched = consumer.fetch_group(0, None).now_or_never().unwrap();
-		assert!(matches!(fetched, Err(Error::Old)), "{:?}", fetched.err());
+		elapse(&producer, Duration::from_secs(60));
+		let fetched = producer.consume().fetch_group(0, None).now_or_never().unwrap();
+		assert!(fetched.is_ok(), "{:?}", fetched.err());
 	}
 
 	/// A successor whose header landed but whose first frame never does still starts the
@@ -19131,11 +19153,11 @@ mod test {
 		));
 	}
 
-	/// A group ended by `finish` reads whole but says nothing about where it ends; `finish_at`
-	/// declares the end a media reader checks against the next group.
+	/// A group ended by `finish` reads every frame but does not say it is whole;
+	/// `finish_whole` does.
 	#[kio::test]
 	#[cfg(feature = "async")]
-	async fn a_finished_group_declares_no_end() {
+	async fn a_finished_group_is_not_whole() {
 		let producer = track_producer("test", Info::timed());
 		let mut open = producer.append_next().unwrap();
 		open.write_frame(Timestamp::from_millis(0).unwrap(), &b"a"[..]).unwrap();
@@ -19146,15 +19168,15 @@ mod test {
 		ended
 			.write_frame(Timestamp::from_millis(20).unwrap(), &b"c"[..])
 			.unwrap();
-		ended.finish_at(30).unwrap();
+		ended.finish_whole().unwrap();
 
 		let mut reader = producer.subscribe(replay().with_range(0..));
 		let mut first = reader.assert_group();
 		assert_eq!(first.read_frame().await.unwrap().unwrap().payload, &b"a"[..]);
 		assert_eq!(first.read_frame().await.unwrap().unwrap().payload, &b"b"[..]);
 		assert!(first.read_frame().await.unwrap().is_none(), "every frame is read");
-		assert_eq!(first.end(), None);
-		assert_eq!(reader.assert_group().end(), Some(30));
+		assert!(!first.is_whole());
+		assert!(reader.assert_group().is_whole());
 	}
 
 	#[kio::test]

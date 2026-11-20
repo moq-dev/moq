@@ -216,7 +216,7 @@ fn run(session: Session, info: &track::Info, body: &[u8], chunk: usize) -> Optio
 	let broadcast = broadcast.produce();
 	let track = broadcast.create_track("ingest", info.clone())?;
 
-	let (end, fin, group) = match session {
+	let (end, whole, group) = match session {
 		Session::Lite {
 			version,
 			records,
@@ -234,9 +234,9 @@ fn run(session: Session, info: &track::Info, body: &[u8], chunk: usize) -> Optio
 				keep_up(&mut viewer);
 				res
 			});
-			let fin = end.as_ref().ok().copied().flatten();
-			let end = end.map(|end| end.map_or_else(|| "fin".to_string(), |end| format!("end {end}")));
-			(end, fin, (group, consumer))
+			let whole = end.as_ref().is_ok_and(|whole| *whole);
+			let end = end.map(|whole| if whole { "whole" } else { "fin" }.to_string());
+			(end, whole, (group, consumer))
 		}
 		Session::Ietf { version } => {
 			let (header, used) = ietf::GroupHeader::decode_slice(body, version).ok()?;
@@ -262,15 +262,17 @@ fn run(session: Session, info: &track::Info, body: &[u8], chunk: usize) -> Optio
 				keep_up(&mut viewer);
 				res
 			});
-			(end.map(|ended| format!("{ended:?}")), None, (group, consumer))
+			(end.map(|ended| format!("{ended:?}")), false, (group, consumer))
 		}
 	};
 
 	let (group, consumer) = group;
-	// Settle the group as the session does, so the reader below never waits. A GROUP_END
-	// the group refuses, such as one before a frame it holds, fails the stream there too.
+	// Settle the group as the session does, so the reader below never waits.
 	let end = match end {
-		Ok(said) => group.end(fin).map(|()| said),
+		Ok(said) => {
+			group.end(whole);
+			Ok(said)
+		}
 		Err(err) => {
 			let _ = group.abort(err.clone());
 			Err(err)
@@ -386,10 +388,9 @@ pub(super) fn seeds() -> Vec<super::Seed> {
 				data.extend_from_slice(payload);
 			}
 			if version.has_group_end() {
-				// A zero length, then the End: past the last frame's 2ms, or the start's next
-				// unit when untimed.
+				// A zero length: GROUP_END, the group is whole.
 				let mut whole = data.clone();
-				whole.extend_from_slice(&[0, if timed { 3 } else { 1 }]);
+				whole.push(0);
 				push(whole);
 			}
 			push(data);

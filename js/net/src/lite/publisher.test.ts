@@ -872,14 +872,14 @@ async function servedSubscription(
 			const header = await GroupMessage.decode(reader, version);
 
 			const payloads: string[] = [];
-			let end: bigint | undefined;
+			let whole: true | undefined;
 			while (!(await reader.done())) {
 				// Each frame is a zigzag timestamp delta, then a length-prefixed payload. Lite-07
-				// leads with the size plus one instead, where 0 is GROUP_END and its End.
+				// leads with the size plus one instead, where 0 is GROUP_END.
 				const lengthFirst = hasLengthFirst(version);
 				const length = lengthFirst ? (await reader.u53()) - 1 : undefined;
 				if (length === -1) {
-					end = await reader.u62();
+					whole = true;
 					continue;
 				}
 				await reader.u62();
@@ -891,7 +891,7 @@ async function servedSubscription(
 				frameStart: header.frameStart,
 				payloads,
 				previous: header.previous,
-				end,
+				whole,
 			};
 		},
 		// Stop the next group stream the publisher opened with `code`, before reading any of it,
@@ -1299,18 +1299,18 @@ async function holesToFinish(reader: Reader, count = Number.POSITIVE_INFINITY): 
 	}
 }
 
-// Lite-07 ends a finished group's stream with GROUP_END, naming where the group ends, and a closed
-// one's with a bare FIN. Mirrors the Rust `lite07_ends_a_finished_group_with_group_end`.
-test("lite-07 ends a finished group with GROUP_END and a closed one with a bare FIN", async () => {
+// Lite-07 ends a whole group's stream with GROUP_END and a closed one's with a bare FIN. Mirrors
+// the Rust `lite07_ends_a_whole_group_with_group_end`.
+test("lite-07 ends a whole group with GROUP_END and a closed one with a bare FIN", async () => {
 	const sub = await servedSubscription({ version: Version.DRAFT_07, startGroup: 0n });
 	try {
 		const whole = sub.track.createGroup(0n);
 		whole.writeFrame(textFrame("x", Timestamp.fromMillis(0)));
-		whole.finishAt(500n);
-		expect(await sub.servedGroup()).toMatchObject({ key: 0n, payloads: ["x"], end: 500n });
+		whole.finishWhole();
+		expect(await sub.servedGroup()).toMatchObject({ key: 0n, payloads: ["x"], whole: true });
 		sub.serve(1000n);
 		const closed = await sub.servedGroup();
-		expect([closed?.key, closed?.payloads, closed?.end]).toEqual([1000n, ["hello"], undefined]);
+		expect([closed?.key, closed?.payloads, closed?.whole]).toEqual([1000n, ["hello"], undefined]);
 	} finally {
 		await sub.close();
 	}
@@ -2653,7 +2653,7 @@ test("blocked DROP responses stop opening later groups", async () => {
 });
 
 /** One group stream the publisher put on the wire. */
-type Served = { key: bigint; frameStart: number; payloads: string[]; previous?: bigint; end?: bigint };
+type Served = { key: bigint; frameStart: number; payloads: string[]; previous?: bigint; whole?: true };
 
 /**
  * Serves `groups` (frame payloads per group, keyed by sequence) under `bounds`, and

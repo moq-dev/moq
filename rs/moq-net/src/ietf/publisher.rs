@@ -7976,7 +7976,7 @@ impl GroupServe {
 		if let Some(end) = group.end_object() {
 			return Some(status_fields(end));
 		}
-		if group.wire().is_some() || group.end().is_none() {
+		if group.wire().is_some() || !group.is_whole() {
 			return None;
 		}
 		let id = group.index();
@@ -17127,10 +17127,7 @@ mod serve_tests {
 				group.write_frame(group.key_time(), payload.as_slice()).unwrap();
 			}
 			match whole {
-				true => {
-					let end = group.start + 1;
-					group.finish_at(end).unwrap()
-				}
+				true => group.finish_whole().unwrap(),
 				false => group.finish().unwrap(),
 			};
 			// The track goes on past the range, so no END_OF_TRACK marks the group's end.

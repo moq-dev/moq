@@ -60,5 +60,4 @@ Public API: none expected. Wire: none; the draft's group rule tightens.
 
 ## Related
 
-- [GROUP_END is a bare whole marker](/quest/m2/time-addressing/group-end-whole.md) - a finished group with no successor ages from its highest frame timestamp, which this rule keeps below the next start
 - [An fMP4 group start never rewinds the decode timeline](/quest/m3/fmp4-group-start-tfdt.md) - a keyframe repeating its predecessor's timestamp would now continue the group; check which of its cases remain

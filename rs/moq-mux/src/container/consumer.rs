@@ -789,15 +789,7 @@ impl<F: Container> Consumer<F> {
 							self.group = group.group.start;
 							return Poll::Ready(Ok(Some(Event::FrameEnd { end, opens: true })));
 						}
-						// A group its producer finished whole presents up to its end, which can pass
-						// what its frames reach when they carry no duration.
-						let whole = group
-							.group
-							.end()
-							.zip(group.group.timescale())
-							.and_then(|(end, scale)| Timestamp::new(end, scale).ok())
-							.and_then(time);
-						if let Some(end) = group.max_end.max(whole) {
+						if let Some(end) = group.max_end {
 							self.presented_end = Some(end);
 						}
 						self.pending.pop_front();

@@ -29,8 +29,8 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	producer.with_proxy(true)
 }
 
-/// How a reader ended a group: the read's outcome, and the end the group was finished at.
-type Ended = (Result<Option<usize>, moq_net::Error>, Option<u64>);
+/// How a reader ended a group: the read's outcome, and whether the group was finished whole.
+type Ended = (Result<Option<usize>, moq_net::Error>, bool);
 
 /// Publish an unfinished group 0 that stalls past the budget after its only frame, and
 /// return how a reader without a budget of its own ends group 0 at the downstream hop:
@@ -125,7 +125,7 @@ async fn round(version: &str) -> Option<Ended> {
 		}
 	};
 	stalled.abort(moq_net::Error::Cancel).unwrap();
-	Some((end, first.end()))
+	Some((end, first.is_whole()))
 }
 
 #[kio::test]
@@ -133,11 +133,11 @@ async fn a_stalled_group_is_never_cached_downstream_as_finished() {
 	let mut failures = Vec::new();
 	for version in VERSIONS {
 		let ended = round(version).await;
-		// Lite-07 says a group is whole with its end, which a closed one never has; earlier
+		// Lite-07 says a group is whole with GROUP_END, which a closed one never has; earlier
 		// versions can't tell a closed group from a whole one, so only an error is safe.
 		let finished = matches!(
 			(&ended, version == &"moq-lite-07-wip"),
-			(Some((_, Some(_))), _) | (Some((Ok(_), None)), false)
+			(Some((_, true)), _) | (Some((Ok(_), false)), false)
 		);
 		if finished {
 			failures.push(format!("{version}: the downstream hop finished group 0: {ended:?}"));

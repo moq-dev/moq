@@ -340,13 +340,13 @@ upstream as that ID, where a start selects the first group at or after it
 rather than the one containing it. moq-lite 01 and 02 carry no start, so every
 subscription there starts at the live group.
 
-A group ends one of three ways: finished at the time it ends, so it is whole;
-closed, so every frame written arrives but it may have held more, as when a
-relay stops sending a group that went stale; or aborted with an error. A
-finished group's end also bounds how long it stays fresh, so the last group of
-a paused track still ages out. Over the work-in-progress moq-lite 07 each group
-also names the start of the group before it, so a reader sees a gap at once;
-older versions and moq-transport carry neither the end nor the previous start.
+A group ends one of three ways: finished, so it is whole; closed, so every
+frame written arrives but it may have held more, as when a relay stops sending
+a group that went stale; or aborted with an error. A finished group with no
+successor ages from one frame past its highest frame timestamp, so the last
+group of a paused track still ages out. Over the work-in-progress moq-lite 07 each group also
+names the start of the group before it, so a reader sees a gap at once; older
+moq-lite versions say neither whether a group is whole nor the previous start.
 
 Order only decides what goes first, never what is skipped, so catching up oldest
 first needs a max delay that covers the backlog. When a relay serves subscribers of

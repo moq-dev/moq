@@ -446,8 +446,8 @@ struct Recorded {
 	name: String,
 	video: bool,
 	groups: Vec<(u64, Vec<moq_net::frame::Frame>)>,
-	/// Where each group ended whole, when the import said.
-	ends: Vec<Option<u64>>,
+	/// Whether the import finished each group whole.
+	wholes: Vec<bool>,
 }
 
 /// What the import of a clip published.
@@ -484,7 +484,7 @@ async fn record(profile: Profile) -> Recording {
 			.await
 			.unwrap();
 		let mut groups = Vec::new();
-		let mut ends = Vec::new();
+		let mut wholes = Vec::new();
 		while let Some(mut group) = kio::clock::timeout(Duration::from_secs(1), track.recv_group())
 			.await
 			.unwrap()
@@ -494,7 +494,7 @@ async fn record(profile: Profile) -> Recording {
 			while let Some(frame) = group.read_frame().await.unwrap() {
 				frames.push(frame);
 			}
-			ends.push(group.end());
+			wholes.push(group.is_whole());
 			groups.push((group.start, frames));
 		}
 		// The import appends each group, so nothing lies below its first or between two.
@@ -505,7 +505,7 @@ async fn record(profile: Profile) -> Recording {
 			name,
 			video,
 			groups,
-			ends,
+			wholes,
 		});
 	}
 	assert_eq!(
@@ -905,7 +905,7 @@ async fn run(recording: &Recording, arm: &Arm) -> Run {
 	let consumer = broadcast.consume();
 	let groups: Vec<Vec<(u64, Vec<moq_net::frame::Frame>)>> =
 		recording.tracks.iter().map(|track| track.groups.clone()).collect();
-	let ends: Vec<Vec<Option<u64>>> = recording.tracks.iter().map(|track| track.ends.clone()).collect();
+	let wholes: Vec<Vec<bool>> = recording.tracks.iter().map(|track| track.wholes.clone()).collect();
 	// The import's skips, which a relay forwards with the first group past each: a group the path
 	// omits is not skipped, so the export sees it missing.
 	let mut skips: Vec<_> = (recording.tracks.iter())
@@ -936,11 +936,11 @@ async fn run(recording: &Recording, arm: &Arm) -> Run {
 			let (sequence, frames) = &groups[t][g];
 			let Some(f) = step else {
 				let group = open[t].take().unwrap();
-				match (kept[t] == frames.len(), ends[t][g]) {
-					(true, Some(end)) => {
-						group.finish_at(end).unwrap();
+				match (kept[t] == frames.len(), wholes[t][g]) {
+					(true, true) => {
+						group.finish_whole().unwrap();
 					}
-					(true, None) => {
+					(true, false) => {
 						group.finish().unwrap();
 					}
 					(false, _) => group.abort(moq_net::Error::Old).unwrap(),

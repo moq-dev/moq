@@ -290,9 +290,9 @@ pub(super) enum Outcome {
 	/// Frames may still be written.
 	#[default]
 	Open,
-	/// Finished with this many frames, and where it ends in its track's timescale when its
-	/// producer said it is whole: `None` when it finished without an end (see [`Producer::finish`]).
-	Finished(usize, Option<u64>),
+	/// Finished with this many frames, and whether its producer said it is whole: `false` when
+	/// it only closed, possibly short of its frames (see [`Producer::finish`]).
+	Finished(usize, bool),
 	/// Finished with this many frames, then aborted to free its cache: a reader that took
 	/// every frame got the whole group, and one short of it gets the error.
 	Released(usize, Error),
@@ -2281,48 +2281,33 @@ impl Producer {
 		let _ = self.handle.close_aborted(err);
 	}
 
-	/// End the group whole at `end`, the exclusive end of its presentation in its track's
-	/// timescale, returning the [`Finished`] group: no more frames can be written, but it can
-	/// still be read or aborted.
+	/// End the group whole, returning the [`Finished`] group: it holds every frame it will
+	/// ever have, so no more can be written, but it can still be read or aborted.
 	///
-	/// A finished group's own end bounds how long it stays fresh, so the last group of a
-	/// paused or finished track ages out without a successor (see
-	/// [`track::Info::max_age`]). An `end` at or before the group's start is
-	/// [`Error::TimestampMismatch`], which aborts the group. Fails with the abort error if the
-	/// group was already aborted.
-	pub fn finish_at(self, end: u64) -> Result<Finished> {
-		if let Err(err) = self.check_end(end) {
-			let _ = self.handle.close_aborted(err.clone());
-			return Err(err);
-		}
-		self.end(Some(end))
+	/// A whole group with no successor ages from one mean frame interval past its highest frame
+	/// timestamp, so the last group of a paused or finished track ages out (see
+	/// [`track::Info::max_age`]). Fails
+	/// with the abort error if the group was already aborted.
+	pub fn finish_whole(self) -> Result<Finished> {
+		self.end(true)
 	}
 
-	/// Whether [`Self::finish_at`] takes `end`: [`Error::TimestampMismatch`] at or before the
-	/// group's start.
-	pub(crate) fn check_end(&self, end: u64) -> Result<()> {
-		match end <= self.start {
-			true => Err(Error::TimestampMismatch),
-			false => Ok(()),
-		}
-	}
-
-	/// End the group without saying where it ends, returning the [`Finished`] group: every
-	/// frame written still reaches its readers, but they can't tell the group is whole, since
-	/// only [`Self::finish_at`] declares the end a media reader checks against.
+	/// Close the group without saying it is whole, returning the [`Finished`] group: every
+	/// frame written still reaches its readers, but they can't tell whether frames are
+	/// missing, so failover may continue it from another copy.
 	///
-	/// What a producer that doesn't know its group's end calls, and how a relay ends a
-	/// group that expired or arrived partial. Fails with the abort error if the group was
+	/// How a relay ends a group that expired or arrived partial. A producer that wrote every
+	/// frame calls [`Self::finish_whole`] instead. Fails with the abort error if the group was
 	/// already aborted.
 	pub fn finish(self) -> Result<Finished> {
-		self.end(None)
+		self.end(false)
 	}
 
-	fn end(self, end: Option<u64>) -> Result<Finished> {
+	fn end(self, whole: bool) -> Result<Finished> {
 		let mut state = modify(&self.handle.state)?;
 		debug_assert!(state.partial.is_none(), "a frame is already open");
 		let fin = state.next_index;
-		state.outcome = Outcome::Finished(fin, end);
+		state.outcome = Outcome::Finished(fin, whole);
 		// No frame follows to compress.
 		let original_fin = state.range_end.is_none().then_some(fin);
 		if let Some(flate) = &mut state.flate {
@@ -3023,15 +3008,6 @@ impl Handle {
 		self.state.read().outcome.frames().is_some()
 	}
 
-	/// Where the group ends in its track's timescale, once its producer finished it whole
-	/// (see [`Producer::finish_at`]).
-	pub(crate) fn end(&self) -> Option<u64> {
-		match self.state.read().outcome {
-			Outcome::Finished(_, end) => end,
-			_ => None,
-		}
-	}
-
 	/// Whether the group was finished: it holds every frame it will ever have.
 	pub(crate) fn is_finished(&self) -> bool {
 		{
@@ -3145,6 +3121,30 @@ impl Handle {
 			Timeline::Timed { latest, .. } if state.origin != Origin::Unverified => Some(latest),
 			_ => None,
 		}
+	}
+
+	/// How far a group finished whole presents: one frame past its highest frame timestamp, a
+	/// frame being its mean interval from its first frame's timestamp to its highest. `None`
+	/// when it is not whole, or when its frames measure no interval (one frame, or all at one
+	/// timestamp). Only a whole group's frames prove where it stops, and they are the same at
+	/// every copy, so its reach never depends on which copy judges it.
+	pub(super) fn whole_reach(&self) -> Option<Timestamp> {
+		let state = self.state.read();
+		let Outcome::Finished(frames, true) = state.outcome else {
+			return None;
+		};
+		let Timeline::Timed { start, latest } = state.timeline else {
+			return None;
+		};
+		if state.origin == Origin::Unverified {
+			return None;
+		}
+		let gaps = u64::try_from(frames.checked_sub(1)?).ok()?;
+		let interval = latest.value().checked_sub(start.value())?.checked_div(gaps)?;
+		if interval == 0 {
+			return None;
+		}
+		latest.checked_add(Timestamp::new(interval, latest.scale()?).ok()?).ok()
 	}
 
 	/// The group's full cached footprint (payload plus fixed overhead, and a compressed
@@ -4293,13 +4293,10 @@ impl Consumer {
 		state.outcome.frames().unwrap_or(state.next_index)
 	}
 
-	/// Where the group ends in its track's timescale, once its producer finished it whole
-	/// with [`Producer::finish_at`]: `None` while it is open, or when it finished without an end.
-	pub fn end(&self) -> Option<u64> {
-		match self.cursor.state.read().outcome {
-			Outcome::Finished(_, end) => end,
-			_ => None,
-		}
+	/// Whether its producer finished the group whole with [`Producer::finish_whole`]: `false`
+	/// while it is open, aborted, or only closed.
+	pub fn is_whole(&self) -> bool {
+		matches!(self.cursor.state.read().outcome, Outcome::Finished(_, true))
 	}
 
 	/// The next frame, as a consumer for chunked reading.

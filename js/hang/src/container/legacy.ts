@@ -244,8 +244,7 @@ export class Producer {
 			// keyOf vouched for the timescale.
 			marker = new Time.Timestamp(Number(start), this.#track.timescale as Time.Timescale);
 		}
-		// The open group ends whole at the marker, so a reader can tell the marker follows it.
-		this.#close(end, marker);
+		this.#close(end);
 		this.#interval = undefined;
 		if (marker === undefined) return;
 
@@ -259,14 +258,14 @@ export class Producer {
 					: encodeFrame(new Uint8Array(), Duration.micros(timestamp)),
 			timestamp: marker,
 		});
-		group.finish();
+		group.finishWhole();
 		this.#liveEdge = this.#liveEdge === undefined ? timestamp : Math.max(this.#liveEdge, timestamp);
 		this.#marked = true;
 	}
 
-	// Flush and close the current group at the supplied or estimated end timestamp, whole at the
-	// `whole` marker start when one follows it.
-	#close(end?: number, whole?: Time.Timestamp) {
+	// Flush the current group's end marker at the supplied or estimated end timestamp, then finish
+	// it whole, since it holds every frame written.
+	#close(end?: number) {
 		if (!this.#group) return;
 		if (
 			this.#format.kind === "video" &&
@@ -281,11 +280,7 @@ export class Producer {
 		// A presentation endpoint cannot bound the decode-order tail after reordering.
 		const bound = this.#reordered ? undefined : end;
 		this.#format.finishGroup(this.#group, bound === undefined ? undefined : Duration.micros(bound));
-		// A group ends whole where its content stops, which bounds its reach without a successor.
-		const at =
-			whole !== undefined ? BigInt(whole.value) : bound === undefined ? undefined : keyOf(this.#track, bound);
-		if (at !== undefined && at > this.#group.start) this.#group.finishAt(at);
-		else this.#group.finish();
+		this.#group.finishWhole();
 		this.#group = undefined;
 		if (this.#end !== undefined) {
 			this.#liveEdge = this.#liveEdge === undefined ? this.#end : Math.max(this.#liveEdge, this.#end);

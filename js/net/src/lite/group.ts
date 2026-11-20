@@ -119,9 +119,9 @@ export interface WireFrame extends WirePayload {
 	inflated?: number;
 }
 
-/** Lite-07 GROUP_END: the group is whole, ending at `end` in the track's timescale. */
+/** Lite-07 GROUP_END: the group is whole. */
 export interface GroupEnd {
-	end: bigint;
+	whole: true;
 }
 
 /** How {@link frameDecoder} reads each frame's optional fields. */
@@ -162,7 +162,7 @@ export function frameDecoder({
 		let size = 0;
 		if (lengthFirst) {
 			const length = c.u53();
-			if (length === 0) return { end: c.u62() };
+			if (length === 0) return { whole: true };
 			size = length - 1;
 		}
 		const delta = stamped ? unzigzag(c.u62()) : 0n;
@@ -182,15 +182,11 @@ export function frameDecoder({
 
 /**
  * Write a group stream's frames into `producer` until the stream ends or the producer closes.
- * Resolves with where a lite-07 GROUP_END said the group ends, or undefined when the stream ended
- * without one: the caller finishes the group at that end, and a bare FIN only closes it. Anything
- * after GROUP_END, or an End the group refuses (at or before its start), is malformed.
+ * Resolves true when a lite-07 GROUP_END said the group is whole, or false when the stream ended
+ * without one: the caller finishes the group whole, and a bare FIN only closes it. Anything after
+ * GROUP_END is malformed.
  */
-export async function readFrames(
-	stream: Reader,
-	producer: netGroup.Producer,
-	format: FrameFormat,
-): Promise<bigint | undefined> {
+export async function readFrames(stream: Reader, producer: netGroup.Producer, format: FrameFormat): Promise<boolean> {
 	const decode = frameDecoder({ ...format, start: producer.start });
 
 	for (;;) {
@@ -198,15 +194,13 @@ export async function readFrames(
 		// per batch rather than once per frame. Only the group's own stream ends it: a track
 		// that closes first has already closed (or aborted) this group through its cache.
 		const frame = stream.tryDecode(decode) ?? (await race([stream.decodeMaybe(decode), producer.closed]));
-		if (!frame || frame instanceof Error) return undefined;
-		if ("end" in frame) {
-			if (frame.end <= producer.start) throw malformed(`GROUP_END at ${frame.end}, not past the group's start`);
+		if (!frame || frame instanceof Error) return false;
+		if ("whole" in frame) {
 			// The FIN may never come, so the group's own close, such as an abort or eviction, still
 			// ends the wait.
 			const done = await race([stream.done(), producer.closed]);
 			if (done === false) throw malformed("bytes after GROUP_END");
-			if (done !== true) return undefined;
-			return frame.end;
+			return done === true;
 		}
 		if (frame.payload)
 			hooks.writeGroupFrame(
@@ -214,6 +208,6 @@ export async function readFrames(
 				{ payload: frame.payload, timestamp: Time.received(frame.timestamp, producer.start) },
 				frame.inflated,
 			);
-		else if (!(await receiveFrame(stream, producer, frame))) return;
+		else if (!(await receiveFrame(stream, producer, frame))) return false;
 	}
 }

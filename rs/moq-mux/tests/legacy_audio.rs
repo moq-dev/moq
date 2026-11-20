@@ -161,7 +161,7 @@ async fn a_dropped_run_waits_for_the_next_groups_first_packet() {
 				duration: None,
 			};
 			container.write(&mut group, &[packet]).unwrap();
-			group.finish_at(start + 20_000).unwrap();
+			group.finish_whole().unwrap();
 			let read = kio::clock::timeout(TIMEOUT, reader.read())
 				.await
 				.unwrap_or_else(|_| panic!("{version}: packet {n} never read"))

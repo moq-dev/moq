@@ -54,7 +54,7 @@ import {
 } from "./internal.ts";
 import { grace, Ledger } from "./ledger.ts";
 import { rescale } from "./rescale.ts";
-import { floorAt, Timescale, type Timestamp } from "./time.ts";
+import { floorAt, Timescale, Timestamp } from "./time.ts";
 import { checkEnd, checkKey, max, min, UNBOUNDED } from "./util/key.ts";
 import { checkName } from "./util/utf8.ts";
 import { bounded, type Holdings, joinsLive, rangesOf, UNHELD, Window, wireSpan } from "./window.ts";
@@ -3249,7 +3249,7 @@ export class Subscriber {
 		let arrived = this.#arrivals
 			? this.#keptSupersededAt(key, drift, held)
 			: this.#supersededAt(arrival, drift, held);
-		// A group finished whole ages from its own end without a successor.
+		// A group finished whole ages from its own frames without a successor.
 		if (arrived === undefined && !this.#arrivals) arrived = this.#endedAt(key);
 		if (arrived === undefined) return false;
 		// Plain arithmetic: an unenforced budget is infinite, which no duration brand holds.
@@ -3284,12 +3284,11 @@ export class Subscriber {
 		return scale == null ? Number(value) : (Number(value) * 1000) / scale;
 	}
 
-	// The furthest presentation time, in milliseconds, group `key` could still reach: its own
-	// end once finished whole, else where its immediate successor below `end` begins, undefined
-	// when nothing proves where it stops. Mirrors the Rust `TrackState::reach`.
+	// The furthest presentation time, in milliseconds, group `key` could still reach: where its
+	// immediate successor below `end` begins, undefined when nothing proves where it stops.
+	// Without one, no edge sits above the group to convict it in media time; a whole group ages
+	// on the wall clock instead (see {@link #endedAt}). Mirrors the Rust `TrackState::reach`.
 	#reach(key: bigint, end: bigint | undefined, whole?: boolean): number | undefined {
-		const own = this.#held(key)?.end;
-		if (own !== undefined) return this.#presented(own);
 		const successor = this.#successor(key, end, whole);
 		if (!successor) return undefined;
 		const info = this.#state.info.peek();
@@ -3297,15 +3296,24 @@ export class Subscriber {
 		return hooks.groupTimestamp(successor)?.asMillis();
 	}
 
-	// When group `key`, finished whole, stops presenting on the wall clock: its arrival plus
-	// its span, which stands in for a successor arriving, so the last group of a paused or
-	// finished track ages out without one. Mirrors the Rust `TrackState::ended_at`.
+	// When group `key`, finished whole, stops presenting on the wall clock: its arrival plus the
+	// span from its first frame's timestamp to one frame past its highest, a frame being its mean
+	// interval, which stands in for a successor arriving, so the last group of a paused or finished
+	// track ages out without one. Undefined when it is not whole, or its frames measure no interval
+	// (one frame, or all at one timestamp). Only a whole group's frames prove where it stops, and
+	// they are the same at every copy. Mirrors the Rust `TrackState::ended_at` and
+	// `Handle::whole_reach`.
 	#endedAt(key: bigint): Instant | undefined {
 		const group = this.#held(key);
-		const end = group?.end;
-		if (group === undefined || end === undefined || end <= key) return undefined;
-		const span = this.#presented(end - key);
-		return span === undefined ? undefined : hooks.groupArrived(group).checkedAdd(Duration.millis(span));
+		if (!group?.whole || group.frameCount < 2) return undefined;
+		const start = hooks.groupTimestamp(group);
+		const latest = hooks.groupLatest(group);
+		if (start === undefined || latest?.scale === undefined) return undefined;
+		// In the track's units, as Rust divides them.
+		const interval = Math.floor((latest.value - start.value) / (group.frameCount - 1));
+		if (interval <= 0) return undefined;
+		const reach = new Timestamp(latest.value + interval, latest.scale);
+		return hooks.groupArrived(group).checkedAdd(Duration.millis(reach.asMillis() - start.asMillis()));
 	}
 
 	// When the wall clock starts: the cached `arrival`'s arrival, or that of the one `held`
