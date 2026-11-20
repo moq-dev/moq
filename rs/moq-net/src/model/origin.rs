@@ -7840,6 +7840,17 @@ impl Consumer {
 			&& self.scope.mount(path).is_none_or(|mount| mount.resolve(path).is_some())
 	}
 
+	/// [`Self::reaches`], and some path `allowed`, relative to this handle's root, holds
+	/// is in its scope too.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn reaches_any(&self, path: &Path, allowed: &Patterns) -> bool {
+		if !self.reaches(path) {
+			return false;
+		}
+		let ours = self.scope.allowed.rebase(self.root().as_str());
+		allowed.iter().any(|pattern| ours.overlaps(pattern))
+	}
+
 	/// Whether the absolute `path` lies beneath one of this handle's mounts, where the
 	/// origin's own claims at that path are hidden from it.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]

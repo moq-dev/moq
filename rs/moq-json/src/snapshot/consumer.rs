@@ -209,13 +209,7 @@ impl Track {
 			unreachable!("resolved above")
 		};
 		// A snapshot is the newest group's content, so a group given up on changes nothing.
-		loop {
-			match std::task::ready!(track.poll_next_group(waiter))? {
-				Some(moq_net::track::Item::Group(group)) => return Poll::Ready(Ok(Some(group))),
-				Some(moq_net::track::Item::Gap { .. }) => continue,
-				None => return Poll::Ready(Ok(None)),
-			}
-		}
+		track.poll_next_group(waiter)
 	}
 }
 

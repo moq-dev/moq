@@ -102,7 +102,6 @@ setup after the capabilities land.
 ## Required
 
 - [Cache-aware multicast](/quest/m2/multicast/README.md) - the route layer this builds on, replacing the path rule
-- [Routes and announces](/quest/m2/cluster-routes/README.md) - the route layer's acceptance on real sessions
 
 ## Related
 

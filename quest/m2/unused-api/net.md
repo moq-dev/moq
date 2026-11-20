@@ -5,7 +5,7 @@
 `track::Subscriber::next_in_range`, `is_skipped`, and `poll_start` are
 crate-private, and so is `Subscriber::with_range` if its last production
 caller can leave. Their one consumer is moq-mux's container reader, which
-orders groups itself; `track::Ordered` reports a `Gap`, so the reader can
+orders groups itself; `track::Ordered::next_item` reports a `Gap`, so the reader can
 move onto it.
 
 ## Plan
@@ -71,15 +71,12 @@ Steps:
 - `origin::Consumer::covering` stays `pub`: moq.pro and moq-net's own
   `benches/origin.rs` call it.
 
-The reader reads gaps through `Ordered::next_item` once
-[ordered-gaps](/quest/m2/outcome-enums/ordered-gaps.md) lands, since
-`next_group` then yields groups alone (decided 2026-11-18, maintainer,
-/quest-plan); whichever lands second makes the switch.
+The reader reads gaps through `Ordered::next_item`, since `next_group`
+yields groups alone (decided 2026-11-18, maintainer, /quest-plan).
 
 Public API: breaking, removals only unless step 1 adds `Ordered` inputs.
 Wire: none.
 
 ## Related
 
-- [Ordered gaps](/quest/m2/outcome-enums/ordered-gaps.md) - splits `Ordered` into `next_group` and the `next_item` this reader uses
 - [Browser audio holes](/quest/m2/audio-playout/browser-audio-hole-skip.md) - grading the browser counterpart, which already reads `Gap`s

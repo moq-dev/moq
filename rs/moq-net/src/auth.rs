@@ -583,9 +583,32 @@ impl Permit {
 		}
 	}
 
+	/// A permit the peer granted `granted`, with no limit of our own.
+	#[cfg(test)]
+	pub(crate) fn granting(granted: Patterns) -> Self {
+		Self {
+			granted: Some(granted),
+			limit: None,
+		}
+	}
+
 	/// Whether both allow `path`.
 	pub(crate) fn matches(&self, path: &str) -> bool {
 		self.granted(path) && self.within_limit(path)
+	}
+
+	/// The paths at or beneath `prefix` both allow, which a claim there covers: under
+	/// `a/*`, those beneath `a`, though not `a` itself. An intersection too large to spell
+	/// allows nothing, never more.
+	pub(crate) fn beneath(&self, prefix: &str) -> Patterns {
+		let Ok(subtree) = moq_pattern::Pattern::subtree(prefix) else {
+			return Patterns::new();
+		};
+		let mut beneath = Patterns::from(subtree);
+		for patterns in [&self.granted, &self.limit].into_iter().flatten() {
+			beneath = beneath.intersect(patterns).unwrap_or_default();
+		}
+		beneath
 	}
 
 	/// Whether the peer's grant alone allows `path`.
@@ -615,12 +638,65 @@ impl Permit {
 	/// request the peer's floors can certify.
 	#[cfg(feature = "async")]
 	pub(crate) fn granted_regions(&self) -> Option<Vec<crate::Path>> {
-		let granted = self.granted.as_ref()?;
-		let everything = moq_pattern::Pattern::subtree("").ok()?;
-		if granted.contains(&everything) {
-			return None;
-		}
-		Some(crate::model::interest_prefixes(granted))
+		confining(self.granted.as_ref()?)
+	}
+
+	/// The prefixes the grant and the limit together confine this direction to, or `None`
+	/// while neither does: every path both allow lies within one of them.
+	#[cfg(feature = "async")]
+	pub(crate) fn regions(&self) -> Option<Vec<crate::Path>> {
+		let granted = self.granted.as_ref().and_then(confining);
+		let limit = self.limit.as_ref().and_then(confining);
+		let (granted, limit) = match (granted, limit) {
+			(None, None) => return None,
+			(Some(one), None) | (None, Some(one)) => return Some(one),
+			(Some(granted), Some(limit)) => (granted, limit),
+		};
+		// Of two regions one lies within the other, or they share nothing.
+		let mut both: Vec<crate::Path> = (granted.iter())
+			.flat_map(|a| limit.iter().map(move |b| (a, b)))
+			.filter_map(|(a, b)| match () {
+				_ if a.has_prefix(b) => Some(a.clone()),
+				_ if b.has_prefix(a) => Some(b.clone()),
+				_ => None,
+			})
+			.collect();
+		both.sort();
+		both.dedup();
+		Some(both)
+	}
+
+	/// What the peer granted, or `None` when it grants everything.
+	#[cfg(feature = "async")]
+	pub(crate) fn grant(&self) -> Option<&Patterns> {
+		self.granted.as_ref()
+	}
+
+	/// The patterns of the grant that `covered` does not contain, judged pattern by
+	/// pattern, so one may be spurious but none is missed, each with the prefix holding
+	/// what it shows. `None` covers everything.
+	#[cfg(feature = "async")]
+	pub(crate) fn beyond(&self, covered: Option<&Patterns>) -> Vec<(moq_pattern::Pattern, crate::Path)> {
+		let Some(covered) = covered else {
+			return Vec::new();
+		};
+		let granted = match &self.granted {
+			Some(granted) => granted.clone(),
+			None => Patterns::from(moq_pattern::Pattern::all()),
+		};
+		(granted.iter())
+			.filter(|pattern| !covered.contains(pattern))
+			.filter_map(|pattern| {
+				let head = crate::model::interest_prefixes(&Patterns::from(pattern.clone()));
+				Some((pattern.clone(), head.into_iter().next()?))
+			})
+			.collect()
+	}
+
+	/// Whether the peer granted both the same, whatever limit either set.
+	#[cfg(feature = "async")]
+	pub(crate) fn same_grant(&self, other: &Self) -> bool {
+		self.granted == other.granted
 	}
 
 	/// Whether both set the same limit on the peer, whatever either was granted.
@@ -638,6 +714,16 @@ impl Permit {
 			(Some(this), Some(other)) => this.covers(other),
 		};
 		covers(&self.granted, &other.granted) && covers(&self.limit, &other.limit)
+	}
+}
+
+/// The prefixes `patterns` confine paths to, or `None` when they allow every path.
+#[cfg(feature = "async")]
+fn confining(patterns: &Patterns) -> Option<Vec<crate::Path>> {
+	let everything = moq_pattern::Pattern::subtree("").ok()?;
+	match patterns.contains(&everything) {
+		true => None,
+		false => Some(crate::model::interest_prefixes(patterns)),
 	}
 }
 
@@ -3100,6 +3186,51 @@ mod tests {
 			permit(Some(&["a", "b"]), Some(&["c"])).granted_regions(),
 			Some(vec![path("a"), path("b")])
 		);
+	}
+
+	/// What a publisher shows its peer lies within the regions of the grant and the limit
+	/// together, the deeper of any two nested; and two grants with the same regions can
+	/// still differ, as `a/*` and `a/**` do.
+	#[cfg(feature = "async")]
+	#[test]
+	fn the_regions_follow_the_grant_and_the_limit() {
+		let permit = |granted: Option<&[&str]>, limit: Option<&[&str]>| Permit {
+			granted: granted.map(patterns),
+			limit: limit.map(patterns),
+		};
+		let path = crate::Path::from_static;
+		assert_eq!(permit(None, None).regions(), None);
+		assert_eq!(permit(None, Some(&["a/b"])).regions(), Some(vec![path("a/b")]));
+		assert_eq!(permit(Some(&[""]), Some(&["a"])).regions(), Some(vec![path("a")]));
+		assert_eq!(
+			permit(Some(&["a", "c/d"]), Some(&["a/b", "c", "e"])).regions(),
+			Some(vec![path("a/b"), path("c/d")])
+		);
+
+		let one = |pattern: &str| Permit {
+			granted: Some(Patterns::from(pattern.parse::<crate::Pattern>().unwrap())),
+			limit: None,
+		};
+		assert_eq!(one("a/*").granted_regions(), one("a/**").granted_regions());
+		assert!(!one("a/*").same_grant(&one("a/**")));
+	}
+
+	/// A permit allows what both allow beneath a path, the same paths: beneath `a` under
+	/// `a/*`, but nothing beneath `a/b` under `a/*/x` granted and `a/*/y` limited.
+	#[test]
+	fn a_permit_allows_what_both_allow_beneath() {
+		let permit = |granted: Option<&str>, limit: Option<&str>| Permit {
+			granted: granted.map(|pattern| Patterns::from(pattern.parse::<crate::Pattern>().unwrap())),
+			limit: limit.map(|pattern| Patterns::from(pattern.parse::<crate::Pattern>().unwrap())),
+		};
+		let reaches = |permit: Permit, prefix: &str| !permit.beneath(prefix).is_empty();
+		assert!(reaches(permit(Some("a/*"), None), "a"));
+		assert!(reaches(permit(None, Some("a/*")), ""));
+		assert!(!reaches(permit(Some("a/*"), None), "a/b/c"));
+		assert!(!reaches(permit(None, Some("a/*")), "b"));
+		assert!(reaches(permit(Some("a/*/x"), Some("a/b/*")), "a"));
+		assert!(!reaches(permit(Some("a/*/x"), Some("a/*/y")), "a/b"));
+		assert!(reaches(permit(None, None), "a"));
 	}
 
 	/// A limit replaces the last one, narrower or wider, and applies to a version

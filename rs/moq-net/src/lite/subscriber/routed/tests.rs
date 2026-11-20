@@ -273,6 +273,143 @@ async fn the_limit_admits_each_claim() {
 	assert_eq!(served(&routed), ["live/a/public/x"]);
 }
 
+/// A grant change holds unsynced only the readers whose prefix it newly shows something
+/// in, until an answer after it is in; a reader it misses, and every reader on a
+/// narrowing, stays synced, since nothing new can arrive there.
+#[kio::test]
+async fn a_grant_change_unsyncs_only_the_readers_it_can_show_more() {
+	let (subscriber, consumer) = subscriber();
+	let granting = |paths: &[&str]| {
+		Permit::granting(
+			paths
+				.iter()
+				.map(|path| crate::Pattern::subtree(path).unwrap())
+				.collect(),
+		)
+	};
+	let all = crate::Patterns::from(crate::Pattern::all());
+	let everything = consumer.routes();
+	let a = consumer.scope("a", &all).unwrap().routes();
+	let synced = |routes: &crate::origin::Routes| routes.poll_synced(&kio::Waiter::noop()).is_ready();
+	let answer = |routed: &mut Routed, prefix: u64| {
+		pump(routed, &subscriber);
+		routed.receive(Wire::Synced { prefix }).unwrap();
+		routed.release();
+	};
+
+	let mut routed = Routed::new(&subscriber, 1, &granting(&["a"]), None, None).unwrap();
+	routed.want(Path::empty(), subscriber.origin.snapshot(""));
+	answer(&mut routed, 0);
+	assert!(synced(&everything) && synced(&a));
+
+	// `b` joins the grant: the whole tree waits for it, and `a` cannot gain from it.
+	routed.limit(&granting(&["a", "b"])).unwrap();
+	assert!(!synced(&everything), "the whole tree holds the new region");
+	assert!(synced(&a), "a region the change misses stays synced");
+	answer(&mut routed, 1);
+	assert!(synced(&everything));
+
+	// A narrowing shows nothing new.
+	routed.limit(&granting(&["a"])).unwrap();
+	assert!(
+		synced(&everything) && synced(&a),
+		"a narrowing keeps every reader synced"
+	);
+
+	// Two gains before an answer hold only what each shows.
+	routed.limit(&granting(&["a", "b"])).unwrap();
+	routed.limit(&granting(&["a", "b", "c"])).unwrap();
+	assert!(!synced(&everything));
+	assert!(synced(&a), "neither gain shows `a` anything new");
+
+	// Narrowed within a gain still unanswered, what it keeps is still held.
+	let bc = consumer.scope("b/c", &all).unwrap().routes();
+	let bd = consumer.scope("b/d", &all).unwrap().routes();
+	routed.limit(&granting(&["a", "b/c"])).unwrap();
+	assert!(!synced(&bc), "`b/c` may still be in the unheard answer");
+	assert!(synced(&bd), "`b/d` is no longer shown");
+	answer(&mut routed, 2);
+	assert!(synced(&everything) && synced(&bc));
+}
+
+/// A grant change that shows more within a prefix asked, though within no reader's, still
+/// sends an edit: a reader arriving there before its answer waits for it, since the peer
+/// may already have sent what the change shows.
+#[kio::test]
+async fn a_grant_change_under_a_coarsened_ask_holds_the_readers_that_arrive() {
+	let (subscriber, consumer) = subscriber();
+	let granting = |patterns: &[&str]| {
+		Permit::granting(
+			(patterns.iter())
+				.map(|pattern| pattern.parse::<crate::Pattern>().unwrap())
+				.collect(),
+		)
+	};
+	let mut routed = Routed::new(&subscriber, 1, &granting(&["a/*"]), None, None).unwrap();
+	// Too many to ask for one by one: the session asks for `a`.
+	for want in prefixes("a", 17, 4000) {
+		routed.want(want.clone(), subscriber.origin.snapshot(want));
+	}
+	pump(&mut routed, &subscriber);
+	let asked: Vec<u64> = routed.asked.keys().copied().collect();
+	assert_eq!(asked.len(), 1);
+	routed.receive(Wire::Synced { prefix: asked[0] }).unwrap();
+	routed.release();
+
+	routed.limit(&granting(&["a/*", "a/new/**"])).unwrap();
+	let fresh = Path::from_static("a/new/x");
+	let reader = consumer.scope(fresh.as_str(), &crate::Patterns::from(crate::Pattern::all()));
+	let reader = reader.unwrap().routes();
+	routed.want(fresh.clone(), subscriber.origin.snapshot(fresh));
+	routed.release();
+	let synced = |routes: &crate::origin::Routes| routes.poll_synced(&kio::Waiter::noop()).is_ready();
+	assert!(!synced(&reader), "the change's answer is still to come");
+	pump(&mut routed, &subscriber);
+	routed.release();
+	assert!(synced(&reader));
+}
+
+/// A peer that leaves an edit unanswered while its grant keeps changing holds one prefix
+/// per want and pattern it still grants, however many changes it sends; and a region too
+/// deep to lie beneath the session's root shows nothing there, holding no reader back.
+#[kio::test]
+async fn grant_changes_hold_only_what_the_grant_still_shows() {
+	let (mut subscriber, _consumer) = subscriber();
+	subscriber.origin = subscriber
+		.origin
+		.scope("r", &crate::Patterns::from(crate::Pattern::all()))
+		.unwrap();
+	let granting = |patterns: &[String]| {
+		Permit::granting(
+			(patterns.iter())
+				.map(|pattern| pattern.parse::<crate::Pattern>().unwrap())
+				.collect(),
+		)
+	};
+	let held = ["a/**".to_string(), "c/**".to_string()];
+	let mut routed = Routed::new(&subscriber, 1, &granting(&held[..1]), None, None).unwrap();
+	routed.want(Path::empty(), subscriber.origin.snapshot(""));
+	routed.want(Path::from_static("a"), subscriber.origin.snapshot("a"));
+	pump(&mut routed, &subscriber);
+	let stream = routed.stream();
+	// The answer never comes.
+	routed.limit(&granting(&held)).unwrap();
+	assert!(matches!(stream.try_wire(), Some(Msg::Ask(_))));
+	// Each gain the grant takes back again lets go of what it held.
+	for i in 0..64 {
+		let mut more = held.to_vec();
+		more.push(format!("b{i}/*/**"));
+		routed.limit(&granting(&more)).unwrap();
+		routed.limit(&granting(&held)).unwrap();
+	}
+	assert_eq!(routed.gained.len(), 1, "only `c` is held, for the whole tree");
+
+	let mut deep = held.to_vec();
+	deep.push(format!("{}/**", "x".repeat(crate::Path::MAX_BYTES)));
+	routed.limit(&granting(&deep)).unwrap();
+	assert_eq!(routed.gained.len(), 1);
+}
+
 /// A forwarding neighbour's claims wait for the floor that closes their batch, and are
 /// served under the route the floor names.
 #[kio::test]
@@ -520,6 +657,23 @@ fn a_set_past_one_request_is_asked_for_more_coarsely() {
 			.all(|prefix| regions.iter().any(|region| prefix.has_prefix(region)))
 	);
 	assert_eq!(asked.len(), 17);
+
+	// Regions too many on their own give way to the longest prefix at least two of them
+	// share, up to the root, and none goes unasked.
+	let mut regions = prefixes("g/h", 16, 4000);
+	let lone = prefixes("g/i", 1, 4000);
+	regions.extend(lone.iter().cloned());
+	regions.insert(path("k"));
+	assert!(!fits(&regions));
+	let mut expected = lone;
+	expected.extend([path("g/h"), path("k")]);
+	assert_eq!(super::coarsen(regions.clone(), &regions), expected);
+	let regions: std::collections::BTreeSet<Path> =
+		(0..17).map(|i| path(&format!("r{i}/{}", "x".repeat(4000)))).collect();
+	assert_eq!(
+		super::coarsen(regions.clone(), &regions),
+		[Path::empty()].into_iter().collect()
+	);
 }
 
 /// A claim whose path this node cannot resolve lies in a prefix it cannot name, so

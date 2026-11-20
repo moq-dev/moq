@@ -5,11 +5,17 @@
 // per broadcast the peer is shown, at no cost. The peer edits its prefixes in place: each edit
 // takes effect at the ANNOUNCE_OK answering it, where both ends drop every claim within a prefix
 // it removed, and the answer then tells what the added prefixes cover.
+//
+// A prefix wider than our grant is answered region by region, as if the peer had asked for each
+// granted region inside it: a claim above a region is presented at the region. A claim is shown
+// where the grant covers some path beneath it. A grant change is answered before the ANNOUNCE_OK of
+// the next edit.
 
 import { type GetPromise, type Getter, race } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { ProtocolViolation } from "../error.ts";
-import { coveringPrefixes, hiddenBelow, presented } from "../internal.ts";
+import type * as Instance from "../instance.ts";
+import { coveringPrefixes, hiddenBelow, presented, scopeHead } from "../internal.ts";
 import * as Path from "../path.ts";
 import { type Advertised, type Advertisements, type OriginConsumer, sameInstance } from "../wire.ts";
 import { type Add, type AnnounceBroadcast, type Claim, claimsEqual, ownClaim, requestFits } from "./announce.ts";
@@ -22,7 +28,7 @@ export interface Publish {
 	/** The origin's claims, or undefined once it closed. */
 	advertised: Getter<Advertisements | undefined>;
 	/** The origin's scope, when the session publishes one. */
-	origin?: Pick<OriginConsumer, "covers">;
+	origin?: Pick<OriginConsumer, "covers" | "allowed">;
 	/** Our grant: only what it lets us publish is announced. */
 	grant?: Getter<Grant | undefined>;
 	/** Resolves once the tokens this session presented at setup are answered, so nothing is
@@ -185,6 +191,8 @@ export class Answer {
 	// Put the peer's request in effect: answer it, drop what the removed prefixes covered, tell
 	// what the added ones cover, and close each added prefix's initial set.
 	async #edit(request: { remove: bigint[]; add: [bigint, Prefix][] }) {
+		// A grant change the peer may have seen before this edit is answered before it.
+		if (this.#dirty) await this.#sync();
 		const removed: Path.Valid[] = [];
 		for (const id of request.remove) {
 			const prefix = this.#prefixes.get(id);
@@ -215,21 +223,51 @@ export class Answer {
 		const { advertised, origin } = this.#publish;
 		const table = origin ? advertised.peek() : undefined;
 		const grant = this.#publish.grant?.peek();
+		const granted = grant && regions(grant.publish);
 		// The claims the peer is shown, by their path from the session's root: the table under each
-		// prefix, less the hidden ones it did not ask for and whatever our grant does not let us
-		// publish, which is kept apart to tell a claim it no longer covers from one that ended.
+		// prefix, less the hidden ones it did not ask for and whatever our grant does not let us publish.
 		const latest = new Map<Path.Valid, Advertised>();
-		const ungranted = new Set<Path.Valid>();
+		// A claim is shown where the grant lets us publish some path it covers that the claim's own
+		// scope and the handle's both serve, as one at `a` serves `a/*` though `a` itself is not
+		// granted. An intersection too large to spell covers nothing, never more.
+		const shows = (snap: Advertised, path: Path.Valid) => {
+			if (!grant) return true;
+			let beneath = new Path.Patterns([Path.Pattern.subtree(path)]);
+			try {
+				for (const scope of [snap.claim, origin?.allowed]) if (scope) beneath = scope.intersect(beneath);
+			} catch {
+				return false;
+			}
+			return [...beneath].some((pattern) => grant.publish.overlaps(pattern));
+		};
+		// Whether the advertisement a claim the peer holds came from is still in the table, as when
+		// its presentation moved: the claim is lost to the peer rather than ended, since its publisher
+		// never withdrew it. Another path's advertisement of the same instance proves nothing.
+		// Indexed once per diff, and only when a claim leaves.
+		let advertisements: Map<object, Set<Instance.Valid | undefined>> | undefined;
+		const stillAdvertised = (sent: Sent) => {
+			if (!advertisements) {
+				advertisements = new Map();
+				for (const candidates of table?.values() ?? []) {
+					for (const snap of candidates) {
+						const instances = advertisements.get(snap.identity) ?? new Set();
+						instances.add(snap.route.instance);
+						advertisements.set(snap.identity, instances);
+					}
+				}
+			}
+			return advertisements.get(sent.snap.identity)?.has(sent.snap.route.instance) ?? false;
+		};
 		const ids = [...this.#prefixes.keys()].sort((a, b) => (a < b ? -1 : 1));
 		for (const id of table ? ids : []) {
 			const prefix = this.#prefixes.get(id);
 			if (!prefix || !table) continue;
 			const carries = (covered: Path.Valid) => prefix.hidden || !hiddenBelow(prefix.path, covered);
-			// A claim covering the prefix from above keeps how many segments broader than it it is.
-			for (const [suffix, snap] of presented(prefix.path, table, carries, true)) {
-				const path = Path.join(prefix.path, suffix);
-				if (!grant || grant.publish.matches(path)) latest.set(path, snap);
-				else ungranted.add(path);
+			for (const read of reads(prefix.path, granted)) {
+				// A claim covering what is read from above keeps how many segments broader than it it is.
+				for (const [suffix, snap] of presented(read, table, carries, true, shows)) {
+					latest.set(Path.join(read, suffix), snap);
+				}
 			}
 		}
 
@@ -241,7 +279,7 @@ export class Answer {
 		};
 		for (const [path, sent] of [...this.#live]) {
 			// No longer granted, it is lost to the peer: its publisher never ended it.
-			if (!latest.has(path)) end(path, sent, ungranted.has(path));
+			if (!latest.has(path)) end(path, sent, !shows(sent.snap, path) || stillAdvertised(sent));
 		}
 		for (const [path, snap] of latest) {
 			const { instance, epoch, cost } = snap.route;
@@ -265,4 +303,25 @@ export class Answer {
 		}
 		return msgs;
 	}
+}
+
+// The regions `patterns` confine the peer to, none within another, or undefined when they allow
+// every path. A head too long or deep to be a path holds none. Mirrors rs/moq-net's
+// `interest_prefixes`.
+function regions(patterns: Path.Patterns): Path.Valid[] | undefined {
+	if (patterns.contains(Path.Pattern.all())) return undefined;
+	const heads = new Set(
+		patterns
+			.toArray()
+			.map(scopeHead)
+			.filter((head) => Path.check(head) === undefined),
+	);
+	return [...heads].filter((head) => ![...heads].some((other) => other !== head && Path.hasPrefix(other, head)));
+}
+
+// What answers the requested `prefix`: the prefix itself when a region holds it or nothing confines
+// the peer, and otherwise each region inside it.
+function reads(prefix: Path.Valid, granted: Path.Valid[] | undefined): Path.Valid[] {
+	if (!granted || granted.some((region) => Path.hasPrefix(region, prefix))) return [prefix];
+	return granted.filter((region) => Path.hasPrefix(prefix, region));
 }
