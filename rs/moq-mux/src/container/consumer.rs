@@ -1516,9 +1516,9 @@ impl<F: Container> GroupBuffer<F> {
 	}
 
 	/// True if this group holds nothing to deliver and never will: aborted with nothing
-	/// buffered and no fault to report.
+	/// buffered, no endpoint decoded, and no fault to report.
 	fn reapable(&mut self, waiter: &kio::Waiter) -> bool {
-		self.buffered.is_empty() && self.fault.is_none() && self.poll_aborted(waiter)
+		self.buffered.is_empty() && self.markers.is_empty() && self.fault.is_none() && self.poll_aborted(waiter)
 	}
 
 	fn note_end(&mut self, end: std::time::Duration) {
@@ -1858,6 +1858,39 @@ mod tests {
 			});
 		}
 		items
+	}
+
+	/// An endpoint looked ahead in the next group is delivered though that group then aborts: it is
+	/// decoded, so only a group holding nothing at all is reaped.
+	#[tokio::test(start_paused = true)]
+	async fn a_looked_ahead_endpoint_outlives_its_groups_abort() {
+		let mut track = track_producer("gaps", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let subscription = track.subscribe(
+			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10))),
+		);
+		let mut consumer = Consumer::new(subscription, Container::Legacy(crate::container::Kind::Audio));
+		let mut head = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
+		Container::Legacy(crate::container::Kind::Audio)
+			.write(
+				&mut head,
+				&[Frame {
+					timestamp: ts(0),
+					payload: Bytes::from_static(&[0xDE, 0xAD]),
+					keyframe: true,
+					duration: None,
+				}],
+			)
+			.unwrap();
+		assert!(matches!(consumer.read().await.unwrap(), Some(Read::Frame { group: 0, .. })));
+		let mut next = track.create_group(moq_net::group::Info { start: 1 }).unwrap();
+		write_marker(&mut next, ts(20_000));
+		// Group 0 is still open, so the read blocks and looks ahead into group 1.
+		assert!(consumer.poll_read(&kio::Waiter::noop()).is_pending());
+		next.abort(moq_net::Error::Cancel).unwrap();
+		assert!(consumer.poll_read(&kio::Waiter::noop()).is_pending());
+		head.finish().unwrap();
+		let _track = track.finish().unwrap();
+		assert_eq!(items(&mut consumer).await, ["end 20000"]);
 	}
 
 	/// Joining a paused track, whose only served group is a marker, reads the end without
