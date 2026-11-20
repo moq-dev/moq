@@ -28,7 +28,7 @@ export interface Publish {
 	/** The origin's claims, or undefined once it closed. */
 	advertised: Getter<Advertisements | undefined>;
 	/** The origin's scope, when the session publishes one. */
-	origin?: Pick<OriginConsumer, "covers">;
+	origin?: Pick<OriginConsumer, "covers" | "allowed">;
 	/** Our grant: only what it lets us publish is announced. */
 	grant?: Getter<Grant | undefined>;
 	/** Resolves once the tokens this session presented at setup are answered, so nothing is
@@ -227,15 +227,14 @@ export class Answer {
 		// The claims the peer is shown, by their path from the session's root: the table under each
 		// prefix, less the hidden ones it did not ask for and whatever our grant does not let us publish.
 		const latest = new Map<Path.Valid, Advertised>();
-		// A claim is shown where the grant lets us publish some path it covers, and a scoped one
-		// serves, as one at `a` serves `a/*` though `a` itself is not granted. An intersection too
-		// large to spell covers nothing, never more.
-		const shows = (path: Path.Valid, snap: Advertised) => {
+		// A claim is shown where the grant lets us publish some path it covers that the claim's own
+		// scope and the handle's both serve, as one at `a` serves `a/*` though `a` itself is not
+		// granted. An intersection too large to spell covers nothing, never more.
+		const shows = (snap: Advertised, path: Path.Valid) => {
 			if (!grant) return true;
-			const subtree = new Path.Patterns([Path.Pattern.subtree(path)]);
-			let beneath = subtree;
+			let beneath = new Path.Patterns([Path.Pattern.subtree(path)]);
 			try {
-				if (snap.claim) beneath = snap.claim.intersect(subtree);
+				for (const scope of [snap.claim, origin?.allowed]) if (scope) beneath = scope.intersect(beneath);
 			} catch {
 				return false;
 			}
@@ -266,9 +265,8 @@ export class Answer {
 			const carries = (covered: Path.Valid) => prefix.hidden || !hiddenBelow(prefix.path, covered);
 			for (const read of reads(prefix.path, granted)) {
 				// A claim covering what is read from above keeps how many segments broader than it it is.
-				for (const [suffix, snap] of presented(read, table, carries, true)) {
-					const path = Path.join(read, suffix);
-					if (shows(path, snap)) latest.set(path, snap);
+				for (const [suffix, snap] of presented(read, table, carries, true, shows)) {
+					latest.set(Path.join(read, suffix), snap);
 				}
 			}
 		}
@@ -281,7 +279,7 @@ export class Answer {
 		};
 		for (const [path, sent] of [...this.#live]) {
 			// No longer granted, it is lost to the peer: its publisher never ended it.
-			if (!latest.has(path)) end(path, sent, !shows(path, sent.snap) || stillAdvertised(sent));
+			if (!latest.has(path)) end(path, sent, !shows(sent.snap, path) || stillAdvertised(sent));
 		}
 		for (const [path, snap] of latest) {
 			const { instance, epoch, cost } = snap.route;

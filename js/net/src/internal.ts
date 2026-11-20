@@ -115,7 +115,8 @@ export function hiddenBelow(prefix: Path.Valid, path: Path.Valid): boolean {
 /**
  * Where each carried route lands under the requested prefix: its suffix beneath the
  * prefix, or the empty suffix for a route above it, where the most specific such route
- * wins the way a request through the prefix would resolve.
+ * wins the way a request through the prefix would resolve. Only a candidate `shows` admits
+ * at the path it lands on competes.
  */
 export function presented(
 	prefix: Path.Valid,
@@ -123,6 +124,7 @@ export function presented(
 	carries: (covered: Path.Valid) => boolean,
 	// Lite-07: a route above the prefix keeps how many segments broader than the prefix it is.
 	keepAbove = false,
+	shows: (candidate: Advertised, at: Path.Valid) => boolean = () => true,
 ): Map<Path.Valid, Advertised> {
 	const out = new Map<Path.Valid, Advertised>();
 	let rootLen = -1;
@@ -134,7 +136,7 @@ export function presented(
 			// A scoped route covers only what it claims, so the best one that can serve the prefix wins.
 			const snap = firstEligible(
 				candidates,
-				(candidate) => !candidate.claim || candidate.claim.overlaps(requested),
+				(candidate) => (!candidate.claim || candidate.claim.overlaps(requested)) && shows(candidate, prefix),
 			);
 			if (!snap) continue;
 			rootLen = covered.length;
@@ -148,7 +150,7 @@ export function presented(
 			continue;
 		}
 		const suffix = Path.stripPrefix(prefix, covered);
-		const best = suffix !== null ? firstEligible(candidates) : undefined;
+		const best = suffix !== null ? firstEligible(candidates, (candidate) => shows(candidate, covered)) : undefined;
 		if (suffix !== null && best) out.set(suffix, best);
 	}
 	return out;

@@ -4316,6 +4316,52 @@ test("a lite-07 scoped claim sharing no path with the grant is hidden", async ()
 	}
 });
 
+// A claim is shown only where the grant, the claim's scope, and the answering handle's scope share
+// a path. Beneath a handle scoped to `a/*/x`, an unscoped claim at `a` serves nothing `a/*/y`
+// grants; and of two claims at `a`, the cheaper scoped to `a/*/x` gives way to the one `a/*/y`
+// shows.
+test("a lite-07 claim is shown only where the handle and the grant share a path", async () => {
+	const patterns = (pattern: string) => new Path.Patterns([Path.Pattern.parse(pattern)]);
+	const grant = new Signal<Grant | undefined>({ publish: patterns("a/*/y"), subscribe: new Path.Patterns([]) });
+	const synced = async (next: () => Promise<AnnounceBroadcast>) => {
+		const msgs: AnnounceBroadcast[] = [];
+		for (;;) {
+			const msg = await next();
+			msgs.push(msg);
+			if (msg.status === "synced") return msgs.flatMap((msg) => (msg.status === "start" ? [msg] : []));
+		}
+	};
+
+	const origin = new OriginProducer();
+	const claim = origin.claim(Path.from("a"));
+	const handle = routedAnswer(origin.scope(Path.empty(), patterns("a/*/x")), grant);
+	try {
+		await handle.ok();
+		expect(await synced(handle.next)).toEqual([]);
+	} finally {
+		claim.close();
+		handle.close();
+		origin.close();
+	}
+
+	const both = new OriginProducer();
+	const cheap = both.scope(Path.empty(), patterns("a/*/x")).claim(Path.from("a"), { cost: 1n });
+	const dear = both.scope(Path.empty(), patterns("a/*/y")).claim(Path.from("a"), { cost: 5n });
+	const answer = routedAnswer(both, grant);
+	try {
+		await answer.ok();
+		const starts = await synced(answer.next);
+		expect(starts.map((msg) => (msg.status === "start" ? [msg.suffix, msg.claim.cost] : []))).toEqual([
+			[Path.from("a"), 5n],
+		]);
+	} finally {
+		cheap.close();
+		dear.close();
+		answer.close();
+		both.close();
+	}
+});
+
 // A claim whose route is withdrawn ends, not lost, though another path still advertises the same
 // named instance: only the advertisement the claim came from proves it moved.
 test("a lite-07 withdrawn claim ends though its instance lives on elsewhere", async () => {
