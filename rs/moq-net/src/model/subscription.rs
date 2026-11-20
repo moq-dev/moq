@@ -48,6 +48,11 @@ pub struct Subscription {
 	/// answer gives. A session holding no upstream subscription for its copy subscribes again
 	/// for such a reader, whatever its ranges. Aggregated as any: one such reader is enough.
 	pub(crate) feed: bool,
+	/// The frames this reader already holds of the group a range starts at, so that range asks
+	/// for it from the frame after them rather than whole: a route switch resuming on a new
+	/// copy. Only a range whose start is a [`Anchor::Time`] at exactly that group's start uses
+	/// it. Aggregated only when every reader resumes: the lowest position then.
+	pub(crate) resume: Option<Position>,
 }
 
 /// How far behind the live edge a subscriber plays: where it starts, and how late it may fall.
@@ -67,9 +72,9 @@ pub struct Delay {
 	/// included, and a resumed subscription ignore it, and changing it later moves nothing
 	/// already started.
 	///
-	/// A media consumer also waits this long for a missing group, since past it the group would
-	/// play late, and starts an unstated minimum as zero but waits a missing group for
-	/// [`Self::max`] instead. The aggregate across subscribers is
+	/// It only sets where a reader starts: a missing group is given up by [`Self::max`] alone,
+	/// whatever the minimum. A media consumer starts an unstated minimum as zero. The aggregate
+	/// across subscribers is
 	/// the largest stated one, which a relay forwards upstream, so the copy it fills reaches
 	/// back for the reader that buffers most; each reader's own minimum then bounds what it
 	/// reads of that copy. moq-lite before 07 and moq-transport cannot carry it.
@@ -372,6 +377,7 @@ impl Default for Subscription {
 			ranges: vec![Range::oldest()],
 			order: Order::Descending,
 			feed: false,
+			resume: None,
 		}
 	}
 }
@@ -552,6 +558,7 @@ impl Combined {
 			combined.order = Order::Descending;
 		}
 		combined.feed |= sub.feed;
+		combined.resume = combined.resume.zip(sub.resume).map(|(a, b)| a.min(b));
 	}
 
 	/// The aggregate, or `None` without a subscriber.

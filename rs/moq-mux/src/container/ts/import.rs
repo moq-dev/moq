@@ -1801,13 +1801,13 @@ impl<E: catalog::Catalog> Import<E> {
 		Ok(())
 	}
 
-	/// Close the current group on every track and reopen at `sequence`.
-	pub fn seek(&mut self, sequence: u64) -> Result<()> {
+	/// Close the current group on every track and reopen at `start`, in each track's timescale.
+	pub fn seek(&mut self, start: u64) -> Result<()> {
 		for stream in self.streams.values_mut() {
-			stream.seek(sequence)?;
+			stream.seek(start)?;
 		}
 		for section in self.sections.values_mut() {
-			section.seek(sequence)?;
+			section.seek(start)?;
 		}
 		Ok(())
 	}
@@ -2389,8 +2389,8 @@ impl<E: catalog::Catalog> SectionStream<E> {
 		Ok(())
 	}
 
-	fn seek(&mut self, sequence: u64) -> Result<()> {
-		self.track.seek(sequence)?;
+	fn seek(&mut self, start: u64) -> Result<()> {
+		self.track.seek(start)?;
 		Ok(())
 	}
 
@@ -2641,8 +2641,8 @@ impl<E: catalog::Catalog> PesPacketStream<E> {
 		Ok(())
 	}
 
-	fn seek(&mut self, sequence: u64) -> Result<()> {
-		self.track.seek(sequence)?;
+	fn seek(&mut self, start: u64) -> Result<()> {
+		self.track.seek(start)?;
 		Ok(())
 	}
 
@@ -3306,7 +3306,7 @@ impl<E: catalog::Catalog> Stream<E> {
 	}
 
 	/// Sync was lost: drop whatever partial unit is held and stop vouching for the next
-	/// boundary. This is [`seek`](Self::seek) without the group-sequence side effect, for a
+	/// boundary. This is [`seek`](Self::seek) without reopening the group at a new start, for a
 	/// break the stream recovers from in place.
 	fn desync(&mut self) {
 		match self {
@@ -3369,7 +3369,7 @@ impl<E: catalog::Catalog> Stream<E> {
 		}
 	}
 
-	fn seek(&mut self, sequence: u64) -> Result<()> {
+	fn seek(&mut self, start: u64) -> Result<()> {
 		match self {
 			Stream::H264 {
 				split,
@@ -3379,7 +3379,7 @@ impl<E: catalog::Catalog> Stream<E> {
 			} => {
 				assembly.reset();
 				split.reset();
-				Ok(import.seek(sequence)?)
+				Ok(import.seek(start)?)
 			}
 			Stream::H265 {
 				split,
@@ -3389,12 +3389,12 @@ impl<E: catalog::Catalog> Stream<E> {
 			} => {
 				assembly.reset();
 				split.reset();
-				Ok(import.seek(sequence)?)
+				Ok(import.seek(start)?)
 			}
-			Stream::Aac(stream) => stream.seek(sequence),
-			Stream::Opus(stream) => stream.seek(sequence),
-			Stream::Legacy(stream) => stream.seek(sequence),
-			Stream::PesPacket(stream) => stream.seek(sequence),
+			Stream::Aac(stream) => stream.seek(start),
+			Stream::Opus(stream) => stream.seek(start),
+			Stream::Legacy(stream) => stream.seek(start),
+			Stream::PesPacket(stream) => stream.seek(start),
 			Stream::Clock | Stream::Ignored => Ok(()),
 		}
 	}
@@ -4056,11 +4056,11 @@ impl<E: CatalogExt> AacStream<E> {
 		Ok(())
 	}
 
-	fn seek(&mut self, sequence: u64) -> Result<()> {
+	fn seek(&mut self, start: u64) -> Result<()> {
 		// A seek is a discontinuity like any other.
 		self.desync();
 		if let Some(import) = &mut self.import {
-			import.seek(sequence)?;
+			import.seek(start)?;
 		}
 		Ok(())
 	}
@@ -4160,8 +4160,8 @@ impl OpusStream {
 		Ok(())
 	}
 
-	fn seek(&mut self, sequence: u64) -> Result<()> {
-		Ok(self.import.seek(sequence)?)
+	fn seek(&mut self, start: u64) -> Result<()> {
+		Ok(self.import.seek(start)?)
 	}
 
 	fn finish(&mut self) -> Result<()> {
@@ -4663,11 +4663,11 @@ impl<E: CatalogExt> LegacyStream<E> {
 		Ok(())
 	}
 
-	fn seek(&mut self, sequence: u64) -> Result<()> {
+	fn seek(&mut self, start: u64) -> Result<()> {
 		// A seek is a discontinuity like any other.
 		self.desync();
 		if let Some(import) = &mut self.import {
-			import.seek(sequence)?;
+			import.seek(start)?;
 		}
 		Ok(())
 	}

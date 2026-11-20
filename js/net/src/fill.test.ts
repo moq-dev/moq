@@ -418,7 +418,7 @@ test("fill: a gap below a group that fails after a probe is asked", async () => 
 	failed.abort(new StreamError(StreamCode.Cancel));
 	await yieldNow();
 	// Judged stale against group 4, so not asked.
-	await reader.start();
+	hooks.sourceStart(reader);
 	group.abort(new StreamError(StreamCode.Cancel));
 	await yieldNow();
 	const next = ordered.nextGroup();

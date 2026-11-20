@@ -1,11 +1,13 @@
-# [M] A front keeps delivering after it switches copies on lite-07
+# [M] A reader refused as unroutable reads again on lite-07
 
 ## Goal
 
-On lite-07, a relay's front that switches to a new copy after a link reopens
-or a relay crashes keeps delivering every group to its readers, as the
-release (lite-06) does. Today it can deliver for a few seconds, then hand
-out one group every 15-25s for a minute or more, with its route unchanged.
+On lite-07, a reader whose relay still shows its broadcast keeps reading after
+a link reopens or a relay crashes, as the release (lite-06) does. Today, about
+one run in twenty, a relay answers a reader's live subscription with
+Unroutable while it keeps announcing the broadcast unchanged. The reader's
+track strands, waiting for a route change that never comes, and starves for
+the rest of the run without an error.
 
 No reader starves in
 `just test mesh-replay --mesh test/mesh-replay/ring4.toml --script test/mesh-replay/reopen.toml --broadcasts 32`
@@ -14,43 +16,66 @@ or in the nightly ring meshes, once `[[known]]` no longer names this quest in
 
 ## Plan
 
-Found by [the mesh replay](/test/mesh-replay/README.md) while fixing
-[reopen-starve](https://github.com/moq-dev/moq/pull/9179), whose fix leaves no
-request refused and never asked again. With that fix, 9 of 13 `reopen.toml`
-runs on ring4 at 32 broadcasts passed (2 of 3 with
-[#9154](https://github.com/moq-dev/moq/pull/9154)), and the others starved 3
-to 205 reader paths. Before it, 17 of 24 passed, and failures starved 1 to 32
-paths, some of them stranded requests.
+Found by [the mesh replay](/test/mesh-replay/README.md). On main after
+[roll-echo-stall](https://github.com/moq-dev/moq/pull/9174) and
+[reopen-starve](https://github.com/moq-dev/moq/pull/9179), 19 of 20
+`reopen.toml` runs (ring4, 32 broadcasts, debug build) passed. In the failing
+run, `b`'s reader followed `d/0` and `d/3` through `a`. When the `a`-`b`
+session idle-timed out, relay `b` reset the reader's live subscriptions for
+exactly those two paths with Unroutable, and never withdrew or updated `d/0`.
+The reader's front strands a track refused as unroutable until its table moves
+(`model/front.rs` `refuse`, `Track::stranded`, `unstrand`), so it never asked
+again. The other 30 paths switched to the copy through `c`. That run had info
+logs only.
 
-What an instrumented failing run shows, after every link of `a` reopened:
+Decided 2026-11-20 by the maintainer:
 
-- `a`'s front on `b/0` switched to the direct route to `b` as `b`'s copy of
-  the claims caught up, spliced the new copy, and fed its reader for 13s.
-  From then on its route never changed and no request was refused, yet
-  `b`'s groups reached `a`'s reader once every 15-25s.
-- Over the same minute, `d`'s reader stalled the same way on all of `c`'s
-  broadcasts, through a front on the `c`-`d` link that the fault never
-  touched and that never switched.
-- No shaper dropped or overflowed a packet, and every reader's status kept
-  time.
+- ✅ The hop holds (rejected: the reader re-asks on a timer, which adds a
+  backstop timer and can loop on a refusal that stands). A hop never answers a
+  live subscription with Unroutable while it still shows that broadcast
+  available. Its front either waits for a route, as it already does for an
+  orphaned claim (`Front::waiting`), or changes its announcement so the reader
+  asks again.
+- ✅ The lite-07 cut waits on this fix.
 
-Pre-fix runs showed the same signature on a handful of paths: a front
-spliced a copy that delivered, then its reader got nothing for 57-75s.
+What [moq-dev/moq#9219](https://github.com/moq-dev/moq/pull/9219) did:
 
-Likely cause, untested: [roll-echo-stall](https://github.com/moq-dev/moq/pull/9174)'s
-first fix. A shared lite-07 copy never places a time start that a wider
-range already covers, so the subscription it feeds waits. A spliced copy
-resumes from a time. Its head could not be tested here: it no longer builds
-on main, and its merge is being redone. Once it lands, rerun `reopen.toml`
-several times. If no reader starves, delete this quest and its `[[known]]`
-entry. Otherwise, instrument the stalled subscription on both ends of the
-link: which groups the publisher serves, and what the subscriber's window
-waits on.
+- Closed one way a hop broke that rule. A front reads whether a source is
+  closing from its broadcast, and takes a failure from a source still open as
+  the track's verdict. A lite session could fail the copies it carries, or a
+  query waiting on TRACK_INFO, before it closed the broadcasts they came from:
+  a front that saw a copy die that way asked the dying source again and ended
+  the track with its answer, which a relay passes on as Unroutable. The lite
+  subscriber now closes a source before failing its tracks with the session's
+  end (`TrackServe::close_if_ending`, `SubscriberDriver::abort`), so the front
+  holds the track for the next route. It reads the session's state, not the
+  error, since a stream's own reset can carry the same error. The IETF
+  subscriber is unchanged. `/verify-failover` models the window: a dead relay's
+  route still shows until it leaves the table (`Shows`, `Withdraw`).
+- Added a debug line for every front step (`moq_net::model`), so a failing run
+  shows how a front ended a track.
 
-The lite-07 cut waits on it, as decided for reopen-starve on 2026-11-19
-(under the maintainer's delegation for lite-07 routing calls): it is the
-same starved reader after a link flap or a crash, which a deployment sees
-daily.
+That race was not confirmed as this failure. On an unloaded host, 59 base runs
+passed, as did 21 release runs of the fix that landed (and 24 debug runs of an
+earlier, error-based fix it replaced), and no reader got Unroutable during the
+single link reopen in any of them. Holding the drain open 2s after the transport closed
+did not make the base fail either. Traced relays showed the source closing
+before its copies end, the order the fix now guarantees. Debug runs on the CI host at load 70 or more starve
+readers by load alone: sessions to the detours idle-time out too.
+
+Next steps: capture one failure with
+`RUST_LOG=info,moq_net::model=debug`, on a host under real but not saturating
+load (relays below a core each), and record per-relay CPU with it. Rerun
+`reopen.toml` on a debug build until a reader gets Unroutable during the
+single link reopen; that alone marks the bug, starving or not. In the failing
+relay's log, find the front step that ended that path. Then write the test at
+the lowest layer that shows it, fix it as decided, rerun `/verify-failover`,
+and rerun the replay at least 20 times before dropping the `[[known]]` entries
+in `test/mesh-replay/script.toml`.
+
+Pauses are not part of this quest. A debug build pauses about as long on
+lite-06 as on lite-07 under the same load, and a release build the same on
+both versions.
 
 Not a wire change.
 

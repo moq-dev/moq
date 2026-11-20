@@ -188,7 +188,10 @@ export class Terminal {
 		this.#end = undefined;
 		this.#endGroup = undefined;
 		this.#before = undefined;
-		// A fresh encoder's first packets need no frames of the stopped one ahead of them.
+		// A fresh encoder's first packets need no frames of the stopped one ahead of them, and no
+		// warmup a join or a gap left pending: a wire before lite-07 names the run the publisher
+		// skipped across its silence a drop, so after every pause a gap reaches this frame too.
+		this.#prime = false;
 		this.#forget();
 		this.#resetEpoch();
 	}

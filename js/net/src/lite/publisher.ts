@@ -64,6 +64,7 @@ import {
 	type Applied,
 	encodeSubscribeResponse,
 	LiveRanges,
+	positionFrames,
 	rangeBounds,
 	rangesOf,
 	requestedRange,
@@ -277,6 +278,10 @@ type FrameBounds = {
 	endGroup?: bigint;
 	/** Last frame (inclusive) to send within {@link endGroup}; every other group runs to its end. */
 	endFrame?: number;
+	/** Lite-07: the first frame of each group a range starts partway through (see {@link positionFrames}). */
+	starts: ReadonlyMap<bigint, number>;
+	/** Lite-07: {@link starts} as each decoded update leaves them, until the run applies that update. */
+	startsAfter: WeakMap<SubscribeUpdate, ReadonlyMap<bigint, number>>;
 };
 
 /**
@@ -292,7 +297,7 @@ type FrameBounds = {
  */
 function frameRange(bounds: FrameBounds, key: bigint): { start: number; end?: number } {
 	return {
-		start: bounds.startGroup === key ? bounds.startFrame : 0,
+		start: bounds.starts.get(key) ?? (bounds.startGroup === key ? bounds.startFrame : 0),
 		end: bounds.endGroup === key ? bounds.endFrame : undefined,
 	};
 }
@@ -509,6 +514,11 @@ class Requested {
 
 	get(id: bigint): WireRange | undefined {
 		return this.#ranges.get(id);
+	}
+
+	/** Every live range. */
+	values(): IterableIterator<WireRange> {
+		return this.#ranges.values();
 	}
 
 	/** Hold `range` as Range ID `id`, replacing any it held. */
@@ -1125,6 +1135,8 @@ export class Publisher {
 			startFrame: msg.startFrame,
 			endGroup: msg.endGroup,
 			endFrame: msg.endFrame,
+			starts: hasRanges(this.version) ? positionFrames(msg.ranges ?? []) : new Map(),
+			startsAfter: new WeakMap(),
 		};
 		let legacy: datagram.Consumer | undefined;
 		const legacyPriority = new Signal(msg.priority);
@@ -1216,6 +1228,11 @@ export class Publisher {
 			const asked = rangesOf(msg);
 			// The ranges as the model holds them, pinned, by Range ID, with the read cursor's bounds.
 			const requested = new Requested(asked);
+			// Lite-07: the Range IDs of the live ranges that start partway through a group, so an
+			// edit recomputes the frame starts only while one is live.
+			const positions = new Set<bigint>();
+			for (const [id, range] of asked.entries())
+				if (range.start?.absolute !== undefined && range.start.frame) positions.add(BigInt(id));
 			// Lite-07: the ranges whose relative or time anchors may still resolve.
 			const unpinned = new Unpinned();
 			if (hasRanges(this.version))
@@ -1288,6 +1305,13 @@ export class Publisher {
 					for (const id of retired) requested.remove(id);
 					for (const [id, range] of [...pins, ...added]) requested.insert(id, range);
 					for (const [id, range] of added) unpinned.insert(id, due(range, false));
+					for (const id of retired) positions.delete(id);
+					for (const [id, range] of added)
+						if (range.start?.absolute !== undefined && range.start.frame) positions.add(id);
+					bounds.startsAfter.set(
+						update,
+						positions.size > 0 ? positionFrames([...requested.values()]) : new Map(),
+					);
 					// Refused before the model moves, as one SUBSCRIBE asking for nothing is.
 					Object.assign(update, spanBetween(this.version, requested.start(), requested.end()));
 					const add = [...pins, ...added].map(([id, range]) => [id, requestedRange(range)] as const);
@@ -1791,6 +1815,7 @@ export class Publisher {
 							bounds.startFrame = update.startFrame;
 							bounds.endGroup = update.endGroup;
 							bounds.endFrame = update.endFrame;
+							bounds.starts = bounds.startsAfter.get(update) ?? new Map();
 							moveCursor();
 							// A run elided for a group the ranges no longer name goes out after all.
 							if (!(await sendElided())) return false;

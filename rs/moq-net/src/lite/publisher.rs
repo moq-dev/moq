@@ -3779,6 +3779,283 @@ mod announce_test {
 		assert!(matches!(refused, Err(Error::ProtocolViolation)), "{refused:?}");
 	}
 
+	/// A lite-07 prefix wider than the grant is answered region by region: a claim above a
+	/// region is presented at the region, and nothing outside the grant is told. A grant
+	/// change is answered before the ANNOUNCE_OK of the next edit, even one that changes
+	/// nothing, mounts beneath a newly granted region included; a narrowing loses what it
+	/// no longer shows.
+	#[kio::test]
+	async fn a_lite07_prefix_wider_than_the_grant_is_answered_region_by_region() {
+		let path = |path: &str| crate::Path::new(path).unwrap();
+		let subtrees = |paths: &[&str]| -> crate::Patterns {
+			paths
+				.iter()
+				.map(|path| crate::Pattern::subtree(path).unwrap())
+				.collect()
+		};
+		let origin = Hop::new(1).unwrap().produce();
+		let _above = origin.announce("a", origin::RouteInfo::new()).unwrap();
+		let _ax = origin.announce("a/b/x", origin::RouteInfo::new()).unwrap();
+		let _cy = origin.announce("c/y", origin::RouteInfo::new()).unwrap();
+		let _outside = origin.announce("d/z", origin::RouteInfo::new()).unwrap();
+		let _cam = origin.announce("src/cam", origin::RouteInfo::new()).unwrap();
+		let consumer = (origin.mount("e/m", "src").unwrap())
+			.scope("", &crate::Patterns::from(crate::Pattern::all()))
+			.unwrap()
+			.consume();
+		let auth = crate::auth::Link::new(false);
+		let limit = |paths: &[&str]| crate::auth::Grant {
+			publish: crate::Patterns::default(),
+			subscribe: subtrees(paths),
+			expires: None,
+		};
+		auth.handle().authorize(&limit(&["a/b"]));
+		let mut answer = super::routed::Answer::alone_on(consumer, auth.clone());
+		let log = Log::default();
+		let mut wire = Wire {
+			writes: log.writes.clone(),
+			cursor: 0,
+			version: Version::Lite07,
+		};
+		let mut writer = Writer::new(
+			crate::transport::boxed::SendStream::new(SinkSend::new(log)),
+			Version::Lite07,
+		);
+		let waiter = kio::Waiter::noop();
+		let mut sent = |answer: &mut super::routed::Answer| {
+			answer.drain(&mut writer).unwrap();
+			assert!(writer.poll_flush(&waiter).is_ready());
+			wire.take_announces()
+		};
+		// The paths the peer is told, each with how far above it its claim is.
+		let mut decoder = lite::AnnounceDecoder::default();
+		let mut started = |msgs: &[lite::AnnounceBroadcast]| -> Vec<(String, u64)> {
+			let mut told = Vec::new();
+			for msg in msgs {
+				match msg {
+					lite::AnnounceBroadcast::Start { suffix, claim, .. } => {
+						let path = decoder.start(Some(suffix.clone())).unwrap().unwrap();
+						told.push((path.to_string(), claim.item.above));
+					}
+					lite::AnnounceBroadcast::End { id, .. } => {
+						decoder.end(*id).unwrap();
+					}
+					_ => {}
+				}
+			}
+			told.sort();
+			told
+		};
+
+		answer.request(false, Vec::new(), vec![(path(""), true)]).unwrap();
+		let first = sent(&mut answer);
+		assert_eq!(first[0], lite::AnnounceBroadcast::Ok);
+		let told = started(&first);
+		// `a` covers the region from one segment above it; `c/y` and `d/z` lie outside.
+		assert_eq!(told, [("a/b".to_string(), 1), ("a/b/x".to_string(), 0)], "{first:?}");
+		assert_eq!(first.last(), Some(&lite::AnnounceBroadcast::Synced { prefix: 0 }));
+
+		// The grant widens to `c` and the mount point `e`, unread until the next edit: the
+		// edit changes nothing, and its ANNOUNCE_OK follows both.
+		auth.handle().authorize(&limit(&["a/b", "c", "e"]));
+		answer.request(false, Vec::new(), Vec::new()).unwrap();
+		let widened = sent(&mut answer);
+		let ok = widened.iter().position(|msg| *msg == lite::AnnounceBroadcast::Ok);
+		assert_eq!(ok, Some(widened.len() - 1), "{widened:?}");
+		let told = started(&widened);
+		assert_eq!(
+			told,
+			[("c/y".to_string(), 0), ("e/m/cam".to_string(), 0)],
+			"{widened:?}"
+		);
+
+		// Narrowed back, what it no longer shows is lost.
+		auth.handle().authorize(&limit(&["a/b"]));
+		answer.poll_permit(&waiter).unwrap();
+		let narrowed = sent(&mut answer);
+		let lost = narrowed
+			.iter()
+			.filter(|msg| matches!(msg, lite::AnnounceBroadcast::End { lost: true, .. }));
+		assert_eq!(lost.count(), 2, "{narrowed:?}");
+
+		// Widened to everything, the root replaces the region as what is read: `a/b/x` is
+		// told again by the wider read rather than ended, and only the claim above the
+		// region moves, lost where it was presented and told at its own path.
+		auth.handle().authorize(&limit(&[""]));
+		answer.poll_permit(&waiter).unwrap();
+		let whole = sent(&mut answer);
+		let ends: Vec<_> = (whole.iter())
+			.filter_map(|msg| match msg {
+				lite::AnnounceBroadcast::End { lost, .. } => Some(*lost),
+				_ => None,
+			})
+			.collect();
+		assert_eq!(ends, [true], "{whole:?}");
+		let told = started(&whole);
+		assert!(told.contains(&("a".to_string(), 0)), "{whole:?}");
+		assert!(!told.iter().any(|(path, _)| path == "a/b/x"), "{whole:?}");
+	}
+
+	/// Grant changes queued before the answer drains each move the reads they queued, in
+	/// order: one that keeps the regions keeps a mount and its claim, though a later one
+	/// replaces that mount, and the claim every grant shows is never ended.
+	#[kio::test]
+	async fn lite07_grant_changes_queued_back_to_back_apply_in_order() {
+		let path = |path: &str| crate::Path::new(path).unwrap();
+		let origin = Hop::new(1).unwrap().produce();
+		let _cam = origin.announce("src/m", origin::RouteInfo::new()).unwrap();
+		let consumer = (origin.mount("a", "src").unwrap())
+			.scope("", &crate::Patterns::from(crate::Pattern::all()))
+			.unwrap()
+			.consume();
+		let auth = crate::auth::Link::new(false);
+		let limit = |pattern: &str| crate::auth::Grant {
+			publish: crate::Patterns::default(),
+			subscribe: crate::Patterns::from(pattern.parse::<crate::Pattern>().unwrap()),
+			expires: None,
+		};
+		auth.handle().authorize(&limit("a/*"));
+		let mut answer = super::routed::Answer::alone_on(consumer, auth.clone());
+		let log = Log::default();
+		let mut wire = Wire {
+			writes: log.writes.clone(),
+			cursor: 0,
+			version: Version::Lite07,
+		};
+		let mut writer = Writer::new(
+			crate::transport::boxed::SendStream::new(SinkSend::new(log)),
+			Version::Lite07,
+		);
+		let waiter = kio::Waiter::noop();
+		let mut sent = |answer: &mut super::routed::Answer| {
+			answer.drain(&mut writer).unwrap();
+			assert!(writer.poll_flush(&waiter).is_ready());
+			wire.take_announces()
+		};
+
+		answer.request(false, Vec::new(), vec![(path(""), true)]).unwrap();
+		let first = sent(&mut answer);
+		let starts = first
+			.iter()
+			.filter(|msg| matches!(msg, lite::AnnounceBroadcast::Start { .. }));
+		assert_eq!(starts.count(), 1, "{first:?}");
+
+		// `a/**` keeps the region `a`; `a/m/**` then reads `a/m` in place of `a`.
+		auth.handle().authorize(&limit("a/**"));
+		answer.poll_permit(&waiter).unwrap();
+		auth.handle().authorize(&limit("a/m/**"));
+		answer.poll_permit(&waiter).unwrap();
+		let changed = sent(&mut answer);
+		let ends = changed
+			.iter()
+			.filter(|msg| matches!(msg, lite::AnnounceBroadcast::End { .. }));
+		assert_eq!(ends.count(), 0, "{changed:?}");
+	}
+
+	/// A grant that narrows before a prefix's SYNCED replaces the mount its initial set
+	/// waits on with one beneath the narrower region, and SYNCED waits for that one too.
+	#[kio::test]
+	async fn a_lite07_mount_replaced_before_synced_still_holds_it() {
+		let path = |path: &str| crate::Path::new(path).unwrap();
+		let origin = Hop::new(1).unwrap().produce();
+		let _cam = origin.announce("src/m/cam", origin::RouteInfo::new()).unwrap();
+		let consumer = (origin.mount("a", "src").unwrap())
+			.scope("", &crate::Patterns::from(crate::Pattern::all()))
+			.unwrap()
+			.consume();
+		let auth = crate::auth::Link::new(false);
+		let limit = |pattern: &str| crate::auth::Grant {
+			publish: crate::Patterns::default(),
+			subscribe: crate::Patterns::from(pattern.parse::<crate::Pattern>().unwrap()),
+			expires: None,
+		};
+		auth.handle().authorize(&limit("a/**"));
+		let mut answer = super::routed::Answer::alone_on(consumer, auth.clone());
+		let log = Log::default();
+		let mut wire = Wire {
+			writes: log.writes.clone(),
+			cursor: 0,
+			version: Version::Lite07,
+		};
+		let mut writer = Writer::new(
+			crate::transport::boxed::SendStream::new(SinkSend::new(log)),
+			Version::Lite07,
+		);
+		let waiter = kio::Waiter::noop();
+
+		answer.request(false, Vec::new(), vec![(path(""), true)]).unwrap();
+		// Narrowed before the mount at `a` sent its initial set: `a/m` is read in its place.
+		auth.handle().authorize(&limit("a/m/**"));
+		answer.poll_permit(&waiter).unwrap();
+		answer.drain(&mut writer).unwrap();
+		assert!(writer.poll_flush(&waiter).is_ready());
+		let msgs = wire.take_announces();
+		let start = msgs
+			.iter()
+			.position(|msg| matches!(msg, lite::AnnounceBroadcast::Start { .. }));
+		let synced = msgs
+			.iter()
+			.position(|msg| *msg == lite::AnnounceBroadcast::Synced { prefix: 0 });
+		assert!(start.is_some() && start < synced, "{msgs:?}");
+	}
+
+	/// A claim at a path the scope does not match, but above paths it does, is shown where
+	/// it is presented: `a` under `a/*`, at the region and at its own path. One beneath
+	/// every path the scope matches stays hidden, and so does `a` from a handle scoped to
+	/// `a/*/x`, which shares no path with the scope.
+	#[kio::test]
+	async fn a_lite07_claim_above_what_the_scope_matches_is_shown() {
+		let path = |path: &str| crate::Path::new(path).unwrap();
+		let origin = Hop::new(1).unwrap().produce();
+		let _a = origin.announce("a", origin::RouteInfo::new()).unwrap();
+		let _deep = origin.announce("a/x/y", origin::RouteInfo::new()).unwrap();
+		let _b = origin.announce("b", origin::RouteInfo::new()).unwrap();
+		let auth = crate::auth::Link::new(false);
+		auth.handle().authorize(&crate::auth::Grant {
+			publish: crate::Patterns::default(),
+			subscribe: crate::Patterns::from("a/*".parse::<crate::Pattern>().unwrap()),
+			expires: None,
+		});
+		let waiter = kio::Waiter::noop();
+		let disjoint = (origin.consume())
+			.scope("", &crate::Patterns::from("a/*/x".parse::<crate::Pattern>().unwrap()))
+			.unwrap();
+		let shown = [("a".to_string(), 0)];
+		for (consumer, asked, expected) in [
+			(origin.consume(), "", &shown[..]),
+			(origin.consume(), "a", &shown[..]),
+			(disjoint, "", &[][..]),
+		] {
+			let log = Log::default();
+			let mut wire = Wire {
+				writes: log.writes.clone(),
+				cursor: 0,
+				version: Version::Lite07,
+			};
+			let mut writer = Writer::new(
+				crate::transport::boxed::SendStream::new(SinkSend::new(log)),
+				Version::Lite07,
+			);
+			let mut answer = super::routed::Answer::alone_on(consumer, auth.clone());
+			answer.request(false, Vec::new(), vec![(path(asked), true)]).unwrap();
+			answer.drain(&mut writer).unwrap();
+			assert!(writer.poll_flush(&waiter).is_ready());
+			let msgs = wire.take_announces();
+			let mut decoder = lite::AnnounceDecoder::default();
+			let told: Vec<(String, u64)> = (msgs.iter())
+				.filter_map(|msg| match msg {
+					lite::AnnounceBroadcast::Start { suffix, claim, .. } => {
+						let path = decoder.start(Some(suffix.clone())).unwrap().unwrap();
+						Some((path.to_string(), claim.item.above))
+					}
+					_ => None,
+				})
+				.collect();
+			assert_eq!(told, expected, "{asked:?}: {msgs:?}");
+			assert_eq!(msgs.last(), Some(&lite::AnnounceBroadcast::Synced { prefix: 0 }));
+		}
+	}
+
 	/// A lite-07 edit removing a prefix and adding it again, as a peer changing its
 	/// Hidden opt-in does, tells what a mount beneath it presents again under the new
 	/// Prefix ID: both ends dropped the claim with the prefix, so nothing ends.
@@ -4578,15 +4855,15 @@ fn position_group(group: group::Consumer, frames: &Frames) -> Option<group::Cons
 	(group.index() == expected).then_some(group)
 }
 
-/// The frame bounds of a lite-06 subscription's one range, which the model leaves to the
-/// publisher: it reads whole groups. A lite-07 range covers whole groups, so it has none.
+/// The frame bounds of a subscription, which the model leaves to the publisher: it reads
+/// whole groups. Lite-06 bounds its one range's start and end; lite-07 only a range's start.
 ///
 /// A frame bound qualifies the group its range starts or ends at, so everything in between
 /// is served whole.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Frames {
-	/// The group the range starts partway through, and the first frame it serves of it.
-	first: Option<(u64, u64)>,
+	/// Each group a range starts partway through, and the first frame it serves of it.
+	first: Vec<(u64, u64)>,
 	/// The group the range ends partway through, and the last frame it serves of it, inclusive.
 	last: Option<(u64, u64)>,
 	/// The lowest group a legacy wire's start serves: its start names the first group at or
@@ -4597,10 +4874,9 @@ struct Frames {
 impl Frames {
 	/// The first frame to serve of `group`: 0 unless the range starts partway through it.
 	fn start(&self, group: u64) -> u64 {
-		match self.first {
-			Some((at, first)) if at == group => first,
-			_ => 0,
-		}
+		(self.first.iter())
+			.find(|(at, _)| *at == group)
+			.map_or(0, |(_, first)| *first)
 	}
 
 	/// The last frame to serve of `group`, inclusive, or `None` for all of it.
@@ -4615,11 +4891,16 @@ impl Frames {
 struct Bounds {
 	ranges: Vec<crate::track::Range>,
 	frames: Frames,
+	/// Lite-07: each range starting partway through a group, by its index in `ranges`, with
+	/// that group and the first frame of it. [`Frames::first`] keeps those no other range
+	/// covers.
+	positions: std::collections::BTreeMap<u64, (u64, u64)>,
 }
 
 impl Bounds {
 	/// Read `ranges` as they arrived. Group IDs are group starts, so an absolute anchor and a
-	/// time anchor both name a start. Lite-07 carries only time anchors, both ends inclusive.
+	/// time anchor both name a start. Lite-07 carries time anchors, both ends inclusive, and a
+	/// start partway through a group as an absolute one.
 	///
 	/// A `legacy` wire (one without ranges) means its start as the first group starting at
 	/// or after it, never one before it that contains it, so the frames narrow to that
@@ -4636,8 +4917,9 @@ impl Bounds {
 		let mut bounds = Self {
 			ranges: Vec::with_capacity(ranges.len()),
 			frames: Frames::default(),
+			positions: Default::default(),
 		};
-		// Only lite-06 bounds frames, and it carries one range.
+		// Lite-06 bounds frames on its one range, and lite-07 only a range's start.
 		for range in ranges {
 			// Empty partway through a group, which whole groups can't say: keep its place,
 			// covering no group and narrowing no frame of one.
@@ -4654,11 +4936,10 @@ impl Bounds {
 			if legacy && let Some(lite::Anchor::Absolute(start)) = range.start {
 				bounds.frames.floor = bounds.frames.floor.max(start.group);
 			}
-			if let Some(lite::Anchor::Absolute(start)) = range.start
-				&& start.frame != 0
-			{
-				bounds.frames.first = Some((start.group, start.frame));
-			}
+			let position = match range.start {
+				Some(lite::Anchor::Absolute(start)) if start.frame != 0 => Some((start.group, start.frame)),
+				_ => None,
+			};
 			let end = match range.end {
 				None => None,
 				// A mid-group end includes its group, up to the frame before it.
@@ -4678,8 +4959,16 @@ impl Bounds {
 				},
 				Some(end) => Some(anchor(end)),
 			};
+			// One ending before the group it starts partway through covers nothing, so it starts
+			// no group partway.
+			if let Some((group, frame)) = position
+				&& !matches!(end, Some(Anchor::Time(end)) if end < group)
+			{
+				bounds.positions.insert(bounds.ranges.len() as u64, (group, frame));
+			}
 			bounds.ranges.push(Range { start, end });
 		}
+		bounds.frames.first = first_frames(bounds.positions.values(), &bounds.ranges);
 		bounds
 	}
 
@@ -4693,6 +4982,50 @@ impl Bounds {
 	fn groups(&self) -> crate::track::Subscription {
 		crate::track::Subscription::default().with_ranges(self.ranges.iter().copied())
 	}
+}
+
+/// The frame starts of `positions` that apply among `ranges`: a group delivers once across
+/// the ranges, so a frame start applies only to a group no other range may cover, since
+/// another range's would ask for it from frame 0. A peer may send thousands of ranges, so this
+/// sorts the ranges' times once rather than scanning them per position, and costs nothing
+/// while no range starts partway through a group.
+fn first_frames<'a>(
+	positions: impl IntoIterator<Item = &'a (u64, u64)>,
+	ranges: impl IntoIterator<Item = &'a crate::track::Range>,
+) -> Vec<(u64, u64)> {
+	use crate::track::Anchor;
+	let mut positions: Vec<_> = positions.into_iter().copied().collect();
+	if positions.is_empty() {
+		return positions;
+	}
+	// A range may cover a group unless it starts past it or ends before it, by time. One that
+	// starts past where it ends covers none, so with it left out, no range does both and the
+	// ranges covering a group are the rest less those two counts.
+	let (mut count, mut starts, mut ends) = (0, Vec::new(), Vec::new());
+	for range in ranges {
+		let start = match range.start {
+			Anchor::Time(start) => Some(start),
+			_ => None,
+		};
+		let end = match range.end {
+			Some(Anchor::Time(end)) => Some(end),
+			_ => None,
+		};
+		if start.zip(end).is_some_and(|(start, end)| start > end) {
+			continue;
+		}
+		count += 1;
+		starts.extend(start);
+		ends.extend(end);
+	}
+	starts.sort_unstable();
+	ends.sort_unstable();
+	positions.retain(|(group, _)| {
+		let past = starts.len() - starts.partition_point(|start| start <= group);
+		let before = ends.partition_point(|end| end < group);
+		count - past - before <= 1
+	});
+	positions
 }
 
 /// A subscription's requested ranges in the model's whole groups, by Range ID, with the
@@ -4965,6 +5298,9 @@ struct TrackRun {
 	steer_tx: kio::Producer<Steer>,
 	// The frame bounds of the requested ranges, which the model leaves to `position_group`.
 	frames: Frames,
+	/// Lite-07: each live range starting partway through a group, by Range ID, with that
+	/// group and its first frame, so an edit recomputes [`Frames::first`] from what is live.
+	positions: std::collections::BTreeMap<u64, (u64, u64)>,
 	/// The requested ranges in the model's whole groups, by Range ID, and what the read
 	/// cursor needs of them, kept current per edit.
 	requested: Requested,
@@ -5102,6 +5438,7 @@ impl TrackRun {
 			bounded,
 			requested: Requested::new((0..).zip(bounds.ranges.iter().copied())),
 			frames: bounds.frames,
+			positions: bounds.positions,
 			refused: None,
 			ctx,
 			track,
@@ -5232,9 +5569,14 @@ impl TrackRun {
 		delay: crate::track::Delay,
 		order: Order,
 	) -> bool {
+		let mut positions = Vec::new();
 		let added: Vec<(u64, crate::track::Range)> = added
 			.into_iter()
-			.map(|(id, range)| (id, Bounds::new(std::slice::from_ref(&range), false).ranges[0]))
+			.map(|(id, range)| {
+				let bounds = Bounds::new(std::slice::from_ref(&range), false);
+				positions.extend(bounds.positions.values().map(|position| (id, *position)));
+				(id, bounds.ranges[0])
+			})
 			.collect();
 		for id in &retired {
 			self.unpinned.remove(*id);
@@ -5262,12 +5604,21 @@ impl TrackRun {
 		for (id, range) in pins {
 			self.requested.insert(id, range);
 		}
+		// Retired and replaced ranges take their frame starts with them.
+		let had = !self.positions.is_empty();
+		for id in retired.iter().chain(added.iter().map(|(id, _)| id)) {
+			self.positions.remove(id);
+		}
 		for (id, range) in added {
 			self.requested.insert(id, range);
 			self.unpinned.insert(id, due(&range, false));
 			if id >= self.initial {
 				self.unstarted.insert(id);
 			}
+		}
+		self.positions.extend(positions);
+		if had || !self.positions.is_empty() {
+			self.frames.first = first_frames(self.positions.values(), self.requested.ranges.values());
 		}
 		moved
 	}
@@ -5349,6 +5700,9 @@ impl TrackRun {
 			self.refused = Some(err);
 			return false;
 		}
+		self.positions = (bounds.positions.iter())
+			.map(|(index, position)| (ids[*index as usize], *position))
+			.collect();
 		self.requested = Requested::new(ids.into_iter().zip(bounds.ranges.iter().copied()));
 		self.frames = bounds.frames;
 		true
@@ -7081,6 +7435,93 @@ mod serve_group_test {
 		assert_eq!((inside.frames.start(4), inside.frames.end(6)), (0, None));
 	}
 
+	/// The sweep in `first_frames` keeps exactly the positions a scan of every range per
+	/// position keeps: those no more than one range may cover.
+	#[test]
+	fn first_frames_matches_a_scan_of_every_range() {
+		use rand::{RngExt, SeedableRng};
+		use track::Anchor;
+		let mut rng = rand::rngs::StdRng::seed_from_u64(0x6672616d6573);
+		for _ in 0..2000 {
+			let anchor = |rng: &mut rand::rngs::StdRng| match rng.random_range(0..3) {
+				0 => Anchor::Relative(rng.random_range(0..3)),
+				_ => Anchor::Time(rng.random_range(0..8)),
+			};
+			let ranges: Vec<track::Range> = (0..rng.random_range(0..6))
+				.map(|_| track::Range {
+					start: anchor(&mut rng),
+					end: rng.random_bool(0.6).then(|| anchor(&mut rng)),
+				})
+				.collect();
+			let positions: Vec<(u64, u64)> = (0..rng.random_range(0..4))
+				.map(|_| (rng.random_range(0..8), rng.random_range(1..4)))
+				.collect();
+			let scanned: Vec<(u64, u64)> = (positions.iter().copied())
+				.filter(|(group, _)| {
+					let covers = |range: &&track::Range| match (range.start, range.end) {
+						(Anchor::Time(start), _) if start > *group => false,
+						(_, Some(Anchor::Time(end))) if end < *group => false,
+						_ => true,
+					};
+					ranges.iter().filter(covers).nth(1).is_none()
+				})
+				.collect();
+			assert_eq!(first_frames(&positions, &ranges), scanned, "{ranges:?} {positions:?}");
+		}
+	}
+
+	/// Each lite-07 range starting partway through a group serves that group from its frame,
+	/// unless another range may cover it too, which asks for it whole.
+	#[test]
+	fn frame_starts_apply_per_group() {
+		let at = |group, frame| Some(lite::Anchor::Absolute(track::Position { group, frame }));
+		let time = |time| Some(lite::Anchor::Time(time));
+		let disjoint = Bounds::new(
+			&[
+				lite::Range {
+					start: at(7, 4),
+					end: time(8),
+				},
+				lite::Range {
+					start: at(9, 2),
+					end: None,
+				},
+			],
+			false,
+		);
+		assert_eq!((disjoint.frames.start(7), disjoint.frames.start(9)), (4, 2));
+		assert_eq!(disjoint.frames.start(8), 0);
+
+		// A range ending before the group it starts partway through covers nothing, so another
+		// range covering that group asks for it whole.
+		let empty = Bounds::new(
+			&[
+				lite::Range {
+					start: at(7, 4),
+					end: time(6),
+				},
+				lite::Range { start: None, end: None },
+			],
+			false,
+		);
+		assert_eq!(empty.frames.start(7), 0);
+
+		let overlapping = Bounds::new(
+			&[
+				lite::Range {
+					start: at(7, 4),
+					end: None,
+				},
+				lite::Range {
+					start: at(9, 2),
+					end: None,
+				},
+			],
+			false,
+		);
+		assert_eq!((overlapping.frames.start(7), overlapping.frames.start(9)), (4, 0));
+	}
+
 	/// A group whose head the publisher no longer holds is skipped, not served short:
 	/// only a subscriber that asked for a partial group may receive one.
 	#[test]
@@ -7094,7 +7535,7 @@ mod serve_group_test {
 		group.start_at(5).unwrap();
 		group.write_frame(group.key_time(), b"tail".to_vec()).unwrap();
 		let starting = |frame| Frames {
-			first: Some((3, frame)),
+			first: vec![(3, frame)],
 			..Frames::default()
 		};
 
@@ -8516,6 +8957,37 @@ mod serve_group_test {
 			},
 			false => lite::Applied::Replace(vec![(0, range)]),
 		}
+	}
+
+	/// A lite-07 update that adds or retires a range starting partway through a group moves
+	/// that group's frame start with it, and another range covering the group serves it whole.
+	#[kio::test]
+	async fn lite07_an_edit_moves_frame_starts_with_its_ranges() {
+		let track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", track::Info::default());
+		let (mut run, _, _) = lite07_run(SinkSession::new(Log::default()), track.subscribe(None));
+		let edit = |retired: &[u64], added: &[(u64, lite::Range)]| lite::SubscribeUpdate {
+			wanted_group: None,
+			priority: 0,
+			max_delay: Some(Duration::from_secs(3600)),
+			min_delay: None,
+			ranges: lite::Applied::Edit {
+				retired: retired.to_vec(),
+				added: added.to_vec(),
+			},
+			order: Order::Descending,
+		};
+		let resume = lite::Range::span(Some(5), 2, None, None);
+		run.update(edit(&[0], &[(1, resume)]));
+		assert_eq!(run.frames.start(5), 2, "an added position");
+		run.update(edit(&[], &[(2, lite::Range::span(Some(3), 0, None, None))]));
+		assert_eq!(run.frames.start(5), 0, "another range covers the group");
+		run.update(edit(&[2], &[]));
+		assert_eq!(run.frames.start(5), 2, "the covering range retired");
+		run.update(edit(&[], &[(1, lite::Range::span(Some(5), 0, None, None))]));
+		assert_eq!(run.frames.start(5), 0, "replaced by a whole group");
+		run.update(edit(&[], &[(1, resume)]));
+		run.update(edit(&[1], &[(3, lite::Range::span(Some(4), 0, None, None))]));
+		assert_eq!(run.frames.start(5), 0, "the position retired");
 	}
 
 	/// A range an update adds learns where it starts from SUBSCRIBE_STARTED, after

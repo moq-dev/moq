@@ -231,14 +231,18 @@ mod tests {
 		});
 	}
 
-	/// A simulated suspend counts as suspended without moving the instant, and the host's reads.
+	/// The host's suspend clocks read, and its sleep never shrinks beyond the gap between two reads.
 	#[test]
-	fn a_suspend_is_counted_apart_from_the_instant() {
-		// The host's clocks read, and its sleep never shrinks beyond the gap between two reads.
+	#[cfg_attr(miri, ignore = "reads the host's suspend clock, which Miri does not support")]
+	fn the_host_suspend_reads() {
 		let host = Clock::current();
 		let slept = host.suspended();
 		assert!(host.suspended() + Duration::from_micros(100) >= slept);
+	}
 
+	/// A simulated suspend counts as suspended without moving the instant.
+	#[test]
+	fn a_suspend_is_counted_apart_from_the_instant() {
 		crate::clock::sim::run(async {
 			let clock = Clock::current();
 			let start = clock.now();

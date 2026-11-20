@@ -25,18 +25,18 @@ fn raw_frame(frame: moq_net::frame::Frame) -> MoqFrame {
 #[derive(Clone, Copy, Debug, uniffi::Record)]
 pub struct MoqDelay {
 	/// The target latency: the playout or jitter-buffer delay held behind the live edge, where
-	/// a cold join starts, and how long a media consumer waits for a missing group, or null to
-	/// leave it unstated. A media consumer starts an unstated minimum as zero and waits a
-	/// missing group for `max` instead (an audio decoder floors it at zero and waits only its
-	/// playout estimate, which can be larger), while the subscription keeps it unstated, so it
-	/// never pulls the aggregate across subscribers to zero, unless a catalog warmup or an
-	/// audio decoder's playout delay states one. moq-lite-07 sends it upstream. A `min`
-	/// past `max` starts and waits at `max`, since the publisher serves nothing older.
+	/// a cold join starts, or null to leave it unstated. A missing group is given up by `max`
+	/// alone. A media consumer starts an unstated minimum as zero, while the subscription keeps
+	/// it unstated, so it never pulls the aggregate across subscribers to zero, unless a catalog
+	/// warmup or an audio decoder's playout delay states one. moq-lite-07 sends it upstream. A
+	/// `min` past `max` starts a cold join no further back than the group covering the point `max`
+	/// behind the live edge, since the publisher serves no older group. An audio decoder refuses a `min` beyond the track's
+	/// max age instead.
 	pub min: Option<Duration>,
-	/// How far a non-latest group may fall behind the live edge before it is skipped, or null
-	/// for no subscriber limit, leaving the publisher's max age alone to bound it. `0` skips
-	/// immediately; a larger value tolerates that much reordering. It bounds lateness only,
-	/// never the start.
+	/// How far a non-latest group may fall behind the live edge before it is skipped, and how
+	/// far newer media may run past a missing group before it is given up, or null for no subscriber limit, leaving the
+	/// publisher's max age alone to bound it. `0` skips immediately; a larger value tolerates
+	/// that much reordering. It bounds lateness only, never the start.
 	///
 	/// Enforced both by the publisher's cache (sent on the wire) and by any local buffering,
 	/// such as [`MoqMediaTrackConsumer`]'s jitter buffer. It caps every range.
@@ -495,7 +495,8 @@ impl TrackInner {
 					waiter.waker().wake_by_ref();
 					return Poll::Ready(Ok(Some(group)));
 				}
-				poll_group(&mut ordered.track, waiter).map(|r| r.map_err(Into::into))
+				// The bindings report no gaps, so a group the track gave up on is passed over.
+				ordered.track.poll_next_group(waiter).map_err(Into::into)
 			}
 			Err(e) => Poll::Ready(Err(e)),
 		}
@@ -515,7 +516,7 @@ impl TrackInner {
 		loop {
 			let group = match &mut ordered.pending {
 				Some(group) => group,
-				None => match ready!(poll_group(&mut ordered.track, waiter)) {
+				None => match ready!(ordered.track.poll_next_group(waiter)) {
 					Ok(Some(group)) => ordered.pending.insert(group),
 					Ok(None) => return Poll::Ready(Ok(None)),
 					Err(err) => return Poll::Ready(Err(err.into())),
@@ -730,20 +731,5 @@ impl MoqGroupConsumer {
 	/// Terminal: the group and whatever it still buffers are released here, not when the handle is.
 	pub fn cancel(&self) {
 		self.reads.cancel();
-	}
-}
-
-/// The next group of an ordered read. The bindings report no gaps, so a group the track
-/// gave up on is passed over.
-fn poll_group(
-	track: &mut moq_net::track::Ordered,
-	waiter: &kio::Waiter,
-) -> Poll<Result<Option<moq_net::group::Consumer>, moq_net::Error>> {
-	loop {
-		match ready!(track.poll_next_group(waiter))? {
-			Some(moq_net::track::Item::Group(group)) => return Poll::Ready(Ok(Some(group))),
-			Some(moq_net::track::Item::Gap { .. }) => continue,
-			None => return Poll::Ready(Ok(None)),
-		}
 	}
 }
