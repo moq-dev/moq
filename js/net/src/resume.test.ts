@@ -4831,3 +4831,62 @@ test("failed copies holding groups back are each subscribed afresh", async () =>
 	sub.close();
 	close();
 });
+
+// Mirrors the Rust `a_time_end_between_groups_ends_an_ordered_read_at_the_next` integration test,
+// through a front serving the publisher's own track: its copy passes on what that publisher created.
+test("a time end between two groups ends an ordered read through a front at the next", async () => {
+	const front = new Front();
+	const source = new BroadcastProducer();
+	const handle = source.consume();
+	front.serve(handle);
+	const track = copy(source);
+	for (const key of [1000n, 2000n, 3000n]) track.write(key);
+	const between = {
+		ranges: [{ start: { time: 1500n }, end: { time: 1999n } }],
+		delay: { max: Duration.millis(3_600_000) },
+	};
+	const ordered = front.consumer.track("seq").subscribe(between).ordered();
+	expect((await ordered.nextGroup())?.start).toBe(1000n);
+	expect(await ordered.nextGroup()).toBeUndefined();
+	// An arrival read waits: the publisher may still create 1500.
+	const arrival = front.consumer.track("seq").subscribe(between);
+	expect((await arrival.recvGroup())?.start).toBe(1000n);
+	const waiting = arrival.recvGroup();
+	expect(await isPending(waiting)).toBe(true);
+	// The ended ordered read passed its range: a group created there now is late.
+	track.write(1500n);
+	expect(await ordered.nextGroup()).toBeUndefined();
+	expect((await waiting)?.start).toBe(1500n);
+	ordered.close();
+	arrival.close();
+	front.consumer.close();
+	handle.close();
+	source.close();
+});
+
+// An ordered read through a front that ends past a group its copy gave up, as one missing its head
+// with no fill to ask, returns that gap before the end.
+test("an ordered read through a front returns the gap its copy gave up before ending", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const ta = defined(a.createTrack("seq", { maxAge: null }));
+	const tail = hooks.receiveGroup(ta, { start: 0n, offset: 1 });
+	tail.writeFrame({ payload: enc.encode("0.1"), timestamp: Timestamp.unscaled(0n) });
+	tail.finish();
+	const past = ta.createGroup(2n);
+	past.writeFrame({ payload: enc.encode("2.0"), timestamp: Timestamp.unscaled(2n) });
+	past.finish();
+	front.serve(a.consume());
+	const ordered = front.consumer
+		.track("seq")
+		.subscribe({ delay: { max: null }, ranges: [{ start: { time: 0n }, end: { time: 1n } }] })
+		.ordered();
+	try {
+		expect(await ordered.nextItem()).toMatchObject({ kind: "gap", start: 0n, end: 1n });
+		expect(await ordered.nextItem()).toBeUndefined();
+	} finally {
+		ordered.close();
+		front.consumer.close();
+		a.close();
+	}
+});
