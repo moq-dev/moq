@@ -280,6 +280,21 @@ impl Deferred {
 	}
 }
 
+/// The part of `hole` the track's drops leave open for a reader under `drift`: a received
+/// stale run that does not settle it is no verdict for it (see `Drift::settles`), so it asks
+/// the group again.
+pub(super) fn unsettled(state: &TrackState, hole: ops::Range<u64>, drift: &Drift) -> RangeSet<u64> {
+	let mut left = RangeSet::new();
+	left.insert(hole.clone());
+	// Only what overlaps the hole, so judging every run costs each one the same.
+	for (run, gone) in state.drops.overlapping(&hole) {
+		if drift.settles(run.start.max(hole.start), gone) {
+			left.remove(run.clone());
+		}
+	}
+	left
+}
+
 impl Misses {
 	/// The lowest key still to come from a fill: asked, or answered and not handed out.
 	pub fn lowest(&self) -> Option<u64> {
@@ -1335,23 +1350,24 @@ impl Misses {
 	/// The part of `hole` nobody has a verdict on yet: a received stale run that does not
 	/// settle this reader is no verdict for it (see `Drift::settles`).
 	fn unclaimed(&self, state: &TrackState, hole: ops::Range<u64>, drift: &Drift) -> Vec<ops::Range<u64>> {
-		let mut left = RangeSet::new();
-		left.insert(hole.clone());
-		// Only what overlaps the hole, so judging every run costs each one the same.
-		for (run, gone) in state.drops.overlapping(&hole) {
-			if drift.settles(run.start.max(hole.start), gone) {
-				left.remove(run.clone());
-			}
+		let mut left = self.unanswered(state, hole.clone(), drift);
+		for run in self.wanted.overlapping(&hole) {
+			left.remove(run.clone());
 		}
-		for claimed in [&self.given_up, &self.wanted] {
-			for run in claimed.overlapping(&hole) {
-				left.remove(run.clone());
-			}
+		left.iter().cloned().collect()
+	}
+
+	/// The part of `hole` with no verdict for this reader and no answer from its fills: still
+	/// to ask, or asked and not answered.
+	pub(super) fn unanswered(&self, state: &TrackState, hole: ops::Range<u64>, drift: &Drift) -> RangeSet<u64> {
+		let mut left = unsettled(state, hole.clone(), drift);
+		for run in self.given_up.overlapping(&hole) {
+			left.remove(run.clone());
 		}
 		for key in self.filled.range(hole) {
 			left.remove(*key..*key + 1);
 		}
-		left.iter().cloned().collect()
+		left
 	}
 
 	/// Take in a fill's refusal of `groups`: final where the feed gave up on them too,

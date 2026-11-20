@@ -1022,9 +1022,11 @@ let timeAnchors: (producer: Producer) => {
 type TimeStart = ({ start: bigint; empty?: never } | { start?: never; empty: number }) & { through?: bigint };
 
 // Whether a received copy's range asked from `time`, or the one upstream folded it into, had no
-// group to deliver to a reader within `budget`: the live feed brings it none of the range's groups.
-// Assigned in the producer's static block. Mirrors the Rust `TrackState::answered_empty`.
-let answeredEmpty: (producer: Producer, time: bigint, budget: number) => boolean;
+// group to deliver to a reader judging under `budget` with `coverage`: the live feed brings it none
+// of the range's groups. The answer is a staleness verdict, so it holds only for a reader it settles
+// (see {@link settles}). Assigned in the producer's static block. Mirrors the Rust
+// `TrackState::answered_empty`.
+let answeredEmpty: (producer: Producer, time: bigint, budget: number, coverage: Coverage) => boolean;
 
 // Where a received copy's live feed landed every key it could through `time`, counting from
 // `covering`, where a range covering the time started, or else its first arrival at or below
@@ -1033,10 +1035,16 @@ let answeredEmpty: (producer: Producer, time: bigint, budget: number) => boolean
 // `TrackState::landing_from` and `TrackState::landed_through`.
 let landedFrom: (producer: Producer, time: bigint, covering: bigint | undefined) => bigint | undefined;
 
-// The lowest key of `[start, end)` a received copy's live feed has not accounted for a reader within
-// `budget`, with when its gap's grace folds; see `Producer.#unaccounted`. Unlike {@link mayLand}, a
-// key below where the feed starts counts. Mirrors the Rust `TrackState::unaccounted`.
-let unaccounted: (producer: Producer, start: bigint, end: bigint, budget: number) => { folds?: Instant } | undefined;
+// The lowest key of `[start, end)` a received copy's live feed has not accounted for a reader, with
+// when its gap's grace folds; see `Producer.#unaccounted`. `settled` gives the runs of a gap that
+// reader has a verdict on. Unlike {@link mayLand}, a key below where the feed starts counts. Mirrors
+// the Rust `TrackState::unaccounted`.
+let unaccounted: (
+	producer: Producer,
+	start: bigint,
+	end: bigint,
+	settled: (start: bigint, end: bigint) => Run[],
+) => { folds?: Instant } | undefined;
 
 // When a received copy's time start at `time`, waiting to be placed, next may place itself with no
 // change to wake its readers: the grace of the lowest gap {@link landedFrom} still waits on
@@ -1131,9 +1139,13 @@ function reaches(received: bigint, drops: DropSet, end: End, refused: readonly R
  * above it. Mirrors the Rust `settles`.
  */
 function settles(run: DropRun, budget: number, coverage: Coverage): boolean {
-	if (run.stale === undefined) return true;
-	if (budget > run.stale || coverage === undefined || coverage.cap !== undefined) return false;
-	const above = run.start + 1n;
+	return run.stale === undefined || staleSettles(run.start, run.stale, budget, coverage);
+}
+
+// Whether a staleness verdict at `start` judged under `stale` settles a reader; see {@link settles}.
+function staleSettles(start: bigint, stale: number, budget: number, coverage: Coverage): boolean {
+	if (budget > stale || coverage === undefined || coverage.cap !== undefined) return false;
+	const above = start + 1n;
 	const held = coverage.runs.find((run) => run.start <= above && above < run.end);
 	return held !== undefined && held.end >= UNBOUNDED;
 }
@@ -1643,9 +1655,9 @@ export class Producer {
 			const end = next.done ? UNBOUNDED : next.value.start;
 			return end > start ? { start, end } : undefined;
 		};
-		answeredEmpty = (producer, time, budget) => {
+		answeredEmpty = (producer, time, budget, coverage) => {
 			const reported = producer.#timeStarts.get(time) ?? coveringStart(producer.#timeStarts, time);
-			return reported?.empty !== undefined && budget <= reported.empty;
+			return reported?.empty !== undefined && staleSettles(time, reported.empty, budget, coverage);
 		};
 		timeStartFolds = (producer, time) => {
 			// A reported start places it. An empty answer places nothing, as for `containing`, so a
@@ -1739,7 +1751,7 @@ export class Producer {
 			}
 		};
 		mayLand = (producer, land) => producer.#landable(land) !== undefined;
-		unaccounted = (producer, start, end, budget) => producer.#unaccounted(start, end, budget);
+		unaccounted = (producer, start, end, settled) => producer.#unaccounted(start, end, settled);
 		wireFed = (producer) => producer.#wire !== undefined;
 		feedFloor = (producer) => {
 			if (!producer.#wire) return undefined;
@@ -1812,11 +1824,15 @@ export class Producer {
 		}
 	}
 
-	// The lowest key of `[start, end)` the live feed has not accounted for a reader within `budget`:
-	// not arrived, not given up for good or by a stale verdict covering that budget, before the
-	// track's end, and in a gap whose grace has not folded. Unlike #landing, a key below where the
-	// feed starts counts. Mirrors the Rust `TrackState::unaccounted`.
-	#unaccounted(start: bigint, end: bigint, budget: number): { folds?: Instant } | undefined {
+	// The lowest key of `[start, end)` the live feed has not accounted for a reader: not arrived,
+	// outside the runs `settled` gives it a verdict on, before the track's end, and in a gap whose
+	// grace has not folded. Unlike #landing, a key below where the feed starts counts. Mirrors the
+	// Rust `TrackState::unaccounted`.
+	#unaccounted(
+		start: bigint,
+		end: bigint,
+		settled: (start: bigint, end: bigint) => Run[],
+	): { folds?: Instant } | undefined {
 		if (this.#state.closed.peek() !== undefined) return undefined;
 		const declared = this.#state.end.peek()?.at;
 		if (declared !== undefined) end = min(end, finalKey(declared));
@@ -1825,10 +1841,7 @@ export class Producer {
 		for (const gap of this.#arrivals.gaps(start, end)) {
 			const folds = gap.since?.saturatingAdd(limit);
 			if (folds !== undefined && at.ge(folds)) continue;
-			const settled = this.#state.drops
-				.overlapping(gap.start, gap.end)
-				.filter((run) => run.stale === undefined || budget <= run.stale);
-			if (runGaps(settled, gap.start, gap.end).length > 0) return { folds };
+			if (runGaps(settled(gap.start, gap.end), gap.start, gap.end).length > 0) return { folds };
 		}
 		return undefined;
 	}
@@ -5599,6 +5612,28 @@ export class Subscriber {
 		if (this.#dropsSeen) this.#pending = insertDrop(this.#pending, run.start, run.end, hole);
 	}
 
+	// The runs of `[start, end)` this reader has a verdict on: a drop that settles it, or what its
+	// own fills answered, a group or a refusal, or it gave up. A stale verdict that does not settle it
+	// is none: the reader asks the group again, and only that answer counts. Mirrors the Rust
+	// `Misses::unanswered`.
+	#verdicts(start: bigint, end: bigint, drift: Drift, coverage: Coverage): Run[] {
+		const runs: Run[] = [];
+		for (const drop of this.#state.drops.overlapping(start, end)) {
+			if (settles({ ...drop, start: max(drop.start, start) }, drift.budget, coverage)) {
+				insertRun(runs, drop.start, drop.end);
+			}
+		}
+		for (const run of [...this.#state.refused.peek(), ...this.#givenUp]) {
+			if (run.start < end && start < run.end) insertRun(runs, run.start, run.end);
+		}
+		const timeline = this.#state.timeline;
+		for (let i = timelineIndex(timeline, start); i < timeline.length && timeline[i].start < end; i++) {
+			const group = timeline[i];
+			if (!hooks.groupFailed(group)) insertRun(runs, group.start, group.start + 1n);
+		}
+		return runs;
+	}
+
 	// In order, the group a waiting time start resolves to comes first: it starts at or before that
 	// time, below `key`, and may still land at or past the read's floor `start`, until the budget
 	// gives up on it as on an owed group. Its landing, the answer placing the start, the grace for a
@@ -5607,17 +5642,18 @@ export class Subscriber {
 	#waitTimeStart(start: bigint, key: bigint, drift: Drift): boolean {
 		const producer = this.#state.producer;
 		let waits = false;
+		const coverage = this.#coverage();
 		for (const time of this.#window.waitingIn(start, key)) {
 			if (producer && wireFed(producer)) {
 				// With every key from the floor through the time accounted for, a group still to come
 				// containing it lies below the floor, which the read never hands out.
-				const open = unaccounted(producer, start, time + 1n, drift.budget);
+				const open = unaccounted(producer, start, time + 1n, (from, to) => this.#verdicts(from, to, drift, coverage));
 				if (open === undefined) continue;
 				if (open.folds !== undefined) this.#wakeAt(open.folds.since(Instant.ZERO).asNanos());
 			}
 			// Its range had no group to deliver, so the feed lands none of it. Its successor is this
 			// group's or one below: the group containing the time is judged as an owed group at it would be.
-			if (producer && answeredEmpty(producer, time, drift.budget)) continue;
+			if (producer && answeredEmpty(producer, time, drift.budget, coverage)) continue;
 			if (this.#staleAt(time, drift, true)) continue;
 			const folds = producer && timeStartFolds(producer, time);
 			if (folds !== undefined) this.#wakeAt(folds.since(Instant.ZERO).asNanos());
