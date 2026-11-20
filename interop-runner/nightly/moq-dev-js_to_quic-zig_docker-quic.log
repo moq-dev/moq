@@ -4,11 +4,11 @@ Running interop tests...
   Relay:  ghcr.io/endel/quic-zig-moq-relay:latest
   Client: ghcr.io/englishm/moq-interop-runner-moq-dev-js-client:latest
   URL:    moqt://relay:4443
-time="2026-11-19T17:32:44Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-11-19T17:32:44Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-11-19T17:32:44Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-11-19T17:32:44Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
-time="2026-11-19T17:32:44Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
+time="2026-11-20T17:09:19Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-11-20T17:09:19Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-11-20T17:09:19Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-11-20T17:09:19Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
+time="2026-11-20T17:09:19Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
  Container runner-upstream-relay-1 Recreate 
  Container runner-upstream-relay-1 Recreated 
  Container runner-upstream-test-client-1 Recreate 
@@ -19,7 +19,7 @@ Attaching to relay-1, test-client-1
  Container runner-upstream-relay-1 Waiting 
 relay-1  | 
 relay-1  | === MoQ Relay (drafts 17, 18, 22; WebTransport + QUIC) ===
-relay-1  | Certificate SHA-256: 87b23395b48cacac633b832561fc7a593cf6452d7e013a8362f04d44356bddf3
+relay-1  | Certificate SHA-256: 1451ff54e1c20d945588e2eab8025d9693472a6db26ad32721d6523f1afbf791
 relay-1  | 
 relay-1  | Listening on https://0.0.0.0:4443
 relay-1  | Video demo: https://127.0.0.1:4443/moq_video.html
@@ -34,28 +34,28 @@ test-client-1  | # Relay: moqt://relay:4443
 test-client-1  | 1..8
 test-client-1  | not ok 1 - setup-only
 test-client-1  |   ---
-test-client-1  |   duration_ms: 506
+test-client-1  |   duration_ms: 505
 test-client-1  |   message: ""
 test-client-1  |   ...
 test-client-1  | not ok 2 - announce-only
 test-client-1  |   ---
-test-client-1  |   duration_ms: 504
+test-client-1  |   duration_ms: 505
 test-client-1  |   message: ""
 test-client-1  |   ...
 test-client-1  | not ok 3 - publish-namespace-done
 test-client-1  |   ---
-test-client-1  |   duration_ms: 503
+test-client-1  |   duration_ms: 502
 test-client-1  |   message: ""
 test-client-1  |   ...
 test-client-1  | not ok 4 - subscribe-namespace-lifecycle
 test-client-1  |   ---
-test-client-1  |   duration_ms: 502
+test-client-1  |   duration_ms: 503
 test-client-1  |   test_spec_revision: 1
 test-client-1  |   message: ""
 test-client-1  |   ...
 test-client-1  | not ok 5 - subscribe-error
 test-client-1  |   ---
-test-client-1  |   duration_ms: 501
+test-client-1  |   duration_ms: 502
 test-client-1  |   message: ""
 test-client-1  |   ...
 test-client-1  | not ok 6 - announce-subscribe
