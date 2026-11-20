@@ -280,7 +280,12 @@ async fn the_limit_admits_each_claim() {
 async fn a_grant_change_unsyncs_only_the_readers_it_can_show_more() {
 	let (subscriber, consumer) = subscriber();
 	let granting = |paths: &[&str]| {
-		Permit::granting(paths.iter().map(|path| crate::Pattern::subtree(path).unwrap()).collect())
+		Permit::granting(
+			paths
+				.iter()
+				.map(|path| crate::Pattern::subtree(path).unwrap())
+				.collect(),
+		)
 	};
 	let all = crate::Patterns::from(crate::Pattern::all());
 	let everything = consumer.routes();
@@ -306,7 +311,10 @@ async fn a_grant_change_unsyncs_only_the_readers_it_can_show_more() {
 
 	// A narrowing shows nothing new.
 	routed.limit(&granting(&["a"])).unwrap();
-	assert!(synced(&everything) && synced(&a), "a narrowing keeps every reader synced");
+	assert!(
+		synced(&everything) && synced(&a),
+		"a narrowing keeps every reader synced"
+	);
 }
 
 /// A forwarding neighbour's claims wait for the floor that closes their batch, and are

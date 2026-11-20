@@ -393,7 +393,14 @@ impl Answer {
 		let removed = edit.remove.clone();
 		let added = edit.add.len();
 		let regions = self.regions.clone();
-		self.ask(edit, Marker::Grant { removed, added, regions })?;
+		self.ask(
+			edit,
+			Marker::Grant {
+				removed,
+				added,
+				regions,
+			},
+		)?;
 		// Queued for this session now, so the pass that saw the change sends it.
 		self.main.flush();
 		Ok(())
@@ -488,7 +495,11 @@ impl Answer {
 				Ok(())
 			}
 			Msg::Edited if source == MAIN => match self.markers.pop_front() {
-				Some(Marker::Grant { removed, added, regions }) => {
+				Some(Marker::Grant {
+					removed,
+					added,
+					regions,
+				}) => {
 					self.answering = false;
 					self.regranted(writer, removed, added, regions.as_deref())
 				}
