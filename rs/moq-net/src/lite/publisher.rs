@@ -4001,7 +4001,8 @@ mod announce_test {
 
 	/// A claim at a path the scope does not match, but above paths it does, is shown where
 	/// it is presented: `a` under `a/*`, at the region and at its own path. One beneath
-	/// every path the scope matches stays hidden.
+	/// every path the scope matches stays hidden, and so does `a` from a handle scoped to
+	/// `a/*/x`, which shares no path with the scope.
 	#[kio::test]
 	async fn a_lite07_claim_above_what_the_scope_matches_is_shown() {
 		let path = |path: &str| crate::Path::new(path).unwrap();
@@ -4016,7 +4017,15 @@ mod announce_test {
 			expires: None,
 		});
 		let waiter = kio::Waiter::noop();
-		for asked in ["", "a"] {
+		let disjoint = (origin.consume())
+			.scope("", &crate::Patterns::from("a/*/x".parse::<crate::Pattern>().unwrap()))
+			.unwrap();
+		let shown = [("a".to_string(), 0)];
+		for (consumer, asked, expected) in [
+			(origin.consume(), "", &shown[..]),
+			(origin.consume(), "a", &shown[..]),
+			(disjoint, "", &[][..]),
+		] {
 			let log = Log::default();
 			let mut wire = Wire {
 				writes: log.writes.clone(),
@@ -4027,7 +4036,7 @@ mod announce_test {
 				crate::transport::boxed::SendStream::new(SinkSend::new(log)),
 				Version::Lite07,
 			);
-			let mut answer = super::routed::Answer::alone_on(origin.consume(), auth.clone());
+			let mut answer = super::routed::Answer::alone_on(consumer, auth.clone());
 			answer.request(false, Vec::new(), vec![(path(asked), true)]).unwrap();
 			answer.drain(&mut writer).unwrap();
 			assert!(writer.poll_flush(&waiter).is_ready());
@@ -4042,7 +4051,7 @@ mod announce_test {
 					_ => None,
 				})
 				.collect();
-			assert_eq!(told, [("a".to_string(), 0)], "{asked:?}: {msgs:?}");
+			assert_eq!(told, expected, "{asked:?}: {msgs:?}");
 			assert_eq!(msgs.last(), Some(&lite::AnnounceBroadcast::Synced { prefix: 0 }));
 		}
 	}

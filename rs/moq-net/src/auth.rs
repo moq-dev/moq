@@ -597,21 +597,18 @@ impl Permit {
 		self.granted(path) && self.within_limit(path)
 	}
 
-	/// Whether both allow some path at or beneath `prefix`: a claim there covers a path
-	/// they allow, as one at `a` does under `a/*`.
-	pub(crate) fn reaches(&self, prefix: &str) -> bool {
-		if self.matches(prefix) {
-			return true;
-		}
+	/// The paths at or beneath `prefix` both allow, which a claim there covers: under
+	/// `a/*`, those beneath `a`, though not `a` itself. An intersection too large to spell
+	/// allows nothing, never more.
+	pub(crate) fn beneath(&self, prefix: &str) -> Patterns {
 		let Ok(subtree) = moq_pattern::Pattern::subtree(prefix) else {
-			return false;
+			return Patterns::new();
 		};
-		// An intersection too large to spell reaches nothing, never more.
-		let beneath = match &self.granted {
-			Some(granted) => granted.intersect(&Patterns::from(subtree)).unwrap_or_default(),
-			None => Patterns::from(subtree),
-		};
-		(beneath.iter()).any(|pattern| self.limit.as_ref().is_none_or(|limit| limit.overlaps(pattern)))
+		let mut beneath = Patterns::from(subtree);
+		for patterns in [&self.granted, &self.limit].into_iter().flatten() {
+			beneath = beneath.intersect(patterns).unwrap_or_default();
+		}
+		beneath
 	}
 
 	/// Whether the peer's grant alone allows `path`.
@@ -3218,20 +3215,22 @@ mod tests {
 		assert!(!one("a/*").same_grant(&one("a/**")));
 	}
 
-	/// A permit reaches a path when both allow one at or beneath it, the same one: `a`
-	/// under `a/*`, but not `a/b` under `a/*/x` granted and `a/*/y` limited.
+	/// A permit allows what both allow beneath a path, the same paths: beneath `a` under
+	/// `a/*`, but nothing beneath `a/b` under `a/*/x` granted and `a/*/y` limited.
 	#[test]
-	fn a_permit_reaches_what_both_allow_beneath() {
+	fn a_permit_allows_what_both_allow_beneath() {
 		let permit = |granted: Option<&str>, limit: Option<&str>| Permit {
 			granted: granted.map(|pattern| Patterns::from(pattern.parse::<crate::Pattern>().unwrap())),
 			limit: limit.map(|pattern| Patterns::from(pattern.parse::<crate::Pattern>().unwrap())),
 		};
-		assert!(permit(Some("a/*"), None).reaches("a"));
-		assert!(permit(None, Some("a/*")).reaches(""));
-		assert!(!permit(Some("a/*"), None).reaches("a/b/c"));
-		assert!(!permit(None, Some("a/*")).reaches("b"));
-		assert!(permit(Some("a/*/x"), Some("a/b/*")).reaches("a"));
-		assert!(!permit(Some("a/*/x"), Some("a/*/y")).reaches("a/b"));
+		let reaches = |permit: Permit, prefix: &str| !permit.beneath(prefix).is_empty();
+		assert!(reaches(permit(Some("a/*"), None), "a"));
+		assert!(reaches(permit(None, Some("a/*")), ""));
+		assert!(!reaches(permit(Some("a/*"), None), "a/b/c"));
+		assert!(!reaches(permit(None, Some("a/*")), "b"));
+		assert!(reaches(permit(Some("a/*/x"), Some("a/b/*")), "a"));
+		assert!(!reaches(permit(Some("a/*/x"), Some("a/*/y")), "a/b"));
+		assert!(reaches(permit(None, None), "a"));
 	}
 
 	/// A limit replaces the last one, narrower or wider, and applies to a version

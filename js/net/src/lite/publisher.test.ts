@@ -4281,6 +4281,38 @@ test("a lite-07 claim above what the grant matches is shown", async () => {
 	}
 });
 
+// A scoped claim is shown only where its scope and the grant share a path: one at `a` scoped to
+// `a/*/x` serves something `a/**` grants, and nothing `a/*` does.
+test("a lite-07 scoped claim sharing no path with the grant is hidden", async () => {
+	for (const [granted, told] of [
+		["a/*", []],
+		["a/**", ["a"]],
+	] as const) {
+		const origin = new OriginProducer();
+		const grant = new Signal<Grant | undefined>({
+			publish: new Path.Patterns([Path.Pattern.parse(granted)]),
+			subscribe: new Path.Patterns([]),
+		});
+		const scoped = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("a/*/x")]));
+		const claim = scoped.claim(Path.from("a"));
+		const { next, ok, close } = routedAnswer(origin, grant);
+		try {
+			await ok();
+			const msgs: AnnounceBroadcast[] = [];
+			for (;;) {
+				const msg = await next();
+				msgs.push(msg);
+				if (msg.status === "synced") break;
+			}
+			expect(msgs.flatMap((msg) => (msg.status === "start" ? [msg.suffix] : []))).toEqual([...told]);
+		} finally {
+			claim.close();
+			close();
+			origin.close();
+		}
+	}
+});
+
 // A claim whose route is withdrawn ends, not lost, though another path still advertises the same
 // named instance: only the advertisement the claim came from proves it moved.
 test("a lite-07 withdrawn claim ends though its instance lives on elsewhere", async () => {

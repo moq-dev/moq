@@ -875,8 +875,8 @@ impl Answer {
 		path.parts().count().saturating_sub(self.origin.root().parts().count()) as u64
 	}
 
-	/// Whether the peer is shown the claim at the absolute `path`: the permit allows some
-	/// path it covers.
+	/// Whether the peer is shown the claim at the absolute `path`: the permit and this
+	/// handle allow some path it covers, the same one.
 	fn shows(&self, path: &Path) -> bool {
 		let Some((_, prefix)) = self.region(path) else {
 			return false;
@@ -885,7 +885,7 @@ impl Answer {
 		let (Some(suffix), Some(relative)) = (within, path.strip_prefix(self.origin.root())) else {
 			return false;
 		};
-		(prefix.hidden || !suffix.is_hidden()) && self.origin.reaches(path) && self.permit.reaches(relative.as_str())
+		(prefix.hidden || !suffix.is_hidden()) && self.origin.reaches_any(path, &self.permit.beneath(relative.as_str()))
 	}
 
 	/// Bring the peer's claim `key` in line with what the node told and the answer

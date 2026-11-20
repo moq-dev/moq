@@ -227,9 +227,20 @@ export class Answer {
 		// The claims the peer is shown, by their path from the session's root: the table under each
 		// prefix, less the hidden ones it did not ask for and whatever our grant does not let us publish.
 		const latest = new Map<Path.Valid, Advertised>();
-		// A claim is shown where the grant lets us publish some path it covers, as one at `a` serves
-		// `a/*` though `a` itself is not granted.
-		const shows = (path: Path.Valid) => !grant || grant.publish.overlaps(Path.Pattern.subtree(path));
+		// A claim is shown where the grant lets us publish some path it covers, and a scoped one
+		// serves, as one at `a` serves `a/*` though `a` itself is not granted. An intersection too
+		// large to spell covers nothing, never more.
+		const shows = (path: Path.Valid, snap: Advertised) => {
+			if (!grant) return true;
+			const subtree = new Path.Patterns([Path.Pattern.subtree(path)]);
+			let beneath = subtree;
+			try {
+				if (snap.claim) beneath = snap.claim.intersect(subtree);
+			} catch {
+				return false;
+			}
+			return [...beneath].some((pattern) => grant.publish.overlaps(pattern));
+		};
 		// Whether the advertisement a claim the peer holds came from is still in the table, as when
 		// its presentation moved: the claim is lost to the peer rather than ended, since its publisher
 		// never withdrew it. Another path's advertisement of the same instance proves nothing.
@@ -257,7 +268,7 @@ export class Answer {
 				// A claim covering what is read from above keeps how many segments broader than it it is.
 				for (const [suffix, snap] of presented(read, table, carries, true)) {
 					const path = Path.join(read, suffix);
-					if (shows(path)) latest.set(path, snap);
+					if (shows(path, snap)) latest.set(path, snap);
 				}
 			}
 		}
@@ -270,7 +281,7 @@ export class Answer {
 		};
 		for (const [path, sent] of [...this.#live]) {
 			// No longer granted, it is lost to the peer: its publisher never ended it.
-			if (!latest.has(path)) end(path, sent, !shows(path) || stillAdvertised(sent));
+			if (!latest.has(path)) end(path, sent, !shows(path, sent.snap) || stillAdvertised(sent));
 		}
 		for (const [path, snap] of latest) {
 			const { instance, epoch, cost } = snap.route;
