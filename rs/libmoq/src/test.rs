@@ -5498,7 +5498,10 @@ fn a_rejected_time_start_reads_on() {
 	let group = loop {
 		match reader.poll_recv_group(&waiter) {
 			std::task::Poll::Ready(Ok(Some(group))) => break group,
-			std::task::Poll::Ready(res) => panic!("the reader reads on: {:?}", res.map(|group| group.map(|group| group.start))),
+			std::task::Poll::Ready(res) => panic!(
+				"the reader reads on: {:?}",
+				res.map(|group| group.map(|group| group.start))
+			),
 			std::task::Poll::Pending => {}
 		}
 		if let Ok(code) = group_cb.rx.recv_timeout(std::time::Duration::from_millis(10)) {
