@@ -962,7 +962,8 @@ class Reader implements ResumeSource {
 		const resumed = serving && resumePoint(serving);
 		if (resumed === undefined) return;
 		// A group a replaced copy holds under its cap is that copy's to drain: the serving route is
-		// asked from the lowest one none holds. A copy that failed delivers nothing more.
+		// asked from the lowest one none holds. A copy that failed delivers nothing more, and one
+		// holding a group without its head may give that group up, so it doesn't count.
 		const cursor = this.#shell.cursor.peek().start;
 		const drains = (key: bigint) =>
 			this.#copies.some(
@@ -972,7 +973,7 @@ class Reader implements ResumeSource {
 					max(cursor, copy.floor ?? 0n) <= key &&
 					key < (copyEnd(copy) ?? UNBOUNDED) &&
 					!copyFailed(copy) &&
-					hooks.holdsGroup(copy.sub, key),
+					hooks.holdsGroup(copy.sub, key, true),
 			);
 		for (const gap of delivered.gaps(max(floor, cursor), resumed)) {
 			let key = gap.start;

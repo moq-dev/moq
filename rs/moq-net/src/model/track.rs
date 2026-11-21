@@ -7924,6 +7924,10 @@ impl Drift {
 	}
 }
 
+/// The groups a [`Subscriber`] can be served, which a group it hands out, or one a reader moves
+/// onto its track, measures drift within; see [`Subscriber::served`].
+pub(super) struct Served(kio::Consumer<Published>);
+
 /// Keeps one handed-out group tied to the subscription whose cursor selected it.
 struct GroupExpiry {
 	state: kio::ConsumerWeak<TrackState>,
@@ -7932,8 +7936,9 @@ struct GroupExpiry {
 	cache: Arc<cache::Track>,
 	reading: Reading,
 	subscription: kio::Consumer<demand::Prefs>,
-	/// What the cursor can be served; see [`Cursor::published`]. `None` once the read moved
-	/// to another copy, which serves the reader past where the cursor's copy was capped.
+	/// What the cursor can be served; see [`Cursor::published`]. Once the read moves to another
+	/// copy, what the reader's subscriber to that copy can be served, since a route switch caps
+	/// the copy it moved off; `None`, every group, when the reader has none.
 	servable: Option<kio::Consumer<Published>>,
 	key: u64,
 	superseded: Superseded,
@@ -7987,7 +7992,7 @@ struct Successor {
 }
 
 impl group::Expiry for FetchExpiry {
-	fn for_track(&self, track: &Consumer) -> Arc<dyn group::Expiry> {
+	fn for_track(&self, track: &Consumer, _: Option<&Served>) -> Arc<dyn group::Expiry> {
 		// A replacement copy is always one track instance; the fallback is never read.
 		let state = track.with_state(|state| state.cloned());
 		let (state, cache) = match state {
@@ -8039,7 +8044,7 @@ impl group::Expiry for FetchExpiry {
 }
 
 impl group::Expiry for GroupExpiry {
-	fn for_track(&self, track: &Consumer) -> Arc<dyn group::Expiry> {
+	fn for_track(&self, track: &Consumer, served: Option<&Served>) -> Arc<dyn group::Expiry> {
 		// A replacement copy is always one track instance; the fallback is never read.
 		let state = track.with_state(|state| state.cloned());
 		let (state, cache) = match state {
@@ -8056,7 +8061,7 @@ impl group::Expiry for GroupExpiry {
 			subscription: self.subscription.clone(),
 			// A route switch caps the copy the read moves off at the boundary group, so its
 			// servable would hide every group the replacement holds past it.
-			servable: None,
+			servable: served.map(|served| served.0.clone()),
 			key: self.key,
 			superseded: Superseded::default(),
 		})
@@ -11306,6 +11311,15 @@ impl Subscriber {
 				cursor.filter.window.covered_by(from, bounds.end, accounted)
 			}
 			Inner::Resume(resume, _) => resume.covered(from, bounds.end, accounted),
+		}
+	}
+
+	/// What the groups this subscriber hands out judge their drift within: its ranges and local
+	/// bounds as resolved here. `None` for a front's reader, whose copies resolve them.
+	pub(super) fn served(&self) -> Option<Served> {
+		match &self.inner {
+			Inner::Plain(cursor) => Some(Served(cursor.published.consume())),
+			Inner::Resume(..) => None,
 		}
 	}
 

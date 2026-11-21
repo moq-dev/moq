@@ -3141,6 +3141,43 @@ for (const ordered of [false, true]) {
 	});
 }
 
+// A replaced copy holding a group without its head gives it up under a bounded window, so the switch
+// asks the serving route for that group rather than leave it to the copy. Mirrors the Rust
+// `a_switch_backfills_a_group_the_replaced_copy_holds_without_its_head`.
+test("a switch backfills a group the replaced copy holds without its head", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	front.serve(a.consume());
+	const ordered = front.consumer
+		.track("seq")
+		.subscribe({ delay: { max: null }, ranges: [{ start: { time: 0n }, end: { time: 3n } }] })
+		.ordered();
+	try {
+		expect(ordered.tryNextGroup()).toBeUndefined();
+		await settle();
+		const tail = hooks.receiveGroup(ta.producer, { start: 0n, offset: 1 });
+		tail.writeFrame({ payload: enc.encode("0.1"), timestamp: Timestamp.unscaled(0n) });
+		tail.finish();
+		for (let key = 1n; key < 4n; key++) ta.write(key);
+		for (let key = 0n; key < 4n; key++) tb.write(key);
+		front.serve(b.consume());
+		await settle();
+		const items = [];
+		for (let item = await ordered.nextItem(); item; item = await ordered.nextItem()) {
+			items.push(item.kind === "group" ? `group ${item.group.start}` : `${item.kind} ${item.start}`);
+		}
+		expect(items).toEqual(["group 0", "group 1", "group 2", "group 3"]);
+	} finally {
+		ordered.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+	}
+});
+
 // The Rust reader drops the replaced copy instead (`a_switch_before_any_group_drops_the_replaced_copy`):
 // here it reads as the incumbent until the new route delivers, which bounds it.
 test("a switch before any group leaves the replaced copy uncapped as the incumbent", async () => {

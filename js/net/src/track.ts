@@ -965,8 +965,9 @@ function removeKey(keys: bigint[], key: bigint): void {
 
 // A fresh read handle on a group the producer still caches; assigned in its static block.
 let cachedMirror: (producer: Producer, key: bigint, from: number) => GroupConsumer | undefined;
-// Whether the producer still caches a group that has not failed; assigned in its static block.
-let cachedHolds: (producer: Producer, key: bigint) => boolean;
+// Whether the producer still caches a group that has not failed, with `whole` only one held from
+// its first frame; assigned in its static block.
+let cachedHolds: (producer: Producer, key: bigint, whole?: boolean) => boolean;
 // Whether the producer is a copy a session receives, whose handler fetches by group alone.
 let receivedCopy: (producer: Producer) => boolean;
 // The keys in `[start, end)` the producer caches, unsorted, costing the smaller of the span
@@ -1581,9 +1582,10 @@ export class Producer {
 		hooks.reportedGroup = (producer, group) => producer.#advanceLargest({ group, frame: 0 });
 		objectLargest = (producer) => producer.#objectLargest;
 		fillsOf = (producer) => producer.#fills;
-		cachedHolds = (producer, key) => {
+		cachedHolds = (producer, key, whole = false) => {
 			const entry = producer.#cached.get(key);
-			return entry !== undefined && !(entry.group.closed.peek() instanceof Error);
+			if (entry === undefined || entry.group.closed.peek() instanceof Error) return false;
+			return !whole || hooks.groupOffset(entry.group) === 0;
 		};
 		receivedCopy = (producer) => producer.#wire !== undefined;
 		cachedIn = (producer, start, end) => {
@@ -4460,9 +4462,9 @@ export class Subscriber {
 			const producer = subscriber.#state.producer;
 			return producer && cachedLanded(producer, start, end);
 		};
-		hooks.holdsGroup = (subscriber, key) => {
+		hooks.holdsGroup = (subscriber, key, whole) => {
 			const producer = subscriber.#state.producer;
-			return producer !== undefined && cachedHolds(producer, key);
+			return producer !== undefined && cachedHolds(producer, key, whole);
 		};
 		hooks.holeEnd = (subscriber, key, dropped) => holeEnd(subscriber.#state.drops, key, dropped);
 		hooks.previousStart = (subscriber, start) => {

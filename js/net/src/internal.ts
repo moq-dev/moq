@@ -911,8 +911,11 @@ export const hooks: {
 	 * budget gives up on it, judged by the route copy it is read from when routed.
 	 */
 	judgedGroup: (subscriber: Subscriber, key: bigint) => GroupConsumer | undefined;
-	/** Whether {@link cachedGroup} would find the group, without making a read handle. */
-	holdsGroup: (subscriber: Subscriber, key: bigint) => boolean;
+	/**
+	 * Whether {@link cachedGroup} would find the group, without making a read handle; with `whole`,
+	 * only one held from its first frame.
+	 */
+	holdsGroup: (subscriber: Subscriber, key: bigint, whole?: boolean) => boolean;
 	/**
 	 * When the latest group the subscriber's track caches in `[start, end)` landed, undefined when
 	 * it caches none; a routed reader asks every copy. Mirrors the Rust `Subscriber::landed`.

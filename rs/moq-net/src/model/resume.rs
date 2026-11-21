@@ -786,6 +786,14 @@ impl Copy {
 	}
 
 	/// The copy's own subscription preferences.
+	/// What the reader's subscriber to this copy can be served, once it answered.
+	fn served(&mut self, groups: (u64, Option<u64>)) -> Option<track::Served> {
+		match self.poll_ready(groups, &kio::Waiter::noop()) {
+			Poll::Ready(Ok(sub)) => sub.served(),
+			_ => None,
+		}
+	}
+
 	fn preferences(&self) -> &track::Preferences {
 		match &self.sub {
 			Sub::Pending(pending) => pending.preferences(),
@@ -2983,7 +2991,8 @@ impl Reader {
 		};
 		let from = from.unwrap_or(floor).max(self.groups.0);
 		// A group a replaced copy holds under its cap is that copy's to drain: the serving route
-		// is asked from the lowest one none holds. A copy that failed delivers nothing more.
+		// is asked from the lowest one none holds. A copy that failed delivers nothing more, and
+		// one holding a group without its head may give that group up, so it doesn't count.
 		let start = self.groups.0;
 		let drains = |key: u64| {
 			self.copies.iter().any(|copy| {
@@ -2992,7 +3001,7 @@ impl Reader {
 					&& copy.start(start) <= key
 					&& copy.end().is_some_and(|end| key < end)
 					&& !copy_failed(&copy.track)
-					&& copy.track.peek_group(key).is_some()
+					&& copy.track.peek_group(key).is_some_and(|group| group.first_frame() == 0)
 			})
 		};
 		let lowest =
@@ -3260,12 +3269,24 @@ impl Recover {
 			&& (generation == self.generation || serving.poll_group(self.key, &kio::Waiter::noop()).is_ready())
 	}
 
+	/// What the reader's own copy of route `generation` can be served, `None` until it answered.
+	fn served(&self, generation: u64) -> Option<track::Served> {
+		let reader = self.reader.as_ref()?.upgrade()?;
+		let mut reader = reader.lock().unwrap_or_else(PoisonError::into_inner);
+		let groups = reader.groups;
+		// The route's own copy, which comes after a backfill of it.
+		(reader.copies.iter_mut().rev())
+			.find(|copy| copy.generation == generation)?
+			.served(groups)
+	}
+
 	/// The group from the newest of the reader's other copies that still holds it unfailed,
 	/// positioned at frame `index`.
 	fn held(&self, index: u64) -> Option<Replacement> {
 		let reader = self.reader.as_ref()?.upgrade()?;
-		let reader = reader.lock().unwrap_or_else(PoisonError::into_inner);
-		reader.copies.iter().rev().find_map(|copy| {
+		let mut reader = reader.lock().unwrap_or_else(PoisonError::into_inner);
+		let groups = reader.groups;
+		reader.copies.iter_mut().rev().find_map(|copy| {
 			if copy.generation == self.generation {
 				return None;
 			}
@@ -3276,6 +3297,7 @@ impl Recover {
 				group,
 				generation: copy.generation,
 				copy: copy.track.clone(),
+				served: copy.served(groups),
 			})
 		})
 	}
@@ -3303,6 +3325,7 @@ impl Recover {
 						group,
 						generation,
 						copy: serving.clone(),
+						served: self.served(generation),
 					}));
 				}
 			}
@@ -3376,6 +3399,7 @@ impl Recover {
 							group,
 							generation,
 							copy: serving.clone(),
+							served: self.served(generation),
 						}));
 					}
 					*fetch = Fetch::Refused(Error::NotFound);
@@ -3463,6 +3487,9 @@ fn lend_head(handoff: &group::Handoff, key: u64, serving: &track::Consumer, grou
 pub(super) struct Replacement {
 	pub(super) group: group::Consumer,
 	pub(super) copy: track::Consumer,
+	/// What the reader's subscriber to `copy` can be served, which the group's expiry judges
+	/// it within from now on.
+	pub(super) served: Option<track::Served>,
 	generation: u64,
 }
 
@@ -7977,6 +8004,54 @@ mod test {
 		assert_eq!(drain(&mut sub, false), [4]);
 	}
 
+	/// A replaced copy holding a group without its head gives it up under a bounded window, so
+	/// the switch asks the serving route for that group rather than leave it to the copy.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_switch_backfills_a_group_the_replaced_copy_holds_without_its_head() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = logical
+			.consume()
+			.subscribe(
+				Subscription::default()
+					.with_delay(Delay::default().with_max(HOUR))
+					.with_ranges([track::Range::groups(0..4)]),
+			)
+			.now_or_never()
+			.unwrap()
+			.unwrap()
+			.ordered();
+		let waiter = kio::Waiter::noop();
+		assert!(sub.poll_next_item(&waiter).is_pending());
+		let track::Received::Group(mut rest) = a.create_group_at(group::Info { start: 0 }, 1).unwrap() else {
+			panic!("nothing else holds the group");
+		};
+		rest.write_frame(ts(0), b"x".as_ref()).unwrap();
+		rest.finish().unwrap();
+		for key in 1..4 {
+			write(&a, key);
+		}
+
+		let b = copy();
+		for key in 0..4 {
+			write(&b, key);
+		}
+		routes.serve(b.consume());
+		let mut items = Vec::new();
+		let end = loop {
+			match sub.poll_next_item(&waiter) {
+				Poll::Ready(Ok(Some(track::Item::Group(group)))) => items.push(format!("group {}", group.start)),
+				Poll::Ready(Ok(Some(track::Item::Gap { range, .. }))) => items.push(format!("gap {range:?}")),
+				end => break end,
+			}
+		};
+		assert_eq!(items, ["group 0", "group 1", "group 2", "group 3"]);
+		assert!(matches!(end, Poll::Ready(Ok(None))), "the read ends");
+	}
+
 	/// A replaced copy that gets a handed-out group only after the reader polled on backs it:
 	/// the serving copy's group failing continues from the old copy's.
 	#[test]
@@ -10232,6 +10307,51 @@ mod test {
 				assert!(matches!(chunks.read_chunk().now_or_never(), Some(Err(Error::Old))));
 			} else {
 				assert!(matches!(reading.read_frame().now_or_never(), Some(Err(Error::Old))));
+			}
+		}
+	}
+
+	/// A bounded read that moves a group onto a new route judges it within its own window there:
+	/// newer groups that route holds for others never expire it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_recovered_group_expires_only_within_the_readers_window() {
+		for bounded in [false, true] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			routes.serve(a.consume());
+			let mut subscription =
+				Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(2)));
+			if bounded {
+				subscription = subscription.with_ranges([track::Range::groups(0..1)]);
+			}
+			let mut sub = logical
+				.consume()
+				.subscribe(subscription)
+				.now_or_never()
+				.unwrap()
+				.unwrap();
+			let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+			open.write_frame(ts(0), b"a".as_ref()).unwrap();
+			let mut reading = recv(&mut sub);
+			assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+			assert!(reading.read_frame().now_or_never().is_none());
+
+			let b = copy();
+			let mut replacement = b.create_group(group::Info { start: 0 }).unwrap();
+			replacement.write_frame(ts(0), b"a".as_ref()).unwrap();
+			routes.serve(b.consume());
+			// The stalled read moves onto the new route's copy.
+			assert!(reading.read_frame().now_or_never().is_none());
+			for key in 1..=4 {
+				let mut next = b.create_group(group::Info { start: key }).unwrap();
+				next.write_frame(ts(key * 1000), b"x".as_ref()).unwrap();
+				next.finish().unwrap();
+			}
+			match bounded {
+				true => assert!(reading.read_frame().now_or_never().is_none(), "outside the window"),
+				false => assert!(matches!(reading.read_frame().now_or_never(), Some(Err(Error::Old)))),
 			}
 		}
 	}
