@@ -6,11 +6,14 @@
 import { expect, spyOn, test } from "bun:test";
 import { Duration, Elapsed, sleep, timeout } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
+import { Producer as BroadcastProducer } from "../broadcast.ts";
 import { DEFAULT_EXPIRY } from "../cache.ts";
 import { accept as acceptSession, connect as connectSession } from "../connection/index.ts";
 import { defined } from "../defined.test-util.ts";
 import { StreamCode, StreamError } from "../error.ts";
 import type { Consumer as GroupConsumer } from "../group.ts";
+import { WireRoute } from "../hop.ts";
+import * as Instance from "../instance.ts";
 import { hooks } from "../internal.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { lines } from "../open.ts";
@@ -551,10 +554,15 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 	},
 );
 
-// A publisher whose cache holds group 2 from frame 3 only fetches the head from its track's
-// handler and serves the group whole to a subscriber reading whole groups, as the Rust
-// `position_group` does: a cache only makes things faster. A refused head drops the group.
-test.each([Lite.ALPN_06, Lite.ALPN_07_WIP])("%s: a publisher fetches a headless group's head", async (alpn) => {
+// A publisher whose cache holds group 2 from frame 3 only has its serving reader fetch the head
+// from the track's handler and serves the group whole to a subscriber reading whole groups, as the
+// Rust `position_group` does: a cache only makes things faster. A refused head drops the group.
+// Routed, the publisher serves a relay's front, whose route copy asks that route's handler.
+test.each([
+	[Lite.ALPN_06, "local"],
+	[Lite.ALPN_07_WIP, "local"],
+	[Lite.ALPN_07_WIP, "routed"],
+] as const)("%s: a %s publisher fetches a headless group's head", async (alpn, via) => {
 	for (const refuse of [false, true]) {
 		const pair = createMockTransportPair(alpn);
 		const origin = new OriginProducer();
@@ -562,7 +570,37 @@ test.each([Lite.ALPN_06, Lite.ALPN_07_WIP])("%s: a publisher fetches a headless 
 			connectSession({ url, transport: pair.client }),
 			acceptSession({ transport: pair.server, url, publish: origin.consume() }),
 		]);
-		const broadcast = origin.route(Path.from("room")).broadcast;
+		let broadcast: BroadcastProducer;
+		let unroute = () => {};
+		if (via === "local") {
+			broadcast = origin.route(Path.from("room")).broadcast;
+		} else {
+			// A relay: the broadcast arrives over a route as a logical front, which the publishing
+			// origin serves.
+			broadcast = new BroadcastProducer();
+			const source = broadcast;
+			const upstream = new OriginProducer();
+			const instance = Instance.parse("01900000-0000-7000-8000-000000000001");
+			const received = wireOf(upstream).receive(Path.from("room"), WireRoute.normalize({ instance, cost: 1n }));
+			void (async () => {
+				for await (const request of received.requested()) request.serve(source.consume());
+			})();
+			const routed = upstream.consume().request(Path.from("room"));
+			const claim = origin.claim(Path.from("room"));
+			void (async () => {
+				for await (const request of claim.requested()) {
+					const front = routed.active.peek();
+					if (front) request.serve(front.clone());
+					else request.reject(new Error("no route"));
+				}
+			})();
+			unroute = () => {
+				claim.close();
+				routed.close();
+				received.close();
+				upstream.close();
+			};
+		}
 		const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 		const tail = hooks.receiveGroup(track, { start: 2n, offset: 3 });
 		for (const frame of [3, 4])
@@ -607,6 +645,7 @@ test.each([Lite.ALPN_06, Lite.ALPN_07_WIP])("%s: a publisher fetches a headless 
 		} finally {
 			remote.close();
 			requests.close();
+			unroute();
 			broadcast.close();
 			client.abort();
 			server.abort();

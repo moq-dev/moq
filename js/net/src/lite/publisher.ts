@@ -240,8 +240,6 @@ interface RunGroup {
 	group: group.Consumer;
 	/** Why to stop writing {@link group}, watched while it is served. */
 	givenUp: GivenUp;
-	/** Stops tying a copy fetched in the reader's place to the serving reader, once it is served. */
-	unbind?: Dispose;
 
 	/** How every frame is stamped, or undefined to send no timestamps. */
 	stamp: Stamp | undefined;
@@ -1051,17 +1049,13 @@ export class Publisher {
 		// broadcast resolves is never missed.
 		const revoked = unauthorized(msg.broadcast);
 		let serving: track.Subscriber | undefined;
-		// Aborted on revocation, for what the serving reader no longer reaches, such as a group
-		// fetched in its place.
-		const revocation = new AbortController();
 		const watch = this.#gate.watch(msg.broadcast, () => {
 			console.debug(`publish revoked: broadcast=${msg.broadcast} track=${msg.track}`);
-			revocation.abort(revoked);
 			serving?.close(revoked);
 			stream.abort(revoked);
 		});
 		try {
-			await this.#serveSubscribe(msg, stream, { ...watch, revocation: revocation.signal }, (track) => {
+			await this.#serveSubscribe(msg, stream, watch, (track) => {
 				serving = track;
 			});
 		} finally {
@@ -1072,7 +1066,7 @@ export class Publisher {
 	async #serveSubscribe(
 		msg: Subscribe,
 		stream: Stream,
-		watch: { revoked: () => boolean; revocation: AbortSignal },
+		watch: { revoked: () => boolean },
 		serving: (track: track.Subscriber) => void,
 	) {
 		// Checked before resolving, so a denied request never reaches the origin.
@@ -1144,6 +1138,8 @@ export class Publisher {
 			starts: hasRanges(this.version) ? positionFrames(msg.ranges ?? []) : new Map(),
 			startsAfter: new WeakMap(),
 		};
+		// A group is served whole from the frame asked: the reader fetches what its copy lacks.
+		hooks.wholeGroups(track, (key) => frameRange(bounds, key).start);
 		let legacy: datagram.Consumer | undefined;
 		const legacyPriority = new Signal(msg.priority);
 		let controls: SubscriptionControls | undefined;
@@ -1331,8 +1327,6 @@ export class Publisher {
 				},
 			});
 			const finished = await this.#runTrack(track, stream.writer, controls, {
-				source: consumer,
-				revocation: watch.revocation,
 				sub: msg.id,
 				broadcast: msg.broadcast,
 				stamp,
@@ -1515,10 +1509,6 @@ export class Publisher {
 		stream: Writer,
 		controls: SubscriptionControls,
 		serving: {
-			/** The track `track` reads, which fetches the frames a group's copy lacks. */
-			source: track.Consumer;
-			/** Aborted once the grant no longer covers the broadcast. */
-			revocation: AbortSignal;
 			sub: bigint;
 			broadcast: Path.Valid;
 			stamp: Stamp | undefined;
@@ -1535,7 +1525,7 @@ export class Publisher {
 			initial: bigint;
 		},
 	): Promise<boolean> {
-		const { source, revocation, sub, broadcast, stamp, publisher, compress, named, bounds, initial } = serving;
+		const { sub, broadcast, stamp, publisher, compress, named, bounds, initial } = serving;
 		// What the wire was told of each key: served, or given up, and how. Kept in the
 		// reader's own record, which its drops consult too. Undefined before lite-05.
 		const record = named ? hooks.wire(track) : undefined;
@@ -2064,15 +2054,12 @@ export class Publisher {
 				// The FIN waits for every stream to finish or reset, including one that has not opened yet.
 				// A stream reset to make room fails the group like any other reset, so it is dropped.
 				const task = (async () => {
-					let failed = await this.#fetchHead(source, track, revocation, options);
+					const writer = await this.#openGroup(options);
+					let failed: Error | undefined;
 					try {
-						if (!failed) {
-							const writer = await this.#openGroup(options);
-							failed = writer instanceof Error ? writer : await this.#serveGroup(writer, options);
-						}
+						failed = writer instanceof Error ? writer : await this.#serveGroup(writer, options);
 					} finally {
 						options.givenUp.close();
-						options.unbind?.();
 					}
 					if (failed && emitRange) {
 						pendingDrops.push({
@@ -2575,61 +2562,6 @@ export class Publisher {
 			hooks.releaseGroupReader(group, failed);
 			return failed;
 		}
-	}
-
-	/**
-	 * Swap a group whose copy lacks frames the subscription asked for for a copy fetched from
-	 * that frame on, as the Rust `position_group` does: a cache only makes things faster, so
-	 * a partial hit asks upstream for the rest.
-	 *
-	 * @returns The fetch's error, for SUBSCRIBE_DROP to name, when nothing upstream supplies them
-	 *
-	 * @internal
-	 */
-	async #fetchHead(
-		source: track.Consumer,
-		reader: track.Subscriber,
-		revocation: AbortSignal,
-		options: RunGroup,
-	): Promise<Error | undefined> {
-		const held = options.group;
-		if (hooks.groupIndex(held) <= options.start) return undefined;
-		const asking = reader.subscription.peek();
-		const left = new AbortController();
-		const fetch: track.FetchGroupOptions & broadcast.FetchFrom = {
-			priority: asking?.priority,
-			maxDelay: asking?.delay?.max ?? undefined,
-			signal: left.signal,
-			frameStart: options.start,
-			// Its budget's watch lasts until the copy is released, past the reads to the FIN's
-			// acknowledgement, as a FETCH's does.
-			held: true,
-		};
-		const fetched = source.fetchGroup(held.start, fetch).then(
-			(group) => group,
-			(err: unknown) => error(err),
-		);
-		// The serving subscription's budget, or its end, gives up on the head too.
-		const result = await race([fetched, options.givenUp, options.unsubscribed]);
-		options.givenUp.close();
-		if (result === undefined || result instanceof Error) {
-			left.abort(result ?? new Error("unsubscribed while fetching a group's head"));
-			void fetched.then((late) => {
-				if (!(late instanceof Error)) late.close();
-			});
-			held.close();
-			return result ?? new Error("unsubscribed while fetching a group's head");
-		}
-		held.close();
-		// The copy belongs to its fetch, not the serving reader, so a revoked grant releases it
-		// here, even once that reader finished. Judged under the fetch's budget, as a FETCH is.
-		const release = () => hooks.releaseGroupReader(result, error(revocation.reason));
-		if (revocation.aborted) release();
-		revocation.addEventListener("abort", release);
-		options.unbind = () => revocation.removeEventListener("abort", release);
-		options.group = result;
-		options.givenUp = new GivenUp(result);
-		return undefined;
 	}
 
 	/**
