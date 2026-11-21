@@ -7227,6 +7227,51 @@ mod test {
 		assert_eq!(drain(&mut sub, false), [0]);
 	}
 
+	/// Editing an [`Anchor::Oldest`] end away, by adding its key again or retiring it, lifts
+	/// the refusal it held.
+	#[test]
+	fn editing_an_oldest_end_away_lifts_its_refusal() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		write(&a, 0);
+		routes.serve(a.consume());
+		let oldest = track::Range {
+			start: Anchor::Time(0),
+			end: Some(Anchor::Oldest),
+		};
+		let open = track::Range {
+			start: Anchor::Time(0),
+			end: None,
+		};
+		let refused = Subscription::default()
+			.with_delay(Delay::default().with_max(HOUR))
+			.with_ranges([oldest]);
+		let mut sub = logical.consume().subscribe(refused).now_or_never().unwrap().unwrap();
+		let refuses = |sub: &mut track::Subscriber| {
+			matches!(
+				sub.poll_recv_group(&kio::Waiter::noop()),
+				Poll::Ready(Err(Error::InvalidRange))
+			)
+		};
+		let edit = |retire: Vec<u64>, add: Vec<(u64, track::Range)>| track::Edit {
+			retire,
+			add,
+			priority: 0,
+			delay: Delay::default().with_max(HOUR),
+			order: track::Order::default(),
+		};
+		assert!(refuses(&mut sub));
+		sub.edit(edit(Vec::new(), vec![(0, open)])).unwrap();
+		assert_eq!(drain(&mut sub, false), [0]);
+
+		sub.edit(edit(Vec::new(), vec![(1, oldest)])).unwrap();
+		assert!(refuses(&mut sub));
+		sub.edit(edit(vec![1], Vec::new())).unwrap();
+		write(&a, 1);
+		assert_eq!(drain(&mut sub, false), [1]);
+	}
+
 	#[test]
 	fn a_fresh_nested_reader_ends_after_its_outer_reader_already_passed_its_groups() {
 		let routes = Producer::new();
@@ -9889,6 +9934,29 @@ mod test {
 		drop(pending);
 		drop(second);
 		assert_eq!(routes.subscription(demand, 1).start(), Some(10));
+	}
+
+	/// A front resumes a new copy past the lowest group any reader holds, whichever reader
+	/// that is.
+	#[test]
+	fn the_fronts_subscription_resumes_past_the_reader_furthest_behind() {
+		let routes = Producer::new();
+		let front = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut first = subscribe(&front, HOUR);
+		let mut second = subscribe(&front, HOUR);
+		let resume = || routes.subscription(front.subscription().unwrap(), 2).resume;
+		write(&a, 5);
+		assert_eq!(recv(&mut first).start, 5);
+		assert_eq!(recv(&mut second).start, 5);
+		write(&a, 10);
+		assert_eq!(recv(&mut second).start, 10);
+		assert_eq!(resume(), Some(Position::new(5, 1)), "the first reader is behind");
+		assert_eq!(recv(&mut first).start, 10);
+		write(&a, 15);
+		assert_eq!(recv(&mut first).start, 15);
+		assert_eq!(resume(), Some(Position::new(10, 1)), "the second reader is behind");
 	}
 
 	#[derive(Default)]

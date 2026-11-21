@@ -4185,6 +4185,99 @@ mod tests {
 		assert!(shown(&router), "claimed again after it let go");
 	}
 
+	/// A claimant that restates its copy of an ended claim, the same announcer at the same
+	/// epoch, still holds that copy: only another announcer's claim or a newer epoch lets
+	/// it go.
+	#[test]
+	fn a_holder_restating_its_copy_still_holds_it() {
+		let mut router = Router::<usize, u64, Run>::new(node(1), debounce(HOP));
+		open(&mut router, 2, Role::Routing(node(2)));
+		open(&mut router, 4, Role::Routing(node(4)));
+		router.recv(2, route(2, 2, 1)).unwrap();
+		router.recv(4, route(4, 4, 2)).unwrap();
+		let broadcast = (p("live"), 7);
+		let claims = |origin: Id, change: Change<Run>, floor: Rev| Msg::Claims {
+			origin: node(origin),
+			changes: vec![(broadcast.clone(), change)],
+			floor,
+		};
+		let copy = |chain: Vec<Id>, epoch: u64, cost: Metric| {
+			let Change::Live(claim) = chained(chain) else {
+				unreachable!("a live claim");
+			};
+			Change::Live(Claim {
+				item: run(epoch),
+				cost,
+				..claim
+			})
+		};
+		router.recv(2, claims(2, copy(vec![9, 2], 1, 0), 1)).unwrap();
+		router.recv(4, claims(4, copy(vec![9, 4], 1, 0), 1)).unwrap();
+		router.recv(2, claims(2, Change::Ended, 2)).unwrap();
+		let shown = |router: &Router<usize, u64, Run>| router.shown().contains_key(&(7, p("live")));
+		assert!(!shown(&router), "node 4's copy is of the ended claim");
+
+		router.recv(4, claims(4, copy(vec![9, 4], 1, 5), 2)).unwrap();
+		assert!(!shown(&router), "a restated copy is still the copy");
+		router.recv(4, claims(4, copy(vec![9, 4], 0, 5), 3)).unwrap();
+		assert!(!shown(&router), "an older epoch is a copy too");
+
+		// A newer epoch lets the copy go, so the ended epoch claimed again after it shows.
+		router.recv(4, claims(4, copy(vec![9, 4], 2, 5), 4)).unwrap();
+		router.recv(4, claims(4, copy(vec![9, 4], 1, 5), 5)).unwrap();
+		assert!(shown(&router), "node 4 let go of its copy");
+	}
+
+	/// The same for a copy a scoped neighbour gives: restated, it is still held back, and
+	/// another announcer's claim or a newer epoch lets it go.
+	#[test]
+	fn a_neighbour_restating_its_copy_still_holds_it() {
+		let mut router = Router::<usize, u64, Run>::new(node(1), debounce(HOP));
+		open(&mut router, 2, Role::Routing(node(2)));
+		open(&mut router, 5, Role::Scoped(vec![p(ROOT)]));
+		router.recv(2, route(2, 2, 1)).unwrap();
+		let broadcast = (p("live"), 7);
+		let claims = |change: Change<Run>, floor: Rev| Msg::Claims {
+			origin: node(2),
+			changes: vec![(broadcast.clone(), change)],
+			floor,
+		};
+		let give = |chain: Vec<Id>, epoch: u64, cost: Metric| {
+			let Change::Live(claim) = chained(chain) else {
+				unreachable!("a live claim");
+			};
+			let change = Change::Live(Claim {
+				item: run(epoch),
+				cost,
+				..claim
+			});
+			Msg::Announce {
+				changes: vec![(broadcast.clone(), change)],
+			}
+		};
+		let shown = |router: &Router<usize, u64, Run>| router.shown().contains_key(&(7, p("live")));
+		router.recv(2, claims(chained(vec![9, 2]), 1)).unwrap();
+		router.recv(5, give(vec![9, 8], 0, 0)).unwrap();
+		router.recv(2, claims(Change::Ended, 2)).unwrap();
+		assert!(!shown(&router), "the given copy is of the ended claim");
+
+		router.recv(5, give(vec![9, 8], 0, 5)).unwrap();
+		assert!(!shown(&router), "a restated copy is still the copy");
+
+		// Another announcer's claim lets the copy go.
+		router.recv(5, give(vec![10, 8], 0, 5)).unwrap();
+		router.recv(5, give(vec![9, 8], 0, 5)).unwrap();
+		assert!(shown(&router), "the neighbour let go of its copy");
+
+		// So does a newer epoch.
+		router.recv(2, claims(chained(vec![9, 2]), 3)).unwrap();
+		router.recv(2, claims(Change::Ended, 4)).unwrap();
+		assert!(!shown(&router), "the neighbour holds a copy again");
+		router.recv(5, give(vec![9, 8], 1, 5)).unwrap();
+		router.recv(5, give(vec![9, 8], 0, 5)).unwrap();
+		assert!(shown(&router), "the neighbour let go of its copy");
+	}
+
 	/// A claimant's copy that a newer route's first claims overtake holds no copy any more:
 	/// the revisions it skipped can hide an end and the same claim announced again, which
 	/// the claims alone cannot tell from no change at all.
