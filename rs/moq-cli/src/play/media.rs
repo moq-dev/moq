@@ -245,6 +245,12 @@ impl<O: Output> Media<O> {
 					opened = async { video.opening_mut().expect("guarded").future.as_mut().await }, if video.opening().is_some() => {
 						rejected.extend(opened.rejected);
 						match opened.ready {
+							// Its track finished while it opened, leaving only its newest group, which
+							// already played, so the half picks again without it.
+							Some(ready) if playback.finished(&ready.reference) => {
+								video.cancel_opening();
+								video.repick();
+							}
 							Some(ready) => {
 								spawned += 1;
 								let task = spawned;
@@ -295,6 +301,11 @@ impl<O: Output> Media<O> {
 					opened = async { audio.opening_mut().expect("guarded").future.as_mut().await }, if audio.opening().is_some() => {
 						rejected.extend(opened.rejected);
 						match opened.ready {
+							// Its track finished while it opened, as video's can.
+							Some(ready) if playback.finished(&ready.reference) => {
+								audio.cancel_opening();
+								audio.repick();
+							}
 							Some(ready) => {
 								tracing::info!(track = ready.name, decoder = ready.consumer.name(), "playing audio rendition");
 								if speaker.is_none() {
@@ -373,12 +384,12 @@ impl<O: Output> Media<O> {
 								if video.running().is_some_and(|running| {
 									snapshot.video.renditions.get(&running.data.demand.name).is_some_and(|config| !config.enabled)
 								}) {
-									video.stop();
+									playback.stop(&mut video);
 								}
 								if audio.running().is_some_and(|running| {
 									snapshot.audio.renditions.get(&running.data.demand.name).is_some_and(|config| !config.enabled)
 								}) {
-									audio.stop();
+									playback.stop(&mut audio);
 								}
 								// An opening that would try a disabled rendition is picked again, even
 								// while the half waits for a stopped rendition to end.

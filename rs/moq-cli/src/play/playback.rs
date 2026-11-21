@@ -297,20 +297,28 @@ impl<D, O> Half<D, O> {
 		retired
 	}
 
-	/// Stop the rendition playing, as when the catalog disabled it, dropping what the player
-	/// holds for it. A rendition still opening carries on.
-	pub(super) fn stop(&mut self) {
-		self.phase = match self.take() {
-			Phase::Playing { running } | Phase::Retiring { running } => Phase::Stopping {
-				task: running.task,
-				opening: None,
-			},
-			Phase::Switching { running, opening, .. } => Phase::Stopping {
-				task: running.task,
+	/// Stop the rendition playing, dropping what the player holds for it, and return its task and
+	/// track unless the catalog moved it off that track, whose end is then no finish. A rendition
+	/// still opening carries on.
+	fn stop(&mut self) -> Option<(u64, Track)> {
+		let (task, opening, finishes) = match self.take() {
+			Phase::Playing { running } => (running.task, None, Some(running.track)),
+			Phase::Switching {
+				running,
+				switch,
 				opening,
-			},
-			phase => phase,
+			} => {
+				let finishes = (switch == Switch::Turn).then_some(running.track);
+				(running.task, opening, finishes)
+			}
+			Phase::Retiring { running } => (running.task, None, None),
+			phase => {
+				self.phase = phase;
+				return None;
+			}
 		};
+		self.phase = Phase::Stopping { task, opening };
+		finishes.map(|track| (task, track))
 	}
 }
 
@@ -342,9 +350,10 @@ pub(super) struct Playback {
 	/// one that finished has nothing more to play: selecting it again from a
 	/// newer snapshot would only replay its newest group.
 	finished: HashSet<Track>,
-	/// The tracks of tasks a replacement stopped, by task, whose own finish still counts if
-	/// they got there first. A track the catalog moved off is not among them.
-	replaced: HashMap<u64, Track>,
+	/// The tracks of tasks a replacement or a disabled rendition stopped, by task, whose own
+	/// finish still counts if they got there first. A track the catalog moved off is not among
+	/// them.
+	stopped: HashMap<u64, Track>,
 }
 
 impl Playback {
@@ -394,18 +403,26 @@ impl Playback {
 		};
 		// Dropping the rest of what it held stops it.
 		if let Some(replaced) = replaced {
-			self.replaced.insert(replaced.task, replaced.track);
+			self.stopped.insert(replaced.task, replaced.track);
 		}
 		// A turn's replacement started from a narrowed read, which stays narrowed: once the
 		// replacement ends, the renditions the turn skipped are read again.
 		half.phase = Phase::Playing { running };
 	}
 
+	/// Stop the rendition `half` plays, as when the catalog disabled it. Its task still drives
+	/// the half until it ends, and its track is finished if the task got to its end first.
+	pub(super) fn stop<D, O>(&mut self, half: &mut Half<D, O>) {
+		if let Some((task, track)) = half.stop() {
+			self.stopped.insert(task, track);
+		}
+	}
+
 	/// Record `task` ending, `finished` if its track ended on its own rather than being stopped.
 	/// The half it drives picks again; one a replacement already stopped changes nothing but
 	/// whether its own track finished first.
 	pub(super) fn ended<D, O>(&mut self, half: &mut Half<D, O>, task: u64, finished: bool) {
-		if let Some(track) = self.replaced.remove(&task)
+		if let Some(track) = self.stopped.remove(&task)
 			&& finished
 		{
 			self.finished.insert(track);
@@ -727,7 +744,7 @@ mod tests {
 		let (mut playback, mut video, mut audio) = playing("a");
 		video.move_off();
 		video.open("b");
-		video.stop();
+		playback.stop(&mut video);
 		assert!(video.running().is_none());
 		assert!(video.is_current(1));
 		assert_eq!(video.opening(), Some(&"b"));
@@ -746,6 +763,23 @@ mod tests {
 		assert!(playback.done(&video, &audio));
 	}
 
+	/// A disabled rendition's task that reached its own end before the stop still finished its
+	/// track; one the catalog moved off did not.
+	#[test]
+	fn a_stopped_track_that_finished_is_finished() {
+		let (mut playback, mut video, _audio) = playing("a");
+		playback.stop(&mut video);
+		playback.ended(&mut video, 1, true);
+		assert!(playback.finished(&track("a")));
+		assert!(!video.playing());
+
+		playback.started(&mut video, running(2, "b"));
+		video.move_off();
+		playback.stop(&mut video);
+		playback.ended(&mut video, 2, true);
+		assert!(!playback.finished(&track("b")), "the catalog moved off it");
+	}
+
 	/// Cancelling an opening keeps the phase, so a switch still wants its replacement and a
 	/// stopped rendition still drives its half.
 	#[test]
@@ -761,7 +795,7 @@ mod tests {
 		assert!(playback.wants(&video), "the turn picks again from the next snapshot");
 
 		video.open("tall");
-		video.stop();
+		playback.stop(&mut video);
 		video.cancel_opening();
 		assert!(video.opening().is_none());
 		assert!(video.is_current(1), "the stopped task still drives the half");
