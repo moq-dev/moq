@@ -15,7 +15,7 @@
 (* of the line asks the transport for credit. A waiting open resets the    *)
 (* lowest-ranked open stream it preempts (`Lines::make_room`): one of a    *)
 (* lower-priority subscription, or an older one of its own, never a tied   *)
-(* subscription's. The first opens in line are owed the resets whose      *)
+(* subscription's. The first opens in line are owed the resets whose       *)
 (* credit has yet to return, and make no more.                             *)
 (*                                                                         *)
 (* A group handed out while another waits replaces it if it outranks it    *)
@@ -25,8 +25,10 @@
 (*                                                                         *)
 (* The receiver is abstract: a stream sent whole or reset is eventually    *)
 (* freed, returning its credit; ReceiveCredit.tla checks that every stream *)
-(* it receives ends. No group expires, so a waiting group must open or be  *)
-(* replaced without the clock's help.                                      *)
+(* it receives ends. A `Live` group's producer never finishes, so its      *)
+(* stream holds its credit until a higher-ranked open resets it. No group  *)
+(* expires, so a waiting group must open or be replaced without the        *)
+(* clock's help, unless only streams it may not reset hold the credit.     *)
 (***************************************************************************)
 EXTENDS Integers, FiniteSets, TLC
 
@@ -35,13 +37,18 @@ CONSTANTS
     G,          \* groups per subscription, arriving in any order
     High,       \* the subscriptions at a higher send group priority than the rest
     Asc,        \* the subscriptions whose groups go oldest first; the rest go newest first
-    MaxStreams  \* the peer's initial stream credit
+    MaxStreams, \* the peer's initial stream credit
+    LiveSubs,   \* the subscriptions with a group whose producer never finishes
+    LiveGroup   \* that group
 
 ASSUME MaxStreams >= 1 /\ G >= 1 /\ High \subseteq Subs /\ Asc \subseteq Subs
+ASSUME LiveSubs \subseteq Subs /\ LiveGroup \in 1..G
 
 Prio == [s \in Subs |-> IF s \in High THEN 1 ELSE 0]
 
 Pairs == Subs \X (1..G)
+
+Live == LiveSubs \X {LiveGroup}
 
 \* `priority::in_group`: a group's rank within its subscription.
 InGroup(s, k) == IF s \in Asc THEN -k ELSE k
@@ -184,9 +191,11 @@ Step(s) ==
           THEN v' = IF y = v THEN [v EXCEPT !.awake[s] = FALSE] ELSE y
           ELSE \E k \in ready : v' = Cursor(y, s, k)
 
-\* A serving stream is sent whole and leaves the list; its task wakes the `TrackRun`.
+\* A serving stream is sent whole and leaves the list; its task wakes the `TrackRun`. A live
+\* group's producer never finishes it.
 Finish(p) ==
     /\ v.st[p] = "serving"
+    /\ p \notin Live
     /\ v' = Wake([v EXCEPT !.st[p] = "fin"], {p[1]})
 
 \* The peer frees a stream sent whole or reset, granting one more; the opens waiting on the
@@ -211,11 +220,15 @@ Init ==
          opened |-> 0,
          closed |-> 0]
 
-Done == \A p \in Pairs : v.st[p] \in {"closed", "given"}
-
 System == (\E s \in Subs : Step(s)) \/ (\E p \in Pairs : Finish(p) \/ Free(p))
 
-Next == System \/ (Done /\ UNCHANGED vars)
+\* Where some step of the system is enabled: each step's guard. `Guarded` checks they agree.
+Enabled == \/ \E s \in Subs : v.awake[s]
+           \/ \E p \in Pairs : v.st[p] \in {"fin", "reset"} \/ (v.st[p] = "serving" /\ p \notin Live)
+
+Quiet == ~Enabled
+
+Next == System \/ (Quiet /\ UNCHANGED vars)
 
 Spec == Init /\ [][Next]_vars /\ WF_vars(System)
 
@@ -225,8 +238,8 @@ Spec == Init /\ [][Next]_vars /\ WF_vars(System)
 \* Never more streams open than the peer granted.
 WithinCredit == v.opened <= MaxStreams + v.closed
 
-\* Every group handed out waits for credit until its stream opens or it is given up, and every
-\* stream ends: as in ReceiveCredit.tla, by `Progress` and `Ends`.
+\* Every behavior ends quiet, as in ReceiveCredit.tla, by `Progress`; `Ends` and `TopDelivered`
+\* say what a quiet state may leave undone.
 StRank(x) == CASE x = "cached" -> 0 [] x = "opening" -> 1 [] x = "serving" -> 2
                [] x \in {"fin", "reset"} -> 3 [] OTHER -> 4
 
@@ -240,18 +253,37 @@ Counted == 2 * SumSet(LAMBDA p: StRank(v.st[p]), Pairs) + Cardinality(Placed(v))
 Waits == Cardinality({s \in Subs : v.asked[s]}) + Cardinality({s \in Subs : ~v.awake[s]})
 
 Progress ==
-    [][\/ Done
+    [][\/ Quiet
        \/ Counted' > Counted
        \/ Counted' = Counted /\ Waits' > Waits]_vars
 
-Enabled == (\E s \in Subs : v.awake[s]) \/ (\E p \in Pairs : v.st[p] \in {"serving", "fin", "reset"})
-
 Guarded == Enabled = ENABLED System
 
-Ends == Done \/ Enabled
+\* `s`'s group `k` waits for credit only live streams it may not reset hold: none is left, and
+\* `make_room` finds no stream for it.
+Blocked(s, k) == ~Credit(v) /\ Candidate(v, s, k, Listed(v)) = <<>>
+
+\* Once quiet, every group was sent and freed or given up, is a live group's stream, or waits,
+\* blocked, or stays cached behind its subscription's blocked open: nothing is left to send
+\* that credit could carry.
+Ends ==
+    Quiet => \A p \in Pairs :
+        \/ v.st[p] \in {"closed", "given"}
+        \/ v.st[p] = "serving" /\ p \in Live
+        \/ v.st[p] = "opening" /\ Blocked(p[1], p[2])
+        \/ v.st[p] = "cached" /\ v.opening[p[1]] # 0 /\ Blocked(p[1], v.opening[p[1]])
+
+\* Once quiet, each subscription's highest-ranked group reached the peer, was reset for a higher
+\* priority, or is blocked: a waiting group never holds back one that could reset a live stream.
+TopDelivered ==
+    Quiet => \A s \in Subs :
+        LET k == CHOOSE k \in 1..G : \A j \in 1..G : InGroup(s, k) >= InGroup(s, j) IN
+        \/ v.st[s, k] \in {"serving", "fin", "reset", "closed"}
+        \/ v.st[s, k] \in {"cached", "opening"} /\ Blocked(s, k)
 
 \* Witnesses, each expected to fail.
 NeverPreempts == \A p \in Pairs : v.st[p] # "reset"
 NeverWaits == \A s \in Subs : v.rank[s] = <<>>
 NeverGivesWay == \A p \in Pairs : v.st[p] # "given"
+NeverBlocked == ~(Quiet /\ \E s \in Subs : v.opening[s] # 0)
 =============================================================================

@@ -16,7 +16,7 @@ Ingest checks the group's pace gate. Past the pace window, the stream reserves t
 
 When the peer has no connection credit left, moq-quic evicts the lowest-ranked stream holding credit, newest first. It holds off while an evicted reader has not stopped its stream, or while some reader has data it has not looked at. A reader arrives late or leaves only under `Late` and `Leave`.
 
-`rs/moq-net/verify/credit/SendCredit.tla` models the sender's wait for stream credit. Each subscription's `TrackRun` hands its groups out one at a time, in any arrival order. One group per subscription waits for credit (`TrackRun::opening`) in the session's line, ranked as `open::Rank` orders it. Only the head asks the transport, and a waiting open resets the lowest-ranked stream it preempts (`Lines::make_room`). A group handed out while another waits replaces it if it outranks it (`give_way`), and is shed otherwise. While the waiting group is `stuck`, the cursor hands out only groups that may move it on. The receiver is abstract: a stream sent whole or reset is eventually freed, and ReceiveCredit.tla checks that it is.
+`rs/moq-net/verify/credit/SendCredit.tla` models the sender's wait for stream credit. Each subscription's `TrackRun` hands its groups out one at a time, in any arrival order. One group per subscription waits for credit (`TrackRun::opening`) in the session's line, ranked as `open::Rank` orders it. Only the head asks the transport, and a waiting open resets the lowest-ranked stream it preempts (`Lines::make_room`). A group handed out while another waits replaces it if it outranks it (`give_way`), and is shed otherwise. While the waiting group is `stuck`, the cursor hands out only groups that may move it on. The receiver is abstract: a stream sent whole or reset is eventually freed, and ReceiveCredit.tla checks that it is. A group in `LiveSubs` at `LiveGroup` is one whose producer never finishes, so its stream keeps its credit until a higher-ranked open resets it, as in `rs/moq-net/tests/integration/stream_credit.rs`.
 
 Each step is one poll of the code that handles one event, under the connection's lock where the code takes it. TLC checks every ordering under the bounds in each config.
 
@@ -30,13 +30,14 @@ Each step is one poll of the code that handles one event, under the connection's
 | `evict`'s assertion | Receive | Eviction never picks a stream whose reader may still progress (`Assert` in `EvictLoop`). | A reader that would have finished loses its group. |
 | `Progress` and `Ends` | Receive | Every stream is read whole or evicted, and stopped (`AllEnd`). | A stream holds credit forever: the connection hangs. |
 | `WithinCredit` | Send | Never more streams open than the peer granted. | The peer closes the connection with STREAM_LIMIT_ERROR. |
-| `Progress` and `Ends` | Send | Every group waiting for credit opens or is given up, and every stream ends. | A subscription stops sending behind a group that never opens. |
+| `Progress` and `Ends` | Send | Every behavior ends quiet, and once quiet every group was sent and freed or given up, is a live group's stream, or waits only on live streams it may not reset. | A subscription stops sending behind a group that never opens. |
+| `TopDelivered` | Send | Once quiet, each subscription's highest-ranked group reached the peer, was reset for a higher priority, or waits only on live streams it may not reset. | A waiting group holds back a newer one that could reset an unfinished stream: the stall #8607 fixed. |
 
 TLC's own liveness check is about a thousand times slower here, so liveness is checked through safety. `Progress` is an action property: every step other than the final stutter raises a bounded measure, so every behavior ends stuttering in one state. `Ends` is an invariant: every state is done, or one of the system's steps is enabled there, which weak fairness takes. `Ends` reads each step's guard in place of ENABLED, and `Guarded` checks the two agree on a smaller config. The comment above `Lifecycle` in ReceiveCredit.tla gives the measure.
 
 #9210's claim that every stream pauses, charged its slot's allowance, is `EveryPauseFits` and `ChargedAllowance`, which ReceiveCreditAllowance.cfg checks as an open finding (see below).
 
-Each model has witnesses (`NeverPaused`, `NeverEvicted`, `NeverStuckWaiting`, `NeverPartial`, `NeverPausedInside`; `NeverPreempts`, `NeverWaits`, `NeverGivesWay`). Each one is expected to fail, which shows TLC reaches the state. Check one after changing a step's guard.
+Each model has witnesses (`NeverPaused`, `NeverEvicted`, `NeverStuckWaiting`, `NeverPartial`, `NeverPausedInside`; `NeverPreempts`, `NeverWaits`, `NeverGivesWay`, `NeverBlocked`). Each one is expected to fail, which shows TLC reaches the state. Check one after changing a step's guard.
 
 ## Run
 
@@ -57,6 +58,7 @@ quest gate just rs tla moq-net/verify/credit/ReceiveCredit.tla -config rs/moq-ne
 | `SendCredit.cfg` | two subscriptions, one newest first and one oldest first, one stream of credit | 89k | 6 s |
 | `SendCreditPriority.cfg` | one subscription at a higher priority, so its opens preempt; also `Guarded` | 99k | 46 s |
 | `SendCreditStreams.cfg` | two streams of credit, the orders swapped | 296k | 14 s |
+| `SendCreditLive.cfg` | a middle group of each subscription never finishes | 41.6k | 3 s |
 
 Every config passes but the open finding. Nightly runs every config here and fails if a config with an `\* Open finding:` line passes.
 
@@ -96,7 +98,8 @@ What the model relies on in that code:
 - A stopped stream returns its paused credit and frees its slot (`Stop`), so a reader that never returns cannot pin the paused budget.
 - Eviction passes over a reader that may still progress, and an evicted reader's taken units keep their credit until it stops (`evicted_held`).
 - Only the head of the line asks the transport, and leaving the line wakes the next head (`Line::leave`).
+- A waiting group gives way to one that outranks it (`give_way`), and while it is `stuck` the cursor hands such a group out. Without either, `SendCreditLive.cfg` breaks `TopDelivered`, which the configs without a live group miss.
 
 ## Not covered
 
-Both models leave out loss, gaps, and reordering within a stream: every unit arrives in order. They also leave out rate caps, shrink debt, frame headers' bytes, and the peer resetting a stream on the receive model. Every stream ranks at one priority on the receive side, so eviction order is newest first. Relay chains are left out, since pausing is per hop. So are the front's shedding past a pause and a group's expiry. The send side has two priority levels (`High` and the rest). TLC's simulate mode crashes on ReceiveCredit.tla (an `ArrayIndexOutOfBoundsException` in TLC), so larger shapes run exhaustively, as ReceiveCreditThree.cfg does. A pass covers two streams, or three with readers held from the start, of two or three frames, and two subscriptions of three groups.
+Both models leave out loss, gaps, and reordering within a stream: every unit arrives in order. They also leave out rate caps, shrink debt, frame headers' bytes, and the peer resetting a stream on the receive model. Every stream ranks at one priority on the receive side, so eviction order is newest first. Relay chains are left out, since pausing is per hop. So are the front's shedding past a pause and a group's expiry. The send side has two priority levels (`High` and the rest). TLC's simulate mode crashes on ReceiveCredit.tla (an `ArrayIndexOutOfBoundsException` in TLC), so larger shapes run exhaustively, as ReceiveCreditThree.cfg does. A pass covers two streams, or three with readers held from the start, of two or three frames, and two subscriptions of three groups, one of each live in `SendCreditLive.cfg`.
