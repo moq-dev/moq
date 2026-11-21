@@ -14,8 +14,9 @@ pub(crate) fn check(data: &[u8]) -> Result<()> {
 	scan.finish(data.len())
 }
 
-/// Check a regular MP4's trailing `moov`, whose sample tables grow with the recording, so no
-/// box is refused for its size: only for nesting and expanding counts.
+/// Check a regular MP4's trailing `moov`, whose sample tables grow with the recording and which
+/// holds a track more than the import limit when a recording at it gains a chapter track, so
+/// no box is refused for its size or its tracks: only for nesting and expanding counts.
 pub(crate) fn check_unbounded(data: &[u8]) -> Result<()> {
 	let mut scan = Scan {
 		unbounded: true,
@@ -64,7 +65,7 @@ impl Scan {
 		if self.groups > MAX_FRAGMENT_SAMPLES {
 			return Err(Error::mp4(mp4_atom::Error::TooLarge(b"sgpd".into())));
 		}
-		if self.tracks > MAX_TRACKS {
+		if !self.unbounded && self.tracks > MAX_TRACKS {
 			return Err(Error::TooManyTracks(self.tracks));
 		}
 		Ok(())
@@ -321,6 +322,11 @@ pub(crate) mod tests {
 		// Nesting a container inside itself is still refused.
 		let nested = boxed(b"moov", &boxed(b"moov", &boxed(b"moov", &[])));
 		assert!(check_unbounded(&nested).is_err());
+
+		// A recording at the import's track limit gains a chapter track.
+		let traks = boxed(b"moov", &boxed(b"trak", &[]).repeat(MAX_TRACKS + 1));
+		assert!(matches!(check(&traks), Err(Error::TooManyTracks(_))));
+		check_unbounded(&traks).unwrap();
 	}
 
 	fn inherited(count: u32) -> Vec<u8> {

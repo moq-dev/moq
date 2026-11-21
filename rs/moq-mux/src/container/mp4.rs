@@ -43,7 +43,7 @@ const FREE: [u8; RESERVED as usize] = [0, 0, 0, RESERVED as u8, b'f', b'r', b'e'
 const CHPL_LIMIT: usize = 255;
 
 /// The chapter text track's timescales, finest first: the first one in which every chapter's
-/// duration fits a 32-bit sample duration. Milliseconds cover 49 days a chapter.
+/// duration fits 31 bits, which readers such as FFmpeg's accept. Milliseconds cover 24 days a chapter.
 const TEXT_TIMESCALES: [u32; 4] = [1000, 100, 10, 1];
 
 /// What chapters add to a finish beyond the media's `moov`: at most 255 titles of 255 bytes
@@ -968,9 +968,9 @@ fn chapter_track(
 		sizes.push((text.len() - before) as u32);
 	}
 
-	// The movie's own ticks while every duration fits a 32-bit sample duration, which keeps the
+	// The movie's own ticks while every duration fits 31 bits, which keeps the
 	// samples exact against the leading edit. A longer recording, hours at 90 kHz, counts
-	// milliseconds, and one with a chapter over 49 days the next coarser timescale, rounding
+	// milliseconds, and one with a chapter over 24 days the next coarser timescale, rounding
 	// each chapter's start. The edits stay in the movie's ticks.
 	let (timescale, deltas, length) = std::iter::once(movie)
 		.chain(TEXT_TIMESCALES)
@@ -981,7 +981,10 @@ fn chapter_track(
 				.enumerate()
 				.map(|(i, &(start, _))| {
 					let end = chapters.get(i + 1).map_or(duration, |&(next, _)| next);
-					u32::try_from(scale(end)?.checked_sub(scale(start)?)?).ok()
+					// A delta past 31 bits is clipped by readers such as FFmpeg's.
+					i32::try_from(scale(end)?.checked_sub(scale(start)?)?)
+						.ok()
+						.map(i32::unsigned_abs)
 				})
 				.collect::<Option<Vec<u32>>>()?;
 			Some((timescale, deltas, scale(duration)?.checked_sub(scale(first)?)?))
@@ -2301,7 +2304,17 @@ mod tests {
 		assert_eq!(deltas, [18, 8901]);
 	}
 
-	/// A chapter over 49 days gets a coarser text timescale instead of failing the finish.
+	/// A chapter span FFmpeg would clip, past 31 bits, takes the next timescale: 47,720 seconds
+	/// is 4,294,800,000 ticks at 90 kHz, which fits 32 bits but not 31.
+	#[test]
+	fn a_chapter_delta_past_31_bits_takes_a_coarser_text_timescale() {
+		let (trak, _) = super::chapter_track(2, 90_000, 47_720 * 90_000, &[(0, "a")], 0).unwrap();
+		assert_eq!(trak.mdia.mdhd.timescale, 1000);
+		let (trak, _) = super::chapter_track(2, 90_000, 20_000 * 90_000, &[(0, "a")], 0).unwrap();
+		assert_eq!(trak.mdia.mdhd.timescale, 90_000);
+	}
+
+	/// A chapter over 24 days gets
 	#[test]
 	fn a_chapter_of_weeks_gets_a_coarser_text_timescale() {
 		let day = 24 * 3600 * 90_000;
