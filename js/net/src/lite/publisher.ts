@@ -240,8 +240,6 @@ interface RunGroup {
 	group: group.Consumer;
 	/** Why to stop writing {@link group}, watched while it is served. */
 	givenUp: GivenUp;
-	/** The reader the subscription handed out, when {@link group} is a copy fetched in its place. */
-	judged?: group.Consumer;
 
 	/** How every frame is stamped, or undefined to send no timestamps. */
 	stamp: Stamp | undefined;
@@ -2065,7 +2063,6 @@ export class Publisher {
 						}
 					} finally {
 						options.givenUp.close();
-						options.judged?.close();
 					}
 					if (failed && emitRange) {
 						pendingDrops.push({
@@ -2605,11 +2602,12 @@ export class Publisher {
 			held.close();
 			return result ?? new Error("unsubscribed while fetching a group's head");
 		}
-		// The copy serves under the subscription's live budget, which the reader it replaces still
-		// carries, not the fetch's: held open until the group is served.
+		// The copy reads and serves under the subscription's live budget, not the fetch's.
+		const expiry = hooks.groupExpiry(held);
+		if (expiry) hooks.pinGroupExpiry(result, expiry);
+		held.close();
 		options.group = result;
-		options.judged = held;
-		options.givenUp = new GivenUp(result, held);
+		options.givenUp = new GivenUp(result);
 		return undefined;
 	}
 

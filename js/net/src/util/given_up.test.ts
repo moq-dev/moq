@@ -102,17 +102,3 @@ test("a closed watch hears no later verdict", async () => {
 	expect(givenUp.peek()).toBeUndefined();
 	producer.finish();
 });
-
-test("a copy fetched in a reader's place is given up on that reader's budget, not its own", async () => {
-	const { producer, group: judged, expired } = served();
-	const fetched = served();
-	const givenUp = new GivenUp(fetched.group, judged);
-	const parked = givenUp.write(() => new Promise(() => {}));
-	await yieldNow();
-	expired.set(true);
-	expect(((await parked) as StreamError).code).toBe(StreamCode.Old);
-	expect(fetched.watching()).toBe(0);
-	givenUp.close();
-	producer.finish();
-	fetched.producer.finish();
-});

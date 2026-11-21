@@ -976,6 +976,9 @@ export class Consumer {
 	// The copy it was mirrored from, which that copy's cache evicts.
 	readonly #mirrored: GroupState;
 	#expiry?: Expiry;
+	// Set once a reader serves this copy in place of another, whose budget it keeps across its
+	// own recoveries rather than taking each replacement's; see `hooks.pinGroupExpiry`.
+	#pinned = false;
 	// Carries the group across its logical track's route changes; see `resume.ts`.
 	#recover?: GroupRecover;
 	// A replacement asked for while the copy being read stalls, raced against that copy.
@@ -1137,6 +1140,11 @@ export class Consumer {
 			group.#expiry = expiry;
 		};
 		hooks.groupExpiry = (group) => group.#expiry;
+		hooks.pinGroupExpiry = (group, expiry) => {
+			group.#expiry = expiry;
+			group.#pinned = true;
+			group.#expired?.refresh();
+		};
 		hooks.groupFailed = (group) => group.#failed();
 		hooks.recoverGroup = (group, recover) => {
 			group.#recover = recover;
@@ -1288,7 +1296,7 @@ export class Consumer {
 		if (this.#state.closed.peek() === undefined) this.#state.closed.set(null);
 		this.#arrived ??= this.#state.arrived;
 		this.#state = next;
-		this.#expiry = replacement.expiry;
+		if (!this.#pinned) this.#expiry = replacement.expiry;
 		this.#skip = index;
 		this.#refresh();
 		this.#expired?.refresh();

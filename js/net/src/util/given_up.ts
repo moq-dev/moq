@@ -1,12 +1,11 @@
 import { type Dispose, type GetPromise, race } from "@moq/signals";
 import type { Consumer as GroupConsumer } from "../group.ts";
 
-// Why to stop writing `group`: the subscription's budget, judged on `judged`, gave it up, or it
-// failed for good before it was read whole (evicted, or its copy aborted with no route to
-// continue it).
-function reason(group: GroupConsumer, judged: GroupConsumer): Error | undefined {
+// Why to stop writing `group`: the subscription's budget gave it up, or it failed for good
+// before it was read whole (evicted, or its copy aborted with no route to continue it).
+function reason(group: GroupConsumer): Error | undefined {
 	const closed = group.closed.peek();
-	return judged.expired.peek() ?? (closed instanceof Error ? closed : undefined);
+	return group.expired.peek() ?? (closed instanceof Error ? closed : undefined);
 }
 
 /**
@@ -23,19 +22,13 @@ function reason(group: GroupConsumer, judged: GroupConsumer): Error | undefined 
  */
 export class GivenUp implements GetPromise<Error> {
 	#group: GroupConsumer;
-	#judged: GroupConsumer;
 	#stop?: Error;
 	#listeners = new Set<(value: Error | undefined) => void>();
 	#unwatch: Dispose[];
 
-	/**
-	 * Watch `group`, judging its budget on `judged`: the reader the subscription handed out, when
-	 * `group` is a copy fetched in its place, whose own budget is the fetch's.
-	 */
-	constructor(group: GroupConsumer, judged: GroupConsumer = group) {
+	constructor(group: GroupConsumer) {
 		this.#group = group;
-		this.#judged = judged;
-		this.#unwatch = [judged.expired.subscribe(() => this.#check()), group.closed.subscribe(() => this.#check())];
+		this.#unwatch = [group.expired.subscribe(() => this.#check()), group.closed.subscribe(() => this.#check())];
 	}
 
 	/**
@@ -95,7 +88,7 @@ export class GivenUp implements GetPromise<Error> {
 
 	#check(): void {
 		if (this.#stop) return;
-		const stop = reason(this.#group, this.#judged);
+		const stop = reason(this.#group);
 		if (!stop) return;
 		this.#stop = stop;
 		this.close();
