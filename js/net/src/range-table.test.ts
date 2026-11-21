@@ -22,7 +22,7 @@ import { Timescale, Timestamp } from "./time.ts";
 import type { Range, Subscriber, Subscription } from "./track.ts";
 import { wireOf } from "./wire.ts";
 
-type Ask = { ranges?: { start?: number; end?: number }[]; minAge?: number };
+type Ask = { ranges?: { start?: number | { live: number }; end?: number }[] };
 type Known = { mode: Mode; lang?: "rs" | "js" };
 type Case = {
 	name: string;
@@ -56,11 +56,15 @@ const INSTANCE = Instance.parse("01900000-0000-7000-8000-000000000001");
 
 function subscription(ask: Ask): Subscription {
 	const ranges: Range[] = (ask.ranges ?? [{}]).map((range) => ({
-		start: range.start === undefined ? undefined : BigInt(range.start),
+		start:
+			range.start === undefined
+				? undefined
+				: typeof range.start === "number"
+					? BigInt(range.start)
+					: { live: Duration.millis(range.start.live) },
 		end: range.end === undefined ? undefined : BigInt(range.end),
 	}));
-	const min = ask.minAge === undefined ? undefined : Duration.millis(ask.minAge);
-	return { delay: { min, max: null }, order: "ascending", ranges };
+	return { delay: { max: null }, order: "ascending", ranges };
 }
 
 // The origin, holding every group it writes for good, and its empty track.
@@ -254,7 +258,8 @@ async function run(c: Case, mode: Mode): Promise<void> {
 
 		const delivered = got.delivered();
 		expect(delivered, `${mode}: delivered`).toEqual(c.deliver);
-		if (c.asks !== undefined && cached !== undefined) {
+		// A case delivering nothing can't show whether the copy asked: it answers nothing either way.
+		if (c.asks !== undefined && cached !== undefined && want > 0) {
 			const answered = cached === want;
 			if (answered === c.asks) {
 				throw new Error(

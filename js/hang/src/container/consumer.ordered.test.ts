@@ -5,7 +5,7 @@ import { Duration } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { Time, Track } from "@moq/net";
 import { u53 } from "../catalog/integers.ts";
-import { Consumer, type Read } from "./consumer.ts";
+import { Consumer, type Read, subscribed } from "./consumer.ts";
 import { encodeFrame, Format } from "./legacy.ts";
 
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
@@ -21,7 +21,7 @@ function setup(wait: number, opus = false) {
 	const installed = clock.install();
 	const track = new Track.Producer("audio");
 	const requests = track.requests();
-	const ordered = track.subscribe({ delay: { min: Duration.ZERO, max: Duration.millis(wait) } }).ordered();
+	const ordered = track.subscribe(subscribed({ min: Duration.ZERO, max: Duration.millis(wait) })).ordered();
 	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.secs(2) } }), {
 		format: opus
 			? new Format({

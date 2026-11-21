@@ -45,7 +45,8 @@ export class Consumer<T> {
 			.subscribe({
 				...Moq.Track.Subscription.default(),
 				priority: config.priority ?? 0,
-				delay: { min: config.delay ?? Duration.ZERO, max: config.delay ?? Duration.ZERO },
+				delay: { max: config.delay ?? Duration.ZERO },
+				ranges: [{ start: { live: config.delay ?? Duration.ZERO } }],
 			})
 			.ordered();
 		this.#decoder = new Decoder(config);
@@ -186,8 +187,8 @@ export namespace Consumer {
 		/** Delivery priority of the consumer's subscription, higher first; defaults to 0. */
 		priority?: number;
 		/**
-		 * The reader's playout delay behind the live edge, the subscription's `delay.min` and
-		 * `delay.max`; defaults to zero, which skips a snapshot the moment a newer one arrives. A
+		 * The reader's playout delay behind the live edge: the lag of the subscription's live join,
+		 * and its `delay.max`; defaults to zero, which skips a snapshot the moment a newer one arrives. A
 		 * reader that holds each snapshot until media reaches its timestamp sets its delay, so a
 		 * superseded snapshot it may still need stays deliverable that long and `next()`
 		 * yields it.

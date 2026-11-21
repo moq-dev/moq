@@ -11,16 +11,52 @@ import type { BufferedRanges, Frame, ReceivedFrame } from "./types.ts";
  */
 export const DELAY_MAX = Duration.secs(10);
 
+/**
+ * How far behind the live edge a reader plays: its playout delay. `@moq/net`'s `Moq.Track.Delay`
+ * keeps only `max`, since a live join states its lag as a range start; build the subscription for
+ * this delay with {@link subscribed}.
+ */
+export interface Delay {
+	/**
+	 * How far behind the live edge the reader starts: {@link subscribed} turns each range from the
+	 * oldest group into a live join this far back. `null` or omitted is not stated: such a range
+	 * still reads from the oldest group, and the {@link Consumer}'s start reads it as zero.
+	 */
+	min?: Duration | null;
+	/** How late a group may fall before it is skipped. The same as `Moq.Track.Delay.max`. */
+	max?: Duration | null;
+}
+
+/**
+ * The `delay` and `ranges` a subscription carries for a reader playing at `delay`, from `ranges`
+ * (default one from the oldest group): `delay.max`, and each range from the oldest group a live
+ * join `delay.min` behind the live edge, once `min` is stated. Other ranges keep their start.
+ */
+export function subscribed(
+	delay: Delay,
+	ranges: readonly Moq.Track.Range[] = [{}],
+): Pick<Moq.Track.Subscription, "delay" | "ranges"> {
+	const min = delay.min ?? undefined;
+	const net: Moq.Track.Delay = delay.max === undefined ? {} : { max: delay.max };
+	return {
+		delay: net,
+		ranges: ranges.map((range) =>
+			min === undefined || range.start !== undefined ? { ...range } : { ...range, start: { live: min } },
+		),
+	};
+}
+
 /** Options for constructing a {@link Consumer}. */
 export interface ConsumerProps {
 	/** The container format used to decode each MoQ frame. */
 	format: Format;
 	/**
-	 * How far behind the live edge to play (default: zero for both bounds). See `Moq.Track.Delay`.
+	 * How far behind the live edge to play (default: zero for both bounds). See {@link Delay}.
 	 *
 	 * `min` is how far behind the live edge the subscription starts, plus any
-	 * {@link ConsumerProps.warmup}: the publisher resolves a live join that far back, and the reader
-	 * starts at the first group its ordered read hands out. An unstated (`null`) `min` reads as zero.
+	 * {@link ConsumerProps.warmup}: the publisher resolves a live join that far back (see
+	 * {@link subscribed}), and the reader starts at the first group its ordered read hands out. An
+	 * unstated (`null`) `min` reads as zero.
 	 * `max` alone gives up a missing group: the ordered read waits for one until where the group past
 	 * it begins falls `max` behind the newest content. `max` is also measured as the span from the
 	 * oldest buffered frame to the newest, so it bounds how long a late group that did arrive is
@@ -31,7 +67,7 @@ export interface ConsumerProps {
 	 * less `min` and the warmup.
 	 */
 	// Read-only: a Getter (e.g. another component's output) is accepted directly.
-	delay?: GetterInit<Moq.Track.Delay>;
+	delay?: GetterInit<Delay>;
 	/**
 	 * Cap the bytes of decoded frames held ahead of the reader, counting the whole wire payload they
 	 * share and each frame's and group's own overhead (default: one group at the transport's size
@@ -51,9 +87,9 @@ export interface ConsumerProps {
 	 * decoder that needs that much media before its output is clean starts early enough, such as an
 	 * Opus decoder. Pass the catalog audio rendition's `warmup`. Mirrors Rust's `container::Playout`.
 	 *
-	 * Put the min and max delay plus the warmup on the subscription, since the publisher starts a
-	 * live join at the min and skips what falls outside the max, so the first group the ordered read
-	 * hands out covers the live edge less `delay.min` and the warmup. Until the reader is the warmup
+	 * Put the min and max delay plus the warmup on the subscription (see {@link subscribed}), since
+	 * the publisher starts a live join at the min and skips what falls outside the max, so the first
+	 * group the ordered read hands out covers the live edge less `delay.min` and the warmup. Until the reader is the warmup
 	 * past its first frame, the age skip keeps a group that covers the reach and tolerates the
 	 * warmup, so the media leading up to the start is not dropped as stale. After that, the max delay
 	 * alone governs it.
@@ -154,7 +190,7 @@ function ptsContiguous(end: number | undefined, nextStart: number | undefined): 
 }
 
 // The max delay in microseconds, infinite when unlimited.
-function maxMicros(delay: Moq.Track.Delay): number {
+function maxMicros(delay: Delay): number {
 	return delay.max === null ? Number.POSITIVE_INFINITY : (delay.max?.asMicros() ?? 0);
 }
 
@@ -175,7 +211,7 @@ export class Consumer {
 	// the estimate once the boundary is known. Only gaps ahead of the first group are kept, which bounds it.
 	#unjoined?: { end: bigint; landed: Instant }[] = [];
 	#format: Format;
-	#delay: Getter<Moq.Track.Delay>;
+	#delay: Getter<Delay>;
 	#maxBuffer: number;
 	// How much further than the min delay the start reaches, and the age skip tolerates while warming.
 	#warmup: Duration;
@@ -1039,7 +1075,7 @@ export class Consumer {
 
 	// How far behind the live edge the start reaches, in microseconds: the min delay plus the warmup.
 	// The publisher serves nothing older than the max delay, so a min delay past it reaches no further.
-	#reach(delay: Moq.Track.Delay): number {
+	#reach(delay: Delay): number {
 		return Math.min(delay.min?.asMicros() ?? 0, maxMicros(delay)) + this.#warmup.asMicros();
 	}
 

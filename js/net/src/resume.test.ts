@@ -950,7 +950,7 @@ test("a routed reader serves its live join as the serving copy resolves it", asy
 	front.serve(a.consume());
 	const sub = front.consumer
 		.track("seq")
-		.subscribe({ delay: { min: Duration.ZERO, max: null }, ranges: [{ end: 5n }] });
+		.subscribe({ delay: { max: null }, ranges: [{ start: { live: Duration.ZERO }, end: 5n }] });
 	try {
 		await settle();
 		// The copy holds the groups the join starts among, so it starts at the latest one.

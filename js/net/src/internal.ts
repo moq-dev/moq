@@ -5,7 +5,7 @@
  *
  * @module
  */
-import type { Duration, Instant } from "@moq/clock";
+import { Duration, type Instant } from "@moq/clock";
 import type { Dispose, GetPromise, Getter } from "@moq/signals";
 import type { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import type { Charge, Pool } from "./cache.ts";
@@ -71,9 +71,17 @@ export function wireMaxDelay(subscription: Pick<Subscription, "delay">): number 
 	return max < NO_MAX_DELAY ? max : null;
 }
 
-/** A subscription's {@link Delay.min} in milliseconds as the wire carries it: undefined when not stated. */
-export function minDelayOf(subscription: Pick<Subscription, "delay">): number | undefined {
-	return subscription.delay?.min?.asMillis();
+/**
+ * `value` rounded up to a whole millisecond, as the wire carries it: callers derive one from
+ * measurements (a jitter estimate scaled off RTT), and a budget shortened by rounding skips a group
+ * the subscriber still wants. Refused past the safe integer range, naming `field`.
+ */
+export function wireMillis(field: string, value: Duration): Duration {
+	const millis = Math.ceil(value.asMillis());
+	if (!Number.isSafeInteger(millis)) {
+		throw new RangeError(`${field} exceeds the safe integer millisecond range: ${value}`);
+	}
+	return Duration.millis(millis);
 }
 
 /** Normalize public group bounds into an inclusive start and exclusive end. */
@@ -814,13 +822,25 @@ export const hooks: {
 	 */
 	timeStarts: (producer: Producer, starts: Iterable<readonly [bigint, bigint | undefined, number]>) => void;
 	/**
-	 * Tell a lite-07 copy where its publisher started each live join, as `[minAge, start, past]`,
-	 * the Min Age in milliseconds the join was asked under, replacing the last set: a reader's
-	 * live join the copy can't prove from its own groups starts from the feed one of them covers.
-	 * `past` marks a join answered empty, whose group starts at or past `start`, the key past its
-	 * range's end. Mirrors the Rust `track::JoinStart`; assigned by `track.ts`.
+	 * Record how the upstream publisher answered a range of a lite-07 copy asking the live join `min`
+	 * milliseconds behind the live edge through the time `end`: at group `start`, or undefined for
+	 * nothing to deliver, asked under at most `budget`, the max delay in milliseconds. It replaces the
+	 * join's earlier answer, and places every reader of that join that began waiting before now,
+	 * within the budget. Returns the tick it was recorded at. Mirrors the Rust
+	 * `track::Producer::answer_join`; assigned by `track.ts`.
 	 */
-	joinStarts: (producer: Producer, starts: Iterable<readonly [number, bigint, boolean]>) => void;
+	answerJoin: (
+		producer: Producer,
+		min: number,
+		end: bigint | undefined,
+		start: bigint | undefined,
+		budget: number,
+	) => number;
+	/**
+	 * Forget the answers of the live joins `keep` rejects: no live range asks them, so no reader waits
+	 * on them. Mirrors the Rust `track::Producer::retain_joins`; assigned by `track.ts`.
+	 */
+	retainJoins: (producer: Producer, keep: (min: number, end: bigint | undefined) => boolean) => void;
 	/** Mint a track {@link Request}; assigned by `track.ts`. */
 	makeRequest: (options: TrackRequestOptions) => Request;
 	/**
@@ -1270,7 +1290,10 @@ export const hooks: {
 	timeStarts: () => {
 		throw new Error("track.ts not loaded");
 	},
-	joinStarts: () => {
+	answerJoin: () => {
+		throw new Error("track.ts not loaded");
+	},
+	retainJoins: () => {
 		throw new Error("track.ts not loaded");
 	},
 	servingRuns: () => {

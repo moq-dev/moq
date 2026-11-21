@@ -5,6 +5,9 @@ import { key, resetKeys } from "../key.test-util.ts";
 import { Consumer } from "./consumer.ts";
 import { Decoder, Encoder, type Event, Producer, type Span } from "./index.ts";
 
+// A reader joining at the live edge, which a refresh ratio may restate the newest group for.
+const LIVE_JOIN: Track.Subscription = { ranges: [{ start: { live: Duration.ZERO } }] };
+
 beforeEach(resetKeys);
 
 type Rec = { n: number };
@@ -242,7 +245,7 @@ test("a joiner over the ratio gets a fresh header", async () => {
 		producer.push({ n: 1000 }, key());
 		for (let n = 0; n < pushes; n++) producer.push({ n }, key());
 
-		const joiner = track.subscribe();
+		const joiner = track.subscribe(LIVE_JOIN);
 		await settle();
 		producer.finish();
 		joiner.close();
@@ -262,7 +265,7 @@ test("a window refresh reuses the newest timestamp", async () => {
 	producer.push({ n: 1 }, Time.Timestamp.fromMillis(20));
 	producer.pop(1, Time.Timestamp.fromMillis(30));
 
-	const joiner = track.subscribe();
+	const joiner = track.subscribe(LIVE_JOIN);
 	await settle();
 	producer.finish();
 	joiner.close();
@@ -293,7 +296,7 @@ test("a window refresh after an older edit waits for a later one", async () => {
 	// Ops may carry timestamps older than their group's first frame.
 	producer.push({ n: 1 }, Time.Timestamp.fromMillis(10));
 
-	const joiner = track.subscribe();
+	const joiner = track.subscribe(LIVE_JOIN);
 	await settle();
 	// No group may share the open group's start.
 	expect(track.largest()?.group).toBe(30n);
@@ -314,7 +317,7 @@ test("a window refresh needs a ratio", async () => {
 	const producer = new Producer<Rec>({ track });
 	for (let n = 0; n < 4; n++) producer.push({ n }, key());
 
-	const joiner = track.subscribe();
+	const joiner = track.subscribe(LIVE_JOIN);
 	await settle();
 	producer.finish();
 	joiner.close();

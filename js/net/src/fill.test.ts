@@ -8,7 +8,7 @@ import { defined } from "./defined.test-util.ts";
 import { NotFound, StreamCode, StreamError, toStreamCode } from "./error.ts";
 import { rejectGroups } from "./fill.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
-import { hooks, staleHole } from "./internal.ts";
+import { hooks, NO_MAX_DELAY, staleHole } from "./internal.ts";
 import * as Lite from "./lite/index.ts";
 import { createMockTransportPair } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
@@ -294,8 +294,10 @@ test("fill: a group a lowered floor asks the feed for is not asked of a fill", a
 	const broadcast = new BroadcastProducer();
 	const track = defined(broadcast.createTrack("video", { maxAge: null }));
 	hooks.receiveTrack(track);
-	const live = track.subscribe({ ranges: [{}], delay: { min: Duration.ZERO, max: null } });
+	const live = track.subscribe({ ranges: [{ start: { live: Duration.ZERO } }], delay: { max: null } });
 	hooks.startTrack(track, { start: 1n });
+	// The upstream answers the live join at group 1, as the session records its START.
+	hooks.answerJoin(track, 0, undefined, 1n, NO_MAX_DELAY);
 	hooks.receiveGroup(track, { start: 1n, offset: 0 }).finish();
 	expect((await live.recvGroup())?.start).toBe(1n);
 	const requests = track.requests();
@@ -997,7 +999,7 @@ test("fill: a filled group stays wanted only while a reader will still read it",
 	const { broadcast, track } = resumed(5n);
 	const requests = track.requests();
 	// A live reader already passed every group below the edge.
-	const live = track.subscribe({ ranges: [{}], delay: { min: Duration.ZERO, max: null } });
+	const live = track.subscribe({ ranges: [{ start: { live: Duration.ZERO } }], delay: { max: null } });
 	expect((await live.ordered().nextGroup())?.start).toBe(5n);
 
 	const reader = track.subscribe(history);
