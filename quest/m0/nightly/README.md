@@ -128,6 +128,27 @@ against 5, a one-night move near the threshold, and the Kotlin wrapper's
 Gradle plugin resolution failure, a one-off after two passing nights
 (re-check either if it repeats).
 
+Decided 2026-11-20 (maintainer, /quest-plan), from the triage of runs
+[44562804083](https://github.com/moq-dev/moq/actions/runs/44562804083) and
+[44767045952](https://github.com/moq-dev/moq/actions/runs/44767045952): two
+more children (resume and relay route mutants, drill leak sensitivity), and
+the Firefox `replacement` stall went to
+[interop green](/quest/m0/interop-green/replacement-join-delay.md). Fixed on
+`main`: the ingest fuzz bound
+([moq-dev/moq#9216](https://github.com/moq-dev/moq/pull/9216)), Miri's
+boottime clock ([moq-dev/moq#9212](https://github.com/moq-dev/moq/pull/9212)),
+the earlier resume mutants
+([moq-dev/moq#9217](https://github.com/moq-dev/moq/pull/9217)), and
+push-to-talk ([moq-dev/moq#9214](https://github.com/moq-dev/moq/pull/9214)).
+Owned by open PRs: the JS benches
+([moq-dev/moq#9099](https://github.com/moq-dev/moq/pull/9099)), the Rust bench
+timeout ([moq-dev/moq#9199](https://github.com/moq-dev/moq/pull/9199)), and the
+container export slowdown from
+[moq-dev/moq#9196](https://github.com/moq-dev/moq/pull/9196)
+([moq-dev/moq#9235](https://github.com/moq-dev/moq/pull/9235)). Dropped as
+one-offs: the Windows C and Cpp release builds' runner bash startup failure,
+and the Benchmark site's artifact fetch (re-check either if it repeats).
+
 The mesh replay's violations with no known entry on 2026-11-19 and 11-20
 came from debug-built relays starved for CPU on the 4-core runner, and from
 a strand counted again at every later event; both fixed in
