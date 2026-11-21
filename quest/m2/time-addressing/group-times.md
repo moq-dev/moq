@@ -111,7 +111,3 @@ own End. Run `just test interop --all`.
 
 Public API: none expected beyond moq-net internals. Wire: lite-07-wip only,
 which is unpublished.
-
-## Related
-
-- [A scale-less track ages by arrival](/quest/m2/time-addressing/scale-less-arrival.md) - lite-05/06 still stamp a scale-less frame, with its group's start
