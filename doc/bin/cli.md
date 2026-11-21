@@ -478,13 +478,14 @@ both `--connect` and a WAN cluster peer is refused at startup: use port 0, or dr
 
 ```bash
 moq auth generate --algorithm ES256 --out private.jwk --public public.jwk
-moq auth sign --key private.jwk --root rooms/123 --publish 'alice/**' --subscribe '**' > alice.jwt
+moq auth sign --key private.jwk --root rooms/123 --publish alice --subscribe '' > alice.jwt
 moq auth verify --key public.jwk --in alice.jwt
-moq auth serve --listen 127.0.0.1:4440 --key-dir keys/ --public-subscribe 'anon/**'
+moq auth serve --listen 127.0.0.1:4440 --key-dir keys/ --public-subscribe anon
 ```
 
-`--publish` and `--subscribe` take patterns: `alice` is one broadcast,
-`alice/**` is a subtree, `**` is everything under `--root`. `moq auth serve`
+`--publish` and `--subscribe` take prefixes: `alice` covers `alice` and
+everything beneath it, and `''` is everything under `--root`. A wildcard such as
+`alice/**` is refused. `moq auth serve`
 answers a relay's auth requests with the same keys (see [Auth
 server](/bin/relay/auth#auth-server)). It also reads every setting from an
 optional TOML file (`moq auth serve auth.toml`), where flags win and

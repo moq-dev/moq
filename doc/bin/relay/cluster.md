@@ -334,7 +334,7 @@ URL, `token` on a peer object, or a shared `cluster.token` file for every
 listed peer, re-read on every dial so a rotated token applies at the next
 redial). The accepting relay admits a peer like any client, so a mesh
 needs an auth server that grants the cluster CA, such as
-`moq auth serve --mtls-publish '**' --mtls-subscribe '**' --mtls-link peer`. An
+`moq auth serve --mtls-publish '' --mtls-subscribe '' --mtls-link peer`. An
 accepted peer counts as a cluster peer only when its grant sets a `link`,
 as `--mtls-link peer` does; otherwise what it announces counts as ingest here, like
 a client's, and it lists [hidden](/concept/moq-lite#hidden-broadcasts) routes

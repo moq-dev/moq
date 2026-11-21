@@ -807,7 +807,7 @@ impl Viewer {
 		let mut announced = self
 			.origin
 			.consume()
-			.scope(path, &moq_net::Patterns::from(moq_net::Pattern::all()))
+			.scope(path, &moq_net::Prefixes::all())
 			.unwrap()
 			.routes();
 		let event = announced.next().await.expect("announced");

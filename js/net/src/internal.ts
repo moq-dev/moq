@@ -128,7 +128,6 @@ export function presented(
 ): Map<Path.Valid, Advertised> {
 	const out = new Map<Path.Valid, Advertised>();
 	let rootLen = -1;
-	const requested = Path.Pattern.subtree(prefix);
 	for (const [covered, candidates] of table) {
 		if (!carries(covered)) continue;
 		if (Path.hasPrefix(covered, prefix)) {
@@ -136,7 +135,7 @@ export function presented(
 			// A scoped route covers only what it claims, so the best one that can serve the prefix wins.
 			const snap = firstEligible(
 				candidates,
-				(candidate) => (!candidate.claim || candidate.claim.overlaps(requested)) && shows(candidate, prefix),
+				(candidate) => (!candidate.claim || candidate.claim.overlaps(prefix)) && shows(candidate, prefix),
 			);
 			if (!snap) continue;
 			rootLen = covered.length;
@@ -174,6 +173,23 @@ export function firstEligible<T extends { readonly route: WireRoute; readonly pr
 	}
 	const epochs = new Map([...byPrefix].map(([prefix, routes]) => [prefix, new Epochs(routes)]));
 	return admitted.find((candidate) => !epochs.get(candidate.prefix)?.supersedes(candidate.route));
+}
+
+/**
+ * What of `path`'s subtree every one of `scopes` serves: undefined when all of it, and otherwise
+ * the prefixes beneath `path` that all of them share, possibly none. Asked about a path rather
+ * than a {@link Path.Prefix}, so a path no prefix can spell still gets an answer.
+ */
+export function within(path: Path.Valid, scopes: Iterable<Path.Prefixes | undefined>): Path.Prefixes | undefined {
+	let out: Path.Prefixes | undefined;
+	for (const scope of scopes) {
+		if (!scope || scope.matches(path)) continue;
+		const beneath = new Path.Prefixes(
+			scope.toArray().filter((member) => Path.hasPrefix(path, member.text as Path.Valid)),
+		);
+		out = out ? out.intersect(beneath) : beneath;
+	}
+	return out;
 }
 
 /** Whether the announced prefix's subtree overlaps `scope`. */
@@ -532,6 +548,8 @@ export interface ResumeSource {
 	resolved(): (Resolved | undefined)[];
 	/** The runs of `[start, end)` the serving copy reads, undefined without one. */
 	runs(start: bigint, end: bigint): Run[] | undefined;
+	/** Whether a time start the serving copy still waits to place holds back a gap; see `hooks.gapHeld`. */
+	gapHeld(at: bigint, end: bigint): boolean;
 	/** Whether a route's copy serves the reader now. */
 	serving(): boolean;
 	/** Where the run of keys from `key` the serving copy says no group arrives at ends; see `hooks.holeEnd`. */
@@ -721,6 +739,8 @@ export const hooks: {
 	subscriberEndError: (subscriber: Subscriber) => Error | undefined;
 	/** What this subscriber resolves its ranges against, for a test. Assigned by `track.ts`. */
 	subscriberHoldings: (subscriber: Subscriber) => Holdings;
+	/** The times a received copy's feed accounting may place, for a test. Assigned by `track.ts`. */
+	landingSpan: (producer: Producer) => Run | undefined;
 	/**
 	 * How many keys just below `key` the publisher declared it never produced: the skip run
 	 * ending at `key`, which a moq-transport Prior Group ID Gap names. Mirrors the Rust
@@ -760,11 +780,17 @@ export const hooks: {
 	startsAtKeys: (producer: Producer) => void;
 	/**
 	 * Record where the upstream publisher started each of a lite-07 copy's live wire ranges, as
-	 * `[time, start]` pairs by the time each asked from, replacing the last set: a reader's time
-	 * start the copy cannot place among its own groups resolves to it. Mirrors the Rust
+	 * `[time, start, through]` by the time each asked from (0 for the oldest group), `start`
+	 * undefined for one with no group to deliver, replacing the last set: a reader's time start the
+	 * copy cannot place among its own groups resolves to it. An empty answer holds for a reader
+	 * within `budget`, the narrowest the subscription asked in milliseconds. Mirrors the Rust
 	 * `track::Producer::time_starts`; assigned by `track.ts`.
 	 */
-	timeStarts: (producer: Producer, starts: Iterable<readonly [bigint, bigint]>) => void;
+	timeStarts: (
+		producer: Producer,
+		starts: Iterable<readonly [bigint, bigint | undefined, (bigint | undefined)?]>,
+		budget: number,
+	) => void;
 	/**
 	 * Tell a lite-07 copy where its publisher started each live range counting back, as
 	 * `[back, start, latest]` triples, replacing the last set: the copy holds only part of the
@@ -832,6 +858,11 @@ export const hooks: {
 	 * Assigned by `track.ts`.
 	 */
 	servingRuns: (subscriber: Subscriber, start: bigint, end: bigint) => Run[];
+	/**
+	 * Whether a time start still waiting below `end` holds back a gap an ordered read at `at` would
+	 * return. Assigned by `track.ts`.
+	 */
+	gapHeld: (subscriber: Subscriber, at: bigint, end: bigint) => boolean;
 	/**
 	 * The exclusive end past every group a subscriber reads, or undefined while one of its ranges
 	 * stays open. Assigned by `track.ts`.
@@ -1184,6 +1215,9 @@ export const hooks: {
 	subscriberHoldings: () => {
 		throw new Error("track.ts not loaded");
 	},
+	landingSpan: () => {
+		throw new Error("track.ts not loaded");
+	},
 	skippedBelow: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -1203,6 +1237,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	servingRuns: () => {
+		throw new Error("track.ts not loaded");
+	},
+	gapHeld: () => {
 		throw new Error("track.ts not loaded");
 	},
 	servingEnd: () => {

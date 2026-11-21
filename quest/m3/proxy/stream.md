@@ -1,0 +1,39 @@
+# [L] PROXY over moq-lite
+
+## Goal
+
+moq-lite gains a `PROXY <broadcast>` stream: one bidirectional stream of
+opaque bytes. A relay forwards it toward the broadcast's publisher along the
+route a subscription would take, holding about a stream window per hop and
+caching nothing. moq-net offers it in Rust and JS with mirrored names: a
+dialer opens a stream to a broadcast, and a publisher listens for streams on
+its broadcast and accepts or refuses each. Finishing a side is a FIN, a reset
+carries an application code, and a hop failure resets both sides. A sim test
+carries a bulk transfer through two relays to a slow reader with each hop's
+memory bounded by its window, and a publisher that does not listen refuses.
+
+## Plan
+
+See the [epic](/quest/m3/proxy/README.md) for the decisions.
+
+- Admission is the [dial and listen grants](/quest/m3/proxy/grants.md).
+- A new moq-lite stream type is a wire change. It joins the current wip
+  version (lite-07-wip until the cut; see
+  [lite07-finalize](/quest/m2/lite07-finalize.md)'s freeze policy), and the
+  draft changes in the same PR. A peer on an earlier version never sees one:
+  [moqt](/quest/m3/proxy/moqt.md) carries it as tracks there.
+- Routing reuses the subscription's: a hop picks the route a subscription to
+  the broadcast would, cluster links included, and a broadcast with no route
+  refuses the stream as a subscription would end.
+- The relay forwards bytes, not frames: flow control on each hop's stream is
+  the only buffer.
+- Kixel's byte stream semantics are the reference: FIN as finish, RST with a
+  code, as in kixel-ai/kixel.ai's `rs/kixel/src/socket/stream.rs`.
+
+Public API: additive, a dial on a session or origin and a listen on a
+broadcast, in Rust and JS. Wire: a new stream type in the current wip
+moq-lite version.
+
+## Required
+
+- [Dial and listen grants](/quest/m3/proxy/grants.md) - the permissions a relay checks before forwarding a PROXY

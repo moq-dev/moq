@@ -319,7 +319,7 @@ test("TRACK_STATUS for an empty track names no largest", async () => {
 // Refused before anything resolves when the grant excludes the broadcast, and refused when
 // the grant narrows while the broadcast resolves.
 test("TRACK_STATUS outside the grant is refused on every draft", async () => {
-	const nothing = (): Grant => ({ publish: new Path.Patterns([]), subscribe: new Path.Patterns([]) });
+	const nothing = (): Grant => ({ publish: new Path.Prefixes(), subscribe: new Path.Prefixes() });
 	for (const version of IETF_VERSIONS) {
 		const unauthorized = toRequestCode("unauthorized", "track_status", version);
 		const pair = createMockTransportPair(ALPNS[version]);
@@ -792,8 +792,8 @@ test("a request token does not widen the grant", async () => {
 		const pair = createMockTransportPair(ALPNS[version]);
 		const session = new NativeSession(pair.server, version, true);
 		const nothing = new Signal<Grant | undefined>({
-			publish: new Path.Patterns([]),
-			subscribe: new Path.Patterns([]),
+			publish: new Path.Prefixes(),
+			subscribe: new Path.Prefixes(),
 		});
 		const { pub, origin } = publisher(pair.server, { session, grant: nothing });
 		publish(origin, Path.from("room"));
@@ -1273,7 +1273,7 @@ test("a subscription below an advertised route hears it as the empty suffix", as
 test("a subscription outside a covering route's claim does not hear it", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const { pub, origin } = publisher(pair.server, { requiresSolicitation: true });
-	const chat = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from("room/chat"))]));
+	const chat = origin.scope(Path.empty(), new Path.Prefixes([Path.Prefix.parse(Path.from("room/chat"))]));
 	const dynamic = chat.claim(Path.from("room"));
 
 	const subscription = await Stream.open(pair.client, { version: VERSION });
@@ -1305,7 +1305,7 @@ test("a subscription hears the best covering route its claim allows", async () =
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const { pub, origin } = publisher(pair.server, { requiresSolicitation: true });
 	const scoped = (path: string) =>
-		origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from(path))]));
+		origin.scope(Path.empty(), new Path.Prefixes([Path.Prefix.parse(Path.from(path))]));
 	const chat = scoped("room/chat").claim(Path.from("room"), { cost: 1n });
 	const video = scoped("room/video").claim(Path.from("room"), { cost: 5n });
 
@@ -1338,7 +1338,7 @@ test("a subscription hears the best covering route its claim allows", async () =
 test("a subscription hears a broader covering route when the narrowest cannot serve it", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const origin = new OriginProducer();
-	const tenant = origin.scope(Path.from("tenant"), new Path.Patterns([Path.Pattern.all()]));
+	const tenant = origin.scope(Path.from("tenant"), Path.Prefixes.all());
 	const pub = new Publisher({
 		quic: pair.server,
 		session: new NativeSession(pair.server, VERSION, true),
@@ -1346,7 +1346,7 @@ test("a subscription hears a broader covering route when the narrowest cannot se
 		requiresSolicitation: true,
 	});
 	const chat = origin
-		.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from("tenant/chat"))]))
+		.scope(Path.empty(), new Path.Prefixes([Path.Prefix.parse(Path.from("tenant/chat"))]))
 		.claim(Path.from("tenant"));
 	const broad = origin.claim(Path.empty(), { cost: 5n });
 
@@ -1377,14 +1377,14 @@ test("a subscription hears a broader covering route when the narrowest cannot se
 test("a covering route's claim is compared relative to the served root", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const origin = new OriginProducer();
-	const tenant = origin.scope(Path.from("tenant"), new Path.Patterns([Path.Pattern.all()]));
+	const tenant = origin.scope(Path.from("tenant"), Path.Prefixes.all());
 	const pub = new Publisher({
 		quic: pair.server,
 		session: new NativeSession(pair.server, VERSION, true),
 		publish: tenant.consume(),
 		requiresSolicitation: true,
 	});
-	const chat = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from("tenant/room/chat"))]));
+	const chat = origin.scope(Path.empty(), new Path.Prefixes([Path.Prefix.parse(Path.from("tenant/room/chat"))]));
 	const dynamic = chat.claim(Path.from("tenant/room"));
 
 	const subscription = await Stream.open(pair.client, { version: VERSION });
@@ -3518,10 +3518,7 @@ for (const version of [Version.DRAFT_18] as const) {
 					const pair = createMockTransportPair(ALPN.DRAFT_18);
 					const origin = new OriginProducer();
 					// Authorization heads must not replace the request's empty visibility prefix.
-					const scope = new Path.Patterns([
-						Path.Pattern.subtree(Path.from(".stats")),
-						Path.Pattern.subtree(Path.from("visible")),
-					]);
+					const scope = Path.Prefixes.parse([".stats", "visible"]);
 					const pub = new Publisher({
 						quic: pair.server,
 						session: new NativeSession(pair.server, version, true),
@@ -4048,7 +4045,7 @@ test("a paused SUBSCRIBE ends once its grant is revoked", async () => {
 		}),
 	);
 	try {
-		grant.set({ publish: new Path.Patterns([]), subscribe: new Path.Patterns([]) });
+		grant.set({ publish: new Path.Prefixes(), subscribe: new Path.Prefixes() });
 		expect(await client.reader.u53()).toBe(PublishDone.id);
 		expect((await PublishDone.decode(client.reader, V22)).statusCode).toBe(PublishDoneStatus.UNAUTHORIZED);
 	} finally {

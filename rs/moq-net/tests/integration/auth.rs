@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use moq_net::{
-	Client, Error, Pattern, Patterns, Server, Session, SessionError, StreamError, Version,
+	Client, Error, Prefix, Prefixes, Server, Session, SessionError, StreamError, Version,
 	auth::{self, Grant},
 	origin,
 };
@@ -71,9 +71,9 @@ cases!(
 	a_token_queued_before_our_goaway_rides_only_the_successor,
 	a_broadcast_received_from_the_peer_is_not_ours_to_check,
 	a_broadcast_relayed_from_another_client_is_not_ours_to_check,
-	exact_and_subtree_grants_admit_their_broadcast,
-	pattern_grants_arrive_exactly,
-	a_wildcard_grant_is_enforced,
+	a_prefix_grant_admits_its_broadcast,
+	prefix_grants_arrive_exactly,
+	a_prefix_grant_is_enforced_by_segment,
 );
 
 #[kio::test]
@@ -331,19 +331,19 @@ fn produce_origin(hop: u64) -> origin::Producer {
 	producer.with_proxy(true)
 }
 
-fn patterns(prefixes: &[&str]) -> Patterns {
+fn prefixes(prefixes: &[&str]) -> Prefixes {
 	prefixes
 		.iter()
-		.map(|prefix| Pattern::subtree(prefix).unwrap())
+		.map(|prefix| Prefix::try_from(*prefix).unwrap())
 		.collect()
 }
 
 fn grant(publish: &[&str], subscribe: &[&str]) -> Grant {
-	grant_of(patterns(publish), patterns(subscribe))
+	grant_of(prefixes(publish), prefixes(subscribe))
 }
 
 /// A grant of exactly these paths that never expires.
-fn grant_of(publish: Patterns, subscribe: Patterns) -> Grant {
+fn grant_of(publish: Prefixes, subscribe: Prefixes) -> Grant {
 	let mut grant = Grant::default();
 	grant.publish = publish;
 	grant.subscribe = subscribe;
@@ -535,8 +535,8 @@ async fn both_sides_learn_their_grant_from_scoped_origins(version: &'static str)
 			version: Some(version),
 			client_publish: Some(produce_origin(2)),
 			client_subscribe: Some(produce_origin(3)),
-			server_publish: Some(relay.scope("", &patterns(&["room"])).unwrap()),
-			server_subscribe: Some(relay.scope("", &patterns(&["room/alice"])).unwrap()),
+			server_publish: Some(relay.scope("", &prefixes(&["room"])).unwrap()),
+			server_subscribe: Some(relay.scope("", &prefixes(&["room/alice"])).unwrap()),
 			..Default::default()
 		})
 		.await;
@@ -578,7 +578,7 @@ async fn an_out_of_scope_announce_aborts_with_the_path(version: &'static str) {
 		let pair = connect(Options {
 			version: Some(version),
 			client_publish: Some(publisher.clone()),
-			server_subscribe: Some(relay.scope("", &patterns(&["baz"])).unwrap()),
+			server_subscribe: Some(relay.scope("", &prefixes(&["baz"])).unwrap()),
 			..Default::default()
 		})
 		.await;
@@ -620,7 +620,7 @@ async fn a_broadcast_published_before_the_grant_is_checked(version: &'static str
 		let pair = connect(Options {
 			version: Some(version),
 			client_publish: Some(publisher.clone()),
-			server_subscribe: Some(produce_origin(1).scope("", &patterns(&["baz"])).unwrap()),
+			server_subscribe: Some(produce_origin(1).scope("", &prefixes(&["baz"])).unwrap()),
 			..Default::default()
 		})
 		.await;
@@ -1222,10 +1222,10 @@ async fn older_versions_have_no_grant(version: &'static str) {
 	.expect("timed out");
 }
 
-/// An exact path and a subtree are both admitted, and told as issued wherever AUTH runs:
-/// a grant is never refused for the shape of its patterns.
-async fn exact_and_subtree_grants_admit_their_broadcast(version: &'static str) {
-	for scope in ["ch1", "ch1/**"] {
+/// A prefix naming the broadcast and the empty prefix both admit it, and are told as
+/// issued wherever AUTH runs.
+async fn a_prefix_grant_admits_its_broadcast(version: &'static str) {
+	for scope in ["ch1", ""] {
 		within(async {
 			let relay = produce_origin(1);
 			let broadcast = relay.route("ch1", moq_net::origin::RouteOptions::hidden()).unwrap();
@@ -1233,7 +1233,7 @@ async fn exact_and_subtree_grants_admit_their_broadcast(version: &'static str) {
 			broadcast.announce().unwrap();
 
 			let received = produce_origin(2);
-			let scope = pattern_set(&[scope]);
+			let scope = prefixes(&[scope]);
 			let pair = connect(Options {
 				version: Some(version),
 				client_subscribe: Some(received.clone()),
@@ -1545,10 +1545,10 @@ async fn a_grant_update_too_large_for_one_message_is_unsupported(version: &'stat
 		let token = added(&pair.client.auth(), "update").await.unwrap();
 		let (_, updated) = issued.next().await.unwrap();
 		assert_eq!(granted(&pair.client).await, grant(&["a", "b"], &[]));
-		let huge: Patterns = (0..20)
-			.map(|i| Pattern::subtree(&format!("{i}{}", "x".repeat(4000))).unwrap())
+		let huge: Prefixes = (0..20)
+			.map(|i| Prefix::try_from(format!("{i}{}", "x".repeat(4000))).unwrap())
 			.collect();
-		updated.update(grant_of(huge, Patterns::new()));
+		updated.update(grant_of(huge, Prefixes::new()));
 		let err = token.closed().await;
 		assert!(matches!(err, Error::Unsupported), "{err:?}");
 		assert_eq!(token.grant().peek(), None);
@@ -1559,13 +1559,9 @@ async fn a_grant_update_too_large_for_one_message_is_unsupported(version: &'stat
 	.expect("timed out");
 }
 
-fn pattern_set(texts: &[&str]) -> Patterns {
-	texts.iter().map(|text| Pattern::try_from(*text).unwrap()).collect()
-}
-
-/// Literal, wildcard, and mixed grants reach the presenter exactly as issued, never
+/// Single, nested, sibling, and root grants reach the presenter exactly as issued, never
 /// widened to a covering prefix.
-async fn pattern_grants_arrive_exactly(version: &'static str) {
+async fn prefix_grants_arrive_exactly(version: &'static str) {
 	within(async {
 		let mut pair = connect(Options {
 			version: Some(version),
@@ -1577,11 +1573,11 @@ async fn pattern_grants_arrive_exactly(version: &'static str) {
 		.await;
 		let table = |token: &[u8]| -> Option<Grant> {
 			let (publish, subscribe) = match token {
-				b"" => (pattern_set(&["a/**"]), pattern_set(&[])),
-				b"exact" => (pattern_set(&["room/alice"]), pattern_set(&[])),
-				b"wildcard" => (pattern_set(&["room/*/cam"]), pattern_set(&["**/demo.hang"])),
-				b"mixed" => (pattern_set(&["room/**", "lobby", "cam-*.hang"]), pattern_set(&[])),
-				b"root" => (pattern_set(&[""]), pattern_set(&["**"])),
+				b"" => (prefixes(&["a"]), prefixes(&[])),
+				b"single" => (prefixes(&["room/alice"]), prefixes(&[])),
+				b"nested" => (prefixes(&["room/a/cam", "room/b"]), prefixes(&["demo.hang"])),
+				b"siblings" => (prefixes(&["room", "lobby", "cam.hang"]), prefixes(&[])),
+				b"root" => (prefixes(&[""]), prefixes(&[""])),
 				_ => return None,
 			};
 			Some(grant_of(publish, subscribe))
@@ -1591,7 +1587,7 @@ async fn pattern_grants_arrive_exactly(version: &'static str) {
 		assert_eq!(granted(&pair.client).await, table(b"").unwrap());
 
 		let mut held = Vec::new();
-		for token in ["exact", "wildcard", "mixed", "root"] {
+		for token in ["single", "nested", "siblings", "root"] {
 			let added = added(&pair.client.auth(), token).await.expect(token);
 			assert_eq!(added.grant().peek(), table(token.as_bytes()), "{token}");
 			held.push(added);
@@ -1602,13 +1598,13 @@ async fn pattern_grants_arrive_exactly(version: &'static str) {
 	.expect("timed out");
 }
 
-/// A wildcard grant admits what it matches, including a leading `**` matching zero
-/// segments, and a publish outside it still aborts naming the path.
-async fn a_wildcard_grant_is_enforced(version: &'static str) {
+/// A prefix grant admits its path and every path beneath it, and a publish that shares
+/// only its bytes, not its segments, still aborts naming the path.
+async fn a_prefix_grant_is_enforced_by_segment(version: &'static str) {
 	within(async {
 		let publisher = produce_origin(2);
 		let relay = produce_origin(1);
-		let scope = pattern_set(&["room/*/cam", "**/b.hang"]);
+		let scope = prefixes(&["room/alice", "b.hang"]);
 		let pair = connect(Options {
 			version: Some(version),
 			client_publish: Some(publisher.clone()),
@@ -1619,7 +1615,7 @@ async fn a_wildcard_grant_is_enforced(version: &'static str) {
 		assert_eq!(granted(&pair.client).await.publish, scope);
 
 		let mut held = Vec::new();
-		for path in ["room/alice/cam", "b.hang", "deep/x/b.hang"] {
+		for path in ["room/alice", "room/alice/cam", "b.hang"] {
 			let broadcast = publisher.route(path, moq_net::origin::RouteOptions::hidden()).unwrap();
 			broadcast.announce().unwrap();
 			wait_announced(&relay.consume(), path, true).await;
@@ -1628,7 +1624,7 @@ async fn a_wildcard_grant_is_enforced(version: &'static str) {
 		assert_eq!(pair.client_transport.close_reason(), None);
 
 		let bad = publisher
-			.route("room/alice/mic", moq_net::origin::RouteOptions::hidden())
+			.route("room/alice-mic", moq_net::origin::RouteOptions::hidden())
 			.unwrap();
 		bad.announce().unwrap();
 		assert!(matches!(
@@ -1637,7 +1633,7 @@ async fn a_wildcard_grant_is_enforced(version: &'static str) {
 		));
 		assert_eq!(
 			pair.client_transport.close_reason().map(|(_, reason)| reason),
-			Some("unauthorized: room/alice/mic".to_string())
+			Some("unauthorized: room/alice-mic".to_string())
 		);
 	})
 	.await
@@ -1702,7 +1698,7 @@ async fn a_broadcast_received_from_the_peer_is_not_ours_to_check(version: &'stat
 			client_publish: Some(local.clone()),
 			client_subscribe: Some(local.clone()),
 			server_publish: Some(relay.clone()),
-			server_subscribe: Some(relay.scope("", &patterns(&["local"])).unwrap()),
+			server_subscribe: Some(relay.scope("", &prefixes(&["local"])).unwrap()),
 			..Default::default()
 		})
 		.await;
@@ -1814,7 +1810,7 @@ async fn a_narrowing_deafens_one_path(version: &'static str) {
 		let pair = connect(Options {
 			version: Some(version),
 			client_subscribe: Some(received.clone()),
-			server_publish: Some(relay.scope("", &patterns(&["room"])).unwrap()),
+			server_publish: Some(relay.scope("", &prefixes(&["room"])).unwrap()),
 			..Default::default()
 		})
 		.await;
@@ -1871,7 +1867,7 @@ async fn a_narrowing_deafens_one_path(version: &'static str) {
 			let narrowed = wait_for(pair.client.auth().grant(), |grant| {
 				grant
 					.as_ref()
-					.is_some_and(|grant| grant.subscribe == patterns(&["room/alice/video"]))
+					.is_some_and(|grant| grant.subscribe == prefixes(&["room/alice/video"]))
 			})
 			.await;
 			assert_eq!(narrowed, Some(grant(&[], &["room/alice/video"])));
@@ -2047,7 +2043,7 @@ async fn a_widening_brings_back_a_deafened_path(version: &'static str) {
 		let pair = connect(Options {
 			version: Some(version),
 			client_subscribe: Some(received.clone()),
-			server_publish: Some(relay.scope("", &patterns(&["room"])).unwrap()),
+			server_publish: Some(relay.scope("", &prefixes(&["room"])).unwrap()),
 			..Default::default()
 		})
 		.await;
@@ -2091,7 +2087,7 @@ async fn a_widening_brings_back_a_deafened_path(version: &'static str) {
 			let widened = wait_for(pair.client.auth().grant(), |grant| {
 				grant
 					.as_ref()
-					.is_some_and(|grant| grant.subscribe == patterns(&["room"]))
+					.is_some_and(|grant| grant.subscribe == prefixes(&["room"]))
 			})
 			.await;
 			assert_eq!(widened, Some(grant(&[], &["room"])));
@@ -2401,7 +2397,7 @@ async fn a_broadcast_relayed_from_another_client_is_not_ours_to_check(version: &
 			client_publish: Some(local.clone()),
 			client_subscribe: Some(local.clone()),
 			server_publish: Some(relay.clone()),
-			server_subscribe: Some(relay.scope("", &patterns(&["local"])).unwrap()),
+			server_subscribe: Some(relay.scope("", &prefixes(&["local"])).unwrap()),
 			..Default::default()
 		})
 		.await;
@@ -2474,8 +2470,8 @@ async fn lite_07_a_grant_too_wide_to_ask_is_answered_region_by_region() {
 			published.push(route);
 		}
 		let subscribe = |regions: &[String]| {
-			let subtrees = regions.iter().map(|region| Pattern::subtree(region).unwrap());
-			grant_of(Patterns::default(), subtrees.collect())
+			let subtrees = regions.iter().map(|region| Prefix::try_from(region.as_str()).unwrap());
+			grant_of(Prefixes::default(), subtrees.collect())
 		};
 		let client = produce_origin(9);
 		let mut pair = connect(Options {
@@ -2506,7 +2502,7 @@ async fn lite_07_a_grant_too_wide_to_ask_is_answered_region_by_region() {
 		.await;
 
 		let mut everything = client.consume().routes();
-		let mut first = (client.consume().scope(&regions[0], &Patterns::from(Pattern::all())))
+		let mut first = (client.consume().scope(&regions[0], &Prefixes::all()))
 			.unwrap()
 			.routes();
 		kio::clock::sleep(Duration::from_secs(1)).await;

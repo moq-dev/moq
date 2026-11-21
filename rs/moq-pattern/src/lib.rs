@@ -1,8 +1,13 @@
-//! Exact path patterns for Media over QUIC.
+//! Path patterns and prefix grants for Media over QUIC.
 //!
-//! A [`Pattern`] describes a set of broadcast paths. [`Patterns`] is an unordered union
-//! reduced by exact containment. Matching is linear. [`Pattern::literal`] rejects `*`
-//! because it is reserved for pattern syntax.
+//! A [`Pattern`] describes a set of broadcast paths, for discovery filters that pick which
+//! announcements a reader looks at. [`Patterns`] is an unordered union reduced by exact
+//! containment. Matching is linear. [`Pattern::literal`] rejects `*` because it is
+//! reserved for pattern syntax.
+//!
+//! A [`Prefix`] is a grant member: a path covering itself and every path beneath it, the
+//! empty prefix covering everything. [`Prefixes`] is a grant, a reduced set of them. A
+//! grant takes no wildcard: parsing one fails with [`InvalidPrefix::Wildcard`].
 //!
 //! `moq-net` and `moq-auth` re-export this crate. The TypeScript twin is `@moq/pattern`.
 //!
@@ -74,7 +79,9 @@ mod index;
 mod parts;
 mod pattern;
 mod patterns;
+mod prefix;
 
 pub use parts::{Parts, escape, parts, unescape};
 pub use pattern::{IntersectionError, InvalidPattern, Pattern, Segment, Specificity};
 pub use patterns::Patterns;
+pub use prefix::{InvalidPrefix, Prefix, Prefixes};

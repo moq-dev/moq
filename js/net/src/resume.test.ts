@@ -11,7 +11,7 @@ import type { Session as IetfSession } from "./ietf/session.ts";
 import { Subscriber as IetfSubscriber } from "./ietf/subscriber.ts";
 import { Version as IetfVersion } from "./ietf/version.ts";
 import * as Instance from "./instance.ts";
-import { hooks, staleHole } from "./internal.ts";
+import { hooks, NO_MAX_DELAY, staleHole } from "./internal.ts";
 import type { Lister } from "./listing.ts";
 import { Producer } from "./origin.ts";
 import * as Path from "./path.ts";
@@ -2226,6 +2226,46 @@ test("a replacement spliced before the first copy answers is still checked again
 	b.close();
 });
 
+// A front's key-order reader holds back a gap above a time start its serving copy still waits to
+// place, as a plain reader does: the group containing it may land below the gap.
+test("a front's ordered reader holds a gap above a waiting time start", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const ta = copy(a);
+	hooks.receiveTrack(ta.producer);
+	front.serve(a.consume());
+	ta.write(2000n);
+	hooks.dropTrackGroups(ta.producer, 1500n, 1600n, { error: new StreamError(StreamCode.NotFound) });
+	const ordered = front.consumer
+		.track("seq")
+		.subscribe({ delay: { max: null }, ranges: [{ start: { time: 1500n } }] })
+		.ordered();
+	const read = () => {
+		const out: string[] = [];
+		for (let item = ordered.tryNextItem(); item; item = ordered.tryNextItem()) {
+			if (item.kind === "group") out.push(`group ${item.group.start}`);
+			else out.push(`gap ${item.start}..${item.end}`);
+		}
+		return out;
+	};
+	await settle();
+	expect(read()).toEqual([]);
+	// A parked read wakes once the start is placed.
+	const next = ordered.nextItem();
+	expect(await isPending(next)).toBe(true);
+	hooks.timeStarts(ta.producer, [[1500n, 1000n]], NO_MAX_DELAY);
+	ta.write(1000n);
+	ta.producer.skipGroups(1001n, 1500n);
+	ta.producer.skipGroups(1600n, 2000n);
+	const first = await next;
+	expect(first?.kind === "group" ? first.group.start : first).toBe(1000n);
+	expect(read()).toEqual(["gap 1500..1600", "group 2000"]);
+
+	ordered.close();
+	front.consumer.close();
+	a.close();
+});
+
 test("an ordered reader takes a replaced copy's buffered group before the new copy's later one", async () => {
 	const front = new Front();
 	const a = new BroadcastProducer();
@@ -2537,6 +2577,8 @@ for (const resolution of ["arrival", "drop", "other copy", "budget"] as const) {
 			expect((await ordered.nextGroup())?.start).toBe(4n);
 			ta.write(6n);
 			tb.write(7n);
+			// The session reports where the range the front asked from time 4 started, as with its START.
+			hooks.timeStarts(tb.producer, [[4n, 7n]], NO_MAX_DELAY);
 			hooks.startTrack(tb.producer, { start: 7n, requested: 4n });
 			front.serve(b.consume());
 			await settle();

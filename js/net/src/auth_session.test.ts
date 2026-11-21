@@ -24,7 +24,7 @@ async function reactions(run: () => Promise<void>): Promise<number[]> {
 }
 
 test.each([2, 64])("churn over %i live broadcasts leaves no reaction behind per change", async (live) => {
-	const everything = new Path.Patterns([Path.Pattern.subtree("")]);
+	const everything = new Path.Prefixes([Path.Prefix.parse("")]);
 	const counts = await reactions(async () => {
 		const { promise: closed, resolve: close } = Promise.withResolvers<void>();
 		const quic = { closed, close: () => {} } as unknown as WebTransport;
@@ -47,7 +47,7 @@ test("a session that closes during an authorization wait ends enforcement withou
 	let closes = 0;
 	const quic = { closed, close: () => closes++ } as unknown as WebTransport;
 	// Nothing granted yet, and an authorization that is never answered.
-	const grant = new Signal<Grant | undefined>({ publish: new Path.Patterns(), subscribe: new Path.Patterns() });
+	const grant = new Signal<Grant | undefined>({ publish: new Path.Prefixes(), subscribe: new Path.Prefixes() });
 	const table = new Signal<ReadonlyMap<Path.Valid, unknown> | undefined>(new Map([[Path.from("live"), 0]]));
 	// Counts the change callbacks the enforcer holds on the table, which must go with it.
 	let registered = 0;

@@ -21,7 +21,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
-use moq_auth::{Event, Grant, Pattern, Patterns, Request};
+use moq_auth::{Event, Grant, Prefixes, Request};
 use moq_net::stats;
 use moq_relay::web;
 use moq_relay::{Config, Connection, Relay, auth, cluster};
@@ -168,8 +168,8 @@ impl Script {
 	}
 }
 
-fn all() -> Patterns {
-	[Pattern::all()].into_iter().collect()
+fn all() -> Prefixes {
+	Prefixes::all()
 }
 
 /// How often [`grant`] asks to be re-checked.
@@ -942,7 +942,7 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 
 		// Deafen alice's audio: everything else stays as admitted.
 		let mut narrow = grant(Duration::from_secs(3600));
-		narrow.subscribe.path = ["alice/video/**".parse().unwrap()].into_iter().collect();
+		narrow.subscribe.path = ["alice/video".parse().unwrap()].into_iter().collect();
 		script.on_revalidate(Answer::Grant(narrow));
 		clock.advance(CADENCE);
 
@@ -1376,10 +1376,10 @@ async fn a_certificate_admits_only_what_the_server_grants() {
 	assert_refused(&format!("ws://127.0.0.1:{port}/room").parse().unwrap()).await;
 	relay.abort();
 
-	// A narrow grant: the certificate publishes under `mine/**` and nothing else.
+	// A narrow grant: the certificate publishes under `mine` and nothing else.
 	let narrow = serve(policy(moq_auth::Permissions::new(
-		"mine/**".parse::<moq_auth::Pattern>().unwrap(),
-		Patterns::new(),
+		"mine".parse::<moq_auth::Prefix>().unwrap(),
+		Prefixes::new(),
 	)))
 	.await;
 	let cluster = crate::spawn_cluster(cluster::Options::default());
@@ -1915,7 +1915,7 @@ async fn quic_and_webtransport_report_distinct_auth_transports() {
 #[tokio::test]
 async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 	for scheme in ["tcp", "ws"] {
-		let mut initial = Grant::new(all(), "a/**".parse::<moq_auth::Pattern>().unwrap());
+		let mut initial = Grant::new(all(), "a".parse::<moq_auth::Prefix>().unwrap());
 		initial.expires = Some(kio::clock::wall() + Duration::from_secs(3600));
 		let script = Script::new(initial);
 		let auth = build_auth(script.spawn().await);
@@ -1965,7 +1965,7 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 			.unwrap()
 			.unwrap();
 		let mut a_sub = a_read.track("video").unwrap().subscribe(None).await.unwrap();
-		let mut replacement = Grant::new(all(), "b/**".parse::<moq_auth::Pattern>().unwrap());
+		let mut replacement = Grant::new(all(), "b".parse::<moq_auth::Prefix>().unwrap());
 		replacement.expires = Some(kio::clock::wall() + Duration::from_secs(3600));
 		script.on_connect(Answer::Grant(replacement));
 		let token = subscriber.auth().add("replacement").unwrap();
@@ -2248,7 +2248,7 @@ async fn websocket_refusal_is_in_band() {
 /// The role seen at SETUP reaches the shared admission gate on the WebSocket path.
 #[tokio::test]
 async fn websocket_publisher_role_is_refused_by_a_subscribe_only_grant() {
-	let script = Script::new(Grant::new(Patterns::new(), all()));
+	let script = Script::new(Grant::new(Prefixes::new(), all()));
 	let (port, relay) = spawn_ws_relay(build_auth(script.spawn().await)).await;
 	let url = room_url("ws", port);
 	let origin = moq_tokio::origin::spawn();
