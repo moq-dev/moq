@@ -188,7 +188,7 @@ async fn each_wire_carries_a_time_range() {
 		for (range, mut held) in timed() {
 			// An older wire's publisher starts a time start at the first group at or after it,
 			// not the group containing it.
-			if let (false, Some(start)) = (resolves, range.start) {
+			if let (false, moq_net::track::Start::Time(start)) = (resolves, range.start) {
 				held.retain(|&key| key >= start);
 			}
 			let mut result = read(version, range).await;

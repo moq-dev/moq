@@ -63,7 +63,7 @@ fn sparse(offset: u64) -> Vec<Range> {
 /// Whether `ranges` asks for every group `want` does.
 fn covers(ranges: &[Range], want: &[Range]) -> bool {
 	want.iter().all(|want| {
-		let Some(key) = want.start else { unreachable!() };
+		let moq_net::track::Start::Time(key) = want.start else { unreachable!() };
 		ranges.iter().any(|range| {
 			let start = range.start.is_some_and(|start| start <= key);
 			let end = range.end.is_none_or(|end| key <= end);

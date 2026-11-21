@@ -229,7 +229,7 @@ async fn a_join_ending_before_its_start_ends_empty_through_a_relay() {
 	let chain = Chain::new().await;
 	let bounded = || {
 		joining(Some(Duration::from_secs(1))).with_ranges([track::Range {
-			start: None,
+			start: moq_net::track::Start::Oldest,
 			end: Some(1000),
 		}])
 	};

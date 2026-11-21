@@ -272,6 +272,7 @@ fn collapse(ranges: Vec<Range>) -> Vec<Range> {
 		None => 0,
 		Some(Anchor::Time(_)) => 1,
 		Some(Anchor::Absolute(_)) => 2,
+		Some(Anchor::Live(_)) => 3,
 	};
 	let mut kinds: Vec<Range> = Vec::new();
 	for range in ranges {
@@ -282,6 +283,8 @@ fn collapse(ranges: Vec<Range>) -> Vec<Range> {
 		cover.start = match (cover.start, range.start) {
 			(Some(Anchor::Time(a)), Some(Anchor::Time(b))) => Some(Anchor::Time(a.min(b))),
 			(Some(Anchor::Absolute(a)), Some(Anchor::Absolute(b))) => Some(Anchor::Absolute(a.min(b))),
+			// The join reaching furthest back delivers what each of the others does.
+			(Some(Anchor::Live(a)), Some(Anchor::Live(b))) => Some(Anchor::Live(a.max(b))),
 			(start, _) => start,
 		};
 		cover.end = match (cover.end, range.end) {
@@ -405,7 +408,6 @@ mod tests {
 			wanted_group: Some(u64::MAX - 1),
 			priority: i8::MIN,
 			max_delay: Some(std::time::Duration::from_millis(u64::MAX - 1)),
-			min_delay: Some(std::time::Duration::from_millis(u64::MAX - 1)),
 			ranges,
 			order: crate::track::Order::Descending,
 		};

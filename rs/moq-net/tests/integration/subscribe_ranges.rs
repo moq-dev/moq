@@ -451,7 +451,7 @@ async fn draft22_carries_time_ends_as_group_ids() {
 		assert_eq!(seen, [2, 3, 5]);
 		reader
 			.update(initial.with_ranges([Range {
-				start: Some(0),
+				start: moq_net::track::Start::Time(0),
 				end: Some(2),
 			}]))
 			.unwrap();
@@ -477,7 +477,7 @@ async fn draft22_carries_time_ends_as_group_ids() {
 	let fixture = range_fixture(false).await;
 	let requested = Subscription::default()
 		.with_ranges([Range {
-			start: Some(0),
+			start: moq_net::track::Start::Time(0),
 			end: Some(2),
 		}])
 		.with_delay(Delay::default().with_max(None));
@@ -557,7 +557,7 @@ async fn draft18_updates_narrow_then_widen() {
 		// Group 5 is the newest, so until a later one starts it holds time 6: the narrowed
 		// range still asks from it.
 		let narrowed = Range {
-			start: Some(5),
+			start: moq_net::track::Start::Time(5),
 			end: Some(6),
 		};
 		kio::clock::timeout(
@@ -928,7 +928,7 @@ async fn holes_through_a_relay(version: &str, budget: Option<Duration>) {
 /// The groups keyed in `range`, as a time range: a time end is the last key it holds.
 fn keys(range: std::ops::Range<u64>) -> Range {
 	Range {
-		start: Some(range.start),
+		start: moq_net::track::Start::Time(range.start),
 		end: Some(range.end - 1),
 	}
 }

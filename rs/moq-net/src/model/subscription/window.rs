@@ -10,7 +10,7 @@ use std::{
 	time::Duration,
 };
 
-use super::{Cover, Delay, Range};
+use super::{Cover, Delay, Range, Start};
 
 /// One range resolved to groups: from `start` up to the exclusive `end`, `None` while it
 /// stays open.
@@ -44,8 +44,8 @@ impl<V: Clone + Eq> Accounted for rangemap::RangeMap<u64, V> {
 
 /// The groups a serving hop holds, by start, for resolving range starts.
 pub(in crate::model) trait Holdings {
-	/// Whether this hop resolves ranges against groups of its own, so a Min Age places a range
-	/// with no start here. A hop whose copies resolve them leaves that to them.
+	/// Whether this hop resolves ranges against groups of its own, so a live join is placed
+	/// here. A hop whose copies resolve them leaves that to them.
 	fn resolves(&self) -> bool {
 		true
 	}
@@ -84,11 +84,24 @@ pub(in crate::model) trait Holdings {
 	/// to the oldest group rather than wait.
 	fn complete(&self) -> bool;
 
-	/// Where a live join holding a nonzero `min` behind the live edge starts, for a reader
-	/// within `budget`; see [`Join`].
-	fn join(&self, min: Duration, budget: Duration) -> Join {
-		let _ = (min, budget);
+	/// Where a live join holding a nonzero `min` behind the live edge, ending at `end`, starts
+	/// for a reader within `budget`; see [`Join`]. On a hop that [`Self::answers_joins`], only
+	/// an answer recorded after `since` counts.
+	fn join(&self, min: Duration, end: Option<u64>, budget: Duration, since: u64) -> Join {
+		let _ = (min, end, budget, since);
 		Join::Unknown
+	}
+
+	/// Whether this hop places a live join only where its upstream's answer to that join
+	/// does, never from the groups it holds: a copy holding only part of the track.
+	fn answers_joins(&self) -> bool {
+		false
+	}
+
+	/// The newest answer a live join placed on this hop, which a join beginning to wait now
+	/// takes no earlier answer than: see [`Self::join`].
+	fn join_tick(&self) -> u64 {
+		0
 	}
 
 	/// Whether the producer declared every key in `keys` skipped, so no group starts there
@@ -101,15 +114,13 @@ pub(in crate::model) trait Holdings {
 /// Where a live join starts, as [`Holdings::join`] finds it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::model) enum Join {
-	/// The group containing this time, the live edge less the Min Age, resolved as a range
+	/// The group containing this time, the live edge less the lag, resolved as a range
 	/// starting there is, history lookup included.
 	Time(u64),
-	/// The group starting here, which this hop measured by arrival, or its upstream reported.
+	/// The group starting here, which this hop measured by arrival, or its upstream answered.
 	Group(u64),
-	/// A group starting at or past this key, which an upstream answering a bounded join empty
-	/// proved: a range ending before it holds nothing, and any other waits as for
-	/// [`Self::Unknown`].
-	Past(u64),
+	/// Nothing to deliver, as the upstream answered a bounded join.
+	Empty,
 	/// Nothing measures it yet: a copy waits for its upstream to answer, and any hop for a
 	/// group to measure the live edge by.
 	Unknown,
@@ -186,8 +197,6 @@ impl Holdings for Unheld {
 pub(in crate::model) struct Window {
 	/// What these were resolved from, by key, in the order given.
 	ranges: BTreeMap<u64, Range>,
-	/// The subscriber's Min Age, which reaches a live join back from the live edge.
-	min: Option<Duration>,
 	/// The subscriber's [`Delay::max`](crate::track::Delay::max) as a budget, which a received
 	/// copy places some time starts only within.
 	budget: Duration,
@@ -208,8 +217,8 @@ pub(in crate::model) struct Window {
 	waited: Option<u64>,
 	/// The ranges of a live join whose start waits on the groups held to measure the live
 	/// edge, or on an upstream's answer, which read nothing meanwhile: a group held is no
-	/// reason to start at it.
-	reaching: BTreeSet<u64>,
+	/// reason to start at it. Each with the [`Holdings::join_tick`] it began waiting at.
+	reaching: BTreeMap<u64, u64>,
 	/// The groups the spans cover, shared with what reads them.
 	groups: Cover,
 	/// The part of `groups` a miss may ask for: see [`Self::missable`].
@@ -227,8 +236,8 @@ pub(in crate::model) struct Window {
 /// One non-empty range, resolved.
 #[derive(Clone, Debug)]
 struct Span {
-	/// The time it starts from: its range's start, or where a live join's Min Age reached
-	/// it back to. `None` reaches back to the oldest group.
+	/// The time it starts from: its range's start, or where a live join's lag reached it back
+	/// to. `None` reaches back to the oldest group.
 	anchor: Option<u64>,
 	/// Whether the start is a time the track's history may be asked to place, rather than a
 	/// group this hop already measured.
@@ -260,7 +269,7 @@ struct Looking {
 
 impl Window {
 	/// Resolve `ranges`, keyed by position, for a subscriber with `delay`, `latest` being the
-	/// latest group: a range with no start reaches back by [`Delay::min`] from the live edge.
+	/// latest group: a live join reaches back by its lag from the live edge.
 	pub fn new(ranges: &[Range], delay: Delay, latest: Option<u64>, holdings: &impl Holdings) -> Self {
 		Self::keyed((0..).zip(ranges.iter().copied()), delay, latest, holdings)
 	}
@@ -274,14 +283,13 @@ impl Window {
 	) -> Self {
 		let mut window = Self {
 			ranges: ranges.into_iter().collect(),
-			min: delay.min,
 			budget: delay.budget(),
 			spans: BTreeMap::new(),
 			pending: BTreeSet::new(),
 			looking: BTreeSet::new(),
 			waiting: BTreeSet::new(),
 			waited: None,
-			reaching: BTreeSet::new(),
+			reaching: BTreeMap::new(),
 			groups: Cover::default(),
 			missable: Cover::default(),
 			covered: None,
@@ -309,7 +317,7 @@ impl Window {
 			self.retire(key);
 			self.ranges.insert(key, range);
 			if !range.is_empty() {
-				self.place_range(key, latest, holdings);
+				self.place_range(key, latest, holdings, None);
 			}
 		}
 		self.covered = None;
@@ -340,7 +348,6 @@ impl Window {
 	/// Take the subscriber's current [`Delay`]. Only a range still to place reads it, so one
 	/// already started stays where it started.
 	pub fn set_delay(&mut self, delay: Delay) {
-		self.min = delay.min;
 		let budget = delay.budget();
 		// An answer may place a waiting time start under the new budget with no change to the
 		// groups held, so each is tried again.
@@ -360,7 +367,21 @@ impl Window {
 			.filter_map(move |&(time, _)| (last.replace(time) != Some(time)).then_some(time))
 	}
 
-	/// The budget [`Self::asks`] wait under.
+	/// The live joins still waiting on an answer, with their lag, end, and the
+	/// [`Holdings::join_tick`] each began waiting at: what a received copy asks its upstream to
+	/// place.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub fn joins(&self) -> impl Iterator<Item = (Duration, Option<u64>, u64)> + '_ {
+		self.reaching.iter().filter_map(|(key, &since)| {
+			let range = self.ranges.get(key)?;
+			match range.start {
+				Start::Live(min) => Some((min, range.end, since)),
+				Start::Oldest | Start::Time(_) => None,
+			}
+		})
+	}
+
+	/// The budget [`Self::asks`] and [`Self::joins`] wait under.
 	pub fn budget(&self) -> Duration {
 		self.budget
 	}
@@ -411,8 +432,8 @@ impl Window {
 		let mut moved = false;
 		if !self.reaching.is_empty() {
 			let placed = self.spans.len();
-			for key in std::mem::take(&mut self.reaching) {
-				self.place_range(key, latest, holdings);
+			for (key, since) in std::mem::take(&mut self.reaching) {
+				self.place_range(key, latest, holdings, Some(since));
 			}
 			moved = self.spans.len() > placed;
 		}
@@ -514,7 +535,7 @@ impl Window {
 	/// looking up its start, or that isn't held. One empty as given ends at or below its start.
 	pub fn resolved_key(&self, key: u64) -> Option<Resolved> {
 		let range = self.ranges.get(&key)?;
-		if let (Some(start), Some(_)) = (range.start, range.end)
+		if let (Start::Time(start), Some(_)) = (range.start, range.end)
 			&& range.is_empty()
 		{
 			return Some(Resolved {
@@ -559,7 +580,7 @@ impl Window {
 	/// on a first group, on the groups held to place a start, or on a lookup. Costs those.
 	pub fn unsettled(&self) -> BTreeSet<u64> {
 		let mut keys = self.pending.clone();
-		keys.extend(self.reaching.iter().copied());
+		keys.extend(self.reaching.keys().copied());
 		keys.extend(self.waiting.iter().map(|(_, key)| *key));
 		keys.extend(self.looking.iter().map(|(_, key)| *key));
 		keys
@@ -710,11 +731,12 @@ impl Window {
 
 	/// Resolve every range again from scratch.
 	fn place(&mut self, latest: Option<u64>, holdings: &impl Holdings) {
+		// A live join still waiting keeps the answers it may take.
+		let reaching = std::mem::take(&mut self.reaching);
 		self.spans.clear();
 		self.pending.clear();
 		self.looking.clear();
 		self.waiting.clear();
-		self.reaching.clear();
 		self.groups = Cover::default();
 		self.missable = Cover::default();
 		self.named.clear();
@@ -726,29 +748,44 @@ impl Window {
 			.map(|(key, _)| *key)
 			.collect();
 		for key in keys {
-			self.place_range(key, latest, holdings);
+			self.place_range(key, latest, holdings, reaching.get(&key).copied());
 		}
 		// Each span waiting was just tried against these holdings.
 		self.waited = holdings.unplaced().map(|unplaced| unplaced.mark);
 	}
 
-	/// Resolve the non-empty range keyed `key` into a span, or note what it waits on.
-	fn place_range(&mut self, key: u64, latest: Option<u64>, holdings: &impl Holdings) {
+	/// Resolve the non-empty range keyed `key` into a span, or note what it waits on: a live
+	/// join that waited since [`Holdings::join_tick`] `since` keeps waiting from there.
+	fn place_range(&mut self, key: u64, latest: Option<u64>, holdings: &impl Holdings, since: Option<u64>) {
 		let range = self.ranges[&key];
 		// Every end includes its group.
 		let end = range.end.and_then(|end| end.checked_add(1));
-		let (anchor, asks) = match (range.start, self.min) {
-			(Some(time), _) => (Some(time), true),
-			// Unstated, it reaches back as far as the budget allows.
-			(None, None) => (None, false),
+		let (anchor, asks) = match range.start {
+			Start::Time(time) => (Some(time), true),
+			// It reaches back as far as the budget allows.
+			Start::Oldest => (None, false),
 			// A hop whose copies place the join waits on them, as one with no group yet does.
-			(None, Some(_)) if holdings.defers() => {
+			Start::Live(_) if holdings.defers() => {
 				self.pending.insert(key);
 				return;
 			}
 			// Placed already, where a copy resolved it: one left with no start reached back.
-			(None, Some(_)) if !holdings.resolves() => (None, false),
-			(None, Some(min)) => match latest {
+			Start::Live(_) if !holdings.resolves() => (None, false),
+			// Only its upstream's answer places it, whatever this hop holds: read none of the
+			// groups held until it does.
+			Start::Live(min) if holdings.answers_joins() => {
+				let since = since.unwrap_or_else(|| holdings.join_tick());
+				// Nothing to deliver: a start past its end holds nothing.
+				let past = range.end.and_then(|last| last.checked_add(1));
+				match (holdings.join(min, range.end, self.budget, since), past) {
+					(Join::Group(group) | Join::Time(group), _) | (Join::Empty, Some(group)) => (Some(group), false),
+					(Join::Empty | Join::Unknown, _) => {
+						self.reaching.insert(key, since);
+						return;
+					}
+				}
+			}
+			Start::Live(min) => match latest {
 				// Nothing to measure the live edge by yet: wait for the first group, reading
 				// everything meanwhile.
 				None => {
@@ -758,15 +795,13 @@ impl Window {
 				// The latest group holds the live edge. One made before any group then starts at
 				// the first, which was the latest when it was placed.
 				Some(latest) if min.is_zero() => (Some(latest), false),
-				Some(_) => match holdings.join(min, self.budget) {
+				Some(_) => match holdings.join(min, range.end, self.budget, 0) {
 					Join::Time(time) => (Some(time), true),
 					Join::Group(group) => (Some(group), false),
-					// Starting past its end, the range holds nothing.
-					Join::Past(past) if range.end.is_some_and(|last| last < past) => (Some(past), false),
-					// Nothing to measure the live edge by yet, or a copy's upstream still to answer:
-					// read none of the groups held until it resolves.
-					Join::Past(_) | Join::Unknown => {
-						self.reaching.insert(key);
+					// Nothing to measure the live edge by yet: read none of the groups held until it
+					// resolves.
+					Join::Empty | Join::Unknown => {
+						self.reaching.insert(key, 0);
 						return;
 					}
 				},
@@ -774,18 +809,18 @@ impl Window {
 		};
 		// A group a join measured starts there; a time is placed among the groups held.
 		let placed = match (anchor, asks) {
-			(Some(group), false) => Start::At(group, true),
+			(Some(group), false) => Placed::At(group, true),
 			_ => start(anchor, latest, self.budget, holdings),
 		};
 		let (start, floored) = match placed {
-			Start::At(start, floored) => (start, floored),
-			Start::Pending => {
+			Placed::At(start, floored) => (start, floored),
+			Placed::Pending => {
 				self.pending.insert(key);
 				return;
 			}
 			// Reads only the groups from its time until the groups held place it; see
 			// [`Self::start_waiting`].
-			Start::Waiting => {
+			Placed::Waiting => {
 				let span = Span::new(anchor, asks, 0, end, false, None);
 				self.count(key, Span { waiting: true, ..span });
 				return;
@@ -935,7 +970,7 @@ fn outside(runs: &[ops::RangeInclusive<u64>]) -> impl Iterator<Item = ops::Range
 }
 
 /// Where a range starts.
-enum Start {
+enum Placed {
 	/// At this group, and whether it names that group rather than reaching back to the
 	/// oldest one.
 	At(u64, bool),
@@ -946,25 +981,25 @@ enum Start {
 	Pending,
 }
 
-fn start(anchor: Option<u64>, latest: Option<u64>, budget: Duration, holdings: &impl Holdings) -> Start {
+fn start(anchor: Option<u64>, latest: Option<u64>, budget: Duration, holdings: &impl Holdings) -> Placed {
 	match anchor {
 		// Nothing sits below group 0, so the oldest start needs no latest group.
-		None => Start::At(0, false),
+		None => Placed::At(0, false),
 		// No group starts before 0, so time 0 names group 0 whatever is held.
-		Some(0) => Start::At(0, true),
+		Some(0) => Placed::At(0, true),
 		Some(time) => match holdings.containing(time, budget) {
-			Containing::Group(group) => Start::At(group, true),
+			Containing::Group(group) => Placed::At(group, true),
 			// The group holding it is older than any held, so reach back to the oldest.
-			Containing::Before => Start::At(0, false),
+			Containing::Before => Placed::At(0, false),
 			// Before any group, which a hop that holds none (such as a reader following route
 			// copies) leaves to the copies to resolve.
-			Containing::Unknown if latest.is_none() && !holdings.resolves() => Start::Pending,
+			Containing::Unknown if latest.is_none() && !holdings.resolves() => Placed::Pending,
 			// Nothing can arrive any more, so nothing held reaches past it.
-			Containing::Unknown if holdings.complete() => Start::At(0, false),
+			Containing::Unknown if holdings.complete() => Placed::At(0, false),
 			// The groups held can't place it, so wait for one that can rather than guess from the
 			// latest: a copy can see the live edge before the groups its publisher resolved the
 			// time to.
-			Containing::Unknown => Start::Waiting,
+			Containing::Unknown => Placed::Waiting,
 		},
 	}
 }
