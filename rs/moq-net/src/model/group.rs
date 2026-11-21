@@ -680,6 +680,10 @@ impl Plain {
 		{
 			freed += self.pop(&mut state);
 		}
+		// Each frame billed its slot, not the deque's spare room: free that too once empty.
+		if state.frames.is_empty() {
+			state.frames = VecDeque::new();
+		}
 		freed
 	}
 
@@ -988,6 +992,11 @@ impl GroupState {
 			&& let Some(entry) = self.front.pop_front()
 		{
 			freed += self.unhold(&entry);
+		}
+		// An adopted head's slots were billed by capacity, so the emptied deque frees them.
+		if self.front.is_empty() && self.front.capacity() > 0 {
+			freed += (self.front.capacity() * size_of::<Entry>()) as u64;
+			self.front = VecDeque::new();
 		}
 		let base = self.log.base() as usize;
 		if base < end {
@@ -7671,6 +7680,55 @@ mod test {
 		let plain: u64 = (0..4).map(|index| verbose(index).len() as u64).sum();
 		assert!(stored < plain, "the frames compressed");
 		assert_eq!(metered(), stored);
+	}
+
+	/// Shedding every inflated frame frees the deque that held them, keeping the decoder
+	/// for the frames still to come.
+	#[test]
+	#[cfg(feature = "async")]
+	fn shedding_every_inflated_frame_frees_its_slots() {
+		let pool = cache::Pool::unbounded();
+		let mut group = compressed_group(&pool);
+		for index in 0..2 {
+			group
+				.write_frame(crate::Timestamp::unscaled(group.start), verbose(index))
+				.unwrap();
+		}
+		let mut reader = group.consume();
+		assert_eq!(read_plain(&mut reader).unwrap().unwrap(), verbose(0));
+		let plain = group.handle.state.read().flate.as_ref().unwrap().plain.clone();
+		assert!(plain.lock().frames.capacity() > 0);
+
+		group.handle.shed_all();
+		assert_eq!(plain.lock().frames.capacity(), 0);
+		assert!(plain.lock().decoder.is_some(), "the open group still decodes");
+	}
+
+	/// Shedding an adopted head frees the slots it was billed by capacity, empty frames too.
+	#[test]
+	fn shedding_an_adopted_head_frees_its_slots() {
+		let pool = cache::Pool::unbounded();
+		let cache = cache::Track::new(pool, Default::default(), Default::default(), kio::Weak::new());
+		let mut tail = Producer::new(Info::from(0u64), track::Info::default(), cache);
+		tail.start_at(64).unwrap();
+		let adopter = tail.handle();
+		let entry = Entry::plain(Frame::new(Timestamp::unscaled(0), Bytes::new()).into(), 0);
+		let head = Head {
+			content: None,
+			start: 0,
+			first_object: true,
+			entries: vec![entry; 64],
+			compressed: false,
+		};
+		let before = adopter.state.read().charge.size();
+		adopter.adopt_head(&head);
+		assert_eq!(adopter.state.read().offset, 0, "the head was adopted");
+		assert!(adopter.state.read().charge.size() > before);
+
+		adopter.shed_all();
+		assert_eq!(adopter.state.read().front.capacity(), 0);
+		assert_eq!(adopter.state.read().charge.size(), before);
+		drop(tail);
 	}
 
 	/// The codec state counts toward the pool while it lives: the encoder moves to its
