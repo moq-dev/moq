@@ -81,6 +81,18 @@ export const MissedTickBehavior: {
 
 export type MissedTickBehavior = typeof MissedTickBehavior[keyof typeof MissedTickBehavior];
 
+export class Unsettled<T> extends Error {
+	constructor(watchdog: Duration, last: T | undefined);
+	readonly last: T | undefined;
+}
+
+export interface Wait<T> {
+	every?: Duration;
+	read: (left: Duration) => Promise<T>;
+	ready: (state: T) => boolean;
+	watchdog: Duration;
+}
+
 export class Wall {
 	static readonly UNIX_EPOCH: Wall;
 	[Symbol.toPrimitive](hint: string): string;
@@ -122,6 +134,8 @@ export function timeoutSignal(duration: Duration, options?: {
 	ref?: boolean;
 	signal?: AbortSignal;
 }): AbortSignal;
+
+export function until<T>(wait: Wait<T>): Promise<T | Unsettled<T>>;
 
 export function wall(): Wall;
 

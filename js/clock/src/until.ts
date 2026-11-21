@@ -1,5 +1,5 @@
-import { Duration } from "./types.ts";
 import { now, sleepUntil, timeout } from "./timer.ts";
+import { Duration } from "./types.ts";
 
 /** What `until` reads, when it stops, and how long it may take. */
 export interface Wait<T> {
