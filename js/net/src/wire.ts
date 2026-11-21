@@ -116,8 +116,6 @@ export interface OriginConsumer {
 export interface Advertised {
 	readonly identity: object;
 	readonly route: WireRoute;
-	/** The prefixes beneath its own a scoped route may serve, relative like its key; unset for the whole subtree. */
-	readonly claim?: Path.Prefixes;
 	/**
 	 * The prefix the route was advertised at, when a scope's projection merged several covering
 	 * prefixes under one key; unset when the key is its prefix. Supersession compares only routes

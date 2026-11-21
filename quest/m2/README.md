@@ -82,7 +82,8 @@ replaces lite-07's route layer before it freezes (rejected: lite-08). The
 routes chain stays the critical path, now through that epic.
 That epic finished 2026-11-20
 ([moq-dev/moq#9231](https://github.com/moq-dev/moq/pull/9231)), and the cut's
-routing wait moved to [claim reach](/quest/m2/lite07-claim-reach-routes.md).
+routing wait moved to claim reach, which
+[moq-dev/moq#9290](https://github.com/moq-dev/moq/pull/9290) finished.
 
 Decided 2026-11-05 (maintainer, milestone re-cut): m2 holds the breaking half
 of what was "everything before the cut" (2026-10-20). Breaking covers every
