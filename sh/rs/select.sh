@@ -135,6 +135,23 @@ wants() {
     [[ "$packages" == ALL ]] || grep -qwE "$1" <<<"$names"
 }
 
+# The `package/feature` pairs named by `required-features` on the targets of
+# the crates in $1 (every non-fuzz crate under ALL). Cargo skips a target whose
+# required features are off without a word. $2 is `tested` for the targets the
+# test build holds (benches, examples, and every target with tests), or `all`
+# for `--all-targets`.
+required_features() {
+    cargo metadata --locked --format-version 1 --no-deps | jq -r --arg names "$1" --arg all "$packages" --arg which "$2" '
+        ($names | split(" ") | map(select(. != ""))) as $want
+        | .packages[]
+        | select(if $all == "ALL" then (.name | endswith("-fuzz") | not) else (.name as $n | $want | index($n) != null) end)
+        | .name as $name
+        | .targets[]
+        | select($which == "all" or (.kind // [] | any(. == "bench" or . == "example")) or .test)
+        | (.["required-features"] // [])[]
+        | "\($name)/\(.)"' | LC_ALL=C sort -u | tr '\n' ' '
+}
+
 case "$packages" in
     "")
         echo "rs: no crates affected; skipping."
@@ -222,15 +239,7 @@ case "$action" in
         # gate runs; moq-uring's targets compile to nothing off Linux.
         required=$(
             set -e
-            cargo metadata --locked --format-version 1 --no-deps | jq -r --arg names "$building" --arg all "$packages" '
-                ($names | split(" ") | map(select(. != ""))) as $want
-                | .packages[]
-                | select(if $all == "ALL" then (.name | endswith("-fuzz") | not) else (.name as $n | $want | index($n) != null) end)
-                | .name as $name
-                | .targets[]
-                | select((.kind // [] | any(. == "bench" or . == "example")) or .test)
-                | (.["required-features"] // [])[]
-                | "\($name)/\(.)"' | LC_ALL=C sort -u | tr '\n' ' '
+            required_features "$building" tested
         )
         for feature in $required; do
             [[ " ${features[*]-} " == *" $feature "* ]] || features+=("$feature")
@@ -263,7 +272,20 @@ case "$action" in
         # when moq-cli is selected, since cargo rejects a feature of a package
         # outside the selection; a change to anything they reach selects
         # moq-cli anyway.
-        if wants moq-cli; then flags+=(--features "moq-cli/play moq-cli/capture moq-cli/pipewire moq-cli/pulseaudio"); fi
+        features=()
+        if wants moq-cli; then features+=(moq-cli/play moq-cli/capture moq-cli/pipewire moq-cli/pulseaudio); fi
+        # `--all-targets` skips a target whose required features are off, such
+        # as moq-boy's binary without `openh264`, so turn those on for the
+        # selected crates, as the test build does. moq-gst is never built here.
+        building=$(tr ' ' '\n' <<<"$names" | grep -vx moq-gst | tr '\n' ' ' || true)
+        required=$(
+            set -e
+            required_features "$building" all
+        )
+        for feature in $required; do
+            [[ "$feature" == moq-gst/* || " ${features[*]-} " == *" $feature "* ]] || features+=("$feature")
+        done
+        if ((${#features[@]})); then flags+=(--features "${features[*]}"); fi
         if [[ "$action" == cross ]]; then
             sh/rs/cross-lint.sh "${flags[@]}"
         else
