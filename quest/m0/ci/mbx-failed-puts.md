@@ -62,6 +62,44 @@ night runs under it; note that beside the comparison:
   budget exceeded" or "cached action is missing blob" warnings, from its log.
 - Disk: no hosted job fails for space with the larger store.
 
+Measured 2026-11-14 for scheduled Nightly
+[43601796176](https://github.com/moq-dev/moq/actions/runs/43601796176), the
+first night after #8631 and the first under the 7-day expiry, over the same
+12-hour window as the baseline (all four writer workflows):
+
+| Night      | PutObject 412 | PutObject 200 | GetObject 200 | GetObject 404 |
+| ---------- | ------------- | ------------- | ------------- | ------------- |
+| 2026-11-12 | 151,043       | 12,259        | 317,569       | 6,534         |
+| 2026-11-14 | 86,387        | 44,906        | 429,428       | 17,783        |
+
+- Puts fell 20% (163,302 to 131,293) and 412s 43%. The new 200s and 404s
+  are most likely the 7-day expiry deleting what the night then re-stored.
+- Hits rose in 24 of the 38 Rust-cache jobs, often doubling (doctest 165
+  to 421, Rust benchmark tests 156 to 638), and misses fell in 29. Hits fell
+  in 12, mostly where hundreds of units were "not looked up" (features 590,
+  x11 648, moxygen 342, Rust bench targets 321): mbx found no prediction or
+  prior inputs for them, which the budget does not explain. Find why before
+  judging hit rates on the second night. The Windows `cargo check` job went
+  from 92 to 621 hits, as posted on
+  [jdx/mr-boxington#950](https://github.com/jdx/mr-boxington/discussions/950).
+- 20 Linux jobs still downloaded the full 20 GiB, nearly all of it prefetch
+  (about 600 objects), and 25 still logged "cached action is missing blob"
+  (mbx stops at 128 per job). The budget still binds on Linux, so these jobs
+  keep re-uploading recompiled units.
+- No hosted job failed for disk space with stores up to 21.7 GiB.
+- Upstream merged
+  [jdx/mr-boxington#951](https://github.com/jdx/mr-boxington/pull/951) on
+  2026-11-13, unreleased as of 2026-11-14: prefetch stops at half the budget
+  and a refused restore names the budget. It skips the HEAD-before-PUT check
+  until the 412 counts after it are posted. Its adoption is
+  [its own quest](/quest/m0/ci/mbx-prefetch-cap.md); raising the budget past
+  20 GiB first was not tried, since no job records its free disk.
+
+Decided 2026-11-14 (maintainer, on #8763): ✅ keep the hosted budget at
+20 GiB until #951 ships (rejected: raise it now). ✅ Keep
+[mbx-prefetch-cap](/quest/m0/ci/mbx-prefetch-cap.md) in m0 (rejected: move it
+to m4, drop it).
+
 If 412s stay high once restores succeed, size the remaining sources (repeat
 stores of units mbx did not look up, and blobs every job's session sends once)
 and judge again whether cutting writers is worth the hits it would cost. Plan
@@ -71,9 +109,13 @@ Public API: none. Wire: none.
 
 ## Waiting
 
-- GitHub Actions: the first two scheduled Nightly runs after #8631 merges
-  supply the after numbers above.
+- GitHub Actions: the 2026-11-15 scheduled Nightly, the second after #8631,
+  confirms the 2026-11-14 numbers above.
+- jdx/mr-boxington: a release containing #951, which
+  [mbx-prefetch-cap](/quest/m0/ci/mbx-prefetch-cap.md) adopts before the
+  remaining 412s are judged.
 
 ## Related
 
 - [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) - its Windows misses may share this cause, since Windows also reached its 10 GiB budget
+- [Adopt mbx's prefetch cap](/quest/m0/ci/mbx-prefetch-cap.md) - the upstream fix for the budget that still binds on Linux
