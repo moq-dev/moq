@@ -1443,6 +1443,9 @@ struct RouteEntry {
 	/// How many segments [`Self::prefix`] lies beneath the prefix it was announced at,
 	/// which [`Lane::above`] already counts: what an update adds to the route it is given.
 	below: u8,
+	/// Every prefix the announcement is filed at, this one included: one claim, whose
+	/// instance moves to a fresh one at each together (see [`OriginState::advance`]).
+	filed: Arc<[Path]>,
 	/// The absolute subtrees the announcing producer may not serve, even beneath
 	/// a covering prefix.
 	excluded: Arc<[Path]>,
@@ -3094,6 +3097,7 @@ impl Announcing {
 
 		// A handle that names no instance serves one of its own.
 		let minted = route.instance.clone().unwrap_or_else(Instance::random);
+		let filed: Arc<[Path]> = self.prefixes.iter().map(|(prefix, ..)| prefix.clone()).collect();
 		let mut entries = Vec::with_capacity(self.prefixes.len());
 		for (prefix, claim, below) in &self.prefixes {
 			shared.reannounced(prefix, &route.hops);
@@ -3110,6 +3114,7 @@ impl Announcing {
 				epoch,
 				prefix: prefix.clone(),
 				below: *below,
+				filed: filed.clone(),
 				excluded: self.excluded.clone(),
 				hops: route.hops.clone(),
 				cost: route.cost,
@@ -6982,17 +6987,34 @@ impl OriginState {
 	/// short of remembering every path it ever answered could tell. Under the table's lock,
 	/// with the job's retraction, so no request resolves the path through the old instance
 	/// in between. A prefix route already past `spent` has nothing to do.
+	///
+	/// A claim filed at several prefixes is one claim, so its route at each moves to the
+	/// same fresh instance.
 	fn advance(&mut self, prefix: &Path, id: u64, spent: &Instance) {
-		let Some(entry) = self.routes.entry_mut(prefix, id) else {
+		let Some(entry) = self.routes.entry(prefix, id) else {
 			return;
 		};
-		if entry.instance != *spent {
+		let Some(server) = entry.server.clone().filter(|_| entry.instance == *spent) else {
 			return;
+		};
+		let filed = entry.filed.clone();
+		let instance = Instance::random();
+		for at in filed.iter() {
+			let mut moved = Vec::new();
+			for entry in self.routes.at_mut(at) {
+				let same = entry.lends
+					&& entry.instance == *spent
+					&& (entry.server.as_ref()).is_some_and(|other| other.same_channel(&server));
+				if same {
+					entry.instance = instance.clone();
+					entry.epoch = 0;
+					moved.push(entry.claim.clone());
+				}
+			}
+			for claim in moved {
+				self.sync_route(at, &claim, Gone::End);
+			}
 		}
-		entry.instance = Instance::random();
-		entry.epoch = 0;
-		let claim = entry.claim.clone();
-		self.sync_route(prefix, &claim, Gone::End);
 	}
 
 	/// Whether `instance` still serves `path` as a request would resolve it now: the winning
@@ -14067,6 +14089,45 @@ mod tests {
 		assert_eq!(claim.instance(), second);
 		drop(carol);
 		assert_ne!(claim.instance(), second);
+	}
+
+	/// A claim filed at several grant prefixes is one claim: a job withdrawn under any of them
+	/// moves every filing to the same fresh instance, which the claim reports and each later
+	/// job takes.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_withdrawn_job_moves_every_filing_of_the_claim() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let scoped = producer.scope("", &scopes(&["room/a", "room/b"])).unwrap();
+		let claim = scoped.claim("room", RouteOptions::default()).unwrap();
+		let first = claim.instance();
+
+		let answer = async |path: &str| {
+			let pending = consumer.request(path, None);
+			let published = queued(&claim).await.route(RouteOptions::default()).unwrap();
+			pending.await.unwrap();
+			published
+		};
+
+		let a = answer("room/a/x").await;
+		let b = answer("room/b/x").await;
+		assert_eq!(a.instance(), first, "each filing lends the claim's instance");
+		assert_eq!(b.instance(), first, "each filing lends the claim's instance");
+		b.withdraw();
+		let second = claim.instance();
+		assert_ne!(second, first, "the claim moved on");
+		// Held, since a job that ends moves the claim on again.
+		let mut held = vec![a];
+		for path in ["room/a/y", "room/b/y"] {
+			let job = answer(path).await;
+			assert_eq!(
+				job.instance(),
+				second,
+				"{path}: every filing moved to the claim's new instance"
+			);
+			held.push(job);
+		}
 	}
 
 	/// A job's route takes the instance its claim lends when it announces, not when it was

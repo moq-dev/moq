@@ -2648,6 +2648,23 @@ test("a rooted reader presents the most specific covering route", async () => {
 	origin.close();
 });
 
+// Filed deeper, a broader claim still gives way to a more specific one above the root.
+test("a rooted reader presents the most specific claim, however deep each is filed", async () => {
+	const origin = new Producer();
+	const scoped = (prefix: string) => origin.scope(Path.empty(), Path.Prefixes.parse([prefix]));
+	const narrow = scoped("room/alice").claim(Path.from("room"), { cost: 9n });
+	const broad = scoped("room/alice/x").claim(Path.empty(), { cost: 1n });
+	const rooted = origin.scope(Path.from("room/alice/x"), Path.Prefixes.all());
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	const view = await announcedView(rooted, undefined, { covering: true });
+	expect(view.peek().get(Path.empty())?.cost).toBe(9n);
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	expect(wireOf(rooted.consume()).advertised.peek()?.get(Path.empty())?.[0]?.route.cost).toBe(9n);
+	broad.close();
+	narrow.close();
+	origin.close();
+});
+
 test("a scoped reader picks the best route its scope can see at a prefix", async () => {
 	const origin = new Producer();
 	const scoped = (prefix: string) => origin.scope(Path.empty(), Path.Prefixes.parse([prefix]));

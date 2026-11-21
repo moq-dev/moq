@@ -188,7 +188,9 @@ class Scope {
 			covering.push([path, visible.map((value) => ({ ...value, prefix: path }))]);
 		}
 		if (covering.length > 0) {
-			covering.sort(([a], [b]) => b.length - a.length);
+			// The most specific claim first, as a request beneath the root resolves, then the deeper filing.
+			const rank = ([path, visible]: [Path.Valid, Advertised[]]) => claimDepth(path, visible[0].route);
+			covering.sort((a, b) => rank(b) - rank(a) || b[0].length - a[0].length);
 			out.set(
 				Path.empty(),
 				covering.flatMap(([, visible]) => visible),
@@ -224,24 +226,29 @@ function frontier(node: WatchNode, out: Path.Valid[] = []): Path.Valid[] {
 
 /**
  * Presents advertised prefixes relative to a root. Every prefix at or above the root
- * collapses to the empty path, where the most specific one wins, since that is the route
- * a request beneath the root resolves through.
+ * collapses to the empty path, where the most specific claim wins, then the deeper filing,
+ * since that is the route a request beneath the root resolves through.
  */
 class CoveringRoot {
 	readonly #root: Path.Valid;
-	#covering?: Path.Valid;
+	#covering?: [number, number];
 
 	constructor(root: Path.Valid) {
 		this.#root = root;
 	}
 
-	/** The presented path for `path`, or undefined when it is outside the root or a broader cover. */
-	relative(path: Path.Valid): Path.Valid | undefined {
+	/**
+	 * The presented path for `route` at `path`, or undefined when it is outside the root or a
+	 * more specific cover.
+	 */
+	relative(path: Path.Valid, route: WireRoute): Path.Valid | undefined {
 		const relative = Path.stripPrefix(this.#root, path);
 		if (relative !== null && relative !== Path.empty()) return relative;
 		if (relative === null && !Path.hasPrefix(path, this.#root)) return undefined;
-		if (this.#covering !== undefined && !Path.hasPrefix(this.#covering, path)) return undefined;
-		this.#covering = path;
+		const rank: [number, number] = [claimDepth(path, route), Path.parts(path).length];
+		const covering = this.#covering;
+		if (covering && (rank[0] < covering[0] || (rank[0] === covering[0] && rank[1] < covering[1]))) return undefined;
+		this.#covering = rank;
 		return Path.empty();
 	}
 }
@@ -336,14 +343,26 @@ interface Candidate extends Advertised {
 }
 
 /**
- * Orders advertisements at a prefix: the better route, then a local broadcast on a tie, then
- * fewer hops. A remaining tie is left to the table's newest-first order; see
- * {@link compareRouteCandidates}.
+ * Orders advertisements at a prefix: the most specific claim, then the better route, then a
+ * local broadcast on a tie, then fewer hops. A remaining tie is left to the table's newest-first
+ * order; see {@link compareRouteCandidates}.
  */
 function compareCandidates(a: Candidate, b: Candidate): number {
+	const above = (a.route.above ?? 0n) - (b.route.above ?? 0n);
 	return (
-		compareRoutes(a.route, b.route) || Number(b.exact) - Number(a.exact) || routeHops(a.route) - routeHops(b.route)
+		(above < 0n ? -1 : above > 0n ? 1 : 0) ||
+		compareRoutes(a.route, b.route) ||
+		Number(b.exact) - Number(a.exact) ||
+		routeHops(a.route) - routeHops(b.route)
 	);
+}
+
+/**
+ * How many segments the claim a route at `path` shows has: the path's, less how far above it
+ * the claim is. The most specific claim covering a path wins, however deep it is filed.
+ */
+function claimDepth(path: Path.Valid, route: WireRoute): number {
+	return Path.parts(path).length - Number(route.above ?? 0n);
 }
 
 /**
@@ -2653,7 +2672,7 @@ export class Consumer implements Reader {
 			const entry = firstEligible(candidates, (candidate) => scopeOf(candidate) !== undefined);
 			const scope = entry && scopeOf(entry);
 			if (!entry || !scope) continue;
-			const relative = rooted.relative(path);
+			const relative = rooted.relative(path, entry.route);
 			if (relative === undefined) continue;
 			next.set(relative, {
 				identity: entry.identity,

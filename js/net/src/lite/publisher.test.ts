@@ -4317,6 +4317,79 @@ test("a lite-07 scoped claim sharing no path with the grant is hidden", async ()
 	}
 });
 
+// A claim filed at a handle's root, above it, covers all of what the handle shows: through an
+// origin rooted there it is no more above the path than the path is deep.
+test("a lite-07 claim filed above the handle's root is no more above than the path", async () => {
+	const origin = new OriginProducer();
+	const claim = origin.scope(Path.empty(), Path.Prefixes.parse(["room"])).claim(Path.empty());
+	const { next, ok, close } = routedAnswer(origin.scope(Path.from("room"), Path.Prefixes.parse([""])));
+	try {
+		await ok();
+		const msgs: AnnounceBroadcast[] = [];
+		for (;;) {
+			const msg = await next();
+			msgs.push(msg);
+			if (msg.status === "synced") break;
+		}
+		const told = msgs.flatMap((msg) => (msg.status === "start" ? [`${msg.suffix} above ${msg.claim.above}`] : []));
+		expect(told).toEqual([" above 0"]);
+	} finally {
+		claim.close();
+		close();
+		origin.close();
+	}
+});
+
+// Of claims filed at one grant, the most specific one is shown wherever they meet, however cheap
+// or deep the broader one is filed, as a request there resolves.
+test("a lite-07 answer shows the most specific of the claims filed at a grant", async () => {
+	// The narrow claim at `a` is granted `a/b`; the cheaper root claim is filed at `broadGrant`.
+	const cases: [string, string][] = [
+		["a/b", "a/b above 1"],
+		["a/b/c", "a/b/c above 2"],
+	];
+	for (const [broadGrant, told] of cases) {
+		const origin = new OriginProducer();
+		const scoped = (prefix: string) => origin.scope(Path.empty(), Path.Prefixes.parse([prefix]));
+		const narrow = scoped("a/b").claim(Path.from("a"), { cost: 1n });
+		const broad = scoped(broadGrant).claim(Path.empty(), { cost: 0n });
+		const asked = Path.from(broadGrant);
+		const { next, ok, close } = routedAnswer(origin, undefined, asked);
+		try {
+			await ok();
+			const msgs: AnnounceBroadcast[] = [];
+			for (;;) {
+				const msg = await next();
+				msgs.push(msg);
+				if (msg.status === "synced") break;
+			}
+			const starts = msgs.flatMap((msg) => (msg.status === "start" ? [msg] : []));
+			expect(starts.map((msg) => `${msg.suffix} above ${msg.claim.above}`)).toEqual([told]);
+			expect(starts.map((msg) => msg.instance)).toEqual([narrow.instance]);
+
+			// A request there resolves through the same claim.
+			const request = origin.consume().request(Path.join(asked, Path.from("x")));
+			const which = await Promise.race([
+				narrow
+					.requested()
+					.next()
+					.then(() => "narrow"),
+				broad
+					.requested()
+					.next()
+					.then(() => "broad"),
+			]);
+			expect(which).toBe("narrow");
+			request.close();
+		} finally {
+			narrow.close();
+			broad.close();
+			close();
+			origin.close();
+		}
+	}
+});
+
 // A claim is shown only where the grant, the claim's scope, and the answering handle's scope share
 // a path. Beneath a handle scoped to `a/q/x`, an unscoped claim at `a` serves nothing `a/q/y`
 // grants; and of two claims at `a`, the cheaper scoped to `a/q/x` gives way to the one scoped to

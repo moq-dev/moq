@@ -280,7 +280,12 @@ export class Answer {
 		for (const [path, snap] of latest) {
 			const { instance, epoch, cost } = snap.route;
 			if (instance === undefined) continue;
-			const claim = { ...ownClaim(epoch ?? 0n, snap.route.above ?? 0n), cost };
+			// A claim above the session's root covers all of what the peer sees, so it is no more
+			// above the path than the path is deep.
+			const depth = BigInt(Path.parts(path).length);
+			const above = snap.route.above ?? 0n;
+			// biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min throws on bigint.
+			const claim = { ...ownClaim(epoch ?? 0n, above < depth ? above : depth), cost };
 			const sent = this.#live.get(path);
 			if (!sent || !sameInstance(sent.snap, snap)) {
 				this.#live.set(path, { id: this.#nextAnnounce++, snap, claim });
