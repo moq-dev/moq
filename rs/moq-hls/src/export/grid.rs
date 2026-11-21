@@ -12,12 +12,8 @@
 //! contains, so segment N starts at the group containing pts N × length; or, if it contains none,
 //! the line it starts after, `floor(start / length)`. A group off the grid is placed
 //! once its successor starts, or sooner once one of its own frames passes the next line, since it
-//! then contains that line unless its successor overlaps it; the segment before it completes then,
-//! not a group later. A keyframe may overlap the previous group's last frames (a TS content join
-//! does), so when that overlap straddles a line, an edge that saw the earlier group lists it in the
-//! line's segment while one that joined at the overlapping group lists that segment without it.
-//! That one segment differs across edges, for that broadcast alone (accepted by the maintainer,
-//! 2026-11-15, for listing every off-grid segment up to a group sooner). Groups are never split,
+//! then contains that line: every frame of its successor presents after all of its own. The
+//! segment before it completes then, not a group later. Groups are never split,
 //! since a segment starting mid-GOP is not independent. A grid slot no group starts a
 //! segment in, because an overrun or a pause skipped it, is listed as a gap, so the numbering never
 //! skips: on a 2s grid, a group A = [0s, 7s) is segment 0, slots 1 and 2 are gaps, and a contiguous
