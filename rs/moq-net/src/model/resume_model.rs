@@ -1776,6 +1776,40 @@ fn regressions() {
 			],
 			finish: false,
 		},
+		// A route given up on under an ordered reader's range, its range then dropped, never
+		// panics its drop cursor.
+		Case {
+			ops: vec![
+				Op::Join {
+					reader: 0,
+					spec: spec(false, Budget::Hour, None, false),
+				},
+				Op::Write {
+					instance: 0,
+					slot: 0,
+					group: Some(9),
+					frames: 1,
+				},
+				Op::Up { instance: 0, slot: 2 },
+				Op::Join {
+					reader: 1,
+					spec: spec(true, Budget::Hour, Some((7, 12)), false),
+				},
+				Op::Write {
+					instance: 0,
+					slot: 2,
+					group: None,
+					frames: 1,
+				},
+				Op::GiveUp {
+					instance: 0,
+					slot: 2,
+					group: 1,
+				},
+				Op::Ranges { reader: 1, range: None },
+			],
+			finish: false,
+		},
 	];
 	for case in cases {
 		if let Err(err) = run(&case) {
