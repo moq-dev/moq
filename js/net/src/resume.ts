@@ -130,6 +130,7 @@ const INFO_FIELDS = Object.keys({
 	maxAge: true,
 	priority: true,
 	refresh: true,
+	tail: true,
 	ietf: true,
 } satisfies Record<Exclude<keyof track.Info, "unchecked">, true>) as (keyof track.Info)[];
 

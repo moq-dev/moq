@@ -1831,6 +1831,7 @@ export class Subscriber {
 			// matches what the upstream advertises (relays re-serve with the same bound).
 			maxAge: info.maxAge === undefined ? null : Duration.millis(info.maxAge),
 			priority: info.priority,
+			tail: info.tail,
 			refresh: {
 				ratio: info.refresh ?? null,
 				interval: info.refreshInterval === undefined ? null : Duration.millis(info.refreshInterval),

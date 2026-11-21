@@ -430,6 +430,13 @@ asks to. A stopped stream keeps its receive credit, so a hop stops at most as
 many streams per connection as fit in half its connection window, and the rest
 keep receiving and shedding.
 
+A track may declare a smaller tail than 32 MB, which lite-07 carries to every
+hop: each copy of its groups then keeps that much, and runs at most half of it
+ahead of the fastest reader. Media keeps the default, so a joiner finds a whole
+group of pictures; a long-lived group with one reader, such as a byte stream,
+needs only about what its hops' flow control has in flight. A hop reached over
+an earlier version or moq-transport keeps the default.
+
 ### Refresh
 
 A publisher can opt a track into refresh, so a reader can ask it for a fresh

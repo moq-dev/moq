@@ -1654,6 +1654,7 @@ TRACK_INFO Message {
   Refresh (i)
   Refresh Interval (i)
   Compression (i)
+  Tail (i)
 }
 ~~~
 
@@ -1697,6 +1698,13 @@ Every hop judges a request against its own cache, and a relay forwards the reque
 How each Group of this Track is compressed: none (0x0), or DEFLATE (0x1), each Group one DEFLATE stream as specified by {{moqflate}}.
 Any other value is a PROTOCOL_VIOLATION.
 When Compression is not none, FRAME messages carry an `Inflated Size`.
+
+**Tail**:
+How many bytes of each Group's newest frames a relay keeps for its subscribers.
+A relay MAY drop a Group's older frames once the frames after them exceed the Tail, always keeping the newest, so a subscriber further behind than the Tail, or one joining a longer Group at its start, MAY find them gone and has to FETCH them, where the same holds upstream.
+A relay MAY keep less under resource pressure, and MAY cap how much it keeps; a Track whose TRACK_INFO carries no Tail, as from an earlier version, is kept to the relay's own cap.
+A relay serving the Track onward restates the Tail it keeps.
+A Track meant for joining at a Group's start, such as video starting each Group with a keyframe, declares a Tail that holds a whole Group; a long-lived Group read by one subscriber needs only what flow control has in flight.
 
 ## TRACKS {#tracks}
 TRACKS is sent by a subscriber to list a Broadcast's Tracks.
@@ -2331,6 +2339,7 @@ A stream that FINs without a GROUP_END carries a closed Group, which may have he
 - Made TRACK_INFO Publisher Max Age optional, encoded as milliseconds plus one with zero meaning no limit.
 - Added TRACK_INFO `Refresh` and `Refresh Interval`, and SUBSCRIBE_UPDATE `Wanted Start`, carrying refresh requests through relays: a live-edge join judged by the byte ratio, or a reader's explicit request, either one waiting out the interval.
 - Added `Compression` to TRACK_INFO: none (0x0) or DEFLATE (0x1), whose Groups are DEFLATE streams per draft-lcurley-moq-flate. FRAME carries an `Inflated Size` when it is not none.
+- Added `Tail` to TRACK_INFO: how many bytes of each Group's newest frames a relay keeps, which it restates onward.
 - A `Timescale` of 0 in TRACK_INFO declares a scale-less Track, whose timestamps and Group starts are bare numbers; each of its frames carries its Group's start as its timestamp.
 - A publisher must not start a Group's frame 0 at or before that of a Group with a lower start, and a receiver may refuse a Group that does. A relay serves every Track's timestamps on as received.
 - Replaced Group sequence numbers with Group starts: a Group is addressed by its frame 0's timestamp, or a bare number on a scale-less Track, and no field carries a sequence. A Time Anchor names the Group with the highest start at or below it.

@@ -13,9 +13,9 @@
 //! [Producer::finish] ends it wherever writing stopped. [Consumer::with_range] bounds a reader to a sub-range the same way [`track::Subscriber`]
 //! bounds group keys.
 //!
-//! A group has no size cap. Each copy holds at most its newest 32 MiB, less
-//! under the cache pool's memory pressure, and sheds whole frames from its front to stay
-//! there. A reader that reaches a shed frame rides a flight when the track has a
+//! A group has no size cap. Each copy holds at most its newest 32 MiB, or the smaller
+//! [`tail`](track::Info::tail) its track declares, less under the cache pool's memory
+//! pressure, and sheds whole frames from its front to stay there. A reader that reaches a shed frame rides a flight when the track has a
 //! [`track::Requests`] handler: a separate copy from that frame, paced by its fastest
 //! reader, which it leaves for the copy ahead once that holds its frame within reach.
 //! Otherwise reading a shed frame is [`Error::Evicted`].

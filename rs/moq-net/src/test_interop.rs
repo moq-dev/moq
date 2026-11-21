@@ -582,7 +582,7 @@ fn lite_tracks_interop() {
 		max_age: Some(std::time::Duration::from_secs(2)),
 		timescale: Some(crate::Timescale::MICRO),
 		compression: crate::track::Compression::Deflate,
-		tail: crate::track::Info::default().tail,
+		tail: 4 << 20,
 	};
 	let mut bytes = Vec::new();
 	let mut w = Encoder::new(&mut bytes, version.into());

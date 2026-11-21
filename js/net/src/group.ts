@@ -29,11 +29,15 @@ import { rescaleIn } from "./rescale.ts";
 import type { Timestamp } from "./time.ts";
 import type { Info as TrackInfo } from "./track.ts";
 import { checkKey, RESERVED } from "./util/key.ts";
-import { MAX_FRAME_BYTES } from "./util/limits.ts";
+import { MAX_FRAME_BYTES, TAIL_BYTES } from "./util/limits.ts";
 
-// A live tail budget, including a conservative charge for each frame's object and queue slot.
-const TAIL_BYTES = 32 * 1024 * 1024;
+// A conservative charge for each frame's object and queue slot, counted toward the live tail.
 const FRAME_BYTES = 256;
+
+// The live tail a copy keeps: its track's, or the default before a track claims it.
+function kept(state: GroupState): number {
+	return state.track?.tail ?? TAIL_BYTES;
+}
 
 function frameBytes(frame: Frame): number {
 	if (frame instanceof Chunked) return FRAME_BYTES + frame.retained;
@@ -341,7 +345,7 @@ export class Producer {
 				// chain of takeovers cannot grow a stalled reader's buffer: past the tail, it is behind it.
 				let unread = 0;
 				for (const frame of mirror.frames.peek()) unread += frameBytes(frame);
-				if (unread > TAIL_BYTES) {
+				if (unread > kept(state)) {
 					mirror.frames.set(new Queue());
 					mirror.cacheBytes = 0;
 					mirror.flate = undefined;
@@ -661,7 +665,7 @@ export class Producer {
 		const state = this.#state;
 		const frames = state.frames.peek();
 		const bytes = state.cacheBytes;
-		while (state.cacheBytes > TAIL_BYTES) {
+		while (state.cacheBytes > kept(state)) {
 			const front = frames.first;
 			if (!front) break;
 			// A chunked front frame sheds its sealed segments first, keeping only its newest.

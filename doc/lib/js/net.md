@@ -77,7 +77,8 @@ never downloads them.
 Path patterns are on the
 [concept page](/concept/moq-lite#path-patterns).
 
-Groups retain a 32 MiB live tail without limiting their lifetime or frame count.
+Groups retain a 32 MiB live tail without limiting their lifetime or frame count,
+or the smaller `tail` their track declares, which lite-07 carries to each relay.
 Readers that fall behind the shed front receive `Evicted`; tracks that
 `refresh` also request a fresh group. A join never starts at an arbitrary
 frame in the retained tail.

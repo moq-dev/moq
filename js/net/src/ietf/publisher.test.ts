@@ -5170,6 +5170,7 @@ test("a max age is never sent as MAX_CACHE_DURATION", () => {
 			maxAge: Duration.millis(7000),
 			priority: 0,
 			refresh: { ratio: null, interval: null },
+			tail: 32 * 1024 * 1024,
 		},
 		true,
 	);

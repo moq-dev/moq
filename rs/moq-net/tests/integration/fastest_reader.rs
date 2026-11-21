@@ -294,7 +294,10 @@ async fn two_relays_bound_their_cache_and_resume_without_a_hole() {
 	const FRAME: usize = 64 * 1024;
 	const TOTAL: usize = 64 * MB / FRAME;
 	let lite07: Version = "moq-lite-07-wip".parse().unwrap();
-	for (version, tail) in VERSIONS.iter().flat_map(|version| [(version, 32 * MB), (version, 2 * MB)]) {
+	for (version, tail) in VERSIONS
+		.iter()
+		.flat_map(|version| [(version, 32 * MB), (version, 2 * MB)])
+	{
 		let publisher = origin(1);
 		let first = origin(2);
 		let second = origin(3);
@@ -356,7 +359,11 @@ async fn two_relays_bound_their_cache_and_resume_without_a_hole() {
 		assert!(parked < TOTAL, "{version}: no backpressure reached the producer");
 		// Frame slots count toward pacing too, so the last whole frame can fall short. The
 		// upstream copy also holds what it sent downstream, within its tail.
-		for (hop, relay, max) in [(0, &publisher, tail + FRAME), (1, &first, kept + FRAME), (2, &second, MB + FRAME)] {
+		for (hop, relay, max) in [
+			(0, &publisher, tail + FRAME),
+			(1, &first, kept + FRAME),
+			(2, &second, MB + FRAME),
+		] {
 			let held = relay.config().pool.used();
 			assert!(
 				held >= (MB - FRAME) as u64,

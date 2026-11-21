@@ -249,9 +249,17 @@ mod tests {
 		group
 			.write_frame(crate::Timestamp::unscaled(group.start), payload.clone())
 			.unwrap();
-		assert_eq!(group.poll_paced(&waiter, 0, AHEAD), Poll::Ready(()), "within half the tail");
+		assert_eq!(
+			group.poll_paced(&waiter, 0, AHEAD),
+			Poll::Ready(()),
+			"within half the tail"
+		);
 		assert_eq!(group.poll_ready(&waiter, &info(1)), Poll::Ready(()));
-		assert_eq!(group.poll_ready(&waiter, &info(MB)), Poll::Pending, "its next frame would pass it");
+		assert_eq!(
+			group.poll_ready(&waiter, &info(MB)),
+			Poll::Pending,
+			"its next frame would pass it"
+		);
 		group
 			.write_frame(crate::Timestamp::unscaled(group.start), payload)
 			.unwrap();

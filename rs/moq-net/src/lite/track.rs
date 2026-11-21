@@ -93,8 +93,8 @@ pub struct TrackInfo {
 	/// How FRAME payloads and datagrams are compressed per group. Lite07+ only: an earlier
 	/// peer is served the frames inflated, so it is always [`Compression::None`] there.
 	pub compression: Compression,
-	/// The most bytes of each group a hop keeps. Lite07+ only: an earlier peer's copies keep
-	/// the default.
+	/// The most bytes of each group a hop keeps, served at most 32 MiB. Lite07+ only: an
+	/// earlier peer's copies keep the default.
 	pub tail: u64,
 }
 
@@ -111,7 +111,7 @@ impl TrackInfo {
 				true => info.compression,
 				false => Compression::None,
 			},
-			tail: info.tail,
+			tail: info.kept(),
 		}
 	}
 }
@@ -209,7 +209,7 @@ impl<'a> Message<'a> for TrackInfo {
 			false => Compression::None,
 		};
 		let tail = match version.has_tail() {
-			true => r.varint()?,
+			true => r.varint()?.min(crate::group::MAX_CACHE_BYTES),
 			false => crate::track::Info::default().tail,
 		};
 
@@ -323,7 +323,10 @@ mod test {
 	fn tail_rides_lite07_only() {
 		let info = info_sample();
 		assert_eq!(info_roundtrip(Version::Lite07, &info).tail, 4 << 20);
-		let zero = TrackInfo { tail: 0, ..info_sample() };
+		let zero = TrackInfo {
+			tail: 0,
+			..info_sample()
+		};
 		assert_eq!(info_roundtrip(Version::Lite07, &zero).tail, 0);
 		for version in [Version::Lite05, Version::Lite06] {
 			assert_eq!(

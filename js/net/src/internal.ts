@@ -33,6 +33,7 @@ import type {
 	WireRecord,
 } from "./track.ts";
 import { max, min } from "./util/key.ts";
+import { TAIL_BYTES } from "./util/limits.ts";
 import * as Varint from "./varint.ts";
 import type { Holdings, Resolved } from "./window.ts";
 import type { Advertised, Advertisements } from "./wire.ts";
@@ -48,6 +49,7 @@ export function datagramTrackInfo(info: datagram.Info): Info {
 		maxAge: null,
 		priority: info.priority,
 		refresh: { ratio: null, interval: null },
+		tail: TAIL_BYTES,
 	};
 }
 

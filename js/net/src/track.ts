@@ -56,6 +56,7 @@ import { grace, Ledger } from "./ledger.ts";
 import { rescale } from "./rescale.ts";
 import { floorAt, Timescale, type Timestamp } from "./time.ts";
 import { checkEnd, checkKey, max, min, UNBOUNDED } from "./util/key.ts";
+import { TAIL_BYTES } from "./util/limits.ts";
 import { checkName } from "./util/utf8.ts";
 import { bounded, type Found, type Holdings, joinsLive, rangesOf, UNHELD, Window, wireSpan } from "./window.ts";
 import { type Broadcast as BroadcastWire, registerTrackConsumer } from "./wire.ts";
@@ -176,6 +177,16 @@ export interface Info {
 	priority: number;
 	/** When a reader asks for a new group: on a live join, on a {@link Subscriber.refresh}, or both. See {@link Refresh}. */
 	refresh: Refresh;
+	/**
+	 * The most bytes of each group a copy keeps, newest frames first: 32 MiB, the default and the
+	 * most any copy keeps. A copy sheds its oldest frames past it, keeping at least the newest, so
+	 * a reader that falls further behind gets `Evicted`, and a reader joining at the start of a
+	 * longer group needs a fetch too: media keeps the default to hold a whole group of pictures. A
+	 * long-lived group with one reader, such as a byte stream, needs only about its hops'
+	 * flow-control windows. Reported in TRACK_INFO on lite-07, so relays keep the same; a track
+	 * received over anything else keeps the default. Mirrors the Rust `track::Info::tail`.
+	 */
+	tail: number;
 	/** The original moq-transport publisher's draft. @internal */
 	ietf?: IetfVersion;
 	/**
@@ -253,6 +264,7 @@ export function authoredInfo(init: InfoInit = {}): Info {
 		maxAge: maxAge === null ? null : wireMillis("maxAge", maxAge),
 		priority: priorityValue(init.priority ?? DEFAULT_PRIORITY),
 		refresh: authoredRefresh(init.refresh),
+		tail: authoredTail(init.tail),
 		...(init.ietf === undefined ? {} : { ietf: init.ietf }),
 		...(init.unchecked ? { unchecked: true } : {}),
 	};
@@ -277,6 +289,12 @@ function priorityValue(value: number): number {
 		throw new RangeError(`priority must be an integer in -128..=127: ${value}`);
 	}
 	return value;
+}
+
+// A tail past the most any copy keeps keeps that most, as moq-net's `with_tail` does.
+function authoredTail(tail: number = TAIL_BYTES): number {
+	if (!Number.isSafeInteger(tail) || tail < 0) throw new RangeError(`tail must be a non-negative integer: ${tail}`);
+	return Math.min(tail, TAIL_BYTES);
 }
 
 function authoredRefresh(init: Partial<Refresh> = {}): Refresh {

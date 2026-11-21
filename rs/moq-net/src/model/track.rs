@@ -168,7 +168,7 @@ pub struct Info {
 	/// arrives as a [`Refresh::ratio`] of `Some(0)`.
 	pub refresh: Refresh,
 	/// The most bytes of each group a copy keeps, newest frames first: 32 MiB, the default
-	/// and the most any copy keeps.
+	/// and the most any copy keeps, which a larger one keeps instead.
 	///
 	/// A copy sheds its oldest frames past this, keeping at least the newest, and a writer
 	/// runs at most half of it past the group's fastest reader. A reader that falls behind
@@ -202,7 +202,7 @@ impl PartialEq for Info {
 			priority,
 			compression,
 			refresh,
-			tail,
+			tail: _,
 			properties,
 			unchecked: _,
 		} = self;
@@ -211,7 +211,7 @@ impl PartialEq for Info {
 			&& *priority == other.priority
 			&& *compression == other.compression
 			&& *refresh == other.refresh
-			&& *tail == other.tail
+			&& self.kept() == other.kept()
 			&& *properties == other.properties
 	}
 }
@@ -349,10 +349,10 @@ impl Info {
 		self
 	}
 
-	/// Set the most bytes of each group a copy keeps, returning `self` for chaining. See
-	/// [`tail`](Self::tail).
+	/// Set the most bytes of each group a copy keeps, at most 32 MiB, returning `self` for
+	/// chaining. See [`tail`](Self::tail).
 	pub fn with_tail(mut self, tail: u64) -> Self {
-		self.tail = tail;
+		self.tail = tail.min(group::MAX_CACHE_BYTES);
 		self
 	}
 

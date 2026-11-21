@@ -3,14 +3,32 @@ import type * as Instance from "../instance.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
+import { TAIL_BYTES } from "../util/limits.ts";
 import { decodeNode, decodePin, encodeNode, encodePin } from "./instance.ts";
 import * as Message from "./message.ts";
 import { fromWire, toWire } from "./priority.ts";
-import { hasCompression, hasGroupOrder, hasRefresh, hasTrackStream, Version, wireTimescale } from "./version.ts";
+import {
+	hasCompression,
+	hasGroupOrder,
+	hasRefresh,
+	hasTail,
+	hasTrackStream,
+	Version,
+	wireTimescale,
+} from "./version.ts";
 
 // TRACK_INFO `Compression` codec ids: none, or per-group DEFLATE (draft-lcurley-moq-flate).
 const COMPRESSION_NONE = 0;
 const COMPRESSION_DEFLATE = 1;
+
+function checkTail(tail: number): void {
+	if (!Number.isSafeInteger(tail) || tail < 0 || tail > TAIL_BYTES)
+		throw new RangeError(`tail must be an integer in 0..=${TAIL_BYTES}: ${tail}`);
+}
+
+function min(a: bigint, b: bigint): bigint {
+	return a < b ? a : b;
+}
 
 async function decodeCompression(r: Reader): Promise<boolean> {
 	const codec = await r.u53();
@@ -98,6 +116,8 @@ export class TrackInfo {
 	 * each FRAME carrying its inflated size. Lite-07 only.
 	 */
 	compress: boolean;
+	/** The most bytes of each group a hop keeps, at most 32 MiB. Lite-07 only. */
+	tail: number;
 
 	constructor({
 		priority = 0,
@@ -106,6 +126,7 @@ export class TrackInfo {
 		refresh,
 		refreshInterval,
 		compress = false,
+		tail = TAIL_BYTES,
 	}: {
 		priority?: number;
 		maxAge?: number;
@@ -113,7 +134,9 @@ export class TrackInfo {
 		refresh?: number;
 		refreshInterval?: number;
 		compress?: boolean;
+		tail?: number;
 	}) {
+		checkTail(tail);
 		if (!Number.isInteger(priority) || priority < -128 || priority > 127) {
 			throw new RangeError(`priority must be an integer in -128..=127: ${priority}`);
 		}
@@ -131,6 +154,7 @@ export class TrackInfo {
 		this.maxAge = maxAge;
 		this.timescale = timescale === undefined ? undefined : Timescale(timescale);
 		this.compress = compress;
+		this.tail = tail;
 	}
 
 	async #encode(w: Writer, version: Version) {
@@ -146,6 +170,7 @@ export class TrackInfo {
 			await w.u62(this.refreshInterval === undefined ? 0n : BigInt(this.refreshInterval) + 1n);
 		}
 		if (hasCompression(version)) await w.u53(this.compress ? COMPRESSION_DEFLATE : COMPRESSION_NONE);
+		if (hasTail(version)) await w.u53(this.tail);
 	}
 
 	static async #decode(r: Reader, version: Version): Promise<TrackInfo> {
@@ -171,6 +196,8 @@ export class TrackInfo {
 		if (interval > BigInt(Number.MAX_SAFE_INTEGER))
 			throw new RangeError("refreshInterval exceeds safe milliseconds");
 		const compress = hasCompression(version) ? await decodeCompression(r) : false;
+		// A tail past the most any copy keeps keeps that most.
+		const tail = hasTail(version) ? Number(min(await r.u62(), BigInt(TAIL_BYTES))) : TAIL_BYTES;
 		return new TrackInfo({
 			priority,
 			maxAge,
@@ -178,6 +205,7 @@ export class TrackInfo {
 			refresh: refresh === -1 ? undefined : refresh,
 			refreshInterval: interval === -1n ? undefined : Number(interval),
 			compress,
+			tail,
 		});
 	}
 
@@ -203,6 +231,7 @@ export class TrackInfo {
 			throw new RangeError(`refreshInterval must be a safe non-negative integer: ${this.refreshInterval}`);
 		}
 		if (this.timescale !== undefined) Timescale(this.timescale);
+		checkTail(this.tail);
 		if (this.compress && !hasCompression(version)) {
 			throw new Error("a compressed track needs lite-07");
 		}
