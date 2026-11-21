@@ -835,6 +835,10 @@ impl poll::Lease for RecvLease<'_> {
 		self.lease().is_fin()
 	}
 
+	fn set_window(&mut self, window: u64) {
+		self.lease_mut().set_window(window);
+	}
+
 	fn release(mut self) {
 		let lease = self.lease.take().expect("only taken to hand it back");
 		let mut state = self.stream.inner.lock();

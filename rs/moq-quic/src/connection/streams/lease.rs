@@ -222,12 +222,24 @@ pub struct Lease {
 	/// Bytes in `chunks`.
 	len: usize,
 	fin: bool,
+	/// The window to set as the lease is handed back, in the same hold of the connection's
+	/// lock as its credit returns.
+	window: Option<u64>,
 }
 
 impl Lease {
 	/// Whether the peer finished the stream right after the leased bytes.
 	pub fn is_fin(&self) -> bool {
 		self.fin
+	}
+
+	/// Set the stream's window, as [`Stream::set_window()`] does, when the lease is handed back.
+	///
+	/// A reader shrinking its window for the bytes it just read does so here rather than
+	/// after the hand back: the driver may build a grant from the old window in between, and
+	/// credit granted cannot be taken back.
+	pub fn set_window(&mut self, window: u64) {
+		self.window = Some(window);
 	}
 
 	/// The bytes not yet read, in order, one contiguous chunk at a time.
@@ -369,6 +381,7 @@ impl Stream<'_> {
 				chunks: std::mem::take(&mut lease.chunks),
 				len: std::mem::take(&mut lease.len) as usize,
 				fin: lease.is_fin(),
+				window: None,
 			};
 			// Its reader may be about to free the window.
 			self.state.unlooked.insert(self.id);
@@ -494,6 +507,10 @@ impl Stream<'_> {
 		state.chunks = lease.chunks;
 		state.len = lease.len as u64;
 		state.lent = 0;
+		// Before the grant the bytes taken queue, which the driver builds from this window.
+		if let Some(window) = lease.window {
+			recv.set_window(window);
+		}
 		// What the reader took returns its stream credit.
 		self.queue_max_stream_data()
 	}

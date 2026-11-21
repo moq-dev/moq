@@ -428,6 +428,13 @@ impl Lease<'_> {
 		self.inner().chunks()
 	}
 
+	/// Let the peer send at most `window` bytes past what the reader took, applied as the lease
+	/// is handed back, in the same step as its credit returns. See `moq_quic`'s
+	/// `recv::Lease::set_window`.
+	pub fn set_window(&mut self, window: u64) {
+		self.inner_mut().set_window(window);
+	}
+
 	/// Return the credit of every byte read so far, by this lease or an earlier one.
 	pub fn release(mut self) {
 		let lease = self.inner.take().expect("only taken to hand it back");

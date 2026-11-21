@@ -7221,6 +7221,48 @@ fn a_smaller_window_limits_the_next_grant() {
 	);
 }
 
+/// A window set on a lease applies as the lease is handed back, before the grant that the
+/// credit it returns queues: a reader shrinking its window after the hand back could lose the
+/// race to a driver sending the old one, and credit granted cannot be taken back.
+#[test]
+fn a_window_set_on_a_lease_applies_before_its_grant() {
+	const WINDOW: usize = 4000;
+	const STREAM: usize = 1000;
+	let _guard = subscribe();
+	let mut transport = transport::Config::default();
+	transport.limits.receive_window = NonZeroU64::new(WINDOW as u64);
+	transport.limits.stream_receive_window = NonZeroU64::new(STREAM as u64);
+	let mut pair = Pair::new(
+		Default::default(),
+		server::Config {
+			transport,
+			..server_config()
+		},
+	);
+	let chs = pair.connect();
+	let (client_ch, server_ch) = chs;
+	let s = pair
+		.client_streams(client_ch)
+		.open(Dir::Uni, Default::default())
+		.unwrap();
+	let msg = vec![0xAB; WINDOW];
+	let all = msg.len();
+	let mut sent = 0;
+
+	assert_eq!(pump_leased(&mut pair, chs, s, (&msg, all), &mut sent), STREAM);
+	let mut recv = pair.server_recv(server_ch, s);
+	let mut lease = recv.lease(0).unwrap();
+	lease.advance(lease.remaining());
+	lease.set_window(200);
+	recv.release(lease);
+
+	assert_eq!(
+		pump_leased(&mut pair, chs, s, (&msg, all), &mut sent),
+		200,
+		"granted from the smaller window"
+	);
+}
+
 /// A window set on a bidirectional stream this side opened, before anything arrived on it,
 /// holds once the first grant is spent.
 #[test]

@@ -935,6 +935,8 @@ pub mod poll {
 		/// group runs out of room, so the stream holds little once paused, and many fit in the
 		/// connection window. Credit already granted stays granted. `None` when the transport
 		/// cannot, the default, whose paused streams hold their full stream credit.
+		///
+		/// A transport that can also implements [`Lease::set_window`].
 		fn set_window(&mut self, window: u64) -> Option<u64> {
 			let _ = window;
 			None
@@ -983,6 +985,17 @@ pub mod poll {
 
 		/// Return the credit of every byte read so far, by this lease or an earlier one.
 		fn release(self);
+
+		/// Set the stream's window, as [`RecvStream::set_window`] does, in the same step as the
+		/// lease is handed back, by [`release`](Self::release) or a drop.
+		///
+		/// The reader shrinks the window for the bytes it just read, and the credit they return
+		/// may be granted from the window as the transport builds the grant. A shrink made
+		/// after the hand back can lose that race, and credit granted cannot be taken back.
+		/// Ignored by default, for a transport whose streams cannot set a window.
+		fn set_window(&mut self, window: u64) {
+			let _ = window;
+		}
 	}
 
 	/// A pending [`RecvStream::read_chunk`].

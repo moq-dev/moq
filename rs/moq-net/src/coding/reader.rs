@@ -8,7 +8,10 @@ use bytes::{Buf, Bytes};
 use crate::{
 	Error, StreamError,
 	coding::*,
-	transport::poll::{Lease, RecvStream},
+	transport::{
+		boxed::Shaper,
+		poll::{Lease, RecvStream},
+	},
 };
 
 /// A reader for decoding messages from a stream.
@@ -89,6 +92,15 @@ pub(crate) trait Pause {
 	/// while no reader holds the writer back.
 	fn shape(&mut self, _room: Option<u64>, _unsealed: u64) {}
 
+	/// What [`Self::shape`] would set, for a lease to set as it is handed back: the stream is
+	/// borrowed while one is out. Read after [`Self::window`].
+	fn shaper(&mut self) -> Shaper {
+		Shaper::default()
+	}
+
+	/// Note the window a lease set from [`Self::shaper`], as [`Self::shape`] would have.
+	fn shaped(&mut self, _window: u64) {}
+
 	/// Reserve the credit this stream holds while paused, returning whether it may pause. A
 	/// stream outside any session always may.
 	fn pause(&mut self) -> bool {
@@ -106,6 +118,14 @@ impl Pause for crate::transport::boxed::RecvStream {
 
 	fn shape(&mut self, room: Option<u64>, unsealed: u64) {
 		crate::transport::boxed::RecvStream::shape(self, room, unsealed)
+	}
+
+	fn shaper(&mut self) -> Shaper {
+		crate::transport::boxed::RecvStream::shaper(self)
+	}
+
+	fn shaped(&mut self, window: u64) {
+		crate::transport::boxed::RecvStream::shaped(self, window)
 	}
 
 	fn pause(&mut self) -> bool {
@@ -469,14 +489,16 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 			// A writer too far ahead of the group's fastest reader leaves the rest in the
 			// stream, so flow control pushes back upstream. One partway into a segment reads
 			// on to its seal first, so a paused stream never holds a segment's credit.
+			let window = self.stream.window();
 			let paced = match self.unreleased {
 				0 => {
-					let window = self.stream.window();
 					let paced = frame.poll_ready(waiter, window);
-					self.poll_pace(waiter, paced, || frame.room(window), frame.unsealed() as u64)
+					self.poll_pace(waiter, paced, || frame.room(window, 0), frame.unsealed() as u64)
 				}
 				_ => Poll::Ready(Ok(())),
 			};
+			// Read here, as a lease borrows the stream.
+			let shaper = self.stream.shaper();
 			let mut lease = match match paced {
 				// The stream alone, so `unreleased` can count while the lease is out.
 				Poll::Ready(Ok(())) => {
@@ -518,6 +540,21 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 			};
 			let complete = chunk.len() == remaining;
 			let ended = lease.is_fin() && !lease.has_remaining();
+			// The transport grants credit from what was taken when it next sends, so the window
+			// is sized to the room once the chunk is in, and set as the lease goes back: a
+			// shrink after it could lose the race to a grant from the old window.
+			let shaped = match chunk.is_empty() {
+				true => None,
+				false => {
+					let room = frame
+						.room(window, chunk.len())
+						.map(|room| room.saturating_sub(self.frame));
+					shaper.window(room, frame.unsealed_after(chunk.len()) as u64)
+				}
+			};
+			if let Some(window) = shaped {
+				lease.set_window(window);
+			}
 			if complete || chunk.len() == frame.unsealed() {
 				// Every byte of the segment is in hand, so its credit returns.
 				lease.release();
@@ -525,6 +562,9 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 			} else {
 				drop(lease);
 				self.unreleased += chunk.len() as u64;
+			}
+			if let Some(window) = shaped {
+				self.stream.shaped(window);
 			}
 
 			if !chunk.is_empty() {
@@ -536,11 +576,6 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 					frame.notify();
 					owed = 0;
 				}
-				// The transport grants credit from what was taken when it next sends, so the
-				// room is measured from here, the chunk taken.
-				let window = self.stream.window();
-				let room = frame.room(window).map(|room| room.saturating_sub(self.frame));
-				self.stream.shape(room, frame.unsealed() as u64);
 			}
 			if complete {
 				break Ok(());
@@ -1302,11 +1337,34 @@ mod tests {
 		window: u64,
 		/// The credit held at each pause.
 		paused: Vec<usize>,
-		/// The room and unsealed rest each shaping was given.
-		shaped: Vec<(Option<u64>, u64)>,
+		/// The window the peer is granted under, as the transport holds it, `None` for the full
+		/// credit.
+		in_force: Option<u64>,
+		/// Every window set, in order.
+		windows: Vec<u64>,
+		/// The window in force as each release returned its credit.
+		released_under: Vec<Option<u64>>,
 	}
 
-	struct CreditedLease<'a>(&'a mut Credited);
+	impl Credited {
+		fn set_window(&mut self, window: u64) {
+			self.in_force = Some(window);
+			self.windows.push(window);
+		}
+	}
+
+	struct CreditedLease<'a> {
+		stream: &'a mut Credited,
+		window: Option<u64>,
+	}
+
+	impl Drop for CreditedLease<'_> {
+		fn drop(&mut self) {
+			if let Some(window) = self.window.take() {
+				self.stream.set_window(window);
+			}
+		}
+	}
 
 	impl Pause for Credited {
 		fn window(&mut self) -> u64 {
@@ -1316,8 +1374,21 @@ mod tests {
 			}
 		}
 
+		/// Shapes to the room itself, an allowance of none, so a test reads the window.
+		fn shaper(&mut self) -> Shaper {
+			const STREAM: u64 = u64::MAX / 2;
+			Shaper {
+				active: true,
+				stream: STREAM,
+				allowance: 0,
+				current: self.in_force.unwrap_or(STREAM),
+			}
+		}
+
 		fn shape(&mut self, room: Option<u64>, unsealed: u64) {
-			self.shaped.push((room, unsealed));
+			if let Some(window) = self.shaper().window(room, unsealed) {
+				self.set_window(window);
+			}
 		}
 
 		fn pause(&mut self) -> bool {
@@ -1332,7 +1403,10 @@ mod tests {
 
 		fn poll_lease(&mut self, _: &kio::Waiter, want: usize) -> Poll<Result<CreditedLease<'_>, Self::Error>> {
 			match self.chunks.iter().map(Bytes::len).sum::<usize>() >= want {
-				true => Poll::Ready(Ok(CreditedLease(self))),
+				true => Poll::Ready(Ok(CreditedLease {
+					stream: self,
+					window: None,
+				})),
 				false => Poll::Pending,
 			}
 		}
@@ -1344,34 +1418,42 @@ mod tests {
 
 	impl Buf for CreditedLease<'_> {
 		fn remaining(&self) -> usize {
-			self.0.chunks.iter().map(Bytes::len).sum()
+			self.stream.chunks.iter().map(Bytes::len).sum()
 		}
 
 		fn chunk(&self) -> &[u8] {
-			self.0.chunks.front().map_or(&[], |chunk| &chunk[..])
+			self.stream.chunks.front().map_or(&[], |chunk| &chunk[..])
 		}
 
 		fn advance(&mut self, n: usize) {
-			let front = self.0.chunks.front_mut().expect("advanced past the lease");
+			let front = self.stream.chunks.front_mut().expect("advanced past the lease");
 			front.advance(n);
 			if front.is_empty() {
-				self.0.chunks.pop_front();
+				self.stream.chunks.pop_front();
 			}
-			self.0.held += n;
+			self.stream.held += n;
 		}
 	}
 
 	impl Lease for CreditedLease<'_> {
 		fn chunks(&self) -> impl Iterator<Item = &[u8]> {
-			self.0.chunks.iter().map(|chunk| &chunk[..])
+			self.stream.chunks.iter().map(|chunk| &chunk[..])
 		}
 
 		fn is_fin(&self) -> bool {
 			false
 		}
 
-		fn release(self) {
-			self.0.released += std::mem::take(&mut self.0.held);
+		fn release(mut self) {
+			if let Some(window) = self.window.take() {
+				self.stream.set_window(window);
+			}
+			self.stream.released += std::mem::take(&mut self.stream.held);
+			self.stream.released_under.push(self.stream.in_force);
+		}
+
+		fn set_window(&mut self, window: u64) {
+			self.window = Some(window);
 		}
 	}
 
@@ -1452,9 +1534,11 @@ mod tests {
 		let stream = &reader.stream;
 		assert_eq!(stream.released, SEGMENT, "read on past the window to the seal");
 		assert_eq!(stream.paused, [0], "paused holding nothing taken");
-		let (room, unsealed) = *stream.shaped.last().expect("shaped as it read");
-		assert_eq!(room, Some(0), "no room left");
-		assert_eq!(unsealed, SEGMENT as u64, "but the next segment to seal");
+		assert_eq!(
+			stream.windows.last(),
+			Some(&(SEGMENT as u64)),
+			"no room left, but the next segment to seal"
+		);
 	}
 
 	/// While a reader holds the group back, ingest sizes the stream's credit to the room the
@@ -1486,14 +1570,57 @@ mod tests {
 			let mut frame = group.create_object(info.into()).unwrap();
 			reader.stream.chunks.push_back(Bytes::from(vec![0u8; FRAME]));
 			assert!(matches!(reader.poll_read_frame(noop, &mut frame), Poll::Ready(Ok(()))));
-			room = frame.room(WINDOW);
+			room = frame.room(WINDOW, 0);
 			group.restore(frame.finish().unwrap());
 		}
 
 		let room = room.expect("a reader holds it back");
 		assert!(room <= WINDOW - 3 * FRAME as u64, "the frames took room");
-		let (shaped, unsealed) = *reader.stream.shaped.last().unwrap();
-		assert_eq!(shaped, Some(room - FRAME as u64), "a frame short");
-		assert_eq!(unsealed, 0, "between frames");
+		assert_eq!(
+			reader.stream.windows.last(),
+			Some(&(room - FRAME as u64)),
+			"a frame short, nothing more to seal between frames"
+		);
+	}
+
+	/// The window shrinks as the lease goes back, in the same step as the credit returns: a
+	/// shrink after the hand back could lose the race to a grant the transport builds from the
+	/// old window, and credit granted cannot be taken back, so the stream would hold more than
+	/// its allowance once it pauses.
+	#[test]
+	fn the_window_shrinks_as_the_credit_returns() {
+		const FRAME: usize = 1000;
+		const WINDOW: u64 = 100_000;
+
+		let group = crate::group::Info { start: 0 }.produce();
+		let _idle = group.consume();
+		let mut group = crate::recv::Group::new(group);
+		let info = crate::frame::Info {
+			size: FRAME as u64,
+			timestamp: crate::Timestamp::ZERO,
+		};
+		let stream = Credited {
+			window: WINDOW,
+			..Default::default()
+		};
+		let mut reader = Reader::new(stream, crate::lite::Version::Lite05);
+		let noop = &kio::Waiter::noop();
+		for _ in 0..3 {
+			assert!(matches!(
+				reader.poll_admit(noop, &group, &info.into()),
+				Poll::Ready(Ok(()))
+			));
+			let mut frame = group.create_object(info.into()).unwrap();
+			reader.stream.chunks.push_back(Bytes::from(vec![0u8; FRAME]));
+			assert!(matches!(reader.poll_read_frame(noop, &mut frame), Poll::Ready(Ok(()))));
+			let room = frame.room(WINDOW, 0).expect("a reader holds it back");
+			group.restore(frame.finish().unwrap());
+
+			assert_eq!(
+				reader.stream.released_under.last(),
+				Some(&Some(room - FRAME as u64)),
+				"the credit returned under the window the chunk left room for"
+			);
+		}
 	}
 }

@@ -239,6 +239,9 @@ impl moq_net::transport::poll::Lease for recv::Lease<'_> {
 	fn release(self) {
 		Self::release(self);
 	}
+	fn set_window(&mut self, window: u64) {
+		Self::set_window(self, window);
+	}
 }
 
 /// An error when reading from [`crate::quic::web::recv::Stream`]. Similar to [`crate::quic::recv::Error`].

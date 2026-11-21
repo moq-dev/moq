@@ -229,6 +229,41 @@ impl Pacing {
 	}
 }
 
+/// The window a stream gets for the room its group has left, as [`RecvStream::shape`] sets it,
+/// copied out of the stream so a lease, which borrows it, can set the window as it is handed
+/// back. The default shapes nothing.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Shaper {
+	/// Whether the transport shapes credit, and a connection window is shared.
+	pub(crate) active: bool,
+	/// The stream's full receive credit.
+	pub(crate) stream: u64,
+	/// The credit the stream lets the peer send past the room, from its slot.
+	pub(crate) allowance: u64,
+	/// The window set last.
+	pub(crate) current: u64,
+}
+
+impl Shaper {
+	/// The window to set for the `room` the group has left, at least the `unsealed` rest of
+	/// the segment being written, or `None` while the current one stands; `None` for the room
+	/// while no reader holds the writer back.
+	///
+	/// Credit granted stays granted, so a window left above its target is credit the stream
+	/// holds once paused, and a smaller one is always set. A larger one only is once it moves
+	/// half an allowance, as it pays for the transport's lock.
+	pub(crate) fn window(&self, room: Option<u64>, unsealed: u64) -> Option<u64> {
+		if !self.active {
+			return None;
+		}
+		let target = match room {
+			Some(room) => room.max(unsealed).saturating_add(self.allowance).min(self.stream),
+			None => self.stream,
+		};
+		(target < self.current || target - self.current >= self.allowance / 2).then_some(target)
+	}
+}
+
 /// The session a stream reserves paused credit from, which a stream outliving it never keeps
 /// open: once it is gone, nothing is paused.
 type Budget = Weak<Shared<dyn ErasedSession>>;
@@ -542,6 +577,18 @@ impl RecvStream {
 		self.0.shape(room, unsealed)
 	}
 
+	/// What [`Self::shape`] would set for a room, readable while a lease borrows the stream, so
+	/// the window can be set as the lease is handed back. Read after [`Self::window`], which
+	/// learns whether the transport shapes credit.
+	pub(crate) fn shaper(&mut self) -> Shaper {
+		self.0.shaper()
+	}
+
+	/// Note the window a lease set from [`Self::shaper`], as [`Self::shape`] would have.
+	pub(crate) fn shaped(&mut self, window: u64) {
+		self.0.shaped(window)
+	}
+
 	/// Reserve the connection credit this stream holds while ingest stops reading it, returning
 	/// whether it may stop: not once the session's paused streams hold half its connection
 	/// window, nor on a transport that reports no window.
@@ -750,6 +797,8 @@ trait ErasedRecv: Send + Sync {
 	fn set_window(&mut self, window: u64) -> Option<u64>;
 	fn window(&mut self) -> u64;
 	fn shape(&mut self, room: Option<u64>, unsealed: u64);
+	fn shaper(&mut self) -> Shaper;
+	fn shaped(&mut self, window: u64);
 	fn pause(&mut self) -> bool;
 	fn resume(&mut self);
 }
@@ -759,6 +808,7 @@ trait ErasedLease: Buf {
 	fn chunks(&self) -> Box<dyn Iterator<Item = &[u8]> + '_>;
 	fn is_fin(&self) -> bool;
 	fn release(self: Box<Self>);
+	fn set_window(&mut self, window: u64);
 }
 
 type GroupOf<S> = <<S as poll::Session>::SendStream as poll::SendStream>::Group;
@@ -974,23 +1024,27 @@ impl<T: poll::RecvStream + Send + Sync> ErasedRecv for Budgeted<T> {
 	}
 
 	fn shape(&mut self, room: Option<u64>, unsealed: u64) {
+		if let Some(window) = self.shaper().window(room, unsealed) {
+			Budgeted::set_window(self, window);
+		}
+	}
+
+	fn shaper(&mut self) -> Shaper {
 		let pacing = self.pacing();
 		// Nothing is shared without a connection window, so nothing needs to stay small.
 		if pacing.cap == 0 || self.unshaped {
-			return;
+			return Shaper::default();
 		}
-		let allowance = self.allowance(&pacing);
-		let target = match room {
-			Some(room) => room.max(unsealed).saturating_add(allowance).min(pacing.stream),
-			None => pacing.stream,
-		};
-		let current = self.shaped.unwrap_or(pacing.stream);
-		// Credit granted stays granted, so a window left above its target is credit the stream
-		// holds once paused, and a smaller one always pays for the transport's lock. A larger
-		// one only does once it moves half an allowance.
-		if target < current || target - current >= allowance / 2 {
-			Budgeted::set_window(self, target);
+		Shaper {
+			active: true,
+			stream: pacing.stream,
+			allowance: self.allowance(&pacing),
+			current: self.shaped.unwrap_or(pacing.stream),
 		}
+	}
+
+	fn shaped(&mut self, window: u64) {
+		self.shaped = Some(window);
 	}
 
 	fn pause(&mut self) -> bool {
@@ -1052,6 +1106,10 @@ impl<L: poll::Lease> ErasedLease for L {
 
 	fn release(self: Box<Self>) {
 		poll::Lease::release(*self)
+	}
+
+	fn set_window(&mut self, window: u64) {
+		poll::Lease::set_window(self, window)
 	}
 }
 
@@ -1267,6 +1325,10 @@ impl poll::Lease for Lease<'_> {
 
 	fn release(self) {
 		self.0.release()
+	}
+
+	fn set_window(&mut self, window: u64) {
+		self.0.set_window(window)
 	}
 }
 
