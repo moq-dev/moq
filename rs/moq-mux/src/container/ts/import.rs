@@ -1302,6 +1302,10 @@ impl<E: catalog::Catalog> Import<E> {
 			return Ok(());
 		};
 
+		// Conditional access, like TS-level scrambling: refused while it lasts, on any carriage.
+		if pes.scrambled() {
+			return self.scrambled(pid);
+		}
 		let whole = match stream {
 			Stream::PesPacket(stream) => Some(stream.stream_type),
 			_ => None,
@@ -1310,10 +1314,6 @@ impl<E: catalog::Catalog> Import<E> {
 			&& let Some(why) = refusal(&pes, stream_type)
 		{
 			return self.refuse(pid, &why);
-		}
-		// Conditional access, like TS-level scrambling: refused while it lasts.
-		if pes.scrambled() {
-			return self.scrambled(pid);
 		}
 		let stream = &self.streams[&pid];
 
@@ -2654,13 +2654,11 @@ impl<E: catalog::Catalog> PesPacketStream<E> {
 }
 
 /// Why a whole-PES track cannot carry `pes` unaltered, if it cannot: a header export refuses
-/// ([`PesStart::whole`]), a clock field only the PTS and DTS of are rebased, or a scrambled
-/// payload.
+/// ([`PesStart::whole`]), or a clock field only the PTS and DTS of are rebased.
 fn refusal(pes: &PesStart, stream_type: u8) -> Option<String> {
 	match pes.whole(stream_type) {
 		Err(err) => Some(format!("{err:#}")),
-		Ok(Some(clock)) => Some(clock.to_string()),
-		Ok(None) => pes.scrambled().then(|| "PES-level scrambling".to_string()),
+		Ok(clock) => clock.map(|clock| clock.to_string()),
 	}
 }
 

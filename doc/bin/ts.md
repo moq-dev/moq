@@ -203,8 +203,8 @@ other tracks carry on, and feed health (stalled streams, TR 101 290 counters)
 is logged and reported without changing what publishes. A media unit, PES
 header, or adaptation field that arrives whole but does not parse ends the
 import with the cause: with neither loss nor the flag to explain it, the muxer
-wrote it wrong. A PES scrambled by conditional access is refused and counted,
-and its stream resumes at the next clear keyframe.
+wrote it wrong. A packet or PES scrambled by conditional access is refused and
+counted, and its stream resumes once it is clear, video at its next keyframe.
 Passthrough carries damaged packets as they came.
 
 ## Evidence
