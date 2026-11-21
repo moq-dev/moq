@@ -59,6 +59,12 @@ struct State<E: CatalogExt> {
 }
 
 impl<E: CatalogExt> State<E> {
+	/// Whether a buffering gate opens now: no reservation is outstanding and the catalog lists a
+	/// track. The track scan runs last, so releasing each of many reservations stays linear.
+	fn gate_opens(&mut self) -> bool {
+		matches!(self.gate, Gate::Buffering { reservers: 0, .. }) && self.lists_track()
+	}
+
 	/// Whether the catalog names anything this broadcast can serve, which the initial publish
 	/// waits for.
 	///
@@ -67,12 +73,6 @@ impl<E: CatalogExt> State<E> {
 	/// promises no frames, so it doesn't count. A listed rendition covers application-defined
 	/// sections the base fields can't see, and an importer that lists tracks in the extension
 	/// reports them through [`ext_tracks`](Self::ext_tracks).
-	/// Whether a buffering gate opens now: no reservation is outstanding and the catalog lists a
-	/// track. The track scan runs last, so releasing each of many reservations stays linear.
-	fn gate_opens(&mut self) -> bool {
-		matches!(self.gate, Gate::Buffering { reservers: 0, .. }) && self.lists_track()
-	}
-
 	fn lists_track(&mut self) -> bool {
 		use std::any::TypeId;
 		// Video and audio carry `enabled`, which only the base check reads.
@@ -276,6 +276,9 @@ enum Gate {
 		/// A catalog change was made while buffering and is awaiting the initial publish. Without
 		/// this we'd emit an empty snapshot when the gate opens on a catalog nobody ever touched.
 		pending: bool,
+		/// The timestamp the last staged change was given (see [`Guard::set_timestamp`]), or `None`
+		/// to stamp the initial publish when it goes out.
+		at: Option<moq_net::Timestamp>,
 	},
 	/// The initial snapshot went out: every change publishes.
 	Published,
@@ -309,17 +312,36 @@ impl<E: CatalogExt> Clone for Outputs<E> {
 }
 
 impl<E: CatalogExt> Outputs<E> {
-	/// Emit the catalog to hang and MSF, stamped now on `clock`. Neither writes a catalog identical
-	/// to its last.
-	fn emit(&mut self, catalog: &Catalog<E>, msf: &mut Msf<E>, clock: &crate::Clock) -> crate::Result<()> {
+	/// Emit the catalog to hang and MSF, stamped `at` or else now on `clock`. Neither writes a
+	/// catalog identical to its last.
+	fn emit(
+		&mut self,
+		catalog: &Catalog<E>,
+		msf: &mut Msf<E>,
+		clock: &crate::Clock,
+		at: Option<moq_net::Timestamp>,
+	) -> crate::Result<()> {
 		// Every consumer refuses a catalog that fails this, so refuse it before it reaches one.
 		catalog.check_renditions()?;
 		// The media timeline, so the catalog in effect at a media timestamp is the one stamped at or
 		// before it, whichever thread or runtime publishes. Each catalog starts a group on both
-		// tracks, so one landing in the same millisecond as the last is stamped a unit later
-		// instead of refused.
-		let (_, at) = crate::start::next(&self.hang_track, clock.now())?;
-		let (_, at) = crate::start::next(&self.msf_track, at)?;
+		// tracks.
+		let at = match at {
+			// A caller's timestamp marks the frame the change takes effect at, so moving it would
+			// misplace the change: one that doesn't pass the last publish on either track is refused
+			// before either is written.
+			Some(at) => {
+				crate::start::after(&self.hang_track, at)?;
+				crate::start::after(&self.msf_track, at)?;
+				at
+			}
+			// One landing in the same millisecond as the last is stamped a unit later instead of
+			// refused.
+			None => {
+				let (_, at) = crate::start::next(&self.hang_track, clock.now())?;
+				crate::start::next(&self.msf_track, at)?.1
+			}
+		};
 		// One snapshot per group while deltas are disabled.
 		#[cfg(test)]
 		let before = self.hang_track.largest();
@@ -627,6 +649,7 @@ impl<E: CatalogExt> Producer<E> {
 			state,
 			outputs: &mut self.outputs,
 			updated: false,
+			at: None,
 		})
 	}
 
@@ -844,6 +867,7 @@ impl<E: CatalogExt> Producer<E> {
 				state.gate = Gate::Buffering {
 					reservers: 1,
 					pending: false,
+					at: None,
 				}
 			}
 			Gate::Buffering { reservers, .. } => *reservers += 1,
@@ -869,7 +893,10 @@ impl<E: CatalogExt> Producer<E> {
 		let mut state = take(&self.current);
 		// Nothing was staged (e.g. every stream was ignored): stay unpublished so a later change
 		// still triggers the first emit, rather than publishing an empty catalog now.
-		if !matches!(state.gate, Gate::Buffering { pending: true, .. }) || !state.gate_opens() {
+		let Gate::Buffering { pending: true, at, .. } = state.gate else {
+			return;
+		};
+		if !state.gate_opens() {
 			return;
 		}
 		state.gate = Gate::Published;
@@ -878,7 +905,7 @@ impl<E: CatalogExt> Producer<E> {
 		state.estimates.fold();
 		// Emitted under the lock, as a guard's publish is, since the MSF state belongs to it.
 		let state = &mut *state;
-		if let Err(err) = self.outputs.emit(&state.catalog, &mut state.msf, &state.clock) {
+		if let Err(err) = self.outputs.emit(&state.catalog, &mut state.msf, &state.clock, at) {
 			tracing::error!(%err, "failed to publish the catalog, aborting its tracks");
 			self.outputs.abort(&err);
 			state.closed = Some(err);
@@ -1147,6 +1174,8 @@ pub struct Guard<'a, E: CatalogExt = ()> {
 	state: MutexGuard<'a, State<E>>,
 	outputs: &'a mut Outputs<E>,
 	updated: bool,
+	/// The caller's timestamp for this publish, or `None` to stamp it on publishing.
+	at: Option<moq_net::Timestamp>,
 }
 
 impl<E: CatalogExt> Guard<'_, E> {
@@ -1158,6 +1187,15 @@ impl<E: CatalogExt> Guard<'_, E> {
 	/// what to do with it.
 	pub fn commit(mut self) -> crate::Result<()> {
 		self.publish()
+	}
+
+	/// Stamp this publish at `timestamp` on the producer's [`clock`](Producer::clock), rather than
+	/// the time it is written, such as the frame a layout change takes effect at.
+	///
+	/// The publish fails with [`TimestampRewind`](crate::container::TimestampRewind) unless
+	/// `timestamp` is past the last published catalog's, rather than reordering it.
+	pub fn set_timestamp(&mut self, timestamp: moq_net::Timestamp) {
+		self.at = Some(timestamp);
 	}
 
 	/// Move the producer onto `clock`, a re-basing of the one it has, before anything fixed it.
@@ -1184,8 +1222,9 @@ impl<E: CatalogExt> Guard<'_, E> {
 		// catalog names a track; the mutation stays in `current` and `pending` marks it for the
 		// flush once the gate opens.
 		if matches!(self.state.gate, Gate::Buffering { .. }) && !self.state.gate_opens() {
-			if let Gate::Buffering { pending, .. } = &mut self.state.gate {
+			if let Gate::Buffering { pending, at, .. } = &mut self.state.gate {
 				*pending = true;
+				*at = self.at;
 			}
 			return Ok(());
 		}
@@ -1195,7 +1234,8 @@ impl<E: CatalogExt> Guard<'_, E> {
 
 		// Folded only once it is on the wire, so a failed emit leaves the estimate held.
 		let state = &mut *self.state;
-		self.outputs.emit(&state.catalog, &mut state.msf, &state.clock)?;
+		self.outputs
+			.emit(&state.catalog, &mut state.msf, &state.clock, self.at)?;
 		self.state.estimates.fold();
 		Ok(())
 	}
@@ -2046,6 +2086,81 @@ mod test {
 		// The drop that follows `commit` must not publish a second snapshot.
 		catalog.finish().unwrap();
 		assert_eq!(sent(&catalog), Some(0));
+	}
+
+	/// The newest group start on the hang and MSF catalog tracks, in their timescale.
+	fn starts(catalog: &Producer) -> [Option<u64>; 2] {
+		let outputs = &catalog.outputs;
+		[&outputs.hang_track, &outputs.msf_track].map(|track| track.largest().map(|largest| largest.group))
+	}
+
+	/// `ms` in the catalog tracks' timescale.
+	fn start(catalog: &Producer, ms: u64) -> u64 {
+		let at = moq_net::Timestamp::from_millis(ms).unwrap();
+		catalog.outputs.hang_track.info().rescale(at).unwrap().value()
+	}
+
+	/// Publish an Opus rendition `name`, stamped at `at` (ms) when given.
+	fn opus(catalog: &mut Producer, name: &str, at: Option<u64>) -> crate::Result<()> {
+		let mut guard = catalog.modify().unwrap();
+		if let Some(at) = at {
+			guard.set_timestamp(moq_net::Timestamp::from_millis(at).unwrap());
+		}
+		guard
+			.audio
+			.renditions
+			.insert(name.to_string(), AudioConfig::new(AudioCodec::Opus, 48_000, 2));
+		guard.commit()
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_set_timestamp_stamps_both_tracks() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+
+		// Ahead of the clock, as a frame a pipeline composes early.
+		opus(&mut catalog, "a", Some(60_000)).unwrap();
+		let at = start(&catalog, 60_000);
+		assert_eq!(starts(&catalog), [Some(at); 2]);
+
+		// An unstamped publish still lands after it, though the clock reads earlier.
+		opus(&mut catalog, "b", None).unwrap();
+		assert_eq!(starts(&catalog), [Some(at + 1); 2]);
+
+		opus(&mut catalog, "c", Some(90_000)).unwrap();
+		assert_eq!(starts(&catalog), [Some(start(&catalog, 90_000)); 2]);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_set_timestamp_that_does_not_advance_is_refused() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+
+		opus(&mut catalog, "a", Some(60_000)).unwrap();
+		let published = starts(&catalog);
+		for at in [60_000, 59_000] {
+			let result = opus(&mut catalog, &format!("b{at}"), Some(at));
+			assert!(
+				matches!(result, Err(crate::Error::TimestampRewind(_))),
+				"{at}: {result:?}"
+			);
+			assert_eq!(starts(&catalog), published, "a refused catalog reached the wire");
+		}
+		// The refusal leaves the tracks open: the next change goes out at its own timestamp.
+		opus(&mut catalog, "c", Some(61_000)).unwrap();
+		assert_eq!(starts(&catalog), [Some(start(&catalog, 61_000)); 2]);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_buffered_set_timestamp_stamps_the_initial_publish() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+
+		let reserved = catalog.reserve();
+		opus(&mut catalog, "a", Some(60_000)).unwrap();
+		assert_eq!(starts(&catalog), [None; 2], "published before the reservation resolved");
+		drop(reserved);
+		assert_eq!(starts(&catalog), [Some(start(&catalog, 60_000)); 2]);
 	}
 
 	/// A video rendition `video0` on `catalog`, with a keyframe group at each of `starts` (ms).
