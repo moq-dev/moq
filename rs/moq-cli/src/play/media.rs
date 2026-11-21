@@ -469,11 +469,13 @@ impl<O: Output> Media<O> {
 							|name, config| !playback.finished(&Track::of(&source, config, name)),
 						)
 					});
-				playback.read(Kind::Video, turning && !turned_back);
 				if turned_back {
+					// Nothing in the snapshot was tried, so it stays unread: once the rendition
+					// playing ends, the half reads it.
 					video_opening = None;
 					playback.settle(Kind::Video);
 				} else {
+					playback.read(Kind::Video, turning);
 					let available: Vec<VideoCandidate> = snapshot
 						.video
 						.enabled()
@@ -594,8 +596,18 @@ impl<O: Output> Media<O> {
 				// The playout delay is the target latency, and the max how late a group may be.
 				let mut track = playout.consumer(subscriber, format);
 				// Ready only once the track answers with media, so a replacement swaps in with
-				// its picture on the way rather than freezing what plays while it waits.
-				let first = track.read().await?.context("the track ended before its first frame")?;
+				// its picture on the way rather than freezing what plays while it waits. A stop
+				// marker or gap before any frame is no picture: nothing was read for it to end or
+				// skip, and the frames that drain a stopped group are padding.
+				let mut stopped = None;
+				let first = loop {
+					let read = track.read().await?.context("the track ended before its first frame")?;
+					match &read {
+						moq_mux::container::Read::Frame { group, .. } if stopped != Some(*group) => break read,
+						moq_mux::container::Read::End { group, .. } => stopped = Some(*group),
+						_ => {}
+					}
+				};
 				Ok::<_, anyhow::Error>((first, track, decoder))
 			}
 			.await;
