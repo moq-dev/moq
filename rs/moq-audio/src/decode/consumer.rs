@@ -94,6 +94,10 @@ pub struct Options {
 	pub estimate: bool,
 	/// Initial cached-group policy.
 	pub start: Start,
+	/// The subscription priority, ordering this track against the others on the session under
+	/// congestion: higher is sent first. Defaults to hang's `PRIORITY.audio`;
+	/// [`Consumer::set_priority`] moves it while running.
+	pub priority: i8,
 }
 
 impl Default for Options {
@@ -104,6 +108,7 @@ impl Default for Options {
 			delay: Delay::default(),
 			estimate: true,
 			start: Start::default(),
+			priority: hang::catalog::PRIORITY.audio,
 		}
 	}
 }
@@ -124,6 +129,9 @@ impl Options {
 pub struct Consumer {
 	decoder: Decoder,
 	track: moq_mux::container::Consumer<moq_mux::catalog::hang::Container>,
+	/// The subscription's preferences, for a priority change, until the track ends: holding them
+	/// past that would keep the publisher's demand the container released.
+	control: Option<moq_net::track::Control>,
 	resampler: Option<Resampler>,
 	/// Converts the decoded layout to the output's, when they differ.
 	remix: Option<Remix>,
@@ -243,10 +251,7 @@ impl Consumer {
 		// max too, so a narrower one while joining would drop the groups queued behind a reader
 		// slow to take its first, and the publisher should never see a stated zero min first.
 		let mut subscriber = track
-			.subscribe(
-				playout
-					.subscription(moq_net::track::Subscription::default().with_priority(hang::catalog::PRIORITY.audio)),
-			)
+			.subscribe(playout.subscription(moq_net::track::Subscription::default().with_priority(options.priority)))
 			.await?;
 		// Latest skips cached history; a warmup is primed by trimming the newest group's
 		// start, like any other join. Move the local cursor, not Subscription::ranges: the
@@ -259,6 +264,7 @@ impl Consumer {
 		{
 			subscriber = subscriber.with_range(live_edge.group..);
 		}
+		let control = subscriber.control();
 		let track = subscriber;
 		let max_age = track.info().max_age;
 		let max_delay = options
@@ -289,6 +295,7 @@ impl Consumer {
 			stated,
 			decoder,
 			track,
+			control: Some(control),
 			resampler: None,
 			remix,
 			options,
@@ -346,6 +353,20 @@ impl Consumer {
 		self.options.delay = self.options.delay.with_max(max);
 		self.track.set_delay(self.stated());
 		self.max_delay = max.min(self.max_age.unwrap_or(std::time::Duration::MAX));
+	}
+
+	/// Move [`Options::priority`] mid-stream, updating the subscription in place rather than
+	/// resubscribing, so nothing already fetched is dropped or fetched again.
+	pub fn set_priority(&mut self, priority: i8) {
+		self.options.priority = priority;
+		let Some(control) = &self.control else {
+			return;
+		};
+		let subscription = control.subscription();
+		if subscription.priority != priority {
+			// Closed only once the track ended, when there is nothing left to prioritize.
+			let _ = control.update(subscription.with_priority(priority));
+		}
 	}
 
 	/// The playout delay to hold ahead of the playhead right now: the fixed
@@ -728,6 +749,9 @@ impl Consumer {
 				Some(Err(err)) => self.ended = Some(Some(err.into())),
 				None => {}
 			}
+			if self.ended.is_some() {
+				self.control = None;
+			}
 		}
 	}
 
@@ -1063,6 +1087,34 @@ mod tests {
 					.with_max(Duration::from_millis(600))
 			)
 		);
+	}
+
+	/// The priority reaches the publisher's aggregate subscription at hang's audio default, and a
+	/// change moves that subscription in place, keeping the moved delay with it.
+	#[tokio::test(start_paused = true)]
+	async fn priority_reaches_the_subscription_and_moves_in_place() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 48_000, 1);
+		let mut consumer = Consumer::new(&broadcast.consume(), &catalog, "audio", Options::new())
+			.await
+			.unwrap();
+		assert_eq!(
+			track.subscription().map(|sub| sub.priority),
+			Some(hang::catalog::PRIORITY.audio)
+		);
+
+		consumer.set_priority(-20);
+		assert_eq!(consumer.options().priority, -20);
+		assert_eq!(track.subscription().map(|sub| sub.priority), Some(-20));
+
+		// A later delay change rewrites the subscription without undoing the priority.
+		consumer.set_max_delay(Duration::from_secs(2));
+		let subscription = track.subscription().unwrap();
+		assert_eq!(subscription.priority, -20);
+		assert_eq!(subscription.delay.max, Some(Duration::from_secs(2)));
 	}
 
 	/// A moved max delay reaches the subscription, plus the warmup, clamped to the max age.
