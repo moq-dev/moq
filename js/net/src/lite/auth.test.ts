@@ -6,8 +6,8 @@ import { AuthError, AuthMessage, AuthOk, decodeAuthReplyMaybe, LiteAuthWire } fr
 import * as Lite from "./index.ts";
 import * as Message from "./message.ts";
 
-function patterns(...texts: string[]): Path.Patterns {
-	return new Path.Patterns(texts.map((text) => Path.Pattern.parse(text)));
+function prefixes(...texts: string[]): Path.Prefixes {
+	return Path.Prefixes.parse(texts);
 }
 
 /** Round-trip bytes through a writer and back out of a reader. */
@@ -41,7 +41,7 @@ test("AUTH round-trips its token", async () => {
 });
 
 test("AUTH_OK and AUTH_ERROR round-trip behind their type", async () => {
-	const ok = new AuthOk(patterns("**"), patterns(), 60_000);
+	const ok = new AuthOk(prefixes(""), prefixes(), 60_000);
 	const err = new AuthError(SessionCode.Unauthorized, "expired");
 	const r = await roundTrip(async (w) => {
 		await ok.encode(w, Lite.Version.DRAFT_07);
@@ -50,8 +50,8 @@ test("AUTH_OK and AUTH_ERROR round-trip behind their type", async () => {
 	const first = await decodeAuthReplyMaybe(r, Lite.Version.DRAFT_07);
 	expect(first).toBeInstanceOf(AuthOk);
 	if (!(first instanceof AuthOk)) throw new Error("unreachable");
-	// `**` grants everything; the empty list grants nothing.
-	expect(first.publish.equals(new Path.Patterns([Path.Pattern.all()]))).toBe(true);
+	// The empty prefix grants everything; the empty list grants nothing.
+	expect(first.publish.equals(Path.Prefixes.all())).toBe(true);
 	expect(first.subscribe.size).toBe(0);
 	expect(first.expires).toBe(60_000);
 
@@ -60,8 +60,8 @@ test("AUTH_OK and AUTH_ERROR round-trip behind their type", async () => {
 	expect(await decodeAuthReplyMaybe(r, Lite.Version.DRAFT_07)).toBeUndefined();
 });
 
-test("literal and wildcard grants travel exactly, never widened", async () => {
-	const ok = new AuthOk(patterns("room/alice", "room/*/cam", "**/demo.hang"), patterns("", "lobby/**"));
+test("prefix grants travel exactly, reduced", async () => {
+	const ok = new AuthOk(prefixes("room/alice", "room/bob/cam", "demo.hang"), prefixes("lobby", "lobby/x"));
 	const r = await roundTrip((w) => ok.encode(w, Lite.Version.DRAFT_07));
 	const got = await decodeAuthReplyMaybe(r, Lite.Version.DRAFT_07);
 	if (!(got instanceof AuthOk)) throw new Error("expected AUTH_OK");
@@ -71,17 +71,17 @@ test("literal and wildcard grants travel exactly, never widened", async () => {
 
 // The same bytes as `auth_ok_golden` in `rs/moq-net/src/lite/auth.rs`.
 test("AUTH_OK matches the Rust encoding", async () => {
-	const ok = new AuthOk(patterns("room/*/cam", "**/b.hang"), patterns(""), 1000);
+	const ok = new AuthOk(prefixes("room-b", "room/a"), prefixes(""), 1000);
 	const r = await roundTrip((w) => ok.encode(w, Lite.Version.DRAFT_07));
 	const text = (s: string) => [s.length, ...new TextEncoder().encode(s)];
 	expect([...(await r.readAll())]).toEqual([
 		0x00, // AUTH_OK
-		0x1a, // length
-		0x02, // publish count, in canonical order
-		...text("**/b.hang"),
-		...text("room/*/cam"),
+		0x13, // length
+		0x02, // publish count, in segment order: `room` sorts before `room-b`
+		...text("room/a"),
+		...text("room-b"),
 		0x01, // subscribe count
-		0x00, // the empty pattern: the root alone
+		0x00, // the empty prefix: every path
 		0x83,
 		0xe8, // expires: 1000ms, as a leading-ones varint
 	]);
@@ -97,8 +97,9 @@ test("a reply larger than the peer reads writes nothing", async () => {
 	expect((await r.readAll()).byteLength).toBe(0);
 });
 
-test("only valid, canonical patterns decode", async () => {
-	for (const text of ["*/**", "/room", "room/", "room//a", "a*b*c", "**/**", "a**"]) {
+// Mirrors the refused texts in `rs/moq-net/src/lite/auth.rs`: a wildcard or a malformed path.
+test("only valid prefixes decode", async () => {
+	for (const text of ["**", "room/**", "*", "room/*/cam", "cam-*.hang", "/room", "room/", "room//a", "a\\b"]) {
 		const r = await roundTrip(async (w) => {
 			const body = new TextEncoder().encode(text);
 			await w.u53(0); // AUTH_OK
@@ -131,7 +132,7 @@ test("unsupported after AUTH_OK is an AUTH_ERROR on the wire", async () => {
 		version: Lite.Version.DRAFT_07,
 	});
 	const wire = new LiteAuthWire({} as WebTransport, Lite.Version.DRAFT_07);
-	await wire.grant(stream, { publish: patterns("room/**"), subscribe: patterns() });
+	await wire.grant(stream, { publish: prefixes("room"), subscribe: prefixes() });
 	await wire.unsupported(stream, "grant cannot be encoded");
 	stream.close();
 	await stream.writer.closed;
@@ -143,7 +144,7 @@ test("unsupported after AUTH_OK is an AUTH_ERROR on the wire", async () => {
 });
 
 test("malformed AUTH_OK closes its session", async () => {
-	for (const pattern of ["*/**", "/room", Array(33).fill("room").join("/"), undefined]) {
+	for (const pattern of ["room/**", "/room", Array(33).fill("room").join("/"), undefined]) {
 		const reader = await roundTrip(async (w) => {
 			await Message.encode(
 				w,
@@ -161,7 +162,7 @@ test("malformed AUTH_OK closes its session", async () => {
 });
 
 test("the largest shared expiry remains valid", async () => {
-	const ok = new AuthOk(patterns(), patterns(), Number.MAX_SAFE_INTEGER);
+	const ok = new AuthOk(prefixes(), prefixes(), Number.MAX_SAFE_INTEGER);
 	const reader = await roundTrip((w) => ok.encode(w, Lite.Version.DRAFT_07));
 	expect(await decodeAuthReplyMaybe(reader, Lite.Version.DRAFT_07)).toEqual(ok);
 });

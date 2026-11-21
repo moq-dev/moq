@@ -485,7 +485,7 @@ test("a route received through a scoped handle goes offline when the handle clos
 	const origin = new Producer();
 	const announced = origin.consume().routes();
 
-	const scoped = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.all()]));
+	const scoped = origin.scope(Path.empty(), Path.Prefixes.all());
 	const route = wireOf(scoped).receive(Path.from("room"), WireRoute.default);
 	expect(await announced.next()).toMatchObject({ prefix: Path.from("room"), kind: "start" });
 
@@ -2140,15 +2140,15 @@ test("announced filters by arbitrary patterns and reports captures", async () =>
 
 test("announced lists full names while covering views and session advertisements keep overlaps", async () => {
 	const origin = new Producer();
-	const patterns = new Path.Patterns([Path.Pattern.parse("*.hang"), Path.Pattern.parse("**/*.chat")]);
-	const reader = origin.scope(Path.from("project"), patterns).consume();
+	const filter = Path.Pattern.parse("**/*.chat");
+	const reader = origin.scope(Path.from("project"), Path.Prefixes.all()).consume();
 	const cam = origin.claim(Path.from("project/cam.hang"));
 	const overlap = origin.claim(Path.from("project/room/mic.hang"));
 	const chat = origin.claim(Path.from("project/lobby.chat"));
-	const selected = await announcedView(reader);
-	const covering = await announcedView(reader, undefined, { covering: true });
+	const selected = await announcedView(reader, filter);
+	const covering = await announcedView(reader, filter, { covering: true });
 	const all = [Path.from("cam.hang"), Path.from("lobby.chat"), Path.from("room/mic.hang")];
-	expect([...selected.peek().keys()]).toEqual([Path.from("cam.hang"), Path.from("lobby.chat")]);
+	expect([...selected.peek().keys()]).toEqual([Path.from("lobby.chat")]);
 	expect([...covering.peek().keys()].sort()).toEqual(all);
 	expect(Array.from(wireOf(reader).advertised.peek()?.keys() ?? []).sort()).toEqual(all);
 
@@ -2159,7 +2159,7 @@ test("announced lists full names while covering views and session advertisements
 	overlap.close();
 	nested.close();
 	await new Promise<void>((resolve) => setImmediate(resolve));
-	expect([...selected.peek().keys()]).toEqual([Path.from("cam.hang"), Path.from("lobby.chat")]);
+	expect([...selected.peek().keys()]).toEqual([Path.from("lobby.chat")]);
 	await selected.close();
 	await covering.close();
 	cam.close();
@@ -2170,7 +2170,7 @@ test("announced lists full names while covering views and session advertisements
 test("announced filters before rooting and retains lifecycle, routing and watch cleanup", async () => {
 	const origin = new Producer();
 	const root = Path.from("room/alice");
-	const scoped = origin.scope(root, new Path.Patterns([Path.Pattern.all()]));
+	const scoped = origin.scope(root, Path.Prefixes.all());
 	const reader = scoped.consume();
 	const interests: string[] = [];
 	const unlisten = wireOf(origin).interests((prefix, wanted) => interests.push(`${wanted ? "+" : "-"}${prefix}`));
@@ -2393,9 +2393,9 @@ test("a serving session closing releases quiet origin change listeners", async (
 	}
 });
 
-test("a rooted producer shares the table and enforces its pattern union", async () => {
+test("a rooted producer shares the table and enforces its prefixes", async () => {
 	const origin = new Producer();
-	const scoped = origin.scope(Path.from("tenant"), new Path.Patterns([Path.Pattern.parse("room/*")]));
+	const scoped = origin.scope(Path.from("tenant"), Path.Prefixes.parse(["room/alice", "room/carol"]));
 	const broadcast = publish(scoped, Path.from("room/alice"));
 	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect((await announcedView(origin)).peek().has(Path.from("tenant/room/alice"))).toBe(true);
@@ -2409,21 +2409,19 @@ test("a rooted producer shares the table and enforces its pattern union", async 
 	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(() => scoped.route(Path.from("other"), { hidden: true }).broadcast).toThrow("outside the origin scope");
 	await new Promise<void>((resolve) => setImmediate(resolve));
-	expect(() => scoped.request(Path.from("room/alice/deep"))).toThrow("outside the origin scope");
+	expect(() => scoped.request(Path.from("room/bob"))).toThrow("outside the origin scope");
 	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(() => scoped.claim(Path.from("other"))).toThrow("outside the origin scope");
 	await new Promise<void>((resolve) => setImmediate(resolve));
-	expect(() => scoped.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("other/**")]))).toThrow(
-		"do not overlap",
-	);
+	expect(() => scoped.scope(Path.empty(), Path.Prefixes.parse(["other"]))).toThrow("do not overlap");
 	await new Promise<void>((resolve) => setImmediate(resolve));
-	expect(() => origin.scope(Path.empty(), new Path.Patterns())).toThrow("do not overlap");
+	expect(() => origin.scope(Path.empty(), new Path.Prefixes())).toThrow("do not overlap");
 
-	const nested = scoped.scope(Path.from("room"), new Path.Patterns([Path.Pattern.all()]));
+	const nested = scoped.scope(Path.from("room"), Path.Prefixes.all());
 	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect([...(await announcedView(nested)).peek().keys()]).toEqual([Path.from("alice")]);
 	await new Promise<void>((resolve) => setImmediate(resolve));
-	expect(() => nested.route(Path.from("alice/deep"), { hidden: true }).broadcast).toThrow("outside the origin scope");
+	expect(() => nested.route(Path.from("bob"), { hidden: true }).broadcast).toThrow("outside the origin scope");
 	const announced = nested.routes();
 	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(await announced.next()).toMatchObject({ kind: "start", prefix: Path.from("alice") });
@@ -2436,8 +2434,8 @@ test("a rooted producer shares the table and enforces its pattern union", async 
 test("closing a derived handle releases only what it registered", async () => {
 	const origin = new Producer();
 	const owned = publish(origin, Path.from("lobby"));
-	const scoped = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from("room"))]));
-	const wide = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.all()]));
+	const scoped = origin.scope(Path.empty(), new Path.Prefixes([Path.Prefix.parse(Path.from("room"))]));
+	const wide = origin.scope(Path.empty(), Path.Prefixes.all());
 	const inside = publish(scoped, Path.from("room/alice"));
 	const claim = scoped.claim(Path.from("room/claim"));
 	const ranked = wide.claim(Path.from("ranked"));
@@ -2458,7 +2456,7 @@ test("closing a derived handle releases only what it registered", async () => {
 	expect((await announcedView(origin)).peek().has(Path.from("room/late"))).toBe(false);
 
 	// The owner and fresh handles keep working.
-	const again = publish(origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.all()])), Path.from("room/bob"));
+	const again = publish(origin.scope(Path.empty(), Path.Prefixes.all()), Path.from("room/bob"));
 	expect((await announcedView(origin)).peek().has(Path.from("room/bob"))).toBe(true);
 
 	// Closing what was already released is a no-op.
@@ -2474,7 +2472,7 @@ test("closing a derived handle releases only what it registered", async () => {
 test("a broadcast a derived handle released cannot announce again", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
-	const scoped = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.all()]));
+	const scoped = origin.scope(Path.empty(), Path.Prefixes.all());
 	const path = Path.from("room");
 	const publication = scoped.route(path);
 	const broadcast = publication.broadcast;
@@ -2494,7 +2492,7 @@ test("a broadcast a derived handle released cannot announce again", async () => 
 test("closing a derived handle withdraws the sessions and answers attached through it", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
-	const scoped = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.all()]));
+	const scoped = origin.scope(Path.empty(), Path.Prefixes.all());
 	const path = Path.from("blind");
 
 	const request = consumer.request(path);
@@ -2551,7 +2549,7 @@ test("closing a derived handle withdraws the sessions and answers attached throu
 
 test("a scoped dynamic only serves allowed paths and presents relative requests", async () => {
 	const origin = new Producer();
-	const scoped = origin.scope(Path.from("tenant"), new Path.Patterns([Path.Pattern.parse("room/*/chat")]));
+	const scoped = origin.scope(Path.from("tenant"), Path.Prefixes.parse(["room/alice/chat"]));
 	const dynamic = scoped.claim(Path.from("room"));
 	await new Promise<void>((resolve) => setImmediate(resolve));
 	const denied = origin.request(Path.from("tenant/room/alice/video"));
@@ -2579,7 +2577,7 @@ test("a scoped dynamic only serves allowed paths and presents relative requests"
 
 test("scoped wire views filter and rebase advertisements and blind requests", () => {
 	const origin = new Producer();
-	const scoped = origin.scope(Path.from("tenant"), new Path.Patterns([Path.Pattern.parse("room/**")]));
+	const scoped = origin.scope(Path.from("tenant"), Path.Prefixes.parse(["room"]));
 	const local = publish(origin, Path.from("tenant/room/live"));
 	const hidden = publish(origin, Path.from("tenant/other/live"));
 	const allowed = origin.request(Path.from("tenant/room/missing"));
@@ -2597,9 +2595,9 @@ test("scoped wire views filter and rebase advertisements and blind requests", ()
 
 test("a scoped dynamic is announced only to readers its scope can serve", async () => {
 	const origin = new Producer();
-	const dynamic = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("*/chat")])).claim(Path.empty());
-	const chat = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("room/chat")]));
-	const video = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("room/video")]));
+	const dynamic = origin.scope(Path.empty(), Path.Prefixes.parse(["room/chat"])).claim(Path.empty());
+	const chat = origin.scope(Path.empty(), Path.Prefixes.parse(["room/chat"]));
+	const video = origin.scope(Path.empty(), Path.Prefixes.parse(["room/video"]));
 	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect([...(await announcedView(chat, undefined, { covering: true })).peek().keys()]).toEqual([Path.empty()]);
 	await new Promise<void>((resolve) => setImmediate(resolve));
@@ -2616,7 +2614,7 @@ test("a rooted reader presents the most specific covering route", async () => {
 	const origin = new Producer();
 	const narrow = origin.claim(Path.from("room/alice"), { cost: 9n });
 	const broad = origin.claim(Path.from("room"), { cost: 1n });
-	const rooted = origin.scope(Path.from("room/alice"), new Path.Patterns([Path.Pattern.all()]));
+	const rooted = origin.scope(Path.from("room/alice"), Path.Prefixes.all());
 	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect((await announcedView(rooted)).peek().get(Path.empty())?.cost).toBe(9n);
 	await new Promise<void>((resolve) => setImmediate(resolve));
@@ -2628,9 +2626,9 @@ test("a rooted reader presents the most specific covering route", async () => {
 
 test("a scoped reader picks the best route its scope can see at a prefix", async () => {
 	const origin = new Producer();
-	const scoped = (pattern: string) => origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse(pattern)]));
-	const chat = scoped("*/chat").claim(Path.empty(), { cost: 1n });
-	const video = scoped("*/video").claim(Path.empty(), { cost: 5n });
+	const scoped = (prefix: string) => origin.scope(Path.empty(), Path.Prefixes.parse([prefix]));
+	const chat = scoped("room/chat").claim(Path.empty(), { cost: 1n });
+	const video = scoped("room/video").claim(Path.empty(), { cost: 5n });
 	const reader = scoped("room/video");
 
 	await new Promise<void>((resolve) => setImmediate(resolve));
@@ -2656,32 +2654,11 @@ test("a scoped reader picks the best route its scope can see at a prefix", async
 	origin.close();
 });
 
-test("a scoped reader sees a local broadcast that only loses to a route outside its scope", async () => {
-	const origin = new Producer();
-	const chat = origin
-		.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("room/*/chat")]))
-		.claim(Path.from("room/alice"), { instance: { id: INSTANCE, epoch: 0n }, cost: 0n });
-	const localRoute = origin.route(Path.from("room/alice"), { instance: { id: INSTANCE, epoch: 0n }, cost: 5n });
-	const local = localRoute.broadcast;
-	const reader = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("room/*")]));
-
-	await new Promise<void>((resolve) => setImmediate(resolve));
-
-	expect((await announcedView(reader)).peek().get(Path.from("room/alice"))?.cost).toBe(5n);
-	// Unscoped, the cheaper route still wins the prefix.
-	await new Promise<void>((resolve) => setImmediate(resolve));
-	expect((await announcedView(origin)).peek().get(Path.from("room/alice"))?.cost).toBe(0n);
-
-	local.close();
-	chat.close();
-	origin.close();
-});
-
 test("broadcast handles carry the path they were created or requested at", async () => {
 	expect(new BroadcastProducer().consume().path).toBe(Path.empty());
 
 	const origin = new Producer();
-	const scoped = origin.scope(Path.from("tenant"), new Path.Patterns([Path.Pattern.parse("room/*")]));
+	const scoped = origin.scope(Path.from("tenant"), Path.Prefixes.parse(["room"]));
 	const broadcast = publish(scoped, Path.from("room/alice"));
 	expect(broadcast.consume().path).toBe(Path.from("tenant/room/alice"));
 
@@ -2777,7 +2754,7 @@ test("a scope's merged covering prefixes never supersede across prefixes", async
 	const instance = Instance.random();
 	const room = origin.claim(Path.from("room"), { instance: { id: instance, epoch: 2n } });
 	const video = origin.claim(Path.from("room/video"), { instance: { id: instance, epoch: 1n } });
-	const reader = origin.scope(Path.from("room/video"), new Path.Patterns([Path.Pattern.all()])).consume();
+	const reader = origin.scope(Path.from("room/video"), Path.Prefixes.all()).consume();
 	await settle();
 	const table = wireOf(reader).advertised.peek();
 	if (!table) throw new Error("expected a table");
@@ -2792,14 +2769,14 @@ test("supersession only counts routes the reader can see", async () => {
 	const origin = new Producer();
 	const instance = Instance.random();
 	const video = origin
-		.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("*/video")]))
+		.scope(Path.empty(), Path.Prefixes.parse(["room/video"]))
 		.claim(Path.empty(), { instance: { id: instance, epoch: 1n } });
 	const live = await announcedView(origin, Path.Pattern.parse("room/video"), { covering: true });
 	await settle();
 	expect(live.peek().size).toBe(1);
 	// A higher epoch the reader cannot see never hides the route it can.
 	const chat = origin
-		.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("*/chat")]))
+		.scope(Path.empty(), Path.Prefixes.parse(["room/chat"]))
 		.claim(Path.empty(), { instance: { id: instance, epoch: 2n } });
 	await settle();
 	expect([...live.peek().values()].map((route) => route.epoch)).toEqual([1n]);
@@ -3262,7 +3239,7 @@ test("published names refuse navigation segments", () => {
 			expect(() => origin.claim(path)).toThrow();
 			expect(() => wireOf(origin).receive(path, WireRoute.default)).toThrow();
 		}
-		const scoped = origin.scope(Path.from("room/.."), new Path.Patterns([Path.Pattern.all()]));
+		const scoped = origin.scope(Path.from("room/.."), Path.Prefixes.all());
 		expect(() => scoped.route(Path.from("cam"), { hidden: true }).broadcast).toThrow();
 		for (const path of ["room/.pro/cam", "room/a..b", "room/cam"]) {
 			origin.route(Path.from(path), { hidden: true }).broadcast.close();

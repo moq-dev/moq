@@ -14,7 +14,7 @@ use support::{AppendNext, AtStart};
 use std::time::Duration;
 
 use futures::channel::mpsc;
-use moq_net::{Error, Pattern, Patterns, Version, auth::Grant, origin};
+use moq_net::{Error, Prefix, Prefixes, Version, auth::Grant, origin};
 use support::harness::{MockConnectOptions, MockPair, connect_mock, peer};
 
 /// How long a relay lets an announce stream stall before closing its session.
@@ -364,7 +364,7 @@ async fn a_scoped_peers_dead_leaves_other_sessions_routes_alone() {
 	options.server_subscribe = Some(w.clone());
 	let s_w = connect_mock(options).await;
 	let mut grant = Grant::default();
-	grant.publish = [Pattern::subtree("a").unwrap()].into_iter().collect::<Patterns>();
+	grant.publish = Prefixes::from(Prefix::try_from("a").unwrap());
 	s_w.server.auth().authorize(&grant);
 	quiesce().await;
 

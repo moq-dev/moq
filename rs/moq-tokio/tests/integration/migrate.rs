@@ -260,7 +260,7 @@ async fn a_predecessor_serves_until_its_last_subscription_leaves() {
 async fn a_replacement_does_not_check_what_its_predecessor_learned() {
 	let versions = vec![LITE_07.parse().unwrap()];
 	let origin = moq_tokio::origin::spawn();
-	let only: moq_net::Patterns = [moq_net::Pattern::subtree("up").unwrap()].into_iter().collect();
+	let only = moq_net::Prefixes::from(moq_net::Prefix::try_from("up").unwrap());
 	let ingress = origin.scope("", &only).expect("scope");
 	let (port, mut sessions) = relay_into(&origin, ingress, versions.clone()).await;
 	let local = moq_tokio::origin::spawn();

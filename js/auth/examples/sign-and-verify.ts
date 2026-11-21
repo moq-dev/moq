@@ -20,8 +20,8 @@ async function main() {
 	// Create claims
 	const claims: Claims = {
 		root: "demo",
-		publish: ["bbb/**"], // `demo/bbb` and everything beneath it
-		subscribe: ["**"], // Any broadcast under `demo/`
+		publish: ["bbb"], // `demo/bbb` and everything beneath it
+		subscribe: [""], // Any broadcast under `demo/`
 		expires: Math.floor(Date.now() / 1000) + 3600, // 1 hour from now (in seconds), written as `exp`
 		issued: Math.floor(Date.now() / 1000), // Issued at (in seconds), written as `iat`
 	};
@@ -35,7 +35,7 @@ async function main() {
 	console.log("Verified claims:", verifiedClaims);
 
 	// Scope the claims to a connection path, the way a relay does. Connecting to
-	// demo/bbb consumes the "bbb/**" grant, leaving `**`: the path and everything beneath.
+	// demo/bbb consumes the "bbb" grant, leaving `""`: the path and everything beneath.
 	const permissions = Claims.authorize(verifiedClaims, "demo/bbb");
 	console.log("Permissions at demo/bbb:", permissions.publish.toJSON(), permissions.subscribe.toJSON());
 }

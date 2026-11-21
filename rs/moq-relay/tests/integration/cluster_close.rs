@@ -134,7 +134,7 @@ async fn a_relay_shutdown_closes_its_cluster_dials() {
 	config.connect = connect;
 	config.quic.idle_timeout = quic.idle_timeout;
 	config.cluster.connect = vec![moq_relay::cluster::Peer::new(peer_url(&server))];
-	config.auth.public = vec![moq_auth::Pattern::all()];
+	config.auth.public = vec![moq_auth::Prefix::all()];
 
 	let runtime = dialer_runtime();
 	let (trigger, running) = runtime

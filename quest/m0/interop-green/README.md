@@ -18,7 +18,7 @@ so it only needs to stay green.
   then the run's STEPS summary. The JS route port that [moq-dev/moq#8290](https://github.com/moq-dev/moq/pull/8290)
   waited on landed in [moq-dev/moq#8443](https://github.com/moq-dev/moq/pull/8443),
   so the pass now runs the datagram step; the `replacement` case runs by
-  default on Chromium, and its child quest restores it on Firefox. Decided 2026-11-09 (maintainer, AFK, accepting the
+  default on both engines and every wire. Decided 2026-11-09 (maintainer, AFK, accepting the
   recommendation): close this quest on a pass, which the maintainer set with
   those cases skipped; the pass that closes it runs all but `replacement`.
   Release remeasure measures stale planned-break pins after publication and
@@ -34,8 +34,20 @@ synchronized tone within 1039ms ... "audioStalled":true,"rms":0`). It was the
 first night the case ran on Firefox, since on 2026-11-17 and 2026-11-18 the
 job failed earlier on "after resume", which
 [moq-dev/moq#9141](https://github.com/moq-dev/moq/pull/9141) fixed. This
-epic owns the replacement case's history; reproduce it before planning a
-child.
+epic owns the replacement case's history.
+
+Decided 2026-11-20 (maintainer, /quest-plan), from the triage of Nightly run
+[44767045952](https://github.com/moq-dev/moq/actions/runs/44767045952) and
+scheduled Interop: two children,
+the replacement join (that stall, which also reproduces on Chromium
+`moq-transport-22`; [moq-dev/moq#9293](https://github.com/moq-dev/moq/pull/9293)
+joins live and lifts the quarantine, leaving
+[Chromium's moq-transport audio](/quest/m0/interop-green/ietf-audio-stall.md))
+and
+[the moq-transport JS joining FETCH](/quest/m0/interop-green/ietf-js-joining-fetch.md).
+The intermittent `go -> js` silent audio went to
+test flakes (fixed by the Go tone's start-anchored pacing), and the datagram
+cells are [moq-dev/moq#9197](https://github.com/moq-dev/moq/pull/9197)'s.
 
 Decided 2026-11-12 (maintainer), since green scheduled Interop is this epic's goal and stale pins caused four of the last six red runs:
 
@@ -239,7 +251,9 @@ Scheduled runs
   clock one window per worklet report. Its second restored the case on Chromium, and
   [moq-dev/moq#9023](https://github.com/moq-dev/moq/pull/9023) on Firefox: the player decodes the
   audio an incumbent replays behind the clock only to warm the codec. Off Chromium the moq-transport-22 row stays quarantined, since that
-  wire states no delay to cut the replay at.
+  wire states no delay to cut the replay at. [moq-dev/moq#9293](https://github.com/moq-dev/moq/pull/9293)
+  lifted that: the player joins live, and a relay serving a moq-transport live SUBSCRIBE asks its
+  route for a live join with no min delay.
 
 Public API: none. Wire: none.
 

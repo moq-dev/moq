@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use futures::{StreamExt, channel::mpsc};
 use moq_net::stats::{Message, Registry, SessionInfo, Tier};
-use moq_net::{Error, Instance, Pattern, Patterns, Timestamp, auth, origin, track};
+use moq_net::{Error, Instance, Prefix, Prefixes, Timestamp, auth, origin, track};
 use support::Kind;
 use support::harness::{MockConnectOptions, MockPair, connect_mock, now, spawn};
 
@@ -769,16 +769,12 @@ async fn tokened_uplink(dialer: &origin::Producer, acceptor: &origin::Producer) 
 	(pair, requests)
 }
 
-/// A grant of the `publish` subtrees, or of everything for `**`, subscribing to
-/// everything and lapsing at `expires`.
+/// A grant of the `publish` prefixes, subscribing to everything and lapsing at `expires`.
 fn grant(publish: &[&str], expires: Option<kio::clock::Instant>) -> auth::Grant {
 	let mut grant = auth::Grant::all();
 	grant.publish = (publish.iter())
-		.map(|prefix| match *prefix {
-			"**" => Pattern::all(),
-			prefix => Pattern::subtree(prefix).unwrap(),
-		})
-		.collect::<Patterns>();
+		.map(|prefix| Prefix::try_from(*prefix).unwrap())
+		.collect::<Prefixes>();
 	grant.expires = expires;
 	grant
 }
@@ -814,7 +810,7 @@ async fn a_grant_union_crosses_the_scoped_boundary_each_way() {
 		while let Some(request) = requests.next().await {
 			match request.token().as_ref() {
 				b"wide" => {
-					let issued = request.accept(grant(&["**"], Some(wide_expires)));
+					let issued = request.accept(grant(&[""], Some(wide_expires)));
 					// Revoking a token's grant once it expires is the acceptor's job.
 					kio::clock::sim::spawn(async move {
 						kio::clock::sleep_until(wide_expires).await;
@@ -938,9 +934,7 @@ struct Listing {
 
 impl Listing {
 	async fn new(node: &origin::Producer, prefix: &str) -> Self {
-		let routes = (node.consume().scope(prefix, &Patterns::from(Pattern::all())))
-			.unwrap()
-			.routes();
+		let routes = (node.consume().scope(prefix, &Prefixes::all())).unwrap().routes();
 		let listing = Self { routes };
 		// The request, its answer, and the initial set.
 		kio::clock::sleep(DEBOUNCE).await;
@@ -1043,7 +1037,7 @@ async fn an_origin_leaving_the_interest_ends_its_route_by_its_floor() {
 		let l = Origin::new(2, &["live/a", "vod/l"], &relay).await;
 		if scoped {
 			let mut grant = auth::Grant::default();
-			grant.publish = [Pattern::subtree("live/a").unwrap(), Pattern::subtree("vod").unwrap()]
+			grant.publish = [Prefix::try_from("live/a").unwrap(), Prefix::try_from("vod").unwrap()]
 				.into_iter()
 				.collect();
 			l.link.server.auth().authorize(&grant);

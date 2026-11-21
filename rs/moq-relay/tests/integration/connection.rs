@@ -17,7 +17,7 @@ const TIMEOUT: Duration = Duration::from_secs(60);
 async fn largest_quic_sequence_reaches_the_subscriber() {
 	for alpn in ["moq-lite-02", "moq-lite-06", "moq-transport-22"] {
 		let version = alpn.parse().unwrap();
-		let auth = memory::public(&["**"], &[], &[]);
+		let auth = memory::public(&[""], &[], &[]);
 		let cluster = memory::cluster();
 		let publisher = sim::origin();
 		let broadcast = publisher
@@ -156,7 +156,7 @@ async fn assert_refused(result: Result<moq_net::Session, moq_net::Error>) {
 async fn a_session_declaring_the_relays_own_hop_is_refused() {
 	for alpn in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"] {
 		let version: moq_net::Version = alpn.parse().unwrap();
-		let auth = memory::public(&["**"], &[], &[]);
+		let auth = memory::public(&[""], &[], &[]);
 		let cluster = memory::cluster();
 		if alpn != "moq-lite-07-wip" {
 			let client = moq_net::Client::new().with_publisher(cluster.origin.consume());
@@ -196,7 +196,7 @@ async fn a_relay_dialing_itself_on_lite07_is_refused_inner() {
 	use futures::StreamExt;
 
 	let net = sim::Net::new();
-	let auth = memory::public(&["**"], &[], &[]);
+	let auth = memory::public(&[""], &[], &[]);
 	let cluster = memory::spawn_cluster(net.options("self", &["self"]));
 	let (_trigger, shutdown) = moq_relay::shutdown::Observer::new(TIMEOUT);
 	let mut accepts = net.relay("self", &cluster, &auth, &shutdown);
@@ -217,7 +217,7 @@ async fn a_relay_dialing_itself_on_lite07_is_refused_inner() {
 /// says it publishes.
 #[kio::test]
 async fn subscribe_only_public_rejects_publisher_role() {
-	let auth = memory::public(&[], &[], &["**"]);
+	let auth = memory::public(&[], &[], &[""]);
 	let (origin, _broadcast, _track) = publish("cam");
 	let client = moq_net::Client::new().with_publisher(origin.consume());
 	assert_refused(connect(client, newest(), &memory::cluster(), &auth).await).await;
@@ -226,7 +226,7 @@ async fn subscribe_only_public_rejects_publisher_role() {
 /// The same grant keeps a subscriber: the role gate refuses only the mismatched direction.
 #[kio::test]
 async fn subscribe_only_public_accepts_subscriber_role() {
-	let auth = memory::public(&[], &[], &["**"]);
+	let auth = memory::public(&[], &[], &[""]);
 	let client = moq_net::Client::new().with_subscriber(sim::origin());
 	let session = connect(client, newest(), &memory::cluster(), &auth)
 		.await
@@ -240,7 +240,7 @@ async fn subscribe_only_public_accepts_subscriber_role() {
 /// The mirror: a subscriber whose grant covers only publishing is refused.
 #[kio::test]
 async fn publish_only_public_rejects_subscriber_role() {
-	let auth = memory::public(&[], &["**"], &[]);
+	let auth = memory::public(&[], &[""], &[]);
 	let client = moq_net::Client::new().with_subscriber(sim::origin());
 	assert_refused(connect(client, newest(), &memory::cluster(), &auth).await).await;
 }
@@ -249,7 +249,7 @@ async fn publish_only_public_rejects_subscriber_role() {
 /// neither tears the other down.
 #[kio::test]
 async fn two_publish_only_clients_coexist() {
-	let auth = memory::public(&["**"], &[], &[]);
+	let auth = memory::public(&[""], &[], &[]);
 	let cluster = memory::cluster();
 
 	let (alpha, _alpha_broadcast, _alpha_track) = publish("alpha");
@@ -297,7 +297,7 @@ async fn the_setup_path_reaches_the_decider_and_roots_the_grant() {
 		let mut seen = Vec::new();
 		while let Some(admission) = admissions.next().await {
 			seen.push(admission.request.clone());
-			let all: moq_auth::Patterns = [moq_auth::Pattern::all()].into_iter().collect();
+			let all = moq_auth::Prefixes::all();
 			admission.grant(moq_auth::lease::Consumer::fixed(moq_auth::Grant::new(all.clone(), all)));
 			if seen.len() == 2 {
 				return seen;
@@ -374,7 +374,7 @@ async fn stats_count_admitted_and_refused_sessions() {
 			.find(|(tier, _)| *tier == stats::Tier::default())
 			.map_or(stats::Presence::default(), |(_, presence)| presence)
 	};
-	let auth = memory::public(&[], &[], &["**"]);
+	let auth = memory::public(&[], &[], &[""]);
 
 	let client = moq_net::Client::new().with_subscriber(sim::origin());
 	let session = connect(client, newest(), &cluster, &auth)

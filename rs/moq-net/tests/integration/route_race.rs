@@ -37,7 +37,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use moq_net::{
-	Client, Error, Pattern, Patterns, Server, Version,
+	Client, Error, Prefix, Prefixes, Server, Version,
 	auth::Grant,
 	origin::{self, RouteKind},
 	track,
@@ -208,7 +208,7 @@ fn publish(origin: &origin::Producer, path: &str) -> Live {
 
 fn grant(subscribe: &str) -> Grant {
 	let mut grant = Grant::default();
-	grant.subscribe = [Pattern::subtree(subscribe).unwrap()].into_iter().collect::<Patterns>();
+	grant.subscribe = Prefixes::from(Prefix::try_from(subscribe).unwrap());
 	grant
 }
 

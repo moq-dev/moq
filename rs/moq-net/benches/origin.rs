@@ -50,7 +50,7 @@ use std::time::Duration;
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use futures::FutureExt;
-use moq_net::{Instance, Pattern, Patterns, Timestamp, auth, broadcast, origin, track};
+use moq_net::{Instance, Pattern, Prefix, Prefixes, Timestamp, auth, broadcast, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -152,7 +152,7 @@ fn bench_announce_covering(c: &mut Criterion) {
 						.collect();
 					let consumer = producer
 						.consume()
-						.scope("", &Patterns::from("**/*.chat".parse::<Pattern>().unwrap()))
+						.filter(&"**/*.chat".parse::<Pattern>().unwrap())
 						.unwrap();
 					let consumer = if covering { consumer.covering() } else { consumer };
 					let mut cursors: Vec<_> = (0..readers).map(|_| consumer.routes()).collect();
@@ -400,7 +400,7 @@ fn bench_announce_mounted(c: &mut Criterion) {
 					producer
 						.mount(format!("p{project}/.svc"), ".svc/p0")
 						.unwrap()
-						.scope(format!("p{project}"), &Patterns::from(Pattern::all()))
+						.scope(format!("p{project}"), &Prefixes::all())
 						.unwrap()
 						.consume()
 						.with_hidden(true)
@@ -453,10 +453,8 @@ fn bench_announce_fleet(c: &mut Criterion) {
 				.collect();
 			let _cursors: Vec<_> = (0..peers)
 				.map(|peer| {
-					let patterns: Patterns = [Pattern::subtree(&format!(".stats/p{}", peer % projects)).unwrap()]
-						.into_iter()
-						.collect();
-					consumer.scope("", &patterns).unwrap().routes()
+					let prefixes = Prefixes::from(Prefix::try_from(format!(".stats/p{}", peer % projects)).unwrap());
+					consumer.scope("", &prefixes).unwrap().routes()
 				})
 				.collect();
 			b.iter(|| {
@@ -548,7 +546,7 @@ fn bench_reprice_duplicate(c: &mut Criterion) {
 						let scoped = producer
 							.scope(
 								"",
-								&Patterns::from(Pattern::subtree(&format!("{PATH}/p{}", (peer - 1) % 2)).unwrap()),
+								&Prefixes::from(Prefix::try_from(format!("{PATH}/p{}", (peer - 1) % 2)).unwrap()),
 							)
 							.unwrap();
 						moq_net::fuzz::requests_route(
@@ -572,7 +570,7 @@ fn bench_reprice_duplicate(c: &mut Criterion) {
 							.consume()
 							.scope(
 								"",
-								&Patterns::from(Pattern::subtree(&format!("{PATH}/p{}", peer % 2)).unwrap()),
+								&Prefixes::from(Prefix::try_from(format!("{PATH}/p{}", peer % 2)).unwrap()),
 							)
 							.unwrap()
 							.with_hidden(true)
@@ -1254,7 +1252,7 @@ fn runtime() -> tokio::runtime::Runtime {
 /// Everything under `room/`, which leaves out only the `muted` subscription.
 fn room() -> auth::Grant {
 	let mut grant = auth::Grant::all();
-	grant.subscribe = Pattern::subtree("room").unwrap().into();
+	grant.subscribe = Prefix::try_from("room").unwrap().into();
 	grant
 }
 
@@ -1274,7 +1272,7 @@ fn bench_narrow_delivery(c: &mut Criterion) {
 				if narrowed {
 					// Covers every subscription but the muted one, which is not subscribed here.
 					let mut grant = room();
-					grant.subscribe.insert(Pattern::literal("muted").unwrap());
+					grant.subscribe.insert(Prefix::try_from("muted").unwrap());
 					watching.pair.server.auth().authorize(&grant);
 				}
 				b.iter(|| rt.block_on(watching.round()));

@@ -16,7 +16,7 @@ use support::AtStart;
 
 use std::time::Duration;
 
-use moq_net::{Pattern, Patterns, Version, origin, track};
+use moq_net::{Prefix, Prefixes, Version, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 fn produce_origin(hop: u64) -> origin::Producer {
@@ -40,7 +40,7 @@ async fn link(from: &origin::Producer, to: &origin::Producer) -> MockPair {
 /// Have `to` pull only what `from` publishes at or below `prefix`, as a viewer following
 /// that one path asks.
 async fn follow(from: &origin::Producer, to: &origin::Producer, prefix: &str) -> MockPair {
-	let interest = Patterns::from(Pattern::subtree(prefix).unwrap());
+	let interest = Prefixes::from(Prefix::try_from(prefix).unwrap());
 	let mut options = MockConnectOptions::new(lite07());
 	options.server_publish = Some(from.consume());
 	options.client_subscribe = Some(to.scope("", &interest).unwrap());
@@ -121,12 +121,7 @@ async fn a_claim_above_a_rooted_export_keeps_the_session() {
 	let _published = publish(&source, "", "root");
 
 	let mut options = MockConnectOptions::new(lite07());
-	options.server_publish = Some(
-		source
-			.consume()
-			.scope("tenant", &Patterns::from(Pattern::all()))
-			.unwrap(),
-	);
+	options.server_publish = Some(source.consume().scope("tenant", &Prefixes::all()).unwrap());
 	options.client_subscribe = Some(relay.clone());
 	let pair = connect_mock(options).await;
 	settle().await;

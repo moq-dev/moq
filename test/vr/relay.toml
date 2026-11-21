@@ -12,4 +12,4 @@ version = ["moq-lite-07-wip", "moq-lite-06"]
 listen = "127.0.0.1:4443"
 
 [auth]
-public = "**"
+public = ""

@@ -1991,12 +1991,14 @@ impl SubscribeTrack {
 		// start of its group, so a relay's copy holds the group's head for its other readers,
 		// as a live join would; the resolved range trims below.
 		let fixed: ServeRange = filter_range(msg.filter, LiveEdge::default(), |_, _| None);
-		if let Some(start) = fixed.start {
-			ServeRange {
+		match fixed.start {
+			Some(start) => ServeRange {
 				start: Some(Location { object: 0, ..start }),
 				..fixed
 			}
-			.apply(&mut subscription);
+			.apply(&mut subscription),
+			// Every other filter starts at the live edge, which resolves below.
+			None => live_join(&mut subscription),
 		}
 
 		// Subscribe before resolving the filter: on a routed broadcast the live edge only
@@ -2042,7 +2044,7 @@ impl SubscribeTrack {
 		if let Some(next) = range.fill_tail(fill, edge) {
 			range.start = Some(next);
 		}
-		range.apply(&mut subscription);
+		range.request(&mut subscription, msg.filter, edge);
 		let _ = subscribed.update(subscription);
 		// Serve the track while reading updates; only abrupt closure cancels on draft-22. A
 		// fill or joining FETCH ranks in the same subscription as the group it carries.
@@ -4264,12 +4266,9 @@ impl Publisher {
 				}
 				ns.watched.clear();
 				*prefix = next;
-				let scope = crate::Pattern::subtree(prefix.as_str())
-					.map(|p| p.rebase(prefix.as_str()))
-					.unwrap_or_default();
 				let origin = self
 					.origin
-					.scope(&*prefix, &scope)
+					.scope(&*prefix, &crate::Prefixes::all())
 					.unwrap_or_else(|_| self.origin.empty());
 				*announced = self.advertising(origin, &ns.peer).discovery(ns.hidden).routes();
 				true
@@ -6570,17 +6569,14 @@ impl NamespaceOpen {
 					// A prefix outside our scope (empty origin, or a token that doesn't grant it)
 					// just means we have nothing to announce; respond with an empty set rather
 					// than erroring, which would look fatal to the peer.
-					// The wire prefix decodes as a literal path; convert it explicitly to its
-					// subtree grant, refusing anything that cannot be a subtree.
+					// The wire prefix decodes as a literal path, scoped as its whole subtree; a
+					// prefix no grant can spell (holding a `*`) reaches nothing.
 					// The cursor is rooted at the prefix so every update arrives named as its
 					// wire suffix, a route covering the prefix included: that one presents at
 					// the root, as the empty suffix.
-					let scope = crate::Pattern::subtree(prefix.as_str())
-						.map(|subtree| subtree.rebase(prefix.as_str()))
-						.unwrap_or_default();
 					let origin = publisher
 						.origin
-						.scope(prefix, &scope)
+						.scope(prefix, &crate::Prefixes::all())
 						.unwrap_or_else(|_| publisher.origin.empty());
 
 					// Register the split-horizon peer on the announce cursor too. The origin
@@ -6820,7 +6816,10 @@ impl TrackServe {
 			*bounds = range;
 		}
 		let mut subscription = self.track.subscription();
-		range.apply(&mut subscription);
+		// Only a new filter moves the request: the edge an old one resolved against has moved.
+		if update.filter.is_some() {
+			range.request(&mut subscription, self.filter, edge);
+		}
 		self.track.update(subscription)?;
 		let fill = update.fill.map(|fill| fill_range(fill, self.filter, edge.largest));
 		if let Some(next) = range.fill_tail(fill, edge) {
@@ -11498,7 +11497,7 @@ mod serve_tests {
 			let request = taken_token(&mut running, &mut requests).await;
 
 			issued.update(crate::auth::Grant {
-				subscribe: crate::Pattern::subtree("other").unwrap().into(),
+				subscribe: crate::Prefix::try_from("other").unwrap().into(),
 				..crate::auth::Grant::default()
 			});
 			assert!(futures::poll!(running.as_mut()).is_pending());
@@ -12307,7 +12306,7 @@ mod serve_tests {
 			let scoped = h
 				._origin
 				.consume()
-				.scope(root.as_str(), &crate::Patterns::from(crate::Pattern::all()))
+				.scope(root.as_str(), &crate::Prefixes::all())
 				.unwrap();
 			let peer_setup = peer::PeerSetup::default();
 			peer_setup.set(peer::Peer::default());
@@ -17298,8 +17297,8 @@ mod serve_tests {
 	/// A grant to subscribe to everything, lapsing in `secs` (or never), on the publisher's clock.
 	fn grant_all_expiring(runtime: &crate::time::Deadlines, secs: Option<u64>) -> crate::auth::Grant {
 		crate::auth::Grant {
-			publish: crate::Patterns::new(),
-			subscribe: crate::Pattern::all().into(),
+			publish: crate::Prefixes::new(),
+			subscribe: crate::Prefixes::all(),
 			expires: secs.map(|s| runtime.now().checked_add(Duration::from_secs(s)).unwrap()),
 		}
 	}
@@ -17314,8 +17313,8 @@ mod serve_tests {
 		// The peer lets us publish everything, and we let it read only "other".
 		auth.grant(0, crate::auth::Grant::all());
 		auth.handle().authorize(&crate::auth::Grant {
-			publish: crate::Patterns::new(),
-			subscribe: crate::Pattern::subtree("other").unwrap().into(),
+			publish: crate::Prefixes::new(),
+			subscribe: crate::Prefix::try_from("other").unwrap().into(),
 			expires: None,
 		});
 		assert!(
@@ -18385,13 +18384,13 @@ mod serve_tests {
 	#[kio::test]
 	async fn a_subscribe_token_needs_a_subscribe_grant() {
 		let read_only = crate::auth::Grant {
-			publish: crate::Patterns::new(),
-			subscribe: crate::Pattern::all().into(),
+			publish: crate::Prefixes::new(),
+			subscribe: crate::Prefixes::all(),
 			expires: None,
 		};
 		let write_only = crate::auth::Grant {
-			publish: crate::Pattern::all().into(),
-			subscribe: crate::Patterns::new(),
+			publish: crate::Prefixes::all(),
+			subscribe: crate::Prefixes::new(),
 			expires: None,
 		};
 		let nothing = Some(crate::auth::Grant::default());
@@ -18412,8 +18411,8 @@ mod serve_tests {
 			"a limit of nothing defers to the token"
 		);
 		auth.handle().authorize(&crate::auth::Grant {
-			publish: crate::Patterns::new(),
-			subscribe: crate::Pattern::subtree("other").unwrap().into(),
+			publish: crate::Prefixes::new(),
+			subscribe: crate::Prefix::try_from("other").unwrap().into(),
 			expires: None,
 		});
 		assert!(
@@ -18468,8 +18467,8 @@ mod serve_tests {
 	#[kio::test]
 	async fn a_covering_limit_still_verifies_the_token() {
 		let limit = |subtree: &str| crate::auth::Grant {
-			publish: crate::Patterns::new(),
-			subscribe: crate::Pattern::subtree(subtree).unwrap().into(),
+			publish: crate::Prefixes::new(),
+			subscribe: crate::Prefix::try_from(subtree).unwrap().into(),
 			expires: None,
 		};
 		let (_auth, _h, mut serving) = serve_token_subscribe(crate::auth::Grant::default(), Some(limit("room"))).await;
@@ -18728,8 +18727,8 @@ mod serve_tests {
 		auth.grant(
 			0,
 			crate::auth::Grant {
-				publish: crate::Pattern::subtree("other").unwrap().into(),
-				subscribe: crate::Patterns::new(),
+				publish: crate::Prefix::try_from("other").unwrap().into(),
+				subscribe: crate::Prefixes::new(),
 				expires: None,
 			},
 		);
@@ -19528,7 +19527,7 @@ mod tests {
 		let consume = match scoped {
 			true => origin
 				.consume()
-				.scope("", &crate::Pattern::subtree(".stats").unwrap().into())
+				.scope("", &crate::Prefix::try_from(".stats").unwrap().into())
 				.unwrap(),
 			false => origin.consume(),
 		};
@@ -21579,6 +21578,23 @@ impl ServeRange {
 		}
 	}
 
+	/// Ask for this range, resolved from `filter` against `edge`. A filter other than an
+	/// absolute one starting at the latest group or past it stays a [`live_join`], which the
+	/// serve's floor trims to the range: a time start there would also have the route replay
+	/// what it retains. On a track with no group yet it asks from the oldest group, since
+	/// nothing is retained, and a live join would start at whichever group lands first.
+	fn request(&self, subscription: &mut Subscription, filter: Filter, edge: LiveEdge) {
+		let live = !matches!(filter, Filter::Absolute { .. })
+			&& self.end.is_none()
+			&& edge
+				.latest
+				.is_some_and(|latest| self.start.is_none_or(|start| start.group >= latest));
+		match live {
+			true => live_join(subscription),
+			false => self.apply(subscription),
+		}
+	}
+
 	/// Bound `subscription` to the whole groups this range touches: a model subscription
 	/// starts and ends on a group boundary, and [`GroupSlice`] cuts the objects when serving.
 	fn apply(&self, subscription: &mut Subscription) {
@@ -21586,6 +21602,14 @@ impl ServeRange {
 			.with_start(self.start.map(|start| start.group))
 			.with_end(self.end.and_then(|end| end.group.checked_add(1)));
 	}
+}
+
+/// Ask for a live join with no Min Age, as a SUBSCRIBE without an absolute start does: the
+/// oldest start would have a relay's route replay everything it retains, and SUBSCRIBE_OK
+/// then name the oldest group replayed so far as Largest.
+fn live_join(subscription: &mut Subscription) {
+	*subscription = std::mem::take(subscription).with_ranges([track::Range::live()]);
+	subscription.delay.min = Some(Duration::ZERO);
 }
 
 /// The slice of one group a subscription's [`ServeRange`] selects.
@@ -22360,8 +22384,7 @@ mod compression_tests {
 		use crate::lite::test_transport::{Log, SinkSession};
 		for (version, draft) in [(Version::Draft18, 18), (Version::Draft22, 22)] {
 			let input = serde_json::json!({"draft": draft});
-			let bytes: Vec<u8> =
-				serde_json::from_slice(&crate::test_interop::bun("ietf-compression.ts", input)).unwrap();
+			let bytes: Vec<u8> = serde_json::from_slice(&crate::test_interop::bun("ietf-compression", input)).unwrap();
 			let (parameters, consumed) = ietf::Parameters::decode_slice(&bytes, version).unwrap();
 			assert_eq!(consumed, bytes.len());
 			let negotiated = super::super::flate::from_setup(&parameters).unwrap();
@@ -22399,7 +22422,7 @@ mod compression_tests {
 			let written = log.writes.lock().unwrap().clone();
 			let input = serde_json::json!({"draft": draft, "response": response.to_vec(), "group": written});
 			let received: Vec<Vec<u8>> =
-				serde_json::from_slice(&crate::test_interop::bun("ietf-compression.ts", input)).unwrap();
+				serde_json::from_slice(&crate::test_interop::bun("ietf-compression", input)).unwrap();
 			assert_eq!(received, frames, "draft{draft}: plain JS fallback");
 		}
 	}
