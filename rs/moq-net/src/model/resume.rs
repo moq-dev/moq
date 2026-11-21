@@ -5012,6 +5012,36 @@ mod test {
 		}
 	}
 
+	/// A short group whose cache freed it once the reader drained it still reads on from the
+	/// replacement: what a copy's cache retains never decides what the reader gets.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_released_short_group_continues_from_the_replacement() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, Duration::from_secs(300));
+
+		let mut short = a.create_group(group::Info { start: 0 }).unwrap();
+		short.write_frame(ts(0), b"a".as_ref()).unwrap();
+		let mut reading = recv(&mut sub);
+		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+		short.finish().unwrap().abort(Error::Old).unwrap();
+
+		let b = copy();
+		let mut whole = b.create_group(group::Info { start: 0 }).unwrap();
+		for (ms, frame) in [(0, b"a"), (1, b"b")] {
+			whole.write_frame(ts(ms), frame.as_ref()).unwrap();
+		}
+		whole.finish_at(2).unwrap();
+		routes.serve(b.consume());
+
+		assert_eq!(read(&mut reading), Some(b"b".to_vec()));
+		assert_eq!(read(&mut reading), None);
+		assert_eq!(reading.end(), Some(2), "whole from the replacement");
+	}
+
 	/// A group a copy closed short before its route failed waits for the route replacing it,
 	/// which reads it on, rather than ending where the failed copy closed it.
 	#[test]

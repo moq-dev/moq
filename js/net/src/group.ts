@@ -902,8 +902,9 @@ class CombinedClosed implements GetPromise<Error | null> {
 	#source: () => Once<Error | null>;
 	#final: (value: Error | null, look: boolean) => boolean;
 	#looks: boolean;
-	// A caller awaits it, so a change it wakes for is a look.
-	#awaited = false;
+	// Callers watching it now, so a change they wake for is a look: one per live subscription,
+	// and one for good per awaited promise, which waits until the handle settles.
+	#watchers = 0;
 	#value = new Once<Error | null>();
 	#watched?: Once<Error | null>;
 	// The watcher on `#watched`, replaced when a recovery moves to another copy's state.
@@ -921,7 +922,7 @@ class CombinedClosed implements GetPromise<Error | null> {
 		this.#final = final;
 		this.#looks = looks;
 		if (this.#sync(false)) return;
-		this.#dispose.push(preferred.changed(() => this.#sync(this.#awaited)));
+		this.#dispose.push(preferred.changed(() => this.#sync(this.#watchers > 0)));
 	}
 
 	#sync(look: boolean): boolean {
@@ -941,7 +942,7 @@ class CombinedClosed implements GetPromise<Error | null> {
 			if (this.#watched !== source) {
 				this.#unwatch?.();
 				this.#watched = source;
-				this.#unwatch = source.changed(() => this.#sync(this.#awaited));
+				this.#unwatch = source.changed(() => this.#sync(this.#watchers > 0));
 			}
 			return false;
 		}
@@ -956,7 +957,7 @@ class CombinedClosed implements GetPromise<Error | null> {
 	}
 
 	refresh() {
-		this.#sync(this.#awaited);
+		this.#sync(this.#watchers > 0);
 	}
 
 	// The value it settled with, without looking again.
@@ -972,15 +973,31 @@ class CombinedClosed implements GetPromise<Error | null> {
 	changed(): Promise<Error | null | undefined>;
 	changed(fn: (value: Error | null | undefined) => void): Dispose;
 	changed(fn?: (value: Error | null | undefined) => void): Promise<Error | null | undefined> | Dispose {
-		this.#awaited = true;
-		this.#sync(true);
-		return fn ? this.#value.changed(fn) : this.#value.changed();
+		if (!fn) {
+			this.#watchers++;
+			this.#sync(true);
+			return this.#value.changed();
+		}
+		return this.#watch(() => this.#value.changed(fn));
 	}
 
 	subscribe(fn: (value: Error | null | undefined) => void): Dispose {
-		this.#awaited = true;
+		return this.#watch(() => this.#value.subscribe(fn));
+	}
+
+	// Counts a subscription as watching until its caller disposes it, as a race does once decided.
+	#watch(subscribe: () => Dispose): Dispose {
+		this.#watchers++;
 		this.#sync(true);
-		return this.#value.subscribe(fn);
+		const dispose = subscribe();
+		let live = true;
+		return () => {
+			if (live) {
+				live = false;
+				this.#watchers--;
+			}
+			dispose();
+		};
 	}
 
 	// biome-ignore lint/suspicious/noThenProperty: CombinedClosed is intentionally awaitable.
@@ -988,7 +1005,7 @@ class CombinedClosed implements GetPromise<Error | null> {
 		onFulfilled?: ((value: Error | null) => R1 | PromiseLike<R1>) | null,
 		onRejected?: ((reason: unknown) => R2 | PromiseLike<R2>) | null,
 	): PromiseLike<R1 | R2> {
-		this.#awaited = true;
+		this.#watchers++;
 		this.#sync(true);
 		return this.#value.then(onFulfilled, onRejected);
 	}
