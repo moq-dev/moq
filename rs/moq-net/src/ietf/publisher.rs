@@ -1991,12 +1991,14 @@ impl SubscribeTrack {
 		// start of its group, so a relay's copy holds the group's head for its other readers,
 		// as a live join would; the resolved range trims below.
 		let fixed: ServeRange = filter_range(msg.filter, LiveEdge::default(), |_, _| None);
-		if let Some(start) = fixed.start {
-			ServeRange {
+		match fixed.start {
+			Some(start) => ServeRange {
 				start: Some(Location { object: 0, ..start }),
 				..fixed
 			}
-			.apply(&mut subscription);
+			.apply(&mut subscription),
+			// Every other filter starts at the live edge.
+			None => fixed.request(&mut subscription, msg.filter, LiveEdge::default()),
 		}
 
 		// Subscribe before resolving the filter: on a routed broadcast the live edge only
@@ -2042,7 +2044,7 @@ impl SubscribeTrack {
 		if let Some(next) = range.fill_tail(fill, edge) {
 			range.start = Some(next);
 		}
-		range.apply(&mut subscription);
+		range.request(&mut subscription, msg.filter, edge);
 		let _ = subscribed.update(subscription);
 		// Serve the track while reading updates; only abrupt closure cancels on draft-22. A
 		// fill or joining FETCH ranks in the same subscription as the group it carries.
@@ -6814,7 +6816,10 @@ impl TrackServe {
 			*bounds = range;
 		}
 		let mut subscription = self.track.subscription();
-		range.apply(&mut subscription);
+		// Only a new filter moves the request: the edge an old one resolved against has moved.
+		if update.filter.is_some() {
+			range.request(&mut subscription, self.filter, edge);
+		}
 		self.track.update(subscription)?;
 		let fill = update.fill.map(|fill| fill_range(fill, self.filter, edge.largest));
 		if let Some(next) = range.fill_tail(fill, edge) {
@@ -21570,6 +21575,26 @@ impl ServeRange {
 				Some(end) if end.group == key => end.object.map(|object| object.saturating_add(1)),
 				_ => None,
 			},
+		}
+	}
+
+	/// Ask for this range, resolved from `filter` against `edge`. A filter other than an
+	/// absolute one starting at the latest group or past it asks for a live join with no Min
+	/// Age, which the serve's floor trims to the range. Asking from that group's time instead,
+	/// or from the oldest group before the edge is known, would have a relay's route replay
+	/// everything it retains, and the relay's SUBSCRIBE_OK name the oldest group replayed so
+	/// far as Largest.
+	fn request(&self, subscription: &mut Subscription, filter: Filter, edge: LiveEdge) {
+		let live = !matches!(filter, Filter::Absolute { .. })
+			&& self.end.is_none()
+			&& self
+				.start
+				.is_none_or(|start| edge.latest.is_none_or(|latest| start.group >= latest));
+		if live {
+			*subscription = std::mem::take(subscription).with_ranges([track::Range::live()]);
+			subscription.delay.min = Some(Duration::ZERO);
+		} else {
+			self.apply(subscription);
 		}
 	}
 
