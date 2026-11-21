@@ -55,7 +55,12 @@ accept = "b"
 cost = 2         # optional, ?cost on the dialer's peer URL
 upstream = true  # optional: `dial` marks `accept` upstream, on the new build only
 shape = { delay = "40ms" }   # optional, over [shape]
+build = "old"    # optional: only a dialer on this build dials it
 ```
+
+A link naming a `build` models a roll that also changes the graph, such as a new
+build that renders its dial set by a new rule: mid-roll, a link exists while its
+dialer runs that build. The graph must be connected on either build.
 
 [`ring6.toml`](ring6.toml), the default and nightly mesh, is a ring of six with one
 chord: its longest route crosses three links, every cut leaves a detour, and every
@@ -73,7 +78,7 @@ The script ([`script.toml`](script.toml)) is the sequence of events:
 | `quiet` | How long no route or announce message may move for the mesh to count as quiet. |
 | `settle` | The longest an event waits for quiet and for every reader to read again. |
 | `stall` | How long a reader may read nothing and still count as fed, once it read since the fault ended. |
-| `[[events]]` | `roll` (`to = "new"` or `"old"`), `reopen-link` (`link = "a-b"`), `reopen-relay`, `kill`, `end-source` (each `relay = "c"`), with an optional `times`. An event naming no relay takes the one with the most links. |
+| `[[events]]` | `roll` (`to = "new"` or `"old"`), `reopen-link` (`link = "a-b"`), `reopen-relay`, `kill`, `end-source` (each `relay = "c"`), with an optional `times`. An event naming no relay takes the one with the most links, and a `reopen-link` naming no link its first link every build dials. |
 | `[[known]]` | A violation a quest already owns: `check`, its `kind`, optionally the event `kind`, and the `quest`. It is reported and does not fail the run, except at the start, before any fault. |
 
 A roll drains each relay in the mesh file's order with SIGTERM and starts the other
@@ -120,8 +125,8 @@ reports and logs together with `HARNESS_KEEP=1`. For each event:
   ROUTE, ROUTE\_END, DEAD, and DRAIN on lite-07, sent by every relay.
 - **Changed**, **Rewritten**, **DEAD**, **DRAIN**: the route counters
   (`moq_relay_route_*`, see `doc/concept/stats.md`), sent and received. They count only
-  moq-lite-07 sessions, so relays without one in the event are left out, and the
-  column reads n/a when none had one.
+  moq-lite-07 sessions, so relays with no link on it before or after the event are left
+  out, and the column reads n/a when none had one.
 - **Readers hit**: reader paths that paused longer than 0.5s, of them **bystanders**,
   whose relay and source were both outside the fault, the **longest** pause, and the
   groups **missed** within one instance.
@@ -133,4 +138,9 @@ dialed is starred: a release that predates
 [moq-dev/moq#9158](https://github.com/moq-dev/moq/pull/9158) drains only the sessions it
 accepted, so its starred links read DEAD.
 
-`report.json` holds the same per relay, the worst readers, and every violation.
+Each link's version is the one its accepting relay logged negotiating on the dialer's
+newest session there that has not ended (`down` when none). The report lists, for each
+event that changed one, how many links are on each version and which moved.
+
+`report.json` holds the same per relay, each link's version after each event, the worst
+readers, and every violation.

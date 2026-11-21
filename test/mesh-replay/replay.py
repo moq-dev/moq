@@ -45,6 +45,9 @@ class Link:
     cost: int | None
     upstream: bool
     shape: dict
+    # The build whose relays dial this link, or None for every build: a roll that also changes
+    # the graph, as when the new build renders its dial set by a new rule.
+    build: str | None = None
 
     @property
     def name(self) -> str:
@@ -56,6 +59,10 @@ class Link:
     def other(self, relay: str) -> str:
         return self.accept if relay == self.dial else self.dial
 
+    def dialed_on(self, build: str) -> bool:
+        """Whether a dialer on `build` dials this link."""
+        return self.build is None or self.build == build
+
 
 @dataclass
 class Mesh:
@@ -63,15 +70,22 @@ class Mesh:
     relays: list[str]
     links: list[Link]
 
-    def neighbours(self, relay: str) -> list[str]:
-        return [link.other(relay) for link in self.links if link.touches(relay)]
+    def neighbours(self, relay: str, build: str | None = None) -> list[str]:
+        """The relays `relay` links on any build or, given one, with every relay on it."""
+        return [
+            link.other(relay) for link in self.links if link.touches(relay) and (build is None or link.dialed_on(build))
+        ]
+
+    def builds(self) -> list[str | None]:
+        """The builds whose graphs differ: old and new when a link names one, else just None."""
+        return ["old", "new"] if any(link.build for link in self.links) else [None]
 
     def busiest(self) -> str:
         """The relay with the most links, the first listed among equals."""
         return max(self.relays, key=lambda relay: (len(self.neighbours(relay)), -self.relays.index(relay)))
 
-    def diameter(self) -> int:
-        """The most links any shortest path between two relays crosses."""
+    def diameter(self, build: str | None = None) -> int:
+        """The most links any shortest path between two relays crosses, with every relay on `build`."""
         longest = 0
         for start in self.relays:
             hops = {start: 0}
@@ -79,19 +93,21 @@ class Mesh:
             while frontier:
                 nxt = []
                 for relay in frontier:
-                    for neighbour in self.neighbours(relay):
+                    for neighbour in self.neighbours(relay, build):
                         if neighbour not in hops:
                             hops[neighbour] = hops[relay] + 1
                             nxt.append(neighbour)
                 frontier = nxt
             if len(hops) != len(self.relays):
-                raise ValueError(f"mesh is not connected: {start} reaches only {sorted(hops)}")
+                on = f" on the {build} build" if build else ""
+                raise ValueError(f"mesh is not connected{on}: {start} reaches only {sorted(hops)}")
             longest = max(longest, *hops.values())
         return longest
 
 
 NAME = re.compile(r"^[a-z0-9][a-z0-9_]*$")
 SHAPE_KEYS = {"delay", "rate", "queue"}
+LINK_KEYS = {"dial", "accept", "cost", "upstream", "shape", "build"}
 
 
 def load_mesh(path: Path) -> Mesh:
@@ -115,10 +131,8 @@ def load_mesh(path: Path) -> Mesh:
     links = []
     pairs = set()
     for raw in doc.get("links", []):
-        if set(raw) - {"dial", "accept", "cost", "upstream", "shape"}:
-            raise ValueError(
-                f"{path}: unknown link keys {sorted(set(raw) - {'dial', 'accept', 'cost', 'upstream', 'shape'})}"
-            )
+        if set(raw) - LINK_KEYS:
+            raise ValueError(f"{path}: unknown link keys {sorted(set(raw) - LINK_KEYS)}")
         dial, accept = raw.get("dial"), raw.get("accept")
         if dial not in relays or accept not in relays or dial == accept:
             raise ValueError(f"{path}: link {dial!r} -> {accept!r} must join two listed relays")
@@ -132,9 +146,16 @@ def load_mesh(path: Path) -> Mesh:
         own = raw.get("shape", {})
         if set(own) - SHAPE_KEYS:
             raise ValueError(f"{path}: unknown shape keys {sorted(set(own) - SHAPE_KEYS)}")
-        links.append(Link(dial, accept, cost, bool(raw.get("upstream", False)), {**shape, **own}))
+        build = raw.get("build")
+        if build not in (None, "old", "new"):
+            raise ValueError(f"{path}: link {dial}-{accept} build is `old` or `new`")
+        upstream = bool(raw.get("upstream", False))
+        if upstream and build == "old":
+            raise ValueError(f"{path}: link {dial}-{accept} is marked upstream, which only the new build reads")
+        links.append(Link(dial, accept, cost, upstream, {**shape, **own}, build))
     mesh = Mesh(doc.get("name", path.stem), relays, links)
-    mesh.diameter()
+    for build in mesh.builds():
+        mesh.diameter(build)
     return mesh
 
 
@@ -190,7 +211,10 @@ def load_script(path: Path, mesh: Mesh) -> Script:
         if kind == "reopen-link":
             name = raw.get("link")
             if name is None:
-                link = next(link for link in mesh.links if link.touches(event["relay"]))
+                # One every build dials, so the fault never lands on a link nobody is dialing.
+                link = next((link for link in mesh.links if link.touches(event["relay"]) and link.build is None), None)
+                if link is None:
+                    raise ValueError(f"{path}: every link of {event['relay']} is one build's; name the `link`")
             else:
                 link = next((link for link in mesh.links if link.name == name), None)
                 if link is None:
@@ -242,6 +266,7 @@ COUNTERS = {
 # What going quiet means: no route or announce message moving on any relay.
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 SESSION = re.compile(r'session="([0-9a-f]+)"')
+NEGOTIATED = re.compile(r'session="([0-9a-f]+)".*\bnegotiated version=(\S+)')
 GOAWAY = re.compile(r"received goaway", re.IGNORECASE)
 
 QUIET = re.compile(r"^(moq_relay_route_|moq_relay_control_[rt]x_messages_total\|class=announce)")
@@ -289,6 +314,11 @@ class Totals:
 
     def snapshot(self) -> dict[str, float]:
         return dict(self.total)
+
+
+def is_lite07(version: str) -> bool:
+    """Whether a negotiated version is moq-lite-07, the wip draft or the final one."""
+    return version == "moq-lite-07" or version.startswith("moq-lite-07-")
 
 
 def delta(after: dict[str, float], before: dict[str, float]) -> dict[str, float]:
@@ -521,6 +551,33 @@ class Build:
     version: str = ""
 
 
+class Negotiated:
+    """The version each session of a relay's running process negotiated, read from its log."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.offset = 0
+        self.sessions: dict[str, str] = {}
+
+    def restart(self) -> None:
+        """Forget the last process: called before a new one starts writing."""
+        self.offset = self.path.stat().st_size if self.path.exists() else 0
+        self.sessions = {}
+
+    def update(self) -> None:
+        if not self.path.exists():
+            return
+        with self.path.open("rb") as f:
+            f.seek(self.offset)
+            data = f.read()
+        # Up to the last whole line, so a line being written is read whole next time.
+        whole = data.rfind(b"\n") + 1
+        self.offset += whole
+        for line in ANSI.sub("", data[:whole].decode(errors="replace")).splitlines():
+            if m := NEGOTIATED.search(line):
+                self.sessions[m.group(1)] = m.group(2)
+
+
 class Relay:
     def __init__(self, run: Run, name: str, port: int, internal: int) -> None:
         self.run = run
@@ -528,6 +585,7 @@ class Relay:
         self.port = port
         self.internal = internal
         self.proc = Proc(f"relay {name}", run.dir / f"relay-{name}.log")
+        self.negotiated = Negotiated(self.proc.log)
         self.build: Build | None = None
         self.totals = Totals()
         self.publisher = Proc(f"publisher {name}", run.dir / f"publisher-{name}.log")
@@ -542,7 +600,7 @@ class Relay:
         run = self.run
         peers = []
         for link in run.mesh.links:
-            if link.dial != self.name:
+            if link.dial != self.name or not link.dialed_on(build.name):
                 continue
             entry = f'url = "https://127.0.0.1:{run.shaper_port[link.name]}/", token = "peer.{self.name}"'
             if link.cost is not None:
@@ -596,6 +654,7 @@ connect = [{", ".join(peers)}]
         # again against the cleared counters.
         with self.run.lock:
             self.totals.restart()
+        self.negotiated.restart()
         self.proc.start([build.binary, str(path)])
         deadline = time.time() + 30
         while time.time() < deadline:
@@ -728,13 +787,27 @@ class Run:
         if not self.shapers[link.name].alive:
             raise RuntimeError(f"shaper {link.name} exited on start; see {self.shapers[link.name].log}")
 
-    def lite07(self, link: Link) -> bool:
-        a, b = self.relays[link.dial].build, self.relays[link.accept].build
-        # The acceptor takes the first version in the dialer's offer it also lists. A build's
-        # default list is unknown here, so a link with one counts as not lite-07.
-        if a is None or b is None:
-            return False
-        return next((v for v in a.versions if v in b.versions), None) == "moq-lite-07-wip"
+    def versions(self) -> dict[str, str]:
+        """Each dialed link's version, as its acceptor negotiated it on the dialer's newest open
+        session there, or `down` when the dialer holds none. A link its dialer's build does not
+        dial is left out."""
+        with self.auth.lock:
+            sessions = [e for e in self.auth.events if e["peer"]]
+        ended = {e["id"] for e in sessions if e["event"] == "end"}
+        for relay in self.relays.values():
+            relay.negotiated.update()
+        out = {}
+        for link in self.mesh.links:
+            dialer = self.relays[link.dial].build
+            if dialer is None or not link.dialed_on(dialer.name):
+                continue
+            accepted = self.relays[link.accept].negotiated.sessions
+            version = "down"
+            for e in sessions:
+                if e["peer"] == link.dial and e["id"] in accepted and e["id"] not in ended:
+                    version = accepted[e["id"]]
+            out[link.name] = version
+        return out
 
     def readers(self) -> None:
         for relay in self.relays.values():
@@ -746,7 +819,7 @@ class Run:
         """Apply one fault, wait for the mesh to go quiet, and report what it cost."""
         self.readers()
         before = self.snapshot()
-        lite07_before = {link.name for link in self.mesh.links if self.lite07(link)}
+        versions_before = self.versions()
         start = time.time()
         print(f"[{time.strftime('%H:%M:%S')}] {name}", flush=True)
         restored = apply()
@@ -754,7 +827,8 @@ class Run:
         end = time.time()
         after = self.snapshot()
         self.readers()
-        lite07 = lite07_before | {link.name for link in self.mesh.links if self.lite07(link)}
+        versions = self.versions()
+        lite07 = {name for v in (versions_before, versions) for name, version in v.items() if is_lite07(version)}
         on07 = {r for link in self.mesh.links if link.name in lite07 for r in (link.dial, link.accept)}
 
         deltas = {relay: delta(after[relay], before[relay]) for relay in self.relays}
@@ -803,6 +877,7 @@ class Run:
                 "unavailable": sorted(set(self.relays) - on07),
             },
             "per_relay": {relay: {k: int(v) for k, v in counts.items()} for relay, counts in deltas.items() if counts},
+            "versions": versions,
             "readers": self.reader_report(start, end, targets),
         }
         self.check(report, unfed, unrouted)
@@ -963,7 +1038,12 @@ class Run:
         build = self.builds[to]
         for name in relays:
             relay = self.relays[name]
-            neighbours = self.mesh.neighbours(name)
+            # The links it holds as it drains: each one its dialer's build dials.
+            neighbours = [
+                link.other(name)
+                for link in self.mesh.links
+                if link.touches(name) and link.dialed_on(self.relays[link.dial].build.name)
+            ]
             offsets = {n: self.relays[n].proc.log.stat().st_size for n in neighbours}
             before = self.snapshot()
 
@@ -1157,7 +1237,9 @@ class Run:
             except (OSError, ValueError) as err:
                 # Written in place, so a shaper killed mid-write leaves it torn: report that, not crash.
                 stats = {"error": f"{path.name}: {err}"}
-            out.append({"link": link.name, "cost": link.cost, "upstream": link.upstream, "shaper": stats})
+            out.append(
+                {"link": link.name, "cost": link.cost, "upstream": link.upstream, "build": link.build, "shaper": stats}
+            )
         return out
 
 
@@ -1233,6 +1315,41 @@ def event_row(event: dict) -> str:
     )
 
 
+def graph(mesh: dict) -> str:
+    """The mesh's links and diameter, per build when a roll changes the graph."""
+    if set(mesh["diameter"]) == {"all"}:
+        return f"{len(mesh['links'])} links, diameter {mesh['diameter']['all']}"
+    return "; ".join(
+        f"{sum(1 for link in mesh['links'] if link['build'] in (None, build))} links on the {build} build, "
+        f"diameter {mesh['diameter'][build]}"
+        for build in ("old", "new")
+    )
+
+
+def version_rows(events: list[dict]) -> list[str]:
+    """A row per event that changed which version a link negotiated: the links on each version
+    after it, and the links that moved (`-` where the link was not dialed)."""
+    out = []
+    previous: dict[str, str] = {}
+    for event in events:
+        current = event.get("versions", {})
+        if current == previous:
+            continue
+        counts = {}
+        for version in current.values():
+            counts[version] = counts.get(version, 0) + 1
+        moved = [
+            f"{name}: {previous.get(name, '-')} to {current.get(name, '-')}"
+            for name in sorted(set(previous) | set(current))
+            if previous.get(name) != current.get(name)
+        ]
+        summary = ", ".join(f"{version} {n}" for version, n in sorted(counts.items()))
+        # The first row would list every link as moved; its counts say the same.
+        out.append(row([event["name"], summary or "-", "; ".join(moved) if previous else "-"]))
+        previous = current
+    return out
+
+
 def markdown(report: dict) -> str:
     mesh, builds = report["mesh"], report["builds"]
     result = "passed" if report["passed"] else "failed"
@@ -1241,7 +1358,7 @@ def markdown(report: dict) -> str:
     lines = [
         f"## Mesh replay: {mesh['name']}, {len(mesh['relays'])} relays, {report['broadcasts']} broadcasts each",
         "",
-        f"Diameter {mesh['diameter']} links. New build `{builds['new']}`, old build `{builds['old']}`.",
+        f"{graph(mesh)}. New build `{builds['new']}`, old build `{builds['old']}`.",
         f"Result: **{result}**",
         "",
         row(COLUMNS),
@@ -1250,6 +1367,10 @@ def markdown(report: dict) -> str:
     ]
     if report.get("error"):
         lines += ["", f"The run stopped early: {report['error']}"]
+    versions = version_rows(report["events"])
+    if versions:
+        lines += ["", "Links on each version after each event that changed one, as the accepting relay negotiated:", ""]
+        lines += [row(["Event", "Links per version", "Moved"]), row(["---"] * 3), *versions]
     rolls = [event for event in report["events"] if event.get("links")]
     if rolls:
         lines += [
@@ -1336,7 +1457,7 @@ def main() -> int:
             "name": mesh.name,
             "relays": mesh.relays,
             "links": run.links_report(),
-            "diameter": mesh.diameter(),
+            "diameter": {build or "all": mesh.diameter(build) for build in mesh.builds()},
         },
         "broadcasts": args.broadcasts,
         "builds": {name: build.version for name, build in run.builds.items()},
