@@ -520,6 +520,43 @@ test("a late group on a drained serving copy is read", async () => {
 	}
 });
 
+// A replacement that ends cleanly before delivering any group doesn't end the read while the
+// replaced copy may still deliver a group the reader lacks under its cap.
+test("a replacement ending before any group waits for the replaced copy's late group", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const front = new Front();
+	const sources = [new BroadcastProducer(), new BroadcastProducer()];
+	const handles = sources.map((source) => source.consume());
+	const [ta, tb] = sources.map(copy);
+	// The old route's groups may land late; the new route's local track is complete once it ends.
+	hooks.receiveTrack(ta.producer);
+	front.serve(handles[0]);
+	const sub = front.consumer.track("seq").subscribe({ delay: { max: Duration.millis(3_600_000) } });
+	try {
+		await clock.advance(Duration.ZERO);
+		ta.write(0n);
+		ta.write(2n);
+		expect(drain(sub).sort()).toEqual([0n, 2n]);
+		// Group 1 is still in flight on the old route, capped at 2.
+		front.serve(handles[1]);
+		await clock.advance(Duration.ZERO);
+		tb.producer.finishAt({ group: 3n, frame: 0 });
+		await clock.advance(Duration.ZERO);
+		const next = sub.recvGroup();
+		expect(await isPending(next)).toBe(true);
+		ta.write(1n);
+		await clock.advance(Duration.ZERO);
+		expect((await next)?.start).toBe(1n);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		for (const handle of handles) handle.close();
+		for (const source of sources) source.close();
+		installed.close();
+	}
+});
+
 test("a late group under the resume point is backfilled again", async () => {
 	const clock = new Manual();
 	const installed = clock.install();

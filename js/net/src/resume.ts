@@ -1554,16 +1554,6 @@ class Reader implements ResumeSource {
 		if (!this.#groupsRead) return undefined;
 		// An incumbent not yet bounded may still feed a group the new copy never has.
 		if (copy.until === undefined && copy.done === undefined) return "wait";
-		// Until the serving copy holds a group, a failure of it serves this one again; see #revert.
-		const serving = this.#serving();
-		if (
-			serving &&
-			serving.source !== copy.source &&
-			hooks.latestKey(serving.sub) === undefined &&
-			!(copy.done instanceof Error)
-		) {
-			return "keep";
-		}
 		const end = copyEnd(copy);
 		// Superseded once the serving copy has a group past the bound.
 		if (copy.since === undefined && end !== undefined && edge !== undefined && edge >= end) copy.since = now();
@@ -1581,6 +1571,18 @@ class Reader implements ResumeSource {
 				hooks.mayLand(copy.sub, { ...run, floor, grace: wait, delivered });
 			if (this.#window().runs(start, end).some(lands)) return "wait";
 			if (hooks.hasUnreadGroup(copy.sub, cursor.start, end, delivered)) return "keep";
+		}
+		// Until the serving copy holds a group, a failure of it serves this one again; see #revert.
+		// Only after a group still to land is waited for, so a clean end of the serving copy
+		// waits for it too.
+		const serving = this.#serving();
+		if (
+			serving &&
+			serving.source !== copy.source &&
+			hooks.latestKey(serving.sub) === undefined &&
+			!(copy.done instanceof Error)
+		) {
+			return "keep";
 		}
 		if (copy.lease > 0) return "keep";
 		const lands = !this.#expired(copy, wait.asMillis());

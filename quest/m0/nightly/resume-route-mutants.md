@@ -23,9 +23,13 @@ what survives.
 at the switch's boundary, the largest group held. So
 `the_fronts_subscription_resumes_at_the_boundary_whichever_reader_is_behind`
 (formerly `..._past_the_reader_furthest_behind`) no longer tells readers apart,
-and `Resume::add`'s `at <= next` may survive again. Readers' boundaries differ
-only when one handed out a group past what its copies still hold. Kill it with
-such a test or exclude it as equivalent.
+and `Resume::add`'s `at <= next` may survive again. To reach the comparison, both
+readers need a held head at their boundary: `held_at` returns `None` for a reader
+that handed out a group past every group its copies hold, and `Resume::add` then
+takes `Whole` first. So readers' positions differ only when their copies differ,
+such as one still holding a replaced or backfill copy with a later group, or more
+of the boundary group's frames. Kill it with two such readers, or exclude it as
+equivalent if no such pair is reachable.
 
 Line numbers drift; rerun `cargo mutants -f <file>` on current main first.
 
