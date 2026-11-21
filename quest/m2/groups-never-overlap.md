@@ -79,26 +79,11 @@ The hang draft's "a group MAY start at the same timestamp as the previous
 group" goes too.
 
 Group times ([moq-dev/moq#9263](https://github.com/moq-dev/moq/pull/9263))
-left two overlaps for this quest:
-
-- `group::Producer::finish_at` refuses an End below a group's highest frame,
-  so moq-mux's `close_group` (`rs/moq-mux/src/container/producer.rs`) and
-  hang's legacy `#close` (`js/hang/src/container/legacy.ts`) now close
-  without an End when theirs would fall below the newest frame or the end
-  marker. A discontinuity hits it: the marker group starts one unit below the
-  live edge, and the group closing ahead of it ended whole at the marker.
-  Delete both guards once the producers keep the rule.
-- A discontinuity after a `cut(end)` puts its marker group one unit below
-  `end`, inside the span of the group that `cut` just ended whole there
-  (moq-mux `Producer::discontinuity`, hang's legacy `discontinuity`). A
-  lite-07 copy records that span skipped once its GROUP_END arrives, so the
-  marker is refused there if it arrives second.
-  `container::ts::recovery_test::a_lost_discontinuity_marker_still_breaks_the_clock`
-  exercises it locally.
-- A keyframe below the open group's newest frame cuts it at an estimated
-  End past the keyframe (moq-mux `Producer::prepare`), so the next group
-  starts inside that span, with the same refusal on a lite-07 copy. Continuing
-  the group, as decided above, fixes it.
+found one more overlap this fixes: a keyframe below the open group's newest
+frame cuts it at an estimated End past the keyframe (moq-mux
+`Producer::prepare`), so the next group starts inside that span, which a
+lite-07 copy refuses. Continuing the group, as decided above, fixes it. The
+spans' other cases are [producer spans](/quest/m2/producer-spans.md)'s.
 
 Tests: the producer test above becomes one where the overlapping keyframe
 continues the group, and a TS import across a content join, including leading
@@ -110,5 +95,6 @@ Public API: none expected. Wire: none; the hang draft's group rule tightens.
 ## Related
 
 - [A time anchor lands by group spans](/quest/m2/time-addressing/span-time-anchors.md) - resolves a time against the spans this rule keeps apart
+- [First-party producers keep lite-07 group spans apart](/quest/m2/producer-spans.md) - the guards, the discontinuity marker, and the leading pictures' End, which this leaves
 - [An incomplete group expires by the lowest timestamp of a higher group](/quest/m3/expire-by-higher-min.md) - the expiry bound this rule makes safe
 - [An fMP4 group start never rewinds the decode timeline](/quest/m3/fmp4-group-start-tfdt.md) - a keyframe repeating its predecessor's timestamp would now continue the group; check which of its cases remain

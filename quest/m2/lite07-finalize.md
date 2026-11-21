@@ -239,6 +239,7 @@ and switching rules in `rs/moq-net/AGENTS.md` before the cut):
 - [No relative anchors](/quest/m2/time-addressing/no-relative-anchors.md) - SUBSCRIBE's anchors lose Relative, and Min Age places a live join
 - [A time anchor lands by group spans](/quest/m2/time-addressing/span-time-anchors.md) - the draft's Time Anchor rule resolves a time inside a skipped span or a whole group's span
 - [Groups never overlap](/quest/m2/groups-never-overlap.md) - first-party producers and importers keep the no-overlap MUST the cut publishes
+- [First-party producers keep lite-07 group spans apart](/quest/m2/producer-spans.md) - no group starts or presents inside a span a lower group's End closed
 - [A lite-07 claim is shown no broader than the grants it crossed](/quest/m2/lite07-claim-reach-routes.md) - a peer is never shown a claim at a path no route of it can serve, through any number of relays (maintainer, 2026-11-20)
 
 ## Related

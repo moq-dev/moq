@@ -69,8 +69,9 @@ the same whichever relay or reader serves it:
 with Min Age placing a live join;
 [scale-less tracks aging by arrival](/quest/m2/time-addressing/scale-less-arrival.md);
 Group Streams carrying each time once ([moq-dev/moq#9263](https://github.com/moq-dev/moq/pull/9263)),
-with GROUP_END's end back as a delta, and
-[time anchors landing by group spans](/quest/m2/time-addressing/span-time-anchors.md).
+with GROUP_END's end back as a delta;
+[time anchors landing by group spans](/quest/m2/time-addressing/span-time-anchors.md);
+and [first-party producers keeping those spans apart](/quest/m2/producer-spans.md).
 [moq-dev/moq#9198](https://github.com/moq-dev/moq/pull/9198) and
 [moq-dev/moq#9221](https://github.com/moq-dev/moq/pull/9221) closed, since
 relative starts and the bare GROUP_END are gone.

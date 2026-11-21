@@ -27,7 +27,8 @@ both rules for review on 2026-11-20; neither is decided.
   would answer. A held whole group proves every time in [start, End).
 - Check the rule against open-GOP leading pictures, whose lowest frame sits
   below the group's start, with
-  [groups never overlap](/quest/m2/groups-never-overlap.md).
+  [producer spans](/quest/m2/producer-spans.md), which decides where a span
+  starts.
 - It overlaps [no relative anchors](/quest/m2/time-addressing/no-relative-anchors.md),
   whose live join resolves as a time start, and
   [moq-dev/moq#9172](https://github.com/moq-dev/moq/pull/9172).
@@ -41,4 +42,4 @@ Public API: none expected. Wire: none; the draft's Time Anchor rule changes.
 ## Related
 
 - [No relative anchors](/quest/m2/time-addressing/no-relative-anchors.md) - its live join resolves as a time start, which this changes inside a skipped span
-- [Groups never overlap](/quest/m2/groups-never-overlap.md) - the non-overlap rule this resolution relies on
+- [First-party producers keep lite-07 group spans apart](/quest/m2/producer-spans.md) - the non-overlap rule this resolution relies on, and where a span starts
