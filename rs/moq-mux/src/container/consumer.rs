@@ -168,9 +168,8 @@ pub struct Consumer<F: Container> {
 	// backwards, so a later group with a frame below this is malformed.
 	start: Option<(u64, Timestamp)>,
 
-	// The start of the group the cursor most recently left. B-frames, open-GOP pictures, and a
-	// keyframe overlapping the previous group's last frame may dip below that group's content,
-	// but a frame below its start is a rewind.
+	// The start of the group the cursor most recently left. A frame below it is a rewind. Every
+	// frame also presents after that group's content, which a reader assumes rather than checks.
 	floor: Option<Timestamp>,
 
 	// Presentation end of the group we most recently advanced past, for the 1 ms
@@ -3424,30 +3423,6 @@ mod tests {
 		assert_eq!(
 			frames.iter().map(|f| f.timestamp).collect::<Vec<_>>(),
 			vec![ts(0), ts(66_000), ts(33_000)]
-		);
-	}
-
-	/// A keyframe one frame below the previous group's last frame, but above its start, is an
-	/// overlap rather than a rewind.
-	#[kio::test]
-	async fn a_keyframe_overlapping_the_previous_group_is_accepted() {
-		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
-		let mut consumer = Consumer::new(track.subscribe(None), Container::Legacy(crate::container::Kind::Data));
-		write_group(&mut track, 0, &[ts(0), ts(33_000), ts(66_000)]);
-		// Read the first group before the second arrives: a blocked group that the next one
-		// already covers is skipped for latency, which is not what this checks.
-		for expected in [0, 33_000, 66_000] {
-			assert_eq!(consumer.read_frame().await.unwrap().unwrap().timestamp, ts(expected));
-		}
-		write_group(&mut track, 1, &[ts(50_000), ts(83_000)]);
-		let _track = track.finish().unwrap();
-		let frames = read_all(&mut consumer).await.unwrap();
-		assert_eq!(
-			frames
-				.iter()
-				.map(|f| f.timestamp.as_micros().unwrap())
-				.collect::<Vec<_>>(),
-			vec![50_000, 83_000]
 		);
 	}
 

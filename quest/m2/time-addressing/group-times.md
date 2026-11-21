@@ -77,8 +77,11 @@ Recommended, for review:
 - Aging: a whole group's reach is its own End, and any other group's is
   bounded by its successor's start, as today.
 - With open-GOP leading pictures, a group's lowest frame sits below its
-  start. Check the Time Anchor rule against spans there, alongside
-  [groups never overlap](/quest/m2/groups-never-overlap.md).
+  start. Check the Time Anchor rule against spans there. Since [moq-dev/moq#9264](https://github.com/moq-dev/moq/pull/9264),
+  moq-mux keeps every frame of a group after every frame of a lower one, but
+  `container::Producer` still finishes a group whole at the next keyframe's
+  timestamp, above that keyframe's leading pictures, so the two spans
+  overlap.
 - `group::Producer::finish_at(end)` and `group::Consumer::end()` stay, since
   the end is what GROUP_END encodes.
 
@@ -112,4 +115,3 @@ which is unpublished.
 ## Related
 
 - [A scale-less track ages by arrival](/quest/m2/time-addressing/scale-less-arrival.md) - lite-05/06 still stamp a scale-less frame, with its group's start
-- [Groups never overlap](/quest/m2/groups-never-overlap.md) - enforces the non-overlap rule in hang's producers and importers
