@@ -23,9 +23,9 @@ function measure(ranges: number, drops: number): number {
 	// the reader never settles.
 	const spans: Range[] = Array.from({ length: ranges }, (_, range) => {
 		const at = BigInt(2 * range);
-		return { start: { time: at }, end: { time: at } };
+		return { start: at, end: at };
 	});
-	spans.push({ start: { time: BigInt(2 * ranges) } });
+	spans.push({ start: BigInt(2 * ranges) });
 	const subscriber = producer.subscribe({ ranges: spans });
 	subscriber.tryRecvGroup();
 	// Alternating errors keep adjacent drops separate runs.

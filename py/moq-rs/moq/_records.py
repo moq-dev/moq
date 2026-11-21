@@ -12,10 +12,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
 from importlib import metadata
-from typing import ClassVar, cast
 
 from moq_ffi import (
-    MoqAnchor,
     MoqBackoff,
     MoqClientTls,
     MoqCompression,
@@ -145,71 +143,29 @@ class Datagram:
         )
 
 
-class Anchor:
-    """Where one end of a :class:`Range` falls, mirroring moq-net's ``track::Anchor``.
-
-    Build one with ``Anchor.OLDEST()``, ``Anchor.RELATIVE(groups=...)``, or
-    ``Anchor.TIME(timestamp=...)``.
-    """
-
-    OLDEST: ClassVar[type[_AnchorOldest]]
-    RELATIVE: ClassVar[type[_AnchorRelative]]
-    TIME: ClassVar[type[_AnchorTime]]
-
-    def _ffi(self) -> MoqAnchor:
-        raise TypeError("build an Anchor with Anchor.OLDEST, Anchor.RELATIVE, or Anchor.TIME")
-
-
-# The generated variants subclass MoqAnchor only at runtime, so each _ffi casts for pyright.
-@dataclass(frozen=True)
-class _AnchorOldest(Anchor):
-    """The oldest group still around, as far back as the max delay allows. A start only."""
-
-    def _ffi(self) -> MoqAnchor:
-        return cast(MoqAnchor, MoqAnchor.OLDEST())
-
-
-@dataclass(frozen=True)
-class _AnchorRelative(Anchor):
-    """The group this many before the latest, clamped to group 0: ``0`` is the latest group."""
-
-    groups: int
-
-    def _ffi(self) -> MoqAnchor:
-        return cast(MoqAnchor, MoqAnchor.RELATIVE(groups=self.groups))
-
-
-@dataclass(frozen=True)
-class _AnchorTime(Anchor):
-    """The group containing this time: :meth:`Timestamp.unscaled` in the track's timescale.
-
-    As an end it includes every group starting at or before the time. A scaled timestamp is
-    refused, since the subscription can't check its scale against the track.
-    """
-
-    timestamp: Timestamp
-
-    def _ffi(self) -> MoqAnchor:
-        return cast(MoqAnchor, MoqAnchor.TIME(timestamp=self.timestamp._ffi()))
-
-
-Anchor.OLDEST = _AnchorOldest
-Anchor.RELATIVE = _AnchorRelative
-Anchor.TIME = _AnchorTime
-
-
 @dataclass(frozen=True)
 class Range:
-    """A span of a track to deliver, from ``start`` to ``end``, ``None`` to keep following the live edge.
+    """A span of a track to deliver, mirroring moq-net's ``track::Range``.
 
-    Every start is the first frame of its group, and every end includes its whole group.
+    It runs from the group containing ``start`` through the group containing ``end``. Both are
+    :meth:`Timestamp.unscaled` in the track's timescale; a scaled one is refused, since the
+    subscription can't check its scale against the track. Every start is the first frame of
+    its group, and every end includes its whole group.
+
+    ``start`` is ``None`` for no start, which the subscription's :class:`Delay` places: a stated
+    ``min`` is a live join that far behind the live edge (zero is the latest group), and an
+    unstated one reaches back as far as ``max`` allows. ``end`` is ``None`` to keep following
+    the live edge.
     """
 
-    start: Anchor
-    end: Anchor | None = None
+    start: Timestamp | None = None
+    end: Timestamp | None = None
 
     def _ffi(self) -> MoqRange:
-        return MoqRange(start=self.start._ffi(), end=None if self.end is None else self.end._ffi())
+        return MoqRange(
+            start=None if self.start is None else self.start._ffi(),
+            end=None if self.end is None else self.end._ffi(),
+        )
 
 
 @dataclass(frozen=True)
@@ -217,20 +173,19 @@ class Delay:
     """How far behind the live edge a subscriber or decoder plays, mirroring moq-net's ``track::Delay``.
 
     ``min`` is the target latency: the playout or jitter-buffer delay held behind the
-    live edge, where a cold join starts. ``None`` leaves it unstated, which a decoder starts
-    as zero, while the subscription keeps it unstated, so it never pulls the aggregate across
-    subscribers to zero, unless a catalog warmup or an audio decoder's playout delay states
-    one. A ``min`` past ``max`` starts a cold join no further back than the
-    group covering the point ``max`` behind the live edge.
+    live edge. Once stated, zero included, a :class:`Range` with no start is a live join that
+    far behind the live edge. ``None`` leaves it unstated: such a range reaches back as far as
+    ``max`` allows, and a decoder starts it as zero. A ``min`` past ``max`` starts a live join
+    no further back than the group covering the point ``max`` behind the live edge.
     ``max`` is how far a non-latest group may fall behind before it is skipped, and how far newer
     media may run past a missing group before a decoder gives it up; zero
     skips at once, ``None`` sets no subscriber limit and leaves the publisher's max age
     alone to bound it, and it caps every range.
 
-    A bare ``Delay()`` is moq-net's default, zero for both.
+    A bare ``Delay()`` is moq-net's default: no ``min`` and a zero ``max``.
     """
 
-    min: timedelta | None = timedelta(0)
+    min: timedelta | None = None
     max: timedelta | None = timedelta(0)
 
     @classmethod
@@ -246,9 +201,9 @@ class Subscription:
     """Subscriber-side delivery preferences, mirroring moq-net's ``track::Subscription``.
 
     ``priority`` is in ``-128..=127``, higher first, and defaults to 0, the midpoint.
-    ``delay`` is where a cold join starts and how far a non-latest group may fall behind
-    before it is skipped. ``ranges`` are the spans of the track to deliver, ``None`` for
-    everything ``delay.max`` still allows. ``order`` is which pending group the publisher
+    ``delay`` is where a range with no start begins and how far a non-latest group may fall
+    behind before it is skipped. ``ranges`` are the spans of the track to deliver, ``None`` for
+    one :class:`Range` with no start. ``order`` is which pending group the publisher
     sends first, ``None`` for newest first.
 
     A bare ``Subscription()`` has moq-net's defaults, as :meth:`default` does.
@@ -261,7 +216,7 @@ class Subscription:
 
     @classmethod
     def default(cls) -> Subscription:
-        """moq-net's defaults, whose zero ``delay`` starts at the newest group and skips a superseded one at once.
+        """moq-net's defaults: no ``delay.min`` and a zero ``delay.max``, which start at the newest group.
 
         A ``None`` subscription means the same; ``dataclasses.replace`` this one to change
         a field.

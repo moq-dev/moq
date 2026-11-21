@@ -2942,7 +2942,7 @@ test("a widened range's SUBSCRIBE_STARTED resolves the feed's start", async () =
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, toHop(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
-	const track = broadcast.track("video").subscribe({ ranges: [{ start: { time: 0n }, end: { time: 0n } }] });
+	const track = broadcast.track("video").subscribe({ ranges: [{ start: 0n, end: 0n }] });
 	try {
 		await opened(0);
 		await answerTrackInfo(streams[0], version);
@@ -2955,7 +2955,7 @@ test("a widened range's SUBSCRIBE_STARTED resolves the feed's start", async () =
 		await respond(request, version, [{ start: new SubscribeStart([undefined]) }]);
 		await drainReactions();
 		expect(hooks.sourceStart(track)).not.toBe("pending");
-		track.update({ ranges: [{ start: { time: 0n }, end: { time: 1n } }] });
+		track.update({ ranges: [{ start: 0n, end: 1n }] });
 		// The feed goes pending before the update is written, so reading it waits for both.
 		const update = await SubscribeUpdate.decode(sent, version);
 		expect(hooks.sourceStart(track)).toBe("pending");
@@ -3383,7 +3383,7 @@ test("an update whose bound the wire can't carry fails the track", async () => {
 		await opened(0);
 		await answerTrackInfo(streams[0], Version.DRAFT_05);
 		await (await opened(1)).reading;
-		track.update({ ranges: [{ start: { time: 2n ** 62n - 1n } }] });
+		track.update({ ranges: [{ start: 2n ** 62n - 1n }] });
 		expect(await track.closed).toBeInstanceOf(RangeError);
 	} finally {
 		track.close();

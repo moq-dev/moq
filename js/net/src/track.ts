@@ -57,7 +57,18 @@ import { rescale } from "./rescale.ts";
 import { floorAt, Timescale, type Timestamp } from "./time.ts";
 import { checkEnd, checkKey, max, min, UNBOUNDED } from "./util/key.ts";
 import { checkName } from "./util/utf8.ts";
-import { bounded, type Found, type Holdings, joinsLive, rangesOf, UNHELD, Window, wireSpan } from "./window.ts";
+import {
+	bounded,
+	type Containing,
+	type Found,
+	type Holdings,
+	type Join,
+	joinsLive,
+	rangesOf,
+	UNHELD,
+	Window,
+	wireSpan,
+} from "./window.ts";
 import { type Broadcast as BroadcastWire, registerTrackConsumer } from "./wire.ts";
 
 export { FillGroups, Requests } from "./fill.ts";
@@ -305,73 +316,59 @@ export interface Groups {
 }
 
 /**
- * Where one end of a {@link Range} falls: a count of groups back from the latest one
- * (`relative`, counting the groups the serving hop holds, so `{ relative: 0n }` is the latest
- * group), or a time (`time`, in the track's timescale: the group containing it, the newest one
- * starting at or before it). Mirrors the Rust `Anchor`.
+ * A span of a track to deliver, from `start` through `end`, both times in the track's timescale (a
+ * bare group start on a track without one). Mirrors the Rust `Range`.
  *
- * Groups are keyed by their start, so a group's start names exactly it. On a track without a
- * timescale the time is a bare start, in the same units as the group starts.
- *
- * Every anchor names a whole group: a subscription always starts at a group's first frame. An
- * anchor resolves at the hop that serves it, when it starts serving and again whenever the
- * subscriber replaces its ranges. Before any group exists a relative anchor resolves at the first
- * one, so `{ start: { relative: 0n } }` starts there. One counting back past every group held
- * reaches back to the oldest as a start, and ends before them all as an end.
+ * A time names the group containing it: the newest one starting at or before it. Groups are keyed
+ * by their start, so a group's start names exactly it, and both ends include their group:
+ * `{ start: 2n, end: 6n }` delivers every group from the one containing time 2 through the one
+ * containing time 6. An end before its start is empty. A subscription always starts at a group's
+ * first frame. Each end resolves at the hop that serves it, once, when the range is placed.
  *
  * A time start resolves from the starts of the groups the serving hop holds. When none starts at
  * or before it, a hop whose fill handler serves its history asks it for the group containing the
  * time (see {@link FillGroups.floor}), reading nothing until it answers; otherwise, or when the
- * handler can't tell, it reaches back to the oldest group. While no group is held at all it waits for one,
- * reading only the groups from its time meanwhile.
+ * handler can't tell, it reaches back to the oldest group. While no group is held at all it waits
+ * for one, reading only the groups from its time meanwhile.
  *
- * Older moq-lite versions carry only time anchors, as group IDs, the live start, and the oldest
- * start, refusing any other.
- */
-export type Anchor = { relative: bigint; time?: never } | { time: bigint; relative?: never };
-
-/**
- * A span of a track to deliver: from `start` through `end`. Mirrors the Rust `Range`.
- *
- * An omitted start is the oldest group still around (Rust's `Anchor::Oldest`), and an omitted end
- * keeps following the live edge. Both ends include their group: `{time: 2n}..{time: 6n}` delivers
- * every group from the one containing time 2 through the one containing time 6, and
- * `..{relative: 0n}` delivers through the latest group. A time end before its time start is empty.
+ * An omitted start depends on the subscriber's {@link Delay.min}: not stated, it starts at the
+ * oldest group still around, as far back as {@link Delay.max} allows; stated, it joins live that
+ * far behind the live edge. An omitted end keeps following the live edge.
  */
 export interface Range {
-	/** Where delivery starts, or the oldest group when omitted. */
-	start?: Anchor;
-	/** Where delivery stops, including its group, or onward when omitted. */
-	end?: Anchor;
+	/** Where delivery starts, as a time; see {@link Range} for an omitted one. */
+	start?: bigint;
+	/** Where delivery stops, as a time including its group, or onward when omitted. */
+	end?: bigint;
 }
 
 /**
  * How far behind the live edge a subscriber plays, in milliseconds: where it starts, and how
- * late it may fall. Mirrors the Rust `track::Delay`. Both default to zero, which starts at the
- * newest group and skips a superseded one at once. Each value is rounded up to a whole
+ * late it may fall. Mirrors the Rust `track::Delay`. The minimum defaults to not stated and the
+ * maximum to zero, which skips a superseded group at once. Each value is rounded up to a whole
  * millisecond, so one derived from a measurement is never shortened; a negative or non-finite
  * value, or one past `Number.MAX_SAFE_INTEGER` after rounding, is refused.
  */
 export interface Delay {
 	/**
-	 * The target latency, the playout or jitter-buffer delay held behind the live edge. Omitted
-	 * means `0`; `null` means not stated, which a peer whose wire cannot carry it (moq-lite
-	 * before 07, moq-transport) sends. It only sets where a reader starts: a missing group is given
-	 * up by {@link Delay.max} alone, whatever the minimum. A media consumer starts an unstated
-	 * minimum as `0`.
+	 * The Min Age, the playout or jitter-buffer delay held behind the live edge. Omitted or `null`
+	 * means not stated, which a peer whose wire cannot carry it (moq-lite before 07,
+	 * moq-transport) sends. It only sets where a range with no start begins: a missing group is
+	 * given up by {@link Delay.max} alone, whatever the minimum.
 	 *
-	 * A live join, `{ start: { relative: 0n } }` with no end, starts this far behind the live edge:
-	 * at the newest group that began at or before the live edge minus this, so a player's buffer
-	 * arrives full instead of filling in real time. The hop serving it measures from what it holds:
-	 * in media time from the newest frame on a timed track, and by arrival on its own clock on a
-	 * scale-less one. With no such group held it starts at the oldest one, and never fetches
-	 * upstream for more. {@link Delay.max} still skips what has gone stale. Any other range, the
-	 * default oldest start included, and a resumed subscription ignore it, and changing it later
+	 * Stated, zero included, a range with no start is a live join: it starts at the group
+	 * containing the live edge minus this, so a player's buffer arrives full instead of filling in
+	 * real time, and zero starts at the latest group. The hop serving it measures from what it
+	 * holds: in media time from the newest frame on a timed track, rounded up to a whole tick, and
+	 * by arrival on its own clock on a scale-less one. On a timed track the start resolves as a time
+	 * start, so a hop with a fill handler looks it up in its history, and a relay copy that can't
+	 * prove the group from what it holds asks upstream and waits. Not stated, a range with no start
+	 * begins at the oldest group instead. A range with a start ignores it, and changing it later
 	 * moves nothing already started.
 	 *
-	 * The aggregate across subscribers is the largest stated one, which a relay forwards upstream,
-	 * so the copy it fills reaches back for the reader that buffers most; each reader's own
-	 * minimum then bounds what it reads of that copy.
+	 * The aggregate across subscribers counts only those holding a range with no start: the largest,
+	 * with not stated counting as the largest, which a relay forwards upstream so the copy it fills
+	 * reaches back for the reader that buffers most.
 	 */
 	min?: Duration | null;
 	/**
@@ -393,13 +390,13 @@ export interface Delay {
 export interface Subscription {
 	/** Delivery priority relative to this session's other subscriptions (`-128..=127`, higher first). Defaults to `0`. */
 	priority?: number;
-	/** How far behind the live edge this subscriber plays; see {@link Delay}. Omitted is all zero. */
+	/** How far behind the live edge this subscriber plays; see {@link Delay}. Omitted states no minimum and a zero maximum. */
 	delay?: Delay;
 	/**
 	 * The spans of the track to deliver; see {@link Range}.
 	 *
-	 * Defaults to `[{}]`: everything {@link Delay.max} still considers fresh.
-	 * `[{ start: { relative: 0n } }]` starts at the latest group instead, and an empty list asks
+	 * Defaults to `[{}]`: with no {@link Delay.min} stated, everything {@link Delay.max} still
+	 * considers fresh, and with one, a live join that far behind the live edge. An empty list asks
 	 * for nothing. {@link Delay.max} caps every range: a range names what may be delivered, and
 	 * the budget skips what inside it has gone stale. A read whose ranges all end finishes once
 	 * nothing in them is left to deliver, as in Rust, while one left open follows the live edge.
@@ -438,7 +435,8 @@ export type Order = "ascending" | "descending";
 export const Subscription: {
 	/**
 	 * The default subscription, used when none is passed: priority `0`, descending order, and
-	 * a {@link Delay} of zero that skips a superseded group at once. Mirrors the Rust
+	 * a {@link Delay} with no minimum stated and a zero maximum that skips a superseded group at
+	 * once. Mirrors the Rust
 	 * `Subscription::default()`. Spread it to change one field and keep the rest:
 	 * `{ ...Subscription.default(), priority: 2 }`.
 	 */
@@ -446,7 +444,7 @@ export const Subscription: {
 } = {
 	default: () => ({
 		priority: DEFAULT_PRIORITY,
-		delay: { min: Duration.ZERO, max: Duration.ZERO },
+		delay: { min: null, max: Duration.ZERO },
 		order: "descending",
 	}),
 };
@@ -462,7 +460,7 @@ function subscriptionDefaults(subscription: Subscription = Subscription.default(
 	return {
 		priority: priorityValue(subscription.priority ?? DEFAULT_PRIORITY),
 		delay: {
-			min: delay.min === null ? null : wireMillis("delay.min", delay.min ?? Duration.ZERO),
+			min: delay.min == null ? null : wireMillis("delay.min", delay.min),
 			max:
 				delay.max === null
 					? Duration.millis(NO_MAX_DELAY)
@@ -828,7 +826,7 @@ class TrackState {
 	info = new Signal<Info | undefined>(undefined);
 	/** Newest group head, frame, or location reported by the publisher. */
 	largest = new Signal<Position | undefined>(undefined);
-	// The group {@link largest} first named, where a relative anchor resolved before any group
+	// The group {@link largest} first named, where a live join resolved before any group
 	// existed starts.
 	first?: bigint;
 	// Set once {@link largest} can no longer advance while the track stays open.
@@ -1003,7 +1001,7 @@ let fillEdge: (producer: Producer) => bigint | undefined;
 let sourceStart: (producer: Producer) => bigint | "pending" | undefined;
 // The lowest group a reader naming `named` asks a fill for; see `Producer.#fillFloor`.
 let fillFloor: (producer: Producer, named: bigint | undefined) => bigint | undefined;
-// The keys of the groups the producer caches, sorted: what relative and time anchors resolve
+// The keys of the groups the producer caches, sorted: what time starts and live joins resolve
 // against, as the Rust `TrackState::lookup` keys; assigned in its static block.
 let keysOf: (producer: Producer) => readonly bigint[];
 // How a received copy resolves its readers' time anchors, as its wire tells it; assigned in the
@@ -1013,7 +1011,8 @@ let timeAnchors: (producer: Producer) => {
 	starts: ReadonlyMap<bigint, bigint>;
 	/** The newest of `starts` past the time its range asked from, 0 when none is. */
 	past: bigint;
-	relative: ReadonlyMap<bigint, { start: bigint; latest?: bigint }>;
+	/** Where the publisher started each live join, by the Min Age in milliseconds it was asked under. */
+	joins: readonly (readonly [number, bigint])[];
 	/** Bumped whenever the others, or whether the producer is a received copy, change. */
 	placing: number;
 };
@@ -1272,7 +1271,7 @@ export class Producer {
 	// The cached groups' checked starts, sorted by key, so a first frame finds its
 	// neighbors' with a search.
 	#bounds: Start[] = [];
-	// The keys of the cached groups, sorted: what relative and time anchors resolve against, as
+	// The keys of the cached groups, sorted: what time starts and live joins resolve against, as
 	// the Rust `TrackState::lookup` keys them.
 	#keys: bigint[] = [];
 	// A received copy's readers start a time anchor at the group starting there, held or not:
@@ -1286,8 +1285,9 @@ export class Producer {
 	// The newest start in `#timeStarts` past the time its range asked from, kept as it is
 	// replaced: a reader's `unplaced` reads it on every settle. Mirrors the Rust `starts_past`.
 	#startsPast = 0n;
-	// On a lite-07 copy, where the publisher started each live range counting back, by its count.
-	#relativeStarts = new Map<bigint, { start: bigint; latest?: bigint }>();
+	// On a lite-07 copy, where the publisher started each live join, by the Min Age in milliseconds
+	// it was asked under.
+	#joinStarts: (readonly [number, bigint])[] = [];
 	// Counts changes to how a time start is placed other than by groups arriving or drops: the wire,
 	// `#timeStarts`, and `#startsAtKeys`. Mirrors the Rust `TrackState::placing`.
 	#placing = 0;
@@ -1528,7 +1528,7 @@ export class Producer {
 			atKeys: producer.#startsAtKeys,
 			starts: producer.#timeStarts,
 			past: producer.#startsPast,
-			relative: producer.#relativeStarts,
+			joins: producer.#joinStarts,
 			placing: producer.#placing,
 		});
 		hooks.startsAtKeys = (producer) => {
@@ -1543,8 +1543,14 @@ export class Producer {
 			}
 			producer.#placing++;
 		};
-		hooks.relativeStarts = (producer, starts) => {
-			producer.#relativeStarts = new Map([...starts].map(([back, start, latest]) => [back, { start, latest }]));
+		hooks.joinStarts = (producer, starts) => {
+			const next = [...starts];
+			const last = producer.#joinStarts;
+			if (next.length === last.length && next.every(([age, at], i) => age === last[i][0] && at === last[i][1]))
+				return;
+			producer.#joinStarts = next;
+			// A reader whose live join waits on an answer covering it tries again.
+			for (const state of [producer.#state, ...producer.#sinks]) state.startChanged.update((rev) => rev + 1);
 		};
 		hooks.producerLargest = (producer) => producer.#state.largest;
 		hooks.askProducer = (producer, ask) => producer.#ask(ask);
@@ -3604,7 +3610,7 @@ export class Subscriber {
 		this.#resolve();
 	}
 
-	// The latest group to count relative anchors back from. A reader following route copies
+	// The latest group, which a range waiting on a first group resolves against. A reader following route copies
 	// leaves them to the copies, which hold the groups.
 	#latestGroup(): bigint | undefined {
 		return this.#resume ? undefined : this.#state.largest.peek()?.group;
@@ -3633,7 +3639,7 @@ export class Subscriber {
 		this.#bound();
 	}
 
-	// The groups this reader's track holds, by start, for resolving its relative and time anchors:
+	// The groups this reader's track holds, by start, for resolving its time starts and live joins:
 	// the producer's cache. A reader following route copies leaves them to the copies, which hold
 	// the groups. Mirrors the Rust `Holdings for TrackState`.
 	#holdings(): Holdings {
@@ -3651,7 +3657,7 @@ export class Subscriber {
 			const start = drops.coveredFrom(from);
 			return start < UNBOUNDED ? { start, end: UNBOUNDED } : undefined;
 		};
-		return {
+		const holdings: Holdings = {
 			resolves: () => true,
 			containing: (time) => {
 				// A fetch names its group by start: the one starting there, never an earlier one
@@ -3715,23 +3721,11 @@ export class Subscriber {
 				return { runs, mark };
 			},
 			nextStart: (from) => keys[keyIndex(keys, from)],
-			// A lite-07 copy holds only part of the track, so it starts where its publisher did,
-			// counting from the same latest group: a newer one moved the live edge.
-			reportedStart: (latest, back) => {
-				const reported = receivedCopy(producer) ? anchors.relative.get(back) : undefined;
-				return reported !== undefined && reported.latest === latest ? reported.start : undefined;
-			},
-			back: (latest, back) => {
-				if (back === 0n) return latest;
-				// Bounded by the cache: a huge count reaches back to the oldest.
-				const index = BigInt(keyIndex(keys, latest)) - back;
-				return index < 0n ? undefined : keys[Number(index)];
-			},
 			// Only once the producer is gone: a group held below a reached end may still start.
 			complete: () => state.closed.peek() !== undefined,
 			// A received copy's handler is its session, which fetches by group alone.
 			looksUp: () => !receivedCopy(producer) && fillsOf(producer).serving,
-			reachBack: (_latest, min) => this.#reachBack(min),
+			join: (min) => this.#join(min, holdings.containing, wire && !anchors.atKeys),
 			// Skip runs coalesce, so a gap between two held groups is one run unless the cache
 			// evicted a group inside it.
 			neverProduced: (start, end) => {
@@ -3744,63 +3738,100 @@ export class Subscriber {
 				return at >= end;
 			},
 		};
+		return holdings;
 	}
 
-	// Where a live join holding `min` behind the live edge starts, as {@link Holdings.reachBack}
-	// says: in media time from the newest frame held, or on a scale-less track, by arrival on this
-	// hop's clock, as expiry measures it. Always a group held: the newest one starting by the
-	// target, or the oldest one when none does, so nothing below what this hop holds is asked for.
-	// Groups keyed by their start are found by key; on a copy whose wire keys groups otherwise, by
-	// when each one's first frame presented. Mirrors the Rust `TrackState::reach_back`.
-	#reachBack(min: Duration): { anchor?: Anchor } | undefined {
+	// Where a live join holding `min` behind the live edge starts, as {@link Holdings.join} says: in
+	// media time from the newest frame held, or on a scale-less track, by arrival on this hop's
+	// clock, as expiry measures it. Undefined while nothing held measures the live edge.
+	//
+	// A hop serving its own track starts a timed one as a time start at the live edge minus `min`,
+	// which a fill handler looks up in its history, and a scale-less one at the newest group that
+	// arrived at least `min` ago, or the oldest held. A lite-07 copy (`wire`) holds only part of the
+	// track, so it starts only where it can prove upstream would: see {@link #joinFed}. A copy whose
+	// wire keys groups otherwise starts at a group held, by when each one's first frame presented,
+	// as its publisher resolved the join already. Mirrors the Rust `TrackState::join`.
+	#join(min: Duration, containing: (time: bigint) => Containing, wire: boolean): Join | undefined {
 		const timeline = this.#state.timeline;
 		// The newest group held for which `f` holds, failed ones aside.
 		const newest = (f: (group: GroupConsumer) => boolean) =>
 			timeline.findLast((g) => !hooks.groupFailed(g) && f(g));
-		const held = (group: GroupConsumer | undefined) => {
-			const at = group ?? timeline.find((g) => !hooks.groupFailed(g));
-			return at && { anchor: { time: at.start } };
-		};
+		const oldest = () => timeline.find((g) => !hooks.groupFailed(g));
 		const info = this.#state.info.peek();
 		// Until the track is accepted, whether it is timed at all is unknown.
 		if (info === undefined) return undefined;
 		const scale = info.timescale;
 		if (scale == null) {
 			const at = now();
-			return held(newest((group) => at.since(hooks.groupArrived(group)).ge(min)));
+			const group =
+				newest((group) => at.since(hooks.groupArrived(group)).ge(min)) ?? (wire ? undefined : oldest());
+			if (group) return { group: group.start };
+			// Nothing here arrived long enough ago, which upstream's arrivals may still answer.
+			return wire && oldest() ? this.#joinFed(min, undefined) : undefined;
 		}
 		const stamped = newest((group) => hooks.groupTimestamp(group) !== undefined);
-		const started = stamped && hooks.groupTimestamp(stamped);
 		// In the track's own scale, which holds every timestamp it accepted. Floored exactly, as
 		// Rust's `Timestamp::convert`: an accepted timestamp may sit between ticks.
-		const edge = started && BigInt(floorAt(hooks.groupLatest(stamped) ?? started, scale));
+		const reach = (group: GroupConsumer | undefined) => {
+			const latest = group && (hooks.groupLatest(group) ?? hooks.groupTimestamp(group));
+			return latest && BigInt(floorAt(latest, scale));
+		};
+		const edge = reach(stamped);
 		// The Min Age rounds up to whole ticks, so the start is never newer than it allows.
 		const back = (BigInt(Math.ceil(min.asNanos())) * BigInt(scale) + 999_999_999n) / 1_000_000_000n;
 		const producer = this.#state.producer;
 		if (!this.#state.dropsAnchors.peek() && !(producer && timeAnchors(producer).atKeys)) {
-			const last = newest(() => true)?.start;
-			const top = edge === undefined ? last : last === undefined ? edge : max(edge, last);
+			// A copy's feed may still be bringing older groups, which its own newest then trails: the
+			// largest its upstream reported puts the live edge no lower.
+			const largest = wire ? this.#state.largest.peek()?.group : undefined;
+			let top: bigint | undefined;
+			for (const at of [edge, newest(() => true)?.start, largest]) {
+				if (at !== undefined && (top === undefined || at > top)) top = at;
+			}
 			if (top === undefined) return undefined;
 			const target = top > back ? top - back : 0n;
-			return held(newest((group) => group.start <= target));
+			if (!wire) return { time: target };
+			const held = containing(target);
+			if (typeof held === "object") return { group: held.group };
+			// Groups never overlap in time, so one held starting by the target with a frame at or past
+			// it contains it: every later group starts after that frame.
+			const holder = newest((group) => group.start <= target);
+			const through = reach(holder);
+			if (holder && through !== undefined && through >= target) return { group: holder.start };
+			return this.#joinFed(min, target);
 		}
 		if (edge === undefined) return undefined;
 		const target = edge > back ? edge - back : 0n;
-		return held(
+		const group =
 			newest((group) => {
 				const start = hooks.groupTimestamp(group);
 				return start !== undefined && BigInt(floorAt(start, scale)) <= target;
-			}),
-		);
+			}) ?? oldest();
+		return group && { group: group.start };
 	}
 
-	// Resolve what the groups now held settle: a relative anchor waiting on a first group once
-	// one exists, and a time start as groups arrive. Returns the refusal of ranges this copy cannot
+	// Where a lite-07 copy's live join by `min` starts when its own groups can't prove it: from what
+	// its feed delivers. Each upstream answer covering `min` (a live join asked under a Min Age at
+	// least as large, or one reaching back to the oldest group) starts the feed at some group, which
+	// then delivers every group past it, so a `target` before the earliest such start starts there,
+	// and one past it waits as a time start for the feed to place it. Undefined while no answer
+	// covers it, so the join reads nothing until the copy's upstream subscription, which asks under
+	// the largest Min Age, answers for it.
+	#joinFed(min: Duration, target: bigint | undefined): Join | undefined {
+		const producer = this.#state.producer;
+		if (!producer) return undefined;
+		const anchors = timeAnchors(producer);
+		const age = min.asMillis();
+		let start = anchors.starts.get(0n);
+		for (const [asked, at] of anchors.joins) if (asked >= age && (start === undefined || at < start)) start = at;
+		if (start === undefined) return undefined;
+		return target === undefined || target < start ? { group: start } : { time: target };
+	}
+
+	// Resolve what the groups now held settle: a live join waiting on a first group once one
+	// exists, and a time start as groups arrive. Returns the refusal of ranges this copy cannot
 	// resolve, which every read reports.
 	#settle(): Error | undefined {
-		if (this.#state.dropsAnchors.peek() && !this.#window.wired) {
-			return new Error("a relative or time anchor other than the live start needs moq-lite-07");
-		}
 		if (this.#refusal || this.#resume || this.#window.settled) return this.#refusal;
 		// The live feed had no group when the ranges resolved, so the newest one then was the first.
 		const latest = this.#window.pending ? this.#state.first : this.#latestGroup();
@@ -4332,7 +4363,7 @@ export class Subscriber {
 			subscriber.#resume ? subscriber.#resume.skippedBelow(key) : skippedBelow(subscriber.#state, key);
 		hooks.sourceStart = (subscriber) => {
 			if (subscriber.#resume) return subscriber.#resume.start();
-			// A relative anchor still pending reads every group, so a fill asked below would claim
+			// A live join still pending reads every group, so a fill asked below would claim
 			// the history it never names. Mirrors the Rust `cursor.sync()` in `poll_start`.
 			subscriber.#settle();
 			const producer = subscriber.#state.producer;
@@ -4644,7 +4675,7 @@ export class Subscriber {
 	/**
 	 * The lowest group this subscriber's ranges name, as resolved here, raised to the start of
 	 * {@link withRange}: undefined while one reaches back to the oldest group still around, or a
-	 * relative start still waits on the first group from the live feed.
+	 * live join still waits on the first group from the live feed.
 	 *
 	 * Where a reader that waits on each group in key starts, rather than at whatever arrives
 	 * first, which newest-first delivery makes the latest. Mirrors the Rust `Subscriber::floor`.
@@ -4668,7 +4699,7 @@ export class Subscriber {
 	 * cover, past the starts the publisher declared skipped (see {@link Producer.appendGroup}) and
 	 * those given up for good, undefined when none does: the groups between are never read, so a
 	 * reader waiting on each group in key need not wait for them. A wire before lite-07 forwards
-	 * a skip as such a drop. `from` itself while a relative anchor waits on the first group, which
+	 * a skip as such a drop. `from` itself while a live join waits on the first group, which
 	 * can't say yet. Mirrors the Rust `Subscriber::next_in_range`.
 	 */
 	#nextInRange(from: bigint): bigint | undefined {

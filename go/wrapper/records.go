@@ -72,17 +72,17 @@ type Datagram = ffi.MoqDatagram
 type DatagramInfo = ffi.MoqDatagramInfo
 
 // Delay is how far behind the live edge a subscriber or decoder plays: where it starts, and
-// how late it may fall. The zero Delay is moq-net's default, a stated zero for both, which
+// how late it may fall. The zero Delay is moq-net's default, no Min and a zero Max, which
 // starts at the newest group and skips a superseded group at once.
 type Delay struct {
 	// Min is the target latency: the playout or jitter-buffer delay held behind the live edge,
-	// where a cold join starts. A missing group is given up by Max alone. A Min past Max starts a
-	// cold join no further back than the group covering the point Max behind the live edge, since the publisher serves no older group. moq-lite-07 sends it upstream.
-	Min time.Duration
-	// MinUnstated leaves Min unstated, ignoring it. A decoder starts it as zero, while the
-	// subscription keeps it unstated, so it never pulls the aggregate across subscribers to
-	// zero, unless a catalog warmup or an audio decoder's playout delay states one.
-	MinUnstated bool
+	// or nil to leave it unstated. Once stated, zero included, a Range with no Start is a live
+	// join that far behind the live edge; unstated, such a range reaches back as far as Max
+	// allows, and a decoder starts it as zero. A range with a Start ignores it, and a missing
+	// group is given up by Max alone. A Min past Max starts a live join no further back than the
+	// group covering the point Max behind the live edge, since the publisher serves no older
+	// group. moq-lite-07 sends it upstream.
+	Min *time.Duration
 	// Max is how far a non-latest group may fall behind the live edge before it is skipped. Zero
 	// skips immediately; a larger value tolerates that much reordering. It caps every range,
 	// and bounds lateness only, never the start.
@@ -93,10 +93,7 @@ type Delay struct {
 }
 
 func (d Delay) ffi() (ffi.MoqDelay, error) {
-	var out ffi.MoqDelay
-	if !d.MinUnstated {
-		out.Min = &d.Min
-	}
+	out := ffi.MoqDelay{Min: d.Min}
 	if !d.MaxUnlimited {
 		out.Max = &d.Max
 	}
@@ -107,19 +104,16 @@ func (d Delay) ffi() (ffi.MoqDelay, error) {
 }
 
 func delayFromFFI(d ffi.MoqDelay) Delay {
-	out := Delay{MinUnstated: d.Min == nil, MaxUnlimited: d.Max == nil}
-	if d.Min != nil {
-		out.Min = *d.Min
-	}
+	out := Delay{Min: d.Min, MaxUnlimited: d.Max == nil}
 	if d.Max != nil {
 		out.Max = *d.Max
 	}
 	return out
 }
 
-// Subscription holds subscriber-side delivery preferences: priority, the Delay (where a cold
-// join starts and how late a non-latest group may fall before it is skipped), the ranges of
-// the track to deliver (nil for everything Delay.Max still allows, while an empty non-nil
+// Subscription holds subscriber-side delivery preferences: priority, the Delay (where a range
+// with no start begins and how late a non-latest group may fall before it is skipped), the
+// ranges of the track to deliver (nil for one Range with no start, while an empty non-nil
 // slice asks for nothing), and the order the publisher sends pending groups in (nil for
 // newest first).
 //
@@ -131,8 +125,8 @@ type Subscription struct {
 	Order    *Order
 }
 
-// DefaultSubscription returns moq-net's defaults, whose zero Delay starts at the newest group
-// and skips a superseded group at once. A nil *Subscription means the same.
+// DefaultSubscription returns moq-net's defaults, whose zero Delay (no Min, a zero Max) starts
+// at the newest group and skips a superseded group at once. A nil *Subscription means the same.
 func DefaultSubscription() Subscription {
 	d := ffi.MoqSubscriptionDefaults()
 	var ranges []Range

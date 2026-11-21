@@ -1482,7 +1482,6 @@ Range {
 Anchor {
   Anchor Type (i)
   [Timestamp (i)]
-  [Groups Back (i)]
   [Frame (i)]
 }
 
@@ -1516,8 +1515,8 @@ See the [Expiration](#expiration) section for more information.
 **Subscriber Min Age**:
 The subscriber's target latency behind the live edge, in milliseconds plus one: the playout or jitter-buffer delay it holds.
 A value of `0` means the subscriber did not state one, which is distinct from a stated zero (`1`).
-It decides where a Range joining at the live edge starts (see below).
-A relay forwarding an aggregate of several subscriptions SHOULD carry the largest stated value, and not stated when none is, so its own copy starts far enough back for the subscription that buffers most.
+It decides where a Range with no `Start` starts (see below), and nothing else.
+A relay forwarding an aggregate of several subscriptions SHOULD carry the largest value among those with a Range with no `Start`, counting one not stated as larger than any, so its own copy starts far enough back for the subscription that buffers most.
 
 **Range Count**:
 The number of Ranges that follow.
@@ -1532,14 +1531,13 @@ A relay asking for the union of several subscriptions' Ranges, whose exact union
 **Anchor Type**:
 Which fields follow, and what the Anchor names:
 
-- None (0x0): no fields. As a `Start`, the oldest Group (no floor); as an `End`, the live edge (unbounded).
+- None (0x0): no fields. As a `Start`, no floor: `Subscriber Min Age` places the Range, or else it reaches back to the oldest Group (see below); as an `End`, the live edge (unbounded).
 - Time (0x1): `Timestamp`, the Group containing that time: the one whose start (see [Group](#group)) is the highest at or below it.
-- Relative (0x2): `Groups Back`, the Group that many before the latest, 0 being the latest.
-- Position (0x3): `Timestamp` then `Frame`, as Time, except that a Group starting exactly at `Timestamp` is delivered from frame `Frame` (see [Positions](#positions)). A `Start` only, and `Frame` is never 0, which Time says: anything else is a PROTOCOL_VIOLATION.
+- Position (0x2): `Timestamp` then `Frame`, as Time, except that a Group starting exactly at `Timestamp` is delivered from frame `Frame` (see [Positions](#positions)). A `Start` only, and `Frame` is never 0, which Time says: anything else is a PROTOCOL_VIOLATION.
 
 Any other value is a PROTOCOL_VIOLATION.
 Both ends include the Group they name, so a Range from Time `a` to Time `b` delivers every Group from the one containing `a` through the one containing `b`.
-The publisher resolves a Relative or Time Anchor against the Track as it holds it.
+The publisher resolves a Time Anchor, and a `Start` of None, against the Track as it holds it.
 A Range resolves once: an update that leaves it live does not resolve it again.
 
 A `Start` is a floor, not a request; `Subscriber Max Age` and `Subscriber Min Age` are the only things that ask for data.
@@ -1549,12 +1547,15 @@ A subscriber that buffers is then handed the head of what it can still play inst
 A floor above the latest group simply waits there: that is a resumed subscription naming where it left off.
 Reaching back is best-effort, not a guarantee that the groups still exist; see `Publisher Max Age` in [TRACK_INFO](#track-info).
 
-A Range joining at the live edge, with a `Start` of Relative 0 and an `End` of None, starts by a nonzero `Subscriber Min Age` instead: the publisher SHOULD start it at the newest group it holds that starts at or before the live edge minus the Min Age, at the oldest group it holds when none does, and never at a group Expiration has expired.
+A Range with a `Start` of None joins at the live edge instead when the subscription states a `Subscriber Min Age`: the publisher starts it at the Group containing the live edge minus the Min Age, as a Time `Start` there would, so a stated zero starts at the latest Group.
 The live edge is the newest frame timestamp the publisher holds; on a Track without a timescale, the Min Age is measured by when each group arrived at the publisher instead.
-The publisher starts from what it holds and never fetches to reach further back, so a subscriber is handed the buffer it will play, and no more, without waiting for it to fill.
+It never starts at a group Expiration has expired, and counts no Groups: however sparse the Groups a copy holds, the join lands where the time does.
+A relay's copy places the join only where it can show its origin would: at a time it can place between Groups it holds, or at the Range Start its own subscription was answered with when the time falls before it.
+Otherwise it asks its upstream with the Min Age and waits for the answer, so a subscriber joins at the same Group through any relay.
+A Range with a `Start` of None and no stated Min Age reaches back as any floor does.
 
 A Range covers whole Groups but for a Position `Start`; a subscriber reads a slice of a Group with FETCH (see [Positions](#positions)).
-A Group that another Range may also cover is delivered whole, since each Group is delivered once: one whose `Start` is at or below the Group's start, or is None or Relative, and whose `End` is not a Time below the Group's start.
+A Group that another Range may also cover is delivered whole, since each Group is delivered once: one whose `Start` is at or below the Group's start, or is None, and whose `End` is not a Time below the Group's start.
 A Time `Start` inside the Group, after its start, does not count: whether it falls before the next Group's start is unknown until that Group arrives.
 A subscriber resuming a Track on a new subscription, such as a relay moving to another route, starts at the Position past the frames it holds, so no frame it holds is sent again.
 The Group Stream of a Group that ended at `Frame` carries no FRAME, only how the Group ended.
@@ -1851,7 +1852,7 @@ Any other value is a PROTOCOL_VIOLATION.
 A subscriber joining a Track whose newest group ended knows at once that the group is not the live one, without waiting for its stream to end.
 
 **Range Start**:
-One per Range of the SUBSCRIBE, in Range ID order: the start of the Group where the Range's delivery starts, plus one, so a subscriber learns where a Relative or Time Anchor landed.
+One per Range of the SUBSCRIBE, in Range ID order: the start of the Group where the Range's delivery starts, plus one, so a subscriber learns where a Time Anchor, or a live join, landed.
 0 means the Range has no Group to deliver, including one an update retired before the answer.
 The Range's Groups from this one are owed as described in [SUBSCRIBE_DROP](#subscribe-drop); an earlier one is not, though it MAY still arrive.
 A subscriber MUST treat a `Range Start Count` other than the SUBSCRIBE's `Range Count` as a PROTOCOL_VIOLATION.
@@ -2340,13 +2341,13 @@ A stream that FINs without a GROUP_END carries a closed Group, which may have he
 
 ### Subscriptions {#changelog-07-subscribe}
 
-- Replaced `Group Start`, `Group End`, `Frame Start`, and `Frame End` in SUBSCRIBE and SUBSCRIBE_UPDATE with a non-empty list of Ranges of whole Groups. Each end is an Anchor: none, a time naming the Group containing it, or a count of Groups back from the latest, and both ends include the Group they name. A start may also be a Position, a Group's start and a frame within it, so a subscription resumes a Group partway through.
+- Replaced `Group Start`, `Group End`, `Frame Start`, and `Frame End` in SUBSCRIBE and SUBSCRIBE_UPDATE with a non-empty list of Ranges of whole Groups. Each end is an Anchor: none or a time naming the Group containing it, and both ends include the Group they name. There is no Anchor counting Groups back from the latest: a live join is a Range with no `Start` and a stated `Subscriber Min Age`. A start may also be a Position, a Group's start and a frame within it, so a subscription resumes a Group partway through.
 - Added `Group Order` to SUBSCRIBE and SUBSCRIBE_UPDATE: descending (0x0, the previous fixed order) or ascending (0x1).
 - Encoded `Subscriber Max Age` in SUBSCRIBE and SUBSCRIBE_UPDATE as milliseconds plus one, with zero meaning no limit.
-- Added an optional `Subscriber Min Age` to SUBSCRIBE and SUBSCRIBE_UPDATE, the subscriber's target latency, encoded as milliseconds plus one with zero meaning not stated. A Range joining at the latest group starts that far behind the live edge, from the groups the publisher holds. A relay forwards the largest stated value.
+- Added an optional `Subscriber Min Age` to SUBSCRIBE and SUBSCRIBE_UPDATE, the subscriber's target latency, encoded as milliseconds plus one with zero meaning not stated. A Range with no `Start` starts at the Group containing the live edge minus it, and a relay that can't place that Group from what it holds asks upstream. A relay forwards the largest value among subscriptions joining that way, counting not stated as the largest.
 - FETCH reads one Group or a slice of one, and SUBSCRIBE reads whole Groups but for a Position `Start`: any other read of part of a Group FETCHes it. A publisher holding only part of a Group a subscription covers drops it.
 - A SUBSCRIBE_UPDATE that lowers a `Start` covers the groups below the old start that the publisher still holds, not only those that arrive later. A group already sent is not sent again.
-- Replaced SUBSCRIBE_OK `Group` with a `Range Start` per Range: the Group where that Range's delivery starts, including at a Relative or Time Anchor, from which its Groups are owed.
+- Replaced SUBSCRIBE_OK `Group` with a `Range Start` per Range: the Group where that Range's delivery starts, including at a Time Anchor or a live join, from which its Groups are owed.
 - Each Range takes an implicit Range ID, and SUBSCRIBE_UPDATE edits the live Ranges instead of restating them: `Remove Count` Range IDs to retire, then the Ranges to add. The live Ranges must stay non-empty and fit in one SUBSCRIBE. A Range resolves its Anchors once, however many updates leave it live.
 - SUBSCRIBE_OK's Range Starts answer the SUBSCRIBE's Ranges, and added SUBSCRIBE_STARTED (type 0x4) resolving where each Range an update adds starts.
 - A subscriber fills missing Groups through Ranges on a subscription instead of a FETCH per Group, and asks for a Group a subscription already delivered or dropped, including one dropped with OLD, with a SUBSCRIBE of its own.

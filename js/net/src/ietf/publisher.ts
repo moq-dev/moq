@@ -475,6 +475,8 @@ export class Publisher {
 
 		if (msg.rangeFilters) {
 			refusal = { condition: "invalid_filter", reasonPhrase: "range filters not supported" };
+		} else if (countsBack(msg.filter)) {
+			refusal = { condition: "not_supported", reasonPhrase: "relative filter past the current group" };
 		} else if (!this.#gate.allows(name)) {
 			// Serve only what our grant lets us publish. Checked before resolving, so a denied
 			// request never reaches the origin.
@@ -923,6 +925,12 @@ export class Publisher {
 							msg.fill && Filter.isDraft20(version)
 								? fillRange(msg.fill, msg.filter, snapshot.largest)
 								: undefined;
+						// Refused as the SUBSCRIBE would have been, and ending the subscription as Rust's does.
+						if (params.subscriptionFilter !== undefined && countsBack(msg.filter)) {
+							throw new StreamError(StreamCode.Internal, {
+								message: "relative filter past the current group",
+							});
+						}
 						if (params.subscriptionFilter !== undefined || selected) {
 							// An update's unfiltered range explicitly lowers the floor to zero;
 							// an initial unfiltered subscription still joins the live group. A
@@ -2502,8 +2510,8 @@ async function servingGroup(track: TrackSubscriber): Promise<group.Consumer | un
 /** The model ranges a {@link ServeRange} asks for, whole groups through its last one. */
 function serveRanges(range: ServeRange): Range[] {
 	const out: Range = {};
-	if (range.start) out.start = { time: range.start.group };
-	if (range.end) out.end = { time: range.end.group };
+	if (range.start) out.start = range.start.group;
+	if (range.end) out.end = range.end.group;
 	return [out];
 }
 
@@ -2558,6 +2566,15 @@ function liveEdge(track: TrackSubscriber): LiveEdge {
 	};
 }
 
+/**
+ * Whether `filter` counts groups back past the current one, which we refuse with
+ * NOT_SUPPORTED: keys are group starts, so no arithmetic on one counts groups, and a moq-lite
+ * range has no such start to serve it with.
+ */
+function countsBack(filter: Filter.Filter): boolean {
+	return filter.kind === "relative" && filter.groups > 1n;
+}
+
 /** The Locations a single Location Filter selects, resolved against the live edge. */
 function filterRange(filter: Filter.Filter, edge: LiveEdge, version: IetfVersion): ServeRange {
 	switch (filter.kind) {
@@ -2577,7 +2594,8 @@ function filterRange(filter: Filter.Filter, edge: LiveEdge, version: IetfVersion
 		case "nextObject":
 			if (!edge.next || Filter.isDraft20(version)) return { start: edge.next };
 			return { start: { group: edge.next.group, object: 0n } };
-		// `{Largest.Group + 1 - groups, 0}`: 0 is the next group and 1 is the current one.
+		// `{Largest.Group + 1 - groups, 0}`: 0 is the next group and 1 is the current one, a
+		// live join; anything further back is refused before this (see `countsBack`).
 		// Counted from `Largest.Group`, which sits below the newest group while that group has
 		// no objects yet; only with no largest at all does the newest group stand in for it.
 		case "relative": {

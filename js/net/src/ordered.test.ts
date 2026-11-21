@@ -437,7 +437,7 @@ test("a read returning only gaps keeps its handed-out record compact", () => {
 });
 
 // Mirrors the Rust `a_time_end_between_*` tests in `track.rs`.
-const between = { ranges: [{ start: { time: 1500n }, end: { time: 1999n } }], delay: { max: Duration.millis(30_000) } };
+const between = { ranges: [{ start: 1500n, end: 1999n }], delay: { max: Duration.millis(30_000) } };
 
 test("a time end between two groups ends an ordered read once the publisher created one past it", async () => {
 	using clock = manual();
@@ -506,7 +506,7 @@ test("an ordered read whose window ends past a group it passed as stale reports 
 		clock.jump(Duration.millis(100));
 		put(producer, 100n);
 		const ordered = producer
-			.subscribe({ delay: { max: Duration.millis(50) }, ranges: [{ start: { time: 0n }, end: { time: 49n } }] })
+			.subscribe({ delay: { max: Duration.millis(50) }, ranges: [{ start: 0n, end: 49n }] })
 			.ordered();
 		expect(items(ordered)).toEqual(["gap 0..1 (old)"]);
 		expect(ordered.tryNextItem()).toBeUndefined();

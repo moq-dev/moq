@@ -862,15 +862,12 @@ impl Consume {
 		Ok(id)
 	}
 
-	/// A raw reader's preferences, which join at the latest group unless a range names
-	/// a floor of its own.
+	/// A raw reader's preferences, which join live unless a range names a start of its own:
+	/// at the stated minimum delay, or the latest group without one. Only a range with no
+	/// start reads the minimum, so stating it changes nothing else.
 	fn raw_subscription(subscription: Option<moq_net::track::Subscription>) -> moq_net::track::Subscription {
 		let mut subscription = subscription.unwrap_or_default();
-		for range in &mut subscription.ranges {
-			if range.start == moq_net::track::Range::oldest().start {
-				range.start = moq_net::track::Range::live().start;
-			}
-		}
+		subscription.delay.min.get_or_insert(std::time::Duration::ZERO);
 		subscription
 	}
 
@@ -1657,8 +1654,8 @@ mod tests {
 			}
 		}
 
-		fn write(&mut self, start: u64, micros: u64) {
-			let mut group = self.track.create_group(moq_net::group::Info { start }).unwrap();
+		fn write(&mut self, micros: u64) {
+			let mut group = self.track.create_group(moq_net::group::Info { start: micros }).unwrap();
 			hang::container::Frame {
 				timestamp: moq_net::Timestamp::from_micros(micros).unwrap(),
 				payload: bytes::Bytes::from_static(b"frame"),
@@ -1668,18 +1665,21 @@ mod tests {
 			group.finish().unwrap();
 		}
 
+		/// The next frame's timestamp, past any gap between groups.
 		async fn frame(&self) -> Option<u128> {
-			let code = self.reads.pop().await.unwrap();
-			assert!(code >= 0, "media consumer failed: {code}");
-			if code == 0 {
-				return None;
+			loop {
+				let code = self.reads.pop().await.unwrap();
+				assert!(code >= 0, "media consumer failed: {code}");
+				if code == 0 {
+					return None;
+				}
+				let mut state = State::lock();
+				match state.consume.reads.remove(Id::try_from(code).unwrap()).unwrap() {
+					Read::Frame(frame) => return Some(frame.item.timestamp.as_micros().unwrap()),
+					Read::Gap(_) => continue,
+					Read::End(_) => panic!("expected a frame"),
+				}
 			}
-			let mut state = State::lock();
-			let read = state.consume.reads.remove(Id::try_from(code).unwrap()).unwrap();
-			let Read::Frame(frame) = read else {
-				panic!("expected a frame");
-			};
-			Some(frame.item.timestamp.as_micros().unwrap())
 		}
 
 		async fn cancel(self) {
@@ -1729,9 +1729,9 @@ mod tests {
 				max: Some(Duration::from_millis(200)),
 			};
 			let mut consumer = MediaConsumer::new(warmup, delay).await;
-			consumer.write(5, 5_000_000);
-			consumer.write(4, 4_700_000);
-			consumer.write(3, 4_400_000);
+			consumer.write(5_000_000);
+			consumer.write(4_700_000);
+			consumer.write(4_400_000);
 			drop(consumer.track.clone().finish().unwrap());
 			let warming = warmup.is_some_and(|warmup| !warmup.is_zero());
 			let mut stamps = Vec::new();

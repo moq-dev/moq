@@ -347,7 +347,7 @@ class SmokeTest {
 
     @Test
     fun `a default subscription skips superseded groups at once`() {
-        assertEquals(java.time.Duration.ZERO, Subscription.default().delay.min)
+        assertNull(Subscription.default().delay.min)
         assertEquals(java.time.Duration.ZERO, Subscription.default().delay.max)
     }
 
@@ -374,7 +374,7 @@ class SmokeTest {
                                 min = java.time.Duration.ZERO,
                                 max = java.time.Duration.ofSeconds(10),
                             ),
-                        ranges = listOf(Range(start = AnchorRelative(groups = 2uL))),
+                        ranges = listOf(Range(start = Timestamp.unscaled(0uL))),
                         order = Order.ASCENDING,
                     )
                 )

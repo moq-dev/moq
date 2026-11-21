@@ -320,7 +320,7 @@ async function fetchGroup(
 	const subscriber = subscribe(state, name, {
 		...track.Subscription.default(),
 		priority: options.priority,
-		ranges: [{ start: { time: key }, end: { time: key } }],
+		ranges: [{ start: key, end: key }],
 	});
 	// The lite publisher serving a FETCH from a later frame takes a copy holding that frame on.
 	hooks.fetchBudget(subscriber, options.maxDelay, (options as FetchFrom).frameStart);

@@ -2532,7 +2532,7 @@ test("draft-22: an absolute filter trims the range it serves", async () => {
 		// The request forwarded upstream carries the model's exclusive end, one past the
 		// filter's inclusive last group.
 		expect(track.subscription.peek()).toMatchObject({
-			ranges: [{ start: { time: 1n }, end: { time: 2n } }],
+			ranges: [{ start: 1n, end: 2n }],
 		});
 
 		const first = await nextUni(fx.uni);
@@ -4360,7 +4360,7 @@ test("IETF draft-18: range updates preserve the shared subscription", async () =
 			await new SubscribeUpdate({ requestId: id, parameters }).encode(client.writer, fx.version);
 			expect(await client.reader.u53()).toBe(RequestOk.id);
 			await RequestOk.decode(client.reader, fx.version);
-			expect(track.subscription.peek()?.ranges).toEqual([{ start: { time: 6n }, end: { time: 7n } }]);
+			expect(track.subscription.peek()?.ranges).toEqual([{ start: 6n, end: 7n }]);
 		}
 	} finally {
 		client.close();

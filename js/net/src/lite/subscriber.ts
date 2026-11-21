@@ -209,9 +209,10 @@ interface SubscribeEntry {
 	// Where SUBSCRIBE_START or SUBSCRIBE_STARTED says each live range starts on lite-07, by Range
 	// ID, undefined for one with nothing to deliver.
 	starts: Map<bigint, bigint | undefined>;
-	// The latest group each range's start was counted back from, by Range ID: the publisher's when
-	// SUBSCRIBE_START answered, or the copy's when SUBSCRIBE_STARTED did.
-	edges: Map<bigint, bigint | undefined>;
+	// The Min Age in milliseconds each live demand range with no start was added under, by Range
+	// ID, undefined for not stated, so the copy knows which of its readers' live joins the start
+	// its publisher reports answers, and re-adds the range when the Min Age grows past it.
+	joins: Map<bigint, number | undefined>;
 	// The first group the ranges last sent ask for, which a lite-07 declaration answers.
 	floor?: bigint;
 	// What `#declare` last declared, so an unchanged one is not declared again.
@@ -1705,13 +1706,15 @@ export class Subscriber {
 			asked: [...ranges],
 			live: new LiveRanges(this.version, msg.ranges ?? []),
 			starts: new Map(),
-			edges: new Map(),
+			joins: new Map(),
 			sent: 0,
 			stream: { kind: "setup" },
 			fillIds: new Set(),
 			fillGroups: [],
 			fillsChanged: new Signal(0),
 		};
+		for (const [id, range] of entry.live.entries())
+			if (range.start === undefined) entry.joins.set(id, msg.minDelay);
 		if (hasDatagrams(this.version) && !hasDatagramTracks(this.version) && state.consumer && state.legacyKey) {
 			const info = { priority: producer.priority, timescale: framing.scale };
 			const pending = this.#legacyRequests.get(state.legacyKey);
@@ -2176,7 +2179,7 @@ export class Subscriber {
 			asked: ranges,
 			live: new LiveRanges(this.version, msg.ranges ?? []),
 			starts: new Map(),
-			edges: new Map(),
+			joins: new Map(),
 			sent: 0,
 			// Its responses are read here, which owns this stream's end.
 			stream: { kind: "setup" },
@@ -2523,11 +2526,8 @@ export class Subscriber {
 							`SUBSCRIBE_OK resolves ${resp.start.starts.length} ranges, not ${entry.live.initial}`,
 						);
 					// An update may have retired some already, whose starts say nothing now.
-					const edge = resp.start.largest?.position.group;
 					resp.start.starts.forEach((start, index) => {
-						if (!entry.live.get(BigInt(index))) return;
-						entry.starts.set(BigInt(index), start);
-						entry.edges.set(BigInt(index), edge);
+						if (entry.live.get(BigInt(index))) entry.starts.set(BigInt(index), start);
 					});
 				}
 				// The lowest range start is the first group served; none leaves nothing owed.
@@ -2583,7 +2583,6 @@ export class Subscriber {
 				const range = entry.live.get(id);
 				if (range) {
 					entry.starts.set(id, start);
-					entry.edges.set(id, hooks.producerLargest(entry.track).peek()?.group);
 					// A fill's range starting past where it asked skips groups it will not deliver.
 					const asked = entry.fillIds.has(id) ? fillRun(range) : undefined;
 					if (asked) {
@@ -2676,7 +2675,7 @@ export class Subscriber {
 		const floor = rangesStart(ranges);
 		// Lite-07 answers with SUBSCRIBE_OK once the track ends, unless nothing was asked below the
 		// end. Each range the publisher holds is then owed from the start SUBSCRIBE_OK or
-		// SUBSCRIBE_STARTED named, which accounts for a skipped prefix and resolves a relative or
+		// SUBSCRIBE_STARTED named, which accounts for a skipped prefix and resolves a live join or a
 		// time start; one whose SUBSCRIBE_STARTED is still on its way owes what nothing says yet.
 		if (hasRanges(this.version)) {
 			if (entry.start === undefined) return !(end > (floor ?? 0n));
@@ -2686,7 +2685,7 @@ export class Subscriber {
 				const at = entry.starts.get(id);
 				if (at === undefined) continue;
 				const model = requestedRange(range);
-				owed.push({ ...model, start: { time: at } });
+				owed.push({ ...model, start: at });
 			}
 			// Each starts at the group its publisher reported starting it at.
 			const window = new Window(owed, entry.track.largest()?.group, AT_KEYS);
@@ -2811,16 +2810,28 @@ export class Subscriber {
 					start: { absolute: run.start },
 					end: { absolute: run.end },
 				}));
+				// A live join resolves once, so one whose Min Age grew is retired and added again, which
+				// the publisher places afresh under the new one: how a reader joining further back asks.
+				const age = minDelayOf(current);
+				const renew = new Set<bigint>();
+				for (const [id, added] of entry.joins)
+					if (added !== undefined && (age === undefined || age > added)) renew.add(id);
+				const first = entry.live.next();
 				// The demand's ranges, then the fills'.
-				const edited = entry.live.edit([...fitted.ranges, ...fillRanges], fillRanges.length, (id) =>
-					entry.fillIds.has(id),
+				const edited = entry.live.edit(
+					[...fitted.ranges, ...fillRanges],
+					fillRanges.length,
+					(id) => entry.fillIds.has(id),
+					renew,
 				);
 				edit = edited;
-				for (const id of entry.starts.keys())
-					if (!entry.live.get(id)) {
-						entry.starts.delete(id);
-						entry.edges.delete(id);
-					}
+				for (const id of entry.starts.keys()) if (!entry.live.get(id)) entry.starts.delete(id);
+				for (const id of entry.joins.keys()) if (!entry.live.get(id)) entry.joins.delete(id);
+				const fillIds = new Set(edited.fillIds);
+				edited.add.forEach((range, index) => {
+					const id = first + BigInt(index);
+					if (range.start === undefined && !fillIds.has(id)) entry.joins.set(id, age);
+				});
 				for (const id of entry.fillIds) if (!entry.live.get(id)) entry.fillIds.delete(id);
 				for (const id of edited.fillIds) entry.fillIds.add(id);
 				// The groups a fill newly asks for wait a fresh grace too.
@@ -2871,24 +2882,25 @@ export class Subscriber {
 	// say where one starts. Mirrors the Rust `SubStream::declare`.
 	#declare(entry: SubscribeEntry): void {
 		// Where the publisher started each live range asked from a group's start, which a reader's
-		// time start there resolves to when the copy holds no group at it, and one asked from the
-		// oldest group as asked from 0. Mirrors the Rust `SubStream::report_starts`.
+		// time start there resolves to when the copy holds no group at it, and one with no start
+		// under an unstated Min Age, which reached back to the oldest group, as asked from 0. Mirrors
+		// the Rust `SubStream::report_starts`.
 		const times: [bigint, bigint][] = [];
-		// And each one counting back, which the copy, holding only part of the track, can't count,
-		// with the latest group it counted back from.
-		const relative: [bigint, bigint, bigint | undefined][] = [];
+		// And each live join, by the Min Age it was asked under, which places a reader's live join the
+		// copy can't prove from the groups it holds.
+		const joins: [number, bigint][] = [];
 		for (const id of entry.live.ids()) {
 			const range = entry.live.get(id);
 			const time = range?.start?.time ?? range?.start?.absolute;
-			const back = range?.start?.relative;
 			const at = entry.starts.get(id);
-			if (at === undefined) continue;
+			if (at === undefined || range === undefined) continue;
+			const age = entry.joins.get(id);
 			if (time !== undefined) times.push([time, at]);
-			else if (back !== undefined) relative.push([back, at, entry.edges.get(id)]);
-			else if (range !== undefined && range.start === undefined) times.push([0n, at]);
+			else if (age === undefined) times.push([0n, at]);
+			else joins.push([age, at]);
 		}
 		hooks.timeStarts(entry.track, times);
-		hooks.relativeStarts(entry.track, relative);
+		hooks.joinStarts(entry.track, joins);
 
 		let start: bigint | null = null;
 		let pending = entry.start === undefined;
