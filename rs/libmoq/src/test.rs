@@ -18,17 +18,9 @@ fn micros(value: u64) -> moq_timestamp {
 	}
 }
 
-/// An anchor at the group containing `value`, unscaled in the track's timescale.
-fn time(value: u64) -> moq_anchor {
-	moq_anchor {
-		kind: moq_anchor_kind::MOQ_ANCHOR_TIME as u32,
-		groups: 0,
-		timestamp: moq_timestamp {
-			value,
-			scale: 0,
-			has_scale: false,
-		},
-	}
+/// A range time at the group containing `value`, unscaled in the track's timescale.
+fn time(value: u64) -> moq_timestamp {
+	moq_timestamp::unscaled(value)
 }
 
 /// The timestamp a read points at, which is never NULL.
@@ -48,7 +40,7 @@ const TEN_SECONDS: moq_delay = moq_delay {
 	min_us: 0,
 	max_us: 10_000_000,
 	max_unlimited: false,
-	min_unstated: false,
+	min_stated: true,
 };
 
 /// Convert a positive `i32` return value to `u32`, panicking on error.
@@ -2739,19 +2731,20 @@ fn raw_track_subscription_options_and_update() {
 	let consume = request_broadcast(origin, path);
 
 	let frame_cb = Callback::new();
-	// A time anchor names the group containing it, in the track's microseconds, and an end
+	// A range time names the group containing it, in the track's microseconds, and an end
 	// includes its group. The open range starts at the group containing 100 s, the newest one
 	// held: `two`, and every group after it.
 	let ranges = [
 		moq_range {
 			start: time(20_000),
+			start_present: true,
 			end: time(20_000),
 			end_present: true,
 		},
 		moq_range {
 			start: time(100_000_000),
-			end: time(0),
-			end_present: false,
+			start_present: true,
+			..moq_range::default()
 		},
 	];
 	let subscription = moq_subscription {
@@ -2817,10 +2810,10 @@ fn raw_track_subscription_options_and_update() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// A time anchor starts at the group containing that presentation time, given unscaled in the
+/// A range starts at the group containing that presentation time, given unscaled in the
 /// track's timescale. No budget runs on the wall clock, so a slow suite can't age `one` out.
 #[test]
-fn raw_track_time_anchor() {
+fn raw_track_time_start() {
 	let origin = id(moq_origin_create());
 	let path = b"raw-track-time";
 	let broadcast = publish_broadcast(origin, path);
@@ -2854,8 +2847,8 @@ fn raw_track_time_anchor() {
 	let frame_cb = Callback::new();
 	let ranges = [moq_range {
 		start: time(30_000),
-		end: time(0),
-		end_present: false,
+		start_present: true,
+		..moq_range::default()
 	}];
 	let subscription = moq_subscription {
 		priority: 5,
@@ -2900,8 +2893,84 @@ fn raw_track_time_anchor() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// A time end includes the group starting at it, so `Time(t - 1)` is a former exclusive end at
-/// `t`. A non-NULL empty list asks for nothing, unlike NULL, and a zeroed anchor names no kind.
+/// With no range and no stated minimum delay, a raw reader joins at the latest group even
+/// when its maximum delay reaches back to the oldest one.
+#[test]
+fn raw_track_joins_the_latest_group_without_a_stated_min() {
+	let origin = id(moq_origin_create());
+	let path = b"raw-track-latest";
+	let broadcast = publish_broadcast(origin, path);
+
+	let track_name = b"data";
+	let info = moq_track_info {
+		priority: 3,
+		max_age_us: 0,
+		max_age_unlimited: true,
+		timescale: 1_000_000,
+		timescale_present: true,
+		refresh: 0,
+		refresh_present: false,
+		refresh_interval_us: 0,
+		refresh_interval_present: false,
+		compression: 0,
+	};
+	let track =
+		id(unsafe { moq_publish_track(broadcast, track_name.as_ptr() as *const c_char, track_name.len(), &info) });
+
+	let payloads: [&[u8]; 3] = [b"zero", b"one", b"two"];
+	for (i, payload) in payloads.into_iter().enumerate() {
+		assert_eq!(
+			unsafe { moq_publish_track_frame(track, payload.as_ptr(), payload.len(), &micros(i as u64 * 20_000)) },
+			0
+		);
+	}
+
+	let consume = request_broadcast(origin, path);
+
+	let frame_cb = Callback::new();
+	let subscription = moq_subscription {
+		priority: 5,
+		delay: moq_delay {
+			max_unlimited: true,
+			..moq_delay::default()
+		},
+		ranges: std::ptr::null(),
+		ranges_len: 0,
+		order: 0,
+	};
+	let consumer = id(unsafe {
+		moq_consume_track(
+			consume,
+			track_name.as_ptr() as *const c_char,
+			track_name.len(),
+			&subscription,
+			Some(channel_callback),
+			frame_cb.ptr,
+		)
+	});
+
+	let frame_id = id(frame_cb.recv());
+	let mut frame = moq_frame {
+		payload: std::ptr::null(),
+		payload_size: 0,
+		timestamp: std::ptr::null(),
+		keyframe: false,
+	};
+	assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
+	let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
+	assert_eq!(received, b"two", "joined at the latest group, not the oldest");
+	assert_eq!(moq_consume_track_frame_free(frame_id), 0);
+
+	assert_eq!(moq_consume_track_cancel(consumer), 0);
+	assert_eq!(frame_cb.recv_terminal(), 0);
+	assert_eq!(moq_publish_track_finish(track), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// A time end includes the group starting at it, so `t - 1` is a former exclusive end at `t`. A
+/// non-NULL empty list asks for nothing, unlike NULL, and a zeroed range has no start and no end.
 #[test]
 fn subscription_ranges_parse() {
 	let parse = |ranges: &[moq_range], null: bool| {
@@ -2916,14 +2985,15 @@ fn subscription_ranges_parse() {
 	};
 	let span = moq_range {
 		start: time(1_500),
+		start_present: true,
 		end: time(1_999),
 		end_present: true,
 	};
 	assert_eq!(
 		parse(&[span], false).unwrap(),
 		vec![moq_net::track::Range {
-			start: moq_net::track::Anchor::Time(1_500),
-			end: Some(moq_net::track::Anchor::Time(1_999)),
+			start: Some(1_500),
+			end: Some(1_999),
 		}]
 	);
 	assert_eq!(parse(&[], false).unwrap(), Vec::new());
@@ -2933,34 +3003,35 @@ fn subscription_ranges_parse() {
 		"NULL keeps the default"
 	);
 
-	let zeroed = moq_anchor {
-		kind: 0,
-		groups: 0,
-		timestamp: moq_timestamp::default(),
-	};
-	assert!(matches!(
-		parse(&[moq_range { start: zeroed, ..span }], false),
-		Err(crate::Error::InvalidCode)
-	));
-	// An absent end is never read.
-	assert!(
+	assert_eq!(
+		parse(&[moq_range::default()], false).unwrap(),
+		vec![moq_net::track::Range::default()]
+	);
+	// An absent time is never read, so its scale is never checked.
+	assert_eq!(
 		parse(
 			&[moq_range {
-				end: zeroed,
+				start: micros(1),
+				start_present: false,
+				end: micros(1),
 				end_present: false,
-				..span
 			}],
 			false
 		)
-		.is_ok()
+		.unwrap(),
+		vec![moq_net::track::Range::default()]
 	);
+	assert!(matches!(
+		parse(&[moq_range { end: micros(1), ..span }], false),
+		Err(crate::Error::Moq(_))
+	));
 }
 
-/// An update with a scaled time anchor is refused at the call, keeping its ranges: a time
-/// anchor is an unscaled key in the track's timescale, which the call can't check a scale
+/// An update with a scaled range time is refused at the call, keeping its ranges: a time
+/// is an unscaled key in the track's timescale, which the call can't check a scale
 /// against. The C API only publishes timed tracks, so the track comes from moq-net.
 #[test]
-fn raw_track_update_refuses_a_scaled_time_anchor() {
+fn raw_track_update_refuses_a_scaled_range_time() {
 	let origin = id(moq_origin_create());
 	let path = b"raw-track-untimed";
 	let broadcast = publish_broadcast(origin, path);
@@ -3000,13 +3071,9 @@ fn raw_track_update_refuses_a_scaled_time_anchor() {
 	assert_eq!(moq_consume_track_frame_free(frame_id), 0);
 
 	let ranges = [moq_range {
-		start: moq_anchor {
-			kind: moq_anchor_kind::MOQ_ANCHOR_TIME as u32,
-			groups: 0,
-			timestamp: micros(0),
-		},
-		end: time(0),
-		end_present: false,
+		start: micros(0),
+		start_present: true,
+		..moq_range::default()
 	}];
 	let update = moq_subscription {
 		priority: 3,
@@ -5419,8 +5486,8 @@ fn a_group_request_nobody_reads_is_withdrawn() {
 		moq_net::track::Subscription::default()
 			.with_delay(moq_net::track::Delay::default().with_max(None))
 			.with_ranges([moq_net::track::Range {
-				start: moq_net::track::Anchor::Time(start),
-				end: end.map(moq_net::track::Anchor::Time),
+				start: Some(start),
+				end,
 			}])
 			.with_order(moq_net::track::Order::Ascending)
 	};
@@ -5513,7 +5580,7 @@ fn a_freed_time_start_reads_on_and_an_aborted_one_fails() {
 					.with_delay(moq_net::track::Delay::default().with_max(None))
 					.with_order(moq_net::track::Order::Ascending)
 					.with_ranges([moq_net::track::Range {
-						start: moq_net::track::Anchor::Time(time),
+						start: Some(time),
 						end: None,
 					}]),
 			)
@@ -5541,7 +5608,7 @@ fn a_freed_time_start_reads_on_and_an_aborted_one_fails() {
 					moq_net::track::Subscription::default()
 						.with_delay(moq_net::track::Delay::default().with_max(None))
 						.with_ranges([moq_net::track::Range {
-							start: moq_net::track::Anchor::Time(time),
+							start: Some(time),
 							end: None,
 						}]),
 				)
@@ -5630,8 +5697,8 @@ fn a_rejected_group_request_binds_only_its_readers() {
 		let subscription = moq_net::track::Subscription::default()
 			.with_delay(moq_net::track::Delay::default().with_max(None))
 			.with_ranges([moq_net::track::Range {
-				start: moq_net::track::Anchor::Time(6),
-				end: Some(moq_net::track::Anchor::Time(6)),
+				start: Some(6),
+				end: Some(6),
 			}]);
 		let mut state = State::lock();
 		let producer = state.publish.track_producer(Id::try_from(track).unwrap()).unwrap();
@@ -7953,7 +8020,7 @@ fn a_zeroed_config_is_the_defaults() {
 }
 
 /// `moq_subscription_defaults` and a zeroed struct both read back as moq-net's defaults, and
-/// the flags reach the unstated minimum and the unlimited max.
+/// the flags reach the stated minimum and the unlimited max.
 #[test]
 fn subscription_defaults_are_moq_net_defaults() {
 	let defaults = unsafe { crate::api::parse_subscription(&moq_subscription_defaults()) }.unwrap();
@@ -7969,10 +8036,14 @@ fn subscription_defaults_are_moq_net_defaults() {
 		min_us: 5,
 		max_us: 5,
 		max_unlimited: true,
-		min_unstated: true,
+		min_stated: false,
 	};
 	let flagged = unsafe { crate::api::parse_subscription(&zeroed) }.unwrap();
 	assert_eq!(flagged.delay, moq_net::track::Delay { min: None, max: None });
+
+	zeroed.delay.min_stated = true;
+	let stated = unsafe { crate::api::parse_subscription(&zeroed) }.unwrap();
+	assert_eq!(stated.delay.min, Some(Duration::from_micros(5)));
 }
 
 /// `moq_client_defaults` has to agree with what a zeroed struct actually dials,

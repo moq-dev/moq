@@ -3,9 +3,10 @@ import type * as Moq from "@moq/net";
 import { Error as NetError } from "@moq/net";
 import type { Effect, Getter } from "@moq/signals";
 
-// A live join: the serving hop starts it at the delay's min behind the live edge, so a cold join, a
-// replacement, or a fallback arrives with its buffer full rather than replaying the retained backlog.
-const LIVE: Moq.Track.Range[] = [{ start: { relative: 0n } }];
+// A live join: a range with no start, which the serving hop starts at the delay's min behind the live
+// edge, so a cold join, a replacement, or a fallback arrives with its buffer full rather than
+// replaying the retained backlog.
+const LIVE: Moq.Track.Range[] = [{}];
 
 /**
  * Open a media subscription, joining live at its min delay, with its delay on the initial request

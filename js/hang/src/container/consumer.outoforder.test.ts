@@ -116,10 +116,10 @@ test("a head group still downloading is not truncated", async () => {
 		timescale: Time.Timescale.MILLI,
 		maxAge: Duration.millis(30_000),
 	});
-	const consumer = new Consumer(
-		track.subscribe({ delay: { max: Duration.millis(5000) }, ranges: [{ start: { time: 1n } }] }),
-		{ format: new LegacyFormat("data"), delay: { max: Duration.millis(5000) } },
-	);
+	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(5000) }, ranges: [{ start: 1n }] }), {
+		format: new LegacyFormat("data"),
+		delay: { max: Duration.millis(5000) },
+	});
 
 	// The live edge group arrives first (still open), and the head after it, one frame at a time.
 	const live = defined(track.createGroup(3n));
@@ -157,7 +157,7 @@ test("an excluded gap between ranges does not stall", async () => {
 	const consumer = new Consumer(
 		track.subscribe({
 			delay: { max: Duration.millis(10_000) },
-			ranges: [{ start: { time: 0n }, end: { time: 0n } }, { start: { time: 10n } }],
+			ranges: [{ start: 0n, end: 0n }, { start: 10n }],
 		}),
 		{ format: new LegacyFormat("data"), delay: { max: Duration.millis(10_000) } },
 	);

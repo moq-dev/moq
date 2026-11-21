@@ -1128,7 +1128,7 @@ async fn broadcast_route_migration() {
 	// Resolve and subscribe: the cheaper route (A) serves the track.
 	let subscription = moq_net::track::Subscription::default()
 		.with_ranges([moq_net::track::Range {
-			start: moq_net::track::Anchor::Time(1),
+			start: Some(1),
 			end: None,
 		}])
 		.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)));

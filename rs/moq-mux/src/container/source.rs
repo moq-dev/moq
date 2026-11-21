@@ -588,7 +588,7 @@ impl ExportSource {
 			// request reaches that group too and the reader below leaves it out.
 			if let Some(after) = start.after {
 				subscription = subscription.with_ranges([moq_net::track::Range {
-					start: moq_net::track::Anchor::Time(after),
+					start: Some(after),
 					end: None,
 				}]);
 			}

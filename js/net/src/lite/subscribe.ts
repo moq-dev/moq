@@ -2,7 +2,7 @@ import { fromTransport, ProtocolViolation, StreamCode, StreamError, toStreamCode
 import type * as Instance from "../instance.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
-import type { Anchor, Order, Position, Range } from "../track.ts";
+import type { Order, Position, Range } from "../track.ts";
 import { UNBOUNDED } from "../util/key.ts";
 import { lengthLeadingOnes, parts, split } from "../util/varint.ts";
 import { EMPTY } from "../window.ts";
@@ -129,15 +129,12 @@ interface Span {
 }
 
 /**
- * One end of a lite-07 range: a model {@link Anchor}, or a group by its start (`absolute`), as
- * the Rust `lite::Anchor` holds. A group's start is its time, so `absolute` goes out as a time, an
- * end (exclusive) as the time just before it, and decodes as one. A start partway through the
- * group, at a nonzero `frame`, goes out as a Position; an end there can't.
+ * One end of a lite-07 range: a model time (`time`), or a group by its start (`absolute`), as the
+ * Rust `lite::Anchor` holds. A group's start is its time, so `absolute` goes out as a time, an end
+ * (exclusive) as the time just before it, and decodes as one. A start partway through the group,
+ * at a nonzero `frame`, goes out as a Position; an end there can't.
  */
-export type WireAnchor =
-	| { absolute: bigint; frame?: number; relative?: never; time?: never }
-	| { relative: bigint; absolute?: never; time?: never }
-	| { time: bigint; absolute?: never; relative?: never };
+export type WireAnchor = { absolute: bigint; frame?: number; time?: never } | { time: bigint; absolute?: never };
 
 /** A lite-07 range as the wire carries it; see {@link WireAnchor}. */
 export interface WireRange {
@@ -145,28 +142,32 @@ export interface WireRange {
 	end?: WireAnchor;
 }
 
-/** The wire form of model `ranges`: the same anchors, a time being a group start. */
+/** The wire form of model `ranges`: the same times, a time being a group start. */
 export function toWireRanges(ranges: readonly Range[]): WireRange[] {
-	return ranges.map((range) => ({ ...range }));
+	return ranges.map((range) => {
+		const out: WireRange = {};
+		if (range.start !== undefined) out.start = { time: range.start };
+		if (range.end !== undefined) out.end = { time: range.end };
+		return out;
+	});
 }
 
 /**
- * The lite-07 type and values of a range's start or `end`, none for none. Both time ends are
- * inclusive, so an absolute end, exclusive, goes out as the time just before it; one at group 0
- * holds nothing a time can say. A start partway through a group is a Position: its start, then
- * the frame.
+ * The lite-07 Anchor Type and values of a range's start or `end`: None (0), Time (1), or Position
+ * (2). Both time ends are inclusive, so an absolute end, exclusive, goes out as the time just
+ * before it; one at group 0 holds nothing a time can say. A start partway through a group is a
+ * Position: its start, then the frame.
  */
 function wireAnchor(anchor: WireAnchor | undefined, end: boolean): [number, ...bigint[]] {
 	if (anchor?.absolute !== undefined) {
 		if (anchor.frame) {
 			if (end) throw new Error("a range ends only at a group");
-			return [3, anchor.absolute, BigInt(anchor.frame)];
+			return [2, anchor.absolute, BigInt(anchor.frame)];
 		}
 		if (!end) return [1, anchor.absolute];
 		if (anchor.absolute === 0n) throw new Error(EMPTY_RANGE);
 		return [1, anchor.absolute - 1n];
 	}
-	if (anchor?.relative !== undefined) return [2, anchor.relative];
 	if (anchor?.time !== undefined) return [1, anchor.time];
 	return [0];
 }
@@ -227,8 +228,8 @@ async function encodeSpan(w: Writer, version: Version, span: Span, ranges?: read
 export function requestedRanges(msg: Span & { ranges?: WireRange[] }): Range[] {
 	if (msg.ranges) return msg.ranges.map(requestedRange);
 	const range: Range = {};
-	if (msg.startGroup !== undefined) range.start = { time: msg.startGroup };
-	if (msg.endGroup !== undefined) range.end = { time: msg.endGroup };
+	if (msg.startGroup !== undefined) range.start = msg.startGroup;
+	if (msg.endGroup !== undefined) range.end = msg.endGroup;
 	return [range];
 }
 
@@ -240,15 +241,16 @@ export function requestedRange(range: WireRange): Range {
 	if (start !== undefined && end !== undefined && end <= start) return { ...EMPTY };
 	if (end === 0n) return { ...EMPTY };
 	const out: Range = {};
-	if (range.start) out.start = start === undefined ? (range.start as Anchor) : { time: start };
+	if (range.start) out.start = start ?? range.start.time;
 	// An absolute end is exclusive; every model end includes its group.
-	if (range.end) out.end = end === undefined ? (range.end as Anchor) : { time: end - 1n };
+	if (range.end) out.end = end === undefined ? range.end.time : end - 1n;
 	return out;
 }
 
 /**
- * Decode one lite-07 range end, `undefined` for none: a time, inclusive as an end, a count back,
- * or a start partway through a group, never at frame 0, which a time says.
+ * Decode one lite-07 range end, `undefined` for none: a time, inclusive as an end, or a start
+ * partway through a group, never at frame 0, which a time says. Any other Anchor Type is a
+ * protocol violation.
  */
 async function decodeAnchor(r: Reader, end: boolean): Promise<WireAnchor | undefined> {
 	const kind = await r.u53();
@@ -257,9 +259,7 @@ async function decodeAnchor(r: Reader, end: boolean): Promise<WireAnchor | undef
 			return undefined;
 		case 1:
 			return { time: await r.u62() };
-		case 2:
-			return { relative: await r.u62() };
-		case 3: {
+		case 2: {
 			if (end) throw new ProtocolViolation("a range ends partway through a group");
 			const absolute = await r.u62();
 			const frame = await r.u53();
@@ -314,8 +314,7 @@ export function spanOf(version: Version, ranges: readonly WireRange[]): Span & {
 
 /**
  * The group a lite-07 range starts at and the exclusive group it ends before, either undefined
- * when it counts back from the latest group or has no such end: a time is the start of the group
- * it names, inclusive as an end.
+ * when it has none: a time is the start of the group it names, inclusive as an end.
  */
 export function rangeBounds(range: WireRange): [bigint | undefined, bigint | undefined] {
 	const from = range.start?.absolute ?? range.start?.time;
@@ -367,7 +366,7 @@ export function positionFrames(ranges: readonly WireRange[]): Map<bigint, number
 	let count = 0;
 	for (const range of ranges) {
 		const from = range.start?.absolute ?? range.start?.time;
-		// Unknown ends, such as a count back, may cover it.
+		// No start, or no end, may cover it.
 		const to = range.end?.absolute ?? (range.end?.time === undefined ? undefined : range.end.time + 1n);
 		if (from !== undefined && to !== undefined && from >= to) continue;
 		count++;
@@ -449,7 +448,6 @@ export function rangeSize(range: WireRange): number {
 function rangeKey(range: WireRange): string {
 	const anchor = (anchor: WireAnchor | undefined) => {
 		if (anchor?.absolute !== undefined) return `a${anchor.absolute}.${anchor.frame ?? 0}`;
-		if (anchor?.relative !== undefined) return `r${anchor.relative}`;
 		if (anchor?.time !== undefined) return `t${anchor.time}`;
 		return "-";
 	};
@@ -564,12 +562,15 @@ export class LiveRanges {
 	 *
 	 * The last `fills` of `ranges` ask for fills, and `isFill` names the live ones that do: a fill
 	 * asking for what a demand range does still takes a range of its own, so each Range ID stays
-	 * the demand's or a fill's. `fillIds` are the Range IDs the added fill ranges took.
+	 * the demand's or a fill's. `fillIds` are the Range IDs the added fill ranges took. The live
+	 * ranges in `renew` are retired and added again even when wanted, so the publisher resolves
+	 * them afresh.
 	 */
 	edit(
 		ranges: readonly WireRange[],
 		fills = 0,
 		isFill: (id: bigint) => boolean = () => false,
+		renew: ReadonlySet<bigint> = new Set(),
 	): { remove: bigint[]; add: WireRange[]; fillIds: bigint[] } {
 		if (ranges.length === 0) throw new Error(EMPTY_RANGE);
 		if (!hasRanges(this.#version)) {
@@ -596,7 +597,7 @@ export class LiveRanges {
 		for (const [id, range] of this.#live) {
 			const k = key(range, isFill(id));
 			const count = wanted.get(k) ?? 0;
-			if (count > 0) {
+			if (count > 0 && !renew.has(id)) {
 				wanted.set(k, count - 1);
 			} else {
 				remove.push(id);

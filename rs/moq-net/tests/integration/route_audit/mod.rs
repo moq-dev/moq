@@ -351,9 +351,11 @@ impl Reader {
 				run += 1;
 				let instance = broadcast.info().instance.clone();
 				// From the live edge, and never skipping a group however late.
-				let prefs = track::Subscription::default()
-					.with_delay(track::Delay::default().with_max(Duration::from_secs(60)))
-					.with_ranges([track::Range::live()]);
+				let prefs = track::Subscription::default().with_delay(
+					track::Delay::default()
+						.with_min(Duration::ZERO)
+						.with_max(Duration::from_secs(60)),
+				);
 				let Ok(mut sub) = broadcast.track(TRACK).unwrap().subscribe(prefs).await else {
 					continue;
 				};

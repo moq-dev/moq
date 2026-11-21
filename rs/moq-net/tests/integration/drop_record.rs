@@ -198,11 +198,11 @@ async fn a_relay_eviction_is_filled_by_range_for_every_reader() {
 		chain.populate();
 
 		// A reader with no budget warms the relay with every group, then leaves.
-		let mut warm = chain.subscribe(reading(None, [Range::oldest()])).await;
+		let mut warm = chain.subscribe(reading(None, [Range::default()])).await;
 		assert_eq!(received(&mut warm).await, (0..GROUPS).collect());
 		drop(warm);
 
-		let mut widened = chain.subscribe(reading(NARROW, [Range::oldest()])).await;
+		let mut widened = chain.subscribe(reading(NARROW, [Range::default()])).await;
 		assert_eq!(received(&mut widened).await, (6..GROUPS).collect());
 		// Owed every group from 0, on the relay's own cache, and reading none of them yet.
 		let mut owed = chain.subscribe_relay(reading(None, [support::keys(0..)])).await;
@@ -212,7 +212,7 @@ async fn a_relay_eviction_is_filled_by_range_for_every_reader() {
 		kio::clock::sleep(EXPIRY * 3).await;
 		let (subscribes, _) = chain.asked_upstream();
 
-		widened.update(reading(None, [Range::oldest()])).unwrap();
+		widened.update(reading(None, [Range::default()])).unwrap();
 		assert_eq!(received(&mut widened).await, (0..6).collect(), "the widened reader");
 
 		let mut new = chain.subscribe(reading(None, [support::keys(1..4)])).await;
@@ -340,7 +340,7 @@ async fn reported_drop_through(versions: [&str; 2]) {
 		for key in (0..GROUPS).filter(|key| *key != 7) {
 			write(&chain.source, key, key * 1000);
 		}
-		let mut first = chain.subscribe(reading(B1, [Range::oldest()])).await;
+		let mut first = chain.subscribe(reading(B1, [Range::default()])).await;
 		assert_eq!(received(&mut first).await, [5, 6, 8, 9].into(), "{name}");
 
 		// Group 7 lands once its successor is older than B1 by the wall clock, so the
@@ -355,13 +355,13 @@ async fn reported_drop_through(versions: [&str; 2]) {
 			true => (0..GROUPS).filter(|key| *key != 7).collect(),
 			false => (0..GROUPS).collect(),
 		};
-		first.update(reading(B2, [Range::oldest()])).unwrap();
+		first.update(reading(B2, [Range::default()])).unwrap();
 		assert_eq!(
 			received(&mut first).await,
 			&want - &[5, 6, 8, 9].into(),
 			"{name}: the widened reader"
 		);
-		let mut second = chain.subscribe(reading(B2, [Range::oldest()])).await;
+		let mut second = chain.subscribe(reading(B2, [Range::default()])).await;
 		assert_eq!(received(&mut second).await, want, "{name}: the later reader");
 
 		let _finished = chain.source.clone().finish().unwrap();

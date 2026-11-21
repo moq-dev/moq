@@ -8,7 +8,7 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::track::{Anchor, Delay, Item, Order, Range, Subscription};
+use moq_net::track::{Delay, Item, Order, Range, Subscription};
 use moq_net::{Timestamp, Version};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
@@ -122,7 +122,7 @@ impl Fixture {
 			.with_delay(Delay::default().with_max(None))
 			.with_order(Order::Ascending)
 			.with_ranges([Range {
-				start: Anchor::Time(LIVE),
+				start: Some(LIVE),
 				end: None,
 			}]);
 		kio::clock::timeout(

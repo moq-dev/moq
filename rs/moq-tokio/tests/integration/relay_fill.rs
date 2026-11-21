@@ -215,7 +215,7 @@ async fn relay(version: Version) -> anyhow::Result<()> {
 	// The relay's copy starts where the publisher's budget put it: the live edge before lite-06.
 	let narrow = Subscription::default()
 		.with_delay(Delay::default().with_max(NARROW))
-		.with_ranges([Range::oldest()]);
+		.with_ranges([Range::default()]);
 	let mut first = relay.subscribe(narrow).await?;
 	let start = match version.alpn() {
 		"moq-lite-05" => GROUPS - 1,
@@ -229,10 +229,10 @@ async fn relay(version: Version) -> anyhow::Result<()> {
 		.with_delay(Delay::default().with_max(None))
 		.with_ranges([match version.alpn() {
 			"moq-lite-05" => Range {
-				start: moq_net::track::Anchor::Time(0),
+				start: Some(0),
 				end: None,
 			},
-			_ => Range::oldest(),
+			_ => Range::default(),
 		}]);
 	let mut below = relay.subscribe(wide.clone()).await?;
 	expect(&mut below, groups(0..GROUPS), "below the start").await?;

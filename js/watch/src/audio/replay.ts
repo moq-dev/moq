@@ -245,7 +245,9 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 	// group as it would for a session's, until the group lands or its budget gives up on it.
 	const requests = track.requests();
 	const subscriber = track.subscribe({ delay: { max: WIRE_MAX_DELAY } });
-	const ordered = track.subscribe({ delay: { min: sync.out.delay.peek() } }).ordered();
+	// It states no Min Age, so it reads from the oldest group: a trace keys its groups by sequence
+	// rather than by time, where a live join could not measure back from the live edge.
+	const ordered = track.subscribe({ delay: { min: null } }).ordered();
 	const consumer = new Container.Consumer(subscriber, {
 		format: new Container.Legacy.Format("audio"),
 		delay: new Derived([sync.out.delay, maxDelay], (min, max) => ({ min, max })),
@@ -283,7 +285,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 	signals.run((effect) => {
 		const delay = effect.get(sync.out.delay);
 		const max = holeWait(delay, bound({ delay, maxDelay: effect.get(sync.out.maxDelay), stretch }));
-		ordered.update({ delay: { min: delay.add(warmup), max: max.add(warmup) } });
+		ordered.update({ delay: { min: null, max: max.add(warmup) } });
 	});
 	signals.cleanup(() => requests.close());
 	await settle();

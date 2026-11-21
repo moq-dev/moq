@@ -23,7 +23,7 @@ async function missing(): Promise<{ broadcast: BroadcastProducer; track: Produce
 	group.writeFrame({ payload: enc.encode("live 4"), timestamp: Timestamp.unscaled(group.start) });
 	group.finish();
 	const requests = track.requests();
-	const reader = track.subscribe({ ranges: [{ start: { time: 0n } }], delay: { max: null }, order: "ascending" });
+	const reader = track.subscribe({ ranges: [{ start: 0n }], delay: { max: null }, order: "ascending" });
 	// Reading is what asks.
 	void reader
 		.ordered()
@@ -203,7 +203,7 @@ test("range fills: a recovery's refusals stand until the fill reaches them", asy
 	// From time 0, which names group 0 whatever is held: a time start of 1 would look up whether a
 	// group between 0 and 4 contains it, as the Rust tests' `missed` notes.
 	const later = peer.track.subscribe({
-		ranges: [{ start: { time: 0n } }],
+		ranges: [{ start: 0n }],
 		delay: { max: null },
 		order: "ascending",
 	});
@@ -289,7 +289,7 @@ test("range fills: a range start past the asked groups refuses only the fills ow
 	// for them again.
 	const requests = peer.track.requests();
 	const later = peer.track.subscribe({
-		ranges: [{ start: { time: 0n } }],
+		ranges: [{ start: 0n }],
 		delay: { max: null },
 		order: "ascending",
 	});
@@ -348,7 +348,7 @@ test("range fills: a passing refusal ends with the fills it answered", async () 
 	// From time 0, which names group 0 whatever is held, so it asks for group 1 on rather than
 	// looking up where time 1 falls.
 	const later = peer.track.subscribe({
-		ranges: [{ start: { time: 0n } }],
+		ranges: [{ start: 0n }],
 		delay: { max: null },
 		order: "ascending",
 	});
@@ -424,7 +424,7 @@ test("range fills: a recovery's refusal is taken once", async () => {
 	// From time 0, which names group 0 whatever is held, so it asks for group 1 on rather than
 	// looking up where time 1 falls.
 	const later = peer.track.subscribe({
-		ranges: [{ start: { time: 0n } }],
+		ranges: [{ start: 0n }],
 		delay: { max: null },
 		order: "ascending",
 	});
@@ -476,7 +476,7 @@ test("range fills: an older recovery ending keeps a newer one's coverage", async
 	// From time 0, which names group 0 whatever is held, so it asks for group 1 on rather than
 	// looking up where time 1 falls.
 	const later = peer.track.subscribe({
-		ranges: [{ start: { time: 0n } }],
+		ranges: [{ start: 0n }],
 		delay: { max: null },
 		order: "ascending",
 	});

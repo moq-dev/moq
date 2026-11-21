@@ -11,7 +11,7 @@
 
 use std::time::Duration;
 
-use moq_net::track::{Anchor, Delay, Info, Range, Subscription};
+use moq_net::track::{Delay, Info, Range, Subscription};
 use moq_net::{Timescale, Timestamp, Version, origin};
 
 use crate::route_change::{link, produce_origin, settle};
@@ -84,7 +84,7 @@ async fn read_from_expired(version: &str) -> Vec<u64> {
 	let subscription = Subscription::default()
 		.with_delay(Delay::default().with_max(Duration::from_secs(60)))
 		.with_ranges([Range {
-			start: Anchor::Time(500),
+			start: Some(500),
 			end: None,
 		}]);
 	let mut sub = remote.track("video").unwrap().subscribe(subscription).await.unwrap();

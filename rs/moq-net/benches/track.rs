@@ -161,15 +161,15 @@ fn at(key: u64) -> Timestamp {
 /// The groups from the one containing `start` through the one containing `end`.
 fn span(start: u64, end: u64) -> track::Range {
 	track::Range {
-		start: track::Anchor::Time(start),
-		end: Some(track::Anchor::Time(end)),
+		start: Some(start),
+		end: Some(end),
 	}
 }
 
 /// The groups from the one containing `start` onward.
 fn from(start: u64) -> track::Range {
 	track::Range {
-		start: track::Anchor::Time(start),
+		start: Some(start),
 		end: None,
 	}
 }

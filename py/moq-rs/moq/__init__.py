@@ -56,7 +56,6 @@ from .subscribe import (
     TrackConsumer,
 )
 from .types import (
-    Anchor,
     AudioCodec,
     AudioEncoderInput,
     AudioSampleFormat,
@@ -98,7 +97,6 @@ from .types import (
 
 __all__ = [
     "Allocator",
-    "Anchor",
     "Announce",
     "AnnounceConsumer",
     "AnnounceEvent",

@@ -43,6 +43,11 @@ fn write_group(track: &moq_net::track::Producer, key: u64) {
 	group.finish().unwrap();
 }
 
+/// A live join: no start, placed at the latest group by a stated zero Min Age.
+fn live() -> Subscription {
+	Subscription::default().with_delay(Delay::default().with_min(Duration::ZERO))
+}
+
 /// The next group's key, or `None` once the track ends or nothing arrives in time.
 async fn next(sub: &mut moq_net::track::Subscriber) -> Option<u64> {
 	let group = kio::clock::timeout(TIMEOUT, sub.recv_group()).await.ok()?;
@@ -118,7 +123,7 @@ async fn ahead_then_live(version: Option<&str>, relay: bool) -> (Vec<u64>, Vec<u
 		.expect("no subscriber appeared")
 		.unwrap();
 	kio::clock::sleep(Duration::from_millis(10)).await;
-	let mut live = subscribe(&remote, Subscription::default().with_ranges([Range::live()])).await;
+	let mut live = subscribe(&remote, live()).await;
 
 	// The live subscriber reads group 3 before group 4 supersedes it.
 	let mut live_got: Vec<u64> = next(&mut live).await.into_iter().collect();
@@ -220,13 +225,15 @@ async fn a_live_viewer_asks_lite07_upstream_for_the_live_edge() {
 			.expect("broadcast resolves")
 			.unwrap();
 
-		let _live = subscribe(&remote, Subscription::default().with_ranges([Range::live()])).await;
+		let _live = subscribe(&remote, live()).await;
 		kio::clock::timeout(TIMEOUT, crate::support::wanted(track.demand()))
 			.await
 			.expect("no subscriber appeared")
 			.unwrap();
 		let asked = track.subscription().expect("the publisher holds the demand").ranges;
-		assert_eq!(asked, [Range::live()], "relay={relay}");
+		assert_eq!(asked, [Range::default()], "relay={relay}");
+		let min = track.subscription().expect("the publisher holds the demand").delay.min;
+		assert_eq!(min, Some(Duration::ZERO), "relay={relay}: a live join");
 		drop((track, sessions, relay_origin, subscriber, broadcast, publisher));
 	}
 }
@@ -340,9 +347,7 @@ async fn initial_mixed_ranges_keep_the_absolute_history() {
 				if finished {
 					let mut warm = subscribe(
 						&fixture.remote,
-						Subscription::default()
-							.with_ranges([Range::live()])
-							.with_delay(Delay::default().with_max(None)),
+						Subscription::default().with_delay(Delay::default().with_min(Duration::ZERO).with_max(None)),
 					)
 					.await;
 					assert_eq!(next(&mut warm).await, Some(5));
@@ -350,8 +355,8 @@ async fn initial_mixed_ranges_keep_the_absolute_history() {
 					assert_eq!(next(&mut warm).await, None);
 				}
 				let subscription = Subscription::default()
-					.with_ranges([support::keys(1..2), Range::live()])
-					.with_delay(Delay::default().with_max(None));
+					.with_ranges([support::keys(1..2), Range::default()])
+					.with_delay(Delay::default().with_min(Duration::ZERO).with_max(None));
 				let mut reader = subscribe(&fixture.remote, subscription).await;
 				let mut got = Vec::new();
 				for _ in 0..2 {
@@ -456,8 +461,8 @@ async fn draft22_carries_time_ends_as_group_ids() {
 		assert_eq!(seen, [2, 3, 5]);
 		reader
 			.update(initial.with_ranges([Range {
-				start: moq_net::track::Anchor::Time(0),
-				end: Some(moq_net::track::Anchor::Time(2)),
+				start: Some(0),
+				end: Some(2),
 			}]))
 			.unwrap();
 		let mut got = vec![next(&mut reader).await.unwrap(), next(&mut reader).await.unwrap()];
@@ -482,8 +487,8 @@ async fn draft22_carries_time_ends_as_group_ids() {
 	let fixture = range_fixture(false).await;
 	let requested = Subscription::default()
 		.with_ranges([Range {
-			start: moq_net::track::Anchor::Time(0),
-			end: Some(moq_net::track::Anchor::Time(2)),
+			start: Some(0),
+			end: Some(2),
 		}])
 		.with_delay(Delay::default().with_max(None));
 	let mut reader = subscribe(&fixture.remote, requested).await;
@@ -506,7 +511,7 @@ async fn draft22_can_widen_while_the_current_group_is_quiet() {
 		quiet
 			.write_frame(Timestamp::from_millis(6).unwrap(), b"head".as_slice())
 			.unwrap();
-		let mut live = subscribe(&fixture.remote, Subscription::default().with_ranges([Range::live()])).await;
+		let mut live = subscribe(&fixture.remote, live()).await;
 		let mut current = kio::clock::timeout(TIMEOUT, live.recv_group())
 			.await
 			.unwrap()
@@ -566,8 +571,8 @@ async fn draft18_updates_narrow_then_widen() {
 		// Group 5 is the newest, so until a later one starts it holds time 6: the narrowed
 		// range still asks from it.
 		let narrowed = Range {
-			start: moq_net::track::Anchor::Time(5),
-			end: Some(moq_net::track::Anchor::Time(6)),
+			start: Some(5),
+			end: Some(6),
 		};
 		kio::clock::timeout(
 			TIMEOUT,
@@ -636,7 +641,7 @@ async fn empty_ranges_retire_the_wire_and_can_widen_again() {
 	for version in ["moq-transport-18", "moq-transport-22"] {
 		for relay in [false, true] {
 			let mut fixture = range_fixture_version(version, relay).await;
-			let live = Subscription::default().with_ranges([Range::live()]);
+			let live = live();
 			let mut reader = subscribe(&fixture.remote, live.clone()).await;
 			let mut sibling = subscribe(&fixture.remote, live.clone()).await;
 			assert_eq!(next(&mut reader).await, Some(5));
@@ -712,7 +717,7 @@ async fn draft22_cold_widening_finishes_the_largest_group() {
 			// the publisher serves that as a live join.
 			let narrowed = match start {
 				0 => support::keys(future..),
-				_ => moq_net::track::Range::live(),
+				_ => moq_net::track::Range::default(),
 			};
 			kio::clock::timeout(
 				TIMEOUT,
@@ -911,9 +916,9 @@ async fn holes_through_a_relay(version: &str, budget: Option<Duration>) {
 		let mut reader = subscribe(
 			&fixture.remote,
 			Subscription::default()
-				.with_delay(Delay::default().with_max(budget))
+				.with_delay(Delay::default().with_min(Duration::ZERO).with_max(budget))
 				.with_order(order)
-				.with_ranges([keys(0..8), Range::live()]),
+				.with_ranges([keys(0..8), Range::default()]),
 		)
 		.await;
 		// Everything in range that exists now, before the live edge moves.
@@ -958,7 +963,7 @@ async fn holes_through_a_relay(version: &str, budget: Option<Duration>) {
 /// The groups keyed in `range`, as a time range: a time end is the last key it holds.
 fn keys(range: std::ops::Range<u64>) -> Range {
 	Range {
-		start: moq_net::track::Anchor::Time(range.start),
-		end: Some(moq_net::track::Anchor::Time(range.end - 1)),
+		start: Some(range.start),
+		end: Some(range.end - 1),
 	}
 }

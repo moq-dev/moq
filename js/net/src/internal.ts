@@ -71,11 +71,9 @@ export function wireMaxDelay(subscription: Pick<Subscription, "delay">): number 
 	return max < NO_MAX_DELAY ? max : null;
 }
 
-/** A subscription's {@link Delay.min} in milliseconds as the wire carries it: undefined when not stated, omitted for zero. */
+/** A subscription's {@link Delay.min} in milliseconds as the wire carries it: undefined when not stated. */
 export function minDelayOf(subscription: Pick<Subscription, "delay">): number | undefined {
-	const min = subscription.delay?.min;
-	if (min === null) return undefined;
-	return min?.asMillis() ?? 0;
+	return subscription.delay?.min?.asMillis();
 }
 
 /** Normalize public group bounds into an inclusive start and exclusive end. */
@@ -757,9 +755,10 @@ export const hooks: {
 	 */
 	startTrack: (producer: Producer, served: { start?: bigint | null; requested?: bigint }) => void;
 	/**
-	 * Mark a track as a copy received over a wire without ranges, which cannot carry a relative
-	 * anchor other than the live start, so its readers refuse one rather than guess from a
-	 * partial copy. Mirrors the Rust `Holdings::drops_anchors`; assigned by `track.ts`.
+	 * Mark a track as a copy received over a wire without ranges, whose publisher placed its live
+	 * join already, so its readers start one among the groups held by when each presented rather
+	 * than prove it as a lite-07 copy does. Mirrors the Rust `Holdings::drops_anchors`; assigned by
+	 * `track.ts`.
 	 */
 	dropAnchors: (producer: Producer) => void;
 	/**
@@ -782,12 +781,13 @@ export const hooks: {
 		budget: number,
 	) => void;
 	/**
-	 * Tell a lite-07 copy where its publisher started each live range counting back, as
-	 * `[back, start, latest]` triples, replacing the last set: the copy holds only part of the
-	 * track, so a reader's relative start counts back as the publisher did, until a group past
-	 * the `latest` it counted from moves the live edge. Assigned by `track.ts`.
+	 * Tell a lite-07 copy where its publisher started each live join, as `[minAge, start, past]`,
+	 * the Min Age in milliseconds the join was asked under, replacing the last set: a reader's
+	 * live join the copy can't prove from its own groups starts from the feed one of them covers.
+	 * `past` marks a join answered empty, whose group starts at or past `start`, the key past its
+	 * range's end. Mirrors the Rust `track::JoinStart`; assigned by `track.ts`.
 	 */
-	relativeStarts: (producer: Producer, starts: Iterable<readonly [bigint, bigint, bigint | undefined]>) => void;
+	joinStarts: (producer: Producer, starts: Iterable<readonly [number, bigint, boolean]>) => void;
 	/** Mint a track {@link Request}; assigned by `track.ts`. */
 	makeRequest: (options: TrackRequestOptions) => Request;
 	/**
@@ -1218,7 +1218,7 @@ export const hooks: {
 	timeStarts: () => {
 		throw new Error("track.ts not loaded");
 	},
-	relativeStarts: () => {
+	joinStarts: () => {
 		throw new Error("track.ts not loaded");
 	},
 	servingRuns: () => {

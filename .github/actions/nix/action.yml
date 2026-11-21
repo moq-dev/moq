@@ -9,11 +9,10 @@ runs:
     # uniffi-bindgen-go alone in every job that enters the dev shell. Accepting
     # it keeps flake.nix the only place that names the cache and its key. The
     # flake is this checkout, which these jobs already run as code.
-    - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
+    - uses: cachix/install-nix-action@bb0495a1086c46893eee56f32fd192dfe4a15bb9 # v32.0.0
       with:
-        determinate: false
         # Packages build one derivation per crate, which leaves all but one
         # core idle at Nix's default of one job.
-        extra-conf: |
+        extra_nix_config: |
           accept-flake-config = true
           max-jobs = auto

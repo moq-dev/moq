@@ -302,13 +302,13 @@ impl Want {
 }
 
 /// Whether `subscription` reaches the live edge, the newest source group `edge`: some range is
-/// open, counts back from the latest group, or ends at or past it. As moq-net judges a copy's feed,
+/// open or ends at or past it. As moq-net judges a copy's feed,
 /// ranges wholly below it read only history, which fills serve. Before any group, every range
 /// does.
 fn reaches_live(subscription: &moq_net::track::Subscription, edge: Option<u64>) -> bool {
 	subscription.ranges.iter().any(|range| match (range.end, edge) {
 		// A time end is the last key it reads.
-		(Some(moq_net::track::Anchor::Time(last)), Some(edge)) => last >= edge,
+		(Some(last), Some(edge)) => last >= edge,
 		_ => true,
 	})
 }
@@ -796,7 +796,7 @@ async fn drop_gap(
 	fill: &moq_net::track::FillGroups,
 	sequence: u64,
 ) -> Result<(), Error> {
-	use moq_net::track::{Anchor, Delay, Order, Range, Subscription};
+	use moq_net::track::{Delay, Order, Range, Subscription};
 
 	// The miss is the source's answer, so its readers have it at once, whatever the lookup for
 	// the rest of the gap waits on.
@@ -819,8 +819,8 @@ async fn drop_gap(
 	let from = if below { first } else { sequence };
 	let subscription = Subscription::default()
 		.with_ranges([Range {
-			start: Anchor::Time(from),
-			end: Some(Anchor::Time(last)),
+			start: Some(from),
+			end: Some(last),
 		}])
 		.with_order(Order::Ascending)
 		.with_priority(fill.priority())
@@ -1198,7 +1198,7 @@ mod tests {
 			moq_net::track::Subscription::default()
 				.with_delay(moq_net::track::Delay::default().with_max(None))
 				.with_ranges([moq_net::track::Range {
-					start: moq_net::track::Anchor::Time(from),
+					start: Some(from),
 					end: None,
 				}])
 				.with_order(moq_net::track::Order::Ascending)
@@ -1340,7 +1340,7 @@ mod tests {
 			moq_net::track::Subscription::default()
 				.with_delay(moq_net::track::Delay::default().with_max(None))
 				.with_ranges([moq_net::track::Range {
-					start: moq_net::track::Anchor::Time(1),
+					start: Some(1),
 					end: None,
 				}])
 				.with_order(order),
@@ -1406,7 +1406,7 @@ mod tests {
 			moq_net::track::Subscription::default()
 				.with_delay(moq_net::track::Delay::default().with_max(None))
 				.with_ranges([moq_net::track::Range {
-					start: moq_net::track::Anchor::Time(7),
+					start: Some(7),
 					end: None,
 				}])
 				.with_order(moq_net::track::Order::Ascending),

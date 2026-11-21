@@ -70,7 +70,12 @@ async function subscribed(version: IetfVersion = VERSION, subscription: Partial<
 	const consumer = subscriber
 		.consume(Path.from("room"))
 		.track("video")
-		.subscribe({ ...track.Subscription.default(), ranges: [{ start: { relative: 0n } }], ...subscription });
+		.subscribe({
+			...track.Subscription.default(),
+			delay: { min: Duration.ZERO, max: Duration.ZERO },
+			ranges: [{}],
+			...subscription,
+		});
 	onTestFinished(() => {
 		consumer.close();
 		session.close();
@@ -282,7 +287,7 @@ for (const version of VERSIONS) {
 			const { subscriber, consumer, answer } = await subscribed(version, {
 				order: "ascending",
 				delay: { max: null },
-				ranges: [{ start: { time: 0n } }],
+				ranges: [{ start: 0n }],
 			});
 			await answer({ groupId: 0n, objectId });
 			// Largest is inclusive, including object 0: its following tail is no whole message.
