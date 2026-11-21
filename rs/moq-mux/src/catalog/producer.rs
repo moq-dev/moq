@@ -243,6 +243,13 @@ fn adopt(
 	Ok(Some(clock.adopted(wall)?))
 }
 
+/// `at` on clock `from` moved onto clock `to`: the timestamp `to` reads at the same wall instant.
+fn restamp(from: &crate::Clock, to: &crate::Clock, at: moq_net::Timestamp) -> crate::Result<moq_net::Timestamp> {
+	let unmappable = || crate::Error::UnmappableTimestamp(format!("{at:?} lands before the adopted clock's PTS zero"));
+	let micros = u64::try_from(to.reading(from.wall_clock(at)?)?).map_err(|_| unmappable())?;
+	moq_net::Timestamp::from_micros(micros).map_err(|_| unmappable())
+}
+
 /// Take the shared state, ignoring a poisoned lock.
 ///
 /// A panic under this lock comes from code we hand the catalog to: a [`RenditionConfig::insert`]
@@ -639,7 +646,8 @@ impl<E: CatalogExt> Producer<E> {
 	/// [`next_timestamp`](Self::next_timestamp) for a change no frame times. Fails with
 	/// [`TimestampRewind`](crate::container::TimestampRewind) before any edit unless `timestamp` is
 	/// past the last published catalog's, or the stamp of a change still waiting on the initial
-	/// publish; batch the edits at one frame into one guard.
+	/// publish; batch the edits at one frame into one guard. An edit that re-bases the clock by
+	/// writing `sync.clock` moves `timestamp` with it, onto the same instant on the adopted clock.
 	///
 	/// The publish happens when the returned [`Guard`] drops. Use [`mutate`](Self::mutate) for a
 	/// single edit, which is this guard opened and committed for you. Fails once the catalog tracks
@@ -1271,8 +1279,16 @@ impl<E: CatalogExt> Guard<'_, E> {
 		self.updated = false;
 
 		// The `sync.clock` is the producer's clock: never advertise one it disagrees with.
-		let adopted = adopt(&self.state.clock, self.state.anchored, self.state.catalog.sync.clock);
-		if let Ok(Some(clock)) = &adopted {
+		let adopted = adopt(&self.state.clock, self.state.anchored, self.state.catalog.sync.clock).and_then(|clock| {
+			let Some(clock) = clock else {
+				return Ok(None);
+			};
+			// The stamp was read on the clock this edit re-bases: it names the same instant on the new one.
+			let at = self.at.map(|at| restamp(&self.state.clock, &clock, at)).transpose()?;
+			Ok(Some((clock, at)))
+		});
+		if let Ok(Some((clock, at))) = &adopted {
+			self.at = *at;
 			self.retime(clock.clone());
 		}
 		self.state.catalog.sync.clock = self.state.clock.wall();
@@ -2812,6 +2828,8 @@ mod test {
 		catalog
 			.mutate(|c| c.sync.clock = Some(input), catalog.next_timestamp())
 			.unwrap();
+		// Stamped on the clock it replaced, the edit lands at the same instant on the adopted one.
+		assert_eq!(starts(&catalog), [Some(start(&catalog, 3_600_000)); 2]);
 
 		assert_eq!(catalog.snapshot().sync.clock, Some(input), "advertised unchanged");
 		let clock = catalog.clock();
