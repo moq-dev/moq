@@ -4028,8 +4028,9 @@ impl TrackState {
 	///
 	/// [`Error::MalformedTrack`] when the answer is behind the cache; see [`Self::judge`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	fn set_live(&mut self, largest: Option<Position>, start: Option<u64>) -> Result<()> {
+	fn set_live(&mut self, largest: Option<Position>, finished: Option<bool>, start: Option<u64>) -> Result<()> {
 		self.judge(largest)?;
+		self.report_answer(largest, finished);
 		self.answered(largest, start, true);
 		Ok(())
 	}
@@ -4038,10 +4039,23 @@ impl TrackState {
 	/// bounded subscription of history: the cache can never show that group, so the answer
 	/// alone makes it current, and live joins measure from that group.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	fn set_live_ahead(&mut self, largest: Position, start: Option<u64>) -> Result<()> {
+	fn set_live_ahead(&mut self, largest: Position, finished: Option<bool>, start: Option<u64>) -> Result<()> {
 		self.judge(Some(largest))?;
+		self.report_answer(Some(largest), finished);
 		self.answered(Some(largest), start, false);
 		Ok(())
+	}
+
+	/// Record the answered largest, its group ended there when `finished`, before the feed
+	/// goes live and under the same guard: a reader that going live wakes would otherwise
+	/// take the frames that arrived ahead of the answer as the largest, and read the rest
+	/// of that group as newer. `finished` is `None` for a largest whose frame is not a frame
+	/// ordinal, such as an IETF Object ID, which the cache never records.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	fn report_answer(&self, largest: Option<Position>, finished: Option<bool>) {
+		if let (Some(largest), Some(finished)) = (largest, finished) {
+			self.cache.report_largest(largest, finished);
+		}
 	}
 
 	/// [`Self::set_live`] for an answer with no Largest, where the first group the feed
@@ -5451,26 +5465,39 @@ impl Producer {
 
 	/// The route answered with its largest position, `None` for nothing yet, and the first
 	/// group its feed serves when the answer names it; see [`Self::set_idle`]. Readers
-	/// resume once the cache shows the largest position. A no-op unless idle.
+	/// resume once the cache shows the largest position. A no-op unless idle, but for
+	/// recording the largest: with `finished`, whether its group ended there, it is the
+	/// track's largest from then on; `None` for a largest in IETF Object IDs, which do not
+	/// count frames.
 	///
 	/// [`Error::MalformedTrack`] when the answer is behind the cache (no Largest while the
 	/// copy shows groups, or a Largest before its newest position): the cache is likely
 	/// another track, so the caller fails the copy and the next request builds a fresh one.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn set_live(&mut self, largest: Option<Position>, start: Option<u64>) -> Result<()> {
+	pub(crate) fn set_live(
+		&mut self,
+		largest: Option<Position>,
+		finished: Option<bool>,
+		start: Option<u64>,
+	) -> Result<()> {
 		match self.modify() {
-			Ok(mut state) => state.set_live(largest, start),
+			Ok(mut state) => state.set_live(largest, finished, start),
 			Err(_) => Ok(()),
 		}
 	}
 
 	/// [`Self::set_live`] for a feed that serves no group from `largest`'s on, such as a
 	/// bounded subscription of history: readers resume at once, live joins measuring from
-	/// `largest`'s group. A no-op unless idle.
+	/// `largest`'s group. A no-op unless idle, but for recording the largest.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn set_live_ahead(&mut self, largest: Position, start: Option<u64>) -> Result<()> {
+	pub(crate) fn set_live_ahead(
+		&mut self,
+		largest: Position,
+		finished: Option<bool>,
+		start: Option<u64>,
+	) -> Result<()> {
 		match self.modify() {
-			Ok(mut state) => state.set_live_ahead(largest, start),
+			Ok(mut state) => state.set_live_ahead(largest, finished, start),
 			Err(_) => Ok(()),
 		}
 	}
@@ -5541,7 +5568,7 @@ impl Producer {
 	/// The source reported its largest frame, which [`Self::largest`] follows before the
 	/// frame itself arrives, and whether its group ended there, which a relay forwards. A
 	/// hint about the edge: it never makes the frame readable.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	#[cfg(test)]
 	pub(crate) fn report_largest(&self, largest: Position, finished: bool) {
 		self.state.read().cache.report_largest(largest, finished);
 	}
@@ -14122,7 +14149,7 @@ mod test {
 		reader.set_range(..);
 		assert!(reader.poll_largest(&noop).is_pending(), "the copy is idle");
 
-		producer.set_live(Some(Position::group(2)), None).unwrap();
+		producer.set_live(Some(Position::group(2)), Some(false), None).unwrap();
 		assert!(
 			reader.poll_largest(&noop).is_pending(),
 			"the same largest is not reported again"
@@ -14143,7 +14170,7 @@ mod test {
 
 		let mut reader = producer.subscribe(replay());
 		assert!(reader.poll_largest(&noop).is_pending(), "the copy is idle");
-		producer.set_live(Some(Position::group(5)), None).unwrap();
+		producer.set_live(Some(Position::group(5)), Some(false), None).unwrap();
 		let _answer = framed(&producer, 5, 1);
 		assert_eq!(reader.poll_largest(&noop), Poll::Ready(Some(Position::group(5))));
 
@@ -14168,7 +14195,7 @@ mod test {
 		let (flag, waiter) = Flag::waiter();
 		assert!(reader.poll_largest(&waiter).is_pending(), "the copy is idle");
 
-		producer.set_live(Some(Position::group(5)), None).unwrap();
+		producer.set_live(Some(Position::group(5)), Some(false), None).unwrap();
 		producer.report_largest(Position::group(5), false);
 		assert!(
 			reader.poll_largest(&waiter).is_pending(),
@@ -14179,6 +14206,34 @@ mod test {
 		let _answer = framed(&producer, 5, 1);
 		assert!(flag.take(), "the answer showing woke the reader");
 		assert_eq!(reader.poll_largest(&noop), Poll::Ready(Some(Position::group(5))));
+	}
+
+	/// A copy whose answered group already shows goes live at the answer, and its first
+	/// largest is the answer's, not the frames that arrived ahead of it: a reader taking
+	/// it as where history ends would otherwise read the rest of that group as live.
+	#[test]
+	fn largest_goes_live_at_the_answer_not_the_frames_ahead_of_it() {
+		let mut producer = track_producer("test", Info::default());
+		let noop = kio::Waiter::noop();
+		producer.set_idle();
+		let mut reader = producer.subscribe(replay());
+		let (flag, waiter) = Flag::waiter();
+		assert!(reader.poll_largest(&waiter).is_pending(), "the copy is idle");
+
+		// Seven frames of group 5 land before the answer, which says it reached frame 15.
+		let _arriving = framed(&producer, 5, 7);
+		let answer = Position { group: 5, frame: 15 };
+		producer.set_live(Some(answer), Some(false), None).unwrap();
+		assert!(flag.take(), "going live woke the reader");
+		assert_eq!(reader.poll_largest(&noop), Poll::Ready(Some(answer)));
+
+		// The same holds for a bounded feed the answer alone makes current.
+		let mut producer = track_producer("test", Info::default());
+		producer.set_idle();
+		let mut reader = producer.subscribe(replay());
+		let _arriving = framed(&producer, 5, 7);
+		producer.set_live_ahead(answer, Some(false), None).unwrap();
+		assert_eq!(reader.poll_largest(&noop), Poll::Ready(Some(answer)));
 	}
 
 	/// A relay copy holding groups 0 to 3 from an ended feed, idle until its route answers.
@@ -14511,7 +14566,7 @@ mod test {
 		assert_eq!(ready_groups(&mut reader), Vec::<u64>::new(), "the copy is idle");
 		assert_eq!(reader.floor(), None, "the start waits for the live feed");
 
-		producer.set_live(Some(Position::group(4)), None).unwrap();
+		producer.set_live(Some(Position::group(4)), Some(false), None).unwrap();
 		framed(&producer, 4, 1).finish().unwrap();
 		assert_eq!(ready_groups(&mut reader), vec![4]);
 	}
@@ -14522,7 +14577,7 @@ mod test {
 	fn a_live_join_on_an_idle_copy_waits_for_the_answer_to_show() {
 		let mut producer = idle_copy();
 		let mut reader = producer.subscribe(live_join());
-		producer.set_live(Some(Position::group(5)), None).unwrap();
+		producer.set_live(Some(Position::group(5)), Some(false), None).unwrap();
 		framed(&producer, 4, 1).finish().unwrap();
 		assert_eq!(ready_groups(&mut reader), Vec::<u64>::new(), "the answer has not shown");
 
@@ -14547,7 +14602,7 @@ mod test {
 			producer.set_idle();
 			let mut reader = producer.subscribe(replay());
 
-			let answered = producer.set_live(largest, None);
+			let answered = producer.set_live(largest, Some(false), None);
 			assert_eq!(answered.is_ok(), ok, "{largest:?}");
 			if let Err(err) = answered {
 				assert!(matches!(err, Error::MalformedTrack), "{largest:?}");
@@ -14563,7 +14618,7 @@ mod test {
 
 		let mut producer = idle_copy();
 		assert!(matches!(
-			producer.set_live_ahead(Position::group(2), None),
+			producer.set_live_ahead(Position::group(2), Some(false), None),
 			Err(Error::MalformedTrack)
 		));
 
@@ -14573,7 +14628,7 @@ mod test {
 			framed(&producer, 2, 1).finish().unwrap();
 			framed(&producer, 3, 0).finish().unwrap();
 			producer.set_idle();
-			assert_eq!(producer.set_live(largest, None).is_ok(), ok, "{largest:?}");
+			assert_eq!(producer.set_live(largest, Some(false), None).is_ok(), ok, "{largest:?}");
 		}
 	}
 
@@ -14587,7 +14642,9 @@ mod test {
 		producer.set_idle();
 
 		let resent = framed(&producer, 3, 3);
-		producer.set_live(Some(Position { group: 3, frame: 0 }), None).unwrap();
+		producer
+			.set_live(Some(Position { group: 3, frame: 0 }), Some(false), None)
+			.unwrap();
 		drop(resent);
 	}
 
@@ -14633,8 +14690,15 @@ mod test {
 					group: 2,
 					frame: object,
 				}),
+				// An Object ID, which the cache does not record.
+				None,
 				None,
 			);
+			// Judged in Object IDs, but the largest stays at what the cache holds.
+			if ok {
+				let held = Position { group: 2, frame: 1 };
+				assert_eq!(producer.subscribe(replay()).largest().now_or_never(), Some(Some(held)));
+			}
 			assert_eq!(answered.is_ok(), ok, "object {object}");
 		}
 	}
@@ -14661,7 +14725,7 @@ mod test {
 		assert_eq!(live.floor(), None, "the start waits for the live feed");
 		assert_eq!(ready_groups(&mut oldest), Vec::<u64>::new(), "the copy is idle");
 
-		producer.set_live(Some(Position::group(4)), None).unwrap();
+		producer.set_live(Some(Position::group(4)), Some(false), None).unwrap();
 		framed(&producer, 4, 1).finish().unwrap();
 		assert_eq!(ready_groups(&mut live), vec![4]);
 		assert_eq!(ready_groups(&mut oldest), vec![0, 1, 2, 3, 4]);
@@ -16026,7 +16090,7 @@ mod test {
 		open.abort(Error::Cancel).unwrap();
 
 		let mut answer = producer.create_group(group::Info { start: 2 }).unwrap();
-		producer.set_live(Some(Position::group(2)), None).unwrap();
+		producer.set_live(Some(Position::group(2)), Some(false), None).unwrap();
 		answer
 			.write_frame(Timestamp::from_millis(533).unwrap(), bytes::Bytes::from_static(b""))
 			.unwrap();
@@ -16061,7 +16125,7 @@ mod test {
 				.with_delay(Delay::default().with_max(Duration::from_millis(400)))
 				.with_range(0..),
 		);
-		producer.set_live(Some(Position::group(8)), None).unwrap();
+		producer.set_live(Some(Position::group(8)), Some(false), None).unwrap();
 		for key in [6, 8] {
 			framed(&producer, key, 1).finish().unwrap();
 		}
@@ -16086,7 +16150,7 @@ mod test {
 			}
 			producer.set_idle();
 			producer.start_at(6).unwrap();
-			producer.set_live(Some(Position::group(6)), None).unwrap();
+			producer.set_live(Some(Position::group(6)), Some(false), None).unwrap();
 			framed(&producer, 6, 1).finish().unwrap();
 			if !cached {
 				for key in 0..3 {
@@ -16144,7 +16208,7 @@ mod test {
 		}
 		producer.set_idle();
 		producer.start_at(6).unwrap();
-		producer.set_live(Some(Position::group(6)), None).unwrap();
+		producer.set_live(Some(Position::group(6)), Some(false), None).unwrap();
 		framed(&producer, 6, 1).finish().unwrap();
 		for key in 0..3 {
 			evict(&producer, key);
@@ -16199,7 +16263,7 @@ mod test {
 			framed(&producer, key, 1).finish().unwrap();
 		}
 		producer.set_idle();
-		producer.set_live(Some(Position::group(6)), None).unwrap();
+		producer.set_live(Some(Position::group(6)), Some(false), None).unwrap();
 		framed(&producer, 6, 1).finish().unwrap();
 		let delivered = Delivered::default();
 		let unread = Unread {
@@ -16226,7 +16290,7 @@ mod test {
 		producer.received();
 		framed(&producer, 0, 1).finish().unwrap();
 		producer.set_idle();
-		producer.set_live(Some(Position::group(6)), None).unwrap();
+		producer.set_live(Some(Position::group(6)), Some(false), None).unwrap();
 		framed(&producer, 6, 1).finish().unwrap();
 		evict(&producer, 0);
 		let state = producer.state.read();
@@ -16263,7 +16327,7 @@ mod test {
 				assert_eq!(read_now(&mut reader, ordered), None, "the copy is idle");
 
 				producer.start_at(3).unwrap();
-				producer.set_live(Some(Position::group(3)), None).unwrap();
+				producer.set_live(Some(Position::group(3)), Some(false), None).unwrap();
 				framed(&producer, 3, 1).finish().unwrap();
 				assert_eq!(read_now(&mut reader, ordered), Some(Some(0)), "cached history");
 				// An arrival-order reader may take the live group before its history.
@@ -16318,7 +16382,7 @@ mod test {
 		assert!(subscriber.poll_drop(&waiter).is_pending(), "nothing was given up");
 
 		let mut again = producer.create_group(group::Info { start: 1 }).unwrap();
-		producer.set_live(Some(Position::group(1)), None).unwrap();
+		producer.set_live(Some(Position::group(1)), Some(false), None).unwrap();
 		again
 			.write_frame(Timestamp::from_millis(1000).unwrap(), bytes::Bytes::from_static(b"x"))
 			.unwrap();
@@ -18973,7 +19037,7 @@ mod test {
 		let consumer = request.consume();
 		let mut producer = request.idle().accept(None);
 		assert!(!consumer.is_live(), "idle from the accept");
-		producer.set_live(None, None).unwrap();
+		producer.set_live(None, Some(false), None).unwrap();
 		assert!(consumer.is_live());
 	}
 
@@ -19007,7 +19071,7 @@ mod test {
 		assert!(consumer.is_live(), "accepting the track starts its live feed");
 		producer.set_idle();
 		assert!(!consumer.is_live(), "an idle accepted copy is not live");
-		producer.set_live(None, None).unwrap();
+		producer.set_live(None, Some(false), None).unwrap();
 		assert!(consumer.is_live(), "the answered copy is live again");
 
 		// The fetch handler holds the same producer lifetime, so both leave.
@@ -27788,7 +27852,7 @@ mod test {
 		}
 		producer.set_idle();
 		// The feed resumes at 8, above the cached 0..=4: its live floor is 5.
-		producer.set_live(Some(Position::group(8)), None).unwrap();
+		producer.set_live(Some(Position::group(8)), Some(false), None).unwrap();
 		framed(&producer, 8, 1).finish().unwrap();
 		let mut reader = producer.subscribe(
 			Subscription::default()
@@ -32310,7 +32374,7 @@ mod test {
 				for _ in 0..2 {
 					assert_eq!(read_now(&mut reader, ordered), end, "the source is idle");
 				}
-				source.set_live(Some(Position::group(5)), None).unwrap();
+				source.set_live(Some(Position::group(5)), Some(false), None).unwrap();
 				reader.update(subscription.clone()).unwrap();
 				assert_eq!(read_now(&mut reader, ordered), end);
 				reader.update(subscription.clone().with_range(3..4)).unwrap();
