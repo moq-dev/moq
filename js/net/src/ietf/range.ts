@@ -2,12 +2,15 @@ import { race, Signal } from "@moq/signals";
 import { error, NotFound, ProtocolViolation, StreamCode, StreamError } from "../error.ts";
 import { type FillGroups, fillChanged, wantedRuns } from "../fill.ts";
 import type * as group from "../group.ts";
+import { hooks } from "../internal.ts";
 import { receiveFrame, skipPayload } from "../payload.ts";
 import type { Cursor, Reader } from "../stream.ts";
 import type { Timescale } from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
-import { decodeFetchObject, EndOfRange, objectTime } from "./object.ts";
+import { isDraft20 } from "./filter.ts";
+import { decodeFetchObject, EndOfRange, hasGroupEnd, objectDeltaBias, objectTime } from "./object.ts";
+import type { IetfVersion } from "./version.ts";
 
 /** The groups one standalone FETCH writes, sharing the joining FETCH's object and payload decoder. @internal */
 export class RangeFetch {
@@ -17,7 +20,7 @@ export class RangeFetch {
 	readonly bound?: number;
 	readonly #track: track.Producer;
 	readonly #timescale?: Timescale;
-	readonly #legacy: boolean;
+	readonly #version: IetfVersion;
 	readonly #changed = new Signal(0);
 	readonly #stop = new AbortController();
 	readonly #done = Promise.withResolvers<void>();
@@ -33,7 +36,7 @@ export class RangeFetch {
 		timescale?: Timescale;
 		last: bigint;
 		bound?: number;
-		legacy: boolean;
+		version: IetfVersion;
 	}) {
 		this.fill = options.fill;
 		this.first = this.#next = options.first;
@@ -41,7 +44,7 @@ export class RangeFetch {
 		this.bound = options.bound;
 		this.#track = options.track;
 		this.#timescale = options.timescale;
-		this.#legacy = options.legacy;
+		this.#version = options.version;
 	}
 
 	/** Settles when the stream finishes or the request cancels it. */
@@ -103,10 +106,13 @@ export class RangeFetch {
 			return;
 		}
 		this.#taken = true;
+		const version = this.#version;
 		let prior: bigint | undefined;
 		let next = 0;
 		let first = true;
 		let trailing = false;
+		// The prior entry was draft-23's End of Group, so the group takes no more objects.
+		let ended = false;
 		try {
 			const decode = (c: Cursor) => decodeFetchObject(c);
 			for (;;) {
@@ -115,34 +121,51 @@ export class RangeFetch {
 					this.#stop.signal,
 				);
 				if (object === undefined) break;
+				if (object.kind === "endOfGroup") {
+					if (prior === undefined || this.#current === undefined)
+						throw new ProtocolViolation("a fetch stream starts with an End of Group");
+					// Draft-23 says where the track ends here rather than in FETCH_OK.
+					if (object.track) hooks.endTrack(this.#track, { group: this.#current.key + 1n, frame: 0 });
+					ended = true;
+					continue;
+				}
 				if (object.kind === "endOfRange") {
+					// Draft-23 encodes every End of Range but the stream's first entry against the
+					// prior entry (section 11.4.2.1); within its group the Object ID steps past it.
+					const delta = hasGroupEnd(version) && prior !== undefined;
+					const group = delta && prior !== undefined ? prior + object.group : object.group;
+					const at = delta && object.group === 0n ? next + object.object : object.object;
+					if (ended && delta && object.group === 0n)
+						throw new ProtocolViolation("an End of Range continues a group past its End of Group");
+					ended = false;
 					if (
-						object.group < (prior ?? this.first) ||
-						object.group > this.last ||
-						(this.bound !== undefined && object.group === this.last && object.object >= this.bound)
+						group < (prior ?? this.first) ||
+						group > this.last ||
+						!Number.isSafeInteger(at) ||
+						(this.bound !== undefined && group === this.last && at >= this.bound)
 					)
 						throw new ProtocolViolation("End of Range is outside FETCH_OK's range");
-					if (this.#current?.key === object.group) {
+					if (this.#current?.key === group) {
 						if (object.reason !== EndOfRange.NonExistent)
 							throw new NotFound("FETCH group suffix unavailable");
 						trailing = true;
 					} else {
 						this.#closeGroup();
-						if (object.reason === EndOfRange.NonExistent) this.fill.dropGroups(this.#next, object.group);
-						else this.fill.refuseGroups(this.#next, object.group, new NotFound("FETCH range unavailable"));
-						this.fill.refuseGroups(
-							object.group,
-							object.group + 1n,
-							new NotFound("FETCH omitted a group prefix"),
-						);
-						this.#current = { key: object.group };
-						this.#next = object.group + 1n;
+						if (object.reason === EndOfRange.NonExistent) this.fill.dropGroups(this.#next, group);
+						else this.fill.refuseGroups(this.#next, group, new NotFound("FETCH range unavailable"));
+						this.fill.refuseGroups(group, group + 1n, new NotFound("FETCH omitted a group prefix"));
+						this.#current = { key: group };
+						this.#next = group + 1n;
 					}
-					prior = object.group;
-					next = object.object + 1;
+					prior = group;
+					next = at + 1;
 					first = true;
 					continue;
 				}
+				// Past an End of Group only an object that names another group can follow.
+				if (ended && object.group === undefined)
+					throw new ProtocolViolation("a fetch object continues a group past its End of Group");
+				ended = false;
 				if (
 					first &&
 					(object.group === undefined ||
@@ -172,7 +195,7 @@ export class RangeFetch {
 					object.group === undefined
 						? object.object === undefined
 							? next
-							: next - 1 + object.object
+							: next - 1 + object.object + objectDeltaBias(version)
 						: object.object;
 				if (id === undefined || id !== next || !Number.isSafeInteger(id))
 					throw new Error("FETCH object gap is unsupported");
@@ -194,7 +217,11 @@ export class RangeFetch {
 				next = id + 1;
 				first = false;
 			}
-			if (this.#legacy && this.bound !== undefined && (this.#current?.key !== this.last || next < this.bound))
+			if (
+				!isDraft20(version) &&
+				this.bound !== undefined &&
+				(this.#current?.key !== this.last || next < this.bound)
+			)
 				throw new ProtocolViolation("FETCH ended before FETCH_OK's End Location");
 			this.#closeGroup();
 			this.fill.dropGroups(this.#next, this.last + 1n);

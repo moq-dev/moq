@@ -4,7 +4,7 @@ import type { Reader, Writer } from "../stream.ts";
 import * as Filter from "./filter.ts";
 import * as Namespace from "./namespace.ts";
 import { AUTHORIZATION_TOKEN, type Token, tokenFromRequest, unique } from "./token.ts";
-import { type IetfVersion, Version } from "./version.ts";
+import { type IetfVersion, isDraft23, Version } from "./version.ts";
 
 // ---- Message Parameters (used in Subscribe, Publish, Fetch, etc.) ----
 // A count, then definition-specific Type-Value pairs with delta-encoded types.
@@ -20,9 +20,13 @@ const MSG_PARAM_SUBGROUP_DELIVERY_TIMEOUT = 0x06n;
 const MSG_PARAM_MAX_CACHE_DURATION = 0x04n;
 const MSG_PARAM_EXPIRES = 0x08n;
 const MSG_PARAM_PUBLISHER_PRIORITY = 0x0en;
-export const MSG_PARAM_FORWARD = 0x10n;
+const MSG_PARAM_FORWARD = 0x10n;
+/// PAUSED, draft-23's FORWARD with the opposite sense (section 9.19.18).
+const MSG_PARAM_PAUSED = 0x11n;
 export const MSG_PARAM_SUBSCRIBER_PRIORITY = 0x20n;
 const MSG_PARAM_GROUP_ORDER = 0x22n;
+/// SUBSCRIBE_TRACKS_ID, which draft-23 lets a PUBLISH carry (section 9.8). Read and dropped.
+const MSG_PARAM_SUBSCRIBE_TRACKS_ID = 0x36n;
 /// INCLUDE_PROPERTIES, draft-22's opt-out from Track Properties.
 const MSG_PARAM_INCLUDE_PROPERTIES = 0x35n;
 /// ROUTE_COST, from the MoQ Cluster extension. See `cluster.ts`.
@@ -61,8 +65,9 @@ type ControlMessage =
 /** True when this draft's definition of `message` includes `id`. */
 function allows(message: ControlMessage, version: IetfVersion, id: bigint): boolean {
 	const from20 = version >= Version.DRAFT_20;
+	const from23 = isDraft23(version);
 	const auth = id === MSG_PARAM_AUTHORIZATION_TOKEN;
-	const forward = id === MSG_PARAM_FORWARD;
+	const forward = id === forwardId(version);
 	const priority = id === MSG_PARAM_SUBSCRIBER_PRIORITY;
 	const filter = id === MSG_PARAM_SUBSCRIPTION_FILTER;
 	const order = id === MSG_PARAM_GROUP_ORDER;
@@ -139,14 +144,17 @@ function allows(message: ControlMessage, version: IetfVersion, id: bigint): bool
 				forward ||
 				(priority && from20) ||
 				(filter && from20) ||
-				(order && from20)
+				(order && from20) ||
+				// Draft-23 adds these two (section 9.8); neither changes the refusal ahead.
+				(from23 && (fill || id === MSG_PARAM_SUBSCRIBE_TRACKS_ID))
 			);
 		case "publish-namespace":
 			return auth || id === MSG_PARAM_HOP_PATH || id === MSG_PARAM_ROUTE_COST;
 		case "fetch":
 			return auth || id === MSG_PARAM_FILL_TIMEOUT || priority || (filter && from20) || order || range || include;
 		case "fetch-ok":
-			return false;
+			// Draft-23 answers a FETCH with REQUEST_OK, which carries these two (section 9.3).
+			return isDraft23(version) && (expires || largest);
 		case "request-ok":
 			return expires || largest || id === MSG_PARAM_ACTIVE_COUNT;
 		case "namespace":
@@ -167,7 +175,12 @@ const MSG_PARAM_REPEATABLE: readonly bigint[] = [
 	MSG_PARAM_TRACK_PROPERTY_FILTER,
 ];
 
-type MessageParamKind = "varint" | "uint8" | "bool" | "location" | "filter" | "bytes" | "namespace";
+// The id that carries the Forward State on `version`'s wire.
+function forwardId(version: IetfVersion): bigint {
+	return isDraft23(version) ? MSG_PARAM_PAUSED : MSG_PARAM_FORWARD;
+}
+
+type MessageParamKind = "varint" | "uint8" | "forward" | "location" | "filter" | "bytes" | "namespace";
 /** A `{Group, Object}` pair carried by a message parameter, such as LARGEST_OBJECT. */
 export type MessageLocation = { groupId: bigint; objectId: bigint };
 
@@ -184,6 +197,7 @@ function getMessageParamKind(id: bigint): MessageParamKind {
 		case MSG_PARAM_ROUTE_COST:
 		case MSG_PARAM_HIDDEN:
 		case MSG_PARAM_ACTIVE_COUNT:
+		case MSG_PARAM_SUBSCRIBE_TRACKS_ID:
 			return "varint";
 		case MSG_PARAM_PUBLISHER_PRIORITY:
 		case MSG_PARAM_SUBSCRIBER_PRIORITY:
@@ -191,7 +205,8 @@ function getMessageParamKind(id: bigint): MessageParamKind {
 		case MSG_PARAM_INCLUDE_PROPERTIES:
 			return "uint8";
 		case MSG_PARAM_FORWARD:
-			return "bool";
+		case MSG_PARAM_PAUSED:
+			return "forward";
 		case MSG_PARAM_LARGEST_OBJECT:
 			return "location";
 		case MSG_PARAM_SUBSCRIPTION_FILTER:
@@ -215,6 +230,8 @@ export class Parameters {
 	#locations: Map<bigint, MessageLocation>;
 	/** LOCATION_FILTER, kept decoded because its framing depends on the draft. */
 	#filter: Filter.Filter | undefined;
+	/** The Forward State: FORWARD, or draft-23's PAUSED inverted. */
+	#forward: boolean | undefined;
 	/** Every instance of a parameter that may repeat, decoded only; we never send one. */
 	#repeated: Map<bigint, Uint8Array[]>;
 	/** Every AUTHORIZATION TOKEN, checked for repeats once the block decoded. */
@@ -270,12 +287,11 @@ export class Parameters {
 	}
 
 	get forward(): boolean | undefined {
-		const v = this.vars.get(MSG_PARAM_FORWARD);
-		return v !== undefined ? v !== 0n : undefined;
+		return this.#forward;
 	}
 
 	set forward(v: boolean) {
-		this.vars.set(MSG_PARAM_FORWARD, v ? 1n : 0n);
+		this.#forward = v;
 	}
 
 	get publisherPriority(): number | undefined {
@@ -349,7 +365,7 @@ export class Parameters {
 		this.#filter = v;
 	}
 
-	/** FILL_PARAMETERS: the draft-22 backfill request, as its raw parameter value. */
+	/** FILL_PARAMETERS: the backfill request, as its count and Parameters. */
 	get fillParameters(): Uint8Array | undefined {
 		return this.bytes.get(MSG_PARAM_FILL_PARAMETERS);
 	}
@@ -392,11 +408,19 @@ export class Parameters {
 	/** Encode the block. */
 	async encode(w: Writer, version: IetfVersion) {
 		const filter = this.#filter;
-		await w.u53(this.vars.size + this.bytes.size + this.#locations.size + (filter ? 1 : 0));
+		const forward = this.#forward;
+		await w.u53(
+			this.vars.size +
+				this.bytes.size +
+				this.#locations.size +
+				(filter ? 1 : 0) +
+				(forward !== undefined ? 1 : 0),
+		);
 
 		// Merge all parameter storage and sort by key, for delta encoding.
 		const keys = [...this.vars.keys(), ...this.bytes.keys(), ...this.#locations.keys()];
 		if (filter) keys.push(MSG_PARAM_SUBSCRIPTION_FILTER);
+		if (forward !== undefined) keys.push(forwardId(version));
 		keys.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 
 		let prevId = 0n;
@@ -421,14 +445,9 @@ export class Parameters {
 					await w.u8(Number(value));
 					break;
 				}
-				case "bool": {
-					const value = this.vars.get(key);
-					if (value !== 0n && value !== 1n) {
-						throw new Error(`invalid bool message parameter: ${key.toString()}`);
-					}
-					await w.bool(value === 1n);
+				case "forward":
+					await w.bool(key === MSG_PARAM_PAUSED ? !forward : !!forward);
 					break;
-				}
 				case "location": {
 					const location = this.#locations.get(key);
 					if (location === undefined)
@@ -447,7 +466,8 @@ export class Parameters {
 				case "bytes": {
 					const value = this.bytes.get(key);
 					if (value === undefined) throw new Error(`invalid bytes message parameter: ${key.toString()}`);
-					await w.u53(value.length);
+					// A counted FILL_PARAMETERS ends where its own count says, so it has no Length.
+					if (key !== MSG_PARAM_FILL_PARAMETERS || !Filter.isCountedFill(version)) await w.u53(value.length);
 					await w.write(value);
 					break;
 				}
@@ -493,6 +513,7 @@ export class Parameters {
 				params.bytes.has(id) ||
 				params.#locations.has(id) ||
 				filter ||
+				((id === MSG_PARAM_FORWARD || id === MSG_PARAM_PAUSED) && params.#forward !== undefined) ||
 				(id === 0x34n && params.namespacePrefix !== undefined)
 			) {
 				throw new Error(`duplicate message parameter id: ${id.toString()}`);
@@ -510,12 +531,12 @@ export class Parameters {
 					params.vars.set(id, BigInt(value));
 					break;
 				}
-				case "bool": {
+				case "forward": {
 					const value = await r.u8();
 					if (value !== 0 && value !== 1) {
 						throw new ProtocolViolation(`invalid message parameter value: ${id}`);
 					}
-					params.vars.set(id, BigInt(value));
+					params.#forward = id === MSG_PARAM_PAUSED ? value === 0 : value === 1;
 					break;
 				}
 				case "location": {
@@ -532,7 +553,11 @@ export class Parameters {
 					params.#filter = await Filter.decodeParam(r, version);
 					break;
 				case "bytes": {
-					const size = await r.u53();
+					// Every message body is buffered whole, so a counted fill is measured in place.
+					const size =
+						id === MSG_PARAM_FILL_PARAMETERS && Filter.isCountedFill(version)
+							? await r.peek((c) => Filter.fillSize(c.read(c.remaining), version))
+							: await r.u53();
 					const value = await r.read(size);
 					params.bytes.set(id, value);
 					break;
