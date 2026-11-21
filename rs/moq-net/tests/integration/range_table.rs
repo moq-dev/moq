@@ -119,7 +119,9 @@ fn cases() -> Vec<Case> {
 		.map(|case| Case {
 			name: case["name"].as_str().expect("a name").to_string(),
 			groups: case.get("groups").map(keys).unwrap_or_else(|| groups.clone()),
-			append: case.get("append").is_none_or(|append| append.as_bool().expect("append")),
+			append: case
+				.get("append")
+				.is_none_or(|append| append.as_bool().expect("append")),
 			copy: case
 				.get("copy")
 				.map(|copy| copy.as_array().expect("copy").iter().map(Ask::parse).collect())
@@ -301,7 +303,10 @@ async fn run(case: &Case, mode: Mode) -> Result<(), String> {
 					settle().await;
 					source.write(case);
 					for join in joined {
-						let mut reader = join.await.expect("the subscribe runs").expect("a copy reader subscribes");
+						let mut reader = join
+							.await
+							.expect("the subscribe runs")
+							.expect("a copy reader subscribes");
 						Got::default().read(&mut reader, 0).await;
 						_readers.push(reader);
 					}

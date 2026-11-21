@@ -1,6 +1,7 @@
 //! Rust peers on either side of a JavaScript relay (`test/relay-fill/relay.ts`), over real
 //! WebSocket sessions. The relay's copy FETCHes upstream what a downstream reader misses: the
-//! history below where its feed started, and the groups it received and then evicted.
+//! history below where its feed started, and the groups it received and then evicted. The
+//! relay's copy also passes the shared lite-07 range table (`moq-net/tests/range-table.json`).
 //!
 //! Each reader has a session and copy of its own in front of the relay, so a group it wants
 //! that the relay lacks reaches the relay's copy rather than a Rust copy another reader warmed.
@@ -156,6 +157,67 @@ fn groups(range: std::ops::Range<u64>) -> BTreeMap<u64, String> {
 	range.map(|sequence| (sequence, format!("group {sequence}"))).collect()
 }
 
+/// The JavaScript relay between `publisher`, served upstream of it, and the downstream sessions
+/// it dials.
+struct Running {
+	relay: Relay,
+	child: tokio::process::Child,
+	serves: [tokio::task::JoinHandle<anyhow::Result<()>>; 2],
+}
+
+impl Running {
+	async fn start(version: Version, publisher: moq_net::origin::Producer) -> anyhow::Result<Self> {
+		let (upstream, upstream_serve) = listen(version, true, move || publisher.clone()).await?;
+		let (sessions, viewers) = tokio::sync::mpsc::unbounded_channel();
+		let (downstream, downstream_serve) = listen(version, false, move || {
+			let viewer = moq_tokio::origin::spawn();
+			let _ = sessions.send(viewer.clone());
+			viewer
+		})
+		.await?;
+
+		let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test/relay-fill/relay.ts");
+		let mut child = tokio::process::Command::new("bun")
+			.arg(script)
+			.arg(upstream.as_str())
+			.arg(downstream.as_str())
+			.arg(version.alpn())
+			.arg("history")
+			.stdin(Stdio::piped())
+			.stdout(Stdio::piped())
+			.stderr(Stdio::inherit())
+			.kill_on_drop(true)
+			.spawn()?;
+		let mut relay = Relay {
+			stdin: child.stdin.take().unwrap(),
+			stdout: BufReader::new(child.stdout.take().unwrap()).lines(),
+			viewers,
+		};
+		let ready = relay.stdout.next_line().await?;
+		anyhow::ensure!(ready.as_deref() == Some("ready"), "the relay did not start: {ready:?}");
+		Ok(Self {
+			relay,
+			child,
+			serves: [upstream_serve, downstream_serve],
+		})
+	}
+
+	/// Close the relay's sessions, then wait for it to exit cleanly.
+	async fn stop(self) -> anyhow::Result<()> {
+		let Self {
+			relay,
+			mut child,
+			serves,
+		} = self;
+		drop(relay);
+		anyhow::ensure!(child.wait().await?.success(), "the relay failed");
+		for serve in serves {
+			serve.abort();
+		}
+		Ok(())
+	}
+}
+
 async fn relay(version: Version) -> anyhow::Result<()> {
 	let publisher = moq_tokio::origin::spawn();
 	let broadcast = publisher.route("history", moq_net::origin::RouteOptions::hidden())?;
@@ -175,34 +237,8 @@ async fn relay(version: Version) -> anyhow::Result<()> {
 		group.finish()?;
 	}
 	broadcast.announce()?;
-	let (upstream, upstream_serve) = listen(version, true, move || publisher.clone()).await?;
-	let (sessions, viewers) = tokio::sync::mpsc::unbounded_channel();
-	let (downstream, downstream_serve) = listen(version, false, move || {
-		let viewer = moq_tokio::origin::spawn();
-		let _ = sessions.send(viewer.clone());
-		viewer
-	})
-	.await?;
-
-	let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test/relay-fill/relay.ts");
-	let mut child = tokio::process::Command::new("bun")
-		.arg(script)
-		.arg(upstream.as_str())
-		.arg(downstream.as_str())
-		.arg(version.alpn())
-		.arg("history")
-		.stdin(Stdio::piped())
-		.stdout(Stdio::piped())
-		.stderr(Stdio::inherit())
-		.kill_on_drop(true)
-		.spawn()?;
-	let mut relay = Relay {
-		stdin: child.stdin.take().unwrap(),
-		stdout: BufReader::new(child.stdout.take().unwrap()).lines(),
-		viewers,
-	};
-	let ready = relay.stdout.next_line().await?;
-	anyhow::ensure!(ready.as_deref() == Some("ready"), "the relay did not start: {ready:?}");
+	let mut running = Running::start(version, publisher).await?;
+	let relay = &mut running.relay;
 
 	let expect = async |subscriber: &mut moq_net::track::Subscriber, want: BTreeMap<u64, String>, what: &str| {
 		let got = received(subscriber, &want).await?;
@@ -270,11 +306,8 @@ async fn relay(version: Version) -> anyhow::Result<()> {
 	);
 
 	drop((first, below, inside));
-	drop(relay);
-	anyhow::ensure!(child.wait().await?.success(), "the relay failed on {version}");
+	running.stop().await.with_context(|| version.to_string())?;
 	drop((track, broadcast));
-	upstream_serve.abort();
-	downstream_serve.abort();
 	Ok(())
 }
 
@@ -287,4 +320,154 @@ async fn relay_fill_javascript() {
 			.unwrap()
 			.unwrap();
 	}
+}
+
+/// One reader of the range table, as `rs/moq-net/tests/range-table.json` states it.
+fn table_subscription(ask: &serde_json::Value) -> Subscription {
+	let time = |range: &serde_json::Value, key| range.get(key).and_then(serde_json::Value::as_u64);
+	let ranges = match ask.get("ranges").and_then(serde_json::Value::as_array) {
+		Some(ranges) => ranges
+			.iter()
+			.map(|range| Range {
+				start: time(range, "start"),
+				end: time(range, "end"),
+			})
+			.collect(),
+		None => vec![Range::default()],
+	};
+	let min = ask
+		.get("minAge")
+		.and_then(serde_json::Value::as_u64)
+		.map(Duration::from_millis);
+	Subscription::default()
+		.with_delay(Delay::default().with_min(min).with_max(None))
+		.with_order(moq_net::track::Order::Ascending)
+		.with_ranges(ranges)
+}
+
+/// The group starts `subscriber` hands out, until it has `want` of them, each within
+/// [`ARRIVAL`], then until it ends or goes quiet for [`QUIET`].
+async fn table_read(subscriber: &mut moq_net::track::Subscriber, want: usize) -> anyhow::Result<Vec<u64>> {
+	let mut got = Vec::new();
+	loop {
+		let wait = match got.len() < want {
+			true => ARRIVAL,
+			false => QUIET,
+		};
+		let Ok(group) = kio::clock::timeout(wait, subscriber.recv_group()).await else {
+			return Ok(got);
+		};
+		match group? {
+			Some(group) => got.push(group.start),
+			None => return Ok(got),
+		}
+	}
+}
+
+/// Run one case of the range table through the relay's copy: cold, or `warm` with the case's
+/// copy readers subscribed first, each behind a downstream session of its own.
+async fn table_case(case: &serde_json::Value, groups: &[u64], warm: bool) -> anyhow::Result<Vec<u64>> {
+	let publisher = moq_tokio::origin::spawn();
+	let broadcast = publisher.route("history", moq_net::origin::RouteOptions::hidden())?;
+	let track = broadcast
+		.broadcast()
+		.create_track(
+			"video",
+			Info::default().with_timescale(Timescale::MILLI).with_max_age(None),
+		)
+		.expect("a free name");
+	let starts: Vec<u64> = match case.get("groups").and_then(serde_json::Value::as_array) {
+		Some(starts) => starts.iter().filter_map(serde_json::Value::as_u64).collect(),
+		None => groups.to_vec(),
+	};
+	let append = case.get("append").and_then(serde_json::Value::as_bool) != Some(false);
+	for start in starts {
+		let time = Timestamp::from_millis(start)?;
+		let mut group = match append {
+			true => track.append_group(time)?,
+			false => track.create_group(moq_net::group::Info { start })?,
+		};
+		group.write_frame(time, b"x".to_vec())?;
+		group.finish()?;
+	}
+	broadcast.announce()?;
+	let version = "moq-lite-07-wip".parse().map_err(anyhow::Error::msg)?;
+	let mut running = Running::start(version, publisher).await?;
+
+	let mut readers = Vec::new();
+	if warm {
+		for ask in case
+			.get("copy")
+			.and_then(serde_json::Value::as_array)
+			.into_iter()
+			.flatten()
+		{
+			let mut reader = running.relay.subscribe(table_subscription(ask)).await?;
+			table_read(&mut reader, 0).await?;
+			readers.push(reader);
+		}
+	}
+	if case.get("evict").and_then(serde_json::Value::as_bool) == Some(true) {
+		running.relay.command("evict", "evicted").await?;
+	}
+	let want = case["deliver"].as_array().context("deliver")?.len();
+	let mut reader = running.relay.subscribe(table_subscription(&case["read"])).await?;
+	let mut got = table_read(&mut reader, want).await?;
+	got.sort_unstable();
+
+	drop((reader, readers));
+	running.stop().await?;
+	drop((track, broadcast));
+	Ok(got)
+}
+
+/// The lite-07 range table through a JavaScript relay's copy under a Rust origin, cold and warm,
+/// as `moq-net`'s `range_table` and `js/net/src/range-table.test.ts` run it within each language.
+#[tokio::test]
+#[ignore = "requires Bun; run by just test relay-fill in the interop workflow"]
+async fn relay_fill_range_table() {
+	let table: serde_json::Value =
+		serde_json::from_str(include_str!("../../../moq-net/tests/range-table.json")).expect("the range table parses");
+	let groups: Vec<u64> = table["groups"]
+		.as_array()
+		.expect("groups")
+		.iter()
+		.filter_map(serde_json::Value::as_u64)
+		.collect();
+	let mut failures = Vec::new();
+	for case in table["cases"].as_array().expect("cases") {
+		let name = case["name"].as_str().expect("a name");
+		let want: Vec<u64> = case["deliver"]
+			.as_array()
+			.expect("deliver")
+			.iter()
+			.filter_map(serde_json::Value::as_u64)
+			.collect();
+		for (mode, warm) in [("cold", false), ("warm", true)] {
+			if warm && case.get("copy").is_none() {
+				continue;
+			}
+			// The JavaScript copy's known divergences in the bun suite, and those only this
+			// relay shows.
+			let relayed = format!("relay-{mode}");
+			let known = (case
+				.get("known")
+				.and_then(serde_json::Value::as_array)
+				.into_iter()
+				.flatten())
+			.any(|known| {
+				known["mode"] == relayed || (known["mode"] == mode && known.get("lang").is_none_or(|lang| lang == "js"))
+			});
+			if known {
+				continue;
+			}
+			match kio::clock::timeout(TIMEOUT, table_case(case, &groups, warm)).await {
+				Ok(Ok(got)) if got == want => {}
+				Ok(Ok(got)) => failures.push(format!("{mode}: {name}: delivered {got:?}")),
+				Ok(Err(err)) => failures.push(format!("{mode}: {name}: {err:#}")),
+				Err(_) => failures.push(format!("{mode}: {name}: timed out")),
+			}
+		}
+	}
+	assert!(failures.is_empty(), "{failures:#?}");
 }

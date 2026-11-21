@@ -19,7 +19,7 @@ import { createMockTransportPair } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Timescale, Timestamp } from "./time.ts";
-import type { Producer, Range, Subscriber, Subscription } from "./track.ts";
+import type { Range, Subscriber, Subscription } from "./track.ts";
 import { wireOf } from "./wire.ts";
 
 type Ask = { ranges?: { start?: number; end?: number }[]; minAge?: number };
