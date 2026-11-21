@@ -1410,10 +1410,58 @@ impl Footprint {
 		}
 	}
 
+	fn is_edge(&self) -> bool {
+		self.0.load(Ordering::Relaxed) & EDGE != 0
+	}
+
 	fn demote(&self, edges: &Edges) {
 		let prior = self.0.fetch_and(!EDGE, Ordering::Relaxed);
 		if prior & EDGE != 0 {
 			edges.sub(prior & !EDGE);
+		}
+	}
+}
+
+/// The [`Footprint`]s of every copy of one group that shares its content, which bill one
+/// another's frames: a frame bills whichever copy wrote it first, and any copy may hold it.
+///
+/// So they bill the session together: while one copy is its track's cached live edge, they
+/// all do, a copy that aborted included, since its frames may still be what the live copy
+/// holds; and demoting one demotes them all, as every copy in a slot shares its standing.
+#[derive(Default)]
+pub(super) struct Siblings(Mutex<Vec<(Arc<Track>, Arc<Footprint>)>>);
+
+impl Siblings {
+	/// Add `charge`'s copy, forgetting copies nothing bills any more.
+	pub(super) fn join(&self, charge: &Charge) {
+		let Some(track) = &charge.track else {
+			return;
+		};
+		let mut siblings = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+		siblings.retain(|(_, footprint)| Arc::strong_count(footprint) > 1);
+		if !siblings
+			.iter()
+			.any(|(_, footprint)| Arc::ptr_eq(footprint, &charge.footprint))
+		{
+			siblings.push((track.clone(), charge.footprint.clone()));
+		}
+	}
+
+	/// Bill every copy to the session if any copy does: after one is promoted, joins, or
+	/// is cleared.
+	pub(super) fn sync(&self) {
+		let siblings = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+		if siblings.iter().any(|(_, footprint)| footprint.is_edge()) {
+			for (track, footprint) in siblings.iter() {
+				footprint.promote(&track.edges);
+			}
+		}
+	}
+
+	/// Stop billing every copy to the session.
+	pub(super) fn demote(&self) {
+		for (track, footprint) in self.0.lock().unwrap_or_else(PoisonError::into_inner).iter() {
+			footprint.demote(&track.edges);
 		}
 	}
 }
@@ -1589,6 +1637,14 @@ impl Charge {
 			track.pool.access_insert(self.accessed());
 			self.counted = true;
 		}
+		if let Some(track) = &self.track {
+			self.footprint.demote(&track.edges);
+		}
+	}
+
+	/// Stop billing the session, as the group leaves the cache, without entering the
+	/// evictable population it is no longer part of.
+	pub(super) fn leave_edge(&mut self) {
 		if let Some(track) = &self.track {
 			self.footprint.demote(&track.edges);
 		}

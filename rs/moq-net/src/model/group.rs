@@ -1507,11 +1507,16 @@ impl GroupState {
 		self.front = VecDeque::new();
 		self.evict_log(self.log.end());
 		self.partial = None;
-		if let Some(content) = self.content.take() {
+		let content = self.content.take();
+		if let Some(content) = &content {
 			content.detach(self.outcome.error().cloned().unwrap_or(Error::Dropped));
 		}
 		self.cache = 0;
 		self.charge.clear();
+		// Frames this copy wrote first may be what a live sibling still holds.
+		if let Some(content) = content {
+			content.siblings.sync();
+		}
 		// The header state and terminal object outlive the frames.
 		if let Some(relay) = &mut self.relay {
 			relay.bytes = size_of::<Relay>() as u64 + relay.end_object.as_ref().map_or(0, |fields| fields.heap());
@@ -1537,6 +1542,8 @@ impl Drop for GroupState {
 	fn drop(&mut self) {
 		if let Some(content) = self.content.take() {
 			content.detach(Error::Dropped);
+			self.charge.clear();
+			content.siblings.sync();
 		}
 	}
 }
@@ -2785,10 +2792,11 @@ impl Handle {
 			return;
 		};
 		state.shed_all();
+		// Its payload and its header's fields both bill the session.
 		if state
 			.partial
 			.as_ref()
-			.is_some_and(|partial| !partial.scratch && partial.charged > 0)
+			.is_some_and(|partial| !partial.scratch && (partial.charged > 0 || partial.fields.is_some()))
 		{
 			self.commit_abort(state, Error::Evicted);
 		}
@@ -3267,6 +3275,20 @@ impl Handle {
 	pub(super) fn cache_demote(&self) {
 		if let Ok(mut state) = self.state.write() {
 			state.charge.demote();
+			if let Some(content) = &state.content {
+				content.siblings.demote();
+			}
+		}
+	}
+
+	/// Stop billing the session for this copy as it leaves the cache, though it lives on for
+	/// its holders, unless a sibling copy sharing its frames is still the live edge.
+	pub(super) fn cache_leave_edge(&self) {
+		if let Ok(mut state) = self.state.write() {
+			state.charge.leave_edge();
+			if let Some(content) = &state.content {
+				content.siblings.sync();
+			}
 		}
 	}
 
@@ -3275,6 +3297,9 @@ impl Handle {
 	pub(super) fn cache_promote(&self) {
 		if let Ok(mut state) = self.state.write() {
 			state.charge.promote();
+			if let Some(content) = &state.content {
+				content.siblings.sync();
+			}
 		}
 	}
 

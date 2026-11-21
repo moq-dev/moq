@@ -49,7 +49,7 @@ pub struct Config {
 	/// the rest of the system needs it. It is a target, not a guarantee: writes
 	/// between checks can overshoot it, and the newest group of every live track
 	/// is kept past it, bounded per session by `limits.*.live_edges` instead.
-	/// `capacity` also caps the absolute size.
+	/// `capacity` caps that target.
 	/// "0" removes the governor, leaving the cache unbounded unless `capacity`
 	/// is set: an authenticated publisher can then grow the relay without limit.
 	#[usage(long = "cache-headroom", env = "MOQ_CACHE_HEADROOM", setting = "cache.headroom")]

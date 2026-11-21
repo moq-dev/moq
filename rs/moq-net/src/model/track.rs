@@ -1770,6 +1770,10 @@ impl TrackState {
 	/// Take group `key` out of the cache, raising the eviction watermark to its start.
 	fn uncache(&mut self, key: u64) -> Option<Slot> {
 		let slot = self.remove_slot(key)?;
+		// Its copies may live on for their holders, but no longer as the live edge.
+		for group in slot.copies() {
+			group.cache_leave_edge();
+		}
 		if let Some(start) = slot.bound()
 			&& self.evicted.is_none_or(|(evicted, _)| key > evicted)
 		{
@@ -4400,6 +4404,7 @@ impl TrackState {
 					group.handle().carry_drop();
 				}
 				if let Some(head) = slot.head.replace(Box::new(group.handle())) {
+					head.cache_leave_edge();
 					self.detach(&head);
 				}
 				// A head holding frame 0 gives a group received past it a start.
@@ -25755,6 +25760,92 @@ mod test {
 		let _ = partial.write(bytes::Bytes::from(vec![0u8; 10_000]));
 		assert!(partial.finish().is_err(), "the copy holding the frame survived");
 		assert!(broadcast.edges.used() <= 15_000, "{:?}", broadcast.edges);
+	}
+
+	/// A frame opened with header fields but no payload yet bills those fields to the
+	/// session, so a shed edge holding one is aborted too.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_shed_live_edge_opening_a_frame_is_aborted() {
+		let pool = cache::Pool::unbounded();
+		let broadcast = session_broadcast(&pool, Some(1 << 30));
+		let producer = Producer::new(broadcast.clone(), "test", Info::timed());
+		let group = producer.append_next().unwrap();
+		let mut frame = group
+			.create_object(frame::Header {
+				info: frame::Info {
+					size: 10,
+					timestamp: Timestamp::ZERO,
+				},
+				fields: Some(Arc::new(super::super::object::Fields {
+					id: 0,
+					properties: Default::default(),
+				})),
+				inflated: None,
+			})
+			.unwrap();
+		assert!(broadcast.edges.used() > 0);
+
+		let moves = producer.state.read().cache.moves();
+		producer.state.write().ok().expect("open").shed_edge_all(moves);
+		assert_eq!(broadcast.edges.used(), 0, "{:?}", broadcast.edges);
+		let _ = frame.write(&[0u8; 10][..]);
+		assert!(frame.finish().is_err(), "the copy holding the frame survived");
+	}
+
+	/// A live edge leaving the cache stops billing its session, though a writer still holds it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_uncached_live_edge_stops_billing_the_session() {
+		let pool = cache::Pool::unbounded();
+		let broadcast = session_broadcast(&pool, Some(1 << 30));
+		let producer = Producer::new(broadcast.clone(), "test", Info::timed());
+		let mut group = producer.append_next().unwrap();
+		group
+			.write_frame(group.key_time(), bytes::Bytes::from(vec![0u8; 10_000]))
+			.unwrap();
+		assert!(broadcast.edges.used() >= 10_000);
+
+		let key = 0;
+		producer.state.write().ok().expect("open").uncache(key).expect("cached");
+		assert_eq!(broadcast.edges.used(), 0, "{:?}", broadcast.edges);
+		drop(group);
+	}
+
+	/// Copies of one group share its frames, each billed to whichever copy wrote it first:
+	/// that copy aborting leaves the frames billed while the live edge still holds them.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_live_edge_keeps_billing_frames_an_aborted_sibling_wrote() {
+		const FRAME: usize = 10_000;
+		let pool = cache::Pool::unbounded();
+		let broadcast = session_broadcast(&pool, Some(1 << 30));
+		let producer = Producer::new(broadcast.clone(), "test", Info::timed());
+		producer.received();
+		elapse(&producer, Duration::ZERO);
+		let at = |millis| Timestamp::from_millis(millis).unwrap();
+		let payload = |byte: u8| bytes::Bytes::from(vec![byte; FRAME]);
+
+		// Received from frame 1, so a fetch of the group's head can sit beside it.
+		let Ok(Received::Group(mut first)) = producer.create_group_at(group::Info { start: 3 }, 1, 0..0) else {
+			panic!("the first copy opens");
+		};
+		first.write_frame(at(301), payload(b'b')).unwrap();
+		let mut head = producer
+			.state
+			.write()
+			.ok()
+			.unwrap()
+			.insert_group_request(3, group::Bounds::default(), None)
+			.unwrap()
+			.expect("a fresh group");
+		for (millis, byte) in [(300, b'a'), (301, b'b'), (302, b'c')] {
+			head.write_frame(at(millis), payload(byte)).unwrap();
+		}
+		first.abort(Error::Cancel).unwrap();
+		let used = broadcast.edges.used();
+		assert!(used >= 3 * FRAME as u64, "the live edge holds 3 frames, billing {used}");
+		head.finish().unwrap();
 	}
 
 	/// A session with one live edge past its budget sheds that edge's older frames, keeping
