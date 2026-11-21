@@ -4017,14 +4017,20 @@ export class Subscriber {
 		const anchors = timeAnchors(producer);
 		const age = min.asMillis();
 		let start = anchors.starts.get(0n)?.start;
+		let beyond: bigint | undefined;
 		for (const [asked, at, past] of anchors.joins) {
 			if (asked < age) continue;
 			// A join reaching no further back than one answered empty starts past that one's end,
-			// which proves a bounded reader's range empty and places no other.
-			if (past) return { past: at };
-			if (start === undefined || at < start) start = at;
+			// which proves a bounded reader's range empty and places no other. Ranges with the same
+			// Min Age and different ends answer apart, so the furthest such proof counts.
+			if (past) {
+				if (beyond === undefined || at > beyond) beyond = at;
+			} else if (start === undefined || at < start) {
+				start = at;
+			}
 		}
-		if (start === undefined) return undefined;
+		// Only a group places a join, so any answer with one wins over the empty ones.
+		if (start === undefined) return beyond === undefined ? undefined : { past: beyond };
 		return target === undefined || target < start ? { group: start } : { time: target };
 	}
 

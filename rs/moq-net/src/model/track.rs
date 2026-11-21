@@ -1513,11 +1513,12 @@ impl TrackState {
 		if self.anchors != Anchors::Wire {
 			return None;
 		}
-		self.join_starts
-			.range(min..)
-			.next()
-			.map(|(_, start)| *start)
-			.or_else(|| self.time_starts.get(&0).and_then(TimeStart::start).map(JoinStart::At))
+		let oldest = || self.time_starts.get(&0).and_then(TimeStart::start).map(JoinStart::At);
+		match self.join_starts.range(min..).next().map(|(_, start)| *start) {
+			// A group the oldest range's feed starts at places a join an empty answer can't.
+			Some(JoinStart::Past(past)) => oldest().or(Some(JoinStart::Past(past))),
+			found => found.or_else(oldest),
+		}
 	}
 
 	/// Whether the range asked from `time`, or the one upstream folded it into, had no group to
@@ -5228,9 +5229,27 @@ impl Producer {
 	/// Record where the upstream publisher started each of this lite-07 copy's live wire
 	/// ranges with no start and a stated Min Age, as `(min, start)` pairs, replacing the last
 	/// set. A reader's join reaching no further back than `min` starts no lower than `start`.
+	///
+	/// Ranges with the same Min Age and different ends answer apart, so one Min Age may have
+	/// both a group and an empty answer. A group wins, as only it places a reader's join, and
+	/// the earliest one, whose feed delivers every group from there. Otherwise the furthest
+	/// empty answer wins, as each proves the join starts past its range's end.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn join_starts(&self, starts: impl IntoIterator<Item = (Duration, JoinStart)>) {
-		let starts: BTreeMap<Duration, JoinStart> = starts.into_iter().collect();
+		let mut merged = BTreeMap::<Duration, JoinStart>::new();
+		for (min, start) in starts {
+			merged
+				.entry(min)
+				.and_modify(|kept| {
+					*kept = match (*kept, start) {
+						(JoinStart::At(a), JoinStart::At(b)) => JoinStart::At(a.min(b)),
+						(JoinStart::Past(a), JoinStart::Past(b)) => JoinStart::Past(a.max(b)),
+						(at @ JoinStart::At(_), JoinStart::Past(_)) | (JoinStart::Past(_), at @ JoinStart::At(_)) => at,
+					}
+				})
+				.or_insert(start);
+		}
+		let starts = merged;
 		if let Ok(mut state) = self.modify()
 			&& state.join_starts != starts
 		{
@@ -17377,6 +17396,35 @@ mod test {
 		let mut nearer = producer.subscribe(join(1));
 		assert_eq!(placed(&mut nearer), Some(7));
 		assert_eq!(placed(&mut live), Some(9), "an earlier reader stays where it started");
+	}
+
+	/// Two bounded joins with the same Min Age answer apart, one with a group and one empty.
+	/// The group places a third reader's join, which the empty answer alone could not, whatever
+	/// order the answers arrive in.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_received_copy_prefers_a_join_answered_with_a_group_over_one_answered_empty() {
+		let min = Duration::from_millis(200);
+		for answers in [
+			[(min, JoinStart::At(1000)), (min, JoinStart::Past(501))],
+			[(min, JoinStart::Past(501)), (min, JoinStart::At(1000))],
+		] {
+			let producer = track_producer("test", Info::timed());
+			producer.received();
+			producer.anchored();
+			producer.join_starts(answers);
+			write_group(&producer, 1000);
+
+			let join = Subscription::default()
+				.with_delay(Delay::default().with_min(min).with_max(None))
+				.with_range(..=2000);
+			let mut reader = producer.subscribe(join);
+			assert_eq!(
+				reader.resolved_range(0).map(|resolved| resolved.start),
+				Some(1000),
+				"{answers:?}"
+			);
+		}
 	}
 
 	/// A received copy places a live join inside a group it holds whose frames reach past the

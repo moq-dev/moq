@@ -5631,6 +5631,31 @@ test("finishing returns handles that write nothing new but fill a late group", a
 	finished.close();
 });
 
+// Two bounded joins with the same Min Age answer apart, one with a group and one empty. The group
+// places a third reader's join, which the empty answer alone could not, whatever order the answers
+// arrive in. Mirrors the Rust `a_received_copy_prefers_a_join_answered_with_a_group_over_one_answered_empty`.
+test("track: a received copy prefers a join answered with a group over one answered empty", () => {
+	const answers: [number, bigint, boolean][] = [
+		[200, 1000n, false],
+		[200, 501n, true],
+	];
+	for (const order of [answers, [...answers].reverse()]) {
+		const producer = receivedTrack({ timescale: Timescale.MILLI });
+		hooks.joinStarts(producer, order);
+		putGroup(producer, 1000n, 1000);
+		const reader = producer.subscribe({
+			delay: { min: Duration.millis(200), max: null },
+			ranges: [{ end: 2000n }],
+		});
+		try {
+			expect(reader.tryRecvGroup()?.start).toBe(1000n);
+		} finally {
+			reader.close();
+			producer.close();
+		}
+	}
+});
+
 // Mirrors moq-net's `unplaced_holds_only_what_containing_cant_place`: a run holds only times
 // `containing` can't place, but those a reported start places directly, and leaves out only
 // times below the newest start reported past an earlier range's time, or those the feed's
