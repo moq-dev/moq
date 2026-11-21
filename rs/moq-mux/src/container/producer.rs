@@ -804,6 +804,13 @@ where
 		if let Some(group) = self.group.as_mut() {
 			self.container.finish_group(group, tail_end)?;
 		}
+		// A group never ends below a frame of its own, here the newest written or the endpoint
+		// marker, so one whose bound falls below either closes without an end.
+		let floor = match (self.newest, tail_end) {
+			(Some(newest), Some(marker)) => Some(super::later(newest, marker)),
+			(newest, marker) => newest.or(marker),
+		};
+		let bound = bound.filter(|bound| floor.is_none_or(|floor| !timestamp_lt(*bound, floor)));
 		if let Some(group) = self.group.take() {
 			match bound.and_then(|bound| crate::start::end(&self.inner, group.start, bound)) {
 				Some(end) => group.finish_at(end)?,

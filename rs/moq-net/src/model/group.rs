@@ -2287,9 +2287,11 @@ impl Producer {
 	///
 	/// A finished group's own end bounds how long it stays fresh, so the last group of a
 	/// paused or finished track ages out without a successor (see
-	/// [`track::Info::max_age`]). An `end` at or before the group's start is
-	/// [`Error::TimestampMismatch`], which aborts the group. Fails with the abort error if the
-	/// group was already aborted.
+	/// [`track::Info::max_age`]). Its span, from its start to `end`, holds no other group's
+	/// start, so no successor may start before `end`. An `end` below the group's start or
+	/// below any of its frames' timestamps is [`Error::TimestampMismatch`], which aborts the
+	/// group; one equal to either is a group that presents no further. Fails with the abort
+	/// error if the group was already aborted.
 	pub fn finish_at(self, end: u64) -> Result<Finished> {
 		if let Err(err) = self.check_end(end) {
 			let _ = self.handle.close_aborted(err.clone());
@@ -2298,10 +2300,14 @@ impl Producer {
 		self.end(Some(end))
 	}
 
-	/// Whether [`Self::finish_at`] takes `end`: [`Error::TimestampMismatch`] at or before the
-	/// group's start.
+	/// Whether [`Self::finish_at`] takes `end`: [`Error::TimestampMismatch`] below the
+	/// group's start or below its highest frame timestamp, in its track's timescale.
 	pub(crate) fn check_end(&self, end: u64) -> Result<()> {
-		match end <= self.start {
+		let highest = match self.handle.state.read().timeline {
+			Timeline::Timed { latest, .. } => latest.value(),
+			Timeline::Empty | Timeline::Untimed => 0,
+		};
+		match end < self.start.max(highest) {
 			true => Err(Error::TimestampMismatch),
 			false => Ok(()),
 		}

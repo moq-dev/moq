@@ -48,8 +48,7 @@ removal, a rename, or a wire, catalog, or format change that is free until
 - **Catalog, drafts, and formats.** hang-04 (done: the `sync` section, a version per entry, no video `warmup`, the TS passthrough under
   `mpegts`, one strict rule);
   declared ends, back from m3, which became a whole marker on 2026-11-19
-  and [an end again](/quest/m2/time-addressing/group-times.md) on
-  2026-11-20.
+  and an end again on 2026-11-20 ([moq-dev/moq#9263](https://github.com/moq-dev/moq/pull/9263)).
 - **Native media and gateways.** [Upstream str0m](https://github.com/moq-dev/moq/pull/8963), which reverses the
   2026-10-30 vendoring.
 - **Bindings.** The C API as `libmoq` (done), reversing 2026-10-25.
@@ -69,8 +68,9 @@ the same whichever relay or reader serves it:
 [no relative anchors](/quest/m2/time-addressing/no-relative-anchors.md),
 with Min Age placing a live join;
 [scale-less tracks aging by arrival](/quest/m2/time-addressing/scale-less-arrival.md);
-[Group Streams carrying each time once](/quest/m2/time-addressing/group-times.md),
-with GROUP_END's end back as a delta; and
+Group Streams carrying each time once ([moq-dev/moq#9263](https://github.com/moq-dev/moq/pull/9263)),
+with GROUP_END's end back as a delta, and
+[time anchors landing by group spans](/quest/m2/time-addressing/span-time-anchors.md); and
 [the hang-04 text](/quest/m2/hang-04-text.md) on entry versions and HLS
 overruns. [moq-dev/moq#9198](https://github.com/moq-dev/moq/pull/9198) and
 [moq-dev/moq#9221](https://github.com/moq-dev/moq/pull/9221) closed, since

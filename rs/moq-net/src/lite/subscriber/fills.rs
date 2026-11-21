@@ -255,9 +255,9 @@ impl RangeFills {
 		read: bool,
 		waiter: &kio::Waiter,
 	) -> Result<bool, Error> {
-		// What the copy records skipped is never produced, such as the starts a lite-07 GROUP's
-		// Previous Start passes over, which no SUBSCRIBE_SKIP names: a fill owing one is
-		// answered as a SUBSCRIBE_SKIP answers it, rather than asked or recovered again.
+		// What the copy records skipped is never produced, such as the starts inside a whole
+		// group's span, which its GROUP_END names rather than a SUBSCRIBE_SKIP: a fill owing one
+		// is answered as a SUBSCRIBE_SKIP answers it, rather than asked or recovered again.
 		let mut skipped = Vec::new();
 		for fill in &self.held {
 			if let Some(run) = fill.next_run() {

@@ -9,7 +9,7 @@ still reorder (B-frames, open-GOP leading pictures). Sources that overlap
 today, such as a TS content join, publish without ending the broadcast and
 without rewriting a timestamp. The hang draft states the rule, and the
 producers and every importer keep it, in Rust and JS.
-[Group times](/quest/m2/time-addressing/group-times.md) puts it in the moq-lite
+Group times ([moq-dev/moq#9263](https://github.com/moq-dev/moq/pull/9263)) put it in the moq-lite
 draft, as spans from a group's lowest frame to its End that never overlap.
 
 ## Plan
@@ -78,6 +78,28 @@ them too.
 The hang draft's "a group MAY start at the same timestamp as the previous
 group" goes too.
 
+Group times ([moq-dev/moq#9263](https://github.com/moq-dev/moq/pull/9263))
+left two overlaps for this quest:
+
+- `group::Producer::finish_at` refuses an End below a group's highest frame,
+  so moq-mux's `close_group` (`rs/moq-mux/src/container/producer.rs`) and
+  hang's legacy `#close` (`js/hang/src/container/legacy.ts`) now close
+  without an End when theirs would fall below the newest frame or the end
+  marker. A discontinuity hits it: the marker group starts one unit below the
+  live edge, and the group closing ahead of it ended whole at the marker.
+  Delete both guards once the producers keep the rule.
+- A discontinuity after a `cut(end)` puts its marker group one unit below
+  `end`, inside the span of the group that `cut` just ended whole there
+  (moq-mux `Producer::discontinuity`, hang's legacy `discontinuity`). A
+  lite-07 copy records that span skipped once its GROUP_END arrives, so the
+  marker is refused there if it arrives second.
+  `container::ts::recovery_test::a_lost_discontinuity_marker_still_breaks_the_clock`
+  exercises it locally.
+- A keyframe below the open group's newest frame cuts it at an estimated
+  End past the keyframe (moq-mux `Producer::prepare`), so the next group
+  starts inside that span, with the same refusal on a lite-07 copy. Continuing
+  the group, as decided above, fixes it.
+
 Tests: the producer test above becomes one where the overlapping keyframe
 continues the group, and a TS import across a content join, including leading
 pictures, publishes groups whose frames all precede every frame of the next
@@ -87,6 +109,6 @@ Public API: none expected. Wire: none; the hang draft's group rule tightens.
 
 ## Related
 
-- [Group Streams carry each time once](/quest/m2/time-addressing/group-times.md) - states the rule in the moq-lite draft, with GROUP_END's End closing each span
+- [A time anchor lands by group spans](/quest/m2/time-addressing/span-time-anchors.md) - resolves a time against the spans this rule keeps apart
 - [An incomplete group expires by the lowest timestamp of a higher group](/quest/m3/expire-by-higher-min.md) - the expiry bound this rule makes safe
 - [An fMP4 group start never rewinds the decode timeline](/quest/m3/fmp4-group-start-tfdt.md) - a keyframe repeating its predecessor's timestamp would now continue the group; check which of its cases remain

@@ -344,9 +344,11 @@ A group ends one of three ways: finished at the time it ends, so it is whole;
 closed, so every frame written arrives but it may have held more, as when a
 relay stops sending a group that went stale; or aborted with an error. A
 finished group's end also bounds how long it stays fresh, so the last group of
-a paused track still ages out. Over the work-in-progress moq-lite 07 each group
-also names the start of the group before it, so a reader sees a gap at once;
-older versions and moq-transport carry neither the end nor the previous start.
+a paused track still ages out. Groups never overlap: a group runs from its
+lowest timestamp to its end. Over the work-in-progress moq-lite 07 the time
+between one group's end and the next group's start belongs to no group and is
+reported as skipped, so a reader sees a gap at once; older versions and
+moq-transport carry no end.
 
 Order only decides what goes first, never what is skipped, so catching up oldest
 first needs a max delay that covers the backlog. When a relay serves subscribers of

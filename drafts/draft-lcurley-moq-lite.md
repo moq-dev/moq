@@ -176,7 +176,9 @@ A Group is an ordered stream of Frames within a Track.
 Each group consists of an append-only list of Frames.
 A Group is addressed by its start, a timestamp in the Track's `Timescale`: its frame 0's timestamp, or a bare number on a Track with a `Timescale` of 0.
 No two Groups of a Track share a start, so starts order Groups without a counter, and moq-lite carries no Group sequence number.
-A gap between two starts says nothing on its own: the [GROUP](#group-message) message names the start of the Group before it when the publisher knows it, and [SUBSCRIBE_SKIP](#subscribe-skip) names the starts it declared it will never produce.
+A Group's span runs from its lowest frame timestamp to its End (see [GROUP_END](#group-end)).
+Spans never overlap: every frame of a lower Group presents before every frame of a higher one, though frames within a Group may reorder, and no Group starts after a whole Group's start and before its End.
+A span between one Group's End and the next Group's start is a discontinuity that no Group contains, which the publisher names with [SUBSCRIBE_SKIP](#subscribe-skip).
 A receiver addresses a Group by the start it carries whatever its frames hold, so a publisher that numbers its Groups 0, 1, 2 is still served, with time Anchors compared against those numbers.
 A publisher never creates a Group with start 2^64-1, so every span of starts ends within 64 bits; a receiver treats a Group Stream naming it as a malformed Track.
 
@@ -201,10 +203,10 @@ The contents are opaque to the moq-lite layer.
 Frames within a Group are numbered from 0 in the order they were produced.
 This index is not transmitted per frame; it is implied by position within the Group, anchored by the [GROUP](#group-message) message's `Frame Start`, or a Fetch Stream's FETCH `Frame Start`.
 
-Each frame carries a presentation timestamp expressed in the Track's `Timescale` (see [TRACK_INFO](#track-info)), used by the moq-lite layer for [expiration](#expiration) decisions.
-A Track with a `Timescale` of 0 is scale-less: its timestamps and Group starts are bare numbers in no known unit, and each frame's timestamp is its Group's start.
+Each frame has a presentation timestamp expressed in the Track's `Timescale` (see [TRACK_INFO](#track-info)), used by the moq-lite layer for [expiration](#expiration) decisions.
+A Track with a `Timescale` of 0 is scale-less: its Group starts are bare numbers in no known unit, and its frames carry no timestamp, each taking its Group's start.
 A timestamp MUST be less than 2^61, so every version can carry it; a receiver treats a larger one as a malformed Track.
-Unless a negotiated extension specifies otherwise, a publisher MUST NOT start a Group's frame 0 at or before that of any Group with a lower start it publishes, and MUST NOT give a frame of a scale-less Track any timestamp but its Group's start.
+Unless a negotiated extension specifies otherwise, a publisher MUST NOT start a Group's frame 0 at or before that of any Group with a lower start it publishes.
 A receiver MAY check a received Group against this rule, refusing a violating Group's stream (STOP_SENDING) with TIMESTAMP_MISMATCH.
 A relay serves a Track's timestamps on as it received them, including ones it did not check, unless a negotiated extension specifies otherwise.
 
@@ -353,7 +355,7 @@ Sent when resetting a stream (RESET_STREAM), or when refusing to receive one (ST
 | ------- | ------------- | ----------- |
 |  0x38  | FRAME_TOO_LARGE | A frame declared a payload larger than the receiver accepts. |
 | ------- | ------------- | ----------- |
-|  0x39  | TIMESTAMP_MISMATCH | A frame's timestamp does not fit its track: it starts a Group at or before one with a lower start, or differs from its Group's start on a scale-less track. |
+|  0x39  | TIMESTAMP_MISMATCH | A frame's timestamp does not fit its track: it starts a Group at or before one with a lower start. |
 | ------- | ------------- | ----------- |
 |  0x3B  | UNAUTHORIZED | The endpoint does not authorize this request, or no longer does, such as when the [scope](#auth-stream) does not cover it. The session stays up. |
 | ------- | ------------- | ----------- |
@@ -617,7 +619,7 @@ The subscriber needs the track's TRACK_INFO (notably its timescale) to interpret
 
 The publisher sends SUBSCRIBE_OK once the start is resolved, and SUBSCRIBE_FINISH as soon as the Track's end is known (see [SUBSCRIBE_OK](#subscribe-ok) and [SUBSCRIBE_FINISH](#subscribe-finish)).
 Neither closes the stream: the publisher keeps reading SUBSCRIBE_UPDATE messages, so an update can still widen the Ranges, including into an ended Track's history, and the publisher serves or drops what it newly covers.
-The subscriber judges a Range complete from what it observed: the Groups it received and the starts their `Previous Start` passed over, the SUBSCRIBE_SKIP and SUBSCRIBE_DROP messages, the Range Starts in SUBSCRIBE_OK and SUBSCRIBE_STARTED, and SUBSCRIBE_FINISH.
+The subscriber judges a Range complete from what it observed: the Groups it received and the starts their GROUP_END accounts for, the SUBSCRIBE_SKIP and SUBSCRIBE_DROP messages, the Range Starts in SUBSCRIBE_OK and SUBSCRIBE_STARTED, and SUBSCRIBE_FINISH.
 Drops and Groups name starts, so the subscriber judges them against its latest Ranges, and an update still in flight changes nothing it has counted.
 The publisher never closes its side first: a subscription whose every Range has an `End` other than None and whose every Group has been delivered, skipped, or dropped stays open for an update to widen it.
 
@@ -626,7 +628,7 @@ A publisher never sends a Group twice on one subscription, so a Group the subscr
 That includes a Group dropped with OLD that the subscriber still wants, such as a relay reader whose `Subscriber Max Age` is wider than the one the drop was judged under: no SUBSCRIBE_UPDATE reopens a drop.
 
 The subscriber closes its side (FIN) once it wants nothing more from the subscription, and the publisher then closes its side (FIN), cancelling any Group Stream still open.
-After SUBSCRIBE_FINISH, the subscriber SHOULD close its side once its tail accounting has settled: every received Group Stream has been read to its FIN, reset, or dropped, and every start in range has arrived, been passed over by a [GROUP](#group-message)'s `Previous Start`, been named by SUBSCRIBE_SKIP or SUBSCRIBE_DROP, or exhausted the subscriber's grace period.
+After SUBSCRIBE_FINISH, the subscriber SHOULD close its side once its tail accounting has settled: every received Group Stream has been read to its FIN, reset, or dropped, and every start in range has arrived, been accounted for by a [GROUP_END](#group-end), been named by SUBSCRIBE_SKIP or SUBSCRIBE_DROP, or exhausted the subscriber's grace period.
 A publisher closing its session gracefully MUST wait for the subscriber's FIN or reset on every Subscribe Stream before closing the connection; a transport acknowledgement alone does not confirm the subscriber read the tail.
 Either endpoint MAY reset the stream at any time.
 
@@ -1937,13 +1939,14 @@ Every drop is final on its subscription: no SUBSCRIBE_UPDATE reopens it, and a s
 An OLD drop was judged against the `Subscriber Max Age` in effect when the publisher gave the group up, which the drop does not carry.
 A relay that received one settles with it only a reader whose own budget is no wider than the subscription's and whose Ranges include every group the relay's own Ranges name above the dropped start, since the verdict on a group was judged against the groups above it; it asks again for a reader the drop does not settle.
 
-A later [SUBSCRIBE_SKIP](#subscribe-skip) or [GROUP](#group-message) `Previous Start` passing over the same starts overrides a drop, whatever its Error Code: the subscriber records them as skipped from then on, and a relay forwards the skip even over a drop it already forwarded.
+A later [SUBSCRIBE_SKIP](#subscribe-skip) of the same starts overrides a drop, whatever its Error Code: the subscriber records them as skipped from then on, and a relay forwards the skip even over a drop it already forwarded.
 A subscriber that already ended readers on the drop does not deliver anything again: those readers stay ended.
 A drop that follows a skip of the same starts changes nothing.
 
-For every start in the subscription's range, the publisher MUST send a Group Stream, pass over it with a Group Stream's `Previous Start`, or name it in SUBSCRIBE_SKIP or SUBSCRIBE_DROP.
+For every start in the subscription's range, the publisher MUST send a Group Stream, account for it with a [GROUP_END](#group-end), or name it in SUBSCRIBE_SKIP or SUBSCRIBE_DROP.
 This includes streams reset before their headers were delivered, and streams the subscriber stopped (STOP_SENDING), which it may have discarded unread; such a drop carries the STOP_SENDING's Error Code.
-A publisher that names a Group in a drop after opening its stream also names, in a SUBSCRIBE_SKIP sent before the drop, the skipped starts that stream's `Previous Start` passed over, since the GROUP may never arrive.
+A GROUP_END accounts for the starts strictly between its Group Start and End.
+A drop of a Group the publisher holds whole names its span, with a `Group End` of its End or its start plus one, whichever is higher, since the GROUP_END may never arrive.
 A drop naming a stopped duplicate of a Group that another Group Stream already completed changes nothing for that Group: its readers keep it whole.
 A reliably delivered reset retaining the Group Stream header accounts for that group instead, unless it answers a STOP_SENDING.
 The publisher SHOULD name a start as soon as it gives it up, without waiting for SUBSCRIBE_FINISH.
@@ -1972,8 +1975,8 @@ A skip never overrides a Group that arrived, since that Group was produced; a su
 
 A gap between starts says nothing on its own: a publisher may create Groups out of order, or create again a start whose Group it aborted, so it never skips a start merely because a higher Group exists or the Track ended without it.
 Only the application producing the Track knows a start will never hold a Group, for example when it moves on to the next Group and so declares that it will not go back to fill the starts below.
-A publisher SHOULD send the skip as soon as it declares it, except for the skipped starts directly below a Group whose stream it opens on the subscription, which that stream's [GROUP](#group-message) `Previous Start` passes over instead.
-A relay forwards a skip it received, or one a `Previous Start` declared, and never skips a start on its own: one it never received is named in SUBSCRIBE_DROP (see [SUBSCRIBE_DROP](#subscribe-drop)).
+A publisher SHOULD send the skip as soon as it declares it.
+A relay forwards a skip it received and never skips a start on its own: one it never received is named in SUBSCRIBE_DROP (see [SUBSCRIBE_DROP](#subscribe-drop)).
 
 ## FETCH
 FETCH is sent by a subscriber to request a single group from a track.
@@ -2177,7 +2180,6 @@ GROUP Message {
   Message Length (i)
   Subscribe ID (i)
   Group Start (i)
-  Previous Start (i)
   Frame Start (i)
 }
 ~~~
@@ -2190,12 +2192,6 @@ This ID is used to distinguish between multiple subscriptions for the same track
 The start of the group (see [Group](#group)).
 A subscriber MUST handle gaps, potentially caused by congestion.
 
-**Previous Start**:
-The start of the Group before this one on the Track, plus one; `0` means the publisher does not know it, such as for the first Group after a restart or a Group created out of order.
-No Group has a start between the two, so the subscriber accounts for the starts strictly between them as a [SUBSCRIBE_SKIP](#subscribe-skip) would, and a cache or reader sees a hole before this Group without a round trip.
-A publisher knows it when the starts below this Group were declared skipped down to a Group, or a Group starts just below it.
-A value at or above `Group Start` plus one is a malformed Track.
-
 **Frame Start**:
 The index of the first FRAME message on this stream within the group (see [Positions](#positions)).
 0 means the stream carries the group from its beginning; a publisher sends a higher value only for a Range starting at that Position.
@@ -2207,7 +2203,7 @@ The FRAME message is a payload within a group.
 ~~~
 FRAME Message {
   Payload Length (i)
-  Timestamp Delta (i)
+  [Timestamp Delta (i)]
   [Inflated Size (i)]
   Payload (b)
 }
@@ -2218,14 +2214,15 @@ The size of the payload on the wire, plus one.
 A `Payload Length` of 0 is a [GROUP_END](#group-end) instead.
 
 **Timestamp Delta**:
-A signed delta from the previous frame's timestamp, in the Track's `Timescale`, or in bare units on a scale-less Track.
+A signed delta from the previous FRAME's timestamp on this stream, in the Track's `Timescale`.
+Absent on a scale-less Track.
+The first FRAME on a stream counts from the Group Start, the GROUP's on a Group Stream and the FETCH's on a Fetch Stream, so frame 0's delta is 0.
 Encoded as a zigzag-mapped variable-length integer:
 
 - Encode: `unsigned = (signed << 1) ^ (signed >> 63)` (arithmetic right shift).
 - Decode: `signed = (unsigned >> 1) ^ -(unsigned & 1)`.
 
 Zigzag interleaves non-negative and negative values so small magnitudes of either sign fit in a 1-byte varint.
-The first frame after each GROUP message is delta-encoded from `0`, so its `Timestamp Delta` is the zigzag encoding of the absolute timestamp.
 
 **Inflated Size**:
 The size of the payload once inflated.
@@ -2242,13 +2239,13 @@ It shares FRAME's leading field, reserving the `Payload Length` value 0 that a F
 ~~~
 GROUP_END Message {
   Payload Length (i) = 0
-  End (i)
+  End Delta (i)
 }
 ~~~
 
-**End**:
-The Group's exclusive end: the timestamp where it stops presenting, in the Track's `Timescale`, or a bare number on a scale-less Track.
-It is greater than every frame timestamp in the Group and no greater than the next Group's start; a receiver treats an `End` at or below the Group's start as a malformed Track.
+**End Delta**:
+The Group's exclusive End, the timestamp where it stops presenting, as a non-negative delta from the highest frame timestamp carried on this stream, or from the Group Start when the stream carries no FRAME or the Track is scale-less.
+End is never below any frame timestamp of the Group, and no greater than the next Group's start.
 
 A Group that ends with a GROUP_END is whole: every frame it will ever hold has been sent.
 The publisher FINs the stream right after it, and a receiver treats any byte that follows as a malformed Track.
@@ -2331,7 +2328,7 @@ A stream that FINs without a GROUP_END carries a closed Group, which may have he
 - Made TRACK_INFO Publisher Max Age optional, encoded as milliseconds plus one with zero meaning no limit.
 - Added TRACK_INFO `Refresh` and `Refresh Interval`, and SUBSCRIBE_UPDATE `Wanted Start`, carrying refresh requests through relays: a live-edge join judged by the byte ratio, or a reader's explicit request, either one waiting out the interval.
 - Added `Compression` to TRACK_INFO: none (0x0) or DEFLATE (0x1), whose Groups are DEFLATE streams per draft-lcurley-moq-flate. FRAME carries an `Inflated Size` when it is not none.
-- A `Timescale` of 0 in TRACK_INFO declares a scale-less Track, whose timestamps and Group starts are bare numbers; each of its frames carries its Group's start as its timestamp.
+- A `Timescale` of 0 in TRACK_INFO declares a scale-less Track, whose Group starts are bare numbers; its frames carry no timestamp, each taking its Group's start.
 - A publisher must not start a Group's frame 0 at or before that of a Group with a lower start, and a receiver may refuse a Group that does. A relay serves every Track's timestamps on as received.
 - Replaced Group sequence numbers with Group starts: a Group is addressed by its frame 0's timestamp, or a bare number on a scale-less Track, and no field carries a sequence. A Time Anchor names the Group with the highest start at or below it.
 - Bounded every timestamp below 2^61. A larger one is a malformed Track.
@@ -2368,9 +2365,10 @@ A stream that FINs without a GROUP_END carries a closed Group, which may have he
 
 - Replaced group datagrams with datagram Tracks, a namespace apart from Tracks of Groups. A subscriber subscribes to one on the Datagrams Stream (0x9) with DATAGRAMS and DATAGRAMS_UPDATE, which carry only a priority, and the publisher answers with DATAGRAMS_INFO. A datagram carries the Track's own Sequence and a Timestamp, with no Group, Inflated Size, or Range. Datagrams no longer count toward SUBSCRIBE_DROP, and a subscriber no longer deduplicates them against Group Streams.
 - Added a leading Type to datagrams, 0x0 for a Track Datagram; a receiver discards one of an unknown Type.
-- FRAME and datagrams always carry a timestamp, a bare number on a scale-less Track.
-- Replaced GROUP's `Group Sequence` with `Group Start`, added `Previous Start`, the start of the Group before it, so a subscriber sees the gap before a Group without a SUBSCRIBE_SKIP.
-- Added GROUP_END, a `Payload Length` of 0 followed by the Group's exclusive end: a Group or Fetch Stream ends with it when its Group finished, a FIN alone ends a closed Group whose frames may not all exist, and a reset aborts. A Group's own end bounds its reach.
+- FRAME carries a `Timestamp Delta` only on a Track with a `Timescale`, and the first FRAME on a stream counts it from the Group Start, so frame 0's is 0. Datagrams always carry a timestamp, a bare number on a scale-less Track.
+- Replaced GROUP's `Group Sequence` with `Group Start`.
+- Added GROUP_END, a `Payload Length` of 0 followed by the Group's exclusive End, as a non-negative delta from the highest frame timestamp on the stream, or from the Group Start: a Group or Fetch Stream ends with it when its Group finished, a FIN alone ends a closed Group whose frames may not all exist, and a reset aborts. A Group's own End bounds its reach.
+- A Group's span runs from its lowest frame timestamp to its End, and spans never overlap. The publisher names the starts between one Group's End and the next Group's start with SUBSCRIBE_SKIP. A GROUP_END accounts for the starts strictly between its Group Start and End, and a drop of a Group the publisher holds whole names its span.
 - Expiration also measures a group's arrival age, the time since its successor arrived at this hop.
 - A relay closes a Group it holds only the start of, without a GROUP_END. A publisher resets the Group Stream of a group that expires with OLD, even one whose GROUP_END it sent but is not yet acknowledged, and names the group in a SUBSCRIBE_DROP with OLD.
 - FRAME leads with `Payload Length`, the payload size plus one, in place of the trailing `Message Length`; 0 is malformed.

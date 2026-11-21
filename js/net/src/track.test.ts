@@ -5468,6 +5468,22 @@ test("an append skips the holes created groups left below it", () => {
 	expect(hooks.tryRecvGroup(late, true)).toEqual({ kind: "idle" });
 });
 
+// A group's end may equal its start or its highest frame timestamp, and no lower: B-frames send
+// timestamps backwards, so the highest is not the last. Mirrors the Rust `finish_at`.
+test("a group's end is at or above its start and its highest frame", () => {
+	const producer = new TrackProducer("test");
+	producer.accept({ timescale: Timescale.MILLI, maxAge: null });
+	const write = (start: number, frames: number[]) => {
+		const group = producer.createGroup(BigInt(start));
+		for (const ms of frames) group.writeFrame(textFrame("x", Timestamp.fromMillis(ms)));
+		return group;
+	};
+	expect(() => write(1000, []).finishAt(999n)).toThrow(TimestampMismatch);
+	expect(write(2000, []).finishAt(2000n).consume().end).toBe(2000n);
+	expect(() => write(3000, [3000, 3100, 3033]).finishAt(3099n)).toThrow(TimestampMismatch);
+	expect(write(4000, [4000, 4100, 4033]).finishAt(4100n).consume().end).toBe(4100n);
+});
+
 // A late group created out of order reaches a reader, since creating a group skips nothing.
 test("a late local group reaches a reader, since creating out of order skips nothing", () => {
 	const producer = new TrackProducer("test");

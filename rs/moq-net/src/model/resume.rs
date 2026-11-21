@@ -1315,11 +1315,11 @@ impl Subscriber {
 		track::first_open(run, |key| serving.hole_end(key, false)).is_none()
 	}
 
-	/// The start of the group before `start` the serving copy knows; see
-	/// [`track::Subscriber::previous_start`].
-	pub(super) fn previous_start(&self, start: u64) -> Option<u64> {
-		let serving = self.reader().copies.last().map(|copy| copy.track.clone())?;
-		serving.previous_start(start)
+	/// Where a run of starts up to `end` ends with the span the serving copy knows it reaches
+	/// into; see [`track::Subscriber::span_end`].
+	pub(super) fn span_end(&self, end: u64) -> u64 {
+		let serving = self.reader().copies.last().map(|copy| copy.track.clone());
+		serving.map_or(end, |serving| serving.span_end(end))
 	}
 
 	/// When the latest group any copy caches at `keys` landed: a group a replaced copy
@@ -1327,12 +1327,6 @@ impl Subscriber {
 	pub(super) fn landed(&self, keys: std::ops::Range<u64>) -> Option<crate::time::Instant> {
 		let copies: Vec<_> = self.reader().copies.iter().map(|copy| copy.track.clone()).collect();
 		copies.iter().filter_map(|track| track.landed(keys.clone())).max()
-	}
-
-	/// Whether the serving copy holds the group at `key`; see [`track::Subscriber::holds`].
-	pub(super) fn holds(&self, key: u64) -> bool {
-		let serving = self.reader().copies.last().map(|copy| copy.track.clone());
-		serving.is_some_and(|serving| serving.holds(key))
 	}
 
 	/// The groups the reader's ranges name from `from` on; see
@@ -5746,9 +5740,6 @@ mod test {
 		routes.serve(b.consume());
 		assert_eq!(sub.reader().copies.len(), 2, "the read follows the route to b");
 
-		assert!(sub.holds(5));
-		assert!(!sub.holds(2), "only the replaced copy holds 2");
-		assert_eq!(sub.previous_start(5), Some(4), "the replaced copy would name 2");
 		assert_eq!(sub.skipped_below(5), 2, "the replaced copy knows 3 and 4 were skipped");
 		assert!(sub.is_skipped(std::iter::once(6..=7)));
 		assert!(
