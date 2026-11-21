@@ -168,9 +168,8 @@ pub struct Consumer<F: Container> {
 	// backwards, so a later group with a frame below this is malformed.
 	start: Option<(u64, Timestamp)>,
 
-	// The start of the group the cursor most recently left. B-frames, open-GOP pictures, and a
-	// keyframe overlapping the previous group's last frame may dip below that group's content,
-	// but a frame below its start is a rewind.
+	// The start of the group the cursor most recently left. A frame below it is a rewind. Every
+	// frame also presents after that group's content, which a reader assumes rather than checks.
 	floor: Option<Timestamp>,
 
 	// Presentation end of the group we most recently advanced past, for the 1 ms
@@ -329,12 +328,9 @@ pub const DELAY_MAX: std::time::Duration = std::time::Duration::from_secs(10);
 /// both bounds widened, so a live join reaches back far enough and the budget keeps what it reaches.
 fn warmed(delay: Delay, warmup: std::time::Duration) -> Delay {
 	Delay {
-		// An unstated minimum reads as zero, so a warmup still reaches back for it.
-		min: match delay.min {
-			Some(min) => Some(min.saturating_add(warmup)),
-			None if warmup.is_zero() => None,
-			None => Some(warmup),
-		},
+		// An unstated minimum already reaches back as far as the max delay allows, further than
+		// any live join, so it stays unstated.
+		min: delay.min.map(|min| min.saturating_add(warmup)),
 		max: delay.max.map(|max| max.saturating_add(warmup)),
 	}
 }
@@ -1737,6 +1733,25 @@ mod tests {
 			.unwrap();
 	}
 
+	/// Append a finished group keyed by its first frame's time, as a container producer keys
+	/// them, so a live join measures it in the track's timescale and the publisher says no group
+	/// starts between it and the last (Container::Legacy(crate::container::Kind::Data) format).
+	fn append_timed(track: &mut moq_net::track::Producer, timestamps: &[Timestamp]) {
+		let mut group = track.append_group(timestamps[0]).unwrap();
+		for &timestamp in timestamps {
+			let frame = Frame {
+				timestamp,
+				payload: Bytes::from_static(&[0xDE, 0xAD]),
+				keyframe: false,
+				duration: None,
+			};
+			Container::Legacy(crate::container::Kind::Data)
+				.write(&mut group, &[frame])
+				.unwrap();
+		}
+		group.finish().unwrap();
+	}
+
 	/// Write a finished group with explicit sequence and timestamps (Container::Legacy(crate::container::Kind::Data) format).
 	fn write_group(track: &mut moq_net::track::Producer, sequence: u64, timestamps: &[Timestamp]) {
 		let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
@@ -1933,7 +1948,7 @@ mod tests {
 		let subscription = moq_net::track::Subscription::default()
 			.with_delay(Delay::default().with_max(hour))
 			.with_ranges([moq_net::track::Range {
-				start: moq_net::track::Anchor::Time(0),
+				start: Some(0),
 				end: None,
 			}]);
 		let mut reader = Consumer::new(
@@ -1966,7 +1981,7 @@ mod tests {
 		let subscription = moq_net::track::Subscription::default()
 			.with_delay(Delay::default().with_max(Duration::from_secs(10)))
 			.with_ranges([moq_net::track::Range {
-				start: moq_net::track::Anchor::Time(0),
+				start: Some(0),
 				end: None,
 			}]);
 		let mut reader = Consumer::new(
@@ -2501,9 +2516,15 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_hole_and_an_arrived_group_both_wait_up_to_the_max_delay() {
 		let mut copy = Received::with_info(hang::container::track_info(hang::catalog::PRIORITY.audio)).await;
+		// From group 0, which the playout delay set below doesn't move.
 		let subscriber = copy
 			.subscribe_with(
-				moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(1))),
+				moq_net::track::Subscription::default()
+					.with_delay(Delay::default().with_max(Duration::from_secs(1)))
+					.with_ranges([moq_net::track::Range {
+						start: Some(0),
+						end: None,
+					}]),
 			)
 			.await;
 		let mut reader = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Data));
@@ -2630,7 +2651,7 @@ mod tests {
 		let subscription = moq_net::track::Subscription::default()
 			.with_delay(Delay::default().with_max(Duration::from_secs(10)))
 			.with_ranges([moq_net::track::Range {
-				start: moq_net::track::Anchor::Time(0),
+				start: Some(0),
 				end: None,
 			}]);
 		let mut reader = Consumer::new(
@@ -2693,7 +2714,7 @@ mod tests {
 				let subscription = moq_net::track::Subscription::default()
 					.with_delay(Delay::default().with_max(Duration::from_secs(10)))
 					.with_ranges([moq_net::track::Range {
-						start: moq_net::track::Anchor::Time(0),
+						start: Some(0),
 						end: None,
 					}]);
 				let mut reader = Consumer::new(
@@ -3402,30 +3423,6 @@ mod tests {
 		assert_eq!(
 			frames.iter().map(|f| f.timestamp).collect::<Vec<_>>(),
 			vec![ts(0), ts(66_000), ts(33_000)]
-		);
-	}
-
-	/// A keyframe one frame below the previous group's last frame, but above its start, is an
-	/// overlap rather than a rewind.
-	#[kio::test]
-	async fn a_keyframe_overlapping_the_previous_group_is_accepted() {
-		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
-		let mut consumer = Consumer::new(track.subscribe(None), Container::Legacy(crate::container::Kind::Data));
-		write_group(&mut track, 0, &[ts(0), ts(33_000), ts(66_000)]);
-		// Read the first group before the second arrives: a blocked group that the next one
-		// already covers is skipped for latency, which is not what this checks.
-		for expected in [0, 33_000, 66_000] {
-			assert_eq!(consumer.read_frame().await.unwrap().unwrap().timestamp, ts(expected));
-		}
-		write_group(&mut track, 1, &[ts(50_000), ts(83_000)]);
-		let _track = track.finish().unwrap();
-		let frames = read_all(&mut consumer).await.unwrap();
-		assert_eq!(
-			frames
-				.iter()
-				.map(|f| f.timestamp.as_micros().unwrap())
-				.collect::<Vec<_>>(),
-			vec![50_000, 83_000]
 		);
 	}
 
@@ -4190,8 +4187,8 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn the_start_waits_for_an_earlier_group_when_the_live_edge_arrives_first() {
 		let mut copy = Received::with_info(hang::container::track_info(hang::catalog::PRIORITY.video)).await;
-		write_group(&mut copy.track, 4, &[ts(4_800_000)]);
-		write_group(&mut copy.track, 5, &[ts(5_000_000)]);
+		append_timed(&mut copy.track, &[ts(4_800_000)]);
+		append_timed(&mut copy.track, &[ts(5_000_000)]);
 		let mut consumer = reach_reader(
 			&copy,
 			Duration::from_millis(500),
@@ -4234,13 +4231,13 @@ mod tests {
 		);
 	}
 
-	/// An unstated min delay reads as zero, so the warmup still reaches a live join back for it;
-	/// without a warmup it stays unstated.
+	/// The warmup reaches a live join further back, even one at the live edge, while an unstated
+	/// min delay stays unstated: it reaches back from the oldest group already.
 	#[test]
-	fn the_warmup_widens_an_unstated_min() {
+	fn the_warmup_widens_only_a_stated_min() {
 		let warmup = Duration::from_millis(300);
 		let unstated = Delay::default().with_min(None);
-		assert_eq!(warmed(unstated, warmup).min, Some(warmup));
+		assert_eq!(warmed(unstated, warmup).min, None);
 		assert_eq!(warmed(unstated, Duration::ZERO).min, None);
 		assert_eq!(warmed(unstated.with_min(Duration::ZERO), warmup).min, Some(warmup));
 	}
@@ -4255,9 +4252,9 @@ mod tests {
 		] {
 			let mut copy = Received::with_info(hang::container::track_info(hang::catalog::PRIORITY.video)).await;
 			// Group 4 covers the min delay alone, but not the warmup too.
-			write_group(&mut copy.track, 3, &[ts(4_400_000)]);
-			write_group(&mut copy.track, 4, &[ts(4_700_000)]);
-			write_group(&mut copy.track, 5, &[ts(5_000_000)]);
+			append_timed(&mut copy.track, &[ts(4_400_000)]);
+			append_timed(&mut copy.track, &[ts(4_700_000)]);
+			append_timed(&mut copy.track, &[ts(5_000_000)]);
 			let mut consumer =
 				reach_reader(&copy, Duration::from_millis(200), Duration::from_millis(200), warmup).await;
 			let _track = copy.track.finish().unwrap();
@@ -4303,9 +4300,9 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		let mut consumer = reach_consumer(&mut track, Duration::ZERO, Duration::ZERO, Duration::from_millis(80));
 
-		write_group(&mut track, 5, &[ts(5_000_000)]);
+		write_group(&mut track, 5_000_000, &[ts(5_000_000)]);
 		// Group 4 covers the 4.92s target, and its first frame is read before the rest of it lands.
-		let mut covering = track.create_group(moq_net::group::Info { start: 4 }).unwrap();
+		let mut covering = track.create_group(moq_net::group::Info { start: 4_900_000 }).unwrap();
 		let write = |group: &mut moq_net::group::Producer, micros| {
 			let frame = Frame {
 				timestamp: ts(micros),
@@ -4357,9 +4354,9 @@ mod tests {
 			Duration::from_millis(300),
 		);
 
-		write_group(&mut track, 5, &[ts(5_000_000)]);
+		write_group(&mut track, 5_000_000, &[ts(5_000_000)]);
 		// Group 4 begins 600ms before the newest content, past the 500ms reach, yet covers its 4.5s target.
-		write_group(&mut track, 4, &[ts(4_400_000), ts(4_600_000), ts(4_900_000)]);
+		write_group(&mut track, 4_400_000, &[ts(4_400_000), ts(4_600_000), ts(4_900_000)]);
 		let frame = kio::clock::timeout(Duration::from_millis(50), consumer.read_frame())
 			.await
 			.expect("group 4 covers the reach")
@@ -4389,7 +4386,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_quiet_track_starts_at_once_when_nothing_earlier_is_owed() {
 		let mut copy = Received::with_info(hang::container::track_info(hang::catalog::PRIORITY.video)).await;
-		write_group(&mut copy.track, 5, &[ts(5_000_000)]);
+		append_timed(&mut copy.track, &[ts(5_000_000)]);
 		let mut consumer = reach_reader(
 			&copy,
 			Duration::from_millis(200),
@@ -4503,9 +4500,9 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_min_delay_past_the_max_delay_reaches_the_max_delay() {
 		let mut copy = Received::with_info(hang::container::track_info(hang::catalog::PRIORITY.video)).await;
-		write_group(&mut copy.track, 3, &[ts(4_400_000)]);
-		write_group(&mut copy.track, 4, &[ts(4_700_000)]);
-		write_group(&mut copy.track, 5, &[ts(5_000_000)]);
+		append_timed(&mut copy.track, &[ts(4_400_000)]);
+		append_timed(&mut copy.track, &[ts(4_700_000)]);
+		append_timed(&mut copy.track, &[ts(5_000_000)]);
 		let mut consumer = reach_reader(
 			&copy,
 			Duration::from_secs(2),
@@ -4572,14 +4569,15 @@ mod tests {
 		assert_eq!(consumer.warmup, DELAY_MAX);
 	}
 
-	/// An unlimited max delay keeps the subscription unlimited and skips nothing: a reader of the
-	/// oldest group reads all of the history the copy holds, even past the min delay's reach.
+	/// An unlimited max delay keeps the subscription unlimited and skips nothing: a reader from a
+	/// time start, which the min delay doesn't place, reads all of the history the copy holds, even
+	/// past the min delay's reach.
 	#[tokio::test(start_paused = true)]
 	async fn an_unlimited_max_delay_reads_all_history() {
 		let mut copy = Received::with_info(hang::container::track_info(hang::catalog::PRIORITY.video)).await;
-		write_group(&mut copy.track, 3, &[ts(3_000_000)]);
-		write_group(&mut copy.track, 4, &[ts(4_500_000)]);
-		write_group(&mut copy.track, 5, &[ts(5_000_000)]);
+		append_timed(&mut copy.track, &[ts(3_000_000)]);
+		append_timed(&mut copy.track, &[ts(4_500_000)]);
+		append_timed(&mut copy.track, &[ts(5_000_000)]);
 		let playout = Playout::new(
 			Delay {
 				min: Some(Duration::from_millis(500)),
@@ -4587,9 +4585,11 @@ mod tests {
 			},
 			Duration::ZERO,
 		);
-		let subscriber = copy
-			.subscribe_with(playout.subscription(moq_net::track::Subscription::default()))
-			.await;
+		let from_zero = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range {
+			start: Some(0),
+			end: None,
+		}]);
+		let subscriber = copy.subscribe_with(playout.subscription(from_zero)).await;
 		let mut consumer = playout.consumer(subscriber, Container::Legacy(crate::container::Kind::Data));
 		assert_eq!(subscribed(&consumer).subscription().delay.max, None);
 		let _track = copy.track.finish().unwrap();
@@ -5344,12 +5344,12 @@ mod tests {
 			.with_delay(Delay::default().with_max(Duration::from_secs(10)))
 			.with_ranges([
 				moq_net::track::Range {
-					start: moq_net::track::Anchor::Time(0),
-					end: Some(moq_net::track::Anchor::Time(0)),
+					start: Some(0),
+					end: Some(0),
 				},
 				moq_net::track::Range {
-					start: moq_net::track::Anchor::Time(10),
-					end: Some(moq_net::track::Anchor::Time(10)),
+					start: Some(10),
+					end: Some(10),
 				},
 			]);
 		let mut consumer = Consumer::new(
@@ -5372,23 +5372,22 @@ mod tests {
 		assert_eq!(micros, vec![0, 1_000_000]);
 	}
 
-	/// A relative start names its floor once resolved: delivery starts that many groups
-	/// back from the latest, rather than at whichever group arrives first.
+	/// A live join names its floor once resolved: delivery starts at the group containing the
+	/// live edge minus the Min Age, rather than at whichever group arrives first.
 	#[tokio::test]
-	async fn startup_at_a_relative_start() {
+	async fn startup_at_a_live_join() {
 		tokio::time::pause();
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		for sequence in 5..=9 {
-			write_group(&mut track, sequence, &[ts(sequence * 100_000)]);
+			write_group(&mut track, sequence * 100_000, &[ts(sequence * 100_000)]);
 		}
-		let subscription = moq_net::track::Subscription::default()
-			.with_delay(Delay::default().with_max(Duration::from_secs(10)))
-			.with_ranges([moq_net::track::Range {
-				start: moq_net::track::Anchor::Relative(2),
-				end: None,
-			}]);
+		let subscription = moq_net::track::Subscription::default().with_delay(
+			Delay::default()
+				.with_min(Duration::from_millis(200))
+				.with_max(Duration::from_secs(10)),
+		);
 		let consumer_track = track.subscribe(subscription);
-		assert_eq!(consumer_track.floor(), Some(7));
+		assert_eq!(consumer_track.floor(), Some(700_000));
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 		let _track = track.finish().unwrap();
 
@@ -5402,16 +5401,15 @@ mod tests {
 	async fn startup_at_the_publishers_start_over_a_newer_first_arrival() {
 		let mut copy = Received::with_info(hang::container::track_info(hang::catalog::PRIORITY.video)).await;
 		for sequence in [7, 8, 9, 10] {
-			write_group(&mut copy.track, sequence, &[ts(sequence * 100_000)]);
+			append_timed(&mut copy.track, &[ts(sequence * 100_000)]);
 		}
 		let subscriber = copy
 			.subscribe_with(
-				moq_net::track::Subscription::default()
-					.with_delay(Delay::default().with_min(None).with_max(Duration::from_secs(10)))
-					.with_ranges([moq_net::track::Range {
-						start: moq_net::track::Anchor::Relative(2),
-						end: None,
-					}]),
+				moq_net::track::Subscription::default().with_delay(
+					Delay::default()
+						.with_min(Duration::from_millis(200))
+						.with_max(Duration::from_secs(10)),
+				),
 			)
 			.await;
 		let mut consumer = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Data));
@@ -5420,21 +5418,26 @@ mod tests {
 		assert_eq!(items(&mut consumer).await, ["800000", "900000", "1000000"]);
 	}
 
-	/// A live start takes the start the publisher resolved for it: the publisher counts back from a
+	/// A live join takes the start the publisher resolved for it: the publisher starts at a
 	/// newest group that may hold no frame yet, which neither the largest it reports nor this copy
 	/// counts, so the reader waits for no group below it.
 	#[tokio::test(start_paused = true)]
-	async fn a_waiting_relative_start_takes_the_publishers_resolved_start() {
+	async fn a_waiting_live_join_takes_the_publishers_resolved_start() {
 		let mut copy = Received::with_info(hang::container::track_info(hang::catalog::PRIORITY.video)).await;
 		for sequence in 0..5 {
-			write_group(&mut copy.track, sequence, &[ts(sequence * 100_000)]);
+			write_group(&mut copy.track, sequence * 100_000, &[ts(sequence * 100_000)]);
 		}
-		let mut newest = copy.track.create_group(moq_net::group::Info { start: 5 }).unwrap();
+		let mut newest = copy
+			.track
+			.create_group(moq_net::group::Info { start: 500_000 })
+			.unwrap();
 		let subscriber = copy
 			.subscribe_with(
-				moq_net::track::Subscription::default()
-					.with_delay(Delay::default().with_max(Duration::from_secs(10)))
-					.with_ranges([moq_net::track::Range::live()]),
+				moq_net::track::Subscription::default().with_delay(
+					Delay::default()
+						.with_min(Duration::ZERO)
+						.with_max(Duration::from_secs(10)),
+				),
 			)
 			.await;
 		let mut consumer = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Data));

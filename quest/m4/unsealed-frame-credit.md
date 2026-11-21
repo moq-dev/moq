@@ -30,7 +30,7 @@ Reproduce with `quic_sim::many_groups_carry_bulk_transfers_losslessly` at 200
 groups instead of `MANY`. The fix raises `MANY` until a frame's worth of
 credit per stream no longer bounds it, or says what bounds it instead.
 
-Whatever lands updates the [credit model](/quest/m1/credit-model.md): early
+Whatever lands updates the credit model (the [`verify-credit` skill](/.claude/skills/verify-credit/SKILL.md)): early
 return changes when credit comes back, and its safety property (credit held
 together never exceeds the window) must still hold.
 
@@ -38,5 +38,5 @@ Public API: none expected. Wire: none.
 
 ## Related
 
-- [Credit model](/quest/m1/credit-model.md) - models the credit this changes
+- [`verify-credit` skill](/.claude/skills/verify-credit/SKILL.md) - models the credit this changes
 - [Unbounded groups](/quest/m3/unbounded-groups/README.md) - decided the per-segment release

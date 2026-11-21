@@ -265,6 +265,7 @@ static void start_audio(ctx_t *c, int32_t catalog) {
         // a playout delay of the max delay, waiting on a hole for the same budget it grants a late
         // group.
         out.delay.min_us = MAX_DELAY_US;
+        out.delay.min_stated = true;
         out.delay.max_us = MAX_DELAY_US;
         int32_t track = moq_decode_audio((uint32_t)catalog, i, &out, on_audio, &c->audio[i]);
         pthread_mutex_lock(&c->mu);
@@ -347,7 +348,7 @@ static void on_catalog(void *ud, int32_t catalog) {
         moq_video_config vcfg;
         memset(&vcfg, 0, sizeof(vcfg));
         if (moq_consume_video_config((uint32_t)catalog, 0, &vcfg) == 0) {
-            moq_delay delay = {.min_unstated = true, .max_us = MAX_DELAY_US};
+            moq_delay delay = {.max_us = MAX_DELAY_US};
             int32_t track = moq_consume_video((uint32_t)catalog, 0, &delay, on_frame, ud);
             if (track > 0) {
                 pthread_mutex_lock(&c->mu);

@@ -1,0 +1,16 @@
+[
+	{
+		"name": "a lite-06 scale-less group stamps each frame with its start as milliseconds",
+		"version": "moq-lite-06",
+		"start": 5,
+		"payloads": ["a", "b"],
+		"hex": "00030005000a0161000162"
+	},
+	{
+		"name": "a lite-05 scale-less group stamps each frame with its start as milliseconds",
+		"version": "moq-lite-05",
+		"start": 5,
+		"payloads": ["a", "b"],
+		"hex": "000200050a0161000162"
+	}
+]
