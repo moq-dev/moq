@@ -66,13 +66,12 @@ Decided 2026-11-20 (maintainer, /quest-plan of a pre-cut audit of the
 lite-07 and hang-04 wire changes): the cut also waits on what that audit
 found. Each fix is so that a subscription, frame, or catalog entry means
 the same whichever relay or reader serves it:
-[no relative anchors](/quest/m2/time-addressing/no-relative-anchors.md),
+no relative anchors ([moq-dev/moq#9265](https://github.com/moq-dev/moq/pull/9265)),
 with Min Age placing a live join;
 [scale-less tracks aging by arrival](/quest/m2/time-addressing/scale-less-arrival.md);
 [Group Streams carrying each time once](/quest/m2/time-addressing/group-times.md),
-with GROUP_END's end back as a delta; and
-[the hang-04 text](/quest/m2/hang-04-text.md) on entry versions and HLS
-overruns. [moq-dev/moq#9198](https://github.com/moq-dev/moq/pull/9198) and
+with GROUP_END's end back as a delta.
+[moq-dev/moq#9198](https://github.com/moq-dev/moq/pull/9198) and
 [moq-dev/moq#9221](https://github.com/moq-dev/moq/pull/9221) closed, since
 relative starts and the bare GROUP_END are gone.
 

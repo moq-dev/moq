@@ -561,8 +561,8 @@ async fn includes_take_the_roots_grid_and_denied_ones_are_not_advertised() {
 	let include = publish(&origin, "room/ladder", &child, &value);
 	let server = Server::new(origin.consume(), Default::default()).unwrap();
 	master(&server, "include/", true).await;
-	let patterns = ["room/live".parse::<moq_net::Pattern>().unwrap()].into_iter().collect();
-	let denied = Server::new(origin.consume().scope("", &patterns).unwrap(), Default::default()).unwrap();
+	let prefixes = moq_net::Prefixes::from("room/live".parse::<moq_net::Prefix>().unwrap());
+	let denied = Server::new(origin.consume().scope("", &prefixes).unwrap(), Default::default()).unwrap();
 	master(&denied, "include/", false).await;
 	for resource in ["media.m3u8", "init.abcd.mp4", "seg/abcd.0.m4s"] {
 		assert_eq!(

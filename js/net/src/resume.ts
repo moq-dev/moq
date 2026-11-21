@@ -415,13 +415,13 @@ function resumePoint(copy: Pick<Copy, "floor" | "dropped">): bigint | undefined 
 /**
  * Where `range` resolved, as `at`, on a copy whose resume point is `floor`. One above the range's
  * time start asked the copy from the floor, so its resolution says nothing of which group the
- * range starts at, nor of an end under the floor too. The range is placed at its own anchors,
+ * range starts at, nor of an end under the floor too. The range is placed at its own times,
  * which names the groups under the floor that only a backfill reads. Mirrors the Rust `unraised`.
  */
 function unraised(range: track.Range | undefined, floor: bigint | undefined, at: Resolved): Resolved {
-	const start = range?.start?.time;
+	const start = range?.start;
 	if (floor === undefined || start === undefined || start >= floor) return at;
-	const end = range?.end?.time;
+	const end = range?.end;
 	return { ...at, start, end: end !== undefined && end < floor ? end + 1n : at.end, floored: true };
 }
 
@@ -690,10 +690,10 @@ class Reader implements ResumeSource {
 	}
 
 	/**
-	 * The reader's ranges resolved, a relative or time anchor where the first copy to place it
+	 * The reader's ranges resolved, a time start or live join where the first copy to place it
 	 * placed it, whatever its failover cap: that bounds what the copy delivers, not where the ranges
 	 * resolve. Kept once placed, past that copy being let go. A range stays as first held, unplaced,
-	 * while an anchor of its waits on a copy to place it. A copy resolves a time start against the groups
+	 * while its start waits on a copy to place it. A copy resolves a time start against the groups
 	 * it holds, which may place it below where the reader's window did: the window decides what is
 	 * handed out. Mirrors the Rust `Reader::window`.
 	 */
@@ -701,7 +701,7 @@ class Reader implements ResumeSource {
 		const ranges = this.#ranges();
 		let resolution = this.#resolution;
 		if (!resolution || (resolution.from !== ranges && !sameRanges(resolution.from, ranges))) {
-			resolution = { from: ranges, window: new Window(ranges, undefined, UNHELD) };
+			resolution = { from: ranges, window: new Window(ranges, undefined, UNHELD, this.#min()) };
 			this.#resolution = resolution;
 		}
 		for (const copy of this.#copies) {
@@ -731,7 +731,7 @@ class Reader implements ResumeSource {
 
 	/**
 	 * Place each unsettled {@link #window} range where a copy resolved it, on its own: one whose
-	 * anchors still wait leaves the rest placed, so a publisher names their starts. Mirrors the Rust
+	 * start still waits leaves the rest placed, so a publisher names their starts. Mirrors the Rust
 	 * `Reader::resolve`.
 	 */
 	#resolve(resolved: readonly (Resolved | undefined)[]): void {
@@ -743,11 +743,9 @@ class Reader implements ResumeSource {
 			if (range === undefined) continue;
 			const at = resolved[Number(key)];
 			if (!at) {
-				// A range the copy left unresolved keeps its anchors, which only a copy can place.
-				const unplaced =
-					range.start?.relative !== undefined ||
-					(range.start?.time ?? 0n) > 0n ||
-					range.end?.relative !== undefined;
+				// A range the copy left unresolved keeps its time start or live join, which only a copy
+				// can place.
+				const unplaced = (range.start ?? 0n) > 0n || (range.start === undefined && this.#min() !== undefined);
 				// Placed as it is: nothing of it waits on a copy.
 				if (!unplaced || isEmpty(range)) placed.push([key, range]);
 				continue;
@@ -757,14 +755,18 @@ class Reader implements ResumeSource {
 				continue;
 			}
 			const out: track.Range = {};
-			// One that reached back to the oldest group still does, as on a plain reader.
-			if (range.start !== undefined && at.floored) out.start = { time: at.start };
-			if (range.end !== undefined) out.end = at.end === undefined ? range.end : { time: at.end - 1n };
-			// A relative end still open would leave it waiting on a first group it never gets.
-			if (out.end?.relative !== undefined && !isEmpty(out)) continue;
+			// One that reached back to the oldest group still does, as on a plain reader; a live join
+			// starts where the copy placed it.
+			if (at.floored) out.start = at.start;
+			if (range.end !== undefined) out.end = at.end === undefined ? range.end : at.end - 1n;
 			placed.push([key, out]);
 		}
 		if (placed.length > 0) resolution.window.edit([], placed, undefined, AT_KEYS);
+	}
+
+	/** The reader's Min Age, undefined when not stated, which makes a range with no start a live join. */
+	#min(): Duration | undefined {
+		return this.#shell.subscription.peek()?.delay?.min ?? undefined;
 	}
 
 	/** The reader's ranges, as its preferences name them. */
@@ -823,7 +825,7 @@ class Reader implements ResumeSource {
 			if (this.#resolution && !sameRanges(this.#resolution.from, ranges)) {
 				// The serving copy's resume point may cut off groups the new ranges cover.
 				this.#resumed = true;
-				this.#resolution = { from: ranges, window: new Window(ranges, undefined, UNHELD) };
+				this.#resolution = { from: ranges, window: new Window(ranges, undefined, UNHELD, this.#min()) };
 				for (let index = this.#copies.length - 1; index >= 0; index--) {
 					if (this.#resolution.window.settled) break;
 					const copy = this.#copies[index];
@@ -1705,6 +1707,14 @@ class Reader implements ResumeSource {
 		this.sync();
 		const serving = this.#serving();
 		return serving && hooks.servingRuns(serving.sub, start, end);
+	}
+
+	// The serving copy's runs leave out the keys below a time start it still waits to place, so its
+	// barrier holds a gap the group containing that start may lie below.
+	gapHeld(at: bigint, end: bigint): boolean {
+		this.sync();
+		const serving = this.#serving();
+		return serving !== undefined && hooks.gapHeld(serving.sub, at, end);
 	}
 
 	servingEnd(): bigint | undefined {

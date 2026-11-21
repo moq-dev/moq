@@ -735,11 +735,12 @@ export class FillGroups {
 
 	/**
 	 * Insert group `key` into the track's cache, handing it to the readers waiting on it,
-	 * and return the producer to write its frames into. `info` commits the track's {@link Info}
-	 * if it has none yet. A key from the {@link floor} up to the start answers the start with that
-	 * group. A cached copy missing its first frames, which a reader asked whole, is replaced. Returns
-	 * `undefined` if the group was already answered or cached whole. Throws a `RangeError` outside
-	 * the fill, and an error if the track is closed.
+	 * and return the producer to write its frames into. A live subscription covering it receives
+	 * it too. `info` commits the track's {@link Info} if it has none yet. A key from the
+	 * {@link floor} up to the start answers the start with that group. A cached copy missing its
+	 * first frames, which a reader asked whole, is replaced. Returns `undefined` if the group was
+	 * already answered or cached whole. Throws a `RangeError` outside the fill, and an error if the
+	 * track is closed.
 	 */
 	accept(start: bigint, info?: Info): GroupProducer | undefined {
 		checkKey(start);

@@ -741,7 +741,13 @@ async function subscribeTrack({
 	const consumer = subscriber
 		.consume(Path.from("room"))
 		.track("video")
-		.subscribe(subscription ?? { ...track.Subscription.default(), ranges: [{ start: { relative: 0n } }] });
+		.subscribe(
+			subscription ?? {
+				...track.Subscription.default(),
+				delay: { min: Duration.ZERO, max: Duration.ZERO },
+				ranges: [{}],
+			},
+		);
 
 	const peer = await nextStream(pair.client);
 	peer.reader.version = version;
@@ -1170,7 +1176,7 @@ test.each([Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22])(
 			.track("video")
 			.subscribe({
 				...track.Subscription.default(),
-				ranges: [{ start: { time: 1n } }],
+				ranges: [{ start: 1n }],
 				order: "ascending",
 				delay: { max: null },
 			});
@@ -1230,7 +1236,7 @@ test.each([Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22])(
 			.track("video")
 			.subscribe({
 				...track.Subscription.default(),
-				ranges: [{ start: { time: 0n } }],
+				ranges: [{ start: 0n }],
 				order: "ascending",
 				delay: { max: null },
 			});
@@ -1293,7 +1299,7 @@ test("a bounded subscription asks upstream from its start without an end", async
 		.track("video")
 		.subscribe({
 			...track.Subscription.default(),
-			ranges: [{ start: { time: 4n }, end: { time: 9n } }],
+			ranges: [{ start: 4n, end: 9n }],
 			order: "ascending",
 			delay: { max: null },
 		});

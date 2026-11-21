@@ -38,7 +38,7 @@ fn one_relay() {
 		for seed in 0..2 {
 			let network = Network::new(seed);
 			let relay = SocketAddr::new(ip(1), PORT);
-			let auth = memory::public(&["**"], &[], &[]);
+			let auth = memory::public(&[""], &[], &[]);
 			let cluster = memory::start(memory::cluster(), moq_tokio::connect::Config::default()).await;
 			let relay = serve(&network, relay, &cluster, &auth).await;
 			for client in [PUBLISHER, SUBSCRIBER] {
@@ -59,7 +59,7 @@ fn one_relay() {
 fn two_relays() {
 	memory::run(|| async {
 		let network = Network::new(1);
-		let auth = memory::public(&["**"], &[], &[]);
+		let auth = memory::public(&[""], &[], &[]);
 
 		let cluster_a = memory::start(memory::cluster(), moq_tokio::connect::Config::default()).await;
 		let a = serve(&network, SocketAddr::new(ip(1), PORT), &cluster_a, &auth).await;
@@ -70,6 +70,8 @@ fn two_relays() {
 		let mut cache = moq_relay::cache::Config::default();
 		// Past what the pool counts in milliseconds, so it never expires idle groups.
 		cache.duration = Some(Duration::MAX.into());
+		// And no governor, whose timer would never let the simulation settle.
+		cache.headroom = Some("0".to_string());
 		let mut options = cluster::Options::new(config).with_cache(cache.init().expect("cache"));
 		options.sim = Some(network.host(b.ip()));
 		// A fixed port, which the static peer dials share, so the test can impair that path.
@@ -238,7 +240,7 @@ const CHUNK: usize = 8 * 1024;
 fn a_group_carries_a_bulk_transfer_losslessly() {
 	memory::run(|| async {
 		let network = Network::new(0);
-		let auth = memory::public(&["**"], &[], &[]);
+		let auth = memory::public(&[""], &[], &[]);
 		let cluster = memory::start(memory::cluster(), moq_tokio::connect::Config::default()).await;
 		let relay = serve(&network, SocketAddr::new(ip(1), PORT), &cluster, &auth).await;
 

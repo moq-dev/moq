@@ -151,7 +151,7 @@ async fn subscribe(broadcast: &broadcast::Producer, track: &str) -> track::Order
 /// Every group from the one starting at `start` on.
 fn from(start: u64) -> track::Range {
 	track::Range {
-		start: track::Anchor::Time(start),
+		start: Some(start),
 		end: None,
 	}
 }
@@ -738,8 +738,8 @@ async fn read_range(broadcast: &broadcast::Producer, track: &str, range: track::
 }
 
 /// A time on a millisecond track.
-fn at(millis: u64) -> track::Anchor {
-	track::Anchor::Time(millis)
+fn at(millis: u64) -> Option<u64> {
+	Some(millis)
 }
 
 /// Group `sequence`'s frames `frames` on a timed track, keyed by its first frame's time:
@@ -773,22 +773,22 @@ async fn a_time_range_resolves_from_the_archive() {
 	let (broadcast, _run) = serve(&archive.store).await;
 	let range = |start, end| track::Range { start, end };
 	assert_eq!(
-		read_range(&broadcast, "video", range(at(4_500), Some(at(6_500)))).await,
+		read_range(&broadcast, "video", range(at(4_500), at(6_500))).await,
 		[4_000, 5_000, 6_000]
 	);
 	// A start on the first frame of its group, in the second object of a pair.
 	assert_eq!(
-		read_range(&broadcast, "video", range(at(3_000), Some(at(3_001)))).await,
+		read_range(&broadcast, "video", range(at(3_000), at(3_001))).await,
 		[3_000]
 	);
 	// An end alone, from the oldest group.
 	assert_eq!(
-		read_range(&broadcast, "video", range(at(0), Some(at(1_200)))).await,
+		read_range(&broadcast, "video", range(at(0), at(1_200))).await,
 		[0, 1_000]
 	);
 	// The cache now holds groups 6 and 9, but not what lies between: still looked up.
 	assert_eq!(
-		read_range(&broadcast, "video", range(at(8_500), Some(at(8_600)))).await,
+		read_range(&broadcast, "video", range(at(8_500), at(8_600))).await,
 		[8_000]
 	);
 
@@ -871,7 +871,7 @@ async fn a_time_before_the_archive_starts_at_its_oldest_group() {
 	let (broadcast, _run) = serve(&archive.store).await;
 	let range = track::Range {
 		start: at(500),
-		end: Some(at(4_500)),
+		end: at(4_500),
 	};
 	assert_eq!(read_range(&broadcast, "video", range).await, [3_000, 4_000]);
 }
@@ -889,7 +889,7 @@ async fn a_time_before_a_pruned_head_starts_at_the_oldest_whole_group() {
 	let (broadcast, _run) = serve(&archive.store).await;
 	let range = track::Range {
 		start: at(500),
-		end: Some(at(7_500)),
+		end: at(7_500),
 	};
 	assert_eq!(read_range(&broadcast, "video", range).await, [6_000, 7_000]);
 }
@@ -905,7 +905,7 @@ async fn a_time_in_a_gap_starts_before_it() {
 	let (broadcast, _run) = serve(&archive.store).await;
 	let range = track::Range {
 		start: at(4_500),
-		end: Some(at(6_500)),
+		end: at(6_500),
 	};
 	assert_eq!(read_range(&broadcast, "video", range).await, [3_000, 6_000]);
 }
@@ -952,7 +952,7 @@ async fn a_continuation_does_not_bound_a_group_start() {
 	let (broadcast, _run) = serve(&archive.store).await;
 	let range = track::Range {
 		start: at(600),
-		end: Some(at(700)),
+		end: at(700),
 	};
 	assert_eq!(read_range(&broadcast, "video", range).await, [500]);
 }
@@ -978,7 +978,7 @@ async fn a_time_resolves_by_key_not_first_frame() {
 	let (broadcast, _run) = serve(&archive.store).await;
 	let range = track::Range {
 		start: at(2_200),
-		end: Some(at(2_300)),
+		end: at(2_300),
 	};
 	assert_eq!(read_range(&broadcast, "video", range).await, [2_000]);
 }
@@ -995,7 +995,7 @@ async fn a_scale_less_track_looks_up_a_time_by_key() {
 	let (broadcast, _run) = serve(&archive.store).await;
 	let range = track::Range {
 		start: at(3),
-		end: Some(at(5)),
+		end: at(5),
 	};
 	assert_eq!(read_range(&broadcast, "log", range).await, [2, 5]);
 }
@@ -1063,7 +1063,7 @@ async fn a_seek_across_pruned_history_reaches_the_oldest_retained_group() {
 	mock.take();
 	let range = |start| track::Range {
 		start: at(start),
-		end: Some(at(6_500)),
+		end: at(6_500),
 	};
 	assert_eq!(read_range(&broadcast, "video", range(4_500)).await, [6_000]);
 	let pruned = mock
@@ -1143,7 +1143,7 @@ async fn a_seek_reads_a_listed_but_missing_object_once() {
 
 	let range = track::Range {
 		start: at(2_500),
-		end: Some(at(4_500)),
+		end: at(4_500),
 	};
 	// The newest group the store serves at or before the time, then the range's end.
 	assert_eq!(read_range(&broadcast, "video", range).await, [1_000, 4_000]);

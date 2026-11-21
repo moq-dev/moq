@@ -123,7 +123,7 @@ class TrackConsumer(_Stream[GroupConsumer]):
     def update(self, subscription: Subscription) -> None:
         """Change this subscriber's delivery preferences.
 
-        Raises on a time anchor the track can't serve.
+        Raises on a range time the track can't serve.
         """
         self._inner.update(subscription._ffi())
 

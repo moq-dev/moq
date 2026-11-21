@@ -10,7 +10,7 @@ use crate::support;
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use moq_net::track::{Anchor, Delay, FillGroups, Info, Order, Range, Requests, Subscription};
+use moq_net::track::{Delay, FillGroups, Info, Order, Range, Requests, Subscription};
 use moq_net::{Timescale, Timestamp, Version};
 use support::harness::peer;
 
@@ -125,8 +125,8 @@ async fn read(range: Range, by_time: bool) -> (BTreeSet<u64>, Vec<(u64, u64)>) {
 #[kio::test]
 async fn a_time_start_is_answered_by_the_group_containing_it() {
 	let range = Range {
-		start: Anchor::Time(2500),
-		end: Some(Anchor::Time(4500)),
+		start: Some(2500),
+		end: Some(4500),
 	};
 	let (read, seen) = read(range, true).await;
 	assert_eq!(read, [2000, 3000, 4000].into());
@@ -141,8 +141,8 @@ async fn a_time_start_is_answered_by_the_group_containing_it() {
 #[kio::test]
 async fn a_time_start_at_a_key_is_served_key_by_key() {
 	let range = Range {
-		start: Anchor::Time(2000),
-		end: Some(Anchor::Time(4500)),
+		start: Some(2000),
+		end: Some(4500),
 	};
 	let (read, seen) = read(range, false).await;
 	assert_eq!(read, [2000, 3000, 4000].into());

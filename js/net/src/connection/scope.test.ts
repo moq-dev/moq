@@ -16,11 +16,8 @@ for (const protocol of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18]) {
 		const url = new URL("https://localhost/test");
 		const source = new Producer();
 		const destination = new Producer();
-		const publish = source.scope(Path.from("server"), new Path.Patterns([Path.Pattern.all()]));
-		const consume = destination.scope(
-			Path.from("client"),
-			new Path.Patterns(["room/**", "other/**"].map(Path.Pattern.parse)),
-		);
+		const publish = source.scope(Path.from("server"), Path.Prefixes.all());
+		const consume = destination.scope(Path.from("client"), Path.Prefixes.parse(["room", "other"]));
 		const broadcasts = ["room/live", "room/.hidden", "other/live", "outside"].map((path) => {
 			const broadcastRoute = publish.route(Path.from(path));
 			const broadcast = broadcastRoute.broadcast;
