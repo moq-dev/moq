@@ -486,7 +486,7 @@ async fn an_unwatched_missing_path_is_unroutable_after_sync() {
 }
 
 /// Every moq-transport draft. These read what arrived once everything in flight has.
-const IETF: &[&str] = &["moq-transport-18", "moq-transport-22"];
+const IETF: &[&str] = &["moq-transport-18", "moq-transport-22", "moq-transport-23"];
 
 /// Apply what `announced` reports once everything in flight has arrived to `held`, and
 /// say whether any of it ended a prefix.

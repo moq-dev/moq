@@ -13,7 +13,7 @@ use crate::support::harness::{MockConnectOptions, connect_mock, spawn, subscribe
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-const VERSIONS: &[&str] = &["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"];
+const VERSIONS: &[&str] = &["moq-lite-06", "moq-lite-07-wip", "moq-transport-22", "moq-transport-23"];
 
 /// Past two segments, so the chain has a full middle and a short tail.
 const SIZE: usize = 5 * 1024 * 1024 / 2;

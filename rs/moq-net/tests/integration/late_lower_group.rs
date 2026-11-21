@@ -26,7 +26,7 @@ const FOREVER: Duration = Duration::from_millis((1 << 53) - 1);
 
 const LITE: &[&str] = &["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"];
 
-const TRANSPORT: &[&str] = &["moq-transport-18", "moq-transport-22"];
+const TRANSPORT: &[&str] = &["moq-transport-18", "moq-transport-22", "moq-transport-23"];
 
 /// From `start`, or the oldest group still around when there is none.
 fn floored(start: Option<u64>) -> Range {

@@ -25,7 +25,13 @@ fn origin(hop: u64) -> origin::Producer {
 /// That drop must not hide the group the relay holds whole.
 #[kio::test]
 async fn each_joining_viewer_reads_the_held_group() {
-	for version in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip", "moq-transport-22"] {
+	for version in [
+		"moq-lite-05",
+		"moq-lite-06",
+		"moq-lite-07-wip",
+		"moq-transport-22",
+		"moq-transport-23",
+	] {
 		let version: Version = version.parse().unwrap();
 		let publisher = origin(1);
 		let relay = origin(2);

@@ -1160,7 +1160,7 @@ test("early group waits for SUBSCRIBE_OK priority before track acceptance", asyn
 	track.close();
 });
 
-test.each([Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22])(
+test.each([Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22, Version.DRAFT_23])(
 	"an absolute prefix survives an answer behind its first burst (%s)",
 	async (version) => {
 		const pair = createMockTransportPair(ALPN.DRAFT_18);
@@ -1220,7 +1220,7 @@ test.each([Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22])(
 	},
 );
 
-test.each([Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22])(
+test.each([Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22, Version.DRAFT_23])(
 	"a start of group 0 joins live with no filter and fetches the groups below Largest (%s)",
 	async (version) => {
 		const pair = createMockTransportPair(ALPN.DRAFT_18);
@@ -1741,7 +1741,7 @@ test("a more specific unnamed announcement replaces the consumed source", async 
 	announced.close();
 });
 
-for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
+for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22, Version.DRAFT_23]) {
 	test(`status zero without the end bit delivers an empty object and continues (${version})`, async () => {
 		const { subscriber, track } = await subscribeTrack({ version });
 		onTestFinished(() => track.close());

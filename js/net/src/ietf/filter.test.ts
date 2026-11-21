@@ -324,7 +324,7 @@ test("draft-22 fill carries the Location Filter Type", () => {
 	});
 });
 
-for (const version of [Version.DRAFT_22]) {
+for (const version of [Version.DRAFT_22, Version.DRAFT_23]) {
 	test(`fill rejects invalid group order on ${version}`, () => {
 		for (const value of [0, 3, 255]) {
 			expect(() => Filter.decodeFill(new Uint8Array([1, 0x22, value]), version)).toThrow(/group order/);

@@ -55,7 +55,7 @@ async fn each_side_reads_the_others_implementation() {
 /// Unconfigured, each side names this crate; configured empty, it advertises nothing.
 #[kio::test]
 async fn the_default_names_the_crate_and_empty_omits_it() {
-	for name in ["moq-lite-07-wip", "moq-transport-22"] {
+	for name in ["moq-lite-07-wip", "moq-transport-22", "moq-transport-23"] {
 		let version: Version = name.parse().unwrap();
 		let (seen_by_server, seen_by_client) = exchange(version, None, Some("")).await;
 		assert_eq!(seen_by_server.as_deref(), Some(moq_net::IMPLEMENTATION), "{name}");

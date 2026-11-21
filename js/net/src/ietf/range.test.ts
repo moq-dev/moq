@@ -14,11 +14,12 @@ import { Subscriber } from "./subscriber.ts";
 import { TrackStatusOk, TrackStatusRequest } from "./track.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
 
-const VERSIONS = [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22] as const;
+const VERSIONS = [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22, Version.DRAFT_23] as const;
 const ALPNS = {
 	[Version.DRAFT_18]: ALPN.DRAFT_18,
 	[Version.DRAFT_20]: ALPN.DRAFT_20,
 	[Version.DRAFT_22]: ALPN.DRAFT_22,
+	[Version.DRAFT_23]: ALPN.DRAFT_23,
 };
 const ranges = (start: bigint, end: bigint): Subscription => ({
 	ranges: [{ start: { time: start }, end: { time: end - 1n } }],
@@ -67,11 +68,14 @@ function fixture(version: IetfVersion) {
 		expect(type).toBe(Fetch.id);
 		return { stream, request: await Fetch.decode(stream.reader, version) };
 	};
+	// Draft-23 names the answer's end as its LARGEST_OBJECT, inclusive like draft-22's End Location.
 	const answer = async (stream: Stream, group: bigint, object = 2n, ended = false) => {
-		await stream.writer.u53(FetchOk.id);
+		const end = { group, object: version === Version.DRAFT_18 ? object + 1n : object };
+		await stream.writer.u53(FetchOk.idFor(version));
 		await new FetchOk({
 			endOfTrack: ended,
-			endLocation: { group, object: version === Version.DRAFT_18 ? object + 1n : object },
+			endLocation: end,
+			largest: version === Version.DRAFT_23 ? end : undefined,
 		}).encode(stream.writer, version);
 	};
 	const data = async (id: bigint, groups: bigint[], objects = ["a", "", "c"]) => {
@@ -438,10 +442,9 @@ for (const version of VERSIONS) {
 					{ group: 1n, object, first: object === 0 },
 					version,
 				);
-			await new FetchEndOfRange({ reason: EndOfRange.NonExistent, group: 1n, object: 5n }).encode(
-				writer,
-				version,
-			);
+			// Draft-23 encodes it against the prior object: the same group, and object 2 + 2 + 1.
+			const at = version === Version.DRAFT_23 ? { group: 0n, object: 2n } : { group: 1n, object: 5n };
+			await new FetchEndOfRange({ reason: EndOfRange.NonExistent, ...at }).encode(writer, version);
 		});
 		await fx.subscriber.handleFetch(new Reader(undefined, bytes, version));
 		const group = await pending;
@@ -467,3 +470,59 @@ for (const ietf of [undefined, Version.DRAFT_18]) {
 		hooks.releaseTrack(producer);
 	});
 }
+
+/** A draft-23 answer with no LARGEST_OBJECT, which covers the whole requested range. */
+async function answerRequested(stream: Stream) {
+	const version = Version.DRAFT_23;
+	await stream.writer.u53(FetchOk.idFor(version));
+	await new FetchOk({ endOfTrack: false, endLocation: { group: 0n, object: 0n } }).encode(stream.writer, version);
+}
+
+/** Group 1's objects "a" and "b" on a draft-23 fetch stream, then `tail`. */
+async function groupThen(requestId: bigint, tail: number[]) {
+	const version = Version.DRAFT_23;
+	return Writer.collect(version, async (writer) => {
+		await writer.u62(requestId);
+		for (const [object, payload] of ["a", "b"].entries())
+			await new FetchFrame({ payload: new TextEncoder().encode(payload), priority: 0 }).encode(
+				writer,
+				{ group: 1n, object, first: object === 0 },
+				version,
+			);
+		await writer.write(Uint8Array.from(tail));
+	});
+}
+
+// Draft-23 has no End Of Track in the answer: the fetch stream follows the track's last object
+// with End of Track, which ends the track as FETCH_OK's flag did. End of Group says nothing of it.
+test("draft-23: an End of Track on the fetch stream ends the track", async () => {
+	for (const track of [false, true]) {
+		const fx = fixture(Version.DRAFT_23);
+		const reader = fx.broadcast.track("video").subscribe(ranges(1n, 2n));
+		fx.readers.push(reader);
+		const read = reader.ordered().nextGroup();
+		await fx.status();
+		const { stream, request } = await fx.fetch();
+		await answerRequested(stream);
+		const bytes = await groupThen(request.requestId, [0x80, track ? 0x81 : 0x80]);
+		await fx.subscriber.handleFetch(new Reader(undefined, bytes, Version.DRAFT_23));
+		const group = await read;
+		if (!group) throw new Error("missing group");
+		expect(await payloads(group)).toEqual(["a", "b"]);
+		expect(hooks.subscriberEnd(reader)).toEqual(track ? { group: 2n, frame: 0 } : undefined);
+	}
+});
+
+// Past an End of Group the prior Object ID is 2^64-1, so only an object naming another group
+// follows. The violation fails the stream, but End of Group already finished its group whole.
+test("draft-23: a stream failing after an End of Group keeps the finished group", async () => {
+	const fx = fixture(Version.DRAFT_23);
+	const pending = fx.broadcast.track("video").fetchGroup(1n);
+	await fx.status();
+	const { stream, request } = await fx.fetch();
+	await answerRequested(stream);
+	// End of Group, then an object that inherits group 1: flags 0, an empty payload.
+	const bytes = await groupThen(request.requestId, [0x80, 0x80, 0x00, 0x00]);
+	await fx.subscriber.handleFetch(new Reader(undefined, bytes, Version.DRAFT_23));
+	expect(await payloads(await pending)).toEqual(["a", "b"]);
+});

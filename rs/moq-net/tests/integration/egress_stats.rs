@@ -13,7 +13,13 @@ use support::harness::{MockConnectOptions, connect_mock, subscribed};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-const VERSIONS: &[&str] = &["moq-lite-06", "moq-lite-07-wip", "moq-transport-18", "moq-transport-22"];
+const VERSIONS: &[&str] = &[
+	"moq-lite-06",
+	"moq-lite-07-wip",
+	"moq-transport-18",
+	"moq-transport-22",
+	"moq-transport-23",
+];
 
 const FRAME: usize = 1000;
 

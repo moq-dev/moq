@@ -25,12 +25,13 @@ import { Subscribe, SubscribeOk } from "./subscribe.ts";
 import { Subscriber } from "./subscriber.ts";
 import { ALPN, type IetfVersion, Version, versionName } from "./version.ts";
 
-const VERSIONS = [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22] as const;
+const VERSIONS = [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22, Version.DRAFT_23] as const;
 const VERSION = Version.DRAFT_18;
 const ALPNS: Record<IetfVersion, string> = {
 	[Version.DRAFT_18]: ALPN.DRAFT_18,
 	[Version.DRAFT_20]: ALPN.DRAFT_20,
 	[Version.DRAFT_22]: ALPN.DRAFT_22,
+	[Version.DRAFT_23]: ALPN.DRAFT_23,
 };
 const ALIAS = 9n;
 /** The group SUBSCRIBE_OK names as Largest in most cases below. */

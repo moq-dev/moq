@@ -312,7 +312,7 @@ fn sealed_key(values: &[Property], version: Version, id: u64) -> Result<bool, Er
 mod tests {
 	use super::*;
 
-	const DRAFTS: [Version; 3] = [Version::Draft18, Version::Draft20, Version::Draft22];
+	const DRAFTS: [Version; 4] = [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23];
 
 	#[test]
 	fn key_six_is_opaque_on_every_draft() {
@@ -500,7 +500,7 @@ mod compression_tests {
 	}
 	#[test]
 	fn sizes_are_known_and_unknown_properties_survive() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let unknown = property(0x8800, 7);
 			let wire = compression(serialize([&unknown], version).unwrap(), version, Some(123)).unwrap();
 			let decoded = read(&wire.into(), version).unwrap();
@@ -513,7 +513,7 @@ mod compression_tests {
 	}
 	#[test]
 	fn a_status_cannot_declare_an_inflated_size() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let size = property(super::super::flate::INFLATED, 0);
 			for value in [
 				size.clone(),
@@ -530,7 +530,7 @@ mod compression_tests {
 
 	#[test]
 	fn sealed_sizes_are_forwarded_or_refused_without_rewriting() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			let sealed = Property {
 				id: 0x0b,
 				value: Value::Bytes(

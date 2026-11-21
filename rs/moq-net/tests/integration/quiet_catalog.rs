@@ -21,7 +21,7 @@ fn timed() -> moq_net::track::Info {
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
-const VERSIONS: &[&str] = &["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"];
+const VERSIONS: &[&str] = &["moq-lite-06", "moq-lite-07-wip", "moq-transport-22", "moq-transport-23"];
 
 /// The versions that forward a resume's floor upstream; the IETF relay subscribes without one.
 const LITE: &[&str] = &["moq-lite-06", "moq-lite-07-wip"];

@@ -11,7 +11,7 @@ with it, while shipping a simpler profile you can use today.
 
 | Spec | Scope | Here |
 | --- | --- | --- |
-| [moq-transport](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/) | The IETF pub/sub protocol | Drafts 18, 20, and 22 negotiated by ALPN; [moq-lite](/concept/moq-lite) is a forward-compatible subset |
+| [moq-transport](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/) | The IETF pub/sub protocol | Drafts 18, 20, and 22 negotiated by ALPN, and draft 23 in Rust when asked for; [moq-lite](/concept/moq-lite) is a forward-compatible subset |
 | [MSF](https://datatracker.ietf.org/doc/draft-ietf-moq-msf/) | The IETF catalog format | Read and written; broadcasts ending in `.msf` select it |
 | [LOC](https://datatracker.ietf.org/doc/draft-ietf-moq-loc/) | The IETF low-overhead container | Supported as a hang container kind |
 | [moq-lite](/draft/moq-lite), [hang](/draft/moq-hang), [e2ee](/draft/moq-e2ee), and friends | This project's own drafts | Normative for the implementation, published to the datatracker from [`drafts/`](https://github.com/moq-dev/moq/tree/main/drafts) |
@@ -48,6 +48,7 @@ subset drops. What a peer actually observes against this implementation:
 - **Dynamic groups.** A track advertises `DYNAMIC_GROUPS` when its publisher sets a refresh ratio, and a track received with `DYNAMIC_GROUPS` gets a ratio of 0. A `NEW_GROUP_REQUEST` counts as one more subscriber joining, which a `SUBSCRIBE` already is: it asks for a new group only when the newest group's bytes after its first frame exceed the ratio times the first frame. Joins coalesce until the asked-for group arrives. A Rust relay sends `NEW_GROUP_REQUEST` upstream, on the `SUBSCRIBE` or in a `REQUEST_UPDATE`, once a join wants a group past the newest it holds; a relay holding nothing yet asks for none. On a track without a ratio, an update carrying one ends the subscription with `UPDATE_FAILED`. A moq-lite-07 hop (`moq-lite-07-wip`, opt-in) carries the same demand natively: the ratio in `TRACK_INFO` and the asked-for group in `SUBSCRIBE_UPDATE`. Earlier moq-lite versions carry neither, so a track received over one never refreshes.
 - **Priority.** Higher is served first. This stack's priorities run from -128 to 127 with 0 unset, and go out on the IETF wire, which ranks lower first, as `127 - priority`: an unset priority is IETF 127. An omitted subscriber or publisher priority reads as the drafts' default of IETF 128, one step below unset, so a relay forwards it unchanged. A relay's upstream subscription carries the highest priority its subscribers ask for and updates it as they come and go; its group order stays as the `SUBSCRIBE` asked, since no draft lets an update change it.
 - **Size.** An object extension block larger than 64 KiB ends that subgroup stream. The session stays up. This cap is ours, not the draft's.
+- **Draft 23 is opt-in and partial.** Rust offers or accepts it only where it is named (`--connect-version moq-transport-23`, `--listen-version moq-transport-23`); nothing negotiates it by default, and JavaScript does not speak it. A draft-23 session carries namespace discovery, live `PUBLISH_NAMESPACE` and `SUBSCRIBE`, and a one-group `FETCH` in that draft's encodings. It still closes with `PROTOCOL_VIOLATION` where draft 23 names a narrower code, does not follow `REDIRECT`, reads a Gone range without storing it, and keeps control messages within 65535 bytes whatever larger size a peer offers.
 
 Several project drafts extend the IETF wire without breaking it, since `SETUP`
 ignores unknown parameters: [cluster](/draft/moq-cluster) routing hop lists,
@@ -168,8 +169,9 @@ container and is selectable per track (`container=loc` in the
 
 ## Interop testing
 
-`moq-cli` speaks every listed draft, picks the newest one the relay also
-supports, and prints it in the logs. Publish a test pattern and play it back:
+`moq-cli` speaks every listed draft, picks the newest of drafts 18 to 22 the
+relay also supports, and prints it in the logs. Draft 23 has to be named:
+`--connect-version moq-transport-23`. Publish a test pattern and play it back:
 
 ```bash
 ffmpeg -re -f lavfi -i testsrc=size=1280x720:rate=30 -f lavfi -i sine=frequency=440 \

@@ -16,7 +16,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 
 const LITE: &[&str] = &["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"];
 
-const TRANSPORT: &[&str] = &["moq-transport-18", "moq-transport-22"];
+const TRANSPORT: &[&str] = &["moq-transport-18", "moq-transport-22", "moq-transport-23"];
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	let (producer, driver) =
@@ -326,7 +326,7 @@ async fn range_fixture_history(version: &str, relay: bool, history: u64) -> Rang
 /// Mixed fixed and live ranges retain history for both live and finished cached sources.
 #[kio::test]
 async fn initial_mixed_ranges_keep_the_absolute_history() {
-	for version in ["moq-transport-18", "moq-transport-22"] {
+	for version in ["moq-transport-18", "moq-transport-22", "moq-transport-23"] {
 		for relay in [false, true] {
 			for finished in [false, true] {
 				let fixture = range_fixture_version(version, relay).await;
@@ -615,7 +615,7 @@ async fn draft18_updates_narrow_then_widen() {
 /// reader.
 #[kio::test]
 async fn empty_ranges_retire_the_wire_and_can_widen_again() {
-	for version in ["moq-transport-18", "moq-transport-22"] {
+	for version in ["moq-transport-18", "moq-transport-22", "moq-transport-23"] {
 		for relay in [false, true] {
 			let mut fixture = range_fixture_version(version, relay).await;
 			let live = Subscription::default().with_ranges([Range::live()]);

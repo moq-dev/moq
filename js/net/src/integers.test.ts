@@ -36,7 +36,7 @@ function fields(version: Lite | Version, ...values: (number | bigint)[]): Uint8A
 	return concat(values.map((value) => encodeVarint(value, version)));
 }
 
-for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
+for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22, Version.DRAFT_23]) {
 	for (const [name, decode] of [
 		["request error code", RequestError.decode],
 		["publish status code", PublishDone.decode],
@@ -82,7 +82,7 @@ test("relative anchors round-trip beyond 2^53 and resolve adjacent counts exactl
 	expect(() => rangesOf([{ start: { relative: 1 as never } }])).toThrow(TypeError);
 });
 
-for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
+for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22, Version.DRAFT_23]) {
 	test(`${version}: subgroup and datagram object IDs round-trip beyond 2^53`, async () => {
 		await expect(
 			Group.decode(new Reader(undefined, fields(version, 2 ** 32 + 0x14, 0, 0, 0, 0), version), version),
