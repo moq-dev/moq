@@ -54,6 +54,9 @@ pub struct MockConnectOptions {
 	pub latency: std::time::Duration,
 	/// What both transports report as their connection statistics.
 	pub stats: MockStats,
+	/// Uni streams each side may have open toward its peer at once, as QUIC's stream
+	/// credit. `None` grants credit without limit.
+	pub max_concurrent_uni_streams: Option<usize>,
 	/// Count server driver polls into this counter when supplied.
 	pub server_polls: Option<Arc<AtomicUsize>>,
 	/// The server's per-connection stats context.
@@ -71,6 +74,7 @@ impl MockConnectOptions {
 			server_subscribe: None,
 			latency: std::time::Duration::ZERO,
 			stats: MockStats::default(),
+			max_concurrent_uni_streams: None,
 			server_polls: None,
 			server_stats: Default::default(),
 		}
@@ -103,6 +107,10 @@ pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 	client_transport.set_latency(opts.latency);
 	client_transport.set_stats(opts.stats);
 	server_transport.set_stats(opts.stats);
+	if let Some(max) = opts.max_concurrent_uni_streams {
+		client_transport.limit_unis(max);
+		server_transport.limit_unis(max);
+	}
 	let transports = (client_transport.clone(), server_transport.clone());
 
 	let mut client = Client::new().with_versions(opts.version.into());
