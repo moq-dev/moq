@@ -180,6 +180,9 @@ struct Reader {
 	arrivals: VecDeque<(u128, Instant)>,
 	/// Whether the ended track's decoder has already been drained.
 	drained: bool,
+	/// Whether the container ended or failed, releasing its subscription. A codec error
+	/// leaves it reading, so a later read can still resume.
+	released: bool,
 	/// The first recovery group lacks the preceding GOP's references.
 	recover: bool,
 	leading_floor: Option<moq_net::Timestamp>,
@@ -267,11 +270,11 @@ impl Consumer {
 		let Poll::Ready((reader, result)) = step.as_mut().poll(cx) else {
 			return Poll::Pending;
 		};
-		// Left idle after an error, so the next read asks it again and gets the same answer.
-		self.slot = Slot::Idle(reader);
-		if !matches!(result, Ok(Some(_))) {
+		if reader.released {
 			self.control = None;
 		}
+		// Left idle after an error, so the next read asks it again and gets the same answer.
+		self.slot = Slot::Idle(reader);
 		let Some((read, arrival)) = result? else {
 			return Poll::Ready(Ok(None));
 		};
@@ -366,6 +369,7 @@ impl Reader {
 			pending: VecDeque::new(),
 			arrivals: VecDeque::new(),
 			drained: false,
+			released: false,
 			recover: true,
 			leading_floor: None,
 		};
@@ -383,7 +387,9 @@ impl Reader {
 				return Ok(None);
 			}
 
-			let mux_frame = match self.track.read().await? {
+			let read = self.track.read().await;
+			self.released |= !matches!(read, Ok(Some(_)));
+			let mux_frame = match read? {
 				Some(Encoded::Frame { frame, .. }) => Some(frame),
 				// Drained so the pictures from before the boundary all come out ahead of it,
 				// rather than whenever the media after it pushes them through. The decoder
@@ -1401,15 +1407,19 @@ mod tests {
 		consumer.reader().track.set_delay(Delay::default());
 		write(11, &[2000]);
 		write(12, &[3000, 2800, 2900, 3100]);
+		assert!(consumer.read().await.is_err(), "the drain did not fail");
+		// A codec error leaves the subscription reading, and its priority adjustable.
+		consumer.set_priority(-20);
+		assert_eq!(track.subscription().map(|sub| sub.priority), Some(-20));
 		let _track = track.finish().unwrap();
 		let reads = read_all(&mut consumer).await;
 		assert_eq!(
-			reads[..3],
-			["error", "frame 1100", "gap 1100"],
+			reads[..2],
+			["frame 1100", "gap 1100"],
 			"the drained picture, then its gap: {reads:?}"
 		);
 		assert_eq!(
-			reads[3..],
+			reads[2..],
 			["frame 3000", "error", "frame 3100"],
 			"recovery trims the leading pictures: {reads:?}"
 		);
