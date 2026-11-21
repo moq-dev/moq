@@ -340,10 +340,10 @@ mod tests {
 			self.at += 20_000;
 		}
 
-		/// Send `payload` every 20 ms until `viewer` plays something this source did not
-		/// send live before, and return that.
+		/// Send `payload` every 20 ms until `viewer` plays something other than an earlier
+		/// live payload, and return that. Repeating the last payload skips nothing.
 		async fn play(&mut self, payload: &'static [u8], viewer: &mut impl Viewer) -> Vec<u8> {
-			let stale = self.sent.replace(payload);
+			let stale = self.sent.replace(payload).filter(|sent| *sent != payload);
 			let read = fresh(viewer, stale);
 			tokio::pin!(read);
 			loop {
