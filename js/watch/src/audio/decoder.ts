@@ -360,7 +360,7 @@ export class Decoder {
 					next.end !== undefined ||
 					next.discontinuity !== (discontinuity ?? next.discontinuity)
 				) {
-					if (!(await this.#play(effect, decoder, decoderConfig, order, order.flush()))) return;
+					if (!(await this.#play(effect, decoder, decoderConfig, order, order.flush(), warmup))) return;
 				}
 				if (!next) break;
 				discontinuity = next.discontinuity;
@@ -382,7 +382,8 @@ export class Decoder {
 					bytesReceived: (stats?.bytesReceived ?? 0) + frame.payload.byteLength,
 				}));
 
-				if (!(await this.#play(effect, decoder, decoderConfig, order, order.push({ ...next, frame })))) return;
+				if (!(await this.#play(effect, decoder, decoderConfig, order, order.push({ ...next, frame }), warmup)))
+					return;
 			}
 		});
 	}
@@ -495,6 +496,7 @@ export class Decoder {
 		config: AudioDecoderConfig,
 		order: Order<FrameNext>,
 		reads: FrameNext[],
+		warmup?: Warmup,
 	): Promise<boolean> {
 		for (const next of reads) {
 			if (this.#onNext(next)) {
@@ -507,7 +509,8 @@ export class Decoder {
 
 			// Backpressure: in buffered mode this holds the encoded frame until the playhead nears
 			// it, keeping the lookahead above the floor as Opus instead of decoded PCM. No-op live.
-			await this.#ring?.wait(frame.timestamp as Time.Micro, effect.abort);
+			// A frame whose output the warm-up discards fills no ring space, so it skips the wait.
+			if (!warmup?.ungated()) await this.#ring?.wait(frame.timestamp as Time.Micro, effect.abort);
 
 			// A fatal decode error closes the decoder, so decoding again throws InvalidStateError out
 			// of the loop. Stop instead: the error callback already reported the real failure.
