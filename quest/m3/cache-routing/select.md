@@ -69,6 +69,15 @@ delegated the call, on
 built until the maintainer answers the item under Waiting** (rejected:
 building the port now regardless; deciding there to drop or defer it).
 
+Decided 2026-11-20 (maintainer, in the coordinating session): ✅ **latency
+link costs on the deployment first, and the port waits until after the
+lite-07 cut** (rejected: building the port now for lite-07, which rushes an
+XL wire into the cut for a trade not yet accepted; dropping it). The
+deployment prices each cluster link at its measured minimum RTT, which needs
+no change here, and lite-07 freezes without a warm wire. The port is built
+only if the maintainer then accepts its latency trade (below), with its wire
+in the first wip version after the cut.
+
 Measured 2026-11-18, before building. `warmth.rs` reads a
 mesh from a file (relays, links with costs, marks, and a label, and where
 publishers and readers sit) and `benchmark_warmth_mesh` reports the
@@ -491,7 +500,11 @@ lite-07 freezes changes.
 
 ## Waiting
 
-- Maintainer: whether to build the port. Its saving on the deployment's graph depends on a warm discount that trades reader latency for backbone: 20% of backbone link-groups at +7 to 21% mean reader latency with a warm price at a third of the cold, and 2% to 4% without one. Options: (1) adopt latency link costs on the deployment first, which needs no change here, and build the port after the lite-07 cut only if that latency trade is accepted, its wire then in the first wip version after the cut, recommended, since the costs alone remove a 5 to 12% reader-latency stretch and the port's saving is the trade itself; (2) build the port now for lite-07, at the risk of rushing an XL wire into the cut for a trade not yet accepted; (3) drop the port. An agent cannot take the step: it is a product trade between reader latency and backbone cost, and no check or measurement decides it. Done when the answer is recorded in this Plan.
+- Maintainer: once the deployment routes by latency link costs, whether to accept the warm discount's trade and build the port for the first wip version after the lite-07 cut, or drop it. Measured on the deployment's graph under latency costs: 20% fewer backbone link-groups at +7 to 21% mean reader latency with a warm price at a third of the cold, and 2% without one. Done when the answer is recorded in this Plan.
+
+## Required
+
+- [The lite-07 cut](/quest/m2/lite07-finalize.md) - the port's wire goes in the first wip version after it
 
 ## Related
 
