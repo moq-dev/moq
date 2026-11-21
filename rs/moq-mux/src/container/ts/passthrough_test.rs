@@ -974,7 +974,10 @@ async fn a_passthrough_without_a_rate_keeps_the_recorded_one() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let mut catalog = crate::catalog::Producer::new(&mut broadcast, config()).unwrap();
 	catalog
-		.mutate(|catalog| catalog.ext.mpegts.mux_rate = Some(400_000))
+		.mutate(
+			|catalog| catalog.ext.mpegts.mux_rate = Some(400_000),
+			catalog.next_timestamp(),
+		)
 		.unwrap();
 	let imported = import_onto(broadcast, catalog, &data, data.len(), None).await.unwrap();
 	assert!(imported.catalog.ext.mpegts.passthrough.is_some());
@@ -989,7 +992,10 @@ async fn a_vbr_passthrough_clears_a_recorded_rate() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let mut catalog = crate::catalog::Producer::new(&mut broadcast, config()).unwrap();
 	catalog
-		.mutate(|catalog| catalog.ext.mpegts.mux_rate = Some(400_000))
+		.mutate(
+			|catalog| catalog.ext.mpegts.mux_rate = Some(400_000),
+			catalog.next_timestamp(),
+		)
 		.unwrap();
 	let imported = import_onto(broadcast, catalog, data, data.len(), None).await.unwrap();
 	assert_eq!(imported.catalog.ext.mpegts.mux_rate, None);

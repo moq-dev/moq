@@ -11,7 +11,7 @@ import type { Consumer as BroadcastConsumer, Producer as BroadcastProducer } fro
 import type { Charge, Pool } from "./cache.ts";
 import type * as datagram from "./datagram.ts";
 import type { Delivered } from "./delivered.ts";
-import type { Edit, Prefs } from "./demand.ts";
+import type { Edit, Prefs, Subscriptions } from "./demand.ts";
 import { StreamCode, StreamError, toStreamCode } from "./error.ts";
 import type { Consumer as FrameConsumer } from "./frame.ts";
 import type { Frame, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
@@ -125,19 +125,18 @@ export function presented(
 	shows: (candidate: Advertised, at: Path.Valid) => boolean = () => true,
 ): Map<Path.Valid, Advertised> {
 	const out = new Map<Path.Valid, Advertised>();
-	let rootLen = -1;
+	// The most specific claim covering the prefix wins, then the deeper filing, as a request resolves.
+	let rootRank: [number, number] | undefined;
 	for (const [covered, candidates] of table) {
 		if (!carries(covered)) continue;
 		if (Path.hasPrefix(covered, prefix)) {
-			if (covered.length < rootLen) continue;
-			// A scoped route covers only what it claims, so the best one that can serve the prefix wins.
-			const snap = firstEligible(
-				candidates,
-				(candidate) => (!candidate.claim || candidate.claim.overlaps(prefix)) && shows(candidate, prefix),
-			);
+			const snap = firstEligible(candidates, (candidate) => shows(candidate, prefix));
 			if (!snap) continue;
-			rootLen = covered.length;
-			const above = BigInt(Path.parts(prefix).length - Path.parts(covered).length);
+			const depth = Path.parts(covered).length;
+			const rank: [number, number] = [depth - Number(snap.route.above ?? 0n), depth];
+			if (rootRank && (rank[0] < rootRank[0] || (rank[0] === rootRank[0] && rank[1] < rootRank[1]))) continue;
+			rootRank = rank;
+			const above = BigInt(Path.parts(prefix).length - depth);
 			out.set(
 				Path.empty(),
 				keepAbove && above > 0n
@@ -273,6 +272,8 @@ export function staleHole(budget: number): Hole {
 export interface DropRun extends Run, Hole {
 	/** Copied into a cursor from the track's runs, which it folds in afresh on each change. */
 	received?: boolean;
+	/** The reader's own fill refused it: a verdict for it whatever it reads, until it widens. */
+	own?: boolean;
 }
 
 /** Whether two runs say the same thing, so they may merge. */
@@ -281,7 +282,8 @@ export function sameHole(a: DropRun, b: DropRun): boolean {
 		toStreamCode(a.error) === toStreamCode(b.error) &&
 		!a.skip === !b.skip &&
 		a.stale === b.stale &&
-		!a.received === !b.received
+		!a.received === !b.received &&
+		!a.own === !b.own
 	);
 }
 
@@ -294,13 +296,21 @@ export function insertDrop(
 	drops: readonly DropRun[],
 	start: bigint,
 	end: bigint,
-	hole: Hole & { received?: boolean },
+	hole: Hole & { received?: boolean; own?: boolean },
 ): DropRun[] {
 	if (start >= end) return [...drops];
 	const next = removeRun(drops, start, end);
 	let at = 0;
 	while (at < next.length && next[at].start < start) at++;
-	next.splice(at, 0, { start, end, error: hole.error, skip: hole.skip, stale: hole.stale, received: hole.received });
+	next.splice(at, 0, {
+		start,
+		end,
+		error: hole.error,
+		skip: hole.skip,
+		stale: hole.stale,
+		received: hole.received,
+		own: hole.own,
+	});
 	const merged: DropRun[] = [];
 	for (const run of next) {
 		const last = merged[merged.length - 1];
@@ -407,6 +417,17 @@ export interface ReadGroupFrame {
 	inflated?: number;
 	/** The payload to stream instead of `frame.payload`, for a frame written in pieces. */
 	chunks?: FrameConsumer;
+}
+
+/**
+ * The groups a group moved onto another copy is judged within: its logical reader's window below
+ * that reader's cursor cap. Not the copy's own, which a route switch starts at its boundary.
+ */
+export interface Within {
+	contains: (key: bigint) => boolean;
+	end: () => bigint | undefined;
+	/** What can change either. */
+	changed: readonly Getter<unknown>[];
 }
 
 /** What a resumed reader's {@link ResumeSource} sees of the subscriber it serves. */
@@ -743,8 +764,6 @@ export const hooks: {
 	subscriberEndError: (subscriber: Subscriber) => Error | undefined;
 	/** What this subscriber resolves its ranges against, for a test. Assigned by `track.ts`. */
 	subscriberHoldings: (subscriber: Subscriber) => Holdings;
-	/** The times a received copy's feed accounting may place, for a test. Assigned by `track.ts`. */
-	landingSpan: (producer: Producer) => Run | undefined;
 	/**
 	 * How many keys just below `key` the publisher declared it never produced: the skip run
 	 * ending at `key`, which a moq-transport Prior Group ID Gap names. Mirrors the Rust
@@ -785,17 +804,15 @@ export const hooks: {
 	startsAtKeys: (producer: Producer) => void;
 	/**
 	 * Record where the upstream publisher started each of a lite-07 copy's live wire ranges, as
-	 * `[time, start, through]` by the time each asked from (0 for the oldest group), `start`
-	 * undefined for one with no group to deliver, replacing the last set: a reader's time start the
-	 * copy cannot place among its own groups resolves to it. An empty answer holds for a reader
-	 * within `budget`, the narrowest the subscription asked in milliseconds. Mirrors the Rust
-	 * `track::Producer::time_starts`; assigned by `track.ts`.
+	 * `[time, start, budget]` by the time each asked from (0 for the oldest group), `start`
+	 * undefined for one with no group to deliver at or before its time, answered under at most
+	 * `budget`, the max delay in milliseconds, replacing the last set. A reader's time start the
+	 * copy cannot place among its own groups resolves to the range asked from it: a start at or
+	 * before the time names the group containing it, and anything else says no group there is
+	 * left within the budget. Mirrors the Rust `track::Producer::time_starts`; assigned by
+	 * `track.ts`.
 	 */
-	timeStarts: (
-		producer: Producer,
-		starts: Iterable<readonly [bigint, bigint | undefined, (bigint | undefined)?]>,
-		budget: number,
-	) => void;
+	timeStarts: (producer: Producer, starts: Iterable<readonly [bigint, bigint | undefined, number]>) => void;
 	/**
 	 * Tell a lite-07 copy where its publisher started each live join, as `[minAge, start, past]`,
 	 * the Min Age in milliseconds the join was asked under, replacing the last set: a reader's
@@ -956,9 +973,10 @@ export const hooks: {
 	wire: (subscriber: Subscriber) => WireRecord;
 	/**
 	 * Whether this subscriber's budget, or `budget` in milliseconds when given, gives up on `key`,
-	 * judged by its successor; see {@link expireGroup}.
+	 * judged by its successor; see {@link expireGroup}. Successors count within `within` when
+	 * given, else within this subscriber's window below its cursor's cap.
 	 */
-	staleAt: (subscriber: Subscriber, key: bigint, budget?: number) => Expiry;
+	staleAt: (subscriber: Subscriber, key: bigint, budget?: number, within?: Within) => Expiry;
 	/** A group the subscriber's track still caches, as a fresh read handle. */
 	cachedGroup: (subscriber: Subscriber, key: bigint, from?: number) => GroupConsumer | undefined;
 	/**
@@ -966,8 +984,11 @@ export const hooks: {
 	 * budget gives up on it, judged by the route copy it is read from when routed.
 	 */
 	judgedGroup: (subscriber: Subscriber, key: bigint) => GroupConsumer | undefined;
-	/** Whether {@link cachedGroup} would find the group, without making a read handle. */
-	holdsGroup: (subscriber: Subscriber, key: bigint) => boolean;
+	/**
+	 * Whether {@link cachedGroup} would find the group, without making a read handle; with `whole`,
+	 * only one held from its first frame.
+	 */
+	holdsGroup: (subscriber: Subscriber, key: bigint, whole?: boolean) => boolean;
 	/**
 	 * When the latest group the subscriber's track caches in `[start, end)` landed, undefined when
 	 * it caches none; a routed reader asks every copy. Mirrors the Rust `Subscriber::landed`.
@@ -1018,7 +1039,7 @@ export const hooks: {
 	/** Whether a reader beyond one-shot fetches subscribes to this copy. */
 	subscribing: (producer: Producer) => Getter<boolean>;
 	/** The aggregate across every reader, one-shot fetches included: what the wire asks for. */
-	requested: (producer: Producer) => Getter<Subscription | undefined>;
+	requested: (producer: Producer) => Subscriptions;
 	/** Leave a wire copy serving its cache and fills without a live feed. */
 	cacheTrack: (producer: Producer) => void;
 	/** Fail subscriptions reaching beyond `edge`, keeping history readers and one-shot fetches. */
@@ -1232,9 +1253,6 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	subscriberHoldings: () => {
-		throw new Error("track.ts not loaded");
-	},
-	landingSpan: () => {
 		throw new Error("track.ts not loaded");
 	},
 	skippedBelow: () => {

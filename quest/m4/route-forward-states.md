@@ -41,4 +41,3 @@ Public API: none expected. Wire: none.
 ## Related
 
 - [Route wakes](/quest/m4/route-wakes.md) - which fronts a route change wakes
-- [A lite-07 claim is shown no broader than its grants](/quest/m2/lite07-claim-reach-routes.md) - an advertised claim a request is then refused on

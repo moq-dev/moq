@@ -389,6 +389,14 @@ pub enum Error {
 		reason: &'static str,
 	},
 
+	/// A regular MP4's chapter list holds 255 chapters.
+	#[error("{0} chapters, more than the 255 a chapter list holds")]
+	TooManyChapters(usize),
+
+	/// A regular MP4's chapter list holds titles of 255 bytes.
+	#[error("a chapter title of {0} bytes, more than the 255 a chapter list holds")]
+	ChapterTitleTooLong(usize),
+
 	/// A file to repair is not a recording that an MP4 export left unfinished.
 	#[error("not an unfinished mp4 recording: {0}")]
 	Unrepairable(&'static str),

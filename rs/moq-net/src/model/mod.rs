@@ -63,7 +63,7 @@ pub mod origin {
 		RouteOptions,
 	};
 	#[cfg(feature = "async")]
-	pub(crate) use super::origin_impl::{Lane, NodeFilter};
+	pub(crate) use super::origin_impl::{Lane, NodeFilter, filed};
 
 	// Relay-level: every route change, for forwarding and stats. Apps read
 	// `announce` and `follow` instead.

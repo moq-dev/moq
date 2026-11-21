@@ -457,6 +457,10 @@ For each path and Instance its peer's prefixes present, it sends at most one cla
 The claim carries the publisher's cost to it, the lowest priority and any drain on the way, and its chain (see [ANNOUNCE_START](#announce-start)).
 It sets the claim's `Marked` flag when a marked session lies on the way to it, and never sends such a claim over a marked session.
 
+A claim is shown no broader than the grants on its way let a route serve it.
+A node files a claim at its own prefix when the grant it holds the claim under, its own publish grant or what the session lets the peer publish, covers that prefix, and otherwise at each of the grant's prefixes beneath it, as many segments above each as it is broader (see [Above](#announce-start)).
+It presents a claim no higher than where it is filed, so a relay passes on what it was shown, and no peer is shown a claim at a path a request through it is refused for want of a grant.
+
 When the publisher's way to a claim changes, it sends an ANNOUNCE_UPDATE.
 While it has no way to a claim it still holds, it sets the claim's `Unavailable` flag rather than withdrawing it, and fails requests for it with UNROUTABLE; it sends an ANNOUNCE_END with `Lost` once it has shown the claim unavailable for 800 milliseconds.
 A receiver takes `Unavailable` only as a change to a claim it already holds at that Epoch and Above: it does not hold a claim it is first told unavailable until an ANNOUNCE_UPDATE clears the flag.
@@ -1544,6 +1548,9 @@ Any other value is a PROTOCOL_VIOLATION.
 Both ends include the Group they name, so a Range from Time `a` to Time `b` delivers every Group from the one containing `a` through the one containing `b`.
 The publisher resolves a Time Anchor, and a `Start` of None, against the Track as it holds it.
 A Range resolves once: an update that leaves it live does not resolve it again.
+A relay's copy places a Time `Start` only where it can show its origin would: at the highest Group it holds starting at or below the time once every start between is known not to be a Group, or at the Range Start a Range of its own subscription from that time was answered with.
+A Range Start past the time, or 0, shows only that no Group at or below the time is left within the smallest `Subscriber Max Age` asked between adding that Range and its answer.
+Otherwise the relay adds a Range from that time to its subscription and waits for the answer.
 
 A `Start` is a floor, not a request; `Subscriber Max Age` and `Subscriber Min Age` are the only things that ask for data.
 The publisher SHOULD start at the oldest group at or above the floor that [Expiration](#expiration) has not expired, and MUST NOT deliver an older one.
@@ -2308,6 +2315,7 @@ A stream that FINs without a GROUP_END carries a closed Group, which may have he
 - Added ANNOUNCE_FLOOR (0x3), closing each batch of a route's claims with the Revision of the node the route leads to, so a stale copy never revives a claim whose withdrawal a newer one delivered.
 - A node closes a session whose peer leaves its Announce Stream undrained for 10 seconds.
 - A publisher presents only the most specific claim covering the requested prefix.
+- A claim is filed and presented only where every grant on its way covers it whole: a claim broader than a grant is filed at each of the grant's prefixes beneath it, with Above.
 - A subscriber whose scope confines it to some prefixes SHOULD request those, and edit its set when they change.
 - A prefix wider than the subscriber's scope is answered region by region, a claim above a region presented at the region, so a subscriber whose regions do not fit one request asks for a prefix they share. A claim is within the scope when one of the scope's prefixes lies at, beneath, or above it. A scope change takes effect before the ANNOUNCE_OK of any edit read after it, and an edit may change nothing.
 - Added `Node` to TRACK, TRACKS, SUBSCRIBE, FETCH, and DATAGRAMS: the routing node announcing the claim the first hop selected, which every later hop follows.
@@ -2338,6 +2346,7 @@ A stream that FINs without a GROUP_END carries a closed Group, which may have he
 - Added `Group Order` to SUBSCRIBE and SUBSCRIBE_UPDATE: descending (0x0, the previous fixed order) or ascending (0x1).
 - Encoded `Subscriber Max Age` in SUBSCRIBE and SUBSCRIBE_UPDATE as milliseconds plus one, with zero meaning no limit.
 - Added an optional `Subscriber Min Age` to SUBSCRIBE and SUBSCRIBE_UPDATE, the subscriber's target latency, encoded as milliseconds plus one with zero meaning not stated. A Range with no `Start` starts at the Group containing the live edge minus it, and a relay that can't place that Group from what it holds asks upstream. A relay forwards the largest value among subscriptions joining that way, counting not stated as the largest.
+- A relay places a Time `Start` only where it can show its origin would, and otherwise adds a Range from that time to its own subscription and waits for its answer.
 - FETCH reads one Group or a slice of one, and SUBSCRIBE reads whole Groups but for a Position `Start`: any other read of part of a Group FETCHes it. A publisher holding only part of a Group a subscription covers drops it.
 - A SUBSCRIBE_UPDATE that lowers a `Start` covers the groups below the old start that the publisher still holds, not only those that arrive later. A group already sent is not sent again.
 - Replaced SUBSCRIBE_OK `Group` with a `Range Start` per Range: the Group where that Range's delivery starts, including at a Time Anchor or a live join, from which its Groups are owed.

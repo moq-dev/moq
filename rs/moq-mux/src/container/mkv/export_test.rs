@@ -42,7 +42,12 @@ fn declared_avc() -> Live {
 			)
 			.unwrap(),
 		);
-		catalog.modify().unwrap().video.renditions.insert(name, config);
+		catalog
+			.modify(catalog.next_timestamp())
+			.unwrap()
+			.video
+			.renditions
+			.insert(name, config);
 	})
 }
 
@@ -94,7 +99,12 @@ async fn declared_reorder_starts_before_zero_and_resets_each_group() {
 		let mut config = hang::catalog::AudioConfig::new(hang::catalog::AAC { profile: 2 }, 44100, 2);
 		config.description = Some(Bytes::from_static(&[0x12, 0x10]));
 		config.container = hang::catalog::Container::Legacy;
-		catalog.modify().unwrap().audio.renditions.insert(name, config);
+		catalog
+			.modify(catalog.next_timestamp())
+			.unwrap()
+			.audio
+			.renditions
+			.insert(name, config);
 	});
 	for start in [0, 400_000] {
 		for (index, offset) in [0, 160_000, 80_000, 40_000, 120_000].into_iter().enumerate() {
@@ -489,7 +499,12 @@ async fn export_derives_video_geometry_before_header() {
 	let mut live = Live::new(".vp8", |catalog, name| {
 		let mut config = VideoConfig::new(VideoCodec::VP8);
 		config.container = Container::Legacy;
-		catalog.modify().unwrap().video.renditions.insert(name, config);
+		catalog
+			.modify(catalog.next_timestamp())
+			.unwrap()
+			.video
+			.renditions
+			.insert(name, config);
 	});
 	// Geometry-less startup frames must not park the source before the keyframe.
 	live.track.write(raw_frame(0, &[0x31, 0x00, 0x00], true)).unwrap();
@@ -623,7 +638,12 @@ async fn export_rejects_cmaf_track() {
 		config.container = Container::Cmaf {
 			init: Bytes::from(vec![0u8; 32]),
 		};
-		catalog.modify().unwrap().video.renditions.insert(name, config);
+		catalog
+			.modify(catalog.next_timestamp())
+			.unwrap()
+			.video
+			.renditions
+			.insert(name, config);
 	});
 
 	let mut exporter = crate::container::mkv::Export::new(live.source().await, live.catalog_stream().await);
@@ -941,7 +961,12 @@ fn add_aac(live: &mut Live) -> crate::container::Producer<crate::catalog::hang::
 		let mut config = hang::catalog::AudioConfig::new(hang::catalog::AAC { profile: 2 }, 44100, 2);
 		config.description = Some(Bytes::from_static(&[0x12, 0x10]));
 		config.container = hang::catalog::Container::Legacy;
-		catalog.modify().unwrap().audio.renditions.insert(name, config);
+		catalog
+			.modify(catalog.next_timestamp())
+			.unwrap()
+			.audio
+			.renditions
+			.insert(name, config);
 	})
 }
 
@@ -990,7 +1015,12 @@ async fn a_failed_rendition_continues_on_its_replacement() {
 			replacement.write(raw_frame(ms * 1000, b"new", true)).unwrap();
 			out.extend(drain_now(&mut exporter).await.unwrap());
 		}
-		live.catalog.modify().unwrap().audio.renditions.remove(&failed);
+		live.catalog
+			.modify(live.catalog.next_timestamp())
+			.unwrap()
+			.audio
+			.renditions
+			.remove(&failed);
 		live.track.write(video_frame(300_000, true)).unwrap();
 		out.extend(drain_now(&mut exporter).await.unwrap());
 		live.track.end_with(None).unwrap();
@@ -1163,7 +1193,7 @@ async fn a_rendition_moved_to_a_cmaf_track_fails() {
 	};
 	moving
 		.catalog
-		.modify()
+		.modify(moving.catalog.next_timestamp())
 		.unwrap()
 		.video
 		.renditions
@@ -1379,7 +1409,12 @@ async fn decode_order_is_independent_of_cross_track_arrival_order() {
 		config.container = Container::Legacy;
 		let mut live = Live::audio(config.clone());
 		let mut other = live.add_track("other", |catalog, name| {
-			catalog.modify().unwrap().audio.renditions.insert(name, config);
+			catalog
+				.modify(catalog.next_timestamp())
+				.unwrap()
+				.audio
+				.renditions
+				.insert(name, config);
 		});
 		let mut export = super::Export::new(live.source().await, live.catalog_stream().await)
 			.with_delay(
@@ -1417,14 +1452,26 @@ async fn reordered_video_uses_decode_deadlines_but_keeps_block_pts() {
 	use crate::container::test_util::{Live, raw_frame, video_frame};
 	use hang::catalog::{AAC, AudioConfig, Container};
 	let mut live = Live::avc3();
-	for config in live.catalog.modify().unwrap().video.renditions.values_mut() {
+	for config in live
+		.catalog
+		.modify(live.catalog.next_timestamp())
+		.unwrap()
+		.video
+		.renditions
+		.values_mut()
+	{
 		config.jitter = Some(std::time::Duration::from_millis(120));
 	}
 	let mut audio = live.add_track("audio", |catalog, name| {
 		let mut config = AudioConfig::new(AAC { profile: 2 }, 44100, 2);
 		config.description = Some(Bytes::from_static(&[0x12, 0x10]));
 		config.container = Container::Legacy;
-		catalog.modify().unwrap().audio.renditions.insert(name, config);
+		catalog
+			.modify(catalog.next_timestamp())
+			.unwrap()
+			.audio
+			.renditions
+			.insert(name, config);
 	});
 	for (index, timestamp) in [1000, 1120, 1040, 1080].into_iter().enumerate() {
 		live.track.write(video_frame(timestamp * 1000, index == 0)).unwrap();
@@ -1529,16 +1576,26 @@ async fn disabled_renditions_stay_out_of_the_header_and_idle_after_it() {
 	let mut live = Live::audio(config.clone());
 	let main = live.track.name().to_string();
 	let mut other = live.add_track("other", |catalog, name| {
-		catalog.modify().unwrap().audio.renditions.insert(name, config.clone());
+		catalog
+			.modify(catalog.next_timestamp())
+			.unwrap()
+			.audio
+			.renditions
+			.insert(name, config.clone());
 	});
 	let _disabled = live.add_track("disabled", |catalog, name| {
 		let mut config = config.clone();
 		config.enabled = false;
-		catalog.modify().unwrap().audio.renditions.insert(name, config);
+		catalog
+			.modify(catalog.next_timestamp())
+			.unwrap()
+			.audio
+			.renditions
+			.insert(name, config);
 	});
 	let set_enabled = |live: &mut Live, enabled: bool| {
 		live.catalog
-			.modify()
+			.modify(live.catalog.next_timestamp())
 			.unwrap()
 			.audio
 			.renditions
@@ -1579,7 +1636,14 @@ async fn stalled_presentation_time_keeps_the_export_bounded() {
 	let backward: fn(u64) -> u64 = |index| 10_000_000 - index * 10_000;
 	for (name, pts, lookahead) in [("flat", flat, jitter), ("backward", backward, deepest)] {
 		let mut live = Live::avc3();
-		for config in live.catalog.modify().unwrap().video.renditions.values_mut() {
+		for config in live
+			.catalog
+			.modify(live.catalog.next_timestamp())
+			.unwrap()
+			.video
+			.renditions
+			.values_mut()
+		{
 			config.jitter = Some(jitter);
 		}
 		let mut export = super::Export::new(live.source().await, live.catalog_stream().await)
@@ -1609,7 +1673,14 @@ async fn live_reordered_video_keeps_every_frame() {
 	use std::time::Duration;
 	let frame = 40_000;
 	let mut live = Live::avc3();
-	for config in live.catalog.modify().unwrap().video.renditions.values_mut() {
+	for config in live
+		.catalog
+		.modify(live.catalog.next_timestamp())
+		.unwrap()
+		.video
+		.renditions
+		.values_mut()
+	{
 		config.jitter = Some(Duration::from_millis(120));
 	}
 	let mut export = super::Export::new(live.source().await, live.catalog_stream().await)

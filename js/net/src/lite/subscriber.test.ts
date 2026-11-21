@@ -3046,6 +3046,46 @@ test("a widened range's SUBSCRIBE_STARTED resolves the feed's start", async () =
 	}
 });
 
+// A reader joining a copy whose oldest range already covers its time gets no start of its own from
+// that range, so the copy asks its upstream with a probe, a range of its own from the time, and
+// retires it once the answer places the reader. Mirrors the Rust
+// `a_received_copy_places_no_time_start_by_another_range`.
+test("a lite-07 copy asks upstream for a time start it cannot place", async () => {
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, toHop(1n));
+	const broadcast = subscriber.consume(Path.from("room"));
+	const oldest = broadcast.track("video").subscribe({ delay: { max: null } });
+	let reader: ReturnType<typeof oldest.fork> | undefined;
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version);
+		const request = await opened(1);
+		const sent = new Reader(request.outbound, undefined, version);
+		expect(await sent.u53()).toBe(StreamId.Subscribe);
+		await Subscribe.decode(sent, version);
+		await request.reading;
+		// The oldest group's range starts at 5, which may have expired a group at or before 3.
+		await respond(request, version, [{ start: new SubscribeStart([5n]) }]);
+		await drainReactions();
+		reader = oldest.fork({ delay: { max: null }, ranges: [{ start: 3n }] });
+		const probe = await SubscribeUpdate.decode(sent, version);
+		expect(probe.remove ?? []).toEqual([]);
+		expect(probe.ranges).toEqual([{ start: { time: 3n }, end: { time: 3n } }]);
+		// Answered past its time: no group at or before 3, so the reader starts at the oldest group.
+		await respond(request, version, [{ started: new SubscribeStarted(1n, 5n) }]);
+		await drainReactions();
+		expect(hooks.servingResolved(reader)).toEqual([{ start: 0n, end: undefined, floored: false }]);
+		const retired = await SubscribeUpdate.decode(sent, version);
+		expect(retired.remove).toEqual([1n]);
+	} finally {
+		reader?.close();
+		oldest.close();
+		broadcast.close();
+		subscriber.close();
+	}
+});
+
 // A range the publisher answers with no group to deliver lands none of its groups, so the copy is
 // told, and an ordered read holds no later group back for its time. Only one whose end takes in its
 // time says so: one following the live edge may still get the group containing it.
@@ -3054,13 +3094,11 @@ test("a lite-07 range answered empty is reported only for a range reaching its t
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, toHop(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
-	const reported: (readonly [bigint, bigint | undefined, (bigint | undefined)?])[][] = [];
+	const reported: (readonly [bigint, bigint | undefined, number])[][] = [];
 	const timeStarts = hooks.timeStarts;
-	const budgets: number[] = [];
-	hooks.timeStarts = (producer, starts, budget) => {
+	hooks.timeStarts = (producer, starts) => {
 		reported.push([...starts]);
-		budgets.push(budget);
-		timeStarts(producer, starts, budget);
+		timeStarts(producer, starts);
 	};
 	const track = broadcast.track("video").subscribe({
 		delay: { max: null },
@@ -3073,9 +3111,8 @@ test("a lite-07 range answered empty is reported only for a range reaching its t
 		await request.reading;
 		await respond(request, version, [{ start: new SubscribeStart([undefined, undefined]) }]);
 		await drainReactions();
-		expect(reported.at(-1)).toEqual([[10n, undefined, 20n]]);
-		// Under the narrowest budget the subscription asked with, here none.
-		expect(budgets.at(-1)).toEqual(NO_MAX_DELAY);
+		// Under the budget the range was asked with, here none.
+		expect(reported.at(-1)).toEqual([[10n, undefined, NO_MAX_DELAY]]);
 	} finally {
 		hooks.timeStarts = timeStarts;
 		track.close();

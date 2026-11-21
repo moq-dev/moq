@@ -184,8 +184,8 @@ route key lane's early signal above ended when
 [moq-dev/moq#8987](https://github.com/moq-dev/moq/pull/8987) landed.
 That epic finished 2026-11-20 with its last child
 ([moq-dev/moq#9231](https://github.com/moq-dev/moq/pull/9231)), and the cut's
-routing wait moved to [claim reach](/quest/m2/lite07-claim-reach-routes.md)
-(maintainer, 2026-11-20).
+routing wait moved to claim reach (maintainer, 2026-11-20), which
+[moq-dev/moq#9290](https://github.com/moq-dev/moq/pull/9290) finished.
 
 Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit, which also
 audited the lite-07 draft for what it could lose):
@@ -238,7 +238,6 @@ and switching rules in `rs/moq-net/AGENTS.md` before the cut):
 
 - [A time anchor lands by group spans](/quest/m2/time-addressing/span-time-anchors.md) - the draft's Time Anchor rule resolves a time inside a skipped span or a whole group's span
 - [First-party producers keep lite-07 group spans apart](/quest/m2/producer-spans.md) - no group starts inside a span a lower group's End closed
-- [A lite-07 claim is shown no broader than the grants it crossed](/quest/m2/lite07-claim-reach-routes.md) - a peer is never shown a claim at a path no route of it can serve, through any number of relays (maintainer, 2026-11-20)
 
 ## Related
 

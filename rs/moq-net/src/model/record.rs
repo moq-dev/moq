@@ -327,7 +327,7 @@ mod test {
 	/// An account on a pool that any bill puts over its capacity, so a debt it is owed stands.
 	fn account() -> (cache::Pool, Arc<cache::Track>) {
 		let pool = cache::Pool::new(cache::Config::default().with_capacity(1));
-		let track = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
+		let track = cache::Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
 		(pool, track)
 	}
 
@@ -496,7 +496,7 @@ mod test {
 	#[test]
 	fn a_debt_is_paid_by_any_shrink_and_forgiven_without_pressure() {
 		let pool = cache::Pool::new(cache::Config::default().with_capacity(2 * RUN_OVERHEAD));
-		let track = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
+		let track = cache::Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
 		let mut bill = track.reader();
 		bill.set(4 * RUN_OVERHEAD);
 		owe(&track, 3 * RUN_OVERHEAD);

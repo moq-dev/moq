@@ -55,6 +55,22 @@ function cost(budget: Budget, range: WireRange): number | undefined {
 	}
 }
 
+/**
+ * As many of `ranges`, in order, as fit `budget` beside the `spent` ones, at least the first: one
+ * range past them still fits the message, since the budget is half of it. Mirrors the Rust
+ * `Budget::fit_after`.
+ */
+export function fitAfter(budget: Budget, spent: readonly WireRange[], ranges: readonly WireRange[]): WireRange[] {
+	let used = spent.reduce((total, range) => total + (cost(budget, range) ?? Number.POSITIVE_INFINITY), 0);
+	const taken: WireRange[] = [];
+	for (const range of ranges) {
+		used += cost(budget, range) ?? Number.POSITIVE_INFINITY;
+		if (used > budget.bytes && taken.length > 0) break;
+		taken.push(range);
+	}
+	return taken;
+}
+
 /** Groups from `start`, up to the exclusive `end` or open. */
 interface Span {
 	start: bigint;

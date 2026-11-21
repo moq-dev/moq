@@ -865,7 +865,7 @@ mod tests {
 	) -> moq_mux::container::Producer<moq_mux::catalog::hang::Container> {
 		config.container = hang::catalog::Container::Legacy;
 		catalog
-			.modify()
+			.modify(catalog.next_timestamp())
 			.unwrap()
 			.video
 			.renditions
@@ -921,7 +921,7 @@ mod tests {
 		let mut low = vp8(&mut broadcast, &mut catalog, "low", 360);
 		let set_enabled = |catalog: &mut moq_mux::catalog::Producer, name: &str, enabled: bool| {
 			catalog
-				.modify()
+				.modify(catalog.next_timestamp())
 				.unwrap()
 				.video
 				.renditions
@@ -989,7 +989,7 @@ mod tests {
 			config.track = Some(track.to_string());
 			config.broadcast = broadcast.map(|rel| Relative::new(rel).unwrap());
 			catalog
-				.modify()
+				.modify(catalog.next_timestamp())
 				.unwrap()
 				.video
 				.renditions
@@ -1068,7 +1068,7 @@ mod tests {
 		assert_eq!(next(&mut writes).await, (Bytes::from_static(b"vp9-0"), 98));
 
 		catalog
-			.modify()
+			.modify(catalog.next_timestamp())
 			.unwrap()
 			.video
 			.renditions
@@ -1092,7 +1092,7 @@ mod tests {
 		let mut low = vp8(&mut broadcast, &mut catalog, "low", 360);
 		let set_enabled = |catalog: &mut moq_mux::catalog::Producer, enabled: bool| {
 			catalog
-				.modify()
+				.modify(catalog.next_timestamp())
 				.unwrap()
 				.video
 				.renditions
@@ -1156,7 +1156,7 @@ mod tests {
 		let mut low = vp8(&mut broadcast, &mut catalog, "low", 360);
 		let set_enabled = |catalog: &mut moq_mux::catalog::Producer, enabled: bool| {
 			catalog
-				.modify()
+				.modify(catalog.next_timestamp())
 				.unwrap()
 				.video
 				.renditions
@@ -1214,7 +1214,7 @@ mod tests {
 		let mut low = vp8(&mut broadcast, &mut catalog, "low", 360);
 		let set_enabled = |catalog: &mut moq_mux::catalog::Producer, enabled: bool| {
 			catalog
-				.modify()
+				.modify(catalog.next_timestamp())
 				.unwrap()
 				.video
 				.renditions
@@ -1267,7 +1267,7 @@ mod tests {
 		let mut low = vp8(&mut broadcast, &mut catalog, "low", 360);
 		let set_enabled = |catalog: &mut moq_mux::catalog::Producer, name: &str, enabled: bool| {
 			catalog
-				.modify()
+				.modify(catalog.next_timestamp())
 				.unwrap()
 				.video
 				.renditions
@@ -1294,7 +1294,7 @@ mod tests {
 		idle(&mut writes).await;
 
 		{
-			let mut modify = catalog.modify().unwrap();
+			let mut modify = catalog.modify(catalog.next_timestamp()).unwrap();
 			for config in modify.video.renditions.values_mut() {
 				config.enabled = false;
 			}
@@ -1335,7 +1335,7 @@ mod tests {
 		config.coded_height = Some(1080);
 		config.broadcast = Some(Relative::new("./missing").unwrap());
 		catalog
-			.modify()
+			.modify(catalog.next_timestamp())
 			.unwrap()
 			.video
 			.renditions
@@ -1345,7 +1345,7 @@ mod tests {
 		assert_eq!(written(&mut writes).await.as_ref(), b"low-1");
 
 		catalog
-			.modify()
+			.modify(catalog.next_timestamp())
 			.unwrap()
 			.video
 			.renditions

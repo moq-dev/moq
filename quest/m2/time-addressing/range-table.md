@@ -1,41 +1,31 @@
-# [M] Rust and JS deliver the same groups from one range table
+# [M] The range table's route switch leaves part of the range to the new route
 
 ## Goal
 
-One shared table of range cases pins which groups a subscription delivers, and both Rust and
-`@moq/net` pass it. Each case gives a track's groups at the origin, what a copy holds
-(complete, sparse, or partly evicted), a lite-07 range (a time start, a Position, or no anchor
-with a Min Age, and a time end or none), and the exact group IDs delivered, plus whether the copy
-must ask upstream. Every case runs direct from the origin, through a relay copy cold and warm, as
-a late join, and across a route switch mid-read. The copy's answer always equals the origin's,
-so the cut publishes lite-07 knowing the two implementations agree.
+The shared lite-07 range table (`rs/moq-net/tests/range-table.json`, run by
+`range_table.rs`, `js/net/src/range-table.test.ts`, and `just test relay-fill`) switches
+routes while the reader still waits on part of its range, in Rust and `@moq/net` alike, so
+the new route's copy supplies the rest:
+
+- whole groups the old route never delivered, and
+- a group the old route delivered only the head of, so the new copy holds only its later
+  frames. A reader whose range covers that group on the new copy gets it whole, the relay
+  fetching its head, or sees it named in SUBSCRIBE_DROP when upstream can't supply it.
+
+Today the `switch` mode lets the old route deliver every group before the switch, since
+the origin writes them all first and nothing stalls the old link, so it proves the resume
+neither repeats nor loses a group and ends where it should, but not that the new route
+fills what is left.
 
 ## Plan
 
-Decided 2026-11-20 (maintainer, /quest-plan of the main → release audit): ✅ m2, so the cut
-waits on it (rejected: m4 after the cut, since a divergence found then is a lite-07 behavior fix
-after publication; dropping it for the per-language tests no relative anchors adds, which never
-compare Rust with JS).
-
-The audit reproduced why per-language tests weren't enough: with latest group 9, the same
-`relative: 2` through `time: 8` subscription returned `[7, 8]` from a complete JS copy and `[1, 2]`
-from one holding `[1, 2, 9]`. [moq-dev/moq#9265](https://github.com/moq-dev/moq/pull/9265)
-removes that anchor, but a live join by Min Age and a time start resolve against holdings the
-same way, and nothing compares the two languages' answers.
-
-Recommended:
-
-- One JSON fixture read by a Rust test and a `bun:test` file, as
-  `rs/moq-json/tests/window-vectors.json` and `js/json/src/window/vectors.test.ts` already
-  share one. Expected outputs are group IDs, never timings.
-- Seed it with the audit's sparse-copy case restated without the relative anchor, and the cases
-  no relative anchors names: a Min Age reaching past what a copy holds, an oldest reader and a
-  live reader on one relay, a time start between held groups linked by Previous Start (which a
-  copy may answer from cache) and one that isn't (which must ask).
-- The relayed run uses the real copy path in each language, so a JS copy under a Rust origin
-  is covered the way `just test relay-fill` already covers fills.
-- Drive time with the manual clocks both test suites already use.
-- A copy holding only a group's later frames is a case too: the relay fetches the head and
-  delivers the group whole, or names it in SUBSCRIBE_DROP when upstream can't supply it.
+- Stall the old route's link once the reader has its first groups: Rust's mock transport
+  holds uni streams (`hold_unis`), and `@moq/net`'s mock holds a side's writes
+  (`MockTransport.hold`), which needs a per-stream release to let only some groups through.
+- For the later-frames case, write groups of several frames and switch mid-group. Neither
+  language's public API reads part of a group (`group::Fetch::frame_start` is
+  crate-private), so the resume at (G, N) is the only way a copy comes to hold one.
+- Land it after [moq-dev/moq#9276](https://github.com/moq-dev/moq/pull/9276), which
+  changes where a switch caps the old route, and so what each copy holds after it.
 
 Public API: none. Wire: none; a divergence this finds is fixed under lite-07-wip before the cut.

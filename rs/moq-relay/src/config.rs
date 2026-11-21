@@ -574,7 +574,14 @@ mod tests {
 
 	#[test]
 	fn session_limits_merge_without_crossing_peer_policy() {
-		if !test_env::Env::without(&["MOQ_LIMITS_CLIENT_ANNOUNCES", "MOQ_LIMITS_PEER_ANNOUNCES"]).isolate() {
+		if !test_env::Env::without(&[
+			"MOQ_LIMITS_CLIENT_ANNOUNCES",
+			"MOQ_LIMITS_PEER_ANNOUNCES",
+			"MOQ_LIMITS_CLIENT_LIVE_EDGES",
+			"MOQ_LIMITS_PEER_LIVE_EDGES",
+		])
+		.isolate()
+		{
 			return;
 		}
 		let dir = tempfile::tempdir().unwrap();
@@ -583,14 +590,21 @@ mod tests {
 		let config = Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), path.clone().into()]).unwrap();
 		assert_eq!(config.limits.client.resolve().announces, 7);
 		assert_eq!(config.limits.peer.resolve().announces, 90);
+		// Clients are bounded by default; a peer link carrying every publisher is not.
+		assert_eq!(config.limits.client.resolve().live_edges, Some(256 << 20));
+		assert_eq!(config.limits.peer.resolve().live_edges, None);
 		let config = Config::parse_and_merge([
 			std::ffi::OsString::from("moq-relay"),
 			path.into(),
 			"--limits-client-announces=0".into(),
+			"--limits-client-live-edges=0".into(),
+			"--limits-peer-live-edges=1024".into(),
 		])
 		.unwrap();
 		assert_eq!(config.limits.client.resolve().announces, 0);
 		assert_eq!(config.limits.peer.resolve().announces, 90);
+		assert_eq!(config.limits.client.resolve().live_edges, None);
+		assert_eq!(config.limits.peer.resolve().live_edges, Some(1024));
 	}
 
 	/// `[limits.peer.quic]` mirrors `[quic]`'s keys without touching `[quic]` itself.

@@ -54,6 +54,23 @@ impl Budget {
 		Some(lite::range_size(range, self.form)? + self.id)
 	}
 
+	/// As many of `ranges`, in order, as fit beside the `spent` ones, at least the first: one
+	/// range past them still fits the message, since the budget is half of it.
+	pub fn fit_after<'a>(&self, spent: impl IntoIterator<Item = &'a Range>, ranges: Vec<Range>) -> Vec<Range> {
+		let mut used = (spent.into_iter())
+			.map(|range| self.cost(range).unwrap_or(usize::MAX))
+			.fold(0, usize::saturating_add);
+		let mut taken = Vec::with_capacity(ranges.len());
+		for range in ranges {
+			used = used.saturating_add(self.cost(&range).unwrap_or(usize::MAX));
+			if used > self.bytes && !taken.is_empty() {
+				break;
+			}
+			taken.push(range);
+		}
+		taken
+	}
+
 	fn span(&self, start: Position, end: Option<Position>) -> usize {
 		self.cost(&span(start, end)).unwrap_or(usize::MAX)
 	}

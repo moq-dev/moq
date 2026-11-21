@@ -53,6 +53,10 @@ pub struct Subscription {
 	/// copy. Only a range whose start is exactly that group's start uses
 	/// it. Aggregated only when every reader resumes: the lowest position then.
 	pub(crate) resume: Option<Position>,
+	/// The time starts a received copy's readers wait on, each with the widest budget one
+	/// waits under: the copy can't prove where the publisher would start them, so its session
+	/// asks its upstream with a range of its own from each. Only an aggregate holds any.
+	pub(crate) asks: Vec<(u64, Duration)>,
 }
 
 /// How far behind the live edge a subscriber plays: where it starts, and how late it may fall.
@@ -304,6 +308,7 @@ impl Default for Subscription {
 			order: Order::Descending,
 			feed: false,
 			resume: None,
+			asks: Vec::new(),
 		}
 	}
 }

@@ -34,7 +34,13 @@ impl Live {
 			)
 			.unwrap();
 		insert(&mut catalog, track.name().to_string());
-		let kind = if catalog.modify().unwrap().video.renditions.contains_key(track.name()) {
+		let kind = if catalog
+			.modify(catalog.next_timestamp())
+			.unwrap()
+			.video
+			.renditions
+			.contains_key(track.name())
+		{
 			crate::container::Kind::Video
 		} else {
 			crate::container::Kind::Audio
@@ -83,14 +89,24 @@ impl Live {
 		config.coded_height = Some(240);
 		config.framerate = Some(30.0);
 		config.container = Container::Legacy;
-		catalog.modify().unwrap().video.renditions.insert(name, config);
+		catalog
+			.modify(catalog.next_timestamp())
+			.unwrap()
+			.video
+			.renditions
+			.insert(name, config);
 	}
 
 	/// One Legacy audio rendition.
 	pub(crate) fn audio(mut config: AudioConfig) -> Self {
 		config.container = Container::Legacy;
 		Self::new(".audio", |catalog, name| {
-			catalog.modify().unwrap().audio.renditions.insert(name, config);
+			catalog
+				.modify(catalog.next_timestamp())
+				.unwrap()
+				.audio
+				.renditions
+				.insert(name, config);
 		})
 	}
 
@@ -203,7 +219,7 @@ impl Moving {
 	/// Point the rendition at `track` in `broadcast` (`live` when `None`), described by `sps`.
 	pub(crate) fn point(&mut self, track: &str, broadcast: Option<&str>, sps: &'static [u8]) {
 		let config = Self::config(track, broadcast, sps);
-		let mut catalog = self.catalog.modify().unwrap();
+		let mut catalog = self.catalog.modify(self.catalog.next_timestamp()).unwrap();
 		catalog.video.renditions.insert(Self::RENDITION.to_string(), config);
 	}
 

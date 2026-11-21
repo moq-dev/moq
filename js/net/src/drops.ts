@@ -134,6 +134,10 @@ export class DropSet {
 	// The keys in `#runs`, whatever the reason, as coalesced runs, so whether drops cover a span is
 	// one lookup rather than a walk of every run in it. Mirrors the Rust `TrackState::dropped`.
 	readonly #keys = new Runs<Run>(() => true);
+	// The keys in `#runs` no budget takes back, skips and final drops, as coalesced runs: a stale
+	// drop says nothing of a reader wider than the budget it was judged under. Mirrors the Rust
+	// `TrackState::gone`.
+	readonly #gone = new Runs<Run>(() => true);
 	// Each run's last change, oldest first. An entry whose run was since replaced is dead, and
 	// the log is rebuilt once dead entries clearly outnumber live ones.
 	#log: { revision: number; run: DropRun }[] = [];
@@ -182,15 +186,28 @@ export class DropSet {
 		return start >= end || this.coveredFrom(start) >= end;
 	}
 
+	/**
+	 * Whether every key in `[start, end)` is given up for a reader within `budget` milliseconds:
+	 * skipped, dropped for good, or judged stale under at least that budget. An empty run is.
+	 * Walks the runs only when a stale one lies in it. Mirrors the Rust `TrackState::given_up_for`.
+	 */
+	givenUp(start: bigint, end: bigint, budget: number): boolean {
+		if (start >= end || (this.#gone.at(start)?.end ?? start) >= end) return true;
+		if (!this.covers(start, end)) return false;
+		return this.#runs.overlapping(start, end).every((run) => run.stale === undefined || budget <= run.stale);
+	}
+
 	/** Give up `[start, end)` as `run` says, or forget it when `run` is undefined. */
 	set(start: bigint, end: bigint, run?: Omit<DropRun, "start" | "end">): void {
 		this.#keys.set(start, end, run && { start, end });
+		this.#gone.set(start, end, run && run.stale === undefined ? { start, end } : undefined);
 		this.#apply(this.#runs.set(start, end, run && { ...run, start, end }));
 	}
 
 	/** Forget each of `ranges`, sorted and disjoint, in one pass. */
 	clear(ranges: readonly Run[]): void {
 		this.#keys.clear(ranges);
+		this.#gone.clear(ranges);
 		this.#apply(this.#runs.clear(ranges));
 	}
 

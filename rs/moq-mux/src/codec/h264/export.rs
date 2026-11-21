@@ -166,7 +166,7 @@ mod tests {
 		first.track = Some("a".into());
 		moving
 			.catalog
-			.modify()
+			.modify(moving.catalog.next_timestamp())
 			.unwrap()
 			.video
 			.renditions
@@ -187,7 +187,7 @@ mod tests {
 		assert_ne!(first_prefix, second_prefix);
 		moving
 			.catalog
-			.modify()
+			.modify(moving.catalog.next_timestamp())
 			.unwrap()
 			.video
 			.renditions
@@ -285,12 +285,17 @@ mod tests {
 		let primary = live.track.name().to_string();
 		let config = live.catalog.snapshot().video.renditions[&primary].clone();
 		let mut sibling = live.add_track(".sibling", |catalog, name| {
-			catalog.modify().unwrap().video.renditions.insert(name, config);
+			catalog
+				.modify(catalog.next_timestamp())
+				.unwrap()
+				.video
+				.renditions
+				.insert(name, config);
 		});
 		assert!(primary.as_str() < sibling.name(), "the primary is first by name");
 		let set_enabled = |live: &mut Live, enabled: bool| {
 			live.catalog
-				.modify()
+				.modify(live.catalog.next_timestamp())
 				.unwrap()
 				.video
 				.renditions
