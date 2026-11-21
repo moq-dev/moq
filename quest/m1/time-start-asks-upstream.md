@@ -19,8 +19,4 @@ Done when a viewer behind a relay reads the same groups for a time start as it w
 - Mirror in js/net (`lite/subscriber.ts` `#declare` and its demand ranges), and run `just test interop --all`.
 - Reproduce first with the fixture in `rs/moq-net/tests/integration/waiting_time_start.rs` (publisher, relay, viewer). One case: an unlimited-budget ordered reader asks `Time(10)..Time(20)` and `Time(66)..` while the publisher holds only group 66. Through a relay this reads nothing, on `main` too: the relay's wire publisher waits in `Subscriber::poll_start` on the unplaced `Time(10)`, which ignores the empty answer, so it never answers its own subscriber or forwards 66. The fix covers that path as well as `Ordered`. A second: a narrow viewer joins first, then a wider one asks from a time whose group the narrow budget expired.
 - [moq-dev/moq#9228](https://github.com/moq-dev/moq/pull/9228) made a time start an ordinary group fill with a `floor`, but a received copy never asks one: its readers' time ranges go upstream on the demand subscription, which is what this quest extends.
-- [no-relative-anchors](/quest/m2/time-addressing/no-relative-anchors.md) needs the same ask-and-wait for a Min Age live join, which it resolves as a time start. Whichever lands first builds the mechanism.
-
-## Related
-
-- [no-relative-anchors](/quest/m2/time-addressing/no-relative-anchors.md) - needs the same ask-and-wait for a Min Age live join
+- [moq-dev/moq#9265](https://github.com/moq-dev/moq/pull/9265) asks and waits for a Min Age live join: a copy that can't prove the join's group retires its no-start range upstream and adds it again under the larger Min Age, and records each answer by the Min Age it was asked under (`TrackState::join_starts`). A time start's ask can follow the same pattern.

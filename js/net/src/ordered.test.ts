@@ -485,9 +485,7 @@ test("a folded time start wakes its read when the grace for a gap below it passe
 		put(producer, 2000n, false);
 		clock.jump(Duration.millis(10));
 		put(producer, 1800n, false);
-		const ordered = producer
-			.subscribe({ delay: { max: Duration.secs(1) }, ranges: [{ start: 1500n }] })
-			.ordered();
+		const ordered = producer.subscribe({ delay: { max: Duration.secs(1) }, ranges: [{ start: 1500n }] }).ordered();
 		expect(items(ordered)).toEqual([]);
 		let read: bigint | undefined;
 		const next = ordered.nextGroup().then((group) => {
