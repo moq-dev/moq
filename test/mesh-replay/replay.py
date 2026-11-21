@@ -493,7 +493,9 @@ class Auth:
                     self.send_response(204)
                     self.end_headers()
                     return
-                grant = {"publish": [""], "subscribe": [""]}
+                # `**`, not the bare prefix "": a released relay reads `**` as the whole tree and
+                # "" as the root alone, and this checkout reads both as the whole tree.
+                grant = {"publish": ["**"], "subscribe": ["**"]}
                 if record["peer"]:
                     grant |= {"link": "peer", "peer": True}
                 payload = json.dumps(grant).encode()
