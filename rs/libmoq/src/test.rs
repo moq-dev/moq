@@ -5499,7 +5499,10 @@ fn a_freed_time_start_reads_on_and_an_aborted_one_fails() {
 			let producer = state.publish.track_producer(Id::try_from(track).unwrap()).unwrap();
 			producer.start_at(held[0]).unwrap();
 			for &key in held {
-				let mut group = producer.create_group(moq_net::group::Info { start: key }).unwrap().unwrap();
+				let mut group = producer
+					.create_group(moq_net::group::Info { start: key })
+					.unwrap()
+					.unwrap();
 				group
 					.write_frame(moq_net::Timestamp::from_millis(key).unwrap(), &b"live"[..])
 					.unwrap();
