@@ -237,7 +237,7 @@ audit): ✅ the cut waits on the credit model (`verify-credit`),
 [paused-stream allowance](/quest/m1/paused-allowance.md), which merges once
 the model passes on it, and a bounded relay cache by default. Rejected: cutting with flow
 control unverified; landing #9210 after the cut. The
-[JS frame cap](/quest/m1/js-frame-cap.md) ships with the cut only if it
+[JS frame cap](https://github.com/moq-dev/moq/pull/9283) ships with the cut only if it
 lands first.
 
 On the reconciled candidate, regenerate the Nix build plan with `just rs cargo-nix` after the

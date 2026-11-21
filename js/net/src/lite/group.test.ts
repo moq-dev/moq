@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test";
-import { ProtocolViolation, StreamCode, StreamError, TimestampMismatch } from "../error.ts";
+import { FrameTooLarge, ProtocolViolation, StreamCode, StreamError, TimestampMismatch } from "../error.ts";
 import { Producer } from "../group.ts";
 import { hooks } from "../internal.ts";
 import { concat, encodeVarint, Reader, Writer } from "../stream.ts";
 import { Timestamp } from "../time.ts";
+import { MAX_FRAME_BYTES } from "../util/limits.ts";
 import * as Varint from "../varint.ts";
 import { frameDecoder, Group, readFrames, type WireFrame } from "./group.ts";
 import { frameHeader } from "./publisher.ts";
@@ -144,6 +145,22 @@ test.each([Version.DRAFT_06, Version.DRAFT_07])("a FRAME round-trips on %s", asy
 	expect(decoded.timestamp?.value).toBe(7);
 	expect(decoded.payload).toEqual(new Uint8Array([5, 6]));
 });
+
+test.each([Version.DRAFT_06, Version.DRAFT_07])(
+	"a plain FRAME over 32 MiB is refused at its header on %s",
+	async (version) => {
+		const lengthFirst = hasLengthFirst(version);
+		const decode = frameDecoder({ scale: SCALE, lengthFirst });
+		// Only the header: the cap must not wait for any payload bytes.
+		const header = (size: number) => streamOf([frameHeader(version, 0n, undefined, size, lengthFirst)], version);
+		expect(((await header(MAX_FRAME_BYTES).decode(decode)) as WireFrame).size).toBe(MAX_FRAME_BYTES);
+		await expect(header(MAX_FRAME_BYTES + 1).decode(decode)).rejects.toThrow(FrameTooLarge);
+		const producer = new Producer(0n);
+		await expect(readFrames(header(MAX_FRAME_BYTES + 1), producer, { scale: SCALE, lengthFirst })).rejects.toThrow(
+			FrameTooLarge,
+		);
+	},
+);
 
 // Lite-07 varints, as a Group Stream after its header carries them.
 function lite07(...values: (number | bigint)[]): Uint8Array {
