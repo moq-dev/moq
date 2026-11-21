@@ -7413,7 +7413,11 @@ mod test {
 
 		sub.edit(edit(40, (41, range(41)))).unwrap();
 		assert!(sub.poll_recv_group(&kio::Waiter::noop()).is_pending());
-		assert_eq!(a.subscription().unwrap().ranges, [range(41)], "the edit replaced the range");
+		assert_eq!(
+			a.subscription().unwrap().ranges,
+			[range(41)],
+			"the edit replaced the range"
+		);
 	}
 
 	#[test]
