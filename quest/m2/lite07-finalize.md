@@ -220,7 +220,7 @@ the version that ships them.
 Decided 2026-11-20 (maintainer, /quest-plan auditing the cache, timestamp,
 and switching rules in `rs/moq-net/AGENTS.md` before the cut):
 
-- ✅ The cut waits for [groups never overlap](/quest/m2/groups-never-overlap.md)
+- ✅ The cut waits for groups never overlap, [moq-dev/moq#9264](https://github.com/moq-dev/moq/pull/9264)
   (rejected: after the cut). Group times ([moq-dev/moq#9263](https://github.com/moq-dev/moq/pull/9263))
   puts the strong rule in the draft as a publisher MUST: a group's span,
   [Group Start, End) since 2026-11-21, never overlaps another's. Expiry relies on it,
@@ -237,7 +237,6 @@ and switching rules in `rs/moq-net/AGENTS.md` before the cut):
 ## Required
 
 - [A time anchor lands by group spans](/quest/m2/time-addressing/span-time-anchors.md) - the draft's Time Anchor rule resolves a time inside a skipped span or a whole group's span
-- [Groups never overlap](/quest/m2/groups-never-overlap.md) - first-party producers and importers keep the no-overlap MUST the cut publishes
 - [First-party producers keep lite-07 group spans apart](/quest/m2/producer-spans.md) - no group starts or presents inside a span a lower group's End closed
 - [A lite-07 claim is shown no broader than the grants it crossed](/quest/m2/lite07-claim-reach-routes.md) - a peer is never shown a claim at a path no route of it can serve, through any number of relays (maintainer, 2026-11-20)
 

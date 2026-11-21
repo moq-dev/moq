@@ -40,9 +40,8 @@ import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { readSize, sendPayload } from "../payload.ts";
 import { Priority, sendOrder } from "../priority.ts";
-import { rescale } from "../rescale.ts";
 import { concat, encodeVarint, type Reader, type Stream, type StreamVersion, Writer } from "../stream.ts";
-import { floorAt, type Timescale, Timestamp } from "../time.ts";
+import { floorAt, type Timescale, type Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import type { Reported } from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
@@ -150,41 +149,37 @@ function groupEnd(version: StreamVersion, end: bigint, base: bigint): Uint8Array
 
 /** How a lite hop stamps a track's frames and datagrams. */
 interface Stamp {
-	/** The wire timescale TRACK_INFO declared (see `wireTimescale`). */
-	timescale: Timescale;
 	/**
-	 * The timed track whose frames' own timestamps go out, at its timescale, which the wire's
-	 * equals. Lite-05/06 cannot encode a scale-less track, so a scale-less one carries its send
-	 * time instead.
+	 * The wire timescale TRACK_INFO declared (see `wireTimescale`), or undefined for a datagram on a
+	 * scale-less lite-07 track, whose timestamp goes out as a bare number.
 	 */
-	timed?: { timescale?: Timescale | null };
+	timescale?: Timescale;
 }
 
 /**
  * How `version` stamps a track with `info`, or undefined when its frames carry no timestamps:
  * before lite-05, and on a scale-less lite-07 track, whose frame's time is its group's start (its
- * datagrams go out bare). Lite-05/06 declare milliseconds for a scale-less track.
+ * datagrams go out bare). Lite-05/06 declare milliseconds for a scale-less track, whose frames
+ * carry their group's start.
  */
 function stamping(version: Version, info: { timescale?: Timescale | null }): Stamp | undefined {
-	const timescale = info.timescale ?? undefined;
-	const wire = wireTimescale(version, timescale);
+	const wire = wireTimescale(version, info.timescale);
 	if (wire === undefined) return undefined;
-	return timescale === undefined ? { timescale: wire } : { timescale: wire, timed: info };
+	return { timescale: wire };
 }
 
 /**
- * A frame's `timestamp` as its raw wire value: its send time when a lite-05/06 track goes out
- * scale-less.
+ * A frame or datagram's `timestamp` as its raw wire value. A scale-less track's is its group's
+ * start, or its datagram's sequence, which goes out verbatim on every version: nothing is stamped
+ * with a clock, so a frame carries the same timestamp through every hop and fetch. Mirrors the
+ * Rust `Stamp::wire`.
  */
 function wireTime(timestamp: Timestamp, stamp: Stamp): bigint {
-	return BigInt(stamp.timed ? rescale(stamp.timed, timestamp).value : floorAt(Timestamp.now(), stamp.timescale));
-}
-
-/** A scale-less lite-07 datagram's timestamp as it goes out: the bare value its producer gave. */
-function bareTime(timestamp: Timestamp): bigint {
 	const key = timestamp.key;
-	if (key === undefined) throw new TimestampMismatch();
-	return key;
+	if (key !== undefined) return key;
+	// A timed timestamp on a track declared scale-less: the model never writes one.
+	if (stamp.timescale === undefined) throw new TimestampMismatch();
+	return BigInt(floorAt(timestamp, stamp.timescale));
 }
 
 /**
@@ -2374,15 +2369,7 @@ export class Publisher {
 				end = max(end, datagram.sequence + 1n);
 				// An old subscription uses its stream track's timescale for both kinds. Without one
 				// the track is a scale-less lite-07 one, whose timestamp goes out bare.
-				const timescale = options.stamp?.timescale;
-				const timestamp =
-					timescale === undefined
-						? bareTime(datagram.timestamp)
-						: BigInt(
-								datagram.timestamp.scale === undefined
-									? floorAt(Timestamp.now(), timescale)
-									: floorAt(datagram.timestamp, timescale),
-							);
+				const timestamp = wireTime(datagram.timestamp, options.stamp ?? {});
 				const body = new DatagramMessage(options.sub, datagram.sequence, timestamp, datagram.payload).encode(
 					this.version,
 				);

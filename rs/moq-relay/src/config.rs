@@ -83,8 +83,8 @@ pub struct Config {
 	#[serde(default)]
 	pub stats: stats::Config,
 
-	/// Group cache sizing. Unbounded unless `cache.capacity` or `cache.headroom`
-	/// is set.
+	/// Group cache sizing. Targets 10% of memory free unless `cache.capacity` or
+	/// `cache.headroom` says otherwise; `cache.headroom = "0"` removes that bound.
 	#[usage(flatten)]
 	#[serde(default)]
 	pub cache: cache::Config,

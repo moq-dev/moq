@@ -24,6 +24,7 @@
 use super::flate;
 use super::idle::Idle;
 use super::pace::Pace;
+use super::resume::Cause;
 mod content;
 use crate::cache;
 use crate::frame::{self, Cached, FrameBuf, Payload};
@@ -293,8 +294,9 @@ pub(super) enum Outcome {
 	/// Finished with this many frames, and where it ends in its track's timescale when its
 	/// producer said it is whole: `None` when it finished without an end (see [`Producer::finish`]).
 	Finished(usize, Option<u64>),
-	/// Finished with this many frames and end, then aborted to free its cache: a reader that
-	/// took every frame got the whole group, and one short of it gets the error.
+	/// Finished with this many frames and the end it finished at, then aborted to free its
+	/// cache: a reader that took every frame got every frame the group finished with, and one
+	/// short of it gets the error.
 	Released(usize, Option<u64>, Error),
 	/// Aborted before it finished.
 	Aborted(Error),
@@ -4033,8 +4035,11 @@ impl Consumer {
 		self
 	}
 
-	/// Run `read`, and once this copy fails with its route, or stalls while a newer route
-	/// serves, continue from the serving route's copy at the same frame and read again.
+	/// Run `read`, and once this copy fails with its route, stalls while a newer route serves,
+	/// or closes the group short after a newer route took over, continue from the serving
+	/// route's copy at the same frame and read again.
+	///
+	/// `read` ends with `None` only at the end of the group as this copy holds it.
 	fn poll_resumed<T>(
 		&mut self,
 		waiter: &kio::Waiter,
@@ -4047,10 +4052,11 @@ impl Consumer {
 				return res;
 			}
 			let index = self.cursor.index;
+			let short = matches!(res, Poll::Ready(Ok(None))) && self.closed_short();
 			let Some(recover) = self.carry.as_mut().and_then(|carry| carry.recover.as_mut()) else {
 				return res;
 			};
-			let failed = match &res {
+			let cause = match &res {
 				Poll::Ready(Ok(Some(_))) => {
 					recover.resumed();
 					// The old copy was dense through this frame, so the replacement must be too.
@@ -4065,11 +4071,11 @@ impl Consumer {
 					}
 					return res;
 				}
+				// Closed short of a known end: a route that replaced this copy may hold more.
+				Poll::Ready(Ok(None)) if short => Cause::Closed,
 				// Read to its end: no route is needed for it any more.
 				Poll::Ready(Ok(None)) => {
-					if let Some(carry) = &mut self.carry {
-						carry.recover = None;
-					}
+					self.let_go();
 					return res;
 				}
 				// Content that failed to inflate is the group's under its name, so no copy fixes it.
@@ -4077,23 +4083,44 @@ impl Consumer {
 					recover.failed(index, err);
 					return res;
 				}
-				Poll::Ready(Err(err)) => Some(err.clone()),
-				Poll::Pending => None,
+				Poll::Ready(Err(err)) => Cause::Failed(err.clone()),
+				Poll::Pending => Cause::Stalled,
 			};
-			if !recover.wants(failed.as_ref(), waiter) {
-				if let Some(err) = &failed {
-					recover.failed(index, err);
+			if !recover.wants(cause.error(), waiter) {
+				match &cause {
+					Cause::Failed(err) => recover.failed(index, err),
+					// The copy being read still serves, so its close is the group's end.
+					Cause::Closed => self.let_go(),
+					Cause::Stalled => {}
 				}
 				return res;
 			}
-			recover.recovering(index, failed.as_ref());
-			let replacement = match self.replacement(failed, waiter) {
+			recover.recovering(index, &cause);
+			let closed = matches!(cause, Cause::Closed);
+			let replacement = match self.replacement(cause, waiter) {
 				Poll::Ready(Ok(replacement)) => replacement,
 				Poll::Ready(Err(err)) => {
 					if let Some(recover) = self.recover_mut() {
 						recover.failed(index, &err);
 					}
+					// Nothing continues a group closed short, so it ends where it closed.
+					if closed {
+						self.let_go();
+						return res;
+					}
 					return Poll::Ready(Err(err));
+				}
+				// The reader's budget bounds the wait for the rest, as it does a stall, and
+				// ends the group where it closed.
+				Poll::Pending
+					if closed
+						&& self
+							.expiry
+							.as_ref()
+							.is_some_and(|e| e.is_expired(self.recover(), waiter)) =>
+				{
+					self.let_go();
+					return res;
 				}
 				Poll::Pending => return Poll::Pending,
 			};
@@ -4116,16 +4143,20 @@ impl Consumer {
 		}
 	}
 
-	/// The serving route's copy to continue this group from once its copy `failed`, or
-	/// stalled while a newer route serves, or the error that ends the read instead.
-	fn replacement(&mut self, failed: Option<Error>, waiter: &kio::Waiter) -> Poll<Result<super::resume::Replacement>> {
+	/// The serving route's copy to continue this group from once its copy looks past itself for
+	/// `cause`, or the error that ends the read instead.
+	fn replacement(&mut self, cause: Cause, waiter: &kio::Waiter) -> Poll<Result<super::resume::Replacement>> {
 		// An ordinal FETCH would request different content after an Object ID gap.
 		if self.cursor.state.read().sparse() {
 			return Poll::Ready(Err(Error::Unsupported));
 		}
 		let index = self.cursor.index as u64;
 		let recover = self.recover_mut().expect("only a recovering group needs a replacement");
-		let replacement = ready!(recover.poll(index, failed.as_ref(), waiter))?;
+		let replacement = ready!(recover.poll(index, &cause, waiter))?;
+		let failed = match cause {
+			Cause::Failed(err) => Some(err),
+			Cause::Stalled | Cause::Closed => None,
+		};
 		// A plain read inflates from frame 0, which a replacement starting later lacks
 		// when the failed route's head was not lent to it.
 		if !self.cursor.raw
@@ -4602,6 +4633,24 @@ impl Consumer {
 		self.carry.as_ref()?.recover.as_ref()
 	}
 
+	/// Drop the recovery once the group ended: no route is needed for it any more.
+	fn let_go(&mut self) {
+		if let Some(carry) = &mut self.carry {
+			carry.recover = None;
+		}
+	}
+
+	/// Whether this reader read to the end of a copy that closed the group short of a known
+	/// end, as a FIN without GROUP_END does, below the reader's own cap: the group may hold
+	/// more than this copy got.
+	fn closed_short(&self) -> bool {
+		!self.cursor.capped()
+			&& matches!(
+				self.cursor.state.read().outcome,
+				Outcome::Finished(frames, None) | Outcome::Released(frames, None, _) if self.cursor.index >= frames
+			)
+	}
+
 	fn recover_mut(&mut self) -> Option<&mut super::resume::Recover> {
 		self.carry.as_mut()?.recover.as_mut()
 	}
@@ -4758,11 +4807,14 @@ impl Consumer {
 	pub fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<u64>> {
 		let res = match self.recover().is_none() {
 			true => self.poll_finished_once(waiter),
+			// A reader at the end of a copy that closed the group short reads on from the route
+			// that replaced it, as a frame read does, so its end is that copy's.
 			false => self
 				.poll_resumed(waiter, |this, waiter| {
-					this.poll_finished_once(waiter).map(|res| res.map(Some))
+					this.poll_finished_once(waiter)
+						.map(|res| res.map(|index| (!this.closed_short()).then_some(index)))
 				})
-				.map(|res| res.map(|index| index.expect("finished with an index"))),
+				.map(|res| res.map(|index| index.unwrap_or(self.cursor.index as u64))),
 		};
 		if let Poll::Ready(Ok(_)) = res {
 			self.release_if_finished();

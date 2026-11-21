@@ -828,7 +828,7 @@ A group is expired once either of two ages meets the relevant `Max Age`:
 - Its **timestamp age** is the difference between the *newest* frame timestamp of the latest group that has at least one frame, and this group's **reach**, defined below.
 - Its **arrival age** is the time elapsed since its successor arrived at this hop.
 
-On a scale-less Track, timestamp age counts bare units as the milliseconds of a Max Age.
+A scale-less Track has no timestamp age: its groups expire by arrival age alone.
 
 By timestamp age, a group is expired only once it **provably cannot overlap the Max Age window**: every frame it could still present is older than the budget allows.
 Arrival age needs no such proof: it bounds how long a superseded group may still wait to be delivered.
@@ -2366,7 +2366,7 @@ A stream that FINs without a GROUP_END carries a closed Group, which may have he
 - Replaced GROUP's `Group Sequence` with `Group Start`.
 - Added GROUP_END, a `Payload Length` of 0 followed by the Group's exclusive End, as a non-negative delta from the highest frame timestamp on the stream, or from the Group Start: a Group or Fetch Stream ends with it when its Group finished, a FIN alone ends a closed Group whose frames may not all exist, and a reset aborts. A Group's own End bounds its reach.
 - A Group's span runs from its start to its End, [start, End), and spans never overlap; every frame of a lower Group presents before every frame of a higher one. The publisher names the starts between one Group's End and the next Group's start with SUBSCRIBE_SKIP. A GROUP_END accounts for the starts strictly between its Group Start and End, and a drop of a Group the publisher holds whole names its span.
-- Expiration also measures a group's arrival age, the time since its successor arrived at this hop.
+- Expiration also measures a group's arrival age, the time since its successor arrived at this hop, and only that on a scale-less Track.
 - A relay closes a Group it holds only the start of, without a GROUP_END. A publisher resets the Group Stream of a group that expires with OLD, even one whose GROUP_END it sent but is not yet acknowledged, and names the group in a SUBSCRIBE_DROP with OLD.
 - FRAME leads with `Payload Length`, the payload size plus one, in place of the trailing `Message Length`; 0 is malformed.
 - A publisher SHOULD drop a datagram rather than block when the transport has no room for it, where it previously sent one only if the congestion controller could transmit it immediately.

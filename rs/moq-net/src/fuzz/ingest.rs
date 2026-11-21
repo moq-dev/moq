@@ -91,7 +91,7 @@ pub fn ingest(data: &[u8]) -> bool {
 		0 => {
 			let version = super::LITE_VERSIONS[(*selector as usize / 2) % super::LITE_VERSIONS.len()];
 			// The track arrives timed exactly when the wire stamps it: never before Lite05,
-			// always on Lite05/06 (an untimed one carries its send times), as declared after.
+			// always on Lite05/06 (an untimed one carries its keys), as declared after.
 			let timed = version.wire_timescale(timed.then_some(Timescale::MILLI)).is_some();
 			// Only the `ietf` extension carries a Version, and only on a track that has one.
 			let draft = draft.filter(|_| settings & 0x10 != 0 && version.has_ietf());

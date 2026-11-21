@@ -67,7 +67,7 @@ found. Each fix is so that a subscription, frame, or catalog entry means
 the same whichever relay or reader serves it:
 no relative anchors ([moq-dev/moq#9265](https://github.com/moq-dev/moq/pull/9265)),
 with Min Age placing a live join;
-[scale-less tracks aging by arrival](/quest/m2/time-addressing/scale-less-arrival.md);
+scale-less tracks aging by arrival ([moq-dev/moq#9266](https://github.com/moq-dev/moq/pull/9266));
 Group Streams carrying each time once ([moq-dev/moq#9263](https://github.com/moq-dev/moq/pull/9263)),
 with GROUP_END's end back as a delta;
 [time anchors landing by group spans](/quest/m2/time-addressing/span-time-anchors.md);

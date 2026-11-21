@@ -31,9 +31,9 @@ do today. This quest tightens the second half once producers keep the strong
 rule.
 
 - A higher group's lowest timestamp bounds a lower group only under the strong
-  no-overlap rule, so this waits on it. Until then moq-mux's overlapping groups
-  would expire early. With open-GOP leading pictures, that lowest frame sits
-  below the higher group's start.
+  no-overlap rule, which moq-mux's producers keep since [moq-dev/moq#9264](https://github.com/moq-dev/moq/pull/9264). With
+  open-GOP leading pictures, that lowest frame sits below the higher group's
+  start.
 - Use any known frame of any higher group, a tail copy's included. Under the
   rule, every one of them is above the lower group's frames.
 - Drop `ended_at`'s wall-clock aging of the latest group (JS `#endedAt`), if
@@ -43,7 +43,3 @@ rule.
 
 Public API: none expected. Wire: none. The draft's Expiration text changes,
 which only lets a publisher expire sooner.
-
-## Required
-
-- [Every frame of a group presents before every frame of a higher group](/quest/m2/groups-never-overlap.md) - first-party producers keep the rule that makes a higher group's lowest timestamp an upper bound

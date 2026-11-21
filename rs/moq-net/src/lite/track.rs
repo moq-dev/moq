@@ -142,7 +142,7 @@ pub(crate) struct Framing {
 
 impl Framing {
 	/// How `version` frames a track accepted as `info`. Lite05/06 stamp every frame, an
-	/// untimed track's with its send time in milliseconds.
+	/// untimed track's with its group's start as milliseconds.
 	pub fn new(info: &crate::track::Info, version: Version) -> Self {
 		Self {
 			timescale: version.wire_timescale(info.timescale),

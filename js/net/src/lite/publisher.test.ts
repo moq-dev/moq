@@ -35,7 +35,16 @@ import {
 	SubscribeUpdate,
 } from "./subscribe.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
-import { ALPN_05, ALPN_06, ALPN_07_WIP, hasLengthFirst, hasRanges, keepsSubscribeOpen, Version } from "./version.ts";
+import {
+	ALPN_05,
+	ALPN_06,
+	ALPN_07_WIP,
+	hasLengthFirst,
+	hasRanges,
+	keepsSubscribeOpen,
+	Version,
+	versionName,
+} from "./version.ts";
 
 function publish(origin: OriginProducer, path: Path.Valid) {
 	const broadcastRoute = origin.route(path);
@@ -639,6 +648,55 @@ test("lite draft-06: an unchecked track's fetched frames carry their own timesta
 	} finally {
 		publisher.close();
 		client.close();
+	}
+});
+
+// Replays `rs/moq-net/fixtures/stamps.json`, which moq-net replays too: lite-05/06 stamp a
+// scale-less frame with its group's start, never a clock, so a frame carries the same timestamp
+// on every hop and fetch, and its Group Stream matches byte for byte in both languages.
+const STAMPS = (await Bun.file(new URL("../../../../rs/moq-net/fixtures/stamps.json", import.meta.url)).json()) as {
+	name: string;
+	version: string;
+	start: number;
+	payloads: string[];
+	hex: string;
+}[];
+
+test.each(STAMPS.map((stamp) => [stamp.name, stamp] as const))("%s", async (_name, stamp) => {
+	using clock = manual();
+	const version = defined([Version.DRAFT_05, Version.DRAFT_06].find((v) => versionName(v) === stamp.version));
+	const pair = createMockTransportPair(stamp.version);
+	const origin = new OriginProducer();
+	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
+	const broadcast = publish(origin, Path.from("test"));
+	const track = defined(broadcast.createTrack("video", {}));
+
+	const client = await Stream.open(pair.client, { version });
+	const server = await Stream.accept(pair.server, version);
+	if (!server) throw new Error("publisher never accepted the subscribe stream");
+	void publisher.runSubscribe(
+		new Subscribe({ id: 0n, broadcast: Path.from("test"), track: "video", priority: 0 }),
+		server,
+	);
+
+	const start = BigInt(stamp.start);
+	const group = track.createGroup(start);
+	for (const payload of stamp.payloads) group.writeFrame(textFrame(payload, Timestamp.unscaled(start)));
+	group.finish();
+	await clock.advance(Duration.ZERO);
+
+	const opened = pair.client.incomingUnidirectionalStreams.getReader();
+	try {
+		const next = await opened.read();
+		if (next.done) throw new Error("publisher never opened the group stream");
+		const bytes = await new Response(next.value).arrayBuffer();
+		expect(Buffer.from(bytes).toString("hex")).toBe(stamp.hex);
+	} finally {
+		await opened.cancel();
+		publisher.close();
+		client.close();
+		broadcast.close();
+		origin.close();
 	}
 });
 

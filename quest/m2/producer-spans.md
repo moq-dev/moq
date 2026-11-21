@@ -13,7 +13,7 @@ lite-07 copy then never refuses a group a first-party producer published.
 Left from group times
 ([moq-dev/moq#9263](https://github.com/moq-dev/moq/pull/9263)), which put the
 span rule in the draft and made `group::Producer::finish_at` refuse an End
-below a group's highest frame. [Groups never overlap](/quest/m2/groups-never-overlap.md)
+below a group's highest frame. Groups never overlap
 ([moq-dev/moq#9264](https://github.com/moq-dev/moq/pull/9264)) keeps every
 frame of a group after every frame of a lower one, but not the End. Three
 cases remain:
@@ -65,10 +65,6 @@ higher group.
 
 Public API: `cut(Some(end))` below a written frame returns `InvalidEnd` for
 every kind. Wire: none.
-
-## Required
-
-- [Groups never overlap](/quest/m2/groups-never-overlap.md) - the producers keep every frame of a group after every frame of a lower one, which leaves the guards only a caller's bad cut
 
 ## Related
 
