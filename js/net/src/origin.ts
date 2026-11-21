@@ -2195,6 +2195,7 @@ export class Consumer implements Reader {
 			local: (path, instance) => this.#local(scope.path(path), instance),
 			demand: (path, instance, signal) => this.#demand(scope.path(path), instance, signal),
 			covers: (prefix: Path.Valid) => scope.covers(prefix),
+			allowed: scope.allowed?.rebase(scope.root),
 		});
 	}
 

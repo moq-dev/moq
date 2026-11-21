@@ -427,6 +427,7 @@ export class Subscriber {
 				slots: this.#announces,
 				drained: (route) => this.#drained(route),
 				goaway,
+				grant,
 				send: (msg) => stream.send(msg),
 			});
 		}
@@ -2088,11 +2089,6 @@ export class Subscriber {
 			const maxAge = (await producer.info().catch(() => undefined))?.maxAge;
 			const framing = { compress: entry.compress, timescale: entry.timescale, maxAge };
 			for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
-				// The wire fetches by group alone, so a lookup goes unanswered and its reader falls back.
-				if (fill.kind === "lookup") {
-					fill.close();
-					continue;
-				}
 				// One group is what FETCH carries; more go through the subscription.
 				if (fills && fill.end - fill.start > 1n) {
 					fills.push(fill);

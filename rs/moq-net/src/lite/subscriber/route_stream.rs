@@ -356,7 +356,7 @@ impl Running {
 					}
 					// A grant change applies before the next batch, so a claim it no longer
 					// covers is ended rather than sent.
-					self.answer.poll_permit(&mut self.writer, waiter)?;
+					self.answer.poll_permit(waiter)?;
 				}
 				Sending::Closing => {
 					if let Poll::Ready(closed) = self.writer.poll_closed(waiter) {
@@ -367,10 +367,17 @@ impl Running {
 				Sending::Closed => {}
 			}
 
-			let ready = self.streams.iter().find_map(|stream| match stream.poll_wire(waiter) {
-				Poll::Ready(msg) => Some(msg),
-				Poll::Pending => None,
-			});
+			// The session's key waits while a grant change's mounts send their initial sets,
+			// which the peer's next ANNOUNCE_OK follows.
+			let holding = self.answer.holding();
+			let main = self.streams.len() - 1;
+			let streams = self.streams.iter().enumerate().filter(|(i, _)| !holding || *i != main);
+			let ready = streams
+				.map(|(_, stream)| stream)
+				.find_map(|stream| match stream.poll_wire(waiter) {
+					Poll::Ready(msg) => Some(msg),
+					Poll::Pending => None,
+				});
 			if let Some(msg) = ready {
 				match msg {
 					node::Msg::Ask(edit) => {

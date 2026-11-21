@@ -15,8 +15,8 @@
 //! - Fetching a specific group fetches that same group from the source and
 //!   transcodes just that group, unless every caller leaves before the
 //!   request is accepted, in which case nothing is encoded. Output groups
-//!   mirror source sequence numbers 1:1, so group N of every rung is the same
-//!   content as source group N.
+//!   mirror source group starts 1:1, so the group starting at N on every rung
+//!   is the same content as the source group starting at N.
 //!
 //! The codec work is `moq-video`: hardware where available (NVDEC + NVENC on
 //! Linux, VideoToolbox on macOS, Media Foundation on Windows), with the opt-in
@@ -286,14 +286,6 @@ impl Drop for Transcoder {
 mod tests {
 
 	use super::*;
-
-	/// A fill the test expects to name groups rather than look up a time.
-	pub(crate) fn groups(fill: moq_net::track::Fill) -> moq_net::track::FillGroups {
-		let moq_net::track::Fill::Groups(fill) = fill else {
-			panic!("a run of groups, not a time lookup");
-		};
-		fill
-	}
 
 	/// Constructing a transcoder registers its catalog synchronously, so even an unpolled
 	/// run future owns published state that must end deliberately when abandoned. The
@@ -587,7 +579,7 @@ mod tests {
 			group.finish().unwrap();
 
 			for (name, subscriber) in &mut subscribers {
-				let mut group = subscriber.next_group().await.unwrap().unwrap().group().unwrap();
+				let mut group = subscriber.next_group().await.unwrap().unwrap();
 				assert_eq!(group.start, sequence, "{name} changed the group start");
 				let mut received = Vec::new();
 				while let Some(payload) = group.read_frame().await.unwrap() {
@@ -944,11 +936,7 @@ mod tests {
 		// A past group, the only demand on the rung.
 		let rung = consumer.track("video/120p").unwrap();
 		let fetching = rung.fetch_group(7, None);
-		let request = source_fetches
-			.requested_fill()
-			.await
-			.map(groups)
-			.expect("the source track closed");
+		let request = source_fetches.requested_fill().await.expect("the source track closed");
 		let mut group = request.accept(7, None).unwrap().expect("a fresh group");
 		write_keyframe(&mut group);
 		group.finish().unwrap();
@@ -1012,7 +1000,7 @@ mod tests {
 		let _subscriber = rung.subscribe(past).await.unwrap();
 
 		tokio::spawn(async move {
-			while let Ok(request) = source_fetches.requested_fill().await.map(groups) {
+			while let Ok(request) = source_fetches.requested_fill().await {
 				let mut group = request
 					.accept(request.start().group, None)
 					.unwrap()
@@ -1097,7 +1085,7 @@ mod tests {
 			.await
 			.unwrap()
 			.ordered();
-		let mut group = subscriber.next_group().await.unwrap().unwrap().group().unwrap();
+		let mut group = subscriber.next_group().await.unwrap().unwrap();
 		assert!(group.start <= 1, "unexpected sequence {}", group.start);
 		let payload = group.read_frame().await.unwrap().unwrap();
 		let frame = hang::container::Frame::decode(payload.payload).unwrap();
@@ -1200,11 +1188,7 @@ mod tests {
 			.await
 			.unwrap()
 			.ordered();
-		let mut group = loop {
-			if let Some(group) = live.next_group().await.unwrap().unwrap().group() {
-				break group;
-			}
-		};
+		let mut group = live.next_group().await.unwrap().unwrap();
 		assert!(group.read_frame().await.unwrap().is_some());
 
 		transcoder.abort();
@@ -1253,7 +1237,7 @@ mod tests {
 		assert!(update.encoding);
 
 		// Real frames, so the counters are counting encoding rather than intent.
-		let mut group = subscriber.next_group().await.unwrap().unwrap().group().unwrap();
+		let mut group = subscriber.next_group().await.unwrap().unwrap();
 		group.read_frame().await.unwrap().unwrap();
 		assert!(rendition.frames() > 0);
 		assert!(rendition.bytes() > 0);
@@ -1643,11 +1627,7 @@ mod tests {
 
 		// The rung's fetch task is now inside its source read, which is upstream of
 		// both its decoder and the `FillGroups::accept` that claims output group 7.
-		let request = source_fetches
-			.requested_fill()
-			.await
-			.map(groups)
-			.expect("the source track closed");
+		let request = source_fetches.requested_fill().await.expect("the source track closed");
 		assert_eq!(request.start().group, 7);
 
 		// Retire the rung with the fetch parked there, and let the retirement land
@@ -1724,7 +1704,6 @@ mod tests {
 		let mut abandoned = kio::clock::timeout(std::time::Duration::from_secs(5), source_fetches.requested_fill())
 			.await
 			.expect("the fetch never reached the source")
-			.map(groups)
 			.expect("the source track closed");
 		assert_eq!(abandoned.start().group, 7);
 
@@ -1743,7 +1722,6 @@ mod tests {
 		let fresh = kio::clock::timeout(std::time::Duration::from_secs(5), source_fetches.requested_fill())
 			.await
 			.expect("the retry never fetched the source")
-			.map(groups)
 			.expect("the source track closed");
 		assert_eq!(fresh.start().group, 7);
 		drop(abandoned);
@@ -2191,11 +2169,7 @@ mod tests {
 			.await
 			.unwrap()
 			.ordered();
-		let group = loop {
-			if let Some(group) = subscriber.next_group().await.unwrap().unwrap().group() {
-				break group;
-			}
-		};
+		let group = subscriber.next_group().await.unwrap().unwrap();
 		let served = timestamps(group).await;
 		assert_eq!(served, (166_665_001, expected(1)));
 		live.abort();

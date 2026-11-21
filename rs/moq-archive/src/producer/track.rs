@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use kio::clock::Instant;
-use moq_net::track::{Anchor, Delay, Item, Order, Position, Range, Subscription};
+use moq_net::track::{Anchor, Delay, Order, Position, Range, Subscription};
 use moq_net::{StreamError, Timescale, group};
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt, PutMode, PutPayload};
@@ -219,11 +219,8 @@ impl<S: ObjectStore> Track<S> {
 					}
 					None => {
 						// A group the track gave up on is stored as the hole it leaves.
-						while let Poll::Ready(next) = ordered.poll_next_group(waiter) {
-							match next {
-								Ok(Some(Item::Gap { .. })) => continue,
-								next => return Poll::Ready(Event::Next(next.map(|item| item.and_then(Item::group)))),
-							}
+						if let Poll::Ready(next) = ordered.poll_next_group(waiter) {
+							return Poll::Ready(Event::Next(next));
 						}
 					}
 				}
@@ -238,16 +235,16 @@ impl<S: ObjectStore> Track<S> {
 				// it last stored whole, keyed below where it resumes: that group is already stored.
 				Event::Next(Ok(Some(group))) if self.next.is_some_and(|next| group.start < next.group) => {}
 				Event::Next(Ok(Some(group))) => {
-					let sequence = group.start;
+					let start = group.start;
 					// A resumed group continues after its stored frames. The clamp also starts a
 					// group whose head is held elsewhere at its first frame, rather than lagging
 					// behind it.
 					let stored = self
 						.next
-						.filter(|next| next.group == sequence)
+						.filter(|next| next.group == start)
 						.map_or(0, |next| next.frame);
 					let group = Box::new(group.with_range(stored..));
-					self.next = Some(Position::new(sequence, group.index()));
+					self.next = Some(Position::new(start, group.index()));
 					current = Some(group);
 				}
 				Event::Next(Ok(None)) => break,

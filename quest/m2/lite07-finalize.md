@@ -32,7 +32,7 @@ relay that announces it, and the native hop list is gone, with
 from a lite-06 peer or across a scoped grant carries a chain instead, and
 moq.pro's lite-07 rollout plans for that wire
 ([lite07-mesh](/quest/m5/lite07-mesh.md)). Only
-[Routes and announces](/quest/m2/cluster-routes/README.md) gates the cut,
+Routes and announces (finished in [moq-dev/moq#9202](https://github.com/moq-dev/moq/pull/9202)) gated the cut,
 not the later federation/P2P integrations. Decided 2026-10-13: routes now
 owns the tier/partition correctness tests, so they run before the cut.
 Reaffirmed 2026-11-14 (maintainer, the m2 triage, below). Peer
@@ -147,9 +147,9 @@ would need a breaking release had it landed right after the cut:
 - ✅ [The request loop](https://github.com/moq-dev/moq/pull/8881) moved
   to m3 and no longer gates this: a fixture and a fix with no wire change.
   It returned to m2 on 2026-11-15 and still does not gate this.
-- ✅ [Route layer acceptance](/quest/m2/cluster-routes/acceptance.md) stays
-  in [Routes and announces](/quest/m2/cluster-routes/README.md), so this
-  still waits on it (maintainer, /quest-complete on
+- ✅ Route layer acceptance stays
+  in Routes and announces, so this
+  waited on it until [moq-dev/moq#9202](https://github.com/moq-dev/moq/pull/9202) finished both (maintainer, /quest-complete on
   [moq-dev/moq#8768](https://github.com/moq-dev/moq/pull/8768); rejected:
   moving it to m3 and fixing late routing flaws in lite-08).
 - ✅ The Playwright bump moved to m1 and
@@ -211,10 +211,30 @@ The padding paragraph above is superseded: lite-07 freezes with no Padding
 type, and [the padding probes](/quest/m5/probe-padding.md) bring one back in
 the version that ships them.
 
+Decided 2026-11-20 (maintainer, /quest-plan auditing the cache, timestamp,
+and switching rules in `rs/moq-net/AGENTS.md` before the cut):
+
+- ✅ The cut waits for [groups never overlap](/quest/m2/groups-never-overlap.md)
+  (rejected: after the cut). [Group times](/quest/m2/time-addressing/group-times.md)
+  puts the strong rule in the draft as a publisher MUST: a group's span, from
+  its lowest frame to its End, never overlaps another's. Expiry relies on it,
+  and first-party producers break it today.
+- ✅ [The frame cap](/quest/m1/switch-frame-cap.md) is not Required, like the
+  warmth port: if it has landed when the cut is made, its Position end is in
+  lite-07, and otherwise it moves to the next wip version.
+- The audit's other gaps change no wire and don't gate the cut: a relay
+  asking upstream for a missing group head, the switch's group cap, a
+  replaced copy's short group, and expiry by a higher group's lowest
+  timestamp. A Min Age join that asks upstream is
+  [no relative anchors](/quest/m2/time-addressing/no-relative-anchors.md)'s.
+
 ## Required
 
+- [No relative anchors](/quest/m2/time-addressing/no-relative-anchors.md) - SUBSCRIBE's anchors lose Relative, and Min Age places a live join
+- [Group Streams carry each time once](/quest/m2/time-addressing/group-times.md) - GROUP loses Previous Start, FRAME's first delta counts from the start, and GROUP_END carries an end
 - [Cache-aware multicast](/quest/m2/multicast/README.md) - lite-07 carries the redesigned route layer: routes to forwarding nodes, no holds or doubt, claims crossing trust boundaries by a chain, and no Route Key
-- [Routes and announces](/quest/m2/cluster-routes/README.md) - the route layer's fixtures pass on real lite-07 sessions, and the lite-06 churn mitigations they replace are retired
+- [Groups never overlap](/quest/m2/groups-never-overlap.md) - first-party producers and importers keep the no-overlap MUST the cut publishes
+- [A lite-07 claim is shown no broader than the grants it crossed](/quest/m2/lite07-claim-reach-routes.md) - a peer is never shown a claim at a path no route of it can serve, through any number of relays (maintainer, 2026-11-20)
 
 ## Related
 

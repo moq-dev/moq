@@ -8,7 +8,7 @@ mod window;
 pub(super) use cover::{Cover, minus};
 pub(crate) use window::Accounted;
 pub(crate) use window::Resolved;
-pub(super) use window::{Containing, Holdings, Unheld, Unplaced, Window};
+pub(super) use window::{Containing, Found, Holdings, Unheld, Unplaced, Window};
 
 /// Subscriber-side preferences for receiving a track.
 ///
@@ -72,9 +72,9 @@ pub struct Delay {
 	/// included, and a resumed subscription ignore it, and changing it later moves nothing
 	/// already started.
 	///
-	/// A media consumer also waits this long for a missing group, since past it the group would
-	/// play late, and starts an unstated minimum as zero but waits a missing group for
-	/// [`Self::max`] instead. The aggregate across subscribers is
+	/// It only sets where a reader starts: a missing group is given up by [`Self::max`] alone,
+	/// whatever the minimum. A media consumer starts an unstated minimum as zero. The aggregate
+	/// across subscribers is
 	/// the largest stated one, which a relay forwards upstream, so the copy it fills reaches
 	/// back for the reader that buffers most; each reader's own minimum then bounds what it
 	/// reads of that copy. moq-lite before 07 and moq-transport cannot carry it.
@@ -213,9 +213,10 @@ pub enum Anchor {
 	///
 	/// Resolved from the starts of the groups the serving hop holds. When none starts at
 	/// or before it, a hop whose [`Requests`](crate::track::Requests) handler serves its
-	/// history looks the start up there (see [`FillLookup`](crate::track::FillLookup)),
-	/// reading nothing until it answers; otherwise, or when the handler can't tell, a start
-	/// reaches back to the oldest group. While no group is held at all it waits for one,
+	/// history asks it for the group containing the time (see
+	/// [`FillGroups::floor`](crate::track::FillGroups::floor)), reading nothing until it
+	/// answers; otherwise, or when the handler can't tell, a start reaches back to the oldest
+	/// group. While no group is held at all it waits for one,
 	/// reading nothing of its range meanwhile. An end includes every group starting at or
 	/// before it.
 	///

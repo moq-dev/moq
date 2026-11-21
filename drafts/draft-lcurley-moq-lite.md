@@ -404,6 +404,10 @@ The initial set is relative to this hop: a relay answers with what it holds with
 The publisher MAY coalesce changes to a claim it has not yet sent, and sends no more claims before SYNCED than the initial set holds.
 A retraction of a claim or route already sent MAY precede SYNCED.
 A prefix outside the subscriber's [scope](#auth-stream) lists nothing and is SYNCED at once.
+A prefix wider than the scope is answered as if each of the scope's regions inside it were requested, a region being the leading literal segments of one of the scope's [patterns](#path-pattern), and none lying within another: a claim above a region is presented at that region, sent only within the scope as any presented claim is (below), and the prefix's SYNCED follows every region's initial set.
+So a subscriber whose scope's regions do not fit one ANNOUNCE_REQUEST asks for a prefix they share, the empty prefix at the widest, and still learns every region.
+A change to the scope takes effect on the publisher's stream before the ANNOUNCE_OK answering any edit the publisher reads after it sends or reads the AUTH_OK, AUTH_ERROR, or stream end making the change.
+An edit MAY change nothing, so a subscriber whose scope widens under a prefix it already asked for can send an empty edit and treat the region as synced at its ANNOUNCE_OK.
 
 Each Add of an ANNOUNCE_REQUEST implicitly assigns the next Prefix ID on its sender's stream, each ROUTE to a routing node the stream has no live route to the next Route ID, and each ANNOUNCE_START the next Announce ID: three counters per stream starting at 0 that increment by 1 per assignment.
 No id appears on the wire where it is assigned; both endpoints derive it from the message order on the (reliable, ordered) stream, and other messages reference it instead of repeating the prefix, the routing node, or the claim's path.
@@ -426,7 +430,8 @@ When the session closes, an endpoint MUST assume that every route and claim on t
 
 A broadcast path has at most 32 segments and at most 4,096 bytes; a receiver MUST close the session with a PROTOCOL_VIOLATION on a longer one, except one resolved by [Compression](#announce-compression) or joined beneath a root of the receiver's own, whose claim it drops: the ANNOUNCE_START still assigns its Announce ID, the messages naming it stay valid, and the receiver SHOULD log and count it.
 A claim covers a path when its prefix is a leading run of the path's segments; matching is per path segment, so a prefix never matches half a segment, and equality is byte-by-byte within each segment.
-A publisher presents each claim inside a requested prefix and only the most specific claim at or above it, at that prefix itself, which is exactly the covered set the subscriber may see.
+A publisher presents each claim inside a requested prefix and only the most specific claim at or above it, at that prefix itself, or at each region answering it, and sends those within the subscriber's scope, which is exactly the covered set the subscriber may see.
+A presented claim is within the scope when the scope matches a path it covers, as a claim at `a` is under the scope `a/*`, which does not match `a` itself: a prefix answered with no claim has none covering a path the scope matches.
 A claim presented above its own prefix carries how many segments broader it is than the path it is presented at, its Above, so the subscriber can tell it from a claim exactly at that path.
 Every path on the stream is relative to the session, whichever requested prefix it lies in.
 
@@ -521,7 +526,8 @@ A receiver MUST close the session with a PROTOCOL_VIOLATION on a ROUTE whose Pat
 
 A SUBSCRIBE, FETCH, TRACK, TRACKS, or DATAGRAMS request names the routing node that announces the claim serving it.
 A subscriber that names none lets the publisher select one (see [Resolution](#resolution)), and a relay forwarding a request names the node it selected or was given.
-A relay forwards a request naming a routing node only along its selected route to that node, or to the endpoint whose claim it announces when the request names the relay itself, and resets it with UNROUTABLE when it has neither.
+A relay forwards a request naming a routing node only along a route to that node through a neighbour that sent it the claim, its selected route when that neighbour did, along its selected route to that node when it holds no claim of that node covering the path, or to the endpoint whose claim it announces when the request names the relay itself, and resets it with UNROUTABLE when it has none of these.
+A route can arrive before the claims behind it, so while a relay routes to the named node and holds its claim available and eligible (see [Resolution](#resolution)) but no neighbour with a route there has sent it yet, it holds the request until one does or the claim stops being available and eligible, rather than reset a request for a claim it still shows available.
 
 Claims with the same Instance serve the same Broadcast, so a relay MAY move a live subscription between them, including onto a higher Epoch, continuing from the first frame the subscriber lacks, and a route change (a reconnect, a cheaper path, a draining session) is invisible to the subscriber.
 A relay MUST NOT move a subscription to a claim with a different Instance: it stays on its Instance's claims and ends with the last of them.
@@ -2309,6 +2315,7 @@ A stream that FINs without a GROUP_END carries a closed Group, which may have he
 - A node closes a session whose peer leaves its Announce Stream undrained for 10 seconds.
 - A publisher presents only the most specific claim covering the requested prefix.
 - A subscriber whose scope confines it to some prefixes SHOULD request those, and edit its set when they change.
+- A prefix wider than the subscriber's scope is answered region by region, a claim above a region presented at the region, so a subscriber whose regions do not fit one request asks for a prefix they share. A claim is within the scope when the scope matches a path it covers. A scope change takes effect before the ANNOUNCE_OK of any edit read after it, and an edit may change nothing.
 - Added `Node` to TRACK, TRACKS, SUBSCRIBE, FETCH, and DATAGRAMS: the routing node announcing the claim the first hop selected, which every later hop follows.
 - Replaced Warm and Cold Route Cost with one cost, which each link adds to.
 - The Cost parameter must be at least 1.

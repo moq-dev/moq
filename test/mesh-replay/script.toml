@@ -44,24 +44,3 @@ check = "unfed"
 kind = "stuck"
 event = "roll"
 quest = "/quest/m3/release/cut.md"
-
-# On lite-07 alone, a front that switched copies after a reopened link or a crashed relay can
-# deliver a group only every 15-25s on an unchanged route. Not on a roll, so a roll's starved
-# reader still fails. `reopen.toml` reproduces it and lists nothing known.
-[[known]]
-check = "unfed"
-kind = "starved"
-event = "reopen-link"
-quest = "/quest/m2/multicast/splice-stall.md"
-
-[[known]]
-check = "unfed"
-kind = "starved"
-event = "reopen-relay"
-quest = "/quest/m2/multicast/splice-stall.md"
-
-[[known]]
-check = "unfed"
-kind = "starved"
-event = "kill"
-quest = "/quest/m2/multicast/splice-stall.md"

@@ -70,4 +70,4 @@ Public API: none. Wire: none.
 ## Related
 
 - [fMP4 decode times from the declared depth](/quest/m3/fmp4-declared-clock.md) - replaces how reordered video's decode times are authored; this quest's rule must hold under it too
-- [A group's frames present before the next group starts](/quest/m3/groups-never-overlap.md) - an overlapping or repeating keyframe continues its group there, which may remove some cases here
+- [A group's frames present before the next group starts](/quest/m2/groups-never-overlap.md) - an overlapping or repeating keyframe continues its group there, which may remove some cases here

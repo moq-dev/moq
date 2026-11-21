@@ -6,11 +6,11 @@ import { DEFAULT_EXPIRY } from "./cache.ts";
 import { accept as acceptSession, connect as connectSession } from "./connection/index.ts";
 import { defined } from "./defined.test-util.ts";
 import { NotFound, StreamCode, StreamError, toStreamCode } from "./error.ts";
-import { type FillLookup, rejectGroups } from "./fill.ts";
+import { rejectGroups } from "./fill.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
 import { hooks, staleHole } from "./internal.ts";
 import * as Lite from "./lite/index.ts";
-import { createMockTransportPair, groupsOf, requestedGroups } from "./mock.ts";
+import { createMockTransportPair } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Timescale, Timestamp } from "./time.ts";
@@ -31,7 +31,7 @@ type Archive = Map<bigint, string[]>;
 function respond(requests: Requests, archive: Archive): FillGroups[] {
 	const fills: FillGroups[] = [];
 	void (async () => {
-		for (let fill = await requestedGroups(requests); fill; fill = await requestedGroups(requests)) {
+		for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
 			fills.push(fill);
 			serve(fill, archive);
 		}
@@ -130,8 +130,8 @@ test("fill: a fetch of a group about to be written asks the handler at once, and
 	const { broadcast, track } = resumed(5n);
 	const requests = track.requests();
 	const fetching = wireOf(broadcast).fetchGroup("video", 7n);
-	const fill = await requestedGroups(requests);
-	if (fill?.kind !== "groups") throw new Error("no fill of groups");
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill of groups");
 	expect([fill.start, fill.end]).toEqual([7n, 8n]);
 	expect(fill.wanted()).toBe(7n);
 
@@ -163,8 +163,8 @@ test("fill: concurrent fetches of one group share one fill", async () => {
 	const a = wireOf(broadcast).fetchGroup("video", 3n);
 	const b = wireOf(broadcast).fetchGroup("video", 3n);
 
-	const fill = await requestedGroups(requests);
-	if (fill?.kind !== "groups") throw new Error("no fill of groups");
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill of groups");
 	expect([fill.start, fill.end]).toEqual([3n, 4n]);
 	// The second fetch joined it rather than queueing its own.
 	await yieldNow();
@@ -186,8 +186,8 @@ test("fill: a fetch cancelled while its fill awaits a reply withdraws the fill",
 	const controller = new AbortController();
 	const fetching = wireOf(broadcast).fetchGroup("video", 2n, { signal: controller.signal });
 
-	const fill = await requestedGroups(requests);
-	if (fill?.kind !== "groups") throw new Error("no fill of groups");
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill of groups");
 	expect(await fill.wantedChanged()).toBe(2n);
 	expect(fill.isWanted(2n)).toBe(true);
 
@@ -199,7 +199,7 @@ test("fill: a fetch cancelled while its fill awaits a reply withdraws the fill",
 	// Nothing reads it, so closing the withdrawn fill records nothing.
 	fill.close();
 	const later = wireOf(broadcast).fetchGroup("video", 2n);
-	const refill = await requestedGroups(requests);
+	const refill = await requests.requestedFill();
 	expect(refill?.start).toBe(2n);
 	if (refill) serve(refill, new Map([[2n, ["late"]]]));
 	expect(await frames(await later)).toEqual(["late"]);
@@ -214,8 +214,8 @@ test("fill: an answer aborted below the end does not hold the end open", async (
 		const { broadcast, track } = resumed(1n);
 		const requests = track.requests();
 		const fetching = wireOf(broadcast).fetchGroup("video", 0n);
-		const fill = await requestedGroups(requests);
-		if (fill?.kind !== "groups") throw new Error("no fill of groups");
+		const fill = await requests.requestedFill();
+		if (!fill) throw new Error("no fill of groups");
 		const group = defined(fill.accept(0n));
 		group.writeFrame({ payload: enc.encode("backfill"), timestamp: Timestamp.unscaled(group.start) });
 		if (parked) {
@@ -256,8 +256,8 @@ async function failedAnswerHoldsTheEnd(error: Error) {
 	expect((await ordered.nextGroup())?.start).toBe(0n);
 	const requests = track.requests();
 	const fetching = wireOf(broadcast).fetchGroup("video", 1n);
-	const fill = await requestedGroups(requests);
-	if (fill?.kind !== "groups") throw new Error("no fill of groups");
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill of groups");
 	defined(fill.accept(1n)).abort(error);
 	fill.close();
 	await fetching.catch(() => undefined);
@@ -299,7 +299,7 @@ test("fill: a group a lowered floor asks the feed for is not asked of a fill", a
 	hooks.receiveGroup(track, { start: 1n, offset: 0 }).finish();
 	expect((await live.recvGroup())?.start).toBe(1n);
 	const requests = track.requests();
-	const asked = requestedGroups(requests);
+	const asked = requests.requestedFill();
 
 	const history = track.subscribe({
 		ranges: [{ start: { time: 0n }, end: { time: 0n } }],
@@ -326,8 +326,8 @@ test("fill: a failed answer is withheld from a subscribed reader that reads at o
 		const reader = track.subscribe({ ranges: [{ start: { time: 0n } }], delay: { max: null } });
 		const requests = track.requests();
 		const fetching = wireOf(broadcast).fetchGroup("video", 1n);
-		const fill = await requestedGroups(requests);
-		if (fill?.kind !== "groups") throw new Error("no fill of groups");
+		const fill = await requests.requestedFill();
+		if (!fill) throw new Error("no fill of groups");
 		defined(fill.accept(1n)).abort(new Error("archive failed"));
 		const seen: unknown[] = [];
 		for (let recv = hooks.tryRecvGroup(reader, dispositions); recv.kind !== "idle"; ) {
@@ -350,8 +350,8 @@ test("fill: a held answer that fails keeps its frames and its failure", async ()
 	const track = defined(broadcast.createTrack("video", { maxAge: null }));
 	const requests = track.requests();
 	const fetching = wireOf(broadcast).fetchGroup("video", 1n);
-	const fill = await requestedGroups(requests);
-	if (fill?.kind !== "groups") throw new Error("no fill of groups");
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill of groups");
 	const answer = defined(fill.accept(1n));
 	answer.writeFrame({ payload: enc.encode("fill 1"), timestamp: Timestamp.unscaled(answer.start) });
 	const group = await fetching;
@@ -378,9 +378,9 @@ test("fill: an answer withheld after a probe judged it is asked again", async ()
 	});
 	const ordered = reader.ordered();
 	const first = ordered.nextGroup();
-	const fill = await requestedGroups(requests);
+	const fill = await requests.requestedFill();
 	expect(fill && [fill.start, fill.end]).toEqual([0n, 4n]);
-	if (fill?.kind !== "groups") throw new Error("no fill of groups");
+	if (!fill) throw new Error("no fill of groups");
 	defined(fill.accept(0n)).finish();
 	const answer = defined(fill.accept(2n));
 	answer.writeFrame({ payload: enc.encode("fill 2"), timestamp: Timestamp.unscaled(answer.start) });
@@ -393,7 +393,7 @@ test("fill: an answer withheld after a probe judged it is asked again", async ()
 	expect((await second)?.start).toBe(1n);
 
 	const third = ordered.nextGroup();
-	const again = groupsOf(await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)]));
+	const again = await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)]);
 	expect(again && [again.start, again.end]).toEqual([2n, 3n]);
 	if (again) serve(again, new Map([[2n, ["again"]]]));
 	expect((await third)?.start).toBe(2n);
@@ -418,11 +418,11 @@ test("fill: a gap below a group that fails after a probe is asked", async () => 
 	failed.abort(new StreamError(StreamCode.Cancel));
 	await yieldNow();
 	// Judged stale against group 4, so not asked.
-	await reader.start();
+	hooks.sourceStart(reader);
 	group.abort(new StreamError(StreamCode.Cancel));
 	await yieldNow();
 	const next = ordered.nextGroup();
-	const fill = groupsOf(await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)]));
+	const fill = await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)]);
 	expect(fill && [fill.start, fill.end]).toEqual([0n, 2n]);
 
 	fill?.close();
@@ -444,7 +444,7 @@ test("fill: a gap the newest group rises over after a probe is asked", async () 
 	group.finish();
 	expect(reader.tryRecvGroup()?.start).toBe(5n);
 	reader.tryRecvGroup();
-	const fill = groupsOf(await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)]));
+	const fill = await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)]);
 	expect(fill && [fill.start, fill.end]).toEqual([3n, 5n]);
 
 	fill?.close();
@@ -460,7 +460,7 @@ test("fill: a miss judged with no handler open is asked once one opens", async (
 	const reader = track.subscribe({ ranges: [{ start: { time: 0n } }], delay: { max: null } });
 	expect(reader.tryRecvGroup()?.start).toBe(2n);
 	reader.tryRecvGroup();
-	const out = await requestedGroups(first);
+	const out = await first.requestedFill();
 	expect(out && [out.start, out.end]).toEqual([0n, 2n]);
 	first.close();
 	const group = track.createGroup(5n);
@@ -470,7 +470,7 @@ test("fill: a miss judged with no handler open is asked once one opens", async (
 
 	const second = track.requests();
 	reader.tryRecvGroup();
-	const fill = groupsOf(await Promise.race([second.requestedFill(), yieldNow().then(() => undefined)]));
+	const fill = await Promise.race([second.requestedFill(), yieldNow().then(() => undefined)]);
 	expect(fill && [fill.start, fill.end]).toEqual([3n, 5n]);
 
 	fill?.close();
@@ -548,7 +548,7 @@ test("fill: closing a fill drops what is still wanted, and closing the handler d
 	const { broadcast, track } = resumed(5n);
 	const requests = track.requests();
 	const a = wireOf(broadcast).fetchGroup("video", 1n);
-	const fill = await requestedGroups(requests);
+	const fill = await requests.requestedFill();
 	fill?.close();
 	await expect(a).rejects.toBeInstanceOf(NotFound);
 
@@ -566,15 +566,15 @@ test("fill: a refusal fails the readers waiting now, and a later reader asks aga
 	const { broadcast, track } = resumed(5n);
 	const requests = track.requests();
 	const waiting = wireOf(broadcast).fetchGroup("video", 2n);
-	const fill = await requestedGroups(requests);
-	if (fill?.kind !== "groups") throw new Error("no fill of groups");
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill of groups");
 	const refusal = new StreamError(StreamCode.Cancel, { message: "storage busy" });
 	fill.refuseGroups(2n, 3n, refusal);
 	fill.close();
 	await expect(waiting).rejects.toBe(refusal);
 
 	const later = wireOf(broadcast).fetchGroup("video", 2n);
-	const again = await requestedGroups(requests);
+	const again = await requests.requestedFill();
 	expect(again?.start).toBe(2n);
 	if (again) serve(again, new Map([[2n, ["ok"]]]));
 	expect(await frames(await later)).toEqual(["ok"]);
@@ -587,8 +587,8 @@ test("fill: a group arriving after a refusal reaches the reader the refusal name
 	const { broadcast, track } = resumed(5n);
 	const requests = track.requests();
 	const waiting = wireOf(broadcast).fetchGroup("video", 2n);
-	const fill = await requestedGroups(requests);
-	if (fill?.kind !== "groups") throw new Error("no fill of groups");
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill of groups");
 	fill.refuseGroups(2n, 3n, new StreamError(StreamCode.Cancel, { message: "storage busy" }));
 	// Before the waiting fetch looks again.
 	const group = track.createGroup(2n);
@@ -609,8 +609,8 @@ test("fill: the track's skip of a run a reader's fill refused is what the reader
 		delay: { max: null },
 	});
 	const first = reader.recvGroup();
-	const fill = await requestedGroups(requests);
-	if (fill?.kind !== "groups") throw new Error("no fill of groups");
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill of groups");
 	fill.refuseGroups(0n, 2n, new StreamError(StreamCode.Cancel, { message: "storage busy" }));
 	// The publisher declares the refused run never produced; its verdict wins, as in Rust.
 	track.skipGroups(0n, 2n);
@@ -627,8 +627,8 @@ test("fill: a fill names the most urgent priority and loosest budget among its r
 	const requests = track.requests();
 	const low = track.subscribe({ ...history, priority: 1, delay: { max: Duration.millis(60_000) } });
 	void drain(low);
-	const fill = await requestedGroups(requests);
-	if (fill?.kind !== "groups") throw new Error("no fill of groups");
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill of groups");
 	expect([fill.start, fill.end]).toEqual([0n, 5n]);
 	expect(fill.priority).toBe(1);
 	expect(fill.maxDelay).toEqual(Duration.millis(60_000));
@@ -660,8 +660,8 @@ test("fill: a stale verdict leaves an outstanding fill owed", async () => {
 	const requests = track.requests();
 	track.createGroup(3n).finish();
 	const fetching = wireOf(broadcast).fetchGroup("video", 2n);
-	const fill = await requestedGroups(requests);
-	if (fill?.kind !== "groups") throw new Error("no fill of groups");
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill of groups");
 	expect(fill.wanted()).toBe(2n);
 
 	hooks.dropTrackGroups(track, 2n, 3n, staleHole(500));
@@ -683,8 +683,8 @@ test("fill: a group arriving live answers the fill", async () => {
 	const late = track.createGroup(3n);
 	late.finish();
 	const fetching = wireOf(broadcast).fetchGroup("video", 1n);
-	const fill = await requestedGroups(requests);
-	if (fill?.kind !== "groups") throw new Error("no fill of groups");
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill of groups");
 
 	// The producer writes it itself before the handler gets to it.
 	const live = track.createGroup(1n);
@@ -712,7 +712,7 @@ test("fill: an ordered reader stops waiting on an unanswered fill once its budge
 		});
 		const next = reader.ordered().nextGroup();
 		// The handler takes the fill for the missing groups and never answers.
-		const fill = await requestedGroups(requests);
+		const fill = await requests.requestedFill();
 		expect([fill?.start, fill?.end]).toEqual([0n, 5n]);
 
 		// Group 5 arrived when the reader asked, so its budget gives up the holes below a second on.
@@ -741,7 +741,7 @@ test("fill: an arrival-order reader stops waiting on an unanswered fill once its
 		});
 		expect((await reader.recvGroup())?.start).toBe(5n);
 		const next = reader.recvGroup();
-		const fill = await requestedGroups(requests);
+		const fill = await requests.requestedFill();
 		expect([fill?.start, fill?.end]).toEqual([0n, 5n]);
 
 		// The fill never answers; the holes go past the budget, and the finished track ends the read.
@@ -771,8 +771,8 @@ test("fill: a handler hears that a reader stopped wanting what it handed out pas
 			order: "ascending",
 		});
 		const next = reader.ordered().nextGroup();
-		const fill = await requestedGroups(requests);
-		if (fill?.kind !== "groups") throw new Error("no fill of groups");
+		const fill = await requests.requestedFill();
+		if (!fill) throw new Error("no fill of groups");
 		expect(await fill.wantedChanged()).toBe(0n);
 		const changed = fill.wantedChanged();
 		const unwanted = fill.unwanted(0n);
@@ -821,7 +821,7 @@ test("fill: a bounded reader keeps waiting on a fresh fill once an older one goe
 		const next = reader.recvGroup();
 		const fills: FillGroups[] = [];
 		for (let i = 0; i < 2; i++) {
-			const fill = await requestedGroups(requests);
+			const fill = await requests.requestedFill();
 			if (fill) fills.push(fill);
 		}
 		expect(fills.map((fill) => [fill.start, fill.end])).toEqual([
@@ -854,8 +854,8 @@ test("fill: a reader joining a wider fill is owed only its own ranges", async ()
 		order: "ascending",
 	});
 	void drain(wide);
-	const fill = await requestedGroups(requests);
-	if (fill?.kind !== "groups") throw new Error("no fill of groups");
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill of groups");
 	expect([fill.start, fill.end]).toEqual([0n, 10n]);
 
 	// A narrower reader joins the same fill for 2 and 7 alone.
@@ -874,14 +874,16 @@ test("fill: a reader joining a wider fill is owed only its own ranges", async ()
 			group.close();
 		}
 	})();
-	// Its time starts precede every group held, so each is looked up, but it asks no fill of groups.
-	const looked: FillLookup[] = [];
+	// Its time starts precede every group held, so each asks for the group containing it, one key
+	// wide and floored at 0, but it asks no other fill.
+	const looked: FillGroups[] = [];
 	for (let i = 0; i < 2; i++) {
 		const lookup = await requests.requestedFill();
-		if (lookup?.kind !== "lookup") throw new Error("no lookup");
+		if (!lookup) throw new Error("no time start");
+		expect([lookup.floor, lookup.end - lookup.start]).toEqual([0n, 1n]);
 		looked.push(lookup);
 	}
-	expect(looked.map((lookup) => lookup.time).sort()).toEqual([2n, 7n]);
+	expect(looked.map((lookup) => lookup.start).sort()).toEqual([2n, 7n]);
 	await yieldNow();
 	expect(await Promise.race([requests.requestedFill(), yieldNow().then(() => "none")])).toBe("none");
 
@@ -890,8 +892,8 @@ test("fill: a reader joining a wider fill is owed only its own ranges", async ()
 		group.writeFrame({ payload: enc.encode(`old ${key}`), timestamp: Timestamp.unscaled(group.start) });
 		group.finish();
 	}
-	// A handler that can't tell leaves each start at the group held containing its time.
-	for (const lookup of looked) lookup.close();
+	// Each start's group landed through the wide fill, which answers it.
+	for (const lookup of looked) expect(lookup.wanted()).toBeUndefined();
 	// The wide reader still waits on the rest of the fill; the narrow one has all it reads.
 	await done;
 	expect(got).toEqual([2n, 7n]);
@@ -910,8 +912,8 @@ test("fill: a group no reader reads any more stays withdrawn, and widening back 
 	const ranges = (end: bigint) => [{ start: { time: 0n }, end: { time: end } }];
 	const reader = track.subscribe({ ranges: ranges(4n), delay: { max: null }, order: "ascending" });
 	void drain(reader);
-	const fill = await requestedGroups(requests);
-	if (fill?.kind !== "groups") throw new Error("no fill of groups");
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill of groups");
 	expect([fill.start, fill.end]).toEqual([0n, 5n]);
 
 	reader.update({ ranges: ranges(2n), delay: { max: null }, order: "ascending" });
@@ -922,7 +924,7 @@ test("fill: a group no reader reads any more stays withdrawn, and widening back 
 	reader.update({ ranges: ranges(4n), delay: { max: null }, order: "ascending" });
 	await yieldNow();
 	expect(fill.isWanted(3n)).toBe(false);
-	const again = await requestedGroups(requests);
+	const again = await requests.requestedFill();
 	expect([again?.start, again?.end]).toEqual([3n, 5n]);
 
 	// Each narrowing and widening back asks anew, never spending the refill an eviction gets.
@@ -930,7 +932,7 @@ test("fill: a group no reader reads any more stays withdrawn, and widening back 
 	reader.update({ ranges: ranges(4n), delay: { max: null }, order: "ascending" });
 	await yieldNow();
 	expect(again?.isWanted(3n)).toBe(false);
-	const third = await requestedGroups(requests);
+	const third = await requests.requestedFill();
 	expect([third?.start, third?.end]).toEqual([3n, 5n]);
 
 	third?.close();
@@ -954,14 +956,14 @@ test("fill: a refusal under an old budget is asked afresh on each widening, neve
 	const old = new StreamError(StreamCode.Old, { message: "old" });
 	// Each widening past the last refusal's budget asks a new fill for the run.
 	for (const budget of [60_000, 120_000, 240_000]) {
-		const fill = await requestedGroups(requests);
+		const fill = await requests.requestedFill();
 		expect([fill?.start, fill?.end]).toEqual([0n, 5n]);
-		if (fill?.kind !== "groups") throw new Error("no fill of groups");
+		if (!fill) throw new Error("no fill of groups");
 		rejectGroups(fill, 0n, 5n, old, { budget, everyone: false });
 		fill.close();
 		reader.update(terms(budget * 2));
 	}
-	expect(await requestedGroups(requests)).toMatchObject({ start: 0n, end: 5n });
+	expect(await requests.requestedFill()).toMatchObject({ start: 0n, end: 5n });
 
 	reader.close();
 	requests.close();
@@ -974,8 +976,8 @@ test("fill: what a reader's sequence cursor passes, a fill no longer owes it", a
 	const reader = track.subscribe(history);
 	// A logical reader that already holds what lies below the floor raises its copy's cursor.
 	expect(hooks.tryNextGroup(reader, 0n).kind).toBe("idle");
-	const fill = await requestedGroups(requests);
-	if (fill?.kind !== "groups") throw new Error("no fill of groups");
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill of groups");
 	expect(fill.wanted()).toBe(0n);
 	const changed = fill.wantedChanged();
 	await changed;
@@ -1000,8 +1002,8 @@ test("fill: a filled group stays wanted only while a reader will still read it",
 
 	const reader = track.subscribe(history);
 	const next = reader.ordered().nextGroup();
-	const fill = await requestedGroups(requests);
-	if (fill?.kind !== "groups") throw new Error("no fill of groups");
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill of groups");
 	expect(fill.wanted()).toBe(0n);
 	const source = defined(fill.accept(0n));
 	source.writeFrame({ payload: enc.encode("g0"), timestamp: Timestamp.unscaled(source.start) });
@@ -1039,8 +1041,8 @@ test("fill: a reader changing only its order wakes the handler", async () => {
 	const requests = track.requests();
 	const reader = track.subscribe(history);
 	void drain(reader);
-	const fill = await requestedGroups(requests);
-	if (fill?.kind !== "groups") throw new Error("no fill of groups");
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill of groups");
 	expect(await fill.wantedChanged()).toBe(0n);
 	const changed = fill.wantedChanged();
 
@@ -1064,7 +1066,7 @@ test("fill: a reader parked on a miss asks once a handler opens", async () => {
 
 	// A handler opening wakes it to ask.
 	const requests = track.requests();
-	const fill = await requestedGroups(requests);
+	const fill = await requests.requestedFill();
 	expect([fill?.start, fill?.end]).toEqual([0n, 5n]);
 	if (fill) serve(fill, new Map([[0n, ["old 0"]]]));
 	expect((await next)?.start).toBe(0n);
@@ -1078,8 +1080,8 @@ test("fill: a reader joins a fill still served after its handler's handle closed
 	const { broadcast, track } = resumed(5n);
 	const requests = track.requests();
 	const first = wireOf(broadcast).fetchGroup("video", 2n);
-	const fill = await requestedGroups(requests);
-	if (fill?.kind !== "groups") throw new Error("no fill of groups");
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill of groups");
 	requests.close();
 
 	// The fill is still out, so a second fetch joins it rather than failing at once.
@@ -1098,8 +1100,8 @@ test("fill: a group the track gives up elsewhere answers the fill", async () => 
 	const { broadcast, track } = resumed(5n);
 	const requests = track.requests();
 	const fetching = wireOf(broadcast).fetchGroup("video", 2n);
-	const fill = await requestedGroups(requests);
-	if (fill?.kind !== "groups") throw new Error("no fill of groups");
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill of groups");
 	expect(fill.wanted()).toBe(2n);
 
 	// An upstream SUBSCRIBE_DROP, say: the handler is no longer asked for it.
@@ -1125,7 +1127,7 @@ test("fill: a stale run that does not settle the reader is still asked for", asy
 		delay: { max: Duration.millis(500) },
 	});
 	void drain(reader);
-	const fill = groupsOf(await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)]));
+	const fill = await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)]);
 	expect(fill && [fill.start, fill.end]).toEqual([0n, 2n]);
 
 	fill?.close();
@@ -1150,7 +1152,7 @@ test("fill: a stale run given up after a probe is asked on the next", async () =
 	const asked = async () => {
 		const fills: bigint[][] = [];
 		for (;;) {
-			const fill = groupsOf(await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)]));
+			const fill = await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)]);
 			if (!fill) return fills;
 			fills.push([fill.start, fill.end]);
 			fill.close();
@@ -1176,8 +1178,8 @@ test("fill: a stale run that does not settle the reader leaves its own refusal r
 		delay: { max: Duration.millis(500) },
 	});
 	const first = reader.recvGroup();
-	const fill = await requestedGroups(requests);
-	if (fill?.kind !== "groups") throw new Error("no fill of groups");
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill of groups");
 	const refusal = new StreamError(StreamCode.Cancel, { message: "storage busy" });
 	fill.refuseGroups(0n, 2n, refusal);
 	expect(hooks.tryDrop(reader)).toMatchObject({ kind: "drop", start: 0n, end: 2n, error: refusal });
@@ -1196,8 +1198,8 @@ test("fill: a stale run that does not settle the reader keeps its pending refusa
 		delay: { max: Duration.millis(500) },
 	});
 	const first = reader.recvGroup();
-	const fill = await requestedGroups(requests);
-	if (fill?.kind !== "groups") throw new Error("no fill of groups");
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill of groups");
 	const refusal = new StreamError(StreamCode.Cancel, { message: "storage busy" });
 	fill.refuseGroups(0n, 1n, refusal);
 	fill.refuseGroups(3n, 4n, refusal);
@@ -1224,8 +1226,8 @@ test("fill: a cache-miss fetch of a dynamic track serves the one track the broad
 	const group = track.createGroup(4n);
 	group.finish();
 
-	const fill = await requestedGroups(requests);
-	if (fill?.kind !== "groups") throw new Error("no fill of groups");
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill of groups");
 	serve(fill, new Map([[1n, ["one"]]]));
 	expect(await frames(await fetching)).toEqual(["one"]);
 
@@ -1233,7 +1235,7 @@ test("fill: a cache-miss fetch of a dynamic track serves the one track the broad
 	const second = wireOf(broadcast).fetchGroup("video", 2n);
 	const queued = await Promise.race([wireOf(broadcast).requested(), yieldNow().then(() => "none")]);
 	expect(queued).toBe("none");
-	const refill = await requestedGroups(requests);
+	const refill = await requests.requestedFill();
 	if (refill) serve(refill, new Map([[2n, ["two"]]]));
 	expect(await frames(await second)).toEqual(["two"]);
 
@@ -1262,7 +1264,7 @@ async function session(alpn: string) {
 	const requests = track.requests();
 	const fills: FillGroups[] = [];
 	void (async () => {
-		for (let fill = await requestedGroups(requests); fill; fill = await requestedGroups(requests)) {
+		for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
 			fills.push(fill);
 			for (let key = fill.wanted(); key !== undefined; key = fill.wanted()) {
 				if (key === 1n) {
@@ -1362,7 +1364,7 @@ test("fill: an OLD answer under the max age is held as stale until forgotten", a
 	const asked = async () => {
 		const fills: bigint[][] = [];
 		for (;;) {
-			const fill = groupsOf(await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)]));
+			const fill = await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)]);
 			if (!fill) return fills;
 			fills.push([fill.start, fill.end]);
 			fill.close();
@@ -1374,8 +1376,8 @@ test("fill: an OLD answer under the max age is held as stale until forgotten", a
 	// A reader of the run alone, which the verdict does not settle, waits on the same fill.
 	const bounded = track.subscribe({ ...terms, ranges: [{ start: { time: 0n }, end: { time: 2n } }] });
 	bounded.tryRecvGroup();
-	const fill = await requestedGroups(requests);
-	if (fill?.kind !== "groups") throw new Error("no fill of groups");
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill of groups");
 	expect([fill.start, fill.end]).toEqual([0n, 3n]);
 	const old = new StreamError(StreamCode.Old, { message: "old" });
 	rejectGroups(fill, 0n, 3n, old, { budget: 10_000, everyone: true });
@@ -1463,7 +1465,7 @@ test("fill: a refused head gives its group up, and the bounded reader moves past
 	const { broadcast, track } = headless();
 	const requests = track.requests();
 	void (async () => {
-		for (let fill = await requestedGroups(requests); fill; fill = await requestedGroups(requests)) {
+		for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
 			fill.refuseGroups(fill.start, fill.end, new NotFound("no head"));
 			fill.close();
 		}
@@ -1489,7 +1491,7 @@ test.each([
 	const requests = track.requests();
 	let asked = 0;
 	void (async () => {
-		for (let fill = await requestedGroups(requests); fill; fill = await requestedGroups(requests)) {
+		for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
 			// A reader asking again would loop forever: refuse past a few, so the test still ends.
 			if (++asked > 3) fill.refuseGroups(fill.start, fill.end, new NotFound("asked again"));
 			else if (end === "drop") fill.dropGroups(fill.start, fill.end);
@@ -1514,7 +1516,7 @@ test("fill: a drop of a held group landing while its head is asked leaves the he
 	const requests = track.requests();
 	const ordered = track.subscribe(twoAndThree).ordered();
 	const first = ordered.nextGroup();
-	const fill = await requestedGroups(requests);
+	const fill = await requests.requestedFill();
 	if (!fill) throw new Error("no head asked");
 	expect([fill.start, fill.end]).toEqual([2n, 3n]);
 
@@ -1577,16 +1579,18 @@ function timed(): { broadcast: BroadcastProducer; track: Producer } {
 	return { broadcast, track };
 }
 
-// Answer each lookup with `lookup(time)`, closing it unanswered when that is undefined, and serve
-// every fill of groups from the archive. Returns the lookups' times, in milliseconds.
+// Answer each time start with `lookup(time)`, dropping it when that is undefined, as a handler whose
+// index holds none there does, and serve every other fill from the archive. Returns the time starts'
+// times, in milliseconds.
 function lookups(requests: Requests, lookup: (time: bigint) => bigint | undefined): bigint[] {
 	const times: bigint[] = [];
 	void (async () => {
 		for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
-			if (fill.kind === "lookup") {
-				times.push(fill.time);
-				const answer = lookup(fill.time);
-				if (answer !== undefined) {
+			if (fill.floor < fill.start) {
+				times.push(fill.start);
+				const answer = lookup(fill.start);
+				if (answer === undefined) fill.dropGroups(fill.start, fill.end);
+				else {
 					const group = defined(fill.accept(answer));
 					group.writeFrame({
 						payload: enc.encode(`g${answer}`),
@@ -1669,6 +1673,53 @@ test("fill: a lookup answered below the eviction watermark starts the range ther
 	}
 });
 
+test("fill: a time start dropped after its floor's group is evicted starts at that group", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		const broadcast = new BroadcastProducer();
+		const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
+		const requests = track.requests();
+		const write = (n: bigint) => {
+			const group = track.createGroup(n);
+			group.writeFrame({ payload: enc.encode(`g${n}`), timestamp: Timestamp.fromMillis(Number(n)) });
+			group.finish();
+		};
+		write(1n);
+		write(9n);
+		const reader = track.subscribe({
+			ranges: [{ start: { time: 7n }, end: { time: 7n } }],
+			delay: { max: null },
+			order: "ascending",
+		});
+		const next = reader.ordered().nextGroup();
+		const first = defined(await requests.requestedFill());
+		expect([first.start, first.floor]).toEqual([7n, 2n]);
+		// Idle past the cache window, so the next write evicts every group but the new edge.
+		clock.jump(Duration.millis(DEFAULT_EXPIRY.asMillis() + 1000));
+		write(10n);
+		// The index says 1 holds the time, below the floor: nothing from 2 does. Mirrors the Rust
+		// `a_time_start_is_answered_by_the_group_below_it`: the reader starts at 1 whatever the cache
+		// holds now, asking it back as a miss rather than the time again.
+		first.dropGroups(2n, 8n);
+		first.close();
+		const miss = defined(await requests.requestedFill());
+		expect([miss.start, miss.floor]).toEqual([1n, 1n]);
+		const found = defined(miss.accept(1n));
+		found.writeFrame({ payload: enc.encode("g1"), timestamp: Timestamp.fromMillis(1) });
+		found.finish();
+		miss.dropGroups(2n, 8n);
+		miss.close();
+		expect((await next)?.start).toBe(1n);
+
+		reader.close();
+		requests.close();
+		broadcast.close();
+	} finally {
+		installed.close();
+	}
+});
+
 test("fill: a lookup's answer is read at once, before its first frame: its key is its start", async () => {
 	const { broadcast, track } = timed();
 	const requests = track.requests();
@@ -1676,8 +1727,8 @@ test("fill: a lookup's answer is read at once, before its first frame: its key i
 	const next = reader.ordered().nextGroup();
 	// The handler answers with group 2 but writes no frame yet.
 	const lookup = await requests.requestedFill();
-	if (lookup?.kind !== "lookup") throw new Error("no lookup");
-	expect(lookup.time).toBe(2n);
+	if (!lookup) throw new Error("no time start");
+	expect([lookup.start, lookup.floor]).toEqual([2n, 0n]);
 	const found = defined(lookup.accept(2n));
 	expect((await next)?.start).toBe(2n);
 
@@ -1687,19 +1738,91 @@ test("fill: a lookup's answer is read at once, before its first frame: its key i
 	broadcast.close();
 });
 
-test("fill: a lookup closed unanswered starts the range at its time, asking nothing below it", async () => {
+test("fill: a time start dropped from 0 starts the range at its time, asking nothing below it", async () => {
 	const { broadcast, track } = timed();
 	const requests = track.requests();
 	const times = lookups(requests, () => undefined);
 
-	// Mirrors the Rust `a_time_start_before_the_cache_asks_nothing_below_it`: the group containing
-	// the time is unknown, so every key from the time on is in range, and the archive fills from 2.
+	// Mirrors the Rust `a_time_start_before_the_cache_asks_nothing_below_it`: no group starts at or
+	// before the time, so the range reads from it, and the archive fills from 3, past the key dropped.
 	const reader = track.subscribe(fromTime(2n));
 	const ordered = reader.ordered();
 	const got: bigint[] = [];
-	for (let i = 0; i < 4; i++) got.push((await ordered.nextGroup())?.start ?? -1n);
-	expect(got).toEqual([2n, 3n, 4n, 5n]);
+	for (let i = 0; i < 3; i++) got.push((await ordered.nextGroup())?.start ?? -1n);
+	expect(got).toEqual([3n, 4n, 5n]);
 	expect(times).toEqual([2n]);
+
+	reader.close();
+	requests.close();
+	broadcast.close();
+});
+
+test("fill: a time start just past a held group, dropped, starts at that group", async () => {
+	// Mirrors the Rust `a_time_start_just_past_a_held_group_drops_to_it`: the floor is the time
+	// itself, so the fill asks only its own key, and its drop starts the reader at group 4, which the
+	// walk passed while the lookup was out.
+	for (const ordered of [false, true]) {
+		const broadcast = new BroadcastProducer();
+		const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
+		for (const n of [4n, 10n]) {
+			const group = track.createGroup(n);
+			group.writeFrame({ payload: enc.encode(`g${n}`), timestamp: Timestamp.fromMillis(Number(n)) });
+			group.finish();
+		}
+		const requests = track.requests();
+		const floors: bigint[][] = [];
+		void (async () => {
+			for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
+				floors.push([fill.start, fill.floor]);
+				fill.dropGroups(fill.start, fill.end);
+				fill.close();
+			}
+		})();
+		const reader = track.subscribe(fromTime(5n));
+		const got: bigint[] = [];
+		if (ordered) {
+			const keys = reader.ordered();
+			for (let i = 0; i < 2; i++) got.push((await keys.nextGroup())?.start ?? -1n);
+		} else for (let i = 0; i < 2; i++) got.push((await reader.recvGroup())?.start ?? -1n);
+		expect(got).toEqual([4n, 10n]);
+		expect(floors[0]).toEqual([5n, 5n]);
+
+		reader.close();
+		requests.close();
+		broadcast.close();
+	}
+});
+
+test("fill: a refused time start fails its reader until its ranges change", async () => {
+	const { broadcast, track } = timed();
+	const requests = track.requests();
+	// Mirrors the Rust `a_refused_time_start_fails_its_reader`.
+	const reader = track.subscribe(fromTime(2n));
+	const ordered = reader.ordered();
+	const next = ordered.nextGroup();
+	const start = defined(await requests.requestedFill());
+	expect([start.start, start.floor]).toEqual([2n, 0n]);
+	const refusal = new Error("store down");
+	start.refuseGroups(start.start, start.end, refusal);
+	start.close();
+	// Not group 5, which the cache holds past the time.
+	await expect(next).rejects.toBe(refusal);
+	await expect(ordered.nextGroup()).rejects.toBe(refusal);
+
+	// An edit replacing it resolves every range again, each by its Range ID.
+	const times = lookups(requests, (ms) => ms);
+	hooks.editSubscriber(reader, {
+		retire: [0n],
+		add: [[1n, { start: { time: 3n } }]],
+		priority: 0,
+		order: "ascending",
+		delay: { max: null },
+	});
+	const got: bigint[] = [];
+	for (let i = 0; i < 3; i++) got.push((await ordered.nextGroup())?.start ?? -1n);
+	expect(got).toEqual([3n, 4n, 5n]);
+	expect(times).toEqual([3n]);
+	expect(hooks.servingResolvedKeys(reader, [1n])[0]?.start).toBe(3n);
 
 	reader.close();
 	requests.close();
@@ -1726,8 +1849,8 @@ test("fill: replacing the ranges withdraws a lookup still out", async () => {
 	const reader = track.subscribe(fromTime(2n));
 	expect(reader.tryRecvGroup()).toBeUndefined();
 	const lookup = await requests.requestedFill();
-	if (lookup?.kind !== "lookup") throw new Error("no lookup");
-	expect(lookup.time).toBe(2n);
+	if (!lookup) throw new Error("no time start");
+	expect(lookup.start).toBe(2n);
 
 	// It follows the readers waiting on it: the one with no age budget, until it leaves.
 	expect(lookup.maxDelay).toBeNull();

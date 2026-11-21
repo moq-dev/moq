@@ -407,6 +407,31 @@ fn an_orphan_is_released_when_the_reader_lets_go() {
 	assert_eq!(left.load(Ordering::SeqCst), Left::LOST);
 }
 
+/// Once nothing owns the origin, the node releases each orphan as lost, and a session
+/// still open keeps serving its claims.
+#[test]
+fn releasing_orphans_keeps_the_open_sessions_claims() {
+	let (node, _clock) = node();
+	let (room, other) = (cast("room"), cast("other"));
+	let first = publisher(&node, 1);
+	let second = publisher(&node, 2);
+	let _viewer = viewer(&node, 3);
+	announce(&first, &room, live(0));
+	announce(&second, &other, live(0));
+	confirm(&first);
+	confirm(&second);
+	let left = Arc::new(AtomicU8::new(Left::HELD));
+	first.orphan(node.me(), &room, Box::new(Left(left.clone())));
+	drop(first);
+
+	node.release_orphans();
+	assert_eq!(left.load(Ordering::SeqCst), Left::LOST);
+	assert_eq!(
+		node.poll_forward(3, None, &other, &kio::Waiter::noop()),
+		Poll::Ready(Some(Via::Route { node: node.me() }))
+	);
+}
+
 /// A session that returns before the debounce runs out takes the claim over: the orphan
 /// is released only once the new session serves it, so the origin never drops the claim.
 #[test]
@@ -684,4 +709,177 @@ fn a_neighbour_serves_a_claim_once_its_copy_holds_it() {
 	lagging.recv(claims).unwrap();
 	lagging.flush();
 	assert_eq!(confirm(&lagging), 1);
+}
+
+/// The neighbour whose copy holds a claim leaves while another still routes to its node
+/// with a copy that lacks it. The node keeps showing the claim available, so a request for
+/// it waits for that copy rather than fail: nothing the node shows would change once the
+/// copy arrives, so a request refused meanwhile would never be asked again.
+#[test]
+fn a_request_for_a_claim_shown_available_waits_for_a_copy_that_holds_it() {
+	let (node, _clock) = node();
+	let room = cast("room");
+	let far = id(9);
+	let route = |via: u64, cost| Msg::Route {
+		origin: far,
+		offer: Some(Offer {
+			path: [
+				Hop { node: far, session: 0 },
+				Hop {
+					node: id(via),
+					session: 1,
+				},
+			]
+			.into(),
+			draining: false,
+			priority: i8::MAX,
+			cost,
+			marked: false,
+		}),
+	};
+	let claims = Msg::Claims {
+		origin: far,
+		changes: vec![(room.clone(), live(0))],
+		floor: 1,
+	};
+	let viewer = viewer(&node, 5);
+	let lagging = node.connect(1, port(Role::Routing(id(7)))).unwrap();
+	lagging.recv(Msg::Edited).unwrap();
+	let ahead = node.connect(2, port(Role::Routing(id(8)))).unwrap();
+	ahead.recv(Msg::Edited).unwrap();
+	lagging.recv(route(7, 1)).unwrap();
+	lagging.flush();
+	ahead.recv(route(8, 2)).unwrap();
+	ahead.recv(claims.clone()).unwrap();
+	ahead.flush();
+	assert_eq!(confirm(&ahead), 1);
+	assert_eq!(told(&viewer), [("room".to_string(), true)]);
+
+	drop(ahead);
+	assert!(told(&viewer).is_empty(), "the claim still shows available");
+	assert!(serves(&lagging).is_empty(), "its copy lacks the claim");
+	let (flag, waiter) = flag();
+	assert!(node.poll_forward(5, None, &room, &waiter).is_pending());
+	assert!(node.poll_forward(5, Some(far), &room, &waiter).is_pending());
+
+	lagging.recv(claims).unwrap();
+	lagging.flush();
+	assert_eq!(confirm(&lagging), 1);
+	assert!(flag.woken(), "a way appeared");
+	assert_eq!(
+		node.poll_forward(5, None, &room, &waiter),
+		Poll::Ready(Some(Via::Route { node: far }))
+	);
+}
+
+/// A request waiting for a way to a claim fails once the node no longer routes to the
+/// claim's node, which shows the claim unavailable.
+#[test]
+fn a_request_waiting_for_a_way_fails_once_its_route_goes() {
+	let (node, _clock) = node();
+	let room = cast("room");
+	let far = id(9);
+	let route = |via: u64, cost| Msg::Route {
+		origin: far,
+		offer: Some(Offer {
+			path: [
+				Hop { node: far, session: 0 },
+				Hop {
+					node: id(via),
+					session: 1,
+				},
+			]
+			.into(),
+			draining: false,
+			priority: i8::MAX,
+			cost,
+			marked: false,
+		}),
+	};
+	let viewer = viewer(&node, 5);
+	let lagging = node.connect(1, port(Role::Routing(id(7)))).unwrap();
+	lagging.recv(Msg::Edited).unwrap();
+	let ahead = node.connect(2, port(Role::Routing(id(8)))).unwrap();
+	ahead.recv(Msg::Edited).unwrap();
+	lagging.recv(route(7, 1)).unwrap();
+	lagging.flush();
+	ahead.recv(route(8, 2)).unwrap();
+	ahead
+		.recv(Msg::Claims {
+			origin: far,
+			changes: vec![(room.clone(), live(0))],
+			floor: 1,
+		})
+		.unwrap();
+	ahead.flush();
+	confirm(&ahead);
+	drop(ahead);
+	told(&viewer);
+	let (flag, waiter) = flag();
+	assert!(node.poll_forward(5, None, &room, &waiter).is_pending());
+
+	lagging
+		.recv(Msg::Route {
+			origin: far,
+			offer: None,
+		})
+		.unwrap();
+	lagging.flush();
+	assert!(flag.woken(), "the route went");
+	assert_eq!(node.poll_forward(5, None, &room, &waiter), Poll::Ready(None));
+	assert_eq!(node.poll_forward(5, Some(far), &room, &waiter), Poll::Ready(None));
+}
+
+/// A request waiting for a way to a claim fails once a claim of better precedence outranks
+/// it, as the node then shows the broadcast by that claim, which its sender asks anew.
+#[test]
+fn a_request_waiting_for_a_way_fails_once_its_claim_is_outranked() {
+	let (node, _clock) = node();
+	let room = cast("room");
+	let far = id(9);
+	let route = |via: u64, cost| Msg::Route {
+		origin: far,
+		offer: Some(Offer {
+			path: [
+				Hop { node: far, session: 0 },
+				Hop {
+					node: id(via),
+					session: 1,
+				},
+			]
+			.into(),
+			draining: false,
+			priority: i8::MAX,
+			cost,
+			marked: false,
+		}),
+	};
+	let viewer = viewer(&node, 5);
+	let publisher = publisher(&node, 6);
+	let lagging = node.connect(1, port(Role::Routing(id(7)))).unwrap();
+	lagging.recv(Msg::Edited).unwrap();
+	let ahead = node.connect(2, port(Role::Routing(id(8)))).unwrap();
+	ahead.recv(Msg::Edited).unwrap();
+	lagging.recv(route(7, 1)).unwrap();
+	lagging.flush();
+	ahead.recv(route(8, 2)).unwrap();
+	ahead
+		.recv(Msg::Claims {
+			origin: far,
+			changes: vec![(room.clone(), live(0))],
+			floor: 1,
+		})
+		.unwrap();
+	ahead.flush();
+	confirm(&ahead);
+	drop(ahead);
+	told(&viewer);
+	let (flag, waiter) = flag();
+	assert!(node.poll_forward(5, Some(far), &room, &waiter).is_pending());
+
+	announce(&publisher, &room, live(1));
+	confirm(&publisher);
+	assert!(flag.woken(), "a newer claim arrived");
+	assert_eq!(told(&viewer), [("room".to_string(), true)], "shown by the newer claim");
+	assert_eq!(node.poll_forward(5, Some(far), &room, &waiter), Poll::Ready(None));
 }

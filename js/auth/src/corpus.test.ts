@@ -1,5 +1,5 @@
 // Replays rs/moq-auth/tests/corpus.json, which the Rust crate replays too, so the two
-// parsers cannot disagree on a token, key, key set, or grant without both failing.
+// parsers cannot disagree on a token, key, key set, grant, or signable root without both failing.
 import { describe, expect, test } from "bun:test";
 import * as jose from "jose";
 import { type Access, type Claims, patterns } from "./claims.ts";
@@ -15,6 +15,7 @@ const corpus = (await Bun.file(new URL("../../../rs/moq-auth/tests/corpus.json",
 	jwk: Case[];
 	sets: Case[];
 	grants: Case[];
+	roots: { root: string; signable: boolean }[];
 };
 
 // The claims as the corpus writes them: patterns reduced, absent roles empty, a capped role
@@ -77,3 +78,15 @@ for (const [section, cases, parse] of sections) {
 		}
 	});
 }
+
+// A token is minted for a root exactly when `@moq/net`'s `Path.from` accepts it.
+describe("roots", () => {
+	const key = Key.parse(JSON.stringify(corpus.keys.hs256));
+	for (const { root, signable } of corpus.roots) {
+		test(JSON.stringify(root), async () => {
+			const signed = Key.sign(key, { root, publish: ["**"] });
+			if (signable) await signed;
+			else await expect(signed).rejects.toThrow();
+		});
+	}
+});

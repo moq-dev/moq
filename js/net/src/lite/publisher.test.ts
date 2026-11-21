@@ -9,6 +9,7 @@ import { defined } from "../defined.test-util.ts";
 import { fromTransport, ProtocolViolation, SessionCode, StreamCode, StreamError, toStreamCode } from "../error.ts";
 import { Consumer as GroupConsumer, type Producer as GroupProducer } from "../group.ts";
 import { randomHop } from "../hop.ts";
+import * as Instance from "../instance.ts";
 import { hooks, NO_MAX_DELAY, staleHole } from "../internal.ts";
 import { createMockTransportPair, manual, settlesWithin, textFrame } from "../mock.ts";
 import { lines } from "../open.ts";
@@ -4168,6 +4169,217 @@ test("a lite-07 edit answers each added prefix under its own Prefix ID", async (
 	} finally {
 		cam.close();
 		mic.close();
+		close();
+		origin.close();
+	}
+});
+
+// A prefix wider than our grant is answered region by region: a claim above a granted region is
+// presented at the region, which the grant covers, and nothing outside the grant is told. A grant
+// change is answered before the ANNOUNCE_OK of the next edit, even one that changes nothing.
+test("a lite-07 prefix wider than the grant is answered region by region", async () => {
+	const origin = new OriginProducer();
+	const regions = (...paths: string[]): Grant => ({
+		publish: new Path.Patterns(paths.map((path) => Path.Pattern.subtree(path))),
+		subscribe: new Path.Patterns([]),
+	});
+	const grant = new Signal<Grant | undefined>(regions("a/b"));
+	const broadcasts = ["a", "a/b/x", "c/y", "d/z"].map((path) => publish(origin, Path.from(path)));
+	const { next, ok, request, close } = routedAnswer(origin, grant);
+	const until = async (status: AnnounceBroadcast["status"]) => {
+		const msgs: AnnounceBroadcast[] = [];
+		for (;;) {
+			const msg = await next();
+			msgs.push(msg);
+			if (msg.status === status) return msgs;
+		}
+	};
+	const started = (msgs: AnnounceBroadcast[]) =>
+		msgs.flatMap((msg) => (msg.status === "start" ? [`${msg.suffix} above ${msg.claim.above}`] : [])).sort();
+	try {
+		await ok();
+		const first = await until("synced");
+		// `a` covers the region from one segment above it; `c/y` and `d/z` lie outside.
+		expect(started(first)).toEqual(["a/b above 1", "a/b/x above 0"]);
+
+		// The grant widens to `c`; the edit after it changes nothing, and its answer follows `c/y`.
+		grant.set(regions("a/b", "c"));
+		request([], []);
+		const widened = await until("ok");
+		expect(started(widened)).toEqual(["c/y above 0"]);
+
+		// Widened to `a`, the claim at `a` is no longer presented at `a/b` but at its own path:
+		// lost where it was, since its publisher never withdrew it, and `a/b/x` stays.
+		grant.set(regions("a", "c"));
+		request([], []);
+		const moved = await until("ok");
+		expect(started(moved)).toEqual(["a above 0"]);
+		expect(moved.filter((msg) => msg.status === "endedId")).toEqual([{ status: "endedId", id: 0n, lost: true }]);
+	} finally {
+		for (const broadcast of broadcasts) broadcast.close();
+		close();
+		origin.close();
+	}
+});
+
+// A grant whose head is too long to be a path holds no region: a claim above it is not presented
+// there, which the wire could not carry, and the session stays up.
+test("a lite-07 grant head too long for a path presents nothing", async () => {
+	const origin = new OriginProducer();
+	const long = `a/${"x".repeat(Path.MAX_BYTES)}`;
+	const grant = new Signal<Grant | undefined>({
+		publish: new Path.Patterns([Path.Pattern.parse(`${long}/**`), Path.Pattern.subtree("c")]),
+		subscribe: new Path.Patterns([]),
+	});
+	const broadcasts = ["a", "c/y"].map((path) => publish(origin, Path.from(path)));
+	const { next, ok, close } = routedAnswer(origin, grant);
+	try {
+		await ok();
+		const msgs: AnnounceBroadcast[] = [];
+		for (;;) {
+			const msg = await next();
+			msgs.push(msg);
+			if (msg.status === "synced") break;
+		}
+		expect(msgs.flatMap((msg) => (msg.status === "start" ? [msg.suffix] : []))).toEqual([Path.from("c/y")]);
+	} finally {
+		for (const broadcast of broadcasts) broadcast.close();
+		close();
+		origin.close();
+	}
+});
+
+// A claim at a path the grant does not match, but above paths it does, is shown where it is
+// presented: `a` under `a/*`, at the region and at its own path. One beneath every path the grant
+// matches stays hidden.
+test("a lite-07 claim above what the grant matches is shown", async () => {
+	for (const asked of ["", "a"]) {
+		const origin = new OriginProducer();
+		const grant = new Signal<Grant | undefined>({
+			publish: new Path.Patterns([Path.Pattern.parse("a/*")]),
+			subscribe: new Path.Patterns([]),
+		});
+		const broadcasts = ["a", "a/x/y", "b"].map((path) => publish(origin, Path.from(path)));
+		const { next, ok, close } = routedAnswer(origin, grant, Path.from(asked));
+		try {
+			await ok();
+			const msgs: AnnounceBroadcast[] = [];
+			for (;;) {
+				const msg = await next();
+				msgs.push(msg);
+				if (msg.status === "synced") break;
+			}
+			const told = msgs.flatMap((msg) =>
+				msg.status === "start" ? [`${msg.suffix} above ${msg.claim.above}`] : [],
+			);
+			expect(told).toEqual(["a above 0"]);
+		} finally {
+			for (const broadcast of broadcasts) broadcast.close();
+			close();
+			origin.close();
+		}
+	}
+});
+
+// A scoped claim is shown only where its scope and the grant share a path: one at `a` scoped to
+// `a/*/x` serves something `a/**` grants, and nothing `a/*` does.
+test("a lite-07 scoped claim sharing no path with the grant is hidden", async () => {
+	const cases: [string, string[]][] = [
+		["a/*", []],
+		["a/**", ["a"]],
+	];
+	for (const [granted, told] of cases) {
+		const origin = new OriginProducer();
+		const grant = new Signal<Grant | undefined>({
+			publish: new Path.Patterns([Path.Pattern.parse(granted)]),
+			subscribe: new Path.Patterns([]),
+		});
+		const scoped = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("a/*/x")]));
+		const claim = scoped.claim(Path.from("a"));
+		const { next, ok, close } = routedAnswer(origin, grant);
+		try {
+			await ok();
+			const msgs: AnnounceBroadcast[] = [];
+			for (;;) {
+				const msg = await next();
+				msgs.push(msg);
+				if (msg.status === "synced") break;
+			}
+			expect(msgs.flatMap((msg) => (msg.status === "start" ? [msg.suffix] : []))).toEqual(
+				told.map((path) => Path.from(path)),
+			);
+		} finally {
+			claim.close();
+			close();
+			origin.close();
+		}
+	}
+});
+
+// A claim is shown only where the grant, the claim's scope, and the answering handle's scope share
+// a path. Beneath a handle scoped to `a/*/x`, an unscoped claim at `a` serves nothing `a/*/y`
+// grants; and of two claims at `a`, the cheaper scoped to `a/*/x` gives way to the one `a/*/y`
+// shows.
+test("a lite-07 claim is shown only where the handle and the grant share a path", async () => {
+	const patterns = (pattern: string) => new Path.Patterns([Path.Pattern.parse(pattern)]);
+	const grant = new Signal<Grant | undefined>({ publish: patterns("a/*/y"), subscribe: new Path.Patterns([]) });
+	const synced = async (next: () => Promise<AnnounceBroadcast>) => {
+		const msgs: AnnounceBroadcast[] = [];
+		for (;;) {
+			const msg = await next();
+			msgs.push(msg);
+			if (msg.status === "synced") return msgs.flatMap((msg) => (msg.status === "start" ? [msg] : []));
+		}
+	};
+
+	const origin = new OriginProducer();
+	const claim = origin.claim(Path.from("a"));
+	const handle = routedAnswer(origin.scope(Path.empty(), patterns("a/*/x")), grant);
+	try {
+		await handle.ok();
+		expect(await synced(handle.next)).toEqual([]);
+	} finally {
+		claim.close();
+		handle.close();
+		origin.close();
+	}
+
+	const both = new OriginProducer();
+	const cheap = both.scope(Path.empty(), patterns("a/*/x")).claim(Path.from("a"), { cost: 1n });
+	const dear = both.scope(Path.empty(), patterns("a/*/y")).claim(Path.from("a"), { cost: 5n });
+	const answer = routedAnswer(both, grant);
+	try {
+		await answer.ok();
+		const starts = await synced(answer.next);
+		expect(starts.map((msg) => (msg.status === "start" ? [msg.suffix, msg.claim.cost] : []))).toEqual([
+			[Path.from("a"), 5n],
+		]);
+	} finally {
+		cheap.close();
+		dear.close();
+		answer.close();
+		both.close();
+	}
+});
+
+// A claim whose route is withdrawn ends, not lost, though another path still advertises the same
+// named instance: only the advertisement the claim came from proves it moved.
+test("a lite-07 withdrawn claim ends though its instance lives on elsewhere", async () => {
+	const origin = new OriginProducer();
+	const instance = { id: Instance.random(), epoch: 0n };
+	const a = origin.route(Path.from("a"), { instance });
+	const b = origin.route(Path.from("b"), { instance });
+	const { next, ok, close } = routedAnswer(origin);
+	try {
+		await ok();
+		for (;;) if ((await next()).status === "synced") break;
+		a.withdraw();
+		let msg = await next();
+		while (msg.status !== "endedId") msg = await next();
+		expect(msg).toEqual({ status: "endedId", id: 0n, lost: false });
+	} finally {
+		a.broadcast.close();
+		b.broadcast.close();
 		close();
 		origin.close();
 	}

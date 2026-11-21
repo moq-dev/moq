@@ -33,6 +33,4 @@ Decided:
 The test the audit applied: when two callers collapse an enum the same way,
 the API should return the collapsed form.
 
-Public API: every child is breaking; each lists its migration. Wire: none,
-unless [fill lookups](/quest/m2/outcome-enums/fill-lookups.md) needs a time
-start on the wire.
+Public API: every child is breaking; each lists its migration. Wire: none.

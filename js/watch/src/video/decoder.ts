@@ -692,8 +692,6 @@ class Rendition {
 			format,
 			delay: this.#delay,
 			predecessor: this.consumer ?? this.#predecessor,
-			// The one decoder drives the clock, so it skips a hole once the clock passed it.
-			playhead: this.sync,
 		});
 		effect.cleanup(() => consumer.close());
 		this.consumer = consumer;
@@ -838,7 +836,7 @@ class Rendition {
 				const { frame } = next;
 
 				// An older keyframe would replace the codec references needed by live deltas. Group
-				// sequences only grow within a subscription, so neither a hole nor an endpoint
+				// starts only grow within a subscription, so neither a hole nor an endpoint
 				// resets this guard. Rejected payloads still count as received bytes.
 				const stale = latest !== undefined && next.group < latest;
 				const accepted = !stale && recovery.accept(frame);
@@ -916,7 +914,7 @@ class Rendition {
 				const { frame } = next;
 
 				// An older keyframe would replace the codec references needed by live deltas. Group
-				// sequences only grow within a subscription, so neither a hole nor an endpoint
+				// starts only grow within a subscription, so neither a hole nor an endpoint
 				// resets this guard. Rejected payloads still count as received bytes.
 				const stale = latest !== undefined && next.group < latest;
 				const accepted = !stale && recovery.accept(frame);

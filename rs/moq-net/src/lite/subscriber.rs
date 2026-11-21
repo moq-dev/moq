@@ -1021,6 +1021,11 @@ impl SubscriberDriver {
 		// Before the subscribe map, so a TRACK_INFO request dropped with this driver
 		// rejects with `err` rather than `Dropped`.
 		self.subscriber.note_end(err);
+		// Before the copies they serve, so each front reads what its copy fails with as its
+		// source going, not as the track's verdict.
+		for source in self.sources.iter() {
+			source.source.close();
+		}
 		self.cleanup.abort(err);
 	}
 
@@ -3192,7 +3197,7 @@ mod tests {
 		track.received();
 		let dynamic = track.requests();
 		let fetching = track.consume().fetch_group(key, None);
-		let req = dynamic.requested_groups().now_or_never().expect("queued").unwrap();
+		let req = dynamic.requested_fill().now_or_never().expect("queued").unwrap();
 		(track, fetching, req)
 	}
 
@@ -3443,7 +3448,7 @@ mod tests {
 		let mut requests = Vec::new();
 		for key in keys {
 			callers.push(track.consume().fetch_group(key, None));
-			requests.push(dynamic.requested_groups().now_or_never().expect("queued").unwrap());
+			requests.push(dynamic.requested_fill().now_or_never().expect("queued").unwrap());
 		}
 		(track, callers, requests)
 	}
@@ -3625,7 +3630,7 @@ mod tests {
 		let waiter = kio::Waiter::noop();
 		// Reading judges the reader's misses.
 		let _ = reader.poll_recv_group(&waiter);
-		let fill = dynamic.requested_groups().now_or_never().expect("queued").unwrap();
+		let fill = dynamic.requested_fill().now_or_never().expect("queued").unwrap();
 		assert_eq!((fill.start().group, fill.end()), (0, WIDE));
 
 		let mut fetches = FeedFetches::new(&clock);
@@ -3635,7 +3640,7 @@ mod tests {
 		assert_eq!(fetches.polled, 1);
 		assert!(reader.poll_recv_group(&waiter).is_pending());
 		assert!(
-			dynamic.requested_groups().now_or_never().is_none(),
+			dynamic.requested_fill().now_or_never().is_none(),
 			"a refusal is not asked again"
 		);
 	}
@@ -3660,7 +3665,7 @@ mod tests {
 
 		let mut joined: Vec<_> = (1..=3).map(|key| track.consume().fetch_group(key, None)).collect();
 		assert!(
-			dynamic.requested_groups().now_or_never().is_none(),
+			dynamic.requested_fill().now_or_never().is_none(),
 			"joins existing fills"
 		);
 		drop(callers);
@@ -3673,7 +3678,7 @@ mod tests {
 		assert!(fetches.held.is_empty(), "the last reader leaving releases every fill");
 		assert!(fetches.ready.read().is_empty());
 		assert_eq!(fetches.fold.deadline(), None);
-		assert!(dynamic.requested_groups().now_or_never().is_none());
+		assert!(dynamic.requested_fill().now_or_never().is_none());
 	}
 
 	#[kio::test]
@@ -3690,7 +3695,7 @@ mod tests {
 		drop(caller);
 		let next = track.consume().fetch_group(1, None);
 		let req = dynamic
-			.requested_groups()
+			.requested_fill()
 			.now_or_never()
 			.expect("replacement queued")
 			.unwrap();
@@ -5615,7 +5620,7 @@ mod tests {
 			)
 			.ordered();
 		assert!(reader.poll_next_group(&waiter).is_pending(), "groups 0..4 are owed");
-		let Poll::Ready(Ok(fill)) = requests.poll_requested_groups(&waiter) else {
+		let Poll::Ready(Ok(fill)) = requests.poll_requested_fill(&waiter) else {
 			panic!("groups 0..4 are a miss");
 		};
 		let mut fills = fills::RangeFills::default();
@@ -7041,6 +7046,84 @@ mod tests {
 		let track = first(lite::ControlType::Track).expect("TRACK went out");
 		let fetch = first(lite::ControlType::Fetch).expect("FETCH went out alongside");
 		assert!(track < fetch, "a FETCH opened its stream before TRACK");
+	}
+
+	/// The front reads whether a source is closing from its broadcast, and takes a failure from a
+	/// source still open as the track's verdict. So a run that fails its copy, or the query
+	/// still waiting on TRACK_INFO, with the session's end closes the source first: the front
+	/// then waits for the next route rather than end a track its relay still shows.
+	#[kio::test]
+	async fn a_track_failed_with_its_session_closes_its_source_first() {
+		use crate::transport::poll::Session as _;
+		// Lite04 serves at once; Lite05 waits on TRACK_INFO.
+		for version in [Version::Lite04, Version::Lite05] {
+			let (session, peer) = crate::transport::memory::pair(Default::default());
+			let subscriber = pipelining(crate::driver::Transport::new(session.clone()), version);
+			let source = crate::broadcast::Info::new().produce();
+			let consumer = source.consume();
+			let mut dynamic = source.requests();
+			let mut waiting = consumer.track("video").unwrap().subscribe(None);
+			assert!((&mut waiting).now_or_never().is_none(), "waiting on the publisher");
+			let request = dynamic.requested_track().now_or_never().unwrap().expect("request");
+			let mut run = TrackServeRun::new(
+				TrackServe {
+					validity: Default::default(),
+					route: None,
+					source: Some(source.clone()),
+					subscriber,
+					path: Path::from_static("room"),
+					instance: None,
+					node: None,
+					name: "video".to_string(),
+				},
+				request,
+			);
+			assert!(kio::Task::poll(&mut run, &kio::Waiter::noop()).is_pending());
+			assert!(!consumer.is_closed(), "{version:?}: closed before the session ended");
+
+			peer.close(crate::SessionError::Cancel.to_code(), "gone");
+			for _ in 0..4 {
+				let _ = kio::Task::poll(&mut run, &kio::Waiter::noop());
+			}
+			let ended = match (&mut waiting).now_or_never().expect("the track ended") {
+				Ok(mut copy) => copy.recv_group().now_or_never().expect("the copy ended").err(),
+				Err(err) => Some(err),
+			};
+			assert!(ended.is_some(), "{version:?}: the track ended cleanly");
+			assert!(
+				consumer.is_closed(),
+				"{version:?}: failed the track before closing its source"
+			);
+		}
+	}
+
+	/// The session's end aborts every subscription still open, so it closes every source first,
+	/// for the same reason a run does.
+	#[kio::test]
+	async fn the_session_end_closes_its_sources_before_its_subscriptions() {
+		let (session, _peer) = crate::transport::memory::pair(Default::default());
+		let subscriber = pipelining(crate::driver::Transport::new(session), Version::Lite07);
+		let source = crate::broadcast::Info::new().produce();
+		let consumer = source.consume();
+		let route = kio::Producer::new(());
+		let _ = subscriber.sources.try_push(MintedSource {
+			path: Path::from_static("room"),
+			instance: None,
+			node: None,
+			dynamic: source.requests(),
+			source: crate::model::broadcast::SourceGuard::new(source),
+			route: route.consume(),
+		});
+		let mut driver = SubscriberDriver::new(subscriber, Vec::new(), false, route_stream::Publish::idle());
+		let _ = driver.poll(&kio::Waiter::noop());
+		assert_eq!(driver.sources.len(), 1, "the driver took the source");
+		assert!(!consumer.is_closed());
+		driver.abort(&Error::IdleTimeout);
+		assert!(
+			consumer.is_closed(),
+			"aborted its subscriptions before closing its sources"
+		);
+		drop(route);
 	}
 
 	/// A lite-07 source of `room` over `session`, a consumer to list it through, and the
@@ -10671,6 +10754,18 @@ struct TrackServe {
 }
 
 impl TrackServe {
+	/// Close the source before failing a copy or a request with the session's end. The front
+	/// reads whether a source is closing from its broadcast, and takes a failure from a source
+	/// still open as the track's verdict: a session that failed its copies before closing their
+	/// sources would end tracks its relay could resume on the next route.
+	fn close_if_ending(&self) {
+		if let Some(source) = &self.source
+			&& self.subscriber.session.poll_ending(&kio::Waiter::noop()).is_ready()
+		{
+			source.close();
+		}
+	}
+
 	/// Watches whether the session still lets us receive this broadcast from the peer:
 	/// our grant, and the ceiling on what the peer may publish.
 	fn gate(&self) -> crate::auth::Gate {
@@ -11347,7 +11442,7 @@ impl FinishedServe {
 			let Some(serving) = &self.serving else {
 				return Poll::Ready(());
 			};
-			match self.dynamic.poll_requested_groups(waiter) {
+			match self.dynamic.poll_requested_fill(waiter) {
 				Poll::Ready(Ok(fill)) => {
 					let info = FetchInfo::Known(serving.info().clone());
 					self.fetches.push(FillServeRun::new(serve.clone(), fill, info));
@@ -11364,6 +11459,7 @@ impl FinishedServe {
 			// The groups it already holds stay readable, its clean end too once settled.
 			if let Poll::Ready(err) = self.closed.poll_closed(waiter) {
 				if let Some(serving) = self.serving.take() {
+					serve.close_if_ending();
 					let _ = serving.abort(Error::from_transport(err));
 				}
 				return Poll::Ready(());
@@ -11681,7 +11777,7 @@ impl TrackServeRun {
 					..
 				} => {
 					// A fetch needs nothing from TRACK_INFO to go out, only to read its answer.
-					while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(waiter) {
+					while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(waiter) {
 						fetches.push(FillServeRun::new(self.serve.clone(), fill, known.later()));
 					}
 					// Abandonment was checked at the top of this poll, arming its wait.
@@ -11759,6 +11855,7 @@ impl TrackServeRun {
 							if let Some(pipelined) = pipelined {
 								pipelined.abort(&self.serve, &err);
 							}
+							self.serve.close_if_ending();
 							request.reject(err);
 							return Poll::Ready(());
 						}
@@ -11808,6 +11905,7 @@ impl TrackServeRun {
 							if let Some(datagrams) = &mut self.datagrams {
 								datagrams.end(Err(err.clone()));
 							}
+							self.serve.close_if_ending();
 							let _ = serve_loop.serving.abort(err);
 						}
 					}
@@ -11916,6 +12014,7 @@ impl Drop for TrackServeRun {
 		if let Some(pipelined) = pipelined.take() {
 			pipelined.abort(&self.serve, &err);
 		}
+		self.serve.close_if_ending();
 		request.reject(err);
 	}
 }
@@ -12895,7 +12994,7 @@ impl ServeLoop {
 
 					// A fill is bounded and serves readers already waiting, so serve it ahead of
 					// subscription churn.
-					match self.dynamic.poll_requested_groups(waiter) {
+					match self.dynamic.poll_requested_fill(waiter) {
 						Poll::Ready(Ok(fill)) => {
 							// Lite-07 asks for more than one group through the subscription. One
 							// group, or a slice of one, is what FETCH carries.

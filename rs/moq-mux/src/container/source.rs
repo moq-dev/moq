@@ -1335,8 +1335,7 @@ mod tests {
 	/// A live start begins at the publisher's newest group, even when an older group of the
 	/// backlog the budget serves arrives first. Starting at that older group reads it, then
 	/// skips the groups after it once the next PES moves the live edge a budget past them: a
-	/// gap right after the first frame. Behind a relay holding only that first group, the
-	/// relay passes on the newest group its source named.
+	/// gap right after the first frame.
 	#[tokio::test(start_paused = true)]
 	async fn a_live_start_behind_a_backlog_starts_at_the_newest_group() {
 		use std::time::Duration;
@@ -1424,8 +1423,15 @@ mod tests {
 				timestamps.push(timestamp);
 			}
 
-			// Group 84 was the newest when the export joined.
-			let expected: Vec<u128> = (84..95).map(|sequence| sequence * 24_000).collect();
+			// Group 84 was the newest when the export joined. Behind the relay the ordered reader
+			// hands out nothing until its start is placed, which the held streams delay past the
+			// next two PES, so the newest group by then is the start: either way nothing after it is
+			// skipped.
+			let start = match relay {
+				false => 84,
+				true => 94,
+			};
+			let expected: Vec<u128> = (start..95).map(|sequence| sequence * 24_000).collect();
 			assert_eq!(timestamps, expected, "relay: {relay}");
 			assert_eq!(export.skips(), 0, "relay: {relay}");
 		}

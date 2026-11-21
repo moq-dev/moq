@@ -71,19 +71,17 @@ async function drain(consumer: Consumer): Promise<[bigint, number | undefined][]
 }
 
 // Groups go out newest first, so the head of a subscription's window arrives after the live edge
-// it was served alongside. A cursor taken from the first arrival would drop that head, so it starts
-// at the floor the subscription names, or the start the publisher reports, and waits for it under
-// the budget. A group below that floor is never delivered and adds no gap. Mirrors Rust's
-// `startup_at_the_publishers_start_over_a_newer_first_arrival`.
+// it was served alongside. The ordered read starts at the floor the subscription names and waits for
+// it under the budget. A group below that floor is never delivered and adds no gap.
 test("the head of the window arriving after the live edge is delivered first", async () => {
 	const track = new Track.Producer("test").accept({
 		timescale: Time.Timescale.MILLI,
 		maxAge: Duration.millis(30_000),
 	});
-	// A local track holding no group at or before the anchor resolves no floor from it, so the
-	// publisher's start names the head, as a session declares it.
-	const subscriber = track.subscribe({ delay: { max: Duration.millis(5000) }, ranges: [{ start: { time: 10n } }] });
-	subscriber.start = async () => 10n;
+	// An unserved fill owes the window's head, as a session's feed would.
+	track.requests();
+	const subscriber = track.subscribe({ delay: { max: Duration.millis(5000) } });
+	subscriber.withRange({ start: { included: 10n } });
 	const consumer = new Consumer(subscriber, {
 		format: new LegacyFormat("data"),
 		delay: { min: null, max: Duration.millis(5000) },
@@ -101,11 +99,10 @@ test("the head of the window arriving after the live edge is delivered first", a
 	publish(track, 11n, 11);
 	track.finish();
 
-	const reads: string[] = [];
-	for (let read = await waiting; read; read = await consumer.next()) {
-		reads.push(read.kind === "frame" ? `${read.group}` : read.kind);
-	}
-	expect(reads).toEqual(["10", "11", "12"]);
+	const head = await waiting;
+	const reads = [head?.kind === "frame" ? head.group : head?.kind];
+	for (const [group] of await drain(consumer)) reads.push(group);
+	expect(reads).toEqual([10n, 11n, 12n]);
 
 	consumer.close();
 });
@@ -169,31 +166,5 @@ test("an excluded gap between ranges does not stall", async () => {
 		[0n, 0],
 		[10n, 10],
 	]);
-	consumer.close();
-});
-
-// A relative floor already resolved here still rises to where the publisher says its feed starts,
-// which counts a newest group that held no frame yet, rather than wait under the budget for a group
-// below it that never comes. Mirrors Rust's `a_resolved_relative_floor_rises_to_the_publishers_start`.
-test("a resolved relative floor rises to the publisher's start", async () => {
-	const track = new Track.Producer("test").accept({
-		timescale: Time.Timescale.MILLI,
-		maxAge: Duration.millis(30_000),
-	});
-	for (const sequence of [0n, 1n, 2n, 3n, 4n]) publish(track, sequence, Number(sequence) * 100);
-	const subscriber = track.subscribe({
-		delay: { max: Duration.millis(10_000) },
-		ranges: [{ start: { relative: 0n } }],
-	});
-	expect(subscriber.floor()).toBe(4n);
-	// A session declares the publisher's start; a local track has none, so stand in for it.
-	subscriber.start = async () => 5n;
-	const consumer = new Consumer(subscriber, {
-		format: new LegacyFormat("data"),
-		delay: { max: Duration.millis(10_000) },
-	});
-
-	publish(track, 5n, 500);
-	expect(await drain(consumer)).toEqual([[5n, 5]]);
 	consumer.close();
 });

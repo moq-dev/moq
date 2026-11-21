@@ -293,12 +293,7 @@ fn a_group_carries_a_bulk_transfer_losslessly() {
 				.await
 				.unwrap();
 			let mut ordered = consumer.ordered();
-			let mut group = ordered
-				.next_group()
-				.await
-				.unwrap()
-				.and_then(moq_net::track::Item::group)
-				.expect("a group");
+			let mut group = ordered.next_group().await.unwrap().expect("a group");
 			let mut read = 0;
 			while let Some(frame) = group
 				.read_frame()

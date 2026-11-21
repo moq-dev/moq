@@ -826,9 +826,9 @@ pub enum moq_refresh {
 #[derive(Clone, Copy, Default)]
 pub struct moq_delay {
 	/// The target latency in microseconds: the playout or jitter-buffer delay held behind
-	/// the live edge, where a cold join starts, and how long a media consumer waits for a
-	/// missing group. moq-lite-07 sends it upstream. A `min_us` past the max starts and waits
-	/// at the max, since the publisher serves nothing older. Ignored when `min_unstated` is set.
+	/// the live edge, where a cold join starts. A missing group is given up by the max alone.
+	/// moq-lite-07 sends it upstream. A `min_us` past the max starts a cold join no further back than the
+	/// group covering the point the max behind the live edge, since the publisher serves no older group. Ignored when `min_unstated` is set.
 	pub min_us: u64,
 	/// How far a non-latest group may fall behind the live edge before it is skipped, in
 	/// microseconds. Zero skips immediately. Enforced by the publisher's cache and by any
@@ -837,11 +837,9 @@ pub struct moq_delay {
 	pub max_us: u64,
 	/// No subscriber max: wait on a stalled group as long as the publisher's max age allows.
 	pub max_unlimited: bool,
-	/// Leave the minimum unstated. A media consumer starts it as zero and waits a missing group
-	/// for the max instead (an audio decoder floors it at zero and waits only its playout
-	/// estimate, which can be larger), while the subscription keeps it unstated, so it never
-	/// pulls the aggregate across subscribers to zero, unless a catalog warmup or an audio
-	/// decoder's playout delay states one.
+	/// Leave the minimum unstated. A media consumer starts it as zero, while the subscription
+	/// keeps it unstated, so it never pulls the aggregate across subscribers to zero, unless a
+	/// catalog warmup or an audio decoder's playout delay states one.
 	pub min_unstated: bool,
 }
 
@@ -4164,10 +4162,13 @@ pub extern "C" fn moq_group_request_accept(request: u32) -> i32 {
 	})
 }
 
-/// Reject a group request, failing the readers waiting on it now as not found.
+/// Reject a group request, as serving it failed, failing the readers waiting on it now as not
+/// found.
 ///
-/// A later reader of the group asks again. The error code is not delivered. Consumes the
-/// request handle. Returns a zero on success, or a negative code on failure.
+/// A later reader of the group asks again. A request for a reader's time start, a time no
+/// cached group places, fails that reader until its ranges change; free it instead when you
+/// have no group there. The error code is not delivered. Consumes the request handle. Returns
+/// a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_group_request_abort(request: u32, error_code: u16) -> i32 {
 	ffi::enter(move || {
@@ -4176,7 +4177,11 @@ pub extern "C" fn moq_group_request_abort(request: u32, error_code: u16) -> i32 
 	})
 }
 
-/// Free a group request without accepting it, which rejects it like [moq_group_request_abort].
+/// Free a group request without accepting it, as you have no such group, which rejects it like
+/// [moq_group_request_abort].
+///
+/// A request for a reader's time start says instead that no group starts at that time, so the
+/// reader starts at the group held below it, or at the time when none is, rather than failing.
 ///
 /// Returns a zero on success, or a negative code if the handle is unknown.
 #[unsafe(no_mangle)]
