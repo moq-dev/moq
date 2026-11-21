@@ -2347,6 +2347,8 @@ impl TrackState {
 	/// Fetched backfill is absent from `arrival`, so it cannot age subscription content
 	/// as though it were a live replacement.
 	fn live_edge(&self, servable: &Servable) -> Option<PresentationEdge> {
+		// A scale-less track's groups start at no time, so none is an edge: skip the scan.
+		self.timescale()?;
 		self.find_servable(servable, 0, true, |slot| {
 			if !slot.is_shown() {
 				return None;
