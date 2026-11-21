@@ -41,7 +41,9 @@ Decided 2026-11-20 (maintainer, /quest-plan), from the triage of Nightly run
 scheduled Interop: two children,
 [the replacement join](/quest/m0/interop-green/replacement-join-delay.md)
 (that stall, which also reproduces on Chromium `moq-transport-22`) and
-[the moq-transport JS joining FETCH](/quest/m0/interop-green/ietf-js-joining-fetch.md).
+the moq-transport JS joining FETCH, which the relay refused when the join's Largest
+Object was a group's END_OF_GROUP status (fixed in
+[moq-dev/moq#9291](https://github.com/moq-dev/moq/pull/9291)).
 The intermittent `go -> js` silent audio went to
 [test flakes](/quest/m0/test-flakes-3/go-js-silent-audio.md), and the datagram
 cells are [moq-dev/moq#9197](https://github.com/moq-dev/moq/pull/9197)'s.
