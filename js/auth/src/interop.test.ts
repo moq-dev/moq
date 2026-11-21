@@ -51,8 +51,8 @@ describe("Rust-serialized contract", () => {
 
 	test("a grant typed here is what a Rust relay reads", () => {
 		const grant: Grant = {
-			publish: { path: ["alice/**"], rate: 8_000_000 },
-			subscribe: ["**"],
+			publish: { path: ["alice"], rate: 8_000_000 },
+			subscribe: [""],
 			root: "pid/room",
 			expires: 4102444800,
 			revalidate: 60,

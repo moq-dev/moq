@@ -2,10 +2,10 @@
 //! relay: on the relay's own `--auth-public` and on `moq auth serve --public-*`
 //! behind `--auth-url`.
 //!
-//! Every other test grants bare `**`, which reads the same whether rooted at `/` or
-//! at the dialed path. These use `anon/**` and `event/**`, which do not: rooted at
-//! the dialed path, `anon/**` at `/anon` meant `anon/anon/**`, and at `/rooms/123`
-//! it let an anonymous client into `rooms/123/anon/**`.
+//! Every other test grants the empty prefix, which reads the same whether rooted at `/`
+//! or at the dialed path. These use `anon` and `event`, which do not: rooted at the
+//! dialed path, `anon` at `/anon` meant `anon/anon`, and at `/rooms/123` it let an
+//! anonymous client into `rooms/123/anon`.
 
 use std::time::Duration;
 
@@ -162,7 +162,7 @@ async fn assert_refused(url: url::Url) {
 
 fn anon() -> auth::Config {
 	let mut config = auth::Config::default();
-	config.public = vec!["anon/**".parse().unwrap()];
+	config.public = vec!["anon".parse().unwrap()];
 	config
 }
 
@@ -174,23 +174,25 @@ async fn anon_rules_admit_under_anon_and_refuse_elsewhere() {
 	assert_eq!(first_broadcast(url(port, "/")).await, "anon/test.hang");
 	assert_eq!(first_broadcast(url(port, "/anon")).await, "test.hang");
 
-	// Rooted at the dialed path, this was `rooms/123/anon/**`.
+	// Rooted at the dialed path, this was `rooms/123/anon`.
 	assert_refused(url(port, "/rooms/123")).await;
 	assert_refused(url(port, "/other")).await;
 
 	relay.abort();
 }
 
-#[tokio::test]
-async fn a_leading_wildcard_does_not_reach_into_rooms() {
-	let mut config = auth::Config::default();
-	config.public_subscribe = vec!["*".parse().unwrap()];
-	let (port, relay) = spawn_relay(config).await;
-
-	// Rooted at the dialed path, `*` at `/rooms/123` was every broadcast in the room.
-	assert_refused(url(port, "/rooms/123")).await;
-
-	relay.abort();
+/// A public rule is a prefix: a wildcard is refused where it is parsed, naming the
+/// prefix to write instead, rather than read as a narrower or wider grant.
+#[test]
+fn a_wildcard_public_rule_is_refused() {
+	for (rule, hint) in [
+		("anon/**", "`anon` covers"),
+		("**", "the empty prefix"),
+		("*", "wildcard"),
+	] {
+		let err = rule.parse::<moq_auth::Prefix>().unwrap_err().to_string();
+		assert!(err.contains(hint), "{rule}: {err}");
+	}
 }
 
 #[tokio::test]
@@ -223,9 +225,9 @@ async fn http_routes_follow_the_anon_rules() {
 	relay.abort();
 }
 
-/// The reported upgrade: `moq auth serve --public-subscribe 'event/**'` behind
+/// The reported upgrade: `moq auth serve --public-subscribe event` behind
 /// `--auth-url`, with a viewer at `/event` watching a camera published under a
-/// `root=event` token. Rooted at the dialed path, the viewer saw `event/event/**`.
+/// `root=event` token. Rooted at the dialed path, the viewer saw `event/event`.
 #[tokio::test]
 async fn auth_server_public_rules_are_rooted_at_slash() {
 	let dir = tempfile::tempdir().expect("tempdir");
@@ -235,10 +237,7 @@ async fn auth_server_public_rules_are_rooted_at_slash() {
 
 	let mut policy = moq_auth::serve::Policy::default();
 	policy.keys = Some(moq_auth::serve::Keys::File(key_path));
-	policy.public = moq_auth::Permissions::new(
-		moq_auth::Patterns::new(),
-		"event/**".parse::<moq_auth::Pattern>().unwrap(),
-	);
+	policy.public = moq_auth::Permissions::new(moq_auth::Prefixes::new(), "event".parse::<moq_auth::Prefix>().unwrap());
 	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 	let server_url: url::Url = format!("http://{}/", listener.local_addr().unwrap()).parse().unwrap();
 	let server = moq_auth::serve::Server::new(policy).unwrap();
@@ -250,7 +249,7 @@ async fn auth_server_public_rules_are_rooted_at_slash() {
 
 	let claims = moq_auth::Claims::default()
 		.with_root("event")
-		.with_publish(["**".parse().unwrap()]);
+		.with_publish(["".parse().unwrap()]);
 	let jwt = key.sign(&claims).expect("sign");
 	let mut camera = url(port, "/event");
 	camera.query_pairs_mut().append_pair("jwt", &jwt);
@@ -318,7 +317,7 @@ async fn an_issued_root_with_an_escaped_separator_is_dialable() {
 	config.url = Some(server_url);
 	let (port, relay) = spawn_relay(config).await;
 
-	let all = || ["**".parse::<moq_auth::Pattern>().unwrap()];
+	let all = || ["".parse::<moq_auth::Prefix>().unwrap()];
 	let refused = moq_auth::Claims::default().with_root(r"cam\//1").with_publish(all());
 	assert!(key.sign(&refused).is_err(), "issued a root moq_net::Path::new refuses");
 

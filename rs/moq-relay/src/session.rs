@@ -13,7 +13,8 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use moq_auth::{Pattern, Peer, Request, Role, Transport};
+use moq_auth::{Peer, Request, Role, Transport};
+use moq_net::Pattern;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 

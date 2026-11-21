@@ -45,8 +45,8 @@ async function nextRoute<E extends { kind: string }>(announced: {
 	}
 }
 
-function patterns(...prefixes: string[]): Path.Patterns {
-	return new Path.Patterns(prefixes.map((prefix) => Path.Pattern.subtree(prefix)));
+function patterns(...prefixes: string[]): Path.Prefixes {
+	return Path.Prefixes.parse(prefixes);
 }
 
 function grant(publish: string[], subscribe: string[]): Grant {
@@ -290,9 +290,7 @@ describe.each([Lite.ALPN_07_WIP])("%s", (protocol) => {
 			await waitFor(client.auth.grant, (g) => g?.publish.equals(patterns("a")) === true);
 			const token = await answered(client.auth.add("update"));
 			await waitFor(client.auth.grant, (g) => g?.publish.equals(patterns("a", "b")) === true);
-			const publish = new Path.Patterns(
-				Array.from({ length: 20 }, (_, i) => Path.Pattern.subtree(`${i}${"x".repeat(4000)}`)),
-			);
+			const publish = Path.Prefixes.parse(Array.from({ length: 20 }, (_, i) => `${i}${"x".repeat(4000)}`));
 			issued[issued.length - 1].update({ publish, subscribe: patterns() });
 			expect(await token.closed).toBeInstanceOf(Unsupported);
 			expect(token.grant.peek()).toBeUndefined();
@@ -1198,17 +1196,16 @@ test.each(Array.from({ length: 17 }, (_, gap) => gap))(
 	},
 );
 
-test.each([Lite.ALPN_07_WIP])("%s carries literal and wildcard grants exactly", async (protocol) => {
+test.each([Lite.ALPN_07_WIP])("%s carries prefix grants exactly", async (protocol) => {
 	const { client, server } = await connect({ publish: new OriginProducer(), protocol });
 	const requests = server.auth.requests();
 	const unions: Record<string, [string[], string[]]> = {
-		"": [["a/**"], []],
+		"": [["a"], []],
 		exact: [["room/alice"], []],
-		wildcard: [["room/*/cam"], ["**/demo.hang"]],
-		mixed: [["room/**", "lobby", "cam-*.hang"], []],
-		root: [[""], ["**"]],
+		nested: [["room", "room/alice", "lobby", "cam.hang"], ["demo.hang"]],
+		root: [[""], [""]],
 	};
-	const parse = (texts: string[]) => new Path.Patterns(texts.map((text) => Path.Pattern.parse(text)));
+	const parse = (texts: string[]) => Path.Prefixes.parse(texts);
 	const issued: Issued[] = [];
 	void (async () => {
 		for (;;) {
@@ -1220,7 +1217,7 @@ test.each([Lite.ALPN_07_WIP])("%s carries literal and wildcard grants exactly", 
 	})();
 
 	await waitFor(client.auth.grant, (g) => g !== undefined);
-	for (const token of ["exact", "wildcard", "mixed", "root"]) {
+	for (const token of ["exact", "nested", "root"]) {
 		const [publish, subscribe] = unions[token];
 		const added = await answered(client.auth.add(token));
 		const got = added.grant.peek();

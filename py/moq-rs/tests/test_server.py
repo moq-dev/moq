@@ -638,7 +638,7 @@ async def test_session_auth_reads_the_grant():
             ) as client:
                 session = client.session
                 assert session is not None
-                everything = moq.Grant(publish=("**",), subscribe=("**",))
+                everything = moq.Grant(publish=("",), subscribe=("",))
                 await _await_grant(session, everything)
                 await asyncio.wait_for(accepted.wait(), timeout=5.0)
                 await _await_grant(sessions[0], everything)
