@@ -737,7 +737,7 @@ mod tests {
 	/// are rate control's alone.
 	#[test]
 	fn nvenc_quality_under_a_cap() {
-		use super::super::test_util::spend;
+		use super::super::test_util::{Scene, spend};
 
 		for codec in [Codec::H264, Codec::H265] {
 			let mut config = crate::encode::Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap());
@@ -749,7 +749,7 @@ mod tests {
 				..config.clone()
 			};
 
-			let Some(calm) = spend(&at(4_000_000), false, None) else {
+			let Some(calm) = spend(&at(4_000_000), Scene::Calm, None) else {
 				return;
 			};
 			assert!(
@@ -757,7 +757,7 @@ mod tests {
 				"{codec:?}: a calm scene filled the cap: {calm:?}"
 			);
 
-			let busy = spend(&at(500_000), true, None).unwrap();
+			let busy = spend(&at(500_000), Scene::Busy, None).unwrap();
 			// H.265 settles a little under the cap on noise (85% on an RTX 3070 Ti).
 			assert!(
 				busy.mean > 400_000,
@@ -765,7 +765,7 @@ mod tests {
 			);
 			assert!(busy.peak <= 525_000, "{codec:?}: a busy scene broke the cap: {busy:?}");
 
-			let moved = spend(&at(500_000), true, Some(250_000)).unwrap();
+			let moved = spend(&at(500_000), Scene::Busy, Some(250_000)).unwrap();
 			assert!(
 				(200_000..=262_500).contains(&moved.peak),
 				"{codec:?}: the peak did not follow set_bitrate: {moved:?}"
