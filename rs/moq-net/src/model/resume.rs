@@ -5090,7 +5090,7 @@ mod test {
 				// A refusal leaves it to the subscription, which ends it where it closed.
 				request.reject(Error::NotFound);
 				assert!(reading.read_frame().now_or_never().is_none(), "still waiting");
-				let track::Received::Group(none) = b.create_group_at(group::Info { start: 0 }, 1).unwrap() else {
+				let track::Received::Group(none) = b.create_group_at(group::Info { start: 0 }, 1, 0..0).unwrap() else {
 					panic!("nothing else holds the group");
 				};
 				none.finish().unwrap();
