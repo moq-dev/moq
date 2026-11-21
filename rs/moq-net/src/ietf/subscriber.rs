@@ -3886,6 +3886,9 @@ struct Established {
 	priority: i8,
 	sent_bounds: WireBounds,
 	wanted_bounds: WireBounds,
+	/// The group a live join started at: the Largest its SUBSCRIBE_OK named. `None` for a
+	/// SUBSCRIBE with a start, or one answered with no Largest.
+	joined: Option<u64>,
 	/// REQUEST_UPDATEs sent and not yet answered.
 	unanswered: u64,
 	demand: track::Demand,
@@ -4641,6 +4644,9 @@ impl SubscribeOnce {
 			false => None,
 		};
 
+		let joined = largest
+			.filter(|_| plan.live && plan.start.is_none())
+			.map(|largest| largest.group);
 		let sent_bounds = (
 			plan.start,
 			plan.subscription.as_ref().and_then(|subscription| subscription.end()),
@@ -4660,6 +4666,7 @@ impl SubscribeOnce {
 			priority: sent.priority,
 			sent_bounds,
 			wanted_bounds: sent_bounds,
+			joined,
 			unanswered: 0,
 			demand: track.demand(),
 			subscribed: track
@@ -4733,7 +4740,7 @@ impl SubscribeOnce {
 				.is_some_and(|subscription| !subscription.ranges.is_empty());
 			if let Some(subscription) = subscription {
 				live.priority = subscription.priority;
-				live.wanted_bounds = wire_bounds(&subscription);
+				live.wanted_bounds = wire_bounds(&subscription, live.joined);
 			}
 		}
 		loop {
@@ -14455,16 +14462,28 @@ struct Update {
 /// A subscription's single wire span: its start and exclusive end group, each open when `None`.
 type WireBounds = (Option<u64>, Option<u64>);
 
-/// The single wire span covers mixed absolute/live starts from group zero.
-fn wire_bounds(subscription: &track::Subscription) -> WireBounds {
-	let start = subscription.start().or_else(|| {
-		subscription
-			.ranges
-			.iter()
-			.any(|range| range.start.is_some())
-			.then_some(0)
-	});
-	(start, subscription.end())
+/// The single wire span covering `subscription`'s ranges: mixed starts and ranges without one
+/// from group zero. A range with no start and a stated Min Age is the live join, which started
+/// at the group it `joined`: one that holds every start keeps the live join, so a reader
+/// adding a range the join already delivers widens nothing.
+fn wire_bounds(subscription: &track::Subscription, joined: Option<u64>) -> WireBounds {
+	let end = subscription.end();
+	if let Some(start) = subscription.start() {
+		return (Some(start), end);
+	}
+	let first = subscription
+		.ranges
+		.iter()
+		.filter(|range| !range.is_empty())
+		.filter_map(|range| range.start)
+		.min();
+	let covered =
+		subscription.delay.min.is_some() && joined.is_some_and(|joined| first.is_none_or(|first| first >= joined));
+	let start = match covered {
+		true => None,
+		false => first.map(|_| 0),
+	};
+	(start, end)
 }
 
 /// What a SUBSCRIBE asks for: the range it delivers, and the backfill covering a head that
@@ -14584,6 +14603,30 @@ mod object_id_tests {
 #[cfg(test)]
 mod filter_tests {
 	use super::*;
+
+	/// A live join with a range starting at or after the group it joined keeps its bounds, so
+	/// the copy sends no update widening it from group zero; a range below that group, or one
+	/// beside a range reaching back to the oldest group, widens the span to group zero.
+	#[test]
+	fn a_live_join_keeps_its_bounds_for_a_range_it_already_delivers() {
+		let live = |min: Option<Duration>, start: u64| {
+			track::Subscription::default()
+				.with_delay(track::Delay::default().with_min(min))
+				.with_ranges([
+					track::Range::default(),
+					track::Range {
+						start: Some(start),
+						end: None,
+					},
+				])
+		};
+		let joined = Some(10);
+		assert_eq!(wire_bounds(&live(Some(Duration::ZERO), 10), joined), (None, None));
+		assert_eq!(wire_bounds(&live(Some(Duration::ZERO), 19), joined), (None, None));
+		assert_eq!(wire_bounds(&live(Some(Duration::ZERO), 9), joined), (Some(0), None));
+		assert_eq!(wire_bounds(&live(Some(Duration::ZERO), 19), None), (Some(0), None));
+		assert_eq!(wire_bounds(&live(None, 19), joined), (Some(0), None));
+	}
 
 	/// The live join is the draft's own: the subscription starts after the live edge and a
 	/// `StartGroup=1` fill covers the current group's head, so every object arrives exactly
