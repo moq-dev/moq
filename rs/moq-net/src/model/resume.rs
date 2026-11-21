@@ -7265,6 +7265,52 @@ mod test {
 		assert_eq!(drain(&mut sub, false), [2], "group 2 holds time 3");
 	}
 
+	/// A range an edit adds with a relative start reaching under the serving copy's resume
+	/// point starts at the group it counts back to, which the copy's cache holds, as the copy
+	/// resolved it before its resume point raised it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_added_relative_start_below_the_resume_point_reads_the_group_it_counts_back_to() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let late = Subscription::default()
+			.with_delay(Delay::default().with_max(HOUR))
+			.with_ranges([track::Range {
+				start: Anchor::Time(4),
+				end: None,
+			}]);
+		let mut sub = logical.consume().subscribe(late).now_or_never().unwrap().unwrap();
+		for key in [0, 2, 4, 6] {
+			write(&a, key);
+		}
+		assert_eq!(drain(&mut sub, false), [4, 6]);
+		let b = copy();
+		for key in [0, 2, 4, 6] {
+			write(&b, key);
+		}
+		routes.serve(b.consume());
+		write(&b, 8);
+		assert_eq!(drain(&mut sub, false), [8]);
+
+		sub.edit(track::Edit {
+			retire: Vec::new(),
+			add: vec![(
+				1,
+				track::Range {
+					start: Anchor::Relative(3),
+					end: None,
+				},
+			)],
+			priority: 0,
+			delay: Delay::default().with_max(HOUR),
+			order: track::Order::default(),
+		})
+		.unwrap();
+		assert_eq!(drain(&mut sub, false), [2], "group 2 is three before group 8");
+	}
+
 	/// Ranges only an unanswered replacement can place, around its resume point: one wholly
 	/// below it ends where it asks, and one above it starting at a time inside a group starts
 	/// at that group.
