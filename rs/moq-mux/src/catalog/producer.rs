@@ -1192,10 +1192,32 @@ impl<E: CatalogExt> Guard<'_, E> {
 	/// Stamp this publish at `timestamp` on the producer's [`clock`](Producer::clock), rather than
 	/// the time it is written, such as the frame a layout change takes effect at.
 	///
-	/// The publish fails with [`TimestampRewind`](crate::container::TimestampRewind) unless
-	/// `timestamp` is past the last published catalog's, rather than reordering it.
-	pub fn set_timestamp(&mut self, timestamp: moq_net::Timestamp) {
+	/// Fails with [`TimestampRewind`](crate::container::TimestampRewind), leaving the guard
+	/// unstamped, unless `timestamp` is past the last published catalog's, or the last stamp still
+	/// waiting on the initial publish. Call it before editing, so a refusal finds the catalog
+	/// unchanged: edits made first stay in it and go out with the next publish.
+	pub fn set_timestamp(&mut self, timestamp: moq_net::Timestamp) -> crate::Result<()> {
+		// The guard holds the lock every publish runs under, so nothing lands before this one.
+		// Nothing is on the wire yet while buffering, but the initial publish will be stamped at the
+		// staged timestamp, which this one must pass.
+		let start = |track: &moq_net::track::Producer, timestamp| -> crate::Result<u64> {
+			Ok(track.info().rescale(timestamp)?.value())
+		};
+		for track in [&self.outputs.hang_track, &self.outputs.msf_track] {
+			match self.state.gate {
+				Gate::Buffering { at: Some(floor), .. } if start(track, timestamp)? <= start(track, floor)? => {
+					return Err(crate::container::TimestampRewind { timestamp, floor }.into());
+				}
+				Gate::Buffering { .. } => {
+					start(track, timestamp)?;
+				}
+				Gate::Unreserved | Gate::Published => {
+					crate::start::after(track, timestamp)?;
+				}
+			}
+		}
 		self.at = Some(timestamp);
+		Ok(())
 	}
 
 	/// Move the producer onto `clock`, a re-basing of the one it has, before anything fixed it.
@@ -1224,7 +1246,9 @@ impl<E: CatalogExt> Guard<'_, E> {
 		if matches!(self.state.gate, Gate::Buffering { .. }) && !self.state.gate_opens() {
 			if let Gate::Buffering { pending, at, .. } = &mut self.state.gate {
 				*pending = true;
-				*at = self.at;
+				// An unstamped change keeps the staged stamp, landing no earlier than its neighbour,
+				// as an unstamped publish lands past a stamped one.
+				*at = self.at.or(*at);
 			}
 			return Ok(());
 		}
@@ -2104,7 +2128,7 @@ mod test {
 	fn opus(catalog: &mut Producer, name: &str, at: Option<u64>) -> crate::Result<()> {
 		let mut guard = catalog.modify().unwrap();
 		if let Some(at) = at {
-			guard.set_timestamp(moq_net::Timestamp::from_millis(at).unwrap());
+			guard.set_timestamp(moq_net::Timestamp::from_millis(at).unwrap())?;
 		}
 		guard
 			.audio
@@ -2146,9 +2170,12 @@ mod test {
 			);
 			assert_eq!(starts(&catalog), published, "a refused catalog reached the wire");
 		}
-		// The refusal leaves the tracks open: the next change goes out at its own timestamp.
+		// The refusal leaves the tracks open: the next change goes out at its own timestamp, without
+		// the refused ones.
 		opus(&mut catalog, "c", Some(61_000)).unwrap();
 		assert_eq!(starts(&catalog), [Some(start(&catalog, 61_000)); 2]);
+		let renditions = &catalog.modify().unwrap().audio.renditions;
+		assert_eq!(renditions.keys().collect::<Vec<_>>(), ["a", "c"]);
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -2159,8 +2186,14 @@ mod test {
 		let reserved = catalog.reserve();
 		opus(&mut catalog, "a", Some(60_000)).unwrap();
 		assert_eq!(starts(&catalog), [None; 2], "published before the reservation resolved");
+		// A staged stamp is the floor for the next, and an unstamped change keeps it.
+		let result = opus(&mut catalog, "b", Some(59_000));
+		assert!(matches!(result, Err(crate::Error::TimestampRewind(_))), "{result:?}");
+		opus(&mut catalog, "c", None).unwrap();
 		drop(reserved);
 		assert_eq!(starts(&catalog), [Some(start(&catalog, 60_000)); 2]);
+		let renditions = &catalog.modify().unwrap().audio.renditions;
+		assert_eq!(renditions.keys().collect::<Vec<_>>(), ["a", "c"]);
 	}
 
 	/// A video rendition `video0` on `catalog`, with a keyframe group at each of `starts` (ms).
