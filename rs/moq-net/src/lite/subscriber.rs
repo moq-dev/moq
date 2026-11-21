@@ -9823,7 +9823,7 @@ mod tests {
 			script.extend(announce_script(Version::Lite07, &[&start_at(at, above)]));
 			let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap())
 				.produce()
-				.scope("tenant", &crate::Patterns::from(crate::Pattern::all()))
+				.scope("tenant", &crate::Prefixes::all())
 				.unwrap();
 			let session = crate::lite::test_transport::ScriptedSession::new(script);
 			let (mut prefix, _consumer) = prefix_on(Version::Lite07, session, origin);

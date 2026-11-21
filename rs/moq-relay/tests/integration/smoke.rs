@@ -58,9 +58,9 @@ async fn build_web_with(web_config: web::Config, cluster: cluster::Cluster) -> w
 	// no-ops, but the test binary may run before any other moq code does.
 	let _ = rind_rustls::default_provider().unwrap().install_default();
 
-	// A public grant of `**` lets any path through.
+	// A public grant of the empty prefix lets any path through.
 	let mut auth_config = auth::Config::default();
-	auth_config.public = vec![moq_auth::Pattern::all()];
+	auth_config.public = vec![moq_auth::Prefix::all()];
 	let auth = auth_config
 		.init("test", &moq_tokio::tls::Connect::default(), false)
 		.expect("auth init");
@@ -85,14 +85,14 @@ async fn spawn_relay() -> (u16, tokio::task::JoinHandle<()>) {
 
 /// Stand up the assembled relay path with `--server-version` restricted.
 async fn spawn_versioned_relay(versions: Vec<moq_net::Version>) -> (u16, tokio::task::JoinHandle<()>) {
-	spawn_public_relay(versions, vec![moq_auth::Pattern::all()]).await
+	spawn_public_relay(versions, vec![moq_auth::Prefix::all()]).await
 }
 
 /// Stand up the assembled relay path with `--server-version` restricted, granting anonymous
 /// sessions only `public`.
 async fn spawn_public_relay(
 	versions: Vec<moq_net::Version>,
-	public: Vec<moq_auth::Pattern>,
+	public: Vec<moq_auth::Prefix>,
 ) -> (u16, tokio::task::JoinHandle<()>) {
 	let mut config = Config::default();
 	config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
@@ -386,17 +386,21 @@ async fn hidden_broadcasts_need_a_lite07_opt_in() {
 }
 
 /// A moq-transport namespace field holding a `/` is one path segment all the way through a
-/// relay: a public grant of `room/*` covers `room/a\/b`, which it could not if the escaped `/`
-/// split the field, and each wire reads back the same broadcast the other published.
+/// relay: a public grant of `room/a\/b` covers that broadcast, which it could not if the
+/// escaped `/` split the field, and each wire reads back the same broadcast the other published.
 #[tokio::test]
 async fn an_escaped_separator_crosses_the_relay_as_one_segment() {
 	kio::clock::host_time(); // a real relay on real sockets
 	let lite: moq_net::Version = "moq-lite-07-wip".parse().unwrap();
 	let ietf: moq_net::Version = "moq-transport-22".parse().unwrap();
-	let (port, web_handle) = spawn_public_relay(vec![lite, ietf], vec!["room/*".parse().unwrap()]).await;
+	let fields = [(ietf, lite), (lite, ietf)];
+	let public = (fields.iter())
+		.map(|(publisher, subscriber)| format!(r"room/{publisher}\/{subscriber}").parse().unwrap())
+		.collect();
+	let (port, web_handle) = spawn_public_relay(vec![lite, ietf], public).await;
 	let url: url::Url = format!("ws://127.0.0.1:{port}/").parse().expect("parse url");
 
-	for (publisher, subscriber) in [(ietf, lite), (lite, ietf)] {
+	for (publisher, subscriber) in fields {
 		// The field `<publisher>/<subscriber>`, escaped into one segment.
 		let path = moq_net::Path::new(&format!(r"room/{publisher}\/{subscriber}")).unwrap();
 		assert_eq!(path.parts().count(), 2);
@@ -667,7 +671,7 @@ async fn relay_websocket_root_path_upgrades() {
 
 /// Run the relay's accept loop over the given server config, the same path
 /// `main.rs` uses. Authenticates through the shared [`Auth`], here with fully
-/// public access (`--auth-public "**"`) so no-JWT clients get the root.
+/// public access (`--auth-public ""`) so no-JWT clients get the root.
 ///
 /// Returns the QUIC and TCP sockets the server bound, when it has them, so a
 /// caller that asked for an ephemeral port can dial it.
@@ -716,9 +720,9 @@ async fn spawn_internal_relay() -> (u16, tokio::task::JoinHandle<()>) {
 	let mut config = moq_tokio::listen::Config::default();
 	config.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
 
-	// Public `**` lets any no-JWT stream client through at the root.
+	// The empty public prefix lets any no-JWT stream client through at the root.
 	let mut auth_config = auth::Config::default();
-	auth_config.public = vec![moq_auth::Pattern::all()];
+	auth_config.public = vec![moq_auth::Prefix::all()];
 
 	let (_, tcp, handle) = spawn_accept_relay(config, auth_config).await;
 	(tcp.expect("relay bound no TCP socket").port(), handle)
@@ -824,9 +828,9 @@ async fn spawn_internal_unix_relay() -> (std::path::PathBuf, tokio::task::JoinHa
 	let mut config = moq_tokio::listen::Config::default();
 	config.unix.bind = Some(path.clone());
 
-	// Public `**` lets any no-JWT stream client through at the root.
+	// The empty public prefix lets any no-JWT stream client through at the root.
 	let mut auth_config = auth::Config::default();
-	auth_config.public = vec![moq_auth::Pattern::all()];
+	auth_config.public = vec![moq_auth::Prefix::all()];
 
 	let (_, _, handle) = spawn_accept_relay(config, auth_config).await;
 	(path, handle)
@@ -1031,7 +1035,7 @@ async fn spawn_quic_relay() -> (std::net::SocketAddr, tokio::task::JoinHandle<()
 	config.tls.generate = vec!["localhost".into()];
 
 	let mut auth_config = auth::Config::default();
-	auth_config.public = vec![moq_auth::Pattern::all()];
+	auth_config.public = vec![moq_auth::Prefix::all()];
 
 	let (quic, _, handle) = spawn_accept_relay(config, auth_config).await;
 	(quic.expect("relay bound no QUIC socket"), handle)

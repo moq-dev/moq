@@ -459,7 +459,9 @@ impl Session {
 	/// Ready at once while it carries none. A track request still being set up, waiting
 	/// on authorization or the track's info, counts too. Announcements and the other
 	/// control streams don't, so a session can be idle while it still serves discovery.
-	pub(crate) fn poll_idle(&self, waiter: &kio::Waiter) -> Poll<()> {
+	/// A session that sent a GOAWAY can then close without cutting any reader off.
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_idle(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.work.poll_idle(waiter)
 	}
 

@@ -909,7 +909,7 @@ max_streams = 64
 		if !test_env::Env::default().set("MOQ_AUTH_KEY", "root.jwk").isolate() {
 			return;
 		}
-		let err = Config::parse_and_merge(["moq-relay", "--auth-public", "anon/**"])
+		let err = Config::parse_and_merge(["moq-relay", "--auth-public", "anon"])
 			.expect_err("must refuse")
 			.to_string();
 		assert!(err.contains("MOQ_AUTH_KEY"), "{err}");
@@ -920,7 +920,7 @@ max_streams = 64
 		if !test_env::Env::without(&["MOQ_AUTH_KEY"]).isolate() {
 			return;
 		}
-		let err = Config::parse_and_merge(["moq-relay", "--auth-public", "anon/**", "--auth-key", "root.jwk"])
+		let err = Config::parse_and_merge(["moq-relay", "--auth-public", "anon", "--auth-key", "root.jwk"])
 			.expect_err("must refuse")
 			.to_string();
 		assert!(err.contains("--auth-key"), "{err}");
@@ -1135,6 +1135,9 @@ max_streams = 64
 				if path.file_name().unwrap() == "smoke-legacy.toml" {
 					let error = result.expect_err("the published legacy fixture must be refused");
 					assert!(error.to_string().contains("[server]"), "{}: {error}", path.display());
+				} else if path.file_name().unwrap() == "smoke-patterns.toml" {
+					let error = result.expect_err("the published pattern fixture must be refused");
+					assert!(error.to_string().contains("wildcard"), "{}: {error}", path.display());
 				} else {
 					result.unwrap_or_else(|error| panic!("{}: {error}", path.display()));
 				}
@@ -1749,7 +1752,7 @@ ws = false
 		]);
 	}
 
-	/// The variables the public patterns could also be read from.
+	/// The variables the public prefixes could also be read from.
 	const PUBLIC_ENV: &[&str] = &[
 		"MOQ_AUTH_PUBLIC",
 		"MOQ_AUTH_PUBLIC_SUBSCRIBE",
@@ -1757,10 +1760,9 @@ ws = false
 		"MOQ_AUTH_URL",
 	];
 
-	/// The public patterns arrive from the CLI and TOML alike, as patterns rather
-	/// than prefixes.
+	/// The public prefixes arrive from the CLI and TOML alike.
 	#[test]
-	fn public_patterns_merge_from_every_source() {
+	fn public_prefixes_merge_from_every_source() {
 		if !test_env::Env::without(PUBLIC_ENV).isolate() {
 			return;
 		}
@@ -1768,9 +1770,9 @@ ws = false
 		let config = Config::parse_and_merge([
 			"moq-relay",
 			"--auth-public-subscribe",
-			"demo/**",
+			"demo",
 			"--auth-public-publish",
-			"uploads/**",
+			"uploads",
 		])
 		.expect("config load");
 
@@ -1778,8 +1780,8 @@ ws = false
 			config.auth.validate(false).is_ok(),
 			"CLI public flags must admit anonymous sessions"
 		);
-		assert_eq!(config.auth.public_subscribe, vec!["demo/**".parse().unwrap()]);
-		assert_eq!(config.auth.public_publish, vec!["uploads/**".parse().unwrap()]);
+		assert_eq!(config.auth.public_subscribe, vec!["demo".parse().unwrap()]);
+		assert_eq!(config.auth.public_publish, vec!["uploads".parse().unwrap()]);
 		assert!(
 			config
 				.source("auth.public_subscribe")
@@ -1788,20 +1790,20 @@ ws = false
 			config.source("auth.public_subscribe")
 		);
 
-		let toml = "[auth]\npublic = \"anon/**\"\n";
+		let toml = "[auth]\npublic = \"anon\"\n";
 		let dir = tempfile::tempdir().unwrap();
 		let path = dir.path().join("auth-public-toml.toml");
 		std::fs::write(&path, toml).unwrap();
 		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
 		let config = Config::parse_and_merge(args).expect("toml load");
-		assert_eq!(config.auth.public, vec!["anon/**".parse().unwrap()]);
+		assert_eq!(config.auth.public, vec!["anon".parse().unwrap()]);
 	}
 
-	/// The environment carries a list of public patterns, comma separated.
+	/// The environment carries a list of public prefixes, comma separated.
 	#[test]
-	fn public_patterns_merge_from_the_environment() {
+	fn public_prefixes_merge_from_the_environment() {
 		if !test_env::Env::without(PUBLIC_ENV)
-			.set("MOQ_AUTH_PUBLIC_SUBSCRIBE", "from-env/**,other/**")
+			.set("MOQ_AUTH_PUBLIC_SUBSCRIBE", "from-env,other")
 			.isolate()
 		{
 			return;
@@ -1809,7 +1811,76 @@ ws = false
 		let config = Config::parse_and_merge(["moq-relay"]).expect("env load");
 		assert_eq!(
 			config.auth.public_subscribe,
-			vec!["from-env/**".parse().unwrap(), "other/**".parse().unwrap()]
+			vec!["from-env".parse().unwrap(), "other".parse().unwrap()]
+		);
+	}
+
+	/// The public rule granting everything, as each source spells the empty prefix.
+	fn everything(config: &Config) -> Option<(moq_auth::Prefixes, moq_auth::Prefixes)> {
+		let grant = config.auth.public_grant()?;
+		Some((grant.publish.path, grant.subscribe.path))
+	}
+
+	/// "Anyone may do anything" is the empty prefix, which the CLI and TOML both spell.
+	#[test]
+	fn the_empty_public_prefix_covers_everything() {
+		if !test_env::Env::without(PUBLIC_ENV).isolate() {
+			return;
+		}
+		let all = Some((moq_auth::Prefixes::all(), moq_auth::Prefixes::all()));
+
+		for args in [
+			&["moq-relay", "--auth-public", ""][..],
+			&["moq-relay", "--auth-public="],
+		] {
+			let config = Config::parse_and_merge(args.iter().copied()).expect("cli load");
+			assert_eq!(everything(&config), all, "{args:?}");
+		}
+
+		let dir = tempfile::tempdir().unwrap();
+		for (name, body) in [
+			("string.toml", "[auth]\npublic = \"\"\n"),
+			("list.toml", "[auth]\npublic = [\"\"]\n"),
+		] {
+			let path = dir.path().join(name);
+			std::fs::write(&path, body).unwrap();
+			let args = [std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
+			let config = Config::parse_and_merge(args).expect("toml load");
+			assert_eq!(everything(&config), all, "{body}");
+		}
+	}
+
+	/// The environment spells the empty prefix as a set but empty variable.
+	#[test]
+	fn the_empty_public_prefix_from_the_environment() {
+		if !test_env::Env::without(PUBLIC_ENV).set("MOQ_AUTH_PUBLIC", "").isolate() {
+			return;
+		}
+		let config = Config::parse_and_merge(["moq-relay"]).expect("env load");
+		assert_eq!(
+			everything(&config),
+			Some((moq_auth::Prefixes::all(), moq_auth::Prefixes::all()))
+		);
+	}
+
+	/// A wildcard public rule is refused where it is read, from every source, naming the
+	/// prefix to write instead.
+	#[test]
+	fn a_wildcard_public_rule_is_refused_from_every_source() {
+		if !test_env::Env::without(PUBLIC_ENV).isolate() {
+			return;
+		}
+		let err = Config::parse_and_merge(["moq-relay", "--auth-public", "anon/**"]).unwrap_err();
+		assert!(format!("{err:#}").contains("`anon` covers `anon`"), "{err:#}");
+
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("wildcard.toml");
+		std::fs::write(&path, "[auth]\npublic = \"**\"\n").unwrap();
+		let args = [std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
+		let err = Config::parse_and_merge(args).unwrap_err();
+		assert!(
+			format!("{err:#}").contains("the empty prefix covers every path"),
+			"{err:#}"
 		);
 	}
 

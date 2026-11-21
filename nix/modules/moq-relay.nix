@@ -7,12 +7,8 @@
 let
   cfg = config.services.moq-relay;
   authKey = if cfg.auth.keyFile != null then cfg.auth.keyFile else "${cfg.stateDir}/root.jwk";
-  # A prefix becomes the subtree pattern the relay and the auth server grant.
-  publicPattern =
-    if cfg.auth.publicPath == null || cfg.auth.publicPath == "" then
-      "**"
-    else
-      "${cfg.auth.publicPath}/**";
+  # The prefix the relay and the auth server grant; the empty prefix is everything.
+  publicPrefix = if cfg.auth.publicPath == null then "" else cfg.auth.publicPath;
   authUrl = "http://127.0.0.1:${toString cfg.auth.port}/";
 in
 {
@@ -108,7 +104,7 @@ in
         type = lib.types.nullOr lib.types.str;
         default = null;
         example = "anon";
-        description = "Path prefix anonymous sessions may publish and subscribe under (`anon` grants `anon/**`)";
+        description = "Path prefix anonymous sessions may publish and subscribe under (`anon` grants `anon` and everything beneath it; empty grants everything)";
       };
     };
 
@@ -283,10 +279,10 @@ in
             "${pkgs.moq-cli}/bin/moq auth serve"
             "--listen 127.0.0.1:${toString cfg.auth.port}"
             "--key ${authKey}"
-            "--mtls-publish '**' --mtls-subscribe '**' --mtls-link peer"
+            "--mtls-publish '' --mtls-subscribe '' --mtls-link peer"
           ]
           ++ lib.optionals (cfg.auth.publicPath != null) [
-            "--public-publish '${publicPattern}' --public-subscribe '${publicPattern}'"
+            "--public-publish '${publicPrefix}' --public-subscribe '${publicPrefix}'"
           ]
         );
         Restart = "on-failure";
@@ -380,7 +376,7 @@ in
         MOQ_AUTH_URL = authUrl;
       }
       // lib.optionalAttrs (!cfg.auth.enable) {
-        MOQ_AUTH_PUBLIC = publicPattern;
+        MOQ_AUTH_PUBLIC = publicPrefix;
       }
       // lib.optionalAttrs (cfg.cluster.connect != null) {
         # Cluster configuration

@@ -676,8 +676,8 @@ mod lifecycle_tests {
 				let peer = pollster::block_on(request.accept(None, None)).unwrap();
 				let session = pollster::block_on(connect).unwrap().unwrap();
 				let everything = crate::auth::MoqGrant {
-					publish: vec!["**".into()],
-					subscribe: vec!["**".into()],
+					publish: vec!["".into()],
+					subscribe: vec!["".into()],
 					expires: None,
 				};
 				for grants in [peer.grants(), session.grants()] {

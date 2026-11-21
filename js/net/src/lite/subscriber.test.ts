@@ -449,8 +449,8 @@ test("a lite-07 restart replaces the instance, and the next consume subscribes f
 test("a lite-07 region granted under a wider prefix syncs at the next answer", async () => {
 	const v = Version.DRAFT_07;
 	const subscribe = (...paths: string[]): Grant => ({
-		publish: new Path.Patterns([]),
-		subscribe: new Path.Patterns(paths.map((path) => Path.Pattern.subtree(path))),
+		publish: new Path.Prefixes(),
+		subscribe: Path.Prefixes.parse(paths),
 	});
 	const grant = new Signal<Grant | undefined>(subscribe("a"));
 	const { subscriber, send, ok, settle } = announceHarness(v, 1n, grant);
@@ -493,16 +493,40 @@ test("a lite-07 region granted under a wider prefix syncs at the next answer", a
 	subscriber.close();
 });
 
+test("a lite-07 grant gaining a prefix too long for a path keeps every reader synced", async () => {
+	const v = Version.DRAFT_07;
+	const subscribe = (...paths: string[]): Grant => ({
+		publish: new Path.Prefixes(),
+		subscribe: Path.Prefixes.parse(paths),
+	});
+	const grant = new Signal<Grant | undefined>(subscribe("a"));
+	const { subscriber, send, ok, settle } = announceHarness(v, 1n, grant);
+	const everything = subscriber.routes();
+	await settle();
+	await ok();
+	await send((w) => encodeAnnounceBroadcast(w, { status: "synced", prefix: 0n }, v));
+	await settle();
+	expect(everything.synced.peek()).toBe(true);
+
+	// Like Rust's `Permit::beyond`, a prefix no path can name covers nothing the peer could answer.
+	grant.set(subscribe("a", `b${"x".repeat(Path.MAX_BYTES)}`));
+	await settle();
+	expect(everything.synced.peek()).toBe(true);
+
+	everything.close();
+	subscriber.close();
+});
+
 // Readers too many to ask for one by one are asked for at the root. A grant change that shows more
 // within it, though within no reader's prefix, still sends an edit: a reader arriving there before
 // its answer waits for it, since the peer may already have sent what the change shows.
 test("a lite-07 grant change under a coarsened ask holds the readers that arrive", async () => {
 	const v = Version.DRAFT_07;
-	const grant = (...patterns: string[]): Grant => ({
-		publish: new Path.Patterns([]),
-		subscribe: new Path.Patterns(patterns.map((pattern) => Path.Pattern.parse(pattern))),
+	const grant = (...prefixes: string[]): Grant => ({
+		publish: new Path.Prefixes(),
+		subscribe: Path.Prefixes.parse(prefixes),
 	});
-	const signal = new Signal<Grant | undefined>(grant("a/*"));
+	const signal = new Signal<Grant | undefined>(grant("a"));
 	const { subscriber, send, ok, settle } = announceHarness(v, 1n, signal);
 	const readers = Array.from({ length: 17 }, (_, i) =>
 		subscriber.routes(Path.Pattern.subtree(Path.from(`a/${i}${"x".repeat(4000)}`))),
@@ -516,7 +540,7 @@ test("a lite-07 grant change under a coarsened ask holds the readers that arrive
 	await settle();
 	expect(readers.every((reader) => reader.synced.peek())).toBe(true);
 
-	signal.set(grant("a/*", "b/**"));
+	signal.set(grant("a", "b"));
 	// Noticed before the reader arrives, while no reader's prefix holds `b`.
 	await settle();
 	const b = subscriber.routes(Path.Pattern.subtree(Path.from("b")));
@@ -1894,8 +1918,8 @@ test("a fetch started after the subscriber closes rejects without opening a stre
 test("a grant that shrinks while the subscription sets up refuses it", async () => {
 	const { quic, streams, opened } = fakeSession();
 	const scoped = (prefix: string): Grant => ({
-		publish: new Path.Patterns([]),
-		subscribe: new Path.Patterns([Path.Pattern.subtree(prefix)]),
+		publish: new Path.Prefixes(),
+		subscribe: new Path.Prefixes([Path.Prefix.parse(prefix)]),
 	});
 	const grant = new Signal<Grant | undefined>(scoped("room"));
 	const subscriber = new Subscriber(quic, Version.DRAFT_05, toHop(1n), undefined, undefined, undefined, grant);
@@ -2142,8 +2166,8 @@ test.each(["initial", "track", "fetch", "body"] as const)(
 	async (stage) => {
 		const { quic, streams, opened } = fakeSession();
 		const scoped = (prefix: string): Grant => ({
-			publish: new Path.Patterns(),
-			subscribe: new Path.Patterns([Path.Pattern.subtree(prefix)]),
+			publish: new Path.Prefixes(),
+			subscribe: new Path.Prefixes([Path.Prefix.parse(prefix)]),
 		});
 		const grant = new Signal<Grant | undefined>(scoped(stage === "initial" ? "other" : "room"));
 		const subscriber = new Subscriber(quic, Version.DRAFT_05, toHop(1n), undefined, undefined, undefined, grant);

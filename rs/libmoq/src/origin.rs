@@ -193,7 +193,7 @@ impl Origin {
 	pub fn announced(
 		&mut self,
 		origin: Id,
-		scope: moq_net::Pattern,
+		filter: moq_net::Pattern,
 		hidden: bool,
 		on_announce: OnStatus,
 	) -> Result<Id, Error> {
@@ -203,7 +203,7 @@ impl Origin {
 		let consumer = origin
 			.producer
 			.consume()
-			.scope("", &moq_net::Patterns::from(scope))?
+			.filter(&filter)?
 			.with_hidden(hidden)
 			.announced();
 		self.announced_task.spawn(
