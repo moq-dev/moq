@@ -46,15 +46,16 @@ question):
   for the dialer, which needs an identity type moq-net lacks).
 - ✅ Explicit `dial` and `listen` grants ([grants](/quest/m3/proxy/grants.md))
   (rejected: reading a broadcast meaning dial and publishing it meaning listen,
-  which would let any viewer's token open a stream to a media publisher). The
-  maintainer leaned this way without settling it; revisit in this plan's review.
+  which would let any viewer's token open a stream to a media publisher).
+  Confirmed by the maintainer in the plan's review, 2026-11-20.
 
 m3: it is a wire change a named consumer, Kixel, waits on, and it should not
 gate the cut. kixel-ai/kixel.ai's `quest/m1/proxy.md` adopts it once
 cdn.moq.wtf runs it.
 
-Added in the plan's review, 2026-11-20, for the maintainer to confirm: the
+Decided in the plan's review, 2026-11-20 (maintainer): ✅ the
 conversion keys on each hop's negotiated version lacking PROXY, not on
 moq-transport alone, so a mixed-release relay pair or a moq-lite version
-before PROXY's carries the track form rather than refusing. This extends the moq-transport decision above; it adds no
-dialer-side fallback.
+before PROXY's carries the track form rather than refusing (rejected: converting on
+moq-transport hops only, which breaks streams mid-rollout). This extends the
+moq-transport decision above; it adds no dialer-side fallback.
