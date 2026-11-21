@@ -66,12 +66,16 @@ pub(crate) fn peek_length(bytes: &[u8], version: Version) -> (usize, usize) {
 /// The Message Length of a `len` byte body in `version`'s encoding. For hand-built frames.
 #[cfg(test)]
 pub(crate) fn length_bytes(len: usize, version: Version) -> Vec<u8> {
-	let mut buf = Vec::new();
-	let mut w = Encoder::new(&mut buf, version.into());
-	match version.varint_length() {
-		true => w.varint(len as u64).expect("a length that fits a varint"),
-		false => w.u16(u16::try_from(len).expect("a length that fits 16 bits")),
+	if !version.varint_length() {
+		return u16::try_from(len)
+			.expect("a length that fits 16 bits")
+			.to_be_bytes()
+			.to_vec();
 	}
+	let mut buf = Vec::new();
+	Encoder::new(&mut buf, version.into())
+		.varint(len as u64)
+		.expect("a length that fits a varint");
 	buf
 }
 
