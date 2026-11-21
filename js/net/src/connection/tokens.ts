@@ -21,16 +21,16 @@ export interface Presentation {
 export interface Carrier {
 	/** Whether every offered version carries a SETUP token, so the URL needs none. */
 	setupToken: boolean;
-	/** The URL query parameter that carries it in place of SETUP and `jwt`. */
-	param?: string;
+	/** Whether the URL's `auth` parameter carries it in place of SETUP and `jwt`. */
+	urlAuth?: boolean;
 }
 
 /**
  * Decide what one dial presents.
  *
  * A URL that already carries a `jwt` keeps it (a per-peer credential), so every token rides
- * AUTH. Otherwise the first token is the connection credential: it rides the carrier's
- * `param` alone when it names one, else SETUP, and the URL's `jwt` too when no `setupToken`
+ * AUTH. Otherwise the first token is the connection credential: it rides the URL's `auth`
+ * parameter alone when the carrier asks, else SETUP, and the URL's `jwt` too when no `setupToken`
  * is carried, since the URL is fixed before the version is negotiated.
  *
  * @internal
@@ -39,10 +39,12 @@ export function credential(url: URL, tokens: readonly string[], carrier: Carrier
 	const jwt = url.searchParams.get("jwt");
 	if (jwt) return { url, connection: jwt };
 	const first = tokens[0];
-	if (first === undefined) return { url };
-	if (carrier.param !== undefined) {
-		return { url: withParam(url, carrier.param, first), connection: first, carried: true };
+	if (carrier.urlAuth) {
+		// Even with no token yet, so one that arrives later waits for the next dial.
+		const carried = { url, carried: true };
+		return first === undefined ? carried : { ...carried, url: withAuth(url, first), connection: first };
 	}
+	if (first === undefined) return { url };
 	return { url: carrier.setupToken ? url : withJwt(url, first), setup: first, connection: first };
 }
 
@@ -68,10 +70,10 @@ function withJwt(url: URL, jwt: string): URL {
 	return next;
 }
 
-/** `url` with `param` set to `value`, replacing any it carried, so a credential never repeats. */
-function withParam(url: URL, param: string, value: string): URL {
+/** `url` with `auth` set to the credential, replacing any it carried, so it never repeats. */
+function withAuth(url: URL, credential: string): URL {
 	const next = new URL(url);
-	next.searchParams.set(param, value);
+	next.searchParams.set("auth", credential);
 	return next;
 }
 

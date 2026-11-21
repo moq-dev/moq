@@ -50,27 +50,34 @@ test("a WebSocket fallback presents the credential its own URL decides", () => {
 	expect(configured.setup).toBe("a");
 });
 
-test("a credential parameter carries the first token alone, in place of SETUP and jwt", () => {
-	const carrier = { setupToken: false, param: "credential" };
-	const url = new URL("https://relay.example.com/room?x=1&credential=stale");
+test("the auth parameter carries the first token alone, in place of SETUP and jwt", () => {
+	const carrier = { setupToken: false, urlAuth: true };
+	const url = new URL("https://relay.example.com/room?x=1&auth=stale");
 	const dial = credential(url, ["a b", "c"], carrier);
 	// Replaced, not repeated, and never also in SETUP.
-	expect(dial.url.href).toBe("https://relay.example.com/room?x=1&credential=a+b");
+	expect(dial.url.href).toBe("https://relay.example.com/room?x=1&auth=a+b");
 	expect(dial.setup).toBeUndefined();
 	expect(dial.connection).toBe("a b");
 	expect(extra(dial, ["a b", "c"])).toEqual(["c"]);
 	// A replacement for it waits for the next dial: the relay takes no token of its own kind.
 	expect(extra(dial, ["next", "c"])).toEqual(["c"]);
 	// The configured URL is untouched, so a new credential for each dial changes no key.
-	expect(url.searchParams.get("credential")).toBe("stale");
+	expect(url.searchParams.get("auth")).toBe("stale");
 
 	// A URL's own jwt still decides, and the WebSocket fallback follows the same carrier.
 	const peer = credential(new URL("https://relay.example.com/room?jwt=peer"), ["a"], carrier);
-	expect(peer.url.searchParams.get("credential")).toBeNull();
+	expect(peer.url.searchParams.get("auth")).toBeNull();
 	expect(peer.connection).toBe("peer");
 	const ws = fallback(URL_, new URL("wss://ws.example.com/room"), ["a"], carrier);
-	expect(ws.url.href).toBe("wss://ws.example.com/room?credential=a");
+	expect(ws.url.href).toBe("wss://ws.example.com/room?auth=a");
 	expect(ws.setup).toBeUndefined();
+});
+
+test("with no token yet, the auth parameter still keeps a later first token off AUTH", () => {
+	const dial = credential(URL_, [], { setupToken: false, urlAuth: true });
+	expect(dial.url.href).toBe(URL_.href);
+	expect(dial.setup).toBeUndefined();
+	expect(extra(dial, ["later", "c"])).toEqual(["c"]);
 });
 
 test("no tokens present nothing", () => {

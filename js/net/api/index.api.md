@@ -161,7 +161,6 @@ export namespace Connection {
 	export interface ConnectProps {
 		auth?: Auth.Handle;
 		consume?: Origin.Producer;
-		credentialParam?: string;
 		implementation?: string;
 		publish?: Origin.Consumer;
 		signal?: AbortSignal;
@@ -169,6 +168,7 @@ export namespace Connection {
 		tokens?: readonly string[];
 		transport?: WebTransport;
 		url: URL;
+		urlAuth?: boolean;
 		versions?: readonly string[];
 		viewers?: Bandwidth.Viewers;
 		websocket?: Connection.WebSocketProps;
@@ -189,7 +189,6 @@ export namespace Connection {
 	export interface Props {
 		backoff?: Connection.Backoff;
 		consume?: Origin.Producer;
-		credentialParam?: string;
 		enabled?: boolean | Signals.Signal<boolean>;
 		goaway?: Connection.Handover;
 		publish?: Origin.Consumer;
@@ -199,6 +198,7 @@ export namespace Connection {
 		tokens?: readonly string[] | Signals.Signal<readonly string[]>;
 		transport?: never;
 		url?: URL | Signals.Signal<URL | undefined>;
+		urlAuth?: boolean;
 		versions?: readonly string[] | Signals.Signal<readonly string[] | undefined>;
 		websocket?: Connection.WebSocketProps;
 		webtransport?: Connection.WebTransportProps;

@@ -143,7 +143,7 @@ test("a close that refuses the connection credential answers a session without A
 	}
 });
 
-test("a credential in a URL parameter is judged for each dial like a token", async () => {
+test("a credential in the URL is judged for each dial like a token", async () => {
 	using clock = manual();
 	const original = globalThis.WebTransport;
 	const dialed: URL[] = [];
@@ -162,7 +162,7 @@ test("a credential in a URL parameter is judged for each dial like a token", asy
 				const request = await requests.next();
 				if (!request) break;
 				asked.push(named(request));
-				if (url.searchParams.get("credential") === "revoked") {
+				if (url.searchParams.get("auth") === "revoked") {
 					request.reject(SessionCode.Unauthorized, "no");
 					pair.server.close({ closeCode: SessionCode.Unauthorized, reason: "no" });
 				} else request.accept(GRANT);
@@ -176,12 +176,12 @@ test("a credential in a URL parameter is judged for each dial like a token", asy
 		versions: ["moq-lite-07-wip"],
 		websocket: { enabled: false },
 		tokens,
-		credentialParam: "credential",
+		urlAuth: true,
 		backoff: DELAY,
 	});
 	try {
 		await clock.drive(reload.answered());
-		expect(dialed[0]?.searchParams.get("credential")).toBe("first");
+		expect(dialed[0]?.searchParams.get("auth")).toBe("first");
 		expect(dialed[0]?.searchParams.has("jwt")).toBe(false);
 		// The configured URL stays the key, so a new credential never starts another sequence.
 		expect(reload.url.peek()?.href).toBe(URL_.href);
@@ -204,12 +204,12 @@ test("a credential in a URL parameter is judged for each dial like a token", asy
 		tokens.set(["revoked"]);
 		const err = await clock.drive(refusal(reload.answered()));
 		expect(err?.code).toBe(SessionCode.Unauthorized);
-		expect(dialed.at(-1)?.searchParams.get("credential")).toBe("revoked");
+		expect(dialed.at(-1)?.searchParams.get("auth")).toBe("revoked");
 
 		// The loop is still live, and the next credential is judged on its own.
 		tokens.set(["second"]);
 		await clock.drive(reload.answered());
-		expect(dialed.at(-1)?.searchParams.get("credential")).toBe("second");
+		expect(dialed.at(-1)?.searchParams.get("auth")).toBe("second");
 		expect(reload.error.peek()).toBeUndefined();
 	} finally {
 		reload.close();
