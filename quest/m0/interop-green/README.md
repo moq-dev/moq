@@ -43,7 +43,7 @@ scheduled Interop: two children,
 (that stall, which also reproduces on Chromium `moq-transport-22`) and
 [the moq-transport JS joining FETCH](/quest/m0/interop-green/ietf-js-joining-fetch.md).
 The intermittent `go -> js` silent audio went to
-[test flakes](/quest/m0/test-flakes-3/go-js-silent-audio.md), and the datagram
+test flakes (fixed by the Go tone's start-anchored pacing), and the datagram
 cells are [moq-dev/moq#9197](https://github.com/moq-dev/moq/pull/9197)'s.
 
 Decided 2026-11-12 (maintainer), since green scheduled Interop is this epic's goal and stale pins caused four of the last six red runs:
