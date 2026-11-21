@@ -117,3 +117,47 @@ async fn a_moq_transport_live_join_asks_the_route_for_no_backlog() {
 	.await
 	.expect("the viewer joined live");
 }
+
+/// A relay copy that went idle still holds the group it read last. A live join returning to it
+/// asks the route for a live join, not for everything since that stale group, so the groups
+/// published while nobody read are never replayed.
+#[kio::test]
+async fn a_live_join_reopening_an_idle_copy_stays_a_live_join() {
+	let version: Version = "moq-lite-07-wip".parse().unwrap();
+	let publisher = origin(1);
+	let relay = origin(2);
+	let viewer = origin(3);
+	let _a = peer(version, &publisher, &relay).await;
+	let _b = peer(version, &relay, &viewer).await;
+
+	let broadcast = publisher.route("live", origin::RouteOptions::hidden()).unwrap();
+	let info = track::Info::default()
+		.with_timescale(moq_net::Timescale::MILLI)
+		.with_max_age(None);
+	let source = broadcast.broadcast().create_track("video", info).unwrap();
+	append(&source, 0);
+	append(&source, 500);
+	broadcast.announce().unwrap();
+
+	let joining = track::Subscription::default()
+		.with_ranges([track::Range::live()])
+		.with_delay(track::Delay::default().with_max(Duration::from_secs(30)));
+	kio::clock::timeout(TIMEOUT, async {
+		let remote = viewer.consume().follow("live", None).unwrap().available().await;
+		let remote = remote.unwrap().expect("the broadcast resolves");
+		let mut subscriber = remote.track("video").unwrap().subscribe(joining.clone()).await.unwrap();
+		assert_eq!(subscriber.recv_group().await.unwrap().expect("a group").start, 500);
+		drop(subscriber);
+		crate::support::unwanted(source.demand()).await.unwrap();
+
+		for start in (1000..=3000).step_by(500) {
+			append(&source, start);
+		}
+		let mut subscriber = remote.track("video").unwrap().subscribe(joining).await.unwrap();
+		assert_eq!(subscriber.recv_group().await.unwrap().expect("a group").start, 3000);
+		let asked = source.subscription().expect("the relay subscribes again");
+		assert_eq!(asked.ranges, [track::Range::live()]);
+	})
+	.await
+	.expect("the viewer joined live again");
+}

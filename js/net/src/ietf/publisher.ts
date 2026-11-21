@@ -44,6 +44,7 @@ import {
 	type Position as TrackPosition,
 	Producer as TrackProducer,
 	type Subscriber as TrackSubscriber,
+	type Subscription,
 } from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { toNumber } from "../util/bigint.ts";
@@ -503,14 +504,12 @@ export class Publisher {
 			// bound the subscription before subscribing so the refresh ratio never judges it.
 			const fixed = filterRange(msg.filter, {}, this.#session.version);
 			// Parked past a bounded window's end: the peer reads this stream's end as the track's.
+			// Every other filter starts at the live edge, which resolves once subscribed.
 			return hooks.parked(
 				source.track(msg.trackName).subscribe({
 					priority: fromWire(msg.subscriberPriority),
 					order: msg.groupOrder,
-					// moq-transport carries no budget, so everything the producer retains is served,
-					// and it has no field for a minimum.
-					delay: { max: Duration.millis(Varint.MAX_U53), min: null },
-					ranges: fixed.start ? serveRanges(fixed) : undefined,
+					...(fixed.start ? serveRequest(fixed) : LIVE_JOIN),
 				}),
 			);
 		};
@@ -772,13 +771,7 @@ export class Publisher {
 			// sink regardless. An absent start joins at the latest group, which is what
 			// moq-lite means by joining a live track. The range's end is the inclusive last
 			// group; the model's `endGroup` is exclusive.
-			track.update({
-				priority,
-				order,
-				// moq-transport has no field for a minimum.
-				delay: { max: Duration.millis(Varint.MAX_U53), min: null },
-				ranges: serveRanges(range),
-			});
+			track.update({ priority, order, ...serveRequest(range, msg.filter, edge) });
 			const startGroup = range.start ? range.start.group : hooks.latestKey(track);
 			if (startGroup !== undefined) track.withRange({ ...rangeGroups(range), start: { included: startGroup } });
 			// The live cursor's lowest group, which a fill-only update never lowers.
@@ -790,7 +783,7 @@ export class Publisher {
 			// asking the broadcast would mint a second producer nobody has accepted.
 			cache =
 				fill && fill.kind !== "empty"
-					? track.fork({ priority, order, delay: { max: Duration.millis(Varint.MAX_U53), min: null } })
+					? track.fork({ priority, order, delay: { max: NO_MAX, min: null } })
 					: undefined;
 
 			const ranked = new Priority(track, info.priority);
@@ -937,7 +930,9 @@ export class Publisher {
 							range.start = tail.start;
 							range.end = tail.end;
 							bounds.set(requested, true);
-							track.update({ ...track.subscription.peek(), ranges: serveRanges(range) });
+							// Only a new filter moves the request: the edge an old one resolved against has moved.
+							if (params.subscriptionFilter !== undefined)
+								track.update({ ...track.subscription.peek(), ...serveRequest(range, msg.filter, snapshot) });
 							// Below its floor the live cursor already passed every group or never owned it,
 							// so lowering it for a fill-only update would hand those groups out a second time.
 							let start = range.start ? range.start.group : 0n;
@@ -982,7 +977,7 @@ export class Publisher {
 								? track.fork({
 										priority: fromWire(msg.subscriberPriority),
 										order: msg.groupOrder,
-										delay: { max: Duration.millis(Varint.MAX_U53), min: null },
+										delay: { max: NO_MAX, min: null },
 									})
 								: undefined;
 						try {
@@ -2499,12 +2494,41 @@ async function servingGroup(track: TrackSubscriber): Promise<group.Consumer | un
 	}
 }
 
-/** The model ranges a {@link ServeRange} asks for, whole groups through its last one. */
-function serveRanges(range: ServeRange): Range[] {
+// moq-transport carries no budget, so everything the producer retains is served.
+const NO_MAX = Duration.millis(Varint.MAX_U53);
+
+/**
+ * A live join with no Min Age, as a SUBSCRIBE without an absolute start asks: the oldest start
+ * would have a relay's route replay everything it retains, and SUBSCRIBE_OK then name the
+ * oldest group replayed so far as Largest. Mirrors the Rust `live_join`.
+ */
+const LIVE_JOIN: Pick<Subscription, "delay" | "ranges"> = {
+	delay: { max: NO_MAX, min: Duration.ZERO },
+	ranges: [{ start: { relative: 0n } }],
+};
+
+/**
+ * What to ask for a {@link ServeRange} resolved from `filter` against `edge`. A filter other
+ * than an absolute one starting at the latest group or past it stays a {@link LIVE_JOIN}, which
+ * the serve's cursor trims to the range: a time start there would also have the route replay
+ * what it retains. On a track with no group yet it asks from the oldest group, since nothing is
+ * retained, and a live join would start at whichever group lands first. Mirrors the Rust
+ * `ServeRange::request`.
+ */
+function serveRequest(range: ServeRange, filter?: Filter.Filter, edge?: LiveEdge): Pick<Subscription, "delay" | "ranges"> {
+	const latest = edge?.latest;
+	const live =
+		filter !== undefined &&
+		filter.kind !== "absolute" &&
+		range.end === undefined &&
+		latest !== undefined &&
+		(range.start === undefined || range.start.group >= latest);
+	if (live) return LIVE_JOIN;
 	const out: Range = {};
 	if (range.start) out.start = { time: range.start.group };
 	if (range.end) out.end = { time: range.end.group };
-	return [out];
+	// moq-transport has no field for a minimum.
+	return { delay: { max: NO_MAX, min: null }, ranges: [out] };
 }
 
 function rangeGroups(range: ServeRange): Groups {

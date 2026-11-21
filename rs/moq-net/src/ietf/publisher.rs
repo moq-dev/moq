@@ -1997,8 +1997,8 @@ impl SubscribeTrack {
 				..fixed
 			}
 			.apply(&mut subscription),
-			// Every other filter starts at the live edge.
-			None => fixed.request(&mut subscription, msg.filter, LiveEdge::default()),
+			// Every other filter starts at the live edge, which resolves below.
+			None => live_join(&mut subscription),
 		}
 
 		// Subscribe before resolving the filter: on a routed broadcast the live edge only
@@ -21579,22 +21579,19 @@ impl ServeRange {
 	}
 
 	/// Ask for this range, resolved from `filter` against `edge`. A filter other than an
-	/// absolute one starting at the latest group or past it asks for a live join with no Min
-	/// Age, which the serve's floor trims to the range. Asking from that group's time instead,
-	/// or from the oldest group before the edge is known, would have a relay's route replay
-	/// everything it retains, and the relay's SUBSCRIBE_OK name the oldest group replayed so
-	/// far as Largest.
+	/// absolute one starting at the latest group or past it stays a [`live_join`], which the
+	/// serve's floor trims to the range: a time start there would also have the route replay
+	/// what it retains. On a track with no group yet it asks from the oldest group, since
+	/// nothing is retained, and a live join would start at whichever group lands first.
 	fn request(&self, subscription: &mut Subscription, filter: Filter, edge: LiveEdge) {
 		let live = !matches!(filter, Filter::Absolute { .. })
 			&& self.end.is_none()
-			&& self
-				.start
-				.is_none_or(|start| edge.latest.is_none_or(|latest| start.group >= latest));
-		if live {
-			*subscription = std::mem::take(subscription).with_ranges([track::Range::live()]);
-			subscription.delay.min = Some(Duration::ZERO);
-		} else {
-			self.apply(subscription);
+			&& edge
+				.latest
+				.is_some_and(|latest| self.start.is_none_or(|start| start.group >= latest));
+		match live {
+			true => live_join(subscription),
+			false => self.apply(subscription),
 		}
 	}
 
@@ -21605,6 +21602,14 @@ impl ServeRange {
 			.with_start(self.start.map(|start| start.group))
 			.with_end(self.end.and_then(|end| end.group.checked_add(1)));
 	}
+}
+
+/// Ask for a live join with no Min Age, as a SUBSCRIBE without an absolute start does: the
+/// oldest start would have a relay's route replay everything it retains, and SUBSCRIBE_OK
+/// then name the oldest group replayed so far as Largest.
+fn live_join(subscription: &mut Subscription) {
+	*subscription = std::mem::take(subscription).with_ranges([track::Range::live()]);
+	subscription.delay.min = Some(Duration::ZERO);
 }
 
 /// The slice of one group a subscription's [`ServeRange`] selects.
