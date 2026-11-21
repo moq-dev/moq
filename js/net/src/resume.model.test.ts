@@ -708,7 +708,12 @@ class Model {
 		}
 		// Where the range placed decides what it owes, so record it before the snapshot.
 		this.#place(reader);
-		const covered = (group: number) => (instance.ended ? covers(reader, group) : within(owedRange(reader), group));
+		// An ordered read passes what its floor keeps out, as `owed` judges a read that ended.
+		const covered = (group: number) =>
+			instance.ended
+				? covers(reader, group)
+				: within(owedRange(reader), group) &&
+					(!reader.spec.ordered || reader.local === undefined || group >= reader.local[0]);
 		// Below an end an ordered read passed, it still owes what it owed when it passed it.
 		reader.carried = new Set([...reader.carried].filter((group) => passedBelow(reader, group)));
 		for (let group = 0; group < GROUPS; group++) {

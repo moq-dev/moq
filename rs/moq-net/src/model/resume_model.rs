@@ -846,9 +846,13 @@ impl Model {
 					}
 					// Where the range placed decides what it owes, so record it before the snapshot.
 					reader.place(instance);
+					// An ordered read passes what its floor keeps out, as `owed` judges a read that ended.
 					let covers = |group: u64| match instance.ended {
 						true => reader.covers(group),
-						false => reader.owes().is_some_and(|(start, end)| (start..end).contains(&group)),
+						false => {
+							reader.owes().is_some_and(|(start, end)| (start..end).contains(&group))
+								&& (!reader.spec.ordered || reader.bounds.is_none_or(|(start, _)| group >= start))
+						}
 					};
 					// A group landing below the end afterwards is not owed: a reader stops at it. Below
 					// an end an ordered read passed, it still owes what it owed when it passed it.
@@ -1801,8 +1805,10 @@ fn regressions() {
 			],
 			finish: false,
 		},
-		// An ordered read of a received route waits on a key below a group landing past its range,
-		// which may still land, so the range set again reads it.
+		// The JS model runs these ops on a local route, whose ordered read passes key 0 once group 1
+		// lands past its range. On this received route the read waits for key 0 instead, and the
+		// oracle accepts either: `an_ordered_read_of_a_received_copy_waits_below_a_later_group` in
+		// `track.rs` pins the wait.
 		Case {
 			ops: vec![
 				Op::Join {
@@ -1829,7 +1835,7 @@ fn regressions() {
 			],
 			finish: false,
 		},
-		// The same once the route it waits on fails, with the key below landing on the next route.
+		// The same once the route fails, with the key below landing on the next route.
 		Case {
 			ops: vec![
 				Op::Up { instance: 0, slot: 2 },

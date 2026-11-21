@@ -14124,6 +14124,21 @@ mod test {
 		assert!(matches!(ordered.poll_next_group(&noop), Poll::Ready(Ok(None))));
 	}
 
+	/// An ordered read of a received copy never passes a key below a group landing past its
+	/// range: the feed may still land it, so the read waits and hands it out once it does.
+	#[cfg(feature = "async")]
+	#[test]
+	fn an_ordered_read_of_a_received_copy_waits_below_a_later_group() {
+		let producer = received_producer(None);
+		let mut ordered = producer.subscribe(replay().with_range(0..1)).ordered();
+		let _past = framed(&producer, 1, 1).finish().unwrap();
+		let noop = kio::Waiter::noop();
+		assert!(ordered.poll_next_group(&noop).is_pending(), "the feed may still land 0");
+		let _below = framed(&producer, 0, 1).finish().unwrap();
+		assert!(matches!(ordered.poll_next_group(&noop), Poll::Ready(Ok(Some(group))) if group.start == 0));
+		assert!(matches!(ordered.poll_next_group(&noop), Poll::Ready(Ok(None))));
+	}
+
 	/// A drop outside a reader's ranges is reported once a group arriving places a time start
 	/// below it, widening its range over the drop, as a scan of the whole window would.
 	#[test]
