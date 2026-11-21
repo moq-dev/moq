@@ -1104,31 +1104,36 @@ max_streams = 64
 	/// Real relay examples, packaging and test fixtures use the same loader as an embedding CLI.
 	#[test]
 	fn repository_configs_load() {
-		let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+		let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
 		// Only repository inputs belong here; installed clients and build output below
 		// test/ can contain unrelated TOML. Git's tracked list also includes new fixtures.
-		let tracked = std::process::Command::new("git")
-			.args(["ls-files", "-z", "--", "demo/relay", "packaging", "test"])
-			.current_dir(&root)
-			.output()
-			.expect("list repository fixtures");
-		assert!(tracked.status.success());
-		let tracked = String::from_utf8(tracked.stdout).unwrap();
-		for area in ["demo/relay", "packaging", "test"] {
+		// Each glob names its files from this crate, so sh/rs/reads.sh finds the read
+		// and a new fixture selects this test.
+		for area in [
+			"../../demo/relay/**/*.toml",
+			"../../packaging/**/*.toml",
+			"../../test/**/*.toml",
+		] {
+			let tracked = std::process::Command::new("git")
+				.args(["ls-files", "-z", "--", &format!(":(glob){area}")])
+				.current_dir(manifest)
+				.output()
+				.expect("list repository fixtures");
+			assert!(tracked.status.success());
+			let tracked = String::from_utf8(tracked.stdout).unwrap();
 			let mut checked = 0;
 			// test/mesh-replay/ holds mesh topologies and event scripts, not relay configs; the
 			// replay writes each relay's config at run time.
 			for name in tracked
 				.split('\0')
-				.filter(|name| name.starts_with(area) && !name.starts_with("test/mesh-replay/"))
+				.filter(|name| !name.is_empty() && !name.contains("/test/mesh-replay/"))
 			{
-				let path = root.join(name);
-				if path.extension().is_none_or(|ext| ext != "toml")
-					|| matches!(
-						path.file_name().and_then(|name| name.to_str()),
-						// `cases.toml` holds test/quic-interop's expected results.
-						Some("Cargo.toml" | "rust-toolchain.toml" | "bunfig.toml" | "cases.toml")
-					) {
+				let path = manifest.join(name);
+				if matches!(
+					path.file_name().and_then(|name| name.to_str()),
+					// `cases.toml` holds test/quic-interop's expected results.
+					Some("Cargo.toml" | "rust-toolchain.toml" | "bunfig.toml" | "cases.toml")
+				) {
 					continue;
 				}
 				let result = Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), path.clone().into()]);
