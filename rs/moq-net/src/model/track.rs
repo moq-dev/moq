@@ -7932,8 +7932,9 @@ struct GroupExpiry {
 	cache: Arc<cache::Track>,
 	reading: Reading,
 	subscription: kio::Consumer<demand::Prefs>,
-	/// What the cursor can be served; see [`Cursor::published`].
-	servable: kio::Consumer<Published>,
+	/// What the cursor can be served; see [`Cursor::published`]. `None` once the read moved
+	/// to another copy, which serves the reader past where the cursor's copy was capped.
+	servable: Option<kio::Consumer<Published>>,
 	key: u64,
 	superseded: Superseded,
 }
@@ -8053,7 +8054,9 @@ impl group::Expiry for GroupExpiry {
 			state,
 			cache,
 			subscription: self.subscription.clone(),
-			servable: self.servable.clone(),
+			// A route switch caps the copy the read moves off at the boundary group, so its
+			// servable would hide every group the replacement holds past it.
+			servable: None,
 			key: self.key,
 			superseded: Superseded::default(),
 		})
@@ -8093,10 +8096,12 @@ impl group::Expiry for GroupExpiry {
 		});
 
 		let mut servable = Servable::ALL;
-		let _ = self.servable.poll(waiter, |current| {
-			servable = current.servable.clone();
-			Poll::<()>::Pending
-		});
+		if let Some(published) = &self.servable {
+			let _ = published.poll(waiter, |current| {
+				servable = current.servable.clone();
+				Poll::<()>::Pending
+			});
+		}
 
 		let state = self.state.read();
 		let budget = clamp_max_delay(max_delay, state.max_age_bound());
@@ -9734,7 +9739,7 @@ impl Cursor {
 			cache: self.cache.clone(),
 			reading: Reading::new(self.state.clone()),
 			subscription: self.subscription.consume(),
-			servable: self.published.consume(),
+			servable: Some(self.published.consume()),
 			key,
 			superseded: Superseded::default(),
 		}))
