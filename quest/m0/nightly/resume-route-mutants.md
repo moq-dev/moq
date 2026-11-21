@@ -8,22 +8,22 @@ Nightly's mutants shards report no survivors in
 ## Plan
 
 Found by the 2026-11-20 triage of Nightly run
-[44767045952](https://github.com/moq-dev/moq/actions/runs/44767045952), after
-[moq-dev/moq#9217](https://github.com/moq-dev/moq/pull/9217) killed the
-previous round. The survivors as of a759e4cf64, all in code changed since:
+[44767045952](https://github.com/moq-dev/moq/actions/runs/44767045952).
+[moq-dev/moq#9294](https://github.com/moq-dev/moq/pull/9294) killed or excluded
+27 of its 30 survivors. Three remain in `resume.rs`, in `unraised`: `start < floor`
+to `<=`, and the `end < floor` guard as `true` or `<=`. They decide only an anchor
+exactly at the resume point, or a time end above it; probes of both, with the
+replacement holding and lacking the floor group, read the same groups.
+[moq-dev/moq#9278](https://github.com/moq-dev/moq/pull/9278) deletes `unraised` for
+`raised`, which keeps only the `time < floor` guard: once it lands or closes, rerun
+`cargo mutants -f rs/moq-net/src/model/resume.rs --re raised` and kill or exclude
+what survives.
 
-- `resume.rs`: `unraised` (700, 703: the `start < floor` and `end < floor`
-  guards and their arithmetic), `Copy::ask_whole` (854), `Subscriber::poll_peek_group`
-  (1172), `Subscriber::landed` (1328), `Resume::add` (1513, `at <= next`),
-  `Mirrored::insert`/`remove` (1653, 1659), `Reader::resolve` (1936),
-  `Reader::sync` (2043).
-- `relay.rs`: `Router::publish` (2089 `Change::Live`, 2092),
-  `Router::withdraw` (2149, 2163), `Router::adopt` (2391).
-
-Line numbers drift; rerun `cargo mutants -f <file>` on current main first and
-work from what still survives. For each one, add a test of the edge case the
-guard decides, or delete the guard if no behavior depends on it (and say so
-in the PR). The `verify-resume` and `verify-failover` models may show which
-orderings a guard exists for.
+Line numbers drift; rerun `cargo mutants -f <file>` on current main first.
 
 Public API: none. Wire: none.
+
+## Waiting
+
+- moq-dev/moq: [moq-dev/moq#9278](https://github.com/moq-dev/moq/pull/9278) lands or
+  closes; check with `gh pr view 9278 --json state`.
