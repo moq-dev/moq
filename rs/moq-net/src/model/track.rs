@@ -7473,7 +7473,7 @@ impl Consumer {
 
 	/// Where a run of starts up to `end` ends with the span it reaches into; see
 	/// [`Subscriber::span_end`].
-	pub(super) fn span_end(&self, end: u64) -> u64 {
+	pub(crate) fn span_end(&self, end: u64) -> u64 {
 		if let Some(serving) = self.serving() {
 			return serving.span_end(end);
 		}

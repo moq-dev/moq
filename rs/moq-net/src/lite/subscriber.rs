@@ -476,13 +476,13 @@ impl TrackEntry {
 				let _ = producer.clone().abort(Error::ProtocolViolation);
 				return Err(Error::ProtocolViolation);
 			}
-			// A whole copy the cache already holds refuses this one. Its span holds no other
-			// start, which this subscription accounts for as the copy's own stream did for its
-			// subscription, as with a duplicate of a copy still arriving once it settles.
+			// A whole copy the cache already holds refuses this one. Its span, as any copy that
+			// finished it says, holds no other start, which this subscription accounts for as the
+			// copy's own stream did for its subscription, as with a duplicate of a copy still
+			// arriving once it settles.
 			Err(err) => {
-				if let Some(end) = producer.consume().peek_group(hdr.key).and_then(|group| group.end()) {
-					reading.account(hdr.key..end, now);
-				}
+				let end = producer.consume().span_end(hdr.key.saturating_add(1));
+				reading.account(hdr.key..end, now);
 				return Err(err);
 			}
 		};
@@ -5138,66 +5138,88 @@ mod tests {
 	}
 
 	/// A duplicate of a whole copy the cache already holds accounts for the copy's span, which its
-	/// own GROUP_END would have: the publisher names none of those starts again.
+	/// own GROUP_END would have: the publisher names none of those starts again. The span is read
+	/// from whichever copy finished the group, even beside a fetched head still open.
 	#[kio::test]
 	async fn a_duplicate_of_a_whole_cached_copy_accounts_its_span() {
-		let version = Version::Lite07;
-		let mut script = Vec::new();
-		lite::Group {
-			subscribe: 7,
-			key: 3,
-			frame_start: 0,
-		}
-		.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
-		.unwrap();
-		let session = crate::lite::test_transport::ScriptedSession::eof(script);
-		let clock = crate::time::Deadlines::new(crate::time::Instant::now());
-		let subscriber = Subscriber::new(SubscriberConfig {
-			runtime: clock.clone(),
-			session: crate::driver::Transport::new(session.clone()),
-			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
-			recv_bandwidth: None,
-			version,
-			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
-			peer_node: None,
-			cost: None,
-			going_away: Default::default(),
-			auth: crate::auth::Link::new(false),
-		});
-
-		let track = track::Producer::new(
-			std::sync::Arc::new(crate::broadcast::Info::default()),
-			"video",
-			crate::track::Info::timed(),
-		);
-		let mut cached = track.create_group(group::Info { start: 3 }).unwrap();
-		cached.write_frame(cached.key_time(), &b"x"[..]).unwrap();
-		cached.finish_at(6).unwrap();
-		let tail = kio::Producer::new(Tail::default());
-		subscriber.subscribes.lock().insert(
-			7,
-			TrackEntry::accepted(
-				track.clone(),
-				lite::Framing {
-					timescale: Some(Timescale::MILLI),
-					ietf: None,
-					compressed: false,
-					length_first: false,
-				},
-				tail.clone(),
-			),
-		);
-
 		use crate::transport::poll::Session as _;
-		let (_, recv) = session.open_bi(Default::default()).await.unwrap();
-		let mut group = GroupRecv::new(
-			subscriber,
-			Reader::new(crate::transport::boxed::RecvStream::new(recv), version),
-		);
-		let res = kio::wait(|waiter| group.poll_serve(waiter)).await;
-		assert!(matches!(res, Err(Error::Duplicate)), "{res:?}");
-		drop(group);
-		assert!(tail.read().covers(3..6), "the copy's span is accounted");
+
+		for beside_a_head in [false, true] {
+			let version = Version::Lite07;
+			let frame_start = u64::from(beside_a_head);
+			let mut script = Vec::new();
+			lite::Group {
+				subscribe: 7,
+				key: 3,
+				frame_start,
+			}
+			.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
+			.unwrap();
+			let session = crate::lite::test_transport::ScriptedSession::eof(script);
+			let clock = crate::time::Deadlines::new(crate::time::Instant::now());
+			let subscriber = Subscriber::new(SubscriberConfig {
+				runtime: clock.clone(),
+				session: crate::driver::Transport::new(session.clone()),
+				origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
+				recv_bandwidth: None,
+				version,
+				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
+				peer_node: None,
+				cost: None,
+				going_away: Default::default(),
+				auth: crate::auth::Link::new(false),
+			});
+
+			let track = track::Producer::new(
+				std::sync::Arc::new(crate::broadcast::Info::default()),
+				"video",
+				crate::track::Info::timed(),
+			);
+			let dynamic = track.requests();
+			let mut cached = track.create_group(group::Info { start: 3 }).unwrap();
+			cached.start_at(frame_start).unwrap();
+			cached.write_frame(cached.key_time(), &b"x"[..]).unwrap();
+			// A fetched head from frame 0, still open beside the live copy from frame 1.
+			let mut _head = None;
+			if beside_a_head {
+				let _fetch = track.consume().fetch_group(3, None);
+				let request = dynamic.requested_fill_group().await.unwrap();
+				let mut head = request
+					.accept(crate::track::Info::timed())
+					.unwrap()
+					.expect("a fresh group");
+				head.write_frame(head.key_time(), &b"snapshot"[..]).unwrap();
+				_head = Some(head);
+			}
+			cached.finish_at(6).unwrap();
+			let tail = kio::Producer::new(Tail::default());
+			subscriber.subscribes.lock().insert(
+				7,
+				TrackEntry::accepted(
+					track.clone(),
+					lite::Framing {
+						timescale: Some(Timescale::MILLI),
+						ietf: None,
+						compressed: false,
+						length_first: false,
+					},
+					tail.clone(),
+				),
+			);
+
+			let (_, recv) = session.open_bi(Default::default()).await.unwrap();
+			let mut group = GroupRecv::new(
+				subscriber,
+				Reader::new(crate::transport::boxed::RecvStream::new(recv), version),
+			);
+			let res = kio::wait(|waiter| group.poll_serve(waiter)).await;
+			assert!(matches!(res, Err(Error::Duplicate)), "{beside_a_head}: {res:?}");
+			drop(group);
+			assert!(
+				tail.read().covers(3..6),
+				"{beside_a_head}: the copy's span is accounted"
+			);
+		}
 	}
 
 	/// A lite-07 re-offer can overtake the reset of the stream it replaces: its stream waits,
