@@ -42,8 +42,14 @@ const FREE: [u8; RESERVED as usize] = [0, 0, 0, RESERVED as u8, b'f', b'r', b'e'
 /// What a `chpl` box's one-byte counts allow: chapters in the list, and bytes in a title.
 const CHPL_LIMIT: usize = 255;
 
-/// The chapter text track's timescale.
-const TEXT_TIMESCALE: u32 = 1000;
+/// The chapter text track's timescales, finest first: the first one in which every chapter's
+/// duration fits a 32-bit sample duration. Milliseconds cover 49 days a chapter.
+const TEXT_TIMESCALES: [u32; 4] = [1000, 100, 10, 1];
+
+/// What chapters add to a finish beyond the media's `moov`: at most 255 titles of 255 bytes
+/// each in the `chpl` box, the text, and the text track's tables, with room to spare. It
+/// bounds what a repair reads of a trailer that is not yet known to be one.
+const CHAPTER_BYTES: u64 = (CHPL_LIMIT * (CHPL_LIMIT + 64) + 4096) as u64;
 
 /// The `sample_is_non_sync_sample` bit of ISO/IEC 14496-12 sample flags.
 const NON_SYNC: u32 = 0x0001_0000;
@@ -55,7 +61,8 @@ pub struct Chapter {
 	/// timestamps are on. One before the first sample or after the last is dropped.
 	pub time: Timestamp,
 
-	/// The chapter's name, at most 255 bytes.
+	/// The chapter's name, at most 255 bytes. The limits on titles and on how many chapters
+	/// a finish lists apply to the chapters it writes, not to those it drops.
 	pub title: String,
 }
 
@@ -102,6 +109,10 @@ pub struct Finish {
 	/// Whether a finish cut short left the reserved box a header that skips the fragmented
 	/// `moov`, which must be `free` again before the cut removes the trailing one.
 	reopen: bool,
+
+	/// Whether `tail` is already what the file ends with after `moov_offset`, which a write
+	/// then leaves alone, so a crash never leaves a file without it.
+	kept: bool,
 }
 
 impl Finish {
@@ -122,10 +133,12 @@ impl Finish {
 			file.write_at(self.mdat_offset, &FREE[..8])?;
 			file.sync()?;
 		}
-		// Cut before the moov lands where the cut bytes were, which could otherwise mix with it.
-		file.set_len(self.moov_offset)?;
-		file.sync()?;
-		file.write_at(self.moov_offset, &self.tail)?;
+		if !self.kept {
+			// Cut before the moov lands where the cut bytes were, which could otherwise mix with it.
+			file.set_len(self.moov_offset)?;
+			file.sync()?;
+			file.write_at(self.moov_offset, &self.tail)?;
+		}
 		// The size goes into the body of the `free` box, so only the type needs the moov first.
 		let (kind, size) = self.mdat.split_at(8);
 		file.write_at(self.mdat_offset + 8, size)?;
@@ -206,7 +219,10 @@ impl<S: Stream> Export<S> {
 	}
 
 	/// The writes that turn the file into a regular MP4 listing `chapters`, or `None` when
-	/// nothing was written.
+	/// nothing was written. Pass `&[]` for a file without chapters.
+	///
+	/// At most 255 chapters fall within the recording, and each title is at most 255 bytes:
+	/// those the recording drops count toward neither.
 	///
 	/// Media still buffered for a fragment that has not closed is left out, unless
 	/// [`stop`](Self::stop) wrote it first.
@@ -342,8 +358,15 @@ pub fn repair<F: Read + Seek>(file: &mut F, chapters: &[Chapter]) -> Result<Opti
 				}
 			}
 			// A finish appends the chapter text and a moov, which end the recording, or a
-			// cut-short one part of it.
-			b"mdat" | b"moov" => break,
+			// cut-short one part of it. Complete boxes after the text other than the moov are
+			// fragments a damaged box hides, which a finish would cut.
+			b"mdat" => {
+				if Atom::read(file, atom.end, eof)?.is_some_and(|next| next.kind != *b"moov") {
+					return Err(Error::Unrepairable("an mdat is followed by a box other than the moov").into());
+				}
+				break;
+			}
+			b"moov" => break,
 			_ => return Err(Error::Unrepairable("it holds a box a recording never writes").into()),
 		};
 		for moov in described.drain(..) {
@@ -364,22 +387,14 @@ pub fn repair<F: Read + Seek>(file: &mut F, chapters: &[Chapter]) -> Result<Opti
 	}
 	// What a finish appended, unless anything differs, a cut-short one included. Given no
 	// chapters, a finish that listed some counts too, which they would otherwise lose, so
-	// its trailer is the one written back.
-	let indexed = if eof - end == finish.tail.len() as u64
-		&& read_at(file, end, eof - end, eof)?.is_some_and(|trailer| trailer == finish.tail)
-	{
-		true
-	} else if let Some(trailer) = chapters
-		.is_empty()
-		.then(|| keeps_chapters(file, end, eof, &finish.tail))
-		.transpose()?
-		.flatten()
-	{
-		finish.tail = Bytes::from(trailer);
-		true
-	} else {
-		false
-	};
+	// its trailer stays as it is.
+	let indexed = eof - end == finish.tail.len() as u64
+		&& read_at(file, end, eof - end, eof)?.is_some_and(|trailer| trailer == finish.tail);
+	let kept = !indexed && chapters.is_empty() && keeps_chapters(file, end, eof, &finish.tail)?;
+	if kept {
+		finish.kept = true;
+	}
+	let indexed = indexed || kept;
 	if indexed && slot == finish.mdat {
 		return Ok(None);
 	}
@@ -394,52 +409,102 @@ pub fn repair<F: Read + Seek>(file: &mut F, chapters: &[Chapter]) -> Result<Opti
 	Ok(Some(finish))
 }
 
-/// The file's trailer from `end` when it is a finish that listed chapters: its text and a
-/// `moov` that is `plain`, the `moov` of a finish without chapters, apart from the chapters,
-/// with the text track reading exactly that text.
-fn keeps_chapters<F: Read + Seek>(file: &mut F, end: u64, eof: u64, plain: &[u8]) -> Result<Option<Vec<u8>>> {
+/// Whether the file's trailer from `end` is a finish that listed chapters: the text, and a
+/// `moov` that is `plain`, the `moov` of a finish without chapters, apart from the chapters.
+///
+/// The chapters it lists are read from the `chpl` box, and the text track, its `mdat`, and the
+/// reference to it must be what a finish writes for those chapters.
+fn keeps_chapters<F: Read + Seek>(file: &mut F, end: u64, eof: u64, plain: &[u8]) -> Result<bool> {
 	let Some(text) = Atom::read(file, end, eof)?.filter(|atom| atom.kind == *b"mdat") else {
-		return Ok(None);
+		return Ok(false);
 	};
 	let Some(atom) = Atom::read(file, text.end, eof)?.filter(|atom| atom.kind == *b"moov" && atom.end == eof) else {
-		return Ok(None);
+		return Ok(false);
 	};
+	// A damaged box can declare any size the file is long enough for, which is not worth
+	// reading when a finish never writes that much.
+	if text.end - text.body > CHAPTER_BYTES || atom.end - atom.start > plain.len() as u64 + CHAPTER_BYTES {
+		return Ok(false);
+	}
 	let Some(data) = read_at(file, atom.start, atom.end - atom.start, eof)? else {
-		return Ok(None);
+		return Ok(false);
 	};
 	// A moov that does not decode is damage for the finish to replace, not a failure.
 	let Ok(mut moov) = mp4_atom::Moov::decode(&mut std::io::Cursor::new(data.as_slice())) else {
-		return Ok(None);
+		return Ok(false);
 	};
 	let track = moov
 		.trak
 		.iter()
 		.rposition(|trak| trak.mdia.hdlr.handler == b"text".into());
-	let (Some(track), Some(_)) = (track, moov.udta.take().and_then(|udta| udta.chpl)) else {
-		return Ok(None);
+	let (Some(track), Some(chpl)) = (track, moov.udta.take().and_then(|udta| udta.chpl)) else {
+		return Ok(false);
 	};
-	// The text track must read the mdat just before the moov: from where it starts, and as
-	// many bytes as its samples add up to.
-	let stbl = &moov.trak[track].mdia.minf.stbl;
-	let sizes = match &stbl.stsz.samples {
-		mp4_atom::StszSamples::Different { sizes } => sizes.iter().map(|&size| u64::from(size)).sum::<u64>(),
-		mp4_atom::StszSamples::Identical { count, size } => u64::from(*count) * u64::from(*size),
-	};
-	let offsets = stbl.co64.as_ref().map(|co64| co64.entries.as_slice());
-	if offsets != Some(&[text.body][..]) || sizes != text.end - text.body {
-		return Ok(None);
+	let id = moov.trak[track].tkhd.track_id;
+
+	// The chapters as a finish placed them, in movie ticks, which its 100 ns starts keep
+	// exactly while the movie's timescale is the coarser.
+	let movie = u128::from(moov.mvhd.timescale);
+	if movie == 0 || movie > 10_000_000 || chpl.entries.is_empty() || chpl.entries.len() > CHPL_LIMIT {
+		return Ok(false);
 	}
+	let mut placed = Vec::with_capacity(chpl.entries.len());
+	for entry in &chpl.entries {
+		let ticks = (u128::from(entry.start) * movie).div_ceil(10_000_000);
+		match u64::try_from(ticks) {
+			Ok(start)
+				if start < moov.mvhd.duration
+					&& u128::from(start) * 10_000_000 / movie == u128::from(entry.start)
+					&& placed.last().is_none_or(|&(last, _)| last <= start) =>
+			{
+				placed.push((start, entry.title.as_str()));
+			}
+			_ => return Ok(false),
+		}
+	}
+	let Ok((expected, body)) = chapter_track(id, moov.mvhd.timescale, moov.mvhd.duration, &placed, end) else {
+		return Ok(false);
+	};
+	let Some(stored) = read_at(file, text.body, text.end - text.body, eof)? else {
+		return Ok(false);
+	};
+	if moov.trak[track] != expected || stored != body {
+		return Ok(false);
+	}
+
+	// The first track references the text, besides whatever references it had.
 	moov.trak.remove(track);
-	for trak in &mut moov.trak {
-		trak.tref = None;
+	let removed = moov
+		.trak
+		.first_mut()
+		.and_then(|first| first.tref.as_mut())
+		.and_then(|tref| {
+			let boxes = &mut tref.track_reference_type_boxes;
+			let at = boxes
+				.iter()
+				.rposition(|kind| kind.reference_type == b"chap".into() && kind.track_ids == [id])?;
+			boxes.remove(at);
+			Some(boxes.is_empty())
+		});
+	match removed {
+		None => return Ok(false),
+		Some(true) => moov.trak[0].tref = None,
+		Some(false) => {}
 	}
-	moov.mvhd.next_track_id = moov.trak.iter().map(|trak| trak.tkhd.track_id).max().unwrap_or(0) + 1;
+	let Some(next) = moov
+		.trak
+		.iter()
+		.map(|trak| trak.tkhd.track_id)
+		.max()
+		.unwrap_or(0)
+		.checked_add(1)
+	else {
+		return Ok(false);
+	};
+	moov.mvhd.next_track_id = next;
 	let mut buf = Vec::new();
 	moov.encode(&mut buf).map_err(crate::Error::mp4)?;
-	if buf != plain {
-		return Ok(None);
-	}
-	read_at(file, end, eof - end, eof)
+	Ok(buf == plain)
 }
 
 /// The `len` bytes at `start`, or `None` when they do not end by `limit`.
@@ -685,6 +750,11 @@ impl Index {
 		for (trak, _, timeline) in &timelines {
 			origin = origin.min(to_movie(timeline.start, trak.mdia.mdhd.timescale)?);
 		}
+		// Where each track starts at its own precision, which a movie tick can round away.
+		let starts: Vec<(u64, u32)> = timelines
+			.iter()
+			.map(|(trak, _, timeline)| (timeline.start, trak.mdia.mdhd.timescale))
+			.collect();
 
 		let mut traks = Vec::new();
 		for (trak, track, timeline) in timelines {
@@ -701,15 +771,20 @@ impl Index {
 		traks.sort_by_key(|trak| (trak.mdia.hdlr.handler != b"vide".into(), trak.tkhd.track_id));
 
 		let duration = traks.iter().map(|trak| trak.tkhd.duration).max().unwrap_or(0);
-		let mut next_track_id = traks.iter().map(|trak| trak.tkhd.track_id).max().unwrap_or(0) + 1;
+		let last_track_id = traks.iter().map(|trak| trak.tkhd.track_id).max().unwrap_or(0);
+		let mut next_track_id = last_track_id
+			.checked_add(1)
+			.ok_or_else(|| unindexable(last_track_id, "no track id follows it"))?;
 
 		// The chapter text lies in an mdat of its own, right where the moov would start.
 		let mut tail = BytesMut::new();
 		let mut udta = None;
-		let chapters = self.place(chapters, origin, duration)?;
+		let chapters = self.place(chapters, &starts, origin, duration)?;
 		if !chapters.is_empty() {
 			let id = next_track_id;
-			next_track_id += 1;
+			next_track_id = id
+				.checked_add(1)
+				.ok_or_else(|| unindexable(id, "no track id follows it"))?;
 			let (trak, text) = chapter_track(id, self.timescale, duration, &chapters, end)?;
 			mp4_atom::Header {
 				kind: b"mdat".into(),
@@ -736,14 +811,17 @@ impl Index {
 				}),
 				..Default::default()
 			});
-			// The first track, a video one if there is any, points at the text.
+			// The first track, a video one if there is any, points at the text, besides any
+			// reference it already has.
 			if let Some(first) = traks.first_mut() {
-				first.tref = Some(mp4_atom::Tref {
-					track_reference_type_boxes: vec![mp4_atom::TrackReferenceTypeBox {
+				first
+					.tref
+					.get_or_insert_with(Default::default)
+					.track_reference_type_boxes
+					.push(mp4_atom::TrackReferenceTypeBox {
 						reference_type: b"chap".into(),
 						track_ids: vec![id],
-					}],
-				});
+					});
 			}
 			traks.push(trak);
 		}
@@ -777,21 +855,39 @@ impl Index {
 			mdat_offset: self.reserved,
 			mdat: mdat.freeze(),
 			reopen: false,
+			kept: false,
 		})
 	}
 }
 
 impl Index {
 	/// Each chapter that falls within the movie, sorted, as its start in movie ticks from the
-	/// movie's start at `origin` and its title.
-	fn place<'a>(&self, chapters: &'a [Chapter], origin: u64, duration: u64) -> Result<Vec<(u64, &'a str)>> {
-		let timescale = moq_net::Timescale::new(u64::from(self.timescale))?;
+	/// movie's start at `origin` and its title. `starts` is where each track starts, as media
+	/// ticks and the track's timescale, which the movie's ticks round.
+	fn place<'a>(
+		&self,
+		chapters: &'a [Chapter],
+		starts: &[(u64, u32)],
+		origin: u64,
+		duration: u64,
+	) -> Result<Vec<(u64, &'a str)>> {
+		let movie = moq_net::Timescale::new(u64::from(self.timescale))?;
 		let mut placed = Vec::new();
 		for chapter in chapters {
-			let ticks = u64::try_from(chapter.time.as_scale(timescale)?).map_err(|_| Error::PtsOverflow)?;
-			// A chapter before the first sample or after the last has nothing to start on.
-			if let Some(start) = ticks.checked_sub(origin).filter(|&start| start < duration) {
-				placed.push((start, chapter.title.as_str()));
+			// A chapter before the first sample has nothing to start on: compare it where the
+			// tracks start, not in movie ticks, where it can round onto the start.
+			let mut started = false;
+			for &(start, timescale) in starts {
+				if u128::from(start) <= chapter.time.as_scale(moq_net::Timescale::new(u64::from(timescale))?)? {
+					started = true;
+					break;
+				}
+			}
+			// Nor does one after the last, compared before narrowing to a tick count.
+			let ticks = chapter.time.as_scale(movie)?;
+			let start = ticks.saturating_sub(u128::from(origin));
+			if started && start < u128::from(duration) {
+				placed.push((start as u64, chapter.title.as_str()));
 			}
 		}
 		// A list a player reads in order, equal starts keeping the order given.
@@ -819,24 +915,35 @@ fn chapter_track(
 	offset: u64,
 ) -> Result<(mp4_atom::Trak, Vec<u8>)> {
 	let first = chapters.first().map_or(0, |&(start, _)| start);
-	// Milliseconds, not the movie's ticks, which a long recording at 90 kHz overflows a
-	// 32-bit sample duration in hours. The edits stay in the movie's.
-	let scale = |ticks: u64| ticks * u64::from(TEXT_TIMESCALE) / u64::from(movie);
 	let mut text = Vec::new();
 	let mut sizes = Vec::new();
-	let mut deltas: Vec<u32> = Vec::new();
-	for (i, &(start, title)) in chapters.iter().enumerate() {
+	for &(_, title) in chapters {
 		let before = text.len();
 		// A 16-bit length and the title, then `encd` declaring it UTF-8 as ffmpeg writes it.
 		text.extend_from_slice(&(title.len() as u16).to_be_bytes());
 		text.extend_from_slice(title.as_bytes());
 		text.extend_from_slice(&[0, 0, 0, 12, b'e', b'n', b'c', b'd', 0, 0, 1, 0]);
 		sizes.push((text.len() - before) as u32);
-
-		let end = chapters.get(i + 1).map_or(duration, |&(next, _)| next);
-		let delta = u32::try_from(scale(end) - scale(start)).map_err(|_| Error::PtsOverflow)?;
-		deltas.push(delta);
 	}
+
+	// Milliseconds, not the movie's ticks, which a long recording at 90 kHz overflows a
+	// 32-bit sample duration in hours. A chapter longer than that many milliseconds uses the
+	// next coarser timescale. The edits stay in the movie's ticks.
+	let (timescale, deltas, length) = TEXT_TIMESCALES
+		.iter()
+		.find_map(|&timescale| {
+			let scale = |ticks: u64| u64::try_from(u128::from(ticks) * u128::from(timescale) / u128::from(movie)).ok();
+			let deltas = chapters
+				.iter()
+				.enumerate()
+				.map(|(i, &(start, _))| {
+					let end = chapters.get(i + 1).map_or(duration, |&(next, _)| next);
+					u32::try_from(scale(end)?.checked_sub(scale(start)?)?).ok()
+				})
+				.collect::<Option<Vec<u32>>>()?;
+			Some((timescale, deltas, scale(duration)?.checked_sub(scale(first)?)?))
+		})
+		.ok_or(Error::PtsOverflow)?;
 
 	let mut stts: Vec<mp4_atom::SttsEntry> = Vec::new();
 	for delta in deltas {
@@ -861,8 +968,10 @@ fn chapter_track(
 		edts: edits(first, 0, duration - first),
 		mdia: mp4_atom::Mdia {
 			mdhd: mp4_atom::Mdhd {
-				timescale: TEXT_TIMESCALE,
-				duration: scale(duration) - scale(first),
+				timescale,
+				duration: length,
+				// Undetermined, which a zero decodes as three backticks instead.
+				language: "und".into(),
 				..Default::default()
 			},
 			hdlr: mp4_atom::Hdlr {
@@ -2080,6 +2189,23 @@ mod tests {
 		assert!(index.finish(end, &vec![chapter(0, "a"); 256]).is_err());
 		assert!(index.finish(end, &[chapter(0, &"a".repeat(255))]).is_ok());
 		assert!(index.finish(end, &[chapter(0, &"a".repeat(256))]).is_err());
+
+		// Those the recording drops count toward neither, whatever their time.
+		let past = chapter(60_000, "a");
+		let mut many = vec![past.clone(); 300];
+		many.push(chapter(0, "kept"));
+		assert!(index.finish(end, &many).is_ok());
+		assert!(index.finish(end, &[past.clone(), chapter(0, "kept")]).is_ok());
+		let long = super::Chapter {
+			title: "a".repeat(256),
+			..past
+		};
+		assert!(index.finish(end, &[long]).is_ok());
+		let far = super::Chapter {
+			time: moq_net::Timestamp::from_secs(1 << 60).unwrap(),
+			title: "far".to_string(),
+		};
+		assert!(index.finish(end, &[far]).is_ok());
 	}
 
 	/// A chapter's duration in the text track holds for a recording of hours at the finest
@@ -2089,6 +2215,15 @@ mod tests {
 		let hour = 3600 * 90_000;
 		let (trak, _) = super::chapter_track(2, 90_000, 14 * hour, &[(0, "a"), (hour, "b")], 0).unwrap();
 		assert_eq!(trak.mdia.mdhd.duration, 14 * 3600 * 1000);
+	}
+
+	/// A chapter over 49 days gets a coarser text timescale instead of failing the finish.
+	#[test]
+	fn a_chapter_of_weeks_gets_a_coarser_text_timescale() {
+		let day = 24 * 3600 * 90_000;
+		let (trak, _) = super::chapter_track(2, 90_000, 50 * day, &[(0, "a")], 0).unwrap();
+		assert_eq!(trak.mdia.mdhd.timescale, 100);
+		assert_eq!(trak.mdia.mdhd.duration, 50 * 24 * 3600 * 100);
 	}
 
 	/// A repair given no chapters leaves a finished file's alone, and finishes one whose
@@ -2118,8 +2253,65 @@ mod tests {
 				.position(|kind| kind == b"tkhd")
 				.expect("a tkhd");
 		broken[tkhd + 4] = 9;
-		assert!(<mp4_atom::Moov as mp4_atom::Decode>::decode(&mut std::io::Cursor::new(&broken[moov..])).is_err());
+		// `moov` is where the box's kind starts, past its 4-byte size.
+		let decodes = |file: &[u8]| {
+			<mp4_atom::Moov as mp4_atom::Decode>::decode(&mut std::io::Cursor::new(&file[moov - 4..])).is_ok()
+		};
+		assert!(decodes(&file));
+		assert!(!decodes(&broken));
 		assert!(repair(&broken).unwrap().is_some());
+	}
+
+	/// A trailer that lists chapters is kept only when its chapter text, its references, and
+	/// its list agree, and what is not kept is finished again without them.
+	#[tokio::test(start_paused = true)]
+	async fn repairing_without_chapters_replaces_a_trailer_that_disagrees() {
+		let (mut file, finish) = recorded(&chapters()).await;
+		let text = finish.moov_offset as usize;
+		apply(finish, &mut file);
+		assert!(repair(&file).unwrap().is_none());
+		let trailer = file.windows(4).rposition(|kind| kind == b"moov").expect("a moov");
+		let chapterless = |file: &[u8]| {
+			let mut file = file.to_vec();
+			apply(repair(&file).unwrap().expect("finished again"), &mut file);
+			let moov = super::tests::moov(atoms(&file));
+			assert!(moov.udta.and_then(|udta| udta.chpl).is_none());
+		};
+
+		// A title in the text that `chpl` does not list.
+		let mut changed = file.clone();
+		let at = changed[text..trailer]
+			.windows(5)
+			.position(|title| title == b"First")
+			.expect("a title");
+		changed[text + at + 1] = b'x';
+		chapterless(&changed);
+
+		// A reference to a track that is not the text.
+		let mut changed = file.clone();
+		let chap = changed[trailer..]
+			.windows(4)
+			.position(|kind| kind == b"chap")
+			.expect("a chap reference");
+		changed[trailer + chap + 7] ^= 1;
+		chapterless(&changed);
+
+		// A trailer far larger than a finish writes is not read.
+		let mut changed = file.clone();
+		let size = changed.len() - trailer + 4;
+		changed[trailer - 4..trailer].copy_from_slice(&((size + 1_000_000) as u32).to_be_bytes());
+		changed.resize(changed.len() + 1_000_000, 0);
+		chapterless(&changed);
+	}
+
+	/// A box a damaged moof left in the middle is not a chapter text: the fragments after
+	/// it are not cut.
+	#[tokio::test(start_paused = true)]
+	async fn a_damaged_fragment_box_is_not_repaired_away() {
+		let (mut file, _) = recorded(&chapters()).await;
+		let moof = file.windows(4).position(|kind| kind == b"moof").expect("a moof");
+		file[moof..moof + 4].copy_from_slice(b"mdat");
+		assert!(repair(&file).is_err());
 	}
 
 	/// A finish that crashed before its mdat header was complete still lists its chapters
@@ -2137,6 +2329,18 @@ mod tests {
 		apply(repaired, &mut file);
 		assert_eq!(file, finished);
 		assert_eq!(&file[text + 4..text + 8], b"mdat");
+
+		// The repair can crash too, and the file still lists its chapters once repaired.
+		let mut torn = finished.clone();
+		torn[reserved..reserved + 8].copy_from_slice(&super::FREE[..8]);
+		let repaired = repair(&torn).unwrap().expect("unfinished");
+		for (i, crashed) in crashes(&torn, &repaired).iter().enumerate() {
+			let mut fixed = crashed.clone();
+			if let Some(again) = repair(crashed).unwrap_or_else(|err| panic!("crash {i}: {err}")) {
+				apply(again, &mut fixed);
+			}
+			assert_eq!(fixed, finished, "crash {i}");
+		}
 	}
 
 	/// A repair given other chapters than a finished file lists finishes it again.
