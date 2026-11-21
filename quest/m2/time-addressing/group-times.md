@@ -111,6 +111,3 @@ own End. Run `just test interop --all`.
 
 Public API: none expected beyond moq-net internals. Wire: lite-07-wip only,
 which is unpublished.
-
-## Related
-
