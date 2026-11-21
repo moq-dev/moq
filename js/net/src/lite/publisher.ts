@@ -217,6 +217,7 @@ function trackInfoMessage(info: track.Info, version: Version): TrackInfoMessage 
 		timescale: info.timescale ?? undefined,
 		// An older peer is served the frames inflated.
 		compress: hasCompression(version) && info.compression === "deflate",
+		tail: info.tail,
 	});
 }
 

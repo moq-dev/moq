@@ -530,6 +530,7 @@ test("a listing over a session carries each track's info, end to end", async () 
 			priority: 9,
 			refresh: { ratio: 4, interval: Duration.millis(250) },
 			compression: "deflate",
+			tail: 4 << 20,
 		}),
 	);
 
@@ -543,6 +544,7 @@ test("a listing over a session carries each track's info, end to end", async () 
 			priority: 9,
 			refresh: { ratio: 4, interval: Duration.millis(250) },
 			compression: "deflate",
+			tail: 4 << 20,
 		},
 	});
 	expect(await next(tracks)).toBe("synced");

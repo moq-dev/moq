@@ -284,7 +284,8 @@ async fn a_slow_reader_falls_off_without_slowing_the_fast_one() {
 
 /// Backpressure crosses both relays, with one pacing window of unread payload per hop: the
 /// 1 MiB stream credit each relay grants, not the 16 MiB cap. The upstream copy also keeps
-/// sent history within its 32 MiB tail.
+/// sent history within its 32 MiB tail, or the smaller tail the track declares, which
+/// lite-07 carries to each relay and other versions leave at the default.
 /// Cache charges include frame slots and relay metadata, not transport buffers or RSS.
 #[kio::test]
 async fn two_relays_bound_their_cache_and_resume_without_a_hole() {
@@ -292,11 +293,16 @@ async fn two_relays_bound_their_cache_and_resume_without_a_hole() {
 
 	const FRAME: usize = 64 * 1024;
 	const TOTAL: usize = 64 * MB / FRAME;
-	for version in VERSIONS {
+	let lite07: Version = "moq-lite-07-wip".parse().unwrap();
+	for (version, tail) in VERSIONS
+		.iter()
+		.flat_map(|version| [(version, 32 * MB), (version, 2 * MB)])
+	{
 		let publisher = origin(1);
 		let first = origin(2);
 		let second = origin(3);
 		let version = version.parse::<Version>().unwrap();
+		let kept = if version == lite07 { tail } else { 32 * MB };
 		let upstream = peer(version, &publisher, &first).await;
 		let downstream = peer(version, &first, &second).await;
 		for pair in [&upstream, &downstream] {
@@ -308,10 +314,10 @@ async fn two_relays_bound_their_cache_and_resume_without_a_hole() {
 		let broadcast = publisher
 			.route("chain", moq_net::origin::RouteOptions::hidden())
 			.unwrap();
-		let track = broadcast
-			.broadcast()
-			.create_track("data", track::Info::default().with_timescale(moq_net::Timescale::MILLI))
-			.unwrap();
+		let info = track::Info::default()
+			.with_timescale(moq_net::Timescale::MILLI)
+			.with_tail(tail as u64);
+		let track = broadcast.broadcast().create_track("data", info).unwrap();
 		broadcast.announce().unwrap();
 		let remote = second
 			.consume()
@@ -352,8 +358,12 @@ async fn two_relays_bound_their_cache_and_resume_without_a_hole() {
 		let parked = written.load(std::sync::atomic::Ordering::Relaxed);
 		assert!(parked < TOTAL, "{version}: no backpressure reached the producer");
 		// Frame slots count toward pacing too, so the last whole frame can fall short. The
-		// upstream copy also holds what it sent downstream, within its 32 MiB tail.
-		for (hop, relay, max) in [(1, &first, 32 * MB + FRAME), (2, &second, MB + FRAME)] {
+		// upstream copy also holds what it sent downstream, within its tail.
+		for (hop, relay, max) in [
+			(0, &publisher, tail + FRAME),
+			(1, &first, kept + FRAME),
+			(2, &second, MB + FRAME),
+		] {
 			let held = relay.config().pool.used();
 			assert!(
 				held >= (MB - FRAME) as u64,
@@ -373,10 +383,11 @@ async fn two_relays_bound_their_cache_and_resume_without_a_hole() {
 				Bytes::from(vec![(index % 251) as u8; FRAME]),
 				"{version}: frame {index}"
 			);
-			for relay in [&first, &second] {
+			// Reading fills each copy's tail behind the reader.
+			for (hop, relay, max) in [(0, &publisher, tail), (1, &first, kept), (2, &second, kept)] {
 				assert!(
-					relay.config().pool.used() < 33 * MB as u64,
-					"{version}: live tail grew past its budget"
+					relay.config().pool.used() < (max + MB) as u64,
+					"{version}: hop {hop}'s live tail grew past its budget"
 				);
 			}
 		}

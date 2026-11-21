@@ -77,7 +77,8 @@ never downloads them.
 Grant prefixes and discovery-filter patterns are on the
 [concept page](/concept/moq-lite#grants-and-filters).
 
-Groups retain a 32 MiB live tail without limiting their lifetime or frame count.
+Groups retain a 32 MiB live tail without limiting their lifetime or frame count,
+or the smaller `tail` their track declares, which lite-07 carries to each relay.
 Readers that fall behind the shed front receive `Evicted`; tracks that
 `refresh` also request a fresh group. A join never starts at an arbitrary
 frame in the retained tail.

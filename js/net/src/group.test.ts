@@ -295,6 +295,32 @@ test("a live group retains its tail, while fast readers keep up and lagging read
 	expect(await fast.readFrame()).toBeUndefined();
 });
 
+test("a track's tail bounds its group's copy below the default", async () => {
+	const track = new TrackProducer("bytes").accept({ tail: 4 << 20 });
+	const group = track.createGroup(0n);
+	const fast = group.consume();
+	const slow = group.consume();
+	const payload = new Uint8Array(1024 * 1024);
+	for (let key = 0; key < 12; key++) {
+		group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.start) });
+		expect((await fast.readFrameIndex())?.index).toBe(key);
+		expect(hooks.groupCacheBytes(group)).toBeLessThanOrEqual(4 << 20);
+	}
+	await expect(slow.readFrame()).rejects.toMatchObject({ code: StreamCode.Evicted });
+	group.finish();
+	expect(await fast.readFrame()).toBeUndefined();
+});
+
+test("frames written before a track binds its tail are trimmed to it", () => {
+	const track = new TrackProducer("bytes");
+	const group = track.createGroup(0n);
+	const payload = new Uint8Array(1024 * 1024);
+	for (let key = 0; key < 8; key++) group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.start) });
+	group.finish();
+	track.accept({ tail: 2 << 20 });
+	expect(hooks.groupCacheBytes(group)).toBeLessThanOrEqual(2 << 20);
+});
+
 test("empty frames consume tail storage without a frame count ceiling", async () => {
 	const producer = new Producer(0n);
 	const slow = producer.consume();

@@ -27,6 +27,7 @@ const INFO: track.Info = {
 	maxAge: null,
 	priority: 0,
 	refresh: { ratio: null, interval: null },
+	tail: 32 * 1024 * 1024,
 };
 
 const INSTANCE = Instance.parse("01900000-0000-7000-8000-000000000001");

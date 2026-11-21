@@ -13,6 +13,7 @@ const INFO: Info = {
 	maxAge: null,
 	priority: 0,
 	refresh: { ratio: null, interval: null },
+	tail: 32 * 1024 * 1024,
 };
 
 /** Lets queued microtasks and the listing's signal notifications run. */

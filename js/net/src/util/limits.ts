@@ -8,6 +8,13 @@ import { Session, SessionCode } from "../error.ts";
 export const MAX_FRAME_BYTES = 32 * 1024 * 1024;
 
 /**
+ * The most bytes of a group a copy keeps, its live tail: the default {@link Info.tail} and the
+ * most any track's may be, as moq-net's.
+ * @internal
+ */
+export const TAIL_BYTES = 32 * 1024 * 1024;
+
+/**
  * Bytes in each segment of a frame written in pieces past one segment, as Rust's
  * `frame::SEGMENT`: segment `i` holds the frame's bytes from `i * SEGMENT_BYTES`. A wire
  * frame within one segment is decoded whole; a larger one streams in.

@@ -325,7 +325,8 @@ explicitly, it also caps how long a superseded group stays fresh, whatever max
 age the publisher declared; unset, each track keeps its own max age. The latest
 group of every track, and any group still being read, is kept past `capacity` but
 sheds its oldest frames instead. Whatever the capacity, a group holds at most its
-newest 32 MB. A reader that reaches a shed frame, such as a late joiner of a long
+newest 32 MB, or the smaller tail its track declares over lite-07, with half that
+as its pacing cap. A reader that reaches a shed frame, such as a late joiner of a long
 group, replays it through a flight: a separate copy fetched from the upstream hop
 from that frame, paced by its fastest reader and held to its own 32 MB. Readers
 within 16 MB of a flight's fastest reader share it, and a reader leaves its

@@ -85,14 +85,15 @@ test("TrackInfo carries an untimed track as zero on lite-07 and milliseconds bef
 });
 
 test("TrackInfo carries the compression codec on lite-07 only", async () => {
-	const info = new TrackInfo({ priority: 1, compress: true });
+	// A zero tail is its one last byte, so the codec sits just before it.
+	const info = new TrackInfo({ priority: 1, compress: true, tail: 0 });
 	const lite07 = await bytes((w) => info.encode(w, Version.DRAFT_07), Version.DRAFT_07);
-	expect(lite07.at(-1)).toBe(1);
+	expect(lite07.at(-2)).toBe(1);
 	const got = await TrackInfo.decode(new Reader(undefined, lite07, Version.DRAFT_07), Version.DRAFT_07);
 	expect(got.compress).toBe(true);
 
 	// Anything but none (0) or DEFLATE (1) is a protocol violation.
-	lite07[lite07.length - 1] = 2;
+	lite07[lite07.length - 2] = 2;
 	await expect(TrackInfo.decode(new Reader(undefined, lite07, Version.DRAFT_07), Version.DRAFT_07)).rejects.toThrow(
 		ProtocolViolation,
 	);
@@ -244,8 +245,20 @@ test("refresh ratio and interval survive lite-07 and disappear on legacy wires",
 });
 
 test("refresh interval rides between the ratio and the compression, plus one like max age", async () => {
-	const info = new TrackInfo({ priority: 0, refresh: 1, refreshInterval: 1500, timescale: 1000 });
+	const info = new TrackInfo({ priority: 0, refresh: 1, refreshInterval: 1500, timescale: 1000, tail: 0 });
 	const encoded = await bytes((w) => info.encode(w, Version.DRAFT_07), Version.DRAFT_07);
-	// The ratio plus one, the interval plus one as a two byte leading-ones varint, then no compression.
-	expect([...encoded.slice(-4)]).toEqual([0x02, 0x85, 0xdd, 0x00]);
+	// The ratio plus one, the interval plus one as a two byte leading-ones varint, no compression,
+	// then a zero tail.
+	expect([...encoded.slice(-5)]).toEqual([0x02, 0x85, 0xdd, 0x00, 0x00]);
+});
+
+test("the tail rides lite-07 last, and an earlier version keeps the default", async () => {
+	const info = new TrackInfo({ priority: 0, tail: 4 << 20 });
+	const lite07 = await bytes((w) => info.encode(w, Version.DRAFT_07), Version.DRAFT_07);
+	const got = await TrackInfo.decode(new Reader(undefined, lite07, Version.DRAFT_07), Version.DRAFT_07);
+	expect(got.tail).toBe(4 << 20);
+	const lite06 = await bytes((w) => info.encode(w, Version.DRAFT_06), Version.DRAFT_06);
+	const old = await TrackInfo.decode(new Reader(undefined, lite06, Version.DRAFT_06), Version.DRAFT_06);
+	expect(old.tail).toBe(32 * 1024 * 1024);
+	expect(() => new TrackInfo({ priority: 0, tail: 32 * 1024 * 1024 + 1 })).toThrow(RangeError);
 });

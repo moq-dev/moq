@@ -13,11 +13,12 @@
 //! [Producer::finish] ends it wherever writing stopped. [Consumer::with_range] bounds a reader to a sub-range the same way [`track::Subscriber`]
 //! bounds group keys.
 //!
-//! A group has no size cap. Each copy holds at most its newest 32 MiB, less
-//! under the cache pool's memory pressure, and sheds whole frames from its front to stay
-//! there. A reader that reaches a shed frame rides a flight when the track has a
-//! [`track::Requests`] handler: a separate copy from that frame, paced by its fastest
-//! reader, which it leaves for the copy ahead once that holds its frame within reach.
+//! A group has no size cap. Each copy holds at most its newest 32 MiB, or the smaller
+//! [`tail`](track::Info::tail) its track declares, less under the cache pool's memory
+//! pressure, and sheds whole frames from its front to stay there. A reader that reaches a
+//! shed frame rides a flight when the track has a [`track::Requests`] handler: a separate
+//! copy from that frame, paced by its fastest reader, which it leaves for the copy ahead
+//! once that holds its frame within reach.
 //! Otherwise reading a shed frame is [`Error::Evicted`].
 //!
 //! The stream is closed with [Error] when all writers or readers are dropped.
@@ -44,16 +45,20 @@ use crate::{Error, IntoBytes, Result, StreamError, Timestamp};
 
 /// Maximum size of a group copy's live tail, and of one frame.
 ///
-/// A group has no size cap: a write that takes the frames held past this sheds whole
-/// frames from the copy's front until it fits, and a compressed group's inflated copy
-/// sheds the same way. A reader that reaches a shed frame rides a flight, or gets
-/// [`Error::Evicted`] when nothing serves one (see the module docs). A larger declared
-/// frame size is [`Error::FrameTooLarge`] before allocating.
+/// A group has no size cap: a write that takes the frames held past its track's
+/// [`tail`](track::Info::tail), at most this, sheds whole frames from the copy's front
+/// until it fits, and a compressed group's inflated copy sheds the same way. A reader that
+/// reaches a shed frame rides a flight, or gets [`Error::Evicted`] when nothing serves one
+/// (see the module docs). A larger declared frame size is [`Error::FrameTooLarge`] before
+/// allocating.
 pub(crate) const MAX_CACHE_BYTES: u64 = 32 * 1024 * 1024; // 32 MB
 
-/// How far behind a copy's fastest reader a reader may board it: half the live tail, less
-/// the most one shed frees at once, since the other half may be all ahead of that reader.
-pub(super) const ADMIT: u64 = super::pace::AHEAD - kio::log::Writer::<Entry>::SEGMENT_HEAP as u64;
+/// How far behind a copy's fastest reader a reader may board it, given the bytes the copy
+/// keeps: half of them, less the most one shed frees at once, since the other half may be
+/// all ahead of that reader.
+fn admit(kept: u64) -> u64 {
+	super::pace::ahead(kept).saturating_sub(kio::log::Writer::<Entry>::SEGMENT_HEAP as u64)
+}
 
 /// Heap one cached group costs beyond its frame payloads, excluding the track-side
 /// bookkeeping in [`track::CACHE_OVERHEAD`].
@@ -282,6 +287,9 @@ pub(super) struct GroupState {
 
 	// How far readers got, which each frame entering the log is measured against.
 	pace: Arc<Pace>,
+
+	// The most bytes the live tail keeps: the track's [`track::Info::kept`].
+	kept: u64,
 }
 
 /// How far a group got toward its end; each step replaces the last.
@@ -540,6 +548,8 @@ struct Plain {
 	// The inflated bytes and the group's codec state, counted toward its eviction size
 	// once they exist. Changed only under `state`, or the group's lock for the encoder.
 	bill: cache::Extra,
+	// The most inflated bytes kept: the track's [`track::Info::kept`].
+	kept: u64,
 	state: Mutex<PlainState>,
 }
 
@@ -553,7 +563,7 @@ struct PlainState {
 	// The index of the first frame in `frames`: those before it were shed.
 	base: usize,
 	// What `frames` costs (see [`Plain::cost`]), shed from the front past
-	// [`MAX_CACHE_BYTES`].
+	// [`Plain::kept`].
 	bytes: u64,
 	// The group's frame count once finished, so the decoder drops after the last frame.
 	// Kept here rather than taken with the slices, which may predate the finish.
@@ -566,10 +576,11 @@ struct PlainState {
 }
 
 impl Plain {
-	fn new(bill: cache::Extra) -> Self {
+	fn new(bill: cache::Extra, kept: u64) -> Self {
 		Self {
 			len: AtomicUsize::new(0),
 			bill,
+			kept,
 			state: Mutex::default(),
 		}
 	}
@@ -631,11 +642,11 @@ impl Plain {
 		prefetch.len()
 	}
 
-	/// Shed the oldest inflated frames past [`MAX_CACHE_BYTES`], keeping the newest, once
-	/// the frames a read asked for were taken out.
+	/// Shed the oldest inflated frames past [`Self::kept`], keeping the newest, once the
+	/// frames a read asked for were taken out.
 	fn trim(&self) {
 		let mut state = self.lock();
-		while state.bytes > MAX_CACHE_BYTES && state.frames.len() > 1 {
+		while state.bytes > self.kept && state.frames.len() > 1 {
 			self.pop(&mut state);
 		}
 	}
@@ -726,7 +737,7 @@ impl Inflate {
 
 	/// [`Self::run`] without settling the pool's debt, so the group's guard may be held.
 	///
-	/// The inflated copy keeps at most [`MAX_CACHE_BYTES`], shedding its oldest frames past
+	/// The inflated copy keeps at most [`Plain::kept`], shedding its oldest frames past
 	/// that, but never one from [`Self::keep`] on.
 	fn inflate(&self, meter: &stats::Meter) {
 		for (index, slice) in (self.from..).zip(&self.slices) {
@@ -768,7 +779,7 @@ impl Inflate {
 					self.plain.bill.add(cost);
 					state.bytes += cost;
 					state.frames.push_back(entry);
-					while state.bytes > MAX_CACHE_BYTES && state.base < self.keep.min(index) {
+					while state.bytes > self.plain.kept && state.base < self.keep.min(index) {
 						self.plain.pop(&mut state);
 					}
 					let len = state.base + state.frames.len();
@@ -1015,17 +1026,19 @@ impl GroupState {
 	}
 
 	/// Shed the oldest committed frames until `extra` more bytes fit the live tail
-	/// ([`MAX_CACHE_BYTES`]) with their slots, returning whether the bytes do.
+	/// ([`Self::kept`]) with their slots, returning whether the bytes fit
+	/// [`MAX_CACHE_BYTES`]: a frame larger than a smaller tail still fits once it is all
+	/// the copy holds, since a copy always keeps its newest frame.
 	///
 	/// Slots free a segment at a time, so each shed frame counts as one slot's worth.
 	fn trim(&mut self, extra: u64) -> bool {
 		let mut tail = self.tail().saturating_add(extra);
 		let mut slots = self.slots();
-		if tail.saturating_add(slots) <= MAX_CACHE_BYTES {
+		if tail.saturating_add(slots) <= self.kept {
 			return true;
 		}
 		let mut end = self.held();
-		while tail.saturating_add(slots) > MAX_CACHE_BYTES
+		while tail.saturating_add(slots) > self.kept
 			&& let Some(entry) = self.entry(end)
 		{
 			tail -= entry.frame.payload.len() as u64 + entry.fields.as_ref().map_or(0, |fields| fields.heap());
@@ -1703,9 +1716,10 @@ impl Producer {
 		let access = charge.access();
 		let (log, pace) = {
 			let mut state = state.write().ok().expect("a new group is open");
+			state.kept = track.kept();
 			if track.compressed() {
 				state.flate = Some(Box::new(Flate::new(
-					Arc::new(Plain::new(charge.extra())),
+					Arc::new(Plain::new(charge.extra(), state.kept)),
 					charge.extra(),
 				)));
 			}
@@ -1950,7 +1964,8 @@ impl Producer {
 		// Room for the batch and its slots, or for as much of it as fits: its own front
 		// sheds once committed.
 		let slots = (count * size_of::<Entry>()) as u64;
-		state.trim(stored.saturating_add(slots).min(MAX_CACHE_BYTES));
+		let kept = state.kept;
+		state.trim(stored.saturating_add(slots).min(kept));
 
 		// The last frame's tick, reused below so settling does not re-read the clock.
 		let mut now = None;
@@ -2365,8 +2380,9 @@ impl Producer {
 	}
 
 	/// Resolves once a reader holds the group and the next frame, described by `frame`, fits
-	/// within 16 MB past the end of the last frame its fastest reader took, so a local writer
-	/// runs no further ahead than the live tail keeps behind that reader.
+	/// within half the track's [`tail`](track::Info::tail) (16 MiB by default) past the end of
+	/// the last frame its fastest reader took, so a local writer runs no further ahead than the
+	/// live tail keeps behind that reader.
 	///
 	/// Ready once the group is closed, so the next write surfaces why. A reader that took
 	/// every committed frame is waiting on the writer, so it never holds the writer back, even
@@ -2375,15 +2391,16 @@ impl Producer {
 	/// its front instead.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_ready(&self, waiter: &kio::Waiter, frame: &frame::Info) -> Poll<()> {
-		ready!(self.poll_paced(waiter, frame.size, super::pace::AHEAD));
+		ready!(self.poll_paced(waiter, frame.size, u64::MAX));
 		// A closed group reports `Closed`, which is ready too.
 		self.handle.state.poll_wanted_changed(waiter, false).map(|_| ())
 	}
 
 	/// Poll until the writer may take more from upstream, `partial` bytes into a frame
-	/// it has not committed: until it is at most `window` bytes past the end of the last
-	/// frame its fastest reader took. Ingest passes its stream's receive credit (see
-	/// [`super::pace::window`]); a local writer passes [`super::pace::AHEAD`].
+	/// it has not committed: until it is at most `window` bytes, and at most half the bytes
+	/// the copy keeps, past the end of the last frame its fastest reader took. Ingest passes
+	/// its stream's receive credit (see [`super::pace::window`]); a local writer passes no
+	/// limit of its own.
 	///
 	/// Ready at once while no reader holds the group, so a group nobody watches keeps
 	/// writing and sheds its front, and once it is closed, so the next write surfaces why.
@@ -2394,6 +2411,7 @@ impl Producer {
 	/// A session's ingest waits on this; a local writer waits on [`Self::poll_ready`].
 	pub(crate) fn poll_paced(&self, waiter: &kio::Waiter, partial: u64, window: u64) -> Poll<()> {
 		let pace = &self.handle.alive.pace;
+		let window = window.min(super::pace::ahead(self.handle.track.kept()));
 		if !pace.ahead(partial, window) {
 			return Poll::Ready(());
 		}
@@ -2562,7 +2580,7 @@ impl Handle {
 	}
 
 	/// Whether `reader` may ride this copy at its frame: it holds the frame, no further
-	/// than [`ADMIT`] behind the end of the last frame its fastest reader took, so the
+	/// than [`admit`] behind the end of the last frame its fastest reader took, so the
 	/// front shedding as the writer runs a whole window ahead still leaves it in place.
 	pub(super) fn admits(&self, reader: &Consumer) -> bool {
 		let index = reader.cursor.index;
@@ -2585,7 +2603,7 @@ impl Handle {
 			None if index == state.committed() => state.pace.written(),
 			None => return false,
 		};
-		state.pace.read().saturating_sub(start) <= ADMIT
+		state.pace.read().saturating_sub(start) <= admit(state.kept)
 	}
 
 	/// One past the last frame this copy committed: how far its writer got.
@@ -2635,7 +2653,7 @@ impl Handle {
 			return Ok(Some(content.clone()));
 		}
 		let content = Content::new(&state.charge, state.flate.as_ref().map(|flate| flate.plain.clone()));
-		content.attach(&state.charge);
+		content.attach(&state.charge, state.kept);
 		state.content = Some(content.clone());
 		let loaded = (|| -> Result<()> {
 			let entries: Vec<_> = state.entries(state.held(), state.committed()).cloned().collect();
@@ -2697,7 +2715,7 @@ impl Handle {
 			return;
 		};
 		debug_assert!(state.partial.is_none() && state.next_index == state.offset);
-		let plain = content.attach(&state.charge);
+		let plain = content.attach(&state.charge, state.kept);
 		if let Some(old) = state.content.replace(content) {
 			old.detach(Error::Dropped);
 		}
@@ -2773,7 +2791,7 @@ impl Handle {
 		// Only a head that fits beside the live tail with both their slots, which nothing is
 		// shed to make room for.
 		let slots = state.slots() + (count * size_of::<Entry>()) as u64;
-		if state.tail().saturating_add(payload + metadata + slots) > MAX_CACHE_BYTES {
+		if state.tail().saturating_add(payload + metadata + slots) > state.kept {
 			return None;
 		}
 		let mut adopted = Vec::with_capacity(count);
@@ -3574,7 +3592,7 @@ impl Prefetch {
 			.enumerate()
 			.take_while(|(at, entry)| {
 				inflated = inflated.saturating_add(entry.inflated);
-				*at == 0 || raw || inflated <= MAX_CACHE_BYTES
+				*at == 0 || raw || inflated <= state.kept
 			})
 			.count();
 		// Taken before any slot is written, so a refusal leaves the batch empty.
@@ -6121,6 +6139,67 @@ mod test {
 
 		producer.finish().unwrap();
 		assert!(live.read_frame().now_or_never().unwrap().unwrap().is_none());
+	}
+
+	/// A track's tail bounds each copy of its groups below the default: a reader that keeps
+	/// up reads every frame while the copy holds about the tail, and a late one is shed.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_track_tail_bounds_the_copy() {
+		let pool = cache::Pool::unbounded();
+		let cache = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
+		let track = track::Info::default().with_tail(4 << 20);
+		let mut producer = Producer::new(Info::from(0u64), track, cache);
+		let mut live = producer.consume();
+		let mut late = producer.consume();
+
+		let frames = mebibytes(12);
+		for (index, frame) in frames.iter().enumerate() {
+			producer
+				.write_frame(crate::Timestamp::unscaled(producer.start), frame.clone())
+				.unwrap();
+			let read = live.read_frame().now_or_never().unwrap().unwrap().unwrap();
+			assert_eq!(read.payload, *frame, "frame {index}");
+			assert!(pool.used() <= (4 << 20) + (1 << 20), "{} bytes held", pool.used());
+		}
+		assert!((12 - 4..12 - 2).contains(&producer.handle.state.read().held()));
+		assert!(matches!(late.read_frame().now_or_never().unwrap(), Err(Error::Evicted)));
+	}
+
+	/// A frame larger than the tail still fits: the copy sheds everything before it and keeps
+	/// it, as it keeps any newest frame, even with no tail at all.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_frame_past_the_tail_is_kept_alone() {
+		for tail in [0, 64 << 10] {
+			let pool = cache::Pool::unbounded();
+			let cache = cache::Track::new(pool, Default::default(), kio::Weak::new());
+			let track = track::Info::default().with_tail(tail);
+			let mut producer = Producer::new(Info::from(0u64), track, cache);
+			let mut live = producer.consume();
+			for size in [128 << 10, 256 << 10] {
+				producer
+					.write_frame(crate::Timestamp::unscaled(producer.start), vec![7u8; size])
+					.unwrap();
+				let read = live.read_frame().now_or_never().unwrap().unwrap().unwrap();
+				assert_eq!(read.payload.len(), size, "tail {tail}");
+			}
+			assert_eq!(producer.handle.state.read().held(), 1, "tail {tail}");
+		}
+	}
+
+	/// A tail past the default keeps the default, which also bounds one frame.
+	#[test]
+	fn a_track_tail_past_the_default_keeps_the_default() {
+		let track = track::Info::default().with_tail(u64::MAX);
+		assert_eq!(track.kept(), MAX_CACHE_BYTES);
+	}
+
+	/// Copies of one track kept to different tails, as by hops over different versions, are
+	/// the same track.
+	#[test]
+	fn the_tail_is_not_the_tracks_identity() {
+		assert_eq!(track::Info::default().with_tail(1 << 20), track::Info::default());
 	}
 
 	/// Empty frames still cost their slot, so a group of them sheds its front too.

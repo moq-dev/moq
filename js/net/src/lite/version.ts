@@ -431,6 +431,11 @@ export function hasInstance(version: Version): boolean {
 	}
 }
 
+/** Whether TRACK_INFO carries the track's tail, the bytes of each group a hop keeps. Added in lite-07. */
+export function hasTail(version: Version): boolean {
+	return hasCompression(version);
+}
+
 /**
  * Whether TRACK_INFO carries the compression codec, and a compressed track's FRAME and
  * datagram its inflated size. Added in lite-07.

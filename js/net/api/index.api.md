@@ -736,6 +736,7 @@ export namespace Track {
 		maxAge: Clock.Duration | null;
 		priority: number;
 		refresh: Track.Refresh;
+		tail: number;
 		timescale: Time.Timescale | null;
 	}
 	export interface InfoInit extends Partial<Omit<Track.Info, "refresh">> {

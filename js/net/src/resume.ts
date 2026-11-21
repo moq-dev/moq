@@ -121,9 +121,10 @@ function copyFailed(copy: Copy): boolean {
 	return error instanceof Error && routeFailed(error);
 }
 
-// Every `track.Info` field but `unchecked`, so one added later fails to compile until it is
-// listed here. `unchecked` says how a copy arrived, not what it holds, so copies over different
-// lite versions still match. `ietf` is compared, like Rust's moq-transport `properties`.
+// Every `track.Info` field but `unchecked` and `tail`, so one added later fails to compile until it
+// is listed here. `unchecked` says how a copy arrived and `tail` how much of it a hop keeps, not
+// what it holds, so copies over different lite versions and hops still match. `ietf` is compared,
+// like Rust's moq-transport `properties`.
 const INFO_FIELDS = Object.keys({
 	compression: true,
 	timescale: true,
@@ -131,7 +132,7 @@ const INFO_FIELDS = Object.keys({
 	priority: true,
 	refresh: true,
 	ietf: true,
-} satisfies Record<Exclude<keyof track.Info, "unchecked">, true>) as (keyof track.Info)[];
+} satisfies Record<Exclude<keyof track.Info, "unchecked" | "tail">, true>) as (keyof track.Info)[];
 
 /** Two copies claiming the same content must agree on all of it, like Rust's `Info` equality. */
 function compatible(a: track.Info, b: track.Info): boolean {

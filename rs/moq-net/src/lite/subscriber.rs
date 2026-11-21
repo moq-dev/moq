@@ -6775,6 +6775,7 @@ mod tests {
 					max_age: None,
 					timescale: Some(Timescale::MILLI),
 					compression: crate::track::Compression::None,
+					tail: crate::track::Info::default().tail,
 				}
 				.encode(&mut crate::coding::Encoder::new(&mut info, version.into()), version)
 				.unwrap();
@@ -6801,6 +6802,7 @@ mod tests {
 				max_age: Some(Duration::from_secs(1)),
 				timescale: Some(Timescale::MILLI),
 				compression: crate::track::Compression::None,
+				tail: crate::track::Info::default().tail,
 			}
 			.encode(&mut crate::coding::Encoder::new(&mut info, version.into()), version)
 			.unwrap();
