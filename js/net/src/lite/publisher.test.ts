@@ -4390,6 +4390,48 @@ test("a lite-07 answer shows the most specific of the claims filed at a grant", 
 	}
 });
 
+// Through a handle rooted beneath both filings, a broader claim filed above the root still gives
+// way to a more specific one filed beneath it, as a request there resolves.
+test("a lite-07 rooted answer shows the most specific claim filed on either side of its root", async () => {
+	const origin = new OriginProducer();
+	const scoped = (prefix: string) => origin.scope(Path.empty(), Path.Prefixes.parse([prefix]));
+	const broad = scoped("a").claim(Path.empty(), { cost: 0n });
+	const narrow = scoped("a/b/c/d").claim(Path.from("a"), { cost: 1n });
+	const rooted = origin.scope(Path.from("a/b/c"), Path.Prefixes.parse([""]));
+	const { next, ok, close } = routedAnswer(rooted, undefined, Path.from("d"));
+	try {
+		await ok();
+		const msgs: AnnounceBroadcast[] = [];
+		for (;;) {
+			const msg = await next();
+			msgs.push(msg);
+			if (msg.status === "synced") break;
+		}
+		const starts = msgs.flatMap((msg) => (msg.status === "start" ? [msg] : []));
+		expect(starts.map((msg) => `${msg.suffix} above ${msg.claim.above}`)).toEqual(["d above 1"]);
+		expect(starts.map((msg) => msg.instance)).toEqual([narrow.instance]);
+
+		const request = origin.consume().request(Path.from("a/b/c/d/x"));
+		const which = await Promise.race([
+			narrow
+				.requested()
+				.next()
+				.then(() => "narrow"),
+			broad
+				.requested()
+				.next()
+				.then(() => "broad"),
+		]);
+		expect(which).toBe("narrow");
+		request.close();
+	} finally {
+		narrow.close();
+		broad.close();
+		close();
+		origin.close();
+	}
+});
+
 // A claim is shown only where the grant, the claim's scope, and the answering handle's scope share
 // a path. Beneath a handle scoped to `a/q/x`, an unscoped claim at `a` serves nothing `a/q/y`
 // grants; and of two claims at `a`, the cheaper scoped to `a/q/x` gives way to the one scoped to

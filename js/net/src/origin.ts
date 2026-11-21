@@ -162,14 +162,15 @@ class Scope {
 
 	/**
 	 * The advertisements that may serve this scope, relative to its root. Every prefix at or
-	 * above the root presents as the empty path, most specific first, since that is the order
-	 * a request beneath the root resolves in.
+	 * above the root presents as the empty path, as far above it as its claim is above the root,
+	 * most specific first, since that is the order a request beneath the root resolves in.
 	 */
 	projectRoutes(values: Advertisements | undefined): Advertisements | undefined {
 		if (!values || this === Scope.all) return values;
 		const out = new Map<Path.Valid, readonly Advertised[]>();
 		const covering: [Path.Valid, Advertised[]][] = [];
 		const allowed = this.allowed;
+		const rootDepth = Path.parts(this.root).length;
 		for (const [path, candidates] of values) {
 			const relative = Path.stripPrefix(this.root, path);
 			const above = relative === null || relative === Path.empty();
@@ -184,12 +185,21 @@ class Scope {
 			}
 			// Hold the empty path's place in the order until every covering prefix is known.
 			if (covering.length === 0) out.set(Path.empty(), []);
-			// Each keeps its own prefix, so supersession never compares across the merged prefixes.
-			covering.push([path, visible.map((value) => ({ ...value, prefix: path }))]);
+			// Each keeps its own prefix, so supersession never compares across the merged prefixes,
+			// and its claim's own prefix: raised to the root, it is that much further above it.
+			const raised = BigInt(rootDepth - Path.parts(path).length);
+			covering.push([
+				path,
+				visible.map((value) => ({
+					...value,
+					prefix: path,
+					route: raised === 0n ? value.route : { ...value.route, above: (value.route.above ?? 0n) + raised },
+				})),
+			]);
 		}
 		if (covering.length > 0) {
 			// The most specific claim first, as a request beneath the root resolves, then the deeper filing.
-			const rank = ([path, visible]: [Path.Valid, Advertised[]]) => claimDepth(path, visible[0].route);
+			const rank = ([, visible]: [Path.Valid, Advertised[]]) => claimDepth(Path.empty(), visible[0].route);
 			covering.sort((a, b) => rank(b) - rank(a) || b[0].length - a[0].length);
 			out.set(
 				Path.empty(),
