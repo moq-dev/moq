@@ -418,25 +418,35 @@ export interface Expiry {
 }
 
 /**
+ * Why a group read looks past the copy it reads, as the Rust `resume::Cause`: the copy failed,
+ * stalled while a newer route serves, or closed the group short of a known end (a FIN without
+ * GROUP_END) after a newer route took over, which may hold more.
+ */
+export type RecoverCause = { kind: "failed"; error: Error } | { kind: "stalled" } | { kind: "closed" };
+
+/**
  * Carries a handed-out group across its logical track's route changes. Consulted only once
- * the copy it reads fails, or stalls while a newer route serves, so a passthrough read never
- * touches it. The counterpart of the Rust `resume::Recover`.
+ * the copy it reads fails, stalls while a newer route serves, or closes the group short after
+ * one took over, so a passthrough read never touches it. The counterpart of the Rust
+ * `resume::Recover`.
  */
 export interface GroupRecover {
 	/** Release the route held by this group when its consumer closes. */
 	close?(): void;
 	/**
 	 * Whether to look past the copy being read: it failed with `failed` and that is no verdict
-	 * on the group, or (with none) it stalled while a newer route serves.
+	 * on the group, or (with none) it stalled or closed short while a newer route serves.
 	 */
 	wants(failed: Error | undefined): boolean;
 	/** Wakes a stalled read once the route changes. */
 	readonly changed: Getter<unknown>;
 	/**
-	 * The serving route's copy of the group, to read from frame `index` on. Rejects with the
-	 * error that ends the group once nothing can continue it; abandoned once `signal` aborts.
+	 * The serving route's copy of the group, to read from frame `index` on, once the copy being
+	 * read looks past itself for `cause`. Rejects once nothing can continue the group: with the
+	 * error that ends it, or for a short close, why that close stands. Abandoned once `signal`
+	 * aborts.
 	 */
-	replace(index: number, failed: Error | undefined, signal: AbortSignal): Promise<Replacement>;
+	replace(index: number, cause: RecoverCause, signal: AbortSignal): Promise<Replacement>;
 }
 
 /** A copy of a group still arriving, held for a duplicate that waits on it. */
@@ -1017,6 +1027,11 @@ export const hooks: {
 	releaseGroupReader: (group: GroupConsumer, abort?: Error) => void;
 	/** Settles once a group reader read or released everything it holds, its {@link GroupConsumer.done}. Assigned by `group.ts`. */
 	groupDone: (group: GroupConsumer) => GetPromise<Error | null>;
+	/**
+	 * Settles as {@link GroupConsumer.closed} does, for a watcher that is no reader: it never judges
+	 * whether the read goes on past a short close, leaving that to the reader. Assigned by `group.ts`.
+	 */
+	groupClosed: (group: GroupConsumer) => GetPromise<Error | null>;
 	/** Settles once the reader releases the group (`close` or an abort), however far it read. */
 	groupReleased: (group: GroupConsumer) => Promise<void>;
 	/** Whether a group reader still reads the copy it was mirrored from, not one its recovery moved it to. */
@@ -1431,6 +1446,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	groupDone: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupClosed: () => {
 		throw new Error("group.ts not loaded");
 	},
 	readsMirrored: () => {

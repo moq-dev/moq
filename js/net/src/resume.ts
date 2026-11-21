@@ -61,6 +61,7 @@ import {
 	insertDrop,
 	insertRun,
 	maxDelayOf,
+	type RecoverCause,
 	type Recv,
 	type Replacement,
 	type ResumeShell,
@@ -1552,7 +1553,7 @@ class Reader implements ResumeSource {
 		recover.watch(group);
 		// Closed with the reader, as a direct reader's close reaches the groups it handed out.
 		this.#open.add(group);
-		void group.closed.then(() => this.#open.delete(group));
+		void hooks.groupClosed(group).then(() => this.#open.delete(group));
 		return group;
 	}
 
@@ -1985,6 +1986,11 @@ function closedBeforeSent(name: string): Error {
 	return new StreamError(StreamCode.Cancel, { message: `track ${name} closed before the refresh was sent` });
 }
 
+/** Why a group a copy closed short ends there: no route holds more of it. */
+function standing(): Error {
+	return new StreamError(StreamCode.NotFound, { message: "no route holds more of the group" });
+}
+
 function dropped(): Error {
 	return new StreamError(StreamCode.Cancel, { message: "no route serves the track" });
 }
@@ -2013,7 +2019,7 @@ class Recover implements GroupRecover {
 	 * reading `closed` before then would settle it on a failure recovery could still continue.
 	 */
 	watch(group: GroupConsumer): void {
-		void group.closed.then(() => this.close());
+		void hooks.groupClosed(group).then(() => this.close());
 	}
 
 	close(): void {
@@ -2036,6 +2042,8 @@ class Recover implements GroupRecover {
 		const copy = this.#copy;
 		if (!copy) return false;
 		if (failed && this.#undelivered(failed, copy)) return true;
+		// A short close on a copy whose route failed looks to the route replacing it.
+		if (!failed && copyFailed(copy)) return true;
 		const route = this.#reader.route;
 		return route.generation !== copy.generation || route.concluded;
 	}
@@ -2049,11 +2057,11 @@ class Recover implements GroupRecover {
 		return routeFailed(failed) || copyFailed(copy);
 	}
 
-	async replace(index: number, failed: Error | undefined, signal: AbortSignal): Promise<Replacement> {
+	async replace(index: number, cause: RecoverCause, signal: AbortSignal): Promise<Replacement> {
 		let fetch: Fetch | undefined;
 		let kept: GroupConsumer | undefined;
 		try {
-			const replacement = await this.#replace({ index, failed, signal }, (next) => {
+			const replacement = await this.#replace({ index, cause, signal }, (next) => {
 				fetch?.cancel();
 				fetch = next;
 			});
@@ -2067,11 +2075,15 @@ class Recover implements GroupRecover {
 	}
 
 	async #replace(
-		{ index, failed, signal }: { index: number; failed?: Error; signal: AbortSignal },
+		{ index, cause, signal }: { index: number; cause: RecoverCause; signal: AbortSignal },
 		started: (fetch: Fetch) => void,
 	): Promise<Replacement> {
 		const reader = this.#reader;
 		const route = reader.route;
+		const failed = cause.kind === "failed" ? cause.error : undefined;
+		const closed = cause.kind === "closed";
+		// The copy being read delivers no more of the group.
+		const settled = cause.kind !== "stalled";
 		let fetch: Fetch | undefined;
 		for (;;) {
 			signal.throwIfAborted();
@@ -2084,7 +2096,7 @@ class Recover implements GroupRecover {
 			const current = this.#copy;
 			if (!current) throw new Error("group closed");
 			// The front refused the route that would continue it: nothing will.
-			if (failed && route.refusal) throw route.refusal;
+			if (settled && route.refusal) throw route.refusal;
 			const generation = route.generation;
 			const serving = route.source ? reader.copy(generation) : undefined;
 			const waits: Getter<unknown>[] = [route.changed];
@@ -2103,8 +2115,15 @@ class Recover implements GroupRecover {
 			// An unroutable copy waits for another route rather than asking its own again.
 			const withdrawn = failed !== undefined && generation === current.generation && unroutable(failed);
 			if (!serving) {
+				// Nothing replaced a copy that closed the group, as when its track parks, so its
+				// close stands.
+				if (closed) throw standing();
 				// Nothing serves: a failed copy waits for a route, unless none will come.
 				if (failed && route.concluded) throw failed;
+			} else if (closed && generation === current.generation) {
+				// It serves on with no front to replace it, so its close stands, unless its route
+				// failed: then the next one may hold more.
+				if (!copyFailed(current) || route.concluded) throw standing();
 			} else if (generation !== current.generation || failed) {
 				// The serving route gave the group up, which ends it with that route's error however
 				// a fetch of the rest would answer. A copy that failed dropped its open groups with
@@ -2126,10 +2145,10 @@ class Recover implements GroupRecover {
 				const verdict = closed instanceof Error && !routeFailed(closed) ? closed : undefined;
 				waits.push(serving.sub.closed);
 				// Otherwise ask for it, if the route's version can fetch. The subscription may still
-				// deliver it first. Without FETCH only a copy continues a failed group, and none
-				// holds it, so it ends as the failed copy left it.
+				// deliver it first. Without FETCH only a copy continues a failed or closed group, and
+				// none holds it, so it ends as the copy left it.
 				const fetchGroup = serving.source.wire.fetchGroup;
-				if (!fetchGroup && failed) throw verdict ?? failed;
+				if (!fetchGroup && settled) throw verdict ?? failed ?? standing();
 				if (fetchGroup && !verdict && !withdrawn && fetch?.generation !== generation) {
 					fetch = startFetch(fetchGroup, route.name, this.key, generation, signal);
 					started(fetch);
@@ -2144,8 +2163,9 @@ class Recover implements GroupRecover {
 				if (stale.expired()) throw new StreamError(StreamCode.Old, { message: "group is past the budget" });
 				waits.push(...stale.changed, ...(asked && !asked.outcome ? [asked.settled] : []));
 				// That route failing too waits for the next one, and a refusal is a verdict only for
-				// a copy that failed, once the serving subscription will not deliver the group either.
-				if (outcome && failed && !routeFailed(outcome.error) && !copyFailed(serving)) {
+				// a copy that delivers no more, once the serving subscription will not deliver the
+				// group either.
+				if (outcome && settled && !routeFailed(outcome.error) && !copyFailed(serving)) {
 					const subscription = serving.sub.subscription.peek();
 					const maxDelay = Duration.millis(subscription ? maxDelayOf(subscription) : 0);
 					const land = { start: this.key, end: this.key + 1n, floor: true, grace: grace(maxDelay) };
@@ -2666,10 +2686,11 @@ export class Front {
 				if (failed && undelivered(failed)) return true;
 				return this.#source !== undefined && this.#source !== current;
 			},
-			replace: async (_index, failed, signal) => {
-				// A fetch that failed delivering may ask its own route again; a stalled one, one a
-				// verdict ended, or one whose route withdrew only moves to another. A withdrawal
+			replace: async (_index, cause, signal) => {
+				// A fetch that failed delivering may ask its own route again; a stalled or closed one,
+				// one a verdict ended, or one whose route withdrew only moves to another. A withdrawal
 				// keeps its cause once none will come.
+				const failed = cause.kind === "failed" ? cause.error : undefined;
 				const withdrawn = failed && unroutable(failed) ? failed : undefined;
 				const avoid = failed && undelivered(failed) && !withdrawn ? undefined : current;
 				const next = await this.#fetch(name, key, { ...options, signal }, avoid, withdrawn);
@@ -2695,7 +2716,7 @@ export class Front {
 		// Only once the group carries its recovery: reading `closed` or `done` before then would
 		// settle it on a failure recovery could still continue, releasing the route, or ending
 		// the budget's watch, while it is read.
-		void fetched.group.closed.then(() => current.release());
+		void hooks.groupClosed(fetched.group).then(() => current.release());
 		// The budget is watched for as long as the group is read, or until released while a held
 		// reply awaits its acknowledgement, as the fetch's own subscription is.
 		void (
