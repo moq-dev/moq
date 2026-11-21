@@ -159,9 +159,16 @@ struct Passthrough<E: crate::catalog::hang::CatalogExt> {
 
 	track: moq_net::track::Producer,
 	group: Option<moq_net::group::Producer>,
+
+	// Where the fragments planned so far leave the track, which [`Passthrough::plan`] advances
+	// before they are written, so each fragment of a moof is planned after the ones before it.
+	/// A group is open, or a planned fragment opens one.
+	open: bool,
 	/// The latest group's start, which the next group may not start below.
 	start: Option<Timestamp>,
-	/// The newest sample written, which the next group starts after.
+	/// The latest group's key, which the next group's has to pass.
+	key: Option<u64>,
+	/// The newest sample, which the next group starts after.
 	newest: Option<Timestamp>,
 	/// The newest sample of every group before the latest one: every sample of the latest group
 	/// presents after it.
@@ -199,6 +206,7 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 
 	/// Close the open group, so the next fragment opens one at `pending_start` or its own timestamp.
 	fn close(&mut self) -> crate::Result<()> {
+		self.open = false;
 		self.estimator.cut(None);
 		self.publish_estimate()?;
 		if let Some(group) = self.group.take() {
@@ -644,7 +652,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			rendition,
 			track,
 			group: None,
+			open: false,
 			start: None,
+			key: None,
 			newest: None,
 			ceiling: None,
 			member,
@@ -1166,15 +1176,19 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				offset,
 				new_segment: track.segment != Some(self.segment),
 			};
-			if let Output::Passthrough(output) = &mut track.output
-				&& !output.trim(&mut run, placement, track.kind)?
-			{
-				// With no group open, video waits for a sync sample past what was published.
-				if output.group.is_none() && track.kind == Kind::Video {
-					track.orphaned = true;
-				}
-				continue;
-			}
+			let land = match &mut track.output {
+				Output::Passthrough(output) => match output.plan(&mut run, placement, track.kind)? {
+					Some(land) => Some(land),
+					None => {
+						// With no group open, video waits for a sync sample past what was published.
+						if !output.open && track.kind == Kind::Video {
+							track.orphaned = true;
+						}
+						continue;
+					}
+				},
+				_ => None,
+			};
 			let prefix = match track.output {
 				Output::Passthrough(_) => Some(fragment(traf, &moof, &run, &track.defaults)?),
 				_ => None,
@@ -1193,6 +1207,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				id,
 				run,
 				placement,
+				land,
 				prefix,
 				writer: None,
 				opened: false,
@@ -1246,8 +1261,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 						let (writer, opened) = match &mut track.output {
 							Output::Passthrough(output) => {
 								let prefix = pending.prefix.take().expect("one prefix per fragment");
-								let (writer, opened) =
-									output.start(prefix, &pending.run, track.kind, pending.placement)?;
+								let land = pending.land.expect("a planned passthrough fragment");
+								let (writer, opened) = output.start(prefix, &pending.run, pending.placement, land)?;
 								(Writer::Fragment(writer), opened)
 							}
 							output => {
@@ -1341,6 +1356,8 @@ struct PendingTrack {
 	id: u32,
 	run: Run,
 	placement: Placement,
+	/// Where a passthrough fragment lands, as planned.
+	land: Option<Land>,
 	prefix: Option<Bytes>,
 	writer: Option<Writer>,
 	opened: bool,
@@ -1374,6 +1391,15 @@ enum ChunkOutput {
 	Media { track: usize, sample: usize },
 	/// The sample at this index of `Mdat::text`.
 	Text(usize),
+}
+
+/// Where [`Passthrough::plan`] lands a fragment in its track's groups.
+#[derive(Clone, Copy)]
+enum Land {
+	/// In the open group.
+	Continues,
+	/// In a new group, keyed `start` when a seek named one, else by its own timestamp.
+	Opens { start: Option<u64> },
 }
 
 /// Where a fragment lands on its track.
@@ -1600,128 +1626,148 @@ fn kept(traf: &mp4_atom::Traf, run: &Run) -> Result<mp4_atom::Traf> {
 }
 
 impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
-	/// Drop the samples of `run` that would present at or before the groups before the one its
-	/// fragment lands in, such as leading pictures after a splice, counting them as skipped: every
-	/// sample of a group presents after every sample of the groups before it. A fragment that would
-	/// start a group at or before the newest sample continues the open group, as
-	/// `container::Producer` does for a keyframe; with none open it is dropped whole. Returns whether
-	/// any sample is left to publish.
-	fn trim(&mut self, run: &mut Run, placement: Placement, kind: Kind) -> Result<bool> {
+	/// Plan where `run`'s fragment lands, advancing the planned state past it.
+	///
+	/// Every sample of a group presents after every sample of the groups before it. A fragment
+	/// that would start a group at or before the newest sample continues the open group, as
+	/// `container::Producer` does for a keyframe, and with none open it is dropped whole. The
+	/// samples presenting at or before the groups before the one the fragment lands in, such as
+	/// leading pictures after a splice, are dropped from `run`. Dropped samples count as skipped.
+	/// Returns `None` when nothing is left to publish.
+	fn plan(&mut self, run: &mut Run, placement: Placement, kind: Kind) -> Result<Option<Land>> {
 		let first = run.samples.first().ok_or(Error::MissingTrun)?;
+		// Audio follows segment boundaries; video also waits for a sync first sample so a new
+		// group's first fragment can be decoded independently.
 		let keyframe = placement.keyframe(kind, first);
 		let at = placement.offset.apply(first.timestamp)?;
-		let start_group = self.group.is_none() || (placement.new_segment && keyframe);
-		// A group below the start of the one before it is a restart, which `start` refuses at its
-		// first sample, as the unwrapped track does.
 		let earliest = placement.offset.apply(run.earliest)?;
-		if start_group && self.start.is_some_and(|floor| earliest < floor) {
-			return Ok(true);
+		let mut opens = !self.open || (placement.new_segment && keyframe);
+		// A group may not start below the one before it: a restart, refused before anything of it
+		// publishes, as an unwrapped track does.
+		if opens
+			&& let Some(floor) = self.start
+			&& earliest < floor
+		{
+			return Err(crate::container::TimestampRewind {
+				timestamp: earliest,
+				floor,
+			}
+			.into());
 		}
-		let behind = self.newest.is_some_and(|newest| at <= newest);
-		let ceiling = match (start_group, behind) {
-			(true, false) => self.newest,
-			(true, true) if self.group.is_none() => {
+		if opens && self.newest.is_some_and(|newest| at <= newest) {
+			if !self.open {
 				tracing::debug!(timestamp = ?at, "dropping a fragment with no group to continue");
 				self.sent.skip(run.samples.len() as u64);
-				return Ok(false);
+				return Ok(None);
 			}
-			_ => self.ceiling,
+			opens = false;
+		}
+
+		let ceiling = match opens {
+			true => self.newest,
+			false => self.ceiling,
 		};
-		let Some(ceiling) = ceiling else {
-			return Ok(true);
-		};
-		let before = run.samples.len();
-		let mut kept = Vec::with_capacity(before);
-		for sample in std::mem::take(&mut run.samples) {
-			if placement.offset.apply(sample.timestamp)? > ceiling {
-				kept.push(sample);
+		if let Some(ceiling) = ceiling {
+			let before = run.samples.len();
+			let mut kept = Vec::with_capacity(before);
+			for sample in std::mem::take(&mut run.samples) {
+				if placement.offset.apply(sample.timestamp)? > ceiling {
+					kept.push(sample);
+				}
+			}
+			run.samples = kept;
+			let dropped = before - run.samples.len();
+			if dropped > 0 {
+				tracing::debug!(dropped, "dropping samples that present before an earlier group ends");
+				self.sent.skip(dropped as u64);
+				run.dropped = true;
+				let mut timestamps = run.samples.iter().map(|sample| sample.timestamp);
+				let Some(first) = timestamps.next() else {
+					return Ok(None);
+				};
+				let (earliest, latest) = timestamps.fold((first, first), |(min, max), timestamp| {
+					(
+						crate::container::earlier(min, timestamp),
+						crate::container::later(max, timestamp),
+					)
+				});
+				run.earliest = earliest;
+				run.latest = latest;
 			}
 		}
-		run.samples = kept;
-		let dropped = before - run.samples.len();
-		if dropped == 0 {
-			return Ok(true);
-		}
-		tracing::debug!(dropped, "dropping samples that present before an earlier group ends");
-		self.sent.skip(dropped as u64);
-		run.dropped = true;
-		let mut timestamps = run.samples.iter().map(|sample| sample.timestamp);
-		let Some(first) = timestamps.next() else {
-			return Ok(false);
+
+		let earliest = placement.offset.apply(run.earliest)?;
+		let land = match opens {
+			// A group is keyed by its first fragment's timestamp, or a seek's start, which has to
+			// pass the latest group's. A segment that doesn't continues the open group instead; with
+			// none open it is refused.
+			true => match self.pending_start.take() {
+				Some(start) => {
+					self.key = Some(start);
+					Land::Opens { start: Some(start) }
+				}
+				None => {
+					let key = crate::start::key(&self.track, earliest)?;
+					match self.key {
+						Some(latest) if key <= latest && self.open => Land::Continues,
+						Some(latest) if key <= latest => {
+							let floor = self.start.unwrap_or(earliest);
+							return Err(crate::container::TimestampRewind {
+								timestamp: earliest,
+								floor,
+							}
+							.into());
+						}
+						_ => {
+							self.key = Some(key);
+							Land::Opens { start: None }
+						}
+					}
+				}
+			},
+			false => Land::Continues,
 		};
-		let (earliest, latest) = timestamps.fold((first, first), |(min, max), timestamp| {
-			(
-				crate::container::earlier(min, timestamp),
-				crate::container::later(max, timestamp),
-			)
-		});
-		run.earliest = earliest;
-		run.latest = latest;
-		Ok(true)
+		if let Land::Opens { .. } = land {
+			self.start = Some(earliest);
+			self.ceiling = self.newest;
+		}
+		self.open = true;
+		let latest = placement.offset.apply(run.latest)?;
+		self.newest = Some(
+			self.newest
+				.map_or(latest, |newest| crate::container::later(newest, latest)),
+		);
+		Ok(Some(land))
 	}
 
-	/// Open one per-track fragment's output frame, reporting whether it opened a group.
+	/// Open one per-track fragment's output frame where [`plan`](Self::plan) landed it, reporting
+	/// whether it opened a group.
 	fn start(
 		&mut self,
 		prefix: Bytes,
 		run: &Run,
-		kind: Kind,
 		placement: Placement,
+		land: Land,
 	) -> Result<(moq_net::frame::Producer, bool)> {
 		// Carry the fragment's earliest presentation time as the frame timestamp, in the
 		// track's native timescale and shifted onto the catalog clock. Consumers present the
 		// fragment at it; `tfdt` only places the samples relative to each other.
 		let timestamp = placement.offset.apply(run.earliest)?;
-
-		// Audio follows segment boundaries; video also waits for a sync first sample so a new
-		// group's first fragment can be decoded independently.
-		let keyframe = placement.keyframe(kind, run.samples.first().ok_or(Error::MissingTrun)?);
-		let mut start_group = self.group.is_none() || (placement.new_segment && keyframe);
-		// A group may not start below the one before it. Refused before the open group closes or
-		// a new one opens, so a rewound fragment publishes nothing, as an unwrapped track does.
-		if start_group
-			&& let Some(floor) = self.start
-			&& timestamp < floor
-		{
-			return Err(crate::container::TimestampRewind { timestamp, floor }.into());
-		}
-		// A segment that doesn't start after the newest sample written continues the open group;
-		// `trim` dropped one with none open.
-		if start_group && self.newest.is_some_and(|newest| timestamp <= newest) {
-			start_group = false;
-		}
-		// A group is keyed by its first fragment's timestamp, which has to start after every group
-		// the track holds. A segment that doesn't continues the open group instead; with none open
-		// it is refused.
-		let start = match start_group && self.pending_start.is_none() {
-			true => match (crate::start::opens(&self.track, timestamp)?, &self.group) {
-				(Some(start), _) => Some(start),
-				(None, Some(_)) => {
-					start_group = false;
-					None
+		let group = match land {
+			Land::Opens { start } => {
+				if let Some(prev) = self.group.take() {
+					prev.finish()?;
 				}
-				(None, None) => Some(crate::start::after(&self.track, timestamp)?),
-			},
-			false => None,
-		};
-		let group = if start_group {
-			if let Some(prev) = self.group.take() {
-				prev.finish()?;
+				// Close the previous group for the bitrate estimator (used only when the
+				// descriptor didn't declare a bitrate).
+				self.estimator.cut(Some(timestamp));
+				match start {
+					Some(start) => self.track.create_group(moq_net::group::Info { start })?,
+					None => self.track.append_group(timestamp)?,
+				}
 			}
-			match (self.pending_start.take(), start) {
-				(Some(start), _) => self.track.create_group(moq_net::group::Info { start })?,
-				(None, Some(_)) => self.track.append_group(timestamp)?,
-				(None, None) => unreachable!("a new group without a pending start has one"),
-			}
-		} else {
-			self.group.take().ok_or(Error::NoKeyframe)?
+			Land::Continues => self.group.take().ok_or(Error::NoKeyframe)?,
 		};
-
-		if start_group {
-			// Close the previous group for the bitrate estimator (used only when the
-			// descriptor didn't declare a bitrate).
-			self.estimator.cut(Some(timestamp));
-		}
 		let size = prefix
 			.len()
 			.checked_add(run.samples.iter().map(|sample| sample.range.len()).sum())
@@ -1731,16 +1777,7 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 			size: size as u64,
 		})?;
 		writer.write(prefix)?;
-		if start_group {
-			self.start = Some(timestamp);
-			self.ceiling = self.newest;
-		}
-		let latest = placement.offset.apply(run.latest)?;
-		self.newest = Some(
-			self.newest
-				.map_or(latest, |newest| crate::container::later(newest, latest)),
-		);
-		Ok((writer, start_group))
+		Ok((writer, matches!(land, Land::Opens { .. })))
 	}
 
 	fn complete(&mut self, writer: moq_net::frame::Producer, pending: &PendingTrack, kind: Kind) -> Result<()> {
@@ -2604,12 +2641,17 @@ mod tests {
 				.decode(&media_header(id, 48_000, &[0], SIZE as u32, Some(SIZE)))
 				.unwrap();
 			import.decode(&[0xA5; SIZE]).unwrap();
-			// A new timeline that restarts below the published one is refused at its first sample.
+			// A new timeline that restarts below the published one is refused at its first sample,
+			// or at its header by a passthrough track, which plans where its fragment lands.
 			import.discontinuity().unwrap();
-			import
-				.decode(&media_header(id, 0, &[0], SIZE as u32, Some(SIZE)))
-				.unwrap();
-			let err = import.decode(&[0xA5; SIZE / 2]).unwrap_err();
+			let header = import.decode(&media_header(id, 0, &[0], SIZE as u32, Some(SIZE)));
+			let err = match passthrough {
+				true => header.unwrap_err(),
+				false => {
+					header.unwrap();
+					import.decode(&[0xA5; SIZE / 2]).unwrap_err()
+				}
+			};
 			assert_eq!(
 				import.decode(&[0xA5; SIZE / 2]).unwrap_err().to_string(),
 				err.to_string()

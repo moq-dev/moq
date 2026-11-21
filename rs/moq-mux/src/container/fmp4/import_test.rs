@@ -1248,36 +1248,65 @@ async fn audio_presents_from_its_edit() {
 
 /// One video fragment decoding from `dts`, a sample per `(cts, flags, byte)` lasting `tick`.
 fn video_fragment(track_id: u32, dts: u64, tick: u64, entries: &[(u64, u32, u8)]) -> Vec<u8> {
-	let moof = mp4_atom::Moof {
+	video_moof(track_id, tick, &[(dts, entries)])
+}
+
+/// A video run decoding from its `dts`, a sample per `(cts, flags, byte)`.
+type VideoRun<'a> = (u64, &'a [(u64, u32, u8)]);
+
+/// One moof of a traf per run on `track_id`, each sample lasting `tick`, and their samples back to
+/// back in one mdat.
+fn video_moof(track_id: u32, tick: u64, trafs: &[VideoRun]) -> Vec<u8> {
+	let mut moof = mp4_atom::Moof {
 		mfhd: mp4_atom::Mfhd { sequence_number: 1 },
-		traf: vec![mp4_atom::Traf {
-			tfhd: mp4_atom::Tfhd {
-				track_id,
+		traf: trafs
+			.iter()
+			.map(|&(dts, entries)| mp4_atom::Traf {
+				tfhd: mp4_atom::Tfhd {
+					track_id,
+					..Default::default()
+				},
+				tfdt: Some(mp4_atom::Tfdt {
+					base_media_decode_time: dts,
+				}),
+				trun: vec![mp4_atom::Trun {
+					data_offset: None,
+					samples: entries
+						.iter()
+						.map(|&(cts, flags, _)| mp4_atom::TrunEntry {
+							duration: Some(tick as u32),
+							size: Some(2),
+							flags: Some(flags),
+							cts: Some(cts as i64),
+						})
+						.collect::<Vec<_>>()
+						.into(),
+				}],
 				..Default::default()
-			},
-			tfdt: Some(mp4_atom::Tfdt {
-				base_media_decode_time: dts,
-			}),
-			trun: vec![mp4_atom::Trun {
-				data_offset: None,
-				samples: entries
-					.iter()
-					.map(|&(cts, flags, _)| mp4_atom::TrunEntry {
-						duration: Some(tick as u32),
-						size: Some(2),
-						flags: Some(flags),
-						cts: Some(cts as i64),
-					})
-					.collect::<Vec<_>>()
-					.into(),
-			}],
-			..Default::default()
-		}],
+			})
+			.collect(),
 	};
+	// A traf after the first starts at its own offset, counted from the moof's first byte.
+	if trafs.len() > 1 {
+		for traf in &mut moof.traf {
+			traf.trun[0].data_offset = Some(0);
+		}
+		let mut measured = Vec::new();
+		moof.encode(&mut measured).unwrap();
+		// The mdat's header is 8 bytes, and every sample 2.
+		let mut offset = measured.len() + 8;
+		for (traf, (_, entries)) in moof.traf.iter_mut().zip(trafs) {
+			traf.trun[0].data_offset = Some(offset as i32);
+			offset += 2 * entries.len();
+		}
+	}
 	let mut fragment = Vec::new();
 	moof.encode(&mut fragment).unwrap();
 	mp4_atom::Mdat {
-		data: entries.iter().flat_map(|&(_, _, byte)| [byte; 2]).collect(),
+		data: trafs
+			.iter()
+			.flat_map(|(_, entries)| entries.iter().flat_map(|&(_, _, byte)| [byte; 2]))
+			.collect(),
 	}
 	.encode(&mut fragment)
 	.unwrap();
@@ -1439,11 +1468,15 @@ async fn video_groups_never_overlap() {
 		// Presents 20, 21.
 		(17, &[(3, 0), (3, non_sync)]),
 	];
+	// One moof of two runs: a sync sample at 23 opening a group, then a leading picture at 21,
+	// presenting with the group before, and 25.
+	let split: [(u64, &[(u64, u32)]); 2] = [(19, &[(4, 0)]), (20, &[(1, non_sync), (4, non_sync)])];
 	let expected = [
 		vec![2, 6, 3, 4, 5, 9, 7, 8],
 		vec![10, 15, 11],
 		vec![16, 17],
 		vec![20, 21],
+		vec![23, 25],
 	];
 	for passthrough in [false, true] {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -1463,6 +1496,16 @@ async fn video_groups_never_overlap() {
 		for fragment in rejoined {
 			decode(&mut fmp4, fragment);
 		}
+		let entries: Vec<Vec<_>> = split
+			.iter()
+			.map(|(_, samples)| samples.iter().map(|&(cts, flags)| (cts * tick, flags, 0xA)).collect())
+			.collect();
+		let trafs: Vec<_> = split
+			.iter()
+			.zip(&entries)
+			.map(|(&(dts, _), entries)| (dts * tick, entries.as_slice()))
+			.collect();
+		fmp4.decode(&video_moof(video_id, tick, &trafs)).unwrap();
 		let _finished = fmp4.finish().unwrap();
 		let [video, _] = published(&consumer, &catalog).await;
 		let presented: Vec<u64> = video
