@@ -111,5 +111,4 @@ which is unpublished.
 
 ## Related
 
-- [lite-07 has no relative anchors](/quest/m2/time-addressing/no-relative-anchors.md) - its live join resolves as a time start, which this changes inside a skipped span
 - [Groups never overlap](/quest/m2/groups-never-overlap.md) - enforces the non-overlap rule in hang's producers and importers

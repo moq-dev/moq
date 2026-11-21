@@ -571,6 +571,13 @@ pub(crate) mod test_util {
 		/// The mean bitrate after the first second, once rate control has settled.
 		pub mean: u64,
 		/// The most any one second carried after the first.
+		#[cfg_attr(
+			all(
+				feature = "openh264",
+				not(any(apple, all(target_os = "linux", any(feature = "nvidia", feature = "vaapi"))))
+			),
+			expect(dead_code, reason = "only the hardware encoders' tests bound the peak")
+		)]
 		pub peak: u64,
 	}
 

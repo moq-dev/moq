@@ -194,11 +194,11 @@ void track_refresh()
 	ok(broadcast->close(), "close refresh broadcast");
 }
 
-// Only the defaults carry moq-net's zero delay; a bare record leaves both bounds unset.
+// Only the defaults carry moq-net's zero max delay, with no min; a bare record leaves both unset.
 void subscription_defaults()
 {
 	auto defaults = moq::subscription_defaults();
-	CHECK(defaults.delay.min == std::chrono::nanoseconds::zero());
+	CHECK(!defaults.delay.min.has_value());
 	CHECK(defaults.delay.max == std::chrono::nanoseconds::zero());
 	CHECK(!moq::Subscription{}.delay.max.has_value());
 }

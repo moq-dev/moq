@@ -39,6 +39,8 @@ export interface Contribution {
 	maxDelay: number;
 	/** The min delay in milliseconds, undefined when not stated. */
 	minDelay?: number;
+	/** Whether it holds a range with no start, the only kind its min delay places. */
+	joins: boolean;
 	descending: boolean;
 }
 
@@ -52,12 +54,12 @@ export interface Change {
 	came: readonly Range[];
 }
 
-function contribution(scalars: Scalars): Contribution {
-	const min = scalars.delay.min;
+function contribution(scalars: Scalars, joins: boolean): Contribution {
 	return {
 		priority: scalars.priority,
 		maxDelay: maxDelayOf(scalars),
-		minDelay: min === null || min === undefined ? undefined : min.asMillis(),
+		minDelay: scalars.delay.min?.asMillis(),
+		joins,
 		descending: scalars.order === "descending",
 	};
 }
@@ -71,6 +73,11 @@ function sameScalars(a: Scalars, b: Scalars): boolean {
 		same(a.delay.min, b.delay.min) &&
 		same(a.delay.max, b.delay.max)
 	);
+}
+
+// How many of `ranges` have no start.
+function unstarted(ranges: readonly Range[]): number {
+	return ranges.reduce((count, range) => count + (range.start === undefined ? 1 : 0), 0);
 }
 
 /** The ranges `old` holds more of than `next`, then those `next` holds more of than `old`. */
@@ -101,6 +108,8 @@ export class Prefs implements Getter<Subscription | undefined> {
 	#scalars?: Scalars;
 	// In key order: a whole replacement keys by position, and each key an edit adds is past the rest.
 	#ranges = new Map<bigint, Range>();
+	// How many of the ranges have no start, which only the min delay places.
+	#unstarted = 0;
 	// The preferences as last read, until they change.
 	#value?: Subscription;
 	/** Bumped on every change, so a reader wakes without reading the ranges. */
@@ -138,7 +147,7 @@ export class Prefs implements Getter<Subscription | undefined> {
 
 	/** What these add to an aggregate besides the ranges. */
 	contribution(): Contribution | undefined {
-		return this.#scalars && contribution(this.#scalars);
+		return this.#scalars && contribution(this.#scalars, this.#unstarted > 0);
 	}
 
 	/** Every range, in key order. */
@@ -193,6 +202,7 @@ export class Prefs implements Getter<Subscription | undefined> {
 			this.#ranges.set(key, range);
 			came.push(range);
 		}
+		this.#unstarted += unstarted(came) - unstarted(gone);
 		const moved = gone.length > 0 || came.length > 0;
 		if (!moved && this.#scalars && sameScalars(this.#scalars, scalars)) return false;
 		this.#scalars = scalars;
@@ -207,6 +217,7 @@ export class Prefs implements Getter<Subscription | undefined> {
 		this.#scalars = rest as Scalars;
 		if (!sameRanges([...this.#ranges.values()], ranges ?? [])) {
 			this.#ranges = new Map((ranges ?? []).map((range, index) => [BigInt(index), range]));
+			this.#unstarted = unstarted(ranges ?? []);
 		}
 		// Read back as given, so its identity holds until the next change.
 		this.#value = next;
@@ -215,16 +226,22 @@ export class Prefs implements Getter<Subscription | undefined> {
 
 /**
  * The aggregate of every subscriber's preferences, counted so a change costs what it moved:
- * the highest priority and max delay, the largest stated min delay, descending if any subscriber
- * is, and the union of the ranges. Read as a {@link Subscription}, materialized only when read.
+ * the highest priority and max delay, the min delay, descending if any subscriber is, and the
+ * union of the ranges.
+ *
+ * The min delay counts only the subscribers holding a range with no start, the only kind it
+ * places: the largest of theirs, with one not stated counting as the largest, so a relay's copy
+ * reaches back for the reader that buffers most, and an oldest reader still gets its backlog. Read as a {@link Subscription}, materialized only when read.
  * Mirrors the Rust `Subscriptions`.
  */
 export class Subscriptions implements Getter<Subscription | undefined> {
 	#count = 0;
 	#priority = new Counts<number>();
 	#maxDelay = new Counts<number>();
-	// Only stated minimums count, so an unstated one never reads as zero.
+	// The stated minimums of the subscribers holding a range with no start.
 	#minDelay = new Counts<number>();
+	// How many subscribers hold a range with no start and state no minimum.
+	#unstated = 0;
 	#descending = 0;
 	#ranges = new Ranges();
 	#revision = new Signal(0);
@@ -242,7 +259,8 @@ export class Subscriptions implements Getter<Subscription | undefined> {
 		if (after) {
 			this.#priority.add(after.priority);
 			this.#maxDelay.add(after.maxDelay);
-			if (after.minDelay !== undefined) this.#minDelay.add(after.minDelay);
+			if (after.joins && after.minDelay === undefined) this.#unstated++;
+			else if (after.joins && after.minDelay !== undefined) this.#minDelay.add(after.minDelay);
 			this.#descending += after.descending ? 1 : 0;
 			this.#count++;
 		}
@@ -250,12 +268,14 @@ export class Subscriptions implements Getter<Subscription | undefined> {
 		if (before) {
 			this.#priority.remove(before.priority);
 			this.#maxDelay.remove(before.maxDelay);
-			if (before.minDelay !== undefined) this.#minDelay.remove(before.minDelay);
+			if (before.joins && before.minDelay === undefined) this.#unstated--;
+			else if (before.joins && before.minDelay !== undefined) this.#minDelay.remove(before.minDelay);
 			this.#descending -= before.descending ? 1 : 0;
 			this.#count--;
 		}
 		for (const range of gone) if (this.#ranges.remove(range)) reshaped = true;
 		const next = this.#scalars();
+		if (this.#ranges.joins(next?.minDelay !== undefined)) reshaped = true;
 		const changed =
 			reshaped ||
 			prev?.priority !== next?.priority ||
@@ -279,7 +299,8 @@ export class Subscriptions implements Getter<Subscription | undefined> {
 		return {
 			priority: this.#priority.last() ?? 0,
 			maxDelay: this.maxDelay(),
-			minDelay: this.#minDelay.last(),
+			minDelay: this.#unstated > 0 ? undefined : this.#minDelay.last(),
+			joins: this.#unstated > 0 || this.#minDelay.last() !== undefined,
 			descending: this.#descending > 0,
 		};
 	}
@@ -292,7 +313,6 @@ export class Subscriptions implements Getter<Subscription | undefined> {
 			priority: scalars.priority,
 			delay: {
 				max: Duration.millis(scalars.maxDelay),
-				// The largest stated, so an upstream starts far enough back for the reader that buffers most.
 				min: scalars.minDelay === undefined ? null : Duration.millis(scalars.minDelay),
 			},
 			// One live subscriber held behind another's backlog is worse than a backlog sent late.

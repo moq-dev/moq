@@ -1666,8 +1666,8 @@ mod read_tests {
 	async fn raw_media_catalog_warmup_reaches_the_subscription() {
 		let (_broadcast, track, reader) = subscribe_warmup().await;
 		let mut media = reader.reads.take(|_| Ok(())).unwrap();
-		let write = |start: u64, micros| {
-			let mut group = track.create_group(start.into()).unwrap();
+		let write = |micros: u64| {
+			let mut group = track.create_group(micros.into()).unwrap();
 			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio)
 				.write(
 					&mut group,
@@ -1681,11 +1681,12 @@ mod read_tests {
 				.unwrap();
 			group.finish().unwrap();
 		};
-		// Newest first, all before the first read. Group 4 covers the min delay alone, so
-		// without the warmup the start would skip group 3; only the warmup's reach keeps it.
-		write(5, 5_000_000);
-		write(4, 4_700_000);
-		write(3, 4_400_000);
+		// Newest first, all before the first read, each group starting at its frame. The group
+		// at 4.7s covers the min delay alone, so without the warmup the start would skip the one
+		// at 4.4s; only the warmup's reach keeps it.
+		write(5_000_000);
+		write(4_700_000);
+		write(4_400_000);
 		let _track = track.finish().unwrap();
 		let mut micros = Vec::new();
 		while let Some(read) = media.read().await.unwrap() {
