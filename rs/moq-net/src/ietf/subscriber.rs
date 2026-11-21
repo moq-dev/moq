@@ -7982,6 +7982,8 @@ impl GroupFetchObjects {
 						let final_key = key.checked_add(1).ok_or(Error::ProtocolViolation)?;
 						writer.fetch.fill.finish_track_at(final_key);
 					}
+					// The group is whole now, so a stream that stalls or resets after this keeps it.
+					writer.finish()?;
 					self.ended = true;
 					continue;
 				}
@@ -17714,6 +17716,26 @@ mod stitch_tests {
 		let ended = [group_fetch_objects(KEY, 0, &[b"a"]), group_end(false)].concat();
 		let mut run = GroupFetchRun::new(VERSION, ended).await;
 		assert!(run.recv_objects().await.is_err(), "draft-22 has no End of Group");
+	}
+
+	/// End of Group finishes its group at once, so a stream that stalls after it leaves the
+	/// group whole rather than open until the next group or the stream's end.
+	#[kio::test]
+	async fn an_end_of_group_finishes_its_group_before_the_stream_ends() {
+		let objects = [group_fetch_objects(KEY, 0, &[b"a", b"b"]), group_end(false)].concat();
+		let mut run = GroupFetchRun::stalled(Version::Draft23, objects).await;
+		let (slot, fetch) = run.slot(None, None).await;
+		let mut receiving = run.subscriber.clone();
+		let mut receive = std::pin::pin!(receiving.recv_group_fetch(&mut run.stream, slot.clone()));
+		assert!(futures::poll!(&mut receive).is_pending());
+		assert!(matches!(&*slot.read(), GroupFetch::Receiving(None)));
+
+		let mut group = fetch.await.expect("the group is cached");
+		for _ in 0..2 {
+			assert!(group.read_frame().await.unwrap().is_some());
+		}
+		let end = futures::poll!(std::pin::pin!(group.read_frame()));
+		assert!(matches!(end, Poll::Ready(Ok(None))), "{end:?}");
 	}
 
 	/// A group aborted under a stalled fetch stream, as by eviction, ends the run with its

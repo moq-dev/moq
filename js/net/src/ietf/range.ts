@@ -122,10 +122,11 @@ export class RangeFetch {
 				);
 				if (object === undefined) break;
 				if (object.kind === "endOfGroup") {
-					if (prior === undefined || this.#current === undefined)
-						throw new ProtocolViolation("a fetch stream starts with an End of Group");
+					if (prior === undefined) throw new ProtocolViolation("a fetch stream starts with an End of Group");
 					// Draft-23 says where the track ends here rather than in FETCH_OK.
-					if (object.track) hooks.endTrack(this.#track, { group: this.#current.key + 1n, frame: 0 });
+					if (object.track) hooks.endTrack(this.#track, { group: prior + 1n, frame: 0 });
+					// The group is whole now, so a stream that stalls or resets after this keeps it.
+					this.#closeGroup();
 					ended = true;
 					continue;
 				}

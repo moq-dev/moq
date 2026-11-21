@@ -513,23 +513,16 @@ test("draft-23: an End of Track on the fetch stream ends the track", async () =>
 	}
 });
 
-// Past an End of Group the prior Object ID is 2^64-1, so only an object naming another group follows.
-test("draft-23: an object continuing a group past its End of Group fails the FETCH", async () => {
+// Past an End of Group the prior Object ID is 2^64-1, so only an object naming another group
+// follows. The violation fails the stream, but End of Group already finished its group whole.
+test("draft-23: a stream failing after an End of Group keeps the finished group", async () => {
 	const fx = fixture(Version.DRAFT_23);
 	const pending = fx.broadcast.track("video").fetchGroup(1n);
-	const failed = pending.then(
-		(group) =>
-			payloads(group).then(
-				() => undefined,
-				(err: unknown) => err,
-			),
-		(err: unknown) => err,
-	);
 	await fx.status();
 	const { stream, request } = await fx.fetch();
 	await answerRequested(stream);
 	// End of Group, then an object that inherits group 1: flags 0, an empty payload.
 	const bytes = await groupThen(request.requestId, [0x80, 0x80, 0x00, 0x00]);
 	await fx.subscriber.handleFetch(new Reader(undefined, bytes, Version.DRAFT_23));
-	expect(await failed).toBeInstanceOf(Error);
+	expect(await payloads(await pending)).toEqual(["a", "b"]);
 });
