@@ -5109,8 +5109,13 @@ impl FetchOpen {
 
 		let end_location = if joined {
 			// The subscription starts at the saved Largest Object, so the prefix of that
-			// group has to be here in full or the two leave a gap.
-			if stop != range.end.object {
+			// group has to be here in full or the two leave a gap. A Largest Object that is the
+			// group's End of Group status sits one past the last object a FETCH carries, and
+			// that status proves nothing follows it.
+			let ends_at_status = end == Some(stop)
+				&& group.end_object().is_some_and(|status| status.id == stop)
+				&& stop.checked_add(1) == Some(range.end.object);
+			if stop != range.end.object && !ends_at_status {
 				return self.reject(&Error::NotFound, "joining prefix unavailable");
 			}
 			range.end
@@ -13685,6 +13690,57 @@ mod serve_tests {
 		);
 		assert!(response.is_empty());
 		assert!(h.log.resets().is_empty());
+	}
+
+	/// A relayed group that ended with an End of Group status reports that status as its
+	/// Largest Object. FETCH carries no status, so the join's prefix is every object before it.
+	#[kio::test]
+	async fn a_joining_fetch_ending_at_the_end_of_group_status_is_answered() {
+		for version in JOINING_DRAFTS {
+			let h = serve(version);
+			let mut group = h.track.create_group(group::Info { start: 5 }).unwrap();
+			group
+				.set_wire(group::Wire {
+					sparse: false,
+					first_object: true,
+					first_id: 0,
+					extensions: true,
+					has_end: true,
+					fetchable: true,
+					last: None,
+				})
+				.unwrap();
+			group.write_frame(group.key_time(), b"catalog".as_slice()).unwrap();
+			group
+				.set_end_object(crate::model::object::Fields {
+					id: 1,
+					properties: Default::default(),
+				})
+				.unwrap();
+			group.finish().unwrap();
+			settle().await;
+
+			let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), version)
+				.await
+				.unwrap();
+			let mut serving = Box::pin(
+				h.publisher
+					.clone()
+					.run_subscribe_stream(stream, subscribe(Filter::NextObject, None)),
+			);
+			registered(&h, serving.as_mut()).await;
+			let mark = h.log.writes.lock().unwrap().len();
+			let mut buf = bytes::Bytes::from(joining_fetch(&h, mark).await.unwrap());
+			assert_eq!(
+				crate::coding::decode_varint(&mut buf, version).unwrap(),
+				ietf::FetchOk::ID,
+				"{version}"
+			);
+			let ok = crate::coding::decode_buf(&mut buf, version, |r, v| ietf::FetchOk::decode(r, v)).unwrap();
+			assert_eq!(ok.end_location, Location { group: 5, object: 2 }, "{version}");
+			assert_eq!(occurrences(&h.log, b"catalog"), 1, "{version}");
+			assert!(h.log.resets().is_empty(), "{version}");
+		}
 	}
 
 	/// A joining FETCH whose prefix group was evicted is refused as missing before FETCH_OK.
