@@ -160,6 +160,9 @@ impl<O: Output> Media<O> {
 		let mut viewport = self.viewport.clone();
 		// Cleared once the window is gone, or there never was one, which leaves the viewport as is.
 		let mut viewing = true;
+		// Set while video picks again for a turned viewport. It stopped a rendition that was
+		// playing fine, so it only switches to one whose broadcast is already in hand.
+		let mut turning = false;
 
 		loop {
 			if playback.done() {
@@ -207,12 +210,13 @@ impl<O: Output> Media<O> {
 						let orientation = *viewport.borrow_and_update();
 						let turned = video_demand.as_ref().zip(playback.latest()).is_some_and(|(demand, snapshot)| {
 							turned_away(&snapshot.video, &demand.name, orientation, |name, config| {
-								playback.finished(&Track::of(&source, config, name))
+								!playback.finished(&Track::of(&source, config, name)) && reachable(&source, config)
 							})
 						});
 						if turned {
 							let _ = video_demand.take().expect("checked above").stop.send(());
 							playback.reselect(Kind::Video);
+							turning = true;
 						}
 					}
 					// Followed for as long as it lasts, not just until something is
@@ -282,10 +286,16 @@ impl<O: Output> Media<O> {
 				let render = self.output.render().await;
 				// Copied out first: the borrow holds a lock across the awaits below.
 				let orientation = *viewport.borrow_and_update();
+				let turned = std::mem::take(&mut turning);
 				for (name, config) in shaped(&snapshot.video, orientation) {
 					let reference = Track::of(&source, config, name);
 					// A finished track has only its newest group left, which already played.
 					if playback.finished(&reference) {
+						continue;
+					}
+					// Waiting on a broadcast that may never come would freeze the picture
+					// a turn just stopped, so a turn skips one not yet in hand.
+					if turned && !reachable(&source, config) {
 						continue;
 					}
 					// A rendition pointing at a broadcast we can't reach is that
@@ -551,12 +561,12 @@ fn shaped(video: &hang::catalog::Video, viewport: Option<Orientation>) -> Vec<(&
 }
 
 /// Whether the viewport turned away from the `playing` rendition while one shaped like it, and
-/// not `finished`, is on offer, which now ranks first.
+/// `available`, is on offer, which now ranks first.
 fn turned_away(
 	video: &hang::catalog::Video,
 	playing: &str,
 	viewport: Option<Orientation>,
-	finished: impl Fn(&str, &hang::catalog::VideoConfig) -> bool,
+	available: impl Fn(&str, &hang::catalog::VideoConfig) -> bool,
 ) -> bool {
 	video
 		.renditions
@@ -564,7 +574,19 @@ fn turned_away(
 		.is_some_and(|config| opposed(video, config, viewport))
 		&& video
 			.enabled()
-			.any(|(name, config)| !opposed(video, config, viewport) && !finished(name, config))
+			.any(|(name, config)| !opposed(video, config, viewport) && available(name, config))
+}
+
+/// Whether the broadcast `config` plays from is already in hand, so opening it waits on nothing.
+fn reachable(source: &moq_mux::Source, config: &hang::catalog::VideoConfig) -> bool {
+	source
+		.bind(config.broadcast.as_ref(), config.instance.as_ref())
+		.is_ok_and(|binding| {
+			matches!(
+				binding.poll_broadcast(&kio::Waiter::noop()),
+				std::task::Poll::Ready(Ok(_))
+			)
+		})
 }
 
 // Cancel through the task's own result so it still reports which half ended.
@@ -1168,20 +1190,34 @@ mod tests {
 		);
 	}
 
+	/// A turn only switches to a broadcast already in hand: the playing one, not a sibling
+	/// nothing announced, which would leave the stopped picture frozen while it waits.
+	#[tokio::test]
+	async fn only_a_broadcast_in_hand_is_reachable() {
+		let origin = moq_tokio::origin::spawn();
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let source = moq_mux::Source::new(origin.consume(), broadcast.consume());
+		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		assert!(reachable(&source, &config));
+		config.broadcast = Some(moq_net::path::Relative::new("./portrait").unwrap());
+		assert!(!reachable(&source, &config));
+	}
+
 	#[test]
 	fn turning_away_picks_again_only_with_a_rendition_to_turn_to() {
 		let mut video = oriented();
-		let none = |_: &str, _: &hang::catalog::VideoConfig| false;
-		assert!(turned_away(&video, "wide", Some(Orientation::Portrait), none));
-		assert!(!turned_away(&video, "wide", Some(Orientation::Landscape), none));
-		assert!(!turned_away(&video, "wide", None, none));
+		let all = |_: &str, _: &hang::catalog::VideoConfig| true;
+		assert!(turned_away(&video, "wide", Some(Orientation::Portrait), all));
+		assert!(!turned_away(&video, "wide", Some(Orientation::Landscape), all));
+		assert!(!turned_away(&video, "wide", None, all));
 		// A square rendition suits either way.
-		assert!(!turned_away(&video, "square", Some(Orientation::Landscape), none));
+		assert!(!turned_away(&video, "square", Some(Orientation::Landscape), all));
 
-		// Nothing left to turn to once the portrait-friendly ones are finished or disabled.
-		let finished = |name: &str, _: &hang::catalog::VideoConfig| name == "square";
+		// Nothing to turn to once the portrait-friendly ones are disabled or unavailable, such as
+		// finished or on a broadcast not yet in hand.
+		let available = |name: &str, _: &hang::catalog::VideoConfig| name != "square";
 		video.renditions.get_mut("tall").unwrap().enabled = false;
-		assert!(!turned_away(&video, "wide", Some(Orientation::Portrait), finished));
+		assert!(!turned_away(&video, "wide", Some(Orientation::Portrait), available));
 	}
 	use crate::play::args::Delay;
 	use crate::play::fake::Recorder;
