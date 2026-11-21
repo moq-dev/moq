@@ -41,10 +41,10 @@ import {
 	type Groups,
 	type Info,
 	type Range,
+	type Subscription,
 	type Position as TrackPosition,
 	Producer as TrackProducer,
 	type Subscriber as TrackSubscriber,
-	type Subscription,
 } from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { toNumber } from "../util/bigint.ts";
@@ -932,7 +932,10 @@ export class Publisher {
 							bounds.set(requested, true);
 							// Only a new filter moves the request: the edge an old one resolved against has moved.
 							if (params.subscriptionFilter !== undefined)
-								track.update({ ...track.subscription.peek(), ...serveRequest(range, msg.filter, snapshot) });
+								track.update({
+									...track.subscription.peek(),
+									...serveRequest(range, msg.filter, snapshot),
+								});
 							// Below its floor the live cursor already passed every group or never owned it,
 							// so lowering it for a fill-only update would hand those groups out a second time.
 							let start = range.start ? range.start.group : 0n;
@@ -2515,7 +2518,11 @@ const LIVE_JOIN: Pick<Subscription, "delay" | "ranges"> = {
  * retained, and a live join would start at whichever group lands first. Mirrors the Rust
  * `ServeRange::request`.
  */
-function serveRequest(range: ServeRange, filter?: Filter.Filter, edge?: LiveEdge): Pick<Subscription, "delay" | "ranges"> {
+function serveRequest(
+	range: ServeRange,
+	filter?: Filter.Filter,
+	edge?: LiveEdge,
+): Pick<Subscription, "delay" | "ranges"> {
 	const latest = edge?.latest;
 	const live =
 		filter !== undefined &&
