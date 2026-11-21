@@ -1,13 +1,140 @@
 [page] negotiated protocol: moqt-18
 [page] subscribe_namespace written: requestId=0
-[page] announced: broadcast=smoke-js-web-4304-77.hang active=true
-[page] subscribe start: id=2 broadcast=smoke-js-web-4304-77.hang track=catalog.json
+[page] announced: broadcast=smoke-js-web-4256-26083.hang active=true
+[page] subscribe start: id=2 broadcast=smoke-js-web-4256-26083.hang track=catalog.json
 [page] announced: broadcast=metrics/us-west-2.relay.public active=true
-[page] subscribe written: id=2 broadcast=smoke-js-web-4304-77.hang track=catalog.json
-[page] subscribe ok: id=2 broadcast=smoke-js-web-4304-77.hang track=catalog.json
-[page] received catalog hang smoke-js-web-4304-77.hang {video: Object, clock: Object}
-[page] subscribe start: id=4 broadcast=smoke-js-web-4304-77.hang track=video
-[page] subscribe written: id=4 broadcast=smoke-js-web-4304-77.hang track=video
-[page] subscribe ok: id=4 broadcast=smoke-js-web-4304-77.hang track=video
-[page] received catalog hang smoke-js-web-4304-77.hang {video: Object, clock: Object}
-decoded 4 frames from smoke-js-web-4304-77.hang (vite)
+[page] subscribe written: id=2 broadcast=smoke-js-web-4256-26083.hang track=catalog.json
+[page] subscribe ok: id=2 broadcast=smoke-js-web-4256-26083.hang track=catalog.json
+[page] received catalog hang smoke-js-web-4256-26083.hang {video: Object, clock: Object}
+[page] subscribe start: id=4 broadcast=smoke-js-web-4256-26083.hang track=video
+[page] subscribe written: id=4 broadcast=smoke-js-web-4256-26083.hang track=video
+[page] subscribe ok: id=4 broadcast=smoke-js-web-4256-26083.hang track=video
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 5
+    at e.decode (http://localhost:42837/assets/index-BTo2EGTp.js:1:177571)
+    at a (http://localhost:42837/assets/index-BTo2EGTp.js:1:225791)
+    at #f (http://localhost:42837/assets/index-BTo2EGTp.js:1:99907)
+    at ys.tryDecode (http://localhost:42837/assets/index-BTo2EGTp.js:1:99438)
+    at xf.handleGroup (http://localhost:42837/assets/index-BTo2EGTp.js:1:225851)
+    at async #g (http://localhost:42837/assets/index-BTo2EGTp.js:1:230340)
+[page] received catalog hang smoke-js-web-4256-26083.hang {video: Object, clock: Object}
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 7
+    at e.decode (http://localhost:42837/assets/index-BTo2EGTp.js:1:177571)
+    at a (http://localhost:42837/assets/index-BTo2EGTp.js:1:225791)
+    at #f (http://localhost:42837/assets/index-BTo2EGTp.js:1:99907)
+    at ys.tryDecode (http://localhost:42837/assets/index-BTo2EGTp.js:1:99438)
+    at xf.handleGroup (http://localhost:42837/assets/index-BTo2EGTp.js:1:225851)
+    at async #g (http://localhost:42837/assets/index-BTo2EGTp.js:1:230340)
+[page] received catalog hang smoke-js-web-4256-26083.hang {video: Object, clock: Object}
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 9
+    at e.decode (http://localhost:42837/assets/index-BTo2EGTp.js:1:177571)
+    at a (http://localhost:42837/assets/index-BTo2EGTp.js:1:225791)
+    at #f (http://localhost:42837/assets/index-BTo2EGTp.js:1:99907)
+    at ys.tryDecode (http://localhost:42837/assets/index-BTo2EGTp.js:1:99438)
+    at xf.handleGroup (http://localhost:42837/assets/index-BTo2EGTp.js:1:225851)
+    at async #g (http://localhost:42837/assets/index-BTo2EGTp.js:1:230340)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 11
+    at e.decode (http://localhost:42837/assets/index-BTo2EGTp.js:1:177571)
+    at a (http://localhost:42837/assets/index-BTo2EGTp.js:1:225791)
+    at #f (http://localhost:42837/assets/index-BTo2EGTp.js:1:99907)
+    at ys.tryDecode (http://localhost:42837/assets/index-BTo2EGTp.js:1:99438)
+    at xf.handleGroup (http://localhost:42837/assets/index-BTo2EGTp.js:1:225851)
+    at async #g (http://localhost:42837/assets/index-BTo2EGTp.js:1:230340)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 13
+    at e.decode (http://localhost:42837/assets/index-BTo2EGTp.js:1:177571)
+    at a (http://localhost:42837/assets/index-BTo2EGTp.js:1:225791)
+    at #f (http://localhost:42837/assets/index-BTo2EGTp.js:1:99907)
+    at ys.tryDecode (http://localhost:42837/assets/index-BTo2EGTp.js:1:99438)
+    at xf.handleGroup (http://localhost:42837/assets/index-BTo2EGTp.js:1:225851)
+    at async #g (http://localhost:42837/assets/index-BTo2EGTp.js:1:230340)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 15
+    at e.decode (http://localhost:42837/assets/index-BTo2EGTp.js:1:177571)
+    at a (http://localhost:42837/assets/index-BTo2EGTp.js:1:225791)
+    at #f (http://localhost:42837/assets/index-BTo2EGTp.js:1:99907)
+    at ys.tryDecode (http://localhost:42837/assets/index-BTo2EGTp.js:1:99438)
+    at xf.handleGroup (http://localhost:42837/assets/index-BTo2EGTp.js:1:225851)
+    at async #g (http://localhost:42837/assets/index-BTo2EGTp.js:1:230340)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 17
+    at e.decode (http://localhost:42837/assets/index-BTo2EGTp.js:1:177571)
+    at a (http://localhost:42837/assets/index-BTo2EGTp.js:1:225791)
+    at #f (http://localhost:42837/assets/index-BTo2EGTp.js:1:99907)
+    at ys.tryDecode (http://localhost:42837/assets/index-BTo2EGTp.js:1:99438)
+    at xf.handleGroup (http://localhost:42837/assets/index-BTo2EGTp.js:1:225851)
+    at async #g (http://localhost:42837/assets/index-BTo2EGTp.js:1:230340)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 19
+    at e.decode (http://localhost:42837/assets/index-BTo2EGTp.js:1:177571)
+    at a (http://localhost:42837/assets/index-BTo2EGTp.js:1:225791)
+    at #f (http://localhost:42837/assets/index-BTo2EGTp.js:1:99907)
+    at ys.tryDecode (http://localhost:42837/assets/index-BTo2EGTp.js:1:99438)
+    at xf.handleGroup (http://localhost:42837/assets/index-BTo2EGTp.js:1:225851)
+    at async #g (http://localhost:42837/assets/index-BTo2EGTp.js:1:230340)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 21
+    at e.decode (http://localhost:42837/assets/index-BTo2EGTp.js:1:177571)
+    at a (http://localhost:42837/assets/index-BTo2EGTp.js:1:225791)
+    at #f (http://localhost:42837/assets/index-BTo2EGTp.js:1:99907)
+    at ys.tryDecode (http://localhost:42837/assets/index-BTo2EGTp.js:1:99438)
+    at xf.handleGroup (http://localhost:42837/assets/index-BTo2EGTp.js:1:225851)
+    at async #g (http://localhost:42837/assets/index-BTo2EGTp.js:1:230340)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 23
+    at e.decode (http://localhost:42837/assets/index-BTo2EGTp.js:1:177571)
+    at a (http://localhost:42837/assets/index-BTo2EGTp.js:1:225791)
+    at #f (http://localhost:42837/assets/index-BTo2EGTp.js:1:99907)
+    at ys.tryDecode (http://localhost:42837/assets/index-BTo2EGTp.js:1:99438)
+    at xf.handleGroup (http://localhost:42837/assets/index-BTo2EGTp.js:1:225851)
+    at async #g (http://localhost:42837/assets/index-BTo2EGTp.js:1:230340)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 25
+    at e.decode (http://localhost:42837/assets/index-BTo2EGTp.js:1:177571)
+    at a (http://localhost:42837/assets/index-BTo2EGTp.js:1:225791)
+    at #f (http://localhost:42837/assets/index-BTo2EGTp.js:1:99907)
+    at ys.tryDecode (http://localhost:42837/assets/index-BTo2EGTp.js:1:99438)
+    at xf.handleGroup (http://localhost:42837/assets/index-BTo2EGTp.js:1:225851)
+    at async #g (http://localhost:42837/assets/index-BTo2EGTp.js:1:230340)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 27
+    at e.decode (http://localhost:42837/assets/index-BTo2EGTp.js:1:177571)
+    at a (http://localhost:42837/assets/index-BTo2EGTp.js:1:225791)
+    at #f (http://localhost:42837/assets/index-BTo2EGTp.js:1:99907)
+    at ys.tryDecode (http://localhost:42837/assets/index-BTo2EGTp.js:1:99438)
+    at xf.handleGroup (http://localhost:42837/assets/index-BTo2EGTp.js:1:225851)
+    at async #g (http://localhost:42837/assets/index-BTo2EGTp.js:1:230340)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 29
+    at e.decode (http://localhost:42837/assets/index-BTo2EGTp.js:1:177571)
+    at a (http://localhost:42837/assets/index-BTo2EGTp.js:1:225791)
+    at #f (http://localhost:42837/assets/index-BTo2EGTp.js:1:99907)
+    at ys.tryDecode (http://localhost:42837/assets/index-BTo2EGTp.js:1:99438)
+    at xf.handleGroup (http://localhost:42837/assets/index-BTo2EGTp.js:1:225851)
+    at async #g (http://localhost:42837/assets/index-BTo2EGTp.js:1:230340)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 31
+    at e.decode (http://localhost:42837/assets/index-BTo2EGTp.js:1:177571)
+    at a (http://localhost:42837/assets/index-BTo2EGTp.js:1:225791)
+    at #f (http://localhost:42837/assets/index-BTo2EGTp.js:1:99907)
+    at ys.tryDecode (http://localhost:42837/assets/index-BTo2EGTp.js:1:99438)
+    at xf.handleGroup (http://localhost:42837/assets/index-BTo2EGTp.js:1:225851)
+    at async #g (http://localhost:42837/assets/index-BTo2EGTp.js:1:230340)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 33
+    at e.decode (http://localhost:42837/assets/index-BTo2EGTp.js:1:177571)
+    at a (http://localhost:42837/assets/index-BTo2EGTp.js:1:225791)
+    at #f (http://localhost:42837/assets/index-BTo2EGTp.js:1:99907)
+    at ys.tryDecode (http://localhost:42837/assets/index-BTo2EGTp.js:1:99438)
+    at xf.handleGroup (http://localhost:42837/assets/index-BTo2EGTp.js:1:225851)
+    at async #g (http://localhost:42837/assets/index-BTo2EGTp.js:1:230340)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 35
+    at e.decode (http://localhost:42837/assets/index-BTo2EGTp.js:1:177571)
+    at a (http://localhost:42837/assets/index-BTo2EGTp.js:1:225791)
+    at #f (http://localhost:42837/assets/index-BTo2EGTp.js:1:99907)
+    at ys.tryDecode (http://localhost:42837/assets/index-BTo2EGTp.js:1:99438)
+    at xf.handleGroup (http://localhost:42837/assets/index-BTo2EGTp.js:1:225851)
+    at async #g (http://localhost:42837/assets/index-BTo2EGTp.js:1:230340)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 37
+    at e.decode (http://localhost:42837/assets/index-BTo2EGTp.js:1:177571)
+    at a (http://localhost:42837/assets/index-BTo2EGTp.js:1:225791)
+    at #f (http://localhost:42837/assets/index-BTo2EGTp.js:1:99907)
+    at ys.tryDecode (http://localhost:42837/assets/index-BTo2EGTp.js:1:99438)
+    at xf.handleGroup (http://localhost:42837/assets/index-BTo2EGTp.js:1:225851)
+    at async #g (http://localhost:42837/assets/index-BTo2EGTp.js:1:230340)
+[page] spawn error Error: object IDs must start at 0 and increment by 1, got a delta of 39
+    at e.decode (http://localhost:42837/assets/index-BTo2EGTp.js:1:177571)
+    at a (http://localhost:42837/assets/index-BTo2EGTp.js:1:225791)
+    at #f (http://localhost:42837/assets/index-BTo2EGTp.js:1:99907)
+    at ys.tryDecode (http://localhost:42837/assets/index-BTo2EGTp.js:1:99438)
+    at xf.handleGroup (http://localhost:42837/assets/index-BTo2EGTp.js:1:225851)
+    at async #g (http://localhost:42837/assets/index-BTo2EGTp.js:1:230340)
+decoded 3 frames from smoke-js-web-4256-26083.hang (vite)

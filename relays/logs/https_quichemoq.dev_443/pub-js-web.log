@@ -1,13 +1,10 @@
-publishing smoke-js-web-4304-17077.hang (fake camera, vite) to https://quichemoq.dev:443
+publishing smoke-js-web-4256-20699.hang (fake camera, vite) to https://quichemoq.dev:443
 [page] negotiated protocol: moqt-22
 [page] subscribe_namespace written: requestId=0
-[page] announced: broadcast=smoke-js-web-4304-17077.hang active=true
-[page] publish ok: broadcast=smoke-js-web-4304-17077.hang track=catalog.json
-[page] publish ok: broadcast=smoke-js-web-4304-17077.hang track=video
-[page] publish done: broadcast=smoke-js-web-4304-17077.hang track=video
-[page] publish error: broadcast=smoke-js-web-4304-17077.hang track=video error=remote error: 1
-[page] publish ok: broadcast=smoke-js-web-4304-17077.hang track=video
-[page] publish done: broadcast=smoke-js-web-4304-17077.hang track=video
-[page] publish error: broadcast=smoke-js-web-4304-17077.hang track=video error=remote error: 1
-[page] publish done: broadcast=smoke-js-web-4304-17077.hang track=catalog.json
-[page] publish error: broadcast=smoke-js-web-4304-17077.hang track=catalog.json error=The stream was aborted by the remote server
+[page] announced: broadcast=smoke-js-web-4256-20699.hang active=true
+[page] publish ok: broadcast=smoke-js-web-4256-20699.hang track=catalog.json
+[page] publish ok: broadcast=smoke-js-web-4256-20699.hang track=video
+[page] publish done: broadcast=smoke-js-web-4256-20699.hang track=video
+[page] publish error: broadcast=smoke-js-web-4256-20699.hang track=video error=remote error: 1
+[page] publish done: broadcast=smoke-js-web-4256-20699.hang track=catalog.json
+[page] publish error: broadcast=smoke-js-web-4256-20699.hang track=catalog.json error=The stream was aborted by the remote server
