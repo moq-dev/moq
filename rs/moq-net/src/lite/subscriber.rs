@@ -11068,15 +11068,17 @@ impl TrackServe {
 		// An idle copy is asked from the head of the newest group it cached when
 		// the subscriber has no start of its own: a quiet track (a catalog) sends
 		// that group again, which says the cache is current. A lite-07 list keeps
-		// any range of its own, so only one asking just for the live or oldest group
-		// counts. A copy that cached nothing keeps the subscriber's ranges: no start
+		// any range of its own, so only one asking just for the oldest group counts.
+		// A live join stays one, since asking from a stale cached group would have
+		// the publisher replay everything since it, which the live viewer never asked
+		// for. A copy that cached nothing keeps the subscriber's ranges: no start
 		// would widen a live viewer's ask to every group from the oldest.
 		let idle = subscription.start().is_none()
 			&& (!ranged
 				|| subscription
 					.ranges
 					.iter()
-					.all(|range| range.end.is_none() && matches!(range.start, Anchor::Oldest | Anchor::Relative(0))));
+					.all(|range| range.end.is_none() && range.start == Anchor::Oldest));
 		if let Some(newest) = newest.filter(|_| idle) {
 			subscription = subscription.with_start(newest);
 		}
@@ -12730,15 +12732,15 @@ impl ServeLoop {
 					// answer alone; one that does waits for it to show.
 					// An answer behind the copy's cache fails it.
 					let position = start.largest.map(|largest| largest.position);
+					// Recorded whole as the copy goes live, so a woken reader never takes the
+					// frames ahead of the answer for the largest, and a relay answers its own
+					// readers that the group ended.
+					let ended = start.largest.map(|largest| largest.ended);
 					match active.never_serves(position) {
-						Some(largest) => self.serving.set_live_ahead(largest, served),
-						None => self.serving.set_live(position, served),
+						Some(largest) => self.serving.set_live_ahead(largest, ended, served),
+						None => self.serving.set_live(position, ended, served),
 					}
 					.inspect_err(|err| tracing::warn!(track = %serve.name, %err, "subscribe start behind the cache"))?;
-					// Recorded whole, so a relay answers its own readers that the group ended.
-					if let Some(largest) = start.largest {
-						self.serving.report_largest(largest.position, largest.ended);
-					}
 				} else if active.demand.is_some()
 					&& let Some(entry) = serve.subscriber.subscribes.lock().get_mut(&active.id)
 				{
