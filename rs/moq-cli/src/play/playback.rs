@@ -36,6 +36,9 @@ impl Track {
 #[derive(Default)]
 struct Half {
 	playing: bool,
+	/// Picking a replacement while the rendition playing plays on, which it stops only once the
+	/// replacement is ready.
+	switching: bool,
 	/// The track this half is playing, whose end is a finish. Cleared once retired.
 	track: Option<Track>,
 	/// The snapshot this half last read. A half reads a snapshot once, so a
@@ -102,6 +105,7 @@ impl Playback {
 		self.played = true;
 		let half = self.half_mut(kind);
 		half.playing = true;
+		half.switching = false;
 		half.track = Some(track);
 	}
 
@@ -128,12 +132,17 @@ impl Playback {
 		self.half_mut(kind).track = None;
 	}
 
-	/// Stop counting this half's track as a finish and let it pick again from the snapshot
-	/// on hand once its task ends, as when the viewport turned away from its rendition.
-	pub(super) fn reselect(&mut self, kind: Kind) {
+	/// Pick a replacement from the snapshot on hand while this half plays on, as when the
+	/// viewport turned away from its rendition or the catalog moved it.
+	pub(super) fn switch(&mut self, kind: Kind) {
 		let half = self.half_mut(kind);
-		half.track = None;
+		half.switching = true;
 		half.read = None;
+	}
+
+	/// Give up the replacement being picked, which keeps what plays.
+	pub(super) fn settle(&mut self, kind: Kind) {
+		self.half_mut(kind).switching = false;
 	}
 
 	/// The newest snapshot, whether or not every half has read it.
@@ -146,11 +155,11 @@ impl Playback {
 		self.finished.contains(track)
 	}
 
-	/// Whether this half needs a rendition and hasn't already looked for one in
-	/// the snapshot on hand.
+	/// Whether this half needs a rendition, or a replacement for the one it plays, and hasn't
+	/// already looked for one in the snapshot on hand.
 	pub(super) fn wants(&self, kind: Kind) -> bool {
 		let half = self.half(kind);
-		!half.playing && half.read != Some(self.snapshots)
+		(!half.playing || half.switching) && half.read != Some(self.snapshots)
 	}
 
 	/// Record that this half read the snapshot on hand, whether or not it found
@@ -275,21 +284,35 @@ mod tests {
 		assert!(playback.pending().is_some(), "a fresh snapshot must be read");
 	}
 
-	/// A rendition stopped for the viewport picks again from the snapshot it was
-	/// chosen from, and its stop is no finish, so turning back can play it again.
+	/// A switching half picks a replacement from the snapshot on hand while it plays on, and
+	/// picks once per snapshot: a newer one asks again until the replacement starts.
 	#[test]
-	fn a_reselected_half_reads_its_snapshot_again() {
+	fn a_switching_half_picks_while_it_plays() {
 		let mut playback = Playback::default();
 		playback.received(Default::default());
 		playback.read(Kind::Video);
 		playback.started(Kind::Video, track("wide"));
 		playback.read(Kind::Audio);
+		assert!(playback.pending().is_none());
 
-		playback.reselect(Kind::Video);
-		assert!(playback.pending().is_none(), "picked again before the old task ended");
-		playback.ended(Kind::Video, true);
-		assert!(playback.wants(Kind::Video));
-		assert!(!playback.finished(&track("wide")));
+		playback.switch(Kind::Video);
+		assert!(playback.wants(Kind::Video), "a switch picks from the snapshot on hand");
+		playback.read(Kind::Video);
+		assert!(playback.pending().is_none(), "picked once per snapshot");
+		playback.received(Default::default());
+		assert!(playback.wants(Kind::Video), "a newer snapshot picks again");
+		playback.read(Kind::Video);
+
+		playback.started(Kind::Video, track("tall"));
+		playback.received(Default::default());
+		assert!(!playback.wants(Kind::Video), "the replacement plays");
+		playback.read(Kind::Audio);
+
+		// Given up, the half keeps playing what it has.
+		playback.switch(Kind::Video);
+		playback.settle(Kind::Video);
+		assert!(!playback.wants(Kind::Video));
+		assert!(playback.playing(Kind::Video));
 	}
 
 	/// The catalog track ending is what ends playback, since it is the only thing

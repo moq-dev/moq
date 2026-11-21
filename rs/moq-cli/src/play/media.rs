@@ -160,15 +160,29 @@ impl<O: Output> Media<O> {
 		let mut viewport = self.viewport.clone();
 		// Cleared once the window is gone, or there never was one, which leaves the viewport as is.
 		let mut viewing = true;
-		// Set while video picks again for a turned viewport. It stopped a rendition that was
-		// playing fine, so it only switches to one whose broadcast is already in hand.
-		let mut turning = false;
+		// The video rendition being opened, raced against everything else here. A replacement
+		// opens while the rendition it replaces plays on, which stops only once it is ready, so
+		// one that never comes (a broadcast nothing announces, a subscription left unanswered)
+		// leaves the picture playing rather than frozen.
+		let mut opening: Option<Opening<'_>> = None;
+		// The catalog moved the playing video rendition to another track, so the replacement
+		// being opened is wanted whichever way the window turns.
+		let mut retiring = false;
+		// The newest video task, so the end of one a replacement stopped re-arms nothing.
+		let mut video_task = 0u64;
 
 		loop {
-			if playback.done() {
+			// A rendition still opening can play yet, even after the catalog ended.
+			if playback.done() && opening.is_none() {
 				tails.join_all().await;
 				return Ok(());
 			}
+
+			// Why nothing started, so a catalog this build can't play reports the
+			// reason instead of leaving a blank window up forever. The decoders are
+			// gated by platform and cargo feature (no AV1 without `nvidia`, say), so
+			// this covers gaps the codec flags can't be validated against up front.
+			let mut rejected = Vec::new();
 
 			// Only wait when there is nothing on hand to act on. The snapshot that
 			// retires a rendition arrives while that rendition is still playing, so
@@ -178,7 +192,7 @@ impl<O: Output> Media<O> {
 			if playback.pending().is_none() {
 				tokio::select! {
 					result = tasks.join_next(), if !tasks.is_empty() => {
-						let ended = joined(result.expect("guarded by is_empty"))?.map(|(kind, (finished, sink))| {
+						let ended = joined(result.expect("guarded by is_empty"))?.map(|(kind, (task, finished, sink))| {
 							if kind == Kind::Audio {
 								// A replacement is a track boundary whose timestamps need not
 								// continue this one.
@@ -195,10 +209,59 @@ impl<O: Output> Media<O> {
 							if let Some(sink) = sink {
 								tails.spawn(drain(sink));
 							}
-							(kind, finished)
+							(kind, task, finished)
 						});
-						if let Some((kind, finished)) = ended {
+						// A video task its replacement stopped already gave the half away.
+						if let Some((kind, task, finished)) = ended
+							&& (kind == Kind::Audio || task == video_task)
+						{
 							playback.ended(kind, finished);
+						}
+					}
+					opened = async { opening.as_mut().expect("guarded").await }, if opening.is_some() => {
+						opening = None;
+						rejected.extend(opened.rejected);
+						match opened.ready {
+							Some(ready) => {
+								// The rendition it replaces played until now.
+								if let Some(replaced) = video_demand.take() {
+									let _ = replaced.stop.send(());
+								}
+								retiring = false;
+								video_task += 1;
+								let task = video_task;
+								tracing::info!(track = ready.name, decoder = ready.decoder.name(), "playing video rendition");
+								let (delay, held) = tokio::sync::watch::channel(None);
+								let video = Video {
+									presentation: self.presentation.clone(),
+									frames: self.video.clone(),
+									changed: self.drained.clone(),
+									output: self.output.clone(),
+									max_delay: self.args.video_delay(),
+									min_delay: self.args.video_delay(),
+									delay: held,
+								};
+								let (stop, stopped) = tokio::sync::oneshot::channel();
+								// Video plays on once moved, until its replacement is ready, so its
+								// retire handle only marks the move.
+								let (retire, _) = tokio::sync::oneshot::channel();
+								let demand = Demand {
+									name: ready.name,
+									track: ready.reference.clone(),
+									stop,
+									retire: Some(retire),
+									delay,
+								};
+								demand.hold(&self.args, ready.delay);
+								video_demand = Some(demand);
+								tasks.spawn(async move {
+									let result = until_stopped(video.run(ready.track, ready.decoder), stopped).await;
+									(Kind::Video, result.map(|(finished, _)| (task, finished, None)))
+								});
+								playback.started(Kind::Video, ready.reference);
+							}
+							// Nothing to switch to, so what plays keeps playing.
+							None => playback.settle(Kind::Video),
 						}
 					}
 					_ = tails.join_next(), if !tails.is_empty() => {}
@@ -210,13 +273,18 @@ impl<O: Output> Media<O> {
 						let orientation = *viewport.borrow_and_update();
 						let turned = video_demand.as_ref().zip(playback.latest()).is_some_and(|(demand, snapshot)| {
 							turned_away(&snapshot.video, &demand.name, orientation, |name, config| {
-								!playback.finished(&Track::of(&source, config, name)) && reachable(&source, config)
+								!playback.finished(&Track::of(&source, config, name))
 							})
 						});
-						if turned {
-							let _ = video_demand.take().expect("checked above").stop.send(());
-							playback.reselect(Kind::Video);
-							turning = true;
+						if turned || video_demand.is_none() {
+							// Picked again shaped like the window, if a pick was under way or
+							// the playing rendition is the wrong way round.
+							if opening.take().is_some() || turned {
+								playback.switch(Kind::Video);
+							}
+						} else if !retiring && opening.take().is_some() {
+							// Turned back before the replacement was ready.
+							playback.settle(Kind::Video);
 						}
 					}
 					// Followed for as long as it lasts, not just until something is
@@ -231,10 +299,14 @@ impl<O: Output> Media<O> {
 								stop_disabled(&mut video_demand, snapshot.video.renditions.iter().filter(|(_, config)| !config.enabled).map(|(name, _)| name));
 								stop_disabled(&mut audio_demand, snapshot.audio.renditions.iter().filter(|(_, config)| !config.enabled).map(|(name, _)| name));
 								selection.retain(&mut snapshot);
+								// Video holds no tail beyond the frames queued for the window, so the
+								// rendition it left plays on until its replacement is ready.
 								if let Some(demand) = &mut video_demand
-									&& demand.retire_moved(&source, snapshot.video.renditions.get(&demand.name))
+									&& demand.moved(&source, snapshot.video.renditions.get(&demand.name)).is_some()
 								{
 									playback.retire(Kind::Video);
+									playback.switch(Kind::Video);
+									retiring = true;
 								}
 								if let Some(demand) = &mut audio_demand
 									&& demand.retire_moved(&source, snapshot.audio.renditions.get(&demand.name))
@@ -270,130 +342,25 @@ impl<O: Output> Media<O> {
 			// necessarily the one that just arrived: the half that a retirement
 			// stopped reads the snapshot naming its replacement afterwards.
 			let Some(snapshot) = playback.pending().cloned() else {
+				unplayable(tasks.is_empty() && opening.is_none(), &rejected)?;
 				continue;
 			};
 
-			// Why nothing started, so a catalog this build can't play reports the
-			// reason instead of leaving a blank window up forever. The decoders are
-			// gated by platform and cargo feature (no AV1 without `nvidia`, say), so
-			// this covers gaps the codec flags can't be validated against up front.
-			let mut rejected = Vec::new();
-
 			if playback.wants(Kind::Video) {
 				playback.read(Kind::Video);
-				// The window reports its shape before its renderer comes up, so the first
-				// pick is already shaped like it rather than switching straight away.
-				let render = self.output.render().await;
-				// Copied out first: the borrow holds a lock across the awaits below.
 				let orientation = *viewport.borrow_and_update();
-				let turned = std::mem::take(&mut turning);
-				for (name, config) in shaped(&snapshot.video, orientation) {
-					let reference = Track::of(&source, config, name);
+				// A turn switches only to a rendition shaped like the window: the rest are no
+				// better than the one playing.
+				let turning = video_demand.is_some() && !retiring;
+				let candidates = shaped(&snapshot.video, orientation)
+					.into_iter()
+					.filter(|(_, config)| !(turning && opposed(&snapshot.video, config, orientation)))
+					.map(|(name, config)| (name.clone(), config.clone(), Track::of(&source, config, name)))
 					// A finished track has only its newest group left, which already played.
-					if playback.finished(&reference) {
-						continue;
-					}
-					// Waiting on a broadcast that may never come would freeze the picture
-					// a turn just stopped, so a turn skips one not yet in hand.
-					if turned && !reachable(&source, config) {
-						continue;
-					}
-					// A rendition pointing at a broadcast we can't reach is that
-					// rendition's problem, not the catalog's: fall through to the
-					// next one like an unsupported codec does.
-					let rendition = match source
-						.resolve(config.broadcast.as_ref(), config.instance.as_ref())
-						.await
-					{
-						Ok(rendition) => rendition,
-						Err(err) => {
-							tracing::warn!(track = name, %err, "cannot resolve video rendition");
-							rejected.push(format!("video `{name}`: {err}"));
-							continue;
-						}
-					};
-					// Nothing older than the playhead is worth presenting, so the delay
-					// doubles as the staleness budget on the wire.
-					let max_delay = self.args.video_delay();
-					let opened = async {
-						// The window's renderer refuses a GPU surface it cannot import, so
-						// the decoder downloads those instead, all of them on a device
-						// that imports none.
-						let mut decode = moq_video::decode::Config::new();
-						decode.output = render;
-						decode.device = crate::device(&self.args.vaapi_device, &self.args.v4l2_decoder);
-						let decoder = moq_video::decode::Sink::open(config, &decode).await?;
-						let delay = moq_net::track::Delay {
-							min: Some(self.args.video_delay()),
-							max: Some(max_delay),
-						};
-						let playout = moq_mux::container::Playout::new(delay, Duration::ZERO);
-						let track = rendition.track(hang::catalog::Reference::track(config, name))?;
-						// The whole delay from the first request, so a cold join never states a
-						// zero minimum before the container's update. The live edge, from the
-						// groups each hop holds from its live feed, never a warm copy's backlog,
-						// so it names no cached group for the shared publisher subscription to
-						// rewind to.
-						let subscriber = track
-							.subscribe(
-								playout.subscription(
-									moq_net::track::Subscription::default()
-										.with_priority(hang::catalog::PRIORITY.video)
-										.with_ranges([moq_net::track::Range::live()]),
-								),
-							)
-							.await?;
-						let format = catalog::hang::Container::try_from(config)?;
-						// The playout delay is the target latency, and the max how late a group may be.
-						let track = playout.consumer(subscriber, format);
-						Ok::<_, anyhow::Error>((track, decoder))
-					}
-					.await;
-					match opened {
-						Ok((track, decoder)) => {
-							tracing::info!(track = name, decoder = decoder.name(), "playing video rendition");
-							let (delay, held) = tokio::sync::watch::channel(None);
-							let video = Video {
-								presentation: self.presentation.clone(),
-								frames: self.video.clone(),
-								changed: self.drained.clone(),
-								output: self.output.clone(),
-								max_delay,
-								min_delay: self.args.video_delay(),
-								delay: held,
-							};
-							let (stop, stopped) = tokio::sync::oneshot::channel();
-							let (retire, retired) = tokio::sync::oneshot::channel();
-							let demand = Demand {
-								name: name.clone(),
-								track: reference.clone(),
-								stop,
-								retire: Some(retire),
-								delay,
-							};
-							demand.hold(&self.args, config.delay);
-							video_demand = Some(demand);
-							tasks.spawn(async move {
-								// Video holds no tail beyond the frames already queued for the window,
-								// so a retirement stops it too.
-								let stopped = async {
-									tokio::select! {
-										_ = stopped => {}
-										Ok(()) = retired => {}
-									}
-								};
-								let result = until_stopped(video.run(track, decoder), stopped).await;
-								(Kind::Video, result.map(|(finished, _)| (finished, None)))
-							});
-							playback.started(Kind::Video, reference);
-							break;
-						}
-						Err(err) => {
-							tracing::warn!(track = name, %err, "cannot play video rendition");
-							rejected.push(format!("video `{name}`: {err}"));
-						}
-					}
-				}
+					.filter(|(_, _, reference)| !playback.finished(reference))
+					.collect();
+				// Replaces one still opening, which the newer snapshot or viewport overrides.
+				opening = Some(Box::pin(self.open_video(&source, candidates)));
 			}
 
 			if playback.wants(Kind::Audio) {
@@ -464,10 +431,9 @@ impl<O: Output> Media<O> {
 										std::future::pending().await
 									}
 								};
-								(
-									Kind::Audio,
-									until_stopped(play_audio(consumer, audio, retired), stopped).await,
-								)
+								let result = until_stopped(play_audio(consumer, audio, retired), stopped).await;
+								// Audio never overlaps a replacement, so it needs no task id.
+								(Kind::Audio, result.map(|(finished, sink)| (0, finished, sink)))
 							});
 							playback.started(Kind::Audio, reference);
 							break;
@@ -480,15 +446,122 @@ impl<O: Output> Media<O> {
 				}
 			}
 
-			// Renditions on offer and not one of them playable, with nothing
-			// already running to fall back on.
-			if tasks.is_empty() && !rejected.is_empty() {
-				return Err(
-					Unplayable(format!("no playable rendition in the catalog: {}", rejected.join("; "))).into(),
-				);
-			}
+			unplayable(tasks.is_empty() && opening.is_none(), &rejected)?;
 		}
 	}
+
+	/// Open the first of `candidates` that resolves, subscribes, and decodes, once the window's
+	/// renderer is up. The window reports its shape before its renderer comes up, so the first
+	/// pick is already shaped like it rather than switching straight away.
+	async fn open_video(&self, source: &moq_mux::Source, candidates: Vec<Candidate>) -> Opened {
+		let render = self.output.render().await;
+		let mut rejected = Vec::new();
+		for (name, config, reference) in candidates {
+			// A rendition pointing at a broadcast we can't reach is that
+			// rendition's problem, not the catalog's: fall through to the
+			// next one like an unsupported codec does.
+			let rendition = match source
+				.resolve(config.broadcast.as_ref(), config.instance.as_ref())
+				.await
+			{
+				Ok(rendition) => rendition,
+				Err(err) => {
+					tracing::warn!(track = name, %err, "cannot resolve video rendition");
+					rejected.push(format!("video `{name}`: {err}"));
+					continue;
+				}
+			};
+			let opened = async {
+				// The window's renderer refuses a GPU surface it cannot import, so
+				// the decoder downloads those instead, all of them on a device
+				// that imports none.
+				let mut decode = moq_video::decode::Config::new();
+				decode.output = render;
+				decode.device = crate::device(&self.args.vaapi_device, &self.args.v4l2_decoder);
+				let decoder = moq_video::decode::Sink::open(&config, &decode).await?;
+				// Nothing older than the playhead is worth presenting, so the delay
+				// doubles as the staleness budget on the wire.
+				let delay = moq_net::track::Delay {
+					min: Some(self.args.video_delay()),
+					max: Some(self.args.video_delay()),
+				};
+				let playout = moq_mux::container::Playout::new(delay, Duration::ZERO);
+				let track = rendition.track(hang::catalog::Reference::track(&config, &name))?;
+				// The whole delay from the first request, so a cold join never states a
+				// zero minimum before the container's update. The live edge, from the
+				// groups each hop holds from its live feed, never a warm copy's backlog,
+				// so it names no cached group for the shared publisher subscription to
+				// rewind to.
+				let subscriber = track
+					.subscribe(
+						playout.subscription(
+							moq_net::track::Subscription::default()
+								.with_priority(hang::catalog::PRIORITY.video)
+								.with_ranges([moq_net::track::Range::live()]),
+						),
+					)
+					.await?;
+				let format = catalog::hang::Container::try_from(&config)?;
+				// The playout delay is the target latency, and the max how late a group may be.
+				let track = playout.consumer(subscriber, format);
+				Ok::<_, anyhow::Error>((track, decoder))
+			}
+			.await;
+			match opened {
+				Ok((track, decoder)) => {
+					let ready = Ready {
+						name,
+						reference,
+						delay: config.delay,
+						track,
+						decoder,
+					};
+					return Opened {
+						ready: Some(ready),
+						rejected,
+					};
+				}
+				Err(err) => {
+					tracing::warn!(track = name, %err, "cannot play video rendition");
+					rejected.push(format!("video `{name}`: {err}"));
+				}
+			}
+		}
+		Opened { ready: None, rejected }
+	}
+}
+
+/// A video rendition to try: its name, its config, and the track it plays from.
+type Candidate = (String, hang::catalog::VideoConfig, Track);
+
+/// A video rendition being opened.
+type Opening<'a> = std::pin::Pin<Box<dyn Future<Output = Opened> + Send + 'a>>;
+
+/// What opening a video rendition came to.
+struct Opened {
+	/// The first candidate that opened, if any did.
+	ready: Option<Ready>,
+	/// Why each candidate before it didn't.
+	rejected: Vec<String>,
+}
+
+/// A video rendition subscribed and with its decoder open, ready to play.
+struct Ready {
+	name: String,
+	reference: Track,
+	/// The catalog `delay` it asks for.
+	delay: Option<Duration>,
+	track: moq_mux::container::Consumer<catalog::hang::Container>,
+	decoder: moq_video::decode::Sink,
+}
+
+/// Fail with why nothing plays once renditions were on offer and not one of them
+/// opened, with nothing already running or opening to fall back on.
+fn unplayable(idle: bool, rejected: &[String]) -> anyhow::Result<()> {
+	if idle && !rejected.is_empty() {
+		return Err(Unplayable(format!("no playable rendition in the catalog: {}", rejected.join("; "))).into());
+	}
+	Ok(())
 }
 
 /// Drive `play` until it ends or `stopped` fires, reporting whether it ended on its
@@ -509,7 +582,7 @@ struct Demand {
 	name: String,
 	track: Track,
 	stop: tokio::sync::oneshot::Sender<()>,
-	/// Ends the rendition as though its track finished, taken once sent.
+	/// Ends the rendition as though its track finished, taken once the catalog moves it.
 	retire: Option<tokio::sync::oneshot::Sender<()>>,
 	/// The catalog `delay` the rendition holds, `None` under a fixed `--delay`.
 	delay: tokio::sync::watch::Sender<Option<Duration>>,
@@ -519,12 +592,18 @@ impl Demand {
 	/// Retire the rendition if `config`, its entry in a newer snapshot, moved it to another
 	/// track, returning whether it did. The half then picks again from that snapshot.
 	fn retire_moved(&mut self, source: &moq_mux::Source, config: Option<&impl hang::catalog::Reference>) -> bool {
+		self.moved(source, config).map(|retire| retire.send(())).is_some()
+	}
+
+	/// The retire handle, taken once `config`, its entry in a newer snapshot, moved the
+	/// rendition to another track.
+	fn moved(
+		&mut self,
+		source: &moq_mux::Source,
+		config: Option<&impl hang::catalog::Reference>,
+	) -> Option<tokio::sync::oneshot::Sender<()>> {
 		let moved = config.is_some_and(|config| Track::of(source, config, &self.name) != self.track);
-		let Some(retire) = self.retire.take_if(|_| moved) else {
-			return false;
-		};
-		let _ = retire.send(());
-		true
+		self.retire.take_if(|_| moved)
 	}
 
 	/// Hold the rendition's newest catalog `delay`, unless the delay is fixed.
@@ -575,18 +654,6 @@ fn turned_away(
 		&& video
 			.enabled()
 			.any(|(name, config)| !opposed(video, config, viewport) && available(name, config))
-}
-
-/// Whether the broadcast `config` plays from is already in hand, so opening it waits on nothing.
-fn reachable(source: &moq_mux::Source, config: &hang::catalog::VideoConfig) -> bool {
-	source
-		.bind(config.broadcast.as_ref(), config.instance.as_ref())
-		.is_ok_and(|binding| {
-			matches!(
-				binding.poll_broadcast(&kio::Waiter::noop()),
-				std::task::Poll::Ready(Ok(_))
-			)
-		})
 }
 
 // Cancel through the task's own result so it still reports which half ended.
@@ -1188,19 +1255,6 @@ mod tests {
 			names(Some(Orientation::Portrait)),
 			["tall", "square", "wide", "wide/360p"]
 		);
-	}
-
-	/// A turn only switches to a broadcast already in hand: the playing one, not a sibling
-	/// nothing announced, which would leave the stopped picture frozen while it waits.
-	#[tokio::test]
-	async fn only_a_broadcast_in_hand_is_reachable() {
-		let origin = moq_tokio::origin::spawn();
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let source = moq_mux::Source::new(origin.consume(), broadcast.consume());
-		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
-		assert!(reachable(&source, &config));
-		config.broadcast = Some(moq_net::path::Relative::new("./portrait").unwrap());
-		assert!(!reachable(&source, &config));
 	}
 
 	#[test]
@@ -2290,6 +2344,32 @@ mod tests {
 		assert!(
 			recorder.played().iter().any(|part| part.sample == 0.5),
 			"the live disabled track prevented fallback"
+		);
+	}
+
+	/// A video rendition on a broadcast nothing announces opens beside the rest of playback,
+	/// rather than holding everything up while it waits.
+	#[tokio::test]
+	async fn an_unannounced_video_rendition_holds_nothing_up() {
+		tokio::time::pause();
+		let origin = moq_tokio::origin::spawn();
+		let broadcast = origin.route("room", moq_net::origin::RouteOptions::default()).unwrap();
+		let mut catalog = catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
+		catalog
+			.mutate(|catalog| {
+				let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+				config.broadcast = Some(moq_net::path::Relative::new("./portrait").unwrap());
+				catalog.video.renditions.insert("tall".to_string(), config);
+			})
+			.unwrap();
+		let mut audio = rendition(broadcast.broadcast(), &catalog, "audio");
+		let recorder = Recorder::default();
+		let player = tokio::spawn(media(&origin, Duration::from_millis(50), recorder.clone()).run());
+		write(&mut audio, 40, 0.25).await;
+		settle(player, &recorder).await;
+		assert!(
+			recorder.played().iter().any(|part| part.sample == 0.25),
+			"the unannounced video rendition held audio up"
 		);
 	}
 
