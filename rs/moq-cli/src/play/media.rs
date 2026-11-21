@@ -286,7 +286,7 @@ impl<O: Output> Media<O> {
 						decode.output = self.output.render().await;
 						decode.device = crate::device(&self.args.vaapi_device, &self.args.v4l2_decoder);
 						let decoder = moq_video::decode::Sink::open(config, &decode).await?;
-						let delay = moq_net::track::Delay {
+						let delay = moq_mux::container::Delay {
 							min: Some(self.args.video_delay()),
 							max: Some(max_delay),
 						};

@@ -12,7 +12,7 @@ use super::decoder::Config;
 use super::sink::Sink;
 use crate::Error;
 use crate::Frame;
-pub use moq_net::track::Delay;
+pub use moq_mux::container::Delay;
 
 /// One item of a [`Consumer`] read, in delivery order: a decoded picture, or a break
 /// between them.
@@ -333,11 +333,11 @@ impl Reader {
 		// speed before reaching live media: on a thirty-second retention, half a minute of pictures
 		// raced through.
 		//
-		// A live join, the default range with no start and a stated Min Age, starts that far behind
-		// each hop's live edge, never at what an ended feed left cached, so it names no stale group
-		// that would ask the publisher to rewind for everyone reading. A playout stating no
-		// minimum joins at the latest group, and keeps that zero stated through the container's
-		// updates. `Start::Oldest` states none, which reaches back as far as the max delay allows.
+		// A live join, the range a stated min delay places, starts that far behind each hop's live
+		// edge, never at what an ended feed left cached, so it names no stale group that would ask
+		// the publisher to rewind for everyone reading. A playout stating no minimum joins at the
+		// latest group. `Start::Oldest` states none, which reaches back as far as the max delay
+		// allows.
 		let mut delay = options.delay;
 		delay.min = match options.start {
 			Start::Oldest => None,
@@ -572,7 +572,7 @@ mod tests {
 		// the second `next()` would then block forever waiting for a group that was
 		// skipped.
 		let mut export = moq_mux::container::fmp4::Export::new(source, catalog)
-			.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(30)));
+			.with_delay(moq_mux::container::Delay::default().with_max(std::time::Duration::from_secs(30)));
 		let init = export.next().await.unwrap().expect("CMAF init");
 		let fragment = export.next().await.unwrap().expect("CMAF fragment");
 
@@ -684,8 +684,10 @@ mod tests {
 		// is the case that bites, because its cached groups are stale by then and the publisher
 		// resends the broadcast from them. The live join starts from each hop's live edge.
 		assert_eq!(
-			published.subscription().map(|sub| (sub.ranges, sub.delay.min)),
-			Some((vec![moq_net::track::Range::default()], Some(std::time::Duration::ZERO))),
+			published.subscription().map(|sub| sub.ranges),
+			Some(vec![moq_net::track::Range::from(moq_net::track::Start::Live(
+				std::time::Duration::ZERO
+			))]),
 			"the publisher was asked to rewind the track",
 		);
 	}
@@ -1621,7 +1623,15 @@ mod tests {
 			opened = &mut open => panic!("the open finished with no live edge (ok: {})", opened.is_ok()),
 			first = track.subscription_changed() => first.unwrap(),
 		};
-		assert_eq!(first.map(|sub| sub.delay), Some(delay));
+		assert_eq!(
+			first.map(|sub| (sub.delay, sub.ranges)),
+			Some((
+				moq_net::track::Delay::default().with_max(delay.max),
+				vec![moq_net::track::Range::from(moq_net::track::Start::Live(
+					std::time::Duration::from_millis(300)
+				))],
+			))
+		);
 	}
 
 	/// A device that cannot decode the stream refuses the rendition, so a caller

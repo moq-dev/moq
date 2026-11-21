@@ -163,9 +163,9 @@ pub(crate) struct ExportSource {
 	target: Target,
 	state: SourceState,
 	/// Where the subscription starts behind the live edge, and how late a group may fall.
-	delay: moq_net::track::Delay,
+	delay: crate::container::Delay,
 	/// The delay the consumer skips and starts at, if not the one the subscription states.
-	skip: Option<moq_net::track::Delay>,
+	skip: Option<crate::container::Delay>,
 	transform: Option<VideoTransform>,
 	/// Resolved codec configuration record (avcC / hvcC / AudioSpecificConfig /
 	/// OpusHead). Some once the codec config is available - from the catalog
@@ -213,7 +213,7 @@ impl ExportSource {
 		source: &crate::Source,
 		name: &str,
 		config: &VideoConfig,
-		delay: moq_net::track::Delay,
+		delay: crate::container::Delay,
 	) -> Result<Option<Self>, crate::Error> {
 		Self::video(source, name, config, delay, build_video_transform(config))
 	}
@@ -227,7 +227,7 @@ impl ExportSource {
 		source: &crate::Source,
 		name: &str,
 		config: &VideoConfig,
-		delay: moq_net::track::Delay,
+		delay: crate::container::Delay,
 	) -> Result<Option<Self>, crate::Error> {
 		let record = annexb_catalog_record(config);
 		let transform = match (&config.codec, record.is_some()) {
@@ -252,7 +252,7 @@ impl ExportSource {
 		source: &crate::Source,
 		name: &str,
 		config: &VideoConfig,
-		delay: moq_net::track::Delay,
+		delay: crate::container::Delay,
 	) -> Result<Option<Self>, crate::Error> {
 		Self::video(source, name, config, delay, None)
 	}
@@ -261,7 +261,7 @@ impl ExportSource {
 		source: &crate::Source,
 		name: &str,
 		config: &VideoConfig,
-		delay: moq_net::track::Delay,
+		delay: crate::container::Delay,
 		transform: Option<VideoTransform>,
 	) -> Result<Option<Self>, crate::Error> {
 		let media: HangContainer = config.try_into()?;
@@ -286,7 +286,7 @@ impl ExportSource {
 		source: &crate::Source,
 		name: &str,
 		config: &AudioConfig,
-		delay: moq_net::track::Delay,
+		delay: crate::container::Delay,
 	) -> Result<Option<Self>, crate::Error> {
 		let media: HangContainer = config.try_into()?;
 		let Some(target) = Target::of(source, name, config) else {
@@ -304,7 +304,11 @@ impl ExportSource {
 	///
 	/// Such a rendition has no catalog `broadcast` field, so it always lives on the
 	/// catalog broadcast and can never carry an escaping reference.
-	pub fn for_stream(source: &crate::Source, name: &str, delay: moq_net::track::Delay) -> Result<Self, crate::Error> {
+	pub fn for_stream(
+		source: &crate::Source,
+		name: &str,
+		delay: crate::container::Delay,
+	) -> Result<Self, crate::Error> {
 		let target = Target {
 			path: source.path().clone(),
 			instance: None,
@@ -320,7 +324,7 @@ impl ExportSource {
 		name: &str,
 		target: Target,
 		media: HangContainer,
-		delay: moq_net::track::Delay,
+		delay: crate::container::Delay,
 	) -> Self {
 		Self {
 			name: name.to_string(),
@@ -408,7 +412,7 @@ impl ExportSource {
 	/// Skip and start at `delay` instead of the subscription's own, which still tells the
 	/// publisher how long to keep a group: for a reader that asks the publisher for more than
 	/// it plays out itself.
-	pub(crate) fn skipping_at(mut self, delay: moq_net::track::Delay) -> Self {
+	pub(crate) fn skipping_at(mut self, delay: crate::container::Delay) -> Self {
 		self.skip = Some(delay);
 		self
 	}
@@ -583,15 +587,14 @@ impl ExportSource {
 		if let SourceState::Requesting { binding, start } = &self.state {
 			let broadcast = ready!(binding.poll_broadcast(waiter))?;
 			let instance = binding.sibling().then(|| broadcast.clone());
-			let mut subscription = moq_net::track::Subscription::default().with_delay(self.delay);
 			// From the group starting at `after`: a time start names the group containing it, so the
 			// request reaches that group too and the reader below leaves it out.
-			if let Some(after) = start.after {
-				subscription = subscription.with_ranges([moq_net::track::Range {
-					start: Some(after),
-					end: None,
-				}]);
-			}
+			let subscription = match start.after {
+				Some(after) => moq_net::track::Subscription::default()
+					.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Time(after))]),
+				None => moq_net::track::Subscription::default(),
+			};
+			let subscription = self.delay.subscription(subscription);
 			let track = match broadcast.track(&self.target.track) {
 				Ok(track) => track,
 				Err(_) if instance.as_ref().is_some_and(|i| i.poll_closed(waiter).is_ready()) => return self.end(),
@@ -643,11 +646,11 @@ impl ExportSource {
 				Some(after) => track.with_range((Bound::Excluded(after), Bound::Unbounded)),
 				None => track,
 			};
-			let consumer = Consumer::new(track, media).continuing(reached);
-			let consumer = match self.skip {
-				Some(delay) => consumer.skipping_at(delay),
-				None => consumer,
-			};
+			// The subscription states no min once its range starts at a time, so the consumer
+			// takes the delay from here rather than from it.
+			let consumer = Consumer::new(track, media)
+				.continuing(reached)
+				.skipping_at(self.skip.unwrap_or(self.delay));
 			let consumer = match live {
 				true => consumer.live(),
 				false => consumer,
@@ -982,7 +985,7 @@ mod tests {
 	async fn escaping_reference_skips_the_rendition() {
 		let live = Live::avc3();
 		let source = live.source().await;
-		let delay = moq_net::track::Delay::default();
+		let delay = crate::container::Delay::default();
 
 		let escaping = |result: Result<Option<ExportSource>, crate::Error>, what: &str| match result {
 			Ok(None) => {}
@@ -1009,7 +1012,7 @@ mod tests {
 	async fn legal_reference_keeps_the_rendition() {
 		let live = Live::avc3();
 		let source = live.source().await;
-		let delay = moq_net::track::Delay::default();
+		let delay = crate::container::Delay::default();
 
 		for reference in [None, Some(""), Some("./source"), Some("sub"), Some(".")] {
 			ExportSource::for_video(&source, "video", &video(reference), delay)
@@ -1039,7 +1042,7 @@ mod tests {
 			&source,
 			"audio",
 			&config,
-			moq_net::track::Delay::default().with_max(Duration::from_secs(10)),
+			crate::container::Delay::default().with_max(Duration::from_secs(10)),
 		)
 		.unwrap()
 		.unwrap();
@@ -1073,7 +1076,7 @@ mod tests {
 			&source,
 			"late",
 			&config,
-			moq_net::track::Delay::default().with_max(Duration::from_secs(10)),
+			crate::container::Delay::default().with_max(Duration::from_secs(10)),
 		)
 		.unwrap()
 		.unwrap();
@@ -1103,7 +1106,7 @@ mod tests {
 				&source,
 				"audio",
 				&config,
-				moq_net::track::Delay::default().with_max(Duration::from_secs(10)),
+				crate::container::Delay::default().with_max(Duration::from_secs(10)),
 			)
 			.unwrap()
 			.unwrap();
@@ -1178,7 +1181,7 @@ mod tests {
 			&source,
 			"audio",
 			&audio(Some("./source")),
-			moq_net::track::Delay::default().with_max(Duration::from_secs(10)),
+			crate::container::Delay::default().with_max(Duration::from_secs(10)),
 		)
 		.unwrap()
 		.unwrap();
@@ -1204,7 +1207,7 @@ mod tests {
 		for live_start in [false, true] {
 			let live = Live::avc3();
 			let max_delay = std::time::Duration::from_secs(10);
-			let delay = moq_net::track::Delay::default().with_max(max_delay);
+			let delay = crate::container::Delay::default().with_max(max_delay);
 			let export = ExportSource::for_video(&live.source().await, live.track.name(), &video(None), delay)
 				.unwrap()
 				.expect("fixture should produce a video rendition");
@@ -1239,7 +1242,7 @@ mod tests {
 			&live.source().await,
 			live.track.name(),
 			&audio(None),
-			moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(10)),
+			crate::container::Delay::default().with_max(std::time::Duration::from_secs(10)),
 		)
 		.unwrap()
 		.unwrap()
@@ -1286,7 +1289,7 @@ mod tests {
 			&source,
 			"audio",
 			&audio(None),
-			moq_net::track::Delay::default().with_max(Duration::from_secs(1)),
+			crate::container::Delay::default().with_max(Duration::from_secs(1)),
 		)
 		.unwrap()
 		.unwrap()
@@ -1394,7 +1397,7 @@ mod tests {
 				&source,
 				"audio",
 				&audio(None),
-				moq_net::track::Delay::default().with_max(Duration::from_millis(450)),
+				crate::container::Delay::default().with_max(Duration::from_millis(450)),
 			)
 			.unwrap()
 			.unwrap()
@@ -1447,7 +1450,7 @@ mod tests {
 		for (read, first) in [(900, Some(1_000_000)), (1_500, None)] {
 			let mut moving = Moving::new();
 			let source = moving.source().await;
-			let delay = moq_net::track::Delay::default().with_max(Duration::from_secs(10));
+			let delay = crate::container::Delay::default().with_max(Duration::from_secs(10));
 			let mut previous =
 				ExportSource::for_video(&source, Moving::RENDITION, &Moving::config("a", None, SPS), delay)
 					.unwrap()
@@ -1496,7 +1499,7 @@ mod tests {
 			&live.source().await,
 			live.track.name(),
 			&audio(None),
-			moq_net::track::Delay::default().with_max(Duration::from_secs(10)),
+			crate::container::Delay::default().with_max(Duration::from_secs(10)),
 		)
 		.unwrap()
 		.unwrap();
