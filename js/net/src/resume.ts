@@ -555,7 +555,11 @@ class Reader implements ResumeSource {
 		const [returning] = index === -1 ? [] : this.#copies.splice(index, 1);
 		for (const copy of this.#copies) {
 			copy.replaced = true;
-			this.#cap(copy, boundary);
+			// Nothing held nor handed out: nothing to split. Asked for nothing, a copy's subscription
+			// would end with the track, and a fetch then landing a later group would read as the
+			// whole of it. Left uncapped, it reads as an incumbent until the new copy delivers (see
+			// #joinIncumbent and #observe), where the Rust reader lets it go at once.
+			if (boundary !== undefined) this.#cap(copy, boundary);
 		}
 		if (returning) {
 			const copy = returning;
@@ -622,7 +626,7 @@ class Reader implements ResumeSource {
 	/**
 	 * Where a switch splits the subscription: the largest group any copy holds, never below the
 	 * newest handed out. `undefined` while neither exists, when the new copy is asked for the ranges
-	 * as the copies it replaces were, and they are asked for nothing. Mirrors the Rust
+	 * as the copies it replaces were, and they are left uncapped. Mirrors the Rust
 	 * `Reader::boundary`.
 	 */
 	#boundary(): bigint | undefined {
@@ -638,10 +642,9 @@ class Reader implements ResumeSource {
 	 * Take nothing past group `until` from replaced `copy`, and ask for nothing past it on the wire:
 	 * the copy replacing it starts there. A cap only narrows. Mirrors the Rust `Copy::cap`.
 	 */
-	#cap(copy: Copy, until: bigint | undefined): void {
-		const capped = until ?? null;
-		if (copy.until === null || (copy.until !== undefined && capped !== null && copy.until <= capped)) return;
-		copy.until = capped;
+	#cap(copy: Copy, until: bigint): void {
+		if (copy.until === null || (copy.until !== undefined && copy.until <= until)) return;
+		copy.until = until;
 		this.#update(copy);
 		this.#bound(copy);
 	}
@@ -910,13 +913,15 @@ class Reader implements ResumeSource {
 		};
 		if (this.#copies.some((copy) => asks(copy) && (copyEnd(copy) ?? UNBOUNDED) >= end)) return;
 		// A later resume point widens the route's backfill rather than asking again, so flaps over
-		// a gap keep one per route. Waited for as long as a new one would be.
+		// a gap keep one per route, reading again one that ran out. Waited for as long as a new one
+		// would be.
 		const widened = this.#copies
 			.slice(0, -1)
-			.find((copy) => copy.done === undefined && copy.until !== undefined && asks(copy));
+			.find((copy) => !(copy.done instanceof Error) && copy.until !== undefined && asks(copy));
 		if (widened) {
 			widened.until = end - 1n;
 			widened.since = now();
+			widened.done = undefined;
 			this.#update(widened);
 			this.#bound(widened);
 			this.wake();
@@ -1038,9 +1043,9 @@ class Reader implements ResumeSource {
 	}
 
 	/**
-	 * `copy` handed out `key`. The serving copy's first group bounds the incumbent copies a reader
-	 * joining mid-switch reads (see {@link #joinIncumbent}), the only replaced copies a switch
-	 * left uncapped, just below it: what they hold under it may be groups the new route never has,
+	 * `copy` handed out `key`. The serving copy's first group bounds the replaced copies a switch
+	 * left uncapped, just below it: the incumbent copies a reader joining mid-switch reads (see
+	 * {@link #joinIncumbent}), and those replaced before any group was held or handed out: what they hold under it may be groups the new route never has,
 	 * and what is at or above it the new route delivers. Never below a group already handed out. A
 	 * group it replays, already handed out, bounds nothing: the incumbent may still hold the next.
 	 * Nor does a backfill of the serving route.

@@ -420,7 +420,9 @@ test("route flaps keep one backfill per distinct route", async () => {
 		// Each route's one backfill. Its own copy is asked again only once a cap drained it, before
 		// the flaps settle on returning to the copy each route holds.
 		for (const spy of subscribed) {
-			const backfills = spy.mock.calls.filter(([asked]) => asked?.ranges?.some((range) => range.end !== undefined));
+			const backfills = spy.mock.calls.filter(([asked]) =>
+				asked?.ranges?.some((range) => range.end !== undefined),
+			);
 			expect(backfills.length).toBe(1);
 			expect(spy.mock.calls.length).toBeLessThanOrEqual(3);
 		}
@@ -1125,6 +1127,26 @@ test("a replacement that answers and then aborts before its first group leaves t
 	// The incumbent's clean end is the track's, not the replacement's error.
 	ta.producer.finish();
 	expect(await sub.recvGroup()).toBeUndefined();
+
+	sub.close();
+	close();
+});
+
+test("a replacement that aborts before any group was held leaves the incumbent serving", async () => {
+	const { a, b, swap, active, close } = await setup();
+	const ta = copy(a);
+	const tb = copy(b);
+	const sub = active.track("seq").subscribe();
+	await settle();
+
+	await swap();
+	tb.producer.abort(new StreamError(StreamCode(64)));
+	await settle();
+	expect(sub.closed.peek()).toBeUndefined();
+
+	ta.write(1n);
+	await settle();
+	expect(drain(sub)).toEqual([1n]);
 
 	sub.close();
 	close();
@@ -3118,6 +3140,35 @@ for (const ordered of [false, true]) {
 		}
 	});
 }
+
+// The Rust reader drops the replaced copy instead (`a_switch_before_any_group_drops_the_replaced_copy`):
+// here it reads as the incumbent until the new route delivers, which bounds it.
+test("a switch before any group leaves the replaced copy uncapped as the incumbent", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	try {
+		expect(drain(sub)).toEqual([]);
+		front.serve(b.consume());
+		expect(drain(sub)).toEqual([]);
+		await settle();
+		// Nothing held nor handed out: nothing to split, so the new route is asked as the reader was.
+		expect(tb.producer.subscription.peek()?.ranges?.[0]?.start?.time).toBeUndefined();
+		expect(ta.producer.subscription.peek()?.ranges?.[0]?.end).toBeUndefined();
+		ta.write(0n);
+		tb.write(1n);
+		expect(drain(sub)).toEqual([0n, 1n]);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+	}
+});
 
 test("a group the new route replays bounds nothing, so the old route's next group still arrives", async () => {
 	const front = new Front();

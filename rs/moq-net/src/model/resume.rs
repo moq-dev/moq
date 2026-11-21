@@ -864,11 +864,11 @@ impl Copy {
 	/// the wire: the copy replacing it starts there. A cap only narrows what it may deliver,
 	/// so a copy that ran out stays out: reopened, it would be waited on with nothing left to
 	/// wake the reader.
-	fn cap(&mut self, until: Option<u64>, reader: &Mirrored) {
-		if self.until.is_some_and(|capped| capped <= until) {
+	fn cap(&mut self, until: u64, reader: &Mirrored) {
+		if self.until.is_some_and(|capped| capped <= Some(until)) {
 			return;
 		}
-		self.until = Some(until);
+		self.until = Some(Some(until));
 		// Its own resolution, which capping its end must not move.
 		if let Sub::Ready(sub) = &mut self.sub {
 			let keys = reader.ranges.keys().copied();
@@ -1489,7 +1489,7 @@ impl Resume {
 		if matches!(self, Self::Whole) {
 			return;
 		}
-		*self = match (std::mem::take(self), reader.held_at(reader.newest)) {
+		*self = match (std::mem::take(self), reader.held_at(reader.boundary())) {
 			(_, None) => Self::Whole,
 			(Self::Lowest(at, head), Some((next, _))) if at <= next => Self::Lowest(at, head),
 			(_, Some((next, head))) => Self::Lowest(next, head),
@@ -1781,7 +1781,8 @@ struct Reader {
 
 impl Reader {
 	/// The ranges in `preferences`, from the reader's own, each as a new copy is asked for
-	/// it: from where the reader got to, its anchors where the serving copy placed them.
+	/// it: from the boundary a switch splits at, its anchors where the serving copy placed
+	/// them.
 	fn resumed(&mut self, preferences: &[(u64, track::Range)]) -> Vec<(u64, track::Range)> {
 		let (revision, delay) = {
 			let current = self.subscription.read();
@@ -1816,7 +1817,7 @@ impl Reader {
 			Some(copy) if current => keys.map(|key| copy.resolved.get(&key).copied()).collect(),
 			_ => Vec::new(),
 		};
-		let floor = self.newest;
+		let floor = self.boundary();
 		preferences
 			.iter()
 			.enumerate()
@@ -2106,9 +2107,21 @@ impl Reader {
 		let returning = self.copies.iter().rposition(|copy| copy.track.same_channel(&track));
 		// The copy's own resolution ends at its old cap; the reader's does not.
 		let returning = returning.map(|index| (self.window().resolved_by_key(), self.copies.remove(index)));
-		for copy in &mut self.copies {
-			copy.replaced = true;
-			copy.cap(boundary, &self.mirrored);
+		match boundary {
+			Some(boundary) => {
+				for copy in &mut self.copies {
+					copy.replaced = true;
+					copy.cap(boundary, &self.mirrored);
+				}
+			}
+			// Nothing held nor handed out: nothing to split, so the new copy serves it all. Kept
+			// and asked for nothing, a copy's subscription would end with the track, and a fetch
+			// then landing a later group would read as the whole of it. An end one declared
+			// outlives it.
+			None => {
+				self.learn_end(Some(&kio::Waiter::noop()));
+				self.copies.clear();
+			}
 		}
 		if let Some((resolved, mut copy)) = returning {
 			copy.generation = generation;
@@ -2291,7 +2304,7 @@ impl Reader {
 
 	/// Where a switch splits the subscription: the largest group any copy holds, never below
 	/// the newest handed out. `None` while neither exists, when the new copy is asked for the
-	/// ranges as the copies it replaces were, and they are asked for nothing.
+	/// ranges as the copies it replaces were, and they are dropped.
 	fn boundary(&self) -> Option<u64> {
 		(self.copies.iter())
 			.filter_map(|copy| copy.track.latest_key())
@@ -2878,14 +2891,16 @@ impl Reader {
 		// resume point, and a bounded copy's own ends at its earlier cap.
 		let resolved = self.window().resolved_by_key();
 		// A later resume point widens the route's backfill rather than asking again, so flaps
-		// over a gap keep one per route. Waited for as long as a new one would be.
+		// over a gap keep one per route, reading again one that ran out. Waited for as long as a
+		// new one would be.
 		let last = self.copies.len() - 1;
 		if let Some(copy) = self.copies[..last]
 			.iter_mut()
-			.find(|copy| copy.done.is_none() && copy.end().is_some() && asks(copy))
+			.find(|copy| !matches!(copy.done, Some(Err(_))) && copy.end().is_some() && asks(copy))
 		{
 			copy.until = Some(lowered.end.checked_sub(1));
 			copy.since = Some(copy.track.now());
+			copy.done = None;
 			copy.resolved = resolved;
 			copy.send(&self.mirrored, self.mirrored.ranges.keys().copied());
 			return;
@@ -4951,7 +4966,8 @@ mod test {
 		routes.serve(c.consume());
 		assert_eq!(c.subscription().expect("subscribed").resume, Some(Position::new(1, 1)));
 
-		// A reader holding none of the group asks for it whole, and outweighs one resuming.
+		// A reader yet to read the boundary group resumes past the frames held all the same:
+		// the copy holding them is capped there, and lends them to the new one.
 		let routes = Producer::new();
 		let front = logical(&routes);
 		let a = copy();
@@ -4961,7 +4977,7 @@ mod test {
 		write(&a, 5);
 		assert_eq!(recv(&mut first).start, 5);
 		let demand = front.subscription().unwrap();
-		assert_eq!(routes.subscription(demand.clone(), 2).resume, None);
+		assert_eq!(routes.subscription(demand.clone(), 2).resume, Some(Position::new(5, 1)));
 		assert_eq!(recv(&mut second).start, 5);
 		assert_eq!(routes.subscription(demand, 2).resume, Some(Position::new(5, 1)));
 	}
@@ -7772,6 +7788,31 @@ mod test {
 		}
 	}
 
+	/// A switch before any copy holds a group has nothing to split: the replaced copy goes at
+	/// once, and the new route serves everything from the reader's own start.
+	#[test]
+	fn a_switch_before_any_group_drops_the_replaced_copy() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		assert_eq!(copies(&routes), 1);
+
+		let b = copy();
+		routes.serve(b.consume());
+		assert_eq!(copies(&routes), 1, "only the new route's copy");
+		assert!(a.subscription().is_none(), "the old route is unsubscribed");
+		assert_eq!(
+			b.subscription().expect("subscribed").start(),
+			None,
+			"asked as the reader was"
+		);
+		write(&a, 0);
+		write(&b, 1);
+		assert_eq!(drain(&mut sub, false), [1]);
+	}
+
 	/// How many copies the logical track's only reader holds.
 	fn copies(routes: &Producer) -> usize {
 		let readers = routes.readers.lock().unwrap();
@@ -8944,7 +8985,8 @@ mod test {
 
 	/// A new copy asked for a reader whose update has yet to reach its copies, as when
 	/// another thread asks between the update and its mirroring, places the updated live
-	/// join behind the live edge by the updated delay, as the reader would.
+	/// join behind the live edge by the updated delay, as the reader would, then raises it
+	/// to the boundary: the copy holding the groups behind the edge drains them.
 	#[test]
 	fn a_new_copy_places_an_unmirrored_live_join_by_its_delay() {
 		let routes = Producer::new();
@@ -8968,13 +9010,14 @@ mod test {
 		let _held = routes.subscribe(&b.consume(), logical.subscription().unwrap(), 1);
 		assert_eq!(
 			b.subscription().unwrap().start(),
-			Some(1000),
-			"the newest group 1.5s behind the edge at 3000"
+			Some(3000),
+			"the join 1.5s behind the edge at 3000, raised to it"
 		);
 	}
 
 	/// As [`a_new_copy_places_an_unmirrored_live_join_by_its_delay`], from a failed copy: its
-	/// cache places nothing, so the new copy is asked for the updated start as given.
+	/// cache places nothing, so the new copy is asked for the updated start as given, raised
+	/// to the boundary at the largest group the failed copy holds.
 	#[test]
 	fn a_new_copy_takes_no_placement_of_an_unmirrored_range_from_a_failed_copy() {
 		let routes = Producer::new();
@@ -9002,8 +9045,8 @@ mod test {
 		let _held = routes.subscribe(&b.consume(), logical.subscription().unwrap(), 1);
 		assert_eq!(
 			b.subscription().unwrap().start(),
-			Some(1500),
-			"not the failed copy's 1000"
+			Some(2000),
+			"not the failed copy's 1000, nor the start as given"
 		);
 	}
 
@@ -9609,7 +9652,7 @@ mod test {
 			let old = &mut reader.copies[0];
 			old.replaced = true;
 			assert!(old.poll_ready(groups, &kio::Waiter::noop()).is_ready());
-			old.cap(Some(cap - 1), &mirrored);
+			old.cap(cap - 1, &mirrored);
 			let window = reader.window();
 			assert_eq!(window.is_settled(), placed.is_some(), "{end:?} capped at {cap}");
 			assert_eq!(window.end(), placed, "{end:?} capped at {cap}");
@@ -9793,7 +9836,8 @@ mod test {
 	}
 
 	/// The demand on a new copy keeps each reader's relative start where its copy resolved
-	/// it. Ranges the reader changed since its copies last heard resolve against the newest
+	/// it, raised to the boundary a switch splits at. Ranges the reader changed since its
+	/// copies last heard resolve against the newest
 	/// answered copy's cache now, and an unanswered copy's resolution is for the ranges it
 	/// was asked for alone.
 	#[test]
@@ -9824,7 +9868,8 @@ mod test {
 			write(&a, sequence);
 		}
 		let start = || routes.subscription(Subscription::default(), 1).ranges[0].start;
-		assert_eq!(start(), track::Anchor::Time(5));
+		// Resolved at 5, raised to 20, the largest group held, which the copy drains to.
+		assert_eq!(start(), track::Anchor::Time(20));
 
 		// Changed, but not yet mirrored into the copies.
 		preferences.update(ranges(0)).unwrap();
@@ -9881,7 +9926,9 @@ mod test {
 		assert_eq!(routes.subscription(demand.clone(), 2).start(), Some(5));
 		write(&a, 10);
 		assert_eq!(recv(&mut first).start, 10);
-		assert_eq!(routes.subscription(demand.clone(), 2).start(), Some(5));
+		// From the boundary, the largest group held: what the second reader lacks below it is
+		// the capped copy's to drain, or asked of the new route once a switch finds it missing.
+		assert_eq!(routes.subscription(demand.clone(), 2).start(), Some(10));
 		let pending = front
 			.consume()
 			.subscribe(Subscription::default().with_delay(Delay::default().with_max(HOUR)));
