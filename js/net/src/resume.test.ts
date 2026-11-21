@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { Duration, yieldNow } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
-import { Signal } from "@moq/signals";
+import { race, Signal } from "@moq/signals";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer, type FetchFrom } from "./broadcast.ts";
 import { defined } from "./defined.test-util.ts";
 import { NotFound, SessionCode, SessionError, StreamCode, StreamError, toStreamCode } from "./error.ts";
@@ -19,6 +19,7 @@ import { Front, routeFailed } from "./resume.ts";
 import { Timestamp } from "./time.ts";
 import type * as track from "./track.ts";
 import { unwanted } from "./util/demand.ts";
+import { GivenUp } from "./util/given_up.ts";
 import { overrideBroadcastWire, wireOf } from "./wire.ts";
 
 const INFO: track.Info = {
@@ -1023,6 +1024,157 @@ test("a stalled group continues from the replacement at the next frame", async (
 	await swap();
 	expect(dec.decode((await group.readFrame())?.payload)).toBe("0.1");
 	expect(dec.decode((await group.readFrame())?.payload)).toBe("0.2");
+	expect(await group.readFrame()).toBeUndefined();
+
+	sub.close();
+	close();
+});
+
+for (const closeFirst of [true, false]) {
+	test(`a replaced copy's short group continues from the replacement (closeFirst=${closeFirst})`, async () => {
+		const { a, b, swap, active, close } = await setup();
+		const ta = copy(a);
+		const tb = copy(b);
+		const sub = active.track("seq").subscribe({ delay: { max: Duration.millis(300_000) } });
+		const short = ta.write(0n, 1, false);
+		const group = sub.tryRecvGroup();
+		if (!group) throw new Error("expected group 0");
+		expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+		// The old copy closes it short (FIN without GROUP_END); the new route holds the rest.
+		const whole = tb.write(0n, 3, false);
+		if (closeFirst) short.finish();
+		await swap();
+		if (!closeFirst) short.finish();
+		expect(dec.decode((await group.readFrame())?.payload)).toBe("0.1");
+		expect(dec.decode((await group.readFrame())?.payload)).toBe("0.2");
+		expect(group.closed.peek()).toBeUndefined();
+		whole.finishAt(3n);
+		expect(await group.readFrame()).toBeUndefined();
+		expect(group.end).toBe(3n);
+		expect(await group.closed).toBeNull();
+
+		sub.close();
+		close();
+	});
+}
+
+// A watch no longer looking, or one that never judges, leaves a short close to the reader.
+for (const watch of ["race", "givenUp"] as const) {
+	test(`a short group a ${watch} watched continues from the replacement`, async () => {
+		const { a, b, swap, active, close } = await setup();
+		const ta = copy(a);
+		const tb = copy(b);
+		const sub = active.track("seq").subscribe({ delay: { max: Duration.millis(300_000) } });
+		const short = ta.write(0n, 1, false);
+		const group = sub.tryRecvGroup();
+		if (!group) throw new Error("expected group 0");
+		expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+		// A race decided by its other side drops its watch; a publisher's give-up watch stays.
+		const given = watch === "givenUp" ? new GivenUp(group) : undefined;
+		if (watch === "race") expect(await race([Promise.resolve("ready"), group.closed])).toBe("ready");
+		const whole = tb.write(0n, 3, false);
+		short.finish();
+		await settle();
+		await swap();
+		expect(dec.decode((await group.readFrame())?.payload)).toBe("0.1");
+		expect(dec.decode((await group.readFrame())?.payload)).toBe("0.2");
+		whole.finishAt(3n);
+		expect(await group.readFrame()).toBeUndefined();
+		expect(given?.peek()).toBeUndefined();
+		given?.close();
+
+		sub.close();
+		close();
+	});
+}
+
+test("a short group the replacement lacks reads on once it lands there", async () => {
+	const { a, b, swap, active, close } = await setup();
+	const ta = copy(a);
+	const tb = copy(b);
+	const sub = active.track("seq").subscribe({ delay: { max: Duration.millis(300_000) } });
+	ta.write(0n, 1);
+	const group = sub.tryRecvGroup();
+	if (!group) throw new Error("expected group 0");
+	expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+	await swap();
+	const reading = group.readFrame();
+	await settle();
+	tb.write(0n, 2);
+	expect(dec.decode((await reading)?.payload)).toBe("0.1");
+	expect(await group.readFrame()).toBeUndefined();
+
+	sub.close();
+	close();
+});
+
+test("a short group on a failed route waits for the next one", async () => {
+	const { a, b, swap, active, close } = await setup();
+	const ta = copy(a);
+	const tb = copy(b);
+	const sub = active.track("seq").subscribe({ delay: { max: Duration.millis(300_000) } });
+	ta.write(0n, 1);
+	const group = sub.tryRecvGroup();
+	if (!group) throw new Error("expected group 0");
+	ta.producer.abort(new StreamError(StreamCode.SessionClosed));
+	await settle();
+	expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+	const reading = group.readFrame();
+	expect(await isPending(reading)).toBe(true);
+	tb.write(0n, 2);
+	await swap();
+	expect(dec.decode((await reading)?.payload)).toBe("0.1");
+	expect(await group.readFrame()).toBeUndefined();
+
+	sub.close();
+	close();
+});
+
+test("a short group ends once no route holds more of it", async () => {
+	const { a, b, swap, active, close } = await setup();
+	const ta = copy(a);
+	const tb = copy(b);
+	const sub = active.track("seq").subscribe({ delay: { max: Duration.millis(300_000) } });
+	ta.write(0n, 1);
+	const group = sub.tryRecvGroup();
+	if (!group) throw new Error("expected group 0");
+	// The replacement closed it at the same frame.
+	tb.write(0n, 1);
+	await swap();
+	expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+	expect(await group.readFrame()).toBeUndefined();
+
+	sub.close();
+	close();
+});
+
+test("a short group ends as it closed while its copy still serves", async () => {
+	const { a, active, close } = await setup();
+	const ta = copy(a);
+	const sub = active.track("seq").subscribe({ delay: { max: Duration.millis(300_000) } });
+	ta.write(0n, 1);
+	const group = sub.tryRecvGroup();
+	if (!group) throw new Error("expected group 0");
+	expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+	expect(group.done).toBe(true);
+	expect(await group.closed).toBeNull();
+	expect(await group.readFrame()).toBeUndefined();
+
+	sub.close();
+	close();
+});
+
+test("a short group ends once no route is left to ask", async () => {
+	const { a, active, request, disposeA, close } = await setup();
+	const ta = copy(a);
+	const sub = active.track("seq").subscribe({ delay: { max: Duration.millis(300_000) } });
+	ta.write(0n, 1);
+	const group = sub.tryRecvGroup();
+	if (!group) throw new Error("expected group 0");
+	request.close();
+	disposeA();
+	await settle();
+	expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
 	expect(await group.readFrame()).toBeUndefined();
 
 	sub.close();
