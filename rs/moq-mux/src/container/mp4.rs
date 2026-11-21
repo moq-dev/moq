@@ -391,7 +391,13 @@ fn keeps_chapters<F: Read + Seek>(file: &mut F, end: u64, eof: u64, plain: &[u8]
 	let Some(atom) = atom.filter(|atom| atom.kind == *b"moov" && atom.end == eof) else {
 		return Ok(false);
 	};
-	let mut moov: mp4_atom::Moov = atom.decode(file)?;
+	let Some(data) = read_at(file, atom.start, atom.end - atom.start, eof)? else {
+		return Ok(false);
+	};
+	// A moov that does not decode is damage for the finish to replace, not a failure.
+	let Ok(mut moov) = mp4_atom::Moov::decode(&mut std::io::Cursor::new(data.as_slice())) else {
+		return Ok(false);
+	};
 	let text = moov
 		.trak
 		.iter()
@@ -2076,6 +2082,17 @@ mod tests {
 				.expect("a co64");
 		changed[co64 + 19] ^= 1;
 		assert!(repair(&changed).unwrap().is_some());
+
+		// A moov that no longer decodes is finished again too.
+		let mut broken = file.clone();
+		let tkhd = moov
+			+ broken[moov..]
+				.windows(4)
+				.position(|kind| kind == b"tkhd")
+				.expect("a tkhd");
+		broken[tkhd + 4] = 9;
+		assert!(<mp4_atom::Moov as mp4_atom::Decode>::decode(&mut std::io::Cursor::new(&broken[moov..])).is_err());
+		assert!(repair(&broken).unwrap().is_some());
 	}
 
 	/// A repair given other chapters than a finished file lists finishes it again.
