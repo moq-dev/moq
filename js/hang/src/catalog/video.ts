@@ -274,8 +274,11 @@ export function orientation(
 	if (width === undefined || height === undefined) return undefined;
 	const shape = orientationOf(width, height);
 	// An odd quarter turn swaps the sides, rounded within one full turn so halfway rounds the
-	// same whichever way round the turn is written; a non-finite rotation is ignored.
-	const rotation = (((section.rotation ?? 0) % 360) + 360) % 360;
+	// same whichever way round the turn is written; a non-finite rotation is ignored. A full turn
+	// is added only to a negative remainder, as Rust's `rem_euclid` does: added to a positive one,
+	// it can round a rotation just under halfway up onto it.
+	const remainder = (section.rotation ?? 0) % 360;
+	const rotation = remainder < 0 ? remainder + 360 : remainder;
 	const quarters = Math.round(rotation / 90);
 	const turned = Number.isFinite(quarters) && quarters % 2 === 1;
 	if (!turned || !shape) return shape;

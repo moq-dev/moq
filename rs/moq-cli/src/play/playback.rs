@@ -129,8 +129,14 @@ impl Playback {
 		let half = self.half_mut(kind);
 		half.playing = true;
 		half.switching = None;
-		half.narrowed = false;
+		// A turn's replacement started from a narrowed read, which stays narrowed: once the
+		// replacement ends, the renditions the turn skipped are read again.
 		half.track = Some(track);
+	}
+
+	/// The track this half plays, whose end is a finish: none once the catalog moved it off.
+	pub(super) fn track(&self, kind: Kind) -> Option<&Track> {
+		self.half(kind).track.as_ref()
 	}
 
 	/// Whether a task is driving this half.
@@ -153,6 +159,12 @@ impl Playback {
 		{
 			self.finished.insert(track);
 		}
+	}
+
+	/// Record that `track` ended on its own after its replacement already took its half, so
+	/// the half's own state is left alone.
+	pub(super) fn finish(&mut self, track: Track) {
+		self.finished.insert(track);
 	}
 
 	/// The catalog moved this half's rendition off the track it plays, which it now
@@ -426,6 +438,42 @@ mod tests {
 		playback.read(Kind::Video, false);
 		playback.ended(Kind::Video, false);
 		assert!(!playback.wants(Kind::Video), "a full read is not read again");
+	}
+
+	/// A turn that starts its replacement still skipped the renditions shaped against the
+	/// window, so once that replacement finishes, the half reads the snapshot again in full and
+	/// can go back to the rendition it turned away from.
+	#[test]
+	fn a_turns_replacement_ending_reads_its_snapshot_again() {
+		let mut playback = Playback::default();
+		playback.received(Default::default());
+		playback.read(Kind::Video, false);
+		playback.started(Kind::Video, track("wide"));
+		playback.read(Kind::Audio, false);
+
+		playback.switch(Kind::Video, Switch::Turn);
+		playback.read(Kind::Video, true);
+		playback.started(Kind::Video, track("tall"));
+		assert!(playback.pending().is_none());
+
+		playback.ended(Kind::Video, true);
+		assert!(playback.finished(&track("tall")));
+		assert!(!playback.finished(&track("wide")), "the turn stopped it");
+		assert!(
+			playback.wants(Kind::Video),
+			"the rendition the turn left is still playable"
+		);
+	}
+
+	/// A replaced task that finished on its own before its replacement stopped it still
+	/// finished its track, so a later pick skips it.
+	#[test]
+	fn a_replaced_track_that_finished_is_finished() {
+		let mut playback = Playback::default();
+		playback.started(Kind::Video, track("tall"));
+		playback.finish(track("wide"));
+		assert!(playback.finished(&track("wide")));
+		assert!(playback.playing(Kind::Video), "its replacement still plays");
 	}
 
 	/// The catalog track ending is what ends playback, since it is the only thing

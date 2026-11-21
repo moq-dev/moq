@@ -169,6 +169,16 @@ impl<O: Output> Media<O> {
 		let mut audio_opening: Option<Opening<'_, AudioReady>> = None;
 		// The newest video task, so the end of one a replacement stopped re-arms nothing.
 		let mut video_task = 0u64;
+		// The tracks of video tasks a replacement stopped, by task, whose own finish still counts
+		// if they got there first. A track the catalog moved off is not among them: its end is no
+		// finish, as `Playback::retire` says.
+		let mut replaced = std::collections::HashMap::<u64, Track>::new();
+		// Dropped once the newest video task has ended, and with it its hold on the video clock,
+		// which its replacement takes only then: the clock keeps one track per kind, and the old
+		// one's release would clear the new one's.
+		let mut video_released: Option<tokio::sync::oneshot::Receiver<()>> = None;
+		// How the playing video rendition is shown, kept for when a snapshot drops its entry.
+		let mut video_shape: Option<Orientation> = None;
 		// Why nothing started, so a catalog this build can't play reports the
 		// reason instead of leaving a blank window up forever. The decoders are
 		// gated by platform and cargo feature (no AV1 without `nvidia`, say), so
@@ -201,10 +211,17 @@ impl<O: Output> Media<O> {
 					result = tasks.join_next(), if !tasks.is_empty() => {
 						if let Some((kind, task, result)) = joined(result.expect("guarded by is_empty"))? {
 							if kind == Kind::Video && task != video_task {
-								// Its replacement stopped it and already holds the half, so how it
-								// ended changes nothing.
-								if let Err(err) = result {
-									tracing::debug!(err = format!("{err:#}"), "replaced video rendition failed");
+								// Its replacement already holds the half, so how it ended changes
+								// nothing but whether its own track finished first.
+								let track = replaced.remove(&task);
+								match result {
+									Ok((true, _)) => {
+										if let Some(track) = track {
+											playback.finish(track);
+										}
+									}
+									Ok(_) => {}
+									Err(err) => tracing::debug!(err = format!("{err:#}"), "replaced video rendition failed"),
 								}
 							} else {
 								let (finished, sink) = result?;
@@ -234,11 +251,18 @@ impl<O: Output> Media<O> {
 						match opened.ready {
 							Some(ready) => {
 								// The rendition it replaces played until now.
-								if let Some(replaced) = video_demand.take() {
-									let _ = replaced.stop.send(());
+								if let Some(old) = video_demand.take() {
+									let _ = old.stop.send(());
+									if playback.track(Kind::Video) == Some(&old.track) {
+										replaced.insert(video_task, old.track);
+									}
 								}
 								video_task += 1;
 								let task = video_task;
+								let previous = video_released.take();
+								let (release, released) = tokio::sync::oneshot::channel::<()>();
+								video_released = Some(released);
+								video_shape = ready.shape;
 								tracing::info!(track = ready.name, decoder = ready.decoder.name(), "playing video rendition");
 								let (delay, held) = tokio::sync::watch::channel(None);
 								let video = Video {
@@ -264,7 +288,17 @@ impl<O: Output> Media<O> {
 								video_demand = Some(demand);
 								let (first, track, decoder) = (ready.first, ready.track, ready.decoder);
 								tasks.spawn(async move {
-									let result = until_stopped(video.resume(Some(first), track, decoder), stopped).await;
+									let play = async {
+										// The task it replaces was just stopped, so this waits only for
+										// it to let go of the video clock.
+										if let Some(previous) = previous {
+											let _ = previous.await;
+										}
+										video.resume(Some(first), track, decoder).await
+									};
+									let result = until_stopped(play, stopped).await;
+									// Its hold on the video clock went with `play`.
+									drop(release);
 									(Kind::Video, task, result.map(|(finished, _)| (finished, None)))
 								});
 								playback.started(Kind::Video, ready.reference);
@@ -328,7 +362,7 @@ impl<O: Output> Media<O> {
 						let playing = playback.playing(Kind::Video);
 						let switching = playback.switching(Kind::Video);
 						let turned = playing && video_demand.as_ref().zip(playback.latest()).is_some_and(|(demand, snapshot)| {
-							turned_away(&snapshot.video, &demand.name, orientation, |name, config| {
+							turned_away(&snapshot.video, &demand.name, video_shape, orientation, |name, config| {
 								!playback.finished(&Track::of(&source, config, name))
 							})
 						});
@@ -422,28 +456,48 @@ impl<O: Output> Media<O> {
 				// A turn switches only to a rendition shaped like the window: the rest are no
 				// better than the one playing.
 				let turning = playback.switching(Kind::Video) == Some(Switch::Turn);
-				playback.read(Kind::Video, turning);
-				let available: Vec<VideoCandidate> = snapshot
-					.video
-					.enabled()
-					.map(|(name, config)| (name.clone(), config.clone(), Track::of(&source, config, name)))
-					// A finished track has only its newest group left, which already played.
-					.filter(|(_, _, reference)| !playback.finished(reference))
-					.collect();
-				let candidates = arrange(&snapshot.video, available.clone(), orientation, turning);
-				if candidates.is_empty() {
+				// This read may have taken a viewport change before its branch saw it, such as
+				// the window turning back or going square under the turn, so the turn is checked
+				// against the viewport read here.
+				let turned_back = turning
+					&& !video_demand.as_ref().is_some_and(|demand| {
+						turned_away(
+							&snapshot.video,
+							&demand.name,
+							video_shape,
+							orientation,
+							|name, config| !playback.finished(&Track::of(&source, config, name)),
+						)
+					});
+				playback.read(Kind::Video, turning && !turned_back);
+				if turned_back {
 					video_opening = None;
 					playback.settle(Kind::Video);
-				} else if video_opening
-					.as_ref()
-					.is_none_or(|opening| opening.candidates != candidates)
-				{
-					// Replaces one still opening, which the newer snapshot or viewport overrides.
-					let future = self.open_video(&source, snapshot.video.clone(), available, turning);
-					video_opening = Some(Opening {
-						candidates,
-						future: Box::pin(future),
-					});
+				} else {
+					let available: Vec<VideoCandidate> = snapshot
+						.video
+						.enabled()
+						.map(|(name, config)| (name.clone(), config.clone(), Track::of(&source, config, name)))
+						// A finished track has only its newest group left, which already played.
+						.filter(|(_, _, reference)| !playback.finished(reference))
+						.collect();
+					let candidates = arrange(&snapshot.video, available.clone(), orientation, turning);
+					if candidates.is_empty() {
+						video_opening = None;
+						playback.settle(Kind::Video);
+					} else if video_opening
+						.as_ref()
+						.is_none_or(|opening| *opening.candidates.lock().unwrap() != candidates)
+					{
+						// Replaces one still opening, which the newer snapshot or viewport overrides.
+						let candidates = Arc::new(Mutex::new(candidates));
+						let future =
+							self.open_video(&source, snapshot.video.clone(), available, turning, candidates.clone());
+						video_opening = Some(Opening {
+							candidates,
+							future: Box::pin(future),
+						});
+					}
 				}
 			}
 
@@ -460,11 +514,11 @@ impl<O: Output> Media<O> {
 					audio_opening = None;
 				} else if audio_opening
 					.as_ref()
-					.is_none_or(|opening| opening.candidates != candidates)
+					.is_none_or(|opening| *opening.candidates.lock().unwrap() != candidates)
 				{
 					let future = self.open_audio(&source, candidates.clone());
 					audio_opening = Some(Opening {
-						candidates,
+						candidates: Arc::new(Mutex::new(candidates)),
 						future: Box::pin(future),
 					});
 				}
@@ -480,18 +534,22 @@ impl<O: Output> Media<O> {
 	/// Open the first of `available` that resolves, subscribes, decodes, and answers, once the
 	/// window's renderer is up, trying those shaped like the window first. The window reports its
 	/// shape before its renderer comes up, so the order is read only then, and the first pick is
-	/// already shaped like it rather than switching straight away.
+	/// already shaped like it rather than switching straight away. The order it tries goes into
+	/// `order`, which a later pick compares with its own.
 	async fn open_video(
 		&self,
 		source: &moq_mux::Source,
 		video: hang::catalog::Video,
 		available: Vec<VideoCandidate>,
 		turning: bool,
+		order: Order<hang::catalog::VideoConfig>,
 	) -> Opened<VideoReady> {
 		let render = self.output.render().await;
 		let orientation = *self.viewport.borrow();
+		let arranged = arrange(&video, available, orientation, turning);
+		order.lock().unwrap().clone_from(&arranged);
 		let mut rejected = Vec::new();
-		for (name, config, reference) in arrange(&video, available, orientation, turning) {
+		for (name, config, reference) in arranged {
 			// A rendition pointing at a broadcast we can't reach is that
 			// rendition's problem, not the catalog's: fall through to the
 			// next one like an unsupported codec does.
@@ -544,6 +602,7 @@ impl<O: Output> Media<O> {
 			match opened {
 				Ok((first, track, decoder)) => {
 					let ready = VideoReady {
+						shape: video.orientation(&config),
 						name,
 						reference,
 						delay: config.delay,
@@ -623,10 +682,14 @@ type VideoCandidate = (String, hang::catalog::VideoConfig, Track);
 /// An audio rendition to try: its name, its config, and the track it plays from.
 type AudioCandidate = (String, hang::catalog::AudioConfig, Track);
 
+/// The renditions an opening tries, in order: each one's name, config, and track.
+type Order<C> = Arc<Mutex<Vec<(String, C, Track)>>>;
+
 /// A rendition being opened, and the candidates it tries in order, so a pick that would try the
 /// same keeps it rather than starting over.
 struct Opening<'a, T: Ready> {
-	candidates: Vec<(String, T::Config, Track)>,
+	/// Shared with the opening, which rearranges video once the window's renderer is up.
+	candidates: Order<T::Config>,
 	future: std::pin::Pin<Box<dyn Future<Output = Opened<T>> + Send + 'a>>,
 }
 
@@ -655,6 +718,8 @@ struct Opened<T> {
 /// A video rendition subscribed, answering, and with its decoder open, ready to play.
 struct VideoReady {
 	name: String,
+	/// How it is shown.
+	shape: Option<Orientation>,
 	reference: Track,
 	/// The catalog `delay` it asks for.
 	delay: Option<Duration>,
@@ -766,17 +831,20 @@ fn arrange(
 }
 
 /// Whether the viewport turned away from the `playing` rendition while one shaped like it, and
-/// `available`, is on offer, which now ranks first.
+/// `available`, is on offer, which now ranks first. `shown` is how the rendition was shown when
+/// it started, for a snapshot that no longer lists it.
 fn turned_away(
 	video: &hang::catalog::Video,
 	playing: &str,
+	shown: Option<Orientation>,
 	viewport: Option<Orientation>,
 	available: impl Fn(&str, &hang::catalog::VideoConfig) -> bool,
 ) -> bool {
-	video
+	let shown = video
 		.renditions
 		.get(playing)
-		.is_some_and(|config| opposed(video, config, viewport))
+		.map_or(shown, |config| video.orientation(config));
+	viewport.is_some_and(|viewport| shown.is_some_and(|shown| shown != viewport))
 		&& video
 			.enabled()
 			.any(|(name, config)| !opposed(video, config, viewport) && available(name, config))
@@ -1396,17 +1464,29 @@ mod tests {
 	fn turning_away_picks_again_only_with_a_rendition_to_turn_to() {
 		let mut video = oriented();
 		let all = |_: &str, _: &hang::catalog::VideoConfig| true;
-		assert!(turned_away(&video, "wide", Some(Orientation::Portrait), all));
-		assert!(!turned_away(&video, "wide", Some(Orientation::Landscape), all));
-		assert!(!turned_away(&video, "wide", None, all));
+		let wide = Some(Orientation::Landscape);
+		assert!(turned_away(&video, "wide", None, Some(Orientation::Portrait), all));
+		assert!(!turned_away(&video, "wide", None, Some(Orientation::Landscape), all));
+		assert!(!turned_away(&video, "wide", None, None, all));
 		// A square rendition suits either way.
-		assert!(!turned_away(&video, "square", Some(Orientation::Landscape), all));
+		assert!(!turned_away(&video, "square", None, Some(Orientation::Landscape), all));
+		// The catalog's entry outranks the shape it started with.
+		assert!(!turned_away(&video, "square", wide, Some(Orientation::Portrait), all));
+		// One the snapshot no longer lists keeps the shape it started with.
+		assert!(turned_away(&video, "gone", wide, Some(Orientation::Portrait), all));
+		assert!(!turned_away(&video, "gone", None, Some(Orientation::Portrait), all));
 
 		// Nothing to turn to once the portrait-friendly ones are disabled or unavailable, such as
 		// finished or on a broadcast not yet in hand.
 		let available = |name: &str, _: &hang::catalog::VideoConfig| name != "square";
 		video.renditions.get_mut("tall").unwrap().enabled = false;
-		assert!(!turned_away(&video, "wide", Some(Orientation::Portrait), available));
+		assert!(!turned_away(
+			&video,
+			"wide",
+			None,
+			Some(Orientation::Portrait),
+			available
+		));
 	}
 	use crate::play::args::Delay;
 	use crate::play::fake::Recorder;

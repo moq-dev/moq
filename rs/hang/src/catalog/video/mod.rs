@@ -558,6 +558,8 @@ mod test {
 			(315.0, Orientation::Landscape),
 			(-135.0, Orientation::Portrait),
 			(225.0, Orientation::Portrait),
+			// Just under halfway stays under it.
+			(44.99999999999999, Orientation::Landscape),
 			(f64::NAN, Orientation::Landscape),
 		] {
 			video.rotation = Some(rotation);
