@@ -6,7 +6,7 @@ import { DEFAULT_EXPIRY } from "./cache.ts";
 import { ProtocolViolation, Skipped, StreamCode, StreamError, TimestampMismatch, TooFarBehind } from "./error.ts";
 import type { Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { Version as IetfVersion } from "./ietf/version.ts";
-import { hooks, maxDelayOf, skipHole, staleHole } from "./internal.ts";
+import { hooks, maxDelayOf, NO_MAX_DELAY, skipHole, staleHole } from "./internal.ts";
 import { textFrame } from "./mock.ts";
 import { rescale, rescaleIn } from "./rescale.ts";
 import { Timescale, Timestamp } from "./time.ts";
@@ -1380,6 +1380,18 @@ test("an untimed track reads time anchors as keys", () => {
 	for (const key of [0n, 5n, 10n, 15n]) untimed.appendGroup(Timestamp.unscaled(key)).finish();
 	const reader = untimed.subscribe({ delay: { max: null }, ranges: [{ start: { time: 7n }, end: { time: 10n } }] });
 	expect(readable(reader)).toEqual([5n, 10n]);
+});
+
+// A moq-transport frame's time is its Group ID, so its starts never rewind and index like any.
+test("a moq-transport copy resolves a time anchor", () => {
+	const producer = new TrackProducer("test");
+	producer.accept({ timescale: Timescale.MILLI, maxAge: null, ietf: IetfVersion.DRAFT_18 });
+	for (const key of [0n, 1000n, 2000n]) stampGroup(producer, key, Number(key));
+	const reader = producer.subscribe({
+		delay: { max: null },
+		ranges: [{ start: { time: 1500n } }],
+	});
+	expect(readable(reader)).toEqual([1000n, 2000n]);
 });
 
 test("only unstated minimums aggregate to an unstated one", () => {
@@ -4610,11 +4622,12 @@ test("an endless track with gaps remembers only those within the budget", () => 
 	}
 });
 
-for (const [name, extra] of [
-	["unchecked", { unchecked: true }],
-	["IETF provenance", { ietf: IetfVersion.DRAFT_22 }],
+for (const [name, extra, checked] of [
+	["unchecked", { unchecked: true }, false],
+	// A moq-transport frame's time is its Group ID, so it cannot rewind and is checked.
+	["IETF provenance", { ietf: IetfVersion.DRAFT_22 }, true],
 ] as const) {
-	test(`${name} survives normalization and skips the rewind check`, () => {
+	test(`${name} survives normalization and ${checked ? "keeps" : "skips"} the rewind check`, () => {
 		for (const timescale of [null, Timescale.MILLI]) {
 			const info = authoredInfo({ ...extra, timescale });
 			expect(info).toMatchObject(extra);
@@ -4623,8 +4636,12 @@ for (const [name, extra] of [
 		const producer = new TrackProducer("rewind").accept({ timescale: Timescale.MILLI, ...extra });
 		try {
 			stampGroup(producer, 0n, 1000);
-			stampGroup(producer, 1n, 500);
-			producer.writeFrame({ payload: enc.encode("arrival"), timestamp: Timestamp.fromMillis(250) });
+			if (checked) {
+				expect(() => stampGroup(producer, 1n, 500)).toThrow(TimestampMismatch);
+			} else {
+				stampGroup(producer, 1n, 500);
+				producer.writeFrame({ payload: enc.encode("arrival"), timestamp: Timestamp.fromMillis(250) });
+			}
 		} finally {
 			producer.finish();
 			producer.close();
@@ -5636,7 +5653,8 @@ test("finishing returns handles that write nothing new but fill a late group", a
 
 // Mirrors moq-net's `unplaced_holds_only_what_containing_cant_place`: a run holds only times
 // `containing` can't place, but those a reported start places directly, and leaves out only
-// times below the newest start reported past an earlier range's time.
+// times below the newest start reported past an earlier range's time, or those the feed's
+// accounting may place.
 test("track: a reader's unplaced times are only times its holdings can't place", () => {
 	let seed = 5;
 	const random = (below: number) => {
@@ -5648,23 +5666,31 @@ test("track: a reader's unplaced times are only times its holdings can't place",
 	for (let round = 0; round < 400; round++) {
 		const received = random(2) === 0;
 		const producer = received ? receivedTrack() : new TrackProducer("test").accept({ maxAge: null });
-		const starts: [bigint, bigint][] = [];
+		const starts: [bigint, bigint, undefined][] = [];
 		if (received) {
-			for (let n = random(3); n > 0; n--) starts.push([BigInt(random(48)), BigInt(random(48))]);
-			hooks.timeStarts(producer, starts);
+			for (let n = random(3); n > 0; n--) starts.push([BigInt(random(48)), BigInt(random(48)), undefined]);
+			hooks.timeStarts(producer, starts, NO_MAX_DELAY);
 		}
 		const reported = new Set(starts.map(([time]) => time));
 		let past = 0n;
-		for (const [asked, start] of new Map(starts)) if (asked < start && start > past) past = start;
+		const lowest = new Map<bigint, bigint>();
+		for (const [asked, start] of starts) {
+			const held = lowest.get(asked);
+			if (held === undefined || start < held) lowest.set(asked, start);
+		}
+		for (const [asked, start] of lowest) if (asked < start && start > past) past = start;
 		const reader = producer.subscribe();
 		for (let step = random(16); step >= 0; step--) {
 			const holdings = hooks.subscriberHoldings(reader);
 			const unplaced = holdings.unplaced?.();
 			expect(unplaced).toBeDefined();
+			const landing = received ? hooks.landingSpan(producer) : undefined;
 			for (let at = 0n; at < 64n; at++) {
 				const open = unplaced?.runs.some((run) => run.start <= at && at < run.end) ?? false;
 				const unknown = holdings.containing(at) === "unknown";
 				if (reported.has(at)) expect([at, unknown]).toEqual([at, false]);
+				// The window tries the times the feed's accounting may place on each change.
+				else if (landing && landing.start <= at && at < landing.end) expect([at, open]).toEqual([at, false]);
 				else if (open) expect([at, unknown]).toEqual([at, true]);
 				else if (unknown) expect([at, received && at < past]).toEqual([at, true]);
 			}

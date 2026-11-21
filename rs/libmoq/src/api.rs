@@ -2613,7 +2613,7 @@ pub extern "C" fn moq_broadcast_request_free(request: u32) -> i32 {
 	})
 }
 
-/// Learn about broadcasts matching a pattern scope under an origin.
+/// Learn about broadcasts matching a discovery filter under an origin.
 ///
 /// `config` selects the paths; NULL lists every visible one. Delivered
 /// [moq_announce_event] prefixes remain relative to the origin.
@@ -2643,7 +2643,7 @@ pub unsafe extern "C" fn moq_origin_announced(
 ) -> i32 {
 	ffi::enter(move || {
 		let origin = ffi::parse_id(origin)?;
-		let (scope, hidden) = match unsafe { config.as_ref() } {
+		let (filter, hidden) = match unsafe { config.as_ref() } {
 			None => (moq_net::Pattern::all(), false),
 			Some(config) => {
 				let prefix = unsafe { ffi::parse_str(config.prefix, config.prefix_len)? };
@@ -2656,7 +2656,7 @@ pub unsafe extern "C" fn moq_origin_announced(
 			}
 		};
 		let on_announce = unsafe { ffi::OnStatus::new(user_data, on_announce)? };
-		State::lock().origin.announced(origin, scope, hidden, on_announce)
+		State::lock().origin.announced(origin, filter, hidden, on_announce)
 	})
 }
 
@@ -4162,10 +4162,13 @@ pub extern "C" fn moq_group_request_accept(request: u32) -> i32 {
 	})
 }
 
-/// Reject a group request, failing the readers waiting on it now as not found.
+/// Reject a group request, as serving it failed, failing the readers waiting on it now as not
+/// found.
 ///
-/// A later reader of the group asks again. The error code is not delivered. Consumes the
-/// request handle. Returns a zero on success, or a negative code on failure.
+/// A later reader of the group asks again. A request for a reader's time start, a time no
+/// cached group places, fails that reader until its ranges change; free it instead when you
+/// have no group there. The error code is not delivered. Consumes the request handle. Returns
+/// a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_group_request_abort(request: u32, error_code: u16) -> i32 {
 	ffi::enter(move || {
@@ -4174,7 +4177,11 @@ pub extern "C" fn moq_group_request_abort(request: u32, error_code: u16) -> i32 
 	})
 }
 
-/// Free a group request without accepting it, which rejects it like [moq_group_request_abort].
+/// Free a group request without accepting it, as you have no such group, which rejects it like
+/// [moq_group_request_abort].
+///
+/// A request for a reader's time start says instead that no group starts at that time, so the
+/// reader starts at the group held below it, or at the time when none is, rather than failing.
 ///
 /// Returns a zero on success, or a negative code if the handle is unknown.
 #[unsafe(no_mangle)]

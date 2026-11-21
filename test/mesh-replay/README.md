@@ -23,6 +23,10 @@ just test mesh-replay --new ./moq-relay-from-a-branch      # roll onto another b
 
 ## What runs
 
+This checkout's relay, `moq-bench`, and `moq-shaper` build optimized, like the release
+they roll against: debug relays on a 4-core runner fall behind at 32 broadcasts, and the
+run then measures the build instead of the protocol.
+
 Every relay listens on loopback with a QUIC idle timeout of 10s and a 10s drain, as
 the defaults are, and publishes its stats so its `/metrics` counts routes and control
 messages. A relay dials each link it owns through its own `moq-shaper`, which holds
@@ -91,7 +95,9 @@ where a new relay sits between a new one and an old one.
 - **unfed**: once an event settles, a reader whose relay shows its live broadcast read
   nothing since the fault ended or for `stall`. `stuck` means its follow holds a
   broadcast whose track ended and never handed out another; `starved` means it holds
-  one whose groups stopped.
+  one whose groups stopped. A reader still unfed from an earlier event, having read
+  nothing since, is reported as unfed since that event and matched against its known
+  entries, so one strand fails the run once, not again at every later event.
 - **unrouted**: at the start, before any fault, a reader's relay does not show a live
   broadcast, so nothing behind it would be tested. A mesh starting on the new build with a link
   marked `upstream` may hide a route, so there it is only reported, as after every other

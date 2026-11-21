@@ -4755,7 +4755,7 @@ impl SubscribeOnce {
 		}
 		live.poll_joining(waiter);
 		// An error is the track closing, which the arms below report.
-		if let Poll::Ready(Ok(requested)) = live.dynamic.poll_requested_groups(waiter) {
+		if let Poll::Ready(Ok(requested)) = live.dynamic.poll_requested_fill(waiter) {
 			return Poll::Ready(ServeEnd::Fill(requested));
 		}
 		let _ = group_fetches.poll(waiter);
@@ -5303,7 +5303,7 @@ impl Linger {
 				LingerStep::Closed
 			} else if gate.poll_denied(waiter).is_ready() {
 				LingerStep::Revoked
-			} else if let Poll::Ready(Ok(fill)) = idle.dynamic.poll_requested_groups(waiter) {
+			} else if let Poll::Ready(Ok(fill)) = idle.dynamic.poll_requested_fill(waiter) {
 				LingerStep::Fill(fill)
 			} else {
 				let _ = group_fetches.poll(waiter);
@@ -5931,7 +5931,7 @@ impl LearnTrackStatus {
 						Some(SetupResponse::Cancelled(this.version.transport_error(err)))
 					} else {
 						// A fetch needs nothing from the status to go out, only to read its objects.
-						while let Poll::Ready(Ok(fill)) = asked.dynamic.poll_requested_groups(waiter) {
+						while let Poll::Ready(Ok(fill)) = asked.dynamic.poll_requested_fill(waiter) {
 							group_fetches.push(ServeFill::new(
 								this.clone(),
 								broadcast_path.clone(),
@@ -8741,7 +8741,7 @@ mod tests {
 	#[kio::test]
 	async fn a_rooted_subscriber_asks_for_its_scope_not_its_root() {
 		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
-		let scope = crate::Patterns::from(crate::Pattern::subtree("cam").unwrap());
+		let scope = crate::Prefixes::from(crate::Prefix::try_from("cam").unwrap());
 		let scoped = origin.scope("rootns", &scope).expect("scope the origin");
 
 		let gate = kio::Producer::new(true);
@@ -8766,7 +8766,9 @@ mod tests {
 			Default::default(),
 		);
 
-		let mut namespaces = crate::model::interest_prefixes(&subscriber.origin.allowed());
+		let mut namespaces = (subscriber.origin.allowed().iter())
+			.map(|prefix| crate::Path::new(prefix.as_str()).unwrap())
+			.collect::<Vec<_>>();
 		assert_eq!(
 			namespaces,
 			vec![crate::Path::from_static("cam")],
@@ -8882,7 +8884,7 @@ mod tests {
 
 		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let consumer = origin.consume();
-		let scope = crate::Patterns::from(crate::Pattern::subtree("cam").unwrap());
+		let scope = crate::Prefixes::from(crate::Prefix::try_from("cam").unwrap());
 		let scoped = origin.scope("rootns", &scope).expect("scope the origin");
 
 		let session = crate::lite::test_transport::ScriptedSession::new(namespace_response(VERSION, "x.hang").await);
@@ -8905,7 +8907,9 @@ mod tests {
 			Default::default(),
 		);
 
-		let prefix = crate::model::interest_prefixes(&subscriber.origin.allowed())
+		let prefix = (subscriber.origin.allowed().iter())
+			.map(|prefix| crate::Path::new(prefix.as_str()).unwrap())
+			.collect::<Vec<_>>()
 			.pop()
 			.expect("one prefix");
 		let (_live, live) = live();
@@ -9004,7 +9008,9 @@ mod tests {
 		);
 		subscriber.announces = crate::session::Slots::new(1);
 
-		let prefix = crate::model::interest_prefixes(&subscriber.origin.allowed())
+		let prefix = (subscriber.origin.allowed().iter())
+			.map(|prefix| crate::Path::new(prefix.as_str()).unwrap())
+			.collect::<Vec<_>>()
 			.pop()
 			.expect("one prefix");
 		let (_live, live) = live();
@@ -10088,7 +10094,7 @@ mod tests {
 				let dynamic = track.requests();
 				let mut pending = Box::pin(track.consume().fetch_group(0, None));
 				assert!(futures::poll!(pending.as_mut()).is_pending());
-				let request = dynamic.requested_groups().await.expect("group request");
+				let request = dynamic.requested_fill().await.expect("group request");
 				group = Some(pending);
 				accepted = Some(track);
 				Box::pin(subscriber.clone().run_group_fetch(
@@ -12648,15 +12654,15 @@ mod tests {
 		auth.grant(
 			0,
 			crate::auth::Grant {
-				publish: crate::Patterns::new(),
-				subscribe: crate::Pattern::subtree("other").unwrap().into(),
+				publish: crate::Prefixes::new(),
+				subscribe: crate::Prefix::try_from("other").unwrap().into(),
 				expires: None,
 			},
 		);
 		// We let the peer announce only "other".
 		auth.handle().authorize(&crate::auth::Grant {
-			publish: crate::Pattern::subtree("other").unwrap().into(),
-			subscribe: crate::Patterns::new(),
+			publish: crate::Prefix::try_from("other").unwrap().into(),
+			subscribe: crate::Prefixes::new(),
 			expires: None,
 		});
 		assert!(
@@ -12687,8 +12693,8 @@ mod tests {
 	/// what an announcing peer's token must carry.
 	fn publish_grant_expiring(runtime: &crate::time::Deadlines, secs: Option<u64>) -> crate::auth::Grant {
 		crate::auth::Grant {
-			publish: crate::Pattern::all().into(),
-			subscribe: crate::Patterns::new(),
+			publish: crate::Prefixes::all(),
+			subscribe: crate::Prefixes::new(),
 			expires: secs.map(|s| runtime.now().checked_add(std::time::Duration::from_secs(s)).unwrap()),
 		}
 	}
@@ -12969,8 +12975,8 @@ mod tests {
 	async fn a_covering_limit_still_verifies_the_token() {
 		const VERSION: Version = Version::Draft18;
 		let limit = |subtree: &str| crate::auth::Grant {
-			publish: crate::Pattern::subtree(subtree).unwrap().into(),
-			subscribe: crate::Patterns::new(),
+			publish: crate::Prefix::try_from(subtree).unwrap().into(),
+			subscribe: crate::Prefixes::new(),
 			expires: None,
 		};
 		let auth = crate::auth::Link::new(false);
@@ -13061,8 +13067,8 @@ mod tests {
 		assert!(routed, "the token admits the announce outside the limit");
 
 		auth.handle().authorize(&crate::auth::Grant {
-			publish: crate::Pattern::subtree("other").unwrap().into(),
-			subscribe: crate::Patterns::new(),
+			publish: crate::Prefix::try_from("other").unwrap().into(),
+			subscribe: crate::Prefixes::new(),
 			expires: None,
 		});
 		for _ in 0..50 {
@@ -13617,8 +13623,8 @@ mod tests {
 
 			// Nothing was held for the limit to bring back.
 			auth.handle().authorize(&crate::auth::Grant {
-				publish: crate::Pattern::subtree("other").unwrap().into(),
-				subscribe: crate::Patterns::new(),
+				publish: crate::Prefix::try_from("other").unwrap().into(),
+				subscribe: crate::Prefixes::new(),
 				expires: None,
 			});
 			settle().await;
@@ -14411,13 +14417,13 @@ mod tests {
 	async fn an_announce_token_needs_a_publish_grant() {
 		const VERSION: Version = Version::Draft18;
 		let read_only = crate::auth::Grant {
-			publish: crate::Patterns::new(),
-			subscribe: crate::Pattern::all().into(),
+			publish: crate::Prefixes::new(),
+			subscribe: crate::Prefixes::all(),
 			expires: None,
 		};
 		let write_only = crate::auth::Grant {
-			publish: crate::Pattern::all().into(),
-			subscribe: crate::Patterns::new(),
+			publish: crate::Prefixes::all(),
+			subscribe: crate::Prefixes::new(),
 			expires: None,
 		};
 		for (grant, admitted) in [(read_only, false), (write_only, true)] {
@@ -16912,10 +16918,10 @@ mod stitch_tests {
 		assert!(h.session.log.closes().is_empty());
 	}
 
-	/// A received group whose first object rewinds past the group before it is accepted: a
-	/// moq-transport peer may stamp arrival times, so its timed tracks are unchecked.
+	/// A received group whose first object rewinds past the group before it is refused: a
+	/// moq-transport frame's time is its Group ID, so its timed tracks are checked like any.
 	#[kio::test]
-	async fn a_received_rewind_is_accepted() {
+	async fn a_received_rewind_is_refused() {
 		use futures::FutureExt;
 
 		let mut h = Harness::new(Fill::Done, vec![draft18_subgroup(KEY, true, 0, &[b"rewound"])]);
@@ -16930,7 +16936,6 @@ mod stitch_tests {
 
 		let mut stream = read_draft18(&h.session).await;
 		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
-		// The stream was read to its end, so the group is already delivered.
 		let mut group = consumer
 			.recv_group()
 			.now_or_never()
@@ -16938,8 +16943,11 @@ mod stitch_tests {
 			.unwrap()
 			.unwrap();
 		assert_eq!(group.start, KEY);
-		let frame = group.read_frame().now_or_never().unwrap().unwrap().unwrap();
-		assert_eq!(frame.payload.as_ref(), b"rewound");
+		// The group fails, but the track stays open for the groups after it.
+		assert!(matches!(
+			group.read_frame().now_or_never().unwrap(),
+			Err(Error::TimestampMismatch)
+		));
 		assert!(h.track.closed().now_or_never().is_none());
 	}
 
@@ -17301,7 +17309,7 @@ mod stitch_tests {
 					.await
 					.unwrap();
 				assert!(futures::FutureExt::now_or_never(reading.recv_group()).is_none());
-				let fill = dynamic.requested_groups().await.unwrap();
+				let fill = dynamic.requested_fill().await.unwrap();
 				let bounded = consumer.fetch_group(last, None);
 				let slot = kio::Producer::new(GroupFetch::Ready(RangeFetch {
 					fill: std::sync::Arc::new(fill),
@@ -17398,7 +17406,7 @@ mod stitch_tests {
 			let waiter = kio::Waiter::noop();
 			assert!(reader.poll_drop(&waiter).is_pending());
 			assert!(reader.poll_recv_group(&waiter).is_pending());
-			let Poll::Ready(Ok(fill)) = requests.poll_requested_groups(&waiter) else {
+			let Poll::Ready(Ok(fill)) = requests.poll_requested_fill(&waiter) else {
 				panic!("{version}: missing history was not requested");
 			};
 			assert_eq!((fill.start().group, fill.end()), (0, 3));
@@ -17449,7 +17457,7 @@ mod stitch_tests {
 				.await
 				.unwrap();
 			assert!(futures::FutureExt::now_or_never(reading.recv_group()).is_none());
-			let fill = dynamic.requested_groups().await.unwrap();
+			let fill = dynamic.requested_fill().await.unwrap();
 			assert_eq!(
 				(fill.start().group, fill.end()),
 				(0, 7),
@@ -17649,7 +17657,7 @@ mod stitch_tests {
 			let dynamic = self.track.requests();
 			let mut fetch = Box::pin(self.track.consume().fetch_group(KEY, None));
 			assert!(futures::poll!(fetch.as_mut()).is_pending());
-			let fill = dynamic.requested_groups().await.expect("group request");
+			let fill = dynamic.requested_fill().await.expect("group request");
 			let slot = kio::Producer::new(GroupFetch::Ready(RangeFetch {
 				fill: std::sync::Arc::new(fill),
 				timescale,
@@ -18774,7 +18782,7 @@ mod joining_fetch_tests {
 		let consumer = track.consume();
 		let mut fetch = Box::pin(consumer.fetch_group(GROUP, None));
 		assert!(futures::poll!(fetch.as_mut()).is_pending());
-		let request = dynamic.requested_groups().await.expect("group request");
+		let request = dynamic.requested_fill().await.expect("group request");
 		let outcome = request.joined();
 		let mut run = Box::pin(subscriber.clone().run_group_fetch(
 			Path::from_static("broadcast"),
@@ -19021,7 +19029,7 @@ mod joining_fetch_tests {
 		let consumer = track.consume();
 		let mut fetch = std::pin::pin!(consumer.fetch_group(GROUP, None));
 		assert!(futures::poll!(fetch.as_mut()).is_pending());
-		let request = dynamic.requested_groups().await.expect("no group requested");
+		let request = dynamic.requested_fill().await.expect("no group requested");
 
 		subscriber
 			.clone()
@@ -19091,7 +19099,7 @@ mod joining_fetch_tests {
 					}
 				));
 				assert!(futures::poll!(fetch.as_mut()).is_pending());
-				let request = dynamic.requested_groups().await.expect("no group requested");
+				let request = dynamic.requested_fill().await.expect("no group requested");
 
 				subscriber
 					.clone()
@@ -19217,7 +19225,7 @@ mod joining_fetch_tests {
 			}
 		));
 		assert!(futures::poll!(fetch.as_mut()).is_pending());
-		let request = dynamic.requested_groups().await.expect("no group requested");
+		let request = dynamic.requested_fill().await.expect("no group requested");
 
 		let serving = kio::clock::sim::spawn(subscriber.clone().run_group_fetch(
 			Path::from_static("broadcast"),

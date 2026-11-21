@@ -404,8 +404,8 @@ type Span = {
 	/** Whether the start names a group, rather than reaching back to the oldest one. */
 	floored: boolean;
 	/**
-	 * A time start the groups held can't place, looked up from the track's history: the span reads
-	 * nothing until the lookup answers.
+	 * A time start the groups held can't place, whose group a fill asks the track's history for: the
+	 * span reads nothing until it answers.
 	 */
 	looking?: Lookup;
 	/** A time start the groups held can't place yet: the span reads only the groups from that time until it can. */
@@ -421,14 +421,20 @@ type Span = {
 };
 
 /**
- * A time start being looked up: its time, and the exclusive end of the run below every group
- * held, which holds the group containing it if the track's history does. Mirrors the Rust
- * `Looking`.
+ * A time start being looked up: its time, and the oldest key the group containing it may start at,
+ * past every group held below it. Mirrors the Rust `Looking`.
  */
 export interface Lookup {
 	time: bigint;
-	below: bigint;
+	floor: bigint;
 }
+
+/**
+ * What the track's history answered a time start's lookup with: the group containing the time, no
+ * group from `floor`, the oldest key it asked from, through the time, or nothing, with no handler
+ * left to. Mirrors the Rust `window::Found`.
+ */
+export type Found = { kind: "group"; group: bigint } | { kind: "dropped"; floor: bigint } | { kind: "unanswered" };
 
 /**
  * A subscriber's ranges resolved to the group starts it reads, each by the key its caller gave
@@ -643,9 +649,20 @@ export class Window {
 		span.start = start;
 		span.floored = floored;
 		span.waiting = false;
-		const below = asked ? unresolved(at, start, floored, holdings) : undefined;
-		if (below !== undefined) span.looking = { time: at, below };
+		const floor = asked ? unresolved(at, start, floored, holdings) : undefined;
+		if (floor !== undefined) span.looking = { time: at, floor };
 		this.#count(key, span);
+	}
+
+	/**
+	 * The times in `[start, end)` of the time starts still waiting on the groups held. The group
+	 * containing each starts at or before its time, so one at or past a read's floor and below a
+	 * group may still land between them. Mirrors the Rust `Window::waiting_in`.
+	 */
+	waitingIn(start: bigint, end: bigint): bigint[] {
+		const times: bigint[] = [];
+		for (const entry of this.#waiting.in(start, end)) times.push(entry.time);
+		return times;
 	}
 
 	/** Whether group `key` is in range. Everything is while a relative anchor waits. */
@@ -743,25 +760,44 @@ export class Window {
 	}
 
 	/**
-	 * The lookup of time start `time` answered with `group`, the group containing it or the oldest
-	 * group of the history when `time` is older than all of it: its spans start there, once that
-	 * group is held. Undefined, or an answer not held, means the history couldn't tell, so they
-	 * start where the groups held say. Returns whether the groups in range moved. Mirrors the Rust
-	 * `Window::found`.
+	 * The lookup of time start `at` answered: its spans start where the answer says, never where the
+	 * groups held happen to. Left unanswered because no handler is left, they start where the groups
+	 * held say, as with no handler at all, unless the cache since evicted the group their floor was
+	 * past and a handler is back: then they look it up again from lower down. Returns whether the
+	 * groups in range moved. Mirrors the Rust `Window::found`.
 	 */
-	found(at: bigint, group: bigint | undefined, holdings: Holdings = UNHELD): boolean {
-		const found = this.#looking.take(at);
-		if (found === undefined) return false;
-		const held = group !== undefined && holdings.nextStart(group) === group ? group : undefined;
-		const containing = holdings.containing(at);
-		const start = held ?? (typeof containing === "object" ? containing.group : undefined);
-		for (const key of found) {
+	found(at: bigint, found: Found, holdings: Holdings = UNHELD): boolean {
+		const keys = this.#looking.take(at);
+		if (keys === undefined) return false;
+		for (const key of keys) {
 			const span = this.#spans.get(key);
 			if (!span) continue;
 			this.#uncount(key, span);
+			const asked = span.looking?.floor;
 			span.looking = undefined;
-			span.start = start ?? 0n;
-			span.floored = start !== undefined;
+			if (found.kind === "group") {
+				span.start = found.group;
+				span.floored = true;
+			} else if (found.kind === "dropped") {
+				// A floor is one past the group held below the time, which then holds it; from 0, no
+				// group starts at or before it, so the span reads from the time on.
+				span.start = found.floor > 0n ? found.floor - 1n : at;
+				span.floored = true;
+			} else {
+				const containing = holdings.containing(at);
+				span.start = typeof containing === "object" ? containing.group : 0n;
+				span.floored = typeof containing === "object";
+				if (asked !== undefined) {
+					// Nothing held at or before the time any more, maybe nothing at all: the group containing
+					// it may start anywhere below the floor asked.
+					const floor = span.floored
+						? unresolved(at, span.start, true, holdings)
+						: holdings.looksUp?.()
+							? 0n
+							: undefined;
+					if (floor !== undefined && floor < asked) span.looking = { time: at, floor };
+				}
+			}
 			this.#count(key, span);
 		}
 		return true;
@@ -848,8 +884,8 @@ export class Window {
 		// reach back never looks one up: it starts from what this hop holds.
 		const at = time(anchor);
 		const asked = time(range.start) !== undefined && at === time(range.start);
-		const below = at === undefined || !asked ? undefined : unresolved(at, start.group, start.floored, holdings);
-		const looking = at !== undefined && below !== undefined ? { time: at, below } : undefined;
+		const floor = at === undefined || !asked ? undefined : unresolved(at, start.group, start.floored, holdings);
+		const looking = at !== undefined && floor !== undefined ? { time: at, floor } : undefined;
 		const counted = !start.floored && relative(anchor) !== undefined;
 		this.#count(key, {
 			anchor,
@@ -906,6 +942,14 @@ class ByTime {
 	*all(): Generator<Timed> {
 		const first = this.#entries.first();
 		if (first) yield* this.#entries.from(first.time);
+	}
+
+	/** Every entry whose time is in `[start, end)`, lowest first. */
+	*in(start: bigint, end: bigint): Generator<Timed> {
+		for (const entry of this.#entries.from(start)) {
+			if (entry.time >= end) return;
+			yield entry;
+		}
 	}
 
 	/** Add the span keyed `key` under `time`. */
@@ -1050,19 +1094,20 @@ function startOf(
 }
 
 /**
- * The exclusive end of the run a lookup of time start `at`, resolved to `start`, searches, when
- * the groups held can't tell which group contains it and a handler may: it is before every group
- * held, or a group the cache evicted may start after `start`, the newest held at or before it, and
- * still at or before `at`. Starts the producer skipped hold none. Mirrors the Rust `unresolved`.
+ * The oldest key a fill of the group containing time start `at`, resolved to `start`, asks from,
+ * when the groups held can't tell which group contains it and a handler may: it is before every
+ * group held, or a group the cache evicted may start after `start`, the newest held at or before
+ * it, and still at or before `at`. Starts the producer skipped hold none. Mirrors the Rust
+ * `unresolved`.
  */
 function unresolved(at: bigint, start: bigint, floored: boolean, holdings: Holdings): bigint | undefined {
 	if (!holdings.looksUp?.()) return undefined;
-	if (!floored) return holdings.nextStart(0n);
+	if (!floored) return holdings.nextStart(0n) === undefined ? undefined : 0n;
 	const next = start + 1n;
 	const after = holdings.nextStart(next);
 	if (after === undefined) return undefined;
 	const gap = min(after, at + 1n);
-	return holdings.neverProduced?.(next, gap) || next >= gap ? undefined : after;
+	return holdings.neverProduced?.(next, gap) || next >= gap ? undefined : next;
 }
 
 /**

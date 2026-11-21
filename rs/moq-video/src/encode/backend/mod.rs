@@ -574,13 +574,25 @@ pub(crate) mod test_util {
 		pub peak: u64,
 	}
 
-	/// Encode three seconds of a calm scene (a detailed picture drifting a pixel a
-	/// frame) or a busy one (fresh noise every frame, which no quantizer below the
-	/// coarsest codes under any cap) and report what it spent, retuning the cap
+	/// What [`spend`] encodes.
+	#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+	pub(crate) enum Scene {
+		/// A detailed picture drifting a pixel a frame.
+		Calm,
+		/// Fresh noise every frame, which no quantizer below the coarsest codes
+		/// under any cap.
+		Busy,
+		/// The calm picture held still for half the run, then noise: a rate
+		/// controller that banked what the still picture left unspent can pour
+		/// it into the first busy frames.
+		Waking,
+	}
+
+	/// Encode three seconds of `scene` and report what it spent, retuning the cap
 	/// to `retune` half a second in. `None` when the backend `config` names
 	/// cannot open on this machine; once it opens, any failure panics, so an
 	/// encoder that opens but cannot encode fails the test instead of skipping it.
-	pub(crate) fn spend(config: &crate::encode::Config, busy: bool, retune: Option<u64>) -> Option<Spent> {
+	pub(crate) fn spend(config: &crate::encode::Config, scene: Scene, retune: Option<u64>) -> Option<Spent> {
 		let mut encoder = crate::encode::Encoder::new(config).ok()?;
 		let size = crate::Size::new(config.width, config.height);
 		let fps = config.framerate.rounded() as usize;
@@ -593,6 +605,13 @@ pub(crate) mod test_util {
 					.expect("retune the cap");
 			}
 			let (w, h) = (size.width as usize, size.height as usize);
+			let busy = match scene {
+				Scene::Calm => false,
+				Scene::Busy => true,
+				Scene::Waking => index >= 3 * fps / 2,
+			};
+			// The still picture is the calm one's first frame.
+			let shift = if scene == Scene::Waking { 0 } else { index };
 			let mut rgba = vec![255u8; w * h * 4];
 			for y in 0..h {
 				for x in 0..w {
@@ -603,7 +622,7 @@ pub(crate) mod test_util {
 						noise ^= noise << 17;
 						noise as u8
 					} else {
-						let sx = x + index;
+						let sx = x + shift;
 						(((sx * 7) ^ (y * 13)) & 0xff) as u8 / 2 + ((sx / 9 + y / 5) % 2) as u8 * 64
 					};
 					rgba[i..i + 3].fill(value);

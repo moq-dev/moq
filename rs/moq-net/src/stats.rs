@@ -611,6 +611,8 @@ pub struct Presence {
 	/// [`Routes::refused`].
 	pub routes_refused: u64,
 	/// What the label's lite-07 sessions did on the route layer.
+	// Most labels never route, so an all-zero readout stays off the wire; readers default it.
+	#[serde(skip_serializing_if = "Routes::is_zero")]
 	pub routes: Routes,
 }
 
@@ -2317,6 +2319,22 @@ mod tests {
 		let output = serde_json::to_value(value).unwrap();
 		assert_eq!(output["wire_tx"], 71);
 		assert_eq!(output["wire_rx"], 29);
+	}
+
+	/// A label that never routed writes no `routes` and reads back as zeros, and one count
+	/// writes the whole readout.
+	#[test]
+	fn presence_routes_stay_off_the_wire_until_counted() {
+		let mut presence = Presence::default();
+		let output = serde_json::to_value(presence).unwrap();
+		assert!(output.get("routes").is_none(), "{output}");
+		assert_eq!(serde_json::from_value::<Presence>(output).unwrap(), presence);
+
+		presence.routes.closed.other = 1;
+		let output = serde_json::to_value(presence).unwrap();
+		assert_eq!(output["routes"]["closed"]["other"], 1);
+		assert_eq!(output["routes"]["changed"], 0);
+		assert_eq!(serde_json::from_value::<Presence>(output).unwrap(), presence);
 	}
 
 	#[test]

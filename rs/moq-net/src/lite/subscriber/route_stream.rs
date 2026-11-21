@@ -155,9 +155,28 @@ impl RouteStream {
 
 	/// Ready only with the error that ends the session.
 	pub(super) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
-		match self.poll_run(waiter) {
+		let res = self.poll_run(waiter);
+		if self.withdrawing.is_some() && !self.owes(waiter) {
+			self.withdrawing = None;
+		}
+		match res {
 			Poll::Ready(Err(err)) => Poll::Ready(lite::error::control(&mut self.subscriber.session.clone(), err)),
 			Poll::Ready(Ok(())) | Poll::Pending => Poll::Pending,
+		}
+	}
+
+	/// Whether a draining close still waits on this stream: until its FIN is acknowledged,
+	/// unless the peer was never sent a route or claim for the FIN to end.
+	fn owes(&self, waiter: &kio::Waiter) -> bool {
+		match &self.state {
+			State::Running(running) => match running.sending {
+				Sending::Open => true,
+				Sending::Ending | Sending::Closing => running.answer.announced(),
+				Sending::Closed => false,
+			},
+			// Nothing is announced before the route layer runs, and a leaving session never
+			// starts it announcing.
+			State::Opening | State::Setup(_) => self.publish.withdrawal.poll(waiter).is_pending(),
 		}
 	}
 
@@ -178,11 +197,7 @@ impl RouteStream {
 					self.state = State::Running(Box::new(running));
 				}
 				State::Running(running) => {
-					let res = running.poll(&self.subscriber, &self.publish, waiter);
-					if matches!(running.sending, Sending::Closed) {
-						self.withdrawing = None;
-					}
-					return res;
+					return running.poll(&self.subscriber, &self.publish, waiter);
 				}
 			}
 		}

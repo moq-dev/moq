@@ -167,7 +167,8 @@ pub(in crate::lite) struct Answer {
 	/// The latest marker answered the peer's edit, so the SYNCED after it count.
 	answering: bool,
 	/// How many reads a grant change added have yet to send their initial set, before
-	/// what it no longer shows goes: a claim a wider read tells again is kept.
+	/// what it no longer shows goes and what it now shows starts: a claim a wider read tells
+	/// again is kept. Every prefix's SYNCED waits for that too.
 	regranting: Option<usize>,
 	/// The ANNOUNCE_REQUESTs of an edit that continues.
 	parts: Option<Parts>,
@@ -182,6 +183,8 @@ pub(in crate::lite) struct Answer {
 	live: HashMap<Named, (u64, Claim)>,
 	/// The session is leaving: nothing more is sent.
 	withdrawn: bool,
+	/// The peer was sent a route or a claim, which only this stream can end.
+	announced: bool,
 	/// Why the last error closes the session, when the route layer said.
 	cause: Option<RouteClose>,
 }
@@ -228,6 +231,7 @@ impl Answer {
 			told: BTreeMap::new(),
 			live: HashMap::new(),
 			withdrawn: false,
+			announced: false,
 			cause: None,
 		}
 	}
@@ -450,7 +454,7 @@ impl Answer {
 	/// Whether the grant and this handle show the peer the whole tree, as a routing peer
 	/// must be.
 	pub(in crate::lite) fn whole(&self) -> bool {
-		self.origin.root().is_empty() && self.origin.covers(&Path::empty()) && self.permit.covers_subtree("")
+		self.origin.root().is_empty() && self.origin.covers(&Path::empty()) && self.permit.matches("")
 	}
 
 	/// Ready once the peer reads its stream too slowly for what the node queued.
@@ -530,17 +534,18 @@ impl Answer {
 						let holds = std::mem::replace(&mut mount.holds, Holds::Nothing);
 						holds.synced().then_some(mount.prefix)
 					}
-					// What a grant change reads starts after its prefix's SYNCED, and once all
-					// of it is in, what the change no longer shows goes.
+					// What a grant change reads: once all of it is in, the claims and the SYNCED
+					// held back for it settle. A prefix not yet synced waits for its own reads too.
 					None if !self.answering => {
 						if let Some(left) = self.regranting.as_mut() {
 							*left = left.saturating_sub(1);
 							if *left == 0 {
-								self.regranting = None;
-								self.resync(writer)?;
+								self.settle(writer)?;
 							}
 						}
-						None
+						(self.prefixes.iter())
+							.find(|(_, prefix)| !prefix.synced && prefix.reads.contains(&path))
+							.map(|(id, _)| *id)
 					}
 					None => (self.prefixes.iter())
 						.find(|(_, prefix)| {
@@ -556,6 +561,12 @@ impl Answer {
 			// The other half of the session asks.
 			Msg::Ask(_) => Ok(()),
 		}
+	}
+
+	/// Whether the peer was ever sent a route or a claim. One that never was holds nothing
+	/// a finished stream ends, so a draining close need not wait for it.
+	pub(in crate::lite) fn announced(&self) -> bool {
+		self.announced
 	}
 
 	/// The session is leaving: let go of the node, so nothing more is queued. Finishing
@@ -668,6 +679,9 @@ impl Answer {
 		added: usize,
 		regions: Option<&[Path]>,
 	) -> Result<(), Error> {
+		// The mounts that go below may release a prefix, whose SYNCED waits for the claims
+		// this change shows in the reads it keeps.
+		self.regranting = Some(added);
 		let mut gone: Vec<Named> = (self.told.iter())
 			.filter(|(key, (source, _))| *source == MAIN && removed.iter().any(|read| route::within(&key.0, read)))
 			.map(|(key, _)| key.clone())
@@ -680,20 +694,21 @@ impl Answer {
 				.unwrap_or_default();
 			let dropped: Vec<Path> = prefix.reads.difference(&reads).cloned().collect();
 			let added: Vec<Path> = reads.difference(&prefix.reads).cloned().collect();
-			// Before its SYNCED, the prefix waits for the mounts read in place of those that go,
-			// counted before the ones that go release it.
+			// Before its SYNCED, the prefix waits for what is read in place of what goes, the
+			// session's key and the mounts beneath each read alike, counted before the mounts
+			// that go release it.
 			let holds = match prefix.synced {
 				true => Holds::Main,
 				false => Holds::Both,
 			};
-			let mut mounted = 0;
+			let mut waits = added.len();
 			for read in added {
-				mounted += self.mount(id, read, holds)?;
+				waits += self.mount(id, read, holds)?;
 			}
 			let prefix = self.prefixes.get_mut(&id).expect("listed above");
 			prefix.reads = reads;
 			if !prefix.synced {
-				prefix.waiting += mounted;
+				prefix.waiting += waits;
 			}
 			// The mounts beneath a read the grant no longer shows go with it.
 			let sources: Vec<Source> = (self.mounts.iter())
@@ -719,12 +734,24 @@ impl Answer {
 		}
 		self.main.flush();
 		match added {
-			0 => self.resync(writer),
-			added => {
-				self.regranting = Some(added);
-				Ok(())
-			}
+			0 => self.settle(writer),
+			_ => Ok(()),
 		}
+	}
+
+	/// All a grant change reads is in: bring every claim in line with it, then send each
+	/// SYNCED held back for it.
+	fn settle(&mut self, writer: &mut Writer) -> Result<(), Error> {
+		self.regranting = None;
+		self.resync(writer)?;
+		let ready: Vec<u64> = (self.prefixes.iter())
+			.filter(|(_, prefix)| !prefix.synced && prefix.waiting == 0)
+			.map(|(id, _)| *id)
+			.collect();
+		for id in ready {
+			self.synced(writer, id, 0)?;
+		}
+		Ok(())
 	}
 
 	/// Bring every claim the peer holds or the node told in line with the grant.
@@ -739,13 +766,14 @@ impl Answer {
 	}
 
 	/// `keys` of those answering the prefix with Prefix ID `id` sent their initial set:
-	/// SYNCED goes out once every one has.
+	/// SYNCED goes out once every one has, and no grant change is still reading.
 	fn synced(&mut self, writer: &mut Writer, id: u64, keys: usize) -> Result<(), Error> {
+		let regranting = self.regranting.is_some();
 		let Some(prefix) = self.prefixes.get_mut(&id).filter(|prefix| !prefix.synced) else {
 			return Ok(());
 		};
 		prefix.waiting = prefix.waiting.saturating_sub(keys);
-		if prefix.waiting > 0 {
+		if prefix.waiting > 0 || regranting {
 			return Ok(());
 		}
 		prefix.synced = true;
@@ -765,6 +793,7 @@ impl Answer {
 						claims: HashMap::new(),
 					}
 				});
+				self.announced = true;
 				writer.buffer(&Wire::Route { offer })
 			}
 			None => {
@@ -876,7 +905,8 @@ impl Answer {
 	}
 
 	/// Whether the peer is shown the claim at the absolute `path`: the permit and this
-	/// handle allow some path it covers, the same one.
+	/// handle allow some path it covers, the same one, which prefixes always meet as one
+	/// whole subtree.
 	fn shows(&self, path: &Path) -> bool {
 		let Some((_, prefix)) = self.region(path) else {
 			return false;
@@ -885,7 +915,9 @@ impl Answer {
 		let (Some(suffix), Some(relative)) = (within, path.strip_prefix(self.origin.root())) else {
 			return false;
 		};
-		(prefix.hidden || !suffix.is_hidden()) && self.origin.reaches_any(path, &self.permit.beneath(relative.as_str()))
+		(prefix.hidden || !suffix.is_hidden())
+			&& self.origin.reaches(path)
+			&& self.permit.within(self.origin.allowed()).overlaps(relative.as_str())
 	}
 
 	/// Bring the peer's claim `key` in line with what the node told and the answer
@@ -910,6 +942,7 @@ impl Answer {
 				})?;
 				let announce = announce.expect("lite-07 assigns announce ids");
 				self.live.insert(key, (announce, claim));
+				self.announced = true;
 			}
 			(Some((announce, held)), Some(claim)) => {
 				let id = *announce;
@@ -923,6 +956,10 @@ impl Answer {
 			}
 			(Some(_), None) => {
 				let (id, _) = self.live.remove(&key).expect("matched above");
+				// Still told, it left because the answer no longer shows it, as when a change
+				// queued before a grant change is judged by the new grant: its publisher never
+				// ended it.
+				let lost = lost || self.told.contains_key(&key);
 				writer.buffer(&Wire::End { id, lost })?;
 				self.encoder.end(id);
 			}
@@ -970,3 +1007,6 @@ impl Answer {
 		}
 	}
 }
+
+#[cfg(test)]
+mod tests;

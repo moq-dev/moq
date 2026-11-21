@@ -5257,7 +5257,7 @@ mod test {
 			let dynamic = b.requests();
 			routes.serve(b.consume());
 			assert!(reading.read_frame().now_or_never().is_none(), "fails={fails}");
-			let _pending = dynamic.requested_groups().now_or_never().unwrap().unwrap();
+			let _pending = dynamic.requested_fill().now_or_never().unwrap().unwrap();
 
 			if abort {
 				b.abort(Error::Stream(StreamError::App(5))).unwrap();
@@ -5808,7 +5808,7 @@ mod test {
 		let mut fetching = logical.consume().fetch_group(0, None);
 		assert!((&mut fetching).now_or_never().is_none());
 		let fill = dynamic
-			.requested_groups()
+			.requested_fill()
 			.now_or_never()
 			.expect("the fetch reached the staged copy")
 			.unwrap();
@@ -5842,7 +5842,7 @@ mod test {
 		let staged = routes.stage(refused.consume());
 		let mut fetching = logical.consume().fetch_group(0, None);
 		assert!((&mut fetching).now_or_never().is_none());
-		let fill = refused_dynamic.requested_groups().now_or_never().unwrap().unwrap();
+		let fill = refused_dynamic.requested_fill().now_or_never().unwrap().unwrap();
 		let wrong = refused.accept(crate::track::Info::timed());
 		let mut group = fill
 			.accept(0, crate::track::Info::timed())
@@ -5857,7 +5857,7 @@ mod test {
 		let staged = routes.stage(request.consume());
 		assert!((&mut fetching).now_or_never().is_none());
 		let fill = dynamic
-			.requested_groups()
+			.requested_fill()
 			.now_or_never()
 			.expect("asked again of the next route")
 			.unwrap();
@@ -5886,7 +5886,7 @@ mod test {
 		let mut fetching = logical.consume().fetch_group(0, None);
 		assert!((&mut fetching).now_or_never().is_none());
 		assert!(
-			dynamic.requested_groups().now_or_never().is_none(),
+			dynamic.requested_fill().now_or_never().is_none(),
 			"the withdrawn copy is not asked"
 		);
 
@@ -5908,7 +5908,7 @@ mod test {
 			let mut fetching = logical.consume().fetch_group(0, None);
 			assert!((&mut fetching).now_or_never().is_none());
 			assert!(
-				dynamic.requested_groups().now_or_never().is_some(),
+				dynamic.requested_fill().now_or_never().is_some(),
 				"splice={splice}: the newer stage is asked"
 			);
 		}
@@ -5942,7 +5942,7 @@ mod test {
 			let mut fetching = logical.consume().fetch_group(0, None);
 			let waiter = kio::Waiter::noop();
 			assert!(kio::Task::poll(&mut *fetching, &waiter).is_pending());
-			let fill = dynamic.requested_groups().now_or_never().unwrap().unwrap();
+			let fill = dynamic.requested_fill().now_or_never().unwrap().unwrap();
 			if refused {
 				fill.refuse_groups(0..1, Error::Unauthorized);
 				assert!(
@@ -5971,7 +5971,7 @@ mod test {
 		let _staged = routes.stage(request.consume());
 		let mut fetching = logical.consume().fetch_group(0, None);
 		assert!((&mut fetching).now_or_never().is_none());
-		let fill = dynamic.requested_groups().now_or_never().unwrap().unwrap();
+		let fill = dynamic.requested_fill().now_or_never().unwrap().unwrap();
 		let _staged_copy = request.accept(crate::track::Info::timed());
 		let mut group = fill
 			.accept(0, crate::track::Info::timed())
@@ -5990,7 +5990,7 @@ mod test {
 			"the stage's answer is not handed out"
 		);
 		let fill = b_dynamic
-			.requested_groups()
+			.requested_fill()
 			.now_or_never()
 			.expect("asked of the serving copy")
 			.unwrap();
@@ -6016,7 +6016,7 @@ mod test {
 		let logical = logical(&routes);
 		let mut fetching = logical.consume().fetch_group(0, None);
 		assert!((&mut fetching).now_or_never().is_none());
-		let fill = dynamic.requested_groups().now_or_never().unwrap().unwrap();
+		let fill = dynamic.requested_fill().now_or_never().unwrap().unwrap();
 		fill.refuse_groups(0..1, Error::Dropped);
 		assert!((&mut fetching).now_or_never().is_none(), "the next route is asked");
 
@@ -6688,6 +6688,49 @@ mod test {
 			};
 			keys.push(group.start);
 		}
+	}
+
+	/// A front's key-order reader holds back a gap above a time start its serving copy still
+	/// waits to place, as a plain reader does: the group containing it may land below the gap.
+	#[test]
+	fn a_front_holds_a_gap_above_a_waiting_time_start() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let serving = received_copy();
+		serving.anchored();
+		routes.serve(serving.consume());
+		write(&serving, 2000);
+		serving.drop_groups(1500..1600, StreamError::NotFound);
+		let subscription = Subscription::default()
+			.with_delay(Delay::default().with_max(None))
+			.with_ranges([track::Range {
+				start: Anchor::Time(1500),
+				end: None,
+			}]);
+		let mut sub = logical
+			.consume()
+			.subscribe(subscription)
+			.now_or_never()
+			.unwrap()
+			.unwrap()
+			.ordered();
+		let waiter = kio::Waiter::noop();
+		let mut read = || -> Vec<String> {
+			let mut items = Vec::new();
+			while let Poll::Ready(Ok(Some(item))) = sub.poll_next_item(&waiter) {
+				items.push(match item {
+					track::Item::Group(group) => format!("group {}", group.start),
+					track::Item::Gap { range, .. } => format!("gap {range:?}"),
+				});
+			}
+			items
+		};
+		assert_eq!(read(), Vec::<String>::new(), "the gap waits on the start");
+		serving.time_starts([(1500, Some(1000), None)], Duration::MAX);
+		write(&serving, 1000);
+		serving.skip_groups(1001..1500);
+		serving.skip_groups(1600..2000);
+		assert_eq!(read(), ["group 1000", "gap 1500..1600", "group 2000"]);
 	}
 
 	/// A front's key-order reader reports a group that lands on its copy after the read passed
@@ -9917,15 +9960,12 @@ mod test {
 			let mut group = recv(&mut sub);
 			assert_eq!(read(&mut group), Some(b"held".to_vec()));
 
-			// A moq-transport route's copy, whose timestamps are never checked for a rewind.
+			// A lite-05/06 route's copy, whose timestamps are never checked for a rewind.
 			let b = track::Producer::new(
 				Arc::new(broadcast::Info::default()),
 				"video",
 				crate::track::Info {
-					properties: Some(Arc::new(crate::model::object::TrackProperties {
-						version: crate::ietf::Version::Draft22,
-						values: Vec::new(),
-					})),
+					unchecked: true,
 					..crate::track::Info::timed()
 				},
 			);

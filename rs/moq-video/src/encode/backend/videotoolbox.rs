@@ -653,7 +653,7 @@ mod tests {
 	/// measured are rate control's alone.
 	#[test]
 	fn quality_under_a_cap() {
-		use super::super::test_util::spend;
+		use super::super::test_util::{Scene, spend};
 
 		for codec in [Codec::H264, Codec::H265] {
 			let mut config = Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap());
@@ -665,11 +665,11 @@ mod tests {
 				..config.clone()
 			};
 
-			let calm = spend(&at(4_000_000), false, None).unwrap();
+			let calm = spend(&at(4_000_000), Scene::Calm, None).unwrap();
 			// An M4 spent 35-50 kbit/s here, and 340 with no floor or limit.
 			assert!(calm.mean < 150_000, "{codec:?}: a calm scene filled the cap: {calm:?}");
 
-			let busy = spend(&at(4_000_000), true, None).unwrap();
+			let busy = spend(&at(4_000_000), Scene::Busy, None).unwrap();
 			// VideoToolbox aims about 30% under its limit, and an M4 coded noise at
 			// 53-57% of this one.
 			assert!(
@@ -684,7 +684,7 @@ mod tests {
 			// Under a cap this tight noise is incompressible: VideoToolbox drops
 			// frames rather than break the limit (an average alone ran to 720
 			// kbit/s), so only the peak is checked.
-			let moved = spend(&at(4_000_000), true, Some(250_000)).unwrap();
+			let moved = spend(&at(4_000_000), Scene::Busy, Some(250_000)).unwrap();
 			assert!(
 				moved.peak <= 250_000,
 				"{codec:?}: the limit did not follow set_bitrate: {moved:?}"

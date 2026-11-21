@@ -10,12 +10,12 @@ umask 077
 
 if [ ! -f demo-web.jwt ]; then
     cargo run --quiet --bin moq -- auth sign --key root.jwk --unbounded \
-        --root demo --subscribe '**' --publish 'me/**' \
+        --root demo --subscribe '' --publish 'me' \
         >demo-web.jwt
 fi
 
 if [ ! -f demo-cli.jwt ]; then
     cargo run --quiet --bin moq -- auth sign --key root.jwk --unbounded \
-        --root demo --publish '**' \
+        --root demo --publish '' \
         >demo-cli.jwt
 fi

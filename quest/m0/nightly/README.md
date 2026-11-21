@@ -148,3 +148,11 @@ container export slowdown from
 ([moq-dev/moq#9235](https://github.com/moq-dev/moq/pull/9235)). Dropped as
 one-offs: the Windows C and Cpp release builds' runner bash startup failure,
 and the Benchmark site's artifact fetch (re-check either if it repeats).
+
+The mesh replay's violations with no known entry on 2026-11-19 and 11-20
+came from debug-built relays starved for CPU on the 4-core runner, and from
+a strand counted again at every later event; both fixed in
+[moq-dev/moq#9236](https://github.com/moq-dev/moq/pull/9236). Its `shown`
+rows (a relay still showing a broadcast after its source ended) appeared only
+in those starved runs and did not reproduce locally. A failed replay job now
+uploads its relay and reader logs, so read those if `shown` recurs.

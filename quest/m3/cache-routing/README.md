@@ -17,7 +17,7 @@ links, since routing chooses only among the sessions an operator configured.
 ## Plan
 
 Reopened 2026-11-15 (maintainer, /quest-plan on
-[cache-aware multicast](/quest/m2/multicast/README.md), requirement 8:
+[cache-aware multicast](https://github.com/moq-dev/moq/blob/41cc107579/quest/m2/multicast/README.md), requirement 8:
 "there is a cold cost for a route and a warm cost", and routes coalesce onto
 a node that says it carries a broadcast). What stands and what goes:
 
@@ -32,7 +32,7 @@ a node that says it carries a broadcast). What stands and what goes:
   carrier offered its copy at no cost and a hash ranked carriers.
 - ✅ Warm means demand, not cache contents, and pop skipping and one uplink
   per group of drones are the two cases that must work (maintainer,
-  2026-11-15, [epic](/quest/m2/multicast/README.md) item 9).
+  2026-11-15, [epic](https://github.com/moq-dev/moq/blob/41cc107579/quest/m2/multicast/README.md) item 9).
 - ✅ A pull moves to a cheaper warm copy only from a reader ranked below its
   own: ranked readers, which a TLA+ model shows settle (maintainer,
   2026-11-17, [moq-dev/moq#8986](https://github.com/moq-dev/moq/pull/8986);

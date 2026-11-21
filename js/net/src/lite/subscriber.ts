@@ -89,6 +89,7 @@ import {
 	Subscribe,
 	SubscribeUpdate,
 	toWireRanges,
+	type WireAnchor,
 	type WireRange,
 } from "./subscribe.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
@@ -2089,11 +2090,6 @@ export class Subscriber {
 			const maxAge = (await producer.info().catch(() => undefined))?.maxAge;
 			const framing = { compress: entry.compress, timescale: entry.timescale, maxAge };
 			for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
-				// The wire fetches by group alone, so a lookup goes unanswered and its reader falls back.
-				if (fill.kind === "lookup") {
-					fill.close();
-					continue;
-				}
 				// One group is what FETCH carries; more go through the subscription.
 				if (fills && fill.end - fill.start > 1n) {
 					fills.push(fill);
@@ -2875,10 +2871,10 @@ export class Subscriber {
 	// requested floor, pending, while SUBSCRIBE_START or a range's SUBSCRIBE_STARTED has yet to
 	// say where one starts. Mirrors the Rust `SubStream::declare`.
 	#declare(entry: SubscribeEntry): void {
-		// Where the publisher started each live range asked from a group's start, which a reader's
-		// time start there resolves to when the copy holds no group at it, and one asked from the
-		// oldest group as asked from 0. Mirrors the Rust `SubStream::report_starts`.
-		const times: [bigint, bigint][] = [];
+		// Where the publisher started each live range asked from a group's start or the oldest group
+		// (time 0), with the last time it reaches, which a reader's time start there or folded into it
+		// resolves to when the copy holds no group at it. Mirrors the Rust `SubStream::report_starts`.
+		const times: [bigint, bigint | undefined, bigint | undefined][] = [];
 		// And each one counting back, which the copy, holding only part of the track, can't count,
 		// with the latest group it counted back from.
 		const relative: [bigint, bigint, bigint | undefined][] = [];
@@ -2886,13 +2882,19 @@ export class Subscriber {
 			const range = entry.live.get(id);
 			const time = range?.start?.time ?? range?.start?.absolute;
 			const back = range?.start?.relative;
+			if (!entry.starts.has(id)) continue;
+			// Undefined for a range with no group to deliver.
 			const at = entry.starts.get(id);
-			if (at === undefined) continue;
-			if (time !== undefined) times.push([time, at]);
-			else if (back !== undefined) relative.push([back, at, entry.edges.get(id)]);
-			else if (range !== undefined && range.start === undefined) times.push([0n, at]);
+			if (back !== undefined) {
+				if (at !== undefined) relative.push([back, at, entry.edges.get(id)]);
+			} else if (time !== undefined || range?.start === undefined) {
+				const asked = time ?? 0n;
+				if (at !== undefined || reaches(range?.end, asked)) times.push([asked, at, through(range?.end, asked)]);
+			}
 		}
-		hooks.timeStarts(entry.track, times);
+		// The wire does not say which budget a range resolved under, so an empty one holds only for the
+		// narrowest asked.
+		hooks.timeStarts(entry.track, times, entry.staleBudget);
 		hooks.relativeStarts(entry.track, relative);
 
 		let start: bigint | null = null;
@@ -3431,4 +3433,24 @@ class ConsumeBroadcast extends broadcast.Consumer {
 	override clone(): ConsumeBroadcast {
 		return new ConsumeBroadcast(this.#subscriber, this.#path, this.#consumed, this.shareState());
 	}
+}
+
+// The last time a lite-07 range ending at `end` reaches, undefined while it follows the live edge:
+// an exclusive group end stops at the time before it, and a relative end, unknown here, at the
+// range's own time `asked`. Mirrors the Rust `SubStream::report_starts`.
+// Whether a lite-07 range with no group to deliver says its publisher held none at or before its
+// reach: only one whose end takes in the group containing its time, which a range that ends before
+// its time, or by a count back, may not. Mirrors the Rust `SubStream::report_starts`.
+function reaches(end: WireAnchor | undefined, asked: bigint): boolean {
+	if (end === undefined) return false;
+	if (end.time !== undefined) return end.time >= asked;
+	if (end.absolute !== undefined) return end.absolute > asked;
+	return false;
+}
+
+function through(end: WireAnchor | undefined, asked: bigint): bigint | undefined {
+	if (end === undefined) return undefined;
+	if (end.time !== undefined) return end.time;
+	if (end.absolute !== undefined) return end.absolute > asked ? end.absolute - 1n : asked;
+	return asked;
 }

@@ -90,11 +90,15 @@ impl Discovery {
 		};
 		match client && !origin.relays() {
 			true => discovery.interests = Some(origin.interests()),
-			// The wire speaks announce interest by prefix: ask for each granted pattern's
-			// literal head and let the origin's scope filter what arrives. Each snapshot is
-			// taken now, so a reader never reads as synced before the request goes out.
+			// The wire speaks announce interest by prefix: ask for each granted prefix. Each
+			// snapshot is taken now, so a reader never reads as synced before the request
+			// goes out. A prefix too long for a path names nothing to ask about.
 			false => {
-				for prefix in crate::model::interest_prefixes(&origin.allowed()) {
+				let granted = origin.allowed();
+				for prefix in granted
+					.iter()
+					.filter_map(|prefix| crate::Path::new(prefix.as_str()).ok())
+				{
 					let snapshot = origin.snapshot(&prefix);
 					discovery.requests.insert(prefix.clone(), Request::default());
 					discovery.changes.push_back(Change::Open(prefix, snapshot));

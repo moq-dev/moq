@@ -257,9 +257,9 @@ See [HTTP endpoints](/bin/relay/http).
 # Exactly one of these:
 url = "http://127.0.0.1:4440/"       # An auth server asked once per session event (`moq auth serve`,
                                      # or your own). https:// presents connect.tls; unix:// is a socket.
-# public = "anon/**"                 # Or a static anonymous grant rooted at /, publish and subscribe alike.
-# public_subscribe = ["anon/**", "demo/**"]   # Or split them; patterns, `foo/**` for a subtree.
-# public_publish = ["anon/**"]
+# public = "anon"                    # Or a static anonymous grant rooted at /, publish and subscribe alike.
+# public_subscribe = ["anon", "demo"] # Or split them; each prefix covers its subtree, "" covers everything.
+# public_publish = ["anon"]
 ```
 
 See [Authentication](/bin/relay/auth).
@@ -384,8 +384,12 @@ asking it to reconnect elsewhere, including any that connect during the drain,
 and is force-closed if it is still connected when the window ends. The cluster
 links the relay dialed are drained the same way and stop redialing, so a
 neighbour hears the relay is draining and moves its routes before the link
-closes. A neighbour keeps serving such a link rather than leave it, so a relay
-that dialed a peer holds its drain to the end of the window. Accepted
+closes. A neighbour keeps serving such a link rather than leave it, so the
+relay closes the link itself once its accepted connections have left and
+nothing reads through it, or at the end of the window, where a link still open
+counts as force-closed. Until then the link keeps announcing the broadcasts of
+publishers still connected to the relay, so neighbours don't lose them while
+those publishers move. Accepted
 connections still handshaking or awaiting authorization hold the drain until
 they finish, fail, or reach that same deadline, where any still pending is
 refused or closed. Public HTTP/1.1 connections hold the drain from TCP accept

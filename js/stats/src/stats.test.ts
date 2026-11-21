@@ -121,6 +121,8 @@ test("a frame names each counter once and a missing counter reads zero", () => {
 	expect(PresenceSchema.parse({ sessions_started: 4, sessions_ended: 2 })).toMatchObject({
 		sessions_started: 4,
 		sessions_ended: 2,
+		// A label that never routed sends no `routes`.
+		routes: { changed: 0, closed: { other: 0 } },
 	});
 	// The pre-rename spellings are neither read nor kept.
 	expect(PresenceSchema.parse({ sessions: 4, sessions_closed: 2 })).toMatchObject({

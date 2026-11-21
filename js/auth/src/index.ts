@@ -6,20 +6,16 @@
  * gets back, and the JWT {@link Claims} a client presents in its query with the
  * {@link Key} that signs and verifies it.
  *
- * Grants and claims name paths with patterns from `@moq/pattern`, re-exported here:
- * `foo` is one broadcast, `foo/**` is a subtree, `**` is everything.
+ * Grants and claims name paths with prefixes from `@moq/pattern`, re-exported here:
+ * `foo` is `foo` and everything beneath it, and the empty prefix is everything. Signing
+ * takes no wildcard: `foo/**` and `**` are refused, written `foo` and `""` instead. Until the
+ * next two version migrations, a token, key scope, or parsed grant spells each prefix as the
+ * subtree pattern releases before 0.22 read, `foo/**` or `**`, and reads that spelling back.
  *
  * @module
  */
 
-export {
-	compareSpecificity,
-	InvalidPattern,
-	Pattern,
-	Patterns,
-	type Segment,
-	type Specificity,
-} from "@moq/pattern";
+export { InvalidPrefix, Prefix, Prefixes } from "@moq/pattern";
 export * from "./algorithm.ts";
 export * from "./claims.ts";
 export * from "./contract.ts";
