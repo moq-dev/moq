@@ -68,6 +68,7 @@ import {
 	type Run,
 	removeRun,
 	runGaps,
+	type Within,
 } from "./internal.ts";
 import { grace } from "./ledger.ts";
 import { keyOf, type Lister, type Tracks, type TracksEvent } from "./listing.ts";
@@ -482,6 +483,13 @@ class Reader implements ResumeSource {
 	#groupsRead = false;
 	/** The groups handed out and still read, which other copies may back; see {@link #backs}. */
 	readonly out = new Set<Recover>();
+
+	/**
+	 * What a group moved onto another copy is judged within: this reader's window below its cursor
+	 * cap, not the copy's own subscription, which starts at the switch's boundary. Mirrors the Rust
+	 * `Recover::window`.
+	 */
+	readonly within: Within;
 	/** Every group handed out and still open, which ends with the reader. */
 	#open = new Set<GroupConsumer>();
 	/** The soonest deadline a read waits on, armed to wake it then. */
@@ -493,6 +501,11 @@ class Reader implements ResumeSource {
 	constructor(route: Route, shell: ResumeShell, record: (info: track.Info, source: Source) => void, parent?: Copy) {
 		this.route = route;
 		this.#shell = shell;
+		this.within = {
+			contains: (key) => this.#inWindow(key),
+			end: () => shell.cursor.peek().end,
+			changed: [shell.cursor, shell.subscription],
+		};
 		this.#record = record;
 		this.#mirrored = shell.subscription.peek();
 		this.#bounded = shell.cursor.peek();
@@ -2247,7 +2260,7 @@ class Recover implements GroupRecover {
 	#replacement(group: GroupConsumer, copy: Copy): Replacement {
 		return {
 			group,
-			expiry: hooks.staleAt(copy.sub, this.key),
+			expiry: hooks.staleAt(copy.sub, this.key, undefined, this.#reader.within),
 			adopt: () => {
 				// A later switch must keep this copy subscribed while the recovered group still
 				// reads it, just like a group handed out from that copy directly. Leased first, so

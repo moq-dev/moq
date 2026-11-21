@@ -1064,6 +1064,75 @@ test("a group no route continues is given up once a newer one supersedes it", as
 	close();
 });
 
+// A read that moves a group onto a new route judges it within the reader's own window: newer groups
+// that route holds for others never expire it, and groups in the window do, even below where the new
+// route's subscription starts. Mirrors the Rust `a_recovered_group_expires_only_within_the_readers_window`.
+for (const [name, end, held, newer, expires] of [
+	["outside the window", 0n, undefined, 4n, false],
+	// The old route's group 4 puts the boundary past the window, so the new route's own subscription
+	// asks for nothing: its groups 1 to 3 are the reader's all the same.
+	["below the boundary", 3n, 4n, 3n, true],
+] as const) {
+	test(`a recovered group expires only within the reader's window (${name})`, async () => {
+		const { a, b, swap, active, close } = await setup();
+		const ta = copy(a);
+		const tb = copy(b);
+		const sub = active.track("seq").subscribe({ ranges: [{ start: { time: 0n }, end: { time: end } }] });
+		ta.write(0n, 1, false);
+		const group = sub.tryRecvGroup();
+		if (!group) throw new Error("expected group 0");
+		expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+		if (held !== undefined) ta.write(held);
+
+		tb.write(0n, 1, false);
+		await swap();
+		// The stalled read moves onto the new route's copy.
+		const next = group.readFrame();
+		next.catch(() => {});
+		expect(await isPending(next)).toBe(true);
+		for (let key = 1n; key <= newer; key++) tb.write(key);
+		if (expires) {
+			await expect(next).rejects.toBeInstanceOf(StreamError);
+		} else {
+			expect(await isPending(next)).toBe(true);
+		}
+
+		group.close();
+		sub.close();
+		close();
+	});
+}
+
+// A group moved onto another copy wakes when the reader's cursor cap rises over groups that expire
+// it. Mirrors the Rust `a_recovered_group_wakes_when_the_readers_cap_rises`.
+test("a recovered group wakes when the reader's cap rises", async () => {
+	const { a, b, swap, active, close } = await setup();
+	const ta = copy(a);
+	const tb = copy(b);
+	const sub = active
+		.track("seq")
+		.subscribe()
+		.withRange({ end: { excluded: 1n } });
+	ta.write(0n, 1, false);
+	const group = sub.tryRecvGroup();
+	if (!group) throw new Error("expected group 0");
+	expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+
+	tb.write(0n, 1, false);
+	await swap();
+	const next = group.readFrame();
+	next.catch(() => {});
+	for (let key = 1n; key <= 4n; key++) tb.write(key);
+	expect(await isPending(next)).toBe(true);
+
+	sub.withRange({ end: { excluded: 5n } });
+	await expect(next).rejects.toBeInstanceOf(StreamError);
+
+	group.close();
+	sub.close();
+	close();
+});
+
 // Moq-transport provenance is content, like Rust's `properties`: a copy over another draft differs.
 for (const [name, before, after] of [
 	["track properties", { priority: 1 }, { priority: 2 }],
