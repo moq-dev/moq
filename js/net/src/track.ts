@@ -965,8 +965,9 @@ function removeKey(keys: bigint[], key: bigint): void {
 
 // A fresh read handle on a group the producer still caches; assigned in its static block.
 let cachedMirror: (producer: Producer, key: bigint, from: number) => GroupConsumer | undefined;
-// Whether the producer still caches a group that has not failed; assigned in its static block.
-let cachedHolds: (producer: Producer, key: bigint) => boolean;
+// Whether the producer still caches a group that has not failed, with `whole` only one held from
+// its first frame; assigned in its static block.
+let cachedHolds: (producer: Producer, key: bigint, whole?: boolean) => boolean;
 // Whether the producer is a copy a session receives, whose handler fetches by group alone.
 let receivedCopy: (producer: Producer) => boolean;
 // The keys in `[start, end)` the producer caches, unsorted, costing the smaller of the span
@@ -1721,9 +1722,10 @@ export class Producer {
 		hooks.reportedGroup = (producer, group) => producer.#advanceLargest({ group, frame: 0 });
 		objectLargest = (producer) => producer.#objectLargest;
 		fillsOf = (producer) => producer.#fills;
-		cachedHolds = (producer, key) => {
+		cachedHolds = (producer, key, whole = false) => {
 			const entry = producer.#cached.get(key);
-			return entry !== undefined && !(entry.group.closed.peek() instanceof Error);
+			if (entry === undefined || entry.group.closed.peek() instanceof Error) return false;
+			return !whole || !hooks.groupHeadless(entry.group);
 		};
 		receivedCopy = (producer) => producer.#wire !== undefined;
 		cachedIn = (producer, start, end) => {
@@ -3101,9 +3103,15 @@ type Drift = {
 	// track's bare starts count as milliseconds, as the Rust `age` reads them.
 	presentation?: { key: bigint; at: number };
 	end?: bigint;
-	// Judged against the whole track rather than this reader's window, as a fetch is.
-	whole: boolean;
+	// Judged within these groups rather than this reader's window, as a fetch is (every group).
+	scope?: Scope;
 };
+
+// The groups a drift is judged within when not this reader's own window: every group, as for a
+// fetch, or a logical reader's window for a group moved onto this copy.
+type Scope = (key: bigint) => boolean;
+
+const WHOLE: Scope = () => true;
 
 // An ordered read's state, mirroring the Rust `Ordered`: a group read and held back because a gap
 // below it goes first, the gaps found and not returned yet (sorted and disjoint), and one past
@@ -3330,10 +3338,13 @@ export class Subscriber {
 	// `Filter::refused`.
 	#refusal?: Error;
 
-	#drift(whole = this.#fetchBudget !== undefined): Drift {
+	#drift(
+		scope = this.#fetchBudget !== undefined ? WHOLE : undefined,
+		end = scope ? undefined : this.#cursor.peek().end,
+	): Drift {
 		// A fetch judges its group against the whole track, as the Rust `fetch_group` does: a
-		// newer group outside its one-group window still supersedes it.
-		const end = whole ? undefined : this.#cursor.peek().end;
+		// newer group outside its one-group window still supersedes it. A moved group's scope
+		// brings its own end, unbounded when its logical reader's is.
 		const timeline = this.#state.timeline;
 		let presentation: Drift["presentation"];
 		const info = this.#state.info.peek();
@@ -3343,7 +3354,7 @@ export class Subscriber {
 		const scaleless = info !== undefined && info.timescale == null;
 		for (let i = (end === undefined ? timeline.length : timelineIndex(timeline, end)) - 1; i >= 0; i--) {
 			const group = timeline[i];
-			if (hooks.groupFailed(group) || !this.#judges(group.start, whole)) continue;
+			if (hooks.groupFailed(group) || !this.#judges(group.start, scope)) continue;
 			if (scaleless) {
 				if (!hooks.groupStarted(group)) continue;
 				presentation = { key: group.start, at: Number(group.start) };
@@ -3363,14 +3374,14 @@ export class Subscriber {
 			bounded: fresh !== undefined && requested >= fresh,
 			presentation,
 			end,
-			whole,
+			scope,
 		};
 	}
 
 	// {@link #drift} as a fetch judges its group, against the whole track, under the fetch's own
 	// budget in milliseconds in place of this reader's, still capped by the track's max age.
 	#driftWithin(budget: number): Drift {
-		const drift = this.#drift(true);
+		const drift = this.#drift(WHOLE);
 		const fresh = this.#state.info.peek()?.maxAge?.asMillis();
 		return {
 			...drift,
@@ -3387,21 +3398,21 @@ export class Subscriber {
 	// last timestamp says where it starts presenting, not where it ends. A group whose header
 	// landed without a frame is not content yet, so the next one is the bound; an unstamped
 	// successor leaves the reach unbounded.
-	#successor(key: bigint, end?: bigint, whole?: boolean): GroupConsumer | undefined {
-		return this.#after(key, end, hooks.groupStarted, whole);
+	#successor(key: bigint, end?: bigint, scope?: Scope): GroupConsumer | undefined {
+		return this.#after(key, end, hooks.groupStarted, scope);
 	}
 
 	// The group after `key` that starts its wall clock: like {@link #successor}, but
 	// counting a group before its first frame. Its header arrived, so a relay ages the group
 	// before it as the origin does, even if its first frame never comes.
-	#arrival(key: bigint, end?: bigint, whole?: boolean): GroupConsumer | undefined {
-		return this.#after(key, end, () => true, whole);
+	#arrival(key: bigint, end?: bigint, scope?: Scope): GroupConsumer | undefined {
+		return this.#after(key, end, () => true, scope);
 	}
 
-	// Whether group `key` counts toward the drift edge: inside the window, or anywhere for a
-	// fetch or when judging the `whole` track.
-	#judges(key: bigint, whole = this.#fetchBudget !== undefined): boolean {
-		return whole || this.#window.contains(key);
+	// Whether group `key` counts toward the drift edge: inside the window, or the `scope` judged
+	// within instead, every group for a fetch.
+	#judges(key: bigint, scope = this.#fetchBudget !== undefined ? WHOLE : undefined): boolean {
+		return scope ? scope(key) : this.#window.contains(key);
 	}
 
 	// The first servable group after `key` below `end` that `counts`.
@@ -3409,13 +3420,13 @@ export class Subscriber {
 		key: bigint,
 		end: bigint | undefined,
 		counts: (group: GroupConsumer) => boolean,
-		whole?: boolean,
+		scope?: Scope,
 	): GroupConsumer | undefined {
 		const timeline = this.#state.timeline;
 		for (let i = timelineIndex(timeline, key + 1n); i < timeline.length; i++) {
 			const successor = timeline[i];
 			if (end !== undefined && successor.start >= end) break;
-			if (hooks.groupFailed(successor) || !this.#judges(successor.start, whole)) continue;
+			if (hooks.groupFailed(successor) || !this.#judges(successor.start, scope)) continue;
 			if (counts(successor)) return successor;
 		}
 		return undefined;
@@ -3449,7 +3460,7 @@ export class Subscriber {
 	// from another copy, or outliving this subscriber. Once closed, only the wall clock judges
 	// it, from the arrivals kept at close.
 	#staleAt(key: bigint, drift: Drift, wake = false, held?: Superseded): boolean {
-		const arrival = this.#arrivals ? undefined : this.#arrival(key, drift.end, drift.whole);
+		const arrival = this.#arrivals ? undefined : this.#arrival(key, drift.end, drift.scope);
 		let arrived = this.#arrivals
 			? this.#keptSupersededAt(key, drift, held)
 			: this.#supersededAt(arrival, drift, held);
@@ -3463,7 +3474,7 @@ export class Subscriber {
 		// A closed subscriber keeps no timeline to bound the reach with.
 		if (this.#arrivals) return false;
 
-		const reach = this.#reach(key, drift.end, drift.whole);
+		const reach = this.#reach(key, drift.end, drift.scope);
 		return (
 			drift.presentation !== undefined &&
 			drift.presentation.key > key &&
@@ -3491,10 +3502,10 @@ export class Subscriber {
 	// The furthest presentation time, in milliseconds, group `key` could still reach: its own
 	// end once finished whole, else where its immediate successor below `end` begins, undefined
 	// when nothing proves where it stops. Mirrors the Rust `TrackState::reach`.
-	#reach(key: bigint, end: bigint | undefined, whole?: boolean): number | undefined {
+	#reach(key: bigint, end: bigint | undefined, scope?: Scope): number | undefined {
 		const own = this.#held(key)?.end;
 		if (own !== undefined) return this.#presented(own);
-		const successor = this.#successor(key, end, whole);
+		const successor = this.#successor(key, end, scope);
 		if (!successor) return undefined;
 		const info = this.#state.info.peek();
 		if (info !== undefined && info.timescale == null) return this.#presented(successor.start);
@@ -4628,12 +4639,17 @@ export class Subscriber {
 			(subscriber.#state.closed.peek() !== undefined || subscriber.#complete()) &&
 			!hooks.hasUnreadGroup(subscriber, start, end, delivered);
 		hooks.awaitsFill = (subscriber) => subscriber.#fillWait;
-		hooks.staleAt = (subscriber, key, budget) => {
+		hooks.staleAt = (subscriber, key, budget, within) => {
 			const held: Superseded = {};
-			const drift = budget === undefined ? () => subscriber.#drift() : () => subscriber.#driftWithin(budget);
+			let drift = budget === undefined ? () => subscriber.#drift() : () => subscriber.#driftWithin(budget);
+			let changed = subscriber.#expiryChanged();
+			if (within) {
+				drift = () => subscriber.#drift(within.contains, within.end());
+				changed = [...changed, ...within.changed];
+			}
 			return {
 				expired: () => subscriber.#staleAt(key, drift(), true, held),
-				changed: subscriber.#expiryChanged(),
+				changed,
 			};
 		};
 		hooks.cachedGroup = (subscriber, key, from = 0) => {
@@ -4652,9 +4668,9 @@ export class Subscriber {
 			const producer = subscriber.#state.producer;
 			return producer && cachedLanded(producer, start, end);
 		};
-		hooks.holdsGroup = (subscriber, key) => {
+		hooks.holdsGroup = (subscriber, key, whole) => {
 			const producer = subscriber.#state.producer;
-			return producer !== undefined && cachedHolds(producer, key);
+			return producer !== undefined && cachedHolds(producer, key, whole);
 		};
 		hooks.holeEnd = (subscriber, key, dropped) => holeEnd(subscriber.#state.drops, key, dropped);
 		hooks.previousStart = (subscriber, start) => {
