@@ -914,7 +914,15 @@ impl Answer {
 		let (Some(suffix), Some(relative)) = (within, path.strip_prefix(self.origin.root())) else {
 			return false;
 		};
-		(prefix.hidden || !suffix.is_hidden()) && self.origin.reaches_any(path, &self.permit.beneath(relative.as_str()))
+		if !prefix.hidden && suffix.is_hidden() {
+			return false;
+		}
+		// Most claims sit at a path both allow, which is one they cover; only a claim
+		// above a region needs the costlier search for one beneath it.
+		if self.permit.matches(relative.as_str()) && self.origin.permits(path) && self.origin.reaches(path) {
+			return true;
+		}
+		self.origin.reaches_any(path, &self.permit.beneath(relative.as_str()))
 	}
 
 	/// Bring the peer's claim `key` in line with what the node told and the answer

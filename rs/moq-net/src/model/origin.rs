@@ -7842,6 +7842,12 @@ impl Consumer {
 			&& self.scope.mount(path).is_none_or(|mount| mount.resolve(path).is_some())
 	}
 
+	/// Whether the absolute `path` itself is in this handle's scope, not excluded.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn permits(&self, path: &Path) -> bool {
+		self.scope.permits(path)
+	}
+
 	/// [`Self::reaches`], and some path `allowed`, relative to this handle's root, holds
 	/// is in its scope too.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
