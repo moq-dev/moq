@@ -79,11 +79,15 @@ pub enum Start {
 ///
 /// `#[non_exhaustive]`: build via [`Options::new`] (or `default()`) and set the
 /// fields, so future knobs don't break callers.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Options {
 	/// The decoder: backend, output representation, scaling hint.
 	pub decoder: Config,
+	/// The subscription priority, ordering this track against the others on the session under
+	/// congestion: higher is sent first. Defaults to hang's `PRIORITY.video`;
+	/// [`Consumer::set_priority`] moves it while running.
+	pub priority: i8,
 	/// Where to start on a track that already holds groups.
 	pub start: Start,
 	/// How far behind the live edge playback runs. [`Delay::min`] is the
@@ -96,8 +100,19 @@ pub struct Options {
 	pub delay: Delay,
 }
 
+impl Default for Options {
+	fn default() -> Self {
+		Self {
+			decoder: Config::default(),
+			priority: hang::catalog::PRIORITY.video,
+			start: Start::default(),
+			delay: Delay::default(),
+		}
+	}
+}
+
 impl Options {
-	/// Defaults: a default [`Config`], every cached group, real-time latency.
+	/// Defaults: a default [`Config`], hang's video priority, every cached group, real-time latency.
 	pub fn new() -> Self {
 		Self::default()
 	}
@@ -111,6 +126,8 @@ impl Options {
 /// `moq_audio::decode::Consumer`.
 pub struct Consumer {
 	slot: Slot,
+	/// The subscription's preferences, reachable while a read holds the reader.
+	control: moq_net::track::Control,
 	name: String,
 	/// When the access unit behind the latest picture returned arrived.
 	arrival: Option<Instant>,
@@ -176,9 +193,10 @@ impl Consumer {
 		name: impl Into<String>,
 		options: Options,
 	) -> Result<Self, Error> {
-		let reader = Reader::open(broadcast, catalog, &name.into(), &options).await?;
+		let (reader, control) = Reader::open(broadcast, catalog, &name.into(), &options).await?;
 		Ok(Self {
 			name: reader.decoder.name().to_owned(),
+			control,
 			slot: Slot::Idle(Box::new(reader)),
 			arrival: None,
 		})
@@ -187,6 +205,18 @@ impl Consumer {
 	/// The decoder backend name in use, e.g. `"videotoolbox"` or `"openh264"`.
 	pub fn name(&self) -> &str {
 		&self.name
+	}
+
+	/// Move the subscription priority mid-stream, updating the subscription in place
+	/// rather than resubscribing, so nothing already fetched is dropped or fetched again.
+	///
+	/// A read in flight is unaffected; an ended track ignores it.
+	pub fn set_priority(&mut self, priority: i8) {
+		let subscription = self.control.subscription();
+		if subscription.priority != priority {
+			// Closed only once the track ended, when there is nothing left to prioritize.
+			let _ = self.control.update(subscription.with_priority(priority));
+		}
 	}
 
 	/// When the access unit behind the latest picture [`read`](Self::read) returned
@@ -276,7 +306,7 @@ impl Reader {
 		catalog: &VideoConfig,
 		name: &str,
 		options: &Options,
-	) -> Result<Self, Error> {
+	) -> Result<(Self, moq_net::track::Control), Error> {
 		let decoder = Sink::open(catalog, &options.decoder).await.map_err(|err| match err {
 			// Only a codec or description this build cannot decode is a refusal of the
 			// rendition. Backend and worker faults keep their own variants.
@@ -289,7 +319,7 @@ impl Reader {
 		// The whole delay from the first request, as the container keeps it, so the publisher
 		// never sees a stated zero min before the container's update.
 		let mut subscription =
-			playout.subscription(moq_net::track::Subscription::default().with_priority(hang::catalog::PRIORITY.video));
+			playout.subscription(moq_net::track::Subscription::default().with_priority(options.priority));
 		// A decoder often opens on a track that is already cached: a replacement decoder
 		// subscribes while its predecessor still holds groups, and a rendition switched away from
 		// and back to stays warm on the origin for `moq_net::model::track::IDLE_LINGER` (cached
@@ -313,6 +343,7 @@ impl Reader {
 		if options.start == Start::Latest {
 			subscriber.largest().await;
 		}
+		let control = subscriber.control();
 		let track = subscriber;
 		// The catalog says how the track is framed, and it is not always the legacy
 		// wire: `moq import fmp4` publishes CMAF. Reading a moof+mdat fragment as a
@@ -331,7 +362,7 @@ impl Reader {
 			recover: true,
 			leading_floor: None,
 		};
-		Ok(reader)
+		Ok((reader, control))
 	}
 
 	/// The next item this decoder alone produces, with its access unit's arrival
@@ -715,6 +746,69 @@ mod tests {
 			],
 			"the default dropped groups the caller never asked to drop",
 		);
+	}
+
+	/// The priority reaches the publisher's aggregate subscription at hang's video default, and a
+	/// change while a read waits moves that subscription in place: the waiting read still gets
+	/// the next picture.
+	#[tokio::test]
+	async fn priority_reaches_the_subscription_and_moves_in_place() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let published = track.clone();
+		let subscriber = broadcast.consume();
+		let mut producer = moq_mux::container::Producer::new(
+			track,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
+		);
+		let catalog = VideoConfig::new(hang::catalog::H264 {
+			inline: true,
+			profile: 0x42,
+			constraints: 0,
+			level: 30,
+		});
+		let options = Options {
+			decoder: Config {
+				kind: Kind::Named(probe::BUFFERED_NAME.into()),
+				..Config::new()
+			},
+			..Options::new()
+		};
+		let mut consumer = Consumer::new(&subscriber, &catalog, "video", options).await.unwrap();
+		assert_eq!(
+			published.subscription().map(|sub| sub.priority),
+			Some(hang::catalog::PRIORITY.video)
+		);
+
+		consumer.set_priority(10);
+		assert_eq!(published.subscription().map(|sub| sub.priority), Some(10));
+
+		// Park a read on the empty track, so the reader is held by the read in flight.
+		{
+			let read = consumer.read();
+			tokio::pin!(read);
+			assert!(futures::poll!(read.as_mut()).is_pending());
+		}
+		consumer.set_priority(-20);
+		assert_eq!(published.subscription().map(|sub| sub.priority), Some(-20));
+
+		producer
+			.write(moq_mux::container::Frame {
+				timestamp: Timestamp::from_micros(0).unwrap(),
+				duration: None,
+				payload: Bytes::from_static(b"access unit"),
+				keyframe: true,
+			})
+			.unwrap();
+		let _finished = producer.finish().unwrap();
+		let frame = consumer
+			.next_frame()
+			.await
+			.unwrap()
+			.expect("the waiting read's picture");
+		assert_eq!(frame.timestamp, Timestamp::from_micros(0).unwrap());
 	}
 
 	/// The age budget is the subscription's and not the decoder's: it reaches
@@ -1462,6 +1556,7 @@ mod tests {
 				},
 				start: Start::Latest,
 				delay,
+				..Options::new()
 			},
 		));
 		// The open waits for the live edge with its subscription open, so the first aggregate
