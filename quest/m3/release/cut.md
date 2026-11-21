@@ -237,9 +237,9 @@ audit): ✅ the cut waits on the [credit model](/quest/m1/credit-model.md),
 [paused-stream allowance](/quest/m1/paused-allowance.md), which merges once
 the model passes on it, and a [bounded relay cache by
 default](/quest/m1/relay-memory-default.md). Rejected: cutting with flow
-control unverified; landing #9210 after the cut. The
-[JS frame cap](/quest/m1/js-frame-cap.md) ships with the cut only if it
-lands first.
+control unverified; landing #9210 after the cut. The JS frame cap
+([#9283](https://github.com/moq-dev/moq/pull/9283)) ships with the cut only
+if it lands first.
 
 On the reconciled candidate, regenerate the Nix build plan with `just rs cargo-nix` after the
 shared version bump. A dry run of the bump to 0.22.0 updated 52 packages and left Cargo.nix stale.
