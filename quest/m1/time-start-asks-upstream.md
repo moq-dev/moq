@@ -8,8 +8,12 @@ That inference lost information each review round of [moq-dev/moq#9265](https://
 
 Done when a viewer behind a relay joins at the same group as it would reading the publisher directly, for any Min Age and budget, joining before or after another viewer.
 
+## Waiting
+
+- Maintainer: choose how a copy asks upstream for one reader's join. `Subscriber Min Age` is one value per subscription on the wire, so a per-reader join range can't carry its own Min Age, and the choice may change the lite-07 wire, which an agent should not decide alone. The options are (1) a per-range Min Age on lite-07-wip, which is unpublished, so each join becomes a range upstream answers exactly, as a time start's probe is, at one varint per no-start range; (2) a time probe from the live edge the copy measures minus the Min Age, as #9307's probes do for a time start, which is only as fresh as the copy's own edge; or (3) keep the inference. Recommended: 1. Done once the choice is recorded in this Plan.
+
 ## Plan
 
-- Decide how a copy asks for one reader's join. `Subscriber Min Age` is one value per subscription on the wire, so a per-reader join range can't carry its own Min Age. The options are a per-range Min Age (a lite-07 wire change, `-wip` only), or a time probe from the live edge the copy measures minus the Min Age, as #9307's probes do for a time start, which is only as fresh as the copy's own edge.
+- Ask upstream for each join the copy can't prove from its held groups, as the chosen option says, shared by readers with the same Min Age and end, and take exactly that range's answer.
 - Then remove `JoinStart`, its `Past` bound, and the `feed_start` selection (js/net `#joinFed`), which also settles the different covering answer Rust and JS pick today.
 - Mirror in js/net and run `just test interop --all`.

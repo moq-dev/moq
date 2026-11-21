@@ -640,9 +640,14 @@ impl Misses {
 		// A refusal held while the feed may still deliver its groups is judged again once
 		// the feed gives up on them, which nothing else wakes this reader for. Registered
 		// whether or not the deadline moved here: `ask` settles what no handler can take
-		// before this runs, and the judge registered only the deadline it saw.
+		// before this runs, and the judge registered only the deadline it saw. One already
+		// passed is the judge's to take up, which runs once the feed's start resolves: armed
+		// again, it would wake this reader at once, every poll, while nothing can change.
 		if let Some(at) = self.deferred.deadline() {
-			state.read().cache.watch_wall(at, waiter);
+			let state = state.read();
+			if at > state.cache.pool().now_wall() {
+				state.cache.watch_wall(at, waiter);
+			}
 		}
 		retry
 	}

@@ -44,14 +44,7 @@
 			"copy": [{ "ranges": [{ "start": 1000, "end": 2000 }] }, { "minAge": 0 }],
 			"read": { "ranges": [{ "start": 7000, "end": 8000 }] },
 			"deliver": [7000, 8000],
-			"asks": true,
-			"known": [
-				{
-					"mode": "warm",
-					"quest": "/quest/m1/time-start-asks-upstream.md",
-					"why": "the copy places 7000 at the held 2000, since it holds 9000 above it"
-				}
-			]
+			"asks": true
 		},
 		{
 			"name": "a live join starts at the group containing the live edge minus its Min Age",
@@ -65,14 +58,7 @@
 			"copy": [{ "minAge": 1000 }],
 			"read": { "minAge": 3500 },
 			"deliver": [5000, 6000, 7000, 8000, 9000],
-			"asks": true,
-			"known": [
-				{
-					"mode": "relay-warm",
-					"quest": "/quest/m1/time-start-asks-upstream.md",
-					"why": "the JavaScript relay starts its downstream copy's wider join at the 8000 it holds"
-				}
-			]
+			"asks": true
 		},
 		{
 			"name": "an oldest reader on a copy a live reader started",
@@ -107,19 +93,7 @@
 			"copy": [{ "ranges": [{ "start": 1000, "end": 1000 }] }, { "ranges": [{ "start": 3000, "end": 3000 }] }],
 			"read": { "ranges": [{ "start": 2500, "end": 3000 }] },
 			"deliver": [2000, 3000],
-			"asks": true,
-			"known": [
-				{
-					"mode": "warm",
-					"quest": "/quest/m1/time-start-asks-upstream.md",
-					"why": "the copy places 2500 at the held 1000, and Rust then spins once upstream answers"
-				},
-				{
-					"mode": "late",
-					"quest": "/quest/m1/time-start-asks-upstream.md",
-					"why": "the copy places 2500 at the held 1000"
-				}
-			]
+			"asks": true
 		},
 		{
 			"name": "a time start at a group the copy lacks asks upstream",
@@ -134,15 +108,7 @@
 			"evict": true,
 			"read": { "ranges": [{ "start": 2000, "end": 4000 }] },
 			"deliver": [2000, 3000, 4000],
-			"asks": true,
-			"known": [
-				{
-					"mode": "late",
-					"lang": "js",
-					"quest": "/quest/m1/time-start-asks-upstream.md",
-					"why": "the copy fetches 0 and 1000 too, and places 2000 at whichever lands first"
-				}
-			]
+			"asks": true
 		},
 		{
 			"name": "a time start between groups a publisher created unlinked",
@@ -150,14 +116,7 @@
 			"copy": [{}],
 			"read": { "ranges": [{ "start": 2500, "end": 3000 }] },
 			"deliver": [2000, 3000],
-			"asks": true,
-			"known": [
-				{
-					"mode": "warm",
-					"quest": "/quest/m1/time-start-asks-upstream.md",
-					"why": "the copy answers from 2000 and 3000, though nothing it holds says no group starts between them"
-				}
-			]
+			"asks": true
 		}
 	]
 }
