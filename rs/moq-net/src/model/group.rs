@@ -4651,6 +4651,7 @@ impl Consumer {
 
 	/// Start reads at frame `index`, even below the first frame this copy holds, which a read
 	/// then fetches (see [`Self::fetches_from`]). A start below the cursor is ignored.
+	#[cfg(feature = "async")]
 	pub(crate) fn fetching_from(mut self, index: u64) -> Self {
 		self.skip_to(index);
 		self
