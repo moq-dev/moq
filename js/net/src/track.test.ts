@@ -2818,6 +2818,23 @@ test("createGroup replaces a live sequence", async () => {
 	expect(await next?.readString()).toBe("retry");
 });
 
+// A replaced group still open leaves the cache, yet the track's teardown still ends it for the
+// reader draining it, as it ends a cached one.
+test("aborting the track ends a replaced group a reader holds", async () => {
+	const producer = new TrackProducer("test");
+	const track = producer.subscribe();
+
+	const old = producer.createGroup(7n);
+	old.writeFrame(textFrame("old", Timestamp.fromMillis(Number(old.start))));
+	const draining = await track.recvGroup();
+	expect(draining?.start).toBe(7n);
+	expect((await draining?.readFrame())?.payload).toBeDefined();
+
+	producer.createGroup(7n).finish();
+	producer.abort(new Error("gone"));
+	await expect(draining?.readFrame()).rejects.toThrow("gone");
+});
+
 // A beyond-cap group outlives a clean close for a later widening, so the subscriber
 // leaving is what releases it: widening after close() finds nothing.
 test("closing the subscriber releases a group retained across a clean close", async () => {

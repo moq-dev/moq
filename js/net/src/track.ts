@@ -1336,6 +1336,11 @@ export class Producer {
 	#cache = new Set<CachedGroup>();
 	// The same entries by key, so a write finds a duplicate without a scan.
 	#cached = new Map<bigint, CachedGroup>();
+	// Groups a newer copy replaced while still open, for a teardown to end: the readers draining
+	// one keep it after it leaves the cache. Pruned of closed ones as it doubles. Mirrors the Rust
+	// `detach`.
+	#detached = new Set<GroupProducer>();
+	#detachedKept = 0;
 	// The cached groups' checked starts, sorted by key, so a first frame finds its
 	// neighbors' with a search.
 	#bounds: Start[] = [];
@@ -2763,6 +2768,7 @@ export class Producer {
 			// arriving for the readers already holding it, outside the cache.
 			this.#unlink(existing);
 			this.#uncache(existing);
+			this.#detach(existing.group);
 		} else if (existing) {
 			if (!failed) {
 				throw new Error(`duplicate group: key=${key}`);
@@ -2786,6 +2792,16 @@ export class Producer {
 		this.#cap(group);
 		this.#publish(group, fetched, failed && { failed, kept });
 		return group;
+	}
+
+	// Keep a replaced `group` for the teardown to end, though the cache no longer holds it.
+	#detach(group: GroupProducer): void {
+		this.#detached.add(group);
+		if (this.#detached.size <= 2 * this.#detachedKept) return;
+		for (const kept of this.#detached) {
+			if (kept.closed.peek() !== undefined) this.#detached.delete(kept);
+		}
+		this.#detachedKept = this.#detached.size;
 	}
 
 	// Whether this track's timestamps may rewind (see {@link Info.unchecked}).
@@ -3050,6 +3066,8 @@ export class Producer {
 			abort ??
 			new StreamError(StreamCode.Cancel, { message: `track ${this.name} closed with unfinished groups` });
 		for (const { group } of this.#cache) group.abort(groupError);
+		for (const group of this.#detached) group.abort(groupError);
+		this.#detached.clear();
 		for (const entry of open) {
 			this.#unlink(entry);
 			this.#uncache(entry);
