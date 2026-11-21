@@ -320,27 +320,30 @@ mod tests {
 	struct Live<'a> {
 		bridge: &'a mut dyn Bridge,
 		/// The next packet's timestamp.
-		at: u64,
+		at: Duration,
 		/// What it last sent live, which may still be in flight after its viewer played it.
 		sent: Option<&'static [u8]>,
 	}
 
 	impl<'a> Live<'a> {
+		/// How far apart it sends packets, in both media time and wall time.
+		const STEP: Duration = Duration::from_millis(20);
+
 		fn new(bridge: &'a mut dyn Bridge) -> Self {
 			Self {
 				bridge,
-				at: 20_000,
+				at: Self::STEP,
 				sent: None,
 			}
 		}
 
 		/// Send `payload` once.
 		fn push(&mut self, payload: &'static [u8]) {
-			push(self.bridge, self.at, payload);
-			self.at += 20_000;
+			push(self.bridge, self.at.as_micros() as u64, payload);
+			self.at += Self::STEP;
 		}
 
-		/// Send `payload` every 20 ms until `viewer` plays something other than an earlier
+		/// Send `payload` every [`Self::STEP`] until `viewer` plays something other than an earlier
 		/// live payload, and return that. Repeating the last payload skips nothing.
 		async fn play(&mut self, payload: &'static [u8], viewer: &mut impl Viewer) -> Vec<u8> {
 			let stale = self.sent.replace(payload).filter(|sent| *sent != payload);
@@ -350,7 +353,7 @@ mod tests {
 				self.push(payload);
 				tokio::select! {
 					played = &mut read => return played.expect("the viewer was closed"),
-					_ = kio::clock::sleep(Duration::from_millis(20)) => {}
+					_ = kio::clock::sleep(Self::STEP) => {}
 				}
 			}
 		}
