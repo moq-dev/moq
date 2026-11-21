@@ -2889,7 +2889,7 @@ export class Subscriber {
 		const times: [bigint, bigint | undefined, bigint | undefined][] = [];
 		// And each live join, by the Min Age it was asked under, which places a reader's live join the
 		// copy can't prove from the groups it holds.
-		const joins: [number, bigint][] = [];
+		const joins: [number, bigint, boolean][] = [];
 		for (const id of entry.live.ids()) {
 			const range = entry.live.get(id);
 			if (range === undefined || !entry.starts.has(id)) continue;
@@ -2898,7 +2898,11 @@ export class Subscriber {
 			const at = entry.starts.get(id);
 			const age = entry.joins.get(id);
 			if (time === undefined && age !== undefined) {
-				if (at !== undefined) joins.push([age, at]);
+				// A join answered empty starts past its range's end: the group containing the live edge
+				// minus its Min Age is a later one, and the edge only moves on.
+				const last = through(range.end, 0n);
+				if (at !== undefined) joins.push([age, at, false]);
+				else if (last !== undefined) joins.push([age, last + 1n, true]);
 				continue;
 			}
 			const asked = time ?? 0n;

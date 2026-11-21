@@ -605,6 +605,17 @@ impl Anchors {
 	}
 }
 
+/// Where a received lite-07 copy's publisher started a live join, as its answer says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum JoinStart {
+	/// The group the join starts at.
+	At(u64),
+	/// No group to deliver: the join's group starts at or past this key, the one past its
+	/// range's end.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	Past(u64),
+}
+
 /// How a received copy's publisher answered a range asked from a time, and the last time the
 /// range reaches, `None` while it follows the live edge.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -794,7 +805,7 @@ pub(crate) struct TrackState {
 	// start and a stated Min Age, by that Min Age: the feed delivers every group from there,
 	// so a join reaching no further back starts no lower. Replaced whole as the ranges change,
 	// like `time_starts`.
-	join_starts: BTreeMap<Duration, u64>,
+	join_starts: BTreeMap<Duration, JoinStart>,
 	// Counts changes to how a time start is placed other than by groups arriving or drops:
 	// `time_starts`, `anchors`, and `starts_at_keys`. See [`Unplaced::mark`].
 	placing: u64,
@@ -1249,7 +1260,10 @@ impl Holdings for TrackState {
 			return match aged {
 				Some((&key, _)) => Join::Group(key),
 				// This copy's arrivals don't reach back that far, but its upstream's may.
-				None if wire => self.feed_start(min).map_or(Join::Unknown, Join::Group),
+				None if wire => match self.feed_start(min) {
+					Some(JoinStart::At(start) | JoinStart::Past(start)) => Join::Group(start),
+					None => Join::Unknown,
+				},
 				None => oldest().unwrap_or(Join::Unknown),
 			};
 		};
@@ -1296,12 +1310,24 @@ impl Holdings for TrackState {
 		if !wire || self.containing_received(target) != Containing::Unknown {
 			return Join::Time(target);
 		}
+		// Groups never overlap in time, so one held starting by the target with a frame at or
+		// past it contains it: every later group starts after that frame.
+		let holder = self.walked(..=target).next_back();
+		let through = |slot: &Slot| slot.group.latest().and_then(|latest| latest.convert(scale).ok());
+		if let Some((&key, slot)) = holder
+			&& through(slot).is_some_and(|through| through.value() >= target)
+		{
+			return Join::Group(key);
+		}
 		match self.feed_start(min) {
 			// The feed reaching this far back starts above the time, which only a live edge
 			// trailing the upstream's puts below it.
-			Some(start) if target < start => Join::Group(start),
+			Some(JoinStart::At(start)) if target < start => Join::Group(start),
 			// The feed delivers every group from its start, so it places the time.
-			Some(_) => Join::Time(target),
+			Some(JoinStart::At(_)) => Join::Time(target),
+			// A join reaching no further back than one answered empty starts past that one's
+			// end, which every reader's join folded into it reaches no further than.
+			Some(JoinStart::Past(past)) => Join::Group(past),
 			None => Join::Unknown,
 		}
 	}
@@ -1476,7 +1502,7 @@ impl TrackState {
 	/// live edge: the start its upstream reported for a range with no start, answered under
 	/// this Min Age or a larger one, or reaching back as far as the budget allows. The feed
 	/// delivers every group from there, so the join's group is that one or a later one.
-	fn feed_start(&self, min: Duration) -> Option<u64> {
+	fn feed_start(&self, min: Duration) -> Option<JoinStart> {
 		if self.anchors != Anchors::Wire {
 			return None;
 		}
@@ -1484,7 +1510,7 @@ impl TrackState {
 			.range(min..)
 			.next()
 			.map(|(_, start)| *start)
-			.or_else(|| self.time_starts.get(&0).and_then(TimeStart::start))
+			.or_else(|| self.time_starts.get(&0).and_then(TimeStart::start).map(JoinStart::At))
 	}
 
 	/// Whether the range asked from `time`, or the one upstream folded it into, had no group to
@@ -5196,8 +5222,8 @@ impl Producer {
 	/// ranges with no start and a stated Min Age, as `(min, start)` pairs, replacing the last
 	/// set. A reader's join reaching no further back than `min` starts no lower than `start`.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn join_starts(&self, starts: impl IntoIterator<Item = (Duration, u64)>) {
-		let starts: BTreeMap<Duration, u64> = starts.into_iter().collect();
+	pub(crate) fn join_starts(&self, starts: impl IntoIterator<Item = (Duration, JoinStart)>) {
+		let starts: BTreeMap<Duration, JoinStart> = starts.into_iter().collect();
 		if let Ok(mut state) = self.modify()
 			&& state.join_starts != starts
 		{
@@ -17319,7 +17345,7 @@ mod test {
 		producer.received();
 		producer.anchored();
 		// The publisher started the copy's feed at 9 for a join at the live edge.
-		producer.join_starts([(Duration::ZERO, 9)]);
+		producer.join_starts([(Duration::ZERO, JoinStart::At(9))]);
 		write_group(&producer, 9);
 
 		let mut live = producer.subscribe(join(0));
@@ -17330,7 +17356,10 @@ mod test {
 		assert_eq!(drain_groups(&mut behind), Vec::<u64>::new(), "reads nothing meanwhile");
 
 		// The publisher answers the larger Min Age at 7, and its feed delivers that group.
-		producer.join_starts([(Duration::ZERO, 9), (Duration::from_millis(2), 7)]);
+		producer.join_starts([
+			(Duration::ZERO, JoinStart::At(9)),
+			(Duration::from_millis(2), JoinStart::At(7)),
+		]);
 		write_group(&producer, 7);
 		assert_eq!(placed(&mut behind), Some(7));
 		let mut groups = drain_groups(&mut behind);
@@ -17341,6 +17370,27 @@ mod test {
 		let mut nearer = producer.subscribe(join(1));
 		assert_eq!(placed(&mut nearer), Some(7));
 		assert_eq!(placed(&mut live), Some(9), "an earlier reader stays where it started");
+	}
+
+	/// A received copy places a live join inside a group it holds whose frames reach past the
+	/// join's time, with no newer group yet: groups never overlap, so no later one starts
+	/// before those frames. Mirrors JS `#join`.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_received_copy_places_a_live_join_inside_a_held_group() {
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		let mut group = producer.create_group(group::Info { start: 1000 }).unwrap();
+		for millis in (1000..=1900).step_by(100) {
+			group
+				.write_frame(Timestamp::from_millis(millis).unwrap(), bytes::Bytes::from_static(b"x"))
+				.unwrap();
+		}
+		let join =
+			Subscription::default().with_delay(Delay::default().with_min(Duration::from_millis(200)).with_max(None));
+		let mut reader = producer.subscribe(join);
+		assert_eq!(reader.resolved_range(0).map(|resolved| resolved.start), Some(1000));
 	}
 
 	#[test]

@@ -10294,7 +10294,10 @@ impl SubStream {
 				(Some(lite::Anchor::Absolute(time)), _) => time.group,
 				(None, None) => 0,
 				(None, Some(min)) => {
-					if let Some(start) = start {
+					// A join answered empty starts past its range's end: the group containing
+					// the live edge minus its Min Age is a later one, and the edge only moves on.
+					let past = |through: u64| track::JoinStart::Past(through.saturating_add(1));
+					if let Some(start) = start.map(track::JoinStart::At).or_else(|| through(0).map(past)) {
 						joins.push((min, start));
 					}
 					continue;
@@ -11067,14 +11070,17 @@ impl TrackServe {
 		// the subscriber has no start of its own: a quiet track (a catalog) sends
 		// that group again, which says the cache is current. A lite-07 list keeps
 		// any range of its own, so only one asking just for a range with no start
-		// counts. A copy that cached nothing keeps the subscriber's ranges: no start
-		// would widen a live viewer's ask to every group from the oldest.
+		// counts, and only without a Min Age: a live join keeps its range, which the
+		// publisher places behind its own live edge, so the join reaches back past what
+		// the copy holds. A copy that cached nothing keeps the subscriber's ranges: no
+		// start would widen a live viewer's ask to every group from the oldest.
 		let idle = subscription.start().is_none()
 			&& (!ranged
-				|| subscription
-					.ranges
-					.iter()
-					.all(|range| range.end.is_none() && range.start.is_none()));
+				|| subscription.delay.min.is_none()
+					&& subscription
+						.ranges
+						.iter()
+						.all(|range| range.end.is_none() && range.start.is_none()));
 		if let Some(newest) = newest.filter(|_| idle) {
 			subscription = subscription.with_start(newest);
 		}

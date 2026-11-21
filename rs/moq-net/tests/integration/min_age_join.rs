@@ -220,3 +220,49 @@ async fn an_oldest_and_a_live_reader_on_one_relay_each_get_their_own_start() {
 		.expect("both readers read their start");
 	}
 }
+
+/// A live join whose range ends before the group it joins at reads nothing and ends, through a
+/// relay copy as at the origin: the publisher answers the copy's range empty, which says the
+/// join starts past its end.
+#[kio::test]
+async fn a_join_ending_before_its_start_ends_empty_through_a_relay() {
+	let chain = Chain::new().await;
+	let bounded = || {
+		joining(Some(Duration::from_secs(1))).with_ranges([track::Range {
+			start: None,
+			end: Some(1000),
+		}])
+	};
+	kio::clock::timeout(TIMEOUT, async {
+		let mut direct = chain.origin(bounded()).await;
+		assert!(
+			direct.next_group().await.unwrap().is_none(),
+			"the origin delivers nothing"
+		);
+		let mut relayed = chain.relay(bounded()).await;
+		assert!(relayed.next_group().await.unwrap().is_none(), "nor does the copy");
+	})
+	.await
+	.expect("both bounded joins end");
+}
+
+/// A live join on a relay copy reopened while idle reaches back by its Min Age, as at the
+/// origin: reopening asks the publisher for the join, not just the newest group the copy kept.
+#[kio::test]
+async fn a_join_on_an_idle_copy_reaches_back_by_its_min_age() {
+	let chain = Chain::new().await;
+	kio::clock::timeout(TIMEOUT, async {
+		let mut live = chain.relay(joining(Some(Duration::ZERO))).await;
+		assert_eq!(first(&mut live).await, 5000);
+		drop(live);
+		// The copy goes idle once its upstream subscription ends, keeping what it cached.
+		let mut source = chain.source.clone();
+		while source.subscription().is_some() {
+			source.subscription_changed().await.unwrap();
+		}
+		let mut relayed = chain.relay(joining(Some(Duration::from_secs(2)))).await;
+		assert_eq!(first(&mut relayed).await, 3000, "2 s behind the live edge at 5 s");
+	})
+	.await
+	.expect("the join read its start");
+}

@@ -216,6 +216,26 @@ test("copy fill: lite-07 asks upstream for a live join reaching back past what t
 	}
 });
 
+// A live join whose range ends before the group it joins at reads nothing and ends, on the copy as
+// at the origin: the publisher answers the copy's range empty, which says the join starts past its
+// end. Mirrors the Rust `a_join_ending_before_its_start_ends_empty_through_a_relay`.
+test("copy fill: lite-07 ends a live join answered empty", async () => {
+	const peer = await peers(Lite.ALPN_07_WIP, true);
+	try {
+		populateTimed(peer.track);
+		// 1 s behind the newest frame at 4 s is 3 s, past the range's end at 1 s.
+		const bounded = (): Subscription => ({ ...joining(1000), ranges: [{ end: 1_000n }] });
+		const origin = peer.track.subscribe(bounded());
+		expect(sorted(await take(origin, 1))).toEqual([]);
+		const relayed = peer.remote.track("video").subscribe(bounded());
+		expect(sorted(await take(relayed, 1))).toEqual([]);
+		origin.close();
+		relayed.close();
+	} finally {
+		peer.close();
+	}
+});
+
 test("copy fill: lite-06 asks nothing below a start resolved from the budget, and relies on the re-offer", async () => {
 	const peer = await peers(Lite.ALPN_06);
 	try {

@@ -1011,8 +1011,11 @@ let timeAnchors: (producer: Producer) => {
 	starts: ReadonlyMap<bigint, TimeStart>;
 	/** The newest start in `starts` past the time its range asked from, 0 when none is. */
 	past: bigint;
-	/** Where the publisher started each live join, by the Min Age in milliseconds it was asked under. */
-	joins: readonly (readonly [number, bigint])[];
+	/**
+	 * Where the publisher started each live join, by the Min Age in milliseconds it was asked under,
+	 * and whether it was answered empty, starting past that key.
+	 */
+	joins: readonly (readonly [number, bigint, boolean])[];
 	/** Bumped whenever the others, or whether the producer is a received copy, change. */
 	placing: number;
 };
@@ -1355,7 +1358,7 @@ export class Producer {
 	#startsPast = 0n;
 	// On a lite-07 copy, where the publisher started each live join, by the Min Age in milliseconds
 	// it was asked under.
-	#joinStarts: (readonly [number, bigint])[] = [];
+	#joinStarts: (readonly [number, bigint, boolean])[] = [];
 	// Counts changes to how a time start is placed other than by groups arriving or drops: the wire,
 	// `#timeStarts`, and `#startsAtKeys`. Mirrors the Rust `TrackState::placing`.
 	#placing = 0;
@@ -1686,8 +1689,9 @@ export class Producer {
 		hooks.joinStarts = (producer, starts) => {
 			const next = [...starts];
 			const last = producer.#joinStarts;
-			if (next.length === last.length && next.every(([age, at], i) => age === last[i][0] && at === last[i][1]))
-				return;
+			const same = ([age, at, past]: readonly [number, bigint, boolean], i: number) =>
+				age === last[i][0] && at === last[i][1] && past === last[i][2];
+			if (next.length === last.length && next.every(same)) return;
 			producer.#joinStarts = next;
 			// A reader whose live join waits on an answer covering it tries again.
 			for (const state of [producer.#state, ...producer.#sinks]) state.startChanged.update((rev) => rev + 1);
@@ -4013,7 +4017,13 @@ export class Subscriber {
 		const anchors = timeAnchors(producer);
 		const age = min.asMillis();
 		let start = anchors.starts.get(0n)?.start;
-		for (const [asked, at] of anchors.joins) if (asked >= age && (start === undefined || at < start)) start = at;
+		for (const [asked, at, past] of anchors.joins) {
+			if (asked < age) continue;
+			// A join reaching no further back than one answered empty starts past that one's end,
+			// which every reader's join folded into it reaches no further than.
+			if (past) return { group: at };
+			if (start === undefined || at < start) start = at;
+		}
 		if (start === undefined) return undefined;
 		return target === undefined || target < start ? { group: start } : { time: target };
 	}

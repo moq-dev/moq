@@ -781,12 +781,13 @@ export const hooks: {
 		budget: number,
 	) => void;
 	/**
-	 * Tell a lite-07 copy where its publisher started each live join, as `[minAge, start]`
-	 * pairs, the Min Age in milliseconds the join was asked under, replacing the last set: a
-	 * reader's live join the copy can't prove from its own groups starts from the feed one of them
-	 * covers. Assigned by `track.ts`.
+	 * Tell a lite-07 copy where its publisher started each live join, as `[minAge, start, past]`,
+	 * the Min Age in milliseconds the join was asked under, replacing the last set: a reader's
+	 * live join the copy can't prove from its own groups starts from the feed one of them covers.
+	 * `past` marks a join answered empty, whose group starts at or past `start`, the key past its
+	 * range's end. Mirrors the Rust `track::JoinStart`; assigned by `track.ts`.
 	 */
-	joinStarts: (producer: Producer, starts: Iterable<readonly [number, bigint]>) => void;
+	joinStarts: (producer: Producer, starts: Iterable<readonly [number, bigint, boolean]>) => void;
 	/** Mint a track {@link Request}; assigned by `track.ts`. */
 	makeRequest: (options: TrackRequestOptions) => Request;
 	/**
