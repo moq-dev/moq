@@ -909,6 +909,8 @@ class Run:
                                 # never handed out another. Starved: it holds one whose groups stopped.
                                 "kind": "stuck" if state.ended is not None else "starved",
                                 "ended": state.ended,
+                                # Its last read as of this observation, which a strand begins from.
+                                "last": state.last,
                             }
                         )
         return unfed, unrouted
@@ -932,15 +934,21 @@ class Run:
         # A reader still unfed from an earlier event, having read nothing since, is that event's
         # strand: it keeps that event's known entry rather than failing every later event again.
         # A strand ends only with a read, so one whose source stopped meanwhile is kept for later.
+        # An unfed reader is judged by the read it was observed with, any other by its latest.
         def last(reader: str, path: str) -> float | None:
             follow = self.relays[reader].readout.paths.get(path)
             return follow.last if follow else None
 
-        strands = {key: began for key, began in self.strands.items() if began["last"] == last(*key)}
+        seen = {(item["reader"], item["path"]): item["last"] for item in unfed}
+        strands = {
+            key: began
+            for key, began in self.strands.items()
+            if began["last"] == (seen[key] if key in seen else last(*key))
+        }
         groups = {}
         for item in unfed:
             key = (item["reader"], item["path"])
-            began = strands.get(key) or {"name": report["name"], "kind": report["kind"], "last": last(*key)}
+            began = strands.get(key) or {"name": report["name"], "kind": report["kind"], "last": item["last"]}
             strands[key] = began
             groups.setdefault((began["name"], item["kind"]), (began, []))[1].append(item)
         self.strands = strands
@@ -978,7 +986,9 @@ class Run:
         if known:
             entry["known"] = known["quest"]
         report.setdefault("violations", []).append(entry)
-        self.violations.append(entry)
+        # A carried strand was already counted by the event it began in.
+        if not began:
+            self.violations.append(entry)
 
     # ── faults ──
 

@@ -233,11 +233,11 @@ class KnownTest(unittest.TestCase):
             strands={},
         )
         run.violation = lambda *args: replay.Run.violation(run, *args)
-        unfed = [{"reader": "a", "path": "replay/b/0", "kind": "starved"}]
 
-        def check(kind):
+        def check(kind, observed=None):
             report = {"name": kind, "kind": kind}
-            replay.Run.check(run, report, unfed, [])
+            last = follow.last if observed is None else observed
+            replay.Run.check(run, report, [{"reader": "a", "path": "replay/b/0", "kind": "starved", "last": last}], [])
             return report["violations"][0]
 
         self.assertEqual(check("kill")["known"], "/q.md")
@@ -250,6 +250,40 @@ class KnownTest(unittest.TestCase):
         # Read once since: a new strand, which no entry excuses.
         follow.last = 9.0
         fresh = check("roll")
+        self.assertNotIn("began", fresh)
+        self.assertNotIn("known", fresh)
+        # The run counts each strand once, in the event it began: the kill's and the roll's.
+        self.assertEqual([v["event"] for v in run.violations], ["kill", "roll"])
+
+    def test_a_strand_begins_from_the_read_it_was_observed_with(self):
+        follow = replay.Follow(last=5.0)
+        run = SimpleNamespace(
+            script=SimpleNamespace(known=[{"check": "unfed", "event": "kill", "quest": "/q.md"}]),
+            relays={
+                "a": SimpleNamespace(
+                    name="a",
+                    readout=SimpleNamespace(paths={"replay/b/0": follow}),
+                    publisher=SimpleNamespace(alive=True),
+                    proc=SimpleNamespace(alive=False),
+                )
+            },
+            procs=lambda: [],
+            violations=[],
+            strands={},
+        )
+        run.violation = lambda *args: replay.Run.violation(run, *args)
+
+        def check(kind, last):
+            report = {"name": kind, "kind": kind}
+            item = {"reader": "a", "path": "replay/b/0", "kind": "starved", "last": last}
+            replay.Run.check(run, report, [item], [])
+            return report["violations"][0]
+
+        # Unfed as of 5.0, though the readout refreshed after settling shows a recovery read at 9.0.
+        follow.last = 9.0
+        self.assertEqual(check("kill", 5.0)["known"], "/q.md")
+        # Stalled again after that read: a new strand, which the kill's entry does not excuse.
+        fresh = check("roll", 9.0)
         self.assertNotIn("began", fresh)
         self.assertNotIn("known", fresh)
 
