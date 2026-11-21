@@ -273,6 +273,37 @@ async fn a_join_on_an_idle_copy_reaches_back_by_its_min_age() {
 	.expect("the join read its start");
 }
 
+/// A live join on a relay copy reopened while idle reaches back by its Min Age when it opens
+/// together with a reader that leaves its own unstated, on a track that writes nothing more:
+/// the unstated reader hides the join's Min Age from the aggregate, which must not reopen the
+/// copy from just the newest group it kept.
+#[kio::test]
+async fn a_join_on_an_idle_copy_opened_with_an_unstated_reader_reaches_back() {
+	let chain = Chain::new().await;
+	kio::clock::timeout(TIMEOUT, async {
+		let mut live = chain.relay(joining(Some(Duration::ZERO))).await;
+		assert_eq!(first(&mut live).await, 5000);
+		drop(live);
+		let mut source = chain.source.clone();
+		while source.subscription().is_some() {
+			source.subscription_changed().await.unwrap();
+		}
+		// Both subscribe before the session reads the demand, so one SUBSCRIBE opens for both.
+		let remote = chain.relay.consume().follow("live", None).unwrap().available().await;
+		let remote = remote.unwrap().expect("the broadcast resolves");
+		let track = remote.track("video").unwrap();
+		let (oldest, joined) = futures::join!(
+			track.subscribe(joining(None)),
+			track.subscribe(joining(Some(Duration::from_secs(2))))
+		);
+		let (mut oldest, mut joined) = (oldest.unwrap().ordered(), joined.unwrap().ordered());
+		assert_eq!(first(&mut joined).await, 3000, "2 s behind the live edge at 5 s");
+		assert_eq!(first(&mut oldest).await, 0, "the unstated reader reads from the oldest");
+	})
+	.await
+	.expect("both readers read their start");
+}
+
 /// A live join on a relay copy that went idle measures the live edge from its publisher's
 /// answer, not from the groups the ended feed left: the publisher moved on meanwhile, and the
 /// groups the copy missed would leave a hole after its stale ones.

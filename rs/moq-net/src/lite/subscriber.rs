@@ -10872,7 +10872,11 @@ impl TrackServe {
 			(None, Sub::Active(active)) if !fills.is_empty() => active.demand.clone(),
 			(pref, _) => pref,
 		};
-		let request = self.wire_request(pref, producer.idle_newest().filter(|_| opening));
+		let idle = producer
+			.idle_newest()
+			.filter(|_| opening)
+			.map(|newest| (newest, producer.joins_stated()));
+		let request = self.wire_request(pref, idle);
 		// The demand's ranges and the fills' groups, widened together until they fit.
 		let (request, groups) = match ranged {
 			true => {
@@ -11046,12 +11050,12 @@ impl TrackServe {
 	/// What a SUBSCRIBE carries for the demand `pref`: the subscription and its ranges, or
 	/// `None` when it asks for nothing.
 	///
-	/// `newest` when this opens a subscription for a copy whose newest cached group, while
-	/// idle, is that group.
+	/// `idle` when this opens a subscription for a copy whose newest cached group, while
+	/// idle, is its first, with whether any subscriber of the copy joins live at a stated Min Age.
 	fn wire_request(
 		&self,
 		pref: Option<Subscription>,
-		newest: Option<u64>,
+		idle: Option<(u64, bool)>,
 	) -> Option<(Subscription, Vec<lite::Range>)> {
 		// An empty half-open range asks for nothing, and the wire cannot say that: its
 		// bounds are inclusive, so the nearest encoding either hands back the position
@@ -11070,18 +11074,24 @@ impl TrackServe {
 		// the subscriber has no start of its own: a quiet track (a catalog) sends
 		// that group again, which says the cache is current. A lite-07 list keeps
 		// any range of its own, so only one asking just for a range with no start
-		// counts, and only without a Min Age: a live join keeps its range, which the
-		// publisher places behind its own live edge, so the join reaches back past what
-		// the copy holds. A copy that cached nothing keeps the subscriber's ranges: no
-		// start would widen a live viewer's ask to every group from the oldest.
-		let idle = subscription.start().is_none()
-			&& (!ranged
-				|| subscription.delay.min.is_none()
-					&& subscription
-						.ranges
-						.iter()
-						.all(|range| range.end.is_none() && range.start.is_none()));
-		if let Some(newest) = newest.filter(|_| idle) {
+		// counts, and only when no subscriber states a Min Age: a live join keeps its range,
+		// which the publisher places behind its own live edge, so the join reaches back past
+		// what the copy holds. The aggregate's minimum can't say so, since one subscriber
+		// leaving its own unstated hides another's. A copy that cached nothing keeps the
+		// subscriber's ranges: no start would widen a live viewer's ask to every group from
+		// the oldest.
+		let newest = idle.and_then(|(newest, joins)| {
+			let reask = subscription.start().is_none()
+				&& (!ranged
+					|| !joins
+						&& subscription.delay.min.is_none()
+						&& subscription
+							.ranges
+							.iter()
+							.all(|range| range.end.is_none() && range.start.is_none()));
+			reask.then_some(newest)
+		});
+		if let Some(newest) = newest {
 			subscription = subscription.with_start(newest);
 		}
 		// A wire without frame bounds asks the group whole.

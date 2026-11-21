@@ -833,13 +833,14 @@ impl Consume {
 		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task.
 		tokio::spawn(async move {
 			let res = crate::ffi::run(driver.watch(async move {
-				let subscribe = Self::subscribe(&broadcast, &name, subscription.clone());
+				// Subscribed with the raw preferences from the start: an update that only
+				// states the minimum delay doesn't place a range that already resolved.
+				let subscribe = Self::subscribe(&broadcast, &name, Self::raw_subscription(subscription));
 				let Some(track) = Self::until_closed(&mut close, subscribe).await? else {
 					return Ok(());
 				};
 				let track = track.ordered();
 				let control = track.control();
-				Self::update_raw(&control, Self::raw_subscription(subscription))?;
 				// Go live under the lock, so no later update lands before the pending one.
 				if let Some(entry) = State::lock().consume.raw_task.get_mut(id) {
 					let pending = std::mem::replace(&mut entry.control, RawControl::Live(control.clone()));

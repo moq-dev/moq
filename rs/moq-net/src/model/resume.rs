@@ -7258,13 +7258,7 @@ mod test {
 
 		sub.edit(track::Edit {
 			retire: Vec::new(),
-			add: vec![(
-				1,
-				track::Range {
-					start: None,
-					end: None,
-				},
-			)],
+			add: vec![(1, track::Range { start: None, end: None })],
 			priority: 0,
 			delay: Delay::default().with_max(HOUR).with_min(Duration::from_millis(6)),
 			order: track::Order::default(),

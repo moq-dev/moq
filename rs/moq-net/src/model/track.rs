@@ -5563,6 +5563,13 @@ impl Producer {
 		}
 	}
 
+	/// Whether a subscriber holding a range with no start states a Min Age: a live join,
+	/// which the aggregate's minimum hides once another leaves its own unstated.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn joins_stated(&self) -> bool {
+		self.state.read().subscriptions.lock().joins_stated()
+	}
+
 	/// [`Request::request_start`] for a copy already accepted, which a held copy's next
 	/// subscription asks for again.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]

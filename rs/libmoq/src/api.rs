@@ -840,8 +840,8 @@ pub struct moq_delay {
 	pub max_us: u64,
 	/// No subscriber max: wait on a stalled group as long as the publisher's max age allows.
 	pub max_unlimited: bool,
-	/// Whether `min_us` is stated. When false, a range with no start reaches back as far as the
-	/// max allows, and a media consumer starts its minimum as zero.
+	/// Whether `min_us` is stated. When false, a consumer starts its minimum as zero, so a range
+	/// with no start joins at the latest group; give a range a time start to reach back.
 	pub min_stated: bool,
 }
 

@@ -2893,6 +2893,82 @@ fn raw_track_time_start() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
+/// With no range and no stated minimum delay, a raw reader joins at the latest group even
+/// when its maximum delay reaches back to the oldest one.
+#[test]
+fn raw_track_joins_the_latest_group_without_a_stated_min() {
+	let origin = id(moq_origin_create());
+	let path = b"raw-track-latest";
+	let broadcast = publish_broadcast(origin, path);
+
+	let track_name = b"data";
+	let info = moq_track_info {
+		priority: 3,
+		max_age_us: 0,
+		max_age_unlimited: true,
+		timescale: 1_000_000,
+		timescale_present: true,
+		refresh: 0,
+		refresh_present: false,
+		refresh_interval_us: 0,
+		refresh_interval_present: false,
+		compression: 0,
+	};
+	let track =
+		id(unsafe { moq_publish_track(broadcast, track_name.as_ptr() as *const c_char, track_name.len(), &info) });
+
+	let payloads: [&[u8]; 3] = [b"zero", b"one", b"two"];
+	for (i, payload) in payloads.into_iter().enumerate() {
+		assert_eq!(
+			unsafe { moq_publish_track_frame(track, payload.as_ptr(), payload.len(), &micros(i as u64 * 20_000)) },
+			0
+		);
+	}
+
+	let consume = request_broadcast(origin, path);
+
+	let frame_cb = Callback::new();
+	let subscription = moq_subscription {
+		priority: 5,
+		delay: moq_delay {
+			max_unlimited: true,
+			..moq_delay::default()
+		},
+		ranges: std::ptr::null(),
+		ranges_len: 0,
+		order: 0,
+	};
+	let consumer = id(unsafe {
+		moq_consume_track(
+			consume,
+			track_name.as_ptr() as *const c_char,
+			track_name.len(),
+			&subscription,
+			Some(channel_callback),
+			frame_cb.ptr,
+		)
+	});
+
+	let frame_id = id(frame_cb.recv());
+	let mut frame = moq_frame {
+		payload: std::ptr::null(),
+		payload_size: 0,
+		timestamp: std::ptr::null(),
+		keyframe: false,
+	};
+	assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
+	let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
+	assert_eq!(received, b"two", "joined at the latest group, not the oldest");
+	assert_eq!(moq_consume_track_frame_free(frame_id), 0);
+
+	assert_eq!(moq_consume_track_cancel(consumer), 0);
+	assert_eq!(frame_cb.recv_terminal(), 0);
+	assert_eq!(moq_publish_track_finish(track), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
 /// A time end includes the group starting at it, so `t - 1` is a former exclusive end at `t`. A
 /// non-NULL empty list asks for nothing, unlike NULL, and a zeroed range has no start and no end.
 #[test]

@@ -102,6 +102,12 @@ impl Subscriptions {
 		self.unstated > 0
 	}
 
+	/// Whether a subscriber holding a range with no start states a Min Age, which the
+	/// aggregate's minimum hides once another leaves its own unstated.
+	pub(super) fn joins_stated(&self) -> bool {
+		!self.min_delay.is_empty()
+	}
+
 	/// The largest delay budget without materializing the subscription's ranges.
 	pub(super) fn max_delay(&self) -> Duration {
 		self.max_delay
