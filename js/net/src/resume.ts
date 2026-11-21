@@ -1133,8 +1133,6 @@ class Reader implements ResumeSource {
 		}
 		// The failed copies holding a group back for a placement, which still report their failure.
 		const held = new Set<Copy>();
-		// Whether a replaced copy failed this pass, owing the serving route a backfill.
-		let owed = false;
 		// The serving copy first: it is the one that keeps delivering.
 		for (let index = this.#copies.length - 1; index >= 0; index--) {
 			const copy = this.#copies[index];
@@ -1169,10 +1167,7 @@ class Reader implements ResumeSource {
 				} else if (recv.kind === "error") copy.done = recv.error;
 				else if (this.#drained(copy, delivered)) copy.done = hooks.arrived(copy.sub);
 				// What a replaced copy that just failed still had to drain is asked of the serving route.
-				if (copy.replaced && copy.done instanceof Error) {
-					this.#resumed = true;
-					owed = true;
-				}
+				if (copy.replaced && copy.done instanceof Error) this.#resumed = true;
 				break;
 			}
 		}
@@ -1189,11 +1184,8 @@ class Reader implements ResumeSource {
 			return copy.done ?? (failed instanceof Error ? failed : undefined);
 		});
 		// A revert serves the copy the failed replacement capped again, which may hold the next
-		// group already. A replaced copy that failed this pass owes a backfill once the window is
-		// placed: ask for it now, since its close already fired and no later group is sure to wake
-		// the read. Mirrors the Rust `Reader::poll_lowest`.
-		const backfill = owed && this.#resumed && this.#window().floor() !== undefined;
-		if (end.kind === "idle" && (this.route.generation !== generation || backfill)) {
+		// group already.
+		if (end.kind === "idle" && this.route.generation !== generation) {
 			return this.tryGroup(ordered, delivered, dispositions);
 		}
 		return end;
