@@ -2215,7 +2215,7 @@ mod tests {
 			"--listen-tcp-bind",
 			"127.0.0.1:0",
 			"--auth-public",
-			"**",
+			"",
 			"import",
 			"ts",
 		])
@@ -2233,7 +2233,7 @@ mod tests {
 			"--listen-unix-bind",
 			"/tmp/moq-cli.sock",
 			"--auth-public",
-			"**",
+			"",
 			"export",
 			"ts",
 		])
@@ -2256,7 +2256,7 @@ mod tests {
 			argv.extend(["import", "ts"]);
 			Invocation::try_parse_from(argv).expect("parse")
 		};
-		let err = parse(["--auth-public", "**"]).moq.validate().unwrap_err().to_string();
+		let err = parse(["--auth-public", ""]).moq.validate().unwrap_err().to_string();
 		assert!(err.contains("--auth-public ignores"), "{err}");
 		assert!(parse(["--auth-url", "http://127.0.0.1:4440/"]).moq.validate().is_ok());
 	}
@@ -2268,7 +2268,7 @@ mod tests {
 			"--listen-tcp-bind",
 			"127.0.0.1:0",
 			"--auth-public",
-			"**",
+			"",
 			"--drain-timeout",
 			"500ms",
 			"import",
@@ -2302,7 +2302,7 @@ mod tests {
 			"--listen-tcp-bind",
 			"127.0.0.1:0",
 			"--auth-public",
-			"**",
+			"",
 			"--drain-timeout",
 			"500ms",
 			"play",
@@ -2327,7 +2327,7 @@ mod tests {
 			"--auth-url",
 			"http://127.0.0.1:4440/",
 			"--auth-public",
-			"**",
+			"",
 			"import",
 			"ts",
 		])
@@ -2347,7 +2347,7 @@ mod tests {
 		assert!(cli.moq.validate().is_ok());
 
 		// A local verb refuses the flag like every other MoQ-side flag.
-		let cli = Invocation::try_parse_from(["moq", "--auth-public", "**", "auth", "generate"]).expect("parse");
+		let cli = Invocation::try_parse_from(["moq", "--auth-public", "", "auth", "generate"]).expect("parse");
 		assert!(cli.reject("auth").unwrap_err().to_string().contains("--auth-public"));
 	}
 
@@ -2851,7 +2851,7 @@ mod tests {
 			&["--listen-lb-id", "01"],
 			&["--listen-tcp-bind", "127.0.0.1:0"],
 			&["--cluster-node", "https://self.example"],
-			&["--auth-public", "**"],
+			&["--auth-public", ""],
 			&["--drain-timeout", "500ms"],
 		];
 		let dial: &[&[&str]] = &[
@@ -2909,7 +2909,7 @@ mod tests {
 			&["--listen-tls-cert", "cert.pem"],
 			&["--listen-tcp-tls"],
 			&["--listen-version", "moq-lite-02"],
-			&["--auth-public", "**"],
+			&["--auth-public", ""],
 		] {
 			let err = parse(flag).unserved().unwrap_err().to_string();
 			assert!(err.contains(flag[0]), "{flag:?}: {err}");

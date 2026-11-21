@@ -30,7 +30,7 @@ async fn relay() -> Relay {
 	config.listen.version = std::iter::once(LITE_07.parse().unwrap())
 		.chain(moq_net::Versions::all().iter().copied())
 		.collect();
-	config.auth.public = vec![moq_auth::Pattern::all()];
+	config.auth.public = vec![moq_auth::Prefix::all()];
 	let relay = moq_relay::Relay::load(config).await.unwrap();
 	let url = format!("https://{}/", relay.quic_addr().unwrap()).parse().unwrap();
 	let ready = relay.ready();
@@ -151,8 +151,8 @@ async fn replacement(version: &str) {
 	let viewer_origin = moq_tokio::origin::spawn();
 	let viewer = viewer_origin.consume();
 	let watch = |path| {
-		let path = moq_net::Patterns::from(moq_net::Pattern::literal(path).unwrap());
-		viewer.scope("", &path).unwrap().routes()
+		let path = moq_net::Pattern::literal(path).unwrap();
+		viewer.filter(&path).unwrap().routes()
 	};
 	let mut catalog_follow = watch("live/catalog.hang");
 	let mut media_follow = watch("live/media");

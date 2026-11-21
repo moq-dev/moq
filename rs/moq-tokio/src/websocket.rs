@@ -477,8 +477,8 @@ pub(crate) async fn connect(
 				let url = &url;
 				async move {
 					let stream = tokio::net::TcpStream::connect(addr).await?;
-					stream.set_nodelay(true)?;
-					connect_tls_override(tls, name, url, stream, alpns, session).await
+					let stats = qmux::tcp::adopt(&stream)?;
+					connect_tls_override(tls, name, url, stream, stats, alpns, session).await
 				}
 			})
 			.await?
@@ -514,6 +514,7 @@ async fn connect_tls_override(
 	tls_host_name: &str,
 	url: &Url,
 	stream: tokio::net::TcpStream,
+	stats: Option<qmux::SharedSocketStats>,
 	alpns: &[&str],
 	session: &qmux::Config,
 ) -> Result<qmux::Session> {
@@ -537,13 +538,13 @@ async fn connect_tls_override(
 		.map_err(|err| Error::WebSocketConnect(crate::error::message(err)))?;
 	let negotiated = upgrade(&mut stream, &request).await?;
 
-	qmux::ws::Upgraded::new(stream, &negotiated)
+	let mut upgraded = qmux::ws::Upgraded::new(stream, &negotiated)
 		.with_keep_alive(qmux::ws::KeepAlive::default())
-		.with_session_config(session.clone())
-		.connect()
-		.await
-		.map(crate::spawn_qmux)
-		.map_err(Error::connect)
+		.with_session_config(session.clone());
+	if let Some(stats) = stats {
+		upgraded = upgraded.with_socket_stats(stats);
+	}
+	upgraded.connect().await.map(crate::spawn_qmux).map_err(Error::connect)
 }
 
 /// The most response header bytes [`upgrade`] reads before giving up on the server.
@@ -773,7 +774,7 @@ impl Listener {
 	pub(crate) async fn accept_pending(
 		&self,
 	) -> impl Future<Output = Result<(qmux::Session, Url, Accepted)>> + Send + use<> {
-		let (stream, addr) = self.accept_socket().await;
+		let (stream, stats, addr) = self.accept_socket().await;
 		tracing::debug!(%addr, "accepted WebSocket TCP connection");
 
 		let accepted = Arc::new(Mutex::new(None::<(String, Url)>));
@@ -829,30 +830,33 @@ impl Listener {
 				.unwrap()
 				.take()
 				.expect("successful upgrade selected a protocol");
-			let session = qmux::ws::Upgraded::new(stream, &protocol)
+			let mut upgraded = qmux::ws::Upgraded::new(stream, &protocol)
 				.with_keep_alive(qmux::ws::KeepAlive::default())
-				.with_session_config(session)
-				.accept()
-				.await
-				.map(crate::spawn_qmux)
-				.map_err(Error::accept)?;
+				.with_session_config(session);
+			if let Some(stats) = stats {
+				upgraded = upgraded.with_socket_stats(stats);
+			}
+			let session = upgraded.accept().await.map(crate::spawn_qmux).map_err(Error::accept)?;
 			Ok((session, url, Accepted { remote: addr, protocol }))
 		}
 	}
 
-	/// The `accept(2)` half: keep asking until a connection comes back.
-	async fn accept_socket(&self) -> (tokio::net::TcpStream, net::SocketAddr) {
+	/// The `accept(2)` half: keep asking until a connection comes back, prepared to carry
+	/// a session.
+	async fn accept_socket(&self) -> (tokio::net::TcpStream, Option<qmux::SharedSocketStats>, net::SocketAddr) {
 		loop {
 			match self.listener.accept().await {
 				Ok((stream, addr)) => {
-					// qmux already batches records, so Nagle would only hold a batch's
-					// tail for the peer's delayed ACK. Only a reset socket refuses it.
-					if let Err(err) = stream.set_nodelay(true) {
-						tracing::debug!(%addr, %err, "dropped a connection that refused TCP_NODELAY");
-						continue;
-					}
+					// Only a reset socket refuses it.
+					let stats = match qmux::tcp::adopt(&stream) {
+						Ok(stats) => stats,
+						Err(err) => {
+							tracing::debug!(%addr, %err, "dropped a connection that refused TCP_NODELAY");
+							continue;
+						}
+					};
 					self.health.accepted();
-					return (stream, addr);
+					return (stream, stats, addr);
 				}
 				Err(err) => {
 					if let Some(delay) = self.health.failed(&err) {
@@ -949,12 +953,14 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn listener_disables_nagle() {
+	async fn listener_prepares_sockets() {
 		let listener = Listener::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
 		let addr = listener.local_addr().unwrap();
 		let _client = tokio::net::TcpStream::connect(addr).await.unwrap();
-		let (stream, _) = listener.accept_socket().await;
+		let (stream, stats, _) = listener.accept_socket().await;
 		assert!(stream.nodelay().unwrap());
+		// The handle the session bounds the kernel's unsent queue through.
+		assert_eq!(stats.is_some(), cfg!(any(target_os = "linux", target_os = "macos")));
 	}
 
 	#[tokio::test]

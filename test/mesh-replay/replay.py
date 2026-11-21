@@ -493,7 +493,7 @@ class Auth:
                     self.send_response(204)
                     self.end_headers()
                     return
-                grant = {"publish": ["**"], "subscribe": ["**"]}
+                grant = {"publish": [""], "subscribe": [""]}
                 if record["peer"]:
                     grant |= {"link": "peer", "peer": True}
                 payload = json.dumps(grant).encode()

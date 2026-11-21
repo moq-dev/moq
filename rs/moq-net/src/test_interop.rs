@@ -488,8 +488,8 @@ fn ietf_datagram_interop() {
 fn lite_auth_unsupported_interop() {
 	let version = lite::Version::Lite07;
 	let grant = lite::AuthReply::Ok(lite::AuthOk {
-		publish: crate::Patterns::from(crate::Pattern::subtree("room").unwrap()),
-		subscribe: crate::Patterns::new(),
+		publish: crate::Prefixes::from(crate::Prefix::try_from("room").unwrap()),
+		subscribe: crate::Prefixes::new(),
 		expires: None,
 	});
 	let refused = lite::AuthReply::Error(lite::AuthError {

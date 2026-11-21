@@ -10,7 +10,8 @@ retransmitted as TCP requires. Every peer, browser WebSocket viewers included,
 still speaks plain TCP, so this changes the relay's egress (the server is the
 sender) and nothing on the wire.
 
-It beats [the kernel baseline](/quest/m1/tcp-notsent-lowat.md) on stale bytes
+It beats the kernel baseline (`TCP_NOTSENT_LOWAT` at the congestion window,
+[moq-dev/moq#9242](https://github.com/moq-dev/moq/pull/9242)) on stale bytes
 sent and on how well its estimate tracks the path, or it doesn't ship.
 
 Non-goals: clients dialing over it, DPDK, CPU savings, and what a peer's own

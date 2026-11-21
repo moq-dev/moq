@@ -13,7 +13,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
-use moq_auth::{Event, Grant, Pattern, Patterns, Request};
+use moq_auth::{Event, Grant, Prefixes, Request};
 use moq_relay::session::{Filter, List, Nudged};
 use moq_relay::{Connection, auth, cluster, internal, web};
 
@@ -123,8 +123,8 @@ impl Script {
 	}
 }
 
-fn all() -> Patterns {
-	[Pattern::all()].into_iter().collect()
+fn all() -> Prefixes {
+	Prefixes::all()
 }
 
 /// A grant that lasts an hour and would not re-check on its own during a test.

@@ -1083,8 +1083,8 @@ test("closing the loop keeps the tokens until the session drains", async () => {
 				if (!request) break;
 				const token = new TextDecoder().decode(request.token);
 				request.accept({
-					publish: new Path.Patterns(token === "token" ? [Path.Pattern.all()] : []),
-					subscribe: new Path.Patterns(),
+					publish: token === "token" ? Path.Prefixes.all() : new Path.Prefixes(),
+					subscribe: new Path.Prefixes(),
 				});
 			}
 		});
