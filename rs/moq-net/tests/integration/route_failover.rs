@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use futures::channel::mpsc;
-use moq_net::{Error, Pattern, Patterns, Timestamp, group, origin, stats, track};
+use moq_net::{Error, Prefixes, Timestamp, group, origin, stats, track};
 use support::Kind;
 use support::harness::{MockConnectOptions, MockPair, connect_mock, peer_with_latency};
 
@@ -470,11 +470,7 @@ async fn a_narrower_next_hop_fails_over_to_a_wider_route() {
 	let mut options = links.options("p-c", &p, &c);
 	options.client_discovers_all = false;
 	let _p_c = connect_mock(options).await;
-	let _c_reads_other = c
-		.consume()
-		.scope("other", &Patterns::from(Pattern::all()))
-		.unwrap()
-		.routes();
+	let _c_reads_other = c.consume().scope("other", &Prefixes::all()).unwrap().routes();
 	kio::clock::sleep(Duration::from_secs(1)).await;
 
 	let mut watched = Vec::new();

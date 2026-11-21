@@ -4,8 +4,8 @@ import { claims } from "./token.ts";
 test("claims root the token at the room and scope publish to the identity", () => {
 	expect(claims("meet/demo", "alice")).toEqual({
 		root: "meet/demo",
-		subscribe: ["**"],
-		publish: ["alice/**"],
+		subscribe: [""],
+		publish: ["alice"],
 	});
 });
 
@@ -18,8 +18,8 @@ test("claims rejects an identity with an empty segment", () => {
 test("claims accepts a multi-segment identity", () => {
 	expect(claims("hang/room", "guest/uuid")).toEqual({
 		root: "hang/room",
-		subscribe: ["**"],
-		publish: ["guest/uuid/**"],
+		subscribe: [""],
+		publish: ["guest/uuid"],
 	});
 });
 

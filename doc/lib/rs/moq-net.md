@@ -41,5 +41,5 @@ cargo add moq-tokio
 
 See the [Rust quick start](/lib/rs/#quick-start) and
 [docs.rs/moq-net](https://docs.rs/moq-net). The TypeScript twin is
-[`@moq/net`](/lib/js/net). Path patterns are on the
-[concept page](/concept/moq-lite#path-patterns).
+[`@moq/net`](/lib/js/net). Grant prefixes and discovery-filter
+patterns are on the [concept page](/concept/moq-lite#grants-and-filters).

@@ -35,7 +35,7 @@ impl Mesh {
 	/// version the relays dial each other with.
 	async fn start(cluster_version: Option<moq_net::Version>) -> Self {
 		let net = Net::new();
-		let auth = memory::public(&["**"], &[], &[]);
+		let auth = memory::public(&[""], &[], &[]);
 		let mut relays = Vec::new();
 		for (name, peers) in [("a", &[][..]), ("b", &["a"]), ("c", &["a", "b"]), ("d", &["c"])] {
 			let cluster = memory::spawn_cluster(net.options(name, peers));

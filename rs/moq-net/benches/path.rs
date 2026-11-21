@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use futures::FutureExt;
 use moq_net::{
-	Path, Pattern, Patterns,
+	Path, Prefixes,
 	fuzz::{Announced, Messages, decode_announces, decode_namespaces, encode_announces, encode_namespaces},
 	origin,
 };
@@ -160,7 +160,7 @@ fn requests() {
 
 		// A rooted handle joins its root onto every path it is given.
 		let (root, rest) = s.split_once('/').unwrap();
-		let rooted = consumer.scope(root, &Patterns::from(Pattern::all())).unwrap();
+		let rooted = consumer.scope(root, &Prefixes::all()).unwrap();
 		let rooted_target = format!("{rest}/0");
 		allocs(&format!("origin/request_rooted_str/{name}"), 2_000, 1, || {
 			local(&|| rooted.request(rooted_target.as_str(), None))

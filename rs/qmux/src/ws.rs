@@ -114,8 +114,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Upgraded<T> {
 	/// An HTTP server hands over a type-erased upgraded stream, so QMux can't find
 	/// the socket itself. A server that kept a handle on the accepted connection
 	/// can attach it here and get the kernel's RTT (and, on Linux, delivery rate)
-	/// instead of only QMux's own `QX_PING` measurement. See
-	/// `TcpStats` (Linux and macOS).
+	/// instead of only QMux's own `QX_PING` measurement, and keep the kernel's unsent
+	/// queue to about one congestion window. See `TcpStats` (Linux and macOS).
 	pub fn with_socket_stats(mut self, stats: crate::SharedSocketStats) -> Self {
 		self.socket_stats = Some(stats);
 		self
@@ -314,7 +314,16 @@ impl Client {
 		}
 
 		let config = self.session.clone().with_negotiated(version, protocol);
-		let transport = WsTransport::new(ws_stream, Address::Uri);
+		let tcp = match ws_stream.get_ref() {
+			MaybeTlsStream::Plain(tcp) => Some(tcp),
+			MaybeTlsStream::Rustls(tls) => Some(tls.get_ref().0),
+			_ => None,
+		};
+		let socket_stats = tcp.map(crate::tcp::adopt).transpose()?.flatten();
+		let mut transport = WsTransport::new(ws_stream, Address::Uri);
+		if let Some(stats) = socket_stats {
+			transport = transport.with_socket_stats(stats);
+		}
 		let transport = match self.keep_alive {
 			Some(ka) => transport.with_keep_alive(ka)?,
 			None => transport,
