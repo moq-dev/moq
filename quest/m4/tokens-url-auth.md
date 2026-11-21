@@ -6,7 +6,7 @@
 
 ## Plan
 
-Decided 2026-11-20 (maintainer, /quest-complete on [moq-dev/moq#9215](https://github.com/moq-dev/moq/pull/9215)): keep the Rust counterpart as a quest rather than drop it. Placed in m4 by m3's rule: Kixel's node, the one caller, dials with the query itself today, so no one waits on it.
+Decided 2026-11-20 (maintainer, [comment](https://github.com/moq-dev/moq/pull/9215#issuecomment-7053898194) on [moq-dev/moq#9215](https://github.com/moq-dev/moq/pull/9215)): keep the Rust counterpart as a quest rather than drop it. Placed in m4 by m3's rule: Kixel's node, the one caller, dials with the query itself today, so no one waits on it.
 
 Mirror the JS behavior in `rs/moq-net/src/auth/tokens.rs` (`Tokens::preview`, `locate`) and the connection that builds each dial in `rs/moq-tokio/src/connection.rs`:
 

@@ -533,7 +533,7 @@ function refuse(props?: ConnectionProps): void {
 	if (props.tokens !== undefined) {
 		throw new Error("tokens cannot be shared; pass share: false");
 	}
-	if (props.urlAuth !== undefined) {
+	if (props.urlAuth) {
 		throw new Error("urlAuth cannot be shared; pass share: false");
 	}
 	if (props.timeout !== undefined) {
@@ -551,7 +551,7 @@ function requiresPrivate(props: ConnectionProps): boolean {
 		props.websocket !== undefined ||
 		props.backoff !== undefined ||
 		props.tokens !== undefined ||
-		props.urlAuth !== undefined ||
+		props.urlAuth === true ||
 		props.timeout !== undefined ||
 		props.goaway !== undefined ||
 		props.publish !== undefined ||
