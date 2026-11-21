@@ -3222,27 +3222,11 @@ impl TrackState {
 		self.max_key.map_or(0, |max| max + 1)
 	}
 
-	/// Reject a key that is still cached; a dead (aborted or evicted)
-	/// incarnation is removed so a fresh group can serve the key again. Subscribers may
-	/// have seen its start, so it stays as the eviction watermark.
-	///
-	/// Best effort: nothing remembers a key whose slot is already gone, so a
-	/// publisher re-sending a long-evicted key is accepted as new.
-	/// A group that starts above `frame_start` is also replaceable: it cannot answer a
-	/// request from there, so the wider producer takes the slot. Readers already
-	/// draining the old one keep their own handle.
-	///
-	/// A fetched backfill never holds the key against the feed: subscribers read only
-	/// the feed's groups, so its copy takes the slot, and the fetch's readers keep theirs.
-	fn claim_key(&mut self, key: u64, frame_start: u64) -> Result<()> {
-		if self.holding_group(key, frame_start).is_some() {
-			return Err(Error::Duplicate);
-		}
-		self.displace(key);
-		Ok(())
-	}
-
 	/// The copy of the feed's `key` that still answers from `frame_start`, if any.
+	///
+	/// A dead (aborted or evicted) copy holds nothing, and neither does one that starts
+	/// above `frame_start`: it cannot answer a request from there. A fetched backfill never
+	/// holds the key against the feed: subscribers read only the feed's groups.
 	fn holding_group(&self, key: u64, frame_start: u64) -> Option<&group::Handle> {
 		self.lookup.get(&key).filter(|slot| slot.visible)?;
 		self.covering_group(key, frame_start)
@@ -4719,6 +4703,18 @@ fn largest_ended(state: &TrackState, waiter: &kio::Waiter) -> Poll<()> {
 	}
 }
 
+/// How [`Producer::create_group_inner`] treats a start another group already holds.
+#[derive(Clone, Copy)]
+enum Admit {
+	/// Replace it: the producer says nothing else writes the start.
+	Replace,
+	/// Leave it and create nothing: the first writer wins.
+	Claim,
+	/// A received copy from this frame: refused once the holder settled, else held on it.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	Received(u64),
+}
+
 /// Where a received copy of a group goes.
 pub(crate) enum Received {
 	/// A new group, for the copy to fill.
@@ -4852,17 +4848,32 @@ impl Producer {
 	/// It says nothing about the starts around it: groups may be created out of order, and
 	/// an aborted or evicted start created again. A gap it leaves is skipped only once the
 	/// producer says it will not fill it, with [`Self::skip_groups`] or [`Self::append_group`].
-	/// A start already skipped is refused with [`Error::Skipped`], one held by another group
-	/// with [`Error::Duplicate`], and the reserved start `u64::MAX` with
-	/// [`Error::BoundsExceeded`].
+	/// A start already skipped is refused with [`Error::Skipped`], and the reserved start
+	/// `u64::MAX` with [`Error::BoundsExceeded`].
+	///
+	/// A start another group holds is replaced: the new group takes the slot, and readers
+	/// already draining the old one keep their own handle. The same broadcast, track, and
+	/// group start always name the same content, and nothing checks it, as with
+	/// [`Self::append_group`]. Two writers that may race to one start use
+	/// [`Self::claim_group`] instead.
 	///
 	/// Readers and group demand reach it at once, but the track counts it as content (its
 	/// live edge, or the successor that ages the group before it) only once its first frame
 	/// opens or it finishes.
 	pub fn create_group(&self, group: group::Info) -> Result<group::Producer> {
-		match self.create_group_inner(group, None, 0..0)? {
-			Received::Group(group) => Ok(group),
-			Received::Held(_) => unreachable!("only a received copy waits on another"),
+		match self.create_group_inner(group, Admit::Replace, 0..0)? {
+			Some(Received::Group(group)) => Ok(group),
+			_ => unreachable!("a replacing create always creates"),
+		}
+	}
+
+	/// [`Self::create_group`], unless another live group already holds the start: then
+	/// `None`, and that group is left alone. The first writer of a start wins.
+	pub fn claim_group(&self, group: group::Info) -> Result<Option<group::Producer>> {
+		match self.create_group_inner(group, Admit::Claim, 0..0)? {
+			Some(Received::Group(group)) => Ok(Some(group)),
+			None => Ok(None),
+			Some(Received::Held(_)) => unreachable!("only a received copy waits on another"),
 		}
 	}
 
@@ -4878,15 +4889,11 @@ impl Producer {
 	/// leave its reader waiting on keys that never come.
 	#[cfg(feature = "async")]
 	pub(crate) fn create_group_at(&self, group: group::Info, start: u64, passed: ops::Range<u64>) -> Result<Received> {
-		self.create_group_inner(group, Some(start), passed)
+		let received = self.create_group_inner(group, Admit::Received(start), passed)?;
+		Ok(received.expect("a received copy is refused or held, never passed over"))
 	}
 
-	fn create_group_inner(
-		&self,
-		info: group::Info,
-		received: Option<u64>,
-		passed: ops::Range<u64>,
-	) -> Result<Received> {
+	fn create_group_inner(&self, info: group::Info, admit: Admit, passed: ops::Range<u64>) -> Result<Option<Received>> {
 		// Reserved, so every group fits an exclusive range.
 		if info.start == u64::MAX {
 			return Err(coding::BoundsExceeded.into());
@@ -4906,14 +4913,16 @@ impl Producer {
 				);
 			}
 		}
-		let admitted = self.admit_group(&mut state, info, received);
+		let admitted = self.admit_group(&mut state, info, admit);
 		let deferred = state.deferred();
 		drop(state);
-		let admitted = admitted.map(|(received, adopted)| {
-			if let (Received::Group(group), Some(adopted)) = (&received, adopted) {
-				group.handle().settle_head(adopted);
-			}
-			received
+		let admitted = admitted.map(|admitted| {
+			admitted.map(|(received, adopted)| {
+				if let (Received::Group(group), Some(adopted)) = (&received, adopted) {
+					group.handle().settle_head(adopted);
+				}
+				received
+			})
 		});
 		deferred.wake();
 		admitted
@@ -4925,8 +4934,8 @@ impl Producer {
 		&self,
 		state: &mut TrackState,
 		info: group::Info,
-		received: Option<u64>,
-	) -> Result<(Received, Option<group::Adopted>)> {
+		admit: Admit,
+	) -> Result<Option<(Received, Option<group::Adopted>)>> {
 		if matches!(state.outcome, Outcome::Sealed(_)) || state.final_key().is_some_and(|fin| info.start >= fin) {
 			return Err(Error::Closed);
 		}
@@ -4935,27 +4944,30 @@ impl Producer {
 		if state.skipped(info.start) {
 			return Err(Error::Skipped);
 		}
-		let start = received.unwrap_or(0);
-		let content = if received.is_some() {
-			if let Some(holding) = state.holding_group(info.start, start) {
-				if holding.is_settled() {
-					return Err(Error::Duplicate);
+		let (start, content) = match admit {
+			Admit::Replace => (0, None),
+			Admit::Claim if state.holding_group(info.start, 0).is_some() => return Ok(None),
+			Admit::Claim => (0, None),
+			Admit::Received(start) => {
+				if let Some(holding) = state.holding_group(info.start, start) {
+					if holding.is_settled() {
+						return Err(Error::Duplicate);
+					}
+					let arriving = holding.clone();
+					state.holds.entry(info.start).or_default().push(arriving.clone());
+					let hold = Hold {
+						arriving,
+						track: self.state.downgrade(),
+						key: info.start,
+					};
+					return Ok(Some((Received::Held(hold), None)));
 				}
-				let arriving = holding.clone();
-				state.holds.entry(info.start).or_default().push(arriving.clone());
-				let hold = Hold {
-					arriving,
-					track: self.state.downgrade(),
-					key: info.start,
-				};
-				return Ok((Received::Held(hold), None));
+				(start, state.content_for_copy(info.start)?)
 			}
-			state.content_for_copy(info.start)?
-		} else {
-			None
 		};
 		let track = state.info.clone().unwrap();
-		state.claim_key(info.start, start)?;
+		// Whatever holds the key lets it go; readers draining it keep their own handle.
+		state.displace(info.start);
 		let mut group = group::Producer::new(info, track, state.cache.clone()).with_meter(state.ingress.meter());
 		if start != 0 {
 			group.bound(group::Bounds { start, end: None })?;
@@ -4980,7 +4992,7 @@ impl Producer {
 		};
 		state.cap(&group.handle())?;
 		state.commit_group(&group.handle());
-		Ok((Received::Group(group), adopted))
+		Ok(Some((Received::Group(group), adopted)))
 	}
 
 	/// Create the next group, starting at `start`: after every group this track holds.
@@ -26062,21 +26074,45 @@ mod test {
 			.write_frame(group.key_time(), bytes::Bytes::from_static(b"head"))
 			.unwrap();
 
-		// While it lives the slot answers, so the key is taken.
-		assert!(matches!(
-			producer.create_group(group::Info { start: 3 }),
-			Err(Error::Duplicate)
-		));
+		// While it lives the slot answers, so a claim of the key is left out.
+		assert!(producer.claim_group(group::Info { start: 3 }).unwrap().is_none());
 		assert!(consumer.peek_group(3).is_some());
 
 		group.abort(Error::Cancel).unwrap();
 
 		assert!(consumer.peek_group(3).is_none(), "an aborted slot is a cache miss");
 		producer
-			.create_group(group::Info { start: 3 })
+			.claim_group(group::Info { start: 3 })
+			.unwrap()
 			.expect("an aborted slot releases its key")
 			.finish()
 			.unwrap();
+	}
+
+	/// A plain create replaces a live group holding its start: readers take the new one,
+	/// and a reader already draining the old one keeps it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn create_group_replaces_a_held_start() {
+		let producer = track_producer("test", Info::timed());
+		let consumer = producer.consume();
+
+		let mut old = producer.create_group(group::Info { start: 3 }).unwrap();
+		old.write_frame(old.key_time(), bytes::Bytes::from_static(b"old"))
+			.unwrap();
+		let mut draining = consumer.peek_group(3).expect("the old group answers");
+
+		let mut new = producer.create_group(group::Info { start: 3 }).unwrap();
+		new.write_frame(new.key_time(), bytes::Bytes::from_static(b"new"))
+			.unwrap();
+		new.finish().unwrap();
+		old.finish().unwrap();
+
+		let mut group = consumer.peek_group(3).expect("the new group answers");
+		let frame = group.read_frame().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(&frame.payload[..], b"new");
+		let frame = draining.read_frame().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(&frame.payload[..], b"old");
 	}
 
 	/// Lowering the floor re-offers what the arrival walk could have read, a live group

@@ -6404,8 +6404,10 @@ impl OpenGroup {
 	) -> Poll<Result<Opened, Error>> {
 		let key = header.group_id;
 		// Stats (groups/frames/bytes) are counted in the model as the group is written,
-		// through the tagged `track::Producer`.
-		let create = |track: &mut track::Producer| track.create_group(group::Info { start: key });
+		// through the tagged `track::Producer`. A group the copy already holds arrived twice,
+		// and the model has one producer per group, so the second stream is refused.
+		let create =
+			|track: &mut track::Producer| track.claim_group(group::Info { start: key })?.ok_or(Error::Duplicate);
 
 		loop {
 			match self.step {
@@ -7021,12 +7023,13 @@ impl RunFill {
 			}
 			self.skipped = None;
 			let key = group.ok_or(Error::ProtocolViolation)?;
-			match open_fill_group(track, &mut self.head, key) {
-				Ok(()) => {}
+			if !open_fill_group(track, &mut self.head, key)? {
 				// Widening a range can fill groups the copy already owns. Drain their
 				// objects without replacing their producer or cutting the rest of the fill.
-				Err(Error::Duplicate) if self.multiple => self.skipped = Some((key, 0)),
-				Err(err) => return Err(err),
+				if !self.multiple {
+					return Err(Error::Duplicate);
+				}
+				self.skipped = Some((key, 0));
 			}
 		}
 		if self.skipped.is_some() {
@@ -8120,12 +8123,15 @@ fn resolve_fetch_group(prior: Option<u64>, wire: Option<u64>) -> Result<Option<u
 	Ok(Some(group))
 }
 
+/// Open the fill's group at `key` as the head, or return false when the copy already holds it.
 fn open_fill_group(
 	track: &mut track::Producer,
 	head: &mut Option<(u64, u64, crate::recv::Group)>,
 	key: u64,
-) -> Result<(), Error> {
-	let producer = track.create_group(group::Info { start: key })?;
+) -> Result<bool, Error> {
+	let Some(producer) = track.claim_group(group::Info { start: key })? else {
+		return Ok(false);
+	};
 	producer.set_wire(group::Wire {
 		sparse: false,
 		first_object: true,
@@ -8136,7 +8142,7 @@ fn open_fill_group(
 		last: None,
 	})?;
 	*head = Some((key, 0, crate::recv::Group::new(producer)));
-	Ok(())
+	Ok(true)
 }
 
 /// Ready once a finished subscription's data streams are accounted for: Stream Count of
@@ -18293,7 +18299,7 @@ mod joining_fetch_tests {
 			(held.producer.clone().unwrap(), held.fill.clone())
 		};
 		let mut head = None;
-		open_fill_group(&mut track, &mut head, 4).unwrap();
+		assert!(open_fill_group(&mut track, &mut head, 4).unwrap());
 		let (key, next, producer) = head.unwrap();
 		*fill.write().ok().unwrap() = Fill::Ready {
 			key,
