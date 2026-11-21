@@ -9,7 +9,7 @@ still reorder (B-frames, open-GOP leading pictures). Sources that overlap
 today, such as a TS content join, publish without ending the broadcast and
 without rewriting a timestamp. The hang draft states the rule, and the
 producers and every importer keep it, in Rust and JS.
-[Group times](/quest/m2/time-addressing/group-times.md) puts it in the moq-lite
+Group times ([moq-dev/moq#9263](https://github.com/moq-dev/moq/pull/9263)) put it in the moq-lite
 draft, as spans from a group's lowest frame to its End that never overlap.
 
 ## Plan
@@ -78,6 +78,13 @@ them too.
 The hang draft's "a group MAY start at the same timestamp as the previous
 group" goes too.
 
+Group times ([moq-dev/moq#9263](https://github.com/moq-dev/moq/pull/9263))
+found one more overlap this fixes: a keyframe below the open group's newest
+frame cuts it at an estimated End past the keyframe (moq-mux
+`Producer::prepare`), so the next group starts inside that span, which a
+lite-07 copy refuses. Continuing the group, as decided above, fixes it. The
+spans' other cases are [producer spans](/quest/m2/producer-spans.md)'s.
+
 Tests: the producer test above becomes one where the overlapping keyframe
 continues the group, and a TS import across a content join, including leading
 pictures, publishes groups whose frames all precede every frame of the next
@@ -87,6 +94,7 @@ Public API: none expected. Wire: none; the hang draft's group rule tightens.
 
 ## Related
 
-- [Group Streams carry each time once](/quest/m2/time-addressing/group-times.md) - states the rule in the moq-lite draft, with GROUP_END's End closing each span
+- [A time anchor lands by group spans](/quest/m2/time-addressing/span-time-anchors.md) - resolves a time against the spans this rule keeps apart
+- [First-party producers keep lite-07 group spans apart](/quest/m2/producer-spans.md) - the guards, the discontinuity marker, and the leading pictures' End, which this leaves
 - [An incomplete group expires by the lowest timestamp of a higher group](/quest/m3/expire-by-higher-min.md) - the expiry bound this rule makes safe
 - [An fMP4 group start never rewinds the decode timeline](/quest/m3/fmp4-group-start-tfdt.md) - a keyframe repeating its predecessor's timestamp would now continue the group; check which of its cases remain

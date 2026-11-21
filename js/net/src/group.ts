@@ -26,7 +26,7 @@ import {
 import { type Expiry, type GroupRecover, hooks, type ReadGroupFrame, type Replacement } from "./internal.ts";
 import { Queue } from "./queue.ts";
 import { rescaleIn } from "./rescale.ts";
-import type { Timestamp } from "./time.ts";
+import { floorAt, type Timestamp } from "./time.ts";
 import type { Info as TrackInfo } from "./track.ts";
 import { checkKey, RESERVED } from "./util/key.ts";
 import { MAX_FRAME_BYTES } from "./util/limits.ts";
@@ -312,6 +312,7 @@ export class Producer {
 			if (state.closed.peek() !== undefined) flate.finish();
 		};
 		hooks.groupOffset = (group) => group.#state.offset;
+		hooks.groupWholeEnd = (group) => (group.#state.closed.peek() === null ? group.#state.end : undefined);
 		hooks.groupHeadless = (group) => group.#state.index > 0 || headShed(group.#state.frames.peek().first);
 		hooks.holdGroup = (group) => {
 			group.#holds++;
@@ -720,13 +721,23 @@ export class Producer {
 	/**
 	 * Ends the group whole at `end`, the exclusive end of its presentation in the track's
 	 * timescale, returning it as {@link Finished}, as the Rust `group::Producer::finish_at`. An
-	 * `end` at or before the group's start throws {@link TimestampMismatch}.
+	 * `end` below the group's start, or below its highest frame timestamp, throws
+	 * {@link TimestampMismatch}; one equal to either is accepted.
 	 */
 	finishAt(end: bigint): Finished {
-		if (end <= this.start) throw new TimestampMismatch();
+		if (end < this.start || end < this.#highest()) throw new TimestampMismatch();
 		if (this.#state.closed.peek() === undefined) this.#state.end = end;
 		this.#end(null);
 		return this;
+	}
+
+	// The highest frame timestamp in the track's timescale, or the start when there is none to
+	// compare: no frame is timed, or no track says which timescale `end` is in.
+	#highest(): bigint {
+		const { latest, track } = this.#state;
+		if (latest === undefined || track?.timescale == null) return this.start;
+		// A streamed frame keeps the timestamp it was created with, in any scale.
+		return BigInt(floorAt(latest, track.timescale));
 	}
 
 	/**

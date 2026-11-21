@@ -48,7 +48,3 @@ lite-06 bytes of a scale-less frame match the shared fixture in Rust and JS.
 
 Public API: none; a behavior change. Wire: no byte change; lite-07-wip expiry
 semantics, and a scale-less frame's lite-05/06 timestamp in JS.
-
-## Related
-
-- [lite-07 Group Streams carry each time once](/quest/m2/time-addressing/group-times.md) - a scale-less FRAME stops carrying a timestamp on lite-07; lite-05/06 still need this one

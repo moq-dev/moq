@@ -2614,15 +2614,15 @@ export class Subscriber {
 				entry.fills?.refuse(start, end, error);
 			} else if ("skip" in resp) {
 				const { start, end } = resp.skip;
-				this.#skipped(entry, start, end, "SUBSCRIBE_SKIP");
+				this.#skipped(entry, start, end);
 			}
 		}
 	}
 
-	// The publisher never produced `[start, end)`, as `by` (a SUBSCRIBE_SKIP, or a GROUP's Previous
-	// Start) says, so nothing is waited for and no reader ends. A skip replaces any drop of the same
-	// groups; a reader a drop already ended stays ended.
-	#skipped(entry: SubscribeEntry, start: bigint, end: bigint, by: string): void {
+	// The publisher never produced `[start, end)`, as a SUBSCRIBE_SKIP says, so nothing is waited
+	// for and no reader ends. A skip replaces any drop of the same groups; a reader a drop already
+	// ended stays ended.
+	#skipped(entry: SubscribeEntry, start: bigint, end: bigint): void {
 		entry.tail.account(start, end);
 		// A fill owing them is answered: the source never had them.
 		entry.fills?.refuse(start, end, new NotFound(`group ${start}`));
@@ -2631,7 +2631,7 @@ export class Subscriber {
 		const [cached] = hooks.skipTrackGroups(entry.track, start, end);
 		if (cached) {
 			console.warn(
-				`protocol error: ${by} skips [${start}, ${end}), which holds group ${cached.start}, which arrived; keeping it`,
+				`protocol error: SUBSCRIBE_SKIP skips [${start}, ${end}), which holds group ${cached.start}, which arrived; keeping it`,
 			);
 		}
 	}
@@ -2965,16 +2965,6 @@ export class Subscriber {
 		}
 
 		const { track, timescale, tail } = entry;
-		// The group before it must start below it, or the header contradicts itself: only this
-		// stream ends, as a malformed FRAME does.
-		if (group.previous !== undefined && group.previous >= group.key) {
-			stream.stop(
-				new StreamError(StreamCode.MalformedTrack, {
-					message: `group ${group.key} names group ${group.previous} as the one before it`,
-				}),
-			);
-			return;
-		}
 		// Asked before this stream accounts for the group: a drop that overtook it named it.
 		let owed = !tail.covers(group.key, group.key + 1n);
 		// A drop that overtook this stream, rather than a gap the grace gave up on.
@@ -3023,11 +3013,6 @@ export class Subscriber {
 				offset: group.frameStart,
 				fill: entry.filling,
 			});
-			// Lite-07: the starts the header passes over were never produced, as a SUBSCRIBE_SKIP
-			// would say. Recorded once the group is, so a relay serving the copy sees the group the
-			// skip runs up to, whose own GROUP passes over it again.
-			const passed = group.passedOver();
-			if (passed.start < passed.end) this.#skipped(entry, passed.start, passed.end, `GROUP ${group.key}`);
 			// Released once this copy took the group, so the failed copy's readers find it.
 			arriving?.release();
 			// A drop that overtook the header already accounts for the group; a copy served again is
@@ -3040,7 +3025,15 @@ export class Subscriber {
 
 			// Whole at a GROUP_END's end, else without one: every frame sent arrived.
 			if (end === undefined) producer.finish();
-			else producer.finishAt(end);
+			else {
+				producer.finishAt(end);
+				// No other group starts inside the span, which the tail counts as it counts the
+				// group, and the track records skipped, as its own publisher's append did.
+				if (end > group.key + 1n) {
+					tail.account(group.key + 1n, end);
+					hooks.skipTrackGroups(track, group.key + 1n, end);
+				}
+			}
 			stream.stop(StreamCode.Cancel);
 		} catch (err: unknown) {
 			// A violation ends the session, which the connection does once it escapes; anything

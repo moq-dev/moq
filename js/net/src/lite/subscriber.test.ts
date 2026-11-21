@@ -1883,6 +1883,56 @@ test("a malformed lite-07 group stream ends only its group", async () => {
 	}
 });
 
+// Lite-07: a GROUP_END accounts for the starts inside the group's span, `(start, End)`, in the
+// subscription's tail as the group itself is, and the copy records them skipped, ending at End.
+test("a lite-07 GROUP_END accounts for the starts inside its group's span", async () => {
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, toHop(1n));
+	type Entry = { tail: { covers(start: bigint, end: bigint): boolean } };
+	let entry: Entry | undefined;
+	const internal = subscriber as unknown as {
+		runResponses: (stream: unknown, entry: Entry) => Promise<void>;
+	};
+	const runResponses = internal.runResponses.bind(internal);
+	const responses = spyOn(internal, "runResponses").mockImplementation((stream, captured) => {
+		entry = captured;
+		return runResponses(stream, captured);
+	});
+	const track = subscriber
+		.consume(Path.from("room"))
+		.track("video")
+		.subscribe({ delay: { max: Duration.millis(60_000) } });
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version, 1000);
+		await (await opened(1)).reading;
+
+		const stream = handStream(version);
+		// Frame 0 at the group's start, delta 0, then the End 500 past it.
+		stream.write(await liteFrame(0, new Uint8Array([1])));
+		stream.write(
+			await Writer.collect(version, async (w) => {
+				await w.u53(0);
+				await w.u62(500n);
+			}),
+		);
+		stream.finish();
+		await subscriber.runGroup(new Group({ subscribe: 0n, key: 1000n }), stream.reader);
+		const group = await track.recvGroup();
+		expect((await group?.readFrame())?.timestamp?.value).toBe(1000);
+		expect(group?.end).toBe(1500n);
+		if (!entry) throw new Error("no subscription");
+		expect(entry.tail.covers(1000n, 1500n)).toBe(true);
+		expect(entry.tail.covers(1500n, 1501n)).toBe(false);
+		expect(hooks.holeEnd(track, 1200n, false)).toBe(1500n);
+	} finally {
+		responses.mockRestore();
+		track.close();
+		subscriber.close();
+	}
+});
+
 // A TRACK reset while its SUBSCRIBE is live fails the subscription, so the origin can try another
 // route, and resets the SUBSCRIBE.
 test("a reset track rejects the subscription and resets its subscribe", async () => {
