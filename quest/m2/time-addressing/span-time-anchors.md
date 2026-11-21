@@ -25,12 +25,14 @@ both rules for review on 2026-11-20; neither is decided.
   pause", which only the End says.
 - The cache proof is AGENTS.md's Required rule: answer only what upstream
   would answer. A held whole group proves every time in [start, End).
-- Check the rule against open-GOP leading pictures, whose lowest frame sits
-  below the group's start, with
-  [producer spans](/quest/m2/producer-spans.md), which decides where a span
-  starts.
-- It overlaps [no relative anchors](/quest/m2/time-addressing/no-relative-anchors.md),
-  whose live join resolves as a time start, and
+- A span runs from Group Start, [Group Start, End) (maintainer, 2026-11-21).
+  An open-GOP group's leading pictures present below its start, inside the
+  lower group's span, so a time among them resolves to the lower group: a
+  subscription starts at a group's first frame, and those pictures decode
+  only from there.
+- It overlaps the live join of lite-07's anchors
+  ([moq-dev/moq#9265](https://github.com/moq-dev/moq/pull/9265)), which
+  resolves as a time start, and
   [moq-dev/moq#9172](https://github.com/moq-dev/moq/pull/9172).
 
 Where it lives: Rust `model/track.rs` (time starts, `find_landable`,
@@ -41,5 +43,4 @@ Public API: none expected. Wire: none; the draft's Time Anchor rule changes.
 
 ## Related
 
-- [No relative anchors](/quest/m2/time-addressing/no-relative-anchors.md) - its live join resolves as a time start, which this changes inside a skipped span
-- [First-party producers keep lite-07 group spans apart](/quest/m2/producer-spans.md) - the non-overlap rule this resolution relies on, and where a span starts
+- [First-party producers keep lite-07 group spans apart](/quest/m2/producer-spans.md) - the non-overlap rule this resolution relies on

@@ -351,7 +351,7 @@ closed, so every frame written arrives but it may have held more, as when a
 relay stops sending a group that went stale; or aborted with an error. A
 finished group's end also bounds how long it stays fresh, so the last group of
 a paused track still ages out. Over the work-in-progress moq-lite 07 groups
-never overlap: a group runs from its lowest timestamp to its end, and the time
+never overlap: a group runs from its start to its end, and the time
 between one group's end and the next group's start belongs to no group and is
 reported as skipped, so a reader sees a gap at once. Older versions and
 moq-transport carry no end.

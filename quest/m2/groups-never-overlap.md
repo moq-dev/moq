@@ -10,7 +10,7 @@ today, such as a TS content join, publish without ending the broadcast and
 without rewriting a timestamp. The hang draft states the rule, and the
 producers and every importer keep it, in Rust and JS.
 Group times ([moq-dev/moq#9263](https://github.com/moq-dev/moq/pull/9263)) put it in the moq-lite
-draft, as spans from a group's lowest frame to its End that never overlap.
+draft, as spans [Group Start, End) that never overlap.
 
 ## Plan
 

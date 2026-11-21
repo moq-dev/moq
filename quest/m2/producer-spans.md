@@ -39,39 +39,32 @@ cases remain:
   stamp the marker at its End and key the next group strictly after it, as a
   seek's marker already does (`crate::start::next`).
 - **Open-GOP leading pictures.** `container::Producer` finishes a group whole
-  at the next keyframe's timestamp, above that keyframe's leading pictures, so
-  the next group's lowest frame falls inside the span when the span runs from
-  the lowest frame, as the draft says. The next group's lowest frame isn't
-  known when its keyframe cuts, since leading pictures follow it in decode
-  order. Moq-net's accounting already uses [Group Start, End): a GROUP_END
-  accounts only the starts strictly inside it.
+  at the next keyframe's timestamp, above that keyframe's leading pictures.
+  With a span of [Group Start, End), as decided below, those pictures present
+  inside the lower group's span without breaking the rule, and moq-net's
+  accounting already counts only the starts strictly inside a span. Nothing
+  changes in the producers for this case; the test below keeps it.
+
+Decided 2026-11-21 (maintainer, /quest-complete):
+
+- ✅ A group's span runs from Group Start, so a span is [Group Start, End)
+  (rejected: from the lowest frame, naming the leading pictures' gap with
+  SUBSCRIBE_SKIP; from the lowest frame, holding GROUP_END until the next
+  group's lowest frame is known). A subscription starts at a group's first
+  frame, so a time among the next group's leading pictures must resolve to the
+  lower group for those pictures to decode. This reverses the 2026-11-20
+  "lowest frame" decision; group times
+  ([moq-dev/moq#9263](https://github.com/moq-dev/moq/pull/9263)) puts
+  [Group Start, End) in the lite-07-wip draft.
 
 Tests: a cut below a written frame is refused for audio and reordered video;
 a discontinuity after `cut(end)` publishes a marker a lite-07 copy accepts in
 either arrival order; an open-GOP stream publishes groups whose spans hold no
-other group's frame or start. Run `/verify-subscribe` if the draft's span
-wording changes.
+other group's start, and whose frames all present before every frame of a
+higher group.
 
 Public API: `cut(Some(end))` below a written frame returns `InvalidEnd` for
-every kind. Wire: none, unless the span wording changes in the lite-07-wip
-draft, which is unpublished.
-
-## Waiting
-
-- Maintainer: where a group's span starts, given open-GOP leading pictures.
-  Options: (a) from Group Start, so the draft's span becomes [Group Start,
-  End) and the strong frame rule stays a separate sentence; nothing in the
-  producers changes, and a time between a leading picture and its keyframe
-  resolves to the lower group, which a RASL picture needs anyway to decode;
-  (b) from the lowest frame, as decided for group times on 2026-11-20, with
-  the producer ending a group where its own content stops (its duration
-  marker) and naming the rest up to the keyframe with SUBSCRIBE_SKIP, though
-  the leading pictures then present inside a span the draft calls a
-  discontinuity no group contains; (c) from the lowest frame, holding a
-  group's GROUP_END until the next group's lowest frame is known, which
-  delays every whole group by the reorder depth. Recommended: (a), since it
-  matches what moq-net already accounts and needs no producer change. An
-  agent can't take it because it reverses a maintainer decision.
+every kind. Wire: none.
 
 ## Required
 

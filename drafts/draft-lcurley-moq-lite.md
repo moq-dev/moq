@@ -176,8 +176,10 @@ A Group is an ordered stream of Frames within a Track.
 Each group consists of an append-only list of Frames.
 A Group is addressed by its start, a timestamp in the Track's `Timescale`: its frame 0's timestamp, or a bare number on a Track with a `Timescale` of 0.
 No two Groups of a Track share a start, so starts order Groups without a counter, and moq-lite carries no Group sequence number.
-A Group's span runs from its lowest frame timestamp to its End (see [GROUP_END](#group-end)).
-Spans never overlap: every frame of a lower Group presents before every frame of a higher one, though frames within a Group may reorder, and no Group starts after a whole Group's start and before its End.
+A Group's span runs from its start to its End, [start, End) (see [GROUP_END](#group-end)).
+Spans never overlap: no Group starts after a whole Group's start and before its End.
+Every frame of a lower Group presents before every frame of a higher one, though frames within a Group may reorder.
+A higher Group's leading frames, which present before its start, may fall inside a lower Group's span, so a time among them resolves to the lower Group, from whose first frame a subscription decodes them.
 A span between one Group's End and the next Group's start is a discontinuity that no Group contains, which the publisher names with [SUBSCRIBE_SKIP](#subscribe-skip).
 A receiver addresses a Group by the start it carries whatever its frames hold, so a publisher that numbers its Groups 0, 1, 2 is still served, with time Anchors compared against those numbers.
 A publisher never creates a Group with start 2^64-1, so every span of starts ends within 64 bits; a receiver treats a Group Stream naming it as a malformed Track.
@@ -2363,7 +2365,7 @@ A stream that FINs without a GROUP_END carries a closed Group, which may have he
 - FRAME carries a `Timestamp Delta` only on a Track with a `Timescale`, and the first FRAME on a stream counts it from the Group Start, so frame 0's is 0. Datagrams always carry a timestamp, a bare number on a scale-less Track.
 - Replaced GROUP's `Group Sequence` with `Group Start`.
 - Added GROUP_END, a `Payload Length` of 0 followed by the Group's exclusive End, as a non-negative delta from the highest frame timestamp on the stream, or from the Group Start: a Group or Fetch Stream ends with it when its Group finished, a FIN alone ends a closed Group whose frames may not all exist, and a reset aborts. A Group's own End bounds its reach.
-- A Group's span runs from its lowest frame timestamp to its End, and spans never overlap. The publisher names the starts between one Group's End and the next Group's start with SUBSCRIBE_SKIP. A GROUP_END accounts for the starts strictly between its Group Start and End, and a drop of a Group the publisher holds whole names its span.
+- A Group's span runs from its start to its End, [start, End), and spans never overlap; every frame of a lower Group presents before every frame of a higher one. The publisher names the starts between one Group's End and the next Group's start with SUBSCRIBE_SKIP. A GROUP_END accounts for the starts strictly between its Group Start and End, and a drop of a Group the publisher holds whole names its span.
 - Expiration also measures a group's arrival age, the time since its successor arrived at this hop.
 - A relay closes a Group it holds only the start of, without a GROUP_END. A publisher resets the Group Stream of a group that expires with OLD, even one whose GROUP_END it sent but is not yet acknowledged, and names the group in a SUBSCRIBE_DROP with OLD.
 - FRAME leads with `Payload Length`, the payload size plus one, in place of the trailing `Message Length`; 0 is malformed.

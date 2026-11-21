@@ -222,8 +222,8 @@ and switching rules in `rs/moq-net/AGENTS.md` before the cut):
 
 - ✅ The cut waits for [groups never overlap](/quest/m2/groups-never-overlap.md)
   (rejected: after the cut). Group times ([moq-dev/moq#9263](https://github.com/moq-dev/moq/pull/9263))
-  puts the strong rule in the draft as a publisher MUST: a group's span, from
-  its lowest frame to its End, never overlaps another's. Expiry relies on it,
+  puts the strong rule in the draft as a publisher MUST: a group's span,
+  [Group Start, End) since 2026-11-21, never overlaps another's. Expiry relies on it,
   and first-party producers break it today.
 - ✅ [The frame cap](/quest/m1/switch-frame-cap.md) is not Required, like the
   warmth port: if it has landed when the cut is made, its Position end is in
