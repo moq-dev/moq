@@ -65,7 +65,7 @@ Decided 2026-11-20 (maintainer, /quest-plan of a pre-cut audit of the
 lite-07 and hang-04 wire changes): the cut also waits on what that audit
 found. Each fix is so that a subscription, frame, or catalog entry means
 the same whichever relay or reader serves it:
-[no relative anchors](/quest/m2/time-addressing/no-relative-anchors.md),
+no relative anchors ([moq-dev/moq#9265](https://github.com/moq-dev/moq/pull/9265)),
 with Min Age placing a live join;
 [scale-less tracks aging by arrival](/quest/m2/time-addressing/scale-less-arrival.md);
 Group Streams carrying each time once ([moq-dev/moq#9263](https://github.com/moq-dev/moq/pull/9263)),

@@ -281,7 +281,7 @@ async fn main() -> anyhow::Result<()> {
 			let options = moq_net::track::Subscription::default()
 				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(if drop { 60 } else { 5 })))
 				.with_ranges([moq_net::track::Range {
-					start: moq_net::track::Anchor::Time(0),
+					start: Some(0),
 					end: None,
 				}]);
 			let mut track = remote.subscribe(Some(options)).await?;

@@ -3016,7 +3016,7 @@ test("a widened range's SUBSCRIBE_STARTED resolves the feed's start", async () =
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, toHop(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
-	const track = broadcast.track("video").subscribe({ ranges: [{ start: { time: 0n }, end: { time: 0n } }] });
+	const track = broadcast.track("video").subscribe({ ranges: [{ start: 0n, end: 0n }] });
 	try {
 		await opened(0);
 		await answerTrackInfo(streams[0], version);
@@ -3029,7 +3029,7 @@ test("a widened range's SUBSCRIBE_STARTED resolves the feed's start", async () =
 		await respond(request, version, [{ start: new SubscribeStart([undefined]) }]);
 		await drainReactions();
 		expect(hooks.sourceStart(track)).not.toBe("pending");
-		track.update({ ranges: [{ start: { time: 0n }, end: { time: 1n } }] });
+		track.update({ ranges: [{ start: 0n, end: 1n }] });
 		// The feed goes pending before the update is written, so reading it waits for both.
 		const update = await SubscribeUpdate.decode(sent, version);
 		expect(hooks.sourceStart(track)).toBe("pending");
@@ -3048,7 +3048,7 @@ test("a widened range's SUBSCRIBE_STARTED resolves the feed's start", async () =
 
 // A range the publisher answers with no group to deliver lands none of its groups, so the copy is
 // told, and an ordered read holds no later group back for its time. Only one whose end takes in its
-// time says so: one ending by a count back may still have skipped the group containing it.
+// time says so: one following the live edge may still get the group containing it.
 test("a lite-07 range answered empty is reported only for a range reaching its time", async () => {
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();
@@ -3064,23 +3064,16 @@ test("a lite-07 range answered empty is reported only for a range reaching its t
 	};
 	const track = broadcast.track("video").subscribe({
 		delay: { max: null },
-		ranges: [
-			{ start: { time: 10n }, end: { time: 20n } },
-			{ start: { time: 30n }, end: { relative: 0n } },
-			{ start: { time: 66n } },
-		],
+		ranges: [{ start: 10n, end: 20n }, { start: 30n }],
 	});
 	try {
 		await opened(0);
 		await answerTrackInfo(streams[0], version);
 		const request = await opened(1);
 		await request.reading;
-		await respond(request, version, [{ start: new SubscribeStart([undefined, undefined, 66n]) }]);
+		await respond(request, version, [{ start: new SubscribeStart([undefined, undefined]) }]);
 		await drainReactions();
-		expect(reported.at(-1)).toEqual([
-			[10n, undefined, 20n],
-			[66n, 66n, undefined],
-		]);
+		expect(reported.at(-1)).toEqual([[10n, undefined, 20n]]);
 		// Under the narrowest budget the subscription asked with, here none.
 		expect(budgets.at(-1)).toEqual(NO_MAX_DELAY);
 	} finally {
@@ -3502,7 +3495,7 @@ test("an update whose bound the wire can't carry fails the track", async () => {
 		await opened(0);
 		await answerTrackInfo(streams[0], Version.DRAFT_05);
 		await (await opened(1)).reading;
-		track.update({ ranges: [{ start: { time: 2n ** 62n - 1n } }] });
+		track.update({ ranges: [{ start: 2n ** 62n - 1n }] });
 		expect(await track.closed).toBeInstanceOf(RangeError);
 	} finally {
 		track.close();

@@ -70,7 +70,6 @@ from moq_ffi import (
 )
 
 from ._records import (
-    Anchor,
     Backoff,
     ClientTls,
     ConnectionStats,
@@ -89,7 +88,6 @@ from ._records import (
 )
 
 __all__ = [
-    "Anchor",
     "AudioCodec",
     "AudioEncoderInput",
     "AudioSampleFormat",

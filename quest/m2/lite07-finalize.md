@@ -232,11 +232,10 @@ and switching rules in `rs/moq-net/AGENTS.md` before the cut):
   asking upstream for a missing group head, the switch's group cap, a
   replaced copy's short group, and expiry by a higher group's lowest
   timestamp. A Min Age join that asks upstream is
-  [no relative anchors](/quest/m2/time-addressing/no-relative-anchors.md)'s.
+  [moq-dev/moq#9265](https://github.com/moq-dev/moq/pull/9265)'s.
 
 ## Required
 
-- [No relative anchors](/quest/m2/time-addressing/no-relative-anchors.md) - SUBSCRIBE's anchors lose Relative, and Min Age places a live join
 - [A time anchor lands by group spans](/quest/m2/time-addressing/span-time-anchors.md) - the draft's Time Anchor rule resolves a time inside a skipped span or a whole group's span
 - [Groups never overlap](/quest/m2/groups-never-overlap.md) - first-party producers and importers keep the no-overlap MUST the cut publishes
 - [First-party producers keep lite-07 group spans apart](/quest/m2/producer-spans.md) - no group starts or presents inside a span a lower group's End closed

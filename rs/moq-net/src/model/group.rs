@@ -293,9 +293,9 @@ pub(super) enum Outcome {
 	/// Finished with this many frames, and where it ends in its track's timescale when its
 	/// producer said it is whole: `None` when it finished without an end (see [`Producer::finish`]).
 	Finished(usize, Option<u64>),
-	/// Finished with this many frames, then aborted to free its cache: a reader that took
-	/// every frame got the whole group, and one short of it gets the error.
-	Released(usize, Error),
+	/// Finished with this many frames and end, then aborted to free its cache: a reader that
+	/// took every frame got the whole group, and one short of it gets the error.
+	Released(usize, Option<u64>, Error),
 	/// Aborted before it finished.
 	Aborted(Error),
 }
@@ -304,7 +304,7 @@ impl Outcome {
 	/// The total number of frames, once finished.
 	pub(super) fn frames(&self) -> Option<usize> {
 		match self {
-			Self::Finished(frames, _) | Self::Released(frames, _) => Some(*frames),
+			Self::Finished(frames, _) | Self::Released(frames, ..) => Some(*frames),
 			Self::Open | Self::Aborted(_) => None,
 		}
 	}
@@ -312,7 +312,7 @@ impl Outcome {
 	/// The error the group was aborted with, before or after it finished.
 	pub(super) fn error(&self) -> Option<&Error> {
 		match self {
-			Self::Released(_, err) | Self::Aborted(err) => Some(err),
+			Self::Released(.., err) | Self::Aborted(err) => Some(err),
 			Self::Open | Self::Finished(..) => None,
 		}
 	}
@@ -1255,7 +1255,7 @@ impl GroupState {
 			return Poll::Ready(Err(Error::Evicted));
 		}
 		match &self.outcome {
-			Outcome::Released(total, err) if index < *total => Poll::Ready(Err(err.clone())),
+			Outcome::Released(total, _, err) if index < *total => Poll::Ready(Err(err.clone())),
 			Outcome::Finished(..) | Outcome::Released(..) => Poll::Ready(Ok(())),
 			Outcome::Aborted(err) => Poll::Ready(Err(err.clone())),
 			Outcome::Open => {
@@ -2941,7 +2941,7 @@ impl Handle {
 		}
 		let finished = guard.outcome.frames().is_some();
 		guard.outcome = match guard.outcome {
-			Outcome::Finished(frames, _) => Outcome::Released(frames, err),
+			Outcome::Finished(frames, end) => Outcome::Released(frames, end, err),
 			_ => Outcome::Aborted(err),
 		};
 		// After the outcome exists, so a scan reading the mirror never hides a live group.
@@ -3033,7 +3033,7 @@ impl Handle {
 	/// (see [`Producer::finish_at`]).
 	pub(crate) fn end(&self) -> Option<u64> {
 		match self.state.read().outcome {
-			Outcome::Finished(_, end) => end,
+			Outcome::Finished(_, end) | Outcome::Released(_, end, _) => end,
 			_ => None,
 		}
 	}
@@ -4300,10 +4300,11 @@ impl Consumer {
 	}
 
 	/// Where the group ends in its track's timescale, once its producer finished it whole
-	/// with [`Producer::finish_at`]: `None` while it is open, or when it finished without an end.
+	/// with [`Producer::finish_at`], kept after its cache is released: `None` while it is open,
+	/// when it was aborted unfinished, or when it finished without an end.
 	pub fn end(&self) -> Option<u64> {
 		match self.cursor.state.read().outcome {
-			Outcome::Finished(_, end) => end,
+			Outcome::Finished(_, end) | Outcome::Released(_, end, _) => end,
 			_ => None,
 		}
 	}
@@ -6343,7 +6344,8 @@ mod test {
 
 	/// A finished group is still aborted once its frames are released to free memory (the
 	/// cache pool's expiry window or byte target). A reader that already drained every frame
-	/// is missing nothing, so it must see the clean end of group rather than the abort.
+	/// is missing nothing, so it must see the clean end of group, and where it ends, rather
+	/// than the abort.
 	#[test]
 	#[cfg(feature = "async")]
 	fn abort_after_finish_keeps_the_clean_end_for_a_drained_reader() {
@@ -6351,7 +6353,7 @@ mod test {
 		producer
 			.write_frame(Timestamp::ZERO, Bytes::from_static(b"hello"))
 			.unwrap();
-		let producer = producer.finish().unwrap();
+		let producer = producer.finish_at(1).unwrap();
 
 		let mut drained = producer.consume();
 		let mut behind = producer.consume();
@@ -6363,6 +6365,7 @@ mod test {
 		// Drained everything before the abort: nothing is missing.
 		assert!(drained.read_frame().now_or_never().unwrap().unwrap().is_none());
 		assert!(drained.next_frame().now_or_never().unwrap().unwrap().is_none());
+		assert_eq!(drained.end(), Some(1));
 
 		// Never read the frame, and its bytes are gone: a truncated stream, not a clean end.
 		assert!(matches!(behind.read_frame().now_or_never().unwrap(), Err(Error::Old)));

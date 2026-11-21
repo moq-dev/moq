@@ -669,7 +669,7 @@ async fn groups_waiting_for_track_info_give_way_first() {
 	let every = Subscription::default()
 		.with_order(moq_net::track::Order::Ascending)
 		.with_ranges([moq_net::track::Range {
-			start: moq_net::track::Anchor::Time(0),
+			start: Some(0),
 			end: None,
 		}])
 		.with_delay(Delay::default().with_max(Duration::from_secs(60)));

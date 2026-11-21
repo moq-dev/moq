@@ -53,7 +53,7 @@ type DecoderOutput struct {
 	Channels   *uint32
 	// Delay.Min is the jitter buffer to hold ahead of the playhead, and where a cold join starts;
 	// Delay.Max bounds how stale a group may get before it is skipped, and adds no buffering. The
-	// zero Delay is zero for both.
+	// zero Delay leaves Min unstated, which the decoder starts as zero, and Max zero.
 	Delay moq.Delay
 	// Estimate measures the playout delay from arrival timing, never below Delay.Min; false holds
 	// exactly Delay.Min. nil estimates.

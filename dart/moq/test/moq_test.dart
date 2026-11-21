@@ -273,12 +273,12 @@ void main() {
 
   test('a default subscription skips superseded groups at once', () {
     for (final subscription in [defaultSubscription(), Subscription()]) {
-      expect(subscription.delay.min, Duration.zero);
+      expect(subscription.delay.min, isNull);
       expect(subscription.delay.max, Duration.zero);
     }
-    final unset = Delay(min: null, max: null);
-    expect(unset.min, isNull);
-    expect(unset.max, isNull);
+    final stated = Delay(min: Duration.zero, max: null);
+    expect(stated.min, Duration.zero);
+    expect(stated.max, isNull);
   });
 
   test('a negative duration in a raw record is refused', () {
@@ -319,7 +319,7 @@ void main() {
       final consumer = track.consume(
         subscription: Subscription(
           delay: Delay(max: const Duration(seconds: 10)),
-          ranges: [Range(start: RelativeMoqAnchor(2))],
+          ranges: [Range(start: Timestamp.unscaled(0))],
           order: Order.ascending,
         ),
       );

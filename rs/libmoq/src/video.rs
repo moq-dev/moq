@@ -172,8 +172,8 @@ pub struct moq_video_decoder_output {
 	/// How far behind the live edge to play: where a cold join starts and when
 	/// a stalled group is skipped. Same knob as `moq_consume_video`'s `delay`.
 	/// Zeroed: start at the newest group and skip aggressively (the moq-mux
-	/// default); set `min_us` to your playout delay and `max_us` at or past it
-	/// for a softer skip.
+	/// default); state `min_us` (with `min_stated`) as your playout delay and set
+	/// `max_us` at or past it for a softer skip.
 	pub delay: crate::api::moq_delay,
 	/// `moq_video_pixel_format` discriminant. Unknown values fail
 	/// [`moq_decode_video`] rather than decoding into an assumed layout.
