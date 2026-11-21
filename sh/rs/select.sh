@@ -47,11 +47,23 @@ select_packages() {
         return
     fi
 
-    local seeds benches edges selected
+    local seeds benches readers edges selected
     # A crate's `benches/` builds only its own bench targets, which no other crate can
     # depend on, so it selects that crate alone (for its lint) rather than every
     # dependent's tests.
     benches=$(sed -n 's|^rs/\([^/]*\)/benches/.*|\1|p' "$list")
+    # A crate that reads a file outside itself, such as a fixture, a script its
+    # tests run, or another crate's bench module, is a seed when that file
+    # changes. sh/rs/reads.sh lists the reads as globs, made regexes here.
+    readers=$(bash sh/rs/reads.sh | jq -rR --rawfile list "$list" '
+        def escape: gsub("(?<c>[.+?^$()\\[\\]{}|\\\\])"; "\\\(.c)");
+        def regex: split("**/") | map(split("**") | map(split("*") | map(escape) | join("[^/]*")) | join(".*"))
+            | "^\(join("(.*/)?"))(/.*)?$";
+        ($list | split("\n") | map(select(. != ""))) as $paths
+        | capture("^rs/(?<crate>[^/ ]+) (?<glob>[^ ]*) ")
+        | (.glob | regex) as $regex
+        | select(any($paths[]; test($regex)))
+        | .crate')
     # A target can also sit outside its crate, as moq-cli's interop examples
     # under test/interop/clients/rust/ do, so a change in the directory of a
     # target's root file, which holds that file's modules, seeds its crate.
@@ -60,8 +72,7 @@ select_packages() {
     # selector's tests check that.
     seeds=$({
         sed -n '\|^rs/[^/]*/benches/|d; s|^rs/\([^/]*\)/.*|\1|p' "$list"
-        # moq-relay's tests read its NixOS module.
-        sed -n 's|^nix/modules/moq-relay\.nix$|moq-relay|p' "$list"
+        printf '%s\n' "$readers"
         # The gate's Send-depth proof of moq-net's session driver is this script.
         sed -n 's|^sh/rs/send-depth\.sh$|moq-net|p' "$list"
         # The gate compiles the C fixtures and doc samples against libmoq's header.
