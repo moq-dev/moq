@@ -985,8 +985,6 @@ export const hooks: {
 	groupOffset: (group: GroupProducer) => number;
 	/** Whether this source copy can no longer serve frame 0: it began past it, or shed it. */
 	groupHeadless: (group: GroupProducer) => boolean;
-	/** Whether this source copy began at frame 0 and may still write it. */
-	groupMayStart: (group: GroupProducer) => boolean;
 	writeGroupFrame: (group: GroupProducer, frame: Frame, inflated?: number) => void;
 	/** Payload footprint including a shared inflated copy, for measurements. */
 	groupCacheBytes: (group: GroupProducer) => number;
@@ -1388,9 +1386,6 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	groupHeadless: () => {
-		throw new Error("group.ts not loaded");
-	},
-	groupMayStart: () => {
 		throw new Error("group.ts not loaded");
 	},
 	startGroup: () => {

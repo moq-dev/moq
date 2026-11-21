@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex};
 
 use futures::future::{self, Either};
-use moq_net::track::{Fill, FillGroups, FillLookup, Position};
+use moq_net::track::{FillGroups, Position};
 use moq_net::{Timescale, Timestamp, group, track};
 use object_store::ObjectStore;
 
@@ -147,67 +147,56 @@ impl Live {
 
 /// Serve `fill` from the archive, a group at a time in the fill's order as its readers pick
 /// them up, until every group is answered or nobody waits on it.
-pub(super) async fn serve<S: ObjectStore>(shared: Arc<Shared<S>>, index: Arc<Mutex<Index>>, fill: Fill) {
-	match fill {
-		Fill::Lookup(lookup) => look_up(&shared, &index, &lookup).await,
-		Fill::Groups(mut fill) => {
-			while let Some(sequence) = fill.wanted_changed().await {
-				serve_group(&shared, &index, Asker::Fill(&fill), sequence).await;
-			}
+pub(super) async fn serve<S: ObjectStore>(shared: Arc<Shared<S>>, index: Arc<Mutex<Index>>, mut fill: FillGroups) {
+	while let Some(sequence) = fill.wanted_changed().await {
+		match sequence == fill.start().group && fill.floor() < sequence {
+			true => look_up(&shared, &index, &fill, sequence).await,
+			false => serve_group(&shared, &index, &fill, sequence, sequence).await,
 		}
 	}
 }
 
-/// Who a served group answers: a fill's readers, or a lookup, which owes no group.
-#[derive(Clone, Copy)]
-enum Asker<'a> {
-	Fill(&'a FillGroups),
-	Lookup(&'a FillLookup),
-}
-
-impl Asker<'_> {
-	/// Name `groups` as never to be delivered; a lookup owes none.
-	fn drop_groups(self, groups: std::ops::Range<u64>) {
-		if let Self::Fill(fill) = self {
-			fill.drop_groups(groups);
-		}
-	}
-
-	fn accept(self, sequence: u64) -> moq_net::Result<Option<group::Producer>> {
-		match self {
-			Self::Fill(fill) => fill.accept(sequence, None),
-			Self::Lookup(lookup) => lookup.accept(sequence, None),
-		}
-	}
-}
-
-/// Answer `lookup`'s time, in the track's timescale, with the group containing it: the
-/// newest group starting at or before it, found among the objects whose keys say they may hold
-/// it, or the oldest stored group when every one starts after it. A group starts at its key,
-/// as the live cache resolves it. Left unanswered when the archive holds no group, or the store
-/// fails.
-async fn look_up<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, lookup: &FillLookup) {
+/// Answer `fill`'s start at `pts`, a time in the track's timescale, with the group containing
+/// it: the newest group starting at or before it, found among the objects whose keys say they
+/// may hold it. A group starts at its key, as the live cache resolves it. Dropped when the
+/// archive holds none from the fill's floor through it, and refused, failing the reader until
+/// its ranges change, when the store fails or the group found can't be served.
+async fn look_up<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, fill: &FillGroups, pts: u64) {
 	loop {
-		match search(shared, index, lookup.time()).await {
-			Search::Found(sequence) => return serve_group(shared, index, Asker::Lookup(lookup), sequence).await,
+		match search(shared, index, pts).await {
+			Search::Found(sequence) if sequence >= fill.floor() => {
+				serve_group(shared, index, fill, pts, sequence).await;
+				break;
+			}
+			// The cache holds a newer group at or before it than the archive does.
+			Search::Found(_) | Search::None => {
+				fill.drop_groups(fill.floor()..pts + 1);
+				return;
+			}
 			// The index dropped what the store pruned, at least the object found gone, which no
 			// listing adds back, so the search starts over on what it retains. Each retry drops an
 			// object for good, so only a store pruning what it lists faster than a GET keeps
 			// this going, at one LIST and GET per object it writes.
 			Search::Pruned => {}
-			Search::Unanswered => return,
+			Search::Failed => break,
 		}
+	}
+	// Left unanswered while a reader still waits, as when the group found was pruned since.
+	if fill.is_wanted(pts) {
+		fill.refuse_groups(pts..pts + 1, moq_net::Error::Stream(moq_net::StreamError::Internal));
 	}
 }
 
-/// How a lookup's search ended.
+/// How a search for the group containing a time ended.
 enum Search {
 	/// At the group starting at this sequence.
 	Found(u64),
+	/// With no group starting at or before it.
+	None,
 	/// At an object the store pruned since it was listed.
 	Pruned,
-	/// With no group, or a store failure.
-	Unanswered,
+	/// With a store failure.
+	Failed,
 }
 
 /// Search the index for the group containing `pts`; see [`look_up`].
@@ -235,33 +224,10 @@ async fn search<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, pts: u
 			return Search::Found(sequence);
 		}
 	}
-
-	// Every group starts after it: the oldest group is where its range reaches back to, skipping
-	// one whose head was pruned, which can't be served from its first frame.
-	let mut next = index.lock().unwrap().after(None);
-	while let Some((start, path)) = next {
-		let object = match load(shared, index, start, &path, timed).await {
-			Ok(object) => object,
-			Err(ended) => return ended,
-		};
-		let found = object
-			.entries
-			.iter()
-			.enumerate()
-			.find(|(position, entry)| !entry.frames.is_empty() && (*position > 0 || object.frame_start == 0))
-			.map(|(_, entry)| entry.sequence);
-		if let Some(sequence) = found {
-			return Search::Found(sequence);
-		}
-		next = index.lock().unwrap().after(Some(start));
-	}
-	Search::Unanswered
+	Search::None
 }
 
-/// The object a lookup searches, or how the search ends without it.
-///
-/// An abandoned lookup still finishes the read and answers nobody: a lookup owes no group, so
-/// nothing tells it when its readers stop waiting.
+/// The object a search reads, or how the search ends without it.
 async fn load<S: ObjectStore>(
 	shared: &Shared<S>,
 	index: &Mutex<Index>,
@@ -279,17 +245,20 @@ async fn load<S: ObjectStore>(
 		Err(err) => err,
 	};
 	tracing::warn!(%path, %err, "archived object is unavailable for a time lookup");
-	Err(Search::Unanswered)
+	Err(Search::Failed)
 }
 
-/// Answer group `sequence` for `asker` from the objects holding it, drop the run of sequences
-/// around it that the archive does not hold, or refuse it for now when the store fails.
-async fn serve_group<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, asker: Asker<'_>, sequence: u64) {
-	let frame = match asker {
-		Asker::Fill(fill) => fill.frame_start(sequence),
-		// A lookup is answered from the group's first frame.
-		Asker::Lookup(_) => 0,
-	};
+/// Answer `fill`'s `key` with group `sequence` from the objects holding it, drop the run of
+/// sequences around it that the archive does not hold, or refuse it for now when the store
+/// fails. The group is the key's own, or one below it containing a time start.
+async fn serve_group<S: ObjectStore>(
+	shared: &Shared<S>,
+	index: &Mutex<Index>,
+	fill: &FillGroups,
+	key: u64,
+	sequence: u64,
+) {
+	let frame = fill.frame_start(sequence);
 	let (holding, after, timed, timescale) = {
 		let index = index.lock().unwrap();
 		let (holding, after) = index.holding(sequence, frame);
@@ -309,32 +278,23 @@ async fn serve_group<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, a
 			}
 			loaded
 		};
-		let loaded = match asker {
-			// A lookup owes no group, so nothing says when its readers stop waiting: it finishes
-			// the read.
-			Asker::Lookup(_) => load.await,
-			Asker::Fill(fill) => {
-				let unwanted = std::pin::pin!(fill.unwanted(sequence));
-				match future::select(unwanted, std::pin::pin!(load)).await {
-					// Every reader narrowed past it: the fill moves on to the groups it still owes.
-					Either::Left(_) => return,
-					Either::Right((loaded, _)) => loaded,
-				}
-			}
+		let unwanted = std::pin::pin!(fill.unwanted(key));
+		let loaded = match future::select(unwanted, std::pin::pin!(load)).await {
+			// Every reader narrowed past it: the fill moves on to the groups it still owes.
+			Either::Left(_) => return,
+			Either::Right((loaded, _)) => loaded,
 		};
 		match loaded {
 			Ok(object) => objects.push(object),
 			Err(Error::NotFound(_)) => {
-				asker.drop_groups(sequence..sequence + 1);
+				fill.drop_groups(sequence..sequence + 1);
 				return;
 			}
 			Err(err) => {
 				// The store still lists it, so a later reader asks again.
 				tracing::warn!(%path, sequence, %err, "archived group is unavailable");
 				let err = moq_net::Error::Stream(moq_net::StreamError::Internal);
-				if let Asker::Fill(fill) = asker {
-					fill.refuse_groups(sequence..sequence + 1, err);
-				}
+				fill.refuse_groups(key..key + 1, err);
 				return;
 			}
 		}
@@ -342,13 +302,13 @@ async fn serve_group<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, a
 
 	let Some(first) = objects.first() else {
 		// Older than the oldest stored object: pruned, or never stored.
-		asker.drop_groups(0..next);
+		fill.drop_groups(0..next);
 		return;
 	};
 	let Some(position) = first.entries.iter().position(|entry| entry.sequence >= sequence) else {
 		// A gap after the object's last entry.
 		let last = first.entries.last().map_or(0, |entry| entry.sequence + 1);
-		asker.drop_groups(last..next);
+		fill.drop_groups(last..next);
 		return;
 	};
 	let found = &first.entries[position];
@@ -358,7 +318,7 @@ async fn serve_group<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, a
 			0 => sequence,
 			_ => first.entries[position - 1].sequence + 1,
 		};
-		asker.drop_groups(gap..found.sequence);
+		fill.drop_groups(gap..found.sequence);
 		return;
 	}
 	let start = match position {
@@ -367,7 +327,7 @@ async fn serve_group<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, a
 	};
 	if start > frame {
 		// Its head was pruned.
-		asker.drop_groups(sequence..sequence + 1);
+		fill.drop_groups(sequence..sequence + 1);
 		return;
 	}
 
@@ -381,18 +341,16 @@ async fn serve_group<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, a
 			}
 			_ => {
 				// A continuation went missing, so the group can't be served whole.
-				asker.drop_groups(sequence..sequence + 1);
+				fill.drop_groups(sequence..sequence + 1);
 				return;
 			}
 		}
 	}
 
-	if let Asker::Fill(fill) = asker
-		&& !fill.is_wanted(sequence)
-	{
+	if !fill.is_wanted(key) {
 		return;
 	}
-	let Ok(Some(mut producer)) = asker.accept(sequence) else {
+	let Ok(Some(mut producer)) = fill.accept(sequence, None) else {
 		return;
 	};
 	for (index, stored) in stored {

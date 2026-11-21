@@ -227,18 +227,18 @@ export class Answer {
 		// The claims the peer is shown, by their path from the session's root: the table under each
 		// prefix, less the hidden ones it did not ask for and whatever our grant does not let us publish.
 		const latest = new Map<Path.Valid, Advertised>();
-		// A claim is shown where the grant lets us publish some path it covers that the claim's own
-		// scope and the handle's both serve, as one at `a` serves `a/*` though `a` itself is not
-		// granted. An intersection too large to spell covers nothing, never more.
+		// A claim is shown where some path it covers is served by the claim's own scope and the
+		// handle's, and our grant, if any, lets us publish it, as one at `a` serves `a/*` though `a`
+		// itself is not granted. An intersection too large to spell covers nothing, never more.
 		const shows = (snap: Advertised, path: Path.Valid) => {
-			if (!grant) return true;
 			let beneath = new Path.Patterns([Path.Pattern.subtree(path)]);
 			try {
 				for (const scope of [snap.claim, origin?.allowed]) if (scope) beneath = scope.intersect(beneath);
 			} catch {
 				return false;
 			}
-			return [...beneath].some((pattern) => grant.publish.overlaps(pattern));
+			const paths = [...beneath];
+			return grant ? paths.some((pattern) => grant.publish.overlaps(pattern)) : paths.length > 0;
 		};
 		// Whether the advertisement a claim the peer holds came from is still in the table, as when
 		// its presentation moved: the claim is lost to the peer rather than ended, since its publisher

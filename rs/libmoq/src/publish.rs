@@ -30,7 +30,7 @@ struct TrackRequest {
 /// several times the size of a fill.
 enum Request {
 	Track(Box<TrackRequest>),
-	Fill(moq_net::track::Fill),
+	Fill(moq_net::track::FillGroups),
 	Datagram(DatagramRequest),
 }
 
@@ -1059,12 +1059,6 @@ impl Publish {
 				Request::Track(request) => State::lock().publish.track_request.insert(*request)?,
 				Request::Datagram(request) => State::lock().publish.datagram_request.insert(request)?,
 				Request::Fill(fill) => {
-					// A lookup of a time owes no group, and a request names one: drop it
-					// unanswered, as a handler that can't resolve times does, so the reader
-					// falls back to the groups held.
-					let moq_net::track::Fill::Groups(fill) = fill else {
-						continue;
-					};
 					let mut serve = Box::pin(Self::serve_fill(callback, Arc::new(fill)));
 					fills.push(move |waiter: &kio::Waiter| waiter.poll_future(serve.as_mut()));
 					continue;
@@ -1197,18 +1191,29 @@ impl Publish {
 		self.insert_group(group)
 	}
 
-	/// Reject a group request like [`Self::group_request_free`]; `error_code` is not delivered.
+	/// Refuse a group request, failing the readers waiting on it now as not found, so a later
+	/// reader asks again; `error_code` is not delivered. A reader's time start fails with it
+	/// until its ranges change, as serving it failed.
 	pub fn group_request_abort(&mut self, request: Id, _error_code: u16) -> Result<(), Error> {
-		self.group_request_free(request)
-	}
-
-	/// Drop a group request, failing the readers waiting on it as not found. The group is
-	/// refused rather than dropped, so a later reader asks again.
-	pub fn group_request_free(&mut self, request: Id) -> Result<(), Error> {
 		let request = self.group_request.remove(request).ok_or(Error::NotFound)?;
 		request
 			.fill
 			.refuse_groups(request.start..request.start + 1, moq_net::Error::NotFound);
+		Ok(())
+	}
+
+	/// Free a group request unanswered: refused as [`Self::group_request_abort`] refuses it,
+	/// except a reader's time start, which is dropped. A C handler knows its groups only by
+	/// key, so one lacking the time's key says no group starts there, and its reader starts at
+	/// the group below rather than failing.
+	pub fn group_request_free(&mut self, request: Id) -> Result<(), Error> {
+		let request = self.group_request.remove(request).ok_or(Error::NotFound)?;
+		let fill = &request.fill;
+		let groups = request.start..request.start + 1;
+		match fill.is_time_start() {
+			true => fill.drop_groups(groups),
+			false => fill.refuse_groups(groups, moq_net::Error::NotFound),
+		}
 		Ok(())
 	}
 

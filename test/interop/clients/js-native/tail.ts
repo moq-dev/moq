@@ -97,10 +97,6 @@ function serveHistory(track: Moq.Track.Producer) {
 	const requests = track.requests();
 	void (async () => {
 		for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
-			if (fill.kind === "lookup") {
-				fill.close();
-				continue;
-			}
 			for (let sequence = fill.wanted(); sequence !== undefined; sequence = fill.wanted()) {
 				const group = fill.accept(sequence);
 				if (!group) throw new Error("the group was already answered");

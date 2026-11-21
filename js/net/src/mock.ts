@@ -9,21 +9,9 @@ import { Manual } from "@moq/clock/test";
 import type { Getter } from "@moq/signals";
 import { Consumer as BroadcastConsumer } from "./broadcast.ts";
 import type { TransportStats } from "./connection/stats.ts";
-import type { Fill, FillGroups, Requests } from "./fill.ts";
 import type { Frame } from "./group.ts";
 import type { SendStream } from "./stream.ts";
 import { Timestamp } from "./time.ts";
-
-/** `fill` as a run of groups, for a test that expects no lookup: a lookup throws. */
-export function groupsOf(fill: Fill | undefined): FillGroups | undefined {
-	if (fill?.kind === "lookup") throw new Error("expected a fill of groups, got a lookup");
-	return fill;
-}
-
-/** The next fill `requests` hands out, for a test that expects only runs of groups. */
-export async function requestedGroups(requests: Requests): Promise<FillGroups | undefined> {
-	return groupsOf(await requests.requestedFill());
-}
 
 /** A UTF-8 text frame stamped `timestamp` (now by default), for a test writing to a timed track. */
 export function textFrame(text: string, timestamp = Timestamp.now()): Frame {

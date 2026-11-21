@@ -84,7 +84,6 @@ async fn fetch_ahead(
 	let fill = kio::clock::timeout(TIMEOUT, request.requests().requested_fill())
 		.await
 		.unwrap_or_else(|_| panic!("{version}: the FETCH waited for the info"))
-		.map(support::groups)
 		.unwrap();
 	let held = Held {
 		_publisher: publisher,

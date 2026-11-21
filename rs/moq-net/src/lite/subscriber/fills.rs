@@ -853,7 +853,7 @@ mod tests {
 			)
 			.ordered();
 		assert!(reader.poll_next_group(&waiter).is_pending(), "groups 0..3 are owed");
-		let Poll::Ready(Ok(fill)) = requests.poll_requested_groups(&waiter) else {
+		let Poll::Ready(Ok(fill)) = requests.poll_requested_fill(&waiter) else {
 			panic!("groups 0..3 are a miss");
 		};
 		(reader, fill)
@@ -902,7 +902,7 @@ mod tests {
 			.ordered();
 		let _ = reader.poll_next_group(&waiter);
 		assert!(
-			requests.poll_requested_groups(&waiter).is_pending(),
+			requests.poll_requested_fill(&waiter).is_pending(),
 			"a lost group is not asked again"
 		);
 	}

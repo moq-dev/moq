@@ -231,6 +231,16 @@ Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit):
   cut gate's "hand-written `moq-c`" below reads `libmoq`, and the two
   quests for a code-free `libmoq` stub were deleted.
 
+Decided 2026-11-20 (maintainer, /quest-plan of the pre-cut flow-control
+audit): ✅ the cut waits on the [credit model](/quest/m1/credit-model.md),
+[#9210](https://github.com/moq-dev/moq/pull/9210)'s
+[paused-stream allowance](/quest/m1/paused-allowance.md), which merges once
+the model passes on it, and a [bounded relay cache by
+default](/quest/m1/relay-memory-default.md). Rejected: cutting with flow
+control unverified; landing #9210 after the cut. The
+[JS frame cap](/quest/m1/js-frame-cap.md) ships with the cut only if it
+lands first.
+
 On the reconciled candidate, regenerate the Nix build plan with `just rs cargo-nix` after the
 shared version bump. A dry run of the bump to 0.22.0 updated 52 packages and left Cargo.nix stale.
 Repeat the two-relay smoke with the candidate and the last published relay. Put each binary upstream
@@ -238,6 +248,26 @@ in turn, then publish from each side, discover it from the other, fetch and comp
 observe withdrawal. All four paths passed on lite-06 with 0.17.17 and audited main at d0ce553674.
 Re-run the existing cut checks on the resolved merge and version bump. After publication,
 check that Release remeasure opened or updated its pin PR, as RELEASE.md describes.
+
+From the 2026-11-20 main → release audit (main `9828a20cab` against release `381b802d9b`: 4,241
+main-only and 307 release-only commits, 330 paths conflicted in a trial merge), for the
+candidate:
+- Keep the behavior of release-only fixes while resolving conflicts, not just their text, and
+  run a test of each on the candidate: stopped-stream receive credit (`b834502dfa`, qmux 0.5.4
+  and `@moq/qmux` 0.3.5), a far-ahead group sequence costing a relay nothing extra
+  (`0c9ffdd7a7`, backport of [moq-dev/moq#9044](https://github.com/moq-dev/moq/pull/9044)), a
+  relay restarting under its old hop ID stranding nothing (`4a9005c3c5`), a 64-bit Hop ID read
+  as unknown in Rust and JS (`f48b7a066e`, `a480bba27c`), and a restarted publisher winning over
+  its lingering session (`5511441a02`). List the rest with
+  `git log --no-merges origin/main..origin/release`.
+- Widen the two-relay smoke above: keep a reader attached through each roll, in both directions
+  (last published relay to candidate and back), and check it keeps receiving the same frames
+  after the roll and after a withdrawal and return.
+- The cut PR (head `main`) now runs the full moq-transport matrix and Released wire
+  compatibility in its Release gate, which a backport PR still skips (planned by the audit's
+  PR). Read both results on the cut PR rather than repeating them by hand.
+- Attach each result to the candidate SHA in the cut PR body, so a later push visibly
+  invalidates it.
 
 ## Required
 
@@ -249,4 +279,7 @@ check that Release remeasure opened or updated its pin PR, as RELEASE.md describ
 - [Cargo feature review](/quest/m3/release/feature-flags.md) - every Cargo feature was judged against the feature rules, and approved changes landed
 - [Interop and Video pass on main](/quest/m0/interop-green/README.md) - the cut PR's release gate runs `interop.yml`, which failed on `main` every day through 2026-11-12
 - [Nightly passes on main](/quest/m0/nightly/README.md) - the release gate runs `features.yml`, red in the 2026-11-12 Nightly
+- [Credit model](/quest/m1/credit-model.md) - receive credit, pausing, and the sender's credit wait never deadlock
+- [Paused-stream allowance](/quest/m1/paused-allowance.md) - #9210 merges with its design checked
+- [Relay memory default](/quest/m1/relay-memory-default.md) - a stock relay's cache is bounded
 - [Claim new npm names](/quest/m3/release/npm-first-publish.md) - trusted publishing can publish every new `@moq/*` package

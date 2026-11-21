@@ -612,8 +612,8 @@ test.each([0, 5, 6, 7])("a fetched cached tail keeps absolute indices from %s", 
 	}
 });
 
-// An unchecked track's frames go out with their own timestamps, which may be moq-transport
-// arrival times, rather than their send time.
+// An unchecked (lite-05/06) track's frames go out with their own timestamps, which may be an
+// untimed origin's send times, rather than this hop's send time.
 test("lite draft-06: an unchecked track's fetched frames carry their own timestamp", async () => {
 	const pair = createMockTransportPair(ALPN_06);
 	const origin = new OriginProducer();

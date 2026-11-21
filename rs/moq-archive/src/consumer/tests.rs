@@ -804,6 +804,41 @@ async fn a_time_range_resolves_from_the_archive() {
 	}
 }
 
+/// A time start whose lookup fails at the store, by a failing GET or an object that doesn't
+/// decode, fails the subscription with that failure, rather than starting where the groups
+/// cached happen to say.
+#[tokio::test(start_paused = true)]
+async fn a_failed_time_lookup_fails_the_subscription() {
+	for malformed in [false, true] {
+		let archive = Archive::new();
+		archive.track("video", 0, true).await;
+		stored(&archive, 0..10).await;
+
+		let (broadcast, _run) = serve(&archive.store).await;
+		// The object holding groups 4 and 5.
+		let object = "video/0000000000000004000-0000000000000000000";
+		match malformed {
+			true => archive.raw(object, b"x").await,
+			false => drop(archive.store.inner().fail_gets(&format!("rec/{object}"))),
+		}
+		let track = broadcast.consume().track("video").unwrap();
+		let subscription = Subscription::default()
+			.with_ranges([track::Range {
+				start: at(4_500),
+				end: None,
+			}])
+			.with_order(Order::Ascending)
+			.with_delay(moq_net::track::Delay::default().with_max(None));
+		let mut reader = track.subscribe(subscription).await.unwrap().ordered();
+		let read = timeout(5 * REFRESH, reader.next_group()).await.expect("answered");
+		let err = read.map(|group| group.map(|group| group.start)).unwrap_err();
+		assert!(
+			matches!(err, moq_net::Error::Stream(moq_net::StreamError::Internal)),
+			"malformed {malformed}: {err}"
+		);
+	}
+}
+
 /// A completed archive's track ends only once a time range's lookup answers, so the range
 /// still reads its history.
 #[tokio::test(start_paused = true)]

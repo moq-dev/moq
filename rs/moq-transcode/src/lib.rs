@@ -287,14 +287,6 @@ mod tests {
 
 	use super::*;
 
-	/// A fill the test expects to name groups rather than look up a time.
-	pub(crate) fn groups(fill: moq_net::track::Fill) -> moq_net::track::FillGroups {
-		let moq_net::track::Fill::Groups(fill) = fill else {
-			panic!("a run of groups, not a time lookup");
-		};
-		fill
-	}
-
 	/// Constructing a transcoder registers its catalog synchronously, so even an unpolled
 	/// run future owns published state that must end deliberately when abandoned. The
 	/// output itself stays open while the caller holds it.
@@ -944,11 +936,7 @@ mod tests {
 		// A past group, the only demand on the rung.
 		let rung = consumer.track("video/120p").unwrap();
 		let fetching = rung.fetch_group(7, None);
-		let request = source_fetches
-			.requested_fill()
-			.await
-			.map(groups)
-			.expect("the source track closed");
+		let request = source_fetches.requested_fill().await.expect("the source track closed");
 		let mut group = request.accept(7, None).unwrap().expect("a fresh group");
 		write_keyframe(&mut group);
 		group.finish().unwrap();
@@ -1012,7 +1000,7 @@ mod tests {
 		let _subscriber = rung.subscribe(past).await.unwrap();
 
 		tokio::spawn(async move {
-			while let Ok(request) = source_fetches.requested_fill().await.map(groups) {
+			while let Ok(request) = source_fetches.requested_fill().await {
 				let mut group = request
 					.accept(request.start().group, None)
 					.unwrap()
@@ -1639,11 +1627,7 @@ mod tests {
 
 		// The rung's fetch task is now inside its source read, which is upstream of
 		// both its decoder and the `FillGroups::accept` that claims output group 7.
-		let request = source_fetches
-			.requested_fill()
-			.await
-			.map(groups)
-			.expect("the source track closed");
+		let request = source_fetches.requested_fill().await.expect("the source track closed");
 		assert_eq!(request.start().group, 7);
 
 		// Retire the rung with the fetch parked there, and let the retirement land
@@ -1720,7 +1704,6 @@ mod tests {
 		let mut abandoned = kio::clock::timeout(std::time::Duration::from_secs(5), source_fetches.requested_fill())
 			.await
 			.expect("the fetch never reached the source")
-			.map(groups)
 			.expect("the source track closed");
 		assert_eq!(abandoned.start().group, 7);
 
@@ -1739,7 +1722,6 @@ mod tests {
 		let fresh = kio::clock::timeout(std::time::Duration::from_secs(5), source_fetches.requested_fill())
 			.await
 			.expect("the retry never fetched the source")
-			.map(groups)
 			.expect("the source track closed");
 		assert_eq!(fresh.start().group, 7);
 		drop(abandoned);

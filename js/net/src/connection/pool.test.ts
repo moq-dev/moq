@@ -84,6 +84,21 @@ test("two handles on one URL share a connection and an origin", async () => {
 	second.close();
 });
 
+test("urlAuth: false is the default carrier, so it shares; true needs a private loop", async () => {
+	const dials = stubTransports();
+
+	const first = new Connection({ url, urlAuth: false });
+	const second = new Connection({ url, share: true, urlAuth: false });
+	await advance();
+	expect(dials.count()).toBe(1);
+	expect(second.origin.peek()).toBe(first.origin.peek());
+
+	expect(() => new Connection({ url, share: true, urlAuth: true })).toThrow("urlAuth cannot be shared");
+
+	first.close();
+	second.close();
+});
+
 test("the connection closes after the last handle and the linger window", async () => {
 	const dials = stubTransports();
 

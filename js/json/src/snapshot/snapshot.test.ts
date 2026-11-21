@@ -377,6 +377,27 @@ test("mutate starts from the configured initial value", async () => {
 	expect((await consumer.next())?.value).toEqual({ a: 1 });
 });
 
+// JSON null is a published value: mutate must hand it over rather than the stale `initial`, and
+// must not refuse it as if nothing had been published.
+test("mutate starts from a published null", async () => {
+	for (const initial of [undefined, { a: 1 }]) {
+		const track = new Track.Producer("test");
+		const producer = new Producer<Value | null>({ track, initial });
+		producer.update(null, key());
+
+		let seen: Value | null | undefined;
+		producer.mutate((v) => {
+			seen = v;
+		}, key());
+		expect(seen).toBeNull();
+		producer.finish();
+		const consumer = new Consumer<Value | null>({ track });
+		const states: (Value | null)[] = [];
+		for (let state = await consumer.latest(); state; state = await consumer.latest()) states.push(state.value);
+		expect(states).toEqual([null]);
+	}
+});
+
 // A rejected edit never reached the wire, so the next owner starts from the last value that did.
 // Carrying the rejected edit forward would fail every later publish the same way. (Mirrors the Rust
 // `a_rejected_edit_leaves_modify_at_the_last_written_value`.)

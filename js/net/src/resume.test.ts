@@ -552,8 +552,9 @@ test("a backfill waits on a fill the finished route still owes", async () => {
 	const fills: track.FillGroups[] = [];
 	void (async () => {
 		for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
-			// The replacement asks from the reader's newest group, which this route never held.
-			if (fill.kind === "lookup") fill.close();
+			// The replacement asks for the group containing the reader's newest group's start, which
+			// this route never held.
+			if (fill.floor < fill.start) fill.close();
 			else fills.push(fill);
 		}
 	})();

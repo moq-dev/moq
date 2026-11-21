@@ -542,21 +542,12 @@ impl MoqTrackRequests {
 	/// Wait for the next run of groups readers miss: a fetch of an uncached group, or
 	/// history a subscription reads that the cache no longer holds.
 	///
-	/// Cached groups are served without reaching this method.
-	///
-	/// A reader's time start that no cached group places is looked up rather than filled; a
-	/// fill names groups, so the lookup is dropped unanswered here, and the reader falls back
-	/// to the groups held.
+	/// Cached groups are served without reaching this method. A reader's time start that no
+	/// cached group places asks for the group starting at that time, as any other.
 	pub async fn requested_fill(&self) -> Result<Arc<MoqFill>, MoqError> {
 		let fill = self
 			.reads
-			.wait(|requests, waiter| {
-				loop {
-					if let moq_net::track::Fill::Groups(fill) = ready!(requests.poll_requested_fill(waiter))? {
-						return Poll::Ready(Ok(fill));
-					}
-				}
-			})
+			.wait(|requests, waiter| requests.poll_requested_fill(waiter).map_err(Into::into))
 			.await?;
 		Ok(Arc::new(MoqFill::new(fill)))
 	}

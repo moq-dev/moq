@@ -10,7 +10,7 @@ cluster with two uplinks, partition, and healing. No bespoke federation router.
 ## Plan
 
 Reopened 2026-11-15 (maintainer, /quest-plan on
-[cache-aware multicast](/quest/m2/multicast/README.md), item 3): claims, not
+[cache-aware multicast](https://github.com/moq-dev/moq/blob/41cc107579/quest/m2/multicast/README.md), item 3): claims, not
 routes, cross a trust boundary. The CDN relay scopes the local relay's
 connection to a path prefix, so the session carries claims alone (the
 lite-07 draft's Routing: a peer confined to part of the tree exchanges no

@@ -3197,7 +3197,7 @@ mod tests {
 		track.received();
 		let dynamic = track.requests();
 		let fetching = track.consume().fetch_group(key, None);
-		let req = dynamic.requested_groups().now_or_never().expect("queued").unwrap();
+		let req = dynamic.requested_fill().now_or_never().expect("queued").unwrap();
 		(track, fetching, req)
 	}
 
@@ -3448,7 +3448,7 @@ mod tests {
 		let mut requests = Vec::new();
 		for key in keys {
 			callers.push(track.consume().fetch_group(key, None));
-			requests.push(dynamic.requested_groups().now_or_never().expect("queued").unwrap());
+			requests.push(dynamic.requested_fill().now_or_never().expect("queued").unwrap());
 		}
 		(track, callers, requests)
 	}
@@ -3630,7 +3630,7 @@ mod tests {
 		let waiter = kio::Waiter::noop();
 		// Reading judges the reader's misses.
 		let _ = reader.poll_recv_group(&waiter);
-		let fill = dynamic.requested_groups().now_or_never().expect("queued").unwrap();
+		let fill = dynamic.requested_fill().now_or_never().expect("queued").unwrap();
 		assert_eq!((fill.start().group, fill.end()), (0, WIDE));
 
 		let mut fetches = FeedFetches::new(&clock);
@@ -3640,7 +3640,7 @@ mod tests {
 		assert_eq!(fetches.polled, 1);
 		assert!(reader.poll_recv_group(&waiter).is_pending());
 		assert!(
-			dynamic.requested_groups().now_or_never().is_none(),
+			dynamic.requested_fill().now_or_never().is_none(),
 			"a refusal is not asked again"
 		);
 	}
@@ -3665,7 +3665,7 @@ mod tests {
 
 		let mut joined: Vec<_> = (1..=3).map(|key| track.consume().fetch_group(key, None)).collect();
 		assert!(
-			dynamic.requested_groups().now_or_never().is_none(),
+			dynamic.requested_fill().now_or_never().is_none(),
 			"joins existing fills"
 		);
 		drop(callers);
@@ -3678,7 +3678,7 @@ mod tests {
 		assert!(fetches.held.is_empty(), "the last reader leaving releases every fill");
 		assert!(fetches.ready.read().is_empty());
 		assert_eq!(fetches.fold.deadline(), None);
-		assert!(dynamic.requested_groups().now_or_never().is_none());
+		assert!(dynamic.requested_fill().now_or_never().is_none());
 	}
 
 	#[kio::test]
@@ -3695,7 +3695,7 @@ mod tests {
 		drop(caller);
 		let next = track.consume().fetch_group(1, None);
 		let req = dynamic
-			.requested_groups()
+			.requested_fill()
 			.now_or_never()
 			.expect("replacement queued")
 			.unwrap();
@@ -5620,7 +5620,7 @@ mod tests {
 			)
 			.ordered();
 		assert!(reader.poll_next_group(&waiter).is_pending(), "groups 0..4 are owed");
-		let Poll::Ready(Ok(fill)) = requests.poll_requested_groups(&waiter) else {
+		let Poll::Ready(Ok(fill)) = requests.poll_requested_fill(&waiter) else {
 			panic!("groups 0..4 are a miss");
 		};
 		let mut fills = fills::RangeFills::default();
@@ -11454,7 +11454,7 @@ impl FinishedServe {
 			let Some(serving) = &self.serving else {
 				return Poll::Ready(());
 			};
-			match self.dynamic.poll_requested_groups(waiter) {
+			match self.dynamic.poll_requested_fill(waiter) {
 				Poll::Ready(Ok(fill)) => {
 					let info = FetchInfo::Known(serving.info().clone());
 					self.fetches.push(FillServeRun::new(serve.clone(), fill, info));
@@ -11789,7 +11789,7 @@ impl TrackServeRun {
 					..
 				} => {
 					// A fetch needs nothing from TRACK_INFO to go out, only to read its answer.
-					while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(waiter) {
+					while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(waiter) {
 						fetches.push(FillServeRun::new(self.serve.clone(), fill, known.later()));
 					}
 					// Abandonment was checked at the top of this poll, arming its wait.
@@ -13006,7 +13006,7 @@ impl ServeLoop {
 
 					// A fill is bounded and serves readers already waiting, so serve it ahead of
 					// subscription churn.
-					match self.dynamic.poll_requested_groups(waiter) {
+					match self.dynamic.poll_requested_fill(waiter) {
 						Poll::Ready(Ok(fill)) => {
 							// Lite-07 asks for more than one group through the subscription. One
 							// group, or a slice of one, is what FETCH carries.
