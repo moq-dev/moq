@@ -6826,17 +6826,18 @@ impl Consumer {
 	/// see `TrackState::drifted`. Parks in this track's expiry index, so only a change that
 	/// can make the group stale, or land it here, wakes it. Pending for good once the track closes.
 	///
-	/// Judged within `within`, a reader's groups and its exclusive cap, else every group,
-	/// searched through `live`, which the caller keeps across polls.
+	/// Judged within `within`, a reader's groups and its exclusive cap (see
+	/// [`Servable::within`]), else every group, searched through `live`, which the caller keeps
+	/// across polls.
 	pub(super) fn poll_stale(
 		&self,
 		key: u64,
 		budget: Duration,
-		within: Option<(Cover, Option<u64>)>,
+		within: Option<(Option<Cover>, Option<u64>)>,
 		live: &Arc<Live>,
 		waiter: &kio::Waiter,
 	) -> Poll<()> {
-		let servable = within.map_or(Servable::ALL, |(groups, cap)| Servable::covering(groups, cap, live));
+		let servable = Servable::within(within, live);
 		self.with_state(|state| {
 			let Some(state) = state else {
 				return Poll::Pending;
@@ -8123,9 +8124,7 @@ impl group::Expiry for GroupExpiry {
 			}
 			// Without a reader, as for a nested front's, every group.
 			Successors::Reader(live) => {
-				if let Some((Some(groups), cap)) = recover.and_then(|recover| recover.window(waiter)) {
-					servable = Servable::covering(groups, cap, live);
-				}
+				servable = Servable::within(recover.and_then(|recover| recover.window(waiter)), live);
 			}
 		}
 
@@ -8569,6 +8568,17 @@ impl Servable {
 		match window.groups() {
 			None => Self::ALL,
 			Some(groups) => Self::covering(groups.clone(), None, live),
+		}
+	}
+
+	/// A reader's groups below its exclusive cap, as [`super::resume::Recover::window`] gives
+	/// them: below the cap alone while its groups wait on a relative anchor, and every group
+	/// without a reader.
+	fn within(within: Option<(Option<Cover>, Option<u64>)>, live: &Arc<Live>) -> Self {
+		match within {
+			Some((Some(groups), cap)) => Self::covering(groups, cap, live),
+			Some((None, cap)) => Self::ALL.below(cap),
+			None => Self::ALL,
 		}
 	}
 
@@ -18432,6 +18442,20 @@ mod test {
 		);
 		assert_eq!(entries(), 1, "the stale entries are pruned");
 		drop(groups);
+	}
+
+	/// A reader whose groups still wait on a relative anchor keeps its cap: a group past it is
+	/// no newer group of the reader's.
+	#[test]
+	fn servable_within_keeps_the_cap_while_the_groups_wait() {
+		let live = Arc::default();
+		let pending = Servable::within(Some((None, Some(3))), &live);
+		assert!(pending.contains(2));
+		assert!(!pending.contains(3));
+		let resolved = Servable::within(Some((Some(Cover::new(std::iter::once(1..=5))), Some(3))), &live);
+		assert!(!resolved.contains(0) && resolved.contains(2) && !resolved.contains(3));
+		assert!(Servable::within(Some((None, None)), &live).contains(u64::MAX));
+		assert!(Servable::within(None, &live).contains(u64::MAX));
 	}
 
 	/// Capping a servable window in place keeps exactly the groups the set of its runs

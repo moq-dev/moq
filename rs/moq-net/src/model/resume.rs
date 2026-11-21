@@ -3079,7 +3079,7 @@ pub(super) struct Recover {
 	recovering: bool,
 	/// The index of the serving copy's live groups a pending recovery's expiry searches
 	/// within the reader's window, kept across polls so each costs the groups that arrived
-	/// since; see [`Self::within`].
+	/// since; see [`Self::window`].
 	live: Arc<super::track::Live>,
 }
 
@@ -3288,7 +3288,7 @@ impl Recover {
 			if res.is_pending()
 				&& let Some(budget) = self.poll_budget(waiter)
 				&& serving
-					.poll_stale(self.key, budget, self.within(waiter), &self.live, waiter)
+					.poll_stale(self.key, budget, self.window(waiter), &self.live, waiter)
 					.is_ready()
 			{
 				return Poll::Ready(Err(Error::Old));
@@ -3472,14 +3472,6 @@ impl Recover {
 		waiter.register(&mut reader.capped);
 		let cap = reader.groups.1;
 		Some((reader.window().groups().cloned(), cap))
-	}
-
-	/// [`Self::window`] with its groups resolved, else `None` to judge every group.
-	fn within(&self, waiter: &kio::Waiter) -> Option<(Cover, Option<u64>)> {
-		match self.window(waiter)? {
-			(Some(groups), cap) => Some((groups, cap)),
-			(None, _) => None,
-		}
 	}
 
 	/// Commit the replacement only once the caller has acquired its cursor or frame.
