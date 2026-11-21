@@ -9,7 +9,7 @@ description: Model-check how a front's reader resumes one logical track across r
 
 ## Rules
 
-Each rule is an INVARIANT; the harm says why it matters.
+Each rule is an INVARIANT, except `SwitchCapsAtBoundary`, a PROPERTY over each switch step; the harm says why it matters.
 
 | Rule | Holds when | Harm if broken |
 | --- | --- | --- |
@@ -20,6 +20,7 @@ Each rule is an INVARIANT; the harm says why it matters.
 | `FailsOnlyUnroutable` | The track fails only once the front gave up: a route failing is the front's to replace. | A single relay failure ends playback that another route could carry. |
 | `QuietIsSettled` | Once the serving route is complete and the reader holds every group, a poll ends the read rather than parking. | A finished track hangs open on a replaced route. |
 | `ReplacedCapped` | A switch caps every copy it replaces at the boundary at once: only the serving copy is unbounded. | The old route keeps sending groups the new one also sends, paying twice for every group after a failover. |
+| `SwitchCapsAtBoundary` | Each copy a switch replaces is capped at most at the boundary the switch split at, as the reader stood when it switched. | A cap past the boundary lets the old route send a group the new one also sends. |
 | `CopiesBounded` | However often routes flap, a route keeps at most its own copy and one backfill of it subscribed, plus one backfill for each route that failed while it still had groups to drain. | Each flap leaks a subscription upstream. |
 
 ## Run

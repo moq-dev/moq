@@ -975,14 +975,15 @@ class Reader implements ResumeSource {
 		const resumed = serving && resumePoint(serving);
 		if (resumed === undefined) return;
 		// A group a replaced copy holds under its cap is that copy's to drain: the serving route is
-		// asked from the lowest one none holds. A copy that failed delivers nothing more, and one
-		// holding a group without its head may give that group up, so it doesn't count.
+		// asked from the lowest one none holds. A copy that failed or spent its drain budget delivers
+		// nothing more, even while a read still leases it, and one holding a group without its head
+		// may give that group up, so neither counts.
 		const cursor = this.#shell.cursor.peek().start;
 		const drains = (key: bigint) =>
 			this.#copies.some(
 				(copy) =>
 					copy.replaced &&
-					copy.done === undefined &&
+					this.#feeds(copy) &&
 					max(cursor, copy.floor ?? 0n) <= key &&
 					key < (copyEnd(copy) ?? UNBOUNDED) &&
 					!copyFailed(copy) &&
@@ -1059,10 +1060,11 @@ class Reader implements ResumeSource {
 	/**
 	 * `copy` handed out `key`. The serving copy's first group bounds the replaced copies a switch
 	 * left uncapped, just below it: the incumbent copies a reader joining mid-switch reads (see
-	 * {@link #joinIncumbent}), and those replaced before any group was held or handed out: what they hold under it may be groups the new route never has,
-	 * and what is at or above it the new route delivers. Never below a group already handed out. A
-	 * group it replays, already handed out, bounds nothing: the incumbent may still hold the next.
-	 * Nor does a backfill of the serving route.
+	 * {@link #joinIncumbent}), and those replaced before any group was held or handed out. What
+	 * they hold under it may be groups the new route never has, and what is at or above it the new
+	 * route delivers. Never below a group already handed out. A group it replays, already handed
+	 * out, bounds nothing: the incumbent may still hold the next. Nor does a backfill of the
+	 * serving route.
 	 */
 	#observe(copy: Copy, key: bigint): void {
 		copy.delivered = true;
@@ -1131,6 +1133,8 @@ class Reader implements ResumeSource {
 		}
 		// The failed copies holding a group back for a placement, which still report their failure.
 		const held = new Set<Copy>();
+		// Whether a replaced copy failed this pass, owing the serving route a backfill.
+		let owed = false;
 		// The serving copy first: it is the one that keeps delivering.
 		for (let index = this.#copies.length - 1; index >= 0; index--) {
 			const copy = this.#copies[index];
@@ -1165,7 +1169,10 @@ class Reader implements ResumeSource {
 				} else if (recv.kind === "error") copy.done = recv.error;
 				else if (this.#drained(copy, delivered)) copy.done = hooks.arrived(copy.sub);
 				// What a replaced copy that just failed still had to drain is asked of the serving route.
-				if (copy.replaced && copy.done instanceof Error) this.#resumed = true;
+				if (copy.replaced && copy.done instanceof Error) {
+					this.#resumed = true;
+					owed = true;
+				}
 				break;
 			}
 		}
@@ -1182,8 +1189,11 @@ class Reader implements ResumeSource {
 			return copy.done ?? (failed instanceof Error ? failed : undefined);
 		});
 		// A revert serves the copy the failed replacement capped again, which may hold the next
-		// group already.
-		if (end.kind === "idle" && this.route.generation !== generation) {
+		// group already. A replaced copy that failed this pass owes a backfill once the window is
+		// placed: ask for it now, since its close already fired and no later group is sure to wake
+		// the read. Mirrors the Rust `Reader::poll_lowest`.
+		const backfill = owed && this.#resumed && this.#window().floor() !== undefined;
+		if (end.kind === "idle" && (this.route.generation !== generation || backfill)) {
 			return this.tryGroup(ordered, delivered, dispositions);
 		}
 		return end;

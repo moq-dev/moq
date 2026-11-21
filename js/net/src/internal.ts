@@ -395,7 +395,6 @@ export interface ReadGroupFrame {
 	chunks?: FrameConsumer;
 }
 
-/** What a resumed reader's {@link ResumeSource} sees of the subscriber it serves. */
 /**
  * The groups a group moved onto another copy is judged within: its logical reader's window below
  * that reader's cursor cap. Not the copy's own, which a route switch starts at its boundary.
@@ -407,6 +406,7 @@ export interface Within {
 	changed: readonly Getter<unknown>[];
 }
 
+/** What a resumed reader's {@link ResumeSource} sees of the subscriber it serves. */
 export interface ResumeShell {
 	/** The reader's own preferences, mirrored into every copy it subscribes. */
 	readonly subscription: Getter<Subscription | undefined>;

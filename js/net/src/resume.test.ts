@@ -4,7 +4,7 @@ import { Manual } from "@moq/clock/test";
 import { Signal } from "@moq/signals";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer, type FetchFrom } from "./broadcast.ts";
 import { defined } from "./defined.test-util.ts";
-import { NotFound, SessionCode, SessionError, StreamCode, StreamError } from "./error.ts";
+import { NotFound, SessionCode, SessionError, StreamCode, StreamError, toStreamCode } from "./error.ts";
 import { type Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { WireRoute } from "./hop.ts";
 import type { Session as IetfSession } from "./ietf/session.ts";
@@ -78,6 +78,16 @@ function copy(source: BroadcastProducer) {
 			return group;
 		},
 	};
+}
+
+/** Expect `read` to fail as past its budget, not with some other stream error. */
+async function expectOld(read: Promise<unknown>) {
+	const err = await read.then(
+		() => undefined,
+		(e: unknown) => e,
+	);
+	expect(err).toBeInstanceOf(StreamError);
+	expect(toStreamCode(err)).toBe(StreamCode.Old);
 }
 
 /** Every group sequence readable without waiting. */
@@ -1092,7 +1102,7 @@ for (const [name, end, held, newer, expires] of [
 		expect(await isPending(next)).toBe(true);
 		for (let key = 1n; key <= newer; key++) tb.write(key);
 		if (expires) {
-			await expect(next).rejects.toBeInstanceOf(StreamError);
+			await expectOld(next);
 		} else {
 			expect(await isPending(next)).toBe(true);
 		}
@@ -1102,6 +1112,42 @@ for (const [name, end, held, newer, expires] of [
 		close();
 	});
 }
+
+// An unbounded reader judges a group moved onto a replaced copy past that copy's cap: the copy's
+// newer groups, held for others, expire it.
+test("a group moved onto a capped copy expires within an unbounded reader's window", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	ta.write(0n, 1, false);
+	const group = await sub.recvGroup();
+	if (group?.start !== 0n) throw new Error("expected group 0");
+	expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+
+	// The switch caps A at group 0. The stalled read moves onto B, which then fails it, so it
+	// continues from A, the replaced copy still holding it.
+	front.serve(b.consume());
+	await settle();
+	const failing = tb.write(0n, 1, false);
+	const next = group.readFrame();
+	next.catch(() => {});
+	await settle();
+	failing.abort(new StreamError(StreamCode.SessionClosed));
+	expect(await isPending(next)).toBe(true);
+
+	for (let key = 1n; key <= 4n; key++) ta.write(key);
+	await expectOld(next);
+
+	group.close();
+	sub.close();
+	front.consumer.close();
+	a.close();
+	b.close();
+});
 
 // A group moved onto another copy wakes when the reader's cursor cap rises over groups that expire
 // it. Mirrors the Rust `a_recovered_group_wakes_when_the_readers_cap_rises`.
@@ -1126,7 +1172,7 @@ test("a recovered group wakes when the reader's cap rises", async () => {
 	expect(await isPending(next)).toBe(true);
 
 	sub.withRange({ end: { excluded: 5n } });
-	await expect(next).rejects.toBeInstanceOf(StreamError);
+	await expectOld(next);
 
 	group.close();
 	sub.close();
@@ -2431,7 +2477,7 @@ test("a resumed reader drops a taken group outside its window when the offered o
 		await settle();
 		// Group 10 still goes out from the failed copy that holds it whole, once the replacement placed
 		// its range; 80 never does.
-		expect(new Set(drain(sub))).toEqual(new Set([10n, 100n, 120n]));
+		expect(drain(sub).sort((x, y) => (x < y ? -1 : x > y ? 1 : 0))).toEqual([10n, 100n, 120n]);
 	} finally {
 		sub.close();
 		front.consumer.close();

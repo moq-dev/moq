@@ -2409,7 +2409,7 @@ impl Reader {
 			return Some(Poll::Ready(Err(err)));
 		}
 		self.groups_read = true;
-		self.backfill_gaps(delivered);
+		self.backfill_gaps(delivered, waiter);
 		let groups = self.groups;
 		let budget = self.mirrored.budget();
 		let floor = if ordered { delivered.floor() } else { 0 };
@@ -2945,7 +2945,7 @@ impl Reader {
 	/// widened ranges newly cover, as one cursor on the logical track would still get. From
 	/// the lowest gap within the reader's ranges, so groups already handed out are not asked
 	/// for again below it. A gap past the reader's budget was already forgotten as handed out.
-	fn backfill_gaps(&mut self, delivered: &Delivered) {
+	fn backfill_gaps(&mut self, delivered: &Delivered, waiter: &kio::Waiter) {
 		if self.resumed.is_none() {
 			return;
 		}
@@ -2991,13 +2991,16 @@ impl Reader {
 		};
 		let from = from.unwrap_or(floor).max(self.groups.0);
 		// A group a replaced copy holds under its cap is that copy's to drain: the serving route
-		// is asked from the lowest one none holds. A copy that failed delivers nothing more, and
-		// one holding a group without its head may give that group up, so it doesn't count.
+		// is asked from the lowest one none holds. A copy that failed or spent its drain budget
+		// delivers nothing more, even while a read still leases it, and one holding a group
+		// without its head may give that group up, so neither counts.
 		let start = self.groups.0;
+		let budget = self.mirrored.budget();
 		let drains = |key: u64| {
 			self.copies.iter().any(|copy| {
 				copy.replaced
 					&& copy.done.is_none()
+					&& !copy.expired(budget, waiter)
 					&& copy.start(start) <= key
 					&& copy.end().is_some_and(|end| key < end)
 					&& !copy_failed(&copy.track)

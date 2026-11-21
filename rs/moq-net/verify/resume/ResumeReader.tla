@@ -511,6 +511,14 @@ EndWaitsForReplaced == rd.late = {}
 \* past the boundary: only the serving copy is unbounded.
 ReplacedCapped == \A i \in 1 .. Len(rd.copies) : rd.copies[i].rep => Bounded(rd.copies[i])
 
+\* And at the boundary the switch split at, not past it: a switch leaves every
+\* copy it replaced capped at most there, judged against the reader as the
+\* switch found it, since groups landing later raise the boundary.
+SwitchCapsAtBoundary ==
+    [][rd'.gen # rd.gen /\ Boundary(rd) # None =>
+        \A i \in 1 .. Len(rd'.copies) :
+            rd'.copies[i].rep => Bounded(rd'.copies[i]) /\ rd'.copies[i].until <= Boundary(rd)]_vars
+
 \* A clean end only follows a route declaring one.
 CleanEndIsDeclared == rd.ended = "ok" => \E t \in Tracks : trk[t].fin
 

@@ -1585,7 +1585,7 @@ export class Producer {
 		cachedHolds = (producer, key, whole = false) => {
 			const entry = producer.#cached.get(key);
 			if (entry === undefined || entry.group.closed.peek() instanceof Error) return false;
-			return !whole || hooks.groupOffset(entry.group) === 0;
+			return !whole || !hooks.groupHeadless(entry.group);
 		};
 		receivedCopy = (producer) => producer.#wire !== undefined;
 		cachedIn = (producer, start, end) => {
@@ -3157,10 +3157,13 @@ export class Subscriber {
 	// `Filter::refused`.
 	#refusal?: Error;
 
-	#drift(scope = this.#fetchBudget !== undefined ? WHOLE : undefined, end = this.#cursor.peek().end): Drift {
+	#drift(
+		scope = this.#fetchBudget !== undefined ? WHOLE : undefined,
+		end = scope ? undefined : this.#cursor.peek().end,
+	): Drift {
 		// A fetch judges its group against the whole track, as the Rust `fetch_group` does: a
-		// newer group outside its one-group window still supersedes it.
-		if (scope === WHOLE) end = undefined;
+		// newer group outside its one-group window still supersedes it. A moved group's scope
+		// brings its own end, unbounded when its logical reader's is.
 		const timeline = this.#state.timeline;
 		let presentation: Drift["presentation"];
 		const info = this.#state.info.peek();
