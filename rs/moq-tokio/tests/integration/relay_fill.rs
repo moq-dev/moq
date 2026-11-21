@@ -157,17 +157,27 @@ fn groups(range: std::ops::Range<u64>) -> BTreeMap<u64, String> {
 	range.map(|sequence| (sequence, format!("group {sequence}"))).collect()
 }
 
+/// A listener's task, aborted once dropped, so a failed or timed-out run frees its sockets.
+struct Serving(tokio::task::JoinHandle<anyhow::Result<()>>);
+
+impl Drop for Serving {
+	fn drop(&mut self) {
+		self.0.abort();
+	}
+}
+
 /// The JavaScript relay between `publisher`, served upstream of it, and the downstream sessions
 /// it dials.
 struct Running {
 	relay: Relay,
 	child: tokio::process::Child,
-	serves: [tokio::task::JoinHandle<anyhow::Result<()>>; 2],
+	_serves: [Serving; 2],
 }
 
 impl Running {
 	async fn start(version: Version, publisher: moq_net::origin::Producer) -> anyhow::Result<Self> {
 		let (upstream, upstream_serve) = listen(version, true, move || publisher.clone()).await?;
+		let upstream_serve = Serving(upstream_serve);
 		let (sessions, viewers) = tokio::sync::mpsc::unbounded_channel();
 		let (downstream, downstream_serve) = listen(version, false, move || {
 			let viewer = moq_tokio::origin::spawn();
@@ -175,6 +185,7 @@ impl Running {
 			viewer
 		})
 		.await?;
+		let downstream_serve = Serving(downstream_serve);
 
 		let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test/relay-fill/relay.ts");
 		let mut child = tokio::process::Command::new("bun")
@@ -198,22 +209,19 @@ impl Running {
 		Ok(Self {
 			relay,
 			child,
-			serves: [upstream_serve, downstream_serve],
+			_serves: [upstream_serve, downstream_serve],
 		})
 	}
 
-	/// Close the relay's sessions, then wait for it to exit cleanly.
+	/// Close the relay's sessions, then wait for it to exit cleanly. The listeners stop either way.
 	async fn stop(self) -> anyhow::Result<()> {
 		let Self {
 			relay,
 			mut child,
-			serves,
+			_serves,
 		} = self;
 		drop(relay);
 		anyhow::ensure!(child.wait().await?.success(), "the relay failed");
-		for serve in serves {
-			serve.abort();
-		}
 		Ok(())
 	}
 }
