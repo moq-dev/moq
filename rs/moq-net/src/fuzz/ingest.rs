@@ -224,11 +224,12 @@ fn run(session: Session, info: &track::Info, body: &[u8], chunk: usize) -> Optio
 		} => {
 			let mut reader = reader(Bytes::copy_from_slice(body), chunk, version);
 			let producer = track.append_next().ok()?;
+			let clock = lite::Clock::new(version, producer.start);
 			let consumer = producer.consume();
 			let mut viewer = stored(producer.consume(), info.compressed());
 			let mut group = crate::recv::Group::new(producer);
 			let framing = lite::Framing::new(info, version);
-			let mut ingest = lite::FrameIngest::new(framing, records, frame_start);
+			let mut ingest = lite::FrameIngest::new(framing, records, frame_start, clock);
 			let end = drive(body.len(), |waiter| {
 				let res = ingest.poll(&mut reader, &mut group, waiter);
 				keep_up(&mut viewer);
@@ -364,8 +365,7 @@ pub(super) fn seeds() -> Vec<super::Seed> {
 
 	// moq-lite: three plain frames, at every version, timed and untimed. The timing
 	// prefix is a zigzag delta, so 0x02 steps the clock forward by one; an untimed lite-07
-	// frame carries one too, which keeps its group's start. Lite-07 also ends the group
-	// whole with a GROUP_END.
+	// frame carries none. Lite-07 also ends the group whole with a GROUP_END.
 	for (index, version) in super::LITE_VERSIONS.iter().enumerate() {
 		for timed in [false, true] {
 			let mut data = vec![(index * 2) as u8, timed as u8, 3];
@@ -386,10 +386,9 @@ pub(super) fn seeds() -> Vec<super::Seed> {
 				data.extend_from_slice(payload);
 			}
 			if version.has_group_end() {
-				// A zero length, then the End: past the last frame's 2ms, or the start's next
-				// unit when untimed.
+				// A zero length, then the End, one past the highest frame (or the start, untimed).
 				let mut whole = data.clone();
-				whole.extend_from_slice(&[0, if timed { 3 } else { 1 }]);
+				whole.extend_from_slice(&[0, 1]);
 				push(whole);
 			}
 			push(data);
@@ -402,9 +401,9 @@ pub(super) fn seeds() -> Vec<super::Seed> {
 	let mut data = vec![(lite07 * 2) as u8, 0x10, 2, 0];
 	for payload in [&b"ab"[..], b"c"] {
 		// Object 0 is the first record's absolute ID, then each next one is a zero delta,
-		// and neither has a property block. The frame's size follows, plus one, then a zero
-		// timestamp delta, which keeps the untimed group's start.
-		data.extend_from_slice(&[0, 0, payload.len() as u8 + 1, 0]);
+		// and neither has a property block. The frame's size follows, plus one, and no
+		// timestamp, since the track is untimed.
+		data.extend_from_slice(&[0, 0, payload.len() as u8 + 1]);
 		data.extend_from_slice(payload);
 	}
 	push(data);

@@ -48,8 +48,7 @@ removal, a rename, or a wire, catalog, or format change that is free until
 - **Catalog, drafts, and formats.** hang-04 (done: the `sync` section, a version per entry, no video `warmup`, the TS passthrough under
   `mpegts`, one strict rule);
   declared ends, back from m3, which became a whole marker on 2026-11-19
-  and [an end again](/quest/m2/time-addressing/group-times.md) on
-  2026-11-20.
+  and an end again on 2026-11-20 ([moq-dev/moq#9263](https://github.com/moq-dev/moq/pull/9263)).
 - **Native media and gateways.** [Upstream str0m](https://github.com/moq-dev/moq/pull/8963), which reverses the
   2026-10-30 vendoring.
 - **Bindings.** The C API as `libmoq` (done), reversing 2026-10-25.
@@ -68,8 +67,11 @@ found. Each fix is so that a subscription, frame, or catalog entry means
 the same whichever relay or reader serves it:
 no relative anchors ([moq-dev/moq#9265](https://github.com/moq-dev/moq/pull/9265)),
 with Min Age placing a live join;
-[Group Streams carrying each time once](/quest/m2/time-addressing/group-times.md),
-with GROUP_END's end back as a delta.
+scale-less tracks aging by arrival ([moq-dev/moq#9266](https://github.com/moq-dev/moq/pull/9266));
+Group Streams carrying each time once ([moq-dev/moq#9263](https://github.com/moq-dev/moq/pull/9263)),
+with GROUP_END's end back as a delta;
+[time anchors landing by group spans](/quest/m2/time-addressing/span-time-anchors.md);
+and [first-party producers keeping those spans apart](/quest/m2/producer-spans.md).
 [moq-dev/moq#9198](https://github.com/moq-dev/moq/pull/9198) and
 [moq-dev/moq#9221](https://github.com/moq-dev/moq/pull/9221) closed, since
 relative starts and the bare GROUP_END are gone.

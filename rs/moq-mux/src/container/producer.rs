@@ -914,8 +914,22 @@ where
 		if let Some(group) = self.group.as_mut() {
 			self.container.finish_group(group, tail_end)?;
 		}
+		// A group never ends below a frame of its own, here the newest written or the endpoint
+		// marker, so one whose bound falls below either closes without an end.
+		let floor = match (self.newest, tail_end) {
+			(Some(newest), Some(marker)) => Some(super::later(newest, marker)),
+			(newest, marker) => newest.or(marker),
+		};
+		// Compared in the track's timescale, as `finish_at` checks it, so a bound finer than a
+		// microsecond is not taken for its frame.
+		let floor = floor
+			.and_then(|floor| self.inner.info().rescale(floor).ok())
+			.map(|floor| floor.value());
 		if let Some(group) = self.group.take() {
-			match bound.and_then(|bound| crate::start::end(&self.inner, group.start, bound)) {
+			let end = bound
+				.and_then(|bound| crate::start::end(&self.inner, group.start, bound))
+				.filter(|end| floor.is_none_or(|floor| *end >= floor));
+			match end {
 				Some(end) => group.finish_at(end)?,
 				None => group.finish()?,
 			};
@@ -943,9 +957,8 @@ where
 			self.cadence = Some(delta);
 		}
 		self.previous_timestamp = Some(timestamp);
-		if self.newest.is_none_or(|newest| timestamp_lt(newest, timestamp)) {
-			self.newest = Some(timestamp);
-		}
+		// At full precision, so the group's floor is its highest frame as `finish_at` sees it.
+		self.newest = Some(self.newest.map_or(timestamp, |newest| super::later(newest, timestamp)));
 
 		// Timestamp and duration can be at different scales, so add them in micros; the
 		// sub-microsecond rounding that costs is far below a segment boundary.
@@ -2153,6 +2166,56 @@ mod tests {
 			kind: crate::container::fmp4::Kind::Video,
 		};
 		crate::container::fmp4::encode_fragment(info, group).unwrap();
+	}
+
+	/// Writes each frame onto the group at its own timescale, so the group's frames keep
+	/// precision a microsecond container would drop.
+	struct Stamped;
+
+	impl super::Container for Stamped {
+		type Error = crate::Error;
+
+		fn write(&self, group: &mut moq_net::group::Producer, frames: &[Frame]) -> Result<(), Self::Error> {
+			for frame in frames {
+				group.write_frame(frame.timestamp, frame.payload.clone())?;
+			}
+			Ok(())
+		}
+
+		fn decode(&self, _frame: moq_net::frame::Frame) -> Result<Vec<Frame>, Self::Error> {
+			unreachable!("Stamped is write-only")
+		}
+	}
+
+	/// A cut bound below the newest frame by less than a microsecond is still below it in the
+	/// track's timescale, where `finish_at` checks it, so the group closes without an end
+	/// rather than failing.
+	#[tokio::test]
+	async fn a_bound_below_a_frame_by_under_a_microsecond_closes_without_an_end() {
+		let nanos = moq_net::Timescale::new(1_000_000_000).unwrap();
+		let info = hang::container::track_info(hang::catalog::PRIORITY.video).with_timescale(nanos);
+		let track = track_producer("test", info);
+		let mut consumer = track.subscribe(replay());
+		let mut producer = Producer::new(track, Stamped);
+		let at = |nanoseconds: u64, keyframe: bool| Frame {
+			timestamp: Timestamp::new(nanoseconds, nanos).unwrap(),
+			payload: Bytes::from_static(&[0xDE, 0xAD]),
+			keyframe,
+			duration: None,
+		};
+		producer.write(at(1_000_000, true)).unwrap();
+		// Within one microsecond of the newest frame, which still counts as the newer.
+		producer.write(at(2_000_001, false)).unwrap();
+		producer.write(at(2_000_002, false)).unwrap();
+		producer.cut(Some(Timestamp::new(2_000_001, nanos).unwrap())).unwrap();
+
+		let mut group = consumer.recv_group().await.unwrap().unwrap();
+		let mut frames = 0;
+		while group.read_frame().await.unwrap().is_some() {
+			frames += 1;
+		}
+		assert_eq!(frames, 3, "the group closes rather than aborting");
+		assert_eq!(group.end(), None, "an end below a frame is not declared");
 	}
 
 	#[tokio::test]

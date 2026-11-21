@@ -320,10 +320,14 @@ export class Producer {
 		// A presentation endpoint cannot bound the decode-order tail after reordering.
 		const bound = this.#reordered ? undefined : end;
 		this.#format.finishGroup(this.#group, bound === undefined ? undefined : Duration.micros(bound));
-		// A group ends whole where its content stops, which bounds its reach without a successor.
+		// A group ends whole where its content stops, which bounds its reach without a successor. It
+		// never ends below a frame of its own, here the newest written or the endpoint marker, so one
+		// whose end falls below either closes without one.
 		const at =
 			whole !== undefined ? BigInt(whole.value) : bound === undefined ? undefined : keyOf(this.#track, bound);
-		if (at !== undefined && at > this.#group.start) this.#group.finishAt(at);
+		const newest = Math.max(this.#end ?? Number.NEGATIVE_INFINITY, bound ?? Number.NEGATIVE_INFINITY);
+		const floor = Number.isFinite(newest) ? keyOf(this.#track, newest) : this.#group.start;
+		if (at !== undefined && at > this.#group.start && at >= floor) this.#group.finishAt(at);
 		else this.#group.finish();
 		this.#group = undefined;
 		if (this.#end !== undefined) {

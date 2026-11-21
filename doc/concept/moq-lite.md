@@ -350,9 +350,11 @@ A group ends one of three ways: finished at the time it ends, so it is whole;
 closed, so every frame written arrives but it may have held more, as when a
 relay stops sending a group that went stale; or aborted with an error. A
 finished group's end also bounds how long it stays fresh, so the last group of
-a paused track still ages out. Over the work-in-progress moq-lite 07 each group
-also names the start of the group before it, so a reader sees a gap at once;
-older versions and moq-transport carry neither the end nor the previous start.
+a paused track still ages out. Over the work-in-progress moq-lite 07 groups
+never overlap: a group runs from its start to its end, and the time
+between one group's end and the next group's start belongs to no group and is
+reported as skipped, so a reader sees a gap at once. Older versions and
+moq-transport carry no end.
 
 Order only decides what goes first, never what is skipped, so catching up oldest
 first needs a max delay that covers the backlog. When a relay serves subscribers of
@@ -408,7 +410,8 @@ zero, the live edge only, unless its publisher asks for more or for no limit;
 media tracks declare 30 seconds, so a segmented egress can still find its
 segments. A relay bounds what it keeps with its own cache, not the publisher's
 default. Max age ages a group by the
-same two clocks as max delay and never makes the newest group stale. A fetch
+same two clocks as max delay, and makes the newest group stale only once it
+finished whole and its own end stands in for a successor. A fetch
 obeys the same bound, and may name a tighter max delay of its own.
 moq-transport drops it: its `MAX_CACHE_DURATION` would also expire the newest group,
 so a hop past one keeps superseded groups only as long as its own cache allows.

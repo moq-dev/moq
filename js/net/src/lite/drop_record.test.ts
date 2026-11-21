@@ -572,9 +572,12 @@ test("a run of billions of sequences is settled by each reader in one step, drop
 			["group", 1n + 2n * BILLIONS],
 		]);
 	}
-	// The skip rides the GROUP above it, whose Previous Start passes over the run.
+	// Each run goes out as it was learned, as one message.
 	for (const hop of ["up", "down"] as const)
-		expect(wire.on(hop)).toEqual([["drop", 1n, 1n + BILLIONS, StreamCode.Cancel]]);
+		expect(wire.on(hop)).toEqual([
+			["drop", 1n, 1n + BILLIONS, StreamCode.Cancel],
+			["skip", 1n + BILLIONS, 1n + 2n * BILLIONS, undefined],
+		]);
 	expect(chained.fetches()).toEqual(before);
 
 	for (const reader of [narrow, wide]) reader.close();

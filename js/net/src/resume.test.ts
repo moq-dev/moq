@@ -16,7 +16,7 @@ import type { Lister } from "./listing.ts";
 import { Producer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Front, routeFailed } from "./resume.ts";
-import { Timestamp } from "./time.ts";
+import { Timescale, Timestamp } from "./time.ts";
 import type * as track from "./track.ts";
 import { unwanted } from "./util/demand.ts";
 import { GivenUp } from "./util/given_up.ts";
@@ -5082,5 +5082,35 @@ test("an ordered read through a front returns the gap its copy gave up before en
 		ordered.close();
 		front.consumer.close();
 		a.close();
+	}
+});
+
+// A routed reader knows a whole group's span from its serving copy, as the Rust
+// `Subscriber::span_end` asks it, so a publisher reading through it names none of the starts
+// inside the span.
+test("a routed reader reports its serving copy's whole group spans", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const front = new Front();
+	const source = new BroadcastProducer();
+	const handle = source.consume();
+	const producer = defined(source.createTrack("seq", { ...INFO, timescale: Timescale.MILLI }));
+	const group = producer.createGroup(3n);
+	group.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(3) });
+	group.finishAt(10n);
+	front.serve(handle);
+	const sub = front.consumer.track("seq").subscribe({ delay: { max: Duration.millis(3_600_000) } });
+	try {
+		await clock.advance(Duration.ZERO);
+		expect(sub.tryRecvGroup()?.start).toBe(3n);
+		expect(hooks.wholeEnd(sub, 3n)).toBe(10n);
+		expect(hooks.wholeAround(sub, 5n)).toEqual({ start: 3n, end: 10n });
+		expect(hooks.wholeAround(sub, 10n)).toBeUndefined();
+	} finally {
+		sub.close();
+		front.consumer.close();
+		handle.close();
+		source.close();
+		installed.close();
 	}
 });

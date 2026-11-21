@@ -221,9 +221,9 @@ Decided 2026-11-20 (maintainer, /quest-plan auditing the cache, timestamp,
 and switching rules in `rs/moq-net/AGENTS.md` before the cut):
 
 - ✅ The cut waits for groups never overlap, [moq-dev/moq#9264](https://github.com/moq-dev/moq/pull/9264)
-  (rejected: after the cut). [Group times](/quest/m2/time-addressing/group-times.md)
-  puts the strong rule in the draft as a publisher MUST: a group's span, from
-  its lowest frame to its End, never overlaps another's. Expiry relies on it,
+  (rejected: after the cut). Group times ([moq-dev/moq#9263](https://github.com/moq-dev/moq/pull/9263))
+  puts the strong rule in the draft as a publisher MUST: a group's span,
+  [Group Start, End) since 2026-11-21, never overlaps another's. Expiry relies on it,
   and first-party producers break it today.
 - ✅ [The frame cap](/quest/m1/switch-frame-cap.md) is not Required, like the
   warmth port: if it has landed when the cut is made, its Position end is in
@@ -236,7 +236,8 @@ and switching rules in `rs/moq-net/AGENTS.md` before the cut):
 
 ## Required
 
-- [Group Streams carry each time once](/quest/m2/time-addressing/group-times.md) - GROUP loses Previous Start, FRAME's first delta counts from the start, and GROUP_END carries an end
+- [A time anchor lands by group spans](/quest/m2/time-addressing/span-time-anchors.md) - the draft's Time Anchor rule resolves a time inside a skipped span or a whole group's span
+- [First-party producers keep lite-07 group spans apart](/quest/m2/producer-spans.md) - no group starts inside a span a lower group's End closed
 - [A lite-07 claim is shown no broader than the grants it crossed](/quest/m2/lite07-claim-reach-routes.md) - a peer is never shown a claim at a path no route of it can serve, through any number of relays (maintainer, 2026-11-20)
 
 ## Related

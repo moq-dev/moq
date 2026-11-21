@@ -1004,6 +1004,11 @@ let fillFloor: (producer: Producer, named: bigint | undefined) => bigint | undef
 // The keys of the groups the producer caches, sorted: what time starts and live joins resolve
 // against, as the Rust `TrackState::lookup` keys; assigned in its static block.
 let keysOf: (producer: Producer) => readonly bigint[];
+// The span of the held group finished whole that holds `key` strictly past its start, undefined
+// when none does; assigned in its static block.
+let wholeAround: (producer: Producer, key: bigint) => Run | undefined;
+// Where the held group at `key` ends, once finished whole; assigned in its static block.
+let wholeAt: (producer: Producer, key: bigint) => bigint | undefined;
 // How a received copy resolves its readers' time anchors, as its wire tells it; assigned in the
 // producer's static block. See `hooks.startsAtKeys` and `hooks.timeStarts`.
 let timeAnchors: (producer: Producer) => {
@@ -1604,6 +1609,18 @@ export class Producer {
 		sourceStart = (producer) => producer.#wire?.served && producer.#feedStart();
 		fillFloor = (producer, named) => producer.#fillFloor(named);
 		keysOf = (producer) => producer.#keys;
+		wholeAt = (producer, key) => {
+			const entry = producer.#cached.get(key);
+			return entry && hooks.groupWholeEnd(entry.group);
+		};
+		wholeAround = (producer, key) => {
+			const keys = producer.#keys;
+			const index = keyIndex(keys, key);
+			if (index === 0 || keys[index] === key) return undefined;
+			const start = keys[index - 1];
+			const end = wholeAt(producer, start);
+			return end !== undefined && key < end ? { start, end } : undefined;
+		};
 		timeAnchors = (producer) => ({
 			atKeys: producer.#startsAtKeys,
 			starts: producer.#timeStarts,
@@ -2495,7 +2512,13 @@ export class Producer {
 		group.closed.then((closed) => {
 			// An aborted live edge is no longer protected, so it may expire like any other.
 			if (closed instanceof Error) this.#account.demote(entry);
-			if (!(closed instanceof Error)) return;
+			if (closed === null) {
+				// A group the feed delivered whole accounts for its span: no other group starts
+				// strictly inside it, so a pending tail owes none of them.
+				const end = hooks.groupWholeEnd(group);
+				if (!fetched && end !== undefined && end > group.start + 1n) this.#arrive(group.start + 1n, end);
+				return;
+			}
 			// A re-created group already replaced this one.
 			const current = this.#cached.get(group.start);
 			if (current && current.group !== group) return;
@@ -4727,15 +4750,17 @@ export class Subscriber {
 			return producer !== undefined && cachedHolds(producer, key);
 		};
 		hooks.holeEnd = (subscriber, key, dropped) => holeEnd(subscriber.#state.drops, key, dropped);
-		hooks.previousStart = (subscriber, start) => {
-			// A reader following route copies knows only what the serving copy holds, which this
-			// one does not: unknown, so the skips below go out on their own.
-			if (subscriber.#resume || start === 0n) return undefined;
-			const below = start - 1n;
-			const run = subscriber.#state.drops.at(below);
-			if (run?.skip) return run.start > 0n ? run.start - 1n : undefined;
+		hooks.wholeEnd = (subscriber, key) => {
+			// A reader following route copies knows what the serving copy holds, as the Rust
+			// `Subscriber::span_end` asks it.
+			if (subscriber.#resume) return subscriber.#resume.wholeEnd(key);
 			const producer = subscriber.#state.producer;
-			return producer !== undefined && cachedIn(producer, below, start).length > 0 ? below : undefined;
+			return producer && wholeAt(producer, key);
+		};
+		hooks.wholeAround = (subscriber, key) => {
+			if (subscriber.#resume) return subscriber.#resume.wholeAround(key);
+			const producer = subscriber.#state.producer;
+			return producer && wholeAround(producer, key);
 		};
 		hooks.staleHeld = (subscriber, start, end) => {
 			const held: Run[] = [];

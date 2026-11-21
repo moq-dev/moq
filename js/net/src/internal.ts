@@ -554,6 +554,10 @@ export interface ResumeSource {
 	serving(): boolean;
 	/** Where the run of keys from `key` the serving copy says no group arrives at ends; see `hooks.holeEnd`. */
 	holeEnd(key: bigint, dropped: boolean): bigint | undefined;
+	/** Where the group the serving copy holds whole at `key` ends; see `hooks.wholeEnd`. */
+	wholeEnd(key: bigint): bigint | undefined;
+	/** The span of the group the serving copy holds whole around `key`; see `hooks.wholeAround`. */
+	wholeAround(key: bigint): Run | undefined;
 	/**
 	 * The exclusive end past every group the serving copy reads: undefined while one of its
 	 * ranges stays open or without a serving copy.
@@ -970,12 +974,15 @@ export const hooks: {
 	 */
 	landed: (subscriber: Subscriber, start: bigint, end: bigint) => Instant | undefined;
 	/**
-	 * The start of the group before `start` on the subscriber's track, as a lite-07 GROUP's
-	 * Previous Start names it: just below the run of starts declared skipped directly under
-	 * `start`, else `start - 1` when a group starts there, else undefined. Mirrors the Rust
-	 * crate-private `track::Subscriber::previous_start`.
+	 * Where the group the subscriber's track holds at `key` ends, once it finished whole: its span
+	 * is `[key, end)`. Undefined for a group not held, still open, or ended without one.
 	 */
-	previousStart: (subscriber: Subscriber, start: bigint) => bigint | undefined;
+	wholeEnd: (subscriber: Subscriber, key: bigint) => bigint | undefined;
+	/**
+	 * The span of the group the subscriber's track holds finished whole that holds `key` strictly
+	 * past its start, which no other group starts inside; undefined when none does.
+	 */
+	wholeAround: (subscriber: Subscriber, key: bigint) => Run | undefined;
 	/**
 	 * Where the run of keys from `key` that no group can arrive at on the subscriber's track ends:
 	 * a skip, or with `dropped` a drop given up for good. Mirrors the Rust crate-private
@@ -1036,6 +1043,8 @@ export const hooks: {
 	groupOffset: (group: GroupProducer) => number;
 	/** Whether this source copy can no longer serve frame 0: it began past it, or shed it. */
 	groupHeadless: (group: GroupProducer) => boolean;
+	/** Where a source copy finished whole ends, undefined while it is open or ended without one. */
+	groupWholeEnd: (group: GroupProducer) => bigint | undefined;
 	writeGroupFrame: (group: GroupProducer, frame: Frame, inflated?: number) => void;
 	/** Payload footprint including a shared inflated copy, for measurements. */
 	groupCacheBytes: (group: GroupProducer) => number;
@@ -1378,7 +1387,10 @@ export const hooks: {
 	landed: () => {
 		throw new Error("track.ts not loaded");
 	},
-	previousStart: () => {
+	wholeEnd: () => {
+		throw new Error("track.ts not loaded");
+	},
+	wholeAround: () => {
 		throw new Error("track.ts not loaded");
 	},
 	holeEnd: () => {
@@ -1451,6 +1463,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	groupHeadless: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupWholeEnd: () => {
 		throw new Error("group.ts not loaded");
 	},
 	startGroup: () => {

@@ -626,8 +626,6 @@ fn group_stream(subscribe: u64, sequence: u64, size: usize) -> Vec<u8> {
 	let mut header = Vec::new();
 	varint(&mut header, subscribe);
 	varint(&mut header, sequence);
-	// No previous start: 0 says unknown, since the field carries it plus one.
-	varint(&mut header, 0);
 	// Frame Start: the stream carries the group from its first frame.
 	varint(&mut header, 0);
 
@@ -636,9 +634,9 @@ fn group_stream(subscribe: u64, sequence: u64, size: usize) -> Vec<u8> {
 	varint(&mut bytes, header.len() as u64);
 	bytes.extend_from_slice(&header);
 	// The frame's size plus one, the zigzag timestamp delta, then the payload. The first
-	// frame's delta is absolute, and it starts its group, so it is the group's key.
+	// frame's delta counts from the group's start, and it starts its group, so it is 0.
 	varint(&mut bytes, size as u64 + 1);
-	varint(&mut bytes, sequence * 2);
+	varint(&mut bytes, 0);
 	bytes.resize(bytes.len() + size, 5);
 	bytes
 }

@@ -1039,6 +1039,12 @@ impl Slot {
 		(!self.visible && self.is_aborted()) || self.serving().is_settled()
 	}
 
+	/// Where the group ends whole, as any copy that finished it says: a fetched head can
+	/// finish it while the live copy is still open or aborted.
+	fn end(&self) -> Option<u64> {
+		self.copies().find_map(group::Handle::end)
+	}
+
 	/// Every copy this slot holds, the live group first.
 	fn copies(&self) -> impl Iterator<Item = &group::Handle> {
 		std::iter::once(&self.group).chain(self.head.as_deref())
@@ -1846,28 +1852,45 @@ impl TrackState {
 		gone.then_some(run.end)
 	}
 
-	/// The start of the group before `start`, as a lite-07 GROUP's Previous Start names it:
-	/// just below the run of starts the publisher declared skipped directly under `start`, or
-	/// the group just below it, and `None` when neither says. A run skipped down to 0 has no
-	/// group below it. See [`Subscriber::previous_start`].
-	fn previous_start(&self, start: u64) -> Option<u64> {
-		let below = start.checked_sub(1)?;
-		match self.drops.get_key_value(&below) {
-			Some((run, hole)) if *hole == Hole::Skip => run.start.checked_sub(1),
-			_ => self.lookup.contains_key(&below).then_some(below),
+	/// The runs of `keys` outside every whole group's span, where a group may still start:
+	/// none starts inside one (see [`Self::span_end`]).
+	fn outside_spans(&self, keys: ops::Range<u64>) -> Vec<ops::Range<u64>> {
+		let mut runs = Vec::new();
+		let mut at = keys.start;
+		while at < keys.end {
+			// A whole group's span may run past the rest of `keys`.
+			at = self.span_end(at).max(at);
+			if at >= keys.end {
+				break;
+			}
+			// The next span starts just past the next group held whole.
+			let next = self
+				.lookup
+				.range(at..keys.end)
+				.find_map(|(key, slot)| slot.end().filter(|end| *end > key + 1).map(|_| key + 1))
+				.unwrap_or(keys.end);
+			if at < next {
+				runs.push(at..next);
+			}
+			at = next;
+		}
+		runs
+	}
+
+	/// Where a run of starts up to the exclusive `end` ends once it takes in the rest of the
+	/// span of the group it reaches into: no other group starts inside a whole group's span,
+	/// from its start to its end (see [`group::Producer::finish_at`]). `end` itself when the
+	/// group starting below it is not held whole.
+	fn span_end(&self, end: u64) -> u64 {
+		match self.lookup.range(..end).next_back() {
+			Some((_, slot)) => slot.end().map_or(end, |whole| whole.max(end)),
+			None => end,
 		}
 	}
 
 	/// When the latest group cached at `keys` landed here, `None` when none is.
 	fn landed(&self, keys: ops::Range<u64>) -> Option<crate::time::Instant> {
 		self.lookup.range(keys).map(|(_, slot)| slot.arrived).max()
-	}
-
-	/// Whether the live feed's copy of the group at `key` is cached and still serves it.
-	fn holds_group(&self, key: u64) -> bool {
-		self.lookup
-			.get(&key)
-			.is_some_and(|slot| slot.visible && slot.serves_end())
 	}
 
 	/// Skip what of `groups` holds no cached group, replacing any drop of it, final or stale:
@@ -3628,8 +3651,13 @@ impl TrackState {
 			if folds.is_some_and(|folds| now >= folds) {
 				continue;
 			}
-			if let Some(found) = self.drops.gaps(&gap).find_map(|open| f(open, folds)) {
-				return Some(found);
+			let found = self
+				.drops
+				.gaps(&gap)
+				.flat_map(|open| self.outside_spans(open))
+				.find_map(|open| f(open, folds));
+			if found.is_some() {
+				return found;
 			}
 		}
 		None
@@ -7460,12 +7488,14 @@ impl Consumer {
 		self.with_state(|state| state?.read().hole_end(key, dropped))
 	}
 
-	/// The start of the group before `start`; see [`Subscriber::previous_start`].
-	pub(super) fn previous_start(&self, start: u64) -> Option<u64> {
+	/// Where a run of starts up to `end` ends with the span it reaches into; see
+	/// [`Subscriber::span_end`].
+	pub(crate) fn span_end(&self, end: u64) -> u64 {
 		if let Some(serving) = self.serving() {
-			return serving.previous_start(start);
+			return serving.span_end(end);
 		}
-		self.with_state(|state| state?.read().previous_start(start))
+		self.with_state(|state| state.map(|state| state.read().span_end(end)))
+			.unwrap_or(end)
 	}
 
 	/// When the latest group cached at `keys` landed; see [`Subscriber::landed`].
@@ -7474,15 +7504,6 @@ impl Consumer {
 			return serving.landed(keys);
 		}
 		self.with_state(|state| state.and_then(|state| state.read().landed(keys)))
-	}
-
-	/// Whether the cache holds the group at `key`; see [`Subscriber::holds`].
-	pub(super) fn holds(&self, key: u64) -> bool {
-		if let Some(serving) = self.serving() {
-			return serving.holds(key);
-		}
-		self.with_state(|state| state.map(|state| state.read().holds_group(key)))
-			.unwrap_or(false)
 	}
 
 	/// The keys of `span` the cache holds, lowest first.
@@ -9605,7 +9626,7 @@ impl Cursor {
 	///
 	/// An `ordered` read of the track's own publisher also passes a key below a group that
 	/// publisher created (see [`Self::passes`]). A received copy never does: only what its
-	/// feed proved, such as a GROUP's Previous Start, accounts for a key there.
+	/// feed proved, such as a whole group's GROUP_END, accounts for a key there.
 	fn is_exhausted(&self, logical: &[&Delivered], from: u64, ordered: bool) -> bool {
 		let taken: Vec<&Delivered> = std::iter::once(&self.record.delivered)
 			.chain(logical.iter().copied())
@@ -11664,15 +11685,15 @@ impl Subscriber {
 		}
 	}
 
-	/// The start of the group before `start` on the track, as a lite-07 GROUP's Previous Start
-	/// names it: just below the run of starts the publisher declared skipped directly under
-	/// `start`, else the group just below it, else `None`. No group starts between the two.
-	/// A copy knows only the skips its wire forwarded.
+	/// Where a run of starts up to the exclusive `end` ends once it takes in the rest of the
+	/// span of the group it reaches into, the one starting just below `end`, when the cache
+	/// holds that group whole: no other group starts inside a whole group's span, so the run
+	/// names those starts with it. `end` itself otherwise.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn previous_start(&self, start: u64) -> Option<u64> {
+	pub(crate) fn span_end(&self, end: u64) -> u64 {
 		match &self.inner {
-			Inner::Plain(cursor) => cursor.state.read().previous_start(start),
-			Inner::Resume(resume, _) => resume.previous_start(start),
+			Inner::Plain(cursor) => cursor.state.read().span_end(end),
+			Inner::Resume(resume, _) => resume.span_end(end),
 		}
 	}
 
@@ -11682,15 +11703,6 @@ impl Subscriber {
 		match &self.inner {
 			Inner::Plain(cursor) => cursor.state.read().landed(keys),
 			Inner::Resume(resume, _) => resume.landed(keys),
-		}
-	}
-
-	/// Whether the track's cache holds the live feed's group at `key`, still serving it.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn holds(&self, key: u64) -> bool {
-		match &self.inner {
-			Inner::Plain(cursor) => cursor.state.read().holds_group(key),
-			Inner::Resume(resume, _) => resume.holds(key),
 		}
 	}
 
@@ -13128,6 +13140,21 @@ mod test {
 	fn track_producer(name: impl Into<Arc<str>>, info: impl Into<Option<Info>>) -> Producer {
 		let info = info.into().unwrap_or_else(|| Info::default().with_max_age(None));
 		Producer::new(Arc::new(broadcast::Info::default()), name, info)
+	}
+
+	/// The runs of a range outside every whole group's span: a span that reaches past the
+	/// range's end leaves nothing of it, rather than a range read backwards.
+	#[test]
+	fn outside_spans_stops_at_a_span_past_the_range() {
+		let producer = Producer::new(Arc::new(broadcast::Info::default()), "test", Info::timed());
+		let mut group = producer.create_group(group::Info { start: 10 }).unwrap();
+		group
+			.write_frame(Timestamp::from_millis(10).unwrap(), b"x".as_slice())
+			.unwrap();
+		group.finish_at(20).unwrap();
+		let state = producer.state.read();
+		assert_eq!(state.outside_spans(15..16), Vec::<ops::Range<u64>>::new());
+		assert_eq!(state.outside_spans(0..25), vec![0..11, 20..25]);
 	}
 
 	#[test]
@@ -24682,6 +24709,33 @@ mod test {
 		let head = head.finish().unwrap();
 		assert_eq!(fetch.await.unwrap().index(), 0);
 		(live, head)
+	}
+
+	/// A fetched head that finished its group whole bounds the group's span while the live
+	/// copy beside it is still open: no other group starts inside it.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_fetched_heads_end_bounds_the_span() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let consumer = producer.consume();
+
+		let mut live = producer.create_group(group::Info { start: 0 }).unwrap();
+		live.start_at(1).unwrap();
+		live.write_frame(live.key_time(), bytes::Bytes::from_static(b"delta"))
+			.unwrap();
+		let fetch = consumer.fetch_group(0, None);
+		let request = dynamic.requested_fill_group().await.unwrap();
+		let mut head = request.accept(Info::timed()).unwrap().expect("a fresh group");
+		head.write_frame(head.key_time(), bytes::Bytes::from_static(b"snapshot"))
+			.unwrap();
+		let _head = head.finish_at(20).unwrap();
+		assert_eq!(fetch.await.unwrap().index(), 0);
+
+		let state = producer.state.read();
+		assert_eq!(state.span_end(5), 20, "the head's end, though the live copy is open");
+		assert_eq!(state.outside_spans(0..25), vec![0..1, 20..25]);
+		drop(live);
 	}
 
 	/// A live group with a fetched head of group 0 still writing, and the track's end

@@ -934,27 +934,31 @@ async function servedSubscription(
 			const header = await GroupMessage.decode(reader, version);
 
 			const payloads: string[] = [];
+			const times: bigint[] = [];
 			let end: bigint | undefined;
+			let endDelta: bigint | undefined;
+			// Lite-07 counts the first delta from the group's start, and GROUP_END from the highest.
+			const lengthFirst = hasLengthFirst(version);
+			let ts = lengthFirst ? header.key : 0n;
+			let highest: bigint | undefined;
 			while (!(await reader.done())) {
 				// Each frame is a zigzag timestamp delta, then a length-prefixed payload. Lite-07
-				// leads with the size plus one instead, where 0 is GROUP_END and its End.
-				const lengthFirst = hasLengthFirst(version);
+				// leads with the size plus one instead, where 0 is GROUP_END and its End delta.
 				const length = lengthFirst ? (await reader.u53()) - 1 : undefined;
 				if (length === -1) {
-					end = await reader.u62();
+					endDelta = await reader.u62();
+					end = (highest ?? header.key) + endDelta;
 					continue;
 				}
-				await reader.u62();
+				const zigzag = await reader.u62();
+				ts += (zigzag >> 1n) ^ -(zigzag & 1n);
+				times.push(ts);
+				if (highest === undefined || ts > highest) highest = ts;
 				const size = length ?? (await reader.u53());
 				payloads.push(new TextDecoder().decode(await reader.read(size)));
 			}
-			return {
-				key: header.key,
-				frameStart: header.frameStart,
-				payloads,
-				previous: header.previous,
-				end,
-			};
+			const served = { key: header.key, frameStart: header.frameStart, payloads };
+			return lengthFirst ? { ...served, times, end, endDelta } : served;
 		},
 		// Stop the next group stream the publisher opened with `code`, before reading any of it,
 		// as a subscriber that discards a stream unread does.
@@ -1386,28 +1390,152 @@ test("lite-07 ends a finished group with GROUP_END and a closed one with a bare 
 	}
 });
 
-// A lite-07 GROUP names the previous group's start, so a skipped run just below a group it serves
-// goes out in that GROUP rather than as a SUBSCRIBE_SKIP. Mirrors the Rust
-// `lite07_skips_a_declared_skip`.
-test("lite-07 passes over a skipped run in the GROUP above it", async () => {
+// A lite-07 GROUP_END's End is a delta from the highest frame timestamp the stream carried: B-frames
+// send timestamps backwards, so the highest is not the last.
+test("lite-07 GROUP_END counts from the highest frame of a group with B-frames", async () => {
 	const sub = await servedSubscription({ version: Version.DRAFT_07, startGroup: 0n });
 	try {
-		sub.serve(0n);
-		expect(await sub.servedGroup()).toMatchObject({ key: 0n, previous: undefined });
-		sub.serve(3n);
-		sub.track.skipGroups(1n, 3n);
-		expect(await sub.servedGroup()).toMatchObject({ key: 3n, previous: 0n });
-		sub.track.finish();
-		sub.track.close();
-		expect(await holesToFinish(sub.client.reader)).toEqual([]);
+		const group = sub.track.createGroup(1000n);
+		for (const ms of [1000, 1100, 1033, 1066]) group.writeFrame(textFrame("x", Timestamp.fromMillis(ms)));
+		group.finishAt(1133n);
+		expect(await sub.servedGroup()).toMatchObject({
+			key: 1000n,
+			times: [1000n, 1100n, 1033n, 1066n],
+			endDelta: 33n,
+			end: 1133n,
+		});
 	} finally {
 		await sub.close();
 	}
 });
 
-// A skipped run a GROUP passed over goes out as SUBSCRIBE_SKIP ahead of a drop of that group, since
-// the GROUP may never have arrived. Mirrors the Rust `lite07_sends_an_elided_skip_ahead_of_a_drop`.
-test("lite-07 sends a passed-over skip ahead of a drop of the group above it", async () => {
+// A group may end at its highest frame (delta 0), and one with no frame at its start.
+test("lite-07 GROUP_END may end a group at its highest frame or its start", async () => {
+	const sub = await servedSubscription({ version: Version.DRAFT_07, startGroup: 0n });
+	try {
+		const group = sub.track.createGroup(1000n);
+		group.writeFrame(textFrame("x", Timestamp.fromMillis(1040)));
+		group.finishAt(1040n);
+		expect(await sub.servedGroup()).toMatchObject({ key: 1000n, times: [1040n], endDelta: 0n, end: 1040n });
+		const empty = sub.track.createGroup(2000n);
+		empty.finishAt(2000n);
+		expect(await sub.servedGroup()).toMatchObject({ key: 2000n, times: [], endDelta: 0n, end: 2000n });
+	} finally {
+		await sub.close();
+	}
+});
+
+// A subscription starting partway into a group gets a stream with Frame Start above 0, whose first
+// delta still counts from the group's start: it carries no frame 0 to count from.
+test("lite-07 counts a resumed stream's first delta from the group's start", async () => {
+	const sub = await servedSubscription({ version: Version.DRAFT_07, startGroup: 1000n, startFrame: 1 });
+	try {
+		const group = sub.track.createGroup(1000n);
+		for (const ms of [1000, 1033, 1066]) group.writeFrame(textFrame("x", Timestamp.fromMillis(ms)));
+		group.finishAt(1100n);
+		expect(await sub.servedGroup()).toMatchObject({
+			key: 1000n,
+			frameStart: 1,
+			times: [1033n, 1066n],
+			end: 1100n,
+		});
+	} finally {
+		await sub.close();
+	}
+});
+
+// A declared skip goes out as SUBSCRIBE_SKIP as soon as the publisher learns of it, even below a
+// group it serves. Mirrors the Rust `lite07_skips_a_declared_skip`.
+test("lite-07 sends a declared skip below a served group as SUBSCRIBE_SKIP", async () => {
+	const sub = await servedSubscription({ version: Version.DRAFT_07, startGroup: 0n });
+	try {
+		sub.serve(0n);
+		expect(await sub.servedSequence()).toBe(0n);
+		sub.serve(3n);
+		sub.track.skipGroups(1n, 3n);
+		expect(await sub.servedSequence()).toBe(3n);
+		sub.track.finish();
+		sub.track.close();
+		expect(await holesToFinish(sub.client.reader)).toEqual([["skip", 1n, 3n]]);
+	} finally {
+		await sub.close();
+	}
+});
+
+// Appending names the starts between one group's End and the next group's start with
+// SUBSCRIBE_SKIP: a pause, or a sparse data track's gaps. Contiguous groups, each starting at the
+// previous End, skip nothing, and the starts inside each span are accounted for by its GROUP_END.
+test("lite-07 skips a pause and a sparse track's gaps, but nothing between contiguous groups", async () => {
+	const sub = await servedSubscription({ version: Version.DRAFT_07, startGroup: 0n });
+	try {
+		const append = (start: number, end: number) => {
+			const group = sub.track.appendGroup(Timestamp.fromMillis(start));
+			group.writeFrame(textFrame("x", Timestamp.fromMillis(start)));
+			group.finishAt(BigInt(end));
+		};
+		// Contiguous: each starts at the previous End.
+		append(0, 500);
+		expect(await sub.servedGroup()).toMatchObject({ key: 0n, end: 500n });
+		append(500, 1000);
+		expect(await sub.servedGroup()).toMatchObject({ key: 500n, end: 1000n });
+		// A pause: [1000, 1700) is named.
+		append(1700, 2000);
+		expect(await sub.servedGroup()).toMatchObject({ key: 1700n, end: 2000n });
+		// A sparse track whose groups end at their start: each skip starts just past it.
+		append(2100, 2100);
+		expect(await sub.servedGroup()).toMatchObject({ key: 2100n, endDelta: 0n, end: 2100n });
+		append(2200, 2200);
+		expect(await sub.servedGroup()).toMatchObject({ key: 2200n, end: 2200n });
+		sub.track.finish();
+		sub.track.close();
+		expect(await holesToFinish(sub.client.reader)).toEqual([
+			["skip", 1000n, 1700n],
+			["skip", 2000n, 2100n],
+			["skip", 2101n, 2200n],
+		]);
+	} finally {
+		await sub.close();
+	}
+});
+
+// A drop of a group held whole names its span, so the subscriber accounts for the starts inside it.
+test("lite-07 drops a whole group's span", async () => {
+	const sub = await servedSubscription({ version: Version.DRAFT_07, startGroup: 0n });
+	try {
+		const group = sub.track.createGroup(0n);
+		group.writeFrame(textFrame("x", Timestamp.fromMillis(0)));
+		group.finishAt(500n);
+		await sub.stopServed(StreamCode.Cancel);
+		expect(await holesToFinish(sub.client.reader, 1)).toEqual([["drop", 0n, 500n]]);
+	} finally {
+		await sub.close();
+	}
+});
+
+// A group whose stream failed before its End was known still has the starts inside its span named
+// once it finishes whole: no GROUP_END went out for them on this subscription.
+test("lite-07 names the span of a group that finished whole after its stream failed", async () => {
+	const sub = await servedSubscription({ version: Version.DRAFT_07, startGroup: 0n });
+	try {
+		const group = sub.track.createGroup(0n);
+		group.writeFrame(textFrame("x", Timestamp.fromMillis(0)));
+		await sub.stopServed(StreamCode.Cancel);
+		expect(await holesToFinish(sub.client.reader, 1)).toEqual([["drop", 0n, 1n]]);
+		group.finishAt(500n);
+		sub.serve(1000n);
+		expect((await sub.servedGroup())?.key).toBe(1000n);
+		sub.track.finish();
+		sub.track.close();
+		// Without the span, only [500, 1000) would be named.
+		expect(await holesToFinish(sub.client.reader)).toEqual([["drop", 1n, 1000n]]);
+	} finally {
+		await sub.close();
+	}
+});
+
+// A skipped run goes out as SUBSCRIBE_SKIP ahead of a drop of the group above it. Mirrors the Rust
+// `lite07_sends_a_skip_ahead_of_a_drop`.
+test("lite-07 sends a skip ahead of a drop of the group above it", async () => {
 	const sub = await servedSubscription({ version: Version.DRAFT_07, startGroup: 0n });
 	try {
 		sub.serve(0n);
@@ -2723,7 +2851,14 @@ test("blocked DROP responses stop opening later groups", async () => {
 });
 
 /** One group stream the publisher put on the wire. */
-type Served = { key: bigint; frameStart: number; payloads: string[]; previous?: bigint; end?: bigint };
+type Served = {
+	key: bigint;
+	frameStart: number;
+	payloads: string[];
+	times?: bigint[];
+	end?: bigint;
+	endDelta?: bigint;
+};
 
 /**
  * Serves `groups` (frame payloads per group, keyed by sequence) under `bounds`, and
