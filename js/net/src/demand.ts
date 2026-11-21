@@ -244,6 +244,9 @@ export class Subscriptions implements Getter<Subscription | undefined> {
 	#unstated = 0;
 	#descending = 0;
 	#ranges = new Ranges();
+	// The time starts a received copy's readers wait on, by time, each budget they wait under
+	// counted: see {@link asks}.
+	#asks = new Map<bigint, Counts<number>>();
 	#revision = new Signal(0);
 	// The aggregate as last read, until it changes; null for none read yet.
 	#value: Subscription | undefined | null = null;
@@ -287,6 +290,43 @@ export class Subscriptions implements Getter<Subscription | undefined> {
 			this.#revision.update((revision) => revision + 1);
 		}
 		return changed;
+	}
+
+	/**
+	 * Count a reader waiting on time start `time` under `budget`, the max delay in milliseconds,
+	 * once more when `waits`, else once less. Returns whether {@link asks} changed, which wakes
+	 * every watcher as any change to the aggregate does. Mirrors the Rust `Subscriptions::ask`.
+	 */
+	ask(time: bigint, budget: number, waits: boolean): boolean {
+		let budgets = this.#asks.get(time);
+		const widest = budgets?.last();
+		if (waits) {
+			if (!budgets) {
+				budgets = new Counts<number>();
+				this.#asks.set(time, budgets);
+			}
+			budgets.add(budget);
+		} else if (budgets) {
+			budgets.remove(budget);
+			if (budgets.last() === undefined) this.#asks.delete(time);
+		}
+		const changed = this.#asks.get(time)?.last() !== widest;
+		if (changed) this.#revision.update((revision) => revision + 1);
+		return changed;
+	}
+
+	/**
+	 * The time starts a received copy's readers wait on, lowest first, each with the widest budget
+	 * in milliseconds one waits under: its session asks its upstream to place each with a range of
+	 * its own. Mirrors the Rust `Subscription::asks`.
+	 */
+	asks(): [bigint, number][] {
+		const asks: [bigint, number][] = [];
+		for (const [time, budgets] of this.#asks) {
+			const widest = budgets.last();
+			if (widest !== undefined) asks.push([time, widest]);
+		}
+		return asks.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
 	}
 
 	/** The largest max delay in milliseconds, without reading the ranges. */

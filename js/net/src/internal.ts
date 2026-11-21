@@ -11,7 +11,7 @@ import type { Consumer as BroadcastConsumer, Producer as BroadcastProducer } fro
 import type { Charge, Pool } from "./cache.ts";
 import type * as datagram from "./datagram.ts";
 import type { Delivered } from "./delivered.ts";
-import type { Edit, Prefs } from "./demand.ts";
+import type { Edit, Prefs, Subscriptions } from "./demand.ts";
 import { StreamCode, StreamError, toStreamCode } from "./error.ts";
 import type { Consumer as FrameConsumer } from "./frame.ts";
 import type { Frame, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
@@ -764,8 +764,6 @@ export const hooks: {
 	subscriberEndError: (subscriber: Subscriber) => Error | undefined;
 	/** What this subscriber resolves its ranges against, for a test. Assigned by `track.ts`. */
 	subscriberHoldings: (subscriber: Subscriber) => Holdings;
-	/** The times a received copy's feed accounting may place, for a test. Assigned by `track.ts`. */
-	landingSpan: (producer: Producer) => Run | undefined;
 	/**
 	 * How many keys just below `key` the publisher declared it never produced: the skip run
 	 * ending at `key`, which a moq-transport Prior Group ID Gap names. Mirrors the Rust
@@ -806,17 +804,15 @@ export const hooks: {
 	startsAtKeys: (producer: Producer) => void;
 	/**
 	 * Record where the upstream publisher started each of a lite-07 copy's live wire ranges, as
-	 * `[time, start, through]` by the time each asked from (0 for the oldest group), `start`
-	 * undefined for one with no group to deliver, replacing the last set: a reader's time start the
-	 * copy cannot place among its own groups resolves to it. An empty answer holds for a reader
-	 * within `budget`, the narrowest the subscription asked in milliseconds. Mirrors the Rust
-	 * `track::Producer::time_starts`; assigned by `track.ts`.
+	 * `[time, start, budget]` by the time each asked from (0 for the oldest group), `start`
+	 * undefined for one with no group to deliver at or before its time, answered under at most
+	 * `budget`, the max delay in milliseconds, replacing the last set. A reader's time start the
+	 * copy cannot place among its own groups resolves to the range asked from it: a start at or
+	 * before the time names the group containing it, and anything else says no group there is
+	 * left within the budget. Mirrors the Rust `track::Producer::time_starts`; assigned by
+	 * `track.ts`.
 	 */
-	timeStarts: (
-		producer: Producer,
-		starts: Iterable<readonly [bigint, bigint | undefined, (bigint | undefined)?]>,
-		budget: number,
-	) => void;
+	timeStarts: (producer: Producer, starts: Iterable<readonly [bigint, bigint | undefined, number]>) => void;
 	/**
 	 * Tell a lite-07 copy where its publisher started each live join, as `[minAge, start, past]`,
 	 * the Min Age in milliseconds the join was asked under, replacing the last set: a reader's
@@ -1043,7 +1039,7 @@ export const hooks: {
 	/** Whether a reader beyond one-shot fetches subscribes to this copy. */
 	subscribing: (producer: Producer) => Getter<boolean>;
 	/** The aggregate across every reader, one-shot fetches included: what the wire asks for. */
-	requested: (producer: Producer) => Getter<Subscription | undefined>;
+	requested: (producer: Producer) => Subscriptions;
 	/** Leave a wire copy serving its cache and fills without a live feed. */
 	cacheTrack: (producer: Producer) => void;
 	/** Fail subscriptions reaching beyond `edge`, keeping history readers and one-shot fetches. */
@@ -1257,9 +1253,6 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	subscriberHoldings: () => {
-		throw new Error("track.ts not loaded");
-	},
-	landingSpan: () => {
 		throw new Error("track.ts not loaded");
 	},
 	skippedBelow: () => {

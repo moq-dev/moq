@@ -31,6 +31,9 @@ pub(super) struct Subscriptions {
 	resumes: BTreeMap<Position, usize>,
 	/// How many subscribers resume, so the aggregate asks without summing [`Self::resumes`].
 	resuming: usize,
+	/// The time starts a received copy's readers wait on, by time, counted under the budget
+	/// each waits with: see [`Subscription::asks`].
+	asks: BTreeMap<u64, BTreeMap<Duration, usize>>,
 	/// The lowest group consumers want while no refresh is pending, never lowered.
 	wanted: u64,
 	/// A request for a group past every key written, until a group answers it or its
@@ -80,7 +83,34 @@ impl Subscriptions {
 			order,
 			feed,
 			resume,
+			asks: self.asks(),
 		})
+	}
+
+	/// Each time start readers wait on, with the widest budget one waits under.
+	fn asks(&self) -> Vec<(u64, Duration)> {
+		(self.asks.iter())
+			.filter_map(|(time, budgets)| Some((*time, *budgets.last_key_value()?.0)))
+			.collect()
+	}
+
+	/// Count a reader waiting on time start `time` under `budget`, or uncount one when not
+	/// `waits`, waking the aggregate's watchers when the widest budget at that time moves.
+	pub(super) fn ask(&mut self, time: u64, budget: Duration, waits: bool) -> kio::WaiterList {
+		let budgets = self.asks.entry(time).or_default();
+		let widest = budgets.last_key_value().map(|(budget, _)| *budget);
+		match waits {
+			true => _ = add(budgets, budget),
+			false => _ = remove(budgets, budget),
+		}
+		let moved = budgets.last_key_value().map(|(budget, _)| *budget) != widest;
+		if budgets.is_empty() {
+			self.asks.remove(&time);
+		}
+		match moved {
+			true => self.waiters.take(),
+			false => Default::default(),
+		}
 	}
 
 	/// [`Self::combined`] without its ranges, costing none of them.
@@ -93,6 +123,7 @@ impl Subscriptions {
 			order,
 			feed,
 			resume,
+			asks: Vec::new(),
 		})
 	}
 
@@ -477,6 +508,7 @@ impl Prefs {
 			order: self.order,
 			feed: self.feed,
 			resume: self.resume,
+			asks: Vec::new(),
 		}
 	}
 
@@ -803,6 +835,7 @@ mod tests {
 				resume: rng
 					.random_bool(0.5)
 					.then(|| Position::new(rng.random_range(0..8), rng.random_range(1..4))),
+				asks: Vec::new(),
 			};
 			match (&mut slots[index], rng.random_range(0..3)) {
 				(slot @ None, _) => *slot = Some((producer.subscribe(next.clone()), next)),

@@ -558,16 +558,20 @@ impl Consumer {
 
 	/// Subscribe to the logical track with the reader's own preferences.
 	pub(super) fn subscribe(&self, subscription: track::Preferences) -> Subscriber {
-		let (mirrored, revision, min) = {
+		let (mirrored, revision, delay) = {
 			let prefs = subscription.read();
 			// Only the ranges: the first sync mirrors the scalars, before it asks any copy.
 			let mut mirrored = Mirrored::default();
 			for (key, range) in prefs.ranges() {
 				mirrored.insert(key, range);
 			}
-			(mirrored, prefs.revision, prefs.delay.min)
+			(mirrored, prefs.revision, prefs.delay)
 		};
-		let window = keyed(mirrored.ranges.iter().map(|(key, range)| (*key, *range)), min, &Unheld);
+		let window = keyed(
+			mirrored.ranges.iter().map(|(key, range)| (*key, *range)),
+			delay,
+			&Unheld,
+		);
 		let reader = Arc::new_cyclic(|this| {
 			Mutex::new(Reader {
 				this: this.clone(),
@@ -677,7 +681,7 @@ impl Holdings for Placed {
 		false
 	}
 
-	fn containing(&self, time: u64) -> Containing {
+	fn containing(&self, time: u64, _: Duration) -> Containing {
 		Containing::Group(time)
 	}
 
@@ -1631,6 +1635,7 @@ impl Mirrored {
 			order: self.order,
 			feed: self.feed,
 			resume: None,
+			asks: Vec::new(),
 		}
 	}
 
@@ -1960,7 +1965,7 @@ impl Reader {
 			let mirrored = &mut self.mirrored;
 			(mirrored.priority, mirrored.delay, mirrored.order, mirrored.feed) = scalars;
 			// A join not yet placed waits on a copy only while its Min Age is stated.
-			self.window.set_min(mirrored.delay.min);
+			self.window.set_delay(mirrored.delay);
 			let change = match ranges {
 				None => Change::Scalars,
 				Some(Ok(edited)) => {
@@ -2011,7 +2016,7 @@ impl Reader {
 					self.mirrored = mirrored;
 					self.window = keyed(
 						self.mirrored.ranges.iter().map(|(key, range)| (*key, *range)),
-						self.mirrored.delay.min,
+						self.mirrored.delay,
 						&Unheld,
 					);
 					// The serving copy's resume point may cut off groups the new ranges cover,
@@ -3806,13 +3811,13 @@ impl kio::Task for Fetching {
 	}
 }
 
-/// A window over `ranges`, each under its key, a range with no start joining by `min`.
+/// A window over `ranges`, each under its key, for a subscriber with `delay`.
 fn keyed(
 	ranges: impl IntoIterator<Item = (u64, track::Range)>,
-	min: Option<Duration>,
+	delay: track::Delay,
 	holdings: &impl Holdings,
 ) -> Window {
-	Window::keyed(ranges, min, None, holdings)
+	Window::keyed(ranges, delay, None, holdings)
 }
 
 #[cfg(test)]
@@ -7140,7 +7145,7 @@ mod test {
 			items
 		};
 		assert_eq!(read(), Vec::<String>::new(), "the gap waits on the start");
-		serving.time_starts([(1500, Some(1000), None)], Duration::MAX);
+		serving.time_starts([(1500, Some(1000), Duration::MAX)]);
 		write(&serving, 1000);
 		serving.skip_groups(1001..1500);
 		serving.skip_groups(1600..2000);

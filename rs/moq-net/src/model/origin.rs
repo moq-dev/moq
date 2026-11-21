@@ -4726,7 +4726,8 @@ fn pick<'a>(
 
 /// What [`FrontServe::poll_step`] returns: one thing that happened.
 enum FrontStep {
-	Assigned(track::Request),
+	/// Boxed, as it dwarfs every other step.
+	Assigned(Box<track::Request>),
 	Resolved(Result<broadcast::Consumer, Error>),
 	SourceClosed(u64),
 	Info(Arc<str>, u64, Result<track::Info, Error>),
@@ -4956,7 +4957,7 @@ impl FrontServe {
 	/// Wait for the next thing to happen, the one place the front parks.
 	fn poll_step(&mut self, waiter: &kio::Waiter) -> Poll<FrontStep> {
 		if let Poll::Ready(Ok(request)) = self.dynamic.poll_requested_track(waiter) {
-			return Poll::Ready(FrontStep::Assigned(request));
+			return Poll::Ready(FrontStep::Assigned(Box::new(request)));
 		}
 		if let Some(upstream) = &self.upstream
 			&& let Poll::Ready(result) = upstream.pending.poll(waiter, |p| match &p.resolved {
@@ -5520,6 +5521,7 @@ impl kio::Task for FrontServe {
 
 			let event = match step {
 				FrontStep::Assigned(request) => {
+					let request = *request;
 					let name: Arc<str> = request.name().into();
 					let track_ready = crate::util::QueueWake::new(name.clone(), self.ready.clone());
 					track_ready.wake_by_ref();
