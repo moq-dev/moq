@@ -4,23 +4,23 @@ Running interop tests...
   Relay:  ghcr.io/endel/quic-zig-moq-relay:latest
   Client: ghcr.io/englishm/moq-interop-runner-moq-dev-js-client:latest
   URL:    moqt://relay:4443
-time="2026-11-21T03:39:52Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-11-21T03:39:52Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-11-21T03:39:52Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-11-21T03:39:52Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
-time="2026-11-21T03:39:52Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
+time="2026-11-21T16:21:25Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-11-21T16:21:25Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-11-21T16:21:25Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-11-21T16:21:25Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
+time="2026-11-21T16:21:25Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
  Container runner-upstream-relay-1 Recreate 
  Container runner-upstream-relay-1 Recreated 
  Container runner-upstream-test-client-1 Recreate 
  Container runner-upstream-test-client-1 Recreated 
 Attaching to relay-1, test-client-1
  Container runner-upstream-relay-1 Starting 
-relay-1  | 
-relay-1  | === MoQ Relay (drafts 17, 18, 22; WebTransport + QUIC) ===
-relay-1  | Certificate SHA-256: 1336d30dbe82357d71f92d5fe58a08469878ff979563e1466319ee2e69ccae87
-relay-1  | 
  Container runner-upstream-relay-1 Started 
  Container runner-upstream-relay-1 Waiting 
+relay-1  | 
+relay-1  | === MoQ Relay (drafts 17, 18, 22; WebTransport + QUIC) ===
+relay-1  | Certificate SHA-256: 8f65b89f988a7c01023243fe289322d835dbfd161d2cef929d8600e6f797985e
+relay-1  | 
 relay-1  | Listening on https://0.0.0.0:4443
 relay-1  | Video demo: https://127.0.0.1:4443/moq_video.html
 relay-1  | Clock demo: https://127.0.0.1:4443/moq.html
@@ -34,7 +34,7 @@ test-client-1  | # Relay: moqt://relay:4443
 test-client-1  | 1..8
 test-client-1  | not ok 1 - setup-only
 test-client-1  |   ---
-test-client-1  |   duration_ms: 574
+test-client-1  |   duration_ms: 506
 test-client-1  |   message: ""
 test-client-1  |   ...
 test-client-1  | not ok 2 - announce-only
@@ -60,17 +60,17 @@ test-client-1  |   message: ""
 test-client-1  |   ...
 test-client-1  | not ok 6 - announce-subscribe
 test-client-1  |   ---
-test-client-1  |   duration_ms: 503
+test-client-1  |   duration_ms: 502
 test-client-1  |   message: ""
 test-client-1  |   ...
 test-client-1  | not ok 7 - subscribe-before-announce
 test-client-1  |   ---
-test-client-1  |   duration_ms: 501
+test-client-1  |   duration_ms: 502
 test-client-1  |   message: ""
 test-client-1  |   ...
 test-client-1  | not ok 8 - data-subgroup-basic
 test-client-1  |   ---
-test-client-1  |   duration_ms: 502
+test-client-1  |   duration_ms: 503
 test-client-1  |   test_spec_revision: 2
 test-client-1  |   message: ""
 test-client-1  |   ...

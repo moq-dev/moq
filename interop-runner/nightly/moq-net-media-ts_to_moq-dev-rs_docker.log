@@ -4,22 +4,22 @@ Running interop tests...
   Relay:  moq-interop-relay:local
   Client: ghcr.io/englishm/moq-interop-runner-moq-net-media-ts-client:latest
   URL:    https://relay:4443
-time="2026-11-21T03:36:38Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-11-21T03:36:38Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-11-21T03:36:38Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-11-21T03:36:38Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
-time="2026-11-21T03:36:38Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
+time="2026-11-21T16:18:31Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-11-21T16:18:31Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-11-21T16:18:31Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-11-21T16:18:31Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
+time="2026-11-21T16:18:31Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
  Container runner-upstream-test-client-1 Recreate 
  Container runner-upstream-test-client-1 Recreated 
 Attaching to relay-1, test-client-1
  Container runner-upstream-relay-1 Starting 
  Container runner-upstream-relay-1 Started 
  Container runner-upstream-relay-1 Waiting 
-relay-1  | [2m2026-11-21T03:36:39.041013Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP receive buffer is smaller than requested; raise `net.core.rmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m1048576
-relay-1  | [2m2026-11-21T03:36:39.041225Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP send buffer is smaller than requested; raise `net.core.wmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m4194304
-relay-1  | [2m2026-11-21T03:36:39.041634Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m cluster initialized [3mhop_id[0m[2m=[0m1903367497178489
-relay-1  | [2m2026-11-21T03:36:39.041791Z[0m [32m INFO[0m [2mmoq_relay::relay[0m[2m:[0m listening [3maddr[0m[2m=[0m[::]:4443 [3mkind[0m[2m=[0m"quic"
-relay-1  | [2m2026-11-21T03:36:39.041983Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m no cluster peers configured; running standalone
+relay-1  | [2m2026-11-21T16:18:31.703743Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP receive buffer is smaller than requested; raise `net.core.rmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m1048576
+relay-1  | [2m2026-11-21T16:18:31.703765Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP send buffer is smaller than requested; raise `net.core.wmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m4194304
+relay-1  | [2m2026-11-21T16:18:31.704055Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m cluster initialized [3mhop_id[0m[2m=[0m8961772367533130
+relay-1  | [2m2026-11-21T16:18:31.704104Z[0m [32m INFO[0m [2mmoq_relay::relay[0m[2m:[0m listening [3maddr[0m[2m=[0m[::]:4443 [3mkind[0m[2m=[0m"quic"
+relay-1  | [2m2026-11-21T16:18:31.704190Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m no cluster peers configured; running standalone
  Container runner-upstream-relay-1 Healthy 
  Container runner-upstream-test-client-1 Starting 
  Container runner-upstream-test-client-1 Started 
@@ -29,28 +29,28 @@ test-client-1  | # Relay: https://relay:4443
 test-client-1  | # Offered: moq-transport-22, moq-transport-21, moq-transport-20, moq-transport-19, moq-transport-18
 test-client-1  | # Fixture: mpeg-ts 20015 ms, 2000000 b/s, 26616 packets (2771 null); moq-dev-m2ts 20 groups, 1019 objects
 test-client-1  | 1..2
-relay-1        | [2m2026-11-21T03:36:44.696953Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m0 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:48229 [3msession[0m[2m=[0m"f119e378ee134c4d251b657b49adee89" [3mimplementation[0m[2m=[0m"moq-lite-rs"[1m}[0m[2m:[0m [2mmoq_relay::cluster[0m[2m:[0m session accepted [3mtransport[0m[2m=[0mwebtransport [3mrequest.role[0m[2m=[0mNone [3mtier[0m[2m=[0m [3mroot[0m[2m=[0mPath("") [3mpublish[0m[2m=[0mSome(Prefixes([""])) [3msubscribe[0m[2m=[0mSome(Prefixes([""]))
-relay-1        | [2m2026-11-21T03:36:44.697063Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m0 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:48229 [3msession[0m[2m=[0m"f119e378ee134c4d251b657b49adee89" [3mimplementation[0m[2m=[0m"moq-lite-rs"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m negotiated [3mversion[0m[2m=[0mmoq-transport-22 [3mtransport[0m[2m=[0mwebtransport
-relay-1        | [2m2026-11-21T03:36:45.001073Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m1 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:48229 [3msession[0m[2m=[0m"62d25b2f16ebf2695c81186a2787b2d2" [3mimplementation[0m[2m=[0m"moq-lite-rs"[1m}[0m[2m:[0m [2mmoq_relay::cluster[0m[2m:[0m session accepted [3mtransport[0m[2m=[0mwebtransport [3mrequest.role[0m[2m=[0mNone [3mtier[0m[2m=[0m [3mroot[0m[2m=[0mPath("") [3mpublish[0m[2m=[0mSome(Prefixes([""])) [3msubscribe[0m[2m=[0mSome(Prefixes([""]))
-relay-1        | [2m2026-11-21T03:36:45.001180Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m1 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:48229 [3msession[0m[2m=[0m"62d25b2f16ebf2695c81186a2787b2d2" [3mimplementation[0m[2m=[0m"moq-lite-rs"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m negotiated [3mversion[0m[2m=[0mmoq-transport-22 [3mtransport[0m[2m=[0mwebtransport
-relay-1        | [2m2026-11-21T03:37:05.522060Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m1 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:48229 [3msession[0m[2m=[0m"62d25b2f16ebf2695c81186a2787b2d2" [3mimplementation[0m[2m=[0m"moq-lite-rs"[1m}[0m[2m:[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0mprotocol violation
-relay-1        | [2m2026-11-21T03:37:05.522336Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m1 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:48229 [3msession[0m[2m=[0m"62d25b2f16ebf2695c81186a2787b2d2" [3mimplementation[0m[2m=[0m"moq-lite-rs"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m connection closed [3mid[0m[2m=[0m1 [3merr[0m[2m=[0mprotocol violation
-relay-1        | [2m2026-11-21T03:37:05.623805Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m0 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:48229 [3msession[0m[2m=[0m"f119e378ee134c4d251b657b49adee89" [3mimplementation[0m[2m=[0m"moq-lite-rs"[1m}[0m[2m:[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0mno error
-relay-1        | [2m2026-11-21T03:37:05.624257Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m0 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:48229 [3msession[0m[2m=[0m"f119e378ee134c4d251b657b49adee89" [3mimplementation[0m[2m=[0m"moq-lite-rs"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m connection closed [3mid[0m[2m=[0m0 [3merr[0m[2m=[0mcancelled
+relay-1        | [2m2026-11-21T16:18:37.377960Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m0 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:35320 [3msession[0m[2m=[0m"f76a4c064ff547268688a2d71a345406" [3mimplementation[0m[2m=[0m"moq-lite-rs"[1m}[0m[2m:[0m [2mmoq_relay::cluster[0m[2m:[0m session accepted [3mtransport[0m[2m=[0mwebtransport [3mrequest.role[0m[2m=[0mNone [3mtier[0m[2m=[0m [3mroot[0m[2m=[0mPath("") [3mpublish[0m[2m=[0mSome(Prefixes([""])) [3msubscribe[0m[2m=[0mSome(Prefixes([""]))
+relay-1        | [2m2026-11-21T16:18:37.378066Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m0 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:35320 [3msession[0m[2m=[0m"f76a4c064ff547268688a2d71a345406" [3mimplementation[0m[2m=[0m"moq-lite-rs"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m negotiated [3mversion[0m[2m=[0mmoq-transport-22 [3mtransport[0m[2m=[0mwebtransport
+relay-1        | [2m2026-11-21T16:18:37.682011Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m1 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:35320 [3msession[0m[2m=[0m"f6a96a264880afaaf505fed2a8853a95" [3mimplementation[0m[2m=[0m"moq-lite-rs"[1m}[0m[2m:[0m [2mmoq_relay::cluster[0m[2m:[0m session accepted [3mtransport[0m[2m=[0mwebtransport [3mrequest.role[0m[2m=[0mNone [3mtier[0m[2m=[0m [3mroot[0m[2m=[0mPath("") [3mpublish[0m[2m=[0mSome(Prefixes([""])) [3msubscribe[0m[2m=[0mSome(Prefixes([""]))
+relay-1        | [2m2026-11-21T16:18:37.682103Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m1 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:35320 [3msession[0m[2m=[0m"f6a96a264880afaaf505fed2a8853a95" [3mimplementation[0m[2m=[0m"moq-lite-rs"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m negotiated [3mversion[0m[2m=[0mmoq-transport-22 [3mtransport[0m[2m=[0mwebtransport
+relay-1        | [2m2026-11-21T16:18:38.186484Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m1 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:35320 [3msession[0m[2m=[0m"f6a96a264880afaaf505fed2a8853a95" [3mimplementation[0m[2m=[0m"moq-lite-rs"[1m}[0m[2m:[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0mno error
+relay-1        | [2m2026-11-21T16:18:38.186760Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m1 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:35320 [3msession[0m[2m=[0m"f6a96a264880afaaf505fed2a8853a95" [3mimplementation[0m[2m=[0m"moq-lite-rs"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m connection closed [3mid[0m[2m=[0m1 [3merr[0m[2m=[0mcancelled
+relay-1        | [2m2026-11-21T16:18:38.288294Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m0 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:35320 [3msession[0m[2m=[0m"f76a4c064ff547268688a2d71a345406" [3mimplementation[0m[2m=[0m"moq-lite-rs"[1m}[0m[2m:[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0mno error
+relay-1        | [2m2026-11-21T16:18:38.288461Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m0 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:35320 [3msession[0m[2m=[0m"f76a4c064ff547268688a2d71a345406" [3mimplementation[0m[2m=[0m"moq-lite-rs"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m connection closed [3mid[0m[2m=[0m0 [3merr[0m[2m=[0mcancelled
 test-client-1  | # Subtest: ts-carriage-integrity
 test-client-1  |     1..9
 test-client-1  |     ok 1 - catalog (equal to the published catalog, 65 bytes)
-test-client-1  |     ok 2 - byte-identical (the fixture's last 23840 non-null packets, from packet 29)
-test-client-1  |     ok 3 - ordering (1019 objects in groups 0-19, in order)
-test-client-1  |     ok 4 - decode (video 500, audio 939 frames from packet 0, as the fixture predicts)
-test-client-1  |     ok 5 - packet-alignment (26587 packets)
-test-client-1  |     ok 6 - transport-errors (0 packets with transport_error_indicator set)
-test-client-1  |     ok 7 - continuity (0 TSDuck continuity reports)
-test-client-1  |     ok 8 - psi-unchanged (PAT and 1 PMT(s) as in the fixture)
-test-client-1  |     ok 9 - group-starts (20 groups, each at a random access point)
-test-client-1  | ok 1 - ts-carriage-integrity
+test-client-1  |     not ok 2 - byte-identical (nothing received)
+test-client-1  |     not ok 3 - ordering (no object received)
+test-client-1  |     not ok 4 - decode (no random access point received)
+test-client-1  |     not ok 5 - packet-alignment (nothing received)
+test-client-1  |     not ok 6 - transport-errors (nothing received)
+test-client-1  |     not ok 7 - continuity (nothing received)
+test-client-1  |     not ok 8 - psi-unchanged (the PAT and PMT sections received differ from the fixture's)
+test-client-1  |     not ok 9 - group-starts (no object received)
+test-client-1  | not ok 1 - ts-carriage-integrity
 test-client-1  |   ---
-test-client-1  |   duration_ms: 23661
+test-client-1  |   duration_ms: 1154
 test-client-1  |   implementation_version: "0.1.0"
 test-client-1  |   test_spec_revision: 1
 test-client-1  |   media_format: "mpeg-ts"
@@ -64,47 +64,38 @@ test-client-1  |     subscriber:
 test-client-1  |       moqt_version: "moqt-22"
 test-client-1  |       transport: "webtransport-h3"
 test-client-1  |       alpn: "moqt-22"
-test-client-1  |   run_id: "edff2a849330ea224c3779f2dee526e8"
-test-client-1  |   namespace: "moq-test/ts-carriage-integrity/edff2a849330ea224c3779f2dee526e8"
+test-client-1  |   run_id: "c0d72dba7442e4afb4e62f3cd3461f01"
+test-client-1  |   namespace: "moq-test/ts-carriage-integrity/c0d72dba7442e4afb4e62f3cd3461f01"
 test-client-1  |   catalog_ms: 1
 test-client-1  |   join_offset_ms: -501
-test-client-1  |   track_end: "finished"
-test-client-1  |   ts_packets_received: 26587
-test-client-1  |   ts_null_packets_received: 2747
-test-client-1  |   ts_tail_start_packet: 29
-test-client-1  |   groups_received: 20
-test-client-1  |   objects_received: 1019
-test-client-1  |   bytes_received: 4998356
-test-client-1  |   first_group: 0
-test-client-1  |   last_group: 19
-test-client-1  |   ts_first_object: 0
-test-client-1  |   ts_decode_start_packet: 0
-test-client-1  |   ts_decoded_frames: "video 500, audio 939"
-test-client-1  |   ts_expected_frames: "video 500, audio 939"
+test-client-1  |   track_end: "the relay ended the subscription with REQUEST_ERROR (remote error: code=0)"
+test-client-1  |   ts_packets_received: 0
+test-client-1  |   ts_null_packets_received: 0
+test-client-1  |   message: "the relay ended the subscription with REQUEST_ERROR (remote error: code=0)"
 test-client-1  |   ...
-relay-1        | [2m2026-11-21T03:37:08.321264Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m2 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:48229 [3msession[0m[2m=[0m"c5c70c8ce7f37b526af30483cf372c0f" [3mimplementation[0m[2m=[0m"moq-lite-rs"[1m}[0m[2m:[0m [2mmoq_relay::cluster[0m[2m:[0m session accepted [3mtransport[0m[2m=[0mwebtransport [3mrequest.role[0m[2m=[0mNone [3mtier[0m[2m=[0m [3mroot[0m[2m=[0mPath("") [3mpublish[0m[2m=[0mSome(Prefixes([""])) [3msubscribe[0m[2m=[0mSome(Prefixes([""]))
-relay-1        | [2m2026-11-21T03:37:08.321345Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m2 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:48229 [3msession[0m[2m=[0m"c5c70c8ce7f37b526af30483cf372c0f" [3mimplementation[0m[2m=[0m"moq-lite-rs"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m negotiated [3mversion[0m[2m=[0mmoq-transport-22 [3mtransport[0m[2m=[0mwebtransport
-relay-1        | [2m2026-11-21T03:37:15.126017Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m3 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:48229 [3msession[0m[2m=[0m"7fcf82753ca7992a39983104966a3592" [3mimplementation[0m[2m=[0m"moq-lite-rs"[1m}[0m[2m:[0m [2mmoq_relay::cluster[0m[2m:[0m session accepted [3mtransport[0m[2m=[0mwebtransport [3mrequest.role[0m[2m=[0mNone [3mtier[0m[2m=[0m [3mroot[0m[2m=[0mPath("") [3mpublish[0m[2m=[0mSome(Prefixes([""])) [3msubscribe[0m[2m=[0mSome(Prefixes([""]))
-relay-1        | [2m2026-11-21T03:37:15.126094Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m3 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:48229 [3msession[0m[2m=[0m"7fcf82753ca7992a39983104966a3592" [3mimplementation[0m[2m=[0m"moq-lite-rs"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m negotiated [3mversion[0m[2m=[0mmoq-transport-22 [3mtransport[0m[2m=[0mwebtransport
-relay-1        | [2m2026-11-21T03:37:17.128428Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m3 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:48229 [3msession[0m[2m=[0m"7fcf82753ca7992a39983104966a3592" [3mimplementation[0m[2m=[0m"moq-lite-rs"[1m}[0m[2m:[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0mno error
-relay-1        | [2m2026-11-21T03:37:17.128587Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m3 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:48229 [3msession[0m[2m=[0m"7fcf82753ca7992a39983104966a3592" [3mimplementation[0m[2m=[0m"moq-lite-rs"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m connection closed [3mid[0m[2m=[0m3 [3merr[0m[2m=[0mcancelled
-relay-1        | [2m2026-11-21T03:37:28.638823Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m2 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:48229 [3msession[0m[2m=[0m"c5c70c8ce7f37b526af30483cf372c0f" [3mimplementation[0m[2m=[0m"moq-lite-rs"[1m}[0m[2m:[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0mno error
-relay-1        | [2m2026-11-21T03:37:28.639001Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m2 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:48229 [3msession[0m[2m=[0m"c5c70c8ce7f37b526af30483cf372c0f" [3mimplementation[0m[2m=[0m"moq-lite-rs"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m connection closed [3mid[0m[2m=[0m2 [3merr[0m[2m=[0mcancelled
+relay-1        | [2m2026-11-21T16:18:38.494560Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m2 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:35320 [3msession[0m[2m=[0m"71ab47d0fe5e8d44fb7dbb90162da90f" [3mimplementation[0m[2m=[0m"moq-lite-rs"[1m}[0m[2m:[0m [2mmoq_relay::cluster[0m[2m:[0m session accepted [3mtransport[0m[2m=[0mwebtransport [3mrequest.role[0m[2m=[0mNone [3mtier[0m[2m=[0m [3mroot[0m[2m=[0mPath("") [3mpublish[0m[2m=[0mSome(Prefixes([""])) [3msubscribe[0m[2m=[0mSome(Prefixes([""]))
+relay-1        | [2m2026-11-21T16:18:38.494643Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m2 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:35320 [3msession[0m[2m=[0m"71ab47d0fe5e8d44fb7dbb90162da90f" [3mimplementation[0m[2m=[0m"moq-lite-rs"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m negotiated [3mversion[0m[2m=[0mmoq-transport-22 [3mtransport[0m[2m=[0mwebtransport
+relay-1        | [2m2026-11-21T16:18:45.299402Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m3 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:35320 [3msession[0m[2m=[0m"5901e31d92a16c6f997e5fe674ba31c2" [3mimplementation[0m[2m=[0m"moq-lite-rs"[1m}[0m[2m:[0m [2mmoq_relay::cluster[0m[2m:[0m session accepted [3mtransport[0m[2m=[0mwebtransport [3mrequest.role[0m[2m=[0mNone [3mtier[0m[2m=[0m [3mroot[0m[2m=[0mPath("") [3mpublish[0m[2m=[0mSome(Prefixes([""])) [3msubscribe[0m[2m=[0mSome(Prefixes([""]))
+relay-1        | [2m2026-11-21T16:18:45.299477Z[0m [32m INFO[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m3 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:35320 [3msession[0m[2m=[0m"5901e31d92a16c6f997e5fe674ba31c2" [3mimplementation[0m[2m=[0m"moq-lite-rs"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m negotiated [3mversion[0m[2m=[0mmoq-transport-22 [3mtransport[0m[2m=[0mwebtransport
+relay-1        | [2m2026-11-21T16:18:58.812853Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m3 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:35320 [3msession[0m[2m=[0m"5901e31d92a16c6f997e5fe674ba31c2" [3mimplementation[0m[2m=[0m"moq-lite-rs"[1m}[0m[2m:[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0mno error
+relay-1        | [2m2026-11-21T16:18:58.813092Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m3 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:35320 [3msession[0m[2m=[0m"5901e31d92a16c6f997e5fe674ba31c2" [3mimplementation[0m[2m=[0m"moq-lite-rs"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m connection closed [3mid[0m[2m=[0m3 [3merr[0m[2m=[0mcancelled
+relay-1        | [2m2026-11-21T16:18:58.914142Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m2 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:35320 [3msession[0m[2m=[0m"71ab47d0fe5e8d44fb7dbb90162da90f" [3mimplementation[0m[2m=[0m"moq-lite-rs"[1m}[0m[2m:[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0mno error
+relay-1        | [2m2026-11-21T16:18:58.914604Z[0m [33m WARN[0m [1mconn[0m[1m{[0m[3mid[0m[2m=[0m2 [3mremote[0m[2m=[0m[::ffff:172.18.0.3]:35320 [3msession[0m[2m=[0m"71ab47d0fe5e8d44fb7dbb90162da90f" [3mimplementation[0m[2m=[0m"moq-lite-rs"[1m}[0m[2m:[0m [2mmoq_relay::connection[0m[2m:[0m connection closed [3mid[0m[2m=[0m2 [3merr[0m[2m=[0mcancelled
 test-client-1  | # Subtest: ts-late-subscriber
 test-client-1  |     1..10
 test-client-1  |     ok 1 - catalog (equal to the published catalog, 65 bytes)
-test-client-1  |     not ok 2 - byte-identical (ends at fixture packet 11290, before the fixture's end)
-test-client-1  |     not ok 3 - ordering (group 8 object 0 received twice)
-test-client-1  |     not ok 4 - decode (video 12, audio 24 frames from packet 0, not as the fixture predicts)
-test-client-1  |     ok 5 - packet-alignment (637 packets)
+test-client-1  |     ok 2 - byte-identical (the fixture's last 14099 non-null packets, from packet 10667)
+test-client-1  |     ok 3 - ordering (611 objects in groups 8-19, in order)
+test-client-1  |     ok 4 - decode (video 300, audio 571 frames from packet 0, as the fixture predicts)
+test-client-1  |     ok 5 - packet-alignment (15949 packets)
 test-client-1  |     ok 6 - transport-errors (0 packets with transport_error_indicator set)
 test-client-1  |     ok 7 - continuity (0 TSDuck continuity reports)
 test-client-1  |     ok 8 - psi-unchanged (PAT and 1 PMT(s) as in the fixture)
-test-client-1  |     ok 9 - group-starts (1 groups, each at a random access point)
+test-client-1  |     ok 9 - group-starts (12 groups, each at a random access point)
 test-client-1  |     ok 10 - join-point (lowest group 8, with group 8 open at the SUBSCRIBE)
-test-client-1  | not ok 2 - ts-late-subscriber
+test-client-1  | ok 2 - ts-late-subscriber
 test-client-1  |   ---
-test-client-1  |   duration_ms: 21452
+test-client-1  |   duration_ms: 22182
 test-client-1  |   implementation_version: "0.1.0"
 test-client-1  |   test_spec_revision: 1
 test-client-1  |   media_format: "mpeg-ts"
@@ -118,36 +109,33 @@ test-client-1  |     subscriber:
 test-client-1  |       moqt_version: "moqt-22"
 test-client-1  |       transport: "webtransport-h3"
 test-client-1  |       alpn: "moqt-22"
-test-client-1  |   run_id: "d72c6017467742ea19706265d113d453"
-test-client-1  |   namespace: "moq-test/ts-late-subscriber/d72c6017467742ea19706265d113d453"
-test-client-1  |   catalog_ms: 1
-test-client-1  |   join_offset_ms: 8501
+test-client-1  |   run_id: "cc8d702383e948dc2ac22c135b57953a"
+test-client-1  |   namespace: "moq-test/ts-late-subscriber/cc8d702383e948dc2ac22c135b57953a"
+test-client-1  |   catalog_ms: 0
+test-client-1  |   join_offset_ms: 8500
 test-client-1  |   join_group: 8
 test-client-1  |   join_group_ok: 8
-test-client-1  |   track_end: "the relay ended the subscription with REQUEST_ERROR (remote error: code=0)"
-test-client-1  |   ts_packets_received: 637
-test-client-1  |   ts_null_packets_received: 57
-test-client-1  |   first_mismatch:
-test-client-1  |     packet: 637
-test-client-1  |     expected: "PID 0x0100 CC 15"
-test-client-1  |   groups_received: 1
-test-client-1  |   objects_received: 48
-test-client-1  |   bytes_received: 239512
+test-client-1  |   track_end: "finished"
+test-client-1  |   ts_packets_received: 15949
+test-client-1  |   ts_null_packets_received: 1850
+test-client-1  |   ts_tail_start_packet: 10667
+test-client-1  |   groups_received: 12
+test-client-1  |   objects_received: 611
+test-client-1  |   bytes_received: 2998412
 test-client-1  |   first_group: 8
-test-client-1  |   last_group: 8
+test-client-1  |   last_group: 19
 test-client-1  |   ts_first_object: 0
 test-client-1  |   ts_decode_start_packet: 0
-test-client-1  |   ts_decoded_frames: "video 12, audio 24"
+test-client-1  |   ts_decoded_frames: "video 300, audio 571"
 test-client-1  |   ts_expected_frames: "video 300, audio 571"
-test-client-1  |   message: "the relay ended the subscription with REQUEST_ERROR (remote error: code=0)"
 test-client-1  |   ...
 [Ktest-client-1 exited with code 1
  Compose Stopping Aborting on container exit...
  Container runner-upstream-test-client-1 Stopping 
  Container runner-upstream-test-client-1 Stopped 
  Container runner-upstream-relay-1 Stopping 
-relay-1        | [2m2026-11-21T03:37:30.070750Z[0m [32m INFO[0m [2mmoq_relay::relay[0m[2m:[0m shutdown signal received; draining sessions (signal again to exit immediately) [3mwindow[0m[2m=[0m10s
-relay-1        | [2m2026-11-21T03:37:30.070772Z[0m [32m INFO[0m [2mmoq_relay::shutdown[0m[2m:[0m drain ended with every session gone; exiting [3melapsed[0m[2m=[0m862ns
+relay-1        | [2m2026-11-21T16:19:00.983846Z[0m [32m INFO[0m [2mmoq_relay::relay[0m[2m:[0m shutdown signal received; draining sessions (signal again to exit immediately) [3mwindow[0m[2m=[0m10s
+relay-1        | [2m2026-11-21T16:19:00.983866Z[0m [32m INFO[0m [2mmoq_relay::shutdown[0m[2m:[0m drain ended with every session gone; exiting [3melapsed[0m[2m=[0m682ns
  Container runner-upstream-relay-1 Stopped 
 [Krelay-1 exited with code 0
 
