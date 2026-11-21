@@ -4,6 +4,7 @@
 import importlib.util
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -88,9 +89,51 @@ class MeshTest(unittest.TestCase):
             ('relays = ["a", "b", "c"]\n[[links]]\ndial = "a"\naccept = "b"', "not connected"),
             ('relays = ["a", "b"]\n[[links]]\ndial = "a"\naccept = "b"\ncost = 0', "at least 1"),
             ('relays = ["a", "b"]\nlinks = []\nextra = 1', "unknown keys"),
+            ('relays = ["a", "b"]\n[[links]]\ndial = "a"\naccept = "b"\nbuild = "mid"', "`old` or `new`"),
+            ('relays = ["a", "b"]\n[[links]]\ndial = "a"\naccept = "b"\nbuild = "old"\nupstream = true', "upstream"),
+            (
+                'relays = ["a", "b", "c"]\n[[links]]\ndial = "a"\naccept = "b"\n'
+                '[[links]]\ndial = "b"\naccept = "c"\nbuild = "old"',
+                "not connected on the new build",
+            ),
         ]:
             with self.subTest(body=body), self.assertRaisesRegex(ValueError, error):
                 replay.load_mesh(mesh_file(body))
+
+    def test_a_roll_can_change_the_graph(self):
+        # The old build dials the a-c shortcut, the new one does not.
+        body = (
+            'relays = ["a", "b", "c"]\n[[links]]\ndial = "a"\naccept = "c"\nbuild = "old"\n'
+            '[[links]]\ndial = "a"\naccept = "b"\n[[links]]\ndial = "b"\naccept = "c"\n'
+        )
+        mesh = replay.load_mesh(mesh_file(body))
+        self.assertEqual(mesh.builds(), ["old", "new"])
+        self.assertEqual((mesh.diameter("old"), mesh.diameter("new")), (1, 2))
+        self.assertEqual(sorted(mesh.neighbours("a")), ["b", "c"])
+        self.assertEqual(mesh.neighbours("a", "new"), ["b"])
+        self.assertEqual(replay.load_mesh(HERE / "ring4.toml").builds(), [None])
+        # A link fault names a link every build dials unless the script names one.
+        script = replay.load_script(mesh_file('[[events]]\nkind = "reopen-link"\nrelay = "a"\n'), mesh)
+        self.assertEqual(script.events[0]["link"], "a-b")
+        only = replay.load_mesh(mesh_file(body.replace('accept = "b"\n', 'accept = "b"\nbuild = "new"\n', 1)))
+        with self.assertRaisesRegex(ValueError, "name the `link`"):
+            replay.load_script(mesh_file('[[events]]\nkind = "reopen-link"\nrelay = "a"\n'), only)
+        # A named link fault needs its dialer's build at that point to dial it.
+        reopen = '[[events]]\nkind = "reopen-link"\nrelay = "a"\nlink = "a-c"\n'
+        self.assertEqual(replay.load_script(mesh_file('start = "old"\n' + reopen), mesh).events[0]["link"], "a-c")
+        with self.assertRaisesRegex(ValueError, "a does not dial on its build then"):
+            replay.load_script(mesh_file(reopen), mesh)
+        # Each build's graph is whole, but rolling a before c leaves a alone mid-roll.
+        split = replay.load_mesh(
+            mesh_file(
+                'relays = ["a", "b", "c"]\n[[links]]\ndial = "a"\naccept = "b"\nbuild = "old"\n'
+                '[[links]]\ndial = "c"\naccept = "a"\nbuild = "new"\n[[links]]\ndial = "b"\naccept = "c"\n'
+            )
+        )
+        roll = 'start = "old"\n[[events]]\nkind = "roll"\nto = "new"\nrelays = [{}]\n'
+        replay.load_script(mesh_file(roll.format('"c", "a", "b"')), split)
+        with self.assertRaisesRegex(ValueError, r"once a rolls to new, \['b', 'c'\] are cut off"):
+            replay.load_script(mesh_file(roll.format('"a", "c", "b"')), split)
 
     def test_script_defaults_to_the_busiest_relay(self):
         mesh = replay.load_mesh(mesh_file(RING + '[[links]]\ndial = "a"\naccept = "c"\n'))
@@ -317,22 +360,115 @@ class BuildTest(unittest.TestCase):
         )
         return run, link
 
-    def test_a_link_is_lite07_when_the_dialer_offers_it_first(self):
-        new = replay.Build("new", "relay", ["moq-lite-07-wip", "moq-lite-06"])
-        only07 = replay.Build("old", "relay", ["moq-lite-07-wip"])
-        prefers06 = replay.Build("old", "relay", ["moq-lite-06", "moq-lite-07-wip"])
-        release = replay.Build("old", "relay", [])
-        cases = [
-            (new, only07, True),
-            (only07, new, True),
-            (prefers06, new, False),
-            (new, prefers06, True),
-            (new, release, False),
-            (new, None, False),
+    def test_a_link_reads_the_version_its_acceptor_negotiated_on_the_newest_open_session(self):
+        log = Path(SCRATCH.name) / "relay-b.log"
+        log.write_text("")
+        negotiated = replay.Negotiated(log)
+        new, old = replay.Build("new", "relay", []), replay.Build("old", "relay", [])
+
+        def line(session, version):
+            # As a relay writes it, colours included.
+            dim, end = "\x1b[2m", "\x1b[0m"
+            return (
+                f"{dim}2026-11-21T02:34:59Z{end} \x1b[32m INFO{end} \x1b[1mconn{end}\x1b[1m{{{end}"
+                f'\x1b[3msession{end}{dim}={end}"{session}"\x1b[1m}}{end}{dim}:{end} '
+                f"{dim}moq_relay::connection{end}{dim}:{end} negotiated \x1b[3mversion{end}{dim}={end}{version} "
+                f"\x1b[3mtransport{end}{dim}={end}quic\n"
+            )
+
+        events = []
+        links = [replay.Link("a", "b", None, False, {}), replay.Link("c", "b", None, False, {}, "old")]
+        run = SimpleNamespace(
+            auth=SimpleNamespace(lock=threading.Lock(), events=events),
+            relays={
+                name: SimpleNamespace(
+                    build=new,
+                    negotiated=negotiated if name == "b" else replay.Negotiated(log),
+                    proc=SimpleNamespace(alive=True),
+                    started=0.0,
+                )
+                for name in "abc"
+            },
+            mesh=SimpleNamespace(links=links),
+        )
+
+        def versions():
+            return replay.Run.versions(run)
+
+        # The new build does not dial c-b, and a-b has no session yet.
+        self.assertEqual(versions(), {"a-b": "down"})
+        events.append({"event": "connect", "id": "aa", "peer": "a", "t": 1.0})
+        with log.open("a") as f:
+            f.write(line("aa", "moq-lite-06"))
+            f.write("a line still being writ")
+        self.assertEqual(versions(), {"a-b": "moq-lite-06"})
+        # A newer session wins; the older one ending changes nothing.
+        events.append({"event": "connect", "id": "bb", "peer": "a", "t": 2.0})
+        with log.open("a") as f:
+            f.write("ten\n" + line("bb", "moq-lite-07-wip"))
+        events.append({"event": "end", "id": "aa", "peer": "a", "t": 3.0})
+        self.assertEqual(versions(), {"a-b": "moq-lite-07-wip"})
+        events.append({"event": "end", "id": "bb", "peer": "a", "t": 4.0})
+        self.assertEqual(versions(), {"a-b": "down"})
+        # A restarted acceptor holds none of its last process's sessions.
+        events.append({"event": "connect", "id": "cc", "peer": "a", "t": 5.0})
+        with log.open("a") as f:
+            f.write(line("cc", "moq-lite-06"))
+        self.assertEqual(versions(), {"a-b": "moq-lite-06"})
+        # A dead dialer's link is down, though its acceptor still holds the session.
+        run.relays["a"].proc.alive = False
+        self.assertEqual(versions(), {"a-b": "down"})
+        # Restarted, the dialer counts only the sessions its new process opened.
+        run.relays["a"].proc.alive, run.relays["a"].started = True, 6.0
+        self.assertEqual(versions(), {"a-b": "down"})
+        events.append({"event": "connect", "id": "dd", "peer": "a", "t": 7.0})
+        with log.open("a") as f:
+            f.write(line("dd", "moq-lite-07-wip"))
+        self.assertEqual(versions(), {"a-b": "moq-lite-07-wip"})
+        negotiated.restart()
+        self.assertEqual(versions(), {"a-b": "down"})
+        # On the old build, the dialer dials its own link too.
+        run.relays["c"].build = old
+        self.assertEqual(versions(), {"a-b": "down", "c-b": "down"})
+        self.assertTrue(replay.is_lite07("moq-lite-07-wip") and replay.is_lite07("moq-lite-07"))
+        self.assertFalse(replay.is_lite07("moq-lite-06") or replay.is_lite07("down"))
+
+    def test_the_report_lists_each_event_that_moved_a_link(self):
+        events = [
+            {"name": "start", "versions": {"a-b": "moq-lite-06", "a-c": "moq-lite-06"}},
+            {"name": "kill b", "versions": {"a-b": "moq-lite-06", "a-c": "moq-lite-06"}},
+            {"name": "roll a to new", "versions": {"a-b": "moq-lite-07-wip"}},
         ]
-        for dial, accept, want in cases:
-            run, link = self.fake_run(dial, accept)
-            self.assertEqual(replay.Run.lite07(run, link), want)
+        self.assertEqual(
+            replay.version_rows(events),
+            [
+                "| start | moq-lite-06 2 | - |",
+                "| roll a to new | moq-lite-07-wip 1 | a-b: moq-lite-06 to moq-lite-07-wip; a-c: moq-lite-06 to - |",
+            ],
+        )
+        mesh = {"links": [{"build": None}, {"build": "old"}], "diameter": {"old": 1, "new": 2}}
+        self.assertEqual(
+            replay.graph(mesh), "2 links on the old build, diameter 1; 1 links on the new build, diameter 2"
+        )
+
+    def test_readers_follow_the_first_broadcasts_of_each_relay(self):
+        relay = replay.Relay.__new__(replay.Relay)
+        relay.name, relay.run = "a", SimpleNamespace(broadcasts=4, follow=2)
+        self.assertEqual(relay.followed(), ["replay/a/0", "replay/a/1"])
+        self.assertEqual(len(relay.paths()), 4)
+        relay.run.follow = 0
+        self.assertEqual(relay.followed(), relay.paths())
+
+    def test_a_build_dials_only_its_links(self):
+        run, _ = self.fake_run(None, None)
+        run.mesh.links = [replay.Link("a", "b", None, False, {}, "old"), replay.Link("a", "c", None, False, {})]
+        run.shaper_port = {"a-b": 1, "a-c": 5}
+        relay = replay.Relay.__new__(replay.Relay)
+        relay.run, relay.name, relay.port, relay.internal = run, "a", 2, 3
+        self.assertIn("127.0.0.1:1/", relay.config(replay.Build("old", "relay", [])))
+        new = relay.config(replay.Build("new", "relay", []))
+        self.assertNotIn("127.0.0.1:1/", new)
+        self.assertIn("127.0.0.1:5/", new)
 
     def test_only_the_new_build_marks_a_link_upstream(self):
         run, _ = self.fake_run(None, None)
