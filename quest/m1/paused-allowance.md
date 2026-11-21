@@ -3,10 +3,10 @@
 ## Goal
 
 [#9210](https://github.com/moq-dev/moq/pull/9210) merges with its design
-checked by the [credit model](/quest/m1/credit-model.md): each paused stream
-holds a slot-sized allowance of credit instead of a stream window, so any
-number of streams pause within half the connection window. #9210 deletes
-this quest.
+checked by the credit model (`rs/moq-net/verify/credit`, the `verify-credit`
+skill): each paused stream holds a slot-sized allowance of credit instead of a
+stream window, so any number of streams pause within half the connection
+window. #9210 deletes this quest.
 
 ## Plan
 
@@ -19,6 +19,10 @@ first and modeling the result).
 items stay on the PR. When the model finds a violation in its design, fix it
 there before merging.
 
-## Required
-
-- [Credit model](/quest/m1/credit-model.md) - checks the slot allowances and `set_window` before they ship
+The model passes on #9210 at 69dc410be: the window, the cap, and every stream
+ending hold (`verify-credit`). Its open finding, `ReceiveCreditAllowance.cfg`,
+is #9210's own claim that every pause is charged its slot's allowance. A grant
+queued by `Stream::release` can go out before the next lock shrinks the window,
+so a pause is charged up to a stream window and a later one can be refused
+under the cap. Shrinking in the release's own lock hold passes it; then
+promote `EveryPauseFits` and `ChargedAllowance` into the other configs.
