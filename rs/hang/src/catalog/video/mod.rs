@@ -164,9 +164,12 @@ impl Video {
 			_ => (config.coded_width?, config.coded_height?),
 		};
 		let orientation = Orientation::of(width, height)?;
-		// An odd quarter turn swaps the sides; a non-finite rotation is ignored.
-		let quarters = (self.rotation.unwrap_or(0.0) / QUARTER_TURN_DEGREES).round();
-		let turned = quarters.is_finite() && quarters.rem_euclid(2.0) == 1.0;
+		// An odd quarter turn swaps the sides, rounded the way the catalog normalizes it; a
+		// non-finite rotation is ignored.
+		let rotation = self
+			.rotation
+			.and_then(|rotation| normalize_video_rotation(rotation).ok());
+		let turned = (rotation.unwrap_or(0.0) / QUARTER_TURN_DEGREES).rem_euclid(2.0) == 1.0;
 		Some(if turned { orientation.turned() } else { orientation })
 	}
 
@@ -550,6 +553,11 @@ mod test {
 			(-90.0, Orientation::Portrait),
 			(180.0, Orientation::Landscape),
 			(269.0, Orientation::Portrait),
+			// Halfway rounds the same whichever way round the turn is written.
+			(-45.0, Orientation::Landscape),
+			(315.0, Orientation::Landscape),
+			(-135.0, Orientation::Portrait),
+			(225.0, Orientation::Portrait),
 			(f64::NAN, Orientation::Landscape),
 		] {
 			video.rotation = Some(rotation);

@@ -223,6 +223,10 @@ test("orientation follows the shown shape", () => {
 		[-90, "portrait"],
 		[180, "landscape"],
 		[269, "portrait"],
+		[-45, "landscape"],
+		[315, "landscape"],
+		[-135, "portrait"],
+		[225, "portrait"],
 	] as const) {
 		expect(Catalog.Video.orientation(section({ rotation }), sized(1920, 1080))).toBe(expected);
 	}
