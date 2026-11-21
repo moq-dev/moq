@@ -704,6 +704,7 @@ class Reader implements ResumeSource {
 			this.#resolution = resolution;
 		}
 		if (resolution.window.settled) return resolution.window;
+		const ends = this.#raisedEnds();
 		for (const copy of this.#copies) {
 			if (resolution.window.settled) break;
 			// A copy whose delivery failed places a time start past its last group as if nothing
@@ -723,11 +724,43 @@ class Reader implements ResumeSource {
 				// backfill asked from below places it; see #backfillGaps.
 				if (!at || raised(ranges[index], copy.floor) !== undefined) return undefined;
 				if (cap !== undefined && at.end !== undefined && at.end <= at.start) return undefined;
-				return cap === undefined || (at.end !== undefined && at.end < cap) ? at : { ...at, end: undefined };
+				if (cap === undefined || (at.end !== undefined && at.end < cap)) return at;
+				// A relative end the cap cut is where a copy that raised the start placed it.
+				const end = ranges[index]?.end?.relative !== undefined ? ends.get(BigInt(index)) : undefined;
+				return { ...at, end };
 			});
 			this.#resolve(resolved);
 		}
 		return resolution.window;
+	}
+
+	/**
+	 * Where the first copy that raised an unsettled range's time start placed its relative end, by
+	 * key: the copy says nothing of where the range starts, but the backfill that places the start is
+	 * capped under the resume point, so only that copy places the end. Mirrors the Rust
+	 * `Reader::raised_ends`.
+	 */
+	#raisedEnds(): Map<bigint, bigint> {
+		const ends = new Map<bigint, bigint>();
+		const window = this.#resolution?.window;
+		if (!window || window.settled) return ends;
+		const ranges = this.#ranges();
+		const keys = [...window.unsettled()].filter((key) => ranges[Number(key)]?.end?.relative !== undefined);
+		if (keys.length === 0) return ends;
+		for (const copy of this.#copies) {
+			if (!this.route.concluded && copyFailed(copy)) continue;
+			if (!copy.from || !sameRanges(copy.from, ranges)) continue;
+			const own = copy.sub.closed.peek() === undefined ? hooks.servingResolved(copy.sub) : (copy.resolved ?? []);
+			const cap = copyEnd(copy);
+			for (const key of keys) {
+				const at = own[Number(key)];
+				if (ends.has(key) || !at || at.end === undefined) continue;
+				if (raised(ranges[Number(key)], copy.floor) === undefined) continue;
+				if (cap !== undefined && (at.end <= at.start || at.end >= cap)) continue;
+				ends.set(key, at.end);
+			}
+		}
+		return ends;
 	}
 
 	/**
@@ -962,15 +995,22 @@ class Reader implements ResumeSource {
 		const owed: bigint[] = [];
 		const placed: (Resolved | undefined)[] = [];
 		const ranges = this.#ranges();
+		const ends = this.#raisedEnds();
 		for (const [key, time] of raisedAt) {
 			if (resumed !== undefined && !delivered.covers(time, resumed)) {
 				owed.push(time);
 				continue;
 			}
-			// An end other than a time one is where the serving copy placed it.
-			const end = ranges[Number(key)]?.end?.time;
-			const served = serving && hooks.servingResolved(serving.sub)[Number(key)]?.end;
-			placed[Number(key)] = { start: time, end: end === undefined ? served : end + 1n, floored: true };
+			const range = ranges[Number(key)];
+			let end: bigint | undefined;
+			if (range?.end?.time !== undefined) end = range.end.time + 1n;
+			else if (range?.end?.relative !== undefined) {
+				// A relative end is where a copy that raised the start placed it: waited for, as the
+				// window waits on a copy to place it.
+				end = ends.get(key);
+				if (end === undefined) return;
+			}
+			placed[Number(key)] = { start: time, end, floored: true };
 		}
 		if (placed.length > 0) this.#resolve(placed);
 		this.#resumed = false;
@@ -1188,10 +1228,19 @@ class Reader implements ResumeSource {
 		// A group of the window that the local floor or cap keeps out stays owed, as on one cursor,
 		// though no copy reads it: under the serving copy's resume point, or under where that copy's
 		// own ranges start, when an earlier copy placed the window lower.
+		// Above where the serving copy's own window starts, for the ranges it placed itself, is that
+		// copy's to judge, skips included.
+		let own: bigint | undefined;
+		for (const resolved of hooks.servingResolved(serving.sub)) {
+			if (resolved !== undefined && (own === undefined || resolved.start < own)) own = resolved.start;
+		}
+		const until = own === undefined ? serving.floor : serving.floor === undefined ? own : max(own, serving.floor);
 		const cursor = this.#shell.cursor.peek();
-		for (const run of window.runs(window.floor() ?? 0n, end)) {
-			for (const gap of delivered.gaps(run.start, run.end)) {
-				if (gap.start < cursor.start || (cursor.end !== undefined && gap.end > cursor.end)) return false;
+		if (until !== undefined) {
+			for (const run of window.runs(window.floor() ?? 0n, min(until, end))) {
+				for (const gap of delivered.gaps(run.start, run.end)) {
+					if (gap.start < cursor.start || (cursor.end !== undefined && gap.end > cursor.end)) return false;
+				}
 			}
 		}
 		return hooks.exhaustedFor(serving.sub, delivered, ordered);
@@ -1506,8 +1555,9 @@ class Reader implements ResumeSource {
 		// superseded it, landed or not.
 		if (copy.done === undefined && end !== undefined && !this.#expired(copy, budget)) {
 			const cursor = this.#shell.cursor.peek();
-			// From where it was asked to start, or else from what it first got.
-			const start = max(cursor.start, copy.floor ?? 0n);
+			// From where it was asked to start, or else from what it first got. A backfill owes what
+			// the reader's window hands out below its floor too.
+			const start = copy.backfill ? cursor.start : max(cursor.start, copy.floor ?? 0n);
 			const floor = copy.floor !== undefined;
 			// A group still to land in the reader's window is waited for once something superseded
 			// it, as a gap is.
@@ -1531,7 +1581,7 @@ class Reader implements ResumeSource {
 			if (hooks.holdsGroup(copy.sub, key)) return true;
 			// A group at or past where it was asked to start may land even before its first
 			// arrival; without a floor, only what follows its first arrival can.
-			const asked = copy.floor !== undefined && copy.floor <= key;
+			const asked = copy.floor !== undefined && (copy.backfill || copy.floor <= key);
 			const land = { start: key, end: key + 1n, floor: asked, grace: wait };
 			if (lands && hooks.mayLand(copy.sub, land)) return true;
 		}
