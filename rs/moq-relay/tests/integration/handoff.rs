@@ -93,9 +93,12 @@ fn active(registry: &Registry) -> u64 {
 }
 
 /// Wait until the relay behind `registry` serves `count` sessions.
+///
+/// The registry has no change notification, so this polls; a sleep lets the runtime
+/// park between polls instead of spinning a core the relays need on a loaded host.
 async fn serving(registry: &Registry, count: u64) {
 	while active(registry) != count {
-		tokio::task::yield_now().await;
+		kio::clock::sleep(Duration::from_millis(5)).await;
 	}
 }
 
