@@ -127,3 +127,11 @@ the base moves past it). Dropped: the aac `step` `av_lag_ms_p50` of 5.1
 against 5, a one-night move near the threshold, and the Kotlin wrapper's
 Gradle plugin resolution failure, a one-off after two passing nights
 (re-check either if it repeats).
+
+The mesh replay's violations with no known entry on 2026-11-19 and 11-20
+came from debug-built relays starved for CPU on the 4-core runner, and from
+a strand counted again at every later event; both fixed in
+[moq-dev/moq#9236](https://github.com/moq-dev/moq/pull/9236). Its `shown`
+rows (a relay still showing a broadcast after its source ended) appeared only
+in those starved runs and did not reproduce locally. A failed replay job now
+uploads its relay and reader logs, so read those if `shown` recurs.
