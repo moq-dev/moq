@@ -144,6 +144,8 @@ class MeshTest(unittest.TestCase):
             replay.load_script(mesh_file('[[events]]\nkind = "kill"\nrelay = "z"\n'), mesh)
         with self.assertRaisesRegex(ValueError, "duration"):
             replay.load_script(mesh_file('down = "soon"\n'), mesh)
+        with self.assertRaisesRegex(ValueError, "`times` is at least 1"):
+            replay.load_script(mesh_file('[[events]]\nkind = "roll"\nto = "old"\ntimes = 0\n'), mesh)
 
 
 METRICS = """# HELP moq_relay_route_changes_total route changes

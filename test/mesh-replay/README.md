@@ -56,7 +56,7 @@ accept = "b"
 cost = 2         # optional, ?cost on the dialer's peer URL
 upstream = true  # optional: `dial` marks `accept` upstream, on the new build only
 shape = { delay = "40ms" }   # optional, over [shape]
-build = "old"    # optional: only a dialer on this build dials it
+build = "new"    # optional: only a dialer on this build dials it
 ```
 
 A link naming a `build` models a roll that also changes the graph, such as a new

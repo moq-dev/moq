@@ -213,6 +213,10 @@ def load_script(path: Path, mesh: Mesh) -> Script:
         if kind not in KINDS:
             raise ValueError(f"{path}: event kind {kind!r} is not one of {sorted(KINDS)}")
         event = dict(raw)
+        # Zero would skip the event at run time while the graph check below still applied it.
+        event["times"] = int(raw.get("times", 1))
+        if event["times"] < 1:
+            raise ValueError(f"{path}: a {kind}'s `times` is at least 1")
         if kind == "roll":
             if raw.get("to") not in ("new", "old"):
                 raise ValueError(f"{path}: a roll goes `to` new or old")
@@ -246,7 +250,6 @@ def load_script(path: Path, mesh: Mesh) -> Script:
                         f"{path}: reopen-link names {name}, which {link.dial} does not dial on its build then"
                     )
             event["link"] = link.name
-        event["times"] = int(raw.get("times", 1))
         events.append(event)
     known = doc.get("known", [])
     for item in known:
