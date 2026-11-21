@@ -681,6 +681,10 @@ connect = [{", ".join(peers)}]
     def paths(self) -> list[str]:
         return [f"{PREFIX}/{self.name}/{i}" for i in range(self.run.broadcasts)]
 
+    def followed(self) -> list[str]:
+        """The broadcasts every other relay's reader follows: the first `--follow`, or all."""
+        return self.paths()[: self.run.follow or None]
+
     def client(self, proc: Proc, flags: list[str]) -> None:
         build = self.run.builds["new"]
         versions = []
@@ -698,7 +702,7 @@ connect = [{", ".join(peers)}]
         flags = ["--output", str(self.readout.file)]
         for relay in self.run.relays.values():
             if relay is not self:
-                for path in relay.paths():
+                for path in relay.followed():
                     flags += ["--follow", path]
         self.client(self.reader, flags)
 
@@ -709,6 +713,7 @@ class Run:
         self.mesh = mesh
         self.script = script
         self.broadcasts = args.broadcasts
+        self.follow = args.follow
         self.log = args.log
         self.bench = args.bench
         self.shaper = args.shaper
@@ -964,14 +969,18 @@ class Run:
             shows = relay.announced() if relay.name in live else None
             if shows is None:
                 continue
-            # Every path the reader was told to follow, so one it never reported counts too.
+            # Every path the reader was told to follow, so one it never reported counts too, and
+            # every live broadcast for the route, followed or not.
             for other in self.relays.values():
                 if other is relay or other.name not in publishing or other.name not in live:
                     continue
+                followed = set(other.followed())
                 for path in other.paths():
                     state = relay.readout.paths.get(path) or Follow()
                     if path not in shows:
                         unrouted.append({"reader": relay.name, "path": path})
+                    elif path not in followed:
+                        continue
                     elif state.last is None or state.last < restored or now - state.last > self.script.stall:
                         unfed.append(
                             {
@@ -1356,7 +1365,12 @@ def markdown(report: dict) -> str:
     if report["known"]:
         result += f", {len(report['known'])} known"
     lines = [
-        f"## Mesh replay: {mesh['name']}, {len(mesh['relays'])} relays, {report['broadcasts']} broadcasts each",
+        f"## Mesh replay: {mesh['name']}, {len(mesh['relays'])} relays, {report['broadcasts']} broadcasts each"
+        + (
+            f", readers follow {report['follow']} of each"
+            if report.get("follow", report["broadcasts"]) < report["broadcasts"]
+            else ""
+        ),
         "",
         f"{graph(mesh)}. New build `{builds['new']}`, old build `{builds['old']}`.",
         f"Result: **{result}**",
@@ -1410,6 +1424,7 @@ def main() -> int:
     run.add_argument("--mesh", type=Path, required=True)
     run.add_argument("--script", type=Path, required=True)
     run.add_argument("--broadcasts", type=int, required=True)
+    run.add_argument("--follow", type=int, default=0, help="broadcasts of each relay a reader follows (0: all)")
     run.add_argument("--dir", required=True)
     run.add_argument("--ports", required=True)
     run.add_argument("--bench", required=True)
@@ -1460,6 +1475,7 @@ def main() -> int:
             "diameter": {build or "all": mesh.diameter(build) for build in mesh.builds()},
         },
         "broadcasts": args.broadcasts,
+        "follow": args.follow or args.broadcasts,
         "builds": {name: build.version for name, build in run.builds.items()},
         "events": run.events,
         "violations": failing,

@@ -348,6 +348,14 @@ class BuildTest(unittest.TestCase):
             replay.graph(mesh), "2 links on the old build, diameter 1; 1 links on the new build, diameter 2"
         )
 
+    def test_readers_follow_the_first_broadcasts_of_each_relay(self):
+        relay = replay.Relay.__new__(replay.Relay)
+        relay.name, relay.run = "a", SimpleNamespace(broadcasts=4, follow=2)
+        self.assertEqual(relay.followed(), ["replay/a/0", "replay/a/1"])
+        self.assertEqual(len(relay.paths()), 4)
+        relay.run.follow = 0
+        self.assertEqual(relay.followed(), relay.paths())
+
     def test_a_build_dials_only_its_links(self):
         run, _ = self.fake_run(None, None)
         run.mesh.links = [replay.Link("a", "b", None, False, {}, "old"), replay.Link("a", "c", None, False, {})]

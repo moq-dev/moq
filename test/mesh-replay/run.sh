@@ -17,12 +17,13 @@ RERUN="$(harness_env MESH_REPLAY_LOG)just test mesh-replay$(harness_argv "$@")"
 
 usage() {
     cat >&2 <<'USAGE'
-usage: just test mesh-replay [--mesh FILE]... [--script FILE] [--broadcasts N[,N...]]
+usage: just test mesh-replay [--mesh FILE]... [--script FILE] [--broadcasts N[,N...]] [--follow N]
                              [--new RELAY] [--old RELAY | --old-release VERSION] [--report DIR]
 
   --mesh FILE         relays and links (default: test/mesh-replay/ring6.toml); repeat to sweep
   --script FILE       the faults to play (default: test/mesh-replay/script.toml)
   --broadcasts LIST   broadcasts each relay publishes, comma-separated to sweep (default: 4)
+  --follow N          broadcasts of each other relay a reader follows (default: all)
   --new RELAY         the relay rolled onto (default: this checkout's build)
   --old RELAY         the relay rolled off (default: the newest moq-relay release)
   --old-release V     that release's version instead of the newest
@@ -35,6 +36,7 @@ USAGE
 MESHES=()
 SCRIPT="$DIR/script.toml"
 BROADCASTS=4
+FOLLOW=0
 NEW=""
 OLD=""
 OLD_RELEASE=""
@@ -46,6 +48,7 @@ while [[ $# -gt 0 ]]; do
         --mesh) MESHES+=("$(realpath "$2")") ;;
         --script) SCRIPT=$(realpath "$2") ;;
         --broadcasts) BROADCASTS="$2" ;;
+        --follow) FOLLOW="$2" ;;
         --new) NEW=$(realpath "$2") ;;
         --old) OLD=$(realpath "$2") ;;
         --old-release) OLD_RELEASE="$2" ;;
@@ -64,6 +67,10 @@ dupe=$(for mesh in "${MESHES[@]}"; do basename "$mesh" .toml; done | sort | uniq
 }
 [[ "$BROADCASTS" =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]] || {
     echo "error: --broadcasts takes whole numbers, comma-separated (got '$BROADCASTS')" >&2
+    exit 2
+}
+[[ "$FOLLOW" =~ ^[0-9]+$ ]] || {
+    echo "error: --follow takes a whole number (got '$FOLLOW')" >&2
     exit 2
 }
 [[ -z "$OLD" || -z "$OLD_RELEASE" ]] || {
@@ -122,7 +129,7 @@ for mesh in "${MESHES[@]}"; do
         cell="$(basename "$mesh" .toml)-$count"
         mkdir -p "$HARNESS_RUN/$cell"
         args=(
-            run --mesh "$mesh" --script "$SCRIPT" --broadcasts "$count"
+            run --mesh "$mesh" --script "$SCRIPT" --broadcasts "$count" --follow "$FOLLOW"
             --dir "$HARNESS_RUN/$cell" --ports "$ports" --report "$REPORT/$cell"
             --log "${MESH_REPLAY_LOG:-info}" --bench "$HARNESS_RUN/new/moq-bench" --shaper "$HARNESS_RUN/new/moq-shaper"
             --new "$HARNESS_RUN/new/relay" --new-label "$NEW_LABEL" --old "$HARNESS_RUN/old/bin/moq-relay" --old-versions "$OLD_VERSIONS"
