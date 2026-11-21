@@ -9987,10 +9987,7 @@ mod test {
 		let from = |time, end| {
 			Subscription::default()
 				.with_delay(Delay::default().with_max(HOUR))
-				.with_ranges([track::Range {
-					start: Some(time),
-					end,
-				}])
+				.with_ranges([track::Range { start: Some(time), end }])
 		};
 		let mut sub = logical
 			.consume()
@@ -10038,10 +10035,7 @@ mod test {
 		let from = |time, end| {
 			Subscription::default()
 				.with_delay(Delay::default().with_max(HOUR))
-				.with_ranges([track::Range {
-					start: Some(time),
-					end,
-				}])
+				.with_ranges([track::Range { start: Some(time), end }])
 		};
 		let mut sub = front
 			.consume()
