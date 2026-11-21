@@ -45,8 +45,9 @@ joins live and lifts the quarantine, leaving Chromium's moq-transport audio
 stall, which [moq-dev/moq#9300](https://github.com/moq-dev/moq/pull/9300)
 fixed: a relay could serve a group before the skip its header passed over,
 so the group went out without its Prior Group ID Gap)
-and
-[the moq-transport JS joining FETCH](/quest/m0/interop-green/ietf-js-joining-fetch.md).
+and the moq-transport JS joining FETCH, which the relay refused when the join's Largest
+Object was a group's END_OF_GROUP status (fixed in
+[moq-dev/moq#9291](https://github.com/moq-dev/moq/pull/9291)).
 The intermittent `go -> js` silent audio went to
 test flakes (fixed by the Go tone's start-anchored pacing), and the datagram
 cells are [moq-dev/moq#9197](https://github.com/moq-dev/moq/pull/9197)'s.
