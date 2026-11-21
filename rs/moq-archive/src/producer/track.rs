@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use kio::clock::Instant;
-use moq_net::track::{Anchor, Delay, Order, Position, Range, Subscription};
+use moq_net::track::{Delay, Order, Position, Range, Subscription};
 use moq_net::{StreamError, Timescale, group};
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt, PutMode, PutPayload};
@@ -161,10 +161,10 @@ impl<S: ObjectStore> Track<S> {
 		let config = &shared.config;
 		let range = match self.next {
 			Some(next) => Range {
-				start: Anchor::Time(next.group),
+				start: Some(next.group),
 				end: None,
 			},
-			None => Range::oldest(),
+			None => Range::default(),
 		};
 		// The cap, since `info` may describe an older instance than the one subscribed, and a
 		// backlog a smaller budget skipped is not sent again. The budget is narrowed below.

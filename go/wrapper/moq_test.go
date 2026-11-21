@@ -312,7 +312,7 @@ func TestAudioConsumerDelay(t *testing.T) {
 	estimate := false
 	fixed, err := moqaudio.Subscribe(ctx, bc, track, rendition, moqaudio.DecoderOutput{
 		Format:   moq.AudioSampleFormatF32,
-		Delay:    moq.Delay{Min: fixedDelay, MaxUnlimited: true},
+		Delay:    moq.Delay{Min: &fixedDelay, MaxUnlimited: true},
 		Estimate: &estimate,
 	})
 	if err != nil {
@@ -1110,9 +1110,10 @@ func TestAscendingSubscriptionReadsCachedBacklogOldestFirst(t *testing.T) {
 	}
 
 	order := moq.OrderAscending
+	start := moq.Unscaled(0)
 	consumer, err := track.Consume(&moq.Subscription{
 		Delay:  moq.Delay{Max: 10 * time.Second},
-		Ranges: []moq.Range{{Start: moq.AnchorRelative{Groups: 2}}},
+		Ranges: []moq.Range{{Start: &start}},
 		Order:  &order,
 	})
 	if err != nil {

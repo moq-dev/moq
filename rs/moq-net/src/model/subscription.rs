@@ -8,7 +8,7 @@ mod window;
 pub(super) use cover::{Cover, minus};
 pub(crate) use window::Accounted;
 pub(crate) use window::Resolved;
-pub(super) use window::{Containing, Found, Holdings, Unheld, Unplaced, Window};
+pub(super) use window::{Containing, Found, Holdings, Join, Unheld, Unplaced, Window};
 
 /// Subscriber-side preferences for receiving a track.
 ///
@@ -26,9 +26,9 @@ pub struct Subscription {
 	pub delay: Delay,
 	/// The spans of the track to deliver; see [`Range`].
 	///
-	/// The default is [`Range::oldest`]: everything [`Delay::max`] still considers
-	/// fresh. [`Range::live`] starts at the latest group instead, and an empty list asks
-	/// for nothing.
+	/// The default is one [`Range::default`], which has no start: [`Delay`] places it, at a
+	/// live join [`Delay::min`] behind the live edge, or as far back as [`Delay::max`] allows
+	/// when the minimum is not stated. An empty list asks for nothing.
 	///
 	/// A request to the publisher, aggregated across every live subscriber as the union of
 	/// their ranges, and this subscriber's read filter: it reads only the groups its own
@@ -50,34 +50,36 @@ pub struct Subscription {
 	pub(crate) feed: bool,
 	/// The frames this reader already holds of the group a range starts at, so that range asks
 	/// for it from the frame after them rather than whole: a route switch resuming on a new
-	/// copy. Only a range whose start is a [`Anchor::Time`] at exactly that group's start uses
+	/// copy. Only a range whose start is exactly that group's start uses
 	/// it. Aggregated only when every reader resumes: the lowest position then.
 	pub(crate) resume: Option<Position>,
 }
 
 /// How far behind the live edge a subscriber plays: where it starts, and how late it may fall.
 ///
-/// Both default to zero, which starts at the newest group and skips a superseded one at once.
+/// The default states no minimum and a zero maximum, which starts at the newest group and skips
+/// a superseded one at once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Delay {
 	/// The target latency, the playout or jitter-buffer delay held behind the live edge, or
 	/// `None` when the subscriber did not state one.
 	///
-	/// A [`Range::live`] join starts this far behind the live edge: at the newest group that
-	/// began at or before the live edge minus this, so a player's buffer arrives full instead
-	/// of filling in real time. The hop serving it measures from what it holds: in media time
-	/// from the newest frame on a timed track, and by arrival on its own clock on a scale-less
-	/// one. With no such group held it starts at the oldest one, and never fetches upstream for
-	/// more. [`Self::max`] still skips what has gone stale. Any other range, [`Range::oldest`]
-	/// included, and a resumed subscription ignore it, and changing it later moves nothing
-	/// already started.
+	/// A range with no start is a live join once this is stated, zero included: it starts at
+	/// the group containing the live edge minus this, so a player's buffer arrives full instead
+	/// of filling in real time. The hop serving it measures the live edge in media time, from
+	/// the newest frame it holds, and on a scale-less track by arrival on its own clock. It
+	/// resolves that time as any range start, so a publisher looks it up in its history and a
+	/// relay's copy that can't place it from what it holds asks its upstream and waits.
+	/// [`Self::max`] still skips what has gone stale. Unstated, a range with no start reaches
+	/// back as far as [`Self::max`] allows. A range with a start, and a resumed subscription,
+	/// ignore it, and changing it later moves nothing already started.
 	///
 	/// It only sets where a reader starts: a missing group is given up by [`Self::max`] alone,
 	/// whatever the minimum. A media consumer starts an unstated minimum as zero. The aggregate
-	/// across subscribers is
-	/// the largest stated one, which a relay forwards upstream, so the copy it fills reaches
-	/// back for the reader that buffers most; each reader's own minimum then bounds what it
-	/// reads of that copy. moq-lite before 07 and moq-transport cannot carry it.
+	/// across the subscribers holding a range with no start is the largest, counting an
+	/// unstated one as the largest, which a relay forwards upstream, so the copy it fills
+	/// reaches back for the reader that buffers most; each reader's own minimum then bounds
+	/// what it reads of that copy. moq-lite before 07 and moq-transport cannot carry it.
 	///
 	/// This is the `Subscriber Min Age` on the moq-lite-07 wire, in milliseconds.
 	pub min: Option<Duration>,
@@ -140,7 +142,7 @@ pub struct Delay {
 impl Default for Delay {
 	fn default() -> Self {
 		Self {
-			min: Some(Duration::ZERO),
+			min: None,
 			max: Some(Duration::ZERO),
 		}
 	}
@@ -179,113 +181,51 @@ pub enum Order {
 	Descending,
 }
 
-/// Where one end of a [`Range`] falls: a count of groups back from the latest one, the
-/// oldest group, or a time, which names the group containing it.
+/// A span of a track to deliver: from the group containing `start` through the group
+/// containing `end`, both times in the track's timescale (bare starts on a scale-less track).
 ///
-/// Every anchor names a whole group: a subscription always starts at a group's first frame,
-/// since a group is the unit of decodability, and every end includes its group.
+/// Every range names whole groups: a subscription always starts at a group's first frame,
+/// since a group is the unit of decodability, and an end includes its group. `2..=6` delivers
+/// every group from the one containing time 2 through the one containing time 6. An end before
+/// its start is empty.
 ///
-/// A relative or time anchor resolves at the hop that serves it, when it starts serving
-/// and again whenever the subscriber replaces its ranges. Before any group exists a
-/// relative anchor resolves at the first one, so [`Range::live`] starts there. A relay's
-/// copy waiting on a fresh upstream answer counts from the live feed's latest group once
-/// it answers, never from the groups an ended feed left in its cache.
-///
-/// Over moq-lite-07, a copy resolves relative anchors from the reported live edge. A Rust
-/// moq-transport copy resolves a relative anchor from the Largest Object its live join
-/// reports. Older moq-lite versions accept time and [`Anchor::Oldest`] starts but refuse
-/// relative anchors other than [`Range::live`]'s with
-/// [`Error::Unsupported`](crate::Error::Unsupported) rather than guess from a partial copy.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Anchor {
-	/// The group this many before the latest, counting the groups the serving hop holds:
-	/// `Relative(0)` is the latest group. One counting back past every group held reaches
-	/// back to the oldest as a start, and ends before them all as an end.
-	Relative(u64),
-	/// The oldest group still around, as far back as [`Delay::max`] allows, naming no floor.
-	///
-	/// A start only: [`Range::oldest`] is the range starting here. An end here is refused
-	/// with [`Error::InvalidRange`](crate::Error::InvalidRange), since no hop can tell
-	/// which group is the oldest still around anywhere upstream.
-	Oldest,
-	/// The group containing this time, in the track's timescale: the newest one starting at
-	/// or before it. Groups are keyed by their start, so a group's start names exactly it.
-	///
-	/// Resolved from the starts of the groups the serving hop holds. When none starts at
-	/// or before it, a hop whose [`Requests`](crate::track::Requests) handler serves its
-	/// history asks it for the group containing the time (see
-	/// [`FillGroups::floor`](crate::track::FillGroups::floor)), reading nothing until it
-	/// answers; otherwise, or when the handler can't tell, a start reaches back to the oldest
-	/// group. While no group is held at all it waits for one,
-	/// reading nothing of its range meanwhile. An end includes every group starting at or
-	/// before it.
-	///
-	/// On a scale-less track (no [`Info::timescale`](crate::track::Info::timescale)) the
-	/// time is a bare start, in the same units as the group starts.
-	Time(u64),
-}
-
-/// A span of a track to deliver: from `start` through `end`, or onward when `end` is `None`.
-///
-/// Both ends include their group: `Time(2)..=Time(6)` delivers every group starting from the
-/// one containing time 2 through the one containing time 6, and `Oldest..=Relative(0)`
-/// delivers through the latest group. A time end before its time start is empty.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// A time resolves at the hop that serves it, from the starts of the groups it holds: the
+/// newest one starting at or before it. When none does, a hop whose
+/// [`Requests`](crate::track::Requests) handler serves its history asks it for the group
+/// containing the time (see [`FillGroups::floor`](crate::track::FillGroups::floor)), reading
+/// nothing until it answers; otherwise, or when the handler can't tell, a start reaches back to
+/// the oldest group. While no group is held at all it waits for one, reading nothing of its
+/// range meanwhile. A relay's copy that can't tell which group contains a start asks its
+/// upstream and waits for the answer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Range {
-	/// Where delivery starts.
-	pub start: Anchor,
-	/// Where delivery stops, including its group, or `None` to keep following the live edge.
-	pub end: Option<Anchor>,
+	/// Where delivery starts: the group containing this time, or `None` for no start, which
+	/// starts where the subscription's [`Delay`] puts it. A stated [`Delay::min`] makes it a
+	/// live join that far behind the live edge; an unstated one reaches back as far as
+	/// [`Delay::max`] allows.
+	pub start: Option<u64>,
+	/// Where delivery stops, including the group containing this time, or `None` to keep
+	/// following the live edge.
+	pub end: Option<u64>,
 }
 
 impl Range {
-	/// Everything from the latest group onward.
-	pub fn live() -> Self {
-		Self {
-			start: Anchor::Relative(0),
-			end: None,
-		}
-	}
-
-	/// Everything from the oldest group still around onward, the default.
-	///
-	/// Unlike `Time(0)..` this names no floor: a wire whose publisher resolves the start
-	/// from [`Delay::max`] reaches as far back as it allows, and an older wire
-	/// starts at the live edge, filling nothing below it.
-	pub fn oldest() -> Self {
-		Self {
-			start: Anchor::Oldest,
-			end: None,
-		}
-	}
-
-	/// Whether a wire without ranges carries this range upstream: time anchors, as group
-	/// IDs, and the live and oldest starts it spells with no floor.
-	pub(super) fn is_wire(&self) -> bool {
-		let start = match self.start {
-			Anchor::Oldest | Anchor::Time(_) | Anchor::Relative(0) => true,
-			Anchor::Relative(_) => false,
-		};
-		start && matches!(self.end, None | Some(Anchor::Time(_)))
-	}
-
 	/// Whether this range certainly delivers nothing, wherever the latest group lands.
-	///
-	/// An [`Anchor::Oldest`] end delivers nothing either: every reader holding one is
-	/// refused, so it never reaches the demand asked upstream.
 	pub(crate) fn is_empty(&self) -> bool {
-		match (self.start, self.end) {
-			(_, Some(Anchor::Oldest)) => true,
-			(Anchor::Time(start), Some(Anchor::Time(end))) => end < start,
-			_ => false,
-		}
+		matches!((self.start, self.end), (Some(start), Some(end)) if end < start)
+	}
+
+	/// Whether this range has no start and follows the live edge: where a [`Delay::min`]
+	/// places a live join.
+	pub(crate) fn is_open(&self) -> bool {
+		self.start.is_none() && self.end.is_none()
 	}
 
 	/// A range holding nothing: nothing sorts below group 0, so an exclusive end there holds
 	/// nothing, whatever the start.
 	pub(crate) const EMPTY: Self = Self {
-		start: Anchor::Time(1),
-		end: Some(Anchor::Time(0)),
+		start: Some(1),
+		end: Some(0),
 	};
 
 	/// The range from group `start` up to the exclusive group `end`, or onward for `None`:
@@ -294,13 +234,10 @@ impl Range {
 	#[cfg(any(feature = "async", test))]
 	pub(crate) fn span(start: Option<u64>, end: Option<u64>) -> Option<Self> {
 		let end = match end {
-			Some(end) => Some(Anchor::Time(end.checked_sub(1)?)),
+			Some(end) => Some(end.checked_sub(1)?),
 			None => None,
 		};
-		let range = Self {
-			start: start.map_or(Anchor::Oldest, Anchor::Time),
-			end,
-		};
+		let range = Self { start, end };
 		(!range.is_empty()).then_some(range)
 	}
 }
@@ -309,24 +246,22 @@ impl Range {
 /// reference for the track's incremental union.
 ///
 /// Time spans merge where they overlap or touch, as the group starts they cover. The rest
-/// can't be placed without the latest group, so only an open range drops what it certainly
-/// covers: the open time span drops ranges starting inside it, and the farthest open
-/// relative range drops relative ranges starting no farther back. [`Range::oldest`] covers
-/// everything.
+/// can't be placed without the live edge, so only an open range drops what it certainly
+/// covers: the open time span drops ranges starting inside it. An open range with no start
+/// covers everything only when `reaches_back`, an unstated aggregate [`Delay::min`]: a live
+/// join reaches no further back than its Min Age.
 #[cfg(test)]
-pub(super) fn union(ranges: impl IntoIterator<Item = Range>) -> Vec<Range> {
+pub(super) fn union(ranges: impl IntoIterator<Item = Range>, reaches_back: bool) -> Vec<Range> {
 	let ranges: Vec<Range> = ranges.into_iter().filter(|range| !range.is_empty()).collect();
-	if ranges.contains(&Range::oldest()) {
-		return vec![Range::oldest()];
+	let open = ranges.contains(&Range::default());
+	if open && reaches_back {
+		return vec![Range::default()];
 	}
 
+	// An end at the last start covers every group, as an open one does.
 	let mut spans: Vec<(u64, Option<u64>)> = ranges
 		.iter()
-		.filter_map(|range| match (range.start, range.end) {
-			(Anchor::Time(start), None) => Some((start, None)),
-			(Anchor::Time(start), Some(Anchor::Time(end))) => Some((start, end.checked_add(1))),
-			_ => None,
-		})
+		.filter_map(|range| Some((range.start?, range.end.and_then(|end| end.checked_add(1)))))
 		.collect();
 	spans.sort_unstable();
 	let mut runs: Vec<(u64, Option<u64>)> = Vec::new();
@@ -338,33 +273,23 @@ pub(super) fn union(ranges: impl IntoIterator<Item = Range>) -> Vec<Range> {
 			_ => runs.push((start, end)),
 		}
 	}
-	let tail = runs.last().filter(|run| run.1.is_none()).map(|run| run.0);
-	let farthest = ranges
-		.iter()
-		.filter_map(|range| match (range.start, range.end) {
-			(Anchor::Relative(back), None) => Some(back),
-			_ => None,
-		})
-		.max();
 
 	let mut union: Vec<Range> = runs
 		.into_iter()
 		.map(|(start, end)| Range {
-			start: Anchor::Time(start),
-			end: end.map(|end| Anchor::Time(end - 1)),
+			start: Some(start),
+			end: end.map(|end| end - 1),
 		})
 		.collect();
-	union.extend(ranges.into_iter().filter(|range| match (range.start, range.end) {
-		(Anchor::Time(_), None | Some(Anchor::Time(_))) | (Anchor::Relative(_), None) => false,
-		(Anchor::Time(start), _) => tail.is_none_or(|tail| start < tail),
-		(Anchor::Relative(back), _) => farthest.is_none_or(|farthest| back > farthest),
-		// Nothing but the open oldest range, handled above, covers the oldest group.
-		(Anchor::Oldest, _) => true,
-	}));
-	union.extend(farthest.map(|back| Range {
-		start: Anchor::Relative(back),
-		end: None,
-	}));
+	// A range with no start but an end can't be placed against the time spans.
+	union.extend(
+		ranges
+			.iter()
+			.filter(|range| range.start.is_none() && range.end.is_some()),
+	);
+	if open {
+		union.push(Range::default());
+	}
 	union.sort_unstable();
 	union.dedup();
 	union
@@ -375,7 +300,7 @@ impl Default for Subscription {
 		Self {
 			priority: 0,
 			delay: Delay::default(),
-			ranges: vec![Range::oldest()],
+			ranges: vec![Range::default()],
 			order: Order::Descending,
 			feed: false,
 			resume: None,
@@ -413,40 +338,42 @@ impl Subscription {
 		self
 	}
 
-	/// The lowest group any range names by time, or `None` when one counts back from the
-	/// latest group or reaches back to the oldest (or none is asked for).
+	/// Whether a range of these preferences has no start, so [`Delay::min`] places it.
+	pub(crate) fn joins(&self) -> bool {
+		self.ranges
+			.iter()
+			.any(|range| range.start.is_none() && !range.is_empty())
+	}
+
+	/// The lowest start any range names, or `None` when one has no start (or none is asked
+	/// for).
 	///
 	/// The form a wire without ranges carries: a floor below which nothing is requested.
 	#[cfg(any(feature = "async", test))]
 	pub(crate) fn start(&self) -> Option<u64> {
 		let mut floor: Option<u64> = None;
 		for range in self.ranges.iter().filter(|range| !range.is_empty()) {
-			let Anchor::Time(start) = range.start else {
-				return None;
-			};
+			let start = range.start?;
 			floor = Some(floor.map_or(start, |floor| floor.min(start)));
 		}
 		floor
 	}
 
-	/// The exclusive end past every range, or `None` when one is open or counts back from
-	/// the latest group. An empty list, or one of empty ranges, ends at group 0.
+	/// The exclusive end past every range, or `None` when one is open. An empty list, or one
+	/// of empty ranges, ends at group 0.
 	///
 	/// The form a wire without ranges carries, alongside [`Self::start`].
 	#[cfg(any(feature = "async", test))]
 	pub(crate) fn end(&self) -> Option<u64> {
 		let mut end = Some(0);
 		for range in self.ranges.iter().filter(|range| !range.is_empty()) {
-			let Some(Anchor::Time(last)) = range.end else {
-				return None;
-			};
-			end = end.max(Some(last.checked_add(1)?));
+			end = end.max(Some(range.end?.checked_add(1)?));
 		}
 		end
 	}
 
-	/// Replace the ranges with one from `start` (or [`Range::oldest`]'s) up to [`Self::end`],
-	/// returning `self` for chaining: the form a wire without ranges carries.
+	/// Replace the ranges with one from `start` (or no start) up to [`Self::end`], returning
+	/// `self` for chaining: the form a wire without ranges carries.
 	#[cfg(any(feature = "async", test))]
 	pub(crate) fn with_start(self, start: impl Into<Option<u64>>) -> Self {
 		let end = self.end();
@@ -471,23 +398,23 @@ impl Range {
 	/// This range raised to start no earlier than `floor` and stop before `end`, the
 	/// exclusive end, without ever widening it.
 	///
-	/// `resolved` names where it resolved, so a relative or time anchor becomes its own
-	/// group, raised to `floor` or capped at `end`. A start not resolved keeps its anchor,
-	/// since the floor may lie before it, so the caller drops what it resolves to below
-	/// `floor`; an end not resolved becomes the bound.
+	/// `resolved` names where it resolved, so a start becomes its own group, raised to `floor`,
+	/// and an end capped at `end`. A start not resolved keeps its time, since the floor may lie
+	/// before it, so the caller drops what it resolves to below `floor`; an end not resolved
+	/// becomes the bound.
 	pub(super) fn clamped(&self, floor: Option<u64>, end: Option<u64>, resolved: Option<Resolved>) -> Self {
 		let resolved = resolved.filter(|_| floor.is_some() || end.is_some());
-		let start = match (self.start, resolved) {
-			(Anchor::Oldest | Anchor::Relative(_) | Anchor::Time(_), Some(resolved)) => Anchor::Time(resolved.start),
-			(start, _) => start,
+		let start = match resolved {
+			Some(resolved) => Some(resolved.start),
+			None => self.start,
 		};
 		let start = match (start, floor) {
-			(Anchor::Time(start), Some(floor)) => Anchor::Time(start.max(floor)),
+			(Some(start), Some(floor)) => Some(start.max(floor)),
 			(start, _) => start,
 		};
 		let requested = match (self.end, resolved.and_then(|resolved| resolved.end)) {
-			(Some(Anchor::Relative(_) | Anchor::Time(_)), Some(resolved)) => match resolved.checked_sub(1) {
-				Some(last) => Some(Anchor::Time(last)),
+			(Some(_), Some(resolved)) => match resolved.checked_sub(1) {
+				Some(last) => Some(last),
 				None => return Self::EMPTY,
 			},
 			(requested, _) => requested,
@@ -495,8 +422,8 @@ impl Range {
 		let end = match (requested, end.map(|end| end.checked_sub(1))) {
 			(requested, None) => requested,
 			(_, Some(None)) => return Self::EMPTY,
-			(Some(Anchor::Time(requested)), Some(Some(last))) => Some(Anchor::Time(requested.min(last))),
-			(_, Some(Some(last))) => Some(Anchor::Time(last)),
+			(Some(requested), Some(Some(last))) => Some(requested.min(last)),
+			(_, Some(Some(last))) => Some(last),
 		};
 		Self { start, end }
 	}
@@ -534,24 +461,31 @@ impl Subscription {
 /// the track's counted aggregate is checked against.
 #[cfg(test)]
 #[derive(Default)]
-pub(super) struct Combined(Option<Subscription>);
+pub(super) struct Combined {
+	sub: Option<Subscription>,
+	/// The Min Age of the subscribers holding a range with no start: `None` before any, and
+	/// `Some(None)` once one leaves it unstated, which counts as the largest.
+	min: Option<Option<Duration>>,
+}
 
 #[cfg(test)]
 impl Combined {
 	/// Fold in one subscriber's preferences.
 	pub(super) fn add(&mut self, sub: &Subscription) {
-		let Some(combined) = &mut self.0 else {
-			self.0 = Some(sub.clone());
+		if sub.joins() {
+			self.min = Some(match self.min {
+				None => sub.delay.min,
+				Some(min) => min.zip(sub.delay.min).map(|(a, b)| a.max(b)),
+			});
+		}
+		let Some(combined) = &mut self.sub else {
+			self.sub = Some(sub.clone());
 			return;
 		};
 		combined.priority = combined.priority.max(sub.priority);
 		combined.delay.max = match (combined.delay.max, sub.delay.max) {
 			(Some(a), Some(b)) => Some(a.max(b)),
 			_ => None,
-		};
-		combined.delay.min = match (combined.delay.min, sub.delay.min) {
-			(Some(a), Some(b)) => Some(a.max(b)),
-			(a, b) => a.or(b),
 		};
 		combined.ranges.extend_from_slice(&sub.ranges);
 		// Key-first prioritization is enabled only when every subscriber wants it.
@@ -564,8 +498,9 @@ impl Combined {
 
 	/// The aggregate, or `None` without a subscriber.
 	pub(super) fn finish(self) -> Option<Subscription> {
-		let mut combined = self.0?;
-		combined.ranges = union(std::mem::take(&mut combined.ranges));
+		let mut combined = self.sub?;
+		combined.delay.min = self.min.flatten();
+		combined.ranges = union(std::mem::take(&mut combined.ranges), combined.delay.min.is_none());
 		Some(combined)
 	}
 }
@@ -650,59 +585,41 @@ mod tests {
 		combined.finish()
 	}
 
-	fn time(start: u64) -> Anchor {
-		Anchor::Time(start)
-	}
-
 	/// Groups from `start` up to the exclusive `end`, or onward for `None`.
 	fn groups(start: u64, end: impl Into<Option<u64>>) -> Range {
 		Range {
-			start: Anchor::Time(start),
-			end: end.into().map(|end| Anchor::Time(end - 1)),
+			start: Some(start),
+			end: end.into().map(|end| end - 1),
 		}
 	}
 
-	/// A hop holding every group from 0 through the latest, as contiguous starts do.
-	struct Contiguous;
-
-	impl Holdings for Contiguous {
-		fn containing(&self, time: u64) -> Containing {
-			Containing::Group(time)
+	fn range(start: impl Into<Option<u64>>, end: impl Into<Option<u64>>) -> Range {
+		Range {
+			start: start.into(),
+			end: end.into(),
 		}
-
-		fn next_start(&self, from: u64) -> Option<u64> {
-			Some(from)
-		}
-
-		fn back(&self, latest: u64, back: u64) -> Option<u64> {
-			latest.checked_sub(back)
-		}
-
-		fn complete(&self) -> bool {
-			false
-		}
-	}
-
-	fn range(start: Anchor, end: impl Into<Option<Anchor>>) -> Range {
-		Range { start, end: end.into() }
 	}
 
 	fn ranges(subscriptions: &[Subscription]) -> Vec<Range> {
 		combine(subscriptions).unwrap().ranges
 	}
 
-	/// A legacy span becomes inclusive time anchors: an exclusive end of 0 holds nothing,
-	/// whatever the start, and an end of 1 holds group 0.
+	fn joining(min: impl Into<Option<Duration>>) -> Subscription {
+		Subscription::default().with_delay(Delay::default().with_min(min))
+	}
+
+	/// A legacy span becomes inclusive times: an exclusive end of 0 holds nothing, whatever
+	/// the start, and an end of 1 holds group 0.
 	#[test]
 	fn legacy_spans_become_inclusive_time_ranges() {
-		assert_eq!(Range::span(Some(2), Some(6)), Some(range(time(2), time(5))));
-		assert_eq!(Range::span(None, Some(6)), Some(range(Anchor::Oldest, time(5))));
-		assert_eq!(Range::span(Some(2), None), Some(range(time(2), None)));
-		assert_eq!(Range::span(None, None), Some(Range::oldest()));
+		assert_eq!(Range::span(Some(2), Some(6)), Some(range(2, 5)));
+		assert_eq!(Range::span(None, Some(6)), Some(range(None, 5)));
+		assert_eq!(Range::span(Some(2), None), Some(range(2, None)));
+		assert_eq!(Range::span(None, None), Some(Range::default()));
 		assert_eq!(Range::span(Some(0), Some(0)), None);
 		assert_eq!(Range::span(None, Some(0)), None);
 		assert_eq!(Range::span(Some(5), Some(5)), None);
-		assert_eq!(Range::span(Some(0), Some(1)), Some(range(time(0), time(0))));
+		assert_eq!(Range::span(Some(0), Some(1)), Some(range(0, 0)));
 		assert!(Range::EMPTY.is_empty());
 	}
 
@@ -717,36 +634,8 @@ mod tests {
 		assert_eq!(key_bounds((Bound::Unbounded, Bound::Included(5))), key_bounds(..6));
 	}
 
-	/// A relative start counts back from the latest group and clamps at group 0. Before any
-	/// group exists only the farthest offset resolves, since it is group 0 regardless.
-	#[test]
-	fn relative_starts_resolve_against_the_latest_group() {
-		let floor = |sub: &Subscription, latest| Window::new(&sub.ranges, None, latest, &Contiguous).unwrap().floor();
-
-		let live = Subscription::default().with_ranges([Range::live()]);
-		assert_eq!(floor(&live, Some(7)), Some(7));
-		assert_eq!(floor(&live, None), None);
-
-		let buffering = Subscription::default().with_ranges([range(Anchor::Relative(3), None)]);
-		assert_eq!(floor(&buffering, Some(7)), Some(4));
-		assert_eq!(floor(&buffering, Some(1)), Some(0), "an offset past the start clamps");
-
-		assert_eq!(floor(&Subscription::default(), None), Some(0));
-
-		// The lowest range wins, and one unresolved range leaves the whole floor unresolved.
-		let mixed = Subscription::default().with_ranges([range(time(4), None), Range::live()]);
-		assert_eq!(floor(&mixed, Some(3)), Some(3));
-		assert_eq!(floor(&mixed, Some(9)), Some(4));
-		assert_eq!(floor(&mixed, None), None);
-
-		// Nothing asked for floors nowhere, and an empty range asks for nothing.
-		assert_eq!(floor(&Subscription::default().with_ranges([]), None), Some(0));
-		let empty = Subscription::default().with_ranges([groups(5, 5), groups(10, None)]);
-		assert_eq!(floor(&empty, None), Some(10));
-	}
-
-	/// The bounds a wire without ranges carries: the lowest time start and the highest
-	/// exclusive time end, either one lost to a range that counts back from the latest group.
+	/// The bounds a wire without ranges carries: the lowest start and the highest exclusive
+	/// end, either one lost to a range without it.
 	#[test]
 	fn bounds_project_the_ranges_for_older_wires() {
 		let sub = Subscription::default();
@@ -759,11 +648,8 @@ mod tests {
 		let sub = Subscription::default().with_ranges([groups(0, None)]);
 		assert_eq!((sub.start(), sub.end()), (Some(0), None));
 
-		let sub = Subscription::default().with_ranges([groups(2, 4), Range::live()]);
+		let sub = Subscription::default().with_ranges([groups(2, 4), Range::default()]);
 		assert_eq!((sub.start(), sub.end()), (None, None));
-
-		let sub = Subscription::default().with_ranges([range(time(2), Anchor::Relative(0))]);
-		assert_eq!((sub.start(), sub.end()), (Some(2), None));
 
 		// Nothing asked for is the empty range.
 		let sub = Subscription::default().with_ranges([]);
@@ -774,8 +660,9 @@ mod tests {
 		assert_eq!(sub.with_start(None).with_end(None), Subscription::default());
 	}
 
-	/// The aggregate is the union: overlapping and adjacent time ranges merge, an open
-	/// range absorbs what starts inside it, and the oldest range absorbs everything.
+	/// The aggregate is the union: overlapping and adjacent time ranges merge, an open range
+	/// absorbs what starts inside it, and a range with no start absorbs everything only while
+	/// it reaches back as far as the budget allows.
 	#[test]
 	fn combined_ranges_are_the_union() {
 		let sub = |ranges: &[Range]| Subscription::default().with_ranges(ranges.iter().copied());
@@ -800,25 +687,18 @@ mod tests {
 		);
 		assert_eq!(
 			ranges(&[sub(&[groups(2, 5)]), Subscription::default()]),
-			vec![Range::oldest()]
+			vec![Range::default()]
 		);
 
-		// Relative ranges count back from the same latest group, so the widest open one covers
-		// every narrower one, whatever its end.
+		// A live join reaches back only by its Min Age, so the history beside it stays asked.
 		assert_eq!(
-			ranges(&[
-				sub(&[Range::live()]),
-				sub(&[range(Anchor::Relative(3), None)]),
-				sub(&[range(Anchor::Relative(1), Anchor::Relative(0))]),
-			]),
-			vec![range(Anchor::Relative(3), None)]
+			ranges(&[sub(&[groups(2, 5)]), joining(Duration::from_secs(2))]),
+			vec![Range::default(), groups(2, 5)]
 		);
-
-		// A time floor above the live edge does not hide the live edge: both stay, relative
-		// first.
+		// Unless another reader with no start leaves its Min Age unstated.
 		assert_eq!(
-			ranges(&[sub(&[groups(4, None)]), sub(&[Range::live()])]),
-			vec![Range::live(), groups(4, None)]
+			ranges(&[sub(&[groups(2, 5)]), joining(Duration::from_secs(2)), joining(None)]),
+			vec![Range::default()]
 		);
 
 		// Empty ranges ask for nothing.
@@ -826,10 +706,28 @@ mod tests {
 		assert_eq!(ranges(&[sub(&[]), sub(&[groups(1, 2)])]), vec![groups(1, 2)]);
 	}
 
+	/// The Min Age forwarded is the largest among the readers whose ranges have no start, an
+	/// unstated one counting as the largest, so an oldest reader keeps its backlog beside a
+	/// live one. A reader with only time starts leaves it alone.
+	#[test]
+	fn combined_min_age_counts_only_readers_without_a_start() {
+		let min = |subs: &[Subscription]| combine(subs).unwrap().delay.min;
+		let two = Duration::from_secs(2);
+		let five = Duration::from_secs(5);
+		assert_eq!(min(&[joining(two), joining(five)]), Some(five));
+		assert_eq!(min(&[joining(two), joining(None)]), None);
+		assert_eq!(min(&[joining(None), joining(two)]), None);
+		let timed = Subscription::default()
+			.with_ranges([groups(3, None)])
+			.with_delay(Delay::default().with_min(Duration::from_secs(9)));
+		assert_eq!(min(&[joining(two), timed.clone()]), Some(two));
+		assert_eq!(min(&[timed]), None, "nobody joins, so nothing is stated");
+	}
+
 	/// Combining is order-independent and stops changing once it covers everyone.
 	#[test]
 	fn combined_ranges_settle() {
-		let a = Subscription::default().with_ranges([groups(2, 5), Range::live()]);
+		let a = Subscription::default().with_ranges([groups(2, 5), Range::default()]);
 		let b = Subscription::default().with_ranges([groups(4, 9)]);
 		assert_eq!(combine(&[a.clone(), b.clone()]), combine(&[b.clone(), a.clone()]));
 

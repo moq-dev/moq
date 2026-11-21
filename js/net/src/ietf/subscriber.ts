@@ -1032,10 +1032,8 @@ export class Subscriber {
 		if (hooks.trackFinished(producer) || !hooks.subscribing(producer).peek()) return false;
 		const ranges = hooks.requested(producer).peek()?.ranges ?? [];
 		if (!bounded(ranges)) return true;
-		const end = wireSpan(ranges).end;
-		// A relative end resolves against Largest, or against the first group when none exists yet,
-		// which only the live feed delivers.
-		return end === undefined ? edge === 0n : end > edge;
+		// Every range ends, at a time, so the end is known.
+		return (wireSpan(ranges).end ?? 0n) > edge;
 	}
 
 	async #historyOnly(producer: track.Producer, edge: bigint): Promise<void> {
