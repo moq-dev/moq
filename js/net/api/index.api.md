@@ -664,13 +664,6 @@ export interface Timed<T> {
 }
 
 export namespace Track {
-	export type Anchor = {
-		relative: bigint;
-		time?: never;
-	} | {
-		relative?: never;
-		time: bigint;
-	};
 	export type Bound = {
 		excluded?: never;
 		included: bigint;
@@ -808,8 +801,8 @@ export namespace Track {
 		writeFrame(frame: Group.Frame): void;
 	}
 	export interface Range {
-		end?: Track.Anchor;
-		start?: Track.Anchor;
+		end?: bigint;
+		start?: bigint;
 	}
 	export interface Refresh {
 		interval: Clock.Duration | null;

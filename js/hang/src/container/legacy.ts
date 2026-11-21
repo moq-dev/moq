@@ -147,9 +147,20 @@ export class Producer {
 	#end?: number;
 	// Furthest timestamp in finished groups, used only for discontinuity markers.
 	#liveEdge?: number;
-	// The current group start and the previous group start, which bounds its frames.
+	// The current group start and the previous group start: a frame below it is a restart.
 	#start?: number;
 	#floor?: number;
+	// The newest frame of every group before the current one: every frame of the current group
+	// presents after it.
+	#ceiling?: number;
+	// A keyframe was dropped with no group open, so the frames decoding from it go too, until a
+	// keyframe opens a group.
+	#skipping = false;
+	// The latest keyframe written, whose leading pictures are the frames after it presenting before it.
+	#keyframe?: number;
+	// A leading picture of #keyframe was dropped, so its later leading pictures go too: they may
+	// reference it, and pictures presenting after the keyframe never reference a leading picture.
+	#tainted = false;
 	// Gap between consecutive timestamps, used to close the last group when no successor exists.
 	#interval?: number;
 	// A discontinuity's marker is the newest group, so another one would say nothing new.
@@ -163,24 +174,50 @@ export class Producer {
 		this.#track = track;
 	}
 
-	/** Encode and append a frame; a keyframe starts a new group. Throws if the first frame is not a keyframe, a group start goes backwards, or a frame is below the previous group start. */
+	/**
+	 * Encode and append a frame; a keyframe starts a new group. Every frame of a group presents after
+	 * every frame of the groups before it, so a keyframe that doesn't start after the newest frame
+	 * continues the open group (a splice), and a later frame presenting at or before the groups before
+	 * its own (a leading picture after a splice) is dropped, as is a keyframe at or before the newest
+	 * frame with no group open, with the frames after it until a keyframe opens a group. Throws if the
+	 * first frame is not a keyframe, a group start goes backwards, or a frame is below the previous
+	 * group start.
+	 */
 	encode(data: Uint8Array | Source, pts: Duration, keyframe: boolean) {
 		const timestamp = micros(pts);
 		const floor = keyframe ? this.#start : this.#floor;
 		if (floor !== undefined && timestamp < floor) {
 			throw new Error("frame timestamp is below the previous group start");
 		}
-		// A keyframe opens a group starting at its timestamp, which has to start after every group the
-		// track holds. One that doesn't, such as parameter sets and the picture they precede written
-		// as two keyframes at one timestamp, continues the open group instead. With none open it is
+		// A keyframe opens a group starting at its timestamp, which has to start after every frame
+		// written and every group the track holds. One that doesn't, such as parameter sets and the
+		// picture they precede written as two keyframes at one timestamp, or a splice dipping below
+		// the old content's last frames, continues the open group instead. With none open it is
 		// refused, before anything changes.
-		const opens = keyframe && startsPast(this.#track, timestamp);
+		const behind = this.#newest !== undefined && timestamp <= this.#newest;
+		const opens = keyframe && !behind && startsPast(this.#track, timestamp);
+		// Dropped: a keyframe with no group to continue, and a frame presenting with the groups
+		// before its own, such as a leading picture after a splice.
+		if (keyframe && behind && !this.#group) {
+			this.#skipping = true;
+			return;
+		}
+		if (!keyframe && !this.#group && this.#skipping) return;
 		if (keyframe && !opens && !this.#group) throw new Error("a keyframe must start after the previous group");
+		if (!opens && this.#group && !keyframe) {
+			if (this.#ceiling !== undefined && timestamp <= this.#ceiling) {
+				this.#tainted = true;
+				return;
+			}
+			if (this.#tainted && this.#keyframe !== undefined && timestamp < this.#keyframe) return;
+		}
+		if (keyframe) {
+			this.#keyframe = timestamp;
+			this.#tainted = false;
+		}
 		this.#marked = false;
 		if (opens) {
-			const rewound = this.#previous !== undefined && timestamp < this.#previous;
-			this.#close(rewound ? undefined : timestamp);
-			if (rewound) this.#interval = undefined;
+			this.#close(timestamp);
 			// A track's first group says nothing came before it, so a reader can tell it is the first.
 			if (this.#track.largest() === undefined) {
 				const start = keyOf(this.#track, timestamp);
@@ -188,6 +225,8 @@ export class Producer {
 			}
 			this.#group = this.#track.appendGroup(Time.Timestamp.fromMicros(timestamp));
 			this.#floor = this.#start;
+			this.#ceiling = this.#newest;
+			this.#skipping = false;
 			this.#start = timestamp;
 		} else if (!this.#group) {
 			throw new Error("must start with a keyframe");
@@ -281,10 +320,14 @@ export class Producer {
 		// A presentation endpoint cannot bound the decode-order tail after reordering.
 		const bound = this.#reordered ? undefined : end;
 		this.#format.finishGroup(this.#group, bound === undefined ? undefined : Duration.micros(bound));
-		// A group ends whole where its content stops, which bounds its reach without a successor.
+		// A group ends whole where its content stops, which bounds its reach without a successor. It
+		// never ends below a frame of its own, here the newest written or the endpoint marker, so one
+		// whose end falls below either closes without one.
 		const at =
 			whole !== undefined ? BigInt(whole.value) : bound === undefined ? undefined : keyOf(this.#track, bound);
-		if (at !== undefined && at > this.#group.start) this.#group.finishAt(at);
+		const newest = Math.max(this.#end ?? Number.NEGATIVE_INFINITY, bound ?? Number.NEGATIVE_INFINITY);
+		const floor = Number.isFinite(newest) ? keyOf(this.#track, newest) : this.#group.start;
+		if (at !== undefined && at > this.#group.start && at >= floor) this.#group.finishAt(at);
 		else this.#group.finish();
 		this.#group = undefined;
 		if (this.#end !== undefined) {

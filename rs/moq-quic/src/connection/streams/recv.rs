@@ -159,6 +159,9 @@ pub(super) struct Recv {
 	pub(super) reader: Reader,
 	/// What a reader leased, which lives as long as the stream does.
 	pub(super) lease: Leased,
+	/// The credit its reader lets the peer send past what it took, when smaller than the
+	/// connection's stream receive window; see [`Stream::set_window`](super::lease).
+	window: Option<u64>,
 }
 
 /// Whether the application still reads a receive stream
@@ -183,6 +186,7 @@ impl Recv {
 			data_end: 0,
 			reader: Reader::Reading,
 			lease: Leased::default(),
+			window: None,
 		})
 	}
 
@@ -277,11 +281,14 @@ impl Recv {
 	/// transmission of the value is recommended. If the boolean value is
 	/// `false` the new window should only be transmitted if a previous transmission
 	/// had failed.
-	pub(super) fn max_stream_data(&mut self, stream_receive_window: u64) -> (u64, bool) {
+	pub(super) fn max_stream_data(&self, stream_receive_window: u64) -> (u64, bool) {
 		// Credit runs from what the reader took, not what it leased: a reader that stops taking
 		// holds at most its window of bytes it has not taken. One waiting on a unit larger than
 		// the window gets room for the unit, which the connection window bounds.
 		let taken = self.assembler.bytes_read() - self.lease.untaken();
+		let stream_receive_window = self
+			.window
+			.map_or(stream_receive_window, |window| window.min(stream_receive_window));
 		let window = stream_receive_window.max(self.lease.wanted());
 		// A window shrunk since the last announcement cannot take back credit already granted.
 		let max_stream_data = (taken + window).max(self.sent_max_stream_data);
@@ -297,8 +304,31 @@ impl Recv {
 		// takes in the meantime would add to it.
 		let diff = max_stream_data - self.sent_max_stream_data;
 		let short = self.sent_max_stream_data < taken + self.lease.wanted();
-		let transmit = self.can_send_flow_control() && (diff >= (stream_receive_window / 8) || short);
+		// At least a byte, so a tiny window never resends an unchanged limit.
+		let threshold = (stream_receive_window / 8).max(1);
+		let transmit = self.can_send_flow_control() && (diff >= threshold || short);
 		(max_stream_data, transmit)
+	}
+
+	/// Let the peer send at most `window` bytes past what the reader took, or the connection's
+	/// stream receive window if that is smaller.
+	pub(super) fn set_window(&mut self, window: u64) {
+		self.window = Some(window);
+	}
+
+	/// The connection credit this stream may hold under `stream_receive_window`: the bytes that
+	/// arrived and were not released, and those the peer may still send.
+	pub(super) fn credit(&self, stream_receive_window: u64) -> u64 {
+		let (max_stream_data, _) = self.max_stream_data(stream_receive_window);
+		let mut limit = max_stream_data.max(self.sent_max_stream_data);
+		if let Some(size) = self.final_offset() {
+			limit = limit.min(size);
+		}
+		match self.reader {
+			Reader::Reading => limit.saturating_sub(self.end) + self.unread_credit() + self.lease.held,
+			// It keeps no data, and the peer's further bytes return their credit as they arrive.
+			Reader::Evicted | Reader::Stopped => self.lease.held,
+		}
 	}
 
 	/// Records that a `MAX_STREAM_DATA` announcing a certain window was sent
@@ -566,7 +596,7 @@ impl<'a> Chunks<'a> {
 		let mut should_transmit = self.streams.queue_max_stream_id(self.pending);
 
 		// If the stream hasn't finished, we may need to issue stream-level flow control credit
-		if let ChunksState::Readable(mut rs) = state {
+		if let ChunksState::Readable(rs) = state {
 			let (_, max_stream_data) = rs.max_stream_data(self.streams.stream_receive_window);
 			should_transmit |= max_stream_data;
 			if max_stream_data {

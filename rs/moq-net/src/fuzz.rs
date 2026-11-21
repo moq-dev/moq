@@ -1186,7 +1186,6 @@ impl LiteSample {
 			Self::Group => lite::Group {
 				subscribe: 3,
 				key: 1_234,
-				previous: None,
 				frame_start: 0,
 			}
 			.encode(w, version)
@@ -1201,7 +1200,7 @@ impl LiteSample {
 				priority: 2,
 				max_delay: Some(std::time::Duration::from_secs(10)),
 				min_delay: None,
-				ranges: vec![lite::Range::OLDEST],
+				ranges: vec![lite::Range::OPEN],
 			}
 			.encode(w, version)
 			.unwrap(),
@@ -1431,7 +1430,6 @@ impl Default for Messages {
 			lite_group: lite::Group {
 				subscribe: 7,
 				key: 123_456,
-				previous: None,
 				frame_start: 0,
 			},
 			ietf_subscribe: ietf::Subscribe {
@@ -1581,7 +1579,7 @@ pub fn encode_subscribe(broadcast: &Path, track: &str, ietf: bool, out: &mut Vec
 			priority: 0,
 			max_delay: Some(std::time::Duration::ZERO),
 			min_delay: None,
-			ranges: vec![lite::Range::OLDEST],
+			ranges: vec![lite::Range::OPEN],
 			order: track::Order::Descending,
 		}
 		.encode(w, BENCH_LITE)

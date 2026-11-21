@@ -130,12 +130,7 @@ const native = values.publisher === "native";
 const isEngine = (name: string): name is Engine => ENGINES.some((engine) => engine === name);
 const requestedPublisher = values["publisher-engine"] ?? "chromium";
 const requestedPlayer = values["player-engine"] ?? "chromium";
-// moq-transport states no delay, so the incumbent replays its whole retention to a returning
-// viewer, and an in-order transport delivers all of it ahead of the live edge. Chromium's
-// WebTransport delivers newest first and hides it; the other engines play over WebSocket.
-const replacementVersions = ["moq-lite-07-wip", "moq-lite-06", "moq-transport-22"].filter(
-	(version) => requestedPlayer === "chromium" || version !== "moq-transport-22",
-);
+const replacementVersions = ["moq-lite-07-wip", "moq-lite-06", "moq-transport-22"];
 const selected = new Set<string>(
 	values.cases === undefined
 		? native
@@ -168,11 +163,6 @@ if (
 const publisherEngine = requestedPublisher as Engine;
 const playerEngine = requestedPlayer as Engine;
 const wants = (name: Case) => selected.has(name);
-if (!native && selected.has("replacement") && !replacementVersions.includes("moq-transport-22")) {
-	console.error(
-		"QUARANTINE\treplacement moq-transport-22\tmoq-transport states no delay, so the incumbent replays its whole retention ahead of the live edge over an in-order transport; see test/interop/README.md",
-	);
-}
 
 // process.exit narrows `url` above, but not inside the function declarations below.
 const relay: string = url;

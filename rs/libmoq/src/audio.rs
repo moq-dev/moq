@@ -119,7 +119,7 @@ pub struct moq_audio_decoder_output {
 	/// remixes to it.
 	pub channels: u32,
 	/// How far behind the live edge to play. Same knob as `moq_consume_audio`'s
-	/// `delay`. `min_us` floors the playout delay, which is otherwise measured
+	/// `delay`. A stated `min_us` floors the playout delay, which is otherwise measured
 	/// from arrival timing, and sets where a cold join starts. `max_us` bounds
 	/// group staleness and adds no buffering. Zeroed: start at the newest group
 	/// and skip aggressively (the moq-mux default).

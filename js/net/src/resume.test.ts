@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { Duration, yieldNow } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
-import { Signal } from "@moq/signals";
+import { race, Signal } from "@moq/signals";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer, type FetchFrom } from "./broadcast.ts";
 import { defined } from "./defined.test-util.ts";
 import { NotFound, SessionCode, SessionError, StreamCode, StreamError } from "./error.ts";
@@ -16,9 +16,10 @@ import type { Lister } from "./listing.ts";
 import { Producer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Front, routeFailed } from "./resume.ts";
-import { Timestamp } from "./time.ts";
+import { Timescale, Timestamp } from "./time.ts";
 import type * as track from "./track.ts";
 import { unwanted } from "./util/demand.ts";
+import { GivenUp } from "./util/given_up.ts";
 import { overrideBroadcastWire, wireOf } from "./wire.ts";
 
 const INFO: track.Info = {
@@ -275,7 +276,7 @@ test("a returning route keeps the reader's bounded end across its cap", async ()
 	front.serve(handles[0]);
 	const sub = front.consumer.track("seq").subscribe({
 		delay: { max: Duration.millis(3_600_000) },
-		ranges: [{ start: { time: 0n }, end: { time: 100n } }],
+		ranges: [{ start: 0n, end: 100n }],
 	});
 	try {
 		await clock.advance(Duration.ZERO);
@@ -317,7 +318,7 @@ test("a resumed reader's replaced ranges reach its serving copy", async () => {
 	front.serve(handles[0]);
 	const sub = front.consumer.track("seq").subscribe({
 		delay: { max: Duration.millis(3_600_000) },
-		ranges: [{ start: { time: 0n }, end: { time: 100n } }],
+		ranges: [{ start: 0n, end: 100n }],
 	});
 	try {
 		await clock.advance(Duration.ZERO);
@@ -328,7 +329,7 @@ test("a resumed reader's replaced ranges reach its serving copy", async () => {
 		expect(drain(sub)).toEqual([10n]);
 		sub.update({
 			delay: { max: Duration.millis(3_600_000) },
-			ranges: [{ start: { time: 50n }, end: { time: 60n } }],
+			ranges: [{ start: 50n, end: 60n }],
 		});
 		await clock.advance(Duration.ZERO);
 		tb.write(30n);
@@ -360,8 +361,8 @@ test("a group the window dropped above the serving copy's resume point is backfi
 	const sub = front.consumer.track("seq").subscribe({
 		delay,
 		ranges: [
-			{ start: { time: 10n }, end: { time: 10n } },
-			{ start: { time: 50n }, end: { time: 50n } },
+			{ start: 10n, end: 10n },
+			{ start: 50n, end: 50n },
 		],
 	});
 	try {
@@ -376,7 +377,7 @@ test("a group the window dropped above the serving copy's resume point is backfi
 		tb.write(40n);
 		await clock.advance(Duration.ZERO);
 		expect(drain(sub)).toEqual([50n]);
-		sub.update({ delay, ranges: [{ start: { time: 40n }, end: { time: 60n } }] });
+		sub.update({ delay, ranges: [{ start: 40n, end: 60n }] });
 		await clock.advance(Duration.ZERO);
 		await clock.advance(Duration.ZERO);
 		expect(drain(sub)).toEqual([40n]);
@@ -612,7 +613,7 @@ test("a routed source start follows the serving copy and its subscriber floor", 
 	hooks.startTrack(tb.producer, { start: 5n, requested: 3n });
 	const front = new Front();
 	front.serve(a.consume());
-	const sub = front.consumer.track("seq").subscribe({ ranges: [{ start: { time: 3n } }] });
+	const sub = front.consumer.track("seq").subscribe({ ranges: [{ start: 3n }] });
 	try {
 		expect(hooks.sourceStart(sub)).toBe(3n);
 		const subscribed = tb.producer.subscription.changed();
@@ -627,7 +628,7 @@ test("a routed source start follows the serving copy and its subscriber floor", 
 	}
 });
 
-test("a routed reader serves its relative ranges as the serving copy resolves them", async () => {
+test("a routed reader serves its live join as the serving copy resolves it", async () => {
 	const a = new BroadcastProducer();
 	const ta = copy(a);
 	for (let key = 0n; key < 5n; key++) ta.write(key);
@@ -635,12 +636,12 @@ test("a routed reader serves its relative ranges as the serving copy resolves th
 	front.serve(a.consume());
 	const sub = front.consumer
 		.track("seq")
-		.subscribe({ delay: { max: null }, ranges: [{ start: { relative: 2n }, end: { relative: 1n } }] });
+		.subscribe({ delay: { min: Duration.ZERO, max: null }, ranges: [{ end: 5n }] });
 	try {
 		await settle();
-		// The copy holds the groups the anchors count back from, so the ranges end there.
-		expect(hooks.servingEnd(sub)).toBe(4n);
-		expect(hooks.servingRuns(sub, 0n, 10n)).toEqual([{ start: 2n, end: 4n }]);
+		// The copy holds the groups the join starts among, so it starts at the latest one.
+		expect(hooks.servingEnd(sub)).toBe(6n);
+		expect(hooks.servingRuns(sub, 0n, 10n)).toEqual([{ start: 4n, end: 6n }]);
 	} finally {
 		sub.close();
 		front.consumer.close();
@@ -658,12 +659,10 @@ test("a bounded read through routes ends once its window is read, across a route
 	for (let key = 0n; key < 3n; key++) ta.write(key);
 	const front = new Front();
 	front.serve(a.consume());
-	const sub = front.consumer
-		.track("seq")
-		.subscribe({ delay: { max: null }, ranges: [{ start: { time: 1n }, end: { time: 4n } }] });
+	const sub = front.consumer.track("seq").subscribe({ delay: { max: null }, ranges: [{ start: 1n, end: 4n }] });
 	const floored = front.consumer
 		.track("seq")
-		.subscribe({ delay: { max: null }, ranges: [{ start: { time: 1n }, end: { time: 4n } }] })
+		.subscribe({ delay: { max: null }, ranges: [{ start: 1n, end: 4n }] })
 		.withRange({ start: { included: 3n } });
 	try {
 		expect((await sub.recvGroup())?.start).toBe(1n);
@@ -761,7 +760,7 @@ test("a resumed fork has its own preferences and replay cursor", async () => {
 	front.serve(a.consume());
 	const parent = front.consumer.track("seq").subscribe({
 		priority: 2,
-		ranges: [{ start: { time: 1n } }],
+		ranges: [{ start: 1n }],
 	});
 	ta.write(0n);
 	ta.write(1n);
@@ -1012,6 +1011,157 @@ test("a stalled group continues from the replacement at the next frame", async (
 	close();
 });
 
+for (const closeFirst of [true, false]) {
+	test(`a replaced copy's short group continues from the replacement (closeFirst=${closeFirst})`, async () => {
+		const { a, b, swap, active, close } = await setup();
+		const ta = copy(a);
+		const tb = copy(b);
+		const sub = active.track("seq").subscribe({ delay: { max: Duration.millis(300_000) } });
+		const short = ta.write(0n, 1, false);
+		const group = sub.tryRecvGroup();
+		if (!group) throw new Error("expected group 0");
+		expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+		// The old copy closes it short (FIN without GROUP_END); the new route holds the rest.
+		const whole = tb.write(0n, 3, false);
+		if (closeFirst) short.finish();
+		await swap();
+		if (!closeFirst) short.finish();
+		expect(dec.decode((await group.readFrame())?.payload)).toBe("0.1");
+		expect(dec.decode((await group.readFrame())?.payload)).toBe("0.2");
+		expect(group.closed.peek()).toBeUndefined();
+		whole.finishAt(3n);
+		expect(await group.readFrame()).toBeUndefined();
+		expect(group.end).toBe(3n);
+		expect(await group.closed).toBeNull();
+
+		sub.close();
+		close();
+	});
+}
+
+// A watch no longer looking, or one that never judges, leaves a short close to the reader.
+for (const watch of ["race", "givenUp"] as const) {
+	test(`a short group a ${watch} watched continues from the replacement`, async () => {
+		const { a, b, swap, active, close } = await setup();
+		const ta = copy(a);
+		const tb = copy(b);
+		const sub = active.track("seq").subscribe({ delay: { max: Duration.millis(300_000) } });
+		const short = ta.write(0n, 1, false);
+		const group = sub.tryRecvGroup();
+		if (!group) throw new Error("expected group 0");
+		expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+		// A race decided by its other side drops its watch; a publisher's give-up watch stays.
+		const given = watch === "givenUp" ? new GivenUp(group) : undefined;
+		if (watch === "race") expect(await race([Promise.resolve("ready"), group.closed])).toBe("ready");
+		const whole = tb.write(0n, 3, false);
+		short.finish();
+		await settle();
+		await swap();
+		expect(dec.decode((await group.readFrame())?.payload)).toBe("0.1");
+		expect(dec.decode((await group.readFrame())?.payload)).toBe("0.2");
+		whole.finishAt(3n);
+		expect(await group.readFrame()).toBeUndefined();
+		expect(given?.peek()).toBeUndefined();
+		given?.close();
+
+		sub.close();
+		close();
+	});
+}
+
+test("a short group the replacement lacks reads on once it lands there", async () => {
+	const { a, b, swap, active, close } = await setup();
+	const ta = copy(a);
+	const tb = copy(b);
+	const sub = active.track("seq").subscribe({ delay: { max: Duration.millis(300_000) } });
+	ta.write(0n, 1);
+	const group = sub.tryRecvGroup();
+	if (!group) throw new Error("expected group 0");
+	expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+	await swap();
+	const reading = group.readFrame();
+	await settle();
+	tb.write(0n, 2);
+	expect(dec.decode((await reading)?.payload)).toBe("0.1");
+	expect(await group.readFrame()).toBeUndefined();
+
+	sub.close();
+	close();
+});
+
+test("a short group on a failed route waits for the next one", async () => {
+	const { a, b, swap, active, close } = await setup();
+	const ta = copy(a);
+	const tb = copy(b);
+	const sub = active.track("seq").subscribe({ delay: { max: Duration.millis(300_000) } });
+	ta.write(0n, 1);
+	const group = sub.tryRecvGroup();
+	if (!group) throw new Error("expected group 0");
+	ta.producer.abort(new StreamError(StreamCode.SessionClosed));
+	await settle();
+	expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+	const reading = group.readFrame();
+	expect(await isPending(reading)).toBe(true);
+	tb.write(0n, 2);
+	await swap();
+	expect(dec.decode((await reading)?.payload)).toBe("0.1");
+	expect(await group.readFrame()).toBeUndefined();
+
+	sub.close();
+	close();
+});
+
+test("a short group ends once no route holds more of it", async () => {
+	const { a, b, swap, active, close } = await setup();
+	const ta = copy(a);
+	const tb = copy(b);
+	const sub = active.track("seq").subscribe({ delay: { max: Duration.millis(300_000) } });
+	ta.write(0n, 1);
+	const group = sub.tryRecvGroup();
+	if (!group) throw new Error("expected group 0");
+	// The replacement closed it at the same frame.
+	tb.write(0n, 1);
+	await swap();
+	expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+	expect(await group.readFrame()).toBeUndefined();
+
+	sub.close();
+	close();
+});
+
+test("a short group ends as it closed while its copy still serves", async () => {
+	const { a, active, close } = await setup();
+	const ta = copy(a);
+	const sub = active.track("seq").subscribe({ delay: { max: Duration.millis(300_000) } });
+	ta.write(0n, 1);
+	const group = sub.tryRecvGroup();
+	if (!group) throw new Error("expected group 0");
+	expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+	expect(group.done).toBe(true);
+	expect(await group.closed).toBeNull();
+	expect(await group.readFrame()).toBeUndefined();
+
+	sub.close();
+	close();
+});
+
+test("a short group ends once no route is left to ask", async () => {
+	const { a, active, request, disposeA, close } = await setup();
+	const ta = copy(a);
+	const sub = active.track("seq").subscribe({ delay: { max: Duration.millis(300_000) } });
+	ta.write(0n, 1);
+	const group = sub.tryRecvGroup();
+	if (!group) throw new Error("expected group 0");
+	request.close();
+	disposeA();
+	await settle();
+	expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+	expect(await group.readFrame()).toBeUndefined();
+
+	sub.close();
+	close();
+});
+
 test("a group whose route fails continues from the replacement", async () => {
 	const { a, b, swap, active, disposeA, close } = await setup();
 	const ta = copy(a);
@@ -1186,7 +1336,7 @@ test("readers owed nothing below the incumbent's end end cleanly when the replac
 	const { a, b, swap, active, close } = await setup();
 	const ta = copy(a);
 	const tb = copy(b);
-	const later = active.track("seq").subscribe({ ranges: [{ start: { time: 3n } }] });
+	const later = active.track("seq").subscribe({ ranges: [{ start: 3n }] });
 	ta.write(0n);
 	ta.write(1n);
 	await swap();
@@ -2005,8 +2155,8 @@ test.each([
 ])(
 	"a group fetched over a wire goes stale by the fetch's own budget ($budget)",
 	async ({ maxDelay, stale, bounded }) => {
-		// Still, so only presentation time judges.
-		const { installed } = manual();
+		// Still until the test moves it: a scale-less track ages by arrival alone.
+		const { clock, installed } = manual();
 		const front = new Front();
 		const a = new BroadcastProducer();
 		const ta = copy(a);
@@ -2031,14 +2181,15 @@ test.each([
 			// A reader of group 0 alone subscribes the first copy, and a live one whose own budget is
 			// far wider the next.
 			const first = bounded
-				? front.consumer.track("seq").subscribe({ ranges: [{ start: { time: 0n }, end: { time: 0n } }] })
+				? front.consumer.track("seq").subscribe({ ranges: [{ start: 0n, end: 0n }] })
 				: undefined;
 			const sub = front.consumer.track("seq").subscribe({ delay: { max: Duration.millis(3_600_000) } });
 			await settle();
 			expect(group.expired.peek()).toBeUndefined();
 
-			// The copy's live edge runs a second past group 0's successor.
+			// Group 0's successor arrived at the copy a second ago.
 			ta.write(2000n);
+			await clock.advance(SECOND);
 			if (stale) expect(await verdict).toMatchObject({ code: StreamCode.Old });
 			else expect(await isPending(verdict)).toBe(true);
 
@@ -2117,7 +2268,7 @@ test("a front's ordered reader holds a gap above a waiting time start", async ()
 	hooks.dropTrackGroups(ta.producer, 1500n, 1600n, { error: new StreamError(StreamCode.NotFound) });
 	const ordered = front.consumer
 		.track("seq")
-		.subscribe({ delay: { max: null }, ranges: [{ start: { time: 1500n } }] })
+		.subscribe({ delay: { max: null }, ranges: [{ start: 1500n }] })
 		.ordered();
 	const read = () => {
 		const out: string[] = [];
@@ -2189,8 +2340,8 @@ test("an ordered resumed reader owes no window group under its local floor", asy
 		.subscribe({
 			delay: { max: null },
 			ranges: [
-				{ start: { time: 10n }, end: { time: 10n } },
-				{ start: { time: 100n }, end: { time: 200n } },
+				{ start: 10n, end: 10n },
+				{ start: 100n, end: 200n },
 			],
 		})
 		.withRange({ start: { included: 60n } });
@@ -2229,8 +2380,8 @@ test("an ordered resumed reader owes no window group its copy declares skipped",
 	const sub = front.consumer.track("seq").subscribe({
 		delay: { max: null },
 		ranges: [
-			{ start: { time: 10n }, end: { time: 30n } },
-			{ start: { time: 100n }, end: { time: 200n } },
+			{ start: 10n, end: 30n },
+			{ start: 100n, end: 200n },
 		],
 	});
 	const ordered = sub.ordered();
@@ -2268,8 +2419,8 @@ test("an ordered resumed reader does not hold a failed copy for a group it can n
 	const sub = front.consumer.track("seq").subscribe({
 		delay: { max: null },
 		ranges: [
-			{ start: { time: 10n }, end: { time: 30n } },
-			{ start: { time: 100n }, end: { time: 200n } },
+			{ start: 10n, end: 30n },
+			{ start: 100n, end: 200n },
 		],
 	});
 	const ordered = sub.ordered();
@@ -2309,8 +2460,8 @@ test("an ordered resumed reader holding a copy wakes when the owed group lands",
 	const sub = front.consumer.track("seq").subscribe({
 		delay: { max: null },
 		ranges: [
-			{ start: { time: 10n }, end: { time: 30n } },
-			{ start: { time: 100n }, end: { time: 200n } },
+			{ start: 10n, end: 30n },
+			{ start: 100n, end: 200n },
 		],
 	});
 	const ordered = sub.ordered();
@@ -2350,8 +2501,8 @@ test("a resumed reader drops a taken group outside its window when the offered o
 	const sub = front.consumer.track("seq").subscribe({
 		delay: { max: null },
 		ranges: [
-			{ start: { time: 10n }, end: { time: 10n } },
-			{ start: { time: 100n }, end: { time: 200n } },
+			{ start: 10n, end: 10n },
+			{ start: 100n, end: 200n },
 		],
 	});
 	try {
@@ -3543,7 +3694,7 @@ test("the largest honours the reader's bounds on the serving copy", async () => 
 		.track("seq")
 		.subscribe()
 		.withRange({ end: { excluded: 3n } });
-	const floored = front.consumer.track("seq").subscribe({ ranges: [{ start: { time: 8n } }] });
+	const floored = front.consumer.track("seq").subscribe({ ranges: [{ start: 8n }] });
 	for (let key = 0n; key < 5n; key++) ta.write(key);
 
 	const next = capped.largest();
@@ -4122,7 +4273,7 @@ test.each([
 			}
 			return keys;
 		};
-		const asked = () => tb.producer.subscription.peek()?.ranges?.[0]?.start?.time;
+		const asked = () => tb.producer.subscription.peek()?.ranges?.[0]?.start;
 		try {
 			sub.withRange({ start: { included: 4n } });
 			await clock.advance(Duration.ZERO);
@@ -4720,7 +4871,7 @@ test("a routed reader places a range past one still waiting", async () => {
 	ta.write(64n);
 	const sub = front.consumer
 		.track("seq")
-		.subscribe({ delay: { max: null }, ranges: [{ start: { time: 66n } }, { start: { time: 64n } }] });
+		.subscribe({ delay: { max: null }, ranges: [{ start: 66n }, { start: 64n }] });
 	try {
 		await settle();
 		const resolved = hooks.servingResolved(sub);
@@ -4746,7 +4897,7 @@ test("a failed copy leaves a time start to the serving copy", async () => {
 	const front = new Front();
 	front.serve(a.consume());
 	ta.write(64n);
-	const waiting = front.consumer.track("seq").subscribe({ delay: { max: null }, ranges: [{ start: { time: 66n } }] });
+	const waiting = front.consumer.track("seq").subscribe({ delay: { max: null }, ranges: [{ start: 66n }] });
 	try {
 		const read: bigint[] = [];
 		const reading = (async () => {
@@ -4811,7 +4962,7 @@ test("a failed copy holding a group back is still subscribed afresh", async () =
 	const ta = copy(a);
 	hooks.receiveTrack(ta.producer);
 	ta.write(64n);
-	const sub = active.track("seq").subscribe({ delay: { max: null }, ranges: [{ start: { time: 66n } }] });
+	const sub = active.track("seq").subscribe({ delay: { max: null }, ranges: [{ start: 66n }] });
 	await settle();
 	expect(sub.tryRecvGroup()).toBeUndefined();
 
@@ -4841,7 +4992,7 @@ test("failed copies holding groups back are each subscribed afresh", async () =>
 	const ta = copy(a);
 	hooks.receiveTrack(ta.producer);
 	ta.write(64n);
-	const sub = active.track("seq").subscribe({ delay: { max: null }, ranges: [{ start: { time: 66n } }] });
+	const sub = active.track("seq").subscribe({ delay: { max: null }, ranges: [{ start: 66n }] });
 	const read: bigint[] = [];
 	const poll = async () => {
 		for (let attempt = 0; attempt < 10 && read.length < 2; attempt++) {
@@ -4885,7 +5036,7 @@ test("a time end between two groups ends an ordered read through a front at the 
 	const track = copy(source);
 	for (const key of [1000n, 2000n, 3000n]) track.write(key);
 	const between = {
-		ranges: [{ start: { time: 1500n }, end: { time: 1999n } }],
+		ranges: [{ start: 1500n, end: 1999n }],
 		delay: { max: Duration.millis(3_600_000) },
 	};
 	const ordered = front.consumer.track("seq").subscribe(between).ordered();
@@ -4922,7 +5073,7 @@ test("an ordered read through a front returns the gap its copy gave up before en
 	front.serve(a.consume());
 	const ordered = front.consumer
 		.track("seq")
-		.subscribe({ delay: { max: null }, ranges: [{ start: { time: 0n }, end: { time: 1n } }] })
+		.subscribe({ delay: { max: null }, ranges: [{ start: 0n, end: 1n }] })
 		.ordered();
 	try {
 		expect(await ordered.nextItem()).toMatchObject({ kind: "gap", start: 0n, end: 1n });
@@ -4931,5 +5082,35 @@ test("an ordered read through a front returns the gap its copy gave up before en
 		ordered.close();
 		front.consumer.close();
 		a.close();
+	}
+});
+
+// A routed reader knows a whole group's span from its serving copy, as the Rust
+// `Subscriber::span_end` asks it, so a publisher reading through it names none of the starts
+// inside the span.
+test("a routed reader reports its serving copy's whole group spans", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const front = new Front();
+	const source = new BroadcastProducer();
+	const handle = source.consume();
+	const producer = defined(source.createTrack("seq", { ...INFO, timescale: Timescale.MILLI }));
+	const group = producer.createGroup(3n);
+	group.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(3) });
+	group.finishAt(10n);
+	front.serve(handle);
+	const sub = front.consumer.track("seq").subscribe({ delay: { max: Duration.millis(3_600_000) } });
+	try {
+		await clock.advance(Duration.ZERO);
+		expect(sub.tryRecvGroup()?.start).toBe(3n);
+		expect(hooks.wholeEnd(sub, 3n)).toBe(10n);
+		expect(hooks.wholeAround(sub, 5n)).toEqual({ start: 3n, end: 10n });
+		expect(hooks.wholeAround(sub, 10n)).toBeUndefined();
+	} finally {
+		sub.close();
+		front.consumer.close();
+		handle.close();
+		source.close();
+		installed.close();
 	}
 });

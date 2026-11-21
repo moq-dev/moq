@@ -7,7 +7,7 @@ import { nextMedia, subscribeMedia } from "./media";
 
 const flush = () => yieldNow();
 
-test("media max delay is present on the initial subscription and later updates", async () => {
+test("media joins live, with its delay on the initial subscription and later updates", async () => {
 	let initial: Moq.Track.Subscription | undefined;
 	const updates: Moq.Track.Subscription[] = [];
 	const subscriber = {
@@ -32,11 +32,20 @@ test("media max delay is present on the initial subscription and later updates",
 		priority: 7,
 		delay,
 	});
-	expect(initial).toEqual({ priority: 7, delay: { min: Duration.millis(100), max: Duration.millis(250) } });
+	const live = [{}];
+	expect(initial).toEqual({
+		priority: 7,
+		delay: { min: Duration.millis(100), max: Duration.millis(250) },
+		ranges: live,
+	});
 
 	delay.set({ min: Duration.millis(100), max: Duration.millis(500) });
 	await flush();
-	expect(updates.at(-1)).toEqual({ priority: 7, delay: { min: Duration.millis(100), max: Duration.millis(500) } });
+	expect(updates.at(-1)).toEqual({
+		priority: 7,
+		delay: { min: Duration.millis(100), max: Duration.millis(500) },
+		ranges: live,
+	});
 
 	effect.close();
 });

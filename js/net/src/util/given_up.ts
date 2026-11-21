@@ -1,10 +1,13 @@
 import { type Dispose, type GetPromise, race } from "@moq/signals";
 import type { Consumer as GroupConsumer } from "../group.ts";
+import { hooks } from "../internal.ts";
 
 // Why to stop writing `group`: the subscription's budget gave it up, or it failed for good
-// before it was read whole (evicted, or its copy aborted with no route to continue it).
+// before it was read whole (evicted, or its copy aborted with no route to continue it). Through
+// the close a watch never decides, so watching a short close does not end a group a route move
+// may still continue.
 function reason(group: GroupConsumer): Error | undefined {
-	const closed = group.closed.peek();
+	const closed = hooks.groupClosed(group).peek();
 	return group.expired.peek() ?? (closed instanceof Error ? closed : undefined);
 }
 
@@ -28,7 +31,10 @@ export class GivenUp implements GetPromise<Error> {
 
 	constructor(group: GroupConsumer) {
 		this.#group = group;
-		this.#unwatch = [group.expired.subscribe(() => this.#check()), group.closed.subscribe(() => this.#check())];
+		this.#unwatch = [
+			group.expired.subscribe(() => this.#check()),
+			hooks.groupClosed(group).subscribe(() => this.#check()),
+		];
 	}
 
 	/**

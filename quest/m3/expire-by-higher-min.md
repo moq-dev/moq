@@ -24,16 +24,16 @@ hold connection credit other broadcasts need.
   span; and closed [moq-dev/moq#9221](https://github.com/moq-dev/moq/pull/9221)'s
   estimate of a mean frame interval).
 
-[Group times](/quest/m2/time-addressing/group-times.md) gives a whole group its
+Group times ([moq-dev/moq#9263](https://github.com/moq-dev/moq/pull/9263)) gave a whole group its
 End and recommends bounding any other group by its successor's start, as
 `reach` (`rs/moq-net/src/model/track.rs`) and `#reach` (`js/net/src/track.ts`)
 do today. This quest tightens the second half once producers keep the strong
 rule.
 
 - A higher group's lowest timestamp bounds a lower group only under the strong
-  no-overlap rule, so this waits on it. Until then moq-mux's overlapping groups
-  would expire early. With open-GOP leading pictures, that lowest frame sits
-  below the higher group's start.
+  no-overlap rule, which moq-mux's producers keep since [moq-dev/moq#9264](https://github.com/moq-dev/moq/pull/9264). With
+  open-GOP leading pictures, that lowest frame sits below the higher group's
+  start.
 - Use any known frame of any higher group, a tail copy's included. Under the
   rule, every one of them is above the lower group's frames.
 - Drop `ended_at`'s wall-clock aging of the latest group (JS `#endedAt`), if
@@ -43,8 +43,3 @@ rule.
 
 Public API: none expected. Wire: none. The draft's Expiration text changes,
 which only lets a publisher expire sooner.
-
-## Required
-
-- [Every frame of a group presents before every frame of a higher group](/quest/m2/groups-never-overlap.md) - first-party producers keep the rule that makes a higher group's lowest timestamp an upper bound
-- [Group Streams carry each time once](/quest/m2/time-addressing/group-times.md) - GROUP_END's End, the whole group's bound, and the draft's no-overlap MUST

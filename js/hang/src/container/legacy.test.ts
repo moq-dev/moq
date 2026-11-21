@@ -64,8 +64,9 @@ test("Legacy Producer keys groups in a nanosecond track's timescale", async () =
 
 	expect(await groups(subscriber)).toEqual([
 		{ start: 1_000_000n, end: 2_000_000n, frames: [1_000, 2_000] },
-		// Its end marker at 3ms, then whole at the marker one nanosecond before it.
-		{ start: 2_000_000n, end: 2_999_999n, frames: [2_000, 3_000] },
+		// Its end marker at 3ms lies past the marker group one nanosecond before it, and a group
+		// never ends below a frame of its own, so it closes without an end.
+		{ start: 2_000_000n, end: undefined, frames: [2_000, 3_000] },
 		{ start: 2_999_999n, end: undefined, frames: [2_999] },
 	]);
 });

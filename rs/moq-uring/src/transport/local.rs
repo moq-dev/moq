@@ -176,6 +176,10 @@ impl<T: poll::RecvStream> poll::RecvStream for Local<T> {
 		self.0.set_priority(priority)
 	}
 
+	fn set_window(&mut self, window: u64) -> Option<u64> {
+		self.0.set_window(window)
+	}
+
 	fn stop(&mut self, code: u32) {
 		self.0.stop(code)
 	}

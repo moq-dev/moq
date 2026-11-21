@@ -69,13 +69,10 @@ lints [moq-dev/moq#6576](https://github.com/moq-dev/moq/pull/6576).
 ### Check first: lints
 
 - Already gated, so skip: `clippy::allow_attributes_without_reason`,
-  unfulfilled `expect`s, Biome's unused `biome-ignore`, ruff's `RUF100`, and
+  unfulfilled `expect`s (on Linux, macOS, and Windows), Biome's unused `biome-ignore`, ruff's `RUF100`, and
   pyright's unnecessary `type: ignore` in the Python wrapper. Review what
   those can't see. Generated and vendored bindings keep their blanket allows;
   `shellcheck disable` is out of scope.
-- CI lints Linux only, so run clippy for `aarch64-apple-darwin` and
-  `x86_64-pc-windows-gnu` from Linux with a rust-overlay toolchain and
-  `zig cc` for build scripts. That found every stale suppression last run.
 - Swift: read the nightly macOS job's Swift step for warnings. TypeScript:
   run typescript-eslint's `no-deprecated` once it supports the pinned
   TypeScript, and consider joining CI. The CARLA sim's pyright needs the

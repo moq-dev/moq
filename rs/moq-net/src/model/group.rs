@@ -24,6 +24,7 @@
 use super::flate;
 use super::idle::Idle;
 use super::pace::Pace;
+use super::resume::Cause;
 mod content;
 use crate::cache;
 use crate::frame::{self, Cached, FrameBuf, Payload};
@@ -232,8 +233,8 @@ pub(super) struct GroupState {
 	pub(super) partial: Option<Partial>,
 
 	// Index of the first frame this handle holds: any the group deliberately started
-	// past (see [`Producer::start_at`]). Reading below it is [`Error::Lagged`]; the
-	// frames are not here. Frames shed from the front since sit between it and
+	// past (see [`Producer::start_at`]). The frames are not here: reading below it
+	// fetches them (see [`Consumer::fetches_from`]) or is [`Error::Lagged`]. Frames shed from the front since sit between it and
 	// [`Self::held`], and reading them is [`Error::Evicted`].
 	pub(super) offset: usize,
 
@@ -293,9 +294,10 @@ pub(super) enum Outcome {
 	/// Finished with this many frames, and where it ends in its track's timescale when its
 	/// producer said it is whole: `None` when it finished without an end (see [`Producer::finish`]).
 	Finished(usize, Option<u64>),
-	/// Finished with this many frames, then aborted to free its cache: a reader that took
-	/// every frame got the whole group, and one short of it gets the error.
-	Released(usize, Error),
+	/// Finished with this many frames and the end it finished at, then aborted to free its
+	/// cache: a reader that took every frame got every frame the group finished with, and one
+	/// short of it gets the error.
+	Released(usize, Option<u64>, Error),
 	/// Aborted before it finished.
 	Aborted(Error),
 }
@@ -304,7 +306,7 @@ impl Outcome {
 	/// The total number of frames, once finished.
 	pub(super) fn frames(&self) -> Option<usize> {
 		match self {
-			Self::Finished(frames, _) | Self::Released(frames, _) => Some(*frames),
+			Self::Finished(frames, _) | Self::Released(frames, ..) => Some(*frames),
 			Self::Open | Self::Aborted(_) => None,
 		}
 	}
@@ -312,7 +314,7 @@ impl Outcome {
 	/// The error the group was aborted with, before or after it finished.
 	pub(super) fn error(&self) -> Option<&Error> {
 		match self {
-			Self::Released(_, err) | Self::Aborted(err) => Some(err),
+			Self::Released(.., err) | Self::Aborted(err) => Some(err),
 			Self::Open | Self::Finished(..) => None,
 		}
 	}
@@ -1255,7 +1257,7 @@ impl GroupState {
 			return Poll::Ready(Err(Error::Evicted));
 		}
 		match &self.outcome {
-			Outcome::Released(total, err) if index < *total => Poll::Ready(Err(err.clone())),
+			Outcome::Released(total, _, err) if index < *total => Poll::Ready(Err(err.clone())),
 			Outcome::Finished(..) | Outcome::Released(..) => Poll::Ready(Ok(())),
 			Outcome::Aborted(err) => Poll::Ready(Err(err.clone())),
 			Outcome::Open => {
@@ -1772,10 +1774,12 @@ impl Producer {
 	///
 	/// A group can be short at its front or its back, never in the middle: this trims
 	/// the front. Transport cuts at the back also retain their incomplete provenance.
-	/// The frames below `index` are not a gap this handle will ever fill, so a reader
-	/// positioned below it gets [`Error::Lagged`]. They belong to whoever produced the
-	/// head of the group, typically another route serving the same track (see
-	/// [`crate::track::Subscriber`]).
+	/// The frames below `index` are not a gap this handle will ever fill. They belong to
+	/// whoever produced the head of the group, typically another route serving the same
+	/// track (see [`crate::track::Subscriber`]), so a reader positioned below it fetches
+	/// them from there: a front recovers them from a route, or the track's
+	/// [`crate::track::Requests`] handlers serve them. With neither, the read is
+	/// [`Error::Lagged`]; a failed fetch fails it with the fetch's error.
 	///
 	/// The counterpart of [`Consumer::with_range`], which positions a *reader* the same
 	/// way. Where the group begins is part of its shape, so this must come before the
@@ -2287,9 +2291,11 @@ impl Producer {
 	///
 	/// A finished group's own end bounds how long it stays fresh, so the last group of a
 	/// paused or finished track ages out without a successor (see
-	/// [`track::Info::max_age`]). An `end` at or before the group's start is
-	/// [`Error::TimestampMismatch`], which aborts the group. Fails with the abort error if the
-	/// group was already aborted.
+	/// [`track::Info::max_age`]). Its span, from its start to `end`, holds no other group's
+	/// start, so no successor may start before `end`. An `end` below the group's start or
+	/// below any of its frames' timestamps is [`Error::TimestampMismatch`], which aborts the
+	/// group; one equal to either is a group that presents no further. Fails with the abort
+	/// error if the group was already aborted.
 	pub fn finish_at(self, end: u64) -> Result<Finished> {
 		if let Err(err) = self.check_end(end) {
 			let _ = self.handle.close_aborted(err.clone());
@@ -2298,10 +2304,14 @@ impl Producer {
 		self.end(Some(end))
 	}
 
-	/// Whether [`Self::finish_at`] takes `end`: [`Error::TimestampMismatch`] at or before the
-	/// group's start.
+	/// Whether [`Self::finish_at`] takes `end`: [`Error::TimestampMismatch`] below the
+	/// group's start or below its highest frame timestamp, in its track's timescale.
 	pub(crate) fn check_end(&self, end: u64) -> Result<()> {
-		match end <= self.start {
+		let highest = match self.handle.state.read().timeline {
+			Timeline::Timed { latest, .. } => latest.value(),
+			Timeline::Empty | Timeline::Untimed => 0,
+		};
+		match end < self.start.max(highest) {
 			true => Err(Error::TimestampMismatch),
 			false => Ok(()),
 		}
@@ -2405,6 +2415,17 @@ impl Producer {
 			true => Poll::Pending,
 			false => Poll::Ready(()),
 		}
+	}
+
+	/// How many more bytes the writer, `partial` bytes into a frame it has not committed, may
+	/// take before [`Self::poll_paced`] holds it at `window`, or `None` once nothing would;
+	/// see [`super::pace::Pace::room`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn room(&self, partial: u64, window: u64) -> Option<u64> {
+		if self.handle.state.is_closed() {
+			return None;
+		}
+		self.handle.alive.pace.room(partial, window, self.handle.state.wanted())
 	}
 
 	/// The non-writing observer used by the cache and built-in sessions.
@@ -2935,7 +2956,7 @@ impl Handle {
 		}
 		let finished = guard.outcome.frames().is_some();
 		guard.outcome = match guard.outcome {
-			Outcome::Finished(frames, _) => Outcome::Released(frames, err),
+			Outcome::Finished(frames, end) => Outcome::Released(frames, end, err),
 			_ => Outcome::Aborted(err),
 		};
 		// After the outcome exists, so a scan reading the mirror never hides a live group.
@@ -3027,7 +3048,7 @@ impl Handle {
 	/// (see [`Producer::finish_at`]).
 	pub(crate) fn end(&self) -> Option<u64> {
 		match self.state.read().outcome {
-			Outcome::Finished(_, end) => end,
+			Outcome::Finished(_, end) | Outcome::Released(_, end, _) => end,
 			_ => None,
 		}
 	}
@@ -3042,7 +3063,7 @@ impl Handle {
 
 	/// The index of the first frame this group still holds, or `None` once it has been
 	/// aborted. Non-zero when the group started later (see [`Self::start_at`]); a reader
-	/// positioned below it is [`Error::Lagged`].
+	/// positioned below it fetches the frames it lacks or fails with [`Error::Lagged`].
 	///
 	/// One guard for both halves, deliberately. The track asks this to decide whether a
 	/// cached slot can still answer a request, and reading the abort and the offset
@@ -4027,8 +4048,11 @@ impl Consumer {
 		self
 	}
 
-	/// Run `read`, and once this copy fails with its route, or stalls while a newer route
-	/// serves, continue from the serving route's copy at the same frame and read again.
+	/// Run `read`, and once this copy fails with its route, stalls while a newer route serves,
+	/// or closes the group short after a newer route took over, continue from the serving
+	/// route's copy at the same frame and read again.
+	///
+	/// `read` ends with `None` only at the end of the group as this copy holds it.
 	fn poll_resumed<T>(
 		&mut self,
 		waiter: &kio::Waiter,
@@ -4041,10 +4065,11 @@ impl Consumer {
 				return res;
 			}
 			let index = self.cursor.index;
+			let short = matches!(res, Poll::Ready(Ok(None))) && self.closed_short();
 			let Some(recover) = self.carry.as_mut().and_then(|carry| carry.recover.as_mut()) else {
 				return res;
 			};
-			let failed = match &res {
+			let cause = match &res {
 				Poll::Ready(Ok(Some(_))) => {
 					recover.resumed();
 					// The old copy was dense through this frame, so the replacement must be too.
@@ -4059,11 +4084,11 @@ impl Consumer {
 					}
 					return res;
 				}
+				// Closed short of a known end: a route that replaced this copy may hold more.
+				Poll::Ready(Ok(None)) if short => Cause::Closed,
 				// Read to its end: no route is needed for it any more.
 				Poll::Ready(Ok(None)) => {
-					if let Some(carry) = &mut self.carry {
-						carry.recover = None;
-					}
+					self.let_go();
 					return res;
 				}
 				// Content that failed to inflate is the group's under its name, so no copy fixes it.
@@ -4071,23 +4096,44 @@ impl Consumer {
 					recover.failed(index, err);
 					return res;
 				}
-				Poll::Ready(Err(err)) => Some(err.clone()),
-				Poll::Pending => None,
+				Poll::Ready(Err(err)) => Cause::Failed(err.clone()),
+				Poll::Pending => Cause::Stalled,
 			};
-			if !recover.wants(failed.as_ref(), waiter) {
-				if let Some(err) = &failed {
-					recover.failed(index, err);
+			if !recover.wants(cause.error(), waiter) {
+				match &cause {
+					Cause::Failed(err) => recover.failed(index, err),
+					// The copy being read still serves, so its close is the group's end.
+					Cause::Closed => self.let_go(),
+					Cause::Stalled => {}
 				}
 				return res;
 			}
-			recover.recovering(index, failed.as_ref());
-			let replacement = match self.replacement(failed, waiter) {
+			recover.recovering(index, &cause);
+			let closed = matches!(cause, Cause::Closed);
+			let replacement = match self.replacement(cause, waiter) {
 				Poll::Ready(Ok(replacement)) => replacement,
 				Poll::Ready(Err(err)) => {
 					if let Some(recover) = self.recover_mut() {
 						recover.failed(index, &err);
 					}
+					// Nothing continues a group closed short, so it ends where it closed.
+					if closed {
+						self.let_go();
+						return res;
+					}
 					return Poll::Ready(Err(err));
+				}
+				// The reader's budget bounds the wait for the rest, as it does a stall, and
+				// ends the group where it closed.
+				Poll::Pending
+					if closed
+						&& self
+							.expiry
+							.as_ref()
+							.is_some_and(|e| e.is_expired(self.recover(), waiter)) =>
+				{
+					self.let_go();
+					return res;
 				}
 				Poll::Pending => return Poll::Pending,
 			};
@@ -4110,16 +4156,20 @@ impl Consumer {
 		}
 	}
 
-	/// The serving route's copy to continue this group from once its copy `failed`, or
-	/// stalled while a newer route serves, or the error that ends the read instead.
-	fn replacement(&mut self, failed: Option<Error>, waiter: &kio::Waiter) -> Poll<Result<super::resume::Replacement>> {
+	/// The serving route's copy to continue this group from once its copy looks past itself for
+	/// `cause`, or the error that ends the read instead.
+	fn replacement(&mut self, cause: Cause, waiter: &kio::Waiter) -> Poll<Result<super::resume::Replacement>> {
 		// An ordinal FETCH would request different content after an Object ID gap.
 		if self.cursor.state.read().sparse() {
 			return Poll::Ready(Err(Error::Unsupported));
 		}
 		let index = self.cursor.index as u64;
 		let recover = self.recover_mut().expect("only a recovering group needs a replacement");
-		let replacement = ready!(recover.poll(index, failed.as_ref(), waiter))?;
+		let replacement = ready!(recover.poll(index, &cause, waiter))?;
+		let failed = match cause {
+			Cause::Failed(err) => Some(err),
+			Cause::Stalled | Cause::Closed => None,
+		};
 		// A plain read inflates from frame 0, which a replacement starting later lacks
 		// when the failed route's head was not lent to it.
 		if !self.cursor.raw
@@ -4279,8 +4329,9 @@ impl Consumer {
 	/// Advance the read cursor to `index`, skipping every frame below it.
 	///
 	/// Unlike [`Self::with_range`], this does not clamp past a requested frame the group
-	/// never held. A [`Producer::start_at`] floor above `index` still surfaces as
-	/// [`Error::Lagged`].
+	/// never held. A [`Producer::start_at`] floor above `index` makes a read fetch the
+	/// frames below it, from a front's route or the track's [`crate::track::Requests`]
+	/// handlers, and surfaces as [`Error::Lagged`] when neither can serve them.
 	pub fn skip_to(&mut self, index: u64) {
 		Idle::disarm(&mut self.idle);
 		self.cursor.skip_to(index);
@@ -4294,10 +4345,11 @@ impl Consumer {
 	}
 
 	/// Where the group ends in its track's timescale, once its producer finished it whole
-	/// with [`Producer::finish_at`]: `None` while it is open, or when it finished without an end.
+	/// with [`Producer::finish_at`], kept after its cache is released: `None` while it is open,
+	/// when it was aborted unfinished, or when it finished without an end.
 	pub fn end(&self) -> Option<u64> {
 		match self.cursor.state.read().outcome {
-			Outcome::Finished(_, end) => end,
+			Outcome::Finished(_, end) | Outcome::Released(_, end, _) => end,
 			_ => None,
 		}
 	}
@@ -4595,6 +4647,24 @@ impl Consumer {
 		self.carry.as_ref()?.recover.as_ref()
 	}
 
+	/// Drop the recovery once the group ended: no route is needed for it any more.
+	fn let_go(&mut self) {
+		if let Some(carry) = &mut self.carry {
+			carry.recover = None;
+		}
+	}
+
+	/// Whether this reader read to the end of a copy that closed the group short of a known
+	/// end, as a FIN without GROUP_END does, below the reader's own cap: the group may hold
+	/// more than this copy got.
+	fn closed_short(&self) -> bool {
+		!self.cursor.capped()
+			&& matches!(
+				self.cursor.state.read().outcome,
+				Outcome::Finished(frames, None) | Outcome::Released(frames, None, _) if self.cursor.index >= frames
+			)
+	}
+
 	fn recover_mut(&mut self) -> Option<&mut super::resume::Recover> {
 		self.carry.as_mut()?.recover.as_mut()
 	}
@@ -4617,17 +4687,44 @@ impl Consumer {
 		}
 	}
 
-	/// Whether the copy read shed the frame read next, rather than failing or never holding
-	/// it. Ordinals stand for frames only on a dense group, so only one boards a flight. A
-	/// plain read of a compressed copy also loses a frame its inflated copy shed, which the
-	/// decoder, already past it, cannot inflate again.
+	/// Whether the copy read lacks the frame read next, having shed it or started past it,
+	/// rather than failing. Ordinals stand for frames only on a dense group, so only one
+	/// boards a flight. A plain read of a compressed copy also loses a frame its inflated copy
+	/// shed, which the decoder, already past it, cannot inflate again. A group handed out
+	/// from a front recovers a frame its copy started past from a route instead.
 	fn shed_next(&self) -> bool {
 		let state = self.cursor.state.read();
 		let index = self.cursor.index;
-		if state.outcome.error().is_some() || state.sparse() || index < state.offset {
+		if state.outcome.error().is_some() || state.sparse() {
 			return false;
 		}
+		if index < state.offset {
+			return self.recover().is_none();
+		}
 		index < state.held() || state.plain(self.cursor.raw).is_some_and(|plain| plain.shed_past(index))
+	}
+
+	/// Whether reading from frame `index` can fetch the frames below where this copy starts:
+	/// a front recovers them from a route, and a track's [`track::Requests`] handlers serve
+	/// them as a flight. A failed or refused fetch fails the read.
+	pub(crate) fn fetches_from(&self, index: u64) -> bool {
+		let state = self.cursor.state.read();
+		if index >= state.offset as u64 {
+			return true;
+		}
+		if state.outcome.error().is_some() || state.sparse() {
+			return false;
+		}
+		drop(state);
+		self.recover().is_some() || self.cursor.cache.track().is_some_and(|track| track::flies(&track))
+	}
+
+	/// Start reads at frame `index`, even below the first frame this copy holds, which a read
+	/// then fetches (see [`Self::fetches_from`]). A start below the cursor is ignored.
+	#[cfg(feature = "async")]
+	pub(crate) fn fetching_from(mut self, index: u64) -> Self {
+		self.skip_to(index);
+		self
 	}
 
 	/// Read the same frames from `copy` from here on, keeping this reader's place and cap.
@@ -4751,11 +4848,14 @@ impl Consumer {
 	pub fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<u64>> {
 		let res = match self.recover().is_none() {
 			true => self.poll_finished_once(waiter),
+			// A reader at the end of a copy that closed the group short reads on from the route
+			// that replaced it, as a frame read does, so its end is that copy's.
 			false => self
 				.poll_resumed(waiter, |this, waiter| {
-					this.poll_finished_once(waiter).map(|res| res.map(Some))
+					this.poll_finished_once(waiter)
+						.map(|res| res.map(|index| (!this.closed_short()).then_some(index)))
 				})
-				.map(|res| res.map(|index| index.expect("finished with an index"))),
+				.map(|res| res.map(|index| index.unwrap_or(self.cursor.index as u64))),
 		};
 		if let Poll::Ready(Ok(_)) = res {
 			self.release_if_finished();
@@ -4857,7 +4957,13 @@ impl Consumer {
 		let (raw, end) = (self.cursor.raw, self.cursor.end);
 		// Frames already prefetched are this cursor's whatever the group sheds since, so
 		// only the first one past them can be evicted.
-		let unread = index + self.cursor.prefetch.buffered().0 as usize;
+		let mut unread = index + self.cursor.prefetch.buffered().0 as usize;
+		// The frames below where this copy starts come from a flight, and the group ends
+		// where this copy does.
+		let offset = self.cursor.state.read().offset;
+		if unread < offset && self.recover().is_none() && self.fetches_from(unread as u64) {
+			unread = offset;
+		}
 		let res = self
 			.cursor
 			.poll(waiter, |state| state.poll_end(index, unread, raw, end))
@@ -6337,7 +6443,8 @@ mod test {
 
 	/// A finished group is still aborted once its frames are released to free memory (the
 	/// cache pool's expiry window or byte target). A reader that already drained every frame
-	/// is missing nothing, so it must see the clean end of group rather than the abort.
+	/// is missing nothing, so it must see the clean end of group, and where it ends, rather
+	/// than the abort.
 	#[test]
 	#[cfg(feature = "async")]
 	fn abort_after_finish_keeps_the_clean_end_for_a_drained_reader() {
@@ -6345,7 +6452,7 @@ mod test {
 		producer
 			.write_frame(Timestamp::ZERO, Bytes::from_static(b"hello"))
 			.unwrap();
-		let producer = producer.finish().unwrap();
+		let producer = producer.finish_at(1).unwrap();
 
 		let mut drained = producer.consume();
 		let mut behind = producer.consume();
@@ -6357,6 +6464,7 @@ mod test {
 		// Drained everything before the abort: nothing is missing.
 		assert!(drained.read_frame().now_or_never().unwrap().unwrap().is_none());
 		assert!(drained.next_frame().now_or_never().unwrap().unwrap().is_none());
+		assert_eq!(drained.end(), Some(1));
 
 		// Never read the frame, and its bytes are gone: a truncated stream, not a clean end.
 		assert!(matches!(behind.read_frame().now_or_never().unwrap(), Err(Error::Old)));

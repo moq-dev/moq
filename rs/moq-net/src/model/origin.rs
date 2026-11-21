@@ -3932,6 +3932,9 @@ struct OwnClaims {
 	best: HashMap<Path, (Instance, crate::route::node::Claim, bool)>,
 	/// The instance at each prefix that a route not learned upstream serves.
 	local: HashMap<Path, Instance>,
+	/// Claims that left since the last feed, told after it: a successor at the same
+	/// prefix must reach the node first, or a peer reading the two apart sees an end.
+	gone: BTreeMap<crate::route::node::Broadcast, crate::route::node::Change>,
 	/// Whether the origin forwards. One that does not tells no peer a claim it learned.
 	proxy: bool,
 	node: crate::route::Node,
@@ -4063,7 +4066,7 @@ impl OwnClaims {
 						RouteKind::End => Change::Ended,
 						_ => Change::Lost,
 					};
-					self.node.own(false, (announce.prefix, instance), change);
+					self.gone.insert((announce.prefix, instance), change);
 				}
 				return None;
 			}
@@ -4091,7 +4094,7 @@ impl OwnClaims {
 			.insert(announce.prefix.clone(), (instance.clone(), claim, learned));
 		// Another instance took the prefix: the one it served before is gone.
 		if let Some((was, ..)) = was.filter(|(was, ..)| *was != instance) {
-			self.node.own(false, (announce.prefix.clone(), was), Change::Ended);
+			self.gone.insert((announce.prefix.clone(), was), Change::Ended);
 		}
 		Some(announce.prefix)
 	}
@@ -4121,8 +4124,8 @@ impl OwnClaims {
 
 	/// Feed the node the claim at each of `prefixes`, marked unless a route not learned
 	/// upstream serves the same instance there, and unless this origin forwards what it
-	/// learned.
-	fn feed(&self, mut prefixes: Vec<Path>) {
+	/// learned. Then end the claims that left, less any that came back since.
+	fn feed(&mut self, mut prefixes: Vec<Path>) {
 		prefixes.sort();
 		prefixes.dedup();
 		for prefix in prefixes {
@@ -4132,6 +4135,12 @@ impl OwnClaims {
 			let marked = (*learned && !self.proxy) || self.local.get(&prefix) != Some(instance);
 			let change = crate::route::node::Change::Live(claim.clone());
 			self.node.own(marked, (prefix, instance.clone()), change);
+		}
+		for ((prefix, instance), change) in std::mem::take(&mut self.gone) {
+			if self.best.get(&prefix).is_some_and(|(best, ..)| *best == instance) {
+				continue;
+			}
+			self.node.own(false, (prefix, instance), change);
 		}
 	}
 }
@@ -7788,6 +7797,7 @@ impl Consumer {
 			downstream: own(true).routes(),
 			best: HashMap::new(),
 			local: HashMap::new(),
+			gone: BTreeMap::new(),
 			proxy: self.proxy,
 			node: node.clone(),
 		};
@@ -11796,6 +11806,34 @@ mod tests {
 				.any(|(path, live)| path.as_str() == "room/alice" && *live),
 			"the new stream is told the announced claim"
 		);
+	}
+
+	/// A route that takes a path over from another reaches the route node before the one
+	/// it replaces ends, so a peer reading the two apart sees the path restart, not end.
+	#[test]
+	fn a_takeover_tells_the_route_node_the_successor_first() {
+		use crate::route::relay;
+		let producer = origin(1).produce();
+		let old = producer.route("room/alice", RouteOptions::hidden()).unwrap();
+		old.announce().unwrap();
+		let stream = route_stream(&producer.route_node());
+		while stream.try_wire().is_some() {}
+		let gone = old.instance();
+		let new = producer.route("room/alice", RouteOptions::hidden()).unwrap();
+		new.announce().unwrap();
+		// Nothing polls this test's driver: each `route_node` catches the feeder up.
+		producer.route_node();
+		drop(old);
+		producer.route_node();
+		let changes: Vec<(Instance, bool)> = std::iter::from_fn(|| stream.try_wire())
+			.filter_map(|msg| match msg {
+				relay::Msg::Announce { changes } => Some(changes),
+				_ => None,
+			})
+			.flatten()
+			.map(|((_, instance), change)| (instance, matches!(change, relay::Change::Live(_))))
+			.collect();
+		assert_eq!(changes, [(new.instance(), true), (gone, false)]);
 	}
 
 	/// Feeding the route node counts nothing against the session whose handle created it.
@@ -16436,7 +16474,7 @@ mod tests {
 		let mut later = video
 			.subscribe(crate::track::Subscription {
 				ranges: vec![crate::track::Range {
-					start: crate::track::Anchor::Time(3),
+					start: Some(3),
 					end: None,
 				}],
 				..Default::default()

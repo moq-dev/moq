@@ -1321,7 +1321,7 @@ async fn producer_replaced(version: &str) {
 			group.write_frame(group.at_start(), payload(key, frame)).unwrap();
 			assert_eq!(next(&mut rx).await, (key, payload(key, frame)), "{version}");
 		}
-		group.finish().unwrap();
+		group.finish_at(key + 1).unwrap();
 	}
 
 	// The encoder restarts: the old producer goes away mid-broadcast, and the resumed
@@ -1338,7 +1338,7 @@ async fn producer_replaced(version: &str) {
 		group.write_frame(group.at_start(), payload(2, frame)).unwrap();
 		assert_eq!(next(&mut rx).await, (2, payload(2, frame)), "{version}");
 	}
-	group.finish().unwrap();
+	group.finish_at(3).unwrap();
 
 	settle().await;
 	assert!(

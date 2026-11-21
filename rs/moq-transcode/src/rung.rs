@@ -302,13 +302,13 @@ impl Want {
 }
 
 /// Whether `subscription` reaches the live edge, the newest source group `edge`: some range is
-/// open, counts back from the latest group, or ends at or past it. As moq-net judges a copy's feed,
+/// open or ends at or past it. As moq-net judges a copy's feed,
 /// ranges wholly below it read only history, which fills serve. Before any group, every range
 /// does.
 fn reaches_live(subscription: &moq_net::track::Subscription, edge: Option<u64>) -> bool {
 	subscription.ranges.iter().any(|range| match (range.end, edge) {
 		// A time end is the last key it reads.
-		(Some(moq_net::track::Anchor::Time(last)), Some(edge)) => last >= edge,
+		(Some(last), Some(edge)) => last >= edge,
 		_ => true,
 	})
 }
@@ -476,28 +476,23 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 					// Mirror the source group so fetches and rendition
 					// switches map 1:1.
 					let info = moq_net::group::Info { start };
-					current = match producer.create_group(info) {
-						Ok(output) => Some(Writing(Some(output))),
-						// A fetch task is already serving this group (a consumer
-						// fetched a group at the live edge before the live loop
-						// reached it). The fetch is authoritative and its group
-						// reaches every subscriber through the shared track cache,
-						// so skip it here. Residual: if that fetch then fails and
-						// aborts the group, this rung skips one GOP until the next
-						// keyframe.
-						//
-						// The two paths stay separate writers on purpose. This one
-						// rides the shared feed (one decoder for every rung) and keeps
-						// its encoder's rate control across groups; a fetch decodes one
-						// past group on its own, at whatever pace the source serves it,
-						// with a fresh codec pair. Folding the fetch into this loop
-						// would either stall the live edge behind a past group's decode
-						// or give up the shared decode, and the track cache already
-						// settles who writes a group: the first `create_group` or
-						// `accept` wins, and the other sees `Duplicate`.
-						Err(moq_net::Error::Duplicate) => None,
-						Err(err) => return Err(err.into()),
-					};
+					// `None`: a fetch task is already serving this group (a
+					// consumer fetched a group at the live edge before the live
+					// loop reached it). The fetch is authoritative and its group
+					// reaches every subscriber through the shared track cache, so
+					// skip it here. Residual: if that fetch then fails and aborts
+					// the group, this rung skips one GOP until the next keyframe.
+					//
+					// The two paths stay separate writers on purpose. This one
+					// rides the shared feed (one decoder for every rung) and keeps
+					// its encoder's rate control across groups; a fetch decodes one
+					// past group on its own, at whatever pace the source serves it,
+					// with a fresh codec pair. Folding the fetch into this loop
+					// would either stall the live edge behind a past group's decode
+					// or give up the shared decode, and the track cache already
+					// settles who writes a group: the first `claim_group` or
+					// `accept` wins, and the other gets `None`.
+					current = producer.claim_group(info)?.map(|output| Writing(Some(output)));
 				}
 				Some(Item::Frame(frame)) => {
 					// No open group: attached mid-group, skipped a duplicate, or
@@ -800,7 +795,7 @@ async fn drop_gap(
 	fill: &moq_net::track::FillGroups,
 	sequence: u64,
 ) -> Result<(), Error> {
-	use moq_net::track::{Anchor, Delay, Order, Range, Subscription};
+	use moq_net::track::{Delay, Order, Range, Subscription};
 
 	// The miss is the source's answer, so its readers have it at once, whatever the lookup for
 	// the rest of the gap waits on.
@@ -823,8 +818,8 @@ async fn drop_gap(
 	let from = if below { first } else { sequence };
 	let subscription = Subscription::default()
 		.with_ranges([Range {
-			start: Anchor::Time(from),
-			end: Some(Anchor::Time(last)),
+			start: Some(from),
+			end: Some(last),
 		}])
 		.with_order(Order::Ascending)
 		.with_priority(fill.priority())
@@ -1202,7 +1197,7 @@ mod tests {
 			moq_net::track::Subscription::default()
 				.with_delay(moq_net::track::Delay::default().with_max(None))
 				.with_ranges([moq_net::track::Range {
-					start: moq_net::track::Anchor::Time(from),
+					start: Some(from),
 					end: None,
 				}])
 				.with_order(moq_net::track::Order::Ascending)
@@ -1344,7 +1339,7 @@ mod tests {
 			moq_net::track::Subscription::default()
 				.with_delay(moq_net::track::Delay::default().with_max(None))
 				.with_ranges([moq_net::track::Range {
-					start: moq_net::track::Anchor::Time(1),
+					start: Some(1),
 					end: None,
 				}])
 				.with_order(order),
@@ -1409,7 +1404,7 @@ mod tests {
 			moq_net::track::Subscription::default()
 				.with_delay(moq_net::track::Delay::default().with_max(None))
 				.with_ranges([moq_net::track::Range {
-					start: moq_net::track::Anchor::Time(7),
+					start: Some(7),
 					end: None,
 				}])
 				.with_order(moq_net::track::Order::Ascending),

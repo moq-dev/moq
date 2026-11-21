@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test";
-import { StreamCode, Stream as StreamError } from "../error.ts";
+import { FrameTooLarge, StreamCode, Stream as StreamError } from "../error.ts";
 import { Cursor, concat, encodeVarint, Reader, Writer } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
+import { MAX_FRAME_BYTES } from "../util/limits.ts";
 import { FetchHeader } from "./fetch.ts";
-import { decodeGroupGap, encodeGroupGap, Frame, Group, objectTime } from "./object.ts";
+import { decodeFetchObject, decodeGroupGap, encodeGroupGap, Frame, Group, objectTime } from "./object.ts";
 import { Version } from "./version.ts";
 
 const VERSION = Version.DRAFT_18;
@@ -83,6 +84,28 @@ test("an object's header goes out in one write, ahead of its payload", async () 
 	expect(frame.payload).toEqual(payload);
 	expect(frame.groupGap).toBe(3n);
 	expect(Frame.decode(c, flags).endOfTrack).toBe(true);
+});
+
+test("an object or fetched object declaring more than 32 MiB is refused at its header", () => {
+	const flags = {
+		hasExtensions: false,
+		hasSubgroup: false,
+		hasSubgroupObject: false,
+		hasEnd: false,
+		hasPriority: false,
+		firstObject: true,
+	};
+	// Only the header: the cap must not wait for any payload bytes.
+	const object = (size: number) =>
+		new Cursor(concat([encodeVarint(0, VERSION), encodeVarint(size, VERSION)]), VERSION);
+	expect(Frame.decode(object(MAX_FRAME_BYTES), flags).streamed).toBe(MAX_FRAME_BYTES);
+	expect(() => Frame.decode(object(MAX_FRAME_BYTES + 1), flags)).toThrow(FrameTooLarge);
+
+	// Flags 0: subgroup zero and no optional fields, so the length follows them directly.
+	const fetched = (size: number) =>
+		new Cursor(concat([encodeVarint(0, VERSION), encodeVarint(size, VERSION)]), VERSION);
+	expect(decodeFetchObject(fetched(MAX_FRAME_BYTES))).toMatchObject({ kind: "object", size: MAX_FRAME_BYTES });
+	expect(() => decodeFetchObject(fetched(MAX_FRAME_BYTES + 1))).toThrow(FrameTooLarge);
 });
 
 test("a data stream's header goes out in one write, stream type included", async () => {
