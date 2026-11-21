@@ -1051,13 +1051,17 @@ export class Publisher {
 		// broadcast resolves is never missed.
 		const revoked = unauthorized(msg.broadcast);
 		let serving: track.Subscriber | undefined;
+		// Aborted on revocation, for what the serving reader no longer reaches, such as a group
+		// fetched in its place.
+		const revocation = new AbortController();
 		const watch = this.#gate.watch(msg.broadcast, () => {
 			console.debug(`publish revoked: broadcast=${msg.broadcast} track=${msg.track}`);
+			revocation.abort(revoked);
 			serving?.close(revoked);
 			stream.abort(revoked);
 		});
 		try {
-			await this.#serveSubscribe(msg, stream, watch, (track) => {
+			await this.#serveSubscribe(msg, stream, { ...watch, revocation: revocation.signal }, (track) => {
 				serving = track;
 			});
 		} finally {
@@ -1068,7 +1072,7 @@ export class Publisher {
 	async #serveSubscribe(
 		msg: Subscribe,
 		stream: Stream,
-		watch: { revoked: () => boolean },
+		watch: { revoked: () => boolean; revocation: AbortSignal },
 		serving: (track: track.Subscriber) => void,
 	) {
 		// Checked before resolving, so a denied request never reaches the origin.
@@ -1328,6 +1332,7 @@ export class Publisher {
 			});
 			const finished = await this.#runTrack(track, stream.writer, controls, {
 				source: consumer,
+				revocation: watch.revocation,
 				sub: msg.id,
 				broadcast: msg.broadcast,
 				stamp,
@@ -1512,6 +1517,8 @@ export class Publisher {
 		serving: {
 			/** The track `track` reads, which fetches the frames a group's copy lacks. */
 			source: track.Consumer;
+			/** Aborted once the grant no longer covers the broadcast. */
+			revocation: AbortSignal;
 			sub: bigint;
 			broadcast: Path.Valid;
 			stamp: Stamp | undefined;
@@ -1528,7 +1535,7 @@ export class Publisher {
 			initial: bigint;
 		},
 	): Promise<boolean> {
-		const { source, sub, broadcast, stamp, publisher, compress, named, bounds, initial } = serving;
+		const { source, revocation, sub, broadcast, stamp, publisher, compress, named, bounds, initial } = serving;
 		// What the wire was told of each key: served, or given up, and how. Kept in the
 		// reader's own record, which its drops consult too. Undefined before lite-05.
 		const record = named ? hooks.wire(track) : undefined;
@@ -2057,7 +2064,7 @@ export class Publisher {
 				// The FIN waits for every stream to finish or reset, including one that has not opened yet.
 				// A stream reset to make room fails the group like any other reset, so it is dropped.
 				const task = (async () => {
-					let failed = await this.#fetchHead(source, track, options);
+					let failed = await this.#fetchHead(source, track, revocation, options);
 					try {
 						if (!failed) {
 							const writer = await this.#openGroup(options);
@@ -2579,7 +2586,12 @@ export class Publisher {
 	 *
 	 * @internal
 	 */
-	async #fetchHead(source: track.Consumer, reader: track.Subscriber, options: RunGroup): Promise<Error | undefined> {
+	async #fetchHead(
+		source: track.Consumer,
+		reader: track.Subscriber,
+		revocation: AbortSignal,
+		options: RunGroup,
+	): Promise<Error | undefined> {
 		const held = options.group;
 		if (hooks.groupIndex(held) <= options.start) return undefined;
 		const asking = reader.subscription.peek();
@@ -2589,6 +2601,9 @@ export class Publisher {
 			maxDelay: asking?.delay?.max ?? undefined,
 			signal: left.signal,
 			frameStart: options.start,
+			// Its budget's watch lasts until the copy is released, past the reads to the FIN's
+			// acknowledgement, as a FETCH's does.
+			held: true,
 		};
 		const fetched = source.fetchGroup(held.start, fetch).then(
 			(group) => group,
@@ -2606,14 +2621,12 @@ export class Publisher {
 			return result ?? new Error("unsubscribed while fetching a group's head");
 		}
 		held.close();
-		// The copy belongs to its fetch, so the serving reader closing, as a revoked grant closes
-		// it, releases the copy as it would the reader it replaced. Judged under the fetch's
-		// budget, as a FETCH is.
-		const release = (closed: Error | null | undefined) => {
-			if (closed instanceof Error) hooks.releaseGroupReader(result, closed);
-		};
-		release(reader.closed.peek());
-		options.unbind = reader.closed.subscribe(release);
+		// The copy belongs to its fetch, not the serving reader, so a revoked grant releases it
+		// here, even once that reader finished. Judged under the fetch's budget, as a FETCH is.
+		const release = () => hooks.releaseGroupReader(result, error(revocation.reason));
+		if (revocation.aborted) release();
+		revocation.addEventListener("abort", release);
+		options.unbind = () => revocation.removeEventListener("abort", release);
 		options.group = result;
 		options.givenUp = new GivenUp(result);
 		return undefined;
