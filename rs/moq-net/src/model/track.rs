@@ -1267,7 +1267,8 @@ impl Holdings for TrackState {
 				Some((&key, _)) => Join::Group(key),
 				// This copy's arrivals don't reach back that far, but its upstream's may.
 				None if wire => match self.feed_start(min) {
-					Some(JoinStart::At(start) | JoinStart::Past(start)) => Join::Group(start),
+					Some(JoinStart::At(start)) => Join::Group(start),
+					Some(JoinStart::Past(past)) => Join::Past(past),
 					None => Join::Unknown,
 				},
 				None => oldest().unwrap_or(Join::Unknown),
@@ -1332,8 +1333,8 @@ impl Holdings for TrackState {
 			// The feed delivers every group from its start, so it places the time.
 			Some(JoinStart::At(_)) => Join::Time(target),
 			// A join reaching no further back than one answered empty starts past that one's
-			// end, which every reader's join folded into it reaches no further than.
-			Some(JoinStart::Past(past)) => Join::Group(past),
+			// end, which proves a bounded reader's range empty and places no other.
+			Some(JoinStart::Past(past)) => Join::Past(past),
 			None => Join::Unknown,
 		}
 	}

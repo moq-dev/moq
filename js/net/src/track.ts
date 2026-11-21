@@ -4020,8 +4020,8 @@ export class Subscriber {
 		for (const [asked, at, past] of anchors.joins) {
 			if (asked < age) continue;
 			// A join reaching no further back than one answered empty starts past that one's end,
-			// which every reader's join folded into it reaches no further than.
-			if (past) return { group: at };
+			// which proves a bounded reader's range empty and places no other.
+			if (past) return { past: at };
 			if (start === undefined || at < start) start = at;
 		}
 		if (start === undefined) return undefined;

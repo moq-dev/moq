@@ -229,8 +229,13 @@ test("copy fill: lite-07 ends a live join answered empty", async () => {
 		expect(sorted(await take(origin, 1))).toEqual([]);
 		const relayed = peer.remote.track("video").subscribe(bounded());
 		expect(sorted(await take(relayed, 1))).toEqual([]);
+		// That empty answer places no reader whose range reaches past its end: one unbounded, with the
+		// same Min Age, joins where the origin does.
+		const open = peer.remote.track("video").subscribe(joining(1000));
+		expect(sorted(await take(open, 2))).toEqual(timed(3_000n));
 		origin.close();
 		relayed.close();
+		open.close();
 	} finally {
 		peer.close();
 	}

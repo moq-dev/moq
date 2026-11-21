@@ -241,6 +241,12 @@ async fn a_join_ending_before_its_start_ends_empty_through_a_relay() {
 		);
 		let mut relayed = chain.relay(bounded()).await;
 		assert!(relayed.next_group().await.unwrap().is_none(), "nor does the copy");
+
+		// That empty answer places no reader whose range reaches past its end: one unbounded,
+		// with the same Min Age, joins where the origin does.
+		let mut open = chain.relay(joining(Some(Duration::from_secs(1)))).await;
+		assert_eq!(first(&mut open).await, 4000, "1 s behind the live edge at 5 s");
+		drop(relayed);
 	})
 	.await
 	.expect("both bounded joins end");

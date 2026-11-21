@@ -280,7 +280,15 @@ export interface Holdings {
  * Where a live join starts: at a group (`group`), or as a time start at the live edge minus its
  * Min Age (`time`), which resolves, looks up, and waits as any time start does.
  */
-export type Join = { group: bigint; time?: never } | { time: bigint; group?: never };
+/**
+ * Where a live join starts: the group containing a time, a group, or, as `past`, a group starting
+ * at or past a key, which an upstream answering a bounded join empty proved. Mirrors the Rust
+ * `Join`.
+ */
+export type Join =
+	| { group: bigint; time?: never; past?: never }
+	| { time: bigint; group?: never; past?: never }
+	| { past: bigint; group?: never; time?: never };
 
 /**
  * The times a {@link Holdings} can't place: sorted, disjoint runs, apart from the times a placement
@@ -755,6 +763,15 @@ export class Window {
 			const join = this.#join(this.min, latest, holdings);
 			if (join === "pending" || join === "reaching") {
 				(join === "pending" ? this.#pending : this.#reaching).add(key);
+				return;
+			}
+			if (join.past !== undefined) {
+				// Starting past its end, the range holds nothing; any other waits for an answer.
+				if (range.end !== undefined && range.end < join.past) {
+					this.#count(key, { at: undefined, start: join.past, end, floored: true, waiting: false });
+				} else {
+					this.#reaching.add(key);
+				}
 				return;
 			}
 			if (join.group !== undefined) {

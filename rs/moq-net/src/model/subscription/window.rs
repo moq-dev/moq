@@ -101,6 +101,10 @@ pub(in crate::model) enum Join {
 	Time(u64),
 	/// The group starting here, which this hop measured by arrival, or its upstream reported.
 	Group(u64),
+	/// A group starting at or past this key, which an upstream answering a bounded join empty
+	/// proved: a range ending before it holds nothing, and any other waits as for
+	/// [`Self::Unknown`].
+	Past(u64),
 	/// Nothing measures it yet: a copy waits for its upstream to answer, and any hop for a
 	/// group to measure the live edge by.
 	Unknown,
@@ -736,9 +740,11 @@ impl Window {
 				Some(_) => match holdings.join(min) {
 					Join::Time(time) => (Some(time), true),
 					Join::Group(group) => (Some(group), false),
+					// Starting past its end, the range holds nothing.
+					Join::Past(past) if range.end.is_some_and(|last| last < past) => (Some(past), false),
 					// Nothing to measure the live edge by yet, or a copy's upstream still to answer:
 					// read none of the groups held until it resolves.
-					Join::Unknown => {
+					Join::Past(_) | Join::Unknown => {
 						self.reaching.insert(key);
 						return;
 					}
