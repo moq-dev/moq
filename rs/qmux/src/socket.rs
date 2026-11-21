@@ -37,6 +37,10 @@ pub trait SocketStats: Send + Sync + 'static {
 	fn limit_unsent(&self) -> Option<usize> {
 		None
 	}
+
+	/// Shut the connection down, since the session's driver ended and this handle may hold
+	/// its socket open. Statistics stay readable afterward.
+	fn shutdown(&self) {}
 }
 
 /// A shared handle to a transport's statistics.
@@ -399,13 +403,21 @@ mod unix {
 		fn limit_unsent(&self) -> Option<usize> {
 			let window = sys::congestion_window(self.borrow()).filter(|&window| window > 0)?;
 			let window = u32::try_from(window).unwrap_or(u32::MAX);
-			// Linux wakes writers on a changed mark, so a raised one frees a parked write at once.
+			// A changed mark wakes a parked writer once the unsent bytes are under half of it
+			// (Linux's `tcp_stream_memory_free` with `wake`), so a raise frees it at or before
+			// the next ACK that would have.
 			if self.window.load(Ordering::Relaxed) != window {
 				// Only a socket already torn down refuses it, and its session is ending anyway.
 				set_unsent_bound(self.borrow(), window).ok()?;
 				self.window.store(window, Ordering::Relaxed);
 			}
 			usize::try_from(window).ok()
+		}
+
+		fn shutdown(&self) {
+			// SAFETY: the descriptor is live for as long as `self`. A socket already shut down
+			// or reset refuses it, which leaves nothing to do.
+			unsafe { libc::shutdown(self.fd.as_raw_fd(), libc::SHUT_RDWR) };
 		}
 	}
 

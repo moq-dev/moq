@@ -150,6 +150,11 @@ impl<T> Drop for Driver<T> {
 		if !matches!(self.run.phase, Phase::Done) {
 			finish(&self.run.inner, Err(Error::Closed));
 		}
+		// The socket statistics hold a duplicate of the descriptor, which would keep the
+		// connection open past the transport for as long as any session handle lives.
+		if let Some(socket) = &self.run.socket {
+			socket.shutdown();
+		}
 	}
 }
 
@@ -356,7 +361,7 @@ impl<T: Transport> Run<T> {
 		self.unflushed = !flushed;
 		if blocked || !flushed {
 			// The window may have moved since the socket's bound was last set. Setting it
-			// before parking means a raised bound wakes the flush that just went pending.
+			// before parking lets a raised bound wake the flush that just went pending sooner.
 			self.limit_unsent();
 		}
 		let had_room = std::mem::replace(&mut self.room, flushed && !blocked);

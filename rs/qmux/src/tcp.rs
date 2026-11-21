@@ -98,4 +98,31 @@ mod tests {
 			}
 		}
 	}
+
+	/// A driver that ends without closing its transport, such as one dropped, still ends
+	/// the connection while a session handle (and the socket statistics' duplicate of the
+	/// descriptor) outlives it.
+	#[tokio::test]
+	async fn dropped_driver_ends_the_connection() {
+		use moq_net::transport::poll::Session as _;
+
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let addr = listener.local_addr().unwrap();
+		let mut config = Config::new(Version::QMux01);
+		// Only the closed socket may end the server's session, not its idle timer.
+		config.idle_timeout = None;
+		let (client, server) = tokio::join!(connect(addr, config.clone()), async {
+			accept(listener.accept().await.unwrap().0, config.clone()).await
+		});
+		let (client, client_driver) = client.unwrap();
+		let (server, server_driver) = server.unwrap();
+		tokio::spawn(server_driver);
+
+		drop(client_driver);
+		// Bounds a regression's hang; the close arrives in a round trip on loopback.
+		kio::clock::timeout(std::time::Duration::from_secs(10), server.closed())
+			.await
+			.expect("the server never saw the connection end");
+		drop(client);
+	}
 }
