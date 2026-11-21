@@ -233,8 +233,8 @@ pub(super) struct GroupState {
 	pub(super) partial: Option<Partial>,
 
 	// Index of the first frame this handle holds: any the group deliberately started
-	// past (see [`Producer::start_at`]). Reading below it is [`Error::Lagged`]; the
-	// frames are not here. Frames shed from the front since sit between it and
+	// past (see [`Producer::start_at`]). The frames are not here: reading below it
+	// fetches them (see [`Consumer::fetches_from`]) or is [`Error::Lagged`]. Frames shed from the front since sit between it and
 	// [`Self::held`], and reading them is [`Error::Evicted`].
 	pub(super) offset: usize,
 
@@ -1774,10 +1774,12 @@ impl Producer {
 	///
 	/// A group can be short at its front or its back, never in the middle: this trims
 	/// the front. Transport cuts at the back also retain their incomplete provenance.
-	/// The frames below `index` are not a gap this handle will ever fill, so a reader
-	/// positioned below it gets [`Error::Lagged`]. They belong to whoever produced the
-	/// head of the group, typically another route serving the same track (see
-	/// [`crate::track::Subscriber`]).
+	/// The frames below `index` are not a gap this handle will ever fill. They belong to
+	/// whoever produced the head of the group, typically another route serving the same
+	/// track (see [`crate::track::Subscriber`]), so a reader positioned below it fetches
+	/// them from there: a front recovers them from a route, or the track's
+	/// [`crate::track::Requests`] handlers serve them. With neither, the read is
+	/// [`Error::Lagged`]; a failed fetch fails it with the fetch's error.
 	///
 	/// The counterpart of [`Consumer::with_range`], which positions a *reader* the same
 	/// way. Where the group begins is part of its shape, so this must come before the
@@ -2407,6 +2409,17 @@ impl Producer {
 			true => Poll::Pending,
 			false => Poll::Ready(()),
 		}
+	}
+
+	/// How many more bytes the writer, `partial` bytes into a frame it has not committed, may
+	/// take before [`Self::poll_paced`] holds it at `window`, or `None` once nothing would;
+	/// see [`super::pace::Pace::room`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn room(&self, partial: u64, window: u64) -> Option<u64> {
+		if self.handle.state.is_closed() {
+			return None;
+		}
+		self.handle.alive.pace.room(partial, window, self.handle.state.wanted())
 	}
 
 	/// The non-writing observer used by the cache and built-in sessions.
@@ -3044,7 +3057,7 @@ impl Handle {
 
 	/// The index of the first frame this group still holds, or `None` once it has been
 	/// aborted. Non-zero when the group started later (see [`Self::start_at`]); a reader
-	/// positioned below it is [`Error::Lagged`].
+	/// positioned below it fetches the frames it lacks or fails with [`Error::Lagged`].
 	///
 	/// One guard for both halves, deliberately. The track asks this to decide whether a
 	/// cached slot can still answer a request, and reading the abort and the offset
@@ -4310,8 +4323,9 @@ impl Consumer {
 	/// Advance the read cursor to `index`, skipping every frame below it.
 	///
 	/// Unlike [`Self::with_range`], this does not clamp past a requested frame the group
-	/// never held. A [`Producer::start_at`] floor above `index` still surfaces as
-	/// [`Error::Lagged`].
+	/// never held. A [`Producer::start_at`] floor above `index` makes a read fetch the
+	/// frames below it, from a front's route or the track's [`crate::track::Requests`]
+	/// handlers, and surfaces as [`Error::Lagged`] when neither can serve them.
 	pub fn skip_to(&mut self, index: u64) {
 		Idle::disarm(&mut self.idle);
 		self.cursor.skip_to(index);
@@ -4667,17 +4681,44 @@ impl Consumer {
 		}
 	}
 
-	/// Whether the copy read shed the frame read next, rather than failing or never holding
-	/// it. Ordinals stand for frames only on a dense group, so only one boards a flight. A
-	/// plain read of a compressed copy also loses a frame its inflated copy shed, which the
-	/// decoder, already past it, cannot inflate again.
+	/// Whether the copy read lacks the frame read next, having shed it or started past it,
+	/// rather than failing. Ordinals stand for frames only on a dense group, so only one
+	/// boards a flight. A plain read of a compressed copy also loses a frame its inflated copy
+	/// shed, which the decoder, already past it, cannot inflate again. A group handed out
+	/// from a front recovers a frame its copy started past from a route instead.
 	fn shed_next(&self) -> bool {
 		let state = self.cursor.state.read();
 		let index = self.cursor.index;
-		if state.outcome.error().is_some() || state.sparse() || index < state.offset {
+		if state.outcome.error().is_some() || state.sparse() {
 			return false;
 		}
+		if index < state.offset {
+			return self.recover().is_none();
+		}
 		index < state.held() || state.plain(self.cursor.raw).is_some_and(|plain| plain.shed_past(index))
+	}
+
+	/// Whether reading from frame `index` can fetch the frames below where this copy starts:
+	/// a front recovers them from a route, and a track's [`track::Requests`] handlers serve
+	/// them as a flight. A failed or refused fetch fails the read.
+	pub(crate) fn fetches_from(&self, index: u64) -> bool {
+		let state = self.cursor.state.read();
+		if index >= state.offset as u64 {
+			return true;
+		}
+		if state.outcome.error().is_some() || state.sparse() {
+			return false;
+		}
+		drop(state);
+		self.recover().is_some() || self.cursor.cache.track().is_some_and(|track| track::flies(&track))
+	}
+
+	/// Start reads at frame `index`, even below the first frame this copy holds, which a read
+	/// then fetches (see [`Self::fetches_from`]). A start below the cursor is ignored.
+	#[cfg(feature = "async")]
+	pub(crate) fn fetching_from(mut self, index: u64) -> Self {
+		self.skip_to(index);
+		self
 	}
 
 	/// Read the same frames from `copy` from here on, keeping this reader's place and cap.
@@ -4910,7 +4951,13 @@ impl Consumer {
 		let (raw, end) = (self.cursor.raw, self.cursor.end);
 		// Frames already prefetched are this cursor's whatever the group sheds since, so
 		// only the first one past them can be evicted.
-		let unread = index + self.cursor.prefetch.buffered().0 as usize;
+		let mut unread = index + self.cursor.prefetch.buffered().0 as usize;
+		// The frames below where this copy starts come from a flight, and the group ends
+		// where this copy does.
+		let offset = self.cursor.state.read().offset;
+		if unread < offset && self.recover().is_none() && self.fetches_from(unread as u64) {
+			unread = offset;
+		}
 		let res = self
 			.cursor
 			.poll(waiter, |state| state.poll_end(index, unread, raw, end))

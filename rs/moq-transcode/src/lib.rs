@@ -1665,7 +1665,7 @@ mod tests {
 	/// A fetch dropped before its group is encoded never opens that encode, and
 	/// the request goes with it. A later fetch of the same group is a new
 	/// request: the abandoned one must not still be encoding into the cache,
-	/// where this accept would come back `Duplicate`.
+	/// where this accept would come back `None`.
 	#[tokio::test]
 	async fn an_abandoned_fetch_encodes_nothing() {
 		let source = source_catalog(320, 240);

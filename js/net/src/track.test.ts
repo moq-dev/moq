@@ -2812,22 +2812,27 @@ test("withRange drops groups recvGroup parked at the cap", async () => {
 	expect((await pending)?.start).toBe(2n);
 });
 
-// A live duplicate would fan out to every subscriber twice (recvGroup has no sequence
-// cursor to hide it), so createGroup rejects it like Rust's claim_sequence. An aborted
-// incarnation is evicted so a fresh group can serve the sequence again.
-test("createGroup rejects a duplicate live sequence", async () => {
+// createGroup replaces a live sequence, as Rust's create_group does: a subscriber that took the
+// first copy is not handed the key again, and a later reader gets the replacement.
+test("createGroup replaces a live sequence", async () => {
 	const producer = new TrackProducer("test");
 	const track = producer.subscribe();
 
 	const first = producer.createGroup(7n);
 	first.writeFrame(textFrame("first", Timestamp.fromMillis(Number(first.start))));
 	first.finish();
+	const got = await track.recvGroup();
+	expect(got?.start).toBe(7n);
+	expect(await got?.readString()).toBe("first");
 
-	// A peer re-sending a live sequence is rejected, not fanned out again.
-	expect(() => producer.createGroup(7n)).toThrow("duplicate group");
-	expect((await track.recvGroup())?.start).toBe(7n);
+	const second = producer.createGroup(7n);
+	second.writeFrame(textFrame("second", Timestamp.fromMillis(Number(second.start))));
+	second.finish();
+	const late = await producer.subscribe().recvGroup();
+	expect(late?.start).toBe(7n);
+	expect(await late?.readString()).toBe("second");
 
-	// An aborted incarnation is replaceable: the retry serves the sequence fresh.
+	// An aborted incarnation is replaced the same way: the retry serves the sequence fresh.
 	const aborted = producer.createGroup(8n);
 	aborted.abort(new Error("upstream reset"));
 
@@ -2835,9 +2840,26 @@ test("createGroup rejects a duplicate live sequence", async () => {
 	retry.writeFrame(textFrame("retry", Timestamp.fromMillis(Number(retry.start))));
 	retry.finish();
 
-	const got = await track.recvGroup();
-	expect(got?.start).toBe(8n);
-	expect(await got?.readString()).toBe("retry");
+	const next = await track.recvGroup();
+	expect(next?.start).toBe(8n);
+	expect(await next?.readString()).toBe("retry");
+});
+
+// A replaced group still open leaves the cache, yet the track's teardown still ends it for the
+// reader draining it, as it ends a cached one.
+test("aborting the track ends a replaced group a reader holds", async () => {
+	const producer = new TrackProducer("test");
+	const track = producer.subscribe();
+
+	const old = producer.createGroup(7n);
+	old.writeFrame(textFrame("old", Timestamp.fromMillis(Number(old.start))));
+	const draining = await track.recvGroup();
+	expect(draining?.start).toBe(7n);
+	expect((await draining?.readFrame())?.payload).toBeDefined();
+
+	producer.createGroup(7n).finish();
+	producer.abort(new Error("gone"));
+	await expect(draining?.readFrame()).rejects.toThrow("gone");
 });
 
 // A beyond-cap group outlives a clean close for a later widening, so the subscriber

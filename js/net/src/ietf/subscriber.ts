@@ -1909,7 +1909,8 @@ export class Subscriber {
 						`group ${group.groupId} is at or past the declared end ${subscription.end}`,
 					);
 				}
-				producer = track.createGroup(group.groupId);
+				// A group the copy already holds arrived twice, which the received path refuses.
+				producer = hooks.receiveGroup(track, { start: group.groupId, offset: 0 });
 			}
 			return producer;
 		};
@@ -2176,7 +2177,7 @@ export class Subscriber {
 
 				const timestamp = objectTime(timescale, join.key);
 				if (first) {
-					producer = join.open(() => track.createGroup(join.key));
+					producer = join.open(() => hooks.receiveGroup(track, { start: join.key, offset: 0 }));
 					if (!producer) {
 						discarding = true;
 						if (!object.payload) await skipPayload(stream, object.size);
