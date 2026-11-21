@@ -987,12 +987,23 @@ class Reader implements ResumeSource {
 		// Kept until a copy places the ranges, but those whose start the resume point raised, which
 		// only the backfill places: only then can the gaps they cover be judged.
 		let floor = window.floor();
-		if (floor === undefined) {
-			if (raisedAt.size === 0 || raisedAt.size !== window.unsettled().size) return;
-			floor = window.runs()[0]?.start ?? 0n;
-		}
 		const serving = this.#copies.at(-1);
 		const resumed = serving && resumePoint(serving);
+		if (floor === undefined && raisedAt.size !== window.unsettled().size) {
+			// The gaps wait for the other ranges to place, but an owed raised start is asked now: its
+			// backfill places it whatever they wait on, and a later ask finds it.
+			if (resumed === undefined) return;
+			let start: bigint | undefined;
+			for (const time of raisedAt.values()) {
+				if (!delivered.covers(time, resumed)) start = start === undefined ? time : min(start, time);
+			}
+			if (start !== undefined) this.#backfill(start, resumed);
+			return;
+		}
+		if (floor === undefined) {
+			if (raisedAt.size === 0) return;
+			floor = window.runs()[0]?.start ?? 0n;
+		}
 		// A raised start whose groups from its time the reader already holds or passed owes nothing
 		// under the resume point: placed at its time, it hands out what the group holding it would,
 		// as none under it goes out.
@@ -1116,9 +1127,15 @@ class Reader implements ResumeSource {
 	// backfill's that no range placed so far holds, since only a placed range bounds the groups under
 	// the resume point. Mirrors the Rust `Reader::poll_lowest`.
 	#waits(copy: Copy, key: bigint): boolean {
+		if (!this.#mayWait(copy)) return false;
+		const failed = !this.route.concluded && copyFailed(copy);
 		const window = this.#window();
-		if (!window.pending) return false;
-		return (!this.route.concluded && copyFailed(copy)) || (copy.backfill === true && !window.holds(key));
+		return window.pending && (failed || !window.holds(key));
+	}
+
+	// Whether the hold in `#waits` can apply to a copy at all, so only those peek before taking.
+	#mayWait(copy: Copy): boolean {
+		return (!this.route.concluded && copyFailed(copy)) || copy.backfill === true;
 	}
 
 	tryGroup(ordered: boolean, delivered: Delivered, dispositions: boolean): Recv {
@@ -1171,7 +1188,7 @@ class Reader implements ResumeSource {
 				const newest = this.#newest === undefined ? undefined : this.#newest + 1n;
 				// Its group stays there until placed, but how it ran out is still judged below. It got
 				// a group, so its route did not refuse the track.
-				const peeked = hooks.peekGroup(copy.sub, ordered, newest);
+				const peeked = this.#mayWait(copy) ? hooks.peekGroup(copy.sub, ordered, newest) : undefined;
 				if (peeked !== undefined && this.#waits(copy, peeked)) {
 					copy.delivered = true;
 					held.add(copy);

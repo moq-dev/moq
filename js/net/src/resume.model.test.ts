@@ -642,6 +642,8 @@ class Model {
 		if (!instance.ended && reader.ranges === undefined) {
 			throw fail(index, "the track ended cleanly though no route declared an end");
 		}
+		// Where the range placed decides what it owes, so record it before the snapshot.
+		this.#place(reader);
 		const covered = (group: number) => (instance.ended ? covers(reader, group) : within(owedRange(reader), group));
 		reader.carried = new Set();
 		for (let group = 0; group < GROUPS; group++) {
@@ -785,19 +787,23 @@ class Model {
 	 */
 	place(): void {
 		for (const reader of this.readers) {
-			if (!reader || reader.spec.ordered || reader.ranges === undefined || reader.holding !== undefined) continue;
-			if (hooks.servingResolved(reader.sub)[0] === undefined) continue;
-			const publisher = this.instances[reader.instance];
-			const start = reader.ranges[0];
-			let holding = start;
-			for (let group = start; group >= 0; group--) {
-				if (!publisher.written.has(group) && !publisher.givenUp.has(group)) continue;
-				const held = publisher.live().every((copy) => copy.groups.has(group) && !copy.givenUp.has(group));
-				if (held) holding = group;
-				break;
-			}
-			reader.holding = holding;
+			if (reader) this.#place(reader);
 		}
+	}
+
+	#place(reader: Reader): void {
+		if (reader.spec.ordered || reader.ranges === undefined || reader.holding !== undefined) return;
+		if (hooks.servingResolved(reader.sub)[0] === undefined) return;
+		const publisher = this.instances[reader.instance];
+		const start = reader.ranges[0];
+		let holding = start;
+		for (let group = start; group >= 0; group--) {
+			if (!publisher.written.has(group) && !publisher.givenUp.has(group)) continue;
+			const held = publisher.live().every((copy) => copy.groups.has(group) && !copy.givenUp.has(group));
+			if (held) holding = group;
+			break;
+		}
+		reader.holding = holding;
 	}
 
 	/**

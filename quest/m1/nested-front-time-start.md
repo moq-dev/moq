@@ -25,7 +25,9 @@ Two gaps add up:
 - A backfill asked through an inner front is let go before the group holding
   the time lands on it: Rust `Copy::backs` and JS `#retains` ask
   `may_land`/`hooks.mayLand`, which a front's reader answers `false` for, as
-  it holds no producer. Forward it to the inner reader's serving copy.
+  it holds no producer. Forward it to the inner reader's copies: true
+  while any copy it still retains may land the group, not only its serving
+  copy, since a replaced copy may still deliver one the serving copy cannot.
 
 Extend that test, and its JS mirror, to assert the range places at 7..7 and
 the read ends.

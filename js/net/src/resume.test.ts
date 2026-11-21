@@ -427,6 +427,49 @@ test("a backfill places a time start its serving copy raised, at the group holdi
 });
 
 /**
+ * As above, beside a range still waiting on a group past the live edge: the raised start's backfill
+ * is asked without waiting for that range to place. Mirrors the Rust
+ * `a_backfill_places_a_raised_start_beside_a_waiting_range`.
+ */
+test("a backfill places a raised start beside a waiting range", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const front = new Front();
+	const sources = [new BroadcastProducer(), new BroadcastProducer()];
+	const handles = sources.map((source) => source.consume());
+	const [ta, tb] = sources.map(copy);
+	const delay = { max: Duration.millis(3_600_000) };
+	ta.write(6n);
+	ta.write(8n);
+	front.serve(handles[0]);
+	const sub = front.consumer.track("seq").subscribe({ delay, ranges: [{ start: { time: 8n } }] });
+	try {
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([8n]);
+		front.serve(handles[1]);
+		await clock.advance(Duration.ZERO);
+		ta.producer.abort(new StreamError(StreamCode.SessionClosed));
+		sub.update({
+			delay,
+			ranges: [{ start: { time: 7n }, end: { time: 8n } }, { start: { time: 20n } }],
+		});
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([]);
+		for (const key of [6n, 8n]) tb.write(key);
+		await clock.advance(Duration.ZERO);
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([6n]);
+		expect(hooks.servingResolved(sub)[0]?.start).toBe(6n);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		for (const handle of handles) handle.close();
+		for (const source of sources) source.close();
+		installed.close();
+	}
+});
+
+/**
  * As above, for a range that ends relative to the live edge: the serving copy places that end, and
  * the backfill, capped under the resume point, places only the start.
  */

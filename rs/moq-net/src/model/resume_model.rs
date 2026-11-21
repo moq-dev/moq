@@ -304,6 +304,33 @@ impl Reader {
 			.map(|(start, end)| (self.holding.map_or(start, |holding| holding.min(start)), end))
 	}
 
+	/// Once an arrival read first placed the range, record the group holding its start time:
+	/// the newest group at or before it the instance wrote, when every live route holds it and
+	/// none between was written or given up anywhere, so whichever route places the range starts
+	/// it there. Otherwise its start time stands, owing only from there.
+	fn place(&mut self, publisher: &Publisher) {
+		let (Some((start, _)), None, Some(Cursor::Arrival(sub))) = (self.ranges, self.holding, &mut self.cursor) else {
+			return;
+		};
+		if sub.resolved_range(0).is_none() {
+			return;
+		}
+		let exists = |group: &u64| publisher.written.contains_key(group) || publisher.given_up.contains(group);
+		let held = |group: u64| {
+			publisher.live().all(|copy| {
+				!copy.given_up.contains(&group)
+					&& copy
+						.groups
+						.get(&group)
+						.is_some_and(|parts| parts.iter().any(|part| part.from == 0))
+			})
+		};
+		self.holding = Some(match (0..=start).rev().find(exists) {
+			Some(holding) if held(holding) => holding,
+			_ => start,
+		});
+	}
+
 	/// Whether the reader may be handed `group`: inside its bounds and before its range's
 	/// end. The range starts at the group containing its start time among those the copy
 	/// that resolved it held, which may be a lower one, so a group below the start may be
@@ -740,6 +767,8 @@ impl Model {
 					if !instance.ended && reader.ranges.is_none() {
 						return Err(fail(index, "the track ended cleanly though no route declared an end"));
 					}
+					// Where the range placed decides what it owes, so record it before the snapshot.
+					reader.place(instance);
 					let covers = |group: u64| match instance.ended {
 						true => reader.covers(group),
 						false => reader.owes().is_some_and(|(start, end)| (start..end).contains(&group)),
@@ -845,34 +874,10 @@ impl Model {
 	}
 
 	/// Record, for each arrival reader whose range just placed, the group holding its start
-	/// time: the newest group at or before it the instance wrote, when every live route holds
-	/// it and none between was written or given up anywhere, so whichever route places the
-	/// range starts it there. Otherwise its start time stands, owing only from there.
+	/// time. See [`Reader::place`].
 	fn place(&mut self) {
 		for reader in self.readers.iter_mut().flatten() {
-			let (Some((start, _)), None, Some(Cursor::Arrival(sub))) =
-				(reader.ranges, reader.holding, &mut reader.cursor)
-			else {
-				continue;
-			};
-			if sub.resolved_range(0).is_none() {
-				continue;
-			}
-			let publisher = &self.instances[reader.instance];
-			let exists = |group: &u64| publisher.written.contains_key(group) || publisher.given_up.contains(group);
-			let held = |group: u64| {
-				publisher.live().all(|copy| {
-					!copy.given_up.contains(&group)
-						&& copy
-							.groups
-							.get(&group)
-							.is_some_and(|parts| parts.iter().any(|part| part.from == 0))
-				})
-			};
-			reader.holding = Some(match (0..=start).rev().find(exists) {
-				Some(holding) if held(holding) => holding,
-				_ => start,
-			});
+			reader.place(&self.instances[reader.instance]);
 		}
 	}
 

@@ -2562,8 +2562,12 @@ impl Reader {
 						let copy = &self.copies[index];
 						let (backfill, failed) =
 							(copy.backfill, self.route.end().is_none() && copy_failed(&copy.track));
-						let window = self.window();
-						if window.is_pending() && (failed || (backfill && !window.holds(key))) {
+						// Only a copy the hold can apply to computes the window.
+						let held_back = (failed || backfill) && {
+							let window = self.window();
+							window.is_pending() && (failed || !window.holds(key))
+						};
+						if held_back {
 							held = true;
 							break;
 						}
@@ -3037,15 +3041,6 @@ impl Reader {
 		}
 		let placed = self.window().floor();
 		let raised = self.raised();
-		// Kept until a copy places the ranges, but those whose start the resume point raised,
-		// which only the backfill places: only then can the gaps they cover be judged.
-		let floor = match placed {
-			Some(floor) => floor,
-			None if !raised.is_empty() && raised.len() == self.window.unsettled().len() => {
-				self.window.runs(0).next().map_or(0, |run| *run.start())
-			}
-			None => return,
-		};
 		let resumed = self.copies.last().and_then(|copy| copy.floor);
 		// A raised start whose groups from its time the reader already holds or passed owes
 		// nothing under the resume point: placed at its time, it hands out what the group
@@ -3055,6 +3050,22 @@ impl Reader {
 			.filter(|(_, time)| resumed.is_some_and(|resumed| !delivered.covers(**time..resumed)))
 			.map(|(key, time)| (*key, *time))
 			.collect();
+		// Kept until a copy places the ranges, but those whose start the resume point raised,
+		// which only the backfill places: only then can the gaps they cover be judged.
+		let floor = match placed {
+			Some(floor) => floor,
+			None if !raised.is_empty() && raised.len() == self.window.unsettled().len() => {
+				self.window.runs(0).next().map_or(0, |run| *run.start())
+			}
+			None => {
+				// The gaps wait for the other ranges to place, but an owed raised start is asked
+				// now: its backfill places it whatever they wait on, and a later ask finds it.
+				if let (Some(resumed), Some(start)) = (resumed, owed.values().min()) {
+					self.backfill(*start..resumed, delivered);
+				}
+				return;
+			}
+		};
 		if owed.len() < raised.len() {
 			// A relative end is where a copy that raised the start placed it: waited for, as
 			// the window waits on a copy to place it.
@@ -9577,6 +9588,51 @@ mod test {
 		let mut read = drain(&mut sub, false);
 		read.sort_unstable();
 		assert_eq!(read, [6, 9]);
+		assert_eq!(sub.resolved_range(0).map(|resolved| resolved.start), Some(6));
+	}
+
+	/// As [`a_backfill_places_a_time_start_its_serving_copy_raised`], beside a range still
+	/// waiting on a group past the live edge: the raised start's backfill is asked without
+	/// waiting for that range to place.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_backfill_places_a_raised_start_beside_a_waiting_range() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = received_copy();
+		write(&a, 6);
+		write(&a, 8);
+		routes.serve(a.consume());
+		let range = |start, end: Option<u64>| track::Range {
+			start: track::Anchor::Time(start),
+			end: end.map(track::Anchor::Time),
+		};
+		let subscription = |ranges: Vec<track::Range>| {
+			Subscription::default()
+				.with_delay(Delay::default().with_max(HOUR))
+				.with_ranges(ranges)
+		};
+		let mut sub = logical
+			.consume()
+			.subscribe(subscription(vec![range(8, None)]))
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		assert_eq!(drain(&mut sub, false), [8]);
+		let b = track::Request::new(Arc::new(broadcast::Info::default()), "video");
+		routes.serve(b.consume());
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		a.abort(Error::Cancel).unwrap();
+		sub.update(subscription(vec![range(7, Some(8)), range(20, None)]))
+			.unwrap();
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+
+		let b = b.accept(crate::track::Info::timed());
+		b.received();
+		for key in [6, 8] {
+			write(&b, key);
+		}
+		assert_eq!(drain(&mut sub, false), [6]);
 		assert_eq!(sub.resolved_range(0).map(|resolved| resolved.start), Some(6));
 	}
 
