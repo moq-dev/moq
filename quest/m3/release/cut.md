@@ -249,6 +249,26 @@ observe withdrawal. All four paths passed on lite-06 with 0.17.17 and audited ma
 Re-run the existing cut checks on the resolved merge and version bump. After publication,
 check that Release remeasure opened or updated its pin PR, as RELEASE.md describes.
 
+From the 2026-11-20 main → release audit (main `9828a20cab` against release `381b802d9b`: 4,241
+main-only and 307 release-only commits, 330 paths conflicted in a trial merge), for the
+candidate:
+- Keep the behavior of release-only fixes while resolving conflicts, not just their text, and
+  run a test of each on the candidate: stopped-stream receive credit (`b834502dfa`, qmux 0.5.4
+  and `@moq/qmux` 0.3.5), a far-ahead group sequence costing a relay nothing extra
+  (`0c9ffdd7a7`, backport of [moq-dev/moq#9044](https://github.com/moq-dev/moq/pull/9044)), a
+  relay restarting under its old hop ID stranding nothing (`4a9005c3c5`), a 64-bit Hop ID read
+  as unknown in Rust and JS (`f48b7a066e`, `a480bba27c`), and a restarted publisher winning over
+  its lingering session (`5511441a02`). List the rest with
+  `git log --no-merges origin/main..origin/release`.
+- Widen the two-relay smoke above: keep a reader attached through each roll, in both directions
+  (last published relay to candidate and back), and check it keeps receiving the same frames
+  after the roll and after a withdrawal and return.
+- The cut PR (head `main`) now runs the full moq-transport matrix and Released wire
+  compatibility in its Release gate, which a backport PR still skips (planned by the audit's
+  PR). Read both results on the cut PR rather than repeating them by hand.
+- Attach each result to the candidate SHA in the cut PR body, so a later push visibly
+  invalidates it.
+
 ## Required
 
 - [Breaking release readiness](/quest/m2/README.md) - code, protocol and package proofs

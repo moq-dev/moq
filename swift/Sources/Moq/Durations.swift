@@ -26,6 +26,7 @@ func checkSubscription(_ subscription: Subscription?) throws {
 
 func checkTrackInfo(_ info: TrackInfo?) throws {
     try checkDuration(info?.maxAge, "maxAge")
+    try checkDuration(info?.refresh.interval, "refresh.interval")
 }
 
 func checkFetch(_ options: FetchGroupOptions?) throws {
