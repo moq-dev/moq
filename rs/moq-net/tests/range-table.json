@@ -1,0 +1,155 @@
+{
+	"about": [
+		"The lite-07 range table: which groups a subscription delivers, shared by rs/moq-net/tests/integration/range_table.rs and js/net/src/range-table.test.ts, and run in each direct, through a relay copy cold, warm, and as a late join, and across a route switch.",
+		"groups: the origin's group starts in milliseconds, each group one frame at its start, appended (linked by Previous Start) unless append is false.",
+		"copy: the readers that shape what the copy holds before the case's reader joins; each stays subscribed. evict ages out every group nobody touches but the live edge.",
+		"read: the case's reader. ranges default to one with no start; a range's start and end are times, either omitted for none; minAge, in milliseconds, places a range with no start as a live join.",
+		"deliver: the group starts the reader gets, from every mode alike. asks: whether a warm copy must ask upstream rather than answer from what it holds.",
+		"known: a mode and language that still diverges, and the quest that owns the fix; the test fails once it agrees, so the marker comes off."
+	],
+	"groups": [0, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000],
+	"cases": [
+		{
+			"name": "a time range delivers the groups containing its start and its end",
+			"copy": [{}],
+			"read": { "ranges": [{ "start": 2500, "end": 4500 }] },
+			"deliver": [2000, 3000, 4000],
+			"asks": false
+		},
+		{
+			"name": "a time end between two groups stops after the group containing it",
+			"copy": [{}],
+			"read": { "ranges": [{ "start": 1500, "end": 1999 }] },
+			"deliver": [1000],
+			"asks": false,
+			"known": [
+				{
+					"mode": "switch",
+					"lang": "rs",
+					"quest": "/quest/m2/time-addressing/relayed-range-in-one-group.md",
+					"why": "a relay's wire publisher, serving from its copy, ends the range empty, so the reader two hops away gets nothing"
+				}
+			]
+		},
+		{
+			"name": "a time start with no end follows the live edge",
+			"copy": [{}],
+			"read": { "ranges": [{ "start": 7500 }] },
+			"deliver": [7000, 8000, 9000],
+			"asks": false
+		},
+		{
+			"name": "a sparse copy asks for a time range it holds none of",
+			"copy": [{ "ranges": [{ "start": 1000, "end": 2000 }] }, { "minAge": 0 }],
+			"read": { "ranges": [{ "start": 7000, "end": 8000 }] },
+			"deliver": [7000, 8000],
+			"asks": true,
+			"known": [
+				{
+					"mode": "warm",
+					"quest": "/quest/m1/time-start-asks-upstream.md",
+					"why": "the copy places 7000 at the held 2000, since it holds 9000 above it"
+				}
+			]
+		},
+		{
+			"name": "a live join starts at the group containing the live edge minus its Min Age",
+			"copy": [{}],
+			"read": { "minAge": 2000 },
+			"deliver": [7000, 8000, 9000],
+			"asks": false
+		},
+		{
+			"name": "a Min Age reaching past what the copy holds asks upstream",
+			"copy": [{ "minAge": 1000 }],
+			"read": { "minAge": 3500 },
+			"deliver": [5000, 6000, 7000, 8000, 9000],
+			"asks": true
+		},
+		{
+			"name": "an oldest reader on a copy a live reader started",
+			"copy": [{ "minAge": 0 }],
+			"read": {},
+			"deliver": [0, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000],
+			"asks": true
+		},
+		{
+			"name": "a live reader on a copy an oldest reader filled",
+			"copy": [{}],
+			"read": { "minAge": 0 },
+			"deliver": [9000],
+			"asks": false
+		},
+		{
+			"name": "a time range and a live join in one subscription",
+			"copy": [{}],
+			"read": { "ranges": [{ "start": 1000, "end": 2000 }, {}], "minAge": 1000 },
+			"deliver": [1000, 2000, 8000, 9000],
+			"asks": false
+		},
+		{
+			"name": "a time start between held groups linked by Previous Start is answered from the copy",
+			"copy": [{ "ranges": [{ "start": 2000, "end": 3000 }] }],
+			"read": { "ranges": [{ "start": 2500, "end": 3000 }] },
+			"deliver": [2000, 3000],
+			"asks": false
+		},
+		{
+			"name": "a time start between held groups with one missing between them asks upstream",
+			"copy": [{ "ranges": [{ "start": 1000, "end": 1000 }] }, { "ranges": [{ "start": 3000, "end": 3000 }] }],
+			"read": { "ranges": [{ "start": 2500, "end": 3000 }] },
+			"deliver": [2000, 3000],
+			"asks": true,
+			"known": [
+				{
+					"mode": "warm",
+					"quest": "/quest/m1/time-start-asks-upstream.md",
+					"why": "the copy places 2500 at the held 1000, and Rust then spins once upstream answers"
+				},
+				{
+					"mode": "late",
+					"quest": "/quest/m1/time-start-asks-upstream.md",
+					"why": "the copy places 2500 at the held 1000"
+				}
+			]
+		},
+		{
+			"name": "a time start at a group the copy lacks asks upstream",
+			"copy": [{ "minAge": 0 }],
+			"read": { "ranges": [{ "start": 3000, "end": 3000 }] },
+			"deliver": [3000],
+			"asks": true
+		},
+		{
+			"name": "a copy that evicted a time range asks for it again",
+			"copy": [{}],
+			"evict": true,
+			"read": { "ranges": [{ "start": 2000, "end": 4000 }] },
+			"deliver": [2000, 3000, 4000],
+			"asks": true,
+			"known": [
+				{
+					"mode": "late",
+					"lang": "js",
+					"quest": "/quest/m1/time-start-asks-upstream.md",
+					"why": "the copy fetches 0 and 1000 too, and places 2000 at whichever lands first"
+				}
+			]
+		},
+		{
+			"name": "a time start between groups a publisher created unlinked",
+			"append": false,
+			"copy": [{}],
+			"read": { "ranges": [{ "start": 2500, "end": 3000 }] },
+			"deliver": [2000, 3000],
+			"asks": true,
+			"known": [
+				{
+					"mode": "warm",
+					"quest": "/quest/m1/time-start-asks-upstream.md",
+					"why": "the copy answers from 2000 and 3000, though nothing it holds says no group starts between them"
+				}
+			]
+		}
+	]
+}

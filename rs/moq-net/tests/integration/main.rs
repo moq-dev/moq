@@ -63,6 +63,7 @@ mod quiet_catalog;
 mod range_anchors;
 mod range_fill;
 mod range_read;
+mod range_table;
 mod range_union_fit;
 mod received_rewind;
 mod rejoin;
