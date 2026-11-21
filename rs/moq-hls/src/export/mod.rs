@@ -4,9 +4,11 @@
 //! reading only each group's first frame timestamp, which the transport carries. Playlists and
 //! manifests are a pure function of those timestamps and the catalog's `sync.interval`,
 //! and media bytes move only when an HTTP client requests a segment, which FETCHes exactly the
-//! groups that segment holds from the relay cache and transmuxes them to CMAF. The media
-//! subscriptions that index each group count toward no stats session, so a source whose origin
-//! is metered counts its catalog and the media clients fetch, not media nobody requested. A broadcast whose catalog declares no
+//! groups that segment holds from the relay cache and transmuxes them to CMAF. The catalog
+//! subscription, the media subscriptions that index each group, and the keyframe group an
+//! inline-parameter-set init builds from count toward no stats session, so a source whose origin
+//! is metered counts only the segments clients fetch, not the bookkeeping behind a request that
+//! is refused. A broadcast whose catalog declares no
 //! interval gets no playlists. A `moq-archive` recording served by its
 //! `Consumer` is served the same way, and a segment GETs only its rendition's objects.
 //!
@@ -582,8 +584,13 @@ impl WatchCatalog {
 	}
 
 	/// Subscribe to the broadcast's hang catalog track.
+	///
+	/// Unmetered like the media index: the catalog is the export's own bookkeeping, read
+	/// whether or not a client ever fetches anything, so a request that is refused (no
+	/// servable rendition yet) counts nothing.
 	fn subscribe(&self) -> Watch {
 		let track = self.broadcast().track(hang::Catalog::DEFAULT_NAME).map(|track| {
+			let track = track.unmetered();
 			let info = track.info().into_inner();
 			(catalog::hang::Consumer::new(track), info)
 		});
@@ -2201,8 +2208,9 @@ mod tests {
 		drop((media, catalog, broadcast));
 	}
 
-	/// Indexing reads every group of the media, but a stats session on the source's origin
-	/// counts only the catalog and what a client fetches.
+	/// Reading the catalog, indexing every group of the media, and building an inline init from a
+	/// keyframe group count toward no stats session on the source's origin: only a segment a
+	/// client fetches does.
 	#[tokio::test(start_paused = true)]
 	async fn a_metered_source_counts_only_what_clients_fetch() {
 		let origin = produce_origin();
@@ -2210,8 +2218,8 @@ mod tests {
 			.route("live", moq_net::origin::RouteOptions::default())
 			.expect("publish allowed");
 		settle().await;
-		// Coded dimensions, so the init builds from the catalog without reading media.
-		let (catalog, mut media) = publish_vp8(&mut broadcast.broadcast().clone(), video_config());
+		// No coded dimensions, so the init builds from a keyframe group.
+		let (catalog, mut media) = publish_vp8(&mut broadcast.broadcast().clone(), inline_vp8());
 
 		let registry = moq_net::stats::Registry::new(moq_net::stats::Config::new());
 		let consumer = origin.consume().with_stats(
@@ -2234,22 +2242,26 @@ mod tests {
 			.rendition(Kind::Video, "video0")
 			.expect("rendition discovered from the catalog");
 		until_listed(&rendition, 2).await;
-		let indexed = bytes();
-		assert!(indexed > 0, "the catalog counts");
+		rendition
+			.latest_init()
+			.await
+			.unwrap()
+			.expect("the init builds from a keyframe group");
+		assert_eq!(bytes(), 0, "the catalog and the init's keyframe group count nothing");
 
 		// Three more GOPs, indexed and listed without a fetch.
 		for micros in [6_000_000, 8_000_000, 10_000_000] {
 			media.write(vp8_frame(micros, true)).unwrap();
 		}
 		until_listed(&rendition, 5).await;
-		assert_eq!(bytes(), indexed, "indexing every group counts nothing");
+		assert_eq!(bytes(), 0, "indexing every group counts nothing");
 
 		rendition
 			.listed_segment(4)
 			.await
 			.unwrap()
 			.expect("segment fetched on demand");
-		assert!(bytes() > indexed, "the fetched segment counts");
+		assert!(bytes() > 0, "the fetched segment counts");
 
 		drop((media, catalog, broadcast));
 	}

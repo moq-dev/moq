@@ -2732,7 +2732,9 @@ impl InitRead {
 		let (broadcast, track) = match &self.track {
 			Some(track) => track,
 			None => match ready!(media.poll_track_or_refusal(binding, waiter))? {
-				Some(track) => self.track.insert(track),
+				// The init is the export's own bookkeeping, not delivery to a client, so a
+				// metered source counts only the segments clients fetch.
+				Some((broadcast, track)) => self.track.insert((broadcast, track.unmetered())),
 				None => return Poll::Ready(Ok(None)),
 			},
 		};
