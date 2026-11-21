@@ -7220,6 +7220,51 @@ mod test {
 		assert_eq!(read, [1, 2, 3]);
 	}
 
+	/// A range an edit adds with a time start inside a group under the serving copy's resume
+	/// point starts at that group, which the copy's cache holds.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_added_time_start_below_the_resume_point_reads_the_group_holding_it() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let late = Subscription::default()
+			.with_delay(Delay::default().with_max(HOUR))
+			.with_ranges([track::Range {
+				start: Anchor::Time(4),
+				end: None,
+			}]);
+		let mut sub = logical.consume().subscribe(late).now_or_never().unwrap().unwrap();
+		for key in [0, 2, 4, 6] {
+			write(&a, key);
+		}
+		assert_eq!(drain(&mut sub, false), [4, 6]);
+		let b = copy();
+		for key in [0, 2, 4, 6] {
+			write(&b, key);
+		}
+		routes.serve(b.consume());
+		write(&b, 8);
+		assert_eq!(drain(&mut sub, false), [8]);
+
+		sub.edit(track::Edit {
+			retire: Vec::new(),
+			add: vec![(
+				1,
+				track::Range {
+					start: Anchor::Time(3),
+					end: None,
+				},
+			)],
+			priority: 0,
+			delay: Delay::default().with_max(HOUR),
+			order: track::Order::default(),
+		})
+		.unwrap();
+		assert_eq!(drain(&mut sub, false), [2], "group 2 holds time 3");
+	}
+
 	/// Ranges only an unanswered replacement can place, around its resume point: one wholly
 	/// below it ends where it asks, and one above it starting at a time inside a group starts
 	/// at that group.
@@ -7356,15 +7401,16 @@ mod test {
 			.with_ranges([range(0)]);
 		let mut sub = logical.consume().subscribe(start).now_or_never().unwrap().unwrap();
 		assert!(sub.poll_recv_group(&kio::Waiter::noop()).is_pending());
-		for key in 1..=4 {
+		// Each edit logs two keys, past the 64 the log keeps beyond twice the ranges.
+		for key in 1..=40 {
 			sub.edit(edit(key - 1, (key, range(key)))).unwrap();
 		}
 		assert!(sub.poll_recv_group(&kio::Waiter::noop()).is_pending());
-		assert_eq!(a.subscription().unwrap().ranges, [range(4)]);
+		assert_eq!(a.subscription().unwrap().ranges, [range(40)]);
 
-		sub.edit(edit(4, (5, range(5)))).unwrap();
+		sub.edit(edit(40, (41, range(41)))).unwrap();
 		assert!(sub.poll_recv_group(&kio::Waiter::noop()).is_pending());
-		assert_eq!(a.subscription().unwrap().ranges, [range(5)], "the edit replaced the range");
+		assert_eq!(a.subscription().unwrap().ranges, [range(41)], "the edit replaced the range");
 	}
 
 	#[test]
