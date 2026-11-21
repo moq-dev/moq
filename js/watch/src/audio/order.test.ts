@@ -1,4 +1,5 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, type Mock, spyOn } from "bun:test";
+import { Time } from "@moq/net";
 import { Order } from "./order";
 
 type Read = { group: number; frame: { timestamp: number } };
@@ -6,6 +7,12 @@ const read = (group: number, timestamp: number): Read => ({ group, frame: { time
 const timestamps = (reads: Read[]) => reads.map(({ frame }) => frame.timestamp);
 
 describe("Order", () => {
+	let clock: Mock<typeof Time.Micro.now>;
+	beforeEach(() => {
+		clock = spyOn(Time.Micro, "now").mockReturnValue(Time.Micro(0));
+	});
+	afterEach(() => clock.mockRestore());
+
 	it("releases a held head sorted once a newer group arrives", () => {
 		const order = new Order<Read>(() => ({ floor: 100, maxDelay: 1000 }));
 		for (const t of [40, 20, 0]) expect(order.push(read(t / 20, t))).toEqual([]);
@@ -67,6 +74,18 @@ describe("Order", () => {
 		expect(order.push(read(5, 40))).toEqual([]);
 		expect(order.push(read(4, -20))).toEqual([]);
 		expect(timestamps(order.push(read(5, 120)))).toEqual([-20, 0, 40, 120]);
+	});
+
+	// A publisher repeating one timestamp never advances the span or runs past the floor, so only the
+	// time the head has waited releases it, however many frames arrived meanwhile.
+	it("releases a head once it has waited the max delay", () => {
+		const order = new Order<Read>(() => ({ floor: 100, maxDelay: 1000 }));
+		for (let i = 0; i < 100; i++) expect(order.push(read(5, 20))).toEqual([]);
+		clock.mockReturnValue(Time.Micro(999));
+		expect(order.push(read(5, 20))).toEqual([]);
+		clock.mockReturnValue(Time.Micro(1000));
+		expect(order.push(read(5, 20))).toHaveLength(102);
+		expect(timestamps(order.push(read(5, 20)))).toEqual([20]);
 	});
 
 	it("holds nothing live", () => {
