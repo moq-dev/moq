@@ -1244,7 +1244,10 @@ impl<E: CatalogExt> Guard<'_, E> {
 		// catalog names a track; the mutation stays in `current` and `pending` marks it for the
 		// flush once the gate opens.
 		let mut at = self.at;
-		if let Gate::Buffering { pending, at: staged, .. } = &mut self.state.gate {
+		if let Gate::Buffering {
+			pending, at: staged, ..
+		} = &mut self.state.gate
+		{
 			*pending = true;
 			// An unstamped change keeps the staged stamp, landing no earlier than its neighbour, as
 			// an unstamped publish lands past a stamped one. That holds for the change opening the
@@ -2206,12 +2209,18 @@ mod test {
 		// A disabled rendition lists no track, so the gate stays shut past the reservation.
 		drop(catalog.reserve());
 		let mut guard = catalog.modify().unwrap();
-		guard.set_timestamp(moq_net::Timestamp::from_millis(60_000).unwrap()).unwrap();
+		guard
+			.set_timestamp(moq_net::Timestamp::from_millis(60_000).unwrap())
+			.unwrap();
 		let mut disabled = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
 		disabled.enabled = false;
 		guard.audio.renditions.insert("a".to_string(), disabled);
 		guard.commit().unwrap();
-		assert_eq!(starts(&catalog), [None; 2], "published before the catalog listed a track");
+		assert_eq!(
+			starts(&catalog),
+			[None; 2],
+			"published before the catalog listed a track"
+		);
 
 		// The unstamped change that lists one goes out at the staged stamp.
 		opus(&mut catalog, "b", None).unwrap();
