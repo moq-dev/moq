@@ -4591,6 +4591,11 @@ export class Subscriber {
 			subscriber.#settle();
 			return keys.map((key) => subscriber.#window.resolvedKey(key));
 		};
+		hooks.servingWaiting = (subscriber) => {
+			if (subscriber.#resume) return subscriber.#resume.waiting();
+			subscriber.#settle();
+			return subscriber.#window.waiting();
+		};
 		hooks.editSubscriber = (subscriber, edit) => subscriber.#edit(edit);
 		hooks.preferences = (subscriber) => subscriber.#state.update;
 		hooks.resolveRanges = (subscriber, subscription) =>

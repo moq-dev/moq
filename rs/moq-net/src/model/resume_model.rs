@@ -286,12 +286,49 @@ struct Reader {
 	end: Option<Result<(), Error>>,
 	/// What every live route carried in full, in range, when the track ended cleanly.
 	carried: BTreeSet<u64>,
+	/// The group holding the range's start time when an arrival read first placed the range,
+	/// as the routes wrote groups then: what it owes starts there. See [`Model::place`].
+	holding: Option<u64>,
 }
 
 impl Reader {
 	fn covers(&self, group: u64) -> bool {
 		let within = |range: Option<(u64, u64)>| range.is_none_or(|(start, end)| (start..end).contains(&group));
-		within(self.ranges) && within(self.bounds)
+		within(self.owes()) && within(self.bounds)
+	}
+
+	/// The subscription's group range as a plain reader of the route places it: from the
+	/// group holding its start time.
+	fn owes(&self) -> Option<(u64, u64)> {
+		self.ranges
+			.map(|(start, end)| (self.holding.map_or(start, |holding| holding.min(start)), end))
+	}
+
+	/// Once an arrival read first placed the range, record the group holding its start time:
+	/// the newest group at or before it the instance wrote, when every live route holds it and
+	/// none between was written or given up anywhere, so whichever route places the range starts
+	/// it there. Otherwise its start time stands, owing only from there.
+	fn place(&mut self, publisher: &Publisher) {
+		let (Some((start, _)), None, Some(Cursor::Arrival(sub))) = (self.ranges, self.holding, &mut self.cursor) else {
+			return;
+		};
+		if sub.resolved_range(0).is_none() {
+			return;
+		}
+		let exists = |group: &u64| publisher.written.contains_key(group) || publisher.given_up.contains(group);
+		let held = |group: u64| {
+			publisher.live().all(|copy| {
+				!copy.given_up.contains(&group)
+					&& copy
+						.groups
+						.get(&group)
+						.is_some_and(|parts| parts.iter().any(|part| part.from == 0))
+			})
+		};
+		self.holding = Some(match (0..=start).rev().find(exists) {
+			Some(holding) if held(holding) => holding,
+			_ => start,
+		});
 	}
 
 	/// Whether the reader may be handed `group`: inside its bounds and before its range's
@@ -437,6 +474,7 @@ impl Model {
 					return Ok(());
 				};
 				reader.ranges = range;
+				reader.holding = None;
 				let _ = reader.control.update(subscription(reader.spec.budget, range));
 				// A read that ended at its range's end reads on once the range widens.
 				if matches!(reader.end, Some(Ok(()))) && !self.instances[reader.instance].ended {
@@ -650,6 +688,7 @@ impl Model {
 			doomed: false,
 			end: None,
 			carried: BTreeSet::new(),
+			holding: None,
 		};
 		self.readers[index] = Some(reader);
 		self.poll(index)
@@ -728,9 +767,11 @@ impl Model {
 					if !instance.ended && reader.ranges.is_none() {
 						return Err(fail(index, "the track ended cleanly though no route declared an end"));
 					}
+					// Where the range placed decides what it owes, so record it before the snapshot.
+					reader.place(instance);
 					let covers = |group: u64| match instance.ended {
 						true => reader.covers(group),
-						false => reader.ranges.is_some_and(|(start, end)| (start..end).contains(&group)),
+						false => reader.owes().is_some_and(|(start, end)| (start..end).contains(&group)),
 					};
 					// A group landing below the end afterwards is not owed: a reader stops at it.
 					reader.carried = (0..GROUPS)
@@ -823,12 +864,21 @@ impl Model {
 			}
 			quiet = if woken { 0 } else { quiet + 1 };
 			if quiet == 16 {
+				self.place();
 				return Ok(());
 			}
 		}
 		Err(TestCaseError::fail(
 			"readers never settled: something keeps waking them",
 		))
+	}
+
+	/// Record, for each arrival reader whose range just placed, the group holding its start
+	/// time. See [`Reader::place`].
+	fn place(&mut self) {
+		for reader in self.readers.iter_mut().flatten() {
+			reader.place(&self.instances[reader.instance]);
+		}
 	}
 
 	/// Every live route catches up on every group and, for `finish`, declares the end; then
@@ -897,7 +947,7 @@ impl Model {
 		let read_range = matches!(reader.end, Some(Ok(()))) && !instance.ended;
 		let covers = |group: u64| match read_range {
 			true => {
-				reader.ranges.is_some_and(|(start, end)| (start..end).contains(&group))
+				reader.owes().is_some_and(|(start, end)| (start..end).contains(&group))
 					&& (!reader.spec.ordered || reader.bounds.is_none_or(|(start, _)| group >= start))
 			}
 			false => reader.covers(group),
@@ -1032,6 +1082,48 @@ fn regressions() {
 		drops,
 	};
 	let cases = [
+		// A range moved under the serving copy's resume point starts at the group holding its
+		// start time, which only a backfill from below that point places, not at a key equal
+		// to the time.
+		Case {
+			ops: vec![
+				Op::Join {
+					reader: 0,
+					spec: spec(false, Budget::Hour, Some((8, 12)), false),
+				},
+				Op::Write {
+					instance: 0,
+					slot: 0,
+					group: Some(8),
+					frames: 3,
+				},
+				Op::Write {
+					instance: 0,
+					slot: 0,
+					group: Some(6),
+					frames: 1,
+				},
+				Op::Up { instance: 0, slot: 1 },
+				Op::Write {
+					instance: 0,
+					slot: 1,
+					group: Some(6),
+					frames: 1,
+				},
+				Op::Write {
+					instance: 0,
+					slot: 1,
+					group: Some(8),
+					frames: 3,
+				},
+				Op::Down { instance: 0, slot: 0 },
+				Op::Ranges {
+					reader: 0,
+					range: Some((7, 12)),
+				},
+			],
+			finish: false,
+		},
 		// After a failover, a range moved back resolves from the first copy to answer it,
 		// even a replaced one under a failover cap, so the groups below that cap stay owed.
 		Case {

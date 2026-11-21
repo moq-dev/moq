@@ -24,6 +24,9 @@ export type Run = { start: bigint; end: bigint };
  */
 export type Resolved = { start: bigint; end?: bigint; floored: boolean };
 
+/** A range whose time start waits on the groups held to place it: that time, and the exclusive end it resolved to. */
+export type Waiting = { time: bigint; end?: bigint };
+
 /** Everything from the latest group onward. */
 export const LIVE: Range = Object.freeze({ start: Object.freeze({ relative: 0n }) });
 
@@ -670,6 +673,14 @@ export class Window {
 		return this.pending || this.#groups.contains(key);
 	}
 
+	/**
+	 * Whether a range placed so far holds group `key`: unlike {@link contains}, not every group while a
+	 * relative anchor waits. Mirrors the Rust `Window::holds`.
+	 */
+	holds(key: bigint): boolean {
+		return this.#groups.contains(key);
+	}
+
 	/** The lowest group in range at or above `from`, undefined when none is. `from` itself while a relative anchor waits. */
 	next(from: bigint): bigint | undefined {
 		return this.pending ? from : this.#groups.next(from);
@@ -728,6 +739,23 @@ export class Window {
 		const span = this.#spans.get(key);
 		if (!span || span.looking || span.waiting) return undefined;
 		return { start: span.start, end: span.end === UNBOUNDED ? undefined : span.end, floored: span.floored };
+	}
+
+	/**
+	 * The range keyed `key` while its time start waits on the groups held to place it: that time, and
+	 * the exclusive end it resolved to, undefined while it stays open. Mirrors the Rust
+	 * `Window::waiting_key`.
+	 */
+	waitingKey(key: bigint): Waiting | undefined {
+		const span = this.#spans.get(key);
+		const at = span?.waiting ? time(span.anchor) : undefined;
+		if (!span || at === undefined) return undefined;
+		return { time: at, end: span.end === UNBOUNDED ? undefined : span.end };
+	}
+
+	/** Each range while its time start waits, in key order, as {@link waitingKey} reads it. */
+	waiting(): (Waiting | undefined)[] {
+		return [...this.#ranges.keys()].map((key) => this.waitingKey(key));
 	}
 
 	/** Each range resolved, in key order, as {@link resolvedKey} reads it. Mirrors the Rust `Window::resolved`. */
