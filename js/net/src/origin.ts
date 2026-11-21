@@ -176,7 +176,7 @@ class Scope {
 			if (above && !Path.hasPrefix(path, this.root)) continue;
 			// A route serves the whole subtree it is filed at, so it may serve this scope when the two overlap.
 			if (allowed && !allowed.overlaps(path)) continue;
-			const visible = [...candidates];
+			const visible = candidates;
 			if (visible.length === 0) continue;
 			if (!above) {
 				out.set(relative, visible);
@@ -197,7 +197,6 @@ class Scope {
 		return out;
 	}
 }
-
 
 /** One segment of the watched-prefix trie, kept while it or anything beneath it is watched. */
 interface WatchNode {
@@ -328,7 +327,6 @@ interface RouteEntry {
 function admits(entry: RouteEntry, path: Path.Valid): boolean {
 	return entry.scope.matches(path);
 }
-
 
 /** One advertisement at a prefix. `exact` marks an announced local broadcast, which is only its own path. */
 interface Candidate extends Advertised {
