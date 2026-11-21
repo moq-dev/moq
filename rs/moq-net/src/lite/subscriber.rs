@@ -392,24 +392,15 @@ impl TrackEntry {
 		// Stats (groups/frames/bytes) are counted in the model as the group
 		// is written, through the tagged `track::Producer`. The track counts
 		// it as content once its first frame lands.
-		let received = producer.create_group_at(group_info, hdr.frame_start);
 		// Lite-07: the starts the header passes over were never produced, as a SUBSCRIBE_SKIP
-		// would say. Recorded once the group is, so a relay serving the copy sees the group
-		// the skip runs up to, whose own GROUP passes over it again.
+		// would say. Recorded with the group, so a relay serving the copy never sees one
+		// without the other.
 		let passed = hdr.passed_over();
-		if !passed.is_empty() {
-			if let Ok(mut tail) = self.tail.write() {
-				tail.account(passed.clone(), now);
-			}
-			let cached = producer.skip_received(passed.clone());
-			if let Some(first) = cached.iter().next() {
-				tracing::warn!(
-					group = hdr.key,
-					passed = ?passed,
-					cached = first.start,
-					"protocol error: GROUP passes over a group that arrived; keeping the group"
-				);
-			}
+		let received = producer.create_group_at(group_info, hdr.frame_start, passed.clone());
+		if !passed.is_empty()
+			&& let Ok(mut tail) = self.tail.write()
+		{
+			tail.account(passed, now);
 		}
 		// The subscription's end waits until this stream is read. Counted
 		// whatever the cache said, since the publisher counts every stream it
@@ -449,7 +440,7 @@ impl TrackEntry {
 		let Some(Accepted { producer, .. }) = &self.copy else {
 			return Err(Error::Cancel);
 		};
-		let received = producer.create_group_at(group::Info { start: hdr.key }, hdr.frame_start);
+		let received = producer.create_group_at(group::Info { start: hdr.key }, hdr.frame_start, 0..0);
 		self.place(hdr, version, received, reading)
 	}
 
@@ -5163,7 +5154,7 @@ mod tests {
 				.with_range(0..);
 			let mut reader = track.subscribe(subscription.clone());
 			// The original copy, still arriving: one frame in, no end yet.
-			let Ok(track::Received::Group(mut first)) = track.create_group_at(group::Info { start: 3 }, 0) else {
+			let Ok(track::Received::Group(mut first)) = track.create_group_at(group::Info { start: 3 }, 0, 0..0) else {
 				panic!("the first copy opens");
 			};
 			first

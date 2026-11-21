@@ -4799,7 +4799,7 @@ impl Producer {
 	/// live edge, or the successor that ages the group before it) only once its first frame
 	/// opens or it finishes.
 	pub fn create_group(&self, group: group::Info) -> Result<group::Producer> {
-		match self.create_group_inner(group, None)? {
+		match self.create_group_inner(group, None, 0..0)? {
 			Received::Group(group) => Ok(group),
 			Received::Held(_) => unreachable!("only a received copy waits on another"),
 		}
@@ -4809,17 +4809,63 @@ impl Producer {
 	///
 	/// A copy that already answers from `start` holds the key: a finished one refuses
 	/// this copy with [`Error::Duplicate`], and one still arriving is returned to wait on.
+	///
+	/// `passed` are the starts just below the group that its header says were never produced,
+	/// recorded as [`Self::skip_groups`] does whether or not the group is created. Both land
+	/// under one lock: a relay names the skip below a group only as it opens the group's
+	/// stream (a moq-transport Prior Group ID Gap), so one that saw the group first would
+	/// leave its reader waiting on keys that never come.
 	#[cfg(feature = "async")]
-	pub(crate) fn create_group_at(&self, group: group::Info, start: u64) -> Result<Received> {
-		self.create_group_inner(group, Some(start))
+	pub(crate) fn create_group_at(&self, group: group::Info, start: u64, passed: ops::Range<u64>) -> Result<Received> {
+		self.create_group_inner(group, Some(start), passed)
 	}
 
-	fn create_group_inner(&self, info: group::Info, received: Option<u64>) -> Result<Received> {
+	fn create_group_inner(
+		&self,
+		info: group::Info,
+		received: Option<u64>,
+		passed: ops::Range<u64>,
+	) -> Result<Received> {
 		// Reserved, so every group fits an exclusive range.
 		if info.start == u64::MAX {
 			return Err(coding::BoundsExceeded.into());
 		}
 		let mut state = self.modify()?;
+		if !passed.is_empty() {
+			let cached = state.skip_groups(passed.clone());
+			state.charge_debt();
+			// A group that arrived was produced after all, so the skip contradicts it: it
+			// keeps the group, and the session goes on.
+			if let Some(first) = cached.iter().next() {
+				tracing::warn!(
+					group = info.start,
+					passed = ?passed,
+					cached = first.start,
+					"protocol error: GROUP passes over a group that arrived; keeping the group"
+				);
+			}
+		}
+		let admitted = self.admit_group(&mut state, info, received);
+		let deferred = state.deferred();
+		drop(state);
+		let admitted = admitted.map(|(received, adopted)| {
+			if let (Received::Group(group), Some(adopted)) = (&received, adopted) {
+				group.handle().settle_head(adopted);
+			}
+			received
+		});
+		deferred.wake();
+		admitted
+	}
+
+	/// [`Self::create_group_inner`] under the track lock, with the head the group adopted, which
+	/// is settled once the lock is released.
+	fn admit_group(
+		&self,
+		state: &mut TrackState,
+		info: group::Info,
+		received: Option<u64>,
+	) -> Result<(Received, Option<group::Adopted>)> {
 		if matches!(state.outcome, Outcome::Sealed(_)) || state.final_key().is_some_and(|fin| info.start >= fin) {
 			return Err(Error::Closed);
 		}
@@ -4836,11 +4882,12 @@ impl Producer {
 				}
 				let arriving = holding.clone();
 				state.holds.entry(info.start).or_default().push(arriving.clone());
-				return Ok(Received::Held(Hold {
+				let hold = Hold {
 					arriving,
 					track: self.state.downgrade(),
 					key: info.start,
-				}));
+				};
+				return Ok((Received::Held(hold), None));
 			}
 			state.content_for_copy(info.start)?
 		} else {
@@ -4872,13 +4919,7 @@ impl Producer {
 		};
 		state.cap(&group.handle())?;
 		state.commit_group(&group.handle());
-		let deferred = state.deferred();
-		drop(state);
-		if let Some(adopted) = adopted {
-			group.handle().settle_head(adopted);
-		}
-		deferred.wake();
-		Ok(Received::Group(group))
+		Ok((Received::Group(group), adopted))
 	}
 
 	/// Create the next group, starting at `start`: after every group this track holds.
@@ -17822,6 +17863,35 @@ mod test {
 		assert_eq!(lent(&producer), [3, 4]);
 	}
 
+	/// A reader the received group wakes already sees the skip its header passed over: a relay
+	/// names the skip below a group (a moq-transport Prior Group ID Gap) only as it serves it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_received_group_lands_with_its_skip() {
+		struct Gap {
+			consumer: Consumer,
+			seen: std::sync::Mutex<Option<u64>>,
+		}
+		impl futures::task::ArcWake for Gap {
+			fn wake_by_ref(gap: &Arc<Self>) {
+				*gap.seen.lock().unwrap() = Some(gap.consumer.skipped_below(9));
+			}
+		}
+
+		let producer = track_producer("test", Info::default());
+		let mut subscriber = producer.subscribe(replay());
+		let gap = Arc::new(Gap {
+			consumer: producer.consume(),
+			seen: Default::default(),
+		});
+		let waiter = kio::Waiter::new(futures::task::waker(gap.clone()));
+		assert!(subscriber.poll_recv_group(&waiter).is_pending());
+		let Ok(Received::Group(_group)) = producer.create_group_at(group::Info { start: 9 }, 0, 5..9) else {
+			panic!("nothing holds group 9");
+		};
+		assert_eq!(*gap.seen.lock().unwrap(), Some(4), "woken with the skip below");
+	}
+
 	/// A loan for a group the copy already caches still stands for a copy of it that lands
 	/// later and displaces the cached one, which adopts it as it lands.
 	#[test]
@@ -17829,7 +17899,7 @@ mod test {
 	fn a_displacing_arrival_takes_the_loan() {
 		let producer = track_producer("test", Info::timed());
 		let consumer = producer.consume();
-		let Received::Group(late) = producer.create_group_at(group::Info { start: 5 }, 2).unwrap() else {
+		let Received::Group(late) = producer.create_group_at(group::Info { start: 5 }, 2, 0..0).unwrap() else {
 			panic!("nothing else holds group 5");
 		};
 		let mut prefix = group::Info { start: 5 }.produce();
@@ -17840,7 +17910,7 @@ mod test {
 		consumer.lend_head(5, prefix.consume().handoff().head().unwrap());
 		assert_eq!(consumer.peek_group(5).expect("cached").first_frame(), 2);
 
-		let Received::Group(wider) = producer.create_group_at(group::Info { start: 5 }, 1).unwrap() else {
+		let Received::Group(wider) = producer.create_group_at(group::Info { start: 5 }, 1, 0..0).unwrap() else {
 			panic!("a copy from frame 1 displaces one from frame 2");
 		};
 		assert_eq!(
@@ -17862,7 +17932,7 @@ mod test {
 			.write_frame(Timestamp::from_millis(5).unwrap(), bytes::Bytes::new())
 			.unwrap();
 		consumer.lend_head(5, prefix.consume().handoff().head().unwrap());
-		let Received::Group(late) = producer.create_group_at(group::Info { start: 5 }, 2).unwrap() else {
+		let Received::Group(late) = producer.create_group_at(group::Info { start: 5 }, 2, 0..0).unwrap() else {
 			panic!("nothing else holds group 5");
 		};
 		assert_eq!(
@@ -17870,7 +17940,7 @@ mod test {
 			2,
 			"one frame does not reach frame 2"
 		);
-		let Received::Group(wider) = producer.create_group_at(group::Info { start: 5 }, 1).unwrap() else {
+		let Received::Group(wider) = producer.create_group_at(group::Info { start: 5 }, 1, 0..0).unwrap() else {
 			panic!("a copy from frame 1 displaces one from frame 2");
 		};
 		assert_eq!(
@@ -17895,7 +17965,7 @@ mod test {
 		}
 		consumer.lend_head(7, prefix.consume().handoff().head().unwrap());
 		producer.give_up(7..8, Hole::stale(Duration::from_millis(1)));
-		let Received::Group(late) = producer.create_group_at(group::Info { start: 7 }, 2).unwrap() else {
+		let Received::Group(late) = producer.create_group_at(group::Info { start: 7 }, 2, 0..0).unwrap() else {
 			panic!("a stale drop does not refuse the group");
 		};
 		assert_eq!(
@@ -17946,7 +18016,7 @@ mod test {
 		aborted.abort(Error::Cancel).unwrap();
 		assert!(reader.with_state(|state| state.unwrap().read().lent.lock().unwrap().loans.is_empty()));
 		for (key, at) in [(7, 2), (9, 1)] {
-			let Received::Group(group) = producer.create_group_at(group::Info { start: key }, at).unwrap() else {
+			let Received::Group(group) = producer.create_group_at(group::Info { start: key }, at, 0..0).unwrap() else {
 				panic!("nothing else holds group {key}");
 			};
 			let seen = consumer.peek_group(key).expect("cached");
@@ -21394,17 +21464,17 @@ mod test {
 		for case in ["reoffer", "released", "past"] {
 			let producer = received_producer(Info::timed());
 			let at = |millis| Timestamp::from_millis(millis).unwrap();
-			let Ok(Received::Group(mut first)) = producer.create_group_at(group::Info { start: 3 }, 0) else {
+			let Ok(Received::Group(mut first)) = producer.create_group_at(group::Info { start: 3 }, 0, 0..0) else {
 				panic!("the first copy opens");
 			};
 			first.write_frame(at(300), &b"a"[..]).unwrap();
 			let mut reader = first.consume();
 			assert_eq!(&reader.read_frame().await.unwrap().unwrap().payload[..], b"a", "{case}");
 
-			let Ok(Received::Held(hold)) = producer.create_group_at(group::Info { start: 3 }, 0) else {
+			let Ok(Received::Held(hold)) = producer.create_group_at(group::Info { start: 3 }, 0, 0..0) else {
 				panic!("the re-offer waits on the copy still arriving");
 			};
-			let Ok(Received::Held(second)) = producer.create_group_at(group::Info { start: 3 }, 0) else {
+			let Ok(Received::Held(second)) = producer.create_group_at(group::Info { start: 3 }, 0, 0..0) else {
 				panic!("a second duplicate waits too");
 			};
 			first.abort(Error::Cancel).unwrap();
@@ -21420,7 +21490,7 @@ mod test {
 				continue;
 			}
 			let start = if case == "past" { 2 } else { 0 };
-			let Ok(Received::Group(mut again)) = producer.create_group_at(group::Info { start: 3 }, start) else {
+			let Ok(Received::Group(mut again)) = producer.create_group_at(group::Info { start: 3 }, start, 0..0) else {
 				panic!("the re-offer takes the group");
 			};
 			drop(hold);
@@ -21430,7 +21500,7 @@ mod test {
 			);
 			// The second duplicate now waits on the re-offer, which holds nobody reading the
 			// failed copy.
-			let Ok(Received::Held(third)) = producer.create_group_at(group::Info { start: 3 }, start) else {
+			let Ok(Received::Held(third)) = producer.create_group_at(group::Info { start: 3 }, start, 0..0) else {
 				panic!("the second duplicate waits on the re-offer still arriving");
 			};
 			drop(second);
@@ -21456,21 +21526,21 @@ mod test {
 	async fn a_failed_copy_finishes_on_its_held_reoffer() {
 		let producer = received_producer(Info::timed());
 		let at = |millis| Timestamp::from_millis(millis).unwrap();
-		let Ok(Received::Group(mut first)) = producer.create_group_at(group::Info { start: 3 }, 0) else {
+		let Ok(Received::Group(mut first)) = producer.create_group_at(group::Info { start: 3 }, 0, 0..0) else {
 			panic!("the first copy opens");
 		};
 		first.write_frame(at(300), &b"a"[..]).unwrap();
 		let mut reader = first.consume();
 		assert_eq!(&reader.read_frame().await.unwrap().unwrap().payload[..], b"a");
 
-		let Ok(Received::Held(hold)) = producer.create_group_at(group::Info { start: 3 }, 0) else {
+		let Ok(Received::Held(hold)) = producer.create_group_at(group::Info { start: 3 }, 0, 0..0) else {
 			panic!("the re-offer waits on the copy still arriving");
 		};
 		first.abort(Error::Cancel).unwrap();
 		let waiter = kio::Waiter::noop();
 		assert!(reader.poll_finished(&waiter).is_pending(), "waits on the held re-offer");
 
-		let Ok(Received::Group(mut again)) = producer.create_group_at(group::Info { start: 3 }, 0) else {
+		let Ok(Received::Group(mut again)) = producer.create_group_at(group::Info { start: 3 }, 0, 0..0) else {
 			panic!("the re-offer takes the group");
 		};
 		drop(hold);
@@ -21491,21 +21561,21 @@ mod test {
 		for torn in [false, true] {
 			let producer = received_producer(Info::timed());
 			let at = |millis| Timestamp::from_millis(millis).unwrap();
-			let Ok(Received::Group(mut first)) = producer.create_group_at(group::Info { start: 3 }, 0) else {
+			let Ok(Received::Group(mut first)) = producer.create_group_at(group::Info { start: 3 }, 0, 0..0) else {
 				panic!("the first copy opens");
 			};
 			first.write_frame(at(300), &b"a"[..]).unwrap();
 			let mut reader = first.consume();
 			assert_eq!(&reader.read_frame().await.unwrap().unwrap().payload[..], b"a", "{torn}");
 
-			let Ok(Received::Held(hold)) = producer.create_group_at(group::Info { start: 3 }, 0) else {
+			let Ok(Received::Held(hold)) = producer.create_group_at(group::Info { start: 3 }, 0, 0..0) else {
 				panic!("the re-offer waits on the copy still arriving");
 			};
 			first.abort(Error::Cancel).unwrap();
-			let Ok(Received::Group(mut again)) = producer.create_group_at(group::Info { start: 3 }, 0) else {
+			let Ok(Received::Group(mut again)) = producer.create_group_at(group::Info { start: 3 }, 0, 0..0) else {
 				panic!("the re-offer takes the group");
 			};
-			let Ok(Received::Held(next)) = producer.create_group_at(group::Info { start: 3 }, 0) else {
+			let Ok(Received::Held(next)) = producer.create_group_at(group::Info { start: 3 }, 0, 0..0) else {
 				panic!("another re-offer waits on the first");
 			};
 			drop(hold);
@@ -21547,7 +21617,7 @@ mod test {
 				reader.poll_read_frame(&waiter).is_pending(),
 				"waits on the next re-offer"
 			);
-			let Ok(Received::Group(mut last)) = producer.create_group_at(group::Info { start: 3 }, 0) else {
+			let Ok(Received::Group(mut last)) = producer.create_group_at(group::Info { start: 3 }, 0, 0..0) else {
 				panic!("the next re-offer takes the group");
 			};
 			drop(next);
@@ -21568,7 +21638,7 @@ mod test {
 		for again_fails in [false, true] {
 			let producer = received_producer(Info::timed());
 			let at = |millis| Timestamp::from_millis(millis).unwrap();
-			let Ok(Received::Group(mut first)) = producer.create_group_at(group::Info { start: 3 }, 0) else {
+			let Ok(Received::Group(mut first)) = producer.create_group_at(group::Info { start: 3 }, 0, 0..0) else {
 				panic!("the first copy opens");
 			};
 			first.write_frame(at(300), &b"a"[..]).unwrap();
@@ -21577,14 +21647,14 @@ mod test {
 			// Takes frame 1 into its prefetch with frame 0.
 			assert_eq!(&reader.read_frame().await.unwrap().unwrap().payload[..], b"a");
 
-			let Ok(Received::Held(hold)) = producer.create_group_at(group::Info { start: 3 }, 0) else {
+			let Ok(Received::Held(hold)) = producer.create_group_at(group::Info { start: 3 }, 0, 0..0) else {
 				panic!("the re-offer waits on the copy still arriving");
 			};
 			first.abort(Error::Cancel).unwrap();
-			let Ok(Received::Group(mut again)) = producer.create_group_at(group::Info { start: 3 }, 2) else {
+			let Ok(Received::Group(mut again)) = producer.create_group_at(group::Info { start: 3 }, 2, 0..0) else {
 				panic!("the re-offer takes the group");
 			};
-			let Ok(Received::Held(next)) = producer.create_group_at(group::Info { start: 3 }, 2) else {
+			let Ok(Received::Held(next)) = producer.create_group_at(group::Info { start: 3 }, 2, 0..0) else {
 				panic!("another re-offer waits on the first");
 			};
 			drop(hold);
@@ -21606,7 +21676,7 @@ mod test {
 			again.abort(Error::Cancel).unwrap();
 			let res = reader.poll_finished(&waiter);
 			assert!(res.is_pending(), "waits on the next re-offer: {res:?}");
-			let Ok(Received::Group(mut last)) = producer.create_group_at(group::Info { start: 3 }, 0) else {
+			let Ok(Received::Group(mut last)) = producer.create_group_at(group::Info { start: 3 }, 0, 0..0) else {
 				panic!("the next re-offer takes the group");
 			};
 			drop(next);
@@ -21630,7 +21700,7 @@ mod test {
 		for start in [2, 3] {
 			let producer = received_producer(Info::timed());
 			let at = |millis| Timestamp::from_millis(millis).unwrap();
-			let Ok(Received::Group(mut first)) = producer.create_group_at(group::Info { start: 3 }, 0) else {
+			let Ok(Received::Group(mut first)) = producer.create_group_at(group::Info { start: 3 }, 0, 0..0) else {
 				panic!("the first copy opens");
 			};
 			first.write_frame(at(300), &b"a"[..]).unwrap();
@@ -21639,13 +21709,13 @@ mod test {
 			// Takes frame 1 into its prefetch with frame 0.
 			assert_eq!(&reader.read_frame().await.unwrap().unwrap().payload[..], b"a");
 
-			let Ok(Received::Held(hold)) = producer.create_group_at(group::Info { start: 3 }, 0) else {
+			let Ok(Received::Held(hold)) = producer.create_group_at(group::Info { start: 3 }, 0, 0..0) else {
 				panic!("the re-offer waits on the copy still arriving");
 			};
 			first.abort(Error::Cancel).unwrap();
 			let waiter = kio::Waiter::noop();
 			assert!(reader.poll_finished(&waiter).is_pending(), "{start}: waits on the hold");
-			let Ok(Received::Group(mut again)) = producer.create_group_at(group::Info { start: 3 }, start) else {
+			let Ok(Received::Group(mut again)) = producer.create_group_at(group::Info { start: 3 }, start, 0..0) else {
 				panic!("the re-offer takes the group");
 			};
 			drop(hold);
@@ -21680,7 +21750,7 @@ mod test {
 		let producer = received_producer(Info::timed());
 		let mut subscriber = producer.subscribe(None);
 		let at = |millis| Timestamp::from_millis(millis).unwrap();
-		let Ok(Received::Group(mut first)) = producer.create_group_at(group::Info { start: 3 }, 0) else {
+		let Ok(Received::Group(mut first)) = producer.create_group_at(group::Info { start: 3 }, 0, 0..0) else {
 			panic!("the first copy opens");
 		};
 		first.write_frame(at(300), &b"a"[..]).unwrap();
@@ -21690,11 +21760,11 @@ mod test {
 		// Takes frame 1 into its prefetch with frame 0.
 		assert_eq!(&reader.read_frame().await.unwrap().unwrap().payload[..], b"a");
 
-		let Ok(Received::Held(hold)) = producer.create_group_at(group::Info { start: 3 }, 0) else {
+		let Ok(Received::Held(hold)) = producer.create_group_at(group::Info { start: 3 }, 0, 0..0) else {
 			panic!("the re-offer waits on the copy still arriving");
 		};
 		first.abort(Error::Cancel).unwrap();
-		let Ok(Received::Group(mut again)) = producer.create_group_at(group::Info { start: 3 }, 2) else {
+		let Ok(Received::Group(mut again)) = producer.create_group_at(group::Info { start: 3 }, 2, 0..0) else {
 			panic!("the re-offer takes the group");
 		};
 		drop(hold);
@@ -21713,7 +21783,7 @@ mod test {
 		let producer = received_producer(Info::timed());
 		let at = |millis| Timestamp::from_millis(millis).unwrap();
 		// Received from frame 1, so a fetch of the group's head can sit beside it.
-		let Ok(Received::Group(mut first)) = producer.create_group_at(group::Info { start: 3 }, 1) else {
+		let Ok(Received::Group(mut first)) = producer.create_group_at(group::Info { start: 3 }, 1, 0..0) else {
 			panic!("the first copy opens");
 		};
 		first.write_frame(at(301), &b"b"[..]).unwrap();
@@ -21782,7 +21852,7 @@ mod test {
 	async fn a_retained_end_check_follows_a_lifted_cap() {
 		let producer = received_producer(Info::timed());
 		let at = |millis| Timestamp::from_millis(millis).unwrap();
-		let Ok(Received::Group(mut first)) = producer.create_group_at(group::Info { start: 3 }, 0) else {
+		let Ok(Received::Group(mut first)) = producer.create_group_at(group::Info { start: 3 }, 0, 0..0) else {
 			panic!("the first copy opens");
 		};
 		first.write_frame(at(300), &b"a"[..]).unwrap();
@@ -21790,7 +21860,7 @@ mod test {
 		let mut reader = first.consume().with_range(..3);
 		// Takes frame 1 into its prefetch with frame 0.
 		assert_eq!(&reader.read_frame().await.unwrap().unwrap().payload[..], b"a");
-		let Ok(Received::Held(hold)) = producer.create_group_at(group::Info { start: 3 }, 0) else {
+		let Ok(Received::Held(hold)) = producer.create_group_at(group::Info { start: 3 }, 0, 0..0) else {
 			panic!("the re-offer waits on the copy still arriving");
 		};
 		first.abort(Error::Cancel).unwrap();
@@ -21820,7 +21890,7 @@ mod test {
 		for chunked in [false, true] {
 			let producer = received_producer(Info::timed());
 			let at = |millis| Timestamp::from_millis(millis).unwrap();
-			let Ok(Received::Group(mut first)) = producer.create_group_at(group::Info { start: 3 }, 0) else {
+			let Ok(Received::Group(mut first)) = producer.create_group_at(group::Info { start: 3 }, 0, 0..0) else {
 				panic!("the first copy opens");
 			};
 			let mut reader = first.consume();
@@ -21842,7 +21912,7 @@ mod test {
 			}
 			reader.skip_to(3);
 
-			let Ok(Received::Held(hold)) = producer.create_group_at(group::Info { start: 3 }, 0) else {
+			let Ok(Received::Held(hold)) = producer.create_group_at(group::Info { start: 3 }, 0, 0..0) else {
 				panic!("the re-offer waits on the copy still arriving");
 			};
 			first.abort(Error::Cancel).unwrap();
@@ -21851,7 +21921,7 @@ mod test {
 				reader.poll_read_frame(&waiter).is_pending(),
 				"waits on the held re-offer"
 			);
-			let Ok(Received::Group(mut again)) = producer.create_group_at(group::Info { start: 3 }, 0) else {
+			let Ok(Received::Group(mut again)) = producer.create_group_at(group::Info { start: 3 }, 0, 0..0) else {
 				panic!("the re-offer takes the group");
 			};
 			drop(hold);
@@ -21877,7 +21947,7 @@ mod test {
 		for reoffer in [false, true] {
 			let producer = received_producer(Info::timed());
 			let at = |millis| Timestamp::from_millis(millis).unwrap();
-			let Ok(Received::Group(mut first)) = producer.create_group_at(group::Info { start: 3 }, 1) else {
+			let Ok(Received::Group(mut first)) = producer.create_group_at(group::Info { start: 3 }, 1, 0..0) else {
 				panic!("the first copy opens");
 			};
 			first.write_frame(at(301), &b"b"[..]).unwrap();
@@ -21908,7 +21978,7 @@ mod test {
 				assert!(res.is_err(), "nor is the group's end: {res:?}");
 				continue;
 			}
-			let Ok(Received::Group(mut again)) = producer.create_group_at(group::Info { start: 3 }, 0) else {
+			let Ok(Received::Group(mut again)) = producer.create_group_at(group::Info { start: 3 }, 0, 0..0) else {
 				panic!("the re-offer takes the group");
 			};
 			for (millis, payload) in [(300, b"a"), (301, b"b"), (302, b"c"), (303, b"d")] {
@@ -21931,14 +22001,14 @@ mod test {
 			let mut subscriber = producer
 				.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(500))));
 			let at = |millis| Timestamp::from_millis(millis).unwrap();
-			let Ok(Received::Group(mut first)) = producer.create_group_at(group::Info { start: 3 }, 0) else {
+			let Ok(Received::Group(mut first)) = producer.create_group_at(group::Info { start: 3 }, 0, 0..0) else {
 				panic!("the first copy opens");
 			};
 			first.write_frame(at(0), &b"a"[..]).unwrap();
 			let mut reader = subscriber.recv_group().await.unwrap().expect("group 3");
 			assert_eq!(&reader.read_frame().await.unwrap().unwrap().payload[..], b"a");
 
-			let Ok(Received::Held(_hold)) = producer.create_group_at(group::Info { start: 3 }, 0) else {
+			let Ok(Received::Held(_hold)) = producer.create_group_at(group::Info { start: 3 }, 0, 0..0) else {
 				panic!("the re-offer waits on the copy still arriving");
 			};
 			first.abort(Error::Cancel).unwrap();
@@ -21948,7 +22018,7 @@ mod test {
 			// Group 4 bounds group 3's reach at 1s, and group 5 puts the edge a second past it.
 			let mut later = Vec::new();
 			for (start, millis) in [(4, 1000), (5, 2000)] {
-				let Ok(Received::Group(mut next)) = producer.create_group_at(group::Info { start }, 0) else {
+				let Ok(Received::Group(mut next)) = producer.create_group_at(group::Info { start }, 0, 0..0) else {
 					panic!("group {start} opens");
 				};
 				next.write_frame(at(millis), &b"x"[..]).unwrap();
@@ -26083,7 +26153,7 @@ mod test {
 		let mut fetched = pending.await.unwrap();
 		subscriber.assert_no_group();
 
-		let Ok(Received::Group(mut live)) = producer.create_group_at(0u64.into(), 0) else {
+		let Ok(Received::Group(mut live)) = producer.create_group_at(0u64.into(), 0, 0..0) else {
 			panic!("the feed takes the slot");
 		};
 		live.write_frame(live.key_time(), bytes::Bytes::from_static(b"snapshot"))
@@ -26099,7 +26169,7 @@ mod test {
 		live.finish().unwrap();
 		assert!(group.read_frame().await.unwrap().is_none());
 		assert!(matches!(
-			producer.create_group_at(0u64.into(), 0),
+			producer.create_group_at(0u64.into(), 0, 0..0),
 			Err(Error::Duplicate)
 		));
 	}
