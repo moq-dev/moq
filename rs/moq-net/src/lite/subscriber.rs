@@ -505,8 +505,7 @@ impl Subscriber {
 		Self {
 			session: config.session,
 			runtime: config.runtime,
-			// Its own frame budget, so a peer's declared sizes crowd out no other session.
-			origin: config.origin.with_own_frames(),
+			origin: config.origin,
 			recv_bandwidth: config.recv_bandwidth,
 			self_origin,
 			session_origin: config.peer_node.unwrap_or(crate::Hop::UNKNOWN),

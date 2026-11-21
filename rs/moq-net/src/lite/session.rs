@@ -289,6 +289,8 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 	// subscribe origin issues no ANNOUNCE_PLEASE.
 	let publish = publish.unwrap_or_else(|| origin::Producer::empty().consume().with_stats(stats.clone()));
 	let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty().with_stats(stats.clone()));
+	// Budgets of its own, so what the peer publishes crowds out no other session.
+	let subscribe = subscribe.with_own_budgets(limits.live_edges);
 	let subscriptions = crate::session::Slots::default().with_stats(publish.stats(), crate::stats::Cap::Subscriptions);
 	let announces =
 		crate::session::Slots::new(limits.announces).with_stats(subscribe.stats(), crate::stats::Cap::Announces);

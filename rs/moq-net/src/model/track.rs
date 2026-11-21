@@ -1770,6 +1770,10 @@ impl TrackState {
 	/// Take group `key` out of the cache, raising the eviction watermark to its start.
 	fn uncache(&mut self, key: u64) -> Option<Slot> {
 		let slot = self.remove_slot(key)?;
+		// Its copies may live on for their holders, but no longer as the live edge.
+		for group in slot.copies() {
+			group.cache_leave_edge();
+		}
 		if let Some(start) = slot.bound()
 			&& self.evicted.is_none_or(|(evicted, _)| key > evicted)
 		{
@@ -3206,7 +3210,12 @@ impl TrackState {
 			broadcast: broadcast.clone(),
 			..Default::default()
 		});
-		let cache = cache::Track::new(broadcast.pool.clone(), broadcast.frames.clone(), state.downgrade());
+		let cache = cache::Track::new(
+			broadcast.pool.clone(),
+			broadcast.frames.clone(),
+			broadcast.edges.clone(),
+			state.downgrade(),
+		);
 		let mut new = state.write().ok().expect("a new track is open");
 		new.drops_bill = cache.extra();
 		new.arrivals_bill = cache.extra();
@@ -3292,7 +3301,12 @@ impl TrackState {
 			}
 			self.newest_produced = self.newest_produced.max(Some(key));
 		}
-		if !self.protects(key) {
+		if self.protects(key) {
+			// Billed to the session as its newest live edge, which pays for it if the
+			// session holds too many.
+			group.cache_promote();
+			self.cache.edge_moved();
+		} else {
 			group.cache_demote();
 			self.evict.push_back((key, stamp));
 		}
@@ -3564,6 +3578,49 @@ impl TrackState {
 			self.cache.owe_readers(&mut self.debt);
 		}
 		paid
+	}
+
+	/// Shed every frame of the live edge its session queued at its `moves`th move, if it is
+	/// still the edge: the session holds more live edges than its budget, and this one moved
+	/// longest ago.
+	///
+	/// The group stays cached, its timeline intact, so it still marks where the live edge is:
+	/// a live join is placed and staleness is judged as before, and a reader reaching a shed
+	/// frame reads [`Error::Evicted`], as after any shed.
+	pub(super) fn shed_edge_all(&mut self, moves: u64) {
+		if !self.cache.edge_is(moves) {
+			return;
+		}
+		let Some(slot) = self
+			.latest_group
+			.filter(|latest| self.protects(*latest))
+			.and_then(|latest| self.lookup.get(&latest))
+		else {
+			return;
+		};
+		for group in slot.copies() {
+			group.shed_all();
+		}
+	}
+
+	/// Shed up to `excess` bytes of the live edge's older frames, keeping the newest of an
+	/// open group: the session is past its budget with no other live edge left to shed.
+	pub(super) fn shed_edge(&mut self, excess: u64) {
+		let Some(slot) = self
+			.latest_group
+			.filter(|latest| self.protects(*latest))
+			.and_then(|latest| self.lookup.get(&latest))
+		else {
+			return;
+		};
+		let mut freed = 0u64;
+		for group in slot.copies() {
+			if freed >= excess {
+				break;
+			}
+			// Whatever the frames' sizes: the budget, not a write, decides what goes.
+			freed = freed.saturating_add(group.shed(u64::MAX, excess - freed));
+		}
 	}
 
 	/// Group `key` once cached, `None` once the feed starts past it or ends before it,
@@ -4338,14 +4395,16 @@ impl TrackState {
 			_ if kept => self.detach(&group.handle()),
 			Some(slot) => {
 				// Joins the slot's standing: demoted already unless it is the live edge.
-				if !protected {
-					group.handle().cache_demote();
+				match protected {
+					true => group.handle().cache_promote(),
+					false => group.handle().cache_demote(),
 				}
 				// A replacing head inherits the drop the slot holds, announcing it if it dies.
 				if slot.dropped.is_some() {
 					group.handle().carry_drop();
 				}
 				if let Some(head) = slot.head.replace(Box::new(group.handle())) {
+					head.cache_leave_edge();
 					self.detach(&head);
 				}
 				// A head holding frame 0 gives a group received past it a start.
@@ -25693,6 +25752,427 @@ mod test {
 		assert!(consumer.peek_group(0).is_none());
 		let mut group = consumer.peek_group(2).expect("latest survives");
 		assert_eq!(group.read_frame().await.unwrap().unwrap().payload.len(), 1000);
+	}
+
+	/// A broadcast ingested by a session whose live edges may hold `limit` bytes, caching into
+	/// `pool`.
+	#[cfg(feature = "async")]
+	fn session_broadcast(pool: &cache::Pool, limit: Option<u64>) -> Arc<broadcast::Info> {
+		Arc::new(broadcast::Info {
+			pool: pool.clone(),
+			edges: cache::Edges::new(limit),
+			..Default::default()
+		})
+	}
+
+	/// Many quiet tracks, each holding one finished group of one frame, hold no more than
+	/// their session's live-edge budget, however small the pool: the session pays with its
+	/// oldest live edges, and another session's are untouched.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_session_pays_for_its_live_edges() {
+		const FRAME: usize = 10_000;
+		const TRACKS: usize = 200;
+		// Ten frames: a shed edge's bookkeeping is left out.
+		const LIMIT: u64 = 10 * FRAME as u64 + 1024;
+		let pool = cache::Pool::new(
+			cache::Config::default()
+				.with_capacity(1_000)
+				.with_expiry(cache::DEFAULT_EXPIRY),
+		);
+
+		// Another session's quiet track, written first so it is the oldest edge in the pool.
+		let other = session_broadcast(&pool, Some(LIMIT));
+		let mut bystander = Producer::new(other.clone(), "bystander", Info::timed());
+		finished_group(&mut bystander, FRAME);
+
+		let flood = session_broadcast(&pool, Some(LIMIT));
+		let mut tracks: Vec<_> = (0..TRACKS)
+			.map(|i| Producer::new(flood.clone(), format!("t{i}"), Info::timed()))
+			.collect();
+		for track in &mut tracks {
+			finished_group(track, FRAME);
+			let held = flood.edges.used();
+			assert!(held <= LIMIT, "the session's live edges hold {held}");
+		}
+		assert!(
+			pool.used() <= 2 * LIMIT + 2 * FRAME as u64 + 2 * (TRACKS as u64 + 1) * cache::ENTRY_OVERHEAD,
+			"the pool holds every quiet edge: {}",
+			pool.used()
+		);
+
+		// The newest edges survive, the oldest went, and nobody else paid.
+		let newest = tracks.last().unwrap().consume();
+		let read = |consumer: Consumer| {
+			let mut group = consumer.peek_group(0).expect("the edge stays cached");
+			group.read_frame().now_or_never().expect("cached")
+		};
+		assert!(matches!(read(newest), Ok(Some(_))), "the newest edge was shed");
+		assert!(
+			matches!(read(tracks[0].consume()), Err(Error::Evicted)),
+			"the oldest edge kept its frame"
+		);
+		assert!(matches!(read(bystander.consume()), Ok(Some(_))), "another session paid");
+		assert!(other.edges.used() > 0);
+
+		// A track whose edge went carries on: its next group is the new edge.
+		finished_group(&mut tracks[0], FRAME);
+		let mut subscriber = tracks[0].subscribe(live_join());
+		assert_eq!(subscriber.assert_group().start, 1);
+
+		// Every edge's bill leaves with its track.
+		drop((subscriber, tracks, bystander));
+		assert_eq!(flood.edges.used(), 0);
+		assert_eq!(other.edges.used(), 0);
+	}
+
+	/// A live join on a copy whose live edge its session shed is placed as before: the shed
+	/// group still marks where the edge is, so the history below it never reads as newest.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_shed_live_edge_never_rewinds_a_live_join() {
+		let pool = cache::Pool::unbounded();
+		let broadcast = session_broadcast(&pool, Some(1 << 20));
+		let producer = Producer::new(broadcast, "test", Info::timed());
+		producer.received();
+		producer.anchored();
+		producer.join_starts([(Duration::ZERO, JoinStart::At(18_000))]);
+		for key in [18_000, 19_000, 20_000] {
+			write_group(&producer, key);
+		}
+		let join = |millis| {
+			Subscription::default().with_delay(Delay::default().with_min(Duration::from_millis(millis)).with_max(None))
+		};
+		let placed = |subscriber: &mut Subscriber| subscriber.resolved_range(0).map(|resolved| resolved.start);
+		assert_eq!(placed(&mut producer.subscribe(join(1000))), Some(19_000));
+
+		let moves = producer.state.read().cache.moves();
+		producer.state.write().ok().expect("open").shed_edge_all(moves);
+		assert_eq!(
+			placed(&mut producer.subscribe(join(1000))),
+			Some(19_000),
+			"the join moved once the edge's frames went"
+		);
+	}
+
+	/// An edge the session shed that receives more frames is offered again: a later write
+	/// past the budget sheds it a second time, rather than leaving it to grow unchecked.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_shed_live_edge_that_grows_is_shed_again() {
+		const FRAME: usize = 10_000;
+		let pool = cache::Pool::unbounded();
+		let broadcast = session_broadcast(&pool, Some(25_000));
+		let a = Producer::new(broadcast.clone(), "a", Info::timed());
+		let mut b = Producer::new(broadcast.clone(), "b", Info::timed());
+		let mut c = Producer::new(broadcast.clone(), "c", Info::timed());
+		let frame = || bytes::Bytes::from(vec![0u8; FRAME]);
+
+		let mut open = a.append_next().unwrap();
+		open.write_frame(open.key_time(), frame()).unwrap();
+		// Past the budget: a's edge moved longest ago, so it is shed.
+		finished_group(&mut b, 2 * FRAME);
+		assert!(broadcast.edges.used() <= 25_000);
+		// a's edge grows; b's is now the oldest queued, and goes.
+		open.write_frame(open.key_time(), frame()).unwrap();
+		assert!(broadcast.edges.used() <= 25_000);
+		// A third track's write finds a's edge queued again, and sheds it.
+		finished_group(&mut c, 2 * FRAME);
+		assert!(broadcast.edges.used() <= 25_000, "{:?}", broadcast.edges);
+		let mut group = a.consume().peek_group(0).expect("the edge stays cached");
+		assert!(matches!(group.read_frame().now_or_never(), Some(Err(Error::Evicted))));
+		drop(open);
+	}
+
+	/// Shedding a received compressed edge whose plain copy a reader started inflates nothing
+	/// just to drop it: the plain copy goes with the slices, decoder included, a plain read of
+	/// them is evicted, and the edge bills only its fixed bookkeeping after.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_shed_compressed_edge_inflates_nothing() {
+		let info = Info::timed().with_compression(Compression::Deflate);
+		let stored = stored_slices(&info);
+		let pool = cache::Pool::unbounded();
+		let broadcast = session_broadcast(&pool, Some(1 << 30));
+		let producer = Producer::new(broadcast.clone(), "test", info);
+		let mut group = producer.create_group(group::Info { start: 0 }).unwrap();
+		// The plain copy starts on the first two slices, then lags the last two.
+		for object in &stored[..2] {
+			group = ingest_slice(group, object);
+		}
+		let mut reader = producer.consume().peek_group(0).expect("cached");
+		assert!(reader.read_frame().await.unwrap().is_some());
+		for object in &stored[2..] {
+			group = ingest_slice(group, object);
+		}
+		assert!(broadcast.edges.used() > 0);
+
+		let moves = producer.state.read().cache.moves();
+		producer.state.write().ok().expect("open").shed_edge_all(moves);
+		// Only fixed bookkeeping is left: no slice, inflated frame, or decoder.
+		assert!(broadcast.edges.used() < 1024, "{:?}", broadcast.edges);
+		// What a reader already took it keeps; a plain read of what was shed is evicted.
+		drop(reader);
+		let mut late = producer.consume().peek_group(0).expect("the edge stays cached");
+		let read = late.read_frame().now_or_never();
+		assert!(matches!(read, Some(Err(Error::Evicted))), "{read:?}");
+		drop(group);
+	}
+
+	/// The stored slices a publisher of a compressed group would send.
+	#[cfg(feature = "async")]
+	fn stored_slices(info: &Info) -> arrayvec::ArrayVec<frame::Object, 4> {
+		let source = track_producer("source", info.clone());
+		let mut written = source.create_group(group::Info { start: 0 }).unwrap();
+		for index in 0..4 {
+			let payload = bytes::Bytes::from(format!("frame {index}; ").repeat(1000));
+			written.write_frame(written.key_time(), payload).unwrap();
+		}
+		let written = written.finish().unwrap();
+		let mut stored = arrayvec::ArrayVec::<frame::Object, 4>::new();
+		assert!(matches!(
+			written
+				.consume()
+				.compressed()
+				.poll_read_objects(&kio::Waiter::noop(), &mut stored),
+			Poll::Ready(Ok(4))
+		));
+		stored
+	}
+
+	/// Receive one stored slice into `group`, as a subscriber does.
+	#[cfg(feature = "async")]
+	fn ingest_slice(group: group::Producer, object: &frame::Object) -> group::Producer {
+		let mut frame = group
+			.create_object(frame::Header {
+				info: frame::Info {
+					size: object.payload.len() as u64,
+					timestamp: object.timestamp,
+				},
+				fields: object.fields.clone(),
+				inflated: object.inflated,
+			})
+			.unwrap();
+		frame.write(object.payload.contiguous(0)).unwrap();
+		frame.finish().unwrap()
+	}
+
+	/// Shedding a received compressed edge that holds no slice yet discards no history, so
+	/// the frames it receives afterwards still read plain.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_shed_empty_compressed_edge_still_decodes() {
+		let info = Info::timed().with_compression(Compression::Deflate);
+		let stored = stored_slices(&info);
+		let pool = cache::Pool::unbounded();
+		let broadcast = session_broadcast(&pool, Some(1 << 30));
+		let producer = Producer::new(broadcast.clone(), "test", info);
+		let mut group = producer.create_group(group::Info { start: 0 }).unwrap();
+
+		let moves = producer.state.read().cache.moves();
+		producer.state.write().ok().expect("open").shed_edge_all(moves);
+		for object in &stored {
+			group = ingest_slice(group, object);
+		}
+		group.finish().unwrap();
+		let mut reader = producer.consume().peek_group(0).expect("cached");
+		for index in 0..4 {
+			let frame = reader.read_frame().await.unwrap().expect("a frame");
+			assert_eq!(frame.payload, format!("frame {index}; ").repeat(1000).as_bytes());
+		}
+	}
+
+	/// A shed compressed edge whose plain copy had caught up keeps its decoder for the frames
+	/// still to come, and that codec state, a fixed cost per group, never bills the session:
+	/// shedding brings the session back under budget.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_shed_caught_up_compressed_edge_keeps_decoding_off_budget() {
+		let info = Info::timed().with_compression(Compression::Deflate);
+		let stored = stored_slices(&info);
+		let pool = cache::Pool::unbounded();
+		let broadcast = session_broadcast(&pool, Some(1 << 30));
+		let producer = Producer::new(broadcast.clone(), "test", info);
+		let mut group = producer.create_group(group::Info { start: 0 }).unwrap();
+		for object in &stored[..3] {
+			group = ingest_slice(group, object);
+		}
+		let mut reader = producer.consume().peek_group(0).expect("cached");
+		for _ in 0..3 {
+			assert!(reader.read_frame().await.unwrap().is_some());
+		}
+
+		let moves = producer.state.read().cache.moves();
+		producer.state.write().ok().expect("open").shed_edge_all(moves);
+		assert!(broadcast.edges.used() < 1024, "{:?}", broadcast.edges);
+		group = ingest_slice(group, &stored[3]);
+		let frame = reader.read_frame().await.unwrap().expect("a frame");
+		assert_eq!(frame.payload, "frame 3; ".repeat(1000).as_bytes());
+		group.finish().unwrap();
+	}
+
+	/// A frame still arriving on a shed edge cannot be shed, so its copy is aborted: a
+	/// publisher leaving frames unfinished cannot hold their bytes past the budget.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_shed_live_edge_still_receiving_a_frame_is_aborted() {
+		let pool = cache::Pool::unbounded();
+		let broadcast = session_broadcast(&pool, Some(15_000));
+		let a = Producer::new(broadcast.clone(), "a", Info::timed());
+		let mut b = Producer::new(broadcast.clone(), "b", Info::timed());
+
+		let group = a.append_next().unwrap();
+		let mut partial = group
+			.create_frame(frame::Info {
+				size: 20_000,
+				timestamp: Timestamp::ZERO,
+			})
+			.unwrap();
+		partial.write(bytes::Bytes::from(vec![0u8; 10_000])).unwrap();
+		finished_group(&mut b, 10_000);
+		assert!(broadcast.edges.used() <= 15_000, "{:?}", broadcast.edges);
+		// The rest of the frame lands in an aborted copy, which finishing reports.
+		let _ = partial.write(bytes::Bytes::from(vec![0u8; 10_000]));
+		assert!(partial.finish().is_err(), "the copy holding the frame survived");
+		assert!(broadcast.edges.used() <= 15_000, "{:?}", broadcast.edges);
+	}
+
+	/// A frame opened with header fields but no payload yet bills those fields to the
+	/// session, so a shed edge holding one is aborted too.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_shed_live_edge_opening_a_frame_is_aborted() {
+		let pool = cache::Pool::unbounded();
+		let broadcast = session_broadcast(&pool, Some(1 << 30));
+		let producer = Producer::new(broadcast.clone(), "test", Info::timed());
+		let group = producer.append_next().unwrap();
+		let mut frame = group
+			.create_object(frame::Header {
+				info: frame::Info {
+					size: 10,
+					timestamp: Timestamp::ZERO,
+				},
+				fields: Some(Arc::new(super::super::object::Fields {
+					id: 0,
+					properties: Default::default(),
+				})),
+				inflated: None,
+			})
+			.unwrap();
+		assert!(broadcast.edges.used() > 0);
+
+		let moves = producer.state.read().cache.moves();
+		producer.state.write().ok().expect("open").shed_edge_all(moves);
+		assert_eq!(broadcast.edges.used(), 0, "{:?}", broadcast.edges);
+		let _ = frame.write(&[0u8; 10][..]);
+		assert!(frame.finish().is_err(), "the copy holding the frame survived");
+	}
+
+	/// A live edge leaving the cache stops billing its session, though a writer still holds it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_uncached_live_edge_stops_billing_the_session() {
+		let pool = cache::Pool::unbounded();
+		let broadcast = session_broadcast(&pool, Some(1 << 30));
+		let producer = Producer::new(broadcast.clone(), "test", Info::timed());
+		let mut group = producer.append_next().unwrap();
+		group
+			.write_frame(group.key_time(), bytes::Bytes::from(vec![0u8; 10_000]))
+			.unwrap();
+		assert!(broadcast.edges.used() >= 10_000);
+
+		let key = 0;
+		producer.state.write().ok().expect("open").uncache(key).expect("cached");
+		assert_eq!(broadcast.edges.used(), 0, "{:?}", broadcast.edges);
+		drop(group);
+	}
+
+	/// Two copies of a live edge's group sharing frame 1, the one received from frame 1
+	/// having written it first, with frames of `frame` bytes.
+	#[cfg(feature = "async")]
+	fn shared_live_edge(frame: usize) -> (Arc<broadcast::Info>, Producer, group::Producer, group::Producer) {
+		let pool = cache::Pool::unbounded();
+		let broadcast = session_broadcast(&pool, Some(1 << 30));
+		let producer = Producer::new(broadcast.clone(), "test", Info::timed());
+		producer.received();
+		elapse(&producer, Duration::ZERO);
+		let at = |millis| Timestamp::from_millis(millis).unwrap();
+		let payload = |byte: u8| bytes::Bytes::from(vec![byte; frame]);
+
+		// Received from frame 1, so a fetch of the group's head can sit beside it.
+		let Ok(Received::Group(mut first)) = producer.create_group_at(group::Info { start: 3 }, 1, 0..0) else {
+			panic!("the first copy opens");
+		};
+		first.write_frame(at(301), payload(b'b')).unwrap();
+		let mut head = producer
+			.state
+			.write()
+			.ok()
+			.unwrap()
+			.insert_group_request(3, group::Bounds::default(), None)
+			.unwrap()
+			.expect("a fresh group");
+		for (millis, byte) in [(300, b'a'), (301, b'b'), (302, b'c')] {
+			head.write_frame(at(millis), payload(byte)).unwrap();
+		}
+		(broadcast, producer, first, head)
+	}
+
+	/// Copies of one group share its frames, each billed to whichever copy wrote it first:
+	/// that copy aborting leaves the frames billed while the live edge still holds them, even
+	/// frames smaller than the fixed overhead the aborted copy releases.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_live_edge_keeps_billing_frames_an_aborted_sibling_wrote() {
+		const FRAME: usize = 100;
+		let (broadcast, _producer, first, head) = shared_live_edge(FRAME);
+		let before = broadcast.edges.used();
+		assert!(
+			before >= 3 * FRAME as u64,
+			"the live edge holds 3 frames, billing {before}"
+		);
+		// Everything the aborted copy held, the live edge holds too.
+		first.abort(Error::Cancel).unwrap();
+		assert_eq!(broadcast.edges.used(), before);
+		head.finish().unwrap();
+	}
+
+	/// A live edge's sibling copies leaving the cache together stop billing the session,
+	/// though writers still hold both.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn uncached_sibling_live_edges_stop_billing_the_session() {
+		let (broadcast, producer, first, head) = shared_live_edge(10_000);
+		assert!(broadcast.edges.used() >= 30_000);
+		producer.state.write().ok().expect("open").uncache(3).expect("cached");
+		assert_eq!(broadcast.edges.used(), 0, "{:?}", broadcast.edges);
+		drop((first, head));
+	}
+
+	/// A session with one live edge past its budget sheds that edge's older frames, keeping
+	/// the newest of the open group being written.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_lone_live_edge_sheds_down_to_its_newest_frame() {
+		let pool = cache::Pool::unbounded();
+		let broadcast = session_broadcast(&pool, Some(25_000));
+		let producer = Producer::new(broadcast.clone(), "test", Info::timed());
+		let mut group = producer.append_next().unwrap();
+		for _ in 0..5 {
+			group
+				.write_frame(group.key_time(), bytes::Bytes::from(vec![0u8; 10_000]))
+				.unwrap();
+		}
+		let held = broadcast.edges.used();
+		assert!(held <= 25_000, "the open edge holds {held}");
+		assert!(held >= 10_000, "the newest frame went too: {held}");
+
+		// Demoting the edge stops billing the session.
+		let mut next = producer.append_next().unwrap();
+		assert!(broadcast.edges.used() < 10_000);
+		next.write_frame(next.key_time(), bytes::Bytes::from(vec![0u8; 100]))
+			.unwrap();
+		drop((group, next, producer));
 	}
 
 	/// A FETCH cache hit refreshes the group's access time: anything accessed more

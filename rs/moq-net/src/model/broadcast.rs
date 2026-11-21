@@ -68,6 +68,10 @@ pub struct Info {
 	// What the frames this broadcast's groups are still receiving may allocate up front,
 	// inherited from the origin handle that created it.
 	pub(crate) frames: super::frame::Budget,
+
+	// What the live edges of this broadcast's tracks may hold, shared with the session
+	// ingesting it, inherited from the origin handle that created it.
+	pub(crate) edges: cache::Edges,
 }
 
 impl Default for Info {
@@ -78,6 +82,7 @@ impl Default for Info {
 			path: crate::Path::default(),
 			instance: None,
 			frames: Default::default(),
+			edges: Default::default(),
 		}
 	}
 }

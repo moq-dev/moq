@@ -1114,6 +1114,7 @@ impl Drop for Working {
 /// ```
 /// let mut limits = moq_net::session::Limits::default();
 /// limits.announces = 1_000;
+/// limits.live_edges = Some(256 << 20);
 /// let client = moq_net::Client::new().with_limits(limits);
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1121,12 +1122,23 @@ impl Drop for Working {
 pub struct Limits {
 	/// Broadcasts (moq-lite) or namespaces (moq-transport) the peer may have announced to us.
 	pub announces: usize,
+
+	/// Bytes the newest group of every track we receive from the peer may hold in all.
+	///
+	/// The cache never evicts a live track's newest group, so a peer holding many quiet
+	/// tracks would otherwise hold one group each past any cache capacity. Past this, the
+	/// session sheds the frames of its own live edges, the one that moved longest ago first,
+	/// and then the older frames of the one being written. `None` leaves them unbounded.
+	pub live_edges: Option<u64>,
 }
 
 impl Default for Limits {
 	/// Generous enough for a relay mesh carrying a large origin; lower it for untrusted peers.
 	fn default() -> Self {
-		Self { announces: 100_000 }
+		Self {
+			announces: 100_000,
+			live_edges: None,
+		}
 	}
 }
 
