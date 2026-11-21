@@ -125,19 +125,18 @@ export function presented(
 	shows: (candidate: Advertised, at: Path.Valid) => boolean = () => true,
 ): Map<Path.Valid, Advertised> {
 	const out = new Map<Path.Valid, Advertised>();
-	let rootLen = -1;
+	// The most specific claim covering the prefix wins, then the deeper filing, as a request resolves.
+	let rootRank: [number, number] | undefined;
 	for (const [covered, candidates] of table) {
 		if (!carries(covered)) continue;
 		if (Path.hasPrefix(covered, prefix)) {
-			if (covered.length < rootLen) continue;
-			// A scoped route covers only what it claims, so the best one that can serve the prefix wins.
-			const snap = firstEligible(
-				candidates,
-				(candidate) => (!candidate.claim || candidate.claim.overlaps(prefix)) && shows(candidate, prefix),
-			);
+			const snap = firstEligible(candidates, (candidate) => shows(candidate, prefix));
 			if (!snap) continue;
-			rootLen = covered.length;
-			const above = BigInt(Path.parts(prefix).length - Path.parts(covered).length);
+			const depth = Path.parts(covered).length;
+			const rank: [number, number] = [depth - Number(snap.route.above ?? 0n), depth];
+			if (rootRank && (rank[0] < rootRank[0] || (rank[0] === rootRank[0] && rank[1] < rootRank[1]))) continue;
+			rootRank = rank;
+			const above = BigInt(Path.parts(prefix).length - depth);
 			out.set(
 				Path.empty(),
 				keepAbove && above > 0n
@@ -273,6 +272,8 @@ export function staleHole(budget: number): Hole {
 export interface DropRun extends Run, Hole {
 	/** Copied into a cursor from the track's runs, which it folds in afresh on each change. */
 	received?: boolean;
+	/** The reader's own fill refused it: a verdict for it whatever it reads, until it widens. */
+	own?: boolean;
 }
 
 /** Whether two runs say the same thing, so they may merge. */
@@ -281,7 +282,8 @@ export function sameHole(a: DropRun, b: DropRun): boolean {
 		toStreamCode(a.error) === toStreamCode(b.error) &&
 		!a.skip === !b.skip &&
 		a.stale === b.stale &&
-		!a.received === !b.received
+		!a.received === !b.received &&
+		!a.own === !b.own
 	);
 }
 
@@ -294,13 +296,21 @@ export function insertDrop(
 	drops: readonly DropRun[],
 	start: bigint,
 	end: bigint,
-	hole: Hole & { received?: boolean },
+	hole: Hole & { received?: boolean; own?: boolean },
 ): DropRun[] {
 	if (start >= end) return [...drops];
 	const next = removeRun(drops, start, end);
 	let at = 0;
 	while (at < next.length && next[at].start < start) at++;
-	next.splice(at, 0, { start, end, error: hole.error, skip: hole.skip, stale: hole.stale, received: hole.received });
+	next.splice(at, 0, {
+		start,
+		end,
+		error: hole.error,
+		skip: hole.skip,
+		stale: hole.stale,
+		received: hole.received,
+		own: hole.own,
+	});
 	const merged: DropRun[] = [];
 	for (const run of next) {
 		const last = merged[merged.length - 1];
@@ -407,6 +417,17 @@ export interface ReadGroupFrame {
 	inflated?: number;
 	/** The payload to stream instead of `frame.payload`, for a frame written in pieces. */
 	chunks?: FrameConsumer;
+}
+
+/**
+ * The groups a group moved onto another copy is judged within: its logical reader's window below
+ * that reader's cursor cap. Not the copy's own, which a route switch starts at its boundary.
+ */
+export interface Within {
+	contains: (key: bigint) => boolean;
+	end: () => bigint | undefined;
+	/** What can change either. */
+	changed: readonly Getter<unknown>[];
 }
 
 /** What a resumed reader's {@link ResumeSource} sees of the subscriber it serves. */
@@ -952,9 +973,10 @@ export const hooks: {
 	wire: (subscriber: Subscriber) => WireRecord;
 	/**
 	 * Whether this subscriber's budget, or `budget` in milliseconds when given, gives up on `key`,
-	 * judged by its successor; see {@link expireGroup}.
+	 * judged by its successor; see {@link expireGroup}. Successors count within `within` when
+	 * given, else within this subscriber's window below its cursor's cap.
 	 */
-	staleAt: (subscriber: Subscriber, key: bigint, budget?: number) => Expiry;
+	staleAt: (subscriber: Subscriber, key: bigint, budget?: number, within?: Within) => Expiry;
 	/** A group the subscriber's track still caches, as a fresh read handle. */
 	cachedGroup: (subscriber: Subscriber, key: bigint, from?: number) => GroupConsumer | undefined;
 	/**
@@ -962,8 +984,11 @@ export const hooks: {
 	 * budget gives up on it, judged by the route copy it is read from when routed.
 	 */
 	judgedGroup: (subscriber: Subscriber, key: bigint) => GroupConsumer | undefined;
-	/** Whether {@link cachedGroup} would find the group, without making a read handle. */
-	holdsGroup: (subscriber: Subscriber, key: bigint) => boolean;
+	/**
+	 * Whether {@link cachedGroup} would find the group, without making a read handle; with `whole`,
+	 * only one held from its first frame.
+	 */
+	holdsGroup: (subscriber: Subscriber, key: bigint, whole?: boolean) => boolean;
 	/**
 	 * When the latest group the subscriber's track caches in `[start, end)` landed, undefined when
 	 * it caches none; a routed reader asks every copy. Mirrors the Rust `Subscriber::landed`.

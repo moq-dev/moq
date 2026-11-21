@@ -457,6 +457,10 @@ For each path and Instance its peer's prefixes present, it sends at most one cla
 The claim carries the publisher's cost to it, the lowest priority and any drain on the way, and its chain (see [ANNOUNCE_START](#announce-start)).
 It sets the claim's `Marked` flag when a marked session lies on the way to it, and never sends such a claim over a marked session.
 
+A claim is shown no broader than the grants on its way let a route serve it.
+A node files a claim at its own prefix when the grant it holds the claim under, its own publish grant or what the session lets the peer publish, covers that prefix, and otherwise at each of the grant's prefixes beneath it, as many segments above each as it is broader (see [Above](#announce-start)).
+It presents a claim no higher than where it is filed, so a relay passes on what it was shown, and no peer is shown a claim at a path a request through it is refused for want of a grant.
+
 When the publisher's way to a claim changes, it sends an ANNOUNCE_UPDATE.
 While it has no way to a claim it still holds, it sets the claim's `Unavailable` flag rather than withdrawing it, and fails requests for it with UNROUTABLE; it sends an ANNOUNCE_END with `Lost` once it has shown the claim unavailable for 800 milliseconds.
 A receiver takes `Unavailable` only as a change to a claim it already holds at that Epoch and Above: it does not hold a claim it is first told unavailable until an ANNOUNCE_UPDATE clears the flag.
@@ -2311,6 +2315,7 @@ A stream that FINs without a GROUP_END carries a closed Group, which may have he
 - Added ANNOUNCE_FLOOR (0x3), closing each batch of a route's claims with the Revision of the node the route leads to, so a stale copy never revives a claim whose withdrawal a newer one delivered.
 - A node closes a session whose peer leaves its Announce Stream undrained for 10 seconds.
 - A publisher presents only the most specific claim covering the requested prefix.
+- A claim is filed and presented only where every grant on its way covers it whole: a claim broader than a grant is filed at each of the grant's prefixes beneath it, with Above.
 - A subscriber whose scope confines it to some prefixes SHOULD request those, and edit its set when they change.
 - A prefix wider than the subscriber's scope is answered region by region, a claim above a region presented at the region, so a subscriber whose regions do not fit one request asks for a prefix they share. A claim is within the scope when one of the scope's prefixes lies at, beneath, or above it. A scope change takes effect before the ANNOUNCE_OK of any edit read after it, and an edit may change nothing.
 - Added `Node` to TRACK, TRACKS, SUBSCRIBE, FETCH, and DATAGRAMS: the routing node announcing the claim the first hop selected, which every later hop follows.

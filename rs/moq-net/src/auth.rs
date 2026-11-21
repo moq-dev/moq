@@ -599,6 +599,15 @@ impl Permit {
 			.fold(scope, |scope, prefixes| scope.intersect(prefixes))
 	}
 
+	/// The paths `scope` holds that the limit allows too: what the peer may offer us there.
+	#[cfg(feature = "async")]
+	pub(crate) fn limiting(&self, scope: Prefixes) -> Prefixes {
+		match &self.limit {
+			Some(limit) => scope.intersect(limit),
+			None => scope,
+		}
+	}
+
 	/// Whether the peer's grant alone allows `path`.
 	pub(crate) fn granted(&self, path: &str) -> bool {
 		self.granted.as_ref().is_none_or(|granted| granted.matches(path))

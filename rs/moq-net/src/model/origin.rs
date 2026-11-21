@@ -20,7 +20,7 @@ use super::{
 	front::{Action, Candidate, Event, Front, Refusal},
 };
 use crate::{
-	Error, Instance, InvalidPattern, Path, Pattern, Patterns, Prefix, Prefixes,
+	Error, Instance, InvalidPattern, Path, Pattern, Patterns, Prefixes,
 	coding::{BoundsExceeded, Decode, DecodeError, Decoder, Encode, EncodeError, Encoder, Form, varint},
 	path::{self, Segment},
 	time::{Deadlines, Instant},
@@ -1006,6 +1006,7 @@ type RouteMeta = (
 	Option<crate::auth::Credential>,
 	Option<crate::route::NodeId>,
 	bool,
+	u8,
 );
 
 /// The earlier of two optional deadlines.
@@ -1418,7 +1419,10 @@ impl OriginConsumerState {
 				node: meta.6,
 				draining: false,
 				available: meta.7,
-				lane: Lane::default(),
+				lane: Lane {
+					above: meta.8,
+					..Lane::default()
+				},
 				marked: false,
 			},
 		};
@@ -1433,10 +1437,15 @@ struct RouteEntry {
 	instance: Instance,
 	/// Which incarnation of the instance; see [`RouteInfo::epoch`].
 	epoch: u64,
+	/// Where the entry is filed: the prefix it was announced at, or one of its producer's
+	/// grant prefixes beneath it, so the entry may serve its whole subtree.
 	prefix: Path,
-	/// The absolute prefixes the announcing producer may serve. The prefix is
-	/// only the wire-visible covering claim; this scope remains authoritative.
-	scope: Prefixes,
+	/// How many segments [`Self::prefix`] lies beneath the prefix it was announced at,
+	/// which [`Lane::above`] already counts: what an update adds to the route it is given.
+	below: u8,
+	/// Every prefix the announcement is filed at, this one included: one claim, whose
+	/// instance moves to a fresh one at each together (see [`OriginState::advance`]).
+	filed: Arc<[Path]>,
 	/// The absolute subtrees the announcing producer may not serve, even beneath
 	/// a covering prefix.
 	excluded: Arc<[Path]>,
@@ -1485,16 +1494,13 @@ struct RouteEntry {
 	/// The route layer let go of the claim this entry follows through another of its
 	/// copies, whose own retraction is on its way. See [`Claim::retire`].
 	retired: bool,
-	/// [`prefix_claim`] of [`Self::prefix`], built once at announce time.
+	/// [`prefix_claim`] of [`Self::prefix`], built once at announce time: every path the
+	/// entry may serve.
 	///
 	/// The announce sync evaluates a route's claim once per (cursor, route) pair,
 	/// and building one allocates a segment vector and a canonical string. Holding
 	/// it makes that visit a comparison.
 	claim: Pattern,
-	/// The subtrees beneath the prefix the route may serve, built once at announce time
-	/// for the same reason: [`Self::claim`] when the scope covers the prefix, else each
-	/// [`Self::scope`] member beneath it.
-	reach: Vec<Pattern>,
 	/// Whether the job routes answering this prefix route take its instance, which it
 	/// minted rather than was given: their readers continue on the job's route. It moves
 	/// to a fresh one as each job carrying it stops serving; see [`OriginState::advance`].
@@ -1511,9 +1517,10 @@ impl RouteEntry {
 		(self.prefix.parts().count()).saturating_sub(usize::from(self.lane.above))
 	}
 
-	/// Whether the announcing producer may serve the absolute `path`.
+	/// Whether the announcing producer may serve the absolute `path` beneath the entry: its
+	/// grant covers the entry's whole subtree, less what it excludes.
 	fn authorizes(&self, path: &Path) -> bool {
-		self.scope.matches(path.as_str()) && !self.excluded.iter().any(|excluded| path.has_prefix(excluded))
+		!self.excluded.iter().any(|excluded| path.has_prefix(excluded))
 	}
 
 	/// Whether cursors see the entry and requests resolve through it.
@@ -1544,12 +1551,13 @@ impl RouteEntry {
 			self.auth.clone(),
 			self.node,
 			self.available,
+			self.lane.above,
 		)
 	}
 
 	/// Whether [`Self::meta`] would equal `meta`, without building it.
 	fn delivers(&self, meta: &RouteMeta) -> bool {
-		let (hops, cost, source, instance, epoch, auth, node, available) = meta;
+		let (hops, cost, source, instance, epoch, auth, node, available, above) = meta;
 		*hops == self.hops
 			&& *cost == self.cost
 			&& *source == self.entered()
@@ -1558,6 +1566,7 @@ impl RouteEntry {
 			&& *auth == self.auth
 			&& *node == self.node
 			&& *available == self.available
+			&& *above == self.lane.above
 	}
 
 	/// Whether a request for `path` can be served through this entry. A served
@@ -1578,9 +1587,9 @@ impl RouteEntry {
 		}
 	}
 
-	/// Whether this route and `allowed` share any path beneath the advertised prefix.
+	/// Whether this route and `allowed` share any path beneath the entry's prefix.
 	fn overlaps(&self, allowed: &Patterns) -> bool {
-		self.reach.iter().any(|reach| allowed.overlaps(reach))
+		allowed.overlaps(&self.claim)
 	}
 }
 
@@ -1593,16 +1602,24 @@ fn publish_path(path: &Path) -> Result<(), Error> {
 	Ok(())
 }
 
-/// What `scope` lets a route at `prefix`, claiming `claim`, serve: see [`RouteEntry::reach`].
-fn reach(scope: &Prefixes, prefix: &Path, claim: &Pattern) -> Vec<Pattern> {
-	if scope.matches(prefix.as_str()) {
-		return vec![claim.clone()];
+/// Where a claim at the absolute `requested` prefix is filed under `scope`, so each place
+/// serves its whole subtree: the prefix itself when the scope covers it, and otherwise each
+/// of the scope's prefixes beneath it that `publishes` admits, with how many segments
+/// beneath the requested prefix it lies. Empty when the scope reaches nothing beneath it.
+pub(crate) fn filed(scope: &Prefixes, requested: &Path, publishes: impl Fn(&Path) -> bool) -> Vec<(Path, u8)> {
+	if scope.matches(requested.as_str()) {
+		return vec![(requested.clone(), 0)];
 	}
-	// The claim spells its prefix, so the prefix holds no wildcard.
-	let Ok(prefix) = Prefix::try_from(prefix.as_str()) else {
-		return Vec::new();
-	};
-	scope.intersect(&prefix.into()).iter().map(Prefix::pattern).collect()
+	let depth = requested.depth();
+	(scope.iter())
+		// A prefix too long for a path holds nothing a request could name.
+		.filter_map(|prefix| Path::new(prefix.as_str()).ok())
+		.filter(|prefix| prefix.has_prefix(requested) && prefix.depth() <= Path::MAX_PARTS && publishes(prefix))
+		.map(|prefix| {
+			let below = u8::try_from(prefix.depth() - depth).expect("a path has at most 32 segments");
+			(prefix, below)
+		})
+		.collect()
 }
 
 /// The paths a prefix can cover, using an exact pattern at the path depth limit.
@@ -2594,8 +2611,7 @@ impl Producer {
 			hop: Hop::from(self.node),
 			shared: self.shared.clone(),
 			requested: full.clone(),
-			prefixes: vec![(full.clone(), claim)],
-			scope: self.scope.allowed.clone(),
+			prefixes: vec![(full.clone(), claim, 0)],
 			excluded: self.scope.excluded.clone(),
 			local: true,
 			link: self.link,
@@ -3010,12 +3026,9 @@ struct Announcing {
 	shared: SendCell<kio::Shared<OriginState>>,
 	/// The absolute advertised prefix, which also keys the ingress announce counters.
 	requested: Path,
-	/// The prefix inserted into the table, with its [`prefix_claim`]. The scope
-	/// decides visibility and request authorization without changing the route's
-	/// prefix shape.
-	prefixes: Vec<(Path, Pattern)>,
-	/// The absolute paths the producer is authorized to serve.
-	scope: Prefixes,
+	/// Where the route is filed in the table (see [`filed`]), each with its
+	/// [`prefix_claim`] and how many segments beneath the advertised prefix it lies.
+	prefixes: Vec<(Path, Pattern, u8)>,
 	/// The absolute subtrees the producer may not serve.
 	excluded: Arc<[Path]>,
 	local: bool,
@@ -3027,23 +3040,33 @@ struct Announcing {
 }
 
 impl Announcing {
-	/// The requested prefix as-is, refused when its subtree does not overlap the scope.
+	/// The requested prefix, filed where the scope lets it serve (see [`filed`]), refused
+	/// when its subtree does not overlap the scope.
 	fn new(producer: &Producer, prefix: impl TryInto<Path, Error: Into<Error>>) -> Result<Self, Error> {
 		let requested = producer.root.join(&path::convert(prefix)?)?;
 		publish_path(&requested)?;
 		if requested.depth() > Path::MAX_PARTS {
 			return Err(BoundsExceeded.into());
 		}
-		let claim = prefix_claim(&requested)?;
-		if !producer.scope.allowed.overlaps(requested.as_str()) || !producer.scope.publishes(&requested) {
+		// Refuses a path only a pattern could spell.
+		prefix_claim(&requested)?;
+		if !producer.scope.publishes(&requested) {
+			return Err(Error::Unauthorized);
+		}
+		let scope = &producer.scope;
+		let mut prefixes = Vec::new();
+		for (prefix, below) in filed(&scope.allowed, &requested, |prefix| scope.publishes(prefix)) {
+			let claim = prefix_claim(&prefix)?;
+			prefixes.push((prefix, claim, below));
+		}
+		if prefixes.is_empty() {
 			return Err(Error::Unauthorized);
 		}
 		Ok(Self {
 			hop: Hop::from(producer.node),
 			shared: producer.shared.clone(),
-			requested: requested.clone(),
-			prefixes: vec![(requested, claim)],
-			scope: producer.scope.allowed.clone(),
+			requested,
+			prefixes,
 			excluded: producer.scope.excluded.clone(),
 			local: false,
 			link: producer.link,
@@ -3074,8 +3097,9 @@ impl Announcing {
 
 		// A handle that names no instance serves one of its own.
 		let minted = route.instance.clone().unwrap_or_else(Instance::random);
+		let filed: Arc<[Path]> = self.prefixes.iter().map(|(prefix, ..)| prefix.clone()).collect();
 		let mut entries = Vec::with_capacity(self.prefixes.len());
-		for (prefix, claim) in &self.prefixes {
+		for (prefix, claim, below) in &self.prefixes {
 			shared.reannounced(prefix, &route.hops);
 			let id = shared.next_route;
 			shared.next_route += 1;
@@ -3089,7 +3113,8 @@ impl Announcing {
 				instance,
 				epoch,
 				prefix: prefix.clone(),
-				scope: self.scope.clone(),
+				below: *below,
+				filed: filed.clone(),
 				excluded: self.excluded.clone(),
 				hops: route.hops.clone(),
 				cost: route.cost,
@@ -3100,7 +3125,10 @@ impl Announcing {
 				link: self.link,
 				marked: route.marked,
 				node: route.node,
-				lane: route.lane.clone(),
+				lane: Lane {
+					above: route.lane.above.saturating_add(*below),
+					..route.lane.clone()
+				},
 				draining: route.draining,
 				available: route.available,
 				server: serving.server.clone(),
@@ -3109,7 +3137,6 @@ impl Announcing {
 				stale,
 				retired: false,
 				claim: claim.clone(),
-				reach: reach(&self.scope, prefix, claim),
 				lends: serving.lends,
 				lent: None,
 			});
@@ -3738,7 +3765,10 @@ impl AnnounceProducer {
 			entry.auth = route.auth.clone();
 			entry.via = route.via;
 			entry.node = route.node;
-			entry.lane = route.lane.clone();
+			entry.lane = Lane {
+				above: route.lane.above.saturating_add(entry.below),
+				..route.lane.clone()
+			};
 			entry.draining = route.draining;
 			entry.available = route.available;
 			entry.marked = route.marked;
@@ -3801,7 +3831,10 @@ impl AnnounceProducer {
 			via: entry.via,
 			source: entry.entered(),
 			node: entry.node,
-			lane: entry.lane.clone(),
+			lane: Lane {
+				above: entry.lane.above.saturating_sub(entry.below),
+				..entry.lane.clone()
+			},
 			draining: entry.draining,
 			available: entry.available,
 			marked: entry.marked,
@@ -4076,7 +4109,8 @@ impl OwnClaims {
 		let claim = Claim {
 			item: Attr {
 				epoch: route.epoch,
-				above: 0,
+				// Filed at a grant prefix beneath the prefix it claims, it is shown no higher.
+				above: route.lane.above.into(),
 			},
 			cost: route.cost.value(),
 			priority: route.lane.priority.unwrap_or(i8::MAX),
@@ -6964,17 +6998,34 @@ impl OriginState {
 	/// short of remembering every path it ever answered could tell. Under the table's lock,
 	/// with the job's retraction, so no request resolves the path through the old instance
 	/// in between. A prefix route already past `spent` has nothing to do.
+	///
+	/// A claim filed at several prefixes is one claim, so its route at each moves to the
+	/// same fresh instance.
 	fn advance(&mut self, prefix: &Path, id: u64, spent: &Instance) {
-		let Some(entry) = self.routes.entry_mut(prefix, id) else {
+		let Some(entry) = self.routes.entry(prefix, id) else {
 			return;
 		};
-		if entry.instance != *spent {
+		let Some(server) = entry.server.clone().filter(|_| entry.instance == *spent) else {
 			return;
+		};
+		let filed = entry.filed.clone();
+		let instance = Instance::random();
+		for at in filed.iter() {
+			let mut moved = Vec::new();
+			for entry in self.routes.at_mut(at) {
+				let same = entry.lends
+					&& entry.instance == *spent
+					&& (entry.server.as_ref()).is_some_and(|other| other.same_channel(&server));
+				if same {
+					entry.instance = instance.clone();
+					entry.epoch = 0;
+					moved.push(entry.claim.clone());
+				}
+			}
+			for claim in moved {
+				self.sync_route(at, &claim, Gone::End);
+			}
 		}
-		entry.instance = Instance::random();
-		entry.epoch = 0;
-		let claim = entry.claim.clone();
-		self.sync_route(prefix, &claim, Gone::End);
 	}
 
 	/// Whether `instance` still serves `path` as a request would resolve it now: the winning
@@ -9281,7 +9332,7 @@ mod tests {
 	fn scopes(prefixes: &[&str]) -> Prefixes {
 		prefixes
 			.iter()
-			.map(|prefix| Prefix::try_from(*prefix).unwrap())
+			.map(|prefix| crate::Prefix::try_from(*prefix).unwrap())
 			.collect()
 	}
 
@@ -10377,15 +10428,35 @@ mod tests {
 		announced.assert_next_wait();
 	}
 
+	/// A claim broader than its producer's grant is filed at each granted prefix beneath it,
+	/// as many segments above it as it is broader, so it is shown only where it may serve.
 	#[kio::test]
-	async fn announce_keeps_its_prefix_under_a_producer_scope() {
+	async fn a_claim_is_filed_at_the_grant_prefixes_beneath_it() {
 		let producer = origin(1).produce();
-		let scoped = producer.scope("", &scopes(&["room"])).unwrap();
+		let scoped = producer.scope("", &scopes(&["a/b", "a/c/d", "z"])).unwrap();
 
-		// Prefix advertisements stay prefixes. The scope filters requests locally.
-		let _a = scoped.announce("", RouteInfo::new()).unwrap();
+		let _a = scoped.announce("a", RouteInfo::new()).unwrap();
 		let mut announced = producer.consume().routes();
-		announced.expect_next_active("").await;
+		let mut seen = Vec::new();
+		for _ in 0..2 {
+			let event = announced.expect_next().await;
+			let RouteKind::Start = event.kind else {
+				panic!("should start: {event:?}");
+			};
+			seen.push((event.announce.prefix.to_string(), event.announce.route.lane.above));
+		}
+		seen.sort();
+		assert_eq!(seen, [("a/b".to_string(), 1), ("a/c/d".to_string(), 2)]);
+		announced.assert_next_wait();
+
+		// A request outside the grant finds nothing to resolve through.
+		let outside = Path::new("a/q").unwrap();
+		assert!(producer.shared.lock().routes.covering(&outside).next().is_none());
+
+		// Within a granted prefix, the claim is filed where it was announced.
+		let _b = scoped.announce("z/y", RouteInfo::new()).unwrap();
+		let route = announced.expect_next_active("z/y").await;
+		assert_eq!(route.lane.above, 0);
 
 		// Disjoint prefixes cannot be claimed at all.
 		assert!(matches!(
@@ -12848,7 +12919,8 @@ mod tests {
 			.unwrap()
 			.covering()
 			.routes();
-		matching.expect_next_active("").await;
+		// Filed at its grant, beneath the prefix it claims.
+		assert_eq!(matching.expect_next_active("room/chat").await.lane.above, 2);
 		let mut outside = producer
 			.consume()
 			.scope("", &scopes(&["room/video"]))
@@ -12883,7 +12955,8 @@ mod tests {
 			.unwrap()
 			.covering()
 			.routes();
-		assert_eq!(video.expect_next_active("").await.cost, Cost::new(5));
+		// Each claim is filed at its grant, so the cursor sees the one filed within its scope.
+		assert_eq!(video.expect_next_active("room/video").await.cost, Cost::new(5));
 	}
 
 	#[kio::test]
@@ -12901,13 +12974,15 @@ mod tests {
 			.routes();
 		let mut rooted = consumer.scope("room/live", &Prefixes::all()).unwrap().routes();
 
+		// Each claim of `room/live` is filed at its own grant, so each cursor sees only those
+		// within its scope and horizon.
 		let chat = producer
 			.scope("", &scopes(&["room/live/chat"]))
 			.unwrap()
 			.forward("room/live", RouteInfo::new().with_hops(hops(&[7])).with_cost(1))
 			.unwrap();
-		assert_eq!(all.expect_next_active("room/live").await.cost, Cost::new(1));
-		assert_eq!(rooted.expect_next_active("").await.cost, Cost::new(1));
+		assert_eq!(all.expect_next_active("room/live/chat").await.cost, Cost::new(1));
+		assert_eq!(rooted.expect_next_active("chat").await.cost, Cost::new(1));
 		excluded.assert_next_wait();
 		video.assert_next_wait();
 
@@ -12916,23 +12991,23 @@ mod tests {
 			.unwrap()
 			.forward("room/live", RouteInfo::new().with_hops(hops(&[8])).with_cost(5))
 			.unwrap();
-		all.assert_next_wait();
-		rooted.assert_next_wait();
-		assert_eq!(excluded.expect_next_active("room/live").await.cost, Cost::new(5));
-		assert_eq!(video.expect_next_active("room/live").await.cost, Cost::new(5));
+		assert_eq!(all.expect_next_active("room/live/video").await.cost, Cost::new(5));
+		assert_eq!(rooted.expect_next_active("video").await.cost, Cost::new(5));
+		assert_eq!(excluded.expect_next_active("room/live/video").await.cost, Cost::new(5));
+		assert_eq!(video.expect_next_active("room/live/video").await.cost, Cost::new(5));
 
 		chat.update(RouteInfo::new().with_hops(hops(&[7])).with_cost(9))
 			.unwrap();
-		assert_eq!(all.expect_next_active("room/live").await.cost, Cost::new(5));
-		assert_eq!(rooted.expect_next_active("").await.cost, Cost::new(5));
+		assert_eq!(all.expect_next_active("room/live/chat").await.cost, Cost::new(9));
+		assert_eq!(rooted.expect_next_active("chat").await.cost, Cost::new(9));
 		excluded.assert_next_wait();
 		video.assert_next_wait();
 
 		drop(video_route);
-		assert_eq!(all.expect_next_active("room/live").await.cost, Cost::new(9));
-		assert_eq!(rooted.expect_next_active("").await.cost, Cost::new(9));
-		excluded.expect_next_offline("room/live").await;
-		video.expect_next_offline("room/live").await;
+		all.expect_next_offline("room/live/video").await;
+		rooted.expect_next_offline("video").await;
+		excluded.expect_next_offline("room/live/video").await;
+		video.expect_next_offline("room/live/video").await;
 	}
 
 	#[kio::test]
@@ -14054,6 +14129,45 @@ mod tests {
 		assert_eq!(claim.instance(), second);
 		drop(carol);
 		assert_ne!(claim.instance(), second);
+	}
+
+	/// A claim filed at several grant prefixes is one claim: a job withdrawn under any of them
+	/// moves every filing to the same fresh instance, which the claim reports and each later
+	/// job takes.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_withdrawn_job_moves_every_filing_of_the_claim() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let scoped = producer.scope("", &scopes(&["room/a", "room/b"])).unwrap();
+		let claim = scoped.claim("room", RouteOptions::default()).unwrap();
+		let first = claim.instance();
+
+		let answer = async |path: &str| {
+			let pending = consumer.request(path, None);
+			let published = queued(&claim).await.route(RouteOptions::default()).unwrap();
+			pending.await.unwrap();
+			published
+		};
+
+		let a = answer("room/a/x").await;
+		let b = answer("room/b/x").await;
+		assert_eq!(a.instance(), first, "each filing lends the claim's instance");
+		assert_eq!(b.instance(), first, "each filing lends the claim's instance");
+		b.withdraw();
+		let second = claim.instance();
+		assert_ne!(second, first, "the claim moved on");
+		// Held, since a job that ends moves the claim on again.
+		let mut held = vec![a];
+		for path in ["room/a/y", "room/b/y"] {
+			let job = answer(path).await;
+			assert_eq!(
+				job.instance(),
+				second,
+				"{path}: every filing moved to the claim's new instance"
+			);
+			held.push(job);
+		}
 	}
 
 	/// A job's route takes the instance its claim lends when it announces, not when it was
