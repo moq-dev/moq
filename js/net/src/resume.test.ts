@@ -2003,8 +2003,8 @@ test.each([
 ])(
 	"a group fetched over a wire goes stale by the fetch's own budget ($budget)",
 	async ({ maxDelay, stale, bounded }) => {
-		// Still, so only presentation time judges.
-		const { installed } = manual();
+		// Still until the test moves it: a scale-less track ages by arrival alone.
+		const { clock, installed } = manual();
 		const front = new Front();
 		const a = new BroadcastProducer();
 		const ta = copy(a);
@@ -2035,8 +2035,9 @@ test.each([
 			await settle();
 			expect(group.expired.peek()).toBeUndefined();
 
-			// The copy's live edge runs a second past group 0's successor.
+			// Group 0's successor arrived at the copy a second ago.
 			ta.write(2000n);
+			await clock.advance(SECOND);
 			if (stale) expect(await verdict).toMatchObject({ code: StreamCode.Old });
 			else expect(await isPending(verdict)).toBe(true);
 

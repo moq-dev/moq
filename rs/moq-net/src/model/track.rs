@@ -176,7 +176,8 @@ pub struct Info {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) properties: Option<Arc<crate::model::object::TrackProperties>>,
 	/// Whether this copy's groups skip the rewind check: set on a lite-05/06 copy, whose
-	/// untimed origin stamps send times, so an older group fetched later looks like a rewind.
+	/// untimed origin may be a released publisher stamping send times, so an older group
+	/// fetched later looks like a rewind.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) unchecked: bool,
 }
@@ -2399,6 +2400,8 @@ impl TrackState {
 	/// Fetched backfill is absent from `arrival`, so it cannot age subscription content
 	/// as though it were a live replacement.
 	fn live_edge(&self, servable: &Servable) -> Option<PresentationEdge> {
+		// A scale-less track's groups start at no time, so none is an edge: skip the scan.
+		self.timescale()?;
 		self.find_servable(servable, 0, true, |slot| {
 			if !slot.is_shown() {
 				return None;
@@ -2414,8 +2417,8 @@ impl TrackState {
 		})
 	}
 
-	/// This track's own edge within `servable`, for measuring drift. A scale-less track's
-	/// edge is its newest shown group's key, so its max age counts bare units.
+	/// This track's own edge within `servable`, for measuring drift. A scale-less track has
+	/// none: its bare starts are no time, so it ages by arrival alone.
 	fn drift_edge(&self, servable: &Servable) -> Edge {
 		Edge {
 			presentation: self.live_edge(servable),
@@ -2514,23 +2517,22 @@ impl TrackState {
 		self.started_at(self.successor(key, servable)?)
 	}
 
-	/// A key, or a group's end, in presentation time: in the track's timescale, or unscaled
-	/// on a scale-less track, over the whole key range, whose max age counts bare units as
-	/// milliseconds (see [`PresentationEdge::behind`]).
-	fn presented(&self, value: u64) -> Option<Timestamp> {
-		match self.info.as_ref()?.timescale {
-			Some(scale) => Timestamp::new(value, scale).ok(),
-			None => Some(Timestamp::unscaled(value)),
-		}
+	/// The track's timescale, or `None` on a scale-less track, or before its info is known.
+	fn timescale(&self) -> Option<crate::Timescale> {
+		self.info.as_ref()?.timescale
 	}
 
-	/// Where the group in `slot` starts presenting: its first frame's timestamp, or its key
-	/// on a scale-less track, whose frames carry none.
+	/// A key, or a group's end, in the track's timescale, or `None` on a scale-less track,
+	/// whose bare numbers are no time.
+	fn presented(&self, value: u64) -> Option<Timestamp> {
+		Timestamp::new(value, self.timescale()?).ok()
+	}
+
+	/// Where the group in `slot` starts presenting: its first frame's timestamp, or `None` on
+	/// a scale-less track, whose frames carry no time.
 	fn started_at(&self, slot: &Slot) -> Option<Timestamp> {
-		match self.info.as_ref()?.timescale {
-			Some(_) => slot.group.timestamp(),
-			None => self.presented(slot.group.start),
-		}
+		self.timescale()?;
+		slot.group.timestamp()
 	}
 
 	/// Where group `key` ends, once its producer finished it whole: what bounds its reach
@@ -2541,11 +2543,12 @@ impl TrackState {
 
 	/// When group `key`, finished whole, stops presenting on the wall clock: its arrival plus
 	/// its span, which stands in for a successor arriving, so the last group of a paused or
-	/// finished track ages out without one.
+	/// finished track ages out without one. A scale-less group's span is no time, so it waits
+	/// for a successor.
 	fn ended_at(&self, key: u64) -> Option<crate::time::Instant> {
 		let slot = self.lookup.get(&key)?;
 		let span = self.presented(slot.group.end()?.checked_sub(key)?)?;
-		slot.arrived.checked_add(age(span)?)
+		slot.arrived.checked_add(Duration::try_from(span).ok()?)
 	}
 
 	/// The group after `key` that bounds it: the first servable one in `servable` whose
@@ -2652,7 +2655,8 @@ impl TrackState {
 	/// The wall clock judges it too: a group is also stale once its successor arrived a
 	/// full `budget` ago (see [`Self::superseded`]), so a peer whose timestamps stop
 	/// advancing or an empty successor that never presents cannot pin a superseded group.
-	/// Media time still convicts first when a burst arrives at once. A group finished whole
+	/// Media time still convicts first when a burst arrives at once. A scale-less track has
+	/// no media time, so only the wall clock judges it. A group finished whole
 	/// ages from its arrival plus its span instead when no successor arrived, so the last
 	/// group of a paused or finished track ages out; one with neither is never convicted.
 	///
@@ -2727,6 +2731,10 @@ impl TrackState {
 		}
 		if self.aged(arrived, budget) {
 			return true;
+		}
+		// A scale-less track ages by arrival alone.
+		if self.timescale().is_none() {
+			return false;
 		}
 		let reach = loop {
 			if let Some(end) = self.own_end(key) {
@@ -8936,17 +8944,8 @@ impl PresentationEdge {
 	fn behind(&self, reach: Option<Timestamp>, budget: Duration) -> bool {
 		reach
 			.and_then(|reach| self.timestamp.checked_sub(reach).ok())
-			.and_then(age)
+			.and_then(|span| Duration::try_from(span).ok())
 			.is_some_and(|age| age >= budget)
-	}
-}
-
-/// A span of presentation time as a duration: a scale-less track's bare units count as
-/// milliseconds, over the whole key range.
-fn age(span: Timestamp) -> Option<Duration> {
-	match span.scale() {
-		Some(_) => Duration::try_from(span).ok(),
-		None => Some(Duration::from_millis(span.value())),
 	}
 }
 
@@ -29005,25 +29004,50 @@ mod test {
 		assert_eq!(drain_groups(&mut subscriber), [2998]);
 	}
 
-	/// A scale-less track's max age counts bare key units as milliseconds over the whole key
-	/// range, so keys past a scaled timestamp's bound age by their distance as low ones do.
+	/// A scale-less track's starts are bare numbers, never milliseconds, so groups whose
+	/// starts jump age by arrival alone, anywhere in the key range.
 	#[test]
-	fn a_scale_less_track_ages_wide_keys_by_their_distance() {
+	fn a_scale_less_track_ages_by_arrival_alone() {
+		let budget = Duration::from_millis(5);
 		for base in [0, 1u64 << 61, u64::MAX - 30_000] {
 			let producer = track_producer("test", None);
 			for offset in [0, 10_000, 20_000] {
 				write_untimed_group(&producer, base + offset);
 			}
-			// All three arrived at once, so only the keys' distance makes the oldest stale: its
-			// successor starts 10 s behind the edge. The middle one reaches the edge.
-			let mut subscriber = producer
-				.subscribe(Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(5))));
+			let subscribe =
+				|| producer.subscribe(Subscription::default().with_delay(Delay::default().with_max(budget)));
+			// All three arrived at once, so however far apart their starts, none is stale yet.
 			assert_eq!(
-				drain_groups(&mut subscriber),
-				[base + 10_000, base + 20_000],
+				drain_groups(&mut subscribe()),
+				[base, base + 10_000, base + 20_000],
 				"from {base}"
 			);
+			// Their successors arrived a full budget ago, so only the newest is left.
+			elapse(&producer, budget);
+			assert_eq!(drain_groups(&mut subscribe()), [base + 20_000], "from {base}");
 		}
+	}
+
+	/// A scale-less group's end is a bare number, no time, so a group finished whole ages only
+	/// once a successor arrives, as any other group does.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_scale_less_whole_group_ages_only_once_superseded() {
+		let producer = track_producer("test", Info::default().with_max_age(Duration::ZERO));
+		elapse(&producer, Duration::ZERO);
+		let mut group = producer.append_group(Timestamp::unscaled(0)).unwrap();
+		group
+			.write_frame(Timestamp::unscaled(0), bytes::Bytes::from_static(b"x"))
+			.unwrap();
+		group.finish_at(1).unwrap();
+
+		let consumer = producer.consume();
+		elapse(&producer, Duration::from_secs(1));
+		let fetched = consumer.fetch_group(0, None).now_or_never().unwrap();
+		assert!(fetched.is_ok(), "before a successor: {:?}", fetched.err());
+		write_untimed_group(&producer, 1);
+		let fetched = consumer.fetch_group(0, None).now_or_never().unwrap();
+		assert!(matches!(fetched, Err(Error::Old)), "{:?}", fetched.err());
 	}
 
 	/// An empty successor gives the lowest group above a gap no reach, so media time never

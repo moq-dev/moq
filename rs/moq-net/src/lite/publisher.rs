@@ -90,8 +90,7 @@ struct Shared {
 	subscriptions: crate::session::Slots,
 	/// Holds this session's listings: one per broadcast, the newest replacing the rest.
 	lister: crate::broadcast::Owner,
-	// The send time an untimed track's frames carry on Lite05/06, which can't mark them
-	// untimed (see `wire_timestamp`).
+	// The clock the session's timers and auth replies read.
 	runtime: crate::time::Deadlines,
 	estimate: kio::ProducerWeak<crate::session::Estimate>,
 	/// The peer's latest PROBE target, which the session's sender probes up to.
@@ -7754,6 +7753,58 @@ mod serve_group_test {
 			};
 			assert!(bytes.ends_with(tail), "finished={finished}: {bytes:?}");
 			assert!(log.resets().is_empty(), "finished={finished}");
+		}
+	}
+
+	/// One case of `fixtures/stamps.json`, which `js/net` replays too.
+	#[derive(serde::Deserialize)]
+	#[serde(deny_unknown_fields)]
+	struct StampCase {
+		name: String,
+		version: crate::Version,
+		start: u64,
+		payloads: Vec<String>,
+		hex: String,
+	}
+
+	/// Lite-05/06 stamp a scale-less frame with its group's start, so a frame carries the same
+	/// timestamp on every hop and fetch, never a clock: the Group Stream matches the shared
+	/// fixture byte for byte.
+	#[kio::test]
+	async fn a_scale_less_group_stream_matches_the_shared_fixture() {
+		let cases: Vec<StampCase> =
+			serde_json::from_str(include_str!("../../fixtures/stamps.json")).expect("a malformed fixture");
+		assert!(!cases.is_empty(), "the fixture is empty");
+		for case in cases {
+			let crate::Version(crate::Draft::Lite(version)) = case.version else {
+				panic!("{}: not a moq-lite version", case.name);
+			};
+			let log = Log::default();
+			let mut subscription = lite07_subscription(SinkSession::new(log.clone()));
+			subscription.version = version;
+			subscription.stamp = Stamp::new(version, None);
+			let track = track::Producer::new(
+				Arc::new(broadcast::Info::default()),
+				"test",
+				crate::track::Info::default(),
+			);
+			let mut group = track.create_group(group::Info { start: case.start }).unwrap();
+			for payload in &case.payloads {
+				group
+					.write_frame(Timestamp::unscaled(case.start), payload.as_bytes())
+					.unwrap();
+			}
+			group.finish().unwrap();
+			let handle = subscription.priority.insert(Priority::new(0, 0, 0));
+			subscription
+				.serve_group(case.start, 0, handle, track.consume().peek_group(case.start).unwrap())
+				.await
+				.unwrap();
+
+			let (bytes, fin) = first_stream(&log);
+			assert!(fin, "{}: no FIN", case.name);
+			let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+			assert_eq!(hex, case.hex, "{}", case.name);
 		}
 	}
 

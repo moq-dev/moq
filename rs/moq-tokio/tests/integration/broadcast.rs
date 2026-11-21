@@ -625,7 +625,7 @@ async fn broadcast_moq_lite_05_fetch_during_subscribe_webtransport() {
 }
 
 /// Lite05 can't declare an untimed track, so a track that sets no timescale goes out
-/// in milliseconds, its frames stamped with their send time. The subscriber receives
+/// in milliseconds, its frames stamped with their group's start. The subscriber receives
 /// `Some(ts)` at that scale.
 #[tokio::test]
 async fn broadcast_moq_lite_05_untimed_track() {

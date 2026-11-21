@@ -3108,7 +3108,7 @@ type Drift = {
 	// The budget is the track's max age, which no widening passes: its verdicts are final.
 	bounded: boolean;
 	// The live edge: its group, and the newest time it presents, in milliseconds. A scale-less
-	// track's bare starts count as milliseconds, as the Rust `age` reads them.
+	// track has none: its bare starts are no time, so it ages by arrival alone.
 	presentation?: { key: bigint; at: number };
 	end?: bigint;
 	// Judged against the whole track rather than this reader's window, as a fetch is.
@@ -3348,17 +3348,13 @@ export class Subscriber {
 		let presentation: Drift["presentation"];
 		const info = this.#state.info.peek();
 		// The edge wants the newest content that exists, so it takes the newest stamped group's
-		// latest frame: walk back from the cap to the first one. A scale-less track's frames carry
-		// no timestamp, so its edge is the newest group's start.
+		// latest frame: walk back from the cap to the first one. A scale-less track has none, so it
+		// walks nothing.
 		const scaleless = info !== undefined && info.timescale == null;
-		for (let i = (end === undefined ? timeline.length : timelineIndex(timeline, end)) - 1; i >= 0; i--) {
+		const top = scaleless ? 0 : end === undefined ? timeline.length : timelineIndex(timeline, end);
+		for (let i = top - 1; i >= 0; i--) {
 			const group = timeline[i];
 			if (hooks.groupFailed(group) || !this.#judges(group.start, whole)) continue;
-			if (scaleless) {
-				if (!hooks.groupStarted(group)) continue;
-				presentation = { key: group.start, at: Number(group.start) };
-				break;
-			}
 			const timestamp = hooks.groupTimestamp(group);
 			if (timestamp === undefined) continue;
 			presentation = { key: group.start, at: (hooks.groupLatest(group) ?? timestamp).asMillis() };
@@ -3448,9 +3444,10 @@ export class Subscriber {
 	// falls out for free.
 	//
 	// The wall clock judges it too: a group is also stale once its successor arrived a full
-	// budget ago, so a peer whose timestamps stop advancing, an untimed track, or an empty
-	// successor that never presents cannot pin a superseded group. The successor is re-read,
-	// not latched, like the reach, except by a reader holding the group: it passes `held`, so
+	// budget ago, so a peer whose timestamps stop advancing or an empty successor that never
+	// presents cannot pin a superseded group. A scale-less track has no presentation time, so
+	// only the wall clock judges it. The successor is re-read, not latched, like the reach,
+	// except by a reader holding the group: it passes `held`, so
 	// the wall clock outlives the successor's eviction (see {@link #supersededAt}). The newest
 	// group has no successor, so neither clock ever convicts it. `wake` arms a timer for the
 	// wall deadline, for a held read that waits on it.
@@ -3470,16 +3467,11 @@ export class Subscriber {
 		const deadline = arrived.since(Instant.ZERO).asNanos() + drift.budget * 1_000_000;
 		if (now().since(Instant.ZERO).asNanos() >= deadline) return true;
 		if (wake) this.#wakeAt(deadline);
-		// A closed subscriber keeps no timeline to bound the reach with.
-		if (this.#arrivals) return false;
-
+		// A closed subscriber keeps no timeline to bound the reach with, and only a live edge
+		// above `key` convicts it by media time.
+		if (this.#arrivals || drift.presentation === undefined || drift.presentation.key <= key) return false;
 		const reach = this.#reach(key, drift.end, drift.whole);
-		return (
-			drift.presentation !== undefined &&
-			drift.presentation.key > key &&
-			reach !== undefined &&
-			drift.presentation.at - reach >= drift.budget
-		);
+		return reach !== undefined && drift.presentation.at - reach >= drift.budget;
 	}
 
 	// The cached group starting at `key`, failed or not.
@@ -3489,13 +3481,11 @@ export class Subscriber {
 		return group?.start === key ? group : undefined;
 	}
 
-	// A start or a group's end, in milliseconds of presentation time: a scale-less track's bare
-	// units count as milliseconds. Mirrors the Rust `TrackState::presented` and `age`.
+	// A start or a group's end, in milliseconds of presentation time, or undefined on a
+	// scale-less track, whose bare numbers are no time. Mirrors the Rust `TrackState::presented`.
 	#presented(value: bigint): number | undefined {
-		const info = this.#state.info.peek();
-		if (info === undefined) return undefined;
-		const scale = info.timescale;
-		return scale == null ? Number(value) : (Number(value) * 1000) / scale;
+		const scale = this.#state.info.peek()?.timescale;
+		return scale == null ? undefined : (Number(value) * 1000) / scale;
 	}
 
 	// The furthest presentation time, in milliseconds, group `key` could still reach: its own
@@ -3506,14 +3496,13 @@ export class Subscriber {
 		if (own !== undefined) return this.#presented(own);
 		const successor = this.#successor(key, end, whole);
 		if (!successor) return undefined;
-		const info = this.#state.info.peek();
-		if (info !== undefined && info.timescale == null) return this.#presented(successor.start);
 		return hooks.groupTimestamp(successor)?.asMillis();
 	}
 
 	// When group `key`, finished whole, stops presenting on the wall clock: its arrival plus
 	// its span, which stands in for a successor arriving, so the last group of a paused or
-	// finished track ages out without one. Mirrors the Rust `TrackState::ended_at`.
+	// finished track ages out without one. A scale-less group's span is no time, so it waits
+	// for a successor. Mirrors the Rust `TrackState::ended_at`.
 	#endedAt(key: bigint): Instant | undefined {
 		const group = this.#held(key);
 		const end = group?.end;
