@@ -6,6 +6,7 @@ import {
 	type Containing,
 	clamped,
 	EMPTY,
+	type Found,
 	type Holdings,
 	isEmpty,
 	isWire,
@@ -300,10 +301,10 @@ describe("Window", () => {
 		const held = new Keys([4000n, 9000n]);
 		held.looks = true;
 		let window = new Window([range(time(8500n))], 9000n, held);
-		expect(window.lookups()).toEqual([{ time: 8500n, below: 9000n }]);
+		expect(window.lookups()).toEqual([{ time: 8500n, floor: 4001n }]);
 		expect([window.settled, window.contains(9000n), window.resolved()]).toEqual([false, false, [undefined]]);
 		held.held.add(8000n);
-		expect(window.found(8500n, 8000n, held)).toBe(true);
+		expect(window.found(8500n, { kind: "group", group: 8000n }, held)).toBe(true);
 		expect(window.resolved()).toEqual([{ start: 8000n, end: undefined, floored: true }]);
 		expect(window.settled).toBe(true);
 
@@ -313,14 +314,66 @@ describe("Window", () => {
 		expect(new Window([range(time(8000n))], 9000n, held).lookups()).toHaveLength(0);
 
 		window = new Window([range(time(500n))], 9000n, held);
-		expect(window.lookups()).toEqual([{ time: 500n, below: 4000n }]);
-		expect(window.found(500n, undefined, held)).toBe(true);
-		expect(window.resolved()).toEqual([{ start: 0n, end: undefined, floored: false }]);
+		expect(window.lookups()).toEqual([{ time: 500n, floor: 0n }]);
+		// A drop from 0 says no group starts at or before it, so it reads from the time on.
+		expect(window.found(500n, { kind: "dropped", floor: 0n }, held)).toBe(true);
+		expect(window.resolved()).toEqual([{ start: 500n, end: undefined, floored: true }]);
 		expect(window.contains(4000n)).toBe(true);
 		expect(window.missable(0n).some((run) => run.start < 500n)).toBe(false);
+		// A group below the time held since is none of the answer's.
+		held.held.add(200n);
+		expect(window.contains(200n)).toBe(false);
+		held.held.delete(200n);
 
 		// A lookup nobody asked for is ignored.
-		expect(window.found(500n, undefined, held)).toBe(false);
+		expect(window.found(500n, { kind: "unanswered" }, held)).toBe(false);
+	});
+
+	test("a dropped lookup starts below its floor", () => {
+		const history = (keys: bigint[]) => {
+			const held = new Keys(keys);
+			held.looks = true;
+			return held;
+		};
+		// 4000 evicted while the lookup was out, or 8000 arrived between, as another reader's fill
+		// brings it.
+		for (const held of [[9000n], [4000n, 8000n, 9000n]]) {
+			const window = new Window([range(time(8500n))], 9000n, history([4000n, 9000n]));
+			expect(window.lookups()).toEqual([{ time: 8500n, floor: 4001n }]);
+			expect(window.found(8500n, { kind: "dropped", floor: 4001n }, history(held))).toBe(true);
+			// Answered, not looked up again.
+			expect(window.lookups()).toHaveLength(0);
+			expect(window.resolved()).toEqual([{ start: 4000n, end: undefined, floored: true }]);
+		}
+	});
+
+	test("an eviction during an unanswered lookup looks it up again", () => {
+		const held = new Keys([4000n, 9000n]);
+		held.looks = true;
+		let window = new Window([range(time(8500n))], 9000n, held);
+		expect(window.lookups()).toEqual([{ time: 8500n, floor: 4001n }]);
+		held.held.delete(4000n);
+		expect(window.found(8500n, { kind: "unanswered" }, held)).toBe(true);
+		// Looked up from below, reading nothing meanwhile.
+		expect(window.lookups()).toEqual([{ time: 8500n, floor: 0n }]);
+		expect(window.contains(9000n)).toBe(false);
+		held.held.add(4000n);
+		expect(window.found(8500n, { kind: "group", group: 4000n }, held)).toBe(true);
+		expect(window.resolved()[0]?.start).toBe(4000n);
+
+		// Even with the cache emptied.
+		window = new Window([range(time(8500n))], 9000n, held);
+		const all = held.held;
+		held.held = new Set();
+		expect(window.found(8500n, { kind: "unanswered" }, held)).toBe(true);
+		expect(window.lookups()).toEqual([{ time: 8500n, floor: 0n }]);
+		held.held = all;
+
+		// With nothing evicted, it starts where the groups held say.
+		window = new Window([range(time(8500n))], 9000n, held);
+		expect(window.found(8500n, { kind: "unanswered" }, held)).toBe(true);
+		expect(window.lookups()).toHaveLength(0);
+		expect(window.resolved()[0]?.start).toBe(4000n);
 	});
 
 	test("a skipped gap needs no lookup", () => {
@@ -347,8 +400,8 @@ describe("Window", () => {
 		const held = new Keys([4000n, 9000n]);
 		held.looks = true;
 		const window = new Window([range(time(500n), time(3000n))], 9000n, held);
-		expect(window.lookups()).toEqual([{ time: 500n, below: 4000n }]);
-		expect(window.found(500n, undefined, held)).toBe(true);
+		expect(window.lookups()).toEqual([{ time: 500n, floor: 0n }]);
+		expect(window.found(500n, { kind: "unanswered" }, held)).toBe(true);
 		expect(window.settled).toBe(true);
 		expect(window.resolved()).toEqual([{ start: 0n, end: 3001n, floored: false }]);
 	});
@@ -577,7 +630,12 @@ test("window: settling by steps matches trying every start and rebuilding from t
 			} else if (op === 2) {
 				const lookup = fast.lookups()[0];
 				if (lookup === undefined) continue;
-				const answer = value % 2n === 0n ? value : undefined;
+				const answer: Found =
+					value % 3n === 0n
+						? { kind: "group", group: value }
+						: value % 3n === 1n
+							? { kind: "dropped", floor: lookup.floor }
+							: { kind: "unanswered" };
 				fast.found(lookup.time, answer, keys);
 				full.found(lookup.time, answer, blind(keys));
 			} else if (op === 3) keys.done = true;

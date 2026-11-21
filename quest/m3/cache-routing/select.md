@@ -20,7 +20,7 @@ is made, and otherwise in the first wip version after the cut.
 ## Plan
 
 Rewritten 2026-11-15 (maintainer, /quest-plan on
-[cache-aware multicast](/quest/m2/multicast/README.md)): the rule this was
+[cache-aware multicast](https://github.com/moq-dev/moq/blob/41cc107579/quest/m2/multicast/README.md)): the rule this was
 to build, item 14 of the [epic](/quest/m3/cache-routing/README.md)'s earlier
 Plan, is replaced.
 
@@ -115,7 +115,7 @@ What it shows:
   edge's uplinks equally gets the same tree with no wire.
 - Relays with an uplink each and links between them, the drone meshes, save
   41% to 72%, the whole of what item 9 of the
-  [epic](/quest/m2/multicast/README.md) asked for.
+  [epic](https://github.com/moq-dev/moq/blob/41cc107579/quest/m2/multicast/README.md) asked for.
 - It costs 2.6 to 6.8 times the control messages.
 
 On a deployment's graph, measured by path and not committed: under its

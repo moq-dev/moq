@@ -266,9 +266,13 @@ mod tests {
 	const HEIGHT: u32 = 240;
 
 	fn config() -> Config {
+		config_at(Size::new(WIDTH, HEIGHT))
+	}
+
+	fn config_at(size: Size) -> Config {
 		Config {
 			kind: EncodeKind::Named(NAME.into()),
-			..Config::new(WIDTH, HEIGHT, FrameRate::new(30, 1).unwrap())
+			..Config::new(size.width, size.height, FrameRate::new(30, 1).unwrap())
 		}
 	}
 
@@ -582,7 +586,7 @@ mod tests {
 	/// (Mesa 26.3), whose H.264 spent 1.9 Mbit/s on the calm scene.
 	#[test]
 	fn quality_under_the_bitrate() {
-		use super::super::test_util::spend;
+		use super::super::test_util::{Scene, spend};
 
 		for codec in [Codec::H264, Codec::H265] {
 			let at = |bps: u64| Config {
@@ -591,7 +595,7 @@ mod tests {
 				join: std::time::Duration::from_secs(10),
 				..config()
 			};
-			let Some(calm) = spend(&at(8_000_000), false, None) else {
+			let Some(calm) = spend(&at(8_000_000), Scene::Calm, None) else {
 				eprintln!("skipping: no VA-API {codec:?} encoder");
 				continue;
 			};
@@ -600,17 +604,47 @@ mod tests {
 				"{codec:?}: a calm scene filled the bitrate: {calm:?}"
 			);
 
-			let busy = spend(&at(2_000_000), true, None).unwrap();
+			let busy = spend(&at(2_000_000), Scene::Busy, None).unwrap();
 			assert!(busy.mean > 1_600_000, "{codec:?}: a busy scene fell short: {busy:?}");
 			assert!(
 				busy.peak <= 2_600_000,
 				"{codec:?}: a busy scene broke the bitrate: {busy:?}"
 			);
 
-			let moved = spend(&at(2_000_000), true, Some(1_000_000)).unwrap();
+			let moved = spend(&at(2_000_000), Scene::Busy, Some(1_000_000)).unwrap();
 			assert!(
 				(800_000..=1_300_000).contains(&moved.peak),
 				"{codec:?}: the bitrate did not follow set_bitrate: {moved:?}"
+			);
+		}
+	}
+
+	/// A still picture that turns to noise is held to the bitrate about as well
+	/// as noise throughout: the first busy frames spend only what the still one
+	/// left in the HRD buffer, so the worst second runs [`HRD_FRAMES`] frames
+	/// over. radeonsi peaked at 2.18 to 2.24 Mbit/s here on an RX 9070 (Mesa
+	/// 26.0.8 and 26.3) and a Radeon 610M (Mesa 26.3); FFmpeg's
+	/// `{h264,hevc}_vaapi` with a second of buffer, as OBS sets it, peaked at
+	/// 10.6 and 12.7 on the same switch. Wider than the test above, since VCN 5
+	/// encodes no H.265 under 384 pixels wide.
+	#[test]
+	fn a_still_scene_turning_busy_holds_the_bitrate() {
+		use super::super::test_util::{Scene, spend};
+
+		for codec in [Codec::H264, Codec::H265] {
+			let config = Config {
+				bitrate: Some(moq_net::bandwidth::Rate::from_bps(2_000_000)),
+				codec,
+				join: std::time::Duration::from_secs(10),
+				..config_at(Size::new(640, 360))
+			};
+			let Some(waking) = spend(&config, Scene::Waking, None) else {
+				eprintln!("skipping: no VA-API {codec:?} encoder");
+				continue;
+			};
+			assert!(
+				waking.peak <= 2_600_000,
+				"{codec:?}: a scene turning busy broke the bitrate: {waking:?}"
 			);
 		}
 	}

@@ -5257,7 +5257,7 @@ mod test {
 			let dynamic = b.requests();
 			routes.serve(b.consume());
 			assert!(reading.read_frame().now_or_never().is_none(), "fails={fails}");
-			let _pending = dynamic.requested_groups().now_or_never().unwrap().unwrap();
+			let _pending = dynamic.requested_fill().now_or_never().unwrap().unwrap();
 
 			if abort {
 				b.abort(Error::Stream(StreamError::App(5))).unwrap();
@@ -5808,7 +5808,7 @@ mod test {
 		let mut fetching = logical.consume().fetch_group(0, None);
 		assert!((&mut fetching).now_or_never().is_none());
 		let fill = dynamic
-			.requested_groups()
+			.requested_fill()
 			.now_or_never()
 			.expect("the fetch reached the staged copy")
 			.unwrap();
@@ -5842,7 +5842,7 @@ mod test {
 		let staged = routes.stage(refused.consume());
 		let mut fetching = logical.consume().fetch_group(0, None);
 		assert!((&mut fetching).now_or_never().is_none());
-		let fill = refused_dynamic.requested_groups().now_or_never().unwrap().unwrap();
+		let fill = refused_dynamic.requested_fill().now_or_never().unwrap().unwrap();
 		let wrong = refused.accept(crate::track::Info::timed());
 		let mut group = fill
 			.accept(0, crate::track::Info::timed())
@@ -5857,7 +5857,7 @@ mod test {
 		let staged = routes.stage(request.consume());
 		assert!((&mut fetching).now_or_never().is_none());
 		let fill = dynamic
-			.requested_groups()
+			.requested_fill()
 			.now_or_never()
 			.expect("asked again of the next route")
 			.unwrap();
@@ -5886,7 +5886,7 @@ mod test {
 		let mut fetching = logical.consume().fetch_group(0, None);
 		assert!((&mut fetching).now_or_never().is_none());
 		assert!(
-			dynamic.requested_groups().now_or_never().is_none(),
+			dynamic.requested_fill().now_or_never().is_none(),
 			"the withdrawn copy is not asked"
 		);
 
@@ -5908,7 +5908,7 @@ mod test {
 			let mut fetching = logical.consume().fetch_group(0, None);
 			assert!((&mut fetching).now_or_never().is_none());
 			assert!(
-				dynamic.requested_groups().now_or_never().is_some(),
+				dynamic.requested_fill().now_or_never().is_some(),
 				"splice={splice}: the newer stage is asked"
 			);
 		}
@@ -5942,7 +5942,7 @@ mod test {
 			let mut fetching = logical.consume().fetch_group(0, None);
 			let waiter = kio::Waiter::noop();
 			assert!(kio::Task::poll(&mut *fetching, &waiter).is_pending());
-			let fill = dynamic.requested_groups().now_or_never().unwrap().unwrap();
+			let fill = dynamic.requested_fill().now_or_never().unwrap().unwrap();
 			if refused {
 				fill.refuse_groups(0..1, Error::Unauthorized);
 				assert!(
@@ -5971,7 +5971,7 @@ mod test {
 		let _staged = routes.stage(request.consume());
 		let mut fetching = logical.consume().fetch_group(0, None);
 		assert!((&mut fetching).now_or_never().is_none());
-		let fill = dynamic.requested_groups().now_or_never().unwrap().unwrap();
+		let fill = dynamic.requested_fill().now_or_never().unwrap().unwrap();
 		let _staged_copy = request.accept(crate::track::Info::timed());
 		let mut group = fill
 			.accept(0, crate::track::Info::timed())
@@ -5990,7 +5990,7 @@ mod test {
 			"the stage's answer is not handed out"
 		);
 		let fill = b_dynamic
-			.requested_groups()
+			.requested_fill()
 			.now_or_never()
 			.expect("asked of the serving copy")
 			.unwrap();
@@ -6016,7 +6016,7 @@ mod test {
 		let logical = logical(&routes);
 		let mut fetching = logical.consume().fetch_group(0, None);
 		assert!((&mut fetching).now_or_never().is_none());
-		let fill = dynamic.requested_groups().now_or_never().unwrap().unwrap();
+		let fill = dynamic.requested_fill().now_or_never().unwrap().unwrap();
 		fill.refuse_groups(0..1, Error::Dropped);
 		assert!((&mut fetching).now_or_never().is_none(), "the next route is asked");
 
@@ -9917,15 +9917,12 @@ mod test {
 			let mut group = recv(&mut sub);
 			assert_eq!(read(&mut group), Some(b"held".to_vec()));
 
-			// A moq-transport route's copy, whose timestamps are never checked for a rewind.
+			// A lite-05/06 route's copy, whose timestamps are never checked for a rewind.
 			let b = track::Producer::new(
 				Arc::new(broadcast::Info::default()),
 				"video",
 				crate::track::Info {
-					properties: Some(Arc::new(crate::model::object::TrackProperties {
-						version: crate::ietf::Version::Draft22,
-						values: Vec::new(),
-					})),
+					unchecked: true,
 					..crate::track::Info::timed()
 				},
 			);
