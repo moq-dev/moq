@@ -8,7 +8,7 @@ A pending broadcast should never block a rendition that can play now, and the pr
 
 ## Plan
 
-- Recommended: while a candidate's broadcast is still pending, open the next candidate that resolves now. Once the pending broadcast lands, pick again and swap make-before-break, the same way a viewport turn does (`Playback::switch` in `rs/moq-cli/src/play/playback.rs`).
+- Recommended: while a candidate's broadcast is still pending, open the next candidate that resolves now. Once the pending broadcast lands, pick again and swap make-before-break, the same way a viewport turn does (`Half::turn` in `rs/moq-cli/src/play/playback.rs`), as a new `Switch` variant.
 - Rejected: a timeout on each resolve. It needs a timer that AGENTS.md asks about first, and it still blanks the window for that long.
 - Check whether `@moq/watch` (`js/watch/src/video/source.ts`) waits the same way, and fix both in one PR if it does.
 - Found by CodeRabbit on [#9287](https://github.com/moq-dev/moq/pull/9287).

@@ -1,7 +1,7 @@
 //! Rendition selection: which half of the pipeline still needs a track, and
 //! which catalog snapshot it may pick one from.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use hang::catalog::Reference;
 use moq_mux::catalog;
@@ -52,23 +52,255 @@ pub(super) enum Switch {
 	Move,
 }
 
-/// One half of the pipeline: whether it is playing, and which catalog snapshot
-/// it last picked a rendition from.
-#[derive(Default)]
-struct Half {
-	playing: bool,
-	/// The replacement being picked while the rendition playing plays on.
-	switching: Option<Switch>,
-	/// The snapshot was last read for a turn, which skipped the renditions shaped against the
-	/// window, so the half reads it again in full once its rendition ends.
-	narrowed: bool,
-	/// The track this half is playing, whose end is a finish. Cleared once retired.
-	track: Option<Track>,
-	/// The snapshot this half last read. A half reads a snapshot once, so a
-	/// track that ends with nothing newer on offer stays stopped rather than
-	/// resubscribing to the rendition it just finished, and doing it again every
-	/// time that resubscription ends.
-	read: Option<u64>,
+/// Which catalog snapshot a half last read. A half reads a snapshot once, so a track that ends
+/// with nothing newer on offer stays stopped rather than resubscribing to the rendition it just
+/// finished, and doing it again every time that resubscription ends.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Read {
+	#[default]
+	Unread,
+	/// Every enabled rendition in the snapshot was considered.
+	Full(u64),
+	/// The snapshot was read for a turn, which skipped the renditions shaped against the window,
+	/// so the half reads it again in full once the rendition playing ends.
+	Narrowed(u64),
+}
+
+impl Read {
+	fn covers(self, snapshot: u64) -> bool {
+		matches!(self, Self::Full(read) | Self::Narrowed(read) if read == snapshot)
+	}
+
+	/// What is left read once the rendition playing ends: the renditions a turn skipped are no
+	/// worse than nothing.
+	fn ended(self) -> Self {
+		match self {
+			Self::Narrowed(_) => Self::Unread,
+			read => read,
+		}
+	}
+}
+
+/// A rendition a half plays: the task playing it, the track it plays from, and `data`, what
+/// the player holds for it, such as the handle that stops it when dropped.
+pub(super) struct Running<D> {
+	pub(super) task: u64,
+	pub(super) track: Track,
+	pub(super) data: D,
+}
+
+/// Where a half is in playing a rendition, each phase holding what only it has. `O` is a
+/// rendition being opened, which replaces the one playing once it is ready.
+enum Phase<D, O> {
+	/// Nothing plays.
+	Idle { opening: Option<O> },
+	/// A rendition plays, and its end is a finish.
+	Playing { running: Running<D> },
+	/// A rendition plays while a replacement is picked, and stops once one is ready. Its end is
+	/// a finish only on a turn: a move left its track.
+	Switching {
+		running: Running<D>,
+		switch: Switch,
+		opening: Option<O>,
+	},
+	/// The catalog moved the rendition, which plays out what it holds and ends; that end is no
+	/// finish, so a move back can play the track again.
+	Retiring { running: Running<D> },
+	/// The rendition was stopped, as when the catalog disabled it, and its task is ending.
+	Stopping { task: u64, opening: Option<O> },
+}
+
+/// One half of the player: its phase, and the snapshot it last read, which every phase keeps.
+pub(super) struct Half<D, O> {
+	phase: Phase<D, O>,
+	read: Read,
+}
+
+impl<D, O> Default for Half<D, O> {
+	fn default() -> Self {
+		Self {
+			phase: Phase::Idle { opening: None },
+			read: Read::Unread,
+		}
+	}
+}
+
+impl<D, O> Half<D, O> {
+	fn take(&mut self) -> Phase<D, O> {
+		std::mem::replace(&mut self.phase, Phase::Idle { opening: None })
+	}
+
+	/// Whether a task is driving this half.
+	pub(super) fn playing(&self) -> bool {
+		!matches!(self.phase, Phase::Idle { .. })
+	}
+
+	/// Whether a task is driving this half or a rendition is opening for it.
+	fn busy(&self) -> bool {
+		!matches!(self.phase, Phase::Idle { opening: None })
+	}
+
+	/// The rendition playing, unless it was stopped.
+	pub(super) fn running(&self) -> Option<&Running<D>> {
+		match &self.phase {
+			Phase::Playing { running } | Phase::Switching { running, .. } | Phase::Retiring { running } => {
+				Some(running)
+			}
+			Phase::Idle { .. } | Phase::Stopping { .. } => None,
+		}
+	}
+
+	/// Whether `task` drives this half, rather than being one a replacement already stopped.
+	pub(super) fn is_current(&self, task: u64) -> bool {
+		match &self.phase {
+			Phase::Stopping { task: stopping, .. } => *stopping == task,
+			_ => self.running().is_some_and(|running| running.task == task),
+		}
+	}
+
+	/// The replacement being picked, if any.
+	pub(super) fn switching(&self) -> Option<Switch> {
+		match &self.phase {
+			Phase::Switching { switch, .. } => Some(*switch),
+			_ => None,
+		}
+	}
+
+	/// The rendition being opened, if any.
+	pub(super) fn opening(&self) -> Option<&O> {
+		match &self.phase {
+			Phase::Idle { opening } | Phase::Switching { opening, .. } | Phase::Stopping { opening, .. } => {
+				opening.as_ref()
+			}
+			Phase::Playing { .. } | Phase::Retiring { .. } => None,
+		}
+	}
+
+	pub(super) fn opening_mut(&mut self) -> Option<&mut O> {
+		match &mut self.phase {
+			Phase::Idle { opening } | Phase::Switching { opening, .. } | Phase::Stopping { opening, .. } => {
+				opening.as_mut()
+			}
+			Phase::Playing { .. } | Phase::Retiring { .. } => None,
+		}
+	}
+
+	/// Open `opening`, replacing any still opening, which a newer pick overrides. Only a half
+	/// that wants a rendition picks one.
+	pub(super) fn open(&mut self, opening: O) {
+		match &mut self.phase {
+			Phase::Idle { opening: slot } | Phase::Switching { opening: slot, .. } => *slot = Some(opening),
+			Phase::Playing { .. } | Phase::Retiring { .. } | Phase::Stopping { .. } => {
+				debug_assert!(false, "opened a rendition for a half that wanted none")
+			}
+		}
+	}
+
+	/// Give up the rendition being picked, which found nothing to open or is no longer wanted.
+	/// A turn's switch ends with it, keeping what plays; a move's stays wanted, so the next
+	/// snapshot tries again.
+	pub(super) fn give_up(&mut self) {
+		self.phase = match self.take() {
+			Phase::Idle { .. } => Phase::Idle { opening: None },
+			Phase::Switching {
+				running,
+				switch: Switch::Turn,
+				..
+			} => Phase::Playing { running },
+			Phase::Switching {
+				running,
+				switch: Switch::Move,
+				..
+			} => Phase::Switching {
+				running,
+				switch: Switch::Move,
+				opening: None,
+			},
+			Phase::Stopping { task, .. } => Phase::Stopping { task, opening: None },
+			phase => phase,
+		};
+	}
+
+	/// The viewport turned away from the rendition playing, so pick a replacement shaped like it
+	/// from the snapshot on hand. A move stays a move.
+	pub(super) fn turn(&mut self) {
+		self.read = Read::Unread;
+		self.phase = match self.take() {
+			Phase::Playing { running } => Phase::Switching {
+				running,
+				switch: Switch::Turn,
+				opening: None,
+			},
+			phase => phase,
+		};
+	}
+
+	/// The catalog moved the rendition playing to another track, so pick any replacement from
+	/// the snapshot on hand while it plays on.
+	pub(super) fn move_off(&mut self) {
+		self.read = Read::Unread;
+		self.phase = match self.take() {
+			Phase::Playing { running } => Phase::Switching {
+				running,
+				switch: Switch::Move,
+				opening: None,
+			},
+			Phase::Switching { running, opening, .. } => Phase::Switching {
+				running,
+				switch: Switch::Move,
+				opening,
+			},
+			phase => phase,
+		};
+	}
+
+	/// The catalog moved the rendition back onto the track it plays, so nothing replaces it and
+	/// its end is a finish again.
+	pub(super) fn stay(&mut self) {
+		self.phase = match self.take() {
+			Phase::Switching {
+				running,
+				switch: Switch::Move,
+				..
+			} => Phase::Playing { running },
+			phase => phase,
+		};
+	}
+
+	/// Pick again from the snapshot on hand, as when the viewport changed under a pick.
+	pub(super) fn repick(&mut self) {
+		self.read = Read::Unread;
+	}
+
+	/// The catalog moved the rendition, which now plays out what it holds and ends. Returns
+	/// whether it was playing, and so is told to retire now.
+	pub(super) fn retire(&mut self) -> bool {
+		let mut retired = false;
+		self.phase = match self.take() {
+			Phase::Playing { running } => {
+				retired = true;
+				Phase::Retiring { running }
+			}
+			phase => phase,
+		};
+		retired
+	}
+
+	/// Stop the rendition playing, as when the catalog disabled it, dropping what the player
+	/// holds for it. A rendition still opening carries on.
+	pub(super) fn stop(&mut self) {
+		self.phase = match self.take() {
+			Phase::Playing { running } | Phase::Retiring { running } => Phase::Stopping {
+				task: running.task,
+				opening: None,
+			},
+			Phase::Switching { running, opening, .. } => Phase::Stopping {
+				task: running.task,
+				opening,
+			},
+			phase => phase,
+		};
+	}
 }
 
 /// What is playing, and whether anything else still can.
@@ -82,8 +314,6 @@ struct Half {
 /// ends. Playback stops only once the catalog itself is over.
 #[derive(Default)]
 pub(super) struct Playback {
-	video: Half,
-	audio: Half,
 	/// The newest snapshot, held until every half has read it.
 	latest: Option<catalog::hang::Catalog>,
 	/// How many snapshots have arrived. A half records this rather than the
@@ -101,111 +331,16 @@ pub(super) struct Playback {
 	/// one that finished has nothing more to play: selecting it again from a
 	/// newer snapshot would only replay its newest group.
 	finished: HashSet<Track>,
+	/// The tracks of tasks a replacement stopped, by task, whose own finish still counts if
+	/// they got there first. A track the catalog moved off is not among them.
+	replaced: HashMap<u64, Track>,
 }
 
 impl Playback {
-	fn half(&self, kind: Kind) -> &Half {
-		match kind {
-			Kind::Video => &self.video,
-			Kind::Audio => &self.audio,
-		}
-	}
-
-	fn half_mut(&mut self, kind: Kind) -> &mut Half {
-		match kind {
-			Kind::Video => &mut self.video,
-			Kind::Audio => &mut self.audio,
-		}
-	}
-
 	/// Hold onto a snapshot, which may not be read until a track ends.
 	pub(super) fn received(&mut self, snapshot: catalog::hang::Catalog) {
 		self.snapshots += 1;
 		self.latest = Some(snapshot);
-	}
-
-	pub(super) fn started(&mut self, kind: Kind, track: Track) {
-		self.played = true;
-		let half = self.half_mut(kind);
-		half.playing = true;
-		half.switching = None;
-		// A turn's replacement started from a narrowed read, which stays narrowed: once the
-		// replacement ends, the renditions the turn skipped are read again.
-		half.track = Some(track);
-	}
-
-	/// The track this half plays, whose end is a finish: none once the catalog moved it off.
-	pub(super) fn track(&self, kind: Kind) -> Option<&Track> {
-		self.half(kind).track.as_ref()
-	}
-
-	/// Whether a task is driving this half.
-	pub(super) fn playing(&self, kind: Kind) -> bool {
-		self.half(kind).playing
-	}
-
-	/// Record a task ending, re-arming selection for that half. `finished` is
-	/// whether its track ended on its own, rather than being stopped.
-	pub(super) fn ended(&mut self, kind: Kind, finished: bool) {
-		let half = self.half_mut(kind);
-		half.playing = false;
-		half.switching = None;
-		// The renditions a turn skipped are no worse than nothing.
-		if std::mem::take(&mut half.narrowed) {
-			half.read = None;
-		}
-		if let Some(track) = half.track.take()
-			&& finished
-		{
-			self.finished.insert(track);
-		}
-	}
-
-	/// Record that `track` ended on its own after its replacement already took its half, so
-	/// the half's own state is left alone.
-	pub(super) fn finish(&mut self, track: Track) {
-		self.finished.insert(track);
-	}
-
-	/// The catalog moved this half's rendition off the track it plays, which it now
-	/// retires: that track ending is no finish, so a move back can play it again.
-	pub(super) fn retire(&mut self, kind: Kind) {
-		self.half_mut(kind).track = None;
-	}
-
-	/// Pick a replacement from the snapshot on hand while this half plays on, as when the
-	/// viewport turned away from its rendition or the catalog moved it. A move stays a move.
-	pub(super) fn switch(&mut self, kind: Kind, switch: Switch) {
-		let half = self.half_mut(kind);
-		if half.switching != Some(Switch::Move) {
-			half.switching = Some(switch);
-		}
-		half.read = None;
-	}
-
-	/// The catalog moved this half's rendition back onto `track`, which it still plays, so
-	/// nothing replaces it and its end is a finish again.
-	pub(super) fn stay(&mut self, kind: Kind, track: Track) {
-		let half = self.half_mut(kind);
-		half.switching = None;
-		half.track = Some(track);
-	}
-
-	/// The replacement being picked, if any.
-	pub(super) fn switching(&self, kind: Kind) -> Option<Switch> {
-		self.half(kind).switching
-	}
-
-	/// Pick again from the snapshot on hand, as when the viewport changed under a pick.
-	pub(super) fn repick(&mut self, kind: Kind) {
-		self.half_mut(kind).read = None;
-	}
-
-	/// Give up a turn's replacement, which keeps what plays. A move's stays wanted, so the next
-	/// snapshot tries again.
-	pub(super) fn settle(&mut self, kind: Kind) {
-		let half = self.half_mut(kind);
-		half.switching.take_if(|switch| *switch == Switch::Turn);
 	}
 
 	/// The newest snapshot, whether or not every half has read it.
@@ -218,26 +353,83 @@ impl Playback {
 		self.finished.contains(track)
 	}
 
-	/// Whether this half needs a rendition, or a replacement for the one it plays, and hasn't
+	/// Whether `half` needs a rendition, or a replacement for the one it plays, and hasn't
 	/// already looked for one in the snapshot on hand.
-	pub(super) fn wants(&self, kind: Kind) -> bool {
-		let half = self.half(kind);
-		(!half.playing || half.switching.is_some()) && half.read != Some(self.snapshots)
+	pub(super) fn wants<D, O>(&self, half: &Half<D, O>) -> bool {
+		matches!(half.phase, Phase::Idle { .. } | Phase::Switching { .. }) && !half.read.covers(self.snapshots)
 	}
 
-	/// Record that this half read the snapshot on hand, whether or not it found
-	/// anything playable in it. `narrowed` if a turn skipped some of it.
-	pub(super) fn read(&mut self, kind: Kind, narrowed: bool) {
-		let snapshots = self.snapshots;
-		let half = self.half_mut(kind);
-		half.read = Some(snapshots);
-		half.narrowed = narrowed;
+	/// Record that `half` read the snapshot on hand, whether or not it found anything playable
+	/// in it. `narrowed` if a turn skipped some of it.
+	pub(super) fn read<D, O>(&self, half: &mut Half<D, O>, narrowed: bool) {
+		half.read = match narrowed {
+			true => Read::Narrowed(self.snapshots),
+			false => Read::Full(self.snapshots),
+		};
+	}
+
+	/// `running` started playing for `half`, stopping the rendition it replaces.
+	pub(super) fn started<D, O>(&mut self, half: &mut Half<D, O>, running: Running<D>) {
+		self.played = true;
+		let replaced = match half.take() {
+			Phase::Playing { running } => Some(running),
+			Phase::Switching {
+				running,
+				switch: Switch::Turn,
+				..
+			} => Some(running),
+			// A move left the track, and a stopped task's end is no finish.
+			Phase::Switching { .. } | Phase::Retiring { .. } | Phase::Idle { .. } | Phase::Stopping { .. } => None,
+		};
+		// Dropping the rest of what it held stops it.
+		if let Some(replaced) = replaced {
+			self.replaced.insert(replaced.task, replaced.track);
+		}
+		// A turn's replacement started from a narrowed read, which stays narrowed: once the
+		// replacement ends, the renditions the turn skipped are read again.
+		half.phase = Phase::Playing { running };
+	}
+
+	/// Record `task` ending, `finished` if its track ended on its own rather than being stopped.
+	/// The half it drives picks again; one a replacement already stopped changes nothing but
+	/// whether its own track finished first.
+	pub(super) fn ended<D, O>(&mut self, half: &mut Half<D, O>, task: u64, finished: bool) {
+		if let Some(track) = self.replaced.remove(&task)
+			&& finished
+		{
+			self.finished.insert(track);
+		}
+		if !half.is_current(task) {
+			return;
+		}
+		let (finishes, opening) = match half.take() {
+			Phase::Playing { running } => (Some(running.track), None),
+			Phase::Switching {
+				running,
+				switch: Switch::Turn,
+				opening,
+			} => (Some(running.track), opening),
+			Phase::Switching { opening, .. } | Phase::Stopping { opening, .. } => (None, opening),
+			Phase::Retiring { .. } | Phase::Idle { .. } => (None, None),
+		};
+		if let Some(track) = finishes
+			&& finished
+		{
+			self.finished.insert(track);
+		}
+		// A rendition still opening plays once ready, with nothing left to replace.
+		half.phase = Phase::Idle { opening };
+		half.read = half.read.ended();
 	}
 
 	/// The snapshot to pick renditions from, if either half still needs one.
-	pub(super) fn pending(&self) -> Option<&catalog::hang::Catalog> {
+	pub(super) fn pending<V, VO, A, AO>(
+		&self,
+		video: &Half<V, VO>,
+		audio: &Half<A, AO>,
+	) -> Option<&catalog::hang::Catalog> {
 		let snapshot = self.latest.as_ref()?;
-		(self.wants(Kind::Video) || self.wants(Kind::Audio)).then_some(snapshot)
+		(self.wants(video) || self.wants(audio)).then_some(snapshot)
 	}
 
 	/// Whether the catalog is still worth reading.
@@ -249,12 +441,12 @@ impl Playback {
 		!self.catalog_ended
 	}
 
-	/// True once nothing is playing and nothing more can start.
+	/// True once nothing is playing or opening and nothing more can start.
 	///
 	/// A snapshot no half has read yet still can: the last thing a catalog says
 	/// before it ends may be the rendition that replaces the one just retired.
-	pub(super) fn done(&self) -> bool {
-		self.catalog_ended && !self.video.playing && !self.audio.playing && self.pending().is_none()
+	pub(super) fn done<V, VO, A, AO>(&self, video: &Half<V, VO>, audio: &Half<A, AO>) -> bool {
+		self.catalog_ended && !video.busy() && !audio.busy() && self.pending(video, audio).is_none()
 	}
 }
 
@@ -273,6 +465,9 @@ pub(super) fn joined<T>(result: Result<T, tokio::task::JoinError>) -> anyhow::Re
 mod tests {
 	use super::*;
 
+	/// A half whose renditions hold nothing, opening a named rendition.
+	type TestHalf = Half<(), &'static str>;
+
 	fn track(name: &str) -> Track {
 		Track {
 			broadcast: None,
@@ -280,17 +475,37 @@ mod tests {
 		}
 	}
 
+	fn running(task: u64, name: &str) -> Running<()> {
+		Running {
+			task,
+			track: track(name),
+			data: (),
+		}
+	}
+
+	/// Both halves, with a snapshot on hand that both have read and `video` playing as task 1.
+	fn playing(video: &str) -> (Playback, TestHalf, TestHalf) {
+		let mut playback = Playback::default();
+		let (mut video_half, mut audio) = (TestHalf::default(), TestHalf::default());
+		playback.received(Default::default());
+		playback.read(&mut video_half, false);
+		playback.started(&mut video_half, running(1, video));
+		playback.read(&mut audio, false);
+		(playback, video_half, audio)
+	}
+
 	/// Only a track that ended on its own is finished: a disabled rendition was
 	/// stopped and may be enabled again.
 	#[test]
 	fn only_an_ended_track_is_finished() {
 		let mut playback = Playback::default();
-		playback.started(Kind::Video, track("video"));
-		playback.ended(Kind::Video, false);
+		let mut video = TestHalf::default();
+		playback.started(&mut video, running(1, "video"));
+		playback.ended(&mut video, 1, false);
 		assert!(!playback.finished(&track("video")));
 
-		playback.started(Kind::Video, track("video"));
-		playback.ended(Kind::Video, true);
+		playback.started(&mut video, running(2, "video"));
+		playback.ended(&mut video, 2, true);
 		assert!(playback.finished(&track("video")));
 		assert!(!playback.finished(&track("audio")));
 	}
@@ -303,29 +518,31 @@ mod tests {
 	/// the half whose track ends afterwards reads it then.
 	#[test]
 	fn a_finished_track_re_arms_its_half() {
-		let mut playback = Playback::default();
-		playback.received(Default::default());
-		playback.started(Kind::Video, track("video"));
-		playback.read(Kind::Video, false);
-		playback.started(Kind::Audio, track("audio"));
-		playback.read(Kind::Audio, false);
+		let (mut playback, mut video, mut audio) = playing("video");
+		playback.started(&mut audio, running(2, "audio"));
 
 		// The snapshot naming the replacement, while the retired track plays on.
 		playback.received(Default::default());
-		assert!(playback.pending().is_none(), "nothing to start while both halves play");
+		assert!(
+			playback.pending(&video, &audio).is_none(),
+			"nothing to start while both halves play"
+		);
 
-		playback.ended(Kind::Video, true);
-		assert!(!playback.done(), "playback ended on a retired rendition");
-		assert!(playback.audio.playing, "audio ended with the video rendition");
-		assert!(playback.pending().is_some(), "the retirement snapshot was dropped");
-		assert!(playback.wants(Kind::Video), "the replacement was never looked for");
-		assert!(!playback.wants(Kind::Audio), "audio is still playing its own rendition");
+		playback.ended(&mut video, 1, true);
+		assert!(!playback.done(&video, &audio), "playback ended on a retired rendition");
+		assert!(audio.playing(), "audio ended with the video rendition");
+		assert!(
+			playback.pending(&video, &audio).is_some(),
+			"the retirement snapshot was dropped"
+		);
+		assert!(playback.wants(&video), "the replacement was never looked for");
+		assert!(!playback.wants(&audio), "audio is still playing its own rendition");
 
 		// The replacement lands and playback carries on.
-		playback.read(Kind::Video, false);
-		playback.started(Kind::Video, track("video"));
-		assert!(playback.pending().is_none());
-		assert!(!playback.done());
+		playback.read(&mut video, false);
+		playback.started(&mut video, running(3, "video"));
+		assert!(playback.pending(&video, &audio).is_none());
+		assert!(!playback.done(&video, &audio));
 	}
 
 	/// A track that ends with nothing newer on offer stays stopped. Reading the
@@ -333,50 +550,48 @@ mod tests {
 	/// that just finished, and do it again the moment that ended too.
 	#[test]
 	fn a_read_snapshot_is_not_read_twice() {
-		let mut playback = Playback::default();
-		playback.received(Default::default());
-		// A video-only catalog: both halves read the snapshot, only one found
-		// something in it.
-		playback.read(Kind::Video, false);
-		playback.started(Kind::Video, track("video"));
-		playback.read(Kind::Audio, false);
+		// A video-only catalog: both halves read the snapshot, only one found something in it.
+		let (mut playback, mut video, audio) = playing("video");
 
-		playback.ended(Kind::Video, true);
-		assert!(playback.pending().is_none(), "the player would resubscribe in a loop");
+		playback.ended(&mut video, 1, true);
+		assert!(
+			playback.pending(&video, &audio).is_none(),
+			"the player would resubscribe in a loop"
+		);
 
 		playback.received(Default::default());
-		assert!(playback.pending().is_some(), "a fresh snapshot must be read");
+		assert!(
+			playback.pending(&video, &audio).is_some(),
+			"a fresh snapshot must be read"
+		);
 	}
 
 	/// A switching half picks a replacement from the snapshot on hand while it plays on, and
 	/// picks once per snapshot: a newer one asks again until the replacement starts.
 	#[test]
 	fn a_switching_half_picks_while_it_plays() {
-		let mut playback = Playback::default();
-		playback.received(Default::default());
-		playback.read(Kind::Video, false);
-		playback.started(Kind::Video, track("wide"));
-		playback.read(Kind::Audio, false);
-		assert!(playback.pending().is_none());
+		let (mut playback, mut video, mut audio) = playing("wide");
+		assert!(playback.pending(&video, &audio).is_none());
 
-		playback.switch(Kind::Video, Switch::Turn);
-		assert!(playback.wants(Kind::Video), "a switch picks from the snapshot on hand");
-		playback.read(Kind::Video, false);
-		assert!(playback.pending().is_none(), "picked once per snapshot");
+		video.turn();
+		assert!(playback.wants(&video), "a switch picks from the snapshot on hand");
+		playback.read(&mut video, false);
+		assert!(playback.pending(&video, &audio).is_none(), "picked once per snapshot");
 		playback.received(Default::default());
-		assert!(playback.wants(Kind::Video), "a newer snapshot picks again");
-		playback.read(Kind::Video, false);
+		assert!(playback.wants(&video), "a newer snapshot picks again");
+		playback.read(&mut video, false);
 
-		playback.started(Kind::Video, track("tall"));
+		playback.started(&mut video, running(2, "tall"));
 		playback.received(Default::default());
-		assert!(!playback.wants(Kind::Video), "the replacement plays");
-		playback.read(Kind::Audio, false);
+		assert!(!playback.wants(&video), "the replacement plays");
+		playback.read(&mut audio, false);
 
 		// Given up, the half keeps playing what it has.
-		playback.switch(Kind::Video, Switch::Turn);
-		playback.settle(Kind::Video);
-		assert!(!playback.wants(Kind::Video));
-		assert!(playback.playing(Kind::Video));
+		video.turn();
+		video.give_up();
+		assert!(!playback.wants(&video));
+		assert!(video.playing());
+		assert_eq!(video.switching(), None);
 	}
 
 	/// A move's replacement stays wanted after an attempt finds nothing, so the next snapshot
@@ -384,30 +599,25 @@ mod tests {
 	/// tried twice. Moving back onto the playing track ends the switch.
 	#[test]
 	fn a_failed_move_tries_again_from_the_next_snapshot() {
-		let mut playback = Playback::default();
-		playback.received(Default::default());
-		playback.read(Kind::Video, false);
-		playback.started(Kind::Video, track("a"));
-		playback.read(Kind::Audio, false);
+		let (mut playback, mut video, _audio) = playing("a");
 
-		playback.retire(Kind::Video);
-		playback.switch(Kind::Video, Switch::Move);
-		playback.read(Kind::Video, false);
-		playback.settle(Kind::Video);
-		assert_eq!(playback.switching(Kind::Video), Some(Switch::Move));
-		assert!(!playback.wants(Kind::Video), "the same snapshot is tried once");
+		video.move_off();
+		playback.read(&mut video, false);
+		video.give_up();
+		assert_eq!(video.switching(), Some(Switch::Move));
+		assert!(!playback.wants(&video), "the same snapshot is tried once");
 
 		// A turn doesn't narrow a move.
-		playback.switch(Kind::Video, Switch::Turn);
-		assert_eq!(playback.switching(Kind::Video), Some(Switch::Move));
-		playback.read(Kind::Video, false);
+		video.turn();
+		assert_eq!(video.switching(), Some(Switch::Move));
+		playback.read(&mut video, false);
 
 		playback.received(Default::default());
-		assert!(playback.wants(Kind::Video), "the move was given up");
+		assert!(playback.wants(&video), "the move was given up");
 
-		playback.stay(Kind::Video, track("a"));
-		assert!(!playback.wants(Kind::Video));
-		playback.ended(Kind::Video, true);
+		video.stay();
+		assert!(!playback.wants(&video));
+		playback.ended(&mut video, 1, true);
 		assert!(
 			playback.finished(&track("a")),
 			"a track moved back onto is finished by its end"
@@ -418,26 +628,23 @@ mod tests {
 	/// replaced ends, the rest are no worse than nothing, so the half reads the snapshot again.
 	#[test]
 	fn a_narrowed_read_is_read_again_once_its_rendition_ends() {
-		let mut playback = Playback::default();
-		playback.received(Default::default());
-		playback.read(Kind::Video, false);
-		playback.started(Kind::Video, track("wide"));
-		playback.read(Kind::Audio, false);
+		let (mut playback, mut video, audio) = playing("wide");
 
-		playback.switch(Kind::Video, Switch::Turn);
-		playback.read(Kind::Video, true);
-		playback.settle(Kind::Video);
-		assert_eq!(playback.switching(Kind::Video), None);
-		assert!(playback.pending().is_none());
+		video.turn();
+		playback.read(&mut video, true);
+		video.give_up();
+		assert_eq!(video.switching(), None);
+		assert!(playback.pending(&video, &audio).is_none());
 
-		playback.ended(Kind::Video, true);
+		playback.ended(&mut video, 1, true);
 		assert!(
-			playback.wants(Kind::Video),
+			playback.wants(&video),
 			"the renditions the turn skipped were never tried"
 		);
-		playback.read(Kind::Video, false);
-		playback.ended(Kind::Video, false);
-		assert!(!playback.wants(Kind::Video), "a full read is not read again");
+		playback.read(&mut video, false);
+		playback.started(&mut video, running(2, "tall"));
+		playback.ended(&mut video, 2, false);
+		assert!(!playback.wants(&video), "a full read is not read again");
 	}
 
 	/// A turn that starts its replacement still skipped the renditions shaped against the
@@ -445,35 +652,132 @@ mod tests {
 	/// can go back to the rendition it turned away from.
 	#[test]
 	fn a_turns_replacement_ending_reads_its_snapshot_again() {
-		let mut playback = Playback::default();
-		playback.received(Default::default());
-		playback.read(Kind::Video, false);
-		playback.started(Kind::Video, track("wide"));
-		playback.read(Kind::Audio, false);
+		let (mut playback, mut video, audio) = playing("wide");
 
-		playback.switch(Kind::Video, Switch::Turn);
-		playback.read(Kind::Video, true);
-		playback.started(Kind::Video, track("tall"));
-		assert!(playback.pending().is_none());
+		video.turn();
+		playback.read(&mut video, true);
+		playback.started(&mut video, running(2, "tall"));
+		assert!(playback.pending(&video, &audio).is_none());
 
-		playback.ended(Kind::Video, true);
+		playback.ended(&mut video, 2, true);
 		assert!(playback.finished(&track("tall")));
 		assert!(!playback.finished(&track("wide")), "the turn stopped it");
-		assert!(
-			playback.wants(Kind::Video),
-			"the rendition the turn left is still playable"
-		);
+		assert!(playback.wants(&video), "the rendition the turn left is still playable");
 	}
 
-	/// A replaced task that finished on its own before its replacement stopped it still
-	/// finished its track, so a later pick skips it.
+	/// A task a replacement stopped no longer drives the half, but if it finished its own track
+	/// before the stop reached it, that track is finished, so a later pick skips it.
 	#[test]
 	fn a_replaced_track_that_finished_is_finished() {
-		let mut playback = Playback::default();
-		playback.started(Kind::Video, track("tall"));
-		playback.finish(track("wide"));
+		let (mut playback, mut video, _audio) = playing("wide");
+		video.turn();
+		playback.started(&mut video, running(2, "tall"));
+		assert!(!video.is_current(1));
+
+		playback.ended(&mut video, 1, true);
 		assert!(playback.finished(&track("wide")));
-		assert!(playback.playing(Kind::Video), "its replacement still plays");
+		assert!(video.playing(), "its replacement still plays");
+		assert!(video.is_current(2));
+	}
+
+	/// A track the catalog moved off is no finish when its task ends, whether a replacement
+	/// stopped it first or not.
+	#[test]
+	fn a_moved_track_is_never_finished() {
+		let (mut playback, mut video, _audio) = playing("a");
+		video.move_off();
+		playback.started(&mut video, running(2, "b"));
+		playback.ended(&mut video, 1, true);
+		assert!(!playback.finished(&track("a")), "replaced after a move");
+
+		video.move_off();
+		playback.ended(&mut video, 2, true);
+		assert!(!playback.finished(&track("b")), "ended mid-move");
+		assert!(!video.playing());
+	}
+
+	/// A retired rendition plays out and ends, and that end is no finish.
+	#[test]
+	fn a_retired_rendition_is_not_finished() {
+		let (mut playback, mut audio, _video) = playing("audio");
+		assert!(audio.retire());
+		assert!(!audio.retire(), "told to retire once");
+		assert!(audio.playing());
+		assert!(!playback.wants(&audio), "a retiring half waits for its end");
+		playback.ended(&mut audio, 1, true);
+		assert!(!playback.finished(&track("audio")));
+		assert!(!audio.playing());
+	}
+
+	/// A stopped rendition still drives its half until its task ends, so nothing is picked and
+	/// playback does not end under it; a rendition opening for it carries on.
+	#[test]
+	fn a_stopped_rendition_drives_its_half_until_it_ends() {
+		let (mut playback, mut video, mut audio) = playing("a");
+		video.move_off();
+		video.open("b");
+		video.stop();
+		assert!(video.running().is_none());
+		assert!(video.is_current(1));
+		assert_eq!(video.opening(), Some(&"b"));
+
+		playback.received(Default::default());
+		playback.catalog_ended = true;
+		assert!(!playback.wants(&video), "the stopped task still drives it");
+		assert!(!playback.done(&video, &audio));
+
+		playback.ended(&mut video, 1, false);
+		assert_eq!(video.opening(), Some(&"b"), "the opening plays once ready");
+		assert!(!playback.done(&video, &audio));
+		video.give_up();
+		playback.read(&mut video, false);
+		playback.read(&mut audio, false);
+		assert!(playback.done(&video, &audio));
+	}
+
+	/// A rendition that ends while its replacement opens leaves the opening to play once ready.
+	#[test]
+	fn a_replacement_still_opening_outlives_the_rendition_it_replaces() {
+		let (mut playback, mut video, _audio) = playing("wide");
+		video.turn();
+		playback.read(&mut video, true);
+		video.open("tall");
+
+		playback.ended(&mut video, 1, true);
+		assert!(!video.playing());
+		assert_eq!(video.opening(), Some(&"tall"));
+		assert!(
+			playback.finished(&track("wide")),
+			"a turn's rendition finishes by its end"
+		);
+
+		playback.started(&mut video, running(2, "tall"));
+		assert!(video.opening().is_none());
+		assert!(video.is_current(2));
+	}
+
+	/// Turning back gives up a turn's opening and keeps what plays; a move's switch stays
+	/// wanted when its opening is given up, and moving back drops the opening.
+	#[test]
+	fn giving_up_ends_a_turn_but_not_a_move() {
+		let (playback, mut video, _audio) = playing("wide");
+		video.turn();
+		playback.read(&mut video, true);
+		video.open("tall");
+		video.give_up();
+		assert_eq!(video.switching(), None);
+		assert!(video.opening().is_none());
+
+		video.move_off();
+		video.open("other");
+		video.give_up();
+		assert_eq!(video.switching(), Some(Switch::Move));
+		assert!(video.opening().is_none());
+
+		video.open("other");
+		video.stay();
+		assert_eq!(video.switching(), None);
+		assert!(video.opening().is_none(), "nothing replaces a rendition moved back");
 	}
 
 	/// The catalog track ending is what ends playback, since it is the only thing
@@ -482,13 +786,17 @@ mod tests {
 	#[test]
 	fn playback_ends_with_the_catalog() {
 		let mut playback = Playback::default();
-		playback.started(Kind::Video, track("video"));
+		let (mut video, audio) = (TestHalf::default(), TestHalf::default());
+		playback.started(&mut video, running(1, "video"));
 
 		playback.catalog_ended = true;
-		assert!(!playback.done(), "playback ended while video was still playing");
+		assert!(
+			!playback.done(&video, &audio),
+			"playback ended while video was still playing"
+		);
 
-		playback.ended(Kind::Video, true);
-		assert!(playback.done());
+		playback.ended(&mut video, 1, true);
+		assert!(playback.done(&video, &audio));
 	}
 
 	/// The catalog's last word can be the replacement for the rendition it
@@ -498,24 +806,27 @@ mod tests {
 	/// looks.
 	#[test]
 	fn a_final_snapshot_outlives_the_catalog() {
-		let mut playback = Playback::default();
-		playback.received(Default::default());
-		playback.started(Kind::Video, track("video"));
-		playback.read(Kind::Video, false);
+		let (mut playback, mut video, mut audio) = playing("video");
 
 		// The last snapshot names the replacement, then the catalog ends, then the
 		// retired track does.
 		playback.received(Default::default());
 		playback.catalog_ended = true;
-		playback.ended(Kind::Video, true);
+		playback.ended(&mut video, 1, true);
 
-		assert!(playback.pending().is_some(), "the final snapshot was never offered");
-		assert!(!playback.done(), "playback ended with a replacement still unread");
+		assert!(
+			playback.pending(&video, &audio).is_some(),
+			"the final snapshot was never offered"
+		);
+		assert!(
+			!playback.done(&video, &audio),
+			"playback ended with a replacement still unread"
+		);
 
 		// Read it for both halves, the way the selection pass does, find nothing
 		// playable in it, and only then stop.
-		playback.read(Kind::Video, false);
-		playback.read(Kind::Audio, false);
-		assert!(playback.done());
+		playback.read(&mut video, false);
+		playback.read(&mut audio, false);
+		assert!(playback.done(&video, &audio));
 	}
 }
