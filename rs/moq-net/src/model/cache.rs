@@ -46,7 +46,7 @@
 use crate::util::SendCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, PoisonError, Weak};
 use std::task::{Poll, ready};
 use std::time::Duration;
@@ -672,16 +672,18 @@ const EDGE_SLACK: usize = 64;
 /// Each track a session ingests bills its live edge here: the newest group, which a live
 /// track keeps whatever the pool's budget, so a publisher holding many quiet tracks would
 /// otherwise hold one group each past any capacity. A frame write that leaves the session
-/// past its limit evicts the session's live edges in the order they last moved, oldest
-/// first, and then sheds the writer's own older frames, so the cost stays with the session
+/// past its limit sheds the frames of the session's live edges in the order they last
+/// moved, oldest first, and then the writer's own older frames, so the cost stays with the session
 /// causing it. The default is unbounded and costs nothing.
 #[derive(Clone, Default)]
 pub(crate) struct Edges(Option<Arc<EdgesInner>>);
 
 struct EdgesInner {
 	limit: u64,
-	// Bytes billed by the live edges of this session's tracks.
-	used: AtomicU64,
+	// Bytes billed by the live edges of this session's tracks. Signed: a footprint that flips
+	// while one of its bytes is mid-update bills the session an instant early or late, which
+	// may dip it below zero, never a reason to reclaim.
+	used: AtomicI64,
 	// The tracks in the order their live edges moved, oldest first, each with the move it
 	// was queued at, so an entry for an edge that moved on since is skipped.
 	order: Mutex<VecDeque<(Weak<Track>, u64)>>,
@@ -695,7 +697,7 @@ impl Edges {
 		Self(limit.map(|limit| {
 			Arc::new(EdgesInner {
 				limit,
-				used: AtomicU64::new(0),
+				used: AtomicI64::new(0),
 				order: Mutex::default(),
 				tracks: AtomicUsize::new(0),
 			})
@@ -705,25 +707,27 @@ impl Edges {
 	/// Bytes the session's live edges bill now.
 	#[cfg(test)]
 	pub(super) fn used(&self) -> u64 {
-		self.0.as_ref().map_or(0, |inner| inner.used.load(Ordering::Relaxed))
+		self.0
+			.as_ref()
+			.map_or(0, |inner| inner.used.load(Ordering::Relaxed).max(0).unsigned_abs())
 	}
 
 	fn add(&self, n: u64) {
 		if let Some(inner) = &self.0 {
-			inner.used.fetch_add(n, Ordering::Relaxed);
+			inner.used.fetch_add(n.cast_signed(), Ordering::Relaxed);
 		}
 	}
 
 	fn sub(&self, n: u64) {
 		if let Some(inner) = &self.0 {
-			inner.used.fetch_sub(n, Ordering::Relaxed);
+			inner.used.fetch_sub(n.cast_signed(), Ordering::Relaxed);
 		}
 	}
 
 	/// How far past its limit the session is, if it is.
 	fn excess(&self) -> Option<u64> {
 		let inner = self.0.as_ref()?;
-		let used = inner.used.load(Ordering::Relaxed);
+		let used = inner.used.load(Ordering::Relaxed).max(0).unsigned_abs();
 		used.checked_sub(inner.limit).filter(|excess| *excess > 0)
 	}
 
@@ -757,7 +761,7 @@ impl Edges {
 				continue;
 			};
 			if let Ok(mut state) = state.write() {
-				state.evict_edge(moves);
+				state.shed_edge_all(moves);
 			}
 		}
 		if let Some(entry) = kept {

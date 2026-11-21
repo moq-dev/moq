@@ -1078,6 +1078,20 @@ impl GroupState {
 		freed
 	}
 
+	/// Shed every committed frame, an open group's newest too, keeping the timeline the
+	/// frames presented, and return the bytes freed. A reader of a shed frame reads it as
+	/// [`Error::Evicted`].
+	fn shed_all(&mut self) -> u64 {
+		if self.outcome.error().is_some() {
+			return 0;
+		}
+		let mut freed = self.shed_to(self.committed());
+		if let Some(flate) = &self.flate {
+			freed += flate.plain.shed(u64::MAX, u64::MAX, false);
+		}
+		freed
+	}
+
 	/// Whether this copy holds no committed frame.
 	fn is_empty(&self) -> bool {
 		self.front.is_empty() && self.log.base() == self.log.end()
@@ -2740,6 +2754,14 @@ impl Handle {
 	pub(super) fn shed(&self, debt: u64, cap: u64) -> u64 {
 		match self.state.write() {
 			Ok(mut state) => state.shed(debt, cap),
+			Err(_) => 0,
+		}
+	}
+
+	/// Shed every frame this copy holds, as [`GroupState::shed_all`] does.
+	pub(super) fn shed_all(&self) -> u64 {
+		match self.state.write() {
+			Ok(mut state) => state.shed_all(),
 			Err(_) => 0,
 		}
 	}

@@ -202,9 +202,10 @@ Zero admits no entries of that kind, not unlimited entries.
 `live_edges` bounds the newest group of every track a session publishes to the
 relay. The cache keeps that group whatever its `capacity` or `headroom`, so a
 publisher holding many quiet tracks would otherwise hold one group each past
-any budget. Past the bound, the session's own live edges are evicted, the one
-that moved longest ago first, and a viewer joining such a track waits for its
-next group; another session's are never touched. Here zero means no bound.
+any budget. Past the bound, the frames of the session's own live edges are
+shed, the one that moved longest ago first, and a viewer reaching one reads it
+as evicted and waits for the track's next group; another session's are never
+touched. Here zero means no bound.
 Peers default to none: a peer link carries every publisher behind it, and each
 is bounded where it connects.
 

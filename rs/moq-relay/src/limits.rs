@@ -33,8 +33,8 @@ pub struct Client {
 	/// bound.
 	///
 	/// The cache keeps each live track's newest group past its capacity, so this is what
-	/// bounds a client holding many quiet tracks. Past it, the client's own live edges are
-	/// evicted, the one that moved longest ago first, never another session's.
+	/// bounds a client holding many quiet tracks. Past it, the frames of the client's own
+	/// live edges are shed, the one that moved longest ago first, never another session's.
 	#[usage(
 		long = "limits-client-live-edges",
 		env = "MOQ_LIMITS_CLIENT_LIVE_EDGES",
@@ -76,7 +76,7 @@ pub struct Peer {
 	/// default) for no bound.
 	///
 	/// A peer link carries every publisher behind it, so a bound here would let one of them
-	/// evict another's live edges: each publisher is bounded where it connects instead.
+	/// shed another's live edges: each publisher is bounded where it connects instead.
 	#[usage(
 		long = "limits-peer-live-edges",
 		env = "MOQ_LIMITS_PEER_LIVE_EDGES",

@@ -3576,31 +3576,31 @@ impl TrackState {
 		paid
 	}
 
-	/// Evict the live edge its session queued at its `moves`th move, if it is still the edge:
-	/// the session holds more live edges than its budget, and this one moved longest ago.
+	/// Shed every frame of the live edge its session queued at its `moves`th move, if it is
+	/// still the edge: the session holds more live edges than its budget, and this one moved
+	/// longest ago.
 	///
-	/// The history below it goes too, older still: left alone, it would read as the newest
-	/// content, rewinding where a live join is placed and what reads as stale.
-	pub(super) fn evict_edge(&mut self, moves: u64) {
-		if !self.cache.edge_is(moves)
-			|| self
-				.latest_group
-				.is_none_or(|latest| !self.protects(latest) || !self.lookup.contains_key(&latest))
-		{
+	/// The group stays cached, its timeline intact, so it still marks where the live edge is:
+	/// a live join is placed and staleness is judged as before, and a reader reaching a shed
+	/// frame reads [`Error::Evicted`], as after any shed.
+	pub(super) fn shed_edge_all(&mut self, moves: u64) {
+		if !self.cache.edge_is(moves) {
 			return;
 		}
-		let keys: Vec<u64> = self.lookup.keys().copied().collect();
-		for key in keys {
-			match self.lookup.get(&key) {
-				None => {}
-				Some(slot) if slot.is_aborted() => self.reclaim_aborted(key),
-				Some(_) => self.evict_group(key, Error::Evicted),
-			}
+		let Some(slot) = self
+			.latest_group
+			.filter(|latest| self.protects(*latest))
+			.and_then(|latest| self.lookup.get(&latest))
+		else {
+			return;
+		};
+		for group in slot.copies() {
+			group.shed_all();
 		}
 	}
 
 	/// Shed up to `excess` bytes of the live edge's older frames, keeping the newest of an
-	/// open group: the session is past its budget with no other live edge left to evict.
+	/// open group: the session is past its budget with no other live edge left to shed.
 	pub(super) fn shed_edge(&mut self, excess: u64) {
 		let Some(slot) = self
 			.latest_group
@@ -25476,6 +25476,7 @@ mod test {
 
 	/// A broadcast ingested by a session whose live edges may hold `limit` bytes, caching into
 	/// `pool`.
+	#[cfg(feature = "async")]
 	fn session_broadcast(pool: &cache::Pool, limit: Option<u64>) -> Arc<broadcast::Info> {
 		Arc::new(broadcast::Info {
 			pool: pool.clone(),
@@ -25488,10 +25489,12 @@ mod test {
 	/// their session's live-edge budget, however small the pool: the session pays with its
 	/// oldest live edges, and another session's are untouched.
 	#[test]
+	#[cfg(feature = "async")]
 	fn a_session_pays_for_its_live_edges() {
 		const FRAME: usize = 10_000;
-		const LIMIT: u64 = 100_000;
 		const TRACKS: usize = 200;
+		// Ten frames, plus the bookkeeping each shed edge still holds.
+		const LIMIT: u64 = 10 * FRAME as u64 + TRACKS as u64 * cache::ENTRY_OVERHEAD;
 		let pool = cache::Pool::new(
 			cache::Config::default()
 				.with_capacity(1_000)
@@ -25520,9 +25523,16 @@ mod test {
 
 		// The newest edges survive, the oldest went, and nobody else paid.
 		let newest = tracks.last().unwrap().consume();
-		assert!(newest.peek_group(0).is_some(), "the newest edge was evicted");
-		assert!(tracks[0].consume().peek_group(0).is_none(), "the oldest edge survived");
-		assert!(bystander.consume().peek_group(0).is_some(), "another session paid");
+		let read = |consumer: Consumer| {
+			let mut group = consumer.peek_group(0).expect("the edge stays cached");
+			group.read_frame().now_or_never().expect("cached")
+		};
+		assert!(matches!(read(newest), Ok(Some(_))), "the newest edge was shed");
+		assert!(
+			matches!(read(tracks[0].consume()), Err(Error::Evicted)),
+			"the oldest edge kept its frame"
+		);
+		assert!(matches!(read(bystander.consume()), Ok(Some(_))), "another session paid");
 		assert!(other.edges.used() > 0);
 
 		// A track whose edge went carries on: its next group is the new edge.
@@ -25536,11 +25546,11 @@ mod test {
 		assert_eq!(other.edges.used(), 0);
 	}
 
-	/// A live join on a copy whose live edge its session evicted is placed as its publisher
-	/// would, never from the history the copy still holds below that edge.
+	/// A live join on a copy whose live edge its session shed is placed as before: the shed
+	/// group still marks where the edge is, so the history below it never reads as newest.
 	#[test]
 	#[cfg(feature = "async")]
-	fn an_evicted_live_edge_never_rewinds_a_live_join() {
+	fn a_shed_live_edge_never_rewinds_a_live_join() {
 		let pool = cache::Pool::unbounded();
 		let broadcast = session_broadcast(&pool, Some(1 << 20));
 		let producer = Producer::new(broadcast, "test", Info::timed());
@@ -25557,11 +25567,11 @@ mod test {
 		assert_eq!(placed(&mut producer.subscribe(join(1000))), Some(19_000));
 
 		let moves = producer.state.read().cache.moves();
-		producer.state.write().ok().expect("open").evict_edge(moves);
-		let placed_after = placed(&mut producer.subscribe(join(1000)));
-		assert!(
-			placed_after.is_none_or(|start| start >= 19_000),
-			"the join rewound to {placed_after:?}"
+		producer.state.write().ok().expect("open").shed_edge_all(moves);
+		assert_eq!(
+			placed(&mut producer.subscribe(join(1000))),
+			Some(19_000),
+			"the join moved once the edge's frames went"
 		);
 	}
 
