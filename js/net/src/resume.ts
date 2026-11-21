@@ -489,6 +489,8 @@ class Reader implements ResumeSource {
 	#wall?: { at: number; timer: AbortController };
 	/** Records the properties a copy committed, and which source it came from. */
 	#record: (info: track.Info, source: Source) => void;
+	/** The first frame of each group the reader reads whole from, applied to every copy; see `hooks.wholeGroups`. */
+	#whole?: (key: bigint) => number | undefined;
 
 	/** `parent` is the newest copy of the reader this one forks, if any. */
 	constructor(route: Route, shell: ResumeShell, record: (info: track.Info, source: Source) => void, parent?: Copy) {
@@ -618,6 +620,7 @@ class Reader implements ResumeSource {
 	#add(copy: Copy, index = this.#copies.length): void {
 		const { source } = copy;
 		source.retain();
+		this.#readWhole(copy);
 		this.#bound(copy);
 		this.#copies.splice(index, 0, copy);
 		this.route.copied();
@@ -1587,6 +1590,18 @@ class Reader implements ResumeSource {
 		disposes.push(this.route.changed.changed(once), this.#changed.changed(once));
 		for (const copy of this.#copies) disposes.push(hooks.groupChanged(copy.sub, once));
 		return dispose;
+	}
+
+	wholeGroups(frameOf: (key: bigint) => number | undefined): void {
+		this.#whole = frameOf;
+		for (const copy of this.#copies) this.#readWhole(copy);
+	}
+
+	// Have `copy` read whole groups, except one the reader already handed out, as from a copy it
+	// replaced: that group continues through its recovery, and no copy waits on its head.
+	#readWhole(copy: Copy): void {
+		const whole = this.#whole;
+		if (whole) hooks.wholeGroups(copy.sub, (key) => (this.#delivered.has(key) ? undefined : whole(key)));
 	}
 
 	forgetPastBudget(delivered: Delivered): void {

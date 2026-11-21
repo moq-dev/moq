@@ -8026,7 +8026,8 @@ impl GroupServe {
 		flags.has_end = self.slice.until.is_none() && wire.as_ref().is_some_and(|wire| wire.has_end);
 		if wire.is_none() {
 			// Only the end: a start would clamp past a prefix the group never held, which
-			// `skip_to` leaves to fail as `Lagged`.
+			// `skip_to` leaves the read to fetch through the track's handlers or a front's
+			// route, or to fail as `Lagged` when neither serves it.
 			self.group.skip_to(self.slice.skip);
 			self.group.end_at(self.slice.until);
 		}

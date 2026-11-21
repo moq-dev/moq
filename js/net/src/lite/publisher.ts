@@ -1125,6 +1125,8 @@ export class Publisher {
 			starts: hasRanges(this.version) ? positionFrames(msg.ranges ?? []) : new Map(),
 			startsAfter: new WeakMap(),
 		};
+		// A group is served whole from the frame asked: the reader fetches what its copy lacks.
+		hooks.wholeGroups(track, (key) => frameRange(bounds, key).start);
 		let legacy: datagram.Consumer | undefined;
 		const legacyPriority = new Signal(msg.priority);
 		let controls: SubscriptionControls | undefined;
