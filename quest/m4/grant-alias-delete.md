@@ -14,14 +14,17 @@ Decided 2026-11-20 (maintainer, on moq-dev/moq#9251): ✅ a temporary read alias
 write alias releases before 0.22 need to read the same subtrees (rejected: shipping strict and
 upgrading an auth server with the relays it answers together).
 
-The alias is `alias` in `rs/moq-auth/src/wire.rs`, and `readPrefix`, `WirePrefixListSchema`,
-`WireAccessSchema`, and `writtenAccess` in `js/auth/src/wire.ts` with `WrittenAccessSchema` in
-`js/auth/src/contract.ts`. Each is marked `TEMPORARY MIGRATION`.
+The alias is `alias` in `rs/moq-auth/src/wire.rs`. In JS it is `readPrefix`, `readPrefixes`,
+`WirePrefixListSchema`, `WireAccessSchema`, `writtenAccess`, and `writtenScope` in
+`js/auth/src/wire.ts`, with their uses: `WrittenAccessSchema` in `js/auth/src/contract.ts`,
+`ScopeSchema`'s last transform and `Scope.allows` in `js/auth/src/claims.ts`, and `toPublic` in
+`js/auth/src/key.ts`. Each is marked `TEMPORARY MIGRATION`.
 
 1. **Write bare prefixes** in the first version migration after 0.22, so it ships in 0.23.0
-   and never in a 0.22 patch (see Waiting). Delete Rust's `Written` and JS's `writtenAccess`,
-   so `GrantSchema` outputs bare prefixes and a typed `Grant` is again the JSON to answer
-   with. Keep the read: 0.22 issuers and auth servers still write `foo/**`. Flip the pins
+   and never in a 0.22 patch (see Waiting). Delete Rust's `Written` and JS's `writtenAccess`
+   and `writtenScope`, so `GrantSchema`, `ScopeSchema`, and `Key.public` output bare prefixes,
+   and a typed `Grant` or key is again the JSON to write. Keep the read: 0.22 issuers and auth
+   servers still write `foo/**`, and `Scope.allows` still reads it. Flip the pins
    (`tests/released_token.rs`, `rate.json`, the grant cross-language vector, the corpus) and
    the wire-compat token lane, where a released (then 0.22) verifier reads both spellings.
    The same PR deletes interop.sh's compat `**` probe, since the released relay then reads
