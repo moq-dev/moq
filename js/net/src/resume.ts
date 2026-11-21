@@ -456,6 +456,12 @@ class Reader implements ResumeSource {
 	 * reader lacks. Kept until the gaps are backfilled; see {@link #backfillGaps}.
 	 */
 	#resumed = false;
+	/**
+	 * The groups a backfill of route `generation` failed to get, which that route is not asked
+	 * for again until the route or the reader's preferences change: a backfill it refuses would
+	 * only fail again, and asking each read would spin. Mirrors the Rust `Reader::refused`.
+	 */
+	#refused?: { generation: number; start: bigint; end: bigint };
 	/** Bumped when this reader subscribes a new copy or a copy's last lease ends, waking its parked reads. */
 	#changed = new Signal(0);
 	#dispose: Dispose[] = [];
@@ -571,7 +577,8 @@ class Reader implements ResumeSource {
 			// Nothing held nor handed out: nothing to split. Asked for nothing, a copy's subscription
 			// would end with the track, and a fetch then landing a later group would read as the
 			// whole of it. Left uncapped, it reads as an incumbent until the new copy delivers (see
-			// #joinIncumbent and #observe), where the Rust reader lets it go at once.
+			// #joinIncumbent and #observe), where the Rust reader lets it go at once, until
+			// quest/m1/switch-no-boundary-parity.md aligns them.
 			if (boundary !== undefined) this.#cap(copy, boundary);
 		}
 		if (returning) {
@@ -862,6 +869,8 @@ class Reader implements ResumeSource {
 		const subscription = this.#shell.subscription.peek();
 		if (subscription !== this.#mirrored) {
 			this.#mirrored = subscription;
+			// New preferences may ask what a backfill failed to get.
+			this.#refused = undefined;
 			for (const copy of this.#copies) this.#update(copy);
 			// A copy just resolved replaced ranges against its cache, before its failover cap raised
 			// them, so the reader takes that resolution now, the newest copy's first.
@@ -915,6 +924,9 @@ class Reader implements ResumeSource {
 		const end = min(passed, resumed);
 		// An ordered reader never goes back, nor does any reader past its budget.
 		if (this.#delivered.covers(start, end)) return;
+		// What a backfill of this route already failed to get, it would fail to get again.
+		const refused = this.#refused;
+		if (refused?.generation === newest.generation && refused.start <= start && end <= refused.end) return;
 		// A floor lowered again asks once. A copy that dropped a group from `start` on no longer
 		// offers it, so it asks for nothing there.
 		const closed = newest.source.from.closed;
@@ -1133,6 +1145,8 @@ class Reader implements ResumeSource {
 		}
 		// The failed copies holding a group back for a placement, which still report their failure.
 		const held = new Set<Copy>();
+		// Whether a replaced copy failed this pass, owing the serving route a backfill.
+		let owed = false;
 		// The serving copy first: it is the one that keeps delivering.
 		for (let index = this.#copies.length - 1; index >= 0; index--) {
 			const copy = this.#copies[index];
@@ -1167,7 +1181,15 @@ class Reader implements ResumeSource {
 				} else if (recv.kind === "error") copy.done = recv.error;
 				else if (this.#drained(copy, delivered)) copy.done = hooks.arrived(copy.sub);
 				// What a replaced copy that just failed still had to drain is asked of the serving route.
-				if (copy.replaced && copy.done instanceof Error) this.#resumed = true;
+				if (copy.replaced && copy.done instanceof Error) {
+					this.#resumed = true;
+					owed = true;
+					// A backfill of the serving route that failed is not asked of that route again.
+					const end = copyEnd(copy);
+					if (copy.generation === this.#generation && copy.floor !== undefined && end !== undefined) {
+						this.#refused = { generation: copy.generation, start: copy.floor, end };
+					}
+				}
 				break;
 			}
 		}
@@ -1184,8 +1206,12 @@ class Reader implements ResumeSource {
 			return copy.done ?? (failed instanceof Error ? failed : undefined);
 		});
 		// A revert serves the copy the failed replacement capped again, which may hold the next
-		// group already.
-		if (end.kind === "idle" && this.route.generation !== generation) {
+		// group already. A replaced copy that failed this pass owes the serving route a backfill
+		// once the window is placed: ask now, since its close already fired and no later group is
+		// sure to wake the read. A backfill that failed is not asked again (`#refused`), so this
+		// ends. Mirrors the Rust `Reader::poll_lowest`.
+		const backfill = owed && this.#resumed && this.#window().floor() !== undefined;
+		if (end.kind === "idle" && (this.route.generation !== generation || backfill)) {
 			return this.tryGroup(ordered, delivered, dispositions);
 		}
 		return end;

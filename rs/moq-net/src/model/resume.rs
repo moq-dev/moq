@@ -581,6 +581,7 @@ impl Consumer {
 				copies: Vec::new(),
 				newest: None,
 				resumed: None,
+				refused: None,
 				window,
 				groups: (0, None),
 				capped: kio::WaiterList::new(),
@@ -1762,6 +1763,10 @@ struct Reader {
 	/// route changed, or the ranges did. Kept until the gaps are backfilled: see
 	/// [`Reader::backfill_gaps`].
 	resumed: Option<Resumed>,
+	/// The groups a backfill of route `generation` failed to get, which that route is not
+	/// asked for again until the route or the reader's preferences change: a backfill it
+	/// refuses would only fail again, and asking each poll would spin.
+	refused: Option<(u64, std::ops::Range<u64>)>,
 	/// The reader's ranges resolved; see [`Reader::window`].
 	window: Window,
 	/// The local floor and exclusive cap; see [`track::Subscriber::with_range`].
@@ -2024,6 +2029,8 @@ impl Reader {
 					Change::All
 				}
 			};
+			// New preferences may ask what a backfill failed to get.
+			self.refused = None;
 			for copy in &mut self.copies {
 				copy.update(&self.mirrored, &change);
 			}
@@ -2540,6 +2547,13 @@ impl Reader {
 			let copy = &self.copies[index];
 			let serving = !copy.replaced && Some(copy.generation) == self.generation;
 			let failed = copy.replaced && matches!(copy.done, Some(Err(_)));
+			// A backfill of the serving route that failed is not asked of that route again.
+			if failed
+				&& Some(copy.generation) == self.generation
+				&& let (Some(floor), Some(end)) = (copy.floor, copy.end())
+			{
+				self.refused = Some((copy.generation, floor..end));
+			}
 			if (late && serving && copy.floor.is_some()) || failed {
 				self.resumed
 					.get_or_insert_with(|| Resumed::Route(None, BTreeMap::new()));
@@ -2885,6 +2899,14 @@ impl Reader {
 		}
 		let newest = self.copies.last().expect("checked above");
 		let (generation, track) = (newest.generation, newest.track.clone());
+		// What a backfill of this route already failed to get, it would fail to get again.
+		if let Some((refused, range)) = &self.refused
+			&& *refused == generation
+			&& range.start <= lowered.start
+			&& lowered.end <= range.end
+		{
+			return;
+		}
 		// A floor lowered again asks once.
 		let asks =
 			|copy: &Copy| copy.track.same_channel(&track) && copy.floor.is_some_and(|floor| floor <= lowered.start);
@@ -10365,6 +10387,42 @@ mod test {
 				true => assert!(matches!(read, Some(Err(Error::Old))), "ranges={ranges:?}"),
 				false => assert!(read.is_none(), "ranges={ranges:?}"),
 			}
+		}
+	}
+
+	/// A replaced copy that fails while it still owes a group hands it to the serving route in
+	/// the same poll, and the poll returns, whether or not that route failed too: a backfill
+	/// reads the serving copy's own track, which still holds the group.
+	#[test]
+	fn a_failed_replaced_copy_backfills_once() {
+		for serving_fails in [false, true] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			routes.serve(a.consume());
+			let mut sub = subscribe(&logical, HOUR);
+			write(&a, 0);
+			assert_eq!(drain(&mut sub, false), [0]);
+			// Held under the cap, so the switch leaves both to the replaced copy.
+			let mut open = a.create_group(group::Info { start: 1 }).unwrap();
+			open.write_frame(ts(1), b"x".as_ref()).unwrap();
+			write(&a, 2);
+			let b = copy();
+			routes.serve(b.consume());
+			write(&b, 1);
+			if serving_fails {
+				b.clone()
+					.abort(Error::Stream(StreamError::Session(SessionError::Cancel)))
+					.unwrap();
+			}
+			// The old route fails before group 1 went out: the serving route owes it.
+			open.abort(Error::Stream(StreamError::Session(SessionError::Cancel)))
+				.unwrap();
+			a.abort(Error::Stream(StreamError::Session(SessionError::Cancel)))
+				.unwrap();
+			let mut got = drain(&mut sub, false);
+			got.sort_unstable();
+			assert_eq!(got, [1, 2], "serving_fails={serving_fails}");
 		}
 	}
 

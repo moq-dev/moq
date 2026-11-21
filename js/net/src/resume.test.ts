@@ -1149,6 +1149,44 @@ test("a group moved onto a capped copy expires within an unbounded reader's wind
 	b.close();
 });
 
+// A replaced copy that fails while it still owes a group hands it to the serving route, and each read
+// settles. Mirrors the Rust `a_failed_replaced_copy_backfills_once`.
+test("a failed replaced copy backfills once", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe({ delay: { max: null } });
+	ta.write(0n);
+	expect(drain(sub)).toEqual([0n]);
+	// Held under the cap, so the switch leaves both to the replaced copy.
+	const open = ta.write(1n, 1, false);
+	ta.write(2n);
+	front.serve(b.consume());
+	await settle();
+	tb.write(1n);
+	// The old route fails before group 1 went out: the serving route owes it.
+	open.abort(new StreamError(StreamCode.SessionClosed));
+	ta.producer.abort(new StreamError(StreamCode.SessionClosed));
+	const got: bigint[] = [];
+	for (let i = 0; i < 2; i++) {
+		const next = sub.recvGroup();
+		next.catch(() => {});
+		await settle();
+		expect(await isPending(next)).toBe(false);
+		const group = await next;
+		if (group) got.push(group.start);
+	}
+	expect(got.sort((x, y) => (x < y ? -1 : x > y ? 1 : 0))).toEqual([1n, 2n]);
+
+	sub.close();
+	front.consumer.close();
+	a.close();
+	b.close();
+});
+
 // A group moved onto another copy wakes when the reader's cursor cap rises over groups that expire
 // it. Mirrors the Rust `a_recovered_group_wakes_when_the_readers_cap_rises`.
 test("a recovered group wakes when the reader's cap rises", async () => {
