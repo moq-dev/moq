@@ -33,7 +33,7 @@ use super::passthrough::PCR_HZ;
 use super::psi::{Pat, PesStart};
 
 /// A forward step beyond this is another timeline: ffmpeg's `dts_delta_threshold`.
-const LEAP: Duration = Duration::from_secs(10);
+pub(super) const LEAP: Duration = Duration::from_secs(10);
 const PTS_HZ: u64 = 90_000;
 const PTS_WRAP: u64 = 1 << 33;
 
