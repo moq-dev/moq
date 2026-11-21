@@ -1515,7 +1515,7 @@ impl GroupState {
 		self.charge.clear();
 		// Frames this copy wrote first may be what a live sibling still holds.
 		if let Some(content) = content {
-			content.siblings.sync();
+			content.siblings.update(&self.charge);
 		}
 		// The header state and terminal object outlive the frames.
 		if let Some(relay) = &mut self.relay {
@@ -1543,7 +1543,7 @@ impl Drop for GroupState {
 		if let Some(content) = self.content.take() {
 			content.detach(Error::Dropped);
 			self.charge.clear();
-			content.siblings.sync();
+			content.siblings.update(&self.charge);
 		}
 	}
 }
@@ -3287,7 +3287,7 @@ impl Handle {
 		if let Ok(mut state) = self.state.write() {
 			state.charge.leave_edge();
 			if let Some(content) = &state.content {
-				content.siblings.sync();
+				content.siblings.update(&state.charge);
 			}
 		}
 	}
@@ -3298,7 +3298,7 @@ impl Handle {
 		if let Ok(mut state) = self.state.write() {
 			state.charge.promote();
 			if let Some(content) = &state.content {
-				content.siblings.sync();
+				content.siblings.update(&state.charge);
 			}
 		}
 	}

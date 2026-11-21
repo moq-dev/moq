@@ -25812,19 +25812,17 @@ mod test {
 		drop(group);
 	}
 
-	/// Copies of one group share its frames, each billed to whichever copy wrote it first:
-	/// that copy aborting leaves the frames billed while the live edge still holds them.
-	#[kio::test]
+	/// Two copies of a live edge's group sharing frame 1, the one received from frame 1
+	/// having written it first, with frames of `frame` bytes.
 	#[cfg(feature = "async")]
-	async fn a_live_edge_keeps_billing_frames_an_aborted_sibling_wrote() {
-		const FRAME: usize = 10_000;
+	fn shared_live_edge(frame: usize) -> (Arc<broadcast::Info>, Producer, group::Producer, group::Producer) {
 		let pool = cache::Pool::unbounded();
 		let broadcast = session_broadcast(&pool, Some(1 << 30));
 		let producer = Producer::new(broadcast.clone(), "test", Info::timed());
 		producer.received();
 		elapse(&producer, Duration::ZERO);
 		let at = |millis| Timestamp::from_millis(millis).unwrap();
-		let payload = |byte: u8| bytes::Bytes::from(vec![byte; FRAME]);
+		let payload = |byte: u8| bytes::Bytes::from(vec![byte; frame]);
 
 		// Received from frame 1, so a fetch of the group's head can sit beside it.
 		let Ok(Received::Group(mut first)) = producer.create_group_at(group::Info { start: 3 }, 1, 0..0) else {
@@ -25842,10 +25840,38 @@ mod test {
 		for (millis, byte) in [(300, b'a'), (301, b'b'), (302, b'c')] {
 			head.write_frame(at(millis), payload(byte)).unwrap();
 		}
+		(broadcast, producer, first, head)
+	}
+
+	/// Copies of one group share its frames, each billed to whichever copy wrote it first:
+	/// that copy aborting leaves the frames billed while the live edge still holds them, even
+	/// frames smaller than the fixed overhead the aborted copy releases.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_live_edge_keeps_billing_frames_an_aborted_sibling_wrote() {
+		const FRAME: usize = 100;
+		let (broadcast, _producer, first, head) = shared_live_edge(FRAME);
+		let before = broadcast.edges.used();
+		assert!(
+			before >= 3 * FRAME as u64,
+			"the live edge holds 3 frames, billing {before}"
+		);
+		// Everything the aborted copy held, the live edge holds too.
 		first.abort(Error::Cancel).unwrap();
-		let used = broadcast.edges.used();
-		assert!(used >= 3 * FRAME as u64, "the live edge holds 3 frames, billing {used}");
+		assert_eq!(broadcast.edges.used(), before);
 		head.finish().unwrap();
+	}
+
+	/// A live edge's sibling copies leaving the cache together stop billing the session,
+	/// though writers still hold both.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn uncached_sibling_live_edges_stop_billing_the_session() {
+		let (broadcast, producer, first, head) = shared_live_edge(10_000);
+		assert!(broadcast.edges.used() >= 30_000);
+		producer.state.write().ok().expect("open").uncache(3).expect("cached");
+		assert_eq!(broadcast.edges.used(), 0, "{:?}", broadcast.edges);
+		drop((first, head));
 	}
 
 	/// A session with one live edge past its budget sheds that edge's older frames, keeping

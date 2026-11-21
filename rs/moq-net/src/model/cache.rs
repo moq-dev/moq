@@ -1133,6 +1133,8 @@ impl Track {
 			access,
 			counted: false,
 			footprint: Arc::default(),
+			content: 0,
+			edge: false,
 		}
 	}
 
@@ -1410,10 +1412,6 @@ impl Footprint {
 		}
 	}
 
-	fn is_edge(&self) -> bool {
-		self.0.load(Ordering::Relaxed) & EDGE != 0
-	}
-
 	fn demote(&self, edges: &Edges) {
 		let prior = self.0.fetch_and(!EDGE, Ordering::Relaxed);
 		if prior & EDGE != 0 {
@@ -1425,43 +1423,60 @@ impl Footprint {
 /// The [`Footprint`]s of every copy of one group that shares its content, which bill one
 /// another's frames: a frame bills whichever copy wrote it first, and any copy may hold it.
 ///
-/// So they bill the session together: while one copy is its track's cached live edge, they
-/// all do, a copy that aborted included, since its frames may still be what the live copy
-/// holds; and demoting one demotes them all, as every copy in a slot shares its standing.
+/// So they bill the session together: while one copy is itself its track's cached live
+/// edge, they all do, a copy that aborted included, since its frames may still be what the
+/// live copy holds; once none is, none does.
 #[derive(Default)]
-pub(super) struct Siblings(Mutex<Vec<(Arc<Track>, Arc<Footprint>)>>);
+pub(super) struct Siblings(Mutex<Vec<Sibling>>);
+
+struct Sibling {
+	track: Arc<Track>,
+	footprint: Arc<Footprint>,
+	// Whether this copy is itself the live edge, not billed for a sibling.
+	edge: bool,
+}
 
 impl Siblings {
-	/// Add `charge`'s copy, forgetting copies nothing bills any more.
-	pub(super) fn join(&self, charge: &Charge) {
+	/// Record whether `charge`'s copy is itself the live edge, adding it if new, and bill
+	/// every copy to match: after a copy joins, is promoted, leaves the cache, or is cleared.
+	pub(super) fn update(&self, charge: &Charge) {
 		let Some(track) = &charge.track else {
 			return;
 		};
 		let mut siblings = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-		siblings.retain(|(_, footprint)| Arc::strong_count(footprint) > 1);
-		if !siblings
-			.iter()
-			.any(|(_, footprint)| Arc::ptr_eq(footprint, &charge.footprint))
+		match siblings
+			.iter_mut()
+			.find(|sibling| Arc::ptr_eq(&sibling.footprint, &charge.footprint))
 		{
-			siblings.push((track.clone(), charge.footprint.clone()));
+			Some(sibling) => sibling.edge = charge.edge,
+			None => siblings.push(Sibling {
+				track: track.clone(),
+				footprint: charge.footprint.clone(),
+				edge: charge.edge,
+			}),
 		}
+		Self::bill(&mut siblings);
 	}
 
-	/// Bill every copy to the session if any copy does: after one is promoted, joins, or
-	/// is cleared.
-	pub(super) fn sync(&self) {
-		let siblings = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-		if siblings.iter().any(|(_, footprint)| footprint.is_edge()) {
-			for (track, footprint) in siblings.iter() {
-				footprint.promote(&track.edges);
-			}
-		}
-	}
-
-	/// Stop billing every copy to the session.
+	/// Stop billing every copy to the session: one leaving the live edge, as its slot does,
+	/// takes them all.
 	pub(super) fn demote(&self) {
-		for (track, footprint) in self.0.lock().unwrap_or_else(PoisonError::into_inner).iter() {
-			footprint.demote(&track.edges);
+		let mut siblings = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+		for sibling in siblings.iter_mut() {
+			sibling.edge = false;
+		}
+		Self::bill(&mut siblings);
+	}
+
+	/// Bill every copy while any is the live edge, forgetting copies nothing bills any more.
+	fn bill(siblings: &mut Vec<Sibling>) {
+		siblings.retain(|sibling| Arc::strong_count(&sibling.footprint) > 1);
+		let edge = siblings.iter().any(|sibling| sibling.edge);
+		for sibling in siblings.iter() {
+			match edge {
+				true => sibling.footprint.promote(&sibling.track.edges),
+				false => sibling.footprint.demote(&sibling.track.edges),
+			}
 		}
 	}
 }
@@ -1490,6 +1505,11 @@ pub(super) struct Charge {
 	// Every byte the group bills, its extras' included, and whether they bill its session's
 	// live edges.
 	footprint: Arc<Footprint>,
+	// The part of `bytes` in `footprint`: content, its fixed overhead left out.
+	content: u64,
+	// Whether this group is itself its track's cached live edge, as opposed to billing the
+	// session only for a sibling that is: see [`Siblings`].
+	edge: bool,
 }
 
 /// The tick of one cached group's last cache access: its creation, every write, and
@@ -1570,6 +1590,7 @@ impl Charge {
 				track.edge_grew();
 			}
 			self.bytes += n;
+			self.content += n;
 		}
 		self.touch(WRITE_BOOST)
 	}
@@ -1579,7 +1600,9 @@ impl Charge {
 		if let Some(track) = &self.track {
 			let n = n.min(self.bytes);
 			track.pool.sub(n);
-			self.footprint.sub(&track.edges, n);
+			let content = n.min(self.content);
+			self.footprint.sub(&track.edges, content);
+			self.content -= content;
 			self.bytes -= n;
 		}
 	}
@@ -1598,6 +1621,8 @@ impl Charge {
 			.bytes
 			.checked_sub(bytes)
 			.expect("transferred payload must already be charged");
+		// Still in the footprint, now through the extra.
+		self.content = self.content.saturating_sub(bytes);
 		Extra {
 			track: self.track.clone(),
 			footprint: Some(self.footprint.clone()),
@@ -1637,9 +1662,7 @@ impl Charge {
 			track.pool.access_insert(self.accessed());
 			self.counted = true;
 		}
-		if let Some(track) = &self.track {
-			self.footprint.demote(&track.edges);
-		}
+		self.leave_edge();
 	}
 
 	/// Stop billing the session, as the group leaves the cache, without entering the
@@ -1648,6 +1671,7 @@ impl Charge {
 		if let Some(track) = &self.track {
 			self.footprint.demote(&track.edges);
 		}
+		self.edge = false;
 	}
 
 	/// Bill the group, its extras included, to its session's [`Edges`] as its track's cached
@@ -1658,6 +1682,7 @@ impl Charge {
 			&& !self.counted
 		{
 			self.footprint.promote(&track.edges);
+			self.edge = true;
 		}
 	}
 
@@ -1705,9 +1730,10 @@ impl Charge {
 	/// Release everything this charge holds: bytes, overhead, and the access
 	/// sample. Idempotent; used when the group aborts and clears its frames.
 	pub(super) fn clear(&mut self) {
+		self.leave_edge();
 		if let Some(track) = &self.track {
-			self.footprint.demote(&track.edges);
-			self.footprint.sub(&track.edges, self.bytes);
+			self.footprint.sub(&track.edges, self.content);
+			self.content = 0;
 			track.pool.sub(self.bytes);
 			self.bytes = 0;
 			if self.counted {

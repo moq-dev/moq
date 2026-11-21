@@ -159,8 +159,7 @@ impl Content {
 	}
 
 	pub(super) fn attach(&self, charge: &cache::Charge) -> Option<Arc<Plain>> {
-		self.siblings.join(charge);
-		self.siblings.sync();
+		self.siblings.update(charge);
 		let mut plain = self.plain.lock().unwrap_or_else(PoisonError::into_inner);
 		self.views.fetch_add(1, Ordering::Relaxed);
 		if plain.as_ref().is_some_and(|plain| plain.lock().released.is_some()) {
