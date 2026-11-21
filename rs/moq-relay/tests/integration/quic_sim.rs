@@ -70,6 +70,8 @@ fn two_relays() {
 		let mut cache = moq_relay::cache::Config::default();
 		// Past what the pool counts in milliseconds, so it never expires idle groups.
 		cache.duration = Some(Duration::MAX.into());
+		// And no governor, whose timer would never let the simulation settle.
+		cache.headroom = Some("0".to_string());
 		let mut options = cluster::Options::new(config).with_cache(cache.init().expect("cache"));
 		options.sim = Some(network.host(b.ip()));
 		// A fixed port, which the static peer dials share, so the test can impair that path.

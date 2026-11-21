@@ -314,9 +314,15 @@ replacement is up and it carries no subscription or fetch.
 ```toml
 [cache]
 capacity = "8GiB"                    # Target bytes of cached groups and buffered datagrams. "75%" of memory also works.
-headroom = "2GiB"                    # Or: keep this much system memory free and grow into the rest.
+headroom = "10%"                     # Keep this much system memory free and grow into the rest (the default).
 duration = "30s"                     # Reclaim groups idle this long, and cap every track's max age at it.
 ```
+
+With no settings, the relay keeps 10% of system memory free (the cgroup limit
+when set), so a publisher that opens many tracks can't grow it without bound.
+`headroom` takes bytes or a percentage, and `capacity` also caps the cache at an
+absolute size. `headroom = "0"` removes the governor, so the cache grows without
+bound unless `capacity` is set: only run that where every publisher is trusted.
 
 `capacity` is a byte target, repaid as active publishers write. `duration`
 (30s by default) bounds memory by age, and sweeps on a timer, so a publisher

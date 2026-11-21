@@ -73,6 +73,8 @@ impl Backend for Relay {
 
 	fn relay(id: u64, capacity: Option<u64>) -> (Node, cache::Pool) {
 		let mut config = moq_relay::cache::Config::default();
+		// Only the swept capacity bounds the pool, not the machine's free memory.
+		config.headroom = Some("0".to_string());
 		if std::env::var_os("SESSION_EXPIRY_ONLY").is_none() {
 			config.capacity = capacity.map(|capacity| capacity.to_string());
 		}
