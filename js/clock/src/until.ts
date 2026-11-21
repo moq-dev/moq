@@ -9,7 +9,7 @@ export interface Wait<T> {
 	ready: (state: T) => boolean;
 	/** End a wait that never settles; never the expected path. */
 	watchdog: Duration;
-	/** Pause between reads; one second by default. */
+	/** Pause between reads, which must be positive; one second by default. */
 	every?: Duration;
 }
 
@@ -35,13 +35,17 @@ export class Unsettled<T> extends Error {
  */
 export async function until<T>(wait: Wait<T>): Promise<T | Unsettled<T>> {
 	const every = wait.every ?? Duration.secs(1);
+	// A zero pause would read in a loop that never yields, starving what it waits on.
+	if (every.isZero()) throw new RangeError("until period must be positive");
 	const deadline = now().saturatingAdd(wait.watchdog);
 	let last: T | undefined;
 	for (;;) {
 		const left = deadline.since(now());
 		if (left.isZero()) return new Unsettled(wait.watchdog, last);
 		try {
-			last = await timeout(left, wait.read(left));
+			const pending = wait.read(left);
+			// Bounded by what is left after the read's synchronous work, so the deadline stays put.
+			last = await timeout(deadline.since(now()), pending);
 		} catch (e) {
 			// Decided by the clock, not the error's type, so any timeout the read uses counts.
 			if (now().ge(deadline)) return new Unsettled(wait.watchdog, last);

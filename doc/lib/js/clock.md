@@ -88,7 +88,7 @@ not cancel the operation. An already-ready operation wins a zero timeout.
 
 `until({ read, ready, watchdog, every })` waits on an observed state instead of
 a guess of how long a change takes: it calls `read` every `every` (one second by
-default) until `ready` accepts the result, and returns it. The watchdog only ends
+default, and never zero) until `ready` accepts the result, and returns it. The watchdog only ends
 a wait that never settles, returning an `Unsettled` error whose `last` is the
 final state read, so the failure says what never arrived. `read` receives the
 remaining budget to bound its own requests, and the watchdog races it, so a

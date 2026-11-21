@@ -72,6 +72,30 @@ test("until bounds a read that ignores its budget", async () => {
 	expect((result as Unsettled<number>).last).toBe(1);
 });
 
+test("until holds its deadline through the read's synchronous work", async () => {
+	const clock = new Manual();
+	installs.push(clock.install());
+	let result: unknown;
+	void until({
+		read: () => {
+			clock.jump(Duration.secs(3));
+			return new Promise<never>(() => {});
+		},
+		ready: () => true,
+		watchdog: Duration.secs(5),
+	}).then((r) => {
+		result = r;
+	});
+	await clock.advance(Duration.secs(2));
+	expect(ms()).toBe(5_000);
+	expect(result).toBeInstanceOf(Unsettled);
+});
+
+test("until refuses a zero period", async () => {
+	const wait = until({ read: async () => 1, ready: () => false, watchdog: Duration.secs(1), every: Duration.ZERO });
+	await expect(wait).rejects.toThrow(RangeError);
+});
+
 test("until treats a read aborted by its own budget as the watchdog", async () => {
 	let reads = 0;
 	const { result, at } = await onManual(() =>
