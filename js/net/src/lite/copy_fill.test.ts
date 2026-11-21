@@ -550,3 +550,67 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 		}
 	},
 );
+
+// A publisher whose cache holds group 2 from frame 3 only fetches the head from its track's
+// handler and serves the group whole to a subscriber reading whole groups, as the Rust
+// `position_group` does: a cache only makes things faster. A refused head drops the group.
+test.each([Lite.ALPN_06, Lite.ALPN_07_WIP])("%s: a publisher fetches a headless group's head", async (alpn) => {
+	for (const refuse of [false, true]) {
+		const pair = createMockTransportPair(alpn);
+		const origin = new OriginProducer();
+		const [client, server] = await Promise.all([
+			connectSession({ url, transport: pair.client }),
+			acceptSession({ transport: pair.server, url, publish: origin.consume() }),
+		]);
+		const broadcast = origin.route(Path.from("room")).broadcast;
+		const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
+		const tail = hooks.receiveGroup(track, { start: 2n, offset: 3 });
+		for (const frame of [3, 4])
+			tail.writeFrame({ payload: enc.encode(`c${frame}`), timestamp: Timestamp.fromMillis(2000) });
+		tail.finish();
+		write(track.createGroup(3n), 3n, "live");
+		const requests = track.requests();
+		void (async () => {
+			for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
+				for (let key = fill.wanted(); key !== undefined; key = fill.wanted()) {
+					if (key !== 2n || refuse) {
+						fill.refuseGroups(key, key + 1n, new StreamError(StreamCode.NotFound));
+						continue;
+					}
+					const group = defined(fill.accept(key));
+					for (let frame = 0; frame < 5; frame++)
+						group.writeFrame({ payload: enc.encode(`c${frame}`), timestamp: Timestamp.fromMillis(2000) });
+					group.finish();
+				}
+				fill.close();
+			}
+		})();
+		const remote = wireOf(client).consume(Path.from("room"));
+		try {
+			const reader = remote.track("video").subscribe({
+				ranges: [{ start: { time: 2n } }],
+				delay: { max: null },
+				order: "ascending",
+			});
+			const ordered = reader.ordered();
+			const got: [bigint, string[]][] = [];
+			for (let group = await ordered.nextGroup(); group; group = await ordered.nextGroup()) {
+				const frames: string[] = [];
+				for (let frame = await group.readFrame(); frame; frame = await group.readFrame())
+					frames.push(dec.decode(frame.payload));
+				got.push([group.start, frames]);
+				if (group.start === 3n) break;
+			}
+			const head: [bigint, string[]][] = refuse ? [] : [[2n, ["c0", "c1", "c2", "c3", "c4"]]];
+			expect(got).toEqual([...head, [3n, ["live 3"]]]);
+			reader.close();
+		} finally {
+			remote.close();
+			requests.close();
+			broadcast.close();
+			client.abort();
+			server.abort();
+			origin.close();
+		}
+	}
+});

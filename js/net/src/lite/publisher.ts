@@ -1325,6 +1325,7 @@ export class Publisher {
 				},
 			});
 			const finished = await this.#runTrack(track, stream.writer, controls, {
+				source: consumer,
 				sub: msg.id,
 				broadcast: msg.broadcast,
 				stamp,
@@ -1507,6 +1508,8 @@ export class Publisher {
 		stream: Writer,
 		controls: SubscriptionControls,
 		serving: {
+			/** The track `track` reads, which fetches the frames a group's copy lacks. */
+			source: track.Consumer;
 			sub: bigint;
 			broadcast: Path.Valid;
 			stamp: Stamp | undefined;
@@ -1523,7 +1526,7 @@ export class Publisher {
 			initial: bigint;
 		},
 	): Promise<boolean> {
-		const { sub, broadcast, stamp, publisher, compress, named, bounds, initial } = serving;
+		const { source, sub, broadcast, stamp, publisher, compress, named, bounds, initial } = serving;
 		// What the wire was told of each key: served, or given up, and how. Kept in the
 		// reader's own record, which its drops consult too. Undefined before lite-05.
 		const record = named ? hooks.wire(track) : undefined;
@@ -2052,10 +2055,12 @@ export class Publisher {
 				// The FIN waits for every stream to finish or reset, including one that has not opened yet.
 				// A stream reset to make room fails the group like any other reset, so it is dropped.
 				const task = (async () => {
-					const writer = await this.#openGroup(options);
-					let failed: Error | undefined;
+					let failed = await this.#fetchHead(source, track, options);
 					try {
-						failed = writer instanceof Error ? writer : await this.#serveGroup(writer, options);
+						if (!failed) {
+							const writer = await this.#openGroup(options);
+							failed = writer instanceof Error ? writer : await this.#serveGroup(writer, options);
+						}
 					} finally {
 						options.givenUp.close();
 					}
@@ -2560,6 +2565,39 @@ export class Publisher {
 			hooks.releaseGroupReader(group, failed);
 			return failed;
 		}
+	}
+
+	/**
+	 * Swap a group whose copy lacks frames the subscription asked for for a copy fetched from
+	 * that frame on, as the Rust `position_group` does: a cache only makes things faster, so
+	 * a partial hit asks upstream for the rest.
+	 *
+	 * @returns The fetch's error, for SUBSCRIBE_DROP to name, when nothing upstream supplies them
+	 *
+	 * @internal
+	 */
+	async #fetchHead(source: track.Consumer, reader: track.Subscriber, options: RunGroup): Promise<Error | undefined> {
+		const held = options.group;
+		if (hooks.groupIndex(held) <= options.start) return undefined;
+		const asking = reader.subscription.peek();
+		const left = new AbortController();
+		void options.unsubscribed.then(() => left.abort(new Error("unsubscribed while fetching a group's head")));
+		const fetch: track.FetchGroupOptions & broadcast.FetchFrom = {
+			priority: asking?.priority,
+			maxDelay: asking?.delay?.max ?? undefined,
+			signal: left.signal,
+			frameStart: options.start,
+		};
+		try {
+			options.group = await source.fetchGroup(held.start, fetch);
+		} catch (err: unknown) {
+			return error(err);
+		} finally {
+			options.givenUp.close();
+			held.close();
+		}
+		options.givenUp = new GivenUp(options.group);
+		return undefined;
 	}
 
 	/**
