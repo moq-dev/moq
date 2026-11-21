@@ -88,15 +88,15 @@ export const ClaimsSchema: ZodMiniPipe<ZodMiniPipe<ZodMiniObject<{
 	iss: ZodMiniOptional<ZodMiniUnknown>;
 	jti: ZodMiniOptional<ZodMiniString<string>>;
 	nbf: ZodMiniOptional<ZodMiniInt>;
-	publish: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniArray<ZodMiniString<string>>, ZodMiniObject<{
-		path: ZodMiniArray<ZodMiniString<string>>;
+	publish: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniArray<ZodMiniPipe<ZodMiniString<string>, ZodMiniTransform<string, string>>>, ZodMiniObject<{
+		path: ZodMiniArray<ZodMiniPipe<ZodMiniString<string>, ZodMiniTransform<string, string>>>;
 		rate: ZodMiniNumber<number>;
 	}, $strict>]>>;
 	put: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniString<string>, ZodMiniArray<ZodMiniString<string>>]>>;
 	root: ZodMiniOptional<ZodMiniString<string>>;
 	sub: ZodMiniOptional<ZodMiniUnknown>;
-	subscribe: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniArray<ZodMiniString<string>>, ZodMiniObject<{
-		path: ZodMiniArray<ZodMiniString<string>>;
+	subscribe: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniArray<ZodMiniPipe<ZodMiniString<string>, ZodMiniTransform<string, string>>>, ZodMiniObject<{
+		path: ZodMiniArray<ZodMiniPipe<ZodMiniString<string>, ZodMiniTransform<string, string>>>;
 		rate: ZodMiniNumber<number>;
 	}, $strict>]>>;
 }, $strict>, ZodMiniTransform<{
@@ -158,16 +158,28 @@ export const GrantSchema: ZodMiniObject<{
 	}>>;
 	mounts: ZodMiniOptional<ZodMiniRecord<ZodMiniString<string>, ZodMiniString<string>>>;
 	peer: ZodMiniOptional<ZodMiniBoolean<boolean>>;
-	publish: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniArray<ZodMiniString<string>>, ZodMiniObject<{
-		path: ZodMiniArray<ZodMiniString<string>>;
+	publish: ZodMiniOptional<ZodMiniPipe<ZodMiniUnion<readonly [ZodMiniArray<ZodMiniPipe<ZodMiniString<string>, ZodMiniTransform<string, string>>>, ZodMiniObject<{
+		path: ZodMiniArray<ZodMiniPipe<ZodMiniString<string>, ZodMiniTransform<string, string>>>;
 		rate: ZodMiniNumber<number>;
-	}, $strict>]>>;
+	}, $strict>]>, ZodMiniTransform<string[] | {
+		path: string[];
+		rate: number;
+	}, string[] | {
+		path: string[];
+		rate: number;
+	}>>>;
 	revalidate: ZodMiniOptional<ZodMiniInt>;
 	root: ZodMiniOptional<ZodMiniString<string>>;
-	subscribe: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniArray<ZodMiniString<string>>, ZodMiniObject<{
-		path: ZodMiniArray<ZodMiniString<string>>;
+	subscribe: ZodMiniOptional<ZodMiniPipe<ZodMiniUnion<readonly [ZodMiniArray<ZodMiniPipe<ZodMiniString<string>, ZodMiniTransform<string, string>>>, ZodMiniObject<{
+		path: ZodMiniArray<ZodMiniPipe<ZodMiniString<string>, ZodMiniTransform<string, string>>>;
 		rate: ZodMiniNumber<number>;
-	}, $strict>]>>;
+	}, $strict>]>, ZodMiniTransform<string[] | {
+		path: string[];
+		rate: number;
+	}, string[] | {
+		path: string[];
+		rate: number;
+	}>>>;
 	tier: ZodMiniOptional<ZodMiniString<string>>;
 }, $strict>;
 
@@ -211,10 +223,10 @@ export const KeySchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 	kty: ZodMiniLiteral<"oct">;
 	scope: ZodMiniOptional<ZodMiniPipe<ZodMiniObject<{
 		get: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
-		publish: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+		publish: ZodMiniOptional<ZodMiniArray<ZodMiniPipe<ZodMiniString<string>, ZodMiniTransform<string, string>>>>;
 		put: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
 		root: ZodMiniDefault<ZodMiniString<string>>;
-		subscribe: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+		subscribe: ZodMiniOptional<ZodMiniArray<ZodMiniPipe<ZodMiniString<string>, ZodMiniTransform<string, string>>>>;
 	}, $strict>, ZodMiniTransform<Omit<{
 		get?: string[] | undefined;
 		publish?: string[] | undefined;
@@ -260,10 +272,10 @@ export const KeySchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 	qi: ZodMiniOptional<ZodMiniString<string>>;
 	scope: ZodMiniOptional<ZodMiniPipe<ZodMiniObject<{
 		get: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
-		publish: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+		publish: ZodMiniOptional<ZodMiniArray<ZodMiniPipe<ZodMiniString<string>, ZodMiniTransform<string, string>>>>;
 		put: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
 		root: ZodMiniDefault<ZodMiniString<string>>;
-		subscribe: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+		subscribe: ZodMiniOptional<ZodMiniArray<ZodMiniPipe<ZodMiniString<string>, ZodMiniTransform<string, string>>>>;
 	}, $strict>, ZodMiniTransform<Omit<{
 		get?: string[] | undefined;
 		publish?: string[] | undefined;
@@ -305,10 +317,10 @@ export const KeySchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 	kty: ZodMiniLiteral<"EC">;
 	scope: ZodMiniOptional<ZodMiniPipe<ZodMiniObject<{
 		get: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
-		publish: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+		publish: ZodMiniOptional<ZodMiniArray<ZodMiniPipe<ZodMiniString<string>, ZodMiniTransform<string, string>>>>;
 		put: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
 		root: ZodMiniDefault<ZodMiniString<string>>;
-		subscribe: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+		subscribe: ZodMiniOptional<ZodMiniArray<ZodMiniPipe<ZodMiniString<string>, ZodMiniTransform<string, string>>>>;
 	}, $strict>, ZodMiniTransform<Omit<{
 		get?: string[] | undefined;
 		publish?: string[] | undefined;
@@ -349,10 +361,10 @@ export const KeySchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 	kty: ZodMiniLiteral<"OKP">;
 	scope: ZodMiniOptional<ZodMiniPipe<ZodMiniObject<{
 		get: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
-		publish: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+		publish: ZodMiniOptional<ZodMiniArray<ZodMiniPipe<ZodMiniString<string>, ZodMiniTransform<string, string>>>>;
 		put: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
 		root: ZodMiniDefault<ZodMiniString<string>>;
-		subscribe: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+		subscribe: ZodMiniOptional<ZodMiniArray<ZodMiniPipe<ZodMiniString<string>, ZodMiniTransform<string, string>>>>;
 	}, $strict>, ZodMiniTransform<Omit<{
 		get?: string[] | undefined;
 		publish?: string[] | undefined;
@@ -404,10 +416,10 @@ export const KeySetSchema: ZodMiniObject<{
 		kty: ZodMiniLiteral<"oct">;
 		scope: ZodMiniOptional<ZodMiniPipe<ZodMiniObject<{
 			get: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
-			publish: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+			publish: ZodMiniOptional<ZodMiniArray<ZodMiniPipe<ZodMiniString<string>, ZodMiniTransform<string, string>>>>;
 			put: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
 			root: ZodMiniDefault<ZodMiniString<string>>;
-			subscribe: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+			subscribe: ZodMiniOptional<ZodMiniArray<ZodMiniPipe<ZodMiniString<string>, ZodMiniTransform<string, string>>>>;
 		}, $strict>, ZodMiniTransform<Omit<{
 			get?: string[] | undefined;
 			publish?: string[] | undefined;
@@ -453,10 +465,10 @@ export const KeySetSchema: ZodMiniObject<{
 		qi: ZodMiniOptional<ZodMiniString<string>>;
 		scope: ZodMiniOptional<ZodMiniPipe<ZodMiniObject<{
 			get: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
-			publish: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+			publish: ZodMiniOptional<ZodMiniArray<ZodMiniPipe<ZodMiniString<string>, ZodMiniTransform<string, string>>>>;
 			put: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
 			root: ZodMiniDefault<ZodMiniString<string>>;
-			subscribe: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+			subscribe: ZodMiniOptional<ZodMiniArray<ZodMiniPipe<ZodMiniString<string>, ZodMiniTransform<string, string>>>>;
 		}, $strict>, ZodMiniTransform<Omit<{
 			get?: string[] | undefined;
 			publish?: string[] | undefined;
@@ -498,10 +510,10 @@ export const KeySetSchema: ZodMiniObject<{
 		kty: ZodMiniLiteral<"EC">;
 		scope: ZodMiniOptional<ZodMiniPipe<ZodMiniObject<{
 			get: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
-			publish: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+			publish: ZodMiniOptional<ZodMiniArray<ZodMiniPipe<ZodMiniString<string>, ZodMiniTransform<string, string>>>>;
 			put: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
 			root: ZodMiniDefault<ZodMiniString<string>>;
-			subscribe: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+			subscribe: ZodMiniOptional<ZodMiniArray<ZodMiniPipe<ZodMiniString<string>, ZodMiniTransform<string, string>>>>;
 		}, $strict>, ZodMiniTransform<Omit<{
 			get?: string[] | undefined;
 			publish?: string[] | undefined;
@@ -542,10 +554,10 @@ export const KeySetSchema: ZodMiniObject<{
 		kty: ZodMiniLiteral<"OKP">;
 		scope: ZodMiniOptional<ZodMiniPipe<ZodMiniObject<{
 			get: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
-			publish: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+			publish: ZodMiniOptional<ZodMiniArray<ZodMiniPipe<ZodMiniString<string>, ZodMiniTransform<string, string>>>>;
 			put: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
 			root: ZodMiniDefault<ZodMiniString<string>>;
-			subscribe: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+			subscribe: ZodMiniOptional<ZodMiniArray<ZodMiniPipe<ZodMiniString<string>, ZodMiniTransform<string, string>>>>;
 		}, $strict>, ZodMiniTransform<Omit<{
 			get?: string[] | undefined;
 			publish?: string[] | undefined;
@@ -810,10 +822,10 @@ export type Scope = output<typeof ScopeSchema>;
 
 export const ScopeSchema: ZodMiniPipe<ZodMiniObject<{
 	get: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
-	publish: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+	publish: ZodMiniOptional<ZodMiniArray<ZodMiniPipe<ZodMiniString<string>, ZodMiniTransform<string, string>>>>;
 	put: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
 	root: ZodMiniDefault<ZodMiniString<string>>;
-	subscribe: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+	subscribe: ZodMiniOptional<ZodMiniArray<ZodMiniPipe<ZodMiniString<string>, ZodMiniTransform<string, string>>>>;
 }, $strict>, ZodMiniTransform<Omit<{
 	get?: string[] | undefined;
 	publish?: string[] | undefined;
