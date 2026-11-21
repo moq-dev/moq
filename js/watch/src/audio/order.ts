@@ -1,3 +1,5 @@
+import { Time } from "@moq/net";
+
 /**
  * Puts one subscription's frames in timestamp order for the audio decoder.
  *
@@ -9,7 +11,8 @@
  * A buffered subscription holds its head and releases it sorted. The head is complete once a newer
  * group than the first arrives, or once the first group alone runs past the floor: the ring could not
  * start playing before holding that much, so waiting for the head costs no startup latency. It is
- * also released once it spans the subscription's max delay, since nothing older is served. After
+ * also released once it spans the subscription's max delay, since nothing older is served, or once it
+ * has waited that long, which bounds what it keeps by arrival time whatever the timestamps say. After
  * that, and throughout when not holding, a frame older than one already decoded is not admitted.
  */
 export class Order<T extends { group: number; frame: { timestamp: number } }> {
@@ -17,8 +20,8 @@ export class Order<T extends { group: number; frame: { timestamp: number } }> {
 	#hold: (() => { floor: number; maxDelay: number }) | undefined;
 	// The head, in arrival order.
 	#held: T[] = [];
-	// The group the head started with, and its own first frame.
-	#first?: { group: number; timestamp: number };
+	// The group the head started with, its own first frame, and when that arrived.
+	#first?: { group: number; timestamp: number; arrived: number };
 	// The oldest and newest held timestamps.
 	#span?: { oldest: number; newest: number };
 	// The newest frame admitted since the decoder was last reset.
@@ -35,7 +38,7 @@ export class Order<T extends { group: number; frame: { timestamp: number } }> {
 		if (!hold) return [read];
 
 		const { group, frame } = read;
-		this.#first ??= { group, timestamp: frame.timestamp };
+		this.#first ??= { group, timestamp: frame.timestamp, arrived: Time.Micro.now() };
 		if (group > this.#first.group) return [...this.flush(), read];
 
 		this.#held.push(read);
@@ -44,7 +47,8 @@ export class Order<T extends { group: number; frame: { timestamp: number } }> {
 		this.#span = { oldest, newest };
 
 		const ran = group === this.#first.group && frame.timestamp - this.#first.timestamp > hold.floor;
-		if (ran || newest - oldest >= hold.maxDelay) return this.flush();
+		const waited = Time.Micro.now() - this.#first.arrived;
+		if (ran || newest - oldest >= hold.maxDelay || waited >= hold.maxDelay) return this.flush();
 		return [];
 	}
 
