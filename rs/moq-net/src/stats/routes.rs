@@ -171,6 +171,11 @@ pub struct Routes {
 }
 
 impl Routes {
+	/// Whether nothing has been counted.
+	pub(crate) fn is_zero(&self) -> bool {
+		*self == Self::default()
+	}
+
 	/// Add every counter from another readout.
 	pub fn add(&mut self, other: Self) {
 		self.changed += other.changed;
