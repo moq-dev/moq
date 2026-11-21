@@ -918,7 +918,7 @@ mod tests {
 			)
 			.unwrap();
 		{
-			let mut guard = catalog.modify().unwrap();
+			let mut guard = catalog.modify(catalog.next_timestamp()).unwrap();
 			let mut config = hang::catalog::AudioConfig::new(hang::catalog::AAC { profile: 2 }, 48_000, 2);
 			config.description = Some(Bytes::from_static(&[0x11, 0x90]));
 			config.container = hang::catalog::Container::Legacy;
@@ -1033,7 +1033,7 @@ mod tests {
 			config.description = Some(Bytes::from_static(&[0x11, 0x90]));
 			config.container = hang::catalog::Container::Legacy;
 			catalog
-				.modify()
+				.modify(catalog.next_timestamp())
 				.unwrap()
 				.audio
 				.renditions

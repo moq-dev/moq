@@ -155,7 +155,12 @@ async fn vp8_source_to_cmaf_export_synthesizes_vp08() {
 	let mut live = Live::new(".vp8", |catalog, name| {
 		let mut config = VideoConfig::new(VideoCodec::VP8);
 		config.container = Container::Legacy;
-		catalog.modify().unwrap().video.renditions.insert(name, config);
+		catalog
+			.modify(catalog.next_timestamp())
+			.unwrap()
+			.video
+			.renditions
+			.insert(name, config);
 	});
 	// Geometry-less startup frames must not park the source before the keyframe.
 	live.track.write(raw_frame(0, &[0x31, 0x00, 0x00], true)).unwrap();
@@ -209,7 +214,12 @@ async fn dimensionless_video_waits_for_catalog_geometry() {
 	let mut live = Live::new(".vp8", |catalog, name| {
 		let mut config = VideoConfig::new(VideoCodec::VP8);
 		config.container = Container::Legacy;
-		catalog.modify().unwrap().video.renditions.insert(name, config);
+		catalog
+			.modify(catalog.next_timestamp())
+			.unwrap()
+			.video
+			.renditions
+			.insert(name, config);
 	});
 	let name = live.track.name().to_string();
 	// A VP8 interframe carries no geometry. Mark it as the group boundary only
@@ -224,7 +234,7 @@ async fn dimensionless_video_waits_for_catalog_geometry() {
 	);
 
 	{
-		let mut catalog = live.catalog.modify().unwrap();
+		let mut catalog = live.catalog.modify(live.catalog.next_timestamp()).unwrap();
 		let config = catalog.video.renditions.get_mut(&name).unwrap();
 		config.coded_width = Some(320);
 		config.coded_height = Some(240);
@@ -263,7 +273,12 @@ async fn dimensionless_video_rejects_a_malformed_description() {
 		});
 		config.description = Some(bytes::Bytes::from_static(&[1]));
 		config.container = Container::Legacy;
-		catalog.modify().unwrap().video.renditions.insert(name, config);
+		catalog
+			.modify(catalog.next_timestamp())
+			.unwrap()
+			.video
+			.renditions
+			.insert(name, config);
 	});
 
 	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await);
@@ -295,7 +310,12 @@ async fn vp9_source_to_cmaf_export_synthesizes_vp09() {
 		config.coded_width = Some(320);
 		config.coded_height = Some(240);
 		config.container = Container::Legacy;
-		catalog.modify().unwrap().video.renditions.insert(name, config);
+		catalog
+			.modify(catalog.next_timestamp())
+			.unwrap()
+			.video
+			.renditions
+			.insert(name, config);
 	});
 	live.track.write(raw_frame(0, &[0x82, 0x49, 0x83, 0x42], true)).unwrap();
 	live.track.end_with(None).unwrap();
@@ -360,7 +380,12 @@ async fn av1_source_to_cmaf_export_synthesizes_av01() {
 		config.coded_width = Some(320);
 		config.coded_height = Some(240);
 		config.container = Container::Legacy;
-		catalog.modify().unwrap().video.renditions.insert(name, config);
+		catalog
+			.modify(catalog.next_timestamp())
+			.unwrap()
+			.video
+			.renditions
+			.insert(name, config);
 	});
 	live.track.write(raw_frame(0, &[0x12, 0x00, 0x0a, 0x0b], true)).unwrap();
 	live.track.end_with(None).unwrap();
@@ -653,7 +678,14 @@ async fn zero_fragment_duration_trusts_a_long_gap_only_without_reordering() {
 		.unwrap();
 	for (reorder, expected) in [(None, cadence), (Some(0), std::time::Duration::from_millis(50))] {
 		let mut live = Live::avc3();
-		for config in live.catalog.modify().unwrap().video.renditions.values_mut() {
+		for config in live
+			.catalog
+			.modify(live.catalog.next_timestamp())
+			.unwrap()
+			.video
+			.renditions
+			.values_mut()
+		{
 			config.reorder = reorder;
 		}
 		live.track.write(video_frame(0, true)).unwrap();
@@ -681,7 +713,12 @@ async fn ntsc_tail_uses_a_representable_catalog_cadence() {
 		config.coded_height = Some(240);
 		config.framerate = Some(30_000.0 / 1001.0);
 		config.container = Container::Legacy;
-		catalog.modify().unwrap().video.renditions.insert(name, config);
+		catalog
+			.modify(catalog.next_timestamp())
+			.unwrap()
+			.video
+			.renditions
+			.insert(name, config);
 	});
 	live.track.write(video_frame(0, true)).unwrap();
 	live.track.end_with(None).unwrap();
@@ -705,7 +742,12 @@ async fn unusable_framerate_uses_the_standard_fallback_rate() {
 		config.coded_height = Some(240);
 		config.framerate = Some(0.0005);
 		config.container = Container::Legacy;
-		catalog.modify().unwrap().video.renditions.insert(name, config);
+		catalog
+			.modify(catalog.next_timestamp())
+			.unwrap()
+			.video
+			.renditions
+			.insert(name, config);
 	});
 	live.track.write(raw_frame(0, &[0x82, 0x00], true)).unwrap();
 	live.track.end_with(None).unwrap();
@@ -1057,7 +1099,12 @@ fn live_av() -> (Live, crate::container::Producer<crate::catalog::hang::Containe
 	let audio = live.add_track(".opus", |catalog, name| {
 		let mut config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
 		config.container = Container::Legacy;
-		catalog.modify().unwrap().audio.renditions.insert(name, config);
+		catalog
+			.modify(catalog.next_timestamp())
+			.unwrap()
+			.audio
+			.renditions
+			.insert(name, config);
 	});
 	(live, audio)
 }
@@ -1364,7 +1411,7 @@ fn video_codec(init: &Bytes) -> mp4_atom::Codec {
 fn wait_for_sps(live: &mut Live) {
 	use hang::catalog::VideoCodec;
 
-	let mut catalog = live.catalog.modify().unwrap();
+	let mut catalog = live.catalog.modify(live.catalog.next_timestamp()).unwrap();
 	let config = catalog.video.renditions.values_mut().next().expect("video");
 	let VideoCodec::H264(h264) = &mut config.codec else {
 		panic!("expected H.264");
@@ -1495,10 +1542,22 @@ async fn returning_rendition_keeps_its_track_id() {
 	let mut fragments = drain_now(&mut exporter).await;
 
 	// The camera turns off, then back on a second later.
-	let config = live.catalog.modify().unwrap().video.renditions.remove(&name).unwrap();
+	let config = live
+		.catalog
+		.modify(live.catalog.next_timestamp())
+		.unwrap()
+		.video
+		.renditions
+		.remove(&name)
+		.unwrap();
 	fragments.extend(drain_now(&mut exporter).await);
 	live.track.write(video_frame(1_000_000, true)).unwrap();
-	live.catalog.modify().unwrap().video.renditions.insert(name, config);
+	live.catalog
+		.modify(live.catalog.next_timestamp())
+		.unwrap()
+		.video
+		.renditions
+		.insert(name, config);
 	fragments.extend(drain_now(&mut exporter).await);
 	live.track.write(video_frame(1_033_000, false)).unwrap();
 	live.track.write(video_frame(1_066_000, true)).unwrap();
@@ -1524,7 +1583,12 @@ fn add_opus(live: &mut Live) -> (crate::container::Producer<crate::catalog::hang
 	let audio = live.add_track(".opus", |catalog, name| {
 		let mut config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
 		config.container = Container::Legacy;
-		catalog.modify().unwrap().audio.renditions.insert(name, config);
+		catalog
+			.modify(catalog.next_timestamp())
+			.unwrap()
+			.audio
+			.renditions
+			.insert(name, config);
 	});
 	let name = audio.name().to_string();
 	(audio, name)
@@ -1576,7 +1640,12 @@ async fn a_failed_rendition_continues_on_its_replacement() {
 		}
 		let mut replacement = replacement.unwrap_or_else(|| add_opus(&mut live).0);
 		if retired_unread {
-			live.catalog.modify().unwrap().audio.renditions.remove(&failed);
+			live.catalog
+				.modify(live.catalog.next_timestamp())
+				.unwrap()
+				.audio
+				.renditions
+				.remove(&failed);
 		}
 		// A replacement is new content, read from its live edge, as a moved rendition is.
 		fragments.extend(drain_now(&mut exporter).await);
@@ -1584,7 +1653,12 @@ async fn a_failed_rendition_continues_on_its_replacement() {
 		fragments.extend(drain_now(&mut exporter).await);
 		write_audio(&mut replacement, 1_100_000, 1);
 		live.track.write(video_frame(1_100_000, true)).unwrap();
-		live.catalog.modify().unwrap().audio.renditions.remove(&failed);
+		live.catalog
+			.modify(live.catalog.next_timestamp())
+			.unwrap()
+			.audio
+			.renditions
+			.remove(&failed);
 		live.track.write(video_frame(1_200_000, true)).unwrap();
 		let _finished = replacement.finish().unwrap();
 		fragments.extend(drain_now(&mut exporter).await);
@@ -1683,7 +1757,7 @@ async fn a_track_failing_before_its_config_leaves_the_init_to_the_rest() {
 	let init = chunk_now(&mut exporter).await.init().expect("init");
 	let mut fragments = drain_now(&mut exporter).await;
 	live.catalog
-		.modify()
+		.modify(live.catalog.next_timestamp())
 		.unwrap()
 		.audio
 		.renditions
@@ -1734,7 +1808,7 @@ async fn a_changed_sample_entry_fails() {
 	drain_now(&mut exporter).await;
 
 	live.catalog
-		.modify()
+		.modify(live.catalog.next_timestamp())
 		.unwrap()
 		.audio
 		.renditions
@@ -1744,7 +1818,7 @@ async fn a_changed_sample_entry_fails() {
 	drain_now(&mut exporter).await;
 
 	live.catalog
-		.modify()
+		.modify(live.catalog.next_timestamp())
 		.unwrap()
 		.audio
 		.renditions
@@ -1770,7 +1844,7 @@ fn opus_head(channels: u32, pre_skip: u16) -> Bytes {
 /// Set the catalog description of the audio rendition `name`.
 fn describe_audio(live: &mut Live, name: &str, description: Bytes) {
 	live.catalog
-		.modify()
+		.modify(live.catalog.next_timestamp())
 		.unwrap()
 		.audio
 		.renditions
@@ -1863,12 +1937,19 @@ async fn a_settled_opus_head_survives_a_return() {
 	describe_audio(&mut live, &name, opus_head(2, 312));
 	drain_now(&mut exporter).await;
 
-	let mut config = live.catalog.modify().unwrap().audio.renditions.remove(&name).unwrap();
+	let mut config = live
+		.catalog
+		.modify(live.catalog.next_timestamp())
+		.unwrap()
+		.audio
+		.renditions
+		.remove(&name)
+		.unwrap();
 	drain_now(&mut exporter).await;
 	write_audio(&mut audio, 1_000_000, 5);
 	config.description = None;
 	live.catalog
-		.modify()
+		.modify(live.catalog.next_timestamp())
 		.unwrap()
 		.audio
 		.renditions
@@ -1896,7 +1977,7 @@ async fn an_opus_head_fails(channels: u32, head: Bytes) {
 	chunk_now(&mut exporter).await.init().expect("init");
 	drain_now(&mut exporter).await;
 
-	let mut catalog = live.catalog.modify().unwrap();
+	let mut catalog = live.catalog.modify(live.catalog.next_timestamp()).unwrap();
 	let config = catalog.audio.renditions.get_mut(&name).unwrap();
 	config.channel_count = channels;
 	config.description = Some(head);
@@ -1932,7 +2013,7 @@ async fn aac_bitrate_churn_keeps_the_track() {
 	chunk_now(&mut exporter).await.init().expect("init");
 
 	live.catalog
-		.modify()
+		.modify(live.catalog.next_timestamp())
 		.unwrap()
 		.audio
 		.renditions
@@ -1968,7 +2049,12 @@ async fn a_changed_catalog_description_fails() {
 		config.description = Some(avcc(PPS));
 		config.coded_width = Some(320);
 		config.coded_height = Some(240);
-		catalog.modify().unwrap().video.renditions.insert(name, config);
+		catalog
+			.modify(catalog.next_timestamp())
+			.unwrap()
+			.video
+			.renditions
+			.insert(name, config);
 	});
 	let name = live.track.name().to_string();
 	live.track
@@ -1978,7 +2064,7 @@ async fn a_changed_catalog_description_fails() {
 	chunk_now(&mut exporter).await.init().expect("init");
 
 	live.catalog
-		.modify()
+		.modify(live.catalog.next_timestamp())
 		.unwrap()
 		.video
 		.renditions
@@ -2116,7 +2202,12 @@ async fn split_h265_parameter_sets_keep_the_sync_point() {
 			config.coded_width = Some(320);
 			config.coded_height = Some(240);
 			config.container = Container::Legacy;
-			catalog.modify().unwrap().video.renditions.insert(name, config);
+			catalog
+				.modify(catalog.next_timestamp())
+				.unwrap()
+				.video
+				.renditions
+				.insert(name, config);
 		})
 	};
 	split_parameter_sets_keep_the_sync_point(live, AUD, &[VPS, SPS, PPS], IDR, DELTA).await;
@@ -2153,11 +2244,18 @@ async fn an_incompatible_return_fails() {
 	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await);
 	chunk_now(&mut exporter).await.init().expect("init");
 
-	let mut config = live.catalog.modify().unwrap().audio.renditions.remove(&name).unwrap();
+	let mut config = live
+		.catalog
+		.modify(live.catalog.next_timestamp())
+		.unwrap()
+		.audio
+		.renditions
+		.remove(&name)
+		.unwrap();
 	drain_now(&mut exporter).await;
 	config.sample_rate = 24_000;
 	live.catalog
-		.modify()
+		.modify(live.catalog.next_timestamp())
 		.unwrap()
 		.audio
 		.renditions
@@ -2182,10 +2280,17 @@ async fn a_return_resumes_after_its_last_group() {
 	chunk_now(&mut exporter).await.init().expect("init");
 	drain_now(&mut exporter).await;
 
-	let config = live.catalog.modify().unwrap().audio.renditions.remove(&name).unwrap();
+	let config = live
+		.catalog
+		.modify(live.catalog.next_timestamp())
+		.unwrap()
+		.audio
+		.renditions
+		.remove(&name)
+		.unwrap();
 	drain_now(&mut exporter).await;
 	live.catalog
-		.modify()
+		.modify(live.catalog.next_timestamp())
 		.unwrap()
 		.audio
 		.renditions
@@ -2327,7 +2432,12 @@ async fn hevc_main10_is_described_from_its_sps() {
 			constraint_flags: [0x90, 0, 0, 0, 0, 0],
 		});
 		config.container = Container::Legacy;
-		catalog.modify().unwrap().video.renditions.insert(name, config);
+		catalog
+			.modify(catalog.next_timestamp())
+			.unwrap()
+			.video
+			.renditions
+			.insert(name, config);
 	});
 	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await);
 	let pending = kio::clock::timeout(std::time::Duration::from_millis(1), exporter.next_chunk()).await;
@@ -2390,7 +2500,7 @@ async fn cmaf_source_exports_at_the_frame_timestamp() {
 	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let track = broadcast.create_track("video", timed()).unwrap();
 	catalog
-		.modify()
+		.modify(catalog.next_timestamp())
 		.unwrap()
 		.video
 		.renditions
@@ -2502,11 +2612,23 @@ async fn a_returning_rendition_may_restart_its_sps() {
 	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await);
 	chunk_now(&mut exporter).await.init().expect("init");
 
-	let config = live.catalog.modify().unwrap().video.renditions.remove(&name).unwrap();
+	let config = live
+		.catalog
+		.modify(live.catalog.next_timestamp())
+		.unwrap()
+		.video
+		.renditions
+		.remove(&name)
+		.unwrap();
 	drain_now(&mut exporter).await;
 	let sps2: &[u8] = &[0x67, 0x42, 0xc0, 0x1f, 0xde, 0xad, 0xbe, 0xee];
 	live.track.write(annexb_frame(1_000_000, &[sps2, PPS, IDR])).unwrap();
-	live.catalog.modify().unwrap().video.renditions.insert(name, config);
+	live.catalog
+		.modify(live.catalog.next_timestamp())
+		.unwrap()
+		.video
+		.renditions
+		.insert(name, config);
 	drain_now(&mut exporter).await;
 	// The next keyframe flushes the restarted one.
 	live.track.write(video_frame(1_033_000, true)).unwrap();
@@ -2530,7 +2652,7 @@ async fn a_changed_catalog_profile_fails() {
 
 	{
 		use hang::catalog::VideoCodec;
-		let mut catalog = live.catalog.modify().unwrap();
+		let mut catalog = live.catalog.modify(live.catalog.next_timestamp()).unwrap();
 		let config = catalog.video.renditions.get_mut(&name).unwrap();
 		let VideoCodec::H264(h264) = &mut config.codec else {
 			panic!("expected H.264");
@@ -2564,7 +2686,12 @@ async fn avc3_with_a_record_exports_as_avc3() {
 		config.framerate = Some(30.0);
 		config.container = Container::Legacy;
 		config.description = Some(description);
-		catalog.modify().unwrap().video.renditions.insert(name, config);
+		catalog
+			.modify(catalog.next_timestamp())
+			.unwrap()
+			.video
+			.renditions
+			.insert(name, config);
 	});
 	live.track
 		.write(crate::container::Frame {
@@ -2613,7 +2740,7 @@ async fn high_profile_inits_from_the_catalog() {
 	let mut live = Live::avc3();
 	{
 		use hang::catalog::VideoCodec;
-		let mut catalog = live.catalog.modify().unwrap();
+		let mut catalog = live.catalog.modify(live.catalog.next_timestamp()).unwrap();
 		let config = catalog.video.renditions.values_mut().next().unwrap();
 		let VideoCodec::H264(h264) = &mut config.codec else {
 			panic!("expected H.264");
@@ -2650,7 +2777,12 @@ async fn annexb_without_dimensions_waits_for_the_sps() {
 		});
 		config.container = Container::Legacy;
 		config.framerate = Some(30.0);
-		catalog.modify().unwrap().video.renditions.insert(name, config);
+		catalog
+			.modify(catalog.next_timestamp())
+			.unwrap()
+			.video
+			.renditions
+			.insert(name, config);
 	});
 	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await);
 	let pending = kio::clock::timeout(std::time::Duration::from_millis(1), exporter.next_chunk()).await;
@@ -2687,7 +2819,12 @@ async fn hevc_main_inits_from_the_catalog() {
 		config.container = Container::Legacy;
 		config.coded_width = Some(320);
 		config.coded_height = Some(240);
-		catalog.modify().unwrap().video.renditions.insert(name, config);
+		catalog
+			.modify(catalog.next_timestamp())
+			.unwrap()
+			.video
+			.renditions
+			.insert(name, config);
 	});
 	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await);
 	let init = chunk_now(&mut exporter).await.init().expect("init before any frame");
@@ -2704,7 +2841,7 @@ async fn hevc_main_inits_from_the_catalog() {
 
 /// Set whether the catalog enables rendition `name`, video or audio.
 fn set_enabled(live: &mut Live, name: &str, enabled: bool) {
-	let mut catalog = live.catalog.modify().unwrap();
+	let mut catalog = live.catalog.modify(live.catalog.next_timestamp()).unwrap();
 	if let Some(config) = catalog.video.renditions.get_mut(name) {
 		config.enabled = enabled;
 	} else {

@@ -130,7 +130,10 @@ fn republish_cut(
 	let track = broadcast.unique_track(".m2ts", catalog.track_info(hang::catalog::PRIORITY.video));
 	let name = track.name().to_string();
 	catalog
-		.mutate(|catalog| catalog.ext.mpegts.passthrough = Some(PassthroughTrack::new(name)))
+		.mutate(
+			|catalog| catalog.ext.mpegts.passthrough = Some(PassthroughTrack::new(name)),
+			catalog.next_timestamp(),
+		)
 		.unwrap();
 	let consumer = broadcast.consume();
 	let start = Instant::now();

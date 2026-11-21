@@ -765,7 +765,7 @@ mod tests {
 		config.coded_width = Some(64);
 		config.coded_height = Some(64);
 		source_catalog
-			.modify()
+			.modify(source_catalog.next_timestamp())
 			.unwrap()
 			.video
 			.renditions

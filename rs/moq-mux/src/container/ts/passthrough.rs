@@ -218,11 +218,12 @@ impl<E: super::Catalog> Drop for Section<E> {
 		// A closed catalog has nothing left to remove it from. The rate stays: it is the
 		// multiplex's, which a demultiplexing importer of the same source may also write, and
 		// that importer leaves it in place when it ends too.
-		let _ = self.catalog.mutate(|catalog| {
+		if let Ok(mut catalog) = self.catalog.edit() {
 			if let Some(mpegts) = catalog.ext.mpegts_mut() {
 				mpegts.passthrough = None;
 			}
-		});
+			let _ = catalog.commit();
+		}
 	}
 }
 
@@ -732,7 +733,8 @@ impl<E: super::Catalog> Passthrough<E> {
 		// when this meter's own value changes: one that has measured nothing leaves it alone.
 		let rate_changed = self.section.as_ref().and_then(|section| section.written.mux_rate) != written.mux_rate;
 		let update = written.clone();
-		self.catalog.mutate(|catalog| {
+		{
+			let mut catalog = self.catalog.edit()?;
 			// `new` checked the section exists, and an extension keeps it for its life.
 			if let Some(mpegts) = catalog.ext.mpegts_mut() {
 				mpegts.passthrough = Some(update.track);
@@ -740,7 +742,8 @@ impl<E: super::Catalog> Passthrough<E> {
 					mpegts.mux_rate = update.mux_rate;
 				}
 			}
-		})?;
+			catalog.commit()?;
+		}
 		match &mut self.section {
 			Some(section) => section.written = written,
 			None => {

@@ -1136,7 +1136,7 @@ fn audio_enabled_follows_each_snapshot() {
 		let mut state = State::lock();
 		let catalog = state.publish.target(Id::try_from(broadcast).unwrap()).unwrap().catalog;
 		catalog
-			.modify()
+			.modify(catalog.next_timestamp())
 			.unwrap()
 			.audio
 			.renditions
@@ -1287,7 +1287,7 @@ fn publish_catalog_roundtrip() {
 		let mut state = State::lock();
 		let catalog = state.publish.target(Id::try_from(broadcast).unwrap()).unwrap().catalog;
 		catalog
-			.modify()
+			.modify(catalog.next_timestamp())
 			.unwrap()
 			.video
 			.renditions
@@ -5967,7 +5967,7 @@ fn publish_sibling_audio(origin: u32, source_instance: &str, rendition_instance:
 	let name = {
 		let mut state = State::lock();
 		let catalog = state.publish.target(Id::try_from(source).unwrap()).unwrap().catalog;
-		let catalog = catalog.modify().unwrap();
+		let catalog = catalog.modify(catalog.next_timestamp()).unwrap();
 		catalog
 			.audio
 			.renditions
@@ -6103,7 +6103,7 @@ fn decoders_cancel_while_resolving_a_sibling() {
 	{
 		let mut state = State::lock();
 		let catalog = state.publish.target(Id::try_from(broadcast).unwrap()).unwrap().catalog;
-		let mut catalog = catalog.modify().unwrap();
+		let mut catalog = catalog.modify(catalog.next_timestamp()).unwrap();
 		let missing = moq_net::path::Relative::new("./missing").unwrap();
 		let mut audio = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
 		audio.broadcast = Some(missing.clone());
@@ -6196,14 +6196,19 @@ fn decode_audio_follows_a_sibling_broadcast_reference() {
 		let mut state = State::lock();
 		let (name, mut config) = {
 			let catalog = state.publish.target(Id::try_from(source).unwrap()).unwrap().catalog;
-			let catalog = catalog.modify().unwrap();
+			let catalog = catalog.modify(catalog.next_timestamp()).unwrap();
 			let (name, config) = catalog.audio.renditions.iter().next().expect("one rendition");
 			(name.clone(), config.clone())
 		};
 		config.broadcast = Some(moq_net::path::Relative::new("./source").unwrap());
 		config.instance = Some(instance.parse().unwrap());
 		let catalog = state.publish.target(Id::try_from(broadcast).unwrap()).unwrap().catalog;
-		catalog.modify().unwrap().audio.renditions.insert(name, config);
+		catalog
+			.modify(catalog.next_timestamp())
+			.unwrap()
+			.audio
+			.renditions
+			.insert(name, config);
 	}
 
 	let consume = request_broadcast(origin, b"d/pub");

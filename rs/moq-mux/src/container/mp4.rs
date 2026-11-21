@@ -882,7 +882,12 @@ mod tests {
 					.encode()
 					.unwrap(),
 			);
-			catalog.modify().unwrap().audio.renditions.insert(name, config);
+			catalog
+				.modify(catalog.next_timestamp())
+				.unwrap()
+				.audio
+				.renditions
+				.insert(name, config);
 		})
 	}
 
@@ -1242,7 +1247,12 @@ mod tests {
 			let audio = add_opus(&mut live, 0);
 			record(&mut export, &mut file).await;
 			let name = audio.name().to_string();
-			live.catalog.modify().unwrap().audio.renditions.remove(&name);
+			live.catalog
+				.modify(live.catalog.next_timestamp())
+				.unwrap()
+				.audio
+				.renditions
+				.remove(&name);
 			record(&mut export, &mut file).await;
 		}
 		assert_eq!(export.fmp4.declarations().count(), 1, "only the video is held");
@@ -1255,7 +1265,12 @@ mod tests {
 		let audio = audio.finish().unwrap();
 		record(&mut export, &mut file).await;
 		let name = audio.name().to_string();
-		live.catalog.modify().unwrap().audio.renditions.remove(&name);
+		live.catalog
+			.modify(live.catalog.next_timestamp())
+			.unwrap()
+			.audio
+			.renditions
+			.remove(&name);
 		live.track.write(video_frame(200_000, true)).unwrap();
 		live.track.end_with(None).unwrap();
 		record(&mut export, &mut file).await;
@@ -1435,8 +1450,14 @@ mod tests {
 
 		let mut live = Live::avc3();
 		let mut audio = add_opus(&mut live, 0);
-		if let Some(config) = live.catalog.modify().unwrap().video.renditions.values_mut().next()
-			&& let hang::catalog::VideoCodec::H264(h264) = &mut config.codec
+		if let Some(config) = live
+			.catalog
+			.modify(live.catalog.next_timestamp())
+			.unwrap()
+			.video
+			.renditions
+			.values_mut()
+			.next() && let hang::catalog::VideoCodec::H264(h264) = &mut config.codec
 		{
 			h264.profile = 110;
 		}
