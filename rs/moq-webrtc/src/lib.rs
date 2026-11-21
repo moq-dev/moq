@@ -427,7 +427,11 @@ mod tests {
 			Some(NEW_PACKET),
 			"the final packet was lost"
 		);
-		assert_eq!(fresh(&mut viewer, Some(OPUS_PACKET)).await, None, "the viewer was not closed");
+		assert_eq!(
+			fresh(&mut viewer, Some(OPUS_PACKET)).await,
+			None,
+			"the viewer was not closed"
+		);
 		// The channel also closes if the viewer panicked, so only its task tells a clean close.
 		kio::clock::timeout(TIMEOUT, task)
 			.await
@@ -462,7 +466,11 @@ mod tests {
 		live.push(NEW_PACKET);
 		let _finished = bridge.finish().unwrap();
 		assert_eq!(fresh(&mut viewer, Some(OPUS_PACKET)).await.as_deref(), Some(NEW_PACKET));
-		assert_eq!(fresh(&mut viewer, Some(OPUS_PACKET)).await, None, "the viewer was not closed");
+		assert_eq!(
+			fresh(&mut viewer, Some(OPUS_PACKET)).await,
+			None,
+			"the viewer was not closed"
+		);
 		// The channel also closes if the viewer panicked, so only its task tells a clean close.
 		kio::clock::timeout(TIMEOUT, task)
 			.await
