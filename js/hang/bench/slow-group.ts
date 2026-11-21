@@ -5,7 +5,6 @@ import { Time, Track, Varint } from "@moq/net";
 import { Signal } from "@moq/signals";
 import { Consumer } from "../src/container/consumer.ts";
 import { Format } from "../src/container/legacy.ts";
-import { defined } from "../src/defined.test-util.ts";
 
 console.log("groups,warnings,bytes,catchup_ms");
 for (const count of [1, 16, 256, 1024]) {
@@ -16,7 +15,7 @@ for (const count of [1, 16, 256, 1024]) {
 		delay,
 	});
 	const write = (sequence: bigint) => {
-		const group = defined(track.createGroup(sequence));
+		const group = track.createGroup(sequence);
 		group.writeFrame({ payload: Varint.encode(Number(sequence) * 1000), timestamp: Time.Timestamp.now() });
 	};
 	const buffered = async (timestamp: number) => {

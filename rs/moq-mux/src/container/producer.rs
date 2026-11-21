@@ -686,10 +686,7 @@ where
 				return Err(super::MissingKeyframe.into());
 			}
 			let group = match (self.pending_start.take(), start) {
-				(Some(start), _) => self
-					.inner
-					.create_group(moq_net::group::Info { start })?
-					.ok_or(moq_net::Error::Duplicate)?,
+				(Some(start), _) => self.inner.create_group(moq_net::group::Info { start })?,
 				(None, Some(start)) => {
 					// A track's first group says nothing came before it, so a reader can tell it
 					// is the first: a decoder starting there needs no warmup.
@@ -955,10 +952,7 @@ where
 		self.pending_start = None;
 		let mut group = match appended {
 			true => self.inner.append_group(timestamp)?,
-			false => self
-				.inner
-				.create_group(moq_net::group::Info { start })?
-				.ok_or(moq_net::Error::Duplicate)?,
+			false => self.inner.create_group(moq_net::group::Info { start })?,
 		};
 		match self.container.kind() {
 			Kind::Data => group.write_frame(timestamp, Bytes::new())?,

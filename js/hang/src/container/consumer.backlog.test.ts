@@ -7,7 +7,6 @@ import { Duration, type Installed, Instant, now } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { Time, Track, Varint } from "@moq/net";
 import { race } from "@moq/signals";
-import { defined } from "../defined.test-util.ts";
 import { Consumer } from "./consumer.ts";
 import { Jitter } from "./jitter.ts";
 import { Format } from "./legacy.ts";
@@ -49,7 +48,7 @@ async function play(
 	try {
 		for (const [at, sequence, media] of events) {
 			await clock.advance(Duration.millis(base + at).saturatingSub(now().since(Instant.ZERO)));
-			const group = defined(track.createGroup(BigInt(sequence)));
+			const group = track.createGroup(BigInt(sequence));
 			const payload = new Uint8Array([...Varint.encode(media * 1000), 1]);
 			group.writeFrame({ payload, timestamp: Time.Timestamp.fromMicros(media * 1000) });
 			group.finish();
@@ -161,7 +160,7 @@ function joining(from: bigint, largest: () => bigint | Promise<bigint>) {
 			largest: async () => ({ group: await largest(), frame: 0 }),
 		});
 	const write = (sequence: number, media: number) => {
-		const group = defined(track.createGroup(BigInt(sequence)));
+		const group = track.createGroup(BigInt(sequence));
 		const payload = new Uint8Array([...Varint.encode(media * 1000), 1]);
 		group.writeFrame({ payload, timestamp: Time.Timestamp.fromMicros(media * 1000) });
 		group.finish();
@@ -310,7 +309,7 @@ test("a range capped below the largest still delivers", async () => {
 	// largest: the consumer reports no backlog, but delivers what it can read.
 	const track = new Track.Producer("audio");
 	for (let sequence = 0; sequence <= 5; sequence++) {
-		const group = defined(track.createGroup(BigInt(sequence)));
+		const group = track.createGroup(BigInt(sequence));
 		const media = sequence * 20;
 		group.writeFrame({
 			payload: new Uint8Array([...Varint.encode(media * 1000), 1]),

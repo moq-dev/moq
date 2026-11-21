@@ -1010,10 +1010,7 @@ async fn export_trims_leading_pictures_after_each_delivery_break() {
 		(11, vec![200, 180, 190, 210]),
 		(13, vec![400, 380, 390, 410]),
 	] {
-		let mut group = track
-			.create_group(moq_net::group::Info { start: sequence })
-			.unwrap()
-			.unwrap();
+		let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
 		let frames: Vec<_> = stamps
 			.into_iter()
 			.enumerate()
@@ -1318,7 +1315,6 @@ async fn export_declared(reorder: u8, groups: &[&[u64]]) -> (Export<crate::catal
 	for (sequence, stamps) in groups.iter().enumerate() {
 		let mut group = track
 			.create_group(moq_net::group::Info { start: sequence as u64 })
-			.unwrap()
 			.unwrap();
 		let frames: Vec<_> = stamps
 			.iter()
@@ -6343,14 +6339,14 @@ async fn a_start_group_cut_short_goes_out() {
 
 	// The first group delivers five pictures before the next group lands and the publisher
 	// resets it.
-	let mut cut = track.create_group(moq_net::group::Info { start: 0 }).unwrap().unwrap();
+	let mut cut = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
 	for tick in 0..5 {
 		rig.at(tick * VIDEO_US).await;
 		wire.write(&mut cut, &[picture(tick)]).unwrap();
 		out.extend(poll_frames(&mut export));
 		rig.audio_until(tick * VIDEO_US, &mut export, &mut out);
 	}
-	let mut group = track.create_group(moq_net::group::Info { start: 1 }).unwrap().unwrap();
+	let mut group = track.create_group(moq_net::group::Info { start: 1 }).unwrap();
 	wire.write(&mut group, &[picture(GOP)]).unwrap();
 	cut.abort(moq_net::Error::Old).unwrap();
 	for tick in 5..GOP {
@@ -6362,10 +6358,7 @@ async fn a_start_group_cut_short_goes_out() {
 		rig.at(tick * VIDEO_US).await;
 		if tick.is_multiple_of(GOP) {
 			group.finish().unwrap();
-			group = track
-				.create_group(moq_net::group::Info { start: tick / GOP })
-				.unwrap()
-				.unwrap();
+			group = track.create_group(moq_net::group::Info { start: tick / GOP }).unwrap();
 		}
 		wire.write(&mut group, &[picture(tick)]).unwrap();
 		out.extend(poll_frames(&mut export));
@@ -8654,10 +8647,7 @@ async fn a_skipped_group_flags_the_clock() {
 			for sequence in 0..80 + 2 * missing {
 				kio::clock::sleep_until(start.saturating_add(Duration::from_millis(sequence * 100))).await;
 				if !(20..20 + missing).contains(&sequence) && !(40 + missing..40 + 2 * missing).contains(&sequence) {
-					let mut group = track
-						.create_group(moq_net::group::Info { start: sequence })
-						.unwrap()
-						.unwrap();
+					let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
 					for k in 0..5u64 {
 						let frame = Frame {
 							timestamp: Timestamp::from_millis(60_000 + sequence * 100 + k * 20).unwrap(),
@@ -8801,10 +8791,7 @@ async fn a_timeline_restarting_at_zero_fails_the_export() {
 	for sequence in 0..11u64 {
 		kio::clock::sleep_until(start.saturating_add(Duration::from_secs(sequence))).await;
 		let base = if sequence < 10 { sequence * 1_000 } else { 0 };
-		let mut group = track
-			.create_group(moq_net::group::Info { start: sequence })
-			.unwrap()
-			.unwrap();
+		let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
 		for k in 0..50u64 {
 			let millis = if sequence == 10 && k == 0 { 9_001 } else { base + k * 20 };
 			let frame = Frame {

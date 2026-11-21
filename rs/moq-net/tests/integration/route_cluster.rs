@@ -235,11 +235,7 @@ impl Publisher {
 
 	/// Write group `key` in full.
 	fn group(&self, key: u64) {
-		let mut group = self
-			.track
-			.create_group(moq_net::group::Info { start: key })
-			.unwrap()
-			.unwrap();
+		let mut group = self.track.create_group(moq_net::group::Info { start: key }).unwrap();
 		for frame in 0..FRAMES {
 			let timestamp = Timestamp::from_micros(1_000_000 + key * 100_000 + frame * 1_000).unwrap();
 			group.write_frame(timestamp, tagged(self.name, key, frame)).unwrap();

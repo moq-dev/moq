@@ -2,7 +2,6 @@ import { expect, spyOn, test } from "bun:test";
 import { Duration } from "@moq/clock";
 import { Time, Track, Varint } from "@moq/net";
 import { Signal } from "@moq/signals";
-import { defined } from "../defined.test-util.ts";
 import { Consumer } from "./consumer.ts";
 import { Format } from "./legacy.ts";
 
@@ -18,7 +17,7 @@ for (const count of [1, 16, 256]) {
 			delay,
 		});
 		const write = (sequence: bigint, timestamp: number) => {
-			const group = defined(track.createGroup(sequence));
+			const group = track.createGroup(sequence);
 			group.writeFrame({ payload: Varint.encode(timestamp), timestamp: Time.Timestamp.now() });
 			return group;
 		};
@@ -69,11 +68,11 @@ for (const open of [true, false]) {
 		const frame = (micros: number) => ({ payload: Varint.encode(micros), timestamp: Time.Timestamp.now() });
 		try {
 			for (let g = 0n; g < 5n; g++) {
-				const group = defined(track.createGroup(g));
+				const group = track.createGroup(g);
 				for (let f = 0; f < 10; f++) group.writeFrame(frame(Number(g) * 1_000_000 + f * 100_000));
 				group.finish();
 			}
-			const last = defined(track.createGroup(5n));
+			const last = track.createGroup(5n);
 			last.writeFrame(frame(5_000_000));
 			if (!open) last.finish();
 			while (consumer.buffered.peek().at(-1)?.end.asMillis() !== 5000) await consumer.buffered.changed();
@@ -118,14 +117,14 @@ test("a backlog start waits on a successor without frames", async () => {
 	};
 	try {
 		for (let g = 0n; g < 4n; g++) {
-			const group = defined(track.createGroup(g));
+			const group = track.createGroup(g);
 			for (const micros of frames(g)) group.writeFrame(frame(micros));
 			group.finish();
 		}
-		const fifth = defined(track.createGroup(4n));
+		const fifth = track.createGroup(4n);
 		// The fifth group's frames left before the sixth's, though they land after it.
 		const sent = Time.Timestamp.now();
-		const last = defined(track.createGroup(5n));
+		const last = track.createGroup(5n);
 		last.writeFrame(frame(5_000_000));
 		last.finish();
 		while (consumer.buffered.peek().at(-1)?.end.asMillis() !== 5000) await consumer.buffered.changed();
@@ -152,7 +151,7 @@ test("Consumer measures each skip's span over every group left, not just the new
 		delay,
 	});
 	const write = (sequence: bigint, timestamp: number) => {
-		const group = defined(track.createGroup(sequence));
+		const group = track.createGroup(sequence);
 		group.writeFrame({ payload: Varint.encode(timestamp), timestamp: Time.Timestamp.now() });
 	};
 	const buffered = async (timestamp: number) => {
@@ -201,7 +200,7 @@ test("a blocking group is kept until its successor starts a budget behind the ne
 		delay: { min: null, max: Duration.millis(150) },
 	});
 	const write = (sequence: bigint, timestamp: number) => {
-		const group = defined(track.createGroup(sequence));
+		const group = track.createGroup(sequence);
 		group.writeFrame({ payload: Varint.encode(timestamp), timestamp: Time.Timestamp.fromMicros(timestamp) });
 		return group;
 	};
@@ -239,11 +238,11 @@ test("a blocking group ages out past an unstamped successor", async () => {
 		delay: { max: Duration.millis(150) },
 	});
 	try {
-		const blocking = defined(track.createGroup(0n));
+		const blocking = track.createGroup(0n);
 		blocking.writeFrame({ payload: Varint.encode(0), timestamp: Time.Timestamp.fromMicros(0) });
 		expect(await consumer.next()).toMatchObject({ kind: "frame", group: 0n });
-		defined(track.createGroup(1n)).finish();
-		const later = defined(track.createGroup(2n));
+		track.createGroup(1n).finish();
+		const later = track.createGroup(2n);
 		for (const timestamp of [1_000_000, 2_000_000])
 			later.writeFrame({ payload: Varint.encode(timestamp), timestamp: Time.Timestamp.fromMicros(timestamp) });
 		await flush();

@@ -210,7 +210,7 @@ async fn a_recording_round_trips() {
 		sleep(Duration::from_millis(1)).await;
 	}
 	for sequence in 0..6 {
-		let mut group = video.create_group(group::Info { start: sequence }).unwrap().unwrap();
+		let mut group = video.create_group(group::Info { start: sequence }).unwrap();
 		for index in 0..3 {
 			let pts = Timestamp::from_millis(sequence * 10_000 + index).unwrap();
 			group
@@ -220,7 +220,7 @@ async fn a_recording_round_trips() {
 		group.finish().unwrap();
 		sleep(Duration::from_millis(10)).await;
 	}
-	let mut group = log.create_group(group::Info { start: 0 }).unwrap().unwrap();
+	let mut group = log.create_group(group::Info { start: 0 }).unwrap();
 	group.write_frame(moq_net::Timestamp::unscaled(0), "a").unwrap();
 	group.finish().unwrap();
 	sleep(Duration::from_millis(10)).await;
@@ -625,7 +625,7 @@ async fn a_re_added_track_replays_both_runs() {
 			sleep(Duration::from_millis(1)).await;
 		}
 		for sequence in sequences {
-			let mut group = track.create_group(group::Info { start: sequence }).unwrap().unwrap();
+			let mut group = track.create_group(group::Info { start: sequence }).unwrap();
 			let pts = Timestamp::from_millis(sequence * 1000).unwrap();
 			group.write_frame(pts, format!("run{run}/{sequence}")).unwrap();
 			group.finish().unwrap();
@@ -1171,10 +1171,7 @@ async fn a_reader_follows_a_real_dvr_through_its_rotations() {
 		sleep(Duration::from_millis(1)).await;
 	}
 	let write = |sequence: u64| {
-		let mut group = video
-			.create_group(group::Info { start: sequence * 1000 })
-			.unwrap()
-			.unwrap();
+		let mut group = video.create_group(group::Info { start: sequence * 1000 }).unwrap();
 		let pts = Timestamp::from_millis(sequence * 1000).unwrap();
 		group.write_frame(pts, Bytes::from(format!("{sequence}"))).unwrap();
 		group.finish().unwrap();

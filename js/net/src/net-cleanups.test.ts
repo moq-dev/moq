@@ -3,7 +3,6 @@ import { Duration } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { accept } from "./connection/accept.ts";
 import { connect } from "./connection/connect.ts";
-import { defined } from "./defined.test-util.ts";
 import { ConnectTimeout } from "./error.ts";
 import { Producer as GroupProducer } from "./group.ts";
 import { Connection as LiteConnection } from "./lite/connection.ts";
@@ -42,7 +41,7 @@ test("group read handles independently replay buffered and future frames", async
 test.each(["group", "track"] as const)("%s JSON rejects an empty frame without treating it as EOF", async (kind) => {
 	const producer = new TrackProducer("json");
 	const subscriber = kind === "track" ? producer.subscribe().ordered() : undefined;
-	const group = kind === "track" ? defined(producer.createGroup(0n)) : new GroupProducer(0n);
+	const group = kind === "track" ? producer.createGroup(0n) : new GroupProducer(0n);
 	const reader = subscriber ?? group.consume();
 	group.writeFrame({ payload: new Uint8Array(), timestamp: Timestamp.unscaled(group.start) });
 	for (const value of [null, false, 0, ""])

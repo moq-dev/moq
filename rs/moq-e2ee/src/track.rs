@@ -57,13 +57,11 @@ impl Producer {
 	///
 	/// # Errors
 	///
-	/// [`Error::Reuse`](crate::Error::Reuse) if `start` was already allocated or another group
-	/// holds it, [`Error::Identity`](crate::Error::Identity) if it exceeds `2^53-1`, or a net error.
+	/// [`Error::Reuse`](crate::Error::Reuse) if `start` was already allocated, [`Error::Identity`](crate::Error::Identity) if
+	/// it exceeds `2^53-1`, or a net error.
 	pub fn create_group(&mut self, start: u64) -> Result<group::Producer> {
 		let (_, inner) = self.claim.allocate(Some(start), |start| {
-			self.inner
-				.create_group(moq_net::group::Info { start })?
-				.ok_or(crate::Error::Reuse)
+			Ok(self.inner.create_group(moq_net::group::Info { start })?)
 		})?;
 		Ok(self.group(inner))
 	}

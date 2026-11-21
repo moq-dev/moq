@@ -286,7 +286,7 @@ impl Feed {
 			while !stopped.load(Ordering::Relaxed) {
 				let start = key * CADENCE.as_millis() as u64;
 				for track in &tracks {
-					let mut group = track.create_group(group::Info { start }).unwrap().unwrap();
+					let mut group = track.create_group(group::Info { start }).unwrap();
 					let frame = payload(tag, key, kio::clock::now());
 					group
 						.write_frame(Timestamp::from_millis(start).unwrap(), frame)

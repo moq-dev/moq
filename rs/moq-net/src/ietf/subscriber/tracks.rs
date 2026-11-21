@@ -2385,10 +2385,7 @@ mod tests {
 			.producer
 			.clone()
 			.unwrap();
-		let mut group = copy
-			.create_group(crate::model::group::Info { start: 5 })
-			.unwrap()
-			.unwrap();
+		let mut group = copy.create_group(crate::model::group::Info { start: 5 }).unwrap();
 		group
 			.write_frame(crate::Timestamp::unscaled(group.start), b"key".as_slice())
 			.unwrap();

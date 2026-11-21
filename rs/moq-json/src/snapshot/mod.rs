@@ -261,7 +261,7 @@ mod test {
 			let waiter = kio::Waiter::noop();
 
 			// Group 0 delivers a value, then stays open with the reader parked on its next frame.
-			let mut group = track.create_group(moq_net::group::Info { start: 0 }).unwrap().unwrap();
+			let mut group = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
 			group
 				.write_frame(moq_net::Timestamp::ZERO, Bytes::from_static(br#"{"a":1}"#))
 				.unwrap();
@@ -276,7 +276,7 @@ mod test {
 			);
 
 			// The replacement arrives and the reader picks up where the value now lives.
-			let mut group = track.create_group(moq_net::group::Info { start: 1 }).unwrap().unwrap();
+			let mut group = track.create_group(moq_net::group::Info { start: 1 }).unwrap();
 			group
 				.write_frame(
 					moq_net::Timestamp::from_millis(1).unwrap(),
@@ -298,7 +298,7 @@ mod test {
 		let mut consumer = Consumer::<Value>::new(track.consume(), consumer::Config::default());
 		let waiter = kio::Waiter::noop();
 
-		let mut group = track.create_group(moq_net::group::Info { start: 0 }).unwrap().unwrap();
+		let mut group = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
 		group
 			.write_frame(moq_net::Timestamp::ZERO, Bytes::from_static(br#"{"a":1}"#))
 			.unwrap();

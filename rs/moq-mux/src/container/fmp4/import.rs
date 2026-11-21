@@ -1623,10 +1623,7 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 				prev.finish()?;
 			}
 			match (self.pending_start.take(), start) {
-				(Some(start), _) => self
-					.track
-					.create_group(moq_net::group::Info { start })?
-					.ok_or(moq_net::Error::Duplicate)?,
+				(Some(start), _) => self.track.create_group(moq_net::group::Info { start })?,
 				(None, Some(_)) => self.track.append_group(timestamp)?,
 				(None, None) => unreachable!("a new group without a pending start has one"),
 			}

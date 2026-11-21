@@ -56,8 +56,9 @@ Not here: moq-lite's control streams
 ([control-stream-recv](/quest/m3/control-stream-recv.md)), the moq-json
 stream producer and moqsink ([error-outcomes-rest](/quest/m3/error-outcomes-rest.md)),
 moq-quic's stream errors (reshaped in
-[moq-dev/moq#9152](https://github.com/moq-dev/moq/pull/9152)), `create_group`'s `Duplicate` (a value since
-[moq-dev/moq#9223](https://github.com/moq-dev/moq/pull/9223)), and
+[moq-dev/moq#9152](https://github.com/moq-dev/moq/pull/9152)), `create_group`'s `Duplicate` (gone since
+[moq-dev/moq#9223](https://github.com/moq-dev/moq/pull/9223), which added
+`claim_group` for racing writers), and
 moq-e2ee ([e2ee-format](/quest/m3/e2ee-format.md)).
 
 Public API: none expected, except a moq-net clean end becoming `Ok(None)`,

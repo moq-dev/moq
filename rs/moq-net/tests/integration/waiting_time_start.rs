@@ -137,12 +137,7 @@ impl Fixture {
 
 	/// Write [`LIVE`] at the publisher.
 	fn write_live(&self) {
-		write(
-			self.track
-				.create_group(moq_net::group::Info { start: LIVE })
-				.unwrap()
-				.unwrap(),
-		);
+		write(self.track.create_group(moq_net::group::Info { start: LIVE }).unwrap());
 	}
 }
 

@@ -66,15 +66,14 @@ export class Producer {
 	 * Start a group at `start`, in the track's timescale, which must be at or above the next
 	 * unallocated one, as {@link NetTrack.Producer.createGroup} does.
 	 *
-	 * Throws {@link Failure} `reuse` if `start` was already allocated or another group holds it,
-	 * `identity` if it exceeds `2^53-1`, or a net error.
+	 * Throws {@link Failure} `reuse` if `start` was already allocated, `identity` if it exceeds
+	 * `2^53-1`, or a net error.
 	 */
 	createGroup(start: bigint): Group.Producer {
 		this.#writable();
 		this.#reserve(start);
-		const inner = this.#inner.createGroup(start);
-		if (inner === undefined) throw new Failure("reuse");
 		this.#next = start + 1n;
+		const inner = this.#inner.createGroup(start);
 		return Group.Producer.make(inner, this.#writer);
 	}
 

@@ -2,7 +2,6 @@ import { expect, test } from "bun:test";
 import { Duration } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { Time, Track } from "@moq/net";
-import { defined } from "../defined.test-util.ts";
 import { Consumer, type Read } from "./consumer.ts";
 import { encodeFrame, Format } from "./legacy.ts";
 
@@ -32,7 +31,7 @@ test.each([0, 100])("a sequence hole before a paused data marker expires at %sms
 		}
 	})();
 	try {
-		const first = defined(track.createGroup(0n));
+		const first = track.createGroup(0n);
 		first.writeFrame({
 			payload: encodeFrame(new Uint8Array([1]), Duration.micros(10_000)),
 			timestamp: Time.Timestamp.fromMicros(10_000),
@@ -40,7 +39,7 @@ test.each([0, 100])("a sequence hole before a paused data marker expires at %sms
 		first.finish();
 		await flush();
 		expect(results).toHaveLength(1);
-		const marker = defined(track.createGroup(2n));
+		const marker = track.createGroup(2n);
 		// A data marker carries no container timestamp; its group's start still passes the first's.
 		marker.writeFrame({ payload: new Uint8Array(), timestamp: Time.Timestamp.fromMicros(20_000) });
 		marker.finish();
@@ -84,7 +83,7 @@ test("a filled hole cancels its timer and the next hole gets a fresh budget", as
 		}
 	})();
 	const write = (sequence: bigint, timestamp?: number) => {
-		const group = defined(track.createGroup(sequence));
+		const group = track.createGroup(sequence);
 		group.writeFrame({
 			payload:
 				timestamp === undefined
@@ -144,7 +143,7 @@ test("the holes a stalled source left behind share one budget", async () => {
 		}
 	})();
 	const write = (sequence: bigint) => {
-		const group = defined(track.createGroup(sequence));
+		const group = track.createGroup(sequence);
 		group.writeFrame({
 			payload: encodeFrame(new Uint8Array([1]), Duration.micros(Number(sequence) * 10_000)),
 			timestamp: Time.Timestamp.fromMicros(Number(sequence) * 10_000),
@@ -191,7 +190,7 @@ test("a hole is late from the earliest arrival past it", async () => {
 		}
 	})();
 	const write = (sequence: bigint) => {
-		const group = defined(track.createGroup(sequence));
+		const group = track.createGroup(sequence);
 		group.writeFrame({
 			payload: encodeFrame(new Uint8Array([1]), Duration.micros(Number(sequence) * 10_000)),
 			timestamp: Time.Timestamp.fromMicros(Number(sequence) * 10_000),
@@ -227,14 +226,14 @@ test("a hole in a drained backlog is late from the earliest arrival past it, not
 	const installed = clock.install();
 	const track = new Track.Producer("data");
 	const marker = (sequence: bigint) => {
-		const group = defined(track.createGroup(sequence));
+		const group = track.createGroup(sequence);
 		group.writeFrame({
 			payload: new Uint8Array(),
 			timestamp: Time.Timestamp.fromMicros(Number(sequence) * 10_000),
 		});
 		group.finish();
 	};
-	const first = defined(track.createGroup(0n));
+	const first = track.createGroup(0n);
 	first.writeFrame({
 		payload: encodeFrame(new Uint8Array([1]), Duration.micros(0)),
 		timestamp: Time.Timestamp.fromMicros(0),
@@ -298,7 +297,7 @@ test.each([true, false])("the head after a declared end is waited for (arrives: 
 		}
 	})();
 	const write = (sequence: bigint, ...frames: [number, Uint8Array?][]) => {
-		const group = defined(track.createGroup(sequence));
+		const group = track.createGroup(sequence);
 		for (const [timestamp, payload = new Uint8Array([1])] of frames) {
 			group.writeFrame({
 				payload: encodeFrame(payload, Duration.micros(timestamp)),
@@ -379,7 +378,7 @@ test("a newest-first flush past a hole delivers the groups landing behind its ne
 	})();
 	// One 20ms frame per group, as a voice publisher writes them, all sent at once.
 	const write = (sequence: number) => {
-		const group = defined(track.createGroup(BigInt(sequence)));
+		const group = track.createGroup(BigInt(sequence));
 		const timestamp = Duration.micros(sequence * 20_000);
 		group.writeFrame({
 			payload: encodeFrame(new Uint8Array([1]), timestamp),
@@ -432,7 +431,7 @@ test("a hole is waited for the max delay, as an arrived group plays up to it", a
 		}
 	})();
 	const write = (sequence: bigint, ms: number, finish = true) => {
-		const group = defined(track.createGroup(sequence));
+		const group = track.createGroup(sequence);
 		group.writeFrame({
 			payload: encodeFrame(new Uint8Array([1]), Duration.millis(ms)),
 			timestamp: Time.Timestamp.fromMicros(ms * 1000),
@@ -503,7 +502,7 @@ test("a hole ends at the max delay, not the min delay", async () => {
 		}
 	})();
 	const write = (sequence: bigint, millis: number) => {
-		const group = defined(track.createGroup(sequence));
+		const group = track.createGroup(sequence);
 		group.writeFrame({
 			payload: encodeFrame(new Uint8Array([1]), Duration.millis(millis)),
 			timestamp: Time.Timestamp.fromMicros(millis * 1000),

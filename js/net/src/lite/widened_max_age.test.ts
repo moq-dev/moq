@@ -76,7 +76,7 @@ for (const [version, alpn] of [
 		const broadcast = publication.broadcast;
 		const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 		const write = (key: number, millis: number) => {
-			const group = defined(producer.createGroup(BigInt(key)));
+			const group = producer.createGroup(BigInt(key));
 			group.writeFrame({ payload: new Uint8Array([key]), timestamp: Timestamp.fromMillis(millis) });
 			group.finish();
 		};
@@ -126,7 +126,7 @@ test("a widening recovers the stale groups for a bounded lite-07 reader", async 
 	const broadcast = publication.broadcast;
 	const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 	const write = (key: number, millis: number) => {
-		const group = defined(producer.createGroup(BigInt(key)));
+		const group = producer.createGroup(BigInt(key));
 		group.writeFrame({ payload: new Uint8Array([key]), timestamp: Timestamp.fromMillis(millis) });
 		group.finish();
 	};

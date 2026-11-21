@@ -89,10 +89,7 @@ fn write_backlog(track: &moq_net::track::Producer) -> Vec<moq_net::group::Produc
 	BACKLOG
 		.iter()
 		.map(|&key| {
-			let mut group = track
-				.create_group(moq_net::group::Info { start: key })
-				.unwrap()
-				.unwrap();
+			let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
 			group
 				.write_frame(Timestamp::from_millis(key * 10).unwrap(), &b"frame"[..])
 				.unwrap();

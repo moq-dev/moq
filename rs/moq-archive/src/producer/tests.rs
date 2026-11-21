@@ -45,7 +45,7 @@ fn ms(ms: u64) -> Timestamp {
 
 /// Write a whole group of `(pts, payload)` frames.
 fn group(track: &track::Producer, sequence: u64, frames: &[(u64, &str)]) {
-	let mut group = track.create_group(group::Info { start: sequence }).unwrap().unwrap();
+	let mut group = track.create_group(group::Info { start: sequence }).unwrap();
 	for (pts, payload) in frames {
 		group.write_frame(ms(*pts), payload.to_string()).unwrap();
 	}
@@ -269,7 +269,7 @@ async fn an_open_untimed_group_is_cut_at_each_flush() {
 	let task = spawn(&store, &broadcast, config().with_flush(SECOND));
 	subscribed(&data).await;
 
-	let mut open = data.create_group(group::Info { start: 0 }).unwrap().unwrap();
+	let mut open = data.create_group(group::Info { start: 0 }).unwrap();
 	open.write_frame(moq_net::Timestamp::unscaled(0), "a").unwrap();
 	settle().await;
 	sleep(SECOND).await;
@@ -306,7 +306,7 @@ async fn an_untimed_group_splits_by_wall_clock() {
 	let task = spawn(&store, &broadcast, config());
 	subscribed(&data).await;
 
-	let mut open = data.create_group(group::Info { start: 0 }).unwrap().unwrap();
+	let mut open = data.create_group(group::Info { start: 0 }).unwrap();
 	for payload in ["a", "b", "c", "d", "e"] {
 		open.write_frame(moq_net::Timestamp::unscaled(0), payload).unwrap();
 		settle().await;
@@ -315,7 +315,7 @@ async fn an_untimed_group_splits_by_wall_clock() {
 	open.finish().unwrap();
 	settle().await;
 	sleep(2 * SECOND).await;
-	let mut next = data.create_group(group::Info { start: 1 }).unwrap().unwrap();
+	let mut next = data.create_group(group::Info { start: 1 }).unwrap();
 	next.write_frame(moq_net::Timestamp::unscaled(1), "f").unwrap();
 	next.finish().unwrap();
 	settle().await;
@@ -347,7 +347,7 @@ async fn an_idle_track_is_flushed_within_the_bound() {
 	let task = spawn(&store, &broadcast, config().with_flush(SECOND));
 	subscribed(&video).await;
 
-	let mut open = video.create_group(group::Info { start: 0 }).unwrap().unwrap();
+	let mut open = video.create_group(group::Info { start: 0 }).unwrap();
 	open.write_frame(ms(0), "a").unwrap();
 	settle().await;
 	sleep(SECOND / 2).await;
@@ -382,8 +382,8 @@ async fn a_restart_mid_group_loses_and_duplicates_nothing() {
 	subscribed(&video).await;
 	subscribed(&data).await;
 
-	let mut timed_group = video.create_group(group::Info { start: 0 }).unwrap().unwrap();
-	let mut untimed_group = data.create_group(group::Info { start: 0 }).unwrap().unwrap();
+	let mut timed_group = video.create_group(group::Info { start: 0 }).unwrap();
+	let mut untimed_group = data.create_group(group::Info { start: 0 }).unwrap();
 	for (pts, payload) in [(0, "a"), (100, "b")] {
 		timed_group.write_frame(ms(pts), payload).unwrap();
 		untimed_group
@@ -443,7 +443,7 @@ async fn a_partial_group_resumes_after_its_last_stored_frame() {
 	subscribed(&video).await;
 
 	group(&video, 0, &[(0, "a")]);
-	let mut partial = video.create_group(group::Info { start: 1 }).unwrap().unwrap();
+	let mut partial = video.create_group(group::Info { start: 1 }).unwrap();
 	partial.start_at(2).unwrap();
 	partial.write_frame(ms(500), "c").unwrap();
 	settle().await;
@@ -538,7 +538,7 @@ async fn track_names_stay_one_segment_through_a_resume() {
 	let task = spawn(&store, &broadcast, config().with_flush(SECOND));
 	for track in &tracks {
 		subscribed(track).await;
-		let mut group = track.create_group(group::Info { start: 0 }).unwrap().unwrap();
+		let mut group = track.create_group(group::Info { start: 0 }).unwrap();
 		group.write_frame(moq_net::Timestamp::unscaled(0), "x").unwrap();
 		group.finish().unwrap();
 	}
@@ -664,7 +664,7 @@ async fn markers_wait_for_the_listing_to_end() {
 	subscribed(&audio).await;
 
 	group(&video, 0, &[(0, "a")]);
-	let mut last = video.create_group(group::Info { start: 1 }).unwrap().unwrap();
+	let mut last = video.create_group(group::Info { start: 1 }).unwrap();
 	last.write_frame(ms(1000), "b").unwrap();
 	last.write_frame(ms(1100), "c").unwrap();
 	// A mid-group end: frames 0 and 1 of group 1.

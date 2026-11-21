@@ -3708,8 +3708,7 @@ pub unsafe extern "C" fn moq_publish_track_group(track: u32, start: *const moq_t
 
 /// Create a raw group with an explicit start.
 ///
-/// Returns a non-zero group handle on success, or a negative code on failure, including when
-/// another live group holds the start.
+/// Returns a non-zero group handle on success, or a negative code on failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_publish_track_group_at(track: u32, start: u64) -> i32 {
 	ffi::enter(move || {

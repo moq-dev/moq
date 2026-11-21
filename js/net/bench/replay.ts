@@ -2,7 +2,6 @@
 import { Duration } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { Time, Track } from "@moq/net";
-import { defined } from "../src/defined.test-util.ts";
 
 type Order = "monotonic" | "reverse" | "mixed";
 const ORDERS: Order[] = ["monotonic", "reverse", "mixed"];
@@ -31,7 +30,7 @@ function arrivals(count: number, order: Order): number[] {
 
 // Write one finished group whose payload names its sequence, so delivery can be checked.
 function publish(track: Track.Producer, sequence: number): void {
-	const group = defined(track.createGroup(BigInt(sequence)));
+	const group = track.createGroup(BigInt(sequence));
 	const payload = new Uint8Array(PAYLOAD);
 	new DataView(payload.buffer).setUint32(0, sequence);
 	group.writeFrame({ payload, timestamp: Time.Timestamp.unscaled(group.start) });

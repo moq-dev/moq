@@ -62,7 +62,7 @@ async function roundTrip(wire: Wire, timescale: Timescale | undefined, timestamp
 			const request = await wireOf(broadcast).requested();
 			if (!request) break;
 			const track = request.accept({ timescale });
-			const group = key === undefined ? hooks.appendNext(track) : defined(track.createGroup(key));
+			const group = key === undefined ? hooks.appendNext(track) : track.createGroup(key);
 			for (const [i, timestamp] of timestamps.entries()) {
 				group.writeFrame({ payload: new Uint8Array([i]), timestamp });
 			}
@@ -95,7 +95,7 @@ async function republish(input: BroadcastConsumer): Promise<BroadcastProducer> {
 			const groups = subscription.ordered();
 			for (let group = await groups.nextGroup(); group; group = await groups.nextGroup()) {
 				// The same group, so a scale-less frame's key still names it.
-				const out = defined(video.createGroup(group.start));
+				const out = video.createGroup(group.start);
 				for (let frame = await group.readFrame(); frame; frame = await group.readFrame()) out.writeFrame(frame);
 				out.finish();
 			}

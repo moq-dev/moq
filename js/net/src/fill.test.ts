@@ -74,7 +74,7 @@ async function drain(reader: { recvGroup(): Promise<GroupConsumer | undefined> }
 function resumed(first: bigint): { broadcast: BroadcastProducer; track: Producer } {
 	const broadcast = new BroadcastProducer();
 	const track = defined(broadcast.createTrack("video", { maxAge: null }));
-	const group = defined(track.createGroup(first));
+	const group = track.createGroup(first);
 	group.writeFrame({ payload: enc.encode(`live ${first}`), timestamp: Timestamp.unscaled(group.start) });
 	group.finish();
 	return { broadcast, track };
@@ -136,7 +136,7 @@ test("fill: a fetch of a group about to be written asks the handler at once, and
 	expect(fill.wanted()).toBe(7n);
 
 	// The producer gets there before the handler answers: the live write is the answer.
-	const group = defined(track.createGroup(7n));
+	const group = track.createGroup(7n);
 	group.writeFrame({ payload: enc.encode("written"), timestamp: Timestamp.unscaled(group.start) });
 	group.finish();
 	expect(fill.wanted()).toBeUndefined();
@@ -412,8 +412,8 @@ test("fill: a gap below a group that fails after a probe is asked", async () => 
 	const requests = track.requests();
 	const reader = track.subscribe({ ranges: [{ start: 0n }], delay: { max: Duration.millis(0) } });
 	const ordered = reader.ordered();
-	const failed = defined(track.createGroup(2n));
-	const group = defined(track.createGroup(4n));
+	const failed = track.createGroup(2n);
+	const group = track.createGroup(4n);
 	group.writeFrame({ payload: enc.encode("live 4"), timestamp: Timestamp.unscaled(group.start) });
 	failed.abort(new StreamError(StreamCode.Cancel));
 	await yieldNow();
@@ -439,7 +439,7 @@ test("fill: a gap the newest group rises over after a probe is asked", async () 
 	const reader = track.subscribe({ ranges: [{ start: 2n }], delay: { max: null } });
 	expect(reader.tryRecvGroup()?.start).toBe(2n);
 	expect(reader.tryRecvGroup()).toBeUndefined();
-	const group = defined(track.createGroup(5n));
+	const group = track.createGroup(5n);
 	group.writeFrame({ payload: enc.encode("live 5"), timestamp: Timestamp.unscaled(group.start) });
 	group.finish();
 	expect(reader.tryRecvGroup()?.start).toBe(5n);
@@ -463,7 +463,7 @@ test("fill: a miss judged with no handler open is asked once one opens", async (
 	const out = await first.requestedFill();
 	expect(out && [out.start, out.end]).toEqual([0n, 2n]);
 	first.close();
-	const group = defined(track.createGroup(5n));
+	const group = track.createGroup(5n);
 	group.finish();
 	expect(reader.tryRecvGroup()?.start).toBe(5n);
 	reader.tryRecvGroup();
@@ -591,7 +591,7 @@ test("fill: a group arriving after a refusal reaches the reader the refusal name
 	if (!fill) throw new Error("no fill of groups");
 	fill.refuseGroups(2n, 3n, new StreamError(StreamCode.Cancel, { message: "storage busy" }));
 	// Before the waiting fetch looks again.
-	const group = defined(track.createGroup(2n));
+	const group = track.createGroup(2n);
 	group.writeFrame({ payload: enc.encode("late"), timestamp: Timestamp.unscaled(group.start) });
 	group.finish();
 	fill.close();
@@ -658,7 +658,7 @@ test("fill: a stale verdict leaves an outstanding fill owed", async () => {
 	const broadcast = new BroadcastProducer();
 	const track = defined(broadcast.createTrack("video", { maxAge: null }));
 	const requests = track.requests();
-	defined(track.createGroup(3n)).finish();
+	track.createGroup(3n).finish();
 	const fetching = wireOf(broadcast).fetchGroup("video", 2n);
 	const fill = await requests.requestedFill();
 	if (!fill) throw new Error("no fill of groups");
@@ -680,14 +680,14 @@ test("fill: a group arriving live answers the fill", async () => {
 	const broadcast = new BroadcastProducer();
 	const track = defined(broadcast.createTrack("video", { maxAge: null }));
 	const requests = track.requests();
-	const late = defined(track.createGroup(3n));
+	const late = track.createGroup(3n);
 	late.finish();
 	const fetching = wireOf(broadcast).fetchGroup("video", 1n);
 	const fill = await requests.requestedFill();
 	if (!fill) throw new Error("no fill of groups");
 
 	// The producer writes it itself before the handler gets to it.
-	const live = defined(track.createGroup(1n));
+	const live = track.createGroup(1n);
 	live.writeFrame({ payload: enc.encode("live"), timestamp: Timestamp.unscaled(live.start) });
 	live.finish();
 	expect(fill.wanted()).toBeUndefined();
@@ -800,7 +800,7 @@ test("fill: a bounded reader keeps waiting on a fresh fill once an older one goe
 		const broadcast = new BroadcastProducer();
 		const track = defined(broadcast.createTrack("video", { maxAge: null }));
 		const write = (key: bigint) => {
-			const group = defined(track.createGroup(key));
+			const group = track.createGroup(key);
 			group.writeFrame({
 				payload: enc.encode(`live ${key}`),
 				timestamp: Timestamp.unscaled(group.start),
@@ -1223,7 +1223,7 @@ test("fill: a cache-miss fetch of a dynamic track serves the one track the broad
 	if (!request) throw new Error("no track request");
 	const track = request.accept({ maxAge: null });
 	const requests = track.requests();
-	const group = defined(track.createGroup(4n));
+	const group = track.createGroup(4n);
 	group.finish();
 
 	const fill = await requests.requestedFill();
@@ -1258,7 +1258,7 @@ async function session(alpn: string) {
 	const broadcast = publication.broadcast;
 	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 	// Groups 0 to 2 were published before this producer existed.
-	const live = defined(track.createGroup(3n));
+	const live = track.createGroup(3n);
 	live.writeFrame({ payload: enc.encode("live 3"), timestamp: Timestamp.fromMillis(3000) });
 	live.finish();
 	const requests = track.requests();
@@ -1352,7 +1352,7 @@ test("fill: a lite-07 ranged subscription reads history the publisher never cach
 test("fill: an OLD answer under the max age is held as stale until forgotten", async () => {
 	const broadcast = new BroadcastProducer();
 	const track = defined(broadcast.createTrack("video", { maxAge: Duration.millis(10_000) }));
-	const live = defined(track.createGroup(3n));
+	const live = track.createGroup(3n);
 	live.writeFrame({ payload: enc.encode("live 3"), timestamp: Timestamp.unscaled(live.start) });
 	live.finish();
 	const requests = track.requests();
@@ -1413,7 +1413,7 @@ function headless(): { broadcast: BroadcastProducer; track: Producer } {
 	for (const frame of ["c3", "c4"])
 		tail.writeFrame({ payload: enc.encode(frame), timestamp: Timestamp.unscaled(2n) });
 	tail.finish();
-	const next = defined(track.createGroup(3n));
+	const next = track.createGroup(3n);
 	next.writeFrame({ payload: enc.encode("d0"), timestamp: Timestamp.unscaled(3n) });
 	next.finish();
 	return { broadcast, track };
@@ -1573,7 +1573,7 @@ test("fill: a fetch of a headless group asks its head, as a fetch from frame 0 d
 function timed(): { broadcast: BroadcastProducer; track: Producer } {
 	const broadcast = new BroadcastProducer();
 	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
-	const group = defined(track.createGroup(5n));
+	const group = track.createGroup(5n);
 	group.writeFrame({ payload: enc.encode("g5"), timestamp: Timestamp.fromMillis(5) });
 	group.finish();
 	return { broadcast, track };
@@ -1647,14 +1647,14 @@ test("fill: a lookup answered below the eviction watermark starts the range ther
 		const requests = track.requests();
 		const times = lookups(requests, (ms) => ms);
 		for (let n = 0n; n < 3n; n++) {
-			const group = defined(track.createGroup(n));
+			const group = track.createGroup(n);
 			group.writeFrame({ payload: enc.encode(`g${n}`), timestamp: Timestamp.fromMillis(Number(n)) });
 			group.finish();
 		}
 		// Idle past the cache window, so the next write evicts every group but the new edge: the
 		// answer and the fills below it land at or below the watermark, unverified.
 		clock.jump(Duration.millis(DEFAULT_EXPIRY.asMillis() + 1000));
-		const edge = defined(track.createGroup(5n));
+		const edge = track.createGroup(5n);
 		edge.writeFrame({ payload: enc.encode("g5"), timestamp: Timestamp.fromMillis(5) });
 		edge.finish();
 
@@ -1681,7 +1681,7 @@ test("fill: a time start dropped after its floor's group is evicted starts at th
 		const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 		const requests = track.requests();
 		const write = (n: bigint) => {
-			const group = defined(track.createGroup(n));
+			const group = track.createGroup(n);
 			group.writeFrame({ payload: enc.encode(`g${n}`), timestamp: Timestamp.fromMillis(Number(n)) });
 			group.finish();
 		};
@@ -1765,7 +1765,7 @@ test("fill: a time start just past a held group, dropped, starts at that group",
 		const broadcast = new BroadcastProducer();
 		const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 		for (const n of [4n, 10n]) {
-			const group = defined(track.createGroup(n));
+			const group = track.createGroup(n);
 			group.writeFrame({ payload: enc.encode(`g${n}`), timestamp: Timestamp.fromMillis(Number(n)) });
 			group.finish();
 		}

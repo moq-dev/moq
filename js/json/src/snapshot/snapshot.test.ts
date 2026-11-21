@@ -222,7 +222,6 @@ test("reads skip a group the subscription still owes", async () => {
 			const next = new Consumer<Value>({ track });
 			const put = (sequence: bigint) => {
 				const group = track.createGroup(sequence);
-				if (!group) throw new Error(`group ${sequence} is already held`);
 				group.writeFrame({
 					payload: new TextEncoder().encode(`{"n":${sequence}}`),
 					timestamp: Time.Timestamp.unscaled(sequence),

@@ -435,16 +435,16 @@ async fn a_waiting_late_group_lets_a_newer_group_through() {
 		}
 
 		// Unfinished, so its stream holds the only credit.
-		let mut held = track.create_group(moq_net::group::Info { start: 2 }).unwrap().unwrap();
+		let mut held = track.create_group(moq_net::group::Info { start: 2 }).unwrap();
 		held.write_frame(held.at_start(), b"held".as_slice()).unwrap();
 		assert_eq!(next!("the held group arrives").start, 2, "{version}");
 
 		// Late and below the held stream: it waits for credit it cannot make room for.
-		let mut late = track.create_group(moq_net::group::Info { start: 0 }).unwrap().unwrap();
+		let mut late = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
 		late.write_frame(late.at_start(), b"late".as_slice()).unwrap();
 		late.finish().unwrap();
 
-		let mut newer = track.create_group(moq_net::group::Info { start: 3 }).unwrap().unwrap();
+		let mut newer = track.create_group(moq_net::group::Info { start: 3 }).unwrap();
 		newer.write_frame(newer.at_start(), b"new".as_slice()).unwrap();
 		newer.finish().unwrap();
 		// Lite-07 drops the late group as OLD when the newer one takes its place, and this
@@ -507,21 +507,18 @@ async fn a_shed_late_group_lets_a_newer_group_through() {
 		}
 
 		// Unfinished, so its stream holds the only credit.
-		let mut held = track.create_group(moq_net::group::Info { start: 3 }).unwrap().unwrap();
+		let mut held = track.create_group(moq_net::group::Info { start: 3 }).unwrap();
 		held.write_frame(held.at_start(), b"held".as_slice()).unwrap();
 		assert_eq!(next!("the held group arrives").start, 3, "{version}");
 
 		// Group 1 waits for credit it cannot make room for, and group 0 ranks below it.
 		for key in [1, 0] {
-			let mut late = track
-				.create_group(moq_net::group::Info { start: key })
-				.unwrap()
-				.unwrap();
+			let mut late = track.create_group(moq_net::group::Info { start: key }).unwrap();
 			late.write_frame(late.at_start(), b"late".as_slice()).unwrap();
 			late.finish().unwrap();
 		}
 
-		let mut newer = track.create_group(moq_net::group::Info { start: 4 }).unwrap().unwrap();
+		let mut newer = track.create_group(moq_net::group::Info { start: 4 }).unwrap();
 		newer.write_frame(newer.at_start(), b"new".as_slice()).unwrap();
 		newer.finish().unwrap();
 		assert_eq!(
@@ -644,20 +641,20 @@ async fn a_closing_stream_does_not_rank_a_waiting_group() {
 		let mut subscriber = remote.track("0").unwrap().subscribe(prefs).await.unwrap();
 
 		// Group 7 finishes, so its stream waits for the acknowledgement; group 10 holds the other.
-		let mut closing = track.create_group(moq_net::group::Info { start: 7 }).unwrap().unwrap();
+		let mut closing = track.create_group(moq_net::group::Info { start: 7 }).unwrap();
 		closing.write_frame(closing.at_start(), b"closing".as_slice()).unwrap();
 		closing.finish().unwrap();
-		let mut held = track.create_group(moq_net::group::Info { start: 10 }).unwrap().unwrap();
+		let mut held = track.create_group(moq_net::group::Info { start: 10 }).unwrap();
 		held.write_frame(held.at_start(), b"held".as_slice()).unwrap();
 		kio::clock::sleep(SETTLE).await;
 
 		// Ranked above group 7 but below group 10: it can only wait for group 7's credit.
-		let mut late = track.create_group(moq_net::group::Info { start: 8 }).unwrap().unwrap();
+		let mut late = track.create_group(moq_net::group::Info { start: 8 }).unwrap();
 		late.write_frame(late.at_start(), b"late".as_slice()).unwrap();
 		late.finish().unwrap();
 		kio::clock::sleep(SETTLE).await;
 
-		let mut newer = track.create_group(moq_net::group::Info { start: 11 }).unwrap().unwrap();
+		let mut newer = track.create_group(moq_net::group::Info { start: 11 }).unwrap();
 		newer.write_frame(newer.at_start(), b"new".as_slice()).unwrap();
 		newer.finish().unwrap();
 

@@ -588,7 +588,7 @@ test("integration: lite-07 keeps a covered bounded subscription open", async () 
 
 	const broadcast = publish(origin, Path.from("test"));
 	const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
-	for (const key of [0n, 1n, 2n, 4n, 5n]) defined(producer.createGroup(key)).finish();
+	for (const key of [0n, 1n, 2n, 4n, 5n]) producer.createGroup(key).finish();
 
 	const remote = wireOf(client).consume(Path.from("test"));
 	const bounded = (end: bigint) =>
@@ -642,7 +642,7 @@ test("integration: lite-07 serves a time range", async () => {
 	const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 	// Keyed by start, as the wire names a group: one per second.
 	for (let start = 0n; start < 10_000n; start += 1000n) {
-		const group = defined(producer.createGroup(start));
+		const group = producer.createGroup(start);
 		group.writeFrame(textFrame(`${start}`, Timestamp.fromMillis(Number(start))));
 		group.finish();
 	}
@@ -1040,7 +1040,7 @@ test.each(["gap", "end"])("integration: lite fetch rejects coalesced misses at %
 	let serving: Promise<void> | undefined;
 	if (missing === "gap") {
 		const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
-		const group = defined(producer.createGroup(1n));
+		const group = producer.createGroup(1n);
 		group.finish();
 	} else {
 		serving = (async () => {
@@ -3149,16 +3149,16 @@ for (const alpn of [Lite.ALPN_06, Lite.ALPN_07_WIP]) {
 			// Unfinished, so its stream holds the only credit.
 			// Each group stamped in sequence order, since the track checks a late group's start.
 			const at = (key: bigint) => Timestamp.fromMillis(1_000 + Number(key));
-			const held = defined(producer.createGroup(2n));
+			const held = producer.createGroup(2n);
 			held.writeFrame(textFrame("held", at(2n)));
 			expect((await settled(subscriber.recvGroup(), "the held group"))?.start).toBe(2n);
 
 			// Late and below the held stream: it waits for credit it cannot make room for.
-			const late = defined(producer.createGroup(0n));
+			const late = producer.createGroup(0n);
 			late.writeFrame(textFrame("late", at(0n)));
 			late.finish();
 
-			const newer = defined(producer.createGroup(3n));
+			const newer = producer.createGroup(3n);
 			newer.writeFrame(textFrame("new", at(3n)));
 			newer.finish();
 			// lite-07 may fill the late group by a fetch first; only group 3 must not wait behind it.

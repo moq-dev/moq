@@ -28,7 +28,6 @@ const track = broadcast.createTrack("video", {
 });
 if (!track) throw new Error("the track already exists");
 const group = track.createGroup(4n);
-if (!group) throw new Error("group 4 already exists");
 group.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.fromMillis(0) });
 group.writeFrame({ payload: new Uint8Array([2]), timestamp: Timestamp.fromMillis(1) });
 

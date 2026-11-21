@@ -69,7 +69,6 @@ window.runRecovery = async (packets) => {
 		if (group?.start !== BigInt(packet.group)) {
 			group?.finish();
 			group = track.createGroup(BigInt(packet.group));
-			if (!group) throw new Error(`group ${packet.group} already exists`);
 		}
 		const timestamp = Duration.micros(packet.timestamp);
 		const payload = Uint8Array.from(atob(packet.data), (c) => c.charCodeAt(0));

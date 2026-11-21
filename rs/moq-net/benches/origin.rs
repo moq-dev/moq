@@ -1124,7 +1124,7 @@ fn bench_handoff(c: &mut Criterion) {
 							.route("room/live", moq_net::origin::RouteOptions::hidden())
 							.unwrap();
 						let track = standby.broadcast().create_track("video", timed()).unwrap();
-						let mut second = track.create_group(moq_net::group::Info { start: 1 }).unwrap().unwrap();
+						let mut second = track.create_group(moq_net::group::Info { start: 1 }).unwrap();
 						second.write_frame(at(1), b"two".as_ref()).unwrap();
 						second.finish().unwrap();
 						// Announcing is what makes the standby a route the front can take.
@@ -1734,10 +1734,7 @@ async fn resume_overlap(shape: ResumeShape, ordered: bool) -> ResumeOverlap {
 			.unwrap();
 		let track = broadcast.broadcast().create_track("0", timed()).unwrap();
 		for key in order {
-			let mut group = track
-				.create_group(moq_net::group::Info { start: key as u64 })
-				.unwrap()
-				.unwrap();
+			let mut group = track.create_group(moq_net::group::Info { start: key as u64 }).unwrap();
 			group.write_frame(at(key as u64), b"f".as_ref()).unwrap();
 			group.finish().unwrap();
 		}

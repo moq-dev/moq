@@ -151,7 +151,7 @@ async function chain(up: Version, down: Version) {
 		remote,
 		/** Write group `sequence` presenting at `millis`, with `size` bytes of payload. */
 		write(key: bigint, millis: number, size = 1) {
-			const group = defined(track.createGroup(key));
+			const group = track.createGroup(key);
 			group.writeFrame({ payload: new Uint8Array(size), timestamp: Timestamp.fromMillis(millis) });
 			group.finish();
 		},

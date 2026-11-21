@@ -38,7 +38,6 @@ function replacement(): Moq.Track.Producer {
 
 function write(sequence: bigint): void {
 	const group = track.createGroup(sequence);
-	if (!group) throw new Error(`group ${sequence} already exists`);
 	group.writeFrame({
 		payload: new TextEncoder().encode(String(sequence)),
 		timestamp: Moq.Time.Timestamp.unscaled(sequence),

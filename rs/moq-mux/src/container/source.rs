@@ -1295,10 +1295,7 @@ mod tests {
 		// One 24 ms frame per group, as the TS import publishes MPEG-1 audio.
 		let wire = HangContainer::Legacy(crate::container::Kind::Audio);
 		let write = |sequence: u64| {
-			let mut group = track
-				.create_group(moq_net::group::Info { start: sequence })
-				.unwrap()
-				.unwrap();
+			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
 			wire.write(&mut group, &[raw_frame(sequence * 24_000, b"audio", true)])
 				.unwrap();
 			group.finish().unwrap();
@@ -1381,10 +1378,7 @@ mod tests {
 			let wire = HangContainer::Legacy(crate::container::Kind::Audio);
 			let pes = |pes: u64| {
 				for sequence in pes * 5..pes * 5 + 5 {
-					let mut group = track
-						.create_group(moq_net::group::Info { start: sequence })
-						.unwrap()
-						.unwrap();
+					let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
 					wire.write(&mut group, &[raw_frame(sequence * 24_000, b"audio", true)])
 						.unwrap();
 					group.finish().unwrap();
@@ -1532,10 +1526,7 @@ mod tests {
 		let (track, mut export) = audio_export().await;
 		let wire = HangContainer::Legacy(crate::container::Kind::Audio);
 		let group = |sequence: u64, timestamp: u64| {
-			let mut group = track
-				.create_group(moq_net::group::Info { start: sequence })
-				.unwrap()
-				.unwrap();
+			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
 			wire.write(&mut group, &[raw_frame(timestamp, b"audio", true)]).unwrap();
 			group
 		};
@@ -1568,10 +1559,7 @@ mod tests {
 		let (track, mut export) = audio_export().await;
 		let wire = HangContainer::Legacy(crate::container::Kind::Audio);
 		for (sequence, timestamp, payload) in [(0, 0, b"audio".as_slice()), (2, 1_000_000, b"".as_slice())] {
-			let mut group = track
-				.create_group(moq_net::group::Info { start: sequence })
-				.unwrap()
-				.unwrap();
+			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
 			wire.write(&mut group, &[raw_frame(timestamp, payload, true)]).unwrap();
 			group.finish().unwrap();
 		}
@@ -1622,10 +1610,7 @@ mod tests {
 			),
 			(2, vec![raw_frame(100_000, b"resumed", true)]),
 		] {
-			let mut group = track
-				.create_group(moq_net::group::Info { start: sequence })
-				.unwrap()
-				.unwrap();
+			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
 			wire.write(&mut group, &frames).unwrap();
 			group.finish().unwrap();
 		}

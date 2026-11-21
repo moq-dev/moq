@@ -421,7 +421,7 @@ test("grouped authentication failure ends the track", async () => {
 	group.finish();
 
 	// A forged second group, written straight to the net track.
-	const bad = defined(p.net.createGroup(1n));
+	const bad = p.net.createGroup(1n);
 	bad.writeFrame({ timestamp: ms(2), payload: await sealed(p, GROUP, 1n, 0, "ok", true) });
 	bad.finish();
 
@@ -439,9 +439,9 @@ test("grouped failure wakes pending reads and releases demand", async () => {
 	expect(demand.wanted.peek()).toBe(true);
 
 	// One authentic frame, then silence. The group and the track stay open.
-	const open = defined(p.net.createGroup(0n));
+	const open = p.net.createGroup(0n);
 	open.writeFrame({ timestamp: ms(1), payload: await sealed(p, GROUP, 0n, 0, "ok") });
-	const bad = defined(p.net.createGroup(1n));
+	const bad = p.net.createGroup(1n);
 	const badDemand = bad.demand();
 	bad.writeFrame({ timestamp: ms(2), payload: await sealed(p, GROUP, 1n, 0, "nope", true) });
 
@@ -469,7 +469,7 @@ test("grouped failure wakes pending reads and releases demand", async () => {
 
 test("a grouped failure leaves the independent datagram track readable", async () => {
 	const p = await pair("audio");
-	const bad = defined(p.net.createGroup(0n));
+	const bad = p.net.createGroup(0n);
 	bad.writeFrame({ timestamp: ms(1), payload: await sealed(p, GROUP, 0n, 0, "nope", true) });
 	p.dg.net.insert({ sequence: 0n, timestamp: ms(2), payload: await sealed(p, DATAGRAM, 0n, 0, "late") });
 	const forged = await recvGroup(p.consumer);
@@ -896,9 +896,9 @@ test("a timestamp out of range at the track's timescale spends nothing", async (
 
 test("a grouped failure skips opens queued behind it", async () => {
 	const p = await pair("video");
-	const bad = defined(p.net.createGroup(0n));
+	const bad = p.net.createGroup(0n);
 	bad.writeFrame({ timestamp: ms(1), payload: await sealed(p, GROUP, 0n, 0, "nope", true) });
-	const good = defined(p.net.createGroup(1n));
+	const good = p.net.createGroup(1n);
 	good.writeFrame({ timestamp: ms(2), payload: await sealed(p, GROUP, 1n, 0, "ok") });
 	p.dg.net.insert({ sequence: 0n, timestamp: ms(3), payload: await sealed(p, DATAGRAM, 0n, 0, "late") });
 	const forged = await recvGroup(p.consumer);

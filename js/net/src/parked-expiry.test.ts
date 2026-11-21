@@ -40,7 +40,7 @@ for (const protocol of protocols) {
 			const maxAge = protocol.kind === "ietf" && mode === "expires" ? Duration.millis(budget) : null;
 			const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge }));
 			const write = (key: bigint) => {
-				const group = defined(track.createGroup(key));
+				const group = track.createGroup(key);
 				group.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.fromMillis(Number(key)) });
 				group.finish();
 			};
@@ -160,7 +160,7 @@ for (const protocol of protocols) {
 		// closes the stream of a group gone stale instead of resetting it.
 		const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 		const write = (key: bigint, frames: number) => {
-			const group = defined(track.createGroup(key));
+			const group = track.createGroup(key);
 			for (let frame = 0; frame < frames; frame++) {
 				group.writeFrame({
 					payload: new Uint8Array([frame]),

@@ -59,10 +59,7 @@ async fn largest_quic_key_reaches_the_subscriber() {
 					true => Timestamp::unscaled(key),
 					false => Timestamp::from_micros(key.min((1 << 61) - 1)).unwrap(),
 				};
-				let mut group = track
-					.create_group(moq_net::group::Info { start: key })
-					.unwrap()
-					.unwrap();
+				let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
 				group.write_frame(timestamp, b"ladder".as_ref()).unwrap();
 				group.finish().unwrap();
 				let mut got = kio::clock::timeout(Duration::from_secs(5), sub.recv_group())
@@ -118,10 +115,7 @@ async fn wide_key_fails_only_its_subscription() {
 	let wide = broadcast.broadcast().create_track("wide", timed()).unwrap();
 	let narrow = broadcast.broadcast().create_track("narrow", timed()).unwrap();
 	broadcast.announce().unwrap();
-	let mut group = wide
-		.create_group(moq_net::group::Info { start: WIDE })
-		.unwrap()
-		.unwrap();
+	let mut group = wide.create_group(moq_net::group::Info { start: WIDE }).unwrap();
 	group.write_frame(latest(), b"wide".as_ref()).unwrap();
 	let mut group = narrow.append_next().unwrap();
 	group.write_frame(Timestamp::ZERO, b"narrow".as_ref()).unwrap();
@@ -218,10 +212,7 @@ async fn a_later_wide_group_fails_only_that_subscription() {
 	assert_eq!(group.start, 0);
 	assert_eq!(group.read_frame().await.unwrap().unwrap().payload, b"first".as_ref());
 
-	let mut group = wide
-		.create_group(moq_net::group::Info { start: WIDE })
-		.unwrap()
-		.unwrap();
+	let mut group = wide.create_group(moq_net::group::Info { start: WIDE }).unwrap();
 	group.write_frame(latest(), b"wide".as_ref()).unwrap();
 
 	let result = kio::clock::timeout(Duration::from_secs(5), sub.recv_group())

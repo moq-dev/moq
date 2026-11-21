@@ -5640,7 +5640,7 @@ mod test {
 		);
 		let groups: Vec<_> = (0..3)
 			.map(|key| {
-				let mut group = track.create_group(Info { start: key }).unwrap().unwrap();
+				let mut group = track.create_group(Info { start: key }).unwrap();
 				group.write_frame(group.key_time(), b"f".as_ref()).unwrap();
 				group.finish().unwrap()
 			})
@@ -6559,7 +6559,7 @@ mod test {
 			.create_track("test", None)
 			.unwrap();
 		let mut subscriber = track.subscribe(None);
-		let live = track.create_group(Info { start: 0 }).unwrap().unwrap();
+		let live = track.create_group(Info { start: 0 }).unwrap();
 
 		kio::clock::sleep(std::time::Duration::from_secs(1)).await;
 		assert_eq!(alone.consume().arrived(), start);

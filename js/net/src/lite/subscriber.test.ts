@@ -7,7 +7,6 @@ import type { Grant } from "../auth.ts";
 import type { AuthSession } from "../auth_session.ts";
 import { Viewers } from "../bandwidth.ts";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
-import { defined } from "../defined.test-util.ts";
 import {
 	error,
 	fromTransport,
@@ -3209,7 +3208,7 @@ test("a skip or final drop replaces an earlier stale one on lite-07", async () =
 		expect(entry.tail.covers(1n, 3n)).toBe(true);
 		expect(entry.tail.covers(4n, 5n)).toBe(true);
 		// Still skipped after the update.
-		expect(() => defined(entry?.track.createGroup(1n))).toThrow(Skipped);
+		expect(() => entry?.track.createGroup(1n)).toThrow(Skipped);
 	} finally {
 		responses.mockRestore();
 		track.close();
@@ -3258,7 +3257,7 @@ test("a skip replaces a final drop but not a cached group on lite-07", async () 
 			{ drop: new SubscribeDrop({ start: 1n, end: 3n, error: StreamCode.NotFound }) },
 		]);
 		if (!entry) throw new Error("no subscription");
-		defined(entry.track.createGroup(5n)).finish();
+		entry.track.createGroup(5n).finish();
 
 		await send([
 			{ skip: new SubscribeSkip({ start: 1n, end: 3n }) },
@@ -3267,8 +3266,8 @@ test("a skip replaces a final drop but not a cached group on lite-07", async () 
 			// Group 5 arrived, so the skip names only 4 and 6.
 			{ skip: new SubscribeSkip({ start: 4n, end: 7n }) },
 		]);
-		expect(() => defined(entry?.track.createGroup(1n))).toThrow(Skipped);
-		expect(() => defined(entry?.track.createGroup(2n))).toThrow(Skipped);
+		expect(() => entry?.track.createGroup(1n)).toThrow(Skipped);
+		expect(() => entry?.track.createGroup(2n)).toThrow(Skipped);
 		expect(entry.tail.covers(4n, 7n)).toBe(true);
 		expect(warn).toHaveBeenCalledTimes(1);
 

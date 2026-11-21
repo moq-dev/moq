@@ -21,7 +21,7 @@ fn reads_skip_an_owed_hole() {
 		let mut next = snapshot::Consumer::<Value>::new(track.consume(), Default::default());
 		let waiter = kio::Waiter::noop();
 		let put = |start: u64| {
-			let mut group = track.create_group(group::Info { start }).unwrap().unwrap();
+			let mut group = track.create_group(group::Info { start }).unwrap();
 			group
 				.write_frame(
 					moq_net::Timestamp::unscaled(start),

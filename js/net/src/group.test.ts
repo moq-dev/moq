@@ -2,7 +2,6 @@ import { expect, test } from "bun:test";
 import { Duration, yieldNow } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { Signal } from "@moq/signals";
-import { defined } from "./defined.test-util.ts";
 import { FrameTooLarge, StreamCode, StreamError } from "./error.ts";
 import { encodable } from "./flate/group.ts";
 import { Producer } from "./group.ts";
@@ -139,7 +138,7 @@ test("a group read late keeps the instant it joined, alone, on a track, or resum
 		const alone = new Producer(0n);
 		const track = new TrackProducer("test");
 		const subscriber = track.subscribe();
-		const live = defined(track.createGroup(0n));
+		const live = track.createGroup(0n);
 		live.writeFrame(textFrame("a"));
 		clock.jump(Duration.millis(1000));
 

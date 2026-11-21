@@ -827,7 +827,7 @@ mod tests {
 		);
 		let requests = producer.requests();
 		for key in 0..6 {
-			let mut group = producer.create_group(group::Info { start: key }).unwrap().unwrap();
+			let mut group = producer.create_group(group::Info { start: key }).unwrap();
 			group
 				.write_frame(crate::Timestamp::from_millis(key * 1000).unwrap(), b"x".as_slice())
 				.unwrap();

@@ -489,7 +489,7 @@ mod tests {
 
 		for sequence in 0..groups {
 			let start = key(sequence, sequence * frames * 33_333);
-			let mut group = track.create_group(start.into()).unwrap().unwrap();
+			let mut group = track.create_group(start.into()).unwrap();
 			for index in 0..frames {
 				let timestamp = (sequence * frames + index) * 33_333;
 				if index == 0 {
@@ -562,7 +562,7 @@ mod tests {
 		.unwrap();
 		let gray = vec![0x80u8; 320 * 240 * 4];
 		for sequence in 0..3 {
-			let mut group = source._track.create_group(sequence.into()).unwrap().unwrap();
+			let mut group = source._track.create_group(sequence.into()).unwrap();
 			encoder.cut().unwrap();
 			let timestamps: Vec<_> = (0..5).map(|index| (sequence * 5 + index) * 33_333).collect();
 			for &timestamp in &timestamps {
@@ -962,7 +962,7 @@ mod tests {
 		let source_fetches = source._track.requests();
 		// The live edge, left open: a live encode that opened its copy would hold the session
 		// until it ends, which it never does here.
-		let mut live = source._track.create_group(9u64.into()).unwrap().unwrap();
+		let mut live = source._track.create_group(9u64.into()).unwrap();
 		write_keyframe(&mut live);
 
 		let config = Config {
@@ -1445,7 +1445,7 @@ mod tests {
 	#[tokio::test]
 	async fn retirement_rides_out_an_open_live_group() {
 		let mut source = source_catalog(320, 240);
-		let mut group = source._track.create_group(0u64.into()).unwrap().unwrap();
+		let mut group = source._track.create_group(0u64.into()).unwrap();
 		write_keyframe(&mut group);
 
 		let config = Config {
@@ -1764,7 +1764,7 @@ mod tests {
 		let _source_fetches = source._track.requests();
 
 		// Two frames, so the output's largest moves once both are encoded.
-		let mut group = source._track.create_group(0u64.into()).unwrap().unwrap();
+		let mut group = source._track.create_group(0u64.into()).unwrap();
 		let mut encoder = moq_video::encode::Encoder::new(&{
 			let mut config = moq_video::encode::Config::new(320, 240, moq_video::FrameRate::new(30, 1).unwrap());
 			config.kind = moq_video::encode::Kind::Software;
@@ -1874,7 +1874,7 @@ mod tests {
 					}
 				}
 			};
-			let mut group = source._track.create_group(0u64.into()).unwrap().unwrap();
+			let mut group = source._track.create_group(0u64.into()).unwrap();
 			write(&mut group, &[0, 33_333]);
 
 			let config = Config {
@@ -1913,7 +1913,7 @@ mod tests {
 
 			// Queue the next source group first, so it is waiting for the live
 			// path by the time it sees the demand go.
-			let mut next = source._track.create_group(1u64.into()).unwrap().unwrap();
+			let mut next = source._track.create_group(1u64.into()).unwrap();
 			write(&mut next, &[66_666]);
 			drop(fetching);
 
@@ -2014,7 +2014,7 @@ mod tests {
 		assert!(asked.delay.max.is_some(), "the feed asks for its publisher's history");
 
 		// The live path opens output group 0 on the source's first frame.
-		let mut lost = source._track.create_group(0u64.into()).unwrap().unwrap();
+		let mut lost = source._track.create_group(0u64.into()).unwrap();
 		write(&mut lost, &[0, 33_333]);
 		let rung = consumer.track("video/120p").unwrap();
 		let mut edge = rung.clone();
@@ -2032,7 +2032,7 @@ mod tests {
 		assert!(partial.await.is_err(), "the lost group was finished short");
 
 		// The next group arrives whole.
-		let mut next = source._track.create_group(1u64.into()).unwrap().unwrap();
+		let mut next = source._track.create_group(1u64.into()).unwrap();
 		write(&mut next, &[66_666, 99_999]);
 		next.finish().unwrap();
 
@@ -2539,7 +2539,7 @@ mod tests {
 			let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
 
 			let mut rung = subscribe(&consumer, "video/120p").await;
-			let mut group = source._track.create_group(0u64.into()).unwrap().unwrap();
+			let mut group = source._track.create_group(0u64.into()).unwrap();
 			write_keyframe(&mut group);
 			group.finish().unwrap();
 			match finish {

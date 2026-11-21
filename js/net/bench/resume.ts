@@ -50,7 +50,7 @@ async function measure(readers: number, swaps: number | undefined, fork = false)
 		const track = defined(broadcast.createTrack("seq"));
 		// Every route's copy holds the same groups under the same sequences.
 		const write = () => {
-			const group = defined(track.createGroup(sequence));
+			const group = track.createGroup(sequence);
 			group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.start) });
 			group.finish();
 		};
