@@ -4773,9 +4773,10 @@ impl SubscribeOnce {
 				// A feed ending before the answer's Largest never shows it, so the
 				// answer alone makes the copy current. A live join's feed is open.
 				Some(largest) if !self.plan.live && live.sent_bounds.1.is_some_and(|end| end <= largest.group) => {
-					track.set_live_ahead(largest, from)
+					track.set_live_ahead(largest, None, from)
 				}
-				largest => track.set_live(largest, from),
+				// An Object ID is no frame ordinal, so the cache does not record it.
+				largest => track.set_live(largest, None, from),
 			};
 			live.resuming = None;
 			// An answer behind the copy's cache fails it.

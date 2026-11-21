@@ -588,8 +588,7 @@ pub(crate) mod tests {
 	/// implementation is graded against the other.
 	pub(crate) fn case(name: &str) -> Case {
 		let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-			.join("../../doc/concept/audio-jitter")
-			.join(format!("{name}.json"));
+			.join(format!("../../doc/concept/audio-jitter/{name}.json"));
 		let json = std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
 		serde_json::from_str(&json).unwrap()
 	}

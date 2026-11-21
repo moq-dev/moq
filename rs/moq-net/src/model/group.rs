@@ -4325,7 +4325,8 @@ impl Consumer {
 	}
 
 	/// Where the group ends in its track's timescale, once its producer finished it whole
-	/// with [`Producer::finish_at`]: `None` while it is open, or when it finished without an end.
+	/// with [`Producer::finish_at`], kept after its cache is released: `None` while it is open,
+	/// when it was aborted unfinished, or when it finished without an end.
 	pub fn end(&self) -> Option<u64> {
 		match self.cursor.state.read().outcome {
 			Outcome::Finished(_, end) | Outcome::Released(_, end, _) => end,
@@ -6389,7 +6390,8 @@ mod test {
 
 	/// A finished group is still aborted once its frames are released to free memory (the
 	/// cache pool's expiry window or byte target). A reader that already drained every frame
-	/// is missing nothing, so it must see the clean end of group rather than the abort.
+	/// is missing nothing, so it must see the clean end of group, and where it ends, rather
+	/// than the abort.
 	#[test]
 	#[cfg(feature = "async")]
 	fn abort_after_finish_keeps_the_clean_end_for_a_drained_reader() {
@@ -6397,7 +6399,7 @@ mod test {
 		producer
 			.write_frame(Timestamp::ZERO, Bytes::from_static(b"hello"))
 			.unwrap();
-		let producer = producer.finish().unwrap();
+		let producer = producer.finish_at(1).unwrap();
 
 		let mut drained = producer.consume();
 		let mut behind = producer.consume();
@@ -6409,6 +6411,7 @@ mod test {
 		// Drained everything before the abort: nothing is missing.
 		assert!(drained.read_frame().now_or_never().unwrap().unwrap().is_none());
 		assert!(drained.next_frame().now_or_never().unwrap().unwrap().is_none());
+		assert_eq!(drained.end(), Some(1));
 
 		// Never read the frame, and its bytes are gone: a truncated stream, not a clean end.
 		assert!(matches!(behind.read_frame().now_or_never().unwrap(), Err(Error::Old)));

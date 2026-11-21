@@ -75,11 +75,12 @@ harness_begin mesh-replay "$RERUN"
 REPORT="${REPORT:-$HARNESS_RUN/report}"
 
 # ── binaries ────────────────────────────────────────────────────────────────
+# Optimized, like the release it rolls against; see README.md.
 cd "$WORKSPACE"
-cargo build --locked -p moq-relay -p moq-bench -p moq-shaper
+cargo build --locked --release -p moq-relay -p moq-bench -p moq-shaper
 TARGET=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys;print(json.load(sys.stdin)["target_directory"])')
 for binary in moq-relay moq-bench moq-shaper; do
-    harness_stage "new/$binary" "$TARGET/debug/$binary"
+    harness_stage "new/$binary" "$TARGET/release/$binary"
 done
 if [[ -n "$NEW" ]]; then
     harness_stage new/relay "$NEW"

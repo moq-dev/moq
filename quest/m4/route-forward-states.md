@@ -15,8 +15,8 @@ Decided 2026-11-20 (maintainer, /quest-plan of the main → release audit): ✅ 
 (rejected: m2, which puts an L routing refactor right before the cut; dropping it and fixing
 races one replay at a time). [moq-dev/moq#9231](https://github.com/moq-dev/moq/pull/9231)
 fixed the race the audit found, and
-[mesh replay violations](/quest/m0/nightly/mesh-replay-violations.md) owns the replay's open
-strands. If that quest traces one to forwarding, move this quest up.
+[the nightly record](/quest/m0/nightly/README.md) records the mesh replay's resolved
+violations. If a replay traces a new strand to forwarding, move this quest up.
 
 The shape today: `Node::forward` (`rs/moq-net/src/route/node.rs`) returns
 `Option<Option<Via>>`, where the outer `None` waits and `Some(None)` refuses, and announce
