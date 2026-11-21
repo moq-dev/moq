@@ -2065,15 +2065,18 @@ mod test {
 		));
 
 		// Type 2 was a relative anchor before lite-07 dropped it, and is a Position now, a
-		// start only; type 3 is assigned to nothing.
-		for kind in [2, 3, 4] {
+		// start only; type 3 is assigned to nothing, as a start or an end. Each closes the
+		// session with a PROTOCOL_VIOLATION.
+		let starts = [3, 4].map(|kind| (2, kind));
+		let ends = [2, 3, 4].map(|kind| (1, kind));
+		for (back, kind) in starts.into_iter().chain(ends) {
 			let mut buf = encode(&msg, version).unwrap();
-			let last = buf.len() - 1;
-			buf[last] = kind;
-			assert!(matches!(
-				crate::coding::decode_from(&mut buf.as_slice(), version, Subscribe::decode_msg),
-				Err(DecodeError::InvalidValue)
-			));
+			let at = buf.len() - back;
+			buf[at] = kind;
+			let err = crate::coding::decode_from(&mut buf.as_slice(), version, Subscribe::decode_msg).unwrap_err();
+			assert!(matches!(err, DecodeError::InvalidValue), "{back} {kind}");
+			let session = crate::SessionError::from(&crate::Error::Decode(err));
+			assert!(matches!(session, crate::SessionError::ProtocolViolation));
 		}
 	}
 
