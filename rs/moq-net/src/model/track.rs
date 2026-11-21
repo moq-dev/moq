@@ -25611,7 +25611,37 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn a_shed_compressed_edge_inflates_nothing() {
 		let info = Info::timed().with_compression(Compression::Deflate);
-		// The stored slices a publisher would send.
+		let stored = stored_slices(&info);
+		let pool = cache::Pool::unbounded();
+		let broadcast = session_broadcast(&pool, Some(1 << 30));
+		let producer = Producer::new(broadcast.clone(), "test", info);
+		let mut group = producer.create_group(group::Info { start: 0 }).unwrap();
+		// The plain copy starts on the first two slices, then lags the last two.
+		for object in &stored[..2] {
+			group = ingest_slice(group, object);
+		}
+		let mut reader = producer.consume().peek_group(0).expect("cached");
+		assert!(reader.read_frame().await.unwrap().is_some());
+		for object in &stored[2..] {
+			group = ingest_slice(group, object);
+		}
+		assert!(broadcast.edges.used() > 0);
+
+		let moves = producer.state.read().cache.moves();
+		producer.state.write().ok().expect("open").shed_edge_all(moves);
+		// Only fixed bookkeeping is left: no slice, inflated frame, or decoder.
+		assert!(broadcast.edges.used() < 1024, "{:?}", broadcast.edges);
+		// What a reader already took it keeps; a plain read of what was shed is evicted.
+		drop(reader);
+		let mut late = producer.consume().peek_group(0).expect("the edge stays cached");
+		let read = late.read_frame().now_or_never();
+		assert!(matches!(read, Some(Err(Error::Evicted))), "{read:?}");
+		drop(group);
+	}
+
+	/// The stored slices a publisher of a compressed group would send.
+	#[cfg(feature = "async")]
+	fn stored_slices(info: &Info) -> arrayvec::ArrayVec<frame::Object, 4> {
 		let source = track_producer("source", info.clone());
 		let mut written = source.create_group(group::Info { start: 0 }).unwrap();
 		for index in 0..4 {
@@ -25627,39 +25657,49 @@ mod test {
 				.poll_read_objects(&kio::Waiter::noop(), &mut stored),
 			Poll::Ready(Ok(4))
 		));
+		stored
+	}
 
+	/// Receive one stored slice into `group`, as a subscriber does.
+	#[cfg(feature = "async")]
+	fn ingest_slice(group: group::Producer, object: &frame::Object) -> group::Producer {
+		let mut frame = group
+			.create_object(frame::Header {
+				info: frame::Info {
+					size: object.payload.len() as u64,
+					timestamp: object.timestamp,
+				},
+				fields: object.fields.clone(),
+				inflated: object.inflated,
+			})
+			.unwrap();
+		frame.write(object.payload.contiguous(0)).unwrap();
+		frame.finish().unwrap()
+	}
+
+	/// Shedding a received compressed edge that holds no slice yet discards no history, so
+	/// the frames it receives afterwards still read plain.
+	#[tokio::test]
+	#[cfg(feature = "async")]
+	async fn a_shed_empty_compressed_edge_still_decodes() {
+		let info = Info::timed().with_compression(Compression::Deflate);
+		let stored = stored_slices(&info);
 		let pool = cache::Pool::unbounded();
 		let broadcast = session_broadcast(&pool, Some(1 << 30));
 		let producer = Producer::new(broadcast.clone(), "test", info);
 		let mut group = producer.create_group(group::Info { start: 0 }).unwrap();
-		for object in &stored {
-			let mut frame = group
-				.create_object(frame::Header {
-					info: frame::Info {
-						size: object.payload.len() as u64,
-						timestamp: object.timestamp,
-					},
-					fields: object.fields.clone(),
-					inflated: object.inflated,
-				})
-				.unwrap();
-			frame.write(object.payload.contiguous(0)).unwrap();
-			group = frame.finish().unwrap();
-		}
-		let mut reader = producer.consume().peek_group(0).expect("cached");
-		assert!(reader.read_frame().await.unwrap().is_some());
-		assert!(broadcast.edges.used() > 0);
 
 		let moves = producer.state.read().cache.moves();
 		producer.state.write().ok().expect("open").shed_edge_all(moves);
-		// Only fixed bookkeeping is left: no slice, inflated frame, or decoder.
-		assert!(broadcast.edges.used() < 1024, "{:?}", broadcast.edges);
-		// What a reader already took it keeps; a plain read of what was shed is evicted.
-		drop(reader);
-		let mut late = producer.consume().peek_group(0).expect("the edge stays cached");
-		let read = late.read_frame().now_or_never();
-		assert!(matches!(read, Some(Err(Error::Evicted))), "{read:?}");
-		drop(group);
+		for object in &stored {
+			group = ingest_slice(group, object);
+		}
+		group.finish().unwrap();
+		let mut reader = producer.consume().peek_group(0).expect("cached");
+		for index in 0..4 {
+			let frame = reader.read_frame().await.unwrap().expect("a frame");
+			assert_eq!(frame.payload, format!("frame {index}; ").repeat(1000).as_bytes());
+		}
 	}
 
 	/// A frame still arriving on a shed edge cannot be shed, so its copy is aborted: a

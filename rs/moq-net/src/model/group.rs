@@ -1088,22 +1088,25 @@ impl GroupState {
 	/// Shed every committed frame, an open group's newest too, keeping the timeline the
 	/// frames presented. A reader of a shed frame reads it as [`Error::Evicted`].
 	///
-	/// A received compressed group inflates nothing to do it: with its slices gone, its plain
-	/// copy can never inflate past them, so that copy is released too, decoder included, and
-	/// its readers read the rest as evicted. A group a local producer is still compressing
-	/// into keeps its plain copy going, as any shed does, since its encoder's window carries on.
+	/// A received compressed group inflates nothing to do it. When that sheds slices its plain
+	/// copy has not inflated yet, the copy can never inflate past them, so it is released too,
+	/// decoder included, and its readers read the rest as evicted. Otherwise, and in a group a
+	/// local producer is still compressing into, the plain copy keeps going, as any shed does:
+	/// nothing it would decode next is gone.
 	fn shed_all(&mut self) {
 		if self.outcome.error().is_some() {
 			return;
 		}
 		let compressing = self.flate.as_ref().is_some_and(|flate| flate.encoder.is_some());
-		self.shed_frames(self.committed(), compressing);
+		let (held, end) = (self.held(), self.committed());
+		self.shed_frames(end, compressing);
 		if let Some(flate) = &self.flate {
-			match compressing {
-				true => {
+			let stranded = !compressing && held < end && flate.plain.len.load(Ordering::Acquire) < end;
+			match stranded {
+				true => flate.plain.release(Error::Evicted),
+				false => {
 					flate.plain.shed(u64::MAX, u64::MAX, false);
 				}
-				false => flate.plain.release(Error::Evicted),
 			}
 		}
 	}
