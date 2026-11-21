@@ -14,6 +14,17 @@ pub(crate) fn check(data: &[u8]) -> Result<()> {
 	scan.finish(data.len())
 }
 
+/// Check a regular MP4's trailing `moov`, whose sample tables grow with the recording, so no
+/// box is refused for its size: only for nesting and expanding counts.
+pub(crate) fn check_unbounded(data: &[u8]) -> Result<()> {
+	let mut scan = Scan {
+		unbounded: true,
+		..Scan::default()
+	};
+	scan.boxes(data, Namespace::Any)?;
+	scan.finish(data.len())
+}
+
 /// Check a body already framed by the streaming importer.
 pub(super) fn body(kind: FourCC, data: &[u8]) -> Result<()> {
 	let mut scan = Scan::default();
@@ -37,6 +48,8 @@ struct Scan {
 	groups: u64,
 	tracks: usize,
 	any_bytes: u64,
+	/// Whether a box is never refused for its size alone.
+	unbounded: bool,
 	// Valid MP4 nesting never repeats a container along one path. Refuse cycles before
 	// mp4-atom's recursive decoder can turn an input-sized tree into call-stack exhaustion.
 	parents: Vec<FourCC>,
@@ -63,7 +76,7 @@ impl Scan {
 			if data.len() < 8 {
 				break;
 			}
-			let (header, body) = next(&mut data)?;
+			let (header, body) = next(&mut data, self.unbounded)?;
 			// These containers retain full Any values even for tiny leaves. Account for their
 			// in-memory entries, since a byte bound alone permits far more than a tenfold parse.
 			if self
@@ -164,7 +177,7 @@ impl Scan {
 			}
 			b"urim" => {
 				take(&mut data, 8)?;
-				next(&mut data)?; // the typed URIBox, not Any
+				next(&mut data, self.unbounded)?; // the typed URIBox, not Any
 				Namespace::Any
 			}
 			// Leaves and private namespaces do not dispatch their bytes through Any. In particular,
@@ -194,7 +207,7 @@ impl Scan {
 			return Ok(());
 		}
 		while data.len() >= 8 {
-			let Ok((header, body)) = next(&mut data) else {
+			let Ok((header, body)) = next(&mut data, self.unbounded) else {
 				break;
 			};
 			self.retain(header.kind, 1, std::mem::size_of::<mp4_atom::Any>())?;
@@ -211,7 +224,7 @@ impl Scan {
 }
 
 /// Split a complete box without copying its body or trusting a narrowed 64-bit size.
-fn next<'a>(data: &mut &'a [u8]) -> Result<(Header, &'a [u8])> {
+fn next<'a>(data: &mut &'a [u8], unbounded: bool) -> Result<(Header, &'a [u8])> {
 	let size = u32::decode(data).map_err(crate::container::fmp4::Error::mp4)?;
 	let kind = FourCC::decode(data).map_err(crate::container::fmp4::Error::mp4)?;
 	let size = match size {
@@ -231,7 +244,7 @@ fn next<'a>(data: &mut &'a [u8]) -> Result<(Header, &'a [u8])> {
 			.map_err(crate::container::fmp4::Error::mp4)? as usize,
 	};
 	// Media has a transport-owned payload bound and is never expanded as metadata.
-	if kind.as_ref() != b"mdat" && size > MAX_METADATA_BYTES {
+	if !unbounded && kind.as_ref() != b"mdat" && size > MAX_METADATA_BYTES {
 		return Err(Error::MetadataTooLarge {
 			kind: kind.to_string(),
 			size,
@@ -287,6 +300,27 @@ pub(crate) mod tests {
 		}
 		// Media stays under the transport's payload bound rather than the metadata bound.
 		check(&boxed(b"mdat", &vec![0; MAX_METADATA_BYTES + 1])).unwrap();
+	}
+
+	/// A finished file's `moov` grows with the recording, past the size a received one may
+	/// have, and is still checked for its nesting.
+	#[test]
+	fn a_trailing_moov_is_not_refused_for_its_size() {
+		let big = boxed(b"moov", &vec![0; MAX_METADATA_BYTES + 1]);
+		assert!(matches!(check(&big), Err(Error::MetadataTooLarge { .. })));
+		check_unbounded(&big).unwrap();
+
+		// A table of any length inside nested boxes, as a long recording's `stsz` is.
+		let stbl = boxed(b"stbl", &boxed(b"stsz", &vec![0; 4 * MAX_METADATA_BYTES]));
+		check_unbounded(&boxed(
+			b"moov",
+			&boxed(b"trak", &boxed(b"mdia", &boxed(b"minf", &stbl))),
+		))
+		.unwrap();
+
+		// Nesting a container inside itself is still refused.
+		let nested = boxed(b"moov", &boxed(b"moov", &boxed(b"moov", &[])));
+		assert!(check_unbounded(&nested).is_err());
 	}
 
 	fn inherited(count: u32) -> Vec<u8> {

@@ -58,7 +58,7 @@ impl Mp4 {
 		})?;
 		let repaired = tokio::task::spawn_blocking(move || {
 			let mut file = file;
-			let Some(finish) = moq_mux::container::mp4::repair(&mut file)? else {
+			let Some(finish) = moq_mux::container::mp4::repair(&mut file, &[])? else {
 				return anyhow::Ok(false);
 			};
 			finish.write(&mut file)?;
