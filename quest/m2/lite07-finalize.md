@@ -174,12 +174,16 @@ would need a breaking release had it landed right after the cut:
 
 Decided 2026-11-15 (maintainer, /quest-plan on the whole route layer): ✅
 lite-07 carries the redesigned route layer of
-[cache-aware multicast](/quest/m2/multicast/README.md), and the cut waits
+[cache-aware multicast](https://github.com/moq-dev/moq/blob/41cc107579/quest/m2/multicast/README.md), and the cut waits
 for it (rejected: freezing lite-07 with the path rule and redesigning in
 lite-08; freezing lite-07 with no route layer). That redesign removes the
 Route Key Parameter, so the 2026-11-10 wait on its symbolic model and the
 route key lane's early signal above ended when
 [moq-dev/moq#8987](https://github.com/moq-dev/moq/pull/8987) landed.
+That epic finished 2026-11-20 with its last child
+([moq-dev/moq#9231](https://github.com/moq-dev/moq/pull/9231)), and the cut's
+routing wait moved to [claim reach](/quest/m2/lite07-claim-reach-routes.md)
+(maintainer, 2026-11-20).
 
 Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit, which also
 audited the lite-07 draft for what it could lose):
@@ -197,7 +201,7 @@ audited the lite-07 draft for what it could lose):
 - ✅ Kept as they are: datagram tracks, including the lite-05/06 bridge (a
   named consumer wants them); all seven lite versions, which keep
   negotiating with today's behaviour; the hidden `.` path prefix; and the
-  route plan of [cache-aware multicast](/quest/m2/multicast/README.md)
+  route plan of [cache-aware multicast](https://github.com/moq-dev/moq/blob/41cc107579/quest/m2/multicast/README.md)
   (rejected: routing as a separately versioned SETUP extension).
 - The smaller wire fixes rode [lite-07 by start](https://github.com/moq-dev/moq/pull/8908):
   Max Age as value plus one, no Padding stream or datagram type, a kind in
@@ -232,7 +236,6 @@ and switching rules in `rs/moq-net/AGENTS.md` before the cut):
 
 - [No relative anchors](/quest/m2/time-addressing/no-relative-anchors.md) - SUBSCRIBE's anchors lose Relative, and Min Age places a live join
 - [Group Streams carry each time once](/quest/m2/time-addressing/group-times.md) - GROUP loses Previous Start, FRAME's first delta counts from the start, and GROUP_END carries an end
-- [Cache-aware multicast](/quest/m2/multicast/README.md) - lite-07 carries the redesigned route layer: routes to forwarding nodes, no holds or doubt, claims crossing trust boundaries by a chain, and no Route Key
 - [Groups never overlap](/quest/m2/groups-never-overlap.md) - first-party producers and importers keep the no-overlap MUST the cut publishes
 - [A lite-07 claim is shown no broader than the grants it crossed](/quest/m2/lite07-claim-reach-routes.md) - a peer is never shown a claim at a path no route of it can serve, through any number of relays (maintainer, 2026-11-20)
 
