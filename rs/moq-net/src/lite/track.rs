@@ -462,25 +462,29 @@ mod test {
 	#[test]
 	fn lite07_carries_the_compression_codec() {
 		for compression in [Compression::None, Compression::Deflate] {
+			// A zero tail is the one byte after the codec.
 			let info = TrackInfo {
 				compression,
+				tail: 0,
 				..info_sample()
 			};
 			let buf = info.encode_bytes(Version::Lite07).unwrap();
-			assert_eq!(buf.last(), Some(&(compression as u8)));
+			assert_eq!(buf[buf.len() - 2..], [compression as u8, 0]);
 			assert_eq!(info_roundtrip(Version::Lite07, &info).compression, compression);
 		}
 
-		// The message body, without its length prefix, ends in the codec id.
+		// The message body, without its length prefix, ends in the codec id and a zero tail.
 		let mut buf = Vec::new();
 		TrackInfo {
 			compression: Compression::Deflate,
+			tail: 0,
 			..info_sample()
 		}
 		.encode_msg(&mut Encoder::new(&mut buf, Version::Lite07.into()), Version::Lite07)
 		.unwrap();
 		// An unknown codec id, still a one-byte varint.
-		*buf.last_mut().unwrap() = 2;
+		let codec = buf.len() - 2;
+		buf[codec] = 2;
 		let mut slice = buf.as_slice();
 		assert!(matches!(
 			crate::coding::decode_buf(&mut slice, Version::Lite07, |r, v| TrackInfo::decode_msg(r, v)),
