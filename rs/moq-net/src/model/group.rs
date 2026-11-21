@@ -232,8 +232,8 @@ pub(super) struct GroupState {
 	pub(super) partial: Option<Partial>,
 
 	// Index of the first frame this handle holds: any the group deliberately started
-	// past (see [`Producer::start_at`]). Reading below it is [`Error::Lagged`]; the
-	// frames are not here. Frames shed from the front since sit between it and
+	// past (see [`Producer::start_at`]). The frames are not here: reading below it
+	// fetches them (see [`Consumer::fetches_from`]) or is [`Error::Lagged`]. Frames shed from the front since sit between it and
 	// [`Self::held`], and reading them is [`Error::Evicted`].
 	pub(super) offset: usize,
 
@@ -1772,10 +1772,12 @@ impl Producer {
 	///
 	/// A group can be short at its front or its back, never in the middle: this trims
 	/// the front. Transport cuts at the back also retain their incomplete provenance.
-	/// The frames below `index` are not a gap this handle will ever fill, so a reader
-	/// positioned below it gets [`Error::Lagged`]. They belong to whoever produced the
-	/// head of the group, typically another route serving the same track (see
-	/// [`crate::track::Subscriber`]).
+	/// The frames below `index` are not a gap this handle will ever fill. They belong to
+	/// whoever produced the head of the group, typically another route serving the same
+	/// track (see [`crate::track::Subscriber`]), so a reader positioned below it fetches
+	/// them from there: a front recovers them from a route, or the track's
+	/// [`crate::track::Requests`] handlers serve them. With neither, the read is
+	/// [`Error::Lagged`]; a failed fetch fails it with the fetch's error.
 	///
 	/// The counterpart of [`Consumer::with_range`], which positions a *reader* the same
 	/// way. Where the group begins is part of its shape, so this must come before the
@@ -3042,7 +3044,7 @@ impl Handle {
 
 	/// The index of the first frame this group still holds, or `None` once it has been
 	/// aborted. Non-zero when the group started later (see [`Self::start_at`]); a reader
-	/// positioned below it is [`Error::Lagged`].
+	/// positioned below it fetches the frames it lacks or fails with [`Error::Lagged`].
 	///
 	/// One guard for both halves, deliberately. The track asks this to decide whether a
 	/// cached slot can still answer a request, and reading the abort and the offset
@@ -4279,8 +4281,9 @@ impl Consumer {
 	/// Advance the read cursor to `index`, skipping every frame below it.
 	///
 	/// Unlike [`Self::with_range`], this does not clamp past a requested frame the group
-	/// never held. A [`Producer::start_at`] floor above `index` still surfaces as
-	/// [`Error::Lagged`].
+	/// never held. A [`Producer::start_at`] floor above `index` makes a read fetch the
+	/// frames below it, from a front's route or the track's [`crate::track::Requests`]
+	/// handlers, and surfaces as [`Error::Lagged`] when neither can serve them.
 	pub fn skip_to(&mut self, index: u64) {
 		Idle::disarm(&mut self.idle);
 		self.cursor.skip_to(index);

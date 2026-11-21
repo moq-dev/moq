@@ -13577,8 +13577,8 @@ mod test {
 		);
 	}
 
-	/// A group missing its head is never served short: reading it is [`Error::Lagged`],
-	/// which a route copy recovers.
+	/// A group missing its head is never served short: with no [`Requests`] handler to
+	/// fetch the head, reading it is [`Error::Lagged`], which a route copy recovers.
 	#[test]
 	fn a_group_missing_its_head_lags() {
 		let producer = track_producer("test", Info::default());
@@ -13599,6 +13599,45 @@ mod test {
 		};
 		assert_eq!(group.index(), 0);
 		assert!(matches!(group.poll_read_frame(&noop), Poll::Ready(Err(Error::Lagged))));
+	}
+
+	/// Any reader of a group missing its head, not only a wire publisher, fetches the head
+	/// through the track's [`Requests`] handlers and reads the group whole.
+	#[test]
+	fn a_group_missing_its_head_fetches_it() {
+		let producer = track_producer("test", Info::default());
+		let requests = producer.requests();
+		let mut headless = producer.create_group(group::Info { start: 4 }).unwrap();
+		headless.start_at(2).unwrap();
+		headless
+			.write_frame(crate::Timestamp::unscaled(headless.start), &b"tail"[..])
+			.unwrap();
+		headless.finish().unwrap();
+
+		let noop = kio::Waiter::noop();
+		let start = Anchor::Time(4);
+		let mut sub = producer.subscribe(replay().with_ranges([Range { start, end: None }]));
+		let Poll::Ready(Ok(Some(mut group))) = sub.poll_recv_group(&noop) else {
+			panic!("no group");
+		};
+		assert!(group.poll_read_frame(&noop).is_pending(), "waits on the fetch");
+
+		let Poll::Ready(Ok(fill)) = requests.poll_requested_fill_group(&noop) else {
+			panic!("no fill asked");
+		};
+		assert_eq!((fill.key(), fill.frame_start()), (4, 0), "asks for the head");
+		let mut whole = fill.accept(Info::default()).unwrap().unwrap();
+		for payload in [&b"head0"[..], b"head1", b"tail"] {
+			whole.write_frame(crate::Timestamp::unscaled(4), payload).unwrap();
+		}
+		whole.finish().unwrap();
+
+		for want in [&b"head0"[..], b"head1", b"tail"] {
+			let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&noop) else {
+				panic!("no frame {want:?}");
+			};
+			assert_eq!(frame.payload.as_ref(), want);
+		}
 	}
 
 	/// The floor a reader waiting on each group starts at is the higher of its ranges' and
