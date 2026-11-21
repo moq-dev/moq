@@ -144,11 +144,13 @@ impl Metrics for Untracked {}
 /// stops reading still holds.
 ///
 /// A session's ingest stops reading a group's stream while the group's fastest reader is far
-/// behind, so flow control pushes back to the publisher. Such a paused stream keeps up to
-/// `stream` bytes it has not read, plus what it read of a frame's unsealed segment, counted
-/// against the shared `connection` window, so the session pauses only as many streams as fit
-/// in half of it; the rest keep reading. See
-/// [`poll::Session::receive_window`].
+/// behind, so flow control pushes back to the publisher. Such a paused stream holds the
+/// connection credit it was granted, counted against the shared `connection` window, so the
+/// session pauses only as many streams as fit in half of it; the rest keep reading. A
+/// transport that shapes a stream's credit ([`poll::RecvStream::set_window`]) holds a paused
+/// one to a small allowance, which shrinks with each stream the session shapes yet sums to
+/// under that half however many there are, so every one pauses; any other holds its `stream`
+/// window. See [`poll::Session::receive_window`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ReceiveWindow {
@@ -925,6 +927,21 @@ pub mod poll {
 			Poll::Pending
 		}
 
+		/// Let the peer send at most `window` bytes past what the reader took, rather than the
+		/// stream's full receive credit, returning the connection credit the stream may hold from
+		/// now on: the bytes that arrived and were not released, and those the peer may still send.
+		///
+		/// A session pacing a stream (see [`Session::receive_window`]) shrinks its window as the
+		/// group runs out of room, so the stream holds little once paused, and many fit in the
+		/// connection window. Credit already granted stays granted. `None` when the transport
+		/// cannot, the default, whose paused streams hold their full stream credit.
+		///
+		/// A transport that can also implements [`Lease::set_window`].
+		fn set_window(&mut self, window: u64) -> Option<u64> {
+			let _ = window;
+			None
+		}
+
 		/// Poll for the next chunk, up to `max` bytes, or `None` once the peer finished the
 		/// stream. Its credit returns as it is read.
 		///
@@ -968,6 +985,17 @@ pub mod poll {
 
 		/// Return the credit of every byte read so far, by this lease or an earlier one.
 		fn release(self);
+
+		/// Set the stream's window, as [`RecvStream::set_window`] does, in the same step as the
+		/// lease is handed back, by [`release`](Self::release) or a drop.
+		///
+		/// The reader shrinks the window for the bytes it just read, and the credit they return
+		/// may be granted from the window as the transport builds the grant. A shrink made
+		/// after the hand back can lose that race, and credit granted cannot be taken back.
+		/// Ignored by default, for a transport whose streams cannot set a window.
+		fn set_window(&mut self, window: u64) {
+			let _ = window;
+		}
 	}
 
 	/// A pending [`RecvStream::read_chunk`].

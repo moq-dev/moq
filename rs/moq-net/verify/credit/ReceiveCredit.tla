@@ -328,11 +328,15 @@ Step(s) ==
                /\ UNCHANGED <<wr, rd, held, refused>>
        ELSE Lease(s, r, slot[s], charge[s]) /\ UNCHANGED <<wr, rd, held, refused>>
 
-\* Hand the lease back (`Lease::release` at a seal, a drop short of one, which restores it).
+\* Hand the lease back (`Lease::release` at a seal, a drop short of one, which restores it). The
+\* lease carries the window shaped to the room the chunk leaves (`Lease::set_window`), which the
+\* hand back sets under the same lock, before it queues the grant.
 HandBack(s) ==
     LET r == q[s]
         tk == r.taken + r.hand
-        back == Queue([r EXCEPT !.out = FALSE, !.taken = tk, !.hand = 0])
+        sl == SlotOf(s)
+        shaped == Shape(r, sl, Room(s, tk), Unsealed(tk))
+        back == Queue([shaped EXCEPT !.out = FALSE, !.taken = tk, !.hand = 0])
         released == [back EXCEPT !.rel = tk]
         passes == IF tk % Seg = 0 THEN Pass([q EXCEPT ![s] = released], credited + tk - r.rel)
                   ELSE IF stuckWaiting THEN Pass([q EXCEPT ![s] = back], credited)
@@ -340,19 +344,17 @@ HandBack(s) ==
     IN /\ pc[s] = "out"
        /\ \E p \in passes : Settle(p, woken)
        /\ pc' = [pc EXCEPT ![s] = "write"]
-       /\ UNCHANGED <<charge, slot, wr, rd, held, refused>>
+       /\ slot' = [slot EXCEPT ![s] = IF Shaped THEN sl ELSE None]
+       /\ UNCHANGED <<charge, wr, rd, held, refused>>
 
-\* Write the chunk into the frame, committing it once whole, and shape the window to the room
-\* left. The lock is taken again, so the driver may have sent a grant since the hand back.
+\* Write the chunk into the frame, committing it once whole. The window was shaped to the room
+\* it leaves as the lease went back.
 Write(s) ==
-    LET sl == SlotOf(s)
-        w == q[s].taken
+    LET w == q[s].taken
     IN /\ pc[s] = "write"
-       /\ q' = [q EXCEPT ![s] = Shape(q[s], sl, Room(s, w), Unsealed(w))]
        /\ wr' = [wr EXCEPT ![s] = w]
        /\ pc' = [pc EXCEPT ![s] = "loop"]
-       /\ slot' = [slot EXCEPT ![s] = IF Shaped THEN sl ELSE None]
-       /\ UNCHANGED <<credited, stuckWaiting, woken, charge, rd, held, refused>>
+       /\ UNCHANGED <<q, credited, stuckWaiting, woken, charge, slot, rd, held, refused>>
 
 (***************************************************************************)
 (* The driver, the peer, and the group's reader.                           *)

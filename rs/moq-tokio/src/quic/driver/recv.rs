@@ -198,6 +198,13 @@ impl Stream {
 		conn.inner.recv_stream(self.reader.id).set_priority(priority);
 	}
 
+	/// Let the peer send at most `window` bytes past what the reader took, returning the
+	/// connection credit the stream may hold. See `moq_quic`'s `RecvStream::set_window`.
+	pub fn set_window(&mut self, window: u64) -> u64 {
+		let mut conn = self.reader.conn.state.lock();
+		conn.inner.recv_stream(self.reader.id).set_window(window)
+	}
+
 	/// Stop accepting data
 	///
 	/// Discards unread data and notifies the peer to stop transmitting.
@@ -419,6 +426,13 @@ impl Lease<'_> {
 	/// The bytes not yet read, in order, one contiguous chunk at a time.
 	pub fn chunks(&self) -> impl Iterator<Item = &[u8]> {
 		self.inner().chunks()
+	}
+
+	/// Let the peer send at most `window` bytes past what the reader took, applied as the lease
+	/// is handed back, in the same step as its credit returns. See `moq_quic`'s
+	/// `recv::Lease::set_window`.
+	pub fn set_window(&mut self, window: u64) {
+		self.inner_mut().set_window(window);
 	}
 
 	/// Return the credit of every byte read so far, by this lease or an earlier one.
