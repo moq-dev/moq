@@ -2,8 +2,9 @@
 
 ## Goal
 
-In `@moq/net`, an error from decoding a Group or Fetch Stream ends only that
-group and the tracks it reaches, never a session. Today `Reader` marks every
+In `@moq/net`, an error from decoding a Group or Fetch Stream aborts only that
+group on each copy of its track, never the track, its broadcast, its sibling
+groups, or a session. Today `Reader` marks every
 error a decoder throws as malformed (`stream.ts`, `decodeError`), and the
 mark travels with the error object: a node that republishes a track aborts
 its copy with that object, and its publisher's `runSubscribe` then closes the
