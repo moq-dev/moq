@@ -4617,17 +4617,43 @@ impl Consumer {
 		}
 	}
 
-	/// Whether the copy read shed the frame read next, rather than failing or never holding
-	/// it. Ordinals stand for frames only on a dense group, so only one boards a flight. A
-	/// plain read of a compressed copy also loses a frame its inflated copy shed, which the
-	/// decoder, already past it, cannot inflate again.
+	/// Whether the copy read lacks the frame read next, having shed it or started past it,
+	/// rather than failing. Ordinals stand for frames only on a dense group, so only one
+	/// boards a flight. A plain read of a compressed copy also loses a frame its inflated copy
+	/// shed, which the decoder, already past it, cannot inflate again. A group handed out
+	/// from a front recovers a frame its copy started past from a route instead.
 	fn shed_next(&self) -> bool {
 		let state = self.cursor.state.read();
 		let index = self.cursor.index;
-		if state.outcome.error().is_some() || state.sparse() || index < state.offset {
+		if state.outcome.error().is_some() || state.sparse() {
 			return false;
 		}
+		if index < state.offset {
+			return self.recover().is_none();
+		}
 		index < state.held() || state.plain(self.cursor.raw).is_some_and(|plain| plain.shed_past(index))
+	}
+
+	/// Whether reading from frame `index` can fetch the frames below where this copy starts:
+	/// a front recovers them from a route, and a track's [`track::Requests`] handlers serve
+	/// them as a flight. A failed or refused fetch fails the read.
+	pub(crate) fn fetches_from(&self, index: u64) -> bool {
+		let state = self.cursor.state.read();
+		if index >= state.offset as u64 {
+			return true;
+		}
+		if state.outcome.error().is_some() || state.sparse() {
+			return false;
+		}
+		drop(state);
+		self.recover().is_some() || self.cursor.cache.track().is_some_and(|track| track::flies(&track))
+	}
+
+	/// Start reads at frame `index`, even below the first frame this copy holds, which a read
+	/// then fetches (see [`Self::fetches_from`]). A start below the cursor is ignored.
+	pub(crate) fn fetching_from(mut self, index: u64) -> Self {
+		self.skip_to(index);
+		self
 	}
 
 	/// Read the same frames from `copy` from here on, keeping this reader's place and cap.
@@ -4857,7 +4883,13 @@ impl Consumer {
 		let (raw, end) = (self.cursor.raw, self.cursor.end);
 		// Frames already prefetched are this cursor's whatever the group sheds since, so
 		// only the first one past them can be evicted.
-		let unread = index + self.cursor.prefetch.buffered().0 as usize;
+		let mut unread = index + self.cursor.prefetch.buffered().0 as usize;
+		// The frames below where this copy starts come from a flight, and the group ends
+		// where this copy does.
+		let offset = self.cursor.state.read().offset;
+		if unread < offset && self.recover().is_none() && self.fetches_from(unread as u64) {
+			unread = offset;
+		}
 		let res = self
 			.cursor
 			.poll(waiter, |state| state.poll_end(index, unread, raw, end))

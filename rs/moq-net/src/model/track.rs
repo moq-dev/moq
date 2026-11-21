@@ -4230,6 +4230,11 @@ pub(super) fn board(track: &kio::Producer<TrackState>, reader: &group::Consumer)
 	}))
 }
 
+/// Whether `track`'s [`Requests`] handlers can serve a flight, which [`board`] asks of them.
+pub(super) fn flies(track: &kio::Producer<TrackState>) -> bool {
+	track.read().fills.read().has_handlers()
+}
+
 /// The copy `reader`, riding a flight, hands over to: one further along that admits it,
 /// and whether that is a flight. See [`TrackState::ride`].
 pub(super) fn hand_over(
