@@ -546,12 +546,14 @@ function presentedAt(reader: Reader, path: Path.Valid): Path.Valid | undefined {
 }
 
 // The prefixes holding what the grant `next` shows that `before` did not: each of its prefixes
-// `before` does not cover. Empty for a narrowing. Mirrors rs/moq-net's `Permit::gained`.
+// `before` does not cover, less any too long for a path, which covers nothing a peer could name.
+// Empty for a narrowing. Mirrors rs/moq-net's `Permit::beyond`.
 function gained(before: Path.Prefixes | undefined, next: Path.Prefixes | undefined): Path.Valid[] {
 	if (!before) return [];
 	if (!next) return [Path.empty()];
 	return next
 		.toArray()
 		.filter((prefix) => !before.matches(prefix.text))
-		.map((prefix) => prefix.text as Path.Valid);
+		.map((prefix) => prefix.text as Path.Valid)
+		.filter((region) => Path.check(region) === undefined);
 }

@@ -493,6 +493,30 @@ test("a lite-07 region granted under a wider prefix syncs at the next answer", a
 	subscriber.close();
 });
 
+test("a lite-07 grant gaining a prefix too long for a path keeps every reader synced", async () => {
+	const v = Version.DRAFT_07;
+	const subscribe = (...paths: string[]): Grant => ({
+		publish: new Path.Prefixes(),
+		subscribe: Path.Prefixes.parse(paths),
+	});
+	const grant = new Signal<Grant | undefined>(subscribe("a"));
+	const { subscriber, send, ok, settle } = announceHarness(v, 1n, grant);
+	const everything = subscriber.routes();
+	await settle();
+	await ok();
+	await send((w) => encodeAnnounceBroadcast(w, { status: "synced", prefix: 0n }, v));
+	await settle();
+	expect(everything.synced.peek()).toBe(true);
+
+	// Like Rust's `Permit::beyond`, a prefix no path can name covers nothing the peer could answer.
+	grant.set(subscribe("a", `b${"x".repeat(Path.MAX_BYTES)}`));
+	await settle();
+	expect(everything.synced.peek()).toBe(true);
+
+	everything.close();
+	subscriber.close();
+});
+
 // Readers too many to ask for one by one are asked for at the root. A grant change that shows more
 // within it, though within no reader's prefix, still sends an edit: a reader arriving there before
 // its answer waits for it, since the peer may already have sent what the change shows.
