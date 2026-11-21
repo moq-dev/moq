@@ -524,6 +524,8 @@ export interface ResumeSource {
 	changed(fn: () => void): Dispose;
 	/** Forget the gaps in `delivered` below each group past the budget, judged on the newest copy. */
 	forgetPastBudget(delivered: Delivered): void;
+	/** Have every copy read whole groups for this reader; see `hooks.wholeGroups`. */
+	wholeGroups(frameOf: (key: bigint) => number | undefined): void;
 	/** The newest key any copy has seen. */
 	latest(): bigint | undefined;
 	/** The serving copy's declared start, raised to its cursor floor, or `"pending"` until resolved. */
@@ -909,6 +911,14 @@ export const hooks: {
 	 * crate-private `track::Subscriber::parked`. Returns the subscriber.
 	 */
 	parked: (subscriber: Subscriber) => Subscriber;
+	/**
+	 * Have a wire publisher's reader hand out each group from frame `frameOf(key)` on, asking a
+	 * fill for the frames its copy lacks below that, as a bounded window does, and giving the group
+	 * up once none can supply them. Through a front, each route copy asks its own fill. A cache only
+	 * makes things faster; mirrors the Rust publisher's `position_group`. `frameOf` answering
+	 * undefined takes the group as held. Returns the subscriber.
+	 */
+	wholeGroups: (subscriber: Subscriber, frameOf: (key: bigint) => number | undefined) => Subscriber;
 	/**
 	 * Whether a route copy's bounded window has nothing left for the logical reader that handed
 	 * out `delivered`, counting what the copy handed out itself, read in key order when
@@ -1330,6 +1340,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	parked: () => {
+		throw new Error("track.ts not loaded");
+	},
+	wholeGroups: () => {
 		throw new Error("track.ts not loaded");
 	},
 	exhaustedFor: () => {

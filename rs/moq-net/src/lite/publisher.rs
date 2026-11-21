@@ -4836,20 +4836,19 @@ async fn recv_next(track: &mut track::Subscriber, emit_boundary: bool) -> Result
 /// at all.
 ///
 /// Frame bounds qualify the start and end group only; everything in between is served
-/// whole. `None` means the group's head is missing and the subscriber never asked for a
-/// partial group, so it must be skipped: a group is the unit of decodability, and only
-/// the subscriber knows whether a partial one is any use to it.
+/// whole. A copy missing frames asked for reads them from upstream, as a cache only makes
+/// things faster. `None` means nothing upstream can supply them and the subscriber never
+/// asked for a partial group, so it must be skipped: a group is the unit of decodability,
+/// and only the subscriber knows whether a partial one is any use to it.
 fn position_group(group: group::Consumer, frames: &Frames) -> Option<group::Consumer> {
 	if group.start < frames.floor {
 		return None;
 	}
 	let expected = frames.start(group.start);
-	let end = frames.end(group.start).map_or(Bound::Unbounded, Bound::Included);
-
-	// The start clamps up to the first frame the group still holds, so landing higher
-	// than asked means the frames below it are gone.
-	let group = group.with_range((Bound::Included(expected), end));
-	(group.index() == expected).then_some(group)
+	let end = frames.end(group.start).and_then(|last| last.checked_add(1));
+	group
+		.fetches_from(expected)
+		.then(|| group.with_end(end).fetching_from(expected))
 }
 
 /// The frame bounds of a subscription, which the model leaves to the publisher: it reads
@@ -5923,9 +5922,10 @@ impl TrackRun {
 						return Poll::Ready(Ok(ControlFlow::Continue(())));
 					}
 					let Some(group) = position_group(group, &self.frames) else {
-						// Its head is gone, and this subscriber didn't ask for a
-						// partial group. Skip it rather than open a stream that can
-						// only be reset; the next servable group resolves the start.
+						// Its head is gone with nothing upstream to fetch it from, and this
+						// subscriber didn't ask for a partial group. Skip it rather than open
+						// a stream that can only be reset; the next servable group resolves
+						// the start.
 						tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, key, "skipping group with a missing head");
 						let hole = Hole::drop(StreamError::NotFound);
 						match &mut self.start {
@@ -10174,6 +10174,170 @@ mod serve_group_test {
 			"only group 0 is served"
 		);
 		assert_eq!(drops(&mut writer, &log, version).await, [(1, 1)]);
+	}
+
+	/// A group missing its head on a track whose handler serves history is fetched from
+	/// that handler and served whole, as the source would: a cache only makes things
+	/// faster. Refused, it is named in SUBSCRIBE_DROP.
+	#[kio::test]
+	async fn a_missing_head_is_fetched() {
+		for refuse in [false, true] {
+			let version = Version::Lite07;
+			let mut track = track::Producer::new(
+				Arc::new(broadcast::Info::default()),
+				"test",
+				crate::track::Info::timed(),
+			);
+			let dynamic = track.requests();
+			let subscriber = track.subscribe(
+				track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(60))),
+			);
+			let session = SinkSession::new(Log::default());
+			let streams = session.log.clone();
+			let (mut run, mut writer, log) = lite_run(version, session, subscriber);
+			write_group(&mut track, 0, 0);
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+
+			let mut headless = track.create_group(group::Info { start: 1 }).unwrap();
+			headless.start_at(1).unwrap();
+			headless
+				.write_frame(Timestamp::from_millis(1).unwrap(), b"tail".as_slice())
+				.unwrap();
+			headless.finish().unwrap();
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+
+			let fill = dynamic.requested_fill_group().now_or_never().expect("a fill").unwrap();
+			assert_eq!((fill.key(), fill.frame_start()), (1, 0), "asks for the head");
+			match refuse {
+				false => {
+					let mut whole = fill.accept(crate::track::Info::timed()).unwrap().unwrap();
+					for payload in [b"head", b"tail"] {
+						whole
+							.write_frame(Timestamp::from_millis(1).unwrap(), payload.as_slice())
+							.unwrap();
+					}
+					whole.finish().unwrap();
+				}
+				true => drop(fill),
+			}
+			drop(dynamic);
+			for _ in 0..8 {
+				while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+				kio::clock::sim::advance(Duration::from_millis(1)).await;
+			}
+
+			let stream = group_stream(&streams, version, 1);
+			match refuse {
+				false => {
+					let (frame_start, frames) = stream.expect("group 1 is served");
+					assert_eq!(frame_start, 0, "served from its first frame");
+					let head = frames.windows(4).position(|w| w == b"head").expect("the head");
+					let tail = frames.windows(4).position(|w| w == b"tail").expect("the tail");
+					assert!(head < tail);
+					assert_eq!(drops(&mut writer, &log, version).await, []);
+				}
+				true => assert_eq!(drops(&mut writer, &log, version).await, [(1, 1)]),
+			}
+		}
+	}
+
+	/// A relay whose route copy holds only the later frames of a group fetches the rest from
+	/// that route and serves the group whole, as the publisher would.
+	#[kio::test]
+	async fn a_relay_fetches_a_missing_head_from_its_route() {
+		use crate::model::ProduceTest;
+		let version = Version::Lite07;
+		let relay = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
+		let route = relay.forward("room", crate::origin::RouteInfo::new()).unwrap();
+		let pending = relay.consume().request("room", None);
+		let upstream = broadcast::Info::new().produce();
+		let mut dynamic = upstream.requests();
+		let request = loop {
+			if let Poll::Ready(Some(request)) = route.poll_requested(&kio::Waiter::noop()) {
+				break request;
+			}
+			kio::clock::sim::advance(Duration::from_millis(1)).await;
+		};
+		request.serve(&upstream);
+		let resolved = pending.await.unwrap();
+
+		let track = resolved.track("test").unwrap();
+		let subscribing = kio::clock::sim::spawn(async move {
+			track
+				.subscribe(
+					track::Subscription::default()
+						.with_delay(track::Delay::default().with_max(Duration::from_secs(60))),
+				)
+				.await
+		});
+		let copy = dynamic
+			.requested_track()
+			.await
+			.unwrap()
+			.accept(crate::track::Info::timed());
+		let fetches = copy.requests();
+		let mut headless = copy.create_group(group::Info { start: 0 }).unwrap();
+		headless.start_at(1).unwrap();
+		headless
+			.write_frame(Timestamp::from_millis(0).unwrap(), b"tail".as_slice())
+			.unwrap();
+		headless.finish().unwrap();
+		let subscriber = subscribing.await.unwrap().unwrap();
+
+		let session = SinkSession::new(Log::default());
+		let streams = session.log.clone();
+		let (mut run, mut writer, log) = lite_run(version, session, subscriber);
+		let serving = kio::clock::sim::spawn(async move {
+			let fill = fetches.requested_fill_group().await.unwrap();
+			assert_eq!((fill.key(), fill.frame_start()), (0, 0), "asks for the head");
+			let mut whole = fill.accept(crate::track::Info::timed()).unwrap().unwrap();
+			for payload in [b"head", b"tail"] {
+				whole
+					.write_frame(Timestamp::from_millis(0).unwrap(), payload.as_slice())
+					.unwrap();
+			}
+			whole.finish().unwrap();
+			fetches
+		});
+		for _ in 0..16 {
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			kio::clock::sim::advance(Duration::from_millis(1)).await;
+		}
+		let _fetches = kio::clock::timeout(Duration::from_secs(1), serving)
+			.await
+			.expect("the relay asks its route for the head")
+			.unwrap();
+		for _ in 0..16 {
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			kio::clock::sim::advance(Duration::from_millis(1)).await;
+		}
+
+		let (frame_start, frames) = group_stream(&streams, version, 0).expect("group 0 is served");
+		assert_eq!(frame_start, 0, "served from its first frame");
+		let head = frames.windows(4).position(|w| w == b"head").expect("the head");
+		let tail = frames.windows(4).position(|w| w == b"tail").expect("the tail");
+		assert!(head < tail);
+		assert_eq!(drops(&mut writer, &log, version).await, []);
+	}
+
+	/// Group `key`'s Group Stream on `log`'s session, as its Frame Start and the bytes after
+	/// its GROUP.
+	fn group_stream(log: &Log, version: Version, key: u64) -> Option<(u64, Vec<u8>)> {
+		let mut streams = std::collections::BTreeMap::<_, Vec<u8>>::new();
+		for (id, sent) in log.trail() {
+			if let Sent::Write(bytes) = sent {
+				streams.entry(id).or_default().extend(bytes);
+			}
+		}
+		streams.into_values().find_map(|bytes| {
+			let mut buf = bytes.as_slice();
+			let group = crate::coding::decode_buf(&mut buf, version, |r, v| {
+				lite::DataType::decode(r, v)?;
+				lite::Group::decode(r, v)
+			})
+			.unwrap();
+			(group.key == key).then(|| (group.frame_start, buf.to_vec()))
+		})
 	}
 
 	/// A long-budget reader warms the relay without changing a live reader's resolved start.
