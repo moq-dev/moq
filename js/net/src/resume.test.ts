@@ -389,6 +389,43 @@ test("a group the window dropped above the serving copy's resume point is backfi
 	}
 });
 
+test("a backfill places a time start its serving copy raised, at the group holding it", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const front = new Front();
+	const sources = [new BroadcastProducer(), new BroadcastProducer()];
+	const handles = sources.map((source) => source.consume());
+	const [ta, tb] = sources.map(copy);
+	const delay = { max: Duration.millis(3_600_000) };
+	const from = (time: bigint) => ({ delay, ranges: [{ start: { time } }] });
+	ta.write(6n);
+	ta.write(8n);
+	front.serve(handles[0]);
+	const sub = front.consumer.track("seq").subscribe(from(8n));
+	try {
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([8n]);
+		// The replacement resumes from 8, holding nothing yet, so its cache places nothing.
+		front.serve(handles[1]);
+		await clock.advance(Duration.ZERO);
+		ta.producer.abort(new StreamError(StreamCode.SessionClosed));
+		sub.update(from(7n));
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([]);
+		for (const key of [6n, 8n, 9n]) tb.write(key);
+		await clock.advance(Duration.ZERO);
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub).sort()).toEqual([6n, 9n]);
+		expect(hooks.servingResolved(sub)[0]?.start).toBe(6n);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		for (const handle of handles) handle.close();
+		for (const source of sources) source.close();
+		installed.close();
+	}
+});
+
 /**
  * A group below the replacement's resume point that the reader never got is asked of the new
  * route, as one cursor on the logical track would still get it late.

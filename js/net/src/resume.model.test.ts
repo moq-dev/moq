@@ -280,6 +280,11 @@ interface Reader {
 	parked: boolean;
 	/** What every live route carried in full when the track ended cleanly. */
 	carried: Set<number>;
+	/**
+	 * The group holding the range's start time when an arrival read first placed the range, as the
+	 * routes wrote groups then: what it owes starts there. See {@link Model.place}.
+	 */
+	holding?: number;
 }
 
 /**
@@ -299,8 +304,18 @@ function within(range: Range, group: number): boolean {
 	return range === undefined || (range[0] <= group && group < range[1]);
 }
 
+/**
+ * The subscription's group range as a plain reader of the route places it: from the group holding
+ * its start time. Mirrors the Rust model's `Reader::owes`.
+ */
+function owedRange(reader: Reader): Range {
+	const range = reader.ranges;
+	if (range === undefined || reader.holding === undefined) return range;
+	return [Math.min(reader.holding, range[0]), range[1]];
+}
+
 function covers(reader: Reader, group: number): boolean {
-	return within(reader.cursor, group);
+	return within(intersect(owedRange(reader), reader.local), group);
 }
 
 /**
@@ -434,6 +449,7 @@ class Model {
 				const reader = this.readers[op.reader];
 				if (!reader) return;
 				reader.ranges = op.range;
+				reader.holding = undefined;
 				reader.cursor = intersect(op.range, reader.local);
 				reader.sub.update(subscription(reader.spec.budget, op.range));
 				// A read that ended at its range's end reads on once the range widens.
@@ -626,7 +642,7 @@ class Model {
 		if (!instance.ended && reader.ranges === undefined) {
 			throw fail(index, "the track ended cleanly though no route declared an end");
 		}
-		const covered = (group: number) => (instance.ended ? covers(reader, group) : within(reader.ranges, group));
+		const covered = (group: number) => (instance.ended ? covers(reader, group) : within(owedRange(reader), group));
 		reader.carried = new Set();
 		for (let group = 0; group < GROUPS; group++) {
 			if (covered(group) && instance.live().every((copy) => complete(copy, group))) reader.carried.add(group);
@@ -753,9 +769,35 @@ class Model {
 				}
 			}
 			quiet = woken ? 0 : quiet + 1;
-			if (quiet === 2) return;
+			if (quiet === 2) {
+				this.place();
+				return;
+			}
 		}
 		throw new Error("readers never settled: something keeps waking them");
+	}
+
+	/**
+	 * Record, for each arrival reader whose range just placed, the group holding its start time:
+	 * the newest group at or before it the instance wrote, when every live route holds it and none
+	 * between was written or given up anywhere, so whichever route places the range starts it
+	 * there. Otherwise its start time stands, owing only from there. Mirrors the Rust `Model::place`.
+	 */
+	place(): void {
+		for (const reader of this.readers) {
+			if (!reader || reader.spec.ordered || reader.ranges === undefined || reader.holding !== undefined) continue;
+			if (hooks.servingResolved(reader.sub)[0] === undefined) continue;
+			const publisher = this.instances[reader.instance];
+			const start = reader.ranges[0];
+			let holding = start;
+			for (let group = start; group >= 0; group--) {
+				if (!publisher.written.has(group) && !publisher.givenUp.has(group)) continue;
+				const held = publisher.live().every((copy) => copy.groups.has(group) && !copy.givenUp.has(group));
+				if (held) holding = group;
+				break;
+			}
+			reader.holding = holding;
+		}
 	}
 
 	/**
@@ -809,7 +851,7 @@ class Model {
 		const readRange = reader.end === null && !instance.ended;
 		const owes = (group: number) =>
 			readRange
-				? within(reader.ranges, group) &&
+				? within(owedRange(reader), group) &&
 					(!reader.spec.ordered || reader.local === undefined || group >= reader.local[0])
 				: covers(reader, group);
 		let owed: number[] = [];
@@ -935,6 +977,45 @@ test("regressions", async () => {
 		drops,
 	});
 	const regressions: Case[] = [
+		// A range moved under the serving copy's resume point starts at the group holding its start
+		// time, which only a backfill from below that point places. Mirrors the Rust case.
+		{
+			ops: [
+				{ kind: "join", reader: 0, spec: spec(false, "hour", [8, 12], false) },
+				{ kind: "write", instance: 0, slot: 0, group: 8, frames: 3 },
+				{ kind: "write", instance: 0, slot: 0, group: 6, frames: 1 },
+				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "write", instance: 0, slot: 1, group: 6, frames: 1 },
+				{ kind: "write", instance: 0, slot: 1, group: 8, frames: 3 },
+				{ kind: "down", instance: 0, slot: 0 },
+				{ kind: "ranges", reader: 0, range: [7, 12] },
+			],
+			finish: false,
+		},
+		// A range an earlier copy placed lower than the serving copy places it stays owed from where
+		// the reader's window starts: a group there that the local floor keeps out holds the read
+		// open. Mirrors the Rust case.
+		{
+			ops: [
+				{ kind: "join", reader: 2, spec: spec(false, "hour", [8, 9], false) },
+				{ kind: "bounds", reader: 2, range: [1, 9] },
+				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "up", instance: 0, slot: 1 },
+			],
+			finish: false,
+		},
+		// A copy resumed at group 0 is asked from there, its ranges clamped where the reader's window
+		// placed them, as any other resume point: the group holding a time start reads on through it.
+		{
+			ops: [
+				{ kind: "up", instance: 1, slot: 1 },
+				{ kind: "join", reader: 0, spec: spec(false, "hour", [2, 3], false) },
+				{ kind: "write", instance: 1, slot: 1, group: undefined, frames: 1 },
+				{ kind: "up", instance: 1, slot: 0 },
+				{ kind: "down", instance: 1, slot: 1 },
+			],
+			finish: false,
+		},
 		// Found by the Rust run. An ordered reader whose range a finished track already passed ends.
 		{ ops: [{ kind: "join", reader: 0, spec: spec(true, "hour", [0, 1], false) }], finish: true },
 		// An ordered reader ends once the rest of its range was given up.

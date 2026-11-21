@@ -690,22 +690,13 @@ impl Holdings for Placed {
 	}
 }
 
-/// Where `range` resolved, as `at`, on a copy whose resume point is `floor`. One above the
-/// range's time start asked the copy from the floor, so its resolution says nothing of which
-/// group the range starts at, nor of an end under the floor too. The range is placed at its
-/// own anchors, which names the groups under the floor that only a backfill reads. Mirrors the
-/// JS `unraised`.
-fn unraised(range: &track::Range, floor: Option<u64>, at: Resolved) -> Resolved {
+/// The time start of `range` that a copy asked from `floor` raised to it, if any: that copy's
+/// resolution says nothing of which group holds it, which only a copy asked from below it
+/// places. Mirrors the JS `raised`.
+fn raised(range: &track::Range, floor: Option<u64>) -> Option<u64> {
 	match (floor, range.start) {
-		(Some(floor), Anchor::Time(start)) if start < floor => Resolved {
-			start,
-			end: match range.end {
-				Some(Anchor::Time(end)) if end < floor => Some(end + 1),
-				_ => at.end,
-			},
-			floored: true,
-		},
-		_ => at,
+		(Some(floor), Anchor::Time(time)) if time < floor => Some(time),
+		_ => None,
 	}
 }
 
@@ -722,6 +713,9 @@ struct Copy {
 	sub: Sub,
 	/// Where the subscription was asked to start, so demand updates never ask for less.
 	floor: Option<u64>,
+	/// Asked for groups under the serving copy's resume point: its floor is where it was asked
+	/// from, not a resume point of its own, so the group holding a time start under it is read.
+	backfill: bool,
 	/// The frames of the group at `floor` the reader already held when this copy was asked,
 	/// so it asks for that group from the next frame; see [`Reader::resume_at`].
 	resume: Option<Position>,
@@ -940,9 +934,13 @@ impl Copy {
 	}
 
 	/// The local floor `start` as this copy applies it: never below its own resume point,
-	/// since groups under it were handed out by an earlier route, or never owed.
+	/// since groups under it were handed out by an earlier route, or never owed. A backfill
+	/// has none: the reader's window and what it handed out decide what it takes.
 	fn start(&self, start: u64) -> u64 {
-		self.floor.map_or(start, |floor| start.max(floor))
+		match self.floor {
+			Some(floor) if !self.backfill => start.max(floor),
+			_ => start,
+		}
 	}
 
 	/// Whether `within` passed since this copy was superseded; see [`Self::since`]. Parks
@@ -1851,6 +1849,9 @@ impl Reader {
 	/// where the ranges resolve. Kept once resolved, past that copy being let go. Pending
 	/// while a relative anchor waits on a copy to resolve it. Costs the ranges still unsettled.
 	fn window(&mut self) -> &Window {
+		if self.window.is_settled() {
+			return &self.window;
+		}
 		let concluded = self.route.end().is_some();
 		for index in 0..self.copies.len() {
 			if self.window.is_settled() {
@@ -1877,7 +1878,12 @@ impl Reader {
 				.copied()
 				.zip(sub.resolved_ranges(keys.iter().copied()))
 				.filter_map(|(key, resolved)| {
-					let resolved = unraised(mirrored.ranges.get(&key)?, floor, resolved?);
+					// A copy asked from above a range's time start says nothing of where it starts:
+					// a backfill asked from below places it; see `backfill_gaps`.
+					if raised(mirrored.ranges.get(&key)?, floor).is_some() {
+						return None;
+					}
+					let resolved = resolved?;
 					if cap.is_some() && resolved.end.is_some_and(|end| end <= resolved.start) {
 						return None;
 					}
@@ -1893,6 +1899,20 @@ impl Reader {
 			self.resolve(&resolved);
 		}
 		&self.window
+	}
+
+	/// The time starts of the unsettled ranges that the serving copy's resume point raised,
+	/// by key: no copy asked from there places them, only a backfill from below.
+	fn raised(&self) -> BTreeMap<u64, u64> {
+		let floor = self.copies.last().and_then(|copy| copy.floor);
+		if floor.is_none() || self.window.is_settled() {
+			return BTreeMap::new();
+		}
+		self.window
+			.unsettled()
+			.into_iter()
+			.filter_map(|key| Some((key, raised(self.mirrored.ranges.get(&key)?, floor)?)))
+			.collect()
 	}
 
 	/// Place each unsettled [`Self::window`] range where a copy resolved it, on its own: one
@@ -2135,6 +2155,7 @@ impl Reader {
 			// Resume where a fresh copy would: a group it buffered while replaced, below the
 			// newest another route handed out, is not handed out.
 			copy.floor = copy.floor.max(self.newest);
+			copy.backfill = false;
 			let resume = self.resume_at(copy.floor, &copy.track);
 			let start = copy.start(self.groups.0);
 			if let (Sub::Ready(sub), Some(_)) = (&mut copy.sub, copy.floor) {
@@ -2167,6 +2188,7 @@ impl Reader {
 			sub: Copy::subscribe(&track, &self.mirrored, span, &resolved),
 			track,
 			floor,
+			backfill: false,
 			resume,
 			resolved,
 			replaced: false,
@@ -2593,26 +2615,23 @@ impl Reader {
 			return false;
 		}
 		let (lowest, cap) = self.groups;
-		let resumed = self.copies.last().and_then(|copy| copy.floor);
 		let window = self.window();
 		let Some(end) = window.end().filter(|_| !window.is_pending()) else {
 			return false;
 		};
-		// A group under the serving copy's resume point that the local floor or cap keeps
-		// out stays owed, as on one cursor, though no copy reads it.
-		if let Some(resumed) = resumed {
-			let until = resumed.min(end);
-			for run in window
-				.runs(window.floor().unwrap_or(0))
-				.take_while(|run| *run.start() < until)
+		// A group of the window that the local floor or cap keeps out stays owed, as on one
+		// cursor, though no copy reads it: under the serving copy's resume point, or under
+		// where that copy's own ranges start, when an earlier copy placed the window lower.
+		for run in window
+			.runs(window.floor().unwrap_or(0))
+			.take_while(|run| *run.start() < end)
+		{
+			let run = *run.start()..run.end().saturating_add(1).min(end);
+			if Delivered::gaps_in_all(taken, run)
+				.iter()
+				.any(|gap| gap.start < lowest || cap.is_some_and(|cap| gap.end > cap))
 			{
-				let run = *run.start()..run.end().saturating_add(1).min(until);
-				if Delivered::gaps_in_all(taken, run)
-					.iter()
-					.any(|gap| gap.start < lowest || cap.is_some_and(|cap| gap.end > cap))
-				{
-					return false;
-				}
+				return false;
 			}
 		}
 		match self.copies.last_mut() {
@@ -2930,6 +2949,7 @@ impl Reader {
 			generation,
 			sub: Copy::subscribe(&track, &self.mirrored, span, &resolved),
 			floor,
+			backfill: true,
 			// Below every group handed out, so the reader holds none of the first.
 			resume: None,
 			resolved,
@@ -2952,18 +2972,61 @@ impl Reader {
 	/// widened ranges newly cover, as one cursor on the logical track would still get. From
 	/// the lowest gap within the reader's ranges, so groups already handed out are not asked
 	/// for again below it. A gap past the reader's budget was already forgotten as handed out.
+	/// A time start the resume point raised is asked from its time, so the backfill places it
+	/// at the group holding it, as the route would for a plain reader.
 	fn backfill_gaps(&mut self, delivered: &Delivered) {
 		if self.resumed.is_none() {
 			return;
 		}
-		// Kept until a copy places the ranges: only then can the gaps they cover be judged.
-		let Some(floor) = self.window().floor() else {
-			return;
+		let placed = self.window().floor();
+		let raised = self.raised();
+		// Kept until a copy places the ranges, but those whose start the resume point raised,
+		// which only the backfill places: only then can the gaps they cover be judged.
+		let floor = match placed {
+			Some(floor) => floor,
+			None if !raised.is_empty() && raised.len() == self.window.unsettled().len() => {
+				self.window.runs(0).next().map_or(0, |run| *run.start())
+			}
+			None => return,
 		};
+		let resumed = self.copies.last().and_then(|copy| copy.floor);
+		// A raised start whose groups from its time the reader already holds or passed owes
+		// nothing under the resume point: placed at its time, it hands out what the group
+		// holding it would, as none under it goes out.
+		let owed: BTreeMap<u64, u64> = raised
+			.iter()
+			.filter(|(_, time)| resumed.is_some_and(|resumed| !delivered.covers(**time..resumed)))
+			.map(|(key, time)| (*key, *time))
+			.collect();
+		if owed.len() < raised.len() {
+			let keys: Vec<u64> = raised.keys().copied().filter(|key| !owed.contains_key(key)).collect();
+			// An end other than a time one is where the serving copy placed it.
+			let ends = match self.copies.last_mut().map(|copy| &mut copy.sub) {
+				Some(Sub::Ready(sub)) => sub.resolved_ranges(keys.iter().copied()),
+				_ => Vec::new(),
+			};
+			let mut ends = ends.into_iter();
+			let placed: BTreeMap<u64, Resolved> = keys
+				.into_iter()
+				.map(|key| {
+					let served = ends.next().flatten().and_then(|at| at.end);
+					let at = Resolved {
+						start: raised[&key],
+						end: match self.mirrored.ranges[&key].end {
+							Some(Anchor::Time(end)) => end.checked_add(1),
+							_ => served,
+						},
+						floored: true,
+					};
+					(key, at)
+				})
+				.collect();
+			self.resolve(&placed);
+		}
 		let Some(resumed_by) = self.resumed.take() else {
 			return;
 		};
-		let Some(resumed) = self.copies.last().and_then(|copy| copy.floor) else {
+		let Some(resumed) = resumed else {
 			return;
 		};
 		// Each range from where the copy it replaced placed it, else where the reader did: a
@@ -2990,15 +3053,18 @@ impl Reader {
 					.map(|range| start(range, None, None))
 					.collect();
 				// Retired since, so nothing new is covered.
-				if starts.is_empty() {
+				if starts.is_empty() && owed.is_empty() {
 					return;
 				}
-				starts.into_iter().min()
+				Some(starts.into_iter().min().unwrap_or(resumed))
 			}
 		};
 		let from = from.unwrap_or(floor).max(self.groups.0);
-		if let Some(gap) = delivered.gaps(from..resumed).first() {
-			self.backfill(gap.start..resumed, delivered);
+		let gap = delivered.gaps(from..resumed).first().map(|gap| gap.start);
+		// A raised start is asked from its time whatever the local floor, so the backfill
+		// places it, and the group holding it is read once the floor lets it.
+		if let Some(start) = gap.into_iter().chain(owed.into_values()).min() {
+			self.backfill(start..resumed, delivered);
 		}
 	}
 
@@ -9302,6 +9368,82 @@ mod test {
 		late.sort_unstable();
 		assert_eq!(late, [1, 3, 5]);
 		drop(c);
+	}
+
+	/// A time start widened under the serving copy's resume point starts at the group holding
+	/// that time, as a plain reader of the route would, not at a group key equal to it.
+	#[kio::test]
+	async fn a_time_start_under_the_resume_point_reads_the_group_holding_it() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = received_copy();
+		let b = received_copy();
+		for copy in [&a, &b] {
+			write(copy, 6);
+			write(copy, 8);
+		}
+		routes.serve(a.consume());
+		let from = |time| {
+			Subscription::default()
+				.with_delay(Delay::default().with_max(HOUR))
+				.with_ranges([track::Range {
+					start: track::Anchor::Time(time),
+					end: None,
+				}])
+		};
+		let mut sub = logical.consume().subscribe(from(8)).now_or_never().unwrap().unwrap();
+		assert_eq!(drain(&mut sub, false), [8]);
+		// B resumes past 8, holding 6 and 8, and its next group lets A go.
+		routes.serve(b.consume());
+		write(&b, 9);
+		assert_eq!(drain(&mut sub, false), [9]);
+		a.abort(Error::Cancel).unwrap();
+		sub.update(from(7)).unwrap();
+		assert_eq!(drain(&mut sub, false), [6]);
+		assert_eq!(sub.resolved_range(0).map(|resolved| resolved.start), Some(6));
+		write(&b, 10);
+		assert_eq!(drain(&mut sub, false), [10]);
+	}
+
+	/// As [`a_time_start_under_the_resume_point_reads_the_group_holding_it`], for ranges
+	/// widened while the serving copy has yet to answer, so its cache places nothing: the
+	/// backfill asked from below its resume point places the start.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_backfill_places_a_time_start_its_serving_copy_raised() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = received_copy();
+		write(&a, 6);
+		write(&a, 8);
+		routes.serve(a.consume());
+		let from = |time| {
+			Subscription::default()
+				.with_delay(Delay::default().with_max(HOUR))
+				.with_ranges([track::Range {
+					start: track::Anchor::Time(time),
+					end: None,
+				}])
+		};
+		let mut sub = logical.consume().subscribe(from(8)).now_or_never().unwrap().unwrap();
+		assert_eq!(drain(&mut sub, false), [8]);
+		let b = track::Request::new(Arc::new(broadcast::Info::default()), "video");
+		routes.serve(b.consume());
+		// The read subscribes the replacement, from 8, which has not answered yet.
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		a.abort(Error::Cancel).unwrap();
+		sub.update(from(7)).unwrap();
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+
+		let b = b.accept(crate::track::Info::timed());
+		b.received();
+		for key in [6, 8, 9] {
+			write(&b, key);
+		}
+		let mut read = drain(&mut sub, false);
+		read.sort_unstable();
+		assert_eq!(read, [6, 9]);
+		assert_eq!(sub.resolved_range(0).map(|resolved| resolved.start), Some(6));
 	}
 
 	/// A copy updated while pending, then answering, hands its own resolution of the
