@@ -73,6 +73,21 @@ class Scope {
 		return this.allowed?.matches(path) ?? true;
 	}
 
+	/**
+	 * Where a claim at the absolute `prefix` is filed, so each place serves its whole subtree:
+	 * the prefix itself when this scope covers it, and otherwise each of its prefixes beneath
+	 * it, with how many segments beneath the claim's prefix it lies. Mirrors rs/moq-net's `filed`.
+	 */
+	filed(prefix: Path.Valid): [Path.Valid, bigint][] {
+		if (!this.allowed || this.allowed.matches(prefix)) return [[prefix, 0n]];
+		const depth = Path.parts(prefix).length;
+		return this.allowed
+			.toArray()
+			.map((member) => member.text as Path.Valid)
+			.filter((at) => Path.check(at) === undefined && Path.hasPrefix(prefix, at))
+			.map((at) => [at, BigInt(Path.parts(at).length - depth)]);
+	}
+
 	path(path: Path.Valid): Path.Valid {
 		const joined = Path.encode(Path.join(this.root, path));
 		if (!this.matches(joined)) throw new Error("path is outside the origin scope");
@@ -159,10 +174,9 @@ class Scope {
 			const relative = Path.stripPrefix(this.root, path);
 			const above = relative === null || relative === Path.empty();
 			if (above && !Path.hasPrefix(path, this.root)) continue;
-			const visible = candidates
-				.filter((value) => !allowed || advertReaches(value, path, allowed))
-				// The claim moves with the key, so it compares against root-relative requests.
-				.map((value) => (value.claim ? { ...value, claim: value.claim.rebase(this.root) } : value));
+			// A route serves the whole subtree it is filed at, so it may serve this scope when the two overlap.
+			if (allowed && !allowed.overlaps(path)) continue;
+			const visible = [...candidates];
 			if (visible.length === 0) continue;
 			if (!above) {
 				out.set(relative, visible);
@@ -184,19 +198,6 @@ class Scope {
 	}
 }
 
-/** Whether the route advertised at `prefix` may serve any path `pattern` admits. */
-function advertOverlaps(advert: Advertised, prefix: Path.Valid, pattern: Path.Pattern): boolean {
-	return advert.claim
-		? advert.claim.toArray().some((member) => pattern.overlaps(member.pattern()))
-		: scopeOverlaps(pattern, prefix);
-}
-
-/** Whether the route advertised at `prefix` may serve any path `allowed` reaches. */
-function advertReaches(advert: Advertised, prefix: Path.Valid, allowed: Path.Prefixes): boolean {
-	return advert.claim
-		? advert.claim.toArray().some((member) => allowed.overlaps(member.text))
-		: allowed.overlaps(prefix);
-}
 
 /** One segment of the watched-prefix trie, kept while it or anything beneath it is watched. */
 interface WatchNode {
@@ -313,8 +314,6 @@ interface Resolution {
 interface RouteEntry {
 	readonly identity: object;
 	readonly scope: Scope;
-	/** The prefixes beneath its own the entry may serve, when its producer's scope covers less. */
-	readonly claim?: Path.Prefixes;
 	readonly route: Signal<WireRoute>;
 	readonly originated: boolean;
 	readonly server?: ServeState;
@@ -330,12 +329,6 @@ function admits(entry: RouteEntry, path: Path.Valid): boolean {
 	return entry.scope.matches(path);
 }
 
-/** What a route at the absolute `prefix` may serve under `scope`: unset for its whole subtree. */
-function claimed(scope: Scope, prefix: Path.Valid): Path.Prefixes | undefined {
-	const allowed = scope.allowed;
-	if (!allowed || allowed.matches(prefix)) return undefined;
-	return new Path.Prefixes(allowed.toArray().filter((member) => Path.hasPrefix(prefix, member.text as Path.Valid)));
-}
 
 /** One advertisement at a prefix. `exact` marks an announced local broadcast, which is only its own path. */
 interface Candidate extends Advertised {
@@ -630,7 +623,6 @@ class OriginState {
 				list.push({
 					identity: entry.identity,
 					route: entry.route.peek(),
-					claim: entry.claim,
 					exact: false,
 					lost: () => entry.lost,
 				});
@@ -1685,16 +1677,32 @@ export class Producer implements Table {
 		publishPath(prefix);
 		const server = new ServeState(this.#scope.root, prefix);
 		server.onChange = (path) => this.#state.refresh(path);
-		const entry: RouteEntry = {
-			identity: {},
-			scope: this.#scope,
-			claim: claimed(this.#scope, prefix),
-			route: new Signal(route),
-			originated,
-			server,
-			lost: false,
+		// Filed where the scope lets it serve whole subtrees, each place as many segments above
+		// its path as the claim is broader: one claim, with one identity and one server.
+		const identity = {};
+		let current = route;
+		const lowered = (route: WireRoute, below: bigint): WireRoute =>
+			below === 0n ? route : { ...route, above: (route.above ?? 0n) + below };
+		const filed = this.#scope.filed(prefix).map(([at, below]) => {
+			const entry: RouteEntry = {
+				identity,
+				scope: this.#scope,
+				route: new Signal(lowered(route, below)),
+				originated,
+				server,
+				lost: false,
+			};
+			return { at, below, entry };
+		});
+		if (filed.length === 0) throw new Error("prefix is outside the origin scope");
+		server.onReject = (path, err) => {
+			const place = filed.find(({ at }) => Path.hasPrefix(at, path));
+			if (place) this.#state.refuse(path, place.entry, err);
 		};
-		server.onReject = (path, err) => this.#state.refuse(path, entry, err);
+		const refresh = () => {
+			this.#state.rebuildOriginated();
+			for (const { at } of filed) this.#state.refreshPrefix(at);
+		};
 
 		let inserted = false;
 		let ended = false;
@@ -1710,37 +1718,39 @@ export class Producer implements Table {
 			open();
 			if (inserted) return;
 			this.#state.routes.mutate((routes) => {
-				const entries = routes.get(prefix);
-				if (entries) entries.unshift(entry);
-				else routes.set(prefix, [entry]);
+				for (const { at, entry } of filed) {
+					const entries = routes.get(at);
+					if (entries) entries.unshift(entry);
+					else routes.set(at, [entry]);
+				}
 			});
 			inserted = true;
-			this.#state.rebuildOriginated();
-			this.#state.refreshPrefix(prefix);
+			refresh();
 		};
-		// Take the entry out of the table, then end (or renew) the server before the requests
-		// beneath it reroute, so none of them resolves through an answer it already gave.
+		// Take the entries out of the table, then end (or renew) the server before the requests
+		// beneath them reroute, so none of them resolves through an answer it already gave.
 		const remove = (server: () => void) => {
 			if (inserted) {
 				inserted = false;
 				this.#state.routes.mutate((routes) => {
-					const entries = routes.get(prefix);
-					if (!entries) return;
-					const index = entries.indexOf(entry);
-					if (index < 0) return;
-					entries.splice(index, 1);
-					if (entries.length === 0) routes.delete(prefix);
+					for (const { at, entry } of filed) {
+						const entries = routes.get(at);
+						if (!entries) continue;
+						const index = entries.indexOf(entry);
+						if (index < 0) continue;
+						entries.splice(index, 1);
+						if (entries.length === 0) routes.delete(at);
+					}
 				});
 			}
 			server();
-			this.#state.rebuildOriginated();
-			this.#state.refreshPrefix(prefix);
+			refresh();
 		};
 		// A received route torn down by any path (its handle, or the scoped handle it came through)
 		// was lost with its session; only its announcer ending it on the wire withdraws it.
 		let lost = !originated;
 		const release = this.#hold(() => {
-			if (!ended) entry.lost = lost;
+			if (!ended) for (const { entry } of filed) entry.lost = lost;
 			ended = true;
 			this.#state.servers.delete(server);
 			remove(() => server.close());
@@ -1759,31 +1769,32 @@ export class Producer implements Table {
 		// served; only readers restart.
 		const update = (next: WireRoute, advance = false) => {
 			open();
-			const previous = entry.route.peek().instance;
+			const previous = current.instance;
 			const restart = inserted && previous !== next.instance;
-			if (restart) this.#state.restart(entry);
-			entry.route.set(next);
+			current = next;
+			for (const { below, entry } of filed) {
+				if (restart) this.#state.restart(entry);
+				entry.route.set(lowered(next, below));
+			}
 			if (previous !== next.instance) {
 				// Wakes a peer's demand pinned to the old instance, which then refuses it.
 				if (advance) server.settled.update((n) => n + 1);
 				else server.reset();
 			}
 			if (!inserted) return;
-			this.#state.rebuildOriginated();
-			this.#state.refreshPrefix(prefix);
+			refresh();
 			this.#state.routes.mutate(() => {});
 		};
 
 		if (publishes && minted) {
 			server.handoff = {
 				current: () => {
-					const { instance, epoch } = entry.route.peek();
+					const { instance, epoch } = current;
 					return { instance: instance as Instance.Valid, epoch: epoch ?? 0n };
 				},
 				advance: (instance) => {
-					if (ended || this.#state.closed.peek() !== undefined || entry.route.peek().instance !== instance)
-						return;
-					update({ ...entry.route.peek(), instance: Instance.random(), epoch: 0n }, true);
+					if (ended || this.#state.closed.peek() !== undefined || current.instance !== instance) return;
+					update({ ...current, instance: Instance.random(), epoch: 0n }, true);
 				},
 			};
 		}
@@ -1791,24 +1802,23 @@ export class Producer implements Table {
 		const publisher = publishes ? this : undefined;
 		return makeClaim(
 			{
-				instance: () => entry.route.peek().instance as Instance.Valid,
+				instance: () => current.instance as Instance.Valid,
 				announce: insert,
 				withdraw: () => {
 					if (ended || !inserted) return;
 					remove(() => server.reset());
 				},
 				announced: () => inserted && this.#state.closed.peek() === undefined,
-				change: (changed) => update(WireRoute.normalize({ ...entry.route.peek(), ...changed })),
+				change: (changed) => update(WireRoute.normalize({ ...current, ...changed })),
 				close: release,
 				end: () => {
 					lost = false;
 					release();
 				},
-				info: () => (inserted && this.#state.closed.peek() === undefined ? entry.route.peek() : undefined),
+				info: () => (inserted && this.#state.closed.peek() === undefined ? current : undefined),
 				update: (next) => {
 					// A route naming no instance keeps the one it serves.
 					const named = WireRoute.normalize(next);
-					const current = entry.route.peek();
 					update(
 						named.instance === undefined
 							? { ...named, instance: current.instance, epoch: current.epoch }
@@ -2639,7 +2649,7 @@ export class Consumer implements Reader {
 				scopes.find(
 					({ pattern, head }) =>
 						(covering || pattern.matches(path)) &&
-						(candidate.exact ? pattern.matches(path) : advertOverlaps(candidate, path, pattern)) &&
+						(candidate.exact ? pattern.matches(path) : scopeOverlaps(pattern, path)) &&
 						(hidden || !hiddenBelow(head, path)),
 				);
 			const entry = firstEligible(candidates, (candidate) => scopeOf(candidate) !== undefined);

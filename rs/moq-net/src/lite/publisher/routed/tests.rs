@@ -812,7 +812,12 @@ fn presented(consumer: origin::Consumer, prefix: &str) -> Vec<(String, u64)> {
 	answer.request(false, Vec::new(), vec![(path(prefix), false)]).unwrap();
 	let mut shown = Vec::new();
 	for msg in sent(&mut answer, &mut writer, &mut peer) {
-		if let AnnounceBroadcast::Start { suffix, instance, claim } = msg {
+		if let AnnounceBroadcast::Start {
+			suffix,
+			instance,
+			claim,
+		} = msg
+		{
 			let (path, _) = peer.start(&suffix, &instance);
 			shown.push((path.to_string(), claim.item.above));
 		}

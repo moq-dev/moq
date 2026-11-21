@@ -24,7 +24,10 @@ fn lite07() -> Version {
 }
 
 fn prefixes(members: &[&str]) -> Prefixes {
-	members.iter().map(|member| Prefix::try_from(*member).unwrap()).collect()
+	members
+		.iter()
+		.map(|member| Prefix::try_from(*member).unwrap())
+		.collect()
 }
 
 /// Have `to` pull what `from` publishes, as `to`'s readers ask for it.
@@ -70,7 +73,12 @@ fn claim(origin: &origin::Producer, granted: &[&str], prefix: &str) -> Rc<origin
 
 /// Every prefix announced on `origin` beneath `under`, once it settles.
 async fn announced(origin: &origin::Producer, under: &str) -> Vec<String> {
-	let mut routes = origin.consume().scope(under, &Prefixes::all()).unwrap().covering().routes();
+	let mut routes = origin
+		.consume()
+		.scope(under, &Prefixes::all())
+		.unwrap()
+		.covering()
+		.routes();
 	let mut seen = Vec::new();
 	while let Ok(event) = kio::clock::timeout(Duration::from_secs(1), routes.next()).await {
 		let event = event.expect("routes ended");

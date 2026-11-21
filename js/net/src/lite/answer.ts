@@ -227,11 +227,11 @@ export class Answer {
 		// The claims the peer is shown, by their path from the session's root: the table under each
 		// prefix, less the hidden ones it did not ask for and whatever our grant does not let us publish.
 		const latest = new Map<Path.Valid, Advertised>();
-		// A claim is shown where some path it covers is served by the claim's own scope and the
-		// handle's, and our grant, if any, lets us publish it, as one at `a` serves `a/b` though `a`
-		// itself is not granted.
-		const shows = (snap: Advertised, path: Path.Valid) => {
-			const served = within(path, [snap.claim, origin?.allowed]);
+		// A claim is filed where its route serves the whole subtree, so it is shown where some path it
+		// covers is in the handle's scope and our grant, if any, lets us publish it, as one at `a` serves
+		// `a/b` though `a` itself is not granted.
+		const shows = (_: Advertised, path: Path.Valid) => {
+			const served = within(path, [origin?.allowed]);
 			if (!grant) return served === undefined || served.size > 0;
 			if (served === undefined) return grant.publish.overlaps(path);
 			return served.toArray().some((prefix) => grant.publish.overlaps(prefix.text));

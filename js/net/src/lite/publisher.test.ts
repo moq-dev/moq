@@ -4283,10 +4283,11 @@ test("a lite-07 claim above the grant is shown at the granted prefix", async () 
 // A scoped claim is shown only where its scope and the grant share a path: one at `a` scoped to
 // `a/q/x` serves something `a` or `a/q` grants, and nothing `a/r` does.
 test("a lite-07 scoped claim sharing no path with the grant is hidden", async () => {
+	// Filed at its scope, the claim is shown there, however much wider the grant is.
 	const cases: [string, string[]][] = [
 		["a/r", []],
-		["a/q", ["a/q"]],
-		["a", ["a"]],
+		["a/q", ["a/q/x"]],
+		["a", ["a/q/x"]],
 	];
 	for (const [granted, told] of cases) {
 		const origin = new OriginProducer();

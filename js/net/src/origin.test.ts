@@ -2566,7 +2566,8 @@ test("a scoped dynamic only serves allowed paths and presents relative requests"
 	expect(request.active.peek()).toBeDefined();
 	dynamic.setCost(2n);
 	await new Promise<void>((resolve) => setImmediate(resolve));
-	expect((await announcedView(origin)).peek().get(Path.from("tenant/room"))?.cost).toBe(2n);
+	// Filed at its scope, beneath the prefix it claims.
+	expect((await announcedView(origin)).peek().get(Path.from("tenant/room/alice/chat"))?.cost).toBe(2n);
 	await requests.return?.();
 	dynamic.close();
 	request.close();
@@ -2593,17 +2594,40 @@ test("scoped wire views filter and rebase advertisements and blind requests", ()
 	origin.close();
 });
 
+// A claim broader than its scope is filed at each scope prefix beneath it, as many segments above
+// it as the claim is broader, so it is advertised only where it may serve. Mirrors the Rust
+// `a_claim_is_filed_at_the_grant_prefixes_beneath_it`.
+test("a claim is filed at the scope prefixes beneath it", async () => {
+	const origin = new Producer();
+	const claim = origin.scope(Path.empty(), Path.Prefixes.parse(["a/b", "a/c/d", "z"])).claim(Path.from("a"));
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	const advertised = wireOf(origin.consume()).advertised.peek() ?? new Map();
+	const filed = [...advertised].map(([path, adverts]) => [path, adverts[0]?.route.above ?? 0n]);
+	expect(filed.sort()).toEqual([
+		[Path.from("a/b"), 1n],
+		[Path.from("a/c/d"), 2n],
+	]);
+	const denied = origin.request(Path.from("a/q"));
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	expect(denied.active.peek()).toBeUndefined();
+	denied.close();
+	claim.close();
+	origin.close();
+});
+
 test("a scoped dynamic is announced only to readers its scope can serve", async () => {
 	const origin = new Producer();
 	const dynamic = origin.scope(Path.empty(), Path.Prefixes.parse(["room/chat"])).claim(Path.empty());
 	const chat = origin.scope(Path.empty(), Path.Prefixes.parse(["room/chat"]));
 	const video = origin.scope(Path.empty(), Path.Prefixes.parse(["room/video"]));
 	await new Promise<void>((resolve) => setImmediate(resolve));
-	expect([...(await announcedView(chat, undefined, { covering: true })).peek().keys()]).toEqual([Path.empty()]);
+	// Filed at its scope, beneath the prefix it claims.
+	const filed = Path.from("room/chat");
+	expect([...(await announcedView(chat, undefined, { covering: true })).peek().keys()]).toEqual([filed]);
 	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect([...(await announcedView(video, undefined, { covering: true })).peek().keys()]).toEqual([]);
 	await new Promise<void>((resolve) => setImmediate(resolve));
-	expect([...(wireOf(chat.consume()).advertised.peek()?.keys() ?? [])]).toEqual([Path.empty()]);
+	expect([...(wireOf(chat.consume()).advertised.peek()?.keys() ?? [])]).toEqual([filed]);
 	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect([...(wireOf(video.consume()).advertised.peek()?.keys() ?? [])]).toEqual([]);
 	dynamic.close();
@@ -2633,11 +2657,12 @@ test("a scoped reader picks the best route its scope can see at a prefix", async
 
 	await new Promise<void>((resolve) => setImmediate(resolve));
 
-	expect((await announcedView(reader, undefined, { covering: true })).peek().get(Path.empty())?.cost).toBe(5n);
+	// Each claim is filed at its own scope, so the reader sees the one filed within its own.
+	const filed = Path.from("room/video");
+	expect((await announcedView(reader, undefined, { covering: true })).peek().get(filed)?.cost).toBe(5n);
 	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(
-		(await announcedView(origin, Path.Pattern.parse("room/video"), { covering: true })).peek().get(Path.empty())
-			?.cost,
+		(await announcedView(origin, Path.Pattern.parse("room/video"), { covering: true })).peek().get(filed)?.cost,
 	).toBe(5n);
 	const announced = reader.routes(undefined, { covering: true });
 	await new Promise<void>((resolve) => setImmediate(resolve));
@@ -2645,7 +2670,7 @@ test("a scoped reader picks the best route its scope can see at a prefix", async
 	announced.close();
 
 	// A session publishing the scoped view offers the video route too.
-	const offered = [...(wireOf(reader.consume()).advertised.peek()?.get(Path.empty()) ?? [])];
+	const offered = [...(wireOf(reader.consume()).advertised.peek()?.get(filed) ?? [])];
 	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(offered.map((advert) => advert.route.cost)).toEqual([5n]);
 

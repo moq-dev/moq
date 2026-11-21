@@ -1067,17 +1067,17 @@ fn filing(origin: &crate::origin::Producer, root: &Path, permit: &crate::auth::P
 }
 
 /// File `wire`, a claim of `instance`, at `filing` instead of where it is: what the node
-/// should hear, each place it leaves lost and each it holds live, as many segments above
-/// it as it lies beneath the claim's path. With `changed`, the claim itself changed, so
+/// should hear, each place it holds live, as many segments above it as it lies beneath the
+/// claim's path, then each it leaves lost. With `changed`, the claim itself changed, so
 /// every place it stays is told again.
-fn refile(wire: &mut WireClaim, instance: &Instance, filing: Vec<Path>, changed: bool) -> Vec<(node::Broadcast, Change)> {
+fn refile(
+	wire: &mut WireClaim,
+	instance: &Instance,
+	filing: Vec<Path>,
+	changed: bool,
+) -> Vec<(node::Broadcast, Change)> {
 	let depth = wire.path.as_ref().map_or(0, |path| path.depth());
 	let mut changes = Vec::new();
-	for path in &wire.filed {
-		if !filing.contains(path) {
-			changes.push(((path.clone(), instance.clone()), Change::Lost));
-		}
-	}
 	for path in &filing {
 		if !changed && wire.filed.contains(path) {
 			continue;
@@ -1085,6 +1085,11 @@ fn refile(wire: &mut WireClaim, instance: &Instance, filing: Vec<Path>, changed:
 		let mut claim = wire.claim.clone();
 		claim.item.above = claim.item.above.saturating_add((path.depth() - depth) as u64);
 		changes.push(((path.clone(), instance.clone()), Change::Live(claim)));
+	}
+	for path in &wire.filed {
+		if !filing.contains(path) {
+			changes.push(((path.clone(), instance.clone()), Change::Lost));
+		}
 	}
 	wire.filed = filing;
 	changes

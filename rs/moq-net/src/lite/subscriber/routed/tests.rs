@@ -285,7 +285,12 @@ async fn a_claim_broader_than_the_limit_is_filed_at_the_limit() {
 	assert_eq!(served(&routed), ["customer"]);
 	assert_eq!(cursor.expect_next_active("customer").await.lane.above, 1);
 
-	let both = Permit::limited(["customer/a/b", "other"].map(|prefix| crate::Prefix::try_from(prefix).unwrap()).into_iter().collect());
+	let both = Permit::limited(
+		["customer/a/b", "other"]
+			.map(|prefix| crate::Prefix::try_from(prefix).unwrap())
+			.into_iter()
+			.collect(),
+	);
 	routed.limit(&both).unwrap();
 	pump(&mut routed, &subscriber);
 	assert_eq!(served(&routed), ["customer/a/b", "other"]);
