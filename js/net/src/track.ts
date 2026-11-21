@@ -1152,7 +1152,10 @@ function reaches(received: bigint, drops: DropSet, end: End, refused: readonly R
  */
 function settles(run: DropRun, budget: number, coverage: Coverage): boolean {
 	if (run.stale === undefined) return true;
-	if (budget > run.stale || coverage === undefined || coverage.cap !== undefined) return false;
+	if (budget > run.stale) return false;
+	// Its own fill judged it against this reader's budget, not newer groups it may not read.
+	if (run.own) return true;
+	if (coverage === undefined || coverage.cap !== undefined) return false;
 	const above = run.start + 1n;
 	const held = coverage.runs.find((run) => run.start <= above && above < run.end);
 	return held !== undefined && held.end >= UNBOUNDED;
@@ -3194,9 +3197,15 @@ type Successor = { key: bigint; arrived: Instant; fate: () => Error | undefined 
  */
 export interface Reported extends Run {
 	kind: "settled" | "dropped" | "skip";
+	/**
+	 * A drop the reader's own fill refused as stale: the budget it was judged under, which a
+	 * wider one takes back (see `Subscriber.#withdraw`). Kept here rather than read off the
+	 * refusal, which a group arriving later takes out while its gap stays reported.
+	 */
+	ownStale?: number;
 }
 
-const sameReport = (a: Reported, b: Reported) => a.kind === b.kind;
+const sameReport = (a: Reported, b: Reported) => a.kind === b.kind && a.ownStale === b.ownStale;
 
 // Whether `reported` stops `hole` going out over it: only a skip goes out over a drop, which it
 // replaces. Mirrors the Rust `Report::blocks`.
@@ -4212,7 +4221,7 @@ export class Subscriber {
 					this.#refilled = removeRun(this.#refilled, start, end);
 					insertRun(this.#unjudged, start, end);
 				}
-				this.#state.refused.update((runs) => insertDrop(runs, start, end, { error, stale }));
+				this.#state.refused.update((runs) => insertDrop(runs, start, end, { error, stale, own: true }));
 			},
 		};
 		return this.#state.asker;
@@ -5282,7 +5291,7 @@ export class Subscriber {
 
 	// The first part of `[from, to)` this cursor has not reported yet within its window, now
 	// reported, with why.
-	#report(from: bigint, to: bigint, hole: Hole): (Recv & { kind: "drop" }) | undefined {
+	#report(from: bigint, to: bigint, hole: Hole & { own?: boolean }): (Recv & { kind: "drop" }) | undefined {
 		const { start, end } = this.#cursor.peek();
 		for (const run of this.#window.runs(max(from, start), min(to, end ?? to))) {
 			const dropped = this.#reportRun(run.start, run.end, hole);
@@ -5293,14 +5302,34 @@ export class Subscriber {
 
 	// The first part of `[from, to)` nothing already reported blocks, now reported, with why,
 	// replacing what it goes out over. Mirrors the Rust `Record::report`.
-	#reportRun(from: bigint, to: bigint, hole: Hole): (Recv & { kind: "drop" }) | undefined {
+	#reportRun(from: bigint, to: bigint, hole: Hole & { own?: boolean }): (Recv & { kind: "drop" }) | undefined {
 		const start = max(from, this.#floor);
 		if (start >= to) return undefined;
 		const blocked = this.#reported.overlapping(start, to).filter((reported) => blocksHole(reported, hole));
 		const [gap] = runGaps(blocked, start, to);
 		if (!gap) return undefined;
-		this.#reported.set(gap.start, gap.end, { ...gap, kind: hole.skip ? "skip" : "dropped" });
+		const ownStale = hole.own && !hole.skip ? hole.stale : undefined;
+		this.#reported.set(gap.start, gap.end, { ...gap, kind: hole.skip ? "skip" : "dropped", ownStale });
 		return { kind: "drop", ...gap, error: hole.error, skip: hole.skip, stale: hole.stale };
+	}
+
+	// Take back the gaps an ordered read has yet to return for its own fills' refusals judged stale
+	// under a budget narrower than `budget`: a drop judged so never settles a wider reader, so it
+	// asks them again. A gap it returned stands, as does whatever a wire publisher told its wire.
+	// Read off the record, not the refusals: a group arriving and then failing takes its key out
+	// of the refusal while the gap stays queued. Mirrors the Rust `Cursor::rejudge`.
+	#withdraw(budget: number): void {
+		const items = this.#items;
+		if (!items || this.#wired) return;
+		for (const gap of [...items.gaps]) {
+			for (const told of this.#reported.overlapping(gap.start, gap.end)) {
+				if (told.kind !== "dropped" || told.ownStale === undefined || budget <= told.ownStale) continue;
+				const from = max(told.start, gap.start);
+				const to = min(told.end, gap.end);
+				this.#reported.set(from, to);
+				items.gaps = removeRun(items.gaps, from, to);
+			}
+		}
 	}
 
 	// The next run this cursor gave up and has not reported, without taking a group. From the
@@ -5337,6 +5366,7 @@ export class Subscriber {
 			!sameCoverage(seen.coverage, coverage);
 		const changed: Run[] = full ? [{ start, end: end ?? UNBOUNDED }] : drops.since(seen.drops);
 		if (full) this.#pending = this.#pending.filter((run) => !run.received);
+		if (seen && budget > seen.budget) this.#withdraw(budget);
 		this.#dropsSeen = {
 			drops: drops.revision,
 			refused: refused.peek(),
