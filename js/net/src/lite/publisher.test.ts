@@ -1512,6 +1512,27 @@ test("lite-07 drops a whole group's span", async () => {
 	}
 });
 
+// A group whose stream failed before its End was known still has the starts inside its span named
+// once it finishes whole: no GROUP_END went out for them on this subscription.
+test("lite-07 names the span of a group that finished whole after its stream failed", async () => {
+	const sub = await servedSubscription({ version: Version.DRAFT_07, startGroup: 0n });
+	try {
+		const group = sub.track.createGroup(0n);
+		group.writeFrame(textFrame("x", Timestamp.fromMillis(0)));
+		await sub.stopServed(StreamCode.Cancel);
+		expect(await holesToFinish(sub.client.reader, 1)).toEqual([["drop", 0n, 1n]]);
+		group.finishAt(500n);
+		sub.serve(1000n);
+		expect((await sub.servedGroup())?.key).toBe(1000n);
+		sub.track.finish();
+		sub.track.close();
+		// Without the span, only [500, 1000) would be named.
+		expect(await holesToFinish(sub.client.reader)).toEqual([["drop", 1n, 1000n]]);
+	} finally {
+		await sub.close();
+	}
+});
+
 // A skipped run goes out as SUBSCRIBE_SKIP ahead of a drop of the group above it. Mirrors the Rust
 // `lite07_sends_a_skip_ahead_of_a_drop`.
 test("lite-07 sends a skip ahead of a drop of the group above it", async () => {

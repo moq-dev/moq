@@ -1607,16 +1607,20 @@ export class Publisher {
 		const reach = (end: bigint): bigint =>
 			max(end, hooks.wholeEnd(track, end - 1n) ?? hooks.wholeAround(track, end - 1n)?.end ?? end);
 
+		// The starts of the groups whose stream is still serving, which may yet send GROUP_END.
+		const streaming = new Set<bigint>();
+
 		// Give up, as `hole` says, whatever part of `[start, end)` this subscription has not been
 		// served or given up yet.
 		const drop = async (start: bigint, end: bigint, hole: Hole): Promise<boolean> => {
 			if (!record) return true;
 			const report = reportOf(hole);
 			for (const gap of record.untold(start, end)) {
-				// The starts inside a group served whole are its GROUP_END's to account for, which may
-				// still be on its way, or its drop's, which names its span.
+				// The starts inside a whole group whose stream is still serving are its GROUP_END's to
+				// account for, which may still be on its way, or its drop's, which names its span. A
+				// stream that already ended without one left them untold, so they are named here.
 				const around = hooks.wholeAround(track, gap.start);
-				const from = around && record.told(around.start) ? min(around.end, gap.end) : gap.start;
+				const from = around && streaming.has(around.start) ? min(around.end, gap.end) : gap.start;
 				if (from >= gap.end) continue;
 				record.tell(from, gap.end, report);
 				const msg = holeMessage(from, gap.end, hole);
@@ -1982,6 +1986,7 @@ export class Publisher {
 						return false;
 				}
 				record?.tell(group.start, group.start + 1n, { kind: "settled" });
+				streaming.add(group.start);
 
 				const options: RunGroup = {
 					sub,
@@ -2008,6 +2013,7 @@ export class Publisher {
 						failed = writer instanceof Error ? writer : await this.#serveGroup(writer, options);
 					} finally {
 						options.givenUp.close();
+						streaming.delete(group.start);
 					}
 					if (failed && emitRange) {
 						const end = max(group.end ?? group.start, group.start + 1n);
