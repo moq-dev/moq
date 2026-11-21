@@ -4695,7 +4695,6 @@ fn largest_ended(state: &TrackState, waiter: &kio::Waiter) -> Poll<()> {
 	}
 }
 
-/// Where a received copy of a group goes.
 /// How [`Producer::create_group_inner`] treats a start another group already holds.
 #[derive(Clone, Copy)]
 enum Admit {
@@ -4704,9 +4703,11 @@ enum Admit {
 	/// Leave it and create nothing: the first writer wins.
 	Claim,
 	/// A received copy from this frame: refused once the holder settled, else held on it.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	Received(u64),
 }
 
+/// Where a received copy of a group goes.
 pub(crate) enum Received {
 	/// A new group, for the copy to fill.
 	Group(group::Producer),
@@ -26092,6 +26093,7 @@ mod test {
 	/// A plain create replaces a live group holding its start: readers take the new one,
 	/// and a reader already draining the old one keeps it.
 	#[test]
+	#[cfg(feature = "async")]
 	fn create_group_replaces_a_held_start() {
 		let producer = track_producer("test", Info::timed());
 		let consumer = producer.consume();
