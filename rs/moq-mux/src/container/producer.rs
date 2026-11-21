@@ -847,9 +847,8 @@ where
 			self.cadence = Some(delta);
 		}
 		self.previous_timestamp = Some(timestamp);
-		if self.newest.is_none_or(|newest| timestamp_lt(newest, timestamp)) {
-			self.newest = Some(timestamp);
-		}
+		// At full precision, so the group's floor is its highest frame as `finish_at` sees it.
+		self.newest = Some(self.newest.map_or(timestamp, |newest| super::later(newest, timestamp)));
 
 		// Timestamp and duration can be at different scales, so add them in micros; the
 		// sub-microsecond rounding that costs is far below a segment boundary.
@@ -2095,6 +2094,8 @@ mod tests {
 			duration: None,
 		};
 		producer.write(at(1_000_000, true)).unwrap();
+		// Within one microsecond of the newest frame, which still counts as the newer.
+		producer.write(at(2_000_001, false)).unwrap();
 		producer.write(at(2_000_002, false)).unwrap();
 		producer.cut(Some(Timestamp::new(2_000_001, nanos).unwrap())).unwrap();
 
@@ -2103,7 +2104,7 @@ mod tests {
 		while group.read_frame().await.unwrap().is_some() {
 			frames += 1;
 		}
-		assert_eq!(frames, 2, "the group closes rather than aborting");
+		assert_eq!(frames, 3, "the group closes rather than aborting");
 		assert_eq!(group.end(), None, "an end below a frame is not declared");
 	}
 
