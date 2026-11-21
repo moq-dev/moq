@@ -61,7 +61,10 @@ impl Fixture {
 		broadcast.announce().unwrap();
 		for index in 0..groups {
 			let mut group = match spacing {
-				1 => track.create_group(moq_net::group::Info { start: index }).unwrap(),
+				1 => track
+					.create_group(moq_net::group::Info { start: index })
+					.unwrap()
+					.unwrap(),
 				spacing => track
 					.append_group(Timestamp::from_millis(index * spacing).unwrap())
 					.unwrap(),
@@ -152,7 +155,11 @@ async fn evicted_history_is_recovered_once_on_its_own_subscription() {
 		assert_eq!(fixture.opened(FETCH), 0, "nothing fetched");
 
 		// The live subscription goes on.
-		let mut group = fixture.track.create_group(moq_net::group::Info { start: 6 }).unwrap();
+		let mut group = fixture
+			.track
+			.create_group(moq_net::group::Info { start: 6 })
+			.unwrap()
+			.unwrap();
 		group
 			.write_frame(Timestamp::from_millis(6000).unwrap(), b"x".as_slice())
 			.unwrap();
@@ -236,7 +243,11 @@ async fn a_recovery_takes_a_skip_inside_it() {
 		let fixture = Fixture::new(2).await;
 		fixture.track.skip_groups(2..3);
 		for start in 3..6 {
-			let mut group = fixture.track.create_group(moq_net::group::Info { start }).unwrap();
+			let mut group = fixture
+				.track
+				.create_group(moq_net::group::Info { start })
+				.unwrap()
+				.unwrap();
 			group
 				.write_frame(Timestamp::from_millis(start * 1000).unwrap(), b"x".as_slice())
 				.unwrap();
@@ -252,7 +263,11 @@ async fn a_recovery_takes_a_skip_inside_it() {
 		assert_eq!(receive(&mut second, 3).await, [1, 3, 4].into());
 
 		// The live subscription goes on.
-		let mut group = fixture.track.create_group(moq_net::group::Info { start: 6 }).unwrap();
+		let mut group = fixture
+			.track
+			.create_group(moq_net::group::Info { start: 6 })
+			.unwrap()
+			.unwrap();
 		group
 			.write_frame(Timestamp::from_millis(6000).unwrap(), b"x".as_slice())
 			.unwrap();

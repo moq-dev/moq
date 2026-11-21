@@ -827,7 +827,10 @@ mod tests {
 		.unwrap();
 		let wire = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
 		let write = |sequence, stamps: &[u64]| {
-			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
+			let mut group = track
+				.create_group(moq_net::group::Info { start: sequence })
+				.unwrap()
+				.unwrap();
 			let frames: Vec<_> = stamps
 				.iter()
 				.enumerate()
@@ -986,7 +989,7 @@ mod tests {
 		.unwrap();
 
 		let wire = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
-		let mut group = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
+		let mut group = track.create_group(moq_net::group::Info { start: 0 }).unwrap().unwrap();
 		let mut landed = std::collections::BTreeMap::new();
 		for (index, frame) in [0u64, 3, 1, 2].into_iter().enumerate() {
 			landed.insert(frame, Instant::now());
@@ -1039,7 +1042,7 @@ mod tests {
 		.unwrap();
 
 		let wire = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
-		let mut group = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
+		let mut group = track.create_group(moq_net::group::Info { start: 0 }).unwrap().unwrap();
 		let frames: Vec<_> = (0..FRAMES)
 			.map(|index| moq_mux::container::Frame {
 				timestamp: Timestamp::from_micros(index * 33_333).unwrap(),
@@ -1243,7 +1246,10 @@ mod tests {
 		.unwrap();
 		let wire = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
 		let write = |sequence, stamps: &[u64]| {
-			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
+			let mut group = track
+				.create_group(moq_net::group::Info { start: sequence })
+				.unwrap()
+				.unwrap();
 			let frames: Vec<_> = stamps
 				.iter()
 				.enumerate()
@@ -1530,6 +1536,7 @@ mod tests {
 			landed.push(Instant::now());
 			let mut group = track
 				.create_group(moq_net::group::Info { start: sequence as u64 })
+				.unwrap()
 				.unwrap();
 			wire.write(
 				&mut group,
@@ -1585,7 +1592,7 @@ mod tests {
 		.unwrap();
 
 		let wire = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
-		let mut group = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
+		let mut group = track.create_group(moq_net::group::Info { start: 0 }).unwrap().unwrap();
 		for keyframe in [true, false] {
 			wire.write(
 				&mut group,

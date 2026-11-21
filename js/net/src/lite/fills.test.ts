@@ -19,7 +19,7 @@ const enc = new TextEncoder();
 async function missing(): Promise<{ broadcast: BroadcastProducer; track: Producer; fill: FillGroups; close(): void }> {
 	const broadcast = new BroadcastProducer();
 	const track = defined(broadcast.createTrack("video", { maxAge: null }));
-	const group = track.createGroup(4n);
+	const group = defined(track.createGroup(4n));
 	group.writeFrame({ payload: enc.encode("live 4"), timestamp: Timestamp.unscaled(group.start) });
 	group.finish();
 	const requests = track.requests();

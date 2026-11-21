@@ -28,7 +28,7 @@ try {
 					const broadcast = broadcastRoute.broadcast;
 					const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 					for (let sequence = 0n; sequence < BigInt(groups); sequence++) {
-						const group = track.createGroup(sequence);
+						const group = defined(track.createGroup(sequence));
 						group.writeFrame(textFrame("frame"));
 						group.finish();
 					}

@@ -721,7 +721,7 @@ export namespace Track {
 		abort(error: Error): void;
 		close(): void;
 		readonly closed: Signals.GetPromise<Error | null>;
-		createGroup(key: bigint): Group.Producer;
+		createGroup(key: bigint): Group.Producer | undefined;
 		info(): Promise<Track.Info>;
 		readonly name: string;
 		requests(): Track.Requests;
@@ -791,7 +791,7 @@ export namespace Track {
 		appendGroup(start: Time.Timestamp): Group.Producer;
 		close(): void;
 		get closed(): Signals.GetPromise<Error | null>;
-		createGroup(key: bigint): Group.Producer;
+		createGroup(key: bigint): Group.Producer | undefined;
 		demand(): Track.Demand;
 		fail(error: Error): Track.Finished;
 		finish(): Track.Finished;

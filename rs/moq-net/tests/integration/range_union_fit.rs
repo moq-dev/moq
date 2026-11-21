@@ -30,7 +30,10 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 }
 
 fn write_group(track: &moq_net::track::Producer, key: u64) {
-	let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
+	let mut group = track
+		.create_group(moq_net::group::Info { start: key })
+		.unwrap()
+		.unwrap();
 	group
 		.write_frame(Timestamp::from_millis(key).unwrap(), &b"x"[..])
 		.unwrap();

@@ -1,4 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
+import { defined } from "../defined.test-util.ts";
 import { StreamCode } from "../error.ts";
 import { Producer as Group } from "../group.ts";
 import { hooks } from "../internal.ts";
@@ -99,7 +100,7 @@ for (const readPlain of [false, true]) {
 
 test("empty frames preserve the window", async () => {
 	const track = new Track("compressed").accept({ compression: "deflate" });
-	const group = track.createGroup(0n);
+	const group = defined(track.createGroup(0n));
 	group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.start) });
 	group.writeFrame({ payload: new Uint8Array(), timestamp: Timestamp.unscaled(group.start) });
 	const reader = group.mirror();

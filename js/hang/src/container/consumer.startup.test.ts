@@ -2,6 +2,7 @@ import { expect, onTestFinished, spyOn, test } from "bun:test";
 import { Duration } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { type Group, Error as NetError, StreamCode, Time, Track } from "@moq/net";
+import { defined } from "../defined.test-util.ts";
 import { Consumer, type Read } from "./consumer.ts";
 import { encodeFrame, Format } from "./legacy.ts";
 
@@ -66,10 +67,10 @@ for (const emptySuccessor of [false, true]) {
 		`Consumer starts across a hole after an empty reset (empty successor: ${emptySuccessor}, maxDelay: %s)`,
 		async (maxDelay) => {
 			const { track, results, warn, flush } = setup(maxDelay);
-			const stale = track.createGroup(16n);
+			const stale = defined(track.createGroup(16n));
 			await flush();
 			if (emptySuccessor) {
-				const empty = track.createGroup(17n);
+				const empty = defined(track.createGroup(17n));
 				empty.finish();
 				await flush();
 			}
@@ -78,7 +79,7 @@ for (const emptySuccessor of [false, true]) {
 			expect(results).toEqual([]);
 
 			const sequence = emptySuccessor ? 19n : 18n;
-			const live = track.createGroup(sequence);
+			const live = defined(track.createGroup(sequence));
 			for (let i = 0; i < 5; i++) write(live, 1_000_000 + i * 33_333);
 			await flush();
 
@@ -96,13 +97,13 @@ for (const emptySuccessor of [false, true]) {
 
 test("Consumer preserves a declared marker before its first media across a hole", async () => {
 	const { track, results, warn, flush } = setup();
-	const marker = track.createGroup(16n);
+	const marker = defined(track.createGroup(16n));
 	write(marker, 0, true);
 	marker.finish();
 	await flush();
 	expect(items(results)).toEqual(["end 16@0"]);
 
-	const live = track.createGroup(18n);
+	const live = defined(track.createGroup(18n));
 	write(live, 50_000);
 	await flush();
 	// Group 17 never arrived, so the media after the marker is past a gap. It spans the declared
@@ -114,7 +115,7 @@ test("Consumer preserves a declared marker before its first media across a hole"
 
 test.each([false, true])("Consumer still waits for a gap after media (playhead reset: %p)", async (reset) => {
 	const { track, consumer, results, warn, flush } = setup(1000);
-	const first = track.createGroup(16n);
+	const first = defined(track.createGroup(16n));
 	write(first, 0);
 	first.finish();
 	await flush();
@@ -124,14 +125,14 @@ test.each([false, true])("Consumer still waits for a gap after media (playhead r
 	track.requests();
 
 	if (reset) {
-		const marker = track.createGroup(17n);
+		const marker = defined(track.createGroup(17n));
 		write(marker, 0, true);
 		marker.finish();
 		await flush();
 		expect(items(results)).toEqual(["16@0", "end 17@0"]);
 	}
 	const sequence = reset ? 20n : 19n;
-	const later = track.createGroup(sequence);
+	const later = defined(track.createGroup(sequence));
 	write(later, 50_000);
 	await flush();
 	// The ordered read holds the group past the hole until the hole resolves, so none of it is buffered.
@@ -141,7 +142,7 @@ test.each([false, true])("Consumer still waits for a gap after media (playhead r
 	// Supply the missing, timestamp-contiguous bridge and prove the queued frame survives. The key
 	// below it was never produced, as an appending publisher declares.
 	track.skipGroups(sequence - 2n, sequence - 1n);
-	const bridge = track.createGroup(sequence - 1n);
+	const bridge = defined(track.createGroup(sequence - 1n));
 	write(bridge, 0);
 	bridge.finish();
 	await flush();

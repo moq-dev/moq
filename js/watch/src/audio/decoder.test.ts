@@ -1655,7 +1655,7 @@ async function livePlayback(burst: number) {
 					held.push(frame * FRAME);
 					if (held.length < burst) continue;
 					for (const timestamp of held) {
-						const group = track.createGroup(sequence++);
+						const group = defined(track.createGroup(sequence++));
 						group.writeFrame(legacyFrame(Duration.millis(timestamp)));
 						group.finish();
 					}

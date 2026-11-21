@@ -386,7 +386,9 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 				if (!group) {
 					const from = skipped.get(arrival.group);
 					if (from !== undefined) track.skipGroups(BigInt(from), BigInt(arrival.group));
-					group = track.createGroup(BigInt(arrival.group));
+					const created = track.createGroup(BigInt(arrival.group));
+					if (!created) throw new Error(`the trace reopens group ${arrival.group}`);
+					group = created;
 					groups.set(arrival.group, group);
 				}
 				const timestamp = micros(arrival.timestamp);

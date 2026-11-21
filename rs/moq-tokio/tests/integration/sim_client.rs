@@ -272,7 +272,10 @@ impl Publisher {
 		let mut source = self.track.clone();
 		while source.subscription_changed().await.unwrap().is_none() {}
 		for sequence in 0..GROUPS {
-			let mut group = source.create_group(moq_net::group::Info { start: sequence }).unwrap();
+			let mut group = source
+				.create_group(moq_net::group::Info { start: sequence })
+				.unwrap()
+				.unwrap();
 			let timestamp = Timestamp::from_millis(sequence * INTERVAL.as_millis() as u64).unwrap();
 			group.write_frame(timestamp, vec![sequence as u8; FRAME]).unwrap();
 			group.finish().unwrap();

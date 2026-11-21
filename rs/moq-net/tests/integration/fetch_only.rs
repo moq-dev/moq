@@ -329,7 +329,10 @@ async fn a_relay_serves_a_bounded_read_of_history_without_subscribing_upstream()
 
 /// Write group `key` of [`frames`] to a live track.
 fn write_group(track: &moq_net::track::Producer, key: u64) {
-	let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
+	let mut group = track
+		.create_group(moq_net::group::Info { start: key })
+		.unwrap()
+		.unwrap();
 	for frame in frames(key) {
 		group.write_frame(group.at_start(), frame).unwrap();
 	}

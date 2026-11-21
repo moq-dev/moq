@@ -26,7 +26,7 @@ fn origin_front_serves_media_with_only_explicit_polls() {
 			track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 		)
 		.unwrap();
-	let mut group = track.create_group(group::Info { start: 7 }).unwrap();
+	let mut group = track.create_group(group::Info { start: 7 }).unwrap().unwrap();
 	group.write_frame(Timestamp::from_millis(7).unwrap(), b"media").unwrap();
 	group.finish().unwrap();
 	broadcast.announce().unwrap();

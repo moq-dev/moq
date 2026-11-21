@@ -85,7 +85,10 @@ async fn read_as(version: Option<&str>, range: Range, how: Read) -> Result<Group
 	for key in (0..5).map(|second| second * 1000) {
 		let mut group = match how.append {
 			true => track.append_group(millis(key)).unwrap(),
-			false => track.create_group(moq_net::group::Info { start: key }).unwrap(),
+			false => track
+				.create_group(moq_net::group::Info { start: key })
+				.unwrap()
+				.unwrap(),
 		};
 		group.write_frame(millis(key), &b"x"[..]).unwrap();
 		group.finish().unwrap();
@@ -145,7 +148,10 @@ async fn read_as(version: Option<&str>, range: Range, how: Read) -> Result<Group
 	}
 	// A read that ended passed its range: a group the publisher creates there now is late.
 	if read.ended && !how.append {
-		let mut late = track.create_group(moq_net::group::Info { start: 1500 }).unwrap();
+		let mut late = track
+			.create_group(moq_net::group::Info { start: 1500 })
+			.unwrap()
+			.unwrap();
 		late.write_frame(millis(1500), &b"x"[..]).unwrap();
 		late.finish().unwrap();
 		let next = match (&mut ordered, &mut arrival) {
@@ -256,13 +262,16 @@ async fn an_ordered_reader_starts_at_the_publishers_start_over_a_frameless_newes
 		.unwrap();
 	broadcast.announce().unwrap();
 	for key in 0..5 {
-		let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
+		let mut group = track
+			.create_group(moq_net::group::Info { start: key })
+			.unwrap()
+			.unwrap();
 		group
 			.write_frame(moq_net::Timestamp::unscaled(group.start), &b"x"[..])
 			.unwrap();
 		group.finish().unwrap();
 	}
-	let mut newest = track.create_group(moq_net::group::Info { start: 5 }).unwrap();
+	let mut newest = track.create_group(moq_net::group::Info { start: 5 }).unwrap().unwrap();
 
 	let subscriber = produce_origin(2);
 	let _pair = peer("moq-lite-07-wip".parse::<Version>().unwrap(), &publisher, &subscriber).await;
@@ -316,7 +325,10 @@ async fn a_sparse_request_counts_its_relative_start_back_as_the_publisher_did() 
 		.unwrap();
 	broadcast.announce().unwrap();
 	for key in 0..10 {
-		let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
+		let mut group = track
+			.create_group(moq_net::group::Info { start: key })
+			.unwrap()
+			.unwrap();
 		group.write_frame(millis(key), &b"x"[..]).unwrap();
 		group.finish().unwrap();
 	}

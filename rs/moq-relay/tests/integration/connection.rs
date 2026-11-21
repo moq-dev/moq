@@ -64,7 +64,10 @@ async fn largest_quic_sequence_reaches_the_subscriber() {
 				true => moq_net::Timestamp::unscaled(sequence),
 				false => moq_net::Timestamp::from_micros(sequence.min((1 << 61) - 1)).unwrap(),
 			};
-			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
+			let mut group = track
+				.create_group(moq_net::group::Info { start: sequence })
+				.unwrap()
+				.unwrap();
 			group.write_frame(timestamp, b"ladder".as_ref()).unwrap();
 			group.finish().unwrap();
 			let mut got = kio::clock::timeout(TIMEOUT, sub.recv_group())

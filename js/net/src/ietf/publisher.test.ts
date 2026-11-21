@@ -243,7 +243,7 @@ test("TRACK_STATUS is answered on every draft without subscribing", async () => 
 					priority: 2,
 				}),
 			);
-			const group = track.createGroup(4n);
+			const group = defined(track.createGroup(4n));
 			group.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.fromMillis(0) });
 			group.writeFrame({ payload: new Uint8Array([2]), timestamp: Timestamp.fromMillis(1) });
 			const subscribed = spyOn(track, "subscribe");
@@ -597,7 +597,7 @@ test("a live SUBSCRIBE asks its track for a live join with no Min Age", async ()
 			if (!request) throw new Error("no track was requested");
 			const track = request.accept({ timescale: Timescale.MILLI });
 			for (const key of [0n, 1n]) {
-				const group = track.createGroup(key);
+				const group = defined(track.createGroup(key));
 				group.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.fromMillis(Number(key)) });
 				group.finish();
 			}
@@ -932,19 +932,19 @@ test("a blocked group header is reset when the group expires", async () => {
 			server,
 		);
 
-		const old = track.createGroup(0n);
+		const old = defined(track.createGroup(0n));
 		old.writeFrame({ payload: new TextEncoder().encode("old"), timestamp: Timestamp.fromMillis(0) });
 		old.finish();
 		await headerStarted;
 
-		const edge = track.createGroup(1n);
+		const edge = defined(track.createGroup(1n));
 		edge.writeFrame({ payload: new TextEncoder().encode("edge"), timestamp: Timestamp.fromMillis(10_000) });
 		edge.finish();
 
 		// A group beyond the edge, so group 0's reach (10s, where group 1 begins) is
 		// provably past the budget. A group is bounded by where its successor starts, so
 		// the successor alone never convicts it: nothing yet proves group 0 ends sooner.
-		const later = track.createGroup(2n);
+		const later = defined(track.createGroup(2n));
 		later.writeFrame({ payload: new TextEncoder().encode("later"), timestamp: Timestamp.fromMillis(20_000) });
 		later.finish();
 
@@ -1011,7 +1011,7 @@ test("a group stream whose FIN never completes is reset when the group expires",
 		);
 
 		const write = (key: bigint) => {
-			const group = track.createGroup(key);
+			const group = defined(track.createGroup(key));
 			group.writeFrame({
 				payload: new TextEncoder().encode("frame"),
 				timestamp: Timestamp.fromMillis(Number(key)),
@@ -1098,7 +1098,7 @@ test("a group stream whose FIN never completes is reset after the cache evicts i
 
 		// Timestamps a millisecond apart, so only the wall clock since group 1 arrived convicts group 0.
 		const write = (key: bigint) => {
-			const group = track.createGroup(key);
+			const group = defined(track.createGroup(key));
 			group.writeFrame({
 				payload: new TextEncoder().encode("frame"),
 				timestamp: Timestamp.fromMillis(Number(key)),
@@ -1188,7 +1188,7 @@ test("a group that goes stale while its stream opens writes nothing", async () =
 		);
 
 		const write = (key: bigint, ms: number) => {
-			const group = track.createGroup(key);
+			const group = defined(track.createGroup(key));
 			group.writeFrame({ payload: new TextEncoder().encode("frame"), timestamp: Timestamp.fromMillis(ms) });
 			group.finish();
 		};
@@ -2889,7 +2889,7 @@ test.each(["ascending", "descending"] as const)("draft-22: a wider fill is refus
 	// live group supersedes it, racing this test's read of the refused fill.
 	const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 	for (const key of [0n, 3n, 9n]) {
-		const group = track.createGroup(key);
+		const group = defined(track.createGroup(key));
 		for (let i = 0; i < 2; i++)
 			group.writeFrame({
 				payload: new TextEncoder().encode(`${key}.${i}`),
@@ -2965,7 +2965,7 @@ async function subscribeOkLargest(version: IetfVersion): Promise<SubscribeOk["la
 	const fx = fixture(version);
 	const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 
-	const group = track.createGroup(5n);
+	const group = defined(track.createGroup(5n));
 	for (let i = 0; i < 4; i++) {
 		group.writeFrame({ payload: new TextEncoder().encode(`5.${i}`), timestamp: Timestamp.now() });
 	}
@@ -3116,7 +3116,7 @@ test.each(["skipGroups", "append"] as const)("our object 0 names the skipped key
 				track.writeFrame({ payload: new TextEncoder().encode(`${key}.0`), timestamp: Timestamp.unscaled(key) });
 				return;
 			}
-			const group = track.createGroup(key);
+			const group = defined(track.createGroup(key));
 			for (let i = 0; i < frames; i++) {
 				group.writeFrame({
 					payload: new TextEncoder().encode(`${key}.${i}`),
@@ -3159,7 +3159,7 @@ test.each([false, true])("draft-22: exact terminal 5/5 survives group FIN=%s", a
 		}),
 	);
 	try {
-		const group = track.createGroup(5n);
+		const group = defined(track.createGroup(5n));
 		for (let i = 0; i < 5; i++)
 			group.writeFrame({ payload: new Uint8Array([i]), timestamp: Timestamp.unscaled(group.start) });
 		const uni = await fx.uni.read();
@@ -3230,7 +3230,7 @@ test("draft-22: an inline terminal reset after its FIN falls back to a standalon
 		}),
 	);
 	try {
-		const group = track.createGroup(5n);
+		const group = defined(track.createGroup(5n));
 		for (let i = 0; i < 5; i++)
 			group.writeFrame({ payload: new Uint8Array([i]), timestamp: Timestamp.unscaled(group.start) });
 		const uni = await fx.uni.read();

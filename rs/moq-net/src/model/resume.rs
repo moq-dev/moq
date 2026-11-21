@@ -3738,11 +3738,11 @@ mod test {
 			let source = copy();
 			routes.serve(source.consume());
 			let mut sub = subscribe(if routed { &logical } else { &source }, HOUR);
-			let mut history = source.create_group(group::Info { start: 0 }).unwrap();
+			let mut history = source.create_group(group::Info { start: 0 }).unwrap().unwrap();
 			history.write_frame(ts(0), b"history".as_ref()).unwrap();
 			history.finish().unwrap();
 			let mut finished = recv(&mut sub);
-			let mut live = source.create_group(group::Info { start: 1 }).unwrap();
+			let mut live = source.create_group(group::Info { start: 1 }).unwrap().unwrap();
 			live.write_frame(ts(1), b"live".as_ref()).unwrap();
 			let mut reading = recv(&mut sub);
 			assert_eq!(read(&mut reading), Some(b"live".to_vec()));
@@ -3790,14 +3790,14 @@ mod test {
 			let a = copy();
 			routes.serve(a.consume());
 			let mut sub = subscribe(&logical, Duration::from_secs(1));
-			let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+			let mut open = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 			open.write_frame(ts(0), b"first".as_ref()).unwrap();
 			let mut held = recv(&mut sub);
 			assert_eq!(read(&mut held), Some(b"first".to_vec()));
 
 			let b = copy();
 			let dynamic = b.requests();
-			let mut newer = b.create_group(group::Info { start: 1 }).unwrap();
+			let mut newer = b.create_group(group::Info { start: 1 }).unwrap().unwrap();
 			newer.write_frame(ts(1), b"newer".as_ref()).unwrap();
 			newer.finish().unwrap();
 			routes.serve(b.consume());
@@ -3816,7 +3816,7 @@ mod test {
 			);
 
 			if arrives {
-				let mut late = b.create_group(group::Info { start: 0 }).unwrap();
+				let mut late = b.create_group(group::Info { start: 0 }).unwrap().unwrap();
 				late.write_frame(ts(0), b"first".as_ref()).unwrap();
 				late.write_frame(ts(1), b"continued".as_ref()).unwrap();
 				late.finish().unwrap();
@@ -3848,7 +3848,7 @@ mod test {
 			routes.serve(a.consume());
 			let mut quick = subscribe(&logical, short);
 			let mut patient = subscribe(&logical, hour);
-			let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+			let mut open = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 			open.write_frame(ts(0), b"first".as_ref()).unwrap();
 			let mut quick_held = recv(&mut quick);
 			let mut patient_held = recv(&mut patient);
@@ -3857,7 +3857,7 @@ mod test {
 
 			let b = copy();
 			let dynamic = b.requests();
-			let mut newer = b.create_group(group::Info { start: 1 }).unwrap();
+			let mut newer = b.create_group(group::Info { start: 1 }).unwrap().unwrap();
 			newer.write_frame(ts(1), b"newer".as_ref()).unwrap();
 			newer.finish().unwrap();
 			routes.serve(b.consume());
@@ -3891,7 +3891,7 @@ mod test {
 			);
 			drop(quick_held);
 			drop(quick);
-			let mut late = b.create_group(group::Info { start: 0 }).unwrap();
+			let mut late = b.create_group(group::Info { start: 0 }).unwrap().unwrap();
 			late.write_frame(ts(0), b"first".as_ref()).unwrap();
 			late.write_frame(ts(1), b"continued".as_ref()).unwrap();
 			late.finish().unwrap();
@@ -3971,11 +3971,11 @@ mod test {
 		let mut source = copy();
 		routes.serve(source.consume());
 		let mut sub = subscribe(&logical, HOUR);
-		let mut whole = source.create_group(group::Info { start: 0 }).unwrap();
+		let mut whole = source.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		whole.write_frame(ts(0), b"a".as_ref()).unwrap();
 		whole.write_frame(ts(1), b"b".as_ref()).unwrap();
 		whole.finish().unwrap();
-		let mut last = source.create_group(group::Info { start: 2 }).unwrap();
+		let mut last = source.create_group(group::Info { start: 2 }).unwrap().unwrap();
 		last.write_frame(ts(2), b"c".as_ref()).unwrap();
 		source.finish_at(Position { group: 2, frame: 1 }).unwrap();
 		let mut first = recv(&mut sub);
@@ -4194,7 +4194,7 @@ mod test {
 		a.finish_at(Position { group: 4, frame: 2 }).unwrap();
 		let b = copy();
 		routes.serve(b.consume());
-		let mut group = b.create_group(group::Info { start: 4 }).unwrap();
+		let mut group = b.create_group(group::Info { start: 4 }).unwrap().unwrap();
 		group.write_frame(ts(0), b"x".as_ref()).unwrap();
 		let mut reading = recv(&mut sub);
 		// Frames past the end arrive only once the group is handed out.
@@ -4587,7 +4587,7 @@ mod test {
 		let routes = Producer::new();
 		let logical = logical(&routes);
 		let a = copy();
-		let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+		let mut open = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		open.write_frame(ts(0), b"x".as_ref()).unwrap();
 		routes.serve(a.consume());
 		let subscription = Subscription::default()
@@ -4746,7 +4746,7 @@ mod test {
 		let logical = logical(&routes);
 		let resumed = logical.consume();
 		let source = copy();
-		let mut warm = source.create_group(group::Info { start: 2 }).unwrap();
+		let mut warm = source.create_group(group::Info { start: 2 }).unwrap().unwrap();
 		warm.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"2-0".as_ref())
 			.unwrap();
 		warm.finish().unwrap();
@@ -4772,7 +4772,7 @@ mod test {
 		routes.serve(a.consume());
 		let mut sub = subscribe(&logical, Duration::ZERO);
 
-		let mut group = a.create_group(group::Info { start: 0 }).unwrap();
+		let mut group = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		group.write_frame(ts(0), b"a".as_ref()).unwrap();
 		group.finish().unwrap();
 
@@ -4897,7 +4897,7 @@ mod test {
 			routes.serve(a.consume());
 			let mut sub = subscribe(if routed { &logical } else { &a }, Duration::from_secs(1));
 			for second in 0..4 {
-				let mut group = a.create_group(group::Info { start: second * 1000 }).unwrap();
+				let mut group = a.create_group(group::Info { start: second * 1000 }).unwrap().unwrap();
 				group.write_frame(ts(second * 1000), b"x".as_ref()).unwrap();
 				group.finish().unwrap();
 			}
@@ -4916,7 +4916,7 @@ mod test {
 		routes.serve(a.consume());
 		let mut sub = subscribe(&logical, Duration::from_secs(10));
 
-		let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+		let mut open = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		open.write_frame(ts(0), b"a".as_ref()).unwrap();
 		open.write_frame(ts(1), b"b".as_ref()).unwrap();
 		let mut reading = recv(&mut sub);
@@ -4925,7 +4925,7 @@ mod test {
 
 		// The replacement holds the whole group; the replaced route stays quiet.
 		let b = copy();
-		let mut whole = b.create_group(group::Info { start: 0 }).unwrap();
+		let mut whole = b.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		for (ms, frame) in [(0, b"a"), (1, b"b"), (2, b"c")] {
 			whole.write_frame(ts(ms), frame.as_ref()).unwrap();
 		}
@@ -4953,7 +4953,7 @@ mod test {
 		routes.serve(a.consume());
 		let mut sub = subscribe(&track, Duration::from_secs(10));
 
-		let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+		let mut open = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		open.write_frame(ts(0), b"a".as_ref()).unwrap();
 		open.write_frame(ts(1), b"b".as_ref()).unwrap();
 		let mut reading = recv(&mut sub);
@@ -4967,7 +4967,7 @@ mod test {
 		assert_eq!(asked.resume, Some(Position::new(0, 2)), "past the two frames held");
 
 		// The new copy gets only the rest, and the reader reads on from it.
-		let mut rest = b.create_group(group::Info { start: 0 }).unwrap();
+		let mut rest = b.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		rest.start_at(2).unwrap();
 		rest.write_frame(ts(2), b"c".as_ref()).unwrap();
 		rest.finish().unwrap();
@@ -5071,7 +5071,7 @@ mod test {
 		routes.serve(a.consume());
 		let mut sub = subscribe(&logical, Duration::from_secs(10));
 
-		let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+		let mut open = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		open.write_frame(ts(0), b"a".as_ref()).unwrap();
 		let mut reading = recv(&mut sub);
 		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
@@ -5103,7 +5103,7 @@ mod test {
 			.map(|index| format!("{index}{}", "z".repeat(64)).into())
 			.collect();
 
-		let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+		let mut open = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		open.write_frame(ts(0), frames[0].clone()).unwrap();
 		open.write_frame(ts(1), frames[1].clone()).unwrap();
 		let mut reading = recv(&mut sub);
@@ -5140,7 +5140,7 @@ mod test {
 		let mut sub = subscribe(&logical, Duration::from_secs(10));
 		let frame = || bytes::Bytes::from("z".repeat(64));
 
-		let mut group = a.create_group(group::Info { start: 0 }).unwrap();
+		let mut group = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		group.write_frame(ts(0), frame()).unwrap();
 		let slice = super::super::flate::Encoder::new().frame(&frame());
 		let header = crate::model::frame::Header {
@@ -5182,7 +5182,7 @@ mod test {
 		let mut sub = subscribe(&logical, Duration::from_secs(10));
 		let frame = || bytes::Bytes::from("z".repeat(64));
 
-		let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+		let mut open = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		open.write_frame(ts(0), frame()).unwrap();
 		let mut reading = recv(&mut sub);
 		assert_eq!(read(&mut reading), Some(frame().to_vec()));
@@ -5221,7 +5221,7 @@ mod test {
 		routes.serve(a.consume());
 		let mut sub = subscribe(&logical, Duration::from_secs(10));
 
-		let open = a.create_group(group::Info { start: 0 }).unwrap();
+		let open = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		let mut frame = open
 			.create_frame(crate::frame::Info {
 				size: 4,
@@ -5240,7 +5240,7 @@ mod test {
 		drop(frame);
 		a.clone().abort(Error::Dropped).unwrap();
 		let b = copy();
-		let mut whole = b.create_group(group::Info { start: 0 }).unwrap();
+		let mut whole = b.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		whole.write_frame(ts(0), b"abcd".as_ref()).unwrap();
 		routes.serve(b.consume());
 
@@ -5263,7 +5263,7 @@ mod test {
 			routes.serve(a.consume());
 			let mut sub = subscribe(&logical, Duration::from_secs(10));
 
-			let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+			let mut open = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 			open.write_frame(ts(0), b"a".as_ref()).unwrap();
 			let mut reading = recv(&mut sub);
 			assert_eq!(read(&mut reading), Some(b"a".to_vec()));
@@ -5310,7 +5310,7 @@ mod test {
 			let a = copy();
 			routes.serve(a.consume());
 			let mut sub = subscribe(&logical, Duration::from_secs(10));
-			let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+			let mut open = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 			open.write_frame(ts(0), b"a".as_ref()).unwrap();
 			let mut reading = recv(&mut sub);
 			assert_eq!(read(&mut reading), Some(b"a".to_vec()));
@@ -5320,7 +5320,7 @@ mod test {
 			for _ in 0..3 {
 				assert!(reading.read_frame().now_or_never().is_none());
 			}
-			let mut whole = b.create_group(group::Info { start: 0 }).unwrap();
+			let mut whole = b.create_group(group::Info { start: 0 }).unwrap().unwrap();
 			for (ms, frame) in [(0, b"a"), (1, b"b")] {
 				whole.write_frame(ts(ms), frame.as_ref()).unwrap();
 			}
@@ -5341,7 +5341,7 @@ mod test {
 			let a = copy();
 			routes.serve(a.consume());
 			let mut sub = subscribe(&logical, Duration::from_secs(10));
-			let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+			let mut open = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 			open.write_frame(ts(0), b"a".as_ref()).unwrap();
 			let mut reading = recv(&mut sub);
 			assert_eq!(read(&mut reading), Some(b"a".to_vec()));
@@ -5369,7 +5369,7 @@ mod test {
 			let a = copy();
 			routes.serve(a.consume());
 			let mut sub = subscribe(&logical, Duration::from_secs(10));
-			let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+			let mut open = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 			open.write_frame(ts(0), b"a".as_ref()).unwrap();
 			let mut reading = recv(&mut sub);
 			assert_eq!(read(&mut reading), Some(b"a".to_vec()));
@@ -5398,7 +5398,7 @@ mod test {
 		routes.serve(a.consume());
 		let mut sub = subscribe(&logical, Duration::from_secs(10));
 
-		let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+		let mut open = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		open.write_frame(ts(0), b"a".as_ref()).unwrap();
 		let mut reading = recv(&mut sub);
 		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
@@ -5426,7 +5426,7 @@ mod test {
 		let a = copy();
 		routes.serve(a.consume());
 		let mut sub = subscribe(&logical, Duration::from_secs(10));
-		let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+		let mut open = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		open.write_frame(ts(0), b"a".as_ref()).unwrap();
 		let mut reading = recv(&mut sub);
 		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
@@ -5435,7 +5435,7 @@ mod test {
 		assert!(reading.read_frame().now_or_never().is_none());
 
 		let b = copy();
-		let mut whole = b.create_group(group::Info { start: 0 }).unwrap();
+		let mut whole = b.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		whole.write_frame(ts(0), b"a".as_ref()).unwrap();
 		whole.write_frame(ts(1), b"b".as_ref()).unwrap();
 		whole.finish().unwrap();
@@ -5454,7 +5454,7 @@ mod test {
 		let a = copy();
 		routes.serve(a.consume());
 		let mut sub = subscribe(&logical, Duration::from_secs(10));
-		let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+		let mut open = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		open.write_frame(ts(0), b"a".as_ref()).unwrap();
 		let mut reading = recv(&mut sub);
 		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
@@ -5476,7 +5476,7 @@ mod test {
 			let dynamic = a.requests();
 			routes.serve(a.consume());
 			let mut sub = subscribe(&logical, Duration::from_secs(10));
-			let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+			let mut open = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 			open.write_frame(ts(0), b"a".as_ref()).unwrap();
 			let mut reading = recv(&mut sub);
 			assert_eq!(read(&mut reading), Some(b"a".to_vec()));
@@ -5493,7 +5493,7 @@ mod test {
 			assert!(reading.read_frame().now_or_never().is_none(), "still waiting");
 
 			let b = copy();
-			let mut whole = b.create_group(group::Info { start: 0 }).unwrap();
+			let mut whole = b.create_group(group::Info { start: 0 }).unwrap().unwrap();
 			whole.write_frame(ts(0), b"a".as_ref()).unwrap();
 			whole.write_frame(ts(1), b"b".as_ref()).unwrap();
 			whole.finish().unwrap();
@@ -5516,7 +5516,7 @@ mod test {
 			routes.serve(a.consume());
 			let mut sub = subscribe(&logical, Duration::from_secs(10));
 
-			let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+			let mut open = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 			open.write_frame(ts(0), b"a".as_ref()).unwrap();
 			let mut reading = if fetched {
 				logical.consume().fetch_group(0, None).now_or_never().unwrap().unwrap()
@@ -5549,7 +5549,7 @@ mod test {
 
 			// Another route holds it: the group continues there.
 			let b = copy();
-			let mut whole = b.create_group(group::Info { start: 0 }).unwrap();
+			let mut whole = b.create_group(group::Info { start: 0 }).unwrap().unwrap();
 			whole.write_frame(ts(0), b"a".as_ref()).unwrap();
 			whole.write_frame(ts(1), b"b".as_ref()).unwrap();
 			whole.finish().unwrap();
@@ -5568,7 +5568,7 @@ mod test {
 		let logical = logical(&routes);
 		let a = copy();
 		routes.serve(a.consume());
-		let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+		let mut open = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		open.write_frame(ts(0), b"a".as_ref()).unwrap();
 		let mut fetched = logical.consume().fetch_group(0, None).now_or_never().unwrap().unwrap();
 		assert_eq!(
@@ -5602,7 +5602,7 @@ mod test {
 			let logical = logical(&routes);
 			let a = copy();
 			routes.serve(a.consume());
-			let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+			let mut open = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 			open.write_frame(ts(0), b"a".as_ref()).unwrap();
 			let mut fetched = logical.consume().fetch_group(0, None).now_or_never().unwrap().unwrap();
 			assert_eq!(read(&mut fetched), Some(b"a".to_vec()));
@@ -5641,7 +5641,7 @@ mod test {
 			let a = copy();
 			let dynamic = a.requests();
 			routes.serve(a.consume());
-			let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+			let mut open = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 			open.write_frame(ts(0), b"a".as_ref()).unwrap();
 			let _a = a.finish().unwrap();
 			let mut fetched = logical.consume().fetch_group(0, None).now_or_never().unwrap().unwrap();
@@ -5662,7 +5662,7 @@ mod test {
 				continue;
 			}
 			let b = copy();
-			let mut whole = b.create_group(group::Info { start: 0 }).unwrap();
+			let mut whole = b.create_group(group::Info { start: 0 }).unwrap().unwrap();
 			whole.write_frame(ts(0), b"a".as_ref()).unwrap();
 			whole.write_frame(ts(1), b"b".as_ref()).unwrap();
 			whole.finish().unwrap();
@@ -5683,11 +5683,15 @@ mod test {
 		let a = copy();
 		let dynamic = a.requests();
 		routes.serve(a.consume());
-		let mut group = a.create_group(group::Info { start: 0 }).unwrap();
+		let mut group = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		group.write_frame(ts(0), b"a".as_ref()).unwrap();
 		group.finish().unwrap();
 		// Groups 1 and 2 are missing below the end: a fetch asks for them.
-		a.create_group(group::Info { start: 3 }).unwrap().finish().unwrap();
+		a.create_group(group::Info { start: 3 })
+			.unwrap()
+			.unwrap()
+			.finish()
+			.unwrap();
 		let last = a.consume();
 		let a = a.finish().unwrap();
 		routes.end(Ok(()));
@@ -6259,7 +6263,7 @@ mod test {
 		routes.serve(a.consume());
 		let mut sub = subscribe(&logical, Duration::from_secs(10));
 
-		let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+		let mut open = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		open.write_frame(ts(0), b"a".as_ref()).unwrap();
 		open.write_frame(ts(1), b"b".as_ref()).unwrap();
 		let mut reading = recv(&mut sub);
@@ -6303,7 +6307,7 @@ mod test {
 		routes.serve(a.consume());
 		let mut sub = subscribe(&logical, Duration::from_secs(10));
 
-		let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+		let mut open = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		open.write_frame(ts(0), b"a".as_ref()).unwrap();
 		let mut reading = recv(&mut sub);
 		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
@@ -6330,7 +6334,7 @@ mod test {
 		let routes = Producer::new();
 		let a = copy();
 		routes.serve(a.consume());
-		let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+		let mut open = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		open.write_frame(ts(0), b"a".as_ref()).unwrap();
 		let mut fetched = logical(&routes)
 			.consume()
@@ -6367,7 +6371,7 @@ mod test {
 		let routes = Producer::new();
 		let a = copy();
 		routes.serve(a.consume());
-		let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+		let mut open = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		open.write_frame(ts(0), b"a".as_ref()).unwrap();
 		let mut fetched = logical(&routes)
 			.consume()
@@ -6392,7 +6396,7 @@ mod test {
 		let routes = Producer::new();
 		let a = track::Producer::new(Arc::new(broadcast::Info::default()), "video", info.clone());
 		routes.serve(a.consume());
-		let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+		let mut open = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		let mut drain = open.consume();
 		// Two frames that compress to almost nothing, but inflate past the tail together.
 		for _ in 0..2 {
@@ -6418,14 +6422,14 @@ mod test {
 		routes.serve(a.consume());
 		let mut sub = subscribe(&logical, Duration::from_secs(10));
 
-		let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+		let mut open = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		open.write_frame(ts(0), b"a".as_ref()).unwrap();
 		let mut reading = recv(&mut sub);
 		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
 
 		// B holds the whole group, then its route fails, keeping it.
 		let b = copy();
-		let mut whole = b.create_group(group::Info { start: 0 }).unwrap();
+		let mut whole = b.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		whole.write_frame(ts(0), b"a".as_ref()).unwrap();
 		whole.write_frame(ts(1), b"b".as_ref()).unwrap();
 		whole.finish().unwrap();
@@ -6465,7 +6469,7 @@ mod test {
 		let b = copy();
 		for (track, keys) in [(&a, 0..2), (&b, 0..3)] {
 			for key in keys {
-				let mut group = track.create_group(group::Info { start: key }).unwrap();
+				let mut group = track.create_group(group::Info { start: key }).unwrap().unwrap();
 				group.write_frame(ts(key), b"x".as_ref()).unwrap();
 				group.finish().unwrap();
 			}
@@ -6680,7 +6684,7 @@ mod test {
 
 	/// Write a finished one-frame group, presented at its key in milliseconds.
 	fn write(track: &track::Producer, key: u64) {
-		let mut group = track.create_group(group::Info { start: key }).unwrap();
+		let mut group = track.create_group(group::Info { start: key }).unwrap().unwrap();
 		group.write_frame(ts(key), b"x".as_ref()).unwrap();
 		group.finish().unwrap();
 	}
@@ -6860,7 +6864,7 @@ mod test {
 		a.anchored();
 		routes.serve(a.consume());
 		write(&a, 10);
-		let mut open = a.create_group(group::Info { start: 100 }).unwrap();
+		let mut open = a.create_group(group::Info { start: 100 }).unwrap().unwrap();
 		open.write_frame(ts(100), b"x".as_ref()).unwrap();
 		let subscription = Subscription::default()
 			.with_delay(Delay::default().with_max(None))
@@ -6911,7 +6915,7 @@ mod test {
 		a.anchored();
 		routes.serve(a.consume());
 		write(&a, 10);
-		let mut open = a.create_group(group::Info { start: 100 }).unwrap();
+		let mut open = a.create_group(group::Info { start: 100 }).unwrap().unwrap();
 		open.write_frame(ts(100), b"x".as_ref()).unwrap();
 		let subscription = Subscription::default()
 			.with_delay(Delay::default().with_max(None))
@@ -6956,7 +6960,7 @@ mod test {
 		a.anchored();
 		routes.serve(a.consume());
 		write(&a, 10);
-		let mut open = a.create_group(group::Info { start: 100 }).unwrap();
+		let mut open = a.create_group(group::Info { start: 100 }).unwrap().unwrap();
 		open.write_frame(ts(100), b"x".as_ref()).unwrap();
 		let subscription = Subscription::default()
 			.with_delay(Delay::default().with_max(None))
@@ -7935,7 +7939,7 @@ mod test {
 				let a = copy();
 				routes.serve(a.consume());
 				let mut sub = subscribe(if nested { &outer } else { &inner }, HOUR);
-				let mut one = a.create_group(group::Info { start: 1 }).unwrap();
+				let mut one = a.create_group(group::Info { start: 1 }).unwrap().unwrap();
 				one.write_frame(ts(1), b"x".as_ref()).unwrap();
 				let one = one.finish().unwrap();
 				write(&a, 3);
@@ -7974,7 +7978,7 @@ mod test {
 						write(&a, 3);
 					}
 					drain(&mut sub, ordered);
-					let mut two = a.create_group(group::Info { start: 2 }).unwrap();
+					let mut two = a.create_group(group::Info { start: 2 }).unwrap().unwrap();
 					two.write_frame(ts(2), b"x".as_ref()).unwrap();
 					let two = two.finish().unwrap();
 					let reserved = peek(&mut sub, ordered);
@@ -8203,7 +8207,7 @@ mod test {
 			let b = copy();
 			routes.serve(b.consume());
 
-			let mut failing = b.create_group(group::Info { start: 1 }).unwrap();
+			let mut failing = b.create_group(group::Info { start: 1 }).unwrap().unwrap();
 			failing.write_frame(ts(1), b"a".as_ref()).unwrap();
 			let noop = kio::Waiter::noop();
 			let res = match ordered {
@@ -8217,7 +8221,7 @@ mod test {
 			assert_eq!(drain(&mut sub, ordered), Vec::<u64>::new());
 
 			// The old route finishes group 1 only now, and the new route's copy of it fails.
-			let mut whole = a.create_group(group::Info { start: 1 }).unwrap();
+			let mut whole = a.create_group(group::Info { start: 1 }).unwrap().unwrap();
 			whole.write_frame(ts(1), b"a".as_ref()).unwrap();
 			whole.write_frame(ts(2), b"b".as_ref()).unwrap();
 			whole.finish().unwrap();
@@ -8247,7 +8251,7 @@ mod test {
 			let c = copy();
 			routes.serve(c.consume());
 
-			let mut failing = c.create_group(group::Info { start: 1 }).unwrap();
+			let mut failing = c.create_group(group::Info { start: 1 }).unwrap().unwrap();
 			failing.write_frame(ts(1), b"a".as_ref()).unwrap();
 			let noop = kio::Waiter::noop();
 			let res = match ordered {
@@ -8261,7 +8265,7 @@ mod test {
 			assert_eq!(drain(&mut sub, ordered), Vec::<u64>::new());
 
 			// b's first group lands only now, and c's copy of it fails.
-			let mut whole = b.create_group(group::Info { start: 1 }).unwrap();
+			let mut whole = b.create_group(group::Info { start: 1 }).unwrap().unwrap();
 			whole.write_frame(ts(1), b"a".as_ref()).unwrap();
 			whole.write_frame(ts(2), b"b".as_ref()).unwrap();
 			whole.finish().unwrap();
@@ -8436,7 +8440,7 @@ mod test {
 		let a = copy();
 		routes.serve(a.consume());
 		let mut sub = subscribe(&logical, HOUR);
-		let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+		let mut open = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		open.write_frame(ts(0), b"a".as_ref()).unwrap();
 		let mut reading = recv(&mut sub);
 		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
@@ -8445,7 +8449,7 @@ mod test {
 		assert!(reading.read_frame().now_or_never().is_none(), "no verdict yet");
 
 		let b = copy();
-		let mut whole = b.create_group(group::Info { start: 0 }).unwrap();
+		let mut whole = b.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		whole.write_frame(ts(0), b"a".as_ref()).unwrap();
 		whole.write_frame(ts(1), b"b".as_ref()).unwrap();
 		whole.finish().unwrap();
@@ -8472,14 +8476,14 @@ mod test {
 		routes.serve(c.consume());
 
 		// Every route holds group 1: a whole, b cut off by its route failing, c failing after a frame.
-		let mut whole = a.create_group(group::Info { start: 1 }).unwrap();
+		let mut whole = a.create_group(group::Info { start: 1 }).unwrap().unwrap();
 		whole.write_frame(ts(1), b"a".as_ref()).unwrap();
 		whole.write_frame(ts(2), b"b".as_ref()).unwrap();
 		whole.finish().unwrap();
-		let mut partial = b.create_group(group::Info { start: 1 }).unwrap();
+		let mut partial = b.create_group(group::Info { start: 1 }).unwrap().unwrap();
 		partial.write_frame(ts(1), b"a".as_ref()).unwrap();
 		b.clone().abort(Error::Dropped).unwrap();
-		let mut failing = c.create_group(group::Info { start: 1 }).unwrap();
+		let mut failing = c.create_group(group::Info { start: 1 }).unwrap().unwrap();
 		failing.write_frame(ts(1), b"a".as_ref()).unwrap();
 		let mut reading = recv(&mut sub);
 		assert_eq!(reading.start, 1);
@@ -8512,11 +8516,11 @@ mod test {
 			routes.serve(b.consume());
 
 			// Both routes hold group 1: the old one whole, the serving one failing after a frame.
-			let mut whole = a.create_group(group::Info { start: 1 }).unwrap();
+			let mut whole = a.create_group(group::Info { start: 1 }).unwrap().unwrap();
 			whole.write_frame(ts(1), b"a".as_ref()).unwrap();
 			whole.write_frame(ts(2), b"b".as_ref()).unwrap();
 			whole.finish().unwrap();
-			let mut failing = b.create_group(group::Info { start: 1 }).unwrap();
+			let mut failing = b.create_group(group::Info { start: 1 }).unwrap().unwrap();
 			failing.write_frame(ts(1), b"a".as_ref()).unwrap();
 			let mut failing = Some(failing);
 			if early {
@@ -8564,11 +8568,11 @@ mod test {
 			let b = copy();
 			routes.serve(b.consume());
 
-			let mut whole = a.create_group(group::Info { start: 1 }).unwrap();
+			let mut whole = a.create_group(group::Info { start: 1 }).unwrap().unwrap();
 			whole.write_frame(ts(1), b"a".as_ref()).unwrap();
 			whole.write_frame(ts(2), b"b".as_ref()).unwrap();
 			whole.finish().unwrap();
-			let mut failing = b.create_group(group::Info { start: 1 }).unwrap();
+			let mut failing = b.create_group(group::Info { start: 1 }).unwrap().unwrap();
 			failing.write_frame(ts(1), b"a".as_ref()).unwrap();
 			let res = match ordered {
 				true => sub.poll_next_group(&kio::Waiter::noop()),
@@ -8607,7 +8611,7 @@ mod test {
 			routes.serve(b.consume());
 
 			// The serving route has nothing yet, so group 8 comes from the replaced one.
-			let mut open = a.create_group(group::Info { start: 8 }).unwrap();
+			let mut open = a.create_group(group::Info { start: 8 }).unwrap().unwrap();
 			open.write_frame(ts(8), b"a".as_ref()).unwrap();
 			let res = match ordered {
 				true => sub.poll_next_group(&kio::Waiter::noop()),
@@ -8681,7 +8685,7 @@ mod test {
 		routes.serve(a.consume());
 		let budget = Duration::from_secs(1);
 		let mut sub = subscribe(&logical, budget);
-		let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+		let mut open = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		open.write_frame(ts(0), b"a".as_ref()).unwrap();
 		let mut reading = recv(&mut sub);
 		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
@@ -8809,7 +8813,7 @@ mod test {
 		routes.serve(a.consume());
 		let mut sub = subscribe(&logical, HOUR);
 		write(&a, 0);
-		let open = a.create_group(group::Info { start: 1 }).unwrap();
+		let open = a.create_group(group::Info { start: 1 }).unwrap().unwrap();
 		assert_eq!(drain(&mut sub, false), [0, 1]);
 
 		open.abort(Error::Cancel).unwrap();
@@ -8865,7 +8869,7 @@ mod test {
 		routes.serve(a.consume());
 		let mut sub = subscribe(&logical, HOUR);
 		sub.set_range(..=0);
-		let mut held = a.create_group(group::Info { start: 0 }).unwrap();
+		let mut held = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		held.write_frame(ts(0), b"a".as_ref()).unwrap();
 		let Poll::Ready(Ok(Some(reading))) = sub.poll_recv_group(&kio::Waiter::noop()) else {
 			panic!("group 0 is handed out")
@@ -8946,7 +8950,7 @@ mod test {
 		let a = copy();
 		routes.serve(a.consume());
 		let mut sub = subscribe(&logical, Duration::from_secs(10));
-		let mut group = a.create_group(group::Info { start: 5 }).unwrap();
+		let mut group = a.create_group(group::Info { start: 5 }).unwrap().unwrap();
 		group.write_frame(ts(5), b"x".as_ref()).unwrap();
 		group.finish().unwrap();
 		assert_eq!(recv(&mut sub).start, 5);
@@ -8956,7 +8960,7 @@ mod test {
 		// Subscribe the replacement before it has anything, so the update moves a ready copy.
 		assert!(sub.recv_group().now_or_never().is_none());
 		for key in [2, 6] {
-			let mut group = b.create_group(group::Info { start: key }).unwrap();
+			let mut group = b.create_group(group::Info { start: key }).unwrap().unwrap();
 			group.write_frame(ts(key), b"x".as_ref()).unwrap();
 			group.finish().unwrap();
 		}
@@ -9052,7 +9056,7 @@ mod test {
 			.unwrap()
 			.unwrap();
 		for key in 0..13 {
-			let mut group = a.create_group(group::Info { start: key * 1000 }).unwrap();
+			let mut group = a.create_group(group::Info { start: key * 1000 }).unwrap().unwrap();
 			group.write_frame(ts(key * 1000), b"x".as_ref()).unwrap();
 			group.finish().unwrap();
 		}
@@ -9066,7 +9070,7 @@ mod test {
 			rest.push(group.start);
 		}
 		for key in 0..13 {
-			let mut group = b.create_group(group::Info { start: key * 1000 }).unwrap();
+			let mut group = b.create_group(group::Info { start: key * 1000 }).unwrap().unwrap();
 			group.write_frame(ts(key * 1000), b"x".as_ref()).unwrap();
 			group.finish().unwrap();
 		}
@@ -9460,7 +9464,7 @@ mod test {
 		let a = copy();
 		routes.serve(a.consume());
 		let mut sub = subscribe(&logical, Duration::from_secs(30));
-		let mut five = a.create_group(group::Info { start: 5000 }).unwrap();
+		let mut five = a.create_group(group::Info { start: 5000 }).unwrap().unwrap();
 		five.write_frame(ts(5000), b"x".as_ref()).unwrap();
 		assert_eq!(recv(&mut sub).start, 5000);
 
@@ -9477,7 +9481,7 @@ mod test {
 
 		let b = b.accept(crate::track::Info::timed());
 		for key in 0..7 {
-			let mut group = b.create_group(group::Info { start: key * 1000 }).unwrap();
+			let mut group = b.create_group(group::Info { start: key * 1000 }).unwrap().unwrap();
 			group.write_frame(ts(key * 1000), b"x".as_ref()).unwrap();
 			group.finish().unwrap();
 		}
@@ -9597,7 +9601,7 @@ mod test {
 		let a = copy();
 		routes.serve(a.consume());
 		let mut sub = subscribe(&logical, Duration::from_secs(30));
-		let mut zero = a.create_group(group::Info { start: 0 }).unwrap();
+		let mut zero = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		zero.write_frame(ts(0), b"x".as_ref()).unwrap();
 		assert_eq!(recv(&mut sub).start, 0);
 
@@ -9614,7 +9618,7 @@ mod test {
 
 		let b = b.accept(crate::track::Info::timed());
 		for key in 0..13 {
-			let mut group = b.create_group(group::Info { start: key * 1000 }).unwrap();
+			let mut group = b.create_group(group::Info { start: key * 1000 }).unwrap().unwrap();
 			group.write_frame(ts(key * 1000), b"x".as_ref()).unwrap();
 			group.finish().unwrap();
 		}
@@ -9716,7 +9720,7 @@ mod test {
 		a.received();
 		routes.serve(a.consume());
 		let mut sub = subscribe(&front, Duration::from_secs(30));
-		let mut zero = a.create_group(group::Info { start: 0 }).unwrap();
+		let mut zero = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		zero.write_frame(ts(0), b"x".as_ref()).unwrap();
 		assert_eq!(recv(&mut sub).start, 0);
 
@@ -9731,7 +9735,7 @@ mod test {
 		sub.update(sub.subscription().with_ranges(ranges)).unwrap();
 		assert!(sub.recv_group().now_or_never().is_none());
 		for key in 1..4 {
-			let mut group = b.create_group(group::Info { start: key * 1000 }).unwrap();
+			let mut group = b.create_group(group::Info { start: key * 1000 }).unwrap().unwrap();
 			group.write_frame(ts(key * 1000), b"x".as_ref()).unwrap();
 			group.finish().unwrap();
 		}
@@ -9777,7 +9781,7 @@ mod test {
 		let routes = Producer::new();
 		let a = copy();
 		routes.serve(a.consume());
-		let mut first = a.create_group(group::Info { start: 3000 }).unwrap();
+		let mut first = a.create_group(group::Info { start: 3000 }).unwrap().unwrap();
 		first.write_frame(ts(3000), b"x".as_ref()).unwrap();
 		first.finish().unwrap();
 		let range = track::Range {
@@ -9916,7 +9920,7 @@ mod test {
 		let a = copy();
 		routes.serve(a.consume());
 		let mut sub = subscribe(&logical, Duration::from_secs(10));
-		let mut first = a.create_group(group::Info { start: 0 }).unwrap();
+		let mut first = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		first.write_frame(ts(0), b"a0".as_ref()).unwrap();
 		assert_eq!(recv(&mut sub).start, 0);
 
@@ -9924,7 +9928,7 @@ mod test {
 		routes.serve(b.consume());
 		// Both routes go on to group 1; only the serving one's copy counts.
 		for (track, payload) in [(&a, b"a1"), (&b, b"b1")] {
-			let mut group = track.create_group(group::Info { start: 1 }).unwrap();
+			let mut group = track.create_group(group::Info { start: 1 }).unwrap().unwrap();
 			group.write_frame(ts(1), payload.as_ref()).unwrap();
 			group.finish().unwrap();
 		}
@@ -9941,7 +9945,7 @@ mod test {
 		let a = copy();
 		routes.serve(a.consume());
 		let mut sub = subscribe(&logical, Duration::from_secs(2));
-		let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+		let mut open = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		open.write_frame(ts(0), b"a".as_ref()).unwrap();
 		let mut reading = recv(&mut sub);
 		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
@@ -9951,13 +9955,13 @@ mod test {
 		let b = copy();
 		routes.serve(b.consume());
 		for key in 1..=2 {
-			let mut group = b.create_group(group::Info { start: key * 1000 }).unwrap();
+			let mut group = b.create_group(group::Info { start: key * 1000 }).unwrap().unwrap();
 			group.write_frame(ts(key * 1000), b"b".as_ref()).unwrap();
 			group.finish().unwrap();
 		}
 		assert!(reading.read_frame().now_or_never().is_none(), "not stale yet");
 
-		let mut group = b.create_group(group::Info { start: 3000 }).unwrap();
+		let mut group = b.create_group(group::Info { start: 3000 }).unwrap().unwrap();
 		group.write_frame(ts(3000), b"b".as_ref()).unwrap();
 		assert!(matches!(reading.read_frame().now_or_never(), Some(Err(Error::Old))));
 	}
@@ -9981,7 +9985,7 @@ mod test {
 			let a = untimed();
 			routes.serve(a.consume());
 			let mut sub = subscribe(&logical, Duration::from_secs(1));
-			let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+			let mut open = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 			open.write_frame(crate::Timestamp::unscaled(open.start), b"a".as_ref())
 				.unwrap();
 			let mut reading = recv(&mut sub);
@@ -9992,7 +9996,7 @@ mod test {
 			// A driver collects the replacement's pool, so its wall deadlines fire.
 			pool.step(Duration::ZERO);
 			let write = |key| {
-				let mut group = b.create_group(group::Info { start: key }).unwrap();
+				let mut group = b.create_group(group::Info { start: key }).unwrap().unwrap();
 				group
 					.write_frame(crate::Timestamp::unscaled(group.start), b"b".as_ref())
 					.unwrap();
@@ -10170,7 +10174,7 @@ mod test {
 		let a = copy();
 		routes.serve(a.consume());
 		let mut sub = subscribe(&logical, Duration::from_secs(10));
-		let _open = a.create_group(group::Info { start: 0 }).unwrap();
+		let _open = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		let mut reading = recv(&mut sub);
 		let wake = Arc::new(Wake::default());
 		let waiter = kio::Waiter::new(wake.clone().into());
@@ -10211,13 +10215,13 @@ mod test {
 			routes.serve(a.consume());
 			let mut sub = subscribe(&logical, Duration::from_millis(100));
 			for (key, ms) in [(0, 0), (1, 1000)] {
-				let mut group = a.create_group(group::Info { start: key }).unwrap();
+				let mut group = a.create_group(group::Info { start: key }).unwrap().unwrap();
 				group.write_frame(ts(ms), b"x".as_ref()).unwrap();
 				group.finish().unwrap();
 			}
 			assert_eq!(recv(&mut sub).start, 0);
 			assert_eq!(recv(&mut sub).start, 1);
-			let mut open = a.create_group(group::Info { start: 2 }).unwrap();
+			let mut open = a.create_group(group::Info { start: 2 }).unwrap().unwrap();
 			open.write_frame(ts(2000), b"held".as_ref()).unwrap();
 			let mut group = recv(&mut sub);
 			assert_eq!(read(&mut group), Some(b"held".to_vec()));
@@ -10235,7 +10239,7 @@ mod test {
 			let groups = groups
 				.iter()
 				.map(|&(key, ms)| {
-					let mut group = b.create_group(group::Info { start: key }).unwrap();
+					let mut group = b.create_group(group::Info { start: key }).unwrap().unwrap();
 					if let Some(ms) = ms {
 						group.write_frame(ts(ms), b"b".as_ref()).unwrap();
 					}
@@ -10280,7 +10284,7 @@ mod test {
 		}
 
 		fn group(&self, key: u64) -> group::Producer {
-			self.copy.create_group(group::Info { start: key }).unwrap()
+			self.copy.create_group(group::Info { start: key }).unwrap().unwrap()
 		}
 	}
 
@@ -10363,7 +10367,7 @@ mod test {
 			let a = copy();
 			routes.serve(a.consume());
 			let mut sub = subscribe(&logical, Duration::from_secs(10));
-			let open = a.create_group(group::Info { start: 0 }).unwrap();
+			let open = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 			let mut frame = open
 				.create_frame(crate::frame::Info {
 					size: 4,
@@ -10379,12 +10383,12 @@ mod test {
 			);
 
 			let b = copy();
-			let mut replacement = b.create_group(group::Info { start: 0 }).unwrap();
+			let mut replacement = b.create_group(group::Info { start: 0 }).unwrap().unwrap();
 			routes.serve(b.consume());
 			assert!(chunks.read_chunk().now_or_never().is_none());
 			if !arrives {
 				for key in 1..=4 {
-					let mut group = b.create_group(group::Info { start: key }).unwrap();
+					let mut group = b.create_group(group::Info { start: key }).unwrap().unwrap();
 					group.write_frame(ts(key * 10_000), b"new".as_ref()).unwrap();
 					group.finish().unwrap();
 				}
@@ -10413,7 +10417,7 @@ mod test {
 			let a = copy();
 			routes.serve(a.consume());
 			let mut sub = subscribe(&logical, Duration::from_secs(2));
-			let open = a.create_group(group::Info { start: 0 }).unwrap();
+			let open = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 			let mut frame = open
 				.create_frame(crate::frame::Info {
 					size: 4,
@@ -10426,7 +10430,7 @@ mod test {
 			assert!(chunks.read_chunk().now_or_never().unwrap().is_ok());
 
 			let b = copy();
-			let replacement = b.create_group(group::Info { start: 0 }).unwrap();
+			let replacement = b.create_group(group::Info { start: 0 }).unwrap().unwrap();
 			let mut replacement_frame = replacement
 				.create_frame(crate::frame::Info {
 					size: 4,
@@ -10439,7 +10443,7 @@ mod test {
 			// Transfer the group cursor too, while its next frame is still pending.
 			assert!(reading.read_frame().now_or_never().is_none());
 			for key in 1..=4 {
-				let mut next = b.create_group(group::Info { start: key }).unwrap();
+				let mut next = b.create_group(group::Info { start: key }).unwrap().unwrap();
 				next.write_frame(ts(key * 1000), b"x".as_ref()).unwrap();
 				next.finish().unwrap();
 			}
@@ -10466,7 +10470,7 @@ mod test {
 		let _request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
 		wake.0.store(false, std::sync::atomic::Ordering::Relaxed);
 		let b = copy();
-		let mut group = b.create_group(group::Info { start: 0 }).unwrap();
+		let mut group = b.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		group.write_frame(ts(0), b"b".as_ref()).unwrap();
 		group.finish().unwrap();
 		routes.serve(b.consume());
@@ -10514,7 +10518,7 @@ mod test {
 		let a = copy();
 		routes.serve(a.consume());
 		let mut sub = subscribe(&logical, Duration::from_secs(2));
-		let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+		let mut open = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		open.write_frame(ts(0), b"a".as_ref()).unwrap();
 		let mut reading = recv(&mut sub);
 		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
@@ -10523,7 +10527,7 @@ mod test {
 		routes.serve(b.consume());
 		assert!(reading.read_frame().now_or_never().is_none());
 		for key in 1..=4 {
-			let mut group = b.create_group(group::Info { start: key * 1000 }).unwrap();
+			let mut group = b.create_group(group::Info { start: key * 1000 }).unwrap().unwrap();
 			group.write_frame(ts(key * 1000), b"b".as_ref()).unwrap();
 			group.finish().unwrap();
 		}
@@ -10536,7 +10540,7 @@ mod test {
 		let routes = Producer::new();
 		let logical = logical(&routes);
 		let a = copy();
-		let group = a.create_group(group::Info { start: 0 }).unwrap();
+		let group = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		group
 			.set_wire(group::Wire {
 				sparse: false,
@@ -10604,7 +10608,7 @@ mod test {
 		let routes = Producer::new();
 		let logical = logical(&routes);
 		let a = copy();
-		let mut group = a.create_group(group::Info { start: 0 }).unwrap();
+		let mut group = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		group
 			.set_wire(group::Wire {
 				sparse: false,
@@ -10650,7 +10654,7 @@ mod test {
 	#[cfg(feature = "async")]
 	fn joined_past_a_gap(objects: &[(u64, &'static [u8])]) -> track::Producer {
 		let b = copy();
-		let mut group = b.create_group(group::Info { start: 0 }).unwrap();
+		let mut group = b.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		group
 			.set_wire(group::Wire {
 				sparse: false,
@@ -10692,7 +10696,7 @@ mod test {
 		let a = copy();
 		routes.serve(a.consume());
 		let mut sub = subscribe(&front, Duration::from_secs(10));
-		let open = a.create_group(group::Info { start: 0 }).unwrap();
+		let open = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		let mut frame = open
 			.create_frame(crate::frame::Info {
 				size: 4,
@@ -10721,7 +10725,7 @@ mod test {
 		let a = copy();
 		routes.serve(a.consume());
 		let mut sub = subscribe(&front, Duration::from_secs(10));
-		let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+		let mut open = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		open.write_frame(ts(0), b"a".as_ref()).unwrap();
 		open.write_frame(ts(1), b"b".as_ref()).unwrap();
 		let mut reading = recv(&mut sub);
@@ -10742,7 +10746,7 @@ mod test {
 			let a = copy();
 			routes.serve(a.consume());
 			let mut sub = subscribe(&front, Duration::from_secs(10));
-			let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+			let mut open = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 			open.write_frame(ts(0), b"a".as_ref()).unwrap();
 			let mut reading = recv(&mut sub);
 			let b = joined_past_a_gap(&[(6, b"x"), (7, b"y"), (8, b"z")]);
@@ -10769,7 +10773,7 @@ mod test {
 	fn a_fetched_group_wakes_when_the_route_changes() {
 		let routes = Producer::new();
 		let a = copy();
-		let _open = a.create_group(group::Info { start: 0 }).unwrap();
+		let _open = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		routes.serve(a.consume());
 		let mut reading = logical(&routes)
 			.consume()
@@ -10794,7 +10798,7 @@ mod test {
 		let dynamic = a.requests();
 		routes.serve(a.consume());
 
-		let mut arriving = a.create_group(group::Info { start: 0 }).unwrap();
+		let mut arriving = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		arriving.write_frame(ts(0), b"a".as_ref()).unwrap();
 		let mut fetched = logical(&routes)
 			.consume()
@@ -10849,7 +10853,7 @@ mod test {
 				let dynamic = a.requests();
 				routes.serve(a.consume());
 				let mut sub = subscribe(&logical, HOUR);
-				let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+				let mut open = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 				open.write_frame(ts(0), b"a".as_ref()).unwrap();
 				let mut reading = match fetched {
 					true => logical.consume().fetch_group(0, None).now_or_never().unwrap().unwrap(),
@@ -10885,7 +10889,7 @@ mod test {
 			let a_requests = a.requests();
 			routes.serve(a.consume());
 			let mut sub = subscribe(&logical, HOUR);
-			let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+			let mut open = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 			open.write_frame(ts(0), b"a".as_ref()).unwrap();
 			let mut reading = match fetched {
 				true => logical.consume().fetch_group(0, None).now_or_never().unwrap().unwrap(),
@@ -10896,7 +10900,7 @@ mod test {
 			let b = copy();
 			let b_requests = b.requests();
 			routes.serve(b.consume());
-			let mut repeat = b.create_group(group::Info { start: 0 }).unwrap();
+			let mut repeat = b.create_group(group::Info { start: 0 }).unwrap().unwrap();
 			repeat.write_frame(ts(0), b"a".as_ref()).unwrap();
 			open.abort(Error::WrongSize).unwrap();
 			assert!(reading.read_frame().now_or_never().is_none(), "fetched={fetched}");
@@ -10927,7 +10931,7 @@ mod test {
 			let a = copy();
 			routes.serve(a.consume());
 			let mut sub = subscribe(&logical, HOUR);
-			let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+			let mut open = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 			open.write_frame(ts(0), b"a".as_ref()).unwrap();
 			let mut reading = recv(&mut sub);
 			assert_eq!(read(&mut reading), Some(b"a".to_vec()));
@@ -10954,7 +10958,7 @@ mod test {
 		let routes = Producer::new();
 		let a = copy();
 		routes.serve(a.consume());
-		let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+		let mut open = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		open.write_frame(ts(0), b"a".as_ref()).unwrap();
 
 		let logical = logical(&routes);
@@ -10976,7 +10980,7 @@ mod test {
 		let routes = Producer::new();
 		let a = copy();
 		routes.serve(a.consume());
-		let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+		let mut open = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		open.write_frame(ts(0), b"a".as_ref()).unwrap();
 
 		let budget = Duration::from_millis(500);
@@ -10998,7 +11002,7 @@ mod test {
 
 		// The new route runs a full second past the group's successor while its fetch is unanswered.
 		for (key, ms) in [(1, 1000), (2, 2000)] {
-			let mut group = b.create_group(group::Info { start: key }).unwrap();
+			let mut group = b.create_group(group::Info { start: key }).unwrap().unwrap();
 			group.write_frame(ts(ms), b"x".as_ref()).unwrap();
 			group.finish().unwrap();
 		}
@@ -11013,7 +11017,7 @@ mod test {
 		let a = copy();
 		routes.serve(a.consume());
 		let mut sub = subscribe(&logical, Duration::from_secs(10));
-		let _open = a.create_group(group::Info { start: 0 }).unwrap();
+		let _open = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		let mut reading = recv(&mut sub);
 		assert!(reading.read_frame().now_or_never().is_none());
 		routes.end(Err(Error::Unroutable));
@@ -11246,10 +11250,10 @@ mod test {
 		let a = copy();
 		routes.serve(a.consume());
 		let mut sub = subscribe(&logical, Duration::from_secs(10));
-		let _open = a.create_group(group::Info { start: 0 }).unwrap();
+		let _open = a.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		let mut reading = recv(&mut sub);
 		let b = copy();
-		let mut replacement = b.create_group(group::Info { start: 0 }).unwrap();
+		let mut replacement = b.create_group(group::Info { start: 0 }).unwrap().unwrap();
 		replacement.write_frame(ts(0), b"b".as_ref()).unwrap();
 		routes.serve(b.consume());
 		assert_eq!(read(&mut reading), Some(b"b".to_vec()));
@@ -11290,7 +11294,8 @@ mod test {
 					let mut sub = subscribe(&logical, Duration::from_secs(if widen { 2 } else { 10 }));
 					let b = copy();
 					// Both routes carry the same content, including the unfinished payload.
-					let writers = [&a, &b].map(|source| source.create_group(group::Info { start: 0 }).unwrap());
+					let writers =
+						[&a, &b].map(|source| source.create_group(group::Info { start: 0 }).unwrap().unwrap());
 					// Each group's writer, held open by its unfinished frame when chunked.
 					let _writers: Vec<_> = writers
 						.into_iter()
@@ -11355,7 +11360,7 @@ mod test {
 						"recovered={recovered}, widen={widen}, chunked={chunked}: preference update did not reach the copy"
 					);
 					for key in 1..=4 {
-						let mut next = source.create_group(group::Info { start: key }).unwrap();
+						let mut next = source.create_group(group::Info { start: key }).unwrap().unwrap();
 						next.write_frame(ts(key * 1000), b"next".as_ref()).unwrap();
 						next.finish().unwrap();
 					}
@@ -11417,7 +11422,7 @@ mod test {
 			routes.serve(copies[0].consume());
 			let mut writers: Vec<_> = copies
 				.iter()
-				.map(|copy| Some(copy.create_group(group::Info { start: 0 }).unwrap()))
+				.map(|copy| Some(copy.create_group(group::Info { start: 0 }).unwrap().unwrap()))
 				.collect();
 			writers[0]
 				.as_mut()

@@ -90,6 +90,7 @@ function write(track: Moq.Track.Producer) {
 function serveHistory(track: Moq.Track.Producer) {
 	track.finishAt({ group: BigInt(GROUPS), frame: 0 });
 	const live = track.createGroup(BigInt(GROUPS - 1));
+	if (!live) throw new Error("the live group already exists");
 	for (const payload of frames(GROUPS - 1))
 		live.writeFrame({ payload, timestamp: Moq.Time.Timestamp.unscaled(live.start) });
 	live.finish();

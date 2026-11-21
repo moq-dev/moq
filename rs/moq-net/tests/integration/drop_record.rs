@@ -37,7 +37,10 @@ fn timed() -> Info {
 
 /// Write group `key` presented at `millis`, and finish it.
 fn write(source: &track::Producer, key: u64, millis: u64) {
-	let mut group = source.create_group(moq_net::group::Info { start: key }).unwrap();
+	let mut group = source
+		.create_group(moq_net::group::Info { start: key })
+		.unwrap()
+		.unwrap();
 	group
 		.write_frame(Timestamp::from_millis(millis).unwrap(), &b"x"[..])
 		.unwrap();
@@ -411,7 +414,11 @@ async fn an_origin_eviction_drop_is_forwarded_final() {
 			let mut reader = chain.subscribe(reading(None, [support::keys(0..)])).await;
 			chain.upstream.server_transport.hold_unis();
 			let write = |key: u64| {
-				let mut group = chain.source.create_group(moq_net::group::Info { start: key }).unwrap();
+				let mut group = chain
+					.source
+					.create_group(moq_net::group::Info { start: key })
+					.unwrap()
+					.unwrap();
 				group
 					.write_frame(Timestamp::from_millis(key * 1000).unwrap(), vec![0u8; PAYLOAD])
 					.unwrap();
@@ -493,7 +500,11 @@ async fn an_ordered_reader_is_told_of_every_group_the_origin_evicted() {
 				.ordered();
 			chain.upstream.server_transport.hold_unis();
 			for key in 0..WRITTEN {
-				let mut group = chain.source.create_group(moq_net::group::Info { start: key }).unwrap();
+				let mut group = chain
+					.source
+					.create_group(moq_net::group::Info { start: key })
+					.unwrap()
+					.unwrap();
 				group
 					.write_frame(Timestamp::from_millis(key * 1000).unwrap(), vec![0u8; PAYLOAD])
 					.unwrap();
@@ -545,7 +556,11 @@ async fn a_run_dropped_before_the_first_group_settles_a_later_range() {
 	let chain = Chain::new([LITE07, LITE07], [forever(), forever(), forever()]).await;
 	let mut reader = chain.subscribe(reading(None, [support::keys(0..)])).await;
 	for key in 0..2 {
-		let group = chain.source.create_group(moq_net::group::Info { start: key }).unwrap();
+		let group = chain
+			.source
+			.create_group(moq_net::group::Info { start: key })
+			.unwrap()
+			.unwrap();
 		group.abort(moq_net::Error::App(1)).unwrap();
 	}
 	write(&chain.source, 2, 0);
@@ -646,6 +661,7 @@ async fn settle_even(chain: &Chain, runs: u64, stale: Option<Duration>) {
 				let group = chain
 					.source
 					.create_group(moq_net::group::Info { start: 2 * run })
+					.unwrap()
 					.unwrap();
 				group.abort(moq_net::Error::App(1)).unwrap();
 			}

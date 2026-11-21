@@ -1911,7 +1911,7 @@ export class Subscriber {
 						`group ${group.groupId} is at or past the declared end ${subscription.end}`,
 					);
 				}
-				producer = track.createGroup(group.groupId);
+				producer = created(track.createGroup(group.groupId), group.groupId);
 			}
 			return producer;
 		};
@@ -2178,7 +2178,7 @@ export class Subscriber {
 
 				const timestamp = objectTime(timescale, join.key);
 				if (first) {
-					producer = join.open(() => track.createGroup(join.key));
+					producer = join.open(() => created(track.createGroup(join.key), join.key));
 					if (!producer) {
 						discarding = true;
 						if (!object.payload) await skipPayload(stream, object.size);
@@ -2401,4 +2401,10 @@ class ConsumeBroadcast extends broadcast.Consumer {
 	override clone(): ConsumeBroadcast {
 		return new ConsumeBroadcast(this.shareState());
 	}
+}
+
+// A stream for a group the copy already holds is refused: the model has one producer per group.
+function created(group: netGroup.Producer | undefined, key: bigint): netGroup.Producer {
+	if (group === undefined) throw new Error(`duplicate group: key=${key}`);
+	return group;
 }

@@ -161,7 +161,11 @@ async fn an_unfed_fetch_is_a_miss() {
 
 		write(&relay.track, b"1");
 		// The publisher skips group 2, so the feed goes past it.
-		let mut skipped = relay.track.create_group(moq_net::group::Info { start: 3 }).unwrap();
+		let mut skipped = relay
+			.track
+			.create_group(moq_net::group::Info { start: 3 })
+			.unwrap()
+			.unwrap();
 		skipped
 			.write_frame(moq_net::Timestamp::unscaled(skipped.start), &b"3"[..])
 			.unwrap();

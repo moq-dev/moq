@@ -3236,7 +3236,7 @@ mod tests {
 
 	/// A group arriving at the relay as its header lands: cached, then accounted for.
 	fn arrive(track: &track::Producer, tail: &kio::Producer<Tail>, key: u64, now: crate::time::Instant) {
-		let mut group = track.create_group(group::Info { start: key }).unwrap();
+		let mut group = track.create_group(group::Info { start: key }).unwrap().unwrap();
 		group
 			.write_frame(crate::Timestamp::unscaled(group.start), &b"x"[..])
 			.unwrap();
@@ -3327,6 +3327,7 @@ mod tests {
 		serving
 			.create_group(group::Info { start: 66 })
 			.unwrap()
+			.unwrap()
 			.finish()
 			.unwrap();
 		active.report_starts(&serving);
@@ -3409,7 +3410,7 @@ mod tests {
 			let h = Harness::new(Version::Lite04);
 			let (mut track, fetching, req) = feed_fetch(3);
 			for key in [5, 6] {
-				let mut group = track.create_group(group::Info { start: key }).unwrap();
+				let mut group = track.create_group(group::Info { start: key }).unwrap().unwrap();
 				group
 					.write_frame(crate::Timestamp::unscaled(group.start), &b"x"[..])
 					.unwrap();
@@ -3471,7 +3472,7 @@ mod tests {
 				"group 3 was asked for just now (update: {update})"
 			);
 
-			let mut group = track.create_group(group::Info { start: 3 }).unwrap();
+			let mut group = track.create_group(group::Info { start: 3 }).unwrap().unwrap();
 			group
 				.write_frame(crate::Timestamp::unscaled(group.start), &b"x"[..])
 				.unwrap();
@@ -4925,7 +4926,7 @@ mod tests {
 			..crate::track::Info::timed()
 		};
 		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", info);
-		let mut before = track.create_group(4u64.into()).unwrap();
+		let mut before = track.create_group(4u64.into()).unwrap().unwrap();
 		before
 			.write_frame(Timestamp::from_millis(1000).unwrap(), &b"before"[..])
 			.unwrap();
@@ -5010,7 +5011,7 @@ mod tests {
 				"video",
 				crate::track::Info::timed(),
 			);
-			let mut cached = track.create_group(group::Info { start: 0 }).unwrap();
+			let mut cached = track.create_group(group::Info { start: 0 }).unwrap().unwrap();
 			cached.write_frame(cached.key_time(), &b"0"[..]).unwrap();
 			cached.finish().unwrap();
 			track.set_idle();
@@ -5026,7 +5027,7 @@ mod tests {
 				assert!(!track.is_live(), "the start waits for a group");
 				entry.answered(None, Some(Position::group(3)));
 			}
-			let mut newest = track.create_group(group::Info { start: 3 }).unwrap();
+			let mut newest = track.create_group(group::Info { start: 3 }).unwrap().unwrap();
 			newest
 				.write_frame(Timestamp::from_millis(300).unwrap(), &b"3"[..])
 				.unwrap();
@@ -5083,7 +5084,7 @@ mod tests {
 			"video",
 			crate::track::Info::timed(),
 		);
-		let mut cached = track.create_group(group::Info { start: 3 }).unwrap();
+		let mut cached = track.create_group(group::Info { start: 3 }).unwrap().unwrap();
 		cached.write_frame(cached.key_time(), &b"x"[..]).unwrap();
 		cached.finish().unwrap();
 		let tail = kio::Producer::new(Tail::default());
@@ -5364,7 +5365,7 @@ mod tests {
 			let broadcast = crate::broadcast::Info::new().produce();
 			let request = broadcast.reserve_track("video").unwrap();
 			let serving = ServeLoop::new(&serve, request, crate::track::Info::timed());
-			let mut group = serving.serving.create_group(group::Info { start: 2 }).unwrap();
+			let mut group = serving.serving.create_group(group::Info { start: 2 }).unwrap().unwrap();
 			group.write_frame(group.key_time(), b"2".as_slice()).unwrap();
 			group.finish().unwrap();
 			let mut reader = broadcast
@@ -5655,7 +5656,7 @@ mod tests {
 		);
 		let requests = copy.requests();
 		for key in 0..6 {
-			let mut group = copy.create_group(group::Info { start: key }).unwrap();
+			let mut group = copy.create_group(group::Info { start: key }).unwrap().unwrap();
 			group
 				.write_frame(crate::Timestamp::from_millis(key * 1000).unwrap(), b"x".as_slice())
 				.unwrap();
@@ -5760,7 +5761,11 @@ mod tests {
 			group.finish().map(drop)
 		};
 		let arrive = |serving: &mut ServeLoop, key| {
-			let group = serving.serving.create_group(crate::group::Info { start: key }).unwrap();
+			let group = serving
+				.serving
+				.create_group(crate::group::Info { start: key })
+				.unwrap()
+				.unwrap();
 			(group, Reading::open(&tail, Some(key), now()))
 		};
 
@@ -5865,7 +5870,11 @@ mod tests {
 				groups: first..last + 1,
 			})
 		};
-		let mut group = serving.serving.create_group(crate::group::Info { start: 5 }).unwrap();
+		let mut group = serving
+			.serving
+			.create_group(crate::group::Info { start: 5 })
+			.unwrap()
+			.unwrap();
 		group
 			.write_frame(crate::Timestamp::from_millis(5).unwrap(), &b"x"[..])
 			.unwrap();
@@ -5960,7 +5969,7 @@ mod tests {
 			let request = broadcast.reserve_track("video").unwrap();
 			let serving = ServeLoop::new(&serve, request, crate::track::Info::timed());
 			let producer = serving.serving.clone();
-			let mut arriving = serving.serving.create_group(group::Info { start: 2 }).unwrap();
+			let mut arriving = serving.serving.create_group(group::Info { start: 2 }).unwrap().unwrap();
 			arriving.write_frame(arriving.key_time(), b"2".as_slice()).unwrap();
 			let mut reader = broadcast
 				.consume()
@@ -5993,7 +6002,7 @@ mod tests {
 			);
 
 			// The track goes on: the next group still reaches the reader.
-			let mut following = producer.create_group(group::Info { start: 3 }).unwrap();
+			let mut following = producer.create_group(group::Info { start: 3 }).unwrap().unwrap();
 			following.write_frame(following.key_time(), b"3".as_slice()).unwrap();
 			let mut next = reader
 				.recv_group()
@@ -8330,7 +8339,11 @@ mod tests {
 		let established = h.wire().len();
 
 		let arrive = |serving: &ServeLoop, key| {
-			let mut group = serving.serving.create_group(group::Info { start: key }).unwrap();
+			let mut group = serving
+				.serving
+				.create_group(group::Info { start: key })
+				.unwrap()
+				.unwrap();
 			for frame in [&b"key"[..], b"abc", b"d"] {
 				group
 					.write_frame(crate::Timestamp::unscaled(group.start), frame)

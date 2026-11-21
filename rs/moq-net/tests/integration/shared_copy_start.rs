@@ -22,7 +22,10 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 const STEP: u64 = 100;
 
 fn write(track: &moq_net::track::Producer, key: u64) {
-	let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
+	let mut group = track
+		.create_group(moq_net::group::Info { start: key })
+		.unwrap()
+		.unwrap();
 	group
 		.write_frame(Timestamp::from_millis(key).unwrap(), &b"x"[..])
 		.unwrap();

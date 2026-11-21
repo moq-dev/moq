@@ -1520,7 +1520,7 @@ mod read_tests {
 		);
 		let timestamp = |us| moq_net::Timestamp::from_micros(us).unwrap();
 		let write = |start, us, payload: bytes::Bytes| {
-			let mut group = track.create_group(moq_net::group::Info { start }).unwrap();
+			let mut group = track.create_group(moq_net::group::Info { start }).unwrap().unwrap();
 			format()
 				.write(
 					&mut group,
@@ -1658,7 +1658,11 @@ mod tests {
 		}
 
 		fn write(&mut self, start: u64, micros: u64) {
-			let mut group = self.track.create_group(moq_net::group::Info { start }).unwrap();
+			let mut group = self
+				.track
+				.create_group(moq_net::group::Info { start })
+				.unwrap()
+				.unwrap();
 			hang::container::Frame {
 				timestamp: moq_net::Timestamp::from_micros(micros).unwrap(),
 				payload: bytes::Bytes::from_static(b"frame"),

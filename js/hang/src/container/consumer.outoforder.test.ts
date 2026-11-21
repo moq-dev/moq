@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { Duration, type Installed } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { type Group, Time, Track, Varint } from "@moq/net";
+import { defined } from "../defined.test-util.ts";
 import { Consumer } from "./consumer.ts";
 import { Format as LegacyFormat } from "./legacy.ts";
 
@@ -54,7 +55,7 @@ function publishFrame(group: Group.Producer, millis: number, tag: number) {
 
 /** Publish one closed group carrying a single frame at `millis`. */
 function publish(track: Track.Producer, sequence: bigint, millis: number) {
-	const group = track.createGroup(sequence);
+	const group = defined(track.createGroup(sequence));
 	publishFrame(group, millis, Number(sequence));
 	group.finish();
 }
@@ -121,9 +122,9 @@ test("a head group still downloading is not truncated", async () => {
 	);
 
 	// The live edge group arrives first (still open), and the head after it, one frame at a time.
-	const live = track.createGroup(3n);
+	const live = defined(track.createGroup(3n));
 	publishFrame(live, 3000, 30);
-	const head = track.createGroup(1n);
+	const head = defined(track.createGroup(1n));
 	publishFrame(head, 1000, 10);
 	const first = await nextFrame(consumer);
 	expect(first?.group).toBe(1n);

@@ -180,10 +180,12 @@ test("the observer reads the publisher's largest group as its subscription began
 	try {
 		while (!track.subscription.peek()) await track.subscription.changed();
 		const first = track.createGroup(7n);
+		if (!first) throw new Error("group 7 already exists");
 		frame(first, 0);
 		while (capture.largest() === undefined) await yieldNow();
 		// Live groups landing after the answer raise the track's largest, not the join's.
 		const later = track.createGroup(12n);
+		if (!later) throw new Error("group 12 already exists");
 		frame(later, 20_000);
 		const seen: Arrival[] = [];
 		while (seen.length < 2) {

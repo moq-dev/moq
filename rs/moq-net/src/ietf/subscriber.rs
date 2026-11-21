@@ -6476,7 +6476,9 @@ impl OpenGroup {
 		let key = header.group_id;
 		// Stats (groups/frames/bytes) are counted in the model as the group is written,
 		// through the tagged `track::Producer`.
-		let create = |track: &mut track::Producer| track.create_group(group::Info { start: key });
+		// A stream for a group the copy already holds is refused: the model has one producer per group.
+		let create =
+			|track: &mut track::Producer| track.create_group(group::Info { start: key })?.ok_or(Error::Duplicate);
 
 		loop {
 			match self.step {
@@ -7092,12 +7094,12 @@ impl RunFill {
 			}
 			self.skipped = None;
 			let key = group.ok_or(Error::ProtocolViolation)?;
-			match open_fill_group(track, &mut self.head, key) {
-				Ok(()) => {}
+			match open_fill_group(track, key)? {
+				Some(group) => self.head = Some((key, 0, group)),
 				// Widening a range can fill groups the copy already owns. Drain their
 				// objects without replacing their producer or cutting the rest of the fill.
-				Err(Error::Duplicate) if self.multiple => self.skipped = Some((key, 0)),
-				Err(err) => return Err(err),
+				None if self.multiple => self.skipped = Some((key, 0)),
+				None => return Err(Error::Duplicate),
 			}
 		}
 		if self.skipped.is_some() {
@@ -8191,12 +8193,11 @@ fn resolve_fetch_group(prior: Option<u64>, wire: Option<u64>) -> Result<Option<u
 	Ok(Some(group))
 }
 
-fn open_fill_group(
-	track: &mut track::Producer,
-	head: &mut Option<(u64, u64, crate::recv::Group)>,
-	key: u64,
-) -> Result<(), Error> {
-	let producer = track.create_group(group::Info { start: key })?;
+/// The fill's group `key`, or `None` when the copy already holds it.
+fn open_fill_group(track: &mut track::Producer, key: u64) -> Result<Option<crate::recv::Group>, Error> {
+	let Some(producer) = track.create_group(group::Info { start: key })? else {
+		return Ok(None);
+	};
 	producer.set_wire(group::Wire {
 		sparse: false,
 		first_object: true,
@@ -8206,8 +8207,7 @@ fn open_fill_group(
 		fetchable: true,
 		last: None,
 	})?;
-	*head = Some((key, 0, crate::recv::Group::new(producer)));
-	Ok(())
+	Ok(Some(crate::recv::Group::new(producer)))
 }
 
 /// Ready once a finished subscription's data streams are accounted for: Stream Count of
@@ -16509,7 +16509,7 @@ mod stitch_tests {
 			"video",
 			track::Info::default().with_timescale(Timescale::MICRO),
 		);
-		let mut producer = track.create_group(group::Info { start: KEY }).unwrap();
+		let mut producer = track.create_group(group::Info { start: KEY }).unwrap().unwrap();
 		producer.write_frame(timestamp(0), b"head-0".as_slice()).unwrap();
 		let mut group = producer.consume();
 
@@ -16535,7 +16535,7 @@ mod stitch_tests {
 			"video",
 			track::Info::default().with_timescale(Timescale::MICRO),
 		);
-		let mut producer = track.create_group(group::Info { start: KEY }).unwrap();
+		let mut producer = track.create_group(group::Info { start: KEY }).unwrap().unwrap();
 		producer.write_frame(timestamp(0), b"head-0".as_slice()).unwrap();
 		let mut group = producer.consume();
 
@@ -16560,7 +16560,7 @@ mod stitch_tests {
 			"video",
 			track::Info::default().with_timescale(Timescale::MICRO),
 		);
-		let mut producer = track.create_group(group::Info { start: KEY }).unwrap();
+		let mut producer = track.create_group(group::Info { start: KEY }).unwrap().unwrap();
 		producer.write_frame(timestamp(0), b"head-0".as_slice()).unwrap();
 		let mut group = producer.consume();
 
@@ -16928,7 +16928,7 @@ mod stitch_tests {
 		let mut h = Harness::new(Fill::Done, vec![draft18_subgroup(KEY, true, 0, &[b"rewound"])]);
 		h.subscriber.version = Version::Draft18;
 		// Starts past the incoming group's first object, at `timestamp(0)`.
-		let mut before = h.track.create_group((KEY - 1).into()).unwrap();
+		let mut before = h.track.create_group((KEY - 1).into()).unwrap().unwrap();
 		before.write_frame(timestamp(4000), b"before".as_slice()).unwrap();
 		before.finish().unwrap();
 
@@ -17297,7 +17297,12 @@ mod stitch_tests {
 				let dynamic = run.track.requests();
 				let consumer = run.track.consume();
 				run.track.start_at(last + 1).unwrap();
-				run.track.create_group((last + 1).into()).unwrap().finish().unwrap();
+				run.track
+					.create_group((last + 1).into())
+					.unwrap()
+					.unwrap()
+					.finish()
+					.unwrap();
 				// From group 0, which a time start names whatever is held, so the history below
 				// the feed is asked as a miss rather than looked up.
 				let mut reading = consumer
@@ -17396,7 +17401,7 @@ mod stitch_tests {
 			run.track.broadcast().pool.poll(now, &kio::Waiter::noop());
 			run.track.received();
 			run.track.start_at(3).unwrap();
-			run.track.create_group(3u64.into()).unwrap().finish().unwrap();
+			run.track.create_group(3u64.into()).unwrap().unwrap().finish().unwrap();
 			let requests = run.track.requests();
 			// From group 0, which a time start names whatever is held.
 			let mut reader = run.track.subscribe(
@@ -17445,7 +17450,7 @@ mod stitch_tests {
 			let dynamic = run.track.requests();
 			let consumer = run.track.consume();
 			run.track.start_at(7).unwrap();
-			run.track.create_group(7u64.into()).unwrap().finish().unwrap();
+			run.track.create_group(7u64.into()).unwrap().unwrap().finish().unwrap();
 			// From group 0, which a time start names whatever is held, so the history below
 			// the feed is asked as a miss rather than looked up.
 			let mut reading = consumer
@@ -18386,9 +18391,7 @@ mod joining_fetch_tests {
 			let held = state.subscribes.values().next().unwrap();
 			(held.producer.clone().unwrap(), held.fill.clone())
 		};
-		let mut head = None;
-		open_fill_group(&mut track, &mut head, 4).unwrap();
-		let (key, next, producer) = head.unwrap();
+		let (key, next, producer) = (4, 0, open_fill_group(&mut track, 4).unwrap().unwrap());
 		*fill.write().ok().unwrap() = Fill::Ready {
 			key,
 			next,
@@ -19386,7 +19389,7 @@ mod new_group_tests {
 			let state = self.probe.state.lock();
 			let copy = state.subscribes.values().next().unwrap().producer.clone().unwrap();
 			drop(state);
-			let mut group = copy.create_group(group::Info { start: key }).unwrap();
+			let mut group = copy.create_group(group::Info { start: key }).unwrap().unwrap();
 			group
 				.write_frame(crate::Timestamp::unscaled(group.start), b"key".as_slice())
 				.unwrap();

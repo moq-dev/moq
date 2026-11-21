@@ -1244,7 +1244,10 @@ impl Publish {
 	/// Create a raw group starting at `start`, in the track's timescale, which names it.
 	pub fn track_group_at(&mut self, track: Id, start: u64) -> Result<Id, Error> {
 		let raw = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
-		let group = raw.inner.create_group(moq_net::group::Info { start })?;
+		let group = raw
+			.inner
+			.create_group(moq_net::group::Info { start })?
+			.ok_or(moq_net::Error::Duplicate)?;
 		self.insert_group(group)
 	}
 

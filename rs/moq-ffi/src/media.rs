@@ -1667,7 +1667,7 @@ mod read_tests {
 		let (_broadcast, track, reader) = subscribe_warmup().await;
 		let mut media = reader.reads.take(|_| Ok(())).unwrap();
 		let write = |start: u64, micros| {
-			let mut group = track.create_group(start.into()).unwrap();
+			let mut group = track.create_group(start.into()).unwrap().unwrap();
 			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio)
 				.write(
 					&mut group,
@@ -1734,7 +1734,7 @@ mod read_tests {
 			value,
 			scale: Some(1_000_000),
 		};
-		let mut first = track.create_group(0u64.into()).unwrap();
+		let mut first = track.create_group(0u64.into()).unwrap().unwrap();
 		format()
 			.write(
 				&mut first,
@@ -1753,7 +1753,7 @@ mod read_tests {
 		assert_eq!(frame.payload, b"encoded");
 		assert_eq!(frame.timestamp, micros(10_000));
 		assert!(frame.keyframe);
-		let mut marker = track.create_group(2u64.into()).unwrap();
+		let mut marker = track.create_group(2u64.into()).unwrap().unwrap();
 		format()
 			.write(
 				&mut marker,
@@ -1773,7 +1773,7 @@ mod read_tests {
 			reader.next().await.unwrap(),
 			Some(MoqMediaRead::End { end }) if end == micros(20_000)
 		));
-		let mut resumed = track.create_group(3u64.into()).unwrap();
+		let mut resumed = track.create_group(3u64.into()).unwrap().unwrap();
 		format()
 			.write(
 				&mut resumed,

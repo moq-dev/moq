@@ -62,7 +62,7 @@ fn publish(origin: &moq_net::origin::Producer, path: &str, instance: &Instance, 
 fn frames(track: &track::Producer, first: u64) {
 	for sequence in first..first + 3 {
 		// Keyed by its first frame's pts, in the track's microseconds.
-		let mut group = track.create_group((sequence * 2_000_000).into()).unwrap();
+		let mut group = track.create_group((sequence * 2_000_000).into()).unwrap().unwrap();
 		hang::container::Frame {
 			timestamp: Timestamp::from_secs(sequence * 2).unwrap(),
 			payload: bytes::Bytes::from_static(if track.name() == "audio" {

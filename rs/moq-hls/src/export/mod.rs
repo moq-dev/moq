@@ -1587,7 +1587,7 @@ mod tests {
 
 	/// Open the group of [`Gops::gop`] `index` on `media`, holding one VP8 keyframe at its start.
 	fn keyframe_group(media: &moq_net::track::Producer, index: u64) -> moq_net::group::Producer {
-		let mut group = media.create_group((index * 2_000).into()).unwrap();
+		let mut group = media.create_group((index * 2_000).into()).unwrap().unwrap();
 		hang::container::Frame {
 			timestamp: moq_net::Timestamp::from_millis(index * 2_000).unwrap(),
 			payload: bytes::Bytes::from_static(KEYFRAME),
@@ -3653,7 +3653,11 @@ mod tests {
 		/// Write the group starting at `pts_ms` with a keyframe there and, when `frames` is more
 		/// than one, that many frames a tenth of the interval apart.
 		fn group(&mut self, pts_ms: u64, frames: u64) {
-			let mut group = self.track.create_group(moq_net::group::Info { start: pts_ms }).unwrap();
+			let mut group = self
+				.track
+				.create_group(moq_net::group::Info { start: pts_ms })
+				.unwrap()
+				.unwrap();
 			for index in 0..frames.max(1) {
 				let micros = (pts_ms + index * INTERVAL.as_millis() as u64 / 10) * 1_000;
 				let frame = vp8_frame(micros, index == 0);
@@ -3677,6 +3681,7 @@ mod tests {
 			let mut group = self
 				.track
 				.create_group(moq_net::group::Info { start: start_ms })
+				.unwrap()
 				.unwrap();
 			let frame = vp8_frame(pts_ms * 1_000, true);
 			hang::container::Frame {
@@ -3691,7 +3696,11 @@ mod tests {
 		/// Write the group at `pts_ms` with a single keyframe declaring a `width`x`height`
 		/// picture in band.
 		fn sized(&mut self, pts_ms: u64, (width, height): (u16, u16)) {
-			let mut group = self.track.create_group(moq_net::group::Info { start: pts_ms }).unwrap();
+			let mut group = self
+				.track
+				.create_group(moq_net::group::Info { start: pts_ms })
+				.unwrap()
+				.unwrap();
 			let mut payload = KEYFRAME.to_vec();
 			payload[6..8].copy_from_slice(&width.to_le_bytes());
 			payload[8..10].copy_from_slice(&height.to_le_bytes());
@@ -3711,7 +3720,11 @@ mod tests {
 
 		/// Start the group at `pts_ms` with a keyframe, leaving it open for more frames.
 		fn open(&mut self, pts_ms: u64) -> moq_net::group::Producer {
-			let mut group = self.track.create_group(moq_net::group::Info { start: pts_ms }).unwrap();
+			let mut group = self
+				.track
+				.create_group(moq_net::group::Info { start: pts_ms })
+				.unwrap()
+				.unwrap();
 			let frame = vp8_frame(pts_ms * 1_000, true);
 			hang::container::Frame {
 				timestamp: frame.timestamp,
@@ -4098,7 +4111,10 @@ mod tests {
 				.step_by(100)
 				.map(|ms| vp8_frame(ms * 1_000, ms == pts_ms))
 				.collect();
-			let mut group = track.create_group(moq_net::group::Info { start: pts_ms }).unwrap();
+			let mut group = track
+				.create_group(moq_net::group::Info { start: pts_ms })
+				.unwrap()
+				.unwrap();
 			let bytes = muxer.fragment(sequence as u32, &frames, None).unwrap();
 			group.write_frame(frames[0].timestamp, bytes).unwrap();
 			group.finish().unwrap();
@@ -4699,7 +4715,7 @@ mod tests {
 		);
 		// Then two groups on the next lines, at 2s and 4s.
 		for start in (0..=cap).chain([2_000_000, 4_000_000]) {
-			let mut group = media.track.create_group(start.into()).unwrap();
+			let mut group = media.track.create_group(start.into()).unwrap().unwrap();
 			let frame = vp8_frame(start, true);
 			hang::container::Frame {
 				timestamp: frame.timestamp,

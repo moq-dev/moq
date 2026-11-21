@@ -167,7 +167,9 @@ async fn relay(version: Version) -> anyhow::Result<()> {
 		)
 		.expect("a free name");
 	for sequence in 0..GROUPS {
-		let mut group = track.create_group(moq_net::group::Info { start: sequence })?;
+		let mut group = track
+			.create_group(moq_net::group::Info { start: sequence })?
+			.expect("a fresh group");
 		group.write_frame(
 			Timestamp::from_millis(sequence * 1000)?,
 			format!("group {sequence}").into_bytes(),

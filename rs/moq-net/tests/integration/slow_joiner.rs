@@ -69,7 +69,10 @@ async fn stalled_read(version: Version, budget: Duration) -> BTreeSet<u64> {
 
 	*gate.write().ok().unwrap() = false;
 	for key in 0..GROUPS {
-		let mut group = source.create_group(moq_net::group::Info { start: key }).unwrap();
+		let mut group = source
+			.create_group(moq_net::group::Info { start: key })
+			.unwrap()
+			.unwrap();
 		group
 			.write_frame(Timestamp::from_millis(key * 1000).unwrap(), &b"x"[..])
 			.unwrap();

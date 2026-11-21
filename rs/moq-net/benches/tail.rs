@@ -49,6 +49,7 @@ impl Held {
 					track
 						.create_group(group::Info { start: key })
 						.unwrap()
+						.unwrap()
 						.finish()
 						.unwrap();
 				}
