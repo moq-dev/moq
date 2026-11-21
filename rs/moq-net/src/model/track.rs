@@ -3977,6 +3977,7 @@ impl TrackState {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn set_live(&mut self, largest: Option<Position>, start: Option<u64>) -> Result<()> {
 		self.judge(largest)?;
+		self.report_answer(largest);
 		self.answered(largest, start, true);
 		Ok(())
 	}
@@ -3987,8 +3988,19 @@ impl TrackState {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn set_live_ahead(&mut self, largest: Position, start: Option<u64>) -> Result<()> {
 		self.judge(Some(largest))?;
+		self.report_answer(Some(largest));
 		self.answered(Some(largest), start, false);
 		Ok(())
+	}
+
+	/// Record an idle copy's answered largest before its feed goes live, under the same
+	/// guard: a reader that going live wakes would otherwise take the frames that arrived
+	/// ahead of the answer as the largest, and read the rest of that group as newer.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	fn report_answer(&self, largest: Option<Position>) {
+		if let (Feed::Idle { .. }, Some(largest)) = (&self.feed, largest) {
+			self.cache.report_largest(largest, false);
+		}
 	}
 
 	/// [`Self::set_live`] for an answer with no Largest, where the first group the feed
@@ -5388,7 +5400,8 @@ impl Producer {
 
 	/// The route answered with its largest position, `None` for nothing yet, and the first
 	/// group its feed serves when the answer names it; see [`Self::set_idle`]. Readers
-	/// resume once the cache shows the largest position. A no-op unless idle.
+	/// resume once the cache shows the largest position, which is the track's largest from
+	/// then on. A no-op unless idle.
 	///
 	/// [`Error::MalformedTrack`] when the answer is behind the cache (no Largest while the
 	/// copy shows groups, or a Largest before its newest position): the cache is likely
@@ -14167,6 +14180,34 @@ mod test {
 		let _answer = framed(&producer, 5, 1);
 		assert!(flag.take(), "the answer showing woke the reader");
 		assert_eq!(reader.poll_largest(&noop), Poll::Ready(Some(Position::group(5))));
+	}
+
+	/// A copy whose answered group already shows goes live at the answer, and its first
+	/// largest is the answer's, not the frames that arrived ahead of it: a reader taking
+	/// it as where history ends would otherwise read the rest of that group as live.
+	#[test]
+	fn largest_goes_live_at_the_answer_not_the_frames_ahead_of_it() {
+		let mut producer = track_producer("test", Info::default());
+		let noop = kio::Waiter::noop();
+		producer.set_idle();
+		let mut reader = producer.subscribe(replay());
+		let (flag, waiter) = Flag::waiter();
+		assert!(reader.poll_largest(&waiter).is_pending(), "the copy is idle");
+
+		// Seven frames of group 5 land before the answer, which says it reached frame 15.
+		let _arriving = framed(&producer, 5, 7);
+		let answer = Position { group: 5, frame: 15 };
+		producer.set_live(Some(answer), None).unwrap();
+		assert!(flag.take(), "going live woke the reader");
+		assert_eq!(reader.poll_largest(&noop), Poll::Ready(Some(answer)));
+
+		// The same holds for a bounded feed the answer alone makes current.
+		let mut producer = track_producer("test", Info::default());
+		producer.set_idle();
+		let mut reader = producer.subscribe(replay());
+		let _arriving = framed(&producer, 5, 7);
+		producer.set_live_ahead(answer, None).unwrap();
+		assert_eq!(reader.poll_largest(&noop), Poll::Ready(Some(answer)));
 	}
 
 	/// A relay copy holding groups 0 to 3 from an ended feed, idle until its route answers.
