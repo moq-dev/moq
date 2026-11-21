@@ -14,7 +14,7 @@ import { Connection } from "./connection.ts";
 import { encodeDatagram, ObjectDatagram } from "./datagram.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
 
-const ALL: IetfVersion[] = [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22];
+const ALL: IetfVersion[] = [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22, Version.DRAFT_23];
 
 function single(publisherPriority?: number): ObjectDatagram {
 	return new ObjectDatagram({
@@ -298,7 +298,7 @@ function lagAnswers(transport: MockTransport, lag: number): void {
 	Object.defineProperty(transport, "incomingBidirectionalStreams", { value: incoming });
 }
 
-for (const alpn of [ALPN.DRAFT_18, ALPN.DRAFT_20, ALPN.DRAFT_22]) {
+for (const alpn of [ALPN.DRAFT_18, ALPN.DRAFT_20, ALPN.DRAFT_22, ALPN.DRAFT_23]) {
 	for (const [lag, finish] of [
 		[0, false],
 		[100, false],
@@ -346,7 +346,7 @@ for (const alpn of [ALPN.DRAFT_18, ALPN.DRAFT_20, ALPN.DRAFT_22]) {
 	}
 }
 
-for (const alpn of [ALPN.DRAFT_18, ALPN.DRAFT_20, ALPN.DRAFT_22]) {
+for (const alpn of [ALPN.DRAFT_18, ALPN.DRAFT_20, ALPN.DRAFT_22, ALPN.DRAFT_23]) {
 	test(`${alpn}: a datagram burst reaches its reader before the end across a receive yield`, async () => {
 		using clock = manual();
 		const source = new Origin();
