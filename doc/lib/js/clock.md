@@ -94,7 +94,7 @@ final state read, so the failure says what never arrived. `read` receives the
 remaining budget to bound its own requests, and the watchdog races it, so a
 read that ignores the budget still ends on time. A read that throws before the
 deadline ends the wait with that error; one that throws once the deadline has
-passed counts as the watchdog. Use it where no event announces the change; when
+passed counts as the watchdog, its error kept as the `Unsettled`'s `cause`. Use it where no event announces the change; when
 one exists, wait on the event.
 
 In this repository, every workspace whose scripts run `bun test` and whose

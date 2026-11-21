@@ -54,6 +54,7 @@ test("until ends at the watchdog, not past it, carrying the last state read", as
 	const unsettled = result as Unsettled<{ renditions: number }>;
 	expect(unsettled.last).toEqual({ renditions: 3 });
 	expect(unsettled.message).toBe('never settled within 2500ms; last read: {"renditions":3}');
+	expect(unsettled.cause).toBeUndefined();
 });
 
 test("until bounds a read that ignores its budget", async () => {
@@ -111,6 +112,8 @@ test("until treats a read aborted by its own budget as the watchdog", async () =
 	);
 	expect(at).toBe(5_000);
 	expect((result as Unsettled<string>).last).toBe("starting");
+	// The read's own error stays diagnosable, though the clock decided the outcome.
+	expect(((result as Unsettled<string>).cause as DOMException).name).toBe("TimeoutError");
 });
 
 test("until rethrows a read failure before the deadline at once, whatever its type", async () => {

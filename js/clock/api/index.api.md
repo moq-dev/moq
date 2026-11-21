@@ -82,7 +82,7 @@ export const MissedTickBehavior: {
 export type MissedTickBehavior = typeof MissedTickBehavior[keyof typeof MissedTickBehavior];
 
 export class Unsettled<T> extends Error {
-	constructor(watchdog: Duration, last: T | undefined);
+	constructor(watchdog: Duration, last: T | undefined, cause?: unknown);
 	readonly last: T | undefined;
 }
 
