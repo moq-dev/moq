@@ -2581,22 +2581,33 @@ export class Publisher {
 		if (hooks.groupIndex(held) <= options.start) return undefined;
 		const asking = reader.subscription.peek();
 		const left = new AbortController();
-		void options.unsubscribed.then(() => left.abort(new Error("unsubscribed while fetching a group's head")));
 		const fetch: track.FetchGroupOptions & broadcast.FetchFrom = {
 			priority: asking?.priority,
 			maxDelay: asking?.delay?.max ?? undefined,
 			signal: left.signal,
 			frameStart: options.start,
 		};
-		try {
-			options.group = await source.fetchGroup(held.start, fetch);
-		} catch (err: unknown) {
-			return error(err);
-		} finally {
-			options.givenUp.close();
+		const fetched = source.fetchGroup(held.start, fetch).then(
+			(group) => group,
+			(err: unknown) => error(err),
+		);
+		// The serving subscription's budget, or its end, gives up on the head too.
+		const result = await race([fetched, options.givenUp, options.unsubscribed]);
+		options.givenUp.close();
+		if (result === undefined || result instanceof Error) {
+			left.abort(result ?? new Error("unsubscribed while fetching a group's head"));
+			void fetched.then((late) => {
+				if (!(late instanceof Error)) late.close();
+			});
 			held.close();
+			return result ?? new Error("unsubscribed while fetching a group's head");
 		}
-		options.givenUp = new GivenUp(options.group);
+		// The copy serves under the subscription's live budget, not the fetch's.
+		const expiry = hooks.groupExpiry(held);
+		if (expiry) hooks.expireGroup(result, expiry);
+		held.close();
+		options.group = result;
+		options.givenUp = new GivenUp(result);
 		return undefined;
 	}
 
