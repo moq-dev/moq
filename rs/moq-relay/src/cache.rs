@@ -24,7 +24,7 @@ const GOVERNOR_INTERVAL: Duration = Duration::from_secs(5);
 /// LRU window (`duration`, 30s by default) or the pool runs out of room,
 /// whichever comes first (the latest group of every track is always retained).
 /// With none of the knobs set the pool targets 10% of system memory free
-/// ([`DEFAULT_HEADROOM`]); `headroom = "0"` with no `capacity` leaves it unbounded in
+/// (`DEFAULT_HEADROOM`); `headroom = "0"` with no `capacity` leaves it unbounded in
 /// bytes, so only the LRU window bounds memory.
 #[derive(usage_rs::Args, Clone, Debug, Default, Deserialize, Serialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
