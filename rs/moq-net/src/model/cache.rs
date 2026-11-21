@@ -760,6 +760,8 @@ impl Edges {
 			let Some(state) = track.state.upgrade() else {
 				continue;
 			};
+			// Unqueued before the shed, so whatever the edge bills after it queues it again.
+			track.queued.store(false, Ordering::Relaxed);
 			if let Ok(mut state) = state.write() {
 				state.shed_edge_all(moves);
 			}
@@ -874,6 +876,9 @@ pub(super) struct Track {
 	edges: Edges,
 	// How many times the live edge moved to a newer group, naming its entry in `edges`.
 	moves: AtomicU64,
+	// Whether the live edge has an entry in its session's order, so one that a reclaim shed
+	// queues again once it grows.
+	queued: AtomicBool,
 
 	// One finished local group's encoder, kept until another group needs it or the
 	// account drops. Raw codec only: an Extra here would keep this account alive.
@@ -1019,6 +1024,7 @@ impl Track {
 			frames,
 			edges,
 			moves: AtomicU64::new(0),
+			queued: AtomicBool::new(false),
 			written: AtomicU64::new(0),
 			next_expiry: AtomicU64::new(0),
 			expiry_cursor: AtomicUsize::new(0),
@@ -1056,7 +1062,15 @@ impl Track {
 	/// the track lock, which orders the moves.
 	pub(super) fn edge_moved(self: &Arc<Self>) {
 		let moves = self.moves.fetch_add(1, Ordering::Relaxed) + 1;
+		self.queued.store(true, Ordering::Relaxed);
 		self.edges.moved(self, moves);
+	}
+
+	/// The live edge billed more: queue it again if a reclaim took its entry.
+	fn edge_grew(self: &Arc<Self>) {
+		if !self.queued.swap(true, Ordering::Relaxed) {
+			self.edges.moved(self, self.moves.load(Ordering::Relaxed));
+		}
 	}
 
 	/// How many times the live edge moved.
@@ -1118,7 +1132,7 @@ impl Track {
 			bytes: ENTRY_OVERHEAD,
 			access,
 			counted: false,
-			footprint: Arc::new(Footprint(AtomicU64::new(ENTRY_OVERHEAD))),
+			footprint: Arc::default(),
 		}
 	}
 
@@ -1351,9 +1365,12 @@ impl Drop for Bill {
 /// The flag bit in a [`Footprint`]: set while its bytes bill the session's [`Edges`].
 const EDGE: u64 = 1 << 63;
 
-/// Every byte one cached group bills, across its [`Charge`] and the [`Extra`]s it hands out
-/// (shared content, inflated copies, codec state), and whether they bill its session's
-/// [`Edges`] as its track's live edge.
+/// The content bytes one cached group bills, across its [`Charge`] and the [`Extra`]s it
+/// hands out (shared content, inflated copies, codec state), and whether they bill its
+/// session's [`Edges`] as its track's live edge.
+///
+/// Its fixed [`ENTRY_OVERHEAD`] is left out: that scales with the tracks a session holds,
+/// which its stream credit bounds, and shedding can never free it.
 ///
 /// One atomic holding both, the flag in its top bit (no group bills 2^63 bytes), so a byte
 /// added while the flag flips is billed to the session exactly once, by whichever came last.
@@ -1361,15 +1378,27 @@ const EDGE: u64 = 1 << 63;
 pub(super) struct Footprint(AtomicU64);
 
 impl Footprint {
-	fn add(&self, edges: &Edges, n: u64) {
-		if self.0.fetch_add(n, Ordering::Relaxed) & EDGE != 0 {
+	/// Count `n` more bytes, returning whether they bill the session.
+	fn add(&self, edges: &Edges, n: u64) -> bool {
+		let edge = self.0.fetch_add(n, Ordering::Relaxed) & EDGE != 0;
+		if edge {
 			edges.add(n);
 		}
+		edge
 	}
 
+	/// Count `n` fewer bytes, no more than it holds: a charge's overhead never entered it.
 	fn sub(&self, edges: &Edges, n: u64) {
-		if self.0.fetch_sub(n, Ordering::Relaxed) & EDGE != 0 {
-			edges.sub(n);
+		let mut taken = 0;
+		let prior = self
+			.0
+			.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |prior| {
+				taken = n.min(prior & !EDGE);
+				Some(prior - taken)
+			})
+			.expect("always updates");
+		if prior & EDGE != 0 {
+			edges.sub(taken);
 		}
 	}
 
@@ -1488,7 +1517,9 @@ impl Charge {
 		if let Some(track) = &self.track {
 			track.pool.add(n);
 			track.written.fetch_add(n, Ordering::Relaxed);
-			self.footprint.add(&track.edges, n);
+			if self.footprint.add(&track.edges, n) {
+				track.edge_grew();
+			}
 			self.bytes += n;
 		}
 		self.touch(WRITE_BOOST)
@@ -1735,10 +1766,14 @@ pub(super) struct Extra {
 
 impl Extra {
 	/// Count `n` bytes in, or out of, the owning group's footprint.
-	fn footprint(&self, track: &Track, n: u64, add: bool) {
+	fn footprint(&self, track: &Arc<Track>, n: u64, add: bool) {
 		if let Some(footprint) = &self.footprint {
 			match add {
-				true => footprint.add(&track.edges, n),
+				true => {
+					if footprint.add(&track.edges, n) {
+						track.edge_grew();
+					}
+				}
 				false => footprint.sub(&track.edges, n),
 			}
 		}
@@ -2096,13 +2131,13 @@ mod test {
 		early.add(10);
 		assert_eq!(edges.used(), 0, "not the live edge yet");
 		charge.promote();
-		assert_eq!(edges.used(), ENTRY_OVERHEAD + 110);
+		assert_eq!(edges.used(), 110, "the overhead is left out");
 		let shared = charge.transfer(60);
 		let late = charge.extra();
 		late.add(5);
-		assert_eq!(edges.used(), ENTRY_OVERHEAD + 115, "a transfer keeps its bytes billed");
+		assert_eq!(edges.used(), 115, "a transfer keeps its bytes billed");
 		shared.sub(20);
-		assert_eq!(edges.used(), ENTRY_OVERHEAD + 95);
+		assert_eq!(edges.used(), 95);
 		charge.demote();
 		assert_eq!(edges.used(), 0);
 		drop((shared, late));

@@ -1079,17 +1079,16 @@ impl GroupState {
 	}
 
 	/// Shed every committed frame, an open group's newest too, keeping the timeline the
-	/// frames presented, and return the bytes freed. A reader of a shed frame reads it as
+	/// frames presented. A reader of a shed frame reads it as
 	/// [`Error::Evicted`].
-	fn shed_all(&mut self) -> u64 {
+	fn shed_all(&mut self) {
 		if self.outcome.error().is_some() {
-			return 0;
+			return;
 		}
-		let mut freed = self.shed_to(self.committed());
+		self.shed_to(self.committed());
 		if let Some(flate) = &self.flate {
-			freed += flate.plain.shed(u64::MAX, u64::MAX, false);
+			flate.plain.shed(u64::MAX, u64::MAX, false);
 		}
-		freed
 	}
 
 	/// Whether this copy holds no committed frame.
@@ -2758,11 +2757,20 @@ impl Handle {
 		}
 	}
 
-	/// Shed every frame this copy holds, as [`GroupState::shed_all`] does.
-	pub(super) fn shed_all(&self) -> u64 {
-		match self.state.write() {
-			Ok(mut state) => state.shed_all(),
-			Err(_) => 0,
+	/// Shed every frame this copy holds, as [`GroupState::shed_all`] does. A frame still
+	/// arriving cannot be shed, so a copy holding one is aborted with [`Error::Evicted`]
+	/// instead: only a publisher leaving frames unfinished loses the group itself.
+	pub(super) fn shed_all(&self) {
+		let Ok(mut state) = self.state.write() else {
+			return;
+		};
+		state.shed_all();
+		if state
+			.partial
+			.as_ref()
+			.is_some_and(|partial| !partial.scratch && partial.charged > 0)
+		{
+			self.commit_abort(state, Error::Evicted);
 		}
 	}
 
