@@ -3578,17 +3578,24 @@ impl TrackState {
 
 	/// Evict the live edge its session queued at its `moves`th move, if it is still the edge:
 	/// the session holds more live edges than its budget, and this one moved longest ago.
+	///
+	/// The history below it goes too, older still: left alone, it would read as the newest
+	/// content, rewinding where a live join is placed and what reads as stale.
 	pub(super) fn evict_edge(&mut self, moves: u64) {
-		if !self.cache.edge_is(moves) {
+		if !self.cache.edge_is(moves)
+			|| self
+				.latest_group
+				.is_none_or(|latest| !self.protects(latest) || !self.lookup.contains_key(&latest))
+		{
 			return;
 		}
-		let Some(key) = self.latest_group.filter(|latest| self.protects(*latest)) else {
-			return;
-		};
-		match self.lookup.get(&key) {
-			None => {}
-			Some(slot) if slot.is_aborted() => self.reclaim_aborted(key),
-			Some(_) => self.evict_group(key, Error::Evicted),
+		let keys: Vec<u64> = self.lookup.keys().copied().collect();
+		for key in keys {
+			match self.lookup.get(&key) {
+				None => {}
+				Some(slot) if slot.is_aborted() => self.reclaim_aborted(key),
+				Some(_) => self.evict_group(key, Error::Evicted),
+			}
 		}
 	}
 
@@ -25527,6 +25534,35 @@ mod test {
 		drop((subscriber, tracks, bystander));
 		assert_eq!(flood.edges.used(), 0);
 		assert_eq!(other.edges.used(), 0);
+	}
+
+	/// A live join on a copy whose live edge its session evicted is placed as its publisher
+	/// would, never from the history the copy still holds below that edge.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_evicted_live_edge_never_rewinds_a_live_join() {
+		let pool = cache::Pool::unbounded();
+		let broadcast = session_broadcast(&pool, Some(1 << 20));
+		let producer = Producer::new(broadcast, "test", Info::timed());
+		producer.received();
+		producer.anchored();
+		producer.join_starts([(Duration::ZERO, JoinStart::At(18_000))]);
+		for key in [18_000, 19_000, 20_000] {
+			write_group(&producer, key);
+		}
+		let join = |millis| {
+			Subscription::default().with_delay(Delay::default().with_min(Duration::from_millis(millis)).with_max(None))
+		};
+		let placed = |subscriber: &mut Subscriber| subscriber.resolved_range(0).map(|resolved| resolved.start);
+		assert_eq!(placed(&mut producer.subscribe(join(1000))), Some(19_000));
+
+		let moves = producer.state.read().cache.moves();
+		producer.state.write().ok().expect("open").evict_edge(moves);
+		let placed_after = placed(&mut producer.subscribe(join(1000)));
+		assert!(
+			placed_after.is_none_or(|start| start >= 19_000),
+			"the join rewound to {placed_after:?}"
+		);
 	}
 
 	/// A session with one live edge past its budget sheds that edge's older frames, keeping

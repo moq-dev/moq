@@ -1055,6 +1055,12 @@ impl Track {
 		self.edges.moved(self, moves);
 	}
 
+	/// How many times the live edge moved.
+	#[cfg(all(test, feature = "async"))]
+	pub(super) fn moves(&self) -> u64 {
+		self.moves.load(Ordering::Relaxed)
+	}
+
 	/// Whether the live edge is still the one its `moves`th move queued.
 	pub(super) fn edge_is(&self, moves: u64) -> bool {
 		self.moves.load(Ordering::Relaxed) == moves
@@ -1108,7 +1114,7 @@ impl Track {
 			bytes: ENTRY_OVERHEAD,
 			access,
 			counted: false,
-			edge: false,
+			footprint: Arc::new(Footprint(AtomicU64::new(ENTRY_OVERHEAD))),
 		}
 	}
 
@@ -1117,6 +1123,7 @@ impl Track {
 	pub(super) fn extra(self: &Arc<Self>) -> Extra {
 		Extra {
 			track: Some(self.clone()),
+			footprint: None,
 			bytes: AtomicU64::new(0),
 		}
 	}
@@ -1337,6 +1344,46 @@ impl Drop for Bill {
 	}
 }
 
+/// The flag bit in a [`Footprint`]: set while its bytes bill the session's [`Edges`].
+const EDGE: u64 = 1 << 63;
+
+/// Every byte one cached group bills, across its [`Charge`] and the [`Extra`]s it hands out
+/// (shared content, inflated copies, codec state), and whether they bill its session's
+/// [`Edges`] as its track's live edge.
+///
+/// One atomic holding both, the flag in its top bit (no group bills 2^63 bytes), so a byte
+/// added while the flag flips is billed to the session exactly once, by whichever came last.
+#[derive(Default)]
+pub(super) struct Footprint(AtomicU64);
+
+impl Footprint {
+	fn add(&self, edges: &Edges, n: u64) {
+		if self.0.fetch_add(n, Ordering::Relaxed) & EDGE != 0 {
+			edges.add(n);
+		}
+	}
+
+	fn sub(&self, edges: &Edges, n: u64) {
+		if self.0.fetch_sub(n, Ordering::Relaxed) & EDGE != 0 {
+			edges.sub(n);
+		}
+	}
+
+	fn promote(&self, edges: &Edges) {
+		let prior = self.0.fetch_or(EDGE, Ordering::Relaxed);
+		if prior & EDGE == 0 {
+			edges.add(prior);
+		}
+	}
+
+	fn demote(&self, edges: &Edges) {
+		let prior = self.0.fetch_and(!EDGE, Ordering::Relaxed);
+		if prior & EDGE != 0 {
+			edges.sub(prior & !EDGE);
+		}
+	}
+}
+
 /// The RAII byte accounting for one cached group, owned by the group's state.
 ///
 /// `add`/`sub` mirror the group's cached payload bytes into the pool with plain
@@ -1358,8 +1405,9 @@ pub(super) struct Charge {
 	// group is in the evictable population. A plain bool: it is only read while
 	// updating the mean, which the owning state's lock already serializes.
 	counted: bool,
-	// Whether the group is its track's cached live edge, billing its session's [`Edges`].
-	edge: bool,
+	// Every byte the group bills, its extras' included, and whether they bill its session's
+	// live edges.
+	footprint: Arc<Footprint>,
 }
 
 /// The tick of one cached group's last cache access: its creation, every write, and
@@ -1436,9 +1484,7 @@ impl Charge {
 		if let Some(track) = &self.track {
 			track.pool.add(n);
 			track.written.fetch_add(n, Ordering::Relaxed);
-			if self.edge {
-				track.edges.add(n);
-			}
+			self.footprint.add(&track.edges, n);
 			self.bytes += n;
 		}
 		self.touch(WRITE_BOOST)
@@ -1449,9 +1495,7 @@ impl Charge {
 		if let Some(track) = &self.track {
 			let n = n.min(self.bytes);
 			track.pool.sub(n);
-			if self.edge {
-				track.edges.sub(n);
-			}
+			self.footprint.sub(&track.edges, n);
 			self.bytes -= n;
 		}
 	}
@@ -1470,13 +1514,9 @@ impl Charge {
 			.bytes
 			.checked_sub(bytes)
 			.expect("transferred payload must already be charged");
-		if let Some(track) = &self.track
-			&& self.edge
-		{
-			track.edges.sub(bytes);
-		}
 		Extra {
 			track: self.track.clone(),
+			footprint: Some(self.footprint.clone()),
 			bytes: AtomicU64::new(bytes),
 		}
 	}
@@ -1491,6 +1531,7 @@ impl Charge {
 	pub(super) fn extra(&self) -> Extra {
 		Extra {
 			track: self.track.clone(),
+			footprint: Some(self.footprint.clone()),
 			bytes: AtomicU64::new(0),
 		}
 	}
@@ -1510,28 +1551,19 @@ impl Charge {
 			track.pool.access_insert(self.accessed());
 			self.counted = true;
 		}
-		self.leave_edge();
-	}
-
-	/// Bill the group to its session's [`Edges`] as its track's cached live edge, which
-	/// eviction never takes while the track lives. Idempotent; a no-op once demoted.
-	pub(super) fn promote(&mut self) {
-		if let Some(track) = &self.track
-			&& !self.edge
-			&& !self.counted
-		{
-			track.edges.add(self.bytes);
-			self.edge = true;
+		if let Some(track) = &self.track {
+			self.footprint.demote(&track.edges);
 		}
 	}
 
-	/// Stop billing the session's [`Edges`].
-	fn leave_edge(&mut self) {
+	/// Bill the group, its extras included, to its session's [`Edges`] as its track's cached
+	/// live edge, which eviction never takes while the track lives. Idempotent; a no-op once
+	/// demoted.
+	pub(super) fn promote(&mut self) {
 		if let Some(track) = &self.track
-			&& self.edge
+			&& !self.counted
 		{
-			track.edges.sub(self.bytes);
-			self.edge = false;
+			self.footprint.promote(&track.edges);
 		}
 	}
 
@@ -1579,8 +1611,9 @@ impl Charge {
 	/// Release everything this charge holds: bytes, overhead, and the access
 	/// sample. Idempotent; used when the group aborts and clears its frames.
 	pub(super) fn clear(&mut self) {
-		self.leave_edge();
 		if let Some(track) = &self.track {
+			self.footprint.demote(&track.edges);
+			self.footprint.sub(&track.edges, self.bytes);
 			track.pool.sub(self.bytes);
 			self.bytes = 0;
 			if self.counted {
@@ -1690,10 +1723,23 @@ impl Drop for Reader {
 #[derive(Default)]
 pub(super) struct Extra {
 	track: Option<Arc<Track>>,
+	// The footprint of the group it was opened from, so its bytes bill that group's live
+	// edge; `None` for the track's own bookkeeping.
+	footprint: Option<Arc<Footprint>>,
 	bytes: AtomicU64,
 }
 
 impl Extra {
+	/// Count `n` bytes in, or out of, the owning group's footprint.
+	fn footprint(&self, track: &Track, n: u64, add: bool) {
+		if let Some(footprint) = &self.footprint {
+			match add {
+				true => footprint.add(&track.edges, n),
+				false => footprint.sub(&track.edges, n),
+			}
+		}
+	}
+
 	/// Take this track's spare encoder with its charge, or bill a new one.
 	pub(super) fn take_encoder(&self) -> flate::Encoder {
 		if let Some(track) = &self.track {
@@ -1701,6 +1747,7 @@ impl Extra {
 			if let Some(mut encoder) = encoder {
 				// Moving existing heap is not a write and must not accrue eviction debt.
 				self.bytes.fetch_add(flate::ENCODER_HEAP, Ordering::Relaxed);
+				self.footprint(track, flate::ENCODER_HEAP, true);
 				encoder.reset();
 				return encoder;
 			}
@@ -1715,6 +1762,7 @@ impl Extra {
 			let mut spare = track.encoder.lock().unwrap_or_else(PoisonError::into_inner);
 			if spare.is_none() {
 				self.bytes.fetch_sub(flate::ENCODER_HEAP, Ordering::Relaxed);
+				self.footprint(track, flate::ENCODER_HEAP, false);
 				*spare = Some(encoder);
 				return;
 			}
@@ -1728,6 +1776,7 @@ impl Extra {
 			track.pool.add(n);
 			track.written.fetch_add(n, Ordering::Relaxed);
 			self.bytes.fetch_add(n, Ordering::Relaxed);
+			self.footprint(track, n, true);
 		}
 	}
 
@@ -1753,13 +1802,16 @@ impl Extra {
 				})
 				.expect("always updates");
 			track.pool.sub(prior.min(n));
+			self.footprint(track, prior.min(n), false);
 		}
 	}
 
 	/// Release every billed byte.
 	pub(super) fn clear(&self) {
 		if let Some(track) = &self.track {
-			track.pool.sub(self.bytes.swap(0, Ordering::Relaxed));
+			let bytes = self.bytes.swap(0, Ordering::Relaxed);
+			track.pool.sub(bytes);
+			self.footprint(track, bytes, false);
 		}
 	}
 }
@@ -2024,6 +2076,43 @@ mod test {
 		let mut c = charge(&pool);
 		c.add(1 << 40);
 		assert_eq!(pool.accrue(1 << 40), Some(u64::MAX));
+	}
+
+	/// A live edge bills its session for every byte it holds, its extras included (shared
+	/// content a transfer moved out, inflated copies, codec state), whichever order they and
+	/// the promotion come in, and stops on demotion or abort, its extras outliving it or not.
+	#[test]
+	fn a_live_edge_bills_its_extras_to_the_session() {
+		let edges = Edges::new(Some(1 << 30));
+		let track = Track::new(Pool::unbounded(), Default::default(), edges.clone(), kio::Weak::new());
+
+		let mut charge = track.charge();
+		charge.add(100);
+		let early = charge.extra();
+		early.add(10);
+		assert_eq!(edges.used(), 0, "not the live edge yet");
+		charge.promote();
+		assert_eq!(edges.used(), ENTRY_OVERHEAD + 110);
+		let shared = charge.transfer(60);
+		let late = charge.extra();
+		late.add(5);
+		assert_eq!(edges.used(), ENTRY_OVERHEAD + 115, "a transfer keeps its bytes billed");
+		shared.sub(20);
+		assert_eq!(edges.used(), ENTRY_OVERHEAD + 95);
+		charge.demote();
+		assert_eq!(edges.used(), 0);
+		drop((shared, late));
+		assert_eq!(edges.used(), 0);
+
+		// Aborted while its extras live on: they stop billing with it.
+		let mut charge = track.charge();
+		let extra = charge.extra();
+		extra.add(10);
+		charge.promote();
+		charge.clear();
+		assert_eq!(edges.used(), 0);
+		drop(extra);
+		assert_eq!(edges.used(), 0);
 	}
 
 	#[test]
