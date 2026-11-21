@@ -170,9 +170,11 @@ certificate, route hop, or cluster-looking URL alone does not select peer limits
 ```toml
 [limits.client]
 announces = 1000                     # Simultaneous broadcasts or namespaces.
+live_edges = 268435456               # Bytes of live edges its tracks hold (256 MiB).
 
 [limits.peer]
 announces = 100000
+live_edges = 0                       # No bound.
 
 [limits.peer.quic]
 max_streams = 100000                 # Concurrent QUIC streams per direction.
@@ -196,6 +198,15 @@ for the combined traffic they carry, and use session peak counters to check
 announcement and subscription headroom. Exceeding `announces` closes the session
 with `TOO_MANY_REQUESTS`; reconnecting with the same load will exceed it again.
 Zero admits no entries of that kind, not unlimited entries.
+
+`live_edges` bounds the newest group of every track a session publishes to the
+relay. The cache keeps that group whatever its `capacity` or `headroom`, so a
+publisher holding many quiet tracks would otherwise hold one group each past
+any budget. Past the bound, the session's own live edges are evicted, the one
+that moved longest ago first, and a viewer joining such a track waits for its
+next group; another session's are never touched. Here zero means no bound.
+Peers default to none: a peer link carries every publisher behind it, and each
+is bounded where it connects.
 
 ## \[runtime]
 
@@ -321,9 +332,8 @@ duration = "30s"                     # Reclaim groups idle this long, and cap ev
 With no settings, the relay targets 10% of system memory free (the cgroup limit
 when set), checked every five seconds, and shrinks the cache toward it as
 publishers write. It is a target, not a hard bound: a burst of writes between
-checks can overshoot it, and the newest frame of every live track is kept
-whatever the target, so a publisher that opens many tracks still holds that much
-until it stops. `headroom` takes bytes or a percentage, and `capacity` also caps
+checks can overshoot it, and the newest group of every live track is kept
+whatever the target, which each session's `live_edges` limit bounds instead. `headroom` takes bytes or a percentage, and `capacity` also caps
 the cache at an absolute size. `headroom = "0"` removes the governor, so the
 cache grows without bound unless `capacity` is set: only run that where every
 publisher is trusted.

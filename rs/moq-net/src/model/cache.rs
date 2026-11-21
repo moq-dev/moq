@@ -32,6 +32,11 @@
 //! cleanup extends retention; standalone pools must call `poll` too.
 //! Byte-pressure eviction still runs inline on writes.
 //!
+//! The pool never evicts a live track's latest group, so a session's live-edge budget
+//! (`session::Limits::live_edges`) bounds what those hold in bytes: every track a session
+//! ingests bills its live edge there, and a session past its budget pays with its own
+//! oldest live edges, never another session's.
+//!
 //! A bare pool is inert by default ([`Pool::unbounded`]): publishers and subscribers
 //! that never set a capacity or expiry pay only a couple of atomic counters, and
 //! register nothing. A standalone [`origin`](crate::origin::Config) enables
@@ -39,7 +44,7 @@
 //! every origin so the whole process caches into a single policy.
 
 use crate::util::SendCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, PoisonError, Weak};
@@ -659,6 +664,145 @@ impl std::fmt::Debug for PoolWeak {
 	}
 }
 
+/// Entries the live-edge order keeps for edges that moved on before it drops them.
+const EDGE_SLACK: usize = 64;
+
+/// What one session's tracks may keep of their live edges, which the [`Pool`] never evicts.
+///
+/// Each track a session ingests bills its live edge here: the newest group, which a live
+/// track keeps whatever the pool's budget, so a publisher holding many quiet tracks would
+/// otherwise hold one group each past any capacity. A frame write that leaves the session
+/// past its limit evicts the session's live edges in the order they last moved, oldest
+/// first, and then sheds the writer's own older frames, so the cost stays with the session
+/// causing it. The default is unbounded and costs nothing.
+#[derive(Clone, Default)]
+pub(crate) struct Edges(Option<Arc<EdgesInner>>);
+
+struct EdgesInner {
+	limit: u64,
+	// Bytes billed by the live edges of this session's tracks.
+	used: AtomicU64,
+	// The tracks in the order their live edges moved, oldest first, each with the move it
+	// was queued at, so an entry for an edge that moved on since is skipped.
+	order: Mutex<VecDeque<(Weak<Track>, u64)>>,
+	// The tracks billing here, so the order knows how many of its entries can be current.
+	tracks: AtomicUsize,
+}
+
+impl Edges {
+	/// A budget of `limit` bytes, or unbounded for `None`.
+	pub(crate) fn new(limit: Option<u64>) -> Self {
+		Self(limit.map(|limit| {
+			Arc::new(EdgesInner {
+				limit,
+				used: AtomicU64::new(0),
+				order: Mutex::default(),
+				tracks: AtomicUsize::new(0),
+			})
+		}))
+	}
+
+	/// Bytes the session's live edges bill now.
+	#[cfg(test)]
+	pub(super) fn used(&self) -> u64 {
+		self.0.as_ref().map_or(0, |inner| inner.used.load(Ordering::Relaxed))
+	}
+
+	fn add(&self, n: u64) {
+		if let Some(inner) = &self.0 {
+			inner.used.fetch_add(n, Ordering::Relaxed);
+		}
+	}
+
+	fn sub(&self, n: u64) {
+		if let Some(inner) = &self.0 {
+			inner.used.fetch_sub(n, Ordering::Relaxed);
+		}
+	}
+
+	/// How far past its limit the session is, if it is.
+	fn excess(&self) -> Option<u64> {
+		let inner = self.0.as_ref()?;
+		let used = inner.used.load(Ordering::Relaxed);
+		used.checked_sub(inner.limit).filter(|excess| *excess > 0)
+	}
+
+	/// Pay the session's excess with its oldest live edges other than `writer`'s, then with
+	/// `writer`'s own older frames. Takes track locks: call with none held.
+	fn reclaim(&self, writer: &Track) {
+		let Some(inner) = &self.0 else {
+			return;
+		};
+		// Each entry is offered once per call, so an order holding only edges this write
+		// can't take never spins.
+		let mut offers = inner.order.lock().unwrap_or_else(PoisonError::into_inner).len();
+		let mut kept = None;
+		while offers > 0 && self.excess().is_some() {
+			offers -= 1;
+			let Some((weak, moves)) = inner.order.lock().unwrap_or_else(PoisonError::into_inner).pop_front() else {
+				break;
+			};
+			let Some(track) = weak.upgrade() else {
+				continue;
+			};
+			if !track.edge_is(moves) {
+				continue;
+			}
+			// The writer's edge is the one being written: it pays last, and only in part.
+			if std::ptr::eq(Arc::as_ptr(&track), writer) {
+				kept = Some((weak, moves));
+				continue;
+			}
+			let Some(state) = track.state.upgrade() else {
+				continue;
+			};
+			if let Ok(mut state) = state.write() {
+				state.evict_edge(moves);
+			}
+		}
+		if let Some(entry) = kept {
+			inner
+				.order
+				.lock()
+				.unwrap_or_else(PoisonError::into_inner)
+				.push_front(entry);
+		}
+		if let Some(excess) = self.excess()
+			&& let Some(state) = writer.state.upgrade()
+			&& let Ok(mut state) = state.write()
+		{
+			state.shed_edge(excess);
+		}
+	}
+
+	/// Queue `track`'s live edge as the session's newest, after its `moves`th move.
+	fn moved(&self, track: &Arc<Track>, moves: u64) {
+		let Some(inner) = &self.0 else {
+			return;
+		};
+		let mut order = inner.order.lock().unwrap_or_else(PoisonError::into_inner);
+		order.push_back((Arc::downgrade(track), moves));
+		// Each move leaves its track's earlier entry behind: drop those once they clearly
+		// outnumber the current ones, which costs a constant per move.
+		if order.len() > 2 * inner.tracks.load(Ordering::Relaxed) + EDGE_SLACK {
+			order.retain(|(track, moves)| track.upgrade().is_some_and(|track| track.edge_is(*moves)));
+		}
+	}
+}
+
+impl std::fmt::Debug for Edges {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match &self.0 {
+			Some(inner) => f
+				.debug_struct("Edges")
+				.field("used", &inner.used.load(Ordering::Relaxed))
+				.field("limit", &inner.limit)
+				.finish(),
+			None => f.debug_struct("Edges").finish_non_exhaustive(),
+		}
+	}
+}
+
 /// Gross bytes a track writes before a frame write settles its eviction debt itself,
 /// so a track appending frames to open groups (never inserting another group) still
 /// pays. Coarse: the cost is one track-state lock per threshold crossing.
@@ -720,6 +864,12 @@ pub(super) struct Track {
 	// What the frames this track's groups are still receiving may allocate up front,
 	// shared with every track minted from the same origin handle.
 	frames: super::frame::Budget,
+
+	// What the session ingesting this track may keep of its tracks' live edges, which this
+	// track's undemoted groups bill.
+	edges: Edges,
+	// How many times the live edge moved to a newer group, naming its entry in `edges`.
+	moves: AtomicU64,
 
 	// One finished local group's encoder, kept until another group needs it or the
 	// account drops. Raw codec only: an Extra here would keep this account alive.
@@ -850,11 +1000,21 @@ impl Track {
 	}
 
 	/// Open an account against `pool` for the track behind `state`, its frames
-	/// allocating up front within `frames`.
-	pub(super) fn new(pool: Pool, frames: super::frame::Budget, state: kio::Weak<TrackState>) -> Arc<Self> {
+	/// allocating up front within `frames` and its live edge billed to `edges`.
+	pub(super) fn new(
+		pool: Pool,
+		frames: super::frame::Budget,
+		edges: Edges,
+		state: kio::Weak<TrackState>,
+	) -> Arc<Self> {
+		if let Some(inner) = &edges.0 {
+			inner.tracks.fetch_add(1, Ordering::Relaxed);
+		}
 		let track = Arc::new(Self {
 			pool,
 			frames,
+			edges,
+			moves: AtomicU64::new(0),
 			written: AtomicU64::new(0),
 			next_expiry: AtomicU64::new(0),
 			expiry_cursor: AtomicUsize::new(0),
@@ -886,6 +1046,18 @@ impl Track {
 	/// The track holding this account's groups, while it is still open.
 	pub(super) fn track(&self) -> Option<kio::Producer<TrackState>> {
 		self.state.upgrade()
+	}
+
+	/// The live edge moved to a newer group: queue it as its session's newest. Called under
+	/// the track lock, which orders the moves.
+	pub(super) fn edge_moved(self: &Arc<Self>) {
+		let moves = self.moves.fetch_add(1, Ordering::Relaxed) + 1;
+		self.edges.moved(self, moves);
+	}
+
+	/// Whether the live edge is still the one its `moves`th move queued.
+	pub(super) fn edge_is(&self, moves: u64) -> bool {
+		self.moves.load(Ordering::Relaxed) == moves
 	}
 
 	/// The track's reads parked on their drift budget.
@@ -936,6 +1108,7 @@ impl Track {
 			bytes: ENTRY_OVERHEAD,
 			access,
 			counted: false,
+			edge: false,
 		}
 	}
 
@@ -1042,6 +1215,9 @@ impl Track {
 	}
 
 	fn settle_inner(&self, now: Option<u64>, full: bool) {
+		if self.edges.excess().is_some() {
+			self.edges.reclaim(self);
+		}
 		let settle_debt = self.written.load(Ordering::Relaxed) >= WRITE_CHARGE_THRESHOLD;
 		let scan_expiry = if full {
 			self.pool.expiry().is_some()
@@ -1115,6 +1291,9 @@ impl Track {
 
 impl Drop for Track {
 	fn drop(&mut self) {
+		if let Some(inner) = &self.edges.0 {
+			inner.tracks.fetch_sub(1, Ordering::Relaxed);
+		}
 		if self
 			.encoder
 			.get_mut()
@@ -1179,6 +1358,8 @@ pub(super) struct Charge {
 	// group is in the evictable population. A plain bool: it is only read while
 	// updating the mean, which the owning state's lock already serializes.
 	counted: bool,
+	// Whether the group is its track's cached live edge, billing its session's [`Edges`].
+	edge: bool,
 }
 
 /// The tick of one cached group's last cache access: its creation, every write, and
@@ -1255,6 +1436,9 @@ impl Charge {
 		if let Some(track) = &self.track {
 			track.pool.add(n);
 			track.written.fetch_add(n, Ordering::Relaxed);
+			if self.edge {
+				track.edges.add(n);
+			}
 			self.bytes += n;
 		}
 		self.touch(WRITE_BOOST)
@@ -1265,6 +1449,9 @@ impl Charge {
 		if let Some(track) = &self.track {
 			let n = n.min(self.bytes);
 			track.pool.sub(n);
+			if self.edge {
+				track.edges.sub(n);
+			}
 			self.bytes -= n;
 		}
 	}
@@ -1283,6 +1470,11 @@ impl Charge {
 			.bytes
 			.checked_sub(bytes)
 			.expect("transferred payload must already be charged");
+		if let Some(track) = &self.track
+			&& self.edge
+		{
+			track.edges.sub(bytes);
+		}
 		Extra {
 			track: self.track.clone(),
 			bytes: AtomicU64::new(bytes),
@@ -1317,6 +1509,29 @@ impl Charge {
 		{
 			track.pool.access_insert(self.accessed());
 			self.counted = true;
+		}
+		self.leave_edge();
+	}
+
+	/// Bill the group to its session's [`Edges`] as its track's cached live edge, which
+	/// eviction never takes while the track lives. Idempotent; a no-op once demoted.
+	pub(super) fn promote(&mut self) {
+		if let Some(track) = &self.track
+			&& !self.edge
+			&& !self.counted
+		{
+			track.edges.add(self.bytes);
+			self.edge = true;
+		}
+	}
+
+	/// Stop billing the session's [`Edges`].
+	fn leave_edge(&mut self) {
+		if let Some(track) = &self.track
+			&& self.edge
+		{
+			track.edges.sub(self.bytes);
+			self.edge = false;
 		}
 	}
 
@@ -1364,6 +1579,7 @@ impl Charge {
 	/// Release everything this charge holds: bytes, overhead, and the access
 	/// sample. Idempotent; used when the group aborts and clears its frames.
 	pub(super) fn clear(&mut self) {
+		self.leave_edge();
 		if let Some(track) = &self.track {
 			track.pool.sub(self.bytes);
 			self.bytes = 0;
@@ -1560,7 +1776,7 @@ mod test {
 
 	fn charge(pool: &Pool) -> Charge {
 		// No track behind the account: nothing here settles debt, it just accounts.
-		Track::new(pool.clone(), Default::default(), kio::Weak::new()).charge()
+		Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new()).charge()
 	}
 
 	fn bounded(capacity: u64) -> Pool {
@@ -1624,7 +1840,7 @@ mod test {
 	#[test]
 	fn wall_deadlines_wake_the_driver_and_then_the_read() {
 		let pool = Pool::unbounded();
-		let track = Track::new(pool.clone(), Default::default(), kio::Weak::new());
+		let track = Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
 		let now = super::super::clock::wall();
 		let at = now.saturating_add(Duration::from_secs(1));
 		let (read, reading) = flag();
@@ -1657,7 +1873,7 @@ mod test {
 		let pool = Pool::unbounded();
 		let now = super::super::clock::wall();
 		pool.poll(now, &kio::Waiter::noop());
-		let track = Track::new(pool.clone(), Default::default(), kio::Weak::new());
+		let track = Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
 		let (read, reading) = flag();
 		let (driver, driving) = flag();
 		assert_eq!(pool.poll(now, &driving), None);
@@ -1678,7 +1894,7 @@ mod test {
 		let now = kio::clock::now();
 		let waiter = kio::Waiter::noop();
 		pool.poll(now, &waiter);
-		let track = Track::new(pool.clone(), Default::default(), kio::Weak::new());
+		let track = Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
 		let (read, reading) = flag();
 		let at = now.saturating_add(Duration::from_secs(1));
 		track.watch_wall(at, &reading);
@@ -1702,7 +1918,7 @@ mod test {
 		let pool = Pool::unbounded();
 		let now = super::super::clock::wall();
 		pool.poll(now, &kio::Waiter::noop());
-		let track = Track::new(pool.clone(), Default::default(), kio::Weak::new());
+		let track = Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
 		let (_read, reading) = flag();
 		track.watch_wall(now.saturating_add(Duration::from_secs(2)), &reading);
 		track.watch_wall(now.saturating_add(Duration::from_secs(1)), &reading);
@@ -1812,7 +2028,7 @@ mod test {
 
 	#[test]
 	fn charge_counts_gross_writes() {
-		let track = Track::new(bounded(1000), Default::default(), kio::Weak::new());
+		let track = Track::new(bounded(1000), Default::default(), Default::default(), kio::Weak::new());
 		let mut c = track.charge();
 		c.add(100);
 		assert_eq!(track.take_written(), ENTRY_OVERHEAD + 100);
@@ -1894,7 +2110,7 @@ mod test {
 	#[test]
 	fn expiry_gate_reuses_a_supplied_tick() {
 		let pool = Pool::new(Config::default().with_expiry(Duration::from_secs(1)));
-		let track = Track::new(pool, Default::default(), kio::Weak::new());
+		let track = Track::new(pool, Default::default(), Default::default(), kio::Weak::new());
 		// A supplied tick drives the gate on its own: claimed immediately, closed
 		// until the interval elapses, claimable again on the tick it reopens.
 		assert!(track.expiry_due(Some(0)));
@@ -1917,7 +2133,7 @@ mod test {
 		let pool = bounded(1000);
 		assert!(pool.inner.tracks.lock().is_empty());
 
-		let track = Track::new(pool.clone(), Default::default(), kio::Weak::new());
+		let track = Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
 		assert_eq!(pool.inner.tracks.lock().len(), 1);
 
 		// A registered account whose track is already gone is swept harmlessly.
@@ -1931,7 +2147,7 @@ mod test {
 	fn an_inert_pool_registers_nothing() {
 		// No window means no sweep, so a bare pool pays no registry cost.
 		let pool = Pool::unbounded();
-		let track = Track::new(pool.clone(), Default::default(), kio::Weak::new());
+		let track = Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
 		assert!(pool.inner.tracks.lock().is_empty());
 		pool.sweep();
 		drop(track);
@@ -1940,7 +2156,12 @@ mod test {
 	#[test]
 	fn expiry_gate_stays_closed_without_a_window() {
 		// No window means no time gate, and no clock read to reach it.
-		let track = Track::new(Pool::unbounded(), Default::default(), kio::Weak::new());
+		let track = Track::new(
+			Pool::unbounded(),
+			Default::default(),
+			Default::default(),
+			kio::Weak::new(),
+		);
 		assert!(!track.expiry_due(None));
 		assert!(!track.expiry_due(Some(u64::MAX)));
 	}

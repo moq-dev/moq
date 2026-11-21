@@ -1243,8 +1243,7 @@ impl Subscriber {
 		Self {
 			runtime,
 			session,
-			// Its own frame budget, so a peer's declared sizes crowd out no other session.
-			origin: origin.with_own_frames(),
+			origin,
 			control,
 			session_origin: peer_node.unwrap_or(crate::Hop::UNKNOWN),
 			self_origin,

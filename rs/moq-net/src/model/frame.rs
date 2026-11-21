@@ -1822,7 +1822,7 @@ mod tests {
 	#[test]
 	fn activating_shared_content_transfers_payload_without_recording_it_twice() {
 		let pool = cache::Pool::unbounded();
-		let account = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
+		let account = cache::Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
 		let mut delivery = account.charge();
 		delivery.add(8);
 		let before = pool.used();
@@ -2078,7 +2078,7 @@ mod tests {
 	#[test]
 	fn canonical_and_delivery_charges_follow_their_last_owners() {
 		let pool = cache::Pool::unbounded();
-		let account = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
+		let account = cache::Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
 		let charge = account.charge();
 		let baseline = pool.used();
 		let a = FrameBuf::growing(8);
@@ -2127,7 +2127,7 @@ mod tests {
 	#[test]
 	fn admission_allocates_nothing_and_completed_payload_needs_none() {
 		let pool = cache::Pool::unbounded();
-		let account = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
+		let account = cache::Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
 		let charge = account.charge();
 		let baseline = pool.used();
 		let a = FrameBuf::new(8);

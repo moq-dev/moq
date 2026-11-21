@@ -29,17 +29,33 @@ pub struct Client {
 		setting = "limits.client.announces"
 	)]
 	pub announces: usize,
+	/// Bytes the newest group of every track a client publishes may hold in all; 0 for no
+	/// bound.
+	///
+	/// The cache keeps each live track's newest group past its capacity, so this is what
+	/// bounds a client holding many quiet tracks. Past it, the client's own live edges are
+	/// evicted, the one that moved longest ago first, never another session's.
+	#[usage(
+		long = "limits-client-live-edges",
+		env = "MOQ_LIMITS_CLIENT_LIVE_EDGES",
+		default = "268435456",
+		setting = "limits.client.live_edges"
+	)]
+	pub live_edges: u64,
 }
 
 impl Default for Client {
 	fn default() -> Self {
-		Self { announces: 1000 }
+		Self {
+			announces: 1000,
+			live_edges: 256 << 20,
+		}
 	}
 }
 
 impl Client {
 	pub(crate) fn resolve(&self) -> moq_net::session::Limits {
-		resolve(self.announces)
+		resolve(self.announces, self.live_edges)
 	}
 }
 
@@ -56,6 +72,18 @@ pub struct Peer {
 		setting = "limits.peer.announces"
 	)]
 	pub announces: usize,
+	/// Bytes the newest group of every track a peer relays to us may hold in all; 0 (the
+	/// default) for no bound.
+	///
+	/// A peer link carries every publisher behind it, so a bound here would let one of them
+	/// evict another's live edges: each publisher is bounded where it connects instead.
+	#[usage(
+		long = "limits-peer-live-edges",
+		env = "MOQ_LIMITS_PEER_LIVE_EDGES",
+		default = "0",
+		setting = "limits.peer.live_edges"
+	)]
+	pub live_edges: u64,
 	/// QUIC limits a peer session widens to (`[limits.peer.quic]`).
 	#[usage(flatten)]
 	pub quic: Quic,
@@ -65,6 +93,7 @@ impl Default for Peer {
 	fn default() -> Self {
 		Self {
 			announces: 100000,
+			live_edges: 0,
 			quic: Quic::default(),
 		}
 	}
@@ -72,7 +101,7 @@ impl Default for Peer {
 
 impl Peer {
 	pub(crate) fn resolve(&self) -> moq_net::session::Limits {
-		resolve(self.announces)
+		resolve(self.announces, self.live_edges)
 	}
 }
 
@@ -152,8 +181,9 @@ impl Quic {
 	}
 }
 
-fn resolve(announces: usize) -> moq_net::session::Limits {
+fn resolve(announces: usize, live_edges: u64) -> moq_net::session::Limits {
 	let mut limits = moq_net::session::Limits::default();
 	limits.announces = announces;
+	limits.live_edges = (live_edges > 0).then_some(live_edges);
 	limits
 }

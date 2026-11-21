@@ -2332,6 +2332,10 @@ pub struct Producer {
 	// What the frames written through this handle may allocate up front, shared by every
 	// broadcast it creates.
 	frames: super::frame::Budget,
+
+	// What the live edges of the tracks written through this handle may hold, shared by
+	// every broadcast it creates.
+	edges: super::cache::Edges,
 }
 
 impl Producer {
@@ -2362,6 +2366,7 @@ impl Producer {
 			tasks,
 			timers: timers.clone(),
 			frames: Default::default(),
+			edges: Default::default(),
 		};
 		let driver = Driver {
 			state: DriverState {
@@ -2375,11 +2380,12 @@ impl Producer {
 		(producer, driver)
 	}
 
-	/// Give this handle a frame budget of its own, so what one session allocates up front
-	/// never crowds out another's.
+	/// Give this handle budgets of its own, so what one session allocates up front never
+	/// crowds out another's, and its tracks' live edges hold at most `live_edges` bytes.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn with_own_frames(mut self) -> Self {
+	pub(crate) fn with_own_budgets(mut self, live_edges: Option<u64>) -> Self {
 		self.frames = Default::default();
+		self.edges = super::cache::Edges::new(live_edges);
 		self
 	}
 
@@ -2520,6 +2526,7 @@ impl Producer {
 			tasks,
 			timers: Deadlines::new(Instant::ZERO),
 			frames: Default::default(),
+			edges: Default::default(),
 		}
 	}
 
@@ -2608,6 +2615,7 @@ impl Producer {
 			path: full,
 			instance: None,
 			frames: self.frames.clone(),
+			edges: self.edges.clone(),
 		};
 		let source = info.produce().with_stats(ingress);
 		// A job's route naming no instance takes its prefix route's, held in the table
@@ -2681,6 +2689,7 @@ impl Producer {
 			path: full,
 			instance: None,
 			frames: self.frames.clone(),
+			edges: self.edges.clone(),
 		}
 		.produce()
 		.with_stats(ingress)
@@ -2901,6 +2910,7 @@ impl Producer {
 			tasks: self.tasks.clone(),
 			timers: self.timers.clone(),
 			frames: self.frames.clone(),
+			edges: self.edges.clone(),
 		})
 	}
 
@@ -8481,6 +8491,7 @@ impl Consumer {
 			instance: None,
 			// A front reads its routes' copies, so it writes no frames of its own.
 			frames: Default::default(),
+			edges: Default::default(),
 		});
 		let request = kio::Producer::new(PendingFront {
 			resolved: None,

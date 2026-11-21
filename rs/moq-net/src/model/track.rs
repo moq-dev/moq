@@ -3206,7 +3206,12 @@ impl TrackState {
 			broadcast: broadcast.clone(),
 			..Default::default()
 		});
-		let cache = cache::Track::new(broadcast.pool.clone(), broadcast.frames.clone(), state.downgrade());
+		let cache = cache::Track::new(
+			broadcast.pool.clone(),
+			broadcast.frames.clone(),
+			broadcast.edges.clone(),
+			state.downgrade(),
+		);
 		let mut new = state.write().ok().expect("a new track is open");
 		new.drops_bill = cache.extra();
 		new.arrivals_bill = cache.extra();
@@ -3292,7 +3297,12 @@ impl TrackState {
 			}
 			self.newest_produced = self.newest_produced.max(Some(key));
 		}
-		if !self.protects(key) {
+		if self.protects(key) {
+			// Billed to the session as its newest live edge, which pays for it if the
+			// session holds too many.
+			group.cache_promote();
+			self.cache.edge_moved();
+		} else {
 			group.cache_demote();
 			self.evict.push_back((key, stamp));
 		}
@@ -3564,6 +3574,42 @@ impl TrackState {
 			self.cache.owe_readers(&mut self.debt);
 		}
 		paid
+	}
+
+	/// Evict the live edge its session queued at its `moves`th move, if it is still the edge:
+	/// the session holds more live edges than its budget, and this one moved longest ago.
+	pub(super) fn evict_edge(&mut self, moves: u64) {
+		if !self.cache.edge_is(moves) {
+			return;
+		}
+		let Some(key) = self.latest_group.filter(|latest| self.protects(*latest)) else {
+			return;
+		};
+		match self.lookup.get(&key) {
+			None => {}
+			Some(slot) if slot.is_aborted() => self.reclaim_aborted(key),
+			Some(_) => self.evict_group(key, Error::Evicted),
+		}
+	}
+
+	/// Shed up to `excess` bytes of the live edge's older frames, keeping the newest of an
+	/// open group: the session is past its budget with no other live edge left to evict.
+	pub(super) fn shed_edge(&mut self, excess: u64) {
+		let Some(slot) = self
+			.latest_group
+			.filter(|latest| self.protects(*latest))
+			.and_then(|latest| self.lookup.get(&latest))
+		else {
+			return;
+		};
+		let mut freed = 0u64;
+		for group in slot.copies() {
+			if freed >= excess {
+				break;
+			}
+			// Whatever the frames' sizes: the budget, not a write, decides what goes.
+			freed = freed.saturating_add(group.shed(u64::MAX, excess - freed));
+		}
 	}
 
 	/// Group `key` once cached, `None` once the feed starts past it or ends before it,
@@ -4338,8 +4384,9 @@ impl TrackState {
 			_ if kept => self.detach(&group.handle()),
 			Some(slot) => {
 				// Joins the slot's standing: demoted already unless it is the live edge.
-				if !protected {
-					group.handle().cache_demote();
+				match protected {
+					true => group.handle().cache_promote(),
+					false => group.handle().cache_demote(),
 				}
 				// A replacing head inherits the drop the slot holds, announcing it if it dies.
 				if slot.dropped.is_some() {
@@ -25418,6 +25465,94 @@ mod test {
 		assert!(consumer.peek_group(0).is_none());
 		let mut group = consumer.peek_group(2).expect("latest survives");
 		assert_eq!(group.read_frame().await.unwrap().unwrap().payload.len(), 1000);
+	}
+
+	/// A broadcast ingested by a session whose live edges may hold `limit` bytes, caching into
+	/// `pool`.
+	fn session_broadcast(pool: &cache::Pool, limit: Option<u64>) -> Arc<broadcast::Info> {
+		Arc::new(broadcast::Info {
+			pool: pool.clone(),
+			edges: cache::Edges::new(limit),
+			..Default::default()
+		})
+	}
+
+	/// Many quiet tracks, each holding one finished group of one frame, hold no more than
+	/// their session's live-edge budget, however small the pool: the session pays with its
+	/// oldest live edges, and another session's are untouched.
+	#[test]
+	fn a_session_pays_for_its_live_edges() {
+		const FRAME: usize = 10_000;
+		const LIMIT: u64 = 100_000;
+		const TRACKS: usize = 200;
+		let pool = cache::Pool::new(
+			cache::Config::default()
+				.with_capacity(1_000)
+				.with_expiry(cache::DEFAULT_EXPIRY),
+		);
+
+		// Another session's quiet track, written first so it is the oldest edge in the pool.
+		let other = session_broadcast(&pool, Some(LIMIT));
+		let mut bystander = Producer::new(other.clone(), "bystander", Info::timed());
+		finished_group(&mut bystander, FRAME);
+
+		let flood = session_broadcast(&pool, Some(LIMIT));
+		let mut tracks: Vec<_> = (0..TRACKS)
+			.map(|i| Producer::new(flood.clone(), format!("t{i}"), Info::timed()))
+			.collect();
+		for track in &mut tracks {
+			finished_group(track, FRAME);
+			let held = flood.edges.used();
+			assert!(held <= LIMIT, "the session's live edges hold {held}");
+		}
+		assert!(
+			pool.used() <= 2 * LIMIT + 2 * FRAME as u64,
+			"the pool holds every quiet edge: {}",
+			pool.used()
+		);
+
+		// The newest edges survive, the oldest went, and nobody else paid.
+		let newest = tracks.last().unwrap().consume();
+		assert!(newest.peek_group(0).is_some(), "the newest edge was evicted");
+		assert!(tracks[0].consume().peek_group(0).is_none(), "the oldest edge survived");
+		assert!(bystander.consume().peek_group(0).is_some(), "another session paid");
+		assert!(other.edges.used() > 0);
+
+		// A track whose edge went carries on: its next group is the new edge.
+		finished_group(&mut tracks[0], FRAME);
+		let mut subscriber = tracks[0].subscribe(live_join());
+		assert_eq!(subscriber.assert_group().start, 1);
+
+		// Every edge's bill leaves with its track.
+		drop((subscriber, tracks, bystander));
+		assert_eq!(flood.edges.used(), 0);
+		assert_eq!(other.edges.used(), 0);
+	}
+
+	/// A session with one live edge past its budget sheds that edge's older frames, keeping
+	/// the newest of the open group being written.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_lone_live_edge_sheds_down_to_its_newest_frame() {
+		let pool = cache::Pool::unbounded();
+		let broadcast = session_broadcast(&pool, Some(25_000));
+		let producer = Producer::new(broadcast.clone(), "test", Info::timed());
+		let mut group = producer.append_next().unwrap();
+		for _ in 0..5 {
+			group
+				.write_frame(group.key_time(), bytes::Bytes::from(vec![0u8; 10_000]))
+				.unwrap();
+		}
+		let held = broadcast.edges.used();
+		assert!(held <= 25_000, "the open edge holds {held}");
+		assert!(held >= 10_000, "the newest frame went too: {held}");
+
+		// Demoting the edge stops billing the session.
+		let mut next = producer.append_next().unwrap();
+		assert!(broadcast.edges.used() < 10_000);
+		next.write_frame(next.key_time(), bytes::Bytes::from(vec![0u8; 100]))
+			.unwrap();
+		drop((group, next, producer));
 	}
 
 	/// A FETCH cache hit refreshes the group's access time: anything accessed more

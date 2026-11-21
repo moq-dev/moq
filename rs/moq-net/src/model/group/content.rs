@@ -283,7 +283,12 @@ pub(crate) struct StorageBench {
 #[cfg(all(feature = "async", any(test, feature = "fuzz")))]
 impl StorageBench {
 	pub(crate) fn new(frames: usize, views: usize) -> Self {
-		let account = cache::Track::new(cache::Pool::unbounded(), Default::default(), kio::Weak::new());
+		let account = cache::Track::new(
+			cache::Pool::unbounded(),
+			Default::default(),
+			Default::default(),
+			kio::Weak::new(),
+		);
 		let charge = account.charge();
 		let content = Content::new(&charge, None);
 		let mut owners = Vec::with_capacity(frames);
@@ -323,7 +328,7 @@ mod tests {
 	#[test]
 	fn weak_indexes_remove_final_owners_without_losing_replacements() {
 		let pool = cache::Pool::unbounded();
-		let account = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
+		let account = cache::Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
 		let charge = account.charge();
 		let baseline = pool.used();
 		let contents = Contents::default();
