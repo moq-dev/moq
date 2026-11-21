@@ -148,17 +148,16 @@ class Datagram:
 class Anchor:
     """Where one end of a :class:`Range` falls, mirroring moq-net's ``track::Anchor``.
 
-    Build one with ``Anchor.OLDEST()``, ``Anchor.ABSOLUTE(group=...)``,
-    ``Anchor.RELATIVE(groups=...)``, or ``Anchor.TIME(timestamp=...)``.
+    Build one with ``Anchor.OLDEST()``, ``Anchor.RELATIVE(groups=...)``, or
+    ``Anchor.TIME(timestamp=...)``.
     """
 
     OLDEST: ClassVar[type[_AnchorOldest]]
-    ABSOLUTE: ClassVar[type[_AnchorAbsolute]]
     RELATIVE: ClassVar[type[_AnchorRelative]]
     TIME: ClassVar[type[_AnchorTime]]
 
     def _ffi(self) -> MoqAnchor:
-        raise TypeError("build an Anchor with Anchor.OLDEST, Anchor.ABSOLUTE, Anchor.RELATIVE, or Anchor.TIME")
+        raise TypeError("build an Anchor with Anchor.OLDEST, Anchor.RELATIVE, or Anchor.TIME")
 
 
 # The generated variants subclass MoqAnchor only at runtime, so each _ffi casts for pyright.
@@ -168,16 +167,6 @@ class _AnchorOldest(Anchor):
 
     def _ffi(self) -> MoqAnchor:
         return cast(MoqAnchor, MoqAnchor.OLDEST())
-
-
-@dataclass(frozen=True)
-class _AnchorAbsolute(Anchor):
-    """This group, delivered from its first frame."""
-
-    group: int
-
-    def _ffi(self) -> MoqAnchor:
-        return cast(MoqAnchor, MoqAnchor.ABSOLUTE(group=self.group))
 
 
 @dataclass(frozen=True)
@@ -194,7 +183,8 @@ class _AnchorRelative(Anchor):
 class _AnchorTime(Anchor):
     """The group containing this time: :meth:`Timestamp.unscaled` in the track's timescale.
 
-    A scaled timestamp is refused, since the subscription can't check its scale against the track.
+    As an end it includes every group starting at or before the time. A scaled timestamp is
+    refused, since the subscription can't check its scale against the track.
     """
 
     timestamp: Timestamp
@@ -204,7 +194,6 @@ class _AnchorTime(Anchor):
 
 
 Anchor.OLDEST = _AnchorOldest
-Anchor.ABSOLUTE = _AnchorAbsolute
 Anchor.RELATIVE = _AnchorRelative
 Anchor.TIME = _AnchorTime
 
@@ -213,8 +202,7 @@ Anchor.TIME = _AnchorTime
 class Range:
     """A span of a track to deliver, from ``start`` to ``end``, ``None`` to keep following the live edge.
 
-    A relative or time start is the first frame of its group, and a relative or time end
-    includes its whole group. An absolute end is exclusive.
+    Every start is the first frame of its group, and every end includes its whole group.
     """
 
     start: Anchor
@@ -229,13 +217,13 @@ class Delay:
     """How far behind the live edge a subscriber or decoder plays, mirroring moq-net's ``track::Delay``.
 
     ``min`` is the target latency: the playout or jitter-buffer delay held behind the
-    live edge, where a cold join starts, and how long a decoder waits for a missing group.
-    ``None`` leaves it unstated, which a decoder starts as zero, waiting a missing group for
-    ``max`` instead (an audio decoder floors it at zero and waits only its playout estimate,
-    which can be larger), while the subscription keeps it unstated, so it never pulls the
-    aggregate across subscribers to zero, unless a catalog warmup or an audio decoder's
-    playout delay states one. A ``min`` past ``max`` starts at ``max``.
-    ``max`` is how far a non-latest group may fall behind before it is skipped; zero
+    live edge, where a cold join starts. ``None`` leaves it unstated, which a decoder starts
+    as zero, while the subscription keeps it unstated, so it never pulls the aggregate across
+    subscribers to zero, unless a catalog warmup or an audio decoder's playout delay states
+    one. A ``min`` past ``max`` starts a cold join no further back than the
+    group covering the point ``max`` behind the live edge.
+    ``max`` is how far a non-latest group may fall behind before it is skipped, and how far newer
+    media may run past a missing group before a decoder gives it up; zero
     skips at once, ``None`` sets no subscriber limit and leaves the publisher's max age
     alone to bound it, and it caps every range.
 

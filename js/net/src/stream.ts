@@ -66,7 +66,7 @@ function isLite(version: StreamVersion): version is LiteVersion {
 }
 
 /** The moq-transport draft a stream follows, or undefined on moq-lite, whose stream codes are the same on every draft. */
-export function asIetf(version: StreamVersion): IetfVersion | undefined {
+function asIetf(version: StreamVersion): IetfVersion | undefined {
 	return isLite(version) ? undefined : version;
 }
 

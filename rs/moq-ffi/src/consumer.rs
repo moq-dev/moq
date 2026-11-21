@@ -25,18 +25,18 @@ fn raw_frame(frame: moq_net::frame::Frame) -> MoqFrame {
 #[derive(Clone, Copy, Debug, uniffi::Record)]
 pub struct MoqDelay {
 	/// The target latency: the playout or jitter-buffer delay held behind the live edge, where
-	/// a cold join starts, and how long a media consumer waits for a missing group, or null to
-	/// leave it unstated. A media consumer starts an unstated minimum as zero and waits a
-	/// missing group for `max` instead (an audio decoder floors it at zero and waits only its
-	/// playout estimate, which can be larger), while the subscription keeps it unstated, so it
-	/// never pulls the aggregate across subscribers to zero, unless a catalog warmup or an
-	/// audio decoder's playout delay states one. moq-lite-07 sends it upstream. A `min`
-	/// past `max` starts and waits at `max`, since the publisher serves nothing older.
+	/// a cold join starts, or null to leave it unstated. A missing group is given up by `max`
+	/// alone. A media consumer starts an unstated minimum as zero, while the subscription keeps
+	/// it unstated, so it never pulls the aggregate across subscribers to zero, unless a catalog
+	/// warmup or an audio decoder's playout delay states one. moq-lite-07 sends it upstream. A
+	/// `min` past `max` starts a cold join no further back than the group covering the point `max`
+	/// behind the live edge, since the publisher serves no older group. An audio decoder refuses a `min` beyond the track's
+	/// max age instead.
 	pub min: Option<Duration>,
-	/// How far a non-latest group may fall behind the live edge before it is skipped, or null
-	/// for no subscriber limit, leaving the publisher's max age alone to bound it. `0` skips
-	/// immediately; a larger value tolerates that much reordering. It bounds lateness only,
-	/// never the start.
+	/// How far a non-latest group may fall behind the live edge before it is skipped, and how
+	/// far newer media may run past a missing group before it is given up, or null for no subscriber limit, leaving the
+	/// publisher's max age alone to bound it. `0` skips immediately; a larger value tolerates
+	/// that much reordering. It bounds lateness only, never the start.
 	///
 	/// Enforced both by the publisher's cache (sent on the wire) and by any local buffering,
 	/// such as [`MoqMediaTrackConsumer`]'s jitter buffer. It caps every range.
@@ -98,15 +98,14 @@ pub fn moq_subscription_defaults() -> MoqSubscription {
 	}
 }
 
-/// A span of a track to deliver: from `start` up to `end`, or onward when `end` is null.
+/// A span of a track to deliver: from `start` through `end`, or onward when `end` is null.
 ///
-/// A relative or time start is the first frame of its group, and a relative or time end
-/// includes its whole group. An absolute end is exclusive.
+/// Every start is the first frame of its group, and every end includes its whole group.
 #[derive(Clone, Copy, uniffi::Record)]
 pub struct MoqRange {
 	/// Where delivery starts.
 	pub start: MoqAnchor,
-	/// Where delivery stops, or null to keep following the live edge.
+	/// Where delivery stops, including its group, or null to keep following the live edge.
 	#[uniffi(default = None)]
 	pub end: Option<MoqAnchor>,
 }
@@ -114,18 +113,18 @@ pub struct MoqRange {
 /// Where one end of a [`MoqRange`] falls, mirroring [`moq_net::track::Anchor`].
 #[derive(Clone, Copy, uniffi::Enum)]
 pub enum MoqAnchor {
-	/// The group starting here, delivered from its first frame.
-	Absolute {
-		/// The group's start, in its track's timescale, which names it.
-		group: u64,
-	},
 	/// The group this many before the latest, counting the groups held: `0` is the latest
 	/// group, and one counting back past every group held reaches back to the oldest.
 	Relative {
 		/// The number of groups back from the live edge.
 		groups: u64,
 	},
-	/// The group containing this time: the newest one starting at or before it.
+	/// The group containing this time: the newest one starting at or before it. A group is
+	/// named by its start, so its start names exactly it. As an end, it includes every group
+	/// starting at or before the time.
+	///
+	/// Over a session older than moq-lite-07, a start between two groups reaches the
+	/// publisher as the first group at or after it, missing the one containing it.
 	Time {
 		/// The time in the track's timescale, given [unscaled](MoqTimestamp::unscaled). A scaled
 		/// one is refused with a timestamp mismatch until the bindings convert it.
@@ -146,14 +145,12 @@ pub enum MoqOrder {
 }
 
 impl MoqAnchor {
-	/// This anchor as a start. A group is named by its start, so an absolute group names
-	/// that time. A time must be unscaled, in the track's timescale: the timescale is unknown
-	/// here, so a scaled one is refused rather than read in the wrong units.
-	fn start(self) -> Result<moq_net::track::Anchor, MoqError> {
+	/// This anchor as moq-net reads it. A time must be unscaled, in the track's timescale: the
+	/// timescale is unknown here, so a scaled one is refused rather than read in the wrong units.
+	fn resolve(self) -> Result<moq_net::track::Anchor, MoqError> {
 		use moq_net::track::Anchor;
 		Ok(match self {
 			Self::Oldest => Anchor::Oldest,
-			Self::Absolute { group } => Anchor::Time(group),
 			Self::Relative { groups } => Anchor::Relative(groups),
 			Self::Time { timestamp } => match timestamp.scale {
 				None => Anchor::Time(timestamp.value),
@@ -161,29 +158,15 @@ impl MoqAnchor {
 			},
 		})
 	}
-
-	/// This anchor as an end, or `None` for an absolute end at group 0, which holds nothing.
-	/// An absolute end is exclusive, so it ends with the group before it.
-	fn end(self) -> Result<Option<moq_net::track::Anchor>, MoqError> {
-		match self {
-			Self::Absolute { group } => Ok(group.checked_sub(1).map(moq_net::track::Anchor::Time)),
-			anchor => anchor.start().map(Some),
-		}
-	}
 }
 
 impl MoqRange {
-	/// This range as moq-net reads it, or `None` when it holds nothing.
-	pub(crate) fn resolve(self) -> Result<Option<moq_net::track::Range>, MoqError> {
-		let start = self.start.start()?;
-		let end = match self.end {
-			Some(end) => match end.end()? {
-				Some(end) => Some(end),
-				None => return Ok(None),
-			},
-			None => None,
-		};
-		Ok(Some(moq_net::track::Range { start, end }))
+	/// This range as moq-net reads it.
+	pub(crate) fn resolve(self) -> Result<moq_net::track::Range, MoqError> {
+		Ok(moq_net::track::Range {
+			start: self.start.resolve()?,
+			end: self.end.map(MoqAnchor::resolve).transpose()?,
+		})
 	}
 }
 
@@ -239,7 +222,7 @@ impl TryFrom<MoqSubscription> for moq_net::track::Subscription {
 				.into_iter()
 				.map(MoqRange::resolve)
 				.collect::<Result<Vec<_>, _>>()?;
-			subscription = subscription.with_ranges(ranges.into_iter().flatten());
+			subscription = subscription.with_ranges(ranges);
 		}
 		if let Some(order) = s.order {
 			subscription = subscription.with_order(order.into());
@@ -512,7 +495,8 @@ impl TrackInner {
 					waiter.waker().wake_by_ref();
 					return Poll::Ready(Ok(Some(group)));
 				}
-				poll_group(&mut ordered.track, waiter).map(|r| r.map_err(Into::into))
+				// The bindings report no gaps, so a group the track gave up on is passed over.
+				ordered.track.poll_next_group(waiter).map_err(Into::into)
 			}
 			Err(e) => Poll::Ready(Err(e)),
 		}
@@ -532,7 +516,7 @@ impl TrackInner {
 		loop {
 			let group = match &mut ordered.pending {
 				Some(group) => group,
-				None => match ready!(poll_group(&mut ordered.track, waiter)) {
+				None => match ready!(ordered.track.poll_next_group(waiter)) {
 					Ok(Some(group)) => ordered.pending.insert(group),
 					Ok(None) => return Poll::Ready(Ok(None)),
 					Err(err) => return Poll::Ready(Err(err.into())),
@@ -747,20 +731,5 @@ impl MoqGroupConsumer {
 	/// Terminal: the group and whatever it still buffers are released here, not when the handle is.
 	pub fn cancel(&self) {
 		self.reads.cancel();
-	}
-}
-
-/// The next group of an ordered read. The bindings report no gaps, so a group the track
-/// gave up on is passed over.
-fn poll_group(
-	track: &mut moq_net::track::Ordered,
-	waiter: &kio::Waiter,
-) -> Poll<Result<Option<moq_net::group::Consumer>, moq_net::Error>> {
-	loop {
-		match ready!(track.poll_next_group(waiter))? {
-			Some(moq_net::track::Item::Group(group)) => return Poll::Ready(Ok(Some(group))),
-			Some(moq_net::track::Item::Gap { .. }) => continue,
-			None => return Poll::Ready(Ok(None)),
-		}
 	}
 }

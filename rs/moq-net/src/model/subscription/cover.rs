@@ -197,6 +197,19 @@ impl Cover {
 		}
 	}
 
+	/// Where the run reaching past every key starts, `None` when the last run ends.
+	pub fn open_from(&self) -> Option<u64> {
+		if sum(&self.root) <= 0 {
+			return None;
+		}
+		// The open run starts at the first covered key past the last gap edge, or at the
+		// first edge when every edge leaves a run open.
+		match last_in(&self.root, 0, Want::Gap) {
+			Some(gap) => self.first_key(gap, Want::Covered),
+			None => self.lowest(),
+		}
+	}
+
 	/// The spans where `self` and `old` may cover differently, lowest first: where their counts
 	/// differ, a superset of where coverage does.
 	///
@@ -442,6 +455,22 @@ fn first_in(link: &Link, offset: i64, want: Want) -> Option<u64> {
 	first_in(&node.right, at, want)
 }
 
+/// The last key of the subtree, entered with `offset` runs open, whose running sum is `want`.
+fn last_in(link: &Link, offset: i64, want: Want) -> Option<u64> {
+	let node = link.as_ref()?;
+	if !want.within(offset, node) {
+		return None;
+	}
+	let at = offset + sum(&node.left) + node.delta;
+	if let Some(key) = last_in(&node.right, at, want) {
+		return Some(key);
+	}
+	if want.at(at) {
+		return Some(node.key);
+	}
+	last_in(&node.left, offset, want)
+}
+
 /// [`first_in`] over the keys at or after `from`.
 fn first_from(link: &Link, offset: i64, from: u64, want: Want) -> Option<u64> {
 	let node = link.as_ref()?;
@@ -572,6 +601,16 @@ mod tests {
 				assert_eq!(
 					cover.highest(),
 					union.iter().next_back().map(|run| *run.end()),
+					"{}",
+					context()
+				);
+				assert_eq!(
+					cover.open_from(),
+					union
+						.iter()
+						.next_back()
+						.filter(|run| *run.end() == u64::MAX)
+						.map(|run| *run.start()),
 					"{}",
 					context()
 				);

@@ -60,7 +60,7 @@ up.
 
 Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit): ✅ every
 unused public item is removed or hidden before the cut, in
-[one sweep per area](/quest/m2/unused-api/README.md), each re-checked for a
+one sweep per area (done in m2), each re-checked for a
 downstream caller first (rejected: judging them after m2 lands). That audit
 re-read this list, so it is settled:
 

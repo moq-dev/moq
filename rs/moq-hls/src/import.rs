@@ -2420,8 +2420,7 @@ mod tests {
 		let mut out = Vec::new();
 		loop {
 			let mut group = match subscriber.poll_next_group(&kio::Waiter::noop()) {
-				Poll::Ready(Ok(Some(moq_net::track::Item::Group(group)))) => group,
-				Poll::Ready(Ok(Some(moq_net::track::Item::Gap { .. }))) => continue,
+				Poll::Ready(Ok(Some(group))) => group,
 				Poll::Pending | Poll::Ready(Ok(None)) => break,
 				Poll::Ready(Err(error)) => return (out, Some(error)),
 			};

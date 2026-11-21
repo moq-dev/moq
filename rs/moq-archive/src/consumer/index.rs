@@ -155,15 +155,6 @@ impl Index {
 		around.reverse();
 		around
 	}
-
-	/// The object just after the one starting at `start`, or the oldest for `None`.
-	pub fn after(&self, start: Option<Start>) -> Option<(Start, Path)> {
-		let (start, path) = match start {
-			Some(start) => self.objects.range((start.0, start.1.saturating_add(1))..).next()?,
-			None => self.objects.first_key_value()?,
-		};
-		Some((*start, path.clone()))
-	}
 }
 
 /// Take in the objects new since `index`'s cursor and return them, with the track's `end` when

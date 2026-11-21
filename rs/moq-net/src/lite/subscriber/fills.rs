@@ -853,7 +853,7 @@ mod tests {
 			)
 			.ordered();
 		assert!(reader.poll_next_group(&waiter).is_pending(), "groups 0..3 are owed");
-		let Poll::Ready(Ok(fill)) = requests.poll_requested_groups(&waiter) else {
+		let Poll::Ready(Ok(fill)) = requests.poll_requested_fill(&waiter) else {
 			panic!("groups 0..3 are a miss");
 		};
 		(reader, fill)
@@ -876,14 +876,14 @@ mod tests {
 		// The lowered start asks for them again, and they arrive.
 		let (mut reader, fill) = ask(&producer, &requests);
 		for key in 0..3 {
-			let mut group = fill.accept(key, None).unwrap();
+			let mut group = fill.accept(key, None).unwrap().expect("a fresh group");
 			group
 				.write_frame(crate::Timestamp::from_millis(key * 1000).unwrap(), b"x".as_slice())
 				.unwrap();
 			group.finish().unwrap();
 		}
 		for key in 0..3 {
-			let Poll::Ready(Ok(Some(track::Item::Group(group)))) = reader.poll_next_group(&waiter) else {
+			let Poll::Ready(Ok(Some(group))) = reader.poll_next_group(&waiter) else {
 				panic!("group {key} was delivered");
 			};
 			assert_eq!(group.start, key);
@@ -902,7 +902,7 @@ mod tests {
 			.ordered();
 		let _ = reader.poll_next_group(&waiter);
 		assert!(
-			requests.poll_requested_groups(&waiter).is_pending(),
+			requests.poll_requested_fill(&waiter).is_pending(),
 			"a lost group is not asked again"
 		);
 	}

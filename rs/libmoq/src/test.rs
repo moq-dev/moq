@@ -18,6 +18,19 @@ fn micros(value: u64) -> moq_timestamp {
 	}
 }
 
+/// An anchor at the group containing `value`, unscaled in the track's timescale.
+fn time(value: u64) -> moq_anchor {
+	moq_anchor {
+		kind: moq_anchor_kind::MOQ_ANCHOR_TIME as u32,
+		groups: 0,
+		timestamp: moq_timestamp {
+			value,
+			scale: 0,
+			has_scale: false,
+		},
+	}
+}
+
 /// The timestamp a read points at, which is never NULL.
 fn read_timestamp(timestamp: *const moq_timestamp) -> moq_timestamp {
 	*unsafe { timestamp.as_ref() }.expect("a read always carries a timestamp")
@@ -2726,23 +2739,18 @@ fn raw_track_subscription_options_and_update() {
 	let consume = request_broadcast(origin, path);
 
 	let frame_cb = Callback::new();
-	let absolute = |group| moq_anchor {
-		kind: moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32,
-		group,
-		timestamp: moq_timestamp::default(),
-	};
-	// An absolute anchor is a group's start, in the track's microseconds, and an absolute end
-	// is exclusive. The open range starts at the group containing 100 s, the newest one held:
-	// `two`, and every group after it.
+	// A time anchor names the group containing it, in the track's microseconds, and an end
+	// includes its group. The open range starts at the group containing 100 s, the newest one
+	// held: `two`, and every group after it.
 	let ranges = [
 		moq_range {
-			start: absolute(20_000),
-			end: absolute(20_001),
+			start: time(20_000),
+			end: time(20_000),
 			end_present: true,
 		},
 		moq_range {
-			start: absolute(100_000_000),
-			end: absolute(0),
+			start: time(100_000_000),
+			end: time(0),
 			end_present: false,
 		},
 	];
@@ -2787,7 +2795,7 @@ fn raw_track_subscription_options_and_update() {
 	// Replace both ranges with one that ends at `three`, so the read ends once it reads it
 	// and never sees `four`.
 	let bounded = [moq_range {
-		end: absolute(60_001),
+		end: time(60_000),
 		..ranges[0]
 	}];
 	let update = moq_subscription {
@@ -2845,20 +2853,8 @@ fn raw_track_time_anchor() {
 
 	let frame_cb = Callback::new();
 	let ranges = [moq_range {
-		start: moq_anchor {
-			kind: moq_anchor_kind::MOQ_ANCHOR_TIME as u32,
-			group: 0,
-			timestamp: moq_timestamp {
-				value: 30_000,
-				scale: 0,
-				has_scale: false,
-			},
-		},
-		end: moq_anchor {
-			kind: moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32,
-			group: 0,
-			timestamp: moq_timestamp::default(),
-		},
+		start: time(30_000),
+		end: time(0),
 		end_present: false,
 	}];
 	let subscription = moq_subscription {
@@ -2902,6 +2898,62 @@ fn raw_track_time_anchor() {
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// A time end includes the group starting at it, so `Time(t - 1)` is a former exclusive end at
+/// `t`. A non-NULL empty list asks for nothing, unlike NULL, and a zeroed anchor names no kind.
+#[test]
+fn subscription_ranges_parse() {
+	let parse = |ranges: &[moq_range], null: bool| {
+		let subscription = moq_subscription {
+			priority: 0,
+			delay: moq_delay::default(),
+			ranges: if null { std::ptr::null() } else { ranges.as_ptr() },
+			ranges_len: ranges.len(),
+			order: 0,
+		};
+		unsafe { crate::api::parse_subscription(&subscription) }.map(|subscription| subscription.ranges)
+	};
+	let span = moq_range {
+		start: time(1_500),
+		end: time(1_999),
+		end_present: true,
+	};
+	assert_eq!(
+		parse(&[span], false).unwrap(),
+		vec![moq_net::track::Range {
+			start: moq_net::track::Anchor::Time(1_500),
+			end: Some(moq_net::track::Anchor::Time(1_999)),
+		}]
+	);
+	assert_eq!(parse(&[], false).unwrap(), Vec::new());
+	assert_eq!(
+		parse(&[], true).unwrap(),
+		moq_net::track::Subscription::default().ranges,
+		"NULL keeps the default"
+	);
+
+	let zeroed = moq_anchor {
+		kind: 0,
+		groups: 0,
+		timestamp: moq_timestamp::default(),
+	};
+	assert!(matches!(
+		parse(&[moq_range { start: zeroed, ..span }], false),
+		Err(crate::Error::InvalidCode)
+	));
+	// An absent end is never read.
+	assert!(
+		parse(
+			&[moq_range {
+				end: zeroed,
+				end_present: false,
+				..span
+			}],
+			false
+		)
+		.is_ok()
+	);
 }
 
 /// An update with a scaled time anchor is refused at the call, keeping its ranges: a time
@@ -2950,14 +3002,10 @@ fn raw_track_update_refuses_a_scaled_time_anchor() {
 	let ranges = [moq_range {
 		start: moq_anchor {
 			kind: moq_anchor_kind::MOQ_ANCHOR_TIME as u32,
-			group: 0,
+			groups: 0,
 			timestamp: micros(0),
 		},
-		end: moq_anchor {
-			kind: moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32,
-			group: 0,
-			timestamp: moq_timestamp::default(),
-		},
+		end: time(0),
 		end_present: false,
 	}];
 	let update = moq_subscription {
@@ -5407,6 +5455,142 @@ fn a_group_request_nobody_reads_is_withdrawn() {
 	assert_eq!(moq_publish_track_finish(track), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// A C handler knows its groups only by key, so freeing a reader's time start says no group
+/// starts at that time: the reader reads on from it, or from the group held just below it,
+/// rather than failing. That includes a time just past a held group, whose fill asks only the
+/// time's own key. Aborting it instead says serving it failed, which fails the reader and
+/// records nothing, so a later reader asks again.
+#[test]
+fn a_freed_time_start_reads_on_and_an_aborted_one_fails() {
+	for (time, held, first) in [
+		(7, &[10][..], Some(10)),
+		(5, &[4, 10][..], Some(4)),
+		(7, &[10][..], None),
+	] {
+		let origin = id(moq_origin_create());
+		let broadcast = publish_broadcast(origin, b"track-dynamic-time-start");
+		let name = b"data";
+		// Timed in milliseconds, with no publisher age limit, so the groups behind the live one
+		// stay fresh.
+		let info = moq_track_info {
+			priority: 0,
+			max_age_us: 0,
+			max_age_unlimited: true,
+			timescale: 1000,
+			timescale_present: true,
+			refresh: 0,
+			refresh_present: false,
+			refresh_interval_us: 0,
+			refresh_interval_present: false,
+			compression: 0,
+		};
+		let track = id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), &info) });
+		let group_cb = Callback::new();
+		let dynamic = id(unsafe { moq_publish_track_requests(track, Some(channel_callback), group_cb.ptr) });
+
+		// Subscribed once the groups are held, which then place the time or ask for it.
+		let mut reader = {
+			let mut state = State::lock();
+			let producer = state.publish.track_producer(Id::try_from(track).unwrap()).unwrap();
+			producer.start_at(held[0]).unwrap();
+			for &key in held {
+				let mut group = producer.create_group(moq_net::group::Info { start: key }).unwrap();
+				group
+					.write_frame(moq_net::Timestamp::from_millis(key).unwrap(), &b"live"[..])
+					.unwrap();
+				group.finish().unwrap();
+			}
+			producer.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(None))
+					.with_order(moq_net::track::Order::Ascending)
+					.with_ranges([moq_net::track::Range {
+						start: moq_net::track::Anchor::Time(time),
+						end: None,
+					}]),
+			)
+		};
+		// Nothing is read before the time start is answered.
+		let waiter = kio::Waiter::noop();
+		assert!(reader.poll_recv_group(&waiter).is_pending());
+		let request = id(group_cb.recv_reading(&mut reader));
+		let mut start = 0u64;
+		assert_eq!(unsafe { moq_group_request_start(request, &mut start) }, 0);
+		assert_eq!(start, time);
+		let Some(first) = first else {
+			assert_eq!(moq_group_request_abort(request, 9), 0);
+			for _ in 0..2 {
+				assert!(
+					matches!(reader.poll_recv_group(&waiter), std::task::Poll::Ready(Err(_))),
+					"not group 10, which the cache holds past the time"
+				);
+			}
+			// Nothing recorded the time's key dropped, so a fresh reader asks for it again.
+			let mut again = {
+				let mut state = State::lock();
+				let producer = state.publish.track_producer(Id::try_from(track).unwrap()).unwrap();
+				producer.subscribe(
+					moq_net::track::Subscription::default()
+						.with_delay(moq_net::track::Delay::default().with_max(None))
+						.with_ranges([moq_net::track::Range {
+							start: moq_net::track::Anchor::Time(time),
+							end: None,
+						}]),
+				)
+			};
+			let request = id(group_cb.recv_reading(&mut again));
+			assert_eq!(unsafe { moq_group_request_start(request, &mut start) }, 0);
+			assert_eq!(start, time);
+			assert_eq!(moq_group_request_free(request), 0);
+			drop((reader, again));
+			assert_eq!(moq_publish_requests_cancel(dynamic), 0);
+			let terminal = loop {
+				match group_cb.recv() {
+					code if code > 0 => drop(moq_group_request_free(id(code))),
+					code => break code,
+				}
+			};
+			assert_eq!(terminal, 0);
+			assert_eq!(moq_publish_track_finish(track), 0);
+			assert_eq!(moq_publish_close(broadcast), 0);
+			assert_eq!(moq_origin_close(origin), 0);
+			continue;
+		};
+		assert_eq!(moq_group_request_free(request), 0);
+		// The keys after it up to the next group held are asked as misses, rejected too.
+		let group = loop {
+			match reader.poll_recv_group(&waiter) {
+				std::task::Poll::Ready(Ok(Some(group))) => break group,
+				std::task::Poll::Ready(res) => {
+					panic!(
+						"the reader reads on: {:?}",
+						res.map(|group| group.map(|group| group.start))
+					)
+				}
+				std::task::Poll::Pending => {}
+			}
+			if let Ok(code) = group_cb.rx.recv_timeout(std::time::Duration::from_millis(10)) {
+				assert_eq!(moq_group_request_free(id(code)), 0);
+			}
+		};
+		assert_eq!(group.start, first, "time {time}");
+
+		drop(reader);
+		assert_eq!(moq_publish_requests_cancel(dynamic), 0);
+		// A miss asked before the reader left may still be queued ahead of the terminal.
+		let terminal = loop {
+			match group_cb.recv() {
+				code if code > 0 => drop(moq_group_request_free(id(code))),
+				code => break code,
+			}
+		};
+		assert_eq!(terminal, 0);
+		assert_eq!(moq_publish_track_finish(track), 0);
+		assert_eq!(moq_publish_close(broadcast), 0);
+		assert_eq!(moq_origin_close(origin), 0);
+	}
 }
 
 /// Rejecting a group request fails only the readers waiting on it: the group is not named

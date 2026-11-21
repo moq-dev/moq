@@ -106,11 +106,12 @@ async fn import_onto(
 			moq_net::track::Subscription::default()
 				.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY)),
 		)
-		.await?;
+		.await?
+		.ordered();
 	let mut objects = Vec::new();
 	let mut markers = Vec::new();
 	let mut starts = Vec::new();
-	while let Some(mut group) = kio::clock::timeout(Duration::from_secs(1), track.recv_group())
+	while let Some(mut group) = kio::clock::timeout(Duration::from_secs(1), track.next_group())
 		.await
 		.expect("the track stalled")?
 	{
@@ -684,22 +685,132 @@ async fn an_import_shifts_onto_a_clock_already_in_use() {
 	assert_eq!(markers, [offset], "the break moves with the timeline");
 }
 
-/// A flagged step back is a restart: new content, which a timeline cannot step back into.
+/// The clock steps that are not elapsed time: back with or without the flag, and forward more
+/// than ten seconds without it.
+const SPLICES: [(&str, u64, bool); 3] = [
+	("unflagged back", 2_000 * MS, false),
+	("flagged back", 2_000 * MS, true),
+	("unflagged leap", 60_000 * MS, false),
+];
+
+/// A step that is not elapsed time, as a switch between two unlocked encoders makes, is spliced:
+/// the import carries on, the count resumes where the rate before the step puts it, and the next
+/// group starts behind a break marker, whether the step lands on a random access point or not.
 #[tokio::test(start_paused = true)]
-async fn a_flagged_step_back_is_a_restart() {
+async fn a_step_that_is_not_elapsed_time_is_spliced() {
+	for (name, to, flagged) in SPLICES {
+		for mid_gop in [false, true] {
+			let mut mux = Mux::default();
+			program(&mut mux, 0x100);
+			paced(&mut mux, 0x100, 10_000 * MS, if mid_gop { 25 } else { 30 }, 10, 2);
+			let mut step = Flags::pcr(to);
+			step.random_access = !mid_gop;
+			if flagged {
+				step = step.discontinuity();
+			}
+			mux.packet(0x100, step);
+			mux.fill(0x101, 2);
+			paced(&mut mux, 0x100, to + 40 * MS, 30, 10, 2);
+			let data = mux.bytes();
+			let case = format!("{name}, mid-GOP {mid_gop}");
+
+			let imported = import(&data, 188 * 7, None).await.expect(&case);
+			assert_suffix(&data, &imported);
+			let micros: Vec<u64> = imported.objects.iter().map(|object| object.micros).collect();
+			assert!(micros.windows(2).all(|pair| pair[0] <= pair[1]), "{case}: {micros:?}");
+
+			let groups = imported.groups();
+			let jump = groups
+				.iter()
+				.position(|group| header(&group[0].payload).pcr == Some(to))
+				.unwrap_or_else(|| panic!("{case}: the step starts a group"));
+			let before = groups[jump - 1].last().unwrap().micros;
+			let after = groups[jump][0].micros;
+			assert!(
+				(before..before + 50_000).contains(&after),
+				"{case}: the count carries on past the step: {before} {after}"
+			);
+			// Everything after carries on at the source's pace from there.
+			let last = imported.objects.last().unwrap().micros;
+			assert!(
+				(after + 1_150_000..after + 1_250_000).contains(&last),
+				"{case}: {after} {last}"
+			);
+			let [marker] = imported.markers[..] else {
+				panic!("{case}: one marker: {:?}", imported.markers);
+			};
+			assert!(
+				groups[jump - 1][0].group < marker && marker < groups[jump][0].group,
+				"{case}: a marker group between them declares the break"
+			);
+			assert_eq!(imported.holes, [], "{case}");
+			assert_eq!(imported.section().random_access, !mid_gop, "{case}");
+		}
+	}
+}
+
+/// An unflagged step forward of up to ten seconds is elapsed time, such as a stall at the source:
+/// the count takes the step and no break is declared.
+#[tokio::test(start_paused = true)]
+async fn an_unflagged_step_within_ten_seconds_is_elapsed_time() {
 	let mut mux = Mux::default();
 	program(&mut mux, 0x100);
 	paced(&mut mux, 0x100, 10_000 * MS, 30, 10, 2);
-	mux.packet(0x100, Flags::pcr(2_000 * MS).discontinuity());
+	paced(&mut mux, 0x100, 20_000 * MS, 30, 10, 2);
 	let data = mux.bytes();
-	let err = match import(&data, data.len(), None).await {
-		Ok(_) => panic!("a restart was carried on one timeline"),
-		Err(err) => err,
+	let imported = import(&data, data.len(), None).await.unwrap();
+	assert_suffix(&data, &imported);
+	assert_eq!(imported.markers, Vec::<u64>::new());
+	let last = imported.objects.last().unwrap().micros;
+	assert!((21_150_000..21_200_000).contains(&last), "{last}");
+}
+
+/// One corrupt PCR costs two splices, out to its value and back from it, rather than the import.
+#[tokio::test(start_paused = true)]
+async fn a_lone_corrupt_pcr_splices_twice() {
+	let mut mux = Mux::default();
+	program(&mut mux, 0x100);
+	paced(&mut mux, 0x100, 10_000 * MS, 30, 10, 2);
+	mux.packet(0x100, Flags::pcr(40_000_000 * MS));
+	mux.fill(0x101, 2);
+	paced(&mut mux, 0x100, 11_240 * MS, 30, 10, 2);
+	let data = mux.bytes();
+	let imported = import(&data, data.len(), None).await.unwrap();
+	assert_suffix(&data, &imported);
+	assert_eq!(imported.markers.len(), 2, "{:?}", imported.markers);
+	let micros: Vec<u64> = imported.objects.iter().map(|object| object.micros).collect();
+	assert!(micros.windows(2).all(|pair| pair[0] <= pair[1]), "{micros:?}");
+	let last = *micros.last().unwrap();
+	assert!((12_300_000..12_450_000).contains(&last), "{last}");
+}
+
+/// A repeated PCR gives the interval before a step no rate, so the splice resumes on the last
+/// object's microsecond, where the marker sits: the group behind it still starts past it.
+#[tokio::test(start_paused = true)]
+async fn a_splice_after_a_repeated_pcr_starts_past_the_marker() {
+	let mut mux = Mux::default();
+	program(&mut mux, 0x100);
+	paced(&mut mux, 0x100, 10_000 * MS, 30, 10, 2);
+	mux.packet(0x100, Flags::pcr(11_160 * MS));
+	mux.fill(0x101, 2);
+	mux.packet(0x100, Flags::pcr(2_000 * MS));
+	mux.fill(0x101, 2);
+	paced(&mut mux, 0x100, 2_040 * MS, 30, 10, 2);
+	let data = mux.bytes();
+	let imported = import(&data, data.len(), None).await.unwrap();
+	assert_suffix(&data, &imported);
+	let [marker] = imported.markers[..] else {
+		panic!("one marker: {:?}", imported.markers);
 	};
-	assert!(
-		matches!(&err, crate::Error::PcrRestart { pid: 0x100, to, .. } if *to == 2_000 * MS),
-		"{err:?}"
-	);
+	let groups = imported.groups();
+	let jump = groups
+		.iter()
+		.position(|group| header(&group[0].payload).pcr == Some(2_000 * MS))
+		.expect("the step starts a group");
+	let before = groups[jump - 1].last().unwrap().micros;
+	let after = groups[jump][0].micros;
+	assert!(groups[jump - 1][0].group < marker && marker < groups[jump][0].group);
+	assert!(before < after && after < before + 50_000, "{before} {after}");
 }
 
 /// A break before any group has started is no group start, so the first group still waits for a
@@ -716,23 +827,6 @@ async fn a_break_before_the_first_group_does_not_start_it() {
 	let imported = import(&data, data.len(), None).await.unwrap();
 	assert!(header(&imported.objects[0].payload).random_access);
 	assert!(imported.section().random_access);
-}
-
-#[tokio::test(start_paused = true)]
-async fn an_unflagged_rewind_is_refused() {
-	let mut mux = Mux::default();
-	program(&mut mux, 0x100);
-	paced(&mut mux, 0x100, 10_000 * MS, 30, 10, 2);
-	mux.packet(0x100, Flags::pcr(9_000 * MS));
-	let data = mux.bytes();
-	let err = match import(&data, data.len(), None).await {
-		Ok(_) => panic!("a rewind was accepted"),
-		Err(err) => err,
-	};
-	assert!(
-		matches!(&err, crate::Error::PcrRewind { pid: 0x100, to, .. } if *to == 9_000 * MS),
-		"{err:?}"
-	);
 }
 
 #[tokio::test(start_paused = true)]

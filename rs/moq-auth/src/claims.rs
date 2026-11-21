@@ -30,7 +30,8 @@ pub struct Scope {
 
 impl Scope {
 	/// Returns an error when the scope permits nothing, making the key unusable, or names
-	/// a root [`Key::sign`](crate::Key::sign) would refuse.
+	/// a malformed root. [`Key::with_scope`](crate::Key::with_scope) also refuses a root
+	/// [`Key::sign`](crate::Key::sign) would.
 	pub fn validate(&self) -> crate::Result<()> {
 		path::validate(&self.root)?;
 		if self.publish.is_empty() && self.subscribe.is_empty() {

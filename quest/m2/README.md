@@ -32,21 +32,24 @@ removal, a rename, or a wire, catalog, or format change that is free until
   returned from m4, and the two moq-transport interop quests in m3 were
   deleted. Kept as they are: datagram tracks with their lite-05/06 bridge,
   all seven lite versions, the hidden `.` path prefix, and the route plan
-  of [cache-aware multicast](/quest/m2/multicast/README.md), whose switch
+  of [cache-aware multicast](https://github.com/moq-dev/moq/blob/41cc107579/quest/m2/multicast/README.md), whose switch
   settled the public route API in
   [moq-dev/moq#9053](https://github.com/moq-dev/moq/pull/9053). The
   moq-cluster draft stays, since third-party relays ship it, rewritten to
   what the binding sends.
 - **moq-net API.** [Socket endpoints](https://github.com/moq-dev/moq/pull/9029) leave for Kixel, and the
   demos return to their earlier format.
-- **Unused API.** [One sweep per area](/quest/m2/unused-api/README.md), each
-  item re-checked for a downstream caller first.
+- **Unused API.** One sweep per area (done: the last,
+  [moq-dev/moq#9196](https://github.com/moq-dev/moq/pull/9196)), each item
+  re-checked for a downstream caller first.
 - **Auth and crypto.** End-to-end encryption is its own unpublished crate again
   ([moq-dev/moq#8947](https://github.com/moq-dev/moq/pull/8947)); its
   [finished format](/quest/m3/e2ee-format.md) follows in m3.
 - **Catalog, drafts, and formats.** hang-04 (done: the `sync` section, a version per entry, no video `warmup`, the TS passthrough under
   `mpegts`, one strict rule);
-  [declared ends](/quest/m2/time-addressing/consumers.md), back from m3.
+  declared ends, back from m3, which became a whole marker on 2026-11-19
+  and [an end again](/quest/m2/time-addressing/group-times.md) on
+  2026-11-20.
 - **Native media and gateways.** [Upstream str0m](https://github.com/moq-dev/moq/pull/8963), which reverses the
   2026-10-30 vendoring.
 - **Bindings.** The C API as `libmoq` (done), reversing 2026-10-25.
@@ -59,10 +62,27 @@ allowed inside a value. Not reopened: AUTH_ERROR's retry codes (2026-11-14)
 and AUTH_OK's rate fields, which wait for lite-08
 ([rate grant](/quest/m5/rate-grant.md)).
 
+Decided 2026-11-20 (maintainer, /quest-plan of a pre-cut audit of the
+lite-07 and hang-04 wire changes): the cut also waits on what that audit
+found. Each fix is so that a subscription, frame, or catalog entry means
+the same whichever relay or reader serves it:
+[no relative anchors](/quest/m2/time-addressing/no-relative-anchors.md),
+with Min Age placing a live join;
+[scale-less tracks aging by arrival](/quest/m2/time-addressing/scale-less-arrival.md);
+[Group Streams carrying each time once](/quest/m2/time-addressing/group-times.md),
+with GROUP_END's end back as a delta; and
+[the hang-04 text](/quest/m2/hang-04-text.md) on entry versions and HLS
+overruns. [moq-dev/moq#9198](https://github.com/moq-dev/moq/pull/9198) and
+[moq-dev/moq#9221](https://github.com/moq-dev/moq/pull/9221) closed, since
+relative starts and the bare GROUP_END are gone.
+
 Decided 2026-11-15 (maintainer, /quest-plan on the whole route layer): ✅ the
-cut waits on [cache-aware multicast](/quest/m2/multicast/README.md), which
+cut waits on [cache-aware multicast](https://github.com/moq-dev/moq/blob/41cc107579/quest/m2/multicast/README.md), which
 replaces lite-07's route layer before it freezes (rejected: lite-08). The
 routes chain stays the critical path, now through that epic.
+That epic finished 2026-11-20
+([moq-dev/moq#9231](https://github.com/moq-dev/moq/pull/9231)), and the cut's
+routing wait moved to [claim reach](/quest/m2/lite07-claim-reach-routes.md).
 
 Decided 2026-11-05 (maintainer, milestone re-cut): m2 holds the breaking half
 of what was "everything before the cut" (2026-10-20). Breaking covers every
@@ -102,9 +122,10 @@ Decided 2026-11-12 (maintainer, /quest-audit before the cut):
   the capture selections. None
   is on the routes chain, which stays the critical path.
 - ✅ Under the path rule a route keeps one sticky down-only flag beside its
-  path; see the [routes epic](/quest/m2/cluster-routes/README.md). The
+  path; see the routes epic, finished in
+  [moq-dev/moq#9202](https://github.com/moq-dev/moq/pull/9202). The
   route layer that replaced it keeps the flag as a route's mark
-  ([cache-aware multicast](/quest/m2/multicast/README.md) item 6).
+  ([cache-aware multicast](https://github.com/moq-dev/moq/blob/41cc107579/quest/m2/multicast/README.md) item 6).
 
 Carried from m1's Plan before the re-cut, where "m1" means the whole pre-cut
 milestone, now m1 and m2:
@@ -283,8 +304,8 @@ what would need a breaking release had it landed right after the cut:
   to m3's cluster-routing epic (a fixture and a fix, no wire), until it
   returned to m2 on 2026-11-15 (maintainer, on
   [moq-dev/moq#8832](https://github.com/moq-dev/moq/pull/8832)) and became
-  the request quest of [cache-aware multicast](/quest/m2/multicast/README.md);
-  [media consumers](/quest/m2/time-addressing/consumers.md) to m3 (its API
+  the request quest of [cache-aware multicast](https://github.com/moq-dev/moq/blob/41cc107579/quest/m2/multicast/README.md);
+  media consumers (later start placement) to m3 (its API
   breaks ride the model; dropping hang's markers is tolerated by readers),
   until it returned to m2 on 2026-11-16;
   [moq-transport time addressing](https://github.com/moq-dev/moq/pull/8918) to m4
@@ -304,8 +325,9 @@ what would need a breaking release had it landed right after the cut:
   router key per announce stream, which the route model doesn't check, and
   keep the reopen-and-hand-over machinery for its lifetime (rejected: moving
   both to lite-08).
-- ✅ [Route acceptance](/quest/m2/cluster-routes/acceptance.md) stays in
-  the routes epic and gates the cut, per the 2026-10-13 rule that routes'
+- ✅ Route acceptance stays in
+  the routes epic and gates the cut (both finished in
+  [moq-dev/moq#9202](https://github.com/moq-dev/moq/pull/9202)), per the 2026-10-13 rule that routes'
   tier and partition tests run before it (maintainer; rejected: moving it to
   m3 and fixing late routing flaws in lite-08).
 - ✅ Group drops split: its lite-07 wire question

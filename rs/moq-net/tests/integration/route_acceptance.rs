@@ -1,7 +1,7 @@
 #![cfg(feature = "async")]
 
 //! Acceptance of lite-07's route rule on real sessions with time mocked: the topology
-//! fixtures of the routes epic's acceptance quest (`quest/m2/cluster-routes/acceptance.md`)
+//! fixtures of the routes epic's acceptance quest
 //! and the three from routing prior art (the epic's Plan item 30).
 //!
 //! The rule's own fixtures live in `path_routes.rs`, whose helpers these share.
@@ -216,8 +216,7 @@ async fn ring() -> (
 
 /// [`ring`]: the link from `R1` to `R2` closes. `R2` preferred the path through `R1`, of
 /// cost 3, and its backup runs the other way round the ring, of cost 4: it moves there at
-/// once (within the origin's update hold), the broadcast available throughout. Every
-/// other session stays up.
+/// once, the broadcast available throughout. Every other session stays up.
 #[kio::test]
 async fn a_ring_moves_at_once_to_a_backup_avoiding_the_far_end() {
 	let (_p, _live, relays, links, _p_r0) = ring().await;
@@ -237,8 +236,10 @@ async fn a_ring_moves_at_once_to_a_backup_avoiding_the_far_end() {
 
 /// [`ring`]: the link from `R0` to `R1` closes. Every backup runs the other way round the
 /// ring, through `R0`, the closed link's far end, on sessions the DEAD does not name: `R2`
-/// moves onto its backup, of cost 4, and `R1` onto `R2`'s, of cost 5, both at once and
-/// available throughout. Every session of the backup stays up.
+/// moves onto its backup, of cost 4, available throughout, and `R1` onto `R2`'s, of cost
+/// 5, both at once. `R2` routed through `R1`, so it offered `R1` nothing until it moved:
+/// `R1` shows the claim unavailable until `R2`'s route lands, here in the same instant.
+/// Every session of the backup stays up.
 #[kio::test]
 async fn a_ring_moves_at_once_to_a_backup_through_the_far_end() {
 	let (_p, _live, relays, links, _p_r0) = ring().await;
@@ -248,13 +249,15 @@ async fn a_ring_moves_at_once_to_a_backup_through_the_far_end() {
 	cut(&links[0]);
 	quiesce().await;
 
-	for (name, watch, cost) in [("R2", &mut near, 4), ("R1", &mut far, 5)] {
+	for (name, watch, cost, waits) in [("R2", &mut near, 4, false), ("R1", &mut far, 5, true)] {
 		let seen = watch.seen(start);
+		assert!(!seen.iter().any(withdrawn), "{name} stays shown: {seen:?}");
 		assert!(
-			seen.iter().all(|seen| seen.available && !withdrawn(seen)),
-			"{name} stays available: {seen:?}"
+			seen.iter().all(|seen| seen.available || (waits && seen.at.is_zero())),
+			"{name} is unavailable only while its backup is on its way: {seen:?}"
 		);
 		let moved = seen.last().expect("moved");
+		assert!(moved.available, "{name} ends available: {seen:?}");
 		assert!(moved.cost == cost, "{name} ends on its backup: {seen:?}");
 		assert!(moved.at < DEBOUNCE, "{name} moves at once: {seen:?}");
 	}
@@ -265,9 +268,9 @@ async fn a_ring_moves_at_once_to_a_backup_through_the_far_end() {
 
 /// `A` and `B` each reach `P` directly and peer with each other, over a link lagging by
 /// [`LAG`]. `P` dies: each relay's only route left is the other's direct route, which the
-/// other's own close made stale. Each moves onto it until the other's DEAD ends it one lag
-/// after the cut, shorter than the origin's update hold, so neither shows the move. Both
-/// show the claim unavailable and let go a debounce after that DEAD.
+/// other's own close made stale. Each moves onto it at once, as the route rule must while
+/// nothing says it is stale, until the other's DEAD ends it one lag after the cut. Both
+/// then show the claim unavailable and let go a debounce after that DEAD, once.
 #[kio::test]
 async fn two_relays_routing_through_each_other_both_let_go() {
 	const LAG: Duration = Duration::from_millis(200);
@@ -284,7 +287,12 @@ async fn two_relays_routing_through_each_other_both_let_go() {
 	quiesce().await;
 	for (name, watch) in ["A", "B"].into_iter().zip(&mut watched) {
 		let seen = watch.seen(start);
-		assert!(!seen.iter().any(|seen| seen.available), "{name}: {seen:?}");
+		assert!(
+			seen.iter().all(|seen| !seen.available || seen.at.is_zero()),
+			"{name}: on the stale route only until its DEAD lands: {seen:?}"
+		);
+		let unavailable = seen.iter().find(|seen| !seen.available).expect("unavailable");
+		assert_eq!(unavailable.at, LAG, "{name}: unavailable once the DEAD lands: {seen:?}");
 		assert_eq!(
 			seen.iter().filter(|seen| withdrawn(seen)).count(),
 			1,
@@ -296,6 +304,40 @@ async fn two_relays_routing_through_each_other_both_let_go() {
 	}
 }
 
+/// `P` feeds `A`, which neighbours `B`. `P`'s link to `A` closes: no route reaches the claim,
+/// so `A` lets it go a debounce later. Just after, `P` links to `B`, and `A` shows the claim
+/// again the moment `B`'s route lands, at its higher cost. A lite-07 claim's own withdrawal is
+/// final for the routes it had, so nothing holds a later one back the way a hop chain's
+/// retraction quarantine would.
+#[kio::test]
+async fn a_claim_let_go_returns_at_once_on_a_worse_route() {
+	let version = lite07();
+	let [p, a, b] = [1, 2, 3].map(produce_origin);
+	let _live = publish(&p, "live");
+	let p_a = peer(version, &p, &a).await;
+	let _a_b = peer(version, &a, &b).await;
+	quiesce().await;
+
+	let mut watch = record(&a, "live").await;
+	let start = kio::clock::now();
+	cut(&p_a);
+	kio::clock::sleep(DEBOUNCE).await;
+	land().await;
+	let _p_b = peer(version, &p, &b).await;
+	let linked = kio::clock::now().saturating_duration_since(start);
+	land().await;
+	let seen = watch.seen(start);
+	let [lost, gone, back] = seen.as_slice() else {
+		panic!("let go, then back: {seen:?}");
+	};
+	assert!(!lost.available && lost.at.is_zero(), "{seen:?}");
+	assert!(withdrawn(gone) && gone.at == DEBOUNCE, "{seen:?}");
+	assert!(
+		back.kind == support::Kind::Start && back.available && back.cost == 2 && back.at == linked,
+		"back at once, through B: {seen:?}"
+	);
+}
+
 /// How far apart [`a_vanished_relay_is_noticed_a_keep_alive_apart`]'s neighbours notice.
 const KEEP_ALIVE: Duration = Duration::from_secs(3);
 
@@ -304,9 +346,8 @@ const KEEP_ALIVE: Duration = Duration::from_secs(3);
 /// neighbours notice one at a time, `R1` at once, `R2` half a [`KEEP_ALIVE`] later, `R3` a
 /// whole one later, as keep-alives spaced that far apart would.
 ///
-/// Measured, each move shown 300 ms later through the origin's update hold: nothing keeps
-/// a relay off a route through `X` that a neighbour still offers, so `R1` moves onto
-/// `R2`'s at once and onto `R3`'s when `R2` notices, as `R2` does. `R3` notices at 3 s,
+/// Measured: nothing keeps a relay off a route through `X` that a neighbour still offers,
+/// so `R1` moves onto `R2`'s at once and onto `R3`'s when `R2` notices, as `R2` does. `R3` notices at 3 s,
 /// and all three show the claim unavailable then and go offline a debounce later, once
 /// each: the broadcast is never withdrawn early, but readers on `R1` and `R2` see it
 /// available while nothing can serve it, and a request made then follows a route into
@@ -376,8 +417,8 @@ async fn a_vanished_relay_is_noticed_a_keep_alive_apart() {
 			.map(|seen| seen.at.as_millis())
 			.collect()
 	};
-	assert_eq!(moves(&seen[0]), [300, 1_800], "R1: {:?}", seen[0]);
-	assert_eq!(moves(&seen[1]), [1_800], "R2: {:?}", seen[1]);
+	assert_eq!(moves(&seen[0]), [0, 1_500], "R1: {:?}", seen[0]);
+	assert_eq!(moves(&seen[1]), [1_500], "R2: {:?}", seen[1]);
 	assert_eq!(moves(&seen[2]), [], "R3: {:?}", seen[2]);
 }
 
@@ -447,7 +488,9 @@ async fn a_dispute_wheel_settles() {
 /// cost it had before.
 ///
 /// `B` and `C` move onto the backup as soon as the cut's news arrives, staying available,
-/// and back as soon as the primary returns. `A` is left with the backup through `B`.
+/// and back as soon as the primary returns. `A` is left with the backup through `B`, which
+/// routed through `A` and so offered it nothing until it moved: `A` shows the claim
+/// unavailable until then, here in the same instant.
 #[kio::test]
 async fn a_primary_that_fails_and_returns_takes_every_relay_back() {
 	for back in [DEBOUNCE / 2, HOLD + DEBOUNCE] {
@@ -504,11 +547,18 @@ async fn a_primary_that_fails_and_returns_takes_every_relay_back() {
 			);
 		}
 		assert!(
-			seen[0].iter().all(|seen| seen.available && !withdrawn(seen)),
+			seen[0]
+				.iter()
+				.all(|seen| !withdrawn(seen) && (seen.available || seen.at.is_zero())),
 			"A after {back:?}: {:?}",
 			seen[0]
 		);
-		assert_eq!(seen[0][0].cost, 5, "A after {back:?}: onto the backup: {:?}", seen[0]);
+		let backup = seen[0].iter().find(|seen| seen.available).expect("moved");
+		assert!(
+			backup.cost == 5 && backup.at.is_zero(),
+			"A after {back:?}: onto the backup at once: {:?}",
+			seen[0]
+		);
 	}
 }
 

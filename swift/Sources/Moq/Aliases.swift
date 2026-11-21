@@ -71,12 +71,11 @@ public typealias AnnounceEvent = MoqFFI.MoqAnnounceEvent
 /// deliver, and group ordering.
 public typealias Subscription = MoqFFI.MoqSubscription
 /// How far behind the live edge a subscriber or decoder plays: `min` is the target latency, where a
-/// cold join starts, and how long a decoder waits for a missing group, `nil` to leave it unstated
-/// (a decoder starts it as zero and waits a missing group for `max`, except an audio decoder, which
-/// floors it at zero and waits only its playout estimate, which can be larger; a catalog warmup or
-/// an audio decoder's playout delay still states a `min` to the publisher), and `max`,
-/// `nil` for no subscriber limit, is how far a non-latest group may fall behind before it is
-/// skipped. A `min` past `max` starts at `max`.
+/// cold join starts, `nil` to leave it unstated (a decoder starts it as zero; a catalog warmup or
+/// an audio decoder's playout delay still states a `min` to the publisher), and `max`, `nil` for no
+/// subscriber limit, is how far a non-latest group may fall behind before it is skipped, and how
+/// far newer media may run past a missing group before a decoder gives it up. A `min` past `max`
+/// starts a cold join no further back than the group covering the point `max` behind the live edge.
 public typealias Delay = MoqFFI.MoqDelay
 /// Options for fetching one complete group by start.
 public typealias FetchGroupOptions = MoqFFI.MoqFetchGroupOptions
@@ -150,11 +149,12 @@ public typealias Position = MoqFFI.MoqPosition
 // Nested rather than top-level: a module-level `Range` would shadow `Swift.Range`
 // in every file that imports Moq.
 extension Subscription {
-    /// A span of a track to deliver: from `start` up to `end`, or onward when `end` is `nil`.
+    /// A span of a track to deliver: from `start` through `end`, or onward when `end` is `nil`.
+    /// Every end includes its whole group.
     public typealias Range = MoqFFI.MoqRange
-    /// Where one end of a `Range` falls: `.oldest` (a start only), `.absolute(group:)`,
-    /// `.relative(groups:)` back from the latest group, or `.time(timestamp:)` for the group
-    /// containing an unscaled time in the track's timescale (a scaled one is refused).
+    /// Where one end of a `Range` falls: `.oldest` (a start only), `.relative(groups:)` back
+    /// from the latest group, or `.time(timestamp:)` for the group containing an unscaled time
+    /// in the track's timescale (a scaled one is refused).
     public typealias Anchor = MoqFFI.MoqAnchor
     /// Which pending group the publisher sends first: `.ascending` or `.descending`.
     public typealias Order = MoqFFI.MoqOrder

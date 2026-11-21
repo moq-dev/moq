@@ -372,6 +372,11 @@ fn read_general_audio<T: Buf>(reader: &mut BitReader<T>, core: u8) -> Result<boo
 	Ok(reader.read(1, Error::IncompleteConfig)? == 1)
 }
 
+/// Whether the raw data block `block` leads with a program config element.
+pub(crate) fn leads_with_program_config(block: &[u8]) -> bool {
+	block.first().is_some_and(|&byte| u32::from(byte >> 5) == ID_PCE)
+}
+
 /// Build the AudioSpecificConfig for a stream that signals its fields per frame, as ADTS does.
 ///
 /// A `channel_config` of 0 means a program config element leads `block`, the stream's first raw

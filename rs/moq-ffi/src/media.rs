@@ -1457,8 +1457,8 @@ fn reserve_track(
 	suffix: &str,
 ) -> Result<moq_net::track::Request, MoqError> {
 	let name = track.unwrap_or_else(|| broadcast.unique_name(suffix));
-	broadcast.reserve_track(name).map_err(|err| MoqError::Codec {
-		reason: format!("init failed: {err}"),
+	broadcast.reserve_track(name.clone()).ok_or_else(|| MoqError::Codec {
+		reason: format!("init failed: the track {name} already exists"),
 	})
 }
 
@@ -2231,11 +2231,7 @@ mod timebase_tests {
 				.await
 				.unwrap()
 				.ordered();
-			let mut group = loop {
-				if let Some(group) = catalogs.next_group().await.unwrap().unwrap().group() {
-					break group;
-				}
-			};
+			let mut group = catalogs.next_group().await.unwrap().unwrap();
 			let stamp = group.read_frame().await.unwrap().unwrap().timestamp;
 			// Catalogs published in the same millisecond, such as a rendition and its first estimate,
 			// start a unit apart, since each starts its own group.

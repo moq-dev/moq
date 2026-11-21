@@ -587,12 +587,8 @@ impl RangeWriter {
 				fill.drop_groups(key..key + 1);
 				None
 			}
-			false => match fill.accept(key, None) {
-				Ok(producer) => Some(crate::recv::Group::new(producer)),
-				// Delivered since it was asked: this fetch's copy is a duplicate.
-				Err(Error::Duplicate) => None,
-				Err(err) => return Err(err),
-			},
+			// None once delivered since it was asked: this fetch's copy is a duplicate.
+			false => fill.accept(key, None)?.map(crate::recv::Group::new),
 		};
 		if let Some(producer) = &producer {
 			let handle = producer.handle().clone();
@@ -4759,7 +4755,7 @@ impl SubscribeOnce {
 		}
 		live.poll_joining(waiter);
 		// An error is the track closing, which the arms below report.
-		if let Poll::Ready(Ok(requested)) = live.dynamic.poll_requested_groups(waiter) {
+		if let Poll::Ready(Ok(requested)) = live.dynamic.poll_requested_fill(waiter) {
 			return Poll::Ready(ServeEnd::Fill(requested));
 		}
 		let _ = group_fetches.poll(waiter);
@@ -5307,7 +5303,7 @@ impl Linger {
 				LingerStep::Closed
 			} else if gate.poll_denied(waiter).is_ready() {
 				LingerStep::Revoked
-			} else if let Poll::Ready(Ok(fill)) = idle.dynamic.poll_requested_groups(waiter) {
+			} else if let Poll::Ready(Ok(fill)) = idle.dynamic.poll_requested_fill(waiter) {
 				LingerStep::Fill(fill)
 			} else {
 				let _ = group_fetches.poll(waiter);
@@ -5935,7 +5931,7 @@ impl LearnTrackStatus {
 						Some(SetupResponse::Cancelled(this.version.transport_error(err)))
 					} else {
 						// A fetch needs nothing from the status to go out, only to read its objects.
-						while let Poll::Ready(Ok(fill)) = asked.dynamic.poll_requested_groups(waiter) {
+						while let Poll::Ready(Ok(fill)) = asked.dynamic.poll_requested_fill(waiter) {
 							group_fetches.push(ServeFill::new(
 								this.clone(),
 								broadcast_path.clone(),
@@ -10145,7 +10141,7 @@ mod tests {
 				let dynamic = track.requests();
 				let mut pending = Box::pin(track.consume().fetch_group(0, None));
 				assert!(futures::poll!(pending.as_mut()).is_pending());
-				let request = dynamic.requested_groups().await.expect("group request");
+				let request = dynamic.requested_fill().await.expect("group request");
 				group = Some(pending);
 				accepted = Some(track);
 				Box::pin(subscriber.clone().run_group_fetch(
@@ -16728,13 +16724,12 @@ mod stitch_tests {
 		let mut next = h.stream().await;
 		h.subscriber.clone().recv_group(&mut next).await.expect("next group");
 		// The refused group comes back as a gap, then the next group.
-		let Poll::Ready(Ok(Some(track::Item::Gap { range, .. }))) = ordered.poll_next_group(&kio::Waiter::noop())
-		else {
+		let Poll::Ready(Ok(Some(track::Item::Gap { range, .. }))) = ordered.poll_next_item(&kio::Waiter::noop()) else {
 			panic!("the refused group is not reported");
 		};
 		assert!(range.contains(&KEY), "{range:?}");
 		let group = match ordered.poll_next_group(&kio::Waiter::noop()) {
-			Poll::Ready(Ok(Some(track::Item::Group(group)))) => group,
+			Poll::Ready(Ok(Some(group))) => group,
 			Poll::Ready(_) => panic!("no next group"),
 			Poll::Pending => panic!("the ordered reader still waits on the refused group"),
 		};
@@ -17018,10 +17013,10 @@ mod stitch_tests {
 		assert!(h.session.log.closes().is_empty());
 	}
 
-	/// A received group whose first object rewinds past the group before it is accepted: a
-	/// moq-transport peer may stamp arrival times, so its timed tracks are unchecked.
+	/// A received group whose first object rewinds past the group before it is refused: a
+	/// moq-transport frame's time is its Group ID, so its timed tracks are checked like any.
 	#[kio::test]
-	async fn a_received_rewind_is_accepted() {
+	async fn a_received_rewind_is_refused() {
 		use futures::FutureExt;
 
 		let mut h = Harness::new(Fill::Done, vec![draft18_subgroup(KEY, true, 0, &[b"rewound"])]);
@@ -17036,7 +17031,6 @@ mod stitch_tests {
 
 		let mut stream = read_draft18(&h.session).await;
 		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
-		// The stream was read to its end, so the group is already delivered.
 		let mut group = consumer
 			.recv_group()
 			.now_or_never()
@@ -17044,8 +17038,11 @@ mod stitch_tests {
 			.unwrap()
 			.unwrap();
 		assert_eq!(group.start, KEY);
-		let frame = group.read_frame().now_or_never().unwrap().unwrap().unwrap();
-		assert_eq!(frame.payload.as_ref(), b"rewound");
+		// The group fails, but the track stays open for the groups after it.
+		assert!(matches!(
+			group.read_frame().now_or_never().unwrap(),
+			Err(Error::TimestampMismatch)
+		));
 		assert!(h.track.closed().now_or_never().is_none());
 	}
 
@@ -17407,7 +17404,7 @@ mod stitch_tests {
 					.await
 					.unwrap();
 				assert!(futures::FutureExt::now_or_never(reading.recv_group()).is_none());
-				let fill = dynamic.requested_groups().await.unwrap();
+				let fill = dynamic.requested_fill().await.unwrap();
 				let bounded = consumer.fetch_group(last, None);
 				let slot = kio::Producer::new(GroupFetch::Ready(RangeFetch {
 					fill: std::sync::Arc::new(fill),
@@ -17504,7 +17501,7 @@ mod stitch_tests {
 			let waiter = kio::Waiter::noop();
 			assert!(reader.poll_drop(&waiter).is_pending());
 			assert!(reader.poll_recv_group(&waiter).is_pending());
-			let Poll::Ready(Ok(fill)) = requests.poll_requested_groups(&waiter) else {
+			let Poll::Ready(Ok(fill)) = requests.poll_requested_fill(&waiter) else {
 				panic!("{version}: missing history was not requested");
 			};
 			assert_eq!((fill.start().group, fill.end()), (0, 3));
@@ -17555,7 +17552,7 @@ mod stitch_tests {
 				.await
 				.unwrap();
 			assert!(futures::FutureExt::now_or_never(reading.recv_group()).is_none());
-			let fill = dynamic.requested_groups().await.unwrap();
+			let fill = dynamic.requested_fill().await.unwrap();
 			assert_eq!(
 				(fill.start().group, fill.end()),
 				(0, 7),
@@ -17829,7 +17826,7 @@ mod stitch_tests {
 			let dynamic = self.track.requests();
 			let mut fetch = Box::pin(self.track.consume().fetch_group(KEY, None));
 			assert!(futures::poll!(fetch.as_mut()).is_pending());
-			let fill = dynamic.requested_groups().await.expect("group request");
+			let fill = dynamic.requested_fill().await.expect("group request");
 			let slot = kio::Producer::new(GroupFetch::Ready(RangeFetch {
 				fill: std::sync::Arc::new(fill),
 				timescale,
@@ -18955,7 +18952,7 @@ mod joining_fetch_tests {
 		let consumer = track.consume();
 		let mut fetch = Box::pin(consumer.fetch_group(GROUP, None));
 		assert!(futures::poll!(fetch.as_mut()).is_pending());
-		let request = dynamic.requested_groups().await.expect("group request");
+		let request = dynamic.requested_fill().await.expect("group request");
 		let outcome = request.joined();
 		let mut run = Box::pin(subscriber.clone().run_group_fetch(
 			Path::from_static("broadcast"),
@@ -19204,7 +19201,7 @@ mod joining_fetch_tests {
 		let consumer = track.consume();
 		let mut fetch = std::pin::pin!(consumer.fetch_group(GROUP, None));
 		assert!(futures::poll!(fetch.as_mut()).is_pending());
-		let request = dynamic.requested_groups().await.expect("no group requested");
+		let request = dynamic.requested_fill().await.expect("no group requested");
 
 		subscriber
 			.clone()
@@ -19275,7 +19272,7 @@ mod joining_fetch_tests {
 					}
 				));
 				assert!(futures::poll!(fetch.as_mut()).is_pending());
-				let request = dynamic.requested_groups().await.expect("no group requested");
+				let request = dynamic.requested_fill().await.expect("no group requested");
 
 				subscriber
 					.clone()
@@ -19402,7 +19399,7 @@ mod joining_fetch_tests {
 			}
 		));
 		assert!(futures::poll!(fetch.as_mut()).is_pending());
-		let request = dynamic.requested_groups().await.expect("no group requested");
+		let request = dynamic.requested_fill().await.expect("no group requested");
 
 		let serving = kio::clock::sim::spawn(subscriber.clone().run_group_fetch(
 			Path::from_static("broadcast"),

@@ -16,6 +16,7 @@ import { Duration } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import fc from "fast-check";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
+import { defined } from "./defined.test-util.ts";
 import { NotFound, StreamCode, StreamError, TooFarBehind } from "./error.ts";
 import type { Frame, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { toHop, WireRoute } from "./hop.ts";
@@ -469,7 +470,7 @@ class Model {
 		});
 		const serving = wireOf(this.origin).receive(PATH, route);
 		const broadcast = new BroadcastProducer();
-		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+		const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 		void (async () => {
 			for await (const request of serving.requested()) {
 				request.serve(Upstream.of(broadcast, (key, local) => this.fill(instance, slot, key, local)));
@@ -625,7 +626,7 @@ class Model {
 		if (!instance.ended && reader.ranges === undefined) {
 			throw fail(index, "the track ended cleanly though no route declared an end");
 		}
-		const covered = (group: number) => (instance.ended ? true : within(reader.ranges, group));
+		const covered = (group: number) => (instance.ended ? covers(reader, group) : within(reader.ranges, group));
 		reader.carried = new Set();
 		for (let group = 0; group < GROUPS; group++) {
 			if (covered(group) && instance.live().every((copy) => complete(copy, group))) reader.carried.add(group);
@@ -1105,6 +1106,223 @@ test("regressions", async () => {
 				{ kind: "write", instance: 0, slot: 1, group: 2, frames: 1 },
 				{ kind: "write", instance: 0, slot: 1, group: 11, frames: 1 },
 				{ kind: "end", instance: 0, slot: 1 },
+			],
+			finish: false,
+		},
+		// A copy places a time start against the groups it holds, which may put it below where the
+		// reader's window did: the window decides, so the read hands out no group under it.
+		{
+			ops: [
+				{ kind: "join", reader: 0, spec: spec(false, "hour", [1, 3], false) },
+				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "write", instance: 0, slot: 0, group: 1, frames: 2 },
+				{ kind: "write", instance: 0, slot: 0, group: 0, frames: 1 },
+				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+			],
+			finish: false,
+		},
+		// After a failover, ranges replaced resolve from the newest copy to answer them, not from a
+		// replaced one whose cache lacks the group they start at.
+		{
+			ops: [
+				{ kind: "join", reader: 2, spec: spec(false, "hour", undefined, false) },
+				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "up", instance: 0, slot: 2 },
+				{ kind: "write", instance: 0, slot: 2, group: 2, frames: 1 },
+				{ kind: "ranges", reader: 2, range: [2, 3] },
+				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+			],
+			finish: false,
+		},
+		// Ranges replaced once the only route went down resolve on the closed copy, which places them
+		// against the groups it holds, so the read hands out no buffered group they leave out.
+		{
+			ops: [
+				{ kind: "up", instance: 1, slot: 1 },
+				{ kind: "write", instance: 1, slot: 1, group: 3, frames: 1 },
+				{ kind: "join", reader: 1, spec: spec(false, "hour", [1, 3], false) },
+				{ kind: "write", instance: 1, slot: 1, group: 2, frames: 1 },
+				{ kind: "down", instance: 1, slot: 1 },
+				{ kind: "ranges", reader: 1, range: [1, 2] },
+			],
+			finish: false,
+		},
+		// After a failover, a range moved back resolves from the first copy to answer it, even a
+		// replaced one under a failover cap, so the groups below that cap stay owed. Mirrors the
+		// Rust case.
+		{
+			ops: [
+				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "join", reader: 2, spec: spec(false, "hour", undefined, false) },
+				{ kind: "write", instance: 0, slot: 1, group: 7, frames: 2 },
+				{ kind: "up", instance: 0, slot: 0 },
+				{ kind: "down", instance: 0, slot: 1 },
+				{ kind: "ranges", reader: 2, range: [1, 8] },
+			],
+			finish: false,
+		},
+		// A group the window dropped from a copy with no resume point is asked of its route again
+		// once the ranges widen to name it.
+		{
+			ops: [
+				{ kind: "up", instance: 1, slot: 0 },
+				{ kind: "join", reader: 0, spec: spec(false, "hour", [3, 4], false) },
+				{ kind: "up", instance: 1, slot: 2 },
+				{ kind: "write", instance: 1, slot: 0, group: 3, frames: 1 },
+				{ kind: "write", instance: 1, slot: 2, group: undefined, frames: 1 },
+				{ kind: "down", instance: 1, slot: 0 },
+				{ kind: "ranges", reader: 0, range: undefined },
+			],
+			finish: false,
+		},
+		// Ranges widened below the serving copy's resume point ask its route for the groups they
+		// newly cover, as a route change does.
+		{
+			ops: [
+				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "join", reader: 3, spec: spec(false, "hour", [1, 3], false) },
+				{ kind: "write", instance: 0, slot: 1, group: 1, frames: 1 },
+				{ kind: "write", instance: 0, slot: 1, group: undefined, frames: 1 },
+				{ kind: "write", instance: 0, slot: 1, group: undefined, frames: 1 },
+				{ kind: "down", instance: 0, slot: 1 },
+				{ kind: "ranges", reader: 3, range: undefined },
+				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+			],
+			finish: false,
+		},
+		// An ordered reader reads a cached group its local floor kept out once the floor is lowered:
+		// the read stays open while the floor keeps it out.
+		{
+			ops: [
+				{ kind: "join", reader: 3, spec: spec(true, "hour", [0, 1], false) },
+				{ kind: "bounds", reader: 3, range: [1, 2] },
+				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "bounds", reader: 3, range: undefined },
+				{ kind: "read", reader: 0 },
+			],
+			finish: false,
+		},
+		// A bounded read ends by the window its copies placed, so a group under the resume point that
+		// the local floor keeps out stays owed.
+		{
+			ops: [
+				{ kind: "join", reader: 2, spec: spec(false, "hour", [1, 4], false) },
+				{ kind: "write", instance: 0, slot: 0, group: 2, frames: 1 },
+				{ kind: "bounds", reader: 2, range: [2, 4] },
+				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "join", reader: 0, spec: spec(false, "short", undefined, false) },
+			],
+			finish: false,
+		},
+		// A route's give-up is no arrival, so the gap below it does not age from then: a group landing
+		// there later still reaches the backfill asked for it.
+		{
+			ops: [
+				{ kind: "up", instance: 1, slot: 1 },
+				{ kind: "giveUp", instance: 1, slot: 1, group: 2 },
+				{ kind: "expire" },
+				{ kind: "up", instance: 1, slot: 2 },
+				{ kind: "join", reader: 0, spec: spec(false, "hour", undefined, false) },
+				{ kind: "write", instance: 1, slot: 1, group: undefined, frames: 1 },
+				{ kind: "write", instance: 1, slot: 2, group: 2, frames: 1 },
+				{ kind: "down", instance: 1, slot: 2 },
+				{ kind: "leave", reader: 1 },
+			],
+			finish: false,
+		},
+		// What a local track's subscribers ask for is no feed floor, so a drop it forgets under that is
+		// still accounted and the read ends with the track.
+		{
+			ops: [
+				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "join", reader: 0, spec: spec(false, "hour", [9, 12], false) },
+				{ kind: "up", instance: 0, slot: 2 },
+				{ kind: "giveUp", instance: 0, slot: 1, group: 1 },
+				{ kind: "expire" },
+				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+			],
+			finish: true,
+		},
+		// A local floor holds a read open only for a group the cache holds under it, so a range whose
+		// groups never arrived ends.
+		{
+			ops: [
+				{ kind: "join", reader: 1, spec: spec(false, "hour", [1, 2], false) },
+				{ kind: "bounds", reader: 1, range: [6, 12] },
+				{ kind: "write", instance: 0, slot: 0, group: 11, frames: 3 },
+				{ kind: "end", instance: 0, slot: 0 },
+				{ kind: "ranges", reader: 1, range: undefined },
+				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+			],
+			finish: false,
+		},
+		// A forgotten drop reaching a local track's first arrival stays accounted once a lower group
+		// lands, so no replaced copy is waited on for it.
+		{
+			ops: [
+				{ kind: "join", reader: 0, spec: spec(false, "hour", [10, 12], false) },
+				{ kind: "giveUp", instance: 0, slot: 0, group: 1 },
+				{ kind: "expire" },
+				{ kind: "write", instance: 0, slot: 0, group: 2, frames: 1 },
+				{ kind: "up", instance: 0, slot: 1 },
+			],
+			finish: true,
+		},
+		// A replaced copy is waited on only for groups the reader's window names.
+		{
+			ops: [
+				{ kind: "join", reader: 2, spec: spec(false, "hour", undefined, false) },
+				{ kind: "write", instance: 0, slot: 0, group: 9, frames: 1 },
+				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "down", instance: 0, slot: 0 },
+				{ kind: "ranges", reader: 2, range: [1, 2] },
+				{ kind: "write", instance: 0, slot: 0, group: 0, frames: 1 },
+			],
+			finish: false,
+		},
+		// A read that ends with the track owed the groups its cursor named then, as the Rust model
+		// judges it.
+		{
+			ops: [
+				{ kind: "up", instance: 1, slot: 1 },
+				{ kind: "up", instance: 1, slot: 0 },
+				{ kind: "join", reader: 0, spec: spec(false, "hour", [1, 3], false) },
+				{ kind: "write", instance: 1, slot: 0, group: undefined, frames: 1 },
+				{ kind: "write", instance: 1, slot: 1, group: 1, frames: 1 },
+				{ kind: "write", instance: 1, slot: 0, group: 11, frames: 1 },
+				{ kind: "down", instance: 1, slot: 1 },
+				{ kind: "end", instance: 1, slot: 0 },
+				{ kind: "ranges", reader: 0, range: undefined },
+				{ kind: "advance", ms: 1 },
+			],
+			finish: false,
+		},
+		// A time start under the serving copy's resume point is placed where it names, not at the floor
+		// that raised it, so the read waits on a group the local floor keeps out. Mirrors the Rust case.
+		{
+			ops: [
+				{ kind: "join", reader: 2, spec: spec(false, "hour", undefined, false) },
+				{ kind: "write", instance: 0, slot: 0, group: 8, frames: 3 },
+				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "down", instance: 0, slot: 0 },
+				{ kind: "bounds", reader: 2, range: [8, 9] },
+				{ kind: "ranges", reader: 2, range: [7, 9] },
+				{ kind: "read", reader: 0 },
+			],
+			finish: false,
+		},
+		// Ranges widened under the resume point of a copy whose failover cap cut their end short start
+		// where they name and keep their own end. Mirrors the Rust case.
+		{
+			ops: [
+				{ kind: "up", instance: 1, slot: 0 },
+				{ kind: "join", reader: 1, spec: spec(false, "hour", [3, 7], false) },
+				{ kind: "up", instance: 1, slot: 1 },
+				{ kind: "write", instance: 1, slot: 1, group: 3, frames: 1 },
+				{ kind: "write", instance: 1, slot: 1, group: 5, frames: 3 },
+				{ kind: "down", instance: 1, slot: 1 },
+				{ kind: "ranges", reader: 1, range: [1, 7] },
+				{ kind: "join", reader: 0, spec: spec(false, "hour", undefined, false) },
 			],
 			finish: false,
 		},

@@ -437,7 +437,10 @@ impl MoqBroadcastProducer {
 		let _guard = crate::ffi::enter();
 		self.with_state(|state| {
 			let info = raw_track_info(info)?;
-			let track = state.broadcast.create_track(name, Some(info))?;
+			let track = state
+				.broadcast
+				.create_track(name, Some(info))
+				.ok_or(moq_net::Error::Duplicate)?;
 			MoqTrackProducer::child(track, &state.children)
 		})
 	}
@@ -539,21 +542,12 @@ impl MoqTrackRequests {
 	/// Wait for the next run of groups readers miss: a fetch of an uncached group, or
 	/// history a subscription reads that the cache no longer holds.
 	///
-	/// Cached groups are served without reaching this method.
-	///
-	/// A reader's time start that no cached group places is looked up rather than filled; a
-	/// fill names groups, so the lookup is dropped unanswered here, and the reader falls back
-	/// to the groups held.
+	/// Cached groups are served without reaching this method. A reader's time start that no
+	/// cached group places asks for the group starting at that time, as any other.
 	pub async fn requested_fill(&self) -> Result<Arc<MoqFill>, MoqError> {
 		let fill = self
 			.reads
-			.wait(|requests, waiter| {
-				loop {
-					if let moq_net::track::Fill::Groups(fill) = ready!(requests.poll_requested_fill(waiter))? {
-						return Poll::Ready(Ok(fill));
-					}
-				}
-			})
+			.wait(|requests, waiter| requests.poll_requested_fill(waiter).map_err(Into::into))
 			.await?;
 		Ok(Arc::new(MoqFill::new(fill)))
 	}
@@ -640,7 +634,7 @@ impl MoqFill {
 	/// at [`start`](Self::start)'s frame, so its frames keep their indices.
 	pub fn accept(&self, start: u64) -> Result<Arc<MoqGroupProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
-		let group = self.inner.accept(start, None)?;
+		let group = self.inner.accept(start, None)?.ok_or(moq_net::Error::Duplicate)?;
 		Ok(Arc::new(MoqGroupProducer::from_inner(group)))
 	}
 

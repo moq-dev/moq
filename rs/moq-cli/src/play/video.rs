@@ -153,9 +153,6 @@ impl<O: Output> Video<O> {
 		// Signalled when a segment behind the front becomes the front.
 		let advanced = tokio::sync::Notify::new();
 		let role = self.presentation.track(moq_mux::container::Kind::Video);
-		// A missing group stops being waited for once the clock reaches the group after it,
-		// whose pictures would replace any late one it held.
-		track.set_playhead(self.presentation.consume());
 		let receive = async {
 			// Video has no jitter estimate, so its target is the encoder delay alone,
 			// which holds audio back with it.

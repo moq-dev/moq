@@ -68,6 +68,13 @@ pub(in crate::model) trait Holdings {
 	/// Where `time` falls among the groups held.
 	fn containing(&self, time: u64) -> Containing;
 
+	/// Runs of times that [`Self::containing`] can't place, so a window skips its time starts
+	/// in them rather than try each again whenever the groups held change. `None` when it
+	/// can't tell, so each is tried.
+	fn unplaced(&self) -> Option<Unplaced> {
+		None
+	}
+
 	/// The lowest group held starting at or after `from`.
 	fn next_start(&self, from: u64) -> Option<u64>;
 
@@ -115,6 +122,32 @@ pub(in crate::model) enum Containing {
 	Unknown,
 }
 
+/// What the track's history answered a time start's lookup with; see [`Window::found`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Found {
+	/// The group containing the time.
+	Group(u64),
+	/// No group starts from `floor`, the oldest key the lookup asked from, through the time.
+	Dropped { floor: u64 },
+	/// Nothing answered: no handler was left to.
+	Unanswered,
+}
+
+/// The times a hop's [`Holdings::containing`] can't place, as up to two runs: every time in
+/// them is [`Containing::Unknown`], except the few that `mark` places another way.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::model) struct Unplaced {
+	pub runs: [ops::RangeInclusive<u64>; 2],
+	/// Changes whenever a time inside the runs may have come to be placed by something other
+	/// than a group arriving or a drop, so a window that saw another mark tries every start.
+	pub mark: u64,
+}
+
+impl Unplaced {
+	/// An empty run, for a hop that places every time on one side.
+	pub const NONE: ops::RangeInclusive<u64> = ops::RangeInclusive::new(1, 0);
+}
+
 /// A hop that holds no groups of its own, such as a reader following route copies that
 /// resolve its ranges for it.
 pub(in crate::model) struct Unheld;
@@ -160,8 +193,11 @@ pub(in crate::model) struct Window {
 	/// every span.
 	looking: BTreeSet<(u64, u64)>,
 	/// The spans whose time start waits on a group arriving, which read only the groups from
-	/// that time meanwhile.
-	waiting: BTreeSet<u64>,
+	/// that time meanwhile: by that time, then key, so a change to the groups held tries only
+	/// those its [`Holdings::unplaced`] leaves out, found without visiting the rest.
+	waiting: BTreeSet<(u64, u64)>,
+	/// The [`Unplaced::mark`] every waiting span was last tried under.
+	waited: Option<u64>,
 	/// The ranges of a live join whose reach back waits on the groups held to measure the
 	/// live edge, which read nothing meanwhile: a group held is no reason to start at it.
 	reaching: BTreeSet<u64>,
@@ -189,8 +225,8 @@ struct Span {
 	end: Option<u64>,
 	/// Whether the start names a group, rather than reaching back to the oldest one.
 	floored: bool,
-	/// A time start the groups held can't place, looked up from the track's history: the
-	/// span reads nothing until the lookup answers.
+	/// A time start the groups held can't place, whose group a fill asks the track's history
+	/// for: the span reads nothing until it answers.
 	looking: Option<Looking>,
 	/// A time start the groups held can't place yet: the span reads only the groups from
 	/// that time until it can.
@@ -201,12 +237,12 @@ struct Span {
 	missable: Option<ops::RangeInclusive<u64>>,
 }
 
-/// A time start being looked up: its time, and the exclusive end of the run below every
-/// group held, which holds the group containing it if the track's history does.
+/// A time start being looked up: its time, and the oldest key the group containing it may
+/// start at, past every group held below it.
 #[derive(Clone, Copy, Debug)]
 struct Looking {
 	time: u64,
-	below: u64,
+	floor: u64,
 }
 
 impl Window {
@@ -234,6 +270,7 @@ impl Window {
 			pending: BTreeSet::new(),
 			looking: BTreeSet::new(),
 			waiting: BTreeSet::new(),
+			waited: None,
 			reaching: BTreeSet::new(),
 			groups: Cover::default(),
 			missable: Cover::default(),
@@ -279,7 +316,6 @@ impl Window {
 		}
 		self.pending.remove(&key);
 		self.reaching.remove(&key);
-		self.waiting.remove(&key);
 		if let Some(span) = self.spans.remove(&key) {
 			self.uncount(key, &span);
 		}
@@ -307,9 +343,12 @@ impl Window {
 		!self.reaching.is_empty()
 	}
 
-	/// Whether a time start still waits on the groups held to place it.
-	pub fn is_waiting(&self) -> bool {
-		!self.waiting.is_empty()
+	/// Whether a time start still waits on the groups held to place it, where the group
+	/// containing it may start above `floor`. One at or below the floor needs no placing: the
+	/// floor already keeps out every group but one starting there, and serves the first group
+	/// from it either way.
+	pub fn is_waiting_above(&self, floor: u64) -> bool {
+		self.waiting.last().is_some_and(|&(time, _)| time > floor)
 	}
 
 	/// Resolve what the groups now held settle: relative anchors once `latest` exists, and
@@ -341,22 +380,30 @@ impl Window {
 	}
 
 	/// Start the spans whose time start waits on a group, once one arrived, or once nothing
-	/// can arrive any more. Returns whether any did.
+	/// can arrive any more. Only the times the holdings may now place are tried, so a change
+	/// placing one of them costs that one, not every span still waiting. Returns whether any
+	/// started.
 	fn start_waiting(&mut self, holdings: &impl Holdings) -> bool {
+		let complete = holdings.complete();
+		let unplaced = holdings.unplaced().filter(|_| !complete);
+		let tried: Vec<(u64, u64)> = match unplaced {
+			Some(unplaced) if self.waited == Some(unplaced.mark) => outside(&unplaced.runs)
+				.flat_map(|gap| self.waiting.range((*gap.start(), 0)..=(*gap.end(), u64::MAX)))
+				.copied()
+				.collect(),
+			_ => {
+				self.waited = unplaced.map(|unplaced| unplaced.mark);
+				self.waiting.iter().copied().collect()
+			}
+		};
 		let mut started = false;
-		for key in std::mem::take(&mut self.waiting) {
-			let Anchor::Time(time) = self.spans[&key].anchor else {
-				unreachable!("only a time start waits on a group");
-			};
+		for (time, key) in tried {
 			let (start, floored) = match holdings.containing(time) {
 				Containing::Group(group) => (group, true),
 				// The group holding it is older than any held, or nothing can arrive.
 				Containing::Before => (0, false),
-				Containing::Unknown if holdings.complete() => (0, false),
-				Containing::Unknown => {
-					self.waiting.insert(key);
-					continue;
-				}
+				Containing::Unknown if complete => (0, false),
+				Containing::Unknown => continue,
 			};
 			started = true;
 			self.start_span(key, time, start, floored, holdings);
@@ -372,8 +419,8 @@ impl Window {
 		let mut span = self.spans.remove(&key).expect("a waiting span");
 		self.uncount(key, &span);
 		(span.start, span.floored, span.waiting) = (start, floored, false);
-		if let Some(below) = unresolved(time, start, floored, holdings).filter(|_| asked) {
-			span.looking = Some(Looking { time, below });
+		if let Some(floor) = unresolved(time, start, floored, holdings).filter(|_| asked) {
+			span.looking = Some(Looking { time, floor });
 		}
 		self.count(key, span, holdings);
 	}
@@ -438,9 +485,35 @@ impl Window {
 		})
 	}
 
+	/// The range keyed `key` while its time start waits on the groups held to place it: that
+	/// time, and the exclusive end it resolved to, `None` while it stays open.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub fn waiting_key(&self, key: u64) -> Option<(u64, Option<u64>)> {
+		let span = self.spans.get(&key)?;
+		span.waits_on().map(|time| (time, span.end))
+	}
+
 	/// Each range resolved, in key order, as [`Self::resolved_key`] reads it.
 	pub fn resolved(&self) -> Vec<Option<Resolved>> {
 		self.ranges.keys().map(|key| self.resolved_key(*key)).collect()
+	}
+
+	/// Each range resolved, by key, leaving out those [`Self::resolved_key`] can't place.
+	pub fn resolved_by_key(&self) -> BTreeMap<u64, Resolved> {
+		self.ranges
+			.keys()
+			.filter_map(|key| Some((*key, self.resolved_key(*key)?)))
+			.collect()
+	}
+
+	/// The keys of the ranges not yet settled, which keep [`Self::is_settled`] false: waiting
+	/// on a first group, on the groups held to place a start, or on a lookup. Costs those.
+	pub fn unsettled(&self) -> BTreeSet<u64> {
+		let mut keys = self.pending.clone();
+		keys.extend(self.reaching.iter().copied());
+		keys.extend(self.waiting.iter().map(|(_, key)| *key));
+		keys.extend(self.looking.iter().map(|(_, key)| *key));
+		keys
 	}
 
 	/// The exclusive end past every group in range, `None` when one stays open or an anchor
@@ -531,36 +604,56 @@ impl Window {
 		Some((*run.start()).max(range.start)..end)
 	}
 
-	/// The time starts still looked up, each with the exclusive end of the run below every
-	/// group held, which holds the group containing it if the track's history does.
+	/// The time starts still looked up, each with the oldest key the group containing it may
+	/// start at: past every group held below the time, which holds it if the track's history
+	/// has one.
 	pub fn lookups(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
 		self.looking
 			.iter()
-			.filter_map(|(_, key)| self.spans[key].looking.map(|looking| (looking.time, looking.below)))
+			.filter_map(|(_, key)| self.spans[key].looking.map(|looking| (looking.time, looking.floor)))
 	}
 
-	/// The lookup of time start `time` answered with the group containing it, or the oldest
-	/// group of the history when `time` is older than all of it: its spans start there, once
-	/// that group is held. `None`, or an answer not held, means the history couldn't tell, so
-	/// they start where the groups held say. Returns whether the groups in range moved.
-	pub fn found(&mut self, time: u64, group: Option<u64>, holdings: &impl Holdings) -> bool {
-		let found: Vec<u64> = self
+	/// The lookup of time start `time` answered: its spans start where the answer says,
+	/// never where the groups held happen to. Left unanswered because no handler is left,
+	/// they start where the groups held say, as with no handler at all, unless the cache since
+	/// evicted the group their floor was past and a handler is back: then the history may
+	/// hold the answer below that floor, so they look it up again from lower down. Each
+	/// look-up again needs another eviction, so it ends. Returns whether the groups in range
+	/// moved.
+	pub fn found(&mut self, time: u64, found: Found, holdings: &impl Holdings) -> bool {
+		let keys: Vec<u64> = self
 			.looking
 			.range((time, 0)..=(time, u64::MAX))
 			.map(|(_, key)| *key)
 			.collect();
-		if found.is_empty() {
+		if keys.is_empty() {
 			return false;
 		}
-		let held = group.filter(|group| holdings.next_start(*group) == Some(*group));
-		for key in found {
+		for key in keys {
 			let mut span = self.spans.remove(&key).expect("a span looking up its start");
 			self.uncount(key, &span);
-			span.looking = None;
-			(span.start, span.floored) = match (held, holdings.containing(time)) {
-				(Some(group), _) | (None, Containing::Group(group)) => (group, true),
-				(None, _) => (0, false),
+			let asked = span.looking.take().map(|looking| looking.floor);
+			(span.start, span.floored) = match found {
+				Found::Group(group) => (group, true),
+				// A floor is one past the group held below the time, which then holds it; from 0,
+				// no group starts at or before it, so the span reads from the time on.
+				Found::Dropped { floor } => (floor.checked_sub(1).unwrap_or(time), true),
+				Found::Unanswered => match holdings.containing(time) {
+					Containing::Group(group) => (group, true),
+					_ => (0, false),
+				},
 			};
+			if let Found::Unanswered = found {
+				let floor = match span.floored {
+					true => unresolved(time, span.start, true, holdings),
+					// Nothing held at or before the time any more, maybe nothing at all: the group
+					// containing it may start anywhere below the floor asked.
+					false => holdings.looks_up().then_some(0),
+				};
+				span.looking = floor
+					.filter(|floor| asked.is_some_and(|asked| *floor < asked))
+					.map(|floor| Looking { time, floor });
+			}
 			self.count(key, span, holdings);
 		}
 		self.covered = None;
@@ -588,6 +681,8 @@ impl Window {
 		for key in keys {
 			self.place_range(key, latest, holdings);
 		}
+		// Each span waiting was just tried against these holdings.
+		self.waited = holdings.unplaced().map(|unplaced| unplaced.mark);
 		Ok(())
 	}
 
@@ -624,7 +719,6 @@ impl Window {
 			// [`Self::start_waiting`].
 			Start::Waiting => {
 				let span = Span::new(anchor, 0, end, false, None);
-				self.waiting.insert(key);
 				self.count(key, Span { waiting: true, ..span }, holdings);
 				return;
 			}
@@ -633,7 +727,7 @@ impl Window {
 		// join's reach back never looks one up: it starts from what this hop holds.
 		let looking = match (range.start, anchor) {
 			(Anchor::Time(_), Anchor::Time(time)) => {
-				unresolved(time, start, floored, holdings).map(|below| Looking { time, below })
+				unresolved(time, start, floored, holdings).map(|floor| Looking { time, floor })
 			}
 			_ => None,
 		};
@@ -661,6 +755,9 @@ impl Window {
 		if let Some(looking) = span.looking {
 			self.looking.insert((looking.time, key));
 		}
+		if let Some(time) = span.waits_on() {
+			self.waiting.insert((time, key));
+		}
 		self.spans.insert(key, span);
 	}
 
@@ -685,10 +782,21 @@ impl Window {
 		if let Some(looking) = span.looking {
 			self.looking.remove(&(looking.time, key));
 		}
+		if let Some(time) = span.waits_on() {
+			self.waiting.remove(&(time, key));
+		}
 	}
 }
 
 impl Span {
+	/// The time start it waits on the groups held to place, if any.
+	fn waits_on(&self) -> Option<u64> {
+		match (self.waiting, self.anchor) {
+			(true, Anchor::Time(time)) => Some(time),
+			_ => None,
+		}
+	}
+
 	fn new(anchor: Anchor, start: u64, end: Option<u64>, floored: bool, looking: Option<Looking>) -> Self {
 		Self {
 			anchor,
@@ -751,6 +859,25 @@ fn check<'a>(mut ranges: impl Iterator<Item = &'a Range> + Clone, holdings: &imp
 	Ok(())
 }
 
+/// The times outside `runs`, lowest first, as runs.
+fn outside(runs: &[ops::RangeInclusive<u64>]) -> impl Iterator<Item = ops::RangeInclusive<u64>> + '_ {
+	let mut from = Some(0);
+	let mut runs = runs.iter().filter(|run| !run.is_empty());
+	std::iter::from_fn(move || {
+		loop {
+			let at = from?;
+			let Some(run) = runs.next() else {
+				from = None;
+				return Some(at..=u64::MAX);
+			};
+			from = run.end().checked_add(1).map(|next| next.max(at));
+			if at < *run.start() {
+				return Some(at..=*run.start() - 1);
+			}
+		}
+	})
+}
+
 /// The Min Age a live join reaches back by: `min`, for [`Range::live`], where this hop resolves
 /// its own ranges. Any other start names where it starts, the oldest one included, which asks for
 /// everything the budget keeps. A zero minimum starts at the latest group anyway.
@@ -804,21 +931,22 @@ fn start(anchor: Anchor, latest: Option<u64>, holdings: &impl Holdings) -> Start
 	}
 }
 
-/// The exclusive end of the run a lookup of time start `time`, resolved to `start`, searches,
-/// when the groups held can't tell which group contains it and a handler may: it is before
-/// every group held, or a group the cache evicted may start after `start`, the newest held
-/// at or before it, and still at or before `time`. Keys the producer skipped hold none.
+/// The oldest key a fill of the group containing time start `time`, resolved to `start`,
+/// asks from, when the groups held can't tell which group contains it and a handler may: it
+/// is before every group held, or a group the cache evicted may start after `start`, the
+/// newest held at or before it, and still at or before `time`. Keys the producer skipped
+/// hold none.
 fn unresolved(time: u64, start: u64, floored: bool, holdings: &impl Holdings) -> Option<u64> {
 	if !holdings.looks_up() {
 		return None;
 	}
 	if !floored {
-		return holdings.next_start(0);
+		return holdings.next_start(0).map(|_| 0);
 	}
 	let next = start.checked_add(1)?;
 	let after = holdings.next_start(next)?;
 	let gap = next..after.min(time.saturating_add(1));
-	(!holdings.never_produced(gap)).then_some(after)
+	(!holdings.never_produced(gap)).then_some(next)
 }
 
 /// Where a range stops, exclusive, or `None` while it waits on a latest group. `Some(None)`
@@ -853,6 +981,9 @@ mod tests {
 		skipped: Vec<ops::Range<u64>>,
 		complete: bool,
 		looks_up: bool,
+		/// Every key below this was dropped, so a time below it is placed before every
+		/// group even while none is held.
+		dropped: u64,
 	}
 
 	impl Keys {
@@ -872,9 +1003,20 @@ mod tests {
 		fn containing(&self, time: u64) -> Containing {
 			match self.held.range(..=time).next_back() {
 				Some(key) => Containing::Group(*key),
-				None if self.held.is_empty() => Containing::Unknown,
+				None if self.held.is_empty() && time >= self.dropped => Containing::Unknown,
 				None => Containing::Before,
 			}
+		}
+
+		fn unplaced(&self) -> Option<Unplaced> {
+			let unknown = match self.held.is_empty() {
+				true => self.dropped..=u64::MAX,
+				false => Unplaced::NONE,
+			};
+			Some(Unplaced {
+				runs: [unknown, Unplaced::NONE],
+				mark: 0,
+			})
 		}
 
 		fn next_start(&self, from: u64) -> Option<u64> {
@@ -898,6 +1040,114 @@ mod tests {
 					.skipped
 					.iter()
 					.any(|run| run.start <= keys.start && keys.end <= run.end)
+		}
+	}
+
+	/// [`Keys`] keeping its [`Holdings::unplaced`] to itself, so a window tries every start
+	/// still waiting on each change.
+	struct Blind<'a>(&'a Keys);
+
+	impl Holdings for Blind<'_> {
+		fn looks_up(&self) -> bool {
+			self.0.looks_up()
+		}
+
+		fn containing(&self, time: u64) -> Containing {
+			self.0.containing(time)
+		}
+
+		fn next_start(&self, from: u64) -> Option<u64> {
+			self.0.next_start(from)
+		}
+
+		fn back(&self, latest: u64, back: u64) -> Option<u64> {
+			self.0.back(latest, back)
+		}
+
+		fn complete(&self) -> bool {
+			self.0.complete()
+		}
+
+		fn never_produced(&self, keys: ops::Range<u64>) -> bool {
+			self.0.never_produced(keys)
+		}
+	}
+
+	/// Everything a reader of `window` sees.
+	fn seen(window: &Window) -> impl PartialEq + std::fmt::Debug {
+		let lookups: BTreeSet<_> = window.lookups().collect();
+		(
+			window.runs(0).collect::<Vec<_>>(),
+			window.missable(0).collect::<Vec<_>>(),
+			(window.floor(), window.start(), window.named(), window.end()),
+			(
+				window.resolved(),
+				lookups,
+				window.is_settled(),
+				!window.waiting.is_empty(),
+			),
+		)
+	}
+
+	proptest::proptest! {
+		/// A window that skips the starts its holdings can't place sees what one trying every
+		/// start sees, through groups arriving and leaving, drops, edits, lookups answering,
+		/// and the track completing.
+		#[test]
+		fn settling_by_steps_matches_trying_every_start(
+			ranges in proptest::collection::vec((proptest::bool::weighted(0.2), 0u64..40, proptest::option::of(0u64..48)), 1..12),
+			ops in proptest::collection::vec((0u8..6, 0u64..48), 0..24),
+			looks_up: bool,
+		) {
+			let to_range = |(relative, start, end): (bool, u64, Option<u64>)| {
+				let start = match relative {
+					true => Anchor::Relative(start % 6),
+					false => time(start),
+				};
+				range(start, end.map(time))
+			};
+			let ranges: Vec<Range> = ranges.into_iter().map(to_range).collect();
+			let mut next_key = ranges.len() as u64;
+			let mut keys = Keys {
+				looks_up,
+				..Keys::default()
+			};
+			let mut fast = Window::new(&ranges, None, None, &keys).unwrap();
+			let mut full = Window::new(&ranges, None, None, &Blind(&keys)).unwrap();
+			for (op, value) in ops {
+				let latest = keys.held.last().copied();
+				match op {
+					0 => drop(keys.held.insert(value)),
+					1 => keys.dropped = keys.dropped.max(value),
+					2 => {
+						let Some((time, floor)) = fast.lookups().next() else {
+							continue;
+						};
+						let answer = match value % 3 {
+							0 => Found::Group(value),
+							1 => Found::Dropped { floor },
+							_ => Found::Unanswered,
+						};
+						fast.found(time, answer, &keys);
+						full.found(time, answer, &Blind(&keys));
+					}
+					3 => keys.complete = true,
+					// Retire one range and add a time start, placed against what is held now.
+					4 => {
+						let added = [(next_key, range(time(value), None))];
+						next_key += 1;
+						let retired = [value % next_key];
+						fast.edit(retired, &added, latest, &keys).unwrap();
+						full.edit(retired, &added, latest, &Blind(&keys)).unwrap();
+					}
+					// The oldest group held is evicted.
+					_ => drop(keys.held.pop_first()),
+				}
+				let latest = keys.held.last().copied();
+				fast.settle(latest, &keys);
+				full.settle(latest, &Blind(&keys));
+				proptest::prop_assert_eq!(seen(&fast), seen(&full));
+			}
 		}
 	}
 
@@ -1190,19 +1440,20 @@ mod tests {
 		assert!(window.covered_by(0, None, &accounted));
 	}
 
-	/// With a handler serving the history, a time start the groups held can't place is looked
-	/// up and reads nothing meanwhile: before every start, or with a group the cache evicted
-	/// possibly starting between the newest held at or before it and the time. The answer
-	/// places it; none leaves what the groups held say.
+	/// With a handler serving the history, a time start the groups held can't place asks a
+	/// fill for its group from past the newest held below it, and reads nothing meanwhile:
+	/// before every start, or with a group the cache evicted possibly starting between the
+	/// newest held at or before it and the time. The answer places it: a drop from 0 says no
+	/// group starts at or before it, so it reads from the time on.
 	#[test]
 	fn a_time_start_the_groups_cant_place_is_looked_up() {
 		let mut keys = Keys::new([4000, 9000]);
 		keys.looks_up = true;
 		let mut window = Window::new(&[range(time(8500), None)], None, Some(9000), &keys).unwrap();
-		assert_eq!(window.lookups().collect::<Vec<_>>(), [(8500, 9000)]);
+		assert_eq!(window.lookups().collect::<Vec<_>>(), [(8500, 4001)]);
 		assert!(!window.is_settled() && !window.contains(9000) && window.resolved() == [None]);
 		keys.held.insert(8000);
-		assert!(window.found(8500, Some(8000), &keys));
+		assert!(window.found(8500, Found::Group(8000), &keys));
 		assert_eq!(
 			window.resolved(),
 			[Some(Resolved {
@@ -1219,17 +1470,86 @@ mod tests {
 		assert_eq!(window.lookups().count(), 0, "8000 starts exactly there");
 
 		let mut window = Window::new(&[range(time(500), None)], None, Some(9000), &keys).unwrap();
-		assert_eq!(window.lookups().collect::<Vec<_>>(), [(500, 4000)]);
-		assert!(window.found(500, None, &keys));
+		assert_eq!(window.lookups().collect::<Vec<_>>(), [(500, 0)]);
+		assert!(window.found(500, Found::Dropped { floor: 0 }, &keys));
 		assert_eq!(
 			window.resolved(),
 			[Some(Resolved {
-				start: 0,
+				start: 500,
 				end: None,
-				floored: false
+				floored: true
 			})]
 		);
 		assert!(window.contains(4000) && !window.missable(0).any(|run| *run.start() < 500));
+		// A group below the time held since is none of the answer's.
+		keys.held.insert(200);
+		assert!(!window.contains(200));
+	}
+
+	/// A dropped lookup starts at the group its floor was past, which then holds the time,
+	/// whatever the cache holds by the answer: that group evicted, or another arrived between.
+	#[test]
+	fn a_dropped_lookup_starts_below_its_floor() {
+		let history = |held: &[u64]| Keys {
+			looks_up: true,
+			..Keys::new(held.iter().copied())
+		};
+		// 4000 evicted while the lookup was out, or 8000 arrived between, as another reader's
+		// fill brings it.
+		for held in [&[9000][..], &[4000, 8000, 9000]] {
+			let mut window =
+				Window::new(&[range(time(8500), None)], None, Some(9000), &history(&[4000, 9000])).unwrap();
+			assert_eq!(window.lookups().collect::<Vec<_>>(), [(8500, 4001)]);
+			assert!(window.found(8500, Found::Dropped { floor: 4001 }, &history(held)));
+			assert_eq!(window.lookups().count(), 0, "answered, not looked up again");
+			assert_eq!(
+				window.resolved(),
+				[Some(Resolved {
+					start: 4000,
+					end: None,
+					floored: true
+				})]
+			);
+		}
+	}
+
+	/// The group a lookup's floor was past evicted while it was out, a lookup left unanswered
+	/// looks the time up again from below once a handler is back, where the history may hold
+	/// the group containing it, rather than starting where the groups still held say.
+	#[test]
+	fn an_eviction_during_a_lookup_looks_it_up_again() {
+		let mut keys = Keys::new([4000, 9000]);
+		keys.looks_up = true;
+		let mut window = Window::new(&[range(time(8500), None)], None, Some(9000), &keys).unwrap();
+		assert_eq!(window.lookups().collect::<Vec<_>>(), [(8500, 4001)]);
+		keys.held.remove(&4000);
+		assert!(window.found(8500, Found::Unanswered, &keys));
+		assert_eq!(
+			window.lookups().collect::<Vec<_>>(),
+			[(8500, 0)],
+			"looked up from below"
+		);
+		assert!(!window.contains(9000), "reads nothing meanwhile");
+		keys.held.insert(4000);
+		assert!(window.found(8500, Found::Group(4000), &keys));
+		assert_eq!(window.resolved()[0].map(|resolved| resolved.start), Some(4000));
+
+		// Even with the cache emptied.
+		let mut window = Window::new(&[range(time(8500), None)], None, Some(9000), &keys).unwrap();
+		let all = std::mem::take(&mut keys.held);
+		assert!(window.found(8500, Found::Unanswered, &keys));
+		assert_eq!(
+			window.lookups().collect::<Vec<_>>(),
+			[(8500, 0)],
+			"looked up from below"
+		);
+		keys.held = all;
+
+		// With nothing evicted, it starts where the groups held say.
+		let mut window = Window::new(&[range(time(8500), None)], None, Some(9000), &keys).unwrap();
+		assert!(window.found(8500, Found::Unanswered, &keys));
+		assert_eq!(window.lookups().count(), 0);
+		assert_eq!(window.resolved()[0].map(|resolved| resolved.start), Some(4000));
 	}
 
 	/// Keys the producer skipped hold no group, even in the history, so a start in a skipped
@@ -1251,8 +1571,8 @@ mod tests {
 		let mut keys = Keys::new([4000, 9000]);
 		keys.looks_up = true;
 		let mut window = Window::new(&[range(time(500), time(3000))], None, Some(9000), &keys).unwrap();
-		assert_eq!(window.lookups().collect::<Vec<_>>(), [(500, 4000)]);
-		assert!(window.found(500, None, &keys));
+		assert_eq!(window.lookups().collect::<Vec<_>>(), [(500, 0)]);
+		assert!(window.found(500, Found::Unanswered, &keys));
 		assert!(window.is_settled());
 		assert_eq!(
 			window.resolved(),

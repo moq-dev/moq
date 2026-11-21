@@ -75,7 +75,7 @@ impl Waiter {
 
 	/// Whether this is a [`noop`](Self::noop) waiter.
 	#[inline]
-	pub(crate) fn is_noop(&self) -> bool {
+	pub fn is_noop(&self) -> bool {
 		self.noop
 	}
 

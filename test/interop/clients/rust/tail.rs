@@ -118,7 +118,9 @@ async fn main() -> anyhow::Result<()> {
 			if datagram {
 				// Untimed: the OBJECT_DATAGRAM carries no timestamp, so the subscriber can
 				// check the payload alone. Stay open until each one is acknowledged.
-				let mut track = broadcast.create_datagrams("tail", moq_net::datagram::Info::default())?;
+				let mut track = broadcast
+					.create_datagrams("tail", moq_net::datagram::Info::default())
+					.context("the track already exists")?;
 				route.announce()?;
 				let session = client
 					.clone()
@@ -143,18 +145,20 @@ async fn main() -> anyhow::Result<()> {
 				session.close().await?;
 				eprintln!("tail acknowledged");
 			} else {
-				let mut track = broadcast.create_track(
-					"tail",
-					moq_net::track::Info::default()
-						.with_timescale(moq_net::Timescale::MILLI)
-						.with_compression(match compress {
-							true => moq_net::track::Compression::Deflate,
-							false => moq_net::track::Compression::None,
-						})
-						// `cached` and `late` read groups a newer one supersedes, which the default
-						// zero max age would leave stale.
-						.with_max_age(None),
-				)?;
+				let mut track = broadcast
+					.create_track(
+						"tail",
+						moq_net::track::Info::default()
+							.with_timescale(moq_net::Timescale::MILLI)
+							.with_compression(match compress {
+								true => moq_net::track::Compression::Deflate,
+								false => moq_net::track::Compression::None,
+							})
+							// `cached` and `late` read groups a newer one supersedes, which the default
+							// zero max age would leave stale.
+							.with_max_age(None),
+					)
+					.context("the track already exists")?;
 				route.announce()?;
 				if cached {
 					write(&mut track, mode)?;

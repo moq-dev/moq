@@ -6,6 +6,7 @@ import {
 	type Containing,
 	clamped,
 	EMPTY,
+	type Found,
 	type Holdings,
 	isEmpty,
 	isWire,
@@ -17,6 +18,7 @@ import {
 	rangesStart,
 	span,
 	UNHELD,
+	type Unplaced,
 	union,
 	Window,
 	wireRanges,
@@ -40,12 +42,16 @@ const groups = (start: bigint, end?: bigint): Range =>
 
 const ascending = (a: bigint, b: bigint) => (a < b ? -1 : a > b ? 1 : 0);
 
-/** The group starts a hop holds, the key runs its producer skipped, and whether a handler serves its history. */
+/**
+ * The group starts a hop holds, the key runs its producer skipped, whether a handler serves its
+ * history, and where the dropped prefix ends, which places a time below it before every group.
+ */
 class Keys implements Holdings {
 	held: Set<bigint>;
 	skipped: Run[] = [];
 	done = false;
 	looks = false;
+	dropped = 0n;
 
 	constructor(held: Iterable<bigint> = []) {
 		this.held = new Set(held);
@@ -63,7 +69,11 @@ class Keys implements Holdings {
 		const sorted = this.#sorted();
 		const group = sorted.filter((key) => key <= at).at(-1);
 		if (group !== undefined) return { group };
-		return sorted.length === 0 ? "unknown" : "before";
+		return sorted.length === 0 && at >= this.dropped ? "unknown" : "before";
+	}
+
+	unplaced(): Unplaced {
+		return { runs: this.held.size === 0 ? [{ start: this.dropped, end: UNBOUNDED }] : [], mark: 0 };
 	}
 
 	nextStart(from: bigint): bigint | undefined {
@@ -179,6 +189,19 @@ describe("Window", () => {
 		expect(covered(ended, held.held)).toEqual(keys(0n, 8n));
 	});
 
+	test("a relative start past every group asks from the oldest group held when placed", () => {
+		const held = new Keys([33n, 66n, 99n]);
+		const window = new Window([range(relative(10n))], 99n, held);
+		expect(window.missable()).toEqual([{ start: 33n, end: UNBOUNDED }]);
+		// Neither an older group arriving nor the oldest evicted moves it, as in Rust.
+		held.held.add(20n);
+		expect(window.settle(99n, held)).toBe(false);
+		held.held.delete(20n);
+		held.held.delete(33n);
+		expect(window.settle(99n, held)).toBe(false);
+		expect(window.missable()).toEqual([{ start: 33n, end: UNBOUNDED }]);
+	});
+
 	test("relative anchors count groups back from the latest", () => {
 		let held = new Keys([0n, 33n, 66n, 99n]);
 		let window = new Window([range(relative(2n), relative(1n))], 99n, held);
@@ -278,10 +301,10 @@ describe("Window", () => {
 		const held = new Keys([4000n, 9000n]);
 		held.looks = true;
 		let window = new Window([range(time(8500n))], 9000n, held);
-		expect(window.lookups()).toEqual([{ time: 8500n, below: 9000n }]);
+		expect(window.lookups()).toEqual([{ time: 8500n, floor: 4001n }]);
 		expect([window.settled, window.contains(9000n), window.resolved()]).toEqual([false, false, [undefined]]);
 		held.held.add(8000n);
-		expect(window.found(8500n, 8000n, held)).toBe(true);
+		expect(window.found(8500n, { kind: "group", group: 8000n }, held)).toBe(true);
 		expect(window.resolved()).toEqual([{ start: 8000n, end: undefined, floored: true }]);
 		expect(window.settled).toBe(true);
 
@@ -291,14 +314,66 @@ describe("Window", () => {
 		expect(new Window([range(time(8000n))], 9000n, held).lookups()).toHaveLength(0);
 
 		window = new Window([range(time(500n))], 9000n, held);
-		expect(window.lookups()).toEqual([{ time: 500n, below: 4000n }]);
-		expect(window.found(500n, undefined, held)).toBe(true);
-		expect(window.resolved()).toEqual([{ start: 0n, end: undefined, floored: false }]);
+		expect(window.lookups()).toEqual([{ time: 500n, floor: 0n }]);
+		// A drop from 0 says no group starts at or before it, so it reads from the time on.
+		expect(window.found(500n, { kind: "dropped", floor: 0n }, held)).toBe(true);
+		expect(window.resolved()).toEqual([{ start: 500n, end: undefined, floored: true }]);
 		expect(window.contains(4000n)).toBe(true);
 		expect(window.missable(0n).some((run) => run.start < 500n)).toBe(false);
+		// A group below the time held since is none of the answer's.
+		held.held.add(200n);
+		expect(window.contains(200n)).toBe(false);
+		held.held.delete(200n);
 
 		// A lookup nobody asked for is ignored.
-		expect(window.found(500n, undefined, held)).toBe(false);
+		expect(window.found(500n, { kind: "unanswered" }, held)).toBe(false);
+	});
+
+	test("a dropped lookup starts below its floor", () => {
+		const history = (keys: bigint[]) => {
+			const held = new Keys(keys);
+			held.looks = true;
+			return held;
+		};
+		// 4000 evicted while the lookup was out, or 8000 arrived between, as another reader's fill
+		// brings it.
+		for (const held of [[9000n], [4000n, 8000n, 9000n]]) {
+			const window = new Window([range(time(8500n))], 9000n, history([4000n, 9000n]));
+			expect(window.lookups()).toEqual([{ time: 8500n, floor: 4001n }]);
+			expect(window.found(8500n, { kind: "dropped", floor: 4001n }, history(held))).toBe(true);
+			// Answered, not looked up again.
+			expect(window.lookups()).toHaveLength(0);
+			expect(window.resolved()).toEqual([{ start: 4000n, end: undefined, floored: true }]);
+		}
+	});
+
+	test("an eviction during an unanswered lookup looks it up again", () => {
+		const held = new Keys([4000n, 9000n]);
+		held.looks = true;
+		let window = new Window([range(time(8500n))], 9000n, held);
+		expect(window.lookups()).toEqual([{ time: 8500n, floor: 4001n }]);
+		held.held.delete(4000n);
+		expect(window.found(8500n, { kind: "unanswered" }, held)).toBe(true);
+		// Looked up from below, reading nothing meanwhile.
+		expect(window.lookups()).toEqual([{ time: 8500n, floor: 0n }]);
+		expect(window.contains(9000n)).toBe(false);
+		held.held.add(4000n);
+		expect(window.found(8500n, { kind: "group", group: 4000n }, held)).toBe(true);
+		expect(window.resolved()[0]?.start).toBe(4000n);
+
+		// Even with the cache emptied.
+		window = new Window([range(time(8500n))], 9000n, held);
+		const all = held.held;
+		held.held = new Set();
+		expect(window.found(8500n, { kind: "unanswered" }, held)).toBe(true);
+		expect(window.lookups()).toEqual([{ time: 8500n, floor: 0n }]);
+		held.held = all;
+
+		// With nothing evicted, it starts where the groups held say.
+		window = new Window([range(time(8500n))], 9000n, held);
+		expect(window.found(8500n, { kind: "unanswered" }, held)).toBe(true);
+		expect(window.lookups()).toHaveLength(0);
+		expect(window.resolved()[0]?.start).toBe(4000n);
 	});
 
 	test("a skipped gap needs no lookup", () => {
@@ -325,8 +400,8 @@ describe("Window", () => {
 		const held = new Keys([4000n, 9000n]);
 		held.looks = true;
 		const window = new Window([range(time(500n), time(3000n))], 9000n, held);
-		expect(window.lookups()).toEqual([{ time: 500n, below: 4000n }]);
-		expect(window.found(500n, undefined, held)).toBe(true);
+		expect(window.lookups()).toEqual([{ time: 500n, floor: 0n }]);
+		expect(window.found(500n, { kind: "unanswered" }, held)).toBe(true);
 		expect(window.settled).toBe(true);
 		expect(window.resolved()).toEqual([{ start: 0n, end: 3001n, floored: false }]);
 	});
@@ -507,4 +582,121 @@ describe("ranges", () => {
 		expect(joinsLive([groups(3n)])).toBe(false);
 		expect(joinsLive([range(relative(2n), relative(0n))])).toBe(false);
 	});
+});
+
+/** {@link Keys} keeping its unplaced times to itself, so a window tries every start on each change. */
+function blind(keys: Keys): Holdings {
+	return {
+		resolves: () => true,
+		looksUp: () => keys.looksUp(),
+		neverProduced: (start, end) => keys.neverProduced(start, end),
+		complete: () => keys.complete(),
+		containing: (at) => keys.containing(at),
+		nextStart: (from) => keys.nextStart(from),
+		back: (latest, back) => keys.back(latest, back),
+	};
+}
+
+test("window: settling by steps matches trying every start and rebuilding from the spans", () => {
+	let seed = 11;
+	const random = (below: number) => {
+		seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+		// The high bits: an LCG's low bits cycle.
+		return (seed >>> 16) % below;
+	};
+	const seen = (window: Window) => ({
+		runs: window.runs(),
+		missable: window.missable(),
+		bounds: [window.floor(), window.start(), window.end()],
+		resolved: window.resolved(),
+		lookups: window.lookups().map((lookup) => lookup.time),
+		state: [window.settled, window.pending],
+	});
+	for (let round = 0; round < 3000; round++) {
+		const ranges = Array.from({ length: 1 + random(11) }, () => {
+			const start = random(5) === 0 ? relative(BigInt(random(6))) : time(BigInt(random(40)));
+			return range(start, random(3) === 0 ? undefined : time(BigInt(random(48))));
+		});
+		const keys = new Keys();
+		keys.looks = random(2) === 0;
+		const fast = new Window(ranges, undefined, keys);
+		const full = new Window(ranges, undefined, blind(keys));
+		for (let step = random(24); step > 0; step--) {
+			const value = BigInt(random(48));
+			const op = random(5);
+			if (op === 0) keys.held.add(value);
+			else if (op === 1) {
+				if (value > keys.dropped) keys.dropped = value;
+			} else if (op === 2) {
+				const lookup = fast.lookups()[0];
+				if (lookup === undefined) continue;
+				const answer: Found =
+					value % 3n === 0n
+						? { kind: "group", group: value }
+						: value % 3n === 1n
+							? { kind: "dropped", floor: lookup.floor }
+							: { kind: "unanswered" };
+				fast.found(lookup.time, answer, keys);
+				full.found(lookup.time, answer, blind(keys));
+			} else if (op === 3) keys.done = true;
+			else if (op === 4) keys.held.delete(keys.nextStart(0n) ?? 0n);
+			const latest = [...keys.held].sort(ascending).at(-1);
+			fast.settle(latest, keys);
+			full.settle(latest, blind(keys));
+			expect(seen(fast)).toEqual(seen(full));
+			// A window waiting on a latest group reads everything, with no spans yet.
+			if (fast.pending) continue;
+			const fresh = fast.fresh();
+			expect(fast.runs()).toEqual(fresh.runs);
+			expect(fast.missable()).toEqual(fresh.missable);
+			expect(fast.named()).toBe(fresh.named);
+		}
+	}
+});
+
+test("window: an edit by key matches building the edited ranges afresh", () => {
+	let seed = 23;
+	const random = (below: number) => {
+		seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+		// The high bits: an LCG's low bits cycle.
+		return (seed >>> 16) % below;
+	};
+	const any = (): Range => {
+		const kind = random(6);
+		const start = kind === 0 ? relative(BigInt(random(6))) : kind === 1 ? undefined : time(BigInt(random(40)));
+		const end =
+			random(3) === 0 ? undefined : random(5) === 0 ? relative(BigInt(random(4))) : time(BigInt(random(48)));
+		return range(start, end);
+	};
+	const seen = (window: Window) => ({
+		ranges: window.ranges,
+		runs: window.runs(),
+		missable: window.missable(),
+		bounds: [window.floor(), window.start(), window.end()],
+		resolved: window.resolved(),
+		lookups: window.lookups().map((lookup) => lookup.time),
+		state: [window.settled, window.pending, window.wired],
+	});
+	for (let round = 0; round < 2000; round++) {
+		// Fixed holdings, so ranges left alone resolve as a fresh build resolves them.
+		const keys = new Keys(Array.from({ length: random(8) }, () => BigInt(random(48))));
+		keys.looks = random(2) === 0;
+		const latest = [...keys.held].sort(ascending).at(-1);
+		const held = new Map<bigint, Range>();
+		let next = 0n;
+		for (let count = random(8); count > 0; count--) held.set(next++, any());
+		const window = Window.keyed(held, latest, keys);
+		for (let step = random(16); step > 0; step--) {
+			const retire: bigint[] = [];
+			const add: [bigint, Range][] = [];
+			for (const key of held.keys()) if (random(4) === 0) retire.push(key);
+			for (const key of held.keys()) if (random(6) === 0) add.push([key, any()]);
+			for (let count = random(3); count > 0; count--) add.push([next++, any()]);
+			const readded = new Set(add.map(([key]) => key));
+			for (const key of retire) if (!readded.has(key)) held.delete(key);
+			for (const [key, range] of add) held.set(key, range);
+			window.edit(retire, add, latest, keys);
+			expect(seen(window)).toEqual(seen(Window.keyed(held, latest, keys)));
+		}
+	}
 });

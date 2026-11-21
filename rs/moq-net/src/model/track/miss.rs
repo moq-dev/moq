@@ -1319,7 +1319,6 @@ impl Misses {
 				end: run.end,
 				frame_end: None,
 				asking: *asking,
-				time: None,
 				fetch: false,
 			};
 			let (joins, unfillable) = fills.lock().join(fills, &ask);
@@ -2211,7 +2210,7 @@ mod tests {
 				_ => Servable::covering(
 					Cover::new(runs(6).into_iter().chain(runs(2))),
 					(next(3) == 0).then(|| next(KEYS + 2)),
-					&Servable::NONE,
+					&Default::default(),
 				),
 			};
 			let mut misses = Misses::default();
@@ -2454,7 +2453,7 @@ mod tests {
 		);
 
 		// One fill answers: only its join is looked at again, and the later task wakes.
-		let fill = std::future::poll_fn(|cx| requests.poll_requested_groups(&kio::Waiter::new(cx.waker().clone())))
+		let fill = std::future::poll_fn(|cx| requests.poll_requested_fill(&kio::Waiter::new(cx.waker().clone())))
 			.await
 			.unwrap();
 		let woken = second.0.load(Ordering::Relaxed);
@@ -2531,7 +2530,7 @@ mod tests {
 			"a no-op poll leaves the real registrations in place"
 		);
 
-		let fill = std::future::poll_fn(|cx| requests.poll_requested_groups(&kio::Waiter::new(cx.waker().clone())))
+		let fill = std::future::poll_fn(|cx| requests.poll_requested_fill(&kio::Waiter::new(cx.waker().clone())))
 			.await
 			.unwrap();
 		let (read_woken, drops_woken) = (read.0.load(Ordering::Relaxed), drops.0.load(Ordering::Relaxed));

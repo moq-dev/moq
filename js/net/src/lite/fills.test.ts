@@ -4,9 +4,9 @@ import { expect, spyOn, test } from "bun:test";
 import { yieldNow } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
+import { defined } from "../defined.test-util.ts";
 import { StreamCode, StreamError } from "../error.ts";
 import { hooks, type Run } from "../internal.ts";
-import { requestedGroups } from "../mock.ts";
 import { Tail } from "../tail.ts";
 import { Timestamp } from "../time.ts";
 import type { FillGroups, Producer } from "../track.ts";
@@ -18,7 +18,7 @@ const enc = new TextEncoder();
 // reader asks of it.
 async function missing(): Promise<{ broadcast: BroadcastProducer; track: Producer; fill: FillGroups; close(): void }> {
 	const broadcast = new BroadcastProducer();
-	const track = broadcast.createTrack("video", { maxAge: null });
+	const track = defined(broadcast.createTrack("video", { maxAge: null }));
 	const group = track.createGroup(4n);
 	group.writeFrame({ payload: enc.encode("live 4"), timestamp: Timestamp.unscaled(group.start) });
 	group.finish();
@@ -29,8 +29,8 @@ async function missing(): Promise<{ broadcast: BroadcastProducer; track: Produce
 		.ordered()
 		.nextGroup()
 		.catch(() => undefined);
-	const fill = await requestedGroups(requests);
-	if (fill?.kind !== "groups") throw new Error("no fill of groups");
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill of groups");
 	expect([fill.start, fill.end]).toEqual([0n, 4n]);
 	return {
 		broadcast,
@@ -135,7 +135,7 @@ test("range fills: a stale drop of asked groups is recovered once, on a subscrip
 	fills.poll(tail, true);
 	expect(opened.length).toBe(1);
 	expect(peer.fill.wanted()).toBe(0n);
-	peer.fill.accept(0n).finish();
+	defined(peer.fill.accept(0n)).finish();
 	fills.poll(tail, true);
 	// Refused for this fill, which moves on past them.
 	expect(peer.fill.wanted()).toBe(3n);
@@ -160,7 +160,8 @@ test("range fills: the last recovery finishing reports the fills empty", async (
 
 	// Every group arrives while a stream of the recovery is still read, which keeps it.
 	recovery.reading = true;
-	for (let key = peer.fill.wanted(); key !== undefined; key = peer.fill.wanted()) peer.fill.accept(key).finish();
+	for (let key = peer.fill.wanted(); key !== undefined; key = peer.fill.wanted())
+		defined(peer.fill.accept(key)).finish();
 	expect(fills.poll(tail, true)).toBe(true);
 	expect(fills.ask.groups).toEqual([]);
 	expect(fills.isEmpty()).toBe(false);
@@ -195,7 +196,7 @@ test("range fills: a recovery's refusals stand until the fill reaches them", asy
 	// The fill still waits on group 0.
 	expect(peer.fill.wanted()).toBe(0n);
 
-	peer.fill.accept(0n).finish();
+	defined(peer.fill.accept(0n)).finish();
 	fills.poll(tail, true);
 	expect(peer.fill.wanted()).toBe(3n);
 	// Recorded as lost: a later reader is told so rather than waiting on them.
@@ -296,7 +297,7 @@ test("range fills: a range start past the asked groups refuses only the fills ow
 		.ordered()
 		.nextGroup()
 		.catch(() => undefined);
-	const again = await requestedGroups(requests);
+	const again = await requests.requestedFill();
 	expect(again?.wanted()).toBe(0n);
 
 	again?.close();
@@ -337,7 +338,7 @@ test("range fills: a passing refusal ends with the fills it answered", async () 
 	fills.poll(tail, true);
 	opened[0]?.finish([{ start: 1n, end: 3n, refusal: passing(new StreamError(StreamCode.Cancel)) }]);
 	await yieldNow();
-	peer.fill.accept(0n).finish();
+	defined(peer.fill.accept(0n)).finish();
 	fills.poll(tail, true);
 	expect(peer.fill.wanted()).toBe(3n);
 	peer.fill.close();
@@ -357,8 +358,8 @@ test("range fills: a passing refusal ends with the fills it answered", async () 
 		.nextGroup()
 		.then(() => reading.nextGroup())
 		.catch(() => undefined);
-	const again = await requestedGroups(requests);
-	if (again?.kind !== "groups") throw new Error("no fill of groups");
+	const again = await requests.requestedFill();
+	if (!again) throw new Error("no fill of groups");
 	fills.push(again);
 	fills.poll(tail, true);
 	expect(again.wanted()).toBe(1n);
@@ -381,7 +382,7 @@ test("range fills: a recovery's refusal answers before it is over", async () => 
 	fills.poll(tail, true);
 	fills.refuse(1n, 3n, new StreamError(StreamCode.Old));
 	fills.poll(tail, true);
-	peer.fill.accept(0n).finish();
+	defined(peer.fill.accept(0n)).finish();
 	fills.poll(tail, true);
 	expect(peer.fill.wanted()).toBe(1n);
 
@@ -411,7 +412,7 @@ test("range fills: a recovery's refusal is taken once", async () => {
 	if (!recovery) throw new Error("no recovery");
 	// Still reading another of its streams, so it stays out with no fill owing it.
 	recovery.reading = true;
-	peer.fill.accept(0n).finish();
+	defined(peer.fill.accept(0n)).finish();
 	recovery.refuse({ start: 1n, end: 2n, refusal: passing(new StreamError(StreamCode.Cancel)) });
 	fills.poll(tail, true);
 	expect(peer.fill.wanted()).toBe(2n);
@@ -433,8 +434,8 @@ test("range fills: a recovery's refusal is taken once", async () => {
 		.nextGroup()
 		.then(() => reading.nextGroup())
 		.catch(() => undefined);
-	const again = await requestedGroups(requests);
-	if (again?.kind !== "groups") throw new Error("no fill of groups");
+	const again = await requests.requestedFill();
+	if (!again) throw new Error("no fill of groups");
 	fills.push(again);
 	fills.poll(tail, true);
 	expect(again.wanted()).toBe(1n);
@@ -463,7 +464,7 @@ test("range fills: an older recovery ending keeps a newer one's coverage", async
 	if (!older) throw new Error("no recovery");
 	// It refuses group 1 and keeps reading group 2, past the fill.
 	older.reading = true;
-	peer.fill.accept(0n).finish();
+	defined(peer.fill.accept(0n)).finish();
 	older.refuse({ start: 1n, end: 2n, refusal: passing(new StreamError(StreamCode.Cancel)) });
 	fills.poll(tail, true);
 	peer.fill.close();
@@ -485,8 +486,8 @@ test("range fills: an older recovery ending keeps a newer one's coverage", async
 		.nextGroup()
 		.then(() => reading.nextGroup())
 		.catch(() => undefined);
-	const again = await requestedGroups(requests);
-	if (again?.kind !== "groups") throw new Error("no fill of groups");
+	const again = await requests.requestedFill();
+	if (!again) throw new Error("no fill of groups");
 	fills.push(again);
 	fills.poll(tail, true);
 	expect(opened.map((entry) => entry.groups)).toEqual([
@@ -521,7 +522,7 @@ test("range fills: a stale drop repeated during its recovery waits on it", async
 	fills.poll(tail, true);
 	fills.refuse(1n, 3n, new StreamError(StreamCode.Old));
 	fills.poll(tail, true);
-	peer.fill.accept(0n).finish();
+	defined(peer.fill.accept(0n)).finish();
 	fills.poll(tail, true);
 	expect(peer.fill.wanted()).toBe(1n);
 

@@ -55,9 +55,10 @@ async fn import(data: &[u8]) -> Imported {
 			moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(RECORDING)),
 		)
 		.await
-		.unwrap();
+		.unwrap()
+		.ordered();
 	let mut objects = Vec::new();
-	while let Some(mut group) = kio::clock::timeout(Duration::from_secs(1), track.recv_group())
+	while let Some(mut group) = kio::clock::timeout(Duration::from_secs(1), track.next_group())
 		.await
 		.unwrap()
 		.unwrap()
@@ -126,9 +127,7 @@ fn republish_cut(
 	let cut = cut.to_vec();
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let mut catalog = crate::catalog::Producer::new(&mut broadcast, config()).unwrap();
-	let track = broadcast
-		.unique_track(".m2ts", catalog.track_info(hang::catalog::PRIORITY.video))
-		.unwrap();
+	let track = broadcast.unique_track(".m2ts", catalog.track_info(hang::catalog::PRIORITY.video));
 	let name = track.name().to_string();
 	catalog
 		.mutate(|catalog| catalog.ext.mpegts.passthrough = Some(PassthroughTrack::new(name)))
@@ -251,11 +250,10 @@ async fn a_capture_is_released_byte_identical_on_its_own_pcr() {
 	}
 }
 
-#[tokio::test(start_paused = true)]
-async fn a_flagged_jump_crosses_without_holding_the_output() {
-	// The capture twice, the second copy's clock twenty seconds ahead, its first PCR flagged
-	// as the discontinuity.
-	const STEP: u64 = 20 * 90_000;
+/// The capture, then the capture again with its PCRs moved by `step` 90 kHz ticks around the
+/// 33-bit wrap and its first PCR flagged as a discontinuity when `flagged`.
+fn stepped(step: i64, flagged: bool) -> Vec<u8> {
+	const WRAP: i64 = 1 << 33;
 	let mut second = KYRION.to_vec();
 	let mut pcrs = second
 		.as_chunks_mut::<188>()
@@ -263,53 +261,79 @@ async fn a_flagged_jump_crosses_without_holding_the_output() {
 		.iter_mut()
 		.filter(|pkt| pkt[3] & 0x20 != 0 && pkt[4] > 0 && pkt[5] & 0x10 != 0)
 		.peekable();
-	pcrs.peek_mut().expect("a PCR")[5] |= 0x80;
+	if flagged {
+		pcrs.peek_mut().expect("a PCR")[5] |= 0x80;
+	}
 	for pkt in pcrs {
 		let base = pkt[6..11].iter().fold(0u64, |base, byte| base << 8 | u64::from(*byte)) >> 7;
-		let base = ((base + STEP) & ((1 << 33) - 1)) << 7 | u64::from(pkt[10] & 0x7f);
+		let base = ((base as i64 + step).rem_euclid(WRAP) as u64) << 7 | u64::from(pkt[10] & 0x7f);
 		pkt[6..11].copy_from_slice(&base.to_be_bytes()[3..]);
 	}
-	let input = [KYRION, &second].concat();
-	let objects = import(&input).await.objects;
-	assert!(
-		objects.iter().any(|object| object.payload.is_empty()),
-		"a marker declares the break"
-	);
+	[KYRION, &second].concat()
+}
 
-	// The bytes keep coming at the source's pace across the jump: only the PCR leaps.
-	let mut arrivals = vec![Duration::from_millis(40)];
-	for pair in objects.windows(2) {
-		let step = Duration::from_micros(pair[1].micros - pair[0].micros).min(Duration::from_millis(100));
-		arrivals.push(*arrivals.last().unwrap() + step);
+/// Every clock break crosses the release without holding the output: a flagged jump forward,
+/// which the timestamps carry, and the steps the importer splices, which they don't. The capture
+/// repeated unchanged is an encoder restarting, its clock stepping back by the capture's length.
+#[tokio::test(start_paused = true)]
+async fn a_clock_break_crosses_without_holding_the_output() {
+	for (name, step, flagged, carried) in [
+		("flagged jump", 20 * 90_000, true, true),
+		("unflagged back", 0, false, false),
+		("flagged back", -90_000, true, false),
+		("unflagged leap", 20 * 90_000, false, false),
+	] {
+		let input = stepped(step, flagged);
+		let objects = import(&input).await.objects;
+		assert_eq!(
+			objects.iter().filter(|object| object.payload.is_empty()).count(),
+			1,
+			"{name}: a marker declares the break"
+		);
+
+		// The bytes keep coming at the source's pace across the break: only the PCR moves.
+		let mut arrivals = vec![Duration::from_millis(40)];
+		for pair in objects.windows(2) {
+			let step = Duration::from_micros(pair[1].micros - pair[0].micros).min(Duration::from_millis(100));
+			arrivals.push(*arrivals.last().unwrap() + step);
+		}
+		let republished = republish(objects.clone(), move |i, _| arrivals[i]);
+		let source = crate::source::announced(&republished.consumer).await;
+		let delay = Duration::from_millis(500);
+		let release = Release::new(source, CatalogFormat::Hang, delay).await.unwrap();
+		let (released, release) = drain(release).await;
+
+		assert!(
+			payloads(&released) == bytes(objects.iter().map(|object| &object.payload)),
+			"{name}: both sides of the break go out, byte for byte"
+		);
+		assert!(
+			payloads(&released) == input[input.len() - payloads(&released).len()..],
+			"{name}: the output is the input"
+		);
+		assert_eq!(release.dropped(), 0, "{name}");
+		let (jump, step) = released
+			.windows(2)
+			.enumerate()
+			.map(|(i, pair)| {
+				(
+					i,
+					pair[1].1.timestamp.as_micros().unwrap() as i128 - pair[0].1.timestamp.as_micros().unwrap() as i128,
+				)
+			})
+			.max_by_key(|(_, step)| *step)
+			.unwrap();
+		match carried {
+			true => assert!(step > 10_000_000, "{name}: the timestamps carry the jump"),
+			false => assert!(
+				(0..100_000).contains(&step),
+				"{name}: the timestamps carry on past the splice: {step}"
+			),
+		}
+		let pauses = released.windows(2).map(|pair| pair[1].0.duration_since(pair[0].0));
+		let pause = pauses.max().unwrap();
+		assert!(pause <= delay, "{name}: the output paused {pause:?} at {jump}");
 	}
-	let republished = republish(objects.clone(), move |i, _| arrivals[i]);
-	let source = crate::source::announced(&republished.consumer).await;
-	let release = Release::new(source, CatalogFormat::Hang, Duration::from_millis(500))
-		.await
-		.unwrap();
-	let delay = Duration::from_millis(500);
-	let (released, release) = drain(release).await;
-
-	let out = bytes(released.iter().map(|(_, frame)| &frame.payload));
-	assert!(
-		out == bytes(objects.iter().map(|object| &object.payload)),
-		"both sides of the jump go out, byte for byte"
-	);
-	assert_eq!(release.dropped(), 0);
-	let (jump, step) = released
-		.windows(2)
-		.enumerate()
-		.map(|(i, pair)| {
-			(
-				i,
-				pair[1].1.timestamp.as_micros().unwrap() as i128 - pair[0].1.timestamp.as_micros().unwrap() as i128,
-			)
-		})
-		.max_by_key(|(_, step)| *step)
-		.unwrap();
-	assert!(step > 10_000_000, "the timestamps carry the jump");
-	let pause = released[jump + 1].0.duration_since(released[jump].0);
-	assert!(pause <= delay, "the output paused {pause:?} at the jump");
 }
 
 #[tokio::test(start_paused = true)]

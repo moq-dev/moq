@@ -8,7 +8,7 @@ mod window;
 pub(super) use cover::{Cover, minus};
 pub(crate) use window::Accounted;
 pub(crate) use window::Resolved;
-pub(super) use window::{Containing, Holdings, Unheld, Window};
+pub(super) use window::{Containing, Found, Holdings, Unheld, Unplaced, Window};
 
 /// Subscriber-side preferences for receiving a track.
 ///
@@ -48,6 +48,11 @@ pub struct Subscription {
 	/// answer gives. A session holding no upstream subscription for its copy subscribes again
 	/// for such a reader, whatever its ranges. Aggregated as any: one such reader is enough.
 	pub(crate) feed: bool,
+	/// The frames this reader already holds of the group a range starts at, so that range asks
+	/// for it from the frame after them rather than whole: a route switch resuming on a new
+	/// copy. Only a range whose start is a [`Anchor::Time`] at exactly that group's start uses
+	/// it. Aggregated only when every reader resumes: the lowest position then.
+	pub(crate) resume: Option<Position>,
 }
 
 /// How far behind the live edge a subscriber plays: where it starts, and how late it may fall.
@@ -67,9 +72,9 @@ pub struct Delay {
 	/// included, and a resumed subscription ignore it, and changing it later moves nothing
 	/// already started.
 	///
-	/// A media consumer also waits this long for a missing group, since past it the group would
-	/// play late, and starts an unstated minimum as zero but waits a missing group for
-	/// [`Self::max`] instead. The aggregate across subscribers is
+	/// It only sets where a reader starts: a missing group is given up by [`Self::max`] alone,
+	/// whatever the minimum. A media consumer starts an unstated minimum as zero. The aggregate
+	/// across subscribers is
 	/// the largest stated one, which a relay forwards upstream, so the copy it fills reaches
 	/// back for the reader that buffers most; each reader's own minimum then bounds what it
 	/// reads of that copy. moq-lite before 07 and moq-transport cannot carry it.
@@ -208,9 +213,10 @@ pub enum Anchor {
 	///
 	/// Resolved from the starts of the groups the serving hop holds. When none starts at
 	/// or before it, a hop whose [`Requests`](crate::track::Requests) handler serves its
-	/// history looks the start up there (see [`FillLookup`](crate::track::FillLookup)),
-	/// reading nothing until it answers; otherwise, or when the handler can't tell, a start
-	/// reaches back to the oldest group. While no group is held at all it waits for one,
+	/// history asks it for the group containing the time (see
+	/// [`FillGroups::floor`](crate::track::FillGroups::floor)), reading nothing until it
+	/// answers; otherwise, or when the handler can't tell, a start reaches back to the oldest
+	/// group. While no group is held at all it waits for one,
 	/// reading nothing of its range meanwhile. An end includes every group starting at or
 	/// before it.
 	///
@@ -372,6 +378,7 @@ impl Default for Subscription {
 			ranges: vec![Range::oldest()],
 			order: Order::Descending,
 			feed: false,
+			resume: None,
 		}
 	}
 }
@@ -458,49 +465,40 @@ impl Subscription {
 	fn with_span(self, start: Option<u64>, end: Option<u64>) -> Self {
 		self.with_ranges(Range::span(start, end))
 	}
+}
 
-	/// These preferences with every range raised to start no earlier than `floor` and
-	/// stop before `end`, the exclusive end, without ever widening one.
+impl Range {
+	/// This range raised to start no earlier than `floor` and stop before `end`, the
+	/// exclusive end, without ever widening it.
 	///
-	/// `resolved` names where each range resolved, by index, so a relative or time anchor
-	/// becomes its own group, raised to `floor` or capped at `end`. A start not resolved
-	/// keeps its anchor, since the floor may lie before it, so the caller drops what it
-	/// resolves to below `floor`; an end not resolved becomes the bound.
-	pub(super) fn clamped(&self, floor: Option<u64>, end: Option<u64>, resolved: &[Option<Resolved>]) -> Self {
-		let clamping = floor.is_some() || end.is_some();
-		let ranges = self
-			.ranges
-			.iter()
-			.enumerate()
-			.map(|(index, range)| {
-				let resolved = resolved.get(index).copied().flatten().filter(|_| clamping);
-				let start = match (range.start, resolved) {
-					(Anchor::Oldest | Anchor::Relative(_) | Anchor::Time(_), Some(resolved)) => {
-						Anchor::Time(resolved.start)
-					}
-					(start, _) => start,
-				};
-				let start = match (start, floor) {
-					(Anchor::Time(start), Some(floor)) => Anchor::Time(start.max(floor)),
-					(start, _) => start,
-				};
-				let requested = match (range.end, resolved.and_then(|resolved| resolved.end)) {
-					(Some(Anchor::Relative(_) | Anchor::Time(_)), Some(resolved)) => match resolved.checked_sub(1) {
-						Some(last) => Some(Anchor::Time(last)),
-						None => return Range::EMPTY,
-					},
-					(requested, _) => requested,
-				};
-				let end = match (requested, end.map(|end| end.checked_sub(1))) {
-					(requested, None) => requested,
-					(_, Some(None)) => return Range::EMPTY,
-					(Some(Anchor::Time(requested)), Some(Some(last))) => Some(Anchor::Time(requested.min(last))),
-					(_, Some(Some(last))) => Some(Anchor::Time(last)),
-				};
-				Range { start, end }
-			})
-			.collect();
-		Self { ranges, ..self.clone() }
+	/// `resolved` names where it resolved, so a relative or time anchor becomes its own
+	/// group, raised to `floor` or capped at `end`. A start not resolved keeps its anchor,
+	/// since the floor may lie before it, so the caller drops what it resolves to below
+	/// `floor`; an end not resolved becomes the bound.
+	pub(super) fn clamped(&self, floor: Option<u64>, end: Option<u64>, resolved: Option<Resolved>) -> Self {
+		let resolved = resolved.filter(|_| floor.is_some() || end.is_some());
+		let start = match (self.start, resolved) {
+			(Anchor::Oldest | Anchor::Relative(_) | Anchor::Time(_), Some(resolved)) => Anchor::Time(resolved.start),
+			(start, _) => start,
+		};
+		let start = match (start, floor) {
+			(Anchor::Time(start), Some(floor)) => Anchor::Time(start.max(floor)),
+			(start, _) => start,
+		};
+		let requested = match (self.end, resolved.and_then(|resolved| resolved.end)) {
+			(Some(Anchor::Relative(_) | Anchor::Time(_)), Some(resolved)) => match resolved.checked_sub(1) {
+				Some(last) => Some(Anchor::Time(last)),
+				None => return Self::EMPTY,
+			},
+			(requested, _) => requested,
+		};
+		let end = match (requested, end.map(|end| end.checked_sub(1))) {
+			(requested, None) => requested,
+			(_, Some(None)) => return Self::EMPTY,
+			(Some(Anchor::Time(requested)), Some(Some(last))) => Some(Anchor::Time(requested.min(last))),
+			(_, Some(Some(last))) => Some(Anchor::Time(last)),
+		};
+		Self { start, end }
 	}
 }
 
@@ -561,6 +559,7 @@ impl Combined {
 			combined.order = Order::Descending;
 		}
 		combined.feed |= sub.feed;
+		combined.resume = combined.resume.zip(sub.resume).map(|(a, b)| a.min(b));
 	}
 
 	/// The aggregate, or `None` without a subscriber.

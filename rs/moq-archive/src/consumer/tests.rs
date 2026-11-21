@@ -158,15 +158,10 @@ fn from(start: u64) -> track::Range {
 
 /// The next group, past the gaps the read reports for what the archive never held.
 async fn group(reader: &mut track::Ordered) -> Option<moq_net::group::Consumer> {
-	loop {
-		let item = timeout(Duration::from_secs(10), reader.next_group())
-			.await
-			.expect("a group arrives")
-			.unwrap()?;
-		if let track::Item::Group(group) = item {
-			return Some(group);
-		}
-	}
+	timeout(Duration::from_secs(10), reader.next_group())
+		.await
+		.expect("a group arrives")
+		.unwrap()
 }
 
 /// The next group's start, without waiting for it to end.
@@ -244,7 +239,7 @@ async fn a_recording_round_trips() {
 
 	let mut reader = subscribe(&broadcast, "video").await;
 	for sequence in 0..6 {
-		let mut group = reader.next_group().await.unwrap().unwrap().group().unwrap();
+		let mut group = reader.next_group().await.unwrap().unwrap();
 		assert_eq!(group.start, sequence);
 		for index in 0..3 {
 			let frame = group.read_frame().await.unwrap().unwrap();
@@ -468,7 +463,7 @@ async fn an_archive_without_markers_stays_open() {
 	let (broadcast, _run) = serve(&archive.store).await;
 	let mut reader = subscribe(&broadcast, "video").await;
 	assert_eq!(next(&mut reader).await.unwrap(), (0, expected(true, 0, 0..1)));
-	let mut group = reader.next_group().await.unwrap().unwrap().group().unwrap();
+	let mut group = reader.next_group().await.unwrap().unwrap();
 	assert!(group.read_frame().await.unwrap().is_some());
 	let pending = timeout(30 * REFRESH, group.read_frame()).await;
 	assert!(pending.is_err(), "the newest group stays open");
@@ -484,7 +479,7 @@ async fn closing_the_broadcast_cancels_the_live_tracks() {
 
 	let (broadcast, run) = serve(&archive.store).await;
 	let mut reader = subscribe(&broadcast, "video").await;
-	let mut group = reader.next_group().await.unwrap().unwrap().group().unwrap();
+	let mut group = reader.next_group().await.unwrap().unwrap();
 	assert!(group.read_frame().await.unwrap().is_some());
 
 	broadcast.close();
@@ -503,7 +498,7 @@ async fn a_gapped_continuation_aborts_the_open_group() {
 
 	let (broadcast, run) = serve(&archive.store).await;
 	let mut reader = subscribe(&broadcast, "video").await;
-	let mut group = reader.next_group().await.unwrap().unwrap().group().unwrap();
+	let mut group = reader.next_group().await.unwrap().unwrap();
 	assert!(group.read_frame().await.unwrap().is_some());
 
 	// Frame 1 of group 0 is missing.
@@ -526,7 +521,7 @@ async fn a_store_failure_aborts_the_served_tracks() {
 
 	let (broadcast, run) = serve(&archive.store).await;
 	let mut reader = subscribe(&broadcast, "video").await;
-	let mut group = reader.next_group().await.unwrap().unwrap().group().unwrap();
+	let mut group = reader.next_group().await.unwrap().unwrap();
 	assert!(group.read_frame().await.unwrap().is_some());
 
 	archive.store.inner().fail_lists();
@@ -582,7 +577,7 @@ async fn a_completed_archive_ends_as_recorded() {
 	let end = timeout(Duration::from_secs(10), reader.next_group())
 		.await
 		.expect("the track ends");
-	let end = end.map(|item| item.map(|item| item.group().expect("a group").start));
+	let end = end.map(|group| group.map(|group| group.start));
 	assert!(
 		matches!(end, Err(moq_net::Error::Stream(moq_net::StreamError::App(7)))),
 		"{end:?}"
@@ -735,9 +730,7 @@ async fn read_range(broadcast: &broadcast::Producer, track: &str, range: track::
 	let mut read = Vec::new();
 	while let Ok(group) = timeout(5 * REFRESH, reader.next_group()).await {
 		match group.unwrap() {
-			Some(track::Item::Group(group)) => read.push(group.start),
-			// Nothing is stored below the first group, which the read reports as a gap.
-			Some(track::Item::Gap { .. }) => {}
+			Some(group) => read.push(group.start),
 			None => break,
 		}
 	}
@@ -808,6 +801,41 @@ async fn a_time_range_resolves_from_the_archive() {
 	let mut reader = track.subscribe(subscription).await.unwrap().ordered();
 	for expected in 7..10 {
 		assert_eq!(sequence(&mut reader).await, Some(expected * 1000));
+	}
+}
+
+/// A time start whose lookup fails at the store, by a failing GET or an object that doesn't
+/// decode, fails the subscription with that failure, rather than starting where the groups
+/// cached happen to say.
+#[tokio::test(start_paused = true)]
+async fn a_failed_time_lookup_fails_the_subscription() {
+	for malformed in [false, true] {
+		let archive = Archive::new();
+		archive.track("video", 0, true).await;
+		stored(&archive, 0..10).await;
+
+		let (broadcast, _run) = serve(&archive.store).await;
+		// The object holding groups 4 and 5.
+		let object = "video/0000000000000004000-0000000000000000000";
+		match malformed {
+			true => archive.raw(object, b"x").await,
+			false => drop(archive.store.inner().fail_gets(&format!("rec/{object}"))),
+		}
+		let track = broadcast.consume().track("video").unwrap();
+		let subscription = Subscription::default()
+			.with_ranges([track::Range {
+				start: at(4_500),
+				end: None,
+			}])
+			.with_order(Order::Ascending)
+			.with_delay(moq_net::track::Delay::default().with_max(None));
+		let mut reader = track.subscribe(subscription).await.unwrap().ordered();
+		let read = timeout(5 * REFRESH, reader.next_group()).await.expect("answered");
+		let err = read.map(|group| group.map(|group| group.start)).unwrap_err();
+		assert!(
+			matches!(err, moq_net::Error::Stream(moq_net::StreamError::Internal)),
+			"malformed {malformed}: {err}"
+		);
 	}
 }
 

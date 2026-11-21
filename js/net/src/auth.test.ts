@@ -12,6 +12,7 @@ import {
 	Unsupported,
 } from "./auth.ts";
 import { accept as acceptSession, connect as connectSession, type Session } from "./connection/index.ts";
+import { defined } from "./defined.test-util.ts";
 import { SessionCode, SessionError, StreamCode, StreamError, toStreamCode } from "./error.ts";
 import { appendFrame } from "./frame.test-util.ts";
 import * as Ietf from "./ietf/index.ts";
@@ -492,7 +493,7 @@ describe.each([Lite.ALPN_07_WIP])("%s", (protocol) => {
 		const origin = new OriginProducer();
 		const broadcastRoute = origin.route(Path.from("room/x"));
 		const broadcast = broadcastRoute.broadcast;
-		const published = broadcast.createTrack("video");
+		const published = defined(broadcast.createTrack("video"));
 		appendFrame(published, new Uint8Array([1]));
 		const { client, server } = await connect({ serverPublish: origin, protocol });
 		const requests = server.auth.requests();
@@ -518,7 +519,7 @@ describe.each([Lite.ALPN_07_WIP])("%s", (protocol) => {
 			const renewing = answered(client.auth.add("renewal"));
 			const renewal = await requests.next();
 			if (!renewal) throw new Error("missing renewal");
-			appendFrame(broadcast.createTrack("audio"), new Uint8Array([3]));
+			appendFrame(defined(broadcast.createTrack("audio")), new Uint8Array([3]));
 			const covered = wireOf(client).consume(Path.from("room/x")).track("audio").subscribe();
 			expect(await covered.recvGroup()).toBeDefined();
 			covered.close();
@@ -554,9 +555,9 @@ describe.each([Lite.ALPN_07_WIP])("%s", (protocol) => {
 		try {
 			const unanswered = await requests.next();
 			if (!unanswered) throw new Error("missing token");
-			const track = new OriginProducer()
-				.route(Path.from("room/x"), { hidden: true })
-				.broadcast.createTrack("video");
+			const track = defined(
+				new OriginProducer().route(Path.from("room/x"), { hidden: true }).broadcast.createTrack("video"),
+			);
 			const reader = track.subscribe();
 			const ready = wireOf(client).auth.ready(Path.from("room/x"), "subscribe", {
 				until: () => abandoned(track.demand()),
@@ -583,7 +584,7 @@ describe.each([Lite.ALPN_07_WIP])("%s", (protocol) => {
 		const origin = new OriginProducer();
 		const broadcastRoute = origin.route(Path.from("room/x"));
 		const broadcast = broadcastRoute.broadcast;
-		broadcast.createTrack("video");
+		defined(broadcast.createTrack("video"));
 		const { client, server, transport } = await connect({ serverPublish: origin, protocol });
 		const requests = server.auth.requests();
 		const setup = await requests.next();
@@ -621,7 +622,7 @@ describe.each([Lite.ALPN_07_WIP])("%s", (protocol) => {
 			const origin = new OriginProducer();
 			const broadcastRoute = origin.route(Path.from("room/x"));
 			const broadcast = broadcastRoute.broadcast;
-			const published = broadcast.createTrack("video");
+			const published = defined(broadcast.createTrack("video"));
 			appendFrame(published, new Uint8Array([7]));
 			const { client, server } = await connect({ serverPublish: origin, protocol });
 			const requests = server.auth.requests();
@@ -657,7 +658,7 @@ describe.each([Lite.ALPN_07_WIP])("%s", (protocol) => {
 		const origin = new OriginProducer();
 		const broadcastRoute = origin.route(Path.from("room/x"));
 		const broadcast = broadcastRoute.broadcast;
-		appendFrame(broadcast.createTrack("video"), new Uint8Array([1]));
+		appendFrame(defined(broadcast.createTrack("video")), new Uint8Array([1]));
 
 		const { client, server } = await connect({ serverPublish: origin, protocol });
 		await waitFor(client.auth.grant, (g) => g !== undefined && g.subscribe.size > 0);
@@ -1086,7 +1087,7 @@ test("a fetch abandoned while its token waits never reaches the wire", async () 
 	const origin = new OriginProducer();
 	const broadcastRoute = origin.route(Path.from("room/x"));
 	const broadcast = broadcastRoute.broadcast;
-	appendFrame(broadcast.createTrack("video"), new Uint8Array([1]));
+	appendFrame(defined(broadcast.createTrack("video")), new Uint8Array([1]));
 	const { client, server, transport } = await connect({ serverPublish: origin, protocol: Lite.ALPN_07_WIP });
 	const requests = server.auth.requests();
 	const setup = await requests.next();
@@ -1126,7 +1127,7 @@ test("a listing waits for its token before reaching the wire", async () => {
 	const origin = new OriginProducer();
 	const broadcastRoute = origin.route(Path.from("room/x"));
 	const broadcast = broadcastRoute.broadcast;
-	broadcast.createTrack("video");
+	defined(broadcast.createTrack("video"));
 	const { client, server, transport } = await connect({ serverPublish: origin, protocol: Lite.ALPN_07_WIP });
 	const requests = server.auth.requests();
 	const setup = await requests.next();
@@ -1163,7 +1164,7 @@ test.each(Array.from({ length: 17 }, (_, gap) => gap))(
 		const origin = new OriginProducer();
 		const broadcastRoute = origin.route(Path.from("room/x"));
 		const broadcast = broadcastRoute.broadcast;
-		appendFrame(broadcast.createTrack("video"), new Uint8Array([7]));
+		appendFrame(defined(broadcast.createTrack("video")), new Uint8Array([7]));
 		const { client, server } = await connect({ serverPublish: origin, protocol: Lite.ALPN_07_WIP });
 		const requests = server.auth.requests();
 		const setup = await requests.next();
@@ -1279,12 +1280,12 @@ test("a revoked grant resets its subscriptions with UNAUTHORIZED", async () => {
 	const clientOrigin = new OriginProducer();
 	const upRoute = clientOrigin.route(Path.from("up/y"));
 	const up = upRoute.broadcast;
-	const upTrack = up.createTrack("video");
+	const upTrack = defined(up.createTrack("video"));
 
 	const serverOrigin = new OriginProducer();
 	const downRoute = serverOrigin.route(Path.from("room/x"));
 	const down = downRoute.broadcast;
-	const downTrack = down.createTrack("video");
+	const downTrack = defined(down.createTrack("video"));
 
 	const { client, server } = await connect({
 		publish: clientOrigin,

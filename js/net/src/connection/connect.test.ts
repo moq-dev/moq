@@ -542,6 +542,13 @@ test("the removed per-transport protocols fail loudly", async () => {
 	}
 });
 
+test("urlAuth cannot reach a supplied transport, which never dials the URL", async () => {
+	const pair = createMockTransportPair(ALPN_05);
+	await expect(connect(url, { transport: pair.client, urlAuth: true, tokens: ["a"] })).rejects.toThrow(
+		"urlAuth cannot reach a supplied transport",
+	);
+});
+
 test("a peer cannot select outside the explicit versions", async () => {
 	const pair = createMockTransportPair(ALPN_05);
 	const restore = stubWebTransport(pair.client);

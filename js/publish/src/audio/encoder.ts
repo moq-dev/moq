@@ -36,7 +36,8 @@ const FADE = Duration.millis(50);
 // The WebCodecs/MP4 codec string for AAC-LC. "aac" is our user-facing shorthand.
 const AAC_CODEC = "mp4a.40.2";
 
-import { Duration, Instant, now } from "@moq/clock";
+import { Duration } from "@moq/clock";
+import * as MediaClock from "../media-clock";
 import { Backlog } from "./backlog";
 import { Framer } from "./framer";
 
@@ -191,6 +192,7 @@ export class Encoder {
 	 * A snapshot, for reaching the shared capture format knobs (`audio.capture?.sampleRate`). Read
 	 * {@link in}.capture through an effect instead when you need to react to it being swapped.
 	 */
+	// fallow-ignore-next-line unused-class-member
 	get capture(): Capture | undefined {
 		return this.in.capture.peek();
 	}
@@ -804,7 +806,7 @@ export class Encoder {
 
 				const backlog = new Backlog(retention, config.sampleRate);
 				const deadline = new Signal<Duration | undefined>(undefined);
-				const clock = () => now().since(Instant.ZERO);
+				const clock = MediaClock.now;
 				effect.run((timer) => {
 					const at = timer.get(deadline);
 					if (at === undefined) return;

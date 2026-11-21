@@ -555,7 +555,7 @@ impl Model {
 			for slot in 0..SLOTS {
 				while let Some(Poll::Ready(Ok(fill))) = self.instances[instance].routes[slot]
 					.as_ref()
-					.map(|copy| copy.fills.poll_requested_groups(&kio::Waiter::noop()))
+					.map(|copy| copy.fills.poll_requested_fill(&kio::Waiter::noop()))
 				{
 					filled = true;
 					let (start, end) = (fill.start().group, fill.end());
@@ -569,7 +569,7 @@ impl Model {
 							fill.refuse_groups(group..group + 1, Error::Stream(GIVE_UP));
 						} else if written == 0 || written < from || held.into_iter().any(|part| part.from <= from) {
 							fill.refuse_groups(group..group + 1, Error::NotFound);
-						} else if let Ok(writer) = fill.accept(group, None) {
+						} else if let Ok(Some(writer)) = fill.accept(group, None) {
 							// The fill starts at the frame its readers want, which may not exist yet.
 							copy.groups.entry(group).or_default().push(Part {
 								from,
@@ -667,13 +667,16 @@ impl Model {
 		while reader.end.is_none() {
 			let polled = match reader.cursor.as_mut().unwrap() {
 				Cursor::Arrival(sub) => sub.poll_recv_group(&waiter),
-				Cursor::Ordered(sub) => match sub.poll_next_group(&waiter) {
+				Cursor::Ordered(sub) => match sub.poll_next_item(&waiter) {
 					// An ordered read reports its drops in turn.
-					Poll::Ready(Ok(Some(track::Item::Gap { range, error }))) => {
+					Poll::Ready(Ok(Some(track::Item::Gap { range, error, .. }))) => {
 						reader.report_drop(index, range, &format!("{error:?}"))?;
 						continue;
 					}
-					polled => polled.map(|res| res.map(|item| item.map(|item| item.group().expect("a group")))),
+					Poll::Ready(Ok(Some(track::Item::Group(group)))) => Poll::Ready(Ok(Some(group))),
+					Poll::Ready(Ok(None)) => Poll::Ready(Ok(None)),
+					Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+					Poll::Pending => Poll::Pending,
 				},
 			};
 			match polled {
@@ -1510,6 +1513,68 @@ fn regressions() {
 					frames: 1,
 				},
 				Op::End { instance: 0, slot: 1 },
+			],
+			finish: false,
+		},
+		// A time start under the serving copy's resume point is placed where it names, not at
+		// the floor that raised it, so the read waits on a group the local floor keeps out.
+		Case {
+			ops: vec![
+				Op::Join {
+					reader: 2,
+					spec: spec(false, Budget::Hour, None, false),
+				},
+				Op::Write {
+					instance: 0,
+					slot: 0,
+					group: Some(8),
+					frames: 3,
+				},
+				Op::Up { instance: 0, slot: 1 },
+				Op::Down { instance: 0, slot: 0 },
+				Op::Bounds {
+					reader: 2,
+					range: Some((8, 9)),
+				},
+				Op::Ranges {
+					reader: 2,
+					range: Some((7, 9)),
+				},
+				Op::Read { reader: 0 },
+			],
+			finish: false,
+		},
+		// Ranges widened under the resume point of a copy whose failover cap cut their end short
+		// start where they name, and keep their own end.
+		Case {
+			ops: vec![
+				Op::Up { instance: 1, slot: 0 },
+				Op::Join {
+					reader: 1,
+					spec: spec(false, Budget::Hour, Some((3, 7)), false),
+				},
+				Op::Up { instance: 1, slot: 1 },
+				Op::Write {
+					instance: 1,
+					slot: 1,
+					group: Some(3),
+					frames: 1,
+				},
+				Op::Write {
+					instance: 1,
+					slot: 1,
+					group: Some(5),
+					frames: 3,
+				},
+				Op::Down { instance: 1, slot: 1 },
+				Op::Ranges {
+					reader: 1,
+					range: Some((1, 7)),
+				},
+				Op::Join {
+					reader: 0,
+					spec: spec(false, Budget::Hour, None, false),
+				},
 			],
 			finish: false,
 		},

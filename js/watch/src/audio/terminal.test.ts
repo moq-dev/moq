@@ -140,10 +140,37 @@ test("a gap re-primes the decoder on the warmup before it, so the audio after it
 		expect(terminal.primes(opus(timestamp))).toBe(true);
 		expect(terminal.span(opus(timestamp)).frames).toBe(0);
 	}
-	// The overlap the pre-skip carries over the restart starts before the frame, so only it is trimmed.
+	// An Opus packet decodes to the encoder's lookahead before its timestamp, so the frame after the gap
+	// plays whole from a pre-skip early, as it would have with no gap.
 	expect(terminal.primes(opus(1_000_000))).toBe(false);
-	expect(terminal.span(opus(1_000_000))).toEqual({ timestamp: 1_000_000, frameOffset: 312, frames: 648 });
+	expect(terminal.span(opus(1_000_000))).toEqual({ timestamp: 993_500, frameOffset: 0, frames: 960 });
 	expect(terminal.span(opus(1_020_000))).toEqual({ timestamp: 1_013_500, frameOffset: 0, frames: 960 });
+});
+
+// A reader can report a gap where nothing went missing, such as over keys a publisher never used.
+test("a gap with nothing missing leaves no hole in Opus output", () => {
+	const terminal = new Terminal();
+	terminal.clear(312, 80_000);
+	const ends: number[] = [];
+	const starts: number[] = [];
+	const play = (timestamp: number) => {
+		if (terminal.primes(opus(timestamp))) return;
+		const span = terminal.span(opus(timestamp));
+		if (span.frames === 0) return;
+		starts.push(span.timestamp);
+		ends.push(span.timestamp + (span.frames * 1_000_000) / 48_000);
+	};
+	for (let i = 0; i < 10; i++) {
+		terminal.update(frame(BigInt(i), i * 20_000));
+		terminal.decoded(packet(i * 20_000), Duration.micros(20_000));
+		play(i * 20_000);
+	}
+	expect(terminal.update(gap)).toBe(true);
+	terminal.update(frame(10n, 200_000));
+	for (const { timestamp } of terminal.preroll()) play(timestamp);
+	play(200_000);
+	// Output is back to back across the restart.
+	expect(starts.at(-1)).toBe(ends.at(-2));
 });
 
 // A decoder that coalesces outputs can hand back the pre-roll and the frame after the gap together.
@@ -214,4 +241,28 @@ test("a fresh encoder after a declared end takes no pre-roll from the stopped on
 	terminal.update(frame(2n, 2_000_000));
 	expect(terminal.preroll()).toEqual([]);
 	expect(terminal.span(opus(2_000_000)).frames).toBe(0);
+});
+
+test("a gap after a declared end reaches the fresh encoder's first frame unprimed", () => {
+	const terminal = new Terminal();
+	terminal.clear(0, 80_000);
+	terminal.update(frame(0n, 0));
+	terminal.decoded(packet(0), Duration.micros(20_000));
+	terminal.update(end(1n, 20_000));
+	// Before lite-07 the run the publisher skipped across the silence arrives as a drop.
+	terminal.update(gap);
+	expect(terminal.update(frame(2n, 1_000_000))).toBe(true);
+	expect(terminal.preroll()).toEqual([]);
+	expect(terminal.span(opus(1_000_000)).frames).toBe(960);
+});
+
+test("a join during a pause plays the fresh encoder's first frame whole, past a gap or not", () => {
+	for (const gapped of [false, true]) {
+		const terminal = new Terminal();
+		terminal.clear(0, 80_000);
+		terminal.update(end(1n, 20_000));
+		if (gapped) terminal.update(gap);
+		expect(terminal.update(frame(2n, 1_000_000))).toBe(true);
+		expect(terminal.span(opus(1_000_000)).frames).toBe(960);
+	}
 });

@@ -2444,3 +2444,111 @@ async fn added(handle: &auth::Handle, token: impl Into<bytes::Bytes>) -> moq_net
 	credential.answered().await?;
 	Ok(credential)
 }
+
+/// A relay grants its client 18 disjoint regions over two tokens, half each, and publishes
+/// a broadcast in each, plus a claim above the last; none widens within the grant. Each
+/// token's grant fits its own message, but their union's prefixes cannot all fit the one
+/// ANNOUNCE_REQUEST a subscriber's whole set must, so the client asks for the root, and
+/// the relay answers each granted region inside it. A reader of the whole tree finds every
+/// region's broadcast, and the claim above the last region at that region, and nothing
+/// the grant leaves out. A third token then grants a 19th region under the same ask: a
+/// reader of it syncs with its broadcast, not before.
+#[kio::test]
+async fn lite_07_a_grant_too_wide_to_ask_is_answered_region_by_region() {
+	within(async {
+		let relay = produce_origin(1);
+		let regions: Vec<String> = (0..19).map(|i| format!("r{i:02}/{}", "x".repeat(3800))).collect();
+		let mut published: Vec<origin::Route> = (regions.iter())
+			.map(|region| {
+				let route = relay
+					.route(format!("{region}/live"), origin::RouteOptions::hidden())
+					.unwrap();
+				route.announce().unwrap();
+				route
+			})
+			.collect();
+		// Above the last granted region, and outside every region.
+		for path in ["r17", "outside/live"] {
+			let route = relay.route(path, origin::RouteOptions::hidden()).unwrap();
+			route.announce().unwrap();
+			published.push(route);
+		}
+		let subscribe = |regions: &[String]| {
+			let subtrees = regions.iter().map(|region| Pattern::subtree(region).unwrap());
+			grant_of(Patterns::default(), subtrees.collect())
+		};
+		let client = produce_origin(9);
+		let mut pair = connect(Options {
+			server_publish: Some(relay.clone()),
+			client_subscribe: Some(client.clone()),
+			server_requests: true,
+			..Default::default()
+		})
+		.await;
+		// The relay confines its client to the grants it issues.
+		pair.server.auth().authorize(&grant(&[], &[]));
+		let (first, second, third) = (
+			subscribe(&regions[..9]),
+			subscribe(&regions[9..18]),
+			subscribe(&regions[18..]),
+		);
+		let _issued = serve(pair.requests.take().unwrap(), move |token| match token {
+			b"" => Some(first.clone()),
+			b"t1" => Some(second.clone()),
+			b"t2" => Some(third.clone()),
+			_ => None,
+		});
+		let _t1 = added(&pair.client.auth(), "t1").await.expect("t1 granted");
+		let whole = subscribe(&regions[..18]).subscribe;
+		wait_for(pair.client.auth().grant(), |grant| {
+			grant.as_ref().is_some_and(|grant| grant.subscribe == whole)
+		})
+		.await;
+
+		let mut everything = client.consume().routes();
+		let mut first = (client.consume().scope(&regions[0], &Patterns::from(Pattern::all())))
+			.unwrap()
+			.routes();
+		kio::clock::sleep(Duration::from_secs(1)).await;
+		let found = |routes: &mut origin::Routes| {
+			let mut found = std::collections::BTreeSet::new();
+			while let Some(event) = routes.try_next() {
+				found.insert(event.announce.prefix.to_string());
+			}
+			found
+		};
+		let mut expected: std::collections::BTreeSet<String> =
+			regions[..18].iter().map(|region| format!("{region}/live")).collect();
+		expected.insert(regions[17].clone());
+		assert_eq!(found(&mut everything), expected, "every region, and nothing outside");
+		assert!(everything.poll_synced(&kio::Waiter::noop()).is_ready());
+		assert_eq!(found(&mut first).len(), 1);
+		let synced = |routes: &origin::Routes| routes.poll_synced(&kio::Waiter::noop()).is_ready();
+		assert!(synced(&first));
+
+		// The 19th region joins the grant under the root the client already asks for. The
+		// reader of the whole tree is synced again only with its broadcast; the reader of
+		// the first region, which the change cannot show anything new, stays synced.
+		let _t2 = added(&pair.client.auth(), "t2").await.expect("t2 granted");
+		kio::wait(|waiter| match everything.poll_synced(waiter) {
+			std::task::Poll::Ready(()) => std::task::Poll::Pending,
+			std::task::Poll::Pending => std::task::Poll::Ready(()),
+		})
+		.await;
+		assert!(synced(&first), "a region the change misses stays synced");
+		let mut seen = std::collections::BTreeSet::new();
+		kio::wait(|waiter| {
+			seen.extend(found(&mut everything));
+			everything.poll_synced(waiter)
+		})
+		.await;
+		let last = regions.last().unwrap();
+		assert_eq!(
+			seen,
+			std::collections::BTreeSet::from([format!("{last}/live")]),
+			"synced again with the new region's broadcast"
+		);
+	})
+	.await
+	.expect("timed out");
+}

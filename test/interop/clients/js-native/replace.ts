@@ -24,10 +24,17 @@ const received = [new Moq.Origin.Producer(), new Moq.Origin.Producer(), new Moq.
 const claim = published.claim(Moq.Path.from(prefix));
 const broadcast = new Moq.Broadcast.Producer();
 const path = Moq.Path.from(`${prefix}/entity`);
-let track = broadcast.createTrack("value", { maxAge: null });
+let track = replacement();
 const serving = (async () => {
 	for await (const request of claim.requested()) request.serve(broadcast);
 })();
+
+// The aborted track no longer holds the name, so its replacement takes it.
+function replacement(): Moq.Track.Producer {
+	const created = broadcast.createTrack("value", { maxAge: null });
+	if (!created) throw new Error("the track already exists");
+	return created;
+}
 
 function write(sequence: bigint): void {
 	const group = track.createGroup(sequence);
@@ -85,7 +92,7 @@ try {
 	for (let sequence = 1n; sequence <= 64n; sequence++) {
 		const continued = ordered.readFrame();
 		track.abort(new Moq.Error.Stream(Moq.StreamCode.Internal, { message: "source failed" }));
-		track = broadcast.createTrack("value", { maxAge: null });
+		track = replacement();
 		write(sequence);
 		check(await continued, sequence);
 		ordered.close();
@@ -95,23 +102,23 @@ try {
 	for (const [index, sequence] of [66n, 68n].entries()) {
 		const continued: ReturnType<Moq.Track.Ordered["readFrame"]> = ordered.readFrame();
 		track.abort(new Moq.Error.Stream(Moq.StreamCode.Internal, { message: "source failed" }));
-		track = broadcast.createTrack("value", { maxAge: null });
+		track = replacement();
 		const requests = track.requests();
 		write(sequence);
 		const future = sequence + 1n;
 		// Serve every request until the round ends, not only the fill asserted here: a relay
-		// moving its range below the replacement's first group asks where that time starts,
-		// and an unanswered lookup holds back the subscription that asked.
+		// moving its range below the replacement's first group asks for the group containing
+		// that time, and an unanswered fill holds back the subscription that asked.
 		const filled = Promise.withResolvers<void>();
 		const serving = (async () => {
 			for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
 				try {
-					if (fill.kind === "lookup") continue; // closed unanswered: no time lookups here
 					if (fill.start < sequence) continue; // history the replacement no longer holds
 					assert.equal(fill.start, future);
 					assert.equal(fill.end, future + 1n);
 					assert.equal(fill.maxDelay, null);
 					const group = fill.accept(future);
+					if (!group) continue; // already answered by an earlier fill
 					group.writeFrame({
 						payload: new TextEncoder().encode(String(future)),
 						timestamp: Moq.Time.Timestamp.unscaled(future),

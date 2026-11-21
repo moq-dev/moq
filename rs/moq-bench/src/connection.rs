@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use moq_net::{broadcast, group, track};
-use moq_tokio::Status;
+use moq_tokio::connection::Phase;
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
@@ -141,9 +141,9 @@ pub async fn run(ctx: Connection) {
 				.with_timescale(moq_net::Timescale::MILLI)
 				.with_max_age(None),
 		) {
-			Ok(track) => track,
-			Err(err) => {
-				tracing::error!(connection, %err, "failed to create track");
+			Some(track) => track,
+			None => {
+				tracing::error!(connection, "the track already exists");
 				continue;
 			}
 		};
@@ -162,7 +162,7 @@ pub async fn run(ctx: Connection) {
 	}
 
 	let client = client.with_publisher(&publish).with_subscriber(consume.clone());
-	let mut reconnect = client.connect(url);
+	let reconnect = client.connect(url);
 
 	match &role {
 		Role::Mesh if rolled.subscribe > 0 => {
@@ -186,29 +186,27 @@ pub async fn run(ctx: Connection) {
 		Role::Mesh | Role::FanoutPublisher { .. } => {}
 	}
 
-	// The status loop doubles as the keep-alive: it tracks connect/disconnect for
+	// The state loop doubles as the keep-alive: it tracks connect/disconnect for
 	// the gauge and returns once the reconnect loop gives up.
+	let monitor = reconnect.monitor();
+	let mut observed = monitor.state();
 	let mut connected = false;
 	loop {
+		// A GOAWAY's migration still serves on the old session, so it stays connected.
+		let serving = matches!(observed.phase, Phase::Connected { .. } | Phase::Migrating { .. });
+		// Edge-triggered so repeated same-state events can't drift the gauge.
+		if serving && !connected {
+			stats.connections.fetch_add(1, Ordering::Relaxed);
+			for published in publishing.iter().filter_map(std::sync::Weak::upgrade) {
+				published.establish();
+			}
+		} else if !serving && connected {
+			stats.connections.fetch_sub(1, Ordering::Relaxed);
+		}
+		connected = serving;
 		tokio::select! {
-			status = reconnect.status() => match status {
-				// Edge-triggered so repeated same-state events can't drift the gauge.
-				Ok(Status::Connected) => {
-					if !connected {
-						connected = true;
-						stats.connections.fetch_add(1, Ordering::Relaxed);
-						for published in publishing.iter().filter_map(std::sync::Weak::upgrade) {
-							published.establish();
-						}
-					}
-				}
-				Ok(Status::Disconnected) => {
-					if connected {
-						connected = false;
-						stats.connections.fetch_sub(1, Ordering::Relaxed);
-					}
-				}
-				Ok(_) => {}
+			changed = monitor.state_changed(observed.revision) => match changed {
+				Ok(next) => observed = next,
 				Err(err) => {
 					tracing::warn!(connection, %err, "connection gave up");
 					break;
@@ -896,12 +894,7 @@ mod tests {
 			.await
 			.unwrap()
 			.ordered();
-		let mut group = sub
-			.next_group()
-			.await
-			.unwrap()
-			.and_then(moq_net::track::Item::group)
-			.expect("a group");
+		let mut group = sub.next_group().await.unwrap().expect("a group");
 
 		let keyframe = group.read_frame().await.unwrap().expect("keyframe");
 		let header: serde_json::Value = serde_json::from_slice(&keyframe.payload).unwrap();
@@ -948,12 +941,7 @@ mod tests {
 			.await
 			.unwrap()
 			.ordered();
-		let mut group = sub
-			.next_group()
-			.await
-			.unwrap()
-			.and_then(moq_net::track::Item::group)
-			.expect("a group");
+		let mut group = sub.next_group().await.unwrap().expect("a group");
 
 		// Just the keyframe, then the group ends.
 		assert!(group.read_frame().await.unwrap().is_some(), "keyframe");
@@ -985,12 +973,7 @@ mod tests {
 		tokio::time::advance(Duration::from_millis(250)).await;
 
 		let mut sub = consumer.track(TRACK).unwrap().subscribe(None).await.unwrap().ordered();
-		let mut group = sub
-			.next_group()
-			.await
-			.unwrap()
-			.and_then(moq_net::track::Item::group)
-			.expect("a group");
+		let mut group = sub.next_group().await.unwrap().expect("a group");
 		let keyframe = group.read_frame().await.unwrap().expect("keyframe").payload;
 
 		assert_eq!(keyframe.len(), 300, "keyframe padded to the rolled frame size");
@@ -1023,12 +1006,7 @@ mod tests {
 		tokio::time::advance(Duration::from_millis(250)).await;
 
 		let mut sub = consumer.track(TRACK).unwrap().subscribe(None).await.unwrap().ordered();
-		let mut group = sub
-			.next_group()
-			.await
-			.unwrap()
-			.and_then(moq_net::track::Item::group)
-			.expect("a group");
+		let mut group = sub.next_group().await.unwrap().expect("a group");
 		let keyframe = group.read_frame().await.unwrap().expect("keyframe").payload;
 
 		assert!(keyframe.len() > 50, "header is the floor; no truncation to fit");

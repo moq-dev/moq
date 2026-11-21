@@ -85,7 +85,7 @@ import {
 	EMPTY_RANGE,
 	inclusiveGroupEnd,
 	LiveRanges,
-	requestedRanges,
+	requestedRange,
 	Subscribe,
 	SubscribeUpdate,
 	toWireRanges,
@@ -427,6 +427,7 @@ export class Subscriber {
 				slots: this.#announces,
 				drained: (route) => this.#drained(route),
 				goaway,
+				grant,
 				send: (msg) => stream.send(msg),
 			});
 		}
@@ -1719,28 +1720,31 @@ export class Subscriber {
 			const datagrams = request
 				? request.accept(info)
 				: wireOf(state.consumer).createDatagrams(producer.name, info, false);
-			entry.datagrams = { producer: datagrams, timescale: framing.scale };
-			entry.legacyKey = state.legacyKey;
-			this.#datagrams.set(id, entry.datagrams);
-			this.#legacyDatagrams.set(state.legacyKey, entry.datagrams);
-			let held: track.Subscriber | undefined;
-			const sync = () => {
-				const priority = datagrams.priority.peek();
-				if (priority === undefined) {
+			// Undefined while a live datagram track already holds the name: serve the stream track alone.
+			if (datagrams) {
+				entry.datagrams = { producer: datagrams, timescale: framing.scale };
+				entry.legacyKey = state.legacyKey;
+				this.#datagrams.set(id, entry.datagrams);
+				this.#legacyDatagrams.set(state.legacyKey, entry.datagrams);
+				let held: track.Subscriber | undefined;
+				const sync = () => {
+					const priority = datagrams.priority.peek();
+					if (priority === undefined) {
+						held?.close();
+						held = undefined;
+					} else if (held) {
+						held.update({ priority });
+					} else {
+						held = producer.subscribe({ priority });
+					}
+				};
+				const dispose = datagrams.priority.subscribe(sync);
+				sync();
+				entry.datagramDemand = () => {
+					dispose();
 					held?.close();
-					held = undefined;
-				} else if (held) {
-					held.update({ priority });
-				} else {
-					held = producer.subscribe({ priority });
-				}
-			};
-			const dispose = datagrams.priority.subscribe(sync);
-			sync();
-			entry.datagramDemand = () => {
-				dispose();
-				held?.close();
-			};
+				};
+			}
 		}
 
 		this.#subscribes.set(id, entry);
@@ -2085,11 +2089,6 @@ export class Subscriber {
 			const maxAge = (await producer.info().catch(() => undefined))?.maxAge;
 			const framing = { compress: entry.compress, timescale: entry.timescale, maxAge };
 			for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
-				// The wire fetches by group alone, so a lookup goes unanswered and its reader falls back.
-				if (fill.kind === "lookup") {
-					fill.close();
-					continue;
-				}
 				// One group is what FETCH carries; more go through the subscription.
 				if (fills && fill.end - fill.start > 1n) {
 					fills.push(fill);
@@ -2379,11 +2378,11 @@ export class Subscriber {
 			cancel.abort();
 			return;
 		}
-		let group: netGroup.Producer;
+		let group: netGroup.Producer | undefined;
 		try {
 			// The live feed may have brought it meanwhile, or every reader left.
-			if (!fill.isWanted(key)) throw new StreamError(StreamCode.Cancel, { message: "cancel" });
-			group = fill.accept(key);
+			if (fill.isWanted(key)) group = fill.accept(key);
+			if (!group) throw new StreamError(StreamCode.Cancel, { message: "cancel" });
 		} catch (err) {
 			stream.abort(error(err));
 			return;
@@ -2686,7 +2685,7 @@ export class Subscriber {
 				if (!entry.starts.has(id)) return false;
 				const at = entry.starts.get(id);
 				if (at === undefined) continue;
-				const [model] = requestedRanges({ startFrame: 0, ranges: [range] });
+				const model = requestedRange(range);
 				owed.push({ ...model, start: { time: at } });
 			}
 			// Each starts at the group its publisher reported starting it at.
@@ -2872,8 +2871,8 @@ export class Subscriber {
 	// say where one starts. Mirrors the Rust `SubStream::declare`.
 	#declare(entry: SubscribeEntry): void {
 		// Where the publisher started each live range asked from a group's start, which a reader's
-		// time start there resolves to when the copy holds no group at it. Mirrors the Rust
-		// `report_time_starts`.
+		// time start there resolves to when the copy holds no group at it, and one asked from the
+		// oldest group as asked from 0. Mirrors the Rust `SubStream::report_starts`.
 		const times: [bigint, bigint][] = [];
 		// And each one counting back, which the copy, holding only part of the track, can't count,
 		// with the latest group it counted back from.
@@ -2886,6 +2885,7 @@ export class Subscriber {
 			if (at === undefined) continue;
 			if (time !== undefined) times.push([time, at]);
 			else if (back !== undefined) relative.push([back, at, entry.edges.get(id)]);
+			else if (range !== undefined && range.start === undefined) times.push([0n, at]);
 		}
 		hooks.timeStarts(entry.track, times);
 		hooks.relativeStarts(entry.track, relative);

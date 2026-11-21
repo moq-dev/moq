@@ -1161,11 +1161,6 @@ export class Subscriber {
 			for (;;) {
 				const fill = await untilAborted(requests.requestedFill(), signal);
 				if (!fill) break;
-				// FETCH asks by group alone, so a lookup goes unanswered and its reader falls back.
-				if (fill.kind === "lookup") {
-					fill.close();
-					continue;
-				}
 				const run = async () => {
 					try {
 						// The join may already bring a miss in this run. Let it answer first instead
@@ -1655,7 +1650,6 @@ export class Subscriber {
 					priority: fromWire(ok.properties.priority ?? DEFAULT_WIRE),
 					// No MAX_CACHE_DURATION sets no publisher limit, not the authored default.
 					maxAge: maxCacheDuration === undefined ? null : Duration.millis(Number(maxCacheDuration)),
-					// A moq-transport peer may stamp arrival times, and nothing on the wire says it didn't.
 					ietf: version,
 				});
 		const producer = known ?? staged?.producer;
@@ -2346,7 +2340,7 @@ export class Subscriber {
 	#bindDatagrams(source: broadcast.Consumer, track: track.Producer, info: Partial<datagram.Info>) {
 		const pending = this.#datagramRequests.get(source);
 		const entry = pending?.get(track.name);
-		let producer: datagram.Producer;
+		let producer: datagram.Producer | undefined;
 		try {
 			producer = entry ? entry.request.accept(info) : wireOf(source).createDatagrams(track.name, info, false);
 		} catch (err) {
@@ -2354,6 +2348,8 @@ export class Subscriber {
 			console.debug(`serving the stream track without datagrams: ${reason(err)}`);
 			return;
 		}
+		// A live datagram track already holds the name.
+		if (!producer) return;
 		pending?.delete(track.name);
 		entry?.accepted.set(true);
 		let held: track.Subscriber | undefined;

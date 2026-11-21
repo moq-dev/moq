@@ -65,9 +65,7 @@ async fn abandoned_fetch_reaches_the_publisher(version: &str, relays: u64, stage
 	let groups = request.requests();
 	let _track = request.accept(timed());
 	let mut request = match futures::future::select(std::pin::pin!(groups.requested_fill()), &mut waiting).await {
-		futures::future::Either::Left((request, _)) => {
-			support::groups(request.expect("the fetch reaches the publisher"))
-		}
+		futures::future::Either::Left((request, _)) => request.expect("the fetch reaches the publisher"),
 		futures::future::Either::Right(_) => panic!("nothing answered the fetch"),
 	};
 
@@ -81,7 +79,7 @@ async fn abandoned_fetch_reaches_the_publisher(version: &str, relays: u64, stage
 			.unwrap_or_else(|_| panic!("{ctx}: the publisher's fetch is still wanted"));
 		}
 		Stage::MidResponse => {
-			let mut group = request.accept(0, timed()).unwrap();
+			let mut group = request.accept(0, timed()).unwrap().expect("a fresh group");
 			group
 				.write_frame(group.at_start(), Bytes::from_static(b"head"))
 				.unwrap();
@@ -118,7 +116,7 @@ async fn abandoned_fetch_reaches_the_publisher(version: &str, relays: u64, stage
 			assert_eq!(payloads, [&b"head"[..], &b"tail"[..]], "{ctx}");
 		}
 		Stage::Drained => {
-			let mut group = request.accept(0, timed()).unwrap();
+			let mut group = request.accept(0, timed()).unwrap().expect("a fresh group");
 			group
 				.write_frame(group.at_start(), Bytes::from_static(b"head"))
 				.unwrap();
@@ -199,12 +197,10 @@ async fn a_refetch_within_the_linger_stays_on_the_relay(version: &str) {
 	let groups = request.requests();
 	let _track = request.accept(timed());
 	let request = match futures::future::select(std::pin::pin!(groups.requested_fill()), &mut waiting).await {
-		futures::future::Either::Left((request, _)) => {
-			support::groups(request.expect("the fetch reaches the publisher"))
-		}
+		futures::future::Either::Left((request, _)) => request.expect("the fetch reaches the publisher"),
 		futures::future::Either::Right(_) => panic!("nothing answered the fetch"),
 	};
-	let mut group = request.accept(0, timed()).unwrap();
+	let mut group = request.accept(0, timed()).unwrap().expect("a fresh group");
 	group
 		.write_frame(group.at_start(), Bytes::from_static(b"segment"))
 		.unwrap();

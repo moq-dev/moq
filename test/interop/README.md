@@ -18,7 +18,10 @@ WebCodecs output painted to a canvas and drives the player's pause/resume contro
 The native JS tail lanes also resolve on-demand claims on lite-07, under Node
 and Bun over WebSocket and WebTransport. Fresh readers request or follow the
 claim's own path and child paths. A reader-first case checks that an absent
-request ends while its follower waits for the publisher to arrive.
+request ends while its follower waits for the publisher to arrive. A browser forwards
+nothing and knows no node, so every request `@moq/net` sends names Node ID 0, leaving the
+relay to pick the claim's node: these lanes are where a relay answers that end to end,
+since a Rust client always names one.
 
 Every publisher also sends an Opus tone, one sine per channel, and every subscriber
 decodes it. Python and C++ send a mono 440 Hz tone; the rest send 440 Hz left and
@@ -108,9 +111,16 @@ GStreamer checks the late tail alone. `moqsrc` keeps watching a finished
 broadcast, since an announcement means online/offline, so it has no end,
 withdrawal, or session to report. It joins once the broadcast has finished and
 requires exactly ten nonempty video buffers; its cell passes with the end check
-marked N/A. A pinned moq-transport pass records the case as skipped:
-moq-transport is a compatibility layer, and a finished broadcast's late tail
-between our own clients is not planned work.
+marked N/A. A finished track's last group ages out its max delay after it ends,
+so like the other finish readers it subscribes with a max delay of its whole
+read phase: how late `gst-launch` starts is not the delivery under test. A
+pinned moq-transport pass records the case as skipped: moq-transport is a
+compatibility layer, and a finished broadcast's late tail between our own
+clients is not planned work.
+
+The runner releases a publisher's teardown only once every reader it started
+exited cleanly with its marker, so one failed reader fails the whole row. Each
+failed cell names its own cause, or the reader or publisher that failed its row.
 
 Every client closes its session on the way out: publishers stop when their input
 ends (the browser on SIGTERM), and subscribers close once they have their frame.
@@ -373,9 +383,9 @@ It runs the cells planned breaks cover
 without letting them fail the run, then rewrites `compat/planned-breaks.json`:
 a break with a failing cell is re-pinned to the releases just measured, and one
 with none is deleted. It prints each break's failing cells; the release workflow
-copies that report into the pin-update PR body and retains failure artifacts for
-seven days. Reasons describe why a break is allowed; the measured pins and PR
-body record its current extent.
+copies that report into the pin-update PR body and retains the report, versions,
+and every cell's logs and verdict inputs (not the staged binaries or media) for
+seven days. Reasons describe why a break is allowed; the measured pins and PR body record its current extent.
 
 ## Media QA
 
