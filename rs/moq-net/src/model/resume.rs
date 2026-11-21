@@ -6690,6 +6690,49 @@ mod test {
 		}
 	}
 
+	/// A front's key-order reader holds back a gap above a time start its serving copy still
+	/// waits to place, as a plain reader does: the group containing it may land below the gap.
+	#[test]
+	fn a_front_holds_a_gap_above_a_waiting_time_start() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let serving = received_copy();
+		serving.anchored();
+		routes.serve(serving.consume());
+		write(&serving, 2000);
+		serving.drop_groups(1500..1600, StreamError::NotFound);
+		let subscription = Subscription::default()
+			.with_delay(Delay::default().with_max(None))
+			.with_ranges([track::Range {
+				start: Anchor::Time(1500),
+				end: None,
+			}]);
+		let mut sub = logical
+			.consume()
+			.subscribe(subscription)
+			.now_or_never()
+			.unwrap()
+			.unwrap()
+			.ordered();
+		let waiter = kio::Waiter::noop();
+		let mut read = || -> Vec<String> {
+			let mut items = Vec::new();
+			while let Poll::Ready(Ok(Some(item))) = sub.poll_next_item(&waiter) {
+				items.push(match item {
+					track::Item::Group(group) => format!("group {}", group.start),
+					track::Item::Gap { range, .. } => format!("gap {range:?}"),
+				});
+			}
+			items
+		};
+		assert_eq!(read(), Vec::<String>::new(), "the gap waits on the start");
+		serving.time_starts([(1500, Some(1000), None)], Duration::MAX);
+		write(&serving, 1000);
+		serving.skip_groups(1001..1500);
+		serving.skip_groups(1600..2000);
+		assert_eq!(read(), ["group 1000", "gap 1500..1600", "group 2000"]);
+	}
+
 	/// A front's key-order reader reports a group that lands on its copy after the read passed
 	/// its key, as old, and never one it handed out.
 	#[test]

@@ -520,7 +520,7 @@ async fn dvb_ac3_keeps_its_sync_frames_in_one_pes() {
 /// and the refusal is counted.
 #[tokio::test(start_paused = true)]
 async fn a_pes_with_a_field_no_rebase_reaches_refuses_its_stream() {
-	let cases: [(&str, Vec<u8>); 8] = [
+	let cases: [(&str, Vec<u8>); 7] = [
 		// PES_extension_flag set with no header byte left for the extension.
 		("truncated extension", pes_with(0xbd, 0x80, 0x01, &[], 0, b"ext")),
 		// ES_rate flagged with one of its three bytes inside PES_header_data_length.
@@ -546,7 +546,6 @@ async fn a_pes_with_a_field_no_rebase_reaches_refuses_its_stream() {
 				b"tref",
 			),
 		),
-		("scrambling", pes_with(0xbd, 0x90, 0x00, &[], 0, b"scrambled")),
 		("unbounded", {
 			let mut pes = pes_with(0xbd, 0x80, 0x00, &[], 0, b"unbounded");
 			pes[4..6].fill(0);
@@ -584,6 +583,29 @@ async fn a_pes_with_a_field_no_rebase_reaches_refuses_its_stream() {
 		assert!(imported.entry().is_none(), "{why}: the track left the catalog");
 		assert_eq!(imported.stats().refused, 1, "{why}");
 	}
+}
+
+/// A PES-scrambled PES is refused alone, as a TS-scrambled packet is: the track stays, and the
+/// clear PES after it publishes.
+#[tokio::test(start_paused = true)]
+async fn a_scrambled_pes_is_refused_until_clear() {
+	let mut feed = Feed::new(0x06, &[]);
+	let start = 1_000 * MS;
+	feed.pcr(start).picture(start).data(klv(1, 8)).pcr(start + 40 * MS);
+	feed.picture(start + 40 * MS)
+		.data(pes_with(0xbd, 0x90, 0x00, &[], 0, b"scrambled"))
+		.pcr(start + 80 * MS)
+		.picture(start + 80 * MS)
+		.data(klv(2, 8))
+		.pcr(start + 120 * MS);
+
+	let imported = import(&feed.bytes(), false).unwrap();
+	let (name, _) = imported.entry().expect("the track stays in the catalog");
+	let (frames, err) = read(&imported.consumer, &name).await;
+	let got: Vec<_> = frames.iter().map(|frame| frame.payload.to_vec()).collect();
+	assert_eq!(got, [feed.pes[0].1.clone(), feed.pes[2].1.clone()]);
+	assert!(err.is_none(), "the track ends cleanly");
+	assert_eq!(imported.stats().refused, 1);
 }
 
 /// Begin importing `head` onto a clock the first PTS places.
