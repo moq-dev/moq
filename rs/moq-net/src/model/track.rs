@@ -1555,10 +1555,15 @@ impl TrackState {
 		}
 		let first = self.first_arrival;
 		let asked = self.time_starts.keys().next().map(|asked| asked.saturating_add(1));
-		let Some(lowest) = first.into_iter().chain(asked).min() else {
+		let Some(lowest) = first.into_iter().chain(asked).chain(self.feed_starts()).min() else {
 			return Unplaced::NONE;
 		};
-		let from = first.into_iter().chain(self.highest_time_start).max().unwrap_or(lowest);
+		let highest = first
+			.into_iter()
+			.chain(self.highest_time_start)
+			.chain(self.feed_starts())
+			.max();
+		let from = highest.unwrap_or(lowest);
 		let grace = self.arrival_grace();
 		match self.find_landable(from..u64::MAX, true, grace, |open, _| Some(open.start)) {
 			Some(key) => match key.checked_sub(1) {
@@ -1589,13 +1594,28 @@ impl TrackState {
 	}
 
 	/// Where the group containing `time` starts at the earliest, which [`Self::landed_through`]
-	/// counts from: `covering`, where a range covering the time started, or else the feed's
-	/// first arrival at or below `time`. Each is a group, so the one containing the time is
-	/// there or past it, and a range added below changes nothing of it. A skip or a forgotten
-	/// drop names no group. Arrival order is not key order, so with neither, a lower key may
-	/// still land.
+	/// counts from: `covering`, where a range covering the time started, or else the newest at
+	/// or below `time` of the feed's first arrival and the groups its upstream started a live
+	/// join at. Each is a group, so the one containing the time is there or past it, and a
+	/// range added below changes nothing of it. A join's start counts even if it never lands,
+	/// as when its publisher expires it: the feed delivers or names every group from there. A
+	/// skip or a forgotten drop names no group. Arrival order is not key order, so with none, a
+	/// lower key may still land.
 	fn landing_from(&self, time: u64, covering: Option<u64>) -> Option<u64> {
-		covering.or_else(|| self.first_arrival.filter(|&first| first <= time))
+		covering.or_else(|| {
+			(self.first_arrival.into_iter().chain(self.feed_starts()))
+				.filter(|&start| start <= time)
+				.max()
+		})
+	}
+
+	/// The groups the upstream started this copy's live joins at, whose feeds deliver or name
+	/// every group from there.
+	fn feed_starts(&self) -> impl Iterator<Item = u64> + '_ {
+		self.join_starts.values().filter_map(|start| match start {
+			JoinStart::At(start) => Some(*start),
+			JoinStart::Past(_) => None,
+		})
 	}
 
 	/// Whether the live feed may land nothing more at or below `time` that could contain it:
@@ -17613,6 +17633,36 @@ mod test {
 			Subscription::default().with_delay(Delay::default().with_min(Duration::from_millis(200)).with_max(None));
 		let mut reader = producer.subscribe(join);
 		assert_eq!(reader.resolved_range(0).map(|resolved| resolved.start), Some(1000));
+	}
+
+	/// A received copy's join inside the group its publisher started the feed at is placed
+	/// even when that group never lands: the publisher expired it under the reader's budget, as
+	/// it does a join whose Max Age equals its Min Age, and the next group passes over the
+	/// keys between. The feed's start is a group, so the join is there or past it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_received_copy_places_a_join_inside_its_feeds_expired_start() {
+		let min = Duration::from_millis(100);
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		producer.report_edge(1110);
+		producer.join_starts([(min, JoinStart::At(1000))]);
+
+		let join = Subscription::default().with_delay(Delay::default().with_min(min).with_max(Some(min)));
+		let mut reader = producer.subscribe(join);
+		assert_eq!(
+			reader.resolved_range(0).map(|resolved| resolved.start),
+			None,
+			"nothing landed yet"
+		);
+
+		// The feed's first group expired, and the next names it as its Previous Start.
+		producer.give_up(1000..1001, Hole::stale(min));
+		producer.skip_groups(1001..1021);
+		write_group(&producer, 1021);
+		assert_eq!(reader.resolved_range(0).map(|resolved| resolved.start), Some(1000));
+		assert_eq!(drain_groups(&mut reader), [1021]);
 	}
 
 	#[test]

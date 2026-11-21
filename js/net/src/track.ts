@@ -1670,10 +1670,14 @@ export class Producer {
 			const first = producer.#firstArrival;
 			const reach = producer.#timeStartReach;
 			const asked = reach && reach.lowest + 1n;
-			const start = first === undefined ? asked : asked === undefined ? first : min(first, asked);
-			if (start === undefined) return undefined;
+			const lows = [first, asked, ...producer.#feedStarts()].filter((key): key is bigint => key !== undefined);
+			if (lows.length === 0) return undefined;
+			const start = lows.reduce(min);
 			// The first key landable from a place only rises with it, so the highest bounds them all.
-			const from = first === undefined ? (reach?.highest ?? start) : max(first, reach?.highest ?? first);
+			const highs = [first, reach?.highest, ...producer.#feedStarts()].filter(
+				(key): key is bigint => key !== undefined,
+			);
+			const from = highs.length === 0 ? start : highs.reduce(max);
 			const landable = producer.#landing({ start: from, end: UNBOUNDED, floor: true, grace: producer.#grace() });
 			const next = landable.next();
 			const end = next.done ? UNBOUNDED : next.value.start;
@@ -1809,12 +1813,22 @@ export class Producer {
 		};
 	}
 
-	// Where the group containing `time` starts at the earliest: `covering`, or else the feed's first
-	// arrival at or below `time`. Each is a group; a skip or a forgotten run names none. Mirrors the
-	// Rust `TrackState::landing_from`.
+	// Where the group containing `time` starts at the earliest: `covering`, or else the newest at or
+	// below `time` of the feed's first arrival and the groups its upstream started a live join at.
+	// Each is a group, a join's start even if its publisher expired it; a skip or a forgotten run
+	// names none. Mirrors the Rust `TrackState::landing_from`.
 	#landingFrom(time: bigint, covering: bigint | undefined): bigint | undefined {
-		const first = this.#firstArrival;
-		return covering ?? (first !== undefined && first <= time ? first : undefined);
+		if (covering !== undefined) return covering;
+		const below = [this.#firstArrival, ...this.#feedStarts()].filter(
+			(key): key is bigint => key !== undefined && key <= time,
+		);
+		return below.length === 0 ? undefined : below.reduce(max);
+	}
+
+	// The groups the upstream started this copy's live joins at, whose feeds deliver or name every
+	// group from there. Mirrors the Rust `TrackState::feed_starts`.
+	#feedStarts(): bigint[] {
+		return this.#joinStarts.filter(([, , past]) => !past).map(([, at]) => at);
 	}
 
 	// Undefined once the live feed landed every key it could from `from` through `time`, else the

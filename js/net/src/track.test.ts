@@ -5705,6 +5705,29 @@ test("track: a received copy prefers a join answered with a group over one answe
 	}
 });
 
+// A received copy's join inside the group its publisher started the feed at is placed even when
+// that group never lands: the publisher expired it under the reader's budget, and the next group
+// passes over the keys between. Mirrors the Rust
+// `a_received_copy_places_a_join_inside_its_feeds_expired_start`.
+test("track: a received copy places a join inside its feed's expired start", () => {
+	const producer = receivedTrack({ timescale: Timescale.MILLI });
+	hooks.reportedGroup(producer, 1110n);
+	hooks.joinStarts(producer, [[100, 1000n, false]]);
+	const reader = producer.subscribe({ delay: { min: Duration.millis(100), max: Duration.millis(100) } });
+	try {
+		expect(hooks.servingResolved(reader)).toEqual([undefined]);
+		// The feed's first group expired, and the next names it as its Previous Start.
+		hooks.dropTrackGroups(producer, 1000n, 1001n, staleHole(100));
+		producer.skipGroups(1001n, 1021n);
+		putGroup(producer, 1021n, 1021);
+		expect(hooks.servingResolved(reader)).toEqual([{ start: 1000n, end: undefined, floored: true }]);
+		expect(reader.tryRecvGroup()?.start).toBe(1021n);
+	} finally {
+		reader.close();
+		producer.close();
+	}
+});
+
 // Mirrors moq-net's `unplaced_holds_only_what_containing_cant_place`: a run holds only times
 // `containing` can't place, but those a reported start places directly, and leaves out only
 // times below the newest start reported past an earlier range's time, or those the feed's
