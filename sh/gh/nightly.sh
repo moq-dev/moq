@@ -135,8 +135,6 @@ case "$1" in
         SESSION_CPU=1 criterion net-cpu -p moq-net --features fuzz --bench session -- session_delivery_group_cost_cpu
         # Measure each kio routine, including the contended bench's worker threads.
         criterion kio --no-fail-fast -p kio --bench '*'
-        # moq-gst's catalog bench shares a target name with moq-mux's, so it runs on its own.
-        criterion gst -p moq-gst --bench catalog
         ;;
     rust-shared)
         # One invocation unifies this release build instead of rebuilding shared crates
@@ -155,6 +153,8 @@ case "$1" in
     rust-extra)
         criterion qmux --manifest-path rs/qmux/Cargo.toml --bench receive
         criterion msf -p moq-msf --bench catalog
+        # moq-gst's catalog bench shares a target name with moq-mux's, so it runs on its own.
+        criterion gst -p moq-gst --bench catalog
         # The allocation/window/play-buffer/batch/receive-bursts/openh264 tables keep their stdout in the run;
         # only Criterion estimates enter the trend report.
         criterion extra --no-fail-fast -p moq-e2ee -p moq-json -p moq-archive -p moq-cli -p moq-mux -p moq-audio \
