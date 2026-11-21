@@ -79,6 +79,12 @@ pub(super) struct Misses {
 	picked: BTreeMap<u64, RangeSet<u64>>,
 	/// Never asked again: named dropped to the reader.
 	given_up: RangeSet<u64>,
+	/// The part of `given_up` judged stale, with the budget each run was judged under: a
+	/// wider budget asks it again (see [`Self::widen`]).
+	stale: RangeMap<u64, Duration>,
+	/// No wider than the narrowest budget in `stale`, so [`Self::widen`] looks only when a
+	/// budget wider than it could take a run back.
+	narrowest: Option<Duration>,
 	/// The window revision and cap what this holds was last clipped to, with the window's
 	/// missable groups then, `None` while every group was.
 	clipped: Option<(u64, Option<u64>, Option<Cover>)>,
@@ -814,6 +820,15 @@ impl Misses {
 			self.refused = clip(&self.refused);
 			self.given_up = clip(&self.given_up);
 			self.refilled = clip(&self.refilled);
+			if !self.stale.is_empty() {
+				let mut stale = RangeMap::new();
+				for (run, budget) in self.stale.iter() {
+					for kept in self.given_up.overlapping(run) {
+						stale.insert(kept.start.max(run.start)..kept.end.min(run.end), *budget);
+					}
+				}
+				self.stale = stale;
+			}
 			for (&start, &(end, _)) in &self.deferred.runs {
 				for run in span.overlapping(&(start..end)) {
 					candidates.insert(start.max(run.start)..end.min(run.end));
@@ -847,6 +862,7 @@ impl Misses {
 				] {
 					set.remove(0..low);
 				}
+				self.stale.remove(0..low);
 				self.deferred.remove(0..low);
 			}
 			// What the window no longer covers is forgotten, and what it newly covers
@@ -867,6 +883,7 @@ impl Misses {
 					] {
 						set.remove(run.clone());
 					}
+					self.stale.remove(run.clone());
 					self.deferred.remove(run);
 				}
 				for run in view.gained(old, low, last).into_iter().map(half) {
@@ -1182,6 +1199,7 @@ impl Misses {
 			] {
 				set.remove(0..low);
 			}
+			self.stale.remove(0..low);
 		}
 		let evicted = inbox.judge(state.cached, inbox_floor(low, taken), top);
 		debug_assert!(evicted.is_empty(), "an eviction landed without counting");
@@ -1360,7 +1378,15 @@ impl Misses {
 	/// to ask, or asked and not answered.
 	pub(super) fn unanswered(&self, state: &TrackState, hole: ops::Range<u64>, drift: &Drift) -> RangeSet<u64> {
 		let mut left = unsettled(state, hole.clone(), drift);
-		for run in self.given_up.overlapping(&hole) {
+		let mut given: RangeSet<u64> = self.given_up.overlapping(&hole).cloned().collect();
+		// A run given up stale under a narrower budget is no verdict for this reader, even
+		// before its next probe takes it back (see `Self::widen`).
+		for (run, judged) in self.stale.overlapping(&hole) {
+			if *judged < drift.budget {
+				given.remove(run.clone());
+			}
+		}
+		for run in given.iter() {
 			left.remove(run.clone());
 		}
 		for key in self.filled.range(hole) {
@@ -1403,7 +1429,43 @@ impl Misses {
 			return;
 		}
 		self.given_up.insert(groups.clone());
+		match stale {
+			Some(budget) => {
+				self.stale.insert(groups.clone(), budget);
+				self.narrowest = Some(self.narrowest.map_or(budget, |narrowest| narrowest.min(budget)));
+			}
+			None => self.stale.remove(groups.clone()),
+		}
 		given_up.push((groups, stale));
+	}
+
+	/// Take back the runs given up as stale under a budget narrower than `budget`, returning
+	/// them for the caller to reopen with [`Self::reopen`]: only a widening reverses a stale
+	/// verdict. Looks only when `budget` is wider than the narrowest it holds, whichever
+	/// budget a verdict was judged under and whenever it arrived.
+	pub fn widen(&mut self, budget: Duration) -> RangeSet<u64> {
+		if self.narrowest.is_none_or(|narrowest| budget <= narrowest) {
+			return RangeSet::new();
+		}
+		let widened: RangeSet<u64> = self
+			.stale
+			.iter()
+			.filter(|(_, judged)| **judged < budget)
+			.map(|(run, _)| run.clone())
+			.collect();
+		for run in widened.iter() {
+			self.stale.remove(run.clone());
+		}
+		self.narrowest = self.stale.iter().map(|(_, judged)| *judged).min();
+		widened
+	}
+
+	/// Judge `run` afresh: no longer given up, and judged again by the next probe.
+	pub fn reopen(&mut self, run: ops::Range<u64>) {
+		self.given_up.remove(run.clone());
+		self.judged.remove(run);
+		// The next probe judges under new terms, which looks at every key it has not judged.
+		self.at = None;
 	}
 }
 
@@ -1631,12 +1693,13 @@ fn looser(ours: Option<Duration>, asked: Option<Duration>) -> bool {
 /// folds: it hands out nothing there, so never asks a fill for it again.
 impl super::super::record::Beside for Misses {
 	fn runs(&self) -> u64 {
-		self.given_up.len() as u64
+		(self.given_up.len() + self.stale.len()) as u64
 	}
 
 	fn forget_below(&mut self, floor: u64) {
 		if floor > 0 {
 			self.given_up.remove(0..floor);
+			self.stale.remove(0..floor);
 		}
 	}
 }

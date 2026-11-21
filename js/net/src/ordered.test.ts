@@ -630,6 +630,78 @@ test("a refusal judged stale under a narrower budget leaves a widened read's tim
 	requests.close();
 });
 
+test("a widened ordered read asks its own stale refusal again unless it returned the gap", async () => {
+	for (const returned of [false, true]) {
+		const producer = receivedTrack();
+		const requests = producer.requests();
+		put(producer, 900n, false);
+		put(producer, 2000n, false);
+		if (returned) producer.skipGroups(901n, 1000n);
+		hooks.dropTrackGroups(producer, 1000n, 1500n, staleHole(10_000));
+		const subscriber = producer
+			.subscribe({ delay: { max: Duration.secs(1) } })
+			.withRange({ start: { included: 900n }, end: { excluded: 1600n } });
+		const ordered = subscriber.ordered();
+		expect(items(ordered)).toEqual(["group 900"]);
+		const fill = await requests.requestedFill();
+		expect([fill?.start, fill?.end]).toEqual([1000n, 1500n]);
+		if (fill) rejectGroups(fill, 1000n, 1500n, new StreamError(StreamCode.Old), { budget: 1000, everyone: false });
+		// A verdict under its own budget, though the cap keeps it from the groups the fill judged
+		// against: returned once nothing is owed below it, and never asked again.
+		expect(items(ordered)).toEqual(returned ? ["gap 1000..1500 (old)"] : []);
+
+		// Widened past the budget the fill refused under: the refusal is no verdict for it now,
+		// unless the read already passed it, since a read in key order never goes back.
+		subscriber.update({ delay: { max: null } });
+		if (!returned) producer.skipGroups(901n, 1000n);
+		expect(items(ordered)).toEqual([]);
+		let again: [bigint, bigint] | undefined;
+		void requests.requestedFill().then((fill) => {
+			if (fill) again = [fill.start, fill.end];
+		});
+		for (let i = 0; i < 10; i++) await Promise.resolve();
+		expect(again).toEqual(returned ? undefined : [1000n, 1500n]);
+		requests.close();
+	}
+});
+
+// The refusal's gap stays queued when a group arriving for its first key fails again: the widening
+// takes back all of it, not just what the refusal still names, so no gap stands for that key.
+test("a widened ordered read takes back its whole stale gap after a group for it fails", async () => {
+	const producer = receivedTrack();
+	const requests = producer.requests();
+	put(producer, 900n, false);
+	put(producer, 2000n, false);
+	hooks.dropTrackGroups(producer, 1000n, 1500n, staleHole(10_000));
+	const subscriber = producer
+		.subscribe({ delay: { max: Duration.secs(1) } })
+		.withRange({ start: { included: 900n }, end: { excluded: 1600n } });
+	const ordered = subscriber.ordered();
+	expect(items(ordered)).toEqual(["group 900"]);
+	const fill = await requests.requestedFill();
+	expect([fill?.start, fill?.end]).toEqual([1000n, 1500n]);
+	if (fill) rejectGroups(fill, 1000n, 1500n, new StreamError(StreamCode.Old), { budget: 1000, everyone: false });
+	expect(items(ordered)).toEqual([]);
+
+	// A wider reader asks the run, and its answer for 1000 lands and then fails.
+	const wide = producer
+		.subscribe({ delay: { max: null } })
+		.withRange({ start: { included: 900n }, end: { excluded: 1600n } })
+		.ordered();
+	items(wide);
+	const other = await requests.requestedFill();
+	expect(other?.start).toBe(1000n);
+	const answer = other?.accept(1000n);
+	answer?.writeFrame(textFrame("x", Timestamp.unscaled(1000n)));
+	answer?.abort(new StreamError(StreamCode.Cancel));
+	for (let i = 0; i < 10; i++) await Promise.resolve();
+
+	subscriber.update({ delay: { max: null } });
+	producer.skipGroups(901n, 1000n);
+	expect(items(ordered)).toEqual([]);
+	requests.close();
+});
+
 test("an empty answer never extends the reach of a start reported for its time", () => {
 	for (const emptyFirst of [false, true]) {
 		const producer = receivedTrack();
