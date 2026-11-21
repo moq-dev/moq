@@ -9,7 +9,7 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::track::{Delay, Info, Order, Range, Subscription};
+use moq_net::track::{Delay, Info, Order, Range, Start, Subscription};
 use moq_net::{Timescale, Timestamp, Version, cache, origin, track};
 use serde_json::Value;
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
@@ -55,33 +55,35 @@ impl Mode {
 #[derive(Clone, Debug)]
 struct Ask {
 	ranges: Vec<Range>,
-	min: Option<Duration>,
 }
 
 impl Ask {
 	fn parse(value: &Value) -> Self {
-		let time = |range: &Value, key| range.get(key).map(|time: &Value| time.as_u64().expect("a time"));
+		let start = |range: &Value| match range.get("start") {
+			None => Start::Oldest,
+			Some(start) => match start.get("live") {
+				Some(live) => Start::Live(Duration::from_millis(live.as_u64().expect("a lag"))),
+				None => Start::Time(start.as_u64().expect("a time")),
+			},
+		};
 		let ranges = match value.get("ranges") {
 			Some(ranges) => ranges
 				.as_array()
 				.expect("ranges")
 				.iter()
 				.map(|range| Range {
-					start: time(range, "start"),
-					end: time(range, "end"),
+					start: start(range),
+					end: range.get("end").map(|end| end.as_u64().expect("a time")),
 				})
 				.collect(),
 			None => vec![Range::default()],
 		};
-		let min = value
-			.get("minAge")
-			.map(|min| Duration::from_millis(min.as_u64().expect("a Min Age")));
-		Self { ranges, min }
+		Self { ranges }
 	}
 
 	fn subscription(&self) -> Subscription {
 		Subscription::default()
-			.with_delay(Delay::default().with_min(self.min).with_max(None))
+			.with_delay(Delay::default().with_max(None))
 			.with_order(Order::Ascending)
 			.with_ranges(self.ranges.clone())
 	}
