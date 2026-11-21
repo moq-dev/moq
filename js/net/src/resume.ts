@@ -1225,22 +1225,23 @@ class Reader implements ResumeSource {
 		const window = this.#window();
 		const end = window.end();
 		if (end === undefined || window.pending) return false;
-		// A group of the window that the local floor or cap keeps out stays owed, as on one cursor,
-		// though no copy reads it: under the serving copy's resume point, or under where that copy's
-		// own ranges start, when an earlier copy placed the window lower.
-		// Above where the serving copy's own window starts, for the ranges it placed itself, is that
-		// copy's to judge, skips included.
-		let own: bigint | undefined;
-		for (const resolved of hooks.servingResolved(serving.sub)) {
-			if (resolved !== undefined && (own === undefined || resolved.start < own)) own = resolved.start;
-		}
-		const until = own === undefined ? serving.floor : serving.floor === undefined ? own : max(own, serving.floor);
+		// A group of a range that the local floor or cap keeps out stays owed, as on one cursor,
+		// though no copy reads it: under the serving copy's resume point, or under where that copy
+		// placed the range, when an earlier copy placed it lower. Above that the serving copy judges,
+		// skips included.
 		const cursor = this.#shell.cursor.peek();
-		if (until !== undefined) {
-			for (const run of window.runs(window.floor() ?? 0n, min(until, end))) {
-				for (const gap of delivered.gaps(run.start, run.end)) {
-					if (gap.start < cursor.start || (cursor.end !== undefined && gap.end > cursor.end)) return false;
-				}
+		const own = hooks.servingResolved(serving.sub);
+		for (let index = 0; index < this.#ranges().length; index++) {
+			const placed = window.resolvedKey(BigInt(index));
+			if (!placed) continue;
+			const start = own[index]?.start;
+			let until =
+				start === undefined ? serving.floor : serving.floor === undefined ? start : max(start, serving.floor);
+			if (until === undefined) continue;
+			until = min(until, min(end, placed.end ?? end));
+			if (placed.start >= until) continue;
+			for (const gap of delivered.gaps(placed.start, until)) {
+				if (gap.start < cursor.start || (cursor.end !== undefined && gap.end > cursor.end)) return false;
 			}
 		}
 		return hooks.exhaustedFor(serving.sub, delivered, ordered);

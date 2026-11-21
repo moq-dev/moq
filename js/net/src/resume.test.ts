@@ -499,6 +499,52 @@ test("a skip under the local floor ends a single route read", async () => {
 });
 
 /**
+ * A range an earlier copy placed lower than the serving copy places it stays owed from there,
+ * whatever another range the serving copy placed lower: a group the local floor keeps out of it
+ * holds the read open.
+ */
+test("a range placed lower stays owed beside an empty one", async () => {
+	const front = new Front();
+	const sources = [new BroadcastProducer(), new BroadcastProducer()];
+	const handles = sources.map((source) => source.consume());
+	const [ta, tb] = sources.map(copy);
+	ta.write(2n);
+	ta.write(9n);
+	front.serve(handles[0]);
+	const delay = { max: Duration.millis(3_600_000) };
+	const ranges = [
+		{ start: { time: 8n }, end: { time: 8n } },
+		{ start: { time: 1n }, end: { time: 0n } },
+	];
+	const sub = front.consumer
+		.track("seq")
+		.subscribe({ delay, ranges })
+		.withRange({ start: { included: 3n }, end: { excluded: 9n } });
+	try {
+		await settle();
+		expect(drain(sub)).toEqual([]);
+		tb.write(8n);
+		tb.write(9n);
+		front.serve(handles[1]);
+		await settle();
+		expect(drain(sub)).toEqual([8n]);
+		ta.producer.abort(new StreamError(StreamCode.SessionClosed));
+		await settle();
+		let ended = false;
+		void sub.recvGroup().then(() => {
+			ended = true;
+		});
+		await settle();
+		expect(ended).toBe(false);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		for (const handle of handles) handle.close();
+		for (const source of sources) source.close();
+	}
+});
+
+/**
  * As above, with the group holding the time still to land when the backfill learns no group sits
  * between it and the resume point: the backfill is kept for it, below where it was asked from.
  */
