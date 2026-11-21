@@ -954,17 +954,18 @@ impl Finished {
 	}
 }
 
-/// How far back a subscription wants retained audio replayed. A live join starts its min delay
-/// behind the live edge, which a player states as its playout delay plus the codec's warmup, so
-/// that bounds it within the max delay. Any other range, or a live join stating no min
-/// (moq-transport, moq-lite before 07), wants all its max delay keeps; `None` leaves the retention.
+/// How far back a subscription wants retained audio replayed. A live join, a range with no start
+/// and a stated min delay, starts that far behind the live edge, which a player states as its
+/// playout delay plus the codec's warmup, so that bounds it within the max delay. Any other range,
+/// or one with no start stating no min (an oldest reader, as moq-transport and moq-lite before 07
+/// carry), wants all its max delay keeps; `None` leaves the retention.
 #[cfg(any(feature = "capture", test))]
 fn replay_budget(subscription: &moq_net::track::Subscription) -> Option<std::time::Duration> {
 	let live = !subscription.ranges.is_empty()
 		&& subscription
 			.ranges
 			.iter()
-			.all(|range| *range == moq_net::track::Range::live());
+			.all(|range| range.start.is_none() && range.end.is_none());
 	let max = subscription.delay.max;
 	match (subscription.delay.min.filter(|_| live), max) {
 		(Some(min), Some(max)) => Some(min.min(max)),
@@ -1161,21 +1162,26 @@ mod tests {
 	/// Replayed groups reach the track as fresh arrivals, so only the encoder can tell they are old:
 	/// a live viewer rejoining after seconds idle would otherwise receive all of them first. A live
 	/// join states how far back it plays as its min delay, which bounds the replay however far its
-	/// max delay reaches; one that states none (moq-transport, moq-lite before 07) is bounded by its
-	/// max alone, as is a reader asking for history.
+	/// max delay reaches; a range with no start that states none (an oldest reader, as
+	/// moq-transport and moq-lite before 07 carry) is bounded by its max alone, as is a reader
+	/// asking for history from a time.
 	#[tokio::test(start_paused = true)]
 	async fn demand_replays_only_the_history_its_delay_wants() {
 		let budget = Duration::from_millis(130);
 		let long = Duration::from_secs(10);
-		let live = || vec![moq_net::track::Range::live()];
+		let open = || vec![moq_net::track::Range::default()];
 		for (delay, ranges) in [
-			(moq_net::track::Delay::default().with_min(budget).with_max(long), live()),
-			(moq_net::track::Delay::default().with_min(None).with_max(budget), live()),
-			(moq_net::track::Delay::default().with_min(long).with_max(budget), live()),
-			// A reader reaching back for history, such as an archive, wants all its max delay keeps.
+			(moq_net::track::Delay::default().with_min(budget).with_max(long), open()),
+			(moq_net::track::Delay::default().with_min(None).with_max(budget), open()),
+			(moq_net::track::Delay::default().with_min(long).with_max(budget), open()),
+			// A reader reaching back for history from a time, such as an archive resuming, wants
+			// all its max delay keeps whatever min it states.
 			(
-				moq_net::track::Delay::default().with_max(budget),
-				vec![moq_net::track::Range::oldest()],
+				moq_net::track::Delay::default().with_min(long).with_max(budget),
+				vec![moq_net::track::Range {
+					start: Some(0),
+					end: None,
+				}],
 			),
 		] {
 			replays_from(

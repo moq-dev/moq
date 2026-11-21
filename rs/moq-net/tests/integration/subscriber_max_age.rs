@@ -89,24 +89,25 @@ async fn relay_forwards_the_most_tolerant_subscriber_max_age() {
 }
 
 async fn min_delay(track: &mut track::Producer, min: Option<Duration>) {
+	settles(track, |subscription| subscription.delay.min == min).await;
+}
+
+async fn settles(track: &mut track::Producer, wanted: impl Fn(&track::Subscription) -> bool) {
 	kio::clock::timeout(Duration::from_secs(5), async {
 		loop {
-			if track
-				.subscription()
-				.is_some_and(|subscription| subscription.delay.min == min)
-			{
+			if track.subscription().is_some_and(|subscription| wanted(&subscription)) {
 				return;
 			}
 			track.subscription_changed().await.unwrap();
 		}
 	})
 	.await
-	.unwrap_or_else(|_| panic!("wanted min {min:?}, publisher has {:?}", track.subscription()));
+	.unwrap_or_else(|_| panic!("publisher has {:?}", track.subscription()));
 }
 
 /// A lite-07 relay forwards the largest stated min delay upstream, so its copy reaches back for
-/// the reader that buffers most, and a lite-06 subscriber, whose wire cannot state one, counts
-/// for nothing.
+/// the reader that buffers most. A lite-06 subscriber with no start, whose wire cannot state a
+/// min, counts as unstated, which reaches back furthest, until it leaves.
 #[kio::test]
 async fn relay_forwards_the_largest_stated_min_delay() {
 	let lite07: Version = "moq-lite-07-wip".parse().unwrap();
@@ -151,16 +152,25 @@ async fn relay_forwards_the_largest_stated_min_delay() {
 		track::Subscription::default().with_delay(track::Delay::default().with_min(min.map(Duration::from_millis)))
 	};
 
-	let unstated = cache(&legacy).await.subscribe(prefs(Some(0))).await.unwrap();
-	min_delay(&mut source, None).await;
 	let modern = cache(&modern).await;
 	let fast = modern.subscribe(prefs(Some(100))).await.unwrap();
 	min_delay(&mut source, Some(Duration::from_millis(100))).await;
 	let slow = modern.subscribe(prefs(Some(500))).await.unwrap();
 	min_delay(&mut source, Some(Duration::from_millis(500))).await;
-	drop(slow);
-	min_delay(&mut source, Some(Duration::from_millis(100))).await;
-	drop(fast);
+	// Its wire carries no min, so the relay holds it unstated.
+	let unstated = cache(&legacy).await.subscribe(prefs(Some(0))).await.unwrap();
 	min_delay(&mut source, None).await;
 	drop(unstated);
+	min_delay(&mut source, Some(Duration::from_millis(500))).await;
+	drop(slow);
+	// A Min Age places only a range with no start: once the fast reader's join resolved, its
+	// range names the group it started at, and the relay forwards no Min Age for it.
+	let fast_min = Some(Duration::from_millis(100));
+	settles(&mut source, |subscription| match subscription.delay.min {
+		None => subscription.ranges.iter().all(|range| range.start.is_some()),
+		min => min == fast_min,
+	})
+	.await;
+	drop(fast);
+	min_delay(&mut source, None).await;
 }

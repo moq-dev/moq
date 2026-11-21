@@ -992,8 +992,8 @@ mod tests {
 
 		let past = moq_net::track::Subscription::default()
 			.with_ranges([moq_net::track::Range {
-				start: moq_net::track::Anchor::Time(3),
-				end: Some(moq_net::track::Anchor::Time(4)),
+				start: Some(3),
+				end: Some(4),
 			}])
 			.with_delay(moq_net::track::Delay::default().with_max(None));
 		let rung = consumer.track("video/120p").unwrap();
@@ -2165,7 +2165,10 @@ mod tests {
 		// The live loop serves the latest source group, at its key.
 		let (rung, live) = instance().await;
 		let mut subscriber = rung
-			.subscribe(moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::live()]))
+			.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_min(std::time::Duration::ZERO)),
+			)
 			.await
 			.unwrap()
 			.ordered();

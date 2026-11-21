@@ -32,7 +32,7 @@ test("media joins live, with its delay on the initial subscription and later upd
 		priority: 7,
 		delay,
 	});
-	const live = [{ start: { relative: 0n } }];
+	const live = [{}];
 	expect(initial).toEqual({
 		priority: 7,
 		delay: { min: Duration.millis(100), max: Duration.millis(250) },

@@ -357,7 +357,7 @@ func finishSubscribe(ctx context.Context, client *moq.Client, broadcast string, 
 	for id, video = range catalog.Video {
 		break
 	}
-	media, err := moqmedia.NewTrackConsumer(ctx, consumer, moqmedia.TrackConfig{Rendition: moqmedia.VideoRendition(id, video), Subscription: &moq.Subscription{Delay: moq.Delay{MinUnstated: true, Max: maxDelay}}})
+	media, err := moqmedia.NewTrackConsumer(ctx, consumer, moqmedia.TrackConfig{Rendition: moqmedia.VideoRendition(id, video), Subscription: &moq.Subscription{Delay: moq.Delay{Max: maxDelay}}})
 	if err != nil {
 		return err
 	}
@@ -477,13 +477,14 @@ func finishSubscribe(ctx context.Context, client *moq.Client, broadcast string, 
 func decodeAudio(ctx context.Context, consumer *moq.BroadcastConsumer, id string, rendition moqmedia.Audio, out string, audioMs int) error {
 	codec, _, _ := strings.Cut(rendition.Codec, ".")
 	out += "." + codec
+	playout := maxDelay
 	decoder, err := moqaudio.Subscribe(ctx, consumer, id, rendition, moqaudio.DecoderOutput{
 		Format: moq.AudioSampleFormatF32,
 		// moq-audio waits on a missing group for its playout delay, measured from arrival timing at tens
 		// of ms, so a runtime starved longer than that skips a group that is only late. This reader
 		// checks delivery between implementations, not a real-time deadline: it holds a playout delay of
 		// the max delay, waiting on a hole for the same budget it grants a late group.
-		Delay: moq.Delay{Min: maxDelay, Max: maxDelay},
+		Delay: moq.Delay{Min: &playout, Max: maxDelay},
 	})
 	if err != nil {
 		return err
@@ -586,7 +587,7 @@ func subscribe(ctx context.Context, url, broadcast string, opts dialOptions, tim
 		break
 	}
 
-	media, err := moqmedia.NewTrackConsumer(ctx, consumer, moqmedia.TrackConfig{Rendition: moqmedia.VideoRendition(id, video), Subscription: &moq.Subscription{Delay: moq.Delay{MinUnstated: true, Max: maxDelay}}})
+	media, err := moqmedia.NewTrackConsumer(ctx, consumer, moqmedia.TrackConfig{Rendition: moqmedia.VideoRendition(id, video), Subscription: &moq.Subscription{Delay: moq.Delay{Max: maxDelay}}})
 	if err != nil {
 		return err
 	}
