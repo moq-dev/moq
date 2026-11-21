@@ -22,14 +22,13 @@ use std::sync::{
 };
 use std::task::Waker;
 
-use super::group::MAX_CACHE_BYTES;
 #[cfg(any(test, feature = "async"))]
 use crate::transport::ReceiveWindow;
 
 /// The furthest a paced writer runs ahead of its group's fastest reader: half the live
 /// tail, so the other half stays behind the fastest reader for slower ones.
 #[cfg(any(test, feature = "async"))]
-pub(crate) const AHEAD: u64 = ahead(MAX_CACHE_BYTES);
+pub(crate) const AHEAD: u64 = ahead(super::group::MAX_CACHE_BYTES);
 
 /// How far a paced writer runs ahead of the fastest reader of a copy keeping `kept` bytes.
 pub(crate) const fn ahead(kept: u64) -> u64 {
