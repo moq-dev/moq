@@ -3228,23 +3228,29 @@ mod tests {
 	fn a_hold_taken_mid_decision_waits_for_it() {
 		let holds = kio::Producer::<usize>::default();
 		let consumer = holds.consume();
-		let (held, landed) = std::sync::mpsc::channel();
+		let order = std::sync::Mutex::new(Vec::new());
+		let (trying, started) = std::sync::mpsc::channel();
 		std::thread::scope(|scope| {
 			let decided = poll_released(&consumer, &kio::Waiter::noop(), |_| {
 				scope.spawn(|| {
+					trying.send(()).unwrap();
 					*holds.write().ok().unwrap() += 1;
-					held.send(()).unwrap();
+					order.lock().unwrap().push("held");
 				});
-				// Proving the hold blocked needs a wait; a slow machine can only miss the race, never fail.
-				assert!(
-					landed.recv_timeout(Duration::from_millis(100)).is_err(),
-					"a hold landed between the hold count and the idle check"
-				);
+				started.recv().unwrap();
+				// Give the hold every chance to land; it never can while the decision holds the count.
+				for _ in 0..10_000 {
+					if !order.lock().unwrap().is_empty() {
+						break;
+					}
+					std::thread::yield_now();
+				}
+				order.lock().unwrap().push("decided");
 				Poll::Ready(())
 			});
 			assert!(decided.is_ready());
 		});
-		landed.recv().unwrap();
+		assert_eq!(*order.lock().unwrap(), ["decided", "held"], "a hold landed mid-decision");
 	}
 
 	/// A [`Hold`] taken once a drain is waiting on a session's last reader still holds the
