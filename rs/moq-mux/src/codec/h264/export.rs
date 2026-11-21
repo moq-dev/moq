@@ -319,6 +319,26 @@ mod tests {
 		assert_eq!(next(&mut export).await.as_ref(), b"primary-2");
 	}
 
+	/// With several matching renditions, the catalog's ranking picks, not their names.
+	#[tokio::test(start_paused = true)]
+	async fn exports_the_best_ranked_rendition() {
+		use crate::container::test_util::{Live, raw_frame};
+
+		let mut live = Live::avc3();
+		let primary = live.track.name().to_string();
+		let mut config = live.catalog.snapshot().video.renditions[&primary].clone();
+		config.preference = 1;
+		let mut sibling = live.add_track(".sibling", |catalog, name| {
+			catalog.modify().unwrap().video.renditions.insert(name, config);
+		});
+		assert!(primary.as_str() < sibling.name(), "name order would pick the primary");
+		let mut export = Export::new(live.source().await, live.catalog_stream().await);
+
+		live.track.write(raw_frame(0, b"primary-0", true)).unwrap();
+		sibling.write(raw_frame(0, b"sibling-0", true)).unwrap();
+		assert_eq!(next(&mut export).await.as_ref(), b"sibling-0");
+	}
+
 	#[tokio::test(start_paused = true)]
 	async fn in_band_export_accepts_empty_parameter_sets() {
 		for in_band in [false, true] {

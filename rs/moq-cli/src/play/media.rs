@@ -277,6 +277,9 @@ impl<O: Output> Media<O> {
 
 			if playback.wants(Kind::Video) {
 				playback.read(Kind::Video);
+				// The window reports its shape before its renderer comes up, so the first
+				// pick is already shaped like it rather than switching straight away.
+				let render = self.output.render().await;
 				// Copied out first: the borrow holds a lock across the awaits below.
 				let orientation = *viewport.borrow_and_update();
 				for (name, config) in shaped(&snapshot.video, orientation) {
@@ -307,7 +310,7 @@ impl<O: Output> Media<O> {
 						// the decoder downloads those instead, all of them on a device
 						// that imports none.
 						let mut decode = moq_video::decode::Config::new();
-						decode.output = self.output.render().await;
+						decode.output = render;
 						decode.device = crate::device(&self.args.vaapi_device, &self.args.v4l2_decoder);
 						let decoder = moq_video::decode::Sink::open(config, &decode).await?;
 						let delay = moq_net::track::Delay {

@@ -76,7 +76,7 @@ pub fn run(
 	let drained = Arc::new(tokio::sync::Notify::new());
 	// Set once the window's device opens. The media task starts now anyway, so
 	// the broadcast resolves while the window does, and waits for it only to
-	// open a decoder.
+	// pick and open a video rendition.
 	let render = Arc::new(tokio::sync::SetOnce::new());
 	let (viewport, viewed) = tokio::sync::watch::channel(None);
 
@@ -287,6 +287,7 @@ impl ApplicationHandler<Event> for App {
 			// still resolving, rather than showing whatever was in the surface.
 			Ok(display) => {
 				display.window.request_redraw();
+				// Before the renderer, which the media task waits on to pick its first rendition.
 				let size = display.window.inner_size();
 				self.reshape(size.width, size.height);
 				self.render
