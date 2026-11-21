@@ -243,10 +243,14 @@ fn adopt(
 	Ok(Some(clock.adopted(wall)?))
 }
 
-/// `at` on clock `from` moved onto clock `to`: the timestamp `to` reads at the same wall instant.
+/// `at` on clock `from` moved onto clock `to`, a re-basing of it: shifted by what separates their
+/// readings at one instant, so it names the same moment. Needs no wall mapping, which a clock placed
+/// on arrival without a host wall clock lacks.
 fn restamp(from: &crate::Clock, to: &crate::Clock, at: moq_net::Timestamp) -> crate::Result<moq_net::Timestamp> {
-	let unmappable = || crate::Error::UnmappableTimestamp(format!("{at:?} lands before the adopted clock's PTS zero"));
-	let micros = u64::try_from(to.reading(from.wall_clock(at)?)?).map_err(|_| unmappable())?;
+	let unmappable = || crate::Error::UnmappableTimestamp(format!("{at:?} lands before the re-based clock's PTS zero"));
+	let now = kio::clock::now();
+	let shift = to.capture(now)?.as_micros()? as i128 - from.capture(now)?.as_micros()? as i128;
+	let micros = u64::try_from(at.as_micros()? as i128 + shift).map_err(|_| unmappable())?;
 	moq_net::Timestamp::from_micros(micros).map_err(|_| unmappable())
 }
 
@@ -769,7 +773,7 @@ impl<E: CatalogExt> Producer<E> {
 				None => guard.state.clock.arrival(since)?,
 			};
 			let advertised = clock.wall();
-			guard.retime(clock);
+			guard.retime(clock)?;
 			guard.state.anchored = true;
 			match wall {
 				// A placement can precede every track. It stages no publish, so the catalog first
@@ -1267,8 +1271,23 @@ impl<E: CatalogExt> Guard<'_, E> {
 	}
 
 	/// Move the producer onto `clock`, a re-basing of the one it has, before anything fixed it.
-	fn retime(&mut self, clock: crate::Clock) {
+	///
+	/// Every stamp still pending, this guard's and the one staged for the initial publish, was read
+	/// on the old clock: each moves onto the same moment on the new one. A stamp that can't is
+	/// refused, leaving the clock as it was.
+	fn retime(&mut self, clock: crate::Clock) -> crate::Result<()> {
+		let old = &self.state.clock;
+		let at = self.at.map(|at| restamp(old, &clock, at)).transpose()?;
+		let staged = match self.state.gate {
+			Gate::Buffering { at: Some(staged), .. } => Some(restamp(old, &clock, staged)?),
+			_ => None,
+		};
+		self.at = at;
+		if let (Gate::Buffering { at, .. }, Some(staged)) = (&mut self.state.gate, staged) {
+			*at = Some(staged);
+		}
 		self.state.clock = clock;
+		Ok(())
 	}
 
 	/// Publish a mutated catalog once, clearing the flag so it isn't published again.
@@ -1279,18 +1298,8 @@ impl<E: CatalogExt> Guard<'_, E> {
 		self.updated = false;
 
 		// The `sync.clock` is the producer's clock: never advertise one it disagrees with.
-		let adopted = adopt(&self.state.clock, self.state.anchored, self.state.catalog.sync.clock).and_then(|clock| {
-			let Some(clock) = clock else {
-				return Ok(None);
-			};
-			// The stamp was read on the clock this edit re-bases: it names the same instant on the new one.
-			let at = self.at.map(|at| restamp(&self.state.clock, &clock, at)).transpose()?;
-			Ok(Some((clock, at)))
-		});
-		if let Ok(Some((clock, at))) = &adopted {
-			self.at = *at;
-			self.retime(clock.clone());
-		}
+		let adopted = adopt(&self.state.clock, self.state.anchored, self.state.catalog.sync.clock)
+			.and_then(|clock| clock.map_or(Ok(()), |clock| self.retime(clock)));
 		self.state.catalog.sync.clock = self.state.clock.wall();
 		adopted?;
 
@@ -2275,6 +2284,25 @@ mod test {
 		drop(reserved);
 		assert_eq!(starts(&catalog), [Some(start(&catalog, 60_000) + 1); 2]);
 		assert_eq!(audio(&catalog), ["a", "c"]);
+	}
+
+	/// An importer's first frame re-bases the clock after a change was staged: the staged stamp moves
+	/// with it, so the initial publish lands at the same moment on the clock the media runs on.
+	#[tokio::test(start_paused = true)]
+	async fn a_staged_timestamp_moves_with_the_clock_an_importer_anchors() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+
+		let timebase = catalog.timebase();
+		let reserved = timebase.reserve();
+		// Staged on the fresh clock, which reads ten seconds.
+		let staged = catalog.next_timestamp();
+		opus(&mut catalog, "a", staged).unwrap();
+
+		// The first frame, at PTS 1.4s, places the clock so it reads 1.4s now.
+		timebase.anchor(ms(1_400)).unwrap();
+		drop(reserved);
+		assert_eq!(starts(&catalog), [Some(start(&catalog, 1_400)); 2]);
 	}
 
 	#[tokio::test(start_paused = true)]
