@@ -80,6 +80,12 @@ export interface ConnectionProps {
 	tokens?: readonly string[] | Signal<readonly string[]>;
 
 	/**
+	 * Carry the connection credential, the first token, in the URL's `auth` query parameter
+	 * instead of SETUP and `jwt`; see {@link ConnectProps.urlAuth}. Implies a private loop.
+	 */
+	urlAuth?: boolean;
+
+	/**
 	 * Maximum time for each connection attempt, the dial and the MoQ handshake (default:
 	 * 30000ms; `0` waits forever). An attempt that outlives it is retried like any other
 	 * failure. The same bound as the `timeout` option of {@link Connection.connect}.
@@ -120,8 +126,8 @@ export interface ConnectionProps {
  * session finishes its groups, and the handle and its origin carry across. A redirect the
  * `goaway` policy refuses stops the loop like an auth rejection does.
  *
- * Options the pool cannot honor (transport options, backoff, timeout, goaway, tokens, a pinned
- * certificate, caller-owned origins) use a private loop. An explicit `share: true`
+ * Options the pool cannot honor (transport options, backoff, timeout, goaway, tokens, a credential
+ * in the URL, a pinned certificate, caller-owned origins) use a private loop. An explicit `share: true`
  * refuses them. A supplied transport cannot reconnect at all; pass it to {@link Connection.connect}
  * instead.
  *
@@ -334,6 +340,7 @@ export class Connection {
 				timeout: props.timeout,
 				goaway: props.goaway,
 				tokens: props.tokens,
+				urlAuth: props.urlAuth,
 			});
 			signals.cleanup(() => loop.close());
 
@@ -526,6 +533,9 @@ function refuse(props?: ConnectionProps): void {
 	if (props.tokens !== undefined) {
 		throw new Error("tokens cannot be shared; pass share: false");
 	}
+	if (props.urlAuth) {
+		throw new Error("urlAuth cannot be shared; pass share: false");
+	}
 	if (props.timeout !== undefined) {
 		throw new Error("timeout cannot be shared; pass share: false");
 	}
@@ -541,6 +551,7 @@ function requiresPrivate(props: ConnectionProps): boolean {
 		props.websocket !== undefined ||
 		props.backoff !== undefined ||
 		props.tokens !== undefined ||
+		props.urlAuth === true ||
 		props.timeout !== undefined ||
 		props.goaway !== undefined ||
 		props.publish !== undefined ||

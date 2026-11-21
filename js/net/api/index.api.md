@@ -168,6 +168,7 @@ export namespace Connection {
 		tokens?: readonly string[];
 		transport?: WebTransport;
 		url: URL;
+		urlAuth?: boolean;
 		versions?: readonly string[];
 		viewers?: Bandwidth.Viewers;
 		websocket?: Connection.WebSocketProps;
@@ -197,6 +198,7 @@ export namespace Connection {
 		tokens?: readonly string[] | Signals.Signal<readonly string[]>;
 		transport?: never;
 		url?: URL | Signals.Signal<URL | undefined>;
+		urlAuth?: boolean;
 		versions?: readonly string[] | Signals.Signal<readonly string[] | undefined>;
 		websocket?: Connection.WebSocketProps;
 		webtransport?: Connection.WebTransportProps;

@@ -448,7 +448,8 @@ release costs only that route.
 
 `routes` counts what the label's moq-lite-07 sessions did on the route layer,
 each under the label of the session whose peer caused it. Its size never
-depends on how many broadcasts or relays the mesh has. When rolling a mesh onto
+depends on how many broadcasts or relays the mesh has, and a label with nothing
+counted leaves it out, which readers read as zeros. When rolling a mesh onto
 a new release one relay at a time, compare a canary's rates with its
 neighbours':
 

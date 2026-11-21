@@ -408,41 +408,47 @@ mod tests {
 		http.abort();
 	}
 
+	/// The next payload `viewer` receives while `bridge` keeps sending from `at`, as a live
+	/// source does. Each packet's group ends whole where the packet does, so a paused source's
+	/// last one ages out before a session that connects past its delay budget reads it, which
+	/// a loaded host does to the first packet as readily as the second.
+	async fn played_live(
+		bridge: &mut dyn Bridge,
+		at: &mut u64,
+		viewer: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+	) -> Vec<u8> {
+		let read = received(viewer);
+		tokio::pin!(read);
+		loop {
+			push(bridge, *at, NEW_PACKET);
+			*at += 20_000;
+			tokio::select! {
+				played = &mut read => return played.expect("the viewer was closed"),
+				_ = kio::clock::sleep(Duration::from_millis(20)) => {}
+			}
+		}
+	}
+
 	/// A viewer re-offering from the address its abandoned session still holds plays on its
 	/// new session: the new session's ICE confirms the path, so the address moves to it.
 	#[tokio::test]
 	async fn a_reoffer_from_the_same_address_plays() {
 		let origin = moq_tokio::origin::spawn();
 		let (_route, mut bridge, _catalog) = publish_opus(&origin, moq_net::Instance::random());
-		push(&mut *bridge, 20_000, OPUS_PACKET);
+		let mut at = 20_000;
 
 		let (url, http, mut sessions) = serve_whep(&origin).await;
 		let udp = std::sync::Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
 		let (old, mut viewer) = raw_view_on(url.clone(), udp.clone()).await;
 		let _old_session = sessions.recv().await.unwrap();
-		assert_eq!(received(&mut viewer).await.as_deref(), Some(OPUS_PACKET));
+		assert_eq!(played_live(&mut *bridge, &mut at, &mut viewer).await, NEW_PACKET);
 
 		// The peer drops its connection without a word, then offers again from the same address.
 		old.abort();
 		let _ = old.await;
 		let (_new, mut viewer) = raw_view_on(url, udp).await;
 		let _new_session = sessions.recv().await.unwrap();
-		// The source keeps sending, as a live one does: each packet's group ends whole where the
-		// packet does, so a paused source's last one ages out before a session arriving past its
-		// delay budget reads it.
-		let read = received(&mut viewer);
-		tokio::pin!(read);
-		let mut at = 40_000;
-		let played = loop {
-			push(&mut *bridge, at, NEW_PACKET);
-			at += 20_000;
-			tokio::select! {
-				played = &mut read => break played,
-				_ = kio::clock::sleep(Duration::from_millis(20)) => {}
-			}
-		};
-		let played = played.expect("the new session never played");
-		assert!([OPUS_PACKET, NEW_PACKET].contains(&played.as_slice()), "{played:?}");
+		assert_eq!(played_live(&mut *bridge, &mut at, &mut viewer).await, NEW_PACKET);
 		http.abort();
 	}
 
