@@ -432,6 +432,7 @@ impl Server {
 			moq = moq.with_subscriber(subscriber);
 		}
 
+		let websocket = websocket.map(|websocket| websocket.with_quic(&resolved).with_versions(&versions));
 		Ok(Server {
 			admission,
 			accept: Default::default(),
@@ -440,7 +441,7 @@ impl Server {
 			streams,
 			tls_stream,
 			quic,
-			websocket: websocket.map(|websocket| websocket.with_quic(&resolved)),
+			websocket,
 		})
 	}
 
