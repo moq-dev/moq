@@ -266,3 +266,31 @@ async fn a_join_on_an_idle_copy_reaches_back_by_its_min_age() {
 	.await
 	.expect("the join read its start");
 }
+
+/// A live join on a relay copy that went idle measures the live edge from its publisher's
+/// answer, not from the groups the ended feed left: the publisher moved on meanwhile, and the
+/// groups the copy missed would leave a hole after its stale ones.
+#[kio::test]
+async fn a_join_on_an_idle_copy_waits_for_the_live_edge() {
+	let chain = Chain::new().await;
+	kio::clock::timeout(TIMEOUT, async {
+		let mut oldest = chain.relay(joining(None)).await;
+		for start in (0..=5000).step_by(500) {
+			assert_eq!(first(&mut oldest).await, start);
+		}
+		drop(oldest);
+		let mut source = chain.source.clone();
+		while source.subscription().is_some() {
+			source.subscription_changed().await.unwrap();
+		}
+		for start in (5500..=8000).step_by(500) {
+			append(&chain.source, start);
+		}
+		let mut relayed = chain.relay(joining(Some(Duration::from_secs(2)))).await;
+		for start in (6000..=8000).step_by(500) {
+			assert_eq!(first(&mut relayed).await, start, "2 s behind the live edge at 8 s");
+		}
+	})
+	.await
+	.expect("the join read on to live");
+}

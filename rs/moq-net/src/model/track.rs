@@ -1249,7 +1249,13 @@ impl Holdings for TrackState {
 	/// answer: from the groups it holds, or from where its upstream started a range answering
 	/// at least this Min Age, whose feed delivers every group from there. Otherwise it waits on
 	/// its upstream, which its session asks again with a Min Age this large.
+	///
+	/// An idle copy waits as [`Self::latest_live`] does: what an ended feed left measures no
+	/// live edge, and the groups it missed since leave a hole the next feed may not fill.
 	fn join(&self, min: Duration) -> Join {
+		if !self.readable() {
+			return Join::Unknown;
+		}
 		let wire = self.anchors == Anchors::Wire;
 		let oldest = || self.walked(..).next().map(|(&key, _)| Join::Group(key));
 		let Some(info) = self.info.as_ref() else {
