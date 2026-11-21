@@ -2379,6 +2379,7 @@ impl Reader {
 			logical: None,
 			fetch: None,
 			recovering: false,
+			live: Arc::default(),
 		})
 	}
 
@@ -3076,6 +3077,10 @@ pub(super) struct Recover {
 	fetch: Option<(u64, Fetch)>,
 	/// A recovery started and has not ended, so its events are logged once each.
 	recovering: bool,
+	/// The index of the serving copy's live groups a pending recovery's expiry searches
+	/// within the reader's window, kept across polls so each costs the groups that arrived
+	/// since; see [`Self::within`].
+	live: Arc<super::track::Live>,
 }
 
 enum Fetch {
@@ -3100,6 +3105,7 @@ impl Clone for Recover {
 			// A clone reads in parallel, so it asks and logs for itself.
 			fetch: None,
 			recovering: false,
+			live: self.live.clone(),
 		}
 	}
 }
@@ -3282,7 +3288,7 @@ impl Recover {
 			if res.is_pending()
 				&& let Some(budget) = self.poll_budget(waiter)
 				&& serving
-					.poll_stale(self.key, budget, self.within(waiter), waiter)
+					.poll_stale(self.key, budget, self.within(waiter), &self.live, waiter)
 					.is_ready()
 			{
 				return Poll::Ready(Err(Error::Old));
@@ -3706,6 +3712,7 @@ impl kio::Task for Fetching {
 						logical: Some(self.logical.clone()),
 						fetch: None,
 						recovering: false,
+						live: Arc::default(),
 					})))
 				}
 				// A finished track's last copy failed: the copy served after the end is already

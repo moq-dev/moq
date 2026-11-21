@@ -6826,17 +6826,17 @@ impl Consumer {
 	/// see `TrackState::drifted`. Parks in this track's expiry index, so only a change that
 	/// can make the group stale, or land it here, wakes it. Pending for good once the track closes.
 	///
-	/// Judged within `within`, a reader's groups and its exclusive cap, else every group.
+	/// Judged within `within`, a reader's groups and its exclusive cap, else every group,
+	/// searched through `live`, which the caller keeps across polls.
 	pub(super) fn poll_stale(
 		&self,
 		key: u64,
 		budget: Duration,
 		within: Option<(Cover, Option<u64>)>,
+		live: &Arc<Live>,
 		waiter: &kio::Waiter,
 	) -> Poll<()> {
-		let servable = within.map_or(Servable::ALL, |(groups, cap)| {
-			Servable::covering(groups, cap, &Arc::default())
-		});
+		let servable = within.map_or(Servable::ALL, |(groups, cap)| Servable::covering(groups, cap, live));
 		self.with_state(|state| {
 			let Some(state) = state else {
 				return Poll::Pending;
@@ -8379,7 +8379,7 @@ impl PartialEq for Several {
 /// Each index is for the cover it last searched: a search under an edited cover moves only
 /// the runs the edit moved, so a SUBSCRIBE_UPDATE costs its own ranges, never the cache.
 #[derive(Default)]
-struct Live(Mutex<Vec<Indexed>>);
+pub(super) struct Live(Mutex<Vec<Indexed>>);
 
 struct Indexed {
 	/// The track indexed, by its cache account. Held weakly, so a track that went away
