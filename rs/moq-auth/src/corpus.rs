@@ -150,7 +150,7 @@ fn documents() {
 fn roots() {
 	let corpus = corpus();
 	let key: Key = serde_json::from_value(corpus.keys["hs256"].clone()).unwrap();
-	let all: crate::Patterns = ["**".parse().unwrap()].into_iter().collect();
+	let all = crate::Prefixes::all();
 	for case in corpus.roots {
 		let claims = Claims::default().with_root(&case.root).with_publish(all.clone());
 		let scope = crate::Scope {

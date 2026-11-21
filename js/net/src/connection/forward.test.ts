@@ -78,7 +78,7 @@ class FakeSession {
 			consume: (path, instance) => this.consume(path, instance),
 			exclusive,
 			leave: () => {},
-			auth: new AuthSession({ peerGrant: { publish: new Path.Patterns(), subscribe: new Path.Patterns() } }),
+			auth: new AuthSession({ peerGrant: { publish: new Path.Prefixes(), subscribe: new Path.Prefixes() } }),
 		});
 		this.closed = new Promise((resolve) => {
 			this.#die = resolve;
@@ -690,12 +690,9 @@ test("a request replaced across one coalesced wakeup still gets answered", async
 	origin.close();
 });
 
-test("a scoped origin narrows a root watch to its disjoint literal heads", async () => {
+test("a scoped origin narrows a root watch to its prefixes", async () => {
 	const origin = new OriginProducer();
-	const scoped = origin.scope(
-		Path.empty(),
-		new Path.Patterns(["room/*/chat", "room/nested/**", "other/**"].map(Path.Pattern.parse)),
-	);
+	const scoped = origin.scope(Path.empty(), Path.Prefixes.parse(["room", "room/nested", "other"]));
 	const session = new FakeSession();
 	forwardAnnounced(session.session, scoped);
 
@@ -704,14 +701,14 @@ test("a scoped origin narrows a root watch to its disjoint literal heads", async
 	expect(session.open()).toEqual(["other/**", "room/**"]);
 	all.close();
 
-	// A watch inside a head rides the head's open request, and one outside the scope asks for
-	// nothing.
+	// A watch inside a prefix rides the prefix's open request, and one outside the scope asks
+	// for nothing.
 	let inside = origin.routes(Path.Pattern.subtree(Path.from("room/alice/chat")));
 	const outside = origin.routes(Path.Pattern.subtree(Path.from("elsewhere")));
 	await advance(LINGER);
 	expect(session.open()).toEqual(["room/**"]);
 
-	// With nothing open above it, a watch inside a head asks for itself.
+	// With nothing open above it, a watch inside a prefix asks for itself.
 	inside.close();
 	await advance(LINGER);
 	expect(session.open()).toEqual([]);
@@ -727,17 +724,17 @@ test("a scoped origin narrows a root watch to its disjoint literal heads", async
 
 test("a scoped session filters discovered routes and requests under its root", async () => {
 	const origin = new OriginProducer();
-	const scoped = origin.scope(Path.from("tenant"), new Path.Patterns([Path.Pattern.parse("room/*/chat")]));
+	const scoped = origin.scope(Path.from("tenant"), Path.Prefixes.parse(["room/alice/chat", "room/bob/chat"]));
 	const session = new FakeSession();
 	forwardAnnounced(session.session, scoped);
 
 	const all = origin.routes();
 	const events = record(all);
 	await settle();
-	// Session-relative: the scope's root is the session's.
-	expect(session.open()).toEqual(["room/**"]);
-	for (const prefix of ["room/alice/video", "room/alice/chat", "room/bob/chat"])
-		start(session.stream("room/**"), prefix);
+	// Session-relative: the scope's root is the session's, and it asks for each prefix.
+	expect(session.open()).toEqual(["room/alice/chat/**", "room/bob/chat/**"]);
+	start(session.stream("room/alice/chat/**"), "room/alice/chat");
+	start(session.stream("room/bob/chat/**"), "room/bob/chat");
 
 	const allowed = origin.request(Path.from("tenant/room/bob/chat"));
 	const denied = origin.request(Path.from("tenant/room/bob/video"));
@@ -851,7 +848,7 @@ test("a request synced as it opens releases the watcher", async () => {
 
 test("a scoped session refuses blind requests outside its allowed paths", async () => {
 	const origin = new OriginProducer();
-	const scoped = origin.scope(Path.from("tenant"), new Path.Patterns([Path.Pattern.parse("room/*/chat")]));
+	const scoped = origin.scope(Path.from("tenant"), Path.Prefixes.parse(["room/bob/chat"]));
 	const session = new FakeSession();
 	forwardAnnounced(session.session, scoped);
 	const allowed = origin.request(Path.from("tenant/room/bob/chat"));

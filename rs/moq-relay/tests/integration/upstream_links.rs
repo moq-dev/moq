@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use moq_auth::{Grant, Pattern, lease};
+use moq_auth::{Grant, lease};
 use moq_net::origin;
 use moq_relay::{
 	Connection, auth,
@@ -73,7 +73,7 @@ impl Node {
 /// What the embedded decider grants a dial at `path`: everything, as a peer,
 /// upstream when asked.
 fn grant(path: &str) -> Grant {
-	let all: moq_net::Patterns = [Pattern::all()].into_iter().collect();
+	let all = moq_net::Prefixes::all();
 	let mut grant = Grant::new(all.clone(), all);
 	grant.root = Some(String::new());
 	grant.link = Some(match path {

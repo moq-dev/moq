@@ -418,8 +418,8 @@ test("the connection's tokens ride every session across a GOAWAY", async () => {
 					const token = new TextDecoder().decode(request.token);
 					relay.tokens.push(token);
 					const issued = request.accept({
-						publish: new Path.Patterns([Path.Pattern.all()]),
-						subscribe: new Path.Patterns(),
+						publish: Path.Prefixes.all(),
+						subscribe: new Path.Prefixes(),
 					});
 					void issued.closed.then(() => relay.withdrawn.push(token));
 				}

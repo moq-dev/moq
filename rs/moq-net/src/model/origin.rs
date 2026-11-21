@@ -20,7 +20,7 @@ use super::{
 	front::{Action, Candidate, Event, Front, Refusal},
 };
 use crate::{
-	Error, Instance, InvalidPattern, Path, Pattern, Patterns,
+	Error, Instance, InvalidPattern, Path, Pattern, Patterns, Prefix, Prefixes,
 	coding::{BoundsExceeded, Decode, DecodeError, Decoder, Encode, EncodeError, Encoder, Form, varint},
 	path::{self, Segment},
 	time::{Deadlines, Instant},
@@ -1434,9 +1434,9 @@ struct RouteEntry {
 	/// Which incarnation of the instance; see [`RouteInfo::epoch`].
 	epoch: u64,
 	prefix: Path,
-	/// The absolute patterns the announcing producer may serve. The prefix is
+	/// The absolute prefixes the announcing producer may serve. The prefix is
 	/// only the wire-visible covering claim; this scope remains authoritative.
-	scope: Patterns,
+	scope: Prefixes,
 	/// The absolute subtrees the announcing producer may not serve, even beneath
 	/// a covering prefix.
 	excluded: Arc<[Path]>,
@@ -1491,9 +1491,9 @@ struct RouteEntry {
 	/// and building one allocates a segment vector and a canonical string. Holding
 	/// it makes that visit a comparison.
 	claim: Pattern,
-	/// Each [`Self::scope`] member intersected with [`Self::claim`], built once at
-	/// announce time for the same reason: the paths beneath the prefix the route
-	/// may serve. A member whose intersection is too large to spell reaches nothing.
+	/// The subtrees beneath the prefix the route may serve, built once at announce time
+	/// for the same reason: [`Self::claim`] when the scope covers the prefix, else each
+	/// [`Self::scope`] member beneath it.
 	reach: Vec<Pattern>,
 	/// Whether the job routes answering this prefix route take its instance, which it
 	/// minted rather than was given: their readers continue on the job's route. It moves
@@ -1593,13 +1593,16 @@ fn publish_path(path: &Path) -> Result<(), Error> {
 	Ok(())
 }
 
-/// What `scope` lets a route at `claim` serve: see [`RouteEntry::reach`].
-fn reach(scope: &Patterns, claim: &Pattern) -> Vec<Pattern> {
-	scope
-		.iter()
-		.filter_map(|scope| scope.intersect(claim).ok())
-		.flatten()
-		.collect()
+/// What `scope` lets a route at `prefix`, claiming `claim`, serve: see [`RouteEntry::reach`].
+fn reach(scope: &Prefixes, prefix: &Path, claim: &Pattern) -> Vec<Pattern> {
+	if scope.matches(prefix.as_str()) {
+		return vec![claim.clone()];
+	}
+	// The claim spells its prefix, so the prefix holds no wildcard.
+	let Ok(prefix) = Prefix::try_from(prefix.as_str()) else {
+		return Vec::new();
+	};
+	scope.intersect(&prefix.into()).iter().map(Prefix::pattern).collect()
 }
 
 /// The paths a prefix can cover, using an exact pattern at the path depth limit.
@@ -1826,7 +1829,7 @@ struct TableCursor {
 
 impl TableCursor {
 	/// Where `prefix` presents on this cursor, named relative to the cursor root.
-	/// The prefix stays a prefix; the pattern scope only decides visibility.
+	/// The prefix stays a prefix; the scope and filter only decide visibility.
 	/// `claim` is the prefix's [`prefix_claim`], which the caller already holds:
 	/// building one allocates, and the sweeps below ask this per route per
 	/// cursor.
@@ -1977,13 +1980,13 @@ impl TableCursor {
 	}
 }
 
-/// A handle's view of an origin: the absolute patterns it may reach, and the
+/// A handle's view of an origin: the absolute prefixes it may reach, and the
 /// subtrees it reads from elsewhere on the origin.
 #[derive(Clone)]
 struct OriginScope {
 	// The paths this handle may reach, absolute, named as the handle sees them:
 	// a path under a mount is authorized here, before it is resolved.
-	allowed: Patterns,
+	allowed: Prefixes,
 	// The subtrees that resolve elsewhere; see [`Producer::mount`]. Disjoint.
 	mounts: Arc<[Mount]>,
 	// The subtrees this handle never reaches despite `allowed`, absolute and
@@ -2090,15 +2093,15 @@ impl OriginScope {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn empty() -> Self {
 		Self {
-			allowed: Patterns::new(),
+			allowed: Prefixes::new(),
 			mounts: Arc::from([]),
 			excluded: Arc::from([]),
 		}
 	}
 
-	/// This view narrowed to the absolute `patterns`: the paths in both.
-	fn narrow(&self, patterns: &Patterns) -> Option<Self> {
-		let allowed = self.allowed.intersect(patterns).ok()?;
+	/// This view narrowed to the absolute `prefixes`: the paths in both.
+	fn narrow(&self, prefixes: &Prefixes) -> Option<Self> {
+		let allowed = self.allowed.intersect(prefixes);
 		if allowed.is_empty() {
 			None
 		} else {
@@ -2154,7 +2157,7 @@ impl OriginScope {
 	}
 
 	/// What this view reaches, named from `root`.
-	fn relative(&self, root: &Path) -> Patterns {
+	fn relative(&self, root: &Path) -> Prefixes {
 		self.allowed.rebase(root.as_str())
 	}
 }
@@ -2162,14 +2165,14 @@ impl OriginScope {
 impl Default for OriginScope {
 	fn default() -> Self {
 		Self {
-			allowed: Patterns::from(Pattern::all()),
+			allowed: Prefixes::all(),
 			mounts: Arc::from([]),
 			excluded: Arc::from([]),
 		}
 	}
 }
 
-/// The announce-interest prefixes that cover a pattern scope on a prefix-only
+/// The announce-interest prefixes that cover what a cursor lists on a prefix-only
 /// wire: each member's literal head, minus heads another already covers.
 ///
 /// A pattern's literal segments are spelled like a path's, so a head fails only when it
@@ -2561,8 +2564,7 @@ impl Producer {
 	/// serving the permitted descendants), and no mount or excluded subtree covers it.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn publishable(&self, full: &Path) -> bool {
-		Pattern::subtree(full.as_str()).is_ok_and(|subtree| self.scope.allowed.overlaps(&subtree))
-			&& self.scope.publishes(full)
+		self.scope.allowed.overlaps(full.as_str()) && self.scope.publishes(full)
 	}
 
 	/// An exact route at the absolute `full` path, answering `request` on its first
@@ -2734,7 +2736,9 @@ impl Producer {
 		let listener = Listener {
 			id,
 			root: self.root.clone(),
-			heads: interest_prefixes(&self.allowed()),
+			heads: (self.allowed().iter())
+				.filter_map(|prefix| Path::new(prefix.as_str()).ok())
+				.collect(),
 			allowed: self.scope.allowed.clone(),
 			link: self.link,
 			queue: queue.clone(),
@@ -2801,8 +2805,8 @@ impl Producer {
 	/// The claim is priced, credentialed and shown like an exact route. It is visible
 	/// for as long as the returned [`Claim`] (and every clone) lives, unless withdrawn.
 	///
-	/// The prefix must overlap this producer's pattern scope. Individual requests
-	/// remain authoritative and are refused when they do not match the scope.
+	/// The prefix must overlap this producer's scope. Individual requests remain
+	/// authoritative and are refused when the scope does not cover them.
 	pub fn claim(&self, prefix: impl TryInto<Path, Error: Into<Error>>, options: RouteOptions) -> Result<Claim, Error> {
 		// A minted instance lives in the table, which moves it on as its jobs end; see
 		// [`OriginState::advance`].
@@ -2871,15 +2875,16 @@ impl Producer {
 		})
 	}
 
-	/// Returns a producer rooted at `root` and restricted to matching `patterns`.
+	/// Returns a producer rooted at `root` and restricted to `prefixes`, each covering
+	/// its whole subtree.
 	///
-	/// `root` is relative to this producer's root, and `patterns` are relative to
+	/// `root` is relative to this producer's root, and `prefixes` are relative to
 	/// the new root. Returns [`Error::Unauthorized`] when the requested scope has
 	/// no overlap with this producer's scope, or [`Error::BoundsExceeded`] when
-	/// rooting the patterns would exceed the path limit.
-	pub fn scope(&self, root: impl TryInto<Path, Error: Into<Error>>, patterns: &Patterns) -> Result<Producer, Error> {
+	/// rooting the prefixes would exceed the path limit or the root holds a `*`.
+	pub fn scope(&self, root: impl TryInto<Path, Error: Into<Error>>, prefixes: &Prefixes) -> Result<Producer, Error> {
 		let root = self.root.join(&path::convert(root)?)?;
-		let rooted = patterns.rooted(root.as_str()).map_err(|_| BoundsExceeded)?;
+		let rooted = prefixes.rooted(root.as_str()).map_err(|_| BoundsExceeded)?;
 		let scope = self.scope.narrow(&rooted).ok_or(Error::Unauthorized)?;
 		Ok(Producer {
 			node: self.node,
@@ -2939,11 +2944,7 @@ impl Producer {
 		}
 		// A mount point no pattern can spell could never be announced or authorized.
 		Pattern::literal(at.as_str())?;
-		if !self
-			.scope
-			.allowed
-			.covers(&Patterns::from(Pattern::subtree(target.as_str())?))
-		{
+		if !self.scope.allowed.matches(target.as_str()) {
 			return Err(Error::Unauthorized);
 		}
 		// Symmetric, so the order mounts are added never changes which sets are accepted:
@@ -2990,8 +2991,8 @@ impl Producer {
 		&self.root
 	}
 
-	/// The patterns this producer may publish under, relative to its root.
-	pub fn allowed(&self) -> Patterns {
+	/// The prefixes this producer may publish under, relative to its root.
+	pub fn allowed(&self) -> Prefixes {
 		self.scope.relative(&self.root)
 	}
 
@@ -3009,12 +3010,12 @@ struct Announcing {
 	shared: SendCell<kio::Shared<OriginState>>,
 	/// The absolute advertised prefix, which also keys the ingress announce counters.
 	requested: Path,
-	/// The prefix inserted into the table, with its [`prefix_claim`]. Pattern
-	/// scopes decide visibility and request authorization without changing the
-	/// route's prefix shape.
+	/// The prefix inserted into the table, with its [`prefix_claim`]. The scope
+	/// decides visibility and request authorization without changing the route's
+	/// prefix shape.
 	prefixes: Vec<(Path, Pattern)>,
 	/// The absolute paths the producer is authorized to serve.
-	scope: Patterns,
+	scope: Prefixes,
 	/// The absolute subtrees the producer may not serve.
 	excluded: Arc<[Path]>,
 	local: bool,
@@ -3034,7 +3035,7 @@ impl Announcing {
 			return Err(BoundsExceeded.into());
 		}
 		let claim = prefix_claim(&requested)?;
-		if !producer.scope.allowed.overlaps(&claim) || !producer.scope.publishes(&requested) {
+		if !producer.scope.allowed.overlaps(requested.as_str()) || !producer.scope.publishes(&requested) {
 			return Err(Error::Unauthorized);
 		}
 		Ok(Self {
@@ -3108,7 +3109,7 @@ impl Announcing {
 				stale,
 				retired: false,
 				claim: claim.clone(),
-				reach: reach(&self.scope, claim),
+				reach: reach(&self.scope, prefix, claim),
 				lends: serving.lends,
 				lent: None,
 			});
@@ -3649,7 +3650,7 @@ enum Retract {
 pub(crate) struct AnnounceProducer {
 	shared: SendCell<kio::Shared<OriginState>>,
 	/// The table entries this advertisement created, by prefix and id. A prefix
-	/// remains unchanged; pattern scopes only filter its visibility and requests.
+	/// remains unchanged; scopes only filter its visibility and requests.
 	entries: Vec<(Path, u64)>,
 	/// The ingress counters an advertised interval's announce guard comes from.
 	ingress: stats::Scope,
@@ -5991,8 +5992,8 @@ struct Listener {
 	root: Path,
 	/// The broadest prefixes the session may ask about, relative to `root`.
 	heads: Vec<Path>,
-	/// The absolute patterns the session may publish under.
-	allowed: Patterns,
+	/// The absolute prefixes the session may publish under.
+	allowed: Prefixes,
 	/// The link the session's routes arrive on, which its snapshots wait for.
 	link: Link,
 	queue: kio::Queue<InterestChange>,
@@ -6014,8 +6015,7 @@ impl Listener {
 			if head.has_prefix(&relative) {
 				out.push(head.clone());
 			} else if relative.has_prefix(head) {
-				let reaches = Pattern::subtree(prefix.as_str()).is_ok_and(|subtree| self.allowed.overlaps(&subtree));
-				return match reaches {
+				return match self.allowed.overlaps(prefix.as_str()) {
 					true => vec![relative],
 					false => Vec::new(),
 				};
@@ -7617,6 +7617,10 @@ pub struct Consumer {
 	max_hops: NonZeroUsize,
 	scope: OriginScope,
 
+	// What `announced` and `routes` list, absolute: the scope's subtrees, narrowed by
+	// each `filter`. Discovery only; requests answer to the scope alone.
+	listed: Patterns,
+
 	// A prefix that is automatically stripped from all paths.
 	root: Path,
 
@@ -7672,6 +7676,7 @@ impl Consumer {
 			node: producer.node,
 			max_hops: producer.max_hops,
 			scope: producer.scope.clone(),
+			listed: producer.scope.allowed.patterns(),
 			root: producer.root.clone(),
 			shared: producer.shared.clone(),
 			stats,
@@ -7716,10 +7721,7 @@ impl Consumer {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn node_id(&self, subscribe: &Producer) -> Option<crate::route::NodeId> {
 		let whole = |root: &Path, scope: &OriginScope| {
-			root.is_empty()
-				&& Pattern::subtree("").is_ok_and(|all| scope.allowed.contains(&all))
-				&& scope.excluded.is_empty()
-				&& scope.mounts.is_empty()
+			root.is_empty() && scope.allowed.matches("") && scope.excluded.is_empty() && scope.mounts.is_empty()
 		};
 		let routing = self.proxy
 			&& subscribe.link() != Link::Local
@@ -7755,6 +7757,7 @@ impl Consumer {
 			node: self.node,
 			max_hops: self.max_hops,
 			scope: OriginScope::default(),
+			listed: Patterns::from(Pattern::all()),
 			root: Path::default(),
 			shared: self.shared.clone(),
 			stats: stats::Session::default(),
@@ -7834,23 +7837,9 @@ impl Consumer {
 	/// there, never one the origin holds at `path` itself (see [`Self::mounted`]).
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn reaches(&self, path: &Path) -> bool {
-		let Ok(subtree) = Pattern::subtree(path.as_str()) else {
-			return false;
-		};
-		self.scope.allowed.overlaps(&subtree)
+		self.scope.allowed.overlaps(path.as_str())
 			&& !self.scope.excluded.iter().any(|excluded| path.has_prefix(excluded))
 			&& self.scope.mount(path).is_none_or(|mount| mount.resolve(path).is_some())
-	}
-
-	/// [`Self::reaches`], and some path `allowed`, relative to this handle's root, holds
-	/// is in its scope too.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn reaches_any(&self, path: &Path, allowed: &Patterns) -> bool {
-		if !self.reaches(path) {
-			return false;
-		}
-		let ours = self.scope.allowed.rebase(self.root().as_str());
-		allowed.iter().any(|pattern| ours.overlaps(pattern))
 	}
 
 	/// Whether the absolute `path` lies beneath one of this handle's mounts, where the
@@ -7875,15 +7864,11 @@ impl Consumer {
 			.collect()
 	}
 
-	/// Whether this handle reaches every path at or beneath the absolute `prefix`,
-	/// judged pattern by pattern, so a `false` may be spurious but a `true` never is.
+	/// Whether this handle reaches every path at or beneath the absolute `prefix`.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn covers(&self, prefix: &Path) -> bool {
-		let Ok(subtree) = Pattern::subtree(prefix.as_str()) else {
-			return false;
-		};
 		let overlaps = |other: &Path| other.has_prefix(prefix) || prefix.has_prefix(other);
-		self.scope.allowed.contains(&subtree)
+		self.scope.allowed.matches(prefix.as_str())
 			&& !self.scope.excluded.iter().any(overlaps)
 			&& !self.scope.mounts.iter().any(|mount| overlaps(&mount.at))
 	}
@@ -8016,6 +8001,7 @@ impl Consumer {
 	pub(crate) fn empty(&self) -> Self {
 		Self {
 			scope: OriginScope::empty(),
+			listed: Patterns::new(),
 			..self.clone()
 		}
 	}
@@ -8035,11 +8021,11 @@ impl Consumer {
 	///
 	/// Allocates a per-cursor coalescing buffer and replays the currently
 	/// announced routes as initial updates. Routes stay prefixes and are named
-	/// relative to this consumer's root; its patterns only filter visibility.
-	/// Only routes whose literal name matches those patterns are reported, unless
+	/// relative to this consumer's root; its scope and [`filter`](Self::filter)s only
+	/// decide visibility. Only routes whose literal name both admit are reported, unless
 	/// [`covering`](Self::covering) asks for every route that could serve them.
-	/// Routes with a segment starting with `.` below the literal head of those
-	/// patterns are hidden unless [`with_hidden`](Self::with_hidden) opted in.
+	/// Routes with a segment starting with `.` below the literal head of what is listed
+	/// are hidden unless [`with_hidden`](Self::with_hidden) opted in.
 	/// The stream also watches its scope: a client session fed by this origin asks
 	/// its peer about the scope while any stream watches it.
 	/// Drop the returned [`Routes`] to unregister.
@@ -8057,7 +8043,7 @@ impl Consumer {
 					state: state.clone(),
 					under,
 					holes,
-					named: mount.map(|mount| (mount.clone(), self.scope.allowed.clone())),
+					named: mount.map(|mount| (mount.clone(), self.listed.clone())),
 					interested: self.interested,
 					current: HashMap::new(),
 				}
@@ -8080,7 +8066,7 @@ impl Consumer {
 			};
 			let cursors = vec![cursor(
 				root,
-				mount.translate(&self.scope.allowed),
+				mount.translate(&self.listed),
 				self.hidden.translate(mount),
 				Some(mount),
 				Path::default(),
@@ -8098,7 +8084,7 @@ impl Consumer {
 
 		// Otherwise the consumer's own cursor, minus the mounted and excluded subtrees,
 		// plus one cursor per mount beneath the root it may discover, presenting under it.
-		let heads = interest_prefixes(&self.scope.allowed);
+		let heads = interest_prefixes(&self.listed);
 		let mut holes = self.scope.holes(None).unwrap_or_default();
 		let mut cursors = Vec::new();
 		for mount in self.scope.mounts.iter() {
@@ -8109,7 +8095,7 @@ impl Consumer {
 			let Some(mount_holes) = self.scope.holes(Some(mount)) else {
 				continue;
 			};
-			let allowed = mount.translate(&self.scope.allowed);
+			let allowed = mount.translate(&self.listed);
 			// Hidden at the mount point means hidden throughout: the dot segment is above
 			// everything the mount holds. A top-up feed's rule moves onto the target.
 			if allowed.is_empty()
@@ -8133,7 +8119,7 @@ impl Consumer {
 			0,
 			cursor(
 				self.root.clone(),
-				self.scope.allowed.clone(),
+				self.listed.clone(),
 				self.hidden.clone(),
 				None,
 				Path::default(),
@@ -8182,17 +8168,26 @@ impl Consumer {
 	pub(crate) fn path_routes(&self, path: impl TryInto<Path, Error: Into<Error>>) -> Result<Follow, Error> {
 		let path = path::convert(path)?;
 
-		// Scope down to the path itself, which still sees every route whose claim covers it:
-		// the rest of the origin never wakes it, and a route claiming only paths beneath it
-		// (a scoped dynamic at the same prefix) never masks the one that serves it, just as a
-		// request skips it.
-		let consumer = self.scope("", &Patterns::from(Pattern::literal(path.as_str())?))?;
-
-		// `scope` keeps narrower permissions intact: on a consumer limited to
-		// `foo/specific`, no route can ever cover `foo`.
-		if !consumer.scope.permits(&consumer.root.join(&path)?) {
+		// On a consumer limited to `foo/specific`, no route can ever cover `foo`.
+		if !self.scope.permits(&self.root.join(&path)?) {
 			return Err(Error::Unauthorized);
 		}
+
+		// List the path itself, which still sees every route whose claim covers it: the
+		// rest of the origin never wakes it, and a route claiming only paths beneath it (a
+		// scoped dynamic at the same prefix) never masks the one that serves it, just as a
+		// request skips it. A lookup answers to the scope alone, so it starts from the
+		// scope's subtrees rather than this handle's discovery filters.
+		let rooted = Pattern::literal(path.as_str())?
+			.rooted(self.root.as_str())
+			.map_err(|_| BoundsExceeded)?;
+		let listed = self
+			.scope
+			.allowed
+			.patterns()
+			.intersect(&rooted.into())
+			.map_err(|_| Error::Unauthorized)?;
+		let consumer = Consumer { listed, ..self.clone() };
 
 		// Untagged: this is a lookup, not egress announce forwarding, so it must not drive
 		// the announce guards. Hiding narrows discovery, not lookup, so a hidden path
@@ -8265,21 +8260,43 @@ impl Consumer {
 		Ok(Following::new(self.clone(), path, instance.into(), routes))
 	}
 
-	/// Returns a consumer rooted at `root` and restricted to matching `patterns`.
+	/// Returns a consumer rooted at `root` and restricted to `prefixes`, each covering
+	/// its whole subtree.
 	///
-	/// `root` is relative to this consumer's root, and `patterns` are relative to
+	/// `root` is relative to this consumer's root, and `prefixes` are relative to
 	/// the new root. Returns [`Error::Unauthorized`] when the requested scope has
 	/// no overlap with this consumer's scope, or [`Error::BoundsExceeded`] when
-	/// rooting the patterns would exceed the path limit.
-	pub fn scope(&self, root: impl TryInto<Path, Error: Into<Error>>, patterns: &Patterns) -> Result<Consumer, Error> {
+	/// rooting the prefixes would exceed the path limit or the root holds a `*`.
+	pub fn scope(&self, root: impl TryInto<Path, Error: Into<Error>>, prefixes: &Prefixes) -> Result<Consumer, Error> {
 		let root = self.root.join(&path::convert(root)?)?;
-		let rooted = patterns.rooted(root.as_str()).map_err(|_| BoundsExceeded)?;
+		let rooted = prefixes.rooted(root.as_str()).map_err(|_| BoundsExceeded)?;
 		let scope = self.scope.narrow(&rooted).ok_or(Error::Unauthorized)?;
+		// A filter too intricate to narrow with the scope lists nothing it can name; refuse
+		// it rather than list less than asked.
+		let listed = self
+			.listed
+			.intersect(&rooted.patterns())
+			.map_err(|_| Error::Unauthorized)?;
 		Ok(Consumer {
 			scope,
+			listed,
 			root,
 			..self.clone()
 		})
+	}
+
+	/// A clone whose [`announced`](Self::announced) and [`routes`](Self::routes) list only
+	/// the routes `pattern`, relative to this root, matches, and report what its wildcards
+	/// captured ([`Announce::captures`]). Filters narrow each other. A discovery filter, not
+	/// a scope: requests are unaffected.
+	///
+	/// Returns [`Error::BoundsExceeded`] when rooting the pattern would exceed the path
+	/// limit or the root holds a `*`, and [`Error::Unauthorized`] when the filter is too
+	/// intricate to narrow what this handle lists.
+	pub fn filter(&self, pattern: &Pattern) -> Result<Consumer, Error> {
+		let rooted = pattern.rooted(self.root.as_str()).map_err(|_| BoundsExceeded)?;
+		let listed = self.listed.intersect(&rooted.into()).map_err(|_| Error::Unauthorized)?;
+		Ok(Consumer { listed, ..self.clone() })
 	}
 
 	/// Resolve a broadcast by exact path, optionally pinning its [`Instance`].
@@ -8500,8 +8517,8 @@ impl Consumer {
 		&self.root
 	}
 
-	/// The patterns this consumer may reach, relative to its root.
-	pub fn allowed(&self) -> Patterns {
+	/// The prefixes this consumer may reach, relative to its root.
+	pub fn allowed(&self) -> Prefixes {
 		self.scope.relative(&self.root)
 	}
 
@@ -9177,7 +9194,7 @@ mod tests {
 				..Default::default()
 			};
 			let (producer, _driver) = Producer::new(config);
-			let scoped = producer.scope("room", &Patterns::from(Pattern::all())).unwrap();
+			let scoped = producer.scope("room", &Prefixes::all()).unwrap();
 			assert_eq!(scoped.config().max_hops.get(), effective);
 			assert_eq!(
 				scoped.consume().forwardable().horizon.max_hops.map(NonZeroUsize::get),
@@ -9249,10 +9266,10 @@ mod tests {
 	}
 
 	/// The scope granting these prefixes: each spelled as its subtree pattern.
-	fn scopes(prefixes: &[&str]) -> Patterns {
+	fn scopes(prefixes: &[&str]) -> Prefixes {
 		prefixes
 			.iter()
-			.map(|prefix| Pattern::subtree(prefix).unwrap())
+			.map(|prefix| Prefix::try_from(*prefix).unwrap())
 			.collect()
 	}
 
@@ -9572,10 +9589,7 @@ mod tests {
 	#[test]
 	fn only_overlapping_snapshots_hold() {
 		let producer = origin(1).produce();
-		let room = producer
-			.consume()
-			.scope("room", &Patterns::from(Pattern::all()))
-			.unwrap();
+		let room = producer.consume().scope("room", &Prefixes::all()).unwrap();
 
 		let other = producer.snapshot("other");
 		assert!(room.routes().is_synced(), "a disjoint prefix");
@@ -9598,7 +9612,7 @@ mod tests {
 	#[test]
 	fn a_shadowed_snapshot_never_holds() {
 		let producer = origin(1).produce();
-		let project = mounted(&producer, "p1", &["**"]).with_hidden(true);
+		let project = mounted(&producer, "p1", &[""]).with_hidden(true);
 		let announced = project.routes();
 		assert!(announced.is_synced());
 
@@ -9694,10 +9708,7 @@ mod tests {
 		announced.assert_next_wait();
 
 		// Naming the dot segment lists what is under it, by root or by pattern.
-		let mut announced = consumer
-			.scope(".stats", &Patterns::from(Pattern::all()))
-			.unwrap()
-			.routes();
+		let mut announced = consumer.scope(".stats", &Prefixes::all()).unwrap().routes();
 		announced.expect_next_active("node").await;
 		announced.assert_next_wait();
 		let mut announced = consumer.scope("", &scopes(&["room/.internal"])).unwrap().routes();
@@ -9731,7 +9742,7 @@ mod tests {
 		let _overlay = producer.route("p1/.pro/cam", RouteOptions::default()).unwrap();
 		let consumer = producer
 			.consume()
-			.scope("p1", &Patterns::from(Pattern::all()))
+			.scope("p1", &Prefixes::all())
 			.unwrap()
 			.with_hidden(true)
 			.exclude(".pro")
@@ -9765,7 +9776,7 @@ mod tests {
 		let _foo = producer.route(".svc/p1/foo", RouteOptions::default()).unwrap();
 		let _bar = producer.route(".svc/p1/bar", RouteOptions::default()).unwrap();
 		let _cam = producer.route("p1/cam", RouteOptions::default()).unwrap();
-		let project = mounted(&producer, "p1", &["**"]).with_hidden(true);
+		let project = mounted(&producer, "p1", &[""]).with_hidden(true);
 
 		let mut announced = project.exclude(".svc/foo").unwrap().routes();
 		announced.expect_next_active("cam").await;
@@ -9778,7 +9789,7 @@ mod tests {
 
 		// Rooted inside the mount, the exclusion moves onto the target.
 		let mut inside = project
-			.scope(".svc", &Patterns::from(Pattern::all()))
+			.scope(".svc", &Prefixes::all())
 			.unwrap()
 			.exclude("foo")
 			.unwrap()
@@ -9788,12 +9799,11 @@ mod tests {
 	}
 
 	/// A project-rooted handle reading `.svc` from the fleet-wide `.svc/<pid>`.
-	fn mounted(producer: &Producer, pid: &str, patterns: &[&str]) -> Consumer {
-		let patterns: Patterns = patterns.iter().map(|pattern| pattern.parse().unwrap()).collect();
+	fn mounted(producer: &Producer, pid: &str, prefixes: &[&str]) -> Consumer {
 		producer
 			.mount(format!("{pid}/.svc"), format!(".svc/{pid}"))
 			.unwrap()
-			.scope(pid, &patterns)
+			.scope(pid, &scopes(prefixes))
 			.unwrap()
 			.consume()
 	}
@@ -9805,7 +9815,7 @@ mod tests {
 	async fn mount_resolves_on_the_target_front() {
 		let producer = origin(1).produce();
 		let server = producer.forward(".svc", RouteInfo::new()).unwrap();
-		let project = mounted(&producer, "p1", &["**"]);
+		let project = mounted(&producer, "p1", &[""]);
 
 		let through = project.request(".svc/foo", None);
 		let direct = producer.consume().request(".svc/p1/foo", None);
@@ -9834,7 +9844,7 @@ mod tests {
 		let _other = producer.route(".svc/p2/bar", RouteOptions::default()).unwrap();
 		let _cam = producer.route("p1/cam", RouteOptions::default()).unwrap();
 		let _shadowed = producer.route("p1/.svc/forged", RouteOptions::default()).unwrap();
-		let project = mounted(&producer, "p1", &["**"]);
+		let project = mounted(&producer, "p1", &[""]);
 
 		// A dot segment hides the mount like any other.
 		let mut announced = project.routes();
@@ -9848,11 +9858,7 @@ mod tests {
 		announced.assert_next_wait();
 
 		// Rooted inside the mount, the claim covers the root itself.
-		let mut inside = project
-			.scope(".svc", &Patterns::from(Pattern::all()))
-			.unwrap()
-			.covering()
-			.routes();
+		let mut inside = project.scope(".svc", &Prefixes::all()).unwrap().covering().routes();
 		inside.expect_next_active("").await;
 		inside.expect_next_active("foo").await;
 		inside.assert_next_wait();
@@ -9896,7 +9902,7 @@ mod tests {
 		narrower.clone().with_hidden(true).routes().assert_next_wait();
 
 		// Another project's mount reaches its own target, never this one's.
-		let other = mounted(&producer, "p2", &["**"]);
+		let other = mounted(&producer, "p2", &[""]);
 		other.clone().with_hidden(true).routes().assert_next_wait();
 		let err = other.request(".svc/foo", None).await.err().unwrap();
 		assert!(matches!(err, Error::Unroutable));
@@ -9908,7 +9914,7 @@ mod tests {
 	async fn mount_captures_the_named_path() {
 		let producer = origin(1).produce();
 		let _foo = producer.route(".svc/p1/foo", RouteOptions::default()).unwrap();
-		let project = mounted(&producer, "p1", &["**"]).with_hidden(true);
+		let project = mounted(&producer, "p1", &[""]).with_hidden(true);
 
 		let Some(RouteEvent {
 			kind: RouteKind::Start,
@@ -9920,7 +9926,7 @@ mod tests {
 		assert_eq!(update.prefix.as_str(), ".svc/foo");
 		assert_eq!(update.captures, Some(vec![".svc/foo".parse::<Pattern>().unwrap()]));
 
-		let inside = project.scope(".svc", &Patterns::from(Pattern::all())).unwrap();
+		let inside = project.scope(".svc", &Prefixes::all()).unwrap();
 		let Some(RouteEvent {
 			kind: RouteKind::Start,
 			announce: update,
@@ -9932,8 +9938,8 @@ mod tests {
 		assert_eq!(update.captures, Some(vec!["foo".parse::<Pattern>().unwrap()]));
 	}
 
-	/// A target at the maximum depth still presents its exact path: the `**` a
-	/// wildcard scope carries past it can only match nothing there.
+	/// A target at the maximum depth still presents its exact path: nothing a scope
+	/// covers beneath it fits there.
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn mount_keeps_a_max_depth_target() {
@@ -9943,7 +9949,7 @@ mod tests {
 		let project = producer
 			.mount("p1/.svc", deep.as_str())
 			.unwrap()
-			.scope("p1", &Patterns::from(Pattern::all()))
+			.scope("p1", &Prefixes::all())
 			.unwrap()
 			.consume()
 			.with_hidden(true);
@@ -9955,7 +9961,7 @@ mod tests {
 		// Beneath the mount the target has no room: refused, never handed to a route.
 		let err = project.request(".svc/x", None).await.err().unwrap();
 		assert!(matches!(err, Error::BoundsExceeded(_)), "{err:?}");
-		let inside = project.scope(".svc/x", &Patterns::from(Pattern::all())).unwrap();
+		let inside = project.scope(".svc/x", &Prefixes::all()).unwrap();
 		inside.routes().assert_next_wait();
 	}
 
@@ -9970,7 +9976,7 @@ mod tests {
 		let project = producer
 			.mount("p1/a/b", "t")
 			.unwrap()
-			.scope("p1", &Patterns::from(Pattern::all()))
+			.scope("p1", &Prefixes::all())
 			.unwrap()
 			.consume();
 
@@ -9992,7 +9998,7 @@ mod tests {
 		let project = producer
 			.mount("p1/.svc", ".svc/p1")
 			.unwrap()
-			.scope("p1", &Patterns::from(Pattern::all()))
+			.scope("p1", &Prefixes::all())
 			.unwrap();
 		assert!(matches!(
 			project.route(".svc/foo", RouteOptions::hidden()),
@@ -10057,7 +10063,7 @@ mod tests {
 		let registry = stats::Registry::new(stats::Config::new());
 		let producer = origin(1).produce();
 		let _foo = producer.route(".svc/p1/foo", RouteOptions::default()).unwrap();
-		let project = mounted(&producer, "p1", &["**"])
+		let project = mounted(&producer, "p1", &[""])
 			.with_stats(
 				registry
 					.tier(stats::Tier::default())
@@ -10392,10 +10398,7 @@ mod tests {
 		let producer = origin(1).produce();
 		let _a = producer.announce("room/alice", RouteInfo::new()).unwrap();
 
-		let consumer = producer
-			.consume()
-			.scope("room", &Patterns::from(Pattern::all()))
-			.unwrap();
+		let consumer = producer.consume().scope("room", &Prefixes::all()).unwrap();
 		let mut announced = consumer.routes();
 		announced.expect_next_active("alice").await;
 	}
@@ -11267,10 +11270,7 @@ mod tests {
 		let _broad = producer.announce("room", RouteInfo::new().with_cost(1)).unwrap();
 		let _narrow = producer.announce("room/alice", RouteInfo::new().with_cost(9)).unwrap();
 
-		let consumer = producer
-			.consume()
-			.scope("room/alice", &Patterns::from(Pattern::all()))
-			.unwrap();
+		let consumer = producer.consume().scope("room/alice", &Prefixes::all()).unwrap();
 		let mut announced = consumer.routes();
 		let route = announced.expect_next_active("").await;
 		assert_eq!(route.cost, Cost::new(9));
@@ -11285,9 +11285,9 @@ mod tests {
 		let exact = producer.announce("room/alice", RouteInfo::new()).unwrap();
 		let consumer = producer
 			.consume()
-			.scope("", &Patterns::from("room/*".parse::<Pattern>().unwrap()))
+			.filter(&"room/*".parse::<Pattern>().unwrap())
 			.unwrap()
-			.scope("room/alice", &Patterns::from(Pattern::all()))
+			.scope("room/alice", &Prefixes::all())
 			.unwrap()
 			.covering();
 		let mut announced = consumer.routes();
@@ -11332,7 +11332,7 @@ mod tests {
 		let exact = producer.forward("room/alice", RouteInfo::new()).unwrap();
 		let mut announced = producer
 			.consume()
-			.scope("room/alice", &Patterns::from(Pattern::all()))
+			.scope("room/alice", &Prefixes::all())
 			.unwrap()
 			.covering()
 			.routes();
@@ -11351,7 +11351,7 @@ mod tests {
 		let exact = producer.forward("room/alice", RouteInfo::new()).unwrap();
 		let mut announced = producer
 			.consume()
-			.scope("room/alice", &Patterns::from(Pattern::all()))
+			.scope("room/alice", &Prefixes::all())
 			.unwrap()
 			.covering()
 			.routes();
@@ -11447,6 +11447,32 @@ mod tests {
 		broadcast.announce().unwrap();
 		let resolved = resolving.await.expect("resolves once announced").unwrap();
 		assert_eq!(resolved.info().path.as_str(), "room/alice");
+		drop(broadcast);
+	}
+
+	/// A discovery filter narrows what a handle lists, never what it resolves: a path the
+	/// filter leaves out still follows and requests through the scope alone.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_filter_never_narrows_a_lookup() {
+		let producer = origin(1).produce();
+		let broadcast = producer.route("b", RouteOptions::hidden()).unwrap();
+		broadcast.announce().unwrap();
+		let consumer = producer.consume().filter(&"a".parse().unwrap()).unwrap();
+		consumer.routes().assert_next_wait();
+
+		let mut following = consumer.follow("b", None).unwrap();
+		let followed = kio::clock::timeout(Duration::from_secs(1), following.available())
+			.await
+			.expect("follows a path the filter leaves out")
+			.unwrap()
+			.expect("the followed broadcast");
+		assert_eq!(followed.info().path.as_str(), "b");
+		let requested = kio::clock::timeout(Duration::from_secs(1), consumer.request("b", None))
+			.await
+			.expect("requests a path the filter leaves out")
+			.unwrap();
+		assert_eq!(requested.info().path.as_str(), "b");
 		drop(broadcast);
 	}
 
@@ -11757,7 +11783,7 @@ mod tests {
 	fn the_route_node_answers_with_the_table_as_it_stands() {
 		let producer = origin(1).produce();
 		(producer.clone().with_link(Link::Upstream).with_proxy(true).consume())
-			.scope("elsewhere", &Patterns::from(Pattern::all()))
+			.scope("elsewhere", &Prefixes::all())
 			.unwrap()
 			.with_hidden(false)
 			.route_node();
@@ -12712,7 +12738,7 @@ mod tests {
 		));
 
 		// The byte limit counts the root the producer joins on.
-		let rooted = producer.scope("r", &Patterns::from(Pattern::all())).unwrap();
+		let rooted = producer.scope("r", &Prefixes::all()).unwrap();
 		let longest = "b".repeat(Path::MAX_BYTES - 2);
 		let _long = rooted
 			.route(longest.as_str(), RouteOptions::hidden())
@@ -12773,8 +12799,7 @@ mod tests {
 	#[cfg(feature = "async")]
 	async fn forward_keeps_its_producer_scope() {
 		let producer = origin(1).produce();
-		let scope = Patterns::from("*/chat".parse::<Pattern>().unwrap());
-		let scoped = producer.scope("", &scope).unwrap();
+		let scoped = producer.scope("", &scopes(&["room/chat"])).unwrap();
 		let dynamic = scoped.forward("", RouteInfo::new()).unwrap();
 
 		let mut matching = producer
@@ -12808,13 +12833,9 @@ mod tests {
 	#[kio::test]
 	async fn scoped_cursor_selects_among_the_routes_it_can_see() {
 		let producer = origin(1).produce();
-		let scoped = |pattern: &str| {
-			producer
-				.scope("", &Patterns::from(pattern.parse::<Pattern>().unwrap()))
-				.unwrap()
-		};
-		let _chat = scoped("*/chat").forward("", RouteInfo::new().with_cost(1)).unwrap();
-		let _video = scoped("*/video").forward("", RouteInfo::new().with_cost(5)).unwrap();
+		let scoped = |prefix: &str| producer.scope("", &scopes(&[prefix])).unwrap();
+		let _chat = scoped("room/chat").forward("", RouteInfo::new().with_cost(1)).unwrap();
+		let _video = scoped("room/video").forward("", RouteInfo::new().with_cost(5)).unwrap();
 
 		let mut video = producer
 			.consume()
@@ -12838,10 +12859,7 @@ mod tests {
 			.unwrap()
 			.covering()
 			.routes();
-		let mut rooted = consumer
-			.scope("room/live", &Patterns::from(Pattern::all()))
-			.unwrap()
-			.routes();
+		let mut rooted = consumer.scope("room/live", &Prefixes::all()).unwrap().routes();
 
 		let chat = producer
 			.scope("", &scopes(&["room/live/chat"]))
@@ -12885,7 +12903,7 @@ mod tests {
 		let narrow = producer.forward("room/live", RouteInfo::new().with_cost(9)).unwrap();
 		let mut announced = producer
 			.consume()
-			.scope("room/live/video", &Patterns::from(Pattern::all()))
+			.scope("room/live/video", &Prefixes::all())
 			.unwrap()
 			.covering()
 			.routes();
@@ -13163,7 +13181,7 @@ mod tests {
 		);
 
 		// The mark survives narrowing the handle.
-		let scoped = peer.scope("room", &Patterns::from(Pattern::all())).unwrap();
+		let scoped = peer.scope("room", &Prefixes::all()).unwrap();
 		let _nested = scoped.forward("x", RouteInfo::new().with_via(origin(8))).unwrap();
 		assert_eq!(announced.expect_next_active("room/x").await.source(), Source::Peer(8));
 	}
@@ -16862,18 +16880,23 @@ mod tests {
 	}
 
 	#[kio::test]
-	async fn scope_accepts_every_pattern_union() {
+	async fn scope_takes_prefixes_each_covering_its_subtree() {
 		let producer = origin(1).produce();
 
-		// The root grant is `**`, the old empty prefix.
-		let root = producer.scope("", &Patterns::from(Pattern::all())).unwrap();
-		assert_eq!(root.allowed(), Patterns::from(Pattern::all()));
+		// The empty prefix grants everything.
+		let root = producer.scope("", &Prefixes::all()).unwrap();
+		assert_eq!(root.allowed(), Prefixes::all());
 
-		// `foo/**` keeps the old `foo` prefix meaning.
 		let scoped = producer.scope("", &scopes(&["room"])).unwrap();
 		assert_eq!(scoped.allowed(), scopes(&["room"]));
+		assert!(scoped.route("room", RouteOptions::default()).is_ok());
+		assert!(scoped.route("room/alice", RouteOptions::default()).is_ok());
+		assert!(matches!(
+			scoped.route("roomy", RouteOptions::default()),
+			Err(Error::Unauthorized)
+		));
 
-		// Multiple prefixes round-trip, with overlap collapsed.
+		// Multiple prefixes round-trip, with nested ones collapsed.
 		let multi = producer.scope("", &scopes(&["room", "room/chat", "anon"])).unwrap();
 		assert_eq!(multi.allowed(), scopes(&["room", "anon"]));
 
@@ -16881,20 +16904,11 @@ mod tests {
 		let consumer = producer.consume().scope("", &scopes(&["room"])).unwrap();
 		assert_eq!(consumer.allowed(), scopes(&["room"]));
 
-		for text in ["room", "", "*room", "room/*", "*", "**/room", "room/**/chat", "*.hang"] {
-			let union = Patterns::from(text.parse::<Pattern>().unwrap());
-			assert_eq!(producer.scope("", &union).expect(text).allowed(), union, "{text}");
-			assert_eq!(
-				producer.consume().scope("", &union).expect(text).allowed(),
-				union,
-				"{text}"
-			);
-		}
-
-		let mixed: Patterns = ["room/**".parse().unwrap(), "other".parse().unwrap()]
-			.into_iter()
-			.collect();
-		assert_eq!(producer.scope("", &mixed).unwrap().allowed(), mixed);
+		// A root no prefix can spell is refused, not read as a pattern.
+		assert!(matches!(
+			producer.scope("room/*", &Prefixes::all()),
+			Err(Error::BoundsExceeded(_))
+		));
 	}
 
 	#[kio::test]
@@ -17234,9 +17248,7 @@ mod tests {
 			assert!(producer.route(path, RouteOptions::hidden()).is_err(), "created {path}");
 			assert!(producer.announce(path, RouteInfo::new()).is_err(), "announced {path}");
 		}
-		let scoped = producer
-			.scope("room/..", &Patterns::from_iter([Pattern::all()]))
-			.unwrap();
+		let scoped = producer.scope("room/..", &Prefixes::all()).unwrap();
 		assert!(scoped.route("cam", RouteOptions::hidden()).is_err());
 		for path in ["room/.pro/cam", "room/a..b", "room/cam"] {
 			let _route = producer.route(path, RouteOptions::hidden()).unwrap();
@@ -17264,10 +17276,10 @@ mod tests {
 	async fn scope_empty_union_grants_nothing() {
 		let producer = origin(1).produce();
 
-		// An empty union grants nothing: scoping is refused, like a disjoint prefix.
-		assert!(matches!(producer.scope("", &Patterns::new()), Err(Error::Unauthorized)));
+		// An empty set grants nothing: scoping is refused, like a disjoint prefix.
+		assert!(matches!(producer.scope("", &Prefixes::new()), Err(Error::Unauthorized)));
 		assert!(matches!(
-			producer.consume().scope("", &Patterns::new()),
+			producer.consume().scope("", &Prefixes::new()),
 			Err(Error::Unauthorized)
 		));
 	}
@@ -17288,7 +17300,7 @@ mod tests {
 		));
 
 		// A literal root rebases the grant without changing its meaning.
-		let rooted = nested.scope("room/chat", &Patterns::from(Pattern::all())).unwrap();
+		let rooted = nested.scope("room/chat", &Prefixes::all()).unwrap();
 		assert_eq!(rooted.allowed(), scopes(&[""]));
 
 		// Publishing through the nested view lands where the root says.
@@ -17298,42 +17310,36 @@ mod tests {
 	}
 
 	#[kio::test]
-	async fn scope_intersects_and_rebases_arbitrary_grants() {
+	async fn scope_intersects_and_rebases_prefixes() {
 		let producer = origin(1).produce();
-		let rooms = producer
-			.scope("", &Patterns::from("room/*".parse::<Pattern>().unwrap()))
-			.unwrap();
-		let chats = rooms
-			.scope("", &Patterns::from("*/chat".parse::<Pattern>().unwrap()))
-			.unwrap();
-		assert_eq!(chats.allowed(), Patterns::from("room/chat".parse::<Pattern>().unwrap()));
+		// Narrowing keeps the deeper of two nested prefixes, whichever side holds it.
+		let rooms = producer.scope("", &scopes(&["room", "lobby/a"])).unwrap();
+		let both = rooms.scope("", &scopes(&["room/chat", "lobby"])).unwrap();
+		assert_eq!(both.allowed(), scopes(&["room/chat", "lobby/a"]));
 
-		let exact = producer
-			.scope("", &Patterns::from("room/alice".parse::<Pattern>().unwrap()))
-			.unwrap();
-		let rooted = exact.scope("room", &Patterns::from(Pattern::all())).unwrap();
-		assert_eq!(rooted.allowed(), Patterns::from("alice".parse::<Pattern>().unwrap()));
+		let alice = producer.scope("", &scopes(&["room/alice"])).unwrap();
+		let rooted = alice.scope("room", &Prefixes::all()).unwrap();
+		assert_eq!(rooted.allowed(), scopes(&["alice"]));
 		assert!(matches!(
-			exact.scope("room/bob", &Patterns::from(Pattern::all())),
+			alice.scope("room/bob", &Prefixes::all()),
 			Err(Error::Unauthorized)
 		));
 
-		let broadcast = exact.route("room/alice", RouteOptions::hidden()).unwrap();
+		// A prefix covers its whole subtree, so what lies beneath publishes too.
+		let broadcast = alice.route("room/alice", RouteOptions::hidden()).unwrap();
+		let cam = alice.route("room/alice/cam", RouteOptions::hidden()).unwrap();
 		assert!(matches!(
-			exact.route("room/alice/cam", RouteOptions::hidden()),
+			alice.route("room/bob", RouteOptions::hidden()),
 			Err(Error::Unauthorized)
 		));
 		assert!(producer.consume().get_broadcast("room/alice").is_some());
-		drop(broadcast);
+		drop((broadcast, cam));
 	}
 
 	#[kio::test]
-	async fn wildcard_scope_filters_announcements_and_reports_captures() {
+	async fn a_filter_lists_its_matches_and_reports_captures() {
 		let producer = origin(1).produce();
-		let consumer = producer
-			.consume()
-			.scope("", &Patterns::from("room/*/chat".parse::<Pattern>().unwrap()))
-			.unwrap();
+		let consumer = producer.consume().filter(&"room/*/chat".parse().unwrap()).unwrap();
 		let mut listed = consumer.routes();
 		let mut announced = consumer.covering().routes();
 
@@ -17374,20 +17380,20 @@ mod tests {
 	#[kio::test]
 	async fn announced_lists_full_names_in_replay_and_live_changes() {
 		let producer = origin(1).produce();
-		let patterns: Patterns = ["*.hang", "**/*.chat"]
-			.into_iter()
-			.map(|p| p.parse::<Pattern>().unwrap())
-			.collect();
-		let consumer = producer.consume().scope("project", &patterns).unwrap();
+		let consumer = (producer.consume().scope("project", &Prefixes::all()).unwrap())
+			.filter(&"**/*.chat".parse().unwrap())
+			.unwrap();
 		let cam = producer.announce("project/cam.hang", RouteInfo::new()).unwrap();
 		let overlap = producer.announce("project/room/mic.hang", RouteInfo::new()).unwrap();
 		let chat = producer.announce("project/lobby.chat", RouteInfo::new()).unwrap();
+		let _other = producer.announce("elsewhere/lobby.chat", RouteInfo::new()).unwrap();
+		// Every route whose subtree could hold a match, within the scope.
 		let mut routing = consumer.clone().covering().routes();
 		routing.expect_next_active("cam.hang").await;
 		routing.expect_next_active("lobby.chat").await;
 		routing.expect_next_active("room/mic.hang").await;
+		routing.assert_next_wait();
 		let mut selected = consumer.routes();
-		selected.expect_next_active("cam.hang").await;
 		selected.expect_next_active("lobby.chat").await;
 		selected.assert_next_wait();
 
@@ -17405,10 +17411,7 @@ mod tests {
 	#[kio::test]
 	async fn announced_keeps_lifecycle_and_filters_before_rerooting() {
 		let producer = origin(1).produce();
-		let consumer = producer
-			.consume()
-			.scope("room/alice", &Patterns::from(Pattern::all()))
-			.unwrap();
+		let consumer = producer.consume().scope("room/alice", &Prefixes::all()).unwrap();
 		let broad = producer.announce("room", RouteInfo::new()).unwrap();
 		let mut selected = consumer.routes();
 		selected.assert_next_wait();
@@ -17466,14 +17469,16 @@ mod tests {
 		let _excluded = producer
 			.announce(".svc/p1/private/lobby.chat", RouteInfo::new())
 			.unwrap();
-		let project = mounted(&producer, "p1", &["**/*.chat"])
+		let project = mounted(&producer, "p1", &[""])
+			.filter(&"**/*.chat".parse().unwrap())
+			.unwrap()
 			.with_hidden(true)
 			.exclude(".svc/private")
 			.unwrap();
 		let mut selected = project.routes();
 		selected.expect_next_active(".svc/.private/lobby.chat").await;
 		selected.assert_next_wait();
-		let mut inside = project.scope(".svc", &Patterns::from(Pattern::all())).unwrap().routes();
+		let mut inside = project.scope(".svc", &Prefixes::all()).unwrap().routes();
 		inside.expect_next_active(".private/lobby.chat").await;
 		inside.assert_next_wait();
 		let live = producer.announce(".svc/p1/lobby.chat", RouteInfo::new()).unwrap();
@@ -17491,9 +17496,8 @@ mod tests {
 		let producer = origin(1).produce();
 		let local = producer.route("project/cam.chat", RouteOptions::default()).unwrap();
 		let overlap = producer.announce("project/room", RouteInfo::new()).unwrap();
-		let consumer = producer
-			.consume()
-			.scope("project", &Patterns::from("**/*.chat".parse::<Pattern>().unwrap()))
+		let consumer = (producer.consume().scope("project", &Prefixes::all()).unwrap())
+			.filter(&"**/*.chat".parse().unwrap())
 			.unwrap()
 			.local()
 			.with_stats(

@@ -5,12 +5,13 @@ use crate::ffi::Polled;
 
 /// What the peer lets this side do, in this side's own paths.
 ///
-/// An empty pattern list grants nothing in that direction; `**` grants everything.
+/// Each entry is a path prefix covering that path and everything beneath it. An empty list
+/// grants nothing in that direction; the empty prefix `""` grants everything.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct MoqGrant {
-	/// The broadcast patterns this side may publish to the peer.
+	/// The broadcast prefixes this side may publish to the peer.
 	pub publish: Vec<String>,
-	/// The broadcast patterns this side may subscribe to from the peer.
+	/// The broadcast prefixes this side may subscribe to from the peer.
 	pub subscribe: Vec<String>,
 	/// How long until the grant lapses, measured when it was read, or `None` for never.
 	pub expires: Option<std::time::Duration>,
@@ -18,10 +19,10 @@ pub struct MoqGrant {
 
 impl From<moq_net::auth::Grant> for MoqGrant {
 	fn from(grant: moq_net::auth::Grant) -> Self {
-		let patterns = |patterns: &moq_net::Patterns| patterns.iter().map(ToString::to_string).collect();
+		let prefixes = |prefixes: &moq_net::Prefixes| prefixes.iter().map(ToString::to_string).collect();
 		Self {
-			publish: patterns(&grant.publish),
-			subscribe: patterns(&grant.subscribe),
+			publish: prefixes(&grant.publish),
+			subscribe: prefixes(&grant.subscribe),
 			expires: grant
 				.expires
 				.map(|expires| crate::ffi::duration(expires.saturating_duration_since(moq_net::time::Instant::now()))),
