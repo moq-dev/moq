@@ -119,6 +119,11 @@ module py '^(py/|sh/py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/|rs/uniffi-bindgen
 # doc samples.
 module rs '^(\.cargo/|nix/modules/moq-relay\.nix$|doc/lib/c/|doc/lib/samples\.sh$|sh/local\.(sh|ts)$|rs/|test/interop/clients/rust/|sh/rs/|Cargo\.(toml|lock)$|clippy\.toml$|rust-toolchain\.toml$|\.config/nextest\.toml$)' \
     tools='cargo jq cc' compiles='check fix' fix
+# Clippy for macOS and Windows over rs's selection, so a platform-gated error
+# fails here rather than in the nightly native lanes. Nix pins its toolchain
+# and zig compiles its build scripts' C.
+module rs_cross "${scope[rs]}" \
+    tools='cargo jq nix zig' compiles=check
 # nix/Cargo.nix records each crate's dependencies, features, and targets,
 # read from the manifests, the lockfile, and the files cargo discovers targets
 # from. The pinned crate2nix comes from flake.lock.
@@ -430,6 +435,7 @@ step() {
         # The check keeps docs and the isolated default-media lint; the test
         # phase enforces the other clippy checks in its existing build.
         check:rs) run just rs lint-changed "$rs_list" ;;
+        check:rs_cross) run just rs cross-lint-changed "$rs_list" ;;
         check:carla_bridge) run just carla bridge-check ;;
         check:bench)
             run python3 bench/compare.test.py

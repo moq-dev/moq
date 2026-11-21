@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # Run `just rs check|check-test|lint|fix|test` on the crates a diff touches,
-# plus their dependents. `platform` is the Windows and macOS compile.
+# plus their dependents. `platform` is the Windows and macOS compile on those
+# hosts, and `cross` lints for both from any host.
 #
-# Usage: sh/rs/select.sh check|check-test|lint|fix|test|platform|uring LISTFILE|--all
+# Usage: sh/rs/select.sh check|check-test|lint|fix|test|platform|cross|uring LISTFILE|--all
 #
 # LISTFILE holds the changed paths, one per line. `--all` is the whole
 # workspace, as is a change to anything every crate is built or tested by.
 set -euo pipefail
 
-usage="usage: sh/rs/select.sh check|check-test|lint|fix|test|platform|uring LISTFILE|--all"
+usage="usage: sh/rs/select.sh check|check-test|lint|fix|test|platform|cross|uring LISTFILE|--all"
 action=${1:?$usage}
 list=${2:?$usage}
 
@@ -20,7 +21,7 @@ select_packages() {
         echo ALL
         return
     fi
-    if [[ "$list" == --all ]] || grep -qE '^(\.cargo/.*|sh/local\.(sh|ts)|Cargo\.(toml|lock)|clippy\.toml|rust-toolchain\.toml|rs/justfile|sh/rs/(select|platform|nextest)\.sh|\.config/nextest\.toml)$' "$list"; then
+    if [[ "$list" == --all ]] || grep -qE '^(\.cargo/.*|sh/local\.(sh|ts)|Cargo\.(toml|lock)|clippy\.toml|rust-toolchain\.toml|rs/justfile|sh/rs/(select|platform|cross-lint|zig-(cc|c\+\+|ar)|nextest)\.sh|\.config/nextest\.toml)$' "$list"; then
         echo ALL
         return
     fi
@@ -232,10 +233,15 @@ case "$action" in
         if ((${#features[@]})); then flags+=(--features "${features[*]}"); fi
         just rs test "${flags[@]}" ${timings[@]+"${timings[@]}"}
         ;;
-    platform)
-        # moq-gst links GStreamer via pkg-config, which the runners don't have.
+    platform | cross)
+        # moq-gst links GStreamer via pkg-config, which neither the runners nor
+        # a cross build have.
         if [[ "$packages" == ALL ]]; then
             flags+=(--exclude moq-gst)
+            # libFuzzer's C++ includes a Linux header zig's macOS libc lacks,
+            # and fuzzing runs only on Linux. A diff's selection never holds a
+            # `*-fuzz` crate.
+            [[ "$action" != cross ]] || flags+=(--exclude moq-auth-fuzz --exclude qmux-fuzz)
         else
             flags=()
             for id in $packages; do
@@ -253,7 +259,11 @@ case "$action" in
         # outside the selection; a change to anything they reach selects
         # moq-cli anyway.
         if wants moq-cli; then flags+=(--features "moq-cli/play moq-cli/capture moq-cli/pipewire moq-cli/pulseaudio"); fi
-        cargo check --locked "${flags[@]}" --all-targets
+        if [[ "$action" == cross ]]; then
+            sh/rs/cross-lint.sh "${flags[@]}"
+        else
+            cargo check --locked "${flags[@]}" --all-targets
+        fi
         ;;
     *)
         echo "$usage" >&2
