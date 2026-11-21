@@ -22339,8 +22339,7 @@ mod compression_tests {
 		use crate::lite::test_transport::{Log, SinkSession};
 		for (version, draft) in [(Version::Draft18, 18), (Version::Draft22, 22)] {
 			let input = serde_json::json!({"draft": draft});
-			let bytes: Vec<u8> =
-				serde_json::from_slice(&crate::test_interop::bun("ietf-compression.ts", input)).unwrap();
+			let bytes: Vec<u8> = serde_json::from_slice(&crate::test_interop::bun("ietf-compression", input)).unwrap();
 			let (parameters, consumed) = ietf::Parameters::decode_slice(&bytes, version).unwrap();
 			assert_eq!(consumed, bytes.len());
 			let negotiated = super::super::flate::from_setup(&parameters).unwrap();
@@ -22378,7 +22377,7 @@ mod compression_tests {
 			let written = log.writes.lock().unwrap().clone();
 			let input = serde_json::json!({"draft": draft, "response": response.to_vec(), "group": written});
 			let received: Vec<Vec<u8>> =
-				serde_json::from_slice(&crate::test_interop::bun("ietf-compression.ts", input)).unwrap();
+				serde_json::from_slice(&crate::test_interop::bun("ietf-compression", input)).unwrap();
 			assert_eq!(received, frames, "draft{draft}: plain JS fallback");
 		}
 	}
