@@ -8112,7 +8112,7 @@ impl group::Expiry for GroupExpiry {
 			}
 			// Without a reader, as for a nested front's, every group.
 			Successors::Reader(live) => {
-				if let Some((Some(groups), cap)) = recover.and_then(|recover| recover.window()) {
+				if let Some((Some(groups), cap)) = recover.and_then(|recover| recover.window(waiter)) {
 					servable = Servable::covering(groups, cap, live);
 				}
 			}

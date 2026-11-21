@@ -583,6 +583,7 @@ impl Consumer {
 				resumed: None,
 				window,
 				groups: (0, None),
+				capped: kio::WaiterList::new(),
 				groups_read: false,
 				out: Vec::new(),
 				drops: RangeMap::new(),
@@ -1765,6 +1766,10 @@ struct Reader {
 	window: Window,
 	/// The local floor and exclusive cap; see [`track::Subscriber::with_range`].
 	groups: (u64, Option<u64>),
+	/// The groups moved onto another copy, which judge their expiry within [`Self::groups`]'
+	/// cap ([`Recover::window`]), woken when it moves. The ranges wake them through
+	/// [`Self::subscription`].
+	capped: kio::WaiterList,
 	/// Whether groups were ever asked for; until then the reader keeps no replaced copy.
 	groups_read: bool,
 	/// The groups handed out, by key, held while each is read.
@@ -2854,6 +2859,7 @@ impl Reader {
 	/// resolves; one already reading has to be moved, or a group it skipped stays skipped.
 	fn set_range(&mut self, start: u64, end: Option<u64>, delivered: &Delivered) {
 		let passed = std::mem::replace(&mut self.groups, (start, end)).0;
+		self.capped.wake();
 		for copy in &mut self.copies {
 			copy.reopen();
 			let start = copy.start(start);
@@ -3422,10 +3428,12 @@ impl Recover {
 	/// The groups the reader's ranges resolve to, `None` while a relative anchor waits, and its
 	/// local exclusive cap: what a group moved onto another copy is judged within, since that
 	/// copy's own subscription starts at the switch's boundary, and the copy the group moved off
-	/// is capped there. `None` once the reader is gone.
-	pub(super) fn window(&self) -> Option<(Option<Cover>, Option<u64>)> {
+	/// is capped there. `None` once the reader is gone. Registers `waiter` for a move of the
+	/// cap; [`Self::poll_budget`] already did for the ranges.
+	pub(super) fn window(&self, waiter: &kio::Waiter) -> Option<(Option<Cover>, Option<u64>)> {
 		let reader = self.reader.as_ref()?.upgrade()?;
 		let mut reader = reader.lock().unwrap_or_else(PoisonError::into_inner);
+		waiter.register(&mut reader.capped);
 		let cap = reader.groups.1;
 		Some((reader.window().groups().cloned(), cap))
 	}
@@ -10355,6 +10363,41 @@ mod test {
 				false => assert!(read.is_none(), "ranges={ranges:?}"),
 			}
 		}
+	}
+
+	/// A group moved onto another copy wakes when the reader's local cap rises over groups that
+	/// expire it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_recovered_group_wakes_when_the_readers_cap_rises() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, Duration::from_secs(2));
+		sub.set_range(..1);
+		let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+		open.write_frame(ts(0), b"a".as_ref()).unwrap();
+		let mut reading = recv(&mut sub);
+		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+
+		let b = copy();
+		let mut replacement = b.create_group(group::Info { start: 0 }).unwrap();
+		replacement.write_frame(ts(0), b"a".as_ref()).unwrap();
+		routes.serve(b.consume());
+		for key in 1..5 {
+			let mut next = b.create_group(group::Info { start: key }).unwrap();
+			next.write_frame(ts(key * 1000), b"x".as_ref()).unwrap();
+			next.finish().unwrap();
+		}
+		let wake = Arc::new(Wake::default());
+		let waiter = kio::Waiter::new(wake.clone().into());
+		assert!(reading.poll_read_frame(&waiter).is_pending(), "past the reader's cap");
+		wake.0.store(false, std::sync::atomic::Ordering::Relaxed);
+
+		sub.set_range(..5);
+		assert!(wake.0.load(std::sync::atomic::Ordering::Relaxed));
+		assert!(matches!(reading.poll_read_frame(&waiter), Poll::Ready(Err(Error::Old))));
 	}
 
 	#[test]
