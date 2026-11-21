@@ -27,10 +27,6 @@ use serde_with::DurationMilliSecondsWithFrac;
 /// The default track name for the MSF catalog.
 pub const DEFAULT_NAME: &str = "catalog";
 
-// Bound catalog parsing before initRef expansion.
-/// Maximum number of tracks or initDataList entries accepted during parsing.
-pub const MAX_TRACKS: usize = 64;
-
 /// Maximum serialized catalog bytes and aggregate resolved initData string bytes.
 pub const MAX_CATALOG_BYTES: usize = 32 * 1024 * 1024;
 
@@ -414,66 +410,13 @@ struct Wire<E> {
 	generated_at: Option<u64>,
 	#[serde(default, skip_serializing_if = "is_false")]
 	is_complete: bool,
-	#[serde(default, deserialize_with = "deserialize_bounded_entries")]
+	#[serde(default)]
 	tracks: Vec<Track>,
-	#[serde(default, deserialize_with = "deserialize_bounded_init_data_list")]
 	init_data_list: Option<Vec<InitData>>,
 
 	/// The extension's own root members, written flat alongside the ones above.
 	#[serde(flatten)]
 	ext: E,
-}
-
-// Do not let an untrusted sequence size hint reserve
-// arbitrary capacity, or deserialize a 65th entry before rejecting the catalog.
-fn deserialize_bounded_entries<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
-where
-	D: serde::Deserializer<'de>,
-	T: Deserialize<'de>,
-{
-	struct EntriesVisitor<T>(std::marker::PhantomData<T>);
-	struct RejectExtraEntry;
-
-	impl<'de> serde::de::DeserializeSeed<'de> for RejectExtraEntry {
-		type Value = ();
-
-		fn deserialize<D: serde::Deserializer<'de>>(self, _: D) -> Result<(), D::Error> {
-			Err(serde::de::Error::custom(format!(
-				"MSF catalog exceeds {MAX_TRACKS} entries"
-			)))
-		}
-	}
-
-	impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for EntriesVisitor<T> {
-		type Value = Vec<T>;
-
-		fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-			write!(f, "an array of at most {MAX_TRACKS} entries")
-		}
-
-		fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<T>, A::Error> {
-			let mut entries = Vec::new();
-			while entries.len() < MAX_TRACKS {
-				match seq.next_element()? {
-					Some(entry) => entries.push(entry),
-					None => return Ok(entries),
-				}
-			}
-			let _ = seq.next_element_seed(RejectExtraEntry)?;
-			Ok(entries)
-		}
-	}
-
-	deserializer.deserialize_seq(EntriesVisitor(std::marker::PhantomData))
-}
-
-fn deserialize_bounded_init_data_list<'de, D: serde::Deserializer<'de>>(
-	deserializer: D,
-) -> Result<Option<Vec<InitData>>, D::Error> {
-	#[derive(Deserialize)]
-	struct Entries(#[serde(deserialize_with = "deserialize_bounded_entries")] Vec<InitData>);
-
-	Option::<Entries>::deserialize(deserializer).map(|entries| entries.map(|entries| entries.0))
 }
 
 /// Wire encoding of the catalog version. Deserialization accepts draft-00's
@@ -706,8 +649,7 @@ impl<'de> Deserialize<'de> for Role {
 mod test {
 	use super::*;
 
-	// Bound regression tests: exercise the public string parser
-	// and serde's Value path, which must share structural/expansion guards.
+	// Both the string parser and serde's Value path enforce the resolved byte limit.
 	fn assert_bound_error_both(value: serde_json::Value, expected: &str) {
 		let json = serde_json::to_string(&value).unwrap();
 		let error = Catalog::<()>::from_str(&json).expect_err("string parser must reject catalog");
@@ -719,33 +661,12 @@ mod test {
 	}
 
 	#[test]
-	fn tracks_limit_rejects_before_deserializing_65th_entry() {
-		let mut tracks = vec![serde_json::json!({"name": "v", "packaging": "loc"}); MAX_TRACKS];
-		// A normal Vec deserializer would report this invalid Track instead.
-		tracks.push(serde_json::json!(false));
-		assert_bound_error_both(
-			serde_json::json!({"version": "draft-01", "tracks": tracks}),
-			"MSF catalog exceeds 64 entries",
-		);
-	}
-
-	#[test]
-	fn init_data_limit_rejects_before_deserializing_65th_entry() {
-		let mut entries = vec![serde_json::json!({"id": "i", "type": "inline", "data": ""}); MAX_TRACKS];
-		// Reject before asking serde to turn this invalid item into InitData.
-		entries.push(serde_json::json!(false));
-		assert_bound_error_both(
-			serde_json::json!({"version": "draft-01", "initDataList": entries}),
-			"MSF catalog exceeds 64 entries",
-		);
-	}
-
-	#[test]
-	fn track_and_init_entry_exact_limits_are_accepted() {
-		let tracks: Vec<_> = (0..MAX_TRACKS)
+	fn more_than_64_tracks_and_init_entries_are_accepted_within_the_byte_limits() {
+		const ENTRIES: usize = 65;
+		let tracks: Vec<_> = (0..ENTRIES)
 			.map(|i| serde_json::json!({"name": format!("v{i}"), "packaging": "loc", "initRef": format!("i{i}")}))
 			.collect();
-		let entries: Vec<_> = (0..MAX_TRACKS)
+		let entries: Vec<_> = (0..ENTRIES)
 			.map(|i| serde_json::json!({"id": format!("i{i}"), "type": "inline", "data": "AQID"}))
 			.collect();
 		let value = serde_json::json!({"version": "draft-01", "tracks": tracks, "initDataList": entries});
@@ -753,7 +674,7 @@ mod test {
 		let from_string = Catalog::<()>::from_str(&json).unwrap();
 		let from_value = serde_json::from_value::<Catalog<()>>(value).unwrap();
 		assert_eq!(from_string, from_value);
-		assert_eq!(from_string.tracks.len(), MAX_TRACKS);
+		assert_eq!(from_string.tracks.len(), ENTRIES);
 		assert!(
 			from_string
 				.tracks
@@ -801,8 +722,9 @@ mod test {
 
 	#[test]
 	fn shared_references_accept_exact_resolved_byte_limit() {
-		let payload = "A".repeat(MAX_CATALOG_BYTES / MAX_TRACKS);
-		let mut tracks: Vec<_> = (0..MAX_TRACKS)
+		const TRACKS: usize = 64;
+		let payload = "A".repeat(MAX_CATALOG_BYTES / TRACKS);
+		let mut tracks: Vec<_> = (0..TRACKS)
 			.map(|i| serde_json::json!({"name": format!("v{i}"), "packaging": "loc", "initRef": "shared"}))
 			.collect();
 		// Matching inline + reference counts once, preserving upstream semantics.
@@ -817,7 +739,7 @@ mod test {
 			Catalog::<()>::from_str(&json).unwrap(),
 			serde_json::from_value::<Catalog<()>>(value).unwrap(),
 		] {
-			assert_eq!(catalog.tracks.len(), MAX_TRACKS);
+			assert_eq!(catalog.tracks.len(), TRACKS);
 			assert_eq!(
 				catalog
 					.tracks
