@@ -1,6 +1,6 @@
 ---
 name: verify-resume
-description: Model-check how a front's reader resumes one logical track across route changes (`rs/moq-net/src/model/resume.rs`) with TLA+. Use when a change touches `Reader::sync`, a copy's bound (`observe`, `bound_at_end`), backfill (`backfill`, `backfill_gaps`), which replaced copies are kept or waited on (`let_go`, `Copy::retains`), how a group is picked and handed out once (`poll_lowest`, `deliverable`, `take`), or when the track ends (`poll_end`), or when a failover bug needs every ordering of arrivals, switches, and route failures checked rather than a random sweep.
+description: Model-check how a front's reader resumes one logical track across route changes (`rs/moq-net/src/model/resume.rs`) with TLA+. Use when a change touches `Reader::sync`, where a switch splits the subscription (`boundary`, `Copy::cap`), backfill (`backfill`, `backfill_gaps`), which replaced copies are kept or waited on (`let_go`, `Copy::retains`), how a group is picked and handed out once (`poll_lowest`, `deliverable`, `take`), or when the track ends (`poll_end`), or when a failover bug needs every ordering of arrivals, switches, and route failures checked rather than a random sweep.
 ---
 
 # Verify track resume
@@ -9,7 +9,7 @@ description: Model-check how a front's reader resumes one logical track across r
 
 ## Rules
 
-Each rule is an INVARIANT; the harm says why it matters.
+Each rule is an INVARIANT, except `SwitchCapsAtBoundary`, a PROPERTY over each switch step; the harm says why it matters.
 
 | Rule | Holds when | Harm if broken |
 | --- | --- | --- |
@@ -19,7 +19,9 @@ Each rule is an INVARIANT; the harm says why it matters.
 | `CleanEndIsDeclared` | A clean end only follows a route declaring one. | A failed route reads as the broadcast ending. |
 | `FailsOnlyUnroutable` | The track fails only once the front gave up: a route failing is the front's to replace. | A single relay failure ends playback that another route could carry. |
 | `QuietIsSettled` | Once the serving route is complete and the reader holds every group, a poll ends the read rather than parking. | A finished track hangs open on a replaced route. |
-| `CopiesBounded` | However often routes flap, a route keeps at most its own copy and one backfill of it subscribed. | Each flap leaks a subscription upstream. |
+| `ReplacedCapped` | A switch caps every copy it replaces at the boundary at once: only the serving copy is unbounded. | The old route keeps sending groups the new one also sends, paying twice for every group after a failover. |
+| `SwitchCapsAtBoundary` | Each copy a switch replaces is capped at most at the boundary the switch split at, as the reader stood when it switched. | A cap past the boundary lets the old route send a group the new one also sends. |
+| `CopiesBounded` | However often routes flap, a route keeps at most its own copy and one backfill of it subscribed, plus one backfill for each route that failed while it still had groups to drain. | Each flap leaks a subscription upstream. |
 
 ## Run
 
@@ -28,7 +30,7 @@ quest gate just rs tla moq-net/verify/resume/ResumeReader.tla
 quest gate just rs tla moq-net/verify/resume/ResumeReader.tla -config rs/moq-net/verify/resume/ThreeRoutes.cfg
 ```
 
-The first checks every rule over two routes, three groups, two switches, and a reader holding each group until it finishes it: about 19.9M distinct states, in about five minutes. The second trades a group for a third route, so a route can come up after another failed: about 7.4M states, in about a minute. Both pass at the sync commit. Nightly runs every config here and fails if a config with an `\* Open finding:` line passes.
+The first checks every rule over two routes, three groups, two switches, and a reader holding each group until it finishes it: about 21.3M distinct states, in about six minutes. The second trades a group for a third route, so a route can come up after another failed: about 5.4M states, in about a minute. Both pass at the sync commit. Nightly runs every config here and fails if a config with an `\* Open finding:` line passes.
 
 ## Open findings
 
@@ -40,18 +42,18 @@ Follow Reading a failure in `rs/moq-net/verify/README.md`. Replay the path as a 
 
 ## Coverage
 
-Sync commit: `8c939bc9d05e5e882fb4e042a9efbf2db227b721`, plus [moq-dev/moq#9103](https://github.com/moq-dev/moq/pull/9103), which reads a group landing late on a drained copy. Run `git log 8c939bc9d0.. -- rs/moq-net/src/model/resume.rs rs/moq-net/src/model/track.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
+Sync commit: `8c939bc9d05e5e882fb4e042a9efbf2db227b721`, plus [moq-dev/moq#9103](https://github.com/moq-dev/moq/pull/9103), which reads a group landing late on a drained copy, and [moq-dev/moq#9276](https://github.com/moq-dev/moq/pull/9276), which splits a switch at one boundary. Run `git log 8c939bc9d0.. -- rs/moq-net/src/model/resume.rs rs/moq-net/src/model/track.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
 
 | Code | Model |
 | --- | --- |
-| `rs/moq-net/src/model/resume.rs` `Reader::sync` (reuse of a route's copy, new copy at `newest`) | `Sync`, `Serve` |
+| `rs/moq-net/src/model/resume.rs` `Reader::sync`, `boundary`, `Copy::cap` (reuse of a route's copy, new copy at the boundary, replaced copies capped there) | `Sync`, `Boundary`, `Cap`, `Serve` |
 | `rs/moq-net/src/model/resume.rs` `Reader::backfill`, `backfill_gaps` | `Backfill`, `BackfillGaps` |
-| `rs/moq-net/src/model/resume.rs` `Reader::poll_lowest`, `deliverable`, `take`, `observe`, `Copy::done` | `Poll`, `Pass`, `Scan`, `Peek`, `Deliverable`, `Take` |
-| `rs/moq-net/src/model/resume.rs` `Reader::bound_at_end`, `let_go`, `Copy::retains` | `BoundAtEnd`, `LetGo`, `Retains` |
+| `rs/moq-net/src/model/resume.rs` `Reader::poll_lowest`, `deliverable`, `take`, `Copy::done` | `Poll`, `Pass`, `Scan`, `Peek`, `Deliverable`, `Take` |
+| `rs/moq-net/src/model/resume.rs` `Reader::let_go`, `Copy::retains` | `LetGo`, `Retains` |
 | `rs/moq-net/src/model/resume.rs` `Reader::poll_end` | `PollEnd` |
 | `rs/moq-net/src/model/resume.rs` `Producer::splice`, `serve_from`, `Producer::end`, `Phase::Finished` | `Serve`, `FrontFinish`, `FrontFail` |
 | `rs/moq-net/src/model/track.rs` `TrackState::is_complete`, `may_land`, `max_key`, `Consumer::latest_key`, `Consumer::poll_arrived`, `track::Subscriber::has_unread_group`, `Producer::finish_shared` | `Seal`, `Held`, `MayLand`, `Latest`, `Landed`, `HasUnread`, `Settle` |
 
 ## Not covered
 
-Whole groups only, so no frames and no `Recover`: a group whose copy stalls or fails mid-read continuing on another copy is left out, as are compressed groups and fetches. The subscription is unbounded from the oldest group with an hour's budget, so nothing goes stale or expires, and local ranges (`set_range`, a lowered floor's backfill), ordered reads, caps, refusals, drops and their reports, and re-offers are left out. Copies answer at once (no `Sub::Pending`), the reader joins before any group lands, a route declares its end only once it holds the last group, and a route that declared its end never fails. A pass covers two routes with three groups or three routes with two, two switches between live routes, and one reader. `resume_model.rs`'s proptest and the tests in `resume.rs` own the rest.
+Whole groups only, so no frames and no `Recover`: a group whose copy stalls or fails mid-read continuing on another copy is left out, as are compressed groups and fetches. The subscription is unbounded from the oldest group with an hour's budget, so nothing goes stale or expires (nor is the budget clock a replaced copy runs on, `since` and `drained`, modeled), and local ranges (`set_range`, a lowered floor's backfill), ordered reads, caps, refusals, drops and their reports, and re-offers are left out. Copies answer at once (no `Sub::Pending`), the reader joins before any group lands, a route declares its end only once it holds the last group, and a route that declared its end never fails. A pass covers two routes with three groups or three routes with two, two switches between live routes, and one reader. `resume_model.rs`'s proptest and the tests in `resume.rs` own the rest.

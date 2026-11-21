@@ -7210,7 +7210,19 @@ impl Consumer {
 	/// behind its live edge, as a reader would judge it, whether the track holds it or not;
 	/// see `TrackState::drifted`. Parks in this track's expiry index, so only a change that
 	/// can make the group stale, or land it here, wakes it. Pending for good once the track closes.
-	pub(super) fn poll_stale(&self, key: u64, budget: Duration, waiter: &kio::Waiter) -> Poll<()> {
+	///
+	/// Judged within `within`, a reader's groups and its exclusive cap (see
+	/// [`Servable::within`]), else every group, searched through `live`, which the caller keeps
+	/// across polls.
+	pub(super) fn poll_stale(
+		&self,
+		key: u64,
+		budget: Duration,
+		within: Option<(Option<Cover>, Option<u64>)>,
+		live: &Arc<Live>,
+		waiter: &kio::Waiter,
+	) -> Poll<()> {
+		let servable = Servable::within(within, live);
 		self.with_state(|state| {
 			let Some(state) = state else {
 				return Poll::Pending;
@@ -7218,7 +7230,7 @@ impl Consumer {
 			let state = state.read();
 			let budget = clamp_max_delay(budget, state.max_age_bound());
 			state.cache.wakes().watch_held(key, waiter);
-			match state.poll_drifted(key, &Servable::ALL, budget, None, waiter) {
+			match state.poll_drifted(key, &servable, budget, None, waiter) {
 				true => Poll::Ready(()),
 				false => Poll::Pending,
 			}
@@ -8300,10 +8312,20 @@ struct GroupExpiry {
 	cache: Arc<cache::Track>,
 	reading: Reading,
 	subscription: kio::Consumer<demand::Prefs>,
-	/// What the cursor can be served; see [`Cursor::published`].
-	servable: kio::Consumer<Published>,
+	/// The groups whose landing above supersedes this one.
+	successors: Successors,
 	key: u64,
 	superseded: Superseded,
+}
+
+/// The groups a [`GroupExpiry`] measures drift within.
+enum Successors {
+	/// What the cursor that handed the group out can be served; see [`Cursor::published`].
+	Cursor(kio::Consumer<Published>),
+	/// The group moved onto another copy: the logical reader's window, below its local cap.
+	/// Not the cursor's, which a route switch capped at the boundary, nor the new copy's own,
+	/// which starts there. Indexed on whichever copy it is judged on.
+	Reader(Arc<Live>),
 }
 
 /// Keeps one fetched group tied to this caller's age budget.
@@ -8421,7 +8443,7 @@ impl group::Expiry for GroupExpiry {
 			state,
 			cache,
 			subscription: self.subscription.clone(),
-			servable: self.servable.clone(),
+			successors: Successors::Reader(Arc::default()),
 			key: self.key,
 			superseded: Superseded::default(),
 		})
@@ -8461,10 +8483,18 @@ impl group::Expiry for GroupExpiry {
 		});
 
 		let mut servable = Servable::ALL;
-		let _ = self.servable.poll(waiter, |current| {
-			servable = current.servable.clone();
-			Poll::<()>::Pending
-		});
+		match &self.successors {
+			Successors::Cursor(published) => {
+				let _ = published.poll(waiter, |current| {
+					servable = current.servable.clone();
+					Poll::<()>::Pending
+				});
+			}
+			// Without a reader, as for a nested front's, every group.
+			Successors::Reader(live) => {
+				servable = Servable::within(recover.and_then(|recover| recover.window(waiter)), live);
+			}
+		}
 
 		let state = self.state.read();
 		let budget = clamp_max_delay(max_delay, state.max_age_bound());
@@ -8716,7 +8746,7 @@ impl PartialEq for Several {
 /// Each index is for the cover it last searched: a search under an edited cover moves only
 /// the runs the edit moved, so a SUBSCRIBE_UPDATE costs its own ranges, never the cache.
 #[derive(Default)]
-struct Live(Mutex<Vec<Indexed>>);
+pub(super) struct Live(Mutex<Vec<Indexed>>);
 
 struct Indexed {
 	/// The track indexed, by its cache account. Held weakly, so a track that went away
@@ -8906,6 +8936,17 @@ impl Servable {
 		match window.groups() {
 			None => Self::ALL,
 			Some(groups) => Self::covering(groups.clone(), None, live),
+		}
+	}
+
+	/// A reader's groups below its exclusive cap, as [`super::resume::Recover::window`] gives
+	/// them: below the cap alone while a live join waits on a first group, and every group
+	/// without a reader.
+	fn within(within: Option<(Option<Cover>, Option<u64>)>, live: &Arc<Live>) -> Self {
+		match within {
+			Some((Some(groups), cap)) => Self::covering(groups, cap, live),
+			Some((None, cap)) => Self::ALL.below(cap),
+			None => Self::ALL,
 		}
 	}
 
@@ -10165,7 +10206,7 @@ impl Cursor {
 			cache: self.cache.clone(),
 			reading: Reading::new(self.state.clone()),
 			subscription: self.subscription.consume(),
-			servable: self.published.consume(),
+			successors: Successors::Cursor(self.published.consume()),
 			key,
 			superseded: Superseded::default(),
 		}))
@@ -19942,6 +19983,20 @@ mod test {
 		);
 		assert_eq!(entries(), 1, "the stale entries are pruned");
 		drop(groups);
+	}
+
+	/// A reader whose groups still wait on a live join keeps its cap: a group past it is
+	/// no newer group of the reader's.
+	#[test]
+	fn servable_within_keeps_the_cap_while_the_groups_wait() {
+		let live = Arc::default();
+		let pending = Servable::within(Some((None, Some(3))), &live);
+		assert!(pending.contains(2));
+		assert!(!pending.contains(3));
+		let resolved = Servable::within(Some((Some(Cover::new(std::iter::once(1..=5))), Some(3))), &live);
+		assert!(!resolved.contains(0) && resolved.contains(2) && !resolved.contains(3));
+		assert!(Servable::within(Some((None, None)), &live).contains(u64::MAX));
+		assert!(Servable::within(None, &live).contains(u64::MAX));
 	}
 
 	/// Capping a servable window in place keeps exactly the groups the set of its runs
