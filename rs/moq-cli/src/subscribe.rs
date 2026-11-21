@@ -423,7 +423,7 @@ impl Subscribe {
 			}
 		};
 
-		match mp4.finish()? {
+		match mp4.finish(&[])? {
 			Some(trailer) => {
 				// Converting drops the error of a write still in flight, which flushing returns.
 				file.flush().await?;
