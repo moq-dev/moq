@@ -58,10 +58,9 @@ was named, and `set_live` covers it.
 The cut:
 
 - Every quest under Required has landed.
-- [The warmth port](/quest/m3/cache-routing/select.md) has either landed and
-  passed the mesh replay (`just test mesh-replay --new <its relay>`), or moved its
-  wire to the next wip version: no open PR still adds warm fields to
-  lite-07-wip, and no warm field is on main that the replay has not run.
+- No warm field is on main or in an open PR against lite-07-wip:
+  [the warmth port](/quest/m3/cache-routing/select.md) waits until after the
+  cut (maintainer, 2026-11-20).
 - The identifier becomes `moq-lite-07` in `rs/moq-net` and `js/net`, in the
   draft (whose text already names the rename), and at every site spelling
   the wip ALPN: grep the repository for `moq-lite-07-wip`. A wip peer and a
@@ -129,6 +128,9 @@ then, by the cut step above: its wire is in lite-07 if the port has landed
 and passed the mesh replay by that moment, and otherwise moves to the next
 wip version. A port that lands in the days between the last Required quest
 and the cut is in, on the same test.
+Superseded 2026-11-20 (maintainer, in the coordinating session): the port
+waits until after the cut, behind latency link costs on the deployment, so
+lite-07 freezes without a warm wire.
 The explicit `Oldest` anchor rides [time addressing's model](https://github.com/moq-dev/moq/blob/7d1bee79cb8fcb4d816fc53f0547ef8b2b19756a/quest/m2/time-addressing/model.md),
 whose lite-07 encoding [lite-07 by start](https://github.com/moq-dev/moq/pull/8908) carries.
 
@@ -174,12 +176,16 @@ would need a breaking release had it landed right after the cut:
 
 Decided 2026-11-15 (maintainer, /quest-plan on the whole route layer): ✅
 lite-07 carries the redesigned route layer of
-[cache-aware multicast](/quest/m2/multicast/README.md), and the cut waits
+[cache-aware multicast](https://github.com/moq-dev/moq/blob/41cc107579/quest/m2/multicast/README.md), and the cut waits
 for it (rejected: freezing lite-07 with the path rule and redesigning in
 lite-08; freezing lite-07 with no route layer). That redesign removes the
 Route Key Parameter, so the 2026-11-10 wait on its symbolic model and the
 route key lane's early signal above ended when
 [moq-dev/moq#8987](https://github.com/moq-dev/moq/pull/8987) landed.
+That epic finished 2026-11-20 with its last child
+([moq-dev/moq#9231](https://github.com/moq-dev/moq/pull/9231)), and the cut's
+routing wait moved to [claim reach](/quest/m2/lite07-claim-reach-routes.md)
+(maintainer, 2026-11-20).
 
 Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit, which also
 audited the lite-07 draft for what it could lose):
@@ -197,7 +203,7 @@ audited the lite-07 draft for what it could lose):
 - ✅ Kept as they are: datagram tracks, including the lite-05/06 bridge (a
   named consumer wants them); all seven lite versions, which keep
   negotiating with today's behaviour; the hidden `.` path prefix; and the
-  route plan of [cache-aware multicast](/quest/m2/multicast/README.md)
+  route plan of [cache-aware multicast](https://github.com/moq-dev/moq/blob/41cc107579/quest/m2/multicast/README.md)
   (rejected: routing as a separately versioned SETUP extension).
 - The smaller wire fixes rode [lite-07 by start](https://github.com/moq-dev/moq/pull/8908):
   Max Age as value plus one, no Padding stream or datagram type, a kind in
@@ -211,11 +217,28 @@ The padding paragraph above is superseded: lite-07 freezes with no Padding
 type, and [the padding probes](/quest/m5/probe-padding.md) bring one back in
 the version that ships them.
 
+Decided 2026-11-20 (maintainer, /quest-plan auditing the cache, timestamp,
+and switching rules in `rs/moq-net/AGENTS.md` before the cut):
+
+- ✅ The cut waits for [groups never overlap](/quest/m2/groups-never-overlap.md)
+  (rejected: after the cut). [Group times](/quest/m2/time-addressing/group-times.md)
+  puts the strong rule in the draft as a publisher MUST: a group's span, from
+  its lowest frame to its End, never overlaps another's. Expiry relies on it,
+  and first-party producers break it today.
+- ✅ [The frame cap](/quest/m1/switch-frame-cap.md) is not Required, like the
+  warmth port: if it has landed when the cut is made, its Position end is in
+  lite-07, and otherwise it moves to the next wip version.
+- The audit's other gaps change no wire and don't gate the cut: a relay
+  asking upstream for a missing group head, the switch's group cap, a
+  replaced copy's short group, and expiry by a higher group's lowest
+  timestamp. A Min Age join that asks upstream is
+  [no relative anchors](/quest/m2/time-addressing/no-relative-anchors.md)'s.
+
 ## Required
 
 - [No relative anchors](/quest/m2/time-addressing/no-relative-anchors.md) - SUBSCRIBE's anchors lose Relative, and Min Age places a live join
 - [Group Streams carry each time once](/quest/m2/time-addressing/group-times.md) - GROUP loses Previous Start, FRAME's first delta counts from the start, and GROUP_END carries an end
-- [Cache-aware multicast](/quest/m2/multicast/README.md) - lite-07 carries the redesigned route layer: routes to forwarding nodes, no holds or doubt, claims crossing trust boundaries by a chain, and no Route Key
+- [Groups never overlap](/quest/m2/groups-never-overlap.md) - first-party producers and importers keep the no-overlap MUST the cut publishes
 - [A lite-07 claim is shown no broader than the grants it crossed](/quest/m2/lite07-claim-reach-routes.md) - a peer is never shown a claim at a path no route of it can serve, through any number of relays (maintainer, 2026-11-20)
 
 ## Related

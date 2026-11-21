@@ -13,23 +13,39 @@ export interface Presentation {
 	setup?: string;
 	/** The credential the connection presents, from the URL or SETUP. Never also presented on AUTH. */
 	connection?: string;
+	/** Whether the URL carries it for a relay that takes no token of its own, so its replacements wait for the next dial instead of riding AUTH. */
+	carried?: boolean;
+}
+
+/** Where a dial carries its connection credential. @internal */
+export interface Carrier {
+	/** Whether every offered version carries a SETUP token, so the URL needs none. */
+	setupToken: boolean;
+	/** Whether the URL's `auth` parameter carries it in place of SETUP and `jwt`. */
+	urlAuth?: boolean;
 }
 
 /**
  * Decide what one dial presents.
  *
  * A URL that already carries a `jwt` keeps it (a per-peer credential), so every token rides
- * AUTH. Otherwise the first token is the connection credential: it rides SETUP, and the URL
- * too when `setupToken` is false, since the URL is fixed before the version is negotiated.
+ * AUTH. Otherwise the first token is the connection credential: it rides the URL's `auth`
+ * parameter alone when the carrier asks, else SETUP, and the URL's `jwt` too when no `setupToken`
+ * is carried, since the URL is fixed before the version is negotiated.
  *
  * @internal
  */
-export function credential(url: URL, tokens: readonly string[], setupToken: boolean): Presentation {
+export function credential(url: URL, tokens: readonly string[], carrier: Carrier): Presentation {
 	const jwt = url.searchParams.get("jwt");
 	if (jwt) return { url, connection: jwt };
 	const first = tokens[0];
+	if (carrier.urlAuth) {
+		// Even with no token yet, so one that arrives later waits for the next dial.
+		const carried = { url, carried: true };
+		return first === undefined ? carried : { ...carried, url: withAuth(url, first), connection: first };
+	}
 	if (first === undefined) return { url };
-	return { url: setupToken ? url : withJwt(url, first), setup: first, connection: first };
+	return { url: carrier.setupToken ? url : withJwt(url, first), setup: first, connection: first };
 }
 
 /**
@@ -41,10 +57,10 @@ export function credential(url: URL, tokens: readonly string[], setupToken: bool
  *
  * @internal
  */
-export function fallback(primary: URL, url: URL, tokens: readonly string[], setupToken: boolean): Presentation {
+export function fallback(primary: URL, url: URL, tokens: readonly string[], carrier: Carrier): Presentation {
 	const inherited = primary.searchParams.get("jwt");
-	if (inherited && !url.searchParams.get("jwt")) return credential(withJwt(url, inherited), tokens, setupToken);
-	return credential(url, tokens, setupToken);
+	if (inherited && !url.searchParams.get("jwt")) return credential(withJwt(url, inherited), tokens, carrier);
+	return credential(url, tokens, carrier);
 }
 
 /** `url` with `jwt` appended to its query. @internal */
@@ -54,9 +70,23 @@ function withJwt(url: URL, jwt: string): URL {
 	return next;
 }
 
-/** The tokens to hold on their own AUTH streams, each once. @internal */
+/** `url` with `auth` set to the credential, replacing any it carried, so it never repeats. */
+function withAuth(url: URL, credential: string): URL {
+	const next = new URL(url);
+	next.searchParams.set("auth", credential);
+	return next;
+}
+
+/**
+ * The tokens to hold on their own AUTH streams, each once. A credential the URL carries takes
+ * no token of the relay's own kind, so its replacement is no AUTH token either: the next dial
+ * presents it.
+ *
+ * @internal
+ */
 export function extra(credential: Presentation, tokens: readonly string[]): string[] {
-	return [...new Set(tokens)].filter((token) => token !== credential.connection);
+	const reserved = credential.carried ? tokens[0] : undefined;
+	return [...new Set(tokens)].filter((token) => token !== credential.connection && token !== reserved);
 }
 
 interface Entry {

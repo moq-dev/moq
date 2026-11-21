@@ -772,7 +772,7 @@ describe("refusal", () => {
 
 	it("refuses a name outside the origin's scope", async () => {
 		const owner = new Origin.Producer();
-		const scoped = owner.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from("room"))]));
+		const scoped = owner.scope(Path.empty(), Path.Prefixes.parse(["room"]));
 		const source = new Broadcast({
 			origin: scoped,
 			name: Path.from("lobby/live.hang"),
@@ -893,9 +893,9 @@ describe("cross-broadcast renditions", () => {
 		const owner = new Origin.Producer();
 		const scopes: string[] = [];
 		const announced = owner.announced.bind(owner);
-		owner.announced = (scope, options) => {
-			scopes.push(scope?.text ?? "**");
-			return announced(scope, options);
+		owner.announced = (filter, options) => {
+			scopes.push(filter?.text ?? "**");
+			return announced(filter, options);
 		};
 		const source = new Broadcast({
 			origin: owner,

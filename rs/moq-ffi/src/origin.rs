@@ -358,7 +358,7 @@ impl MoqOriginProducer {
 
 #[uniffi::export]
 impl MoqOriginConsumer {
-	/// Subscribe to routes whose names match a pattern scope; updates stay relative to the origin.
+	/// Subscribe to routes whose names match a discovery filter; updates stay relative to the origin.
 	pub fn announced(&self, config: MoqAnnounceConfig) -> Result<Arc<MoqAnnounceConsumer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		self.driver.check()?;
@@ -367,10 +367,7 @@ impl MoqOriginConsumer {
 			None => moq_net::Pattern::all(),
 		};
 		let filter = filter.rooted(&config.prefix)?;
-		let origin = self
-			.inner
-			.scope("", &moq_net::Patterns::from(filter))?
-			.with_hidden(config.hidden);
+		let origin = self.inner.filter(&filter)?.with_hidden(config.hidden);
 		Ok(Arc::new(MoqAnnounceConsumer {
 			reads: Polled::new(origin.announced()).supervised(self.driver.clone()),
 		}))

@@ -38,7 +38,7 @@ fn one_relay() {
 		for seed in 0..2 {
 			let network = Network::new(seed);
 			let relay = SocketAddr::new(ip(1), PORT);
-			let auth = memory::public(&["**"], &[], &[]);
+			let auth = memory::public(&[""], &[], &[]);
 			let cluster = memory::start(memory::cluster(), moq_tokio::connect::Config::default()).await;
 			let relay = serve(&network, relay, &cluster, &auth).await;
 			for client in [PUBLISHER, SUBSCRIBER] {
@@ -59,7 +59,7 @@ fn one_relay() {
 fn two_relays() {
 	memory::run(|| async {
 		let network = Network::new(1);
-		let auth = memory::public(&["**"], &[], &[]);
+		let auth = memory::public(&[""], &[], &[]);
 
 		let cluster_a = memory::start(memory::cluster(), moq_tokio::connect::Config::default()).await;
 		let a = serve(&network, SocketAddr::new(ip(1), PORT), &cluster_a, &auth).await;
@@ -272,7 +272,7 @@ const MANY: usize = 100;
 /// asserting every one arrives.
 async fn bulk(tracks: usize, chunk: usize, read: usize) {
 	let network = Network::new(0);
-	let auth = memory::public(&["**"], &[], &[]);
+	let auth = memory::public(&[""], &[], &[]);
 	let cluster = memory::start(memory::cluster(), moq_tokio::connect::Config::default()).await;
 	let relay = serve(&network, SocketAddr::new(ip(1), PORT), &cluster, &auth).await;
 

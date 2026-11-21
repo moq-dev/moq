@@ -1013,6 +1013,10 @@ impl FillGroups {
 	/// Insert group `key` into the track's cache, handing it to the readers waiting on
 	/// it, and return a [`group::Producer`] to fill.
 	///
+	/// On a track this publisher accepted, a group past every one it produced is its live feed,
+	/// which its subscriptions deliver too; one below is history, served only to whoever misses
+	/// it. A relay's copy leaves that to its upstream's subscription.
+	///
 	/// The group starts at [`start`](Self::start)'s frame when it is the first group, so the
 	/// frames written keep the indices they have in the group. A key from the
 	/// [`floor`](Self::floor) up to the start's answers the start with that group, from its

@@ -78,7 +78,7 @@ Recommended, for review:
   bounded by its successor's start, as today.
 - With open-GOP leading pictures, a group's lowest frame sits below its
   start. Check the Time Anchor rule against spans there, alongside
-  [groups never overlap](/quest/m3/groups-never-overlap.md).
+  [groups never overlap](/quest/m2/groups-never-overlap.md).
 - `group::Producer::finish_at(end)` and `group::Consumer::end()` stay, since
   the end is what GROUP_END encodes.
 
@@ -113,4 +113,4 @@ which is unpublished.
 
 - [lite-07 has no relative anchors](/quest/m2/time-addressing/no-relative-anchors.md) - its live join resolves as a time start, which this changes inside a skipped span
 - [A scale-less track ages by arrival](/quest/m2/time-addressing/scale-less-arrival.md) - lite-05/06 still stamp a scale-less frame, with its group's start
-- [Groups never overlap](/quest/m3/groups-never-overlap.md) - enforces the non-overlap rule in hang's producers and importers
+- [Groups never overlap](/quest/m2/groups-never-overlap.md) - enforces the non-overlap rule in hang's producers and importers

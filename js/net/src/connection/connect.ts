@@ -261,6 +261,19 @@ export interface ConnectProps {
 	tokens?: readonly string[];
 
 	/**
+	 * Carry the connection credential, the first of {@link ConnectProps.tokens}, in the URL's
+	 * `auth` query parameter instead of SETUP and `jwt`. For a relay that reads a credential of
+	 * its own from the URL and takes a SETUP token or `jwt` to be its own kind. The peer's
+	 * verdict on it is judged like any connection credential, and a credential in a `Signal` of
+	 * tokens is replaced for each dial without changing the URL. Replacing it on a live session
+	 * takes a redial: the new credential rides no AUTH stream, so `answered()` waits for it.
+	 *
+	 * An `auth` parameter the URL already has is replaced. A URL's own `jwt` still wins: then
+	 * every token rides AUTH. A supplied `transport` never dials the URL, so it refuses `urlAuth`.
+	 */
+	urlAuth?: boolean;
+
+	/**
 	 * Build the session on `auth`, so it presents every token the handle holds and a route
 	 * naming one of its `Credential`s keeps it across a reconnect. Omit to give the session a handle
 	 * of its own, which ends with it.
@@ -351,6 +364,8 @@ export async function establish({ url, ...props }: ConnectProps, reached?: Reach
 	if ("discovery" in props) throw new TypeError(DISCOVERY_REMOVED);
 	props.versions = normalizeVersions(props);
 	if (props.transport && props.versions) throw new TypeError("versions cannot reconfigure a supplied transport");
+	// The URL is never dialed for a supplied transport, so the credential it carries would be dropped.
+	if (props.transport && props.urlAuth) throw new TypeError("urlAuth cannot reach a supplied transport");
 	const signal = props.signal ?? NEVER_ABORTED;
 	if (signal.aborted) reached?.transport.close();
 	signal.throwIfAborted();
@@ -419,13 +434,14 @@ export class Reached {
  */
 export async function reachable(
 	url: URL,
-	props: Pick<ConnectProps, "tokens" | "versions" | "webtransport" | "websocket" | "timeout">,
+	props: Pick<ConnectProps, "tokens" | "urlAuth" | "versions" | "webtransport" | "websocket" | "timeout">,
 	signal: AbortSignal,
 ): Promise<Reached | undefined> {
 	if (!isWebTransportSupported() || signal.aborted) return undefined;
 	const tokens = props.tokens ?? [];
 	const offered = offer(normalizeVersions(props));
-	const dialUrl = parse(credential(url, tokens, offered.setupToken).url).url;
+	const carrier = { setupToken: offered.setupToken, urlAuth: props.urlAuth };
+	const dialUrl = parse(credential(url, tokens, carrier).url).url;
 	const { promise: cancel, resolve } = Promise.withResolvers<void>();
 	const onAbort = () => resolve();
 	signal.addEventListener("abort", onAbort, { once: true });
@@ -458,9 +474,10 @@ async function connectInner(
 	reached?: WebTransport,
 ): Promise<[Session, Presentation]> {
 	const offered = offer(props.versions);
-	const dial = credential(raw, tokens, offered.setupToken);
+	const carrier = { setupToken: offered.setupToken, urlAuth: props.urlAuth };
+	const dial = credential(raw, tokens, carrier);
 	const url = parse(dial.url).url;
-	const fallbackDial = props.websocket?.url && fallback(raw, props.websocket.url, tokens, offered.setupToken);
+	const fallbackDial = props.websocket?.url && fallback(raw, props.websocket.url, tokens, carrier);
 	const wiring = (presented: Presentation): SessionProps => ({
 		publish: props.publish,
 		handle: props.auth,

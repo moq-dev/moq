@@ -27,7 +27,7 @@ pub(crate) struct Inner {
 	state: Mutex<State>,
 	/// Updated by the driver, so stats never take the lock.
 	pub(crate) wire: net::Wire,
-	socket_stats: Option<SharedSocketStats>,
+	pub(crate) socket_stats: Option<SharedSocketStats>,
 	address: Address,
 }
 

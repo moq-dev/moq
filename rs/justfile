@@ -90,6 +90,11 @@ lint-changed $LIST:
 check-test-changed $LIST:
     sh/rs/select.sh check-test "$LIST"
 
+# Clippy for macOS and Windows from this host, on the crates in a changed-file
+# list (or `--all`) plus their dependents; the gate runs it on every Rust diff.
+cross-lint-changed $LIST:
+    sh/rs/select.sh cross "$LIST"
+
 # Like `fix`, but only the crates in a changed-file list plus their dependents.
 fix-changed $LIST:
     sh/rs/select.sh fix "$LIST"

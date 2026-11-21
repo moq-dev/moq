@@ -174,9 +174,9 @@ pub(in crate::lite) struct Routed {
 	asked: BTreeMap<u64, Asked>,
 	/// What of the grant the peer's answers already cover, `None` for everything: what
 	/// a grant change shows beyond it may already be in the peer's answer, unheard here.
-	covered: Option<crate::Patterns>,
+	covered: Option<crate::Prefixes>,
 	/// What the grant shows beyond `covered` within the wants, held until an answer after
-	/// it is in: one per want and pattern of the grant, however often it changes.
+	/// it is in: one per want and prefix of the grant, however often it changes.
 	gained: Vec<Gain>,
 	/// The grant showed more since the last edit: the next is sent even when it changes
 	/// nothing, since its ANNOUNCE_OK follows what the change shows under a wider prefix.
@@ -211,9 +211,9 @@ pub(in crate::lite) struct Routed {
 /// answer after it.
 struct Gain {
 	want: Path,
-	/// The pattern of the grant that showed it.
-	pattern: crate::Pattern,
-	/// The deeper of the want and what the pattern shows, relative to the root.
+	/// The prefix of the grant that showed it.
+	prefix: crate::Prefix,
+	/// The deeper of the want and the prefix, relative to the root.
 	held: Path,
 	/// Holds the readers until dropped.
 	_snapshot: crate::model::Snapshot,
@@ -460,16 +460,16 @@ impl Routed {
 			.into_iter()
 			.partition(|gain| answered(&gain.held));
 		self.gained = held;
-		// The peer's answers now cover what each released pattern shows, and once nothing
-		// is held, the whole grant.
+		// The peer's answers now cover each released prefix, and once nothing is held, the
+		// whole grant.
 		if self.gained.is_empty() {
 			if self.covered.as_ref() != self.permit.grant() {
 				self.covered = self.permit.grant().cloned();
 			}
 		} else if let Some(covered) = self.covered.as_mut() {
 			for gain in released {
-				if !self.gained.iter().any(|held| held.pattern == gain.pattern) {
-					covered.insert(gain.pattern);
+				if !self.gained.iter().any(|held| held.prefix == gain.prefix) {
+					covered.insert(gain.prefix);
 				}
 			}
 		}
@@ -836,17 +836,16 @@ impl Routed {
 		// for it. Elsewhere, and on a narrowing, nothing new can arrive, and a reader stays
 		// synced.
 		if !permit.same_grant(&self.permit) {
-			// The peer's answers cover only what the new grant still shows of what they did;
-			// past what one intersection can hold, take them to cover nothing, holding more.
+			// The peer's answers cover only what the new grant still shows of what they did.
 			self.covered = match (self.covered.take(), permit.grant()) {
 				(None, granted) => granted.cloned(),
 				(Some(covered), None) => Some(covered),
-				(Some(covered), Some(granted)) => Some(covered.intersect(granted).unwrap_or_default()),
+				(Some(covered), Some(granted)) => Some(covered.intersect(granted)),
 			};
 			let overlaps = |a: &Path, b: &Path| a.has_prefix(b) || b.has_prefix(a);
 			let asking = self.stream.asking();
 			let mut before = std::mem::take(&mut self.gained);
-			for (pattern, region) in permit.beyond(self.covered.as_ref()) {
+			for (granted, region) in permit.beyond(self.covered.as_ref()) {
 				// Too deep to lie beneath the root, it shows nothing here.
 				let Ok(absolute) = self.root.join(&region) else {
 					continue;
@@ -857,7 +856,7 @@ impl Routed {
 				for want in self.wants.keys().filter(|want| overlaps(want, &region)) {
 					self.regranted = true;
 					// Held already: keep its snapshot, so its readers wait on unbroken.
-					let kept = (before.iter()).position(|gain| gain.want == *want && gain.pattern == pattern);
+					let kept = (before.iter()).position(|gain| gain.want == *want && gain.prefix == granted);
 					if let Some(kept) = kept {
 						self.gained.push(before.swap_remove(kept));
 						continue;
@@ -868,7 +867,7 @@ impl Routed {
 					};
 					self.gained.push(Gain {
 						want: want.clone(),
-						pattern: pattern.clone(),
+						prefix: granted.clone(),
 						_snapshot: self.origin.snapshot(held.clone()),
 						held,
 					});
@@ -1062,9 +1061,9 @@ fn admits(origin: &crate::origin::Producer, root: &Path, permit: &crate::auth::P
 }
 
 /// Whether `permit` trusts the peer with the whole tree: neither grant confines it,
-/// whether by setting no patterns or by one that covers everything.
+/// whether by setting no prefixes or by the empty one, which covers everything.
 pub(in crate::lite) fn whole(permit: &crate::auth::Permit) -> bool {
-	permit.covers_subtree("")
+	permit.matches("")
 }
 
 #[cfg(test)]

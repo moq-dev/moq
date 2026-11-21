@@ -39,11 +39,11 @@ unsafe impl Send for GrantRecord {}
 
 impl GrantRecord {
 	fn new(grant: Option<moq_net::auth::Grant>) -> Self {
-		let patterns = |patterns: &moq_net::Patterns| patterns.iter().map(ToString::to_string).collect::<Vec<_>>();
-		let publish = grant.as_ref().map(|grant| patterns(&grant.publish)).unwrap_or_default();
+		let prefixes = |prefixes: &moq_net::Prefixes| prefixes.iter().map(ToString::to_string).collect::<Vec<_>>();
+		let publish = grant.as_ref().map(|grant| prefixes(&grant.publish)).unwrap_or_default();
 		let subscribe = grant
 			.as_ref()
-			.map(|grant| patterns(&grant.subscribe))
+			.map(|grant| prefixes(&grant.subscribe))
 			.unwrap_or_default();
 		let views = |strings: &[String]| {
 			strings
@@ -66,17 +66,18 @@ impl GrantRecord {
 
 /// What the peer lets this side do, in this side's own paths.
 ///
-/// An empty pattern list grants nothing in that direction; `**` grants everything.
+/// Each entry is a path prefix covering that path and everything beneath it. An empty list
+/// grants nothing in that direction; the empty prefix `""` grants everything.
 #[repr(C)]
 pub struct moq_grant {
 	/// False until the peer first answers a token, and while a client reconnects; the other
 	/// fields are then empty.
 	pub present: bool,
-	/// The broadcast patterns this side may publish to the peer.
+	/// The broadcast prefixes this side may publish to the peer.
 	pub publish: *const moq_string,
 	/// The number of entries in `publish`.
 	pub publish_len: usize,
-	/// The broadcast patterns this side may subscribe to from the peer.
+	/// The broadcast prefixes this side may subscribe to from the peer.
 	pub subscribe: *const moq_string,
 	/// The number of entries in `subscribe`.
 	pub subscribe_len: usize,

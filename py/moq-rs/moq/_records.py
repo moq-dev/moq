@@ -513,13 +513,14 @@ class ConnectionStats:
 class Grant:
     """What the peer lets this side do, in this side's own paths.
 
-    An empty pattern list grants nothing in that direction; ``**`` grants everything.
+    Each prefix covers its path and everything beneath it. An empty list grants
+    nothing in that direction; the empty prefix ``""`` grants everything.
     """
 
     publish: tuple[str, ...]
-    """The broadcast patterns this side may publish to the peer."""
+    """The broadcast prefixes this side may publish to the peer."""
     subscribe: tuple[str, ...]
-    """The broadcast patterns this side may subscribe to from the peer."""
+    """The broadcast prefixes this side may subscribe to from the peer."""
     expires: timedelta | None = None
     """How long until the grant lapses, measured when it was read, or ``None`` for never."""
 

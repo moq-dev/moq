@@ -183,6 +183,8 @@ pub(in crate::lite) struct Answer {
 	live: HashMap<Named, (u64, Claim)>,
 	/// The session is leaving: nothing more is sent.
 	withdrawn: bool,
+	/// The peer was sent a route or a claim, which only this stream can end.
+	announced: bool,
 	/// Why the last error closes the session, when the route layer said.
 	cause: Option<RouteClose>,
 }
@@ -229,6 +231,7 @@ impl Answer {
 			told: BTreeMap::new(),
 			live: HashMap::new(),
 			withdrawn: false,
+			announced: false,
 			cause: None,
 		}
 	}
@@ -451,7 +454,7 @@ impl Answer {
 	/// Whether the grant and this handle show the peer the whole tree, as a routing peer
 	/// must be.
 	pub(in crate::lite) fn whole(&self) -> bool {
-		self.origin.root().is_empty() && self.origin.covers(&Path::empty()) && self.permit.covers_subtree("")
+		self.origin.root().is_empty() && self.origin.covers(&Path::empty()) && self.permit.matches("")
 	}
 
 	/// Ready once the peer reads its stream too slowly for what the node queued.
@@ -558,6 +561,12 @@ impl Answer {
 			// The other half of the session asks.
 			Msg::Ask(_) => Ok(()),
 		}
+	}
+
+	/// Whether the peer was ever sent a route or a claim. One that never was holds nothing
+	/// a finished stream ends, so a draining close need not wait for it.
+	pub(in crate::lite) fn announced(&self) -> bool {
+		self.announced
 	}
 
 	/// The session is leaving: let go of the node, so nothing more is queued. Finishing
@@ -784,6 +793,7 @@ impl Answer {
 						claims: HashMap::new(),
 					}
 				});
+				self.announced = true;
 				writer.buffer(&Wire::Route { offer })
 			}
 			None => {
@@ -895,7 +905,8 @@ impl Answer {
 	}
 
 	/// Whether the peer is shown the claim at the absolute `path`: the permit and this
-	/// handle allow some path it covers, the same one.
+	/// handle allow some path it covers, the same one, which prefixes always meet as one
+	/// whole subtree.
 	fn shows(&self, path: &Path) -> bool {
 		let Some((_, prefix)) = self.region(path) else {
 			return false;
@@ -904,7 +915,9 @@ impl Answer {
 		let (Some(suffix), Some(relative)) = (within, path.strip_prefix(self.origin.root())) else {
 			return false;
 		};
-		(prefix.hidden || !suffix.is_hidden()) && self.origin.reaches_any(path, &self.permit.beneath(relative.as_str()))
+		(prefix.hidden || !suffix.is_hidden())
+			&& self.origin.reaches(path)
+			&& self.permit.within(self.origin.allowed()).overlaps(relative.as_str())
 	}
 
 	/// Bring the peer's claim `key` in line with what the node told and the answer
@@ -929,6 +942,7 @@ impl Answer {
 				})?;
 				let announce = announce.expect("lite-07 assigns announce ids");
 				self.live.insert(key, (announce, claim));
+				self.announced = true;
 			}
 			(Some((announce, held)), Some(claim)) => {
 				let id = *announce;

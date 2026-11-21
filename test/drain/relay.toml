@@ -31,4 +31,4 @@ listen = "127.0.0.1:4470"
 
 [auth]
 # Allow anonymous access to everything.
-public = "**"
+public = ""

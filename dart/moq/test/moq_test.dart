@@ -363,8 +363,8 @@ void main() {
 
     // Generated records compare by identity, so compare the fields.
     void expectEverything(Grant? grant) {
-      expect(grant?.publish, ['**']);
-      expect(grant?.subscribe, ['**']);
+      expect(grant?.publish, ['']);
+      expect(grant?.subscribe, ['']);
       expect(grant?.expires, isNull);
     }
 

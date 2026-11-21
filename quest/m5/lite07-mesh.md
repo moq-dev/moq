@@ -14,7 +14,7 @@ moq.pro's lite-07 rollout waits on [Finalize moq-lite-07](/quest/m2/lite07-final
 condition cannot clear before a release carries the final version.
 
 Decided 2026-10-05, and redesigned 2026-11-15 by
-[cache-aware multicast](/quest/m2/multicast/README.md): the final lite-07
+[cache-aware multicast](https://github.com/moq-dev/moq/blob/41cc107579/quest/m2/multicast/README.md): the final lite-07
 carries the route layer of [moq-dev/moq#8987](https://github.com/moq-dev/moq/pull/8987).
 Relays route to each other by ROUTE, ROUTE_END, DEAD, and DRAIN under a
 Node ID with a Start, and every claim belongs to the relay that announces

@@ -1638,7 +1638,6 @@ export class Subscriber {
 					priority: fromWire(ok.properties.priority ?? DEFAULT_WIRE),
 					// No MAX_CACHE_DURATION sets no publisher limit, not the authored default.
 					maxAge: maxCacheDuration === undefined ? null : Duration.millis(Number(maxCacheDuration)),
-					// A moq-transport peer may stamp arrival times, and nothing on the wire says it didn't.
 					ietf: version,
 				});
 		const producer = known ?? staged?.producer;

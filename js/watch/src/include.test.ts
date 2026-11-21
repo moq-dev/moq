@@ -160,7 +160,7 @@ it("reads an unavailable include as offline without touching the parent", async 
 
 it("reports an include outside the origin's scope as an error, leaving the parent live", async () => {
 	const origin = new Origin.Producer();
-	const scoped = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("room/*")]));
+	const scoped = origin.scope(Path.empty(), Path.Prefixes.parse(["room"]));
 	publish(scoped, "room/main.hang");
 	const parent = new Broadcast({
 		origin: scoped,

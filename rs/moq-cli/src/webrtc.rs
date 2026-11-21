@@ -64,8 +64,8 @@ pub async fn listen_import(target: ImportTarget, listen: Listen) -> anyhow::Resu
 
 /// WHEP server: serve WebRTC plays of `name` from the Origin (export).
 pub async fn listen_export(origin: moq_net::origin::Consumer, name: String, listen: Listen) -> anyhow::Result<()> {
-	let scope = moq_net::Patterns::from(
-		moq_net::Pattern::subtree(&name).with_context(|| format!("invalid broadcast name `{name}`"))?,
+	let scope = moq_net::Prefixes::from(
+		moq_net::Prefix::try_from(name.as_str()).with_context(|| format!("invalid broadcast name `{name}`"))?,
 	);
 	let subscriber = origin
 		.scope("", &scope)
@@ -76,8 +76,8 @@ pub async fn listen_export(origin: moq_net::origin::Consumer, name: String, list
 
 /// Restrict a producer to the single broadcast `name` so a WHIP peer can only publish it.
 fn scope_producer(origin: &moq_net::origin::Producer, name: &str) -> anyhow::Result<moq_net::origin::Producer> {
-	let scope = moq_net::Patterns::from(
-		moq_net::Pattern::subtree(name).with_context(|| format!("invalid broadcast name `{name}`"))?,
+	let scope = moq_net::Prefixes::from(
+		moq_net::Prefix::try_from(name).with_context(|| format!("invalid broadcast name `{name}`"))?,
 	);
 	origin
 		.scope("", &scope)

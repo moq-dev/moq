@@ -404,7 +404,7 @@ The initial set is relative to this hop: a relay answers with what it holds with
 The publisher MAY coalesce changes to a claim it has not yet sent, and sends no more claims before SYNCED than the initial set holds.
 A retraction of a claim or route already sent MAY precede SYNCED.
 A prefix outside the subscriber's [scope](#auth-stream) lists nothing and is SYNCED at once.
-A prefix wider than the scope is answered as if each of the scope's regions inside it were requested, a region being the leading literal segments of one of the scope's [patterns](#path-pattern), and none lying within another: a claim above a region is presented at that region, sent only within the scope as any presented claim is (below), and the prefix's SYNCED follows every region's initial set.
+A prefix wider than the scope is answered as if each of the scope's regions inside it were requested, a region being one of the scope's [prefixes](#path-prefix) not lying within another: a claim above a region is presented at that region, sent only within the scope as any presented claim is (below), and the prefix's SYNCED follows every region's initial set.
 So a subscriber whose scope's regions do not fit one ANNOUNCE_REQUEST asks for a prefix they share, the empty prefix at the widest, and still learns every region.
 A change to the scope takes effect on the publisher's stream before the ANNOUNCE_OK answering any edit the publisher reads after it sends or reads the AUTH_OK, AUTH_ERROR, or stream end making the change.
 An edit MAY change nothing, so a subscriber whose scope widens under a prefix it already asked for can send an empty edit and treat the region as synced at its ANNOUNCE_OK.
@@ -431,7 +431,8 @@ When the session closes, an endpoint MUST assume that every route and claim on t
 A broadcast path has at most 32 segments and at most 4,096 bytes; a receiver MUST close the session with a PROTOCOL_VIOLATION on a longer one, except one resolved by [Compression](#announce-compression) or joined beneath a root of the receiver's own, whose claim it drops: the ANNOUNCE_START still assigns its Announce ID, the messages naming it stay valid, and the receiver SHOULD log and count it.
 A claim covers a path when its prefix is a leading run of the path's segments; matching is per path segment, so a prefix never matches half a segment, and equality is byte-by-byte within each segment.
 A publisher presents each claim inside a requested prefix and only the most specific claim at or above it, at that prefix itself, or at each region answering it, and sends those within the subscriber's scope, which is exactly the covered set the subscriber may see.
-A presented claim is within the scope when the scope matches a path it covers, as a claim at `a` is under the scope `a/*`, which does not match `a` itself: a prefix answered with no claim has none covering a path the scope matches.
+A presented claim is within the scope when the scope covers a path the claim covers: when one of the scope's prefixes lies at, beneath, or above the path the claim is presented at.
+Since a scope covers whole subtrees, a claim within it is within it at every path it is presented at.
 A claim presented above its own prefix carries how many segments broader it is than the path it is presented at, its Above, so the subscriber can tell it from a claim exactly at that path.
 Every path on the stream is relative to the session, whichever requested prefix it lies in.
 
@@ -526,7 +527,8 @@ A receiver MUST close the session with a PROTOCOL_VIOLATION on a ROUTE whose Pat
 
 A SUBSCRIBE, FETCH, TRACK, TRACKS, or DATAGRAMS request names the routing node that announces the claim serving it.
 A subscriber that names none lets the publisher select one (see [Resolution](#resolution)), and a relay forwarding a request names the node it selected or was given.
-A relay forwards a request naming a routing node only along its selected route to that node, or to the endpoint whose claim it announces when the request names the relay itself, and resets it with UNROUTABLE when it has neither.
+A relay forwards a request naming a routing node only along a route to that node through a neighbour that sent it the claim, its selected route when that neighbour did, along its selected route to that node when it holds no claim of that node covering the path, or to the endpoint whose claim it announces when the request names the relay itself, and resets it with UNROUTABLE when it has none of these.
+A route can arrive before the claims behind it, so while a relay routes to the named node and holds its claim available and eligible (see [Resolution](#resolution)) but no neighbour with a route there has sent it yet, it holds the request until one does or the claim stops being available and eligible, rather than reset a request for a claim it still shows available.
 
 Claims with the same Instance serve the same Broadcast, so a relay MAY move a live subscription between them, including onto a higher Epoch, continuing from the first frame the subscriber lacks, and a route change (a reconnect, a cheaper path, a draining session) is invisible to the subscriber.
 A relay MUST NOT move a subscription to a claim with a different Instance: it stays on its Instance's claims and ends with the last of them.
@@ -2102,43 +2104,36 @@ AUTH_OK Message {
   Type (i) = 0x0
   Message Length (i)
   Publish Count (i)
-  Publish Pattern (s) ...
+  Publish Prefix (s) ...
   Subscribe Count (i)
-  Subscribe Pattern (s) ...
+  Subscribe Prefix (s) ...
   Expires (i)
 }
 ~~~
 
-**Publish Pattern**:
-A [pattern](#path-pattern) matching broadcast paths the opener may announce and serve.
+**Publish Prefix**:
+A [prefix](#path-prefix) covering broadcast paths the opener may announce and serve.
 A count of zero grants none.
 
-**Subscribe Pattern**:
-A [pattern](#path-pattern) matching broadcast paths the opener may subscribe to.
+**Subscribe Prefix**:
+A [prefix](#path-prefix) covering broadcast paths the opener may subscribe to.
 
 **Expires**:
 The number of milliseconds until the grant lapses, or 0 for never.
 A value greater than 2^53 - 1 is invalid and MUST close the session with PROTOCOL_VIOLATION.
 The acceptor revokes a lapsed grant with AUTH_ERROR; the opener uses Expires to present a replacement token in time.
 
-### Path Pattern {#path-pattern}
-A pattern is a set of broadcast paths, written as `/`-separated segments split as a path's are, so a literal names a segment holding a `/` by escaping it.
-Each segment is one of:
+### Path Prefix {#path-prefix}
+A prefix is a broadcast path, written as `/`-separated segments split as a path's are, so a segment holding a `/` escapes it.
+It covers itself and every path beneath it: `room` covers `room` and `room/alice` but not `roomy`, and the empty prefix covers every path.
+Matching is per path segment, as a claim's is.
 
-- a literal, matching that segment exactly;
-- `*`, matching any one segment;
-- a literal with one `*` inside it, such as `cam-*.hang`, matching any segment that starts with the bytes before the `*` and ends with the bytes after it, without overlapping them;
-- `**`, matching zero or more segments.
+A prefix has at most 32 segments and no leading, trailing, or repeated `/`.
+It holds no `*`: a grant names whole subtrees and never a wildcard, so a route a grant admits always serves whole subtrees.
+A prefix that breaks any of these rules is a PROTOCOL_VIOLATION.
 
-A pattern matches a path when its segments match the path's segments in order, covering the whole path.
-The empty pattern matches only the empty path, `room/**` matches `room` and every path beneath it, and `**` matches every path.
-
-A pattern has at most 32 segments and at most one `**`.
-It has no leading, trailing, or repeated `/`, no segment with more than one `*`, and no `**` combined with other bytes in a segment.
-It is canonical: a `**` is never immediately preceded by a `*` segment, since `*/**` and `**/*` match the same paths and only `**/*` is valid.
-A pattern that breaks any of these rules is a PROTOCOL_VIOLATION.
-
-A grant covers a request when one of its patterns matches the path.
+A grant covers a request when one of its prefixes covers the path.
+A sender SHOULD omit a prefix lying within another of the same grant, since it covers nothing more.
 
 An endpoint MUST close the session with PROTOCOL_VIOLATION when an AUTH stream message fails to decode, has trailing body bytes, or has an unexpected type for its direction.
 The opener sends exactly one AUTH; any additional message on its side is a PROTOCOL_VIOLATION.
@@ -2284,7 +2279,7 @@ A stream that FINs without a GROUP_END carries a closed Group, which may have he
 
 ### Authorization {#changelog-07-auth}
 
-- Added the Auth Stream (0x7) with AUTH, AUTH_OK, and AUTH_ERROR: either endpoint presents a token on its own stream and learns the [path patterns](#path-pattern) it may publish and subscribe to. The union of a session's open grants is its scope. A shrink withdraws what it no longer covers, and an announcement outside the scope closes the session with UNAUTHORIZED. A peer without the stream resets it.
+- Added the Auth Stream (0x7) with AUTH, AUTH_OK, and AUTH_ERROR: either endpoint presents a token on its own stream and learns the [path prefixes](#path-prefix) it may publish and subscribe to, each covering its whole subtree; a prefix holding a `*` is a PROTOCOL_VIOLATION. The union of a session's open grants is its scope. A shrink withdraws what it no longer covers, and an announcement outside the scope closes the session with UNAUTHORIZED. A peer without the stream resets it.
 - Scope widens before AUTH_OK. A presenter waits for unanswered non-empty tokens before sending an uncovered request or rejecting a publication, and renewal waits for AUTH_OK before withdrawing the old token.
 - An Auth Stream message that fails to decode, has trailing body bytes, or has an unexpected type, or a second AUTH from the opener, closes the session with PROTOCOL_VIOLATION, as do invalid UTF-8 or an oversized AUTH_ERROR reason.
 - An AUTH_ERROR with INTERNAL_ERROR, TOO_MANY_REQUESTS, or CONTROL_MESSAGE_TIMEOUT leaves the token undecided, and the presenter presents it again after a growing backoff; any other code ends the token.
@@ -2314,7 +2309,7 @@ A stream that FINs without a GROUP_END carries a closed Group, which may have he
 - A node closes a session whose peer leaves its Announce Stream undrained for 10 seconds.
 - A publisher presents only the most specific claim covering the requested prefix.
 - A subscriber whose scope confines it to some prefixes SHOULD request those, and edit its set when they change.
-- A prefix wider than the subscriber's scope is answered region by region, a claim above a region presented at the region, so a subscriber whose regions do not fit one request asks for a prefix they share. A claim is within the scope when the scope matches a path it covers. A scope change takes effect before the ANNOUNCE_OK of any edit read after it, and an edit may change nothing.
+- A prefix wider than the subscriber's scope is answered region by region, a claim above a region presented at the region, so a subscriber whose regions do not fit one request asks for a prefix they share. A claim is within the scope when one of the scope's prefixes lies at, beneath, or above it. A scope change takes effect before the ANNOUNCE_OK of any edit read after it, and an edit may change nothing.
 - Added `Node` to TRACK, TRACKS, SUBSCRIBE, FETCH, and DATAGRAMS: the routing node announcing the claim the first hop selected, which every later hop follows.
 - Replaced Warm and Cold Route Cost with one cost, which each link adds to.
 - The Cost parameter must be at least 1.
