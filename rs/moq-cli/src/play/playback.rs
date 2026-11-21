@@ -196,6 +196,17 @@ impl<D, O> Half<D, O> {
 		}
 	}
 
+	/// Drop the rendition being opened, keeping the phase: a half that wants a rendition picks
+	/// again from the next snapshot it reads.
+	pub(super) fn cancel_opening(&mut self) {
+		match &mut self.phase {
+			Phase::Idle { opening } | Phase::Switching { opening, .. } | Phase::Stopping { opening, .. } => {
+				*opening = None
+			}
+			Phase::Playing { .. } | Phase::Retiring { .. } => {}
+		}
+	}
+
 	/// Give up the rendition being picked, which found nothing to open or is no longer wanted.
 	/// A turn's switch ends with it, keeping what plays; a move's stays wanted, so the next
 	/// snapshot tries again.
@@ -733,6 +744,27 @@ mod tests {
 		playback.read(&mut video, false);
 		playback.read(&mut audio, false);
 		assert!(playback.done(&video, &audio));
+	}
+
+	/// Cancelling an opening keeps the phase, so a switch still wants its replacement and a
+	/// stopped rendition still drives its half.
+	#[test]
+	fn cancelling_an_opening_keeps_the_phase() {
+		let (mut playback, mut video, _audio) = playing("wide");
+		video.turn();
+		playback.read(&mut video, true);
+		video.open("tall");
+		video.cancel_opening();
+		assert!(video.opening().is_none());
+		assert_eq!(video.switching(), Some(Switch::Turn));
+		playback.received(Default::default());
+		assert!(playback.wants(&video), "the turn picks again from the next snapshot");
+
+		video.open("tall");
+		video.stop();
+		video.cancel_opening();
+		assert!(video.opening().is_none());
+		assert!(video.is_current(1), "the stopped task still drives the half");
 	}
 
 	/// A rendition that ends while its replacement opens leaves the opening to play once ready.

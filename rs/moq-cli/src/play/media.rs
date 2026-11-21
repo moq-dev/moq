@@ -376,6 +376,22 @@ impl<O: Output> Media<O> {
 								}) {
 									audio.stop();
 								}
+								// An opening that would try a disabled rendition is picked again, even
+								// while the half waits for a stopped rendition to end.
+								if video.opening().is_some_and(|opening| {
+									opening.candidates.lock().unwrap().iter().any(|(name, _, _)| {
+										snapshot.video.renditions.get(name).is_some_and(|config| !config.enabled)
+									})
+								}) {
+									video.cancel_opening();
+								}
+								if audio.opening().is_some_and(|opening| {
+									opening.candidates.lock().unwrap().iter().any(|(name, _, _)| {
+										snapshot.audio.renditions.get(name).is_some_and(|config| !config.enabled)
+									})
+								}) {
+									audio.cancel_opening();
+								}
 								selection.retain(&mut snapshot);
 								// Video holds no tail beyond the frames queued for the window, so the
 								// rendition it left plays on until its replacement is ready.
@@ -480,7 +496,7 @@ impl<O: Output> Media<O> {
 						video.give_up();
 					} else if video
 						.opening()
-						.is_none_or(|opening| *opening.candidates.lock().unwrap() != candidates)
+						.is_none_or(|opening| !same_renditions(&opening.candidates.lock().unwrap(), &candidates))
 					{
 						// Replaces one still opening, which the newer snapshot or viewport overrides.
 						let candidates = Arc::new(Mutex::new(candidates));
@@ -507,7 +523,7 @@ impl<O: Output> Media<O> {
 					audio.give_up();
 				} else if audio
 					.opening()
-					.is_none_or(|opening| *opening.candidates.lock().unwrap() != candidates)
+					.is_none_or(|opening| !same_renditions(&opening.candidates.lock().unwrap(), &candidates))
 				{
 					let future = self.open_audio(&source, candidates.clone());
 					audio.open(Opening {
@@ -684,6 +700,17 @@ type VideoCandidate = (String, hang::catalog::VideoConfig, Track);
 
 /// An audio rendition to try: its name, its config, and the track it plays from.
 type AudioCandidate = (String, hang::catalog::AudioConfig, Track);
+
+/// Whether two picks try the same renditions in the same order. A rendition is its name and
+/// track, which always carry the same content, so a newer snapshot that only updates its hints,
+/// such as a measured bitrate or jitter, keeps the opening rather than starting it over.
+fn same_renditions<C>(left: &[(String, C, Track)], right: &[(String, C, Track)]) -> bool {
+	left.len() == right.len()
+		&& left
+			.iter()
+			.zip(right)
+			.all(|((left, _, left_track), (right, _, right_track))| left == right && left_track == right_track)
+}
 
 /// The renditions an opening tries, in order: each one's name, config, and track.
 type Order<C> = Arc<Mutex<Vec<(String, C, Track)>>>;
