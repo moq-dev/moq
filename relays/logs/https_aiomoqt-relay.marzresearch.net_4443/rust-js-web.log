@@ -1,17 +1,19 @@
 [page] negotiated protocol: moqt-22
 [page] subscribe_namespace written: requestId=0
+[page] announced: broadcast=openmoq/aiomoqt/mtt_00/bbb_4k60/loc/h264/1080/60/aac/2 active=true
+[page] announced: broadcast=openmoq/aiomoqt/mtt_00/clock/cmaf/h264/1080/30/aac/2 active=true
+[page] announced: broadcast=openmoq/aiomoqt/mtt_00/clock/loc/h264/720/30/opus/2/msf/catalog/2000/dgram active=true
+[page] announced: broadcast=openmoq/aiomoqt/mtt_00/clock/loc/h264/720/30/aac/2 active=true
+[page] announced: broadcast=openmoq/aiomoqt/mtt_00/bbb_4k30/cmaf/h264/1080/30/aac/2 active=true
+[page] announced: broadcast=openmoq/aiomoqt/mtt_00/akamai_cmaf/loc/h264/720/29_97/opus/2 active=true
+[page] announced: broadcast=openmoq/aiomoqt/mtt_00/bbb_4k30/cmaf/h264/1080/30/aac/2/msf/catalog/2000/1/0/alt4 active=true
 [page] announced: broadcast=openmoq/ffmpeg/artemis active=true
-[page] announced: broadcast=openmoq/aiomoqt/mtt_00/bbb_4k30/loc/h264/720/30/aac/2 active=true
-[page] announced: broadcast=ci/player-soak/44773528955/aiomoqt-relay/cmaf/burst active=true
-[page] announced: broadcast=ci/player-soak/44773528955/aiomoqt-relay/loc active=true
-[page] announced: broadcast=ci/player-soak/44773528955/aiomoqt-relay/loc/burst active=true
-[page] announced: broadcast=ci/player-soak/44773528955/aiomoqt-relay/cmaf active=true
-[page] announced: broadcast=smoke-rust-4443-24684.hang active=true
-[page] subscribe start: id=2 broadcast=smoke-rust-4443-24684.hang track=catalog.json
-[page] subscribe written: id=2 broadcast=smoke-rust-4443-24684.hang track=catalog.json
-[page] subscribe ok: id=2 broadcast=smoke-rust-4443-24684.hang track=catalog.json
-[page] received catalog hang smoke-rust-4443-24684.hang {video: Object, audio: Object, archive: Object, clock: Object}
-[page] subscribe start: id=4 broadcast=smoke-rust-4443-24684.hang track=0.avc3
-[page] subscribe written: id=4 broadcast=smoke-rust-4443-24684.hang track=0.avc3
-[page] subscribe ok: id=4 broadcast=smoke-rust-4443-24684.hang track=0.avc3
-decoded 12 frames from smoke-rust-4443-24684.hang (vite)
+[page] announced: broadcast=smoke-rust-4304-24530.hang active=true
+[page] subscribe start: id=2 broadcast=smoke-rust-4304-24530.hang track=catalog.json
+[page] subscribe written: id=2 broadcast=smoke-rust-4304-24530.hang track=catalog.json
+[page] subscribe ok: id=2 broadcast=smoke-rust-4304-24530.hang track=catalog.json
+[page] received catalog hang smoke-rust-4304-24530.hang {video: Object, audio: Object, archive: Object, clock: Object}
+[page] subscribe start: id=4 broadcast=smoke-rust-4304-24530.hang track=0.avc3
+[page] subscribe written: id=4 broadcast=smoke-rust-4304-24530.hang track=0.avc3
+[page] subscribe ok: id=4 broadcast=smoke-rust-4304-24530.hang track=0.avc3
+decoded 19 frames from smoke-rust-4304-24530.hang (vite)
