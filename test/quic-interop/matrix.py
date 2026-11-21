@@ -82,6 +82,17 @@ def prepare(args):
     )
     if n != 1:
         sys.exit("interop.py no longer saves logs where expected; update the patch")
+    # A cell that times out is stopped without the variables its Compose file needs, so
+    # Compose rejects the file and the cell's containers keep running into the next cell,
+    # whose simulator then forwards to a server that is gone.
+    text, n = re.subn(
+        r'^(\s+)"docker compose --env-file empty\.env stop " \+ containers,',
+        r'\1params + " docker compose --env-file empty.env stop " + containers,',
+        text,
+        flags=re.M,
+    )
+    if n != 1:
+        sys.exit("interop.py no longer stops a timed-out cell where expected; update the patch")
     interop.write_text(text)
 
 
