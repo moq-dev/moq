@@ -35,13 +35,11 @@ Recommended:
 - The relayed run uses the real copy path in each language, so a JS copy under a Rust origin
   is covered the way `just test relay-fill` already covers fills.
 - Drive time with the manual clocks both test suites already use.
+- A copy holding only a group's later frames is a case too: the relay fetches the head and
+  delivers the group whole, or names it in SUBSCRIBE_DROP when upstream can't supply it.
 
 Public API: none. Wire: none; a divergence this finds is fixed under lite-07-wip before the cut.
 
 ## Required
 
 - [No relative anchors](/quest/m2/time-addressing/no-relative-anchors.md) - the range shapes this table pins
-
-## Related
-
-- [A relay fetches a group's missing head](/quest/m1/missing-head-asks-upstream.md) - a partial group a copy holds is another case for the table
