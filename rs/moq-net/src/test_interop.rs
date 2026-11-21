@@ -354,6 +354,7 @@ fn lite_varint_interop() {
 				true => crate::track::Compression::Deflate,
 				false => crate::track::Compression::None,
 			},
+			tail: crate::track::Info::default().tail,
 		}
 		.encode_bytes(version)
 		.unwrap();
@@ -581,6 +582,7 @@ fn lite_tracks_interop() {
 		max_age: Some(std::time::Duration::from_secs(2)),
 		timescale: Some(crate::Timescale::MICRO),
 		compression: crate::track::Compression::Deflate,
+		tail: crate::track::Info::default().tail,
 	};
 	let mut bytes = Vec::new();
 	let mut w = Encoder::new(&mut bytes, version.into());

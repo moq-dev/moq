@@ -280,6 +280,15 @@ impl Version {
 		)
 	}
 
+	/// Whether TRACK_INFO carries the Track's tail, the bytes of each group a hop keeps.
+	/// Added in lite-07; an earlier peer's copies keep the default.
+	pub(crate) fn has_tail(self) -> bool {
+		!matches!(
+			self,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
+		)
+	}
+
 	/// Whether FRAME leads with its `Payload Length`, the payload size plus one. Added in
 	/// lite-07; an earlier FRAME ends its header with the payload size.
 	pub(crate) fn has_length_first(self) -> bool {

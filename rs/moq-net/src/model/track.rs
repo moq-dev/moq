@@ -167,6 +167,17 @@ pub struct Info {
 	/// On moq-transport, a track that refreshes at all is advertised as DYNAMIC_GROUPS, which
 	/// arrives as a [`Refresh::ratio`] of `Some(0)`.
 	pub refresh: Refresh,
+	/// The most bytes of each group a copy keeps, newest frames first: 32 MiB, the default
+	/// and the most any copy keeps.
+	///
+	/// A copy sheds its oldest frames past this, keeping at least the newest, and a writer
+	/// runs at most half of it past the group's fastest reader. A reader that falls behind
+	/// that rides a flight or gets [`Error::Evicted`], and a reader joining at the start of
+	/// a longer group needs a flight too, so media keeps the default to hold a whole group of
+	/// pictures. A long-lived group with one reader, such as a byte stream, needs only about
+	/// its hops' flow-control windows. Reported in TRACK_INFO on lite-07, so relays keep the
+	/// same; a copy received over anything else keeps the default.
+	pub tail: u64,
 	/// The draft a moq-transport publisher spoke and the Track Properties moq-net does not
 	/// interpret, forwarded unchanged. `None` for a track published over moq-lite, which
 	/// therefore carries no moq-transport state.
@@ -191,6 +202,7 @@ impl PartialEq for Info {
 			priority,
 			compression,
 			refresh,
+			tail,
 			properties,
 			unchecked: _,
 		} = self;
@@ -199,6 +211,7 @@ impl PartialEq for Info {
 			&& *priority == other.priority
 			&& *compression == other.compression
 			&& *refresh == other.refresh
+			&& *tail == other.tail
 			&& *properties == other.properties
 	}
 }
@@ -279,7 +292,7 @@ pub enum Compression {
 }
 
 /// An authored track's defaults: untimed, a zero [`max_age`](Info::max_age) (the live edge only),
-/// priority 0, uncompressed, never asking for a refresh.
+/// priority 0, uncompressed, never asking for a refresh, keeping a 32 MiB tail.
 impl Default for Info {
 	fn default() -> Self {
 		Self {
@@ -288,6 +301,7 @@ impl Default for Info {
 			priority: DEFAULT_PRIORITY,
 			compression: Compression::None,
 			refresh: Refresh::default(),
+			tail: group::MAX_CACHE_BYTES,
 			properties: None,
 			unchecked: false,
 		}
@@ -333,6 +347,18 @@ impl Info {
 	pub fn with_refresh(mut self, refresh: Refresh) -> Self {
 		self.refresh = refresh;
 		self
+	}
+
+	/// Set the most bytes of each group a copy keeps, returning `self` for chaining. See
+	/// [`tail`](Self::tail).
+	pub fn with_tail(mut self, tail: u64) -> Self {
+		self.tail = tail;
+		self
+	}
+
+	/// The bytes each copy of a group keeps: [`tail`](Self::tail), at most 32 MiB.
+	pub(crate) fn kept(&self) -> u64 {
+		self.tail.min(group::MAX_CACHE_BYTES)
 	}
 
 	/// `timestamp` at this track's [`timescale`](Self::timescale).

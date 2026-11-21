@@ -93,6 +93,9 @@ pub struct TrackInfo {
 	/// How FRAME payloads and datagrams are compressed per group. Lite07+ only: an earlier
 	/// peer is served the frames inflated, so it is always [`Compression::None`] there.
 	pub compression: Compression,
+	/// The most bytes of each group a hop keeps. Lite07+ only: an earlier peer's copies keep
+	/// the default.
+	pub tail: u64,
 }
 
 impl TrackInfo {
@@ -108,6 +111,7 @@ impl TrackInfo {
 				true => info.compression,
 				false => Compression::None,
 			},
+			tail: info.tail,
 		}
 	}
 }
@@ -120,6 +124,7 @@ impl From<TrackInfo> for crate::track::Info {
 			.with_priority(info.priority)
 			.with_refresh(info.refresh)
 			.with_compression(info.compression)
+			.with_tail(info.tail)
 	}
 }
 
@@ -203,6 +208,10 @@ impl<'a> Message<'a> for TrackInfo {
 			},
 			false => Compression::None,
 		};
+		let tail = match version.has_tail() {
+			true => r.varint()?,
+			false => crate::track::Info::default().tail,
+		};
 
 		Ok(Self {
 			priority,
@@ -210,6 +219,7 @@ impl<'a> Message<'a> for TrackInfo {
 			max_age,
 			timescale,
 			compression,
+			tail,
 		})
 	}
 
@@ -242,6 +252,9 @@ impl<'a> Message<'a> for TrackInfo {
 			// The frames would arrive compressed with nothing saying so.
 			return Err(EncodeError::Version);
 		}
+		if version.has_tail() {
+			w.varint(self.tail)?;
+		}
 		Ok(())
 	}
 }
@@ -257,6 +270,7 @@ mod test {
 			max_age: Some(Duration::from_millis(2000)),
 			timescale: Some(Timescale::MICRO),
 			compression: Compression::None,
+			tail: 4 << 20,
 		}
 	}
 
@@ -301,6 +315,25 @@ mod test {
 				assert_eq!(info_roundtrip(version, &info).max_age, max_age);
 			}
 		}
+	}
+
+	/// Lite-07 carries the tail, so a relay keeps what the publisher declared; an earlier
+	/// peer's copies keep the default.
+	#[test]
+	fn tail_rides_lite07_only() {
+		let info = info_sample();
+		assert_eq!(info_roundtrip(Version::Lite07, &info).tail, 4 << 20);
+		let zero = TrackInfo { tail: 0, ..info_sample() };
+		assert_eq!(info_roundtrip(Version::Lite07, &zero).tail, 0);
+		for version in [Version::Lite05, Version::Lite06] {
+			assert_eq!(
+				info_roundtrip(version, &info).tail,
+				crate::track::Info::default().tail,
+				"{version}"
+			);
+		}
+		let restated = crate::track::Info::from(info_roundtrip(Version::Lite07, &info));
+		assert_eq!(TrackInfo::serve(&restated, Version::Lite07).tail, 4 << 20);
 	}
 
 	#[test]
@@ -490,6 +523,7 @@ mod test {
 			max_age: None,
 			timescale: Some(Timescale::new((1u64 << 62) - 1).unwrap()),
 			compression: Compression::None,
+			tail: 4 << 20,
 		};
 		let got = info_roundtrip(Version::Lite05, &info);
 		assert_eq!(got.priority, i8::MIN);
@@ -510,6 +544,7 @@ mod test {
 			max_age: Some(Duration::from_nanos(999_999)),
 			timescale: Some(Timescale::MILLI),
 			compression: Compression::None,
+			tail: 4 << 20,
 		};
 		let got = info_roundtrip(Version::Lite05, &info);
 		assert_eq!(got.max_age, Some(Duration::ZERO));
@@ -524,6 +559,7 @@ mod test {
 			max_age: Some(Duration::from_millis(u64::MAX)),
 			timescale: Some(Timescale::MILLI),
 			compression: Compression::None,
+			tail: 4 << 20,
 		};
 		// The partial bytes are the Writer's to drop; see `a_failed_encode_leaves_no_partial_bytes`.
 		assert!(matches!(

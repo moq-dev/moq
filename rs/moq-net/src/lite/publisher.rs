@@ -2208,6 +2208,7 @@ impl Request for TrackInfoServe {
 					max_age: None,
 					timescale: info.timescale,
 					compression: crate::track::Compression::None,
+					tail: crate::track::Info::default().tail,
 				})?;
 				// As a stream track's answer does, though only lite-05/06 get here, which
 				// never negotiate the extension.

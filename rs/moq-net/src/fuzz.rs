@@ -1427,6 +1427,7 @@ impl Default for Messages {
 				max_age: Some(Duration::from_secs(10)),
 				timescale: Some(crate::Timescale::MICRO),
 				compression: crate::track::Compression::None,
+				tail: crate::track::Info::default().tail,
 			},
 			lite_group: lite::Group {
 				subscribe: 7,

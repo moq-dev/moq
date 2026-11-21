@@ -8,7 +8,8 @@
 //!
 //! Ingest's window is the stream receive credit its transport grants, capped at [`AHEAD`]
 //! (see [`window`]), so a hop holds about what its upstream peer can have in flight on
-//! that stream. A local writer, which has no transport, uses [`AHEAD`] itself.
+//! that stream. Either window is capped again at half the bytes the group's copy keeps
+//! (see [`ahead`]), which is [`AHEAD`] unless its track declares a smaller tail.
 //!
 //! Progress is in bytes on one scale per group copy: each frame entering the copy's log
 //! ends where the frames before it, payload and slot, add up to. A frame larger than the
@@ -27,7 +28,12 @@ use crate::transport::ReceiveWindow;
 
 /// The furthest a paced writer runs ahead of its group's fastest reader: half the live
 /// tail, so the other half stays behind the fastest reader for slower ones.
-pub(crate) const AHEAD: u64 = MAX_CACHE_BYTES / 2;
+pub(crate) const AHEAD: u64 = ahead(MAX_CACHE_BYTES);
+
+/// How far a paced writer runs ahead of the fastest reader of a copy keeping `kept` bytes.
+pub(crate) const fn ahead(kept: u64) -> u64 {
+	kept / 2
+}
 
 /// How far ingest reading a stream runs ahead of its group's fastest reader: the credit one
 /// stream may hold under `receive`, the windows its transport grants, capped at [`AHEAD`].
@@ -225,6 +231,31 @@ mod tests {
 		read(&mut fast);
 		assert!(flag.woken(), "the fastest reader's read wakes the writer");
 		assert_eq!(group.poll_paced(&waiter, 0, AHEAD), Poll::Ready(()));
+	}
+
+	/// A track declaring a smaller tail paces its writer at half of it, whatever window the
+	/// writer passes.
+	#[test]
+	fn a_smaller_tail_paces_sooner() {
+		let (_flag, waiter) = flag();
+		let track = crate::track::Info::default().with_tail(4 * MB as u64);
+		let mut group = group::Producer::new(
+			group::Info { start: 0 },
+			track,
+			crate::cache::Track::new(crate::cache::Pool::unbounded(), Default::default(), kio::Weak::new()),
+		);
+		let _reader = group.consume();
+		let payload = Bytes::from(vec![0u8; MB]);
+		group
+			.write_frame(crate::Timestamp::unscaled(group.start), payload.clone())
+			.unwrap();
+		assert_eq!(group.poll_paced(&waiter, 0, AHEAD), Poll::Ready(()), "within half the tail");
+		assert_eq!(group.poll_ready(&waiter, &info(1)), Poll::Ready(()));
+		assert_eq!(group.poll_ready(&waiter, &info(MB)), Poll::Pending, "its next frame would pass it");
+		group
+			.write_frame(crate::Timestamp::unscaled(group.start), payload)
+			.unwrap();
+		assert_eq!(group.poll_paced(&waiter, 0, AHEAD), Poll::Pending, "past half the tail");
 	}
 
 	/// Ingest paces at its stream's receive credit, so a writer stops once that much is

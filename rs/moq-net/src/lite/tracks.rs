@@ -220,6 +220,7 @@ mod test {
 			max_age: Some(Duration::from_secs(2)),
 			timescale: Some(Timescale::MICRO),
 			compression: crate::track::Compression::Deflate,
+			tail: 4 << 20,
 		};
 		let TracksEvent::Added {
 			name,
