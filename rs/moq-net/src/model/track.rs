@@ -7924,10 +7924,6 @@ impl Drift {
 	}
 }
 
-/// The groups a [`Subscriber`] can be served, which a group it hands out, or one a reader moves
-/// onto its track, measures drift within; see [`Subscriber::served`].
-pub(super) struct Served(kio::Consumer<Published>);
-
 /// Keeps one handed-out group tied to the subscription whose cursor selected it.
 struct GroupExpiry {
 	state: kio::ConsumerWeak<TrackState>,
@@ -7936,12 +7932,20 @@ struct GroupExpiry {
 	cache: Arc<cache::Track>,
 	reading: Reading,
 	subscription: kio::Consumer<demand::Prefs>,
-	/// What the cursor can be served; see [`Cursor::published`]. Once the read moves to another
-	/// copy, what the reader's subscriber to that copy can be served, since a route switch caps
-	/// the copy it moved off; `None`, every group, when the reader has none.
-	servable: Option<kio::Consumer<Published>>,
+	/// The groups whose landing above supersedes this one.
+	successors: Successors,
 	key: u64,
 	superseded: Superseded,
+}
+
+/// The groups a [`GroupExpiry`] measures drift within.
+enum Successors {
+	/// What the cursor that handed the group out can be served; see [`Cursor::published`].
+	Cursor(kio::Consumer<Published>),
+	/// The group moved onto another copy: the logical reader's window, below its local cap.
+	/// Not the cursor's, which a route switch capped at the boundary, nor the new copy's own,
+	/// which starts there. Indexed on whichever copy it is judged on.
+	Reader(Arc<Live>),
 }
 
 /// Keeps one fetched group tied to this caller's age budget.
@@ -7992,7 +7996,7 @@ struct Successor {
 }
 
 impl group::Expiry for FetchExpiry {
-	fn for_track(&self, track: &Consumer, _: Option<&Served>) -> Arc<dyn group::Expiry> {
+	fn for_track(&self, track: &Consumer) -> Arc<dyn group::Expiry> {
 		// A replacement copy is always one track instance; the fallback is never read.
 		let state = track.with_state(|state| state.cloned());
 		let (state, cache) = match state {
@@ -8044,7 +8048,7 @@ impl group::Expiry for FetchExpiry {
 }
 
 impl group::Expiry for GroupExpiry {
-	fn for_track(&self, track: &Consumer, served: Option<&Served>) -> Arc<dyn group::Expiry> {
+	fn for_track(&self, track: &Consumer) -> Arc<dyn group::Expiry> {
 		// A replacement copy is always one track instance; the fallback is never read.
 		let state = track.with_state(|state| state.cloned());
 		let (state, cache) = match state {
@@ -8059,9 +8063,7 @@ impl group::Expiry for GroupExpiry {
 			state,
 			cache,
 			subscription: self.subscription.clone(),
-			// A route switch caps the copy the read moves off at the boundary group, so its
-			// servable would hide every group the replacement holds past it.
-			servable: served.map(|served| served.0.clone()),
+			successors: Successors::Reader(Arc::default()),
 			key: self.key,
 			superseded: Superseded::default(),
 		})
@@ -8101,11 +8103,19 @@ impl group::Expiry for GroupExpiry {
 		});
 
 		let mut servable = Servable::ALL;
-		if let Some(published) = &self.servable {
-			let _ = published.poll(waiter, |current| {
-				servable = current.servable.clone();
-				Poll::<()>::Pending
-			});
+		match &self.successors {
+			Successors::Cursor(published) => {
+				let _ = published.poll(waiter, |current| {
+					servable = current.servable.clone();
+					Poll::<()>::Pending
+				});
+			}
+			// Without a reader, as for a nested front's, every group.
+			Successors::Reader(live) => {
+				if let Some((Some(groups), cap)) = recover.and_then(|recover| recover.window()) {
+					servable = Servable::covering(groups, cap, live);
+				}
+			}
 		}
 
 		let state = self.state.read();
@@ -9744,7 +9754,7 @@ impl Cursor {
 			cache: self.cache.clone(),
 			reading: Reading::new(self.state.clone()),
 			subscription: self.subscription.consume(),
-			servable: Some(self.published.consume()),
+			successors: Successors::Cursor(self.published.consume()),
 			key,
 			superseded: Superseded::default(),
 		}))
@@ -11311,15 +11321,6 @@ impl Subscriber {
 				cursor.filter.window.covered_by(from, bounds.end, accounted)
 			}
 			Inner::Resume(resume, _) => resume.covered(from, bounds.end, accounted),
-		}
-	}
-
-	/// What the groups this subscriber hands out judge their drift within: its ranges and local
-	/// bounds as resolved here. `None` for a front's reader, whose copies resolve them.
-	pub(super) fn served(&self) -> Option<Served> {
-		match &self.inner {
-			Inner::Plain(cursor) => Some(Served(cursor.published.consume())),
-			Inner::Resume(..) => None,
 		}
 	}
 

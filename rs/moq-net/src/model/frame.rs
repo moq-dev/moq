@@ -1596,7 +1596,7 @@ impl Consumer {
 			// A cached group can precede this frame's header. Keep the old generation
 			// until the replacement frame is actually available.
 			if let Some(expiry) = &mut self.expiry {
-				expiry.policy = expiry.policy.for_track(&replacement.copy, replacement.served.as_ref());
+				expiry.policy = expiry.policy.for_track(&replacement.copy);
 			}
 			// A stored compressed frame continues from the replacement's stored form, where
 			// the byte offset means the same thing.

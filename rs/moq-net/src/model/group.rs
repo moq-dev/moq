@@ -3797,9 +3797,8 @@ pub(super) trait Expiry: Send + Sync + std::panic::UnwindSafe + std::panic::RefU
 	/// gone, asked only once a verdict needs it.
 	fn is_expired(&self, recover: Option<&super::resume::Recover>, waiter: &kio::Waiter) -> bool;
 
-	/// Keep the reader's budget while following a replacement track's edge, within the groups
-	/// `served` names, the reader's subscriber to that track's.
-	fn for_track(&self, track: &track::Consumer, served: Option<&track::Served>) -> Arc<dyn Expiry>;
+	/// Keep the reader's budget and cap while following a replacement track's edge.
+	fn for_track(&self, track: &track::Consumer) -> Arc<dyn Expiry>;
 
 	/// What the reader asks a fill with, such as the flight it boards.
 	fn asking(&self) -> super::track::Asking;
@@ -4101,10 +4100,7 @@ impl Consumer {
 			// is parked on the old copy.
 			Idle::disarm(&mut self.idle);
 			recover.adopt(&replacement);
-			self.expiry = self
-				.expiry
-				.as_ref()
-				.map(|expiry| expiry.for_track(&replacement.copy, replacement.served.as_ref()));
+			self.expiry = self.expiry.as_ref().map(|expiry| expiry.for_track(&replacement.copy));
 			self.cursor = replacement.group.cursor;
 			self.cursor.index = index;
 			self.cursor.end = end;
@@ -7647,7 +7643,7 @@ mod test {
 			self.0.0.load(Ordering::Relaxed)
 		}
 
-		fn for_track(&self, _: &track::Consumer, _: Option<&track::Served>) -> Arc<dyn Expiry> {
+		fn for_track(&self, _: &track::Consumer) -> Arc<dyn Expiry> {
 			Arc::new(self.clone())
 		}
 

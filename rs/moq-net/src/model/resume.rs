@@ -58,7 +58,9 @@ use crate::{Error, Result, StreamError, group, stats, track};
 
 use super::delivered::Delivered;
 use super::idle::{Idle, Walk};
-use super::subscription::{Accounted, Anchor, Containing, Holdings, Position, Resolved, Subscription, Unheld, Window};
+use super::subscription::{
+	Accounted, Anchor, Containing, Cover, Holdings, Position, Resolved, Subscription, Unheld, Window,
+};
 use crate::ledger;
 
 /// What the front says about a logical track: the copy to read now, and how it ended.
@@ -786,14 +788,6 @@ impl Copy {
 	}
 
 	/// The copy's own subscription preferences.
-	/// What the reader's subscriber to this copy can be served, once it answered.
-	fn served(&mut self, groups: (u64, Option<u64>)) -> Option<track::Served> {
-		match self.poll_ready(groups, &kio::Waiter::noop()) {
-			Poll::Ready(Ok(sub)) => sub.served(),
-			_ => None,
-		}
-	}
-
 	fn preferences(&self) -> &track::Preferences {
 		match &self.sub {
 			Sub::Pending(pending) => pending.preferences(),
@@ -3269,24 +3263,12 @@ impl Recover {
 			&& (generation == self.generation || serving.poll_group(self.key, &kio::Waiter::noop()).is_ready())
 	}
 
-	/// What the reader's own copy of route `generation` can be served, `None` until it answered.
-	fn served(&self, generation: u64) -> Option<track::Served> {
-		let reader = self.reader.as_ref()?.upgrade()?;
-		let mut reader = reader.lock().unwrap_or_else(PoisonError::into_inner);
-		let groups = reader.groups;
-		// The route's own copy, which comes after a backfill of it.
-		(reader.copies.iter_mut().rev())
-			.find(|copy| copy.generation == generation)?
-			.served(groups)
-	}
-
 	/// The group from the newest of the reader's other copies that still holds it unfailed,
 	/// positioned at frame `index`.
 	fn held(&self, index: u64) -> Option<Replacement> {
 		let reader = self.reader.as_ref()?.upgrade()?;
-		let mut reader = reader.lock().unwrap_or_else(PoisonError::into_inner);
-		let groups = reader.groups;
-		reader.copies.iter_mut().rev().find_map(|copy| {
+		let reader = reader.lock().unwrap_or_else(PoisonError::into_inner);
+		reader.copies.iter().rev().find_map(|copy| {
 			if copy.generation == self.generation {
 				return None;
 			}
@@ -3297,7 +3279,6 @@ impl Recover {
 				group,
 				generation: copy.generation,
 				copy: copy.track.clone(),
-				served: copy.served(groups),
 			})
 		})
 	}
@@ -3325,7 +3306,6 @@ impl Recover {
 						group,
 						generation,
 						copy: serving.clone(),
-						served: self.served(generation),
 					}));
 				}
 			}
@@ -3399,7 +3379,6 @@ impl Recover {
 							group,
 							generation,
 							copy: serving.clone(),
-							served: self.served(generation),
 						}));
 					}
 					*fetch = Fetch::Refused(Error::NotFound);
@@ -3438,6 +3417,17 @@ impl Recover {
 		// preferences here too, before judging its budget against the live edge.
 		reader.sync(waiter);
 		Some(reader.mirrored.budget())
+	}
+
+	/// The groups the reader's ranges resolve to, `None` while a relative anchor waits, and its
+	/// local exclusive cap: what a group moved onto another copy is judged within, since that
+	/// copy's own subscription starts at the switch's boundary, and the copy the group moved off
+	/// is capped there. `None` once the reader is gone.
+	pub(super) fn window(&self) -> Option<(Option<Cover>, Option<u64>)> {
+		let reader = self.reader.as_ref()?.upgrade()?;
+		let mut reader = reader.lock().unwrap_or_else(PoisonError::into_inner);
+		let cap = reader.groups.1;
+		Some((reader.window().groups().cloned(), cap))
 	}
 
 	/// Commit the replacement only once the caller has acquired its cursor or frame.
@@ -3487,9 +3477,6 @@ fn lend_head(handoff: &group::Handoff, key: u64, serving: &track::Consumer, grou
 pub(super) struct Replacement {
 	pub(super) group: group::Consumer,
 	pub(super) copy: track::Consumer,
-	/// What the reader's subscriber to `copy` can be served, which the group's expiry judges
-	/// it within from now on.
-	pub(super) served: Option<track::Served>,
 	generation: u64,
 }
 
@@ -10311,20 +10298,30 @@ mod test {
 		}
 	}
 
-	/// A bounded read that moves a group onto a new route judges it within its own window there:
-	/// newer groups that route holds for others never expire it.
+	/// A read that moves a group onto a new route judges it within the reader's own window:
+	/// newer groups that route holds for others never expire it, and groups in the window do,
+	/// even below where the new route's subscription starts.
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_recovered_group_expires_only_within_the_readers_window() {
-		for bounded in [false, true] {
+		// The reader's groups, the group past them the old route holds, the groups the new route
+		// holds past the one read, and whether they expire it.
+		let cases = [
+			(None, None, 1..5, true),
+			(Some(0..1), None, 1..5, false),
+			// The old route's group 4 puts the boundary past the window, so the new route's own
+			// subscription asks for nothing: its groups 1 to 3 are the reader's all the same.
+			(Some(0..4), Some(4), 1..4, true),
+		];
+		for (ranges, held, newer, expires) in cases {
 			let routes = Producer::new();
 			let logical = logical(&routes);
 			let a = copy();
 			routes.serve(a.consume());
 			let mut subscription =
 				Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(2)));
-			if bounded {
-				subscription = subscription.with_ranges([track::Range::groups(0..1)]);
+			if let Some(ranges) = ranges.clone() {
+				subscription = subscription.with_ranges([track::Range::groups(ranges)]);
 			}
 			let mut sub = logical
 				.consume()
@@ -10337,6 +10334,9 @@ mod test {
 			let mut reading = recv(&mut sub);
 			assert_eq!(read(&mut reading), Some(b"a".to_vec()));
 			assert!(reading.read_frame().now_or_never().is_none());
+			if let Some(key) = held {
+				write(&a, key);
+			}
 
 			let b = copy();
 			let mut replacement = b.create_group(group::Info { start: 0 }).unwrap();
@@ -10344,14 +10344,15 @@ mod test {
 			routes.serve(b.consume());
 			// The stalled read moves onto the new route's copy.
 			assert!(reading.read_frame().now_or_never().is_none());
-			for key in 1..=4 {
+			for key in newer {
 				let mut next = b.create_group(group::Info { start: key }).unwrap();
 				next.write_frame(ts(key * 1000), b"x".as_ref()).unwrap();
 				next.finish().unwrap();
 			}
-			match bounded {
-				true => assert!(reading.read_frame().now_or_never().is_none(), "outside the window"),
-				false => assert!(matches!(reading.read_frame().now_or_never(), Some(Err(Error::Old)))),
+			let read = reading.read_frame().now_or_never();
+			match expires {
+				true => assert!(matches!(read, Some(Err(Error::Old))), "ranges={ranges:?}"),
+				false => assert!(read.is_none(), "ranges={ranges:?}"),
 			}
 		}
 	}
