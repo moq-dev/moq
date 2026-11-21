@@ -7401,9 +7401,12 @@ mod test {
 			.with_ranges([range(0)]);
 		let mut sub = logical.consume().subscribe(start).now_or_never().unwrap().unwrap();
 		assert!(sub.poll_recv_group(&kio::Waiter::noop()).is_pending());
-		// Each edit logs two keys, past the 64 the log keeps beyond twice the ranges.
+		// Edited behind the reader's back, which a subscriber's own edit never is: each edit
+		// logs two keys, past the 64 the log keeps beyond twice the ranges.
+		let reader = routes.readers.lock().unwrap().iter().find_map(Weak::upgrade).unwrap();
+		let channel = reader.lock().unwrap().subscription.clone();
 		for key in 1..=40 {
-			sub.edit(edit(key - 1, (key, range(key)))).unwrap();
+			channel.edit(edit(key - 1, (key, range(key)))).unwrap();
 		}
 		assert!(sub.poll_recv_group(&kio::Waiter::noop()).is_pending());
 		assert_eq!(a.subscription().unwrap().ranges, [range(40)]);
