@@ -170,19 +170,26 @@ impl<O: Output> Media<O> {
 		let mut retiring = false;
 		// The newest video task, so the end of one a replacement stopped re-arms nothing.
 		let mut video_task = 0u64;
+		// Why nothing started, so a catalog this build can't play reports the
+		// reason instead of leaving a blank window up forever. The decoders are
+		// gated by platform and cargo feature (no AV1 without `nvidia`, say), so
+		// this covers gaps the codec flags can't be validated against up front.
+		let mut rejected = Vec::new();
 
 		loop {
 			// A rendition still opening can play yet, even after the catalog ended.
 			if playback.done() && opening.is_none() {
+				if !playback.played {
+					return Err(Unplayable("the catalog contains no playable audio or video renditions".into()).into());
+				}
 				tails.join_all().await;
 				return Ok(());
 			}
 
-			// Why nothing started, so a catalog this build can't play reports the
-			// reason instead of leaving a blank window up forever. The decoders are
-			// gated by platform and cargo feature (no AV1 without `nvidia`, say), so
-			// this covers gaps the codec flags can't be validated against up front.
-			let mut rejected = Vec::new();
+			// Kept while video opens, so its rejections join those of the audio picked beside it.
+			if opening.is_none() {
+				rejected.clear();
+			}
 
 			// Only wait when there is nothing on hand to act on. The snapshot that
 			// retires a rendition arrives while that rendition is still playing, so
@@ -271,12 +278,13 @@ impl<O: Output> Media<O> {
 							continue;
 						}
 						let orientation = *viewport.borrow_and_update();
-						let turned = video_demand.as_ref().zip(playback.latest()).is_some_and(|(demand, snapshot)| {
+						let playing = playback.playing(Kind::Video);
+						let turned = playing && video_demand.as_ref().zip(playback.latest()).is_some_and(|(demand, snapshot)| {
 							turned_away(&snapshot.video, &demand.name, orientation, |name, config| {
 								!playback.finished(&Track::of(&source, config, name))
 							})
 						});
-						if turned || video_demand.is_none() {
+						if turned || !playing {
 							// Picked again shaped like the window, if a pick was under way or
 							// the playing rendition is the wrong way round.
 							if opening.take().is_some() || turned {
@@ -321,12 +329,9 @@ impl<O: Output> Media<O> {
 								}
 								playback.received(snapshot);
 							},
-							None => {
-								if !playback.played {
-									return Err(Unplayable("the catalog contains no playable audio or video renditions".into()).into());
-								}
-								playback.catalog_ended = true;
-							}
+							// A video rendition still opening may yet play, so whether anything
+							// did is decided once nothing more can start.
+							None => playback.catalog_ended = true,
 						}
 					}
 				}
@@ -351,8 +356,8 @@ impl<O: Output> Media<O> {
 				let orientation = *viewport.borrow_and_update();
 				// A turn switches only to a rendition shaped like the window: the rest are no
 				// better than the one playing.
-				let turning = video_demand.is_some() && !retiring;
-				let candidates = shaped(&snapshot.video, orientation)
+				let turning = playback.playing(Kind::Video) && !retiring;
+				let candidates: Vec<_> = shaped(&snapshot.video, orientation)
 					.into_iter()
 					.filter(|(_, config)| !(turning && opposed(&snapshot.video, config, orientation)))
 					.map(|(name, config)| (name.clone(), config.clone(), Track::of(&source, config, name)))
@@ -360,7 +365,12 @@ impl<O: Output> Media<O> {
 					.filter(|(_, _, reference)| !playback.finished(reference))
 					.collect();
 				// Replaces one still opening, which the newer snapshot or viewport overrides.
-				opening = Some(Box::pin(self.open_video(&source, candidates)));
+				opening = None;
+				if candidates.is_empty() {
+					playback.settle(Kind::Video);
+				} else {
+					opening = Some(Box::pin(self.open_video(&source, candidates)));
+				}
 			}
 
 			if playback.wants(Kind::Audio) {
