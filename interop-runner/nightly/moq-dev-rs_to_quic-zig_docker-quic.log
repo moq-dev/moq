@@ -4,11 +4,11 @@ Running interop tests...
   Relay:  ghcr.io/endel/quic-zig-moq-relay:latest
   Client: ghcr.io/englishm/moq-interop-runner-moq-dev-rs-client:latest
   URL:    moqt://relay:4443
-time="2026-11-20T17:10:26Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-11-20T17:10:26Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-11-20T17:10:26Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-11-20T17:10:26Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
-time="2026-11-20T17:10:26Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
+time="2026-11-21T03:41:00Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-11-21T03:41:00Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-11-21T03:41:00Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-11-21T03:41:00Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
+time="2026-11-21T03:41:00Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
  Container runner-upstream-relay-1 Recreate 
  Container runner-upstream-relay-1 Recreated 
  Container runner-upstream-test-client-1 Recreate 
@@ -19,7 +19,7 @@ Attaching to relay-1, test-client-1
  Container runner-upstream-relay-1 Waiting 
 relay-1  | 
 relay-1  | === MoQ Relay (drafts 17, 18, 22; WebTransport + QUIC) ===
-relay-1  | Certificate SHA-256: 1451ff54e1c20d945588e2eab8025d9693472a6db26ad32721d6523f1afbf791
+relay-1  | Certificate SHA-256: 1336d30dbe82357d71f92d5fe58a08469878ff979563e1466319ee2e69ccae87
 relay-1  | 
 relay-1  | Listening on https://0.0.0.0:4443
 relay-1  | Video demo: https://127.0.0.1:4443/moq_video.html
@@ -33,15 +33,15 @@ test-client-1  | # moq-dev-rs-client v0.1.0 (moq-tokio 0.19.28)
 test-client-1  | # Relay: moqt://relay:4443
 test-client-1  | 1..8
 relay-1        | [relay] client 0 connected (QUIC, moqt-22)
+relay-1        | [relay] client 0 SETUP received
 test-client-1  | ok 1 - setup-only
 test-client-1  |   ---
-test-client-1  |   duration_ms: 42
+test-client-1  |   duration_ms: 32
 test-client-1  |   negotiated: moq-transport-22
 test-client-1  |   ...
-relay-1        | [relay] client 0 SETUP received
 relay-1        | [relay] client 1 connected (QUIC, moqt-22)
-relay-1        | [relay] client 1 SETUP received
 relay-1        | [relay] PUBLISH_NAMESPACE client=1 ns="moq-test/interop/"
+relay-1        | [relay] client 1 SETUP received
 relay-1        | [relay] client 0 gone
 test-client-1  | ok 2 - announce-only
 test-client-1  |   ---
@@ -62,11 +62,11 @@ test-client-1  |   outcome: "namespace withdrawn cleanly"
 test-client-1  |   ...
 relay-1        | [relay] client 1 connected (QUIC, moqt-22)
 relay-1        | [relay] client 1 SETUP received
-relay-1        | [relay] SUBSCRIBE_NAMESPACE client=1 prefix="moq-test/interop/subscribe-namespace-lifecycle/7-1795194634132908679/"
+relay-1        | [relay] SUBSCRIBE_NAMESPACE client=1 prefix="moq-test/interop/subscribe-namespace-lifecycle/7-1795232467242902300/"
 relay-1        | [relay] client 2 connected (QUIC, moqt-22)
 relay-1        | [relay] client 2 SETUP received
-relay-1        | [relay] PUBLISH_NAMESPACE client=2 ns="moq-test/interop/subscribe-namespace-lifecycle/7-1795194634132908679/"
-relay-1        | [relay] namespace "moq-test/interop/subscribe-namespace-lifecycle/7-1795194634132908679/" withdrawn by client 2
+relay-1        | [relay] PUBLISH_NAMESPACE client=2 ns="moq-test/interop/subscribe-namespace-lifecycle/7-1795232467242902300/"
+relay-1        | [relay] namespace "moq-test/interop/subscribe-namespace-lifecycle/7-1795232467242902300/" withdrawn by client 2
 test-client-1  | ok 4 - subscribe-namespace-lifecycle
 test-client-1  |   ---
 test-client-1  |   duration_ms: 30
@@ -78,8 +78,8 @@ relay-1        | [relay] client 3 connected (QUIC, moqt-22)
 relay-1        | [relay] client 3 SETUP received
 relay-1        | [relay] PUBLISH_NAMESPACE client=3 ns="moq-test/interop/"
 relay-1        | [relay] client 0 gone
-relay-1        | [relay] client 1 gone
 relay-1        | [relay] client 2 gone
+relay-1        | [relay] client 1 gone
 relay-1        | [relay] client 0 connected (QUIC, moqt-22)
 relay-1        | [relay] client 0 SETUP received
 relay-1        | [relay] SUBSCRIBE_NAMESPACE client=0 prefix="moq-test/interop/"
@@ -89,20 +89,20 @@ relay-1        | [relay] SUBSCRIBE → publisher client 3 ns="moq-test/interop/"
 relay-1        | [relay] SUBSCRIBE_OK ← publisher client 3 alias=1
 test-client-1  | ok 6 - announce-subscribe
 test-client-1  |   ---
-test-client-1  |   duration_ms: 306
+test-client-1  |   duration_ms: 307
 test-client-1  |   negotiated: moq-transport-22
 test-client-1  |   outcome: "SUBSCRIBE_OK for moq-test/interop/test-track"
 test-client-1  |   ...
 test-client-1  | ok 7 - subscribe-before-announce # SKIP moq-net API requires namespace discovery before SUBSCRIBE
 relay-1        | [relay] client 1 connected (QUIC, moqt-22)
 relay-1        | [relay] client 1 SETUP received
-relay-1        | [relay] PUBLISH_NAMESPACE client=1 ns="moq-test/data-subgroup-basic/d92aeb3da6c47223c6f377031d61b6e9/"
+relay-1        | [relay] PUBLISH_NAMESPACE client=1 ns="moq-test/data-subgroup-basic/398db111e14265e020d18208cc26dc18/"
 relay-1        | [relay] client 2 connected (QUIC, moqt-22)
 relay-1        | [relay] client 2 SETUP received
-relay-1        | [relay] SUBSCRIBE_NAMESPACE client=2 prefix="moq-test/data-subgroup-basic/d92aeb3da6c47223c6f377031d61b6e9/"
+relay-1        | [relay] SUBSCRIBE_NAMESPACE client=2 prefix="moq-test/data-subgroup-basic/398db111e14265e020d18208cc26dc18/"
 relay-1        | [relay] → 1 NAMESPACE to client 2
-relay-1        | [relay] SUBSCRIBE client=2 ns="moq-test/data-subgroup-basic/d92aeb3da6c47223c6f377031d61b6e9/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0/" track="track"
-relay-1        | [relay] SUBSCRIBE → publisher client 1 ns="moq-test/data-subgroup-basic/d92aeb3da6c47223c6f377031d61b6e9/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0/" track="track"
+relay-1        | [relay] SUBSCRIBE client=2 ns="moq-test/data-subgroup-basic/398db111e14265e020d18208cc26dc18/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0/" track="track"
+relay-1        | [relay] SUBSCRIBE → publisher client 1 ns="moq-test/data-subgroup-basic/398db111e14265e020d18208cc26dc18/moq-test-00/0/0/0/2/4/5/64/32/2/1/1/0/-1/-1/0/" track="track"
 relay-1        | [relay] SUBSCRIBE_OK ← publisher client 1 alias=1
 relay-1        | [relay] stream from client 1 → 1 subs (group=0)
 relay-1        | [relay] stream from client 1 → 1 subs (group=1)
@@ -122,12 +122,12 @@ relay-1        | [relay] client 0 gone
 relay-1        | [relay] client 3 gone
 [Ktest-client-1 exited with code 0
  Compose Stopping Aborting on container exit...
- Container runner-upstream-test-client-1 Stopping 
- Container runner-upstream-test-client-1 Stopped 
- Container runner-upstream-relay-1 Stopping 
 relay-1        | [relay] client 1 gone
 relay-1        | [relay] PUBLISH_DONE → client 2 status=2 streams=4
 relay-1        | [relay] client 2 gone
+ Container runner-upstream-test-client-1 Stopping 
+ Container runner-upstream-test-client-1 Stopped 
+ Container runner-upstream-relay-1 Stopping 
 relay-1        | [relay] draining: GOAWAY → 0 clients
  Container runner-upstream-relay-1 Stopped 
 [Krelay-1 exited with code 0
