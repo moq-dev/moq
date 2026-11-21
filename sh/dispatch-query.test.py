@@ -282,6 +282,7 @@ class QueryTests(unittest.TestCase):
             "uniffi_bindgen_dart",
             "uv",
             "xml2rfc",
+            "zig",
         ):
             path = self.bin / tool
             path.write_text("#!/bin/sh\nexit 0\n")
@@ -753,7 +754,18 @@ esac
     def test_rust_lane_runs_only_the_lint_and_the_test_build(self):
         self.change("rs/kio/src/clock/mod.rs")
         calls = [call.split()[1] for call in self.run_ci() if call.startswith("rs ")]
+        # rs_cross is a lane of its own, so its call can land anywhere.
+        self.assertEqual(calls.count("cross-lint-changed"), 1)
+        calls.remove("cross-lint-changed")
         self.assertEqual(calls, ["lint-changed", "test-changed"])
+
+    def test_the_cross_lint_follows_its_flake_pinned_toolchain(self):
+        for path, expected in (("flake.lock", True), ("flake.nix", True), ("js/net/src/index.ts", False)):
+            with self.subTest(path=path):
+                self.change(path)
+                calls = self.run_ci()
+                (self.repo / path).unlink()
+                self.assertEqual(any(call.startswith("rs cross-lint-changed ") for call in calls), expected)
 
     def test_tooling_tests_follow_what_they_read(self):
         for path, expected in (
@@ -799,8 +811,12 @@ esac
             with self.subTest(filter=filter):
                 self.env["CHECK_MODULES"] = filter
                 calls = self.run_ci("--all")
-                # cargo_nix is a module of its own that runs a recipe of rs/justfile.
-                rs = [call for call in calls if call.startswith("rs ") and not call.startswith("rs cargo-nix")]
+                # cargo_nix and rs_cross are modules of their own that run recipes of rs/justfile.
+                rs = [
+                    call
+                    for call in calls
+                    if call.startswith("rs ") and not call.startswith(("rs cargo-nix", "rs cross-lint-changed"))
+                ]
                 self.assertEqual(rs, expected)
                 # Every other module runs in the job that does not name one.
                 self.assertEqual("gh check" in calls, filter.startswith("-"))
