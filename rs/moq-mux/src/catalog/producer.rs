@@ -683,7 +683,11 @@ impl<E: CatalogExt> Producer<E> {
 
 	/// A timestamp for a change no frame times: the producer's [`clock`](Self::clock) now, or a unit
 	/// past the last catalog when the clock hasn't passed it, so two changes in one millisecond both
-	/// publish. Another thread's publish between this and [`modify`](Self::modify) can still pass it.
+	/// publish. Another thread's publish between this and [`modify`](Self::modify) can still pass it,
+	/// such as an importer's estimate racing a binding's section edit: `modify` then returns
+	/// [`TimestampRewind`](crate::container::TimestampRewind) and the catalog is unchanged. That
+	/// window is accepted over an edit that picks its own timestamp, since every caller states when
+	/// its change takes effect.
 	pub fn next_timestamp(&self) -> moq_net::Timestamp {
 		let state = take(&self.current);
 		let now = state.clock.now();
