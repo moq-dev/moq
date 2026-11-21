@@ -311,6 +311,16 @@ test("a track's tail bounds its group's copy below the default", async () => {
 	expect(await fast.readFrame()).toBeUndefined();
 });
 
+test("frames written before a track binds its tail are trimmed to it", () => {
+	const track = new TrackProducer("bytes");
+	const group = track.createGroup(0n);
+	const payload = new Uint8Array(1024 * 1024);
+	for (let key = 0; key < 8; key++) group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.start) });
+	group.finish();
+	track.accept({ tail: 2 << 20 });
+	expect(hooks.groupCacheBytes(group)).toBeLessThanOrEqual(2 << 20);
+});
+
 test("empty frames consume tail storage without a frame count ceiling", async () => {
 	const producer = new Producer(0n);
 	const slow = producer.consume();

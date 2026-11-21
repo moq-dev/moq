@@ -192,8 +192,8 @@ pub struct Info {
 	pub(crate) unchecked: bool,
 }
 
-// `unchecked` says how this copy arrived, not what it holds, so copies of one track over
-// different versions still match.
+// `unchecked` says how this copy arrived, and `tail` how much of it a hop keeps, not what
+// it holds, so copies of one track over different versions and hops still match.
 impl PartialEq for Info {
 	fn eq(&self, other: &Self) -> bool {
 		let Self {
@@ -211,7 +211,6 @@ impl PartialEq for Info {
 			&& *priority == other.priority
 			&& *compression == other.compression
 			&& *refresh == other.refresh
-			&& self.kept() == other.kept()
 			&& *properties == other.properties
 	}
 }

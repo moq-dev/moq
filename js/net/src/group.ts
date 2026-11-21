@@ -386,6 +386,8 @@ export class Producer {
 			if (state.track !== undefined) throw new TimestampMismatch();
 			for (const frame of state.frames.peek()) checkTimed(track, state.start, frame);
 			state.track = track;
+			// Frames written before the track bound it count against its tail.
+			group.#trim();
 		};
 		hooks.admitGroupStart = (group, admit) => {
 			group.#admits ??= [];

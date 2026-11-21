@@ -1026,7 +1026,9 @@ impl GroupState {
 	}
 
 	/// Shed the oldest committed frames until `extra` more bytes fit the live tail
-	/// ([`Self::kept`]) with their slots, returning whether the bytes do.
+	/// ([`Self::kept`]) with their slots, returning whether the bytes fit
+	/// [`MAX_CACHE_BYTES`]: a frame larger than a smaller tail still fits once it is all
+	/// the copy holds, since a copy always keeps its newest frame.
 	///
 	/// Slots free a segment at a time, so each shed frame counts as one slot's worth.
 	fn trim(&mut self, extra: u64) -> bool {
@@ -1044,7 +1046,7 @@ impl GroupState {
 			end += 1;
 		}
 		self.shed_to(end);
-		tail <= self.kept
+		tail <= MAX_CACHE_BYTES
 	}
 
 	/// Shed whole frames from the front toward `debt`, freeing at most about `cap`, and
@@ -6164,11 +6166,40 @@ mod test {
 		assert!(matches!(late.read_frame().now_or_never().unwrap(), Err(Error::Evicted)));
 	}
 
+	/// A frame larger than the tail still fits: the copy sheds everything before it and keeps
+	/// it, as it keeps any newest frame, even with no tail at all.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_frame_past_the_tail_is_kept_alone() {
+		for tail in [0, 64 << 10] {
+			let pool = cache::Pool::unbounded();
+			let cache = cache::Track::new(pool, Default::default(), kio::Weak::new());
+			let track = track::Info::default().with_tail(tail);
+			let mut producer = Producer::new(Info::from(0u64), track, cache);
+			let mut live = producer.consume();
+			for size in [128 << 10, 256 << 10] {
+				producer
+					.write_frame(crate::Timestamp::unscaled(producer.start), vec![7u8; size])
+					.unwrap();
+				let read = live.read_frame().now_or_never().unwrap().unwrap().unwrap();
+				assert_eq!(read.payload.len(), size, "tail {tail}");
+			}
+			assert_eq!(producer.handle.state.read().held(), 1, "tail {tail}");
+		}
+	}
+
 	/// A tail past the default keeps the default, which also bounds one frame.
 	#[test]
 	fn a_track_tail_past_the_default_keeps_the_default() {
 		let track = track::Info::default().with_tail(u64::MAX);
 		assert_eq!(track.kept(), MAX_CACHE_BYTES);
+	}
+
+	/// Copies of one track kept to different tails, as by hops over different versions, are
+	/// the same track.
+	#[test]
+	fn the_tail_is_not_the_tracks_identity() {
+		assert_eq!(track::Info::default().with_tail(1 << 20), track::Info::default());
 	}
 
 	/// Empty frames still cost their slot, so a group of them sheds its front too.
