@@ -118,6 +118,8 @@ rcgen = { workspace = true, features = ["pem"] }
 reqwest = { workspace = true, features = ["rustls-no-provider"] }
 rind-rcgen = { workspace = true }
 rind-rustls = { workspace = true }
+# The shared lite-07 range table, which the JavaScript relay's copy runs through.
+serde_json = { workspace = true }
 # Sockets a test holds or inspects: which ones the process still holds, so the
 # worker tests can prove a stopped group closed its own, and port reservations
 # that never listen, so a test needn't release a port another test could take.

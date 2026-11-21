@@ -294,7 +294,7 @@ stream-limits:
     uv run --no-project python ../sh/js/install.py frozen
     bash ../sh/local.sh cargo nextest run --locked -p moq-tokio --test integration -E 'test(/^stream_limits::/)' --run-ignored only
 
-# A JavaScript relay between Rust peers FETCHes upstream what its copy misses, below its start and once evicted.
+# A JavaScript relay between Rust peers FETCHes upstream what its copy misses, below its start and once evicted, and passes the lite-07 range table.
 relay-fill:
     uv run --no-project python ../sh/js/install.py frozen
     bash ../sh/local.sh cargo nextest run --locked -p moq-tokio --test integration -E 'test(/^relay_fill::/)' --run-ignored all
