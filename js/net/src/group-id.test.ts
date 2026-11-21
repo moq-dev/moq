@@ -157,8 +157,8 @@ for (const wire of WIRES) {
 test("a group sequence that is not a non-negative bigint is refused where a caller passes one", async () => {
 	const track = defined(new BroadcastProducer().createTrack("video"));
 	// A plain JS caller can still pass a number, which would otherwise mix with bigints later.
-	expect(() => defined(track.createGroup(1 as unknown as bigint))).toThrow(TypeError);
-	expect(() => defined(track.createGroup(-1n))).toThrow(RangeError);
+	expect(() => track.createGroup(1 as unknown as bigint)).toThrow(TypeError);
+	expect(() => track.createGroup(-1n)).toThrow(RangeError);
 	expect(defined(track.createGroup(MAX_QUIC)).start).toBe(MAX_QUIC);
 	const consumer = new BroadcastProducer().consume().track("video");
 	await expect(consumer.fetchGroup(1 as unknown as bigint)).rejects.toThrow(TypeError);

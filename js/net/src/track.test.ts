@@ -3832,7 +3832,7 @@ test("a scale-less single-frame write lands at its key", () => {
 	producer.writeFrame({ payload: enc.encode("c"), timestamp: Timestamp.unscaled(5n) });
 	expect(drain(subscriber)).toEqual([3n, 5n]);
 	// The keys below each write are skipped, so creating one is refused.
-	expect(() => defined(producer.createGroup(4n))).toThrow(Skipped);
+	expect(() => producer.createGroup(4n)).toThrow(Skipped);
 });
 
 // An explicit start is a floor, not a request: the budget still skips what it finds stale
@@ -4515,7 +4515,7 @@ test.each([true, false])("a mid-group end caps later writes (declared first: %s)
 		group.writeFrame({ payload: new Uint8Array([2]), timestamp: Timestamp.unscaled(group.start) }),
 	).toThrow("past the track's end");
 	expect(group.consume().frameCount).toBe(2);
-	expect(() => defined(producer.createGroup(6n))).toThrow();
+	expect(() => producer.createGroup(6n)).toThrow("at or past the track's end");
 	producer.finish();
 	producer.close();
 });
@@ -5380,7 +5380,7 @@ test("fail ends at the live edge and leaves an end already given", async () => {
 	latest.writeFrame(textFrame("c", Timestamp.fromMillis(2)));
 	latest.finish();
 	producer.fail(failed);
-	expect(() => defined(producer.createGroup(3n))).toThrow();
+	expect(() => producer.createGroup(3n)).toThrow("at or past the track's end");
 	const late = defined(producer.createGroup(1n));
 	late.writeFrame(textFrame("b", Timestamp.fromMillis(1)));
 	late.finish();
@@ -5492,17 +5492,17 @@ test("creating a skipped sequence throws Skipped", () => {
 	defined(producer.createGroup(0n)).finish();
 	defined(producer.createGroup(3n)).finish();
 	hooks.appendNext(producer).finish();
-	expect(() => defined(producer.createGroup(1n))).toThrow(Skipped);
+	expect(() => producer.createGroup(1n)).toThrow(Skipped);
 
 	producer.skipGroups(5n, 7n);
-	expect(() => defined(producer.createGroup(6n))).toThrow(Skipped);
+	expect(() => producer.createGroup(6n)).toThrow(Skipped);
 	// No skip below group 0.
 	expect(() => producer.skipGroups(-1n, 1n)).toThrow(RangeError);
 	// The next sequence, 5, was skipped too.
 	expect(() => hooks.appendNext(producer)).toThrow(Skipped);
 	// A later drop leaves a skipped sequence skipped.
 	expect(hooks.dropTrackGroups(producer, 1n, 2n, { error: DROPPED })).toEqual([]);
-	expect(() => defined(producer.createGroup(1n))).toThrow(Skipped);
+	expect(() => producer.createGroup(1n)).toThrow(Skipped);
 	// A dropped sequence may be created again.
 	hooks.dropTrackGroups(producer, 9n, 10n, { error: DROPPED });
 	defined(producer.createGroup(9n)).finish();
@@ -5557,7 +5557,7 @@ test("a skip is reported over a reported drop", () => {
 
 	expect(hooks.dropTrackGroups(producer, 2n, 3n, { error: DROPPED })).toEqual([]);
 	expect(drain()).toEqual([]);
-	expect(() => defined(producer.createGroup(2n))).toThrow(Skipped);
+	expect(() => producer.createGroup(2n)).toThrow(Skipped);
 	reader.close();
 	producer.close();
 });
@@ -5597,8 +5597,8 @@ test("a huge skip costs one run", () => {
 test("the reserved sequence is refused", () => {
 	const reserved = (1n << 64n) - 1n;
 	const producer = new TrackProducer("test").accept({});
-	expect(() => defined(producer.createGroup(1n << 64n))).toThrow(RangeError);
-	expect(() => defined(producer.createGroup(reserved))).toThrow(RangeError);
+	expect(() => producer.createGroup(1n << 64n)).toThrow(RangeError);
+	expect(() => producer.createGroup(reserved)).toThrow(RangeError);
 	expect(() => hooks.receiveGroup(producer, { start: reserved, offset: 0 })).toThrow(RangeError);
 	defined(producer.createGroup(reserved - 1n)).finish();
 	expect(() => hooks.appendNext(producer)).toThrow(RangeError);
@@ -5616,7 +5616,7 @@ test("finishing returns handles that write nothing new but fill a late group", a
 	const finished = producer.finish();
 	// @ts-expect-error a finished track appends no group
 	expect(() => finished.appendGroup(Timestamp.unscaled(2n))).toThrow("at or past the track's end");
-	expect(() => defined(finished.createGroup(2n))).toThrow("at or past the track's end");
+	expect(() => finished.createGroup(2n)).toThrow("at or past the track's end");
 
 	const late = defined(finished.createGroup(0n));
 	late.writeFrame(textFrame("late", Timestamp.fromMillis(Number(late.start))));
