@@ -183,7 +183,10 @@ export const VideoConfigSchema = z.object({
 
 	// Higher is preferred: a player selects among the highest preference it can decode, then by
 	// picture and bitrate within it. A compatibility transcode is -1 so only a player that can't
-	// decode the source pulls it. Default: 0, so publishers only write it when nonzero.
+	// decode the source pulls it. A player with a viewport first keeps the renditions of its
+	// orientation, so preference ranks within one: a publisher ranks its secondary orientation
+	// lower, and a consumer without a viewport takes the main one. Default: 0, so publishers only
+	// write it when nonzero.
 	preference: z.optional(z.int32()),
 
 	// If true, the decoder will optimize for latency.
@@ -247,6 +250,40 @@ export const VideoSchema = z.object({
 
 /** Decoder config for a single video rendition. */
 export type VideoConfig = z.infer<typeof VideoConfigSchema>;
+
+/** The orientation of a `width` by `height` picture, or undefined when square. */
+export function orientationOf(width: number, height: number): "landscape" | "portrait" | undefined {
+	if (width > height) return "landscape";
+	if (width < height) return "portrait";
+	return undefined;
+}
+
+/**
+ * Which way `config` is shown once rotated, or undefined when square or of unknown size: the
+ * section's display size when set, else the rendition's display aspect ratio or coded size, turned
+ * by the section's rotation.
+ */
+export function orientation(
+	section: z.infer<typeof VideoSchema>,
+	config: VideoConfig,
+): "landscape" | "portrait" | undefined {
+	if (section.display) return orientationOf(section.display.width, section.display.height);
+	const aspect = config.displayAspectWidth !== undefined && config.displayAspectHeight !== undefined;
+	const width = aspect ? config.displayAspectWidth : config.codedWidth;
+	const height = aspect ? config.displayAspectHeight : config.codedHeight;
+	if (width === undefined || height === undefined) return undefined;
+	const shape = orientationOf(width, height);
+	// An odd quarter turn swaps the sides, rounded within one full turn so halfway rounds the
+	// same whichever way round the turn is written; a non-finite rotation is ignored. A full turn
+	// is added only to a negative remainder, as Rust's `rem_euclid` does: added to a positive one,
+	// it can round a rotation just under halfway up onto it.
+	const remainder = (section.rotation ?? 0) % 360;
+	const rotation = remainder < 0 ? remainder + 360 : remainder;
+	const quarters = Math.round(rotation / 90);
+	const turned = Number.isFinite(quarters) && quarters % 2 === 1;
+	if (!turned || !shape) return shape;
+	return shape === "landscape" ? "portrait" : "landscape";
+}
 
 /** Rank video best first: enabled, then highest preference, largest picture, highest bitrate, and name. */
 export function ranked(renditions: Record<string, VideoConfig>): [string, VideoConfig][] {

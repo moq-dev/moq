@@ -146,7 +146,18 @@ impl<O: Output> Video<O> {
 	}
 
 	/// Play `track` through `decoder`.
-	pub async fn run<D: Decoder>(self, mut track: Track, mut decoder: D) -> anyhow::Result<()> {
+	#[cfg(test)]
+	pub async fn run<D: Decoder>(self, track: Track, decoder: D) -> anyhow::Result<()> {
+		self.resume(None, track, decoder).await
+	}
+
+	/// Play `track` through `decoder`, starting with `first`, already read from it.
+	pub async fn resume<D: Decoder>(
+		self,
+		mut first: Option<Read>,
+		mut track: Track,
+		mut decoder: D,
+	) -> anyhow::Result<()> {
 		let closed = std::sync::atomic::AtomicBool::new(false);
 		// One segment per encoder between declared ends, oldest first.
 		let buffers = Mutex::new(VecDeque::from([Segment::default()]));
@@ -207,7 +218,10 @@ impl<O: Output> Video<O> {
 						}
 					}
 				}
-				let read = tokio::select! {
+				let read = if let Some(read) = first.take() {
+					Some(read)
+				} else {
+					tokio::select! {
 					read = track.read() => read?,
 					Ok(()) = encoder.changed() => {
 						target(*encoder.borrow_and_update());
@@ -217,6 +231,7 @@ impl<O: Output> Video<O> {
 						shared = delay;
 						follow(&mut track, &mut held, shared);
 						continue;
+					}
 					}
 				};
 				let mut buffers = buffers.lock().unwrap();
@@ -519,6 +534,7 @@ mod tests {
 			playhead: Default::default(),
 			drained: Default::default(),
 			output: Recorder::default(),
+			viewport: tokio::sync::watch::channel(None).1,
 		}
 	}
 

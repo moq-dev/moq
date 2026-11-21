@@ -16,10 +16,14 @@ import * as video from "./video.ts";
 export const Audio = { ranked: audio.ranked };
 /** The catalog audio section. */
 export type Audio = z.infer<typeof audio.AudioSchema>;
-/** Video quality ordering. */
-export const Video = { ranked: video.ranked };
+/** Video quality ordering, and the orientation a rendition is shown in. */
+export const Video = { ranked: video.ranked, orientation: video.orientation };
 /** The catalog video section. */
 export type Video = z.infer<typeof video.VideoSchema>;
+/** Which way a picture or viewport is longer. */
+export const Orientation = { of: video.orientationOf };
+/** Which side of a picture or viewport is longer. */
+export type Orientation = NonNullable<ReturnType<typeof video.orientationOf>>;
 
 export type { AudioConfig } from "./audio.ts";
 export { AudioConfigSchema, AudioSchema } from "./audio.ts";
