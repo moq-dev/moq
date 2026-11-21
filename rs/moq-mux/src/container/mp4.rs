@@ -458,7 +458,7 @@ fn keeps_chapters<F: Read + Seek>(file: &mut F, end: u64, eof: u64, plain: &[u8]
 	};
 	// A moov that does not decode, or nests more than the decoder is safe to read, is damage
 	// for the finish to replace, not a failure.
-	if fmp4::metadata::check(&data).is_err() {
+	if fmp4::metadata::check_unbounded(&data).is_err() {
 		return Ok(false);
 	}
 	let Ok(mut moov) = mp4_atom::Moov::decode(&mut std::io::Cursor::new(data.as_slice())) else {
