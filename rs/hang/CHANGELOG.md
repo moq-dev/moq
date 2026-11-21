@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.25](https://github.com/moq-dev/moq/compare/hang-v0.21.24...hang-v0.21.25) - 2026-11-21
+
+### Fixed
+
+- *(hang)* refuse malformed H.264 codec fields (backport #6847)
+
 ## [0.21.24](https://github.com/moq-dev/moq/compare/hang-v0.21.23...hang-v0.21.24) - 2026-11-11
 
 ### Other

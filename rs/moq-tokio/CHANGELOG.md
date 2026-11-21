@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.38](https://github.com/moq-dev/moq/compare/moq-tokio-v0.19.37...moq-tokio-v0.19.38) - 2026-11-21
+
+### Fixed
+
+- *(moq-net)* bounce a route renamed in place, and say a front serves one source
+
 ## [0.19.37](https://github.com/moq-dev/moq/compare/moq-tokio-v0.19.36...moq-tokio-v0.19.37) - 2026-11-15
 
 ### Other

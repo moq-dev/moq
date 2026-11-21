@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.18](https://github.com/moq-dev/moq/compare/moq-relay-v0.17.17...moq-relay-v0.17.18) - 2026-11-21
+
+### Fixed
+
+- *(relay)* redial a cluster peer from the first backoff ceiling once an attempt connected (backport)
+- *(moq-net)* an ended front bounces its path's announce
+
 ## [0.17.17](https://github.com/moq-dev/moq/compare/moq-relay-v0.17.16...moq-relay-v0.17.17) - 2026-11-15
 
 ### Other

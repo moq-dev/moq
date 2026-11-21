@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.24](https://github.com/moq-dev/moq/compare/moq-net-v0.3.23...moq-net-v0.3.24) - 2026-11-21
+
+### Fixed
+
+- *(net)* a far-ahead group sequence costs a relay nothing extra (backport #9044)
+- *(moq-net)* bounce a route renamed in place, and say a front serves one source
+- *(moq-net)* a peer's copy dying mid-serve ends its track
+- *(moq-net)* an ended front bounces its path's announce
+- *(moq-net)* a request joins a front only through its own route
+- *(moq-net)* never stitch two broadcasts on release
+
+### Other
+
+- *(net)* drop the removed offset from the datagram cursor comment
+- *(moq-net)* a relay restarting under its old hop id strands nothing
+- *(moq-net)* request_broadcast's body says a front serves one source
+
 ## [0.3.23](https://github.com/moq-dev/moq/compare/moq-net-v0.3.22...moq-net-v0.3.23) - 2026-11-11
 
 ### Fixed
