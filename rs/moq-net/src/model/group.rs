@@ -15,9 +15,10 @@
 //!
 //! A group has no size cap. Each copy holds at most its newest 32 MiB, or the smaller
 //! [`tail`](track::Info::tail) its track declares, less under the cache pool's memory
-//! pressure, and sheds whole frames from its front to stay there. A reader that reaches a shed frame rides a flight when the track has a
-//! [`track::Requests`] handler: a separate copy from that frame, paced by its fastest
-//! reader, which it leaves for the copy ahead once that holds its frame within reach.
+//! pressure, and sheds whole frames from its front to stay there. A reader that reaches a
+//! shed frame rides a flight when the track has a [`track::Requests`] handler: a separate
+//! copy from that frame, paced by its fastest reader, which it leaves for the copy ahead
+//! once that holds its frame within reach.
 //! Otherwise reading a shed frame is [`Error::Evicted`].
 //!
 //! The stream is closed with [Error] when all writers or readers are dropped.
@@ -46,9 +47,10 @@ use crate::{Error, IntoBytes, Result, StreamError, Timestamp};
 ///
 /// A group has no size cap: a write that takes the frames held past its track's
 /// [`tail`](track::Info::tail), at most this, sheds whole frames from the copy's front
-/// until it fits, and a compressed group's inflated copy sheds the same way. A reader that reaches a shed frame rides a flight, or gets
-/// [`Error::Evicted`] when nothing serves one (see the module docs). A larger declared
-/// frame size is [`Error::FrameTooLarge`] before allocating.
+/// until it fits, and a compressed group's inflated copy sheds the same way. A reader that
+/// reaches a shed frame rides a flight, or gets [`Error::Evicted`] when nothing serves one
+/// (see the module docs). A larger declared frame size is [`Error::FrameTooLarge`] before
+/// allocating.
 pub(crate) const MAX_CACHE_BYTES: u64 = 32 * 1024 * 1024; // 32 MB
 
 /// How far behind a copy's fastest reader a reader may board it, given the bytes the copy
