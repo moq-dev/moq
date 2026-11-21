@@ -17235,6 +17235,63 @@ mod test {
 		assert_eq!(read(&mut ordered), [Err(1000..1200), Ok(1200), Err(1201..1500)]);
 	}
 
+	/// A group arriving for a refused run's first key and then failing leaves the run's gap
+	/// queued: the widening takes back all of it, so no gap stands for that key.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_widened_read_takes_back_its_whole_stale_gap_after_a_group_for_it_fails() {
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		let dynamic = producer.requests();
+		write_group(&producer, 900);
+		write_group(&producer, 2000);
+		producer.give_up(1000..1500, Hole::stale(Duration::from_secs(10)));
+		let mut ordered = producer
+			.subscribe(Subscription::default().with_delay(Delay::default().with_max(Some(Duration::from_secs(1)))))
+			.with_range(900..1600)
+			.ordered();
+		let read = |ordered: &mut Ordered| {
+			let mut items = Vec::new();
+			loop {
+				match ordered.next_item().now_or_never() {
+					None => return items,
+					Some(Ok(Some(Item::Group(group)))) => items.push(Ok(group.start)),
+					Some(Ok(Some(Item::Gap { range, .. }))) => items.push(Err(range)),
+					Some(res) => panic!("ended: {:?}", res.map(|_| ())),
+				}
+			}
+		};
+		assert_eq!(read(&mut ordered), [Ok(900)]);
+		let fill = dynamic.requested_fill().now_or_never().expect("asked").unwrap();
+		fill.refuse_groups(1000..1500, Error::Old);
+		assert_eq!(read(&mut ordered), []);
+
+		// A wider reader asks the run, and its answer for 1000 lands and then fails.
+		let mut wide = producer
+			.subscribe(Subscription::default().with_delay(Delay::default().with_max(None)))
+			.with_range(900..1600)
+			.ordered();
+		read(&mut wide);
+		let other = dynamic
+			.requested_fill()
+			.now_or_never()
+			.expect("asked by the wider reader")
+			.unwrap();
+		assert_eq!(other.start().group, 1000);
+		let answer = other
+			.accept(1000, None)
+			.unwrap()
+			.expect("a group the wider budget reaches");
+		answer.abort(Error::Cancel).unwrap();
+
+		ordered
+			.update(ordered.subscription().with_delay(Delay::default().with_max(None)))
+			.unwrap();
+		producer.skip_groups(901..1000);
+		assert_eq!(read(&mut ordered), []);
+	}
+
 	/// A gap an ordered read returned stands once it widens: a read in key order never goes back.
 	#[test]
 	#[cfg(feature = "async")]

@@ -82,8 +82,9 @@ pub(super) struct Misses {
 	/// The part of `given_up` judged stale, with the budget each run was judged under: a
 	/// wider budget asks it again (see [`Self::widen`]).
 	stale: RangeMap<u64, Duration>,
-	/// The budget [`Self::widen`] last looked under.
-	widened_at: Option<Duration>,
+	/// No wider than the narrowest budget in `stale`, so [`Self::widen`] looks only when a
+	/// budget wider than it could take a run back.
+	narrowest: Option<Duration>,
 	/// The window revision and cap what this holds was last clipped to, with the window's
 	/// missable groups then, `None` while every group was.
 	clipped: Option<(u64, Option<u64>, Option<Cover>)>,
@@ -1429,7 +1430,10 @@ impl Misses {
 		}
 		self.given_up.insert(groups.clone());
 		match stale {
-			Some(budget) => self.stale.insert(groups.clone(), budget),
+			Some(budget) => {
+				self.stale.insert(groups.clone(), budget);
+				self.narrowest = Some(self.narrowest.map_or(budget, |narrowest| narrowest.min(budget)));
+			}
 			None => self.stale.remove(groups.clone()),
 		}
 		given_up.push((groups, stale));
@@ -1437,10 +1441,10 @@ impl Misses {
 
 	/// Take back the runs given up as stale under a budget narrower than `budget`, returning
 	/// them for the caller to reopen with [`Self::reopen`]: only a widening reverses a stale
-	/// verdict. Looks only once the budget changed: a run given up since was judged under a
-	/// budget no narrower than the reader's.
+	/// verdict. Looks only when `budget` is wider than the narrowest it holds, whichever
+	/// budget a verdict was judged under and whenever it arrived.
 	pub fn widen(&mut self, budget: Duration) -> RangeSet<u64> {
-		if self.widened_at.replace(budget) == Some(budget) || self.stale.is_empty() {
+		if self.narrowest.is_none_or(|narrowest| budget <= narrowest) {
 			return RangeSet::new();
 		}
 		let widened: RangeSet<u64> = self
@@ -1452,6 +1456,7 @@ impl Misses {
 		for run in widened.iter() {
 			self.stale.remove(run.clone());
 		}
+		self.narrowest = self.stale.iter().map(|(_, judged)| *judged).min();
 		widened
 	}
 
