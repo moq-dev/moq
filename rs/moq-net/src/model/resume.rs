@@ -9917,15 +9917,12 @@ mod test {
 			let mut group = recv(&mut sub);
 			assert_eq!(read(&mut group), Some(b"held".to_vec()));
 
-			// A moq-transport route's copy, whose timestamps are never checked for a rewind.
+			// A lite-05/06 route's copy, whose timestamps are never checked for a rewind.
 			let b = track::Producer::new(
 				Arc::new(broadcast::Info::default()),
 				"video",
 				crate::track::Info {
-					properties: Some(Arc::new(crate::model::object::TrackProperties {
-						version: crate::ietf::Version::Draft22,
-						values: Vec::new(),
-					})),
+					unchecked: true,
 					..crate::track::Info::timed()
 				},
 			);

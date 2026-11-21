@@ -176,11 +176,11 @@ export interface Info {
 	priority: number;
 	/** When a reader asks for a new group: on a live join, on a {@link Subscriber.refresh}, or both. See {@link Refresh}. */
 	refresh: Refresh;
-	/** The original moq-transport publisher's draft, whose timestamps may rewind. @internal */
+	/** The original moq-transport publisher's draft. @internal */
 	ietf?: IetfVersion;
 	/**
 	 * Whether this copy's groups skip the rewind check, since its timestamps may be lite-05/06 send
-	 * times. An {@link Info.ietf} track skips it too. Mirrors the Rust `track::Info::unchecked`.
+	 * times. Mirrors the Rust `track::Info::unchecked`.
 	 * @internal
 	 */
 	unchecked?: boolean;
@@ -2592,10 +2592,9 @@ export class Producer {
 		return group;
 	}
 
-	// Whether this track's timestamps may rewind (see {@link Info.unchecked} and {@link Info.ietf}).
+	// Whether this track's timestamps may rewind (see {@link Info.unchecked}).
 	#unchecked(): boolean {
-		const info = this.#state.info.peek();
-		return info?.unchecked === true || info?.ietf !== undefined;
+		return this.#state.info.peek()?.unchecked === true;
 	}
 
 	/**

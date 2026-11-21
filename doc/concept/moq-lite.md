@@ -375,11 +375,9 @@ without a timescale, each frame stamped with its group's start.
 A publisher refuses a group that starts before a lower one, and so does a
 moq-lite 07 receiver. A receiver passes on the timestamps it gets over moq-lite
 05 and 06 without checking them, since their send times look like media time and
-an older group fetched later would look like a rewind. Timestamps received over
-moq-transport, whose peers may stamp arrival times, are not checked either. A
-relay serves both on over every version. Over moq-lite 07 the
-[ietf extension](/draft/moq-ietf) keeps moq-transport ones unchecked; without
-it, the receiver checks them and may refuse a group that rewinds.
+an older group fetched later would look like a rewind. A relay serves them on
+over every version. A moq-transport frame's time is its Group ID, so its
+timestamps cannot rewind and are checked like any other.
 
 A publisher may [compress](/concept/compression) a track, which pays off for
 repetitive data such as JSON and not for media. Each group's frames become one
