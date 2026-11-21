@@ -1341,6 +1341,11 @@ export class Producer {
 	#cache = new Set<CachedGroup>();
 	// The same entries by key, so a write finds a duplicate without a scan.
 	#cached = new Map<bigint, CachedGroup>();
+	// Groups a newer copy replaced while still open, for a teardown to end: the readers draining
+	// one keep it after it leaves the cache. Pruned of closed ones as it doubles. Mirrors the Rust
+	// `detach`.
+	#detached = new Set<GroupProducer>();
+	#detachedKept = 0;
 	// The cached groups' checked starts, sorted by key, so a first frame finds its
 	// neighbors' with a search.
 	#bounds: Start[] = [];
@@ -1443,7 +1448,7 @@ export class Producer {
 			name,
 			accept: (key, info) => {
 				if (info !== undefined && this.#state.info.peek() === undefined) this.accept(info);
-				return this.#createGroup(key, 0, true);
+				return this.#createGroup(key, 0, { fetched: true });
 			},
 			drop: (start, end, hole) => {
 				this.#drop(start, end, hole);
@@ -1591,7 +1596,7 @@ export class Producer {
 			producer.#placing++;
 		};
 		hooks.receiveGroup = (producer, { start: sequence, offset: start, fill }) =>
-			producer.#createGroup(sequence, start, fill);
+			producer.#createGroup(sequence, start, { fetched: fill });
 		hooks.arrivingGroup = (producer, key) => {
 			const group = producer.#cached.get(key)?.group;
 			if (!group || group.closed.peek() !== undefined) return undefined;
@@ -2757,17 +2762,22 @@ export class Producer {
 	 * key already skipped throws {@link Skipped}, and the reserved key 2^64-1 a
 	 * `RangeError`.
 	 *
-	 * Throws on a key that is still cached: a live duplicate would fan out to every
-	 * subscriber twice. An aborted incarnation is evicted so a fresh group can serve the
-	 * key again. Best effort (mirrors Rust): nothing remembers a key whose cache
-	 * entry is already gone, so a long-evicted key is accepted as new. Its frames are
-	 * checked like {@link appendGroup}'s.
+	 * A key another group holds is replaced: the new group takes the slot, and readers already
+	 * draining the old one keep it. The same broadcast, track, and group key always name the
+	 * same content, and nothing checks it, as with {@link appendGroup}. Its frames are checked
+	 * like {@link appendGroup}'s.
 	 */
 	createGroup(key: bigint): GroupProducer {
-		return this.#createGroup(key, 0);
+		return this.#createGroup(key, 0, { replace: true });
 	}
 
-	#createGroup(key: bigint, start: number, fetched = false): GroupProducer {
+	// `replace` lets a live copy of the key go; without it only a copy that failed, or one a
+	// copy from frame 0 can serve better, gives way, and any other throws.
+	#createGroup(
+		key: bigint,
+		start: number,
+		{ fetched = false, replace = false }: { fetched?: boolean; replace?: boolean } = {},
+	): GroupProducer {
 		this.#writable(key);
 		// A skip says the key will never be produced, so it is final. A drop is not: a
 		// publisher may re-create a group it cut or aborted.
@@ -2775,12 +2785,13 @@ export class Producer {
 		const existing = this.#cached.get(key);
 		let kept: Map<TrackState, GroupConsumer> | undefined;
 		const failed = existing?.group.closed.peek() instanceof Error ? existing.group : undefined;
-		if (existing && !failed && start === 0 && hooks.groupHeadless(existing.group)) {
-			// A copy from frame 0, a fill a bounded reader asked or the feed's own, replaces one that
-			// can't serve its head. One still arriving keeps arriving for the readers already holding
-			// it, outside the cache.
+		if (existing && !failed && (replace || (start === 0 && hooks.groupHeadless(existing.group)))) {
+			// The producer's own replacement, or a copy from frame 0 (a fill a bounded reader asked or
+			// the feed's own) replacing one that can't serve its head. One still arriving keeps
+			// arriving for the readers already holding it, outside the cache.
 			this.#unlink(existing);
 			this.#uncache(existing);
+			this.#detach(existing.group);
 		} else if (existing) {
 			if (!failed) {
 				throw new Error(`duplicate group: key=${key}`);
@@ -2804,6 +2815,16 @@ export class Producer {
 		this.#cap(group);
 		this.#publish(group, fetched, failed && { failed, kept });
 		return group;
+	}
+
+	// Keep a replaced `group` for the teardown to end, though the cache no longer holds it.
+	#detach(group: GroupProducer): void {
+		this.#detached.add(group);
+		if (this.#detached.size <= 2 * this.#detachedKept) return;
+		for (const kept of this.#detached) {
+			if (kept.closed.peek() !== undefined) this.#detached.delete(kept);
+		}
+		this.#detachedKept = this.#detached.size;
 	}
 
 	// Whether this track's timestamps may rewind (see {@link Info.unchecked}).
@@ -3068,6 +3089,8 @@ export class Producer {
 			abort ??
 			new StreamError(StreamCode.Cancel, { message: `track ${this.name} closed with unfinished groups` });
 		for (const { group } of this.#cache) group.abort(groupError);
+		for (const group of this.#detached) group.abort(groupError);
+		this.#detached.clear();
 		for (const entry of open) {
 			this.#unlink(entry);
 			this.#uncache(entry);
@@ -3277,6 +3300,9 @@ export class Subscriber {
 	#fetchBudget?: number;
 	// The first frame a fetch asks of its group: a copy starting past it lacks its head.
 	#fetchFrom = 0;
+	// The first frame a wire publisher serves of each group, which it reads whole from there. Set
+	// through `hooks.wholeGroups`.
+	#whole?: (key: bigint) => number | undefined;
 	// Which cursor owns this subscription. Both cursors draw from one buffer, so the
 	// first group read commits the track to arrival order and {@link ordered} commits
 	// it to sequence order; whichever wins is the only one allowed from here on.
@@ -4442,9 +4468,12 @@ export class Subscriber {
 	}
 
 	// Whether `group` is one this reader hands out only from its first frame, which it lacks: the
-	// window is bounded, so it reads whole groups as a fetch would, from the frame a fetch asks.
-	// Mirrors the Rust `Cursor::lacks_head`, and a fetch's `poll_fetch_cached` frame bounds.
+	// window is bounded, so it reads whole groups as a fetch would, from the frame a fetch asks, or
+	// a wire publisher reads it whole from the frame it serves. Mirrors the Rust
+	// `Cursor::lacks_head`, a fetch's `poll_fetch_cached` frame bounds, and `position_group`.
 	#lacksHead(group: GroupConsumer): boolean {
+		const whole = this.#whole?.(group.start);
+		if (whole !== undefined) return hooks.groupFirstFrame(group) > whole;
 		return this.#window.end() !== undefined && hooks.groupFirstFrame(group) > this.#fetchFrom;
 	}
 
@@ -4598,6 +4627,11 @@ export class Subscriber {
 		hooks.tryRecvGroup = (subscriber, dispositions) => subscriber.#tryRecvGroup(dispositions);
 		hooks.parked = (subscriber) => {
 			subscriber.#parks = true;
+			return subscriber;
+		};
+		hooks.wholeGroups = (subscriber, frameOf) => {
+			subscriber.#whole = frameOf;
+			subscriber.#resume?.wholeGroups(frameOf);
 			return subscriber;
 		};
 		// A route copy judged for the logical reader that handed out `delivered`: what the copy

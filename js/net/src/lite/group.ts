@@ -146,7 +146,8 @@ export function frameDecoder({
 		const delta = timescale !== undefined ? unzigzag(c.u62()) : 0n;
 		const inflated = compress ? c.u53() : undefined;
 		if (!lengthFirst) size = c.u53();
-		// A compressed frame is stored whole; a plain one past a segment streams in after this.
+		// A compressed frame is stored whole; a plain one past a segment streams in after this,
+		// and `decodePayload` caps its size.
 		if (compress && (size > MAX_FRAME_BYTES || (inflated ?? 0) > MAX_FRAME_BYTES)) throw new FrameTooLarge();
 		const payload = compress ? c.read(size) : decodePayload(c, size);
 		// Commit the delta only after the last read: an incomplete decode gets retried.
