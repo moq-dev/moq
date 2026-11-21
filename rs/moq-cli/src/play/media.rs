@@ -268,6 +268,8 @@ impl<O: Output> Media<O> {
 									delay,
 								};
 								demand.hold(&self.args, ready.delay);
+								// A snapshot that arrived while it opened kept the opening but may have raised its delay.
+								demand.hold(&self.args, playback.latest().and_then(|snapshot| snapshot.video.renditions.get(&demand.name)).and_then(|config| config.delay));
 								let (first, track, decoder) = (ready.first, ready.track, ready.decoder);
 								let clock = video_clock.clone();
 								tasks.spawn(async move {
@@ -319,6 +321,8 @@ impl<O: Output> Media<O> {
 									delay,
 								};
 								demand.hold(&self.args, ready.delay);
+								// A snapshot that arrived while it opened kept the opening but may have raised its delay.
+								demand.hold(&self.args, playback.latest().and_then(|snapshot| snapshot.audio.renditions.get(&demand.name)).and_then(|config| config.delay));
 								let consumer = ready.consumer;
 								let retired = retire.clone();
 								tasks.spawn(async move {
@@ -394,7 +398,12 @@ impl<O: Output> Media<O> {
 								}
 								selection.retain(&mut snapshot);
 								// Video holds no tail beyond the frames queued for the window, so the
-								// rendition it left plays on until its replacement is ready.
+								// rendition it left plays on until its replacement is ready. Only a move
+								// switches here: a snapshot never turns the picture, even when it adds a
+								// rendition shaped like the window, which only a viewport change does. A
+								// rendition that failed to open would otherwise be tried again on every
+								// catalog update, and publishers update their hints often (a recorded
+								// decision on #9287).
 								if let Some(running) = video.running() {
 									let name = &running.data.demand.name;
 									let moved = snapshot
