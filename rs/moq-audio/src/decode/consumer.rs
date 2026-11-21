@@ -129,8 +129,9 @@ impl Options {
 pub struct Consumer {
 	decoder: Decoder,
 	track: moq_mux::container::Consumer<moq_mux::catalog::hang::Container>,
-	/// The subscription's preferences, for a priority change.
-	control: moq_net::track::Control,
+	/// The subscription's preferences, for a priority change, until the track ends: holding them
+	/// past that would keep the publisher's demand the container released.
+	control: Option<moq_net::track::Control>,
 	resampler: Option<Resampler>,
 	/// Converts the decoded layout to the output's, when they differ.
 	remix: Option<Remix>,
@@ -294,7 +295,7 @@ impl Consumer {
 			stated,
 			decoder,
 			track,
-			control,
+			control: Some(control),
 			resampler: None,
 			remix,
 			options,
@@ -358,10 +359,13 @@ impl Consumer {
 	/// resubscribing, so nothing already fetched is dropped or fetched again.
 	pub fn set_priority(&mut self, priority: i8) {
 		self.options.priority = priority;
-		let subscription = self.control.subscription();
+		let Some(control) = &self.control else {
+			return;
+		};
+		let subscription = control.subscription();
 		if subscription.priority != priority {
 			// Closed only once the track ended, when there is nothing left to prioritize.
-			let _ = self.control.update(subscription.with_priority(priority));
+			let _ = control.update(subscription.with_priority(priority));
 		}
 	}
 
@@ -744,6 +748,9 @@ impl Consumer {
 				Some(Ok(None)) => self.ended = Some(None),
 				Some(Err(err)) => self.ended = Some(Some(err.into())),
 				None => {}
+			}
+			if self.ended.is_some() {
+				self.control = None;
 			}
 		}
 	}

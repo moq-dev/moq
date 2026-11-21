@@ -126,8 +126,9 @@ impl Options {
 /// `moq_audio::decode::Consumer`.
 pub struct Consumer {
 	slot: Slot,
-	/// The subscription's preferences, reachable while a read holds the reader.
-	control: moq_net::track::Control,
+	/// The subscription's preferences, reachable while a read holds the reader, until the track
+	/// ends: holding them past that would keep the publisher's demand the container released.
+	control: Option<moq_net::track::Control>,
 	name: String,
 	/// When the access unit behind the latest picture returned arrived.
 	arrival: Option<Instant>,
@@ -196,7 +197,7 @@ impl Consumer {
 		let (reader, control) = Reader::open(broadcast, catalog, &name.into(), &options).await?;
 		Ok(Self {
 			name: reader.decoder.name().to_owned(),
-			control,
+			control: Some(control),
 			slot: Slot::Idle(Box::new(reader)),
 			arrival: None,
 		})
@@ -212,10 +213,13 @@ impl Consumer {
 	///
 	/// A read in flight is unaffected; an ended track ignores it.
 	pub fn set_priority(&mut self, priority: i8) {
-		let subscription = self.control.subscription();
+		let Some(control) = &self.control else {
+			return;
+		};
+		let subscription = control.subscription();
 		if subscription.priority != priority {
 			// Closed only once the track ended, when there is nothing left to prioritize.
-			let _ = self.control.update(subscription.with_priority(priority));
+			let _ = control.update(subscription.with_priority(priority));
 		}
 	}
 
@@ -265,6 +269,9 @@ impl Consumer {
 		};
 		// Left idle after an error, so the next read asks it again and gets the same answer.
 		self.slot = Slot::Idle(reader);
+		if !matches!(result, Ok(Some(_))) {
+			self.control = None;
+		}
 		let Some((read, arrival)) = result? else {
 			return Poll::Ready(Ok(None));
 		};
@@ -809,6 +816,42 @@ mod tests {
 			.unwrap()
 			.expect("the waiting read's picture");
 		assert_eq!(frame.timestamp, Timestamp::from_micros(0).unwrap());
+	}
+
+	/// A read the container's error ends lets go of the subscription, so the handle kept for
+	/// priority changes pins no demand on the publisher once nothing more is read.
+	#[tokio::test]
+	async fn an_ended_read_releases_the_subscription() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let subscriber = broadcast.consume();
+		let catalog = VideoConfig::new(hang::catalog::H264 {
+			inline: true,
+			profile: 0x42,
+			constraints: 0,
+			level: 30,
+		});
+		let options = Options {
+			decoder: Config {
+				kind: Kind::Named(probe::BUFFERED_NAME.into()),
+				..Config::new()
+			},
+			..Options::new()
+		};
+		let mut consumer = Consumer::new(&subscriber, &catalog, "video", options).await.unwrap();
+		assert!(track.subscription().is_some());
+
+		// A truncated varint where the legacy frame's timestamp belongs.
+		let mut group = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
+		group
+			.write_frame(Timestamp::from_micros(0).unwrap(), Bytes::from_static(&[0xFF]))
+			.unwrap();
+		let _group = group.finish().unwrap();
+
+		assert!(consumer.read().await.is_err(), "the malformed frame decoded");
+		assert!(track.subscription().is_none(), "the ended consumer still subscribes");
 	}
 
 	/// The age budget is the subscription's and not the decoder's: it reaches
