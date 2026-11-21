@@ -69,7 +69,7 @@ mod video;
 ///
 /// Every PID is accounted for. A listed stream that is not carried counts once in
 /// [`stats::Stream::refused`] with a warning, and so does each TS-scrambled packet on a carried
-/// one. Once the PMT is in, a packet on a PID no table claims (the null PID aside) counts in its
+/// one and each PES-scrambled PES on a decoded one. Once the PMT is in, a packet on a PID no table claims (the null PID aside) counts in its
 /// own row: see [`stats::Snapshot::streams`]. That holds when the PAT lists only the imported
 /// program; a [`with_program`](Self::with_program) import of a multiplex cannot tell another
 /// program's PIDs from unclaimed ones, so it leaves them to [`Programs`](super::Programs).
@@ -606,18 +606,19 @@ impl<E: catalog::Catalog> Import<E> {
 		if matches!(continuation, Some(Continuation::Duplicate)) {
 			return Ok(());
 		}
-		// A media or PCR packet whose adaptation field overruns itself is refused before
-		// its clock bits can reach the program clock. Its counter already joined the
-		// chain, so a gap in front of it still salvages what came before.
+		// A media or PCR packet whose adaptation field overruns itself ends the import before
+		// its clock bits can reach the program clock: it arrived whole and unflagged, so the
+		// muxer wrote it wrong.
 		if let Ok(pid) = Pid::new(pid)
-			&& (self.streams.contains_key(&pid) || self.pcr_pid == Some(pid))
+			&& (self
+				.streams
+				.get(&pid)
+				.is_some_and(|stream| !matches!(stream, Stream::Ignored))
+				|| self.pcr_pid == Some(pid))
 			&& pkt[1] & 0x80 == 0
 			&& !adaptation_valid(pkt)
 		{
-			if matches!(continuation, Some(Continuation::Broken)) {
-				self.salvage(pid)?;
-			}
-			return self.damage(pid, &malformed!("malformed TS adaptation field"));
+			return Err(malformed!("malformed TS adaptation field on PID {}", pid.as_u16()));
 		}
 		// Read the clock's own flag before routing, so the break lands between the media
 		// either side of it. The PCR PID can be a dedicated one nothing below routes, and
@@ -917,30 +918,26 @@ impl<E: catalog::Catalog> Import<E> {
 		let payload = match payload(pkt) {
 			Payload::None => return Ok(()),
 			Payload::Bytes(payload) => payload,
-			// No payload can be found in it, so like a corrupt packet it breaks the PES.
 			Payload::Malformed => {
-				return self.damage(pid, &malformed!("malformed TS adaptation field"));
+				return Err(malformed!("malformed TS adaptation field on PID {}", pid.as_u16()));
 			}
 		};
 		if pkt[1] & 0x40 != 0 {
-			// The new start ends the preceding PES even while its own header is incomplete.
-			self.flush(pid)?;
-			if self.headers.remove(&pid).is_some() {
-				self.damage(pid, &malformed!("PES header truncated at next start"))?;
+			// Loss, a flagged packet, and scrambling all drop a partial header, so one still here
+			// is a header the muxer cut short.
+			if self.headers.contains_key(&pid) {
+				return Err(malformed!(
+					"PES header on PID {} truncated at the next start",
+					pid.as_u16()
+				));
 			}
+			self.flush(pid)?;
 			// The payload ends the packet, so this is where its start code sits in the input.
 			let at = offset + (TsPacket::SIZE - payload.len()) as u64;
 			// Taken here, not once the header is whole, so a PCR landing before the header's
 			// continuation is the one after it.
 			let span = self.placement.span(at);
-			return match PesStart::header_len(payload) {
-				Ok(len) if payload.len() >= len => match PesStart::parse(payload) {
-					Ok(pes) => self.handle_pes_start(pid, pes, span),
-					Err(err) => self.damage(pid, &err),
-				},
-				Ok(_) => self.pes_header(pid, span, payload.to_vec()),
-				Err(err) => self.damage(pid, &err),
-			};
+			return self.pes_header(pid, span, payload.to_vec());
 		}
 		if let Some((span, mut header)) = self.headers.remove(&pid) {
 			header.extend_from_slice(payload);
@@ -950,20 +947,18 @@ impl<E: catalog::Catalog> Import<E> {
 		}
 	}
 
-	/// Continue a PES header split across packets, placed by `span` from its start code.
+	/// Open the PES whose header `header` begins, placed by `span` from its start code, or hold
+	/// the header until the packets after it complete it. A header that arrived intact but does
+	/// not parse ends the import.
 	fn pes_header(&mut self, pid: Pid, span: Option<Span>, header: Vec<u8>) -> Result<()> {
-		let len = match PesStart::header_len(&header) {
-			Ok(len) => len,
-			Err(err) => return self.damage(pid, &err),
-		};
+		let malformed = |err| malformed!("PES header on PID {}: {err}", pid.as_u16());
+		let len = PesStart::header_len(&header).map_err(malformed)?;
 		if header.len() < len {
 			self.headers.insert(pid, (span, header));
 			return Ok(());
 		}
-		match PesStart::parse(&header) {
-			Ok(pes) => self.handle_pes_start(pid, pes, span),
-			Err(err) => self.damage(pid, &err),
-		}
+		let pes = PesStart::parse(&header).map_err(malformed)?;
+		self.handle_pes_start(pid, pes, span)
 	}
 
 	fn ensure_stream(&mut self, pid: Pid, stream_type: u8, descriptors: &[catalog::Descriptor]) -> Result<()> {
@@ -1307,6 +1302,10 @@ impl<E: catalog::Catalog> Import<E> {
 			return Ok(());
 		};
 
+		// Conditional access, like TS-level scrambling: refused while it lasts, on any carriage.
+		if pes.scrambled() {
+			return self.scrambled(pid);
+		}
 		let whole = match stream {
 			Stream::PesPacket(stream) => Some(stream.stream_type),
 			_ => None,
@@ -1315,9 +1314,6 @@ impl<E: catalog::Catalog> Import<E> {
 			&& let Some(why) = refusal(&pes, stream_type)
 		{
 			return self.refuse(pid, &why);
-		}
-		if pes.scrambled() {
-			return self.damage(pid, &malformed!("scrambled PES is not supported"));
 		}
 		let stream = &self.streams[&pid];
 
@@ -1424,8 +1420,9 @@ impl<E: catalog::Catalog> Import<E> {
 		Ok(())
 	}
 
-	/// Refuse the PES a damaged packet breaks (loss, the transport error indicator, or a
-	/// malformed TS or PES header) without changing any other PID or the program clock.
+	/// Refuse the PES a damaged packet breaks (loss, the transport error indicator, or a header
+	/// cut short by either, a PMT revision, or the end of input) without changing any other PID
+	/// or the program clock.
 	fn damage(&mut self, pid: Pid, err: &Error) -> Result<()> {
 		// Complete AUs ahead of the damaged packet remain valid, including those
 		// in an unbounded PES. Its final NAL/AU is never flushed at a loss boundary.
@@ -1588,8 +1585,8 @@ impl<E: catalog::Catalog> Import<E> {
 		Ok(())
 	}
 
-	/// A TS-scrambled packet on the carried `pid`: refused, and the unit it interrupts lost with
-	/// it. The route stays, so the stream resumes once its packets are clear again.
+	/// A TS-scrambled packet or PES-scrambled PES on the carried `pid`: refused, and the unit it
+	/// interrupts lost with it. The route stays, so the stream resumes once it is clear again.
 	fn scrambled(&mut self, pid: Pid) -> Result<()> {
 		self.pending.remove(&pid);
 		self.headers.remove(&pid);
@@ -1605,7 +1602,7 @@ impl<E: catalog::Catalog> Import<E> {
 		if self.scrambled.insert(pid.as_u16()) {
 			tracing::warn!(
 				pid = pid.as_u16(),
-				"refusing TS-scrambled packets; carry the multiplex whole to keep them"
+				"refusing scrambled payloads; carry the multiplex whole to keep them"
 			);
 		}
 		Ok(())
@@ -2657,13 +2654,11 @@ impl<E: catalog::Catalog> PesPacketStream<E> {
 }
 
 /// Why a whole-PES track cannot carry `pes` unaltered, if it cannot: a header export refuses
-/// ([`PesStart::whole`]), a clock field only the PTS and DTS of are rebased, or a scrambled
-/// payload.
+/// ([`PesStart::whole`]), or a clock field only the PTS and DTS of are rebased.
 fn refusal(pes: &PesStart, stream_type: u8) -> Option<String> {
 	match pes.whole(stream_type) {
 		Err(err) => Some(format!("{err:#}")),
-		Ok(Some(clock)) => Some(clock.to_string()),
-		Ok(None) => pes.scrambled().then(|| "PES-level scrambling".to_string()),
+		Ok(clock) => clock.map(|clock| clock.to_string()),
 	}
 }
 
@@ -8844,8 +8839,10 @@ pub(super) mod test {
 		import
 	}
 
+	/// A header cut short by loss or the end of input is dropped; one the muxer cut short with
+	/// the next start ends the import.
 	#[test]
-	fn pes_fragmented_header_resets_on_loss_new_start_and_eof() {
+	fn pes_fragmented_header_resets_on_loss_and_eof_and_ends_at_a_new_start() {
 		let pid = Pid::new(0x50).unwrap();
 		let header = [0, 0, 1, 0xe0, 0, 0, 0x80, 0x80, 5];
 		for end in ["loss", "start", "eof"] {
@@ -8856,27 +8853,27 @@ pub(super) mod test {
 			assert_eq!(import.headers[&pid].1.len(), 9);
 			match end {
 				"loss" => import.broken(pid).unwrap(),
-				"start" => import
-					.pes_packet(
-						pid,
-						&pes_fragment(0x50, true, 1, &[0, 0, 1, 0xe0, 0, 0, 0x80, 0, 0, 0xaa]),
-						0,
-					)
-					.unwrap(),
+				"start" => {
+					let err = import
+						.pes_packet(
+							pid,
+							&pes_fragment(0x50, true, 1, &[0, 0, 1, 0xe0, 0, 0, 0x80, 0, 0, 0xaa]),
+							0,
+						)
+						.expect_err("an intact header cut short is the muxer's");
+					assert!(err.to_string().contains("truncated at the next start"), "{err}");
+					continue;
+				}
 				_ => import.finish_in_place().unwrap(),
 			}
 			assert!(!import.headers.contains_key(&pid));
-			if end == "start" {
-				assert_eq!(import.pending[&pid].data, [0xaa]);
-			} else {
-				import
-					.pes_packet(pid, &pes_fragment(0x50, false, 1, &[0xff; 5]), 0)
-					.unwrap();
-				assert!(
-					!import.pending.contains_key(&pid),
-					"orphan bytes cannot complete the lost header"
-				);
-			}
+			import
+				.pes_packet(pid, &pes_fragment(0x50, false, 1, &[0xff; 5]), 0)
+				.unwrap();
+			assert!(
+				!import.pending.contains_key(&pid),
+				"orphan bytes cannot complete the lost header"
+			);
 		}
 	}
 
@@ -9041,13 +9038,15 @@ pub(super) mod test {
 	}
 
 	#[test]
-	fn malformed_pes_prefix_is_refused_without_waiting_for_more_bytes() {
+	fn malformed_pes_prefix_ends_the_import_without_waiting_for_more_bytes() {
 		let pid = Pid::new(0x50).unwrap();
 		for bad in [&[1][..], &[0, 1][..], &[0, 0, 2][..]] {
 			let mut import = ignored_pes_import();
-			import.pes_packet(pid, &pes_fragment(0x50, true, 0, bad), 0).unwrap();
+			let err = import
+				.pes_packet(pid, &pes_fragment(0x50, true, 0, bad), 0)
+				.expect_err("a malformed prefix");
+			assert!(err.to_string().contains("start code prefix"), "{err}");
 			assert!(import.headers.is_empty());
-			assert!(import.pending.is_empty());
 		}
 	}
 
@@ -9055,15 +9054,15 @@ pub(super) mod test {
 	fn pes_length_overruns_fail_before_waiting_for_the_optional_header() {
 		let pid = Pid::new(0x50).unwrap();
 		let mut import = ignored_pes_import();
-		import
+		let err = import
 			.pes_packet(
 				pid,
 				&pes_fragment(0x50, true, 0, &[0, 0, 1, 0xe0, 0, 4, 0x80, 0x80, 255]),
 				0,
 			)
-			.unwrap();
+			.expect_err("a PES length shorter than its header");
+		assert!(err.to_string().contains("shorter than its header"), "{err}");
 		assert!(import.headers.is_empty());
-		assert!(import.pending.is_empty());
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -9456,22 +9455,21 @@ pub(super) mod test {
 		assert!(is_rewind(&err), "{err:?}");
 	}
 
-	/// Group starts never go backwards, and no frame sits below the start of the group before
-	/// its own, which is what the producer demands. Frames may still present below the previous
-	/// group's content (B-frames, an overlapping keyframe).
+	/// Every frame of a group presents after every frame of the groups before it, which is what
+	/// the producer demands. Frames within a group may still reorder (B-frames, a join that
+	/// continues the group).
 	fn assert_forward(frames: &[crate::container::Frame]) {
-		let (mut start, mut floor) = (None, None);
+		let (mut ceiling, mut newest) = (None, None);
 		for frame in frames {
 			let ts = frame.timestamp.as_micros().unwrap();
 			if frame.keyframe {
-				assert!(
-					start.is_none_or(|start| ts >= start),
-					"a group started at {ts} before {start:?}"
-				);
-				floor = start;
-				start = Some(ts);
+				ceiling = newest;
 			}
-			assert!(floor.is_none_or(|floor| ts >= floor), "rewound to {ts} below {floor:?}");
+			assert!(
+				ceiling.is_none_or(|ceiling| ts > ceiling),
+				"{ts} presents at or before {ceiling:?}, an earlier group's newest frame"
+			);
+			newest = newest.max(Some(ts));
 		}
 	}
 
@@ -9677,16 +9675,16 @@ pub(super) mod test {
 		);
 	}
 
-	/// Damage on one PID refuses that unit and its dependent pictures while another PID
-	/// carries on. A later decode call resumes from the next keyframe.
-	async fn damaged_video_recovers(damage: &str) {
+	/// The fault `damage` names hits one packet of a later video PES on one PID while another PID
+	/// carries on, returning the mux and the offsets of the damaged packet and of the GOP after.
+	fn damaged_video(damage: &str) -> (Mux, usize, usize) {
 		let peer = VIDEO + 1;
 		let mut mux = Mux {
 			out: synth_pmt(&[(StreamType::H264, VIDEO), (StreamType::H264, peer)], false),
 			..Default::default()
 		};
 		mux.gop(VIDEO, 90_000);
-		if matches!(damage, "pes" | "adaptation" | "adaptation-clock" | "tei") {
+		if damage != "clean" {
 			// These faults hide the next PES entirely. An AUD received ahead of
 			// the fault proves the preceding picture complete; the AUD's own
 			// picture remains unconfirmed and is discarded at the loss.
@@ -9709,6 +9707,8 @@ pub(super) mod test {
 				packet[5] = 0x90;
 			}
 			"tei" => packet[1] |= 0x80,
+			// PES_scrambling_control, as conditional access sets it.
+			"scrambled" => packet[payload_at + 6] |= 0x10,
 			"clean" => {}
 			_ => unreachable!(),
 		}
@@ -9720,7 +9720,16 @@ pub(super) mod test {
 		let resume_at = mux.out.len();
 		mux.gop(VIDEO, 90_000 + 8 * FRAME);
 		mux.gop(peer, 90_000 + 8 * FRAME);
+		(mux, damaged_at, resume_at)
+	}
 
+	/// A packet the receiver flagged corrupt (`tei`) loses its unit and the dependent pictures
+	/// while another PID carries on, and so does a PES conditional access scrambled
+	/// (`scrambled`), refused rather than damaged. A later decode call resumes from the next
+	/// keyframe.
+	async fn damaged_video_recovers(damage: &str) {
+		let peer = VIDEO + 1;
+		let (mux, _, resume_at) = damaged_video(damage);
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
 		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
@@ -9737,7 +9746,11 @@ pub(super) mod test {
 			.decode(&mux.out[resume_at..])
 			.expect("next keyframe must recover");
 		import.finish_in_place().unwrap();
-		assert_eq!(import.stats().streams[&VIDEO].damaged, u64::from(damage != "clean"));
+		let row = &import.stats().streams[&VIDEO];
+		assert_eq!(
+			(row.damaged, row.refused),
+			(u64::from(damage == "tei"), u64::from(damage == "scrambled"))
+		);
 		assert_eq!(import.stats().streams[&peer].damaged, 0);
 		for (pid, expected) in [(VIDEO, if damage == "clean" { 12 } else { 8 }), (peer, 12)] {
 			let Stream::H264 { import: video, .. } = &import.streams[&Pid::new(pid).unwrap()] else {
@@ -9755,9 +9768,33 @@ pub(super) mod test {
 		}
 	}
 
+	/// An intact, unflagged packet whose PES header or adaptation field does not parse ends the
+	/// import with the cause, after the pictures ahead of it, and counts no damage. The clock
+	/// bits a malformed field announces never reach the program clock.
 	#[tokio::test(start_paused = true)]
-	async fn damaged_pes_header_recovers() {
-		damaged_video_recovers("pes").await;
+	async fn malformed_headers_end_the_import() {
+		for (damage, cause) in [
+			("pes", "PES header"),
+			("adaptation", "adaptation field"),
+			("adaptation-clock", "adaptation field"),
+		] {
+			let (mux, damaged_at, _) = damaged_video(damage);
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let consumer = broadcast.consume();
+			let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+			let mut import = super::Import::new(broadcast, catalog.reserve());
+			let before = import.decode(&mux.out[..damaged_at]).map(|_| import.last_pts);
+			let err = import.decode(&mux.out[damaged_at..]).expect_err(damage);
+			assert!(err.to_string().contains(cause), "{damage}: {err}");
+			assert_eq!(import.last_pts, before.unwrap(), "{damage} moved the clock");
+			let stats = import.stats();
+			assert!(stats.streams.values().all(|stream| stream.damaged == 0), "{damage}");
+			let Stream::H264 { import: video, .. } = &import.streams[&Pid::new(VIDEO).unwrap()] else {
+				panic!("video route");
+			};
+			let frames = read_track(&consumer, video.name(), crate::container::Kind::Video).await;
+			assert_eq!(frames.len(), 4, "{damage}: the pictures an AUD proved whole");
+		}
 	}
 
 	/// PES boundaries need not fall on NALs, so the first PES after a continuity break can open
@@ -9841,18 +9878,13 @@ pub(super) mod test {
 	}
 
 	#[tokio::test(start_paused = true)]
-	async fn damaged_adaptation_recovers() {
-		damaged_video_recovers("adaptation").await;
-	}
-
-	#[tokio::test(start_paused = true)]
-	async fn damaged_adaptation_cannot_reset_the_program_clock() {
-		damaged_video_recovers("adaptation-clock").await;
-	}
-
-	#[tokio::test(start_paused = true)]
 	async fn damaged_tei_recovers() {
 		damaged_video_recovers("tei").await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn scrambled_pes_is_refused_until_clear() {
+		damaged_video_recovers("scrambled").await;
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -9935,11 +9967,17 @@ pub(super) mod test {
 		}
 	}
 
+	/// A malformed adaptation field on a carried PID or the clock's ends the import before its
+	/// clock bits are read; one on a PID the import does not carry is not read at all.
 	#[test]
-	fn invalid_adaptation_lengths_damage_media_and_dedicated_clock_pids() {
+	fn invalid_adaptation_fields_end_the_import_on_media_and_clock_pids() {
+		// Clear of the PMT PID and every stream, so only the clock reads it.
 		const PCR: u16 = 0x0200;
-		for pid in [VIDEO, PCR] {
-			for (control, length) in [(0b10, 0), (0b10, 182), (0b11, 183)] {
+		const IGNORED: u16 = 0x0300;
+		// Lengths the packet control forbids, and a PCR flag on a field too short to hold it.
+		let faults: [(u8, u8, &[u8]); 4] = [(0b10, 0, &[]), (0b10, 182, &[]), (0b11, 183, &[]), (0b10, 1, &[0x90])];
+		for pid in [VIDEO, PCR, IGNORED] {
+			for (control, length, field) in faults {
 				let mut mux = Mux {
 					out: synth_pmt(&[(StreamType::H264, VIDEO)], false),
 					..Default::default()
@@ -9950,55 +9988,34 @@ pub(super) mod test {
 				let mut import = super::Import::new(broadcast, catalog.reserve());
 				import.decode(&mux.out).unwrap();
 				import.pcr_pid = Some(Pid::new(PCR).unwrap());
+				import.streams.insert(Pid::new(IGNORED).unwrap(), Stream::Ignored);
+				let last_pts = import.last_pts;
+				assert!(last_pts.is_some());
 
 				let mut packet = clock_break_packet(pid);
 				packet[3] = control << 4;
 				packet[4] = length;
-				import.decode(&packet).unwrap();
-				assert!(import.last_pts.is_some(), "invalid adaptation reset the clock");
-				assert_eq!(
-					import.stats().streams[&pid].damaged,
-					1,
-					"pid={pid} control={control:b} length={length}"
+				packet[5..5 + field.len()].copy_from_slice(field);
+				let case = format!("pid={pid} control={control:b} length={length}");
+				if pid == IGNORED {
+					import.decode(&packet).expect(&case);
+				} else {
+					let err = import.decode(&packet).expect_err(&case);
+					assert!(err.to_string().contains("adaptation field"), "{case}: {err}");
+				}
+				assert_eq!(import.last_pts, last_pts, "{case} moved the clock");
+				assert!(
+					import.stats().streams.values().all(|stream| stream.damaged == 0),
+					"{case}"
 				);
 			}
 		}
 	}
 
-	/// A dedicated PCR PID's malformed adaptation field cannot declare a timebase break.
+	/// A malformed PES start ends the import after the AU a codec boundary already completed in
+	/// the preceding unbounded PES published.
 	#[test]
-	fn damaged_adaptation_on_a_dedicated_pcr_pid_keeps_the_clock() {
-		// Clear of the PMT PID and every stream, so only the clock-only row can carry it.
-		const PCR: u16 = 0x0200;
-		let mut mux = Mux {
-			out: synth_pmt(&[(StreamType::H264, VIDEO)], false),
-			..Default::default()
-		};
-		mux.gop(VIDEO, 90_000);
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
-		let mut import = super::Import::new(broadcast, catalog.reserve());
-		import.decode(&mux.out).unwrap();
-		import.pcr_pid = Some(Pid::new(PCR).unwrap());
-		assert!(import.last_pts.is_some());
-
-		// The flag byte is the field's only byte, so the PCR it announces overruns it.
-		let mut packet = clock_break_packet(PCR);
-		packet[4] = 1;
-		packet[5] = 0x90;
-		import.decode(&packet).unwrap();
-		assert!(import.last_pts.is_some(), "a malformed field reset the program clock");
-		let stats = import.stats();
-		assert_eq!(
-			(stats.streams[&PCR].track.as_str(), stats.streams[&PCR].damaged),
-			("", 1)
-		);
-	}
-
-	/// A damaged PES start does not revoke the AU a codec boundary already
-	/// completed in the preceding unbounded PES.
-	#[test]
-	fn damaged_pes_start_flushes_the_unit_before_it() {
+	fn malformed_pes_start_ends_the_import_after_the_unit_before_it() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
@@ -10018,13 +10035,15 @@ pub(super) mod test {
 		let start = 5 + usize::from(damaged[4]);
 		damaged[start + 6..start + 19].fill(0);
 		data.extend(damaged);
-		import.decode(&data).unwrap();
-		import.finish_in_place().unwrap();
-		assert_eq!(import.stats().streams[&VIDEO].damaged, 1);
+		let err = import
+			.decode(&data)
+			.expect_err("a malformed PES header ends the import");
+		assert!(err.to_string().contains("PES header on PID"), "{err}");
+		assert_eq!(import.stats().streams[&VIDEO].damaged, 0);
 		assert_eq!(
 			import.stats().streams[&VIDEO].units,
 			1,
-			"the keyframe before the damage"
+			"the keyframe before the malformed header"
 		);
 	}
 
@@ -10206,9 +10225,9 @@ pub(super) mod test {
 
 	/// #3798's join: a new IDR presents below the last P-frame on a continuous clock, since
 	/// the B-frames before it presented earlier than the P-frame decoded ahead of them. It
-	/// still starts after the previous group did, so it overlaps rather than rewinds.
+	/// continues the old content's group, so the next group still presents after all of it.
 	#[tokio::test(start_paused = true)]
-	async fn h264_join_below_a_p_frame_publishes() {
+	async fn h264_join_below_a_p_frame_continues_the_group() {
 		let mut mux = Mux {
 			out: synth_pmt(&[(StreamType::H264, VIDEO)], false),
 			..Default::default()
@@ -10218,6 +10237,45 @@ pub(super) mod test {
 		mux.gops(VIDEO, 90_000 + 6 * FRAME, 2);
 		let frames = video_frames(&mux.out).await;
 		assert_eq!(frames.len(), 16, "every picture either side of the join");
+		let groups = frames.iter().filter(|frame| frame.keyframe).count();
+		assert_eq!(groups, 3, "the join's IDR continues the group it overlaps");
+		assert_forward(&frames);
+	}
+
+	/// A join whose IDR lands past the old content, followed by leading pictures: the one that
+	/// would present at or before the old content's newest frame is dropped, with the leading
+	/// pictures decoding after it, which may reference it. The pictures after the IDR publish.
+	#[tokio::test(start_paused = true)]
+	async fn h264_join_drops_a_leading_picture_before_the_old_content_ends() {
+		let mut mux = Mux {
+			out: synth_pmt(&[(StreamType::H264, VIDEO)], false),
+			..Default::default()
+		};
+		// The old content's newest frame presents at `base + 4 * FRAME` and decodes last at
+		// `base + 3 * FRAME`.
+		let base = 90_000 + 4 * FRAME;
+		mux.gops(VIDEO, 90_000, 2);
+		for (keyframe, pts, dts) in [
+			(true, base + 7 * FRAME, base + 3 * FRAME + 1_000),
+			(false, base + 4 * FRAME, base + 3 * FRAME + 2_000),
+			(false, base + 6 * FRAME, base + 4 * FRAME),
+			(false, base + 9 * FRAME, base + 5 * FRAME),
+			(false, base + 8 * FRAME, base + 6 * FRAME),
+		] {
+			let cc = mux.cc(VIDEO);
+			mux.out
+				.extend_from_slice(&video_pes(VIDEO, cc, pts, Some(dts), &annexb_au(keyframe)));
+		}
+		let frames = video_frames(&mux.out).await;
+		let micros = |ticks: u64| u128::from(ticks) * 1_000_000 / 90_000;
+		let joined: Vec<u128> = frames[8..]
+			.iter()
+			.map(|frame| frame.timestamp.as_micros().unwrap())
+			.collect();
+		assert_eq!(
+			joined,
+			[base + 7 * FRAME, base + 9 * FRAME, base + 8 * FRAME].map(micros)
+		);
 		assert_forward(&frames);
 	}
 

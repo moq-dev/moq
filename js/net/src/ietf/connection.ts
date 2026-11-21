@@ -180,8 +180,8 @@ export class Connection implements Session {
 		this.#auth = new AuthSession({
 			requests: true,
 			peerGrant: {
-				publish: new Path.Patterns([Path.Pattern.all()]),
-				subscribe: new Path.Patterns(publish ? [Path.Pattern.all()] : []),
+				publish: Path.Prefixes.all(),
+				subscribe: publish ? Path.Prefixes.all() : new Path.Prefixes(),
 			},
 			handle,
 			draining: () => this.#goaway.peek() !== undefined || this.#phase.kind !== "open",
@@ -322,14 +322,14 @@ export class Connection implements Session {
 		}
 	}
 
-	/** The paths announced matching `scope`, each present or absent; see {@link Session.announced}. */
-	announced(scope?: Path.Pattern, options?: announce.Options): announce.Consumer {
-		return announce.list(this.#subscriber.routes(scope, options));
+	/** The paths announced matching `filter`, each present or absent; see {@link Session.announced}. */
+	announced(filter?: Path.Pattern, options?: announce.Options): announce.Consumer {
+		return announce.list(this.#subscriber.routes(filter, options));
 	}
 
-	/** Every route change matching `scope`, for code that forwards routes. @internal */
-	routes(scope?: Path.Pattern, options?: announce.Options): announce.Routes {
-		return this.#subscriber.routes(scope, options);
+	/** Every route change matching `filter`, for code that forwards routes. @internal */
+	routes(filter?: Path.Pattern, options?: announce.Options): announce.Routes {
+		return this.#subscriber.routes(filter, options);
 	}
 
 	/** Accepts request streams and dispatches them. */

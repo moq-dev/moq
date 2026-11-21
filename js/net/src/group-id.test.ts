@@ -1,5 +1,6 @@
 // Group IDs past 2^53 decode, survive a JS forwarding node, and encode again on every wire
-// version, as a third-party moq-transport publisher's or a fine timescale's start ticks may be.
+// version that can carry them, as a third-party moq-transport publisher's or a fine timescale's start
+// ticks may be.
 import { expect, test } from "bun:test";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { accept, connect } from "./connection/index.ts";
@@ -33,8 +34,8 @@ const WIRES: Wire[] = [
 	{ name: "lite-02", protocol: "", version: Lite.Version.DRAFT_02 },
 	{ name: "lite-03", protocol: Lite.ALPN_03 },
 	{ name: "lite-04", protocol: Lite.ALPN_04 },
-	{ name: "lite-05", protocol: Lite.ALPN_05, datagrams: true },
-	{ name: "lite-06", protocol: Lite.ALPN_06, datagrams: true },
+	// Lite-05 and lite-06 are missing: they stamp a scale-less track's frames and datagrams with
+	// their keys as milliseconds, which a JS hop's timestamps hold only below 2^53.
 	{ name: "lite-07-wip", protocol: Lite.ALPN_07_WIP, datagrams: true },
 	{ name: "ietf-18", protocol: Ietf.ALPN.DRAFT_18 },
 	{ name: "ietf-20", protocol: Ietf.ALPN.DRAFT_20 },

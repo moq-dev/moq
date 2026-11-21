@@ -257,9 +257,9 @@ See [HTTP endpoints](/bin/relay/http).
 # Exactly one of these:
 url = "http://127.0.0.1:4440/"       # An auth server asked once per session event (`moq auth serve`,
                                      # or your own). https:// presents connect.tls; unix:// is a socket.
-# public = "anon/**"                 # Or a static anonymous grant rooted at /, publish and subscribe alike.
-# public_subscribe = ["anon/**", "demo/**"]   # Or split them; patterns, `foo/**` for a subtree.
-# public_publish = ["anon/**"]
+# public = "anon"                    # Or a static anonymous grant rooted at /, publish and subscribe alike.
+# public_subscribe = ["anon", "demo"] # Or split them; each prefix covers its subtree, "" covers everything.
+# public_publish = ["anon"]
 ```
 
 See [Authentication](/bin/relay/auth).
@@ -314,9 +314,19 @@ replacement is up and it carries no subscription or fetch.
 ```toml
 [cache]
 capacity = "8GiB"                    # Target bytes of cached groups and buffered datagrams. "75%" of memory also works.
-headroom = "2GiB"                    # Or: keep this much system memory free and grow into the rest.
+headroom = "10%"                     # Keep this much system memory free and grow into the rest (the default).
 duration = "30s"                     # Reclaim groups idle this long, and cap every track's max age at it.
 ```
+
+With no settings, the relay targets 10% of system memory free (the cgroup limit
+when set), checked every five seconds, and shrinks the cache toward it as
+publishers write. It is a target, not a hard bound: a burst of writes between
+checks can overshoot it, and the newest frame of every live track is kept
+whatever the target, so a publisher that opens many tracks still holds that much
+until it stops. `headroom` takes bytes or a percentage, and `capacity` also caps
+the cache at an absolute size. `headroom = "0"` removes the governor, so the
+cache grows without bound unless `capacity` is set: only run that where every
+publisher is trusted.
 
 `capacity` is a byte target, repaid as active publishers write. `duration`
 (30s by default) bounds memory by age, and sweeps on a timer, so a publisher
@@ -384,8 +394,12 @@ asking it to reconnect elsewhere, including any that connect during the drain,
 and is force-closed if it is still connected when the window ends. The cluster
 links the relay dialed are drained the same way and stop redialing, so a
 neighbour hears the relay is draining and moves its routes before the link
-closes. A neighbour keeps serving such a link rather than leave it, so a relay
-that dialed a peer holds its drain to the end of the window. Accepted
+closes. A neighbour keeps serving such a link rather than leave it, so the
+relay closes the link itself once its accepted connections have left and
+nothing reads through it, or at the end of the window, where a link still open
+counts as force-closed. Until then the link keeps announcing the broadcasts of
+publishers still connected to the relay, so neighbours don't lose them while
+those publishers move. Accepted
 connections still handshaking or awaiting authorization hold the drain until
 they finish, fail, or reach that same deadline, where any still pending is
 refused or closed. Public HTTP/1.1 connections hold the drain from TCP accept

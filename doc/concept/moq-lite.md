@@ -189,12 +189,21 @@ explicit opt-in on the announce request. On moq-transport that opt-in is the
 [hidden](/draft/moq-hidden) extension; a peer that never declares it receives
 every authorized namespace, dot-prefixed ones included.
 
-## Path patterns
+## Grants and filters
 
-Patterns describe sets of literal paths. They are how a token scopes what a
-session may publish and subscribe to, and how a consumer filters the
-announcements it is told about. They never travel as announcements: the wire
-carries prefixes, and each side filters locally.
+A grant, what a token or an origin scope lets a session publish and subscribe
+to, is a set of path prefixes. A prefix covers its path and everything beneath
+it: `room` covers `room`, `room/alice`, and `room/alice/cam`, but not `roomy`.
+The empty prefix covers everything. A grant holds no wildcard: `room/**`, `**`,
+`*`, or `cam-*.hang` is refused where the grant is made, so write `room` for
+`room/**` and the empty prefix for `**`. Tokens and auth server grants spell a
+prefix as `room/**` or `**` until releases before 0.22 retire, since those read
+a bare member as one path. Since every grant covers
+whole subtrees, a route a grant admits always serves whole subtrees too.
+
+Patterns are discovery filters: they pick which announcements a consumer lists,
+and never widen or narrow what it may request. They never travel as
+announcements: the wire carries prefixes, and each side filters locally.
 
 A pattern matches the whole path. `room` matches only `room`, while `room/**`
 matches `room` and every descendant. Segments are separated by `/`:
@@ -214,7 +223,7 @@ there is no escape for a literal `*`. The empty pattern matches the empty path.
 A subscriber watching under a root sees advertisements named relative to that
 root. When several routes advertise one prefix, each reader sees the best route
 its scope can use. A listing reports only routes whose literal name matches its
-patterns: under `**/*.chat`, a claim at `room` is left out even though it could
+filter: under `**/*.chat`, a claim at `room` is left out even though it could
 serve `room/lobby.chat`, and so is a route above the root. Requests still
 resolve through such covering routes, and a session still forwards them to its
 peer, which routes through them. Code that routes or forwards opts in with the
@@ -224,9 +233,8 @@ JS.
 ## Authorization
 
 On moq-lite 07 (`moq-lite-07-wip`, opt-in) each side presents a token on its
-own Auth stream and learns what it may publish and subscribe to: a union of
-[path patterns](#path-patterns), delivered exactly as issued rather than widened
-to a prefix. Right after setup both sides present the credential the connection
+own Auth stream and learns what it may publish and subscribe to: a set of
+[path prefixes](#grants-and-filters), delivered exactly as issued. Right after setup both sides present the credential the connection
 already carried (the URL token, a client certificate, or nothing), so a
 publisher learns before anyone subscribes whether its broadcasts can reach the
 peer. More tokens can be added without reconnecting; the session's scope is the
@@ -286,8 +294,8 @@ Each subscription carries the knobs that decide behavior under congestion:
 | **Priority** (-128..127, default 0) | Higher-priority tracks get bandwidth first. Audio above video, base layer above enhancement. The publisher's track priority breaks ties between subscriptions at one priority. From a native Rust publisher over QUIC or WebTransport, subscriptions at the same priority and publisher priority split bandwidth evenly by bytes, streams and datagrams alike, however many groups each has queued. A browser publisher and other transports without send groups are not covered. |
 | **Order** | Which group to send first when several are pending. Newest first for live (the default), oldest first for catch-up. Needs moq-lite 07 or moq-transport; older moq-lite always sends newest first. |
 | **Max delay** | How long a non-latest group stays worth delivering before it is skipped. Zero means "live edge only", and raising it is also what asks for history. Unset leaves the publisher's max age alone to bound it. |
-| **Min delay** | The playout buffer the subscriber holds behind the live edge. A join from the latest group starts at the newest group beginning this far behind it, so the buffer arrives full instead of filling in real time, and no fuller. The hop answering measures from what it holds: media time on a timed track, arrival time on an untimed one, and it never fetches upstream to reach further. Zero (the default) reaches back nothing, and a range from the oldest group or a named start ignores it. Carried by moq-lite 07, where a relay asks upstream for the largest its subscribers state. |
-| **Ranges** | Which groups to ask for: from the oldest group, a number of groups back from the latest, or the group containing a time, through an end that includes its group. Each group arrives whole, from its first frame. The default asks for everything max delay allows. Max delay still caps every range. |
+| **Min delay** | The playout buffer the subscriber holds behind the live edge, and where a live join starts. A range with no start and a stated min delay starts at the group containing the live edge minus it, so the buffer arrives full instead of filling in real time, and no fuller; zero starts at the latest group. The hop answering measures by media time on a timed track and by arrival on an untimed one, and fills from history to reach that group like any time start. A relay copy that can't prove which group its upstream would start at asks upstream and waits, so a join reads the same groups through a relay as from the publisher. Not stated (the default), a range with no start reaches back as far as max delay allows, and a range with a start ignores it. Carried by moq-lite 07, where a relay asks upstream for the largest its joining subscribers state, counting not stated as the largest. |
+| **Ranges** | Which groups to ask for: from the group containing a time, or from where min delay places a range with no start, through the group containing an end time or onward with the live edge. Each group arrives whole, from its first frame. The default asks for everything max delay allows. Max delay still caps every range. |
 
 On moq-lite 05 and later, a publisher explicitly reports groups that will not arrive.
 This lets a finished subscription settle without waiting for missing groups.
@@ -329,15 +337,13 @@ A group is addressed by its start: where it starts in the track's timescale,
 or a bare number that grows with each group on a track without one. A time
 start is the group containing that time, the newest starting at or before it,
 and a time end includes the group containing it, so neither waits on a frame.
-A relative anchor counts the groups the hop holds back from the latest one. It
-resolves on the hop that publishes the track, and over moq-lite-07, which
-carries it upstream and reports the live edge, so a copy resolves the ends
-itself. A Rust moq-transport copy resolves a relative anchor from the Largest
-Object its live join reports. Older moq-lite versions refuse relative anchors
-other than the live and default starts. Older moq-lite versions and
-moq-transport carry a group ID equal to the start, so a time anchor goes
-upstream as that ID, where a start selects the first group at or after it
-rather than the one containing it. moq-lite 01 and 02 carry no start, so every
+Older moq-lite versions and moq-transport carry a group ID equal to the start,
+so a time goes upstream as that ID, where a start selects the first group at or
+after it rather than the one containing it. A live join goes to a moq-transport
+publisher as a join at its latest group. A moq-transport subscriber's relative
+filter or joining FETCH is served for the current or next group and refused
+`NOT_SUPPORTED` for one counting further back, since group IDs here are starts
+and no arithmetic on them counts groups. moq-lite 01 and 02 carry no start, so every
 subscription there starts at the live group.
 
 A group ends one of three ways: finished at the time it ends, so it is whole;
@@ -368,14 +374,15 @@ A track is timed or untimed: it declares a timescale or none, and a frame that
 doesn't match is refused. No receiver fills in an arrival time, so an untimed
 track is judged by the wall clock alone. Tracks from moq-lite before 05, or from
 moq-transport without a `TIMESCALE`, arrive
-untimed. moq-lite 05 and 06 cannot declare an untimed track, so there its
-frames go out stamped with their send time; the work-in-progress 07 carries it
-without a timescale, each frame stamped with its group's start.
+untimed. moq-lite 05 and 06 cannot declare an untimed track, so there it goes
+out as milliseconds, each frame stamped with its group's start; the
+work-in-progress 07 carries it without a timescale, with the same stamps.
 
 A publisher refuses a group that starts before a lower one, and so does a
 moq-lite 07 receiver. A receiver passes on the timestamps it gets over moq-lite
-05 and 06 without checking them, since their send times look like media time and
-an older group fetched later would look like a rewind. A relay serves them on
+05 and 06 without checking them, since an older publisher stamps an untimed
+track there with send times, which look like media time, and an older group
+fetched later would look like a rewind. A relay serves them on
 over every version. A moq-transport frame's time is its Group ID, so its
 timestamps cannot rewind and are checked like any other.
 

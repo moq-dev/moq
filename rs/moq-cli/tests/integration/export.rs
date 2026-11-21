@@ -98,7 +98,7 @@ async fn relay() -> Relay {
 	config.listen.version = std::iter::once(LITE_07.parse().unwrap())
 		.chain(moq_net::Versions::all().iter().copied())
 		.collect();
-	config.auth.public = vec![moq_auth::Pattern::all()];
+	config.auth.public = vec![moq_auth::Prefix::all()];
 	let relay = moq_relay::Relay::load(config).await.expect("test relay");
 	let url = format!("https://{}/", relay.quic_addr().expect("QUIC address"));
 	let ready = relay.ready();
@@ -1084,8 +1084,8 @@ async fn next_instance(announced: &mut moq_net::origin::Routes) -> moq_net::Inst
 #[ignore = "real-time process test: just rs cli-export"]
 async fn a_passthrough_export_ends_with_its_redundant_importer() {
 	let relay = relay().await;
-	let demo = moq_net::Patterns::from(moq_net::Pattern::literal("demo").unwrap());
-	let mut announced = relay.origin.scope("", &demo).unwrap().routes();
+	let demo = moq_net::Pattern::literal("demo").unwrap();
+	let mut announced = relay.origin.filter(&demo).unwrap().routes();
 	let (feed, feeding) = redundant_feed();
 	let mut first = redundant_import(&relay, &feed, &["--passthrough"]);
 	let incumbent = next_instance(&mut announced).await;

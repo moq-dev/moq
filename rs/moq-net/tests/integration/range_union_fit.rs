@@ -63,19 +63,10 @@ fn sparse(offset: u64) -> Vec<Range> {
 /// Whether `ranges` asks for every group `want` does.
 fn covers(ranges: &[Range], want: &[Range]) -> bool {
 	want.iter().all(|want| {
-		let moq_net::track::Anchor::Time(key) = want.start else {
-			unreachable!()
-		};
+		let Some(key) = want.start else { unreachable!() };
 		ranges.iter().any(|range| {
-			let start = match range.start {
-				moq_net::track::Anchor::Time(start) => start <= key,
-				_ => false,
-			};
-			let end = match range.end {
-				Some(moq_net::track::Anchor::Time(end)) => key <= end,
-				None => true,
-				_ => false,
-			};
+			let start = range.start.is_some_and(|start| start <= key);
+			let end = range.end.is_none_or(|end| key <= end);
 			start && end
 		})
 	})
@@ -153,7 +144,7 @@ async fn a_union_too_large_for_one_message_asks_a_covering_superset() {
 	assert!(
 		ranges
 			.iter()
-			.all(|range| matches!(range.start, moq_net::track::Anchor::Time(start) if start >= BASE)),
+			.all(|range| range.start.is_some_and(|start| start >= BASE)),
 		"nothing below the viewers' ranges"
 	);
 

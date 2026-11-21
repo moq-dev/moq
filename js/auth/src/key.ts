@@ -5,7 +5,7 @@ import { type Algorithm, AlgorithmSchema } from "./algorithm.ts";
 import { type Claims, ClaimsFieldsSchema, ClaimsSchema, Scope, ScopeSchema } from "./claims.ts";
 import * as Json from "./json.ts";
 import * as Path from "./path.ts";
-import { encodeClaims } from "./wire.ts";
+import { encodeClaims, writtenScope } from "./wire.ts";
 
 /**
  * A validated key identifier (kid). At most 128 alphanumeric, hyphen, or underscore characters.
@@ -126,6 +126,9 @@ function toPublic(key: Key): PublicKey {
 	const copy: Record<string, unknown> = structuredClone(key);
 	for (const field of ["d", "p", "q", "dp", "dq", "qi"]) delete copy[field];
 	copy.key_ops = ["verify"];
+	// TEMPORARY MIGRATION (see `wire.ts`): a scope typed by hand is spelled as a parsed one is, so
+	// a published key reads as the same subtrees as the tokens it verifies.
+	if (key.scope) copy.scope = writtenScope(key.scope);
 	return copy as PublicKey;
 }
 
@@ -168,7 +171,7 @@ function parse(jwk: string): Key {
  * `issued` is written only when the claims carry one, so an unset field stays off the
  * wire rather than being stamped with the current time; nor is an `id` invented.
  *
- * Takes each role as {@link Claims} spell it: its patterns, or `{path, rate}` when capped.
+ * Takes each role as {@link Claims} spell it: its prefixes, or `{path, rate}` when capped.
  * A field {@link Claims} lacks is refused, the wire's `exp` and the legacy `put`/`get`
  * included.
  *

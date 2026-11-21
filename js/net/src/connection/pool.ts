@@ -363,20 +363,20 @@ export class Connection {
 	}
 
 	/**
-	 * Subscribe to broadcast announcements matching `scope`, spanning reconnects
+	 * Subscribe to broadcast announcements matching `filter`, spanning reconnects
 	 * and URL switches: a switch retracts everything from
 	 * the old relay's origin, then the new one's arrivals stream in.
 	 */
-	announced(scope: Path.Pattern = Path.Pattern.all(), options?: Announce.Options): Announce.Consumer {
-		return list(this.routes(scope, options));
+	announced(filter: Path.Pattern = Path.Pattern.all(), options?: Announce.Options): Announce.Consumer {
+		return list(this.routes(filter, options));
 	}
 
 	/**
-	 * Every route change matching `scope`, spanning reconnects like {@link announced}.
+	 * Every route change matching `filter`, spanning reconnects like {@link announced}.
 	 *
 	 * @internal
 	 */
-	routes(scope: Path.Pattern = Path.Pattern.all(), options?: Announce.Options): Routes {
+	routes(filter: Path.Pattern = Path.Pattern.all(), options?: Announce.Options): Routes {
 		const producer = new AnnounceProducer();
 		const consumer = producer.consume();
 
@@ -393,7 +393,7 @@ export class Connection {
 				return;
 			}
 			// A URL switch retracts what the old origin announced.
-			pumpAnnounced(effect, origin.routes(scope, options), producer);
+			pumpAnnounced(effect, origin.routes(filter, options), producer);
 		});
 
 		closeUnwanted(producer);

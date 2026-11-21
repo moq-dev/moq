@@ -20,7 +20,7 @@ function named(request: Request): string {
 }
 
 /** Grants everything and refuses nothing. */
-const GRANT = { publish: new Path.Patterns([Path.Pattern.all()]), subscribe: new Path.Patterns() };
+const GRANT = { publish: Path.Prefixes.all(), subscribe: new Path.Prefixes() };
 
 /**
  * A lite-07 relay that answers each token itself: `decide` accepts or rejects the request, and

@@ -1502,13 +1502,10 @@ test("default audio replays the last second after three seconds without a subscr
 // join states how far back it plays as its min delay, which bounds the replay however far its max
 // delay reaches; one that states none (moq-transport, moq-lite before 07) is bounded by its max
 // alone, as is a reader asking for history.
-const LIVE = [{ start: { relative: 0n } }];
+const LIVE = [{}];
 for (const [name, subscription] of [
 	["a live join's min delay", { delay: { min: Duration.millis(130), max: Duration.millis(10_000) }, ranges: LIVE }],
-	[
-		"a live join's max delay when it states no min",
-		{ delay: { min: null, max: Duration.millis(130) }, ranges: LIVE },
-	],
+	["an oldest reader's max delay, stating no min", { delay: { min: null, max: Duration.millis(130) }, ranges: LIVE }],
 	[
 		"a live join's max delay when that is shorter than its min",
 		{ delay: { min: Duration.millis(10_000), max: Duration.millis(130) }, ranges: LIVE },

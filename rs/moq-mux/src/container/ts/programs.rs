@@ -2231,7 +2231,8 @@ mod test {
 		assert_eq!(programs.stats().crc_error, 1);
 
 		// A waiting program's PMT PID that a started program reads only as media: no program
-		// reassembles PMTs there, so the scan counts the corrupt section.
+		// reassembles PMTs there, so the scan counts the corrupt section, before the started
+		// program ends on reading a section as a PES header.
 		let origin = crate::source::produce_origin();
 		let mut programs = Programs::new(
 			origin,
@@ -2241,7 +2242,8 @@ mod test {
 		let mut data = psi_packets(0, &mut 0, &[], &pat_section(&[(1, 0x0100), (2, 0x0061)]));
 		data.extend(psi_packets(0x0100, &mut 0, &[], &pmt(1)));
 		data.extend(psi_packets(0x0061, &mut 0, &[], &corrupt(pmt(2))));
-		programs.decode(&data).unwrap();
+		let err = programs.decode(&data).expect_err("a section is no PES");
+		assert!(err.to_string().contains("PES header on PID 97"), "{err}");
 		assert_eq!(programs.programs.len(), 1);
 		assert_eq!(programs.stats().crc_error, 1);
 	}

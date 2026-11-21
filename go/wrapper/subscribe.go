@@ -153,7 +153,7 @@ func (t *TrackConsumer) Info() TrackInfo {
 }
 
 // Update changes this subscriber's delivery preferences. It fails on a
-// negative MaxDelay, or a time anchor the track can't serve.
+// negative MaxDelay, or a range time the track can't serve.
 func (t *TrackConsumer) Update(subscription Subscription) error {
 	sub, err := subscription.ffi()
 	if err != nil {

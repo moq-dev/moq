@@ -4380,8 +4380,8 @@ mod session_tests {
 
 	/// The announcements of the routes covering `path` on `origin`.
 	fn watch(origin: &moq_net::origin::Producer, path: &str) -> moq_net::origin::Routes {
-		let path = moq_net::Patterns::from(moq_net::Pattern::literal(path).unwrap());
-		origin.consume().scope("", &path).unwrap().routes()
+		let path = moq_net::Pattern::literal(path).unwrap();
+		origin.consume().filter(&path).unwrap().routes()
 	}
 
 	/// Follow `room` on `origin` past its start.

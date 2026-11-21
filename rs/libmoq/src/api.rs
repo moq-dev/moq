@@ -820,15 +820,18 @@ pub enum moq_refresh {
 /// How far behind the live edge a subscriber or media consumer plays: where it starts, and how
 /// late it may fall.
 ///
-/// A zeroed struct is moq-net's default, and so is a null pointer where one is taken: start at
-/// the newest group and skip a superseded one at once.
+/// A zeroed struct is moq-net's default, and so is a null pointer where one is taken: no stated
+/// minimum and a zero max, which starts at the newest group and skips a superseded one at once.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct moq_delay {
-	/// The target latency in microseconds: the playout or jitter-buffer delay held behind
-	/// the live edge, where a cold join starts. A missing group is given up by the max alone.
-	/// moq-lite-07 sends it upstream. A `min_us` past the max starts a cold join no further back than the
-	/// group covering the point the max behind the live edge, since the publisher serves no older group. Ignored when `min_unstated` is set.
+	/// The target latency in microseconds: the playout or jitter-buffer delay held behind the
+	/// live edge, read only when `min_stated` is set. A range with no start is a live join once
+	/// it is stated, zero included: it starts at the group containing the live edge minus this.
+	/// A range with a start ignores it, and a missing group is given up by the max alone.
+	/// moq-lite-07 sends it upstream. A `min_us` past the max starts a live join no further back
+	/// than the group covering the point the max behind the live edge, since the publisher
+	/// serves no older group.
 	pub min_us: u64,
 	/// How far a non-latest group may fall behind the live edge before it is skipped, in
 	/// microseconds. Zero skips immediately. Enforced by the publisher's cache and by any
@@ -837,16 +840,15 @@ pub struct moq_delay {
 	pub max_us: u64,
 	/// No subscriber max: wait on a stalled group as long as the publisher's max age allows.
 	pub max_unlimited: bool,
-	/// Leave the minimum unstated. A media consumer starts it as zero, while the subscription
-	/// keeps it unstated, so it never pulls the aggregate across subscribers to zero, unless a
-	/// catalog warmup or an audio decoder's playout delay states one.
-	pub min_unstated: bool,
+	/// Whether `min_us` is stated. When false, a consumer starts its minimum as zero, so a range
+	/// with no start joins at the latest group; give a range a time start to reach back.
+	pub min_stated: bool,
 }
 
 impl From<moq_delay> for moq_net::track::Delay {
 	fn from(delay: moq_delay) -> Self {
 		Self {
-			min: (!delay.min_unstated).then(|| std::time::Duration::from_micros(delay.min_us)),
+			min: delay.min_stated.then(|| std::time::Duration::from_micros(delay.min_us)),
 			max: (!delay.max_unlimited).then(|| std::time::Duration::from_micros(delay.max_us)),
 		}
 	}
@@ -858,7 +860,7 @@ impl From<moq_net::track::Delay> for moq_delay {
 			min_us: delay.min.map(micros).unwrap_or_default(),
 			max_us: delay.max.map(micros).unwrap_or_default(),
 			max_unlimited: delay.max.is_none(),
-			min_unstated: delay.min.is_none(),
+			min_stated: delay.min.is_some(),
 		}
 	}
 }
@@ -882,12 +884,12 @@ pub struct moq_subscription {
 	/// the midpoint.
 	pub priority: i8,
 
-	/// How far behind the live edge this subscriber plays: where a cold join starts, and how
-	/// late a non-latest group may fall before it is skipped.
+	/// How far behind the live edge this subscriber plays: where a range with no start begins,
+	/// and how late a non-latest group may fall before it is skipped.
 	pub delay: moq_delay,
 
-	/// The spans of the track to deliver, or NULL for everything `delay.max_us` still
-	/// considers fresh. A non-NULL pointer with `ranges_len` 0 asks for nothing.
+	/// The spans of the track to deliver, or NULL for one range with no start. A non-NULL
+	/// pointer with `ranges_len` 0 asks for nothing.
 	///
 	/// A request to the publisher, aggregated across every subscriber, and this
 	/// subscription's read filter: it reads only the groups its own ranges cover.
@@ -899,50 +901,32 @@ pub struct moq_subscription {
 	pub order: u32,
 }
 
-/// A span of a track to deliver: from `start` through `end`, or onward without one.
+/// A span of a track to deliver: from the group containing `start` through the group containing
+/// `end`. A zeroed one has neither: a range with no start that follows the live edge.
 ///
-/// Every start is the first frame of its group, and every end includes its whole group.
+/// Every start is the first frame of its group, and every end includes its whole group. A time
+/// names the group containing it, the newest one starting at or before it, so a group's start
+/// names exactly it. Both are unscaled (`has_scale` false), with `value` in the track's
+/// timescale; a scaled one is refused with a timestamp mismatch.
+///
+/// A range with no start is placed by the subscription's `delay`. A raw track consumer joins it
+/// live: `delay.min_us` behind the live edge, or at the latest group when `delay.min_stated` is
+/// false.
+///
+/// Over a session older than moq-lite-07, a start between two groups reaches the publisher as
+/// the first group at or after it, missing the one containing it.
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct moq_range {
-	/// Where delivery starts.
-	pub start: moq_anchor,
-	/// Where delivery stops, including its group, read only when `end_present` is true.
-	pub end: moq_anchor,
+	/// Where delivery starts, read only when `start_present` is true.
+	pub start: moq_timestamp,
+	/// Whether `start` is present. When false, the subscription's `delay` places the start.
+	pub start_present: bool,
+	/// Where delivery stops, including the group containing it, read only when `end_present`
+	/// is true.
+	pub end: moq_timestamp,
 	/// Whether `end` is present. When false, the range follows the live edge.
 	pub end_present: bool,
-}
-
-/// Where one end of a [moq_range] falls. A zeroed one names no kind and is refused.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct moq_anchor {
-	/// `moq_anchor_kind` discriminant.
-	pub kind: u32,
-	/// Read only with `MOQ_ANCHOR_RELATIVE`: how many groups before the latest one (0 is the
-	/// latest, and an offset past every group held reaches back to the oldest).
-	pub groups: u64,
-	/// The time, read only with `MOQ_ANCHOR_TIME`: unscaled (`has_scale` false), with `value` in
-	/// the track's timescale. A scaled one is refused with a timestamp mismatch.
-	pub timestamp: moq_timestamp,
-}
-
-/// How a [moq_anchor] names its position.
-#[repr(C)]
-#[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
-#[derive(Clone, Copy, Debug)]
-pub enum moq_anchor_kind {
-	/// A count of `groups` back from the latest one.
-	MOQ_ANCHOR_RELATIVE = 1,
-	/// The group containing a time: the newest one starting at or before it. A group is named
-	/// by its start, so its start names exactly it. As an end, it includes every group
-	/// starting at or before the time.
-	///
-	/// Over a session older than moq-lite-07, a start between two groups reaches the
-	/// publisher as the first group at or after it, missing the one containing it.
-	MOQ_ANCHOR_TIME = 2,
-	/// The oldest group still around, as far back as `delay.max_us` allows. A start only.
-	MOQ_ANCHOR_OLDEST = 3,
 }
 
 /// Which of a subscription's pending groups the publisher sends first. Zero is the default.
@@ -956,18 +940,13 @@ pub enum moq_order {
 	MOQ_ORDER_ASCENDING = 1,
 }
 
-/// `anchor` as moq-net reads it. A time must be unscaled, in the track's timescale: the
+/// A range's time as moq-net reads it. It must be unscaled, in the track's timescale: the
 /// timescale is unknown here, so a scaled one is refused rather than read in the wrong units.
-fn parse_anchor(anchor: &moq_anchor) -> Result<moq_net::track::Anchor, Error> {
-	Ok(match anchor.kind {
-		v if v == moq_anchor_kind::MOQ_ANCHOR_RELATIVE as u32 => moq_net::track::Anchor::Relative(anchor.groups),
-		v if v == moq_anchor_kind::MOQ_ANCHOR_TIME as u32 => match anchor.timestamp.has_scale {
-			false => moq_net::track::Anchor::Time(anchor.timestamp.value),
-			true => return Err(moq_net::Error::TimestampMismatch.into()),
-		},
-		v if v == moq_anchor_kind::MOQ_ANCHOR_OLDEST as u32 => moq_net::track::Anchor::Oldest,
-		_ => return Err(Error::InvalidCode),
-	})
+fn parse_range_time(timestamp: &moq_timestamp) -> Result<u64, Error> {
+	match timestamp.has_scale {
+		false => Ok(timestamp.value),
+		true => Err(moq_net::Error::TimestampMismatch.into()),
+	}
 }
 
 /// # Safety
@@ -990,8 +969,11 @@ pub(crate) unsafe fn parse_subscription(
 			.iter()
 			.map(|range| {
 				Ok(moq_net::track::Range {
-					start: parse_anchor(&range.start)?,
-					end: range.end_present.then(|| parse_anchor(&range.end)).transpose()?,
+					start: range
+						.start_present
+						.then(|| parse_range_time(&range.start))
+						.transpose()?,
+					end: range.end_present.then(|| parse_range_time(&range.end)).transpose()?,
 				})
 			})
 			.collect::<Result<Vec<_>, Error>>()?;
@@ -1466,9 +1448,10 @@ pub unsafe extern "C" fn moq_versions(dst: *mut moq_string, count: usize) -> i32
 	})
 }
 
-/// A [moq_subscription] with moq-net's defaults, whose zero `delay` starts at the newest
-/// group and skips a superseded one at once. A NULL subscription pointer or a zeroed struct
-/// means the same; start from this struct to change a field.
+/// A [moq_subscription] with moq-net's defaults, whose `delay` states no minimum and a zero
+/// max, which starts at the newest group and skips a superseded one at once. A NULL
+/// subscription pointer or a zeroed struct means the same; start from this struct to change a
+/// field.
 ///
 /// Returned by value because there is nothing to fail.
 #[unsafe(no_mangle)]
@@ -2613,7 +2596,7 @@ pub extern "C" fn moq_broadcast_request_free(request: u32) -> i32 {
 	})
 }
 
-/// Learn about broadcasts matching a pattern scope under an origin.
+/// Learn about broadcasts matching a discovery filter under an origin.
 ///
 /// `config` selects the paths; NULL lists every visible one. Delivered
 /// [moq_announce_event] prefixes remain relative to the origin.
@@ -2643,7 +2626,7 @@ pub unsafe extern "C" fn moq_origin_announced(
 ) -> i32 {
 	ffi::enter(move || {
 		let origin = ffi::parse_id(origin)?;
-		let (scope, hidden) = match unsafe { config.as_ref() } {
+		let (filter, hidden) = match unsafe { config.as_ref() } {
 			None => (moq_net::Pattern::all(), false),
 			Some(config) => {
 				let prefix = unsafe { ffi::parse_str(config.prefix, config.prefix_len)? };
@@ -2656,7 +2639,7 @@ pub unsafe extern "C" fn moq_origin_announced(
 			}
 		};
 		let on_announce = unsafe { ffi::OnStatus::new(user_data, on_announce)? };
-		State::lock().origin.announced(origin, scope, hidden, on_announce)
+		State::lock().origin.announced(origin, filter, hidden, on_announce)
 	})
 }
 
@@ -5028,7 +5011,7 @@ pub unsafe extern "C" fn moq_consume_track(
 ///
 /// Pass NULL for `subscription` to reset to moq-net defaults.
 ///
-/// Returns a zero on success, or a negative code on failure, such as a time anchor on an
+/// Returns a zero on success, or a negative code on failure, such as a range time on an
 /// untimed track, which leaves the subscription as it was. An update made before the
 /// subscription is established applies once it is, so a refusal then ends the consumer
 /// through its callback instead.

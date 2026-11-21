@@ -100,7 +100,7 @@ async fn main() -> anyhow::Result<()> {
 
 			let path = moq_net::Path::new(&config.broadcast)?;
 			let scope =
-				moq_net::Patterns::from(moq_net::Pattern::subtree(path.as_str()).context("invalid broadcast name")?);
+				moq_net::Prefixes::from(moq_net::Prefix::try_from(path.as_str()).context("invalid broadcast name")?);
 			let consumer = origin
 				.scope("", &scope)
 				.context("not allowed to consume broadcast")?
