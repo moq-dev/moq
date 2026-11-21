@@ -1347,6 +1347,36 @@ impl Consumer {
 		self.expired
 	}
 
+	/// Why a wire publisher waiting on the transport, for stream credit or to drain, should
+	/// give up on this group: the drift budget convicted it ([`Error::Old`]), or its copy
+	/// was aborted (evicted, cut, or failed upstream) before this cursor read it all.
+	/// `pending` as in [`Self::poll_expired_while_pending`].
+	///
+	/// A machine parked on stream credit reads nothing, so without this an aborted group,
+	/// which never expires, would wait for credit it could only spend on a reset. A spliced
+	/// group is never abandoned for an abort: another route may still continue it.
+	pub(crate) fn poll_abandoned(&mut self, waiter: &kio::Waiter, pending: bool) -> Option<Error> {
+		if self.poll_expired_while_pending(waiter, pending) {
+			return Some(Error::Old);
+		}
+		let ConsumerKind::Plain(plain) = &self.inner else {
+			return None;
+		};
+		// Registered on the close alone: an abort closes the channel, and waking on every
+		// frame written to a parked group would cost a stalled subscriber per frame.
+		if plain.state.poll_closed(waiter).is_pending() {
+			return None;
+		}
+		let state = plain.state.read();
+		let unread = !plain.capped() && state.fin.is_none_or(|fin| plain.index < fin);
+		match &state.abort {
+			// The rest of the group is gone; what was read already is not.
+			Some(err) if unread => Some(err.clone()),
+			// Read to its end, or finished and closed with its last producer: still servable.
+			_ => None,
+		}
+	}
+
 	/// Whether expiry can still discard content or unblock a group that may grow.
 	fn expiry_pending(&self) -> bool {
 		match &self.inner {
