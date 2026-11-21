@@ -232,14 +232,13 @@ Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit):
   quests for a code-free `libmoq` stub were deleted.
 
 Decided 2026-11-20 (maintainer, /quest-plan of the pre-cut flow-control
-audit): ✅ the cut waits on the [credit model](/quest/m1/credit-model.md),
+audit): ✅ the cut waits on the credit model (`verify-credit`),
 [#9210](https://github.com/moq-dev/moq/pull/9210)'s
 [paused-stream allowance](/quest/m1/paused-allowance.md), which merges once
-the model passes on it, and a [bounded relay cache by
-default](/quest/m1/relay-memory-default.md). Rejected: cutting with flow
-control unverified; landing #9210 after the cut. The JS frame cap
-([#9283](https://github.com/moq-dev/moq/pull/9283)) ships with the cut only
-if it lands first.
+the model passes on it, and a bounded relay cache by default. Rejected: cutting with flow
+control unverified; landing #9210 after the cut. The
+[JS frame cap](https://github.com/moq-dev/moq/pull/9283) ships with the cut only if it
+lands first.
 
 On the reconciled candidate, regenerate the Nix build plan with `just rs cargo-nix` after the
 shared version bump. A dry run of the bump to 0.22.0 updated 52 packages and left Cargo.nix stale.
@@ -279,7 +278,5 @@ candidate:
 - [Cargo feature review](/quest/m3/release/feature-flags.md) - every Cargo feature was judged against the feature rules, and approved changes landed
 - [Interop and Video pass on main](/quest/m0/interop-green/README.md) - the cut PR's release gate runs `interop.yml`, which failed on `main` every day through 2026-11-12
 - [Nightly passes on main](/quest/m0/nightly/README.md) - the release gate runs `features.yml`, red in the 2026-11-12 Nightly
-- [Credit model](/quest/m1/credit-model.md) - receive credit, pausing, and the sender's credit wait never deadlock
 - [Paused-stream allowance](/quest/m1/paused-allowance.md) - #9210 merges with its design checked
-- [Relay memory default](/quest/m1/relay-memory-default.md) - a stock relay's cache is bounded
 - [Claim new npm names](/quest/m3/release/npm-first-publish.md) - trusted publishing can publish every new `@moq/*` package

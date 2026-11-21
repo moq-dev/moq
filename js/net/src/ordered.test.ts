@@ -440,7 +440,7 @@ test("a read returning only gaps keeps its handed-out record compact", () => {
 test("an ordered read hands out nothing past a time start still waiting to be placed", () => {
 	const producer = receivedTrack();
 	put(producer, 2000n, false);
-	const ordered = producer.subscribe({ delay: { max: null }, ranges: [{ start: { time: 1500n } }] }).ordered();
+	const ordered = producer.subscribe({ delay: { max: null }, ranges: [{ start: 1500n }] }).ordered();
 	expect(items(ordered)).toEqual([]);
 	// A session's tail holds the read at the answered start's group until it lands, and says
 	// nothing lies between it and 2000.
@@ -453,7 +453,7 @@ test("an ordered read hands out nothing past a time start still waiting to be pl
 test("a time start folded upstream into an earlier range places from the range covering it", () => {
 	const producer = receivedTrack();
 	put(producer, 2000n, false);
-	const subscriber = producer.subscribe({ delay: { max: null }, ranges: [{ start: { time: 1500n } }] });
+	const subscriber = producer.subscribe({ delay: { max: null }, ranges: [{ start: 1500n }] });
 	// A range asked from 1000 that ends at 1200 doesn't reach the time.
 	hooks.timeStarts(producer, [[1000n, 1000n, 1200n]], NO_MAX_DELAY);
 	expect(hooks.servingResolved(subscriber)).toEqual([undefined]);
@@ -485,9 +485,7 @@ test("a folded time start wakes its read when the grace for a gap below it passe
 		put(producer, 2000n, false);
 		clock.jump(Duration.millis(10));
 		put(producer, 1800n, false);
-		const ordered = producer
-			.subscribe({ delay: { max: Duration.secs(1) }, ranges: [{ start: { time: 1500n } }] })
-			.ordered();
+		const ordered = producer.subscribe({ delay: { max: Duration.secs(1) }, ranges: [{ start: 1500n }] }).ordered();
 		expect(items(ordered)).toEqual([]);
 		let read: bigint | undefined;
 		const next = ordered.nextGroup().then((group) => {
@@ -513,7 +511,7 @@ test("a waiting time start holds back a gap above its group", () => {
 	const producer = receivedTrack();
 	put(producer, 2000n, false);
 	drop(producer, 1500n, 1600n);
-	const ordered = producer.subscribe({ delay: { max: null }, ranges: [{ start: { time: 1500n } }] }).ordered();
+	const ordered = producer.subscribe({ delay: { max: null }, ranges: [{ start: 1500n }] }).ordered();
 	expect(items(ordered)).toEqual([]);
 	hooks.timeStarts(producer, [[1500n, 1000n]], NO_MAX_DELAY);
 	put(producer, 1000n, false);
@@ -529,7 +527,7 @@ test("a waiting time start holds an ordered read only within its budget", async 
 		const producer = receivedTrack();
 		put(producer, 2000n, false);
 		const ordered = producer
-			.subscribe({ delay: { max: Duration.millis(100) }, ranges: [{ start: { time: 1500n } }] })
+			.subscribe({ delay: { max: Duration.millis(100) }, ranges: [{ start: 1500n }] })
 			.ordered();
 		expect(items(ordered)).toEqual([]);
 		let read: bigint | undefined;
@@ -553,7 +551,7 @@ test("a waiting time start below an ordered read's own floor holds nothing", () 
 	const producer = receivedTrack();
 	put(producer, 2000n, false);
 	const ordered = producer
-		.subscribe({ delay: { max: null }, ranges: [{ start: { time: 1500n } }] })
+		.subscribe({ delay: { max: null }, ranges: [{ start: 1500n }] })
 		.withRange({ start: { included: 2000n } })
 		.ordered();
 	expect(items(ordered)).toEqual(["group 2000"]);
@@ -564,7 +562,7 @@ test("a waiting time start holds no gap once nothing from the read's floor throu
 	put(producer, 2000n, false);
 	const ordered = () =>
 		producer
-			.subscribe({ delay: { max: null }, ranges: [{ start: { time: 1500n } }] })
+			.subscribe({ delay: { max: null }, ranges: [{ start: 1500n }] })
 			.withRange({ start: { included: 1500n }, end: { excluded: 1600n } })
 			.ordered();
 	drop(producer, 1501n, 1600n);
@@ -582,7 +580,7 @@ test("a stale verdict narrower than an ordered read's budget leaves its time sta
 	hooks.dropTrackGroups(producer, 1000n, 1500n, staleHole(100));
 	drop(producer, 1500n, 1600n);
 	const ordered = producer
-		.subscribe({ delay: { max: null }, ranges: [{ start: { time: 1500n } }] })
+		.subscribe({ delay: { max: null }, ranges: [{ start: 1500n }] })
 		.withRange({ start: { included: 1000n }, end: { excluded: 1600n } })
 		.ordered();
 	// The group containing 1500 may still land for this budget.
@@ -600,7 +598,7 @@ test("a stale verdict a capped ordered read rejects leaves its time start waitin
 	hooks.dropTrackGroups(producer, 1000n, 1500n, staleHole(10_000));
 	drop(producer, 1500n, 1600n);
 	const ordered = producer
-		.subscribe({ delay: { max: Duration.secs(1) }, ranges: [{ start: { time: 1500n } }] })
+		.subscribe({ delay: { max: Duration.secs(1) }, ranges: [{ start: 1500n }] })
 		.withRange({ start: { included: 1000n }, end: { excluded: 1600n } })
 		.ordered();
 	// Within the verdict's budget, but the cap keeps the read from the groups it rests on.
@@ -625,7 +623,7 @@ test("a refusal judged stale under a narrower budget leaves a widened read's tim
 	expect([fill?.start, fill?.end]).toEqual([1000n, 1500n]);
 	if (fill) rejectGroups(fill, 1000n, 1500n, new StreamError(StreamCode.Old), { budget: 100, everyone: false });
 	// Widened past the refusal's budget, with a time start nothing held places.
-	subscriber.update({ delay: { max: null }, ranges: [{ start: { time: 1500n } }] });
+	subscriber.update({ delay: { max: null }, ranges: [{ start: 1500n }] });
 	expect(items(ordered)).toEqual([]);
 	requests.close();
 });
@@ -642,7 +640,7 @@ test("an empty answer never extends the reach of a start reported for its time",
 		drop(producer, 1200n, 1201n);
 		producer.skipGroups(1201n, 1600n);
 		const at = (time: bigint) =>
-			hooks.servingResolved(producer.subscribe({ delay: { max: null }, ranges: [{ start: { time } }] }));
+			hooks.servingResolved(producer.subscribe({ delay: { max: null }, ranges: [{ start: time }] }));
 		expect(at(1250n)).toEqual([{ start: 1200n, end: undefined, floored: true }]);
 		// No answer reaches 1500.
 		expect(at(1500n)).toEqual([undefined]);
@@ -654,7 +652,7 @@ test("a skip is no group to place a waiting time start from", () => {
 	// GROUP 2000 says the group before it is 1000, which is still on its way.
 	producer.skipGroups(1001n, 2000n);
 	put(producer, 2000n, false);
-	const ordered = producer.subscribe({ delay: { max: null }, ranges: [{ start: { time: 1500n } }] }).ordered();
+	const ordered = producer.subscribe({ delay: { max: null }, ranges: [{ start: 1500n }] }).ordered();
 	expect(items(ordered)).toEqual([]);
 	put(producer, 1000n, false);
 	expect(items(ordered)).toEqual(["group 1000", "group 2000"]);
@@ -667,7 +665,7 @@ test("a folded time start never places below the range covering it", () => {
 	// The covering range's first group was given up, and nothing lies between it and the time.
 	drop(producer, 1200n, 1201n);
 	producer.skipGroups(1201n, 1600n);
-	const subscriber = producer.subscribe({ delay: { max: null }, ranges: [{ start: { time: 1500n } }] });
+	const subscriber = producer.subscribe({ delay: { max: null }, ranges: [{ start: 1500n }] });
 	expect(hooks.servingResolved(subscriber)).toEqual([{ start: 1200n, end: undefined, floored: true }]);
 });
 
@@ -677,13 +675,13 @@ test("a range answered empty holds back no later group within its budget, though
 	// Asked with a one second budget: the answer says nothing about a group a wider reader still wants.
 	hooks.timeStarts(producer, [[1000n, undefined, 1800n]], 1000);
 	const at = (time: bigint) =>
-		hooks.servingResolved(producer.subscribe({ delay: { max: null }, ranges: [{ start: { time } }] }));
+		hooks.servingResolved(producer.subscribe({ delay: { max: null }, ranges: [{ start: time }] }));
 	expect(at(1000n)).toEqual([undefined]);
 	expect(at(1500n)).toEqual([undefined]);
 	// GROUP 2000 says nothing lies between the time and it.
 	producer.skipGroups(1000n, 2000n);
 	const read = (time: bigint, max: Duration | null) =>
-		items(producer.subscribe({ delay: { max }, ranges: [{ start: { time } }] }).ordered());
+		items(producer.subscribe({ delay: { max }, ranges: [{ start: time }] }).ordered());
 	for (const time of [1000n, 1500n]) {
 		expect(read(time, Duration.secs(1))).toEqual(["group 2000"]);
 		expect(read(time, null)).toEqual([]);
@@ -696,7 +694,7 @@ async function flush() {
 }
 
 // Mirrors the Rust `a_time_end_between_*` tests in `track.rs`.
-const between = { ranges: [{ start: { time: 1500n }, end: { time: 1999n } }], delay: { max: Duration.millis(30_000) } };
+const between = { ranges: [{ start: 1500n, end: 1999n }], delay: { max: Duration.millis(30_000) } };
 
 test("a time end between two groups ends an ordered read once the publisher created one past it", async () => {
 	using clock = manual();
@@ -765,7 +763,7 @@ test("an ordered read whose window ends past a group it passed as stale reports 
 		clock.jump(Duration.millis(100));
 		put(producer, 100n);
 		const ordered = producer
-			.subscribe({ delay: { max: Duration.millis(50) }, ranges: [{ start: { time: 0n }, end: { time: 49n } }] })
+			.subscribe({ delay: { max: Duration.millis(50) }, ranges: [{ start: 0n, end: 49n }] })
 			.ordered();
 		expect(items(ordered)).toEqual(["gap 0..1 (old)"]);
 		expect(ordered.tryNextItem()).toBeUndefined();

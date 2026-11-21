@@ -10,7 +10,7 @@ use support::AtStart;
 
 use std::time::Duration;
 
-use moq_net::{Pattern, Patterns, Version, origin, track};
+use moq_net::{Prefixes, Version, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(600);
@@ -50,7 +50,7 @@ fn tenant(origin: &origin::Producer, root: &str) -> origin::Consumer {
 	origin
 		.mount("tenant-b/shared", "tenant-a/public")
 		.unwrap()
-		.scope(root, &Patterns::from(Pattern::all()))
+		.scope(root, &Prefixes::all())
 		.unwrap()
 		.with_proxy(true)
 		.consume()
@@ -247,7 +247,7 @@ async fn a_claim_above_the_target_outranks_a_claim_above_the_mount_point() {
 	let handle = relay
 		.mount("tenant-b/x/shared", "tenant-a/public")
 		.unwrap()
-		.scope("", &Patterns::from(Pattern::all()))
+		.scope("", &Prefixes::all())
 		.unwrap()
 		.with_proxy(true)
 		.consume();

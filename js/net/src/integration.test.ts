@@ -196,7 +196,7 @@ test("integration: lite subscription options and updates reach the publisher", a
 			const producer = request.accept({ timescale: Timescale.MILLI });
 			// The TRACK lookup opens the request and the SUBSCRIBE joins it, so its options land after.
 			const check = (subscription = producer.subscription.peek()) => {
-				if (subscription?.ranges?.[0]?.start?.time === 1n) resolveProducer?.(producer);
+				if (subscription?.ranges?.[0]?.start === 1n) resolveProducer?.(producer);
 			};
 			check();
 			producer.subscription.subscribe(check);
@@ -208,7 +208,7 @@ test("integration: lite subscription options and updates reach the publisher", a
 	const subscriber = remote.track("video").subscribe({
 		priority: 3,
 		delay: { max: Duration.millis(250) },
-		ranges: [{ start: { time: 1n }, end: { time: 8n } }],
+		ranges: [{ start: 1n, end: 8n }],
 	});
 	const producer = await accepted;
 	expect(producer.subscription.peek()).toEqual({
@@ -216,20 +216,20 @@ test("integration: lite subscription options and updates reach the publisher", a
 		// The negotiated lite-06 cannot state a minimum.
 		delay: { min: null, max: Duration.millis(250) },
 		order: "descending",
-		ranges: [{ start: { time: 1n }, end: { time: 8n } }],
+		ranges: [{ start: 1n, end: 8n }],
 	});
 
 	const updated = producer.subscription.changed();
 	subscriber.update({
 		priority: 8,
 		delay: { max: Duration.millis(500) },
-		ranges: [{ start: { time: 2n }, end: { time: 11n } }],
+		ranges: [{ start: 2n, end: 11n }],
 	});
 	expect(await updated).toEqual({
 		priority: 8,
 		delay: { min: null, max: Duration.millis(500) },
 		order: "descending",
-		ranges: [{ start: { time: 2n }, end: { time: 11n } }],
+		ranges: [{ start: 2n, end: 11n }],
 	});
 
 	subscriber.close();
@@ -290,7 +290,7 @@ test("integration: lite carries a fractional delay as a whole millisecond", asyn
 			const producer = request.accept({ timescale: Timescale.MILLI });
 			// The TRACK lookup opens the request and the SUBSCRIBE joins it, so its options land after.
 			const check = (subscription = producer.subscription.peek()) => {
-				if (subscription?.ranges?.[0]?.start?.time === 1n) resolveProducer?.(producer);
+				if (subscription?.ranges?.[0]?.start === 1n) resolveProducer?.(producer);
 			};
 			check();
 			producer.subscription.subscribe(check);
@@ -302,7 +302,7 @@ test("integration: lite carries a fractional delay as a whole millisecond", asyn
 	// nothing resubscribes. The publisher must see the budget rounded up instead.
 	const subscriber = remote
 		.track("video")
-		.subscribe({ delay: { max: Duration.millis(38.75) }, ranges: [{ start: { time: 1n } }] });
+		.subscribe({ delay: { max: Duration.millis(38.75) }, ranges: [{ start: 1n }] });
 
 	// A failed subscribe never reaches the publisher, so race its closure to report the
 	// encode error rather than block until the suite times out.
@@ -314,7 +314,7 @@ test("integration: lite carries a fractional delay as a whole millisecond", asyn
 	expect(producer.subscription.peek()?.delay?.max).toEqual(Duration.millis(39));
 
 	const updated = producer.subscription.changed();
-	subscriber.update({ delay: { max: Duration.millis(500.25) }, ranges: [{ start: { time: 1n } }] });
+	subscriber.update({ delay: { max: Duration.millis(500.25) }, ranges: [{ start: 1n }] });
 	expect((await Promise.race([updated, failed]))?.delay?.max).toEqual(Duration.millis(501));
 
 	subscriber.close();
@@ -353,7 +353,7 @@ test("integration: lite applies initial and updated group bounds", async () => {
 		.track("video")
 		.subscribe({
 			delay: { max: Duration.millis(REPLAY_LATENCY_MS) },
-			ranges: [{ start: { time: INITIAL_START_GROUP }, end: { time: INITIAL_END_GROUP - 1n } }],
+			ranges: [{ start: INITIAL_START_GROUP, end: INITIAL_END_GROUP - 1n }],
 		})
 		.ordered();
 	try {
@@ -366,7 +366,7 @@ test("integration: lite applies initial and updated group bounds", async () => {
 		// Replacing the ranges reads on from the same reader, the update going upstream.
 		subscriber.update({
 			delay: { max: Duration.millis(REPLAY_LATENCY_MS) },
-			ranges: [{ start: { time: UPDATED_GROUP }, end: { time: UPDATED_END_GROUP - 1n } }],
+			ranges: [{ start: UPDATED_GROUP, end: UPDATED_END_GROUP - 1n }],
 		});
 		const updated = (pending: Promise<unknown>) =>
 			withTimeout(pending, Duration.millis(UPDATE_TIMEOUT_MS), "updated group bound timed out");
@@ -376,7 +376,7 @@ test("integration: lite applies initial and updated group bounds", async () => {
 		// An open range parks at the live edge instead.
 		subscriber.update({
 			delay: { max: Duration.millis(REPLAY_LATENCY_MS) },
-			ranges: [{ start: { time: GROUP_COUNT } }],
+			ranges: [{ start: GROUP_COUNT }],
 		});
 		expect(await settlesWithin(subscriber.nextGroup(), clock, Duration.millis(PENDING_ASSERT_MS))).toBe(false);
 	} finally {
@@ -411,7 +411,7 @@ test("integration: lite refuses an empty requested range on open and on update",
 		// of an empty window ends at once, and the copy is refused.
 		const empty = video.subscribe({
 			delay: { max: Duration.millis(REPLAY_LATENCY_MS) },
-			ranges: [{ start: { time: 2n }, end: { time: 1n } }],
+			ranges: [{ start: 2n, end: 1n }],
 		});
 		expect(await empty.recvGroup()).toBeUndefined();
 		expect(
@@ -423,13 +423,13 @@ test("integration: lite refuses an empty requested range on open and on update",
 		const live = video
 			.subscribe({
 				delay: { max: Duration.millis(REPLAY_LATENCY_MS) },
-				ranges: [{ start: { time: 1n }, end: { time: 1n } }],
+				ranges: [{ start: 1n, end: 1n }],
 			})
 			.ordered();
 		expect((await live.nextGroup())?.start).toBe(1n);
 		live.update({
 			delay: { max: Duration.millis(REPLAY_LATENCY_MS) },
-			ranges: [{ start: { time: 3n }, end: { time: 2n } }],
+			ranges: [{ start: 3n, end: 2n }],
 		});
 		expect(await live.nextGroup()).toBeUndefined();
 		expect(
@@ -444,9 +444,9 @@ test("integration: lite refuses an empty requested range on open and on update",
 	}
 });
 
-// Lite-07 carries every range, so a sparse request counting back from the latest group delivers
-// just its groups, and the publisher ends it once they are accounted for.
-test("integration: lite-07 serves sparse and relative ranges", async () => {
+// Lite-07 carries every range, so a sparse request with a live join delivers just its groups, and
+// the publisher ends it once they are accounted for.
+test("integration: lite-07 serves sparse ranges and a live join", async () => {
 	const pair = createMockTransportPair(Lite.ALPN_07_WIP);
 	const origin = new OriginProducer();
 	const [client, server] = await Promise.all([
@@ -463,12 +463,10 @@ test("integration: lite-07 serves sparse and relative ranges", async () => {
 		const reader = remote
 			.track("video")
 			.subscribe({
-				delay: { max: null },
+				// The join starts 2 ms behind the newest group, which starts at 9 ms.
+				delay: { min: Duration.millis(2), max: null },
 				order: "ascending",
-				ranges: [
-					{ start: { time: 1n }, end: { time: 2n } },
-					{ start: { relative: 2n }, end: { time: 8n } },
-				],
+				ranges: [{ start: 1n, end: 2n }, { end: 8n }],
 			})
 			.ordered();
 		// Covering the ranges ends the subscription upstream, and the read with its window.
@@ -485,14 +483,14 @@ test("integration: lite-07 serves sparse and relative ranges", async () => {
 	}
 });
 
-// A publisher counts a relative start back from its newest group, which may hold no frame yet and
+// A publisher starts a zero Min Age live join at its newest group, which may hold no frame yet and
 // so counts neither in the largest it reports nor where the copy resolves the start. The copy keeps
 // the publisher's start, so a reader waiting on each group in sequence starts there rather than
 // waiting below it for groups that never arrive. Mirrors the Rust
 // `an_ordered_reader_starts_at_the_publishers_start_over_a_frameless_newest_group`.
 // The newest group lands before the reader asks, as it can under load: a sibling reads it, so the
 // reader's own window has yet to settle on it when it asks where it starts.
-test("integration: lite-07 starts an ordered read at a relative start over a frameless newest group", async () => {
+test("integration: lite-07 starts an ordered read at a live join over a frameless newest group", async () => {
 	const pair = createMockTransportPair(Lite.ALPN_07_WIP);
 	const origin = new OriginProducer();
 	const [client, server] = await Promise.all([
@@ -510,7 +508,7 @@ test("integration: lite-07 starts an ordered read at a relative start over a fra
 	const newest = hooks.appendNext(producer);
 
 	const remote = wireOf(client).consume(Path.from("test"));
-	const subscription = { delay: { max: null }, ranges: [{ start: { relative: 0n } }] };
+	const subscription = { delay: { min: Duration.ZERO, max: null }, ranges: [{}] };
 	const reader = remote.track("video").subscribe(subscription).ordered();
 	const sibling = remote.track("video").subscribe(subscription);
 	try {
@@ -531,10 +529,10 @@ test("integration: lite-07 starts an ordered read at a relative start over a fra
 	}
 });
 
-// A lite-07 copy counts a relative start back as its publisher reported, but only from the latest
-// group the publisher counted from: a reader joining live once newer groups arrived starts at the
-// live edge, not where the first reader started, even after an update that changed no range.
-test("integration: lite-07 joins a late relative start at the live edge", async () => {
+// A lite-07 copy keeps the start its publisher reported for a live join, but a reader joining live
+// once newer groups arrived starts at the live edge, not where the first reader started, even
+// after an update that changed no range.
+test("integration: lite-07 joins a late live join at the live edge", async () => {
 	const pair = createMockTransportPair(Lite.ALPN_07_WIP);
 	const origin = new OriginProducer();
 	const [client, server] = await Promise.all([
@@ -547,7 +545,7 @@ test("integration: lite-07 joins a late relative start at the live edge", async 
 	hooks.appendNext(producer).finish();
 
 	const remote = wireOf(client).consume(Path.from("test"));
-	const subscription = { delay: { max: null }, ranges: [{ start: { relative: 0n } }] };
+	const subscription = { delay: { min: Duration.ZERO, max: null }, ranges: [{}] };
 	const first = remote.track("video").subscribe(subscription);
 	let late: ReturnType<typeof first.ordered> | undefined;
 	try {
@@ -556,7 +554,7 @@ test("integration: lite-07 joins a late relative start at the live edge", async 
 			hooks.appendNext(producer).finish();
 			expect((await first.recvGroup())?.start).toBe(BigInt(key));
 		}
-		// An update that changes no range leaves each report at the edge it was counted from.
+		// An update that changes no range leaves each report at the edge it joined at.
 		first.update({ ...subscription, priority: 7 });
 		await withTimeout(
 			(async () => {
@@ -598,7 +596,7 @@ test("integration: lite-07 keeps a covered bounded subscription open", async () 
 		remote.track("video").subscribe({
 			delay: { max: Duration.millis(60_000) },
 			order: "ascending",
-			ranges: [{ start: { time: 1n }, end: { time: end - 1n } }],
+			ranges: [{ start: 1n, end: end - 1n }],
 		});
 	// Arrival reads, as the Rust test's: an ordered one would wait out the missing group 3.
 	const read = async (reader: ReturnType<typeof bounded>, count: number) => {
@@ -655,7 +653,7 @@ test("integration: lite-07 serves a time range", async () => {
 		const reader = remote.track("video").subscribe({
 			delay: { max: null },
 			order: "ascending",
-			ranges: [{ start: { time: 2000n }, end: { time: 5000n } }],
+			ranges: [{ start: 2000n, end: 5000n }],
 		});
 		const got: bigint[] = [];
 		for (let i = 0; i < 4; i++) got.push((await reader.recvGroup())?.start ?? -1n);

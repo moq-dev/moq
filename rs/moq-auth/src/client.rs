@@ -523,12 +523,12 @@ impl<S: Post> Driver<S> {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use moq_pattern::Patterns;
+	use moq_pattern::Prefixes;
 	use std::task::Poll;
 	use wiremock::matchers::{method, path};
 	use wiremock::{Mock, MockServer, Request as Received, ResponseTemplate};
 
-	fn patterns(texts: &[&str]) -> Patterns {
+	fn prefixes(texts: &[&str]) -> Prefixes {
 		texts.iter().map(|text| text.parse().unwrap()).collect()
 	}
 
@@ -645,7 +645,7 @@ mod tests {
 	/// The wire carries whole seconds, so a cadence under one second would serialize
 	/// as zero and be refused; these tests run on a one-second cadence.
 	fn grant(expires_in: Option<Duration>, revalidate: Option<Duration>) -> Grant {
-		let mut grant = Grant::new(patterns(&["**"]), Patterns::new());
+		let mut grant = Grant::new(prefixes(&[""]), Prefixes::new());
 		grant.expires = expires_in.map(|d| kio::clock::wall() + d);
 		grant.revalidate = revalidate;
 		grant
@@ -660,7 +660,7 @@ mod tests {
 		.await;
 
 		let consumer = client(&server).connect(request()).await.unwrap();
-		assert_eq!(consumer.grant().publish.path, patterns(&["**"]));
+		assert_eq!(consumer.grant().publish.path, prefixes(&[""]));
 		assert_eq!(log.events(), [Event::Connect]);
 
 		consumer.close("disconnected", Bytes { sent: 7, received: 11 });
@@ -1062,7 +1062,7 @@ mod tests {
 		}
 
 		// A grant the relay cannot read is the server's fault and final, not an outage.
-		for body in ["nope", r#"{"publish":["**"],"publish_rate":8000}"#] {
+		for body in ["nope", r#"{"publish":[""],"publish_rate":8000}"#] {
 			let unreadable = server(Log::default(), move |_| {
 				ResponseTemplate::new(200).set_body_string(body)
 			})
@@ -1297,7 +1297,7 @@ mod tests {
 	#[tokio::test]
 	async fn an_expired_grant_is_refused() {
 		tokio::time::pause();
-		let mut grant = Grant::new(patterns(&["**"]), Patterns::new());
+		let mut grant = Grant::new(prefixes(&[""]), Prefixes::new());
 		grant.expires = Some(kio::clock::wall() - Duration::from_secs(1));
 		let script = Script::new(Log::default(), move |_| Some(Ok(grant.clone())));
 		assert!(matches!(script.connect().await, Err(Error::GrantExpired)));
@@ -1362,7 +1362,7 @@ mod tests {
 		assert!(log.revalidates() >= 1, "the outage was answered before expires");
 		assert_eq!(
 			consumer.grant().publish.path,
-			patterns(&["**"]),
+			prefixes(&[""]),
 			"the grant stands through the outage"
 		);
 		let reason = kio::clock::timeout_at(latest.saturating_add(tolerance), consumer.closed())

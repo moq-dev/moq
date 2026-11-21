@@ -493,6 +493,8 @@ class Auth:
                     self.send_response(204)
                     self.end_headers()
                     return
+                # `**`, not the bare prefix "": a released relay reads `**` as the whole tree and
+                # "" as the root alone, and this checkout reads both as the whole tree.
                 grant = {"publish": ["**"], "subscribe": ["**"]}
                 if record["peer"]:
                     grant |= {"link": "peer", "peer": True}
@@ -669,6 +671,8 @@ class Run:
         self.auth = Auth(self.auth_port, self.dir / "auth.jsonl")
         self.events: list[dict] = []
         self.violations: list[dict] = []
+        # Each reader path left unfed, by the event that left it so and its last read then.
+        self.strands: dict[tuple[str, str], dict] = {}
         self.stop = threading.Event()
         self.lock = threading.Lock()
         self.poller = threading.Thread(target=self.poll, daemon=True)
@@ -907,6 +911,8 @@ class Run:
                                 # never handed out another. Starved: it holds one whose groups stopped.
                                 "kind": "stuck" if state.ended is not None else "starved",
                                 "ended": state.ended,
+                                # Its last read as of this observation, which a strand begins from.
+                                "last": state.last,
                             }
                         )
         return unfed, unrouted
@@ -926,36 +932,65 @@ class Run:
             # A baseline with a reader left unrouted tests nothing behind it.
             if self.baseline(report["kind"]):
                 self.violation(report, "unrouted", unrouted)
-        for kind in ("stuck", "starved"):
-            items = [item for item in unfed if item["kind"] == kind]
-            if items:
-                self.violation(report, "unfed", items, kind)
+
+        # A reader still unfed from an earlier event, having read nothing since, is that event's
+        # strand: it keeps that event's known entry rather than failing every later event again.
+        # A strand ends only with a read, so one whose source stopped meanwhile is kept for later.
+        # An unfed reader is judged by the read it was observed with, any other by its latest.
+        def last(reader: str, path: str) -> float | None:
+            follow = self.relays[reader].readout.paths.get(path)
+            return follow.last if follow else None
+
+        seen = {(item["reader"], item["path"]): item["last"] for item in unfed}
+        strands = {
+            key: began
+            for key, began in self.strands.items()
+            if began["last"] == (seen[key] if key in seen else last(*key))
+        }
+        groups = {}
+        for item in unfed:
+            key = (item["reader"], item["path"])
+            began = strands.get(key) or {"name": report["name"], "kind": report["kind"], "last": item["last"]}
+            strands[key] = began
+            groups.setdefault((began["name"], item["kind"]), (began, []))[1].append(item)
+        self.strands = strands
+        for (name, kind), (began, items) in groups.items():
+            self.violation(report, "unfed", items, kind, None if name == report["name"] else began)
         if shown:
             self.violation(report, "shown", shown)
         died = [proc.name for proc in self.procs() if proc.died]
         if died:
             self.violation(report, "died", died)
 
-    def violation(self, report: dict, check: str, items: list, kind: str | None = None) -> None:
+    def violation(
+        self, report: dict, check: str, items: list, kind: str | None = None, began: dict | None = None
+    ) -> None:
+        """Record a violation of `report`'s event, or one carried from the earlier event `began`,
+        which names the event whose known entries it is matched against."""
+        event = (began or report)["kind"]
         # The start is the baseline before any fault, so no known flaw excuses it.
         known = next(
             (
                 k
                 for k in self.script.known
-                if report["kind"] != "start"
+                if event != "start"
                 and k["check"] == check
                 and k.get("kind", kind) == kind
-                and k.get("event", report["kind"]) == report["kind"]
+                and k.get("event", event) == event
             ),
             None,
         )
         entry = {"event": report["name"], "check": check, "count": len(items), "items": items[:20]}
         if kind:
             entry["kind"] = kind
+        if began:
+            entry["began"] = began["name"]
         if known:
             entry["known"] = known["quest"]
         report.setdefault("violations", []).append(entry)
-        self.violations.append(entry)
+        # A carried strand was already counted by the event it began in.
+        if not began:
+            self.violations.append(entry)
 
     # ── faults ──
 
@@ -1275,6 +1310,7 @@ def markdown(report: dict) -> str:
         for entry in report["violations"] + report["known"]:
             tag = f" (known: {entry['known']})" if "known" in entry else ""
             check = entry["check"] + (f" ({entry['kind']})" if entry.get("kind") else "")
+            check += f" since {entry['began']}" if "began" in entry else ""
             lines.append(f"- {entry['event']}: {check} x{entry['count']}{tag}: `{json.dumps(entry['items'][:3])}`")
     lines += ["", NOTE, ""]
     return "\n".join(lines)

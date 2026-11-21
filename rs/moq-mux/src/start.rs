@@ -62,6 +62,11 @@ pub(crate) fn opens(track: &moq_net::track::Producer, timestamp: moq_net::Timest
 		.then_some(start.value()))
 }
 
+/// The key of a group starting at `timestamp` on `track`: `timestamp` in the track's timescale.
+pub(crate) fn key(track: &moq_net::track::Producer, timestamp: moq_net::Timestamp) -> crate::Result<u64> {
+	Ok(of(track, timestamp)?.0.value())
+}
+
 /// [`opens`], refusing a start that doesn't pass the newest with
 /// [`TimestampRewind`](crate::container::TimestampRewind).
 pub(crate) fn after(track: &moq_net::track::Producer, timestamp: moq_net::Timestamp) -> crate::Result<u64> {

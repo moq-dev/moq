@@ -169,6 +169,8 @@ impl Net {
 		let cache = crate::cache::Config {
 			// Past what the pool counts in milliseconds, so it never expires idle groups.
 			duration: Some(Duration::MAX.into()),
+			// No governor either: its timer would keep the mesh from settling.
+			headroom: Some("0".to_string()),
 			..Default::default()
 		};
 		let mut options = cluster::Options::new(config).with_cache(cache.init().expect("cache"));

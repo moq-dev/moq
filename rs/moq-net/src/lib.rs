@@ -147,7 +147,7 @@ pub use driver::Driver;
 pub use error::*;
 pub use instance::{Instance, InvalidInstance};
 pub use model::*;
-pub use path::{InvalidPattern, Path, Pattern, Patterns};
+pub use path::{InvalidPattern, InvalidPrefix, Path, Pattern, Patterns, Prefix, Prefixes};
 #[cfg(feature = "async")]
 pub use reconnect::Reconnect;
 #[cfg(feature = "async")]

@@ -382,9 +382,10 @@ impl Version {
 		)
 	}
 
-	/// Whether received frame timestamps are the publisher's media time. Lite05/06 stamp an
-	/// untimed track's payloads with their send time, which a receiver cannot tell from it,
-	/// so it passes them through as the track's time without checking them for a rewind.
+	/// Whether received frame timestamps are the publisher's media time. A released Lite05/06
+	/// publisher may stamp an untimed track's payloads with their send time, which a receiver
+	/// cannot tell from it, so it passes them through as the track's time without checking
+	/// them for a rewind.
 	pub(crate) fn has_media_time(self) -> bool {
 		!matches!(
 			self,

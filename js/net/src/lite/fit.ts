@@ -116,9 +116,8 @@ export function fit(
 		(gap) => avoid.some((run) => run.start < gap.end && gap.start < run.end),
 	);
 
-	// The other ranges count back from the latest group or start at the oldest, so no gap between
-	// them is measured: when even one span per list leaves them no room, each kind collapses to
-	// the one range covering it.
+	// The other ranges have no start, so no gap between them is measured: when even one span per
+	// list leaves them no room, they collapse to the one range covering them.
 	const costOf = (ranges: readonly WireRange[]) =>
 		ranges.reduce((sum, range) => sum + (cost(budget, range) ?? Number.POSITIVE_INFINITY), 0);
 	if (costOf(others) + spans.least() + runs.least() > budget.bytes) others = collapse(others);
@@ -250,26 +249,21 @@ function bySpan(a: Span, b: Span): number {
 }
 
 /**
- * One range per kind of start covering every range of that kind: from the earliest start to the
- * latest end. A time or absolute start is a span, so only the oldest and counts back are left.
+ * One range covering every range with no start, from where they start to the latest end. A time
+ * or absolute start is a span, so only ranges with no start are left, and they all start at the
+ * same group.
  */
 function collapse(ranges: readonly WireRange[]): WireRange[] {
-	const kinds: WireRange[] = [];
-	for (const range of ranges) {
-		const relative = range.start?.relative;
-		const cover = kinds.find((cover) => (cover.start?.relative === undefined) === (relative === undefined));
-		if (!cover) {
-			kinds.push({ ...range });
-			continue;
-		}
-		if (cover.start?.relative !== undefined && relative !== undefined)
-			cover.start = { relative: max(cover.start.relative, relative) };
+	const [first, ...rest] = ranges;
+	if (!first) return [];
+	const cover: WireRange = { ...first };
+	for (const range of rest) {
 		const [a, b] = [cover.end, range.end];
 		if (a?.absolute !== undefined && b?.absolute !== undefined)
 			cover.end = { absolute: max(a.absolute, b.absolute) };
 		else if (a?.time !== undefined && b?.time !== undefined) cover.end = { time: max(a.time, b.time) };
-		// Ends of different kinds can't be ordered without the latest group: follow the edge.
+		// An exclusive and an inclusive end, or an open one: follow the edge.
 		else delete cover.end;
 	}
-	return kinds;
+	return [cover];
 }

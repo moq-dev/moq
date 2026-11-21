@@ -40,9 +40,8 @@ import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { readSize, sendPayload } from "../payload.ts";
 import { Priority, sendOrder } from "../priority.ts";
-import { rescale } from "../rescale.ts";
 import { concat, encodeVarint, type Reader, type Stream, type StreamVersion, Writer } from "../stream.ts";
-import { floorAt, type Timescale, Timestamp } from "../time.ts";
+import { floorAt, type Timescale, type Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import type { Reported } from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
@@ -150,15 +149,9 @@ function groupEnd(version: StreamVersion, end: bigint): Uint8Array {
 interface Stamp {
 	/**
 	 * The wire timescale TRACK_INFO declared (see `wireTimescale`), or undefined on a scale-less
-	 * lite-07 track, whose timestamps go out as bare numbers: a frame's its group's start.
+	 * lite-07 track, whose timestamps go out as bare numbers.
 	 */
 	timescale?: Timescale;
-	/**
-	 * The timed track whose frames' own timestamps go out, at its timescale, which the wire's
-	 * equals. Lite-05/06 cannot encode a scale-less track, so a scale-less one carries its send
-	 * time instead.
-	 */
-	timed?: { timescale?: Timescale | null };
 }
 
 /**
@@ -166,26 +159,23 @@ interface Stamp {
  * lite-05. Lite-05/06 declare milliseconds for a scale-less track, and lite-07 stamps it bare.
  */
 function stamping(version: Version, info: { timescale?: Timescale | null }): Stamp | undefined {
-	const timescale = info.timescale ?? undefined;
-	const wire = wireTimescale(version, timescale);
+	const wire = wireTimescale(version, info.timescale);
 	if (wire === undefined) return hasLengthFirst(version) ? {} : undefined;
-	return timescale === undefined ? { timescale: wire } : { timescale: wire, timed: info };
+	return { timescale: wire };
 }
 
 /**
- * A frame or datagram's `timestamp` as its raw wire value: bare on a scale-less lite-07 track, or
- * its send time when a lite-05/06 track goes out scale-less.
+ * A frame or datagram's `timestamp` as its raw wire value. A scale-less track's is its group's
+ * start, or its datagram's sequence, which goes out verbatim on every version: nothing is stamped
+ * with a clock, so a frame carries the same timestamp through every hop and fetch. Mirrors the
+ * Rust `Stamp::wire`.
  */
 function wireTime(timestamp: Timestamp, stamp: Stamp): bigint {
-	if (stamp.timescale === undefined) return bareTime(timestamp);
-	return BigInt(stamp.timed ? rescale(stamp.timed, timestamp).value : floorAt(Timestamp.now(), stamp.timescale));
-}
-
-/** A scale-less lite-07 datagram's timestamp as it goes out: the bare value its producer gave. */
-function bareTime(timestamp: Timestamp): bigint {
 	const key = timestamp.key;
-	if (key === undefined) throw new TimestampMismatch();
-	return key;
+	if (key !== undefined) return key;
+	// A timed timestamp on a track declared scale-less: the model never writes one.
+	if (stamp.timescale === undefined) throw new TimestampMismatch();
+	return BigInt(floorAt(timestamp, stamp.timescale));
 }
 
 /**
@@ -557,8 +547,9 @@ class Requested {
 }
 
 /**
- * Lite-07 ranges whose relative or time anchors may still resolve, by Range ID, each due once the
- * latest group reaches the lowest start that could resolve it. Mirrors the Rust `Unpinned`.
+ * Lite-07 ranges whose time starts, live joins, or time ends may still resolve, by Range ID, each
+ * due once the latest group reaches the lowest start that could resolve it. Mirrors the Rust
+ * `Unpinned`.
  */
 class Unpinned {
 	#due = new Map<bigint, bigint>();
@@ -598,30 +589,26 @@ class Unpinned {
 }
 
 /**
- * The lowest latest group start that could resolve `range`'s next relative or time anchor: its
- * start unless `started`, then its end. Undefined once neither can move. Mirrors the Rust `due`.
+ * The lowest latest group start that could resolve `range`'s start, a time or a live join, unless
+ * `started`, then its time end. Undefined once neither can move. Mirrors the Rust `due`.
  */
 function due(range: WireRange, started: boolean): bigint | undefined {
 	if (isEmpty(requestedRange(range))) return undefined;
-	if (!started && (range.start?.relative !== undefined || range.start?.time !== undefined)) return 0n;
-	if (range.end?.relative !== undefined) return 0n;
+	if (!started && range.start?.absolute === undefined) return 0n;
 	if (range.end?.time !== undefined) return range.end.time + 1n;
 	return undefined;
 }
 
 // `entry`, a range this subscription already held, resolved as it was: a range resolves once, so
-// an update that leaves it live never counts its relative anchors back from a newer latest group,
-// nor looks a time start up again in newer holdings. A start reaching back to the oldest group
-// held stays as it was, since an absolute start would turn it into a floor the subscriber never
-// named.
+// an update that leaves it live never looks a time start up again in newer holdings, nor places a
+// live join again under a newer Min Age. A start reaching back to the oldest group held stays as
+// it was, since an absolute start would turn it into a floor the subscriber never named.
 function pin(asked: WireRange, resolved: Resolved | undefined): WireRange {
 	if (!resolved) return asked;
 	const range = { ...asked };
-	if (resolved.floored && (range.start?.relative !== undefined || range.start?.time !== undefined))
-		range.start = { absolute: resolved.start };
+	if (resolved.floored && range.start?.absolute === undefined) range.start = { absolute: resolved.start };
 	// An end resolves once it settles; until then it is reported open.
-	if ((range.end?.relative !== undefined || range.end?.time !== undefined) && resolved.end !== undefined)
-		range.end = { absolute: resolved.end };
+	if (range.end?.time !== undefined && resolved.end !== undefined) range.end = { absolute: resolved.end };
 	return range;
 }
 
@@ -1233,13 +1220,13 @@ export class Publisher {
 			const positions = new Set<bigint>();
 			for (const [id, range] of asked.entries())
 				if (range.start?.absolute !== undefined && range.start.frame) positions.add(BigInt(id));
-			// Lite-07: the ranges whose relative or time anchors may still resolve.
+			// Lite-07: the ranges whose starts or time ends may still resolve.
 			const unpinned = new Unpinned();
 			if (hasRanges(this.version))
 				for (const [id, range] of asked.entries()) unpinned.insert(BigInt(id), due(range, false));
-			// Each live range due once the latest group reached where it may resolve, with its anchors
-			// replaced by the groups they resolved to: a range resolves once, so an update that leaves it
-			// live never counts its relative anchors back from a newer latest group, nor looks a time
+			// Each live range due once the latest group reached where it may resolve, with its start and
+			// end replaced by the groups they resolved to: a range resolves once, so an update that
+			// leaves it live never places a live join again under a newer Min Age, nor looks a time
 			// start up again in newer holdings, here or on a relay's copies. Only the ranges still
 			// waiting are asked, and each is let go once its anchors settle, so this costs those ranges
 			// rather than every range. Mirrors the Rust `TrackRun::pin`.
@@ -2423,15 +2410,7 @@ export class Publisher {
 				end = max(end, datagram.sequence + 1n);
 				// An old subscription uses its stream track's timescale for both kinds. Without one
 				// the track is a scale-less lite-07 one, whose timestamp goes out bare.
-				const timescale = options.stamp?.timescale;
-				const timestamp =
-					timescale === undefined
-						? bareTime(datagram.timestamp)
-						: BigInt(
-								datagram.timestamp.scale === undefined
-									? floorAt(Timestamp.now(), timescale)
-									: floorAt(datagram.timestamp, timescale),
-							);
+				const timestamp = wireTime(datagram.timestamp, options.stamp ?? {});
 				const body = new DatagramMessage(options.sub, datagram.sequence, timestamp, datagram.payload).encode(
 					this.version,
 				);

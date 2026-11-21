@@ -119,7 +119,7 @@ async function accept(quic: WebTransport, url: URL, publish: Moq.Origin.Consumer
 	};
 }
 
-const scoped = origin.scope(Moq.Path.empty(), new Moq.Path.Patterns([Moq.Path.Pattern.literal("handover")]));
+const scoped = origin.scope(Moq.Path.empty(), Moq.Path.Prefixes.parse(["handover"]));
 const first = listen(scoped.consume());
 const second = listen(origin.consume());
 process.stdout.write(`${JSON.stringify([first.url, second.url])}\n`);
