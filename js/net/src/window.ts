@@ -412,7 +412,18 @@ export class Window {
 	 * places some time starts only for a reader within the budget its upstream answered under. Only
 	 * a range still to place reads it, so one already started stays where it started.
 	 */
-	budget: number;
+	get budget(): number {
+		return this.#budget;
+	}
+
+	set budget(budget: number) {
+		// An answer may place a waiting time start under the new budget with no change to the groups
+		// held, so each is tried again.
+		if (budget !== this.#budget) this.#waited = undefined;
+		this.#budget = budget;
+	}
+
+	#budget: number;
 
 	/**
 	 * Resolve `ranges`, keyed by position, time starts from `holdings` within `budget` (see
@@ -427,7 +438,7 @@ export class Window {
 		budget = NO_MAX_DELAY,
 	) {
 		this.min = min;
-		this.budget = budget;
+		this.#budget = budget;
 		for (const [index, range] of ranges.entries()) this.#ranges.set(BigInt(index), range);
 		this.#place(latest, holdings);
 	}

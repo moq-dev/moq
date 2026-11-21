@@ -341,7 +341,13 @@ impl Window {
 	/// already started stays where it started.
 	pub fn set_delay(&mut self, delay: Delay) {
 		self.min = delay.min;
-		self.budget = delay.budget();
+		let budget = delay.budget();
+		// An answer may place a waiting time start under the new budget with no change to the
+		// groups held, so each is tried again.
+		if budget != self.budget {
+			self.waited = None;
+		}
+		self.budget = budget;
 	}
 
 	/// The time starts still waiting on the groups held, with the budget they wait under: what

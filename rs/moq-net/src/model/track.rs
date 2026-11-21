@@ -6161,6 +6161,16 @@ fn clamp_max_delay(mut max_delay: Duration, bound: Option<Duration>) -> Duration
 	max_delay
 }
 
+/// `delay` with its budget clamped to `bound`, the one a received copy's demand asks its
+/// upstream under (see [`clamp_combined`]): an answer with no group at or before a time holds
+/// at most that far, so a reader places its time starts within it.
+fn placing(delay: Delay, bound: Option<Duration>) -> Delay {
+	match bound {
+		Some(bound) if delay.budget() > bound => delay.with_max(Some(bound)),
+		_ => delay,
+	}
+}
+
 /// Clamp the aggregate's max delay budget to `bound`; see [`clamp_max_delay`]. A bound that
 /// doesn't lower the budget leaves it as is, so an unbounded demand stays `None` on the wire
 /// rather than becoming a huge value no version can carry.
@@ -9251,7 +9261,8 @@ impl Cursor {
 			let preferences = subscription.read();
 			let ranges_revision = preferences.revision;
 			let state = state.read();
-			let window = Window::keyed(preferences.ranges(), preferences.delay, state.latest_live(), &*state);
+			let delay = placing(preferences.delay, state.demand_bound());
+			let window = Window::keyed(preferences.ranges(), delay, state.latest_live(), &*state);
 			let filter = Filter {
 				window,
 				resolved: ranges_revision,
@@ -9449,6 +9460,7 @@ impl Cursor {
 		}
 		let state = self.state.read();
 		let holdings = &*state;
+		let delay = placing(delay, state.demand_bound());
 		let moved = match changed {
 			Some((revision, change)) => {
 				self.filter.resolved = revision;
@@ -10822,6 +10834,7 @@ impl Republish {
 			return;
 		}
 		let state = self.state.read();
+		let delay = placing(delay, state.demand_bound());
 		let window = Window::keyed(ranges, delay, state.latest_live(), &*state);
 		drop(state);
 		let runs = Servable::of(&window, &Arc::default());
@@ -11658,7 +11671,8 @@ impl Subscriber {
 		match &self.inner {
 			Inner::Plain(cursor) => {
 				let state = cursor.state.read();
-				Window::new(&subscription.ranges, subscription.delay, state.latest_live(), &*state).resolved()
+				let delay = placing(subscription.delay, state.demand_bound());
+				Window::new(&subscription.ranges, delay, state.latest_live(), &*state).resolved()
 			}
 			Inner::Resume(..) => Vec::new(),
 		}
@@ -16637,6 +16651,47 @@ mod test {
 		assert_eq!(placed(&mut past), Some((2000, true)));
 		drop(past);
 		assert_eq!(asks(&producer), Vec::<u64>::new());
+	}
+
+	/// A time start an answer places only within a narrower budget than the reader's waits, and
+	/// places once the reader narrows to it, with no change to the groups held. A copy whose
+	/// cache bounds what its demand asks upstream places it under that bound at once.
+	#[test]
+	fn a_waiting_time_start_places_within_the_budget_it_was_answered_under() {
+		let narrow = Duration::from_millis(100);
+		let from = |max| {
+			Subscription::default()
+				.with_ranges([Range {
+					start: Some(1500),
+					end: None,
+				}])
+				.with_delay(Delay::default().with_max(max))
+		};
+		let placed = |subscriber: &mut Subscriber| {
+			subscriber
+				.resolved_range(0)
+				.map(|resolved| (resolved.start, resolved.floored))
+		};
+		for bound in [None, Some(narrow)] {
+			let producer = match bound {
+				Some(bound) => track_producer_capped("test", Info::timed(), bound),
+				None => track_producer("test", Info::timed()),
+			};
+			producer.received();
+			producer.anchored();
+			write_group(&producer, 2000);
+			let mut reader = producer.subscribe(from(None));
+			// The publisher started the range asked from 1500 past it, under the narrow budget.
+			producer.time_starts([(1500, Some(2000), narrow)]);
+			match bound {
+				Some(_) => assert_eq!(placed(&mut reader), Some((0, false)), "the cache bounds it"),
+				None => {
+					assert_eq!(placed(&mut reader), None, "a wider reader may still get a group");
+					reader.update(from(Some(narrow))).unwrap();
+					assert_eq!(placed(&mut reader), Some((0, false)));
+				}
+			}
+		}
 	}
 
 	/// An ordered read of a lite-07 copy hands out no group past a time start still waiting to

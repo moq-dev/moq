@@ -450,6 +450,20 @@ test("an ordered read hands out nothing past a time start still waiting to be pl
 	expect(items(ordered)).toEqual(["group 1000", "group 2000"]);
 });
 
+// Mirrors the Rust `a_waiting_time_start_places_within_the_budget_it_was_answered_under`.
+test("a waiting time start places once the reader narrows to the budget it was answered under", () => {
+	const producer = receivedTrack();
+	put(producer, 2000n, false);
+	const from = (max: Duration | null) => ({ delay: { max }, ranges: [{ start: 1500n }] });
+	const subscriber = producer.subscribe(from(null));
+	// The publisher started the range asked from 1500 past it, under a 100 ms budget.
+	hooks.timeStarts(producer, [[1500n, 2000n, 100]]);
+	expect(hooks.servingResolved(subscriber)).toEqual([undefined]);
+	subscriber.update(from(Duration.millis(100)));
+	expect(hooks.servingResolved(subscriber)).toEqual([{ start: 0n, end: undefined, floored: false }]);
+	subscriber.close();
+});
+
 test("a time start no answer for its own time places asks upstream for it", () => {
 	const producer = receivedTrack();
 	put(producer, 2000n, false);
