@@ -26,7 +26,7 @@ import {
 import { type Expiry, type GroupRecover, hooks, type ReadGroupFrame, type Replacement } from "./internal.ts";
 import { Queue } from "./queue.ts";
 import { rescaleIn } from "./rescale.ts";
-import type { Timestamp } from "./time.ts";
+import { floorAt, type Timestamp } from "./time.ts";
 import type { Info as TrackInfo } from "./track.ts";
 import { checkKey, RESERVED } from "./util/key.ts";
 import { MAX_FRAME_BYTES } from "./util/limits.ts";
@@ -736,7 +736,8 @@ export class Producer {
 	#highest(): bigint {
 		const { latest, track } = this.#state;
 		if (latest === undefined || track?.timescale == null) return this.start;
-		return BigInt(latest.value);
+		// A streamed frame keeps the timestamp it was created with, in any scale.
+		return BigInt(floorAt(latest, track.timescale));
 	}
 
 	/**

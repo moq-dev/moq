@@ -5482,6 +5482,13 @@ test("a group's end is at or above its start and its highest frame", () => {
 	expect(write(2000, []).finishAt(2000n).consume().end).toBe(2000n);
 	expect(() => write(3000, [3000, 3100, 3033]).finishAt(3099n)).toThrow(TimestampMismatch);
 	expect(write(4000, [4000, 4100, 4033]).finishAt(4100n).consume().end).toBe(4100n);
+	// A streamed frame keeps its own scale, which the end is compared in the track's.
+	const streamed = producer.createGroup(5000n);
+	const frame = streamed.createFrame({ size: 1, timestamp: Timestamp.fromMicros(5_100_000) });
+	frame.write(new Uint8Array([1]));
+	frame.finish();
+	expect(() => streamed.finishAt(5099n)).toThrow(TimestampMismatch);
+	expect(streamed.finishAt(5100n).consume().end).toBe(5100n);
 });
 
 // A late group created out of order reaches a reader, since creating a group skips nothing.

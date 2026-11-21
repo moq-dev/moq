@@ -31,7 +31,7 @@ Follow Reading a failure in `rs/moq-net/verify/README.md`. Replay the path on th
 
 ## Coverage
 
-Sync commit: `3016af623807e939c2e99571a3ec02beb2493579`. Run `git log 3016af6238.. -- rs/moq-net/src/lite/publisher.rs rs/moq-net/src/lite/subscriber.rs rs/moq-net/src/tail.rs rs/moq-net/src/model/track.rs rs/moq-net/src/model/record.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
+Sync commit: `bf3f3b26f23df3dec51a48d4b36e67445d84ea98`. Run `git log bf3f3b26f2.. -- rs/moq-net/src/lite/publisher.rs rs/moq-net/src/lite/subscriber.rs rs/moq-net/src/tail.rs rs/moq-net/src/model/track.rs rs/moq-net/src/model/record.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
 
 | Code | Model |
 | --- | --- |

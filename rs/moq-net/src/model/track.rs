@@ -1798,7 +1798,11 @@ impl TrackState {
 		let mut runs = Vec::new();
 		let mut at = keys.start;
 		while at < keys.end {
+			// A whole group's span may run past the rest of `keys`.
 			at = self.span_end(at).max(at);
+			if at >= keys.end {
+				break;
+			}
 			// The next span starts just past the next group held whole.
 			let next = self
 				.lookup
@@ -13043,6 +13047,21 @@ mod test {
 	fn track_producer(name: impl Into<Arc<str>>, info: impl Into<Option<Info>>) -> Producer {
 		let info = info.into().unwrap_or_else(|| Info::default().with_max_age(None));
 		Producer::new(Arc::new(broadcast::Info::default()), name, info)
+	}
+
+	/// The runs of a range outside every whole group's span: a span that reaches past the
+	/// range's end leaves nothing of it, rather than a range read backwards.
+	#[test]
+	fn outside_spans_stops_at_a_span_past_the_range() {
+		let producer = Producer::new(Arc::new(broadcast::Info::default()), "test", Info::timed());
+		let mut group = producer.create_group(group::Info { start: 10 }).unwrap();
+		group
+			.write_frame(Timestamp::from_millis(10).unwrap(), b"x".as_slice())
+			.unwrap();
+		group.finish_at(20).unwrap();
+		let state = producer.state.read();
+		assert_eq!(state.outside_spans(15..16), Vec::<ops::Range<u64>>::new());
+		assert_eq!(state.outside_spans(0..25), vec![0..11, 20..25]);
 	}
 
 	#[test]
