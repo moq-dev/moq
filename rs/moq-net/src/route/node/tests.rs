@@ -830,6 +830,67 @@ fn a_request_waiting_for_a_way_fails_once_its_route_goes() {
 	assert_eq!(node.poll_forward(5, Some(far), &room, &waiter), Poll::Ready(None));
 }
 
+/// A request waiting for a way to a claim fails once the neighbour reports a session on
+/// the route's path closed: the route ends, but its copy of the claim stays known.
+#[test]
+fn a_request_waiting_for_a_way_fails_once_its_route_ends() {
+	let (node, _clock) = node();
+	let room = cast("room");
+	let far = id(9);
+	let route = |via: u64, cost| Msg::Route {
+		origin: far,
+		offer: Some(Offer {
+			path: [
+				Hop { node: far, session: 0 },
+				Hop {
+					node: id(via),
+					session: 1,
+				},
+			]
+			.into(),
+			draining: false,
+			priority: i8::MAX,
+			cost,
+			marked: false,
+		}),
+	};
+	let viewer = viewer(&node, 5);
+	let lagging = node.connect(1, port(Role::Routing(id(7)))).unwrap();
+	lagging.recv(Msg::Edited).unwrap();
+	let ahead = node.connect(2, port(Role::Routing(id(8)))).unwrap();
+	ahead.recv(Msg::Edited).unwrap();
+	lagging.recv(route(7, 1)).unwrap();
+	lagging.flush();
+	ahead.recv(route(8, 2)).unwrap();
+	ahead
+		.recv(Msg::Claims {
+			origin: far,
+			changes: vec![(room.clone(), live(0))],
+			floor: 1,
+		})
+		.unwrap();
+	ahead.flush();
+	confirm(&ahead);
+	drop(ahead);
+	told(&viewer);
+	let (flag, waiter) = flag();
+	assert!(node.poll_forward(5, None, &room, &waiter).is_pending());
+
+	lagging
+		.recv(Msg::Dead {
+			hop: Hop {
+				node: id(7),
+				session: 1,
+			},
+			far,
+		})
+		.unwrap();
+	lagging.flush();
+	assert!(flag.woken(), "the route ended");
+	assert_eq!(node.poll_forward(5, None, &room, &waiter), Poll::Ready(None));
+	assert_eq!(node.poll_forward(5, Some(far), &room, &waiter), Poll::Ready(None));
+}
+
 /// A request waiting for a way to a claim fails once a claim of better precedence outranks
 /// it, as the node then shows the broadcast by that claim, which its sender asks anew.
 #[test]
