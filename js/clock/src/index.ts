@@ -22,6 +22,7 @@ export {
 	yieldNow,
 } from "./timer.ts";
 export { Duration, Instant, Wall } from "./types.ts";
+export { Unsettled, until, type Wait } from "./until.ts";
 
 /** Read the installed clock's wall time. */
 export function wall(): Wall {
