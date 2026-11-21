@@ -1201,7 +1201,7 @@ impl LiteSample {
 				priority: 2,
 				max_delay: Some(std::time::Duration::from_secs(10)),
 				min_delay: None,
-				ranges: vec![lite::Range::OLDEST],
+				ranges: vec![lite::Range::OPEN],
 			}
 			.encode(w, version)
 			.unwrap(),
@@ -1581,7 +1581,7 @@ pub fn encode_subscribe(broadcast: &Path, track: &str, ietf: bool, out: &mut Vec
 			priority: 0,
 			max_delay: Some(std::time::Duration::ZERO),
 			min_delay: None,
-			ranges: vec![lite::Range::OLDEST],
+			ranges: vec![lite::Range::OPEN],
 			order: track::Order::Descending,
 		}
 		.encode(w, BENCH_LITE)

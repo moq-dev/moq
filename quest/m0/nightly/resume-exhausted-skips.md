@@ -21,7 +21,7 @@ above it to the serving copy's `exhausted_for`. Two cases break that split:
   checks it: the read ends early. The model case, failing on `main` in both
   languages with `missing groups [0]`:
   `join r2 unordered [8,9]; bounds r2 [1,9]; write 0/0 next; up 0/1`.
-- Overlapping ranges `Time(8)..=Time(8)` and `Time(0)..=Time(8)`, where an
+- Overlapping ranges `8..=8` and `0..=8`, where an
   earlier copy placed the first at 6 and the serving copy places it at 8: a
   group 7 the publisher skipped is missing from `Delivered`, so a check from
   `Delivered` alone keeps the read pending, though the serving copy accounted

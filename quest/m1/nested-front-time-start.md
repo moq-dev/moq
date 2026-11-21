@@ -3,7 +3,7 @@
 ## Goal
 
 A reader of a front whose route is another front places a range's time start
-and relative end as a reader of a plain route copy does, so its bounded read
+as a reader of a plain route copy does, so its bounded read
 ends once that range is read, in Rust (`rs/moq-net/src/model/resume.rs`) and JS
 (`js/net/src/resume.ts`) alike.
 
@@ -11,10 +11,10 @@ ends once that range is read, in Rust (`rs/moq-net/src/model/resume.rs`) and JS
 
 Found on [moq-dev/moq#9278](https://github.com/moq-dev/moq/pull/9278)'s review,
 and reproduced on `main` at `b4496b1207`: in
-`a_raised_start_keeps_a_relative_end_an_inner_front_froze_while_waiting`, a
-range `Time(7)..Relative(0)` moved under the resume point of a replacement
-behind an inner front never places (`resolved_range(0)` stays `None`), so the
-read stays pending after every group lands.
+`a_raised_start_behind_an_inner_front_hands_out_nothing_past_its_end`, a
+range `7..=7` moved under the resume point of a replacement behind an inner
+front never places (`resolved_range(0)` stays `None`), so the read stays
+pending after every group lands.
 
 Two gaps add up:
 

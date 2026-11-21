@@ -1,7 +1,7 @@
 //! Resume checked against a model of one logical track.
 //!
-//! Random keys of route flips, route failures, give-ups, ranges, cache expiry, and
-//! reader joins and leaves drive an origin's fronts on the simulated clock. Every reader's
+//! Random keys of route flips, route failures, give-ups, short closes, ranges, cache expiry,
+//! and reader joins and leaves drive an origin's fronts on the simulated clock. Every reader's
 //! groups, frames, drops, and end are checked against what one plain cursor on the logical
 //! track would see: every group its range and budget allow, each once, in its order. A
 //! second instance, priced below the first, wins the path while older readers stay on
@@ -102,6 +102,16 @@ enum Op {
 		group: Option<u64>,
 		frames: usize,
 	},
+	/// The route's live feed closes `group`, or the lowest group it still writes, where it got
+	/// to, without saying it is whole, as a relay whose upstream closed the group does; with
+	/// `down`, the route then fails before any reader looks, so the front replaces the copy
+	/// that closed it.
+	Close {
+		instance: usize,
+		slot: usize,
+		group: Option<u64>,
+		down: bool,
+	},
 	/// The route gives up `group` with a verdict on its content.
 	GiveUp {
 		instance: usize,
@@ -172,6 +182,8 @@ fn op() -> impl Strategy<Value = Op> {
 		8 => route.clone().prop_map(|(instance, slot)| Op::Up { instance, slot }),
 		6 => route.clone().prop_map(|(instance, slot)| Op::Down { instance, slot }),
 		4 => (route.clone(), 0..GROUPS - 1).prop_map(|((instance, slot), group)| Op::GiveUp { instance, slot, group }),
+		4 => (route.clone(), proptest::option::weighted(0.3, 0..GROUPS), any::<bool>())
+			.prop_map(|((instance, slot), group, down)| Op::Close { instance, slot, group, down }),
 		2 => route.prop_map(|(instance, slot)| Op::End { instance, slot }),
 		6 => (1..=200u64).prop_map(|ms| Op::Advance { ms }),
 		1 => Just(Op::Expire),
@@ -216,6 +228,24 @@ impl Copy {
 			.get(&group)
 			.is_some_and(|parts| parts.iter().any(|part| part.from == 0 && part.written == frames(group)))
 	}
+
+	/// Whether the route's live feed closed `group` short of its last frame.
+	fn closed(&self, group: u64) -> bool {
+		self.groups.get(&group).is_some_and(|parts| {
+			parts
+				.iter()
+				.any(|part| part.from == 0 && part.writer.is_none() && part.written < frames(group))
+		})
+	}
+
+	/// Whether the route's live feed closed `group` at `frames`, short of its last frame.
+	fn closed_at(&self, group: u64, frames: usize) -> bool {
+		self.closed(group)
+			&& self
+				.groups
+				.get(&group)
+				.is_some_and(|parts| parts.iter().any(|part| part.from == 0 && part.written == frames))
+	}
 }
 
 /// One publisher instance: its routes, and what any of them ever carried.
@@ -228,6 +258,8 @@ struct Publisher {
 	complete: BTreeSet<u64>,
 	/// Groups some route gave up.
 	given_up: BTreeSet<u64>,
+	/// Each group some route closed short, and how many frames it closed it at.
+	short: BTreeSet<(u64, usize)>,
 	/// Some route declared the track's end.
 	ended: bool,
 }
@@ -406,26 +438,7 @@ impl Model {
 	async fn apply(&mut self, op: &Op) -> Result<(), TestCaseError> {
 		match *op {
 			Op::Up { instance, slot } => self.up(instance, slot),
-			Op::Down { instance, slot } => {
-				let publisher = &mut self.instances[instance];
-				let Some(copy) = publisher.routes[slot].take() else {
-					return Ok(());
-				};
-				copy.serving.abort();
-				for part in copy.groups.into_values().flatten() {
-					if let Some(writer) = part.writer {
-						let _ = writer.abort(route_failure());
-					}
-				}
-				let _ = copy.track.abort(route_failure());
-				if publisher.live().next().is_none() {
-					for reader in self.readers.iter_mut().flatten() {
-						if reader.instance == instance {
-							reader.doomed = true;
-						}
-					}
-				}
-			}
+			Op::Down { instance, slot } => self.down(instance, slot),
 			Op::Write {
 				instance,
 				slot,
@@ -435,8 +448,10 @@ impl Model {
 				let Some(copy) = &self.instances[instance].routes[slot] else {
 					return Ok(());
 				};
-				let group = group
-					.or_else(|| (0..GROUPS).find(|group| !copy.complete(*group) && !copy.given_up.contains(group)));
+				let group = group.or_else(|| {
+					(0..GROUPS)
+						.find(|group| !copy.complete(*group) && !copy.closed(*group) && !copy.given_up.contains(group))
+				});
 				if let Some(group) = group {
 					self.write(instance, slot, group, frames);
 				}
@@ -458,6 +473,34 @@ impl Model {
 					copy.track.drop_groups(group..group + 1, GIVE_UP);
 				}
 				publisher.given_up.insert(group);
+			}
+			Op::Close {
+				instance,
+				slot,
+				group,
+				down,
+			} => {
+				let publisher = &mut self.instances[instance];
+				let Some(copy) = &mut publisher.routes[slot] else {
+					return Ok(());
+				};
+				let open = |part: &Part| part.from == 0 && part.writer.is_some();
+				let group = group.or_else(|| {
+					(copy.groups.iter())
+						.find(|(_, parts)| parts.iter().any(open))
+						.map(|(group, _)| *group)
+				});
+				let parts = group
+					.and_then(|group| copy.groups.get_mut(&group))
+					.map(Vec::as_mut_slice)
+					.unwrap_or_default();
+				if let (Some(group), Some(part)) = (group, parts.iter_mut().find(|part| open(part))) {
+					part.writer.take().unwrap().finish().unwrap();
+					publisher.short.insert((group, part.written));
+				}
+				if down {
+					self.down(instance, slot);
+				}
 			}
 			Op::End { instance, slot } => self.end(instance, slot),
 			Op::Advance { ms } => kio::clock::sim::advance(Duration::from_millis(ms)).await,
@@ -502,6 +545,28 @@ impl Model {
 			}
 		}
 		Ok(())
+	}
+
+	/// The route's session fails, failing its copy.
+	fn down(&mut self, instance: usize, slot: usize) {
+		let publisher = &mut self.instances[instance];
+		let Some(copy) = publisher.routes[slot].take() else {
+			return;
+		};
+		copy.serving.abort();
+		for part in copy.groups.into_values().flatten() {
+			if let Some(writer) = part.writer {
+				let _ = writer.abort(route_failure());
+			}
+		}
+		let _ = copy.track.abort(route_failure());
+		if publisher.live().next().is_none() {
+			for reader in self.readers.iter_mut().flatten() {
+				if reader.instance == instance {
+					reader.doomed = true;
+				}
+			}
+		}
 	}
 
 	fn up(&mut self, instance: usize, slot: usize) {
@@ -826,10 +891,27 @@ impl Model {
 						read.frames += 1;
 					}
 					Poll::Ready(Ok(None)) => {
-						if read.frames != frames(*key) || !instance.complete.contains(key) {
+						// Short of whole only where a route closed it, and, unless the budget gave up or
+						// the group may have expired, only while a route that closed it lives: one whose
+						// route failed reads on from the route replacing it.
+						let whole = read.frames == frames(*key) && instance.complete.contains(key);
+						if !whole && !instance.short.contains(&(*key, read.frames)) {
 							return Err(fail(
 								index,
 								format!("group {key} ended cleanly after {} frames", read.frames),
+							));
+						}
+						if !whole
+							&& reader.spec.budget == Budget::Hour
+							&& !reader.doomed && reader.floor.is_none_or(|floor| *key > floor)
+							&& !instance.live().any(|copy| copy.closed_at(*key, read.frames))
+						{
+							return Err(fail(
+								index,
+								format!(
+									"group {key} ended after {} frames where a failed route closed it",
+									read.frames
+								),
 							));
 						}
 						read.end = Some(Ok(()));
@@ -1120,6 +1202,30 @@ fn regressions() {
 				Op::Ranges {
 					reader: 0,
 					range: Some((7, 12)),
+				},
+			],
+			finish: false,
+		},
+		// A group the serving route closes short as it fails reads on from the route that
+		// replaces it, which holds the rest.
+		Case {
+			ops: vec![
+				Op::Up { instance: 0, slot: 1 },
+				Op::Write {
+					instance: 0,
+					slot: 1,
+					group: Some(7),
+					frames: 1,
+				},
+				Op::Join {
+					reader: 0,
+					spec: spec(false, Budget::Hour, None, false),
+				},
+				Op::Close {
+					instance: 0,
+					slot: 1,
+					group: Some(7),
+					down: true,
 				},
 			],
 			finish: false,

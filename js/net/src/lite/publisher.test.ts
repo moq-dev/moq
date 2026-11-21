@@ -35,7 +35,16 @@ import {
 	SubscribeUpdate,
 } from "./subscribe.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
-import { ALPN_05, ALPN_06, ALPN_07_WIP, hasLengthFirst, hasRanges, keepsSubscribeOpen, Version } from "./version.ts";
+import {
+	ALPN_05,
+	ALPN_06,
+	ALPN_07_WIP,
+	hasLengthFirst,
+	hasRanges,
+	keepsSubscribeOpen,
+	Version,
+	versionName,
+} from "./version.ts";
 
 function publish(origin: OriginProducer, path: Path.Valid) {
 	const broadcastRoute = origin.route(path);
@@ -642,6 +651,55 @@ test("lite draft-06: an unchecked track's fetched frames carry their own timesta
 	}
 });
 
+// Replays `rs/moq-net/fixtures/stamps.json`, which moq-net replays too: lite-05/06 stamp a
+// scale-less frame with its group's start, never a clock, so a frame carries the same timestamp
+// on every hop and fetch, and its Group Stream matches byte for byte in both languages.
+const STAMPS = (await Bun.file(new URL("../../../../rs/moq-net/fixtures/stamps.json", import.meta.url)).json()) as {
+	name: string;
+	version: string;
+	start: number;
+	payloads: string[];
+	hex: string;
+}[];
+
+test.each(STAMPS.map((stamp) => [stamp.name, stamp] as const))("%s", async (_name, stamp) => {
+	using clock = manual();
+	const version = defined([Version.DRAFT_05, Version.DRAFT_06].find((v) => versionName(v) === stamp.version));
+	const pair = createMockTransportPair(stamp.version);
+	const origin = new OriginProducer();
+	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
+	const broadcast = publish(origin, Path.from("test"));
+	const track = defined(broadcast.createTrack("video", {}));
+
+	const client = await Stream.open(pair.client, { version });
+	const server = await Stream.accept(pair.server, version);
+	if (!server) throw new Error("publisher never accepted the subscribe stream");
+	void publisher.runSubscribe(
+		new Subscribe({ id: 0n, broadcast: Path.from("test"), track: "video", priority: 0 }),
+		server,
+	);
+
+	const start = BigInt(stamp.start);
+	const group = track.createGroup(start);
+	for (const payload of stamp.payloads) group.writeFrame(textFrame(payload, Timestamp.unscaled(start)));
+	group.finish();
+	await clock.advance(Duration.ZERO);
+
+	const opened = pair.client.incomingUnidirectionalStreams.getReader();
+	try {
+		const next = await opened.read();
+		if (next.done) throw new Error("publisher never opened the group stream");
+		const bytes = await new Response(next.value).arrayBuffer();
+		expect(Buffer.from(bytes).toString("hex")).toBe(stamp.hex);
+	} finally {
+		await opened.cancel();
+		publisher.close();
+		client.close();
+		broadcast.close();
+		origin.close();
+	}
+});
+
 // How long a served-subscription test waits on its manual clock for the next group stream
 // before calling the publisher idle.
 const IDLE_MS = Duration.millis(500);
@@ -718,6 +776,8 @@ async function servedSubscription(
 		pending?: boolean;
 		// The `Subscriber Max Age` as decoded, in place of the scheduling tests' wide one.
 		maxDelay?: number | null;
+		// The `Subscriber Min Age` as decoded, which places a range with no start.
+		minDelay?: number;
 	} = {},
 ) {
 	const version = options.version ?? Version.DRAFT_05;
@@ -785,6 +845,7 @@ async function servedSubscription(
 	// rejecting.
 	msg.ranges = options.ranges;
 	if (options.maxDelay !== undefined) msg.maxDelay = options.maxDelay;
+	msg.minDelay = options.minDelay;
 	const serving = publisher.runSubscribe(msg, server);
 
 	const opened = pair.client.incomingUnidirectionalStreams.getReader();
@@ -917,7 +978,7 @@ async function servedSubscription(
 	};
 }
 
-// SUBSCRIBE_START tells the subscriber where each range's start landed, which a relative or time
+// SUBSCRIBE_START tells the subscriber where each range's start landed, which a live join or time
 // start leaves it no way to work out from the groups it receives. Mirrors the Rust
 // `lite07_start_names_each_resolved_range_start`.
 test("lite-07 SUBSCRIBE_START names each resolved range start", async () => {
@@ -926,14 +987,16 @@ test("lite-07 SUBSCRIBE_START names each resolved range start", async () => {
 		version,
 		prefill: [0n, 1n, 2n, 3n, 4n],
 		maxAge: Duration.millis(3_600_000),
+		// A live join 1 ms behind the newest frame, at 4 ms.
+		minDelay: 1,
 		ranges: [
-			{ start: { relative: 1n } },
+			{},
 			// Group 1 starts at 1 ms.
 			{ start: { time: 1n }, end: { absolute: 2n } },
 			// Empty, so it starts nowhere.
 			{ start: { absolute: 3n }, end: { absolute: 3n } },
-			// Empty only once its start resolves to group 4.
-			{ start: { relative: 0n }, end: { absolute: 2n } },
+			// Empty only once its start resolves to group 3.
+			{ end: { absolute: 2n } },
 		],
 	});
 	try {
@@ -981,7 +1044,8 @@ test.each([
 });
 
 // A range an update adds learns where it starts from SUBSCRIBE_STARTED, and keeps that start however
-// many later updates leave it live, rather than counting back from a newer latest group.
+// many later updates leave it live, rather than joining again from a newer live edge under a newer
+// Min Age.
 test("lite-07 SUBSCRIBE_STARTED reports an added range's start, which later updates keep", async () => {
 	const version = Version.DRAFT_07;
 	const sub = await servedSubscription({
@@ -1001,22 +1065,25 @@ test("lite-07 SUBSCRIBE_STARTED reports an added range's start, which later upda
 		if (!("start" in start)) throw new Error("expected SUBSCRIBE_OK");
 		expect(start.start.starts).toEqual([0n]);
 
-		// Two groups back from the latest, group 2, which takes Range ID 1.
-		await replayUpdate({ priority: 0, ranges: [{ start: { relative: 2n } }] }).encode(sub.client.writer, version);
+		// A live join 2 ms behind the newest frame, at group 2, which takes Range ID 1.
+		await replayUpdate({ priority: 0, minDelay: 2, ranges: [{}] }).encode(sub.client.writer, version);
 		const started = await next();
 		if (!("started" in started)) throw new Error("expected SUBSCRIBE_STARTED");
 		expect([started.started.id, started.started.start]).toEqual([1n, 2n]);
 
-		// Newer groups arrive, and another update leaves the range live: it still starts at 2.
-		// The added range starts at time 9, which the live group 7 contains.
+		// Newer groups arrive, and another update under a larger Min Age leaves the range live: it
+		// still starts at 2. The added range starts at time 9, which the live group 7 contains.
 		for (const key of [5n, 6n, 7n]) sub.serve(key);
-		await replayUpdate({ priority: 0, ranges: [{ start: { absolute: 9n } }] }).encode(sub.client.writer, version);
+		await replayUpdate({ priority: 0, minDelay: 4, ranges: [{ start: { absolute: 9n } }] }).encode(
+			sub.client.writer,
+			version,
+		);
 		const pinned = await next();
 		if (!("started" in pinned)) throw new Error("expected SUBSCRIBE_STARTED");
 		expect([pinned.started.id, pinned.started.start]).toEqual([2n, 7n]);
 		const ranges = sub.track.subscription.peek()?.ranges ?? [];
-		expect(ranges.some((range) => range.start?.time === 2n)).toBe(true);
-		expect(ranges.some((range) => range.start?.relative !== undefined)).toBe(false);
+		expect(ranges.some((range) => range.start === 2n)).toBe(true);
+		expect(ranges.some((range) => range.start === undefined)).toBe(false);
 	} finally {
 		await sub.close();
 	}
@@ -1046,7 +1113,9 @@ test("lite-07 answers a bounded window that resolves empty and FINs in reply", a
 			version,
 			prefill: [0n, 1n, 2n, 3n, 4n, 5n],
 			maxAge: Duration.millis(3_600_000),
-			ranges: [{ start: { relative: 0n }, end: { absolute: 3n } }],
+			// A live join at the latest group, past its end.
+			minDelay: 0,
+			ranges: [{ end: { absolute: 3n } }],
 		});
 		try {
 			const resp = await decodeSubscribeResponse(sub.client.reader, version);
@@ -2238,7 +2307,7 @@ test("lite draft-06: scheduling updates apply while SUBSCRIBE_START is blocked",
 			// Lite-06 cannot state a minimum.
 			delay: { min: null, max: Duration.millis(TEST_MAX_DELAY_MS) },
 			order: "descending",
-			ranges: [{ end: { time: 5n } }],
+			ranges: [{ end: 5n }],
 		});
 		expect(ranges).not.toHaveBeenCalled();
 

@@ -293,18 +293,14 @@ impl<O: Output> Media<O> {
 						let playout = moq_mux::container::Playout::new(delay, Duration::ZERO);
 						let track = rendition.track(hang::catalog::Reference::track(config, name))?;
 						// The whole delay from the first request, so a cold join never states a
-						// zero minimum before the container's update. The live edge, from the
-						// groups each hop holds from its live feed, never a warm copy's backlog,
-						// so it names no cached group for the shared publisher subscription to
-						// rewind to.
+						// zero minimum before the container's update. A live join: the default
+						// range has no start, so the stated minimum places it behind each hop's
+						// live edge, never at a warm copy's backlog, so it names no cached group
+						// for the shared publisher subscription to rewind to.
 						let subscriber = track
-							.subscribe(
-								playout.subscription(
-									moq_net::track::Subscription::default()
-										.with_priority(hang::catalog::PRIORITY.video)
-										.with_ranges([moq_net::track::Range::live()]),
-								),
-							)
+							.subscribe(playout.subscription(
+								moq_net::track::Subscription::default().with_priority(hang::catalog::PRIORITY.video),
+							))
 							.await?;
 						let format = catalog::hang::Container::try_from(config)?;
 						// The playout delay is the target latency, and the max how late a group may be.

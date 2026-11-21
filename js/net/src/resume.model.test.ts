@@ -1,9 +1,9 @@
 /**
  * Resume checked against a model of one logical track, mirroring the Rust `model::resume_model`.
  *
- * Random sequences of route flips, route failures, give-ups, ranges, cache expiry, and reader
- * joins and leaves drive an origin's fronts on the manual clock. Every reader's groups, frames,
- * drops, and end are checked against what one plain cursor on the logical track would see:
+ * Random sequences of route flips, route failures, give-ups, short closes, ranges, cache expiry,
+ * and reader joins and leaves drive an origin's fronts on the manual clock. Every reader's groups,
+ * frames, drops, and end are checked against what one plain cursor on the logical track would see:
  * every group its range and budget allow, each once, in its order. A second instance, priced
  * below the first, wins the path while older readers stay on theirs until it has no route left,
  * then end with an error.
@@ -89,6 +89,12 @@ type Op =
 	| { kind: "write"; instance: number; slot: number; group?: number; frames: number }
 	/** The route gives up `group` with a verdict on its content. */
 	| { kind: "giveUp"; instance: number; slot: number; group: number }
+	/**
+	 * The route's copy closes `group`, or the lowest group it still writes, where it got to,
+	 * without saying it is whole, as a relay whose upstream closed the group does; with `down`,
+	 * the route then fails before any reader looks, so the front replaces the copy that closed it.
+	 */
+	| { kind: "close"; instance: number; slot: number; group?: number; down: boolean }
 	/** The route's copy declares the track's end, once it holds the last group. */
 	| { kind: "end"; instance: number; slot: number }
 	| { kind: "advance"; ms: number }
@@ -152,6 +158,19 @@ const op: fc.Arbitrary<Op> = fc.oneof(
 			group: fc.nat({ max: GROUPS - 2 }),
 		}),
 	},
+	{
+		weight: 4,
+		arbitrary: fc.record({
+			kind: fc.constant("close" as const),
+			instance,
+			slot,
+			group: fc.oneof(
+				{ weight: 7, arbitrary: fc.constant(undefined) },
+				{ weight: 3, arbitrary: fc.nat({ max: GROUPS - 1 }) },
+			),
+			down: fc.boolean(),
+		}),
+	},
 	{ weight: 2, arbitrary: fc.record({ kind: fc.constant("end" as const), instance, slot }) },
 	{
 		weight: 6,
@@ -175,8 +194,8 @@ interface Copy {
 	/** Answers the front's requests for the route until the route goes. */
 	serving: { close(): void };
 	broadcast: BroadcastProducer;
-	/** Frames written per group, with the writer while the group is open. */
-	groups: Map<number, { written: number; writer?: GroupProducer }>;
+	/** Frames written per group, with the writer while the group is open, and whether it closed short. */
+	groups: Map<number, { written: number; writer?: GroupProducer; closed?: boolean }>;
 	givenUp: Set<number>;
 }
 
@@ -214,6 +233,12 @@ function complete(copy: Copy, group: number): boolean {
 	return copy.groups.get(group)?.written === frames(group);
 }
 
+/** Whether the route's copy closed `group` short at `at` frames, or at all when `at` is omitted. */
+function closed(copy: Copy, group: number, at?: number): boolean {
+	const entry = copy.groups.get(group);
+	return !!entry?.closed && (at === undefined || entry.written === at);
+}
+
 /** One publisher instance: its routes, and what any of them ever carried. */
 class Publisher {
 	routes: (Copy | undefined)[] = Array.from({ length: SLOTS }, () => undefined);
@@ -223,6 +248,8 @@ class Publisher {
 	complete = new Set<number>();
 	/** Groups some route gave up. */
 	givenUp = new Set<number>();
+	/** Each group some route closed short, as `group:frames`. */
+	short = new Set<string>();
 	/** Some route declared the track's end. */
 	ended = false;
 	/** The newest group when idle cached groups last expired: any route may have let go of those. */
@@ -345,7 +372,7 @@ function groups(range: Range): track.Groups {
 function subscription(budget: Budget, range: Range): track.Subscription {
 	return {
 		delay: { max: budget === "hour" ? HOUR : SHORT },
-		ranges: range ? [{ start: { time: BigInt(range[0]) }, end: { time: BigInt(range[1]) - 1n } }] : undefined,
+		ranges: range ? [{ start: BigInt(range[0]), end: BigInt(range[1]) - 1n }] : undefined,
 	};
 }
 
@@ -380,29 +407,16 @@ class Model {
 			case "up":
 				this.up(op.instance, op.slot);
 				break;
-			case "down": {
-				const instance = this.instances[op.instance];
-				const copy = instance.routes[op.slot];
-				if (!copy) return;
-				instance.routes[op.slot] = undefined;
-				copy.serving.close();
-				for (const { writer } of copy.groups.values()) writer?.abort(routeFailure());
-				copy.track.abort(routeFailure());
-				copy.broadcast.close();
-				if (instance.live().length === 0) {
-					for (const reader of this.readers) {
-						if (reader?.instance === op.instance) reader.doomed = true;
-					}
-				}
+			case "down":
+				this.down(op.instance, op.slot);
 				break;
-			}
 			case "write": {
 				const copy = this.instances[op.instance].routes[op.slot];
 				if (!copy) return;
 				let group = op.group;
 				if (group === undefined) {
 					for (let candidate = 0; candidate < GROUPS; candidate++) {
-						if (!complete(copy, candidate) && !copy.givenUp.has(candidate)) {
+						if (!complete(copy, candidate) && !closed(copy, candidate) && !copy.givenUp.has(candidate)) {
 							group = candidate;
 							break;
 						}
@@ -424,6 +438,29 @@ class Model {
 					hooks.dropTrackGroups(copy.track, BigInt(op.group), BigInt(op.group + 1), { error: giveUp() });
 				}
 				instance.givenUp.add(op.group);
+				break;
+			}
+			case "close": {
+				const instance = this.instances[op.instance];
+				const copy = instance.routes[op.slot];
+				if (!copy) return;
+				let group = op.group;
+				if (group === undefined) {
+					for (const [candidate, entry] of [...copy.groups.entries()].sort(([a], [b]) => a - b)) {
+						if (entry.writer) {
+							group = candidate;
+							break;
+						}
+					}
+				}
+				const entry = group === undefined ? undefined : copy.groups.get(group);
+				if (group !== undefined && entry?.writer) {
+					entry.writer.finish();
+					entry.writer = undefined;
+					entry.closed = true;
+					instance.short.add(`${group}:${entry.written}`);
+				}
+				if (op.down) this.down(op.instance, op.slot);
 				break;
 			}
 			case "end":
@@ -495,10 +532,27 @@ class Model {
 		publisher.routes[slot] = { track: producer, serving, broadcast, groups: new Map(), givenUp: new Set() };
 	}
 
+	/** The route's session fails, failing its copy. */
+	down(instance: number, slot: number): void {
+		const publisher = this.instances[instance];
+		const copy = publisher.routes[slot];
+		if (!copy) return;
+		publisher.routes[slot] = undefined;
+		copy.serving.close();
+		for (const { writer } of copy.groups.values()) writer?.abort(routeFailure());
+		copy.track.abort(routeFailure());
+		copy.broadcast.close();
+		if (publisher.live().length === 0) {
+			for (const reader of this.readers) {
+				if (reader?.instance === instance) reader.doomed = true;
+			}
+		}
+	}
+
 	write(instance: number, slot: number, group: number, more: number): void {
 		const publisher = this.instances[instance];
 		const copy = publisher.routes[slot];
-		if (!copy || copy.givenUp.has(group) || complete(copy, group)) return;
+		if (!copy || copy.givenUp.has(group) || complete(copy, group) || closed(copy, group)) return;
 		let entry = copy.groups.get(group);
 		if (!entry) {
 			entry = { written: 0 };
@@ -740,8 +794,24 @@ class Model {
 			if (reader.gone) return;
 			this.progress++;
 			if (!frame) {
-				if (reading.frames !== frames(key) || !this.instances[reader.instance].complete.has(key)) {
+				// Short of whole only where a route closed it, and, unless the budget gave up or the
+				// group may have expired, only while a route that closed it lives: one whose route
+				// failed reads on from the route replacing it.
+				const instance = this.instances[reader.instance];
+				const whole = reading.frames === frames(key) && instance.complete.has(key);
+				if (!whole && !instance.short.has(`${key}:${reading.frames}`)) {
 					this.failure ??= fail(index, `group ${key} ended cleanly after ${reading.frames} frames`);
+				} else if (
+					!whole &&
+					reader.spec.budget === "hour" &&
+					!reader.doomed &&
+					(instance.expired === undefined || key > instance.expired) &&
+					!instance.live().some((copy) => closed(copy, key, reading.frames))
+				) {
+					this.failure ??= fail(
+						index,
+						`group ${key} ended after ${reading.frames} frames where a failed route closed it`,
+					);
 				}
 				reading.end = null;
 				return;
@@ -1007,6 +1077,17 @@ test("regressions", async () => {
 				{ kind: "write", instance: 1, slot: 1, group: undefined, frames: 1 },
 				{ kind: "up", instance: 1, slot: 0 },
 				{ kind: "down", instance: 1, slot: 1 },
+			],
+			finish: false,
+		},
+		// A group the serving route closes short as it fails reads on from the route that
+		// replaces it, which holds the rest. Mirrors the Rust case.
+		{
+			ops: [
+				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "write", instance: 0, slot: 1, group: 7, frames: 1 },
+				{ kind: "join", reader: 0, spec: spec(false, "hour", undefined, false) },
+				{ kind: "close", instance: 0, slot: 1, group: 7, down: true },
 			],
 			finish: false,
 		},
