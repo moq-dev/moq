@@ -161,6 +161,11 @@ struct Passthrough<E: crate::catalog::hang::CatalogExt> {
 	group: Option<moq_net::group::Producer>,
 	/// The latest group's start, which the next group may not start below.
 	start: Option<Timestamp>,
+	/// The newest sample written, which the next group starts after.
+	newest: Option<Timestamp>,
+	/// The newest sample of every group before the latest one: every sample of the latest group
+	/// presents after it.
+	ceiling: Option<Timestamp>,
 
 	// This track's place in the broadcast's join interval. Passthrough writes groups by hand (no
 	// `container::Producer`), so it reports what its estimator measured itself.
@@ -262,6 +267,8 @@ struct Run {
 	samples: Vec<Sample>,
 	/// The earliest presentation time, which a passthrough fragment is stamped with.
 	earliest: Timestamp,
+	/// The latest presentation time of any sample.
+	latest: Timestamp,
 	/// The furthest presentation end any sample reaches.
 	end: Timestamp,
 	/// The edit list dropped some of the fragment's samples.
@@ -638,6 +645,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			track,
 			group: None,
 			start: None,
+			newest: None,
+			ceiling: None,
 			member,
 			pending_start: None,
 			estimator: self.catalog.estimator(),
@@ -1230,7 +1239,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 								let prefix = pending.prefix.take().expect("one prefix per fragment");
 								let (writer, opened) =
 									output.start(prefix, &pending.run, track.kind, pending.placement)?;
-								(Writer::Fragment(writer), opened)
+								(writer.map_or(Writer::Dropped, Writer::Fragment), opened)
 							}
 							output => {
 								let (sample, opened) = open_sample(output, pending, *sample_index, track.timescale)?;
@@ -1247,12 +1256,11 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					if complete {
 						let last = *sample_index + 1 == pending.run.samples.len();
 						match &mut track.output {
-							Output::Passthrough(output) if last => {
-								let Some(Writer::Fragment(writer)) = pending.writer.take() else {
-									unreachable!("passthrough tracks write whole fragments");
-								};
-								output.complete(writer, pending, track.kind)?;
-							}
+							Output::Passthrough(output) if last => match pending.writer.take() {
+								Some(Writer::Fragment(writer)) => output.complete(writer, pending, track.kind)?,
+								Some(Writer::Dropped) => {}
+								_ => unreachable!("passthrough tracks write whole fragments"),
+							},
 							Output::Passthrough(_) => {}
 							output => media!(output, producer => {
 								let Some(Writer::Sample(sample)) = pending.writer.take() else {
@@ -1312,7 +1320,7 @@ impl Mdat {
 					let _ = writer.abort(err.clone());
 				}
 				Some(Writer::Sample(sample)) => sample.abort(err.clone()),
-				None => {}
+				Some(Writer::Dropped) | None => {}
 			}
 		}
 	}
@@ -1332,6 +1340,8 @@ struct PendingTrack {
 enum Writer {
 	/// A passthrough track's whole per-track fragment.
 	Fragment(moq_net::frame::Producer),
+	/// A passthrough fragment the track dropped, whose payload is discarded.
+	Dropped,
 	/// One unwrapped sample.
 	Sample(Streamed),
 }
@@ -1340,6 +1350,7 @@ impl Writer {
 	fn write(&mut self, chunk: &[u8]) -> crate::Result<()> {
 		match self {
 			Self::Fragment(writer) => writer.write(chunk)?,
+			Self::Dropped => {}
 			Self::Sample(sample) => sample.write(chunk)?,
 		}
 		Ok(())
@@ -1400,6 +1411,7 @@ impl<E: crate::catalog::hang::CatalogExt> Fmp4Track<E> {
 		self.last_decode_time = Some(dts);
 
 		let mut earliest = None;
+		let mut latest = None;
 		let mut end = None;
 		let mut samples = Vec::with_capacity(sample::count(traf) as usize);
 		let mut dropped = false;
@@ -1431,6 +1443,7 @@ impl<E: crate::catalog::hang::CatalogExt> Fmp4Track<E> {
 				};
 				end = Some(end.map_or(sample_end, |max| crate::container::later(max, sample_end)));
 				earliest = Some(earliest.map_or(timestamp, |min| crate::container::earlier(min, timestamp)));
+				latest = Some(latest.map_or(timestamp, |max| crate::container::later(max, timestamp)));
 
 				samples.push(Sample {
 					dts,
@@ -1450,7 +1463,7 @@ impl<E: crate::catalog::hang::CatalogExt> Fmp4Track<E> {
 			}
 		}
 
-		let (Some(earliest), Some(end)) = (earliest, end) else {
+		let (Some(earliest), Some(latest), Some(end)) = (earliest, latest, end) else {
 			return match dropped {
 				true => Ok(None),
 				false => Err(Error::MissingTrun.into()),
@@ -1459,6 +1472,7 @@ impl<E: crate::catalog::hang::CatalogExt> Fmp4Track<E> {
 		Ok(Some(Run {
 			samples,
 			earliest,
+			latest,
 			end,
 			dropped,
 		}))
@@ -1579,14 +1593,15 @@ fn kept(traf: &mp4_atom::Traf, run: &Run) -> Result<mp4_atom::Traf> {
 }
 
 impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
-	/// Open one per-track fragment's output frame, reporting whether it opened a group.
+	/// Open one per-track fragment's output frame, reporting whether it opened a group, or `None`
+	/// for a fragment dropped because it presents with the groups before its own.
 	fn start(
 		&mut self,
 		prefix: Bytes,
 		run: &Run,
 		kind: Kind,
 		placement: Placement,
-	) -> Result<(moq_net::frame::Producer, bool)> {
+	) -> Result<(Option<moq_net::frame::Producer>, bool)> {
 		// Carry the fragment's earliest presentation time as the frame timestamp, in the
 		// track's native timescale and shifted onto the catalog clock. Consumers present the
 		// fragment at it; `tfdt` only places the samples relative to each other.
@@ -1603,6 +1618,27 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 			&& timestamp < floor
 		{
 			return Err(crate::container::TimestampRewind { timestamp, floor }.into());
+		}
+		// Every sample of a group presents after every sample of the groups before it, so a segment
+		// that doesn't start after the newest sample written continues the open group, as
+		// `container::Producer` does for a keyframe; with none open it is dropped. So is a later
+		// fragment presenting with the groups before its own, such as a leading picture after a
+		// splice, its samples counted as skipped.
+		let behind = self.newest.is_some_and(|newest| timestamp <= newest);
+		if start_group && behind && self.group.is_some() {
+			start_group = false;
+		}
+		let dropped = match start_group {
+			true => behind,
+			false => self.ceiling.is_some_and(|ceiling| timestamp <= ceiling),
+		};
+		if dropped {
+			tracing::debug!(
+				?timestamp,
+				"dropping a fragment that presents before its group's predecessors end"
+			);
+			self.sent.skip(run.samples.len() as u64);
+			return Ok((None, false));
 		}
 		// A group is keyed by its first fragment's timestamp, which has to start after every group
 		// the track holds. A segment that doesn't continues the open group instead; with none open
@@ -1647,8 +1683,14 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		writer.write(prefix)?;
 		if start_group {
 			self.start = Some(timestamp);
+			self.ceiling = self.newest;
 		}
-		Ok((writer, start_group))
+		let latest = placement.offset.apply(run.latest)?;
+		self.newest = Some(
+			self.newest
+				.map_or(latest, |newest| crate::container::later(newest, latest)),
+		);
+		Ok((Some(writer), start_group))
 	}
 
 	fn complete(&mut self, writer: moq_net::frame::Producer, pending: &PendingTrack, kind: Kind) -> Result<()> {

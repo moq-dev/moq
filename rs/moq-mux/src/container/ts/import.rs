@@ -9456,22 +9456,21 @@ pub(super) mod test {
 		assert!(is_rewind(&err), "{err:?}");
 	}
 
-	/// Group starts never go backwards, and no frame sits below the start of the group before
-	/// its own, which is what the producer demands. Frames may still present below the previous
-	/// group's content (B-frames, an overlapping keyframe).
+	/// Every frame of a group presents after every frame of the groups before it, which is what
+	/// the producer demands. Frames within a group may still reorder (B-frames, a join that
+	/// continues the group).
 	fn assert_forward(frames: &[crate::container::Frame]) {
-		let (mut start, mut floor) = (None, None);
+		let (mut ceiling, mut newest) = (None, None);
 		for frame in frames {
 			let ts = frame.timestamp.as_micros().unwrap();
 			if frame.keyframe {
-				assert!(
-					start.is_none_or(|start| ts >= start),
-					"a group started at {ts} before {start:?}"
-				);
-				floor = start;
-				start = Some(ts);
+				ceiling = newest;
 			}
-			assert!(floor.is_none_or(|floor| ts >= floor), "rewound to {ts} below {floor:?}");
+			assert!(
+				ceiling.is_none_or(|ceiling| ts > ceiling),
+				"{ts} presents at or before {ceiling:?}, an earlier group's newest frame"
+			);
+			newest = newest.max(Some(ts));
 		}
 	}
 
@@ -10206,9 +10205,9 @@ pub(super) mod test {
 
 	/// #3798's join: a new IDR presents below the last P-frame on a continuous clock, since
 	/// the B-frames before it presented earlier than the P-frame decoded ahead of them. It
-	/// still starts after the previous group did, so it overlaps rather than rewinds.
+	/// continues the old content's group, so the next group still presents after all of it.
 	#[tokio::test(start_paused = true)]
-	async fn h264_join_below_a_p_frame_publishes() {
+	async fn h264_join_below_a_p_frame_continues_the_group() {
 		let mut mux = Mux {
 			out: synth_pmt(&[(StreamType::H264, VIDEO)], false),
 			..Default::default()
@@ -10218,6 +10217,44 @@ pub(super) mod test {
 		mux.gops(VIDEO, 90_000 + 6 * FRAME, 2);
 		let frames = video_frames(&mux.out).await;
 		assert_eq!(frames.len(), 16, "every picture either side of the join");
+		let groups = frames.iter().filter(|frame| frame.keyframe).count();
+		assert_eq!(groups, 3, "the join's IDR continues the group it overlaps");
+		assert_forward(&frames);
+	}
+
+	/// A join whose IDR lands past the old content, followed by leading pictures: the one that
+	/// would present at or before the old content's newest frame is dropped, the rest publish.
+	#[tokio::test(start_paused = true)]
+	async fn h264_join_drops_a_leading_picture_before_the_old_content_ends() {
+		let mut mux = Mux {
+			out: synth_pmt(&[(StreamType::H264, VIDEO)], false),
+			..Default::default()
+		};
+		// The old content's newest frame presents at `base + 4 * FRAME` and decodes last at
+		// `base + 3 * FRAME`.
+		let base = 90_000 + 4 * FRAME;
+		mux.gops(VIDEO, 90_000, 2);
+		for (keyframe, pts, dts) in [
+			(true, base + 7 * FRAME, base + 3 * FRAME + 1_000),
+			(false, base + 4 * FRAME, base + 3 * FRAME + 2_000),
+			(false, base + 6 * FRAME, base + 4 * FRAME),
+			(false, base + 9 * FRAME, base + 5 * FRAME),
+			(false, base + 8 * FRAME, base + 6 * FRAME),
+		] {
+			let cc = mux.cc(VIDEO);
+			mux.out
+				.extend_from_slice(&video_pes(VIDEO, cc, pts, Some(dts), &annexb_au(keyframe)));
+		}
+		let frames = video_frames(&mux.out).await;
+		let micros = |ticks: u64| u128::from(ticks) * 1_000_000 / 90_000;
+		let joined: Vec<u128> = frames[8..]
+			.iter()
+			.map(|frame| frame.timestamp.as_micros().unwrap())
+			.collect();
+		assert_eq!(
+			joined,
+			[base + 7 * FRAME, base + 6 * FRAME, base + 9 * FRAME, base + 8 * FRAME].map(micros)
+		);
 		assert_forward(&frames);
 	}
 

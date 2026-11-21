@@ -1403,6 +1403,71 @@ async fn video_joined_mid_gop_starts_at_a_sync_sample() {
 	}
 }
 
+/// Every sample of a group presents after every sample of the groups before it, passthrough or
+/// unwrapped: a sync sample that doesn't start after the newest sample continues the open group,
+/// and a later one presenting at or before the groups before its own is dropped.
+#[tokio::test]
+async fn video_groups_never_overlap() {
+	let (_, (video_id, video_scale), _) = bbb_init();
+	let tick = video_scale.as_u64() / 24;
+	let non_sync = 0x0001_0000;
+
+	let init = bbb_init_with_edits(video_id, vec![media_edit(0)]);
+	// `(cts, flags)` per sample, each fragment decoding from `dts`, in ticks.
+	let fragments: [(u64, &[(u64, u32)]); 6] = [
+		// Presents 2, 6, 3, 4.
+		(0, &[(2, 0), (5, non_sync), (1, non_sync), (1, non_sync)]),
+		// A join at 5, below the newest sample: it continues the group. Presents 5, 9, 7, 8.
+		(4, &[(1, 0), (4, non_sync), (1, non_sync), (1, non_sync)]),
+		// A sync sample past the newest, with a leading picture at it. Presents 10, 9, 15, 11.
+		(8, &[(2, 0), (0, non_sync), (5, non_sync), (0, non_sync)]),
+		// Past the newest again. Presents 16.
+		(12, &[(4, 0)]),
+		// Presents 13, with the group before: dropped.
+		(13, &[(0, non_sync)]),
+		// Presents 17.
+		(14, &[(3, non_sync)]),
+	];
+	let cases = [
+		// Unwrapped, every sample is placed on its own: the leading picture at 9 is dropped.
+		(
+			false,
+			vec![vec![2, 6, 3, 4, 5, 9, 7, 8], vec![10, 15, 11], vec![16, 17]],
+		),
+		// Passthrough places whole fragments by their earliest sample, so the one with the leading
+		// picture continues the group instead.
+		(true, vec![vec![2, 6, 3, 4, 5, 9, 7, 8, 10, 9, 15, 11], vec![16, 17]]),
+	];
+	for (passthrough, expected) in cases {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve()).with_cmaf(passthrough);
+		fmp4.decode(&init).unwrap();
+		for (dts, samples) in fragments {
+			let entries: Vec<_> = samples.iter().map(|&(cts, flags)| (cts * tick, flags, 0xA)).collect();
+			fmp4.decode(&video_fragment(video_id, dts * tick, tick, &entries))
+				.unwrap();
+		}
+		let _finished = fmp4.finish().unwrap();
+		let [video, _] = published(&consumer, &catalog).await;
+		let presented: Vec<u64> = video
+			.iter()
+			.map(|(timestamp, _, _)| (timestamp * u128::from(video_scale.as_u64())).div_ceil(1_000_000) as u64 / tick)
+			.collect();
+		assert_eq!(presented, expected.concat(), "passthrough {passthrough}");
+		// Each group starts at its first sample, the lowest of its sync samples.
+		let name = catalog.snapshot().video.renditions.keys().next().unwrap().clone();
+		let starts: Vec<u64> = starts(&consumer, &name)
+			.await
+			.into_iter()
+			.map(|start| (u128::from(start) * u128::from(video_scale.as_u64())).div_ceil(1_000_000) as u64 / tick)
+			.collect();
+		let firsts: Vec<u64> = expected.iter().map(|group| group[0]).collect();
+		assert_eq!(starts, firsts, "passthrough {passthrough}");
+	}
+}
+
 #[test]
 fn test_bbb_init_roundtrip() {
 	let data = include_bytes!("test_data/bbb.mp4");

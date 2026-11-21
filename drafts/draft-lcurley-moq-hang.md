@@ -905,7 +905,7 @@ Every container shares the same group rules:
 
 Each group MUST start with a keyframe, except a group that contains only a discontinuity marker.
 If the codec does not support delta frames (e.g. audio), a group MAY consist of multiple keyframes.
-Otherwise, a group MUST consist of a single keyframe followed by zero or more delta frames.
+Otherwise, a group MUST consist of a keyframe followed by zero or more frames that decode from the frames before them in the group.
 
 A group with no decodable frames is a walk-now discontinuity: one empty codec payload and no media.
 An empty payload is data on a data track, so in every container a data track's marker is one object with no bytes, which is no frame; it ends at the furthest point the consumer has read.
@@ -914,9 +914,9 @@ A consumer MUST NOT submit the marker to a decoder.
 Empty groups (zero objects) are permitted and mean nothing.
 After a discontinuity the timeline continues forward.
 A publisher that stops producing and may resume on the same track (e.g. an encoder idle for lack of demand) SHOULD publish a discontinuity marker when it stops, so the group before the pause does not reach across the gap and read as live.
-The first timestamp of a group MUST NOT be lower than the first timestamp of any group with a lower start, and no frame of a group may be lower than the first timestamp of the group before it; a group that breaks either is malformed.
-A group MAY start at the same timestamp as the previous group.
-Frames MAY present below the previous group's content (B-frames, or a keyframe overlapping the previous group's last frame).
+Every frame of a group MUST present after every frame of any group with a lower start; a group that breaks this is malformed.
+Frames within a group MAY present out of order (B-frames, open-GOP leading pictures), so a consumer bounds a group that isn't whole by the lowest timestamp it knows in a higher group.
+A publisher splicing in new content keeps this by continuing the current group at a keyframe that doesn't present after the group's newest frame, and by dropping a later frame that presents at or before the previous group's newest frame, such as a leading picture that references the old content.
 A publisher whose source restarts below the previous group's start begins a new broadcast instead.
 A hole between delivered groups is a playhead event unless the publisher declared the starts between them skipped or the boundary is contiguous within 1 ms.
 A consumer re-applies startup delay and skip at a playhead event; it does not reset codec state.
@@ -1082,7 +1082,7 @@ This document has no IANA actions.
 - A `ttml` payload is one complete TTML document in the `media` time base, clipped to its frame: its `body` begin matches the frame timestamp, and its `body` end bounds what it presents.
 - Specified MSF text metadata preservation and refusal of unrepresentable text packaging during gateway conversion.
 - Added optional `bitrate`, `jitter`, and `delay` fields to `json` and `binary` track entries, `delay` measured only from payloads stamped with their capture time on the broadcast clock.
-- Replaced the live-edge floor with monotonic group starts: a group may overlap the previous group's content but not start before it.
+- Replaced the live-edge floor with groups that never overlap: every frame of a group presents after every frame of a lower group, while frames within a group may reorder. A spliced keyframe that doesn't present after its group's newest frame continues that group.
 - A data track marks a discontinuity with a group of one object with no bytes, since its empty payload is data. An object with no bytes on an audio or video track, or sharing its group, is malformed.
 - Timed CMAF samples from the frame timestamp, which is the fragment's earliest presentation time; `tfdt` is only relative within the fragment, and places the samples of an untimed frame. A timed CMAF track counts in its `mdhd` ticks, and a fragment's runs lie back to back in its `mdat`, each `data_offset` counting from its `moof`.
 - A `loc` frame's codec payload uses the `legacy` framing.
