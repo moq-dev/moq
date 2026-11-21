@@ -43,6 +43,19 @@ def dispatch_scope():
     return re.search(r"^module rs '([^']*)'", (ROOT / "sh/dispatch.sh").read_text(), re.M).group(1)
 
 
+def rust_reads():
+    """Each `(crate directory, glob, file:line)` a Rust source reads outside its crate, from sh/rs/reads.sh."""
+    listed = subprocess.run(["bash", "sh/rs/reads.sh"], cwd=ROOT, check=True, capture_output=True, text=True)
+    return [tuple(line.split(" ", 2)) for line in listed.stdout.splitlines()]
+
+
+def read_probes(glob):
+    """Paths a read covers: the file it names, or a new file in each place a wildcard or directory leaves open."""
+    if "*" not in glob:
+        return [f"{glob}/added" if (ROOT / glob).is_dir() else glob]
+    return [glob.replace("**/", nested).replace("**", "added").replace("*", "added") for nested in ("", "added/")]
+
+
 class SelectTest(unittest.TestCase):
     # CI runs target lints before its test build.
     def selected(self, *paths, action="lint", github_actions=False):
@@ -223,12 +236,44 @@ class SelectTest(unittest.TestCase):
                     )
         self.assertEqual(self.selected("test/interop/compat/container.rs"), [])
 
-    def test_relay_nixos_module_selects_the_relay(self):
-        # moq-relay's tests read the module.
-        calls = self.selected("nix/modules/moq-relay.nix", action="test")
-        self.assertTrue(any("/rs/moq-relay#" in call for call in calls), calls)
+    def test_a_read_selects_its_reader(self):
+        for path, crate in (
+            # A new relay config, the shape of moq-dev/moq#8459.
+            ("test/added/relay.toml", "moq-relay"),
+            ("nix/modules/moq-relay.nix", "moq-relay"),
+            # A format interpolation stands for one segment.
+            ("doc/concept/audio-jitter/added.json", "moq-audio"),
+            ("test/interop/added.ts", "moq-net"),
+            ("test/max-age/client.ts", "moq-tokio"),
+            # A bench module another crate's bench includes, beside a bench-only change.
+            ("rs/moq-net/benches/session/added.rs", "moq-relay"),
+        ):
+            with self.subTest(path=path):
+                calls = self.selected(path, action="test")
+                self.assertTrue(any(f"/rs/{crate}#" in call for call in calls), calls)
+        for path in ("test/interop/clients/js/added.ts", "doc/concept/audio-jitter/clock/reference.ts"):
+            with self.subTest(path=path):
+                self.assertEqual(self.selected(path), [])
+
+    def test_dispatch_scope_covers_rust_reads(self):
+        # `just gh check` runs this on every diff, so a new read outside rs/
+        # fails before its file's next change skips the test that reads it.
         scope = dispatch_scope()
-        self.assertRegex("nix/modules/moq-relay.nix", scope)
+        reads = rust_reads()
+        for crate, glob, source in reads:
+            if glob.startswith("rs/"):
+                continue
+            # A `../` string that is no path, such as a path-traversal test input
+            # in a file that mentions CARGO_MANIFEST_DIR, also lands here.
+            hint = "; if that literal is no path, keep it out of files that mention CARGO_MANIFEST_DIR"
+            with self.subTest(crate=crate, glob=glob, source=source):
+                self.assertTrue(glob, f"{crate} reads the whole repository at {source}; name the files it reads{hint}")
+                for probe in read_probes(glob):
+                    self.assertRegex(
+                        probe, scope, f"{crate} reads {glob} at {source}, which sh/dispatch.sh's rs scope misses{hint}"
+                    )
+        # The lister still finds the read behind moq-dev/moq#8459.
+        self.assertIn(("rs/moq-relay", "test/**/*.toml"), [(crate, glob) for crate, glob, _ in reads])
 
     def test_dispatch_scope_covers_out_of_crate_targets(self):
         scope = dispatch_scope()

@@ -278,7 +278,7 @@ async fn run(config: &Config) -> Result<()> {
 	let consume_origin = moq_tokio::origin::spawn();
 	let viewers = consume_origin
 		.consume()
-		.scope(&viewer_path, &moq_net::Patterns::from(moq_net::Pattern::all()))
+		.scope(&viewer_path, &moq_net::Prefixes::all())
 		.context("invalid viewer prefix")?;
 
 	tracing::info!(url = %moq_tokio::RedactedUrl::new(&url), %name, broadcast = %broadcast_path, viewers = %viewer_path, "connecting to relay");

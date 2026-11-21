@@ -220,7 +220,7 @@ This is what lets a subscriber move a Track to a different publisher partway thr
 A Group can therefore be assembled from more than one publisher: each contributes a disjoint run of frames, and the subscriber concatenates them in index order.
 
 A partial Group is only ever delivered to a subscriber that asked for one, with FETCH or a Position Start.
-A publisher that holds only the later frames of a Group a subscription covers names it in a [SUBSCRIBE_DROP](#subscribe-drop) rather than deliver the part it holds.
+A relay that holds only the later frames of a Group a subscription covers fetches the earlier frames from upstream and delivers the Group whole; a publisher that can't obtain them names the Group in a [SUBSCRIBE_DROP](#subscribe-drop) rather than deliver the part it holds.
 One that holds its earlier frames, such as a relay whose upstream closed the Group, delivers them and closes the Group Stream without a GROUP_END.
 A Group is the unit of decodability: its earlier Frames may carry a keyframe or compression state the later Frames need.
 
@@ -404,7 +404,7 @@ The initial set is relative to this hop: a relay answers with what it holds with
 The publisher MAY coalesce changes to a claim it has not yet sent, and sends no more claims before SYNCED than the initial set holds.
 A retraction of a claim or route already sent MAY precede SYNCED.
 A prefix outside the subscriber's [scope](#auth-stream) lists nothing and is SYNCED at once.
-A prefix wider than the scope is answered as if each of the scope's regions inside it were requested, a region being the leading literal segments of one of the scope's [patterns](#path-pattern), and none lying within another: a claim above a region is presented at that region, sent only within the scope as any presented claim is (below), and the prefix's SYNCED follows every region's initial set.
+A prefix wider than the scope is answered as if each of the scope's regions inside it were requested, a region being one of the scope's [prefixes](#path-prefix) not lying within another: a claim above a region is presented at that region, sent only within the scope as any presented claim is (below), and the prefix's SYNCED follows every region's initial set.
 So a subscriber whose scope's regions do not fit one ANNOUNCE_REQUEST asks for a prefix they share, the empty prefix at the widest, and still learns every region.
 A change to the scope takes effect on the publisher's stream before the ANNOUNCE_OK answering any edit the publisher reads after it sends or reads the AUTH_OK, AUTH_ERROR, or stream end making the change.
 An edit MAY change nothing, so a subscriber whose scope widens under a prefix it already asked for can send an empty edit and treat the region as synced at its ANNOUNCE_OK.
@@ -431,7 +431,8 @@ When the session closes, an endpoint MUST assume that every route and claim on t
 A broadcast path has at most 32 segments and at most 4,096 bytes; a receiver MUST close the session with a PROTOCOL_VIOLATION on a longer one, except one resolved by [Compression](#announce-compression) or joined beneath a root of the receiver's own, whose claim it drops: the ANNOUNCE_START still assigns its Announce ID, the messages naming it stay valid, and the receiver SHOULD log and count it.
 A claim covers a path when its prefix is a leading run of the path's segments; matching is per path segment, so a prefix never matches half a segment, and equality is byte-by-byte within each segment.
 A publisher presents each claim inside a requested prefix and only the most specific claim at or above it, at that prefix itself, or at each region answering it, and sends those within the subscriber's scope, which is exactly the covered set the subscriber may see.
-A presented claim is within the scope when the scope matches a path it covers, as a claim at `a` is under the scope `a/*`, which does not match `a` itself: a prefix answered with no claim has none covering a path the scope matches.
+A presented claim is within the scope when the scope covers a path the claim covers: when one of the scope's prefixes lies at, beneath, or above the path the claim is presented at.
+Since a scope covers whole subtrees, a claim within it is within it at every path it is presented at.
 A claim presented above its own prefix carries how many segments broader it is than the path it is presented at, its Above, so the subscriber can tell it from a claim exactly at that path.
 Every path on the stream is relative to the session, whichever requested prefix it lies in.
 
@@ -823,7 +824,7 @@ A group is expired once either of two ages meets the relevant `Max Age`:
 - Its **timestamp age** is the difference between the *newest* frame timestamp of the latest group that has at least one frame, and this group's **reach**, defined below.
 - Its **arrival age** is the time elapsed since its successor arrived at this hop.
 
-On a scale-less Track, timestamp age counts bare units as the milliseconds of a Max Age.
+A scale-less Track has no timestamp age: its groups expire by arrival age alone.
 
 By timestamp age, a group is expired only once it **provably cannot overlap the Max Age window**: every frame it could still present is older than the budget allows.
 Arrival age needs no such proof: it bounds how long a superseded group may still wait to be delivered.
@@ -1482,7 +1483,6 @@ Range {
 Anchor {
   Anchor Type (i)
   [Timestamp (i)]
-  [Groups Back (i)]
   [Frame (i)]
 }
 
@@ -1516,8 +1516,8 @@ See the [Expiration](#expiration) section for more information.
 **Subscriber Min Age**:
 The subscriber's target latency behind the live edge, in milliseconds plus one: the playout or jitter-buffer delay it holds.
 A value of `0` means the subscriber did not state one, which is distinct from a stated zero (`1`).
-It decides where a Range joining at the live edge starts (see below).
-A relay forwarding an aggregate of several subscriptions SHOULD carry the largest stated value, and not stated when none is, so its own copy starts far enough back for the subscription that buffers most.
+It decides where a Range with no `Start` starts (see below), and nothing else.
+A relay forwarding an aggregate of several subscriptions SHOULD carry the largest value among those with a Range with no `Start`, counting one not stated as larger than any, so its own copy starts far enough back for the subscription that buffers most.
 
 **Range Count**:
 The number of Ranges that follow.
@@ -1532,14 +1532,13 @@ A relay asking for the union of several subscriptions' Ranges, whose exact union
 **Anchor Type**:
 Which fields follow, and what the Anchor names:
 
-- None (0x0): no fields. As a `Start`, the oldest Group (no floor); as an `End`, the live edge (unbounded).
+- None (0x0): no fields. As a `Start`, no floor: `Subscriber Min Age` places the Range, or else it reaches back to the oldest Group (see below); as an `End`, the live edge (unbounded).
 - Time (0x1): `Timestamp`, the Group containing that time: the one whose start (see [Group](#group)) is the highest at or below it.
-- Relative (0x2): `Groups Back`, the Group that many before the latest, 0 being the latest.
-- Position (0x3): `Timestamp` then `Frame`, as Time, except that a Group starting exactly at `Timestamp` is delivered from frame `Frame` (see [Positions](#positions)). A `Start` only, and `Frame` is never 0, which Time says: anything else is a PROTOCOL_VIOLATION.
+- Position (0x2): `Timestamp` then `Frame`, as Time, except that a Group starting exactly at `Timestamp` is delivered from frame `Frame` (see [Positions](#positions)). A `Start` only, and `Frame` is never 0, which Time says: anything else is a PROTOCOL_VIOLATION.
 
 Any other value is a PROTOCOL_VIOLATION.
 Both ends include the Group they name, so a Range from Time `a` to Time `b` delivers every Group from the one containing `a` through the one containing `b`.
-The publisher resolves a Relative or Time Anchor against the Track as it holds it.
+The publisher resolves a Time Anchor, and a `Start` of None, against the Track as it holds it.
 A Range resolves once: an update that leaves it live does not resolve it again.
 
 A `Start` is a floor, not a request; `Subscriber Max Age` and `Subscriber Min Age` are the only things that ask for data.
@@ -1549,12 +1548,15 @@ A subscriber that buffers is then handed the head of what it can still play inst
 A floor above the latest group simply waits there: that is a resumed subscription naming where it left off.
 Reaching back is best-effort, not a guarantee that the groups still exist; see `Publisher Max Age` in [TRACK_INFO](#track-info).
 
-A Range joining at the live edge, with a `Start` of Relative 0 and an `End` of None, starts by a nonzero `Subscriber Min Age` instead: the publisher SHOULD start it at the newest group it holds that starts at or before the live edge minus the Min Age, at the oldest group it holds when none does, and never at a group Expiration has expired.
+A Range with a `Start` of None joins at the live edge instead when the subscription states a `Subscriber Min Age`: the publisher starts it at the Group containing the live edge minus the Min Age, as a Time `Start` there would, so a stated zero starts at the latest Group.
 The live edge is the newest frame timestamp the publisher holds; on a Track without a timescale, the Min Age is measured by when each group arrived at the publisher instead.
-The publisher starts from what it holds and never fetches to reach further back, so a subscriber is handed the buffer it will play, and no more, without waiting for it to fill.
+It never starts at a group Expiration has expired, and counts no Groups: however sparse the Groups a copy holds, the join lands where the time does.
+A relay's copy places the join only where it can show its origin would: at a time it can place between Groups it holds, or at the Range Start its own subscription was answered with when the time falls before it.
+Otherwise it asks its upstream with the Min Age and waits for the answer, so a subscriber joins at the same Group through any relay.
+A Range with a `Start` of None and no stated Min Age reaches back as any floor does.
 
 A Range covers whole Groups but for a Position `Start`; a subscriber reads a slice of a Group with FETCH (see [Positions](#positions)).
-A Group that another Range may also cover is delivered whole, since each Group is delivered once: one whose `Start` is at or below the Group's start, or is None or Relative, and whose `End` is not a Time below the Group's start.
+A Group that another Range may also cover is delivered whole, since each Group is delivered once: one whose `Start` is at or below the Group's start, or is None, and whose `End` is not a Time below the Group's start.
 A Time `Start` inside the Group, after its start, does not count: whether it falls before the next Group's start is unknown until that Group arrives.
 A subscriber resuming a Track on a new subscription, such as a relay moving to another route, starts at the Position past the frames it holds, so no frame it holds is sent again.
 The Group Stream of a Group that ended at `Frame` carries no FRAME, only how the Group ended.
@@ -1851,7 +1853,7 @@ Any other value is a PROTOCOL_VIOLATION.
 A subscriber joining a Track whose newest group ended knows at once that the group is not the live one, without waiting for its stream to end.
 
 **Range Start**:
-One per Range of the SUBSCRIBE, in Range ID order: the start of the Group where the Range's delivery starts, plus one, so a subscriber learns where a Relative or Time Anchor landed.
+One per Range of the SUBSCRIBE, in Range ID order: the start of the Group where the Range's delivery starts, plus one, so a subscriber learns where a Time Anchor, or a live join, landed.
 0 means the Range has no Group to deliver, including one an update retired before the answer.
 The Range's Groups from this one are owed as described in [SUBSCRIBE_DROP](#subscribe-drop); an earlier one is not, though it MAY still arrive.
 A subscriber MUST treat a `Range Start Count` other than the SUBSCRIBE's `Range Count` as a PROTOCOL_VIOLATION.
@@ -2103,43 +2105,36 @@ AUTH_OK Message {
   Type (i) = 0x0
   Message Length (i)
   Publish Count (i)
-  Publish Pattern (s) ...
+  Publish Prefix (s) ...
   Subscribe Count (i)
-  Subscribe Pattern (s) ...
+  Subscribe Prefix (s) ...
   Expires (i)
 }
 ~~~
 
-**Publish Pattern**:
-A [pattern](#path-pattern) matching broadcast paths the opener may announce and serve.
+**Publish Prefix**:
+A [prefix](#path-prefix) covering broadcast paths the opener may announce and serve.
 A count of zero grants none.
 
-**Subscribe Pattern**:
-A [pattern](#path-pattern) matching broadcast paths the opener may subscribe to.
+**Subscribe Prefix**:
+A [prefix](#path-prefix) covering broadcast paths the opener may subscribe to.
 
 **Expires**:
 The number of milliseconds until the grant lapses, or 0 for never.
 A value greater than 2^53 - 1 is invalid and MUST close the session with PROTOCOL_VIOLATION.
 The acceptor revokes a lapsed grant with AUTH_ERROR; the opener uses Expires to present a replacement token in time.
 
-### Path Pattern {#path-pattern}
-A pattern is a set of broadcast paths, written as `/`-separated segments split as a path's are, so a literal names a segment holding a `/` by escaping it.
-Each segment is one of:
+### Path Prefix {#path-prefix}
+A prefix is a broadcast path, written as `/`-separated segments split as a path's are, so a segment holding a `/` escapes it.
+It covers itself and every path beneath it: `room` covers `room` and `room/alice` but not `roomy`, and the empty prefix covers every path.
+Matching is per path segment, as a claim's is.
 
-- a literal, matching that segment exactly;
-- `*`, matching any one segment;
-- a literal with one `*` inside it, such as `cam-*.hang`, matching any segment that starts with the bytes before the `*` and ends with the bytes after it, without overlapping them;
-- `**`, matching zero or more segments.
+A prefix has at most 32 segments and no leading, trailing, or repeated `/`.
+It holds no `*`: a grant names whole subtrees and never a wildcard, so a route a grant admits always serves whole subtrees.
+A prefix that breaks any of these rules is a PROTOCOL_VIOLATION.
 
-A pattern matches a path when its segments match the path's segments in order, covering the whole path.
-The empty pattern matches only the empty path, `room/**` matches `room` and every path beneath it, and `**` matches every path.
-
-A pattern has at most 32 segments and at most one `**`.
-It has no leading, trailing, or repeated `/`, no segment with more than one `*`, and no `**` combined with other bytes in a segment.
-It is canonical: a `**` is never immediately preceded by a `*` segment, since `*/**` and `**/*` match the same paths and only `**/*` is valid.
-A pattern that breaks any of these rules is a PROTOCOL_VIOLATION.
-
-A grant covers a request when one of its patterns matches the path.
+A grant covers a request when one of its prefixes covers the path.
+A sender SHOULD omit a prefix lying within another of the same grant, since it covers nothing more.
 
 An endpoint MUST close the session with PROTOCOL_VIOLATION when an AUTH stream message fails to decode, has trailing body bytes, or has an unexpected type for its direction.
 The opener sends exactly one AUTH; any additional message on its side is a PROTOCOL_VIOLATION.
@@ -2285,7 +2280,7 @@ A stream that FINs without a GROUP_END carries a closed Group, which may have he
 
 ### Authorization {#changelog-07-auth}
 
-- Added the Auth Stream (0x7) with AUTH, AUTH_OK, and AUTH_ERROR: either endpoint presents a token on its own stream and learns the [path patterns](#path-pattern) it may publish and subscribe to. The union of a session's open grants is its scope. A shrink withdraws what it no longer covers, and an announcement outside the scope closes the session with UNAUTHORIZED. A peer without the stream resets it.
+- Added the Auth Stream (0x7) with AUTH, AUTH_OK, and AUTH_ERROR: either endpoint presents a token on its own stream and learns the [path prefixes](#path-prefix) it may publish and subscribe to, each covering its whole subtree; a prefix holding a `*` is a PROTOCOL_VIOLATION. The union of a session's open grants is its scope. A shrink withdraws what it no longer covers, and an announcement outside the scope closes the session with UNAUTHORIZED. A peer without the stream resets it.
 - Scope widens before AUTH_OK. A presenter waits for unanswered non-empty tokens before sending an uncovered request or rejecting a publication, and renewal waits for AUTH_OK before withdrawing the old token.
 - An Auth Stream message that fails to decode, has trailing body bytes, or has an unexpected type, or a second AUTH from the opener, closes the session with PROTOCOL_VIOLATION, as do invalid UTF-8 or an oversized AUTH_ERROR reason.
 - An AUTH_ERROR with INTERNAL_ERROR, TOO_MANY_REQUESTS, or CONTROL_MESSAGE_TIMEOUT leaves the token undecided, and the presenter presents it again after a growing backoff; any other code ends the token.
@@ -2315,7 +2310,7 @@ A stream that FINs without a GROUP_END carries a closed Group, which may have he
 - A node closes a session whose peer leaves its Announce Stream undrained for 10 seconds.
 - A publisher presents only the most specific claim covering the requested prefix.
 - A subscriber whose scope confines it to some prefixes SHOULD request those, and edit its set when they change.
-- A prefix wider than the subscriber's scope is answered region by region, a claim above a region presented at the region, so a subscriber whose regions do not fit one request asks for a prefix they share. A claim is within the scope when the scope matches a path it covers. A scope change takes effect before the ANNOUNCE_OK of any edit read after it, and an edit may change nothing.
+- A prefix wider than the subscriber's scope is answered region by region, a claim above a region presented at the region, so a subscriber whose regions do not fit one request asks for a prefix they share. A claim is within the scope when one of the scope's prefixes lies at, beneath, or above it. A scope change takes effect before the ANNOUNCE_OK of any edit read after it, and an edit may change nothing.
 - Added `Node` to TRACK, TRACKS, SUBSCRIBE, FETCH, and DATAGRAMS: the routing node announcing the claim the first hop selected, which every later hop follows.
 - Replaced Warm and Cold Route Cost with one cost, which each link adds to.
 - The Cost parameter must be at least 1.
@@ -2340,13 +2335,13 @@ A stream that FINs without a GROUP_END carries a closed Group, which may have he
 
 ### Subscriptions {#changelog-07-subscribe}
 
-- Replaced `Group Start`, `Group End`, `Frame Start`, and `Frame End` in SUBSCRIBE and SUBSCRIBE_UPDATE with a non-empty list of Ranges of whole Groups. Each end is an Anchor: none, a time naming the Group containing it, or a count of Groups back from the latest, and both ends include the Group they name. A start may also be a Position, a Group's start and a frame within it, so a subscription resumes a Group partway through.
+- Replaced `Group Start`, `Group End`, `Frame Start`, and `Frame End` in SUBSCRIBE and SUBSCRIBE_UPDATE with a non-empty list of Ranges of whole Groups. Each end is an Anchor: none or a time naming the Group containing it, and both ends include the Group they name. There is no Anchor counting Groups back from the latest: a live join is a Range with no `Start` and a stated `Subscriber Min Age`. A start may also be a Position, a Group's start and a frame within it, so a subscription resumes a Group partway through.
 - Added `Group Order` to SUBSCRIBE and SUBSCRIBE_UPDATE: descending (0x0, the previous fixed order) or ascending (0x1).
 - Encoded `Subscriber Max Age` in SUBSCRIBE and SUBSCRIBE_UPDATE as milliseconds plus one, with zero meaning no limit.
-- Added an optional `Subscriber Min Age` to SUBSCRIBE and SUBSCRIBE_UPDATE, the subscriber's target latency, encoded as milliseconds plus one with zero meaning not stated. A Range joining at the latest group starts that far behind the live edge, from the groups the publisher holds. A relay forwards the largest stated value.
+- Added an optional `Subscriber Min Age` to SUBSCRIBE and SUBSCRIBE_UPDATE, the subscriber's target latency, encoded as milliseconds plus one with zero meaning not stated. A Range with no `Start` starts at the Group containing the live edge minus it, and a relay that can't place that Group from what it holds asks upstream. A relay forwards the largest value among subscriptions joining that way, counting not stated as the largest.
 - FETCH reads one Group or a slice of one, and SUBSCRIBE reads whole Groups but for a Position `Start`: any other read of part of a Group FETCHes it. A publisher holding only part of a Group a subscription covers drops it.
 - A SUBSCRIBE_UPDATE that lowers a `Start` covers the groups below the old start that the publisher still holds, not only those that arrive later. A group already sent is not sent again.
-- Replaced SUBSCRIBE_OK `Group` with a `Range Start` per Range: the Group where that Range's delivery starts, including at a Relative or Time Anchor, from which its Groups are owed.
+- Replaced SUBSCRIBE_OK `Group` with a `Range Start` per Range: the Group where that Range's delivery starts, including at a Time Anchor or a live join, from which its Groups are owed.
 - Each Range takes an implicit Range ID, and SUBSCRIBE_UPDATE edits the live Ranges instead of restating them: `Remove Count` Range IDs to retire, then the Ranges to add. The live Ranges must stay non-empty and fit in one SUBSCRIBE. A Range resolves its Anchors once, however many updates leave it live.
 - SUBSCRIBE_OK's Range Starts answer the SUBSCRIBE's Ranges, and added SUBSCRIBE_STARTED (type 0x4) resolving where each Range an update adds starts.
 - A subscriber fills missing Groups through Ranges on a subscription instead of a FETCH per Group, and asks for a Group a subscription already delivered or dropped, including one dropped with OLD, with a SUBSCRIBE of its own.
@@ -2371,7 +2366,7 @@ A stream that FINs without a GROUP_END carries a closed Group, which may have he
 - FRAME and datagrams always carry a timestamp, a bare number on a scale-less Track.
 - Replaced GROUP's `Group Sequence` with `Group Start`, added `Previous Start`, the start of the Group before it, so a subscriber sees the gap before a Group without a SUBSCRIBE_SKIP.
 - Added GROUP_END, a `Payload Length` of 0 followed by the Group's exclusive end: a Group or Fetch Stream ends with it when its Group finished, a FIN alone ends a closed Group whose frames may not all exist, and a reset aborts. A Group's own end bounds its reach.
-- Expiration also measures a group's arrival age, the time since its successor arrived at this hop.
+- Expiration also measures a group's arrival age, the time since its successor arrived at this hop, and only that on a scale-less Track.
 - A relay closes a Group it holds only the start of, without a GROUP_END. A publisher resets the Group Stream of a group that expires with OLD, even one whose GROUP_END it sent but is not yet acknowledged, and names the group in a SUBSCRIBE_DROP with OLD.
 - FRAME leads with `Payload Length`, the payload size plus one, in place of the trailing `Message Length`; 0 is malformed.
 - A publisher SHOULD drop a datagram rather than block when the transport has no room for it, where it previously sent one only if the congestion controller could transmit it immediately.

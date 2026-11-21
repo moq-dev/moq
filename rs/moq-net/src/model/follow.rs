@@ -454,7 +454,7 @@ mod tests {
 	use super::super::ProduceTest;
 	use super::*;
 	use crate::{
-		Error, Hop, Instance, Pattern, Patterns,
+		Error, Hop, Instance, Prefix, Prefixes,
 		origin::{Cost, RouteInfo, RouteOptions},
 	};
 
@@ -613,7 +613,7 @@ mod tests {
 	#[kio::test]
 	async fn follow_ignores_a_route_scoped_beneath_the_path() {
 		let origin = Hop::new(1).unwrap().produce();
-		let chat = Patterns::from("room/*/chat".parse::<Pattern>().unwrap());
+		let chat = Prefixes::from(Prefix::try_from("room/alice/chat").unwrap());
 		let _chat = origin
 			.scope("", &chat)
 			.unwrap()
@@ -958,7 +958,7 @@ mod tests {
 	#[test]
 	fn follow_refuses_a_path_outside_the_scope() {
 		let origin = Hop::new(1).unwrap().produce();
-		let scope = Patterns::from(Pattern::subtree("pool/job/cam").unwrap());
+		let scope = Prefixes::from(Prefix::try_from("pool/job/cam").unwrap());
 		let scoped = origin.consume().scope("", &scope).unwrap();
 		assert!(matches!(scoped.path_routes("pool/job"), Err(Error::Unauthorized)));
 	}

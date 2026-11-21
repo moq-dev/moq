@@ -46,7 +46,7 @@ tls.generate = ["localhost"]
 listen = "[::]:4443"   # serves the certificate fingerprint for local browsers
 
 [auth]
-public = "**"          # anonymous access to everything; development only
+public = ""           # anonymous access to everything; development only
 ```
 
 Every option is also a `--flag` or `MOQ_*` environment variable, and

@@ -91,11 +91,12 @@ pub struct Options {
 	/// Where to start on a track that already holds groups.
 	pub start: Start,
 	/// How far behind the live edge playback runs. [`Delay::min`] is the
-	/// player's playout delay, where a cold join starts; [`Delay::max`] is how
-	/// far playback may drift before a stalled group is skipped. Both default to
-	/// zero: start at the newest group and skip aggressively. Set `min` to your
-	/// playout delay and `max` at or past it for a softer skip. The max is
-	/// applied to the transport subscription, and both reach
+	/// player's playout delay, where a [`Start::Latest`] join starts, and is not
+	/// stated for [`Start::Oldest`]; [`Delay::max`] is how far playback may drift
+	/// before a stalled group is skipped. The min defaults to unstated, which
+	/// [`Start::Latest`] joins as zero, and the max to zero: skip aggressively.
+	/// Set `min` to your playout delay and `max` at or past it for a softer skip.
+	/// The max is applied to the transport subscription, and both reach
 	/// [`moq_mux::container::Consumer`].
 	pub delay: Delay,
 }
@@ -324,12 +325,6 @@ impl Reader {
 			err => err,
 		})?;
 
-		let playout = moq_mux::container::Playout::new(options.delay, std::time::Duration::ZERO);
-		let track = broadcast.track(hang::catalog::Reference::track(catalog, name))?;
-		// The whole delay from the first request, as the container keeps it, so the publisher
-		// never sees a stated zero min before the container's update.
-		let mut subscription =
-			playout.subscription(moq_net::track::Subscription::default().with_priority(options.priority));
 		// A decoder often opens on a track that is already cached: a replacement decoder
 		// subscribes while its predecessor still holds groups, and a rendition switched away from
 		// and back to stays warm on the origin for `moq_net::model::track::IDLE_LINGER` (cached
@@ -338,14 +333,22 @@ impl Reader {
 		// speed before reaching live media: on a thirty-second retention, half a minute of pictures
 		// raced through.
 		//
-		// A live start counts from the latest group each hop holds from its live feed, never from
-		// what an ended feed left cached, so it names no stale group that would ask the publisher
-		// to rewind for everyone reading. The group before a live edge is the one containing the
-		// key just below it, since starts are sparse. Every wire carries a time start, where a
-		// relative one past the edge is refused before lite-07; there it reaches the edge alone.
-		if options.start == Start::Latest {
-			subscription = subscription.with_ranges([moq_net::track::Range::live()]);
-		}
+		// A live join, the default range with no start and a stated Min Age, starts that far behind
+		// each hop's live edge, never at what an ended feed left cached, so it names no stale group
+		// that would ask the publisher to rewind for everyone reading. A playout stating no
+		// minimum joins at the latest group, and keeps that zero stated through the container's
+		// updates. `Start::Oldest` states none, which reaches back as far as the max delay allows.
+		let mut delay = options.delay;
+		delay.min = match options.start {
+			Start::Oldest => None,
+			Start::Latest => delay.min.or(Some(std::time::Duration::ZERO)),
+		};
+		let playout = moq_mux::container::Playout::new(delay, std::time::Duration::ZERO);
+		let track = broadcast.track(hang::catalog::Reference::track(catalog, name))?;
+		// The whole delay from the first request, as the container keeps it, so the publisher
+		// never sees a stated zero min before the container's update.
+		let subscription =
+			playout.subscription(moq_net::track::Subscription::default().with_priority(options.priority));
 		let mut subscriber = track.subscribe(subscription).await?;
 		// The live edge is known only once the feed is live: a warm copy still waiting on its
 		// source reports nothing yet. Opening waits for it, or the track's end, as `Start::Latest`
@@ -679,10 +682,10 @@ mod tests {
 		// subscriber and tell the publisher what to send, so a start at a cached group would
 		// rewind the track for everyone reading it. A rendition switched away from and back to
 		// is the case that bites, because its cached groups are stale by then and the publisher
-		// resends the broadcast from them. The live start counts from each hop's live feed.
+		// resends the broadcast from them. The live join starts from each hop's live edge.
 		assert_eq!(
-			published.subscription().map(|sub| sub.ranges),
-			Some(vec![moq_net::track::Range::live()]),
+			published.subscription().map(|sub| (sub.ranges, sub.delay.min)),
+			Some((vec![moq_net::track::Range::default()], Some(std::time::Duration::ZERO))),
 			"the publisher was asked to rewind the track",
 		);
 	}

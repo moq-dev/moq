@@ -84,10 +84,6 @@ pub use origin_impl::Consume;
 // plain ids.
 pub(crate) use origin_impl::{Hop, Hops, InvalidHop};
 
-// The announce-interest prefixes a scope needs on a prefix-shaped wire.
-#[cfg(feature = "async")]
-pub(crate) use origin_impl::interest_prefixes;
-
 // Held by a session while its peer's initial announcements arrive.
 #[cfg(feature = "async")]
 pub(crate) use origin_impl::Snapshot;

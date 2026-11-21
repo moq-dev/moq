@@ -992,8 +992,8 @@ mod tests {
 
 		let past = moq_net::track::Subscription::default()
 			.with_ranges([moq_net::track::Range {
-				start: moq_net::track::Anchor::Time(3),
-				end: Some(moq_net::track::Anchor::Time(4)),
+				start: Some(3),
+				end: Some(4),
 			}])
 			.with_delay(moq_net::track::Delay::default().with_max(None));
 		let rung = consumer.track("video/120p").unwrap();
@@ -1665,7 +1665,7 @@ mod tests {
 	/// A fetch dropped before its group is encoded never opens that encode, and
 	/// the request goes with it. A later fetch of the same group is a new
 	/// request: the abandoned one must not still be encoding into the cache,
-	/// where this accept would come back `Duplicate`.
+	/// where this accept would come back `None`.
 	#[tokio::test]
 	async fn an_abandoned_fetch_encodes_nothing() {
 		let source = source_catalog(320, 240);
@@ -2165,7 +2165,10 @@ mod tests {
 		// The live loop serves the latest source group, at its key.
 		let (rung, live) = instance().await;
 		let mut subscriber = rung
-			.subscribe(moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::live()]))
+			.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_min(std::time::Duration::ZERO)),
+			)
 			.await
 			.unwrap()
 			.ordered();

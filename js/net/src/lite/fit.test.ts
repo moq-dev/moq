@@ -47,19 +47,18 @@ function group(anchor: WireAnchor | undefined, end: boolean): bigint | undefined
 	return undefined;
 }
 
-/** Whether `outer` asks for everything `inner` does, judged without the latest group. */
+/**
+ * Whether `outer` asks for everything `inner` does, judged without the latest group: a range with
+ * no start covers only another with none, which starts where it does.
+ */
 function covers(outer: WireRange, inner: WireRange): boolean {
 	const start = (() => {
-		if (outer.start === undefined) return true;
-		if (outer.start.relative !== undefined)
-			return inner.start?.relative !== undefined && outer.start.relative >= inner.start.relative;
+		if (outer.start === undefined) return inner.start === undefined;
 		const [a, b] = [group(outer.start, false), group(inner.start, false)];
 		return a !== undefined && b !== undefined && a <= b;
 	})();
 	const end = (() => {
 		if (outer.end === undefined) return true;
-		if (outer.end.relative !== undefined)
-			return inner.end?.relative !== undefined && outer.end.relative <= inner.end.relative;
 		const [a, b] = [group(outer.end, true), group(inner.end, true)];
 		return a !== undefined && b !== undefined && a >= b;
 	})();
@@ -74,8 +73,7 @@ function random(rng: Rng): { demand: WireRange[]; fills: Run[]; avoid: Run[] } {
 		const to = rng.chance(0.9) ? from + BigInt(rng.int(1, 50)) : undefined;
 		const end: WireAnchor | undefined = to === undefined ? undefined : { absolute: to };
 		const kind = rng.int(0, 10);
-		if (kind === 0) demand.push({ start: { relative: BigInt(rng.int(0, 20)) }, end });
-		else if (kind === 1) demand.push({ end });
+		if (kind < 2) demand.push({ end });
 		// The demand names groups by time, inclusive as an end; a fill's are absolute.
 		else if (kind < 6)
 			demand.push({ start: { time: from }, end: to === undefined ? undefined : { time: to - 1n } });
@@ -154,17 +152,14 @@ test("fit leaves any edit between fitted ranges one message", async () => {
 	}
 });
 
-// Each kind of start collapses to the one range covering it once nothing else fits. Mirrors the
-// Rust `collapses_ranges_with_no_gap_to_close`.
+// The ranges with no start collapse to the one range covering them once nothing else fits.
+// Mirrors the Rust `collapses_ranges_with_no_gap_to_close`.
 test("fit collapses ranges with no gap to close", () => {
-	const relative: WireRange[] = Array.from({ length: 200 }, (_, back) => ({
-		start: { relative: BigInt(back) },
-		end: { absolute: 1_000n + BigInt(back) },
+	const unstarted: WireRange[] = Array.from({ length: 200 }, (_, n) => ({
+		end: { absolute: 1_000n + BigInt(n) },
 	}));
-	expect(fit(relative, [], [], budget(100)).ranges).toEqual([
-		{ start: { relative: 199n }, end: { absolute: 1_199n } },
-	]);
-	expect(() => fit(relative, [], [], budget(4))).toThrow("too many ranges");
+	expect(fit(unstarted, [], [], budget(100)).ranges).toEqual([{ end: { absolute: 1_199n } }]);
+	expect(() => fit(unstarted, [], [], budget(2))).toThrow("too many ranges");
 });
 
 // The narrowest gaps close first, so the fewest unwanted groups are asked for. Mirrors the Rust

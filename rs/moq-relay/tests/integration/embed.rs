@@ -42,7 +42,7 @@ fn certificate(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf
 }
 
 fn public_auth(config: &mut Config) {
-	config.auth.public = vec![moq_auth::Pattern::all()];
+	config.auth.public = vec![moq_auth::Prefix::all()];
 }
 
 fn client() -> moq_tokio::Client {

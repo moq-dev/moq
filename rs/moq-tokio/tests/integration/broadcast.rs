@@ -625,7 +625,7 @@ async fn broadcast_moq_lite_05_fetch_during_subscribe_webtransport() {
 }
 
 /// Lite05 can't declare an untimed track, so a track that sets no timescale goes out
-/// in milliseconds, its frames stamped with their send time. The subscriber receives
+/// in milliseconds, its frames stamped with their group's start. The subscriber receives
 /// `Some(ts)` at that scale.
 #[tokio::test]
 async fn broadcast_moq_lite_05_untimed_track() {
@@ -1126,7 +1126,7 @@ async fn broadcast_route_migration() {
 	// Resolve and subscribe: the cheaper route (A) serves the track.
 	let subscription = moq_net::track::Subscription::default()
 		.with_ranges([moq_net::track::Range {
-			start: moq_net::track::Anchor::Time(1),
+			start: Some(1),
 			end: None,
 		}])
 		.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)));
@@ -2809,7 +2809,7 @@ async fn announce_interest_unauthorized_keeps_session_alive() {
 		.consume()
 		.scope(
 			"",
-			&moq_net::Patterns::from(moq_net::Pattern::subtree("allowed").unwrap()),
+			&moq_net::Prefixes::from(moq_net::Prefix::try_from("allowed").unwrap()),
 		)
 		.expect("failed to scope publish origin");
 
@@ -2823,8 +2823,8 @@ async fn announce_interest_unauthorized_keeps_session_alive() {
 			"",
 			&["allowed", "denied"]
 				.into_iter()
-				.map(|prefix| moq_net::Pattern::subtree(prefix).unwrap())
-				.collect::<moq_net::Patterns>(),
+				.map(|prefix| moq_net::Prefix::try_from(prefix).unwrap())
+				.collect::<moq_net::Prefixes>(),
 		)
 		.expect("failed to scope consume origin");
 	let sub_consumer = consume.consume();
@@ -2871,12 +2871,12 @@ async fn announce_interest_unauthorized_keeps_session_alive() {
 	);
 }
 
-/// A wildcard grant on both ends of a session. The subscriber asks for the grant's
-/// literal head (`room`) and lands only what its scope admits; the server's grant
-/// (`server_scope`) filters what it advertises and serves. Every wire still carries
-/// prefix announcements; arbitrary patterns are local authorization and filtering.
-async fn wildcard_scope_test(version: &str, server_scope: &str) {
-	let scope = |text: &str| moq_net::Patterns::from(text.parse::<moq_net::Pattern>().unwrap());
+/// A prefix grant on both ends of a session, and a discovery filter on the subscriber.
+/// The subscriber's scope (`room`) bounds what it may land and the server's grant
+/// (`server_scope`) what it advertises and serves; the filter (`room/*/chat`) only picks
+/// which announcements the subscriber lists, capturing the room.
+async fn prefix_scope_test(version: &str, server_scope: &str) {
+	let scope = |text: &str| moq_net::Prefixes::from(text.parse::<moq_net::Prefix>().unwrap());
 
 	// ── publisher (server): rooms with a chat and an audio track each ──
 	let pub_origin = moq_tokio::origin::spawn();
@@ -2919,13 +2919,12 @@ async fn wildcard_scope_test(version: &str, server_scope: &str) {
 	let mut server = server.listen().await.expect("failed to listen");
 	let addr = server.local_addr().expect("local addr");
 
-	// ── subscriber (client): every room's chat ──
+	// ── subscriber (client): every room, listing each room's chat ──
 	let sub_origin = moq_tokio::origin::spawn();
-	let consume = sub_origin
-		.scope("", &scope("room/*/chat"))
-		.expect("scope consume origin");
+	let consume = sub_origin.scope("", &scope("room")).expect("scope consume origin");
 	let sub_consumer = consume.consume();
-	let mut announcements = sub_consumer.announced();
+	let chats = "room/*/chat".parse::<moq_net::Pattern>().unwrap();
+	let mut announcements = sub_consumer.filter(&chats).expect("filter").announced();
 
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
@@ -2947,8 +2946,8 @@ async fn wildcard_scope_test(version: &str, server_scope: &str) {
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
-	// Exactly alice's chat: bob's is outside the server's grant, alice's audio and the
-	// lobby are outside the client's. The match pins the room.
+	// Exactly alice's chat: bob's is outside the server's grant, the lobby is outside the
+	// client's, and alice's audio is outside the filter. The match pins the room.
 	let (update, active) = next_announce(&mut announcements).await;
 	assert_eq!(update.prefix.as_str(), "room/alice/chat");
 	assert_eq!(
@@ -2975,16 +2974,11 @@ async fn wildcard_scope_test(version: &str, server_scope: &str) {
 		.expect("group closed");
 	assert_eq!(frame.payload.as_ref(), b"room/alice/chat");
 	// The server grant excludes bob's chat, so that otherwise-authorized request is
-	// unroutable. Audio and lobby never pass the client's own scope and are unauthorized.
+	// unroutable. The lobby never passes the client's own scope and is unauthorized.
 	let refused = sub_consumer.request("room/bob/chat", None).await.err();
 	assert!(matches!(refused, Some(moq_net::Error::Unroutable)), "{refused:?}");
-	for path in ["room/alice/audio", "lobby/alice/chat"] {
-		let refused = sub_consumer.request(path, None).await.err();
-		assert!(
-			matches!(refused, Some(moq_net::Error::Unauthorized)),
-			"{path}: {refused:?}"
-		);
-	}
+	let refused = sub_consumer.request("lobby/alice/chat", None).await.err();
+	assert!(matches!(refused, Some(moq_net::Error::Unauthorized)), "{refused:?}");
 
 	// Ending the session retracts alice's chat after every announcement the session
 	// delivered, so anything outside the grants shows up before that retraction.
@@ -3007,25 +3001,24 @@ async fn wildcard_scope_test(version: &str, server_scope: &str) {
 }
 
 #[tokio::test]
-async fn broadcast_wildcard_scopes_lite_05() {
-	wildcard_scope_test("moq-lite-05", "room/alice/**").await;
+async fn broadcast_prefix_scopes_lite_05() {
+	prefix_scope_test("moq-lite-05", "room/alice").await;
 }
 
 #[tokio::test]
-async fn broadcast_wildcard_scopes_lite_06() {
-	wildcard_scope_test("moq-lite-06", "room/alice/**").await;
+async fn broadcast_prefix_scopes_lite_06() {
+	prefix_scope_test("moq-lite-06", "room/alice").await;
 }
 
-/// A leading-wildcard server grant still filters literal prefix announcements.
+/// A server grant of exactly one broadcast's subtree.
 #[tokio::test]
-async fn broadcast_wildcard_server_scope_lite_06() {
-	wildcard_scope_test("moq-lite-06", "*/alice/chat").await;
+async fn broadcast_prefix_server_scope_lite_06() {
+	prefix_scope_test("moq-lite-06", "room/alice/chat").await;
 }
 
-/// Older wires use the same literal-head interest and local filtering.
 #[tokio::test]
-async fn broadcast_wildcard_server_scope_lite_05() {
-	wildcard_scope_test("moq-lite-05", "*/alice/chat").await;
+async fn broadcast_prefix_server_scope_lite_05() {
+	prefix_scope_test("moq-lite-05", "room/alice/chat").await;
 }
 
 /// Reverse of the usual direction: a publish-only client (`with_publisher`, no `with_subscriber`)
@@ -3041,8 +3034,8 @@ async fn publish_only_client_to_subscribe_only_server() {
 			"",
 			&["allowed", "denied"]
 				.into_iter()
-				.map(|prefix| moq_net::Pattern::subtree(prefix).unwrap())
-				.collect::<moq_net::Patterns>(),
+				.map(|prefix| moq_net::Prefix::try_from(prefix).unwrap())
+				.collect::<moq_net::Prefixes>(),
 		)
 		.expect("failed to scope consume origin");
 	let sub_consumer = consume.consume();
@@ -3118,7 +3111,7 @@ async fn publish_only_client_to_subscribe_only_server() {
 		.consume()
 		.scope(
 			"",
-			&moq_net::Patterns::from(moq_net::Pattern::subtree("allowed").unwrap()),
+			&moq_net::Prefixes::from(moq_net::Prefix::try_from("allowed").unwrap()),
 		)
 		.expect("failed to scope publish origin");
 

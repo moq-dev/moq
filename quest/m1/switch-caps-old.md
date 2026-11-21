@@ -46,7 +46,3 @@ the old route, loses no group below G, and delivers G's frames once, in both
 languages.
 
 Public API: none expected. Wire: none.
-
-## Related
-
-- [A replaced copy's short group continues from the replacement](/quest/m1/switch-partial-close.md) - the other gap the audit found at a switch

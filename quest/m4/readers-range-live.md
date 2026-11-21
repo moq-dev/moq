@@ -16,7 +16,7 @@ puts them.
 Changed 2026-11-20 (maintainer, /quest-plan of a pre-cut audit of the lite-07
 and hang-04 wire changes): lite-07 has no relative anchors, and a live join is
 no start anchor plus a stated Min Age, filled from upstream when a copy can't
-prove its start ([no relative anchors](/quest/m2/time-addressing/no-relative-anchors.md)).
+prove its start ([moq-dev/moq#9265](https://github.com/moq-dev/moq/pull/9265)).
 This quest's relative ranges became that join. `Range::live()`'s callers move
 with the anchor's removal; these readers never used it.
 

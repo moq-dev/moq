@@ -6,9 +6,12 @@ a client presents in its query and the keys that sign and verify it. For the
 contract, the relay flags, and worked examples, see the
 [Authentication Documentation](../../doc/bin/relay/auth.md).
 
-Grants and claims name paths with patterns from `@moq/pattern`: `foo` is one
-broadcast, `foo/**` is a subtree, `**` is everything. A role is an `Access`:
-its patterns, or `{"path": [...], "rate": bps}` with a bitrate cap, read and
+Grants and claims name paths with prefixes from `@moq/pattern`: `foo` is `foo`
+and everything beneath it, and the empty prefix `""` is everything. Signing takes
+no wildcard, so `foo/**`, `**`, and `cam-*` are refused. Tokens, a parsed key's
+scope, `Key.public`, and `GrantSchema`'s output spell each prefix as the subtree
+pattern releases before 0.22 read, `foo/**` or `**`, and read that spelling back. A role is an `Access`:
+its prefixes, or `{"path": [...], "rate": bps}` with a bitrate cap, read and
 written as it is.
 
 ## Installation
@@ -68,8 +71,8 @@ const key = Key.parse(keyString); // See generate example above
 // Create claims
 const claims: Claims = {
   root: "demo",
-  publish: ["bbb/**"], // `demo/bbb` and everything beneath it
-  subscribe: ["**"], // Any broadcast under `demo/`
+  publish: ["bbb"], // `demo/bbb` and everything beneath it
+  subscribe: [""], // Any broadcast under `demo/`
   expires: Math.floor(Date.now() / 1000) + 3600, // 1 hour from now (in seconds), written as `exp`
   issued: Math.floor(Date.now() / 1000), // Issued at (in seconds), written as `iat`
 };
@@ -83,8 +86,8 @@ Or you can sign as a CLI
 ```bash
 moq-auth sign --key "root.jwk" \
   --root "rooms/meeting-123" \
-  --subscribe "**" \
-  --publish "alice/**" > "alice.jwt"
+  --subscribe "" \
+  --publish "alice" > "alice.jwt"
 ```
 
 The token expires in an hour unless `--ttl`, `--expires`, or `--unbounded` says otherwise.
@@ -97,7 +100,7 @@ You can also verify a token, then scope it to a connection path the way `moq aut
 import { Claims, Key } from "@moq/auth";
 
 const claims = await Key.verify(key, token); // signature, kid, strict claims, and expiry
-const permissions = Claims.authorize(claims, "rooms/meeting-123"); // patterns relative to the path
+const permissions = Claims.authorize(claims, "rooms/meeting-123"); // prefixes relative to the path
 ```
 
 Or as a CLI:
@@ -116,7 +119,7 @@ know, so check `request.relay` before sending one newer than that relay:
 import { type Grant, RequestSchema } from "@moq/auth";
 
 const request = RequestSchema.parse(await body.json());
-const grant: Grant = { subscribe: { path: ["**"], rate: 8_000_000 }, expires: 4102444800, revalidate: 60 };
+const grant: Grant = { subscribe: { path: [""], rate: 8_000_000 }, expires: 4102444800, revalidate: 60 };
 return Response.json(grant);
 ```
 
