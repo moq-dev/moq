@@ -269,7 +269,7 @@ export interface ConnectProps {
 	 * takes a redial: the new credential rides no AUTH stream, so `answered()` waits for it.
 	 *
 	 * An `auth` parameter the URL already has is replaced. A URL's own `jwt` still wins: then
-	 * every token rides AUTH.
+	 * every token rides AUTH. A supplied `transport` never dials the URL, so it refuses `urlAuth`.
 	 */
 	urlAuth?: boolean;
 
@@ -364,6 +364,8 @@ export async function establish({ url, ...props }: ConnectProps, reached?: Reach
 	if ("discovery" in props) throw new TypeError(DISCOVERY_REMOVED);
 	props.versions = normalizeVersions(props);
 	if (props.transport && props.versions) throw new TypeError("versions cannot reconfigure a supplied transport");
+	// The URL is never dialed for a supplied transport, so the credential it carries would be dropped.
+	if (props.transport && props.urlAuth) throw new TypeError("urlAuth cannot reach a supplied transport");
 	const signal = props.signal ?? NEVER_ABORTED;
 	if (signal.aborted) reached?.transport.close();
 	signal.throwIfAborted();
