@@ -4681,13 +4681,14 @@ export class Subscriber {
 		};
 		hooks.holeEnd = (subscriber, key, dropped) => holeEnd(subscriber.#state.drops, key, dropped);
 		hooks.wholeEnd = (subscriber, key) => {
-			// A reader following route copies knows only what the serving copy holds.
-			if (subscriber.#resume) return undefined;
+			// A reader following route copies knows what the serving copy holds, as the Rust
+			// `Subscriber::span_end` asks it.
+			if (subscriber.#resume) return subscriber.#resume.wholeEnd(key);
 			const producer = subscriber.#state.producer;
 			return producer && wholeAt(producer, key);
 		};
 		hooks.wholeAround = (subscriber, key) => {
-			if (subscriber.#resume) return undefined;
+			if (subscriber.#resume) return subscriber.#resume.wholeAround(key);
 			const producer = subscriber.#state.producer;
 			return producer && wholeAround(producer, key);
 		};

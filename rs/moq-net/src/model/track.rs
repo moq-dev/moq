@@ -1035,6 +1035,12 @@ impl Slot {
 		(!self.visible && self.is_aborted()) || self.serving().is_settled()
 	}
 
+	/// Where the group ends whole, as any copy that finished it says: a fetched head can
+	/// finish it while the live copy is still open or aborted.
+	fn end(&self) -> Option<u64> {
+		self.copies().find_map(group::Handle::end)
+	}
+
 	/// Every copy this slot holds, the live group first.
 	fn copies(&self) -> impl Iterator<Item = &group::Handle> {
 		std::iter::once(&self.group).chain(self.head.as_deref())
@@ -1807,7 +1813,7 @@ impl TrackState {
 			let next = self
 				.lookup
 				.range(at..keys.end)
-				.find_map(|(key, slot)| slot.group.end().filter(|end| *end > key + 1).map(|_| key + 1))
+				.find_map(|(key, slot)| slot.end().filter(|end| *end > key + 1).map(|_| key + 1))
 				.unwrap_or(keys.end);
 			if at < next {
 				runs.push(at..next);
@@ -1823,7 +1829,7 @@ impl TrackState {
 	/// group starting below it is not held whole.
 	fn span_end(&self, end: u64) -> u64 {
 		match self.lookup.range(..end).next_back() {
-			Some((_, slot)) => slot.group.end().map_or(end, |whole| whole.max(end)),
+			Some((_, slot)) => slot.end().map_or(end, |whole| whole.max(end)),
 			None => end,
 		}
 	}
@@ -24470,6 +24476,33 @@ mod test {
 		let head = head.finish().unwrap();
 		assert_eq!(fetch.await.unwrap().index(), 0);
 		(live, head)
+	}
+
+	/// A fetched head that finished its group whole bounds the group's span while the live
+	/// copy beside it is still open: no other group starts inside it.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_fetched_heads_end_bounds_the_span() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let consumer = producer.consume();
+
+		let mut live = producer.create_group(group::Info { start: 0 }).unwrap();
+		live.start_at(1).unwrap();
+		live.write_frame(live.key_time(), bytes::Bytes::from_static(b"delta"))
+			.unwrap();
+		let fetch = consumer.fetch_group(0, None);
+		let request = dynamic.requested_fill_group().await.unwrap();
+		let mut head = request.accept(Info::timed()).unwrap().expect("a fresh group");
+		head.write_frame(head.key_time(), bytes::Bytes::from_static(b"snapshot"))
+			.unwrap();
+		let _head = head.finish_at(20).unwrap();
+		assert_eq!(fetch.await.unwrap().index(), 0);
+
+		let state = producer.state.read();
+		assert_eq!(state.span_end(5), 20, "the head's end, though the live copy is open");
+		assert_eq!(state.outside_spans(0..25), vec![0..1, 20..25]);
+		drop(live);
 	}
 
 	/// A live group with a fetched head of group 0 still writing, and the track's end

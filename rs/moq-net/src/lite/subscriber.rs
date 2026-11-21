@@ -1469,8 +1469,17 @@ impl GroupRecv {
 					*open = Some(Open::Duplicate(duplicate));
 					break Poll::Pending;
 				}
-				// The copy holds every frame, so this one only duplicates it.
-				Poll::Ready(Ok(())) => break Poll::Ready(Err(Error::Duplicate)),
+				// The copy holds every frame, so this one only duplicates it. A whole copy's span
+				// holds no other start, which this subscription accounts for as the copy's own
+				// stream did for its subscription.
+				Poll::Ready(Ok(())) => {
+					if let Some(end) = duplicate.arriving.arriving().end() {
+						duplicate
+							.reading
+							.account(hdr.key..end, self.subscriber.runtime.now());
+					}
+					break Poll::Ready(Err(Error::Duplicate));
+				}
 				Poll::Ready(Err(_)) => {
 					let subs = self.subscriber.subscribes.lock();
 					let Some(entry) = subs.get(&hdr.subscribe) else {
@@ -5104,8 +5113,9 @@ mod tests {
 	}
 
 	/// A lite-07 re-offer can overtake the reset of the stream it replaces: its stream waits,
-	/// unread, until that copy settles. It is discarded once the copy finishes, and takes the
-	/// group once the copy fails, continuing the reads of that copy.
+	/// unread, until that copy settles. It is discarded once the copy finishes, accounting for
+	/// the span a whole copy holds, and takes the group once the copy fails, continuing the
+	/// reads of that copy.
 	#[kio::test]
 	async fn a_duplicate_of_an_arriving_copy_waits_for_it_to_settle() {
 		use crate::transport::poll::Session as _;
@@ -5186,10 +5196,12 @@ mod tests {
 			let frame = original.read_frame().await.unwrap().unwrap();
 			assert_eq!(&frame.payload[..], b"first");
 			if !first_fails {
-				first.finish().unwrap();
+				first.finish_at(400).unwrap();
 				let res = kio::wait(|waiter| duplicate.poll_serve(waiter)).await;
 				assert!(matches!(res, Err(Error::Duplicate)), "{res:?}");
 				assert!(original.read_frame().await.unwrap().is_none());
+				// The copy finished whole, so the discarded stream accounts for its span too.
+				assert!(tail.read().accounted(0..500).eq(std::iter::once(3..400)));
 				continue;
 			}
 

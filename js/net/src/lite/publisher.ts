@@ -1609,8 +1609,11 @@ export class Publisher {
 		};
 
 		// A drop of a group held whole names its span, `[start, max(End, start + 1))`, so the
-		// subscriber accounts for the starts inside it too: no other group starts there.
-		const reach = (end: bigint): bigint => max(end, hooks.wholeEnd(track, end - 1n) ?? end);
+		// subscriber accounts for the starts inside it too: no other group starts there. The
+		// group is the highest one below `end`, starting at `end - 1n` or holding it in its span,
+		// as the Rust `TrackState::span_end` takes it.
+		const reach = (end: bigint): bigint =>
+			max(end, hooks.wholeEnd(track, end - 1n) ?? hooks.wholeAround(track, end - 1n)?.end ?? end);
 
 		// Give up, as `hole` says, whatever part of `[start, end)` this subscription has not been
 		// served or given up yet.
@@ -1717,7 +1720,9 @@ export class Publisher {
 				}
 				if (pendingDrops.length > 0) {
 					for (const { start, end, error } of pendingDrops.splice(0)) {
-						record?.tell(start, end, reportOf({ error }));
+						// The rest of the span is told with it; the served start keeps its record.
+						for (const gap of record?.untold(start, end) ?? [])
+							record?.tell(gap.start, gap.end, reportOf({ error }));
 						const msg = SubscribeDrop.given(start, end, error, this.version);
 						if (!(await controls.response(encodeSubscribeResponse(stream, { drop: msg }, this.version))))
 							return false;

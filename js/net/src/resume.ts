@@ -1663,6 +1663,16 @@ class Reader implements ResumeSource {
 		return serving && hooks.holeEnd(serving.sub, key, dropped);
 	}
 
+	wholeEnd(key: bigint): bigint | undefined {
+		const serving = this.#serving();
+		return serving && hooks.wholeEnd(serving.sub, key);
+	}
+
+	wholeAround(key: bigint): Run | undefined {
+		const serving = this.#serving();
+		return serving && hooks.wholeAround(serving.sub, key);
+	}
+
 	// A failed serving copy's own resolution is no placement while the front may still replace it:
 	// the reader's ranges stay as placed, pending until a copy continuing the track places them.
 	// Mirrors the Rust reader answering from its window.

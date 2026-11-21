@@ -5825,9 +5825,18 @@ impl TrackRun {
 		let dropped = std::mem::take(&mut *self.ctx.outcomes.dropped.lock().unwrap());
 		if !dropped.is_empty() {
 			// Each was served, so its record says so already, and the drop is final: nothing
-			// is served or dropped over it again.
+			// is served or dropped over it again. The rest of its span is told with it, so the
+			// end of the track names none of those starts again.
 			for (span, err) in dropped {
-				writer.buffer(&self.hole(span, &Hole::drop(err)))?;
+				let hole = Hole::drop(err);
+				if self.start.emits_range() {
+					let report = self.report(&hole);
+					let record = self.track.record_mut();
+					for gap in record.untold(span.clone()).iter() {
+						record.tell(gap.clone(), report);
+					}
+				}
+				writer.buffer(&self.hole(span, &hole))?;
 			}
 			return Poll::Ready(Ok(ControlFlow::Continue(())));
 		}
@@ -9403,6 +9412,34 @@ mod serve_group_test {
 			}
 		}
 		assert_eq!(holes, vec![4..6]);
+	}
+
+	/// A whole group whose stream fails before its GROUP_END names its span in its drop, which
+	/// tells the rest of the span too, so the end of the track names none of it again.
+	#[kio::test]
+	async fn lite07_a_failed_whole_groups_span_is_not_dropped_again_at_the_end() {
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let subscriber = track.subscribe(None);
+		let (mut run, mut writer, log) = lite07_run(SinkSession::new(Log::default()), subscriber);
+		write_group(&mut track, 0, 0);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		// Group 0's stream failed while its span reached 4.
+		run.ctx.outcomes.dropped.lock().unwrap().push((0..4, StreamError::Old));
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		write_group(&mut track, 6, 6);
+		let _track = track.finish().unwrap();
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		let drops: Vec<_> = holes(&mut writer, &log)
+			.await
+			.into_iter()
+			.filter(|(kind, _)| *kind == "drop")
+			.map(|(_, groups)| groups)
+			.collect();
+		assert_eq!(drops, [0..4, 4..6]);
 	}
 
 	/// A relay forwards a SKIP over a DROP it already forwarded for the same groups, since the

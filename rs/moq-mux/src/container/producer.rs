@@ -810,9 +810,16 @@ where
 			(Some(newest), Some(marker)) => Some(super::later(newest, marker)),
 			(newest, marker) => newest.or(marker),
 		};
-		let bound = bound.filter(|bound| floor.is_none_or(|floor| !timestamp_lt(*bound, floor)));
+		// Compared in the track's timescale, as `finish_at` checks it, so a bound finer than a
+		// microsecond is not taken for its frame.
+		let floor = floor
+			.and_then(|floor| self.inner.info().rescale(floor).ok())
+			.map(|floor| floor.value());
 		if let Some(group) = self.group.take() {
-			match bound.and_then(|bound| crate::start::end(&self.inner, group.start, bound)) {
+			let end = bound
+				.and_then(|bound| crate::start::end(&self.inner, group.start, bound))
+				.filter(|end| floor.is_none_or(|floor| *end >= floor));
+			match end {
 				Some(end) => group.finish_at(end)?,
 				None => group.finish()?,
 			};
@@ -2050,6 +2057,54 @@ mod tests {
 			kind: crate::container::fmp4::Kind::Video,
 		};
 		crate::container::fmp4::encode_fragment(info, group).unwrap();
+	}
+
+	/// Writes each frame onto the group at its own timescale, so the group's frames keep
+	/// precision a microsecond container would drop.
+	struct Stamped;
+
+	impl super::Container for Stamped {
+		type Error = crate::Error;
+
+		fn write(&self, group: &mut moq_net::group::Producer, frames: &[Frame]) -> Result<(), Self::Error> {
+			for frame in frames {
+				group.write_frame(frame.timestamp, frame.payload.clone())?;
+			}
+			Ok(())
+		}
+
+		fn decode(&self, _frame: moq_net::frame::Frame) -> Result<Vec<Frame>, Self::Error> {
+			unreachable!("Stamped is write-only")
+		}
+	}
+
+	/// A cut bound below the newest frame by less than a microsecond is still below it in the
+	/// track's timescale, where `finish_at` checks it, so the group closes without an end
+	/// rather than failing.
+	#[tokio::test]
+	async fn a_bound_below_a_frame_by_under_a_microsecond_closes_without_an_end() {
+		let nanos = moq_net::Timescale::new(1_000_000_000).unwrap();
+		let info = hang::container::track_info(hang::catalog::PRIORITY.video).with_timescale(nanos);
+		let track = track_producer("test", info);
+		let mut consumer = track.subscribe(replay());
+		let mut producer = Producer::new(track, Stamped);
+		let at = |nanoseconds: u64, keyframe: bool| Frame {
+			timestamp: Timestamp::new(nanoseconds, nanos).unwrap(),
+			payload: Bytes::from_static(&[0xDE, 0xAD]),
+			keyframe,
+			duration: None,
+		};
+		producer.write(at(1_000_000, true)).unwrap();
+		producer.write(at(2_000_002, false)).unwrap();
+		producer.cut(Some(Timestamp::new(2_000_001, nanos).unwrap())).unwrap();
+
+		let mut group = consumer.recv_group().await.unwrap().unwrap();
+		let mut frames = 0;
+		while group.read_frame().await.unwrap().is_some() {
+			frames += 1;
+		}
+		assert_eq!(frames, 2, "the group closes rather than aborting");
+		assert_eq!(group.end(), None, "an end below a frame is not declared");
 	}
 
 	#[tokio::test]
