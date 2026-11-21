@@ -1592,6 +1592,86 @@ async fn video_continuing_a_seeked_group_keeps_its_leading_pictures() {
 	}
 }
 
+/// A sync-led fragment that continues the open group keeps a leading picture below the group's
+/// start but past the groups before it, passthrough or unwrapped: only a fragment that opens a
+/// group is a restart when it dips below the latest group's start.
+#[tokio::test]
+async fn video_continuing_keeps_a_leading_picture_below_its_start() {
+	let (_, (video_id, video_scale), _) = bbb_init();
+	let tick = video_scale.as_u64() / 24;
+	let non_sync = 0x0001_0000;
+	let init = bbb_init_with_edits(video_id, vec![media_edit(0)]);
+	// Presents 1; then 6 and 9, opening a group at 6; then a sync sample at 8, continuing it, and a
+	// leading picture at 4.
+	let fragments: [(u64, &[(u64, u32)]); 3] = [
+		(0, &[(1, 0)]),
+		(1, &[(5, 0), (7, non_sync)]),
+		(3, &[(5, 0), (0, non_sync)]),
+	];
+	for passthrough in [false, true] {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve()).with_cmaf(passthrough);
+		fmp4.decode(&init).unwrap();
+		for (dts, samples) in fragments {
+			let entries: Vec<_> = samples.iter().map(|&(cts, flags)| (cts * tick, flags, 0xA)).collect();
+			fmp4.decode(&video_fragment(video_id, dts * tick, tick, &entries))
+				.unwrap();
+		}
+		let _finished = fmp4.finish().unwrap();
+		let [video, _] = published(&consumer, &catalog).await;
+		let presented: Vec<u64> = video
+			.iter()
+			.map(|(timestamp, _, _)| (timestamp * u128::from(video_scale.as_u64())).div_ceil(1_000_000) as u64 / tick)
+			.collect();
+		assert_eq!(presented, [1, 6, 9, 8, 4], "passthrough {passthrough}");
+		let name = catalog.snapshot().video.renditions.keys().next().unwrap().clone();
+		assert_eq!(starts(&consumer, &name).await.len(), 2, "passthrough {passthrough}");
+	}
+}
+
+/// In a source without `styp`, a video keyframe that continues the open group at a segment
+/// boundary still rolls the segment, so the next keyframe starts another and audio rolls with it,
+/// passthrough or unwrapped.
+#[tokio::test]
+async fn continuing_keyframe_rolls_the_segment() {
+	let (_, (video_id, video_scale), (audio_id, _)) = bbb_init();
+	let tick = video_scale.as_u64() / 24;
+	let non_sync = 0x0001_0000;
+	let init = bbb_init_with_edits(video_id, vec![media_edit(0)]);
+	// Video presents 1; 6 and 9, opening a group; a sync sample at 8, continuing it; then 10.
+	let video: [(u64, &[(u64, u32)]); 4] = [
+		(0, &[(1, 0)]),
+		(1, &[(5, 0), (7, non_sync)]),
+		(3, &[(5, 0)]),
+		(5, &[(5, 0)]),
+	];
+	for passthrough in [false, true] {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve()).with_cmaf(passthrough);
+		fmp4.decode(&init).unwrap();
+		let name = catalog.snapshot().audio.renditions.keys().next().unwrap().clone();
+		let mut track = consumer.track(&name).unwrap().subscribe(replay()).await.unwrap();
+		// An audio fragment after each video one, in that video fragment's segment.
+		for (index, (dts, samples)) in video.into_iter().enumerate() {
+			let entries: Vec<_> = samples.iter().map(|&(cts, flags)| (cts * tick, flags, 0xA)).collect();
+			fmp4.decode(&video_fragment(video_id, dts * tick, tick, &entries))
+				.unwrap();
+			let audio: TrackRun = (index as u64 * 1024, &[(0, 0, 0xB)]);
+			fmp4.decode(&track_moof(audio_id, 1024, &[audio])).unwrap();
+		}
+		let _finished = fmp4.finish().unwrap();
+		assert_eq!(
+			drain_group_frames(&mut track),
+			vec![1, 1, 1, 1],
+			"a group per segment, passthrough {passthrough}"
+		);
+	}
+}
+
 #[test]
 fn test_bbb_init_roundtrip() {
 	let data = include_bytes!("test_data/bbb.mp4");

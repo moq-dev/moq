@@ -1177,23 +1177,31 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				new_segment: track.segment != Some(self.segment),
 			};
 			let land = match &mut track.output {
-				Output::Passthrough(output) => match output.plan(&mut run, placement, track.kind)? {
-					Some(land) => {
-						// The plan opened the segment's group, so a later run of this track in the
-						// same moof continues it.
-						if let Land::Opens { .. } = land {
-							track.segment = Some(self.segment);
-						}
-						Some(land)
+				Output::Passthrough(output) => {
+					// A sync-led fragment at a new segment rolls the segment whether it opens a group,
+					// continues one, or is dropped, as an unwrapped track's keyframe does, so the next
+					// keyframe moof starts a segment and audio rolls with it.
+					let leads = match run.samples.first() {
+						Some(first) => placement.new_segment && placement.keyframe(track.kind, first),
+						None => false,
+					};
+					let land = output.plan(&mut run, placement, track.kind)?;
+					// A group the plan opened belongs to the segment, so a later run of this track in
+					// the same moof continues it.
+					if leads || matches!(land, Some(Land::Opens { .. })) {
+						track.segment = Some(self.segment);
 					}
-					None => {
-						// With no group open, video waits for a sync sample past what was published.
-						if !output.open && track.kind == Kind::Video {
-							track.orphaned = true;
+					match land {
+						Some(land) => Some(land),
+						None => {
+							// With no group open, video waits for a sync sample past what was published.
+							if !output.open && track.kind == Kind::Video {
+								track.orphaned = true;
+							}
+							continue;
 						}
-						continue;
 					}
-				},
+				}
 				_ => None,
 			};
 			let prefix = match track.output {
@@ -1649,17 +1657,13 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		let at = placement.offset.apply(first.timestamp)?;
 		let earliest = placement.offset.apply(run.earliest)?;
 		let mut opens = !self.open || (placement.new_segment && keyframe);
-		// A group may not start below the one before it: a restart, refused before anything of it
-		// publishes, as an unwrapped track does.
-		if opens
+		// A keyframe below the latest group's start is a restart whether it would open, continue, or
+		// be dropped, refused before anything of it publishes, as an unwrapped track's keyframe is.
+		if keyframe
 			&& let Some(floor) = self.start
-			&& earliest < floor
+			&& at < floor
 		{
-			return Err(crate::container::TimestampRewind {
-				timestamp: earliest,
-				floor,
-			}
-			.into());
+			return Err(crate::container::TimestampRewind { timestamp: at, floor }.into());
 		}
 		if opens && self.newest.is_some_and(|newest| at <= newest) {
 			if !self.open {
@@ -1696,6 +1700,20 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 				}
 				_ => key = Some(next),
 			}
+		}
+
+		// A group may not start below the one before it, so a fragment that really opens one with a
+		// sample below the latest group's start is a restart. One that continues the open group
+		// instead has its samples at or before the ceiling trimmed below.
+		if opens
+			&& let Some(floor) = self.start
+			&& earliest < floor
+		{
+			return Err(crate::container::TimestampRewind {
+				timestamp: earliest,
+				floor,
+			}
+			.into());
 		}
 
 		let ceiling = match opens {
