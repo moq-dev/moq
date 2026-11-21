@@ -17,12 +17,22 @@ memory bounded by its window, and a publisher that does not listen refuses.
 See the [epic](/quest/m3/proxy/README.md) for the decisions.
 
 - Admission is the [dial and listen grants](/quest/m3/proxy/grants.md).
-- A new moq-lite stream type is a wire change: follow AGENTS.md's wire rules
-  for the version it joins and update its draft in the same PR.
+- A new moq-lite stream type is a wire change. It joins the current wip
+  version (lite-07-wip until the cut; see
+  [lite07-finalize](/quest/m2/lite07-finalize.md)'s freeze policy), and the
+  draft changes in the same PR. A peer on an earlier version never sees one:
+  [moqt](/quest/m3/proxy/moqt.md) carries it as tracks there.
+- Routing reuses the subscription's: a hop picks the route a subscription to
+  the broadcast would, cluster links included, and a broadcast with no route
+  refuses the stream as a subscription would end.
 - The relay forwards bytes, not frames: flow control on each hop's stream is
   the only buffer.
 - Kixel's byte stream semantics are the reference: FIN as finish, RST with a
   code, as in kixel-ai/kixel.ai's `rs/kixel/src/socket/stream.rs`.
+
+Public API: additive, a dial on a session or origin and a listen on a
+broadcast, in Rust and JS. Wire: a new stream type in the current wip
+moq-lite version.
 
 ## Required
 

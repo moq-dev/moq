@@ -5,10 +5,13 @@
 A session can open `PROXY <broadcast>`: one bidirectional stream of opaque
 bytes, routed hop by hop to that broadcast's publisher the way a subscription
 is, with no group cache and no fan-out. Each hop holds about a stream's flow
-control window. Through a moq-transport hop, moq-net carries the same stream
-as two tracks under a hidden `.proxy/` namespace and converts it back at the
-next moq-lite hop, so an application sees one API on every path and never
-branches on the version. A relay on cdn.moq.pro forwards it.
+control window. Through a hop whose version lacks PROXY, moq-net carries the
+same stream as two tracks under a hidden `.proxy/` namespace and converts it
+back at the next hop that has it, so an application sees one API on every
+path and never branches on the version. That covers every moq-transport hop
+and a moq-lite hop on a version before PROXY's, as between moq.pro's relays
+mid-rollout, where two releases run side by side (AGENTS.md). A relay on
+cdn.moq.pro forwards it.
 
 Boundaries:
 
@@ -49,3 +52,9 @@ question):
 m3: it is a wire change a named consumer, Kixel, waits on, and it should not
 gate the cut. kixel-ai/kixel.ai's `quest/m1/proxy.md` adopts it once
 cdn.moq.wtf runs it.
+
+Added in the plan's review, 2026-11-20, for the maintainer to confirm: the
+conversion keys on each hop's negotiated version lacking PROXY, not on
+moq-transport alone, so a mixed-release relay pair or a moq-lite version
+before PROXY's carries the track form rather than refusing. This extends the moq-transport decision above; it adds no
+dialer-side fallback.
