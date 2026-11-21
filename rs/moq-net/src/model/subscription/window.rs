@@ -458,6 +458,12 @@ impl Window {
 		self.is_pending() || self.groups.contains(key)
 	}
 
+	/// Whether a range placed so far holds group `key`: unlike [`Self::contains`], not every
+	/// group while a live join waits on a first group.
+	pub fn holds(&self, key: u64) -> bool {
+		self.groups.contains(key)
+	}
+
 	/// The lowest group in range, `None` while an anchor waits. Nothing in range floors
 	/// nowhere: group 0.
 	pub fn floor(&self) -> Option<u64> {

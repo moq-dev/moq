@@ -400,6 +400,264 @@ test("a group the window dropped above the serving copy's resume point is backfi
 	}
 });
 
+test("a backfill places a time start its serving copy raised, at the group holding it", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const front = new Front();
+	const sources = [new BroadcastProducer(), new BroadcastProducer()];
+	const handles = sources.map((source) => source.consume());
+	const [ta, tb] = sources.map(copy);
+	const delay = { max: Duration.millis(3_600_000) };
+	const from = (time: bigint) => ({ delay, ranges: [{ start: time }] });
+	ta.write(6n);
+	ta.write(8n);
+	front.serve(handles[0]);
+	const sub = front.consumer.track("seq").subscribe(from(8n));
+	try {
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([8n]);
+		// The replacement resumes from 8, holding nothing yet, so its cache places nothing.
+		front.serve(handles[1]);
+		await clock.advance(Duration.ZERO);
+		ta.producer.abort(new StreamError(StreamCode.SessionClosed));
+		sub.update(from(7n));
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([]);
+		for (const key of [6n, 8n, 9n]) tb.write(key);
+		await clock.advance(Duration.ZERO);
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub).sort()).toEqual([6n, 9n]);
+		expect(hooks.servingResolved(sub)[0]?.start).toBe(6n);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		for (const handle of handles) handle.close();
+		for (const source of sources) source.close();
+		installed.close();
+	}
+});
+
+/**
+ * As above, beside a range still waiting on a group past the live edge: the raised start's backfill
+ * is asked without waiting for that range to place. Mirrors the Rust
+ * `a_backfill_places_a_raised_start_beside_a_waiting_range`.
+ */
+test("a backfill places a raised start beside a waiting range", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const front = new Front();
+	const sources = [new BroadcastProducer(), new BroadcastProducer()];
+	const handles = sources.map((source) => source.consume());
+	const [ta, tb] = sources.map(copy);
+	const delay = { max: Duration.millis(3_600_000) };
+	ta.write(6n);
+	ta.write(8n);
+	front.serve(handles[0]);
+	const sub = front.consumer.track("seq").subscribe({ delay, ranges: [{ start: 8n }] });
+	try {
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([8n]);
+		front.serve(handles[1]);
+		await clock.advance(Duration.ZERO);
+		ta.producer.abort(new StreamError(StreamCode.SessionClosed));
+		sub.update({
+			delay,
+			ranges: [{ start: 7n, end: 8n }, { start: 20n }],
+		});
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([]);
+		for (const key of [6n, 8n]) tb.write(key);
+		await clock.advance(Duration.ZERO);
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([6n]);
+		expect(hooks.servingResolved(sub)[0]?.start).toBe(6n);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		for (const handle of handles) handle.close();
+		for (const source of sources) source.close();
+		installed.close();
+	}
+});
+
+/**
+ * As above, for a range that ends past the resume point: the backfill, capped under it, places only
+ * the start, and the read ends at the range's own end. Mirrors the Rust
+ * `a_backfill_places_a_raised_start_under_an_end_past_the_resume_point`.
+ */
+test("a backfill places a raised start under an end past the resume point", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const front = new Front();
+	const sources = [new BroadcastProducer(), new BroadcastProducer()];
+	const handles = sources.map((source) => source.consume());
+	const [ta, tb] = sources.map(copy);
+	const delay = { max: Duration.millis(3_600_000) };
+	ta.write(6n);
+	ta.write(8n);
+	front.serve(handles[0]);
+	const sub = front.consumer.track("seq").subscribe({ delay, ranges: [{ start: 8n }] });
+	try {
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([8n]);
+		front.serve(handles[1]);
+		await clock.advance(Duration.ZERO);
+		ta.producer.abort(new StreamError(StreamCode.SessionClosed));
+		sub.update({ delay, ranges: [{ start: 7n, end: 9n }] });
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([]);
+		for (const key of [9n, 8n, 6n]) tb.write(key);
+		tb.producer.skipGroups(7n, 8n);
+		await clock.advance(Duration.ZERO);
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub).sort()).toEqual([6n, 9n]);
+		expect(hooks.servingResolved(sub)[0]).toMatchObject({ start: 6n, end: 10n });
+		expect(await sub.recvGroup()).toBeUndefined();
+	} finally {
+		sub.close();
+		front.consumer.close();
+		for (const handle of handles) handle.close();
+		for (const source of sources) source.close();
+		installed.close();
+	}
+});
+
+/**
+ * As a backfill placing a raised start under an end past the resume point, with the received
+ * replacement behind an inner front, through which the backfill places nothing. Mirrors the Rust
+ * `a_raised_start_behind_an_inner_front_hands_out_nothing_past_its_end`.
+ */
+test("a raised start behind an inner front hands out nothing past its end", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const front = new Front();
+	const inner = new Front();
+	const sources = [new BroadcastProducer(), new BroadcastProducer()];
+	const handles = sources.map((source) => source.consume());
+	const [ta, tb] = sources.map(copy);
+	hooks.receiveTrack(tb.producer);
+	const delay = { max: Duration.millis(3_600_000) };
+	ta.write(6n);
+	ta.write(8n);
+	front.serve(handles[0]);
+	const sub = front.consumer.track("seq").subscribe({ delay, ranges: [{ start: 8n }] });
+	try {
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([8n]);
+		inner.serve(handles[1]);
+		front.serve(inner.consumer);
+		await clock.advance(Duration.ZERO);
+		ta.producer.abort(new StreamError(StreamCode.SessionClosed));
+		sub.update({ delay, ranges: [{ start: 7n, end: 7n }] });
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([]);
+		// The backfill through the inner front places nothing, so its groups wait for the window:
+		// none past the range's end goes out.
+		for (const key of [6n, 7n, 8n, 9n]) {
+			tb.write(key);
+			await clock.advance(Duration.ZERO);
+			await clock.advance(Duration.ZERO);
+			expect(drain(sub)).toEqual([]);
+		}
+	} finally {
+		sub.close();
+		front.consumer.close();
+		inner.consumer.close();
+		for (const handle of handles) handle.close();
+		for (const source of sources) source.close();
+		installed.close();
+	}
+});
+
+/**
+ * A backfill's group that a range already placed holds goes out though another range still waits on
+ * its anchors. Mirrors the Rust `a_backfill_group_a_placed_range_holds_goes_out_beside_a_waiting_range`.
+ */
+test("a backfill group a placed range holds goes out beside a waiting range", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const front = new Front();
+	const sources = [new BroadcastProducer(), new BroadcastProducer()];
+	const handles = sources.map((source) => source.consume());
+	const [ta, tb] = sources.map(copy);
+	hooks.receiveTrack(tb.producer);
+	const delay = { max: Duration.millis(3_600_000) };
+	ta.write(6n);
+	ta.write(8n);
+	front.serve(handles[0]);
+	const sub = front.consumer.track("seq").subscribe({ delay, ranges: [{ start: 8n }] });
+	try {
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([8n]);
+		front.serve(handles[1]);
+		await clock.advance(Duration.ZERO);
+		ta.producer.abort(new StreamError(StreamCode.SessionClosed));
+		sub.update({ delay, ranges: [{ start: 7n }] });
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([]);
+		tb.write(7n);
+		await clock.advance(Duration.ZERO);
+		// A range whose start waits on a group still to land leaves the window pending.
+		sub.update({ delay, ranges: [{ start: 7n }, { start: 9n }] });
+		await clock.advance(Duration.ZERO);
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([7n]);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		for (const handle of handles) handle.close();
+		for (const source of sources) source.close();
+		installed.close();
+	}
+});
+
+/**
+ * As a backfill placing a time start its serving copy raised, with the group holding the time still
+ * to land when the backfill learns no group sits between it and the resume point: the backfill is
+ * kept for it, below where it was asked from.
+ */
+test("a backfill waits for the group holding a time under its floor", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const front = new Front();
+	const sources = [new BroadcastProducer(), new BroadcastProducer()];
+	const handles = sources.map((source) => source.consume());
+	const [ta, tb] = sources.map(copy);
+	const delay = { max: Duration.millis(3_600_000) };
+	const from = (time: bigint) => ({ delay, ranges: [{ start: time }] });
+	ta.write(6n);
+	ta.write(8n);
+	tb.write(8n);
+	front.serve(handles[0]);
+	const sub = front.consumer.track("seq").subscribe(from(8n));
+	try {
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([8n]);
+		front.serve(handles[1]);
+		tb.write(9n);
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([9n]);
+		ta.producer.abort(new StreamError(StreamCode.SessionClosed));
+		sub.update(from(7n));
+		tb.producer.skipGroups(7n, 8n);
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([]);
+		tb.write(10n);
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([10n]);
+		tb.write(6n);
+		await clock.advance(Duration.ZERO);
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([6n]);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		for (const handle of handles) handle.close();
+		for (const source of sources) source.close();
+		installed.close();
+	}
+});
+
 /**
  * A group below the replacement's resume point that the reader never got is asked of the new
  * route, as one cursor on the logical track would still get it late.
