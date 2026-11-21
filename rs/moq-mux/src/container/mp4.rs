@@ -443,9 +443,9 @@ fn keeps_chapters<F: Read + Seek>(file: &mut F, end: u64, eof: u64, plain: &[u8]
 	let id = moov.trak[track].tkhd.track_id;
 
 	// The chapters as a finish placed them, in movie ticks, which its 100 ns starts keep
-	// exactly while the movie's timescale is the coarser.
+	// exactly, as a finish places each on the first tick of its 100 ns.
 	let movie = u128::from(moov.mvhd.timescale);
-	if movie == 0 || movie > 10_000_000 || chpl.entries.is_empty() || chpl.entries.len() > CHPL_LIMIT {
+	if movie == 0 || chpl.entries.is_empty() || chpl.entries.len() > CHPL_LIMIT {
 		return Ok(false);
 	}
 	let mut placed = Vec::with_capacity(chpl.entries.len());
@@ -887,7 +887,7 @@ impl Index {
 			let ticks = chapter.time.as_scale(movie)?;
 			let start = ticks.saturating_sub(u128::from(origin));
 			if started && start < u128::from(duration) {
-				placed.push((start as u64, chapter.title.as_str()));
+				placed.push((snap(start, self.timescale) as u64, chapter.title.as_str()));
 			}
 		}
 		// A list a player reads in order, equal starts keeping the order given.
@@ -900,6 +900,14 @@ impl Index {
 		}
 		Ok(placed)
 	}
+}
+
+/// A chapter's start in movie ticks moved back to the first tick in the same 100 ns, the
+/// resolution of a `chpl` entry, which a repair reads back to place the chapter. A movie
+/// timescale of 10 MHz or less has no two ticks in one 100 ns, so nothing moves.
+fn snap(ticks: u128, timescale: u32) -> u128 {
+	let movie = u128::from(timescale);
+	(ticks * 10_000_000 / movie * movie).div_ceil(10_000_000)
 }
 
 /// The QuickTime chapter track, whose samples are the titles in the order given, and the
@@ -2206,6 +2214,24 @@ mod tests {
 			title: "far".to_string(),
 		};
 		assert!(index.finish(end, &[far]).is_ok());
+	}
+
+	/// A chapter at a movie timescale above 10 MHz starts on the first tick of its 100 ns,
+	/// which is where a repair reads it back, and nothing moves at or below it.
+	#[test]
+	fn a_chapter_starts_on_the_first_tick_of_its_chpl_unit() {
+		for movie in [1_000, 90_000, 10_000_000, 48_000_000, 1_000_000_000] {
+			for ticks in [0u128, 1, 7, 99, 100, 12_345, 987_654_321] {
+				let snapped = super::snap(ticks, movie);
+				assert!(snapped <= ticks);
+				assert_eq!(super::snap(snapped, movie), snapped);
+				let chpl = |ticks: u128| ticks * 10_000_000 / u128::from(movie);
+				assert_eq!(chpl(snapped), chpl(ticks));
+				if movie <= 10_000_000 {
+					assert_eq!(snapped, ticks);
+				}
+			}
+		}
 	}
 
 	/// A chapter's duration in the text track holds for a recording of hours at the finest
