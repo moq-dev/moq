@@ -273,12 +273,13 @@ func connectionStatsFromFFI(s ffi.MoqConnectionStats) ConnectionStats {
 	}
 }
 
-// Grant is what the peer lets this side do, in this side's own paths. An empty
-// pattern list grants nothing in that direction; "**" grants everything.
+// Grant is what the peer lets this side do, in this side's own paths. Each prefix
+// covers its path and everything beneath it. An empty list grants nothing in that
+// direction; the empty prefix "" grants everything.
 type Grant struct {
-	// Publish lists the broadcast patterns this side may publish to the peer.
+	// Publish lists the broadcast prefixes this side may publish to the peer.
 	Publish []string
-	// Subscribe lists the broadcast patterns this side may subscribe to from the peer.
+	// Subscribe lists the broadcast prefixes this side may subscribe to from the peer.
 	Subscribe []string
 	// Expires is how long until the grant lapses, measured when it was read, or nil for never.
 	Expires *time.Duration

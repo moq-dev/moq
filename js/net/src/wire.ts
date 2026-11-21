@@ -108,16 +108,16 @@ export interface OriginConsumer {
 	demand(path: Path.Valid, instance?: Instance.Valid, signal?: AbortSignal): Promise<broadcast.Consumer | undefined>;
 	/** Whether the handle's scope admits everything beneath the root-relative `prefix`. */
 	covers(prefix: Path.Valid): boolean;
-	/** The root-relative paths the handle's scope admits; unset for every path. */
-	readonly allowed?: Path.Patterns;
+	/** The root-relative prefixes the handle's scope admits; unset for every path. */
+	readonly allowed?: Path.Prefixes;
 }
 
 /** One originated advertisement exposed to the publishing wire. */
 export interface Advertised {
 	readonly identity: object;
 	readonly route: WireRoute;
-	/** The paths a scoped route may serve beneath its prefix, relative like its key; unset for the whole subtree. */
-	readonly claim?: Path.Patterns;
+	/** The prefixes beneath its own a scoped route may serve, relative like its key; unset for the whole subtree. */
+	readonly claim?: Path.Prefixes;
 	/**
 	 * The prefix the route was advertised at, when a scope's projection merged several covering
 	 * prefixes under one key; unset when the key is its prefix. Supersession compares only routes

@@ -1663,7 +1663,7 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 			try {
 				hooks.receiveTrack(sub.track);
 				// A lite-07 source reports where it started the time asked for.
-				if (hasRanges(version)) hooks.timeStarts(sub.track, [[2n, source]]);
+				if (hasRanges(version)) hooks.timeStarts(sub.track, [[2n, source]], NO_MAX_DELAY);
 				hooks.startTrack(sub.track, { start: source, requested: 2n });
 				sub.serve(6n);
 				expect(await sub.servedSequence()).toBe(6n);
@@ -1691,7 +1691,7 @@ test("lite draft-07: a time start a copy's oldest range covers starts where that
 	try {
 		hooks.receiveTrack(sub.track);
 		await flush();
-		hooks.timeStarts(sub.track, [[0n, 6n]]);
+		hooks.timeStarts(sub.track, [[0n, 6n]], NO_MAX_DELAY);
 		hooks.startTrack(sub.track, { start: 6n });
 		sub.serve(6n);
 		expect(await sub.servedSequence()).toBe(6n);
@@ -1714,7 +1714,7 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 			hooks.startTrack(sub.track, { requested: 2n });
 			sub.serve(6n);
 			await flush();
-			if (hasRanges(version)) hooks.timeStarts(sub.track, [[2n, 3n]]);
+			if (hasRanges(version)) hooks.timeStarts(sub.track, [[2n, 3n]], NO_MAX_DELAY);
 			hooks.startTrack(sub.track, { start: 3n, requested: 2n });
 			const response = await decodeSubscribeResponse(sub.client.reader, version);
 			if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
@@ -3190,7 +3190,7 @@ test("lite draft-05: a group that goes stale while its stream opens writes nothi
 });
 
 function grantOf(publish: string): Grant {
-	return { publish: new Path.Patterns([Path.Pattern.subtree(publish)]), subscribe: new Path.Patterns([]) };
+	return { publish: new Path.Prefixes([Path.Prefix.parse(publish)]), subscribe: new Path.Prefixes() };
 }
 
 // The resets carrying our UNAUTHORIZED code, by message.
@@ -4180,8 +4180,8 @@ test("a lite-07 edit answers each added prefix under its own Prefix ID", async (
 test("a lite-07 prefix wider than the grant is answered region by region", async () => {
 	const origin = new OriginProducer();
 	const regions = (...paths: string[]): Grant => ({
-		publish: new Path.Patterns(paths.map((path) => Path.Pattern.subtree(path))),
-		subscribe: new Path.Patterns([]),
+		publish: Path.Prefixes.parse(paths),
+		subscribe: new Path.Prefixes(),
 	});
 	const grant = new Signal<Grant | undefined>(regions("a/b"));
 	const broadcasts = ["a", "a/b/x", "c/y", "d/z"].map((path) => publish(origin, Path.from(path)));
@@ -4222,14 +4222,14 @@ test("a lite-07 prefix wider than the grant is answered region by region", async
 	}
 });
 
-// A grant whose head is too long to be a path holds no region: a claim above it is not presented
+// A granted prefix too long to be a path holds no region: a claim above it is not presented
 // there, which the wire could not carry, and the session stays up.
-test("a lite-07 grant head too long for a path presents nothing", async () => {
+test("a lite-07 granted prefix too long for a path presents nothing", async () => {
 	const origin = new OriginProducer();
 	const long = `a/${"x".repeat(Path.MAX_BYTES)}`;
 	const grant = new Signal<Grant | undefined>({
-		publish: new Path.Patterns([Path.Pattern.parse(`${long}/**`), Path.Pattern.subtree("c")]),
-		subscribe: new Path.Patterns([]),
+		publish: Path.Prefixes.parse([long, "c"]),
+		subscribe: new Path.Prefixes(),
 	});
 	const broadcasts = ["a", "c/y"].map((path) => publish(origin, Path.from(path)));
 	const { next, ok, close } = routedAnswer(origin, grant);
@@ -4249,15 +4249,14 @@ test("a lite-07 grant head too long for a path presents nothing", async () => {
 	}
 });
 
-// A claim at a path the grant does not match, but above paths it does, is shown where it is
-// presented: `a` under `a/*`, at the region and at its own path. One beneath every path the grant
-// matches stays hidden.
-test("a lite-07 claim above what the grant matches is shown", async () => {
+// A claim above the grant is shown at the granted prefix, whichever prefix above it the peer
+// asks for, and one outside the grant stays hidden.
+test("a lite-07 claim above the grant is shown at the granted prefix", async () => {
 	for (const asked of ["", "a"]) {
 		const origin = new OriginProducer();
 		const grant = new Signal<Grant | undefined>({
-			publish: new Path.Patterns([Path.Pattern.parse("a/*")]),
-			subscribe: new Path.Patterns([]),
+			publish: Path.Prefixes.parse(["a/x"]),
+			subscribe: new Path.Prefixes(),
 		});
 		const broadcasts = ["a", "a/x/y", "b"].map((path) => publish(origin, Path.from(path)));
 		const { next, ok, close } = routedAnswer(origin, grant, Path.from(asked));
@@ -4272,7 +4271,7 @@ test("a lite-07 claim above what the grant matches is shown", async () => {
 			const told = msgs.flatMap((msg) =>
 				msg.status === "start" ? [`${msg.suffix} above ${msg.claim.above}`] : [],
 			);
-			expect(told).toEqual(["a above 0"]);
+			expect(told.sort()).toEqual(["a/x above 1", "a/x/y above 0"]);
 		} finally {
 			for (const broadcast of broadcasts) broadcast.close();
 			close();
@@ -4282,19 +4281,20 @@ test("a lite-07 claim above what the grant matches is shown", async () => {
 });
 
 // A scoped claim is shown only where its scope and the grant share a path: one at `a` scoped to
-// `a/*/x` serves something `a/**` grants, and nothing `a/*` does.
+// `a/q/x` serves something `a` or `a/q` grants, and nothing `a/r` does.
 test("a lite-07 scoped claim sharing no path with the grant is hidden", async () => {
 	const cases: [string, string[]][] = [
-		["a/*", []],
-		["a/**", ["a"]],
+		["a/r", []],
+		["a/q", ["a/q"]],
+		["a", ["a"]],
 	];
 	for (const [granted, told] of cases) {
 		const origin = new OriginProducer();
 		const grant = new Signal<Grant | undefined>({
-			publish: new Path.Patterns([Path.Pattern.parse(granted)]),
-			subscribe: new Path.Patterns([]),
+			publish: Path.Prefixes.parse([granted]),
+			subscribe: new Path.Prefixes(),
 		});
-		const scoped = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("a/*/x")]));
+		const scoped = origin.scope(Path.empty(), Path.Prefixes.parse(["a/q/x"]));
 		const claim = scoped.claim(Path.from("a"));
 		const { next, ok, close } = routedAnswer(origin, grant);
 		try {
@@ -4317,12 +4317,12 @@ test("a lite-07 scoped claim sharing no path with the grant is hidden", async ()
 });
 
 // A claim is shown only where the grant, the claim's scope, and the answering handle's scope share
-// a path. Beneath a handle scoped to `a/*/x`, an unscoped claim at `a` serves nothing `a/*/y`
-// grants; and of two claims at `a`, the cheaper scoped to `a/*/x` gives way to the one `a/*/y`
-// shows.
+// a path. Beneath a handle scoped to `a/q/x`, an unscoped claim at `a` serves nothing `a/q/y`
+// grants; and of two claims at `a`, the cheaper scoped to `a/q/x` gives way to the one scoped to
+// `a/q/y`, shown at the granted prefix.
 test("a lite-07 claim is shown only where the handle and the grant share a path", async () => {
-	const patterns = (pattern: string) => new Path.Patterns([Path.Pattern.parse(pattern)]);
-	const grant = new Signal<Grant | undefined>({ publish: patterns("a/*/y"), subscribe: new Path.Patterns([]) });
+	const prefixes = (prefix: string) => Path.Prefixes.parse([prefix]);
+	const grant = new Signal<Grant | undefined>({ publish: prefixes("a/q/y"), subscribe: new Path.Prefixes() });
 	const synced = async (next: () => Promise<AnnounceBroadcast>) => {
 		const msgs: AnnounceBroadcast[] = [];
 		for (;;) {
@@ -4334,7 +4334,7 @@ test("a lite-07 claim is shown only where the handle and the grant share a path"
 
 	const origin = new OriginProducer();
 	const claim = origin.claim(Path.from("a"));
-	const handle = routedAnswer(origin.scope(Path.empty(), patterns("a/*/x")), grant);
+	const handle = routedAnswer(origin.scope(Path.empty(), prefixes("a/q/x")), grant);
 	try {
 		await handle.ok();
 		expect(await synced(handle.next)).toEqual([]);
@@ -4345,14 +4345,14 @@ test("a lite-07 claim is shown only where the handle and the grant share a path"
 	}
 
 	const both = new OriginProducer();
-	const cheap = both.scope(Path.empty(), patterns("a/*/x")).claim(Path.from("a"), { cost: 1n });
-	const dear = both.scope(Path.empty(), patterns("a/*/y")).claim(Path.from("a"), { cost: 5n });
+	const cheap = both.scope(Path.empty(), prefixes("a/q/x")).claim(Path.from("a"), { cost: 1n });
+	const dear = both.scope(Path.empty(), prefixes("a/q/y")).claim(Path.from("a"), { cost: 5n });
 	const answer = routedAnswer(both, grant);
 	try {
 		await answer.ok();
 		const starts = await synced(answer.next);
 		expect(starts.map((msg) => (msg.status === "start" ? [msg.suffix, msg.claim.cost] : []))).toEqual([
-			[Path.from("a"), 5n],
+			[Path.from("a/q/y"), 5n],
 		]);
 	} finally {
 		cheap.close();

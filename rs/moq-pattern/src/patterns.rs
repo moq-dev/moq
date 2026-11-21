@@ -2,14 +2,14 @@ use super::{IntersectionError, InvalidPattern, Pattern, index::Index};
 
 /// A union of patterns, reduced so no member is contained by another.
 ///
-/// This is the shape of a grant (the paths a token may publish) and of a rebased
-/// pattern (see [`Pattern::rebase`]). Order is canonical, so two unions describing the
-/// same reduced set compare equal.
+/// This is the shape of a discovery filter and of a rebased pattern (see
+/// [`Pattern::rebase`]). Order is canonical, so two unions describing the same reduced set
+/// compare equal.
 ///
 /// Containment is per member: [`contains`](Self::contains) holds when one pattern in the
 /// union contains the candidate. A candidate covered only jointly by several members
 /// (`a/**` against `a`, `a/*`, and `a/*/**`) is refused, which keeps the check linear
-/// and its answer easy to predict. A grant that means a subtree writes `a/**`.
+/// and its answer easy to predict. A filter that means a subtree writes `a/**`.
 ///
 /// Operations over a whole union (collecting, extending, [`covers`](Self::covers), and
 /// [`intersect`](Self::intersect)) index one side by segment first, so their cost

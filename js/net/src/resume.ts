@@ -1692,6 +1692,14 @@ class Reader implements ResumeSource {
 		return serving && hooks.servingRuns(serving.sub, start, end);
 	}
 
+	// The serving copy's runs leave out the keys below a time start it still waits to place, so its
+	// barrier holds a gap the group containing that start may lie below.
+	gapHeld(at: bigint, end: bigint): boolean {
+		this.sync();
+		const serving = this.#serving();
+		return serving !== undefined && hooks.gapHeld(serving.sub, at, end);
+	}
+
 	servingEnd(): bigint | undefined {
 		this.sync();
 		const serving = this.#serving();

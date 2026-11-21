@@ -73,7 +73,12 @@ class Epoch {
 
 		// A stuck source leaves arrival time as the only clock we have, which is what the <video>
 		// fallback uses anyway.
-		const timestamp = this.#stuck ? arrived : frame.timestamp - this.#base + this.#zero + (arrived - instant);
+		// Whole microseconds, like the integer a VideoFrame stores: the float error in the clock
+		// arithmetic would otherwise land a frame a hair under its mark, which a browser truncates a
+		// whole microsecond early.
+		const timestamp = Math.round(
+			this.#stuck ? arrived : frame.timestamp - this.#base + this.#zero + (arrived - instant),
+		);
 
 		const stamped = new VideoFrame(frame, { timestamp });
 		frame.close();
@@ -280,7 +285,9 @@ function videoProcessor(track: StreamTrack): ReadableStream<VideoFrame> {
 						const at = Instant.ZERO.saturatingAdd(
 							Duration.millis(Math.max(metadata.captureTime ?? now, 0)),
 						);
-						controller.enqueue(new VideoFrame(video, { timestamp: MediaClock.capture(at).asMicros() }));
+						controller.enqueue(
+							new VideoFrame(video, { timestamp: Math.round(MediaClock.capture(at).asMicros()) }),
+						);
 						resolve();
 					});
 				});

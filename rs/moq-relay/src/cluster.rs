@@ -1599,8 +1599,8 @@ impl Cluster {
 	) -> Result<Admitted, auth::Error> {
 		let mut admitted = self.scope(lease, request)?;
 		let mut bound = admitted.lease.token().clone();
-		bound.publish.path = moq_net::Pattern::all().into();
-		bound.subscribe.path = moq_net::Pattern::all().into();
+		bound.publish.path = moq_net::Prefixes::all();
+		bound.subscribe.path = moq_net::Prefixes::all();
 		if request.role != Some(moq_auth::Role::Subscriber) {
 			admitted.publisher = self
 				.publisher(&bound)
@@ -1799,7 +1799,7 @@ impl Cluster {
 	/// billed under `--cluster-tier`. The proof is a secret this relay minted for
 	/// itself, so no auth server is asked.
 	pub(crate) fn lan_peer_grant(&self) -> moq_auth::Grant {
-		let mut grant = moq_auth::Grant::new(moq_auth::Pattern::all(), moq_auth::Pattern::all());
+		let mut grant = moq_auth::Grant::new(moq_auth::Prefix::all(), moq_auth::Prefix::all());
 		grant.tier = self.config.tier.clone().filter(|tier| !tier.is_empty());
 		grant.link = Some(moq_auth::Link::Peer);
 		grant
@@ -2319,7 +2319,7 @@ impl Cluster {
 		}
 		// Counted by the relay's drain before the first dial, so a drain that starts
 		// while the session connects still waits for it.
-		let serving = self.shutdown.serve();
+		let serving = self.shutdown.serve_link();
 		// The GOAWAY lifecycle lives in the reconnect loop: on an upstream GOAWAY it
 		// dials the replacement while the old session keeps serving, so the old
 		// routes stay attached and the origin hands live tracks over at a group
@@ -2663,7 +2663,7 @@ mod tests {
 			(Some(moq_auth::Link::Peer), 20),
 			(Some(moq_auth::Link::Upstream), 20),
 		] {
-			let mut grant = moq_auth::Grant::new(moq_net::Pattern::all(), moq_net::Pattern::all());
+			let mut grant = moq_auth::Grant::new(moq_net::Prefix::all(), moq_net::Prefix::all());
 			grant.link = link;
 			let (_producer, consumer) = moq_auth::lease::Producer::new(grant);
 			// A cluster-looking path alone never selects the peer policy.
@@ -2692,7 +2692,7 @@ mod tests {
 		});
 		for peer in [false, true] {
 			for session in [false, true] {
-				let mut grant = moq_auth::Grant::new(moq_auth::Pattern::all(), moq_auth::Pattern::all());
+				let mut grant = moq_auth::Grant::new(moq_auth::Prefix::all(), moq_auth::Prefix::all());
 				grant.link = peer.then_some(moq_auth::Link::Peer);
 				let lease = auth::Lease::new("/", moq_auth::lease::Consumer::fixed(grant)).unwrap();
 				let admitted = match session {
@@ -2753,7 +2753,7 @@ mod tests {
 	#[tokio::test]
 	async fn session_handles_apply_grant_mounts() {
 		let cluster = new_cluster(Config::default()).expect("cluster");
-		let everything = || moq_net::Patterns::from(moq_net::Pattern::all());
+		let everything = || moq_net::Prefixes::all();
 		let mut grant = moq_auth::Grant::new(everything(), everything());
 		grant.mounts.insert(".svc".into(), ".svc/pid".into());
 		let token = auth::Token::new("/pid", &grant).unwrap();
@@ -2792,7 +2792,7 @@ mod tests {
 	#[tokio::test]
 	async fn session_handles_refuse_invalid_grant_mounts() {
 		let cluster = new_cluster(Config::default()).expect("cluster");
-		let everything = || moq_net::Patterns::from(moq_net::Pattern::all());
+		let everything = || moq_net::Prefixes::all();
 		let invalid: [&[(&str, &str)]; 2] = [&[(".a", "pid/.z"), (".z", "secret")], &[("*", ".svc/pid")]];
 		for mounts in invalid {
 			let mut grant = moq_auth::Grant::new(everything(), everything());
@@ -2855,7 +2855,7 @@ mod tests {
 		drop(cluster);
 	}
 
-	/// Only cluster peers publish under the stats prefix: a root `**` client grant
+	/// Only cluster peers publish under the stats prefix: a client grant of everything
 	/// can neither route nor announce there, yet still reads the relay's stats.
 	#[kio::test]
 	async fn only_peers_publish_under_the_stats_prefix() {
@@ -2863,7 +2863,7 @@ mod tests {
 		let options = || moq_net::origin::RouteOptions::default();
 		for link in [None, Some(moq_auth::Link::Peer), Some(moq_auth::Link::Upstream)] {
 			let peer = link.is_some();
-			let mut grant = moq_auth::Grant::new(moq_auth::Pattern::all(), moq_auth::Pattern::all());
+			let mut grant = moq_auth::Grant::new(moq_auth::Prefix::all(), moq_auth::Prefix::all());
 			grant.link = link;
 			let token = auth::Lease::new("/", moq_auth::lease::Consumer::fixed(grant)).unwrap();
 			let publisher = cluster.publisher(token.token()).expect("publish grant");
@@ -2883,7 +2883,7 @@ mod tests {
 			assert!(publisher.route(".statsish", options()).is_ok());
 		}
 
-		let grant = moq_auth::Grant::new(moq_auth::Pattern::all(), moq_auth::Pattern::all());
+		let grant = moq_auth::Grant::new(moq_auth::Prefix::all(), moq_auth::Prefix::all());
 		let token = auth::Lease::new("/", moq_auth::lease::Consumer::fixed(grant)).unwrap();
 		let consumer = cluster.subscriber(token.token()).expect("subscribe grant").consume();
 		let path = Path::from_static(".stats/node");
@@ -3546,7 +3546,7 @@ mod tests {
 	}
 
 	/// Once the relay drains, no source change replaces, releases, or adds a dial, so
-	/// each link's own task finishes its drain to the deadline.
+	/// each link's own task finishes its drain.
 	#[tokio::test]
 	async fn mesh_freezes_its_dials_once_the_relay_drains() {
 		let (trigger, shutdown) = crate::shutdown::Observer::new(Duration::from_secs(10));
@@ -4741,7 +4741,7 @@ mod tests {
 	#[tokio::test]
 	async fn peer_grant_marks_the_session_publisher() {
 		let cluster = new_cluster(Config::default()).expect("cluster");
-		let all: moq_net::Patterns = [moq_net::Pattern::all()].into_iter().collect();
+		let all = moq_net::Prefixes::all();
 
 		let client = auth::Token::new("/", &moq_auth::Grant::new(all.clone(), all.clone())).unwrap();
 		let mut grant = moq_auth::Grant::new(all.clone(), all);
@@ -4777,7 +4777,7 @@ mod tests {
 	#[tokio::test]
 	async fn upstream_grant_hides_other_upstreams() {
 		let cluster = new_cluster(Config::default()).expect("cluster");
-		let all: moq_net::Patterns = [moq_net::Pattern::all()].into_iter().collect();
+		let all = moq_net::Prefixes::all();
 
 		let client = auth::Token::new("/", &moq_auth::Grant::new(all.clone(), all.clone())).unwrap();
 		let mut grant = moq_auth::Grant::new(all.clone(), all);

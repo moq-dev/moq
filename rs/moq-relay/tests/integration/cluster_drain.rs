@@ -79,7 +79,7 @@ impl Relay {
 			.route("b", moq_net::origin::RouteOptions::default())
 			.expect("create broadcast");
 		let (trigger, observer) = shutdown::Observer::new(DRAIN);
-		let _accepts = net.relay("b", &cluster, &memory::public(&["**"], &[], &[]), &observer);
+		let _accepts = net.relay("b", &cluster, &memory::public(&[""], &[], &[]), &observer);
 		let net = net.clone();
 		let exits = owned.clone();
 		let exited = kio::clock::sim::spawn(async move {

@@ -4276,12 +4276,9 @@ impl Publisher {
 				}
 				ns.watched.clear();
 				*prefix = next;
-				let scope = crate::Pattern::subtree(prefix.as_str())
-					.map(|p| p.rebase(prefix.as_str()))
-					.unwrap_or_default();
 				let origin = self
 					.origin
-					.scope(&*prefix, &scope)
+					.scope(&*prefix, &crate::Prefixes::all())
 					.unwrap_or_else(|_| self.origin.empty());
 				*announced = self.advertising(origin, &ns.peer).discovery(ns.hidden).routes();
 				true
@@ -6597,17 +6594,14 @@ impl NamespaceOpen {
 					// A prefix outside our scope (empty origin, or a token that doesn't grant it)
 					// just means we have nothing to announce; respond with an empty set rather
 					// than erroring, which would look fatal to the peer.
-					// The wire prefix decodes as a literal path; convert it explicitly to its
-					// subtree grant, refusing anything that cannot be a subtree.
+					// The wire prefix decodes as a literal path, scoped as its whole subtree; a
+					// prefix no grant can spell (holding a `*`) reaches nothing.
 					// The cursor is rooted at the prefix so every update arrives named as its
 					// wire suffix, a route covering the prefix included: that one presents at
 					// the root, as the empty suffix.
-					let scope = crate::Pattern::subtree(prefix.as_str())
-						.map(|subtree| subtree.rebase(prefix.as_str()))
-						.unwrap_or_default();
 					let origin = publisher
 						.origin
-						.scope(prefix, &scope)
+						.scope(prefix, &crate::Prefixes::all())
 						.unwrap_or_else(|_| publisher.origin.empty());
 
 					// Register the split-horizon peer on the announce cursor too. The origin
@@ -11562,7 +11556,7 @@ mod serve_tests {
 			let request = taken_token(&mut running, &mut requests).await;
 
 			issued.update(crate::auth::Grant {
-				subscribe: crate::Pattern::subtree("other").unwrap().into(),
+				subscribe: crate::Prefix::try_from("other").unwrap().into(),
 				..crate::auth::Grant::default()
 			});
 			assert!(futures::poll!(running.as_mut()).is_pending());
@@ -12371,7 +12365,7 @@ mod serve_tests {
 			let scoped = h
 				._origin
 				.consume()
-				.scope(root.as_str(), &crate::Patterns::from(crate::Pattern::all()))
+				.scope(root.as_str(), &crate::Prefixes::all())
 				.unwrap();
 			let peer_setup = peer::PeerSetup::default();
 			peer_setup.set(peer::Peer::default());
@@ -17452,8 +17446,8 @@ mod serve_tests {
 	/// A grant to subscribe to everything, lapsing in `secs` (or never), on the publisher's clock.
 	fn grant_all_expiring(runtime: &crate::time::Deadlines, secs: Option<u64>) -> crate::auth::Grant {
 		crate::auth::Grant {
-			publish: crate::Patterns::new(),
-			subscribe: crate::Pattern::all().into(),
+			publish: crate::Prefixes::new(),
+			subscribe: crate::Prefixes::all(),
 			expires: secs.map(|s| runtime.now().checked_add(Duration::from_secs(s)).unwrap()),
 		}
 	}
@@ -17468,8 +17462,8 @@ mod serve_tests {
 		// The peer lets us publish everything, and we let it read only "other".
 		auth.grant(0, crate::auth::Grant::all());
 		auth.handle().authorize(&crate::auth::Grant {
-			publish: crate::Patterns::new(),
-			subscribe: crate::Pattern::subtree("other").unwrap().into(),
+			publish: crate::Prefixes::new(),
+			subscribe: crate::Prefix::try_from("other").unwrap().into(),
 			expires: None,
 		});
 		assert!(
@@ -18539,13 +18533,13 @@ mod serve_tests {
 	#[kio::test]
 	async fn a_subscribe_token_needs_a_subscribe_grant() {
 		let read_only = crate::auth::Grant {
-			publish: crate::Patterns::new(),
-			subscribe: crate::Pattern::all().into(),
+			publish: crate::Prefixes::new(),
+			subscribe: crate::Prefixes::all(),
 			expires: None,
 		};
 		let write_only = crate::auth::Grant {
-			publish: crate::Pattern::all().into(),
-			subscribe: crate::Patterns::new(),
+			publish: crate::Prefixes::all(),
+			subscribe: crate::Prefixes::new(),
 			expires: None,
 		};
 		let nothing = Some(crate::auth::Grant::default());
@@ -18566,8 +18560,8 @@ mod serve_tests {
 			"a limit of nothing defers to the token"
 		);
 		auth.handle().authorize(&crate::auth::Grant {
-			publish: crate::Patterns::new(),
-			subscribe: crate::Pattern::subtree("other").unwrap().into(),
+			publish: crate::Prefixes::new(),
+			subscribe: crate::Prefix::try_from("other").unwrap().into(),
 			expires: None,
 		});
 		assert!(
@@ -18622,8 +18616,8 @@ mod serve_tests {
 	#[kio::test]
 	async fn a_covering_limit_still_verifies_the_token() {
 		let limit = |subtree: &str| crate::auth::Grant {
-			publish: crate::Patterns::new(),
-			subscribe: crate::Pattern::subtree(subtree).unwrap().into(),
+			publish: crate::Prefixes::new(),
+			subscribe: crate::Prefix::try_from(subtree).unwrap().into(),
 			expires: None,
 		};
 		let (_auth, _h, mut serving) = serve_token_subscribe(crate::auth::Grant::default(), Some(limit("room"))).await;
@@ -18882,8 +18876,8 @@ mod serve_tests {
 		auth.grant(
 			0,
 			crate::auth::Grant {
-				publish: crate::Pattern::subtree("other").unwrap().into(),
-				subscribe: crate::Patterns::new(),
+				publish: crate::Prefix::try_from("other").unwrap().into(),
+				subscribe: crate::Prefixes::new(),
 				expires: None,
 			},
 		);
@@ -19682,7 +19676,7 @@ mod tests {
 		let consume = match scoped {
 			true => origin
 				.consume()
-				.scope("", &crate::Pattern::subtree(".stats").unwrap().into())
+				.scope("", &crate::Prefix::try_from(".stats").unwrap().into())
 				.unwrap(),
 			false => origin.consume(),
 		};
@@ -22499,8 +22493,7 @@ mod compression_tests {
 		use crate::lite::test_transport::{Log, SinkSession};
 		for (version, draft) in [(Version::Draft18, 18), (Version::Draft22, 22)] {
 			let input = serde_json::json!({"draft": draft});
-			let bytes: Vec<u8> =
-				serde_json::from_slice(&crate::test_interop::bun("ietf-compression.ts", input)).unwrap();
+			let bytes: Vec<u8> = serde_json::from_slice(&crate::test_interop::bun("ietf-compression", input)).unwrap();
 			let (parameters, consumed) = ietf::Parameters::decode_slice(&bytes, version).unwrap();
 			assert_eq!(consumed, bytes.len());
 			let negotiated = super::super::flate::from_setup(&parameters).unwrap();
@@ -22538,7 +22531,7 @@ mod compression_tests {
 			let written = log.writes.lock().unwrap().clone();
 			let input = serde_json::json!({"draft": draft, "response": response.to_vec(), "group": written});
 			let received: Vec<Vec<u8>> =
-				serde_json::from_slice(&crate::test_interop::bun("ietf-compression.ts", input)).unwrap();
+				serde_json::from_slice(&crate::test_interop::bun("ietf-compression", input)).unwrap();
 			assert_eq!(received, frames, "draft{draft}: plain JS fallback");
 		}
 	}

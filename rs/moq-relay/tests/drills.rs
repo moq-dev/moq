@@ -285,7 +285,7 @@ fn relay_config() -> Config {
 	let mut config = Config::default();
 	config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.listen.tls.generate = vec!["localhost".into()];
-	config.auth.public = vec![moq_auth::Pattern::all()];
+	config.auth.public = vec![moq_auth::Prefix::all()];
 	config
 }
 

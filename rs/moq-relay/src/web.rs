@@ -1241,7 +1241,7 @@ mod tests {
 		let (_, cert, _) = make_certs(&dir);
 		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(cert).unwrap()).unwrap();
 		let auth = crate::auth::Config {
-			public_subscribe: vec![moq_auth::Pattern::all()],
+			public_subscribe: vec![moq_auth::Prefix::all()],
 			..Default::default()
 		}
 		.init("test", &moq_tokio::tls::Connect::default(), false)
@@ -1340,7 +1340,7 @@ mod tests {
 			for publish_only in [false, true] {
 				let auth = if publish_only {
 					crate::auth::Config {
-						public_publish: vec![moq_auth::Pattern::all()],
+						public_publish: vec![moq_auth::Prefix::all()],
 						..Default::default()
 					}
 					.init("test", &moq_tokio::tls::Connect::default(), false)
@@ -1472,7 +1472,7 @@ mod tests {
 			for _ in 0..6 {
 				let admission = admissions.next().await.unwrap();
 				assert_eq!(admission.request.transport, moq_auth::Transport::Http);
-				let mut grant = moq_auth::Grant::new(moq_auth::Patterns::new(), moq_auth::Pattern::all());
+				let mut grant = moq_auth::Grant::new(moq_auth::Prefixes::new(), moq_auth::Prefix::all());
 				grant.tier = Some(
 					admission
 						.request
@@ -1598,7 +1598,7 @@ mod tests {
 		let (_, cert, _) = make_certs(&dir);
 		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(cert).unwrap()).unwrap();
 		let auth = crate::auth::Config {
-			public_subscribe: vec![moq_auth::Pattern::all()],
+			public_subscribe: vec![moq_auth::Prefix::all()],
 			..Default::default()
 		}
 		.init("test", &moq_tokio::tls::Connect::default(), false)
@@ -1660,7 +1660,7 @@ mod tests {
 			for _ in 0..2 {
 				let admission = admissions.next().await.unwrap();
 				// Publish-only: admitted by auth, but forbidden from reading.
-				let grant = moq_auth::Grant::new(moq_auth::Pattern::all(), moq_auth::Patterns::new());
+				let grant = moq_auth::Grant::new(moq_auth::Prefix::all(), moq_auth::Prefixes::new());
 				let (producer, consumer) = moq_auth::lease::Producer::new(grant);
 				leases.push(producer);
 				admission.grant(consumer);
@@ -2008,7 +2008,7 @@ mod tests {
 		// The probed route is the test's own, so auth never runs; it just has to be
 		// configured with something for `Web` to build.
 		let auth_config = crate::auth::Config {
-			public_subscribe: vec![moq_auth::Pattern::all()],
+			public_subscribe: vec![moq_auth::Prefix::all()],
 			..Default::default()
 		};
 		let auth = auth_config
@@ -2129,8 +2129,8 @@ mod tests {
 				"WebSocket, tls={tls}"
 			);
 			admission.grant(moq_auth::lease::Consumer::fixed(moq_auth::Grant::new(
-				moq_auth::Pattern::all(),
-				moq_auth::Pattern::all(),
+				moq_auth::Prefix::all(),
+				moq_auth::Prefix::all(),
 			)));
 			drop(client.await.expect("the WebSocket session connects"));
 		}
@@ -2153,7 +2153,7 @@ mod tests {
 		config.web.https.listen = Some("127.0.0.1:0".parse().unwrap());
 		config.web.https.cert = vec![cert];
 		config.web.https.key = vec![key];
-		config.auth.public = vec![moq_auth::Pattern::all()];
+		config.auth.public = vec![moq_auth::Prefix::all()];
 		let relay = crate::Relay::load(config).await.unwrap().with_signals(false);
 		let https = relay.web_addrs().https.unwrap();
 		let ready = relay.ready();
@@ -2229,7 +2229,7 @@ mod tests {
 		config.web.https.key = vec![key.clone()];
 		// A client CA needs a server to grant certificates; this one grants them everything.
 		let mut policy = moq_auth::serve::Policy::default();
-		policy.mtls = moq_auth::Permissions::new(moq_auth::Pattern::all(), moq_auth::Pattern::all());
+		policy.mtls = moq_auth::Permissions::new(moq_auth::Prefix::all(), moq_auth::Prefix::all());
 		let auth = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 		config.auth.url = Some(format!("http://{}/", auth.local_addr().unwrap()).parse().unwrap());
 		let auth_server = moq_auth::serve::Server::new(policy).unwrap();
@@ -2325,7 +2325,7 @@ mod tests {
 			config.https.cert = vec![cert.clone()];
 			config.https.key = vec![key.clone()];
 			let auth = crate::auth::Config {
-				public_subscribe: vec![moq_auth::Pattern::all()],
+				public_subscribe: vec![moq_auth::Prefix::all()],
 				..Default::default()
 			}
 			.init("test", &moq_tokio::tls::Connect::default(), false)
@@ -2427,7 +2427,7 @@ mod tests {
 		let mut config = Config::default();
 		config.http.listen = Some("127.0.0.1:0".parse().unwrap());
 		let auth = crate::auth::Config {
-			public_subscribe: vec![moq_auth::Pattern::all()],
+			public_subscribe: vec![moq_auth::Prefix::all()],
 			..Default::default()
 		}
 		.init("test", &moq_tokio::tls::Connect::default(), false)
@@ -2486,7 +2486,7 @@ mod tests {
 	#[tokio::test]
 	async fn unreachable_timeout_waits_forever() {
 		let auth_config = crate::auth::Config {
-			public_subscribe: vec![moq_auth::Pattern::all()],
+			public_subscribe: vec![moq_auth::Prefix::all()],
 			..Default::default()
 		};
 		let auth = auth_config
@@ -2512,7 +2512,7 @@ mod tests {
 		let mut config = Config::default();
 		config.http.listen = Some("127.0.0.1:0".parse().unwrap());
 		let auth_config = crate::auth::Config {
-			public_subscribe: vec![moq_auth::Pattern::all()],
+			public_subscribe: vec![moq_auth::Prefix::all()],
 			..Default::default()
 		};
 		let auth = auth_config
@@ -2656,7 +2656,7 @@ mod tests {
 		config.listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
 		config.web.http.listen = Some("127.0.0.1:0".parse().unwrap());
 		config.web.ws = true;
-		config.auth.public = vec![moq_auth::Pattern::all()];
+		config.auth.public = vec![moq_auth::Prefix::all()];
 		config.quic.receive_window = Some(3 << 20);
 		config.quic.stream_receive_window = Some(384 << 10);
 		config.quic.max_streams = Some(17);
@@ -2724,7 +2724,7 @@ mod tests {
 		config.http.listen = Some("127.0.0.1:0".parse().unwrap());
 		config.ws = true;
 		let auth_config = crate::auth::Config {
-			public_subscribe: vec![moq_auth::Pattern::all()],
+			public_subscribe: vec![moq_auth::Prefix::all()],
 			..Default::default()
 		};
 		let auth = auth_config
@@ -2878,7 +2878,7 @@ mod tests {
 				config.listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
 				config.listen.timeout = Some((std::time::Duration::ZERO).into());
 				config.web.ws = true;
-				config.auth.public = vec![moq_auth::Pattern::all()];
+				config.auth.public = vec![moq_auth::Prefix::all()];
 				config.drain_timeout = Some((DRAIN_WINDOW).into());
 				if tls {
 					config.web.https.listen = Some("127.0.0.1:0".parse().unwrap());

@@ -15,7 +15,7 @@ import { type GetPromise, type Getter, race } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { ProtocolViolation } from "../error.ts";
 import type * as Instance from "../instance.ts";
-import { coveringPrefixes, hiddenBelow, presented, scopeHead } from "../internal.ts";
+import { coveringPrefixes, hiddenBelow, presented, within } from "../internal.ts";
 import * as Path from "../path.ts";
 import { type Advertised, type Advertisements, type OriginConsumer, sameInstance } from "../wire.ts";
 import { type Add, type AnnounceBroadcast, type Claim, claimsEqual, ownClaim, requestFits } from "./announce.ts";
@@ -228,17 +228,13 @@ export class Answer {
 		// prefix, less the hidden ones it did not ask for and whatever our grant does not let us publish.
 		const latest = new Map<Path.Valid, Advertised>();
 		// A claim is shown where some path it covers is served by the claim's own scope and the
-		// handle's, and our grant, if any, lets us publish it, as one at `a` serves `a/*` though `a`
-		// itself is not granted. An intersection too large to spell covers nothing, never more.
+		// handle's, and our grant, if any, lets us publish it, as one at `a` serves `a/b` though `a`
+		// itself is not granted.
 		const shows = (snap: Advertised, path: Path.Valid) => {
-			let beneath = new Path.Patterns([Path.Pattern.subtree(path)]);
-			try {
-				for (const scope of [snap.claim, origin?.allowed]) if (scope) beneath = scope.intersect(beneath);
-			} catch {
-				return false;
-			}
-			const paths = [...beneath];
-			return grant ? paths.some((pattern) => grant.publish.overlaps(pattern)) : paths.length > 0;
+			const served = within(path, [snap.claim, origin?.allowed]);
+			if (!grant) return served === undefined || served.size > 0;
+			if (served === undefined) return grant.publish.overlaps(path);
+			return served.toArray().some((prefix) => grant.publish.overlaps(prefix.text));
 		};
 		// Whether the advertisement a claim the peer holds came from is still in the table, as when
 		// its presentation moved: the claim is lost to the peer rather than ended, since its publisher
@@ -305,18 +301,15 @@ export class Answer {
 	}
 }
 
-// The regions `patterns` confine the peer to, none within another, or undefined when they allow
-// every path. A head too long or deep to be a path holds none. Mirrors rs/moq-net's
-// `interest_prefixes`.
-function regions(patterns: Path.Patterns): Path.Valid[] | undefined {
-	if (patterns.contains(Path.Pattern.all())) return undefined;
-	const heads = new Set(
-		patterns
-			.toArray()
-			.map(scopeHead)
-			.filter((head) => Path.check(head) === undefined),
-	);
-	return [...heads].filter((head) => ![...heads].some((other) => other !== head && Path.hasPrefix(other, head)));
+// The regions `prefixes` confine the peer to, or undefined when they allow every path: the
+// prefixes themselves, already none within another. One too long or deep to be a path holds none.
+// Mirrors rs/moq-net's `Permit::regions`.
+function regions(prefixes: Path.Prefixes): Path.Valid[] | undefined {
+	if (prefixes.matches(Path.empty())) return undefined;
+	return prefixes
+		.toArray()
+		.map((prefix) => prefix.text as Path.Valid)
+		.filter((region) => Path.check(region) === undefined);
 }
 
 // What answers the requested `prefix`: the prefix itself when a region holds it or nothing confines

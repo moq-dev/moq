@@ -9,7 +9,7 @@
 
 import { Pattern } from "@moq/pattern";
 import * as z from "zod/mini";
-import { AccessSchema, paths, UnixSecondsSchema } from "./wire.ts";
+import { paths, UnixSecondsSchema, WireAccessSchema, writtenAccess } from "./wire.ts";
 
 const PathSchema = z.string().check(
 	z.refine(
@@ -38,6 +38,9 @@ export const TransportSchema = z.pipe(
 );
 /** A value parsed by {@link TransportSchema}. */
 export type Transport = z.infer<typeof TransportSchema>;
+
+// TEMPORARY MIGRATION: a grant's role, read through the alias and spelled as a release before 0.22 reads it.
+const WrittenAccessSchema = z.pipe(WireAccessSchema, z.transform(writtenAccess));
 
 /** How a cluster peer (another relay) links to this one. */
 export const LinkSchema = z.enum(["peer", "upstream"]);
@@ -190,18 +193,23 @@ export type Request = z.infer<typeof RequestSchema>;
  * nothing is a refusal too, and one that asks to be revalidated must say when it
  * expires, so an outage always has a bound the server chose.
  *
- * The type is the wire shape, so a parsed or typed grant is the JSON to answer with. A field
- * this schema does not know is refused, as the relay refuses it: a field added later may
- * narrow the grant, and a reader that skipped it would widen the session. Read the
- * request's `relay` before sending a field newer than the relay that asks.
+ * The type is the wire shape, so a parsed grant is the JSON to answer with. A field this
+ * schema does not know is refused, as the relay refuses it: a field added later may narrow
+ * the grant, and a reader that skipped it would widen the session. Read the request's
+ * `relay` before sending a field newer than the relay that asks.
+ *
+ * TEMPORARY MIGRATION: parsing spells each prefix as the subtree pattern a relay before 0.22
+ * reads (`foo/**`, `**`), and reads one spelled that way back as its prefix, so answer with
+ * the parsed grant: such a relay reads a bare `foo` as the one path `foo`. Any other wildcard
+ * is refused. Removed with `readPrefix` in `wire.ts` over the next two version migrations.
  */
 export const GrantSchema = z
 	.strictObject({
-		/** What the session may publish, relative to the root: patterns, or `{path, rate}` with a bitrate cap. */
-		publish: z.optional(AccessSchema),
-		/** What the session may subscribe to, relative to the root: patterns, or `{path, rate}` with a bitrate cap. */
-		subscribe: z.optional(AccessSchema),
-		/** The path the patterns are relative to, replacing the dialed one. Absent means the dialed path. */
+		/** What the session may publish, relative to the root: prefixes, or `{path, rate}` with a bitrate cap. */
+		publish: z.optional(WrittenAccessSchema),
+		/** What the session may subscribe to, relative to the root: prefixes, or `{path, rate}` with a bitrate cap. */
+		subscribe: z.optional(WrittenAccessSchema),
+		/** The path the prefixes are relative to, replacing the dialed one. Absent means the dialed path. */
 		root: z.optional(z.string()),
 		/** Subtrees read from elsewhere: each path, relative to the root, resolves at the absolute path it maps to. Read-only. */
 		mounts: z.optional(z.record(z.string(), z.string())),

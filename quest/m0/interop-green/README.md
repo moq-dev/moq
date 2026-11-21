@@ -34,8 +34,17 @@ synchronized tone within 1039ms ... "audioStalled":true,"rms":0`). It was the
 first night the case ran on Firefox, since on 2026-11-17 and 2026-11-18 the
 job failed earlier on "after resume", which
 [moq-dev/moq#9141](https://github.com/moq-dev/moq/pull/9141) fixed. This
-epic owns the replacement case's history; reproduce it before planning a
-child.
+epic owns the replacement case's history.
+
+Decided 2026-11-20 (maintainer, /quest-plan), from the triage of Nightly run
+[44767045952](https://github.com/moq-dev/moq/actions/runs/44767045952) and
+scheduled Interop: two children,
+[the replacement join](/quest/m0/interop-green/replacement-join-delay.md)
+(that stall, which also reproduces on Chromium `moq-transport-22`) and
+[the moq-transport JS joining FETCH](/quest/m0/interop-green/ietf-js-joining-fetch.md).
+The intermittent `go -> js` silent audio went to
+test flakes (fixed by the Go tone's start-anchored pacing), and the datagram
+cells are [moq-dev/moq#9197](https://github.com/moq-dev/moq/pull/9197)'s.
 
 Decided 2026-11-12 (maintainer), since green scheduled Interop is this epic's goal and stale pins caused four of the last six red runs:
 

@@ -115,10 +115,18 @@ module py '^(py/|sh/py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/|rs/uniffi-bindgen
 # sh/rs/select.sh widens to the whole workspace for inputs every crate shares.
 # moq-cli builds the Rust interop clients as examples from outside its
 # crate; sh/rs/select.test.py fails when a target's directory is missing.
-# moq-relay's tests read its NixOS module, and libmoq's lint compiles the C
-# doc samples.
-module rs '^(\.cargo/|nix/modules/moq-relay\.nix$|doc/lib/c/|doc/lib/samples\.sh$|sh/local\.(sh|ts)$|rs/|test/interop/clients/rust/|sh/rs/|Cargo\.(toml|lock)$|clippy\.toml$|rust-toolchain\.toml$|\.config/nextest\.toml$)' \
+# libmoq's lint compiles the C doc samples. The files Rust reads outside rs/,
+# which sh/rs/reads.sh lists and select.test.py holds this scope to, come
+# last: the relay's configs, unit, and NixOS module, the scripts the tests
+# run, and the vectors the tests share with JS and the docs.
+module rs '^(\.cargo/|doc/lib/c/|doc/lib/samples\.sh$|sh/local\.(sh|ts)$|rs/|test/interop/clients/rust/|sh/rs/|Cargo\.(toml|lock)$|clippy\.toml$|rust-toolchain\.toml$|\.config/nextest\.toml$|nix/modules/moq-relay\.nix$|(demo/relay|packaging|test)/.*\.toml$|packaging/moq-relay/moq-relay\.service$|test/interop/[^/]*\.ts$|test/(datagram-tracks/client|max-age/client|receive-credit/sender|relay-fill/relay|stream-limits/client)\.ts$|doc/concept/audio-jitter/.*\.json$|drafts/moq-e2ee-01-wip\.json$)' \
     tools='cargo jq cc' compiles='check fix' fix
+# Clippy for macOS and Windows over rs's selection, so a platform-gated error
+# fails here rather than in the nightly native lanes. The flake pins its
+# toolchain and the zig that compiles its build scripts' C, so a change there
+# lints the whole workspace (see sh/rs/select.sh).
+module rs_cross "${scope[rs]%)}|flake\.(nix|lock)$)" \
+    tools='cargo jq nix zig' compiles=check
 # nix/Cargo.nix records each crate's dependencies, features, and targets,
 # read from the manifests, the lockfile, and the files cargo discovers targets
 # from. The pinned crate2nix comes from flake.lock.
@@ -213,7 +221,7 @@ module markdown '' \
 # Workflow lints and repository-wide policy, such as every opt-in test having a
 # caller, so they gate every diff.
 module gh '' \
-    tools='actionlint zizmor bun python3 uv cargo' lane=bun
+    tools='actionlint zizmor bun python3 uv cargo jq' lane=bun
 # `just gh test`, the repository tooling tests, follow what they run and read,
 # including the selectors under sh/, the release-plz configuration, the nfpm
 # configs, the Cargo and Bun workspace manifests and lockfiles, and the flake
@@ -430,6 +438,7 @@ step() {
         # The check keeps docs and the isolated default-media lint; the test
         # phase enforces the other clippy checks in its existing build.
         check:rs) run just rs lint-changed "$rs_list" ;;
+        check:rs_cross) run just rs cross-lint-changed "$rs_list" ;;
         check:carla_bridge) run just carla bridge-check ;;
         check:bench)
             run python3 bench/compare.test.py

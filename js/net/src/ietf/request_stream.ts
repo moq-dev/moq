@@ -330,7 +330,9 @@ export class RequestStream {
 		if (type === undefined) return undefined;
 		try {
 			const size = await Message.readLength(reader);
-			const framed = concat([Message.lengthBytes(size, version), await reader.read(size)]);
+			// Allocate only once the body has arrived, so a peer withholding it holds just what it sent.
+			const body = await reader.read(size);
+			const framed = concat([Message.lengthBytes(size, version), body]);
 			return { type, reader: new Reader(undefined, framed, version) };
 		} catch (err) {
 			throw malformed(err, "request stream message");
