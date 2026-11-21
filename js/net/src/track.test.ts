@@ -1334,6 +1334,33 @@ test("a scale-less join reaches back by arrival", () => {
 	}
 });
 
+// A scale-less track's starts and ends are bare numbers, never milliseconds, so groups whose
+// starts jump age by arrival alone, anywhere in the key range, and a group finished whole waits
+// for a successor. Mirrors the Rust `a_scale_less_track_ages_by_arrival_alone`.
+test("a scale-less track ages by arrival alone", () => {
+	const clock = manualTime(0);
+	try {
+		for (const [i, base] of [0n, 1n << 61n, 2n ** 64n - 30_001n].entries()) {
+			clock.set(i * 1000);
+			const producer = new TrackProducer("test").accept({ maxAge: null });
+			for (const offset of [0n, 10_000n, 20_000n]) {
+				const group = producer.createGroup(base + offset);
+				group.writeFrame(textFrame("x", Timestamp.unscaled(base + offset)));
+				group.finishAt(base + offset + 1n);
+			}
+			const subscribe = () => producer.subscribe({ delay: { max: Duration.millis(5) } });
+			// All three arrived at once, so however far apart their starts, none is stale yet.
+			expect(readable(subscribe())).toEqual([base, base + 10_000n, base + 20_000n]);
+			// Their successors arrived a full budget ago, and the newest has none to age it.
+			clock.set(i * 1000 + 10);
+			expect(readable(subscribe())).toEqual([base + 20_000n]);
+			producer.close();
+		}
+	} finally {
+		clock.installed.close();
+	}
+});
+
 // A time start resolves on keys alone: groups opened before their first frames, below a
 // reached end, are read from the one containing it. Mirrors the Rust `a_time_start_needs_no_frame`.
 test("a time start resolves on keys alone, before any group's first frame", () => {

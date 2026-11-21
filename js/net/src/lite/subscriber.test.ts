@@ -2830,7 +2830,7 @@ async function groupStream(timestamp: number, version: Version = Version.DRAFT_0
 	);
 }
 
-// Lite-05/06 stamp an untimed track's frames with their send time, which a receiver cannot tell
+// A released lite-05/06 publisher stamps an untimed track's frames with their send time, which a receiver cannot tell
 // from media time, so it keeps every timestamp there unchecked: a group that rewinds or lands out
 // of order is accepted with its timestamp.
 test.each([Version.DRAFT_05, Version.DRAFT_06])("version %p passes received timestamps through", async (version) => {

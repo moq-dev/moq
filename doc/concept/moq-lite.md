@@ -368,14 +368,15 @@ A track is timed or untimed: it declares a timescale or none, and a frame that
 doesn't match is refused. No receiver fills in an arrival time, so an untimed
 track is judged by the wall clock alone. Tracks from moq-lite before 05, or from
 moq-transport without a `TIMESCALE`, arrive
-untimed. moq-lite 05 and 06 cannot declare an untimed track, so there its
-frames go out stamped with their send time; the work-in-progress 07 carries it
-without a timescale, each frame stamped with its group's start.
+untimed. moq-lite 05 and 06 cannot declare an untimed track, so there it goes
+out as milliseconds, each frame stamped with its group's start; the
+work-in-progress 07 carries it without a timescale, with the same stamps.
 
 A publisher refuses a group that starts before a lower one, and so does a
 moq-lite 07 receiver. A receiver passes on the timestamps it gets over moq-lite
-05 and 06 without checking them, since their send times look like media time and
-an older group fetched later would look like a rewind. A relay serves them on
+05 and 06 without checking them, since an older publisher stamps an untimed
+track there with send times, which look like media time, and an older group
+fetched later would look like a rewind. A relay serves them on
 over every version. A moq-transport frame's time is its Group ID, so its
 timestamps cannot rewind and are checked like any other.
 
