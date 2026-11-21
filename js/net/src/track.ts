@@ -3838,15 +3838,16 @@ export class Subscriber {
 				const below = index > 0 ? keys[index - 1] : undefined;
 				// A lite-07 copy holds only part of the track, so it places a time only where it can prove
 				// what its upstream would answer: at a group held before it once every key between is
-				// dropped or skipped, before every group once every key through it is, or where its
+				// given up for this reader, before every group once every key through it is, or where its
 				// upstream answered a range asked from that time. Anything else waits, and the reader asks
 				// its upstream for it (see `askTimes`): a group held after the time says nothing of one
-				// between. Mirrors the Rust `TrackState::containing_received`.
+				// between, nor does a stale drop of a reader wider than the budget it was judged under.
+				// Mirrors the Rust `TrackState::containing_received`.
 				if (wire) {
-					if (below !== undefined && drops.covers(below + 1n, time + 1n)) return { group: below };
+					if (below !== undefined && drops.givenUp(below + 1n, time + 1n, budget)) return { group: below };
 					const reported = timeStartContaining(anchors.starts.get(time), time, budget);
 					if (reported !== undefined) return reported;
-					if (below === undefined && drops.covers(0n, time + 1n)) return "before";
+					if (below === undefined && drops.givenUp(0n, time + 1n, budget)) return "before";
 					return "unknown";
 				}
 				if (below !== undefined) return { group: below };

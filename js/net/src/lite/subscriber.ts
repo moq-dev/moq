@@ -3484,9 +3484,6 @@ class ConsumeBroadcast extends broadcast.Consumer {
 	}
 }
 
-// Whether a lite-07 range with no group to deliver says its publisher held none at or before its
-// reach: only one whose end takes in the group containing its time, which a range that ends before
-// its time may not. Mirrors the Rust `SubStream::report_starts`.
 // The probes to ask for `asks`, each a time start the copy's readers wait on with the widest budget
 // one waits under in milliseconds, beside the demand's `ranges` going out under `budget`, and the
 // live probes to ask afresh: one answered under a narrower budget than its readers'. A demand range
@@ -3537,6 +3534,9 @@ function sameAsks(a: readonly (readonly [bigint, number])[], b: readonly (readon
 	return a.length === b.length && a.every(([time, budget], i) => time === b[i][0] && budget === b[i][1]);
 }
 
+// Whether a lite-07 range with no group to deliver says its publisher held none at or before its
+// reach: only one whose end takes in the group containing its time, which a range that ends before
+// its time may not. Mirrors the Rust `SubStream::report_starts`.
 function reaches(end: WireAnchor | undefined, asked: bigint): boolean {
 	if (end === undefined) return false;
 	if (end.time !== undefined) return end.time >= asked;

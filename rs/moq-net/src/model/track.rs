@@ -807,6 +807,9 @@ pub(crate) struct TrackState {
 	// The keys in `drops`, whatever the reason, as coalesced runs, so whether drops cover a
 	// span is one lookup rather than a walk of every run in it.
 	dropped: RangeSet<u64>,
+	// The keys in `drops` no budget takes back, skips and final drops, as coalesced runs: a
+	// stale drop says nothing of a reader wider than the budget it was judged under.
+	gone: RangeSet<u64>,
 	// What this track's own publisher produced since its last `append_group`, which skips
 	// every key below it that never arrived and was not given up: the producer moved on.
 	// Arrivals cannot say so, since a gap folds into them once nobody waits for it. Only
@@ -1132,12 +1135,12 @@ pub(super) const CACHE_OVERHEAD: u64 = 2
 		+ size_of::<(u64, u32)>()) as u64;
 
 /// Heap the track keeps per run of its drop set: the run and its reason in `drops`, at most
-/// one coalesced run in `dropped`, and its two entries in `drops_changes`. Doubled for half-full `BTreeMap` nodes, as
+/// one coalesced run in each of `dropped` and `gone`, and its two entries in `drops_changes`. Doubled for half-full `BTreeMap` nodes, as
 /// [`CACHE_OVERHEAD`] is. Billed to the pool, so a peer fragmenting its drops into runs costs
 /// what the cache would hold, never more.
 pub(super) const RUN_OVERHEAD: u64 = 2
 	* (size_of::<(ops::Range<u64>, Hole)>()
-		+ size_of::<ops::Range<u64>>()
+		+ 2 * size_of::<ops::Range<u64>>()
 		+ size_of::<(u64, (u64, u64))>()
 		+ size_of::<(u64, u64)>()) as u64;
 
@@ -1419,14 +1422,16 @@ impl TrackState {
 	/// [`Holdings::containing`] on a lite-07 copy, which holds only part of the track, for a
 	/// reader within `budget`. It places a time only where it can prove what its upstream would
 	/// answer: at a group held there, at a group held before it once every key between is
-	/// dropped or skipped (a GROUP's Previous Start links the two), before every group once
-	/// every key through it is, or where its upstream answered a range asked from that time.
+	/// given up for this reader (a GROUP's Previous Start links the two), before every group
+	/// once every key through it is, or where its upstream answered a range asked from that
+	/// time. A stale drop is given up only for a reader within the budget it was judged under:
+	/// a wider one may still get that group, as for an answer.
 	/// Anything else is unknown, and the reader's session asks its upstream for it (see
 	/// [`Subscriber::asks`]): a group held after the time says nothing of one between.
 	fn containing_received(&self, time: u64, budget: Duration) -> Containing {
 		let held = self.lookup.range(..=time).next_back().map(|(&key, _)| key);
 		if let Some(key) = held
-			&& self.dropped_cover(key.saturating_add(1)..time.saturating_add(1))
+			&& self.given_up_for(key.saturating_add(1)..time.saturating_add(1), budget)
 		{
 			return Containing::Group(key);
 		}
@@ -1434,7 +1439,7 @@ impl TrackState {
 			return placed;
 		}
 		match held {
-			None if self.dropped_cover(0..time.saturating_add(1)) => Containing::Before,
+			None if self.given_up_for(0..time.saturating_add(1), budget) => Containing::Before,
 			_ => Containing::Unknown,
 		}
 	}
@@ -1470,6 +1475,22 @@ impl TrackState {
 	/// Whether drops, for whatever reason, cover every key in `keys`. An empty run is covered.
 	fn dropped_cover(&self, keys: ops::Range<u64>) -> bool {
 		keys.is_empty() || self.dropped.get(&keys.start).is_some_and(|run| run.end >= keys.end)
+	}
+
+	/// Whether skips and final drops, never a stale one, cover every key in `keys`. An empty run
+	/// is covered.
+	fn gone_cover(&self, keys: ops::Range<u64>) -> bool {
+		keys.is_empty() || self.gone.get(&keys.start).is_some_and(|run| run.end >= keys.end)
+	}
+
+	/// Whether every key in `keys` is given up for a reader within `budget`: skipped, dropped
+	/// for good, or judged stale under at least that budget. Walks the drop runs only when a
+	/// stale one lies in `keys`.
+	fn given_up_for(&self, keys: ops::Range<u64>, budget: Duration) -> bool {
+		self.gone_cover(keys.clone())
+			|| (self.dropped_cover(keys.clone())
+				&& (self.drops.overlapping(&keys))
+					.all(|(_, hole)| hole.stale_budget().is_none_or(|stale| budget <= stale)))
 	}
 
 	/// The upstream publisher's Largest Object, unless a frame or group received since its
@@ -1833,6 +1854,10 @@ impl TrackState {
 		let before = entries(self);
 		match hole {
 			Some(hole) => {
+				match hole.stale_budget() {
+					Some(_) => self.gone.remove(groups.clone()),
+					None => self.gone.insert(groups.clone()),
+				}
 				self.drops.insert(groups.clone(), hole);
 				self.dropped.insert(groups.clone());
 				let max_ticks = self.cache.pool().expiry_ticks();
@@ -1852,6 +1877,7 @@ impl TrackState {
 			None => {
 				self.drops.remove(groups.clone());
 				self.dropped.remove(groups.clone());
+				self.gone.remove(groups.clone());
 				self.drops_born.remove(groups);
 			}
 		}
@@ -13243,7 +13269,7 @@ mod test {
 		/// every way a run is given up, split, replaced, or forgotten.
 		#[test]
 		fn dropped_cover_matches_a_walk_of_the_drops(
-			ops in proptest::collection::vec((0u8..4, 0u64..40, 1u64..8), 1..40),
+			ops in proptest::collection::vec((0u8..5, 0u64..40, 1u64..8), 1..40),
 			probes in proptest::collection::vec((0u64..48, 0u64..48), 16),
 		) {
 			let producer = track_producer("test", Info::default());
@@ -13252,6 +13278,9 @@ mod test {
 				match op {
 					0 => producer.drop_groups(groups, StreamError::Cancel),
 					1 => producer.drop_groups(groups, StreamError::Old),
+					4 => {
+						producer.give_up(groups, Hole::stale(Duration::from_millis(500)));
+					}
 					2 => producer.skip_groups(groups),
 					_ => producer.modify().unwrap().forget_drops(groups),
 				}
@@ -13261,6 +13290,13 @@ mod test {
 					union.insert(run.clone());
 				}
 				proptest::prop_assert_eq!(&union, &state.dropped);
+				let mut gone = RangeSet::new();
+				for (run, hole) in state.drops.iter() {
+					if hole.stale_budget().is_none() {
+						gone.insert(run.clone());
+					}
+				}
+				proptest::prop_assert_eq!(&gone, &state.gone);
 				for &(start, len) in &probes {
 					let keys = start..start + len;
 					let walk = |kind: &dyn Fn(&Hole) -> bool| {
@@ -13277,6 +13313,16 @@ mod test {
 						at >= keys.end
 					};
 					proptest::prop_assert_eq!(state.dropped_cover(keys.clone()), walk(&|_| true));
+					proptest::prop_assert_eq!(
+						state.gone_cover(keys.clone()),
+						walk(&|hole| hole.stale_budget().is_none())
+					);
+					for budget in [Duration::from_millis(50), Duration::from_secs(5)] {
+						proptest::prop_assert_eq!(
+							state.given_up_for(keys.clone(), budget),
+							walk(&|hole| hole.stale_budget().is_none_or(|stale| budget <= stale))
+						);
+					}
 					proptest::prop_assert_eq!(state.never_produced(keys.clone()), walk(&|hole| *hole == Hole::Skip));
 				}
 			}
@@ -16804,6 +16850,36 @@ mod test {
 		}
 	}
 
+	/// A stale drop between a held group and a time start proves nothing of a reader wider than
+	/// the budget it was judged under, so the time waits for it, where one within that budget,
+	/// or skips over the same keys, place it at the held group.
+	#[test]
+	fn a_stale_drop_places_no_time_start_past_a_held_group() {
+		let from = Subscription::default()
+			.with_ranges([Range {
+				start: Some(1500),
+				end: None,
+			}])
+			.with_delay(Delay::default().with_max(None));
+		let placed = |subscriber: &mut Subscriber| subscriber.resolved_range(0).map(|resolved| resolved.start);
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		write_group(&producer, 1000);
+		write_group(&producer, 2000);
+		producer.skip_groups(1001..1400);
+		producer.give_up(1400..1401, Hole::stale(Duration::from_millis(100)));
+		producer.skip_groups(1401..2000);
+		let mut reader = producer.subscribe(from.clone());
+		assert_eq!(placed(&mut reader), None, "a wider reader may still get 1400");
+		let narrow = from
+			.clone()
+			.with_delay(Delay::default().with_max(Some(Duration::from_millis(100))));
+		assert_eq!(placed(&mut producer.subscribe(narrow)), Some(1000));
+		producer.skip_groups(1400..1401);
+		assert_eq!(placed(&mut producer.subscribe(from)), Some(1000));
+	}
+
 	/// An ordered read of a lite-07 copy hands out no group past a time start still waiting to
 	/// be placed, since the group containing the time may still land below it: it reads that
 	/// group first, with no gap, once the publisher's answer and the group arrive.
@@ -17102,7 +17178,8 @@ mod test {
 
 	/// A stale verdict under a narrower budget than an ordered read's settles none of its keys for
 	/// it, so the group containing a waiting time start may still land there, and a gap above
-	/// the time waits for it.
+	/// the time waits for it. A group landing among those keys places nothing either: the rest of
+	/// them may still hold a later one, so the time waits for its upstream's answer.
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_narrower_stale_verdict_leaves_a_time_start_waiting() {
@@ -17131,6 +17208,8 @@ mod test {
 		};
 		assert_eq!(next(), None, "the group containing 1500 may still land");
 		write_group(&producer, 1200);
+		assert_eq!(next(), None, "a group between 1200 and 1500 may still land");
+		producer.time_starts([(1500, Some(1200), Duration::MAX)]);
 		assert_eq!(next(), Some(Ok(1200)));
 		// Passed as a gap, so nothing the read may still take can contain 1500.
 		assert_eq!(next(), Some(Err(1201..1500)));

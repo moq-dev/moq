@@ -464,6 +464,28 @@ test("a waiting time start places once the reader narrows to the budget it was a
 	subscriber.close();
 });
 
+// Mirrors the Rust `a_stale_drop_places_no_time_start_past_a_held_group`.
+test("a stale drop places no time start past a held group", () => {
+	const producer = receivedTrack();
+	put(producer, 1000n, false);
+	put(producer, 2000n, false);
+	producer.skipGroups(1001n, 1400n);
+	hooks.dropTrackGroups(producer, 1400n, 1401n, staleHole(100));
+	producer.skipGroups(1401n, 2000n);
+	const from = { delay: { max: null }, ranges: [{ start: 1500n }] };
+	const waiting = producer.subscribe(from);
+	// A reader wider than the stale verdict's budget may still get 1400.
+	expect(hooks.servingResolved(waiting)).toEqual([undefined]);
+	waiting.close();
+	const narrow = producer.subscribe({ ...from, delay: { max: Duration.millis(100) } });
+	expect(hooks.servingResolved(narrow)[0]?.start).toBe(1000n);
+	narrow.close();
+	producer.skipGroups(1400n, 1401n);
+	const placed = producer.subscribe(from);
+	expect(hooks.servingResolved(placed)[0]?.start).toBe(1000n);
+	placed.close();
+});
+
 test("a time start no answer for its own time places asks upstream for it", () => {
 	const producer = receivedTrack();
 	put(producer, 2000n, false);
@@ -600,10 +622,11 @@ test("a stale verdict narrower than an ordered read's budget leaves its time sta
 	// The group containing 1500 may still land for this budget.
 	expect(items(ordered)).toEqual([]);
 	put(producer, 1200n, false);
-	expect(items(ordered)).toEqual(["group 1200"]);
+	// A group between 1200 and 1500 may still land, so the time waits for its upstream's answer.
+	expect(items(ordered)).toEqual([]);
 	hooks.timeStarts(producer, [[1500n, 1200n, NO_MAX_DELAY]]);
 	producer.skipGroups(1201n, 1500n);
-	expect(items(ordered)).toEqual(["gap 1500..1600 (delivery timeout)"]);
+	expect(items(ordered)).toEqual(["group 1200", "gap 1500..1600 (delivery timeout)"]);
 });
 
 test("a stale verdict a capped ordered read rejects leaves its time start waiting", () => {
