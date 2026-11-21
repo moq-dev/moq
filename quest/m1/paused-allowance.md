@@ -25,4 +25,7 @@ is #9210's own claim that every pause is charged its slot's allowance. A grant
 queued by `Stream::release` can go out before the next lock shrinks the window,
 so a pause is charged up to a stream window and a later one can be refused
 under the cap. Shrinking in the release's own lock hold passes it; then
-promote `EveryPauseFits` and `ChargedAllowance` into the other configs.
+promote `EveryPauseFits` and `ChargedAllowance` into the configs with
+`Late = FALSE` (`ReceiveCreditWide.cfg`, `ReceiveCreditThree.cfg`). A late
+reader can still be charged a stream window granted before it arrived, so
+the configs with late readers keep them out.
