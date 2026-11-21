@@ -2663,37 +2663,25 @@ impl Reader {
 		}
 		let (lowest, cap) = self.groups;
 		let resumed = self.copies.last().and_then(|copy| copy.floor);
-		// Where the serving copy placed each range itself: what lies above it is that copy's
-		// to judge, skips included.
-		let keys: Vec<u64> = self.mirrored.ranges.keys().copied().collect();
-		let own = match self.copies.last_mut() {
-			Some(Copy {
-				sub: Sub::Ready(sub), ..
-			}) => sub.resolved_ranges(keys.iter().copied()),
-			_ => Vec::new(),
-		};
 		let window = self.window();
 		let Some(end) = window.end().filter(|_| !window.is_pending()) else {
 			return false;
 		};
-		// A group of a range that the local floor or cap keeps out stays owed, as on one
-		// cursor, though no copy reads it: under the serving copy's resume point, or under
-		// where that copy placed the range, when an earlier copy placed it lower.
-		for (index, key) in keys.iter().enumerate() {
-			let Some(placed) = window.resolved_key(*key) else {
-				continue;
-			};
-			let own = own.get(index).copied().flatten().map(|own| own.start);
-			let Some(until) = resumed.max(own) else {
-				continue;
-			};
-			let until = until.min(end).min(placed.end.unwrap_or(end));
-			if placed.start < until
-				&& Delivered::gaps_in_all(taken, placed.start..until)
+		// A group under the serving copy's resume point that the local floor or cap keeps
+		// out stays owed, as on one cursor, though no copy reads it.
+		if let Some(resumed) = resumed {
+			let until = resumed.min(end);
+			for run in window
+				.runs(window.floor().unwrap_or(0))
+				.take_while(|run| *run.start() < until)
+			{
+				let run = *run.start()..run.end().saturating_add(1).min(until);
+				if Delivered::gaps_in_all(taken, run)
 					.iter()
 					.any(|gap| gap.start < lowest || cap.is_some_and(|cap| gap.end > cap))
-			{
-				return false;
+				{
+					return false;
+				}
 			}
 		}
 		match self.copies.last_mut() {
@@ -9635,78 +9623,6 @@ mod test {
 			sub.poll_recv_group(&kio::Waiter::noop()),
 			Poll::Ready(Ok(None))
 		));
-	}
-
-	/// On one route, a group of the window that the local floor keeps out and the publisher
-	/// skipped is the serving copy's to judge: the read ends once the rest is read.
-	#[test]
-	fn a_skip_under_the_local_floor_ends_a_single_route_read() {
-		let routes = Producer::new();
-		let logical = logical(&routes);
-		let a = copy();
-		a.skip_groups(0..1);
-		write(&a, 1);
-		write(&a, 2);
-		routes.serve(a.consume());
-		let subscription = Subscription::default()
-			.with_delay(Delay::default().with_max(HOUR))
-			.with_ranges([track::Range {
-				start: track::Anchor::Time(0),
-				end: Some(track::Anchor::Time(1)),
-			}]);
-		let mut sub = logical
-			.consume()
-			.subscribe(subscription)
-			.now_or_never()
-			.unwrap()
-			.unwrap()
-			.with_range(1..2);
-		assert_eq!(drain(&mut sub, false), [1]);
-		assert!(matches!(
-			sub.poll_recv_group(&kio::Waiter::noop()),
-			Poll::Ready(Ok(None))
-		));
-	}
-
-	/// A range an earlier copy placed lower than the serving copy places it stays owed from
-	/// there, whatever another range the serving copy placed lower: a group the local floor
-	/// keeps out of it holds the read open.
-	#[test]
-	fn a_range_placed_lower_stays_owed_beside_an_empty_one() {
-		let routes = Producer::new();
-		let logical = logical(&routes);
-		let a = copy();
-		write(&a, 2);
-		write(&a, 9);
-		routes.serve(a.consume());
-		let subscription = Subscription::default()
-			.with_delay(Delay::default().with_max(HOUR))
-			.with_ranges([
-				track::Range {
-					start: track::Anchor::Time(8),
-					end: Some(track::Anchor::Time(8)),
-				},
-				track::Range {
-					start: track::Anchor::Time(1),
-					end: Some(track::Anchor::Time(0)),
-				},
-			]);
-		let mut sub = logical
-			.consume()
-			.subscribe(subscription)
-			.now_or_never()
-			.unwrap()
-			.unwrap()
-			.with_range(3..9);
-		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
-		let b = copy();
-		write(&b, 8);
-		write(&b, 9);
-		routes.serve(b.consume());
-		assert_eq!(drain(&mut sub, false), [8]);
-		a.abort(Error::Cancel).unwrap();
-		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
-		assert!(sub.poll_recv_group(&kio::Waiter::noop()).is_pending());
 	}
 
 	/// A copy updated while pending, then answering, hands its own resolution of the

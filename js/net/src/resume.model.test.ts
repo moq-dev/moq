@@ -992,18 +992,6 @@ test("regressions", async () => {
 			],
 			finish: false,
 		},
-		// A range an earlier copy placed lower than the serving copy places it stays owed from where
-		// the reader's window starts: a group there that the local floor keeps out holds the read
-		// open. Mirrors the Rust case.
-		{
-			ops: [
-				{ kind: "join", reader: 2, spec: spec(false, "hour", [8, 9], false) },
-				{ kind: "bounds", reader: 2, range: [1, 9] },
-				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
-				{ kind: "up", instance: 0, slot: 1 },
-			],
-			finish: false,
-		},
 		// A copy resumed at group 0 is asked from there, its ranges clamped where the reader's window
 		// placed them, as any other resume point: the group holding a time start reads on through it.
 		{

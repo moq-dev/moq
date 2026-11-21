@@ -1119,29 +1119,6 @@ fn regressions() {
 			],
 			finish: false,
 		},
-		// A range an earlier copy placed lower than the serving copy places it stays owed
-		// from where the reader's window starts: a group there that the local floor keeps out
-		// holds the read open, though the serving copy judges its own range read.
-		Case {
-			ops: vec![
-				Op::Join {
-					reader: 2,
-					spec: spec(false, Budget::Hour, Some((8, 9)), false),
-				},
-				Op::Bounds {
-					reader: 2,
-					range: Some((1, 9)),
-				},
-				Op::Write {
-					instance: 0,
-					slot: 0,
-					group: None,
-					frames: 1,
-				},
-				Op::Up { instance: 0, slot: 1 },
-			],
-			finish: false,
-		},
 		// After a failover, a range moved back resolves from the first copy to answer it,
 		// even a replaced one under a failover cap, so the groups below that cap stay owed.
 		Case {

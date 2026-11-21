@@ -469,84 +469,9 @@ test("a backfill places a raised start under a relative end", async () => {
 });
 
 /**
- * On one route, a group of the window that the local floor keeps out and the publisher skipped is
- * the serving copy's to judge: the read ends once the rest is read.
- */
-test("a skip under the local floor ends a single route read", async () => {
-	const front = new Front();
-	const source = new BroadcastProducer();
-	const handle = source.consume();
-	const ta = copy(source);
-	ta.producer.skipGroups(0n, 1n);
-	ta.write(1n);
-	ta.write(2n);
-	front.serve(handle);
-	const delay = { max: Duration.millis(3_600_000) };
-	const sub = front.consumer
-		.track("seq")
-		.subscribe({ delay, ranges: [{ start: { time: 0n }, end: { time: 1n } }] })
-		.withRange({ start: { included: 1n }, end: { excluded: 2n } });
-	try {
-		await settle();
-		expect(drain(sub)).toEqual([1n]);
-		expect(await sub.recvGroup()).toBeUndefined();
-	} finally {
-		sub.close();
-		front.consumer.close();
-		handle.close();
-		source.close();
-	}
-});
-
-/**
- * A range an earlier copy placed lower than the serving copy places it stays owed from there,
- * whatever another range the serving copy placed lower: a group the local floor keeps out of it
- * holds the read open.
- */
-test("a range placed lower stays owed beside an empty one", async () => {
-	const front = new Front();
-	const sources = [new BroadcastProducer(), new BroadcastProducer()];
-	const handles = sources.map((source) => source.consume());
-	const [ta, tb] = sources.map(copy);
-	ta.write(2n);
-	ta.write(9n);
-	front.serve(handles[0]);
-	const delay = { max: Duration.millis(3_600_000) };
-	const ranges = [
-		{ start: { time: 8n }, end: { time: 8n } },
-		{ start: { time: 1n }, end: { time: 0n } },
-	];
-	const sub = front.consumer
-		.track("seq")
-		.subscribe({ delay, ranges })
-		.withRange({ start: { included: 3n }, end: { excluded: 9n } });
-	try {
-		await settle();
-		expect(drain(sub)).toEqual([]);
-		tb.write(8n);
-		tb.write(9n);
-		front.serve(handles[1]);
-		await settle();
-		expect(drain(sub)).toEqual([8n]);
-		ta.producer.abort(new StreamError(StreamCode.SessionClosed));
-		await settle();
-		let ended = false;
-		void sub.recvGroup().then(() => {
-			ended = true;
-		});
-		await settle();
-		expect(ended).toBe(false);
-	} finally {
-		sub.close();
-		front.consumer.close();
-		for (const handle of handles) handle.close();
-		for (const source of sources) source.close();
-	}
-});
-
-/**
- * As above, with the group holding the time still to land when the backfill learns no group sits
- * between it and the resume point: the backfill is kept for it, below where it was asked from.
+ * As a backfill placing a time start its serving copy raised, with the group holding the time still
+ * to land when the backfill learns no group sits between it and the resume point: the backfill is
+ * kept for it, below where it was asked from.
  */
 test("a backfill waits for the group holding a time under its floor", async () => {
 	const clock = new Manual();

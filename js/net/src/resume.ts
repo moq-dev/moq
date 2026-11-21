@@ -1225,23 +1225,13 @@ class Reader implements ResumeSource {
 		const window = this.#window();
 		const end = window.end();
 		if (end === undefined || window.pending) return false;
-		// A group of a range that the local floor or cap keeps out stays owed, as on one cursor,
-		// though no copy reads it: under the serving copy's resume point, or under where that copy
-		// placed the range, when an earlier copy placed it lower. Above that the serving copy judges,
-		// skips included.
-		const cursor = this.#shell.cursor.peek();
-		const own = hooks.servingResolved(serving.sub);
-		for (let index = 0; index < this.#ranges().length; index++) {
-			const placed = window.resolvedKey(BigInt(index));
-			if (!placed) continue;
-			const start = own[index]?.start;
-			let until =
-				start === undefined ? serving.floor : serving.floor === undefined ? start : max(start, serving.floor);
-			if (until === undefined) continue;
-			until = min(until, min(end, placed.end ?? end));
-			if (placed.start >= until) continue;
-			for (const gap of delivered.gaps(placed.start, until)) {
-				if (gap.start < cursor.start || (cursor.end !== undefined && gap.end > cursor.end)) return false;
+		const resumed = resumePoint(serving);
+		if (resumed !== undefined) {
+			const cursor = this.#shell.cursor.peek();
+			for (const run of window.runs(window.floor() ?? 0n, min(resumed, end))) {
+				for (const gap of delivered.gaps(run.start, run.end)) {
+					if (gap.start < cursor.start || (cursor.end !== undefined && gap.end > cursor.end)) return false;
+				}
 			}
 		}
 		return hooks.exhaustedFor(serving.sub, delivered, ordered);
