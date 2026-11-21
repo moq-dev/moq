@@ -526,7 +526,7 @@ impl Flate {
 			return;
 		}
 		if self.encoder.take().is_some() {
-			self.plain.bill.sub(flate::ENCODER_HEAP);
+			self.plain.bill.sub_state(flate::ENCODER_HEAP);
 		}
 	}
 }
@@ -583,7 +583,7 @@ impl Plain {
 	/// Drop `state`'s decoder, which no frame needs any more.
 	fn drop_decoder(&self, state: &mut PlainState) {
 		if state.decoder.take().is_some() {
-			self.bill.sub(flate::DECODER_HEAP);
+			self.bill.sub_state(flate::DECODER_HEAP);
 		}
 	}
 
@@ -748,7 +748,7 @@ impl Inflate {
 				.and_then(|size| {
 					let bill = &self.plain.bill;
 					let decoder = state.decoder.get_or_insert_with(|| {
-						bill.add(flate::DECODER_HEAP);
+						bill.add_state(flate::DECODER_HEAP);
 						flate::Decoder::new()
 					});
 					decoder.frame(&slice.frame.payload.contiguous(0), size)

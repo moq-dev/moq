@@ -25679,7 +25679,7 @@ mod test {
 
 	/// Shedding a received compressed edge that holds no slice yet discards no history, so
 	/// the frames it receives afterwards still read plain.
-	#[tokio::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_shed_empty_compressed_edge_still_decodes() {
 		let info = Info::timed().with_compression(Compression::Deflate);
@@ -25700,6 +25700,35 @@ mod test {
 			let frame = reader.read_frame().await.unwrap().expect("a frame");
 			assert_eq!(frame.payload, format!("frame {index}; ").repeat(1000).as_bytes());
 		}
+	}
+
+	/// A shed compressed edge whose plain copy had caught up keeps its decoder for the frames
+	/// still to come, and that codec state, a fixed cost per group, never bills the session:
+	/// shedding brings the session back under budget.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_shed_caught_up_compressed_edge_keeps_decoding_off_budget() {
+		let info = Info::timed().with_compression(Compression::Deflate);
+		let stored = stored_slices(&info);
+		let pool = cache::Pool::unbounded();
+		let broadcast = session_broadcast(&pool, Some(1 << 30));
+		let producer = Producer::new(broadcast.clone(), "test", info);
+		let mut group = producer.create_group(group::Info { start: 0 }).unwrap();
+		for object in &stored[..3] {
+			group = ingest_slice(group, object);
+		}
+		let mut reader = producer.consume().peek_group(0).expect("cached");
+		for _ in 0..3 {
+			assert!(reader.read_frame().await.unwrap().is_some());
+		}
+
+		let moves = producer.state.read().cache.moves();
+		producer.state.write().ok().expect("open").shed_edge_all(moves);
+		assert!(broadcast.edges.used() < 1024, "{:?}", broadcast.edges);
+		group = ingest_slice(group, &stored[3]);
+		let frame = reader.read_frame().await.unwrap().expect("a frame");
+		assert_eq!(frame.payload, "frame 3; ".repeat(1000).as_bytes());
+		group.finish().unwrap();
 	}
 
 	/// A frame still arriving on a shed edge cannot be shed, so its copy is aborted: a

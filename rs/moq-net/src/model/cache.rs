@@ -1143,6 +1143,7 @@ impl Track {
 			track: Some(self.clone()),
 			footprint: None,
 			bytes: AtomicU64::new(0),
+			state: AtomicU64::new(0),
 		}
 	}
 
@@ -1553,6 +1554,7 @@ impl Charge {
 			track: self.track.clone(),
 			footprint: Some(self.footprint.clone()),
 			bytes: AtomicU64::new(bytes),
+			state: AtomicU64::new(0),
 		}
 	}
 
@@ -1568,6 +1570,7 @@ impl Charge {
 			track: self.track.clone(),
 			footprint: Some(self.footprint.clone()),
 			bytes: AtomicU64::new(0),
+			state: AtomicU64::new(0),
 		}
 	}
 
@@ -1762,6 +1765,10 @@ pub(super) struct Extra {
 	// edge; `None` for the track's own bookkeeping.
 	footprint: Option<Arc<Footprint>>,
 	bytes: AtomicU64,
+	// The part of `bytes` that is codec state rather than content, kept out of the footprint:
+	// a fixed cost per group, like its entry overhead, so it bills the pool but not the
+	// session's live edges, which shedding could never bring back under budget.
+	state: AtomicU64,
 }
 
 impl Extra {
@@ -1786,12 +1793,12 @@ impl Extra {
 			if let Some(mut encoder) = encoder {
 				// Moving existing heap is not a write and must not accrue eviction debt.
 				self.bytes.fetch_add(flate::ENCODER_HEAP, Ordering::Relaxed);
-				self.footprint(track, flate::ENCODER_HEAP, true);
+				self.state.fetch_add(flate::ENCODER_HEAP, Ordering::Relaxed);
 				encoder.reset();
 				return encoder;
 			}
 		}
-		self.add(flate::ENCODER_HEAP);
+		self.add_state(flate::ENCODER_HEAP);
 		flate::Encoder::new()
 	}
 
@@ -1801,12 +1808,36 @@ impl Extra {
 			let mut spare = track.encoder.lock().unwrap_or_else(PoisonError::into_inner);
 			if spare.is_none() {
 				self.bytes.fetch_sub(flate::ENCODER_HEAP, Ordering::Relaxed);
-				self.footprint(track, flate::ENCODER_HEAP, false);
+				self.state.fetch_sub(flate::ENCODER_HEAP, Ordering::Relaxed);
 				*spare = Some(encoder);
 				return;
 			}
 		}
-		self.sub(flate::ENCODER_HEAP);
+		self.sub_state(flate::ENCODER_HEAP);
+	}
+
+	/// Bill `n` more bytes of codec state, which the session's live edges do not count.
+	pub(super) fn add_state(&self, n: u64) {
+		if let Some(track) = &self.track {
+			track.pool.add(n);
+			track.written.fetch_add(n, Ordering::Relaxed);
+			self.bytes.fetch_add(n, Ordering::Relaxed);
+			self.state.fetch_add(n, Ordering::Relaxed);
+		}
+	}
+
+	/// Release `n` billed bytes of codec state.
+	pub(super) fn sub_state(&self, n: u64) {
+		if let Some(track) = &self.track {
+			let prior = self
+				.state
+				.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |state| {
+					Some(state.saturating_sub(n))
+				})
+				.expect("always updates");
+			self.bytes.fetch_sub(prior.min(n), Ordering::Relaxed);
+			track.pool.sub(prior.min(n));
+		}
 	}
 
 	/// Bill `n` more bytes.
@@ -1849,8 +1880,9 @@ impl Extra {
 	pub(super) fn clear(&self) {
 		if let Some(track) = &self.track {
 			let bytes = self.bytes.swap(0, Ordering::Relaxed);
+			let state = self.state.swap(0, Ordering::Relaxed);
 			track.pool.sub(bytes);
-			self.footprint(track, bytes, false);
+			self.footprint(track, bytes.saturating_sub(state), false);
 		}
 	}
 }
