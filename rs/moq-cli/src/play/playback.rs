@@ -29,6 +29,27 @@ impl Track {
 			name: config.track(id).to_string(),
 		}
 	}
+
+	/// A track on the catalog's own broadcast, for tests.
+	#[cfg(test)]
+	pub(super) fn named(name: &str) -> Self {
+		Self {
+			broadcast: None,
+			name: name.to_string(),
+		}
+	}
+}
+
+/// Why a half picks a replacement while the rendition it plays plays on, which it stops only
+/// once the replacement is ready.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Switch {
+	/// The viewport turned away from the rendition, so only one shaped like it is better.
+	Turn,
+	/// The catalog moved the rendition to another track, so any replacement is wanted, whichever
+	/// way the window turns. It stays wanted until one starts: a failed attempt tries again from
+	/// the next snapshot.
+	Move,
 }
 
 /// One half of the pipeline: whether it is playing, and which catalog snapshot
@@ -36,6 +57,11 @@ impl Track {
 #[derive(Default)]
 struct Half {
 	playing: bool,
+	/// The replacement being picked while the rendition playing plays on.
+	switching: Option<Switch>,
+	/// The snapshot was last read for a turn, which skipped the renditions shaped against the
+	/// window, so the half reads it again in full once its rendition ends.
+	narrowed: bool,
 	/// The track this half is playing, whose end is a finish. Cleared once retired.
 	track: Option<Track>,
 	/// The snapshot this half last read. A half reads a snapshot once, so a
@@ -102,6 +128,8 @@ impl Playback {
 		self.played = true;
 		let half = self.half_mut(kind);
 		half.playing = true;
+		half.switching = None;
+		half.narrowed = false;
 		half.track = Some(track);
 	}
 
@@ -115,6 +143,11 @@ impl Playback {
 	pub(super) fn ended(&mut self, kind: Kind, finished: bool) {
 		let half = self.half_mut(kind);
 		half.playing = false;
+		half.switching = None;
+		// The renditions a turn skipped are no worse than nothing.
+		if std::mem::take(&mut half.narrowed) {
+			half.read = None;
+		}
 		if let Some(track) = half.track.take()
 			&& finished
 		{
@@ -128,23 +161,65 @@ impl Playback {
 		self.half_mut(kind).track = None;
 	}
 
+	/// Pick a replacement from the snapshot on hand while this half plays on, as when the
+	/// viewport turned away from its rendition or the catalog moved it. A move stays a move.
+	pub(super) fn switch(&mut self, kind: Kind, switch: Switch) {
+		let half = self.half_mut(kind);
+		if half.switching != Some(Switch::Move) {
+			half.switching = Some(switch);
+		}
+		half.read = None;
+	}
+
+	/// The catalog moved this half's rendition back onto `track`, which it still plays, so
+	/// nothing replaces it and its end is a finish again.
+	pub(super) fn stay(&mut self, kind: Kind, track: Track) {
+		let half = self.half_mut(kind);
+		half.switching = None;
+		half.track = Some(track);
+	}
+
+	/// The replacement being picked, if any.
+	pub(super) fn switching(&self, kind: Kind) -> Option<Switch> {
+		self.half(kind).switching
+	}
+
+	/// Pick again from the snapshot on hand, as when the viewport changed under a pick.
+	pub(super) fn repick(&mut self, kind: Kind) {
+		self.half_mut(kind).read = None;
+	}
+
+	/// Give up a turn's replacement, which keeps what plays. A move's stays wanted, so the next
+	/// snapshot tries again.
+	pub(super) fn settle(&mut self, kind: Kind) {
+		let half = self.half_mut(kind);
+		half.switching.take_if(|switch| *switch == Switch::Turn);
+	}
+
+	/// The newest snapshot, whether or not every half has read it.
+	pub(super) fn latest(&self) -> Option<&catalog::hang::Catalog> {
+		self.latest.as_ref()
+	}
+
 	/// Whether `track` already ended on its own.
 	pub(super) fn finished(&self, track: &Track) -> bool {
 		self.finished.contains(track)
 	}
 
-	/// Whether this half needs a rendition and hasn't already looked for one in
-	/// the snapshot on hand.
+	/// Whether this half needs a rendition, or a replacement for the one it plays, and hasn't
+	/// already looked for one in the snapshot on hand.
 	pub(super) fn wants(&self, kind: Kind) -> bool {
 		let half = self.half(kind);
-		!half.playing && half.read != Some(self.snapshots)
+		(!half.playing || half.switching.is_some()) && half.read != Some(self.snapshots)
 	}
 
 	/// Record that this half read the snapshot on hand, whether or not it found
-	/// anything playable in it.
-	pub(super) fn read(&mut self, kind: Kind) {
+	/// anything playable in it. `narrowed` if a turn skipped some of it.
+	pub(super) fn read(&mut self, kind: Kind, narrowed: bool) {
 		let snapshots = self.snapshots;
-		self.half_mut(kind).read = Some(snapshots);
+		let half = self.half_mut(kind);
+		half.read = Some(snapshots);
+		half.narrowed = narrowed;
 	}
 
 	/// The snapshot to pick renditions from, if either half still needs one.
@@ -171,13 +246,12 @@ impl Playback {
 	}
 }
 
-/// The half a finished task was driving and what it left behind, or `None` if
-/// it was cancelled (on the way out, where which half it was no longer matters).
-pub(super) fn joined<T>(
-	result: Result<(Kind, anyhow::Result<T>), tokio::task::JoinError>,
-) -> anyhow::Result<Option<(Kind, T)>> {
+/// What a finished task returned, or `None` if it was cancelled (on the way out, where which
+/// half it was no longer matters). Its own result is left to the caller, which ignores a task a
+/// replacement already stopped.
+pub(super) fn joined<T>(result: Result<T, tokio::task::JoinError>) -> anyhow::Result<Option<T>> {
 	match result {
-		Ok((kind, result)) => result.map(|left| Some((kind, left))),
+		Ok(ended) => Ok(Some(ended)),
 		Err(err) if err.is_cancelled() => Ok(None),
 		Err(err) => Err(err.into()),
 	}
@@ -220,9 +294,9 @@ mod tests {
 		let mut playback = Playback::default();
 		playback.received(Default::default());
 		playback.started(Kind::Video, track("video"));
-		playback.read(Kind::Video);
+		playback.read(Kind::Video, false);
 		playback.started(Kind::Audio, track("audio"));
-		playback.read(Kind::Audio);
+		playback.read(Kind::Audio, false);
 
 		// The snapshot naming the replacement, while the retired track plays on.
 		playback.received(Default::default());
@@ -236,7 +310,7 @@ mod tests {
 		assert!(!playback.wants(Kind::Audio), "audio is still playing its own rendition");
 
 		// The replacement lands and playback carries on.
-		playback.read(Kind::Video);
+		playback.read(Kind::Video, false);
 		playback.started(Kind::Video, track("video"));
 		assert!(playback.pending().is_none());
 		assert!(!playback.done());
@@ -251,15 +325,107 @@ mod tests {
 		playback.received(Default::default());
 		// A video-only catalog: both halves read the snapshot, only one found
 		// something in it.
-		playback.read(Kind::Video);
+		playback.read(Kind::Video, false);
 		playback.started(Kind::Video, track("video"));
-		playback.read(Kind::Audio);
+		playback.read(Kind::Audio, false);
 
 		playback.ended(Kind::Video, true);
 		assert!(playback.pending().is_none(), "the player would resubscribe in a loop");
 
 		playback.received(Default::default());
 		assert!(playback.pending().is_some(), "a fresh snapshot must be read");
+	}
+
+	/// A switching half picks a replacement from the snapshot on hand while it plays on, and
+	/// picks once per snapshot: a newer one asks again until the replacement starts.
+	#[test]
+	fn a_switching_half_picks_while_it_plays() {
+		let mut playback = Playback::default();
+		playback.received(Default::default());
+		playback.read(Kind::Video, false);
+		playback.started(Kind::Video, track("wide"));
+		playback.read(Kind::Audio, false);
+		assert!(playback.pending().is_none());
+
+		playback.switch(Kind::Video, Switch::Turn);
+		assert!(playback.wants(Kind::Video), "a switch picks from the snapshot on hand");
+		playback.read(Kind::Video, false);
+		assert!(playback.pending().is_none(), "picked once per snapshot");
+		playback.received(Default::default());
+		assert!(playback.wants(Kind::Video), "a newer snapshot picks again");
+		playback.read(Kind::Video, false);
+
+		playback.started(Kind::Video, track("tall"));
+		playback.received(Default::default());
+		assert!(!playback.wants(Kind::Video), "the replacement plays");
+		playback.read(Kind::Audio, false);
+
+		// Given up, the half keeps playing what it has.
+		playback.switch(Kind::Video, Switch::Turn);
+		playback.settle(Kind::Video);
+		assert!(!playback.wants(Kind::Video));
+		assert!(playback.playing(Kind::Video));
+	}
+
+	/// A move's replacement stays wanted after an attempt finds nothing, so the next snapshot
+	/// tries again rather than leaving the moved rendition playing; the same snapshot is not
+	/// tried twice. Moving back onto the playing track ends the switch.
+	#[test]
+	fn a_failed_move_tries_again_from_the_next_snapshot() {
+		let mut playback = Playback::default();
+		playback.received(Default::default());
+		playback.read(Kind::Video, false);
+		playback.started(Kind::Video, track("a"));
+		playback.read(Kind::Audio, false);
+
+		playback.retire(Kind::Video);
+		playback.switch(Kind::Video, Switch::Move);
+		playback.read(Kind::Video, false);
+		playback.settle(Kind::Video);
+		assert_eq!(playback.switching(Kind::Video), Some(Switch::Move));
+		assert!(!playback.wants(Kind::Video), "the same snapshot is tried once");
+
+		// A turn doesn't narrow a move.
+		playback.switch(Kind::Video, Switch::Turn);
+		assert_eq!(playback.switching(Kind::Video), Some(Switch::Move));
+		playback.read(Kind::Video, false);
+
+		playback.received(Default::default());
+		assert!(playback.wants(Kind::Video), "the move was given up");
+
+		playback.stay(Kind::Video, track("a"));
+		assert!(!playback.wants(Kind::Video));
+		playback.ended(Kind::Video, true);
+		assert!(
+			playback.finished(&track("a")),
+			"a track moved back onto is finished by its end"
+		);
+	}
+
+	/// A turn tries only renditions shaped like the window. Once the rendition it would have
+	/// replaced ends, the rest are no worse than nothing, so the half reads the snapshot again.
+	#[test]
+	fn a_narrowed_read_is_read_again_once_its_rendition_ends() {
+		let mut playback = Playback::default();
+		playback.received(Default::default());
+		playback.read(Kind::Video, false);
+		playback.started(Kind::Video, track("wide"));
+		playback.read(Kind::Audio, false);
+
+		playback.switch(Kind::Video, Switch::Turn);
+		playback.read(Kind::Video, true);
+		playback.settle(Kind::Video);
+		assert_eq!(playback.switching(Kind::Video), None);
+		assert!(playback.pending().is_none());
+
+		playback.ended(Kind::Video, true);
+		assert!(
+			playback.wants(Kind::Video),
+			"the renditions the turn skipped were never tried"
+		);
+		playback.read(Kind::Video, false);
+		playback.ended(Kind::Video, false);
+		assert!(!playback.wants(Kind::Video), "a full read is not read again");
 	}
 
 	/// The catalog track ending is what ends playback, since it is the only thing
@@ -287,7 +453,7 @@ mod tests {
 		let mut playback = Playback::default();
 		playback.received(Default::default());
 		playback.started(Kind::Video, track("video"));
-		playback.read(Kind::Video);
+		playback.read(Kind::Video, false);
 
 		// The last snapshot names the replacement, then the catalog ends, then the
 		// retired track does.
@@ -300,8 +466,8 @@ mod tests {
 
 		// Read it for both halves, the way the selection pass does, find nothing
 		// playable in it, and only then stop.
-		playback.read(Kind::Video);
-		playback.read(Kind::Audio);
+		playback.read(Kind::Video, false);
+		playback.read(Kind::Audio, false);
 		assert!(playback.done());
 	}
 }

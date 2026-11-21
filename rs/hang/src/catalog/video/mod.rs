@@ -149,6 +149,30 @@ impl Video {
 		ranked.into_iter()
 	}
 
+	/// Which way `config` is shown once rotated, or `None` when square or of unknown size.
+	///
+	/// The section's display size decides it when set, else the rendition's display aspect
+	/// ratio or coded size, turned by the section's rotation. A player with a viewport keeps
+	/// the renditions shaped like it, so [preference](VideoConfig::preference) ranks within
+	/// an orientation.
+	pub fn orientation(&self, config: &VideoConfig) -> Option<Orientation> {
+		if let Some(display) = &self.display {
+			return Orientation::of(display.width, display.height);
+		}
+		let (width, height) = match (config.display_aspect_width, config.display_aspect_height) {
+			(Some(width), Some(height)) => (width, height),
+			_ => (config.coded_width?, config.coded_height?),
+		};
+		let orientation = Orientation::of(width, height)?;
+		// An odd quarter turn swaps the sides, rounded the way the catalog normalizes it; a
+		// non-finite rotation is ignored.
+		let rotation = self
+			.rotation
+			.and_then(|rotation| normalize_video_rotation(rotation).ok());
+		let turned = (rotation.unwrap_or(0.0) / QUARTER_TURN_DEGREES).rem_euclid(2.0) == 1.0;
+		Some(if turned { orientation.turned() } else { orientation })
+	}
+
 	/// Normalize and replace the properties shared by every video rendition.
 	pub fn set_properties(&mut self, properties: VideoProperties) -> crate::Result<()> {
 		let properties = properties.normalized()?;
@@ -156,6 +180,33 @@ impl Video {
 		self.rotation = properties.rotation;
 		self.flip = properties.flip;
 		Ok(())
+	}
+}
+
+/// Which side of a picture or viewport is longer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Orientation {
+	/// Wider than tall.
+	Landscape,
+	/// Taller than wide.
+	Portrait,
+}
+
+impl Orientation {
+	/// The orientation of a `width` by `height` picture, or `None` when square.
+	pub fn of(width: u32, height: u32) -> Option<Self> {
+		match width.cmp(&height) {
+			std::cmp::Ordering::Greater => Some(Self::Landscape),
+			std::cmp::Ordering::Less => Some(Self::Portrait),
+			std::cmp::Ordering::Equal => None,
+		}
+	}
+
+	fn turned(self) -> Self {
+		match self {
+			Self::Landscape => Self::Portrait,
+			Self::Portrait => Self::Landscape,
+		}
 	}
 }
 
@@ -307,7 +358,10 @@ pub struct VideoConfig {
 
 	/// Higher is preferred: a consumer selects among the highest preference it can decode,
 	/// then by picture and bitrate within it. A compatibility transcode is `-1` so only a
-	/// consumer that can't decode the source pulls it. Only written when nonzero.
+	/// consumer that can't decode the source pulls it. A player with a viewport first keeps
+	/// the renditions of its [orientation](Video::orientation), so preference ranks within
+	/// one: a publisher ranks its secondary orientation lower, and a consumer without a
+	/// viewport takes the main one. Only written when nonzero.
 	#[serde(default, skip_serializing_if = "is_zero")]
 	pub preference: i32,
 
@@ -471,6 +525,51 @@ mod test {
 			let decoded: VideoConfig = serde_json::from_value(encoded).unwrap();
 			assert_eq!(decoded.reorder, Some(depth));
 		}
+	}
+
+	#[test]
+	fn orientation_follows_the_shown_shape() {
+		let sized = |width, height| {
+			let mut config = VideoConfig::new(VideoCodec::VP8);
+			config.coded_width = Some(width);
+			config.coded_height = Some(height);
+			config
+		};
+		let mut video = Video::default();
+		assert_eq!(video.orientation(&sized(1920, 1080)), Some(Orientation::Landscape));
+		assert_eq!(video.orientation(&sized(1080, 1920)), Some(Orientation::Portrait));
+		assert_eq!(video.orientation(&sized(720, 720)), None);
+		assert_eq!(video.orientation(&VideoConfig::new(VideoCodec::VP8)), None);
+
+		// The display aspect ratio, not the coded size, is the picture's shape.
+		let mut anamorphic = sized(1440, 1080);
+		anamorphic.display_aspect_width = Some(9);
+		anamorphic.display_aspect_height = Some(16);
+		assert_eq!(video.orientation(&anamorphic), Some(Orientation::Portrait));
+
+		// Only an odd quarter turn swaps the sides, however the rotation is written.
+		for (rotation, expected) in [
+			(90.0, Orientation::Portrait),
+			(-90.0, Orientation::Portrait),
+			(180.0, Orientation::Landscape),
+			(269.0, Orientation::Portrait),
+			// Halfway rounds the same whichever way round the turn is written.
+			(-45.0, Orientation::Landscape),
+			(315.0, Orientation::Landscape),
+			(-135.0, Orientation::Portrait),
+			(225.0, Orientation::Portrait),
+			(f64::NAN, Orientation::Landscape),
+		] {
+			video.rotation = Some(rotation);
+			assert_eq!(video.orientation(&sized(1920, 1080)), Some(expected), "{rotation}");
+		}
+
+		// The display size is the shape after rotation, shared by every rendition.
+		video.display = Some(Display {
+			width: 1080,
+			height: 1920,
+		});
+		assert_eq!(video.orientation(&sized(1920, 1080)), Some(Orientation::Portrait));
 	}
 
 	#[test]
