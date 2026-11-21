@@ -17,14 +17,10 @@ idle expiry. So N tracks that each wrote one large frame and went quiet hold
 N frames past any capacity, until the publisher or a subscriber ends them. The
 default headroom bounds a track that keeps writing, not this shape.
 
-Decide the bound: reclaiming a quiet track's live edge (a late joiner then
-needs a flight or a new group), a per-session or per-broadcast track limit, or
-charging the held live edge against the session's credit. Measure it with
-many tracks of one frame each against a small headroom on the built binary.
-
-## Waiting
-
-- Maintainer: pick the bound. Recommend a per-session live-edge byte budget
-  (charge a track's retained newest frame to the session that opened it), since
-  evicting a live edge changes what a subscriber is served and a track-count
-  limit does not bound bytes; alternative is reclaiming idle live edges.
+Decided 2026-11-21 (maintainer, /quest-complete): a per-session byte budget
+for live edges (charge a track's retained newest frame to the session that
+opened it), so a session past it pays with its own oldest live edges or new
+tracks (rejected: reclaiming any idle live edge globally under pressure; a
+per-track cap on the newest frame). It confines the cost to the publisher
+causing it. Measure it with many tracks of one frame each against a small
+headroom on the built binary.
