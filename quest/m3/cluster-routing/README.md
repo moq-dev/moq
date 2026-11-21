@@ -21,7 +21,7 @@ by its own milestone. ✅ m3 (rejected: m2, where the cut would wait on it;
 pulling the m2 blocker into m1). It ranks right after m2, when it can start.
 
 Reopened 2026-11-15 (maintainer, /quest-plan on the whole route layer):
-[cache-aware multicast](/quest/m2/multicast/README.md) replaced the route
+[cache-aware multicast](https://github.com/moq-dev/moq/blob/41cc107579/quest/m2/multicast/README.md) replaced the route
 layer this Plan described, and where the two differ it wins. A routing node
 is a node that forwards, not every publisher; a claim crosses a scoped grant
 by a chain, not a qualified identity under a route key; and holds, doubt,
@@ -98,10 +98,6 @@ per-broadcast warm routes rank against (decided 2026-11-08, maintainer).
 Each implementation updates the docs it makes stale. The separate
 [routing guide](/quest/m3/routing-guide.md) explains the combined design and
 setup after the capabilities land.
-
-## Required
-
-- [Cache-aware multicast](/quest/m2/multicast/README.md) - the route layer this builds on, replacing the path rule
 
 ## Related
 
