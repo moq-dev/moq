@@ -942,6 +942,25 @@ struct Task {
 	holds: kio::Producer<usize>,
 }
 
+/// Ready once no [`Hold`] is left and `idle` is ready, checked under the hold count's
+/// lock so a [`Hold`] taken meanwhile waits for the decision instead of slipping past it.
+fn poll_released(
+	holds: &kio::Consumer<usize>,
+	waiter: &kio::Waiter,
+	idle: impl FnOnce(&kio::Waiter) -> Poll<()>,
+) -> Poll<()> {
+	let mut idle = Some(idle);
+	match holds.poll(waiter, |count| match **count {
+		0 => idle.take().expect("polled once")(waiter),
+		_ => Poll::Pending,
+	}) {
+		Poll::Ready(Ok(())) => Poll::Ready(()),
+		// Every Hold keeps the count open, so a closed one has none left.
+		Poll::Ready(Err(_)) => idle.map_or(Poll::Pending, |idle| idle(waiter)),
+		Poll::Pending => Poll::Pending,
+	}
+}
+
 /// Keeps a [`Connection::drain`] from closing its idle session until this drops.
 ///
 /// From [`Connection::hold`]. The drain still closes the session at its timeout.
@@ -1155,19 +1174,7 @@ impl Connection {
 					session.closed().await;
 					Err(moq_net::Error::GoawayTimeout)
 				}
-				// Both re-checked on every wake, so a hold taken once the count read zero,
-				// while the session still carried work, still holds it.
-				() = kio::wait(|waiter| {
-					let released = holds.poll(waiter, |count| match **count {
-						0 => Poll::Ready(()),
-						_ => Poll::Pending,
-					});
-					let idle = session.poll_idle(waiter);
-					match (released, idle) {
-						(Poll::Ready(_), Poll::Ready(())) => Poll::Ready(()),
-						_ => Poll::Pending,
-					}
-				}) => {
+				() = kio::wait(|waiter| poll_released(&holds, waiter, |waiter| session.poll_idle(waiter))) => {
 					tracing::debug!("drained session carries nothing; closing");
 					close_by(session, deadline).await
 				}
@@ -3213,6 +3220,31 @@ mod tests {
 			.expect("the released session was held open")
 			.unwrap()
 			.expect("the idle close failed");
+	}
+
+	/// A [`Hold`] taken while a drain decides the session is idle waits for that decision,
+	/// so it never slips in between the hold count and the idle check.
+	#[test]
+	fn a_hold_taken_mid_decision_waits_for_it() {
+		let holds = kio::Producer::<usize>::default();
+		let consumer = holds.consume();
+		let (held, landed) = std::sync::mpsc::channel();
+		std::thread::scope(|scope| {
+			let decided = poll_released(&consumer, &kio::Waiter::noop(), |_| {
+				scope.spawn(|| {
+					*holds.write().ok().unwrap() += 1;
+					held.send(()).unwrap();
+				});
+				// Proving the hold blocked needs a wait; a slow machine can only miss the race, never fail.
+				assert!(
+					landed.recv_timeout(Duration::from_millis(100)).is_err(),
+					"a hold landed between the hold count and the idle check"
+				);
+				Poll::Ready(())
+			});
+			assert!(decided.is_ready());
+		});
+		landed.recv().unwrap();
 	}
 
 	/// A [`Hold`] taken once a drain is waiting on a session's last reader still holds the
