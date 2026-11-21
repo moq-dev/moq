@@ -6,13 +6,13 @@
 
 ## Plan
 
-[moq-dev/moq#8975](https://github.com/moq-dev/moq/pull/8975) landed draft-23 opt-in, in Rust and `js/net`, with these gaps (decided 2026-11-20, maintainer: opt-in first, gaps here):
+[moq-dev/moq#8975](https://github.com/moq-dev/moq/pull/8975) landed draft-23 opt-in, in Rust and `js/net`. Decided 2026-11-21 (maintainer), one feature at a time:
 
-- REDIRECT is decoded but not acted on. Recommend: treat it as the request's end with an error, the least code, unless a peer shows a use that needs the redirect followed.
-- End of Gone Range only decodes; the relay cache has no Gone state. Recommend: no Gone state, since it is moq-transport-only; check that a relay passes the range on as missing data.
-- A peer's FILL_PARAMETERS into our relay at draft-23 is tested only moq-net against itself. Run it against a third-party peer, such as imquic's `moq-23` branch.
-- MAX_CONTROL_MESSAGE_SIZE is Setup Option 0x09 in the published draft-23 and 0x0A from moq-transport PR 2055 on. We send neither and stay within the 65535 default, which needs no change unless a peer depends on the option.
-- Add draft-23 to the `test/interop` version lists and the demo relay configs, and run `just test interop --all` at draft-23.
+- REDIRECT: ✅ end the request with an error (rejected: follow it to the new location). It is decoded today but not acted on.
+- End of Gone Range: ✅ leave it as is, failing the fetch as unsupported, so the requester gets an error for those groups (rejected: pass the groups on as not found; a Gone cache state).
+- A peer's FILL_PARAMETERS (joining subscribe) into our relay: ✅ run it against a third-party peer, such as imquic's `moq-23` branch, and fix what it finds (rejected: rely on moq-net's self-test).
+- MAX_CONTROL_MESSAGE_SIZE: ✅ honor a peer's limit (rejected: ignore it). Read the peer's Setup Option and refuse to send a control message past a limit smaller than 65535. It is 0x09 in the published draft-23 and 0x0A from moq-transport PR 2055 on; take the published draft's. We still never advertise one, so what we accept stays at the 65535 default. Mirror it in `js/net`.
+- Then ✅ offer draft-23 by default (rejected: keep it opt-in; drop the quest): `Versions::all()`, `ALPNS`, the JS default offer, the `test/interop` version lists, and the demo relay configs, and run `just test interop --all` at draft-23.
 - Session close codes stay PROTOCOL_VIOLATION (decided 2026-11-20, maintainer).
 
 ## Related

@@ -6,7 +6,7 @@ The IETF fuzz targets in `rs/moq-net/src/fuzz.rs` decode at draft-23, and every 
 
 ## Plan
 
-`IETF_VERSIONS` lists drafts 18, 20, and 22. The targets pick a version by an input byte modulo the list's length, so appending draft-23 re-targets three of the five stored ingest regressions and changes what one settings value means in the ingest target ([moq-dev/moq#8975](https://github.com/moq-dev/moq/pull/8975)). Recommend: keep the existing selector mapping for drafts 18 to 22 and give draft-23 a value outside it, so stored inputs keep their meaning; otherwise re-derive the stored regressions at their old versions.
+`IETF_VERSIONS` lists drafts 18, 20, and 22. The targets pick a version by an input byte modulo the list's length, so appending draft-23 re-targets three of the five stored ingest regressions and changes what one settings value means in the ingest target ([moq-dev/moq#8975](https://github.com/moq-dev/moq/pull/8975)). Decided 2026-11-21 (maintainer): ✅ keep the existing selector mapping for drafts 18 to 22 and give draft-23 a value outside it, so stored inputs keep their meaning (rejected: append draft-23 and re-derive the stored regressions at their old versions).
 
 ## Related
 
