@@ -128,6 +128,19 @@ impl Playback {
 		self.half_mut(kind).track = None;
 	}
 
+	/// Stop counting this half's track as a finish and let it pick again from the snapshot
+	/// on hand once its task ends, as when the viewport turned away from its rendition.
+	pub(super) fn reselect(&mut self, kind: Kind) {
+		let half = self.half_mut(kind);
+		half.track = None;
+		half.read = None;
+	}
+
+	/// The newest snapshot, whether or not every half has read it.
+	pub(super) fn latest(&self) -> Option<&catalog::hang::Catalog> {
+		self.latest.as_ref()
+	}
+
 	/// Whether `track` already ended on its own.
 	pub(super) fn finished(&self, track: &Track) -> bool {
 		self.finished.contains(track)
@@ -260,6 +273,23 @@ mod tests {
 
 		playback.received(Default::default());
 		assert!(playback.pending().is_some(), "a fresh snapshot must be read");
+	}
+
+	/// A rendition stopped for the viewport picks again from the snapshot it was
+	/// chosen from, and its stop is no finish, so turning back can play it again.
+	#[test]
+	fn a_reselected_half_reads_its_snapshot_again() {
+		let mut playback = Playback::default();
+		playback.received(Default::default());
+		playback.read(Kind::Video);
+		playback.started(Kind::Video, track("wide"));
+		playback.read(Kind::Audio);
+
+		playback.reselect(Kind::Video);
+		assert!(playback.pending().is_none(), "picked again before the old task ended");
+		playback.ended(Kind::Video, true);
+		assert!(playback.wants(Kind::Video));
+		assert!(!playback.finished(&track("wide")));
 	}
 
 	/// The catalog track ending is what ends playback, since it is the only thing

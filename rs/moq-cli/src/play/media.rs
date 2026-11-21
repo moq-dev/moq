@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Context;
+use hang::catalog::Orientation;
 use moq_mux::catalog::{self, Stream};
 // The ambient clock, which follows tokio's paused clock when a test drives the
 // playout clock itself.
@@ -67,6 +68,8 @@ pub(super) struct Media<O: Output> {
 	pub(super) playhead: Playhead,
 	pub(super) drained: Arc<tokio::sync::Notify>,
 	pub(super) output: O,
+	/// The window's orientation, `None` while square or without a window.
+	pub(super) viewport: tokio::sync::watch::Receiver<Option<Orientation>>,
 }
 
 impl<O: Output> Media<O> {
@@ -154,6 +157,9 @@ impl<O: Output> Media<O> {
 		let mut speaker = None;
 		// Retired audio sinks still playing out what they hold.
 		let mut tails = tokio::task::JoinSet::new();
+		let mut viewport = self.viewport.clone();
+		// Cleared once the window is gone, or there never was one, which leaves the viewport as is.
+		let mut viewing = true;
 
 		loop {
 			if playback.done() {
@@ -193,6 +199,22 @@ impl<O: Output> Media<O> {
 						}
 					}
 					_ = tails.join_next(), if !tails.is_empty() => {}
+					changed = viewport.changed(), if viewing => {
+						if changed.is_err() {
+							viewing = false;
+							continue;
+						}
+						let orientation = *viewport.borrow_and_update();
+						let turned = video_demand.as_ref().zip(playback.latest()).is_some_and(|(demand, snapshot)| {
+							turned_away(&snapshot.video, &demand.name, orientation, |name, config| {
+								playback.finished(&Track::of(&source, config, name))
+							})
+						});
+						if turned {
+							let _ = video_demand.take().expect("checked above").stop.send(());
+							playback.reselect(Kind::Video);
+						}
+					}
 					// Followed for as long as it lasts, not just until something is
 					// playing: a publisher retires renditions (a transcode ladder
 					// resizing under a source that changed resolution) by naming the
@@ -255,7 +277,9 @@ impl<O: Output> Media<O> {
 
 			if playback.wants(Kind::Video) {
 				playback.read(Kind::Video);
-				for (name, config) in snapshot.video.enabled() {
+				// Copied out first: the borrow holds a lock across the awaits below.
+				let orientation = *viewport.borrow_and_update();
+				for (name, config) in shaped(&snapshot.video, orientation) {
 					let reference = Track::of(&source, config, name);
 					// A finished track has only its newest group left, which already played.
 					if playback.finished(&reference) {
@@ -506,6 +530,38 @@ impl Demand {
 			raised
 		});
 	}
+}
+
+/// Whether `config` is shown in the orientation opposite the viewport's. A square or unsized
+/// rendition suits either, and every one suits a square viewport or none.
+fn opposed(video: &hang::catalog::Video, config: &hang::catalog::VideoConfig, viewport: Option<Orientation>) -> bool {
+	viewport.is_some_and(|viewport| video.orientation(config).is_some_and(|shown| shown != viewport))
+}
+
+/// The enabled renditions to try, those shaped like the viewport first in rank order, then the
+/// rest as a decode fallback. So `preference` ranks within an orientation.
+fn shaped(video: &hang::catalog::Video, viewport: Option<Orientation>) -> Vec<(&String, &hang::catalog::VideoConfig)> {
+	let mut candidates: Vec<_> = video.enabled().collect();
+	// Stable, so rank order holds within each side.
+	candidates.sort_by_key(|(_, config)| opposed(video, config, viewport));
+	candidates
+}
+
+/// Whether the viewport turned away from the `playing` rendition while one shaped like it, and
+/// not `finished`, is on offer, which now ranks first.
+fn turned_away(
+	video: &hang::catalog::Video,
+	playing: &str,
+	viewport: Option<Orientation>,
+	finished: impl Fn(&str, &hang::catalog::VideoConfig) -> bool,
+) -> bool {
+	video
+		.renditions
+		.get(playing)
+		.is_some_and(|config| opposed(video, config, viewport))
+		&& video
+			.enabled()
+			.any(|(name, config)| !opposed(video, config, viewport) && !finished(name, config))
 }
 
 // Cancel through the task's own result so it still reports which half ended.
@@ -1069,6 +1125,61 @@ mod tests {
 	use moq_mux::catalog::hang::Container;
 
 	use super::*;
+
+	/// A landscape program ranked first, beside a lower-ranked portrait one and a square one.
+	fn oriented() -> hang::catalog::Video {
+		let mut video = hang::catalog::Video::default();
+		for (name, width, height, preference) in [
+			("wide", 1920, 1080, 0),
+			("wide/360p", 640, 360, 0),
+			("tall", 1080, 1920, -1),
+			("square", 720, 720, -2),
+		] {
+			let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+			config.coded_width = Some(width);
+			config.coded_height = Some(height);
+			config.preference = preference;
+			video.insert(name, config).unwrap();
+		}
+		video
+	}
+
+	#[test]
+	fn renditions_shaped_like_the_viewport_come_first() {
+		let video = oriented();
+		let names = |viewport| {
+			shaped(&video, viewport)
+				.into_iter()
+				.map(|(name, _)| name.as_str())
+				.collect::<Vec<_>>()
+		};
+		assert_eq!(names(None), ["wide", "wide/360p", "tall", "square"]);
+		// A square rendition suits either way, so it passes the opposite one.
+		assert_eq!(
+			names(Some(Orientation::Landscape)),
+			["wide", "wide/360p", "square", "tall"]
+		);
+		assert_eq!(
+			names(Some(Orientation::Portrait)),
+			["tall", "square", "wide", "wide/360p"]
+		);
+	}
+
+	#[test]
+	fn turning_away_picks_again_only_with_a_rendition_to_turn_to() {
+		let mut video = oriented();
+		let none = |_: &str, _: &hang::catalog::VideoConfig| false;
+		assert!(turned_away(&video, "wide", Some(Orientation::Portrait), none));
+		assert!(!turned_away(&video, "wide", Some(Orientation::Landscape), none));
+		assert!(!turned_away(&video, "wide", None, none));
+		// A square rendition suits either way.
+		assert!(!turned_away(&video, "square", Some(Orientation::Landscape), none));
+
+		// Nothing left to turn to once the portrait-friendly ones are finished or disabled.
+		let finished = |name: &str, _: &hang::catalog::VideoConfig| name == "square";
+		video.renditions.get_mut("tall").unwrap().enabled = false;
+		assert!(!turned_away(&video, "wide", Some(Orientation::Portrait), finished));
+	}
 	use crate::play::args::Delay;
 	use crate::play::fake::Recorder;
 
@@ -2103,6 +2214,7 @@ mod tests {
 			playhead: Default::default(),
 			drained: Default::default(),
 			output,
+			viewport: tokio::sync::watch::channel(None).1,
 		}
 	}
 

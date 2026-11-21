@@ -519,6 +519,7 @@ mod tests {
 			playhead: Default::default(),
 			drained: Default::default(),
 			output: Recorder::default(),
+			viewport: tokio::sync::watch::channel(None).1,
 		}
 	}
 

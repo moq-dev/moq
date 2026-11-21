@@ -15,6 +15,8 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
+use hang::catalog::Orientation;
+
 use super::args::Args;
 use super::layout::fit;
 use super::media::Media;
@@ -76,6 +78,7 @@ pub fn run(
 	// the broadcast resolves while the window does, and waits for it only to
 	// open a decoder.
 	let render = Arc::new(tokio::sync::SetOnce::new());
+	let (viewport, viewed) = tokio::sync::watch::channel(None);
 
 	let media = tokio::spawn(
 		Media {
@@ -90,6 +93,7 @@ pub fn run(
 				proxy: proxy.clone(),
 				render: render.clone(),
 			},
+			viewport: viewed,
 		}
 		.run(),
 	);
@@ -108,7 +112,7 @@ pub fn run(
 	} else {
 		format!("moq play: {broadcast}")
 	};
-	let mut app = App::new(title, video, presentation.consume(), drained, render);
+	let mut app = App::new(title, video, presentation.consume(), drained, render, viewport);
 	let result = event_loop.run_app(&mut app).context("playback event loop failed");
 	media.abort();
 	network.abort();
@@ -164,6 +168,8 @@ struct App {
 	presentation: Consumer,
 	drained: Arc<tokio::sync::Notify>,
 	render: Arc<tokio::sync::SetOnce<moq_video::Output>>,
+	/// Tells the media task which way the window is longer, so it picks renditions shaped like it.
+	viewport: tokio::sync::watch::Sender<Option<Orientation>>,
 	display: Option<Display>,
 	next_redraw: Option<Instant>,
 	/// The media tasks are done. Keep presenting whatever they left queued, then
@@ -181,6 +187,7 @@ impl App {
 		presentation: Consumer,
 		drained: Arc<tokio::sync::Notify>,
 		render: Arc<tokio::sync::SetOnce<moq_video::Output>>,
+		viewport: tokio::sync::watch::Sender<Option<Orientation>>,
 	) -> Self {
 		Self {
 			title,
@@ -188,6 +195,7 @@ impl App {
 			presentation,
 			drained,
 			render,
+			viewport,
 			display: None,
 			next_redraw: None,
 			ending: false,
@@ -252,6 +260,17 @@ impl App {
 		Ok(())
 	}
 
+	/// Report the window's new size to the media task, once it crosses square.
+	fn reshape(&self, width: u32, height: u32) {
+		// A minimized window is zero-sized, which says nothing about its shape.
+		if width == 0 || height == 0 {
+			return;
+		}
+		let orientation = Orientation::of(width, height);
+		self.viewport
+			.send_if_modified(|held| std::mem::replace(held, orientation) != orientation);
+	}
+
 	fn fail(&mut self, event_loop: &ActiveEventLoop, err: impl ToString) {
 		self.error = Some(err.to_string());
 		event_loop.exit();
@@ -268,6 +287,8 @@ impl ApplicationHandler<Event> for App {
 			// still resolving, rather than showing whatever was in the surface.
 			Ok(display) => {
 				display.window.request_redraw();
+				let size = display.window.inner_size();
+				self.reshape(size.width, size.height);
 				self.render
 					.set(moq_video::render::output(&display.device))
 					.expect("the display opens once");
@@ -316,6 +337,7 @@ impl ApplicationHandler<Event> for App {
 				..
 			} => event_loop.exit(),
 			WindowEvent::Resized(size) => {
+				self.reshape(size.width, size.height);
 				if let Some(display) = self.display.as_mut() {
 					display.resize(size.width, size.height);
 					display.window.request_redraw();

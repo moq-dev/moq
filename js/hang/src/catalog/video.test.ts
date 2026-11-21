@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import * as Catalog from "./index.ts";
-import { ranked, VideoConfigSchema } from "./video.ts";
+import { ranked, VideoConfigSchema, VideoSchema } from "./video.ts";
 
 test("ranked puts enabled video before a larger disabled picture", () => {
 	const renditions = {
@@ -199,4 +199,36 @@ test("stereo is optional and keeps unknown packings verbatim", () => {
 		expect(vr({ stereo }).stereo).toBe(stereo);
 	}
 	expect(() => vr({ stereo: 2 })).toThrow();
+});
+
+test("orientation follows the shown shape", () => {
+	const section = (extra: Record<string, unknown> = {}) => VideoSchema.parse({ renditions: {}, ...extra });
+	const sized = (codedWidth: number, codedHeight: number) => rendition({ codedWidth, codedHeight });
+	expect(Catalog.Video.orientation(section(), sized(1920, 1080))).toBe("landscape");
+	expect(Catalog.Video.orientation(section(), sized(1080, 1920))).toBe("portrait");
+	expect(Catalog.Video.orientation(section(), sized(720, 720))).toBeUndefined();
+	expect(Catalog.Video.orientation(section(), rendition())).toBeUndefined();
+
+	// The display aspect ratio, not the coded size, is the picture's shape.
+	const anamorphic = VideoConfigSchema.parse({
+		...sized(1440, 1080),
+		displayAspectWidth: 9,
+		displayAspectHeight: 16,
+	});
+	expect(Catalog.Video.orientation(section(), anamorphic)).toBe("portrait");
+
+	// Only an odd quarter turn swaps the sides, however the rotation is written.
+	for (const [rotation, expected] of [
+		[90, "portrait"],
+		[-90, "portrait"],
+		[180, "landscape"],
+		[269, "portrait"],
+	] as const) {
+		expect(Catalog.Video.orientation(section({ rotation }), sized(1920, 1080))).toBe(expected);
+	}
+
+	// The display size is the shape after rotation, shared by every rendition.
+	const display = section({ display: { width: 1080, height: 1920 } });
+	expect(Catalog.Video.orientation(display, sized(1920, 1080))).toBe("portrait");
+	expect(Catalog.Orientation.of(1, 1)).toBeUndefined();
 });
