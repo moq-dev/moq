@@ -19,6 +19,14 @@ replacement holding and lacking the floor group, read the same groups.
 `cargo mutants -f rs/moq-net/src/model/resume.rs --re raised` and kill or exclude
 what survives.
 
+[moq-dev/moq#9276](https://github.com/moq-dev/moq/pull/9276) resumes every reader
+at the switch's boundary, the largest group held. So
+`the_fronts_subscription_resumes_at_the_boundary_whichever_reader_is_behind`
+(formerly `..._past_the_reader_furthest_behind`) no longer tells readers apart,
+and `Resume::add`'s `at <= next` may survive again. Readers' boundaries differ
+only when one handed out a group past what its copies still hold. Kill it with
+such a test or exclude it as equivalent.
+
 Line numbers drift; rerun `cargo mutants -f <file>` on current main first.
 
 Public API: none. Wire: none.
