@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use moq_net::{Timestamp, Version, cache, origin, track};
 
-use crate::support::harness::{MockPair, peer, spawn};
+use crate::support::harness::{MockConnectOptions, MockPair, connect_mock, peer, spawn};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -330,4 +330,96 @@ async fn a_join_on_an_idle_copy_waits_for_the_live_edge() {
 	})
 	.await
 	.expect("the join read on to live");
+}
+
+/// moq-transport states no Min Age, so a relay serving its live SUBSCRIBE asks the route for a
+/// live join with none: the publisher replays nothing it retains, and the viewer starts at the
+/// live group.
+#[kio::test]
+async fn a_moq_transport_live_join_asks_the_route_for_no_backlog() {
+	let publisher = origin(1);
+	let relay = origin(2);
+	let viewer = origin(3);
+	let _upstream = peer("moq-lite-07-wip".parse().unwrap(), &publisher, &relay).await;
+	let mut options = MockConnectOptions::new("moq-transport-22".parse().unwrap());
+	options.server_publish = Some(relay.consume());
+	options.client_subscribe = Some(viewer.clone());
+	let _downstream = connect_mock(options).await;
+
+	let broadcast = publisher.route("live", origin::RouteOptions::hidden()).unwrap();
+	let info = track::Info::default()
+		.with_timescale(moq_net::Timescale::MILLI)
+		.with_max_age(None);
+	let source = broadcast.broadcast().create_track("video", info).unwrap();
+	for start in (0..=5000).step_by(500) {
+		append(&source, start);
+	}
+	broadcast.announce().unwrap();
+
+	let joining = track::Subscription::default().with_delay(
+		track::Delay::default()
+			.with_min(Duration::ZERO)
+			.with_max(Duration::from_secs(30)),
+	);
+	kio::clock::timeout(TIMEOUT, async {
+		let remote = viewer.consume().follow("live", None).unwrap().available().await;
+		let remote = remote.unwrap().expect("the broadcast resolves");
+		let mut subscriber = remote.track("video").unwrap().subscribe(joining).await.unwrap();
+		assert_eq!(subscriber.recv_group().await.unwrap().expect("a group").start, 5000);
+		let asked = source.subscription().expect("the relay subscribes");
+		assert_eq!(asked.ranges, [track::Range::default()]);
+		assert_eq!(asked.delay.min, Some(Duration::ZERO));
+		append(&source, 5500);
+		assert_eq!(subscriber.recv_group().await.unwrap().expect("a group").start, 5500);
+		let asked = source.subscription().expect("still subscribed");
+		assert_eq!(asked.ranges, [track::Range::default()]);
+	})
+	.await
+	.expect("the viewer joined live");
+}
+
+/// A relay copy that went idle still holds the group it read last. A live join returning to it
+/// asks the route for a live join, not for everything since that stale group, so the groups
+/// published while nobody read are never replayed.
+#[kio::test]
+async fn a_live_join_reopening_an_idle_copy_stays_a_live_join() {
+	let version: Version = "moq-lite-07-wip".parse().unwrap();
+	let publisher = origin(1);
+	let relay = origin(2);
+	let viewer = origin(3);
+	let _a = peer(version, &publisher, &relay).await;
+	let _b = peer(version, &relay, &viewer).await;
+
+	let broadcast = publisher.route("live", origin::RouteOptions::hidden()).unwrap();
+	let info = track::Info::default()
+		.with_timescale(moq_net::Timescale::MILLI)
+		.with_max_age(None);
+	let source = broadcast.broadcast().create_track("video", info).unwrap();
+	append(&source, 0);
+	append(&source, 500);
+	broadcast.announce().unwrap();
+
+	let joining = track::Subscription::default().with_delay(
+		track::Delay::default()
+			.with_min(Duration::ZERO)
+			.with_max(Duration::from_secs(30)),
+	);
+	kio::clock::timeout(TIMEOUT, async {
+		let remote = viewer.consume().follow("live", None).unwrap().available().await;
+		let remote = remote.unwrap().expect("the broadcast resolves");
+		let mut subscriber = remote.track("video").unwrap().subscribe(joining.clone()).await.unwrap();
+		assert_eq!(subscriber.recv_group().await.unwrap().expect("a group").start, 500);
+		drop(subscriber);
+		crate::support::unwanted(source.demand()).await.unwrap();
+
+		for start in (1000..=3000).step_by(500) {
+			append(&source, start);
+		}
+		let mut subscriber = remote.track("video").unwrap().subscribe(joining).await.unwrap();
+		assert_eq!(subscriber.recv_group().await.unwrap().expect("a group").start, 3000);
+		let asked = source.subscription().expect("the relay subscribes again");
+		assert_eq!(asked.ranges, [track::Range::default()]);
+	})
+	.await
+	.expect("the viewer joined live again");
 }

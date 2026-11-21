@@ -2001,12 +2001,14 @@ impl SubscribeTrack {
 			Ok(fixed) => fixed,
 			Err(err) => return Poll::Ready(Some(Err((err, None)))),
 		};
-		if let Some(start) = fixed.start {
-			ServeRange {
+		match fixed.start {
+			Some(start) => ServeRange {
 				start: Some(Location { object: 0, ..start }),
 				..fixed
 			}
-			.apply(&mut subscription);
+			.apply(&mut subscription),
+			// Every other filter starts at the live edge, which resolves below.
+			None => live_join(&mut subscription),
 		}
 
 		// Subscribe before resolving the filter: on a routed broadcast the live edge only
@@ -2055,7 +2057,7 @@ impl SubscribeTrack {
 		if let Some(next) = range.fill_tail(fill, edge) {
 			range.start = Some(next);
 		}
-		range.apply(&mut subscription);
+		range.request(&mut subscription, msg.filter, edge);
 		let _ = subscribed.update(subscription);
 		// Serve the track while reading updates; only abrupt closure cancels on draft-22. A
 		// fill or joining FETCH ranks in the same subscription as the group it carries.
@@ -6827,7 +6829,10 @@ impl TrackServe {
 			*bounds = range;
 		}
 		let mut subscription = self.track.subscription();
-		range.apply(&mut subscription);
+		// Only a new filter moves the request: the edge an old one resolved against has moved.
+		if update.filter.is_some() {
+			range.request(&mut subscription, self.filter, edge);
+		}
 		self.track.update(subscription)?;
 		let fill = update.fill.map(|fill| fill_range(fill, self.filter, edge.largest));
 		if let Some(next) = range.fill_tail(fill, edge) {
@@ -21586,6 +21591,29 @@ impl ServeRange {
 		}
 	}
 
+	/// Ask for this range, resolved from `filter` against `edge`. A filter other than an
+	/// absolute one starting at the latest group or past it stays a [`live_join`], which the
+	/// serve's floor trims to the range: a time start there would also have the route replay
+	/// what it retains. On a track with no group yet it asks from the oldest group, since
+	/// nothing is retained, and a live join would start at whichever group lands first.
+	fn request(&self, subscription: &mut Subscription, filter: Filter, edge: LiveEdge) {
+		let live = !matches!(filter, Filter::Absolute { .. })
+			&& self.end.is_none()
+			&& edge
+				.latest
+				.is_some_and(|latest| self.start.is_none_or(|start| start.group >= latest));
+		match live {
+			true => live_join(subscription),
+			// From time zero rather than with no start: replacing a live join's range with an
+			// equal one would leave it where it already resolved.
+			false => ServeRange {
+				start: self.start.or(Some(Location { group: 0, object: 0 })),
+				..*self
+			}
+			.apply(subscription),
+		}
+	}
+
 	/// Bound `subscription` to the whole groups this range touches: a model subscription
 	/// starts and ends on a group boundary, and [`GroupSlice`] cuts the objects when serving.
 	fn apply(&self, subscription: &mut Subscription) {
@@ -21593,6 +21621,15 @@ impl ServeRange {
 			.with_start(self.start.map(|start| start.group))
 			.with_end(self.end.and_then(|end| end.group.checked_add(1)));
 	}
+}
+
+/// Ask for a live join with a Min Age of zero, as a SUBSCRIBE without an absolute start does:
+/// a range with no start and no Min Age would reach back to the oldest group and have a
+/// relay's route replay everything it retains, and SUBSCRIBE_OK then name the oldest group
+/// replayed so far as Largest.
+fn live_join(subscription: &mut Subscription) {
+	*subscription = std::mem::take(subscription).with_ranges([track::Range::default()]);
+	subscription.delay.min = Some(Duration::ZERO);
 }
 
 /// The slice of one group a subscription's [`ServeRange`] selects.

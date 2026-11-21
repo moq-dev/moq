@@ -133,7 +133,7 @@ Decided 2026-11-20 (maintainer, /quest-plan), from the triage of runs
 [44767045952](https://github.com/moq-dev/moq/actions/runs/44767045952): two
 more children (resume and relay route mutants, drill leak sensitivity), and
 the Firefox `replacement` stall went to
-[interop green](/quest/m0/interop-green/replacement-join-delay.md). Fixed on
+[interop green](/quest/m0/interop-green/README.md). Fixed on
 `main`: the ingest fuzz bound
 ([moq-dev/moq#9216](https://github.com/moq-dev/moq/pull/9216)), Miri's
 boottime clock ([moq-dev/moq#9212](https://github.com/moq-dev/moq/pull/9212)),

@@ -582,6 +582,57 @@ test("a SUBSCRIBE withdrawn during setup releases its demand on every draft", as
 	}
 });
 
+// moq-transport states no Min Age, so a live SUBSCRIBE asks its track for a live join with none,
+// before and after the edge resolves: the oldest or a time start would have an on-demand
+// publisher, or a relay's route, replay what it retains. Mirrors the Rust
+// `a_moq_transport_live_join_asks_the_route_for_no_backlog`.
+test("a live SUBSCRIBE asks its track for a live join with no Min Age", async () => {
+	for (const version of IETF_VERSIONS) {
+		const fx = fixture(version);
+		const client = await Stream.open(fx.pair.client, { version });
+		const server = await Stream.accept(fx.pair.server, version);
+		if (!server) throw new Error("publisher never accepted the subscribe stream");
+		const accepted = (async () => {
+			const request = await wireOf(fx.broadcast).requested();
+			if (!request) throw new Error("no track was requested");
+			const track = request.accept({ timescale: Timescale.MILLI });
+			for (const key of [0n, 1n]) {
+				const group = track.createGroup(key);
+				group.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.fromMillis(Number(key)) });
+				group.finish();
+			}
+			return track;
+		})();
+		const serving = fx.pub.runSubscribe(
+			new Subscribe({
+				requestId: 0n,
+				trackNamespace: Path.from("test"),
+				trackName: "video",
+				subscriberPriority: 128,
+				filter: { kind: "nextObject" },
+			}),
+			server,
+		);
+		const asked = (track: TrackProducer) => {
+			const subscription = track.subscription.peek();
+			return { ranges: subscription?.ranges, min: subscription?.delay?.min?.asMillis() };
+		};
+		const live = { ranges: [{}], min: 0 };
+		try {
+			const track = await accepted;
+			expect(asked(track)).toEqual(live);
+			expect(await client.reader.u53()).toBe(SubscribeOk.id);
+			const ok = await SubscribeOk.decode(client.reader, version);
+			expect(ok.largest?.groupId).toBe(1n);
+			expect(asked(track)).toEqual(live);
+		} finally {
+			client.close();
+			fx.close();
+			await serving.catch(() => {});
+		}
+	}
+});
+
 // A resume subscribes again as a new SUBSCRIBE does, so the requester leaving while the
 // resumed track is never answered ends the request at once too.
 test("a SUBSCRIBE withdrawn while resuming releases its demand", async () => {
