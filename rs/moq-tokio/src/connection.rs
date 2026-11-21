@@ -3250,7 +3250,11 @@ mod tests {
 			});
 			assert!(decided.is_ready());
 		});
-		assert_eq!(*order.lock().unwrap(), ["decided", "held"], "a hold landed mid-decision");
+		assert_eq!(
+			*order.lock().unwrap(),
+			["decided", "held"],
+			"a hold landed mid-decision"
+		);
 	}
 
 	/// A [`Hold`] taken once a drain is waiting on a session's last reader still holds the
