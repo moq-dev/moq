@@ -1156,7 +1156,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				None => return Err(Error::UnknownTrack(id).into()),
 			};
 			// A fragment wholly before the edit or the first sync sample publishes nothing.
-			let Some(run) = track.run(traf, &mut resolver)? else {
+			let Some(mut run) = track.run(traf, &mut resolver)? else {
 				continue;
 			};
 			// The moov declared every track, so any track's anchored fragment releases the catalog.
@@ -1166,6 +1166,15 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				offset,
 				new_segment: track.segment != Some(self.segment),
 			};
+			if let Output::Passthrough(output) = &mut track.output
+				&& !output.trim(&mut run, placement, track.kind)?
+			{
+				// With no group open, video waits for a sync sample past what was published.
+				if output.group.is_none() && track.kind == Kind::Video {
+					track.orphaned = true;
+				}
+				continue;
+			}
 			let prefix = match track.output {
 				Output::Passthrough(_) => Some(fragment(traf, &moof, &run, &track.defaults)?),
 				_ => None,
@@ -1239,7 +1248,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 								let prefix = pending.prefix.take().expect("one prefix per fragment");
 								let (writer, opened) =
 									output.start(prefix, &pending.run, track.kind, pending.placement)?;
-								(writer.map_or(Writer::Dropped, Writer::Fragment), opened)
+								(Writer::Fragment(writer), opened)
 							}
 							output => {
 								let (sample, opened) = open_sample(output, pending, *sample_index, track.timescale)?;
@@ -1256,11 +1265,12 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					if complete {
 						let last = *sample_index + 1 == pending.run.samples.len();
 						match &mut track.output {
-							Output::Passthrough(output) if last => match pending.writer.take() {
-								Some(Writer::Fragment(writer)) => output.complete(writer, pending, track.kind)?,
-								Some(Writer::Dropped) => {}
-								_ => unreachable!("passthrough tracks write whole fragments"),
-							},
+							Output::Passthrough(output) if last => {
+								let Some(Writer::Fragment(writer)) = pending.writer.take() else {
+									unreachable!("passthrough tracks write whole fragments");
+								};
+								output.complete(writer, pending, track.kind)?;
+							}
 							Output::Passthrough(_) => {}
 							output => media!(output, producer => {
 								let Some(Writer::Sample(sample)) = pending.writer.take() else {
@@ -1320,7 +1330,7 @@ impl Mdat {
 					let _ = writer.abort(err.clone());
 				}
 				Some(Writer::Sample(sample)) => sample.abort(err.clone()),
-				Some(Writer::Dropped) | None => {}
+				None => {}
 			}
 		}
 	}
@@ -1340,8 +1350,6 @@ struct PendingTrack {
 enum Writer {
 	/// A passthrough track's whole per-track fragment.
 	Fragment(moq_net::frame::Producer),
-	/// A passthrough fragment the track dropped, whose payload is discarded.
-	Dropped,
 	/// One unwrapped sample.
 	Sample(Streamed),
 }
@@ -1350,7 +1358,6 @@ impl Writer {
 	fn write(&mut self, chunk: &[u8]) -> crate::Result<()> {
 		match self {
 			Self::Fragment(writer) => writer.write(chunk)?,
-			Self::Dropped => {}
 			Self::Sample(sample) => sample.write(chunk)?,
 		}
 		Ok(())
@@ -1593,15 +1600,74 @@ fn kept(traf: &mp4_atom::Traf, run: &Run) -> Result<mp4_atom::Traf> {
 }
 
 impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
-	/// Open one per-track fragment's output frame, reporting whether it opened a group, or `None`
-	/// for a fragment dropped because it presents with the groups before its own.
+	/// Drop the samples of `run` that would present at or before the groups before the one its
+	/// fragment lands in, such as leading pictures after a splice, counting them as skipped: every
+	/// sample of a group presents after every sample of the groups before it. A fragment that would
+	/// start a group at or before the newest sample continues the open group, as
+	/// `container::Producer` does for a keyframe; with none open it is dropped whole. Returns whether
+	/// any sample is left to publish.
+	fn trim(&mut self, run: &mut Run, placement: Placement, kind: Kind) -> Result<bool> {
+		let first = run.samples.first().ok_or(Error::MissingTrun)?;
+		let keyframe = placement.keyframe(kind, first);
+		let at = placement.offset.apply(first.timestamp)?;
+		let start_group = self.group.is_none() || (placement.new_segment && keyframe);
+		// A group below the start of the one before it is a restart, which `start` refuses at its
+		// first sample, as the unwrapped track does.
+		let earliest = placement.offset.apply(run.earliest)?;
+		if start_group && self.start.is_some_and(|floor| earliest < floor) {
+			return Ok(true);
+		}
+		let behind = self.newest.is_some_and(|newest| at <= newest);
+		let ceiling = match (start_group, behind) {
+			(true, false) => self.newest,
+			(true, true) if self.group.is_none() => {
+				tracing::debug!(timestamp = ?at, "dropping a fragment with no group to continue");
+				self.sent.skip(run.samples.len() as u64);
+				return Ok(false);
+			}
+			_ => self.ceiling,
+		};
+		let Some(ceiling) = ceiling else {
+			return Ok(true);
+		};
+		let before = run.samples.len();
+		let mut kept = Vec::with_capacity(before);
+		for sample in std::mem::take(&mut run.samples) {
+			if placement.offset.apply(sample.timestamp)? > ceiling {
+				kept.push(sample);
+			}
+		}
+		run.samples = kept;
+		let dropped = before - run.samples.len();
+		if dropped == 0 {
+			return Ok(true);
+		}
+		tracing::debug!(dropped, "dropping samples that present before an earlier group ends");
+		self.sent.skip(dropped as u64);
+		run.dropped = true;
+		let mut timestamps = run.samples.iter().map(|sample| sample.timestamp);
+		let Some(first) = timestamps.next() else {
+			return Ok(false);
+		};
+		let (earliest, latest) = timestamps.fold((first, first), |(min, max), timestamp| {
+			(
+				crate::container::earlier(min, timestamp),
+				crate::container::later(max, timestamp),
+			)
+		});
+		run.earliest = earliest;
+		run.latest = latest;
+		Ok(true)
+	}
+
+	/// Open one per-track fragment's output frame, reporting whether it opened a group.
 	fn start(
 		&mut self,
 		prefix: Bytes,
 		run: &Run,
 		kind: Kind,
 		placement: Placement,
-	) -> Result<(Option<moq_net::frame::Producer>, bool)> {
+	) -> Result<(moq_net::frame::Producer, bool)> {
 		// Carry the fragment's earliest presentation time as the frame timestamp, in the
 		// track's native timescale and shifted onto the catalog clock. Consumers present the
 		// fragment at it; `tfdt` only places the samples relative to each other.
@@ -1619,26 +1685,10 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		{
 			return Err(crate::container::TimestampRewind { timestamp, floor }.into());
 		}
-		// Every sample of a group presents after every sample of the groups before it, so a segment
-		// that doesn't start after the newest sample written continues the open group, as
-		// `container::Producer` does for a keyframe; with none open it is dropped. So is a later
-		// fragment presenting with the groups before its own, such as a leading picture after a
-		// splice, its samples counted as skipped.
-		let behind = self.newest.is_some_and(|newest| timestamp <= newest);
-		if start_group && behind && self.group.is_some() {
+		// A segment that doesn't start after the newest sample written continues the open group;
+		// `trim` dropped one with none open.
+		if start_group && self.newest.is_some_and(|newest| timestamp <= newest) {
 			start_group = false;
-		}
-		let dropped = match start_group {
-			true => behind,
-			false => self.ceiling.is_some_and(|ceiling| timestamp <= ceiling),
-		};
-		if dropped {
-			tracing::debug!(
-				?timestamp,
-				"dropping a fragment that presents before its group's predecessors end"
-			);
-			self.sent.skip(run.samples.len() as u64);
-			return Ok((None, false));
 		}
 		// A group is keyed by its first fragment's timestamp, which has to start after every group
 		// the track holds. A segment that doesn't continues the open group instead; with none open
@@ -1690,7 +1740,7 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 			self.newest
 				.map_or(latest, |newest| crate::container::later(newest, latest)),
 		);
-		Ok((Some(writer), start_group))
+		Ok((writer, start_group))
 	}
 
 	fn complete(&mut self, writer: moq_net::frame::Producer, pending: &PendingTrack, kind: Kind) -> Result<()> {

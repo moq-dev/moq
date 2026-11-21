@@ -1405,7 +1405,8 @@ async fn video_joined_mid_gop_starts_at_a_sync_sample() {
 
 /// Every sample of a group presents after every sample of the groups before it, passthrough or
 /// unwrapped: a sync sample that doesn't start after the newest sample continues the open group,
-/// and a later one presenting at or before the groups before its own is dropped.
+/// a later one presenting at or before the groups before its own is dropped, and with no group open
+/// to continue, a sync sample at or before the newest is dropped with the samples decoding from it.
 #[tokio::test]
 async fn video_groups_never_overlap() {
 	let (_, (video_id, video_scale), _) = bbb_init();
@@ -1419,7 +1420,8 @@ async fn video_groups_never_overlap() {
 		(0, &[(2, 0), (5, non_sync), (1, non_sync), (1, non_sync)]),
 		// A join at 5, below the newest sample: it continues the group. Presents 5, 9, 7, 8.
 		(4, &[(1, 0), (4, non_sync), (1, non_sync), (1, non_sync)]),
-		// A sync sample past the newest, with a leading picture at it. Presents 10, 9, 15, 11.
+		// A sync sample past the newest, with a leading picture at it beside pictures that are
+		// kept. Presents 10, 9, 15, 11.
 		(8, &[(2, 0), (0, non_sync), (5, non_sync), (0, non_sync)]),
 		// Past the newest again. Presents 16.
 		(12, &[(4, 0)]),
@@ -1428,26 +1430,38 @@ async fn video_groups_never_overlap() {
 		// Presents 17.
 		(14, &[(3, non_sync)]),
 	];
-	let cases = [
-		// Unwrapped, every sample is placed on its own: the leading picture at 9 is dropped.
-		(
-			false,
-			vec![vec![2, 6, 3, 4, 5, 9, 7, 8], vec![10, 15, 11], vec![16, 17]],
-		),
-		// Passthrough places whole fragments by their earliest sample, so the one with the leading
-		// picture continues the group instead.
-		(true, vec![vec![2, 6, 3, 4, 5, 9, 7, 8, 10, 9, 15, 11], vec![16, 17]]),
+	// After a rejoin closes the group, `(dts, samples)` the same way.
+	let rejoined: [(u64, &[(u64, u32)]); 3] = [
+		// A sync sample at 17, the newest, with no group to continue: dropped.
+		(15, &[(2, 0)]),
+		// Presents 18, decoding from the dropped sync sample: dropped.
+		(16, &[(2, non_sync)]),
+		// Presents 20, 21.
+		(17, &[(3, 0), (3, non_sync)]),
 	];
-	for (passthrough, expected) in cases {
+	let expected = [
+		vec![2, 6, 3, 4, 5, 9, 7, 8],
+		vec![10, 15, 11],
+		vec![16, 17],
+		vec![20, 21],
+	];
+	for passthrough in [false, true] {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
 		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve()).with_cmaf(passthrough);
 		fmp4.decode(&init).unwrap();
-		for (dts, samples) in fragments {
+		let decode = |fmp4: &mut crate::container::fmp4::Import, (dts, samples): (u64, &[(u64, u32)])| {
 			let entries: Vec<_> = samples.iter().map(|&(cts, flags)| (cts * tick, flags, 0xA)).collect();
 			fmp4.decode(&video_fragment(video_id, dts * tick, tick, &entries))
 				.unwrap();
+		};
+		for fragment in fragments {
+			decode(&mut fmp4, fragment);
+		}
+		fmp4.rejoin().unwrap();
+		for fragment in rejoined {
+			decode(&mut fmp4, fragment);
 		}
 		let _finished = fmp4.finish().unwrap();
 		let [video, _] = published(&consumer, &catalog).await;
@@ -1456,7 +1470,7 @@ async fn video_groups_never_overlap() {
 			.map(|(timestamp, _, _)| (timestamp * u128::from(video_scale.as_u64())).div_ceil(1_000_000) as u64 / tick)
 			.collect();
 		assert_eq!(presented, expected.concat(), "passthrough {passthrough}");
-		// Each group starts at its first sample, the lowest of its sync samples.
+		// Each group starts at its first sample.
 		let name = catalog.snapshot().video.renditions.keys().next().unwrap().clone();
 		let starts: Vec<u64> = starts(&consumer, &name)
 			.await

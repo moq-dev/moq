@@ -153,6 +153,9 @@ export class Producer {
 	// The newest frame of every group before the current one: every frame of the current group
 	// presents after it.
 	#ceiling?: number;
+	// A keyframe was dropped with no group open, so the frames decoding from it go too, until a
+	// keyframe opens a group.
+	#skipping = false;
 	// Gap between consecutive timestamps, used to close the last group when no successor exists.
 	#interval?: number;
 	// A discontinuity's marker is the newest group, so another one would say nothing new.
@@ -171,8 +174,9 @@ export class Producer {
 	 * every frame of the groups before it, so a keyframe that doesn't start after the newest frame
 	 * continues the open group (a splice), and a later frame presenting at or before the groups before
 	 * its own (a leading picture after a splice) is dropped, as is a keyframe at or before the newest
-	 * frame with no group open. Throws if the first frame is not a keyframe, a group start goes
-	 * backwards, or a frame is below the previous group start.
+	 * frame with no group open, with the frames after it until a keyframe opens a group. Throws if the
+	 * first frame is not a keyframe, a group start goes backwards, or a frame is below the previous
+	 * group start.
 	 */
 	encode(data: Uint8Array | Source, pts: Duration, keyframe: boolean) {
 		const timestamp = micros(pts);
@@ -189,7 +193,11 @@ export class Producer {
 		const opens = keyframe && !behind && startsPast(this.#track, timestamp);
 		// Dropped: a keyframe with no group to continue, and a frame presenting with the groups
 		// before its own, such as a leading picture after a splice.
-		if (keyframe && behind && !this.#group) return;
+		if (keyframe && behind && !this.#group) {
+			this.#skipping = true;
+			return;
+		}
+		if (!keyframe && !this.#group && this.#skipping) return;
 		if (keyframe && !opens && !this.#group) throw new Error("a keyframe must start after the previous group");
 		if (!opens && this.#group && this.#ceiling !== undefined && timestamp <= this.#ceiling) return;
 		this.#marked = false;
@@ -203,6 +211,7 @@ export class Producer {
 			this.#group = this.#track.appendGroup(Time.Timestamp.fromMicros(timestamp));
 			this.#floor = this.#start;
 			this.#ceiling = this.#newest;
+			this.#skipping = false;
 			this.#start = timestamp;
 		} else if (!this.#group) {
 			throw new Error("must start with a keyframe");

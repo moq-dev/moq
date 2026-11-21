@@ -90,6 +90,9 @@ pub struct Producer<C: Container, R = ()> {
 	/// The newest frame of every group before the latest one: every frame of the latest group
 	/// presents after it.
 	ceiling: Option<moq_net::Timestamp>,
+	/// A keyframe was dropped with no group open, so the frames decoding from it are dropped too,
+	/// until a keyframe opens a group.
+	skipping: bool,
 
 	/// Duration of the frame that last raised [`end`](Self::end), if it had one. Distinguishes
 	/// an exclusive presentation point from a max timestamp that still needs an estimate.
@@ -309,6 +312,7 @@ impl<C: Container> Producer<C> {
 			start: None,
 			floor: None,
 			ceiling: None,
+			skipping: false,
 			last_duration: None,
 			previous_timestamp: None,
 			cadence: None,
@@ -349,6 +353,7 @@ where
 			start: None,
 			floor: None,
 			ceiling: None,
+			skipping: false,
 			last_duration: None,
 			previous_timestamp: None,
 			cadence: None,
@@ -647,7 +652,8 @@ where
 	/// content's last frames. A later frame presenting at or before the previous groups' newest,
 	/// such as a leading picture after a splice, is dropped and counted as
 	/// [skipped](Self::report_skipped), and so is a keyframe at or before the newest frame with no
-	/// group open, such as after a [`cut`](Self::cut).
+	/// group open, such as after a [`cut`](Self::cut), with the frames after it until a keyframe
+	/// opens a group.
 	///
 	/// Group starts never go backwards: a keyframe below the start of the latest group, or any
 	/// frame below the start of the group before its own, returns
@@ -711,7 +717,10 @@ where
 		{
 			return match self.group {
 				Some(_) => Ok(true),
-				None => Ok(self.drop_frame(timestamp)),
+				None => {
+					self.skipping = true;
+					Ok(self.drop_frame(timestamp))
+				}
 			};
 		}
 
@@ -737,6 +746,9 @@ where
 		// Start a new group if needed; the first frame of a group must be a keyframe.
 		if self.group.is_none() {
 			if !keyframe {
+				if self.skipping {
+					return Ok(self.drop_frame(timestamp));
+				}
 				// No group yet and this delta can't anchor one. The caller (e.g. a
 				// mid-stream join) decides whether to skip until the first keyframe.
 				return Err(super::MissingKeyframe.into());
@@ -756,6 +768,7 @@ where
 
 			self.floor = self.start;
 			self.ceiling = self.newest;
+			self.skipping = false;
 			self.start = Some(timestamp);
 			self.group = Some(group);
 		} else if self.ceiling.is_some_and(|ceiling| !timestamp_lt(ceiling, timestamp)) {
@@ -2274,7 +2287,7 @@ mod tests {
 	}
 
 	/// After a cut there is no open group for a keyframe at or before the newest frame to continue,
-	/// so it is dropped, and the track waits for a keyframe past the newest frame.
+	/// so it is dropped with the frames decoding from it, until a keyframe past the newest frame.
 	#[tokio::test]
 	async fn a_keyframe_overlapping_a_closed_group_is_dropped() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
@@ -2285,8 +2298,7 @@ mod tests {
 		producer.cut(None).unwrap();
 		producer.write(frame(150_000, true)).unwrap();
 		assert!(producer.needs_keyframe());
-		let err = producer.write(frame(183_000, false)).unwrap_err();
-		assert!(matches!(err, crate::Error::MissingKeyframe(_)), "{err:?}");
+		producer.write(frame(183_000, false)).unwrap();
 		producer.write(frame(200_000, true)).unwrap();
 		let _finished = producer.finish().unwrap();
 		assert_eq!(
@@ -2390,7 +2402,7 @@ mod tests {
 						duration: None,
 					});
 					if written.is_ok() {
-						accepted.push((index as u32, timestamp as u128));
+						accepted.push((index as u32, timestamp as u128, keyframe));
 					}
 				}
 				let _finished = producer.finish().unwrap();
@@ -2418,19 +2430,21 @@ mod tests {
 				}
 
 				// Published frames are the accepted ones in order, less those at or before a frame
-				// published ahead of them.
+				// published ahead of them, and those after a dropped keyframe until one is published.
 				let published: Vec<(u32, u128)> = groups.concat();
 				let mut next = published.iter().peekable();
-				let mut newest = None;
-				for &(index, timestamp) in &accepted {
+				let (mut newest, mut skipping) = (None, false);
+				for &(index, timestamp, keyframe) in &accepted {
 					if next.peek().is_some_and(|&&(published, _)| published == index) {
 						next.next();
 						newest = newest.max(Some(timestamp));
+						skipping &= !keyframe;
 					} else {
 						prop_assert!(
-							newest.is_some_and(|newest| timestamp <= newest),
+							newest.is_some_and(|newest| timestamp <= newest) || (skipping && !keyframe),
 							"frame {index} at {timestamp} was dropped above {newest:?}"
 						);
+						skipping |= keyframe;
 					}
 				}
 				prop_assert!(next.peek().is_none(), "published a frame never accepted");

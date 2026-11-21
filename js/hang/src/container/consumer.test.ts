@@ -234,10 +234,8 @@ test("Legacy Producer drops a keyframe overlapping a closed group", () => {
 	producer.discontinuity(Duration.micros(200_000));
 	const largest = track.largest()?.group;
 	producer.encode(new Uint8Array([1]), Duration.micros(150_000), true);
+	producer.encode(new Uint8Array([1]), Duration.micros(183_000), false);
 	expect(track.largest()?.group).toBe(largest);
-	expect(() => producer.encode(new Uint8Array([1]), Duration.micros(183_000), false)).toThrow(
-		"must start with a keyframe",
-	);
 	producer.finish();
 });
 
