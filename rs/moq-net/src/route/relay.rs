@@ -4594,6 +4594,44 @@ mod tests {
 		assert!(!router.shown().contains_key(&(7, p("live/hd"))), "ended, not lost");
 	}
 
+	/// A copy the ending message loses ends only its own path: another announcer's claim lost
+	/// earlier under the ended one still waits out its debounce.
+	#[test]
+	fn a_lost_copy_beside_an_ended_claim_ends_no_other_path() {
+		let mut router = Router::<usize, u64, Run>::new(node(1), debounce(HOP));
+		open(&mut router, 2, Role::Routing(node(2)));
+		open(&mut router, 4, Role::Routing(node(4)));
+		router.recv(2, route(2, 2, 1)).unwrap();
+		router.recv(4, route(4, 4, 2)).unwrap();
+		let live = |path: &str, instance: u64, chain: Vec<Id>, above: u64| {
+			let Change::Live(claim) = chained(chain) else {
+				unreachable!("a live claim");
+			};
+			let item = Run { epoch: 0, above };
+			((p(path), instance), Change::Live(Claim { item, ..claim }))
+		};
+		let claims = |origin: Id, changes, floor: Rev| Msg::Claims {
+			origin: node(origin),
+			changes,
+			floor,
+		};
+		let changes = vec![live("live", 7, vec![9, 2], 0), live("live/sd", 7, vec![9, 2], 1)];
+		router.recv(2, claims(2, changes, 1)).unwrap();
+		// Another announcer's claim, and another instance that keeps its path claimed.
+		let changes = vec![live("live/hd", 7, vec![10, 4], 0), live("live/hd", 8, vec![10, 4], 0)];
+		router.recv(4, claims(4, changes, 1)).unwrap();
+		router
+			.recv(4, claims(4, vec![((p("live/hd"), 7), Change::Lost)], 2))
+			.unwrap();
+		let hd = (7, p("live/hd"));
+		assert!(!router.shown()[&hd].available, "lost, waiting out the debounce");
+
+		let changes = vec![((p("live"), 7), Change::Ended), ((p("live/sd"), 7), Change::Lost)];
+		router.recv(2, claims(2, changes, 2)).unwrap();
+		assert!(!router.shown().contains_key(&(7, p("live/sd"))), "ended, not lost");
+		assert!(router.shown().contains_key(&hd), "still waiting out the debounce");
+	}
+
 	/// A publisher that withdraws its claim and announces it again at the same epoch, as
 	/// `origin::Route::withdraw` and `announce` do, is shown at once: only the copies that
 	/// stood when the end arrived are held back.
