@@ -246,13 +246,16 @@ fn adopt(
 /// `at` on clock `from` moved onto clock `to`, a re-basing of it: shifted by what separates their
 /// readings at one instant, so it names the same moment. Needs no wall mapping, which a clock placed
 /// on arrival without a host wall clock lacks.
+///
+/// A moment before `to`'s PTS zero, such as a change staged before the first frame placed the clock
+/// there, lands at zero: the earliest it can name, still in effect from the first frame on.
 fn restamp(from: &crate::Clock, to: &crate::Clock, at: moq_net::Timestamp) -> crate::Result<moq_net::Timestamp> {
-	let unmappable = || crate::Error::UnmappableTimestamp(format!("{at:?} lands before the re-based clock's PTS zero"));
 	// The clocks' own source, not the caller's: an anchor may run on another thread or runtime.
 	let now = from.instant();
 	let shift = to.capture(now)?.as_micros()? as i128 - from.capture(now)?.as_micros()? as i128;
-	let micros = u64::try_from(at.as_micros()? as i128 + shift).map_err(|_| unmappable())?;
-	moq_net::Timestamp::from_micros(micros).map_err(|_| unmappable())
+	let micros = u64::try_from(at.as_micros()? as i128 + shift).unwrap_or(0);
+	moq_net::Timestamp::from_micros(micros)
+		.map_err(|_| crate::Error::UnmappableTimestamp(format!("{at:?} lands past the re-based clock's range")))
 }
 
 /// Take the shared state, ignoring a poisoned lock.
@@ -2304,6 +2307,25 @@ mod test {
 		timebase.anchor(ms(1_400)).unwrap();
 		drop(reserved);
 		assert_eq!(starts(&catalog), [Some(start(&catalog, 1_400)); 2]);
+	}
+
+	/// A change staged before a zero-based input's first frame lands at PTS zero, the earliest moment
+	/// the clock placed at that frame can name, rather than failing the import.
+	#[tokio::test(start_paused = true)]
+	async fn a_timestamp_staged_before_a_zero_based_first_frame_lands_at_zero() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+
+		let timebase = catalog.timebase();
+		let reserved = timebase.reserve();
+		let staged = catalog.next_timestamp();
+		opus(&mut catalog, "a", staged).unwrap();
+
+		// The input takes a while to deliver its first frame, at PTS zero.
+		tokio::time::advance(std::time::Duration::from_secs(2)).await;
+		timebase.anchor(ms(0)).unwrap();
+		drop(reserved);
+		assert_eq!(starts(&catalog), [Some(0); 2]);
 	}
 
 	/// The anchor may come from a thread outside the runtime the producer was made in: the stamp still
