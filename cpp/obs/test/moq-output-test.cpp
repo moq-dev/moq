@@ -573,6 +573,7 @@ int main()
 		CHECK(WaitFor([&] { return output.IsLiveSession() && relay.Accepted() == 1; }));
 		// The plugin names itself ahead of the C++ package, so a relay can tell it apart.
 		CHECK(relay.Advertised("moq-obs/dev moq-cpp/"));
+		OutlastHealthy();
 		relay.DropSessions();
 		CHECK(WaitFor([&] { return output.GetReconnectCount() == 1 && output.IsLiveSession(); }));
 		CHECK(MoQOutputStatsTest::Instance(output) == first);
@@ -1172,6 +1173,7 @@ int main()
 		MoQOutput o(nullptr, OUTPUT);
 		CHECK(o.Start());
 		CHECK(WaitFor([&] { return o.IsLiveSession() && relay.Accepted() == 1; }));
+		OutlastHealthy();
 		relay.DropSessions();
 		CHECK(WaitFor([&] { return relay.Accepted() == 2; }));
 		CHECK(WaitFor([&] { return o.GetReconnectCount() == 1; }));
@@ -1190,6 +1192,7 @@ int main()
 		MoQOutput o(nullptr, OUTPUT);
 		CHECK(o.Start());
 		CHECK(WaitFor([&] { return o.IsLiveSession(); }));
+		OutlastHealthy();
 		relay.reset();
 		MoQOutput::ConnectionStats stats;
 		CHECK(WaitFor([&] { return !o.TryGetConnectionStats(&stats); }));

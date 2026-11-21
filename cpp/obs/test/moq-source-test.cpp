@@ -1769,6 +1769,7 @@ int main()
 		Publisher publisher(relay, "obs/test");
 		void *source = createSource();
 		CHECK(publisher.WriteUntil([] { return g_output_frames > 0 && g_output_audio > 0; }));
+		OutlastHealthy();
 		relay.DropSessions();
 		CHECK(WaitFor([&] { return relay.Accepted() == 2; }));
 		const int frames = g_output_frames;
