@@ -715,7 +715,7 @@ test.each([
 		const remote = wireOf(client).consume(Path.from("room"));
 		try {
 			const reader = remote.track("video").subscribe({
-				ranges: [{ start: { time: 2n } }],
+				ranges: [{ start: 2n }],
 				delay: { max: null },
 				order: "ascending",
 			});

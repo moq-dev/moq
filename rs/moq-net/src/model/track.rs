@@ -14059,7 +14059,7 @@ mod test {
 		headless.finish().unwrap();
 
 		let noop = kio::Waiter::noop();
-		let start = Anchor::Time(4);
+		let start = Some(4);
 		let mut sub = producer.subscribe(replay().with_ranges([Range { start, end: None }]));
 		let Poll::Ready(Ok(Some(mut group))) = sub.poll_recv_group(&noop) else {
 			panic!("no group");
