@@ -55,7 +55,7 @@ try {
 			[0n, 5n, [0n, 2n, 4n]],
 		] as const) {
 			const reader = broadcast.track("test").subscribe({
-				ranges: [{ ...(start === 0n ? {} : { start: { time: start } }), end: { time: end - 1n } }],
+				ranges: [{ ...(start === 0n ? {} : { start }), end: end - 1n }],
 				delay: { max: null },
 				order: "ascending",
 			});

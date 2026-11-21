@@ -70,12 +70,13 @@ public typealias AnnounceEvent = MoqFFI.MoqAnnounceEvent
 /// Per-subscription delivery preferences: priority, delay, the ranges of the track to
 /// deliver, and group ordering.
 public typealias Subscription = MoqFFI.MoqSubscription
-/// How far behind the live edge a subscriber or decoder plays: `min` is the target latency, where a
-/// cold join starts, `nil` to leave it unstated (a decoder starts it as zero; a catalog warmup or
-/// an audio decoder's playout delay still states a `min` to the publisher), and `max`, `nil` for no
-/// subscriber limit, is how far a non-latest group may fall behind before it is skipped, and how
-/// far newer media may run past a missing group before a decoder gives it up. A `min` past `max`
-/// starts a cold join no further back than the group covering the point `max` behind the live edge.
+/// How far behind the live edge a subscriber or decoder plays: `min` is the target latency, and once
+/// stated, zero included, a range with no start is a live join that far behind the live edge; `nil`
+/// leaves it unstated, so such a range reaches back as far as `max` allows (a decoder starts it as
+/// zero). `max`, `nil` for no subscriber limit, is how far a non-latest group may fall behind before
+/// it is skipped, and how far newer media may run past a missing group before a decoder gives it up.
+/// A `min` past `max` starts a live join no further back than the group covering the point `max`
+/// behind the live edge.
 public typealias Delay = MoqFFI.MoqDelay
 /// Options for fetching one complete group by start.
 public typealias FetchGroupOptions = MoqFFI.MoqFetchGroupOptions
@@ -149,19 +150,19 @@ public typealias Position = MoqFFI.MoqPosition
 // Nested rather than top-level: a module-level `Range` would shadow `Swift.Range`
 // in every file that imports Moq.
 extension Subscription {
-    /// A span of a track to deliver: from `start` through `end`, or onward when `end` is `nil`.
-    /// Every end includes its whole group.
+    /// A span of a track to deliver: from the group containing `start` through the group
+    /// containing `end`, each a `Timestamp.unscaled` time in the track's timescale (a scaled one
+    /// is refused). Every end includes its whole group. A `nil` `start` is no start, which the
+    /// subscription's `delay` places: a stated `min` is a live join that far behind the live edge
+    /// (zero is the latest group), and an unstated one reaches back as far as `max` allows. A
+    /// `nil` `end` keeps following the live edge.
     public typealias Range = MoqFFI.MoqRange
-    /// Where one end of a `Range` falls: `.oldest` (a start only), `.relative(groups:)` back
-    /// from the latest group, or `.time(timestamp:)` for the group containing an unscaled time
-    /// in the track's timescale (a scaled one is refused).
-    public typealias Anchor = MoqFFI.MoqAnchor
     /// Which pending group the publisher sends first: `.ascending` or `.descending`.
     public typealias Order = MoqFFI.MoqOrder
 
-    /// moq-net's defaults, whose zero `delay` starts at the newest group and skips a superseded
-    /// one at once. A `nil` subscription means the same; copy this one to change a field. A
-    /// `Subscription(...)` must name `delay`.
+    /// moq-net's defaults, whose `delay` (no `min`, a zero `max`) starts at the newest group and
+    /// skips a superseded one at once. A `nil` subscription means the same; copy this one to
+    /// change a field. A `Subscription(...)` must name `delay`.
     public static var `default`: Subscription { moqSubscriptionDefaults() }
 }
 

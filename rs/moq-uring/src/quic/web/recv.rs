@@ -69,6 +69,13 @@ impl Stream {
 		}
 	}
 
+	/// Let the peer send at most `window` bytes past what the reader took, returning the
+	/// connection credit the stream may hold, none once stopped. See
+	/// [`recv::Stream::set_window`].
+	pub fn set_window(&mut self, window: u64) -> u64 {
+		self.inner.as_mut().map_or(0, |inner| inner.set_window(window))
+	}
+
 	/// Tell the other end to stop sending data with the given error code. See
 	/// [`recv::Stream::stop`]. This is a u32 with WebTransport since it shares the error
 	/// space with HTTP/3. A raw QUIC session sends the code as is. Does nothing once stopped.
@@ -212,6 +219,9 @@ impl moq_net::transport::poll::RecvStream for Stream {
 	fn set_priority(&mut self, priority: i64) {
 		Self::set_priority(self, priority);
 	}
+	fn set_window(&mut self, window: u64) -> Option<u64> {
+		Some(Self::set_window(self, window))
+	}
 	fn stop(&mut self, code: u32) {
 		Self::stop_mut(self, code);
 	}
@@ -228,6 +238,9 @@ impl moq_net::transport::poll::Lease for recv::Lease<'_> {
 	}
 	fn release(self) {
 		Self::release(self);
+	}
+	fn set_window(&mut self, window: u64) {
+		Self::set_window(self, window);
 	}
 }
 

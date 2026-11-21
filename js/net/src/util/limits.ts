@@ -1,8 +1,9 @@
 import { Session, SessionCode } from "../error.ts";
 
 /**
- * Allocation guard for a compressed frame, which is stored and sent whole: the lite-07 header
- * declares a slice's size before its bytes, so a frame cannot be compressed as it streams.
+ * The largest frame a peer may send, as Rust's `MAX_CACHE_BYTES`: a received frame declaring more
+ * is `FrameTooLarge` at its header. It also caps a compressed frame, which is stored and sent
+ * whole since the lite-07 header declares a slice's size before its bytes.
  * @internal
  */
 export const MAX_FRAME_BYTES = 32 * 1024 * 1024;

@@ -483,9 +483,9 @@ export function hasRefresh(version: Version): boolean {
 	}
 }
 
-/** Whether received frame timestamps are the publisher's media time. Lite-05/06 stamp an untimed
- * track's payloads with their send time, which a receiver cannot tell from it, so it passes them
- * through as the track's time without checking them for a rewind. */
+/** Whether received frame timestamps are the publisher's media time. A released lite-05/06
+ * publisher may stamp an untimed track's payloads with their send time, which a receiver cannot
+ * tell from it, so it passes them through as the track's time without checking them for a rewind. */
 export function hasMediaTime(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-07+ behavior.
 	switch (version) {
@@ -637,7 +637,7 @@ export function hasEndError(version: Version): boolean {
 /**
  * The timescale the wire carries for a track with `timescale`, or `undefined` when its frames
  * and datagrams carry no timestamp. Lite-05 and lite-06 always carry one, so an untimed track
- * declares milliseconds there and its payloads carry their send times instead.
+ * declares milliseconds there and its payloads carry their group's start, or their sequence.
  */
 export function wireTimescale(version: Version, timescale: Timescale | null | undefined): Timescale | undefined {
 	switch (version) {
@@ -723,9 +723,9 @@ export function hasLengthFirst(version: Version): boolean {
 }
 
 /**
- * Whether GROUP carries the previous group's `Previous Start`, and a Group or Fetch Stream ends a
- * finished group with GROUP_END and a closed one with a bare FIN. Added in lite-07; earlier
- * versions end every group with a bare FIN.
+ * Whether a Group or Fetch Stream ends a finished group with GROUP_END and a closed one with a bare
+ * FIN, and counts its first FRAME's timestamp delta from the group's start. Added in lite-07;
+ * earlier versions end every group with a bare FIN and count the first delta from 0.
  */
 export function hasGroupEnd(version: Version): boolean {
 	switch (version) {

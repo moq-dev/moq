@@ -18,7 +18,6 @@ const ENUMS: &[&str] = &[
 	"moq_protocol_kind",
 	"moq_demand",
 	"moq_decode_start",
-	"moq_anchor_kind",
 	"moq_compression",
 ];
 

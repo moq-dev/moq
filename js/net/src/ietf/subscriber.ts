@@ -1032,10 +1032,8 @@ export class Subscriber {
 		if (hooks.trackFinished(producer) || !hooks.subscribing(producer).peek()) return false;
 		const ranges = hooks.requested(producer).peek()?.ranges ?? [];
 		if (!bounded(ranges)) return true;
-		const end = wireSpan(ranges).end;
-		// A relative end resolves against Largest, or against the first group when none exists yet,
-		// which only the live feed delivers.
-		return end === undefined ? edge === 0n : end > edge;
+		// Every range ends, at a time, so the end is known.
+		return (wireSpan(ranges).end ?? 0n) > edge;
 	}
 
 	async #historyOnly(producer: track.Producer, edge: bigint): Promise<void> {
@@ -1911,7 +1909,8 @@ export class Subscriber {
 						`group ${group.groupId} is at or past the declared end ${subscription.end}`,
 					);
 				}
-				producer = track.createGroup(group.groupId);
+				// A group the copy already holds arrived twice, which the received path refuses.
+				producer = hooks.receiveGroup(track, { start: group.groupId, offset: 0 });
 			}
 			return producer;
 		};
@@ -2178,7 +2177,7 @@ export class Subscriber {
 
 				const timestamp = objectTime(timescale, join.key);
 				if (first) {
-					producer = join.open(() => track.createGroup(join.key));
+					producer = join.open(() => hooks.receiveGroup(track, { start: join.key, offset: 0 }));
 					if (!producer) {
 						discarding = true;
 						if (!object.payload) await skipPayload(stream, object.size);

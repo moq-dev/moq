@@ -167,6 +167,15 @@ impl Reading {
 		}
 	}
 
+	/// Record `groups` as accounted for by this stream, such as the span its GROUP_END closed.
+	pub fn account(&self, groups: Range<u64>, now: Instant) {
+		if let Some(tail) = &self.tail
+			&& let Ok(mut state) = tail.write()
+		{
+			state.account(groups, now);
+		}
+	}
+
 	/// Stop holding the end open while the stream waits on another one, which holds it
 	/// open itself if its header arrived.
 	pub fn park(&mut self) {

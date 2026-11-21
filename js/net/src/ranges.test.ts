@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { Counts, Cover } from "./cover.ts";
 import { Ranges } from "./ranges.ts";
-import type { Anchor, Range } from "./track.ts";
+import type { Range } from "./track.ts";
 import { max, min, UNBOUNDED } from "./util/key.ts";
 import { union } from "./window.ts";
 
@@ -18,28 +18,27 @@ function rng(seed: number): (below: number) => number {
 }
 
 // Each change reports exactly whether the union moved, and the union matches a full fold of what
-// is held.
+// is held, whether the ranges with no start join live or reach back to the oldest group.
 test("the incremental union matches a full fold", () => {
 	const random = rng(0x72616e67);
 	const int = (below: number) => Math.floor(random(below));
-	const anchor = (): Anchor | undefined => {
-		const kind = int(6);
-		if (kind === 0) return { relative: BigInt(int(4)) };
-		if (kind === 1) return undefined;
-		return { time: BigInt(int(12)) };
-	};
+	const time = (): bigint | undefined => (int(6) < 2 ? undefined : BigInt(int(12)));
 	const ranges = new Ranges();
 	const held: Range[] = [];
+	let joins = false;
 	for (let step = 0; step < 50_000; step++) {
 		const grow = held.length < 24 ? 0.65 : 0.35;
-		const before = union(held);
+		const before = union(held, joins);
 		let changed: boolean;
-		if (held.length === 0 || random(1) < grow) {
+		if (random(1) < 0.05) {
+			joins = !joins;
+			changed = ranges.joins(joins);
+		} else if (held.length === 0 || random(1) < grow) {
 			const range: Range = {};
-			const start = anchor();
-			if (start) range.start = start;
-			const end = random(1) < 0.6 ? anchor() : undefined;
-			if (end) range.end = end;
+			const start = time();
+			if (start !== undefined) range.start = start;
+			const end = random(1) < 0.6 ? time() : undefined;
+			if (end !== undefined) range.end = end;
 			held.push(range);
 			changed = ranges.add(range);
 		} else {
@@ -47,7 +46,7 @@ test("the incremental union matches a full fold", () => {
 			const [range] = held.splice(index, 1);
 			changed = ranges.remove(range);
 		}
-		const after = union(held);
+		const after = union(held, joins);
 		expect(ranges.union()).toEqual(after);
 		expect(changed).toBe(!Bun.deepEquals(before, after));
 	}
