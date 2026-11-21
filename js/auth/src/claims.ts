@@ -12,10 +12,12 @@ import {
 	AccessSchema,
 	decodeGrants,
 	paths,
+	readPrefixes,
 	TokenIdSchema,
 	UnixSecondsSchema,
 	WireAccessSchema,
 	WirePrefixListSchema,
+	writtenScope,
 } from "./wire.ts";
 
 export { type Access, AccessSchema, PrefixListSchema, TokenIdSchema } from "./wire.ts";
@@ -37,33 +39,41 @@ export function prefixes(texts: readonly string[] | undefined): Prefixes {
  * signers wrote it. A scope bounds paths, never bitrate, so a capped role is
  * refused, as is a malformed root (see `Path.validate`). The stricter `Path.signable` applies
  * only where a scope is minted, so keys minted before it still load. Any other field is refused.
+ *
+ * TEMPORARY MIGRATION (see `wire.ts`): the parsed scope spells each prefix as the subtree pattern
+ * a release before 0.22 reads, `foo/**` or `**`, as `GrantSchema` does. So a parsed key, and
+ * `Key.public` and `KeySet.public` of any key, write a scope every verifier reads as the same
+ * subtrees as the tokens the key signs. {@link Scope.allows} reads either spelling.
  */
-export const ScopeSchema = z
-	.pipe(
-		z.strictObject({
-			/** The root that `publish` and `subscribe` are relative to. Defaults to the empty string. */
-			root: z._default(z.string(), ""),
-			/** Prefixes this key may grant to publishers, relative to `root`. */
-			publish: z.optional(WirePrefixListSchema),
-			/** Prefixes this key may grant to subscribers, relative to `root`. */
-			subscribe: z.optional(WirePrefixListSchema),
-			put: z.optional(z.array(z.string())),
-			get: z.optional(z.array(z.string())),
-		}),
-		z.transform(decodeGrants),
-	)
-	.check(
-		z.refine((data) => (data.publish?.length ?? 0) > 0 || (data.subscribe?.length ?? 0) > 0, {
-			message: "Either publish or subscribe must contain at least one prefix",
-		}),
-		z.superRefine((data, ctx) => {
-			try {
-				Path.validate(data.root);
-			} catch (error) {
-				ctx.addIssue({ code: "custom", message: error instanceof Error ? error.message : String(error) });
-			}
-		}),
-	);
+export const ScopeSchema = z.pipe(
+	z
+		.pipe(
+			z.strictObject({
+				/** The root that `publish` and `subscribe` are relative to. Defaults to the empty string. */
+				root: z._default(z.string(), ""),
+				/** Prefixes this key may grant to publishers, relative to `root`. */
+				publish: z.optional(WirePrefixListSchema),
+				/** Prefixes this key may grant to subscribers, relative to `root`. */
+				subscribe: z.optional(WirePrefixListSchema),
+				put: z.optional(z.array(z.string())),
+				get: z.optional(z.array(z.string())),
+			}),
+			z.transform(decodeGrants),
+		)
+		.check(
+			z.refine((data) => (data.publish?.length ?? 0) > 0 || (data.subscribe?.length ?? 0) > 0, {
+				message: "Either publish or subscribe must contain at least one prefix",
+			}),
+			z.superRefine((data, ctx) => {
+				try {
+					Path.validate(data.root);
+				} catch (error) {
+					ctx.addIssue({ code: "custom", message: error instanceof Error ? error.message : String(error) });
+				}
+			}),
+		),
+	z.transform(writtenScope),
+);
 
 /** A value parsed by {@link ScopeSchema}. */
 export type Scope = z.output<typeof ScopeSchema>;
@@ -242,7 +252,8 @@ function authorize(claims: Claims, path: string): Permissions {
 function allows(scope: Scope, claims: Claims): boolean {
 	const covers = (granted: string[] | undefined, requested: string[] | undefined) => {
 		try {
-			return prefixes(granted).rooted(scope.root).covers(prefixes(requested).rooted(claims.root));
+			// TEMPORARY MIGRATION (see `wire.ts`): a scope spells its prefixes as subtree patterns.
+			return prefixes(readPrefixes(granted)).rooted(scope.root).covers(prefixes(requested).rooted(claims.root));
 		} catch {
 			// A root too deep to place the prefixes beneath cannot be granted either way.
 			return false;

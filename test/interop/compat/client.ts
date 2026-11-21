@@ -282,6 +282,13 @@ if (command === "sign") {
 	const [path, publish, subscribe] = args;
 	const key = Auth.Key.parse(readFileSync(path, "utf8"));
 	console.log(await Auth.Key.sign(key, { root: "compat", publish: [publish], subscribe: [subscribe] }));
+} else if (command === "generate") {
+	// A scoped key as this library writes one, and the public half it publishes. Current only.
+	const [secret, published] = args;
+	const scope = { root: "compat", publish: ["video"], subscribe: [""] };
+	const key = Auth.Key.parse(JSON.stringify({ ...(await Auth.Key.generate("ES256")), scope }));
+	writeFileSync(secret, JSON.stringify(key));
+	writeFileSync(published, JSON.stringify(Auth.Key.public(key)));
 } else if (command === "verify") {
 	// The grant this release should read back, spelled as `sign` takes it, each role a
 	// comma-separated list.

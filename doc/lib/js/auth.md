@@ -23,7 +23,8 @@ or `**`, and reads that spelling back as the prefix. A claim or grant role is
 an `Access`: its prefix array, or `{ path, rate }` with a bitrate cap. A
 `Grant` is typed as its wire shape: answer with `GrantSchema.parse(grant)`,
 which spells it as every relay reads it, and the relay refuses a field it does
-not know. `Claims` spell a token's
+not know. A parsed key spells its scope the same way, and so does `Key.public`,
+so write a key you scope by hand from `Key.parse` of it or from `Key.public`. `Claims` spell a token's
 `exp`, `iat`, `nbf`, and `jti` as `expires`, `issued`, `notBefore`, and `id`, as
 the Rust crate does. Key scopes bound paths only, and `Claims.authorize` checks
 paths only.

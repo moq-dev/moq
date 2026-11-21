@@ -29,7 +29,8 @@ test("claims read legacy put/get prefixes as the same prefixes", () => {
 	const claims = ClaimsSchema.parse({ root: "demo", put: ["alice", "/a//b/"], get: "" });
 	expect(claims.publish).toEqual(["alice", "a/b"]);
 	expect(claims.subscribe).toEqual([""]);
-	expect(ScopeSchema.parse({ root: "demo", put: ["room"] }).publish).toEqual(["room"]);
+	// TEMPORARY MIGRATION (see `writtenScope` in wire.ts): a parsed scope is spelled as written.
+	expect(ScopeSchema.parse({ root: "demo", put: ["room"] }).publish).toEqual(["room/**"]);
 });
 
 // TEMPORARY MIGRATION (see `readPrefix` in wire.ts): released signers and auth servers spell a
@@ -45,8 +46,11 @@ test("every grant reads a subtree pattern as its prefix", () => {
 			path: [prefix],
 			rate: 8000,
 		});
-		expect(ScopeSchema.parse({ subscribe: [text] }).subscribe, text).toEqual([prefix]);
-		expect(GrantSchema.parse({ publish: [text] }).publish, text).toEqual([prefix ? `${prefix}/**` : "**"]);
+		// A parsed scope and grant spell their prefixes as written, which parses back the same.
+		const written = [prefix ? `${prefix}/**` : "**"];
+		expect(ScopeSchema.parse({ subscribe: [text] }).subscribe, text).toEqual(written);
+		expect(ScopeSchema.parse({ subscribe: [prefix] }).subscribe, text).toEqual(written);
+		expect(GrantSchema.parse({ publish: [text] }).publish, text).toEqual(written);
 	}
 });
 

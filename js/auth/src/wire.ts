@@ -37,7 +37,7 @@ export const PrefixListSchema = z.array(
  *
  * Those releases read a member as a pattern: a bare `foo` is the one path `foo`, and `""` the
  * root alone. So every list one of them reads, in a token, a key scope, or an auth server's
- * grant, is written as the same subtrees in pattern form ({@link writtenAccess}), and a member
+ * grant, is written as the same subtrees in pattern form ({@link written}), and a member
  * spelled that way, `foo/**` or `**`, reads back as its prefix. Any other wildcard is still
  * refused, and nothing else takes the alias: `Key.sign`'s claims and the CLI's flags stay strict.
  *
@@ -45,10 +45,24 @@ export const PrefixListSchema = z.array(
  * 0.22 writes bare prefixes, and the one after it deletes the read, once tokens and key scopes
  * minted with `/**` have expired or been re-minted.
  */
-function readPrefix(text: string): string {
+function readPrefix(text: string): Prefix {
 	const head = text === "**" ? "" : text.length > 3 && text.endsWith("/**") ? text.slice(0, -3) : text;
 	// A wildcard left in the head names something other than one subtree; parsing all of it says so.
-	return Prefix.parse(head.includes("*") ? text : head).text;
+	return Prefix.parse(head.includes("*") ? text : head);
+}
+
+/** TEMPORARY MIGRATION (see {@link readPrefix}): the prefixes a list names, in either spelling. */
+export function readPrefixes(texts: readonly string[] | undefined): string[] {
+	return (texts ?? []).map((text) => readPrefix(text).text);
+}
+
+/**
+ * TEMPORARY MIGRATION (see {@link readPrefix}): each prefix spelled as the subtree pattern a release
+ * before 0.22 reads, `foo/**` or `**`, from either spelling. A prefix as deep as a path may be is its
+ * literal, which a release reads as that one path: nothing lies beneath it.
+ */
+function written(texts: readonly string[]): string[] {
+	return texts.map((text) => readPrefix(text).pattern().toString());
 }
 
 /**
@@ -60,7 +74,7 @@ export const WirePrefixListSchema = z.array(
 		z.string(),
 		z.transform((text, ctx) => {
 			try {
-				return readPrefix(text);
+				return readPrefix(text).text;
 			} catch (error) {
 				ctx.issues.push({
 					code: "custom",
@@ -112,14 +126,22 @@ export const WireAccessSchema = z.union([
 	z.strictObject({ path: WirePrefixListSchema, rate: RateSchema }),
 ]);
 
-/**
- * TEMPORARY MIGRATION (see {@link readPrefix}): `access` with each prefix spelled as the subtree
- * pattern a release before 0.22 reads, `foo/**` or `**`. A prefix as deep as a path may be is its
- * literal, which a release reads as that one path: nothing lies beneath it.
- */
+/** TEMPORARY MIGRATION (see {@link readPrefix}): `access` with each prefix spelled as {@link written} does. */
 export function writtenAccess(access: Access): Access {
-	const spell = (texts: string[]) => texts.map((text) => Prefix.parse(text).pattern().toString());
-	return Array.isArray(access) ? spell(access) : { ...access, path: spell(access.path) };
+	return Array.isArray(access) ? written(access) : { ...access, path: written(access.path) };
+}
+
+/**
+ * TEMPORARY MIGRATION (see {@link readPrefix}): a key scope with each prefix spelled as
+ * {@link written} does, so a key's JWK reads as the same subtrees as the tokens it signs.
+ */
+export function writtenScope<T extends { publish?: string[]; subscribe?: string[] }>(scope: T): T {
+	const { publish, subscribe } = scope;
+	return {
+		...scope,
+		...(publish && { publish: written(publish) }),
+		...(subscribe && { subscribe: written(subscribe) }),
+	};
 }
 
 /** The prefixes `access` reaches, empty when the role is absent. */

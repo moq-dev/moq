@@ -6,6 +6,7 @@ import type { Algorithm } from "./algorithm.ts";
 import { Claims } from "./claims.ts";
 import { INSECURE_TEST_RS256_OTHER, INSECURE_TEST_RSA_KEYS } from "./insecure-test-keys.ts";
 import { Key, KeyIdSchema } from "./key.ts";
+import { KeySet } from "./set.ts";
 
 // Helper function to encode JSON to base64url
 function encodeJwk(obj: unknown): string {
@@ -980,9 +981,36 @@ test("public - shares no scope with the signer, and parses back", async () => {
 	const key = await Key.generate("EdDSA");
 	key.scope = { root: "", publish: ["a"] };
 	const publicKey = Key.public(key);
-	expect(publicKey.scope).toEqual(key.scope);
+	// TEMPORARY MIGRATION (see `writtenScope` in wire.ts): spelled as a parsed scope is.
+	expect(publicKey.scope).toEqual({ root: "", publish: ["a/**"] });
+	expect(key.scope).toEqual({ root: "", publish: ["a"] });
 	expect(publicKey.scope).not.toBe(key.scope);
-	expect(Key.parse(JSON.stringify(publicKey)).key_ops).toEqual(["verify"]);
+	const parsed = Key.parse(JSON.stringify(publicKey));
+	expect([parsed.key_ops, parsed.scope]).toEqual([["verify"], publicKey.scope]);
+});
+
+// TEMPORARY MIGRATION (see `writtenScope` in wire.ts): a release before 0.22 reads a scope member
+// as a pattern, the bare `video` as that one path, and refuses a token whose grant exceeds it. So
+// the scope a key publishes spells each prefix as the subtree its tokens spell. The wire-compat
+// lane (`test/interop/compat.sh`) checks the same key against released verifiers.
+test("public - a scoped key publishes the scope its tokens are spelled in", async () => {
+	const generated = await Key.generate("ES256");
+	const typed = { ...generated, scope: { root: "demo", publish: ["video"], subscribe: [""] } };
+	const parsed = Key.parse(JSON.stringify(typed));
+	const written = { root: "demo", publish: ["video/**"], subscribe: ["**"] };
+	expect(parsed.scope).toEqual(written);
+	for (const key of [typed, parsed]) {
+		const published = JSON.parse(JSON.stringify(KeySet.public({ keys: [key] }))).keys[0];
+		expect(published.scope).toEqual(written);
+		expect(Key.public(key).scope).toEqual(written);
+
+		const token = await Key.sign(key, { root: "demo", publish: ["video"], subscribe: [""] });
+		const payload = JSON.parse(Buffer.from(token.split(".")[1], "base64url").toString());
+		expect(payload).toEqual({ root: "demo", publish: ["video/**"], subscribe: ["**"] });
+		const claims = await Key.verify(Key.parse(JSON.stringify(published)), token);
+		expect([claims.publish, claims.subscribe]).toEqual([["video"], [""]]);
+		await expect(Key.sign(key, { root: "demo", publish: ["audio"] })).rejects.toThrow(/exceed the key scope/);
+	}
 });
 
 test("parse - refuses an algorithm another key type owns", async () => {

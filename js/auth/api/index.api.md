@@ -221,7 +221,7 @@ export const KeySchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 	}>>>;
 	kid: ZodMiniOptional<ZodMiniString<string>>;
 	kty: ZodMiniLiteral<"oct">;
-	scope: ZodMiniOptional<ZodMiniPipe<ZodMiniObject<{
+	scope: ZodMiniOptional<ZodMiniPipe<ZodMiniPipe<ZodMiniObject<{
 		get: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
 		publish: ZodMiniOptional<ZodMiniArray<ZodMiniPipe<ZodMiniString<string>, ZodMiniTransform<string, string>>>>;
 		put: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
@@ -239,7 +239,19 @@ export const KeySchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 		put?: string[] | undefined;
 		root: string;
 		subscribe?: string[] | undefined;
-	}>>>;
+	}>>, ZodMiniTransform<Omit<{
+		get?: string[] | undefined;
+		publish?: string[] | undefined;
+		put?: string[] | undefined;
+		root: string;
+		subscribe?: string[] | undefined;
+	}, "get" | "put">, Omit<{
+		get?: string[] | undefined;
+		publish?: string[] | undefined;
+		put?: string[] | undefined;
+		root: string;
+		subscribe?: string[] | undefined;
+	}, "get" | "put">>>>;
 }, $strip>, ZodMiniObject<{
 	alg: ZodMiniEnum<{
 		ES256: "ES256";
@@ -270,7 +282,7 @@ export const KeySchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 	p: ZodMiniOptional<ZodMiniString<string>>;
 	q: ZodMiniOptional<ZodMiniString<string>>;
 	qi: ZodMiniOptional<ZodMiniString<string>>;
-	scope: ZodMiniOptional<ZodMiniPipe<ZodMiniObject<{
+	scope: ZodMiniOptional<ZodMiniPipe<ZodMiniPipe<ZodMiniObject<{
 		get: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
 		publish: ZodMiniOptional<ZodMiniArray<ZodMiniPipe<ZodMiniString<string>, ZodMiniTransform<string, string>>>>;
 		put: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
@@ -288,7 +300,19 @@ export const KeySchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 		put?: string[] | undefined;
 		root: string;
 		subscribe?: string[] | undefined;
-	}>>>;
+	}>>, ZodMiniTransform<Omit<{
+		get?: string[] | undefined;
+		publish?: string[] | undefined;
+		put?: string[] | undefined;
+		root: string;
+		subscribe?: string[] | undefined;
+	}, "get" | "put">, Omit<{
+		get?: string[] | undefined;
+		publish?: string[] | undefined;
+		put?: string[] | undefined;
+		root: string;
+		subscribe?: string[] | undefined;
+	}, "get" | "put">>>>;
 }, $strip>, ZodMiniObject<{
 	alg: ZodMiniEnum<{
 		ES256: "ES256";
@@ -315,7 +339,7 @@ export const KeySchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 	}>>>;
 	kid: ZodMiniOptional<ZodMiniString<string>>;
 	kty: ZodMiniLiteral<"EC">;
-	scope: ZodMiniOptional<ZodMiniPipe<ZodMiniObject<{
+	scope: ZodMiniOptional<ZodMiniPipe<ZodMiniPipe<ZodMiniObject<{
 		get: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
 		publish: ZodMiniOptional<ZodMiniArray<ZodMiniPipe<ZodMiniString<string>, ZodMiniTransform<string, string>>>>;
 		put: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
@@ -333,7 +357,19 @@ export const KeySchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 		put?: string[] | undefined;
 		root: string;
 		subscribe?: string[] | undefined;
-	}>>>;
+	}>>, ZodMiniTransform<Omit<{
+		get?: string[] | undefined;
+		publish?: string[] | undefined;
+		put?: string[] | undefined;
+		root: string;
+		subscribe?: string[] | undefined;
+	}, "get" | "put">, Omit<{
+		get?: string[] | undefined;
+		publish?: string[] | undefined;
+		put?: string[] | undefined;
+		root: string;
+		subscribe?: string[] | undefined;
+	}, "get" | "put">>>>;
 	x: ZodMiniString<string>;
 	y: ZodMiniString<string>;
 }, $strip>, ZodMiniObject<{
@@ -359,7 +395,7 @@ export const KeySchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 	}>>>;
 	kid: ZodMiniOptional<ZodMiniString<string>>;
 	kty: ZodMiniLiteral<"OKP">;
-	scope: ZodMiniOptional<ZodMiniPipe<ZodMiniObject<{
+	scope: ZodMiniOptional<ZodMiniPipe<ZodMiniPipe<ZodMiniObject<{
 		get: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
 		publish: ZodMiniOptional<ZodMiniArray<ZodMiniPipe<ZodMiniString<string>, ZodMiniTransform<string, string>>>>;
 		put: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
@@ -377,7 +413,19 @@ export const KeySchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 		put?: string[] | undefined;
 		root: string;
 		subscribe?: string[] | undefined;
-	}>>>;
+	}>>, ZodMiniTransform<Omit<{
+		get?: string[] | undefined;
+		publish?: string[] | undefined;
+		put?: string[] | undefined;
+		root: string;
+		subscribe?: string[] | undefined;
+	}, "get" | "put">, Omit<{
+		get?: string[] | undefined;
+		publish?: string[] | undefined;
+		put?: string[] | undefined;
+		root: string;
+		subscribe?: string[] | undefined;
+	}, "get" | "put">>>>;
 	x: ZodMiniString<string>;
 }, $strip>], "kty">;
 
@@ -414,7 +462,7 @@ export const KeySetSchema: ZodMiniObject<{
 		}>>>;
 		kid: ZodMiniOptional<ZodMiniString<string>>;
 		kty: ZodMiniLiteral<"oct">;
-		scope: ZodMiniOptional<ZodMiniPipe<ZodMiniObject<{
+		scope: ZodMiniOptional<ZodMiniPipe<ZodMiniPipe<ZodMiniObject<{
 			get: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
 			publish: ZodMiniOptional<ZodMiniArray<ZodMiniPipe<ZodMiniString<string>, ZodMiniTransform<string, string>>>>;
 			put: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
@@ -432,7 +480,19 @@ export const KeySetSchema: ZodMiniObject<{
 			put?: string[] | undefined;
 			root: string;
 			subscribe?: string[] | undefined;
-		}>>>;
+		}>>, ZodMiniTransform<Omit<{
+			get?: string[] | undefined;
+			publish?: string[] | undefined;
+			put?: string[] | undefined;
+			root: string;
+			subscribe?: string[] | undefined;
+		}, "get" | "put">, Omit<{
+			get?: string[] | undefined;
+			publish?: string[] | undefined;
+			put?: string[] | undefined;
+			root: string;
+			subscribe?: string[] | undefined;
+		}, "get" | "put">>>>;
 	}, $strip>, ZodMiniObject<{
 		alg: ZodMiniEnum<{
 			ES256: "ES256";
@@ -463,7 +523,7 @@ export const KeySetSchema: ZodMiniObject<{
 		p: ZodMiniOptional<ZodMiniString<string>>;
 		q: ZodMiniOptional<ZodMiniString<string>>;
 		qi: ZodMiniOptional<ZodMiniString<string>>;
-		scope: ZodMiniOptional<ZodMiniPipe<ZodMiniObject<{
+		scope: ZodMiniOptional<ZodMiniPipe<ZodMiniPipe<ZodMiniObject<{
 			get: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
 			publish: ZodMiniOptional<ZodMiniArray<ZodMiniPipe<ZodMiniString<string>, ZodMiniTransform<string, string>>>>;
 			put: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
@@ -481,7 +541,19 @@ export const KeySetSchema: ZodMiniObject<{
 			put?: string[] | undefined;
 			root: string;
 			subscribe?: string[] | undefined;
-		}>>>;
+		}>>, ZodMiniTransform<Omit<{
+			get?: string[] | undefined;
+			publish?: string[] | undefined;
+			put?: string[] | undefined;
+			root: string;
+			subscribe?: string[] | undefined;
+		}, "get" | "put">, Omit<{
+			get?: string[] | undefined;
+			publish?: string[] | undefined;
+			put?: string[] | undefined;
+			root: string;
+			subscribe?: string[] | undefined;
+		}, "get" | "put">>>>;
 	}, $strip>, ZodMiniObject<{
 		alg: ZodMiniEnum<{
 			ES256: "ES256";
@@ -508,7 +580,7 @@ export const KeySetSchema: ZodMiniObject<{
 		}>>>;
 		kid: ZodMiniOptional<ZodMiniString<string>>;
 		kty: ZodMiniLiteral<"EC">;
-		scope: ZodMiniOptional<ZodMiniPipe<ZodMiniObject<{
+		scope: ZodMiniOptional<ZodMiniPipe<ZodMiniPipe<ZodMiniObject<{
 			get: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
 			publish: ZodMiniOptional<ZodMiniArray<ZodMiniPipe<ZodMiniString<string>, ZodMiniTransform<string, string>>>>;
 			put: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
@@ -526,7 +598,19 @@ export const KeySetSchema: ZodMiniObject<{
 			put?: string[] | undefined;
 			root: string;
 			subscribe?: string[] | undefined;
-		}>>>;
+		}>>, ZodMiniTransform<Omit<{
+			get?: string[] | undefined;
+			publish?: string[] | undefined;
+			put?: string[] | undefined;
+			root: string;
+			subscribe?: string[] | undefined;
+		}, "get" | "put">, Omit<{
+			get?: string[] | undefined;
+			publish?: string[] | undefined;
+			put?: string[] | undefined;
+			root: string;
+			subscribe?: string[] | undefined;
+		}, "get" | "put">>>>;
 		x: ZodMiniString<string>;
 		y: ZodMiniString<string>;
 	}, $strip>, ZodMiniObject<{
@@ -552,7 +636,7 @@ export const KeySetSchema: ZodMiniObject<{
 		}>>>;
 		kid: ZodMiniOptional<ZodMiniString<string>>;
 		kty: ZodMiniLiteral<"OKP">;
-		scope: ZodMiniOptional<ZodMiniPipe<ZodMiniObject<{
+		scope: ZodMiniOptional<ZodMiniPipe<ZodMiniPipe<ZodMiniObject<{
 			get: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
 			publish: ZodMiniOptional<ZodMiniArray<ZodMiniPipe<ZodMiniString<string>, ZodMiniTransform<string, string>>>>;
 			put: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
@@ -570,7 +654,19 @@ export const KeySetSchema: ZodMiniObject<{
 			put?: string[] | undefined;
 			root: string;
 			subscribe?: string[] | undefined;
-		}>>>;
+		}>>, ZodMiniTransform<Omit<{
+			get?: string[] | undefined;
+			publish?: string[] | undefined;
+			put?: string[] | undefined;
+			root: string;
+			subscribe?: string[] | undefined;
+		}, "get" | "put">, Omit<{
+			get?: string[] | undefined;
+			publish?: string[] | undefined;
+			put?: string[] | undefined;
+			root: string;
+			subscribe?: string[] | undefined;
+		}, "get" | "put">>>>;
 		x: ZodMiniString<string>;
 	}, $strip>], "kty">>;
 }, $strip>;
@@ -820,7 +916,7 @@ export const Scope: {
 
 export type Scope = output<typeof ScopeSchema>;
 
-export const ScopeSchema: ZodMiniPipe<ZodMiniObject<{
+export const ScopeSchema: ZodMiniPipe<ZodMiniPipe<ZodMiniObject<{
 	get: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
 	publish: ZodMiniOptional<ZodMiniArray<ZodMiniPipe<ZodMiniString<string>, ZodMiniTransform<string, string>>>>;
 	put: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
@@ -838,7 +934,19 @@ export const ScopeSchema: ZodMiniPipe<ZodMiniObject<{
 	put?: string[] | undefined;
 	root: string;
 	subscribe?: string[] | undefined;
-}>>;
+}>>, ZodMiniTransform<Omit<{
+	get?: string[] | undefined;
+	publish?: string[] | undefined;
+	put?: string[] | undefined;
+	root: string;
+	subscribe?: string[] | undefined;
+}, "get" | "put">, Omit<{
+	get?: string[] | undefined;
+	publish?: string[] | undefined;
+	put?: string[] | undefined;
+	root: string;
+	subscribe?: string[] | undefined;
+}, "get" | "put">>>;
 
 export type SymmetricKey = Extract<Key, {
 	kty: "oct";

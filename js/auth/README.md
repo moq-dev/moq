@@ -8,9 +8,9 @@ contract, the relay flags, and worked examples, see the
 
 Grants and claims name paths with prefixes from `@moq/pattern`: `foo` is `foo`
 and everything beneath it, and the empty prefix `""` is everything. Signing takes
-no wildcard, so `foo/**`, `**`, and `cam-*` are refused. Tokens, key scopes, and
-`GrantSchema`'s output spell each prefix as the subtree pattern releases before
-0.22 read, `foo/**` or `**`, and read that spelling back. A role is an `Access`:
+no wildcard, so `foo/**`, `**`, and `cam-*` are refused. Tokens, a parsed key's
+scope, `Key.public`, and `GrantSchema`'s output spell each prefix as the subtree
+pattern releases before 0.22 read, `foo/**` or `**`, and read that spelling back. A role is an `Access`:
 its prefixes, or `{"path": [...], "rate": bps}` with a bitrate cap, read and
 written as it is.
 
