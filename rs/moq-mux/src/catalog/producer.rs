@@ -248,7 +248,8 @@ fn adopt(
 /// on arrival without a host wall clock lacks.
 fn restamp(from: &crate::Clock, to: &crate::Clock, at: moq_net::Timestamp) -> crate::Result<moq_net::Timestamp> {
 	let unmappable = || crate::Error::UnmappableTimestamp(format!("{at:?} lands before the re-based clock's PTS zero"));
-	let now = kio::clock::now();
+	// The clocks' own source, not the caller's: an anchor may run on another thread or runtime.
+	let now = from.instant();
 	let shift = to.capture(now)?.as_micros()? as i128 - from.capture(now)?.as_micros()? as i128;
 	let micros = u64::try_from(at.as_micros()? as i128 + shift).map_err(|_| unmappable())?;
 	moq_net::Timestamp::from_micros(micros).map_err(|_| unmappable())
@@ -2301,6 +2302,28 @@ mod test {
 
 		// The first frame, at PTS 1.4s, places the clock so it reads 1.4s now.
 		timebase.anchor(ms(1_400)).unwrap();
+		drop(reserved);
+		assert_eq!(starts(&catalog), [Some(start(&catalog, 1_400)); 2]);
+	}
+
+	/// The anchor may come from a thread outside the runtime the producer was made in: the stamp still
+	/// moves by the clocks' own readings, not that thread's.
+	#[tokio::test(start_paused = true)]
+	async fn a_staged_timestamp_moves_with_an_anchor_from_another_thread() {
+		// The runtime's time runs a minute ahead of the host's, more than the fresh clock reads.
+		tokio::time::advance(std::time::Duration::from_secs(60)).await;
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+
+		let timebase = catalog.timebase();
+		let reserved = timebase.reserve();
+		let staged = catalog.next_timestamp();
+		opus(&mut catalog, "a", staged).unwrap();
+
+		std::thread::spawn(move || timebase.anchor(ms(1_400)).map(drop))
+			.join()
+			.unwrap()
+			.unwrap();
 		drop(reserved);
 		assert_eq!(starts(&catalog), [Some(start(&catalog, 1_400)); 2]);
 	}

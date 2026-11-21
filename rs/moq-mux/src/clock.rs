@@ -322,6 +322,12 @@ impl Clock {
 		(now, reading)
 	}
 
+	/// The instant now on the ambient clock this one was created under, whichever thread or runtime
+	/// asks: what [`capture`](Self::capture) takes, and every re-basing of this clock shares.
+	pub(crate) fn instant(&self) -> Instant {
+		self.source.now()
+	}
+
 	/// Map the instant a payload was captured (a datagram's arrival, a sensor read) onto this clock.
 	///
 	/// `at` is an instant on the ambient clock this one was created under, which is the host's
