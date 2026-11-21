@@ -180,6 +180,7 @@ test("falls back to arrival time when the source clock is stuck", async () => {
 
 	// Without the fallback all three would land on the same instant, and the encoder would see a
 	// stream of frames that never advances. Arrivals are 10ms apart, so the deltas are exact.
+	expect(Number.isInteger(first.value?.timestamp)).toBe(true);
 	expect((second.value?.timestamp ?? 0) - (first.value?.timestamp ?? 0)).toBe(10_000);
 	expect((third.value?.timestamp ?? 0) - (second.value?.timestamp ?? 0)).toBe(10_000);
 
