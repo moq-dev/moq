@@ -5015,7 +5015,7 @@ mod test {
 		assert_eq!(b.subscription().unwrap().resume, Some(Position::new(0, 1)));
 		// As a session receives it, partway through. The holder never polls again, so the
 		// copy takes the head on arrival, not from the holder's reads.
-		let track::Received::Group(rest) = b.create_group_at(group::Info { start: 0 }, 1).unwrap() else {
+		let track::Received::Group(rest) = b.create_group_at(group::Info { start: 0 }, 1, 0..0).unwrap() else {
 			panic!("nothing else holds the group");
 		};
 		rest.finish().unwrap();
@@ -5051,7 +5051,7 @@ mod test {
 		routes.serve(b.consume());
 
 		for key in [0, 1] {
-			let track::Received::Group(rest) = b.create_group_at(group::Info { start: key }, 1).unwrap() else {
+			let track::Received::Group(rest) = b.create_group_at(group::Info { start: key }, 1, 0..0).unwrap() else {
 				panic!("nothing else holds group {key}");
 			};
 			rest.finish().unwrap();
@@ -6790,7 +6790,7 @@ mod test {
 		let routes = Producer::new();
 		let logical = logical(&routes);
 		let a = copy();
-		let track::Received::Group(mut rest) = a.create_group_at(group::Info { start: 0 }, 1).unwrap() else {
+		let track::Received::Group(mut rest) = a.create_group_at(group::Info { start: 0 }, 1, 0..0).unwrap() else {
 			panic!("nothing else holds the group");
 		};
 		rest.write_frame(ts(0), b"x".as_ref()).unwrap();
