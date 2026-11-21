@@ -1552,7 +1552,11 @@ impl SiTrack {
 			} else {
 				si_due(timestamp, self.last_emit, floor)
 			};
-		let repeat = !self.clock && due(timestamp, self.last_emit, interval);
+		// A declared interval is the table's limit. The sections go out with the frame they are
+		// muxed ahead of, up to its send-ahead late on the media timeline, so they repeat at
+		// half of it.
+		let cadence = self.interval.map_or(PSI_INTERVAL, |limit| limit / 2);
+		let repeat = !self.clock && due(timestamp, self.last_emit, cadence);
 		if self.active.is_empty() || !(revision || repeat) {
 			return None;
 		}
