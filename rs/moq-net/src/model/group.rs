@@ -964,11 +964,18 @@ impl GroupState {
 	/// A compressed group whose plain copy started inflates the slices first, so its plain
 	/// readers carry on past them; one that never started never will.
 	fn shed_to(&mut self, end: usize) -> u64 {
+		self.shed_frames(end, true)
+	}
+
+	/// [`Self::shed_to`], inflating the slices for the plain copy first only when `inflate`:
+	/// not when that copy is about to be shed too.
+	fn shed_frames(&mut self, end: usize, inflate: bool) -> u64 {
 		let end = end.min(self.committed());
 		if end <= self.held() {
 			return 0;
 		}
-		if let Some(flate) = &self.flate
+		if inflate
+			&& let Some(flate) = &self.flate
 			&& flate.plain.len.load(Ordering::Acquire) > 0
 			&& let Ok(job) = self.inflate(flate, end - 1, end - 1)
 		{
@@ -1079,15 +1086,25 @@ impl GroupState {
 	}
 
 	/// Shed every committed frame, an open group's newest too, keeping the timeline the
-	/// frames presented. A reader of a shed frame reads it as
-	/// [`Error::Evicted`].
+	/// frames presented. A reader of a shed frame reads it as [`Error::Evicted`].
+	///
+	/// A received compressed group inflates nothing to do it: with its slices gone, its plain
+	/// copy can never inflate past them, so that copy is released too, decoder included, and
+	/// its readers read the rest as evicted. A group a local producer is still compressing
+	/// into keeps its plain copy going, as any shed does, since its encoder's window carries on.
 	fn shed_all(&mut self) {
 		if self.outcome.error().is_some() {
 			return;
 		}
-		self.shed_to(self.committed());
+		let compressing = self.flate.as_ref().is_some_and(|flate| flate.encoder.is_some());
+		self.shed_frames(self.committed(), compressing);
 		if let Some(flate) = &self.flate {
-			flate.plain.shed(u64::MAX, u64::MAX, false);
+			match compressing {
+				true => {
+					flate.plain.shed(u64::MAX, u64::MAX, false);
+				}
+				false => flate.plain.release(Error::Evicted),
+			}
 		}
 	}
 
