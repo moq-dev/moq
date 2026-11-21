@@ -44,9 +44,9 @@ def dispatch_scope():
 
 
 def rust_reads():
-    """Each `(crate directory, glob)` a Rust source reads outside its crate, from sh/rs/reads.sh."""
+    """Each `(crate directory, glob, file:line)` a Rust source reads outside its crate, from sh/rs/reads.sh."""
     listed = subprocess.run(["bash", "sh/rs/reads.sh"], cwd=ROOT, check=True, capture_output=True, text=True)
-    return [tuple(line.split(" ", 1)) for line in listed.stdout.splitlines()]
+    return [tuple(line.split(" ", 2)) for line in listed.stdout.splitlines()]
 
 
 def read_probes(glob):
@@ -260,15 +260,20 @@ class SelectTest(unittest.TestCase):
         # fails before its file's next change skips the test that reads it.
         scope = dispatch_scope()
         reads = rust_reads()
-        for crate, glob in reads:
+        for crate, glob, source in reads:
             if glob.startswith("rs/"):
                 continue
-            with self.subTest(crate=crate, glob=glob):
-                self.assertTrue(glob, f"{crate} reads the whole repository; name the files it reads")
+            # A `../` string that is no path, such as a path-traversal test input
+            # in a file that mentions CARGO_MANIFEST_DIR, also lands here.
+            hint = "; if that literal is no path, keep it out of files that mention CARGO_MANIFEST_DIR"
+            with self.subTest(crate=crate, glob=glob, source=source):
+                self.assertTrue(glob, f"{crate} reads the whole repository at {source}; name the files it reads{hint}")
                 for probe in read_probes(glob):
-                    self.assertRegex(probe, scope, f"{crate} reads {glob}, which sh/dispatch.sh's rs scope misses")
+                    self.assertRegex(
+                        probe, scope, f"{crate} reads {glob} at {source}, which sh/dispatch.sh's rs scope misses{hint}"
+                    )
         # The lister still finds the read behind moq-dev/moq#8459.
-        self.assertIn(("rs/moq-relay", "test/**/*.toml"), reads)
+        self.assertIn(("rs/moq-relay", "test/**/*.toml"), [(crate, glob) for crate, glob, _ in reads])
 
     def test_dispatch_scope_covers_out_of_crate_targets(self):
         scope = dispatch_scope()

@@ -60,7 +60,7 @@ select_packages() {
         def regex: split("**/") | map(split("**") | map(split("*") | map(escape) | join("[^/]*")) | join(".*"))
             | "^\(join("(.*/)?"))(/.*)?$";
         ($list | split("\n") | map(select(. != ""))) as $paths
-        | capture("^rs/(?<crate>[^/ ]+) (?<glob>.+)$")
+        | capture("^rs/(?<crate>[^/ ]+) (?<glob>[^ ]*) ")
         | (.glob | regex) as $regex
         | select(any($paths[]; test($regex)))
         | .crate')
