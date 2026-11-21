@@ -21,6 +21,11 @@ select_packages() {
         echo ALL
         return
     fi
+    # The flake pins the cross toolchain and zig.
+    if [[ "$action" == cross && -f "$list" ]] && grep -qE '^flake\.(nix|lock)$' "$list"; then
+        echo ALL
+        return
+    fi
     if [[ "$list" == --all ]] || grep -qE '^(\.cargo/.*|sh/local\.(sh|ts)|Cargo\.(toml|lock)|clippy\.toml|rust-toolchain\.toml|rs/justfile|sh/rs/(select|platform|cross-lint|zig-(cc|c\+\+|ar)|nextest)\.sh|\.config/nextest\.toml)$' "$list"; then
         echo ALL
         return

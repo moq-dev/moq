@@ -120,9 +120,10 @@ module py '^(py/|sh/py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/|rs/uniffi-bindgen
 module rs '^(\.cargo/|nix/modules/moq-relay\.nix$|doc/lib/c/|doc/lib/samples\.sh$|sh/local\.(sh|ts)$|rs/|test/interop/clients/rust/|sh/rs/|Cargo\.(toml|lock)$|clippy\.toml$|rust-toolchain\.toml$|\.config/nextest\.toml$)' \
     tools='cargo jq cc' compiles='check fix' fix
 # Clippy for macOS and Windows over rs's selection, so a platform-gated error
-# fails here rather than in the nightly native lanes. Nix pins its toolchain
-# and zig compiles its build scripts' C.
-module rs_cross "${scope[rs]}" \
+# fails here rather than in the nightly native lanes. The flake pins its
+# toolchain and the zig that compiles its build scripts' C, so a change there
+# lints the whole workspace (see sh/rs/select.sh).
+module rs_cross "${scope[rs]%)}|flake\.(nix|lock)$)" \
     tools='cargo jq nix zig' compiles=check
 # nix/Cargo.nix records each crate's dependencies, features, and targets,
 # read from the manifests, the lockfile, and the files cargo discovers targets
