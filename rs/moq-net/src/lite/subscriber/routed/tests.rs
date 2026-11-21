@@ -273,6 +273,36 @@ async fn the_limit_admits_each_claim() {
 	assert_eq!(served(&routed), ["live/a/public/x"]);
 }
 
+/// A claim broader than the limit is filed at each prefix of the limit beneath it, as many
+/// segments above it as it is broader, and moves as the limit does.
+#[kio::test]
+async fn a_claim_broader_than_the_limit_is_filed_at_the_limit() {
+	let (subscriber, consumer) = subscriber();
+	let mut cursor = consumer.routes();
+	let mut routed = asking(&subscriber, &limited("customer"));
+	routed.receive(start("")).unwrap();
+	pump(&mut routed, &subscriber);
+	assert_eq!(served(&routed), ["customer"]);
+	assert_eq!(cursor.expect_next_active("customer").await.lane.above, 1);
+
+	let both = Permit::limited(["customer/a/b", "other"].map(|prefix| crate::Prefix::try_from(prefix).unwrap()).into_iter().collect());
+	routed.limit(&both).unwrap();
+	pump(&mut routed, &subscriber);
+	assert_eq!(served(&routed), ["customer/a/b", "other"]);
+
+	// A claim within the limit stays where it is.
+	routed.receive(start("other/x")).unwrap();
+	pump(&mut routed, &subscriber);
+	assert_eq!(served(&routed), ["customer/a/b", "other", "other/x"]);
+	let above = |path: &str| {
+		let ((_, _, _), entry) = (routed.served.iter())
+			.find(|((_, served, _), _)| served.as_str() == path)
+			.expect("served");
+		entry.route.route.lane.above
+	};
+	assert_eq!((above("customer/a/b"), above("other"), above("other/x")), (3, 1, 0));
+}
+
 /// A grant change holds unsynced only the readers whose prefix it newly shows something
 /// in, until an answer after it is in; a reader it misses, and every reader on a
 /// narrowing, stays synced, since nothing new can arrive there.
