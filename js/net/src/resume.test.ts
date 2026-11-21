@@ -560,6 +560,48 @@ test("a raised start keeps a relative end an inner front's copy placed while wai
 });
 
 /**
+ * A backfill's group that a range already placed holds goes out though another range still waits on
+ * its anchors. Mirrors the Rust `a_backfill_group_a_placed_range_holds_goes_out_beside_a_waiting_range`.
+ */
+test("a backfill group a placed range holds goes out beside a waiting range", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const front = new Front();
+	const sources = [new BroadcastProducer(), new BroadcastProducer()];
+	const handles = sources.map((source) => source.consume());
+	const [ta, tb] = sources.map(copy);
+	hooks.receiveTrack(tb.producer);
+	const delay = { max: Duration.millis(3_600_000) };
+	ta.write(6n);
+	ta.write(8n);
+	front.serve(handles[0]);
+	const sub = front.consumer.track("seq").subscribe({ delay, ranges: [{ start: { time: 8n } }] });
+	try {
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([8n]);
+		front.serve(handles[1]);
+		await clock.advance(Duration.ZERO);
+		ta.producer.abort(new StreamError(StreamCode.SessionClosed));
+		sub.update({ delay, ranges: [{ start: { time: 7n } }] });
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([]);
+		tb.write(7n);
+		await clock.advance(Duration.ZERO);
+		// A range whose start waits on a group still to land leaves the window pending.
+		sub.update({ delay, ranges: [{ start: { time: 7n } }, { start: { time: 9n }, end: { relative: 0n } }] });
+		await clock.advance(Duration.ZERO);
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([7n]);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		for (const handle of handles) handle.close();
+		for (const source of sources) source.close();
+		installed.close();
+	}
+});
+
+/**
  * As a backfill placing a time start its serving copy raised, with the group holding the time still
  * to land when the backfill learns no group sits between it and the resume point: the backfill is
  * kept for it, below where it was asked from.

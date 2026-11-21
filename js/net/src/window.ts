@@ -673,6 +673,14 @@ export class Window {
 		return this.pending || this.#groups.contains(key);
 	}
 
+	/**
+	 * Whether a range placed so far holds group `key`: unlike {@link contains}, not every group while a
+	 * relative anchor waits. Mirrors the Rust `Window::holds`.
+	 */
+	holds(key: bigint): boolean {
+		return this.#groups.contains(key);
+	}
+
 	/** The lowest group in range at or above `from`, undefined when none is. `from` itself while a relative anchor waits. */
 	next(from: bigint): bigint | undefined {
 		return this.pending ? from : this.#groups.next(from);

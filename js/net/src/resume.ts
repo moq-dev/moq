@@ -1111,12 +1111,14 @@ class Reader implements ResumeSource {
 		return (end === undefined || key < end) && !delivered.has(key);
 	}
 
-	// Whether a copy's next group waits for the reader's window to be placed, which decides whether
-	// it goes out: a failed copy's, until a copy continuing the track places it, and a backfill's,
-	// whose groups under the resume point only the placed window bounds. Mirrors the Rust
-	// `Reader::poll_lowest`.
-	#waits(copy: Copy): boolean {
-		return (copy.backfill || (!this.route.concluded && copyFailed(copy))) && this.#window().pending;
+	// Whether a copy's next group, `key`, waits for the reader's window to be placed, which decides
+	// whether it goes out: a failed copy's, until a copy continuing the track places it, and a
+	// backfill's that no range placed so far holds, since only a placed range bounds the groups under
+	// the resume point. Mirrors the Rust `Reader::poll_lowest`.
+	#waits(copy: Copy, key: bigint): boolean {
+		const window = this.#window();
+		if (!window.pending) return false;
+		return (!this.route.concluded && copyFailed(copy)) || (copy.backfill === true && !window.holds(key));
 	}
 
 	tryGroup(ordered: boolean, delivered: Delivered, dispositions: boolean): Recv {
@@ -1169,7 +1171,8 @@ class Reader implements ResumeSource {
 				const newest = this.#newest === undefined ? undefined : this.#newest + 1n;
 				// Its group stays there until placed, but how it ran out is still judged below. It got
 				// a group, so its route did not refuse the track.
-				if (this.#waits(copy) && hooks.peekGroup(copy.sub, ordered, newest) !== undefined) {
+				const peeked = hooks.peekGroup(copy.sub, ordered, newest);
+				if (peeked !== undefined && this.#waits(copy, peeked)) {
 					copy.delivered = true;
 					held.add(copy);
 					break;
@@ -1359,7 +1362,7 @@ class Reader implements ResumeSource {
 					ordered,
 					this.#newest === undefined ? undefined : this.#newest + 1n,
 				);
-				if (key === undefined || this.#waits(copy)) break;
+				if (key === undefined || this.#waits(copy, key)) break;
 				const deliverable = this.#deliverable(copy, key, delivered);
 				if (deliverable && this.#inWindow(key)) {
 					// A tie goes to the newer copy, so the serving one hands out its first group and

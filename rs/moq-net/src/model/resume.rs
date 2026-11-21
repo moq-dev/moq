@@ -2556,11 +2556,14 @@ impl Reader {
 					Poll::Ready(Ok(Some(reserved))) => {
 						let key = reserved.key();
 						// Nor does a failed copy's group go out before the window is placed, which only
-						// a copy continuing the track does, nor a backfill's, whose groups under the
-						// resume point only the placed window bounds: it stays there until then.
+						// a copy continuing the track does, nor a backfill's that no range placed so far
+						// holds, since only a placed range bounds the groups under the resume point: it
+						// stays there until then.
 						let copy = &self.copies[index];
-						let waits = copy.backfill || (self.route.end().is_none() && copy_failed(&copy.track));
-						if waits && self.window().is_pending() {
+						let (backfill, failed) =
+							(copy.backfill, self.route.end().is_none() && copy_failed(&copy.track));
+						let window = self.window();
+						if window.is_pending() && (failed || (backfill && !window.holds(key))) {
 							held = true;
 							break;
 						}
@@ -9719,6 +9722,52 @@ mod test {
 			write(&b, key);
 			assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
 		}
+	}
+
+	/// A backfill's group that a range already placed holds goes out though another range
+	/// still waits on its anchors.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_backfill_group_a_placed_range_holds_goes_out_beside_a_waiting_range() {
+		let routes = Producer::new();
+		let front = logical(&routes);
+		let a = received_copy();
+		write(&a, 6);
+		write(&a, 8);
+		routes.serve(a.consume());
+		let subscription = |ranges: &[track::Range]| {
+			Subscription::default()
+				.with_delay(Delay::default().with_max(HOUR))
+				.with_ranges(ranges.iter().copied())
+		};
+		let from = |time| track::Range {
+			start: track::Anchor::Time(time),
+			end: None,
+		};
+		let mut sub = front
+			.consume()
+			.subscribe(subscription(&[from(8)]))
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		assert_eq!(drain(&mut sub, false), [8]);
+		let b = track::Request::new(Arc::new(broadcast::Info::default()), "video");
+		routes.serve(b.consume());
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		a.abort(Error::Cancel).unwrap();
+		sub.update(subscription(&[from(7)])).unwrap();
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		let b = b.accept(crate::track::Info::timed());
+		b.received();
+		b.anchored();
+		write(&b, 7);
+		// A range whose start waits on a group still to land leaves the window pending.
+		let waiting = track::Range {
+			start: track::Anchor::Time(9),
+			end: Some(track::Anchor::Relative(0)),
+		};
+		sub.update(subscription(&[from(7), waiting])).unwrap();
+		assert_eq!(drain(&mut sub, false), [7]);
 	}
 
 	/// A copy updated while pending, then answering, hands its own resolution of the
