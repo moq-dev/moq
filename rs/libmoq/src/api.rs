@@ -2596,7 +2596,7 @@ pub extern "C" fn moq_broadcast_request_free(request: u32) -> i32 {
 	})
 }
 
-/// Learn about broadcasts matching a pattern scope under an origin.
+/// Learn about broadcasts matching a discovery filter under an origin.
 ///
 /// `config` selects the paths; NULL lists every visible one. Delivered
 /// [moq_announce_event] prefixes remain relative to the origin.
@@ -2626,7 +2626,7 @@ pub unsafe extern "C" fn moq_origin_announced(
 ) -> i32 {
 	ffi::enter(move || {
 		let origin = ffi::parse_id(origin)?;
-		let (scope, hidden) = match unsafe { config.as_ref() } {
+		let (filter, hidden) = match unsafe { config.as_ref() } {
 			None => (moq_net::Pattern::all(), false),
 			Some(config) => {
 				let prefix = unsafe { ffi::parse_str(config.prefix, config.prefix_len)? };
@@ -2639,7 +2639,7 @@ pub unsafe extern "C" fn moq_origin_announced(
 			}
 		};
 		let on_announce = unsafe { ffi::OnStatus::new(user_data, on_announce)? };
-		State::lock().origin.announced(origin, scope, hidden, on_announce)
+		State::lock().origin.announced(origin, filter, hidden, on_announce)
 	})
 }
 

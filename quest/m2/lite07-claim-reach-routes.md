@@ -20,7 +20,7 @@ the reader as the splice-stall did.
 Decided 2026-11-20 (maintainer, on [moq-dev/moq#9229](https://github.com/moq-dev/moq/pull/9229)):
 ✅ the lite-07 cut waits on this quest, and #9229 lands without it (rejected: fixing it after the
 cut; holding #9229 until it is fixed). ✅ Grants become prefixes
-([prefix grants](/quest/m2/prefix-grants.md)), so a route serves whole subtrees and a claim's
+([moq-dev/moq#9251](https://github.com/moq-dev/moq/pull/9251)), so a route serves whole subtrees and a claim's
 reach is where it is filed and presented (rejected: carrying the reach as patterns on
 ANNOUNCE_START and ANNOUNCE_UPDATE, a wire field and its machinery that only wildcard grants
 needed; judging reach from the routes a node knows, which a relay cannot do, so in-process and
@@ -59,8 +59,3 @@ on).
   judgment over sessions and claim churn.
 
 Public API: none. Wire: the draft's Claims rule for where a claim is presented.
-
-## Required
-
-- [Prefix grants](/quest/m2/prefix-grants.md) - a grant is a set of prefixes, so a route serves
-  whole subtrees

@@ -9410,8 +9410,8 @@ async fn auth_reads_the_peer_grant() {
 		.expect("pair");
 
 	// Each side's origins span the root, so its peer grants it everything.
-	await_grant(&client, grant(&["**"], &["**"])).await;
-	await_grant(&accepted, grant(&["**"], &["**"])).await;
+	await_grant(&client, grant(&[""], &[""])).await;
+	await_grant(&accepted, grant(&[""], &[""])).await;
 	assert!(accepted.tokens().is_none(), "an accepted session presents no tokens");
 
 	// The live session was dialed without a credential, so this one rides AUTH.
@@ -9423,7 +9423,7 @@ async fn auth_reads_the_peer_grant() {
 	assert!(matches!(err, MoqError::Unsupported), "refusal: {err:?}");
 	assert_eq!(
 		client.grants().grant(),
-		Some(grant(&["**"], &["**"])),
+		Some(grant(&[""], &[""])),
 		"a refusal leaves the union"
 	);
 
@@ -9462,9 +9462,9 @@ async fn auth_tokens_join_and_leave_the_union() {
 	let mut listener = config.init(Default::default()).unwrap().listen().await.unwrap();
 	let addr = listener.tcp_local_addr().unwrap();
 
-	let publish = |pattern: &str| {
+	let publish = |prefix: &str| {
 		let mut grant = moq_net::auth::Grant::default();
-		grant.publish = pattern.parse::<moq_net::Pattern>().unwrap().into();
+		grant.publish = prefix.parse::<moq_net::Prefix>().unwrap().into();
 		grant
 	};
 	let serving = tokio::spawn(async move {
@@ -9474,8 +9474,8 @@ async fn auth_tokens_join_and_leave_the_union() {
 		let mut issued = Vec::new();
 		while let Some(request) = requests.next().await {
 			match request.token().as_ref() {
-				b"" => issued.push(request.accept(publish("setup/**"))),
-				b"extra" => issued.push(request.accept(publish("extra/**"))),
+				b"" => issued.push(request.accept(publish("setup"))),
+				b"extra" => issued.push(request.accept(publish("extra"))),
 				_ => request.reject(moq_net::SessionError::Unauthorized, "unknown token"),
 			}
 		}
@@ -9493,7 +9493,7 @@ async fn auth_tokens_join_and_leave_the_union() {
 		.await
 		.expect("connect timed out")
 		.unwrap();
-	await_grant(&session, grant(&["setup/**"], &[])).await;
+	await_grant(&session, grant(&["setup"], &[])).await;
 	// A second consumer watches on its own and starts from the grant it was made with.
 	let watcher = session.grants();
 	// The session was dialed without a credential, so the empty set is already answered.
@@ -9502,13 +9502,13 @@ async fn auth_tokens_join_and_leave_the_union() {
 	let tokens = session.tokens().unwrap();
 	tokens.set(vec!["extra".into()]).unwrap();
 	answered(&session).await.expect("the extra token was refused");
-	// Patterns are kept sorted.
-	await_grant(&session, grant(&["extra/**", "setup/**"], &[])).await;
+	// Prefixes are kept sorted.
+	await_grant(&session, grant(&["extra", "setup"], &[])).await;
 	let seen = kio::clock::timeout(TIMEOUT, watcher.changed())
 		.await
 		.expect("the second consumer sees the change")
 		.unwrap();
-	assert_eq!(seen, Some(grant(&["extra/**", "setup/**"], &[])));
+	assert_eq!(seen, Some(grant(&["extra", "setup"], &[])));
 
 	// A refused replacement still withdraws the token it replaces.
 	tokens.set(vec!["bogus".into()]).unwrap();
@@ -9518,7 +9518,7 @@ async fn auth_tokens_join_and_leave_the_union() {
 		crate::error::MoqErrorScope::Session,
 		MoqProtocolKind::Unauthorized,
 	);
-	await_grant(&session, grant(&["setup/**"], &[])).await;
+	await_grant(&session, grant(&["setup"], &[])).await;
 
 	session.cancel(0);
 	kio::clock::timeout(TIMEOUT, serving)

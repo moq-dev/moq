@@ -547,6 +547,17 @@ export class Window {
 		this.#count(key, span);
 	}
 
+	/**
+	 * The times in `[start, end)` of the time starts still waiting on the groups held. The group
+	 * containing each starts at or before its time, so one at or past a read's floor and below a
+	 * group may still land between them. Mirrors the Rust `Window::waiting_in`.
+	 */
+	waitingIn(start: bigint, end: bigint): bigint[] {
+		const times: bigint[] = [];
+		for (const entry of this.#waiting.in(start, end)) times.push(entry.time);
+		return times;
+	}
+
 	/** Whether group `key` is in range. Everything is while a live join waits on a first group. */
 	contains(key: bigint): boolean {
 		return this.pending || this.#groups.contains(key);
@@ -821,6 +832,14 @@ class ByTime {
 	*all(): Generator<Timed> {
 		const first = this.#entries.first();
 		if (first) yield* this.#entries.from(first.time);
+	}
+
+	/** Every entry whose time is in `[start, end)`, lowest first. */
+	*in(start: bigint, end: bigint): Generator<Timed> {
+		for (const entry of this.#entries.from(start)) {
+			if (entry.time >= end) return;
+			yield entry;
+		}
 	}
 
 	/** Add the span keyed `key` under `time`. */

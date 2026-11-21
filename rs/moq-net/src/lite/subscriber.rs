@@ -3299,6 +3299,60 @@ mod tests {
 		assert_eq!(active.never_serves(None), None, "nothing to go live at");
 	}
 
+	/// A lite-07 range answered with no group to deliver lands none of its groups, so the copy's
+	/// ordered reads hold no later group back for its time. Only one whose end takes in its
+	/// time says so: one ending before it may still have skipped the group containing it.
+	#[kio::test]
+	async fn an_empty_answer_releases_only_a_range_reaching_its_time() {
+		let tail = kio::Producer::new(Tail::default());
+		let Sub::Active(mut active) = feed_sub(&tail).await else {
+			unreachable!("feed_sub is active")
+		};
+		// Times 10 through 20, time 30 ending at group 25, below it, and time 66 onward.
+		active.live = lite::LiveRanges::new(
+			Version::Lite07,
+			&[
+				lite::Range::span(Some(10), 0, Some(20), None),
+				lite::Range::span(Some(30), 0, Some(24), None),
+				lite::Range::span(Some(66), 0, None, None),
+			],
+		);
+		active.starts = [(0, None), (1, None), (2, Some(66))].into();
+		// Asked with no limit, so an empty answer holds for every reader.
+		active.stale_budget = Duration::MAX;
+		let info = track::Info::default().with_timescale(None).with_max_age(None);
+		let serving = track::Producer::new(Arc::new(crate::broadcast::Info::default()), "video", info);
+		serving.received();
+		serving.anchored();
+		serving
+			.create_group(group::Info { start: 66 })
+			.unwrap()
+			.finish()
+			.unwrap();
+		active.report_starts(&serving);
+
+		let read = |time: u64| {
+			let mut ordered = serving
+				.subscribe(
+					track::Subscription::default()
+						.with_ranges([track::Range {
+							start: Some(time),
+							end: None,
+						}])
+						.with_delay(Delay::default().with_max(None)),
+				)
+				.ordered();
+			match ordered.next_item().now_or_never() {
+				Some(Ok(Some(track::Item::Group(group)))) => Some(group.start),
+				None => None,
+				Some(res) => panic!("not a group: {:?}", res.map(|item| item.is_some())),
+			}
+		};
+		assert_eq!(read(10), Some(66), "its range reached 20, past it");
+		assert_eq!(read(15), Some(66), "folded into that range");
+		assert_eq!(read(30), None, "its range ended before it");
+	}
+
 	/// QUIC does not order streams, so group 2's header can reach the relay before group 1's.
 	/// A fetch held for group 1 keeps waiting through the grace and is served when it lands.
 	#[kio::test]
@@ -9757,7 +9811,7 @@ mod tests {
 			script.extend(announce_script(Version::Lite07, &[&start_at(at, above)]));
 			let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap())
 				.produce()
-				.scope("tenant", &crate::Patterns::from(crate::Pattern::all()))
+				.scope("tenant", &crate::Prefixes::all())
 				.unwrap();
 			let session = crate::lite::test_transport::ScriptedSession::new(script);
 			let (mut prefix, _consumer) = prefix_on(Version::Lite07, session, origin);
@@ -10204,12 +10258,11 @@ impl SubStream {
 		Some((start, self.started.is_none()))
 	}
 
-	/// Tell the copy where the publisher started each live range: one asked from a group's
-	/// start, which a reader's time start there resolves to when the copy holds no group at
-	/// it, and a live join, which the copy, holding only part of the track, can't place past
-	/// what it holds. One with no start and no Min Age reached back to the oldest group, so it
-	/// counts as asked from time 0 and places any earlier time start a reader joining it asks.
-	/// Lite-07 only, where each range's start is reported.
+	/// Tell the copy where the publisher started each live range: one asked from a group, or
+	/// from the oldest group as time 0 when it has no start and no Min Age, with how far it
+	/// reaches, which a reader's time start there or folded into it resolves to when the copy
+	/// holds no group at it, and a live join, which the copy, holding only part of the track,
+	/// can't place past what it holds. Lite-07 only, where each range's start is reported.
 	fn report_starts(&self, serving: &track::Producer) {
 		if !self.live.reports_starts() {
 			return;
@@ -10217,17 +10270,44 @@ impl SubStream {
 		let mut times = Vec::new();
 		let mut joins = Vec::new();
 		for (id, range) in self.live.iter() {
-			let Some(Some(start)) = self.starts.get(&id) else {
+			let Some(&start) = self.starts.get(&id) else {
 				continue;
 			};
-			match (range.start, self.mins.get(&id).copied().flatten()) {
-				(Some(lite::Anchor::Absolute(time)), _) => times.push((time.group, *start)),
-				(None, None) => times.push((0, *start)),
-				(None, Some(min)) => joins.push((min, *start)),
-				_ => {}
+			// The last time the range reaches: an exclusive group end stops at the time before
+			// it.
+			let through = |asked: u64| match range.end {
+				None => None,
+				Some(lite::Anchor::Absolute(end)) if end.frame == 0 => Some(end.group.saturating_sub(1).max(asked)),
+				Some(lite::Anchor::Absolute(end)) => Some(end.group),
+				Some(lite::Anchor::Time(end)) => Some(end),
+			};
+			// Whether a range with no group to deliver says its publisher held none at or before
+			// its reach: only one whose end takes in the group containing its time, which a
+			// range that ends before its time may not.
+			let reaches = |asked: u64| match range.end {
+				Some(lite::Anchor::Absolute(end)) if end.frame == 0 => end.group > asked,
+				Some(lite::Anchor::Absolute(end)) => end.group >= asked,
+				Some(lite::Anchor::Time(end)) => end >= asked,
+				None => false,
+			};
+			let asked = match (range.start, self.mins.get(&id).copied().flatten()) {
+				(Some(lite::Anchor::Absolute(time)), _) => time.group,
+				(None, None) => 0,
+				(None, Some(min)) => {
+					if let Some(start) = start {
+						joins.push((min, start));
+					}
+					continue;
+				}
+				_ => continue,
+			};
+			if start.is_some() || reaches(asked) {
+				times.push((asked, start, through(asked)));
 			}
 		}
-		serving.time_starts(times);
+		// The wire does not say which budget a range resolved under, so an empty one holds only
+		// for the narrowest asked.
+		serving.time_starts(times, self.stale_budget);
 		serving.join_starts(joins);
 	}
 

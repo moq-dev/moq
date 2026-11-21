@@ -51,7 +51,7 @@ async fn admit(observer: &shutdown::Observer, version: moq_net::Version, stalled
 			.await;
 	}));
 
-	let all = moq_auth::Pattern::all;
+	let all = moq_auth::Prefix::all;
 	let (lease, consumer) = lease::Producer::new(moq_auth::Grant::new(all(), all()));
 	drop(kio::clock::sim::spawn(async move {
 		admissions.next().await.expect("an admission").grant(consumer);

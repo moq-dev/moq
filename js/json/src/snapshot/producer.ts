@@ -197,8 +197,10 @@ export class Producer<T> {
 	 */
 	mutate(fn: (value: T) => void, at: Time.Timestamp): void {
 		// Start from the last-published value, falling back to the configured initial value. We
-		// don't invent an empty object: mutating with nothing to start from is a usage error.
-		const base = this.#encoder.value ?? this.#initial;
+		// don't invent an empty object: mutating with nothing to start from is a usage error. A
+		// published JSON null is a value, so only `undefined` means nothing was published.
+		const published = this.#encoder.value;
+		const base = published !== undefined ? published : this.#initial;
 		if (base === undefined) {
 			throw new Error("mutate() requires a prior update() or `initial` in the config");
 		}

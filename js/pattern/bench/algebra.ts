@@ -1,8 +1,9 @@
 /**
- * Reduce and compare a peer grant shaped against the union index, swept over its encoded size
- * up to a whole AUTH_OK. Mirrors the Shape cases of the Rust `pattern-algebra` benchmark.
+ * Reduce and compare a peer grant swept over its encoded size up to a whole AUTH_OK: the
+ * pattern unions shaped against the union index mirror the Shape cases of the Rust
+ * `pattern-algebra` benchmark, and the prefix rows are the grant AUTH_OK carries now.
  */
-import { Pattern, Patterns } from "@moq/pattern";
+import { Pattern, Patterns, Prefix, Prefixes } from "@moq/pattern";
 
 /** The largest moq-lite control message, and so the largest AUTH_OK. */
 const MAX_MESSAGE = 65535;
@@ -58,6 +59,38 @@ function grant(shape: "mask" | "chain", bytes: number): { texts: string[]; previ
 	return { texts: [...masks, ...queries], previous };
 }
 
+/**
+ * Distinct prefix members two segments beneath a shared parent, filling at most `bytes` encoded
+ * and given in reverse order so collecting sorts them, with a previous grant of their parents.
+ */
+function prefixGrant(bytes: number): { texts: string[]; previous: Prefixes } {
+	const texts: string[] = [];
+	const parents: string[] = [];
+	let size = 0;
+	for (let index = 0; ; index++) {
+		const parent = `room/${String(index).padStart(5, "0")}`;
+		const text = `${parent}/cam`;
+		size += varint(text.length) + text.length;
+		if (varint(texts.length + 1) + size > bytes) break;
+		texts.push(text);
+		parents.push(parent);
+	}
+	return { texts: texts.reverse(), previous: Prefixes.parse(parents) };
+}
+
+/** Time `body`, repeated to at least 100 ms, and print its row. */
+function time(bytes: number, shape: string, op: string, members: number, body: () => unknown): void {
+	let iterations = 0;
+	const start = performance.now();
+	let elapsed = 0;
+	while (elapsed < 100 || iterations < 3) {
+		body();
+		iterations++;
+		elapsed = performance.now() - start;
+	}
+	console.log(`${bytes},${shape},${op},${members},${(elapsed / iterations).toFixed(3)}`);
+}
+
 /** Time each shape's reduction and regrant comparison, repeated to at least 100 ms per row. */
 export function run(): void {
 	console.log("bytes,shape,op,members,ms_per_op");
@@ -70,22 +103,21 @@ export function run(): void {
 			const reduced = new Patterns(message);
 			if (reduced.size !== message.length) throw new Error(`${shape} members are not incomparable`);
 			if (!previous.covers(reduced)) throw new Error(`${shape} previous grant does not cover it`);
-			const ops: [string, () => unknown][] = [
-				["collect", () => new Patterns(message).size],
-				["covers", () => previous.covers(reduced)],
-			];
-			for (const [op, body] of ops) {
-				let iterations = 0;
-				const start = performance.now();
-				let elapsed = 0;
-				while (elapsed < 100 || iterations < 3) {
-					body();
-					iterations++;
-					elapsed = performance.now() - start;
-				}
-				console.log(`${bytes},${shape},${op},${message.length},${(elapsed / iterations).toFixed(3)}`);
-			}
+			time(bytes, shape, "collect", message.length, () => new Patterns(message).size);
+			time(bytes, shape, "covers", message.length, () => previous.covers(reduced));
 		}
+	}
+	for (const bytes of [4096, 16384, MAX_MESSAGE]) {
+		const { texts, previous } = prefixGrant(bytes);
+		const size = wire(texts);
+		if (size > bytes || size * 16 <= bytes * 15) throw new Error(`prefix fills ${size} of ${bytes} bytes`);
+		const message = texts.map((text) => Prefix.parse(text));
+		const reduced = new Prefixes(message);
+		if (reduced.size !== message.length) throw new Error("prefix members are not disjoint");
+		if (!previous.covers(reduced)) throw new Error("prefix previous grant does not cover it");
+		time(bytes, "prefix", "collect", message.length, () => new Prefixes(message).size);
+		time(bytes, "prefix", "covers", message.length, () => previous.covers(reduced));
+		time(bytes, "prefix", "intersect", message.length, () => previous.intersect(reduced).size);
 	}
 }
 

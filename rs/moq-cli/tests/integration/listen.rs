@@ -33,7 +33,7 @@ async fn listen(stage: &str, flags: &[&str]) -> Listening {
 			"--listen-unix-bind",
 			socket.to_str().unwrap(),
 			"--auth-public",
-			"**",
+			"",
 			"--broadcast",
 			"demo.hang",
 		])

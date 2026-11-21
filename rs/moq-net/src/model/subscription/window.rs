@@ -128,11 +128,12 @@ pub(crate) enum Found {
 	Unanswered,
 }
 
-/// The times a hop's [`Holdings::containing`] can't place, as up to two runs: every time in
-/// them is [`Containing::Unknown`], except the few that `mark` places another way.
+/// The times a hop's [`Holdings::containing`] can't place, as up to four runs, sorted: every
+/// time in them is [`Containing::Unknown`], except the few that `mark` places another way.
+/// They may leave out some unknown times too, which a window then tries each time.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::model) struct Unplaced {
-	pub runs: [ops::RangeInclusive<u64>; 2],
+	pub runs: [ops::RangeInclusive<u64>; 4],
 	/// Changes whenever a time inside the runs may have come to be placed by something other
 	/// than a group arriving or a drop, so a window that saw another mark tries every start.
 	pub mark: u64,
@@ -141,6 +142,22 @@ pub(in crate::model) struct Unplaced {
 impl Unplaced {
 	/// An empty run, for a hop that places every time on one side.
 	pub const NONE: ops::RangeInclusive<u64> = ops::RangeInclusive::new(1, 0);
+
+	/// `run` less what of it `cut` covers: the part below it, then the part above it.
+	pub fn without(run: ops::RangeInclusive<u64>, cut: &ops::RangeInclusive<u64>) -> [ops::RangeInclusive<u64>; 2] {
+		if run.is_empty() || cut.is_empty() {
+			return [run, Self::NONE];
+		}
+		let below = match cut.start().checked_sub(1) {
+			Some(end) => *run.start()..=(*run.end()).min(end),
+			None => Self::NONE,
+		};
+		let above = match cut.end().checked_add(1) {
+			Some(start) => start.max(*run.start())..=*run.end(),
+			None => Self::NONE,
+		};
+		[below, above]
+	}
 }
 
 /// A hop that holds no groups of its own, such as a reader following route copies that
@@ -341,6 +358,21 @@ impl Window {
 	/// from it either way.
 	pub fn is_waiting_above(&self, floor: u64) -> bool {
 		self.waiting.last().is_some_and(|&(time, _)| time > floor)
+	}
+
+	/// The times in `times` of the time starts still waiting on the groups held. The group
+	/// containing each starts at or before its time, so one at or past a read's floor and
+	/// below a group may still land between them.
+	pub fn waiting_in<R: ops::RangeBounds<u64> + 'static>(&self, times: R) -> impl Iterator<Item = u64> + '_ {
+		let from = match times.start_bound() {
+			ops::Bound::Included(&start) => start,
+			ops::Bound::Excluded(&start) => start.saturating_add(1),
+			ops::Bound::Unbounded => 0,
+		};
+		self.waiting
+			.range((from, 0)..)
+			.map(|&(time, _)| time)
+			.take_while(move |time| times.contains(time))
 	}
 
 	/// Resolve what the groups now held settle: live joins once `latest` exists or an
@@ -977,7 +1009,7 @@ mod tests {
 				false => Unplaced::NONE,
 			};
 			Some(Unplaced {
-				runs: [unknown, Unplaced::NONE],
+				runs: [unknown, Unplaced::NONE, Unplaced::NONE, Unplaced::NONE],
 				mark: 0,
 			})
 		}

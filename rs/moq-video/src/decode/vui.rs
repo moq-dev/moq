@@ -66,6 +66,10 @@ fn h264(nal: &[u8]) -> Option<Option<Color>> {
 	use h264_reader::nal::sps::SeqParameterSet;
 	use h264_reader::nal::{Nal, RefNal, UnitType};
 
+	// RefNal panics on an empty NAL, which a doubled or trailing start code yields.
+	if nal.is_empty() {
+		return None;
+	}
 	let nal = RefNal::new(nal, &[], true);
 	if nal.header().ok()?.nal_unit_type() != UnitType::SeqParameterSet {
 		return None;
@@ -151,6 +155,24 @@ mod tests {
 		assert_eq!(signalled(Codec::Vp9, &pps), None);
 		// Not Annex-B at all: the start-code scan gives up rather than spinning.
 		assert_eq!(signalled(Codec::H264, &Bytes::from_static(b"not annex b")), None);
+	}
+
+	/// An empty NAL, from a doubled or trailing start code, is not an SPS.
+	#[test]
+	fn empty_nals_signal_nothing() {
+		for codec in [Codec::H264, Codec::H265] {
+			for unit in [
+				&[0, 0, 1][..],
+				&[0, 0, 0, 1, 0, 0, 1, 0x68, 0xce, 0x38, 0x80],
+				&[0, 0, 1, 0x68, 0, 0, 1],
+			] {
+				assert_eq!(
+					signalled(codec, &Bytes::copy_from_slice(unit)),
+					None,
+					"{codec:?} {unit:?}"
+				);
+			}
+		}
 	}
 
 	/// Two SPSs that disagree leave the pictures unlabelled, since which one the

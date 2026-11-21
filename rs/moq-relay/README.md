@@ -84,6 +84,6 @@ Quick example configuration in your `.toml` file:
 
 ```toml
 [auth]
-url = "http://127.0.0.1:4440/"    # moq auth serve --key root.jwk --public-subscribe 'anon/**'
-# public = "anon/**"              # or a static anonymous grant with no server
+url = "http://127.0.0.1:4440/"    # moq auth serve --key root.jwk --public-subscribe anon
+# public = "anon"                 # or a static anonymous grant with no server
 ```

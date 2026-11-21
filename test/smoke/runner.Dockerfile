@@ -6,5 +6,5 @@ COPY --from=docker.io/library/busybox:stable-musl /bin /bin
 ENV MOQ_LISTEN=[::]:4443 \
     MOQ_LISTEN_TLS_CERT=/certs/cert.pem \
     MOQ_LISTEN_TLS_KEY=/certs/priv.key \
-    MOQ_AUTH_PUBLIC=**
+    MOQ_AUTH_PUBLIC=""
 EXPOSE 4443/udp

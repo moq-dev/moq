@@ -89,6 +89,7 @@ import {
 	Subscribe,
 	SubscribeUpdate,
 	toWireRanges,
+	type WireAnchor,
 	type WireRange,
 } from "./subscribe.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
@@ -2881,25 +2882,31 @@ export class Subscriber {
 	// requested floor, pending, while SUBSCRIBE_START or a range's SUBSCRIBE_STARTED has yet to
 	// say where one starts. Mirrors the Rust `SubStream::declare`.
 	#declare(entry: SubscribeEntry): void {
-		// Where the publisher started each live range asked from a group's start, which a reader's
-		// time start there resolves to when the copy holds no group at it, and one with no start
-		// under an unstated Min Age, which reached back to the oldest group, as asked from 0. Mirrors
-		// the Rust `SubStream::report_starts`.
-		const times: [bigint, bigint][] = [];
+		// Where the publisher started each live range asked from a group's start, or from the oldest
+		// group (time 0) when it has no start under an unstated Min Age, with the last time it
+		// reaches, which a reader's time start there or folded into it resolves to when the copy holds
+		// no group at it. Mirrors the Rust `SubStream::report_starts`.
+		const times: [bigint, bigint | undefined, bigint | undefined][] = [];
 		// And each live join, by the Min Age it was asked under, which places a reader's live join the
 		// copy can't prove from the groups it holds.
 		const joins: [number, bigint][] = [];
 		for (const id of entry.live.ids()) {
 			const range = entry.live.get(id);
-			const time = range?.start?.time ?? range?.start?.absolute;
+			if (range === undefined || !entry.starts.has(id)) continue;
+			const time = range.start?.time ?? range.start?.absolute;
+			// Undefined for a range with no group to deliver.
 			const at = entry.starts.get(id);
-			if (at === undefined || range === undefined) continue;
 			const age = entry.joins.get(id);
-			if (time !== undefined) times.push([time, at]);
-			else if (age === undefined) times.push([0n, at]);
-			else joins.push([age, at]);
+			if (time === undefined && age !== undefined) {
+				if (at !== undefined) joins.push([age, at]);
+				continue;
+			}
+			const asked = time ?? 0n;
+			if (at !== undefined || reaches(range.end, asked)) times.push([asked, at, through(range.end, asked)]);
 		}
-		hooks.timeStarts(entry.track, times);
+		// The wire does not say which budget a range resolved under, so an empty one holds only for the
+		// narrowest asked.
+		hooks.timeStarts(entry.track, times, entry.staleBudget);
 		hooks.joinStarts(entry.track, joins);
 
 		let start: bigint | null = null;
@@ -3438,4 +3445,23 @@ class ConsumeBroadcast extends broadcast.Consumer {
 	override clone(): ConsumeBroadcast {
 		return new ConsumeBroadcast(this.#subscriber, this.#path, this.#consumed, this.shareState());
 	}
+}
+
+// Whether a lite-07 range with no group to deliver says its publisher held none at or before its
+// reach: only one whose end takes in the group containing its time, which a range that ends before
+// its time may not. Mirrors the Rust `SubStream::report_starts`.
+function reaches(end: WireAnchor | undefined, asked: bigint): boolean {
+	if (end === undefined) return false;
+	if (end.time !== undefined) return end.time >= asked;
+	if (end.absolute !== undefined) return end.absolute > asked;
+	return false;
+}
+
+// The last time a lite-07 range ending at `end` reaches, undefined while it follows the live edge:
+// an exclusive group end stops at the time before it, though never before the range's own time
+// `asked`. Mirrors the Rust `SubStream::report_starts`.
+function through(end: WireAnchor | undefined, asked: bigint): bigint | undefined {
+	if (end === undefined) return undefined;
+	if (end.time !== undefined) return end.time;
+	return end.absolute > asked ? end.absolute - 1n : asked;
 }
