@@ -164,9 +164,11 @@ A consumer MUST read an entry's `version` before the rest of the entry, and MUST
 One that skips an entry SHOULD tell its user that an upgrade would show more.
 
 A publisher writes on each entry the highest draft whose fields the entry uses that an older consumer would misread, and on the root the highest such draft for the root's own fields, omitting each `version` while it is 3.
-A field one entry carries raises only that entry's `version`, so an older consumer still plays the rest of the catalog, including a compatibility rendition beside the new one.
+A field one entry carries raises only that entry's `version`, so a consumer of moq-hang-04 or later still plays the rest of the catalog, including a compatibility rendition beside the new one.
+A consumer of moq-hang-03 has no version rule: it reads every entry, ignores `version`, and subscribes to the entry's ID.
 A change raises a version only when a consumer that ignored it would misread the catalog, never for a field it can safely ignore.
 This draft writes no root `version`, and needs an entry `version` of 4 only for a `track` ({{field-track}}) other than the entry's ID, which an older consumer subscribes to instead.
+While a moq-hang-03 consumer matters, a publisher keeps each rendition's `track` equal to its ID, since `version` cannot hide an entry from it.
 
 Every other catalog change in this draft is safe to ignore: `enabled` ({{field-enabled}}) leaves an older consumer selecting a disabled rendition, which plays nothing; `sync` ({{sync}}) only offers the clock and join interval, which an older consumer goes without; `stats` and `echo` ({{media-stats}}) only offer optional tracks; `include` ({{include}}) only offers broadcasts to open on selection; video `preference` leaves an older consumer choosing among every rendition it can decode; `instance` ({{field-instance}}) leaves it reading whichever stream it resolves; video `reorder` leaves it inferring decode times from timestamps; video `color`, `projection`, `stereo`, and `interlaced` and audio `layout` leave it presenting the decoded picture or channels unadjusted; `jitter`, `delay`, audio `warmup` ({{field-warmup}}), and the data track estimates are hints.
 
@@ -235,7 +237,7 @@ A publisher MUST NOT change them for a track once a catalog lists it.
 Every other rendition field is live state that MAY change in any update within its own rules (`jitter` and `delay` never fall), as MAY the video section's `display`, `rotation`, and `flip`.
 The picture size MAY change at any keyframe, which a `description` carrying parameter sets rules out, and `codec` names a profile and level that covers every picture the track carries.
 A publisher that changes an identity field MUST publish the media under a new track name, or as a new broadcast under a new Instance {{moql}}.
-A rendition MAY keep its ID and name the new track with `track` ({{field-track}}), so a consumer follows the new name rather than reusing a decoder configured for the ID.
+A rendition MAY keep its ID and name the new track with `track` ({{field-track}}), so a consumer follows the new name rather than reusing a decoder configured for the ID; a moq-hang-03 consumer subscribes to the ID instead and reads the old track, so a publisher it still serves renames the ID too.
 A track name removed from the catalog MUST NOT return with a different identity.
 A consumer MAY configure a decoder once per track from the catalog.
 
@@ -991,8 +993,8 @@ A line no group starts a segment at, because a group longer than the segment or 
 On a 2 second grid, a group spanning 0 to 7 seconds is segment 0, segments 1 and 2 are gaps, and the group after it, starting at 7 seconds, starts segment 3; an edge that joins at that group numbers it alike without the one before.
 
 A segment starts at its first group's timestamp, or at its line when that group starts after it, as a group resuming from a pause does; a gap starts at its line; and each lasts until the next segment starts.
-A group longer than the segment is listed at its first line, so its duration understates its media, and the gaps after it overstate theirs.
-`EXT-X-TARGETDURATION` is twice the segment length, rounded up to whole seconds: the group containing a line starts at most one interval, and so one segment length, before it, and a gap ends where the next segment starts, under two lengths after its line, so only a group longer than the interval can exceed it.
+A group longer than the segment, an overrun, is an edge's to tolerate: it stays on the grid at its first line, and how the edge reports the durations around it is its own policy.
+`EXT-X-TARGETDURATION` is twice the segment length, rounded up to whole seconds: the group containing a line starts at most one interval, and so one segment length, before it, and a gap ends where the next segment starts, under two lengths after its line, so only an overrun can exceed it.
 The HLS media sequence and the segment URL derive from the segment number, and DASH addresses the same segments by `$Time$`.
 
 An edge lists a segment once a later one starts or the track ends.
@@ -1050,7 +1052,7 @@ This document has no IANA actions.
 - A reader refuses a JSON frame in which an object repeats a member name.
 - A catalog update takes effect at its frame's timestamp on the media timeline, not when a consumer reads it, and a publisher keeps superseded catalog groups as fresh as its media's for consumers behind the live edge; an untimed catalog track's updates apply on arrival.
 - Removed `catalog.json.z` and the data track `compression` field: compression is a track property the transport carries ({{compression}}), so each compressed track is one name, and the catalog, `stats` and `echo` snapshots, and JSON data tracks SHOULD be compressed.
-- Added `version` on the root and on each rendition, data track, and include ({{catalog-version}}): the oldest draft that reads it. A consumer refuses a catalog whose root `version` is above its own, and skips an entry whose `version` is. A `track` other than the entry's ID needs an entry `version` of 4. Consumers MUST ignore unknown fields.
+- Added `version` on the root and on each rendition, data track, and include ({{catalog-version}}): the oldest draft that reads it. A consumer refuses a catalog whose root `version` is above its own, and skips an entry whose `version` is. A `track` other than the entry's ID needs an entry `version` of 4, which gates only consumers of -04 or later. Consumers MUST ignore unknown fields.
 - A root member this draft defines has its shape, or the catalog is refused: a section or field of the wrong type, `null`, or out of range is never read as absent. An application MUST NOT carry its own data under a root key this draft defines.
 - Replaced the root `archive` and `clock` sections, and the timeline track the archive named, with the root `sync` section ({{sync}}): `sync.clock` is the former root `clock`, which every track, the catalog track included, converts into, and `sync.interval` is the longest group of any audio or video track, fixed for the broadcast. Removed the Timeline section.
 - Added the HLS and DASH section ({{hls}}): an edge numbers segments on the grid `sync.interval` fixes, each segment the smallest whole multiple of the interval at least a second long and starting at the group containing its line, and lists a line no group starts as a gap.

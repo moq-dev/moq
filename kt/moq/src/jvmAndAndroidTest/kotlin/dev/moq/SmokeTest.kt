@@ -1208,7 +1208,7 @@ class SmokeTest {
                     )
                 moq.use {
                     val everything =
-                        Grant(publish = listOf("**"), subscribe = listOf("**"), expires = null)
+                        Grant(publish = listOf(""), subscribe = listOf(""), expires = null)
                     assertEquals(everything, moq.grants().updates().first { it != null })
                     val session = accepted.await()
                     assertEquals(everything, session.grants().updates().first { it != null })

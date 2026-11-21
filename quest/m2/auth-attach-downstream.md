@@ -26,10 +26,23 @@ Until moq.pro reads `token`, it must not meet a relay with this change:
 marked temporary migration in `rs/moq-auth/src/serve.rs`), but moq.pro has no
 such reader for the new shape.
 
+Rechecked 2026-11-20 by the main → release audit at moq.pro `828766e510`:
+still unfixed. `rs/edge/src/auth/mod.rs` reads only `query_jwt(request.query)`
+(`:1064`, `:1316` on `End`, `:1339` on `Attach` and `Revalidate`) and never
+`request.token`, and no moq.pro quest owns the change. The planning PR lists
+it as a follow-up for moq.pro's own `/quest-plan`, required by moq.pro's
+[cut pin adoption](https://github.com/moq-dev/moq.pro/blob/main/quest/m0/adopt-cut-pin.md),
+so moq.pro never runs a relay with this change before it reads `token`. Its
+test presents distinct credentials through attach, revalidate, and end
+against both the last released relay and the candidate.
+
 ## Waiting
 
-- Maintainer: check the moq.pro and Kixel auth handlers read `attach` from
-  `token`, and fix one that does not before it meets a relay with this change.
-  An agent cannot read those private repositories from here. Done when both
-  handlers' tests present an attach whose `query` holds an expired `jwt` and
-  whose `token` holds a valid one.
+- moq-dev/moq.pro: the edge auth handler reads an attached credential from
+  `token` on `attach`, `revalidate`, and `end`. Check with
+  `grep -n "request.token" rs/edge/src/auth/mod.rs` on moq.pro `main`, and a
+  test whose attach carries an expired `jwt` in `query` and a valid `token`.
+- kixel-ai/kixel.ai: `Mesh.admit` (`src/mesh.ts:557`, rechecked 2026-11-20)
+  reads a `credential` query parameter on every event, `attach` included, and
+  its client attaches nothing yet. Before a Kixel client attaches, it reads
+  `token` there too; check the same way.

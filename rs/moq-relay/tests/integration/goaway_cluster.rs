@@ -368,7 +368,7 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 ///    retracts under the subscriber.
 async fn cluster_diamond_goaway_seamless_failover_inner() {
 	let net = Net::new();
-	let auth = memory::public(&["**"], &[], &[]);
+	let auth = memory::public(&[""], &[], &[]);
 	let mut lite07 = dialing();
 	lite07.version = vec![LITE_07.parse().unwrap()];
 

@@ -28,7 +28,7 @@ use bytes::Bytes;
 use kio::clock::sim::{self, JoinHandle};
 
 use crate::{
-	Client, Pattern, Patterns, Server, Session, Version, broadcast, cache,
+	Client, Prefixes, Server, Session, Version, broadcast, cache,
 	coding::{Encoder, Form},
 	origin, track,
 	transport::{
@@ -602,10 +602,7 @@ impl Relay {
 	/// Accept the peer's session as a relay would: it may publish only beneath [`PEER`], and
 	/// subscribe to anything.
 	fn serve(&self, versions: &[Version], transport: memory::Session) -> Victim {
-		let publish = self
-			.origin
-			.scope(PEER, &Patterns::from(Pattern::all()))
-			.expect("the peer's scope");
+		let publish = self.origin.scope(PEER, &Prefixes::all()).expect("the peer's scope");
 		let server = Server::new()
 			.with_versions(versions.to_vec().into())
 			.with_publisher(self.origin.consume())

@@ -110,6 +110,19 @@ m1 quest on 2026-10-22.
   - moq-gst: the request pad's `encoder` property, shipped in
     `moq-gst-v0.4.24`, was removed with no entry, so a `gst-launch` line
     setting it now fails at runtime.
+  - moq-archive (added 2026-11-20, from the main → release audit):
+    `rs/moq-archive/MIGRATE.md`'s "Recording format version 4 drops the
+    datagram form" and "Recording format version 3 replaces version 1" are
+    wrong since [moq-dev/moq#8932](https://github.com/moq-dev/moq/pull/8932):
+    `VERSION` is 2, the only version written or read, and `Error::Form` is
+    gone. Replace both with #8932's Impact text: format version 2 replaces
+    version 1; start a new recording prefix; main builds' versions 2 to 4 are
+    unsupported; `Info::version` and `Error::Form` are removed and `Info` no
+    longer implements `Serialize`/`Deserialize` (use `Info::encode` and
+    `Info::decode`); keep a release build's reader for retained version 1
+    archives. Keep the `i8` priority and optional timescale notes, and check
+    the "Objects are keyed by timeline segment" entry's `Key::Segments`,
+    `Store::get_segments`, and `Error::Span`, none of which exist on `main`.
 
 ## Required
 

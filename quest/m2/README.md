@@ -70,9 +70,8 @@ with Min Age placing a live join;
 [scale-less tracks aging by arrival](/quest/m2/time-addressing/scale-less-arrival.md);
 Group Streams carrying each time once ([moq-dev/moq#9263](https://github.com/moq-dev/moq/pull/9263)),
 with GROUP_END's end back as a delta, and
-[time anchors landing by group spans](/quest/m2/time-addressing/span-time-anchors.md); and
-[the hang-04 text](/quest/m2/hang-04-text.md) on entry versions and HLS
-overruns. [moq-dev/moq#9198](https://github.com/moq-dev/moq/pull/9198) and
+[time anchors landing by group spans](/quest/m2/time-addressing/span-time-anchors.md).
+[moq-dev/moq#9198](https://github.com/moq-dev/moq/pull/9198) and
 [moq-dev/moq#9221](https://github.com/moq-dev/moq/pull/9221) closed, since
 relative starts and the bare GROUP_END are gone.
 

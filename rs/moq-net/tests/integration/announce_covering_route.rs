@@ -11,7 +11,7 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::{Pattern, Patterns, Version, origin};
+use moq_net::{Pattern, Prefix, Prefixes, Version, origin};
 use support::harness::{MockConnectOptions, connect_mock};
 
 /// Long enough, in virtual time, for anything in flight to reach the far side.
@@ -40,13 +40,13 @@ fn drain(announced: &mut moq_net::origin::Routes) -> Vec<String> {
 /// subscriber whose announce interest is that prefix.
 async fn covering(version: Option<&str>) -> Vec<String> {
 	let publisher = produce_origin(1);
-	let everything = Patterns::from(Pattern::all());
+	let everything = Prefixes::all();
 
 	let (observer, pair) = match version {
 		None => (publisher.consume(), None),
 		Some(version) => {
 			let subscriber = produce_origin(2);
-			let interest = Patterns::from(Pattern::subtree(REQUESTED).unwrap());
+			let interest = Prefixes::from(Prefix::try_from(REQUESTED).unwrap());
 			let scoped = subscriber.scope("", &interest).unwrap();
 			let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
 			options.server_publish = Some(publisher.consume());
@@ -110,12 +110,18 @@ async fn remote_ietf_peer_hears_the_covering_route() {
 	}
 }
 
-/// A relay forwards a claim at `room` through a `**/*.chat` scope, since a path beneath it
-/// could match, so a request for `room/lobby.chat` is served across both hops. Listing that
-/// scope at the far end shows only literal matches, so the claim stays out of it.
+/// A relay forwards a claim at `room` through a scope granting `room/lobby.chat`, since the
+/// claim covers it, so a request for `room/lobby.chat` is served across both hops. A
+/// `**/*.chat` listing at the far end shows only literal matches, so the claim stays out of it.
+/// lite-07 tells a claim at the scope's region instead, here `room/lobby.chat` itself, which the
+/// listing then matches.
 #[kio::test]
 async fn relays_route_a_covering_claim_that_listings_omit() {
-	let chat = Patterns::from("**/*.chat".parse::<Pattern>().unwrap());
+	let scope: Prefixes = ["lobby.chat", "room/lobby.chat"]
+		.into_iter()
+		.map(|prefix| Prefix::try_from(prefix).unwrap())
+		.collect();
+	let chat = "**/*.chat".parse::<Pattern>().unwrap();
 	for version in [
 		"moq-lite-03",
 		"moq-lite-06",
@@ -123,6 +129,14 @@ async fn relays_route_a_covering_claim_that_listings_omit() {
 		"moq-transport-18",
 		"moq-transport-22",
 	] {
+		// lite-07 tells the claim at the scope's region, which the listing matches.
+		let (expect_listed, expect_covering): (&[&str], &[&str]) = match version {
+			"moq-lite-07-wip" => (
+				&["Start lobby.chat", "Start room/lobby.chat"],
+				&["Start lobby.chat", "Start room/lobby.chat"],
+			),
+			_ => (&["Start lobby.chat"], &["Start lobby.chat", "Start room"]),
+		};
 		let version: Version = version.parse().unwrap();
 		let publisher = produce_origin(1);
 		let claim = publisher
@@ -141,18 +155,20 @@ async fn relays_route_a_covering_claim_that_listings_omit() {
 
 		let client = produce_origin(3);
 		let mut options = MockConnectOptions::new(version);
-		options.server_publish = Some(relay.consume().scope("", &chat).unwrap());
+		options.server_publish = Some(relay.consume().scope("", &scope).unwrap());
 		options.client_subscribe = Some(client.clone());
 		let _downstream = connect_mock(options).await;
 
-		let scoped = client.consume().scope("", &chat).unwrap();
+		let scoped = client.consume().filter(&chat).unwrap();
 		let mut listed = scoped.routes();
 		let mut covering = scoped.clone().covering().routes();
 		kio::clock::sleep(SETTLE).await;
-		assert_eq!(drain(&mut listed), ["Start lobby.chat"], "{version}");
+		let mut routes = drain(&mut listed);
+		routes.sort();
+		assert_eq!(routes, expect_listed, "{version}");
 		let mut routes = drain(&mut covering);
 		routes.sort();
-		assert_eq!(routes, ["Start lobby.chat", "Start room"], "{version}");
+		assert_eq!(routes, expect_covering, "{version}");
 
 		// The claim is asked once something subscribes beneath it.
 		let broadcast = kio::clock::timeout(SETTLE, scoped.request("room/lobby.chat", None))
