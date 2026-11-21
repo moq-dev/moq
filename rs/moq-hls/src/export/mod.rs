@@ -1272,19 +1272,22 @@ mod tests {
 			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
 		let all: Vec<_> = refused.into_iter().chain([(Kind::Video, "video0")]).collect();
 		catalog
-			.mutate(|catalog| {
-				catalog.sync.interval = Some(INTERVAL);
-				for &(kind, name) in &all {
-					match kind {
-						Kind::Video => {
-							catalog.video.renditions.insert(name.into(), video_config());
-						}
-						Kind::Audio => {
-							catalog.audio.renditions.insert(name.into(), opus());
+			.mutate(
+				|catalog| {
+					catalog.sync.interval = Some(INTERVAL);
+					for &(kind, name) in &all {
+						match kind {
+							Kind::Video => {
+								catalog.video.renditions.insert(name.into(), video_config());
+							}
+							Kind::Audio => {
+								catalog.audio.renditions.insert(name.into(), opus());
+							}
 						}
 					}
-				}
-			})
+				},
+				catalog.next_timestamp(),
+			)
 			.unwrap();
 		// Only the servable rendition is ever read.
 		let mut video0 = Gops {
@@ -1541,13 +1544,16 @@ mod tests {
 		let mut catalog =
 			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
 		catalog
-			.mutate(|catalog| {
-				catalog.sync.interval = Some(INTERVAL);
-				for name in ["video0", "video1"] {
-					let config = if name == inline { inline_vp8() } else { video_config() };
-					catalog.video.renditions.insert(name.into(), config);
-				}
-			})
+			.mutate(
+				|catalog| {
+					catalog.sync.interval = Some(INTERVAL);
+					for name in ["video0", "video1"] {
+						let config = if name == inline { inline_vp8() } else { video_config() };
+						catalog.video.renditions.insert(name.into(), config);
+					}
+				},
+				catalog.next_timestamp(),
+			)
 			.unwrap();
 		let other = if inline == "video0" { "video1" } else { "video0" };
 		let other = Gops {
@@ -1680,13 +1686,16 @@ mod tests {
 		let mut catalog =
 			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
 		catalog
-			.mutate(|catalog| {
-				catalog.sync.interval = Some(INTERVAL);
-				for name in ["video0", "video1"] {
-					let config = if name == "video1" { inline_vp8() } else { video_config() };
-					catalog.video.renditions.insert(name.into(), config);
-				}
-			})
+			.mutate(
+				|catalog| {
+					catalog.sync.interval = Some(INTERVAL);
+					for name in ["video0", "video1"] {
+						let config = if name == "video1" { inline_vp8() } else { video_config() };
+						catalog.video.renditions.insert(name.into(), config);
+					}
+				},
+				catalog.next_timestamp(),
+			)
 			.unwrap();
 		let mut video0 = Gops {
 			track: broadcast.broadcast().create_track("video0", timed()).unwrap(),
@@ -1880,7 +1889,10 @@ mod tests {
 	async fn a_disabled_rendition_never_builds_its_init() {
 		let (origin, broadcast, mut catalog, _video0) = inline_sibling().await;
 		catalog
-			.mutate(|catalog| catalog.video.renditions.get_mut("video1").unwrap().enabled = false)
+			.mutate(
+				|catalog| catalog.video.renditions.get_mut("video1").unwrap().enabled = false,
+				catalog.next_timestamp(),
+			)
 			.unwrap();
 		let media = broadcast.broadcast().create_track("video1", timed()).unwrap();
 		for sequence in 0..4 {
@@ -1903,7 +1915,10 @@ mod tests {
 		);
 
 		catalog
-			.mutate(|catalog| catalog.video.renditions.get_mut("video1").unwrap().enabled = true)
+			.mutate(
+				|catalog| catalog.video.renditions.get_mut("video1").unwrap().enabled = true,
+				catalog.next_timestamp(),
+			)
 			.unwrap();
 		listed_in_manifest(&broadcaster).await;
 	}
@@ -3971,12 +3986,15 @@ mod tests {
 		let mut catalog =
 			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
 		catalog
-			.mutate(|catalog| {
-				catalog.sync.interval = Some(INTERVAL);
-				for name in ["video0", "video1"] {
-					catalog.video.renditions.insert(name.into(), video_config());
-				}
-			})
+			.mutate(
+				|catalog| {
+					catalog.sync.interval = Some(INTERVAL);
+					for name in ["video0", "video1"] {
+						catalog.video.renditions.insert(name.into(), video_config());
+					}
+				},
+				catalog.next_timestamp(),
+			)
 			.unwrap();
 		let publish = |name: &str| Gops {
 			track: broadcast.broadcast().create_track(name, timed()).unwrap(),

@@ -183,7 +183,7 @@ impl Transcoder {
 		// can pick a rung immediately. Commit so a catalog that cannot be published fails
 		// here rather than serving rungs nobody can discover.
 		{
-			let mut guard = derived.modify()?;
+			let mut guard = derived.modify(derived.next_timestamp())?;
 			catalog::populate(&mut guard, &snapshot, ladder.rungs(), config.source.as_ref())?;
 			guard.commit()?;
 		}
@@ -210,7 +210,7 @@ impl Transcoder {
 							let scale = Box::pin(pipeline::timescale(source, next.track()));
 							moving = Some(Moving { next, scale, snapshot: snapshot.clone() });
 						}
-						let mut guard = derived.modify()?;
+						let mut guard = derived.modify(derived.next_timestamp())?;
 						catalog::populate(&mut guard, &snapshot, ladder.rungs(), config.source.as_ref())?;
 						guard.commit()?;
 					}
@@ -226,7 +226,7 @@ impl Transcoder {
 					match scale {
 						Ok(scale) => {
 							ladder.adopt(next, scale).await;
-							let mut guard = derived.modify()?;
+							let mut guard = derived.modify(derived.next_timestamp())?;
 							catalog::populate(&mut guard, &snapshot, ladder.rungs(), config.source.as_ref())?;
 							guard.commit()?;
 						}
@@ -351,7 +351,7 @@ mod tests {
 			video.description = description;
 			self.size = (width, height);
 
-			let mut guard = self.catalog.modify().unwrap();
+			let mut guard = self.catalog.modify(self.catalog.next_timestamp()).unwrap();
 			guard.video = hang::catalog::Video::default();
 			guard.video.insert("video", video).unwrap();
 		}
@@ -475,7 +475,12 @@ mod tests {
 		video.coded_height = Some(240);
 		video.bitrate = Some(1_000_000);
 		video.framerate = Some(30.0);
-		catalog.modify().unwrap().video.insert("video", video).unwrap();
+		catalog
+			.modify(catalog.next_timestamp())
+			.unwrap()
+			.video
+			.insert("video", video)
+			.unwrap();
 
 		let track = broadcast.create_track("video", info).unwrap();
 
@@ -1138,11 +1143,14 @@ mod tests {
 		let mut source = source_broadcast(2, 5);
 		source
 			.catalog
-			.mutate(|catalog| {
-				let mut video = catalog.video.renditions.remove("video").unwrap();
-				video.track = Some("video".to_string());
-				catalog.video.renditions.insert("main".to_string(), video);
-			})
+			.mutate(
+				|catalog| {
+					let mut video = catalog.video.renditions.remove("video").unwrap();
+					video.track = Some("video".to_string());
+					catalog.video.renditions.insert("main".to_string(), video);
+				},
+				source.catalog.next_timestamp(),
+			)
 			.unwrap();
 
 		let config = Config {
@@ -2221,7 +2229,7 @@ mod tests {
 		moved.track = Some("withheld".into());
 		source
 			.catalog
-			.modify()
+			.modify(source.catalog.next_timestamp())
 			.unwrap()
 			.video
 			.renditions
@@ -2259,7 +2267,7 @@ mod tests {
 		moved.track = Some("withheld".into());
 		source
 			.catalog
-			.modify()
+			.modify(source.catalog.next_timestamp())
 			.unwrap()
 			.video
 			.renditions
@@ -2392,7 +2400,7 @@ mod tests {
 		avc.coded_height = Some(360);
 		avc.bitrate = Some(1_000_000);
 
-		let mut guard = catalog.modify().unwrap();
+		let mut guard = catalog.modify(catalog.next_timestamp()).unwrap();
 		guard.video.insert("hevc", hevc).unwrap();
 		guard.video.insert("avc", avc).unwrap();
 		guard.commit().unwrap();

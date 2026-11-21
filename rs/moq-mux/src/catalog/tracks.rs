@@ -683,7 +683,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		}
 		config.set_estimate(resolved.clone());
 		{
-			let mut guard = self.catalog.modify()?;
+			let mut guard = self.catalog.edit()?;
 			write(&mut guard, &self.name, config)?;
 			self.present = true;
 			guard.list::<C>(&self.name);
@@ -760,7 +760,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		if self.published.as_ref() == Some(&resolved) {
 			// Still an observation: it releases a rise held back until its window ended. A closed
 			// catalog has nothing left to release.
-			if let Ok(guard) = self.catalog.modify() {
+			if let Ok(guard) = self.catalog.edit() {
 				guard.commit_estimate(true)?;
 			}
 			return Ok(());
@@ -831,7 +831,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 			return Err(self.unpublished());
 		}
 		Self::check_decrease(&self.config()?.estimate(), &config.estimate())?;
-		let mut guard = self.catalog.modify()?;
+		let mut guard = self.catalog.edit()?;
 		write(&mut guard, &self.name, config)?;
 		Ok(guard)
 	}
@@ -853,7 +853,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Drop for Rendition<E, C> {
 		// The entry and the name it holds are released together under one lock. Removing mutates the
 		// catalog, so the guard publishes it (immediately if live, else it accumulates until the gate
 		// opens). A closed catalog has nothing left to release from.
-		if let Ok(mut catalog) = self.catalog.modify() {
+		if let Ok(mut catalog) = self.catalog.edit() {
 			catalog.release::<C>(&self.name, self.present);
 		}
 		// Our reservation (`gate`) drops here. If still held (never set), its release flushes any
@@ -1438,7 +1438,7 @@ mod tests {
 	fn an_existing_entry_owns_its_name() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut catalog = super::super::Producer::new(&mut broadcast, super::super::Config::default()).unwrap();
-		catalog.modify().unwrap().video.insert("v", config(None, None)).unwrap();
+		catalog.edit().unwrap().video.insert("v", config(None, None)).unwrap();
 
 		assert!(
 			catalog.reserve().init::<hang::catalog::VideoConfig>("v").is_err(),

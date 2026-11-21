@@ -91,12 +91,15 @@ fn publish(origin: &origin::Producer, instance: &Instance, tag: &str) -> Publish
 	write(&media, &format!("{tag}:0"));
 	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
 	catalog
-		.mutate(|catalog| {
-			let mut audio = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
-			audio.broadcast = Some(moq_net::path::Relative::new("./media").unwrap());
-			audio.instance = Some(instance.clone());
-			catalog.audio.renditions.insert("audio".into(), audio);
-		})
+		.mutate(
+			|catalog| {
+				let mut audio = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+				audio.broadcast = Some(moq_net::path::Relative::new("./media").unwrap());
+				audio.instance = Some(instance.clone());
+				catalog.audio.renditions.insert("audio".into(), audio);
+			},
+			catalog.next_timestamp(),
+		)
 		.unwrap();
 	Published {
 		catalog,
@@ -229,7 +232,10 @@ async fn replacement(version: &str) {
 	// Later catalog snapshots stay on A and resolving again keeps A's sibling pin.
 	first
 		.catalog
-		.mutate(|catalog| catalog.audio.renditions.get_mut("audio").unwrap().bitrate = Some(64_000))
+		.mutate(
+			|catalog| catalog.audio.renditions.get_mut("audio").unwrap().bitrate = Some(64_000),
+			first.catalog.next_timestamp(),
+		)
 		.unwrap();
 	let later = catalog.next().await.unwrap().unwrap();
 	assert_eq!(later.audio.renditions["audio"].bitrate, Some(64_000));
@@ -344,13 +350,16 @@ impl Worker {
 							moq_mux::catalog::Producer::new(&mut route.broadcast().clone(), Default::default())
 								.unwrap();
 						catalog
-							.mutate(|catalog| {
-								let mut audio =
-									hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
-								audio.broadcast = Some(moq_net::path::Relative::new("./media").unwrap());
-								audio.instance = Some(instance);
-								catalog.audio.renditions.insert("audio".into(), audio);
-							})
+							.mutate(
+								|catalog| {
+									let mut audio =
+										hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+									audio.broadcast = Some(moq_net::path::Relative::new("./media").unwrap());
+									audio.instance = Some(instance);
+									catalog.audio.renditions.insert("audio".into(), audio);
+								},
+								catalog.next_timestamp(),
+							)
 							.unwrap();
 						(Some(catalog), None)
 					}

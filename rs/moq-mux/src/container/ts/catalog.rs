@@ -816,7 +816,7 @@ mod test {
 		)
 		.unwrap();
 
-		let mut guard = producer.modify().unwrap();
+		let mut guard = producer.modify(producer.next_timestamp()).unwrap();
 		guard.ext.mpegts.program = Some(Program {
 			transport_stream_id: 0x1234,
 			program_number: 1,

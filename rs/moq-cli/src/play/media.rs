@@ -2114,13 +2114,16 @@ mod tests {
 		write(&mut high, 10, 0.25).await;
 		let mut low = rendition(broadcast.broadcast(), &catalog, "low");
 		catalog
-			.mutate(|catalog| {
-				let high = catalog.audio.renditions.get_mut("high").unwrap();
-				high.bitrate = Some(u64::from(SAMPLE_RATE) * 32);
-				high.enabled = false;
-				// An unknown bitrate ranks below a known one without falsifying PCM metadata.
-				catalog.audio.renditions.get_mut("low").unwrap().bitrate = None;
-			})
+			.mutate(
+				|catalog| {
+					let high = catalog.audio.renditions.get_mut("high").unwrap();
+					high.bitrate = Some(u64::from(SAMPLE_RATE) * 32);
+					high.enabled = false;
+					// An unknown bitrate ranks below a known one without falsifying PCM metadata.
+					catalog.audio.renditions.get_mut("low").unwrap().bitrate = None;
+				},
+				catalog.next_timestamp(),
+			)
 			.unwrap();
 		for index in 10..40 {
 			high.write(packet(index, 0.25)).unwrap();
@@ -2228,9 +2231,12 @@ mod tests {
 			config.container = hang::catalog::Container::Legacy;
 			config.track = Some(track.to_string());
 			catalog
-				.mutate(|catalog| {
-					catalog.audio.renditions.insert("main".to_string(), config);
-				})
+				.mutate(
+					|catalog| {
+						catalog.audio.renditions.insert("main".to_string(), config);
+					},
+					catalog.next_timestamp(),
+				)
 				.unwrap();
 		};
 		point(&mut catalog, "a");
@@ -2494,9 +2500,12 @@ mod tests {
 		let player = tokio::spawn(media(&origin, Duration::from_millis(50), recorder.clone()).run());
 		write(&mut audio, 10, 0.25).await;
 		catalog
-			.mutate(|catalog| {
-				catalog.audio.renditions.get_mut("audio").unwrap().bitrate = Some(u64::from(SAMPLE_RATE) * 32);
-			})
+			.mutate(
+				|catalog| {
+					catalog.audio.renditions.get_mut("audio").unwrap().bitrate = Some(u64::from(SAMPLE_RATE) * 32);
+				},
+				catalog.next_timestamp(),
+			)
 			.unwrap();
 		let _finished = audio.finish().unwrap();
 

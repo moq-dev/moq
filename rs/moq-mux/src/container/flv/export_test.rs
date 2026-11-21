@@ -566,7 +566,7 @@ fn build_multitrack_broadcast() -> (moq_net::broadcast::Consumer, Vec<Vec<u8>>, 
 		config.coded_width = Some(width);
 		config.coded_height = Some(height);
 		catalog
-			.modify()
+			.modify(catalog.next_timestamp())
 			.unwrap()
 			.video
 			.renditions
@@ -593,7 +593,7 @@ fn build_multitrack_broadcast() -> (moq_net::broadcast::Consumer, Vec<Vec<u8>>, 
 	audio_config.container = Container::Legacy;
 	audio_config.description = Some(Bytes::from_static(&ASC));
 	catalog
-		.modify()
+		.modify(catalog.next_timestamp())
 		.unwrap()
 		.audio
 		.renditions
@@ -753,7 +753,7 @@ async fn export_without_multitrack_keeps_best_audio_rendition() {
 		let mut publish = |name: &str, config: AudioConfig| {
 			let track = producer.create_track(name, timed()).unwrap();
 			catalog
-				.modify()
+				.modify(catalog.next_timestamp())
 				.unwrap()
 				.audio
 				.renditions
@@ -892,7 +892,7 @@ async fn export_rebinds_to_a_better_rendition_before_the_header() {
 	config.coded_width = Some(640);
 	config.coded_height = Some(360);
 	catalog
-		.modify()
+		.modify(catalog.next_timestamp())
 		.unwrap()
 		.video
 		.renditions
@@ -924,7 +924,7 @@ async fn export_rebinds_to_a_better_rendition_before_the_header() {
 	config.coded_width = Some(1920);
 	config.coded_height = Some(1080);
 	catalog
-		.modify()
+		.modify(catalog.next_timestamp())
 		.unwrap()
 		.video
 		.renditions
@@ -988,7 +988,7 @@ async fn export_unbinds_a_rendition_disabled_before_the_header() {
 	config.coded_width = Some(640);
 	config.coded_height = Some(360);
 	catalog
-		.modify()
+		.modify(catalog.next_timestamp())
 		.unwrap()
 		.video
 		.renditions
@@ -1014,7 +1014,7 @@ async fn export_unbinds_a_rendition_disabled_before_the_header() {
 	config.coded_height = Some(1080);
 	config.enabled = false;
 	catalog
-		.modify()
+		.modify(catalog.next_timestamp())
 		.unwrap()
 		.video
 		.renditions
@@ -1035,7 +1035,7 @@ async fn export_unbinds_a_rendition_disabled_before_the_header() {
 	// The small rendition is disabled before its keyframe lands, so the keyframe is no reason
 	// to write a header.
 	catalog
-		.modify()
+		.modify(catalog.next_timestamp())
 		.unwrap()
 		.video
 		.renditions
@@ -1057,7 +1057,7 @@ async fn export_unbinds_a_rendition_disabled_before_the_header() {
 	);
 
 	catalog
-		.modify()
+		.modify(catalog.next_timestamp())
 		.unwrap()
 		.video
 		.renditions
@@ -1114,7 +1114,7 @@ async fn export_rebinds_to_a_better_audio_rendition_before_the_header() {
 		config.bitrate = Some(bitrate);
 		config.description = Some(Bytes::from_static(asc));
 		catalog
-			.modify()
+			.modify(catalog.next_timestamp())
 			.unwrap()
 			.audio
 			.renditions
@@ -1138,7 +1138,7 @@ async fn export_rebinds_to_a_better_audio_rendition_before_the_header() {
 	});
 	config.container = Container::Legacy;
 	catalog
-		.modify()
+		.modify(catalog.next_timestamp())
 		.unwrap()
 		.video
 		.renditions
@@ -1171,7 +1171,7 @@ async fn export_rebinds_to_a_better_audio_rendition_before_the_header() {
 	config.coded_width = Some(1920);
 	config.coded_height = Some(1080);
 	catalog
-		.modify()
+		.modify(catalog.next_timestamp())
 		.unwrap()
 		.video
 		.renditions
@@ -1272,7 +1272,7 @@ async fn export_authors_dts_and_composition_time_for_reordered_avc() {
 	video_config.description = Some(Bytes::from(avcc()));
 	video_config.jitter = Some(Duration::from_millis(80));
 	catalog
-		.modify()
+		.modify(catalog.next_timestamp())
 		.unwrap()
 		.video
 		.renditions
@@ -1282,7 +1282,7 @@ async fn export_authors_dts_and_composition_time_for_reordered_avc() {
 	audio_config.container = Container::Legacy;
 	audio_config.description = Some(Bytes::from_static(&ASC));
 	catalog
-		.modify()
+		.modify(catalog.next_timestamp())
 		.unwrap()
 		.audio
 		.renditions
@@ -1375,7 +1375,7 @@ async fn export_declared(reorder: u8, groups: &[&[u64]], open: bool) -> anyhow::
 	audio_config.container = Container::Legacy;
 	audio_config.description = Some(Bytes::from_static(&ASC));
 	{
-		let mut catalog = catalog.modify().unwrap();
+		let mut catalog = catalog.modify(catalog.next_timestamp()).unwrap();
 		catalog
 			.video
 			.renditions
@@ -1519,7 +1519,12 @@ async fn a_reorder_declared_after_the_header_raises_the_shift() {
 	});
 	config.container = Container::Legacy;
 	config.description = Some(Bytes::from(avcc()));
-	catalog.modify().unwrap().video.renditions.insert(name.clone(), config);
+	catalog
+		.modify(catalog.next_timestamp())
+		.unwrap()
+		.video
+		.renditions
+		.insert(name.clone(), config);
 	let frame = |ms: u64, keyframe| crate::container::Frame {
 		timestamp: Timestamp::from_millis(ms).unwrap(),
 		duration: None,
@@ -1547,7 +1552,7 @@ async fn a_reorder_declared_after_the_header_raises_the_shift() {
 	let mut exported = exporter.next().await.unwrap().expect("the header").to_vec();
 
 	catalog
-		.modify()
+		.modify(catalog.next_timestamp())
 		.unwrap()
 		.video
 		.renditions
@@ -1673,7 +1678,7 @@ async fn a_track_leaving_the_catalog_is_read_to_its_end() {
 	audio_config.container = Container::Legacy;
 	audio_config.description = Some(Bytes::from_static(&ASC));
 	{
-		let mut catalog = catalog.modify().unwrap();
+		let mut catalog = catalog.modify(catalog.next_timestamp()).unwrap();
 		catalog
 			.video
 			.renditions
@@ -1709,7 +1714,12 @@ async fn a_track_leaving_the_catalog_is_read_to_its_end() {
 	}
 
 	// The audio rendition retires before its tail lands; the video carries on.
-	catalog.modify().unwrap().audio.renditions.remove(&audio_name);
+	catalog
+		.modify(catalog.next_timestamp())
+		.unwrap()
+		.audio
+		.renditions
+		.remove(&audio_name);
 	audio.write(frame(23, &[0xbe, 0xef], true)).unwrap();
 	let _finished = audio.finish().unwrap();
 	video.write(frame(33, &[0, 0, 0, 1, 0x41], false)).unwrap();
@@ -1756,7 +1766,7 @@ async fn a_failed_rendition_continues_on_its_replacement() {
 		let legacy = || crate::catalog::hang::Container::Legacy(crate::container::Kind::Data);
 		let mut add = |name: &str, video: bool| {
 			let track = producer.create_track(producer.unique_name(name), timed()).unwrap();
-			let mut modify = catalog.modify().unwrap();
+			let mut modify = catalog.modify(catalog.next_timestamp()).unwrap();
 			if video {
 				modify
 					.video
@@ -1803,7 +1813,12 @@ async fn a_failed_rendition_continues_on_its_replacement() {
 			replacement.write(frame(ms, &[0xbe, 0xef], true)).unwrap();
 			assert!(drain_until_idle(&mut exporter, &mut exported).await.is_none());
 		}
-		catalog.modify().unwrap().audio.renditions.remove(&failed);
+		catalog
+			.modify(catalog.next_timestamp())
+			.unwrap()
+			.audio
+			.renditions
+			.remove(&failed);
 		video.write(frame(166, &[0, 0, 0, 1, 0x41], false)).unwrap();
 		let _finished = replacement.finish().unwrap();
 		let _finished = video.finish().unwrap();
@@ -1854,7 +1869,7 @@ async fn a_replacement_declaring_reorder_raises_the_shift() {
 		|producer: &mut moq_net::broadcast::Producer, catalog: &mut crate::catalog::Producer, config: &VideoConfig| {
 			let track = producer.create_track(producer.unique_name(".avc1"), timed()).unwrap();
 			catalog
-				.modify()
+				.modify(catalog.next_timestamp())
 				.unwrap()
 				.video
 				.renditions
@@ -1873,7 +1888,7 @@ async fn a_replacement_declaring_reorder_raises_the_shift() {
 	video.write(frame(0, &[0, 0, 0, 1, 0x65], true)).unwrap();
 	audio.write(frame(0, &[0xde, 0xad], true)).unwrap();
 	catalog
-		.modify()
+		.modify(catalog.next_timestamp())
 		.unwrap()
 		.audio
 		.renditions
@@ -1936,7 +1951,7 @@ async fn a_continued_track_wakes_the_export() {
 		config.description = Some(Bytes::from_static(&ASC));
 		config.bitrate = Some(bitrate);
 		catalog
-			.modify()
+			.modify(catalog.next_timestamp())
 			.unwrap()
 			.audio
 			.renditions
@@ -2012,7 +2027,7 @@ async fn a_track_failing_before_its_config_leaves_the_header_to_the_rest() {
 	});
 	config.container = Container::Legacy;
 	catalog
-		.modify()
+		.modify(catalog.next_timestamp())
 		.unwrap()
 		.video
 		.renditions
@@ -2024,7 +2039,7 @@ async fn a_track_failing_before_its_config_leaves_the_header_to_the_rest() {
 	config.container = Container::Legacy;
 	config.description = Some(Bytes::from_static(&ASC));
 	catalog
-		.modify()
+		.modify(catalog.next_timestamp())
 		.unwrap()
 		.audio
 		.renditions
@@ -2058,7 +2073,7 @@ async fn a_track_failing_before_its_config_leaves_the_header_to_the_rest() {
 	config.container = Container::Legacy;
 	config.description = Some(Bytes::from(avcc()));
 	catalog
-		.modify()
+		.modify(catalog.next_timestamp())
 		.unwrap()
 		.video
 		.renditions
@@ -2170,7 +2185,12 @@ async fn decode_order_is_independent_of_cross_track_arrival_order() {
 		config.container = Container::Legacy;
 		let mut live = Live::audio(config.clone());
 		let mut other = live.add_track("other", |catalog, name| {
-			catalog.modify().unwrap().audio.renditions.insert(name, config);
+			catalog
+				.modify(catalog.next_timestamp())
+				.unwrap()
+				.audio
+				.renditions
+				.insert(name, config);
 		});
 		let mut export = super::Export::new(live.source().await, live.catalog_stream().await)
 			.with_delay(

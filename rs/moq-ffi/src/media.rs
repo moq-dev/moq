@@ -860,7 +860,7 @@ impl MoqMediaCatalogProducer {
 		value.flip = properties.flip;
 
 		self.broadcast.upgrade().ok_or(MoqError::Closed)?.with_state(|state| {
-			let mut catalog = state.catalog.modify()?;
+			let mut catalog = state.catalog.modify(state.catalog.next_timestamp())?;
 			catalog.video.set_properties(value)?;
 			catalog.commit()?;
 			Ok(())
@@ -878,7 +878,7 @@ impl MoqMediaCatalogProducer {
 		let _guard = crate::ffi::enter();
 		let value: serde_json::Value = serde_json::from_str(&json)?;
 		self.broadcast.upgrade().ok_or(MoqError::Closed)?.with_state(|state| {
-			let mut guard = state.catalog.modify()?;
+			let mut guard = state.catalog.modify(state.catalog.next_timestamp())?;
 			guard.set_section(name, value)?;
 			guard.commit()?;
 			Ok(())
@@ -889,7 +889,7 @@ impl MoqMediaCatalogProducer {
 	pub fn remove_section(&self, name: String) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		self.broadcast.upgrade().ok_or(MoqError::Closed)?.with_state(|state| {
-			let mut guard = state.catalog.modify()?;
+			let mut guard = state.catalog.modify(state.catalog.next_timestamp())?;
 			guard.remove_section(&name);
 			guard.commit()?;
 			Ok(())
