@@ -1243,14 +1243,17 @@ impl<E: CatalogExt> Guard<'_, E> {
 		// Withhold every emit while still buffering the initial reserved set, or until a reserved
 		// catalog names a track; the mutation stays in `current` and `pending` marks it for the
 		// flush once the gate opens.
-		if matches!(self.state.gate, Gate::Buffering { .. }) && !self.state.gate_opens() {
-			if let Gate::Buffering { pending, at, .. } = &mut self.state.gate {
-				*pending = true;
-				// An unstamped change keeps the staged stamp, landing no earlier than its neighbour,
-				// as an unstamped publish lands past a stamped one.
-				*at = self.at.or(*at);
+		let mut at = self.at;
+		if let Gate::Buffering { pending, at: staged, .. } = &mut self.state.gate {
+			*pending = true;
+			// An unstamped change keeps the staged stamp, landing no earlier than its neighbour, as
+			// an unstamped publish lands past a stamped one. That holds for the change opening the
+			// gate too.
+			*staged = at.or(*staged);
+			at = *staged;
+			if !self.state.gate_opens() {
+				return Ok(());
 			}
-			return Ok(());
 		}
 		self.state.gate = Gate::Published;
 		// A snapshot on the wire is a mapping a reader may have copied.
@@ -1258,8 +1261,7 @@ impl<E: CatalogExt> Guard<'_, E> {
 
 		// Folded only once it is on the wire, so a failed emit leaves the estimate held.
 		let state = &mut *self.state;
-		self.outputs
-			.emit(&state.catalog, &mut state.msf, &state.clock, self.at)?;
+		self.outputs.emit(&state.catalog, &mut state.msf, &state.clock, at)?;
 		self.state.estimates.fold();
 		Ok(())
 	}
@@ -2194,6 +2196,26 @@ mod test {
 		assert_eq!(starts(&catalog), [Some(start(&catalog, 60_000)); 2]);
 		let renditions = &catalog.modify().unwrap().audio.renditions;
 		assert_eq!(renditions.keys().collect::<Vec<_>>(), ["a", "c"]);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_staged_set_timestamp_stamps_the_change_opening_the_gate() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+
+		// A disabled rendition lists no track, so the gate stays shut past the reservation.
+		drop(catalog.reserve());
+		let mut guard = catalog.modify().unwrap();
+		guard.set_timestamp(moq_net::Timestamp::from_millis(60_000).unwrap()).unwrap();
+		let mut disabled = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
+		disabled.enabled = false;
+		guard.audio.renditions.insert("a".to_string(), disabled);
+		guard.commit().unwrap();
+		assert_eq!(starts(&catalog), [None; 2], "published before the catalog listed a track");
+
+		// The unstamped change that lists one goes out at the staged stamp.
+		opus(&mut catalog, "b", None).unwrap();
+		assert_eq!(starts(&catalog), [Some(start(&catalog, 60_000)); 2]);
 	}
 
 	/// A video rendition `video0` on `catalog`, with a keyframe group at each of `starts` (ms).
