@@ -112,9 +112,9 @@ pub enum Error {
 	#[error("token is not valid yet")]
 	TokenNotYetValid,
 
-	/// A path pattern did not parse.
+	/// A grant prefix did not parse, such as one holding a wildcard.
 	#[error(transparent)]
-	Pattern(#[from] moq_pattern::InvalidPattern),
+	Prefix(#[from] moq_pattern::InvalidPrefix),
 
 	/// The grant allows nothing, so the session is refused.
 	#[error("grant names nothing; the session is refused")]

@@ -7,11 +7,14 @@
 [![npm version](https://img.shields.io/npm/v/@moq/pattern)](https://www.npmjs.com/package/@moq/pattern)
 [![TypeScript](https://img.shields.io/badge/TypeScript-ready-blue.svg)](https://www.typescriptlang.org/)
 
-Exact path patterns for [Media over QUIC](https://moq.dev): grammar, matching, and set algebra.
+Exact path patterns and prefix grants for [Media over QUIC](https://moq.dev): grammar,
+matching, and set algebra.
 
-A pattern describes a set of broadcast paths. This package provides a shared grammar
-for tokens, origin scopes, and announce interests. Integrating
-patterns into those consumers is separate work.
+A `Pattern` describes a set of broadcast paths, for discovery filters that pick which
+announcements a reader looks at. A `Prefix` is a grant member: a path covering itself and
+everything beneath it, the empty prefix covering everything. `Prefixes`, a reduced set of
+them, is what tokens and origin scopes grant. A grant takes no wildcard: `foo/**` and `**`
+are refused, written `foo` and `""` instead.
 Literal paths stay coordinates; `@moq/net`'s path module keeps construction, joins, and
 prefix operations.
 
@@ -23,11 +26,15 @@ npm add @moq/pattern
 ```
 
 ```ts
-import { Pattern, Patterns } from "@moq/pattern";
+import { Pattern, Prefixes } from "@moq/pattern";
 
-const grant = Pattern.parse("pid/*/chat");
+const grant = Prefixes.parse(["pid/room1", "pid/room2"]);
 grant.matches("pid/room1/chat"); // true
-grant.contains(Pattern.parse("pid/room1/chat")); // true
+grant.overlaps("pid"); // true
+grant.rebase("pid").toJSON(); // ["room1", "room2"]
+
+const filter = Pattern.parse("pid/*/chat");
+filter.matches("pid/room1/chat"); // true
 
 const under = Pattern.parse("**/a").rebase("a");
 [...under].map((p) => p.text); // ["", "**/a"]

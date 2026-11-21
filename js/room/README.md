@@ -24,7 +24,7 @@ bun add @moq/room
 
 ## Token
 
-Sign with [`@moq/auth`](../auth). `root` is the room, `subscribe: ["**"]` subscribes to everyone, `publish: ["<identity>/**"]` so a participant cannot publish at someone else's paths.
+Sign with [`@moq/auth`](../auth). `root` is the room, `subscribe: [""]` subscribes to everyone, `publish: ["<identity>"]` so a participant cannot publish at someone else's paths.
 
 ```ts
 import { claims } from "@moq/room";

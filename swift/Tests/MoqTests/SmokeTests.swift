@@ -195,6 +195,9 @@ final class SmokeTests: XCTestCase {
             var info = try broadcast.publishTrack(name: "info").consume().info()
             info.maxAge = bad
             assertConfig({ _ = try broadcast.publishTrack(name: "bad", info: info) }, "max age \(bad)")
+            info.maxAge = 0
+            info.refresh = TrackRefresh(interval: bad)
+            assertConfig({ _ = try broadcast.publishTrack(name: "bad", info: info) }, "refresh interval \(bad)")
 
             var subscription = Subscription.default
             subscription.delay.max = bad
@@ -251,7 +254,7 @@ final class SmokeTests: XCTestCase {
         }
         defer { watchdog.cancel() }
 
-        let everything = Grant(publish: ["**"], subscribe: ["**"], expires: nil)
+        let everything = Grant(publish: [""], subscribe: [""], expires: nil)
         for side in [session, peer] {
             for try await grant in side.grants() where grant == everything {
                 break

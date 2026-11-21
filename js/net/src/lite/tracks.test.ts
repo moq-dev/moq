@@ -348,7 +348,7 @@ test("a version without the Tracks Stream refuses the listing", async () => {
 });
 
 function scoped(prefix: string): Grant {
-	return { publish: new Path.Patterns(), subscribe: new Path.Patterns([Path.Pattern.subtree(prefix)]) };
+	return { publish: new Path.Prefixes(), subscribe: new Path.Prefixes([Path.Prefix.parse(prefix)]) };
 }
 
 test("a listing our grant does not cover is refused, and never reaches the wire", async () => {

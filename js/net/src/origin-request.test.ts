@@ -91,7 +91,7 @@ test.each(["request", "follow"] as const)(
 	(method) => {
 		const origin = new Producer();
 		expect(() => origin[method](Path.from("camera*main"))).toThrow();
-		const scoped = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from("pool/job/cam"))]));
+		const scoped = origin.scope(Path.empty(), new Path.Prefixes([Path.Prefix.parse(Path.from("pool/job/cam"))]));
 		expect(() => scoped[method](Path.from("pool/job"))).toThrow();
 		expect(wireOf(origin).requests.peek()?.size).toBe(0);
 		origin.close();
@@ -197,7 +197,7 @@ test("followers track the serving prefix, ignoring descendants and re-prices", a
 
 test("a follower ignores a covering route whose scope excludes its path", async () => {
 	const origin = new Producer();
-	const scoped = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("room/*/chat")]));
+	const scoped = origin.scope(Path.empty(), Path.Prefixes.parse(["room/alice/chat"]));
 	const prefix = scoped.claim(Path.from("room/alice"));
 	const exactRoute = origin.route(Path.from("room/alice"), { cost: 5n });
 	const exact = exactRoute.broadcast;

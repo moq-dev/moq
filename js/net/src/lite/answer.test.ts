@@ -28,16 +28,16 @@ import { Version } from "./version.ts";
 /** Where claims are advertised: some above what grants and prefixes name, and one hidden. */
 const PATHS = ["a", "a/x", "a/q/x", "a/.h", "b", "b/c"].map((path) => Path.from(path));
 /** The scopes claims are advertised with, which bound what each may serve. */
-const SCOPES: (string[] | undefined)[] = [undefined, ["a/*/x"], ["*/c/**"]];
+const SCOPES: (string[] | undefined)[] = [undefined, ["a/q/x"], ["a/x", "b/c"]];
 /** The grants: widen, narrow, move, and revoke between them. */
-const GRANTS: (string[] | undefined)[] = [undefined, ["**"], ["a/**"], ["b/**"], ["a/*"], ["a/x/**"], []];
+const GRANTS: (string[] | undefined)[] = [undefined, [""], ["a"], ["b"], ["a/x", "a/q"], ["a/x"], []];
 /** The prefixes the peer asks for. */
 const PREFIXES = ["", "a", "a/x", "a/q", "b"].map((path) => Path.from(path));
 /** The handle's own scope. */
-const HANDLES: (string[] | undefined)[] = [undefined, ["a/**", "b/**"], ["*/q/**", "b/**"]];
+const HANDLES: (string[] | undefined)[] = [undefined, ["a", "b"], ["a/q", "b"]];
 
-function patterns(members: string[]): Path.Patterns {
-	return new Path.Patterns(members.map((member) => Path.Pattern.parse(member)));
+function patterns(members: string[]): Path.Prefixes {
+	return Path.Prefixes.parse(members);
 }
 
 function grant(index: number): Grant | undefined {
@@ -165,7 +165,7 @@ function stream(onSend: (msgs: AnnounceBroadcast[]) => void, gated: boolean) {
 function answer(
 	advertised: Getter<Advertisements | undefined>,
 	grant: Getter<Grant | undefined>,
-	allowed: Path.Patterns | undefined,
+	allowed: Path.Prefixes | undefined,
 	stream: AnnounceStream,
 ) {
 	return new Answer({
@@ -183,7 +183,7 @@ function answer(
 async function shown(
 	table: Advertisements,
 	grant: Grant | undefined,
-	allowed: Path.Patterns | undefined,
+	allowed: Path.Prefixes | undefined,
 	prefix: Path.Valid,
 	hidden: boolean,
 ): Promise<Set<string>> {
@@ -392,7 +392,7 @@ test("a claim is shown only where its scope and the handle's share a path", asyn
 		],
 	]);
 	const allowed = patterns(["a/q/y", "a/r/y"]);
-	for (const grant of [undefined, { publish: patterns(["**"]), subscribe: patterns([]) }]) {
+	for (const grant of [undefined, { publish: patterns([""]), subscribe: patterns([]) }]) {
 		expect(await shown(table, grant, allowed, Path.from("a/q"), false)).toEqual(new Set());
 		expect(await shown(table, grant, allowed, Path.from("a/r"), false)).toEqual(new Set(["a/r i1"]));
 	}

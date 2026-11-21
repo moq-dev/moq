@@ -5,11 +5,11 @@ import type * as Path from "./path";
 
 /** A closeable announcement snapshot for tests and benchmarks. @internal */
 export async function announcedView(
-	origin: { routes(scope?: Path.Pattern, options?: Options): Routes },
-	scope?: Path.Pattern,
+	origin: { routes(filter?: Path.Pattern, options?: Options): Routes },
+	filter?: Path.Pattern,
 	options?: Options,
 ) {
-	const stream = origin.routes(scope, options);
+	const stream = origin.routes(filter, options);
 	const value = new Signal<ReadonlyMap<Path.Valid, WireRoute>>(new Map());
 	const done = (async () => {
 		for await (const event of stream)

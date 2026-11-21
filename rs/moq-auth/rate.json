@@ -3,8 +3,8 @@
 		{
 			"input": {
 				"root": "room",
-				"publish": { "path": ["alice/**"], "rate": 8000000 },
-				"subscribe": ["**"]
+				"publish": { "path": ["alice"], "rate": 8000000 },
+				"subscribe": [""]
 			},
 			"claims": {
 				"root": "room",
@@ -24,17 +24,17 @@
 			},
 			"claims": {
 				"root": "room",
-				"subscribe": { "path": ["bob"], "rate": 1 }
+				"subscribe": { "path": ["bob/**"], "rate": 1 }
 			},
 			"grant": {
 				"root": "room",
-				"subscribe": { "path": ["bob"], "rate": 1 }
+				"subscribe": { "path": ["bob/**"], "rate": 1 }
 			}
 		},
 		{
 			"input": {
 				"root": "room",
-				"publish": { "path": ["**"], "rate": 9007199254740991 }
+				"publish": { "path": [""], "rate": 9007199254740991 }
 			},
 			"claims": {
 				"root": "room",
@@ -49,7 +49,7 @@
 			"input": {
 				"root": "room",
 				"publish": { "path": [], "rate": 8000 },
-				"subscribe": ["**"]
+				"subscribe": [""]
 			},
 			"claims": {
 				"root": "room",
@@ -64,17 +64,17 @@
 		}
 	],
 	"invalid": [
-		{ "publish": { "path": ["**"], "rate": 0 } },
-		{ "publish": { "path": ["**"], "rate": -1 } },
-		{ "publish": { "path": ["**"], "rate": 1.5 } },
-		{ "publish": { "path": ["**"], "rate": 9007199254740992 } },
-		{ "publish": { "path": ["**"], "rate": null } },
-		{ "publish": { "path": ["**"], "rate": "8000" } },
+		{ "publish": { "path": [""], "rate": 0 } },
+		{ "publish": { "path": [""], "rate": -1 } },
+		{ "publish": { "path": [""], "rate": 1.5 } },
+		{ "publish": { "path": [""], "rate": 9007199254740992 } },
+		{ "publish": { "path": [""], "rate": null } },
+		{ "publish": { "path": [""], "rate": "8000" } },
 		{ "publish": { "rate": 8000 } },
-		{ "publish": { "path": ["**"] } },
-		{ "publish": { "path": "**", "rate": 8000 } },
-		{ "publish": { "path": ["**"], "raet": 8000 } },
-		{ "publish": { "path": ["**"], "rate": 8000, "extra": true } },
+		{ "publish": { "path": [""] } },
+		{ "publish": { "path": "", "rate": 8000 } },
+		{ "publish": { "path": [""], "raet": 8000 } },
+		{ "publish": { "path": [""], "rate": 8000, "extra": true } },
 		{ "subscribe": { "path": ["not//valid"], "rate": 8000 } }
 	]
 }

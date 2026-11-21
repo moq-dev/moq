@@ -24,25 +24,25 @@ use super::Answer;
 use crate::coding::Decode;
 use crate::lite::{self, AnnounceBroadcast, Version, subscriber::route_stream::Writer, test_transport::*};
 use crate::model::ProduceTest;
-use crate::{Hop, Instance, Path, Pattern, Patterns, origin};
+use crate::{Hop, Instance, Path, Prefix, Prefixes, origin};
 
 /// Where claims are announced: some above what grants and prefixes name, some deeper than a
-/// grant's `*` shows, one hidden, and some beneath the mount target `s`.
+/// grant reaches, one hidden, and some beneath the mount target `s`.
 const PATHS: &[&str] = &["a", "a/x", "a/x/y", "a/.h", "a/m/x", "b", "b/c", "b/c/d", "s", "s/x"];
 
 /// The scopes claims are announced through, which bound what each may serve.
-const SCOPES: &[&[&str]] = &[&["**"], &["*/x"]];
+const SCOPES: &[&[&str]] = &[&[""], &["a/x", "b/x"]];
 
 /// The grants the peer gives: widen, narrow, move, and revoke between them.
 const GRANTS: &[&[&str]] = &[
-	&["**"],
-	&["a/**"],
-	&["b/**"],
-	&["a/x/**"],
-	&["a/*"],
-	&["a/m/**"],
-	&["a/**", "b/**"],
-	&["a/**", "b/*"],
+	&[""],
+	&["a"],
+	&["b"],
+	&["a/x"],
+	&["a/x/y"],
+	&["a/m"],
+	&["a", "b"],
+	&["a", "b/c"],
 	&[],
 ];
 
@@ -53,23 +53,23 @@ const PREFIXES: &[&str] = &["", "a", "a/x", "b", "a/m", "s"];
 const MOUNTS: &[Option<(&str, &str)>] = &[None, Some(("a", "s")), Some(("a/m", "s"))];
 
 /// The handle's own scope.
-const HANDLES: &[&[&str]] = &[&["**"], &["a/**", "b/**", "s/**"]];
+const HANDLES: &[&[&str]] = &[&[""], &["a", "b", "s"]];
 
 fn path(path: &str) -> Path {
 	Path::new(path).unwrap()
 }
 
-fn patterns(members: &[&str]) -> Patterns {
+fn prefixes(members: &[&str]) -> Prefixes {
 	members
 		.iter()
-		.map(|member| member.parse::<Pattern>().unwrap())
+		.map(|member| Prefix::try_from(*member).unwrap())
 		.collect()
 }
 
 fn grant(index: usize) -> crate::auth::Grant {
 	crate::auth::Grant {
-		publish: Patterns::default(),
-		subscribe: patterns(GRANTS[index]),
+		publish: Prefixes::new(),
+		subscribe: prefixes(GRANTS[index]),
 		expires: None,
 	}
 }
@@ -323,7 +323,7 @@ struct Sim {
 impl Sim {
 	fn new(case: &Case) -> Self {
 		let origin = Hop::new(1).unwrap().produce();
-		let handle = patterns(HANDLES[case.handle]);
+		let handle = prefixes(HANDLES[case.handle]);
 		let consumer = match MOUNTS[case.mount] {
 			Some((at, target)) => origin.mount(at, target).unwrap().scope("", &handle).unwrap().consume(),
 			None => origin.consume().scope("", &handle).unwrap(),
@@ -387,7 +387,7 @@ impl Sim {
 				if self.claims.contains_key(index) {
 					return Ok(());
 				}
-				let Ok(producer) = self.origin.scope("", &patterns(SCOPES[*scope])) else {
+				let Ok(producer) = self.origin.scope("", &prefixes(SCOPES[*scope])) else {
 					return Ok(());
 				};
 				self.next_instance += 1;
@@ -648,8 +648,8 @@ fn sent(answer: &mut Answer, writer: &mut Writer, peer: &mut Peer) -> Vec<Announ
 	peer.take()
 }
 
-/// A root request under `a/**` still waiting on the mount at `a` when the grant moves to
-/// `b/**` holds its SYNCED for the initial set of `b`, read in place of `a`.
+/// A root request under `a` still waiting on the mount at `a` when the grant moves to `b`
+/// holds its SYNCED for the initial set of `b`, read in place of `a`.
 #[test]
 fn a_grant_change_before_synced_holds_it_for_what_is_read_instead() {
 	let origin = Hop::new(1).unwrap().produce();
@@ -658,7 +658,7 @@ fn a_grant_change_before_synced_holds_it_for_what_is_read_instead() {
 	let consumer = origin
 		.mount("a", "s")
 		.unwrap()
-		.scope("", &patterns(&["**"]))
+		.scope("", &Prefixes::all())
 		.unwrap()
 		.consume();
 	let auth = crate::auth::Link::new(false);
@@ -726,10 +726,10 @@ fn a_change_queued_before_a_revocation_ends_its_claim_as_lost() {
 	assert_eq!(ends, [true], "{revoked:?}");
 }
 
-/// A claim the old grant hid inside a read the new grant keeps is started before the SYNCED
-/// of a prefix that another read of the change releases first: `a` waits on the mount at
-/// `a/drop` when the grant moves from `a/u/*/old` to `a/u/*/new`, and SYNCED for `a` follows
-/// `a/u/z/new`, though the read of `a/v` finishes before that of `b`.
+/// A claim the old grant hid is started before the SYNCED of a prefix that another read of
+/// the change releases first: `a` waits on the mount at `a/drop` when the grant moves from
+/// `a/u/z/old` to `a/u/z/new`, and SYNCED for `a` follows `a/u/z/new`, though the read of
+/// `a/v` finishes before that of `b`.
 #[test]
 fn a_grant_change_shows_what_it_keeps_before_synced() {
 	let origin = Hop::new(1).unwrap().produce();
@@ -737,18 +737,18 @@ fn a_grant_change_shows_what_it_keeps_before_synced() {
 	let consumer = origin
 		.mount("a/drop", "s")
 		.unwrap()
-		.scope("", &patterns(&["**"]))
+		.scope("", &Prefixes::all())
 		.unwrap()
 		.consume();
 	let auth = crate::auth::Link::new(false);
 	let authorize = |subscribe: &[&str]| {
 		auth.handle().authorize(&crate::auth::Grant {
-			publish: Patterns::default(),
-			subscribe: patterns(subscribe),
+			publish: Prefixes::new(),
+			subscribe: prefixes(subscribe),
 			expires: None,
 		})
 	};
-	authorize(&["a/u/*/old", "a/drop/**"]);
+	authorize(&["a/u/z/old", "a/drop"]);
 	let mut answer = Answer::alone_on(consumer, auth.clone());
 	let (mut writer, mut peer) = stream();
 	answer
@@ -763,7 +763,7 @@ fn a_grant_change_shows_what_it_keeps_before_synced() {
 	let first = peer.take();
 	assert_eq!(events(&mut peer, &first), ["SYNCED 1"], "{first:?}");
 
-	authorize(&["a/u/*/new", "a/v/**", "b/**"]);
+	authorize(&["a/u/z/new", "a/v", "b"]);
 	answer.poll_permit(&kio::Waiter::noop()).unwrap();
 	let regranted = sent(&mut answer, &mut writer, &mut peer);
 	assert_eq!(

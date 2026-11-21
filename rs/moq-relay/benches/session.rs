@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use futures::FutureExt;
-use moq_auth::{Grant, Pattern, lease};
+use moq_auth::{Grant, Prefix, lease};
 use moq_net::{cache, origin};
 use moq_relay::{Accepted, Connection, auth, cluster, stats};
 use session::{Backend, MockConnectOptions, Pair, mock::create_mock_session_pair};
@@ -90,7 +90,7 @@ impl Backend for Relay {
 		let (auth, mut admissions) = auth::Auth::embedded(format!("bench-{id}"));
 		let decider = tokio::spawn(async move {
 			while let Some(admission) = admissions.next().await {
-				let mut grant = Grant::new(Pattern::all(), Pattern::all());
+				let mut grant = Grant::new(Prefix::all(), Prefix::all());
 				grant.root = Some(String::new());
 				grant.link = (admission.request.path == "/peer").then_some(moq_auth::Link::Peer);
 				admission.grant(lease::Consumer::fixed(grant));

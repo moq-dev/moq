@@ -71,8 +71,8 @@ fn start(path: &'static str) -> Wire {
 	}
 }
 
-fn limited(pattern: &str) -> Permit {
-	Permit::limited([pattern.parse::<crate::Pattern>().unwrap()].into_iter().collect())
+fn limited(prefix: &str) -> Permit {
+	Permit::limited(crate::Prefix::try_from(prefix).unwrap().into())
 }
 
 /// Send the peer what the node asks of it, which the peer answers at once, then serve
@@ -254,8 +254,8 @@ async fn claims_never_pass_the_announce_cap() {
 #[kio::test]
 async fn the_limit_admits_each_claim() {
 	let (subscriber, _consumer) = subscriber();
-	let public = limited("live/*/public/**");
-	let everything = limited("live/**");
+	let public = limited("live/a/public");
+	let everything = limited("live");
 
 	let mut routed = asking(&subscriber, &public);
 	for msg in [start("live/a/public/x"), start("live/a/private/y")] {
@@ -283,11 +283,11 @@ async fn a_grant_change_unsyncs_only_the_readers_it_can_show_more() {
 		Permit::granting(
 			paths
 				.iter()
-				.map(|path| crate::Pattern::subtree(path).unwrap())
+				.map(|path| crate::Prefix::try_from(*path).unwrap())
 				.collect(),
 		)
 	};
-	let all = crate::Patterns::from(crate::Pattern::all());
+	let all = crate::Prefixes::all();
 	let everything = consumer.routes();
 	let a = consumer.scope("a", &all).unwrap().routes();
 	let synced = |routes: &crate::origin::Routes| routes.poll_synced(&kio::Waiter::noop()).is_ready();
@@ -338,16 +338,18 @@ async fn a_grant_change_unsyncs_only_the_readers_it_can_show_more() {
 #[kio::test]
 async fn a_grant_change_under_a_coarsened_ask_holds_the_readers_that_arrive() {
 	let (subscriber, consumer) = subscriber();
-	let granting = |patterns: &[&str]| {
+	let wants = prefixes("a", 17, 4000);
+	let granting = |more: &[&str]| {
 		Permit::granting(
-			(patterns.iter())
-				.map(|pattern| pattern.parse::<crate::Pattern>().unwrap())
+			(wants.iter().map(|want| crate::Prefix::try_from(want.as_str()).unwrap()))
+				.chain(more.iter().map(|prefix| crate::Prefix::try_from(*prefix).unwrap()))
 				.collect(),
 		)
 	};
-	let mut routed = Routed::new(&subscriber, 1, &granting(&["a/*"]), None, None).unwrap();
+	// The grant covers each want and nothing else under `a`.
+	let mut routed = Routed::new(&subscriber, 1, &granting(&[]), None, None).unwrap();
 	// Too many to ask for one by one: the session asks for `a`.
-	for want in prefixes("a", 17, 4000) {
+	for want in wants.iter().cloned() {
 		routed.want(want.clone(), subscriber.origin.snapshot(want));
 	}
 	pump(&mut routed, &subscriber);
@@ -356,9 +358,9 @@ async fn a_grant_change_under_a_coarsened_ask_holds_the_readers_that_arrive() {
 	routed.receive(Wire::Synced { prefix: asked[0] }).unwrap();
 	routed.release();
 
-	routed.limit(&granting(&["a/*", "a/new/**"])).unwrap();
+	routed.limit(&granting(&["a/new"])).unwrap();
 	let fresh = Path::from_static("a/new/x");
-	let reader = consumer.scope(fresh.as_str(), &crate::Patterns::from(crate::Pattern::all()));
+	let reader = consumer.scope(fresh.as_str(), &crate::Prefixes::all());
 	let reader = reader.unwrap().routes();
 	routed.want(fresh.clone(), subscriber.origin.snapshot(fresh));
 	routed.release();
@@ -370,23 +372,20 @@ async fn a_grant_change_under_a_coarsened_ask_holds_the_readers_that_arrive() {
 }
 
 /// A peer that leaves an edit unanswered while its grant keeps changing holds one prefix
-/// per want and pattern it still grants, however many changes it sends; and a region too
+/// per want and prefix it still grants, however many changes it sends; and a region too
 /// deep to lie beneath the session's root shows nothing there, holding no reader back.
 #[kio::test]
 async fn grant_changes_hold_only_what_the_grant_still_shows() {
 	let (mut subscriber, _consumer) = subscriber();
-	subscriber.origin = subscriber
-		.origin
-		.scope("r", &crate::Patterns::from(crate::Pattern::all()))
-		.unwrap();
-	let granting = |patterns: &[String]| {
+	subscriber.origin = subscriber.origin.scope("r", &crate::Prefixes::all()).unwrap();
+	let granting = |prefixes: &[String]| {
 		Permit::granting(
-			(patterns.iter())
-				.map(|pattern| pattern.parse::<crate::Pattern>().unwrap())
+			(prefixes.iter())
+				.map(|prefix| crate::Prefix::try_from(prefix.as_str()).unwrap())
 				.collect(),
 		)
 	};
-	let held = ["a/**".to_string(), "c/**".to_string()];
+	let held = ["a".to_string(), "c".to_string()];
 	let mut routed = Routed::new(&subscriber, 1, &granting(&held[..1]), None, None).unwrap();
 	routed.want(Path::empty(), subscriber.origin.snapshot(""));
 	routed.want(Path::from_static("a"), subscriber.origin.snapshot("a"));
@@ -398,14 +397,14 @@ async fn grant_changes_hold_only_what_the_grant_still_shows() {
 	// Each gain the grant takes back again lets go of what it held.
 	for i in 0..64 {
 		let mut more = held.to_vec();
-		more.push(format!("b{i}/*/**"));
+		more.push(format!("b{i}"));
 		routed.limit(&granting(&more)).unwrap();
 		routed.limit(&granting(&held)).unwrap();
 	}
 	assert_eq!(routed.gained.len(), 1, "only `c` is held, for the whole tree");
 
 	let mut deep = held.to_vec();
-	deep.push(format!("{}/**", "x".repeat(crate::Path::MAX_BYTES)));
+	deep.push("x".repeat(crate::Path::MAX_BYTES));
 	routed.limit(&granting(&deep)).unwrap();
 	assert_eq!(routed.gained.len(), 1);
 }
@@ -545,8 +544,8 @@ async fn a_routing_neighbour_keeps_a_whole_permit() {
 	let mut routed = routing(&subscriber);
 	routed.limit(&Permit::default()).unwrap();
 	// A grant that names everything confines nothing, as a relay's token for a peer does.
-	routed.limit(&limited("**")).unwrap();
-	let narrowed = routed.limit(&limited("live/**"));
+	routed.limit(&limited("")).unwrap();
+	let narrowed = routed.limit(&limited("live"));
 	assert!(matches!(narrowed, Err(Error::Unauthorized)), "{narrowed:?}");
 }
 
@@ -812,13 +811,13 @@ fn routes(registry: &crate::stats::Registry) -> crate::stats::Routes {
 async fn a_claim_outside_the_limit_counts_once() {
 	let (mut subscriber, _consumer) = subscriber();
 	let registry = counted(&mut subscriber);
-	let public = limited("live/*/public/**");
+	let public = limited("live/a/public");
 	let mut routed = asking(&subscriber, &public);
 	for msg in [start("live/a/public/x"), start("live/a/private/y")] {
 		routed.receive(msg).unwrap();
 	}
 	routed.receive(Wire::Change { id: 1, claim: claim(1) }).unwrap();
-	routed.limit(&limited("live/**")).unwrap();
+	routed.limit(&limited("live")).unwrap();
 	routed.limit(&public).unwrap();
 	pump(&mut routed, &subscriber);
 	let refused = routes(&registry).refused;

@@ -210,8 +210,8 @@ checkout.
 just carla venv
 just carla service-install
 
-# The units read this. MOQ_URL carries a token allowed to publish `carla/**`
-# and subscribe `viewer/carla/**`, where drivers publish; keeping it here keeps
+# The units read this. MOQ_URL carries a token allowed to publish `carla`
+# and subscribe `viewer/carla`, where drivers publish; keeping it here keeps
 # it off the command line. CARLA_IMAGE is the tag the moq-dev/carla build printed, since the worker
 # refuses a stock simulator.
 cat >~/.config/moq/carla.env <<'EOF'

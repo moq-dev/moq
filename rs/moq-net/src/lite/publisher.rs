@@ -1060,18 +1060,15 @@ impl AnnounceServe {
 		// that doesn't grant it), we simply have nothing to announce. Respond with an
 		// empty set and keep the stream open (the subscriber treats a FIN here as a
 		// fatal stream close), rather than erroring, which would reset the stream.
-		// The wire prefix decodes as a literal path; convert it explicitly to its
-		// subtree grant, refusing anything that cannot be a subtree.
+		// The wire prefix decodes as a literal path, scoped as its whole subtree; a prefix
+		// no grant can spell (holding a `*`) reaches nothing.
 		// The cursor is rooted at the prefix so every update arrives named as its
 		// wire suffix, a route covering the prefix included: that one presents at
 		// the root, as the empty suffix.
-		let scope = crate::Pattern::subtree(prefix.as_str())
-			.map(|subtree| subtree.rebase(prefix.as_str()))
-			.unwrap_or_default();
 		let origin = self
 			.shared
 			.origin
-			.scope(&prefix, &scope)
+			.scope(&prefix, &crate::Prefixes::all())
 			.unwrap_or_else(|_| self.shared.origin.empty());
 		// Register the split-horizon peer on the announce cursor too. The origin
 		// model uses this exposure to park a reflected copy before it can replace
@@ -3662,10 +3659,7 @@ mod announce_test {
 		let origin = Hop::new(1).unwrap().produce();
 		let root = "r".repeat(100);
 		let _route = origin.announce(format!("{root}/x"), origin::RouteInfo::new()).unwrap();
-		let consumer = origin
-			.consume()
-			.scope(root.as_str(), &crate::Patterns::from(crate::Pattern::all()))
-			.unwrap();
+		let consumer = origin.consume().scope(root.as_str(), &crate::Prefixes::all()).unwrap();
 		let prefix = crate::Path::new(&"p".repeat(crate::Path::MAX_BYTES - 50)).unwrap();
 		let mut answer = super::routed::Answer::alone(consumer);
 		let log = Log::default();
@@ -3786,10 +3780,10 @@ mod announce_test {
 	#[kio::test]
 	async fn a_lite07_prefix_wider_than_the_grant_is_answered_region_by_region() {
 		let path = |path: &str| crate::Path::new(path).unwrap();
-		let subtrees = |paths: &[&str]| -> crate::Patterns {
+		let subtrees = |paths: &[&str]| -> crate::Prefixes {
 			paths
 				.iter()
-				.map(|path| crate::Pattern::subtree(path).unwrap())
+				.map(|path| crate::Prefix::try_from(*path).unwrap())
 				.collect()
 		};
 		let origin = Hop::new(1).unwrap().produce();
@@ -3799,12 +3793,12 @@ mod announce_test {
 		let _outside = origin.announce("d/z", origin::RouteInfo::new()).unwrap();
 		let _cam = origin.announce("src/cam", origin::RouteInfo::new()).unwrap();
 		let consumer = (origin.mount("e/m", "src").unwrap())
-			.scope("", &crate::Patterns::from(crate::Pattern::all()))
+			.scope("", &crate::Prefixes::all())
 			.unwrap()
 			.consume();
 		let auth = crate::auth::Link::new(false);
 		let limit = |paths: &[&str]| crate::auth::Grant {
-			publish: crate::Patterns::default(),
+			publish: crate::Prefixes::new(),
 			subscribe: subtrees(paths),
 			expires: None,
 		};
@@ -3896,7 +3890,7 @@ mod announce_test {
 	}
 
 	/// Grant changes queued before the answer drains each move the reads they queued, in
-	/// order: one that keeps the regions keeps a mount and its claim, though a later one
+	/// order: one that keeps a region keeps its mount and claim, though a later one
 	/// replaces that mount, and the claim every grant shows is never ended.
 	#[kio::test]
 	async fn lite07_grant_changes_queued_back_to_back_apply_in_order() {
@@ -3904,16 +3898,19 @@ mod announce_test {
 		let origin = Hop::new(1).unwrap().produce();
 		let _cam = origin.announce("src/m", origin::RouteInfo::new()).unwrap();
 		let consumer = (origin.mount("a", "src").unwrap())
-			.scope("", &crate::Patterns::from(crate::Pattern::all()))
+			.scope("", &crate::Prefixes::all())
 			.unwrap()
 			.consume();
 		let auth = crate::auth::Link::new(false);
-		let limit = |pattern: &str| crate::auth::Grant {
-			publish: crate::Patterns::default(),
-			subscribe: crate::Patterns::from(pattern.parse::<crate::Pattern>().unwrap()),
+		let limit = |prefixes: &[&str]| crate::auth::Grant {
+			publish: crate::Prefixes::new(),
+			subscribe: prefixes
+				.iter()
+				.map(|prefix| crate::Prefix::try_from(*prefix).unwrap())
+				.collect(),
 			expires: None,
 		};
-		auth.handle().authorize(&limit("a/*"));
+		auth.handle().authorize(&limit(&["a", "x"]));
 		let mut answer = super::routed::Answer::alone_on(consumer, auth.clone());
 		let log = Log::default();
 		let mut wire = Wire {
@@ -3939,10 +3936,10 @@ mod announce_test {
 			.filter(|msg| matches!(msg, lite::AnnounceBroadcast::Start { .. }));
 		assert_eq!(starts.count(), 1, "{first:?}");
 
-		// `a/**` keeps the region `a`; `a/m/**` then reads `a/m` in place of `a`.
-		auth.handle().authorize(&limit("a/**"));
+		// `a` alone keeps the region `a`; `a/m` then reads `a/m` in place of `a`.
+		auth.handle().authorize(&limit(&["a"]));
 		answer.poll_permit(&waiter).unwrap();
-		auth.handle().authorize(&limit("a/m/**"));
+		auth.handle().authorize(&limit(&["a/m"]));
 		answer.poll_permit(&waiter).unwrap();
 		let changed = sent(&mut answer);
 		let ends = changed
@@ -3959,16 +3956,16 @@ mod announce_test {
 		let origin = Hop::new(1).unwrap().produce();
 		let _cam = origin.announce("src/m/cam", origin::RouteInfo::new()).unwrap();
 		let consumer = (origin.mount("a", "src").unwrap())
-			.scope("", &crate::Patterns::from(crate::Pattern::all()))
+			.scope("", &crate::Prefixes::all())
 			.unwrap()
 			.consume();
 		let auth = crate::auth::Link::new(false);
-		let limit = |pattern: &str| crate::auth::Grant {
-			publish: crate::Patterns::default(),
-			subscribe: crate::Patterns::from(pattern.parse::<crate::Pattern>().unwrap()),
+		let limit = |prefix: &str| crate::auth::Grant {
+			publish: crate::Prefixes::new(),
+			subscribe: crate::Prefix::try_from(prefix).unwrap().into(),
 			expires: None,
 		};
-		auth.handle().authorize(&limit("a/**"));
+		auth.handle().authorize(&limit("a"));
 		let mut answer = super::routed::Answer::alone_on(consumer, auth.clone());
 		let log = Log::default();
 		let mut wire = Wire {
@@ -3984,7 +3981,7 @@ mod announce_test {
 
 		answer.request(false, Vec::new(), vec![(path(""), true)]).unwrap();
 		// Narrowed before the mount at `a` sent its initial set: `a/m` is read in its place.
-		auth.handle().authorize(&limit("a/m/**"));
+		auth.handle().authorize(&limit("a/m"));
 		answer.poll_permit(&waiter).unwrap();
 		answer.drain(&mut writer).unwrap();
 		assert!(writer.poll_flush(&waiter).is_ready());
@@ -3998,10 +3995,9 @@ mod announce_test {
 		assert!(start.is_some() && start < synced, "{msgs:?}");
 	}
 
-	/// A claim at a path the scope does not match, but above paths it does, is shown where
-	/// it is presented: `a` under `a/*`, at the region and at its own path. One beneath
-	/// every path the scope matches stays hidden, and so does `a` from a handle scoped to
-	/// `a/*/x`, which shares no path with the scope.
+	/// A claim at a path above the scope is shown where it is presented: `a` under `a/x`, at
+	/// the region one segment beneath it. One within the region is shown at its own path,
+	/// and nothing is shown to a handle scoped to `a/y`, which shares no path with the grant.
 	#[kio::test]
 	async fn a_lite07_claim_above_what_the_scope_matches_is_shown() {
 		let path = |path: &str| crate::Path::new(path).unwrap();
@@ -4011,15 +4007,15 @@ mod announce_test {
 		let _b = origin.announce("b", origin::RouteInfo::new()).unwrap();
 		let auth = crate::auth::Link::new(false);
 		auth.handle().authorize(&crate::auth::Grant {
-			publish: crate::Patterns::default(),
-			subscribe: crate::Patterns::from("a/*".parse::<crate::Pattern>().unwrap()),
+			publish: crate::Prefixes::new(),
+			subscribe: crate::Prefix::try_from("a/x").unwrap().into(),
 			expires: None,
 		});
 		let waiter = kio::Waiter::noop();
 		let disjoint = (origin.consume())
-			.scope("", &crate::Patterns::from("a/*/x".parse::<crate::Pattern>().unwrap()))
+			.scope("", &crate::Prefix::try_from("a/y").unwrap().into())
 			.unwrap();
-		let shown = [("a".to_string(), 0)];
+		let shown = [("a/x".to_string(), 1), ("a/x/y".to_string(), 0)];
 		for (consumer, asked, expected) in [
 			(origin.consume(), "", &shown[..]),
 			(origin.consume(), "a", &shown[..]),
@@ -4041,7 +4037,7 @@ mod announce_test {
 			assert!(writer.poll_flush(&waiter).is_ready());
 			let msgs = wire.take_announces();
 			let mut decoder = lite::AnnounceDecoder::default();
-			let told: Vec<(String, u64)> = (msgs.iter())
+			let mut told: Vec<(String, u64)> = (msgs.iter())
 				.filter_map(|msg| match msg {
 					lite::AnnounceBroadcast::Start { suffix, claim, .. } => {
 						let path = decoder.start(Some(suffix.clone())).unwrap().unwrap();
@@ -4050,6 +4046,7 @@ mod announce_test {
 					_ => None,
 				})
 				.collect();
+			told.sort();
 			assert_eq!(told, expected, "{asked:?}: {msgs:?}");
 			assert_eq!(msgs.last(), Some(&lite::AnnounceBroadcast::Synced { prefix: 0 }));
 		}
@@ -4065,7 +4062,7 @@ mod announce_test {
 			.announce("tenant-a/public/cam", origin::RouteInfo::new())
 			.unwrap();
 		let consumer = (origin.mount("tenant-b/shared", "tenant-a/public").unwrap())
-			.scope("tenant-b", &crate::Patterns::from(crate::Pattern::all()))
+			.scope("tenant-b", &crate::Prefixes::all())
 			.unwrap()
 			.consume();
 		let mut answer = super::routed::Answer::alone(consumer);
@@ -4129,7 +4126,7 @@ mod announce_test {
 			.announce("tenant-a/public/cam", origin::RouteInfo::new())
 			.unwrap();
 		let consumer = (origin.mount("tenant-b/shared", "tenant-a/public").unwrap())
-			.scope("tenant-b", &crate::Patterns::from(crate::Pattern::all()))
+			.scope("tenant-b", &crate::Prefixes::all())
 			.unwrap()
 			.consume();
 		let mut answer = super::routed::Answer::alone(consumer);
@@ -11878,10 +11875,7 @@ mod tests {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
 			let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let root = "r".repeat(crate::Path::MAX_BYTES - 2);
-			let scoped = origin
-				.consume()
-				.scope(root.as_str(), &crate::Patterns::from(crate::Pattern::all()))
-				.unwrap();
+			let scoped = origin.consume().scope(root.as_str(), &crate::Prefixes::all()).unwrap();
 
 			let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
 			peer_setup.set(crate::lite::Setup::default()).unwrap();

@@ -5,7 +5,7 @@ import { wall } from "@moq/clock";
 import { Command, Option } from "commander";
 import { base64url } from "jose";
 import type { Algorithm } from "./algorithm.ts";
-import { Claims, type Scope, ScopeSchema } from "./claims.ts";
+import { Claims, prefixes, type Scope, ScopeSchema } from "./claims.ts";
 import { Key } from "./key.ts";
 import * as Path from "./path.ts";
 import { encodeGrants } from "./wire.ts";
@@ -23,16 +23,22 @@ program
 	.option("--public <path>", "Path to save the public key (for asymmetric algorithms)")
 	.option("--base64", "Output as base64url instead of JSON", false)
 	.option("--root <root>", "Root path for the optional key scope", "")
-	.option("--publish <pattern...>", "Publish patterns the key may grant (foo/** for a subtree)")
-	.option("--subscribe <pattern...>", "Subscribe patterns the key may grant (foo/** for a subtree)")
+	.option("--publish <prefix...>", 'Publish prefixes the key may grant, each with its subtree ("" for everything)')
+	.option(
+		"--subscribe <prefix...>",
+		'Subscribe prefixes the key may grant, each with its subtree ("" for everything)',
+	)
 	.action(async (options) => {
 		try {
 			const algorithm = options.algorithm as Algorithm;
 			let key = await Key.generate(algorithm, options.id);
 			if (options.publish || options.subscribe) {
 				// Parse rather than cast, so a useless scope fails here like it does
-				// in the Rust CLI instead of writing an unusable key to disk.
+				// in the Rust CLI instead of writing an unusable key to disk. Flags take
+				// prefixes alone; only a key file reads the subtree patterns releases wrote.
 				Path.signable(options.root);
+				prefixes(options.publish);
+				prefixes(options.subscribe);
 				const scope: Scope = ScopeSchema.parse({
 					root: options.root,
 					...(options.publish && { publish: options.publish }),
@@ -70,8 +76,11 @@ program
 	.description("Sign a token to stdout")
 	.requiredOption("--key <path>", "Path to the key file")
 	.option("--root <root>", "Root path for the token", "")
-	.option("--publish <pattern...>", "Patterns the holder may publish (foo/** for a subtree)")
-	.option("--subscribe <pattern...>", "Patterns the holder may subscribe to (foo/** for a subtree)")
+	.option("--publish <prefix...>", 'Prefixes the holder may publish, each with its subtree ("" for everything)')
+	.option(
+		"--subscribe <prefix...>",
+		'Prefixes the holder may subscribe to, each with its subtree ("" for everything)',
+	)
 	.addOption(
 		new Option("--expires <timestamp>", "Expiration time as unix timestamp, instead of --ttl from now")
 			.argParser(parseUnixTimestamp)

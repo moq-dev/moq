@@ -18,8 +18,8 @@
  * broadcast and the prefix a route or announcement covers, so a broadcast's own path is
  * the prefix it announces. See {@link Relative} for `..`-style references.
  *
- * {@link Pattern} and {@link Patterns} are re-exported from `@moq/pattern`, the owner of
- * the v1 grammar and algebra.
+ * {@link Prefix} and {@link Prefixes} (grants) and {@link Pattern} and {@link Patterns}
+ * (discovery filters) are re-exported from `@moq/pattern`, the owner of their grammar and algebra.
  *
  * @example
  * ```typescript
@@ -419,13 +419,16 @@ export function relative(target: Valid, base: Valid): Relative | undefined {
 	return (rel.length === 0 ? "." : rel.join("/")) as Relative;
 }
 
-/** Path patterns, and a segment's escaping, owned by `@moq/pattern`. */
+/** Grant prefixes, path patterns, and a segment's escaping, owned by `@moq/pattern`. */
 export {
 	compareSpecificity,
 	escape,
 	InvalidPattern,
+	InvalidPrefix,
 	Pattern,
 	Patterns,
+	Prefix,
+	Prefixes,
 	type Segment,
 	type Specificity,
 	unescape,
