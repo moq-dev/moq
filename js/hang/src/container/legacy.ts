@@ -156,6 +156,11 @@ export class Producer {
 	// A keyframe was dropped with no group open, so the frames decoding from it go too, until a
 	// keyframe opens a group.
 	#skipping = false;
+	// The latest keyframe written, whose leading pictures are the frames after it presenting before it.
+	#keyframe?: number;
+	// A leading picture of #keyframe was dropped, so its later leading pictures go too: they may
+	// reference it, and pictures presenting after the keyframe never reference a leading picture.
+	#tainted = false;
 	// Gap between consecutive timestamps, used to close the last group when no successor exists.
 	#interval?: number;
 	// A discontinuity's marker is the newest group, so another one would say nothing new.
@@ -199,7 +204,17 @@ export class Producer {
 		}
 		if (!keyframe && !this.#group && this.#skipping) return;
 		if (keyframe && !opens && !this.#group) throw new Error("a keyframe must start after the previous group");
-		if (!opens && this.#group && this.#ceiling !== undefined && timestamp <= this.#ceiling) return;
+		if (!opens && this.#group && !keyframe) {
+			if (this.#ceiling !== undefined && timestamp <= this.#ceiling) {
+				this.#tainted = true;
+				return;
+			}
+			if (this.#tainted && this.#keyframe !== undefined && timestamp < this.#keyframe) return;
+		}
+		if (keyframe) {
+			this.#keyframe = timestamp;
+			this.#tainted = false;
+		}
 		this.#marked = false;
 		if (opens) {
 			this.#close(timestamp);

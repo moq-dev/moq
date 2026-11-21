@@ -10243,7 +10243,8 @@ pub(super) mod test {
 	}
 
 	/// A join whose IDR lands past the old content, followed by leading pictures: the one that
-	/// would present at or before the old content's newest frame is dropped, the rest publish.
+	/// would present at or before the old content's newest frame is dropped, with the leading
+	/// pictures decoding after it, which may reference it. The pictures after the IDR publish.
 	#[tokio::test(start_paused = true)]
 	async fn h264_join_drops_a_leading_picture_before_the_old_content_ends() {
 		let mut mux = Mux {
@@ -10273,7 +10274,7 @@ pub(super) mod test {
 			.collect();
 		assert_eq!(
 			joined,
-			[base + 7 * FRAME, base + 6 * FRAME, base + 9 * FRAME, base + 8 * FRAME].map(micros)
+			[base + 7 * FRAME, base + 9 * FRAME, base + 8 * FRAME].map(micros)
 		);
 		assert_forward(&frames);
 	}

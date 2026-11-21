@@ -1631,6 +1631,42 @@ async fn video_continuing_keeps_a_leading_picture_below_its_start() {
 	}
 }
 
+/// A leading picture dropped for presenting with the group before takes the sync sample's later
+/// leading pictures along, since they may reference it, passthrough or unwrapped: the pictures
+/// presenting after the sync sample never do, so they publish.
+#[tokio::test]
+async fn video_drops_the_leading_pictures_after_a_dropped_one() {
+	let (_, (video_id, video_scale), _) = bbb_init();
+	let tick = video_scale.as_u64() / 24;
+	let non_sync = 0x0001_0000;
+	let init = bbb_init_with_edits(video_id, vec![media_edit(0)]);
+	// Presents 4; then a sync sample at 6 opening a group, leading pictures at 4 (with the group
+	// before) and 5 (decoding after it), and 9.
+	let fragments: [(u64, &[(u64, u32)]); 2] = [
+		(0, &[(4, 0)]),
+		(1, &[(5, 0), (2, non_sync), (2, non_sync), (5, non_sync)]),
+	];
+	for passthrough in [false, true] {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve()).with_cmaf(passthrough);
+		fmp4.decode(&init).unwrap();
+		for (dts, samples) in fragments {
+			let entries: Vec<_> = samples.iter().map(|&(cts, flags)| (cts * tick, flags, 0xA)).collect();
+			fmp4.decode(&video_fragment(video_id, dts * tick, tick, &entries))
+				.unwrap();
+		}
+		let _finished = fmp4.finish().unwrap();
+		let [video, _] = published(&consumer, &catalog).await;
+		let presented: Vec<u64> = video
+			.iter()
+			.map(|(timestamp, _, _)| (timestamp * u128::from(video_scale.as_u64())).div_ceil(1_000_000) as u64 / tick)
+			.collect();
+		assert_eq!(presented, [4, 6, 9], "passthrough {passthrough}");
+	}
+}
+
 /// In a source without `styp`, a video keyframe that continues the open group at a segment
 /// boundary still rolls the segment, so the next keyframe starts another and audio rolls with it,
 /// passthrough or unwrapped.

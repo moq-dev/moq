@@ -918,7 +918,7 @@ After a discontinuity the timeline continues forward.
 A publisher that stops producing and may resume on the same track (e.g. an encoder idle for lack of demand) SHOULD publish a discontinuity marker when it stops, so the group before the pause does not reach across the gap and read as live.
 Every frame of a group MUST present after every frame of any group with a lower start; a group that breaks this is malformed.
 Frames within a group MAY present out of order (B-frames, open-GOP leading pictures), so a consumer bounds a group that isn't whole by the lowest timestamp it knows in a higher group.
-A publisher splicing in new content keeps this by continuing the current group at a keyframe that doesn't present after the group's newest frame, and by dropping a later frame that presents at or before the previous group's newest frame, such as a leading picture that references the old content.
+A publisher splicing in new content keeps this by continuing the current group at a keyframe that doesn't present after the group's newest frame, and by dropping a later frame that presents at or before the previous group's newest frame, such as a leading picture that references the old content, along with the leading pictures of the same keyframe that decode after it, which may reference it.
 A publisher whose source restarts below the previous group's start begins a new broadcast instead.
 A hole between delivered groups is a playhead event unless the publisher declared the starts between them skipped or the boundary is contiguous within 1 ms.
 A consumer re-applies startup delay and skip at a playhead event; it does not reset codec state.

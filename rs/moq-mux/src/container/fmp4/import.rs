@@ -173,6 +173,13 @@ struct Passthrough<E: crate::catalog::hang::CatalogExt> {
 	/// The newest sample of every group before the latest one: every sample of the latest group
 	/// presents after it.
 	ceiling: Option<Timestamp>,
+	/// The latest sync sample planned, whose leading pictures are the samples after it presenting
+	/// before it.
+	keyframe: Option<Timestamp>,
+	/// A leading picture of [`keyframe`](Self::keyframe) was dropped, so its later leading pictures
+	/// are dropped too: they may reference it, and pictures presenting after a sync sample never
+	/// reference a leading picture.
+	tainted: bool,
 
 	// This track's place in the broadcast's join interval. Passthrough writes groups by hand (no
 	// `container::Producer`), so it reports what its estimator measured itself.
@@ -657,6 +664,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			key: None,
 			newest: None,
 			ceiling: None,
+			keyframe: None,
+			tainted: false,
 			member,
 			pending_start: None,
 			estimator: self.catalog.estimator(),
@@ -1720,13 +1729,23 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 			true => self.newest,
 			false => self.ceiling,
 		};
-		if let Some(ceiling) = ceiling {
+		{
 			let before = run.samples.len();
 			let mut kept = Vec::with_capacity(before);
 			for sample in std::mem::take(&mut run.samples) {
-				if placement.offset.apply(sample.timestamp)? > ceiling {
-					kept.push(sample);
+				let timestamp = placement.offset.apply(sample.timestamp)?;
+				if ceiling.is_some_and(|ceiling| timestamp <= ceiling) {
+					// A later leading picture of the same sync sample may reference this one.
+					self.tainted |= !sample.sync;
+					continue;
 				}
+				if sample.sync {
+					self.keyframe = Some(timestamp);
+					self.tainted = false;
+				} else if self.tainted && self.keyframe.is_some_and(|keyframe| timestamp < keyframe) {
+					continue;
+				}
+				kept.push(sample);
 			}
 			run.samples = kept;
 			let dropped = before - run.samples.len();

@@ -93,6 +93,13 @@ pub struct Producer<C: Container, R = ()> {
 	/// A keyframe was dropped with no group open, so the frames decoding from it are dropped too,
 	/// until a keyframe opens a group.
 	skipping: bool,
+	/// The latest keyframe written, whose leading pictures are the frames after it presenting
+	/// before it.
+	keyframe: Option<moq_net::Timestamp>,
+	/// A leading picture of [`keyframe`](Self::keyframe) was dropped, so its later leading pictures
+	/// are dropped too: they may reference it, and pictures presenting after the keyframe never
+	/// reference a leading picture.
+	tainted: bool,
 
 	/// Duration of the frame that last raised [`end`](Self::end), if it had one. Distinguishes
 	/// an exclusive presentation point from a max timestamp that still needs an estimate.
@@ -313,6 +320,8 @@ impl<C: Container> Producer<C> {
 			floor: None,
 			ceiling: None,
 			skipping: false,
+			keyframe: None,
+			tainted: false,
 			last_duration: None,
 			previous_timestamp: None,
 			cadence: None,
@@ -354,6 +363,8 @@ where
 			floor: None,
 			ceiling: None,
 			skipping: false,
+			keyframe: None,
+			tainted: false,
 			last_duration: None,
 			previous_timestamp: None,
 			cadence: None,
@@ -716,7 +727,7 @@ where
 			&& !timestamp_lt(newest, timestamp)
 		{
 			return match self.group {
-				Some(_) => Ok(true),
+				Some(_) => Ok(self.continue_keyframe(timestamp)),
 				None => {
 					self.skipping = true;
 					Ok(self.drop_frame(timestamp))
@@ -731,7 +742,7 @@ where
 		let start = match keyframe && self.pending_start.is_none() {
 			true => match (crate::start::opens(&self.inner, timestamp)?, &self.group) {
 				(Some(start), _) => Some(start),
-				(None, Some(_)) => return Ok(true),
+				(None, Some(_)) => return Ok(self.continue_keyframe(timestamp)),
 				(None, None) => Some(crate::start::after(&self.inner, timestamp)?),
 			},
 			false => None,
@@ -771,14 +782,27 @@ where
 			self.skipping = false;
 			self.start = Some(timestamp);
 			self.group = Some(group);
+			self.keyframe = Some(timestamp);
+			self.tainted = false;
 		} else if self.ceiling.is_some_and(|ceiling| !timestamp_lt(ceiling, timestamp)) {
 			// A frame presenting with the groups before its own, such as a leading picture after a
 			// splice, is dropped: it references pictures from before the splice, or shows new
 			// content while the old still plays.
+			self.tainted = true;
+			return Ok(self.drop_frame(timestamp));
+		} else if self.tainted && self.keyframe.is_some_and(|keyframe| timestamp_lt(timestamp, keyframe)) {
+			// A later leading picture of the same keyframe may reference the dropped one.
 			return Ok(self.drop_frame(timestamp));
 		}
 
 		Ok(true)
+	}
+
+	/// Note a keyframe that continues the open group, whose leading pictures are judged afresh.
+	fn continue_keyframe(&mut self, timestamp: moq_net::Timestamp) -> bool {
+		self.keyframe = Some(timestamp);
+		self.tainted = false;
+		true
 	}
 
 	/// Count a frame that presents with the groups before it as skipped rather than writing it,
@@ -2265,7 +2289,8 @@ mod tests {
 	}
 
 	/// A splice whose keyframe lands just past the old content: a leading picture that would
-	/// present at or before the old content's newest frame is dropped, and the rest publish.
+	/// present at or before the old content's newest frame is dropped, with the keyframe's later
+	/// leading pictures, which may reference it. The pictures presenting after the keyframe publish.
 	#[tokio::test]
 	async fn a_leading_picture_at_or_before_the_previous_group_is_dropped() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
@@ -2282,7 +2307,7 @@ mod tests {
 		let _finished = producer.finish().unwrap();
 		assert_eq!(
 			media(collect_payloads(consumer).await),
-			[vec![100_000, 166_000, 133_000], vec![200_000, 183_000, 233_000]]
+			[vec![100_000, 166_000, 133_000], vec![200_000, 233_000]]
 		);
 	}
 
@@ -2430,21 +2455,32 @@ mod tests {
 				}
 
 				// Published frames are the accepted ones in order, less those at or before a frame
-				// published ahead of them, and those after a dropped keyframe until one is published.
+				// published ahead of them, those after a dropped keyframe until one is published, and
+				// the leading pictures of a keyframe after one of them was dropped.
 				let published: Vec<(u32, u128)> = groups.concat();
 				let mut next = published.iter().peekable();
 				let (mut newest, mut skipping) = (None, false);
+				let (mut latest, mut tainted) = (None, false);
 				for &(index, timestamp, keyframe) in &accepted {
 					if next.peek().is_some_and(|&&(published, _)| published == index) {
 						next.next();
 						newest = newest.max(Some(timestamp));
 						skipping &= !keyframe;
-					} else {
+						if keyframe {
+							(latest, tainted) = (Some(timestamp), false);
+						}
 						prop_assert!(
-							newest.is_some_and(|newest| timestamp <= newest) || (skipping && !keyframe),
+							keyframe || !tainted || latest.is_none_or(|latest| timestamp >= latest),
+							"frame {index} at {timestamp} kept after a leading picture of {latest:?} was dropped"
+						);
+					} else {
+						let leading = tainted && !keyframe && latest.is_some_and(|latest| timestamp < latest);
+						prop_assert!(
+							newest.is_some_and(|newest| timestamp <= newest) || (skipping && !keyframe) || leading,
 							"frame {index} at {timestamp} was dropped above {newest:?}"
 						);
 						skipping |= keyframe;
+						tainted |= !keyframe && latest.is_some_and(|latest| timestamp < latest);
 					}
 				}
 				prop_assert!(next.peek().is_none(), "published a frame never accepted");

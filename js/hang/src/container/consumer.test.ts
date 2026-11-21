@@ -198,7 +198,7 @@ test("Legacy Producer accepts open-GOP leading pictures above the previous group
 	producer.finish();
 });
 
-test("Legacy Producer continues a group at a keyframe overlapping it, and drops a leading picture before it", async () => {
+test("Legacy Producer continues a group at a keyframe overlapping it, and drops a leading picture before it with those after it", async () => {
 	const track = micro("test");
 	const subscriber = track.subscribe({ delay: { max: Duration.millis(30_000) } });
 	const producer = new LegacyProducer(track, new LegacyFormat("video"));
@@ -209,10 +209,12 @@ test("Legacy Producer continues a group at a keyframe overlapping it, and drops 
 		// A splice dipping below the newest frame continues the group.
 		[150_000, true],
 		[183_000, false],
-		// Past the newest frame: a new group, whose leading picture at 183_000 presents with the last.
+		// Past the newest frame: a new group, whose leading picture at 183_000 presents with the last,
+		// and whose later leading picture at 190_000 may reference it. 233_000 never does.
 		[200_000, true],
 		[183_000, false],
 		[190_000, false],
+		[233_000, false],
 	] as const) {
 		producer.encode(new Uint8Array([1]), Duration.micros(timestamp), keyframe);
 	}
@@ -222,7 +224,7 @@ test("Legacy Producer continues a group at a keyframe overlapping it, and drops 
 	);
 	expect(groups).toEqual([
 		[100_000, 166_000, 133_000, 150_000, 183_000],
-		[200_000, 190_000],
+		[200_000, 233_000],
 	]);
 });
 
