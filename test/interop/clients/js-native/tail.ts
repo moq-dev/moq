@@ -252,7 +252,7 @@ try {
 				// head predates the subscription.
 				const track = broadcast.track("tail").subscribe({
 					delay: { max: Duration.millis(drop ? 60_000 : 5000) },
-					...(late ? {} : { ranges: [{ start: { time: 0n } }] }),
+					...(late ? {} : { ranges: [{ start: 0n }] }),
 				});
 				if (compress)
 					assert.equal((await track.info()).compression, version === "moq-lite-07-wip" ? "deflate" : "none");

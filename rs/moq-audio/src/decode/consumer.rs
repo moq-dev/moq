@@ -59,6 +59,16 @@ pub enum Start {
 	Latest,
 }
 
+/// The delay a subscription for `options` carries: theirs, with the playout delay `stated` as the
+/// min, where a live join starts. [`Start::Oldest`] states none, which reaches back as far as the
+/// max delay allows rather than join the live edge.
+fn subscribed(options: &Options, stated: Duration) -> Delay {
+	match options.start {
+		Start::Oldest => options.delay.with_min(None),
+		Start::Latest => options.delay.with_min(stated),
+	}
+}
+
 /// PCM output conversion requested from [`Consumer`].
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
@@ -83,8 +93,10 @@ pub struct Options {
 	///
 	/// [`Delay::min`] is the playout delay: the jitter buffer a player holds ahead of the
 	/// playhead, reported by [`Consumer::delay`], and where a cold join starts. With
-	/// [`estimate`](Self::estimate) it is a floor under the measured delay instead. The
-	/// subscription states whichever delay the player holds as its min, following the estimate.
+	/// [`estimate`](Self::estimate) it is a floor under the measured delay instead. A
+	/// [`Start::Latest`] subscription states whichever delay the player holds as its min,
+	/// following the estimate; a [`Start::Oldest`] one states none, reaching back to the oldest
+	/// group.
 	/// A `min` beyond the track's max age is refused. [`Delay::max`] is how far a group may fall
 	/// behind the live edge before the subscription skips it, and how long a missing group is
 	/// waited for; it adds no buffering.
@@ -237,7 +249,7 @@ impl Consumer {
 		// The subscription states the playout delay as its min from the start, the estimate's cold
 		// start included, so a live join reaches back by it (see `next`).
 		let stated = from_millis(target.millis());
-		let playout = moq_mux::container::Playout::new(options.delay.with_min(stated), warmup);
+		let playout = moq_mux::container::Playout::new(subscribed(&options, stated), warmup);
 		let track = broadcast.track(hang::catalog::Reference::track(catalog, &name))?;
 		// The whole delay from the start, as the container keeps it: the transport enforces the
 		// max too, so a narrower one while joining would drop the groups queued behind a reader
@@ -358,9 +370,9 @@ impl Consumer {
 		from_millis(self.target.millis())
 	}
 
-	// The delay the subscription carries: the options', with the playout delay as the min.
+	// The delay the subscription carries; see [`subscribed`].
 	fn stated(&self) -> Delay {
-		self.options.delay.with_min(self.stated)
+		subscribed(&self.options, self.stated)
 	}
 
 	/// Sample rate samples are actually delivered at, which is

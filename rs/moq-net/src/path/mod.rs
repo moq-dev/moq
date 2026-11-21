@@ -1,14 +1,17 @@
-//! Broadcast paths and the patterns that match them.
+//! Broadcast paths, the prefixes that grant them, and the patterns that filter them.
 //!
 //! [`Path`] is a literal coordinate: `/`-separated non-empty segments, with
 //! segment-aware prefix operations. A `\` escapes the `\` or `/` after it, so `a\/b` is one
-//! segment holding a `/`; [`parts`] is the one walk every segment reading goes through. [`Pattern`] describes a set of paths with
-//! wildcards, and [`Patterns`] is a union of them reduced by containment. The
-//! grammar and algebra live in [`moq-pattern`](moq_pattern); this module
-//! re-exports them beside [`Path`] so grants, origin scopes, and announce
-//! interests can share one dialect.
+//! segment holding a `/`; [`parts`] is the one walk every segment reading goes through.
+//! [`Prefixes`] is a grant or an origin scope: a set of [`Prefix`]es, each covering its
+//! whole subtree. [`Pattern`] describes a set of paths with wildcards, for discovery
+//! filters, and [`Patterns`] is a union of them reduced by containment. All of these live
+//! in [`moq-pattern`](moq_pattern); this module re-exports them beside [`Path`].
 
-pub use moq_pattern::{InvalidPattern, Parts, Pattern, Patterns, Segment, Specificity, escape, parts, unescape};
+pub use moq_pattern::{
+	InvalidPattern, InvalidPrefix, Parts, Pattern, Patterns, Prefix, Prefixes, Segment, Specificity, escape, parts,
+	unescape,
+};
 
 use std::fmt::{self, Display};
 use std::sync::Arc;
@@ -699,35 +702,30 @@ impl<V> Encode<V> for Path {
 	}
 }
 
-/// A grant's patterns as a count and each one's canonical text, the one encoding both
-/// wires' AUTH_OK share.
-impl<V> Encode<V> for Patterns {
+/// A grant's prefixes as a count and each one's text, as AUTH_OK carries them.
+impl<V> Encode<V> for Prefixes {
 	fn encode(&self, w: &mut Encoder<'_>, _: V) -> Result<(), EncodeError> {
 		w.varint(self.len() as u64)?;
-		for pattern in self {
-			w.string(pattern.as_str())?;
+		for prefix in self {
+			w.string(prefix.as_str())?;
 		}
 		Ok(())
 	}
 }
 
-impl<'a, V> Decode<'a, V> for Patterns {
+impl<'a, V> Decode<'a, V> for Prefixes {
 	fn decode(r: &mut Decoder<'a>, _: V) -> Result<Self, DecodeError> {
 		let count = r.varint()?;
 		// No preallocation: the count is peer-controlled, and the message size limit
-		// is what bounds how many patterns actually fit.
-		let mut patterns = Vec::new();
+		// is what bounds how many prefixes actually fit.
+		let mut prefixes = Vec::new();
 		for _ in 0..count {
-			let text = r.string()?;
-			let pattern = Pattern::try_from(text.as_str()).map_err(|_| DecodeError::InvalidValue)?;
-			// Only the canonical spelling is valid, so each pattern has one encoding.
-			if pattern.as_str() != text {
-				return Err(DecodeError::InvalidValue);
-			}
-			patterns.push(pattern);
+			// A wildcard is refused like any other malformed prefix.
+			let prefix = Prefix::try_from(r.string()?).map_err(|_| DecodeError::InvalidValue)?;
+			prefixes.push(prefix);
 		}
-		// Reduce once, so a peer's count never turns into quadratic work.
-		Ok(patterns.into_iter().collect())
+		// Reduce once, in one sort, so a peer's count never turns into quadratic work.
+		Ok(prefixes.into_iter().collect())
 	}
 }
 

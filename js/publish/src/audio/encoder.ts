@@ -1031,17 +1031,18 @@ export function resolve(captured: Format, selected: Codec): Resolved {
 	};
 }
 
-// How far back a subscription wants retained audio replayed. A live join starts its min delay behind
-// the live edge, which a player states as its playout delay plus the codec's warmup, so that bounds
-// it within the max delay. Any other range, or a live join stating no min (moq-transport, moq-lite
-// before 07), wants all its max delay keeps. Undefined with no subscription, leaving the retention.
+// How far back a subscription wants retained audio replayed. A live join (an open range with no
+// start and a stated min) starts its min delay behind the live edge, which a player states as its
+// playout delay plus the codec's warmup, so that bounds it within the max delay. Any other range,
+// or one with no start stating no min (moq-transport, moq-lite before 07), wants all its max delay
+// keeps. Undefined with no subscription, leaving the retention.
 function replayBudget(subscription: Moq.Track.Subscription | undefined): Duration | undefined {
 	const delay = subscription?.delay;
 	if (!delay) return undefined;
 	const max = delay.max ?? undefined;
 	const ranges = subscription.ranges ?? [{}];
-	const live = ranges.length > 0 && ranges.every((range) => range.start?.relative === 0n && range.end === undefined);
-	if (!live || delay.min === null || delay.min === undefined) return max;
+	const live = ranges.length > 0 && ranges.every((range) => range.start === undefined && range.end === undefined);
+	if (!live || delay.min == null) return max;
 	return max === undefined ? delay.min : delay.min.min(max);
 }
 

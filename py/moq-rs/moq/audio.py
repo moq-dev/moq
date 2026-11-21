@@ -86,7 +86,8 @@ class DecoderOutput:
     ``delay.min`` is the jitter buffer to hold ahead of the playhead, and where a
     cold join starts; with ``estimate`` (the default) it floors the delay measured
     from arrival timing instead. ``delay.max`` only bounds how stale a group may
-    get before it is skipped, and adds no buffering. Both default to zero.
+    get before it is skipped, and adds no buffering. ``min`` defaults to unstated, which the
+    decoder starts as zero, and ``max`` to zero.
     ``start`` picks where to begin on a track that already holds groups, ``None``
     for the oldest: a live player passes ``DecodeStart.LATEST`` so a reopened
     decoder skips the cached backlog.

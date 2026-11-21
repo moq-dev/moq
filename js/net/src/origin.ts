@@ -53,16 +53,17 @@ class Scope {
 	static readonly all = new Scope(Path.empty());
 
 	readonly root: Path.Valid;
-	readonly allowed?: Path.Patterns;
+	/** The absolute prefixes this handle reaches; unset for every path. */
+	readonly allowed?: Path.Prefixes;
 
-	constructor(root: Path.Valid, allowed?: Path.Patterns) {
+	constructor(root: Path.Valid, allowed?: Path.Prefixes) {
 		this.root = root;
 		this.allowed = allowed;
 	}
 
-	narrow(root: Path.Valid, patterns: Path.Patterns): Scope {
+	narrow(root: Path.Valid, prefixes: Path.Prefixes): Scope {
 		const joined = Path.encode(Path.join(this.root, root));
-		const rooted = patterns.rooted(joined);
+		const rooted = prefixes.rooted(joined);
 		const allowed = this.allowed?.intersect(rooted) ?? rooted;
 		if (allowed.size === 0) throw new Error("origin scopes do not overlap");
 		return new Scope(joined, allowed);
@@ -80,22 +81,22 @@ class Scope {
 
 	prefix(prefix: Path.Valid): Path.Valid {
 		const joined = Path.encode(Path.join(this.root, prefix));
-		if (this.allowed && !this.allowed.overlaps(Path.Pattern.subtree(joined))) {
-			throw new Error("prefix is outside the origin scope");
-		}
+		if (!this.overlaps(joined)) throw new Error("prefix is outside the origin scope");
 		return joined;
 	}
 
-	patterns(pattern: Path.Pattern = Path.Pattern.all()): Path.Patterns {
-		const rooted = new Path.Patterns([pattern.rooted(this.root)]);
-		return this.allowed?.intersect(rooted) ?? rooted;
+	/** The absolute paths a reader's `filter`, relative to the root, lists within this scope. */
+	patterns(filter: Path.Pattern = Path.Pattern.all()): Path.Patterns {
+		const rooted = new Path.Patterns([filter.rooted(this.root)]);
+		return this.allowed?.patterns().intersect(rooted) ?? rooted;
 	}
 
-	/** Omit nested heads because the outer subscription already carries their routes. */
+	/** The root-relative prefixes this scope asks its peer about: its own, already disjoint. */
 	#heads(): Path.Valid[] {
 		if (!this.allowed) return [Path.empty()];
-		const heads = [...new Set([...this.allowed.rebase(this.root)].map(scopeHead))].sort();
-		return heads.filter((head) => !heads.some((other) => other !== head && Path.hasPrefix(other, head)));
+		return [...this.allowed.rebase(this.root)]
+			.map((prefix) => prefix.text as Path.Valid)
+			.filter((head) => Path.check(head) === undefined);
 	}
 
 	#headsCache?: Path.Valid[];
@@ -123,12 +124,12 @@ class Scope {
 		if (!this.allowed) return true;
 		// A peer's prefix may fit the wire alone and overflow once joined: nothing allowed lies there.
 		const path = Path.join(this.root, prefix);
-		return !Path.check(path) && this.allowed.contains(Path.Pattern.subtree(path));
+		return !Path.check(path) && this.allowed.matches(path);
 	}
 
 	/** Whether this scope allows anything beneath the absolute `prefix`. */
 	overlaps(prefix: Path.Valid): boolean {
-		return this.allowed?.overlaps(Path.Pattern.subtree(prefix)) ?? true;
+		return this.allowed?.overlaps(prefix) ?? true;
 	}
 
 	/** The exact paths within this scope, relative to its root. */
@@ -153,13 +154,13 @@ class Scope {
 		if (!values || this === Scope.all) return values;
 		const out = new Map<Path.Valid, readonly Advertised[]>();
 		const covering: [Path.Valid, Advertised[]][] = [];
-		const allowed = this.allowed && [...this.allowed];
+		const allowed = this.allowed;
 		for (const [path, candidates] of values) {
 			const relative = Path.stripPrefix(this.root, path);
 			const above = relative === null || relative === Path.empty();
 			if (above && !Path.hasPrefix(path, this.root)) continue;
 			const visible = candidates
-				.filter((value) => !allowed || allowed.some((pattern) => advertOverlaps(value, path, pattern)))
+				.filter((value) => !allowed || advertReaches(value, path, allowed))
 				// The claim moves with the key, so it compares against root-relative requests.
 				.map((value) => (value.claim ? { ...value, claim: value.claim.rebase(this.root) } : value));
 			if (visible.length === 0) continue;
@@ -185,7 +186,16 @@ class Scope {
 
 /** Whether the route advertised at `prefix` may serve any path `pattern` admits. */
 function advertOverlaps(advert: Advertised, prefix: Path.Valid, pattern: Path.Pattern): boolean {
-	return advert.claim ? advert.claim.overlaps(pattern) : scopeOverlaps(pattern, prefix);
+	return advert.claim
+		? advert.claim.toArray().some((member) => pattern.overlaps(member.pattern()))
+		: scopeOverlaps(pattern, prefix);
+}
+
+/** Whether the route advertised at `prefix` may serve any path `allowed` reaches. */
+function advertReaches(advert: Advertised, prefix: Path.Valid, allowed: Path.Prefixes): boolean {
+	return advert.claim
+		? advert.claim.toArray().some((member) => allowed.overlaps(member.text))
+		: allowed.overlaps(prefix);
 }
 
 /** One segment of the watched-prefix trie, kept while it or anything beneath it is watched. */
@@ -303,8 +313,8 @@ interface Resolution {
 interface RouteEntry {
 	readonly identity: object;
 	readonly scope: Scope;
-	/** The paths the entry may serve beneath its prefix, when its producer is scoped. */
-	readonly claim?: Path.Patterns;
+	/** The prefixes beneath its own the entry may serve, when its producer's scope covers less. */
+	readonly claim?: Path.Prefixes;
 	readonly route: Signal<WireRoute>;
 	readonly originated: boolean;
 	readonly server?: ServeState;
@@ -318,6 +328,13 @@ interface RouteEntry {
 /** Whether `entry` may serve a request for `path`. */
 function admits(entry: RouteEntry, path: Path.Valid): boolean {
 	return entry.scope.matches(path);
+}
+
+/** What a route at the absolute `prefix` may serve under `scope`: unset for its whole subtree. */
+function claimed(scope: Scope, prefix: Path.Valid): Path.Prefixes | undefined {
+	const allowed = scope.allowed;
+	if (!allowed || allowed.matches(prefix)) return undefined;
+	return new Path.Prefixes(allowed.toArray().filter((member) => Path.hasPrefix(prefix, member.text as Path.Valid)));
 }
 
 /** One advertisement at a prefix. `exact` marks an announced local broadcast, which is only its own path. */
@@ -1279,8 +1296,8 @@ export interface Reader {
 	/** Follow `path` across publisher instances; see {@link Consumer.follow}. */
 	follow(path: Path.Valid, options?: FollowOptions): Following;
 
-	/** The available broadcasts under `scope`, as a live stream; see {@link Consumer.announced}. */
-	announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
+	/** The available broadcasts matching `filter`, as a live stream; see {@link Consumer.announced}. */
+	announced(filter?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
 }
 
 /**
@@ -1432,12 +1449,12 @@ export class Producer implements Table {
 	}
 
 	/**
-	 * Narrow this handle to patterns beneath root, presenting paths relative to that root.
-	 * The result borrows the origin; see {@link close}.
+	 * Narrow this handle to `prefixes` beneath `root`, presenting paths relative to that root.
+	 * Each prefix covers its whole subtree. The result borrows the origin; see {@link close}.
 	 */
-	scope(root: Path.Valid, patterns: Path.Patterns): Producer {
+	scope(root: Path.Valid, prefixes: Path.Prefixes): Producer {
 		if (this.#borrowed?.closed) throw new Error("origin handle is closed");
-		const scope = this.#scope.narrow(root, patterns);
+		const scope = this.#scope.narrow(root, prefixes);
 		const producer = new Producer();
 		producer.#state = this.#state;
 		producer.#scope = scope;
@@ -1671,7 +1688,7 @@ export class Producer implements Table {
 		const entry: RouteEntry = {
 			identity: {},
 			scope: this.#scope,
-			claim: this.#scope.allowed?.intersect(new Path.Patterns([Path.Pattern.subtree(prefix)])),
+			claim: claimed(this.#scope, prefix),
 			route: new Signal(route),
 			originated,
 			server,
@@ -1914,14 +1931,14 @@ export class Producer implements Table {
 		return this.#reader.follow(path, options);
 	}
 
-	/** The available broadcasts under `scope`, as a live stream; see {@link Consumer.announced}. */
-	announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer {
-		return this.#reader.announced(scope, options);
+	/** The available broadcasts matching `filter`, as a live stream; see {@link Consumer.announced}. */
+	announced(filter?: Path.Pattern, options?: Announce.Options): Announce.Consumer {
+		return this.#reader.announced(filter, options);
 	}
 
-	/** Every route change under `scope`; see {@link Consumer.routes}. @internal */
-	routes(scope?: Path.Pattern, options?: Announce.Options): announce.Routes {
-		return this.#reader.routes(scope, options);
+	/** Every route change matching `filter`; see {@link Consumer.routes}. @internal */
+	routes(filter?: Path.Pattern, options?: Announce.Options): announce.Routes {
+		return this.#reader.routes(filter, options);
 	}
 
 	/**
@@ -2574,31 +2591,32 @@ export class Consumer implements Reader {
 	}
 
 	/**
-	 * The paths announced matching `scope`, each reported as it becomes present or absent:
-	 * every currently advertised one arrives first as `present`. Another instance taking a
-	 * path over keeps it present; {@link follow} it to see the broadcast change.
-	 * Any pattern is accepted. A local broadcast appears once it announces, exactly as a
-	 * peer sees it. Only routes whose literal name matches the scope are listed, unless
-	 * `options.covering` also asks for every dynamic or received route whose subtree
-	 * overlaps it. The stream ends when the origin closes or the consumer is closed. Hidden
-	 * routes are left out unless `options.hidden` opts in (see {@link Announce.Options}).
-	 * While open, it watches the scope's literal head: a `consume` session asks its peer for
-	 * announcements there.
+	 * The paths announced matching `filter` within this handle's scope, each reported as it
+	 * becomes present or absent: every currently advertised one arrives first as `present`.
+	 * Another instance taking a path over keeps it present; {@link follow} it to see the
+	 * broadcast change. The filter is any pattern, relative to the root, and only picks what is
+	 * listed: what the wildcards stood for is each announcement's `captures`. A local broadcast
+	 * appears once it announces, exactly as a peer sees it. Only routes whose literal name
+	 * matches the filter are listed, unless `options.covering` also asks for every dynamic or
+	 * received route whose subtree overlaps it. The stream ends when the origin closes or the
+	 * consumer is closed. Hidden routes are left out unless `options.hidden` opts in (see
+	 * {@link Announce.Options}). While open, it watches the filter's literal head: a `consume`
+	 * session asks its peer for announcements there.
 	 */
-	announced(scope: Path.Pattern = Path.Pattern.all(), options?: Announce.Options): Announce.Consumer {
-		return announce.list(this.routes(scope, options));
+	announced(filter: Path.Pattern = Path.Pattern.all(), options?: Announce.Options): Announce.Consumer {
+		return announce.list(this.routes(filter, options));
 	}
 
 	/**
-	 * Every change to the routes matching `scope`, for code that forwards routes: a re-price
-	 * is an `update`, and another instance serving a path a `restart`. Scope, options and the
-	 * watch are as for {@link announced}.
+	 * Every change to the routes matching `filter`, for code that forwards routes: a re-price
+	 * is an `update`, and another instance serving a path a `restart`. The filter, options and
+	 * the watch are as for {@link announced}.
 	 *
 	 * @internal
 	 */
-	routes(scope: Path.Pattern = Path.Pattern.all(), options?: Announce.Options): announce.Routes {
+	routes(filter: Path.Pattern = Path.Pattern.all(), options?: Announce.Options): announce.Routes {
 		const producer = new announce.Producer();
-		const patterns = this.#scope.patterns(scope);
+		const patterns = this.#scope.patterns(filter);
 		void producer.closed.then(this.#state.watch([...patterns].map(scopeHead)));
 		void this.#runAnnounced(producer, patterns, options?.hidden ?? false, options?.covering ?? false);
 		const consumer = producer.consume();

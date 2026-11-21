@@ -1980,9 +1980,9 @@ mod tests {
 	#[kio::test]
 	async fn every_permitted_prefix_gets_its_own_subscribe_namespace() {
 		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
-		let scope: crate::Patterns = ["cam", "mic"]
+		let scope: crate::Prefixes = ["cam", "mic"]
 			.into_iter()
-			.map(|prefix| crate::Pattern::subtree(prefix).unwrap())
+			.map(|prefix| crate::Prefix::try_from(prefix).unwrap())
 			.collect();
 		let scoped = origin
 			.scope("rootns", &scope)
@@ -2054,7 +2054,7 @@ mod tests {
 	fn watch(origin: &crate::origin::Producer, prefix: &str) -> crate::origin::Routes {
 		origin
 			.consume()
-			.scope(prefix, &crate::Patterns::from(crate::Pattern::all()))
+			.scope(prefix, &crate::Prefixes::all())
 			.unwrap()
 			.routes()
 	}

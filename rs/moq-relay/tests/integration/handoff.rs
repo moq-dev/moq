@@ -63,7 +63,7 @@ fn config(dir: &Path, cert: &Path, key: &Path, backend: Backend) -> Config {
 	config.internal.listen = Some("127.0.0.1:0".parse().unwrap());
 	config.runtime.workers = moq_relay::runtime::Workers::Count(std::num::NonZeroU16::new(2).unwrap());
 	config.runtime.pin = false;
-	config.auth.public = vec![moq_auth::Pattern::all()];
+	config.auth.public = vec![moq_auth::Prefix::all()];
 	config.stats.enabled = true;
 	config.stats.node = Some("test".into());
 	config.handoff.socket = Some(dir.join("handoff.sock"));
@@ -391,7 +391,7 @@ fn stand_in_draining(dir: &Path, cert: &Path, key: &Path, notify: &Path, drain: 
 		.env("MOQ_LISTEN_TLS_CERT", cert)
 		.env("MOQ_LISTEN_TLS_KEY", key)
 		.env("MOQ_RUNTIME_WORKERS", "1")
-		.env("MOQ_AUTH_PUBLIC", "**")
+		.env("MOQ_AUTH_PUBLIC", "")
 		.env("MOQ_HANDOFF_SOCKET", dir.join("handoff.sock"))
 		.env("NOTIFY_SOCKET", notify)
 		.env("MOQ_DRAIN_TIMEOUT", drain)
@@ -453,7 +453,7 @@ fn relay(dir: &Path, cert: &Path, key: &Path, port: u16, notify: &Path) -> tokio
 		.env("MOQ_QUIC_IDLE_TIMEOUT", format!("{}s", NEVER.as_secs()))
 		.env("MOQ_DRAIN_TIMEOUT", format!("{}s", NEVER.as_secs()))
 		.env("MOQ_RUNTIME_WORKERS", "2")
-		.env("MOQ_AUTH_PUBLIC", "**")
+		.env("MOQ_AUTH_PUBLIC", "")
 		.env("MOQ_HANDOFF_SOCKET", dir.join("handoff.sock"))
 		.env("NOTIFY_SOCKET", notify)
 		.kill_on_drop(true)

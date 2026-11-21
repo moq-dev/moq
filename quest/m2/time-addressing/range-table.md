@@ -19,7 +19,7 @@ compare Rust with JS).
 
 The audit reproduced why per-language tests weren't enough: with latest group 9, the same
 `relative: 2` through `time: 8` subscription returned `[7, 8]` from a complete JS copy and `[1, 2]`
-from one holding `[1, 2, 9]`. [No relative anchors](/quest/m2/time-addressing/no-relative-anchors.md)
+from one holding `[1, 2, 9]`. [moq-dev/moq#9265](https://github.com/moq-dev/moq/pull/9265)
 removes that anchor, but a live join by Min Age and a time start resolve against holdings the
 same way, and nothing compares the two languages' answers.
 
@@ -37,10 +37,6 @@ Recommended:
 - Drive time with the manual clocks both test suites already use.
 
 Public API: none. Wire: none; a divergence this finds is fixed under lite-07-wip before the cut.
-
-## Required
-
-- [No relative anchors](/quest/m2/time-addressing/no-relative-anchors.md) - the range shapes this table pins
 
 ## Related
 

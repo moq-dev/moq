@@ -3,7 +3,7 @@ import { decodeProtectedHeader } from "jose";
 import { Key } from "./key.ts";
 import { KeySet } from "./set.ts";
 
-const CLAIMS = { root: "demo", publish: ["alice/**"], subscribe: ["**"] };
+const CLAIMS = { root: "demo", publish: ["alice"], subscribe: [""] };
 
 async function keySet(...kids: (string | undefined)[]): Promise<KeySet> {
 	return { keys: await Promise.all(kids.map((kid) => Key.generate("HS256", kid))) };
@@ -29,7 +29,7 @@ test("sign / verify - round trip selects the key by kid", async () => {
 	const token = await KeySet.sign(set, CLAIMS);
 	const claims = await KeySet.verify(set, token);
 	expect(claims.root).toBe("demo");
-	expect(claims.publish).toEqual(["alice/**"]);
+	expect(claims.publish).toEqual(["alice"]);
 });
 
 test("verify - a token signed by a key outside the set is rejected", async () => {

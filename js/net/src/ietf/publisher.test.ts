@@ -319,7 +319,7 @@ test("TRACK_STATUS for an empty track names no largest", async () => {
 // Refused before anything resolves when the grant excludes the broadcast, and refused when
 // the grant narrows while the broadcast resolves.
 test("TRACK_STATUS outside the grant is refused on every draft", async () => {
-	const nothing = (): Grant => ({ publish: new Path.Patterns([]), subscribe: new Path.Patterns([]) });
+	const nothing = (): Grant => ({ publish: new Path.Prefixes(), subscribe: new Path.Prefixes() });
 	for (const version of IETF_VERSIONS) {
 		const unauthorized = toRequestCode("unauthorized", "track_status", version);
 		const pair = createMockTransportPair(ALPNS[version]);
@@ -582,6 +582,57 @@ test("a SUBSCRIBE withdrawn during setup releases its demand on every draft", as
 	}
 });
 
+// moq-transport states no Min Age, so a live SUBSCRIBE asks its track for a live join with none,
+// before and after the edge resolves: the oldest or a time start would have an on-demand
+// publisher, or a relay's route, replay what it retains. Mirrors the Rust
+// `a_moq_transport_live_join_asks_the_route_for_no_backlog`.
+test("a live SUBSCRIBE asks its track for a live join with no Min Age", async () => {
+	for (const version of IETF_VERSIONS) {
+		const fx = fixture(version);
+		const client = await Stream.open(fx.pair.client, { version });
+		const server = await Stream.accept(fx.pair.server, version);
+		if (!server) throw new Error("publisher never accepted the subscribe stream");
+		const accepted = (async () => {
+			const request = await wireOf(fx.broadcast).requested();
+			if (!request) throw new Error("no track was requested");
+			const track = request.accept({ timescale: Timescale.MILLI });
+			for (const key of [0n, 1n]) {
+				const group = track.createGroup(key);
+				group.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.fromMillis(Number(key)) });
+				group.finish();
+			}
+			return track;
+		})();
+		const serving = fx.pub.runSubscribe(
+			new Subscribe({
+				requestId: 0n,
+				trackNamespace: Path.from("test"),
+				trackName: "video",
+				subscriberPriority: 128,
+				filter: { kind: "nextObject" },
+			}),
+			server,
+		);
+		const asked = (track: TrackProducer) => {
+			const subscription = track.subscription.peek();
+			return { ranges: subscription?.ranges, min: subscription?.delay?.min?.asMillis() };
+		};
+		const live = { ranges: [{}], min: 0 };
+		try {
+			const track = await accepted;
+			expect(asked(track)).toEqual(live);
+			expect(await client.reader.u53()).toBe(SubscribeOk.id);
+			const ok = await SubscribeOk.decode(client.reader, version);
+			expect(ok.largest?.groupId).toBe(1n);
+			expect(asked(track)).toEqual(live);
+		} finally {
+			client.close();
+			fx.close();
+			await serving.catch(() => {});
+		}
+	}
+});
+
 // A resume subscribes again as a new SUBSCRIBE does, so the requester leaving while the
 // resumed track is never answered ends the request at once too.
 test("a SUBSCRIBE withdrawn while resuming releases its demand", async () => {
@@ -792,8 +843,8 @@ test("a request token does not widen the grant", async () => {
 		const pair = createMockTransportPair(ALPNS[version]);
 		const session = new NativeSession(pair.server, version, true);
 		const nothing = new Signal<Grant | undefined>({
-			publish: new Path.Patterns([]),
-			subscribe: new Path.Patterns([]),
+			publish: new Path.Prefixes(),
+			subscribe: new Path.Prefixes(),
 		});
 		const { pub, origin } = publisher(pair.server, { session, grant: nothing });
 		publish(origin, Path.from("room"));
@@ -1273,7 +1324,7 @@ test("a subscription below an advertised route hears it as the empty suffix", as
 test("a subscription outside a covering route's claim does not hear it", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const { pub, origin } = publisher(pair.server, { requiresSolicitation: true });
-	const chat = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from("room/chat"))]));
+	const chat = origin.scope(Path.empty(), new Path.Prefixes([Path.Prefix.parse(Path.from("room/chat"))]));
 	const dynamic = chat.claim(Path.from("room"));
 
 	const subscription = await Stream.open(pair.client, { version: VERSION });
@@ -1305,7 +1356,7 @@ test("a subscription hears the best covering route its claim allows", async () =
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const { pub, origin } = publisher(pair.server, { requiresSolicitation: true });
 	const scoped = (path: string) =>
-		origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from(path))]));
+		origin.scope(Path.empty(), new Path.Prefixes([Path.Prefix.parse(Path.from(path))]));
 	const chat = scoped("room/chat").claim(Path.from("room"), { cost: 1n });
 	const video = scoped("room/video").claim(Path.from("room"), { cost: 5n });
 
@@ -1338,7 +1389,7 @@ test("a subscription hears the best covering route its claim allows", async () =
 test("a subscription hears a broader covering route when the narrowest cannot serve it", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const origin = new OriginProducer();
-	const tenant = origin.scope(Path.from("tenant"), new Path.Patterns([Path.Pattern.all()]));
+	const tenant = origin.scope(Path.from("tenant"), Path.Prefixes.all());
 	const pub = new Publisher({
 		quic: pair.server,
 		session: new NativeSession(pair.server, VERSION, true),
@@ -1346,7 +1397,7 @@ test("a subscription hears a broader covering route when the narrowest cannot se
 		requiresSolicitation: true,
 	});
 	const chat = origin
-		.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from("tenant/chat"))]))
+		.scope(Path.empty(), new Path.Prefixes([Path.Prefix.parse(Path.from("tenant/chat"))]))
 		.claim(Path.from("tenant"));
 	const broad = origin.claim(Path.empty(), { cost: 5n });
 
@@ -1377,14 +1428,14 @@ test("a subscription hears a broader covering route when the narrowest cannot se
 test("a covering route's claim is compared relative to the served root", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const origin = new OriginProducer();
-	const tenant = origin.scope(Path.from("tenant"), new Path.Patterns([Path.Pattern.all()]));
+	const tenant = origin.scope(Path.from("tenant"), Path.Prefixes.all());
 	const pub = new Publisher({
 		quic: pair.server,
 		session: new NativeSession(pair.server, VERSION, true),
 		publish: tenant.consume(),
 		requiresSolicitation: true,
 	});
-	const chat = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from("tenant/room/chat"))]));
+	const chat = origin.scope(Path.empty(), new Path.Prefixes([Path.Prefix.parse(Path.from("tenant/room/chat"))]));
 	const dynamic = chat.claim(Path.from("tenant/room"));
 
 	const subscription = await Stream.open(pair.client, { version: VERSION });
@@ -2532,7 +2583,7 @@ test("draft-22: an absolute filter trims the range it serves", async () => {
 		// The request forwarded upstream carries the model's exclusive end, one past the
 		// filter's inclusive last group.
 		expect(track.subscription.peek()).toMatchObject({
-			ranges: [{ start: { time: 1n }, end: { time: 2n } }],
+			ranges: [{ start: 1n, end: 2n }],
 		});
 
 		const first = await nextUni(fx.uni);
@@ -3518,10 +3569,7 @@ for (const version of [Version.DRAFT_18] as const) {
 					const pair = createMockTransportPair(ALPN.DRAFT_18);
 					const origin = new OriginProducer();
 					// Authorization heads must not replace the request's empty visibility prefix.
-					const scope = new Path.Patterns([
-						Path.Pattern.subtree(Path.from(".stats")),
-						Path.Pattern.subtree(Path.from("visible")),
-					]);
+					const scope = Path.Prefixes.parse([".stats", "visible"]);
 					const pub = new Publisher({
 						quic: pair.server,
 						session: new NativeSession(pair.server, version, true),
@@ -4048,7 +4096,7 @@ test("a paused SUBSCRIBE ends once its grant is revoked", async () => {
 		}),
 	);
 	try {
-		grant.set({ publish: new Path.Patterns([]), subscribe: new Path.Patterns([]) });
+		grant.set({ publish: new Path.Prefixes(), subscribe: new Path.Prefixes() });
 		expect(await client.reader.u53()).toBe(PublishDone.id);
 		expect((await PublishDone.decode(client.reader, V22)).statusCode).toBe(PublishDoneStatus.UNAUTHORIZED);
 	} finally {
@@ -4360,7 +4408,7 @@ test("IETF draft-18: range updates preserve the shared subscription", async () =
 			await new SubscribeUpdate({ requestId: id, parameters }).encode(client.writer, fx.version);
 			expect(await client.reader.u53()).toBe(RequestOk.id);
 			await RequestOk.decode(client.reader, fx.version);
-			expect(track.subscription.peek()?.ranges).toEqual([{ start: { time: 6n }, end: { time: 7n } }]);
+			expect(track.subscription.peek()?.ranges).toEqual([{ start: 6n, end: 7n }]);
 		}
 	} finally {
 		client.close();

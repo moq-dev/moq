@@ -1060,7 +1060,7 @@ for (const [name, violate] of [
 			if (!auth || (await auth.reader.u53()) !== StreamId.Auth)
 				throw new Error("the peer never presented a credential");
 			await AuthMessage.decode(auth.reader, Version.DRAFT_07);
-			const all = new Path.Patterns([Path.Pattern.all()]);
+			const all = Path.Prefixes.all();
 			await new AuthOk(all, all).encode(auth.writer, Version.DRAFT_07);
 			const { writer, send } = await announceStream(pair);
 			await send({ status: "request", more: false, remove: [], add: [{ prefix: ROOM, hidden: false }] });

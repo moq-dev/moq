@@ -77,7 +77,7 @@ async fn round(version: &str) -> (Vec<(u64, Option<u64>)>, Option<u64>) {
 		remote.track("video").unwrap().subscribe(
 			Subscription::default()
 				.with_delay(Delay::default().with_max(None))
-				.with_ranges([Range::oldest()]),
+				.with_ranges([Range::default()]),
 		),
 	)
 	.await

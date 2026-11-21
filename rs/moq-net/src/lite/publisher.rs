@@ -1061,18 +1061,15 @@ impl AnnounceServe {
 		// that doesn't grant it), we simply have nothing to announce. Respond with an
 		// empty set and keep the stream open (the subscriber treats a FIN here as a
 		// fatal stream close), rather than erroring, which would reset the stream.
-		// The wire prefix decodes as a literal path; convert it explicitly to its
-		// subtree grant, refusing anything that cannot be a subtree.
+		// The wire prefix decodes as a literal path, scoped as its whole subtree; a prefix
+		// no grant can spell (holding a `*`) reaches nothing.
 		// The cursor is rooted at the prefix so every update arrives named as its
 		// wire suffix, a route covering the prefix included: that one presents at
 		// the root, as the empty suffix.
-		let scope = crate::Pattern::subtree(prefix.as_str())
-			.map(|subtree| subtree.rebase(prefix.as_str()))
-			.unwrap_or_default();
 		let origin = self
 			.shared
 			.origin
-			.scope(&prefix, &scope)
+			.scope(&prefix, &crate::Prefixes::all())
 			.unwrap_or_else(|_| self.shared.origin.empty());
 		// Register the split-horizon peer on the announce cursor too. The origin
 		// model uses this exposure to park a reflected copy before it can replace
@@ -3663,10 +3660,7 @@ mod announce_test {
 		let origin = Hop::new(1).unwrap().produce();
 		let root = "r".repeat(100);
 		let _route = origin.announce(format!("{root}/x"), origin::RouteInfo::new()).unwrap();
-		let consumer = origin
-			.consume()
-			.scope(root.as_str(), &crate::Patterns::from(crate::Pattern::all()))
-			.unwrap();
+		let consumer = origin.consume().scope(root.as_str(), &crate::Prefixes::all()).unwrap();
 		let prefix = crate::Path::new(&"p".repeat(crate::Path::MAX_BYTES - 50)).unwrap();
 		let mut answer = super::routed::Answer::alone(consumer);
 		let log = Log::default();
@@ -3787,10 +3781,10 @@ mod announce_test {
 	#[kio::test]
 	async fn a_lite07_prefix_wider_than_the_grant_is_answered_region_by_region() {
 		let path = |path: &str| crate::Path::new(path).unwrap();
-		let subtrees = |paths: &[&str]| -> crate::Patterns {
+		let subtrees = |paths: &[&str]| -> crate::Prefixes {
 			paths
 				.iter()
-				.map(|path| crate::Pattern::subtree(path).unwrap())
+				.map(|path| crate::Prefix::try_from(*path).unwrap())
 				.collect()
 		};
 		let origin = Hop::new(1).unwrap().produce();
@@ -3800,12 +3794,12 @@ mod announce_test {
 		let _outside = origin.announce("d/z", origin::RouteInfo::new()).unwrap();
 		let _cam = origin.announce("src/cam", origin::RouteInfo::new()).unwrap();
 		let consumer = (origin.mount("e/m", "src").unwrap())
-			.scope("", &crate::Patterns::from(crate::Pattern::all()))
+			.scope("", &crate::Prefixes::all())
 			.unwrap()
 			.consume();
 		let auth = crate::auth::Link::new(false);
 		let limit = |paths: &[&str]| crate::auth::Grant {
-			publish: crate::Patterns::default(),
+			publish: crate::Prefixes::new(),
 			subscribe: subtrees(paths),
 			expires: None,
 		};
@@ -3897,7 +3891,7 @@ mod announce_test {
 	}
 
 	/// Grant changes queued before the answer drains each move the reads they queued, in
-	/// order: one that keeps the regions keeps a mount and its claim, though a later one
+	/// order: one that keeps a region keeps its mount and claim, though a later one
 	/// replaces that mount, and the claim every grant shows is never ended.
 	#[kio::test]
 	async fn lite07_grant_changes_queued_back_to_back_apply_in_order() {
@@ -3905,16 +3899,19 @@ mod announce_test {
 		let origin = Hop::new(1).unwrap().produce();
 		let _cam = origin.announce("src/m", origin::RouteInfo::new()).unwrap();
 		let consumer = (origin.mount("a", "src").unwrap())
-			.scope("", &crate::Patterns::from(crate::Pattern::all()))
+			.scope("", &crate::Prefixes::all())
 			.unwrap()
 			.consume();
 		let auth = crate::auth::Link::new(false);
-		let limit = |pattern: &str| crate::auth::Grant {
-			publish: crate::Patterns::default(),
-			subscribe: crate::Patterns::from(pattern.parse::<crate::Pattern>().unwrap()),
+		let limit = |prefixes: &[&str]| crate::auth::Grant {
+			publish: crate::Prefixes::new(),
+			subscribe: prefixes
+				.iter()
+				.map(|prefix| crate::Prefix::try_from(*prefix).unwrap())
+				.collect(),
 			expires: None,
 		};
-		auth.handle().authorize(&limit("a/*"));
+		auth.handle().authorize(&limit(&["a", "x"]));
 		let mut answer = super::routed::Answer::alone_on(consumer, auth.clone());
 		let log = Log::default();
 		let mut wire = Wire {
@@ -3940,10 +3937,10 @@ mod announce_test {
 			.filter(|msg| matches!(msg, lite::AnnounceBroadcast::Start { .. }));
 		assert_eq!(starts.count(), 1, "{first:?}");
 
-		// `a/**` keeps the region `a`; `a/m/**` then reads `a/m` in place of `a`.
-		auth.handle().authorize(&limit("a/**"));
+		// `a` alone keeps the region `a`; `a/m` then reads `a/m` in place of `a`.
+		auth.handle().authorize(&limit(&["a"]));
 		answer.poll_permit(&waiter).unwrap();
-		auth.handle().authorize(&limit("a/m/**"));
+		auth.handle().authorize(&limit(&["a/m"]));
 		answer.poll_permit(&waiter).unwrap();
 		let changed = sent(&mut answer);
 		let ends = changed
@@ -3960,16 +3957,16 @@ mod announce_test {
 		let origin = Hop::new(1).unwrap().produce();
 		let _cam = origin.announce("src/m/cam", origin::RouteInfo::new()).unwrap();
 		let consumer = (origin.mount("a", "src").unwrap())
-			.scope("", &crate::Patterns::from(crate::Pattern::all()))
+			.scope("", &crate::Prefixes::all())
 			.unwrap()
 			.consume();
 		let auth = crate::auth::Link::new(false);
-		let limit = |pattern: &str| crate::auth::Grant {
-			publish: crate::Patterns::default(),
-			subscribe: crate::Patterns::from(pattern.parse::<crate::Pattern>().unwrap()),
+		let limit = |prefix: &str| crate::auth::Grant {
+			publish: crate::Prefixes::new(),
+			subscribe: crate::Prefix::try_from(prefix).unwrap().into(),
 			expires: None,
 		};
-		auth.handle().authorize(&limit("a/**"));
+		auth.handle().authorize(&limit("a"));
 		let mut answer = super::routed::Answer::alone_on(consumer, auth.clone());
 		let log = Log::default();
 		let mut wire = Wire {
@@ -3985,7 +3982,7 @@ mod announce_test {
 
 		answer.request(false, Vec::new(), vec![(path(""), true)]).unwrap();
 		// Narrowed before the mount at `a` sent its initial set: `a/m` is read in its place.
-		auth.handle().authorize(&limit("a/m/**"));
+		auth.handle().authorize(&limit("a/m"));
 		answer.poll_permit(&waiter).unwrap();
 		answer.drain(&mut writer).unwrap();
 		assert!(writer.poll_flush(&waiter).is_ready());
@@ -3999,10 +3996,9 @@ mod announce_test {
 		assert!(start.is_some() && start < synced, "{msgs:?}");
 	}
 
-	/// A claim at a path the scope does not match, but above paths it does, is shown where
-	/// it is presented: `a` under `a/*`, at the region and at its own path. One beneath
-	/// every path the scope matches stays hidden, and so does `a` from a handle scoped to
-	/// `a/*/x`, which shares no path with the scope.
+	/// A claim at a path above the scope is shown where it is presented: `a` under `a/x`, at
+	/// the region one segment beneath it. One within the region is shown at its own path,
+	/// and nothing is shown to a handle scoped to `a/y`, which shares no path with the grant.
 	#[kio::test]
 	async fn a_lite07_claim_above_what_the_scope_matches_is_shown() {
 		let path = |path: &str| crate::Path::new(path).unwrap();
@@ -4012,15 +4008,15 @@ mod announce_test {
 		let _b = origin.announce("b", origin::RouteInfo::new()).unwrap();
 		let auth = crate::auth::Link::new(false);
 		auth.handle().authorize(&crate::auth::Grant {
-			publish: crate::Patterns::default(),
-			subscribe: crate::Patterns::from("a/*".parse::<crate::Pattern>().unwrap()),
+			publish: crate::Prefixes::new(),
+			subscribe: crate::Prefix::try_from("a/x").unwrap().into(),
 			expires: None,
 		});
 		let waiter = kio::Waiter::noop();
 		let disjoint = (origin.consume())
-			.scope("", &crate::Patterns::from("a/*/x".parse::<crate::Pattern>().unwrap()))
+			.scope("", &crate::Prefix::try_from("a/y").unwrap().into())
 			.unwrap();
-		let shown = [("a".to_string(), 0)];
+		let shown = [("a/x".to_string(), 1), ("a/x/y".to_string(), 0)];
 		for (consumer, asked, expected) in [
 			(origin.consume(), "", &shown[..]),
 			(origin.consume(), "a", &shown[..]),
@@ -4042,7 +4038,7 @@ mod announce_test {
 			assert!(writer.poll_flush(&waiter).is_ready());
 			let msgs = wire.take_announces();
 			let mut decoder = lite::AnnounceDecoder::default();
-			let told: Vec<(String, u64)> = (msgs.iter())
+			let mut told: Vec<(String, u64)> = (msgs.iter())
 				.filter_map(|msg| match msg {
 					lite::AnnounceBroadcast::Start { suffix, claim, .. } => {
 						let path = decoder.start(Some(suffix.clone())).unwrap().unwrap();
@@ -4051,6 +4047,7 @@ mod announce_test {
 					_ => None,
 				})
 				.collect();
+			told.sort();
 			assert_eq!(told, expected, "{asked:?}: {msgs:?}");
 			assert_eq!(msgs.last(), Some(&lite::AnnounceBroadcast::Synced { prefix: 0 }));
 		}
@@ -4066,7 +4063,7 @@ mod announce_test {
 			.announce("tenant-a/public/cam", origin::RouteInfo::new())
 			.unwrap();
 		let consumer = (origin.mount("tenant-b/shared", "tenant-a/public").unwrap())
-			.scope("tenant-b", &crate::Patterns::from(crate::Pattern::all()))
+			.scope("tenant-b", &crate::Prefixes::all())
 			.unwrap()
 			.consume();
 		let mut answer = super::routed::Answer::alone(consumer);
@@ -4130,7 +4127,7 @@ mod announce_test {
 			.announce("tenant-a/public/cam", origin::RouteInfo::new())
 			.unwrap();
 		let consumer = (origin.mount("tenant-b/shared", "tenant-a/public").unwrap())
-			.scope("tenant-b", &crate::Patterns::from(crate::Pattern::all()))
+			.scope("tenant-b", &crate::Prefixes::all())
 			.unwrap()
 			.consume();
 		let mut answer = super::routed::Answer::alone(consumer);
@@ -4899,19 +4896,18 @@ struct Bounds {
 
 impl Bounds {
 	/// Read `ranges` as they arrived. Group IDs are group starts, so an absolute anchor and a
-	/// time anchor both name a start. Lite-07 carries time anchors, both ends inclusive, and a
-	/// start partway through a group as an absolute one.
+	/// time anchor both name a start. Lite-07 carries times, both ends inclusive, and a start
+	/// partway through a group as an absolute one.
 	///
 	/// A `legacy` wire (one without ranges) means its start as the first group starting at
 	/// or after it, never one before it that contains it, so the frames narrow to that
 	/// floor (see [`Frames::floor`]).
 	fn new(ranges: &[lite::Range], legacy: bool) -> Self {
-		use crate::track::{Anchor, Range};
+		use crate::track::Range;
 
 		let anchor = |anchor: lite::Anchor| match anchor {
-			lite::Anchor::Absolute(position) => Anchor::Time(position.group),
-			lite::Anchor::Relative(back) => Anchor::Relative(back),
-			lite::Anchor::Time(time) => Anchor::Time(time),
+			lite::Anchor::Absolute(position) => position.group,
+			lite::Anchor::Time(time) => time,
 		};
 
 		let mut bounds = Self {
@@ -4929,10 +4925,7 @@ impl Bounds {
 				bounds.ranges.push(Range::EMPTY);
 				continue;
 			}
-			let start = match range.start {
-				None => Range::oldest().start,
-				Some(start) => anchor(start),
-			};
+			let start = range.start.map(anchor);
 			if legacy && let Some(lite::Anchor::Absolute(start)) = range.start {
 				bounds.frames.floor = bounds.frames.floor.max(start.group);
 			}
@@ -4946,11 +4939,11 @@ impl Bounds {
 				Some(lite::Anchor::Absolute(end)) => match end.frame.checked_sub(1) {
 					Some(frame) => {
 						bounds.frames.last = Some((end.group, frame));
-						Some(Anchor::Time(end.group))
+						Some(end.group)
 					}
 					// An exclusive end at group 0 holds nothing, whatever the start.
 					None => match end.group.checked_sub(1) {
-						Some(group) => Some(Anchor::Time(group)),
+						Some(group) => Some(group),
 						None => {
 							bounds.ranges.push(Range::EMPTY);
 							continue;
@@ -4962,7 +4955,7 @@ impl Bounds {
 			// One ending before the group it starts partway through covers nothing, so it starts
 			// no group partway.
 			if let Some((group, frame)) = position
-				&& !matches!(end, Some(Anchor::Time(end)) if end < group)
+				&& !matches!(end, Some(end) if end < group)
 			{
 				bounds.positions.insert(bounds.ranges.len() as u64, (group, frame));
 			}
@@ -4993,7 +4986,6 @@ fn first_frames<'a>(
 	positions: impl IntoIterator<Item = &'a (u64, u64)>,
 	ranges: impl IntoIterator<Item = &'a crate::track::Range>,
 ) -> Vec<(u64, u64)> {
-	use crate::track::Anchor;
 	let mut positions: Vec<_> = positions.into_iter().copied().collect();
 	if positions.is_empty() {
 		return positions;
@@ -5003,14 +4995,7 @@ fn first_frames<'a>(
 	// ranges covering a group are the rest less those two counts.
 	let (mut count, mut starts, mut ends) = (0, Vec::new(), Vec::new());
 	for range in ranges {
-		let start = match range.start {
-			Anchor::Time(start) => Some(start),
-			_ => None,
-		};
-		let end = match range.end {
-			Some(Anchor::Time(end)) => Some(end),
-			_ => None,
-		};
+		let (start, end) = (range.start, range.end);
 		if start.zip(end).is_some_and(|(start, end)| start > end) {
 			continue;
 		}
@@ -5065,7 +5050,6 @@ impl Requested {
 	}
 
 	fn count(&mut self, range: &crate::track::Range, delta: isize) {
-		use crate::track::Anchor;
 		let tally = |counts: &mut std::collections::BTreeMap<u64, usize>, key: u64| {
 			let count = counts.entry(key).or_default();
 			*count = count.checked_add_signed(delta).expect("a counted range");
@@ -5081,12 +5065,12 @@ impl Requested {
 			return;
 		}
 		match range.start {
-			Anchor::Time(start) => tally(&mut self.starts, start),
-			_ => shift(&mut self.unnamed),
+			Some(start) => tally(&mut self.starts, start),
+			None => shift(&mut self.unnamed),
 		}
 		match range.end {
-			Some(Anchor::Time(last)) => tally(&mut self.ends, last),
-			_ => shift(&mut self.unbounded),
+			Some(last) => tally(&mut self.ends, last),
+			None => shift(&mut self.unbounded),
 		}
 	}
 
@@ -5334,8 +5318,7 @@ struct TrackRun {
 	/// Lite-07: the ranges an update added whose start no SUBSCRIBE_STARTED reported yet, by
 	/// Range ID.
 	unstarted: std::collections::BTreeSet<u64>,
-	/// Lite-07: the ranges whose relative or time anchors may still resolve; see
-	/// [`Self::pin`].
+	/// Lite-07: the ranges whose start or end may still resolve; see [`Self::pin`].
 	unpinned: Unpinned,
 	/// Lite-07: the skipped runs not sent as SUBSCRIBE_SKIP, each by the start of the cached
 	/// group just above it, whose GROUP's Previous Start passes over the run instead. Each
@@ -5347,7 +5330,7 @@ struct TrackRun {
 	recheck_elided: bool,
 }
 
-/// Lite-07 ranges whose relative or time anchors may still resolve, by Range ID, each due
+/// Lite-07 ranges whose start or end may still resolve, by Range ID, each due
 /// once the latest group reaches the lowest start that could resolve it; see [`TrackRun::pin`].
 #[derive(Debug, Default)]
 struct Unpinned {
@@ -5377,24 +5360,20 @@ impl Unpinned {
 	}
 }
 
-/// The lowest latest group start that could resolve `range`'s next relative or time anchor:
-/// its start unless `started`, then its end. `None` once neither can move.
+/// The lowest latest group start that could resolve `range`'s start, unless `started`, then
+/// its end. `None` once neither can move.
 ///
 /// A start may resolve once any group is there, even a time start above every group, which
-/// the latest group may contain. A time end settles once a group starts past it.
-fn due(range: &crate::track::Range, started: bool) -> Option<u64> {
-	use crate::track::Anchor;
+/// the latest group may contain, and so may a live join's, when `joins` (a stated Min Age)
+/// places a range with no start. An end settles once a group starts past it.
+fn due(range: &crate::track::Range, started: bool, joins: bool) -> Option<u64> {
 	if range.is_empty() {
 		return None;
 	}
-	if !started && matches!(range.start, Anchor::Relative(_) | Anchor::Time(_)) {
+	if !started && (range.start.is_some() || joins) {
 		return Some(0);
 	}
-	match range.end {
-		Some(Anchor::Relative(_)) => Some(0),
-		Some(Anchor::Time(last)) => Some(last.saturating_add(1)),
-		_ => None,
-	}
+	range.end.map(|last| last.saturating_add(1))
 }
 
 impl TrackRun {
@@ -5425,8 +5404,9 @@ impl TrackRun {
 
 		let mut unpinned = Unpinned::default();
 		if ctx.version.has_ranges() {
+			let joins = track.subscription().delay.min.is_some();
 			for (id, range) in (0..).zip(&bounds.ranges) {
-				unpinned.insert(id, due(range, false));
+				unpinned.insert(id, due(range, false, joins));
 			}
 		}
 		Self {
@@ -5559,8 +5539,8 @@ impl TrackRun {
 	/// whether the ranges moved.
 	///
 	/// A range left live keeps where it resolved: the model keeps each by its Range ID, so it
-	/// never counts relative anchors back from a newer latest group, nor looks a time start up
-	/// again in newer groups.
+	/// never places a live join again by a newer live edge, nor looks a time start up again in
+	/// newer groups.
 	fn edit(
 		&mut self,
 		retired: Vec<u64>,
@@ -5611,7 +5591,7 @@ impl TrackRun {
 		}
 		for (id, range) in added {
 			self.requested.insert(id, range);
-			self.unpinned.insert(id, due(&range, false));
+			self.unpinned.insert(id, due(&range, false, delay.min.is_some()));
 			if id >= self.initial {
 				self.unstarted.insert(id);
 			}
@@ -5623,19 +5603,19 @@ impl TrackRun {
 		moved
 	}
 
-	/// Each live range whose relative or time anchors resolved since the last update, with
-	/// them replaced by the groups they resolved to: a range resolves once, so an update that
-	/// leaves it live never counts its relative anchors back from a newer latest group, nor
-	/// looks a time start up again in newer groups, here or on a relay's copies, and its
-	/// start names the group it resolved to for the read cursor's floor. A start reaching
-	/// back to the oldest group held stays as it was, since an absolute start would turn it
-	/// into a floor the subscriber never named.
+	/// Each live range whose start or end resolved since the last update, with them replaced
+	/// by the groups they resolved to: a range resolves once, so an update that leaves it live
+	/// never places a live join again by a newer live edge or Min Age, nor looks a time start
+	/// up again in newer groups, here or on a relay's copies, and its start names the group it
+	/// resolved to for the read cursor's floor. A start reaching back to the oldest group held
+	/// stays as it was, since an absolute start would turn it into a floor the subscriber never
+	/// named.
 	///
 	/// Only the ranges still waiting on a start, or on an end a group passed, are asked (see
 	/// [`due`]), once for the batch, and each is let go once its anchors settle: this costs
 	/// the ranges still waiting rather than every range.
 	fn pin(&mut self) -> Vec<(u64, crate::track::Range)> {
-		use crate::track::{Anchor, Range};
+		use crate::track::Range;
 		let Some(latest) = self.track.latest_key() else {
 			return Vec::new();
 		};
@@ -5650,18 +5630,15 @@ impl TrackRun {
 			let Some(resolved) = resolved else {
 				continue;
 			};
-			let start = match range.start {
-				Anchor::Relative(_) | Anchor::Time(_) if resolved.floored => Anchor::Time(resolved.start),
-				start => start,
+			let start = match resolved.floored {
+				true => Some(resolved.start),
+				false => range.start,
 			};
 			// An end resolves once it settles; until then it stays as given. One settled at
 			// group 0 holds nothing.
 			let pinned = match (range.end, resolved.end) {
-				(Some(Anchor::Relative(_) | Anchor::Time(_)), Some(end)) => match end.checked_sub(1) {
-					Some(last) => Range {
-						start,
-						end: Some(Anchor::Time(last)),
-					},
+				(Some(_), Some(end)) => match end.checked_sub(1) {
+					Some(last) => Range { start, end: Some(last) },
 					None => Range::EMPTY,
 				},
 				(end, _) => Range { start, end },
@@ -5669,7 +5646,7 @@ impl TrackRun {
 			// The start settled; the end is due again once it may settle.
 			let next = match resolved.end {
 				Some(_) => None,
-				None => due(&pinned, true),
+				None => due(&pinned, true, false),
 			};
 			self.unpinned.insert(id, next);
 			if pinned != range {
@@ -7379,8 +7356,8 @@ mod serve_group_test {
 		assert_eq!(
 			first.ranges,
 			[crate::track::Range {
-				start: crate::track::Anchor::Time(0),
-				end: Some(crate::track::Anchor::Time(0)),
+				start: Some(0),
+				end: Some(0),
 			}]
 		);
 
@@ -7389,10 +7366,7 @@ mod serve_group_test {
 			start: Some(lite::Anchor::Time(1_000)),
 			end: None,
 		}];
-		assert_eq!(
-			Bounds::new(&time, false).ranges[0].start,
-			crate::track::Anchor::Time(1_000)
-		);
+		assert_eq!(Bounds::new(&time, false).ranges[0].start, Some(1_000));
 	}
 
 	/// A wire without ranges means its start as the first group at or after it, so the
@@ -7404,7 +7378,7 @@ mod serve_group_test {
 			end: None,
 		}];
 		let legacy = Bounds::new(&start, true);
-		assert_eq!(legacy.ranges[0].start, crate::track::Anchor::Time(5));
+		assert_eq!(legacy.ranges[0].start, Some(5));
 		assert_eq!(legacy.frames.floor, 5);
 		assert_eq!(Bounds::new(&start, false).frames.floor, 0);
 
@@ -7440,17 +7414,16 @@ mod serve_group_test {
 	#[test]
 	fn first_frames_matches_a_scan_of_every_range() {
 		use rand::{RngExt, SeedableRng};
-		use track::Anchor;
 		let mut rng = rand::rngs::StdRng::seed_from_u64(0x6672616d6573);
 		for _ in 0..2000 {
 			let anchor = |rng: &mut rand::rngs::StdRng| match rng.random_range(0..3) {
-				0 => Anchor::Relative(rng.random_range(0..3)),
-				_ => Anchor::Time(rng.random_range(0..8)),
+				0 => None,
+				_ => Some(rng.random_range(0..8)),
 			};
 			let ranges: Vec<track::Range> = (0..rng.random_range(0..6))
 				.map(|_| track::Range {
 					start: anchor(&mut rng),
-					end: rng.random_bool(0.6).then(|| anchor(&mut rng)),
+					end: rng.random_bool(0.6).then(|| anchor(&mut rng)).flatten(),
 				})
 				.collect();
 			let positions: Vec<(u64, u64)> = (0..rng.random_range(0..4))
@@ -7459,8 +7432,8 @@ mod serve_group_test {
 			let scanned: Vec<(u64, u64)> = (positions.iter().copied())
 				.filter(|(group, _)| {
 					let covers = |range: &&track::Range| match (range.start, range.end) {
-						(Anchor::Time(start), _) if start > *group => false,
-						(_, Some(Anchor::Time(end))) if end < *group => false,
+						(Some(start), _) if start > *group => false,
+						(_, Some(end)) if end < *group => false,
 						_ => true,
 					};
 					ranges.iter().filter(covers).nth(1).is_none()
@@ -8857,11 +8830,11 @@ mod serve_group_test {
 		.await;
 	}
 
-	/// SUBSCRIBE_START tells the subscriber where each range's start landed, which a relative
+	/// SUBSCRIBE_START tells the subscriber where each range's start landed, which a live join
 	/// or time start leaves it no way to work out from the groups it receives.
 	#[kio::test]
 	async fn lite07_start_names_each_resolved_range_start() {
-		use crate::track::{Anchor, Range};
+		use crate::track::Range;
 
 		let mut track = track::Producer::new(
 			Arc::new(broadcast::Info::default()),
@@ -8873,22 +8846,24 @@ mod serve_group_test {
 		}
 		let subscriber = track.subscribe(
 			track::Subscription::default()
-				.with_delay(track::Delay::default().with_max(Duration::from_secs(3600)))
+				.with_delay(
+					track::Delay::default()
+						.with_max(Duration::from_secs(3600))
+						.with_min(Duration::from_secs(1)),
+				)
 				.with_ranges([
+					// A live join a second behind the newest frame, at 4 s.
+					Range::default(),
 					Range {
-						start: Anchor::Relative(1),
-						end: None,
-					},
-					Range {
-						start: Anchor::Time(1500),
-						end: Some(Anchor::Time(1999)),
+						start: Some(1500),
+						end: Some(1999),
 					},
 					// Empty, so it starts nowhere.
 					Range::EMPTY,
-					// Empty only once its start resolves to group 4000.
+					// Empty only once its join resolves to group 3000.
 					Range {
-						start: Anchor::Relative(0),
-						end: Some(Anchor::Time(1999)),
+						start: None,
+						end: Some(1999),
 					},
 				]),
 		);
@@ -9000,7 +8975,7 @@ mod serve_group_test {
 			crate::track::Info::timed(),
 		);
 		for key in 0..5 {
-			write_group(&mut track, key, key * 1000);
+			write_group(&mut track, key * 1000, key * 1000);
 		}
 		// Bounded below the groups the added range reaches, so its start is its own.
 		let first = lite::Range::span(Some(0), 0, Some(0), None);
@@ -9014,13 +8989,14 @@ mod serve_group_test {
 			assert!(run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready());
 		}
 
-		// Two groups back from the latest, group 2.
-		let back = lite::Range {
-			start: Some(lite::Anchor::Relative(2)),
-			end: None,
+		// A live join two seconds behind the newest frame, at 4 s: group 2000.
+		let back = lite::Range::OPEN;
+		let join = |mut update: LiveUpdate| {
+			update.min_delay = Some(Duration::from_secs(2));
+			update
 		};
 		let live = [(0, first)];
-		run.update(lite07_add(&run, &live, 1, &[back]));
+		run.update(join(lite07_add(&run, &live, 1, &[back])));
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		let started: Vec<_> = responses(&mut writer, &log)
 			.await
@@ -9030,22 +9006,33 @@ mod serve_group_test {
 				_ => None,
 			})
 			.collect();
-		assert_eq!(started, [lite::SubscribeStarted { id: 1, start: Some(2) }]);
+		assert_eq!(
+			started,
+			[lite::SubscribeStarted {
+				id: 1,
+				start: Some(2000)
+			}]
+		);
 
-		// Newer groups arrive, and another update leaves the range live: it still starts at 2.
+		// Newer groups arrive, and another update leaves the range live: it still starts at 2 s.
 		for key in 5..8 {
-			write_group(&mut track, key, key * 1000);
+			write_group(&mut track, key * 1000, key * 1000);
 		}
 		let live = [(0, first), (1, back)];
-		run.update(lite07_add(&run, &live, 2, &[lite::Range::span(Some(9), 0, None, None)]));
+		run.update(join(lite07_add(
+			&run,
+			&live,
+			2,
+			&[lite::Range::span(Some(9000), 0, None, None)],
+		)));
 		let resolved = run.track.resolved_range(1).map(|r| (r.start, r.end));
-		assert_eq!(resolved, Some((2, None)), "the update kept where it started");
+		assert_eq!(resolved, Some((2000, None)), "the update kept where it started");
 		// The model holds it pinned to that group, so a relay's copies, which take the whole
 		// preferences, resolve it there too.
 		assert_eq!(
 			run.track.subscription().ranges[1],
 			track::Range {
-				start: track::Anchor::Time(2),
+				start: Some(2000),
 				end: None,
 			}
 		);
@@ -9095,8 +9082,8 @@ mod serve_group_test {
 		assert!(served.contains(&4000), "served {served:?}");
 	}
 
-	/// An update the model refuses, here a relative start that a group-only copy's cache
-	/// cannot settle, ends the subscription with the refusal once the run reads under it,
+	/// An update the model refuses, here a time start whose lookup the track's history
+	/// handler refuses, ends the subscription with the refusal once the run reads under it,
 	/// rather than serving under terms the model never took.
 	#[kio::test]
 	async fn lite07_a_refused_update_ends_the_subscription() {
@@ -9105,34 +9092,43 @@ mod serve_group_test {
 			"test",
 			crate::track::Info::timed(),
 		);
-		// A received copy whose wire can't say what a relative anchor counts back from.
-		track.received();
-		for key in 0..5 {
-			write_group(&mut track, key, key * 1000);
-		}
+		let requests = track.requests();
+		write_group(&mut track, 9000, 9000);
 		let subscriber = track.subscribe(
 			track::Subscription::default()
 				.with_delay(track::Delay::default().with_max(Duration::from_secs(3600)))
-				.with_range(0..1),
+				.with_range(9000..9001),
 		);
 		let (mut run, mut writer, _log) = lite07_run(SinkSession::new(Log::default()), subscriber);
 		while run.start.resolved().is_none() {
 			assert!(run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready());
 		}
 
-		// Swap range 0 for one counting back from a latest group the copy can't place.
+		// Swap range 0 for a time before every group held, which the handler looks up.
 		let later = lite::Range {
-			start: Some(lite::Anchor::Relative(2)),
+			start: Some(lite::Anchor::Time(7000)),
 			end: Some(lite::Anchor::Time(100_000)),
 		};
 		run.update(lite07_add(&run, &[], 1, &[later]));
+		let waiter = kio::Waiter::noop();
+		let lookup = (0..100)
+			.find_map(|_| {
+				let _ = run.poll_step(&mut writer, &waiter);
+				match requests.poll_requested_fill(&waiter) {
+					Poll::Ready(Ok(lookup)) => Some(lookup),
+					_ => None,
+				}
+			})
+			.expect("the time start asks the handler for its group");
+		lookup.refuse_groups(7000..7001, Error::Timeout);
+		drop(lookup);
 		let result = (0..100)
-			.find_map(|_| match run.poll_step(&mut writer, &kio::Waiter::noop()) {
+			.find_map(|_| match run.poll_step(&mut writer, &waiter) {
 				Poll::Ready(Err(err)) => Some(err),
 				_ => None,
 			})
 			.expect("the refusal ends the subscription");
-		assert!(matches!(result, Error::Unsupported), "ended with {result:?}");
+		assert!(matches!(result, Error::Timeout), "ended with {result:?}");
 	}
 
 	/// Where an added time start `time` resolves among `groups` (starts, in milliseconds),
@@ -9277,8 +9273,8 @@ mod serve_group_test {
 	/// without a start.
 	#[kio::test]
 	async fn lite07_a_floored_time_start_reports_where_delivery_starts() {
-		// Open, and through the latest group, which already holds group 1000.
-		for end in [None, Some(lite::Anchor::Relative(0))] {
+		// Open, and through group 1000, which the copy already holds.
+		for end in [None, Some(lite::Anchor::Time(1000))] {
 			let mut track = track::Producer::new(
 				Arc::new(broadcast::Info::default()),
 				"test",
@@ -11827,10 +11823,7 @@ mod tests {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
 			let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let root = "r".repeat(crate::Path::MAX_BYTES - 2);
-			let scoped = origin
-				.consume()
-				.scope(root.as_str(), &crate::Patterns::from(crate::Pattern::all()))
-				.unwrap();
+			let scoped = origin.consume().scope(root.as_str(), &crate::Prefixes::all()).unwrap();
 
 			let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
 			peer_setup.set(crate::lite::Setup::default()).unwrap();

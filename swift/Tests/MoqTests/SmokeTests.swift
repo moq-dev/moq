@@ -55,7 +55,7 @@ final class SmokeTests: XCTestCase {
     }
 
     func testDefaultSubscriptionSkipsSupersededGroupsAtOnce() {
-        XCTAssertEqual(Subscription.default.delay.min, 0)
+        XCTAssertNil(Subscription.default.delay.min)
         XCTAssertEqual(Subscription.default.delay.max, 0)
     }
 
@@ -101,7 +101,7 @@ final class SmokeTests: XCTestCase {
         let consumer = try track.consume(
             subscription: Subscription(
                 delay: Delay(min: 0, max: 10),
-                ranges: [Subscription.Range(start: .relative(groups: 2))],
+                ranges: [Subscription.Range(start: .unscaled(0))],
                 order: .ascending
             ))
         var starts: [UInt64] = []
@@ -254,7 +254,7 @@ final class SmokeTests: XCTestCase {
         }
         defer { watchdog.cancel() }
 
-        let everything = Grant(publish: ["**"], subscribe: ["**"], expires: nil)
+        let everything = Grant(publish: [""], subscribe: [""], expires: nil)
         for side in [session, peer] {
             for try await grant in side.grants() where grant == everything {
                 break

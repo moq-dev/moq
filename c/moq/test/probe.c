@@ -385,9 +385,9 @@ int main(void)
 	moq_dispatcher dispatcher = {loop_dispatch, loop_shutdown, NULL};
 	moq_set_dispatcher(&dispatcher);
 
-	/* Only the defaults carry moq-net's zero delay; a bare record leaves both bounds unset. */
+	/* Only the defaults carry moq-net's zero max delay, with no min; a bare record leaves both unset. */
 	moq_subscription *defaults = moq_subscription_defaults();
-	CHECK(defaults->delay.min.has_value && defaults->delay.min.value == 0);
+	CHECK(!defaults->delay.min.has_value);
 	CHECK(defaults->delay.max.has_value && defaults->delay.max.value == 0);
 	moq_subscription_free(defaults);
 	moq_subscription bare = moq_subscription_default();

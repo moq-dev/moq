@@ -479,8 +479,8 @@ impl Pattern {
 
 	/// Whether every path `other` matches, this pattern matches too.
 	///
-	/// This is the authorization check: a grant contains a request when the request
-	/// cannot name a path outside it. A pattern contains itself.
+	/// A filter contains another when the other cannot name a path outside it. A pattern
+	/// contains itself.
 	pub fn contains(&self, other: &Self) -> bool {
 		match (self.globstar, other.globstar) {
 			(None, None) => {
@@ -575,7 +575,7 @@ impl Pattern {
 	/// The patterns that, relative to `root`, match exactly the paths this pattern
 	/// matches beneath `root`.
 	///
-	/// This is how a grant or an advertisement is presented inside a rooted view. It is
+	/// This is how a filter or an advertisement is presented inside a rooted view. It is
 	/// a set because `**` may consume the root or stop short of it: `**/a` rebased at `a`
 	/// is both the empty pattern (the root itself) and `**/a` (deeper paths ending in
 	/// `a`). Empty when nothing under `root` matches. The root is normalized like a
@@ -625,8 +625,8 @@ impl Pattern {
 
 	/// The patterns matching exactly the paths both patterns match.
 	///
-	/// This is how a claim is clamped to a scope: the covered paths inside the
-	/// grant, as patterns of their own. It is a set because two partial segments or
+	/// This is how a filter is clamped to a scope: the paths in both, as patterns of
+	/// their own. It is a set because two partial segments or
 	/// two `**` runs can meet in more than one way: `ab*` and `*b` meet at `ab*b` and
 	/// at `ab`, and `a/**` and `**/a` meet at `a/**/a` and at `a`. Empty when the
 	/// two do not [overlap](Self::overlaps).

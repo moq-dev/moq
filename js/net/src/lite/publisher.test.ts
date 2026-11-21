@@ -718,6 +718,8 @@ async function servedSubscription(
 		pending?: boolean;
 		// The `Subscriber Max Age` as decoded, in place of the scheduling tests' wide one.
 		maxDelay?: number | null;
+		// The `Subscriber Min Age` as decoded, which places a range with no start.
+		minDelay?: number;
 	} = {},
 ) {
 	const version = options.version ?? Version.DRAFT_05;
@@ -785,6 +787,7 @@ async function servedSubscription(
 	// rejecting.
 	msg.ranges = options.ranges;
 	if (options.maxDelay !== undefined) msg.maxDelay = options.maxDelay;
+	msg.minDelay = options.minDelay;
 	const serving = publisher.runSubscribe(msg, server);
 
 	const opened = pair.client.incomingUnidirectionalStreams.getReader();
@@ -917,7 +920,7 @@ async function servedSubscription(
 	};
 }
 
-// SUBSCRIBE_START tells the subscriber where each range's start landed, which a relative or time
+// SUBSCRIBE_START tells the subscriber where each range's start landed, which a live join or time
 // start leaves it no way to work out from the groups it receives. Mirrors the Rust
 // `lite07_start_names_each_resolved_range_start`.
 test("lite-07 SUBSCRIBE_START names each resolved range start", async () => {
@@ -926,14 +929,16 @@ test("lite-07 SUBSCRIBE_START names each resolved range start", async () => {
 		version,
 		prefill: [0n, 1n, 2n, 3n, 4n],
 		maxAge: Duration.millis(3_600_000),
+		// A live join 1 ms behind the newest frame, at 4 ms.
+		minDelay: 1,
 		ranges: [
-			{ start: { relative: 1n } },
+			{},
 			// Group 1 starts at 1 ms.
 			{ start: { time: 1n }, end: { absolute: 2n } },
 			// Empty, so it starts nowhere.
 			{ start: { absolute: 3n }, end: { absolute: 3n } },
-			// Empty only once its start resolves to group 4.
-			{ start: { relative: 0n }, end: { absolute: 2n } },
+			// Empty only once its start resolves to group 3.
+			{ end: { absolute: 2n } },
 		],
 	});
 	try {
@@ -981,7 +986,8 @@ test.each([
 });
 
 // A range an update adds learns where it starts from SUBSCRIBE_STARTED, and keeps that start however
-// many later updates leave it live, rather than counting back from a newer latest group.
+// many later updates leave it live, rather than joining again from a newer live edge under a newer
+// Min Age.
 test("lite-07 SUBSCRIBE_STARTED reports an added range's start, which later updates keep", async () => {
 	const version = Version.DRAFT_07;
 	const sub = await servedSubscription({
@@ -1001,22 +1007,25 @@ test("lite-07 SUBSCRIBE_STARTED reports an added range's start, which later upda
 		if (!("start" in start)) throw new Error("expected SUBSCRIBE_OK");
 		expect(start.start.starts).toEqual([0n]);
 
-		// Two groups back from the latest, group 2, which takes Range ID 1.
-		await replayUpdate({ priority: 0, ranges: [{ start: { relative: 2n } }] }).encode(sub.client.writer, version);
+		// A live join 2 ms behind the newest frame, at group 2, which takes Range ID 1.
+		await replayUpdate({ priority: 0, minDelay: 2, ranges: [{}] }).encode(sub.client.writer, version);
 		const started = await next();
 		if (!("started" in started)) throw new Error("expected SUBSCRIBE_STARTED");
 		expect([started.started.id, started.started.start]).toEqual([1n, 2n]);
 
-		// Newer groups arrive, and another update leaves the range live: it still starts at 2.
-		// The added range starts at time 9, which the live group 7 contains.
+		// Newer groups arrive, and another update under a larger Min Age leaves the range live: it
+		// still starts at 2. The added range starts at time 9, which the live group 7 contains.
 		for (const key of [5n, 6n, 7n]) sub.serve(key);
-		await replayUpdate({ priority: 0, ranges: [{ start: { absolute: 9n } }] }).encode(sub.client.writer, version);
+		await replayUpdate({ priority: 0, minDelay: 4, ranges: [{ start: { absolute: 9n } }] }).encode(
+			sub.client.writer,
+			version,
+		);
 		const pinned = await next();
 		if (!("started" in pinned)) throw new Error("expected SUBSCRIBE_STARTED");
 		expect([pinned.started.id, pinned.started.start]).toEqual([2n, 7n]);
 		const ranges = sub.track.subscription.peek()?.ranges ?? [];
-		expect(ranges.some((range) => range.start?.time === 2n)).toBe(true);
-		expect(ranges.some((range) => range.start?.relative !== undefined)).toBe(false);
+		expect(ranges.some((range) => range.start === 2n)).toBe(true);
+		expect(ranges.some((range) => range.start === undefined)).toBe(false);
 	} finally {
 		await sub.close();
 	}
@@ -1046,7 +1055,9 @@ test("lite-07 answers a bounded window that resolves empty and FINs in reply", a
 			version,
 			prefill: [0n, 1n, 2n, 3n, 4n, 5n],
 			maxAge: Duration.millis(3_600_000),
-			ranges: [{ start: { relative: 0n }, end: { absolute: 3n } }],
+			// A live join at the latest group, past its end.
+			minDelay: 0,
+			ranges: [{ end: { absolute: 3n } }],
 		});
 		try {
 			const resp = await decodeSubscribeResponse(sub.client.reader, version);
@@ -1663,7 +1674,7 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 			try {
 				hooks.receiveTrack(sub.track);
 				// A lite-07 source reports where it started the time asked for.
-				if (hasRanges(version)) hooks.timeStarts(sub.track, [[2n, source]]);
+				if (hasRanges(version)) hooks.timeStarts(sub.track, [[2n, source]], NO_MAX_DELAY);
 				hooks.startTrack(sub.track, { start: source, requested: 2n });
 				sub.serve(6n);
 				expect(await sub.servedSequence()).toBe(6n);
@@ -1691,7 +1702,7 @@ test("lite draft-07: a time start a copy's oldest range covers starts where that
 	try {
 		hooks.receiveTrack(sub.track);
 		await flush();
-		hooks.timeStarts(sub.track, [[0n, 6n]]);
+		hooks.timeStarts(sub.track, [[0n, 6n]], NO_MAX_DELAY);
 		hooks.startTrack(sub.track, { start: 6n });
 		sub.serve(6n);
 		expect(await sub.servedSequence()).toBe(6n);
@@ -1714,7 +1725,7 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 			hooks.startTrack(sub.track, { requested: 2n });
 			sub.serve(6n);
 			await flush();
-			if (hasRanges(version)) hooks.timeStarts(sub.track, [[2n, 3n]]);
+			if (hasRanges(version)) hooks.timeStarts(sub.track, [[2n, 3n]], NO_MAX_DELAY);
 			hooks.startTrack(sub.track, { start: 3n, requested: 2n });
 			const response = await decodeSubscribeResponse(sub.client.reader, version);
 			if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
@@ -2238,7 +2249,7 @@ test("lite draft-06: scheduling updates apply while SUBSCRIBE_START is blocked",
 			// Lite-06 cannot state a minimum.
 			delay: { min: null, max: Duration.millis(TEST_MAX_DELAY_MS) },
 			order: "descending",
-			ranges: [{ end: { time: 5n } }],
+			ranges: [{ end: 5n }],
 		});
 		expect(ranges).not.toHaveBeenCalled();
 
@@ -3190,7 +3201,7 @@ test("lite draft-05: a group that goes stale while its stream opens writes nothi
 });
 
 function grantOf(publish: string): Grant {
-	return { publish: new Path.Patterns([Path.Pattern.subtree(publish)]), subscribe: new Path.Patterns([]) };
+	return { publish: new Path.Prefixes([Path.Prefix.parse(publish)]), subscribe: new Path.Prefixes() };
 }
 
 // The resets carrying our UNAUTHORIZED code, by message.
@@ -4180,8 +4191,8 @@ test("a lite-07 edit answers each added prefix under its own Prefix ID", async (
 test("a lite-07 prefix wider than the grant is answered region by region", async () => {
 	const origin = new OriginProducer();
 	const regions = (...paths: string[]): Grant => ({
-		publish: new Path.Patterns(paths.map((path) => Path.Pattern.subtree(path))),
-		subscribe: new Path.Patterns([]),
+		publish: Path.Prefixes.parse(paths),
+		subscribe: new Path.Prefixes(),
 	});
 	const grant = new Signal<Grant | undefined>(regions("a/b"));
 	const broadcasts = ["a", "a/b/x", "c/y", "d/z"].map((path) => publish(origin, Path.from(path)));
@@ -4222,14 +4233,14 @@ test("a lite-07 prefix wider than the grant is answered region by region", async
 	}
 });
 
-// A grant whose head is too long to be a path holds no region: a claim above it is not presented
+// A granted prefix too long to be a path holds no region: a claim above it is not presented
 // there, which the wire could not carry, and the session stays up.
-test("a lite-07 grant head too long for a path presents nothing", async () => {
+test("a lite-07 granted prefix too long for a path presents nothing", async () => {
 	const origin = new OriginProducer();
 	const long = `a/${"x".repeat(Path.MAX_BYTES)}`;
 	const grant = new Signal<Grant | undefined>({
-		publish: new Path.Patterns([Path.Pattern.parse(`${long}/**`), Path.Pattern.subtree("c")]),
-		subscribe: new Path.Patterns([]),
+		publish: Path.Prefixes.parse([long, "c"]),
+		subscribe: new Path.Prefixes(),
 	});
 	const broadcasts = ["a", "c/y"].map((path) => publish(origin, Path.from(path)));
 	const { next, ok, close } = routedAnswer(origin, grant);
@@ -4249,15 +4260,14 @@ test("a lite-07 grant head too long for a path presents nothing", async () => {
 	}
 });
 
-// A claim at a path the grant does not match, but above paths it does, is shown where it is
-// presented: `a` under `a/*`, at the region and at its own path. One beneath every path the grant
-// matches stays hidden.
-test("a lite-07 claim above what the grant matches is shown", async () => {
+// A claim above the grant is shown at the granted prefix, whichever prefix above it the peer
+// asks for, and one outside the grant stays hidden.
+test("a lite-07 claim above the grant is shown at the granted prefix", async () => {
 	for (const asked of ["", "a"]) {
 		const origin = new OriginProducer();
 		const grant = new Signal<Grant | undefined>({
-			publish: new Path.Patterns([Path.Pattern.parse("a/*")]),
-			subscribe: new Path.Patterns([]),
+			publish: Path.Prefixes.parse(["a/x"]),
+			subscribe: new Path.Prefixes(),
 		});
 		const broadcasts = ["a", "a/x/y", "b"].map((path) => publish(origin, Path.from(path)));
 		const { next, ok, close } = routedAnswer(origin, grant, Path.from(asked));
@@ -4272,7 +4282,7 @@ test("a lite-07 claim above what the grant matches is shown", async () => {
 			const told = msgs.flatMap((msg) =>
 				msg.status === "start" ? [`${msg.suffix} above ${msg.claim.above}`] : [],
 			);
-			expect(told).toEqual(["a above 0"]);
+			expect(told.sort()).toEqual(["a/x above 1", "a/x/y above 0"]);
 		} finally {
 			for (const broadcast of broadcasts) broadcast.close();
 			close();
@@ -4282,19 +4292,20 @@ test("a lite-07 claim above what the grant matches is shown", async () => {
 });
 
 // A scoped claim is shown only where its scope and the grant share a path: one at `a` scoped to
-// `a/*/x` serves something `a/**` grants, and nothing `a/*` does.
+// `a/q/x` serves something `a` or `a/q` grants, and nothing `a/r` does.
 test("a lite-07 scoped claim sharing no path with the grant is hidden", async () => {
 	const cases: [string, string[]][] = [
-		["a/*", []],
-		["a/**", ["a"]],
+		["a/r", []],
+		["a/q", ["a/q"]],
+		["a", ["a"]],
 	];
 	for (const [granted, told] of cases) {
 		const origin = new OriginProducer();
 		const grant = new Signal<Grant | undefined>({
-			publish: new Path.Patterns([Path.Pattern.parse(granted)]),
-			subscribe: new Path.Patterns([]),
+			publish: Path.Prefixes.parse([granted]),
+			subscribe: new Path.Prefixes(),
 		});
-		const scoped = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("a/*/x")]));
+		const scoped = origin.scope(Path.empty(), Path.Prefixes.parse(["a/q/x"]));
 		const claim = scoped.claim(Path.from("a"));
 		const { next, ok, close } = routedAnswer(origin, grant);
 		try {
@@ -4317,12 +4328,12 @@ test("a lite-07 scoped claim sharing no path with the grant is hidden", async ()
 });
 
 // A claim is shown only where the grant, the claim's scope, and the answering handle's scope share
-// a path. Beneath a handle scoped to `a/*/x`, an unscoped claim at `a` serves nothing `a/*/y`
-// grants; and of two claims at `a`, the cheaper scoped to `a/*/x` gives way to the one `a/*/y`
-// shows.
+// a path. Beneath a handle scoped to `a/q/x`, an unscoped claim at `a` serves nothing `a/q/y`
+// grants; and of two claims at `a`, the cheaper scoped to `a/q/x` gives way to the one scoped to
+// `a/q/y`, shown at the granted prefix.
 test("a lite-07 claim is shown only where the handle and the grant share a path", async () => {
-	const patterns = (pattern: string) => new Path.Patterns([Path.Pattern.parse(pattern)]);
-	const grant = new Signal<Grant | undefined>({ publish: patterns("a/*/y"), subscribe: new Path.Patterns([]) });
+	const prefixes = (prefix: string) => Path.Prefixes.parse([prefix]);
+	const grant = new Signal<Grant | undefined>({ publish: prefixes("a/q/y"), subscribe: new Path.Prefixes() });
 	const synced = async (next: () => Promise<AnnounceBroadcast>) => {
 		const msgs: AnnounceBroadcast[] = [];
 		for (;;) {
@@ -4334,7 +4345,7 @@ test("a lite-07 claim is shown only where the handle and the grant share a path"
 
 	const origin = new OriginProducer();
 	const claim = origin.claim(Path.from("a"));
-	const handle = routedAnswer(origin.scope(Path.empty(), patterns("a/*/x")), grant);
+	const handle = routedAnswer(origin.scope(Path.empty(), prefixes("a/q/x")), grant);
 	try {
 		await handle.ok();
 		expect(await synced(handle.next)).toEqual([]);
@@ -4345,14 +4356,14 @@ test("a lite-07 claim is shown only where the handle and the grant share a path"
 	}
 
 	const both = new OriginProducer();
-	const cheap = both.scope(Path.empty(), patterns("a/*/x")).claim(Path.from("a"), { cost: 1n });
-	const dear = both.scope(Path.empty(), patterns("a/*/y")).claim(Path.from("a"), { cost: 5n });
+	const cheap = both.scope(Path.empty(), prefixes("a/q/x")).claim(Path.from("a"), { cost: 1n });
+	const dear = both.scope(Path.empty(), prefixes("a/q/y")).claim(Path.from("a"), { cost: 5n });
 	const answer = routedAnswer(both, grant);
 	try {
 		await answer.ok();
 		const starts = await synced(answer.next);
 		expect(starts.map((msg) => (msg.status === "start" ? [msg.suffix, msg.claim.cost] : []))).toEqual([
-			[Path.from("a"), 5n],
+			[Path.from("a/q/y"), 5n],
 		]);
 	} finally {
 		cheap.close();

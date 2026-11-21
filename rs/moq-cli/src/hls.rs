@@ -273,8 +273,8 @@ fn playlist_url(playlist: &str) -> anyhow::Result<Url> {
 /// `/<name>/master.m3u8` and `/<name>/manifest.mpd`); other broadcasts in the
 /// Origin are not served.
 pub async fn export(origin: moq_net::origin::Consumer, args: ExportArgs, name: String) -> anyhow::Result<()> {
-	let scope = moq_net::Patterns::from(
-		moq_net::Pattern::subtree(&name).with_context(|| format!("invalid broadcast name `{name}`"))?,
+	let scope = moq_net::Prefixes::from(
+		moq_net::Prefix::try_from(name.as_str()).with_context(|| format!("invalid broadcast name `{name}`"))?,
 	);
 	let scoped = origin
 		.scope("", &scope)
