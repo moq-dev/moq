@@ -16,6 +16,7 @@ mod catalog_acquisition;
 mod catalog_churn;
 mod catalog_handover;
 mod claim_continues;
+mod claim_reach;
 mod compress;
 mod control_stats;
 mod datagram;

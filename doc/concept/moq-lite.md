@@ -199,7 +199,11 @@ The empty prefix covers everything. A grant holds no wildcard: `room/**`, `**`,
 `room/**` and the empty prefix for `**`. Tokens and auth server grants spell a
 prefix as `room/**` or `**` until releases before 0.22 retire, since those read
 a bare member as one path. Since every grant covers
-whole subtrees, a route a grant admits always serves whole subtrees too.
+whole subtrees, a route a grant admits always serves whole subtrees too: a claim
+broader than its publisher's grant is announced at each granted prefix beneath
+it instead, so a claim at `room` through a grant of `room/alice` is announced at
+`room/alice`, and no reader is shown it where it cannot serve. Each relay it
+crosses does the same with the grant it takes the claim under.
 
 Patterns are discovery filters: they pick which announcements a consumer lists,
 and never widen or narrow what it may request. They never travel as

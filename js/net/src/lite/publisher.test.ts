@@ -4283,10 +4283,11 @@ test("a lite-07 claim above the grant is shown at the granted prefix", async () 
 // A scoped claim is shown only where its scope and the grant share a path: one at `a` scoped to
 // `a/q/x` serves something `a` or `a/q` grants, and nothing `a/r` does.
 test("a lite-07 scoped claim sharing no path with the grant is hidden", async () => {
+	// Filed at its scope, the claim is shown there, however much wider the grant is.
 	const cases: [string, string[]][] = [
 		["a/r", []],
-		["a/q", ["a/q"]],
-		["a", ["a"]],
+		["a/q", ["a/q/x"]],
+		["a", ["a/q/x"]],
 	];
 	for (const [granted, told] of cases) {
 		const origin = new OriginProducer();
@@ -4313,6 +4314,121 @@ test("a lite-07 scoped claim sharing no path with the grant is hidden", async ()
 			close();
 			origin.close();
 		}
+	}
+});
+
+// A claim filed at a handle's root, above it, covers all of what the handle shows: through an
+// origin rooted there it is no more above the path than the path is deep.
+test("a lite-07 claim filed above the handle's root is no more above than the path", async () => {
+	const origin = new OriginProducer();
+	const claim = origin.scope(Path.empty(), Path.Prefixes.parse(["room"])).claim(Path.empty());
+	const { next, ok, close } = routedAnswer(origin.scope(Path.from("room"), Path.Prefixes.parse([""])));
+	try {
+		await ok();
+		const msgs: AnnounceBroadcast[] = [];
+		for (;;) {
+			const msg = await next();
+			msgs.push(msg);
+			if (msg.status === "synced") break;
+		}
+		const told = msgs.flatMap((msg) => (msg.status === "start" ? [`${msg.suffix} above ${msg.claim.above}`] : []));
+		expect(told).toEqual([" above 0"]);
+	} finally {
+		claim.close();
+		close();
+		origin.close();
+	}
+});
+
+// Of claims filed at one grant, the most specific one is shown wherever they meet, however cheap
+// or deep the broader one is filed, as a request there resolves.
+test("a lite-07 answer shows the most specific of the claims filed at a grant", async () => {
+	// The narrow claim at `a` is granted `a/b`; the cheaper root claim is filed at `broadGrant`.
+	const cases: [string, string][] = [
+		["a/b", "a/b above 1"],
+		["a/b/c", "a/b/c above 2"],
+	];
+	for (const [broadGrant, told] of cases) {
+		const origin = new OriginProducer();
+		const scoped = (prefix: string) => origin.scope(Path.empty(), Path.Prefixes.parse([prefix]));
+		const narrow = scoped("a/b").claim(Path.from("a"), { cost: 1n });
+		const broad = scoped(broadGrant).claim(Path.empty(), { cost: 0n });
+		const asked = Path.from(broadGrant);
+		const { next, ok, close } = routedAnswer(origin, undefined, asked);
+		try {
+			await ok();
+			const msgs: AnnounceBroadcast[] = [];
+			for (;;) {
+				const msg = await next();
+				msgs.push(msg);
+				if (msg.status === "synced") break;
+			}
+			const starts = msgs.flatMap((msg) => (msg.status === "start" ? [msg] : []));
+			expect(starts.map((msg) => `${msg.suffix} above ${msg.claim.above}`)).toEqual([told]);
+			expect(starts.map((msg) => msg.instance)).toEqual([narrow.instance]);
+
+			// A request there resolves through the same claim.
+			const request = origin.consume().request(Path.join(asked, Path.from("x")));
+			const which = await Promise.race([
+				narrow
+					.requested()
+					.next()
+					.then(() => "narrow"),
+				broad
+					.requested()
+					.next()
+					.then(() => "broad"),
+			]);
+			expect(which).toBe("narrow");
+			request.close();
+		} finally {
+			narrow.close();
+			broad.close();
+			close();
+			origin.close();
+		}
+	}
+});
+
+// Through a handle rooted beneath both filings, a broader claim filed above the root still gives
+// way to a more specific one filed beneath it, as a request there resolves.
+test("a lite-07 rooted answer shows the most specific claim filed on either side of its root", async () => {
+	const origin = new OriginProducer();
+	const scoped = (prefix: string) => origin.scope(Path.empty(), Path.Prefixes.parse([prefix]));
+	const broad = scoped("a").claim(Path.empty(), { cost: 0n });
+	const narrow = scoped("a/b/c/d").claim(Path.from("a"), { cost: 1n });
+	const rooted = origin.scope(Path.from("a/b/c"), Path.Prefixes.parse([""]));
+	const { next, ok, close } = routedAnswer(rooted, undefined, Path.from("d"));
+	try {
+		await ok();
+		const msgs: AnnounceBroadcast[] = [];
+		for (;;) {
+			const msg = await next();
+			msgs.push(msg);
+			if (msg.status === "synced") break;
+		}
+		const starts = msgs.flatMap((msg) => (msg.status === "start" ? [msg] : []));
+		expect(starts.map((msg) => `${msg.suffix} above ${msg.claim.above}`)).toEqual(["d above 1"]);
+		expect(starts.map((msg) => msg.instance)).toEqual([narrow.instance]);
+
+		const request = origin.consume().request(Path.from("a/b/c/d/x"));
+		const which = await Promise.race([
+			narrow
+				.requested()
+				.next()
+				.then(() => "narrow"),
+			broad
+				.requested()
+				.next()
+				.then(() => "broad"),
+		]);
+		expect(which).toBe("narrow");
+		request.close();
+	} finally {
+		narrow.close();
+		broad.close();
+		close();
+		origin.close();
 	}
 });
 
