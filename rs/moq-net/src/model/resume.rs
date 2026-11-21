@@ -3276,9 +3276,14 @@ impl Recover {
 			{
 				return Poll::Ready(Err(err.clone()));
 			}
+			// Judged within the reader's window, as a moved group is: the serving copy's
+			// subscription starts at the boundary, and newer groups it holds for others outside
+			// the window supersede nothing of the reader's.
 			if res.is_pending()
 				&& let Some(budget) = self.poll_budget(waiter)
-				&& serving.poll_stale(self.key, budget, waiter).is_ready()
+				&& serving
+					.poll_stale(self.key, budget, self.within(waiter), waiter)
+					.is_ready()
 			{
 				return Poll::Ready(Err(Error::Old));
 			}
@@ -3461,6 +3466,14 @@ impl Recover {
 		waiter.register(&mut reader.capped);
 		let cap = reader.groups.1;
 		Some((reader.window().groups().cloned(), cap))
+	}
+
+	/// [`Self::window`] with its groups resolved, else `None` to judge every group.
+	fn within(&self, waiter: &kio::Waiter) -> Option<(Cover, Option<u64>)> {
+		match self.window(waiter)? {
+			(Some(groups), cap) => Some((groups, cap)),
+			(None, _) => None,
+		}
 	}
 
 	/// Commit the replacement only once the caller has acquired its cursor or frame.
@@ -10423,6 +10436,54 @@ mod test {
 			let mut got = drain(&mut sub, false);
 			got.sort_unstable();
 			assert_eq!(got, [1, 2], "serving_fails={serving_fails}");
+		}
+	}
+
+	/// A stalled read still waiting for the new route to continue it is judged within the
+	/// reader's window too: the new route's groups in it expire the read, though its
+	/// subscription starts past them.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_pending_recovery_expires_within_the_readers_window() {
+		// The reader's groups, the group past them the old route holds, the groups the new route
+		// holds, and whether they expire it.
+		for (ranges, held, newer, expires) in [(0..4, Some(4), 1..4, true), (0..1, None, 1..5, false)] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			routes.serve(a.consume());
+			let subscription = Subscription::default()
+				.with_delay(Delay::default().with_max(Duration::from_secs(2)))
+				.with_ranges([track::Range::groups(ranges.clone())]);
+			let mut sub = logical
+				.consume()
+				.subscribe(subscription)
+				.now_or_never()
+				.unwrap()
+				.unwrap();
+			let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+			open.write_frame(ts(0), b"a".as_ref()).unwrap();
+			let mut reading = recv(&mut sub);
+			assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+			assert!(reading.read_frame().now_or_never().is_none());
+			if let Some(key) = held {
+				write(&a, key);
+			}
+
+			// The new route never has group 0, so the read waits on it.
+			let b = copy();
+			routes.serve(b.consume());
+			assert!(reading.read_frame().now_or_never().is_none());
+			for key in newer {
+				let mut next = b.create_group(group::Info { start: key }).unwrap();
+				next.write_frame(ts(key * 1000), b"x".as_ref()).unwrap();
+				next.finish().unwrap();
+			}
+			let read = reading.read_frame().now_or_never();
+			match expires {
+				true => assert!(matches!(read, Some(Err(Error::Old))), "ranges={ranges:?}: {read:?}"),
+				false => assert!(read.is_none(), "ranges={ranges:?}: {read:?}"),
+			}
 		}
 	}
 

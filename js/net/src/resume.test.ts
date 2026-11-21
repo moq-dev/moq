@@ -1113,6 +1113,43 @@ for (const [name, end, held, newer, expires] of [
 	});
 }
 
+// A stalled read still waiting for the new route to continue it is judged within the reader's window
+// too: the new route's groups in it expire the read, though its subscription starts past them, and
+// those it holds for others past the window never do. Mirrors the Rust
+// `a_pending_recovery_expires_within_the_readers_window`.
+for (const [name, end, held, newer, expires] of [
+	["outside the window", 0n, undefined, 4n, false],
+	["below the boundary", 3n, 4n, 3n, true],
+] as const) {
+	test(`a pending recovery expires within the reader's window (${name})`, async () => {
+		const { a, b, swap, active, close } = await setup();
+		const ta = copy(a);
+		const tb = copy(b);
+		const sub = active.track("seq").subscribe({ ranges: [{ start: { time: 0n }, end: { time: end } }] });
+		ta.write(0n, 1, false);
+		const group = sub.tryRecvGroup();
+		if (!group) throw new Error("expected group 0");
+		expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+		if (held !== undefined) ta.write(held);
+
+		await swap();
+		// The new route never has group 0, so the read waits on it.
+		const next = group.readFrame();
+		next.catch(() => {});
+		expect(await isPending(next)).toBe(true);
+		for (let key = 1n; key <= newer; key++) tb.write(key);
+		if (expires) {
+			await expectOld(next);
+		} else {
+			expect(await isPending(next)).toBe(true);
+		}
+
+		group.close();
+		sub.close();
+		close();
+	});
+}
+
 // An unbounded reader judges a group moved onto a replaced copy past that copy's cap: the copy's
 // newer groups, held for others, expire it.
 test("a group moved onto a capped copy expires within an unbounded reader's window", async () => {

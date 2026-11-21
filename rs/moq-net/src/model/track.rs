@@ -6825,7 +6825,18 @@ impl Consumer {
 	/// behind its live edge, as a reader would judge it, whether the track holds it or not;
 	/// see `TrackState::drifted`. Parks in this track's expiry index, so only a change that
 	/// can make the group stale, or land it here, wakes it. Pending for good once the track closes.
-	pub(super) fn poll_stale(&self, key: u64, budget: Duration, waiter: &kio::Waiter) -> Poll<()> {
+	///
+	/// Judged within `within`, a reader's groups and its exclusive cap, else every group.
+	pub(super) fn poll_stale(
+		&self,
+		key: u64,
+		budget: Duration,
+		within: Option<(Cover, Option<u64>)>,
+		waiter: &kio::Waiter,
+	) -> Poll<()> {
+		let servable = within.map_or(Servable::ALL, |(groups, cap)| {
+			Servable::covering(groups, cap, &Arc::default())
+		});
 		self.with_state(|state| {
 			let Some(state) = state else {
 				return Poll::Pending;
@@ -6833,7 +6844,7 @@ impl Consumer {
 			let state = state.read();
 			let budget = clamp_max_delay(budget, state.max_age_bound());
 			state.cache.wakes().watch_held(key, waiter);
-			match state.poll_drifted(key, &Servable::ALL, budget, None, waiter) {
+			match state.poll_drifted(key, &servable, budget, None, waiter) {
 				true => Poll::Ready(()),
 				false => Poll::Pending,
 			}

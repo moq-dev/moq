@@ -2261,7 +2261,9 @@ class Recover implements GroupRecover {
 				// An answer carries its own expiry; the verdict and the budget only end the wait.
 				if (outcome && "group" in outcome) return this.#replacement(outcome.group, serving);
 				if (verdict) throw verdict;
-				const stale = hooks.staleAt(serving.sub, this.key);
+				// Judged within the reader's window, as a moved group is: the serving copy's subscription
+				// starts at the boundary, past groups in the window that supersede this one.
+				const stale = hooks.staleAt(serving.sub, this.key, undefined, reader.within);
 				if (stale.expired()) throw new StreamError(StreamCode.Old, { message: "group is past the budget" });
 				waits.push(...stale.changed, ...(asked && !asked.outcome ? [asked.settled] : []));
 				// That route failing too waits for the next one, and a refusal is a verdict only for
