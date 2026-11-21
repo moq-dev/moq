@@ -73,7 +73,7 @@ import { grace } from "./ledger.ts";
 import { keyOf, type Lister, type Tracks, type TracksEvent } from "./listing.ts";
 import * as track from "./track.ts";
 import { max, min, UNBOUNDED } from "./util/key.ts";
-import { AT_KEYS, clamped, EMPTY, isEmpty, type Resolved, sameRanges, UNHELD, Window } from "./window.ts";
+import { AT_KEYS, clamped, EMPTY, isEmpty, type Resolved, sameRanges, UNHELD, type Waiting, Window } from "./window.ts";
 import { type Broadcast as BroadcastWire, registerWire, wireOf } from "./wire.ts";
 
 /** A copy claiming the same content with different metadata: refused rather than reinterpreted. */
@@ -1111,10 +1111,12 @@ class Reader implements ResumeSource {
 		return (end === undefined || key < end) && !delivered.has(key);
 	}
 
-	// Whether a failed copy's next group waits for a copy continuing the track to place the
-	// reader's window, which decides whether it goes out. Mirrors the Rust `Reader::poll_lowest`.
+	// Whether a copy's next group waits for the reader's window to be placed, which decides whether
+	// it goes out: a failed copy's, until a copy continuing the track places it, and a backfill's,
+	// whose groups under the resume point only the placed window bounds. Mirrors the Rust
+	// `Reader::poll_lowest`.
 	#waits(copy: Copy): boolean {
-		return !this.route.concluded && copyFailed(copy) && this.#window().pending;
+		return (copy.backfill || (!this.route.concluded && copyFailed(copy))) && this.#window().pending;
 	}
 
 	tryGroup(ordered: boolean, delivered: Delivered, dispositions: boolean): Recv {
@@ -1784,6 +1786,16 @@ class Reader implements ResumeSource {
 	resolved(): (Resolved | undefined)[] {
 		this.sync();
 		return this.#window().resolved();
+	}
+
+	// Only the serving copy places a waiting range: the reader's own window holds no groups. Its
+	// subscription keys each range as the reader does. Mirrors the Rust `Reader::waiting_keys`.
+	waiting(): (Waiting | undefined)[] {
+		this.sync();
+		const resolved = this.#window().resolved();
+		const serving = this.#copies.at(-1);
+		const own = serving ? hooks.servingWaiting(serving.sub) : [];
+		return resolved.map((at, index) => (at ? undefined : own[index]));
 	}
 
 	// The reader's ranges resolve on the copies, which hold the groups their anchors name.

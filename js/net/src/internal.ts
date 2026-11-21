@@ -34,7 +34,7 @@ import type {
 } from "./track.ts";
 import { max, min } from "./util/key.ts";
 import * as Varint from "./varint.ts";
-import type { Holdings, Resolved } from "./window.ts";
+import type { Holdings, Resolved, Waiting } from "./window.ts";
 import type { Advertised, Advertisements } from "./wire.ts";
 
 /** A null {@link Delay.max} in milliseconds, which the model holds as the largest value every peer can read. */
@@ -536,6 +536,8 @@ export interface ResumeSource {
 	starts(from: bigint): (bigint | undefined)[] | undefined;
 	/** Each range as the reader's window resolved it, whichever copy serves. */
 	resolved(): (Resolved | undefined)[];
+	/** Each range the reader's window has yet to place while the serving copy waits on its time start. */
+	waiting(): (Waiting | undefined)[];
 	/** The runs of `[start, end)` the serving copy reads, undefined without one. */
 	runs(start: bigint, end: bigint): Run[] | undefined;
 	/** Whether a time start the serving copy still waits to place holds back a gap; see `hooks.gapHeld`. */
@@ -877,10 +879,10 @@ export const hooks: {
 	servingResolvedKeys: (subscriber: Subscriber, keys: readonly bigint[]) => (Resolved | undefined)[];
 	/**
 	 * Each of a subscriber's ranges while its time start waits where it is served, in key order: that
-	 * time, and the exclusive end it resolved to. Undefined for one placed, and for every range of a
-	 * front's reader. Mirrors the Rust `Subscriber::waiting_keys`. Assigned by `track.ts`.
+	 * time, and the exclusive end it resolved to. Undefined for one placed. Mirrors the Rust
+	 * `Subscriber::waiting_keys`. Assigned by `track.ts`.
 	 */
-	servingWaiting: (subscriber: Subscriber) => ({ time: bigint; end?: bigint } | undefined)[];
+	servingWaiting: (subscriber: Subscriber) => (Waiting | undefined)[];
 	/**
 	 * Edit a subscriber's preferences by key, costing the ranges the edit names rather than every
 	 * range: lite-07's SUBSCRIBE_UPDATE, by Range ID. Mirrors the Rust `Subscriber::edit`. Assigned

@@ -4592,7 +4592,7 @@ export class Subscriber {
 			return keys.map((key) => subscriber.#window.resolvedKey(key));
 		};
 		hooks.servingWaiting = (subscriber) => {
-			if (subscriber.#resume) return [];
+			if (subscriber.#resume) return subscriber.#resume.waiting();
 			subscriber.#settle();
 			return subscriber.#window.waiting();
 		};

@@ -2556,11 +2556,11 @@ impl Reader {
 					Poll::Ready(Ok(Some(reserved))) => {
 						let key = reserved.key();
 						// Nor does a failed copy's group go out before the window is placed, which only
-						// a copy continuing the track does: it stays there until then.
-						if self.route.end().is_none()
-							&& copy_failed(&self.copies[index].track)
-							&& self.window().is_pending()
-						{
+						// a copy continuing the track does, nor a backfill's, whose groups under the
+						// resume point only the placed window bounds: it stays there until then.
+						let copy = &self.copies[index];
+						let waits = copy.backfill || (self.route.end().is_none() && copy_failed(&copy.track));
+						if waits && self.window().is_pending() {
 							held = true;
 							break;
 						}
@@ -9672,6 +9672,53 @@ mod test {
 		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
 		let resolved = sub.resolved_range(0).expect("placed");
 		assert_eq!((resolved.start, resolved.end), (7, Some(7)));
+	}
+
+	/// As [`a_raised_start_keeps_a_relative_end_its_serving_copy_froze_while_waiting`], with
+	/// the replacement behind an inner front, through which the backfill places nothing.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_raised_start_keeps_a_relative_end_an_inner_front_froze_while_waiting() {
+		let routes = Producer::new();
+		let front = logical(&routes);
+		let a = received_copy();
+		write(&a, 6);
+		write(&a, 8);
+		routes.serve(a.consume());
+		let from = |time, end| {
+			Subscription::default()
+				.with_delay(Delay::default().with_max(HOUR))
+				.with_ranges([track::Range {
+					start: track::Anchor::Time(time),
+					end,
+				}])
+		};
+		let mut sub = front
+			.consume()
+			.subscribe(from(8, None))
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		assert_eq!(drain(&mut sub, false), [8]);
+		let inner_routes = Producer::new();
+		let inner = logical(&inner_routes);
+		let b = track::Request::new(Arc::new(broadcast::Info::default()), "video");
+		inner_routes.serve(b.consume());
+		routes.serve(inner.consume());
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		a.abort(Error::Cancel).unwrap();
+		sub.update(from(7, Some(track::Anchor::Relative(0)))).unwrap();
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+
+		let b = b.accept(crate::track::Info::timed());
+		b.received();
+		b.anchored();
+		// The backfill through the inner front places nothing, so its groups wait for the
+		// window: none past the end the replacement placed goes out.
+		for key in [6, 7, 8, 9] {
+			write(&b, key);
+			assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		}
 	}
 
 	/// A copy updated while pending, then answering, hands its own resolution of the

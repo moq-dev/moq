@@ -24,6 +24,9 @@ export type Run = { start: bigint; end: bigint };
  */
 export type Resolved = { start: bigint; end?: bigint; floored: boolean };
 
+/** A range whose time start waits on the groups held to place it: that time, and the exclusive end it resolved to. */
+export type Waiting = { time: bigint; end?: bigint };
+
 /** Everything from the latest group onward. */
 export const LIVE: Range = Object.freeze({ start: Object.freeze({ relative: 0n }) });
 
@@ -735,7 +738,7 @@ export class Window {
 	 * the exclusive end it resolved to, undefined while it stays open. Mirrors the Rust
 	 * `Window::waiting_key`.
 	 */
-	waitingKey(key: bigint): { time: bigint; end?: bigint } | undefined {
+	waitingKey(key: bigint): Waiting | undefined {
 		const span = this.#spans.get(key);
 		const at = span?.waiting ? time(span.anchor) : undefined;
 		if (!span || at === undefined) return undefined;
@@ -743,7 +746,7 @@ export class Window {
 	}
 
 	/** Each range while its time start waits, in key order, as {@link waitingKey} reads it. */
-	waiting(): ({ time: bigint; end?: bigint } | undefined)[] {
+	waiting(): (Waiting | undefined)[] {
 		return [...this.#ranges.keys()].map((key) => this.waitingKey(key));
 	}
 
