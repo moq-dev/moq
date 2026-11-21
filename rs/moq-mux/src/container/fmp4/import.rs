@@ -1178,7 +1178,14 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			};
 			let land = match &mut track.output {
 				Output::Passthrough(output) => match output.plan(&mut run, placement, track.kind)? {
-					Some(land) => Some(land),
+					Some(land) => {
+						// The plan opened the segment's group, so a later run of this track in the
+						// same moof continues it.
+						if let Land::Opens { .. } = land {
+							track.segment = Some(self.segment);
+						}
+						Some(land)
+					}
 					None => {
 						// With no group open, video waits for a sync sample past what was published.
 						if !output.open && track.kind == Kind::Video {

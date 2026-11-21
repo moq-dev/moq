@@ -1248,15 +1248,15 @@ async fn audio_presents_from_its_edit() {
 
 /// One video fragment decoding from `dts`, a sample per `(cts, flags, byte)` lasting `tick`.
 fn video_fragment(track_id: u32, dts: u64, tick: u64, entries: &[(u64, u32, u8)]) -> Vec<u8> {
-	video_moof(track_id, tick, &[(dts, entries)])
+	track_moof(track_id, tick, &[(dts, entries)])
 }
 
-/// A video run decoding from its `dts`, a sample per `(cts, flags, byte)`.
-type VideoRun<'a> = (u64, &'a [(u64, u32, u8)]);
+/// A run decoding from its `dts`, a sample per `(cts, flags, byte)`.
+type TrackRun<'a> = (u64, &'a [(u64, u32, u8)]);
 
 /// One moof of a traf per run on `track_id`, each sample lasting `tick`, and their samples back to
 /// back in one mdat.
-fn video_moof(track_id: u32, tick: u64, trafs: &[VideoRun]) -> Vec<u8> {
+fn track_moof(track_id: u32, tick: u64, trafs: &[TrackRun]) -> Vec<u8> {
 	let mut moof = mp4_atom::Moof {
 		mfhd: mp4_atom::Mfhd { sequence_number: 1 },
 		traf: trafs
@@ -1505,7 +1505,7 @@ async fn video_groups_never_overlap() {
 			.zip(&entries)
 			.map(|(&(dts, _), entries)| (dts * tick, entries.as_slice()))
 			.collect();
-		fmp4.decode(&video_moof(video_id, tick, &trafs)).unwrap();
+		fmp4.decode(&track_moof(video_id, tick, &trafs)).unwrap();
 		let _finished = fmp4.finish().unwrap();
 		let [video, _] = published(&consumer, &catalog).await;
 		let presented: Vec<u64> = video
@@ -1522,6 +1522,35 @@ async fn video_groups_never_overlap() {
 			.collect();
 		let firsts: Vec<u64> = expected.iter().map(|group| group[0]).collect();
 		assert_eq!(starts, firsts, "passthrough {passthrough}");
+	}
+}
+
+/// A segment's first moof carrying two runs of one audio track opens one group, not one per run,
+/// passthrough or unwrapped.
+#[tokio::test]
+async fn audio_runs_in_one_moof_share_a_group() {
+	let (init, _, (audio_id, _)) = bbb_init();
+	let tick = 1024;
+	for passthrough in [false, true] {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve()).with_cmaf(passthrough);
+		fmp4.decode(&init).unwrap();
+		let name = catalog.snapshot().audio.renditions.keys().next().unwrap().clone();
+		let mut track = consumer.track(&name).unwrap().subscribe(replay()).await.unwrap();
+		for segment in 0..2u64 {
+			fmp4.decode(&styp()).unwrap();
+			let dts = segment * 2 * tick;
+			let runs: [TrackRun; 2] = [(dts, &[(0, 0, 0xA)]), (dts + tick, &[(0, 0, 0xB)])];
+			fmp4.decode(&track_moof(audio_id, tick, &runs)).unwrap();
+		}
+		let _finished = fmp4.finish().unwrap();
+		assert_eq!(
+			drain_group_frames(&mut track),
+			vec![2, 2],
+			"one group per segment, passthrough {passthrough}"
+		);
 	}
 }
 
