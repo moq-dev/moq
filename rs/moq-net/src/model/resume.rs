@@ -1932,14 +1932,18 @@ impl Reader {
 			let Sub::Ready(sub) = &mut copy.sub else {
 				continue;
 			};
-			for (key, resolved) in keys.iter().copied().zip(sub.resolved_ranges(keys.iter().copied())) {
+			let resolved = sub.resolved_ranges(keys.iter().copied());
+			let waiting = sub.waiting_keys(keys.iter().copied());
+			for ((key, resolved), waiting) in keys.iter().copied().zip(resolved).zip(waiting) {
 				if ends.contains_key(&key) || raised(&self.mirrored.ranges[&key], floor).is_none() {
 					continue;
 				}
-				let end = resolved
-					.filter(|resolved| cap.is_none() || resolved.end.is_none_or(|end| end > resolved.start))
-					.and_then(|resolved| resolved.end)
-					.filter(|end| cap.is_none_or(|cap| *end < cap));
+				// An end placed while the copy's own start still waits holds as well.
+				let end = match resolved {
+					Some(resolved) => resolved.end.filter(|end| cap.is_none() || *end > resolved.start),
+					None => waiting.and_then(|(_, end)| end),
+				};
+				let end = end.filter(|end| cap.is_none_or(|cap| *end < cap));
 				if let Some(end) = end {
 					ends.insert(key, end);
 				}
@@ -9623,6 +9627,51 @@ mod test {
 			sub.poll_recv_group(&kio::Waiter::noop()),
 			Poll::Ready(Ok(None))
 		));
+	}
+
+	/// As [`a_backfill_places_a_raised_start_under_a_relative_end`], with the serving copy's
+	/// relative end frozen while its own start still waits: the backfill hands out nothing
+	/// past that end.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_raised_start_keeps_a_relative_end_its_serving_copy_froze_while_waiting() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = received_copy();
+		write(&a, 6);
+		write(&a, 8);
+		routes.serve(a.consume());
+		let from = |time, end| {
+			Subscription::default()
+				.with_delay(Delay::default().with_max(HOUR))
+				.with_ranges([track::Range {
+					start: track::Anchor::Time(time),
+					end,
+				}])
+		};
+		let mut sub = logical
+			.consume()
+			.subscribe(from(8, None))
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		assert_eq!(drain(&mut sub, false), [8]);
+		let b = track::Request::new(Arc::new(broadcast::Info::default()), "video");
+		routes.serve(b.consume());
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		a.abort(Error::Cancel).unwrap();
+		sub.update(from(7, Some(track::Anchor::Relative(0)))).unwrap();
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+
+		let b = b.accept(crate::track::Info::timed());
+		b.received();
+		b.anchored();
+		write(&b, 6);
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		write(&b, 7);
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		let resolved = sub.resolved_range(0).expect("placed");
+		assert_eq!((resolved.start, resolved.end), (7, Some(7)));
 	}
 
 	/// A copy updated while pending, then answering, hands its own resolution of the

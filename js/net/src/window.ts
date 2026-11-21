@@ -730,6 +730,23 @@ export class Window {
 		return { start: span.start, end: span.end === UNBOUNDED ? undefined : span.end, floored: span.floored };
 	}
 
+	/**
+	 * The range keyed `key` while its time start waits on the groups held to place it: that time, and
+	 * the exclusive end it resolved to, undefined while it stays open. Mirrors the Rust
+	 * `Window::waiting_key`.
+	 */
+	waitingKey(key: bigint): { time: bigint; end?: bigint } | undefined {
+		const span = this.#spans.get(key);
+		const at = span?.waiting ? time(span.anchor) : undefined;
+		if (!span || at === undefined) return undefined;
+		return { time: at, end: span.end === UNBOUNDED ? undefined : span.end };
+	}
+
+	/** Each range while its time start waits, in key order, as {@link waitingKey} reads it. */
+	waiting(): ({ time: bigint; end?: bigint } | undefined)[] {
+		return [...this.#ranges.keys()].map((key) => this.waitingKey(key));
+	}
+
 	/** Each range resolved, in key order, as {@link resolvedKey} reads it. Mirrors the Rust `Window::resolved`. */
 	resolved(): (Resolved | undefined)[] {
 		return [...this.#ranges.keys()].map((key) => this.resolvedKey(key));

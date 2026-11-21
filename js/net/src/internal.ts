@@ -876,6 +876,12 @@ export const hooks: {
 	 */
 	servingResolvedKeys: (subscriber: Subscriber, keys: readonly bigint[]) => (Resolved | undefined)[];
 	/**
+	 * Each of a subscriber's ranges while its time start waits where it is served, in key order: that
+	 * time, and the exclusive end it resolved to. Undefined for one placed, and for every range of a
+	 * front's reader. Mirrors the Rust `Subscriber::waiting_keys`. Assigned by `track.ts`.
+	 */
+	servingWaiting: (subscriber: Subscriber) => ({ time: bigint; end?: bigint } | undefined)[];
+	/**
 	 * Edit a subscriber's preferences by key, costing the ranges the edit names rather than every
 	 * range: lite-07's SUBSCRIBE_UPDATE, by Range ID. Mirrors the Rust `Subscriber::edit`. Assigned
 	 * by `track.ts`.
@@ -1237,6 +1243,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	servingResolvedKeys: () => {
+		throw new Error("track.ts not loaded");
+	},
+	servingWaiting: () => {
 		throw new Error("track.ts not loaded");
 	},
 	editSubscriber: () => {

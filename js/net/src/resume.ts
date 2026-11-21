@@ -750,14 +750,18 @@ class Reader implements ResumeSource {
 		for (const copy of this.#copies) {
 			if (!this.route.concluded && copyFailed(copy)) continue;
 			if (!copy.from || !sameRanges(copy.from, ranges)) continue;
-			const own = copy.sub.closed.peek() === undefined ? hooks.servingResolved(copy.sub) : (copy.resolved ?? []);
+			const open = copy.sub.closed.peek() === undefined;
+			const own = open ? hooks.servingResolved(copy.sub) : (copy.resolved ?? []);
+			const waiting = open ? hooks.servingWaiting(copy.sub) : [];
 			const cap = copyEnd(copy);
 			for (const key of keys) {
+				if (ends.has(key) || raised(ranges[Number(key)], copy.floor) === undefined) continue;
 				const at = own[Number(key)];
-				if (ends.has(key) || !at || at.end === undefined) continue;
-				if (raised(ranges[Number(key)], copy.floor) === undefined) continue;
-				if (cap !== undefined && (at.end <= at.start || at.end >= cap)) continue;
-				ends.set(key, at.end);
+				// An end placed while the copy's own start still waits holds as well.
+				const end = at ? at.end : waiting[Number(key)]?.end;
+				if (end === undefined) continue;
+				if (cap !== undefined && ((at && end <= at.start) || end >= cap)) continue;
+				ends.set(key, end);
 			}
 		}
 		return ends;
