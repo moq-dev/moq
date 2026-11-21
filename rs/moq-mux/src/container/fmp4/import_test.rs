@@ -1554,6 +1554,44 @@ async fn audio_runs_in_one_moof_share_a_group() {
 	}
 }
 
+/// A sync sample whose group key doesn't pass a seek's start continues the open group, keeping a
+/// leading picture that presents at or before the newest sample, as only the groups before it
+/// bound the group's samples, passthrough or unwrapped.
+#[tokio::test]
+async fn video_continuing_a_seeked_group_keeps_its_leading_pictures() {
+	let (_, (video_id, video_scale), _) = bbb_init();
+	let tick = video_scale.as_u64() / 24;
+	let non_sync = 0x0001_0000;
+	let init = bbb_init_with_edits(video_id, vec![media_edit(0)]);
+	// Presents 0, 6, 2; then a sync sample at 7 and a leading picture at 4.
+	let fragments: [(u64, &[(u64, u32)]); 2] = [
+		(0, &[(0, 0), (5, non_sync), (0, non_sync)]),
+		(3, &[(4, 0), (0, non_sync)]),
+	];
+	for passthrough in [false, true] {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve()).with_cmaf(passthrough);
+		fmp4.decode(&init).unwrap();
+		fmp4.seek(10_000_000).unwrap();
+		for (dts, samples) in fragments {
+			let entries: Vec<_> = samples.iter().map(|&(cts, flags)| (cts * tick, flags, 0xA)).collect();
+			fmp4.decode(&video_fragment(video_id, dts * tick, tick, &entries))
+				.unwrap();
+		}
+		let _finished = fmp4.finish().unwrap();
+		let [video, _] = published(&consumer, &catalog).await;
+		let presented: Vec<u64> = video
+			.iter()
+			.map(|(timestamp, _, _)| (timestamp * u128::from(video_scale.as_u64())).div_ceil(1_000_000) as u64 / tick)
+			.collect();
+		assert_eq!(presented, [0, 6, 2, 7, 4], "passthrough {passthrough}");
+		let name = catalog.snapshot().video.renditions.keys().next().unwrap().clone();
+		assert_eq!(starts(&consumer, &name).await.len(), 1, "passthrough {passthrough}");
+	}
+}
+
 #[test]
 fn test_bbb_init_roundtrip() {
 	let data = include_bytes!("test_data/bbb.mp4");

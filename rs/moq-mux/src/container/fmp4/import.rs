@@ -1670,6 +1670,34 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 			opens = false;
 		}
 
+		// A group is keyed by its earliest sample past the newest, which `at` already passes, or by
+		// a seek's start, and the key has to pass the latest group's. A fragment whose key doesn't
+		// continues the open group, decided before trimming so that it keeps the samples only the
+		// groups before it bound; with none open it is refused.
+		let mut key = None;
+		if opens && self.pending_start.is_none() {
+			let mut first = at;
+			for sample in &run.samples {
+				let timestamp = placement.offset.apply(sample.timestamp)?;
+				if self.newest.is_none_or(|newest| timestamp > newest) {
+					first = crate::container::earlier(first, timestamp);
+				}
+			}
+			let next = crate::start::key(&self.track, first)?;
+			match self.key {
+				Some(latest) if next <= latest && self.open => opens = false,
+				Some(latest) if next <= latest => {
+					let floor = self.start.unwrap_or(first);
+					return Err(crate::container::TimestampRewind {
+						timestamp: first,
+						floor,
+					}
+					.into());
+				}
+				_ => key = Some(next),
+			}
+		}
+
 		let ceiling = match opens {
 			true => self.newest,
 			false => self.ceiling,
@@ -1705,31 +1733,14 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 
 		let earliest = placement.offset.apply(run.earliest)?;
 		let land = match opens {
-			// A group is keyed by its first fragment's timestamp, or a seek's start, which has to
-			// pass the latest group's. A segment that doesn't continues the open group instead; with
-			// none open it is refused.
 			true => match self.pending_start.take() {
 				Some(start) => {
 					self.key = Some(start);
 					Land::Opens { start: Some(start) }
 				}
 				None => {
-					let key = crate::start::key(&self.track, earliest)?;
-					match self.key {
-						Some(latest) if key <= latest && self.open => Land::Continues,
-						Some(latest) if key <= latest => {
-							let floor = self.start.unwrap_or(earliest);
-							return Err(crate::container::TimestampRewind {
-								timestamp: earliest,
-								floor,
-							}
-							.into());
-						}
-						_ => {
-							self.key = Some(key);
-							Land::Opens { start: None }
-						}
-					}
+					self.key = key;
+					Land::Opens { start: None }
 				}
 			},
 			false => Land::Continues,
