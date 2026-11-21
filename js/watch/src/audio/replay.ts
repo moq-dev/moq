@@ -213,8 +213,8 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 		ends.set(arrival.group, i);
 	});
 	// A publisher keying groups by timestamp never produces the keys between two groups whose media
-	// is back to back, and each GROUP's Previous Start tells the subscriber so as it lands. Keys
-	// between media that is not are owed, since a group there went missing.
+	// is back to back, and the GROUP_END of the group below tells the subscriber so: its span reaches
+	// the next start. Keys between media that is not are owed, since a group there went missing.
 	const spans = new Map<number, { start: number; end: number }>();
 	for (const { group, timestamp, duration } of trace) {
 		const span = spans.get(group);

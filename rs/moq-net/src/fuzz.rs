@@ -1186,7 +1186,6 @@ impl LiteSample {
 			Self::Group => lite::Group {
 				subscribe: 3,
 				key: 1_234,
-				previous: None,
 				frame_start: 0,
 			}
 			.encode(w, version)
@@ -1431,7 +1430,6 @@ impl Default for Messages {
 			lite_group: lite::Group {
 				subscribe: 7,
 				key: 123_456,
-				previous: None,
 				frame_start: 0,
 			},
 			ietf_subscribe: ietf::Subscribe {

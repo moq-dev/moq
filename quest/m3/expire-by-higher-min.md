@@ -24,7 +24,7 @@ hold connection credit other broadcasts need.
   span; and closed [moq-dev/moq#9221](https://github.com/moq-dev/moq/pull/9221)'s
   estimate of a mean frame interval).
 
-[Group times](/quest/m2/time-addressing/group-times.md) gives a whole group its
+Group times ([moq-dev/moq#9263](https://github.com/moq-dev/moq/pull/9263)) gave a whole group its
 End and recommends bounding any other group by its successor's start, as
 `reach` (`rs/moq-net/src/model/track.rs`) and `#reach` (`js/net/src/track.ts`)
 do today. This quest tightens the second half once producers keep the strong
@@ -43,7 +43,3 @@ rule.
 
 Public API: none expected. Wire: none. The draft's Expiration text changes,
 which only lets a publisher expire sooner.
-
-## Required
-
-- [Group Streams carry each time once](/quest/m2/time-addressing/group-times.md) - GROUP_END's End, the whole group's bound, and the draft's no-overlap MUST

@@ -12,8 +12,8 @@ moq-lite draft change together.
 
 Decided 2026-11-20 (maintainer, /quest-plan auditing the subscription rules
 before the lite-07 cut): a switch caps the old subscription by group first
-([switch-caps-old](/quest/m1/switch-caps-old.md)), and this quest adds the
-frame cap on top. It isn't Required by
+([moq-dev/moq#9276](https://github.com/moq-dev/moq/pull/9276)), and this quest
+adds the frame cap on top. It isn't Required by
 [the lite-07 cut](/quest/m2/lite07-finalize.md). It rides lite-07 if it has
 landed when the cut is made, and otherwise moves to the next wip version.
 
@@ -27,15 +27,21 @@ landed when the cut is made, and otherwise moves to the next wip version.
   the subscription ends. Account for the credit it holds, per moq-net's rule
   that no stream is finished and forgotten.
 - The switch then ends the old copy's ranges at Position (G, N) instead of
-  group G, and drops the step that stops G's stream once the replacement
-  passes it.
+  group G (`Copy::cap` in `rs/moq-net/src/model/resume.rs`, `#cap` in
+  `js/net/src/resume.ts`). Until then both routes send G's frames past N, and
+  the reader takes each once. A per-group stop of G on the old copy was
+  deferred here rather than built and then dropped (2026-11-20, unattended
+  /quest-run, recommended in
+  [moq-dev/moq#9276](https://github.com/moq-dev/moq/pull/9276)).
+- That stop also ended a G that never finishes on the old route, so the
+  frame cap must too: the old copy's read of G ends at N, and the rest of G
+  comes from the replacement (`Recover`).
+- Test, in both languages: a switch while the old route still delivers G
+  sends none of G past N from the old route, and the reader gets each of G's
+  frames once.
 - moq-transport has no frame end; its publisher serves the whole group, as
   today.
 - Run `just test interop --all`.
 
 Public API: the range end type gains a Position in Rust, JS, and the
 bindings. Wire: lite-07-wip if before the cut, else the next wip version.
-
-## Required
-
-- [A route switch caps the old subscription at one boundary](/quest/m1/switch-caps-old.md) - the switch-time cap this narrows to a frame

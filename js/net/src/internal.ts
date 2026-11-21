@@ -273,6 +273,8 @@ export function staleHole(budget: number): Hole {
 export interface DropRun extends Run, Hole {
 	/** Copied into a cursor from the track's runs, which it folds in afresh on each change. */
 	received?: boolean;
+	/** The reader's own fill refused it: a verdict for it whatever it reads, until it widens. */
+	own?: boolean;
 }
 
 /** Whether two runs say the same thing, so they may merge. */
@@ -281,7 +283,8 @@ export function sameHole(a: DropRun, b: DropRun): boolean {
 		toStreamCode(a.error) === toStreamCode(b.error) &&
 		!a.skip === !b.skip &&
 		a.stale === b.stale &&
-		!a.received === !b.received
+		!a.received === !b.received &&
+		!a.own === !b.own
 	);
 }
 
@@ -294,13 +297,21 @@ export function insertDrop(
 	drops: readonly DropRun[],
 	start: bigint,
 	end: bigint,
-	hole: Hole & { received?: boolean },
+	hole: Hole & { received?: boolean; own?: boolean },
 ): DropRun[] {
 	if (start >= end) return [...drops];
 	const next = removeRun(drops, start, end);
 	let at = 0;
 	while (at < next.length && next[at].start < start) at++;
-	next.splice(at, 0, { start, end, error: hole.error, skip: hole.skip, stale: hole.stale, received: hole.received });
+	next.splice(at, 0, {
+		start,
+		end,
+		error: hole.error,
+		skip: hole.skip,
+		stale: hole.stale,
+		received: hole.received,
+		own: hole.own,
+	});
 	const merged: DropRun[] = [];
 	for (const run of next) {
 		const last = merged[merged.length - 1];
@@ -407,6 +418,17 @@ export interface ReadGroupFrame {
 	inflated?: number;
 	/** The payload to stream instead of `frame.payload`, for a frame written in pieces. */
 	chunks?: FrameConsumer;
+}
+
+/**
+ * The groups a group moved onto another copy is judged within: its logical reader's window below
+ * that reader's cursor cap. Not the copy's own, which a route switch starts at its boundary.
+ */
+export interface Within {
+	contains: (key: bigint) => boolean;
+	end: () => bigint | undefined;
+	/** What can change either. */
+	changed: readonly Getter<unknown>[];
 }
 
 /** What a resumed reader's {@link ResumeSource} sees of the subscriber it serves. */
@@ -554,6 +576,10 @@ export interface ResumeSource {
 	serving(): boolean;
 	/** Where the run of keys from `key` the serving copy says no group arrives at ends; see `hooks.holeEnd`. */
 	holeEnd(key: bigint, dropped: boolean): bigint | undefined;
+	/** Where the group the serving copy holds whole at `key` ends; see `hooks.wholeEnd`. */
+	wholeEnd(key: bigint): bigint | undefined;
+	/** The span of the group the serving copy holds whole around `key`; see `hooks.wholeAround`. */
+	wholeAround(key: bigint): Run | undefined;
 	/**
 	 * The exclusive end past every group the serving copy reads: undefined while one of its
 	 * ranges stays open or without a serving copy.
@@ -952,9 +978,10 @@ export const hooks: {
 	wire: (subscriber: Subscriber) => WireRecord;
 	/**
 	 * Whether this subscriber's budget, or `budget` in milliseconds when given, gives up on `key`,
-	 * judged by its successor; see {@link expireGroup}.
+	 * judged by its successor; see {@link expireGroup}. Successors count within `within` when
+	 * given, else within this subscriber's window below its cursor's cap.
 	 */
-	staleAt: (subscriber: Subscriber, key: bigint, budget?: number) => Expiry;
+	staleAt: (subscriber: Subscriber, key: bigint, budget?: number, within?: Within) => Expiry;
 	/** A group the subscriber's track still caches, as a fresh read handle. */
 	cachedGroup: (subscriber: Subscriber, key: bigint, from?: number) => GroupConsumer | undefined;
 	/**
@@ -962,20 +989,26 @@ export const hooks: {
 	 * budget gives up on it, judged by the route copy it is read from when routed.
 	 */
 	judgedGroup: (subscriber: Subscriber, key: bigint) => GroupConsumer | undefined;
-	/** Whether {@link cachedGroup} would find the group, without making a read handle. */
-	holdsGroup: (subscriber: Subscriber, key: bigint) => boolean;
+	/**
+	 * Whether {@link cachedGroup} would find the group, without making a read handle; with `whole`,
+	 * only one held from its first frame.
+	 */
+	holdsGroup: (subscriber: Subscriber, key: bigint, whole?: boolean) => boolean;
 	/**
 	 * When the latest group the subscriber's track caches in `[start, end)` landed, undefined when
 	 * it caches none; a routed reader asks every copy. Mirrors the Rust `Subscriber::landed`.
 	 */
 	landed: (subscriber: Subscriber, start: bigint, end: bigint) => Instant | undefined;
 	/**
-	 * The start of the group before `start` on the subscriber's track, as a lite-07 GROUP's
-	 * Previous Start names it: just below the run of starts declared skipped directly under
-	 * `start`, else `start - 1` when a group starts there, else undefined. Mirrors the Rust
-	 * crate-private `track::Subscriber::previous_start`.
+	 * Where the group the subscriber's track holds at `key` ends, once it finished whole: its span
+	 * is `[key, end)`. Undefined for a group not held, still open, or ended without one.
 	 */
-	previousStart: (subscriber: Subscriber, start: bigint) => bigint | undefined;
+	wholeEnd: (subscriber: Subscriber, key: bigint) => bigint | undefined;
+	/**
+	 * The span of the group the subscriber's track holds finished whole that holds `key` strictly
+	 * past its start, which no other group starts inside; undefined when none does.
+	 */
+	wholeAround: (subscriber: Subscriber, key: bigint) => Run | undefined;
 	/**
 	 * Where the run of keys from `key` that no group can arrive at on the subscriber's track ends:
 	 * a skip, or with `dropped` a drop given up for good. Mirrors the Rust crate-private
@@ -1036,6 +1069,8 @@ export const hooks: {
 	groupOffset: (group: GroupProducer) => number;
 	/** Whether this source copy can no longer serve frame 0: it began past it, or shed it. */
 	groupHeadless: (group: GroupProducer) => boolean;
+	/** Where a source copy finished whole ends, undefined while it is open or ended without one. */
+	groupWholeEnd: (group: GroupProducer) => bigint | undefined;
 	writeGroupFrame: (group: GroupProducer, frame: Frame, inflated?: number) => void;
 	/** Payload footprint including a shared inflated copy, for measurements. */
 	groupCacheBytes: (group: GroupProducer) => number;
@@ -1378,7 +1413,10 @@ export const hooks: {
 	landed: () => {
 		throw new Error("track.ts not loaded");
 	},
-	previousStart: () => {
+	wholeEnd: () => {
+		throw new Error("track.ts not loaded");
+	},
+	wholeAround: () => {
 		throw new Error("track.ts not loaded");
 	},
 	holeEnd: () => {
@@ -1451,6 +1489,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	groupHeadless: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupWholeEnd: () => {
 		throw new Error("group.ts not loaded");
 	},
 	startGroup: () => {
