@@ -3960,7 +3960,8 @@ mod tests {
 		// An update moves the floor and the ranges together, as `begin_subscription` does.
 		let update = |sub: &mut SubStream, start: Option<u64>, ranges: Vec<lite::Range>| {
 			sub.start = start;
-			sub.edit(&ranges, (0, 0), false, &Default::default(), Duration::MAX).unwrap();
+			sub.edit(&ranges, (0, 0), false, &Default::default(), Duration::MAX)
+				.unwrap();
 		};
 		sub.started = Some(None);
 		update(&mut sub, Some(1), vec![lite::Range::span(Some(1), 0, None, None)]);
@@ -4076,18 +4077,33 @@ mod tests {
 		assert_eq!(sub.fill_range(0), None, "the demand's range is no fill");
 
 		// The same bounds again, as a fill.
-		sub.edit(&[demand, demand], (0, 1), false, &Default::default(), Duration::MAX).unwrap();
+		sub.edit(&[demand, demand], (0, 1), false, &Default::default(), Duration::MAX)
+			.unwrap();
 		assert_eq!(sub.fill_range(0), None, "the demand keeps its range");
 		assert_eq!(sub.fill_range(1), Some(4..8), "the copy the edit added is the fill");
 
 		// Another fill joins, and the first keeps its Range ID.
 		let other = groups(10..12);
-		sub.edit(&[demand, demand, other], (0, 2), false, &Default::default(), Duration::MAX).unwrap();
+		sub.edit(
+			&[demand, demand, other],
+			(0, 2),
+			false,
+			&Default::default(),
+			Duration::MAX,
+		)
+		.unwrap();
 		assert_eq!(sub.fill_ids.iter().copied().collect::<Vec<_>>(), [1, 2]);
 
 		// The demand moves away while the fill stays: the fill keeps Range ID 1.
 		let moved = lite::Range::span(Some(20), 0, None, None);
-		sub.edit(&[moved, demand, other], (0, 2), false, &Default::default(), Duration::MAX).unwrap();
+		sub.edit(
+			&[moved, demand, other],
+			(0, 2),
+			false,
+			&Default::default(),
+			Duration::MAX,
+		)
+		.unwrap();
 		assert_eq!(sub.fill_ids.iter().copied().collect::<Vec<_>>(), [1, 2]);
 		assert_eq!(sub.fill_range(1), Some(4..8));
 		assert_eq!(sub.fill_range(3), None, "the demand's new range is no fill");
@@ -4095,11 +4111,13 @@ mod tests {
 		// Before SUBSCRIBE_START, a fill an update retires keeps its Range ID, since the start
 		// still names it, and it must not count as the demand's.
 		sub.started = None;
-		sub.edit(&[moved, demand], (0, 1), false, &Default::default(), Duration::MAX).unwrap();
+		sub.edit(&[moved, demand], (0, 1), false, &Default::default(), Duration::MAX)
+			.unwrap();
 		assert_eq!(sub.fill_range(2), None, "retired");
 		assert!(sub.fill_ids.contains(&2), "still a fill's");
 		sub.started = Some(Some(4));
-		sub.edit(&[moved, demand], (0, 1), false, &Default::default(), Duration::MAX).unwrap();
+		sub.edit(&[moved, demand], (0, 1), false, &Default::default(), Duration::MAX)
+			.unwrap();
 		assert!(!sub.fill_ids.contains(&2), "forgotten once started");
 	}
 
@@ -4148,7 +4166,9 @@ mod tests {
 
 		// A live join, which only the publisher can place.
 		let back = lite::Range::OPEN;
-		let (edit, changed) = sub.edit(&[first, back], (0, 0), false, &Default::default(), Duration::MAX).unwrap();
+		let (edit, changed) = sub
+			.edit(&[first, back], (0, 0), false, &Default::default(), Duration::MAX)
+			.unwrap();
 		assert!(changed);
 		assert_eq!(
 			edit,
@@ -4162,12 +4182,15 @@ mod tests {
 		assert_eq!(sub.owed(None), Some(vec![4..10, 1..10]));
 
 		// Retiring the first range forgets its start.
-		sub.edit(&[back], (0, 0), false, &Default::default(), Duration::MAX).unwrap();
+		sub.edit(&[back], (0, 0), false, &Default::default(), Duration::MAX)
+			.unwrap();
 		assert_eq!(sub.starts.keys().copied().collect::<Vec<_>>(), [1]);
 		assert_eq!(sub.owed(Some(8)), Some(vec![1..8]));
 
 		// A Min Age reaching further back places the join again, as a range of its own.
-		let (edit, changed) = sub.edit(&[back], (0, 0), true, &Default::default(), Duration::MAX).unwrap();
+		let (edit, changed) = sub
+			.edit(&[back], (0, 0), true, &Default::default(), Duration::MAX)
+			.unwrap();
 		assert!(changed);
 		assert_eq!(
 			edit,
@@ -10576,7 +10599,12 @@ impl SubStream {
 		reasked: &std::collections::BTreeSet<u64>,
 		budget: Duration,
 	) -> Result<(lite::RangeEdit, bool), Error> {
-		let before: Vec<_> = self.live.iter().map(|(id, _)| id).filter(|id| !self.probe_ids.contains(id)).collect();
+		let before: Vec<_> = self
+			.live
+			.iter()
+			.map(|(id, _)| id)
+			.filter(|id| !self.probe_ids.contains(id))
+			.collect();
 		let demand = ranges.len().saturating_sub(fills).saturating_sub(probes);
 		let kind = |index: usize| match index {
 			index if index < demand => Kind::Demand,
@@ -10631,7 +10659,6 @@ impl SubStream {
 			.eq(before);
 		Ok((edit, changed))
 	}
-
 }
 
 /// The probes to ask for `asks`, each a time start the copy's readers wait on with the widest
@@ -10657,9 +10684,11 @@ fn probes(
 	let mut probes = Vec::new();
 	let mut reasked = std::collections::BTreeSet::new();
 	for &(time, wanted) in asks {
-		let from = |range: &lite::Range| matches!(range.start, Some(lite::Anchor::Absolute(start)) if start.group == time);
+		let from =
+			|range: &lite::Range| matches!(range.start, Some(lite::Anchor::Absolute(start)) if start.group == time);
 		// Asked under this budget unless live already, under the one it was recorded with.
-		let answers = |range: &lite::Range| live(*range, false).map(|(_, asked)| asked).max().unwrap_or(budget) >= wanted;
+		let answers =
+			|range: &lite::Range| live(*range, false).map(|(_, asked)| asked).max().unwrap_or(budget) >= wanted;
 		if ranges.iter().any(|range| from(range) && answers(range)) {
 			continue;
 		}
@@ -11121,7 +11150,10 @@ impl TrackServe {
 				range_fills.retire_skipped(&groups);
 				// The probes the readers' asks need, as many as fit beside the rest: those left out
 				// go once an answer lets the readers waiting on others go.
-				let asked = demand.as_ref().and_then(|demand| demand.delay.max).unwrap_or(Duration::MAX);
+				let asked = demand
+					.as_ref()
+					.and_then(|demand| demand.delay.max)
+					.unwrap_or(Duration::MAX);
 				let active = match &*sub {
 					Sub::Active(active) => Some(active),
 					Sub::None => None,
@@ -11130,7 +11162,11 @@ impl TrackServe {
 				let fill_ranges: Vec<_> = FillAsk::wire(&groups).collect();
 				let probes = budget.fit_after(demand_ranges.iter().chain(&fill_ranges), probes);
 				let reasked = (reasked.into_iter())
-					.filter(|id| active.and_then(|active| active.live.get(*id)).is_some_and(|range| probes.contains(range)))
+					.filter(|id| {
+						active
+							.and_then(|active| active.live.get(*id))
+							.is_some_and(|range| probes.contains(range))
+					})
 					.collect();
 				(demand.map(|demand| (demand, demand_ranges, probes, reasked)), groups)
 			}

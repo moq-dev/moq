@@ -349,7 +349,9 @@ impl Window {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn asks(&self) -> impl Iterator<Item = u64> + '_ {
 		let mut last = None;
-		self.waiting.iter().filter_map(move |&(time, _)| (last.replace(time) != Some(time)).then_some(time))
+		self.waiting
+			.iter()
+			.filter_map(move |&(time, _)| (last.replace(time) != Some(time)).then_some(time))
 	}
 
 	/// The budget [`Self::asks`] wait under.
@@ -1259,13 +1261,28 @@ mod tests {
 		assert_eq!(covered(&live, [0, 33, 66, 99]), vec![99]);
 		assert_eq!(live.start(), Some(99));
 		// An end before where it joins holds nothing.
-		let short = Window::new(&[range(None, time(50))], min_delay(Some(Duration::ZERO)), Some(99), &keys);
+		let short = Window::new(
+			&[range(None, time(50))],
+			min_delay(Some(Duration::ZERO)),
+			Some(99),
+			&keys,
+		);
 		assert_eq!(covered(&short, [0, 33, 66, 99]), Vec::<u64>::new());
 		// A range with a start ignores the Min Age.
-		let timed = Window::new(&[range(time(40), None)], min_delay(Some(Duration::ZERO)), Some(99), &keys);
+		let timed = Window::new(
+			&[range(time(40), None)],
+			min_delay(Some(Duration::ZERO)),
+			Some(99),
+			&keys,
+		);
 		assert_eq!(timed.start(), Some(33));
 
-		let mut window = Window::new(&[Range::default()], min_delay(Some(Duration::ZERO)), None, &Keys::default());
+		let mut window = Window::new(
+			&[Range::default()],
+			min_delay(Some(Duration::ZERO)),
+			None,
+			&Keys::default(),
+		);
 		assert!(window.is_pending() && window.contains(3) && window.floor().is_none());
 		assert!(!window.settle(None, &Keys::default()));
 		let keys = Keys::new([5]);
@@ -1520,7 +1537,12 @@ mod tests {
 		// 4000 evicted while the lookup was out, or 8000 arrived between, as another reader's
 		// fill brings it.
 		for held in [&[9000][..], &[4000, 8000, 9000]] {
-			let mut window = Window::new(&[range(time(8500), None)], min_delay(None), Some(9000), &history(&[4000, 9000]));
+			let mut window = Window::new(
+				&[range(time(8500), None)],
+				min_delay(None),
+				Some(9000),
+				&history(&[4000, 9000]),
+			);
 			assert_eq!(window.lookups().collect::<Vec<_>>(), [(8500, 4001)]);
 			assert!(window.found(8500, Found::Dropped { floor: 4001 }, &history(held)));
 			assert_eq!(window.lookups().count(), 0, "answered, not looked up again");

@@ -2283,7 +2283,7 @@ test("a front's ordered reader holds a gap above a waiting time start", async ()
 	// A parked read wakes once the start is placed.
 	const next = ordered.nextItem();
 	expect(await isPending(next)).toBe(true);
-	hooks.timeStarts(ta.producer, [[1500n, 1000n]], NO_MAX_DELAY);
+	hooks.timeStarts(ta.producer, [[1500n, 1000n, NO_MAX_DELAY]]);
 	ta.write(1000n);
 	ta.producer.skipGroups(1001n, 1500n);
 	ta.producer.skipGroups(1600n, 2000n);
@@ -2608,7 +2608,7 @@ for (const resolution of ["arrival", "drop", "other copy", "budget"] as const) {
 			ta.write(6n);
 			tb.write(7n);
 			// The session reports where the range the front asked from time 4 started, as with its START.
-			hooks.timeStarts(tb.producer, [[4n, 7n]], NO_MAX_DELAY);
+			hooks.timeStarts(tb.producer, [[4n, 7n, NO_MAX_DELAY]]);
 			hooks.startTrack(tb.producer, { start: 7n, requested: 4n });
 			front.serve(b.consume());
 			await settle();

@@ -214,11 +214,14 @@ async fn a_range_before_every_group_reads_past_it() {
 		]);
 	let mut direct = fixture.track.subscribe(subscription.clone()).ordered();
 	let direct = read(&mut direct, 1).await;
-	let mut reader = kio::clock::timeout(TIMEOUT, fixture.viewers[0].track("value").unwrap().subscribe(subscription))
-		.await
-		.expect("subscribe timeout")
-		.unwrap()
-		.ordered();
+	let mut reader = kio::clock::timeout(
+		TIMEOUT,
+		fixture.viewers[0].track("value").unwrap().subscribe(subscription),
+	)
+	.await
+	.expect("subscribe timeout")
+	.unwrap()
+	.ordered();
 	assert_eq!(read(&mut reader, 1).await, direct);
 	fixture.serving.abort();
 }
@@ -274,7 +277,10 @@ async fn a_wider_reader_reads_what_a_narrower_one_expired() {
 
 	// The viewer's copy holds 5 from a fetch.
 	let fetched = remote.track("value").unwrap().fetch_group(5, None);
-	let mut fetched = kio::clock::timeout(TIMEOUT, fetched).await.expect("fetch timeout").unwrap();
+	let mut fetched = kio::clock::timeout(TIMEOUT, fetched)
+		.await
+		.expect("fetch timeout")
+		.unwrap();
 	kio::clock::timeout(TIMEOUT, fetched.read_frame())
 		.await
 		.expect("read timeout")
@@ -324,7 +330,10 @@ async fn a_time_between_held_groups_starts_where_the_publisher_would() {
 		.unwrap();
 	for key in [10, 20] {
 		let fetched = remote.track("value").unwrap().fetch_group(key, None);
-		let mut fetched = kio::clock::timeout(TIMEOUT, fetched).await.expect("fetch timeout").unwrap();
+		let mut fetched = kio::clock::timeout(TIMEOUT, fetched)
+			.await
+			.expect("fetch timeout")
+			.unwrap();
 		kio::clock::timeout(TIMEOUT, fetched.read_frame())
 			.await
 			.expect("read timeout")

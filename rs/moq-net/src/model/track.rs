@@ -1447,7 +1447,12 @@ impl TrackState {
 		if self.anchors != Anchors::Wire {
 			return None;
 		}
-		let oldest = || self.time_starts.get(&0).and_then(|reported| reported.start).map(JoinStart::At);
+		let oldest = || {
+			self.time_starts
+				.get(&0)
+				.and_then(|reported| reported.start)
+				.map(JoinStart::At)
+		};
 		match self.join_starts.range(min..).next().map(|(_, start)| *start) {
 			// A group the oldest range's feed starts at places a join an empty answer can't.
 			Some(JoinStart::Past(past)) => oldest().or(Some(JoinStart::Past(past))),
@@ -1458,7 +1463,8 @@ impl TrackState {
 	/// Whether the range asked from `time` had no group at or before it for a reader within
 	/// `budget`: the live feed brings it none of the range's groups there.
 	fn answered_empty(&self, time: u64, budget: Duration) -> bool {
-		(self.time_starts.get(&time)).is_some_and(|reported| reported.containing(time, budget) == Some(Containing::Before))
+		(self.time_starts.get(&time))
+			.is_some_and(|reported| reported.containing(time, budget) == Some(Containing::Before))
 	}
 
 	/// Whether drops, for whatever reason, cover every key in `keys`. An empty run is covered.
@@ -8885,9 +8891,19 @@ impl Asked {
 		let subscriptions = self.subscriptions.get_or_insert_with(subscriptions);
 		let wakes: Vec<kio::WaiterList> = {
 			let mut subs = subscriptions.lock();
-			let added = times.iter().filter(|ask| !self.times.contains(ask)).map(|ask| (ask, true));
-			let gone = self.times.iter().filter(|ask| !times.contains(ask)).map(|ask| (ask, false));
-			added.chain(gone).map(|(&(time, budget), waits)| subs.ask(time, budget, waits)).collect()
+			let added = times
+				.iter()
+				.filter(|ask| !self.times.contains(ask))
+				.map(|ask| (ask, true));
+			let gone = self
+				.times
+				.iter()
+				.filter(|ask| !times.contains(ask))
+				.map(|ask| (ask, false));
+			added
+				.chain(gone)
+				.map(|(&(time, budget), waits)| subs.ask(time, budget, waits))
+				.collect()
 		};
 		self.times = times;
 		for mut wakes in wakes {
@@ -17058,7 +17074,10 @@ mod test {
 			Some(1001),
 			"the skip is accounted"
 		);
-		assert_eq!(producer.state.read().containing(1500, Duration::MAX), Containing::Unknown);
+		assert_eq!(
+			producer.state.read().containing(1500, Duration::MAX),
+			Containing::Unknown
+		);
 		let mut ordered = producer
 			.subscribe(
 				Subscription::default()
@@ -17115,7 +17134,10 @@ mod test {
 		assert_eq!(placed(&mut before), Some((0, false)));
 		assert!(before.poll_start(&kio::Waiter::noop()).is_ready());
 		assert_eq!(drain(&mut before), vec![1000]);
-		assert_eq!(producer.subscription().map(|aggregate| aggregate.asks), Some(Vec::new()));
+		assert_eq!(
+			producer.subscription().map(|aggregate| aggregate.asks),
+			Some(Vec::new())
+		);
 	}
 
 	/// A floor at or past a time start, as a pre-lite-07 wire's start sets, keeps out the group

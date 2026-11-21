@@ -1860,7 +1860,7 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 			try {
 				hooks.receiveTrack(sub.track);
 				// A lite-07 source reports where it started the time asked for.
-				if (hasRanges(version)) hooks.timeStarts(sub.track, [[2n, source]], NO_MAX_DELAY);
+				if (hasRanges(version)) hooks.timeStarts(sub.track, [[2n, source, NO_MAX_DELAY]]);
 				hooks.startTrack(sub.track, { start: source, requested: 2n });
 				sub.serve(6n);
 				expect(await sub.servedSequence()).toBe(6n);
@@ -1878,18 +1878,29 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 	}
 }
 
-// A relay's copy already asks from the oldest group, so a downstream asking from time 2 adds no
-// range upstream and gets no start of its own. The oldest range starting at 6 still places it:
-// the source holds nothing at or before 2.
-test("lite draft-07: a time start a copy's oldest range covers starts where that range did", async () => {
+// A relay's copy already asks from the oldest group, yet a downstream asking from time 2 asks its
+// upstream for a start of its own: the oldest range starting at 6 may have expired a group at or
+// before 2 that a wider reader still gets. Answered past 2, it starts at 6.
+test("lite draft-07: a time start a copy's oldest range covers waits for an answer of its own", async () => {
 	const sub = await servedSubscription({ version: Version.DRAFT_07, startGroup: 2n });
 	// The relay's own reader, asking from the oldest group, which the copy's demand then starts at.
 	const local = sub.track.subscribe({ delay: { max: Duration.millis(60_000) } });
 	try {
 		hooks.receiveTrack(sub.track);
 		await flush();
-		hooks.timeStarts(sub.track, [[0n, 6n]], NO_MAX_DELAY);
+		hooks.timeStarts(sub.track, [[0n, 6n, NO_MAX_DELAY]]);
 		hooks.startTrack(sub.track, { start: 6n });
+		await flush();
+		expect(
+			hooks
+				.requested(sub.track)
+				.asks()
+				.map(([time]) => time),
+		).toEqual([2n]);
+		hooks.timeStarts(sub.track, [
+			[0n, 6n, NO_MAX_DELAY],
+			[2n, 6n, NO_MAX_DELAY],
+		]);
 		sub.serve(6n);
 		expect(await sub.servedSequence()).toBe(6n);
 		const response = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_07);
@@ -1911,7 +1922,7 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 			hooks.startTrack(sub.track, { requested: 2n });
 			sub.serve(6n);
 			await flush();
-			if (hasRanges(version)) hooks.timeStarts(sub.track, [[2n, 3n]], NO_MAX_DELAY);
+			if (hasRanges(version)) hooks.timeStarts(sub.track, [[2n, 3n, NO_MAX_DELAY]]);
 			hooks.startTrack(sub.track, { start: 3n, requested: 2n });
 			const response = await decodeSubscribeResponse(sub.client.reader, version);
 			if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");

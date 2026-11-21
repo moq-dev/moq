@@ -11,6 +11,7 @@
 
 import type { Duration } from "@moq/clock";
 import { Counts, Cover } from "./cover.ts";
+import { NO_MAX_DELAY } from "./internal.ts";
 import type { Range } from "./track.ts";
 import { max, min, UNBOUNDED } from "./util/key.ts";
 import { Sorted } from "./util/sorted.ts";
@@ -246,8 +247,12 @@ export interface Holdings {
 	 * with no start reached back. Mirrors the Rust `Holdings::defers`.
 	 */
 	defers?(): boolean;
-	/** Where `time` falls among the groups held. */
-	containing(time: bigint): Containing;
+	/**
+	 * Where `time` falls among the groups held, for a reader whose max delay is `budget` in
+	 * milliseconds ({@link NO_MAX_DELAY} for none): a received copy proves some placements only for a
+	 * reader within the budget its upstream answered under. Mirrors the Rust `Holdings::containing`.
+	 */
+	containing(time: bigint, budget: number): Containing;
 	/** The lowest group held starting at or after `from`. */
 	nextStart(from: bigint): bigint | undefined;
 	/** Whether nothing more can arrive here, so a time start nothing contains reaches back to the oldest group rather than wait. */
@@ -258,11 +263,12 @@ export interface Holdings {
 	 */
 	looksUp?(): boolean;
 	/**
-	 * Where a live join holding `min` behind the live edge starts. Undefined while it can't tell yet:
-	 * nothing held measures the live edge, or a relay copy waits on upstream to answer for it. Absent
-	 * where the hop leaves its ranges to the copies it follows. Mirrors the Rust `Holdings::join`.
+	 * Where a live join holding `min` behind the live edge starts, for a reader within `budget` (see
+	 * {@link containing}). Undefined while it can't tell yet: nothing held measures the live edge, or
+	 * a relay copy waits on upstream to answer for it. Absent where the hop leaves its ranges to the
+	 * copies it follows. Mirrors the Rust `Holdings::join`.
 	 */
-	join?(min: Duration): Join | undefined;
+	join?(min: Duration, budget: number): Join | undefined;
 	/**
 	 * Whether the producer declared every start in `[start, end)` skipped, so no group starts there
 	 * even in the history a handler serves. Absent for none.
@@ -401,13 +407,27 @@ export class Window {
 	 * range placed reads it, so a join already started stays where it started.
 	 */
 	min: Duration | undefined;
+	/**
+	 * The subscriber's max delay in milliseconds, {@link NO_MAX_DELAY} for none: a received copy
+	 * places some time starts only for a reader within the budget its upstream answered under. Only
+	 * a range still to place reads it, so one already started stays where it started.
+	 */
+	budget: number;
 
 	/**
-	 * Resolve `ranges`, keyed by position, time starts from `holdings`, and a range with no start
-	 * by `min` (see {@link min}), `latest` being the latest group.
+	 * Resolve `ranges`, keyed by position, time starts from `holdings` within `budget` (see
+	 * {@link budget}), and a range with no start by `min` (see {@link min}), `latest` being the
+	 * latest group.
 	 */
-	constructor(ranges: readonly Range[], latest: bigint | undefined, holdings: Holdings = UNHELD, min?: Duration) {
+	constructor(
+		ranges: readonly Range[],
+		latest: bigint | undefined,
+		holdings: Holdings = UNHELD,
+		min?: Duration,
+		budget = NO_MAX_DELAY,
+	) {
 		this.min = min;
+		this.budget = budget;
 		for (const [index, range] of ranges.entries()) this.#ranges.set(BigInt(index), range);
 		this.#place(latest, holdings);
 	}
@@ -418,8 +438,9 @@ export class Window {
 		latest: bigint | undefined,
 		holdings: Holdings = UNHELD,
 		min?: Duration,
+		budget = NO_MAX_DELAY,
 	): Window {
-		const window = new Window([], undefined, holdings, min);
+		const window = new Window([], undefined, holdings, min, budget);
 		for (const [key, range] of ranges) window.#ranges.set(key, range);
 		window.#place(latest, holdings);
 		return window;
@@ -525,7 +546,7 @@ export class Window {
 		}
 		let started = false;
 		for (const entry of tried) {
-			const containing = holdings.containing(entry.time);
+			const containing = holdings.containing(entry.time, this.budget);
 			let start: bigint;
 			let floored: boolean;
 			if (typeof containing === "object") [start, floored] = [containing.group, true];
@@ -553,6 +574,17 @@ export class Window {
 		const floor = unresolved(at, start, floored, holdings);
 		if (floor !== undefined) span.looking = { time: at, floor };
 		this.#count(key, span);
+	}
+
+	/**
+	 * The time starts still waiting on the groups held, lowest first, which wait under
+	 * {@link budget}: what a received copy asks its upstream to place. Mirrors the Rust
+	 * `Window::asks`.
+	 */
+	asks(): bigint[] {
+		const times: bigint[] = [];
+		for (const entry of this.#waiting.all()) times.push(entry.time);
+		return times;
 	}
 
 	/**
@@ -683,7 +715,7 @@ export class Window {
 				span.start = found.floor > 0n ? found.floor - 1n : at;
 				span.floored = true;
 			} else {
-				const containing = holdings.containing(at);
+				const containing = holdings.containing(at, this.budget);
 				span.start = typeof containing === "object" ? containing.group : 0n;
 				span.floored = typeof containing === "object";
 				if (asked !== undefined) {
@@ -780,7 +812,7 @@ export class Window {
 			}
 			at = join.time;
 		}
-		const start = startOf(at, latest, holdings);
+		const start = startOf(at, latest, this.budget, holdings);
 		if (start === "pending") {
 			this.#pending.add(key);
 			return;
@@ -802,7 +834,7 @@ export class Window {
 	#join(age: Duration, latest: bigint | undefined, holdings: Holdings): Join | "pending" | "reaching" {
 		if (latest === undefined) return "pending";
 		if (age.asNanos() === 0) return { group: latest };
-		return holdings.join?.(age) ?? "reaching";
+		return holdings.join?.(age, this.budget) ?? "reaching";
 	}
 
 	// Hold `span` under `key`, counting the groups it reads and where it starts.
@@ -961,13 +993,14 @@ function merge(runs: Run[]): Run[] {
 function startOf(
 	at: bigint | undefined,
 	latest: bigint | undefined,
+	budget: number,
 	holdings: Holdings,
 ): { group: bigint; floored: boolean } | "waiting" | "pending" {
 	// Nothing sits below group 0, so the oldest start needs no latest group.
 	if (at === undefined) return { group: 0n, floored: false };
 	// No group starts before 0, so time 0 names group 0 whatever is held.
 	if (at === 0n) return { group: 0n, floored: true };
-	const containing = holdings.containing(at);
+	const containing = holdings.containing(at, budget);
 	if (typeof containing === "object") return { group: containing.group, floored: true };
 	// The group holding it is older than any held, so reach back to the oldest.
 	if (containing === "before") return { group: 0n, floored: false };

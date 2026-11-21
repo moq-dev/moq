@@ -565,7 +565,11 @@ impl Consumer {
 			}
 			(mirrored, prefs.revision, prefs.delay)
 		};
-		let window = keyed(mirrored.ranges.iter().map(|(key, range)| (*key, *range)), delay, &Unheld);
+		let window = keyed(
+			mirrored.ranges.iter().map(|(key, range)| (*key, *range)),
+			delay,
+			&Unheld,
+		);
 		let reader = Arc::new_cyclic(|this| {
 			Mutex::new(Reader {
 				this: this.clone(),
