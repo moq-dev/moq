@@ -49,15 +49,6 @@ impl AtStart for group::Producer {
 	}
 }
 
-/// A fill the test expects to name groups rather than look up a time.
-#[allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
-pub fn groups(fill: track::Fill) -> track::FillGroups {
-	let track::Fill::Groups(fill) = fill else {
-		panic!("a run of groups, not a time lookup");
-	};
-	fill
-}
-
 /// The groups from the one containing `keys`' start through the one containing its end, as
 /// time anchors: on a track whose groups start at consecutive keys, the groups with those keys.
 ///

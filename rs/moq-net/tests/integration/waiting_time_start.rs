@@ -52,7 +52,7 @@ struct Fixture {
 
 impl Fixture {
 	/// A publisher whose scale-less track holds nothing, serving [`FILLED`] from a fill and
-	/// dropping every other fill and lookup, a relay, and two viewers of it.
+	/// dropping every other fill, a relay, and two viewers of it.
 	async fn new() -> Self {
 		let publisher = origin(1);
 		let broadcast = publisher
@@ -66,9 +66,6 @@ impl Fixture {
 		let requests = track.requests();
 		let serving = kio::clock::sim::spawn(async move {
 			while let Ok(fill) = requests.requested_fill().await {
-				let moq_net::track::Fill::Groups(fill) = fill else {
-					continue;
-				};
 				if (fill.start().group..fill.end()).contains(&FILLED)
 					&& let Ok(Some(group)) = fill.accept(FILLED, None)
 				{

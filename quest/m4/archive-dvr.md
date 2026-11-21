@@ -31,7 +31,7 @@ route, so the archive lives at its own path.
   quest of its own. Rejected: a synchronous `GroupSource` callback on the
   live track, since a callback forces history reads to block (bad over S3).
   An application with its own store answers evicted groups through
-  `track::Producer::requests()`, whose `Fill` it serves asynchronously, or
+  `track::Producer::requests()`, whose `FillGroups` it serves asynchronously, or
   records with `moq-archive`. Rejected: serving the deep window on the live
   track itself, since its `max_age` marks those groups `Old`; the archive
   stays at its own path.

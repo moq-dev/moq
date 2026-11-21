@@ -6,7 +6,7 @@ import { Manual } from "@moq/clock/test";
 import { StreamCode, StreamError } from "./error.ts";
 import { rejectGroups } from "./fill.ts";
 import { hooks, NO_MAX_DELAY, staleHole } from "./internal.ts";
-import { manual, requestedGroups, settlesWithin, textFrame } from "./mock.ts";
+import { manual, settlesWithin, textFrame } from "./mock.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import { type Ordered, Producer as TrackProducer } from "./track.ts";
 
@@ -621,7 +621,7 @@ test("a refusal judged stale under a narrower budget leaves a widened read's tim
 	const ordered = subscriber.ordered();
 	// Capped, so the stale run does not settle it: it asks the run again.
 	expect(items(ordered)).toEqual([]);
-	const fill = await requestedGroups(requests);
+	const fill = await requests.requestedFill();
 	expect([fill?.start, fill?.end]).toEqual([1000n, 1500n]);
 	if (fill) rejectGroups(fill, 1000n, 1500n, new StreamError(StreamCode.Old), { budget: 100, everyone: false });
 	// Widened past the refusal's budget, with a time start nothing held places.

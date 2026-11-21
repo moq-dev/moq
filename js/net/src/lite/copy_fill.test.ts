@@ -12,7 +12,7 @@ import { defined } from "../defined.test-util.ts";
 import { StreamCode, StreamError } from "../error.ts";
 import type { Consumer as GroupConsumer } from "../group.ts";
 import { hooks } from "../internal.ts";
-import { createMockTransportPair, requestedGroups } from "../mock.ts";
+import { createMockTransportPair } from "../mock.ts";
 import { lines } from "../open.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -41,7 +41,7 @@ async function peers(alpn: string) {
 	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 	const requests = track.requests();
 	void (async () => {
-		for (let fill = await requestedGroups(requests); fill; fill = await requestedGroups(requests)) {
+		for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
 			for (let key = fill.wanted(); key !== undefined; key = fill.wanted()) {
 				if (key === 1n) {
 					fill.dropGroups(1n, 2n);
@@ -257,8 +257,8 @@ test("copy fill: a filled group stops downloading once every reader left or pass
 	const requests = track.requests();
 	const fills: FillGroups[] = [];
 	const archived = (async () => {
-		const fill = await requestedGroups(requests);
-		if (fill?.kind !== "groups") throw new Error("no fill of groups");
+		const fill = await requests.requestedFill();
+		if (!fill) throw new Error("no fill of groups");
 		fills.push(fill);
 		const group = defined(fill.accept(0n));
 		group.writeFrame({ payload: enc.encode("old 0"), timestamp: Timestamp.fromMillis(0) });
@@ -324,8 +324,8 @@ test("copy fill: a filled group nobody holds any more stops downloading", async 
 	const requests = track.requests();
 	const fills: FillGroups[] = [];
 	const archived = (async () => {
-		const fill = await requestedGroups(requests);
-		if (fill?.kind !== "groups") throw new Error("no fill of groups");
+		const fill = await requests.requestedFill();
+		if (!fill) throw new Error("no fill of groups");
 		fills.push(fill);
 		const group = defined(fill.accept(0n));
 		group.writeFrame({ payload: enc.encode("old 0"), timestamp: Timestamp.fromMillis(0) });
@@ -396,8 +396,8 @@ test("copy fill: a group reset to make room ends", async () => {
 	const requests = track.requests();
 	const fills: FillGroups[] = [];
 	const archived = (async () => {
-		const fill = await requestedGroups(requests);
-		if (fill?.kind !== "groups") throw new Error("no fill of groups");
+		const fill = await requests.requestedFill();
+		if (!fill) throw new Error("no fill of groups");
 		fills.push(fill);
 		const group = defined(fill.accept(0n));
 		group.writeFrame({ payload: enc.encode("old 0"), timestamp: Timestamp.fromMillis(0) });
@@ -498,7 +498,7 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 		let archived = false;
 		const requests = track.requests();
 		void (async () => {
-			for (let fill = await requestedGroups(requests); fill; fill = await requestedGroups(requests)) {
+			for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
 				for (let key = fill.wanted(); key !== undefined; key = fill.wanted()) {
 					if (key !== 2n || !archived) {
 						fill.refuseGroups(key, key + 1n, new StreamError(StreamCode.NotFound));
