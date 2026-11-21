@@ -334,7 +334,12 @@ mod tests {
 		let mut config = live.catalog.snapshot().video.renditions[&primary].clone();
 		config.preference = 1;
 		let mut sibling = live.add_track(".sibling", |catalog, name| {
-			catalog.modify().unwrap().video.renditions.insert(name, config);
+			catalog
+				.modify(catalog.next_timestamp())
+				.unwrap()
+				.video
+				.renditions
+				.insert(name, config);
 		});
 		assert!(primary.as_str() < sibling.name(), "name order would pick the primary");
 		let mut export = Export::new(live.source().await, live.catalog_stream().await);

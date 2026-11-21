@@ -2562,11 +2562,14 @@ mod tests {
 		let broadcast = origin.route("room", moq_net::origin::RouteOptions::default()).unwrap();
 		let mut catalog = catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
 		catalog
-			.mutate(|catalog| {
-				let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
-				config.broadcast = Some(moq_net::path::Relative::new("./portrait").unwrap());
-				catalog.video.renditions.insert("tall".to_string(), config);
-			})
+			.mutate(
+				|catalog| {
+					let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+					config.broadcast = Some(moq_net::path::Relative::new("./portrait").unwrap());
+					catalog.video.renditions.insert("tall".to_string(), config);
+				},
+				catalog.next_timestamp(),
+			)
 			.unwrap();
 		let mut audio = rendition(broadcast.broadcast(), &catalog, "audio");
 		let recorder = Recorder::default();
