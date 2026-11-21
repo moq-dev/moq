@@ -1044,11 +1044,6 @@ export const hooks: {
 	expireGroup: (group: GroupConsumer, expiry: Expiry) => void;
 	/** The drift policy a group carries, if any; see {@link expireGroup}. */
 	groupExpiry: (group: GroupConsumer) => Expiry | undefined;
-	/**
-	 * Judge a copy served in place of another reader by that reader's drift policy for good, so
-	 * the copy's own recoveries never swap in their fetch's policy.
-	 */
-	pinGroupExpiry: (group: GroupConsumer, expiry: Expiry) => void;
 	/** The failure that ends a group's reader, as its `closed` would settle, without building that handle. */
 	groupFailed: (group: GroupConsumer) => Error | undefined;
 	/**
@@ -1469,9 +1464,6 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	groupExpiry: () => {
-		throw new Error("group.ts not loaded");
-	},
-	pinGroupExpiry: () => {
 		throw new Error("group.ts not loaded");
 	},
 	groupFailed: () => {

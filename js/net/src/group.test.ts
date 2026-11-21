@@ -919,39 +919,3 @@ test("a drained unfinished group fails with Old when its budget gives up", async
 	expect(consumer.done).toBe(true);
 	expect(await consumer.closed).toBe(err as StreamError);
 });
-
-test("a pinned budget survives adopting a replacement that carries its own", async () => {
-	const producer = new Producer(0n);
-	const consumer = producer.mirror();
-	const replacement = new Producer(0n);
-	const route = new Signal(false);
-	const adopted = Promise.withResolvers<void>();
-	hooks.recoverGroup(consumer, {
-		changed: route,
-		wants: () => route.peek(),
-		replace: async () => ({
-			group: replacement.mirror(),
-			expiry: { expired: () => false, changed: [] },
-			adopt: () => {
-				route.set(false);
-				adopted.resolve();
-			},
-			discard: () => {},
-		}),
-	});
-	const stale = new Signal(false);
-	const pinned = { expired: () => stale.peek(), changed: [stale] };
-	hooks.pinGroupExpiry(consumer, pinned);
-	producer.writeFrame(textFrame("zero"));
-	expect(await consumer.readString()).toBe("zero");
-	route.set(true);
-	const readable = consumer.readable();
-	await adopted.promise;
-	await new Promise<void>((resolve) => setImmediate(resolve));
-	expect(hooks.groupExpiry(consumer)).toBe(pinned);
-	stale.set(true);
-	expect(await consumer.expired).toBeInstanceOf(StreamError);
-	replacement.finish();
-	await readable;
-	producer.finish();
-});
