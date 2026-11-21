@@ -10,8 +10,9 @@ use futures::FutureExt;
 use moq_net::cache;
 use serde::{Deserialize, Serialize};
 
-/// The headroom a relay keeps free when `headroom` is unset, so an authenticated
-/// publisher opening tracks can't grow the relay without bound.
+/// The headroom a relay targets when `headroom` is unset, so an authenticated
+/// publisher opening tracks is held toward a memory target instead of growing the
+/// cache freely. Only a target: see [`governor`].
 const DEFAULT_HEADROOM: &str = "10%";
 
 /// How often the headroom governor re-samples system memory.
@@ -22,7 +23,7 @@ const GOVERNOR_INTERVAL: Duration = Duration::from_secs(5);
 /// Non-latest groups stay cached until they sit unaccessed past the wall-clock
 /// LRU window (`duration`, 30s by default) or the pool runs out of room,
 /// whichever comes first (the latest group of every track is always retained).
-/// With none of the knobs set the pool keeps 10% of system memory free
+/// With none of the knobs set the pool targets 10% of system memory free
 /// ([`DEFAULT_HEADROOM`]); `headroom = "0"` with no `capacity` leaves it unbounded in
 /// bytes, so only the LRU window bounds memory.
 #[derive(usage_rs::Args, Clone, Debug, Default, Deserialize, Serialize)]
@@ -40,12 +41,14 @@ pub struct Config {
 	#[usage(long = "cache-capacity", env = "MOQ_CACHE_CAPACITY", setting = "cache.capacity")]
 	pub capacity: Option<String>,
 
-	/// Keep at least this much system memory available, e.g. "2GiB" or "10%".
+	/// Target at least this much system memory available, e.g. "2GiB" or "10%".
 	/// Defaults to "10%" (respecting the cgroup limit when set); "0" disables it.
 	///
 	/// Runs a background governor that re-sizes the cache every few seconds
 	/// so the cache soaks up idle memory but is the first thing reclaimed when
-	/// the rest of the system needs it. `capacity` also caps the absolute size.
+	/// the rest of the system needs it. It is a target, not a guarantee: writes
+	/// between checks can overshoot it, and the newest frame of every live track
+	/// is kept past it. `capacity` also caps the absolute size.
 	/// "0" removes the governor, leaving the cache unbounded unless `capacity`
 	/// is set: an authenticated publisher can then grow the relay without limit.
 	#[usage(long = "cache-headroom", env = "MOQ_CACHE_HEADROOM", setting = "cache.headroom")]
@@ -186,9 +189,11 @@ fn system() -> anyhow::Result<sysinfo::System> {
 	sysinfo::System::new().map_err(|err| anyhow::anyhow!("failed to read system memory: {err}"))
 }
 
-/// Re-size the pool periodically so at least `headroom` bytes of system memory
-/// stay available: the cache grows into idle memory and shrinks (tracks evict
-/// their stalest groups as they write) when the rest of the system needs it.
+/// Re-size the pool periodically, aiming to leave at least `headroom` bytes of
+/// system memory available. A target sampled every [`GOVERNOR_INTERVAL`], not a
+/// guarantee: a burst between ticks can overshoot it, and the live edge of every
+/// track is kept past it. The cache grows into idle memory and shrinks (tracks
+/// evict their stalest groups as they write) when the rest of the system needs it.
 ///
 /// Weak on purpose. The pool is the one handle that reaches everything charging
 /// into the budget, so tying the task to it means the task ends when the last
@@ -209,7 +214,8 @@ async fn governor(mut sys: sysinfo::System, pool: cache::PoolWeak, capacity: Opt
 		sys.refresh_memory();
 
 		let available = match cgroup_limits(&mut sys) {
-			Some(limits) => limits.free_memory,
+			// The cgroup's room, unless the host as a whole has less.
+			Some(limits) => limits.free_memory.min(sys.available_memory()),
 			None => sys.available_memory(),
 		};
 

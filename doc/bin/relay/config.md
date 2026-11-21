@@ -318,11 +318,15 @@ headroom = "10%"                     # Keep this much system memory free and gro
 duration = "30s"                     # Reclaim groups idle this long, and cap every track's max age at it.
 ```
 
-With no settings, the relay keeps 10% of system memory free (the cgroup limit
-when set), so a publisher that opens many tracks can't grow it without bound.
-`headroom` takes bytes or a percentage, and `capacity` also caps the cache at an
-absolute size. `headroom = "0"` removes the governor, so the cache grows without
-bound unless `capacity` is set: only run that where every publisher is trusted.
+With no settings, the relay targets 10% of system memory free (the cgroup limit
+when set), checked every five seconds, and shrinks the cache toward it as
+publishers write. It is a target, not a hard bound: a burst of writes between
+checks can overshoot it, and the newest frame of every live track is kept
+whatever the target, so a publisher that opens many tracks still holds that much
+until it stops. `headroom` takes bytes or a percentage, and `capacity` also caps
+the cache at an absolute size. `headroom = "0"` removes the governor, so the
+cache grows without bound unless `capacity` is set: only run that where every
+publisher is trusted.
 
 `capacity` is a byte target, repaid as active publishers write. `duration`
 (30s by default) bounds memory by age, and sweeps on a timer, so a publisher
