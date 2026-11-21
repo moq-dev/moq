@@ -76,6 +76,19 @@ class Mesh:
             link.other(relay) for link in self.links if link.touches(relay) and (build is None or link.dialed_on(build))
         ]
 
+    def unreached(self, on: dict[str, str]) -> list[str]:
+        """The relays the first can't reach when each relay runs the build `on` names."""
+        links = [link for link in self.links if link.dialed_on(on[link.dial])]
+        seen = {self.relays[0]}
+        frontier = [self.relays[0]]
+        while frontier:
+            relay = frontier.pop()
+            for link in links:
+                if link.touches(relay) and link.other(relay) not in seen:
+                    seen.add(link.other(relay))
+                    frontier.append(link.other(relay))
+        return [relay for relay in self.relays if relay not in seen]
+
     def builds(self) -> list[str | None]:
         """The builds whose graphs differ: old and new when a link names one, else just None."""
         return ["old", "new"] if any(link.build for link in self.links) else [None]
@@ -192,6 +205,9 @@ def load_script(path: Path, mesh: Mesh) -> Script:
     if start not in ("new", "old"):
         raise ValueError(f"{path}: start is `new` or `old`")
     events = []
+    # Each relay's build as the script plays, so a graph that changes across a roll is checked
+    # at every step rather than only on either build alone.
+    on = dict.fromkeys(mesh.relays, start)
     for raw in doc.get("events", []):
         kind = raw.get("kind")
         if kind not in KINDS:
@@ -203,6 +219,10 @@ def load_script(path: Path, mesh: Mesh) -> Script:
             event["relays"] = raw.get("relays", mesh.relays)
             if not event["relays"] or set(event["relays"]) - set(mesh.relays):
                 raise ValueError(f"{path}: a roll's `relays` lists relays of the mesh")
+            for relay in event["relays"]:
+                on[relay] = raw["to"]
+                if cut := mesh.unreached(on):
+                    raise ValueError(f"{path}: once {relay} rolls to {raw['to']}, {sorted(cut)} are cut off")
         if kind in ("reopen-relay", "kill", "end-source", "reopen-link"):
             relay = raw.get("relay", mesh.busiest())
             if relay not in mesh.relays:
@@ -220,6 +240,10 @@ def load_script(path: Path, mesh: Mesh) -> Script:
                 if link is None:
                     raise ValueError(
                         f"{path}: reopen-link names {name!r}; links are {[other.name for other in mesh.links]}"
+                    )
+                if not link.dialed_on(on[link.dial]):
+                    raise ValueError(
+                        f"{path}: reopen-link names {name}, which {link.dial} does not dial on its build then"
                     )
             event["link"] = link.name
         event["times"] = int(raw.get("times", 1))
@@ -587,6 +611,8 @@ class Relay:
         self.proc = Proc(f"relay {name}", run.dir / f"relay-{name}.log")
         self.negotiated = Negotiated(self.proc.log)
         self.build: Build | None = None
+        # When the running process started, so a link counts only the sessions it opened.
+        self.started = 0.0
         self.totals = Totals()
         self.publisher = Proc(f"publisher {name}", run.dir / f"publisher-{name}.log")
         self.reader = Proc(f"reader {name}", run.dir / f"reader-{name}.log")
@@ -655,6 +681,7 @@ connect = [{", ".join(peers)}]
         with self.run.lock:
             self.totals.restart()
         self.negotiated.restart()
+        self.started = time.time()
         self.proc.start([build.binary, str(path)])
         deadline = time.time() + 30
         while time.time() < deadline:
@@ -793,9 +820,9 @@ class Run:
             raise RuntimeError(f"shaper {link.name} exited on start; see {self.shapers[link.name].log}")
 
     def versions(self) -> dict[str, str]:
-        """Each dialed link's version, as its acceptor negotiated it on the dialer's newest open
-        session there, or `down` when the dialer holds none. A link its dialer's build does not
-        dial is left out."""
+        """Each dialed link's version, as its acceptor negotiated it on the newest open session the
+        dialer's running process opened there, or `down` when it holds none or is not running. A
+        link its dialer's build does not dial is left out."""
         with self.auth.lock:
             sessions = [e for e in self.auth.events if e["peer"]]
         ended = {e["id"] for e in sessions if e["event"] == "end"}
@@ -803,14 +830,17 @@ class Run:
             relay.negotiated.update()
         out = {}
         for link in self.mesh.links:
-            dialer = self.relays[link.dial].build
-            if dialer is None or not link.dialed_on(dialer.name):
+            dialer = self.relays[link.dial]
+            if dialer.build is None or not link.dialed_on(dialer.build.name):
                 continue
             accepted = self.relays[link.accept].negotiated.sessions
             version = "down"
-            for e in sessions:
-                if e["peer"] == link.dial and e["id"] in accepted and e["id"] not in ended:
-                    version = accepted[e["id"]]
+            if dialer.proc.alive:
+                for e in sessions:
+                    # An acceptor holds a dead process's session until its idle timeout.
+                    fresh = e["t"] >= dialer.started
+                    if e["peer"] == link.dial and fresh and e["id"] in accepted and e["id"] not in ended:
+                        version = accepted[e["id"]]
             out[link.name] = version
         return out
 
@@ -1437,6 +1467,8 @@ def main() -> int:
     run.add_argument("--report", type=Path, required=True)
     run.add_argument("--log", default="info", help="the relays' log level")
     args = parser.parse_args()
+    if args.command == "run" and args.follow < 0:
+        parser.error("--follow must be 0 (all) or more")
 
     if args.command == "ports":
         print(ports_needed(load_mesh(args.mesh)))
@@ -1475,7 +1507,7 @@ def main() -> int:
             "diameter": {build or "all": mesh.diameter(build) for build in mesh.builds()},
         },
         "broadcasts": args.broadcasts,
-        "follow": args.follow or args.broadcasts,
+        "follow": min(args.follow or args.broadcasts, args.broadcasts),
         "builds": {name: build.version for name, build in run.builds.items()},
         "events": run.events,
         "violations": failing,

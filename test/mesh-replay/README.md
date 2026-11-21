@@ -61,7 +61,8 @@ build = "old"    # optional: only a dialer on this build dials it
 
 A link naming a `build` models a roll that also changes the graph, such as a new
 build that renders its dial set by a new rule: mid-roll, a link exists while its
-dialer runs that build. The graph must be connected on either build.
+dialer runs that build. The graph must be connected on either build, and at every
+step of each scripted roll.
 
 [`ring6.toml`](ring6.toml), the default and nightly mesh, is a ring of six with one
 chord: its longest route crosses three links, every cut leaves a detour, and every
@@ -139,8 +140,10 @@ dialed is starred: a release that predates
 [moq-dev/moq#9158](https://github.com/moq-dev/moq/pull/9158) drains only the sessions it
 accepted, so its starred links read DEAD.
 
-Each link's version is the one its accepting relay logged negotiating on the dialer's
-newest session there that has not ended (`down` when none). The report lists, for each
+Each link's version is the one its accepting relay logged negotiating on the newest
+session there, not yet ended, that the dialer's running process opened (`down` when none,
+or while the dialer is down). A build that does not log `negotiated version=` reads `down`
+on every link it accepts. The report lists, for each
 event that changed one, how many links are on each version and which moved.
 
 `report.json` holds the same per relay, each link's version after each event, the worst

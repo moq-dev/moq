@@ -118,6 +118,22 @@ class MeshTest(unittest.TestCase):
         only = replay.load_mesh(mesh_file(body.replace('accept = "b"\n', 'accept = "b"\nbuild = "new"\n', 1)))
         with self.assertRaisesRegex(ValueError, "name the `link`"):
             replay.load_script(mesh_file('[[events]]\nkind = "reopen-link"\nrelay = "a"\n'), only)
+        # A named link fault needs its dialer's build at that point to dial it.
+        reopen = '[[events]]\nkind = "reopen-link"\nrelay = "a"\nlink = "a-c"\n'
+        self.assertEqual(replay.load_script(mesh_file('start = "old"\n' + reopen), mesh).events[0]["link"], "a-c")
+        with self.assertRaisesRegex(ValueError, "a does not dial on its build then"):
+            replay.load_script(mesh_file(reopen), mesh)
+        # Each build's graph is whole, but rolling a before c leaves a alone mid-roll.
+        split = replay.load_mesh(
+            mesh_file(
+                'relays = ["a", "b", "c"]\n[[links]]\ndial = "a"\naccept = "b"\nbuild = "old"\n'
+                '[[links]]\ndial = "c"\naccept = "a"\nbuild = "new"\n[[links]]\ndial = "b"\naccept = "c"\n'
+            )
+        )
+        roll = 'start = "old"\n[[events]]\nkind = "roll"\nto = "new"\nrelays = [{}]\n'
+        replay.load_script(mesh_file(roll.format('"c", "a", "b"')), split)
+        with self.assertRaisesRegex(ValueError, r"once a rolls to new, \['b', 'c'\] are cut off"):
+            replay.load_script(mesh_file(roll.format('"a", "c", "b"')), split)
 
     def test_script_defaults_to_the_busiest_relay(self):
         mesh = replay.load_mesh(mesh_file(RING + '[[links]]\ndial = "a"\naccept = "c"\n'))
@@ -293,9 +309,13 @@ class BuildTest(unittest.TestCase):
         run = SimpleNamespace(
             auth=SimpleNamespace(lock=threading.Lock(), events=events),
             relays={
-                "a": SimpleNamespace(build=new, negotiated=replay.Negotiated(log)),
-                "b": SimpleNamespace(build=new, negotiated=negotiated),
-                "c": SimpleNamespace(build=new, negotiated=replay.Negotiated(log)),
+                name: SimpleNamespace(
+                    build=new,
+                    negotiated=negotiated if name == "b" else replay.Negotiated(log),
+                    proc=SimpleNamespace(alive=True),
+                    started=0.0,
+                )
+                for name in "abc"
             },
             mesh=SimpleNamespace(links=links),
         )
@@ -305,23 +325,34 @@ class BuildTest(unittest.TestCase):
 
         # The new build does not dial c-b, and a-b has no session yet.
         self.assertEqual(versions(), {"a-b": "down"})
-        events.append({"event": "connect", "id": "aa", "peer": "a"})
+        events.append({"event": "connect", "id": "aa", "peer": "a", "t": 1.0})
         with log.open("a") as f:
             f.write(line("aa", "moq-lite-06"))
             f.write("a line still being writ")
         self.assertEqual(versions(), {"a-b": "moq-lite-06"})
         # A newer session wins; the older one ending changes nothing.
-        events.append({"event": "connect", "id": "bb", "peer": "a"})
+        events.append({"event": "connect", "id": "bb", "peer": "a", "t": 2.0})
         with log.open("a") as f:
             f.write("ten\n" + line("bb", "moq-lite-07-wip"))
-        events.append({"event": "end", "id": "aa", "peer": "a"})
+        events.append({"event": "end", "id": "aa", "peer": "a", "t": 3.0})
         self.assertEqual(versions(), {"a-b": "moq-lite-07-wip"})
-        events.append({"event": "end", "id": "bb", "peer": "a"})
+        events.append({"event": "end", "id": "bb", "peer": "a", "t": 4.0})
         self.assertEqual(versions(), {"a-b": "down"})
         # A restarted acceptor holds none of its last process's sessions.
-        events.append({"event": "connect", "id": "cc", "peer": "a"})
+        events.append({"event": "connect", "id": "cc", "peer": "a", "t": 5.0})
         with log.open("a") as f:
             f.write(line("cc", "moq-lite-06"))
+        self.assertEqual(versions(), {"a-b": "moq-lite-06"})
+        # A dead dialer's link is down, though its acceptor still holds the session.
+        run.relays["a"].proc.alive = False
+        self.assertEqual(versions(), {"a-b": "down"})
+        # Restarted, the dialer counts only the sessions its new process opened.
+        run.relays["a"].proc.alive, run.relays["a"].started = True, 6.0
+        self.assertEqual(versions(), {"a-b": "down"})
+        events.append({"event": "connect", "id": "dd", "peer": "a", "t": 7.0})
+        with log.open("a") as f:
+            f.write(line("dd", "moq-lite-07-wip"))
+        self.assertEqual(versions(), {"a-b": "moq-lite-07-wip"})
         negotiated.restart()
         self.assertEqual(versions(), {"a-b": "down"})
         # On the old build, the dialer dials its own link too.
