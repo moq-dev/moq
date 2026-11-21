@@ -363,10 +363,23 @@ pub fn repair<F: Read + Seek>(file: &mut F, chapters: &[Chapter]) -> Result<Opti
 		return Err(Error::Unrepairable("its reserved box is neither free nor its mdat header").into());
 	}
 	// What a finish appended, unless anything differs, a cut-short one included. Given no
-	// chapters, a finish that listed some counts too, which they would otherwise lose.
-	let indexed = (eof - end == finish.tail.len() as u64
-		&& read_at(file, end, eof - end, eof)?.is_some_and(|trailer| trailer == finish.tail))
-		|| (chapters.is_empty() && keeps_chapters(file, end, eof, &finish.tail)?);
+	// chapters, a finish that listed some counts too, which they would otherwise lose, so
+	// its trailer is the one written back.
+	let indexed = if eof - end == finish.tail.len() as u64
+		&& read_at(file, end, eof - end, eof)?.is_some_and(|trailer| trailer == finish.tail)
+	{
+		true
+	} else if let Some(trailer) = chapters
+		.is_empty()
+		.then(|| keeps_chapters(file, end, eof, &finish.tail))
+		.transpose()?
+		.flatten()
+	{
+		finish.tail = Bytes::from(trailer);
+		true
+	} else {
+		false
+	};
 	if indexed && slot == finish.mdat {
 		return Ok(None);
 	}
@@ -381,38 +394,52 @@ pub fn repair<F: Read + Seek>(file: &mut F, chapters: &[Chapter]) -> Result<Opti
 	Ok(Some(finish))
 }
 
-/// Whether the file's trailer from `end` is a finish that listed chapters: its text and a
-/// `moov` that is `plain`, the `moov` of a finish without chapters, apart from the chapters.
-fn keeps_chapters<F: Read + Seek>(file: &mut F, end: u64, eof: u64, plain: &[u8]) -> Result<bool> {
-	let mut atom = Atom::read(file, end, eof)?;
-	if let Some(text) = atom.as_ref().filter(|atom| atom.kind == *b"mdat") {
-		atom = Atom::read(file, text.end, eof)?;
-	}
-	let Some(atom) = atom.filter(|atom| atom.kind == *b"moov" && atom.end == eof) else {
-		return Ok(false);
+/// The file's trailer from `end` when it is a finish that listed chapters: its text and a
+/// `moov` that is `plain`, the `moov` of a finish without chapters, apart from the chapters,
+/// with the text track reading exactly that text.
+fn keeps_chapters<F: Read + Seek>(file: &mut F, end: u64, eof: u64, plain: &[u8]) -> Result<Option<Vec<u8>>> {
+	let Some(text) = Atom::read(file, end, eof)?.filter(|atom| atom.kind == *b"mdat") else {
+		return Ok(None);
+	};
+	let Some(atom) = Atom::read(file, text.end, eof)?.filter(|atom| atom.kind == *b"moov" && atom.end == eof) else {
+		return Ok(None);
 	};
 	let Some(data) = read_at(file, atom.start, atom.end - atom.start, eof)? else {
-		return Ok(false);
+		return Ok(None);
 	};
 	// A moov that does not decode is damage for the finish to replace, not a failure.
 	let Ok(mut moov) = mp4_atom::Moov::decode(&mut std::io::Cursor::new(data.as_slice())) else {
-		return Ok(false);
+		return Ok(None);
 	};
-	let text = moov
+	let track = moov
 		.trak
 		.iter()
 		.rposition(|trak| trak.mdia.hdlr.handler == b"text".into());
-	let (Some(text), Some(_)) = (text, moov.udta.take().and_then(|udta| udta.chpl)) else {
-		return Ok(false);
+	let (Some(track), Some(_)) = (track, moov.udta.take().and_then(|udta| udta.chpl)) else {
+		return Ok(None);
 	};
-	moov.trak.remove(text);
+	// The text track must read the mdat just before the moov: from where it starts, and as
+	// many bytes as its samples add up to.
+	let stbl = &moov.trak[track].mdia.minf.stbl;
+	let sizes = match &stbl.stsz.samples {
+		mp4_atom::StszSamples::Different { sizes } => sizes.iter().map(|&size| u64::from(size)).sum::<u64>(),
+		mp4_atom::StszSamples::Identical { count, size } => u64::from(*count) * u64::from(*size),
+	};
+	let offsets = stbl.co64.as_ref().map(|co64| co64.entries.as_slice());
+	if offsets != Some(&[text.body][..]) || sizes != text.end - text.body {
+		return Ok(None);
+	}
+	moov.trak.remove(track);
 	for trak in &mut moov.trak {
 		trak.tref = None;
 	}
 	moov.mvhd.next_track_id = moov.trak.iter().map(|trak| trak.tkhd.track_id).max().unwrap_or(0) + 1;
 	let mut buf = Vec::new();
 	moov.encode(&mut buf).map_err(crate::Error::mp4)?;
-	Ok(buf == plain)
+	if buf != plain {
+		return Ok(None);
+	}
+	read_at(file, end, eof - end, eof)
 }
 
 /// The `len` bytes at `start`, or `None` when they do not end by `limit`.
@@ -2093,6 +2120,23 @@ mod tests {
 		broken[tkhd + 4] = 9;
 		assert!(<mp4_atom::Moov as mp4_atom::Decode>::decode(&mut std::io::Cursor::new(&broken[moov..])).is_err());
 		assert!(repair(&broken).unwrap().is_some());
+	}
+
+	/// A finish that crashed before its mdat header was complete still lists its chapters
+	/// after a repair given none, which only completes the header.
+	#[tokio::test(start_paused = true)]
+	async fn repairing_without_chapters_keeps_them_when_only_the_header_is_unfinished() {
+		let (mut file, finish) = recorded(&chapters()).await;
+		let reserved = finish.mdat_offset as usize;
+		let text = finish.moov_offset as usize;
+		apply(finish, &mut file);
+		let finished = file.clone();
+
+		file[reserved..reserved + 8].copy_from_slice(&super::FREE[..8]);
+		let repaired = repair(&file).unwrap().expect("unfinished");
+		apply(repaired, &mut file);
+		assert_eq!(file, finished);
+		assert_eq!(&file[text + 4..text + 8], b"mdat");
 	}
 
 	/// A repair given other chapters than a finished file lists finishes it again.
