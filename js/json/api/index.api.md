@@ -31,7 +31,7 @@ export namespace Snapshot {
 		export type Config<T> = Pick<Snapshot.Config<T>, "schema"> & {
 			delay?: Duration;
 			priority?: number;
-			track: Pick<Track.Consumer, "subscribe">;
+			track: Pick<Track.Consumer, "subscribe" | "name">;
 		};
 	}
 	export class Consumer<T> {
