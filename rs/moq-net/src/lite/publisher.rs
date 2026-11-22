@@ -4959,24 +4959,17 @@ impl Bounds {
 	/// `Subscriber Max Age` bounds the whole subscription; `None` on lite-07, which carries
 	/// one on each live start instead.
 	///
-	/// Lite-06 resolves an absent start from that max age, so it takes every group still
-	/// within it; with no max age, it reaches back to the oldest group. Before lite-06 an
-	/// absent start is the latest group, still expiring past the max age, and lite01/02 carry
-	/// none, so nothing expires (see [`cursor_floor`]). A named start is a history floor on
+	/// An absent start takes every group still within that max age, or every group with none,
+	/// as lite01/02 never carry one. Lite-06 resolves it there; before lite-06 an absent start
+	/// is the latest group, which [`cursor_floor`] places rather than a live join, since
+	/// lite01/02 keep the newest group known on arrival. A named start is a history floor on
 	/// every wire, bounded by the publisher's max age.
 	fn legacy(version: Version, max_delay: Option<Duration>) -> Option<crate::track::Start> {
 		use crate::track::Start;
 		if version.has_ranges() {
 			return None;
 		}
-		Some(match (version.resolves_start(), max_delay) {
-			(false, max) => Start::Live {
-				min: Duration::ZERO,
-				max,
-			},
-			(true, Some(max)) => Start::within(max),
-			(true, None) => Start::Oldest,
-		})
+		Some(max_delay.map_or(Start::Oldest, Start::within))
 	}
 
 	/// Whether a subscription to these ranges over `version` is answered once they are
@@ -8975,10 +8968,10 @@ mod serve_group_test {
 	}
 
 	/// A live join added behind the SUBSCRIBE's start reports where it was placed, even when a
-	/// later update pins it there before its SUBSCRIBE_STARTED goes out: the report keeps that
-	/// it was added as a join.
+	/// later update lands before its SUBSCRIBE_STARTED goes out: the update leaves it a live
+	/// join, never pinned to a time start, which would turn its groups into history.
 	#[kio::test]
-	async fn lite07_a_join_pinned_before_its_report_keeps_its_start() {
+	async fn lite07_a_join_updated_before_its_report_keeps_its_start() {
 		let mut track = track::Producer::new(
 			Arc::new(broadcast::Info::default()),
 			"test",
@@ -9001,7 +8994,7 @@ mod serve_group_test {
 			end: None,
 		};
 		run.update(lite07_add(&run, &[(0, first)], 1, &[back]));
-		// Before any SUBSCRIBE_STARTED, another update pins the join to the group it resolved to.
+		// Before any SUBSCRIBE_STARTED, another update leaves the join live.
 		run.update(lite07_add(
 			&run,
 			&[(0, first), (1, back)],
@@ -9010,8 +9003,11 @@ mod serve_group_test {
 		));
 		assert_eq!(
 			run.track.subscription().ranges[1].start,
-			crate::track::Start::Time(2000),
-			"pinned before the report"
+			crate::track::Start::Live {
+				min: Duration::from_secs(2),
+				max: None
+			},
+			"still a live join"
 		);
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		let started: Vec<_> = responses(&mut writer, &log)
@@ -9087,12 +9083,15 @@ mod serve_group_test {
 		)));
 		let resolved = run.track.resolved_range(1).map(|r| (r.start, r.end));
 		assert_eq!(resolved, Some((2000, None)), "the update kept where it started");
-		// The model holds it pinned to that group, so a relay's copies, which take the whole
-		// preferences, resolve it there too.
+		// The model keeps it a live join, placed by its Range ID rather than pinned to a time
+		// start, so its groups stay live ones that expire past its max age.
 		assert_eq!(
 			run.track.subscription().ranges[1],
 			track::Range {
-				start: crate::track::Start::Time(2000),
+				start: crate::track::Start::Live {
+					min: Duration::from_secs(2),
+					max: None
+				},
 				end: None,
 			}
 		);
@@ -10500,7 +10499,7 @@ mod serve_group_test {
 				let mut live = remote
 					.track("test")
 					.unwrap()
-					.subscribe(track::Subscription::default().with_range(0..))
+					.subscribe(track::Subscription::default())
 					.await
 					.unwrap();
 				assert_eq!(live.recv_group().await.unwrap().unwrap().start, 2);
@@ -10588,7 +10587,7 @@ mod serve_group_test {
 				crate::track::Info::timed(),
 			);
 			track.start_at(0).unwrap();
-			let subscriber = track.subscribe(track::Subscription::default());
+			let subscriber = track.subscribe(track::Subscription::default().with_max(Duration::ZERO));
 			let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
 			// The newer group beats the older ones, so the start resolves at the source's 0.
 			track.drop_groups(2..4, crate::StreamError::NotFound);
@@ -10697,10 +10696,11 @@ mod serve_group_test {
 		assert_eq!(drops(&mut writer, &log, version).await, [(0, 1), (3, 4), (6, 6)]);
 	}
 
-	/// A lowered start restarts the age of the gaps it newly asks for, as the subscriber does,
-	/// so a gap below the old start isn't folded away on the time before the update.
+	/// A lowered start is a history floor, so a group it reaches that arrives long after its
+	/// successor is served whole, whatever max age the subscription carries, and the drops at
+	/// the end name only the groups the feed gave up.
 	#[kio::test]
-	async fn the_end_drops_below_a_lowered_start_after_the_grace() {
+	async fn a_lowered_start_serves_a_late_group_whole() {
 		let version = Version::Lite06;
 		let mut track = track::Producer::new(
 			Arc::new(broadcast::Info::default()),
@@ -10728,9 +10728,8 @@ mod serve_group_test {
 		});
 		{
 			let mut run = std::pin::pin!(kio::wait(|waiter| run.poll(&mut writer, waiter)));
-			// Group 2's successor arrives with it: group 5 arrived a full budget before
-			// the update, so group 2 bounded by it would be stale on the wall clock. Group 4
-			// is, and goes unserved.
+			// Group 5 arrived a full max age before group 4, which a live join would judge
+			// stale on the wall clock, but the lowered start is history.
 			write_group(&mut track, 4, 4);
 			write_group(&mut track, 2, 2);
 			assert!(futures::poll!(run.as_mut()).is_pending());
@@ -10738,9 +10737,8 @@ mod serve_group_test {
 			drop(track);
 			run.await.unwrap();
 		}
-		// The feed gave up on 0, 1 and 3 before the update, so they are misses named as the
-		// cursor judges them, ahead of the stale group.
-		assert_eq!(drops(&mut writer, &log, version).await, [(0, 1), (3, 3), (4, 4)]);
+		// The feed gave up on 0, 1 and 3, so they are misses named as the cursor judges them.
+		assert_eq!(drops(&mut writer, &log, version).await, [(0, 1), (3, 3)]);
 	}
 
 	/// After a raised start, lowering it again restarts the gaps below the raised floor, not
