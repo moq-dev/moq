@@ -143,7 +143,10 @@ test("the observer asks for the decoder's delay plus its stretch and warmup, not
 	});
 	try {
 		while (!track.subscription.peek()) await track.subscription.changed();
-		expect(track.subscription.peek()).toMatchObject({ delay: { max: Duration.millis(2180) } });
+		// The live join starts the delay plus the warmup back, and reaches that plus the stretch.
+		expect(track.subscription.peek()).toMatchObject({
+			ranges: [{ start: { live: { min: Duration.millis(180), max: Duration.millis(2180) } } }],
+		});
 	} finally {
 		await capture.close();
 		source.close();
