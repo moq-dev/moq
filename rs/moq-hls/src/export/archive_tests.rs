@@ -128,10 +128,8 @@ impl Recording {
 			sources.insert(name.to_string(), Source { media });
 		}
 
-		// The source publishes in bursts, so the budget covers a whole recording.
 		let config = moq_archive::producer::Config::default()
-			.with_flush(Duration::from_millis(100))
-			.with_max_delay(Duration::from_secs(3600));
+			.with_flush(Duration::from_millis(100));
 		let recorder = tokio::spawn(moq_archive::Producer::new(store.clone(), broadcast.consume(), config).run());
 		// Subscribed before anything is published, so every group is recorded live.
 		for source in sources.values() {

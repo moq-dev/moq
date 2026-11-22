@@ -306,15 +306,17 @@ fn gap(edge: std::time::Duration, resume: Timestamp) -> Result<Item, moq_net::Er
 pub struct Delay {
 	/// The playout delay held behind the live edge, or `None` when the reader did not state one.
 	///
-	/// Stated, zero included, each subscription range starting at
-	/// [`Start::Oldest`](moq_net::track::Start::Oldest) joins live this far behind the live edge
-	/// instead ([`Start::Live`](moq_net::track::Start::Live)), so a player's buffer arrives full;
-	/// a range with a time start keeps it. A reader also keeps the group covering the live edge
-	/// less this as it starts, reading an unstated one as zero. A missing group is given up by
-	/// [`Self::max`] alone, whatever the minimum.
+	/// Each subscription range starting at [`Start::Oldest`](moq_net::track::Start::Oldest)
+	/// joins live this far behind the live edge instead, as a
+	/// [`Start::Live`](moq_net::track::Start::Live) `min`, so a player's buffer arrives full; a
+	/// range with a time start keeps it. Unstated, the join reaches back as far as [`Self::max`]
+	/// allows. A reader also keeps the group covering the live edge less this as it starts,
+	/// reading an unstated one as zero. A missing group is given up by [`Self::max`] alone,
+	/// whatever the minimum.
 	pub min: Option<std::time::Duration>,
 	/// How long a superseded group stays worth delivering, or `None` for as long as the publisher
-	/// keeps it: the subscription's [`moq_net::track::Delay::max`].
+	/// keeps it: each live join's [`Start::Live`](moq_net::track::Start::Live) `max`. With no
+	/// [`Self::min`] either, a range starting at the oldest group stays history, delivered in full.
 	pub max: Option<std::time::Duration>,
 }
 
@@ -340,31 +342,29 @@ impl Delay {
 		self
 	}
 
-	/// `subscription` at this delay: [`Self::max`] as its budget, and each range starting at the
-	/// oldest group joining live [`Self::min`] behind the live edge when it is stated.
+	/// `subscription` at this delay: each range starting at the oldest group joins live
+	/// [`Self::min`] behind the live edge, or [`Self::max`] when only that is stated, and each
+	/// live join takes [`Self::max`] as its own. A time start stays history.
 	pub fn subscription(&self, subscription: moq_net::track::Subscription) -> moq_net::track::Subscription {
 		use moq_net::track::{Range, Start};
-		// A time start, or a live join of the caller's own, is kept.
 		let ranges: Vec<Range> = subscription
 			.ranges
 			.iter()
-			.map(|range| match (range.start, self.min) {
-				(Start::Oldest, Some(min)) => Range {
-					start: Start::Live(min),
-					..*range
-				},
-				_ => *range,
+			.map(|range| {
+				let start = match (range.start, self.min.or(self.max)) {
+					(Start::Oldest, Some(min)) | (Start::Live { min, .. }, _) => Start::Live { min, max: self.max },
+					(start, _) => start,
+				};
+				Range { start, ..*range }
 			})
 			.collect();
-		subscription
-			.with_delay(moq_net::track::Delay::default().with_max(self.max))
-			.with_ranges(ranges)
+		subscription.with_ranges(ranges)
 	}
 
 	/// [`Self::subscription`] as an update to `current`, the subscription it replaces: a range
-	/// starting at the oldest group that `current` already asks with the same end keeps the
-	/// start it was subscribed with, so changing [`Self::min`] places only the ranges it adds.
-	/// A live join that already resolved stays where it started, as
+	/// starting at the oldest group that `current` already joins live with the same end keeps
+	/// that join's `min` and takes the new [`Self::max`], so changing [`Self::min`] places only
+	/// the ranges it adds. A live join that already resolved stays where it started, as
 	/// [`Consumer::set_delay`] leaves it.
 	pub fn update(
 		&self,
@@ -383,13 +383,13 @@ impl Delay {
 				continue;
 			}
 			// For a caller whose own ranges start at the oldest group or a time, as the bindings'
-			// do, a live or oldest start in `current` is one a delay placed.
-			let held = current
-				.ranges
-				.iter()
-				.find(|held| held.end == end && matches!(held.start, Start::Oldest | Start::Live(_)));
-			if let Some(held) = held {
-				range.start = held.start;
+			// do, a live join in `current` is one a delay placed.
+			let held = current.ranges.iter().find_map(|held| match held.start {
+				Start::Live { min, .. } if held.end == end => Some(min),
+				_ => None,
+			});
+			if let Some(min) = held {
+				range.start = Start::Live { min, max: self.max };
 			}
 		}
 		updated
@@ -403,10 +403,24 @@ fn stated(subscription: &moq_net::track::Subscription) -> Option<std::time::Dura
 		.ranges
 		.iter()
 		.filter_map(|range| match range.start {
-			moq_net::track::Start::Live(min) => Some(min),
+			moq_net::track::Start::Live { min, .. } => Some(min),
 			_ => None,
 		})
 		.max()
+}
+
+/// The longest any range of `subscription` keeps a superseded group: `None` while a history range
+/// is asked for or a live join has no `max`.
+fn widest(subscription: &moq_net::track::Subscription) -> Option<std::time::Duration> {
+	let mut widest = Some(std::time::Duration::ZERO);
+	for range in &subscription.ranges {
+		let max = match range.start {
+			moq_net::track::Start::Live { max, .. } => max,
+			moq_net::track::Start::Oldest | moq_net::track::Start::Time(_) => None,
+		};
+		widest = widest.zip(max).map(|(widest, max)| widest.max(max));
+	}
+	widest
 }
 
 /// A [`Consumer`]'s [`Delay`] and the catalog rendition's warmup, applied together.
@@ -484,17 +498,15 @@ impl Playout {
 impl<F: Container> Consumer<F> {
 	/// Create a Consumer wrapping the given moq-lite consumer, decoding `format`.
 	///
-	/// The ordering window inherits the subscriber's current max delay budget, clamped
-	/// to the track's max age. Put that budget on the
+	/// The ordering window inherits the widest live join `max` the subscriber asks, none while
+	/// it asks for history, clamped to the track's max age. Put that budget on the
 	/// [`moq_net::track::Subscription`] before awaiting the subscription, so the
 	/// publisher preserves the same replay window.
 	pub fn new(track: moq_net::track::Subscriber, format: F) -> Self {
 		let subscription = track.subscription();
 		// The budget is clamped to the track's max age, since a group the publisher already marks
 		// stale can't be waited for and would otherwise stall the catch-up by the excess.
-		let max_delay = subscription
-			.delay
-			.max
+		let max_delay = widest(&subscription)
 			.unwrap_or(std::time::Duration::MAX)
 			.min(track.info().max_age.unwrap_or(std::time::Duration::MAX));
 		Self {
@@ -1306,13 +1318,16 @@ impl<F: Container> Consumer<F> {
 		// tolerance set here has to reach it: otherwise moq-net skips the very groups
 		// this consumer was told to wait for, before they ever get here. It keeps the
 		// warmup too, as [`Playout::subscription`] does.
-		// Only the budget: a replaced range resolves again, so the ranges keep the join they
-		// were subscribed with.
+		// Only each live join's max, retuned in place: a replaced range resolves again, so the
+		// ranges keep the join they were subscribed with, and history stays history.
 		let max = warmed(delay, self.warmup).max;
 		let current = track.subscription();
-		let subscription = current
-			.clone()
-			.with_delay(moq_net::track::Delay::default().with_max(max));
+		let mut subscription = current.clone();
+		for range in &mut subscription.ranges {
+			if let moq_net::track::Start::Live { max: held, .. } = &mut range.start {
+				*held = max;
+			}
+		}
 		if subscription != current {
 			let _ = track.update(subscription);
 		}

@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use kio::clock::Instant;
-use moq_net::track::{Delay, Order, Position, Range, Start, Subscription};
+use moq_net::track::{Order, Position, Range, Start, Subscription};
 use moq_net::{StreamError, Timescale, group};
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt, PutMode, PutPayload};
@@ -157,17 +157,14 @@ impl<S: ObjectStore> Track<S> {
 
 	/// Record one subscription until its groups end, returning how.
 	async fn run(&mut self, info: &moq_net::track::Info) -> Result<End> {
-		let shared = self.shared.clone();
-		let config = &shared.config;
+		// History, never a live join: every group from the floor on is delivered or resolved by the
+		// publisher, bounded only by its max age, so nothing expires for staleness here.
 		let range = match self.next {
 			Some(next) => Range::from(Start::Time(next.group)),
-			None => Range::default(),
+			None => Range::ALL,
 		};
-		// The cap, since `info` may describe an older instance than the one subscribed, and a
-		// backlog a smaller budget skipped is not sent again. The budget is narrowed below.
 		let subscription = Subscription::default()
 			.with_order(Order::Ascending)
-			.with_delay(Delay::default().with_max(config.max_delay))
 			.with_ranges([range]);
 
 		let subscribed = match self.shared.broadcast.track(&self.name) {
@@ -185,13 +182,10 @@ impl<S: ObjectStore> Track<S> {
 		// The listing's info may describe an instance the name no longer resolves to, so the
 		// subscribed one's properties are what its frames are stored under.
 		self.properties(subscriber.info()).await?;
-		let max_delay = delay(config, subscriber.info());
 
-		// Groups in key order: one the track still owes is waited for until the budget gives up on
+		// Groups in key order: one the track still owes is waited for until the publisher resolves
 		// it, and one it skipped or dropped costs nothing.
 		let mut ordered = subscriber.ordered();
-		let narrowed = ordered.subscription().with_delay(Delay::default().with_max(max_delay));
-		ordered.update(narrowed)?;
 		// The group being stored, frame by frame.
 		let mut current: Option<Box<group::Consumer>> = None;
 		// The error the groups ended with, if they did.
@@ -267,7 +261,7 @@ impl<S: ObjectStore> Track<S> {
 	}
 
 	/// Store the frame read at `index` of the group being stored, or move past that group once it
-	/// ended, cleanly or not (aborted, or past the budget), keeping what it stored.
+	/// ended, cleanly or not (aborted, or past the publisher's max age), keeping what it stored.
 	fn frame(
 		&mut self,
 		current: &mut Option<Box<group::Consumer>>,
@@ -440,11 +434,6 @@ fn timescale(info: &Info) -> Result<Option<Timescale>> {
 	info.timescale
 		.map(|timescale| Timescale::new(timescale).map_err(|_| Error::Timescale(timescale)))
 		.transpose()
-}
-
-/// How long a missing group is waited for: the configured cap, or the publisher's max age below it.
-fn delay(config: &super::Config, info: &moq_net::track::Info) -> Duration {
-	info.max_age.map_or(config.max_delay, |age| age.min(config.max_delay))
 }
 
 /// `duration` in `timescale` units, saturating.

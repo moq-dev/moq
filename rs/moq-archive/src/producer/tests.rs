@@ -24,7 +24,6 @@ fn config() -> Config {
 	Config::default()
 		.with_duration(2 * SECOND)
 		.with_flush(100 * SECOND)
-		.with_max_delay(10 * SECOND)
 }
 
 fn spawn(store: &Store<Mock>, broadcast: &broadcast::Producer, config: Config) -> JoinHandle<Result<()>> {
@@ -32,7 +31,7 @@ fn spawn(store: &Store<Mock>, broadcast: &broadcast::Producer, config: Config) -
 }
 
 /// A millisecond source track with no publisher max age, so the recorder reaches superseded
-/// groups and only its own max delay bounds the wait for a missing one.
+/// groups and only the publisher's verdict ends the wait for a missing one.
 fn timed() -> track::Info {
 	track::Info::default()
 		.with_timescale(Timescale::MILLI)
@@ -194,7 +193,7 @@ async fn a_late_group_is_a_gap_that_never_stalls_later_groups() {
 	let store = store();
 	let broadcast = broadcast::Info::new().produce();
 	let video = broadcast.create_track("video", timed()).unwrap();
-	let config = config().with_flush(SECOND).with_max_delay(2 * SECOND);
+	let config = config().with_flush(SECOND);
 	let task = spawn(&store, &broadcast, config);
 	subscribed(&video).await;
 
