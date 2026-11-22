@@ -5084,6 +5084,38 @@ mod test {
 		);
 	}
 
+	/// A verdict from the copy serving now ends the group, though the replaced copy it moved
+	/// off still holds the rest: only a newer route or a delivery failure looks past it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn the_serving_copys_verdict_stands_over_a_replaced_copy_holding_the_group() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, Duration::from_secs(10));
+		let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+		open.write_frame(ts(0), b"a".as_ref()).unwrap();
+		let mut reading = recv(&mut sub);
+		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+
+		let b = copy();
+		let mut repeat = b.create_group(group::Info { start: 0 }).unwrap();
+		for (ms, frame) in [(0, b"a"), (1, b"b")] {
+			repeat.write_frame(ts(ms), frame.as_ref()).unwrap();
+		}
+		routes.serve(b.consume());
+		assert_eq!(read(&mut reading), Some(b"b".to_vec()), "the stall moved to b");
+
+		for (ms, frame) in [(1, b"b"), (2, b"c")] {
+			open.write_frame(ts(ms), frame.as_ref()).unwrap();
+		}
+		open.finish().unwrap();
+		repeat.abort(Error::WrongSize).unwrap();
+		let res = reading.read_frame().now_or_never();
+		assert!(matches!(res, Some(Err(Error::WrongSize))), "{res:?}");
+	}
+
 	/// A group the replaced copy closed short (a FIN without GROUP_END) continues from the
 	/// replacement at the next frame, whichever of the close and the switch the reader sees
 	/// first, and ends where the replacement ends it.
