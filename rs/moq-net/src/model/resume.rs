@@ -9195,7 +9195,11 @@ mod test {
 		let Poll::Ready(res) = reading.poll_read_frame(&kio::Waiter::noop()) else {
 			panic!("the group ends");
 		};
-		assert!(res.is_err(), "ended {:?}", res.map(|frame| frame.map(|frame| frame.payload)));
+		assert!(
+			res.is_err(),
+			"ended {:?}",
+			res.map(|frame| frame.map(|frame| frame.payload))
+		);
 		drop(first);
 	}
 

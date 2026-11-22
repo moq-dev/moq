@@ -4774,7 +4774,12 @@ impl Consumer {
 
 	/// Whether the copy read closed the group short below the frame this reader reads next.
 	fn closed_past(&self) -> bool {
-		self.cursor.state.read().outcome.frames().is_some_and(|frames| self.cursor.index > frames)
+		self.cursor
+			.state
+			.read()
+			.outcome
+			.frames()
+			.is_some_and(|frames| self.cursor.index > frames)
 	}
 
 	fn recover_mut(&mut self) -> Option<&mut super::resume::Recover> {
