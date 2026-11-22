@@ -488,6 +488,32 @@ uplink hands it to one other drone, not four (94 against settled pulls'
   covers answers to requests; this changes which neighbour a request goes
   to. Bring a rewording to the maintainer if the two contradict.
 
+Found 2026-11-21 by the main → release routing audit (maintainer: record
+here, rather than as a separate quest):
+
+- Verified: fronts that pick different routes to the same Instance pull it
+  twice. `OriginState::fronts` is keyed by path, horizon, and Instance, and
+  `ServeState.served` shares a pull only between fronts that pick the same
+  route entry (`rs/moq-net/src/model/origin.rs`, about line 1649). A scratch
+  test had a local viewer pull through the cheaper route-layer route while a
+  request naming this relay as claimant (`NodeFilter::Own`) pulled the same
+  Instance through a lite-06 route, which is common while lite-06 and
+  lite-07 relays mix. This port assumes one pull per Instance, so it needs a
+  shared per-Instance copy layer below the fronts, with the horizon only
+  filtering which copies a reader may take.
+- Not verified (raised by Gemini): answer each before building.
+  - Warmth is per broadcast, while subscriptions are per track. A relay
+    whose only reader takes audio could steer a neighbour's video pull onto
+    itself.
+  - The split horizon hides a neighbour's route cost whenever this relay is
+    anywhere on that route, not only its next hop.
+  - The draft permits asymmetric link costs, while `WarmSettle.tla` assumes
+    symmetric ones.
+  - The warm rank omits drain and priority, which the cold rank puts before
+    cost.
+  - A SUBSCRIBE that names a claimant Node ID pins the forwarding relay to
+    that claimant, which may keep it off a warm copy.
+
 Public API: report any relay configuration added, such as a warm cost per
 link. Wire, on lite-07-wip or the first wip version after the cut as
 decided 2026-11-19, and all additive: an advert on the announce stream carrying an Instance's offer,
