@@ -22,10 +22,10 @@ export function subscribeMedia(
 	},
 ): Moq.Track.Subscriber | undefined {
 	if (effect.get(props.broadcast.closed) !== undefined) return;
-	const { ranges } = Container.subscribed(props.delay.peek());
+	const { ranges } = Container.subscription(props.delay.peek());
 	const subscription = (delay: Container.Delay) => ({
 		priority: props.priority,
-		delay: Container.subscribed(delay).delay,
+		delay: Container.subscription(delay).delay,
 		ranges,
 	});
 	const subscriber = props.broadcast.track(props.track).subscribe(subscription(props.delay.peek()));

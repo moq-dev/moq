@@ -14,11 +14,11 @@ export const DELAY_MAX = Duration.secs(10);
 /**
  * How far behind the live edge a reader plays: its playout delay. `@moq/net`'s `Moq.Track.Delay`
  * keeps only `max`, since a live join states its lag as a range start; build the subscription for
- * this delay with {@link subscribed}.
+ * this delay with {@link subscription}.
  */
 export interface Delay {
 	/**
-	 * How far behind the live edge the reader starts: {@link subscribed} turns each range from the
+	 * How far behind the live edge the reader starts: {@link subscription} turns each range from the
 	 * oldest group into a live join this far back. `null` or omitted is not stated: such a range
 	 * still reads from the oldest group, and the {@link Consumer}'s start reads it as zero.
 	 */
@@ -28,19 +28,17 @@ export interface Delay {
 }
 
 /**
- * The `delay` and `ranges` a subscription carries for a reader playing at `delay`, from `ranges`
- * (default one from the oldest group): `delay.max`, and each range from the oldest group a live
- * join `delay.min` behind the live edge, once `min` is stated. Other ranges keep their start.
+ * `subscription` (default one range from the oldest group) at `delay`: `delay.max` as its budget,
+ * and each range from the oldest group a live join `delay.min` behind the live edge, once `min` is
+ * stated. Other ranges keep their start. Mirrors `moq_mux::container::Delay::subscription`.
  */
-export function subscribed(
-	delay: Delay,
-	ranges: readonly Moq.Track.Range[] = [{}],
-): Pick<Moq.Track.Subscription, "delay" | "ranges"> {
+export function subscription(delay: Delay, subscription: Moq.Track.Subscription = {}): Moq.Track.Subscription {
 	const min = delay.min ?? undefined;
 	const net: Moq.Track.Delay = delay.max === undefined ? {} : { max: delay.max };
 	return {
+		...subscription,
 		delay: net,
-		ranges: ranges.map((range) =>
+		ranges: (subscription.ranges ?? [{}]).map((range) =>
 			min === undefined || range.start !== undefined ? { ...range } : { ...range, start: { live: min } },
 		),
 	};
@@ -55,7 +53,7 @@ export interface ConsumerProps {
 	 *
 	 * `min` is how far behind the live edge the subscription starts, plus any
 	 * {@link ConsumerProps.warmup}: the publisher resolves a live join that far back (see
-	 * {@link subscribed}), and the reader starts at the first group its ordered read hands out. An
+	 * {@link subscription}), and the reader starts at the first group its ordered read hands out. An
 	 * unstated (`null`) `min` reads as zero.
 	 * `max` alone gives up a missing group: the ordered read waits for one until where the group past
 	 * it begins falls `max` behind the newest content. `max` is also measured as the span from the
@@ -87,7 +85,7 @@ export interface ConsumerProps {
 	 * decoder that needs that much media before its output is clean starts early enough, such as an
 	 * Opus decoder. Pass the catalog audio rendition's `warmup`. Mirrors Rust's `container::Playout`.
 	 *
-	 * Put the min and max delay plus the warmup on the subscription (see {@link subscribed}), since
+	 * Put the min and max delay plus the warmup on the subscription (see {@link subscription}), since
 	 * the publisher starts a live join at the min and skips what falls outside the max, so the first
 	 * group the ordered read hands out covers the live edge less `delay.min` and the warmup. Until the reader is the warmup
 	 * past its first frame, the age skip keeps a group that covers the reach and tolerates the
