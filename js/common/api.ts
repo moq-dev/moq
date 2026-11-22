@@ -71,6 +71,7 @@ export async function checkReports(dir: string): Promise<string[]> {
 
 interface Manifest {
 	name: string;
+	private?: boolean;
 	exports?: Record<string, string | { types?: string }>;
 	scripts?: Record<string, string>;
 	dependencies?: Record<string, string>;
@@ -958,7 +959,7 @@ async function baseline(checkout: string, out: string) {
 		const dir = resolve(checkout, "js", entry.name);
 		if (!entry.isDirectory() || !existsSync(join(dir, "package.json"))) continue;
 		const manifest: Manifest = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
-		if (!manifest.scripts?.release) continue;
+		if (!manifest.scripts?.release || manifest.private) continue;
 		const work = mkdtempSync(join(tmpdir(), "moq-api-baseline-"));
 		try {
 			declare(dir, join(work, "dist"), manifest);

@@ -216,7 +216,7 @@ js() {
         echo "api-diff: $base does not exist; fetch it or set API_DIFF_BASE" >&2
         exit 1
     }
-    local manifest dir name version file entry surface
+    local manifest dir name file entry surface
     # The renderer imports TypeDoc from this checkout's install, which a fresh runner lacks. The
     # current checkout uses the coordinated full install shared with other readers.
     uv run --no-project python sh/js/install.py frozen >&2
@@ -228,16 +228,31 @@ js() {
     bun js/common/api.ts baseline "$checkout" "$out/js/baseline"
     git worktree remove --force "$checkout"
     trap - EXIT
+    # A package published at either end is compared, so one deleted or made private since the
+    # baseline reads as removed instead of dropping out of the loop.
+    local -A dirs=() versions=()
+    local published='.scripts.release and (.private | not)' manifests
     for manifest in js/*/package.json; do
-        jq -e .scripts.release "$manifest" >/dev/null || continue
-        dir=${manifest%/package.json}
+        jq -e "$published" "$manifest" >/dev/null || continue
         name=$(jq -r .name "$manifest")
-        version=$(git show "$base:$manifest" 2>/dev/null | jq -r .version) || version=-
+        dirs[$name]=${manifest%/package.json}
+        versions[$name]=-
+    done
+    # Captured first, since a process substitution's failure would not stop the run.
+    manifests=$(git ls-tree -r --name-only "$base" -- js | grep -E '^js/[^/]+/package\.json$' || true)
+    while read -r manifest; do
+        [[ -n "$manifest" ]] || continue
+        entry=$(git show "$base:$manifest")
+        jq -e "$published" <<<"$entry" >/dev/null || continue
+        versions[$(jq -r .name <<<"$entry")]=$(jq -r .version <<<"$entry")
+    done <<<"$manifests"
+    for name in "${!versions[@]}"; do
+        dir=${dirs[$name]:-/nonexistent}
         while read -r file; do
             entry=${file%.api.md}
             surface=$name/$entry
             [[ "$entry" != index ]] || surface=$name
-            compare "$surface" "$version" "$out/js/baseline/$name/$file" "$dir/api/$file"
+            compare "$surface" "${versions[$name]}" "$out/js/baseline/$name/$file" "$dir/api/$file"
         done < <(find "$out/js/baseline/$name" "$dir/api" -name '*.api.md' -printf '%f\n' 2>/dev/null | sort -u)
     done
 }
