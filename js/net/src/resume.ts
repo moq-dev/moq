@@ -459,7 +459,7 @@ class Reader implements ResumeSource {
 	 * What copies declared skipped as they were let go, so a key the cursor keeps out under the
 	 * serving copy's resume point counts as accounted for after the copy that knew it is gone; see
 	 * {@link #accounts} and {@link #lacking}. Only the skipped start and end of each gap the reader
-	 * lacks there, which is all the cursor keeps out, so it holds at most two runs a gap.
+	 * lacks there, where the cursor keeps keys out, so it holds at most two runs a gap.
 	 */
 	#skipped = new Delivered();
 	/**
@@ -1692,12 +1692,17 @@ class Reader implements ResumeSource {
 		// A gap may be skipped in parts no one copy knows whole: merge what the held copies skipped
 		// too.
 		if (lacking) for (const copy of this.#copies) this.#keepSkips(copy, lacking);
-		// Only what lies in a gap the reader still lacks: a range edit, a hand-out, or a later switch
-		// leaves the rest unneeded.
+		// Only the skipped start and end of each gap the reader still lacks, at most two runs a gap, so
+		// what is kept never outgrows the gaps however many routes come and go; a skip inside a gap is
+		// left to the copies that hold it.
 		if (this.#skipped.runs > 0) {
 			const kept = new Delivered();
 			for (const gap of this.#lacking(delivered)) {
-				for (const run of runsIn(this.#skipped, gap.start, gap.end)) kept.addRun(run.start, run.end);
+				const runs = runsIn(this.#skipped, gap.start, gap.end);
+				const first = runs[0];
+				if (first?.start === gap.start) kept.addRun(first.start, first.end);
+				const last = runs.at(-1);
+				if (last?.end === gap.end) kept.addRun(last.start, last.end);
 			}
 			this.#skipped = kept;
 		}

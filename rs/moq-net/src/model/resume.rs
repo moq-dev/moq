@@ -1763,8 +1763,8 @@ struct Reader {
 	/// What copies declared skipped as they were let go, so a key the local floor or cap keeps
 	/// out under the serving copy's resume point counts as accounted for after the copy that
 	/// knew it is gone; see [`Reader::accounts`] and [`Reader::lacking`]. Only the skipped start
-	/// and end of each gap the reader lacks there, which is all the floor and cap keep out, so
-	/// it holds at most two runs a gap.
+	/// and end of each gap the reader lacks there, where the floor and cap keep keys out, so it
+	/// holds at most two runs a gap.
 	skipped: RangeSet<u64>,
 	/// Set once the serving copy's resume point may pass over groups the reader lacks: the
 	/// route changed, or the ranges did. Kept until the gaps are backfilled: see
@@ -2316,23 +2316,30 @@ impl Reader {
 		if gone.is_empty() && self.skipped.is_empty() {
 			return waits;
 		}
-		// A skip is final, and only that copy may know it: keep what any copy skipped of each
-		// gap the reader lacks, each under its bound, merged with what was kept before, since a
-		// gap may be skipped in parts no one copy knows whole. Only those gaps: a range edit, a
-		// hand-out, or a later switch leaves the rest unneeded.
+		// A skip is final, and only that copy may know it: keep what the copies skipped of the
+		// start and end of each gap the reader lacks, each under its bound, merged with what was
+		// kept before, since a start or end may be skipped in parts no one copy knows whole. Only
+		// the start and end, at most two runs a gap, so what is kept never outgrows the gaps
+		// however many routes come and go; a skip inside a gap is left to the copies that hold it.
 		let lacking = self.lacking(delivered);
 		let mut kept = RangeSet::new();
 		for gap in &lacking {
-			kept.extend(
-				self.skipped
-					.overlapping(gap)
-					.map(|run| run.start.max(gap.start)..run.end.min(gap.end)),
-			);
+			let mut found: RangeSet<u64> = self
+				.skipped
+				.overlapping(gap)
+				.map(|run| run.start.max(gap.start)..run.end.min(gap.end))
+				.collect();
 			if !gone.is_empty() {
 				for copy in gone.iter().chain(&self.copies) {
 					let end = copy.end().unwrap_or(u64::MAX).min(gap.end);
-					kept.extend(copy.skipped_in(gap.start..end, &kio::Waiter::noop()).iter().cloned());
+					found.extend(copy.skipped_in(gap.start..end, &kio::Waiter::noop()).iter().cloned());
 				}
+			}
+			if let Some(first) = found.iter().next().filter(|run| run.start == gap.start) {
+				kept.insert(first.clone());
+			}
+			if let Some(last) = found.iter().next_back().filter(|run| run.end == gap.end) {
+				kept.insert(last.clone());
 			}
 		}
 		self.skipped = kept;
@@ -12814,44 +12821,6 @@ mod test {
 			"the replaced copy may still deliver 3"
 		);
 		kio::clock::sleep(HOUR).await;
-		assert!(matches!(sub.poll_recv_group(&fresh()), Poll::Ready(Ok(None))));
-	}
-
-	/// A skip inside a gap the local floor keeps out, known only to a replaced copy, still
-	/// counts after that copy is let go, once a later copy declares the rest of the gap.
-	#[kio::test]
-	async fn a_skip_inside_a_kept_out_gap_outlives_its_copy() {
-		let routes = Producer::new();
-		let logical = logical(&routes);
-		let a = copy();
-		write(&a, 0);
-		a.drop_groups(1..2, StreamError::NotFound);
-		a.skip_groups(2..3);
-		a.drop_groups(3..5, StreamError::NotFound);
-		write(&a, 5);
-		routes.serve(a.consume());
-		let subscription = Subscription::default()
-			.with_delay(Delay::default().with_max(HOUR))
-			.with_ranges([track::Range {
-				start: Some(0),
-				end: Some(6),
-			}]);
-		let mut sub = logical
-			.consume()
-			.subscribe(subscription)
-			.now_or_never()
-			.unwrap()
-			.unwrap();
-		assert_eq!(drain(&mut sub, false), [0, 5]);
-		let b = copy();
-		write(&b, 6);
-		routes.serve(b.consume());
-		let mut sub = sub.with_range(3..7);
-		assert_eq!(drain(&mut sub, false), [6]);
-		// Past the grace a late group is waited for, the replaced copy has nothing more and goes.
-		kio::clock::sleep(HOUR).await;
-		assert!(sub.poll_recv_group(&fresh()).is_pending(), "1 is still owed");
-		b.skip_groups(1..2);
 		assert!(matches!(sub.poll_recv_group(&fresh()), Poll::Ready(Ok(None))));
 	}
 
