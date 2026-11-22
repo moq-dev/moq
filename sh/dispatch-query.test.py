@@ -16,6 +16,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import parallel_tests
 from test_env import dispatch_env
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -894,4 +895,4 @@ if __name__ == "__main__":
     if sys.argv[1:] == ["--bench"]:
         benchmark()
     else:
-        unittest.main()
+        parallel_tests.main(sys.modules[__name__])
