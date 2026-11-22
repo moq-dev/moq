@@ -121,7 +121,7 @@ export type EncoderProps = Inputs<EncoderInput> & {
 	// Codec selection plus encoder settings. Defaults to "opus".
 	codec?: Codec | Signal<Codec>;
 
-	// The time between join points: a frame opens a group once it is this far past the last one's start. Defaults to 20 ms.
+	// The time between join points: a frame opens a group once it is this far past the last one's start. Defaults to 80 ms.
 	join?: Duration | Signal<Duration>;
 };
 
@@ -180,9 +180,11 @@ export class Encoder {
 	codec: Signal<Codec>;
 	/**
 	 * The time between join points: a frame opens the next group once it is at least this far past
-	 * the open group's start, closing the previous one. Defaults to 20 ms. A longer join costs the
-	 * relay fewer streams but makes loss coarser: a viewer that falls behind skips a whole group. A
-	 * join that is not a positive, finite duration refuses the rendition.
+	 * the open group's start, closing the previous one. Defaults to 80 ms (four 20 ms Opus frames).
+	 * A longer join costs the relay fewer streams but makes loss coarser: a viewer that falls behind
+	 * skips a whole group. 20 ms (the previous default) is one group per typical Opus frame, about 50
+	 * groups/s, and live relays have been measured dropping some of those groups mid-stream. A join
+	 * that is not a positive, finite duration refuses the rendition.
 	 */
 	join: Signal<Duration>;
 
@@ -244,7 +246,7 @@ export class Encoder {
 	#history: Duration | undefined;
 
 	// The last valid join, which #runConfig validates.
-	#join = Duration.micros(20_000);
+	#join = Duration.micros(80_000);
 	// How far apart groups start under the resolved config, a whole number of frames, which the
 	// broadcast may declare as the catalog's join interval (see groupSpacing).
 	#spacing = new Signal<Duration | undefined>(undefined);
@@ -295,7 +297,7 @@ export class Encoder {
 		this.volume = Signal.from(props?.volume ?? 1);
 		this.muted = Signal.from(props?.muted ?? false);
 		this.codec = Signal.from<Codec>(props?.codec ?? "opus");
-		this.join = Signal.from(props?.join ?? Duration.millis(20));
+		this.join = Signal.from(props?.join ?? Duration.millis(80));
 
 		// Only the capture graph has a node to expose.
 		this.#signals.run((effect) => {

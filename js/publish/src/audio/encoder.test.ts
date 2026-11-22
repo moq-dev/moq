@@ -897,12 +897,12 @@ test("a join packs frames until the minimum and restarts after a break", async (
 	expect(groups).toEqual([5, 2, 1, 2]);
 });
 
-test("default audio groups carry twenty milliseconds", async () => {
+test("default audio groups carry eighty milliseconds", async () => {
 	using _webcodecs = installFakeWebCodecs();
 	for (const [frameMs, packets, groupMs] of [
-		[2.5, 8, undefined],
-		[10, 2, undefined],
-		[20, 1, undefined],
+		[2.5, 32, undefined],
+		[10, 8, undefined],
+		[20, 4, undefined],
 		[2.5, 1, 1],
 	] as const) {
 		using env = await setup(

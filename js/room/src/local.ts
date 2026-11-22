@@ -27,11 +27,19 @@ export interface LocalProps {
 	microphone?: {
 		/** Capture the microphone. Pass a Signal to share it with the app. Defaults to false. */
 		enabled?: GetterInit<boolean>;
+		/**
+		 * Audio group join interval for the microphone encoder. Defaults to the encoder's 80 ms
+		 * default (four 20 ms Opus frames). A shorter join raises the group rate; 20 ms is one
+		 * group per typical Opus frame.
+		 */
+		join?: Publish.Audio.EncoderProps["join"];
 	};
 	/** The screen share's switch. */
 	screen?: {
 		/** Prompt for and capture a screen; turns off when the share ends. Pass a Signal to share it with the app. Defaults to false. */
 		enabled?: GetterInit<boolean>;
+		/** Audio group join interval for screen-share audio. Same default as the microphone. */
+		join?: Publish.Audio.EncoderProps["join"];
 	};
 	/** Seed the published user.json fields. */
 	user?: UserProps;
@@ -215,6 +223,7 @@ export class Local {
 			capture: microphoneCapture,
 			muted: microphoneMuted,
 			bandwidth,
+			join: props.microphone?.join,
 		});
 		this.#signals.cleanup(() => microphoneAudio.close());
 
@@ -247,6 +256,7 @@ export class Local {
 			capture: screenAudioCapture,
 			enabled: this.#screenPublished,
 			bandwidth,
+			join: props.screen?.join,
 		});
 		this.#signals.cleanup(() => screenAudio.close());
 
@@ -255,6 +265,7 @@ export class Local {
 			enabled: microphoneEnabled,
 			source: mic,
 			volume: microphoneAudio.volume,
+			join: microphoneAudio.join,
 			root: microphoneCapture.out.root,
 		};
 		this.screen = {
@@ -262,7 +273,7 @@ export class Local {
 			source: share,
 			capture: screenCapture,
 			broadcast: screenBroadcast,
-			audio: { root: screenAudioCapture.out.root },
+			audio: { root: screenAudioCapture.out.root, join: screenAudio.join },
 		};
 
 		this.#signals.run((effect) => {
@@ -324,6 +335,8 @@ export namespace Local {
 		readonly source: Publish.Source.Microphone;
 		/** Linear gain applied before encoding, where 1 is unity. */
 		readonly volume: Signal<number>;
+		/** Audio group join interval. Defaults to 80 ms. */
+		readonly join: Publish.Audio.Encoder["join"];
 		/** Raw microphone graph while capture is running; its context may render silently. */
 		readonly root: Getter<AudioNode | undefined>;
 	}
@@ -342,6 +355,8 @@ export namespace Local {
 		readonly audio: {
 			/** Raw screen audio graph while capture is running; its context may render silently. */
 			readonly root: Getter<AudioNode | undefined>;
+			/** Audio group join interval. Defaults to 80 ms. */
+			readonly join: Publish.Audio.Encoder["join"];
 		};
 	}
 }
