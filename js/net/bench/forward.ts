@@ -69,8 +69,8 @@ for (const touched of ["covering", "single"] as const) {
 			const table = await announcedView(origin);
 			if (session.streams.length !== headCount) throw new Error("expected one announce stream per head");
 
-			// Routes beneath the heads, spread across them, plus one above every head. The wire
-			// presents that covering route on each head's stream; it lands once, driven by the first.
+			// Routes beneath the heads, spread across them, plus one above every head. The session's
+			// grant reaches only the heads, so that covering route is filed at each of them.
 			for (let index = 0; index < routeCount; index++) {
 				const head = index % headCount;
 				announce(session.streams[head], Path.join(heads[head], Path.from(`r${index}`)), 1n, "start");
@@ -78,19 +78,20 @@ for (const touched of ["covering", "single"] as const) {
 			for (const stream of session.streams) announce(stream, Path.empty(), 1n, "start");
 			await flush();
 
-			const path = touched === "covering" ? Path.empty() : Path.join(heads[0], Path.from("r0"));
-			if (table.peek().size !== routeCount + 1) throw new Error(`expected ${routeCount + 1} routes`);
+			const paths = touched === "covering" ? heads : [Path.join(heads[0], Path.from("r0"))];
+			const expected = routeCount + headCount;
+			if (table.peek().size !== expected) throw new Error(`expected ${expected} routes`);
 
 			const start = performance.now();
 			for (let index = 0; index < updates; index++) {
 				const cost = BigInt(index + 2);
 				if (touched === "covering") {
-					for (const stream of session.streams) announce(stream, path, cost, "update");
+					for (const stream of session.streams) announce(stream, Path.empty(), cost, "update");
 				} else {
-					announce(session.streams[0], path, cost, "update");
+					announce(session.streams[0], paths[0], cost, "update");
 				}
 				await flush();
-				if (table.peek().get(path)?.cost !== cost) throw new Error("re-price did not land");
+				if (paths.some((path) => table.peek().get(path)?.cost !== cost)) throw new Error("re-price did not land");
 				checksum += table.peek().size;
 			}
 			const elapsed = performance.now() - start;
