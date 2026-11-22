@@ -1749,7 +1749,10 @@ export class Publisher {
 				if (groups.size === 0) return true;
 				const dispose: Dispose[] = [];
 				await new Promise<void>((resolve) => {
-					dispose.push(controls.changed(resolve), groupEnded.changed(() => resolve()));
+					dispose.push(
+						controls.changed(resolve),
+						groupEnded.changed(() => resolve()),
+					);
 				});
 				for (const close of dispose) close();
 			}
