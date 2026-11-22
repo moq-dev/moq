@@ -20,8 +20,8 @@ private val BILLION = BigInteger.valueOf(1_000_000_000L)
  * This timestamp as a [Duration], rounded down to a whole nanosecond.
  *
  * The [Timestamp] itself is exact; keep it, not the duration, to republish a tick such as 90 kHz.
- * Throws [IllegalArgumentException] when [unscaled], since a group key has no time, when the
- * scale is zero, or past [Duration]'s range, about 146 million years.
+ * Throws [IllegalArgumentException] when [unscaled], since a group key has no time, when the scale
+ * is zero, or past [Duration]'s range, about 146 million years.
  */
 fun Timestamp.toDuration(): Duration {
     val scale = requireNotNull(scale) { "unscaled timestamp #$value has no duration" }
@@ -43,8 +43,8 @@ fun Timestamp.toDuration(): Duration {
 /**
  * This duration as an exact [Timestamp] at nanosecond scale.
  *
- * Throws [IllegalArgumentException] when negative, infinite, or past 64 bits of nanoseconds
- * (about 584 years); a write refuses one past the value bound with `MoqException.TimeOverflow`.
+ * Throws [IllegalArgumentException] when negative, infinite, or past 64 bits of nanoseconds (about
+ * 584 years); a write refuses one past the value bound with `MoqException.TimeOverflow`.
  */
 fun Duration.toTimestamp(): Timestamp {
     require(!isNegative()) { "a timestamp cannot be negative: $this" }
