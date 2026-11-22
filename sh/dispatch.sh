@@ -9,6 +9,8 @@
 # CHECK_TIMES=FILE also writes each phase's wall seconds, CPU milliseconds, and
 # label there, one per line, ending with the whole run's.
 # `--query` prints the selection before CI installs its toolchain and caches.
+# A local check skips a `memo` module's phase that last passed in this worktree
+# on the same inputs; CHECK_RERUN=1 runs it anyway. CI never skips one.
 # `ci-platform` exists only as a query for the native platform workflows.
 set -euo pipefail
 
@@ -75,7 +77,14 @@ fi
 #   alone           Its lane runs with no other lane beside it, so it waits for
 #                   the rest.
 #   fix             `just fix` runs it too; check and ci run every module.
-declare -A scope=() tools=() compiles=([check]="" [fix]="") lane=() alone=()
+#   memo            A local check skips a phase of it that passed before in this
+#                   worktree when every file its pattern matches, the slice of
+#                   the diff that selects it, its tools' PATH, and the build
+#                   environment are unchanged: the same completeness the pattern
+#                   already promises for selection. It is for modules that
+#                   cost minutes even on a rerun: Rust's tests, and its builds
+#                   once mbx evicts an idle worktree's target directory.
+declare -A scope=() tools=() compiles=([check]="" [fix]="") lane=() alone=() memo=()
 checks=()
 fixes=()
 module() {
@@ -91,6 +100,7 @@ module() {
             lane=*) lane[$name]=${option#lane=} ;;
             alone) solo=1 ;;
             fix) fixes+=("$name") ;;
+            memo) memo[$name]=1 ;;
             *)
                 echo "error: module $name has an unknown option '$option'" >&2
                 exit 2
@@ -98,6 +108,10 @@ module() {
         esac
     done
     [[ -z "$solo" ]] || alone[${lane[$name]:-$name}]=1
+    if [[ -v "memo[$name]" && -z "${scope[$name]}" ]]; then
+        echo "error: module $name takes memo but matches every path" >&2
+        exit 2
+    fi
 }
 
 # maturin bundles rs/moq-ffi into the moq-ffi wheel, and the other bindings
@@ -120,13 +134,13 @@ module py '^(py/|sh/py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/|rs/uniffi-bindgen
 # last: the relay's configs, unit, and NixOS module, the scripts the tests
 # run, and the vectors the tests share with JS and the docs.
 module rs '^(\.cargo/|doc/lib/c/|doc/lib/samples\.sh$|sh/local\.(sh|ts)$|rs/|test/interop/clients/rust/|sh/rs/|Cargo\.(toml|lock)$|clippy\.toml$|rust-toolchain\.toml$|\.config/nextest\.toml$|nix/modules/moq-relay\.nix$|(demo/relay|packaging|test)/.*\.toml$|packaging/moq-relay/moq-relay\.service$|test/interop/[^/]*\.ts$|test/(datagram-tracks/client|max-age/client|receive-credit/sender|relay-fill/relay|stream-limits/client)\.ts$|doc/concept/audio-jitter/.*\.json$|drafts/moq-e2ee-01-wip\.json$)' \
-    tools='cargo jq cc' compiles='check fix' fix
+    tools='cargo jq cc' compiles='check fix' fix memo
 # Clippy for macOS and Windows over rs's selection, so a platform-gated error
 # fails here rather than in the nightly native lanes. The flake pins its
 # toolchain and the zig that compiles its build scripts' C, so a change there
 # lints the whole workspace (see sh/rs/select.sh).
 module rs_cross "${scope[rs]%)}|flake\.(nix|lock)$)" \
-    tools='cargo jq nix zig' compiles=check
+    tools='cargo jq nix zig' compiles=check memo
 # nix/Cargo.nix records each crate's dependencies, features, and targets,
 # read from the manifests, the lockfile, and the files cargo discovers targets
 # from. The pinned crate2nix comes from flake.lock.
@@ -186,7 +200,7 @@ module carla '^demo/carla/(sim/|justfile$)' \
 # rs/, narrowed after the tool check to the crates it path-depends on, so their
 # API changes compile it while other rs/ changes skip it.
 module carla_bridge '^(\.cargo/config\.toml$|Cargo\.toml$|clippy\.toml$|rust-toolchain\.toml$|demo/carla/(bridge/|justfile$)|rs/)' \
-    tools='cargo jq' compiles='check fix' fix
+    tools='cargo jq' compiles='check fix' fix memo
 # Reads the bridge's manifest and the root workspace's, so it needs cargo and
 # runs only after setup. Dev-dependencies of the crates it reaches never build
 # into it, so they are left out.
@@ -575,6 +589,32 @@ lane_cpu() {
     done
 }
 
+# A tree of the working tree as `git add -A` would stage it, tracked and new
+# files alike, written without touching the real index.
+snapshot() {
+    local index
+    index=$(mktemp "$logs/index.XXXXXX")
+    cp "$(git rev-parse --git-path index)" "$index"
+    GIT_INDEX_FILE=$index git add -A
+    GIT_INDEX_FILE=$index git write-tree
+    rm -f "$index"
+}
+
+# A hash of what one phase of a module reads, from a snapshot: the files its
+# pattern matches with the slice of the diff that selected it, the scripts that
+# orchestrate it, and the environment that picks and configures its tools.
+memo_key() {
+    local phase=$1 module=$2 tree=$3
+    {
+        echo "$phase $module ${all:+all}"
+        [[ -n "$all" ]] || grep -E "${scope[$module]}" "$changed" || true
+        git ls-tree -r "$tree" -- justfile sh/dispatch.sh sh/changed.sh
+        env | grep -E '^(PATH|LD_LIBRARY_PATH|PKG_CONFIG_PATH|LIBCLANG_PATH|BINDGEN_[A-Z_]*|CC|CXX|AR|LD|[A-Z_]*FLAGS|(CARGO|RUST|NEXTEST|KIO|MOQ)[A-Z0-9_]*)=' | LC_ALL=C sort || true
+        git -c core.quotePath=false ls-tree -r --format='%(path)%x09%(objectname)' "$tree" |
+            PATTERN=${scope[$module]} awk -F '\t' '$1 ~ ENVIRON["PATTERN"]'
+    } | git hash-object --stdin
+}
+
 # Run one lane's modules in order, appending each phase's wall seconds and CPU
 # milliseconds to the lane's times file and announcing each phase's start and
 # end on fd 3. A failed phase skips the rest of that module, but independent
@@ -601,6 +641,16 @@ run_lane() {
             cpu_began=$cpu
             if github; then echo "::group::$current"; else echo "==> $current"; fi
             echo "$action: $current started" >&3
+            key=
+            if [[ -n "$memo_dir" && -v "memo[$module]" ]]; then
+                key=$(memo_key "$phase" "$module" "$tree")
+                if [[ -f "$memo_dir/$phase-$module" && "$(<"$memo_dir/$phase-$module")" == "$key" ]]; then
+                    echo "$action: $current passed on these same inputs; skipping it (CHECK_RERUN=1 runs it)"
+                    record unchanged
+                    current=
+                    continue
+                fi
+            fi
             # A job, as `run` explains; errexit stays on inside it. Untrapped,
             # the phase would die on TERM at once, orphaning its commands.
             # Trapped, it exits once they do, so a cancel returns only after
@@ -630,6 +680,12 @@ run_lane() {
             fi
             record
             current=
+            # Recorded only when nothing it reads changed while it ran.
+            if [[ -n "$key" && "$(memo_key "$phase" "$module" "$(snapshot)")" == "$key" ]]; then
+                mkdir -p "$memo_dir"
+                echo "$key" >"$memo_dir/$phase-$module.$BASHPID"
+                mv -f "$memo_dir/$phase-$module.$BASHPID" "$memo_dir/$phase-$module"
+            fi
         done
     done
     return "$lane_status"
@@ -687,6 +743,19 @@ cancel() {
 }
 
 logs=$(mktemp -d)
+
+# The memo lives in this worktree's git directory, so it goes with the worktree.
+# CI and `just ci` (CI_STRICT) always run every phase.
+memo_dir=
+tree=
+if [[ "$action" == check && -z "${CI_STRICT:-}${GITHUB_ACTIONS:-}${CHECK_RERUN:-}" ]]; then
+    for module in "${selected[@]}"; do
+        [[ -v "memo[$module]" ]] || continue
+        memo_dir=$(git rev-parse --path-format=absolute --git-path moq-check)
+        tree=$(snapshot)
+        break
+    done
+fi
 declare -A running=()
 lone=
 next=0

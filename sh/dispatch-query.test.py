@@ -518,6 +518,42 @@ class QueryTests(unittest.TestCase):
                 self.assertIn("dart check", calls)
                 self.assertFalse(any(call.startswith("js test-changed ") for call in calls))
 
+    def test_check_skips_a_memo_phase_that_passed_on_the_same_inputs(self):
+        for command in ("awk", "cp", "env", "mkdir", "mv"):
+            (self.bin / command).symlink_to(shutil.which(command))
+        self.env.pop("CI_STRICT")
+        calls = self.root / "calls"
+
+        def run(action="check", fail=False, **env):
+            self.stub_ci('case "$*" in "rs test-changed "*) exit 5 ;; esac\n' if fail else "")
+            result = subprocess.run(
+                ["bash", "sh/dispatch.sh", action, "origin/main"],
+                cwd=self.repo,
+                env=dict(self.env, **env),
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(result.returncode, 5 if fail else 0, result.stderr)
+            return {" ".join(call.split(" ")[:2]) for call in calls.read_text().splitlines()} & rust
+
+        rust = {"rs lint-changed", "rs test-changed", "rs cross-lint-changed", "carla bridge-check"}
+        self.change("rs/dep/src/lib.rs")
+        # Each phase that passed is remembered, and a failure never is.
+        self.assertEqual(run(fail=True), rust)
+        self.assertEqual(run(), {"rs test-changed"})
+        self.assertEqual(run(), set())
+        # A file outside the module's pattern leaves it skipped; one inside, or
+        # a different toolchain environment, runs it again.
+        self.change("quest/m1/example.md")
+        self.assertEqual(run(), set())
+        self.assertEqual(run(RUSTFLAGS="-Dwarnings"), rust)
+        self.change("rs/dep/src/lib.rs")
+        self.assertEqual(run(), rust)
+        self.assertEqual(run(CHECK_RERUN="1"), rust)
+        # CI runs every phase.
+        self.assertEqual(run("ci", CI_STRICT="1"), rust)
+        self.assertEqual(run(), set())
+
     @unittest.skipUnless(sys.platform == "linux" and os.uname().machine == "x86_64", "Linux VM checks only")
     def test_local_flake_namespace_refusal_is_reported_as_skipped(self):
         self.stub_ci()
