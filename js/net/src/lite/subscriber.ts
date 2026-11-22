@@ -2170,11 +2170,11 @@ export class Subscriber {
 	): RecoveryHandle {
 		const producer = copy.track;
 		const id = this.#subscribeNext++;
-		// Narrowed in place once a start before lite-07 settles how far it reaches.
+		// Narrowed in place once the first group before lite-07 settles how far it reaches.
 		const groups = { ...asked };
-		// Before lite-07 the start is the answer, which the publisher gives only once a group in range
-		// can start it, so the range stays open until the start caps it: only upstream knows which
-		// group it still holds past the run.
+		// Before lite-07 the subscription proves only the keys below its start, so the range stays open
+		// until the first group that arrives caps it: only upstream knows which group it still holds
+		// past the run, and a relay's start may be its floor, which names no group.
 		const oneStart = !hasGroupEnd(this.version);
 		const ranges: track.Range[] = [span(groups.start, oneStart ? undefined : groups.end) ?? EMPTY];
 		const msg = this.#withRanges(
@@ -2249,9 +2249,13 @@ export class Subscriber {
 				);
 				stream = opened;
 				let fin = false;
-				// The update capping the open range at the group it starts at, which goes out before our FIN.
+				// The update capping the open range at the first group that arrives, which goes out before
+				// our FIN.
 				let capping: Promise<unknown> = Promise.resolve();
+				let capped = !oneStart;
+				let started = false;
 				const cap = () => {
+					capped = true;
 					const update = new SubscribeUpdate({
 						priority: msg.priority,
 						order: msg.order,
@@ -2265,11 +2269,24 @@ export class Subscriber {
 						.then((encoded) => opened.writer.write(encoded))
 						.catch(() => undefined);
 				};
+				// Only a group that arrives proves one, so once started the range stops past the first;
+				// what lies between is named by the publisher's drops, or given up with the grace.
+				const capAtFirst = () => {
+					const first = entry.tail.first;
+					if (capped || !started || first === undefined || first < groups.start) return;
+					if (first + 1n < groups.end) groups.end = first + 1n;
+					cap();
+				};
 				const responses = this.#recoveryResponses(
 					opened,
 					entry,
 					groups,
-					oneStart ? cap : undefined,
+					(from) => {
+						started = true;
+						// Starting past the run answers all of it, so nothing more is asked.
+						if (!capped && from >= groups.end) cap();
+						capAtFirst();
+					},
 					giveUp,
 					() => fin,
 				);
@@ -2290,6 +2307,7 @@ export class Subscriber {
 				const covered = () => entry.tail.covers(groups.start, groups.end);
 				try {
 					while (!ended && !left.signal.aborted) {
+						capAtFirst();
 						if (covered()) {
 							await race([entry.tail.settle(covered, stopped), over, leaving]);
 							if (ended || left.signal.aborted) break;
@@ -2357,7 +2375,7 @@ export class Subscriber {
 		stream: Stream,
 		entry: SubscribeEntry,
 		groups: Run,
-		cap: (() => void) | undefined,
+		onStart: (from: bigint) => void,
 		giveUp: (start: bigint, end: bigint, refusal: Refusal) => void,
 		fin: () => boolean,
 	): Promise<void> {
@@ -2382,13 +2400,7 @@ export class Subscriber {
 					max(groups.start, min(from, groups.end)),
 					passing(new NotFound(`group ${groups.start}`)),
 				);
-				// Nothing names the keys past a group before lite-07, so this one waits only for the
-				// group it starts at, and the rest is asked again. Its open range is capped there; a
-				// stream already sent past the cap still lands.
-				if (cap) {
-					if (from < groups.end) groups.end = from + 1n;
-					cap();
-				}
+				onStart(from);
 			} else if ("drop" in resp) {
 				const { start, end } = resp.drop;
 				const cause = resp.drop.cause(this.version);

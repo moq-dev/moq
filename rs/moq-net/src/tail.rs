@@ -29,6 +29,8 @@ pub(crate) struct Tail {
 	// than grow with a grace that never passes.
 	bill: Option<cache::Reader>,
 	streams: u64,
+	// The lowest group a stream's header named, which proves the group exists.
+	first: Option<u64>,
 	// Streams whose header arrived and that are still being read.
 	active: u64,
 	// The publisher's FIN ended the track, its only end before lite-05, so a session that
@@ -49,6 +51,7 @@ impl Tail {
 			ledger: Ledger::new(grace),
 			bill: None,
 			streams: 0,
+			first: None,
 			active: 0,
 			ended: false,
 		}
@@ -139,6 +142,11 @@ impl Tail {
 	pub fn streams(&self) -> u64 {
 		self.streams
 	}
+
+	/// The lowest group whose stream's header arrived.
+	pub fn first_group(&self) -> Option<u64> {
+		self.first
+	}
 }
 
 /// A data stream whose header arrived, holding its subscription's end open until dropped.
@@ -159,6 +167,7 @@ impl Reading {
 		state.streams += 1;
 		state.active += 1;
 		if let Some(group) = group {
+			state.first = Some(state.first.map_or(group, |first| first.min(group)));
 			state.account(group..group.saturating_add(1), now);
 		}
 		Self {

@@ -314,3 +314,118 @@ async fn a_recovery_outlives_the_finished_subscription() {
 	assert!(end.is_ok(), "the range ends cleanly: {end:?}");
 	drop((broadcast, upstream, publisher, relay, finished, first));
 }
+
+/// A relay copy recovers runs it evicted from a relay that still holds every group, so gave
+/// none up. That relay starts each run's SUBSCRIBE at the run's first key, which names no
+/// group, and the copy still asks each run once rather than one key at a time.
+#[kio::test]
+async fn a_relay_start_naming_no_group_costs_no_subscribe_per_key() {
+	const TIMEOUT: Duration = Duration::from_secs(600);
+	// The publisher and the first relay hold their groups for good; the last relay's cache
+	// expires them.
+	let unbounded = |hop| {
+		let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+		config.pool = moq_net::cache::Pool::unbounded();
+		let (origin, driver) = origin::Producer::new(config);
+		support::harness::spawn(driver);
+		origin.with_proxy(true)
+	};
+	let publisher = unbounded(1);
+	let broadcast = publisher.route("bcast", origin::RouteOptions::hidden()).unwrap();
+	let track = broadcast
+		.broadcast()
+		.create_track(
+			"video",
+			track::Info::default()
+				.with_timescale(moq_net::Timescale::MICRO)
+				.with_max_age(None),
+		)
+		.unwrap();
+	broadcast.announce().unwrap();
+	let mut finished = Vec::new();
+	for index in 0..6 {
+		let mut group = track
+			.create_group(moq_net::group::Info { start: index * GROUP })
+			.unwrap();
+		group
+			.write_frame(Timestamp::from_micros(index * GROUP).unwrap(), &b"x"[..])
+			.unwrap();
+		finished.push(group.finish().unwrap());
+	}
+
+	let middle = unbounded(2);
+	let mut options = MockConnectOptions::new("moq-lite-06".parse::<Version>().unwrap());
+	options.server_publish = Some(publisher.consume());
+	options.client_subscribe = Some(middle.clone());
+	let first_link = connect_mock(options).await;
+	let relay = origin(3);
+	let mut options = MockConnectOptions::new("moq-lite-06".parse::<Version>().unwrap());
+	// Each request costs a round trip, as on a network, so a walk shows within the run.
+	options.latency = Duration::from_millis(5);
+	options.server_publish = Some(middle.consume());
+	options.client_subscribe = Some(relay.clone());
+	let last_link = connect_mock(options).await;
+	let remote = relay
+		.consume()
+		.follow("bcast", None)
+		.unwrap()
+		.available()
+		.await
+		.unwrap()
+		.unwrap();
+	let history = |ranges: track::Range| {
+		let track = remote.track("video").unwrap();
+		async move {
+			track
+				.subscribe(
+					Subscription::default()
+						.with_delay(Delay::default().with_max(None))
+						.with_ranges([ranges]),
+				)
+				.await
+				.unwrap()
+		}
+	};
+
+	// The live subscription delivers every group, which the last relay then expires while a
+	// reader keeps it live.
+	let mut live = history(track::Range::default()).await;
+	for _ in 0..6 {
+		kio::clock::timeout(TIMEOUT, live.recv_group())
+			.await
+			.expect("group timeout")
+			.unwrap()
+			.expect("a group");
+	}
+	kio::clock::sleep(moq_net::cache::DEFAULT_EXPIRY * 2 + Duration::from_secs(2)).await;
+
+	// A reader from just past the first group misses the run up to the fourth.
+	let before = subscribes(&last_link);
+	let mut second = history(support::keys(1..4 * GROUP)).await;
+	let read = kio::clock::sim::spawn(async move {
+		let mut keys = Vec::new();
+		while let Some(group) = second.recv_group().await.unwrap() {
+			keys.push(group.start);
+		}
+		keys.sort();
+		keys
+	});
+	// The middle relay can't prove the keys between its groups empty, so the runs settle once
+	// the publisher ends the track and the middle relay drops each key it never served below
+	// the run's cap.
+	kio::clock::sleep(Duration::from_secs(10)).await;
+	let _ended = track.finish().unwrap();
+	let keys = kio::clock::timeout(TIMEOUT, read)
+		.await
+		.expect("the reader reaches the end of its range")
+		.unwrap();
+	assert_eq!(keys, [GROUP, 2 * GROUP, 3 * GROUP]);
+	let asked = subscribes(&last_link) - before;
+	// Three groups and the four gaps around them: a run's cap at the group its START named
+	// would walk the gaps a key at a time.
+	assert!(asked <= 2 * 7, "{asked} SUBSCRIBEs for three groups and four gaps");
+	assert_eq!(fetches(&last_link), 0, "nothing fetched");
+	drop((
+		broadcast, first_link, last_link, publisher, middle, relay, finished, live,
+	));
+}

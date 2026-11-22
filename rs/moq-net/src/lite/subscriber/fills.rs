@@ -559,9 +559,9 @@ struct Recovery {
 	serving: track::Producer,
 	id: u64,
 	groups: Range<u64>,
-	/// Before lite-07: the subscription proves only the keys below its start, so once
-	/// started it asks no further than the group it starts at.
-	one_start: bool,
+	/// Whether its range is final. Before lite-07 the subscription proves only the keys below
+	/// its start, so it asks open, then caps once at the first group that arrives.
+	capped: bool,
 	state: RecoveryState,
 	/// The groups this subscription said it will not deliver, and why.
 	refused: RangeMap<u64, Refusal>,
@@ -611,7 +611,7 @@ impl Recovery {
 			serving: serving.clone(),
 			id: establish.id,
 			groups,
-			one_start,
+			capped: !one_start,
 			state: RecoveryState::Establish(Box::new(establish)),
 			refused: Default::default(),
 			fresh: Default::default(),
@@ -679,17 +679,40 @@ impl Recovery {
 					// flush wakes this again.
 					if !*finished && active.stream.writer.is_flushed() {
 						let groups = self.groups.clone();
-						let settled = active
-							.tail
-							.consume()
-							.poll(waiter, |tail| match tail.covers(groups.clone()) && !tail.is_reading() {
-								true => Poll::Ready(()),
+						// Before lite-07 a relay's start may be its source's, raised to the floor, which
+						// names no group: only a group that arrives proves one, so the range waits
+						// for one past the start, then stops there. What lies between is named by the
+						// publisher's drops, or given up with the grace.
+						let capping = !self.capped && active.started.is_some();
+						let seen = match active.tail.consume().poll(waiter, |tail| {
+							if capping
+								&& let Some(first) = tail.first_group()
+								&& first >= groups.start
+							{
+								return Poll::Ready(Some(first));
+							}
+							match tail.covers(groups.clone()) && !tail.is_reading() {
+								true => Poll::Ready(None),
 								false => Poll::Pending,
-							})
-							.is_ready();
-						if settled {
-							let _ = active.stream.writer.finish();
-							*finished = true;
+							}
+						}) {
+							Poll::Ready(Ok(first)) => Some(first),
+							// The tail is gone, as the subscription ended.
+							Poll::Ready(Err(_)) => Some(None),
+							Poll::Pending => None,
+						};
+						match seen {
+							Some(Some(first)) => {
+								self.groups = groups.start..groups.end.min(first.saturating_add(1));
+								self.capped = true;
+								cap(&self.groups, active)?;
+								continue;
+							}
+							Some(None) => {
+								let _ = active.stream.writer.finish();
+								*finished = true;
+							}
+							None => {}
 						}
 					}
 					let res = ready!(active.stream.reader.poll_recv::<lite::SubscribeResponse>(waiter));
@@ -719,19 +742,10 @@ impl Recovery {
 								Refusal::passing(StreamError::NotFound),
 							);
 							active.started = Some(start.starts[0]);
-							// Nothing names the keys past a group before lite-07, so this one waits
-							// only for the group it starts at, and the rest is asked again. Its open
-							// range is capped there; a stream already sent past the cap still lands.
-							if self.one_start {
-								if from < groups.end {
-									self.groups = groups.start..from.saturating_add(1);
-								}
-								let cap = lite::Range {
-									start: Some(lite::Anchor::Absolute(Position::group(groups.start))),
-									end: Some(lite::Anchor::Absolute(Position::group(self.groups.end))),
-								};
-								let (edit, _) = active.live.edit_keyed(&[((), cap)], |_| ())?;
-								super::buffer_update(active, edit)?;
+							// Starting past the run answers all of it, so nothing more is asked.
+							if !self.capped && from >= groups.end {
+								self.capped = true;
+								cap(&self.groups, active)?;
 							}
 						}
 						Recv::Message(lite::SubscribeResponse::Drop(dropped)) => {
@@ -784,6 +798,18 @@ impl Recovery {
 			}
 		}
 	}
+}
+
+/// Before lite-07, cap a recovery's open range at `groups`, those it waits for: nothing names
+/// the keys past a group, so the rest of the run is asked again. A stream already sent past
+/// the cap still lands.
+fn cap(groups: &Range<u64>, active: &mut SubStream) -> Result<(), Error> {
+	let range = lite::Range {
+		start: Some(lite::Anchor::Absolute(Position::group(groups.start))),
+		end: Some(lite::Anchor::Absolute(Position::group(groups.end))),
+	};
+	let (edit, _) = active.live.edit_keyed(&[((), range)], |_| ())?;
+	super::buffer_update(active, edit)
 }
 
 impl Drop for Recovery {
