@@ -577,6 +577,16 @@ class QueryTests(unittest.TestCase):
         self.assertEqual(run("ci", CI_STRICT="1"), rust)
         self.assertEqual(run(GITHUB_ACTIONS="true"), rust)
         self.assertEqual(run(), set())
+        # A file the lint reads without selecting rs reruns only rs.
+        self.change("doc/lib/py/index.md")
+        self.assertEqual(run(), {"rs lint-changed", "rs test-changed"})
+        # A failure forgets the pass, under CHECK_RERUN and `just ci` alike,
+        # while CHECK_RERUN still records the phases that passed.
+        self.assertEqual(run(fail=True, CHECK_RERUN="1"), rust)
+        self.assertEqual(run(), {"rs test-changed"})
+        self.assertEqual(run(), set())
+        self.assertEqual(run("ci", fail=True, CI_STRICT="1"), rust)
+        self.assertEqual(run(), {"rs test-changed"})
 
     @unittest.skipUnless(sys.platform == "linux" and os.uname().machine == "x86_64", "Linux VM checks only")
     def test_local_flake_namespace_refusal_is_reported_as_skipped(self):

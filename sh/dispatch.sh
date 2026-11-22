@@ -81,13 +81,14 @@ fi
 #   alone           Its lane runs with no other lane beside it, so it waits for
 #                   the rest.
 #   fix             `just fix` runs it too; check and ci run every module.
-#   memo            A local check skips a phase of it that passed before in this
-#                   worktree when every file its pattern matches, the slice of
-#                   the diff that selects it, its tools' PATH, and the build
-#                   environment are unchanged: the same completeness the pattern
-#                   already promises for selection. It is for modules that
-#                   cost minutes even on a rerun: Rust's tests, and its builds
-#                   once mbx evicts an idle worktree's target directory.
+#   memo[=REGEX]    A local check skips a phase of it that passed before in this
+#                   worktree when every file its pattern or REGEX matches, the
+#                   slice of the diff that selects it, its tools, and the
+#                   environment are unchanged. REGEX names what a phase reads
+#                   that should not select the module, such as the doc pages a
+#                   lint checks against. It is for modules that cost minutes
+#                   even on a rerun: Rust's tests, and its builds once mbx
+#                   evicts an idle worktree's target directory.
 declare -A scope=() tools=() compiles=([check]="" [fix]="") lane=() alone=() memo=()
 checks=()
 fixes=()
@@ -104,7 +105,8 @@ module() {
             lane=*) lane[$name]=${option#lane=} ;;
             alone) solo=1 ;;
             fix) fixes+=("$name") ;;
-            memo) memo[$name]=1 ;;
+            memo) memo[$name]= ;;
+            memo=*) memo[$name]=${option#memo=} ;;
             *)
                 echo "error: module $name has an unknown option '$option'" >&2
                 exit 2
@@ -137,8 +139,9 @@ module py '^(py/|sh/py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/|rs/uniffi-bindgen
 # which sh/rs/reads.sh lists and select.test.py holds this scope to, come
 # last: the relay's configs, unit, and NixOS module, the scripts the tests
 # run, and the vectors the tests share with JS and the docs.
-module rs '^(\.cargo/|doc/lib/c/|doc/lib/samples\.sh$|sh/local\.(sh|ts)$|rs/|test/interop/clients/rust/|sh/rs/|Cargo\.(toml|lock)$|clippy\.toml$|rust-toolchain\.toml$|\.config/nextest\.toml$|nix/modules/moq-relay\.nix$|(demo/relay|packaging|test)/.*\.toml$|packaging/moq-relay/moq-relay\.service$|test/interop/[^/]*\.ts$|test/(datagram-tracks/client|max-age/client|receive-credit/sender|relay-fill/relay|stream-limits/client)\.ts$|doc/concept/audio-jitter/.*\.json$|drafts/moq-e2ee-01-wip\.json$)' \
-    tools='cargo jq cc' compiles='check fix' fix memo
+module rs '^(\.cargo/|doc/lib/c/|doc/lib/samples\.sh$|sh/local\.(sh|ts)$|rs/|test/interop/clients/rust/|sh/rs/|Cargo\.(toml|lock)$|clippy\.toml$|rust-toolchain\.toml$|\.config/(nextest|hakari)\.toml$|nix/modules/moq-relay\.nix$|(demo/relay|packaging|test)/.*\.toml$|packaging/moq-relay/moq-relay\.service$|test/interop/[^/]*\.ts$|test/(datagram-tracks/client|max-age/client|receive-credit/sender|relay-fill/relay|stream-limits/client)\.ts$|doc/concept/audio-jitter/.*\.json$|drafts/moq-e2ee-01-wip\.json$)' \
+    tools='cargo jq cc' compiles='check fix' fix \
+    memo='^(doc/lib/[^/]+/index\.md|\.github/workflows/[^/]+\.yml)$'
 # Clippy for macOS and Windows over rs's selection, so a platform-gated error
 # fails here rather than in the nightly native lanes. The flake pins its
 # toolchain and the zig that compiles its build scripts' C, so a change there
@@ -622,7 +625,7 @@ memo_key() (
         read -ra list <<<"${tools[$module]}"
         tool_identity "${list[@]}"
         git -c core.quotePath=false ls-tree -r --format='%(path)%x09%(objectname)' "$tree" |
-            PATTERN=${scope[$module]} awk -F '\t' '$1 ~ ENVIRON["PATTERN"]'
+            PATTERN=${scope[$module]} EXTRA=${memo[$module]} awk -F '\t' '$1 ~ ENVIRON["PATTERN"] || (ENVIRON["EXTRA"] != "" && $1 ~ ENVIRON["EXTRA"])'
     } | git hash-object --stdin
 )
 
@@ -684,13 +687,12 @@ run_lane() {
             if github; then echo "::group::$current"; else echo "==> $current"; fi
             echo "$action: $current started" >&3
             key=${keys["$phase $module"]:-}
-            if [[ -n "$key" ]]; then
-                if [[ -f "$memo_dir/$phase-$module" && "$(<"$memo_dir/$phase-$module")" == "$key" ]]; then
-                    echo "$action: $current passed on these same inputs; skipping it (CHECK_RERUN=1 runs it)"
-                    record unchanged
-                    current=
-                    continue
-                fi
+            if [[ -n "$key" && -z "${CHECK_RERUN:-}" && -f "$memo_dir/$phase-$module" &&
+                "$(<"$memo_dir/$phase-$module")" == "$key" ]]; then
+                echo "$action: $current passed on these same inputs; skipping it (CHECK_RERUN=1 runs it)"
+                record unchanged
+                current=
+                continue
             fi
             # A job, as `run` explains; errexit stays on inside it. Untrapped,
             # the phase would die on TERM at once, orphaning its commands.
@@ -713,6 +715,7 @@ run_lane() {
                 break
             fi
             if ((status)); then
+                [[ -z "$memo_dir" || ! -v "memo[$module]" ]] || rm -f "$memo_dir/$phase-$module"
                 record failed
                 ((lane_status)) || lane_status=$status
                 current=
@@ -789,17 +792,18 @@ logs=$(mktemp -d)
 # The memo lives in this worktree's git directory, so it goes with the worktree.
 # CI and `just ci` (CI_STRICT) always run every phase.
 # Each memo phase's key is taken here, before any phase runs, where errexit
-# stops the run if one cannot be computed.
+# stops the run if one cannot be computed. Only a local check reads or writes
+# a pass, and CHECK_RERUN=1 only writes one; any local run, `just ci` included,
+# forgets the pass of a phase that fails, so a flaky failure is never skipped.
 memo_dir=
 tree=
 declare -A keys=()
-if [[ "$action" == check && -z "${CI_STRICT:-}${GITHUB_ACTIONS:-}${CHECK_RERUN:-}" ]]; then
+if [[ -z "${GITHUB_ACTIONS:-}" ]]; then
     for module in "${selected[@]}"; do
         [[ -v "memo[$module]" ]] || continue
-        if [[ -z "$tree" ]]; then
-            memo_dir=$(git rev-parse --path-format=absolute --git-path moq-check)
-            tree=$(snapshot)
-        fi
+        memo_dir=$(git rev-parse --path-format=absolute --git-path moq-check)
+        [[ "$action" == check && -z "${CI_STRICT:-}" ]] || break
+        [[ -n "$tree" ]] || tree=$(snapshot)
         phases_of "$module"
         for phase in "${phases[@]}"; do
             keys["$phase $module"]=$(memo_key "$phase" "$module" "$tree")

@@ -26,7 +26,7 @@ select_packages() {
         echo ALL
         return
     fi
-    if [[ "$list" == --all ]] || grep -qE '^(\.cargo/.*|sh/local\.(sh|ts)|Cargo\.(toml|lock)|clippy\.toml|rust-toolchain\.toml|rs/justfile|sh/rs/(select|platform|cross-lint|zig-(cc|c\+\+|ar)|nextest)\.sh|\.config/nextest\.toml)$' "$list"; then
+    if [[ "$list" == --all ]] || grep -qE '^(\.cargo/.*|sh/local\.(sh|ts)|Cargo\.(toml|lock)|clippy\.toml|rust-toolchain\.toml|rs/justfile|sh/rs/(select|platform|cross-lint|zig-(cc|c\+\+|ar)|nextest)\.sh|\.config/(nextest|hakari)\.toml)$' "$list"; then
         echo ALL
         return
     fi
@@ -61,15 +61,18 @@ select_packages() {
     # A crate that reads a file outside itself, such as a fixture, a script its
     # tests run, or another crate's bench module, is a seed when that file
     # changes, or only a target change when the reading source is one of its
-    # targets. sh/rs/reads.sh lists the reads as globs, made regexes here.
-    readers=$(bash sh/rs/reads.sh | jq -rR --rawfile list "$list" '
+    # targets. sh/rs/reads.sh lists the reads as globs, made regexes here. A
+    # read is followed through the files it reads: a change to a module that an
+    # included module includes in turn reaches the crate at the top.
+    readers=$(bash sh/rs/reads.sh | jq -nrR --rawfile list "$list" '
         def escape: gsub("(?<c>[.+?^$()\\[\\]{}|\\\\])"; "\\\(.c)");
         def regex: split("**/") | map(split("**") | map(split("*") | map(escape) | join("[^/]*")) | join(".*"))
             | "^\(join("(.*/)?"))(/.*)?$";
-        ($list | split("\n") | map(select(. != ""))) as $paths
-        | capture("^rs/(?<crate>[^/ ]+) (?<glob>[^ ]*) (?<file>.*):[0-9]+$")
-        | (.glob | regex) as $regex
-        | select(any($paths[]; test($regex)))
+        [inputs | capture("^rs/(?<crate>[^/ ]+) (?<glob>[^ ]*) (?<file>.*):[0-9]+$") | .regex = (.glob | regex)] as $reads
+        | def hit($paths): [$reads[] | select(.regex as $regex | any($paths[]; test($regex)))];
+          def changed: (. + [hit(.)[].file] | unique) as $more | if $more == . then . else $more | changed end;
+        ($list | split("\n") | map(select(. != "")) | unique | changed) as $paths
+        | hit($paths)[]
         | "\(.crate) \(if .file | test("^rs/[^/]+/(benches|tests|examples)/") then "target" else "library" end)"')
     targets=$({
         sed -nE 's#^rs/([^/]*)/(benches|tests|examples)/.*#\1#p' "$list"

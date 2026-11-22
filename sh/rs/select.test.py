@@ -110,6 +110,12 @@ class SelectTest(unittest.TestCase):
                     calls = self.selected(path, action=action)
                     self.assertTrue(any(call.startswith(f"rs {action} --workspace ") for call in calls), calls)
 
+    def test_hakari_configuration_selects_workspace(self):
+        # It shapes the workspace-hack every crate depends on, and the lint checks it.
+        calls = self.selected(".config/hakari.toml")
+        self.assertTrue(any(call.startswith("rs lint --workspace ") for call in calls), calls)
+        self.assertRegex(".config/hakari.toml", dispatch_scope())
+
     def test_workspace_clippy_configuration_selects_workspace(self):
         # The root clippy.toml is every crate's lint policy, alone or beside one crate's change.
         for paths in (("clippy.toml",), ("clippy.toml", "rs/moq-stats/src/lib.rs")):
@@ -357,13 +363,16 @@ class SelectTest(unittest.TestCase):
             ("rs/moq-net/examples/added.rs", "moq-net"),
             # A read from a target, here moq-tokio's integration tests, is a target change too.
             ("rs/moq-net/tests/range-table.json", "moq-tokio"),
+            # moq-relay's bench includes moq-net's session bench, which includes this helper.
+            ("rs/moq-net/tests/integration/support/harness.rs", "moq-relay"),
         ):
             with self.subTest(path=path):
                 crates = self.selected_crates(path)
                 self.assertIn(crate, crates)
-                self.assertNotIn("moq-relay", crates)
+                # moq-cli depends on each of these crates, not on their targets.
+                self.assertNotIn("moq-cli", crates)
         # A library that reads its own tests/ still reaches its dependents.
-        self.assertIn("moq-relay", self.selected_crates("rs/moq-json/tests/vectors.json"))
+        self.assertIn("moq-cli", self.selected_crates("rs/moq-json/tests/vectors.json"))
 
     def test_a_dev_dependency_stops_at_its_dependent(self):
         # hang's tests run on moq-tokio, but hang's library and its dependents do not.
