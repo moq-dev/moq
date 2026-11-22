@@ -4262,6 +4262,28 @@ fn client_requests_lost_server_hello() {
 	assert!(is_confirmed(pair.client_conn_mut(client_ch)));
 }
 
+/// CRYPTO recovered early goes ahead of a flight the anti-amplification limit still holds back,
+/// since a client buffers only so far past the offset it is missing
+#[test]
+fn recovered_crypto_precedes_unsent_flight() {
+	let _guard = subscribe();
+	let (cert, key) = big_cert_and_key();
+	let mut pair = Pair::new(Default::default(), server_config_with_cert(cert.clone(), key));
+	pair.latency = Duration::from_millis(10);
+	let mut client = client_config_with_certs(vec![cert]);
+	// Less than the flight, more than the anti-amplification limit lets out at once
+	client.transport.crypto_buffer_size = 4096;
+	let client_ch = pair.begin_connect(client);
+	pair.drive_client();
+	pair.time = pair.server.next_wakeup().unwrap();
+	pair.server.drive(pair.time, pair.client.addr);
+
+	// The ServerHello and the flight's first bytes are lost
+	pair.server.outbound.pop_front();
+	pair.drive();
+	assert!(is_confirmed(pair.client_conn_mut(client_ch)));
+}
+
 /// A short idle timeout does not cut the handshake to two Initial flights.
 ///
 /// Before an RTT sample the PTO is 999ms, so a 2s idle timeout is armed at 2997ms, while

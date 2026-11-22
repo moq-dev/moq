@@ -2149,13 +2149,17 @@ impl Connection {
 		if space.crypto.is_none() {
 			return false;
 		}
-		let mut any = false;
+		let mut recovered = VecDeque::new();
 		for packet in space.sent_packets.values_mut() {
 			if packet.retransmits.get().is_some_and(|x| !x.crypto.is_empty()) {
-				let crypto = mem::take(&mut packet.retransmits.get_or_create().crypto);
-				space.pending.crypto.extend(crypto);
-				any = true;
+				recovered.extend(mem::take(&mut packet.retransmits.get_or_create().crypto));
 			}
+		}
+		// Ahead of any flight not yet sent, as a lost packet's CRYPTO goes: the peer buffers only
+		// so far past the offset it is missing
+		let any = !recovered.is_empty();
+		for crypto in recovered.into_iter().rev() {
+			space.pending.crypto.push_front(crypto);
 		}
 		any
 	}
