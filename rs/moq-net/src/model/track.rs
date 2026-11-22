@@ -1404,6 +1404,11 @@ impl Lent {
 }
 
 impl TrackState {
+	/// The copy serving the cached group `key`, if the cache holds it.
+	pub(super) fn cached_handle(&self, key: u64) -> Option<group::Handle> {
+		self.lookup.get(&key).map(|slot| slot.serving().clone())
+	}
+
 	/// The head lent for group `key`, taken; see [`Consumer::lend_head`].
 	fn take_lent(&self, key: u64) -> Option<Arc<group::Head>> {
 		self.lent.lock().unwrap_or_else(PoisonError::into_inner).take(key)
@@ -10384,7 +10389,7 @@ impl Cursor {
 				join.update(asking);
 			}
 			let time = lookup.time;
-			let (answer, created) = match &lookup.join {
+			let (answer, held) = match &lookup.join {
 				None => (fill::TimeStart::Unanswered, None),
 				Some(join) => match join.outcome().poll(waiter, |outcome| {
 					(outcome.time_start(time))
@@ -10406,10 +10411,7 @@ impl Cursor {
 				&& group < time
 			{
 				if lookup.answer.is_none() {
-					lookup.answer = created.or_else(|| {
-						let state = self.state.read();
-						state.lookup.get(&group).map(|slot| slot.serving().clone())
-					});
+					lookup.answer = held;
 				}
 				if lookup
 					.answer
@@ -28687,6 +28689,48 @@ mod test {
 				"cached: {cached}, evicted: {evicted}"
 			);
 		}
+	}
+
+	/// Two readers look up the same time in a pause: the second handler's accept finds the group
+	/// the first created already cached, and the cache lets it go before the second reader takes
+	/// the answer. The answer still holds the group, so its End places that reader past it too.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_cached_lookup_answer_keeps_its_end_once_evicted() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		for (start, end) in [(0, 400), (3000, 3400)] {
+			let mut group = producer.create_group(group::Info { start }).unwrap();
+			group
+				.write_frame(Timestamp::from_millis(start).unwrap(), &b"x"[..])
+				.unwrap();
+			drop(group.finish_at(end).unwrap());
+		}
+		let from = replay().with_order(Order::Ascending).with_ranges([Range {
+			start: crate::track::Start::Time(1700),
+			end: None,
+		}]);
+		let mut first = producer.subscribe(from.clone());
+		let mut second = producer.subscribe(from);
+		assert_eq!(drain_groups(&mut first), Vec::<u64>::new());
+		assert_eq!(drain_groups(&mut second), Vec::<u64>::new());
+		let waiter = kio::Waiter::noop();
+		let mut fills = Vec::new();
+		while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) {
+			fills.push(fill);
+		}
+		assert_eq!(fills.len(), 2, "each reader looks its time up");
+		let mut group = fills[0].accept(1000, None).unwrap().expect("a fresh group");
+		group
+			.write_frame(Timestamp::from_millis(1000).unwrap(), &b"x"[..])
+			.unwrap();
+		drop(group.finish_at(1400).unwrap());
+		assert!(fills[1].accept(1000, None).unwrap().is_none(), "already cached");
+		drop(fills);
+		assert_eq!(drain_groups(&mut first), [3000]);
+		evict(&producer, 1000);
+		assert_eq!(drain_groups(&mut second), [3000]);
+		assert_eq!(second.resolved_range(0).map(|resolved| resolved.start), Some(1400));
 	}
 
 	/// A time start just past a held group asks only the time's own key, from a floor at the

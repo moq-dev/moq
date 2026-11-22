@@ -42,6 +42,8 @@ export interface FillTrack {
 	 * its first frames, which a fill from frame 0 replaces.
 	 */
 	holds(key: bigint): boolean | "headless";
+	/** The group the track caches at `key`, if any. */
+	cached(key: bigint): GroupProducer | undefined;
 	/** Whether the track closed, so nothing more can be served. */
 	closed(): boolean;
 	/** Settles once the track closes. */
@@ -423,7 +425,10 @@ export class FillState {
 				const group = state.#track.holds(key) === true ? undefined : state.#track.accept(key, info);
 				// A time start's fill is no live part, and a group below its key lands nowhere it owes.
 				if (pending.exclusive && !pending.done) {
-					pending.answer = { kind: "group", group: key, answer: key < pending.start ? group : undefined };
+					// Below the time, it holds the group it names, created or cached, so its End stays known
+					// once the cache lets it go.
+					const answer = key < pending.start ? (group ?? state.#track.cached(key)) : undefined;
+					pending.answer = { kind: "group", group: key, answer };
 					state.#resolve(pending, pending.start, pending.end);
 				}
 				return group;
@@ -488,8 +493,8 @@ export interface Judged {
  */
 export type TimeStart =
 	/**
-	 * The group containing the time, and the group created to answer it below the time, held so where
-	 * it ends is known once the cache lets it go.
+	 * The group containing the time, and the group that answered it below the time, held so where it
+	 * ends is known once the cache lets it go.
 	 */
 	{ kind: "group"; group: bigint; answer?: GroupProducer } | { kind: "dropped" } | { kind: "refused"; error: Error };
 

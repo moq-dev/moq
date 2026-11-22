@@ -997,9 +997,6 @@ let keysOf: (producer: Producer) => readonly bigint[];
 let wholeAround: (producer: Producer, key: bigint) => Run | undefined;
 // Where the held group at `key` ends, once finished whole; assigned in its static block.
 let wholeAt: (producer: Producer, key: bigint) => bigint | undefined;
-// The held group at `key`; assigned in its static block.
-let cachedGroup: (producer: Producer, key: bigint) => GroupProducer | undefined;
-
 // Where a range from `time` starts, the group at `key` being the newest starting at or before it and
 // `end` where it ended whole, if it did: there, unless it ended at or before the time, then at its
 // End, so at the next group, since no group contains a time past a whole group's span. A time at the
@@ -1459,6 +1456,7 @@ export class Producer {
 				if (entry === undefined || entry.group.closed.peek() instanceof Error) return false;
 				return hooks.groupHeadless(entry.group) ? "headless" : true;
 			},
+			cached: (key) => this.#cached.get(key)?.group,
 			closed: () => this.#state.closed.peek() !== undefined,
 			released: this.#state.closed,
 		});
@@ -1614,7 +1612,6 @@ export class Producer {
 			const entry = producer.#cached.get(key);
 			return entry && hooks.groupWholeEnd(entry.group);
 		};
-		cachedGroup = (producer, key) => producer.#cached.get(key)?.group;
 		wholeAround = (producer, key) => {
 			const keys = producer.#keys;
 			const index = keyIndex(keys, key);
@@ -4120,7 +4117,7 @@ export class Subscriber {
 			// it: wait for it to end, then place the time by its End, held here so the start is the same
 			// whether the cache still holds it or not. Mirrors the Rust `Cursor::look_up_pass`.
 			if (answer?.kind === "group" && answer.group < lookup.time) {
-				lookup.answer ??= answer.answer ?? (producer && cachedGroup(producer, answer.group));
+				lookup.answer ??= answer.answer;
 				if (lookup.answer?.closed.peek() === undefined && lookup.answer !== undefined) continue;
 			}
 			this.#lookups.splice(this.#lookups.indexOf(lookup), 1);

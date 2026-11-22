@@ -201,8 +201,8 @@ pub(crate) struct Outcome {
 	// Each accepted copy short of the whole group, which a later copy may displace from the
 	// cache before a reader takes it. A whole copy covers every other, so none displaces it.
 	partial: BTreeMap<u64, group::Handle>,
-	// The group a time start's fill accepted below the time, held so where it ends is known
-	// even once the cache lets it go.
+	// The group a time start's fill accepted below the time, created or already cached, held so
+	// where it ends is known even once the cache lets it go.
 	answer: Option<group::Handle>,
 }
 
@@ -216,7 +216,7 @@ impl Outcome {
 		self.accepted.contains(&key)
 	}
 
-	/// The group a time start's fill accepted below the time, if it created it.
+	/// The group a time start's fill accepted below the time.
 	pub(super) fn answer(&self) -> Option<&group::Handle> {
 		self.answer.as_ref()
 	}
@@ -1411,12 +1411,21 @@ impl Inner {
 				_ => false,
 			}
 		};
-		// Cache the group before answering: readers resolve an accept through the cache.
+		// Cache the group before answering: readers resolve an accept through the cache. A time
+		// start answered below its time holds the group it names, created or cached, under the
+		// same lock, so its End stays known once the cache lets it go.
+		let mut answer = None;
 		let res = TrackState::modify(&self.state).and_then(|mut state| {
 			let res = match self.flight {
 				true => state.insert_flight(key, frames, info).map(Some),
 				false => state.insert_group_request(key, frames, info),
 			};
+			if key < self.start.group {
+				answer = match &res {
+					Ok(Some(group)) => Some(group.handle()),
+					_ => state.cached_handle(key),
+				};
+			}
 			let deferred = state.deferred();
 			drop(state);
 			deferred.wake();
@@ -1436,10 +1445,8 @@ impl Inner {
 			{
 				outcome.partial.insert(key, group.handle());
 			}
-			if let Ok(Some(group)) = &res
-				&& key < self.start.group
-			{
-				outcome.answer = Some(group.handle());
+			if answer.is_some() {
+				outcome.answer = answer;
 			}
 		}
 		uncover(&self.fills, self.id, key..end);
