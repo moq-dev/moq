@@ -43,7 +43,6 @@ This epic has no work of its own.
 
 - [NodeId drops Start](/quest/m2/node-id-drop-start.md) - the audit's breaking wire fix
 - [Origin proxy in Config](/quest/m2/origin-proxy-config.md) - the audit's breaking API fix
-- [Remove Peer.egress](/quest/m2/relay-peer-egress.md) - the audit's config break
 - [Route wakes](/quest/m3/route-wakes.md) - the audit's route fan-out cost
 - [Federation](/quest/m3/cluster-routing/federation.md) - the audit's priority and outbound scoping gaps
 - [Warmth port](/quest/m3/cache-routing/select.md) - the audit's cache-aware routing gaps
