@@ -327,7 +327,11 @@ export class Source {
 
 		// Orientation first, so a lower preference ranks a broadcast's secondary orientation
 		// rather than dropping it as a decode fallback.
-		return this.#select(preferredRenditions(orientedRenditions(section, available, target)), target, section?.rotation);
+		return this.#select(
+			preferredRenditions(orientedRenditions(section, available, target)),
+			target,
+			section?.rotation,
+		);
 	}
 
 	/**

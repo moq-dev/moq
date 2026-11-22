@@ -99,5 +99,8 @@ test("a rendition's version field is an unknown field, not a catalog entry versi
 	// A catalog map would skip the first entry and refuse the second; Rust ignores both versions.
 	const input = { renditions: { hd: { version: 99, frames: 3 }, sd: { version: "x", frames: 1 } } };
 	for (const schema of [Stats.SnapshotSchema, Echo.SnapshotSchema])
-		expect(schema.parse(input).renditions).toEqual({ hd: { frames: 3 }, sd: { frames: 1 } });
+		expect(JSON.parse(JSON.stringify(schema.parse(input).renditions))).toEqual({
+			hd: { frames: 3 },
+			sd: { frames: 1 },
+		});
 });

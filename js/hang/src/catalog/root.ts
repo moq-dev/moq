@@ -195,7 +195,8 @@ export function encode(root: Root): Root {
 		value.video = { ...value.video, renditions: versioned(unwrapped(value.video.renditions), entryVersion) };
 	if (value.audio)
 		value.audio = { ...value.audio, renditions: versioned(unwrapped(value.audio.renditions), entryVersion) };
-	if (value.text) value.text = { ...value.text, renditions: versioned(unwrapped(value.text.renditions), entryVersion) };
+	if (value.text)
+		value.text = { ...value.text, renditions: versioned(unwrapped(value.text.renditions), entryVersion) };
 	if (value.json) value.json = { ...value.json, tracks: versioned(value.json.tracks, entryVersion) };
 	if (value.binary) value.binary = { ...value.binary, tracks: versioned(value.binary.tracks, entryVersion) };
 	if (value.include) value.include = versioned(value.include, () => undefined);

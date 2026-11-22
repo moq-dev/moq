@@ -25,7 +25,12 @@ export function renditionsSchema<T extends z.ZodMiniType>(schema: T) {
 			for (const [id, value] of Object.entries(raw)) {
 				const result = schema.safeParse(value);
 				if (result.success) kept.push([id, result.data]);
-				else ctx.issues.push({ code: "custom", message: `malformed rendition ${id}: ${result.error.message}`, input: value });
+				else
+					ctx.issues.push({
+						code: "custom",
+						message: `malformed rendition ${id}: ${result.error.message}`,
+						input: value,
+					});
 			}
 			// fromEntries defines each key as its own property, so `__proto__` stays an ID.
 			return Object.fromEntries(kept) as Record<string, z.infer<T>>;
