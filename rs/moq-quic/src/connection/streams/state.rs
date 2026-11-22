@@ -268,8 +268,10 @@ impl StreamsState {
 	/// Ensure we have space for at least a full flow control window of remotely-initiated streams
 	/// to be open, and notify the peer if the window has moved
 	fn ensure_remote_streams(&mut self, dir: Dir) {
-		let new_count =
-			self.max_concurrent_remote_count[dir as usize].saturating_sub(self.allocated_remote_count[dir as usize]);
+		// RFC 9000 caps a stream count at 2^60: a peer refuses a larger MAX_STREAMS.
+		let new_count = self.max_concurrent_remote_count[dir as usize]
+			.saturating_sub(self.allocated_remote_count[dir as usize])
+			.min(MAX_STREAM_COUNT.saturating_sub(self.max_remote[dir as usize]));
 		self.allocated_remote_count[dir as usize] += new_count;
 		self.max_remote[dir as usize] += new_count;
 	}
@@ -5238,6 +5240,57 @@ mod tests {
 
 		assert_eq!(client.received_max_stream_data(id, 1), Ok(()));
 		assert!(client.received_stop_sending(id, 0u32.into()).is_ok());
+	}
+
+	/// A stream window as large as a varint, added to what the reader took, still encodes.
+	#[test]
+	fn max_stream_data_stays_a_varint() {
+		let mut server = StreamsState::new(
+			Side::Server,
+			1u32.into(),
+			1u32.into(),
+			1024 * 1024,
+			VarInt::MAX,
+			VarInt::MAX,
+		);
+		let id = StreamId::new(Side::Client, Dir::Uni, 0);
+		data(&mut server, id, 0, 1, false);
+		assert_eq!(Streams::new(&mut server, false).accept(Dir::Uni), Some(id));
+		let mut pending = Retransmits::default();
+		let mut stream = recv(&mut server, &mut pending, id);
+		let mut chunks = stream.read().unwrap();
+		assert_eq!(chunks.next(1).unwrap().unwrap().bytes.len(), 1);
+		chunks.finalize();
+
+		pending.max_stream_data.insert(id);
+		server.write_control_frames(
+			&mut Vec::new(),
+			&mut pending,
+			&mut ThinRetransmits::default(),
+			&mut FrameStats::default(),
+			1200,
+		);
+		let rs = server.recv[&id].as_ref().unwrap();
+		assert_eq!(rs.max_stream_data(VarInt::MAX.into_inner()), (VarInt::MAX.into_inner(), false));
+	}
+
+	/// Streams the peer frees never raise MAX_STREAMS past the 2^60 a peer accepts.
+	#[test]
+	fn max_streams_stays_under_the_stream_count_cap() {
+		let cap = VarInt::from_u64(MAX_STREAM_COUNT).unwrap();
+		let mut server = StreamsState::new(Side::Server, cap, cap, 1024 * 1024, VarInt::MAX, VarInt::MAX);
+		let mut pending = Retransmits::default();
+		for index in 0..2 {
+			let id = StreamId::new(Side::Client, Dir::Uni, index);
+			data(&mut server, id, 0, 1, true);
+			assert_eq!(Streams::new(&mut server, false).accept(Dir::Uni), Some(id));
+			let mut stream = recv(&mut server, &mut pending, id);
+			let mut chunks = stream.read().unwrap();
+			assert_eq!(chunks.next(1).unwrap().unwrap().bytes.len(), 1);
+			assert!(chunks.next(1).unwrap().is_none());
+			chunks.finalize();
+		}
+		assert_eq!(server.max_remote[Dir::Uni as usize], MAX_STREAM_COUNT);
 	}
 
 	#[test]
