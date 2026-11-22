@@ -153,6 +153,23 @@ function ptsContiguous(end: number | undefined, nextStart: number | undefined): 
 	return end !== undefined && nextStart !== undefined && nextStart <= end + CONTIGUITY_TOLERANCE;
 }
 
+// The deepest reordering a codec allows, in pictures: H.264 and HEVC hold at most 16 frames, so 32
+// fields. A reader measures a track's reordering and its last picture's duration within this many of a
+// group's latest presentation times. Mirrors Rust's `REORDER_MAX`.
+const REORDER_MAX = 32;
+
+// How the groups read so far run, for judging a step over keys nothing declared skipped. Mirrors Rust's
+// `Cadence`.
+interface Cadence {
+	// One picture, in microseconds, for a group whose frames carry no duration: its highest timestamp is
+	// where its last picture starts, not ends. The largest step between its latest presentation times,
+	// so a field/frame mix allows a frame. Zero once a group's end was exact.
+	slack: number;
+	// The most frames that decoded ahead of a frame they present after, in any group read: an open GOP's
+	// leading pictures decode after the keyframe, so its lowest picture comes within that many.
+	depth: number;
+}
+
 // The max delay in microseconds, infinite when unlimited.
 function maxMicros(delay: Moq.Track.Delay): number {
 	return delay.max === null ? Number.POSITIVE_INFINITY : (delay.max?.asMicros() ?? 0);
@@ -191,6 +208,11 @@ export class Consumer {
 	// promotion guard can tell a timeline-continuous next group from one sitting after a gap.
 	// Written only by #pass, which every move past a group goes through.
 	#presentedEnd?: number;
+	// How the groups read so far run, for judging a step whose group shows no proof of its own.
+	#cadence: Cadence = { slack: 0, depth: 0 };
+	// The latest presentation times of the media read from the group being read, ascending, at most
+	// REORDER_MAX.
+	#pictures: number[] = [];
 	// Group of the last media frame next() returned, so an endpoint after it reads as that frame's
 	// duration rather than a declared stop.
 	#mediaGroup?: bigint;
@@ -618,6 +640,56 @@ export class Consumer {
 		this.#active = next;
 	}
 
+	// Note a media frame read from the group being read, presenting at `at`: how many frames read before
+	// it present after it is how far the track reorders.
+	#read(at: number): void {
+		const latest = this.#pictures;
+		let below = latest.length;
+		while (below > 0 && latest[below - 1] > at) below--;
+		this.#cadence.depth = Math.max(this.#cadence.depth, latest.length - below);
+		if (latest.length < REORDER_MAX) {
+			latest.splice(below, 0, at);
+		} else if (below > 0) {
+			// Full: the earliest leaves, unless this frame presents before every time kept.
+			latest.shift();
+			latest.splice(below - 1, 0, at);
+		}
+	}
+
+	// A group read whole ended at `end`: exactly when a duration or its end marker reaches past its
+	// frames, otherwise one picture past the highest.
+	#reachedEnd(end: number): void {
+		const latest = this.#pictures;
+		const highest = latest.at(-1);
+		if (highest === undefined) return;
+		if (end > highest) {
+			this.#cadence.slack = 0;
+			return;
+		}
+		let step = 0;
+		for (let i = 1; i < latest.length; i++) step = Math.max(step, latest[i] - latest[i - 1]);
+		if (step > 0) this.#cadence.slack = step;
+	}
+
+	// Whether `head`, the next group past keys nothing declared skipped, continues where the content
+	// read so far ended: one of its frames presents by then, within one picture. Its lowest picture
+	// decodes within the track's reorder depth of its first, so it looks no further, nor past its end or
+	// a full max buffer. Undefined until it shows. Before the first item nothing was read to lose, so its
+	// first frame decides.
+	#continues(head: Group): boolean | undefined {
+		const end = this.#edge === undefined ? undefined : this.#presentedEnd;
+		const bound = end === undefined ? undefined : end + this.#cadence.slack;
+		const depth = bound === undefined ? 0 : this.#cadence.depth;
+		const frames = head.frames;
+		for (let i = 0; i < frames.length && i <= depth; i++) {
+			if (ptsContiguous(bound, frames[i].timestamp.asMicros())) return true;
+		}
+		if (frames.length > depth || head.consumer.done || head.fault !== undefined) return false;
+		// Only reading frames frees a full max buffer, so a head holding one judges by what it holds.
+		if (frames.length > 0 && this.#full()) return false;
+		return undefined;
+	}
+
 	// Skip the oldest groups while the buffered span exceeds the max delay. Returns true if any was skipped.
 	#checkMaxDelay(): boolean {
 		if (this.#active === undefined) return false;
@@ -918,16 +990,15 @@ export class Consumer {
 			if (this.#active !== undefined && this.#groups.length > 0) {
 				const head = this.#groups[0];
 				if (head.consumer.start > this.#active) {
-					const first = head.frames.at(0)?.timestamp.asMicros();
-					const contiguous =
-						this.#ordered.isSkipped(this.#active, head.consumer.start) ||
-						ptsContiguous(this.#presentedEnd, first);
+					// An open GOP's leading pictures decode after its keyframe but present before it, so
+					// frames after the first may show the head continues; until then its first frame waits.
+					const verdict = this.#ordered.isSkipped(this.#active, head.consumer.start) || this.#continues(head);
+					const contiguous = verdict === true;
 					const empty = head.empty && head.consumer.done;
 					// A payload that failed to decode gives no timestamp, so its fault settles the step,
 					// for the read below to raise. The read's own end says nothing of where an open head
 					// starts, and reading waits on the head either way.
-					const known =
-						contiguous || head.gap || first !== undefined || head.fault !== undefined || head.consumer.done;
+					const known = verdict !== undefined || head.gap || head.fault !== undefined || head.consumer.done;
 					if (known) {
 						// A gap an empty group carries still marks the next frame, which follows the loss.
 						if (head.gap && !contiguous) {
@@ -969,7 +1040,9 @@ export class Consumer {
 					if (this.#start === undefined || key > this.#start.group) {
 						this.#floor = this.#start?.timestamp;
 						this.#start = { group: key, timestamp: at };
+						this.#pictures = [];
 					}
+					this.#read(at);
 					if (this.#floor !== undefined && at < this.#floor) {
 						this.#abort(new Error("frame timestamp is below the previous group start"));
 						throw this.#error;
@@ -995,7 +1068,10 @@ export class Consumer {
 					// sits there: the promotion guard above steps to it once the publisher declared the run
 					// between skipped or its first frame continues this group's timeline, as Rust's
 					// `poll_continues` does, and otherwise waits for the hole like any other.
-					if (key === this.#active) this.#pass(head, key + 1n);
+					if (key === this.#active) {
+						this.#pass(head, key + 1n);
+						if (settled === null && head.end !== undefined && this.#start?.group === key) this.#reachedEnd(head.end);
+					}
 					head.consumer.close();
 					this.#release(head);
 					const truncated = settled instanceof Error;
