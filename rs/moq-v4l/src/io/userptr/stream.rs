@@ -117,7 +117,7 @@ impl StreamTrait for Stream {
 		// STREAMON on a streaming queue does nothing, and leaves a dequeued
 		// buffer with userspace.
 		if let State::Stopped = self.state {
-			self.state = State::Streaming { held: false };
+			self.state = State::Started;
 		}
 		Ok(())
 	}
@@ -194,11 +194,11 @@ impl<'a> CaptureStream<'a> for Stream {
 
 	fn next(&'a mut self) -> io::Result<(&'a Self::Item, &'a Metadata)> {
 		match self.state {
-			State::Stopped => {
-				// Enqueue all buffers once on stream start. A start that fails
-				// partway hands back what it queued, which STREAMOFF does even on a
-				// queue that never streamed, so the next call starts from the same
-				// place rather than queueing a buffer twice.
+			State::Stopped | State::Started => {
+				// Hand the driver every buffer once per start, however it started. A
+				// start that fails partway hands back what it queued, which STREAMOFF
+				// does even on a queue that never streamed, so the next call starts
+				// from the same place rather than queueing a buffer twice.
 				let started = (0..self.arena.bufs.len())
 					.try_for_each(|index| self.queue(index))
 					.and_then(|()| self.start());
@@ -206,6 +206,7 @@ impl<'a> CaptureStream<'a> for Stream {
 					self.stop()?;
 					return Err(err);
 				}
+				self.state = State::Streaming { held: false };
 			}
 			State::Streaming { held: true } => {
 				// After a timed-out dequeue the driver already holds every buffer, and

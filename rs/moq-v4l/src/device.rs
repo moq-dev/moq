@@ -147,7 +147,9 @@ impl Handle {
 	/// * `timeout` - Timeout in milliseconds. A value of zero returns immediately,
 	///   even if the fd is not ready. A negative value means infinite timeout (blocking).
 	///
-	/// A signal that interrupts the wait restarts it with the full timeout.
+	/// A signal that interrupts a finite wait ends it as a timeout, returning
+	/// zero early rather than restarting and outliving the timeout; an
+	/// infinite wait restarts.
 	pub fn poll(&self, events: i16, timeout: i32) -> io::Result<i32> {
 		loop {
 			let mut fds = [libc::pollfd {
@@ -161,10 +163,52 @@ impl Handle {
 					if err.kind() != io::ErrorKind::Interrupted {
 						return Err(err);
 					}
+					if timeout >= 0 {
+						return Ok(0);
+					}
 				}
 				// Zero means the wait timed out, one that the fd saw activity.
 				ret => return Ok(ret),
 			}
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::os::fd::FromRawFd;
+	use std::sync::mpsc;
+
+	use super::*;
+
+	/// Signals that keep arriving must not stretch a finite wait past its
+	/// timeout, which a restart with the full timeout would.
+	#[test]
+	fn an_interrupted_wait_ends_as_a_timeout() {
+		extern "C" fn ignore(_: libc::c_int) {}
+		unsafe { libc::signal(libc::SIGUSR1, ignore as *const () as libc::sighandler_t) };
+
+		let mut fds = [0; 2];
+		assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+		// An empty pipe never becomes readable while its write end stays open.
+		let (read, _write) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+		let handle = Handle::new(read);
+
+		let (tx, rx) = mpsc::channel();
+		let waiter = std::thread::spawn(move || {
+			tx.send(unsafe { libc::pthread_self() }).unwrap();
+			handle.poll(libc::POLLIN, 60_000)
+		});
+		let thread = rx.recv().unwrap();
+
+		for _ in 0..1_000_000 {
+			if waiter.is_finished() {
+				break;
+			}
+			unsafe { libc::pthread_kill(thread, libc::SIGUSR1) };
+			std::thread::yield_now();
+		}
+		assert!(waiter.is_finished(), "the wait outlived a million signals");
+		assert_eq!(waiter.join().unwrap().unwrap(), 0);
 	}
 }

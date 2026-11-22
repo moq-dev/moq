@@ -8,6 +8,9 @@ pub mod userptr;
 pub(crate) enum State {
 	/// Not streaming: every buffer is userspace's, none of them queued.
 	Stopped,
+	/// Streaming, but `next` has yet to hand the queue its buffers: a capture
+	/// queues every one, an output hands each to userspace to fill first.
+	Started,
 	/// Streaming. `held` is whether userspace holds the buffer at
 	/// `arena_index`, so the next frame queues it back first. A dequeue that
 	/// timed out holds none.

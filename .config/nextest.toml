@@ -42,7 +42,7 @@ test-group = "io-uring"
 # The vivid tests share one capture node, and a second process configuring its
 # queue while another streams gets EBUSY.
 [[profile.default.overrides]]
-filter = "package(moq-video) & test(/^capture::v4l2::tests::vivid::/)"
+filter = "(package(moq-video) & test(/^capture::v4l2::tests::vivid::/)) | (package(moq-v4l) & test(/::tests::vivid::/))"
 test-group = "v4l2"
 
 # The binding benchmark runs many `MOQ_BENCH_SECONDS` budgets back to back, so its
