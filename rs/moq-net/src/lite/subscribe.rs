@@ -59,10 +59,10 @@ impl Subscribe<'_> {
 /// One end of a [`Range`], as the wire carries it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Anchor {
-	/// A position: a start delivers from it, and an end stops just before it. Lite-06 bounds
-	/// either end partway through a group. A group's start is its time, so lite-07 sends one
-	/// at a group's first frame as an [`Anchor::Time`], an end as the time just before it, and
-	/// a start partway through a group as its Position type, which only a start may be.
+	/// A position: a start delivers from it, and an end stops just before it. Either end may
+	/// fall partway through a group. A group's start is its time, so lite-07 sends one at a
+	/// group's first frame as an [`Anchor::Time`], an end as the time just before it, and one
+	/// partway through a group as its Position type.
 	Absolute(crate::track::Position),
 	/// The group containing this time in the track's timescale (the highest start at or
 	/// below it), included as an end. Lite07+ only.
@@ -308,8 +308,8 @@ fn decode_range_list(r: &mut Decoder<'_>) -> Result<Vec<Range>, DecodeError> {
 	// count the bytes can't back runs out before it costs anything.
 	let mut ranges = Vec::new();
 	for _ in 0..count {
-		let start = decode_anchor(r, false)?;
-		let end = decode_anchor(r, true)?;
+		let start = decode_anchor(r)?;
+		let end = decode_anchor(r)?;
 		ranges.push(Range { start, end });
 	}
 	Ok(ranges)
@@ -344,14 +344,13 @@ pub(super) fn range_size(range: &Range, form: Form) -> Option<usize> {
 }
 
 /// Decode one lite-07 range end: its type, then the fields that type carries. Type 0 is no
-/// anchor, a start the Min Age or max age places and the live edge as an end. Type 2, a
-/// position partway through a group, is a start only, so `end` refuses it, and so is one at
-/// frame 0, which type 1 says.
-fn decode_anchor(r: &mut Decoder<'_>, end: bool) -> Result<Option<Anchor>, DecodeError> {
+/// anchor, a start the Min Age or max age places and the live edge as an end. Type 2 is a
+/// position partway through a group, never at frame 0, which type 1 says.
+fn decode_anchor(r: &mut Decoder<'_>) -> Result<Option<Anchor>, DecodeError> {
 	Ok(match r.varint()? {
 		0 => None,
 		1 => Some(Anchor::Time(r.varint()?)),
-		2 if !end => {
+		2 => {
 			let group = r.varint()?;
 			let frame = r.varint()?;
 			if frame == 0 {
@@ -367,13 +366,12 @@ fn decode_anchor(r: &mut Decoder<'_>, end: bool) -> Result<Option<Anchor>, Decod
 ///
 /// An absolute position at a group's first frame goes out as its group's time: a start as
 /// is, and an exclusive end as the inclusive time just before it, an end at group 0 holding
-/// nothing a time can say. A start partway through a group goes out as a position, its
-/// group's start then the frame; an end there is refused, since FETCH reads a slice of a group.
+/// nothing a time can say. One partway through a group goes out as a position, its group's
+/// start then the frame: a start from that frame, an end before it.
 fn wire_anchor(anchor: Option<Anchor>, end: bool) -> Result<(u64, [Option<u64>; 2]), EncodeError> {
 	Ok(match anchor {
 		None => (0, [None, None]),
 		Some(Anchor::Time(time)) => (1, [Some(time), None]),
-		Some(Anchor::Absolute(position)) if position.frame != 0 && end => return Err(EncodeError::Version),
 		Some(Anchor::Absolute(position)) if position.frame != 0 => (2, [Some(position.group), Some(position.frame)]),
 		Some(Anchor::Absolute(position)) if end => (
 			1,
@@ -1833,9 +1831,13 @@ mod test {
 	/// start, then the frame. An end there is refused, since FETCH reads a slice of a group,
 	/// and so is a Position at frame 0, which a Time says.
 	#[test]
-	fn lite07_starts_partway_through_a_group() {
+	fn lite07_starts_and_ends_partway_through_a_group() {
 		let mut msg = framed_sample();
-		assert!(matches!(encode(&msg, Version::Lite07), Err(EncodeError::Version)));
+		assert_eq!(roundtrip(&msg, Version::Lite07).ranges, msg.ranges);
+		let framed = encode(&msg, Version::Lite07).unwrap();
+		// Type 2, start 7, frame 4, then type 2, start 9, frame 3, which it stops before.
+		assert!(framed.ends_with(&[1, 2, 7, 4, 2, 9, 3]), "{framed:?}");
+		assert_eq!(range_size(&msg.ranges[0], Version::Lite07.into()), Some(6));
 		msg.ranges = vec![Range {
 			start: absolute(7, 4),
 			end: None,
@@ -1858,7 +1860,8 @@ mod test {
 		};
 		assert!(decode(&[1, 2, 7, 4, 0]).is_ok());
 		assert!(matches!(decode(&[1, 2, 7, 0, 0]), Err(DecodeError::InvalidValue)));
-		assert!(matches!(decode(&[1, 1, 7, 2, 9, 4]), Err(DecodeError::InvalidValue)));
+		assert!(decode(&[1, 1, 7, 2, 9, 4]).is_ok());
+		assert!(matches!(decode(&[1, 1, 7, 2, 9, 0]), Err(DecodeError::InvalidValue)));
 	}
 
 	/// An update sends only the ranges that changed, and the publisher resolves the same list,
