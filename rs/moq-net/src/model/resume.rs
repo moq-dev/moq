@@ -1074,7 +1074,6 @@ struct Retain<'a> {
 	groups_read: bool,
 	/// The newest group the serving copy has.
 	edge: Option<u64>,
-	mirrored: &'a Mirrored,
 	delivered: &'a Delivered,
 	out: &'a [(u64, Weak<()>)],
 	waiter: &'a kio::Waiter,
@@ -2325,7 +2324,6 @@ impl Reader {
 			window: &self.window,
 			groups_read: self.groups_read,
 			edge,
-			mirrored: &self.mirrored,
 			delivered,
 			out: &self.out,
 			waiter,

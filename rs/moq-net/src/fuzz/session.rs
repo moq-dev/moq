@@ -513,8 +513,8 @@ async fn read_broadcast(broadcast: broadcast::Consumer, read: Rc<RefCell<Vec<Vec
 	let Ok(track) = broadcast.track(TRACK) else {
 		return;
 	};
-	// Never skip a superseded group, so every one the publisher wrote must arrive.
-	let every = track::Subscription::default().with_delay(track::Delay::default().with_max(None));
+	// History from the oldest group skips nothing, so every one the publisher wrote must arrive.
+	let every = track::Subscription::default();
 	let Ok(mut subscriber) = track.subscribe(every).await else {
 		return;
 	};

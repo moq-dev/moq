@@ -2400,7 +2400,7 @@ impl Request for SubscribeServe {
 			Err(err) => return Ok(Self::datagrams(Legacy::datagrams(legacy, err)?, &msg, None)),
 		};
 		let latest = track.latest_key();
-		let bounds = Bounds::new(&msg.ranges, !shared.version.has_ranges());
+		let bounds = Bounds::new(&msg.ranges, Bounds::legacy(shared.version, msg.max_delay));
 		Ok(Self::subscribe(msg, bounds, &track, latest, None, legacy))
 	}
 
@@ -3056,7 +3056,6 @@ impl SubscribeServe {
 	) -> Self {
 		let subscription = crate::track::Subscription {
 			priority: msg.priority,
-			delay: track::Delay { max: msg.max_delay },
 			order: msg.order,
 			..bounds.groups()
 		};
@@ -3156,7 +3155,6 @@ impl Request for FetchServe {
 				track::FetchOptions {
 					options: group::Fetch {
 						priority: msg.priority,
-						max_delay: msg.max_delay,
 						frame_start: msg.start_frame,
 					},
 					end: msg.end_frame.and_then(|end| end.checked_add(1)),
@@ -4887,8 +4885,9 @@ impl Bounds {
 	///
 	/// A `legacy` wire (one without ranges) means its start as the first group starting at
 	/// or after it, never one before it that contains it, so the frames narrow to that
-	/// floor (see [`Frames::floor`]).
-	fn new(ranges: &[lite::Range], legacy: bool) -> Self {
+	/// floor (see [`Frames::floor`]); and its range with no start takes the start
+	/// [`Self::legacy`] gives.
+	fn new(ranges: &[lite::Range], legacy: Option<crate::track::Start>) -> Self {
 		use crate::track::{Range, Start};
 
 		let mut bounds = Self {
@@ -4907,12 +4906,12 @@ impl Bounds {
 				continue;
 			}
 			let start = match range.start {
-				None => Start::Oldest,
+				None => legacy.unwrap_or(Start::Oldest),
 				Some(lite::Anchor::Absolute(position)) => Start::Time(position.group),
 				Some(lite::Anchor::Time(time)) => Start::Time(time),
-				Some(lite::Anchor::Live(min)) => Start::Live(min),
+				Some(lite::Anchor::Live { min, max }) => Start::Live { min, max },
 			};
-			if legacy && let Some(lite::Anchor::Absolute(start)) = range.start {
+			if legacy.is_some() && let Some(lite::Anchor::Absolute(start)) = range.start {
 				bounds.frames.floor = bounds.frames.floor.max(start.group);
 			}
 			let position = match range.start {
@@ -4938,7 +4937,7 @@ impl Bounds {
 				},
 				Some(lite::Anchor::Time(end)) => Some(end),
 				// Only a start may join live, which decoding enforces.
-				Some(lite::Anchor::Live(_)) => {
+				Some(lite::Anchor::Live { .. }) => {
 					bounds.ranges.push(Range::EMPTY);
 					continue;
 				}
@@ -4954,6 +4953,30 @@ impl Bounds {
 		}
 		bounds.frames.first = first_frames(bounds.positions.values(), &bounds.ranges);
 		bounds
+	}
+
+	/// The start a range with none takes on a `version` before lite-07, where one
+	/// `Subscriber Max Age` bounds the whole subscription; `None` on lite-07, which carries
+	/// one on each live start instead.
+	///
+	/// Lite-06 resolves an absent start from that max age, so it joins that far behind the
+	/// live edge, and its groups expire past it; with no max age, it reaches back to the
+	/// oldest group. Before lite-06 an absent start is the latest group, still expiring past
+	/// the max age, and lite01/02 carry none, so nothing expires (see [`cursor_floor`]).
+	/// A named start is a history floor on every wire, bounded by the publisher's max age.
+	fn legacy(version: Version, max_delay: Option<Duration>) -> Option<crate::track::Start> {
+		use crate::track::Start;
+		if version.has_ranges() {
+			return None;
+		}
+		Some(match (version.resolves_start(), max_delay) {
+			(false, max) => Start::Live {
+				min: Duration::ZERO,
+				max,
+			},
+			(true, Some(max)) => Start::Live { min: max, max: Some(max) },
+			(true, None) => Start::Oldest,
+		})
 	}
 
 	/// Whether a subscription to these ranges over `version` is answered once they are
@@ -5362,10 +5385,11 @@ impl Unpinned {
 /// its end. `None` once neither can move.
 ///
 /// A start may resolve once any group is there, even a time start above every group, which
-/// the latest group may contain, and so may a live join's. An end settles once a group starts
-/// past it.
+/// the latest group may contain. An end settles once a group starts past it. A live join is
+/// never pinned: as a time start its groups would turn from live ones that expire past its max
+/// age into history, and the model already keeps it placed by its Range ID.
 fn due(range: &crate::track::Range, started: bool) -> Option<u64> {
-	if range.is_empty() {
+	if range.is_empty() || matches!(range.start, crate::track::Start::Live { .. }) {
 		return None;
 	}
 	if !started && range.start != crate::track::Start::Oldest {
@@ -5472,12 +5496,18 @@ impl TrackRun {
 				group.set_priority(crate::priority::group(upd.priority, self.ctx.publisher));
 			}
 		}
-		let delay = crate::track::Delay { max: upd.max_delay };
 		// Read first: the edit moves it.
 		let requested = self.requested.start();
 		let edited = match upd.ranges {
-			lite::Applied::Edit { retired, added } => self.edit(retired, added, upd.priority, delay, upd.order),
-			lite::Applied::Replace(ranges) => self.replace_ranges(ranges, upd.priority, delay, upd.order),
+			lite::Applied::Edit {
+				retired,
+				added,
+				retuned,
+			} => self.edit(retired, added, retuned, upd.priority, upd.order),
+			lite::Applied::Replace(ranges) => {
+				let legacy = Bounds::legacy(self.ctx.version, upd.max_delay);
+				self.replace_ranges(ranges, legacy, upd.priority, upd.order)
+			}
 		};
 		if !edited {
 			return;
@@ -5525,41 +5555,45 @@ impl TrackRun {
 		self.bounded = self.ctx.version.has_ranges() && self.requested.bounded();
 	}
 
-	/// Lite-07: retire the ranges with Range IDs `retired` and add `added`, passing the edit
-	/// straight to the model, so it costs the ranges it names whatever else is live. Returns
-	/// whether the ranges moved.
+	/// Lite-07: retire the ranges with Range IDs `retired`, add `added`, and give each live
+	/// join in `retuned` its new max age, passing the edit straight to the model, so it costs
+	/// the ranges it names whatever else is live. Returns whether the ranges moved.
 	///
 	/// A range left live keeps where it resolved: the model keeps each by its Range ID, so it
 	/// never places a live join again by a newer live edge, nor looks a time start up again in
-	/// newer groups.
+	/// newer groups. A retuned join is the same range to the model, placed where it was.
 	fn edit(
 		&mut self,
 		retired: Vec<u64>,
 		added: Vec<(u64, lite::Range)>,
+		retuned: Vec<(u64, lite::Range)>,
 		priority: i8,
-		delay: crate::track::Delay,
 		order: Order,
 	) -> bool {
 		let mut positions = Vec::new();
 		let added: Vec<(u64, crate::track::Range)> = added
 			.into_iter()
 			.map(|(id, range)| {
-				let bounds = Bounds::new(std::slice::from_ref(&range), false);
+				let bounds = Bounds::new(std::slice::from_ref(&range), None);
 				positions.extend(bounds.positions.values().map(|position| (id, *position)));
 				(id, bounds.ranges[0])
 			})
+			.collect();
+		// A live join is never pinned (see [`due`]), so a retune replaces it as it stands.
+		let retuned: Vec<(u64, crate::track::Range)> = (retuned.into_iter())
+			.map(|(id, range)| (id, Bounds::new(std::slice::from_ref(&range), None).ranges[0]))
 			.collect();
 		for id in &retired {
 			self.unpinned.remove(*id);
 		}
 		let pins = self.pin();
-		let moved = !retired.is_empty() || !added.is_empty() || !pins.is_empty();
-		// A pinned range is replaced in place, keeping its Range ID.
+		let moved = !retired.is_empty() || !added.is_empty() || !pins.is_empty() || !retuned.is_empty();
+		// A pinned or retuned range is replaced in place, keeping its Range ID.
+		let replaced = || pins.iter().chain(&retuned);
 		let edit = crate::track::Edit {
-			retire: retired.iter().copied().chain(pins.iter().map(|(id, _)| *id)).collect(),
-			add: pins.iter().chain(&added).copied().collect(),
+			retire: retired.iter().copied().chain(replaced().map(|(id, _)| *id)).collect(),
+			add: replaced().chain(&added).copied().collect(),
 			priority,
-			delay,
 			order,
 		};
 		// A refusal leaves the model's ranges as they were, so this side keeps them too.
@@ -5572,7 +5606,7 @@ impl TrackRun {
 			// A range retired before its start resolved is owed no SUBSCRIBE_STARTED.
 			self.unstarted.remove(id);
 		}
-		for (id, range) in pins {
+		for (id, range) in pins.into_iter().chain(retuned) {
 			self.requested.insert(id, range);
 		}
 		// Retired and replaced ranges take their frame starts with them.
@@ -5585,7 +5619,7 @@ impl TrackRun {
 			self.unpinned.insert(id, due(&range, false));
 			if id >= self.initial {
 				self.unstarted
-					.insert(id, matches!(range.start, crate::track::Start::Live(_)));
+					.insert(id, matches!(range.start, crate::track::Start::Live { .. }));
 			}
 		}
 		self.positions.extend(positions);
@@ -5597,9 +5631,9 @@ impl TrackRun {
 
 	/// Each live range whose start or end resolved since the last update, with them replaced
 	/// by the groups they resolved to: a range resolves once, so an update that leaves it live
-	/// never places a live join again by a newer live edge, nor looks a time start
-	/// up again in newer groups, here or on a relay's copies, and its start names the group it
-	/// resolved to for the read cursor's floor. A start reaching back to the oldest group held
+	/// never looks a time start up again in newer groups, here or on a relay's copies, and its
+	/// start names the group it resolved to for the read cursor's floor. A live join stays as
+	/// asked (see [`due`]). A start reaching back to the oldest group held
 	/// stays as it was, since an absolute start would turn it into a floor the subscriber never
 	/// named.
 	///
@@ -5652,15 +5686,14 @@ impl TrackRun {
 	fn replace_ranges(
 		&mut self,
 		ranges: Vec<(u64, lite::Range)>,
+		legacy: Option<crate::track::Start>,
 		priority: i8,
-		delay: crate::track::Delay,
 		order: Order,
 	) -> bool {
 		let (ids, ranges): (Vec<u64>, Vec<lite::Range>) = ranges.into_iter().unzip();
-		let bounds = Bounds::new(&ranges, !self.ctx.version.has_ranges());
+		let bounds = Bounds::new(&ranges, legacy);
 		let model = crate::track::Subscription {
 			priority,
-			delay,
 			order,
 			..bounds.groups()
 		};
@@ -6490,7 +6523,7 @@ impl CoverageBench {
 				end: group(range.end),
 			})
 			.collect();
-		let bounds = Bounds::new(&wire, false);
+		let bounds = Bounds::new(&wire, None);
 		let track = track::Producer::new(
 			Arc::new(crate::broadcast::Info::default()),
 			"bench",
@@ -6589,7 +6622,7 @@ impl UpdateBench {
 			panic!("a memory stream opens at once");
 		};
 		let wire: Vec<_> = (0..ranges).map(Self::range).collect();
-		let bounds = Bounds::new(&wire, false);
+		let bounds = Bounds::new(&wire, None);
 		let track = track::Producer::new(
 			Arc::new(crate::broadcast::Info::default()),
 			"bench",
@@ -6655,7 +6688,7 @@ impl UpdateBench {
 		self.oldest += edited;
 		let next = self.live.next();
 		let add = (next..next + edited).map(Self::range).collect();
-		self.apply(lite::RangeEdit::Edit { remove, add }, 0);
+		self.apply(lite::RangeEdit::Edit { remove, add, retune: Vec::new() }, 0);
 	}
 
 	/// Move only the priority, leaving every range live.

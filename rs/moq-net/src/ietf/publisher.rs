@@ -40,12 +40,10 @@ fn subscribe_refusal<'a>(
 	error
 }
 
-/// Leave only the publisher's max age when the subscriber supplies no age budget.
+/// Serve at the subscriber's priority, bounded by the publisher's max age alone.
 fn serving_subscription(subscriber_priority: u8) -> Subscription {
 	Subscription {
 		priority: super::priority::from_wire(subscriber_priority),
-		// No Max Age leaves the publisher's max age alone, whatever it turns out to be.
-		delay: crate::track::Delay { max: None },
 		// SUBSCRIBE_OK names the live edge, which a relay learns only from its upstream's
 		// answer: never from its cache, nor from an edge reported before.
 		feed: true,
@@ -6842,7 +6840,6 @@ impl TrackServe {
 		if let Some(next) = range.fill_tail(fill, edge) {
 			let options = group::Fetch {
 				priority: self.track.subscription().priority,
-				max_delay: self.track.subscription().delay.max,
 				..Default::default()
 			};
 			// A stream still serving this group from the fill's edge keeps what it covers, so
@@ -21740,9 +21737,13 @@ impl ServeRange {
 
 /// Ask for a live join with no lag, as a SUBSCRIBE without an absolute start does: a range
 /// from the oldest group would have a relay's route replay everything it retains, and
-/// SUBSCRIBE_OK then name the oldest group replayed so far as Largest.
+/// SUBSCRIBE_OK then name the oldest group replayed so far as Largest. No group of it
+/// expires short of the publisher's max age, since this draft's SUBSCRIBE carries none.
 fn live_join(subscription: &mut Subscription) {
-	*subscription = std::mem::take(subscription).with_ranges([track::Range::from(track::Start::Live(Duration::ZERO))]);
+	*subscription = std::mem::take(subscription).with_ranges([track::Range::from(track::Start::Live {
+		min: Duration::ZERO,
+		max: None,
+	})]);
 }
 
 /// The slice of one group a subscription's [`ServeRange`] selects.

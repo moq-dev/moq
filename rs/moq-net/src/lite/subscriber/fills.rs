@@ -4,7 +4,6 @@ use std::{
 	collections::BTreeMap,
 	ops::Range,
 	task::{Poll, ready},
-	time::Duration,
 };
 
 use rangemap::{RangeMap, RangeSet};
@@ -14,7 +13,7 @@ use crate::{
 	Error, StreamError,
 	coding::Recv,
 	group, lite,
-	track::{self, Delay, Order, Position, Subscription},
+	track::{self, Order, Position, Subscription},
 };
 
 /// What a lite-07 copy's held fills ask of its upstream subscription, beside the demand.
@@ -24,8 +23,6 @@ pub(super) struct FillAsk {
 	pub groups: RangeSet<u64>,
 	/// The most urgent priority a held fill asks with.
 	pub priority: i8,
-	/// The most tolerant budget a held fill asks with, `None` for the publisher's max age.
-	pub max_delay: Option<Duration>,
 	pub order: Order,
 }
 
@@ -34,7 +31,6 @@ impl Default for FillAsk {
 		Self {
 			groups: Default::default(),
 			priority: i8::MIN,
-			max_delay: Some(Duration::ZERO),
 			order: Order::Ascending,
 		}
 	}
@@ -48,10 +44,6 @@ impl FillAsk {
 	/// Count `fill`'s preferences in.
 	fn add(&mut self, fill: &track::FillGroups) {
 		self.priority = self.priority.max(fill.priority());
-		self.max_delay = match (self.max_delay, fill.max_delay()) {
-			(Some(ours), Some(theirs)) => Some(ours.max(theirs)),
-			_ => None,
-		};
 		if fill.order() == Order::Descending {
 			self.order = Order::Descending;
 		}
@@ -79,7 +71,6 @@ impl FillAsk {
 		Subscription::default()
 			.with_ranges([])
 			.with_priority(self.priority)
-			.with_delay(Delay::default().with_max(self.max_delay))
 			.with_order(self.order)
 	}
 }
@@ -440,7 +431,6 @@ impl RangeFills {
 		// What finishes a stream still asks with what its fills asked.
 		if self.held.is_empty() && !groups.is_empty() {
 			ask.priority = self.ask.priority;
-			ask.max_delay = self.ask.max_delay;
 			ask.order = self.ask.order;
 		}
 		ask.groups = groups;
@@ -547,7 +537,6 @@ impl Recovery {
 		let subscription = Subscription::default()
 			.with_ranges(track::Range::span(Some(groups.start), Some(groups.end)))
 			.with_priority(priority)
-			.with_delay(Delay::default().with_max(None))
 			.with_order(Order::Ascending);
 		let ranges = vec![lite::Range {
 			start: Some(lite::Anchor::Absolute(Position::group(groups.start))),

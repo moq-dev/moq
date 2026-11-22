@@ -23,9 +23,10 @@ pub struct Subscribe<'a> {
 	pub node: Option<crate::route::NodeId>,
 	pub track: Cow<'a, str>,
 	pub priority: i8,
-	/// The subscriber's `Subscriber Max Age`, or `None` for no limit beyond the publisher's.
-	/// Lite01/02 carry none and decode as `None`; lite03-06 can't say `None` (see
-	/// [`encode_max_delay`]).
+	/// The subscriber's `Subscriber Max Age` before lite-07, or `None` for no limit beyond the
+	/// publisher's. Lite01/02 carry none and decode as `None`; lite03-06 can't say `None` (see
+	/// [`encode_max_delay`]). Lite-07 carries a max age on each [`Anchor::Live`] start instead,
+	/// so this is ignored there and decodes as `None`.
 	pub max_delay: Option<std::time::Duration>,
 	/// The spans to deliver, never empty. Lite07+ carries any number; earlier wires carry
 	/// exactly one (see [`Range`]).
@@ -63,9 +64,14 @@ pub enum Anchor {
 	/// The group containing this time in the track's timescale (the highest start at or
 	/// below it), included as an end. Lite07+ only.
 	Time(u64),
-	/// The group containing the live edge minus this lag, carried in whole milliseconds,
-	/// rounded up. A start only, lite07+ only: an older wire carries it as no start.
-	Live(std::time::Duration),
+	/// The group containing the live edge minus `min`, whose groups expire once they fall
+	/// `max` behind the live edge (`None` for no limit beyond the publisher's). Both are
+	/// carried in whole milliseconds, rounded up. A start only, lite07+ only: an older wire
+	/// carries it as no start.
+	Live {
+		min: std::time::Duration,
+		max: Option<std::time::Duration>,
+	},
 }
 
 /// A span of a track, as the wire carries it.
@@ -174,29 +180,28 @@ impl<'a> Message<'a> for Subscribe<'a> {
 /// say: the largest every implementation carries losslessly.
 const MAX_SAFE_DELAY_MS: u64 = (1 << 53) - 1;
 
-/// Decode the `Subscriber Max Age`: on lite-07 milliseconds plus one, zero meaning no limit;
-/// before it bare milliseconds.
+/// Decode the `Subscriber Max Age`, bare milliseconds before lite-07. Lite-07 carries none:
+/// each live start has its own.
 fn decode_max_delay(r: &mut Decoder<'_>, version: Version) -> Result<Option<std::time::Duration>, DecodeError> {
-	Ok(match version.has_unlimited_max_delay() {
-		true => r.varint_opt()?.map(std::time::Duration::from_millis),
+	Ok(match version.has_ranges() {
+		true => None,
 		false => Some(std::time::Duration::from_millis(r.varint()?)),
 	})
 }
 
-/// Encode the inverse of [`decode_max_delay`]. Before lite-07 no limit goes out as
-/// [`MAX_SAFE_DELAY_MS`].
+/// Encode the inverse of [`decode_max_delay`]: no limit goes out as [`MAX_SAFE_DELAY_MS`].
 fn encode_max_delay(
 	w: &mut Encoder<'_>,
 	version: Version,
 	max_delay: Option<std::time::Duration>,
 ) -> Result<(), EncodeError> {
+	if version.has_ranges() {
+		return Ok(());
+	}
 	let millis = max_delay
 		.map(|max| u64::try_from(max.as_millis()).map_err(|_| EncodeError::BoundsExceeded))
 		.transpose()?;
-	match version.has_unlimited_max_delay() {
-		true => w.varint_opt(millis),
-		false => w.varint(millis.unwrap_or(MAX_SAFE_DELAY_MS)),
-	}
+	w.varint(millis.unwrap_or(MAX_SAFE_DELAY_MS))
 }
 
 /// Decode the ranges SUBSCRIBE and SUBSCRIBE_UPDATE carry after the max age.
@@ -254,7 +259,7 @@ fn encode_ranges(w: &mut Encoder<'_>, version: Version, ranges: &[Range]) -> Res
 	};
 	let (start_group, start_frame) = match range.start {
 		// A live join can't be carried, so it goes out as no start.
-		None | Some(Anchor::Live(_)) => (None, 0),
+		None | Some(Anchor::Live { .. }) => (None, 0),
 		Some(Anchor::Absolute(start)) => (Some(start.group), start.frame),
 		Some(Anchor::Time(_)) => return Err(EncodeError::Version),
 	};
@@ -267,7 +272,7 @@ fn encode_ranges(w: &mut Encoder<'_>, version: Version, ranges: &[Range]) -> Res
 			None => (Some(end.group.checked_sub(1).ok_or(EncodeError::InvalidState)?), None),
 		},
 		Some(Anchor::Time(_)) => return Err(EncodeError::Version),
-		Some(Anchor::Live(_)) => return Err(EncodeError::InvalidState),
+		Some(Anchor::Live { .. }) => return Err(EncodeError::InvalidState),
 	};
 	encode_start_group(w, version, start_group)?;
 	w.varint_opt(end_group)?;
@@ -319,7 +324,8 @@ pub(super) fn range_size(range: &Range, form: Form) -> Option<usize> {
 /// Decode one lite-07 range end: its type, then the fields that type carries. Type 0 is no
 /// anchor, a start the max age places and the live edge as an end. Type 2, a position partway
 /// through a group, is a start only, so `end` refuses it, and so is one at frame 0, which type 1
-/// says. Type 3, a live join's lag in milliseconds, is a start only.
+/// says. Type 3, a live join's lag in milliseconds then its max age in milliseconds plus one,
+/// zero for no limit, is a start only.
 fn decode_anchor(r: &mut Decoder<'_>, end: bool) -> Result<Option<Anchor>, DecodeError> {
 	Ok(match r.varint()? {
 		0 => None,
@@ -332,7 +338,10 @@ fn decode_anchor(r: &mut Decoder<'_>, end: bool) -> Result<Option<Anchor>, Decod
 			}
 			Some(Anchor::Absolute(crate::track::Position { group, frame }))
 		}
-		3 if !end => Some(Anchor::Live(std::time::Duration::from_millis(r.varint()?))),
+		3 if !end => Some(Anchor::Live {
+			min: std::time::Duration::from_millis(r.varint()?),
+			max: r.varint_opt()?.map(std::time::Duration::from_millis),
+		}),
 		_ => return Err(DecodeError::InvalidValue),
 	})
 }
@@ -343,13 +352,21 @@ fn decode_anchor(r: &mut Decoder<'_>, end: bool) -> Result<Option<Anchor>, Decod
 /// is, and an exclusive end as the inclusive time just before it, an end at group 0 holding
 /// nothing a time can say. A start partway through a group goes out as a position, its
 /// group's start then the frame; an end there is refused, since FETCH reads a slice of a group.
-/// A live join goes out as its lag in milliseconds, rounded up, and only as a start.
+/// A live join goes out as its lag then its max age, each in milliseconds rounded up, and only
+/// as a start.
 fn wire_anchor(anchor: Option<Anchor>, end: bool) -> Result<(u64, [Option<u64>; 2]), EncodeError> {
 	Ok(match anchor {
 		None => (0, [None, None]),
 		Some(Anchor::Time(time)) => (1, [Some(time), None]),
-		Some(Anchor::Live(_)) if end => return Err(EncodeError::InvalidState),
-		Some(Anchor::Live(min)) => (3, [Some(crate::track::live_millis(min)), None]),
+		Some(Anchor::Live { .. }) if end => return Err(EncodeError::InvalidState),
+		Some(Anchor::Live { min, max }) => (
+			3,
+			[
+				Some(crate::track::live_millis(min)),
+				// Plus one, so zero says no limit.
+				Some(max.map_or(0, |max| crate::track::live_millis(max).saturating_add(1))),
+			],
+		),
 		Some(Anchor::Absolute(position)) if position.frame != 0 && end => return Err(EncodeError::Version),
 		Some(Anchor::Absolute(position)) if position.frame != 0 => (2, [Some(position.group), Some(position.frame)]),
 		Some(Anchor::Absolute(position)) if end => (
@@ -748,10 +765,12 @@ impl<'a> Message<'a> for SubscribeUpdate {
 				for _ in 0..r.varint()? {
 					remove.push(r.varint()?);
 				}
-				RangeEdit::Edit {
-					remove,
-					add: decode_range_list(r)?,
+				let add = decode_range_list(r)?;
+				let mut retune = Vec::new();
+				for _ in 0..r.varint()? {
+					retune.push((r.varint()?, r.varint_opt()?.map(std::time::Duration::from_millis)));
 				}
+				RangeEdit::Edit { remove, add, retune }
 			}
 			false => RangeEdit::Replace(decode_ranges(r, version)?),
 		};
@@ -782,12 +801,17 @@ impl<'a> Message<'a> for SubscribeUpdate {
 		encode_order(w, version, self.order)?;
 		encode_max_delay(w, version, self.max_delay)?;
 		match (&self.ranges, version.has_ranges()) {
-			(RangeEdit::Edit { remove, add }, true) => {
+			(RangeEdit::Edit { remove, add, retune }, true) => {
 				w.varint(remove.len() as u64)?;
 				for id in remove {
 					w.varint(*id)?;
 				}
 				encode_range_list(w, add)?;
+				w.varint(retune.len() as u64)?;
+				for (id, max) in retune {
+					w.varint(*id)?;
+					w.varint_opt(max.map(crate::track::live_millis))?;
+				}
 			}
 			(RangeEdit::Replace(ranges), false) => encode_ranges(w, version, ranges)?,
 			_ => return Err(EncodeError::Version),
@@ -806,8 +830,13 @@ pub enum RangeEdit {
 	/// Before lite-07: the whole list, replacing the live one.
 	Replace(Vec<Range>),
 	/// Lite-07: retire the ranges with these Range IDs, then add these, each taking the next
-	/// Range ID.
-	Edit { remove: Vec<u64>, add: Vec<Range> },
+	/// Range ID, then give each live join named in `retune` that max age in place, keeping
+	/// where it was placed.
+	Edit {
+		remove: Vec<u64>,
+		add: Vec<Range>,
+		retune: Vec<(u64, Option<std::time::Duration>)>,
+	},
 }
 
 /// A subscription's live ranges by Range ID, which both ends of a Subscribe Stream keep: the
@@ -829,11 +858,12 @@ pub(crate) struct LiveRanges {
 /// A received update's ranges, resolved against the live ones by Range ID.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Applied {
-	/// Lite-07: the Range IDs retired, then each range added with its Range ID, so applying
-	/// it costs the ranges it names.
+	/// Lite-07: the Range IDs retired, then each range added with its Range ID, then each
+	/// live join retuned as it now reads, so applying it costs the ranges it names.
 	Edit {
 		retired: Vec<u64>,
 		added: Vec<(u64, Range)>,
+		retuned: Vec<(u64, Range)>,
 	},
 	/// Before lite-07: every live range, numbered afresh.
 	Replace(Vec<(u64, Range)>),
@@ -845,10 +875,15 @@ impl Applied {
 	pub fn then(self, later: Self) -> Self {
 		match (self, later) {
 			(
-				Self::Edit { mut retired, mut added },
+				Self::Edit {
+					mut retired,
+					mut added,
+					mut retuned,
+				},
 				Self::Edit {
 					retired: gone,
 					added: came,
+					retuned: tuned,
 				},
 			) => {
 				let gone: std::collections::BTreeSet<u64> = gone.into_iter().collect();
@@ -856,9 +891,25 @@ impl Applied {
 				let fresh: std::collections::BTreeSet<u64> =
 					added.iter().map(|(id, _)| *id).filter(|id| gone.contains(id)).collect();
 				added.retain(|(id, _)| !fresh.contains(id));
+				retuned.retain(|(id, _)| !gone.contains(id));
 				retired.extend(gone.difference(&fresh));
+				// A later retune of a range this added is that range added as it now reads, and
+				// one of a range this retuned replaces that retune.
+				for (id, range) in tuned {
+					match added.iter_mut().find(|(added, _)| *added == id) {
+						Some((_, added)) => *added = range,
+						None => {
+							retuned.retain(|(tuned, _)| *tuned != id);
+							retuned.push((id, range));
+						}
+					}
+				}
 				added.extend(came);
-				Self::Edit { retired, added }
+				Self::Edit {
+					retired,
+					added,
+					retuned,
+				}
 			}
 			(_, later) => later,
 		}
@@ -887,6 +938,12 @@ impl LiveRanges {
 			self.live.insert(self.next, range);
 			self.next += 1;
 		}
+	}
+
+	/// Put `range` back live under the Range ID `id` it already had.
+	fn insert(&mut self, id: u64, range: Range) {
+		self.size = self.size.saturating_add(range_size(&range, self.version.into()).unwrap_or(usize::MAX));
+		self.live.insert(id, range);
 	}
 
 	fn remove(&mut self, id: u64) -> Option<Range> {
@@ -947,14 +1004,33 @@ impl LiveRanges {
 				*self = Self::new(self.version, &ranges);
 				Applied::Replace(self.iter().map(|(id, range)| (id, *range)).collect())
 			}
-			RangeEdit::Edit { remove, add } if self.version.has_ranges() => {
+			RangeEdit::Edit { remove, add, retune } if self.version.has_ranges() => {
 				for id in &remove {
 					// An id never assigned, or already retired (including earlier in this list).
 					self.remove(*id).ok_or(DecodeError::InvalidValue)?;
 				}
+				// Retuned before the adds, so a retune names a range live before this edit.
+				let mut retuned: Vec<(u64, Range)> = Vec::with_capacity(retune.len().min(self.live.len()));
+				for (id, max) in retune {
+					// Each live join once: one retuned twice in an edit says nothing a single one doesn't.
+					if retuned.iter().any(|(tuned, _)| *tuned == id) {
+						return Err(DecodeError::InvalidValue);
+					}
+					let mut range = self.remove(id).ok_or(DecodeError::InvalidValue)?;
+					let Some(Anchor::Live { max: live, .. }) = &mut range.start else {
+						return Err(DecodeError::InvalidValue);
+					};
+					*live = max;
+					self.insert(id, range);
+					retuned.push((id, range));
+				}
 				let added = (self.next..).zip(add.iter().copied()).collect();
 				self.add(add);
-				Applied::Edit { retired: remove, added }
+				Applied::Edit {
+					retired: remove,
+					added,
+					retuned,
+				}
 			}
 			_ => return Err(DecodeError::Version),
 		};
@@ -975,6 +1051,7 @@ impl LiveRanges {
 			true => RangeEdit::Edit {
 				remove: Vec::new(),
 				add: Vec::new(),
+				retune: Vec::new(),
 			},
 			false => RangeEdit::Replace(self.live.values().copied().collect()),
 		}
@@ -991,8 +1068,10 @@ impl LiveRanges {
 	}
 
 	/// [`Self::edit`] for ranges asked for by different owners: a live range keeps its Range
-	/// ID only for a wanted range of the same key, `key_of` giving each live one's. Returns
-	/// the edit and the Range ID each range it adds takes, with that range's key.
+	/// ID only for a wanted range of the same key, `key_of` giving each live one's. A live join
+	/// wanted under another max age alone, with the same key, is retuned in place rather than
+	/// placed afresh. Returns the edit and the Range ID each range it adds takes, with that
+	/// range's key.
 	pub fn edit_keyed<K: Copy + Eq + std::hash::Hash>(
 		&mut self,
 		ranges: &[(K, Range)],
@@ -1024,7 +1103,7 @@ impl LiveRanges {
 			}
 		}
 		// In the order asked for, so the publisher numbers them the way this side does.
-		let added: Vec<(K, Range)> = ranges
+		let mut added: Vec<(K, Range)> = ranges
 			.iter()
 			.filter(|wanted_range| {
 				let count = wanted.get_mut(*wanted_range).expect("counted above");
@@ -1034,16 +1113,35 @@ impl LiveRanges {
 			})
 			.copied()
 			.collect();
+		// A live join wanted again under another max age, its placement kept.
+		let mut retune = Vec::new();
+		remove.retain(|&id| {
+			let Some(Anchor::Live { min, .. }) = self.live[&id].start else {
+				return true;
+			};
+			let key = key_of(id);
+			let end = self.live[&id].end;
+			let found = added.iter().enumerate().find_map(|(index, (wanted_key, range))| match range.start {
+				Some(Anchor::Live { min: wanted, max }) if *wanted_key == key && wanted == min && range.end == end => {
+					Some((index, max))
+				}
+				_ => None,
+			});
+			let Some((index, max)) = found else {
+				return true;
+			};
+			let (_, range) = added.remove(index);
+			retune.push((id, range, max));
+			false
+		});
 		let add: Vec<Range> = added.iter().map(|(_, range)| *range).collect();
 		// Checked before anything changes, so a refused edit leaves the ranges as last sent.
 		let form = self.version.into();
 		let size = |range: &Range| range_size(range, form).unwrap_or(usize::MAX);
-		let removed = remove
-			.iter()
+		let removed = (remove.iter().chain(retune.iter().map(|(id, _, _)| id)))
 			.map(|id| size(&self.live[id]))
 			.fold(0, usize::saturating_add);
-		let size = add
-			.iter()
+		let size = (add.iter().chain(retune.iter().map(|(_, range, _)| range)))
 			.map(size)
 			.fold(self.size.saturating_sub(removed), usize::saturating_add);
 		if size > super::message::MAX_MESSAGE_SIZE {
@@ -1052,9 +1150,14 @@ impl LiveRanges {
 		for &id in &remove {
 			self.remove(id);
 		}
+		for &(id, range, _) in &retune {
+			self.remove(id);
+			self.insert(id, range);
+		}
 		let ids = (self.next..).zip(added.into_iter().map(|(key, _)| key)).collect();
 		self.add(add.iter().copied());
-		Ok((RangeEdit::Edit { remove, add }, ids))
+		let retune = retune.into_iter().map(|(id, _, max)| (id, max)).collect();
+		Ok((RangeEdit::Edit { remove, add, retune }, ids))
 	}
 }
 

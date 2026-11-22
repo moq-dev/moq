@@ -72,6 +72,14 @@ pub(crate) struct JoinAsk {
 	pub since: u64,
 }
 
+impl JoinAsk {
+	/// The widest [`Start::Live`] `max` among the readers waiting.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn max(&self) -> Option<Duration> {
+		max_of(self.budget)
+	}
+}
+
 /// A [`Start::Live`] `max` as a budget: `None` waits as long as anything could.
 pub(crate) fn budget(max: Option<Duration>) -> Duration {
 	max.unwrap_or(Duration::MAX)
@@ -378,6 +386,13 @@ impl Subscription {
 	pub fn with_priority(mut self, priority: i8) -> Self {
 		self.priority = priority;
 		self
+	}
+
+	/// The one `Subscriber Max Age` a wire before lite-07 carries for this subscription: no
+	/// limit while a history range is asked for, and otherwise the largest live join's `max`.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn max_age(&self) -> Option<Duration> {
+		max_of(self.widest())
 	}
 
 	/// The widest staleness budget any range gives a group: none while a history range is

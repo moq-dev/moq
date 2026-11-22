@@ -272,7 +272,7 @@ fn collapse(ranges: Vec<Range>) -> Vec<Range> {
 		None => 0,
 		Some(Anchor::Time(_)) => 1,
 		Some(Anchor::Absolute(_)) => 2,
-		Some(Anchor::Live(_)) => 3,
+		Some(Anchor::Live { .. }) => 3,
 	};
 	let mut kinds: Vec<Range> = Vec::new();
 	for range in ranges {
@@ -283,8 +283,12 @@ fn collapse(ranges: Vec<Range>) -> Vec<Range> {
 		cover.start = match (cover.start, range.start) {
 			(Some(Anchor::Time(a)), Some(Anchor::Time(b))) => Some(Anchor::Time(a.min(b))),
 			(Some(Anchor::Absolute(a)), Some(Anchor::Absolute(b))) => Some(Anchor::Absolute(a.min(b))),
-			// The join reaching furthest back delivers what each of the others does.
-			(Some(Anchor::Live(a)), Some(Anchor::Live(b))) => Some(Anchor::Live(a.max(b))),
+			// The join reaching furthest back, under the widest max age, delivers what each of
+			// the others does.
+			(Some(Anchor::Live { min: a, max: x }), Some(Anchor::Live { min: b, max: y })) => Some(Anchor::Live {
+				min: a.max(b),
+				max: x.zip(y).map(|(x, y)| x.max(y)),
+			}),
 			(start, _) => start,
 		};
 		cover.end = match (cover.end, range.end) {
