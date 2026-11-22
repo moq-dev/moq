@@ -1739,15 +1739,20 @@ export class Publisher {
 			if (end instanceof Error) throw end;
 			return end === done;
 		};
-		// Lite-07: `drained`, or `undefined` once a control arrives first. An update may move a stop
-		// a group is parked at, which only the loop applies, so the drain waits for it no longer.
-		const drainedOrControl = async (): Promise<boolean | undefined> => {
+		// Lite-07: true once every group settled, or `undefined` once a control is there to take,
+		// its FIN or failure included. An update may move a stop a group is parked at, which only
+		// the loop applies, so the drain waits for it no longer. One wait per batch of groups,
+		// reused across controls, so updates that leave a group parked add nothing each.
+		let settling: { started: number; settled: Promise<true> } | undefined;
+		const drainedOrControl = async (): Promise<true | undefined> => {
+			if (controls.pending()) return undefined;
+			if (settling?.started !== started) settling = { started, settled: Promise.all(groups).then(() => true) };
 			let dispose: (() => void) | undefined;
 			const control = new Promise<undefined>((resolve) => {
 				dispose = controls.changed(() => resolve(undefined));
 			});
 			try {
-				return await race([drained(), control]);
+				return await race([settling.settled, control]);
 			} finally {
 				dispose?.();
 			}
@@ -1765,6 +1770,8 @@ export class Publisher {
 
 		// Every group this subscription started serving, until its stream finishes or resets.
 		const groups = new Set<Promise<void>>();
+		// How many groups it started serving, so a wait for them all knows when it is stale.
+		let started = 0;
 		const drops = new Signal(0);
 		// Groups whose stream failed, with why, for the control stream to name, as runs: a group held
 		// whole names its span.
@@ -2113,6 +2120,7 @@ export class Publisher {
 					}
 				})();
 				groups.add(task);
+				started++;
 				void task.finally(() => {
 					groups.delete(task);
 				});
