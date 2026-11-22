@@ -65,13 +65,14 @@ Scheduled runs 2026-11-15 to 2026-11-21 (every one red) failed three causes, non
 - Interop (full matrix and moq-transport): `js -> js`, `js -> js-native-*`, and `go -> js`
   timed out waiting for the catalog on moq-transport 18, 20, and 22, one to three cells per
   pass, so a fresh retry always hid it. Root cause: a relay holding a group with its
-  END_OF_GROUP answered Largest at that status, which is no frame. The next subscriber's
-  head fill, which asks the group's objects through Largest, ran off the end, failed
-  NotFound, and the subscriber dropped the catalog group as headless. A relay copy
-  resubscribing hit the same bug as MalformedTrack in `judge`. It first showed in the
-  2026-11-15 run; the culprit PR is not pinned, since bisecting a race that fails 0 to 2 of 6
-  cells locally found no clean split. Fixed in this quest's PR: the group's last object
-  excludes its terminal object.
+  END_OF_GROUP reports Largest at that status, which is no frame (and keeps doing so). The
+  next subscriber's head fill, cut one past that Largest, ran off the end of the group, so
+  the relay reset it NotFound, and the subscriber dropped the catalog group as headless.
+  Fixed in this quest's PR: a fill cut past the terminal object completes at it. A relay
+  copy resubscribing hit the same status as MalformedTrack in `judge`, which now compares
+  its answer with the last data object. It first showed in the 2026-11-15 run; the culprit
+  PR is not pinned, since bisecting a race that fails 0 to 2 of 6 cells locally found no
+  clean split.
 
 Decided 2026-11-12 (maintainer), since green scheduled Interop is this epic's goal and stale pins caused four of the last six red runs:
 

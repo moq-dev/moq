@@ -14888,6 +14888,76 @@ mod serve_tests {
 		assert_eq!(fetch_object_priorities(&mut buf, version), [Some(55)]);
 	}
 
+	/// A fill reaching the Largest Object of a group a relay holds with its END_OF_GROUP, which
+	/// Largest names, ends cleanly at that status rather than resetting: it is no frame, so the
+	/// objects below it are the whole fill.
+	#[kio::test]
+	async fn a_fill_through_the_terminal_object_is_served_whole() {
+		let h = serve(Version::Draft22);
+		let group = h.track.create_group(group::Info { start: 4 }).unwrap();
+		let key_time = group.key_time();
+		group
+			.set_wire(group::Wire {
+				sparse: false,
+				first_object: true,
+				first_id: 0,
+				extensions: true,
+				has_end: true,
+				fetchable: true,
+				last: None,
+			})
+			.unwrap();
+		let mut frame = group
+			.create_object(frame::Header {
+				info: frame::Info {
+					size: 4,
+					timestamp: key_time,
+				},
+				fields: Some(std::sync::Arc::new(crate::model::object::Fields {
+					id: 0,
+					properties: Default::default(),
+				})),
+				inflated: None,
+			})
+			.unwrap();
+		frame.write(&b"head"[..]).unwrap();
+		let group = frame.finish().unwrap();
+		group
+			.set_end_object(crate::model::object::Fields {
+				id: 1,
+				properties: Default::default(),
+			})
+			.unwrap();
+		group.finish().unwrap();
+
+		let ranking = Ranking {
+			queue: h.publisher.priority.clone(),
+			group: None,
+			request_id: RequestId(REQUEST_ID),
+			priority: kio::Producer::new(PRIORITY).consume(),
+			publisher: 0,
+			order: Order::Descending,
+			lapse: Lapse::default(),
+		};
+		let opened = AtomicU64::new(0);
+		// The wire still names the terminal object as Largest, as a relay preserves it, so the
+		// fill's cap lands one past it.
+		assert_eq!(
+			super::live_edge(&h.track.consume()).largest,
+			Some(Location { group: 4, object: 1 })
+		);
+		let fill = FillServe::Group {
+			key: 4,
+			skip: 0,
+			until: Some(2),
+		};
+		h.publisher
+			.run_fill(fill, &ranking, h.track.consume(), &opened, ranking.request_id)
+			.await;
+		assert_eq!(occurrences(&h.log, b"head"), 1);
+		assert!(h.log.resets().is_empty(), "{:?}", h.log.resets());
+	}
+
 	/// A fill sent whole whose FIN the subscriber never acknowledges resets once its group goes
 	/// stale, rather than hold the connection for stale bytes until the subscription ends.
 	#[kio::test]
