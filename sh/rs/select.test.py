@@ -234,13 +234,13 @@ class SelectTest(unittest.TestCase):
                 self.assertTrue(any("/rs/moq-net-tests#" in call for call in calls), calls)
 
     def test_out_of_crate_target_selects_its_crate(self):
-        # moq-cli builds the Rust interop clients as examples from outside its crate.
+        # moq-interop builds the Rust interop clients from outside its crate.
         for path in ("test/interop/clients/rust/tail.rs", "test/interop/clients/rust/added.rs"):
             for action in ("lint", "fix"):
                 with self.subTest(path=path, action=action):
                     calls = self.selected(path, action=action)
                     self.assertTrue(
-                        any(call.startswith(f"rs {action} ") and "/rs/moq-cli#" in call for call in calls), calls
+                        any(call.startswith(f"rs {action} ") and "/rs/moq-interop#" in call for call in calls), calls
                     )
         self.assertEqual(self.selected("test/interop/compat/container.rs"), [])
 

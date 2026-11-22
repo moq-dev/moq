@@ -606,7 +606,7 @@ require_tools() {
 # Build moq-relay + moq-cli from the workspace. The relay is the spine of the
 # test, so a failure here aborts rather than marking a single client broken.
 build_relay_cli() {
-    local flag=() build_examples=0
+    local flag=() packages=(-p moq-relay -p moq-cli) clients=() label=""
     [[ "$PROFILE" == "release" ]] && flag=(--release)
     if [[ -n "$RELAY" && -n "$MOQ" ]]; then
         [[ -x "$RELAY" && -x "$MOQ" ]] || {
@@ -614,11 +614,17 @@ build_relay_cli() {
             exit 1
         }
     else
-        build_examples=1
-        echo "building moq-relay + moq-cli ($PROFILE)..."
+        # The Rust interop clients build in the same cargo call, so they share every
+        # dependency compilation with the relay and CLI instead of a second feature set.
+        if [[ "$MEDIA" -eq 0 ]]; then
+            clients=(interop-tail interop-catalog interop-audio interop-hls interop-control interop-goaway interop-goaway-client interop-finish)
+            packages+=(-p moq-interop)
+            label=" + interop clients"
+        fi
+        echo "building moq-relay + moq-cli$label ($PROFILE)..."
         # ${arr[@]+...} guard: bash 3.2 (macOS /bin/bash) errors on "${flag[@]}" for
         # an empty (debug) array under `set -u`.
-        (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p moq-relay -p moq-cli) || {
+        (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} "${packages[@]}") || {
             echo "error: failed to build moq-relay / moq-cli" >&2
             exit 1
         }
@@ -634,14 +640,10 @@ build_relay_cli() {
         harness_stage bin/moq-sub "$INTEROP_SUB_MOQ"
         INTEROP_SUB_MOQ="$HARNESS_RUN/bin/moq-sub"
     fi
-    if [[ "$build_examples" -eq 1 && "$MEDIA" -eq 0 ]]; then
-        local example args=() examples=(interop-tail interop-catalog interop-audio interop-hls interop-control interop-goaway interop-goaway-client interop-finish)
-        for example in "${examples[@]}"; do args+=(--example "$example"); done
-        (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p moq-cli "${args[@]}")
-        for example in "${examples[@]}"; do
-            harness_stage "examples/$example" "$TARGET_BASE/$PROFILE/examples/$example"
-        done
-    fi
+    local client
+    for client in ${clients[@]+"${clients[@]}"}; do
+        harness_stage "examples/$client" "$TARGET_BASE/$PROFILE/$client"
+    done
 }
 
 # Build the workspace Python packages as wheels (maturin builds rs/moq-ffi, hatchling
