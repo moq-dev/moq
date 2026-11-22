@@ -1356,9 +1356,8 @@ fn a_gateway_takes_no_claim_it_first_hears_unavailable() {
 	}
 }
 
-/// A relay that restarts is a new node, but its neighbours file the session floor per
-/// pair of relays with the restart in the session's order, so a restart replaces the
-/// entry instead of adding one.
+/// A relay that restarts is a new node, and its neighbours keep no more floors after eight
+/// restarts than after one: each restart replaces the pair's entry or lets it go.
 #[test]
 fn a_session_floor_keeps_an_entry_per_pair_of_relays() {
 	let mut sim = RelaySim::new(5, relay::debounce(HOP));
@@ -1384,7 +1383,6 @@ fn a_session_floor_keeps_an_entry_per_pair_of_relays() {
 		kept.push(sim.kept().closed);
 	}
 	// Two ways round each link at most.
-	assert!(kept[0] > 0, "the restart closed sessions routes crossed: {kept:?}");
 	assert!(kept.iter().all(|&pairs| pairs <= 2 * links.len()), "{kept:?}");
 	assert_eq!(kept[0], kept[7], "{kept:?}");
 }
@@ -1454,12 +1452,11 @@ fn whether_a_relay_announces_hangs_on_arrival_order() {
 
 /// The floor's growth with identities that never return: each round a relay under a new
 /// identity joins a ring as a chord with a publisher of its own, announces, and leaves for
-/// good. Every relay that heard a route across one of its sessions keeps that pair's floor
-/// for as long as it runs, at most one entry per direction of each departed session: the
-/// epoch bounds only restarts of one relay, so nothing here replaces or removes an entry.
-/// The quest's PR brings eviction as a decision.
+/// good. A floor no heard route joins is kept only while such floors number no more than
+/// the pairs heard routes join, so the departures stop adding to the table once those
+/// floors fill that room.
 #[test]
-fn a_relay_that_leaves_for_good_leaves_its_floors() {
+fn a_relay_that_leaves_for_good_takes_its_floors() {
 	let (stable, rounds) = (8, 12);
 	let mut sim = RelaySim::new(stable + 2 * rounds + 1, relay::debounce(HOP));
 	let home = stable + 2 * rounds;
@@ -1498,7 +1495,9 @@ fn a_relay_that_leaves_for_good_leaves_its_floors() {
 		assert!(kept.iter().all(|&entries| entries <= 4 * (round + 1)), "{kept:?}");
 		sums.push(kept.iter().sum::<usize>());
 	}
-	assert!(sums.windows(2).all(|pair| pair[1] > pair[0]), "{sums:?}");
+	let (early, late) = sums.split_at(rounds / 2);
+	let most = early.iter().max().expect("a round");
+	assert!(late.iter().all(|sum| sum <= most), "{sums:?}");
 }
 
 /// What the floors cost on the bake-off's shapes as half the relays are replaced, one at
