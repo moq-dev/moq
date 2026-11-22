@@ -277,6 +277,39 @@ class SelectTest(unittest.TestCase):
         # The lister still finds the read behind moq-dev/moq#8459.
         self.assertIn(("rs/moq-relay", "test/**/*.toml"), [(crate, glob) for crate, glob, _ in reads])
 
+    def test_reads_handles_nul_bytes_and_colon_lines(self):
+        # Literal NUL bytes, colon-prefixed lines, and missing trailing newlines
+        # must not shift file framing or line numbers in sh/rs/reads.sh.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            (repo / "rs/a/src").mkdir(parents=True)
+            (repo / "rs/a/Cargo.toml").write_text('[package]\nname = "a"\n')
+            (repo / "rs/a/src/lib.rs").write_bytes(
+                b'const A: &str = "\x00"; const B: &str = include_str!("../../shared.txt");\n'
+                b":not_a_header\n"
+                b'const D: &str = include_str!("../../tail.txt");'
+            )
+            (repo / "rs/b/src").mkdir(parents=True)
+            (repo / "rs/b/Cargo.toml").write_text('[package]\nname = "b"\n')
+            (repo / "rs/b/src/lib.rs").write_bytes(b'const C: &str = include_str!("../../other.txt");')
+
+            result = subprocess.run(
+                ["bash", str(ROOT / "sh/rs/reads.sh")],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(
+                result.stdout.splitlines(),
+                [
+                    "rs/a rs/shared.txt rs/a/src/lib.rs:1",
+                    "rs/a rs/tail.txt rs/a/src/lib.rs:3",
+                    "rs/b rs/other.txt rs/b/src/lib.rs:1",
+                ],
+            )
+
     def test_dispatch_scope_covers_out_of_crate_targets(self):
         scope = dispatch_scope()
         metadata = json.loads(

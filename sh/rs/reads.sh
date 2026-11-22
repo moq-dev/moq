@@ -24,18 +24,22 @@ files=$(grep -rlE --include='*.rs' --exclude-dir=target '"(\{\}/|/)?\.\./' rs) |
 [[ -n "$files" ]] || exit 0
 
 # One argument per file; no path under rs/ holds whitespace.
-# Stream NUL-delimited (filename, contents) pairs so jq scans each file once
-# instead of allocating and sorting one object per source line.
+# Frame each file with a `:` header line and a leading space on every body line,
+# so jq scans each file once without any byte in the file (including NUL) ever
+# colliding with the frame boundary.
 # shellcheck disable=SC2086
-awk 'FNR==1 { if (NR>1) printf "%c", 0; printf "%s%c", FILENAME, 0 } { print } END { if (NR>0) printf "%c", 0 }' $files |
+awk 'FNR==1 { print ":" FILENAME } { print " " $0 }' $files |
     jq -rRs --arg crates "$crates" '
     def resolve: reduce split("/")[] as $s ([];
         if $s == ".." then .[:-1] elif $s == "." or $s == "" then . else . + [$s] end) | join("/");
     ($crates | split("\n") | map(select(. != ""))) as $crates
-    | split("\u0000")[:-1]
-    | range(0; length; 2) as $i
-    | .[$i] as $file
-    | .[$i + 1] as $text
+    | ltrimstr(":")
+    | split("\n:")
+    | .[]
+    | select(. != "")
+    | index("\n") as $nl
+    | .[:$nl] as $file
+    | (.[$nl + 1:] | ltrimstr(" ") | split("\n ") | join("\n")) as $text
     | ($file | split("/")[:-1] | join("/")) as $dir
     | ([$crates[] | select(. as $c | $file | startswith($c + "/"))] | max_by(length)) as $crate
     | ($text | test("CARGO_MANIFEST_DIR")) as $manifest
