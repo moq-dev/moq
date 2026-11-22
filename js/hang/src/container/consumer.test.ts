@@ -406,8 +406,9 @@ test("Legacy Producer discontinuity marks the break at the caller's end", async 
 	producer.discontinuity(Duration.micros(33_000));
 	producer.finish();
 
-	// The marker starts one microsecond before the edge, so media resuming right at it follows.
-	expect(await readGroups(subscriber, 32_999n)).toEqual([
+	// The marker never starts below a frame of the group it ends, here its end marker, so it starts
+	// at the caller's end, where that group ends whole.
+	expect(await readGroups(subscriber, 33_000n)).toEqual([
 		[
 			0n,
 			[
@@ -415,7 +416,7 @@ test("Legacy Producer discontinuity marks the break at the caller's end", async 
 				[33_000, 0],
 			],
 		],
-		[32_999n, [[32_999, 0]]],
+		[33_000n, [[33_000, 0]]],
 	]);
 });
 

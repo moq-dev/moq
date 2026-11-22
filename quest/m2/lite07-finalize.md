@@ -226,7 +226,7 @@ and switching rules in `rs/moq-net/AGENTS.md` before the cut):
   (rejected: after the cut). Group times ([moq-dev/moq#9263](https://github.com/moq-dev/moq/pull/9263))
   puts the strong rule in the draft as a publisher MUST: a group's span,
   [Group Start, End) since 2026-11-21, never overlaps another's. Expiry relies on it,
-  and first-party producers break it today.
+  and first-party producers keep it ([moq-dev/moq#9317](https://github.com/moq-dev/moq/pull/9317)).
 - ✅ [The frame cap](/quest/m1/switch-frame-cap.md) is not Required, like the
   warmth port: if it has landed when the cut is made, its Position end is in
   lite-07, and otherwise it moves to the next wip version.
@@ -247,7 +247,6 @@ changelog typo at `drafts/draft-lcurley-moq-lite.md:2380` during the cut
 ## Required
 
 - [A time anchor lands by group spans](/quest/m2/time-addressing/span-time-anchors.md) - the draft's Time Anchor rule resolves a time inside a skipped span or a whole group's span
-- [First-party producers keep lite-07 group spans apart](/quest/m2/producer-spans.md) - no group starts inside a span a lower group's End closed
 - [Count lite-07 Path Keep by Path::parts](/quest/m2/lite07-path-keep-parts.md) - removes the temporary `raw_parts` / `base.split("/")` migration before lite-07 freezes
 
 ## Related
