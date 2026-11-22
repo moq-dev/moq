@@ -67,8 +67,9 @@ test("Dart reuses the shared libraries and builds only what they lack", async ()
 	expect(stage?.env?.TARGETS).toBe("${{ needs.plan.outputs.all }}");
 	expect(stage?.run).toContain("missing native library artifact");
 	const nightly = await read("nightly");
-	expect(nightly.jobs["release-dart-ffi"].needs).toEqual(["release-shared-ffi"]);
-	expect(nightly.jobs["release-dart-ffi"].with?.["reuse-native"]).toBe(true);
+	// Nightly dry-runs Dart through the coordinator; a second call would upload the same artifacts again.
+	expect(nightly.jobs["release-dart-ffi"]).toBeUndefined();
+	expect(nightly.jobs["release-shared-ffi"].permissions).toEqual({ contents: "write", "id-token": "write" });
 });
 
 test("wrapper gates preserve trusted tag inputs and inspect only their publisher", async () => {
@@ -130,7 +131,6 @@ test("Nightly and alert chains retain packaged outputs with one shared producer"
 	expect(nightly.jobs["release-shared-ffi"].uses).toBe("./.github/workflows/release-shared-ffi.yml");
 	expect(nightly.jobs.sizes.needs).toContain("release-shared-ffi");
 	expect(nightly.jobs["release-py-ffi"]).toBeDefined();
-	expect(nightly.jobs["release-dart-ffi"]).toBeDefined();
 	// A called workflow's jobs cannot exceed the caller's grant, so a dry-run
 	// of a gated wrapper must pass on the gate's permissions.
 	for (const [name, job] of Object.entries(nightly.jobs)) {

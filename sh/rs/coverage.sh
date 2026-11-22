@@ -8,7 +8,7 @@ if [[ $crate == workspace ]]; then
     # Assigned apart so a failure stops the script.
     fuzz_crates=$(bash sh/rs/no-fuzz.sh)
     packages=(--workspace)
-    for crate in $fuzz_crates; do packages+=(--exclude "$crate"); done
+    for fuzz in $fuzz_crates; do packages+=(--exclude "$fuzz"); done
 elif [[ $crate =~ ^[a-zA-Z0-9_-]+$ ]]; then
     packages=(-p "$crate")
     report=(-p "$crate")

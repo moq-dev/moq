@@ -183,7 +183,7 @@ if [[ "$packages" == ALL ]]; then
     # Assigned apart so a failure stops the script.
     fuzz_crates=$(bash sh/rs/no-fuzz.sh)
     flags=(--workspace)
-    for crate in $fuzz_crates; do flags+=(--exclude "$crate"); done
+    for fuzz in $fuzz_crates; do flags+=(--exclude "$fuzz"); done
 else
     # Space-separated `--package <id>` pairs; ids contain no spaces.
     # shellcheck disable=SC2206

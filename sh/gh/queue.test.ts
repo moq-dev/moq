@@ -257,7 +257,7 @@ for (const name of ["x11", "android", "cpp", "audio-quality", "oss-scanner", "ru
 		`nightly must call ${name}.yml`,
 	);
 }
-for (const job of ["release-swift-lib", "release-dart-ffi", "release-dart", "release-js", "release-kt-lib"]) {
+for (const job of ["release-swift-lib", "release-shared-ffi", "release-dart", "release-js", "release-kt-lib"]) {
 	assert.ok(nightly.jobs[job], `nightly must dry-run ${job}`);
 }
 

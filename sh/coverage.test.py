@@ -153,6 +153,9 @@ for arg in sys.argv:
         self.assertIn("--tests", build)
         self.assertIn("--test-threads", build)
         self.assertIn("--json", calls[3])
+        # The fuzz enumeration must not rename the report directory.
+        self.assertTrue((self.root / "target/coverage/workspace/summary.json").parent.is_dir())
+        self.assertFalse((self.root / "target/coverage/qmux-fuzz").exists())
 
     def test_failed_rust_run_removes_previous_report_and_does_not_report(self):
         out = self.root / "target/coverage/moq-json"
