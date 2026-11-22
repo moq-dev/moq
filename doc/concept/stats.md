@@ -402,10 +402,17 @@ An embedder creates a `transport::Wire`, registers it with `stats::Session::wire
 records its connection's cumulative totals on it, and holds the returned guard.
 Dropping the guard records the final reading.
 
-Unsupported transports, including browsers and the current WebSocket/qmux
-adapter, contribute zero. WebSocket wire accounting requires the separate
-qmux counter source; unavailable counters are never estimated from payload.
-Readers default missing wire fields to zero for older relays.
+A qmux session over TCP, which is every WebSocket session, counts the kernel's
+`TCP_INFO` bytes for its socket. `wire_tx` includes TLS, WebSocket, and qmux
+framing and TCP retransmits, and excludes TCP and IP headers. `wire_rx` is the
+bytes TCP delivered, so a peer's duplicate retransmissions are not counted. The
+session copies them at most four times a second, and once more when it ends.
+Only Linux (4.19 or later) reports them: a session on another platform, or on a
+socket the relay holds no handle for, contributes zero.
+
+Other unsupported transports, including browsers, contribute zero. Unavailable
+counters are never estimated from payload. Readers default missing wire fields
+to zero for older relays.
 
 `credit_stalls` and `credit_stalled_us` count how often, and for how many
 microseconds, a connection had a write blocked with all of the peer's
