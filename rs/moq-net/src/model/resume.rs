@@ -9167,6 +9167,38 @@ mod test {
 		}
 	}
 
+	/// A group read past where the copy continuing it closes it short ends with an error, not
+	/// cleanly at the frames read: no route said the group ends there.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_short_close_below_the_frames_read_fails_the_group() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		let mut first = a.create_group(group::Info { start: 1 }).unwrap();
+		first.write_frame(ts(1), b"a".as_ref()).unwrap();
+		first.write_frame(ts(2), b"b".as_ref()).unwrap();
+		let mut reading = recv(&mut sub);
+		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+		assert_eq!(read(&mut reading), Some(b"b".to_vec()));
+
+		// The route replacing a holds one frame of the group, then a fails and b closes the
+		// group there, short of a known end.
+		let b = copy();
+		routes.serve(b.consume());
+		let mut second = b.create_group(group::Info { start: 1 }).unwrap();
+		second.write_frame(ts(1), b"a".as_ref()).unwrap();
+		a.clone().abort(Error::Dropped).unwrap();
+		second.finish().unwrap();
+		let Poll::Ready(res) = reading.poll_read_frame(&kio::Waiter::noop()) else {
+			panic!("the group ends");
+		};
+		assert!(res.is_err(), "ended {:?}", res.map(|frame| frame.map(|frame| frame.payload)));
+		drop(first);
+	}
+
 	/// A group handed out from a replaced copy, then moved to the serving copy once the
 	/// replaced route gave it up, reads on to its last frame after that copy is let go,
 	/// in either read order.

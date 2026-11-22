@@ -4158,9 +4158,10 @@ impl Consumer {
 			}
 			let index = self.cursor.index;
 			let short = matches!(res, Poll::Ready(Ok(None))) && self.closed_short();
-			// A copy taken over mid-group may close it below the frames already read, so its
-			// close cannot be where this read ends.
-			let past = short && self.closed_past();
+			// A copy taken over mid-group may close it below the frames already read from the
+			// copy before it, so its close cannot be where this read ends. One the read started
+			// past on its own still ends it cleanly, as an empty range does.
+			let past = short && self.adopted && self.closed_past();
 			let Some(recover) = self.carry.as_mut().and_then(|carry| carry.recover.as_mut()) else {
 				return res;
 			};
