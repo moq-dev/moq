@@ -509,7 +509,7 @@ A route leads to a routing node that announces claims, never to a publisher: the
 
 A routing node names itself with a Node ID: a non-zero identifier of the relay and its Start, a number that is higher each time the relay's process starts, such as its start time, with Marked clear.
 A Node ID is declared, not proven.
-Two endpoints exchange routes when both send the [Node ID Parameter](#node-id-parameter); each MUST close the session with UNAUTHORIZED when either's grant (see [AUTH_OK](#auth-ok)) covers less than every path, so a peer confined to part of the tree sends claims alone.
+Two endpoints exchange routes when both send the [Node ID Parameter](#node-id-parameter). An endpoint sends it only when the grant it admits the peer under (see [AUTH_OK](#auth-ok)) covers every path, so a peer confined to part of the tree sends claims alone. Each endpoint MUST close the session with UNAUTHORIZED when either's grant covers less than every path once both have sent it, including when a later grant narrows.
 
 A route carries its Path: one hop per node it crossed, the node it leads to first and the sender last.
 A hop names a node by its Node ID, and the session the node learned the route on by its Session Number: a number of the node's own, unique among its sessions and higher for each one it opens or accepts.
