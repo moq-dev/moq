@@ -90,6 +90,10 @@
 //!   microseconds, that the label's connections spent with a write blocked on the
 //!   peer's connection-level credit (`MAX_DATA`), read from the same
 //!   [`crate::transport::Wire`] counters as `wire_tx`.
+//! * `credit_held_readers_us` / `credit_held_evicted_us` ([`Presence`]): cumulative
+//!   microseconds the label's connections had their whole receive window spent by the
+//!   peer while eviction waited, on a reader behind or on an evicted reader yet to stop
+//!   its stream, read from the same counters.
 //! * `routes_refused` ([`Presence`]): cumulative routes and claims that lite-07
 //!   sessions under the label forwarded and this node refused, each withdrawn while
 //!   the session stays open; [`Routes::refused`] splits it by reason.
@@ -324,6 +328,8 @@ struct SessionCounters {
 	wire_rx: AtomicU64,
 	credit_stalls: AtomicU64,
 	credit_stalled_us: AtomicU64,
+	credit_held_readers_us: AtomicU64,
+	credit_held_evicted_us: AtomicU64,
 	/// Per class: bytes sent and received, then messages sent and received.
 	control: [[AtomicU64; 4]; Message::ALL.len()],
 }
@@ -357,6 +363,8 @@ impl SessionCounters {
 			wire_rx: self.wire_rx.load(Ordering::Relaxed),
 			credit_stalls: self.credit_stalls.load(Ordering::Relaxed),
 			credit_stalled_us: self.credit_stalled_us.load(Ordering::Relaxed),
+			credit_held_readers_us: self.credit_held_readers_us.load(Ordering::Relaxed),
+			credit_held_evicted_us: self.credit_held_evicted_us.load(Ordering::Relaxed),
 			sessions_started,
 			sessions_ended,
 			sent_bytes,
@@ -619,6 +627,12 @@ pub struct Presence {
 	pub credit_stalls: u64,
 	/// Cumulative microseconds connections spent blocked on the peer's connection-level credit.
 	pub credit_stalled_us: u64,
+	/// Cumulative microseconds the peer had a connection's whole receive window spent while a
+	/// reader had data it had not looked at yet: readers behind holding the window.
+	pub credit_held_readers_us: u64,
+	/// Cumulative microseconds the peer had a connection's whole receive window spent while an
+	/// evicted reader had not stopped its stream.
+	pub credit_held_evicted_us: u64,
 	/// Cumulative routes and claims a lite-07 session forwarded that this
 	/// node refused, withdrawing each and keeping the session: the total of
 	/// [`Routes::refused`].
@@ -639,6 +653,8 @@ impl Presence {
 		self.wire_rx += other.wire_rx;
 		self.credit_stalls += other.credit_stalls;
 		self.credit_stalled_us += other.credit_stalled_us;
+		self.credit_held_readers_us += other.credit_held_readers_us;
+		self.credit_held_evicted_us += other.credit_held_evicted_us;
 		self.sessions_started += other.sessions_started;
 		self.sessions_ended += other.sessions_ended;
 		self.sent_bytes += other.sent_bytes;
@@ -1413,6 +1429,8 @@ struct WireState {
 	received_bytes: u64,
 	credit_stalls: u64,
 	credit_stalled_us: u64,
+	credit_held_readers_us: u64,
+	credit_held_evicted_us: u64,
 	closed: bool,
 }
 
@@ -1431,13 +1449,26 @@ impl WireInner {
 		let sent_bytes = self.counters.sent_bytes();
 		let received_bytes = self.counters.received_bytes();
 		let credit_stalls = self.counters.credit_stalls();
-		let credit_stalled_us = u64::try_from(self.counters.credit_stalled().as_micros()).unwrap_or(u64::MAX);
+		let micros = |time: std::time::Duration| u64::try_from(time.as_micros()).unwrap_or(u64::MAX);
+		let credit_stalled_us = micros(self.counters.credit_stalled());
+		let credit_held_readers_us = micros(self.counters.credit_held_readers());
+		let credit_held_evicted_us = micros(self.counters.credit_held_evicted());
 		if let Some(presence) = &current.presence {
 			for (counter, now, then) in [
 				(&presence.wire_tx, sent_bytes, last.sent_bytes),
 				(&presence.wire_rx, received_bytes, last.received_bytes),
 				(&presence.credit_stalls, credit_stalls, last.credit_stalls),
 				(&presence.credit_stalled_us, credit_stalled_us, last.credit_stalled_us),
+				(
+					&presence.credit_held_readers_us,
+					credit_held_readers_us,
+					last.credit_held_readers_us,
+				),
+				(
+					&presence.credit_held_evicted_us,
+					credit_held_evicted_us,
+					last.credit_held_evicted_us,
+				),
 			] {
 				counter.fetch_add(now.saturating_sub(then), Ordering::Relaxed);
 			}
@@ -1447,6 +1478,8 @@ impl WireInner {
 			received_bytes,
 			credit_stalls,
 			credit_stalled_us,
+			credit_held_readers_us,
+			credit_held_evicted_us,
 			closed: close,
 		};
 		!close
@@ -2272,15 +2305,19 @@ mod tests {
 		);
 		bytes.set_sent_bytes(15);
 		bytes.set_received_bytes(27);
-		bytes.set_credit_stalls(2, std::time::Duration::from_millis(3));
+		let ms = std::time::Duration::from_millis;
+		bytes.set_credit_stalls(2, ms(3));
+		bytes.set_credit_held(ms(4), ms(1));
 		session.retag(new.clone(), crate::Path::from_static("hall"));
 		bytes.set_sent_bytes(25);
 		bytes.set_received_bytes(50);
-		bytes.set_credit_stalls(5, std::time::Duration::from_millis(10));
+		bytes.set_credit_stalls(5, ms(10));
+		bytes.set_credit_held(ms(9), ms(3));
 		let report = drain(&registry);
-		for (tier, label, expected, stalls) in
-			[(old, "room", (15, 27), (2, 3_000)), (new, "hall", (10, 23), (3, 7_000))]
-		{
+		for (tier, label, expected, stalls, held) in [
+			(old, "room", (15, 27), (2, 3_000), (4_000, 1_000)),
+			(new, "hall", (10, 23), (3, 7_000), (5_000, 2_000)),
+		] {
 			let row = report
 				.sessions
 				.iter()
@@ -2288,6 +2325,8 @@ mod tests {
 				.unwrap();
 			assert_eq!((row.presence.wire_tx, row.presence.wire_rx), expected);
 			assert_eq!((row.presence.credit_stalls, row.presence.credit_stalled_us), stalls);
+			let presence = &row.presence;
+			assert_eq!((presence.credit_held_readers_us, presence.credit_held_evicted_us), held);
 		}
 	}
 
