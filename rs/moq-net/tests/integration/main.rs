@@ -11,6 +11,7 @@ mod announce_covering_route;
 mod announce_to_serve;
 mod answer_behind_cache;
 mod auth;
+mod bridged_rank;
 mod broadcast_close;
 mod catalog_acquisition;
 mod catalog_churn;
