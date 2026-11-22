@@ -333,7 +333,7 @@ impl Source {
 }
 
 pub(crate) struct Camera {
-	stream: MmapStream<'static>,
+	stream: MmapStream,
 	source: Source,
 	width: u32,
 	height: u32,

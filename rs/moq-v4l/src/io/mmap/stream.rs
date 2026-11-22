@@ -1,4 +1,3 @@
-use std::convert::TryInto;
 use std::time::Duration;
 use std::{io, mem, sync::Arc};
 
@@ -14,9 +13,9 @@ use crate::v4l2;
 /// Stream of mapped buffers
 ///
 /// An arena instance is used internally for buffer handling.
-pub struct Stream<'a> {
+pub struct Stream {
 	handle: Arc<Handle>,
-	arena: Arena<'a>,
+	arena: Arena,
 	arena_index: usize,
 	buf_type: Type,
 	buf_meta: Vec<Metadata>,
@@ -24,7 +23,7 @@ pub struct Stream<'a> {
 	state: State,
 }
 
-impl<'a> Stream<'a> {
+impl Stream {
 	/// Returns a stream for frame capturing
 	///
 	/// # Arguments
@@ -72,7 +71,7 @@ impl<'a> Stream<'a> {
 
 	/// Sets a timeout of the v4l file handle.
 	pub fn set_timeout(&mut self, duration: Duration) {
-		self.timeout = Some(duration.as_millis().try_into().unwrap());
+		self.timeout = Some(crate::io::timeout_ms(duration));
 	}
 
 	/// Clears the timeout of the v4l file handle.
@@ -89,25 +88,14 @@ impl<'a> Stream<'a> {
 	}
 }
 
-impl<'a> Drop for Stream<'a> {
+impl Drop for Stream {
 	fn drop(&mut self) {
-		if let Err(e) = self.stop() {
-			if let Some(code) = e.raw_os_error() {
-				// ENODEV means the file descriptor wrapped in the handle became invalid, most
-				// likely because the device was unplugged or the connection (USB, PCI, ..)
-				// broke down. Handle this case gracefully by ignoring it.
-				if code == 19 {
-					/* ignore */
-					return;
-				}
-			}
-
-			panic!("{:?}", e)
-		}
+		// Fails once the device is gone (ENODEV), which stops the queue anyway.
+		let _ = self.stop();
 	}
 }
 
-impl<'a> StreamTrait for Stream<'a> {
+impl StreamTrait for Stream {
 	type Item = [u8];
 
 	fn start(&mut self) -> io::Result<()> {
@@ -143,7 +131,7 @@ impl<'a> StreamTrait for Stream<'a> {
 	}
 }
 
-impl<'a, 'b> CaptureStream<'b> for Stream<'a> {
+impl<'b> CaptureStream<'b> for Stream {
 	fn queue(&mut self, index: usize) -> io::Result<()> {
 		let mut v4l2_buf = v4l2_buffer {
 			index: index as u32,
@@ -201,7 +189,7 @@ impl<'a, 'b> CaptureStream<'b> for Stream<'a> {
 				// partway hands back what it queued, which STREAMOFF does even on a
 				// queue that never streamed, so the next call starts from the same
 				// place rather than queueing a buffer twice.
-				let started = (0..self.arena.bufs.len())
+				let started = (0..self.arena.len())
 					.try_for_each(|index| CaptureStream::queue(self, index))
 					.and_then(|()| self.start());
 				if let Err(err) = started {
@@ -222,13 +210,13 @@ impl<'a, 'b> CaptureStream<'b> for Stream<'a> {
 
 		// The index used to access the buffer elements is given to us by v4l2, so we assume it
 		// will always be valid.
-		let bytes = &self.arena.bufs[self.arena_index];
+		let bytes = self.arena.get(self.arena_index);
 		let meta = &self.buf_meta[self.arena_index];
 		Ok((bytes, meta))
 	}
 }
 
-impl<'a, 'b> OutputStream<'b> for Stream<'a> {
+impl<'b> OutputStream<'b> for Stream {
 	fn queue(&mut self, index: usize) -> io::Result<()> {
 		let mut v4l2_buf = v4l2_buffer {
 			index: index as u32,
@@ -282,22 +270,28 @@ impl<'a, 'b> OutputStream<'b> for Stream<'a> {
 	}
 
 	fn next(&'b mut self) -> io::Result<(&'b mut Self::Item, &'b mut Metadata)> {
-		let init = self.state == State::Stopped;
-		if init {
-			self.start()?;
-		}
-
-		// Only queue and dequeue once the buffer has been filled at the call site. The initial
-		// call to this function from the call site will happen just after the buffers have been
-		// allocated, meaning we need to return the empty buffer initially so it can be filled.
-		if !init {
-			OutputStream::queue(self, self.arena_index)?;
-			self.arena_index = OutputStream::dequeue(self)?;
+		match self.state {
+			State::Stopped => {
+				// The first frame after start is a buffer to fill, not one to queue.
+				self.start()?;
+				self.state = State::Streaming { held: true };
+			}
+			State::Streaming { held } => {
+				// A queue that failed leaves the filled buffer held for the retry, and
+				// a dequeue that failed leaves it with the driver, so it is not queued
+				// a second time.
+				if held {
+					OutputStream::queue(self, self.arena_index)?;
+					self.state = State::Streaming { held: false };
+				}
+				self.arena_index = OutputStream::dequeue(self)?;
+				self.state = State::Streaming { held: true };
+			}
 		}
 
 		// The index used to access the buffer elements is given to us by v4l2, so we assume it
 		// will always be valid.
-		let bytes = &mut self.arena.bufs[self.arena_index];
+		let bytes = self.arena.get_mut(self.arena_index);
 		let meta = &mut self.buf_meta[self.arena_index];
 		Ok((bytes, meta))
 	}

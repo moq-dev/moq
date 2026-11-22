@@ -1,4 +1,3 @@
-use std::convert::TryInto;
 use std::time::Duration;
 use std::{io, mem, sync::Arc};
 
@@ -72,7 +71,7 @@ impl Stream {
 
 	/// Sets a timeout of the v4l file handle.
 	pub fn set_timeout(&mut self, duration: Duration) {
-		self.timeout = Some(duration.as_millis().try_into().unwrap());
+		self.timeout = Some(crate::io::timeout_ms(duration));
 	}
 
 	/// Clears the timeout of the v4l file handle.
@@ -91,19 +90,8 @@ impl Stream {
 
 impl Drop for Stream {
 	fn drop(&mut self) {
-		if let Err(e) = self.stop() {
-			if let Some(code) = e.raw_os_error() {
-				// ENODEV means the file descriptor wrapped in the handle became invalid, most
-				// likely because the device was unplugged or the connection (USB, PCI, ..)
-				// broke down. Handle this case gracefully by ignoring it.
-				if code == 19 {
-					/* ignore */
-					return;
-				}
-			}
-
-			panic!("{:?}", e)
-		}
+		// Fails once the device is gone (ENODEV), which stops the queue anyway.
+		let _ = self.stop();
 	}
 }
 

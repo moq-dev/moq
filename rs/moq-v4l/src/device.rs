@@ -1,3 +1,4 @@
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::Path;
 use std::sync::Arc;
 use std::{io, mem};
@@ -33,11 +34,6 @@ impl Device {
 	pub fn new(index: usize) -> io::Result<Self> {
 		let path = format!("{}{}", "/dev/video", index);
 		let fd = v4l2::open(path, libc::O_RDWR | libc::O_NONBLOCK)?;
-
-		if fd == -1 {
-			return Err(io::Error::last_os_error());
-		}
-
 		Ok(Device {
 			handle: Arc::new(Handle::new(fd)),
 		})
@@ -59,11 +55,6 @@ impl Device {
 	/// ```
 	pub fn with_path<P: AsRef<Path>>(path: P) -> io::Result<Self> {
 		let fd = v4l2::open(&path, libc::O_RDWR | libc::O_NONBLOCK)?;
-
-		if fd == -1 {
-			return Err(io::Error::last_os_error());
-		}
-
 		Ok(Device {
 			handle: Arc::new(Handle::new(fd)),
 		})
@@ -131,18 +122,20 @@ impl io::Write for Device {
 /// Device handle for low-level access.
 ///
 /// Acquiring a handle facilitates (possibly mutating) interactions with the device.
+///
+/// Dropping the last one closes the device.
 pub struct Handle {
-	fd: std::os::raw::c_int,
+	fd: OwnedFd,
 }
 
 impl Handle {
-	fn new(fd: std::os::raw::c_int) -> Self {
+	pub(crate) fn new(fd: OwnedFd) -> Self {
 		Self { fd }
 	}
 
 	/// Returns the raw file descriptor
 	pub fn fd(&self) -> std::os::raw::c_int {
-		self.fd
+		self.fd.as_raw_fd()
 	}
 
 	/// Polls the file descriptor for I/O events
@@ -153,32 +146,25 @@ impl Handle {
 	///
 	/// * `timeout` - Timeout in milliseconds. A value of zero returns immediately,
 	///   even if the fd is not ready. A negative value means infinite timeout (blocking).
+	///
+	/// A signal that interrupts the wait restarts it with the full timeout.
 	pub fn poll(&self, events: i16, timeout: i32) -> io::Result<i32> {
-		match unsafe {
-			libc::poll(
-				[libc::pollfd {
-					fd: self.fd,
-					events,
-					revents: 0,
-				}]
-				.as_mut_ptr(),
-				1,
-				timeout,
-			)
-		} {
-			-1 => Err(io::Error::last_os_error()),
-			ret => {
-				// A return value of zero means that we timed out. A positive value signifies the
-				// number of fds with non-zero revents fields (aka I/O activity).
-				assert!(ret == 0 || ret == 1);
-				Ok(ret)
+		loop {
+			let mut fds = [libc::pollfd {
+				fd: self.fd(),
+				events,
+				revents: 0,
+			}];
+			match unsafe { libc::poll(fds.as_mut_ptr(), 1, timeout) } {
+				-1 => {
+					let err = io::Error::last_os_error();
+					if err.kind() != io::ErrorKind::Interrupted {
+						return Err(err);
+					}
+				}
+				// Zero means the wait timed out, one that the fd saw activity.
+				ret => return Ok(ret),
 			}
 		}
-	}
-}
-
-impl Drop for Handle {
-	fn drop(&mut self) {
-		v4l2::close(self.fd).unwrap();
 	}
 }
