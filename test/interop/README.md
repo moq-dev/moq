@@ -35,7 +35,7 @@ so a runner short of CPU splices the captured tone with no timestamp gap. The Py
 C++ clients encode it through `moq-ffi` at a 2.5 ms
 frame duration, so the matrix covers the FFI audio path with a non-default codec config.
 Each subscriber decodes every audio rendition with what it already has: moq-audio for Rust (the
-`interop-audio` example, since the CLI has no PCM output), `moq-ffi` for Python,
+`interop-audio` client, since the CLI has no PCM output), `moq-ffi` for Python,
 Go, and C++, `libmoq` for C, `decodebin` on each `audio_N` pad for GStreamer, and
 `@moq/hang`'s libav WebCodecs fallback under Node and Bun. Each writes the first
 600 ms of PCM and frame timestamps of each rendition, named by its codec, for
@@ -148,19 +148,22 @@ player survive the publication lifecycle. See [Media QA](#media-qa).
 
 | Client | Source under test | Built with | Roles |
 |---|---|---|---|
-| Rust | `rs/moq-relay` + `rs/moq-cli` (+ `rs/moq-audio` for the `interop-audio` example) | `cargo build` | publish (video + audio) + subscribe |
+| Rust | `rs/moq-relay` + `rs/moq-cli` (+ `rs/moq-interop`'s clients) | `cargo build` | publish (video + audio) + subscribe |
 | Python | `py/moq-rs` (+ `rs/moq-ffi`, import `moq`) | `uv build` wheels (maturin + hatchling), installed into a venv in the run directory | publish (video + audio) + subscribe |
 | Go | `go/wrapper` (+ `rs/moq-ffi`, import `moq-go/moq`) | `sh/go/stage.sh` (uniffi-bindgen-go) + `go build` | publish (video + audio) + subscribe |
 | C++ | `cpp/moq` (+ `rs/moq-ffi`, `find_package(moq-cpp)`) | `cmake` build + install of `cpp/moq` (uniffi-bindgen-cpp), then `cmake` for the client | publish (video + audio) + subscribe |
 | Browser | `js/watch` + `js/publish` | `vite build` + headless Chromium (Playwright) | publish (video + audio) + rendered playback |
 | Native JS | `js/net` + `js/hang` + the npm `@moq/web-transport` polyfill | `node` (tsx) and `bun` | subscribe |
-| C | `rs/libmoq` | `cargo build -p libmoq` + `cc` | subscribe |
-| GStreamer | `rs/moq-gst` (`moqsrc`) | `cargo build -p moq-gst` + `gst-launch-1.0` | subscribe |
+| C | `rs/libmoq` | `cargo build` + `cc` | subscribe |
+| GStreamer | `rs/moq-gst` (`moqsrc`) | `cargo build` + `gst-launch-1.0` | subscribe |
 
 The browser, native JS, C, and GStreamer clients subscribe only by choice
 (publishing media needs an encoder the native JS runtimes lack, the C client is
 intentionally minimal, and `moqsink` publishing needs request-pad muxing this
 client doesn't drive). Rust, Python, Go, C++, and the browser publish.
+
+The Rust, C, and GStreamer rows build in one `cargo build`, so their shared
+dependencies compile once; a compile error there fails the whole run.
 
 The Go client builds against the modules `sh/go/stage.sh` assembles from
 this checkout: `moq-ffi` compiled for the host, bindings regenerated with
