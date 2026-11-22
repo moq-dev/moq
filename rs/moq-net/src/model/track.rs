@@ -10384,7 +10384,7 @@ impl Cursor {
 			lookup.join = None;
 			let found = match answer {
 				fill::TimeStart::Group(group) => Found::Group(group),
-				fill::TimeStart::Dropped => Found::Dropped,
+				fill::TimeStart::Dropped => Found::Dropped { floor: lookup.floor },
 				fill::TimeStart::Unanswered => Found::Unanswered,
 				// Where the time falls is unknown, so the reads fail rather than guess from the
 				// cache. The ranges resolve afresh once they change, asking again.
@@ -16999,6 +16999,47 @@ mod test {
 		assert_eq!(placed(&mut past), Some((2000, true)));
 		drop(past);
 		assert_eq!(asks(&producer), Vec::<u64>::new());
+	}
+
+	/// A lite-07 copy holding a whole group places a time inside its span from that group
+	/// alone, with no successor, since its GROUP_END gave up the starts there. A time past its
+	/// End waits until the publisher skips the pause up to it, then starts at that End, so at
+	/// the next group: the whole group never contains it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_received_copy_places_a_time_from_a_whole_groups_span() {
+		let from = |time| {
+			Subscription::default()
+				.with_ranges([Range {
+					start: crate::track::Start::Time(time),
+					end: None,
+				}])
+				.with_delay(Delay::default().with_max(None))
+		};
+		let start = |subscriber: &mut Subscriber| subscriber.resolved_range(0).map(|resolved| resolved.start);
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		// As a GROUP_END arrives: the group ends whole at 1400 and the starts inside it are given up.
+		let mut group = producer.create_group(group::Info { start: 1000 }).unwrap();
+		group
+			.write_frame(Timestamp::from_millis(1000).unwrap(), &b"x"[..])
+			.unwrap();
+		group.finish_at(1400).unwrap();
+		producer.skip_groups(1001..1400);
+
+		let mut inside = producer.subscribe(from(1300));
+		let mut paused = producer.subscribe(from(1700));
+		assert_eq!(start(&mut inside), Some(1000), "the span proves it");
+		assert_eq!(start(&mut paused), None, "a group may still start in 1400..=1700");
+		assert_eq!(drain(&mut paused), Vec::<u64>::new(), "reads from the time meanwhile");
+
+		// The publisher names the pause with SUBSCRIBE_SKIP.
+		producer.skip_groups(1400..2000);
+		assert_eq!(start(&mut paused), Some(1400));
+		write_group(&producer, 2000);
+		assert_eq!(drain(&mut paused), vec![2000]);
+		assert_eq!(drain(&mut inside), vec![1000, 2000]);
 	}
 
 	/// A time start an answer places only within a narrower budget than the reader's waits, and
@@ -31944,6 +31985,58 @@ mod test {
 			write_group(&producer, key);
 		}
 		assert_eq!(drain(&mut live), vec![4000]);
+	}
+
+	/// A whole group's span runs from its start to its End: a time inside it starts at that
+	/// group, and a time in the pause past it belongs to no group, so a time start there starts
+	/// at the next group, even before that group exists, and a time end there stops after the
+	/// whole group. A group with no End spans up to the next start, as before.
+	#[test]
+	#[cfg(feature = "async")]
+	fn time_anchors_resolve_against_group_spans() {
+		let producer = track_producer("test", Info::timed());
+		let append = |start: u64, end: Option<u64>| {
+			let mut group = producer.append_group(Timestamp::from_millis(start).unwrap()).unwrap();
+			group
+				.write_frame(Timestamp::from_millis(start).unwrap(), &b"x"[..])
+				.unwrap();
+			match end {
+				Some(end) => drop(group.finish_at(end).unwrap()),
+				None => drop(group.finish().unwrap()),
+			}
+		};
+		let time = |start, end: Option<u64>| {
+			replay().with_ranges([Range {
+				start: crate::track::Start::Time(start),
+				end,
+			}])
+		};
+		let start = |subscriber: &mut Subscriber| subscriber.resolved_range(0).map(|resolved| resolved.start);
+		append(0, Some(1000));
+		append(1000, Some(1400));
+
+		let mut inside = producer.subscribe(time(1200, None));
+		assert_eq!(start(&mut inside), Some(1000), "inside the span");
+		let mut paused = producer.subscribe(time(1700, None));
+		assert_eq!(start(&mut paused), Some(1400), "in the pause: at the next group");
+		let mut at_end = producer.subscribe(time(1400, None));
+		assert_eq!(start(&mut at_end), Some(1400), "an End is past the span");
+		assert_eq!(drain(&mut inside), vec![1000]);
+		assert_eq!(drain(&mut paused), Vec::<u64>::new(), "1000 ended before 1700");
+		assert_eq!(drain(&mut at_end), Vec::<u64>::new());
+
+		append(2000, None);
+		assert_eq!(drain(&mut inside), vec![2000]);
+		assert_eq!(drain(&mut paused), vec![2000]);
+		assert_eq!(drain(&mut at_end), vec![2000]);
+
+		// Its own start names a group whatever its End.
+		assert_eq!(start(&mut producer.subscribe(time(1000, None))), Some(1000));
+		let mut through = producer.subscribe(time(0, Some(1700)));
+		assert_eq!(drain(&mut through), vec![0, 1000], "a time end in the pause stops after 1000");
+		// 2000 has no End, so it spans up to the next start.
+		let mut open = producer.subscribe(time(2500, None));
+		assert_eq!(start(&mut open), Some(2000));
 	}
 
 	/// A group joined mid-group still starts at its key, whatever its first frame held says:

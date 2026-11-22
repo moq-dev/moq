@@ -138,8 +138,8 @@ pub(in crate::model) enum Containing {
 pub(crate) enum Found {
 	/// The group containing the time.
 	Group(u64),
-	/// No group starts from the oldest key the lookup asked from through the time.
-	Dropped,
+	/// No group starts from `floor`, the oldest key the lookup asked from, through the time.
+	Dropped { floor: u64 },
 	/// Nothing answered: no handler was left to.
 	Unanswered,
 }
@@ -737,11 +737,9 @@ impl Window {
 			let asked = span.looking.take().map(|looking| looking.floor);
 			(span.start, span.floored) = match found {
 				Found::Group(group) => (group, true),
-				// Nothing starts from the floor through the time, so it starts where the groups held
-				// below the floor placed it; with none held, no group starts at or before the time,
-				// so the span reads from the time on.
-				Found::Dropped if span.floored => (span.start, true),
-				Found::Dropped => (time, true),
+				// A floor is one past where the groups held placed it, which then holds it; from 0,
+				// no group starts at or before it, so the span reads from the time on.
+				Found::Dropped { floor } => (floor.checked_sub(1).unwrap_or(time), true),
 				Found::Unanswered => match holdings.containing(time, self.budget) {
 					Containing::At(start) => (start, true),
 					_ => (0, false),
@@ -1040,9 +1038,8 @@ fn start(anchor: Option<u64>, latest: Option<u64>, budget: Duration, holdings: &
 
 /// The oldest key a fill of the group containing time start `time`, resolved to `start`,
 /// asks from, when the groups held can't tell which group contains it and a handler may: it
-/// is before every group held, or a group the cache evicted may start from `start`, past the
-/// newest held at or before it or at the End of its span, and still at or before `time`. Keys
-/// the producer skipped hold none.
+/// is before every group held, or a group the cache evicted may start after `start`, where the
+/// groups held placed it, and still at or before `time`. Keys the producer skipped hold none.
 fn unresolved(time: u64, start: u64, floored: bool, holdings: &impl Holdings) -> Option<u64> {
 	if !holdings.looks_up() {
 		return None;
@@ -1050,11 +1047,7 @@ fn unresolved(time: u64, start: u64, floored: bool, holdings: &impl Holdings) ->
 	if !floored {
 		return holdings.next_start(0).map(|_| 0);
 	}
-	// A start at a whole group's End holds no group held, so an evicted one may start there.
-	let next = match holdings.next_start(start) == Some(start) {
-		true => start.checked_add(1)?,
-		false => start,
-	};
+	let next = start.checked_add(1)?;
 	let after = holdings.next_start(next)?;
 	let gap = next..after.min(time.saturating_add(1));
 	(!holdings.never_produced(gap)).then_some(next)
@@ -1238,12 +1231,12 @@ mod tests {
 					0 => drop(keys.held.insert(value)),
 					1 => keys.dropped = keys.dropped.max(value),
 					2 => {
-						let Some((time, _)) = fast.lookups().next() else {
+						let Some((time, floor)) = fast.lookups().next() else {
 							continue;
 						};
 						let answer = match value % 3 {
 							0 => Found::Group(value),
-							1 => Found::Dropped,
+							1 => Found::Dropped { floor },
 							_ => Found::Unanswered,
 						};
 						fast.found(time, answer, &keys);
@@ -1643,7 +1636,7 @@ mod tests {
 
 		let mut window = Window::new(&[range(time(500), None)], delay(), Some(9000), &keys);
 		assert_eq!(window.lookups().collect::<Vec<_>>(), [(500, 0)]);
-		assert!(window.found(500, Found::Dropped, &keys));
+		assert!(window.found(500, Found::Dropped { floor: 0 }, &keys));
 		assert_eq!(
 			window.resolved(),
 			[Some(Resolved {
@@ -1671,7 +1664,7 @@ mod tests {
 		for held in [&[9000][..], &[4000, 8000, 9000]] {
 			let mut window = Window::new(&[range(time(8500), None)], delay(), Some(9000), &history(&[4000, 9000]));
 			assert_eq!(window.lookups().collect::<Vec<_>>(), [(8500, 4001)]);
-			assert!(window.found(8500, Found::Dropped, &history(held)));
+			assert!(window.found(8500, Found::Dropped { floor: 4001 }, &history(held)));
 			assert_eq!(window.lookups().count(), 0, "answered, not looked up again");
 			assert_eq!(
 				window.resolved(),
