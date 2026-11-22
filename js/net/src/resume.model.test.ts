@@ -533,8 +533,11 @@ class Model {
 		});
 		const serving = wireOf(this.origin).receive(PATH, route);
 		const broadcast = new BroadcastProducer();
-		// A local publisher, where the Rust model's route is a received copy.
 		const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
+		// The route's live feed, received from its publisher over a wire that reports no range's
+		// start, so its readers place starts against what it holds: the Rust model's `received()`.
+		hooks.receiveTrack(producer);
+		hooks.dropAnchors(producer);
 		void (async () => {
 			for await (const request of serving.requested()) {
 				request.serve(Upstream.of(broadcast, (key, local) => this.fill(instance, slot, key, local)));
