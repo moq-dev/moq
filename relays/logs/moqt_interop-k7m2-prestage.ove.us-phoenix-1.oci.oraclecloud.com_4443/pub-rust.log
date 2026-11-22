@@ -1,42 +1,44 @@
-[2m2026-11-22T15:32:07.794984Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m cluster initialized [3mhop_id[0m[2m=[0m6891028640634442 [3mconfigured[0m[2m=[0mfalse
-[2m2026-11-22T15:32:07.797680Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP receive buffer is smaller than requested; raise `net.core.rmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m4194304
-[2m2026-11-22T15:32:07.797698Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP send buffer is smaller than requested; raise `net.core.wmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m4194304
-[2m2026-11-22T15:32:07.800289Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mmoqt://interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com:4443
-[2m2026-11-22T15:32:07.800498Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m no cluster peers configured; running standalone
-[2m2026-11-22T15:32:07.885666Z[0m [32m INFO[0m [2mmoq_tokio::client[0m[2m:[0m connected [3mversion[0m[2m=[0mmoq-transport-22
-[2m2026-11-22T15:32:07.885681Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connected [3mpeer[0m[2m=[0mmoqt://interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com:4443
-[2m2026-11-22T15:32:07.938959Z[0m [33m WARN[0m [2mmoq_tokio::connection[0m[2m:[0m session severed immediately, retrying [3mpeer[0m[2m=[0mmoqt://interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com:4443 [3merr[0m[2m=[0munknown code=8
-[2m2026-11-22T15:32:07.938967Z[0m [33m WARN[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0munknown code=8
-[2m2026-11-22T15:32:07.938994Z[0m [33m WARN[0m [2mmoq_tokio::connection[0m[2m:[0m reconnecting after backoff [3mwait[0m[2m=[0m990.952448ms
-[2m2026-11-22T15:32:08.930927Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mmoqt://interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com:4443
-[2m2026-11-22T15:32:08.972736Z[0m [32m INFO[0m [2mmoq_tokio::client[0m[2m:[0m connected [3mversion[0m[2m=[0mmoq-transport-22
-[2m2026-11-22T15:32:08.972761Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connected [3mpeer[0m[2m=[0mmoqt://interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com:4443
-[2m2026-11-22T15:32:09.017266Z[0m [33m WARN[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0munknown code=8
-[2m2026-11-22T15:32:09.017324Z[0m [33m WARN[0m [2mmoq_tokio::connection[0m[2m:[0m session severed immediately, retrying [3mpeer[0m[2m=[0mmoqt://interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com:4443 [3merr[0m[2m=[0munknown code=8
-[2m2026-11-22T15:32:09.017338Z[0m [33m WARN[0m [2mmoq_tokio::connection[0m[2m:[0m reconnecting after backoff [3mwait[0m[2m=[0m1.649319s
-[2m2026-11-22T15:32:10.668495Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mmoqt://interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com:4443
-[2m2026-11-22T15:32:10.710535Z[0m [32m INFO[0m [2mmoq_tokio::client[0m[2m:[0m connected [3mversion[0m[2m=[0mmoq-transport-22
-[2m2026-11-22T15:32:10.710560Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connected [3mpeer[0m[2m=[0mmoqt://interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com:4443
-[2m2026-11-22T15:32:10.806137Z[0m [33m WARN[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0munknown code=8
-[2m2026-11-22T15:32:10.806172Z[0m [33m WARN[0m [2mmoq_tokio::connection[0m[2m:[0m session severed immediately, retrying [3mpeer[0m[2m=[0mmoqt://interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com:4443 [3merr[0m[2m=[0munknown code=8
-[2m2026-11-22T15:32:10.806195Z[0m [33m WARN[0m [2mmoq_tokio::connection[0m[2m:[0m reconnecting after backoff [3mwait[0m[2m=[0m2.932610193s
-[2m2026-11-22T15:32:13.740546Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mmoqt://interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com:4443
-[2m2026-11-22T15:32:13.782618Z[0m [32m INFO[0m [2mmoq_tokio::client[0m[2m:[0m connected [3mversion[0m[2m=[0mmoq-transport-22
-[2m2026-11-22T15:32:13.782639Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connected [3mpeer[0m[2m=[0mmoqt://interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com:4443
-[2m2026-11-22T15:32:13.877989Z[0m [33m WARN[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0munknown code=8
-[2m2026-11-22T15:32:13.878039Z[0m [33m WARN[0m [2mmoq_tokio::connection[0m[2m:[0m session severed immediately, retrying [3mpeer[0m[2m=[0mmoqt://interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com:4443 [3merr[0m[2m=[0munknown code=8
-[2m2026-11-22T15:32:13.878048Z[0m [33m WARN[0m [2mmoq_tokio::connection[0m[2m:[0m reconnecting after backoff [3mwait[0m[2m=[0m3.872195711s
-[2m2026-11-22T15:32:17.750986Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mmoqt://interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com:4443
-[2m2026-11-22T15:32:17.793003Z[0m [32m INFO[0m [2mmoq_tokio::client[0m[2m:[0m connected [3mversion[0m[2m=[0mmoq-transport-22
-[2m2026-11-22T15:32:17.793026Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connected [3mpeer[0m[2m=[0mmoqt://interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com:4443
-[2m2026-11-22T15:32:17.834026Z[0m [33m WARN[0m [2mmoq_tokio::connection[0m[2m:[0m session severed immediately, retrying [3mpeer[0m[2m=[0mmoqt://interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com:4443 [3merr[0m[2m=[0munknown code=8
-[2m2026-11-22T15:32:17.834049Z[0m [33m WARN[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0munknown code=8
-[2m2026-11-22T15:32:17.834055Z[0m [31mERROR[0m [2mmoq_tokio::connection[0m[2m:[0m connection loop exited [3merr[0m[2m=[0mreconnect timed out after 10s: unknown code=8
-[2m2026-11-22T15:32:17.834141Z[0m [33m WARN[0m [2mmoq_net::model::track[0m[2m:[0m track::Producer dropped without finish() or abort() [3mtrack[0m[2m=[0m0.avc3
-[2m2026-11-22T15:32:17.834149Z[0m [33m WARN[0m [2mmoq_net::model::group[0m[2m:[0m group::Producer dropped without finish() or abort() [3msequence[0m[2m=[0m10
-[2m2026-11-22T15:32:17.834313Z[0m [33m WARN[0m [2mmoq_net::model::track[0m[2m:[0m track::Producer dropped without finish() or abort() [3mtrack[0m[2m=[0mcatalog.json
-[2m2026-11-22T15:32:17.834316Z[0m [33m WARN[0m [2mmoq_net::model::track[0m[2m:[0m track::Producer dropped without finish() or abort() [3mtrack[0m[2m=[0mcatalog.json.z
-[2m2026-11-22T15:32:17.834343Z[0m [33m WARN[0m [2mmoq_net::model::track[0m[2m:[0m track::Producer dropped without finish() or abort() [3mtrack[0m[2m=[0mcatalog
-[2m2026-11-22T15:32:17.834352Z[0m [33m WARN[0m [2mmoq_net::model::track[0m[2m:[0m track::Producer dropped without finish() or abort() [3mtrack[0m[2m=[0mtimeline.z
-[2m2026-11-22T15:32:17.834355Z[0m [33m WARN[0m [2mmoq_net::model::group[0m[2m:[0m group::Producer dropped without finish() or abort() [3msequence[0m[2m=[0m0
+[2m2026-11-22T16:06:37.193156Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m cluster initialized [3mhop_id[0m[2m=[0m6046736526192486 [3mconfigured[0m[2m=[0mfalse
+[2m2026-11-22T16:06:37.196444Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP receive buffer is smaller than requested; raise `net.core.rmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m1048576
+[2m2026-11-22T16:06:37.196458Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP send buffer is smaller than requested; raise `net.core.wmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m4194304
+[2m2026-11-22T16:06:37.199507Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mmoqt://interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com:4443
+[2m2026-11-22T16:06:37.199540Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m no cluster peers configured; running standalone
+[2m2026-11-22T16:06:37.314637Z[0m [32m INFO[0m [2mmoq_tokio::client[0m[2m:[0m connected [3mversion[0m[2m=[0mmoq-transport-22
+[2m2026-11-22T16:06:37.314658Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connected [3mpeer[0m[2m=[0mmoqt://interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com:4443
+[2m2026-11-22T16:06:37.410223Z[0m [33m WARN[0m [2mmoq_tokio::connection[0m[2m:[0m session severed immediately, retrying [3mpeer[0m[2m=[0mmoqt://interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com:4443 [3merr[0m[2m=[0munknown code=8
+[2m2026-11-22T16:06:37.410239Z[0m [33m WARN[0m [2mmoq_tokio::connection[0m[2m:[0m reconnecting after backoff [3mwait[0m[2m=[0m796.185394ms
+[2m2026-11-22T16:06:37.410237Z[0m [33m WARN[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0munknown code=8
+[2m2026-11-22T16:06:38.207383Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mmoqt://interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com:4443
+[2m2026-11-22T16:06:38.263470Z[0m [32m INFO[0m [2mmoq_tokio::client[0m[2m:[0m connected [3mversion[0m[2m=[0mmoq-transport-22
+[2m2026-11-22T16:06:38.263483Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connected [3mpeer[0m[2m=[0mmoqt://interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com:4443
+[2m2026-11-22T16:06:38.336209Z[0m [33m WARN[0m [2mmoq_tokio::connection[0m[2m:[0m session severed immediately, retrying [3mpeer[0m[2m=[0mmoqt://interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com:4443 [3merr[0m[2m=[0munknown code=8
+[2m2026-11-22T16:06:38.336221Z[0m [33m WARN[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0munknown code=8
+[2m2026-11-22T16:06:38.336229Z[0m [33m WARN[0m [2mmoq_tokio::connection[0m[2m:[0m reconnecting after backoff [3mwait[0m[2m=[0m1.666926019s
+[2m2026-11-22T16:06:40.004258Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mmoqt://interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com:4443
+[2m2026-11-22T16:06:40.059882Z[0m [32m INFO[0m [2mmoq_tokio::client[0m[2m:[0m connected [3mversion[0m[2m=[0mmoq-transport-22
+[2m2026-11-22T16:06:40.059896Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connected [3mpeer[0m[2m=[0mmoqt://interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com:4443
+[2m2026-11-22T16:06:40.116288Z[0m [33m WARN[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0munknown code=8
+[2m2026-11-22T16:06:40.116366Z[0m [33m WARN[0m [2mmoq_tokio::connection[0m[2m:[0m session severed immediately, retrying [3mpeer[0m[2m=[0mmoqt://interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com:4443 [3merr[0m[2m=[0munknown code=8
+[2m2026-11-22T16:06:40.116385Z[0m [33m WARN[0m [2mmoq_tokio::connection[0m[2m:[0m reconnecting after backoff [3mwait[0m[2m=[0m3.698820256s
+[2m2026-11-22T16:06:43.815934Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mmoqt://interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com:4443
+[2m2026-11-22T16:06:43.871902Z[0m [32m INFO[0m [2mmoq_tokio::client[0m[2m:[0m connected [3mversion[0m[2m=[0mmoq-transport-22
+[2m2026-11-22T16:06:43.871916Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connected [3mpeer[0m[2m=[0mmoqt://interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com:4443
+[2m2026-11-22T16:06:43.966926Z[0m [33m WARN[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0munknown code=8
+[2m2026-11-22T16:06:43.966977Z[0m [33m WARN[0m [2mmoq_tokio::connection[0m[2m:[0m session severed immediately, retrying [3mpeer[0m[2m=[0mmoqt://interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com:4443 [3merr[0m[2m=[0munknown code=8
+[2m2026-11-22T16:06:43.966989Z[0m [33m WARN[0m [2mmoq_tokio::connection[0m[2m:[0m reconnecting after backoff [3mwait[0m[2m=[0m3.232514193s
+[2m2026-11-22T16:06:47.200123Z[0m [31mERROR[0m [2mmoq_tokio::connection[0m[2m:[0m connection loop exited [3merr[0m[2m=[0mreconnect timed out after 10s: unknown code=8
+[2m2026-11-22T16:06:47.200231Z[0m [33m WARN[0m [2mmoq_net::model::track[0m[2m:[0m track::Producer dropped without finish() or abort() [3mtrack[0m[2m=[0m0.avc3
+[2m2026-11-22T16:06:47.200246Z[0m [33m WARN[0m [2mmoq_net::model::group[0m[2m:[0m group::Producer dropped without finish() or abort() [3msequence[0m[2m=[0m10
+[2m2026-11-22T16:06:47.200538Z[0m [33m WARN[0m [2mmoq_net::model::track[0m[2m:[0m track::Producer dropped without finish() or abort() [3mtrack[0m[2m=[0mcatalog.json
+[2m2026-11-22T16:06:47.200550Z[0m [33m WARN[0m [2mmoq_net::model::track[0m[2m:[0m track::Producer dropped without finish() or abort() [3mtrack[0m[2m=[0mcatalog.json.z
+[2m2026-11-22T16:06:47.200616Z[0m [33m WARN[0m [2mmoq_net::model::track[0m[2m:[0m track::Producer dropped without finish() or abort() [3mtrack[0m[2m=[0mcatalog
+[2m2026-11-22T16:06:47.200627Z[0m [33m WARN[0m [2mmoq_net::model::track[0m[2m:[0m track::Producer dropped without finish() or abort() [3mtrack[0m[2m=[0mtimeline.z
+[2m2026-11-22T16:06:47.200631Z[0m [33m WARN[0m [2mmoq_net::model::group[0m[2m:[0m group::Producer dropped without finish() or abort() [3msequence[0m[2m=[0m0
 Error: reconnect timed out after 10s: unknown code=8
+[vost#0:0/libx264 @ 0x5c2be37e9580] Error submitting a packet to the muxer: Broken pipe
+    Last message repeated 1 times
+[out#0/h264 @ 0x5c2be37e9180] Error muxing a packet
+[out#0/h264 @ 0x5c2be37e9180] Task finished with error code: -32 (Broken pipe)
+[out#0/h264 @ 0x5c2be37e9180] Terminating thread with return code -32 (Broken pipe)
+[out#0/h264 @ 0x5c2be37e9180] Error writing trailer: Broken pipe
+[out#0/h264 @ 0x5c2be37e9180] Error closing file: Broken pipe
