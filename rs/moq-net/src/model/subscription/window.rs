@@ -85,8 +85,8 @@ pub(in crate::model) trait Holdings {
 	fn complete(&self) -> bool;
 
 	/// Where a live join holding a nonzero `min` behind the live edge, ending at `end`, starts
-	/// for a reader within `budget`; see [`Join`]. On a hop that [`Self::answers_joins`], only
-	/// an answer recorded after join tick `since`, when the join's range was added, counts.
+	/// for a reader within `budget`; see [`Join`]. Only an upstream's answer recorded after join
+	/// tick `since`, when the join's range was added, counts.
 	fn join(&self, min: Duration, end: Option<u64>, budget: Duration, since: u64) -> Join {
 		let _ = (min, end, budget, since);
 		Join::Unknown
@@ -825,7 +825,12 @@ impl Window {
 				// The latest group holds the live edge. One made before any group then starts at
 				// the first, which was the latest when it was placed.
 				Some(latest) if min.is_zero() => (Some(latest), false),
-				Some(_) => match holdings.join(min, range.end, self.budget, 0) {
+				Some(_) => match holdings.join(
+					min,
+					join_end(range.end),
+					self.budget,
+					self.since.get(&key).copied().unwrap_or(0),
+				) {
 					Join::Time(time) => (Some(time), true),
 					Join::Group(group) => (Some(group), false),
 					// Nothing to measure the live edge by yet: read none of the groups held until it

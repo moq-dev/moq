@@ -5867,6 +5867,28 @@ test("track: a declared end resolves an unproven live join", () => {
 	}
 });
 
+// A received lite-07 copy's join answered with a group stays placed there once the end is declared:
+// the copy holds only the groups from where its feed started, so the edge it measures may fall
+// behind all of them. One joining after the answer can't take it. Mirrors the Rust
+// `a_received_copy_keeps_a_join_answer_past_its_declared_end`.
+test("track: a received copy keeps a join answer past its declared end", () => {
+	const producer = receivedTrack({ timescale: Timescale.MILLI });
+	hooks.answersJoins(producer);
+	const join = { delay: { max: Duration.millis(1000) }, ranges: [{ start: { live: Duration.millis(1000) } }] };
+	try {
+		const reader = producer.subscribe(join);
+		hooks.answerJoin(producer, 1000, undefined, 4000n, 1000);
+		// An end past the groups held, still owed the ones between.
+		producer.finishAt({ group: 6001n, frame: 0 });
+		putGroup(producer, 4000n, 4000);
+		expect(reader.tryRecvGroup()?.start).toBe(4000n);
+		const later = producer.subscribe(join);
+		expect(later.tryRecvGroup()).toBeUndefined();
+	} finally {
+		producer.close();
+	}
+});
+
 // A declared end may arrive before the groups below it: until it settles the live edge isn't final,
 // so a join the groups held can't prove keeps waiting rather than placing from a stale edge.
 test("track: an unsettled end leaves an unproven live join waiting", () => {

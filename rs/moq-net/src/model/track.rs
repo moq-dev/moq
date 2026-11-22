@@ -1233,25 +1233,29 @@ impl Holdings for TrackState {
 	/// starts later, never a group given up, as a time the window resolves like any range start;
 	/// on a scale-less track, by arrival on this hop's clock, as expiry measures it.
 	///
-	/// A received lite-07 copy places it only where its upstream answered a range asking the
-	/// same join, recorded after `since`, under a budget at least as wide as the reader's:
-	/// the live edge is the upstream's, which no group held here measures. Otherwise it waits on
-	/// its upstream, which its session asks with a range of its own. Another copy whose wire
-	/// reports where its ranges start places it only where the groups it holds prove, and waits
-	/// otherwise, until its end is declared and settled: then the join resolves as a time start.
+	/// A received lite-07 copy places it where its upstream answered a range asking the same
+	/// join, recorded after `since`, under a budget at least as wide as the reader's: the live
+	/// edge is the upstream's, which no group held here measures. Without one it waits on its
+	/// upstream, which its session asks with a range of its own, until the end is declared.
+	/// Another copy whose wire reports where its ranges start, or a lite-07 copy past its
+	/// declared end with no answer naming a group, places it only where the groups it holds
+	/// prove, and waits otherwise, until its end is declared and settled: then the join
+	/// resolves as a time start.
 	///
 	/// An idle copy waits as [`Self::latest_live`] does: what an ended feed left measures no
 	/// live edge, and the groups it missed since leave a hole the next feed may not fill.
 	fn join(&self, min: Duration, end: Option<u64>, budget: Duration, since: u64) -> Join {
-		// Once the end is declared, nothing more is answered: it places as the groups held
-		// measure it, as its upstream's would, holding the same final groups.
+		let answer = self.join_answers.get(&(min, end));
+		let answer = answer.filter(|answer| answer.tick > since && budget <= answer.budget);
+		// An answer naming a group stands once the end is declared too: the copy holds only
+		// the groups from where its feed started, so they can't measure a join behind them.
+		if let Some(start) = answer.and_then(|answer| answer.start) {
+			return Join::Group(start);
+		}
+		// Until the end is declared, only an answer places it. Nothing more is answered after,
+		// so the groups held measure it.
 		if self.joins_answered() {
-			return match self.join_answers.get(&(min, end)) {
-				Some(answer) if answer.tick > since && budget <= answer.budget => {
-					answer.start.map_or(Join::Empty, Join::Group)
-				}
-				_ => Join::Unknown,
-			};
+			return answer.map_or(Join::Unknown, |_| Join::Empty);
 		}
 		if !self.readable() {
 			return Join::Unknown;
@@ -17920,6 +17924,33 @@ mod test {
 		// A time start at 5000, a second behind the final edge, never the stale edge's 2000: it
 		// reads from there while its lookup asks upstream for the group containing it.
 		assert_eq!(drain_groups(&mut reader), vec![6000]);
+	}
+
+	/// A received lite-07 copy's join answered with a group stays placed there once the end is
+	/// declared: the copy holds only the groups from where its feed started, so the edge it
+	/// measures may fall behind all of them, and it can't prove what its upstream held there.
+	/// Mirrors JS `track: a received copy keeps a join answer past its declared end`.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_received_copy_keeps_a_join_answer_past_its_declared_end() {
+		let min = Duration::from_millis(1000);
+		let mut producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		producer.answers_joins();
+		let join = Subscription::default()
+			.with_delay(Delay::default().with_max(min))
+			.with_ranges([Range::from(Start::Live(min))]);
+		let mut reader = producer.subscribe(join.clone());
+		producer.answer_join(min, None, Some(4000), min);
+		// An end past the groups held, still owed the ones between.
+		producer.finish_at(Position::group(6001)).unwrap();
+		write_group(&producer, 4000);
+		assert_eq!(reader.resolved_range(0).map(|resolved| resolved.start), Some(4000));
+		assert_eq!(drain_groups(&mut reader), [4000]);
+		// One joining after the answer can't take it, and the groups held prove nothing yet.
+		let mut later = producer.subscribe(join);
+		assert_eq!(later.resolved_range(0), None);
 	}
 
 	/// A bounded live join that upstream answers with nothing to deliver, its start past its

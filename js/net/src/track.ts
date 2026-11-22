@@ -1615,9 +1615,8 @@ export class Producer {
 			atKeys: producer.#startsAtKeys,
 			starts: producer.#timeStarts,
 			joins: producer.#joinAnswers,
-			// Once the end is declared, nothing more is answered: a join places as the groups held
-			// measure it, as its upstream's would, holding the same final groups. Mirrors the Rust
-			// `TrackState::joins_answered`.
+			// Once the end is declared, nothing more is answered: a join with no answer naming a group
+			// places as the groups held measure it. Mirrors the Rust `TrackState::joins_answered`.
 			answersJoins:
 				producer.#answersJoins &&
 				producer.#state.end.peek() === undefined &&
@@ -3945,16 +3944,20 @@ export class Subscriber {
 			// A received copy's handler is its session, which fetches by group alone.
 			looksUp: () => !receivedCopy(producer) && fillsOf(producer).serving,
 			join: (min, end, budget, since) => {
-				if (!answers)
-					return this.#join(
-						min,
-						(time) => holdings.containing(time, budget),
-						wire && !anchors.atKeys,
-						anchors.ended,
-					);
-				const answer = anchors.joins.get(joinKey(Math.ceil(min.asMillis()), end));
-				if (answer === undefined || answer.tick <= since || budget > answer.budget) return undefined;
-				return answer.start === undefined ? "empty" : { group: answer.start };
+				const found = anchors.joins.get(joinKey(Math.ceil(min.asMillis()), end));
+				const answer = found && found.tick > since && budget <= found.budget ? found : undefined;
+				// An answer naming a group stands once the end is declared too: the copy holds only the
+				// groups from where its feed started, so they can't measure a join behind them.
+				if (answer?.start !== undefined) return { group: answer.start };
+				// Until the end is declared, only an answer places it. Nothing more is answered after, so
+				// the groups held measure it.
+				if (answers) return answer && "empty";
+				return this.#join(
+					min,
+					(time) => holdings.containing(time, budget),
+					wire && !anchors.atKeys,
+					anchors.ended,
+				);
 			},
 			answersJoins: () => answers,
 			// Skip runs coalesce, so a gap between two held groups is one run unless the cache
@@ -3982,7 +3985,7 @@ export class Subscriber {
 	// ranges start, but not where each join does) places it only where the groups it holds prove, and
 	// waits otherwise. A copy whose wire keys groups otherwise starts at a group held, by when each
 	// one's first frame presented, as its publisher resolved the join already. A lite-07 copy places
-	// none itself (see {@link Holdings.answersJoins}). A `wire` copy whose declared end settled
+	// none itself until its end is declared (see {@link Holdings.answersJoins}). A `wire` copy whose declared end settled
 	// (`ended`) gets no more groups to prove it by, so it leaves an unproven join to a time start,
 	// which asks its upstream.
 	// Mirrors the Rust `TrackState::join`.
