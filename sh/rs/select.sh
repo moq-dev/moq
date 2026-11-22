@@ -26,7 +26,7 @@ select_packages() {
         echo ALL
         return
     fi
-    if [[ "$list" == --all ]] || grep -qE '^(\.cargo/.*|sh/local\.(sh|ts)|Cargo\.(toml|lock)|clippy\.toml|rust-toolchain\.toml|rs/justfile|sh/rs/(select|platform|cross-lint|zig-(cc|c\+\+|ar)|nextest)\.sh|\.config/nextest\.toml)$' "$list"; then
+    if [[ "$list" == --all ]] || grep -qE '^(\.cargo/.*|sh/local\.(sh|ts)|Cargo\.(toml|lock)|clippy\.toml|rust-toolchain\.toml|rs/justfile|sh/rs/(select|platform|cross-lint|zig-(cc|c\+\+|ar)|nextest)\.sh|\.config/(nextest|hakari)\.toml)$' "$list"; then
         echo ALL
         return
     fi
@@ -53,23 +53,31 @@ select_packages() {
         return
     fi
 
-    local seeds benches readers edges selected
-    # A crate's `benches/` builds only its own bench targets, which no other crate can
-    # depend on, so it selects that crate alone (for its lint) rather than every
-    # dependent's tests.
-    benches=$(sed -n 's|^rs/\([^/]*\)/benches/.*|\1|p' "$list")
+    local seeds targets readers edges selected
+    # A crate's `benches/`, `tests/`, and `examples/` build only its own
+    # targets, which no other crate can depend on, so a change there selects
+    # that crate alone rather than every dependent, unless its library reads
+    # the file (sh/rs/reads.sh lists those reads too).
     # A crate that reads a file outside itself, such as a fixture, a script its
     # tests run, or another crate's bench module, is a seed when that file
-    # changes. sh/rs/reads.sh lists the reads as globs, made regexes here.
-    readers=$(bash sh/rs/reads.sh | jq -rR --rawfile list "$list" '
+    # changes, or only a target change when the reading source is one of its
+    # targets. sh/rs/reads.sh lists the reads as globs, made regexes here. A
+    # read is followed through the files it reads: a change to a module that an
+    # included module includes in turn reaches the crate at the top.
+    readers=$(bash sh/rs/reads.sh | jq -nrR --rawfile list "$list" '
         def escape: gsub("(?<c>[.+?^$()\\[\\]{}|\\\\])"; "\\\(.c)");
         def regex: split("**/") | map(split("**") | map(split("*") | map(escape) | join("[^/]*")) | join(".*"))
             | "^\(join("(.*/)?"))(/.*)?$";
-        ($list | split("\n") | map(select(. != ""))) as $paths
-        | capture("^rs/(?<crate>[^/ ]+) (?<glob>[^ ]*) ")
-        | (.glob | regex) as $regex
-        | select(any($paths[]; test($regex)))
-        | .crate')
+        [inputs | capture("^rs/(?<crate>[^/ ]+) (?<glob>[^ ]*) (?<file>.*):[0-9]+$") | .regex = (.glob | regex)] as $reads
+        | def hit($paths): [$reads[] | select(.regex as $regex | any($paths[]; test($regex)))];
+          def changed: (. + [hit(.)[].file] | unique) as $more | if $more == . then . else $more | changed end;
+        ($list | split("\n") | map(select(. != "")) | unique | changed) as $paths
+        | hit($paths)[]
+        | "\(.crate) \(if .file | test("^rs/[^/]+/(benches|tests|examples)/") then "target" else "library" end)"')
+    targets=$({
+        sed -nE 's#^rs/([^/]*)/(benches|tests|examples)/.*#\1#p' "$list"
+        sed -n 's/ target$//p' <<<"$readers"
+    } | sort -u)
     # A target can also sit outside its crate, as moq-interop's clients
     # under test/interop/clients/rust/ do, so a change in the directory of a
     # target's root file, which holds that file's modules, seeds its crate.
@@ -77,8 +85,8 @@ select_packages() {
     # sh/dispatch.sh's `rs` scope must match those directories too; the
     # selector's tests check that.
     seeds=$({
-        sed -n '\|^rs/[^/]*/benches/|d; s|^rs/\([^/]*\)/.*|\1|p' "$list"
-        printf '%s\n' "$readers"
+        sed -nE '\#^rs/[^/]*/(benches|tests|examples)/#d; s#^rs/([^/]*)/.*#\1#p' "$list"
+        sed -n 's/ library$//p' <<<"$readers"
         # The gate's Send-depth proof of moq-net's session driver is this script.
         sed -n 's|^sh/rs/send-depth\.sh$|moq-net|p' "$list"
         # The gate compiles the C fixtures and doc samples against libmoq's header.
@@ -95,27 +103,31 @@ select_packages() {
                     | ltrimstr($root) | sub("[^/]*$"; ""); . as $dir | any($paths[]; startswith($dir))))
             | .name' <<<"$metadata"
     } | sort -u)
-    edges=$(jq -r '.packages[] | .name as $name | .dependencies[] | "\($name) \(.name)"' <<<"$metadata")
+    edges=$(jq -r '.packages[] | .name as $name | .dependencies[] | "\($name) \(.name) \(.kind // "normal")"' <<<"$metadata")
 
-    # A crate is rebuilt when anything it depends on changed, so walk the edges
-    # backwards until the selection stops growing. Test the value, not the key:
-    # awk creates a key on every `want[dep[i]]` read. The id lookup below drops
-    # names that are not workspace crates, such as a seed from `rs/AGENTS.md`.
-    # The seeds go through the environment because BSD awk (macOS) rejects a
-    # newline in a `-v` value.
+    # A library is rebuilt when a normal or build dependency changed, so walk
+    # those edges backwards until the selection stops growing. A dev-dependency
+    # reaches only the tests of the crate that takes it, whose library and
+    # dependents stay as they were, so it selects that crate and stops there.
+    # Test the value, not the key: awk creates a key on every `want[dep[i]]`
+    # read. The id lookup below drops names that are not workspace crates, such
+    # as a seed from `rs/AGENTS.md`. The seeds go through the environment
+    # because BSD awk (macOS) rejects a newline in a `-v` value.
     selected=$(SEEDS="$seeds" awk '
 		BEGIN { split(ENVIRON["SEEDS"], s, "\n"); for (i in s) want[s[i]] = 1 }
-		{ pkg[NR] = $1; dep[NR] = $2 }
+		{ pkg[NR] = $1; dep[NR] = $2; dev[NR] = $3 == "dev" }
 		END {
 			do {
 				grew = 0
 				for (i = 1; i <= NR; i++)
-					if (want[dep[i]] && !want[pkg[i]]) { want[pkg[i]] = 1; grew = 1 }
+					if (!dev[i] && want[dep[i]] && !want[pkg[i]]) { want[pkg[i]] = 1; grew = 1 }
 			} while (grew)
+			for (i = 1; i <= NR; i++) if (dev[i] && want[dep[i]]) tests[pkg[i]] = 1
 			for (name in want) if (want[name]) print name
+			for (name in tests) print name
 		}
 	' <<<"$edges")
-    selected=$(printf '%s\n%s\n' "$selected" "$benches" | sed '/^$/d' | sort -u)
+    selected=$(printf '%s\n%s\n' "$selected" "$targets" | sed '/^$/d' | sort -u)
 
     [[ -n "$selected" ]] || return 0
 
@@ -194,7 +206,10 @@ fi
 
 # The `*-fuzz` crates need a nightly toolchain; only `just rs fuzz` compiles them.
 if [[ "$packages" == ALL ]]; then
-    flags=(--workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz --exclude moq-mux-fuzz --exclude moq-rtmp-fuzz --exclude moq-sock-fuzz --exclude moq-uring-fuzz)
+    # Assigned apart so a failure stops the script.
+    fuzz_crates=$(bash sh/rs/no-fuzz.sh)
+    flags=(--workspace)
+    for fuzz in $fuzz_crates; do flags+=(--exclude "$fuzz"); done
 else
     # Space-separated `--package <id>` pairs; ids contain no spaces.
     # shellcheck disable=SC2206
@@ -296,10 +311,6 @@ case "$action" in
         # a cross build have.
         if [[ "$packages" == ALL ]]; then
             flags+=(--exclude moq-gst)
-            # libFuzzer's C++ includes a Linux header zig's macOS libc lacks,
-            # and fuzzing runs only on Linux. A diff's selection never holds a
-            # `*-fuzz` crate.
-            [[ "$action" != cross ]] || flags+=(--exclude moq-auth-fuzz --exclude qmux-fuzz)
         else
             flags=()
             for id in $packages; do

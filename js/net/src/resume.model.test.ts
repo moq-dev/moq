@@ -25,7 +25,6 @@ import * as Instance from "./instance.ts";
 import { hooks } from "./internal.ts";
 import { type Consumer as OriginConsumer, Producer as OriginProducer, type Requesting } from "./origin.ts";
 import * as Path from "./path.ts";
-import { routeFailed } from "./resume.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import type * as track from "./track.ts";
 import { overrideBroadcastWire, wireOf } from "./wire.ts";
@@ -987,8 +986,6 @@ class Model {
 				// or from the route it would continue from.
 				const gone = reading.end instanceof TooFarBehind || reading.end instanceof NotFound;
 				if (gone && instance.expired !== undefined && key <= instance.expired) continue;
-				// Unlike Rust, an ended JS reader follows no route, so a route failure ends a group still read.
-				if (ended && reading.end instanceof Error && routeFailed(reading.end)) continue;
 				problems += `group ${key} stopped at frame ${reading.frames} (${reading.end}); `;
 			}
 		}
@@ -1618,6 +1615,32 @@ test("regressions", async () => {
 				{ kind: "join", reader: 0, spec: spec(true, "hour", [0, 5], false) },
 				{ kind: "write", instance: 1, slot: 1, group: 4, frames: 1 },
 				{ kind: "close", instance: 1, slot: 1, group: undefined, down: true },
+			],
+			finish: false,
+		},
+		// Once the track ended, a group still read that its route closes short and then fails
+		// continues from the copy the front serves next, as the Rust front's reader does.
+		{
+			ops: [
+				{ kind: "write", instance: 0, slot: 0, group: 11, frames: 1 },
+				{ kind: "end", instance: 0, slot: 0 },
+				{ kind: "join", reader: 0, spec: spec(false, "hour", undefined, false) },
+				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "close", instance: 0, slot: 0, group: undefined, down: true },
+				{ kind: "up", instance: 0, slot: 0 },
+			],
+			finish: false,
+		},
+		// The same once a route that closed the group short ends the track and then fails.
+		{
+			ops: [
+				{ kind: "up", instance: 1, slot: 2 },
+				{ kind: "up", instance: 1, slot: 0 },
+				{ kind: "write", instance: 1, slot: 2, group: 11, frames: 1 },
+				{ kind: "join", reader: 0, spec: spec(true, "hour", [5, 12], false) },
+				{ kind: "close", instance: 1, slot: 2, group: undefined, down: false },
+				{ kind: "end", instance: 1, slot: 2 },
+				{ kind: "down", instance: 1, slot: 2 },
 			],
 			finish: false,
 		},

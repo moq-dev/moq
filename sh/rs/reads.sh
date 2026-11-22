@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Print each path outside its crate that a Rust source under rs/ reads, one
+# Print each path a Rust source under rs/ reads outside its crate, or inside its
+# crate's `tests/`, `benches/`, or `examples/`, one
 # `<crate dir> <glob> <file>:<line>` per line, naming the literal behind it. A glob's `*`, like a format interpolation such
 # as `{name}`, stays within a path segment, `**` crosses them, and a plain path
 # also covers what lies beneath it.
@@ -68,6 +69,9 @@ awk '
     | gsub("\\{[^}]*\\}"; "*")
     | resolve
     | if ($from.string // "") | startswith("#") then sub("/mod\\.rs$"; "") else . end
-    | select(startswith($crate + "/") | not)
+    # A read inside the crate matters only into its target directories, whose
+    # changes otherwise reach no dependent: from its library, or from a target
+    # that a target of another crate includes in turn.
+    | select((startswith($crate + "/") | not) or (ltrimstr($crate + "/") | test("^(tests|benches|examples)/")))
     | "\($crate) \(.) \($source)"
 ' | LC_ALL=C sort -u

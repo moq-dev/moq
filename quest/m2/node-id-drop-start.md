@@ -50,7 +50,3 @@ Notes for the implementer:
 Public API: `origin::Config::node` and the pinning it allows go; `NodeId`
 loses `start`. Wire: NodeId loses Start (lite-07-wip). Migration note: a
 Relay ID can no longer be pinned.
-
-## Required
-
-- [Route floors](/quest/m1/lite07-routing/route-floors.md) - rewrites the same floors first; this then rekeys them by relay alone

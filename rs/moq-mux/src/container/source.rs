@@ -22,7 +22,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use hang::catalog::{AudioConfig, Container, Reference, VideoCodec, VideoConfig};
 
-use super::consumer::{Event, Item};
+use super::consumer::{Event, Item, Reached};
 use crate::catalog::hang::Container as HangContainer;
 use crate::codec::annexb::{InBand, InBandCodec};
 use crate::codec::h264::Avc1;
@@ -68,7 +68,7 @@ enum SourceState {
 		/// Hand out only groups starting after this one.
 		after: Option<u64>,
 		/// Where the groups read before ended.
-		reached: Option<Duration>,
+		reached: Reached,
 		instance: Option<moq_net::broadcast::Consumer>,
 	},
 	/// The resolved consumer, reading frames. Boxed because it's much larger than
@@ -90,7 +90,7 @@ struct Start {
 	/// Read only groups starting after this one, so a resubscription skips groups already read.
 	after: Option<u64>,
 	/// Where the groups read before ended, so the first group after them reads as continuing.
-	reached: Option<Duration>,
+	reached: Reached,
 }
 
 /// A resolved subscription.
@@ -128,7 +128,7 @@ impl Target {
 				media,
 				live: false,
 				after: None,
-				reached: None,
+				reached: Reached::default(),
 			},
 		}
 	}
@@ -142,7 +142,7 @@ pub(crate) struct Resume {
 	/// The latest presentation time delivered.
 	latest: Option<Duration>,
 	/// Where the groups read through ended.
-	reached: Option<Duration>,
+	reached: Reached,
 }
 
 /// What a source continuing another rendition's track skips: media up to what that track delivered.
@@ -194,7 +194,7 @@ pub(crate) struct ExportSource {
 	/// The group of the last frame delivered.
 	delivered: Option<u64>,
 	/// Where the groups read through ended, here or by the source this one resumes.
-	reached: Option<Duration>,
+	reached: Reached,
 	/// Set while continuing another source, until the first sync frame past what it delivered.
 	splice: Option<Splice>,
 	/// Counts the payload of its frames the export emits, once subscribed under a
@@ -347,7 +347,7 @@ impl ExportSource {
 			received: source.received(name),
 			latest: None,
 			delivered: None,
-			reached: None,
+			reached: Reached::default(),
 			splice: None,
 			bill: Default::default(),
 		}
