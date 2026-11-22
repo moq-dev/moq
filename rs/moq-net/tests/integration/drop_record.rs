@@ -352,12 +352,15 @@ async fn reported_drop_through(versions: [&str; 2]) {
 			true => (0..GROUPS).filter(|key| *key != 7).collect(),
 			false => (0..GROUPS).collect(),
 		};
+		// Widening a lite-07 viewer's live join keeps where it started, past the groups B1
+		// expired, so it takes back only the stale group above its start. Over a lite-06
+		// viewer hop the join reaches back to the oldest group, so the re-offer serves those.
+		let widened = match versions[1] == LITE06 {
+			true => &want - &[5, 6, 8, 9].into(),
+			false => [7].into(),
+		};
 		first.update(reading(B2, [Range::ALL])).unwrap();
-		assert_eq!(
-			received(&mut first).await,
-			&want - &[5, 6, 8, 9].into(),
-			"{name}: the widened reader"
-		);
+		assert_eq!(received(&mut first).await, widened, "{name}: the widened reader");
 		let mut second = chain.subscribe(reading(B2, [Range::ALL])).await;
 		assert_eq!(received(&mut second).await, want, "{name}: the later reader");
 

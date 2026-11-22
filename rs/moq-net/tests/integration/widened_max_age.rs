@@ -223,11 +223,14 @@ async fn a_widened_reader_gets_what_was_skipped() {
 			let wide = Subscription::default().with_ranges([Range::ALL]).with_max(WIDE);
 			reader.update(wide).unwrap();
 			let widened = kio::clock::timeout(TIMEOUT, received(&mut reader)).await.unwrap();
-			assert_eq!(
-				widened,
-				(2..6).collect(),
-				"{version} relay={relay}: only what was skipped"
-			);
+			// Lite-07 carries the live join, and widening only its max keeps where it started,
+			// past the groups the narrow max expired. A lite-06 hop carries only the max, so the
+			// join reaches back to the oldest group and takes the publisher's re-offer.
+			let skipped = match version {
+				VERSION => BTreeSet::new(),
+				_ => (2..6).collect(),
+			};
+			assert_eq!(widened, skipped, "{version} relay={relay}: only what was skipped");
 		}
 	}
 }
