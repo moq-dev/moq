@@ -1,7 +1,8 @@
-import { beforeEach, expect, test } from "bun:test";
+import { beforeEach, expect, spyOn, test } from "bun:test";
 import { Duration } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { Error as NetError, StreamCode, Time, Track } from "@moq/net";
+import * as z from "zod/mini";
 import { hooks } from "../../../net/src/internal.ts";
 import { key, resetKeys } from "../key.test-util.ts";
 import { Consumer } from "./consumer.ts";
@@ -789,6 +790,48 @@ test("snapshot consumer propagates a non-gap frame failure", async () => {
 	expect((await consumer.next())?.value).toEqual({ ok: true });
 	group.abort(new NetError.Stream(StreamCode.Internal));
 	await expect(consumer.next()).rejects.toMatchObject({ code: StreamCode.Internal });
+});
+
+// A value that fails the schema is the publisher's mistake, not a failed read: skip it and keep the consumer.
+test("a schema refusal is skipped with a warning and the next value is read", async () => {
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI });
+	const schema = z.object({ n: z.number() });
+	const warn = spyOn(console, "warn").mockImplementation(() => {});
+	try {
+		for (const read of ["next", "latest"] as const) {
+			const consumer = new Consumer({ track, schema });
+			const at = (ms: number, json: string) => {
+				track
+					.appendGroup(Time.Timestamp.fromMillis(ms))
+					.writeFrame({ payload: new TextEncoder().encode(json), timestamp: Time.Timestamp.fromMillis(ms) });
+			};
+			const base = read === "next" ? 10 : 20;
+			at(base, '{"n":"x"}');
+			const pending = consumer[read]();
+			at(base + 1, `{"n":${base}}`);
+			expect((await pending)?.value).toEqual({ n: base });
+			expect(warn).toHaveBeenCalledTimes(read === "next" ? 1 : 2);
+			consumer.close();
+		}
+	} finally {
+		warn.mockRestore();
+	}
+});
+
+// Only a value that fails validation is refused; whatever the schema itself throws is a real failure.
+test("an error a schema throws rejects the read", async () => {
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI });
+	const schema = z.pipe(
+		z.unknown(),
+		z.transform(() => {
+			throw new Error("schema failure");
+		}),
+	) as unknown as z.ZodMiniType<unknown>;
+	const consumer = new Consumer({ track, schema });
+	track
+		.appendGroup(Time.Timestamp.fromMillis(1))
+		.writeFrame({ payload: new TextEncoder().encode("{}"), timestamp: Time.Timestamp.fromMillis(1) });
+	await expect(consumer.next()).rejects.toThrow("schema failure");
 });
 
 test("a scale-less snapshot opens its group at its key, and a delta carries that key", async () => {
