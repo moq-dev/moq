@@ -1079,6 +1079,15 @@ impl Copy {
 				}) {
 				return Retains::Wait;
 			}
+			// A time start no copy placed at a group yet waits on the group holding its time,
+			// which starts at or before it: from the time, since the copy was asked from there,
+			// below its first arrival too.
+			if reader.unplaced.iter().any(|time| {
+				let groups = (*time).max(from)..end;
+				!groups.is_empty() && self.may_land(groups, true, grace, Some(reader.delivered), reader.waiter)
+			}) {
+				return Retains::Wait;
+			}
 			// Inspect without moving either cursor: a later group poll still chooses its
 			// order and applies the current bounds and drift budget. Ignore the local cap
 			// here, since unread groups become eligible again when it rises.
@@ -1113,6 +1122,8 @@ struct Retain<'a> {
 	groups: (u64, Option<u64>),
 	window: &'a Window,
 	groups_read: bool,
+	/// The time starts of the reader's ranges no copy placed at a group yet.
+	unplaced: &'a [u64],
 	/// The newest group the serving copy has.
 	edge: Option<u64>,
 	mirrored: &'a Mirrored,
@@ -2398,14 +2409,25 @@ impl Reader {
 		self.out.retain(|(_, out)| out.strong_count() > 0);
 		// Only a replaced copy is judged against the edge, which costs the serving track's
 		// lock: a reader following one route never pays it.
-		let edge = match self.copies.iter().any(|copy| copy.replaced) {
+		let replaced = self.copies.iter().any(|copy| copy.replaced);
+		let edge = match replaced {
 			true => self.copies.last().and_then(|copy| copy.track.latest_key()),
 			false => None,
+		};
+		// Only a time start a copy placed at a group names it: one that reached back past every
+		// group a copy held, or waits, still looks for the group holding its time.
+		let unplaced: Vec<u64> = match replaced {
+			true => (self.mirrored.ranges.iter())
+				.filter(|(key, _)| !self.window.resolved_key(**key).is_some_and(|resolved| resolved.floored))
+				.filter_map(|(_, range)| range.time())
+				.collect(),
+			false => Vec::new(),
 		};
 		let reader = Retain {
 			groups: self.groups,
 			window: &self.window,
 			groups_read: self.groups_read,
+			unplaced: &unplaced,
 			edge,
 			mirrored: &self.mirrored,
 			delivered,
@@ -10781,6 +10803,122 @@ mod test {
 		assert_eq!(drain(&mut sub, false), [7]);
 	}
 
+	/// A reader whose time start no copy placed at a group yet keeps a replaced copy that may
+	/// still land the group holding that time, as a plain cursor on the logical track reads
+	/// it. The copy replacing it starts past the time: an anchored one leaves the start
+	/// waiting, and another reaches back past every group it holds.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_unplaced_time_start_waits_on_a_replaced_copy() {
+		for anchored in [true, false] {
+			let routes = Producer::new();
+			let front = logical(&routes);
+			let b = received_copy();
+			b.anchored();
+			routes.serve(b.consume());
+			let mut sub = front
+				.consume()
+				.subscribe(
+					Subscription::default()
+						.with_delay(Delay::default().with_max(HOUR))
+						.with_ranges([track::Range {
+							start: crate::track::Start::Time(7),
+							end: Some(7),
+						}]),
+				)
+				.now_or_never()
+				.unwrap()
+				.unwrap();
+			write(&b, 8);
+			assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+
+			let mut c = received_copy();
+			if anchored {
+				c.anchored();
+			}
+			c.start_at(9).unwrap();
+			write(&c, 9);
+			routes.serve(c.consume());
+			assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+
+			let mut read = Vec::new();
+			for key in [6, 7] {
+				write(&b, key);
+				read.extend(drain(&mut sub, false));
+			}
+			assert_eq!(read, [7], "anchored={anchored}");
+			if anchored {
+				let resolved = sub.resolved_range(0).expect("placed");
+				assert_eq!((resolved.start, resolved.end), (7, Some(8)));
+			}
+			assert!(
+				matches!(sub.poll_recv_group(&kio::Waiter::noop()), Poll::Ready(Ok(None))),
+				"anchored={anchored}"
+			);
+		}
+	}
+
+	/// As [`an_unplaced_time_start_waits_on_a_replaced_copy`], for an outer front's backfill
+	/// through an inner front: the inner front's reader is the one whose time start is
+	/// unplaced when it replaces its copy.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_backfill_through_an_inner_front_waits_on_a_copy_replaced_before_placing() {
+		let routes = Producer::new();
+		let front = logical(&routes);
+		let a = received_copy();
+		write(&a, 6);
+		write(&a, 8);
+		routes.serve(a.consume());
+		let from = |time, end| {
+			Subscription::default()
+				.with_delay(Delay::default().with_max(HOUR))
+				.with_ranges([track::Range {
+					start: crate::track::Start::Time(time),
+					end,
+				}])
+		};
+		let mut sub = front
+			.consume()
+			.subscribe(from(8, None))
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		assert_eq!(drain(&mut sub, false), [8]);
+		let inner_routes = Producer::new();
+		let inner = logical(&inner_routes);
+		let b = received_copy();
+		b.anchored();
+		inner_routes.serve(b.consume());
+		routes.serve(inner.consume());
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		a.abort(Error::Cancel).unwrap();
+		sub.update(from(7, Some(7))).unwrap();
+		write(&b, 8);
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+
+		// The inner front moves on to a copy whose feed starts past the time.
+		let mut c = received_copy();
+		c.anchored();
+		c.start_at(9).unwrap();
+		write(&c, 9);
+		inner_routes.serve(c.consume());
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+
+		let mut read = Vec::new();
+		for key in [6, 7] {
+			write(&b, key);
+			read.extend(drain(&mut sub, false));
+		}
+		assert_eq!(read, [7]);
+		let resolved = sub.resolved_range(0).expect("placed");
+		assert_eq!((resolved.start, resolved.end), (7, Some(8)));
+		assert!(matches!(
+			sub.poll_recv_group(&kio::Waiter::noop()),
+			Poll::Ready(Ok(None))
+		));
+	}
+
 	/// A backfill's group that a range already placed holds goes out though another range
 	/// still waits on its anchors.
 	#[test]
@@ -10826,7 +10964,6 @@ mod test {
 		sub.update(subscription(&[from(7), waiting])).unwrap();
 		assert_eq!(drain(&mut sub, false), [7]);
 	}
-
 	/// A copy updated while pending, then answering, hands its own resolution of the
 	/// updated ranges to the copy replacing it, rather than leaving the replacement to
 	/// resolve them from whatever it caches.
