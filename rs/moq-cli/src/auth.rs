@@ -614,13 +614,10 @@ impl Serve {
 		Ok(merged)
 	}
 
-	/// The policy these settings describe, refusing a cadence under a second.
+	/// The policy these settings describe.
 	fn policy(&self) -> anyhow::Result<Policy> {
 		let revalidate = self.revalidate.map(std::time::Duration::from);
 		let expires = self.expires.map(Into::into);
-		if revalidate.is_some_and(|cadence| cadence < std::time::Duration::from_secs(1)) {
-			anyhow::bail!("--revalidate must be at least 1s, the finest cadence the grant writes");
-		}
 		if revalidate.is_some() && expires.is_none() {
 			anyhow::bail!("--revalidate needs --expires, so a grant re-checked through an outage still has a bound");
 		}
@@ -1085,11 +1082,8 @@ mod tests {
 		assert_eq!(bare.expires, None);
 
 		for (args, needs) in [
-			// A cadence the grant can't write would round to zero and have every client re-check in a tight loop.
-			(&["--revalidate", "0s", "--expires", "1h"][..], "at least 1s"),
-			(&["--revalidate", "999ms", "--expires", "1h"][..], "at least 1s"),
 			// The contract refuses a cadence without a bound.
-			(&["--revalidate", "1m"], "--revalidate needs --expires"),
+			(&["--revalidate", "1m"][..], "--revalidate needs --expires"),
 			// Only a re-check keeps a slot alive.
 			(&["--limit-token", "3"], "need --revalidate"),
 			(&["--limit-remote", "3", "--expires", "1h"], "need --revalidate"),
@@ -1102,6 +1096,14 @@ mod tests {
 		}
 		let expiring = serve(&["moq", "auth", "serve", "--expires", "1h"]).policy().unwrap();
 		assert_eq!(expiring.revalidate, None);
+
+		// The server refuses a cadence the grant can't write, so the flag needs no check of its own.
+		let args = ["moq", "auth", "serve", "--revalidate", "999ms", "--expires", "1h"];
+		let short = serve(&args).policy().unwrap();
+		assert!(matches!(
+			moq_auth::serve::Server::new(short),
+			Err(moq_auth::Error::ShortRevalidate)
+		));
 	}
 
 	#[test]
