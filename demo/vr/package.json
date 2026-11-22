@@ -7,7 +7,7 @@
 	"scripts": {
 		"dev": "vite",
 		"build": "vite build",
-		"check": "tsc --noEmit"
+		"check": "bun check --no-script"
 	},
 	"dependencies": {
 		"@moq/watch": "workspace:^",

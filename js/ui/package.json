@@ -11,7 +11,7 @@
 	},
 	"sideEffects": false,
 	"scripts": {
-		"check": "tsc --noEmit",
+		"check": "bun check --no-script",
 		"test": "bun test --pass-with-no-tests"
 	},
 	"dependencies": {

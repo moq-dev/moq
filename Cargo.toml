@@ -298,6 +298,11 @@ opt-level = 3
 [profile.dev.package.rubato]
 opt-level = 3
 
+# Same for zlib-rs, whose deflate/inflate hot loops use SIMD intrinsics: unoptimized,
+# the 32 MiB compressed-group shedding tests spend 15+ s inside deflate/inflate.
+[profile.dev.package.zlib-rs]
+opt-level = 3
+
 # The Go mirror stores native staticlibs in Git, whose per-file limit is 100 MB.
 # Keep all release entry points on the same compact native profile.
 # nix/crates.nix restates this profile for the Nix packages; change both.
