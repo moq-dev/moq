@@ -184,6 +184,9 @@ export function checkRenditions(root: Root): Root {
  * empty `sync` left off the wire. No moq-hang-04 field reshapes the root, so the root `version` is
  * never written.
  *
+ * Takes the parsed catalog, never this function's own output: an unknown container or projection
+ * is written as its original object, which no longer reads as the parsed wrapper.
+ *
  * Throws {@link DuplicateRendition}. Mirrors Rust's catalog serializer.
  */
 export function encode(root: Root): Root {
