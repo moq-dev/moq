@@ -13,10 +13,12 @@ const condition = (run: { name: string; event: string; conclusion: string }) =>
 for (const event of ["pull_request", "pull_request_target", "push", "schedule", "workflow_dispatch", "workflow_run"]) {
 	test(`Discord alert policy for ${event}`, () => {
 		for (const conclusion of ["failure", "timed_out", "success", "cancelled", "skipped"]) {
-			const expected =
-				!["pull_request", "pull_request_target"].includes(event) &&
-				["failure", "timed_out"].includes(conclusion);
-			for (const name of ["Release JS", "moq.sh", "release-brew", "apt-repo"]) {
+			for (const name of ["Release JS", "moq.sh", "release-brew", "apt-repo", "rpm-repo"]) {
+				// `queue: max` never cancels a package-repo publish, so a cancelled one is a dropped release.
+				const queued = ["release-brew", "apt-repo", "rpm-repo"].includes(name);
+				const expected =
+					!["pull_request", "pull_request_target"].includes(event) &&
+					(["failure", "timed_out"].includes(conclusion) || (queued && conclusion === "cancelled"));
 				expect(condition({ name, event, conclusion })).toBe(expected);
 			}
 		}

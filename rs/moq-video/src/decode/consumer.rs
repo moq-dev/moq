@@ -1282,9 +1282,8 @@ mod tests {
 		let _finished = producer.finish().unwrap();
 		read(&mut consumer).await;
 		read(&mut consumer).await;
-		// The discontinuity marker starts a microsecond before the content's end, so content
-		// resuming there still starts a later group.
-		assert_eq!(reads, ["frame 100000", "end 133332", "frame 200000", "none"]);
+		// The cut ended the group whole at the content's end, where the discontinuity marker starts.
+		assert_eq!(reads, ["frame 100000", "end 133333", "frame 200000", "none"]);
 	}
 
 	/// Every read until the track is done, as text: a codec error is one read too.
@@ -1353,7 +1352,7 @@ mod tests {
 
 		assert_eq!(
 			read_all(&mut consumer).await,
-			["error", "frame 100000", "end 133332", "error", "frame 200000"]
+			["error", "frame 100000", "end 133333", "error", "frame 200000"]
 		);
 	}
 

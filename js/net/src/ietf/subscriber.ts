@@ -10,6 +10,7 @@ import type * as datagram from "../datagram.ts";
 import * as DatagramStream from "../datagram_stream.ts";
 import {
 	closeError,
+	closeReason,
 	error,
 	NotFound,
 	ProtocolViolation,
@@ -498,7 +499,7 @@ export class Subscriber {
 	// the connection does for its own violations.
 	#fail(code: SessionCode, reason: string) {
 		try {
-			this.#quic?.close({ closeCode: code, reason });
+			this.#quic?.close({ closeCode: code, reason: closeReason(reason) });
 		} catch {
 			// Already closed.
 		}

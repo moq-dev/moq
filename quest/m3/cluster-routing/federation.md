@@ -79,6 +79,24 @@ relay-to-relay: its consumer, Kixel's mesh relay node (downstream, in
 kixel-ai/kixel.ai), is a Rust relay too. Rejected: session integration
 alone, which drops the proven contract the wire rule below relies on.
 
+Found 2026-11-21 by the main → release routing audit (maintainer: add to
+this Plan rather than new quests):
+
+- moq-relay cannot set `priority` at all: `origin::Producer::with_priority`
+  (`rs/moq-net/src/model/origin.rs`, about line 2449) has no knob on
+  `cluster::Peer`, `cluster.lan`, or the grant, so the one-copy-per-broadcast
+  recipe above is not expressible yet. Map a per-peer and per-LAN priority
+  to it.
+- An outbound dial (`run_remote_session`, `rs/moq-relay/src/cluster.rs`,
+  about line 2302) wires the whole local origin with `with_hidden(true)`, and
+  nothing scopes or mounts it. The CDN's grant bounds what crosses into the
+  CDN, but the local relay has no export policy of its own, and with a CDN
+  token rooted at `tenant-a`, CDN paths land at the local root. Add an
+  optional root, mounts, and export and import prefixes per outbound peer.
+- A scoped peer at the root was closed Unauthorized on lite-07; that bug is
+  [its own quest](/quest/m1/lite07-routing/scoped-peer-node-id.md), which
+  lands first.
+
 Public API: report any peer configuration or admission change. Wire: the
 lite-07 draft's Claims and Routing as they ship; any change requires draft
 and Rust/JS parity. Run `just check`, `just test interop --all`, and `just drafts check`.

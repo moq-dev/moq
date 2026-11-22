@@ -250,6 +250,8 @@ async fn window_opens_once_admitted(dial: &Dial, admissions: &mut Admissions, ho
 		"sent {} bytes before admission",
 		stats.udp_tx.bytes
 	);
+	// Reading SETUP returns a little credit, so the window may hold the writer more than once.
+	assert!(stats.send_credit.stalls > 0, "the SETUP window held the writer");
 
 	// Nothing reads the blocked stream before admission, so only opening the window
 	// credits more. The session then stops that stream, so watch the credit, not the data.
@@ -267,6 +269,8 @@ async fn window_opens_once_admitted(dial: &Dial, admissions: &mut Admissions, ho
 			opened.expect("the window never opened once admitted");
 		}
 	}
+	let waited = conn.stats().send_credit.stalled;
+	assert!(waited > Duration::ZERO, "the wait for admission counts, not {waited:?}");
 
 	conn.close(driver::VarInt::from_u32(0), "done");
 	endpoint.close(driver::VarInt::from_u32(0), "done").await;

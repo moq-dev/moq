@@ -1353,11 +1353,10 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			Msg::Ask(edit) => return self.edit(from, edit),
 			Msg::Edited => {
 				// It answers this node's oldest edit, which takes effect here for both.
+				// Removed first, as the peer applies it: a prefix removed and added again
+				// is asked for afresh.
 				let edit = peer.asking.pop_front().ok_or(Error::Unasked)?;
 				peer.answering = true;
-				for prefix in &edit.add {
-					peer.asked.insert(prefix.clone(), false);
-				}
 				let mut lost = Vec::new();
 				for prefix in &edit.remove {
 					peer.asked.remove(prefix);
@@ -1367,6 +1366,9 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 							.filter(|(path, _)| super::prefix::within(path, prefix))
 							.cloned(),
 					);
+				}
+				for prefix in &edit.add {
+					peer.asked.insert(prefix.clone(), false);
 				}
 				for broadcast in lost {
 					self.peers.get_mut(&from).expect("a neighbour").given.remove(&broadcast);
@@ -4855,6 +4857,49 @@ mod tests {
 		assert_eq!(router.ask(2, add("x")), Err(Error::Nested), "above");
 		assert_eq!(router.ask(2, add("x/y/z")), Err(Error::Nested), "below");
 		router.ask(2, add("x/z")).unwrap();
+	}
+
+	/// A prefix this node removes and adds again in one edit is asked for afresh once
+	/// answered: what it covered goes, and the peer's SYNCED for it is expected again.
+	#[test]
+	fn a_prefix_asked_again_in_one_edit_is_asked_afresh() {
+		let mut router = relay(1);
+		router.connect(2, port(Role::Scoped(Vec::new()))).unwrap();
+		let room = (p("live/room"), 7);
+		router
+			.ask(
+				2,
+				Edit {
+					remove: Vec::new(),
+					add: vec![p("live")],
+				},
+			)
+			.unwrap();
+		router.recv(2, Msg::Edited).unwrap();
+		let announce = Msg::Announce {
+			changes: vec![(room.clone(), live(0))],
+		};
+		router.recv(2, announce.clone()).unwrap();
+		router.recv(2, Msg::Synced(p("live"))).unwrap();
+		assert_eq!(router.is_synced(2, &p("live")), Some(true));
+		assert!(router.peers[&2].given.contains_key(&room));
+
+		router
+			.ask(
+				2,
+				Edit {
+					remove: vec![p("live")],
+					add: vec![p("live")],
+				},
+			)
+			.unwrap();
+		router.recv(2, Msg::Edited).unwrap();
+		assert_eq!(router.is_synced(2, &p("live")), Some(false));
+		assert!(!router.peers[&2].given.contains_key(&room), "the peer dropped it too");
+		router.recv(2, announce).unwrap();
+		router.recv(2, Msg::Synced(p("live"))).unwrap();
+		assert_eq!(router.is_synced(2, &p("live")), Some(true));
+		assert!(router.peers[&2].given.contains_key(&room));
 	}
 
 	/// A request from a marked neighbour never follows a claim that reached this node

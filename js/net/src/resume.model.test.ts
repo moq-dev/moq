@@ -1504,6 +1504,19 @@ test("regressions", async () => {
 			],
 			finish: false,
 		},
+		// A group the local floor keeps out of where an earlier copy placed a range, below where the
+		// serving copy places it: the read runs without a stall. The oracle owes nothing below the
+		// serving copy's placement, so it does not check that group yet; see
+		// quest/m0/nightly/resume-model-placement.md. Mirrors the Rust case.
+		{
+			ops: [
+				{ kind: "join", reader: 2, spec: spec(false, "hour", [8, 9], false) },
+				{ kind: "bounds", reader: 2, range: [1, 9] },
+				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "up", instance: 0, slot: 1 },
+			],
+			finish: false,
+		},
 		// An ordered read of a local route that ran out of its range when a group past it was created
 		// passed the key below for good, so the range set again reads on only past it. The Rust model
 		// runs the same ops on a received route, which waits for that key instead.

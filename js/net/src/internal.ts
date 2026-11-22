@@ -556,12 +556,18 @@ export interface ResumeSource {
 	 */
 	tryDrop(delivered: Delivered, passing?: bigint): (Recv & { kind: "drop" }) | undefined;
 	/**
-	 * Whether the reader's bounded window has nothing left to deliver, judged by the serving copy
-	 * against what it and the logical reader (`delivered`) handed out. A copy that may still
-	 * deliver keeps it open, and an `ordered` reader passes what the copy's own publisher
-	 * created past. Mirrors the Rust `Reader::exhausted`.
+	 * Whether the reader's bounded window has nothing left to deliver: every key of the whole window
+	 * the logical reader (`delivered`) lacks is accounted for, as {@link accounts} judges. A copy
+	 * that may still deliver keeps it open. Mirrors the Rust `Reader::exhausted`.
 	 */
 	exhausted(delivered: Delivered, ordered: boolean): boolean;
+	/**
+	 * Whether every key of `gaps`, which the logical reader (`delivered`) lacks, is accounted for:
+	 * under the serving copy's resume point by the copies it replaced, and above it by the serving
+	 * copy, where an `ordered` reader passes what the copy's own publisher created past. Mirrors the
+	 * Rust `Reader::accounts`.
+	 */
+	accounts(delivered: Delivered, gaps: readonly Run[], ordered: boolean): boolean;
 	/** Wake once a read may go differently; fires at most once. */
 	changed(fn: () => void): Dispose;
 	/** Forget the gaps in `delivered` below each group past the budget, judged on the newest copy. */
@@ -586,6 +592,8 @@ export interface ResumeSource {
 	gapHeld(at: bigint, end: bigint): boolean;
 	/** Whether a route's copy serves the reader now. */
 	serving(): boolean;
+	/** The parts of `[start, end)` any copy held or let go says its publisher skipped; see `hooks.skippedIn`. */
+	skippedIn(start: bigint, end: bigint): Run[];
 	/** Where the run of keys from `key` the serving copy says no group arrives at ends; see `hooks.holeEnd`. */
 	holeEnd(key: bigint, dropped: boolean): bigint | undefined;
 	/** Where the group the serving copy holds whole at `key` ends; see `hooks.wholeEnd`. */
@@ -988,11 +996,17 @@ export const hooks: {
 	 */
 	wholeGroups: (subscriber: Subscriber, frameOf: (key: bigint) => number | undefined) => Subscriber;
 	/**
-	 * Whether a route copy's bounded window has nothing left for the logical reader that handed
-	 * out `delivered`, counting what the copy handed out itself, read in key order when
-	 * `ordered`. Mirrors the Rust `exhausted_for`.
+	 * Whether a route copy accounts for every key of `gaps`, which the logical reader that handed
+	 * out `delivered` lacks: what the copy handed out itself counts too, read in key order when
+	 * `ordered`. Mirrors the Rust `accounts_for`.
 	 */
-	exhaustedFor: (subscriber: Subscriber, delivered: Delivered, ordered: boolean) => boolean;
+	accountsFor: (subscriber: Subscriber, delivered: Delivered, gaps: readonly Run[], ordered: boolean) => boolean;
+	/**
+	 * The parts of `[start, end)` the publisher declared skipped on the subscriber's track, never to
+	 * be produced: a front's reader asks its serving copy. Mirrors the Rust crate-private
+	 * `track::Consumer::skipped_in`.
+	 */
+	skippedIn: (subscriber: Subscriber, start: bigint, end: bigint) => Run[];
 	/** How many runs of handed-out groups a subscriber remembers: one per gap, plus the floor. Tests only. */
 	deliveredRuns: (subscriber: Subscriber) => number;
 	/** How many runs a subscriber's record of what it reported holds. Tests only. */
@@ -1433,7 +1447,10 @@ export const hooks: {
 	wholeGroups: () => {
 		throw new Error("track.ts not loaded");
 	},
-	exhaustedFor: () => {
+	accountsFor: () => {
+		throw new Error("track.ts not loaded");
+	},
+	skippedIn: () => {
 		throw new Error("track.ts not loaded");
 	},
 	staleAt: () => {

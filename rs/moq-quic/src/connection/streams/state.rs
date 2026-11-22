@@ -16,11 +16,11 @@ use super::{
 	send::{End, Error},
 };
 use crate::{
-	Dir, Instant, MAX_STREAM_COUNT, Rate, Side, StreamId, TransportError, VarInt,
+	Dir, Duration, Instant, MAX_STREAM_COUNT, Rate, Side, StreamId, TransportError, VarInt,
 	coding::{BufMutExt, FrameBuf},
 	connection::ConnectionTag,
 	connection::rate::Bucket,
-	connection::stats::{CreditStats, FrameStats},
+	connection::stats::{CreditStats, FrameStats, SendCreditStats},
 	connection::waits::{Wait, Waits},
 	frame::{self, FrameStruct, StreamMetaVec},
 	transport_parameters::TransportParameters,
@@ -151,6 +151,34 @@ pub(crate) struct StreamsState {
 	///
 	/// A new frame is only queued once the peer has raised the limit.
 	pub(super) data_blocked_limit: Option<u64>,
+	/// Episodes and time a writer spent blocked on the peer's connection credit
+	pub(super) send_stalls: SendStalls,
+}
+
+/// The sender's waits on the peer's connection-level credit (`MAX_DATA`)
+///
+/// An episode starts when a write blocks with every credited byte sent, and ends once the peer
+/// raises the limit, no writer waits any more, or the connection closes. Time accrues whenever
+/// the connection is driven with a `now`, so it trails a wait in progress by at most one call.
+#[derive(Debug, Default)]
+pub(super) struct SendStalls {
+	/// Episodes started, the one in progress included
+	count: u64,
+	/// Time blocked, up to the episode's last observation
+	total: Duration,
+	episode: Episode,
+}
+
+/// Where the current wait on the peer's credit stands
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum Episode {
+	/// No writer waits on the peer's credit
+	#[default]
+	Clear,
+	/// A write blocked, and no `now` has seen it yet
+	Blocked,
+	/// A writer still waited at this `now`, up to which `total` counts
+	Since(Instant),
 }
 
 impl StreamsState {
@@ -210,6 +238,7 @@ impl StreamsState {
 			streams_blocked: [false, false],
 			open_refused: [false, false],
 			data_blocked_limit: None,
+			send_stalls: SendStalls::default(),
 		}
 	}
 
@@ -239,8 +268,10 @@ impl StreamsState {
 	/// Ensure we have space for at least a full flow control window of remotely-initiated streams
 	/// to be open, and notify the peer if the window has moved
 	fn ensure_remote_streams(&mut self, dir: Dir) {
-		let new_count =
-			self.max_concurrent_remote_count[dir as usize].saturating_sub(self.allocated_remote_count[dir as usize]);
+		// RFC 9000 caps a stream count at 2^60: a peer refuses a larger MAX_STREAMS.
+		let new_count = self.max_concurrent_remote_count[dir as usize]
+			.saturating_sub(self.allocated_remote_count[dir as usize])
+			.min(MAX_STREAM_COUNT.saturating_sub(self.max_remote[dir as usize]));
 		self.allocated_remote_count[dir as usize] += new_count;
 		self.max_remote[dir as usize] += new_count;
 	}
@@ -490,6 +521,41 @@ impl StreamsState {
 			.get(&id)
 			.and_then(|s| s.as_deref())
 			.is_some_and(|s| s.can_send_flow_control())
+	}
+
+	/// Count a write that just blocked with all the peer's connection credit spent, returning
+	/// whether it starts an episode
+	pub(super) fn send_stalled(&mut self) -> bool {
+		let stalls = &mut self.send_stalls;
+		if stalls.episode != Episode::Clear {
+			return false;
+		}
+		stalls.count += 1;
+		stalls.episode = Episode::Blocked;
+		true
+	}
+
+	/// Accrue the time a writer has waited on the peer's connection credit, up to `now`
+	///
+	/// Called wherever the connection is driven with a `now`: after it handles what it received
+	/// or a timeout, before it transmits, and once it closes, which ends a wait.
+	pub(crate) fn observe_send_credit(&mut self, now: Instant, closed: bool) {
+		let waiting = !closed && self.data_sent == self.max_data && !self.connection_blocked.is_empty();
+		let stalls = &mut self.send_stalls;
+		if let Episode::Since(since) = stalls.episode {
+			stalls.total += now.saturating_duration_since(since);
+		}
+		stalls.episode = match stalls.episode {
+			Episode::Blocked | Episode::Since(_) if waiting => Episode::Since(now),
+			_ => Episode::Clear,
+		};
+	}
+
+	pub(crate) fn send_credit_stats(&self) -> SendCreditStats {
+		SendCreditStats {
+			stalls: self.send_stalls.count,
+			stalled: self.send_stalls.total,
+		}
 	}
 
 	/// Whether a `DATA_BLOCKED` frame could be sent
@@ -1778,6 +1844,164 @@ mod tests {
 		expected[3] = 1;
 		assert_eq!(wakes(&writers), expected, "only the live writer wakes");
 		assert!(server.connection_blocked.is_empty());
+	}
+
+	/// A write blocked on the peer's credit starts one episode per limit, timed from the first
+	/// `now` that sees it until the credit or close that ends it.
+	#[test]
+	fn send_credit_stalls_time_waits_on_the_peer() {
+		let at = |secs| Instant::ZERO.saturating_add(Duration::from_secs(secs));
+		let mut server = make(Side::Server);
+		server.set_params(&TransportParameters {
+			initial_max_streams_uni: 1u32.into(),
+			initial_max_stream_data_uni: 1024u32.into(),
+			initial_max_data: 4u32.into(),
+			..TransportParameters::default()
+		});
+		let mut pending = Retransmits::default();
+		let id = Streams {
+			state: &mut server,
+			closed: false,
+		}
+		.open(Dir::Uni, Default::default())
+		.unwrap();
+		let mut write = |server: &mut StreamsState, data: &[u8]| {
+			send::Stream {
+				id,
+				state: server,
+				pending: &mut pending,
+				closed: false,
+			}
+			.try_write(&mut &data[..])
+		};
+		let stats = |server: &StreamsState| {
+			let stats = server.send_credit_stats();
+			(stats.stalls, stats.stalled)
+		};
+
+		// Taking the last credited byte is no wait.
+		assert_eq!(write(&mut server, b"abcd"), Poll::Ready(Ok(4)));
+		server.observe_send_credit(at(1), false);
+		assert_eq!(stats(&server), (0, Duration::ZERO));
+
+		assert_eq!(write(&mut server, b"e"), Poll::Pending);
+		assert_eq!(stats(&server), (1, Duration::ZERO));
+		server.observe_send_credit(at(2), false);
+		// Retrying at the same limit continues the episode.
+		assert_eq!(write(&mut server, b"e"), Poll::Pending);
+		server.observe_send_credit(at(5), false);
+		assert_eq!(stats(&server), (1, Duration::from_secs(3)));
+
+		server.received_max_data(8u32.into());
+		server.observe_send_credit(at(6), false);
+		server.observe_send_credit(at(9), false);
+		assert_eq!(stats(&server), (1, Duration::from_secs(4)));
+
+		assert_eq!(write(&mut server, b"efghi"), Poll::Ready(Ok(4)));
+		assert_eq!(write(&mut server, b"i"), Poll::Pending);
+		server.observe_send_credit(at(10), false);
+		server.observe_send_credit(at(12), true);
+		server.observe_send_credit(at(20), true);
+		assert_eq!(stats(&server), (2, Duration::from_secs(6)));
+	}
+
+	/// A write held only by the local send window, or one whose writer gave up, is no wait on the
+	/// peer.
+	#[test]
+	fn send_credit_stalls_ignore_the_local_window_and_departed_writers() {
+		let at = |secs| Instant::ZERO.saturating_add(Duration::from_secs(secs));
+		let mut server = make(Side::Server);
+		server.set_params(&TransportParameters {
+			initial_max_streams_uni: 2u32.into(),
+			initial_max_stream_data_uni: 1024u32.into(),
+			initial_max_data: 1024u32.into(),
+			..TransportParameters::default()
+		});
+		server.send_window = 4;
+		let mut pending = Retransmits::default();
+		let open = |server: &mut StreamsState| {
+			Streams {
+				state: server,
+				closed: false,
+			}
+			.open(Dir::Uni, Default::default())
+			.unwrap()
+		};
+		let (first, second) = (open(&mut server), open(&mut server));
+		fn stream<'a>(server: &'a mut StreamsState, pending: &'a mut Retransmits, id: StreamId) -> send::Stream<'a> {
+			send::Stream {
+				id,
+				state: server,
+				pending,
+				closed: false,
+			}
+		}
+		let written = stream(&mut server, &mut pending, first).try_write(&mut &b"abcde"[..]);
+		assert_eq!(written, Poll::Ready(Ok(4)));
+		let written = stream(&mut server, &mut pending, first).try_write(&mut &b"e"[..]);
+		assert_eq!(written, Poll::Pending);
+		server.observe_send_credit(at(1), false);
+		server.observe_send_credit(at(2), false);
+		assert_eq!(server.send_credit_stats().stalls, 0);
+		assert_eq!(server.send_credit_stats().stalled, Duration::ZERO);
+
+		// Credit runs out too, so the wait counts, until its last writer resets.
+		server.max_data = server.data_sent;
+		let written = stream(&mut server, &mut pending, second).try_write(&mut &b"x"[..]);
+		assert_eq!(written, Poll::Pending);
+		stream(&mut server, &mut pending, first).reset(0u32.into()).unwrap();
+		server.observe_send_credit(at(3), false);
+		stream(&mut server, &mut pending, second).reset(0u32.into()).unwrap();
+		server.observe_send_credit(at(5), false);
+		server.observe_send_credit(at(9), false);
+		assert_eq!(server.send_credit_stats().stalls, 1);
+		assert_eq!(server.send_credit_stats().stalled, Duration::from_secs(2));
+	}
+
+	/// A writer blocking at the limit an earlier, departed writer blocked at starts a new episode,
+	/// though it queues no new DATA_BLOCKED.
+	#[test]
+	fn send_credit_stalls_count_a_new_writer_at_the_same_limit() {
+		let at = |secs| Instant::ZERO.saturating_add(Duration::from_secs(secs));
+		let mut server = make(Side::Server);
+		server.set_params(&TransportParameters {
+			initial_max_streams_uni: 2u32.into(),
+			initial_max_stream_data_uni: 1024u32.into(),
+			initial_max_data: 4u32.into(),
+			..TransportParameters::default()
+		});
+		let mut pending = Retransmits::default();
+		let open = |server: &mut StreamsState| {
+			Streams {
+				state: server,
+				closed: false,
+			}
+			.open(Dir::Uni, Default::default())
+			.unwrap()
+		};
+		let (first, second) = (open(&mut server), open(&mut server));
+		fn stream<'a>(server: &'a mut StreamsState, pending: &'a mut Retransmits, id: StreamId) -> send::Stream<'a> {
+			send::Stream {
+				id,
+				state: server,
+				pending,
+				closed: false,
+			}
+		}
+		let written = stream(&mut server, &mut pending, first).try_write(&mut &b"abcde"[..]);
+		assert_eq!(written, Poll::Ready(Ok(4)));
+		let written = stream(&mut server, &mut pending, first).try_write(&mut &b"e"[..]);
+		assert_eq!(written, Poll::Pending);
+		server.observe_send_credit(at(1), false);
+		stream(&mut server, &mut pending, first).reset(0u32.into()).unwrap();
+		server.observe_send_credit(at(2), false);
+
+		let written = stream(&mut server, &mut pending, second).try_write(&mut &b"x"[..]);
+		assert_eq!(written, Poll::Pending);
+		server.observe_send_credit(at(4), false);
+		server.observe_send_credit(at(7), false);
+		assert_eq!(server.send_credit_stats().stalls, 2);
+		assert_eq!(server.send_credit_stats().stalled, Duration::from_secs(4));
 	}
 
 	#[test]
@@ -5016,6 +5240,60 @@ mod tests {
 
 		assert_eq!(client.received_max_stream_data(id, 1), Ok(()));
 		assert!(client.received_stop_sending(id, 0u32.into()).is_ok());
+	}
+
+	/// A stream window as large as a varint, added to what the reader took, still encodes.
+	#[test]
+	fn max_stream_data_stays_a_varint() {
+		let mut server = StreamsState::new(
+			Side::Server,
+			1u32.into(),
+			1u32.into(),
+			1024 * 1024,
+			VarInt::MAX,
+			VarInt::MAX,
+		);
+		let id = StreamId::new(Side::Client, Dir::Uni, 0);
+		data(&mut server, id, 0, 1, false);
+		assert_eq!(Streams::new(&mut server, false).accept(Dir::Uni), Some(id));
+		let mut pending = Retransmits::default();
+		let mut stream = recv(&mut server, &mut pending, id);
+		let mut chunks = stream.read().unwrap();
+		assert_eq!(chunks.next(1).unwrap().unwrap().bytes.len(), 1);
+		chunks.finalize();
+
+		pending.max_stream_data.insert(id);
+		server.write_control_frames(
+			&mut Vec::new(),
+			&mut pending,
+			&mut ThinRetransmits::default(),
+			&mut FrameStats::default(),
+			1200,
+		);
+		let rs = server.recv[&id].as_ref().unwrap();
+		assert_eq!(
+			rs.max_stream_data(VarInt::MAX.into_inner()),
+			(VarInt::MAX.into_inner(), false)
+		);
+	}
+
+	/// Streams the peer frees never raise MAX_STREAMS past the 2^60 a peer accepts.
+	#[test]
+	fn max_streams_stays_under_the_stream_count_cap() {
+		let cap = VarInt::from_u64(MAX_STREAM_COUNT).unwrap();
+		let mut server = StreamsState::new(Side::Server, cap, cap, 1024 * 1024, VarInt::MAX, VarInt::MAX);
+		let mut pending = Retransmits::default();
+		for index in 0..2 {
+			let id = StreamId::new(Side::Client, Dir::Uni, index);
+			data(&mut server, id, 0, 1, true);
+			assert_eq!(Streams::new(&mut server, false).accept(Dir::Uni), Some(id));
+			let mut stream = recv(&mut server, &mut pending, id);
+			let mut chunks = stream.read().unwrap();
+			assert_eq!(chunks.next(1).unwrap().unwrap().bytes.len(), 1);
+			assert!(chunks.next(1).unwrap().is_none());
+			chunks.finalize();
+		}
+		assert_eq!(server.max_remote[Dir::Uni as usize], MAX_STREAM_COUNT);
 	}
 
 	#[test]

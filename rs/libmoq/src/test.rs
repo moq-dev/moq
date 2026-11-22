@@ -10241,3 +10241,16 @@ fn a_pending_credential_ends_with_its_session() {
 	states.recv_terminal();
 	assert_eq!(moq_credential_free(credential), 0);
 }
+
+/// The header declares every C enum, including those that cross the ABI as plain `uint32_t` and
+/// so appear in no signature.
+#[test]
+fn header_declares_every_enum() {
+	let header = include_str!(concat!(env!("OUT_DIR"), "/include/moq.h"));
+	for name in ["moq_order", "moq_refresh", "moq_demand", "moq_compression"] {
+		assert!(
+			header.contains(&format!("typedef enum {name} {{")),
+			"{name} missing from moq.h"
+		);
+	}
+}

@@ -929,7 +929,8 @@ mod tests {
 	}
 
 	/// A gap resumes on the shared capture clock, unless the block before it ran past that: a
-	/// timeline only moves forward, so it then resumes where that block's packet ends.
+	/// timeline only moves forward, so it then resumes just past where that block's packet ends, where
+	/// the gap's marker starts.
 	#[tokio::test(start_paused = true)]
 	async fn opus_uses_the_shared_capture_clock_including_gaps_and_clamping() {
 		tokio::task::LocalSet::new()
@@ -966,8 +967,13 @@ mod tests {
 					samples.try_push(Ok(block)).unwrap();
 					assert!(observer.read().await.unwrap().gap);
 					let next = packet(&mut track).await;
-					// The first block is one 20 ms packet.
-					assert_eq!(next.timestamp.as_micros().unwrap(), (expected + 20_000).max(1_000_000));
+					// The first block is one 20 ms packet. The gap's marker starts where it ends, so a
+					// resume clamped there starts a microsecond past it.
+					let resumed = match expected + 20_000 {
+						end if end >= 1_000_000 => end + 1,
+						_ => 1_000_000,
+					};
+					assert_eq!(next.timestamp.as_micros().unwrap(), resumed);
 					encode_task.abort();
 					assert!(encode_task.await.unwrap_err().is_cancelled());
 					capture_task.abort();

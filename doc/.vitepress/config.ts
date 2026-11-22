@@ -59,6 +59,13 @@ export default defineConfig({
 		["meta", { name: "theme-color", content: "#0f172a" }],
 	],
 
+	// Serves /sitemap.xml, which public/robots.txt names. It lists the clean URLs,
+	// since the host redirects `.html` ones.
+	sitemap: {
+		hostname: "https://doc.moq.dev",
+		transformItems: (items) => items.map((item) => ({ ...item, url: item.url.replace(/\.html$/, "") })),
+	},
+
 	appearance: "force-dark",
 
 	themeConfig: {

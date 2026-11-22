@@ -137,7 +137,8 @@ for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
 		expect(() => Frame.decode(cursor(0, UNSAFE), FLAGS)).toThrow(RangeError);
 		expect(() => Frame.decode(cursor(0, 0, UNSAFE), FLAGS)).toThrow(RangeError);
 		expect(() => decodeFetchObject(cursor(0x0c, 0, UNSAFE))).toThrow(RangeError);
-		expect(() => decodeFetchObject(cursor(0x8c, 0, UNSAFE))).toThrow(RangeError);
+		// An End of Range's Object ID is any varint, since it can close out the rest of a group.
+		expect(decodeFetchObject(cursor(0x8c, 0, UNSAFE))).toMatchObject({ kind: "endOfRange", object: UNSAFE });
 		expect(() => decodeFetchObject(cursor(0, UNSAFE))).toThrow(RangeError);
 		expect(() => decodeGroupGap(cursor(0x0b, UNSAFE))).toThrow(RangeError);
 	});

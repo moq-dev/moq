@@ -823,16 +823,22 @@ impl MoqTrackProducer {
 
 	/// Hand the track to a typed writer that `f` builds (a JSON producer, say), closing this
 	/// handle once `f` succeeds so the writer is the track's only producer. The writer takes this
-	/// handle's place among its broadcast's children. On failure the handle stays open.
+	/// handle's place among its broadcast's children, which `f` also receives so a writer that
+	/// finishes can [`keep`](Children::keep) its track; a finished track has none. On failure the
+	/// handle stays open.
 	pub(crate) fn adopt<T: Child + 'static>(
 		&self,
-		f: impl FnOnce(moq_net::track::Producer) -> Result<T, MoqError>,
+		f: impl FnOnce(moq_net::track::Producer, Option<&Children>) -> Result<T, MoqError>,
 	) -> Result<Arc<T>, MoqError> {
 		// Taken for the whole construction, so a racing adopt finds the handle closed. `f` runs
 		// outside the lock: it may take the broadcast's, which a close holds while it takes this one.
 		let mut phase = std::mem::take(&mut *self.phase.lock().unwrap());
 		let raw = phase.raw()?.clone();
-		match (f(raw), phase) {
+		let family = match &phase {
+			TrackPhase::Open { family, .. } => Some(family),
+			TrackPhase::Finished(_) | TrackPhase::Closed => None,
+		};
+		match (f(raw, family), phase) {
 			(Ok(writer), TrackPhase::Open { family, .. }) => family.adopt(Arc::new(writer)),
 			// A finished track has no family left to join, and ends at its declared end.
 			(Ok(writer), _) => Ok(Arc::new(writer)),

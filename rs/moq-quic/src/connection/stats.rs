@@ -190,6 +190,8 @@ pub struct Stats {
 	pub path: PathStats,
 	/// Connection-level receive flow control
 	pub credit: CreditStats,
+	/// Connection-level send flow control
+	pub send_credit: SendCreditStats,
 }
 
 /// Connection-level receive flow control, from the receiver's side
@@ -208,4 +210,19 @@ pub struct CreditStats {
 	/// The most credit the peer has had spent at once, leased or not yet read: how close the
 	/// connection came to filling its receive window
 	pub peak_spent: u64,
+}
+
+/// Connection-level send flow control: how long writers waited on the peer's credit
+///
+/// An episode starts when a write blocks with every byte the peer's `MAX_DATA` allows already
+/// sent, and ends once the peer raises it, no writer waits, or the connection closes. A write
+/// held only by the local send window is not one. Time accrues as the connection is driven
+/// (receiving, timers, transmitting), so a wait in progress counts up to the latest of those.
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SendCreditStats {
+	/// Episodes so far, the one in progress included
+	pub stalls: u64,
+	/// Time spent blocked across them
+	pub stalled: Duration,
 }

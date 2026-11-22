@@ -4644,7 +4644,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-test",
- "url",
  "webm-iterable",
  "workspace-hack",
 ]
@@ -5020,6 +5019,7 @@ dependencies = [
  "serde_with",
  "socket2 0.6.5",
  "tempfile",
+ "test-env",
  "thiserror 2.0.21",
  "tikv-jemalloc-ctl",
  "tikv-jemallocator",

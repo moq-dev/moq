@@ -1889,7 +1889,8 @@ async fn a_seek_mid_block_waits_for_the_block() {
 		}
 		groups.push((group.start, frames));
 	}
-	assert_eq!(groups, [(0, 2), (100, 1)]);
+	// The block's group ends whole past its second 20ms frame, so the seek's group starts there.
+	assert_eq!(groups, [(0, 2), (40_000, 1)]);
 }
 
 /// A WebM with one VP9 track whose `Video` element holds `children` beside its dimensions.

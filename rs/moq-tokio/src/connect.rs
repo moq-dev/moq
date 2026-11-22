@@ -607,6 +607,7 @@ pub struct Config {
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	#[usage(
 		name = "connect-version",
+		delimiter = ',',
 		long = "connect-version",
 		env = "MOQ_CONNECT_VERSION",
 		setting = "connect.version",

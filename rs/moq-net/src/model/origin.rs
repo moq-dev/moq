@@ -2952,7 +2952,7 @@ impl Producer {
 	/// hidden from the mounted handle.
 	///
 	/// Returns [`Error::Unauthorized`] unless this producer reaches all of
-	/// `target`, so a mount never widens a scope, and [`Error::Duplicate`] when
+	/// `target`, none of it [excluded](Self::exclude), so a mount never widens a scope, and [`Error::Duplicate`] when
 	/// `at` or `target` overlaps a mount point this producer already has, or `at`
 	/// overlaps an existing target or its own: mounts never chain, in whatever order they are added,
 	/// so a target is always read as the origin holds it. Mounts may share a target.
@@ -2970,13 +2970,16 @@ impl Producer {
 		}
 		// A mount point no pattern can spell could never be announced or authorized.
 		Pattern::literal(at.as_str())?;
-		if !self.scope.allowed.matches(target.as_str()) {
+		let overlaps = |a: &Path, b: &Path| a.has_prefix(b) || b.has_prefix(a);
+		// An excluded subtree at, above, or beneath the target would be read under `at`.
+		if !self.scope.allowed.matches(target.as_str())
+			|| self.scope.excluded.iter().any(|excluded| overlaps(&target, excluded))
+		{
 			return Err(Error::Unauthorized);
 		}
 		// Symmetric, so the order mounts are added never changes which sets are accepted:
 		// no mount point overlaps any mount's point or target, its own included.
 		// Targets may overlap.
-		let overlaps = |a: &Path, b: &Path| a.has_prefix(b) || b.has_prefix(a);
 		if overlaps(&at, &target)
 			|| self
 				.scope
@@ -10115,6 +10118,29 @@ mod tests {
 				"{at} -> {target}"
 			);
 		}
+	}
+
+	/// A mount never reads a subtree the handle was excluded from: not the target
+	/// itself, nor one above or beneath it.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn mount_never_reaches_an_excluded_subtree() {
+		let producer = origin(1).produce();
+		let _secret = producer.route(".stats/node", RouteOptions::default()).unwrap();
+		let excluded = producer.exclude(".stats").unwrap();
+		for target in [".stats", ".stats/node", ""] {
+			assert!(
+				matches!(excluded.mount("view", target), Err(Error::Unauthorized)),
+				"{target}"
+			);
+		}
+		let partly = producer.exclude(".stats/node").unwrap();
+		assert!(matches!(partly.mount("view", ".stats"), Err(Error::Unauthorized)));
+
+		// A target beside the excluded subtree mounts, and the exclusion still holds.
+		let mounted = excluded.mount("view", "public").unwrap();
+		let err = mounted.consume().request(".stats/node", None).await.err().unwrap();
+		assert!(matches!(err, Error::Unauthorized), "{err:?}");
 	}
 
 	/// A mount point no pattern can spell could never be announced or authorized.

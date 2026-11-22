@@ -150,9 +150,10 @@ const _: () = assert!(DEFAULT_RECEIVE_WINDOW >= moq_net::transport::MIN_RECEIVE_
 ///
 /// Stream credit returns as bytes are read, whether or not their message is complete,
 /// so this only paces one stream: enough for a single group stream to reach about
-/// 67 Mbps at a 100 ms RTT. A stream paced for a slow reader holds less: its credit
-/// shrinks to the room its group has left.
-pub const DEFAULT_STREAM_RECEIVE_WINDOW: u64 = 1 << 20;
+/// 270 Mbps at a 100 ms RTT, the same as the default connection window. A stream paced for a
+/// slow reader holds less: its credit shrinks to the room its group has left. The connection
+/// window, not this, bounds what all of a peer's streams hold together.
+pub const DEFAULT_STREAM_RECEIVE_WINDOW: u64 = 4 << 20;
 
 /// Default cap on unacknowledged outgoing data, used when [`Config::send_window`] is unset.
 ///
@@ -274,7 +275,7 @@ pub struct Config {
 	)]
 	pub receive_window: Option<u64>,
 
-	/// Per-stream receive window, in bytes. Defaults to 1 MiB.
+	/// Per-stream receive window, in bytes. Defaults to 4 MiB.
 	///
 	/// Stream credit returns as bytes are read, whether or not their message is
 	/// complete, so a smaller window only adds round trips to a large frame. The
