@@ -7,7 +7,6 @@
 //! by the Min Age: a live join that far behind the live edge where lite-07 carries it, the
 //! oldest group when it is not stated.
 
-use crate::WithMax as _;
 use crate::support;
 
 use std::time::Duration;
@@ -113,16 +112,12 @@ async fn read_as(version: Option<&str>, range: Range, how: Read) -> Result<Group
 	// A range with no start joins live, `how.min` behind the live edge, when one is given.
 	let range = match (range.start, how.min) {
 		(moq_net::track::Start::Oldest, Some(min)) => Range {
-			start: moq_net::track::Start::Live {
-				min,
-				max: Some(std::time::Duration::ZERO),
-			},
+			start: moq_net::track::Start::Live { min, max: Some(FOREVER) },
 			..range
 		},
 		_ => range,
 	};
 	let subscription = Subscription::default()
-		.with_max(FOREVER)
 		.with_order(Order::Ascending)
 		.with_ranges([range]);
 	let reader = kio::clock::timeout(TIMEOUT, remote.track("data").unwrap().subscribe(subscription))
@@ -297,9 +292,8 @@ async fn an_ordered_reader_starts_at_the_publishers_start_over_a_frameless_newes
 	let subscription = Subscription::default()
 		.with_ranges([Range::from(moq_net::track::Start::Live {
 			min: Duration::ZERO,
-			max: None,
-		})])
-		.with_max(FOREVER);
+			max: Some(FOREVER),
+		})]);
 	let mut reader = kio::clock::timeout(TIMEOUT, remote.track("data").unwrap().subscribe(subscription))
 		.await
 		.expect("subscribe timeout")
@@ -357,12 +351,11 @@ async fn a_sparse_request_places_its_live_join_as_the_publisher_did() {
 	let join = Range {
 		start: moq_net::track::Start::Live {
 			min: Duration::from_millis(2),
-			max: Some(std::time::Duration::ZERO),
+			max: Some(FOREVER),
 		},
 		end: Some(8),
 	};
 	let subscription = Subscription::default()
-		.with_max(FOREVER)
 		.with_order(Order::Ascending)
 		.with_ranges([range(Some(1), Some(2)), join]);
 	let mut reader = kio::clock::timeout(TIMEOUT, remote.track("data").unwrap().subscribe(subscription))

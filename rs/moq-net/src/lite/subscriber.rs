@@ -5861,11 +5861,16 @@ mod tests {
 		let version = Version::Lite07;
 		let budget = Duration::from_millis(500);
 		let (serve, mut serving, tail, _broadcast) = lite07_serving(budget).await;
-		let mut reader = serving.serving.subscribe(
-			crate::track::Subscription::default()
-				.with_ranges([crate::track::Range::groups(0..)])
-				.with_max(budget),
-		);
+		// A live join under the budget, which the upstream placed at group 0: a stale drop
+		// under that budget ends what it reads.
+		let lag = Duration::from_secs(10);
+		let mut reader = serving.serving.subscribe(crate::track::Subscription::default().with_ranges([
+			crate::track::Range::from(crate::track::Start::Live {
+				min: lag,
+				max: Some(budget),
+			}),
+		]));
+		serving.serving.answer_join(lag, None, Some(0));
 		let waiter = kio::Waiter::noop();
 		let old = |groups: std::ops::Range<u64>| {
 			lite::SubscribeResponse::Drop(lite::SubscribeDrop::new(groups, &crate::StreamError::Old, version))
@@ -5883,8 +5888,15 @@ mod tests {
 			let Sub::Active(active) = &mut serving.sub else {
 				unreachable!("an active subscription");
 			};
-			active.max_delay = Some(Duration::from_secs(5));
-			let ranges = active.live.unchanged();
+			// A live join under a wider max age replaces the range.
+			let wider = lite::Range {
+				start: Some(lite::Anchor::Live {
+					min: Duration::ZERO,
+					max: Some(Duration::from_secs(5)),
+				}),
+				end: None,
+			};
+			let ranges = active.live.edit(&[wider]).unwrap();
 			buffer_update(active, ranges).unwrap();
 		}
 		assert!(covers(1..3), "still accounted for");
@@ -6123,11 +6135,13 @@ mod tests {
 			let producer = serving.serving.clone();
 			let mut arriving = serving.serving.create_group(group::Info { start: 2 }).unwrap();
 			arriving.write_frame(arriving.key_time(), b"2".as_slice()).unwrap();
+			// From the oldest group, which reads what the copy holds: a live join would wait on
+			// the upstream's answer for the live edge.
 			let mut reader = broadcast
 				.consume()
 				.track("video")
 				.unwrap()
-				.subscribe(None)
+				.subscribe(crate::track::Subscription::default().with_ranges([crate::track::Range::ALL]))
 				.await
 				.unwrap();
 			let mut group = reader.recv_group().await.unwrap().unwrap();
@@ -6975,7 +6989,18 @@ mod tests {
 			waiting.now_or_never().expect("accepted").unwrap();
 
 			let (msg, trailing) = sent_subscribe(&sent(&session.log, 1), version);
-			assert_eq!(msg.max_delay, Some(wait), "{version}: the subscriber's own max delay");
+			// Lite-07 carries it on the live join, an older wire as the subscription's.
+			let max = match version.has_ranges() {
+				true => match msg.ranges[..] {
+					[lite::Range {
+						start: Some(lite::Anchor::Live { max, .. }),
+						..
+					}] => max,
+					_ => panic!("{version}: one live join, got {:?}", msg.ranges),
+				},
+				false => msg.max_delay,
+			};
+			assert_eq!(max, Some(wait), "{version}: the subscriber's own max age");
 			assert!(!trailing, "{version}: a SUBSCRIBE_UPDATE followed the accept");
 		}
 	}
@@ -8345,8 +8370,19 @@ mod tests {
 		}]);
 		assert_eq!(wire_ranges(&empty), None);
 
-		// No start goes out as none, for the max age to place upstream.
-		assert_eq!(wire_ranges(&Subscription::default()), Some(vec![lite::Range::OPEN]));
+		// The oldest group goes out as no start, and a live join as itself.
+		let all = Subscription::default().with_ranges([track::Range::ALL]);
+		assert_eq!(wire_ranges(&all), Some(vec![lite::Range::OPEN]));
+		assert_eq!(
+			wire_ranges(&Subscription::default()),
+			Some(vec![lite::Range {
+				start: Some(lite::Anchor::Live {
+					min: Duration::ZERO,
+					max: Some(Duration::ZERO)
+				}),
+				end: None,
+			}])
+		);
 	}
 
 	/// A wire without ranges asks from group 0 when no single start covers both a range
@@ -10301,16 +10337,25 @@ fn wire_ranges(subscription: &Subscription) -> Option<Vec<lite::Range>> {
 /// subscribers' own reads narrow again.
 ///
 /// It starts at the lowest start. A subscription with only ranges without a start asks with
-/// none, which a pre-06 publisher reads as the latest group and a lite-06 one as no floor.
-/// One mixing the two asks from group 0, since no single start covers both: the latest
-/// group may sit below the start.
+/// none, which a pre-06 publisher reads as the latest group and a lite-06 one as no floor,
+/// under the widest max age among them, the one `Subscriber Max Age` the wire carries: a
+/// live join reaching back past every group (see [`track::Start::within`]), or none while a
+/// range from the oldest group asks for history. One mixing the two asks from group 0,
+/// history, since no single start covers both: the latest group may sit below the start.
 fn wire_span(subscription: Subscription) -> Subscription {
 	let start = match subscription.start() {
 		Some(start) => Some(start),
 		None if subscription.ranges.iter().any(|range| range.time().is_some()) => Some(0),
 		None => None,
 	};
-	subscription.with_start(start)
+	let max = subscription.max_age();
+	let mut span = subscription.with_start(start);
+	for range in &mut span.ranges {
+		if let (track::Start::Oldest, Some(max)) = (range.start, max) {
+			range.start = track::Start::within(max);
+		}
+	}
+	span
 }
 
 /// The at-most-one live upstream subscription: its control stream plus the params
