@@ -844,6 +844,7 @@ mod tests {
 		let (sent, received) = (Wire::new(), Wire::new());
 		let tracking = [track(&mut sender, sent.clone()), track(&mut receiver, received.clone())];
 		let mut sender_reports = sender.statistics().clone();
+		let mut receiver_reports = receiver.statistics().clone();
 		for _ in 0..MESSAGES {
 			sender
 				.send((kio::clock::now().into_std(), Bytes::from(vec![7; SRT_PAYLOAD])))
@@ -858,8 +859,8 @@ mod tests {
 				.unwrap();
 		}
 
-		// Wait for a report that has seen every data packet. The sender's tracker holds it, or
-		// a later one, by the time its stream ends.
+		// Wait for a report that has seen every data packet. A tracker holds it, or a later one,
+		// by the time its stream ends.
 		let report = kio::clock::timeout(Duration::from_secs(10), async {
 			loop {
 				let stats = sender_reports.next().await.expect("the sender's connection ended");
@@ -873,6 +874,18 @@ mod tests {
 		// Loopback loses nothing, so every data packet went out once.
 		assert_eq!(report.tx_data, MESSAGES);
 		assert_eq!(srt_bytes(report.tx_bytes, report.tx_data), MESSAGES * (PAYLOAD + 16));
+		// The receiver counts the same packets on its own.
+		let report = kio::clock::timeout(Duration::from_secs(10), async {
+			loop {
+				let stats = receiver_reports.next().await.expect("the receiver's connection ended");
+				if stats.rx_data >= MESSAGES {
+					return stats;
+				}
+			}
+		})
+		.await
+		.expect("the receiver never reported its data");
+		assert_eq!(srt_bytes(report.rx_bytes, report.rx_data), MESSAGES * (PAYLOAD + 16));
 
 		drop((sender, receiver));
 		for task in tracking {
@@ -883,6 +896,7 @@ mod tests {
 			"sent {} for {MESSAGES} packets of {PAYLOAD} bytes",
 			sent.sent_bytes()
 		);
+		assert!(received.received_bytes() >= MESSAGES * (PAYLOAD + 16));
 		// The receiver answers with control packets alone.
 		assert!(sent.received_bytes() < sent.sent_bytes());
 	}
