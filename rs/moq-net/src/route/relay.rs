@@ -3243,7 +3243,11 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		}
 		assert_eq!(self.rx_hops, rx_hops, "heard hops");
 		assert_eq!(self.rx_pairs, rx_pairs, "heard pairs");
-		let loose: BTreeSet<&(Id, Id)> = self.closed.keys().filter(|pair| !rx_pairs.contains_key(*pair)).collect();
+		let loose: BTreeSet<&(Id, Id)> = self
+			.closed
+			.keys()
+			.filter(|pair| !rx_pairs.contains_key(*pair))
+			.collect();
 		assert_eq!(self.loose.age.keys().collect::<BTreeSet<_>>(), loose, "loose floors");
 		assert_eq!(self.loose.by_age.len(), loose.len(), "loose order");
 		assert!(loose.len() <= rx_pairs.len(), "loose floors outnumber the joined pairs");
@@ -5468,8 +5472,8 @@ mod tests {
 
 		fn link(&mut self, a: Id, b: Id, link: usize) {
 			for (x, y) in [(a, b), (b, a)] {
-				let key = 10 * y as usize + link;
-				self.0.get_mut(&x).unwrap().connect(key, port(Role::Routing(node(y)))).unwrap();
+				let (key, router) = (10 * y as usize + link, self.0.get_mut(&x).unwrap());
+				router.connect(key, port(Role::Routing(node(y)))).unwrap();
 			}
 			self.settle();
 		}
@@ -5572,7 +5576,11 @@ mod tests {
 				offer: Some(offer),
 			};
 			router.recv(2, route).unwrap();
-			router.recv(2, Msg::Dead { hop: through, far: node(5) }).unwrap();
+			let dead = Msg::Dead {
+				hop: through,
+				far: node(5),
+			};
+			router.recv(2, dead).unwrap();
 			// The pairs one route joins, and as many it stopped joining.
 			assert!(router.kept().closed <= 4, "{:?}", router.kept());
 		}
