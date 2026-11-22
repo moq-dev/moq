@@ -101,7 +101,14 @@
 			"copy": [{}],
 			"read": { "ranges": [{ "start": 1000, "end": 2000 }, { "start": { "live": 1000 } }] },
 			"deliver": [1000, 2000, 8000, 9000],
-			"asks": true
+			"asks": true,
+			"known": [
+				{
+					"mode": "relay-warm",
+					"quest": "/quest/m2/time-addressing/js-relay-warm-live-join.md",
+					"why": "the JavaScript relay's warm copy serves the time range but never the live join to the next hop"
+				}
+			]
 		},
 		{
 			"name": "a time start between held groups linked by Previous Start is answered from the copy",
