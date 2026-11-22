@@ -3,7 +3,9 @@
 //! The lite-07 range table (`tests/range-table.json`), which `js/net/src/range-table.test.ts`
 //! passes too: each case's reader gets exactly the listed groups direct from the origin,
 //! through a relay copy cold, warm, and as a late join, and across a route switch mid-read. A
-//! warm copy also answers from what it holds exactly when the case says it may.
+//! warm copy also answers from what it holds exactly when the case says it may. Every group
+//! arrives whole: a switch stalls the first route partway through, so the second supplies the
+//! groups the first never delivered and the tail of one it delivered only the head of.
 
 use crate::support;
 
@@ -93,6 +95,8 @@ impl Ask {
 struct Case {
 	name: String,
 	groups: Vec<u64>,
+	/// The frames in each group, one per millisecond from its start.
+	frames: u64,
 	append: bool,
 	copy: Vec<Ask>,
 	evict: bool,
@@ -114,6 +118,7 @@ fn cases() -> Vec<Case> {
 			.collect()
 	};
 	let groups = keys(&table["groups"]);
+	let frames = table["frames"].as_u64().expect("frames per group");
 	table["cases"]
 		.as_array()
 		.expect("cases")
@@ -121,6 +126,7 @@ fn cases() -> Vec<Case> {
 		.map(|case| Case {
 			name: case["name"].as_str().expect("a name").to_string(),
 			groups: case.get("groups").map(keys).unwrap_or_else(|| groups.clone()),
+			frames,
 			append: case
 				.get("append")
 				.is_none_or(|append| append.as_bool().expect("append")),
@@ -189,15 +195,36 @@ impl Source {
 	}
 
 	fn write(&self, case: &Case) {
+		if let Some(live) = self.write_head(case) {
+			Self::write_tail(case, live);
+		}
+	}
+
+	/// Write every group but the tail of the last, returning it still open: the live edge
+	/// mid-group, which a reader may have only the head of when its route changes.
+	fn write_head(&self, case: &Case) -> Option<(u64, moq_net::group::Producer)> {
+		let mut last = None;
 		for &start in &case.groups {
-			let time = Timestamp::from_millis(start).unwrap();
+			if let Some(live) = last.take() {
+				Self::write_tail(case, live);
+			}
 			let mut group = match case.append {
-				true => self.track.append_group(time).unwrap(),
+				true => self.track.append_group(Timestamp::from_millis(start).unwrap()).unwrap(),
 				false => self.track.create_group(moq_net::group::Info { start }).unwrap(),
 			};
-			group.write_frame(time, &b"x"[..]).unwrap();
-			group.finish().unwrap();
+			for frame in 0..case.frames.div_ceil(2) {
+				group.write_frame(Timestamp::from_millis(start + frame).unwrap(), &b"x"[..]).unwrap();
+			}
+			last = Some((start, group));
 		}
+		last
+	}
+
+	fn write_tail(case: &Case, (start, mut group): (u64, moq_net::group::Producer)) {
+		for frame in case.frames.div_ceil(2)..case.frames {
+			group.write_frame(Timestamp::from_millis(start + frame).unwrap(), &b"x"[..]).unwrap();
+		}
+		group.finish().unwrap();
 	}
 }
 
@@ -221,10 +248,10 @@ async fn subscribe(broadcast: &moq_net::broadcast::Consumer, ask: &Ask) -> moq_n
 		.expect("the subscribe answers")
 }
 
-/// What a reader got: each group's start as it arrived, then whether it ended or failed.
-#[derive(Debug, Default)]
+/// What a reader got: each group as it arrived, then whether it ended or failed.
+#[derive(Default)]
 struct Got {
-	groups: Vec<u64>,
+	groups: Vec<moq_net::group::Consumer>,
 	ended: bool,
 	error: Option<String>,
 }
@@ -240,24 +267,46 @@ impl Got {
 			};
 			match kio::clock::timeout(wait, reader.recv_group()).await {
 				Err(_) => return,
-				Ok(Ok(Some(group))) => self.groups.push(group.start),
+				Ok(Ok(Some(group))) => self.groups.push(group),
 				Ok(Ok(None)) => self.ended = true,
 				Ok(Err(err)) => self.error = Some(err.to_string()),
 			}
 		}
 	}
 
-	/// The groups in order, failing a group received twice or an error.
-	fn delivered(&self) -> Result<Vec<u64>, String> {
+	/// Each group's start, as it arrived.
+	fn starts(&self) -> Vec<u64> {
+		self.groups.iter().map(|group| group.start).collect()
+	}
+
+	/// The groups in order, failing a group received twice, one missing any of its
+	/// `frames` frames, or an error.
+	async fn delivered(&mut self, frames: u64) -> Result<Vec<u64>, String> {
+		let starts = self.starts();
 		if let Some(error) = &self.error {
-			return Err(format!("failed after {:?}: {error}", self.groups));
+			return Err(format!("failed after {starts:?}: {error}"));
 		}
-		let mut sorted = self.groups.clone();
+		for group in &mut self.groups {
+			let want: Vec<u64> = (group.start..group.start + frames).collect();
+			let mut got = Vec::new();
+			loop {
+				match kio::clock::timeout(ARRIVAL, group.read_frame()).await {
+					Ok(Ok(Some(frame))) => got.push(frame.timestamp.value()),
+					Ok(Ok(None)) => break,
+					Ok(Err(err)) => return Err(format!("group {} failed after frames {got:?}: {err}", group.start)),
+					Err(_) => return Err(format!("group {} stalled after frames {got:?}", group.start)),
+				}
+			}
+			if got != want {
+				return Err(format!("group {} delivered frames {got:?}", group.start));
+			}
+		}
+		let mut sorted = starts.clone();
 		sorted.sort_unstable();
 		sorted.dedup();
-		match sorted.len() == self.groups.len() {
+		match sorted.len() == starts.len() {
 			true => Ok(sorted),
-			false => Err(format!("delivered a group twice: {:?}", self.groups)),
+			false => Err(format!("delivered a group twice: {starts:?}")),
 		}
 	}
 }
@@ -278,6 +327,8 @@ async fn run(case: &Case, mode: Mode) -> Result<(), String> {
 	let source = Source::new();
 	let want = case.deliver.len();
 	let mut got = Got::default();
+	// A reader joining once the switch settled, which must get the same.
+	let mut after = None;
 	// Kept to the end of the run, so the copy's readers stay subscribed.
 	let mut _readers = Vec::new();
 	let mut _links = Vec::new();
@@ -342,7 +393,8 @@ async fn run(case: &Case, mode: Mode) -> Result<(), String> {
 			_links.push(upstream);
 		}
 		Mode::Switch => {
-			source.write(case);
+			// The live edge stays mid-group until after the switch.
+			let live = source.write_head(case);
 			let relay_a = produce_origin(2, None);
 			let relay_b = produce_origin(3, None);
 			let front = produce_origin(4, None);
@@ -351,28 +403,60 @@ async fn run(case: &Case, mode: Mode) -> Result<(), String> {
 			_readers = warm(&broadcast(&relay_b).await, case).await;
 			let a_to_front = link(&relay_a, &front, None).await;
 
+			// The first route delivers the oldest half of the range and the head of its newest
+			// group, then stalls: one Group Stream each.
 			let remote = broadcast(&front).await;
+			let a = &a_to_front.server_transport;
+			a.hold_unis();
 			let mut reader = subscribe(&remote, &case.read).await.map_err(|err| err.to_string())?;
-			got.read(&mut reader, want / 2).await;
-			// A standby route, priced to lose while the first stands, then the first's session dies.
+			settle().await;
+			let held = a.held_unis();
+			let oldest = (want / 2).min(held.saturating_sub(1));
+			for _ in 0..oldest {
+				a.release_oldest_uni();
+			}
+			if held > oldest {
+				a.release_newest_uni();
+			}
+			got.read(&mut reader, held.min(oldest + 1)).await;
+
+			// A standby route, priced to lose while the first stands, then the first's session
+			// dies and the live group goes on.
 			_links.push(link(&relay_b, &front, Some(1_000)).await);
 			settle().await;
 			a_to_front.server.abort(moq_net::Error::Cancel);
 			a_to_front.client.abort(moq_net::Error::Cancel);
+			if let Some(live) = live {
+				Source::write_tail(case, live);
+			}
 			got.read(&mut reader, want).await;
+
+			let mut late = subscribe(&remote, &case.read).await.map_err(|err| err.to_string())?;
+			let mut late_got = Got::default();
+			late_got.read(&mut late, want).await;
+			after = Some(late_got);
 		}
 	}
 
-	let delivered = got.delivered()?;
+	let delivered = got.delivered(case.frames).await?;
 	if delivered != case.deliver {
 		return Err(format!("delivered {delivered:?}, ended: {}", got.ended));
+	}
+	if let Some(mut after) = after {
+		let delivered = after
+			.delivered(case.frames)
+			.await
+			.map_err(|err| format!("after the switch: {err}"))?;
+		if delivered != case.deliver {
+			return Err(format!("after the switch, delivered {delivered:?}"));
+		}
 	}
 	if let (Some(asks), Some((cached, ended))) = (case.asks, cached) {
 		// Nothing to deliver is answered alone only by ending before upstream could answer.
 		let answered = cached == want && (want > 0 || ended);
 		if answered == asks {
 			return Err(match asks {
-				true => format!("answered {:?} from the copy alone, which must ask", got.groups),
+				true => format!("answered {:?} from the copy alone, which must ask", got.starts()),
 				false => format!("asked upstream, answering only {cached} groups from the copy"),
 			});
 		}
