@@ -4959,11 +4959,11 @@ impl Bounds {
 	/// `Subscriber Max Age` bounds the whole subscription; `None` on lite-07, which carries
 	/// one on each live start instead.
 	///
-	/// Lite-06 resolves an absent start from that max age, so it joins that far behind the
-	/// live edge, and its groups expire past it; with no max age, it reaches back to the
-	/// oldest group. Before lite-06 an absent start is the latest group, still expiring past
-	/// the max age, and lite01/02 carry none, so nothing expires (see [`cursor_floor`]).
-	/// A named start is a history floor on every wire, bounded by the publisher's max age.
+	/// Lite-06 resolves an absent start from that max age, so it takes every group still
+	/// within it; with no max age, it reaches back to the oldest group. Before lite-06 an
+	/// absent start is the latest group, still expiring past the max age, and lite01/02 carry
+	/// none, so nothing expires (see [`cursor_floor`]). A named start is a history floor on
+	/// every wire, bounded by the publisher's max age.
 	fn legacy(version: Version, max_delay: Option<Duration>) -> Option<crate::track::Start> {
 		use crate::track::Start;
 		if version.has_ranges() {
@@ -4974,7 +4974,7 @@ impl Bounds {
 				min: Duration::ZERO,
 				max,
 			},
-			(true, Some(max)) => Start::Live { min: max, max: Some(max) },
+			(true, Some(max)) => Start::within(max),
 			(true, None) => Start::Oldest,
 		})
 	}

@@ -19711,7 +19711,7 @@ mod test {
 			// A live join at the first group to arrive, ending at time 0.
 			let subscription = Subscription::default()
 				.with_ranges([Range {
-					start: Start::Live { min: Duration::ZERO, max: Some(std::time::Duration::ZERO) },
+					start: Start::Live { min: Duration::ZERO, max: None },
 					end: Some(0),
 				}])
 				.with_max(Duration::ZERO);

@@ -347,7 +347,7 @@ async fn initial_mixed_ranges_keep_the_absolute_history() {
 					assert_eq!(next(&mut warm).await, None);
 				}
 				let subscription = Subscription::default()
-					.with_ranges([support::keys(1..2), Range::from(Start::Live { min: Duration::ZERO, max: Some(std::time::Duration::ZERO) })])
+					.with_ranges([support::keys(1..2), Range::from(Start::Live { min: Duration::ZERO, max: None })])
 					.with_max(None);
 				let mut reader = subscribe(&fixture.remote, subscription).await;
 				let mut got = Vec::new();

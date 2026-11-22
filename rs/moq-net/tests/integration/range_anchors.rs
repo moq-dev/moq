@@ -292,7 +292,7 @@ async fn an_ordered_reader_starts_at_the_publishers_start_over_a_frameless_newes
 		.expect("broadcast resolves")
 		.unwrap();
 	let subscription = Subscription::default()
-		.with_ranges([Range::from(moq_net::track::Start::Live { min: Duration::ZERO, max: Some(std::time::Duration::ZERO) })])
+		.with_ranges([Range::from(moq_net::track::Start::Live { min: Duration::ZERO, max: None })])
 		.with_max(FOREVER);
 	let mut reader = kio::clock::timeout(TIMEOUT, remote.track("data").unwrap().subscribe(subscription))
 		.await

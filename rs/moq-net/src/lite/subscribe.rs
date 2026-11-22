@@ -180,13 +180,15 @@ impl<'a> Message<'a> for Subscribe<'a> {
 /// say: the largest every implementation carries losslessly.
 const MAX_SAFE_DELAY_MS: u64 = (1 << 53) - 1;
 
-/// Decode the `Subscriber Max Age`, bare milliseconds before lite-07. Lite-07 carries none:
-/// each live start has its own.
+/// Decode the `Subscriber Max Age`, bare milliseconds before lite-07, where
+/// [`MAX_SAFE_DELAY_MS`] or more says no limit. Lite-07 carries none: each live start has
+/// its own.
 fn decode_max_delay(r: &mut Decoder<'_>, version: Version) -> Result<Option<std::time::Duration>, DecodeError> {
-	Ok(match version.has_ranges() {
-		true => None,
-		false => Some(std::time::Duration::from_millis(r.varint()?)),
-	})
+	if version.has_ranges() {
+		return Ok(None);
+	}
+	let millis = r.varint()?;
+	Ok((millis < MAX_SAFE_DELAY_MS).then(|| std::time::Duration::from_millis(millis)))
 }
 
 /// Encode the inverse of [`decode_max_delay`]: no limit goes out as [`MAX_SAFE_DELAY_MS`].
@@ -2223,36 +2225,123 @@ mod test {
 		}
 	}
 
-	/// Lite-07 encodes `Subscriber Max Age` as milliseconds plus one, 0 for no limit. An earlier
-	/// wire carries bare milliseconds, so no limit goes out as the largest every peer reads, and
-	/// Lite01/02 carry none at all, which decodes as no limit rather than the live edge.
+	/// `Subscriber Max Age` is bare milliseconds before lite-07, so no limit goes out as the
+	/// largest every peer reads and reads back as no limit. Lite01/02 carry none, and lite-07
+	/// none either, since each live start carries its own.
 	#[test]
-	fn max_delay_says_no_limit_on_lite07() {
+	fn max_delay_is_carried_only_before_lite07() {
 		let ms = std::time::Duration::from_millis;
 		let encoded = |version: Version, max_delay| {
 			let mut buf = Vec::new();
 			encode_max_delay(&mut Encoder::new(&mut buf, version.into()), version, max_delay).unwrap();
-			let wire = Decoder::new(&buf, version.into()).varint().unwrap();
+			let wire = (!buf.is_empty()).then(|| Decoder::new(&buf, version.into()).varint().unwrap());
 			let got = decode_max_delay(&mut Decoder::new(&buf, version.into()), version).unwrap();
 			(wire, got)
 		};
-		assert_eq!(encoded(Version::Lite07, None), (0, None));
-		assert_eq!(encoded(Version::Lite07, Some(ms(0))), (1, Some(ms(0))));
-		assert_eq!(encoded(Version::Lite07, Some(ms(250))), (251, Some(ms(250))));
-		assert_eq!(encoded(Version::Lite06, Some(ms(250))), (250, Some(ms(250))));
-		assert_eq!(
-			encoded(Version::Lite06, None),
-			(MAX_SAFE_DELAY_MS, Some(ms(MAX_SAFE_DELAY_MS)))
-		);
+		assert_eq!(encoded(Version::Lite07, Some(ms(250))), (None, None));
+		assert_eq!(encoded(Version::Lite06, Some(ms(250))), (Some(250), Some(ms(250))));
+		assert_eq!(encoded(Version::Lite06, Some(ms(0))), (Some(0), Some(ms(0))));
+		assert_eq!(encoded(Version::Lite06, None), (Some(MAX_SAFE_DELAY_MS), None));
 
 		let mut msg = subscribe_sample();
 		msg.max_delay = Some(ms(250));
-		for version in [Version::Lite01, Version::Lite02] {
+		for version in [Version::Lite01, Version::Lite02, Version::Lite07] {
 			assert_eq!(roundtrip(&msg, version).max_delay, None, "{version}");
 		}
 		assert_eq!(roundtrip(&msg, Version::Lite03).max_delay, Some(ms(250)));
-		msg.max_delay = None;
-		assert_eq!(roundtrip(&msg, Version::Lite07).max_delay, None);
+	}
+
+	/// A live start's max age rides beside its lag, in milliseconds plus one, rounded up, 0 for
+	/// no limit.
+	#[test]
+	fn a_live_starts_max_age_roundtrips_on_lite07() {
+		let ms = std::time::Duration::from_millis;
+		let live = |max| Range {
+			start: Some(Anchor::Live { min: ms(100), max }),
+			end: None,
+		};
+		for (max, wire) in [
+			(None, None),
+			(Some(ms(0)), Some(ms(0))),
+			(Some(ms(250)), Some(ms(250))),
+			(Some(std::time::Duration::from_micros(1500)), Some(ms(2))),
+		] {
+			let mut msg = subscribe_sample();
+			msg.ranges = vec![live(max)];
+			assert_eq!(roundtrip(&msg, Version::Lite07).ranges, vec![live(wire)], "{max:?}");
+		}
+	}
+
+	/// An update retunes a live join wanted under another max age alone in place, keeping its
+	/// Range ID and so where it was placed; anything else about it changing replaces it. The
+	/// publisher refuses a retune naming no live join, or one twice.
+	#[test]
+	fn lite07_retunes_a_live_join_in_place() {
+		let ms = std::time::Duration::from_millis;
+		let version = Version::Lite07;
+		let live = |min, max| Range {
+			start: Some(Anchor::Live { min: ms(min), max }),
+			end: None,
+		};
+		let time = Range {
+			start: Some(Anchor::Time(5)),
+			end: None,
+		};
+		let mut sent = LiveRanges::new(version, &[live(100, Some(ms(500))), time]);
+		let mut live_side = LiveRanges::new(version, &[live(100, Some(ms(500))), time]);
+
+		let edit = sent.edit(&[live(100, Some(ms(2000))), time]).unwrap();
+		assert_eq!(
+			edit,
+			RangeEdit::Edit {
+				remove: vec![],
+				add: vec![],
+				retune: vec![(0, Some(ms(2000)))],
+			}
+		);
+		let update = SubscribeUpdate {
+			wanted_group: None,
+			priority: 0,
+			max_delay: None,
+			ranges: edit,
+			order: crate::track::Order::Descending,
+		};
+		let buf = update.encode_bytes(version).unwrap();
+		let got = crate::coding::decode_buf(&mut buf.as_ref(), version, |r, v| SubscribeUpdate::decode(r, v)).unwrap();
+		assert_eq!(
+			live_side.apply(got.ranges).unwrap(),
+			Applied::Edit {
+				retired: vec![],
+				added: vec![],
+				retuned: vec![(0, live(100, Some(ms(2000))))],
+			}
+		);
+		assert_eq!(live_side.numbered(), sent.numbered());
+
+		// Another lag is another join, placed afresh.
+		let edit = sent.edit(&[live(200, Some(ms(2000))), time]).unwrap();
+		assert_eq!(
+			edit,
+			RangeEdit::Edit {
+				remove: vec![0],
+				add: vec![live(200, Some(ms(2000)))],
+				retune: vec![],
+			}
+		);
+		live_side.apply(edit).unwrap();
+
+		let retune = |retune| RangeEdit::Edit {
+			remove: vec![],
+			add: vec![],
+			retune,
+		};
+		assert!(live_side.clone().apply(retune(vec![(1, None)])).is_err(), "a time start");
+		assert!(live_side.clone().apply(retune(vec![(0, None)])).is_err(), "retired");
+		assert!(
+			live_side.clone().apply(retune(vec![(2, None), (2, None)])).is_err(),
+			"twice"
+		);
+		assert!(live_side.apply(retune(vec![(2, None)])).is_ok());
 	}
 
 	/// Lite-07 carries a live join's lag as a start Anchor in whole milliseconds, rounded up,

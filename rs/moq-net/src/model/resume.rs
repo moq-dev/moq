@@ -10651,7 +10651,7 @@ mod test {
 		}
 		routes.serve(a.consume());
 		let range = track::Range {
-			start: track::Start::Live { min: Duration::ZERO, max: Some(std::time::Duration::ZERO) },
+			start: track::Start::Live { min: Duration::ZERO, max: None },
 			end: Some(1_000_000),
 		};
 		let subscription = Subscription::default()
@@ -10698,7 +10698,7 @@ mod test {
 		routes.serve(b.consume());
 		let joined = sub
 			.subscription()
-			.with_ranges([track::Range::from(track::Start::Live { min: Duration::ZERO, max: Some(std::time::Duration::ZERO) })])
+			.with_ranges([track::Range::from(track::Start::Live { min: Duration::ZERO, max: None })])
 			.with_max(Duration::from_secs(30));
 		sub.update(joined).unwrap();
 		assert!(sub.recv_group().now_or_never().is_none());

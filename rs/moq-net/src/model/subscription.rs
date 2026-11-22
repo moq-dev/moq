@@ -224,6 +224,17 @@ impl Start {
 		max: Some(Duration::ZERO),
 	};
 
+	/// A live join reaching back past every group, so it takes every group still within `max`
+	/// of the live edge: what a wire before lite-07 asks with its one `Subscriber Max Age` and
+	/// no start.
+	pub(crate) const fn within(max: Duration) -> Self {
+		// The largest lag every implementation carries losslessly, long past any group.
+		Self::Live {
+			min: Duration::from_millis((1 << 53) - 1),
+			max: Some(max),
+		}
+	}
+
 	/// Whether this start is a floor for history rather than a live join, so the groups its
 	/// range covers never go stale.
 	pub(crate) fn is_history(&self) -> bool {
@@ -529,15 +540,15 @@ impl Subscription {
 	}
 
 	/// These preferences under a staleness budget the way a subscription-wide max age used to
-	/// apply one: [`Start::LATEST`] and [`Start::Oldest`] reach back as far as `max` and go
-	/// stale past it, or take every group for `None`; another live join keeps its lag and
-	/// takes `max`; a time start is history either way.
+	/// apply one: [`Start::LATEST`] and [`Start::Oldest`] take every group still within `max`
+	/// (see [`Start::within`]), or every group for `None`; another live join keeps its lag
+	/// and takes `max`; a time start is history either way.
 	pub(crate) fn with_max(mut self, max: impl Into<Option<Duration>>) -> Self {
 		let max = max.into();
 		for range in &mut self.ranges {
 			range.start = match range.start {
 				Start::Oldest | Start::LATEST => match max {
-					Some(max) => Start::Live { min: max, max: Some(max) },
+					Some(max) => Start::within(max),
 					None => Start::Oldest,
 				},
 				Start::Live { min, .. } => Start::Live { min, max },
