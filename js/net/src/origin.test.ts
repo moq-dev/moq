@@ -8,7 +8,6 @@ import { StreamCode, StreamError } from "./error.ts";
 import { type Cost, toHop, WireRoute } from "./hop.ts";
 import * as Instance from "./instance.ts";
 import {
-	bestCandidate,
 	chainHash,
 	compareRouteCandidates,
 	compareRoutes,
@@ -2328,18 +2327,25 @@ test("a draining route outranks an unavailable one", () => {
 	expect(compareRoutes(held, draining)).toBeGreaterThan(0);
 });
 
-// An instance's epoch supersedes only within one claim, as Rust's `Epochs` keys by prefix and Above:
+// An instance's epoch supersedes only within one claim, as Rust's `Epochs` keys by the claim's prefix:
 // a broader claim shown at the path, at a higher epoch, is another claim than the exact one there.
 test("a broader claim at a higher epoch does not supersede the exact one", () => {
 	const path = Path.from("src/a");
 	const instance = Instance.parse("i");
 	const exact = { ...WireRoute.default, instance, claimed: true, epoch: 0n };
 	const broad = { ...WireRoute.default, instance, claimed: true, epoch: 1n, above: 1n };
-	expect(bestCandidate(path, path, [exact, broad], (route) => route)).toBe(exact);
-	expect(bestCandidate(path, path, [broad, exact], (route) => route)).toBe(exact);
+	// The best of `routes`, newest first, all filed at the path.
+	const best = (...routes: WireRoute[]) =>
+		mostSpecific(
+			path,
+			(at) => (at === path ? routes : []),
+			(route) => route,
+		);
+	expect(best(exact, broad)).toBe(exact);
+	expect(best(broad, exact)).toBe(exact);
 	// The same claim at a higher epoch still supersedes its older one.
 	const newer = { ...exact, epoch: 2n };
-	expect(bestCandidate(path, path, [exact, newer], (route) => route)).toBe(newer);
+	expect(best(newer, exact)).toBe(newer);
 	expect(superseded(exact, [exact, newer])).toBe(true);
 	expect(superseded(exact, [exact, broad])).toBe(false);
 });

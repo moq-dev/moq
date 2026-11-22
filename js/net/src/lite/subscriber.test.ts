@@ -4310,6 +4310,33 @@ test("a lite-07 reader below the request ranks a broader claim as above its pref
 	subscriber.close();
 });
 
+// Claims of one prefix, one made at `x` and one filed at `x/a` a segment above it, tie on every
+// rank: a reader at `x/a` shows the claim a consume of `x/a` takes, the one filed at the path.
+test("a lite-07 reader below the request shows the claim a consume of its prefix takes", async () => {
+	const { subscriber, announced, send, settled, another, trackRequest } = await routedStream();
+	const [x, xa] = [Path.from("x"), Path.from("x/a")];
+	const narrow = await another(Path.Pattern.subtree(xa));
+	const [made, filed] = [Instance.parse("made"), Instance.parse("filed")];
+	await send({ status: "start", suffix: x, instance: made, claim: claimOf() });
+	await send({ status: "start", suffix: xa, instance: filed, claim: claimOf({ above: 1n }) });
+	await settled();
+	let shown: Instance.Valid | undefined;
+	for (;;) {
+		const next = await Promise.race([narrow.announced.next(), settled().then(() => undefined)]);
+		if (!next) break;
+		shown = next.route.instance;
+	}
+	const consumed = await trackRequest(xa, 0);
+	expect(consumed.request).toMatchObject({ instance: filed });
+	expect(shown).toBe(filed);
+
+	consumed.consumed.close();
+	narrow.announced.close();
+	announced.close();
+	subscriber.close();
+	await consumed.info;
+});
+
 test("a lite-07 claim ranks by its priority before its cost, and last while it drains", async () => {
 	const { subscriber, announced, send } = await routedStream();
 	const room = Path.from("room");

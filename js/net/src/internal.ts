@@ -1707,37 +1707,15 @@ export function chainHash(path: string, hops: readonly bigint[]): bigint {
 }
 
 /**
- * The best of `candidates`, oldest first, at `prefix` for resolving `path`: `best_route` in
- * rs/moq-net. Only an instance's highest epoch is eligible, ranked by
- * {@link compareRouteCandidates} (`route_order`), and a full tie goes to the newest, as Rust's
- * final `Reverse(entry.id)`: a claim is new when it starts or restarts (another instance or
- * epoch), and keeps its place through a re-price. Every selector ranks through this, so the
- * announcements and the consumes of one session never pick apart.
- */
-export function bestCandidate<T>(
-	path: Path.Valid,
-	prefix: Path.Valid,
-	candidates: Iterable<T>,
-	route: (candidate: T) => WireRoute,
-): T | undefined {
-	const list = [...candidates];
-	const epochs = new Epochs(list.map(route));
-	let best: T | undefined;
-	for (const candidate of list) {
-		const next = route(candidate);
-		if (epochs.supersedes(next)) continue;
-		if (best === undefined || compareRouteCandidates(path, prefix, next, route(best)) <= 0) best = candidate;
-	}
-	return best;
-}
-
-/**
  * The best claim covering `path`, as `RouteTable::best_route` in rs/moq-net picks it: only the
  * most specific claims compete, a claim shown above its own prefix counting for the shallower
  * prefix it is really at, and they rank against each other wherever each is filed. Of those, only
  * an instance's highest epoch is eligible, an exact claim's `others` (which never win) included,
- * and the rest order by {@link compareTier}, then the deeper filing, then the newest.
- * `candidates` lists each covering prefix's, newest first.
+ * and the rest order by {@link compareTier}, then the deeper filing, then the newest, as Rust's
+ * final `Reverse(entry.id)`: a claim is new when it starts or restarts (another instance or
+ * epoch), and keeps its place through a re-price. `candidates` lists each covering prefix's,
+ * newest first. Every selector ranks through this, so the announcements and the consumes of one
+ * session never pick apart.
  */
 export function mostSpecific<T>(
 	path: Path.Valid,
@@ -1837,7 +1815,7 @@ export function compareRoutes(a: WireRoute, b: WireRoute): number {
  * hash of each instance, then, within one instance, the hash of its chain. A lite-07 claim counts
  * as one hop, to the peer that sent it, and ranks by the rendezvous hash of its instance. The
  * hashes only spread a prefix's paths: at the prefix itself a tie is left for the newest to win
- * (see {@link bestCandidate}), so a publisher that restarts under a new instance takes over from
+ * (see {@link mostSpecific}), so a publisher that restarts under a new instance takes over from
  * its lingering session at once, matching `route_order` in rs/moq-net for routes a node did not
  * get from a cluster peer, which is every route here.
  */

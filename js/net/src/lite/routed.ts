@@ -18,7 +18,7 @@ import type { BroadcastCache } from "../consume.ts";
 import { error, ProtocolViolation } from "../error.ts";
 import { routesEqual, WireRoute } from "../hop.ts";
 import type * as Instance from "../instance.ts";
-import { bestCandidate, coveringPrefixes, hiddenBelow, scopeCaptures, scopeOverlaps } from "../internal.ts";
+import { coveringPrefixes, hiddenBelow, mostSpecific, scopeCaptures, scopeOverlaps } from "../internal.ts";
 import * as Path from "../path.ts";
 import { SlotMap, type Slots } from "../util/limits.ts";
 import {
@@ -343,7 +343,7 @@ export class Routed {
 				this.#byPath.set(live.path, ids);
 			}
 			// A claim shown anew or restarted iterates last, as the newest; a re-price keeps its
-			// place, as the consume cache does. See bestCandidate.
+			// place, as the consume cache does. See mostSpecific.
 			if (!was || restart) ids.delete(id);
 			ids.add(id);
 			consumes.announce(live.path, live.owner, this.#candidate(live, live.claim), restart);
@@ -367,18 +367,22 @@ export class Routed {
 		this.#serve(id, live, false, lost, was);
 	}
 
-	// The claims `reader` is shown at `path`: those at the path itself, and at the reader's own
-	// prefix each claim at or above it, as the peer presents a claim covering more than a
-	// requested prefix: that many segments more above the path, so a claim exactly there still
-	// outranks it.
-	#candidates(reader: Reader, path: Path.Valid): WireRoute[] {
-		const candidates: WireRoute[] = [];
+	// The claims `reader` is shown at `path`, each with where it is filed and how it is shown:
+	// those at the path itself, and at the reader's own prefix each claim at or above it, as the
+	// peer presents a claim covering more than a requested prefix: that many segments more above
+	// the path, so a claim exactly there still outranks it. Oldest first at each filing.
+	#candidates(reader: Reader, path: Path.Valid): { prefix: Path.Valid; filed: WireRoute; shown: WireRoute }[] {
+		const candidates: { prefix: Path.Valid; filed: WireRoute; shown: WireRoute }[] = [];
 		for (const at of path === reader.prefix ? coveringPrefixes(path) : [path]) {
 			const by = BigInt(Path.parts(path).length - Path.parts(at).length);
 			for (const id of this.#byPath.get(at) ?? []) {
 				const live = this.#claim(id);
 				const shown = by === 0n ? live.claim : { ...live.claim, above: live.claim.above + by };
-				candidates.push(this.#candidate(live, shown));
+				candidates.push({
+					prefix: at,
+					filed: this.#candidate(live, live.claim),
+					shown: this.#candidate(live, shown),
+				});
 			}
 		}
 		return candidates;
@@ -396,14 +400,19 @@ export class Routed {
 			const candidates = this.#candidates(reader, path);
 			if (reader.claims) {
 				// The closest claim of each instance.
-				for (const next of candidates) {
+				for (const { shown: next } of candidates) {
 					const held = now.get(next.instance);
 					if (!held || (next.above ?? 0n) < (held.above ?? 0n)) now.set(next.instance, next);
 				}
 			} else {
-				// The same pick a consume of `path` makes from the cache.
-				const best = bestCandidate(path, path, candidates, (next) => next);
-				if (best) now.set(undefined, best);
+				// The same pick a consume of `path` makes from the cache, ranked where each claim is
+				// filed, newest first at each filing.
+				const best = mostSpecific(
+					path,
+					(prefix) => candidates.filter((candidate) => candidate.prefix === prefix).reverse(),
+					(candidate) => candidate.filed,
+				);
+				if (best) now.set(undefined, best.shown);
 			}
 		}
 
