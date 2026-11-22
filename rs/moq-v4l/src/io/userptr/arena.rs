@@ -75,8 +75,8 @@ impl Drop for Arena {
 			return;
 		}
 
-		// A zero-count REQBUFS stops the queue and makes the driver let go of
-		// every pointer it was handed.
+		// A zero-count REQBUFS succeeds only on a stopped queue, and makes the
+		// driver let go of every pointer it was handed.
 		let mut v4l2_reqbufs = v4l2_requestbuffers {
 			count: 0,
 			..self.requestbuffers_desc()

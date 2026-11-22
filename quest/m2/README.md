@@ -30,8 +30,7 @@ native crates, and public APIs:
   `draft-lcurley-qmux-websocket` up to `qmux-VV.<alpn>`
   ([qmux-websocket-draft](/quest/m2/qmux-websocket-draft.md)).
 - **Vendored native crate soundness.** Fix the unsound public APIs in
-  [moq-v4l](/quest/m2/v4l-arena-soundness.md),
-  [moq-vaapi](/quest/m2/vaapi-soundness-and-upload.md), and
+  [moq-vaapi](/quest/m2/vaapi-soundness-and-upload.md) and
   [moq-nvenc](/quest/m2/nvenc-soundness.md) before `0.22.0` publishes them.
 - **Public API freezes.** Fence `moq-net` event/item types with
   `#[non_exhaustive]` ([net-non-exhaustive-events](/quest/m2/net-non-exhaustive-events.md)),
