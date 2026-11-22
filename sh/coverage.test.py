@@ -17,7 +17,7 @@ class CoverageTest(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
-        for script in ("sh/js/install.py", "sh/js/coverage.py", "sh/rs/coverage.sh", "sh/rs/nextest.sh", "sh/local.sh"):
+        for script in ("sh/js/install.py", "sh/js/coverage.py", "sh/rs/coverage.sh", "sh/rs/no-fuzz.sh", "sh/rs/nextest.sh", "sh/local.sh"):
             target = self.root / script
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / script, target)
@@ -30,6 +30,10 @@ from pathlib import Path
 import sys
 if sys.argv[1:] == ["--version"]:
     print("fixture")
+    sys.exit(0)
+# sh/rs/no-fuzz.sh reads the workspace members; this is not a recorded call.
+if sys.argv[1:2] == ["metadata"]:
+    print(json.dumps({"packages": [{"name": name} for name in ("moq-net", "moq-net-fuzz", "qmux-fuzz", "moq-auth-fuzz")]}))
     sys.exit(0)
 if "install" in sys.argv:
     Path("node_modules").mkdir(exist_ok=True)
@@ -134,8 +138,10 @@ for arg in sys.argv:
         build = calls[1][2:]
         self.assertEqual(build[:3], ["llvm-cov", "nextest", "--no-fail-fast"])
         self.assertIn("--workspace", build)
-        for crate in ("moq-net", "moq-quic", "moq-mux", "moq-rtmp", "moq-sock", "moq-uring"):
-            self.assertIn(f"{crate}-fuzz", build)
+        # Every `*-fuzz` member is excluded, including one a hardcoded list would miss.
+        for crate in ("moq-net-fuzz", "qmux-fuzz", "moq-auth-fuzz"):
+            self.assertIn(crate, build)
+        self.assertNotIn("moq-net", [build[i + 1] for i, arg in enumerate(build[:-1]) if arg == "--exclude"])
         self.assertIn("--tests", build)
         self.assertIn("--test-threads", build)
         self.assertIn("--json", calls[3])

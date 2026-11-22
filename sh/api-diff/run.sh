@@ -230,13 +230,13 @@ js() {
     trap - EXIT
     # A package published at either end is compared, so one deleted or made private since the
     # baseline reads as removed instead of dropping out of the loop.
-    local -A dirs=() versions=()
+    local -A js_dirs=() js_versions=()
     local published='.scripts.release and (.private | not)' manifests
     for manifest in js/*/package.json; do
         jq -e "$published" "$manifest" >/dev/null || continue
         name=$(jq -r .name "$manifest")
-        dirs[$name]=${manifest%/package.json}
-        versions[$name]=-
+        js_dirs[$name]=${manifest%/package.json}
+        js_versions[$name]=-
     done
     # Captured first, since a process substitution's failure would not stop the run.
     manifests=$(git ls-tree -r --name-only "$base" -- js | grep -E '^js/[^/]+/package\.json$' || true)
@@ -244,15 +244,15 @@ js() {
         [[ -n "$manifest" ]] || continue
         entry=$(git show "$base:$manifest")
         jq -e "$published" <<<"$entry" >/dev/null || continue
-        versions[$(jq -r .name <<<"$entry")]=$(jq -r .version <<<"$entry")
+        js_versions[$(jq -r .name <<<"$entry")]=$(jq -r .version <<<"$entry")
     done <<<"$manifests"
-    for name in "${!versions[@]}"; do
-        dir=${dirs[$name]:-/nonexistent}
+    for name in "${!js_versions[@]}"; do
+        dir=${js_dirs[$name]:-/nonexistent}
         while read -r file; do
             entry=${file%.api.md}
             surface=$name/$entry
             [[ "$entry" != index ]] || surface=$name
-            compare "$surface" "${versions[$name]}" "$out/js/baseline/$name/$file" "$dir/api/$file"
+            compare "$surface" "${js_versions[$name]}" "$out/js/baseline/$name/$file" "$dir/api/$file"
         done < <(find "$out/js/baseline/$name" "$dir/api" -name '*.api.md' -printf '%f\n' 2>/dev/null | sort -u)
     done
 }
