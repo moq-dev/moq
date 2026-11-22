@@ -162,7 +162,10 @@ def run(action, plan):
             f"--filter={name}" for name, package in packages.items() if verb in package["manifest"].get("scripts", {})
         ]
         if filters:
-            concurrency = (["--parallel"] if verb in ("check", "test") else []) if os.environ.get("GITHUB_ACTIONS") == "true" else ["--sequential"]
+            if os.environ.get("GITHUB_ACTIONS") == "true":
+                concurrency = ["--parallel"] if verb in ("check", "test") else []
+            else:
+                concurrency = ["--sequential"]
             command("bun", "run", *concurrency, *filters, "--elide-lines=0", verb)
 
     def reports():
