@@ -9,7 +9,7 @@
 #   DISCORD_WEBHOOK   Required. The #alerts channel webhook URL.
 #   RUN_NAME          Workflow name (github.event.workflow_run.name).
 #   RUN_URL           Run html_url.
-#   RUN_CONCLUSION    failure / timed_out.
+#   RUN_CONCLUSION    failure / timed_out / cancelled.
 #   RUN_EVENT         What triggered the failed run (push, schedule, ...).
 #   RUN_REF           head_branch: a branch name, or a tag for tag-triggered runs.
 #   RUN_TITLE         display_title, usually the commit subject.
