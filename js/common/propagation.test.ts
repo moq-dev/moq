@@ -15,45 +15,51 @@ function registry(after: Record<string, number>) {
 	return { checks, found };
 }
 
-test("waits out a transient miss and returns nothing missing", async () => {
+// Runs `body` with a fresh `Manual` clock installed, restoring the ambient clock after.
+async function withClock(body: (clock: Manual) => Promise<void>) {
 	const clock = new Manual();
-	clock.install();
-	const { checks, found } = registry({ "@moq/net@^1": 2 });
-	expect(await clock.drive(settle(["@moq/net@^1"], found))).toEqual([]);
-	expect(checks).toEqual(["@moq/net@^1", "@moq/net@^1"]);
-	expect(now().since(Instant.ZERO).asSecs()).toBe(15);
-});
+	const installed = clock.install();
+	try {
+		await body(clock);
+	} finally {
+		installed.close();
+	}
+}
 
-test("rechecks only what is still missing", async () => {
-	const clock = new Manual();
-	clock.install();
-	const { checks, found } = registry({ a: 1, b: 3 });
-	expect(await clock.drive(settle(["a", "b"], found))).toEqual([]);
-	expect(checks).toEqual(["a", "b", "b", "b"]);
-});
+test("waits out a transient miss and returns nothing missing", () =>
+	withClock(async (clock) => {
+		const { checks, found } = registry({ "@moq/net@^1": 2 });
+		expect(await clock.drive(settle(["@moq/net@^1"], found))).toEqual([]);
+		expect(checks).toEqual(["@moq/net@^1", "@moq/net@^1"]);
+		expect(now().since(Instant.ZERO).asSecs()).toBe(15);
+	}));
 
-test("returns the specs still missing once the delays run out, after 75 s", async () => {
-	const clock = new Manual();
-	clock.install();
-	const { checks, found } = registry({ never: Number.POSITIVE_INFINITY, late: 2 });
-	expect(await clock.drive(settle(["never", "late"], found))).toEqual(["never"]);
-	expect(checks.filter((s) => s === "never")).toHaveLength(DELAYS.length);
-	expect(now().since(Instant.ZERO).asSecs()).toBe(75);
-});
+test("rechecks only what is still missing", () =>
+	withClock(async (clock) => {
+		const { checks, found } = registry({ a: 1, b: 3 });
+		expect(await clock.drive(settle(["a", "b"], found))).toEqual([]);
+		expect(checks).toEqual(["a", "b", "b", "b"]);
+	}));
 
-test("a spec found at once never waits", async () => {
-	const clock = new Manual();
-	clock.install();
-	expect(await clock.drive(settle([], () => false))).toEqual([]);
-	expect(now().since(Instant.ZERO).asSecs()).toBe(0);
-});
+test("returns the specs still missing once the delays run out, after 75 s", () =>
+	withClock(async (clock) => {
+		const { checks, found } = registry({ never: Number.POSITIVE_INFINITY, late: 2 });
+		expect(await clock.drive(settle(["never", "late"], found))).toEqual(["never"]);
+		expect(checks.filter((s) => s === "never")).toHaveLength(DELAYS.length);
+		expect(now().since(Instant.ZERO).asSecs()).toBe(75);
+	}));
 
-test("a registry failure while rechecking is not swallowed", async () => {
-	const clock = new Manual();
-	clock.install();
-	const failing = () => {
-		throw new Error("ECONNRESET");
-	};
-	const work = settle(["x"], failing, [secs(1)]).catch((e: unknown) => e);
-	expect(await clock.drive(work)).toEqual(new Error("ECONNRESET"));
-});
+test("a spec found at once never waits", () =>
+	withClock(async (clock) => {
+		expect(await clock.drive(settle([], () => false))).toEqual([]);
+		expect(now().since(Instant.ZERO).asSecs()).toBe(0);
+	}));
+
+test("a registry failure while rechecking is not swallowed", () =>
+	withClock(async (clock) => {
+		const failing = () => {
+			throw new Error("ECONNRESET");
+		};
+		const work = settle(["x"], failing, [secs(1)]).catch((e: unknown) => e);
+		expect(await clock.drive(work)).toEqual(new Error("ECONNRESET"));
+	}));
