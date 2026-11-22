@@ -202,6 +202,26 @@ async fn close_gives_up_on_a_live_track_for(version: &str) {
 	assert_eq!((kio::clock::now() - started), Duration::from_secs(1));
 }
 
+/// A transport that never confirms this side's abort, as WebTransport waits for a peer
+/// that is gone to acknowledge its close capsule, still ends the session after a grace.
+#[kio::test]
+async fn an_unconfirmed_abort_still_ends_the_session() {
+	let pair = connect_mock(MockConnectOptions::new("moq-lite-06".parse().unwrap())).await;
+	pair.client_transport.withhold_close_confirmation();
+	let started = kio::clock::now();
+	pair.client.abort(Error::GoawayTimeout);
+
+	let err = kio::clock::timeout(TIMEOUT, pair.client.closed())
+		.await
+		.expect("the unconfirmed abort never ended the session");
+	assert!(matches!(err, Error::GoawayTimeout), "{err:?}");
+	assert!(
+		kio::clock::now() - started < Duration::from_secs(1),
+		"ended after {:?}",
+		kio::clock::now() - started
+	);
+}
+
 /// An abort from another handle cuts a drain short.
 #[kio::test]
 async fn abort_cuts_a_drain_short() {

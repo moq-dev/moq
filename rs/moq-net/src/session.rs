@@ -17,6 +17,10 @@ use crate::{Error, SessionError, Version, auth, bandwidth, coding::StreamCodes, 
 /// How long [`Session::close`] waits for queued data before closing anyway.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// The least time a transport this side closed gets to confirm it, before the session
+/// ends without its confirmation; see [`Supervisor::close`].
+const CLOSE_GRACE: Duration = Duration::from_millis(100);
+
 /// A close requested by a session handle, executed by the driver.
 #[derive(Clone)]
 enum Close {
@@ -610,6 +614,7 @@ impl Session {
 			sampled: None,
 			mode: SamplerMode::Idle,
 			drain: Drain::Idle,
+			unconfirmed: None,
 			auth: auth.clone(),
 		};
 
@@ -677,6 +682,9 @@ pub(crate) struct Supervisor {
 	sampled: Option<crate::time::Instant>,
 	mode: SamplerMode,
 	drain: Drain,
+	/// Set once this side closed the transport: past it, the session ends without the
+	/// transport confirming the close.
+	unconfirmed: Option<crate::time::Deadline>,
 	/// The transport's wire counters, registered under the session's root; dropping records the last reading.
 	wire: Option<crate::stats::Wire>,
 	/// This session's side of its auth handle, closed before the end is published so a
@@ -769,38 +777,69 @@ impl Supervisor {
 	const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 	pub(crate) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		// The transport's terminal error ends the supervisor.
-		if let Poll::Ready(err) = self.closed_watch.poll_closed(waiter) {
-			// Nothing samples once this returns, but `stats()` keeps serving
-			// this cell, so leave it holding the session's final counters
-			// rather than whichever sample the last demand happened to catch.
-			self.stats.lock().sample = snapshot(&self.session);
-			self.wire.take();
-			let drain = match std::mem::replace(&mut self.drain, Drain::Idle) {
-				Drain::Done(res) => Some(res),
-				_ => None,
-			};
-			let err = match err.close_kind() {
-				// The transport only knows this side closed it, so the reason is ours.
-				crate::transport::CloseKind::Closed if err.session_error().is_none() => {
-					self.session.closing().cause(self.version).unwrap_or(Error::Cancel)
-				}
-				_ => self.version.transport_error(err),
-			};
-			// Anything the peer is told is "no error" ended the session cleanly, by
-			// either side: one spelling for the handles and the stats.
-			let err = match SessionError::from(&err) {
-				SessionError::Cancel => Error::Cancel,
-				_ => err,
-			};
-			self.auth.close(err.clone());
-			self.context.end(&err);
-			if let Ok(mut closed) = self.closed.write() {
-				*closed = Some(Ended { err, drain });
-			}
+		if let Poll::Ready(err) = self.poll_ended(waiter) {
+			self.end(err);
 			return Poll::Ready(());
 		}
+		self.poll_running(waiter);
+		// A close executed this turn armed its grace, which has to register its wakeup.
+		if let Poll::Ready(err) = self.poll_ended(waiter) {
+			self.end(err);
+			return Poll::Ready(());
+		}
+		Poll::Pending
+	}
 
+	/// Resolve with why the session ended: the transport's terminal error, or this side's
+	/// reason once the transport reports or has had its grace to confirm this side's close.
+	fn poll_ended(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
+		let err = match self.closed_watch.poll_closed(waiter) {
+			Poll::Ready(err) => match err.close_kind() {
+				// The transport only knows this side closed it, so the reason is ours.
+				crate::transport::CloseKind::Closed if err.session_error().is_none() => None,
+				_ => return Poll::Ready(self.version.transport_error(err)),
+			},
+			// A peer that is gone never lets some transports confirm a close, such as a
+			// WebTransport close waiting for its capsule's acknowledgement until the idle
+			// timeout. That transport goes on delivering it on its own.
+			Poll::Pending => match &mut self.unconfirmed {
+				Some(grace) => {
+					ready!(grace.poll(waiter));
+					None
+				}
+				None => return Poll::Pending,
+			},
+		};
+		Poll::Ready(err.unwrap_or_else(|| self.session.closing().cause(self.version).unwrap_or(Error::Cancel)))
+	}
+
+	/// Publish the session's end with `err`.
+	fn end(&mut self, err: Error) {
+		// Nothing samples once this returns, but `stats()` keeps serving
+		// this cell, so leave it holding the session's final counters
+		// rather than whichever sample the last demand happened to catch.
+		self.stats.lock().sample = snapshot(&self.session);
+		self.wire.take();
+		let drain = match std::mem::replace(&mut self.drain, Drain::Idle) {
+			Drain::Done(res) => Some(res),
+			_ => None,
+		};
+		// Anything the peer is told is "no error" ended the session cleanly, by
+		// either side: one spelling for the handles and the stats.
+		let err = match SessionError::from(&err) {
+			SessionError::Cancel => Error::Cancel,
+			_ => err,
+		};
+		self.auth.close(err.clone());
+		self.context.end(&err);
+		if let Ok(mut closed) = self.closed.write() {
+			*closed = Some(Ended { err, drain });
+		}
+	}
+
+	/// Run everything a live session does: its GOAWAY deadline, the handles' close
+	/// requests, and the samplers.
+	fn poll_running(&mut self, waiter: &kio::Waiter) {
 		if let Some(goaway) = &mut self.goaway
 			&& let Poll::Ready(timeout) = goaway.poll(waiter)
 		{
@@ -859,8 +898,6 @@ impl Supervisor {
 		if let Some(probe) = &mut self.probe {
 			probe.poll(waiter);
 		}
-
-		Poll::Pending
 	}
 
 	pub(crate) fn draining(&self) -> bool {
@@ -868,9 +905,16 @@ impl Supervisor {
 	}
 
 	/// Close the transport over `cause`, this side's reason for ending the session.
+	///
+	/// The session then ends once the transport confirms the close, or after three round
+	/// trips and at least [`CLOSE_GRACE`] without it, the time a live peer takes to.
 	fn close(&mut self, cause: Error, reason: &str) {
 		let code = self.version.session_code(&SessionError::from(&cause));
 		self.session.abort(&cause, code, reason);
+		if self.unconfirmed.is_none() {
+			let rtt = snapshot(&self.session).rtt.unwrap_or_default();
+			self.unconfirmed = Some(crate::time::Deadline::after(&self.runtime, (rtt * 3).max(CLOSE_GRACE)));
+		}
 	}
 
 	/// Finish a requested drain once the protocol owes the peer nothing, or at

@@ -10,26 +10,12 @@
 //! through handshake and authentication, then through the established session,
 //! or until the shared deadline. The deadline cuts what is still pending and
 //! closes every established session left, then waits for those to finish their
-//! cleanup: the lease's `end`, reported to the decider. Their transports get only a
-//! short grace to confirm the close, which a vanished peer would otherwise hold
-//! until its idle timeout.
+//! cleanup: the lease's `end`, reported to the decider.
 
 use std::time::Duration;
 
 use kio::clock::Instant;
 use tokio::sync::watch;
-
-/// The least a session past the drain deadline is given to confirm its close.
-const CLOSE_GRACE: Duration = Duration::from_millis(100);
-
-/// Wait for `session`'s transport to confirm the close this side sent, for three
-/// round trips and at least [`CLOSE_GRACE`], as moq-tokio's WebTransport teardown
-/// waits for its peer. A live peer acknowledges by then; a WebTransport close to one
-/// that is gone would otherwise wait for its capsule's ACK until the idle timeout.
-pub(crate) async fn confirm_close(session: &moq_net::Session) {
-	let rtt = session.stats().rtt.unwrap_or_default();
-	let _ = kio::clock::timeout((rtt * 3).max(CLOSE_GRACE), session.closed()).await;
-}
 
 /// Fires the relay-wide shutdown broadcast. Held by `Relay::run` for the OS
 /// signal path; an embedder clones one to stop the relay from its own task.
@@ -414,9 +400,6 @@ impl Observer {
 	/// With no time left (a zero [`drain_timeout`](Self::drain_timeout), or a
 	/// session accepted after the deadline) the GOAWAY's zero timeout closes the
 	/// session at once with `GoawayTimeout`, likely before the GOAWAY is written.
-	///
-	/// Returns once the close is requested, without waiting for the transport to
-	/// confirm it; the session's supervision gives that a grace.
 	pub async fn drain_session(&self, session: &moq_net::Session) {
 		self.drain(session, true).await;
 	}
@@ -443,6 +426,7 @@ impl Observer {
 		}
 		tracing::debug!("peer did not leave before the drain deadline; closing");
 		session.abort(moq_net::Error::GoawayTimeout);
+		session.closed().await;
 	}
 
 	/// Drain a cluster link this relay dialed as [`drain`](Self::drain) does an
