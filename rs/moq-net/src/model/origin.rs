@@ -5134,6 +5134,9 @@ impl kio::Task for FrontServe {
 							self.events.push_back(event);
 						}
 						Action::Request { route } => {
+							// Whatever answers this ask, the one it replaces is unwanted: drop
+							// it now, so its claimant learns nobody waits on it.
+							self.upstream = None;
 							// The entry and what it serves.
 							let found = {
 								let table = self.shared.read();
@@ -14109,6 +14112,24 @@ mod tests {
 		let served = broadcast::Info::new().produce();
 		moved.serve(&served);
 		pending.await.expect("resolves through the cheaper route");
+	}
+
+	/// A front moving to a route that serves at once, such as a local broadcast, also
+	/// leaves the request it held unwanted.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_request_is_unwanted_once_a_direct_route_takes_over() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let pool = producer.claim("room", RouteOptions::default().with_cost(5)).unwrap();
+		let pending = consumer.request("room/alice", None);
+		let request = queued(&pool).await;
+
+		let _direct = producer
+			.route("room/alice", RouteOptions::default().with_cost(1))
+			.unwrap();
+		settle(|| unwanted(&request)).await;
+		pending.await.expect("resolves through the direct route");
 	}
 
 	/// An answer prepared for a claim that went away is refused, never announced.

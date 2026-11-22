@@ -1430,3 +1430,21 @@ test("a held request is unwanted once its requester moves to a cheaper route", a
 	pool.close();
 	origin.close();
 });
+
+test("a held request is unwanted once a direct route takes over", async () => {
+	const origin = new Producer();
+	const path = Path.from("room/alice");
+	const pool = origin.claim(Path.from("room"), { cost: 5n });
+	const requester = origin.request(path);
+	const held = defined((await pool.requested().next()).value);
+	const left = unwanted(held);
+
+	const direct = origin.route(path, { cost: 1n });
+	await settle();
+	expect(left()).toBe(true);
+	expect((await requester.broadcast()).closed.peek()).toBeUndefined();
+	requester.close();
+	direct.close();
+	pool.close();
+	origin.close();
+});
