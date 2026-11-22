@@ -196,6 +196,9 @@ pub(in crate::model) struct Budget {
 	history: Duration,
 	/// The groups history ranges cover.
 	covered: Cover,
+	/// Whether a history range is asked for, placed or not: wherever it lands, its groups get
+	/// the history budget.
+	asked: bool,
 }
 
 impl Budget {
@@ -205,6 +208,7 @@ impl Budget {
 			live: budget,
 			history: budget,
 			covered: Cover::default(),
+			asked: false,
 		}
 	}
 
@@ -225,11 +229,11 @@ impl Budget {
 		}
 	}
 
-	/// The widest budget any group gets.
+	/// The widest budget any group gets, counting a history range not yet placed.
 	pub fn widest(&self) -> Duration {
-		match self.covered.is_empty() {
-			true => self.live,
-			false => self.live.max(self.history),
+		match self.asked {
+			true => self.live.max(self.history),
+			false => self.live,
 		}
 	}
 
@@ -290,6 +294,8 @@ pub(in crate::model) struct Window {
 	/// The budgets of the live joins among [`Self::ranges`], counted: a group no history range
 	/// covers goes stale past the widest.
 	budgets: BTreeMap<Duration, usize>,
+	/// The non-empty history ranges among [`Self::ranges`], placed or not.
+	histories: usize,
 	/// The groups the history ranges' spans read, which never go stale.
 	history: Cover,
 	/// Each non-empty range placed, by key.
@@ -393,13 +399,10 @@ impl Window {
 			.filter(|(_, range)| range.join().is_some())
 			.map(|(key, _)| (*key, since(*key)))
 			.collect();
-		let mut budgets = BTreeMap::new();
-		for range in ranges.values().filter(|range| range.join().is_some()) {
-			*budgets.entry(range.budget()).or_default() += 1;
-		}
 		let mut window = Self {
-			ranges,
-			budgets,
+			ranges: BTreeMap::new(),
+			budgets: BTreeMap::new(),
+			histories: 0,
 			history: Cover::default(),
 			spans: BTreeMap::new(),
 			pending: BTreeSet::new(),
@@ -414,6 +417,10 @@ impl Window {
 			named: BTreeMap::new(),
 			unnamed: 0,
 		};
+		for range in ranges.values() {
+			window.count_budget(range);
+		}
+		window.ranges = ranges;
 		window.place(latest, holdings);
 		window
 	}
@@ -442,7 +449,11 @@ impl Window {
 		holdings: &impl Holdings,
 	) {
 		let retuned: BTreeSet<u64> = (added.iter())
-			.filter(|(key, range)| range.join().is_some_and(|join| self.ranges.get(key).and_then(Range::join) == Some(join)))
+			.filter(|(key, range)| {
+				range
+					.join()
+					.is_some_and(|join| self.ranges.get(key).and_then(Range::join) == Some(join))
+			})
 			.map(|(key, _)| *key)
 			.collect();
 		for key in retired {
@@ -470,16 +481,22 @@ impl Window {
 		self.covered = None;
 	}
 
-	/// Count a live join's budget among [`Self::budgets`].
+	/// Count a live join's budget among [`Self::budgets`], or a history range among
+	/// [`Self::histories`].
 	fn count_budget(&mut self, range: &Range) {
 		if range.join().is_some() {
 			*self.budgets.entry(range.budget()).or_default() += 1;
+		} else if !range.is_empty() {
+			self.histories += 1;
 		}
 	}
 
 	/// Take back what [`Self::count_budget`] counted.
 	fn uncount_budget(&mut self, range: &Range) {
 		if range.join().is_none() {
+			if !range.is_empty() {
+				self.histories -= 1;
+			}
 			return;
 		}
 		let count = self.budgets.get_mut(&range.budget()).expect("a counted budget");
@@ -492,9 +509,36 @@ impl Window {
 	/// How long each group stays worth delivering once superseded, as these ranges set it.
 	pub fn budget(&self) -> Budget {
 		Budget {
-			live: self.budgets.last_key_value().map_or(Duration::ZERO, |(budget, _)| *budget),
+			live: self
+				.budgets
+				.last_key_value()
+				.map_or(Duration::ZERO, |(budget, _)| *budget),
 			history: Duration::MAX,
 			covered: self.history.clone(),
+			asked: self.histories > 0,
+		}
+	}
+
+	/// [`Self::budget`] with each range's staleness taken from `ranges`, by key, rather than
+	/// from the range it was placed as: a front's reader places a live join where a copy
+	/// resolved it, as a time start, and the join's groups still go stale past its `max`.
+	pub fn budget_of(&self, ranges: &BTreeMap<u64, Range>) -> Budget {
+		let asked = || ranges.values().filter(|range| !range.is_empty());
+		let mut covered = Cover::default();
+		for (key, span) in &self.spans {
+			if let Some(run) = &span.groups
+				&& ranges.get(key).is_some_and(|range| range.start.is_history())
+			{
+				covered.add(run.clone(), 1);
+			}
+		}
+		Budget {
+			live: (asked().filter_map(|range| range.join().map(|_| range.budget())))
+				.max()
+				.unwrap_or(Duration::ZERO),
+			history: Duration::MAX,
+			covered,
+			asked: asked().any(|range| range.join().is_none()),
 		}
 	}
 
@@ -1884,11 +1928,7 @@ mod tests {
 	#[test]
 	fn a_time_start_is_not_looked_up_without_a_history() {
 		let keys = Keys::new([4000, 9000]);
-		let window = Window::new(
-			&[range(time(8500), None), range(time(500), None)],
-			Some(9000),
-			&keys,
-		);
+		let window = Window::new(&[range(time(8500), None), range(time(500), None)], Some(9000), &keys);
 		assert_eq!(window.lookups().count(), 0);
 		assert_eq!(
 			window.resolved(),

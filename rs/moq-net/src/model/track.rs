@@ -10160,25 +10160,25 @@ impl Cursor {
 		self.prune_skipped();
 		self.record.delivered.insert(key);
 		let mut delivered = std::mem::take(&mut self.record.delivered);
-		self.forget_past_budget(&mut delivered);
+		self.forget_past_budget(&mut delivered, self.filter.window.budget());
 		self.record.delivered = delivered;
 		self.retire_written_off();
 	}
 
-	/// Forget the gaps in `delivered` below each group past this cursor's budget now,
-	/// whether this track holds it or not: one landing there would be written off. A group
-	/// skipped as stale is not forgotten, since a wider budget owes it again, and neither is
-	/// one a widening still owes, which a newest-first re-offer has yet to judge.
+	/// Forget the gaps in `delivered` below each group past `budget` now, whether this track
+	/// holds it or not: one landing there would be written off. A group skipped as stale is
+	/// not forgotten, since a wider budget owes it again, and neither is one a widening still
+	/// owes, which a newest-first re-offer has yet to judge.
 	///
 	/// One edge for every group judged, so forgetting N gaps never resolves it N times.
-	fn forget_past_budget(&self, delivered: &mut Delivered) {
+	fn forget_past_budget(&self, delivered: &mut Delivered, budget: Budget) {
 		if delivered.above_gap().is_none() {
 			return;
 		}
 		let owed = self.filter.owed.first().map(|run| *run.start());
 		let skipped = self.record.skipped.lowest().into_iter().chain(owed).min();
 		let state = self.state.read();
-		let budgets = self.filter.window.budget().clamped(state.max_age_bound());
+		let budgets = budget.clamped(state.max_age_bound());
 		let edge = state.drift_edge(&self.servable);
 		let now = state.cache.pool().now_wall();
 		while let Some(oldest) = delivered.above_gap() {
@@ -11457,12 +11457,13 @@ impl Subscriber {
 		}
 	}
 
-	/// Forget the gaps in `delivered` below each group past this subscriber's budget now:
-	/// one landing there would be written off.
-	pub(super) fn forget_past_budget(&self, delivered: &mut Delivered) {
+	/// Forget the gaps in `delivered` below each group past `budget` now: one landing there
+	/// would be written off. The budget is the reader's whose `delivered` this is, which a
+	/// front's copy, its ranges raised to a resume point, cannot judge by its own.
+	pub(super) fn forget_past_budget(&self, delivered: &mut Delivered, budget: Budget) {
 		match &self.inner {
-			Inner::Plain(cursor) => cursor.forget_past_budget(delivered),
-			Inner::Resume(resume, _) => resume.forget_past_budget(delivered),
+			Inner::Plain(cursor) => cursor.forget_past_budget(delivered, budget),
+			Inner::Resume(resume, _) => resume.forget_past(delivered, budget),
 		}
 	}
 

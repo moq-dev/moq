@@ -370,7 +370,10 @@ pub(super) fn union(ranges: impl IntoIterator<Item = Range>) -> Vec<Range> {
 	// A range with no time start can't be placed against the time spans.
 	union.extend(ranges.iter().filter(|range| range.start == Start::Oldest));
 	union.extend(joins.into_iter().map(|((min, end), budget)| Range {
-		start: Start::Live { min, max: max_of(budget) },
+		start: Start::Live {
+			min,
+			max: max_of(budget),
+		},
 		end,
 	}));
 	union.sort_unstable();
@@ -692,8 +695,12 @@ mod tests {
 		combine(subscriptions).unwrap().ranges
 	}
 
+	fn join(min: Duration, max: Option<Duration>) -> Range {
+		Range::from(Start::Live { min, max })
+	}
+
 	fn joining(min: Duration) -> Subscription {
-		Subscription::default().with_ranges([Range::from(Start::Live { min, max: Some(std::time::Duration::ZERO) })])
+		Subscription::default().with_ranges([join(min, Some(Duration::ZERO))])
 	}
 
 	/// A legacy span becomes inclusive times: an exclusive end of 0 holds nothing, whatever
@@ -745,12 +752,15 @@ mod tests {
 
 		let sub = Subscription::default().with_start(5).with_end(10);
 		assert_eq!((sub.start(), sub.end()), (Some(5), Some(10)));
-		assert_eq!(sub.with_start(None).with_end(None), Subscription::default());
+		assert_eq!(
+			sub.with_start(None).with_end(None),
+			Subscription::default().with_ranges([Range::ALL])
+		);
 	}
 
 	/// The aggregate is the union: overlapping and adjacent time ranges merge, an open range
-	/// absorbs what starts inside it, and a range with no start absorbs everything only while
-	/// it reaches back as far as the budget allows.
+	/// absorbs what starts inside it, a range from the oldest group absorbs everything, and
+	/// live joins of one lag and end merge under their widest `max`.
 	#[test]
 	fn combined_ranges_are_the_union() {
 		let sub = |ranges: &[Range]| Subscription::default().with_ranges(ranges.iter().copied());
@@ -773,10 +783,7 @@ mod tests {
 			ranges(&[sub(&[groups(2, 5), groups(9, None)]), sub(&[groups(4, None)])]),
 			vec![groups(2, None)]
 		);
-		assert_eq!(
-			ranges(&[sub(&[groups(2, 5)]), Subscription::default()]),
-			vec![Range::ALL]
-		);
+		assert_eq!(ranges(&[sub(&[groups(2, 5)]), sub(&[Range::ALL])]), vec![Range::ALL]);
 
 		// A live join reaches back only by its lag, so the history beside it stays asked, and
 		// each lag is a range of its own.
@@ -786,14 +793,34 @@ mod tests {
 			ranges(&[sub(&[groups(2, 5)]), joining(two), joining(five), joining(two)]),
 			vec![
 				groups(2, 5),
-				Range::from(Start::Live { min: two, max: Some(std::time::Duration::ZERO) }),
-				Range::from(Start::Live { min: five, max: Some(std::time::Duration::ZERO) })
+				join(two, Some(Duration::ZERO)),
+				join(five, Some(Duration::ZERO))
 			]
 		);
 		// Unless another reader starts at the oldest group.
 		assert_eq!(
-			ranges(&[sub(&[groups(2, 5)]), joining(two), Subscription::default()]),
+			ranges(&[sub(&[groups(2, 5)]), joining(two), sub(&[Range::ALL])]),
 			vec![Range::ALL]
+		);
+
+		// Joins of one lag land on the same group whatever their `max`, so they merge under
+		// the widest, and no limit is the widest of all.
+		assert_eq!(
+			ranges(&[sub(&[join(two, Some(five))]), joining(two)]),
+			vec![join(two, Some(five))]
+		);
+		assert_eq!(
+			ranges(&[sub(&[join(two, Some(five))]), sub(&[join(two, None)])]),
+			vec![join(two, None)]
+		);
+		// A join's end keeps it apart from an open one of the same lag.
+		let ended = Range {
+			end: Some(9),
+			..join(two, Some(five))
+		};
+		assert_eq!(
+			ranges(&[sub(&[ended]), joining(two)]),
+			vec![join(two, Some(Duration::ZERO)), ended]
 		);
 
 		// Empty ranges ask for nothing.
