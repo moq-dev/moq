@@ -803,7 +803,10 @@ test.each([
 			const start = index * GROUP;
 			const group = track.createGroup(BigInt(start));
 			for (let frame = 0; frame < FRAMES; frame++) {
-				group.writeFrame({ payload: enc.encode("frame"), timestamp: Timestamp.fromMicros(start + frame * FRAME) });
+				group.writeFrame({
+					payload: enc.encode("frame"),
+					timestamp: Timestamp.fromMicros(start + frame * FRAME),
+				});
 				await clock.advance(Duration.micros(FRAME));
 			}
 			if (index < RESET) group.abort(new StreamError(StreamCode.Old, { message: "old" }));

@@ -141,6 +141,9 @@ async fn reset_groups(live: bool, join: u64) {
 	assert_eq!(keys.last(), Some(&((GROUPS - 1) * GROUP)), "live {live}: read {keys:?}");
 	// At most one request per group: never one per key between them.
 	let fetched = fetches(&upstream);
-	assert!(fetched <= GROUPS as usize, "live {live}: {fetched} fetches for {GROUPS} groups");
+	assert!(
+		fetched <= GROUPS as usize,
+		"live {live}: {fetched} fetches for {GROUPS} groups"
+	);
 	drop((track, broadcast, upstream, publisher, relay, finished));
 }
