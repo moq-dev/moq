@@ -220,7 +220,7 @@ class SelectionTest(unittest.TestCase):
 
         def invoke(args, **kwargs):
             calls.append(list(args))
-            if args[:2] == ("bunx", "tsc") and args[-1] != "test/tsconfig.json":
+            if args[:3] == ("bun", "check", "--no-script") and args[-1] != "test/tsconfig.json":
                 self.configurations.append(json.loads(Path(args[-1]).read_text()))
             return type("Result", (), {"returncode": 1 if args[0] == "grep" else 0})()
 
@@ -262,7 +262,7 @@ class SelectionTest(unittest.TestCase):
                 for action in ("check", "build")
             ],
         )
-        self.assertTrue(any(c[:2] == ["bunx", "tsc"] for c in calls))
+        self.assertTrue(any(c[:3] == ["bun", "check", "--no-script"] for c in calls))
         self.assertEqual(
             self.configurations,
             [{"extends": "./tsconfig.json", "exclude": ["**/dist", str(self.root / "test/browser")]}],
@@ -273,7 +273,7 @@ class SelectionTest(unittest.TestCase):
         calls = self.calls(["doc/index.md"], "test")
         self.assertIn(["bun", "run", "--sequential", "--filter=docs", "--elide-lines=0", "test"], calls)
         hosted = self.calls(["doc/index.md"], "test", github_actions=True)
-        self.assertIn(["bun", "run", "--filter=docs", "--elide-lines=0", "test"], hosted)
+        self.assertIn(["bun", "run", "--parallel", "--filter=docs", "--elide-lines=0", "test"], hosted)
         self.assertFalse(any(c[0] == "just" for c in calls))
 
     def test_owned_package_without_scripts_keeps_harness_check(self):
@@ -281,7 +281,7 @@ class SelectionTest(unittest.TestCase):
         self.write()
         calls = self.calls(["doc/index.md"])
         self.assertFalse(any(c[:2] == ["bun", "run"] for c in calls))
-        self.assertTrue(any(c[:2] == ["bunx", "tsc"] for c in calls))
+        self.assertTrue(any(c[:3] == ["bun", "check", "--no-script"] for c in calls))
         self.assertFalse(any(c[:2] == ["bun", "run"] for c in self.calls(["doc/index.md"], "test")))
         self.assertFalse(any(c[:2] == ["bun", "run"] for c in self.calls(["doc/index.md"], "build")))
 

@@ -145,29 +145,29 @@ module cpp '^(\.cargo/config\.toml$|cpp/moq/|cpp/justfile$|sh/cpp/|sh/clang-form
 # the libobs headers it compiles against.
 module obs_compile '^(\.cargo/config\.toml$|cpp/obs/|cpp/moq/|sh/obs/|rs/moq-ffi/|rs/libmoq/native-libs/|flake\.nix$)' \
     tools='cargo cmake pkg-config uniffi-bindgen-cpp' compiles=check lane=cpp
-# The bun lane serializes fixers and JS builds that write shared outputs.
-# Dependency setup separately uses sh/js/install.py across every entry point.
+# Dependency setup uses sh/js/install.py (locked) across every entry point,
+# and fix already sets limit=1, so read-only JS/Bun checks run in parallel.
 # Biome checks the whole repository. It registers before js so
 # that fix runs it first, since Biome can fix sources that the package build
 # rejects, such as a type-only export.
 module biome '' \
-    tools='bun uv' lane=bun fix
+    tools='bun uv' fix
 # The JS tests also read Rust's shared JSON vectors; sh/js/workspace.py
 # fails a check that reads a cross-tree input this pattern misses.
 # Root Nix inputs own the browser version every npm Playwright pin matches.
 module js '^(js/|bench/browser/|doc/|drafts/|demo/(boy|web|carla/web)/|test/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$|flake\.(nix|lock)$)' \
-    tools='bun python3 uv' lane=bun fix
+    tools='bun python3 uv' fix
 # fallow over the whole workspace: removing the last use of an export in one
 # package leaves it dead in the package that defines it, which a run scoped to
 # the changed packages would never analyze.
 module dead_code '(\.([mc]?[jt]sx?|vue)|(^|/)package\.json|^bun\.lock|^\.fallowrc\.jsonc)$' \
-    tools='bun uv' lane=bun
+    tools='bun uv'
 # The recorded-trace replays play through the player's container consumer and
 # ring on a simulated clock: deterministic, seconds long, and only Bun (plus uv
 # for the install step), so they gate every diff that can move a row. It shares
-# the bun lane so it reads the dependencies js installs.
+# its own install lock so it can run beside js.
 module audio_quality '^(js/(hang|watch|net|signals|clock)/|test/audio-quality/|test/lib/|test/justfile$)' \
-    tools='bun uv' lane=bun
+    tools='bun uv'
 module kt '^(\.cargo/config\.toml$|kt/|sh/kt/|rs/moq-ffi/|rs/uniffi-bindgen/|doc/lib/kt/|doc/lib/samples\.sh$)' \
     tools='cargo gradle java ktfmt' compiles=check fix
 # Rust source is compiled below. Nix reads Cargo metadata, packaging inputs,
@@ -215,20 +215,20 @@ module swift '^(\.cargo/config\.toml$|swift/|sh/swift/|rs/moq-ffi/|rs/uniffi-bin
 module go '^(\.cargo/config\.toml$|go/|sh/go/|rs/moq-ffi/|doc/lib/go/|doc/lib/samples\.sh$)' \
     tools='cargo go uniffi-bindgen-go' compiles=check fix
 module drafts '^(drafts/|sh/drafts/|doc/\.vitepress/drafts\.ts$)' \
-    tools='bun uv kramdown-rfc xml2rfc' lane=bun
+    tools='bun uv kramdown-rfc xml2rfc'
 module markdown '' \
-    tools='bun uv' lane=bun fix
+    tools='bun uv' fix
 # Workflow lints and repository-wide policy, such as every opt-in test having a
 # caller, so they gate every diff.
 module gh '' \
-    tools='actionlint zizmor bun python3 uv cargo jq' lane=bun
+    tools='actionlint zizmor bun python3 uv cargo jq'
 # `just gh test`, the repository tooling tests, follow what they run and read,
 # including the selectors under sh/, the release-plz configuration, the nfpm
 # configs, the Cargo and Bun workspace manifests and lockfiles, and the flake
 # that pins their tools. Its check that Nightly's benchmark tests exist greps all of rs/, so it
 # runs in `gh check` instead. Nightly's full gate runs them whatever changed.
 module tooling '^(sh/|bench/|test/smoke/|packaging/|\.github/|\.cargo/|\.config/hakari\.toml$|\.release-plz\.toml$|Cargo\.(toml|lock)$|rs/moq-ffi/build\.sh$|go/wrapper/|rs/[^/]+/(Cargo\.toml|verify/.*\.cfg)$|js/[^/]+/(bench/|package\.json$)|package\.json$|bun\.lock$|flake\.(nix|lock)$)|(^|/)justfile$' \
-    tools='bun python3 uv cargo release-plz clippy-driver dpkg-deb nfpm rpm' lane=bun
+    tools='bun python3 uv cargo release-plz clippy-driver dpkg-deb nfpm rpm'
 # The drill mutations patch Rust source, so a Rust change can move the code
 # they target. Only nightly runs the drills; this catches a stale patch.
 module drill '^(rs/|test/drill/)'

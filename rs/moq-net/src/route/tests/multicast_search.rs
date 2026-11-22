@@ -602,27 +602,47 @@ fn every_order_from_the_first_flush_keeps_the_multicast_rules() {
 }
 
 /// Each property fails when a defect it guards against is planted, so the search checks
-/// what it claims to.
+/// what it claims to. Split across tests so nextest runs the five searches in parallel.
+fn assert_property_catches_mutant(mutant: Mutant, rule: Rule) {
+	// Only the diamond keeps a dead hop.
+	let mut mesh = match mutant {
+		Mutant::KeepDead => diamond(),
+		_ => triangle(),
+	};
+	mesh.sim.mutate(mutant);
+	let failure = search_for(mesh, &ONE, Some(rule)).expect_err(&format!("{mutant:?} went unnoticed"));
+	eprintln!("{mutant:?}: {failure}");
+	assert!(matches!(failure.broken, Broken::Rule(broke, _) if broke == rule));
+}
+
 #[test]
 #[cfg_attr(miri, ignore = "searches thousands of states")]
-fn every_property_catches_its_mutant() {
-	for (mutant, rule) in [
-		(Mutant::LostEnds, Rule::NoFalseEnd),
-		(Mutant::OldFloor, Rule::NoRevival),
-		(Mutant::Lagging, Rule::Truthful),
-		(Mutant::KeepDead, Rule::QuietIsSettled),
-		(Mutant::Chatter, Rule::Budget),
-	] {
-		// Only the diamond keeps a dead hop.
-		let mut mesh = match mutant {
-			Mutant::KeepDead => diamond(),
-			_ => triangle(),
-		};
-		mesh.sim.mutate(mutant);
-		let failure = search_for(mesh, &ONE, Some(rule)).expect_err(&format!("{mutant:?} went unnoticed"));
-		eprintln!("{mutant:?}: {failure}");
-		assert!(matches!(failure.broken, Broken::Rule(broke, _) if broke == rule));
-	}
+fn property_no_false_end_catches_lost_ends() {
+	assert_property_catches_mutant(Mutant::LostEnds, Rule::NoFalseEnd);
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "searches thousands of states")]
+fn property_no_revival_catches_old_floor() {
+	assert_property_catches_mutant(Mutant::OldFloor, Rule::NoRevival);
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "searches thousands of states")]
+fn property_truthful_catches_lagging() {
+	assert_property_catches_mutant(Mutant::Lagging, Rule::Truthful);
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "searches thousands of states")]
+fn property_quiet_is_settled_catches_keep_dead() {
+	assert_property_catches_mutant(Mutant::KeepDead, Rule::QuietIsSettled);
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "searches thousands of states")]
+fn property_budget_catches_chatter() {
+	assert_property_catches_mutant(Mutant::Chatter, Rule::Budget);
 }
 
 /// The diamond with any of its links, the publisher's included, closing or opening.
