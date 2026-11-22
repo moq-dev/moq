@@ -796,7 +796,9 @@ test("snapshot consumer propagates a non-gap frame failure", async () => {
 test("a schema refusal is skipped with a warning and the next value is read", async () => {
 	const schema = z.object({ n: z.number() });
 	const payload = (json: string) => new TextEncoder().encode(json);
-	const warn = spyOn(console, "warn").mockImplementation(() => {});
+	// Resolves with each refusal, so a read can be held until the consumer has refused.
+	let refused = Promise.withResolvers<void>();
+	const warn = spyOn(console, "warn").mockImplementation(() => refused.resolve());
 	try {
 		// next() refuses the bad snapshot, then yields the state a later frame of its group repairs.
 		const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI });
@@ -807,6 +809,7 @@ test("a schema refusal is skipped with a warning and the next value is read", as
 		expect((await consumer.next())?.value).toEqual({ n: 1 });
 		expect(warn).toHaveBeenCalledTimes(1);
 		consumer.close();
+		refused = Promise.withResolvers<void>();
 
 		// latest() waits through a refused group for the next one.
 		const live = new Track.Producer("live").accept({ timescale: Time.Timescale.MILLI });
@@ -816,7 +819,7 @@ test("a schema refusal is skipped with a warning and the next value is read", as
 			timestamp: Time.Timestamp.fromMillis(1),
 		});
 		const pending = reader.latest();
-		await new Promise((resolve) => setTimeout(resolve, 0));
+		await refused.promise;
 		expect(warn).toHaveBeenCalledTimes(2);
 		live.appendGroup(Time.Timestamp.fromMillis(2)).writeFrame({
 			payload: payload('{"n":2}'),

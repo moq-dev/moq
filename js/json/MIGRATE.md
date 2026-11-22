@@ -4,12 +4,6 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### A snapshot consumer skips a value its schema refuses
-
-A `Snapshot.Consumer` with a `schema` warns and waits for the next frame when a value fails it, where `next()` and `latest()` rejected with the `ZodError`.
-Drop any `catch` that told a `ZodError` from a real failure to keep reading: a read now rejects only on a real failure.
-A caller that must stop on an invalid value, such as a catalog, reads without a `schema` and validates the value itself.
-
 ### Snapshot consumers subscribe themselves at a zero delay ([#7736](https://github.com/moq-dev/moq/pull/7736))
 
 `Snapshot.Consumer`'s `track` option is the track itself, a `Track.Consumer` (`broadcast.track(name)`) or an in-process `Track.Producer`, instead of a `Track.Subscriber`. The consumer subscribes to it at a zero `delay.max` and default options otherwise; the new `priority` option sets the subscription's priority.
