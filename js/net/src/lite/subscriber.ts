@@ -2293,7 +2293,10 @@ export class Subscriber {
 						if (covered()) {
 							await race([entry.tail.settle(covered, stopped), over, leaving]);
 							if (ended || left.signal.aborted) break;
-							await capping;
+							// The cap goes out before our FIN; a cancel, which resets a write still blocked, or
+							// the publisher's end stops the wait.
+							await race([capping, over, leaving]);
+							if (ended || left.signal.aborted) break;
 							fin = true;
 							opened.writer.close();
 							break;
