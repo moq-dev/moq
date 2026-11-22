@@ -15,8 +15,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import parallel_tests
 
 ROOT = Path(__file__).resolve().parents[2]
-FUZZ_CRATES = ("moq-net", "moq-quic", "moq-mux", "moq-rtmp", "moq-sock", "moq-uring")
-FUZZ_EXCLUDES = " ".join(f"--exclude {crate}-fuzz" for crate in FUZZ_CRATES)
+FUZZ_CRATES = sorted(
+    package["name"]
+    for package in json.loads(
+        subprocess.run(
+            ["cargo", "metadata", "--locked", "--format-version", "1", "--no-deps"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    )["packages"]
+    if package["name"].endswith("-fuzz")
+)
+FUZZ_EXCLUDES = " ".join(f"--exclude {crate}" for crate in FUZZ_CRATES)
 DEVICE_FEATURES = "moq-video/capture moq-audio/capture moq-audio/playback moq-cli/play moq-cli/openh264"
 
 
@@ -62,6 +74,15 @@ def read_probes(glob):
 
 
 class SelectTest(unittest.TestCase):
+    def test_every_fuzz_crate_is_excluded(self):
+        # More than one, so a derivation that finds none cannot pass.
+        self.assertGreater(len(FUZZ_CRATES), 1)
+        # rs/justfile cannot call sh/rs/no-fuzz.sh, so its list is checked against the members.
+        recipe = re.search(r'^no_fuzz := "([^"]*)"', (ROOT / "rs/justfile").read_text(), re.M).group(1)
+        self.assertEqual(sorted(re.findall(r"--exclude (\S+)", recipe)), FUZZ_CRATES)
+        listed = subprocess.run(["bash", "sh/rs/no-fuzz.sh"], cwd=ROOT, check=True, capture_output=True, text=True)
+        self.assertEqual(listed.stdout.split(), FUZZ_CRATES)
+
     # CI runs target lints before its test build.
     def selected(self, *paths, action="lint", github_actions=False):
         with tempfile.TemporaryDirectory() as directory:
@@ -479,10 +500,12 @@ class MetadataTest(unittest.TestCase):
     def test_directory_mismatch_still_selects_the_workspace(self):
         metadata = self.metadata()
         metadata["packages"][1]["name"] = "renamed"
+        metadata["packages"].append({**metadata["packages"][0], "name": "seed-fuzz"})
         result = self.run_selection(fixture=metadata)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("a crate directory no longer matches", result.stderr)
-        self.assertIn(f"rs test --workspace {FUZZ_EXCLUDES}", self.calls.read_text())
+        # The exclusions come from the metadata, so a fuzz crate nobody listed is still left out.
+        self.assertIn("rs test --workspace --exclude seed-fuzz ", self.calls.read_text())
 
     def test_every_jq_failure_stops_selection_even_after_partial_output(self):
         jq = self.scratch / "jq"

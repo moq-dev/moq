@@ -194,7 +194,10 @@ fi
 
 # The `*-fuzz` crates need a nightly toolchain; only `just rs fuzz` compiles them.
 if [[ "$packages" == ALL ]]; then
-    flags=(--workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz --exclude moq-mux-fuzz --exclude moq-rtmp-fuzz --exclude moq-sock-fuzz --exclude moq-uring-fuzz)
+    # Assigned apart so a failure stops the script.
+    fuzz_crates=$(bash sh/rs/no-fuzz.sh)
+    flags=(--workspace)
+    for fuzz in $fuzz_crates; do flags+=(--exclude "$fuzz"); done
 else
     # Space-separated `--package <id>` pairs; ids contain no spaces.
     # shellcheck disable=SC2206
@@ -296,10 +299,6 @@ case "$action" in
         # a cross build have.
         if [[ "$packages" == ALL ]]; then
             flags+=(--exclude moq-gst)
-            # libFuzzer's C++ includes a Linux header zig's macOS libc lacks,
-            # and fuzzing runs only on Linux. A diff's selection never holds a
-            # `*-fuzz` crate.
-            [[ "$action" != cross ]] || flags+=(--exclude moq-auth-fuzz --exclude qmux-fuzz)
         else
             flags=()
             for id in $packages; do
