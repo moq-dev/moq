@@ -4790,6 +4790,7 @@ export class Subscriber {
 			};
 		};
 		hooks.mayLand = (subscriber, land) => {
+			if (subscriber.#resume) return subscriber.#resume.mayLand(land);
 			const producer = subscriber.#state.producer;
 			return producer !== undefined && mayLand(producer, land);
 		};
