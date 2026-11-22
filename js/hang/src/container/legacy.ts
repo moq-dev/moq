@@ -117,6 +117,14 @@ function startsPast(track: Moq.Track.Producer, timestamp: number): boolean {
 	return largest === undefined || keyOf(track, timestamp) > largest.group;
 }
 
+// The first whole microsecond whose start on `track` passes the group starting at `key`.
+function startAfter(track: Moq.Track.Producer, key: bigint): number {
+	// keyOf vouched for the timescale.
+	const scale = track.timescale as Time.Timescale;
+	const at = Time.floorAt(new Time.Timestamp(Number(key + 1n), scale), Time.Timescale.MICRO);
+	return keyOf(track, at) > key ? at : at + 1;
+}
+
 // The wire carries whole microseconds, rounded down as moq-net's timestamps are.
 function micros(timestamp: Duration): number {
 	return Math.floor(timestamp.asMicros());
@@ -179,12 +187,13 @@ export class Producer {
 	 * every frame of the groups before it, so a keyframe that doesn't start after the newest frame
 	 * continues the open group (a splice), and a later frame presenting at or before the groups before
 	 * its own (a leading picture after a splice) is dropped, as is a keyframe at or before the newest
-	 * frame with no group open, with the frames after it until a keyframe opens a group. Throws if the
-	 * first frame is not a keyframe, a group start goes backwards, or a frame is below the previous
-	 * group start.
+	 * frame with no group open, with the frames after it until a keyframe opens a group. With no group
+	 * open, a keyframe landing on the latest group's start (media resuming right at a discontinuity's
+	 * marker) is stamped one unit of the track's timescale later. Throws if the first frame is not a
+	 * keyframe, a group start goes backwards, or a frame is below the previous group start.
 	 */
 	encode(data: Uint8Array | Source, pts: Duration, keyframe: boolean) {
-		const timestamp = micros(pts);
+		let timestamp = micros(pts);
 		const floor = keyframe ? this.#start : this.#floor;
 		if (floor !== undefined && timestamp < floor) {
 			throw new Error("frame timestamp is below the previous group start");
@@ -195,6 +204,12 @@ export class Producer {
 		// the old content's last frames, continues the open group instead. With none open it is
 		// refused, before anything changes.
 		const behind = this.#newest !== undefined && timestamp <= this.#newest;
+		// With no group open, one landing on the latest group's start, such as media resuming right
+		// at a discontinuity's marker, starts at the first start past it instead.
+		const largest = this.#track.largest()?.group;
+		if (keyframe && !behind && !this.#group && largest !== undefined && keyOf(this.#track, timestamp) === largest) {
+			timestamp = startAfter(this.#track, largest);
+		}
 		const opens = keyframe && !behind && startsPast(this.#track, timestamp);
 		// Dropped: a keyframe with no group to continue, and a frame presenting with the groups
 		// before its own, such as a leading picture after a splice.
@@ -233,7 +248,7 @@ export class Producer {
 		}
 
 		this.#group?.writeFrame({
-			payload: encodeFrame(data, pts),
+			payload: encodeFrame(data, Duration.micros(timestamp)),
 			timestamp: Time.Timestamp.fromMicros(timestamp),
 		});
 
@@ -260,8 +275,8 @@ export class Producer {
 	 * its successor's first frame, so the group before a pause reads as live until whatever resumes
 	 * it, and a subscriber joining mid-break is handed that stale media. The marker bounds it, and it
 	 * is the latest group a joiner lands on. The marker never starts below a frame the closing group
-	 * holds, a video track's end marker at `end` included, so on a video track what resumes starts
-	 * after `end`. An empty payload is data on a data track, so its marker is one object with no bytes
+	 * holds, a video track's end marker at `end` included, so on a video track a keyframe resuming at
+	 * `end` is stamped one unit of the track's timescale later. An empty payload is data on a data track, so its marker is one object with no bytes
 	 * at all. No marker is written until a frame follows the last one. Throws if `end` precedes a
 	 * frame of the open group.
 	 */
