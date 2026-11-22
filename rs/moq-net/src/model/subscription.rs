@@ -228,9 +228,8 @@ impl Start {
 	/// of the live edge: what a wire before lite-07 asks with its one `Subscriber Max Age` and
 	/// no start.
 	pub(crate) const fn within(max: Duration) -> Self {
-		// The largest lag every implementation carries losslessly, long past any group.
 		Self::Live {
-			min: Duration::from_millis((1 << 53) - 1),
+			min: PAST_EVERY_GROUP,
 			max: Some(max),
 		}
 	}
@@ -314,6 +313,10 @@ impl Range {
 		(!range.is_empty()).then_some(range)
 	}
 }
+
+/// A lag long past any group, so a join this far behind takes every group still within its
+/// `max`: the largest every implementation carries losslessly.
+pub(crate) const PAST_EVERY_GROUP: Duration = Duration::from_millis((1 << 53) - 1);
 
 /// A live join's lag in whole milliseconds, rounded up, as the wire carries it, so a start is
 /// never newer than the lag allows.
