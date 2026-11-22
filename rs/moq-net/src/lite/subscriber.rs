@@ -5871,12 +5871,15 @@ mod tests {
 		// A live join under the budget, which the upstream placed at group 0: a stale drop
 		// under that budget ends what it reads.
 		let lag = Duration::from_secs(10);
-		let mut reader = serving.serving.subscribe(crate::track::Subscription::default().with_ranges([
-			crate::track::Range::from(crate::track::Start::Live {
-				min: lag,
-				max: Some(budget),
-			}),
-		]));
+		let mut reader =
+			serving.serving.subscribe(
+				crate::track::Subscription::default().with_ranges([crate::track::Range::from(
+					crate::track::Start::Live {
+						min: lag,
+						max: Some(budget),
+					},
+				)]),
+			);
 		serving.serving.answer_join(lag, None, Some(0), Duration::MAX);
 		let waiter = kio::Waiter::noop();
 		let old = |groups: std::ops::Range<u64>| {
@@ -6999,10 +7002,12 @@ mod tests {
 			// Lite-07 carries it on the live join, an older wire as the subscription's.
 			let max = match version.has_ranges() {
 				true => match msg.ranges[..] {
-					[lite::Range {
-						start: Some(lite::Anchor::Live { max, .. }),
-						..
-					}] => max,
+					[
+						lite::Range {
+							start: Some(lite::Anchor::Live { max, .. }),
+							..
+						},
+					] => max,
 					_ => panic!("{version}: one live join, got {:?}", msg.ranges),
 				},
 				false => msg.max_delay,

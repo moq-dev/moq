@@ -423,7 +423,13 @@ async fn a_live_join_reopening_an_idle_copy_stays_a_live_join() {
 		let mut subscriber = remote.track("video").unwrap().subscribe(joining).await.unwrap();
 		assert_eq!(subscriber.recv_group().await.unwrap().expect("a group").start, 3000);
 		let asked = source.subscription().expect("the relay subscribes again");
-		assert_eq!(asked.ranges, [track::Range::from(track::Start::Live { min: Duration::ZERO, max: Some(MAX) })]);
+		assert_eq!(
+			asked.ranges,
+			[track::Range::from(track::Start::Live {
+				min: Duration::ZERO,
+				max: Some(MAX)
+			})]
+		);
 	})
 	.await
 	.expect("the viewer joined live again");
@@ -453,7 +459,10 @@ async fn a_join_asked_but_unanswered_is_placed_when_an_oldest_reader_hides_it() 
 		let track = remote.track("video").unwrap();
 		let lag = Duration::from_secs(1);
 		let mut live = track.subscribe(joining(Some(lag))).await.unwrap().ordered();
-		let join = track::Range::from(track::Start::Live { min: lag, max: Some(MAX) });
+		let join = track::Range::from(track::Start::Live {
+			min: lag,
+			max: Some(MAX),
+		});
 		let mut asked = source.clone();
 		while asked
 			.subscription()

@@ -6330,7 +6330,10 @@ impl TrackRun {
 		// update adds does.
 		let start = starts.iter().flatten().fold(start, |start, at| start.min(*at));
 		self.start = Start::Resolved(start);
-		writer.buffer(&lite::SubscribeResponse::Start(lite::SubscribeStart { largest, starts }))?;
+		writer.buffer(&lite::SubscribeResponse::Start(lite::SubscribeStart {
+			largest,
+			starts,
+		}))?;
 		// The subscriber now owes itself everything from the start, so a range given up
 		// above it is named as it would have been after the start. A stale run below it is
 		// never named, so a wider budget may still serve it. A final one is named all the same:
