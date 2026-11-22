@@ -5583,6 +5583,7 @@ mod test {
 	/// at, so the old route stops sending it there, and the reader still reads each frame once:
 	/// one already in flight on the old route, then the rest from the new one.
 	#[test]
+	#[cfg(feature = "async")]
 	fn a_switch_caps_the_replaced_copy_at_the_frame_the_new_one_resumes() {
 		let routes = Producer::new();
 		let track = logical(&routes);
