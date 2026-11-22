@@ -1560,7 +1560,7 @@ It never starts at a group Expiration has expired, and counts no Groups: however
 Each Range joins on its own, so Ranges with different `Min Age` values in one subscription each start where their own lag places them.
 A relay's copy places the join only at the Range Start its upstream answered a Range of the relay's own subscription with, one with the same `Start` and `End`, under a `Subscriber Max Age` at least as large as the subscriber's, and answered after the subscriber's Range was added: the live edge moves, so an earlier answer does not hold.
 Otherwise it adds such a Range to its subscription and waits for the answer, so a subscriber joins at the same Group through any relay, and subscribers joining alike share one answer.
-Once its upstream declared the Track's end, the copy waits on no answer: it places the join as a Time `Start` at the final live edge minus `Min Age`, by the rule above.
+Once its upstream declared the Track's end and every Group below it arrived or was given up, the copy waits on no answer: it places the join as a Time `Start` at the final live edge minus `Min Age`, by the rule above.
 A relay whose upstream session cannot carry a Live `Start`, such as an earlier version, places the join from the Groups it holds instead.
 
 A Range covers whole Groups but for a Position `Start`; a subscriber reads a slice of a Group with FETCH (see [Positions](#positions)).

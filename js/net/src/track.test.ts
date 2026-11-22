@@ -5847,9 +5847,9 @@ test("track: a copy whose end is declared places a live join from its groups", (
 	}
 });
 
-// Once its end is declared, no more groups or answers arrive, so a join the groups held can't prove
-// resolves as a time start and drains them instead of waiting forever. Mirrors moq-net's
-// `a_declared_end_resolves_an_unproven_live_join`.
+// Once its declared end settles, no more groups or answers arrive, so a join the groups held can't
+// prove resolves as a time start from the final edge and drains them instead of waiting forever.
+// Mirrors moq-net's `a_settled_end_resolves_an_unproven_live_join_from_the_final_edge`.
 test("track: a declared end resolves an unproven live join", () => {
 	const producer = receivedTrack({ timescale: Timescale.MILLI });
 	hooks.answersJoins(producer);
@@ -5862,6 +5862,25 @@ test("track: a declared end resolves an unproven live join", () => {
 			ranges: [{ start: { live: Duration.millis(1000) } }],
 		});
 		expect(reader.tryRecvGroup()?.start).toBe(3000n);
+	} finally {
+		producer.close();
+	}
+});
+
+// A declared end may arrive before the groups below it: until it settles the live edge isn't final,
+// so a join the groups held can't prove keeps waiting rather than placing from a stale edge.
+test("track: an unsettled end leaves an unproven live join waiting", () => {
+	const producer = receivedTrack({ timescale: Timescale.MILLI });
+	hooks.answersJoins(producer);
+	try {
+		putGroup(producer, 1000n, 1000);
+		putGroup(producer, 3000n, 3000);
+		producer.finishAt({ group: 6001n, frame: 0 });
+		const reader = producer.subscribe({
+			delay: { max: null },
+			ranges: [{ start: { live: Duration.millis(1000) } }],
+		});
+		expect(reader.tryRecvGroup()).toBeUndefined();
 	} finally {
 		producer.close();
 	}

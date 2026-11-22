@@ -1007,7 +1007,7 @@ let timeAnchors: (producer: Producer) => {
 	 * lite-07 copy, whose ranges carry each join, until its end is declared. See `hooks.answersJoins`.
 	 */
 	answersJoins: boolean;
-	/** Whether the copy's end is declared, so it receives no more answers. */
+	/** Whether the copy's declared end is settled, so its live edge is final. */
 	ended: boolean;
 	/** Bumped whenever the others, or whether the producer is a received copy, change. */
 	placing: number;
@@ -1621,7 +1621,7 @@ export class Producer {
 				producer.#answersJoins &&
 				producer.#state.end.peek() === undefined &&
 				producer.#state.outcome.peek() === undefined,
-			ended: producer.#state.end.peek() !== undefined || producer.#state.outcome.peek() !== undefined,
+			ended: producer.#state.outcome.peek() !== undefined,
 			placing: producer.#placing,
 		});
 		hooks.startsAtKeys = (producer) => {
@@ -3975,8 +3975,9 @@ export class Subscriber {
 	// ranges start, but not where each join does) places it only where the groups it holds prove, and
 	// waits otherwise. A copy whose wire keys groups otherwise starts at a group held, by when each
 	// one's first frame presented, as its publisher resolved the join already. A lite-07 copy places
-	// none itself (see {@link Holdings.answersJoins}). A `wire` copy whose end is `ended` gets no more
-	// groups to prove it by, so it leaves an unproven join to a time start, which asks its upstream.
+	// none itself (see {@link Holdings.answersJoins}). A `wire` copy whose declared end settled
+	// (`ended`) gets no more groups to prove it by, so it leaves an unproven join to a time start,
+	// which asks its upstream.
 	// Mirrors the Rust `TrackState::join`.
 	#join(min: Duration, containing: (time: bigint) => Containing, wire: boolean, ended: boolean): Join | undefined {
 		const timeline = this.#state.timeline;

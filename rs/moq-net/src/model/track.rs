@@ -1238,7 +1238,7 @@ impl Holdings for TrackState {
 	/// the live edge is the upstream's, which no group held here measures. Otherwise it waits on
 	/// its upstream, which its session asks with a range of its own. Another copy whose wire
 	/// reports where its ranges start places it only where the groups it holds prove, and waits
-	/// otherwise, until its end is declared: then the join resolves as a time start.
+	/// otherwise, until its end is declared and settled: then the join resolves as a time start.
 	///
 	/// An idle copy waits as [`Self::latest_live`] does: what an ended feed left measures no
 	/// live edge, and the groups it missed since leave a hole the next feed may not fill.
@@ -1319,8 +1319,9 @@ impl Holdings for TrackState {
 		let through = |slot: &Slot| slot.group.latest().and_then(|latest| latest.convert(scale).ok());
 		match holder {
 			Some((&key, slot)) if through(slot).is_some_and(|through| through.value() >= target) => Join::Group(key),
-			// No more groups will prove it once the end is declared: a time start asks upstream.
-			_ if self.outcome.end().is_some() || self.outcome.is_final() => Join::Time(target),
+			// Once every group below the declared end arrived or was given up, the edge is final
+			// and no more groups will prove it: a time start asks upstream.
+			_ if self.outcome.is_final() || self.outcome.end().is_some_and(End::settled) => Join::Time(target),
 			_ => Join::Unknown,
 		}
 	}
@@ -17819,23 +17820,31 @@ mod test {
 		);
 	}
 
-	/// Once a copy's end is declared, no more groups or answers arrive, so a live join the held
-	/// groups can't prove resolves as a time start and drains them instead of waiting forever.
+	/// A declared end may arrive before the groups below it, so a live join the held groups
+	/// can't prove waits for the final edge. Once nothing more can arrive, it resolves from that
+	/// edge as a time start rather than waiting forever on an answer that won't come. Mirrors JS
+	/// `track: a declared end resolves an unproven live join`.
 	#[test]
 	#[cfg(feature = "async")]
-	fn a_declared_end_resolves_an_unproven_live_join() {
+	fn a_settled_end_resolves_an_unproven_live_join_from_the_final_edge() {
 		let mut producer = track_producer("test", Info::timed());
 		producer.received();
 		producer.anchored();
 		producer.answers_joins();
 		write_group(&producer, 1000);
 		write_group(&producer, 3000);
-		producer.finish_at(Position::group(3001)).unwrap();
+		producer.finish_at(Position::group(6001)).unwrap();
 		let join = Subscription::default()
 			.with_delay(Delay::default().with_max(None))
 			.with_ranges([Range::from(Start::Live(Duration::from_millis(1000)))]);
 		let mut reader = producer.subscribe(join);
-		assert_eq!(drain_groups(&mut reader), vec![3000]);
+		assert_eq!(drain_groups(&mut reader), Vec::<u64>::new(), "the edge isn't final yet");
+		write_group(&producer, 4000);
+		write_group(&producer, 6000);
+		drop(producer);
+		// A time start at 5000, a second behind the final edge, which the groups held can't place
+		// on a complete track, so it reaches back as any such time start does.
+		assert_eq!(drain_groups(&mut reader), vec![6000, 4000, 3000, 1000]);
 	}
 
 	/// A bounded live join that upstream answers with nothing to deliver, its start past its
