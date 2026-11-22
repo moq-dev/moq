@@ -6760,7 +6760,12 @@ fn poll_given_up(group: &mut group::Consumer, waiter: &kio::Waiter) -> Option<Er
 
 /// The frame group `key` stops before among `stops` once it moved from `end`, registering
 /// `waiter` until it does.
-fn poll_stop(stops: &kio::Consumer<Vec<(u64, u64)>>, key: u64, end: Option<u64>, waiter: &kio::Waiter) -> Poll<Option<u64>> {
+fn poll_stop(
+	stops: &kio::Consumer<Vec<(u64, u64)>>,
+	key: u64,
+	end: Option<u64>,
+	waiter: &kio::Waiter,
+) -> Poll<Option<u64>> {
 	match stops.poll(waiter, |stops| match end_of(stops, key) {
 		moved if moved != end => Poll::Ready(moved),
 		_ => Poll::Pending,
@@ -6881,7 +6886,14 @@ impl GroupServe {
 		clippy::too_many_arguments,
 		reason = "one group stream's header fields and how it is ranked, each from its own source"
 	)]
-	fn new(ctx: GroupContext, key: u64, frame_start: u64, end: Option<u64>, rank: Rank, group: group::Consumer) -> Self {
+	fn new(
+		ctx: GroupContext,
+		key: u64,
+		frame_start: u64,
+		end: Option<u64>,
+		rank: Rank,
+		group: group::Consumer,
+	) -> Self {
 		// A lite-07 peer receives a compressed group as stored, others inflated.
 		let mut group = match ctx.version.has_compression() {
 			true => group.compressed(),
@@ -6963,7 +6975,10 @@ impl GroupServe {
 		};
 		let header = writer.buffer(&lite::DataType::Group).and_then(|()| writer.buffer(&msg));
 		let records = match header {
-			Ok(()) => self.ctx.object_records.then(|| lite::ietf::Records::new(self.end.is_some())),
+			Ok(()) => self
+				.ctx
+				.object_records
+				.then(|| lite::ietf::Records::new(self.end.is_some())),
 			Err(err) => {
 				// The header wrote nothing, so the group-stream reset has nothing to pin
 				// it to this subscription. The run loop reads the slot and resets the
@@ -10427,7 +10442,9 @@ mod serve_group_test {
 				crate::track::Info::timed(),
 			);
 			let mut group = track.create_group(group::Info { start: 0 }).unwrap();
-			group.write_frame(Timestamp::from_millis(0).unwrap(), b"aaaa".as_slice()).unwrap();
+			group
+				.write_frame(Timestamp::from_millis(0).unwrap(), b"aaaa".as_slice())
+				.unwrap();
 			let bounds = Bounds::new(&[at(initially)], false);
 			let subscriber = track.subscribe(
 				track::Subscription::default()
@@ -10446,8 +10463,12 @@ mod serve_group_test {
 				// Stopped before frame 2 while the stream is already open.
 				run.update(lite07_add(&run, &[], 1, &[at(Some(2))]));
 			}
-			group.write_frame(Timestamp::from_millis(1).unwrap(), b"bbbb".as_slice()).unwrap();
-			group.write_frame(Timestamp::from_millis(2).unwrap(), b"cccc".as_slice()).unwrap();
+			group
+				.write_frame(Timestamp::from_millis(1).unwrap(), b"bbbb".as_slice())
+				.unwrap();
+			group
+				.write_frame(Timestamp::from_millis(2).unwrap(), b"cccc".as_slice())
+				.unwrap();
 			drive(&mut run, &mut writer);
 			let (bytes, fin, reset) = stream(&streams);
 			assert!(sent(&bytes, b"aaaa") && sent(&bytes, b"bbbb"), "{initially:?}");
@@ -10459,7 +10480,9 @@ mod serve_group_test {
 			run.update(lite07_add(&run, &[], live, &[at(None)]));
 			drive(&mut run, &mut writer);
 			assert!(sent(&stream(&streams).0, b"cccc"), "{initially:?}");
-			group.write_frame(Timestamp::from_millis(3).unwrap(), b"dddd".as_slice()).unwrap();
+			group
+				.write_frame(Timestamp::from_millis(3).unwrap(), b"dddd".as_slice())
+				.unwrap();
 			group.finish().unwrap();
 			drive(&mut run, &mut writer);
 			let (bytes, fin, reset) = stream(&streams);
@@ -10474,8 +10497,12 @@ mod serve_group_test {
 			crate::track::Info::timed(),
 		);
 		let mut group = track.create_group(group::Info { start: 0 }).unwrap();
-		group.write_frame(Timestamp::from_millis(0).unwrap(), b"aaaa".as_slice()).unwrap();
-		group.write_frame(Timestamp::from_millis(1).unwrap(), b"bbbb".as_slice()).unwrap();
+		group
+			.write_frame(Timestamp::from_millis(0).unwrap(), b"aaaa".as_slice())
+			.unwrap();
+		group
+			.write_frame(Timestamp::from_millis(1).unwrap(), b"bbbb".as_slice())
+			.unwrap();
 		let bounds = Bounds::new(&[at(Some(2))], false);
 		let subscriber = track.subscribe(
 			track::Subscription::default()
@@ -10498,8 +10525,12 @@ mod serve_group_test {
 			crate::track::Info::timed(),
 		);
 		let mut group = track.create_group(group::Info { start: 0 }).unwrap();
-		group.write_frame(Timestamp::from_millis(0).unwrap(), b"aaaa".as_slice()).unwrap();
-		group.write_frame(Timestamp::from_millis(1).unwrap(), b"bbbb".as_slice()).unwrap();
+		group
+			.write_frame(Timestamp::from_millis(0).unwrap(), b"aaaa".as_slice())
+			.unwrap();
+		group
+			.write_frame(Timestamp::from_millis(1).unwrap(), b"bbbb".as_slice())
+			.unwrap();
 		let mut ranges = vec![at(Some(1))];
 		ranges.push(lite::Range {
 			start: Some(lite::Anchor::Time(1)),
@@ -10519,7 +10550,11 @@ mod serve_group_test {
 		assert!(sent(&bytes, b"aaaa") && !sent(&bytes, b"bbbb") && !fin && !reset);
 		write_group(&mut track, 1, 1);
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
-		assert!(streams.resets().contains(&Version::Lite07.encode_stream_code(&StreamError::Old)));
+		assert!(
+			streams
+				.resets()
+				.contains(&Version::Lite07.encode_stream_code(&StreamError::Old))
+		);
 	}
 
 	/// Group `key`'s Group Stream on `log`'s session, as its Frame Start and the bytes after

@@ -892,8 +892,7 @@ impl Copy {
 			None => true,
 			Some(None) => false,
 			Some(Some(capped)) => {
-				until < capped
-					|| until == capped && cap.is_some_and(|cap| self.cap.is_none_or(|capped| cap < capped))
+				until < capped || until == capped && cap.is_some_and(|cap| self.cap.is_none_or(|capped| cap < capped))
 			}
 		};
 		if !narrower {
@@ -5596,14 +5595,22 @@ mod test {
 		old.write_frame(ts(1), b"b".as_ref()).unwrap();
 		let mut reading = recv(&mut sub);
 		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
-		assert_eq!(a.subscription().expect("subscribed").cap, None, "a serving copy is uncapped");
+		assert_eq!(
+			a.subscription().expect("subscribed").cap,
+			None,
+			"a serving copy is uncapped"
+		);
 
 		let b = copy();
 		routes.serve(b.consume());
 		assert_eq!(read(&mut reading), Some(b"b".to_vec()));
 		assert_eq!(b.subscription().expect("subscribed").resume, Some(Position::new(0, 2)));
 		let capped = a.subscription().expect("still subscribed");
-		assert_eq!(capped.cap, Some(Position::new(0, 2)), "stopped where the new copy resumes");
+		assert_eq!(
+			capped.cap,
+			Some(Position::new(0, 2)),
+			"stopped where the new copy resumes"
+		);
 		assert!(
 			capped.ranges.iter().all(|range| range.end == Some(0)),
 			"{:?}",

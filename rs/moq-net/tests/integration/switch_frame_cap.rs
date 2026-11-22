@@ -84,6 +84,10 @@ async fn a_switch_mid_group_sends_each_frame_over_one_route() {
 		);
 	}
 	assert!(read0.read_frame().await.unwrap().is_none());
-	assert_eq!(carried(&a_e), [0, 1], "the old route stops at the frame the new one resumes");
+	assert_eq!(
+		carried(&a_e),
+		[0, 1],
+		"the old route stops at the frame the new one resumes"
+	);
 	assert_eq!(carried(&b_e), [2, 3], "the new route sends only the rest");
 }
