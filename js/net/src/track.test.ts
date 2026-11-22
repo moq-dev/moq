@@ -5933,6 +5933,28 @@ test("track: a bounded join answered empty delivers nothing", () => {
 	}
 });
 
+// A bounded join answered empty still delivers nothing once the end is declared, rather than wait on
+// groups that can't measure it. Mirrors the Rust
+// `a_received_copy_keeps_an_empty_join_answer_past_its_declared_end`.
+test("track: a bounded join answered empty delivers nothing past a declared end", () => {
+	const producer = receivedTrack({ timescale: Timescale.MILLI });
+	hooks.answersJoins(producer);
+	try {
+		const reader = producer.subscribe({
+			delay: { max: null },
+			ranges: [{ start: { live: Duration.millis(200) }, end: 500n }],
+		});
+		hooks.answerJoin(producer, 200, 500n, undefined, NO_MAX_DELAY);
+		// An end past the groups held, still owed the ones between.
+		producer.finishAt({ group: 7001n, frame: 0 });
+		putGroup(producer, 1000n, 1000);
+		expect(hooks.servingResolved(reader)).toEqual([{ start: 501n, end: 501n, floored: true }]);
+		expect(reader.tryRecvGroup()).toBeUndefined();
+	} finally {
+		producer.close();
+	}
+});
+
 // Mirrors moq-net's `unplaced_holds_only_what_containing_cant_place`: a run holds only times
 // `containing` can't place, but those a reported start places directly, and a time it leaves out
 // lies between two held groups, which the window tries each time.

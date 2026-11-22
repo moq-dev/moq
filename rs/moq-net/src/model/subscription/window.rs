@@ -98,11 +98,12 @@ pub(in crate::model) trait Holdings {
 		false
 	}
 
-	/// The group the upstream's answer to the live join `min` through `end` starts at, for a
-	/// reader within `budget` whose range was added at join tick `since`. It stands once the
-	/// end is declared too, when [`Self::answers_joins`] no longer holds: a copy holds only the
-	/// groups from where its feed started, so they can't measure a join behind them.
-	fn answered_join(&self, min: Duration, end: Option<u64>, budget: Duration, since: u64) -> Option<u64> {
+	/// The upstream's answer to the live join `min` through `end`, for a reader within `budget`
+	/// whose range was added at join tick `since`: the group it starts at, or `None` for nothing
+	/// to deliver. It stands once the end is declared too, when [`Self::answers_joins`] no
+	/// longer holds: a copy holds only the groups from where its feed started, so they can't
+	/// measure a join behind them.
+	fn answered_join(&self, min: Duration, end: Option<u64>, budget: Duration, since: u64) -> Option<Option<u64>> {
 		let _ = (min, end, budget, since);
 		None
 	}
@@ -827,8 +828,14 @@ impl Window {
 			Start::Live(min) => {
 				let since = self.since.get(&key).copied().unwrap_or(0);
 				let until = join_end(range.end);
-				match (holdings.answered_join(min, until, self.budget, since), latest) {
-					// Its upstream's answer places it, whatever the groups held measure.
+				// Its upstream's answer places it, whatever the groups held measure: nothing to
+				// deliver starts it past its end, while an unbounded one measures.
+				let answered = match holdings.answered_join(min, until, self.budget, since) {
+					Some(Some(group)) => Some(group),
+					Some(None) => range.end.and_then(|last| last.checked_add(1)),
+					None => None,
+				};
+				match (answered, latest) {
 					(Some(group), _) => (Some(group), false),
 					// Nothing to measure the live edge by yet: wait for the first group, reading
 					// everything meanwhile.
@@ -1188,7 +1195,7 @@ mod tests {
 			self.0.answers_joins()
 		}
 
-		fn answered_join(&self, min: Duration, end: Option<u64>, budget: Duration, since: u64) -> Option<u64> {
+		fn answered_join(&self, min: Duration, end: Option<u64>, budget: Duration, since: u64) -> Option<Option<u64>> {
 			self.0.answered_join(min, end, budget, since)
 		}
 

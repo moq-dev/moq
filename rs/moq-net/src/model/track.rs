@@ -1328,8 +1328,8 @@ impl Holdings for TrackState {
 		self.joins_answered()
 	}
 
-	fn answered_join(&self, min: Duration, end: Option<u64>, budget: Duration, since: u64) -> Option<u64> {
-		self.join_answer(min, end, budget, since)?.start
+	fn answered_join(&self, min: Duration, end: Option<u64>, budget: Duration, since: u64) -> Option<Option<u64>> {
+		Some(self.join_answer(min, end, budget, since)?.start)
 	}
 
 	fn never_produced(&self, keys: ops::Range<u64>) -> bool {
@@ -17960,6 +17960,33 @@ mod test {
 			let start = later.resolved_range(0).map(|resolved| resolved.start);
 			assert_ne!(start, Some(4000), "{min:?}");
 		}
+	}
+
+	/// A bounded live join answered with nothing to deliver still delivers nothing once the end
+	/// is declared, rather than wait on groups that can't measure it. Mirrors JS
+	/// `track: a bounded join answered empty delivers nothing past a declared end`.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_received_copy_keeps_an_empty_join_answer_past_its_declared_end() {
+		let min = Duration::from_millis(200);
+		let mut producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		producer.answers_joins();
+		let join = Subscription::default()
+			.with_delay(Delay::default().with_max(None))
+			.with_ranges([Range {
+				start: Start::Live(min),
+				end: Some(500),
+			}]);
+		let mut reader = producer.subscribe(join);
+		producer.answer_join(min, Some(500), None, Duration::MAX);
+		// An end past the groups held, still owed the ones between.
+		producer.finish_at(Position::group(7001)).unwrap();
+		write_group(&producer, 1000);
+		assert!(reader.resolved_range(0).is_some());
+		assert!(reader.poll_start(&kio::Waiter::noop()).is_ready());
+		assert_eq!(drain_groups(&mut reader), Vec::<u64>::new());
 	}
 
 	/// A bounded live join that upstream answers with nothing to deliver, its start past its

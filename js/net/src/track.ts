@@ -3962,7 +3962,7 @@ export class Subscriber {
 				return answer.start === undefined ? "empty" : { group: answer.start };
 			},
 			answersJoins: () => answers,
-			answeredJoin: (min, end, budget, since) => joinAnswer(min, end, budget, since)?.start,
+			answeredJoin: joinAnswer,
 			// Skip runs coalesce, so a gap between two held groups is one run unless the cache
 			// evicted a group inside it.
 			neverProduced: (start, end) => {
