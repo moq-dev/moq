@@ -37,6 +37,8 @@ import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.days
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.nanoseconds
 import kotlin.time.Duration.Companion.seconds
@@ -664,6 +666,16 @@ class SmokeTest {
         assertFailsWith<IllegalArgumentException> {
             Timestamp((1uL shl 61) - 1uL, 1uL).toDuration()
         }
+        // A quotient past a Long fails rather than wrapping to a negative duration.
+        assertFailsWith<IllegalArgumentException> { Timestamp(ULong.MAX_VALUE, 1uL).toDuration() }
+        assertFailsWith<IllegalArgumentException> { Timestamp(1uL, 0uL).toDuration() }
+        // Past what `inWholeNanoseconds` holds, the duration fails rather than saturating.
+        assertFailsWith<IllegalArgumentException> { Duration.INFINITE.toTimestamp() }
+        assertFailsWith<IllegalArgumentException> { (600 * 365).days.toTimestamp() }
+        assertEquals(
+            Timestamp(400uL * 365uL * 86_400uL * 1_000_000_000uL, 1_000_000_000uL),
+            (400 * 365).days.toTimestamp(),
+        )
         assertNull(AudioEncoderOutput(codec = AudioCodec.opus()).frameDuration)
     }
 
