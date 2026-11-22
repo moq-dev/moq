@@ -3,9 +3,9 @@
 ## Goal
 
 Every non-breaking high-severity and impactful medium-severity bug, TLA+
-sync/model drift, O(N²) relay auth-refresh scaling bottleneck, and CI/tooling
-hardening item found in the 2026-11-21 full-codebase audit is fixed on `main`
-without requiring a breaking API or wire change.
+sync/model drift, per-connection credential refresh O(K²) rebuild, and
+CI/tooling hardening item found in the 2026-11-21 full-codebase audit is fixed
+on `main` without requiring a breaking API or wire change.
 
 ## Plan
 
@@ -18,10 +18,10 @@ full-codebase audit, covering both pre-release and new code):
 - ✅ Medium-severity non-breaking bugs split by impact: protocol, correctness,
   UB, and leak fixes join this `m1` epic, while softer edge cases and spec
   cleanups live in `m3` (rejected: all in `m1`; all in `m3`).
-- ✅ TLA+ sync/model drift and `moq-relay`'s `Refresh::ended` O(N²) rebuild
-  join this `m1` epic, while other unmeasured perf items fold into
-  [audit-perf](/quest/m3/audit-perf.md) and new binary-parser fuzz targets go
-  to [m4](/quest/m4/fuzz-binary-parsers.md) (rejected: standalone `m4` perf
+- ✅ TLA+ sync/model drift and `moq-relay`'s per-connection `Refresh::ended`
+  O(K²) rebuild join this `m1` epic, while other unmeasured perf items fold
+  into [audit-perf](/quest/m3/audit-perf.md) and new binary-parser fuzz targets
+  go to [m4](/quest/m4/fuzz-binary-parsers.md) (rejected: standalone `m4` perf
   quests; moving all perf/TLA+ items to `m4`).
 - ✅ Cut-blocking release/packaging bugs live in `m0` and gate
   [the release cut](/quest/m3/release/cut.md), while smaller CI and tooling
