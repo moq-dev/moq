@@ -1577,14 +1577,6 @@ export class Producer {
 			cachedIn(producer, start, end).filter(
 				(key) => producer.#cached.get(key)?.group.closed.peek() === undefined,
 			);
-		hooks.nextCachedGroup = (producer, from) => {
-			const keys = producer.#keys;
-			for (let index = keyIndex(keys, from); index < keys.length; index++) {
-				const key = keys[index];
-				if (!(producer.#cached.get(key)?.group.closed.peek() instanceof Error)) return key;
-			}
-			return undefined;
-		};
 		sourceStart = (producer) => producer.#wire?.served && producer.#feedStart();
 		fillFloor = (producer, named) => producer.#fillFloor(named);
 		keysOf = (producer) => producer.#keys;

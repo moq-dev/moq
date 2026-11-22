@@ -12282,6 +12282,11 @@ impl TrackServeRun {
 								// A reader's miss in flight is settled by the tail instead.
 								let mut fetches = serve_loop.fetches;
 								fetches.retain(|run| run.fill.is_fetch());
+								let mut range_fills = serve_loop.range_fills;
+								for fill in range_fills.take_fetches() {
+									let info = FetchInfo::Known(serve_loop.serving.info().clone());
+									fetches.push(FillServeRun::new(self.serve.clone(), fill, info));
+								}
 								self.finished = Some(FinishedServe {
 									serving: Some(serve_loop.serving),
 									demand: serve_loop.demand,
@@ -13321,12 +13326,26 @@ impl ServeLoop {
 					let _ = self.fetches.poll(waiter);
 					self.feed_fetches
 						.poll(&self.sub, serve.subscriber.runtime.now(), waiter);
+					// Before lite-07 each run is recovered on a subscription of its own, which
+					// outlives this one: nothing here changes with it.
+					let accounted = match &self.sub {
+						Sub::Active(active) => Some(active.tail.clone()),
+						Sub::None => None,
+					};
+					let read = crate::util::poll_unwanted(&mut self.demand, waiter).is_pending();
+					if let Err(err) = self
+						.range_fills
+						.poll(serve, &self.serving, accounted.as_ref(), read, waiter)
+					{
+						return Poll::Ready(ServeEnd::GiveBack(err));
+					}
+					// Ending drops a recovery still out, as a lite-07 track waits for them too.
 					if settle
 						.poll(waiter, |tail| {
 							owed.as_ref()
 								.is_some_and(|owed| owed.iter().all(|owed| tail.covers(owed.clone())))
 						})
-						.is_ready()
+						.is_ready() && !self.range_fills.recovering()
 					{
 						return Poll::Ready(ServeEnd::Finished);
 					}

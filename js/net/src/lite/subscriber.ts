@@ -2173,15 +2173,10 @@ export class Subscriber {
 		// Narrowed in place once a start before lite-07 settles how far it reaches.
 		const groups = { ...asked };
 		// Before lite-07 the start is the answer, which the publisher gives only once a group in range
-		// can start it: the range reaches the first group held at or past the run, or the live edge
-		// when none is.
+		// can start it, so the range stays open until the start caps it: only upstream knows which
+		// group it still holds past the run.
 		const oneStart = !hasGroupEnd(this.version);
-		let end: bigint | undefined = groups.end;
-		if (oneStart) {
-			const next = hooks.nextCachedGroup(producer, groups.end);
-			end = next === undefined ? undefined : next + 1n;
-		}
-		const ranges: track.Range[] = [span(groups.start, end) ?? EMPTY];
+		const ranges: track.Range[] = [span(groups.start, oneStart ? undefined : groups.end) ?? EMPTY];
 		const msg = this.#withRanges(
 			this.#subscribeMessage(
 				id,
@@ -2254,7 +2249,30 @@ export class Subscriber {
 				);
 				stream = opened;
 				let fin = false;
-				const responses = this.#recoveryResponses(opened, entry, groups, oneStart, giveUp, () => fin);
+				// The update capping the open range at the group it starts at, which goes out before our FIN.
+				let capping: Promise<unknown> = Promise.resolve();
+				const cap = () => {
+					const update = new SubscribeUpdate({
+						priority: msg.priority,
+						order: msg.order,
+						maxDelay: msg.maxDelay,
+						minDelay: msg.minDelay,
+						startGroup: msg.startGroup,
+						endGroup: inclusiveGroupEnd(groups.end),
+					});
+					// A failed write means the publisher stopped reading: its responses decide the end.
+					capping = Writer.collect(this.version, (w) => update.encode(w, this.version))
+						.then((encoded) => opened.writer.write(encoded))
+						.catch(() => undefined);
+				};
+				const responses = this.#recoveryResponses(
+					opened,
+					entry,
+					groups,
+					oneStart ? cap : undefined,
+					giveUp,
+					() => fin,
+				);
 				// FIN once every group is accounted for and read, as a subscriber does once its tail
 				// settles, and the publisher FINs in reply.
 				let ended = false;
@@ -2275,6 +2293,7 @@ export class Subscriber {
 						if (covered()) {
 							await race([entry.tail.settle(covered, stopped), over, leaving]);
 							if (ended || left.signal.aborted) break;
+							await capping;
 							fin = true;
 							opened.writer.close();
 							break;
@@ -2329,13 +2348,13 @@ export class Subscriber {
 	}
 
 	// Read a recovery's responses to the publisher's FIN, giving up what it names it will not
-	// deliver. `fin` says whether our FIN went out, which the publisher's answers. With `oneStart`,
-	// before lite-07, `groups` narrows to the group it starts at.
+	// deliver. `fin` says whether our FIN went out, which the publisher's answers. With `cap`,
+	// before lite-07, `groups` narrows to the group it starts at, and `cap` asks no further.
 	async #recoveryResponses(
 		stream: Stream,
 		entry: SubscribeEntry,
 		groups: Run,
-		oneStart: boolean,
+		cap: (() => void) | undefined,
 		giveUp: (start: bigint, end: bigint, refusal: Refusal) => void,
 		fin: () => boolean,
 	): Promise<void> {
@@ -2361,8 +2380,12 @@ export class Subscriber {
 					passing(new NotFound(`group ${groups.start}`)),
 				);
 				// Nothing names the keys past a group before lite-07, so this one waits only for the
-				// group it starts at, and the rest is asked again.
-				if (oneStart && from < groups.end) groups.end = from + 1n;
+				// group it starts at, and the rest is asked again. Its open range is capped there; a
+				// stream already sent past the cap still lands.
+				if (cap) {
+					if (from < groups.end) groups.end = from + 1n;
+					cap();
+				}
 			} else if ("drop" in resp) {
 				const { start, end } = resp.drop;
 				const cause = resp.drop.cause(this.version);

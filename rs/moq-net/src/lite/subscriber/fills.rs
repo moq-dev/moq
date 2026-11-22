@@ -143,6 +143,16 @@ impl RangeFills {
 		}
 	}
 
+	/// Take the held fills a FETCH asked or joined, which outlive the subscription; its tail
+	/// settles the rest.
+	pub fn take_fetches(&mut self) -> Vec<track::FillGroups> {
+		let (fetches, held) = std::mem::take(&mut self.held)
+			.into_iter()
+			.partition(|fill| fill.is_fetch());
+		self.held = held;
+		fetches
+	}
+
 	/// Whether no fill is held, asked for, or recovering.
 	pub fn is_empty(&self) -> bool {
 		self.held.is_empty() && self.ask.is_empty() && self.recoveries.is_empty()
@@ -549,8 +559,8 @@ struct Recovery {
 	serving: track::Producer,
 	id: u64,
 	groups: Range<u64>,
-	/// Before lite-07: the subscription proves only the keys below its start, so it asks no
-	/// further than the group it starts at.
+	/// Before lite-07: the subscription proves only the keys below its start, so once
+	/// started it asks no further than the group it starts at.
 	one_start: bool,
 	state: RecoveryState,
 	/// The groups this subscription said it will not deliver, and why.
@@ -577,16 +587,10 @@ enum RecoveryState {
 impl Recovery {
 	fn new(serve: &TrackServe, serving: &track::Producer, groups: Range<u64>, priority: i8) -> Self {
 		// Before lite-07 the start is the answer, which the publisher gives only once a group in
-		// range can start it: the range reaches the first group held at or past the run, or the
-		// live edge when none is.
+		// range can start it, so the range stays open until the start caps it: only upstream
+		// knows which group it still holds past the run.
 		let one_start = !serve.subscriber.version.has_group_end();
-		let end = match one_start {
-			true => serving
-				.consume()
-				.next_cached_group(groups.end)
-				.map(|key| key.saturating_add(1)),
-			false => Some(groups.end),
-		};
+		let end = (!one_start).then_some(groups.end);
 		let subscription = Subscription::default()
 			.with_ranges(track::Range::span(Some(groups.start), end))
 			.with_priority(priority)
@@ -667,9 +671,13 @@ impl Recovery {
 					}
 				},
 				RecoveryState::Active { sub: active, finished } => {
+					if let Poll::Ready(Err(err)) = active.stream.writer.poll_flush(waiter) {
+						tracing::debug!(%err, "recovery subscribe write failed");
+					}
 					// FIN once every group is accounted for and read, as a subscriber does once
-					// its tail settles, and the publisher FINs in reply.
-					if !*finished {
+					// its tail settles, and the publisher FINs in reply; after any update, whose
+					// flush wakes this again.
+					if !*finished && active.stream.writer.is_flushed() {
 						let groups = self.groups.clone();
 						let settled = active
 							.tail
@@ -683,9 +691,6 @@ impl Recovery {
 							let _ = active.stream.writer.finish();
 							*finished = true;
 						}
-					}
-					if let Poll::Ready(Err(err)) = active.stream.writer.poll_flush(waiter) {
-						tracing::debug!(%err, "recovery subscribe write failed");
 					}
 					let res = ready!(active.stream.reader.poll_recv::<lite::SubscribeResponse>(waiter));
 					let now = self.serve.subscriber.runtime.now();
@@ -715,9 +720,18 @@ impl Recovery {
 							);
 							active.started = Some(start.starts[0]);
 							// Nothing names the keys past a group before lite-07, so this one waits
-							// only for the group it starts at, and the rest is asked again.
-							if self.one_start && from < groups.end {
-								self.groups = groups.start..from.saturating_add(1);
+							// only for the group it starts at, and the rest is asked again. Its open
+							// range is capped there; a stream already sent past the cap still lands.
+							if self.one_start {
+								if from < groups.end {
+									self.groups = groups.start..from.saturating_add(1);
+								}
+								let cap = lite::Range {
+									start: Some(lite::Anchor::Absolute(Position::group(groups.start))),
+									end: Some(lite::Anchor::Absolute(Position::group(self.groups.end))),
+								};
+								let (edit, _) = active.live.edit_keyed(&[((), cap)], |_| ())?;
+								super::buffer_update(active, edit)?;
 							}
 						}
 						Recv::Message(lite::SubscribeResponse::Drop(dropped)) => {
