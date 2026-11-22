@@ -488,14 +488,15 @@ impl<O: Output> Media<O> {
 									audio.cancel_opening();
 								}
 								// The replacement an upgrade handed over to plays once what plays
-								// retires, unless this snapshot disabled or moved it.
+								// retires, unless this snapshot disabled, moved, or removed it: unlike a
+								// rendition playing, it has no tail to play out.
 								if audio.next().is_some_and(|next| {
 									next.candidates.lock().unwrap().iter().any(|(name, _, track)| {
 										snapshot
 											.audio
 											.renditions
 											.get(name)
-											.is_some_and(|config| !config.enabled || Track::of(&source, config, name) != *track)
+											.is_none_or(|config| !config.enabled || Track::of(&source, config, name) != *track)
 									})
 								}) {
 									audio.drop_next();
