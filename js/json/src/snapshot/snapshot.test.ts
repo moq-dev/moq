@@ -794,25 +794,36 @@ test("snapshot consumer propagates a non-gap frame failure", async () => {
 
 // A value that fails the schema is the publisher's mistake, not a failed read: skip it and keep the consumer.
 test("a schema refusal is skipped with a warning and the next value is read", async () => {
-	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI });
 	const schema = z.object({ n: z.number() });
+	const payload = (json: string) => new TextEncoder().encode(json);
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
 	try {
-		for (const read of ["next", "latest"] as const) {
-			const consumer = new Consumer({ track, schema });
-			const at = (ms: number, json: string) => {
-				track
-					.appendGroup(Time.Timestamp.fromMillis(ms))
-					.writeFrame({ payload: new TextEncoder().encode(json), timestamp: Time.Timestamp.fromMillis(ms) });
-			};
-			const base = read === "next" ? 10 : 20;
-			at(base, '{"n":"x"}');
-			const pending = consumer[read]();
-			at(base + 1, `{"n":${base}}`);
-			expect((await pending)?.value).toEqual({ n: base });
-			expect(warn).toHaveBeenCalledTimes(read === "next" ? 1 : 2);
-			consumer.close();
-		}
+		// next() refuses the bad snapshot, then yields the state a later frame of its group repairs.
+		const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI });
+		const consumer = new Consumer({ track, schema });
+		const group = track.appendGroup(Time.Timestamp.fromMillis(1));
+		group.writeFrame({ payload: payload('{"n":"x"}'), timestamp: Time.Timestamp.fromMillis(1) });
+		group.writeFrame({ payload: payload('{"n":1}'), timestamp: Time.Timestamp.fromMillis(2) });
+		expect((await consumer.next())?.value).toEqual({ n: 1 });
+		expect(warn).toHaveBeenCalledTimes(1);
+		consumer.close();
+
+		// latest() waits through a refused group for the next one.
+		const live = new Track.Producer("live").accept({ timescale: Time.Timescale.MILLI });
+		const reader = new Consumer({ track: live, schema });
+		live.appendGroup(Time.Timestamp.fromMillis(1)).writeFrame({
+			payload: payload('{"n":"x"}'),
+			timestamp: Time.Timestamp.fromMillis(1),
+		});
+		const pending = reader.latest();
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(warn).toHaveBeenCalledTimes(2);
+		live.appendGroup(Time.Timestamp.fromMillis(2)).writeFrame({
+			payload: payload('{"n":2}'),
+			timestamp: Time.Timestamp.fromMillis(2),
+		});
+		expect((await pending)?.value).toEqual({ n: 2 });
+		reader.close();
 	} finally {
 		warn.mockRestore();
 	}
