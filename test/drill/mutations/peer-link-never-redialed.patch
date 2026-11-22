@@ -9,13 +9,13 @@ diff --git a/rs/moq-relay/src/cluster.rs b/rs/moq-relay/src/cluster.rs
 index 24082409c0..4371686fd6 100644
 --- a/rs/moq-relay/src/cluster.rs
 +++ b/rs/moq-relay/src/cluster.rs
-@@ -2346,6 +2346,11 @@ impl Cluster {
+@@ -2539,6 +2539,11 @@ impl Cluster {
  		loop {
- 			dial.observe(id, &observation);
- 			*connected |= observation.connects > 0;
+ 			dial.observe(live.id, &live.observation);
+ 			*connected |= live.observation.connects > 0;
 +			// MUTATION: a lost peer link is never redialed.
-+			if matches!(observation.phase, moq_tokio::connection::Phase::Disconnected { .. }) {
-+				drop(reconnect);
++			if matches!(live.observation.phase, moq_tokio::connection::Phase::Disconnected { .. }) {
++				drop(live);
 +				return std::future::pending().await;
 +			}
  			tokio::select! {

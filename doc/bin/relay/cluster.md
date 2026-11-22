@@ -331,8 +331,12 @@ own 30s deadline.
 Peers dial with **mTLS** (recommended: `listen.tls.root` on the listener,
 `connect.tls.cert`/`key` on the dialer) or a **JWT** (inline `?jwt=` on a peer
 URL, `token` on a peer object, or a shared `cluster.token` file for every
-listed peer, re-read on every dial so a rotated token applies at the next
-redial). The accepting relay admits a peer like any client, so a mesh
+listed peer). A new token, from a rewritten `cluster.token` file or a peer's
+changed token in the `api.url` list, renews the live session without dropping
+its routes: in band on moq-lite-07, otherwise on a replacement session that
+connects before the old one drains. Only a token replaces the token: a file
+read empty, as one rewritten in place is between its truncate and its write,
+keeps the current one, so stopping the shared token takes a restart. The accepting relay admits a peer like any client, so a mesh
 needs an auth server that grants the cluster CA, such as
 `moq auth serve --mtls-publish '' --mtls-subscribe '' --mtls-link peer`. An
 accepted peer counts as a cluster peer only when its grant sets a `link`,
