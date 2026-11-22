@@ -37,11 +37,9 @@ exclude_re = [
     # resume.rs: the sweep of handed-out groups only bounds memory, since
     # `let_go` drops dead entries itself before anything reads `out`.
     'replace (== with !=|> with >=) in Reader::hand_out$',
-    # Polling a covered or finished copy hands out nothing, so polling it anyway
-    # only costs work.
-    ':\d+:36: replace \|\| with && in Reader::poll_lowest$',
-    # An expired copy's groups are past the reader's own budget too: the copy expires a
-    # budget after the newer group that makes them stale, and `let_go` arms the same timer.
+    # Polling a covered copy hands out nothing, so polling it anyway only costs work. An
+    # expired copy's groups are past the reader's own budget too: the copy expires a budget
+    # after the newer group that makes them stale, and `let_go` arms the same timer.
     ':\d+:13: replace \|\| with && in Reader::poll_lowest$',
     # A run starting at the window's end or the resume point clips to an empty range, which
     # has no gaps.
@@ -87,19 +85,14 @@ exclude_re = [
     # A run starting at the end clips to an empty range, on which nothing lands
     # and nothing is missing.
     'replace < with <= in Copy::retains$',
-    'replace < with <= in Retain<.*>::holds_window$',
     # `Placed` only sees ranges `Reader::resolve` placed, with no latest group: each
-    # start is a time it contains or the oldest, so it never looks a start up, waits on
-    # one, or counts one back, and an `Oldest` end only reaches it from a copy that
-    # accepted one, which every copy refuses.
-    'replace <impl Holdings for Placed>::(back|next_start|complete|resolves) ',
-    'replace == with != in <impl Holdings for Placed>::back$',
+    # start is a time it contains or the oldest, so it never looks a start up or waits on
+    # one, and an `Oldest` end only reaches it from a copy that accepted one, which every
+    # copy refuses.
+    'replace <impl Holdings for Placed>::(next_start|complete|resolves) ',
     # A copy leaves a non-empty range starting at the oldest group or time 0 unresolved
     # only when a cap at 0 empties every range, so a waiting range stops the window too.
     'replace && with \|\| in Reader::resolve$',
-    # A range placed with its relative end still open stays unsettled, so a copy places it
-    # again once it resolves that end: skipping it only saves the window an edit.
-    ':\d+:7: delete ! in Reader::resolve$',
     # `owes_below` is asked only of a key outside the window, where no run starts.
     'replace < with <= in Reader::owes_below$',
     # Walking again before anything the read parked on fires returns the same
