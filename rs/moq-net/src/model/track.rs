@@ -19,7 +19,7 @@ use std::sync::Mutex;
 
 use super::delivered::Delivered;
 use super::idle;
-use super::record::{Pending, Record, Report};
+use super::record::{Pending, Record, Report, Standing};
 use crate::ledger::{self, Ledger};
 
 pub(crate) use super::subscription::Resolved;
@@ -11570,17 +11570,21 @@ impl Subscriber {
 	/// Bill what this reader settled, and pay what it can of the debt its track left its
 	/// readers; [`Error::Lagged`] once that needed a run it was promised.
 	pub(super) fn settle_record(&mut self, handed: Option<u64>) -> Result<()> {
+		let reader = Standing {
+			from: self.floor().unwrap_or(0),
+			handed,
+		};
 		match &mut self.inner {
 			Inner::Plain(cursor) => {
 				let state = &cursor.state;
 				match cursor.misses.as_deref_mut() {
-					Some(misses) => cursor.record.settle(|| state.read().cache.clone(), misses, handed),
-					None => cursor.record.settle(|| state.read().cache.clone(), &mut (), handed),
+					Some(misses) => cursor.record.settle(|| state.read().cache.clone(), misses, reader),
+					None => cursor.record.settle(|| state.read().cache.clone(), &mut (), reader),
 				}
 			}
 			Inner::Resume(_, logical) => {
 				let state = &logical.state;
-				logical.record.settle(|| state.read().cache.clone(), &mut (), handed)
+				logical.record.settle(|| state.read().cache.clone(), &mut (), reader)
 			}
 		}
 	}

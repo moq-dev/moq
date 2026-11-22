@@ -2383,6 +2383,9 @@ impl Producer {
 		let fin = state.next_index;
 		state.outcome = Outcome::Finished(fin, end);
 		state.charge.finish();
+		if let Some(content) = &state.content {
+			content.siblings.update(&state.charge);
+		}
 		// No frame follows to compress.
 		let original_fin = state.range_end.is_none().then_some(fin);
 		if let Some(flate) = &mut state.flate {

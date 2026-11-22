@@ -156,6 +156,8 @@ struct Inner {
 	// edge (see [`Footprint`]) and spare encoder. Signed: a footprint that flips while one of its bytes is
 	// mid-update pins it an instant early or late, which may dip this below zero.
 	pinned: AtomicI64,
+	// The part of `used` readers' records and tail ledgers bill.
+	records: AtomicU64,
 	// Wall-clock LRU window in milliseconds; u64::MAX means never expire by idleness.
 	expiry: u64,
 	// Reference point for the coarse tick clock.
@@ -228,6 +230,7 @@ impl Pool {
 				used: AtomicU64::new(0),
 				capacity: AtomicU64::new(config.capacity.unwrap_or(u64::MAX)),
 				pinned: AtomicI64::new(0),
+				records: AtomicU64::new(0),
 				expiry,
 				clock: Mutex::new(None),
 				tick: AtomicU64::new(0),
@@ -287,13 +290,21 @@ impl Pool {
 	}
 
 	/// What the capacity leaves beside the pinned bytes, for everything the pool may reclaim.
-	/// None in a pool held past its capacity by what it pins, where the room a reader frees by
-	/// ending is room nothing may use.
+	/// None in a pool held past its capacity by what it pins.
 	pub(super) fn room(&self) -> u64 {
 		self.inner
 			.capacity
 			.load(Ordering::Relaxed)
 			.saturating_sub(self.pinned())
+	}
+
+	/// Whether ending a reader is worth what it frees: the pool has [`Self::room`] other
+	/// content may use, or, held past its capacity by what it pins, its readers' records hold
+	/// more than everything else it holds. Short of that, the room a reader frees is room
+	/// nothing may use, while past it the records are what holds the memory.
+	fn ending_frees(&self) -> bool {
+		let records = self.inner.records.load(Ordering::Relaxed);
+		self.room() > 0 || records > self.used().saturating_sub(records)
 	}
 
 	/// Change the capacity. `None` makes the pool unbounded.
@@ -1472,6 +1483,11 @@ impl Footprint {
 		}
 	}
 
+	/// Whether its group finished.
+	fn finished(&self) -> bool {
+		self.content.load(Ordering::Relaxed) & FINAL != 0
+	}
+
 	/// The group finished, so its content no longer grows.
 	fn finish(&self, track: &Track) {
 		let prior = self.content.fetch_or(FINAL, Ordering::Relaxed);
@@ -1526,7 +1542,7 @@ impl Footprint {
 ///
 /// So they bill the session together: while one copy is itself its track's cached live
 /// edge, they all do, a copy that aborted included, since its frames may still be what the
-/// live copy holds; once none is, none does.
+/// live copy holds; once none is, none does. Once one finished, they are all whole.
 #[derive(Default)]
 pub(super) struct Siblings(Mutex<Vec<Sibling>>);
 
@@ -1569,10 +1585,17 @@ impl Siblings {
 		Self::bill(&mut siblings);
 	}
 
-	/// Bill every copy while any is the live edge, forgetting copies nothing bills any more.
+	/// Bill every copy while any is the live edge, and pin every copy's content once any
+	/// finished, since a copy's frames may be what a finished sibling holds. Forgets copies
+	/// nothing bills any more.
 	fn bill(siblings: &mut Vec<Sibling>) {
 		siblings.retain(|sibling| Arc::strong_count(&sibling.footprint) > 1);
 		let edge = siblings.iter().any(|sibling| sibling.edge);
+		if siblings.iter().any(|sibling| sibling.footprint.finished()) {
+			for sibling in siblings.iter() {
+				sibling.footprint.finish(&sibling.track);
+			}
+		}
 		for sibling in siblings.iter() {
 			match edge {
 				true => sibling.footprint.promote(&sibling.track),
@@ -1890,6 +1913,7 @@ impl Reader {
 		if bytes > self.bytes {
 			let grown = bytes - self.bytes;
 			billed.fetch_add(grown, Ordering::Relaxed);
+			self.track.pool.inner.records.fetch_add(grown, Ordering::Relaxed);
 			self.track.pool.add(grown);
 			self.track.written.fetch_add(grown, Ordering::Relaxed);
 			self.bytes = bytes;
@@ -1898,6 +1922,7 @@ impl Reader {
 			// Whatever a record frees pays toward its readers' debt, however it shrank.
 			let shrunk = self.bytes - bytes;
 			billed.fetch_sub(shrunk, Ordering::Relaxed);
+			self.track.pool.inner.records.fetch_sub(shrunk, Ordering::Relaxed);
 			let _ = readers.debt.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |debt| {
 				(debt > 0).then(|| debt.saturating_sub(shrunk))
 			});
@@ -1920,14 +1945,14 @@ impl Reader {
 	/// Whether this record is one to end when folding leaves a debt: it bills more than a
 	/// cached group's overhead, so ending it frees more than evicting a group would, at least
 	/// its readers' average, so a reader holding little never ends for one holding much, and
-	/// the pool has [`Pool::room`], so what ending it frees is room other content may use.
+	/// ending it frees what the pool can use (see `Pool::ending_frees`).
 	pub(super) fn ends(&self) -> bool {
 		let readers = &self.track.readers;
 		let count = readers.count.load(Ordering::Relaxed);
 		self.record
 			&& self.bytes > ENTRY_OVERHEAD
 			&& u128::from(self.bytes) * u128::from(count) >= u128::from(readers.bytes.load(Ordering::Relaxed))
-			&& self.track.pool.room() > 0
+			&& self.track.pool.ending_frees()
 	}
 }
 
@@ -2407,6 +2432,26 @@ mod test {
 		drop(cold);
 		assert_eq!(pool.used(), 0);
 		assert_eq!(pool.pinned(), 0);
+	}
+
+	/// A copy's content pins once any sibling sharing it finished, since its frames may be what
+	/// the finished copy holds.
+	#[test]
+	fn a_finished_sibling_pins_the_shared_content() {
+		let pool = bounded(0);
+		let track = Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
+		let siblings = Siblings::default();
+		let mut live = track.charge();
+		live.add(1_000);
+		live.promote();
+		siblings.update(&live);
+		let head = track.charge();
+		siblings.update(&head);
+		assert_eq!(pool.pinned(), 2 * ENTRY_OVERHEAD, "the shared frames still grow");
+		head.finish();
+		siblings.update(&head);
+		assert_eq!(pool.pinned(), 2 * ENTRY_OVERHEAD + 1_000);
+		assert_eq!(pool.excess(), None);
 	}
 
 	/// A live edge bills its session for every byte it holds, its extras included (shared

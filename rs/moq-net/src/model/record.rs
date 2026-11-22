@@ -168,6 +168,15 @@ impl Record {
 	}
 }
 
+/// Where a reader stands, which bounds what its record's fold may settle.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct Standing {
+	/// The lowest key the reader's ranges name: nothing below it is owed any more.
+	pub from: u64,
+	/// The group this read hands out, which its publisher has yet to tell its wire of.
+	pub handed: Option<u64>,
+}
+
 /// Runs a reader keeps beside its record, billed with it and settled by its fold: the
 /// misses it gave up, which it never asks a fill for again.
 pub(super) trait Beside {
@@ -212,7 +221,7 @@ impl Record {
 		&mut self,
 		account: impl FnOnce() -> Arc<cache::Track>,
 		beside: &mut dyn Beside,
-		handed: Option<u64>,
+		reader: Standing,
 	) -> Result<(), Error> {
 		if self.failed {
 			return Err(Error::Lagged);
@@ -227,7 +236,7 @@ impl Record {
 		if bill.debt() == 0 {
 			return Ok(());
 		}
-		self.fold(handed);
+		self.fold(reader);
 		beside.forget_below(self.floor);
 		let bytes = (self.runs() + beside.runs()) * RUN_OVERHEAD;
 		let bill = self.bill.as_mut().expect("opened above");
@@ -243,8 +252,9 @@ impl Record {
 	/// not final. Final are the groups handed out, every report, and this reader's own stale
 	/// skips, which a wider budget would offer again only while the pool still held their
 	/// groups. Not final are the runs given up and not reported yet, and the keys nothing
-	/// settled.
-	fn fold(&mut self, handed: Option<u64>) {
+	/// settled at or above where the reader's ranges start: below it, nothing ever will.
+	fn fold(&mut self, reader: Standing) {
+		let Standing { from, handed } = reader;
 		// The runs copied from the track's drop set go first: the next scan folds in again
 		// whatever the track still holds.
 		let received: Vec<_> = self
@@ -271,7 +281,18 @@ impl Record {
 						self.skipped.run_end(floor),
 					];
 					let Some(end) = local.into_iter().flatten().max() else {
-						break;
+						// Nothing settled this key. Below the reader's start nothing will, so it
+						// folds up to that start, or to the first run still to report.
+						if floor >= from {
+							break;
+						}
+						let pending = self.pending.overlapping(&(floor..from)).next();
+						let next = pending.map_or(from, |(run, _)| run.start.max(floor));
+						if next <= floor {
+							break;
+						}
+						floor = next;
+						continue;
 					};
 					// A report or a run given up inside it is judged on its own.
 					let span = floor..end;
@@ -344,12 +365,12 @@ mod test {
 		for key in 0..4 {
 			record.delivered.insert(key);
 		}
-		record.settle(|| track.clone(), &mut (), None).unwrap();
+		record.settle(|| track.clone(), &mut (), Standing::default()).unwrap();
 		assert_eq!(pool.used(), 0, "a lone prefix bills nothing");
 		for key in (10..1_000).step_by(2) {
 			record.reported.insert(key..key + 1, Report::Dropped);
 		}
-		record.settle(|| track.clone(), &mut (), None).unwrap();
+		record.settle(|| track.clone(), &mut (), Standing::default()).unwrap();
 		assert_eq!(pool.used(), 495 * RUN_OVERHEAD);
 		drop(record);
 		assert_eq!(pool.used(), 0);
@@ -366,10 +387,10 @@ mod test {
 		record.reported.insert(1..u64::MAX / 2, Report::Dropped);
 		record.delivered.insert(u64::MAX / 2);
 		record.reported.insert(u64::MAX / 2 + 1..u64::MAX / 2 + 2, Report::Skip);
-		record.settle(|| track.clone(), &mut (), None).unwrap();
+		record.settle(|| track.clone(), &mut (), Standing::default()).unwrap();
 		assert_eq!(pool.used(), 3 * RUN_OVERHEAD);
 		owe(&track, pool.used());
-		record.settle(|| track.clone(), &mut (), None).unwrap();
+		record.settle(|| track.clone(), &mut (), Standing::default()).unwrap();
 		assert_eq!(pool.used(), 0, "all of it folded");
 		assert!(
 			record.told(7) && record.delivered.contains(7),
@@ -379,6 +400,44 @@ mod test {
 		let mut untold = RangeSet::new();
 		untold.insert(u64::MAX / 2 + 2..u64::MAX / 2 + 3);
 		assert_eq!(record.untold(0..u64::MAX / 2 + 3), untold);
+	}
+
+	/// A reader that joined above key 0, as at a sparse-key track's live edge, folds the keys
+	/// below its start, which nothing will ever settle, and so everything final above them. A
+	/// run still to report below its start stops the fold all the same.
+	#[test]
+	fn a_debt_folds_below_where_the_reader_starts() {
+		let (pool, track) = account();
+		let mut record = Record::default();
+		for key in [1_000, 2_000, 3_000] {
+			record.delivered.insert(key);
+			record.reported.insert(key + 1..key + 1_000, Report::Dropped);
+		}
+		let unstarted = Standing::default();
+		record.settle(|| track.clone(), &mut (), unstarted).unwrap();
+		owe(&track, pool.used());
+		record.settle(|| track.clone(), &mut (), unstarted).unwrap();
+		assert!(pool.used() > 0, "a reader owed key 0 folds nothing");
+
+		let started = Standing {
+			from: 1_000,
+			handed: None,
+		};
+		record.settle(|| track.clone(), &mut (), started).unwrap();
+		assert_eq!(pool.used(), 0, "all of it folded");
+		assert!(record.delivered.contains(2_000));
+
+		let mut record = Record::default();
+		record
+			.pending
+			.insert(500..501, Pending::own(Hole::drop(StreamError::NotFound)));
+		record.delivered.insert(1_000);
+		record.delivered.insert(2_000);
+		record.settle(|| track.clone(), &mut (), started).unwrap();
+		owe(&track, pool.used());
+		record.settle(|| track.clone(), &mut (), started).unwrap();
+		assert!(!record.told(500), "the run still to report stays");
+		assert!(record.told(499));
 	}
 
 	/// The group a read hands out stays above the fold: its publisher has yet to tell its wire
@@ -391,9 +450,18 @@ mod test {
 		record.reported.insert(1..3, Report::Dropped);
 		record.delivered.insert(3);
 		record.reported.insert(5..6, Report::Skip);
-		record.settle(|| track.clone(), &mut (), None).unwrap();
+		record.settle(|| track.clone(), &mut (), Standing::default()).unwrap();
 		owe(&track, pool.used());
-		record.settle(|| track.clone(), &mut (), Some(3)).unwrap();
+		record
+			.settle(
+				|| track.clone(),
+				&mut (),
+				Standing {
+					from: 0,
+					handed: Some(3),
+				},
+			)
+			.unwrap();
 		assert!(record.told(2), "the drops below it fold");
 		assert!(!record.told(3), "the handed group stays to be told");
 	}
@@ -413,14 +481,16 @@ mod test {
 		for key in (5..1_000).step_by(2) {
 			record.reported.insert(key..key + 1, Report::Dropped);
 		}
-		record.settle(|| track.clone(), &mut (), None).unwrap();
+		record.settle(|| track.clone(), &mut (), Standing::default()).unwrap();
 		owe(&track, pool.used());
-		let err = record.settle(|| track.clone(), &mut (), None).unwrap_err();
+		let err = record
+			.settle(|| track.clone(), &mut (), Standing::default())
+			.unwrap_err();
 		assert_eq!(StreamError::from(&err), StreamError::TooFarBehind);
 		assert_eq!(pool.used(), 0, "its record went with it");
 		assert!(record.failed());
 		assert!(
-			record.settle(|| track.clone(), &mut (), None).is_err(),
+			record.settle(|| track.clone(), &mut (), Standing::default()).is_err(),
 			"it stays ended"
 		);
 	}
@@ -437,16 +507,17 @@ mod test {
 			.pending
 			.insert(2..3, Pending::own(Hole::drop(StreamError::NotFound)));
 		record.skipped.insert(4, Duration::from_secs(1));
-		record.settle(|| track.clone(), &mut (), None).unwrap();
+		record.settle(|| track.clone(), &mut (), Standing::default()).unwrap();
 		owe(&track, RUN_OVERHEAD);
-		record.settle(|| track.clone(), &mut (), None).unwrap();
+		record.settle(|| track.clone(), &mut (), Standing::default()).unwrap();
 		assert_eq!(pool.used(), 2 * RUN_OVERHEAD, "the drop folded");
 		assert!(!record.told(2), "the run given up is still owed");
 	}
 
-	/// A pool held past its capacity by what it pins ends no reader, since what ending one
-	/// frees is room nothing may use, though it still folds what is final. Given room beside
-	/// the pins, the same debt ends it.
+	/// A pool held past its capacity by what it pins ends no reader while its records hold less
+	/// than everything else, since what ending one frees is room nothing may use, though it
+	/// still folds what is final. Room beside the pins, or records holding most of the pool,
+	/// end it.
 	#[test]
 	fn a_debt_past_the_pins_ends_no_reader() {
 		let pool = cache::Pool::new(cache::Config::default().with_capacity(0));
@@ -455,6 +526,30 @@ mod test {
 		edge.add(1 << 20);
 		edge.promote();
 		edge.finish();
+		let mut record = record_with_promise();
+		record.settle(|| track.clone(), &mut (), Standing::default()).unwrap();
+		owe(&track, pool.used());
+		record.settle(|| track.clone(), &mut (), Standing::default()).unwrap();
+		assert!(record.told(1), "what is final still folds");
+		assert!(!record.failed());
+
+		// Given room beside the pins, the same debt ends it.
+		pool.resize(pool.pinned() + 1);
+		owe(&track, pool.used());
+		assert!(record.settle(|| track.clone(), &mut (), Standing::default()).is_err());
+
+		// So does a record holding most of the pool, with no room beside the pins.
+		pool.resize(0);
+		let mut record = record_with_promise();
+		record.settle(|| track.clone(), &mut (), Standing::default()).unwrap();
+		edge.sub(1 << 20);
+		owe(&track, pool.used());
+		assert!(record.settle(|| track.clone(), &mut (), Standing::default()).is_err());
+	}
+
+	/// A record holding a promise it cannot fold, and enough reports above it that ending it
+	/// frees more than evicting a group would.
+	fn record_with_promise() -> Record {
 		let mut record = Record::default();
 		record.delivered.insert(0);
 		record.reported.insert(1..2, Report::Dropped);
@@ -464,15 +559,7 @@ mod test {
 		for key in (5..1_000).step_by(2) {
 			record.reported.insert(key..key + 1, Report::Dropped);
 		}
-		record.settle(|| track.clone(), &mut (), None).unwrap();
-		owe(&track, pool.used());
-		record.settle(|| track.clone(), &mut (), None).unwrap();
-		assert!(record.told(1), "what is final still folds");
-		assert!(!record.failed());
-
-		pool.resize(pool.pinned() + 1);
-		owe(&track, pool.used());
-		assert!(record.settle(|| track.clone(), &mut (), None).is_err());
+		record
 	}
 
 	/// Of a track's readers, one holding little never ends for one holding much, nor one
@@ -487,13 +574,13 @@ mod test {
 		for key in (1..1_000).step_by(2) {
 			large.pending.insert(key..key + 1, promise.clone());
 		}
-		small.settle(|| track.clone(), &mut (), None).unwrap();
-		large.settle(|| track.clone(), &mut (), None).unwrap();
+		small.settle(|| track.clone(), &mut (), Standing::default()).unwrap();
+		large.settle(|| track.clone(), &mut (), Standing::default()).unwrap();
 		owe(&track, RUN_OVERHEAD);
-		small.settle(|| track.clone(), &mut (), None).unwrap();
-		assert!(large.settle(|| track.clone(), &mut (), None).is_err());
+		small.settle(|| track.clone(), &mut (), Standing::default()).unwrap();
+		assert!(large.settle(|| track.clone(), &mut (), Standing::default()).is_err());
 		assert_eq!(pool.used(), RUN_OVERHEAD);
-		small.settle(|| track.clone(), &mut (), None).unwrap();
+		small.settle(|| track.clone(), &mut (), Standing::default()).unwrap();
 	}
 
 	/// A tail's bill pays the readers' debt but is no record to end: it never joins the mean
