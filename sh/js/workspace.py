@@ -252,7 +252,7 @@ def run(action, plan):
                 if directory.startswith("test/") and directory not in selected_dirs
             ]
             harness = json.loads((ROOT / "test/tsconfig.json").read_text())
-            descriptor, name = tempfile.mkstemp(suffix=".json", dir=ROOT / "test")
+            descriptor, name = tempfile.mkstemp(suffix=".local.json", dir=ROOT / "test")
             try:
                 with os.fdopen(descriptor, "w") as config:
                     json.dump({"extends": "./tsconfig.json", "exclude": harness.get("exclude", []) + excluded}, config)

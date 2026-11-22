@@ -53,8 +53,9 @@ check-test *args:
 lint *args:
     #!/usr/bin/env bash
     set -euo pipefail
+    run() { "$@" || { echo "error: $* failed" >&2; return 1; }; }
     pids=()
-    python3 sh/rs/stats-docs.py & pids+=($!)
+    run python3 sh/rs/stats-docs.py & pids+=($!)
     # The environment is process-wide, so nothing writes it. A text check, because the
     # clock lint's test allowances also silence clippy's disallowed_methods.
     (
@@ -62,17 +63,17 @@ lint *args:
         git grep --untracked -nE '(^|[^[:alnum:]_])(set_var|remove_var)[[:space:]]*\(' -- 'rs/*.rs' || rc=$?
         [ "$rc" -eq 1 ] || { echo "error: a write to the process environment: pass the value down, or run a test in a child with test_env::Env" >&2; exit 1; }
     ) & pids+=($!)
-    cargo fmt --all --check & pids+=($!)
-    RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked --no-deps "$@" & pids+=($!)
-    cargo shear --deny-warnings & pids+=($!)
+    run cargo fmt --all --check & pids+=($!)
+    RUSTDOCFLAGS="-D warnings" run bash sh/local.sh cargo doc --locked --no-deps "$@" & pids+=($!)
+    run cargo shear --deny-warnings & pids+=($!)
     # The workspace-hack's table order is `cargo hakari`'s, which `cargo sort` disagrees with.
     (
         mapfile -t manifests < <(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name != "workspace-hack") | .manifest_path | rtrimstr("/Cargo.toml")')
-        cargo sort --check --no-format . "${manifests[@]}"
+        run cargo sort --check --no-format . "${manifests[@]}"
     ) & pids+=($!)
-    cargo hakari generate --diff & pids+=($!)
-    python3 sh/rs/hakari.py & pids+=($!)
-    python3 sh/rs/crypto.py & pids+=($!)
+    run cargo hakari generate --diff & pids+=($!)
+    run python3 sh/rs/hakari.py & pids+=($!)
+    run python3 sh/rs/crypto.py & pids+=($!)
     fail=0
     for pid in "${pids[@]}"; do wait "$pid" || fail=1; done
     exit "$fail"

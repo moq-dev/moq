@@ -12962,7 +12962,6 @@ impl ServeLoop {
 		Ok(())
 	}
 
-	/// Apply one response read from the upstream subscription.
 	/// Record a single SUBSCRIBE_STARTED without yet publishing the full starts table to
 	/// the track, returning whether the range is still live and needs `report_starts`/`declare`.
 	fn record_started(&mut self, serve: &TrackServe, started: &lite::SubscribeStarted) -> Result<bool, Error> {
@@ -13000,6 +12999,7 @@ impl ServeLoop {
 		Ok(false)
 	}
 
+	/// Apply one response read from the upstream subscription.
 	fn apply_response(&mut self, serve: &TrackServe, msg: lite::SubscribeResponse) -> Result<(), Error> {
 		let Sub::Active(active) = &mut self.sub else {
 			return Ok(());
@@ -13555,138 +13555,103 @@ impl ServeLoop {
 						// stays local: nothing reopens the TRACK for it.
 						self.held = None;
 						active.unanswered = None;
-						match res {
-							Recv::Message(lite::SubscribeResponse::Started(first)) => {
-								let mut dirty = match self.record_started(serve, &first) {
-									Ok(changed) => changed,
-									Err(err) => return Poll::Ready(ServeEnd::GiveBack(err)),
-								};
-								// Drain any further ready SUBSCRIBE_STARTED messages in one pass
-								// before publishing the starts table, avoiding O(N^2) rebuilds when
-								// a multi-range update is answered in a burst.
-								let mut deferred = None;
-								let mut yielded = false;
-								loop {
-									if budget.poll_yield(waiter).is_pending() {
-										yielded = true;
-										break;
+						let mut next = Some(res);
+						while let Some(res) = next.take() {
+							match res {
+								Recv::Message(lite::SubscribeResponse::Started(first)) => {
+									let mut dirty = match self.record_started(serve, &first) {
+										Ok(changed) => changed,
+										Err(err) => return Poll::Ready(ServeEnd::GiveBack(err)),
+									};
+									// Drain any further ready SUBSCRIBE_STARTED messages in one pass
+									// before publishing the starts table, avoiding O(N^2) rebuilds when
+									// a multi-range update is answered in a burst.
+									let mut yielded = false;
+									loop {
+										if budget.poll_yield(waiter).is_pending() {
+											yielded = true;
+											break;
+										}
+										let Sub::Active(active) = &mut self.sub else {
+											break;
+										};
+										match active.stream.reader.poll_recv::<lite::SubscribeResponse>(waiter) {
+											Poll::Ready(Recv::Message(lite::SubscribeResponse::Started(started))) => {
+												match self.record_started(serve, &started) {
+													Ok(changed) => dirty |= changed,
+													Err(err) => return Poll::Ready(ServeEnd::GiveBack(err)),
+												}
+											}
+											Poll::Ready(other) => {
+												next = Some(other);
+												break;
+											}
+											Poll::Pending => break,
+										}
 									}
+									if dirty && let Sub::Active(active) = &mut self.sub {
+										active.report_starts(&self.serving);
+										active.declare(&mut self.serving);
+									}
+									if next.is_none() && yielded {
+										return Poll::Pending;
+									}
+								}
+								Recv::Message(msg) => {
+									if let Err(err) = self.apply_response(serve, msg) {
+										return Poll::Ready(ServeEnd::GiveBack(err));
+									}
+									// Each pass re-polls the whole loop, so a peer streaming
+									// responses must not hold the session's other tasks.
+									ready!(budget.poll_yield(waiter));
+								}
+								Recv::Ended => {
 									let Sub::Active(active) = &mut self.sub else {
 										break;
 									};
-									match active.stream.reader.poll_recv::<lite::SubscribeResponse>(waiter) {
-										Poll::Ready(Recv::Message(lite::SubscribeResponse::Started(next))) => {
-											match self.record_started(serve, &next) {
-												Ok(changed) => dirty |= changed,
-												Err(err) => return Poll::Ready(ServeEnd::GiveBack(err)),
-											}
-										}
-										Poll::Ready(other) => {
-											deferred = Some(other);
-											break;
-										}
-										Poll::Pending => break,
+									// The publisher ends the subscription only once it declared the
+									// track's end: with SUBSCRIBE_FINISH from lite-05, which lite-07
+									// reads into the tail without a FIN.
+									if serve.subscriber.version.has_track_stream() && active.end.is_none() {
+										return Poll::Ready(ServeEnd::GiveBack(Error::ProtocolViolation));
 									}
+									tracing::debug!(broadcast = %serve.subscriber.log_path(&serve.path), track = %serve.name, "subscribe complete");
+									// Upstream FIN'd the subscription: the publisher only FINs
+									// once the track's final key is known and every group
+									// stream finished, so the logical track is over for good
+									// (bounded demand alone never FINs; the publisher parks, since
+									// a cap can be raised). Those streams can still be in flight,
+									// so wait for the tail before finishing.
+									self.mode = ServeMode::Tail {
+										settle: Self::settle(serve, &self.serving, active),
+										requested_end: self.serving.subscription().and_then(|sub| sub.end()),
+									};
 								}
-								if dirty && let Sub::Active(active) = &mut self.sub {
-									active.report_starts(&self.serving);
-									active.declare(&mut self.serving);
+								// Malformed bytes are a protocol violation, which closes the session; a
+								// reset gives up the subscription with its reason.
+								Recv::Malformed(err) => {
+									let Sub::Active(active) = &mut self.sub else {
+										break;
+									};
+									tracing::warn!(broadcast = %serve.subscriber.log_path(&serve.path), track = %serve.name, %err, "subscribe error");
+									self.mode = ServeMode::Failed {
+										err: Error::ProtocolViolation,
+										tail: active.tail.consume(),
+									};
 								}
-								if let Some(other) = deferred {
-									match other {
-										Recv::Message(msg) => {
-											if let Err(err) = self.apply_response(serve, msg) {
-												return Poll::Ready(ServeEnd::GiveBack(err));
-											}
-											ready!(budget.poll_yield(waiter));
-										}
-										Recv::Ended => {
-											let Sub::Active(active) = &mut self.sub else {
-												continue;
-											};
-											if serve.subscriber.version.has_track_stream() && active.end.is_none() {
-												return Poll::Ready(ServeEnd::GiveBack(Error::ProtocolViolation));
-											}
-											tracing::debug!(broadcast = %serve.subscriber.log_path(&serve.path), track = %serve.name, "subscribe complete");
-											self.mode = ServeMode::Tail {
-												settle: Self::settle(serve, &self.serving, active),
-												requested_end: self.serving.subscription().and_then(|sub| sub.end()),
-											};
-										}
-										Recv::Malformed(err) => {
-											let Sub::Active(active) = &mut self.sub else {
-												continue;
-											};
-											tracing::warn!(broadcast = %serve.subscriber.log_path(&serve.path), track = %serve.name, %err, "subscribe error");
-											self.mode = ServeMode::Failed {
-												err: Error::ProtocolViolation,
-												tail: active.tail.consume(),
-											};
-										}
-										Recv::Reset(err) => {
-											let Sub::Active(active) = &mut self.sub else {
-												continue;
-											};
-											tracing::warn!(broadcast = %serve.subscriber.log_path(&serve.path), track = %serve.name, %err, "subscribe error");
-											self.mode = ServeMode::Failed {
-												err,
-												tail: active.tail.consume(),
-											};
-										}
-									}
-								} else if yielded {
-									return Poll::Pending;
+								Recv::Reset(err) => {
+									let Sub::Active(active) = &mut self.sub else {
+										break;
+									};
+									tracing::warn!(broadcast = %serve.subscriber.log_path(&serve.path), track = %serve.name, %err, "subscribe error");
+									self.mode = ServeMode::Failed {
+										err,
+										tail: active.tail.consume(),
+									};
 								}
-								continue;
-							}
-							Recv::Message(msg) => {
-								if let Err(err) = self.apply_response(serve, msg) {
-									return Poll::Ready(ServeEnd::GiveBack(err));
-								}
-								// Each pass re-polls the whole loop, so a peer streaming
-								// responses must not hold the session's other tasks.
-								ready!(budget.poll_yield(waiter));
-								continue;
-							}
-							Recv::Ended => {
-								// The publisher ends the subscription only once it declared the
-								// track's end: with SUBSCRIBE_FINISH from lite-05, which lite-07
-								// reads into the tail without a FIN.
-								if serve.subscriber.version.has_track_stream() && active.end.is_none() {
-									return Poll::Ready(ServeEnd::GiveBack(Error::ProtocolViolation));
-								}
-								tracing::debug!(broadcast = %serve.subscriber.log_path(&serve.path), track = %serve.name, "subscribe complete");
-								// Upstream FIN'd the subscription: the publisher only FINs
-								// once the track's final key is known and every group
-								// stream finished, so the logical track is over for good
-								// (bounded demand alone never FINs; the publisher parks, since
-								// a cap can be raised). Those streams can still be in flight,
-								// so wait for the tail before finishing.
-								self.mode = ServeMode::Tail {
-									settle: Self::settle(serve, &self.serving, active),
-									requested_end: self.serving.subscription().and_then(|sub| sub.end()),
-								};
-								continue;
-							}
-							// Malformed bytes are a protocol violation, which closes the session; a
-							// reset gives up the subscription with its reason.
-							Recv::Malformed(err) => {
-								tracing::warn!(broadcast = %serve.subscriber.log_path(&serve.path), track = %serve.name, %err, "subscribe error");
-								self.mode = ServeMode::Failed {
-									err: Error::ProtocolViolation,
-									tail: active.tail.consume(),
-								};
-								continue;
-							}
-							Recv::Reset(err) => {
-								tracing::warn!(broadcast = %serve.subscriber.log_path(&serve.path), track = %serve.name, %err, "subscribe error");
-								self.mode = ServeMode::Failed {
-									err,
-									tail: active.tail.consume(),
-								};
-								continue;
 							}
 						}
+						continue;
 					}
 
 					// Every response that beat the accept is read.
