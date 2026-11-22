@@ -200,9 +200,16 @@ impl<O: Output> Media<O> {
 			// may have ended and the task set emptied: both branches disarmed, with
 			// a replacement still on offer.
 			if playback.pending(&video, &audio).is_none() {
-				// Watched apart from the halves, which the branches below borrow.
-				let video_outranked = video.running().and_then(|running| running.data.outranked.clone());
-				let audio_outranked = audio.running().and_then(|running| running.data.outranked.clone());
+				// Watched apart from the halves, which the branches below borrow, and only while
+				// nothing replaces what plays: a switch under way keeps the watch for once it settles.
+				let video_outranked = video
+					.running()
+					.filter(|_| video.settled())
+					.and_then(|running| running.data.outranked.clone());
+				let audio_outranked = audio
+					.running()
+					.filter(|_| audio.settled())
+					.and_then(|running| running.data.outranked.clone());
 				tokio::select! {
 					result = tasks.join_next(), if !tasks.is_empty() => {
 						if let Some((kind, task, result)) = joined(result.expect("guarded by is_empty"))? {
@@ -312,6 +319,25 @@ impl<O: Output> Media<O> {
 								audio.cancel_opening();
 								audio.repick();
 							}
+							// An upgrade's replacement plays once the rendition it replaces has played
+							// out what its sink holds, which it fills behind, as after a move. Played
+							// side by side, both would drive the speaker's playhead.
+							Some(ready) if audio.switching() == Some(Switch::Upgrade) => {
+								let next = Opened {
+									ready: Some(ready),
+									rejected: Vec::new(),
+									outranked,
+								};
+								let next = Opening {
+									candidates: Default::default(),
+									future: Box::pin(std::future::ready(next)),
+								};
+								if audio.hand_over(next)
+									&& let Some(running) = audio.running()
+								{
+									running.data.retire.notify_one();
+								}
+							}
 							Some(ready) => {
 								tracing::info!(track = ready.name, decoder = ready.consumer.name(), "playing audio rendition");
 								if speaker.is_none() {
@@ -360,18 +386,13 @@ impl<O: Output> Media<O> {
 						}
 						video.upgrade();
 					}
-					// Audio plays out what its sink holds and picks again, as when the catalog
-					// moves it, so the replacement fills while the tail sounds.
+					// A better audio rendition's broadcast landed, so it opens while the one
+					// playing plays on.
 					() = async { audio_outranked.clone().expect("guarded").landed().await }, if audio_outranked.is_some() => {
 						if let Some(running) = audio.running_mut() {
 							running.data.outranked = None;
 						}
-						if audio.retire()
-							&& let Some(running) = audio.running()
-						{
-							running.data.retire.notify_one();
-							audio.repick();
-						}
+						audio.upgrade();
 					}
 					_ = tails.join_next(), if !tails.is_empty() => {}
 					changed = viewport.changed(), if viewing => {
@@ -569,14 +590,22 @@ impl<O: Output> Media<O> {
 			}
 
 			if playback.wants(&audio) {
-				playback.read(&mut audio, false);
-				let candidates: Vec<AudioCandidate> = snapshot
+				// An upgrade switches only to a rendition ranked above the one playing.
+				let upgrading = audio.switching() == Some(Switch::Upgrade);
+				playback.read(&mut audio, upgrading);
+				let mut candidates: Vec<AudioCandidate> = snapshot
 					.audio
 					.enabled()
 					.map(|(name, config)| (name.clone(), config.clone(), Track::of(&source, config, name)))
 					// A finished track has only its newest group left, which already played.
 					.filter(|(_, _, reference)| !playback.finished(reference))
 					.collect();
+				if upgrading
+					&& let Some(running) = audio.running()
+					&& let Some(rank) = candidates.iter().position(|(_, _, track)| *track == running.track)
+				{
+					candidates.truncate(rank);
+				}
 				if candidates.is_empty() {
 					audio.give_up();
 				} else if audio
@@ -2756,7 +2785,7 @@ mod tests {
 			.unwrap();
 
 		let recorder = Recorder::default();
-		let player = tokio::spawn(media(&origin, Duration::from_millis(50), recorder.clone()).run());
+		let player = tokio::spawn(media(&origin, Duration::from_millis(500), recorder.clone()).run());
 		for index in 0..40 {
 			low.write(packet(index, LOW)).unwrap();
 			kio::clock::sleep(PACKET_DURATION).await;
@@ -2766,10 +2795,14 @@ mod tests {
 			"the pending sibling held the fallback back"
 		);
 
+		// The preferred rendition sends nothing for longer than the delay the fallback holds, so
+		// retiring the fallback as its broadcast lands would go silent.
 		sibling.announce().unwrap();
-		for index in 40..80 {
+		for index in 40..120 {
 			low.write(packet(index, LOW)).unwrap();
-			high.write(packet(index, HIGH)).unwrap();
+			if index >= 80 {
+				high.write(packet(index, HIGH)).unwrap();
+			}
 			kio::clock::sleep(PACKET_DURATION).await;
 		}
 		settle(player, &recorder).await;
@@ -2781,6 +2814,13 @@ mod tests {
 			recorder.played().last().map(|part| part.sample),
 			Some(HIGH),
 			"the fallback outlived the switch"
+		);
+		// The preferred rendition opens while the fallback plays on, which retires only once
+		// the preferred one answers, so every fallback packet sent before then is heard.
+		assert_eq!(
+			played(&recorder, LOW).0,
+			PACKET_DURATION * 81,
+			"the fallback retired before its replacement was ready"
 		);
 	}
 

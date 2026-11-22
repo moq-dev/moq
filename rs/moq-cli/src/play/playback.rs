@@ -114,9 +114,10 @@ enum Phase<D, O> {
 		switch: Switch,
 		opening: Option<O>,
 	},
-	/// The catalog moved the rendition, which plays out what it holds and ends; that end is no
-	/// finish, so a move back can play the track again.
-	Retiring { running: Running<D> },
+	/// The rendition plays out what it holds and ends, as when the catalog moved it; that end is
+	/// no finish, so a move back can play the track again. `next` is a replacement already
+	/// opened, which plays once it ends, as audio's upgrade does so the two never sound at once.
+	Retiring { running: Running<D>, next: Option<O> },
 	/// The rendition was stopped, as when the catalog disabled it, and its task is ending.
 	Stopping { task: u64, opening: Option<O> },
 }
@@ -154,7 +155,7 @@ impl<D, O> Half<D, O> {
 	/// The rendition playing, unless it was stopped.
 	pub(super) fn running(&self) -> Option<&Running<D>> {
 		match &self.phase {
-			Phase::Playing { running } | Phase::Switching { running, .. } | Phase::Retiring { running } => {
+			Phase::Playing { running } | Phase::Switching { running, .. } | Phase::Retiring { running, .. } => {
 				Some(running)
 			}
 			Phase::Idle { .. } | Phase::Stopping { .. } => None,
@@ -163,11 +164,16 @@ impl<D, O> Half<D, O> {
 
 	pub(super) fn running_mut(&mut self) -> Option<&mut Running<D>> {
 		match &mut self.phase {
-			Phase::Playing { running } | Phase::Switching { running, .. } | Phase::Retiring { running } => {
+			Phase::Playing { running } | Phase::Switching { running, .. } | Phase::Retiring { running, .. } => {
 				Some(running)
 			}
 			Phase::Idle { .. } | Phase::Stopping { .. } => None,
 		}
+	}
+
+	/// Whether a rendition plays with nothing replacing it, so a better one landing may upgrade it.
+	pub(super) fn settled(&self) -> bool {
+		matches!(self.phase, Phase::Playing { .. })
 	}
 
 	/// Whether `task` drives this half, rather than being one a replacement already stopped.
@@ -316,14 +322,37 @@ impl<D, O> Half<D, O> {
 		self.read = Read::Unread;
 	}
 
-	/// The catalog moved the rendition, which now plays out what it holds and ends. Returns
-	/// whether it was playing, and so is told to retire now.
+	/// The catalog moved the rendition, which now plays out what it holds and ends, dropping any
+	/// replacement an upgrade was opening: the half picks again once it ends. Returns whether it
+	/// was playing, and so is told to retire now.
 	pub(super) fn retire(&mut self) -> bool {
 		let mut retired = false;
 		self.phase = match self.take() {
-			Phase::Playing { running } => {
+			Phase::Playing { running } | Phase::Switching { running, .. } => {
 				retired = true;
-				Phase::Retiring { running }
+				Phase::Retiring { running, next: None }
+			}
+			phase => phase,
+		};
+		retired
+	}
+
+	/// Retire the rendition an upgrade replaces, handing the half to `next`, its replacement
+	/// already opened, once it has played out what it holds. Returns whether it was upgrading,
+	/// and so is told to retire now; otherwise `next` is dropped.
+	pub(super) fn hand_over(&mut self, next: O) -> bool {
+		let mut retired = false;
+		self.phase = match self.take() {
+			Phase::Switching {
+				running,
+				switch: Switch::Upgrade,
+				..
+			} => {
+				retired = true;
+				Phase::Retiring {
+					running,
+					next: Some(next),
+				}
 			}
 			phase => phase,
 		};
@@ -344,7 +373,7 @@ impl<D, O> Half<D, O> {
 				let finishes = switch.keeps_track().then_some(running.track);
 				(running.task, opening, finishes)
 			}
-			Phase::Retiring { running } => (running.task, None, None),
+			Phase::Retiring { running, next } => (running.task, next, None),
 			phase => {
 				self.phase = phase;
 				return None;
@@ -467,6 +496,11 @@ impl Playback {
 				opening,
 			} if switch.keeps_track() => (Some(running.track), opening),
 			Phase::Switching { opening, .. } | Phase::Stopping { opening, .. } => (None, opening),
+			// The replacement it handed over to plays now, from the read the upgrade narrowed.
+			Phase::Retiring { next: Some(next), .. } => {
+				half.phase = Phase::Idle { opening: Some(next) };
+				return;
+			}
 			Phase::Retiring { .. } | Phase::Idle { .. } => (None, None),
 		};
 		if let Some(track) = finishes
@@ -759,6 +793,32 @@ mod tests {
 		playback.stop(&mut video);
 		video.upgrade();
 		assert_eq!(video.switching(), None, "an idle half has nothing to upgrade");
+	}
+
+	/// An upgrade can hand the half to its opened replacement once what plays has played out what
+	/// it holds: the replacement waits for that end, which is no finish, and plays from the read
+	/// the upgrade narrowed. Only a settled half watches for an upgrade.
+	#[test]
+	fn a_handed_over_replacement_plays_once_its_predecessor_ends() {
+		let (mut playback, mut audio, _video) = playing("low");
+		assert!(audio.settled());
+		audio.upgrade();
+		assert!(!audio.settled(), "a switch under way keeps the watch for later");
+		playback.read(&mut audio, true);
+		assert!(audio.hand_over("high"));
+		assert!(audio.opening().is_none(), "the replacement waits for the end");
+		assert!(audio.running().is_some(), "what plays plays out");
+		assert!(!playback.wants(&audio));
+
+		playback.ended(&mut audio, 1, true);
+		assert!(
+			!playback.finished(&track("low")),
+			"a retired rendition's end is no finish"
+		);
+		assert_eq!(audio.opening(), Some(&"high"));
+		assert!(!playback.wants(&audio), "the replacement is not picked over");
+
+		assert!(!audio.hand_over("other"), "only an upgrade hands over");
 	}
 
 	/// A task a replacement stopped no longer drives the half, but if it finished its own track
