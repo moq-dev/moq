@@ -2556,7 +2556,10 @@ mod tests {
 
 		source.broadcast.close();
 		let result = kio::clock::timeout(std::time::Duration::from_secs(5), transcoder).await;
-		result.expect("closing the source ends the transcoder").unwrap().unwrap();
+		result
+			.expect("closing the source ends the transcoder")
+			.unwrap()
+			.unwrap();
 		drop(source);
 	}
 

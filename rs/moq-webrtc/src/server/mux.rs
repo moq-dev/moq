@@ -730,7 +730,11 @@ mod tests {
 		assert_eq!(registry.by_ufrag[&spoofer.ufrag].addrs.len(), MAX_ADDRS);
 		assert_eq!(registry.by_addr.len(), MAX_ADDRS + 1);
 		assert!(registry.claims.is_empty(), "the oldest address, a claim, was kept");
-		assert_eq!(held_by(&registry, 2), Some(spoofer.ufrag.clone()), "the refreshed address was evicted");
+		assert_eq!(
+			held_by(&registry, 2),
+			Some(spoofer.ufrag.clone()),
+			"the refreshed address was evicted"
+		);
 		assert_eq!(held_by(&registry, 999), Some(spoofer.ufrag.clone()));
 		assert_eq!(held_by(&registry, 3), None);
 		assert_eq!(held_by(&registry, 1), Some(other.ufrag.clone()));
