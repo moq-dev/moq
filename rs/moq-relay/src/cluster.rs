@@ -883,7 +883,8 @@ pub struct Config {
 	/// whenever it changes, so a rotated token reaches every live peer session
 	/// without a restart: in band where the session carries AUTH (moq-lite-07),
 	/// otherwise on a replacement session that takes over before the old one
-	/// drains. Applied to
+	/// drains. Only a token replaces the token: a file read empty, as a rewrite that
+	/// truncates first is mid-write, keeps the current one. Applied to
 	/// any static or API peer whose URL doesn't already carry a `?jwt=` and
 	/// whose object entry sets no `token`. An inline `?jwt=` or object `token`
 	/// provides a per-peer credential instead. LAN peers never receive it; they
@@ -2322,8 +2323,8 @@ impl Cluster {
 	}
 
 	/// Publish the cluster token to `rotated` whenever its file changes, until the
-	/// relay drains. An unreadable file keeps the last token, so a rotation caught
-	/// mid-write never strands a peer, and the next change reads it again.
+	/// relay drains. An unreadable or empty file keeps the last token, so a rotation
+	/// caught mid-write never strands a peer, and the next change reads it again.
 	async fn run_token_rotation(
 		token: ClusterToken,
 		mut files: moq_tokio::watch::Files,
@@ -2336,16 +2337,27 @@ impl Cluster {
 				() = shutdown.started() => return,
 				() = files.changed() => {}
 			}
-			match token.read() {
-				Ok(current) => {
-					rotated.send_if_modified(|token| {
-						let changed = *token != current;
-						*token = current;
-						changed
-					});
-				}
-				Err(err) => tracing::warn!(err = format!("{err:#}"), "keeping the current cluster token"),
+			Self::reload_token(&token, &rotated);
+		}
+	}
+
+	/// Publish the cluster token file's current token to `rotated`, if it changed.
+	///
+	/// Only a token replaces a token. A rewrite that truncates before it writes
+	/// (`echo $JWT > token`) reads empty in between, which no read can tell apart from
+	/// a file left empty on purpose, and taking it as a removal would replace every
+	/// peer session with one presenting nothing, then again once the write lands.
+	fn reload_token(token: &ClusterToken, rotated: &tokio::sync::watch::Sender<Option<String>>) {
+		match token.read() {
+			Ok(Some(current)) => {
+				rotated.send_if_modified(|token| {
+					let changed = token.as_deref() != Some(current.as_str());
+					*token = Some(current);
+					changed
+				});
 			}
+			Ok(None) => tracing::debug!("the cluster token file is empty; keeping the current token"),
+			Err(err) => tracing::warn!(err = format!("{err:#}"), "keeping the current cluster token"),
 		}
 	}
 
@@ -4818,6 +4830,28 @@ mod tests {
 			.expect("spawn test thread")
 			.join()
 			.expect("test thread panicked")
+	}
+
+	/// A rewrite that truncates before it writes, as `echo $JWT > token` does, is
+	/// read empty in between: that read keeps the current token, so no dial drops it.
+	#[test]
+	fn a_truncated_token_file_keeps_the_token() {
+		let dir = tempfile::tempdir().expect("tempdir");
+		let path = dir.path().join("token");
+		let token = ClusterToken(Some(path.clone()));
+		let (rotated, mut current) = tokio::sync::watch::channel(Some("first".to_string()));
+		current.mark_unchanged();
+
+		for empty in ["", " \n"] {
+			std::fs::write(&path, empty).unwrap();
+			Cluster::reload_token(&token, &rotated);
+			assert!(!current.has_changed().unwrap(), "an empty read changed the token");
+			assert_eq!(current.borrow().as_deref(), Some("first"));
+		}
+
+		std::fs::write(&path, "second\n").unwrap();
+		Cluster::reload_token(&token, &rotated);
+		assert_eq!(current.borrow_and_update().as_deref(), Some("second"));
 	}
 
 	/// A fragment is never sent, so a list naming one peer with and without one
