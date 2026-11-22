@@ -793,13 +793,12 @@ impl Copy {
 		}
 	}
 
-	/// Whether this copy is of `serving`'s route, did not fail, and was asked for a key of
-	/// `asking`: one [`Reader::accounts`] would ask that route for again were it let go.
-	fn asked(&self, serving: &track::Consumer, asking: &[std::ops::Range<u64>]) -> bool {
-		let (start, end) = (self.floor.unwrap_or(0), self.end().unwrap_or(u64::MAX));
+	/// Whether this copy is of `serving`'s route, did not fail, and was asked for group `key`.
+	fn asked_for(&self, serving: &track::Consumer, key: u64) -> bool {
 		!matches!(self.done, Some(Err(_)))
 			&& self.track.same_channel(serving)
-			&& asking.iter().any(|run| run.start < end && start < run.end)
+			&& self.floor.unwrap_or(0) <= key
+			&& self.end().is_none_or(|end| key < end)
 	}
 
 	/// Whether a group in `groups` may still land on this copy; see
@@ -2427,9 +2426,11 @@ impl Reader {
 	/// Drop the replaced copies nothing needs any more; see [`Copy::retains`]. Whether one
 	/// may still deliver a group the reader lacks, which a clean end waits for.
 	///
-	/// A copy of the serving route asked for a key [`Self::asking`] names stays too: it is the
-	/// ask [`Self::accounts`] makes, waiting on that route's answer or holding what the record
-	/// does not, and letting it go would only ask again.
+	/// So does the copy of the serving route asked furthest from where [`Self::asking`] starts:
+	/// it is the ask [`Self::accounts`] makes, waiting on that route's answer, and letting it go
+	/// would only ask again. Only that one, since every ask starts there: an ask from lower
+	/// down covers what the copies asked before it did, so a range moved again and again keeps
+	/// one.
 	fn let_go(&mut self, delivered: &Delivered, waiter: &kio::Waiter) -> bool {
 		self.learn_end(None);
 		self.window();
@@ -2441,9 +2442,13 @@ impl Reader {
 			false => None,
 		};
 		let asking = self.asking(delivered, waiter);
-		let serving = (self.copies.last())
-			.filter(|copy| !copy.replaced)
-			.map(|copy| copy.track.clone());
+		let serving = self.copies.last().filter(|copy| !copy.replaced);
+		let asked = asking.zip(serving).and_then(|(key, serving)| {
+			(self.copies.iter().enumerate())
+				.filter(|(_, copy)| copy.replaced && copy.asked_for(&serving.track, key))
+				.max_by_key(|(_, copy)| copy.end().unwrap_or(u64::MAX))
+				.map(|(index, _)| index)
+		});
 		// Only a bounded window ends on what it was handed out, so only there may a fill let
 		// go early lose a group for good.
 		let owed = match self.window.end().is_some() && self.copies.iter().any(|copy| copy.fills) {
@@ -2463,11 +2468,9 @@ impl Reader {
 		};
 		let mut waits = false;
 		// The serving copy, or one between routes with nothing replacing it yet, stays.
-		for mut copy in std::mem::take(&mut self.copies) {
+		for (index, mut copy) in std::mem::take(&mut self.copies).into_iter().enumerate() {
 			let mut retains = copy.replaced.then(|| copy.retains(&reader));
-			if matches!(retains, Some(Retains::No))
-				&& serving.as_ref().is_some_and(|serving| copy.asked(serving, &asking))
-			{
+			if matches!(retains, Some(Retains::No)) && asked == Some(index) {
 				retains = Some(Retains::Keep);
 			}
 			copy.feeds = matches!(retains, None | Some(Retains::Wait));
@@ -2558,23 +2561,24 @@ impl Reader {
 		.filter(|run| !run.is_empty())
 	}
 
-	/// The keys of a bounded window under the serving copy's resume point that `delivered`
-	/// lacks and the local floor or cap keeps out, past the skipped run [`Self::skipped`] records
-	/// from the start of each: what [`Self::accounts`] asks the serving route for. Records that
-	/// run first, from what every copy held now declares, parking `waiter` on each while some is
-	/// not, so an answer is kept before the cache that holds it forgets it. A reader whose floor
-	/// and cap keep nothing out, or that follows one route, pays nothing.
-	fn asking(&mut self, delivered: &Delivered, waiter: &kio::Waiter) -> Vec<std::ops::Range<u64>> {
+	/// Where [`Self::accounts`] asks the serving route from: the first key of a bounded window
+	/// under the serving copy's resume point that `delivered` lacks and the local floor or cap
+	/// keeps out, past the skipped run [`Self::skipped`] records from the start of each run of
+	/// them. Records those runs first, from what every copy held now declares, parking `waiter`
+	/// on each while some is not, so an answer is kept before the cache that holds it forgets
+	/// it. A reader whose floor and cap keep nothing out, or that follows one route, pays
+	/// nothing.
+	fn asking(&mut self, delivered: &Delivered, waiter: &kio::Waiter) -> Option<u64> {
 		let resumed = (self.copies.last())
 			.filter(|copy| !copy.replaced)
 			.and_then(|copy| copy.floor)
 			.filter(|_| self.window.end().is_some() && self.groups != (0, None));
 		let Some(resumed) = resumed else {
 			self.skipped = RangeSet::new();
-			return Vec::new();
+			return None;
 		};
 		let mut kept = RangeSet::new();
-		let mut asking = Vec::new();
+		let mut asking = None;
 		for gap in self.lacking(delivered) {
 			for run in self.kept_out(&gap, resumed) {
 				let start = match self.skipped_in(run.clone(), waiter).iter().next() {
@@ -2585,7 +2589,7 @@ impl Reader {
 					_ => run.start,
 				};
 				if start < run.end {
-					asking.push(start..run.end);
+					asking = asking.or(Some(start));
 				}
 			}
 		}
@@ -13469,6 +13473,47 @@ mod test {
 		let mut sub = sub.with_range(1..4);
 		assert_eq!(drain(&mut sub, false), [1]);
 		assert!(matches!(sub.poll_recv_group(&fresh()), Poll::Ready(Ok(None))));
+	}
+
+	/// A window moved down again and again, each time over a key the local floor keeps out,
+	/// keeps one copy asked of the serving route past the budget, not one a move.
+	#[kio::test]
+	async fn a_window_moved_down_under_the_local_floor_keeps_one_ask() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		write(&a, 10);
+		write(&a, 11);
+		routes.serve(a.consume());
+		let window = |start| {
+			Subscription::default()
+				.with_delay(Delay::default().with_max(HOUR))
+				.with_range(start..14)
+		};
+		let mut sub = logical.consume().subscribe(window(10)).now_or_never().unwrap().unwrap();
+		assert_eq!(drain(&mut sub, false), [10, 11]);
+		let b = copy();
+		write(&b, 12);
+		routes.serve(b.consume());
+		let mut sub = sub.with_range(10..13);
+		assert_eq!(drain(&mut sub, false), [12]);
+		for start in (0..10).rev() {
+			// The route gets the group first, so the window's new start places there, kept out.
+			write(&b, start);
+			sub.update(window(start)).unwrap();
+			assert!(sub.poll_recv_group(&fresh()).is_pending(), "{start} is owed");
+		}
+		kio::clock::sleep(HOUR).await;
+		assert!(sub.poll_recv_group(&fresh()).is_pending(), "0 to 9 are owed");
+		assert!(asked_for(&b, 0), "{:?}", b.subscription());
+		let readers = routes.readers.lock().unwrap();
+		let reader = readers.iter().find_map(Weak::upgrade).unwrap();
+		let reader = reader.lock().unwrap();
+		let b = b.consume();
+		let asked = (reader.copies.iter())
+			.filter(|copy| copy.replaced && copy.track.same_channel(&b))
+			.count();
+		assert_eq!(asked, 1);
 	}
 
 	/// A skip declared late on a replaced copy kept only for a group still read from it wakes

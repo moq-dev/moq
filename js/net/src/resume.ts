@@ -1773,9 +1773,10 @@ class Reader implements ResumeSource {
 	 * ended and it holds nothing left to read. Whether a group the reader lacks may still land on
 	 * a replaced one, which a clean end waits for.
 	 *
-	 * A copy of the serving route asked for a key {@link #asking} names stays too: it is the ask
-	 * {@link #accounts} makes, waiting on that route's answer or holding what the record does not,
-	 * and letting it go would only ask again.
+	 * So does the copy of the serving route asked furthest from where {@link #asking} starts: it is
+	 * the ask {@link #accounts} makes, waiting on that route's answer, and letting it go would only
+	 * ask again. Only that one, since every ask starts there: an ask from lower down covers what the
+	 * copies asked before it did, so a range moved again and again keeps one.
 	 */
 	#letGo(delivered: Delivered): boolean {
 		// An end a copy declared outlives the copy.
@@ -1785,6 +1786,13 @@ class Reader implements ResumeSource {
 		const edge = last && hooks.latestKey(last.sub);
 		const cursor = this.#shell.cursor.peek();
 		const asking = this.#asking(delivered);
+		let asked: Copy | undefined;
+		if (asking !== undefined && last && !last.replaced) {
+			for (const copy of this.#copies) {
+				if (!copy.replaced || !copyAskedFor(copy, last, asking)) continue;
+				if (!asked || (copyEnd(copy) ?? UNBOUNDED) >= (copyEnd(asked) ?? UNBOUNDED)) asked = copy;
+			}
+		}
 		let waits = false;
 		this.#copies = this.#copies.filter((copy) => {
 			if (!copy.replaced) {
@@ -1796,7 +1804,7 @@ class Reader implements ResumeSource {
 			} else {
 				const retains = this.#retains(copy, delivered, edge);
 				if (retains === "wait") waits = true;
-				if (retains || (last && copyAsked(copy, last, asking))) return true;
+				if (retains || copy === asked) return true;
 			}
 			this.#drop(copy);
 			return false;
@@ -1806,31 +1814,31 @@ class Reader implements ResumeSource {
 	}
 
 	/**
-	 * The keys of a bounded window under the serving copy's resume point that `delivered` lacks and
-	 * the cursor keeps out, past the skipped run {@link #skipped} records from the start of each: what
-	 * {@link #accounts} asks the serving route for. Records that run first, from what every copy
-	 * held now declares, so an answer is kept before the cache that holds it forgets it. A reader
-	 * whose cursor keeps nothing out, or that follows one route, pays nothing. Mirrors the Rust
-	 * `Reader::asking`.
+	 * Where {@link #accounts} asks the serving route from: the first key of a bounded window under
+	 * the serving copy's resume point that `delivered` lacks and the cursor keeps out, past the
+	 * skipped run {@link #skipped} records from the start of each run of them. Records those runs
+	 * first, from what every copy held now declares, so an answer is kept before the cache that holds
+	 * it forgets it. A reader whose cursor keeps nothing out, or that follows one route, pays
+	 * nothing. Mirrors the Rust `Reader::asking`.
 	 */
-	#asking(delivered: Delivered): Run[] {
+	#asking(delivered: Delivered): bigint | undefined {
 		const serving = this.#copies.at(-1);
 		const cursor = this.#shell.cursor.peek();
 		const window = this.#window();
 		const resumed = serving && !serving.replaced ? resumePoint(serving) : undefined;
 		if (resumed === undefined || window.end() === undefined || (cursor.start === 0n && cursor.end === undefined)) {
 			this.#skipped = new Delivered();
-			return [];
+			return undefined;
 		}
 		const kept = new Delivered();
-		const asking: Run[] = [];
+		let asking: bigint | undefined;
 		for (const run of window.runs(window.floor() ?? 0n, resumed)) {
 			for (const gap of delivered.gaps(run.start, run.end)) {
 				for (const out of this.#keptOut(gap, resumed)) {
 					const first = this.skippedIn(out.start, out.end)[0];
 					const start = first?.start === out.start ? first.end : out.start;
 					if (start > out.start) kept.addRun(out.start, start);
-					if (start < out.end) asking.push({ start, end: out.end });
+					if (start < out.end) asking ??= start;
 				}
 			}
 		}
@@ -3315,17 +3323,15 @@ function runsIn(held: Delivered, start: bigint, end: bigint): Run[] {
 }
 
 /**
- * Whether replaced `copy` is of `serving`'s route, did not fail, and was asked for a key of
- * `asking`: what the reader would ask that route for again were it let go. Mirrors the Rust
- * `Copy::asked`.
+ * Whether `copy` is of `serving`'s route, did not fail, and was asked for group `key`. Mirrors the
+ * Rust `Copy::asked_for`.
  */
-function copyAsked(copy: Copy, serving: Copy, asking: readonly Run[]): boolean {
-	const start = copy.floor ?? 0n;
-	const end = copyEnd(copy) ?? UNBOUNDED;
+function copyAskedFor(copy: Copy, serving: Copy, key: bigint): boolean {
 	return (
 		!(copy.done instanceof Error) &&
 		copy.source.from.closed === serving.source.from.closed &&
-		asking.some((run) => run.start < end && start < run.end)
+		(copy.floor ?? 0n) <= key &&
+		key < (copyEnd(copy) ?? UNBOUNDED)
 	);
 }
 

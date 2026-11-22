@@ -1374,6 +1374,68 @@ test("a kept-out group is asked once and stays owed", async () => {
 });
 
 /**
+ * A window moved down again and again, each time over a key the cursor keeps out, keeps one copy
+ * asked of the serving route past the budget, not one a move. Mirrors the Rust
+ * `a_window_moved_down_under_the_local_floor_keeps_one_ask`.
+ */
+test("a window moved down under the cursor keeps one ask", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	ta.write(10n);
+	ta.write(11n);
+	tb.write(12n);
+	const front = new Front();
+	front.serve(a.consume());
+	const delay = { max: Duration.millis(3_600_000) };
+	const sub = front.consumer.track("seq").subscribe({ delay, ranges: [{ start: 10n, end: 13n }] });
+	// The route's subscriptions not yet closed.
+	const open = new Set<track.Subscriber>();
+	const subscribe = tb.producer.subscribe.bind(tb.producer);
+	const subscribed = spyOn(tb.producer, "subscribe").mockImplementation((options) => {
+		const asked = subscribe(options);
+		open.add(asked);
+		const close = asked.close.bind(asked);
+		asked.close = () => {
+			open.delete(asked);
+			close();
+		};
+		return asked;
+	});
+	try {
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([10n, 11n]);
+		front.serve(b.consume());
+		sub.withRange({ start: { included: 10n }, end: { excluded: 13n } });
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([12n]);
+		const ended = sub.recvGroup();
+		for (let start = 9n; start >= 0n; start--) {
+			// The route gets the group first, so the window's new start places there, kept out.
+			tb.write(start);
+			sub.update({ delay, ranges: [{ start, end: 13n }] });
+			await clock.advance(Duration.ZERO);
+			expect(await isPending(ended)).toBe(true);
+		}
+		await clock.advance(Duration.millis(3_600_000));
+		expect(await isPending(ended)).toBe(true);
+		expect(askedFor(tb.producer, 0n)).toBe(true);
+		// The serving copy's and the one ask's.
+		expect(open.size).toBe(2);
+	} finally {
+		subscribed.mockRestore();
+		sub.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+		installed.close();
+	}
+});
+
+/**
  * A skip known to a route an inner front replaced still ends the read once the outer front switches
  * away from the inner one too: from what the reader recorded, or else from the outer front's
  * serving route, asked again. Mirrors the Rust
