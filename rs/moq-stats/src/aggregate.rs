@@ -892,6 +892,8 @@ impl<S: Shape> Merged<S> {
 					let instance = update.route.instance().clone();
 					changed |= self.apply_announce(&update, instance, true);
 				}
+				// A route change this version does not know changes no membership.
+				Poll::Ready(Some(_)) => {}
 				Poll::Ready(None) => return Poll::Ready(Ok(None)),
 				Poll::Pending => break,
 			}
