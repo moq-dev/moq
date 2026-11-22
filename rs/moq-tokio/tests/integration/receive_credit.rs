@@ -100,12 +100,7 @@ async fn setup_served(
 	config.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.tls.generate = vec!["localhost".into()];
 	config.version = vec![version];
-	let mut server = config
-		.init(quic)
-		.expect("init server")
-		.listen()
-		.await
-		.expect("listen");
+	let mut server = config.init(quic).expect("init server").listen().await.expect("listen");
 	let server_addr: std::net::SocketAddr = ([127, 0, 0, 1], server.local_addr().expect("addr").port()).into();
 	let shaper = match profile {
 		Some(profile) => Some(
@@ -1403,7 +1398,13 @@ async fn join(bits_per_second: u64, stream_window: u64) -> Joined {
 		.broadcast()
 		.create_track("warm", timed().with_max_age(None))
 		.unwrap();
-	let mut sub = setup.remote.track("warm").unwrap().subscribe(subscription()).await.unwrap();
+	let mut sub = setup
+		.remote
+		.track("warm")
+		.unwrap()
+		.subscribe(subscription())
+		.await
+		.unwrap();
 	let chunk = Bytes::from(vec![1u8; SEGMENT]);
 	for index in 0..(WARM_BYTES / SEGMENT) as u64 {
 		let start = Timestamp::from_millis(index).unwrap();
@@ -1446,7 +1447,13 @@ async fn join(bits_per_second: u64, stream_window: u64) -> Joined {
 
 	kio::clock::sleep(LIVE_BACKLOG).await;
 	let subscribed = kio::clock::now();
-	let mut sub = setup.remote.track("live").unwrap().subscribe(subscription()).await.unwrap();
+	let mut sub = setup
+		.remote
+		.track("live")
+		.unwrap()
+		.subscribe(subscription())
+		.await
+		.unwrap();
 	let mut group = next_group(&mut sub).await;
 	let mut caught_up = None;
 	let mut lag = Vec::new();

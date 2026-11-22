@@ -1252,10 +1252,7 @@ impl Bbr3 {
         let queued = self.probe_rtt_congested.is_some_and(|congested| {
             congested.as_secs_f64() > self.min_rtt.as_secs_f64() * SIMILAR_MIN_RTT
         });
-        if self.min_rtt_expired
-            && !self.idle_restart
-            && self.probe_rtt_skip_app_limited
-            && !queued
+        if self.min_rtt_expired && !self.idle_restart && self.probe_rtt_skip_app_limited && !queued
         {
             self.min_rtt_expired = false;
             self.min_rtt = Ord::min(self.later_min_rtt, rate_sample.rtt);
@@ -8065,7 +8062,11 @@ mod test {
                 assert_eq!(got, entries, "ce={ce} rtt={rtt_us}us");
                 // A skip adopts the window's lowest sample, which the CE-marked packet's is.
                 let min_us = if ce && entries == 0 { 10_000 } else { rtt_us };
-                assert_eq!(sim.bbr.min_rtt, Duration::from_micros(min_us), "ce={ce} rtt={rtt_us}us");
+                assert_eq!(
+                    sim.bbr.min_rtt,
+                    Duration::from_micros(min_us),
+                    "ce={ce} rtt={rtt_us}us"
+                );
             }
         }
     }
