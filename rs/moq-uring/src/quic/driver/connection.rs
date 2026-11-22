@@ -854,7 +854,11 @@ impl Driver {
 			let Poll::Ready(transmit) = conn.poll_transmit(waiter, self.shared.owner.now(), segments, &mut tx) else {
 				return Poll::Pending;
 			};
-			self.shared.wire.set_sent_bytes(conn.stats().udp_tx.bytes);
+			let stats = conn.stats();
+			self.shared.wire.set_sent_bytes(stats.udp_tx.bytes);
+			// A transmit dates a blocked write's wait, and timers reach the wire through one.
+			let credit = stats.send_credit;
+			self.shared.wire.set_credit_stalls(credit.stalls, credit.stalled);
 			// This transmit carries the CONNECTION_CLOSE the loss owed.
 			(transmit, owed && !conn.owes_close())
 		};

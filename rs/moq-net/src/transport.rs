@@ -24,7 +24,8 @@ pub enum Address {
 	Setup,
 }
 
-/// One connection's cumulative wire counters, which its transport updates as it sends and receives.
+/// One connection's cumulative wire counters, which its transport updates as it sends and receives:
+/// its bytes, and its sender's waits on the peer's connection-level credit.
 ///
 /// Clones share the counters, so stats read them without polling the session or keeping the
 /// connection alive, and the final totals stay readable after it closes. Each counter is
@@ -36,6 +37,8 @@ pub struct Wire(std::sync::Arc<WireCounters>);
 struct WireCounters {
 	sent_bytes: std::sync::atomic::AtomicU64,
 	received_bytes: std::sync::atomic::AtomicU64,
+	credit_stalls: std::sync::atomic::AtomicU64,
+	credit_stalled_us: std::sync::atomic::AtomicU64,
 }
 
 impl Wire {
@@ -62,6 +65,27 @@ impl Wire {
 	/// Record the cumulative bytes received so far.
 	pub fn set_received_bytes(&self, total: u64) {
 		self.0.received_bytes.store(total, std::sync::atomic::Ordering::Relaxed);
+	}
+
+	/// How many times the sender blocked with all the peer's connection credit (`MAX_DATA`) spent.
+	pub fn credit_stalls(&self) -> u64 {
+		self.0.credit_stalls.load(std::sync::atomic::Ordering::Relaxed)
+	}
+
+	/// How long the sender spent blocked on the peer's connection credit.
+	pub fn credit_stalled(&self) -> Duration {
+		Duration::from_micros(self.0.credit_stalled_us.load(std::sync::atomic::Ordering::Relaxed))
+	}
+
+	/// Record the cumulative episodes and time the sender spent blocked on the peer's connection
+	/// credit. An episode starts when a write blocks with every credited byte sent, and ends when
+	/// the peer grants more; a write held by the local send window is not one.
+	pub fn set_credit_stalls(&self, stalls: u64, stalled: Duration) {
+		self.0.credit_stalls.store(stalls, std::sync::atomic::Ordering::Relaxed);
+		let micros = u64::try_from(stalled.as_micros()).unwrap_or(u64::MAX);
+		self.0
+			.credit_stalled_us
+			.store(micros, std::sync::atomic::Ordering::Relaxed);
 	}
 }
 

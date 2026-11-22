@@ -341,7 +341,9 @@ impl<T: Transport> Run<T> {
 		}
 		let drained = state.conn.is_drained();
 		let deadline = state.conn.poll_timeout();
+		let credit = state.conn.send_credit_stats();
 		drop(state);
+		self.inner.wire.set_credit_stalls(credit.stalls, credit.stalled);
 
 		self.inner.wire.set_received_bytes(self.received_bytes);
 		self.sent_bytes += written as u64;

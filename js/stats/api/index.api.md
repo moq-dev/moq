@@ -22,6 +22,8 @@ export const BucketFrameSchema: ZodMiniObject<{
 	tiers: ZodMiniDefault<ZodMiniRecord<ZodMiniString<string>, ZodMiniPrefault<ZodMiniObject<{
 		labels: ZodMiniDefault<ZodMiniRecord<ZodMiniString<string>, ZodMiniPrefault<ZodMiniObject<{
 			announces_peak: ZodMiniDefault<ZodMiniNumber<number>>;
+			credit_stalled_us: ZodMiniDefault<ZodMiniNumber<number>>;
+			credit_stalls: ZodMiniDefault<ZodMiniNumber<number>>;
 			received_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 			requests: ZodMiniDefault<ZodMiniNumber<number>>;
 			routes: ZodMiniPrefault<ZodMiniObject<{
@@ -136,6 +138,8 @@ export const BucketFrameSchema: ZodMiniObject<{
 		}, $strip>>;
 		sessions: ZodMiniPrefault<ZodMiniObject<{
 			announces_peak: ZodMiniDefault<ZodMiniNumber<number>>;
+			credit_stalled_us: ZodMiniDefault<ZodMiniNumber<number>>;
+			credit_stalls: ZodMiniDefault<ZodMiniNumber<number>>;
 			received_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 			requests: ZodMiniDefault<ZodMiniNumber<number>>;
 			routes: ZodMiniPrefault<ZodMiniObject<{
@@ -217,6 +221,8 @@ export class BucketReader {
 export const BucketSchema: ZodMiniPrefault<ZodMiniObject<{
 	labels: ZodMiniDefault<ZodMiniRecord<ZodMiniString<string>, ZodMiniPrefault<ZodMiniObject<{
 		announces_peak: ZodMiniDefault<ZodMiniNumber<number>>;
+		credit_stalled_us: ZodMiniDefault<ZodMiniNumber<number>>;
+		credit_stalls: ZodMiniDefault<ZodMiniNumber<number>>;
 		received_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 		requests: ZodMiniDefault<ZodMiniNumber<number>>;
 		routes: ZodMiniPrefault<ZodMiniObject<{
@@ -331,6 +337,8 @@ export const BucketSchema: ZodMiniPrefault<ZodMiniObject<{
 	}, $strip>>;
 	sessions: ZodMiniPrefault<ZodMiniObject<{
 		announces_peak: ZodMiniDefault<ZodMiniNumber<number>>;
+		credit_stalled_us: ZodMiniDefault<ZodMiniNumber<number>>;
+		credit_stalls: ZodMiniDefault<ZodMiniNumber<number>>;
 		received_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 		requests: ZodMiniDefault<ZodMiniNumber<number>>;
 		routes: ZodMiniPrefault<ZodMiniObject<{
@@ -713,6 +721,8 @@ export type PresenceFrame = infer<typeof PresenceFrameSchema>;
 
 export const PresenceFrameSchema: ZodMiniRecord<ZodMiniString<string>, ZodMiniPrefault<ZodMiniObject<{
 	announces_peak: ZodMiniDefault<ZodMiniNumber<number>>;
+	credit_stalled_us: ZodMiniDefault<ZodMiniNumber<number>>;
+	credit_stalls: ZodMiniDefault<ZodMiniNumber<number>>;
 	received_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 	requests: ZodMiniDefault<ZodMiniNumber<number>>;
 	routes: ZodMiniPrefault<ZodMiniObject<{
@@ -766,6 +776,8 @@ export const PresenceFrameSchema: ZodMiniRecord<ZodMiniString<string>, ZodMiniPr
 
 export const PresenceSchema: ZodMiniPrefault<ZodMiniObject<{
 	announces_peak: ZodMiniDefault<ZodMiniNumber<number>>;
+	credit_stalled_us: ZodMiniDefault<ZodMiniNumber<number>>;
+	credit_stalls: ZodMiniDefault<ZodMiniNumber<number>>;
 	received_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 	requests: ZodMiniDefault<ZodMiniNumber<number>>;
 	routes: ZodMiniPrefault<ZodMiniObject<{
@@ -909,6 +921,8 @@ export const TotalsFrameSchema: ZodMiniRecord<ZodMiniString<string>, ZodMiniPref
 	}, $strip>>;
 	sessions: ZodMiniPrefault<ZodMiniObject<{
 		announces_peak: ZodMiniDefault<ZodMiniNumber<number>>;
+		credit_stalled_us: ZodMiniDefault<ZodMiniNumber<number>>;
+		credit_stalls: ZodMiniDefault<ZodMiniNumber<number>>;
 		received_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 		requests: ZodMiniDefault<ZodMiniNumber<number>>;
 		routes: ZodMiniPrefault<ZodMiniObject<{
@@ -1004,6 +1018,8 @@ export const TotalsSchema: ZodMiniPrefault<ZodMiniObject<{
 	}, $strip>>;
 	sessions: ZodMiniPrefault<ZodMiniObject<{
 		announces_peak: ZodMiniDefault<ZodMiniNumber<number>>;
+		credit_stalled_us: ZodMiniDefault<ZodMiniNumber<number>>;
+		credit_stalls: ZodMiniDefault<ZodMiniNumber<number>>;
 		received_bytes: ZodMiniDefault<ZodMiniNumber<number>>;
 		requests: ZodMiniDefault<ZodMiniNumber<number>>;
 		routes: ZodMiniPrefault<ZodMiniObject<{

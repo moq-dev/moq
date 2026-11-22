@@ -430,6 +430,7 @@ impl<'a> Stream<'a> {
 					&& self.state.data_blocked_limit != Some(self.state.max_data)
 				{
 					self.state.data_blocked_limit = Some(self.state.max_data);
+					self.state.send_stalled();
 					self.pending.data_blocked = true;
 					self.state.waits.wake_transmit();
 				}

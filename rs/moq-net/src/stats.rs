@@ -86,6 +86,10 @@
 //!   [`Registry::report`] and [`Registry::snapshot`] read each registered [`Wire`]
 //!   without polling the session. A retag flushes its old tier and label; dropping the guard flushes
 //!   its final nonnegative delta. Unsupported transports contribute zero.
+//! * `credit_stalls` / `credit_stalled_us` ([`Presence`]): cumulative episodes, and
+//!   microseconds, that the label's connections spent with a write blocked on the
+//!   peer's connection-level credit (`MAX_DATA`), read from the same
+//!   [`crate::transport::Wire`] counters as `wire_tx`.
 //! * `routes_refused` ([`Presence`]): cumulative routes and claims that lite-07
 //!   sessions under the label forwarded and this node refused, each withdrawn while
 //!   the session stays open; [`Routes::refused`] splits it by reason.
@@ -318,6 +322,8 @@ struct SessionCounters {
 	bytes: Mutex<SessionBytes>,
 	wire_tx: AtomicU64,
 	wire_rx: AtomicU64,
+	credit_stalls: AtomicU64,
+	credit_stalled_us: AtomicU64,
 	/// Per class: bytes sent and received, then messages sent and received.
 	control: [[AtomicU64; 4]; Message::ALL.len()],
 }
@@ -349,6 +355,8 @@ impl SessionCounters {
 			requests: self.requests.load(Ordering::Relaxed),
 			wire_tx: self.wire_tx.load(Ordering::Relaxed),
 			wire_rx: self.wire_rx.load(Ordering::Relaxed),
+			credit_stalls: self.credit_stalls.load(Ordering::Relaxed),
+			credit_stalled_us: self.credit_stalled_us.load(Ordering::Relaxed),
 			sessions_started,
 			sessions_ended,
 			sent_bytes,
@@ -606,6 +614,11 @@ pub struct Presence {
 	pub wire_tx: u64,
 	/// Cumulative transport bytes received, including transport framing.
 	pub wire_rx: u64,
+	/// Cumulative times a connection's write blocked with all the peer's connection-level
+	/// credit (`MAX_DATA`) spent.
+	pub credit_stalls: u64,
+	/// Cumulative microseconds connections spent blocked on the peer's connection-level credit.
+	pub credit_stalled_us: u64,
 	/// Cumulative routes and claims a lite-07 session forwarded that this
 	/// node refused, withdrawing each and keeping the session: the total of
 	/// [`Routes::refused`].
@@ -624,6 +637,8 @@ impl Presence {
 		self.requests += other.requests;
 		self.wire_tx += other.wire_tx;
 		self.wire_rx += other.wire_rx;
+		self.credit_stalls += other.credit_stalls;
+		self.credit_stalled_us += other.credit_stalled_us;
 		self.sessions_started += other.sessions_started;
 		self.sessions_ended += other.sessions_ended;
 		self.sent_bytes += other.sent_bytes;
@@ -1396,6 +1411,8 @@ struct WireInner {
 struct WireState {
 	sent_bytes: u64,
 	received_bytes: u64,
+	credit_stalls: u64,
+	credit_stalled_us: u64,
 	closed: bool,
 }
 
@@ -1413,17 +1430,23 @@ impl WireInner {
 		};
 		let sent_bytes = self.counters.sent_bytes();
 		let received_bytes = self.counters.received_bytes();
+		let credit_stalls = self.counters.credit_stalls();
+		let credit_stalled_us = u64::try_from(self.counters.credit_stalled().as_micros()).unwrap_or(u64::MAX);
 		if let Some(presence) = &current.presence {
-			presence
-				.wire_tx
-				.fetch_add(sent_bytes.saturating_sub(last.sent_bytes), Ordering::Relaxed);
-			presence
-				.wire_rx
-				.fetch_add(received_bytes.saturating_sub(last.received_bytes), Ordering::Relaxed);
+			for (counter, now, then) in [
+				(&presence.wire_tx, sent_bytes, last.sent_bytes),
+				(&presence.wire_rx, received_bytes, last.received_bytes),
+				(&presence.credit_stalls, credit_stalls, last.credit_stalls),
+				(&presence.credit_stalled_us, credit_stalled_us, last.credit_stalled_us),
+			] {
+				counter.fetch_add(now.saturating_sub(then), Ordering::Relaxed);
+			}
 		}
 		*last = WireState {
 			sent_bytes,
 			received_bytes,
+			credit_stalls,
+			credit_stalled_us,
 			closed: close,
 		};
 		!close
@@ -2249,17 +2272,22 @@ mod tests {
 		);
 		bytes.set_sent_bytes(15);
 		bytes.set_received_bytes(27);
+		bytes.set_credit_stalls(2, std::time::Duration::from_millis(3));
 		session.retag(new.clone(), crate::Path::from_static("hall"));
 		bytes.set_sent_bytes(25);
 		bytes.set_received_bytes(50);
+		bytes.set_credit_stalls(5, std::time::Duration::from_millis(10));
 		let report = drain(&registry);
-		for (tier, label, expected) in [(old, "room", (15, 27)), (new, "hall", (10, 23))] {
+		for (tier, label, expected, stalls) in
+			[(old, "room", (15, 27), (2, 3_000)), (new, "hall", (10, 23), (3, 7_000))]
+		{
 			let row = report
 				.sessions
 				.iter()
 				.find(|row| row.tier == tier && row.label.as_str() == label)
 				.unwrap();
 			assert_eq!((row.presence.wire_tx, row.presence.wire_rx), expected);
+			assert_eq!((row.presence.credit_stalls, row.presence.credit_stalled_us), stalls);
 		}
 	}
 

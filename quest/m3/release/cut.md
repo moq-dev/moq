@@ -242,7 +242,8 @@ lands first.
 
 Decided 2026-11-21 (maintainer, /quest-plan of the main → release
 flow-control review): ✅ the cut waits on
-[send-credit stalls](/quest/m1/send-credit-stalls.md), so the release that
+send-credit stalls (landed: `credit_stalls` and `credit_stalled` in session
+stats, and in the relay's `Presence`), so the release that
 ships the flow-control rework ships a counter for its failure mode, a
 connection blocked on its peer's credit (rejected: the cut not waiting;
 leaving it in m3). The [peer window default](/quest/m1/peer-window-default.md)
@@ -287,4 +288,3 @@ candidate:
 - [Interop and Video pass on main](/quest/m0/interop-green/README.md) - the cut PR's release gate runs `interop.yml`, which failed on `main` every day through 2026-11-12
 - [Nightly passes on main](/quest/m0/nightly/README.md) - the release gate runs `features.yml`, red in the 2026-11-12 Nightly
 - [Claim new npm names](/quest/m3/release/npm-first-publish.md) - trusted publishing can publish every new `@moq/*` package
-- [Send-credit stalls](/quest/m1/send-credit-stalls.md) - session stats show a connection blocked on its peer's credit

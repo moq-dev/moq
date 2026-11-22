@@ -780,16 +780,26 @@ struct PresenceTrack {
 	sums: Cumulative<Presence>,
 	/// Wire collection starts at the current reading on every hold. Other presence
 	/// fields keep their existing live-session seeding behavior.
-	wire_start: HashMap<Path, (u64, u64)>,
+	wire_start: HashMap<Path, [u64; WIRE.len()]>,
 }
+
+/// The presence fields read from connections' wire counters.
+const WIRE: [fn(&mut Presence) -> &mut u64; 4] = [
+	|presence| &mut presence.wire_tx,
+	|presence| &mut presence.wire_rx,
+	|presence| &mut presence.credit_stalls,
+	|presence| &mut presence.credit_stalled_us,
+];
 
 impl PresenceTrack {
 	fn publish(&mut self, stamp: Stamp) {
 		self.sums.fill(&mut self.output.frame);
 		for (tier, presence) in &mut self.output.frame.entries {
-			if let Some(&(tx, rx)) = self.wire_start.get(tier) {
-				presence.wire_tx = presence.wire_tx.saturating_sub(tx);
-				presence.wire_rx = presence.wire_rx.saturating_sub(rx);
+			if let Some(start) = self.wire_start.get(tier) {
+				for (field, start) in WIRE.iter().zip(start) {
+					let value = field(presence);
+					*value = value.saturating_sub(*start);
+				}
 			}
 		}
 		self.output.publish(&self.name, stamp);
@@ -1319,8 +1329,10 @@ impl NodePublisher {
 		for entry in report.sessions.iter().filter(|entry| entry.label == label) {
 			track.sums.add(&entry.tier, entry.closed, |sum| sum.add(entry.presence));
 			let start = track.wire_start.entry(entry.tier.label().clone()).or_default();
-			start.0 += entry.presence.wire_tx;
-			start.1 += entry.presence.wire_rx;
+			let mut presence = entry.presence;
+			for (start, field) in start.iter_mut().zip(WIRE) {
+				*start += *field(&mut presence);
+			}
 		}
 		track.publish(stamp);
 		self.presence.insert(label, track);
