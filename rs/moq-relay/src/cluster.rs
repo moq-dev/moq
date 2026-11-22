@@ -3274,13 +3274,13 @@ mod tests {
 	}
 
 	/// Dials nothing: fails the test if the dial map starts a dial.
-	fn no_dial(target: DialTarget) -> Placeholder {
+	fn no_dial(target: DialTarget, _: PeerToken) -> Placeholder {
 		panic!("must not dial {}", target.key)
 	}
 
 	/// Records each dial the map starts.
-	fn recording(dialed: &mut Vec<DialTarget>) -> impl FnMut(DialTarget) -> Placeholder + '_ {
-		|target| {
+	fn recording(dialed: &mut Vec<DialTarget>) -> impl FnMut(DialTarget, PeerToken) -> Placeholder + '_ {
+		|target, _| {
 			dialed.push(target);
 			placeholder
 		}
@@ -3288,6 +3288,11 @@ mod tests {
 
 	fn key(peer: &str) -> PeerKey {
 		PeerKey::canonicalize(peer)
+	}
+
+	/// A token source that holds no token and never changes.
+	fn no_token() -> PeerToken {
+		tokio::sync::watch::Sender::new(None).subscribe()
 	}
 
 	fn target(peer: &str) -> DialTarget {
@@ -3299,6 +3304,7 @@ mod tests {
 			fingerprint: None,
 			lan: false,
 			upstream: false,
+			token: None,
 		}
 	}
 
@@ -3308,7 +3314,7 @@ mod tests {
 
 	/// Seed a dial for `target` under `source`.
 	fn seeded(dialed: &mut DialMap<Placeholder>, target: DialTarget, source: DialSource) {
-		dialed.upsert(target, source, &mut |_| placeholder);
+		dialed.upsert(target, source, &mut |_, _| placeholder);
 	}
 
 	/// A peer wanted by both a static seed and the API survives losing either
@@ -3471,14 +3477,55 @@ mod tests {
 		assert_eq!(dialed.tasks.len(), 1);
 	}
 
-	/// Inline credentials are dial-affecting even though they are excluded from
-	/// peer identity, so rotating one replaces the session too.
+	/// A token-only API update keeps the live dial and hands it the new token, which
+	/// it renews on its running session instead of redialing.
 	#[test]
-	fn reconcile_api_replaces_inline_credential() {
-		assert_api_replaces(
-			DialTarget::parse("https://peer.example/?jwt=old").unwrap(),
-			DialTarget::parse("https://peer.example/?jwt=new").unwrap(),
-		);
+	fn reconcile_api_renews_a_rotated_token_in_place() {
+		let mut dialed: DialMap<Placeholder> = DialMap::new(None);
+		let mut tokens = Vec::new();
+		let old = DialTarget::parse("https://peer.example/?jwt=old").unwrap();
+		dialed.upsert(old.clone(), DialSource::Api, &mut |_, token| {
+			tokens.push(token);
+			placeholder
+		});
+		let task = dialed.entries[&old.key].task;
+
+		let new = DialTarget::parse("https://peer.example/?jwt=new").unwrap();
+		assert!(old.same_dial(&new) && old != new);
+		dialed.reconcile_api(&[(new.key.clone(), new)].into_iter().collect(), &mut no_dial);
+		assert_eq!(dialed.entries[&old.key].task, task, "the live dial is kept");
+		let [token] = &mut tokens[..] else {
+			panic!("one dial");
+		};
+		assert!(token.has_changed().unwrap());
+		assert_eq!(token.borrow_and_update().as_deref(), Some("new"));
+
+		// Anything else about the dial still replaces it, with the latest token.
+		let moved = DialTarget::parse("https://peer.example/?jwt=newer&cost=2").unwrap();
+		let mut spawned = Vec::new();
+		dialed.reconcile_api(&[(moved.key.clone(), moved)].into_iter().collect(), &mut recording(&mut spawned));
+		assert_eq!(spawned.len(), 1, "a cost change redials");
+		assert_eq!(token.borrow_and_update().as_deref(), Some("newer"));
+	}
+
+	/// Falling back to another source whose target differs only in its token keeps
+	/// the live dial too.
+	#[test]
+	fn release_to_a_token_only_fallback_keeps_the_dial() {
+		let mut dialed: DialMap<Placeholder> = DialMap::new(None);
+		let seed = DialTarget::parse("https://peer.example/?jwt=seed").unwrap();
+		let api = DialTarget::parse("https://peer.example/?jwt=api").unwrap();
+		let mut tokens = Vec::new();
+		dialed.upsert(api.clone(), DialSource::Api, &mut |_, token| {
+			tokens.push(token);
+			placeholder
+		});
+		seeded(&mut dialed, seed.clone(), DialSource::Static);
+		let task = dialed.entries[&api.key].task;
+
+		dialed.release(&api.key, DialSource::Api, &mut no_dial);
+		assert_eq!(dialed.entries[&api.key].task, task, "the live dial is kept");
+		assert_eq!(tokens[0].borrow().as_deref(), Some("seed"));
 	}
 
 	/// A malformed replacement is rejected before reconciliation, so it cannot
@@ -3531,9 +3578,8 @@ mod tests {
 		assert_eq!(desired.values().next().expect("one peer"), &from_url);
 	}
 
-	/// An object `token` rides the same inline credential path: the dial URL
-	/// carries `?jwt=`, the identity drops it, and the shared token does not
-	/// override it.
+	/// An object `token` and an inline `?jwt=` are the same per-peer credential,
+	/// which the identity and the dial URL both drop.
 	#[test]
 	fn peer_object_token_matches_inline_credential() {
 		let inline = DialTarget::from_peer(&Peer::new("https://peer.example/?jwt=secret")).unwrap();
@@ -3542,14 +3588,8 @@ mod tests {
 		let from_object = DialTarget::from_peer(&object).unwrap();
 		assert_eq!(inline, from_object);
 		assert_eq!(inline.key, key("https://peer.example/"));
-		assert!(
-			inline
-				.url
-				.query_pairs()
-				.any(|(key, value)| key == "jwt" && value == "secret"),
-			"the credential must reach the dial URL: {}",
-			inline.url
-		);
+		assert_eq!(inline.token.as_deref(), Some("secret"));
+		assert_eq!(inline.url.query(), None, "the dial presents it through its tokens, not its URL");
 	}
 
 	/// `upstream` is object-only policy: it round-trips, reaches the dial target,
@@ -3709,7 +3749,7 @@ mod tests {
 		let commands = DialCommands::default();
 		let mesh = Mesh {
 			cluster: new_cluster(Config::default()).expect("cluster"),
-			token: ClusterToken::default(),
+			token: tokio::sync::watch::Sender::new(None).subscribe(),
 			dialed: DialMap::new(None),
 			sources: kio::Tasks::new(),
 			commands: commands.clone(),
@@ -3797,7 +3837,7 @@ mod tests {
 		options.shutdown = Some(shutdown);
 		let mut mesh = Mesh {
 			cluster: Cluster::spawn(options).expect("cluster"),
-			token: ClusterToken::default(),
+			token: tokio::sync::watch::Sender::new(None).subscribe(),
 			dialed: DialMap::new(None),
 			sources: kio::Tasks::new(),
 			commands: DialCommands::default(),
@@ -4069,6 +4109,7 @@ mod tests {
 			.mesh(Work {
 				node: Some("https://B.example".to_string()),
 				token: ClusterToken::default(),
+				rotation: None,
 				http: None,
 				discovery: None,
 			})
@@ -4449,6 +4490,7 @@ mod tests {
 			fingerprint: Some(fp),
 			lan: true,
 			upstream: false,
+			token: None,
 		};
 		let _dial = fingerprint.dial_lan_target(&target).expect("dial");
 
@@ -4489,41 +4531,55 @@ mod tests {
 		);
 	}
 
-	/// Each dial attempt reads the shared token afresh, so a rotated file applies
-	/// on the next redial; a per-peer credential still wins, and a LAN dial never
-	/// presents it.
-	#[test]
-	fn each_dial_rereads_the_cluster_token() {
+	/// A dial presents its peer's own token over the shared one, and follows
+	/// either as it changes; a LAN dial never presents the shared one.
+	#[tokio::test]
+	async fn a_credential_follows_its_sources() {
+		let names = |tokens: Vec<moq_net::auth::Token>| tokens.iter().map(|token| token.as_str().to_string()).collect::<Vec<_>>();
+		let shared = tokio::sync::watch::Sender::new(Some("first".to_string()));
+		let own = tokio::sync::watch::Sender::new(None);
+		let target = DialTarget::parse("https://peer.example/").unwrap();
+		let mut credential = Credential::new(&target, own.subscribe(), &shared.subscribe());
+		assert_eq!(names(credential.current()), ["first"]);
+
+		shared.send_replace(Some("second".to_string()));
+		credential.changed().await;
+		assert_eq!(names(credential.current()), ["second"]);
+
+		own.send_replace(Some("own".to_string()));
+		credential.changed().await;
+		assert_eq!(names(credential.current()), ["own"], "a peer's own token wins");
+
+		let mut lan = target.clone();
+		lan.lan = true;
+		let mut credential = Credential::new(&lan, no_token(), &shared.subscribe());
+		assert!(credential.current().is_empty(), "a LAN dial presents no token");
+	}
+
+	/// A rewritten token file reaches the dials, and an unreadable one keeps the
+	/// last token rather than stranding them.
+	#[tokio::test]
+	async fn a_rotated_token_file_reaches_the_dials() {
 		let dir = tempfile::tempdir().expect("tempdir");
 		let path = dir.path().join("token");
-		let token = ClusterToken(Some(path.clone()));
-		let query = |target: &DialTarget| {
-			let (addrs, _) = Cluster::dial_addrs(target, &token).expect("addrs");
-			addrs.as_slice()[0].url().query().map(str::to_string)
-		};
-		let shared = DialTarget::parse("https://peer.example/").unwrap();
-
 		std::fs::write(&path, "first\n").unwrap();
-		assert_eq!(query(&shared).as_deref(), Some("jwt=first"));
-		std::fs::write(&path, "second").unwrap();
-		assert_eq!(query(&shared).as_deref(), Some("jwt=second"));
+		let token = ClusterToken(Some(path.clone()));
+		let files = moq_tokio::watch::Files::new(std::slice::from_ref(&path)).expect("watch");
+		let (rotated, mut current) = tokio::sync::watch::channel(token.read().unwrap());
+		let watch = tokio::spawn(Cluster::run_token_rotation(
+			token,
+			files,
+			rotated,
+			crate::shutdown::Observer::disabled(),
+		));
 
-		let inline = DialTarget::parse("https://peer.example/?jwt=own").unwrap();
-		assert_eq!(query(&inline).as_deref(), Some("jwt=own"));
-		let mut lan = shared.clone();
-		lan.lan = true;
-		assert_eq!(query(&lan), None);
+		std::fs::write(&path, "second").unwrap();
+		current.wait_for(|token| token.as_deref() == Some("second")).await.unwrap();
 
 		std::fs::remove_file(&path).unwrap();
-		assert!(
-			Cluster::dial_addrs(&shared, &token).is_err(),
-			"a vanished token fails the attempt"
-		);
-		assert_eq!(
-			query(&inline).as_deref(),
-			Some("jwt=own"),
-			"an own credential needs no file"
-		);
+		std::fs::write(&path, "third").unwrap();
+		current.wait_for(|token| token.as_deref() == Some("third")).await.unwrap();
+		watch.abort();
 	}
 
 	/// A fragment is never sent, so a list naming one peer with and without one
@@ -4561,7 +4617,8 @@ mod tests {
 		assert_eq!(desired.len(), 1);
 	}
 
-	/// An empty `?jwt=` is absent, so a token never rides alongside it.
+	/// An empty `?jwt=` is absent, so an object token is allowed beside it, and the
+	/// dial URL never carries a credential.
 	#[test]
 	fn an_empty_jwt_is_dropped_before_a_token() {
 		let target = DialTarget::from_peer(&Peer {
@@ -4569,7 +4626,11 @@ mod tests {
 			..Peer::new("https://peer.example/?jwt=")
 		})
 		.unwrap();
-		assert_eq!(target.url.as_str(), "https://peer.example/?jwt=tok");
+		assert_eq!(target.url.as_str(), "https://peer.example/");
+		assert_eq!(target.token.as_deref(), Some("tok"));
+		let inline = DialTarget::parse("https://peer.example/?x=1&jwt=own").unwrap();
+		assert_eq!(inline.url.as_str(), "https://peer.example/?x=1");
+		assert_eq!(inline.token.as_deref(), Some("own"));
 		assert_eq!(
 			DialTarget::parse("https://peer.example/?jwt=&x=1")
 				.unwrap()
@@ -4845,6 +4906,7 @@ mod tests {
 			fingerprint: Some(fingerprint),
 			lan: true,
 			upstream: false,
+			token: None,
 		};
 		let _lan = cluster.dial_lan_target(&target).expect("dial");
 		let (path, query, token) = next().await;
@@ -4930,6 +4992,7 @@ mod tests {
 			fingerprint: Some(fp),
 			lan: true,
 			upstream: false,
+			token: None,
 		};
 		let runtime = tokio::runtime::Builder::new_multi_thread()
 			.worker_threads(1)
@@ -4946,7 +5009,8 @@ mod tests {
 					.route("from-dialer", moq_net::origin::RouteOptions::default())
 					.expect("create");
 				let dial = dialer.nodes.dial(&target.key);
-				tokio::spawn(dialer.clone().supervise_remote(target, ClusterToken::default(), dial));
+				let credential = Credential::new(&target, no_token(), &no_token());
+				tokio::spawn(dialer.clone().supervise_remote(credential, target, dial));
 				(dialer, broadcast)
 			})
 			.await
