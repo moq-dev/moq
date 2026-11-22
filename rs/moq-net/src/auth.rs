@@ -1406,6 +1406,15 @@ impl Link {
 		self.read(|link, _| link.permit(direction))
 	}
 
+	/// Whether the scope set for the peer leaves out no path in either direction, as when
+	/// none was set and only the origin handles bound it.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn admits_whole(&self) -> bool {
+		[Direction::Publish, Direction::Subscribe]
+			.into_iter()
+			.all(|direction| self.permit(direction).within_limit(""))
+	}
+
 	/// The limit once it may have changed since `epoch` last saw it, advancing `epoch`.
 	pub(crate) fn poll_limit(&self, epoch: &mut u64, waiter: &kio::Waiter) -> Poll<Option<Grant>> {
 		let state = ready_or!(self.poll_epoch(*epoch, waiter));

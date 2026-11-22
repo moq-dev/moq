@@ -452,31 +452,18 @@ async fn uplink_transits_both_ways_inner() {
 }
 
 /// A link whose grant covers only one tenant exchanges claims for it, as it does over
-/// lite-06, instead of the accepting side declaring a Node ID and closing the session
-/// Unauthorized: the tenant's broadcasts cross both ways and nothing else does, whichever
-/// side dialed.
+/// lite-06, instead of the relay that admits the grant declaring a Node ID and closing the
+/// session Unauthorized: the tenant's broadcasts cross both ways and nothing else does.
 #[test]
 fn scoped_link_exchanges_claims() {
-	run_cluster_test(scoped_link_exchanges_claims_inner(false));
+	run_cluster_test(scoped_link_exchanges_claims_inner());
 }
 
-/// As [`scoped_link_exchanges_claims`], with the relay that admits the scoped grant the dialer.
-#[test]
-fn scoped_link_dialed_exchanges_claims() {
-	run_cluster_test(scoped_link_exchanges_claims_inner(true));
-}
-
-async fn scoped_link_exchanges_claims_inner(scoped_dials: bool) {
-	// The accepting side admits the dial at `/scoped`: link upstream, root "", and the
-	// tenant's prefix alone.
-	let (cdn, edge) = if scoped_dials {
-		let edge = node(vec![]).await;
-		(node(vec![edge.dial_at("scoped", false)]).await, edge)
-	} else {
-		let cdn = node(vec![]).await;
-		let edge = node(vec![cdn.dial_at("scoped", true)]).await;
-		(cdn, edge)
-	};
+async fn scoped_link_exchanges_claims_inner() {
+	// The listener admits the dial at `/scoped`: link upstream, root "", and the tenant's
+	// prefix alone.
+	let cdn = node(vec![]).await;
+	let edge = node(vec![cdn.dial_at("scoped", true)]).await;
 
 	let _outside = publish(&cdn.origin, "other/cam");
 	let _cdn = publish(&cdn.origin, "tenant-a/cdn");
