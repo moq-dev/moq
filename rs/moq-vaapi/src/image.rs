@@ -226,6 +226,24 @@ impl AsRef<[u8]> for Image<'_> {
 /// copies them in.
 ///
 /// Dropped without `put`, the image is discarded and the surface left as it was.
+///
+/// No other image of the surface, read or write, can exist alongside it:
+///
+/// ```compile_fail,E0502
+/// fn alias(surface: &mut moq_vaapi::Surface<()>, format: moq_vaapi::VAImageFormat) {
+/// 	let read = moq_vaapi::Image::derive_from(surface, surface.size()).unwrap();
+/// 	let write = moq_vaapi::ImageMut::create_uninitialized(surface, format).unwrap();
+/// 	drop((read, write));
+/// }
+/// ```
+///
+/// ```compile_fail,E0499
+/// fn alias(surface: &mut moq_vaapi::Surface<()>, format: moq_vaapi::VAImageFormat) {
+/// 	let first = moq_vaapi::ImageMut::create_uninitialized(surface, format).unwrap();
+/// 	let second = moq_vaapi::ImageMut::create_uninitialized(surface, format).unwrap();
+/// 	drop((first, second));
+/// }
+/// ```
 #[must_use = "an image is written into its surface only by `put`"]
 pub struct ImageMut<'a> {
 	mapping: Mapping,

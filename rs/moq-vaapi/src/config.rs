@@ -73,7 +73,12 @@ impl Config {
 		// call to `vaQuerySurfaceAttributes`.
 		let mut attrs_len: std::os::raw::c_uint = 0;
 		va_check(unsafe {
-			bindings::va().vaQuerySurfaceAttributes(self.display.handle(), self.id, std::ptr::null_mut(), &mut attrs_len)
+			bindings::va().vaQuerySurfaceAttributes(
+				self.display.handle(),
+				self.id,
+				std::ptr::null_mut(),
+				&mut attrs_len,
+			)
 		})?;
 
 		let capacity = attrs_len as usize;

@@ -51,11 +51,11 @@ use crate::{
 	EncPackedHeaderType, EncPictureParameter, EncPictureParameterBufferH264, EncSequenceParameter,
 	EncSequenceParameterBufferH264, EncSliceParameter, EncSliceParameterBufferH264, H264EncFrameCropOffsets,
 	H264EncPicFields, H264EncSeqFields, H264VuiFields, ImageMut, MappedCodedBuffer, Picture, PictureH264, RcFlags,
-	Surface, SurfaceMemoryDescriptor, UsageHint, VAConfigAttrib, VAConfigAttribType, VAEntrypoint, VAProfile,
-	VA_ATTRIB_NOT_SUPPORTED, VA_ENC_PACKED_HEADER_PICTURE, VA_ENC_PACKED_HEADER_SEQUENCE, VA_ENC_PACKED_HEADER_SLICE,
-	VA_FOURCC_ARGB, VA_FOURCC_BGRA, VA_FOURCC_BGRX, VA_FOURCC_NV12, VA_FOURCC_RGBA, VA_FOURCC_RGBX, VA_FOURCC_XRGB,
-	VA_INVALID_ID, VA_PICTURE_H264_INVALID, VA_PICTURE_H264_SHORT_TERM_REFERENCE, VA_RC_CBR, VA_RC_VBR,
-	VA_RT_FORMAT_YUV420, VAImageFormat,
+	Surface, SurfaceMemoryDescriptor, UsageHint, VAConfigAttrib, VAConfigAttribType, VAEntrypoint, VAImageFormat,
+	VAProfile, VA_ATTRIB_NOT_SUPPORTED, VA_ENC_PACKED_HEADER_PICTURE, VA_ENC_PACKED_HEADER_SEQUENCE,
+	VA_ENC_PACKED_HEADER_SLICE, VA_FOURCC_ARGB, VA_FOURCC_BGRA, VA_FOURCC_BGRX, VA_FOURCC_NV12, VA_FOURCC_RGBA,
+	VA_FOURCC_RGBX, VA_FOURCC_XRGB, VA_INVALID_ID, VA_PICTURE_H264_INVALID, VA_PICTURE_H264_SHORT_TERM_REFERENCE,
+	VA_RC_CBR, VA_RC_VBR, VA_RT_FORMAT_YUV420,
 };
 
 mod h265;
@@ -423,7 +423,9 @@ impl Encoder {
 	/// Fails when `nv12` is shorter than a frame at the encoder's size, when the
 	/// driver has no NV12 image format, and when the upload or the encode fails.
 	pub fn encode_nv12(&mut self, nv12: &[u8], keyframe: bool) -> anyhow::Result<Vec<u8>> {
-		let format = self.nv12.ok_or_else(|| anyhow::anyhow!("driver has no NV12 image format"))?;
+		let format = self
+			.nv12
+			.ok_or_else(|| anyhow::anyhow!("driver has no NV12 image format"))?;
 		let mut input = self.input.take().expect("input surface present");
 		let result = upload_nv12(format, &mut input, self.config.width, self.config.height, nv12)
 			.and_then(|()| self.encode_surface(&input, keyframe));
@@ -812,7 +814,14 @@ fn upload_nv12(
 /// Copies `rows` rows of `width` bytes from tightly packed `src` into the image
 /// plane at `offset` with `pitch` bytes per row, failing when the plane does
 /// not hold them.
-fn fill_plane(dst: &mut [u8], offset: usize, pitch: usize, src: &[u8], width: usize, rows: usize) -> anyhow::Result<()> {
+fn fill_plane(
+	dst: &mut [u8],
+	offset: usize,
+	pitch: usize,
+	src: &[u8],
+	width: usize,
+	rows: usize,
+) -> anyhow::Result<()> {
 	if rows == 0 || width == 0 {
 		return Ok(());
 	}
@@ -1424,6 +1433,68 @@ mod tests {
 					return;
 				};
 				assert_eq!(found, expected, "{codec:?}");
+			}
+		}
+	}
+
+	/// A plane fills when its last row holds just the frame's width, not a
+	/// whole pitch, and fails rather than panics when it holds less.
+	#[test]
+	fn a_plane_fills_up_to_its_last_byte_and_no_further() {
+		let src = [1, 2, 3, 4, 5, 6];
+		// Three rows of two bytes at a pitch of four, starting at offset one:
+		// the last row ends at byte 1 + 2 * 4 + 2 = 11.
+		let mut tight = [0; 11];
+		fill_plane(&mut tight, 1, 4, &src, 2, 3).expect("the last row fits");
+		assert_eq!(tight, [0, 1, 2, 0, 0, 3, 4, 0, 0, 5, 6]);
+
+		assert!(fill_plane(&mut [0; 10], 1, 4, &src, 2, 3).is_err(), "a byte short");
+		assert!(
+			fill_plane(&mut [0; 16], 0, 1, &src, 2, 3).is_err(),
+			"a pitch narrower than a row"
+		);
+		assert!(
+			fill_plane(&mut [0; 4], 0, usize::MAX, &src, 2, 3).is_err(),
+			"a pitch that overflows"
+		);
+		fill_plane(&mut [], 0, 4, &[], 2, 0).expect("no rows need no room");
+	}
+
+	/// A size 4:2:0 chroma cannot halve is refused before any device opens.
+	#[test]
+	fn an_odd_or_empty_size_is_refused() {
+		for (width, height) in [(641, 480), (640, 479), (0, 480), (640, 0)] {
+			let err = Encoder::new(Config::new(width, height, 30, 1_000_000, NonZeroU32::MIN))
+				.err()
+				.expect("refused");
+			assert!(err.to_string().contains("even"), "{width}x{height}: {err:#}");
+		}
+	}
+
+	/// The write-only upload puts exactly the frame's pixels into the surface,
+	/// as a `vaGetImage` read-back of it sees them.
+	#[test]
+	fn an_upload_reads_back_as_the_same_pixels() {
+		let Some(display) = Display::open() else {
+			eprintln!("skipping: no VA-API display");
+			return;
+		};
+		for (width, height) in [(WIDTH, HEIGHT), (852, 478)] {
+			let frame = nv12_frame(width, height, 3);
+			let mut surface = blank_surface(&display, VA_FOURCC_NV12, VA_RT_FORMAT_YUV420, (width, height));
+			let format = image_format(&display, VA_FOURCC_NV12);
+			upload_nv12(format, &mut surface, width, height, &frame).expect("upload");
+
+			let image =
+				crate::Image::create_from(&surface, format, (width, height), (width, height)).expect("read back");
+			let (va_image, data) = (*image.image(), image.as_ref());
+			let (w, h) = (width as usize, height as usize);
+			for (plane, rows, src) in [(0, h, &frame[..w * h]), (1, h / 2, &frame[w * h..])] {
+				let (offset, pitch) = (va_image.offsets[plane] as usize, va_image.pitches[plane] as usize);
+				for (row, src) in src.chunks_exact(w).take(rows).enumerate() {
+					let at = offset + row * pitch;
+					assert_eq!(&data[at..at + w], src, "{width}x{height} plane {plane} row {row}");
+				}
 			}
 		}
 	}

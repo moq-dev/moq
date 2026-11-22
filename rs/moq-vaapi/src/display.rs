@@ -340,7 +340,10 @@ fn query<T>(max: c_int, query: impl FnOnce(*mut T, *mut c_int) -> bindings::VASt
 	let mut list = Vec::with_capacity(capacity);
 	let mut num = max;
 	va_check(query(list.as_mut_ptr(), &mut num))?;
-	let len = usize::try_from(num).ok().filter(|&len| len <= capacity).ok_or_else(invalid)?;
+	let len = usize::try_from(num)
+		.ok()
+		.filter(|&len| len <= capacity)
+		.ok_or_else(invalid)?;
 	// Safe because libva wrote `len` entries, which fit the `capacity` allocated above.
 	unsafe { list.set_len(len) };
 	Ok(list)
