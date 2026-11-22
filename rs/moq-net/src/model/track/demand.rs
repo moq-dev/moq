@@ -945,11 +945,8 @@ mod tests {
 	fn unchanged_demand_does_not_wake_the_publisher() {
 		let broadcast = crate::broadcast::Info::default().produce();
 		let mut producer = broadcast.create_track("demand", None).unwrap();
-		let strong = producer.subscribe(
-			Subscription::default()
-				.with_priority(10)
-				.with_max(Duration::from_secs(1)),
-		);
+		// History from the oldest group covers every range the weak reader adds.
+		let strong = producer.subscribe(Subscription::default().with_ranges([Range::ALL]).with_priority(10));
 		let count = Arc::new(Count(AtomicUsize::new(0)));
 		let waiter = kio::Waiter::new(std::task::Waker::from(count.clone()));
 		assert!(producer.poll_subscription_changed(&waiter).is_ready());
