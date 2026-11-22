@@ -275,6 +275,7 @@ async fn announced_until(announcements: &mut moq_net::origin::Routes, until: &st
 		if let moq_net::origin::RouteEvent {
 			kind: moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Update,
 			announce,
+			..
 		} = event
 		{
 			seen.push(announce.prefix.as_str().to_owned());
@@ -1104,10 +1105,12 @@ async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net
 			kind:
 				moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Update | moq_net::origin::RouteKind::Restart,
 			announce: route,
+			..
 		} => Some((route, true)),
 		moq_net::origin::RouteEvent {
 			kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
 			announce: route,
+			..
 		} => Some((route, false)),
 	}
 }

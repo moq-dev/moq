@@ -271,6 +271,7 @@ impl Watcher {
 					if let moq_net::origin::RouteEvent {
 						kind: moq_net::origin::RouteKind::Start,
 						announce: route,
+						..
 					} = event
 					{
 						seen.lock().unwrap().push(route.prefix.to_string());
@@ -360,10 +361,12 @@ async fn synced_listing(url: url::Url) -> BTreeSet<String> {
 				Some(RouteEvent {
 					kind: RouteKind::End | RouteKind::Offline,
 					announce: route,
+					..
 				}) => listed.remove(route.prefix.as_str()),
 				Some(RouteEvent {
 					kind: RouteKind::Start | RouteKind::Update | RouteKind::Restart,
 					announce: route,
+					..
 				}) => listed.insert(route.prefix.to_string()),
 				None => return,
 			};

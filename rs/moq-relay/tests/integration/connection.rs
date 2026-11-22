@@ -123,6 +123,7 @@ async fn next_active(announced: &mut moq_net::origin::Routes) -> String {
 					| moq_net::origin::RouteKind::Update
 					| moq_net::origin::RouteKind::Restart,
 				announce: route,
+				..
 			} => return route.prefix.to_string(),
 			moq_net::origin::RouteEvent {
 				kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
