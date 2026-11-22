@@ -1505,7 +1505,9 @@ test("regressions", async () => {
 			finish: false,
 		},
 		// A group the local floor keeps out of where an earlier copy placed a range, below where the
-		// serving copy places it, stays owed: the read does not end without it. Mirrors the Rust case.
+		// serving copy places it: the read runs without a stall. The oracle owes nothing below the
+		// serving copy's placement, so it does not check that group yet; see
+		// quest/m0/nightly/resume-model-placement.md. Mirrors the Rust case.
 		{
 			ops: [
 				{ kind: "join", reader: 2, spec: spec(false, "hour", [8, 9], false) },

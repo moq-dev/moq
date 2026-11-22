@@ -28,6 +28,15 @@ None is the exhaustion check that PR rewrote:
   `[3,4]` is dropped after a route failover, and the unbounded read never
   hands out group 0.
 
+- The oracle owes a reader nothing below where the serving copy placed its
+  range, so the regression case `join r2 unordered [8,9]; bounds r2 [1,9];
+  write 0/0 next; up 0/1` (in both models) never checks group 0, which the
+  local floor keeps out under that placement: an early end passes it too
+  (found by CodeRabbit on moq-dev/moq#9326). Once placement is settled, the
+  oracle should owe such a group until a copy declares it skipped, and the
+  case should fail when the kept-out check in `Reader::accounts` is
+  disabled.
+
 Start from seed 33. A copy's resolution of a time end it cannot prove, like
 a time start ([moq-dev/moq#9307](https://github.com/moq-dev/moq/pull/9307)),
 should not narrow what the next copy is asked for. Decide per case whether

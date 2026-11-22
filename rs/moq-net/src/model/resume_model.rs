@@ -1895,7 +1895,9 @@ fn regressions() {
 			finish: false,
 		},
 		// A group the local floor keeps out of where an earlier copy placed a range, below where
-		// the serving copy places it, stays owed: the read does not end without it.
+		// the serving copy places it: the read runs without a stall. The oracle owes nothing
+		// below the serving copy's placement, so it does not check that group yet; see
+		// quest/m0/nightly/resume-model-placement.md.
 		Case {
 			ops: vec![
 				Op::Join {
