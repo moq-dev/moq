@@ -3155,7 +3155,8 @@ mod tests {
 	async fn mp2_durations_bridge_undeclared_runs_between_audio_groups() {
 		let track = track_producer("gaps", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		let subscription = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10))),
 		);
 		let config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Mp2, 48_000, 2);
 		let mut reader = Consumer::new(subscription, Container::try_from(&config).unwrap());
@@ -3188,7 +3189,8 @@ mod tests {
 	async fn legacy_video(groups: &[&[u64]]) -> Vec<String> {
 		let track = track_producer("gaps", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let subscription = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10))),
 		);
 		let wire = Container::Legacy(crate::container::Kind::Video);
 		let mut reader = Consumer::new(subscription, Container::Legacy(crate::container::Kind::Video));
@@ -3281,7 +3283,8 @@ mod tests {
 	async fn an_open_gops_keyframe_reads_once_a_leading_picture_lands() {
 		let track = track_producer("gaps", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let subscription = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10))),
 		);
 		let wire = Container::Legacy(crate::container::Kind::Video);
 		let mut reader = Consumer::new(subscription, Container::Legacy(crate::container::Kind::Video));
@@ -3324,7 +3327,8 @@ mod tests {
 	async fn a_held_keyframe_is_read_once_the_max_buffer_fills() {
 		let mut track = track_producer("gaps", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let subscription = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10))),
 		);
 		let wire = Container::Legacy(crate::container::Kind::Video);
 		let mut reader = Consumer::new(subscription, Container::Legacy(crate::container::Kind::Video));
@@ -3367,7 +3371,8 @@ mod tests {
 	async fn an_empty_unproven_group_is_skipped_once_the_max_buffer_fills() {
 		let mut track = track_producer("gaps", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let subscription = track.subscribe(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10))),
 		);
 		let mut reader = Consumer::new(subscription, Container::Legacy(crate::container::Kind::Video));
 		write_group(&mut track, 0, &[ts(0), ts(40_000)]);
