@@ -10249,6 +10249,9 @@ fn a_pending_credential_ends_with_its_session() {
 fn header_declares_every_enum() {
 	let header = include_str!(concat!(env!("OUT_DIR"), "/include/moq.h"));
 	for name in ["moq_order", "moq_refresh", "moq_demand", "moq_compression"] {
-		assert!(header.contains(&format!("typedef enum {name} {{")), "{name} missing from moq.h");
+		assert!(
+			header.contains(&format!("typedef enum {name} {{")),
+			"{name} missing from moq.h"
+		);
 	}
 }

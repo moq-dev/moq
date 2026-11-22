@@ -94,7 +94,10 @@ struct Idle {
 
 impl Idle {
 	fn new(origins: Origins) -> Self {
-		Self { origins, stopping: None }
+		Self {
+			origins,
+			stopping: None,
+		}
 	}
 
 	/// Block until the loop a dropped `listen` started has released its sockets, returning its
