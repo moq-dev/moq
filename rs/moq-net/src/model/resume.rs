@@ -9478,6 +9478,121 @@ mod test {
 		}
 	}
 
+	/// A group read past where the copy continuing it closes it short ends with an error, not
+	/// cleanly at the frames read: no route said the group ends there.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_short_close_below_the_frames_read_fails_the_group() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		let mut first = a.create_group(group::Info { start: 1 }).unwrap();
+		first.write_frame(ts(1), b"a".as_ref()).unwrap();
+		first.write_frame(ts(2), b"b".as_ref()).unwrap();
+		let mut reading = recv(&mut sub);
+		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+		assert_eq!(read(&mut reading), Some(b"b".to_vec()));
+
+		// The route replacing a holds one frame of the group, then a fails and b closes the
+		// group there, short of a known end.
+		let b = copy();
+		routes.serve(b.consume());
+		let mut second = b.create_group(group::Info { start: 1 }).unwrap();
+		second.write_frame(ts(1), b"a".as_ref()).unwrap();
+		a.clone().abort(Error::Dropped).unwrap();
+		second.finish().unwrap();
+		let fails = |reading: &mut group::Consumer| {
+			let Poll::Ready(res) = reading.poll_read_frame(&kio::Waiter::noop()) else {
+				panic!("the group ends");
+			};
+			assert!(
+				res.is_err(),
+				"ended {:?}",
+				res.map(|frame| frame.map(|frame| frame.payload))
+			);
+		};
+		// Every later read fails too, so a batch that swallowed the first error still sees it,
+		// even once a route holding the whole group serves.
+		fails(&mut reading);
+		let c = copy();
+		routes.serve(c.consume());
+		let mut whole = c.create_group(group::Info { start: 1 }).unwrap();
+		for (ms, frame) in [(1, b"a"), (2, b"b"), (3, b"c")] {
+			whole.write_frame(ts(ms), frame.as_ref()).unwrap();
+		}
+		whole.finish().unwrap();
+		fails(&mut reading);
+		fails(&mut reading);
+		drop(first);
+	}
+
+	/// A copy continuing a group that closes it below only frames the reader skipped ends the
+	/// read cleanly, as an empty range does: it read nothing the close takes back.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_short_close_below_skipped_frames_ends_the_read() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		let mut first = a.create_group(group::Info { start: 1 }).unwrap();
+		first.write_frame(ts(1), b"a".as_ref()).unwrap();
+		let mut reading = recv(&mut sub);
+		reading.skip_to(2);
+		assert!(reading.poll_read_frame(&kio::Waiter::noop()).is_pending());
+
+		let b = copy();
+		routes.serve(b.consume());
+		let mut second = b.create_group(group::Info { start: 1 }).unwrap();
+		second.write_frame(ts(1), b"a".as_ref()).unwrap();
+		a.clone().abort(Error::Dropped).unwrap();
+		assert!(reading.poll_read_frame(&kio::Waiter::noop()).is_pending());
+		second.finish().unwrap();
+		assert_eq!(read(&mut reading), None);
+		drop(first);
+	}
+
+	/// A group read past where the copy continuing it closes it short fails with the verdict
+	/// of the route that took over from that copy, when that route gave the group up.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_short_close_below_the_frames_read_fails_with_the_next_routes_verdict() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		let mut first = a.create_group(group::Info { start: 1 }).unwrap();
+		first.write_frame(ts(1), b"a".as_ref()).unwrap();
+		first.write_frame(ts(2), b"b".as_ref()).unwrap();
+		let mut reading = recv(&mut sub);
+		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+		assert_eq!(read(&mut reading), Some(b"b".to_vec()));
+
+		// The read moves onto b at frame 2 once a fails, and waits there.
+		let b = copy();
+		routes.serve(b.consume());
+		let mut second = b.create_group(group::Info { start: 1 }).unwrap();
+		second.write_frame(ts(1), b"a".as_ref()).unwrap();
+		a.clone().abort(Error::Dropped).unwrap();
+		assert!(reading.poll_read_frame(&kio::Waiter::noop()).is_pending());
+		// b closes the group below that frame, and c, which took over, gave it up.
+		second.finish().unwrap();
+		let c = copy();
+		routes.serve(c.consume());
+		c.drop_groups(1..2, StreamError::DeliveryTimeout);
+		for _ in 0..2 {
+			let Poll::Ready(Err(err)) = reading.poll_read_frame(&kio::Waiter::noop()) else {
+				panic!("the group fails");
+			};
+			assert_eq!(StreamError::from(&err), StreamError::DeliveryTimeout, "{err:?}");
+		}
+		drop(first);
+	}
+
 	/// A group handed out from a replaced copy, then moved to the serving copy once the
 	/// replaced route gave it up, reads on to its last frame after that copy is let go,
 	/// in either read order.
