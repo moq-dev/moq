@@ -1225,9 +1225,9 @@ impl Bbr3 {
     /// An application-limited flow without congestion since the stamp skips the due ProbeRTT,
     /// as QUICHE BBRv1's kBBR8 does, which spares media its periodic window cut. Its near-floor
     /// kBBR7 also requires an application-limited interval, so kBBR8 covers it.
-    /// Congestion denies the skip only while the window's lowest sample after the stamp sits
+    /// Congestion denies the skip only while the lowest sample since its latest signal sits
     /// above [`SIMILAR_MIN_RTT`] of BBR.min_rtt, as QUICHE's `probe_rtt_skipped_if_similar_rtt_`
-    /// does: a flow beside a full queue measures that queue, while one whose samples stayed at
+    /// does: a flow beside a full queue measures that queue, while one whose samples returned to
     /// BBR.min_rtt has none to drain. A one-off overflow, such as a startup overshoot, would
     /// otherwise cut a media flow below its own rate for a round and leave it a backlog that it
     /// drains only at its application-limited estimate, seconds behind live.
@@ -1954,36 +1954,6 @@ impl Controller for Bbr3 {
     /// BBRUpdateControlParameters
     /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-07.html#section-5.2.3>
     fn on_ack(&mut self, ack: Ack<'_>) {
-        // SCRATCH TRACE
-        if std::env::var_os("BBR_TRACE").is_some() {
-            use std::sync::Mutex;
-            static LAST: Mutex<Vec<(usize, String)>> = Mutex::new(Vec::new());
-            let id = self as *const Self as usize;
-            let line = format!(
-                "{:?} bw={:.1} max_bw={:.1} pace={:.1} cwnd={} rec={} skip_app={} skip_cong={:?} min_rtt={:?} expired={}",
-                self.state,
-                self.bw * 8e-6,
-                self.max_bw * 8e-6,
-                self.pacing_rate * 8e-6,
-                self.cwnd,
-                self.in_recovery,
-                self.probe_rtt_skip_app_limited,
-                self.probe_rtt_congested,
-                self.min_rtt,
-                self.min_rtt_expired,
-            );
-            let key = format!("{:?}|{}|{}|{}", self.state, self.in_recovery, self.probe_rtt_congested.is_some(), self.probe_rtt_skip_app_limited);
-            let mut last = LAST.lock().unwrap();
-            let entry = last.iter_mut().find(|(i, _)| *i == id);
-            let changed = match entry {
-                Some((_, k)) if *k == key => false,
-                Some((_, k)) => { *k = key; true }
-                None => { last.push((id, key)); true }
-            };
-            if changed {
-                eprintln!("bbr {:x} {:?} inflight={} {line}", id & 0xffffff, ack.now, ack.in_flight);
-            }
-        }
         // equivalent to RS.newly_acked. It is passed to the ACK's model steps rather than kept in
         // `rs`, so no later `set_cwnd` counts it again.
         let newly_acked = ack.packets.iter().map(|acked| u64::from(acked.bytes)).sum();
