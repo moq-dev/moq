@@ -164,10 +164,21 @@ pub(crate) struct StreamsState {
 pub(super) struct SendStalls {
 	/// Episodes started, the one in progress included
 	count: u64,
-	/// Time blocked, up to `since`
+	/// Time blocked, up to the episode's last observation
 	total: Duration,
-	/// The last `now` that found a writer blocked, while one still is
-	since: Option<Instant>,
+	episode: Episode,
+}
+
+/// Where the current wait on the peer's credit stands
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum Episode {
+	/// No writer waits on the peer's credit
+	#[default]
+	Clear,
+	/// A write blocked, and no `now` has seen it yet
+	Blocked,
+	/// A writer still waited at this `now`, up to which `total` counts
+	Since(Instant),
 }
 
 impl StreamsState {
@@ -510,9 +521,16 @@ impl StreamsState {
 			.is_some_and(|s| s.can_send_flow_control())
 	}
 
-	/// Count a write that just blocked on the peer's connection credit, at a new limit
-	pub(super) fn send_stalled(&mut self) {
-		self.send_stalls.count += 1;
+	/// Count a write that just blocked with all the peer's connection credit spent, returning
+	/// whether it starts an episode
+	pub(super) fn send_stalled(&mut self) -> bool {
+		let stalls = &mut self.send_stalls;
+		if stalls.episode != Episode::Clear {
+			return false;
+		}
+		stalls.count += 1;
+		stalls.episode = Episode::Blocked;
+		true
 	}
 
 	/// Accrue the time a writer has waited on the peer's connection credit, up to `now`
@@ -520,12 +538,15 @@ impl StreamsState {
 	/// Called wherever the connection is driven with a `now`: after it handles what it received
 	/// or a timeout, before it transmits, and once it closes, which ends a wait.
 	pub(crate) fn observe_send_credit(&mut self, now: Instant, closed: bool) {
-		let blocked = !closed && self.can_send_data_blocked() && !self.connection_blocked.is_empty();
+		let waiting = !closed && self.data_sent == self.max_data && !self.connection_blocked.is_empty();
 		let stalls = &mut self.send_stalls;
-		if let Some(since) = stalls.since {
+		if let Episode::Since(since) = stalls.episode {
 			stalls.total += now.saturating_duration_since(since);
 		}
-		stalls.since = blocked.then_some(now);
+		stalls.episode = match stalls.episode {
+			Episode::Blocked | Episode::Since(_) if waiting => Episode::Since(now),
+			_ => Episode::Clear,
+		};
 	}
 
 	pub(crate) fn send_credit_stats(&self) -> SendCreditStats {
@@ -1933,6 +1954,52 @@ mod tests {
 		server.observe_send_credit(at(9), false);
 		assert_eq!(server.send_credit_stats().stalls, 1);
 		assert_eq!(server.send_credit_stats().stalled, Duration::from_secs(2));
+	}
+
+	/// A writer blocking at the limit an earlier, departed writer blocked at starts a new episode,
+	/// though it queues no new DATA_BLOCKED.
+	#[test]
+	fn send_credit_stalls_count_a_new_writer_at_the_same_limit() {
+		let at = |secs| Instant::ZERO.saturating_add(Duration::from_secs(secs));
+		let mut server = make(Side::Server);
+		server.set_params(&TransportParameters {
+			initial_max_streams_uni: 2u32.into(),
+			initial_max_stream_data_uni: 1024u32.into(),
+			initial_max_data: 4u32.into(),
+			..TransportParameters::default()
+		});
+		let mut pending = Retransmits::default();
+		let open = |server: &mut StreamsState| {
+			Streams {
+				state: server,
+				closed: false,
+			}
+			.open(Dir::Uni, Default::default())
+			.unwrap()
+		};
+		let (first, second) = (open(&mut server), open(&mut server));
+		fn stream<'a>(server: &'a mut StreamsState, pending: &'a mut Retransmits, id: StreamId) -> send::Stream<'a> {
+			send::Stream {
+				id,
+				state: server,
+				pending,
+				closed: false,
+			}
+		}
+		let written = stream(&mut server, &mut pending, first).try_write(&mut &b"abcde"[..]);
+		assert_eq!(written, Poll::Ready(Ok(4)));
+		let written = stream(&mut server, &mut pending, first).try_write(&mut &b"e"[..]);
+		assert_eq!(written, Poll::Pending);
+		server.observe_send_credit(at(1), false);
+		stream(&mut server, &mut pending, first).reset(0u32.into()).unwrap();
+		server.observe_send_credit(at(2), false);
+
+		let written = stream(&mut server, &mut pending, second).try_write(&mut &b"x"[..]);
+		assert_eq!(written, Poll::Pending);
+		server.observe_send_credit(at(4), false);
+		server.observe_send_credit(at(7), false);
+		assert_eq!(server.send_credit_stats().stalls, 2);
+		assert_eq!(server.send_credit_stats().stalled, Duration::from_secs(4));
 	}
 
 	#[test]

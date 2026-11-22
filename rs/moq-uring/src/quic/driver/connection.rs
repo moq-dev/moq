@@ -738,6 +738,10 @@ impl Driver {
 				return Poll::Pending;
 			}
 			self.shared.conn.borrow_mut().handle_timeout(self.shared.owner.now());
+			// A timeout accrues a blocked write's wait, and an idle one ends the connection
+			// with no transmit left to publish it.
+			let credit = self.shared.conn.borrow().stats().send_credit;
+			self.shared.wire.set_credit_stalls(credit.stalls, credit.stalled);
 		}
 	}
 
@@ -856,7 +860,7 @@ impl Driver {
 			};
 			let stats = conn.stats();
 			self.shared.wire.set_sent_bytes(stats.udp_tx.bytes);
-			// A transmit dates a blocked write's wait, and timers reach the wire through one.
+			// A transmit dates a blocked write's wait.
 			let credit = stats.send_credit;
 			self.shared.wire.set_credit_stalls(credit.stalls, credit.stalled);
 			// This transmit carries the CONNECTION_CLOSE the loss owed.

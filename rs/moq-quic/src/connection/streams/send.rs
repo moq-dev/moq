@@ -426,13 +426,17 @@ impl<'a> Stream<'a> {
 				);
 				self.state.connection_blocked.insert(self.id);
 				// Only report the peer's limit, not our own send window.
-				if self.state.data_sent == self.state.max_data
-					&& self.state.data_blocked_limit != Some(self.state.max_data)
-				{
-					self.state.data_blocked_limit = Some(self.state.max_data);
-					self.state.send_stalled();
-					self.pending.data_blocked = true;
-					self.state.waits.wake_transmit();
+				if self.state.data_sent == self.state.max_data {
+					// A new episode wakes a transmit to date it, even with no new DATA_BLOCKED.
+					let mut wake = self.state.send_stalled();
+					if self.state.data_blocked_limit != Some(self.state.max_data) {
+						self.state.data_blocked_limit = Some(self.state.max_data);
+						self.pending.data_blocked = true;
+						wake = true;
+					}
+					if wake {
+						self.state.waits.wake_transmit();
+					}
 				}
 			} else if stream.data_blocked_limit != Some(stream.max_data) {
 				stream.data_blocked_limit = Some(stream.max_data);
