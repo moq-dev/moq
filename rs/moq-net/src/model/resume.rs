@@ -2442,9 +2442,11 @@ impl Reader {
 		skipped
 	}
 
-	/// What [`Retain::owed`] holds: the gaps [`Self::lacking`] finds, less what a copy holds,
-	/// a replaced copy other than a fill still feeds, or a copy declared skipped.
+	/// What [`Retain::owed`] holds: the gaps [`Self::lacking`] finds, less what a copy still
+	/// read holds and may hand out, what a replaced copy other than a fill still feeds, and
+	/// what a copy declared skipped.
 	fn owed(&self, delivered: &Delivered, waiter: &kio::Waiter) -> RangeSet<u64> {
+		let (start, budget) = (self.groups.0, self.mirrored.budget());
 		let mut owed = RangeSet::new();
 		for gap in self.lacking(delivered) {
 			owed.insert(gap.clone());
@@ -2452,12 +2454,18 @@ impl Reader {
 				owed.remove(run.clone());
 			}
 			for copy in &self.copies {
-				for key in copy.track.cached_groups(gap.clone()) {
-					owed.remove(key..key + 1);
+				// Only a copy `poll_lowest` still reads delivers: not ran out, failed, or past
+				// the budget.
+				if copy.done.is_some() || copy.expired(budget, waiter) {
+					continue;
 				}
-				let feeds = copy.replaced && !copy.fills && !matches!(copy.done, Some(Err(_)));
-				if feeds && !copy_failed(&copy.track) {
-					let (from, until) = (copy.start(self.groups.0), copy.end().unwrap_or(u64::MAX));
+				for key in copy.track.cached_groups(gap.clone()) {
+					if copy.start(start) <= key && Self::deliverable(copy, key, delivered) {
+						owed.remove(key..key + 1);
+					}
+				}
+				if copy.replaced && !copy.fills && copy.feeds && !copy_failed(&copy.track) {
+					let (from, until) = (copy.start(start), copy.end().unwrap_or(u64::MAX));
 					let fed = from.max(gap.start)..until.min(gap.end);
 					if !fed.is_empty() {
 						owed.remove(fed);
@@ -2747,7 +2755,12 @@ impl Reader {
 			{
 				self.refused = Some((copy.generation, floor..end));
 			}
-			if (late && serving && copy.floor.is_some()) || failed {
+			// A bounded window ends on what it was handed out, so a replaced copy that ran out
+			// short of a group the reader lacks under its bound has that group asked again: a
+			// fill let go while that copy still fed it would otherwise leave it unasked.
+			let ran_short =
+				copy.replaced && !copy.fills && matches!(copy.done, Some(Ok(_))) && self.window.end().is_some();
+			if (late && serving && copy.floor.is_some()) || failed || ran_short {
 				self.resumed
 					.get_or_insert_with(|| Resumed::Route(None, BTreeMap::new()));
 			}
@@ -11638,6 +11651,85 @@ mod test {
 		write(&c, 6);
 		assert_eq!(drain(&mut sub, false), [6]);
 		drop(reading);
+	}
+
+	/// A bounded reader of keys up to `end`, with an hour's budget.
+	fn subscribe_until(logical: &track::Producer, end: u64) -> track::Subscriber {
+		let subscription = Subscription::default()
+			.with_delay(Delay::default().with_max(HOUR))
+			.with_ranges([track::Range {
+				start: crate::track::Start::Time(0),
+				end: Some(end),
+			}]);
+		logical
+			.consume()
+			.subscribe(subscription)
+			.now_or_never()
+			.unwrap()
+			.unwrap()
+	}
+
+	/// A bounded read waits for a backfill of a group a replaced copy holds only past its
+	/// cap, which that copy never hands out.
+	#[test]
+	fn a_bounded_read_waits_for_a_group_held_past_a_replaced_copys_cap() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = received_copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe_until(&logical, 7);
+		for key in 0..=4 {
+			write(&a, key);
+		}
+		assert_eq!(drain(&mut sub, false), [0, 1, 2, 3, 4]);
+		let mut open = a.create_group(group::Info { start: 5 }).unwrap();
+		open.write_frame(ts(5), b"x".as_ref()).unwrap();
+		let reading = recv(&mut sub);
+		let b = received_copy();
+		routes.serve(b.consume());
+		write(&b, 7);
+		assert_eq!(drain(&mut sub, false), [7]);
+		// Past the cap at 5, so a never hands it out, and b's route is gone.
+		write(&a, 6);
+		b.abort(Error::Stream(StreamError::Session(SessionError::Cancel)))
+			.unwrap();
+		let mut c = received_copy();
+		routes.serve(c.consume());
+		// Its live feed starts at the resume point, so 6 comes only as a fill.
+		c.start_at(7).unwrap();
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		write(&c, 6);
+		assert_eq!(drain(&mut sub, false), [6]);
+		drop(reading);
+	}
+
+	/// A bounded read waits for a backfill of a group a replaced copy gave up and then ran out
+	/// past: that copy delivers nothing more, so only the backfill may.
+	#[test]
+	fn a_bounded_read_waits_for_a_group_a_drained_replaced_copy_lacks() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = received_copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe_until(&logical, 5);
+		for key in [0, 1, 2, 4] {
+			write(&a, key);
+		}
+		let mut got = drain(&mut sub, false);
+		got.sort_unstable();
+		assert_eq!(got, [0, 1, 2, 4]);
+		let mut b = received_copy();
+		routes.serve(b.consume());
+		// Its live feed starts at the resume point, so 3 comes only as a fill.
+		b.start_at(4).unwrap();
+		write(&b, 5);
+		assert_eq!(drain(&mut sub, false), [5]);
+		// The old route gives 3 up and finishes, so it ran out under its cap without it.
+		a.drop_groups(3..4, StreamError::NotFound);
+		let _finished = a.finish().unwrap();
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		write(&b, 3);
+		assert_eq!(drain(&mut sub, false), [3]);
 	}
 
 	/// A group one route refused to backfill is still asked of the next route, though the
