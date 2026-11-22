@@ -1270,6 +1270,49 @@ async fn raw_track_update_does_not_wait_for_pending_read() {
 	assert_eq!(micros(frame.timestamp), 20_000);
 }
 
+/// An update changing `delay.min` keeps the live join a range with no start was subscribed with,
+/// as a media reader's delay change does, and joins only a range the update adds at the new one.
+#[tokio::test]
+async fn raw_track_update_keeps_the_join_a_range_was_subscribed_with() {
+	use moq_net::track::{Range, Start};
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("status".into(), Some(timed_info())).unwrap();
+	let subscription = |min: u64, ranges: Option<Vec<MoqRange>>| MoqSubscription {
+		priority: 0,
+		delay: MoqDelay {
+			min: Some(Duration::from_secs(min)),
+			max: None,
+		},
+		ranges,
+		order: None,
+	};
+	let consumer = track.consume(Some(subscription(1, None))).unwrap();
+	let joined = |min: u64, end: Option<u64>| Range {
+		start: Start::Live(Duration::from_secs(min)),
+		end,
+	};
+	assert_eq!(consumer.control.subscription().ranges, [joined(1, None)]);
+
+	consumer.update(subscription(2, None)).unwrap();
+	assert_eq!(
+		consumer.control.subscription().ranges,
+		[joined(1, None)],
+		"the range already asked keeps its join"
+	);
+
+	let bounded = MoqRange {
+		start: None,
+		end: Some(MoqTimestamp::unscaled(5_000_000)),
+	};
+	let open = MoqRange { start: None, end: None };
+	consumer.update(subscription(2, Some(vec![open, bounded]))).unwrap();
+	assert_eq!(
+		consumer.control.subscription().ranges,
+		[joined(1, None), joined(2, Some(5_000_000))],
+		"only the added range joins at the new minimum"
+	);
+}
+
 /// Subscribe to `name` on `broadcast` as a raw track, for a typed consumer to take over.
 async fn subscribe(broadcast: &MoqBroadcastProducer, name: &str) -> Arc<MoqTrackConsumer> {
 	broadcast
@@ -7150,7 +7193,8 @@ async fn server_new_validates_the_config() {
 fn subscription_defaults_are_moq_net_defaults() {
 	let defaults = moq_net::track::Subscription::try_from(moq_subscription_defaults()).unwrap();
 	assert_eq!(defaults, moq_net::track::Subscription::default());
-	assert_eq!(defaults.delay.min, None);
+	assert_eq!(moq_subscription_defaults().delay.min, None);
+	assert_eq!(defaults.ranges, [moq_net::track::Range::default()]);
 	assert_eq!(defaults.delay.max, Some(Duration::ZERO));
 }
 
@@ -9387,10 +9431,7 @@ async fn ascending_subscription_reads_a_cached_backlog_oldest_first() {
 	assert_eq!(converted.order, moq_net::track::Order::Ascending);
 	assert_eq!(
 		converted.ranges,
-		vec![moq_net::track::Range {
-			start: Some(0),
-			end: None,
-		}]
+		vec![moq_net::track::Range::from(moq_net::track::Start::Time(0))]
 	);
 
 	let consumer = track.consume(Some(subscription)).unwrap();
@@ -9888,7 +9929,7 @@ async fn range_times_select_the_containing_groups() {
 	assert_eq!(
 		migrated.resolve().unwrap(),
 		moq_net::track::Range {
-			start: Some(1_500),
+			start: moq_net::track::Start::Time(1_500),
 			end: Some(1_999),
 		}
 	);

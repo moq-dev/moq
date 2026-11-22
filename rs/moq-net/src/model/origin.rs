@@ -16768,7 +16768,7 @@ mod tests {
 		let mut later = video
 			.subscribe(crate::track::Subscription {
 				ranges: vec![crate::track::Range {
-					start: Some(3),
+					start: crate::track::Start::Time(3),
 					end: None,
 				}],
 				..Default::default()

@@ -676,10 +676,7 @@ async fn groups_waiting_for_track_info_give_way_first() {
 	let mut requests = setup.broadcast.broadcast().requests();
 	let every = Subscription::default()
 		.with_order(moq_net::track::Order::Ascending)
-		.with_ranges([moq_net::track::Range {
-			start: Some(0),
-			end: None,
-		}])
+		.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Time(0))])
 		.with_delay(Delay::default().with_max(Duration::from_secs(60)));
 	let waiting = tokio::spawn({
 		let remote = setup.remote.clone();

@@ -165,7 +165,7 @@ async fn a_start_group_arrives_whole() {
 						if lite {
 							assert_eq!(
 								fixture.track.subscription_changed().await.unwrap().unwrap().ranges[0].start,
-								Some(5),
+								moq_net::track::Start::Time(5),
 								"{case}: upstream asks for the start group"
 							);
 						}
