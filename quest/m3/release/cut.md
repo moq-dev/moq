@@ -240,6 +240,26 @@ control unverified; landing #9210 after the cut. The
 [JS frame cap](https://github.com/moq-dev/moq/pull/9283) ships with the cut only if it
 lands first.
 
+Decided 2026-11-21 (maintainer, /quest-plan of the main → release
+flow-control review): ✅ the cut waits on
+[send-credit stalls](/quest/m1/send-credit-stalls.md), so the release that
+ships the flow-control rework ships a counter for its failure mode, a
+connection blocked on its peer's credit (rejected: the cut not waiting;
+leaving it in m3). The [peer window default](/quest/m1/peer-window-default.md)
+ships with the cut only if it lands first (rejected: the cut waiting on it).
+
+Decided 2026-11-21 (maintainer, /quest-plan of the exhaustive pre-cut
+full-codebase audit): ✅ the cut waits on the release-pipeline and packaging
+bugs found in m0: simultaneous apt/rpm/brew tag cancellation and npm publish
+propagation retries ([release-queue-and-npm-retry](/quest/m0/release-queue-and-npm-retry.md)),
+the frozen `moq-cli` `.deb` smoke target ([smoke-moq-deb-name](/quest/m0/smoke-moq-deb-name.md)),
+and the missing comma delimiter on `tls::Listen` env vars
+([tls-cert-env-delimiter](/quest/m0/tls-cert-env-delimiter.md)), while
+[crates-trusted-publisher](/quest/m3/crates-trusted-publisher.md) adds
+`moq-vaapi` after the cut first-publishes it by token (rejected: putting all
+pipeline fixes in m1 without gating the cut; fixing only 3 publish-breaking
+bugs and dropping the rest).
+
 On the reconciled candidate, regenerate the Nix build plan with `just rs cargo-nix` after the
 shared version bump. A dry run of the bump to 0.22.0 updated 52 packages and left Cargo.nix stale.
 Repeat the two-relay smoke with the candidate and the last published relay. Put each binary upstream
@@ -279,3 +299,7 @@ candidate:
 - [Interop and Video pass on main](/quest/m0/interop-green/README.md) - the cut PR's release gate runs `interop.yml`, which failed on `main` every day through 2026-11-12
 - [Nightly passes on main](/quest/m0/nightly/README.md) - the release gate runs `features.yml`, red in the 2026-11-12 Nightly
 - [Claim new npm names](/quest/m3/release/npm-first-publish.md) - trusted publishing can publish every new `@moq/*` package
+- [Send-credit stalls](/quest/m1/send-credit-stalls.md) - session stats show a connection blocked on its peer's credit
+- [Queue simultaneous apt/rpm/brew releases and retry npm CDN propagation](/quest/m0/release-queue-and-npm-retry.md) - simultaneous release tags and multi-package npm publishes do not silently drop artifacts
+- [Update smoke workflow to install moq instead of retired moq-cli](/quest/m0/smoke-moq-deb-name.md) - post-cut deb smoke tests install the newly published `moq` package
+- [Restore comma delimiter on TLS cert/key environment variables](/quest/m0/tls-cert-env-delimiter.md) - NixOS multi-cert relay configs do not fail to parse at startup

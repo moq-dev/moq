@@ -9,6 +9,38 @@ complete it before cutting main into release.
 
 ## Plan
 
+Decided 2026-11-21 (maintainer, /quest-plan of an exhaustive full-codebase
+audit before the `0.22.0` cut, covering both pre-release and new code): the cut
+also waits on the breaking fixes that audit surfaced across the wire, vendored
+native crates, and public APIs:
+
+- **Wire and drafts.** Delete the temporary `raw_parts` / `base.split("/")`
+  `Path Keep` migration before lite-07 finalizes
+  ([lite07-path-keep-parts](/quest/m2/lite07-path-keep-parts.md)), and bring
+  `draft-lcurley-qmux-websocket` up to `qmux-VV.<alpn>`
+  ([qmux-websocket-draft](/quest/m2/qmux-websocket-draft.md)).
+- **Vendored native crate soundness.** Fix the unsound public APIs in
+  [moq-v4l](/quest/m2/v4l-arena-soundness.md),
+  [moq-vaapi](/quest/m2/vaapi-soundness-and-upload.md), and
+  [moq-nvenc](/quest/m2/nvenc-soundness.md) before `0.22.0` publishes them.
+- **Public API freezes.** Fence `moq-net` event/item types with
+  `#[non_exhaustive]` ([net-non-exhaustive-events](/quest/m2/net-non-exhaustive-events.md)),
+  fix `hang::Catalog::without_ext` and drop dead `Error` variants and the unused
+  `url` dependency ([hang-without-ext-and-errors](/quest/m2/hang-without-ext-and-errors.md)),
+  rename `moq-gst`'s retired `tls-disable-verify` property to
+  `connect-tls-insecure` ([gst-tls-insecure-prop](/quest/m2/gst-tls-insecure-prop.md)),
+  narrow `@moq/room`'s `Room.remotes` to `ReadonlyMap`
+  ([room-remotes-readonly](/quest/m2/room-remotes-readonly.md)), and open
+  `moq-ffi`'s 5 closed extensible enums while deriving `Debug`/`Eq`/`Hash` on
+  its codec types ([ffi-open-enums](/quest/m2/ffi-open-enums.md)).
+
+Non-breaking findings from the same audit live in
+[m0](/quest/m0/README.md) (release-cut pipeline and packaging blockers),
+[m1/precut-audit](/quest/m1/precut-audit/README.md) (high- and medium-impact
+fixes, TLA+ sync drift, and CI hardening), [m3](/quest/m3/README.md) (softer
+edge cases and low-severity cleanups), and
+[m4](/quest/m4/fuzz-binary-parsers.md) (binary-parser fuzz targets).
+
 Decided 2026-11-16 (maintainer, /quest-plan of an audit of everything on
 `main` since `release`, and of the lite-07 draft): the cut also waits on what
 that audit found. Fifteen reviewers judged about 480 work lines for a
