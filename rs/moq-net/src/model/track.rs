@@ -7422,13 +7422,21 @@ impl Consumer {
 		self.with_state(|state| state?.read().hole_end(key, dropped))
 	}
 
-	/// The parts of `groups` the publisher declared skipped, never to be produced.
-	pub(super) fn skipped_in(&self, groups: ops::Range<u64>) -> RangeSet<u64> {
+	/// The parts of `groups` the publisher declared skipped, never to be produced. Parks
+	/// `waiter` until a change here while some of `groups` is not.
+	pub(super) fn skipped_in(&self, groups: ops::Range<u64>, waiter: &kio::Waiter) -> RangeSet<u64> {
 		if let Some(serving) = self.serving() {
-			return serving.skipped_in(groups);
+			return serving.skipped_in(groups, waiter);
 		}
-		self.with_state(|state| state.map(|state| state.read().skipped_in(groups)))
-			.unwrap_or_default()
+		self.with_state(|state| {
+			let state = state?;
+			let mut found = RangeSet::new();
+			match state.poll(waiter, |state| skips(state, &groups, &mut found)) {
+				Poll::Ready(Err(state)) => Some(state.skipped_in(groups)),
+				_ => Some(found),
+			}
+		})
+		.unwrap_or_default()
 	}
 
 	/// Where a run of starts up to `end` ends with the span it reaches into; see
@@ -11372,10 +11380,17 @@ impl Subscriber {
 
 	/// The parts of `groups` the publisher declared skipped, as this subscriber knows them: a
 	/// front's logical track counts every route it held or let go.
-	pub(super) fn skipped_in(&self, groups: ops::Range<u64>) -> RangeSet<u64> {
+	/// Parks `waiter` until a change while some of `groups` is not.
+	pub(super) fn skipped_in(&self, groups: ops::Range<u64>, waiter: &kio::Waiter) -> RangeSet<u64> {
 		match &self.inner {
-			Inner::Plain(cursor) => cursor.state.read().skipped_in(groups),
-			Inner::Resume(resume, _) => resume.skipped_in(groups),
+			Inner::Plain(cursor) => {
+				let mut found = RangeSet::new();
+				match cursor.state.poll(waiter, |state| skips(state, &groups, &mut found)) {
+					Poll::Ready(Err(state)) => state.skipped_in(groups),
+					_ => found,
+				}
+			}
+			Inner::Resume(resume, _) => resume.skipped_in(groups, waiter),
 		}
 	}
 
@@ -13248,6 +13263,16 @@ impl Subscriber {
 
 	pub fn assert_not_clone(&self, other: &Self) {
 		assert!(!self.is_clone(other), "should not be clone");
+	}
+}
+
+/// Read into `found` the parts of `groups` `state` holds skipped: ready once they cover
+/// `groups`, so a poll parks only while some of it is not.
+fn skips(state: &TrackState, groups: &ops::Range<u64>, found: &mut RangeSet<u64>) -> Poll<()> {
+	*found = state.skipped_in(groups.clone());
+	match found.gaps(groups).next() {
+		None => Poll::Ready(()),
+		Some(_) => Poll::Pending,
 	}
 }
 

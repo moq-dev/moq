@@ -1669,8 +1669,8 @@ class Reader implements ResumeSource {
 		const edge = last && hooks.latestKey(last.sub);
 		const cursor = this.#shell.cursor.peek();
 		let waits = false;
-		const lacking = this.#lacking(delivered);
-		let dropped = false;
+		// Built on the first drop only: a reader no copy leaves pays nothing for it.
+		let lacking: Run[] | undefined;
 		this.#copies = this.#copies.filter((copy) => {
 			if (!copy.replaced) {
 				if (!this.#ended || copy.lease > 0) return true;
@@ -1684,24 +1684,20 @@ class Reader implements ResumeSource {
 				if (retains) return true;
 			}
 			// Before the drop, which closes a front's copy along with its own copies.
+			lacking ??= this.#lacking(delivered);
 			this.#keepSkips(copy, lacking);
 			this.#drop(copy);
-			dropped = true;
 			return false;
 		});
-		// A start or end may be skipped in parts no one copy knows whole: merge what the held copies
-		// skipped before pruning.
-		if (dropped) for (const copy of this.#copies) this.#keepSkips(copy, lacking);
-		// Only what still starts or ends a gap the reader lacks: a range edit, a hand-out, or a later
-		// switch leaves the rest unneeded.
+		// A gap may be skipped in parts no one copy knows whole: merge what the held copies skipped
+		// too.
+		if (lacking) for (const copy of this.#copies) this.#keepSkips(copy, lacking);
+		// Only what lies in a gap the reader still lacks: a range edit, a hand-out, or a later switch
+		// leaves the rest unneeded.
 		if (this.#skipped.runs > 0) {
 			const kept = new Delivered();
 			for (const gap of this.#lacking(delivered)) {
-				const open = this.#skipped.gaps(gap.start, gap.end);
-				const prefix = open[0]?.start ?? gap.end;
-				if (prefix > gap.start) kept.addRun(gap.start, prefix);
-				const suffix = open.at(-1)?.end ?? gap.start;
-				if (suffix < gap.end) kept.addRun(suffix, gap.end);
+				for (const run of runsIn(this.#skipped, gap.start, gap.end)) kept.addRun(run.start, run.end);
 			}
 			this.#skipped = kept;
 		}
@@ -1709,9 +1705,9 @@ class Reader implements ResumeSource {
 	}
 
 	/**
-	 * Keep what `copy` skipped of each gap in `lacking` under its bound, as it is let go, merged with
-	 * what earlier copies skipped: a skip is final, and only that copy may know it. The caller then
-	 * prunes to each gap's skipped start and end. Mirrors the Rust `Reader::let_go`.
+	 * Keep what `copy` skipped of each gap in `lacking` under its bound, merged with what earlier
+	 * copies skipped: a skip is final, and only that copy may know it. Mirrors the Rust
+	 * `Reader::let_go`.
 	 */
 	#keepSkips(copy: Copy, lacking: readonly Run[]): void {
 		const bound = copyEnd(copy);
@@ -1723,7 +1719,7 @@ class Reader implements ResumeSource {
 
 	/**
 	 * The gaps of `delivered` in the reader's window under the serving copy's resume point: where a
-	 * key the cursor keeps out, a start or an end of one, needs a skip to count as accounted for.
+	 * key the cursor keeps out needs a skip to count as accounted for.
 	 * See {@link #accounts}. Mirrors the Rust `Reader::lacking`.
 	 */
 	#lacking(delivered: Delivered): Run[] {
@@ -1985,10 +1981,15 @@ class Reader implements ResumeSource {
 		return this.#serving() !== undefined;
 	}
 
-	// The serving route's copy holds what its publisher skipped.
+	// What any copy held now or let go declared skipped: a skip is final for the whole track, so an
+	// outer front reading this one as a copy keeps what a route this front replaced declared.
 	skippedIn(start: bigint, end: bigint): Run[] {
-		const serving = this.#serving();
-		return serving ? hooks.skippedIn(serving.sub, start, end) : [];
+		const skipped = new Delivered();
+		for (const run of runsIn(this.#skipped, start, end)) skipped.addRun(run.start, run.end);
+		for (const copy of this.#copies) {
+			for (const run of hooks.skippedIn(copy.sub, start, end)) skipped.addRun(run.start, run.end);
+		}
+		return runsIn(skipped, start, end);
 	}
 
 	// The serving route's copy holds what its publisher skipped or gave up.
@@ -3182,4 +3183,16 @@ class FrontConsumer extends broadcast.Consumer {
 	override clone(): FrontConsumer {
 		return new FrontConsumer(this.#front, this.shareState());
 	}
+}
+
+/** The runs of `held` inside `[start, end)`. */
+function runsIn(held: Delivered, start: bigint, end: bigint): Run[] {
+	const runs: Run[] = [];
+	let at = start;
+	for (const gap of held.gaps(start, end)) {
+		if (gap.start > at) runs.push({ start: at, end: gap.start });
+		at = gap.end;
+	}
+	if (at < end) runs.push({ start: at, end });
+	return runs;
 }

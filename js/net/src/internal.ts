@@ -579,7 +579,7 @@ export interface ResumeSource {
 	gapHeld(at: bigint, end: bigint): boolean;
 	/** Whether a route's copy serves the reader now. */
 	serving(): boolean;
-	/** The parts of `[start, end)` the serving copy says its publisher skipped; see `hooks.skippedIn`. */
+	/** The parts of `[start, end)` any copy held or let go says its publisher skipped; see `hooks.skippedIn`. */
 	skippedIn(start: bigint, end: bigint): Run[];
 	/** Where the run of keys from `key` the serving copy says no group arrives at ends; see `hooks.holeEnd`. */
 	holeEnd(key: bigint, dropped: boolean): bigint | undefined;

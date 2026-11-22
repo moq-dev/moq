@@ -771,10 +771,10 @@ struct Span {
 impl Copy {
 	/// The parts of `groups` this copy's publisher declared skipped: through its subscriber
 	/// once ready, which for another front's track counts the routes that front replaced.
-	fn skipped_in(&self, groups: std::ops::Range<u64>) -> RangeSet<u64> {
+	fn skipped_in(&self, groups: std::ops::Range<u64>, waiter: &kio::Waiter) -> RangeSet<u64> {
 		match &self.sub {
-			Sub::Ready(sub) => sub.skipped_in(groups),
-			Sub::Pending(_) => self.track.skipped_in(groups),
+			Sub::Ready(sub) => sub.skipped_in(groups, waiter),
+			Sub::Pending(_) => self.track.skipped_in(groups, waiter),
 		}
 	}
 
@@ -1185,8 +1185,8 @@ impl Subscriber {
 	/// The parts of `groups` this reader knows were skipped: by any copy it holds, or one it
 	/// let go. A skip is final for the whole track, so an outer front reading this one as a
 	/// copy keeps what a route this front replaced declared.
-	pub(super) fn skipped_in(&self, groups: std::ops::Range<u64>) -> RangeSet<u64> {
-		self.reader().skipped_in(groups)
+	pub(super) fn skipped_in(&self, groups: std::ops::Range<u64>, waiter: &kio::Waiter) -> RangeSet<u64> {
+		self.reader().skipped_in(groups, waiter)
 	}
 
 	/// Whether this reader accounts for every key of `gaps`, which none of the readers that
@@ -2331,7 +2331,7 @@ impl Reader {
 			if !gone.is_empty() {
 				for copy in gone.iter().chain(&self.copies) {
 					let end = copy.end().unwrap_or(u64::MAX).min(gap.end);
-					kept.extend(copy.skipped_in(gap.start..end).iter().cloned());
+					kept.extend(copy.skipped_in(gap.start..end, &kio::Waiter::noop()).iter().cloned());
 				}
 			}
 		}
@@ -2339,15 +2339,16 @@ impl Reader {
 		waits
 	}
 
-	/// The parts of `groups` a copy held now or one let go declared skipped.
-	fn skipped_in(&self, groups: std::ops::Range<u64>) -> RangeSet<u64> {
+	/// The parts of `groups` a copy held now or one let go declared skipped. Parks `waiter` on
+	/// each copy read while some of `groups` is not skipped there.
+	fn skipped_in(&self, groups: std::ops::Range<u64>, waiter: &kio::Waiter) -> RangeSet<u64> {
 		let mut skipped: RangeSet<u64> = self
 			.skipped
 			.overlapping(&groups)
 			.map(|run| run.start.max(groups.start)..run.end.min(groups.end))
 			.collect();
 		for copy in &self.copies {
-			skipped.extend(copy.skipped_in(groups.clone()).iter().cloned());
+			skipped.extend(copy.skipped_in(groups.clone(), waiter).iter().cloned());
 		}
 		skipped
 	}
@@ -2712,11 +2713,12 @@ impl Reader {
 			return false;
 		};
 		let resumed = serving.floor.unwrap_or(0);
-		// Declared skipped by a copy let go, or by one held now.
+		// Declared skipped by a copy let go, or by one held now, any of which wakes the read
+		// once it declares more.
 		let skipped = |open: &std::ops::Range<u64>| {
 			let mut held = RangeSet::new();
 			for copy in &self.copies {
-				held.extend(copy.skipped_in(open.clone()).iter().cloned());
+				held.extend(copy.skipped_in(open.clone(), waiter).iter().cloned());
 			}
 			held.gaps(open).next().is_none()
 		};
@@ -12851,6 +12853,54 @@ mod test {
 		assert!(sub.poll_recv_group(&fresh()).is_pending(), "1 is still owed");
 		b.skip_groups(1..2);
 		assert!(matches!(sub.poll_recv_group(&fresh()), Poll::Ready(Ok(None))));
+	}
+
+	/// A skip declared late on a replaced copy kept only for a group still read from it wakes
+	/// the read, though that copy is past its budget and no longer polled for groups.
+	#[kio::test]
+	async fn a_late_skip_on_a_kept_copy_wakes_the_read() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		write(&a, 0);
+		a.drop_groups(1..2, StreamError::NotFound);
+		a.drop_groups(3..5, StreamError::NotFound);
+		let mut open = a.create_group(group::Info { start: 5 }).unwrap();
+		open.write_frame(ts(5), b"x".as_ref()).unwrap();
+		routes.serve(a.consume());
+		let subscription = Subscription::default()
+			.with_delay(Delay::default().with_max(HOUR))
+			.with_ranges([track::Range {
+				start: Some(0),
+				end: Some(6),
+			}]);
+		let mut sub = logical
+			.consume()
+			.subscribe(subscription)
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		assert_eq!(recv(&mut sub).start, 0);
+		let reading = recv(&mut sub);
+		assert_eq!(reading.start, 5);
+		let b = copy();
+		b.skip_groups(1..2);
+		write(&b, 6);
+		routes.serve(b.consume());
+		let mut sub = sub.with_range(3..7);
+		assert_eq!(drain(&mut sub, false), [6]);
+		kio::clock::sleep(HOUR).await;
+		let wake = Arc::new(Wake::default());
+		let waiter = kio::Waiter::new(wake.clone().into());
+		assert!(sub.poll_recv_group(&waiter).is_pending(), "2 is still owed");
+		wake.0.store(false, std::sync::atomic::Ordering::Relaxed);
+		a.skip_groups(2..3);
+		assert!(
+			wake.0.load(std::sync::atomic::Ordering::Relaxed),
+			"the skip wakes the read"
+		);
+		assert!(matches!(sub.poll_recv_group(&waiter), Poll::Ready(Ok(None))));
+		drop(reading);
 	}
 
 	/// A skip known only to a route an inner front replaced counts for an outer front reading
