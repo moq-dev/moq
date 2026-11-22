@@ -11370,6 +11370,15 @@ impl Subscriber {
 		}
 	}
 
+	/// The parts of `groups` the publisher declared skipped, as this subscriber knows them: a
+	/// front's logical track counts every route it held or let go.
+	pub(super) fn skipped_in(&self, groups: ops::Range<u64>) -> RangeSet<u64> {
+		match &self.inner {
+			Inner::Plain(cursor) => cursor.state.read().skipped_in(groups),
+			Inner::Resume(resume, _) => resume.skipped_in(groups),
+		}
+	}
+
 	/// Hand out the group a [`Self::poll_peek_group`] on this subscriber reserved.
 	pub(super) fn take(&mut self, reserved: Reserved) -> Result<group::Consumer> {
 		let meter = self.stats.meter();
