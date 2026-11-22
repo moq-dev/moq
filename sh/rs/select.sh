@@ -122,21 +122,30 @@ select_packages() {
     # Cargo's own package ids, not bare names: a workspace crate that is also
     # pulled from crates.io (kio) makes `--package kio` ambiguous, and cargo
     # refuses before compiling anything.
-    jq -r --arg selected "$selected" '
+    local pkg_flags
+    pkg_flags=$(jq -r --arg selected "$selected" '
 		($selected | split("\n")) as $want
 		| .packages[]
 		| select(.name as $name | $want | index($name) != null)
 		| "--package \(.id)"
-	' <<<"$metadata" | sort -u | tr '\n' ' '
+	' <<<"$metadata" | sort -u | tr '\n' ' ')
+    [[ -n "$pkg_flags" ]] || return 0
+    printf '%s\n%s\n' "$pkg_flags" "$(printf '%s\n' "$seeds" | tr '\n' ' ')"
 }
 
 # A command substitution clears -e, so a failing jq inside selection would
 # otherwise print a partial selection. Restore it there; Bash 4.4's
 # `inherit_errexit` would too, but macOS ships Bash 3.2.
-packages=$(
+selection=$(
     set -e
     select_packages
 )
+packages=${selection%%$'\n'*}
+if [[ "$selection" == *$'\n'* ]]; then
+    seed_names=${selection#*$'\n'}
+else
+    seed_names=
+fi
 
 # Ids are `path+file://<dir>#<version>` for a directory named after its crate.
 names=$(tr ' ' '\n' <<<"$packages" | sed -n 's|.*/\([^/#]*\)#.*|\1|p' | sort -u | tr '\n' ' ')
@@ -144,6 +153,11 @@ names=$(tr ' ' '\n' <<<"$packages" | sed -n 's|.*/\([^/#]*\)#.*|\1|p' | sort -u 
 # True when the selection includes a crate matching the pattern.
 wants() {
     [[ "$packages" == ALL ]] || grep -qwE "$1" <<<"$names"
+}
+
+# True when the diff directly seeded a crate matching the pattern (or selected ALL).
+seeded() {
+    [[ "$packages" == ALL ]] || grep -qwE "$1" <<<"$seed_names"
 }
 
 # The `package/feature` pairs named by `required-features` on the targets of
@@ -192,29 +206,48 @@ case "$action" in
         if wants '(moq-uring|moq-relay)'; then just rs uring; fi
         ;;
     check | check-test | lint)
+        # The session driver's Send proof runs on nightly in its own target dir
+        # (target/send-depth), so overlap it with the stable lint steps and
+        # print its buffered output once it finishes.
+        send_depth_pid=
+        send_depth_log=
+        trap 'rm -f "${send_depth_log:-}"' EXIT
+        if [[ "$action" == lint ]] && wants '(moq-net|moq-tokio)'; then
+            send_depth_log=$(mktemp)
+            just rs send-depth >"$send_depth_log" 2>&1 &
+            send_depth_pid=$!
+        fi
+
+        fail=0
         # The isolated feature builds (`just rs features`) stay out of the
         # gate; the Features workflow runs them nightly and on release PRs.
-        just rs "$action" "${flags[@]}"
+        just rs "$action" "${flags[@]}" || fail=1
         # The test build enables device features, which can hide unused items
         # in the default-feature test cfg. Keep this compile isolated from the
         # selected dependents, whose features would unify capture back in.
-        if [[ "$action" == lint ]] && wants '(moq-video|moq-audio)'; then
-            just rs media-defaults
+        if [[ "$fail" -eq 0 && "$action" == lint ]] && wants '(moq-video|moq-audio)'; then
+            just rs media-defaults || fail=1
         fi
         # Device code behind the off-by-default `capture` feature. check-test
         # lints it through the test build, as for the default features.
-        if [[ "$action" != lint ]] && wants '(moq-video|moq-audio)'; then
-            if [[ "$action" == check-test ]]; then just rs capture-test; else just rs capture; fi
+        if [[ "$fail" -eq 0 && "$action" != lint ]] && wants '(moq-video|moq-audio)'; then
+            if [[ "$action" == check-test ]]; then just rs capture-test || fail=1; else just rs capture || fail=1; fi
         fi
         # moq-net without `async`, which every other build unifies back in.
-        if wants moq-net; then just rs no-async; fi
-        # The session driver's Send proof, which a deeper session state breaks, and
-        # moq-tokio's spawn of it.
-        if [[ "$action" == lint ]] && wants '(moq-net|moq-tokio)'; then just rs send-depth; fi
-        # Every C caller still matches libmoq's generated header.
-        if [[ "$action" == lint ]] && wants libmoq; then just rs c-tests --syntax; fi
+        if [[ "$fail" -eq 0 ]] && wants moq-net; then just rs no-async || fail=1; fi
+        # Every C caller still matches libmoq's generated header. rs/libmoq/build.rs
+        # generates moq.h from rs/libmoq/src alone, so transitive upstream edits
+        # cannot alter the header (and `test rs` still compiles libmoq against them).
+        if [[ "$fail" -eq 0 && "$action" == lint ]] && seeded libmoq; then just rs c-tests --syntax || fail=1; fi
         # moq-cli's media tasks are behind `play`; only check-test runs tests.
-        if [[ "$action" == check-test ]] && wants moq-cli; then just rs play; fi
+        if [[ "$fail" -eq 0 && "$action" == check-test ]] && wants moq-cli; then just rs play || fail=1; fi
+        if [[ -n "$send_depth_pid" ]]; then
+            send_depth_rc=0
+            wait "$send_depth_pid" || send_depth_rc=$?
+            cat "$send_depth_log"
+            if [[ "$send_depth_rc" -ne 0 ]]; then fail=1; fi
+        fi
+        exit "$fail"
         ;;
     fix)
         just rs fix "${flags[@]}"
