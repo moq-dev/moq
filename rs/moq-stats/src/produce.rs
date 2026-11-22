@@ -470,7 +470,10 @@ impl Drain {
 					continue;
 				};
 				let mut entry = entry.clone();
-				entry.path = entry.path.strip_prefix(&view.root).expect("an ancestor prefixes its path");
+				entry.path = entry
+					.path
+					.strip_prefix(&view.root)
+					.expect("an ancestor prefixes its path");
 				view.report.traffic.push(entry);
 			}
 		}
@@ -2565,9 +2568,9 @@ mod tests {
 		));
 		let registry = producer.registry();
 		let session = |root: &'static str, label: &'static str| {
-			registry.tier(Tier::default()).session(
-				moq_net::stats::SessionInfo::new(Path::from_static(label)).with_root(Path::from_static(root)),
-			)
+			registry
+				.tier(Tier::default())
+				.session(moq_net::stats::SessionInfo::new(Path::from_static(label)).with_root(Path::from_static(root)))
 		};
 		let _a = session("a", "x");
 		let _ab = session("a/b", "x");
@@ -2594,8 +2597,16 @@ mod tests {
 		};
 
 		let a = read("a").await;
-		let paths: BTreeMap<_, _> = a.paths.iter().map(|(path, usage)| (path.as_str(), usage.publisher.bytes)).collect();
-		assert_eq!(paths, BTreeMap::from([("live", 1), ("b/cam", 2)]), "relative, nested root included");
+		let paths: BTreeMap<_, _> = a
+			.paths
+			.iter()
+			.map(|(path, usage)| (path.as_str(), usage.publisher.bytes))
+			.collect();
+		assert_eq!(
+			paths,
+			BTreeMap::from([("live", 1), ("b/cam", 2)]),
+			"relative, nested root included"
+		);
 		assert_eq!(a.publisher.bytes, 3);
 		assert_eq!(a.labels.len(), 1, "one label across two roots");
 		assert_eq!(a.labels["x"].sessions_started, 2);
@@ -2614,11 +2625,14 @@ mod tests {
 		let mut frame = read_bucket(&top, "").await;
 		let top = frame.tiers.remove("").unwrap();
 		assert_eq!(top.publisher.bytes, 15);
-		assert_eq!(top.labels["x"].sessions_started, 2, "the node merges one label across roots");
+		assert_eq!(
+			top.labels["x"].sessions_started, 2,
+			"the node merges one label across roots"
+		);
 
 		// A root whose last session leaves ends its broadcast once it lingers.
 		let mut routes = origin.consume().with_hidden(true).routes();
-		let mut live = |routes: &mut origin::Routes| {
+		let live = |routes: &mut origin::Routes| {
 			let mut live = None;
 			while let Some(Some((update, active))) = futures::FutureExt::now_or_never(next_update(routes)) {
 				if update.prefix.as_str() == view("c") {

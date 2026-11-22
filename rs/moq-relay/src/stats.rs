@@ -96,12 +96,7 @@ pub struct Config {
 	/// root. The relay publishes it at [`moq_stats::root_prefix`] and mounts it there
 	/// read-only, so no session can publish at `<root>/<prefix>` and reading it counts
 	/// as no root's traffic. Requires `enabled`.
-	#[usage(
-		long = "stats-roots",
-		env = "MOQ_STATS_ROOTS",
-		setting = "stats.roots",
-		bool_value
-	)]
+	#[usage(long = "stats-roots", env = "MOQ_STATS_ROOTS", setting = "stats.roots", bool_value)]
 	pub roots: bool,
 }
 

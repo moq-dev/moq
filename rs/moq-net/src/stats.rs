@@ -1005,9 +1005,12 @@ struct Shared {
 	/// broadcast; surfaced on the per-tier session tracks and in the totals and
 	/// presence tracks. A tier's inner map is
 	/// created the first time a session records under it.
-	sessions: Lock<HashMap<Tier, HashMap<(Path, Path), Arc<SessionCounters>>>>,
+	sessions: Lock<HashMap<Tier, HashMap<SessionKey, Arc<SessionCounters>>>>,
 	wire: Lock<Vec<Weak<WireInner>>>,
 }
+
+/// The `(root, label)` a tier's session gauges are keyed by.
+type SessionKey = (Path, Path);
 
 /// Per-broadcast counters, lazily split by tier. A tier's [`TierCounters`] is
 /// created the first time a guard records under that label, so the set of tiers
@@ -1048,7 +1051,10 @@ struct TierCounters {
 impl Registry {
 	/// Build an enabled registry from `config`.
 	pub fn new(config: Config) -> Self {
-		let Config { exclude, exclude_rooted } = config;
+		let Config {
+			exclude,
+			exclude_rooted,
+		} = config;
 		Self {
 			exclude,
 			exclude_rooted,
@@ -3262,7 +3268,9 @@ mod tests {
 		let busy = stats
 			.tier(tier.clone())
 			.session(SessionInfo::new(crate::Path::from_static("acme")));
-		let _request = stats.tier(tier.clone()).request(SessionInfo::new(crate::Path::from_static("acme")));
+		let _request = stats
+			.tier(tier.clone())
+			.request(SessionInfo::new(crate::Path::from_static("acme")));
 		let meter = busy.egress(crate::Path::from_static("acme/live")).meter();
 		let _held = quiet.ingress(crate::Path::from_static("acme/other")).meter();
 		assert_eq!(

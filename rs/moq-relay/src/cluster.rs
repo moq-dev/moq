@@ -2947,15 +2947,18 @@ mod tests {
 		let lease = |root| auth::Lease::new(root, moq_auth::lease::Consumer::fixed(grant())).unwrap();
 		let (a, b) = (lease("/a"), lease("/b"));
 		let session = |lease: &auth::Lease| {
-			cluster.stats.tier(lease.token().tier.clone()).session(
-				moq_net::stats::SessionInfo::new(&lease.token().label).with_root(lease.token().root.clone()),
-			)
+			cluster
+				.stats
+				.tier(lease.token().tier.clone())
+				.session(moq_net::stats::SessionInfo::new(&lease.token().label).with_root(lease.token().root.clone()))
 		};
 		let (session_a, _session_b) = (session(&a), session(&b));
 
 		let options = moq_net::origin::RouteOptions::default;
 		let publisher = cluster.publisher(a.token()).expect("publish grant");
-		let _live = publisher.route("live", options()).expect("a client publishes in its root");
+		let _live = publisher
+			.route("live", options())
+			.expect("a client publishes in its root");
 		for path in [".stats", ".stats/node", ".stats/node/evil"] {
 			assert!(publisher.route(path, options()).is_err(), "route {path}");
 		}
@@ -2976,8 +2979,14 @@ mod tests {
 		.unwrap();
 		let stats = moq_stats::Consumer::new(broadcast, Default::default());
 		let mut totals = stats.totals().expect("totals");
-		let frame = kio::wait(|waiter| totals.poll_next(waiter)).await.expect("read").expect("frame");
-		assert_eq!(frame[""].sessions.sessions_started, 1, "root a's own session, not root b's");
+		let frame = kio::wait(|waiter| totals.poll_next(waiter))
+			.await
+			.expect("read")
+			.expect("frame");
+		assert_eq!(
+			frame[""].sessions.sessions_started, 1,
+			"root a's own session, not root b's"
+		);
 
 		let mut report = moq_net::stats::Report::default();
 		cluster.stats.report(&mut report, moq_net::time::Instant::now());
