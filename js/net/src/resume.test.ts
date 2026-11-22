@@ -5318,6 +5318,43 @@ test.each([true, false])("an ended track's group moves off a dying route (rerout
 	}
 });
 
+// A copy rerouted after the clean end that caches the rest of a failed group continues it, even once
+// the front concluded and the dying route can't fetch.
+test("an ended track's group continues from a rerouted copy's cache once the front concluded", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	const failure = new StreamError(StreamCode.SessionClosed);
+	front.serve(counted(a, () => Promise.reject(failure)).route);
+	const sub = front.consumer.track("seq").subscribe({ delay: { max: Duration.millis(3_600_000) } });
+	try {
+		// Its frame stays unread, so the group never stalls onto the rerouted copy.
+		const open = ta.write(0n, 1, false);
+		const group = await sub.recvGroup();
+		if (group?.start !== 0n) throw new Error("expected group 0");
+		ta.producer.finish();
+		expect(await sub.recvGroup()).toBeUndefined();
+
+		tb.write(0n, 2);
+		front.serve(counted(b, () => Promise.reject(failure)).route);
+		await settle();
+		front.consumer.close();
+		await settle();
+		open.abort(failure);
+		expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+		expect(dec.decode((await group.readFrame())?.payload)).toBe("0.1");
+		expect(await group.readFrame()).toBeUndefined();
+		group.close();
+	} finally {
+		sub.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+	}
+});
+
 // The copy a front serves after the clean end only continues the groups still read: it hands out
 // nothing, not even a group below the end the reader never got. Mirrors the Rust
 // `a_reader_stays_on_the_copy_its_track_finished_on`.

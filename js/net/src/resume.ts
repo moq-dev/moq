@@ -982,7 +982,7 @@ class Reader implements ResumeSource {
 			this.#mirrored = subscription;
 			// New preferences may ask what a backfill failed to get.
 			this.#refused = undefined;
-			for (const copy of this.#copies) this.#update(copy);
+			for (const copy of [...this.#copies, ...this.#rerouted]) this.#update(copy);
 			// A copy just resolved replaced ranges against its cache, before its failover cap raised
 			// them, so the reader takes that resolution now, the newest copy's first.
 			const ranges = this.#ranges();
@@ -1003,7 +1003,7 @@ class Reader implements ResumeSource {
 		if (cursor === this.#bounded) return;
 		const passed = this.#bounded.start;
 		this.#bounded = cursor;
-		for (const copy of this.#copies) this.#bound(copy);
+		for (const copy of [...this.#copies, ...this.#rerouted]) this.#bound(copy);
 		if (cursor.start < passed) this.#backfill(cursor.start, passed);
 		if (this.#ended) this.#letGo(this.#delivered);
 	}
@@ -1196,11 +1196,15 @@ class Reader implements ResumeSource {
 		return this.#copies.findLast(matches) ?? this.#rerouted.findLast(matches);
 	}
 
-	/** The copies other than `except` whose track still holds group `key` unfailed, newest first. */
+	/**
+	 * The copies other than `except` whose track still holds group `key` unfailed, newest first: the
+	 * rerouted ones too, which continue a group though they hand none out.
+	 */
 	holding(key: bigint, except: Copy): Copy[] {
+		const copies = [...this.#copies, ...this.#rerouted];
 		const holding: Copy[] = [];
-		for (let index = this.#copies.length - 1; index >= 0; index--) {
-			const copy = this.#copies[index];
+		for (let index = copies.length - 1; index >= 0; index--) {
+			const copy = copies[index];
 			if (copy !== except && hooks.holdsGroup(copy.sub, key)) holding.push(copy);
 		}
 		return holding;
