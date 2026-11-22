@@ -576,7 +576,10 @@ async fn rejoin_never_hands_the_cached_group_before_the_answer() {
 				.ok()
 				.map(|group| group.unwrap().unwrap());
 			if let Some(group) = &early {
-				assert_eq!(group.start, 1, "{version}: the rejoining reader got the cached group first");
+				assert_eq!(
+					group.start, 1,
+					"{version}: the rejoining reader got the cached group first"
+				);
 			}
 
 			pair.server_transport.release_split();

@@ -112,7 +112,10 @@ async fn read_as(version: Option<&str>, range: Range, how: Read) -> Result<Group
 	// A range with no start joins live, `how.min` behind the live edge, when one is given.
 	let range = match (range.start, how.min) {
 		(moq_net::track::Start::Oldest, Some(min)) => Range {
-			start: moq_net::track::Start::Live { min, max: Some(FOREVER) },
+			start: moq_net::track::Start::Live {
+				min,
+				max: Some(FOREVER),
+			},
 			..range
 		},
 		_ => range,
@@ -289,11 +292,10 @@ async fn an_ordered_reader_starts_at_the_publishers_start_over_a_frameless_newes
 		.expect("resolve timeout")
 		.expect("broadcast resolves")
 		.unwrap();
-	let subscription = Subscription::default()
-		.with_ranges([Range::from(moq_net::track::Start::Live {
-			min: Duration::ZERO,
-			max: Some(FOREVER),
-		})]);
+	let subscription = Subscription::default().with_ranges([Range::from(moq_net::track::Start::Live {
+		min: Duration::ZERO,
+		max: Some(FOREVER),
+	})]);
 	let mut reader = kio::clock::timeout(TIMEOUT, remote.track("data").unwrap().subscribe(subscription))
 		.await
 		.expect("subscribe timeout")

@@ -126,12 +126,12 @@ pub struct Info {
 	///
 	/// A group is stale once either clock reaches the budget: the wall-clock time since
 	/// its successor arrived at this hop, or how far its successor's first timestamp
-	/// trails the live edge (see [`Delay::max`]). An untimed track is judged
+	/// trails the live edge (see [`Start::Live`]). An untimed track is judged
 	/// by the wall clock alone, and a peer whose timestamps stop advancing cannot pin a
 	/// superseded group.
 	///
 	/// A freshness bound on what may still be served, the inverse of an HTTP
-	/// `Cache-Control: max-age`. [`Delay::max`] is clamped to this, since a
+	/// `Cache-Control: max-age`. A live join's `max` is clamped to this, since a
 	/// group can't be waited for once it is stale. Reported in TRACK_INFO so
 	/// relays re-serve with the same bound.
 	///
@@ -144,7 +144,7 @@ pub struct Info {
 	/// the cache pool's [`expiry`](crate::cache::Pool::expiry) window.
 	///
 	/// This is the `Publisher Max Age` on the wire, the publisher-side half of the
-	/// budget [`Delay::max`] sets for a subscriber.
+	/// budget a live join's `max` sets for a subscriber (see [`Start::Live`]).
 	///
 	/// Encoded as milliseconds in a QUIC varint, so a duration of `2^62` milliseconds
 	/// or more cannot be put on lite-07 wires. moq-transport egress never sends it, since
@@ -5822,10 +5822,10 @@ impl Producer {
 	/// The info is fixed at creation, so there's nothing to wait for (no
 	/// SUBSCRIBE_OK round trip). Pass `None` for [`Subscription::default`].
 	///
-	/// Reads only the groups the subscription's ranges cover.
-	/// [`Delay::max`] is what asks for data: delivery skips everything in range
-	/// that the budget convicts, so the default budget of zero delivers only the latest
-	/// group and a larger one reaches back over what it can still use.
+	/// Reads only the groups the subscription's ranges cover. A group reached only through
+	/// live joins is skipped once the widest of their `max` convicts it, so the default
+	/// [`Start::LATEST`] delivers only the latest group; a history range delivers every group
+	/// it covers.
 	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> Subscriber {
 		let preferences = subscription.into().unwrap_or_default();
 
@@ -5856,7 +5856,7 @@ impl Producer {
 	/// when there are no live subscribers. Unlike [`Self::subscription`], this
 	/// doesn't wait for a change or advance the change cursor.
 	///
-	/// The aggregate's [`Delay::max`] is the subscribers' own, capped only by
+	/// Each live join's `max` in the aggregate is the subscribers' own, capped only by
 	/// the local cache ceiling ([`broadcast::Info::cache_duration`]). The publisher
 	/// enforces its own [`Info::max_age`], which each reader's lateness budget also
 	/// applies, so the demand asked upstream is the same before and after the info lands.
@@ -6970,10 +6970,10 @@ impl Consumer {
 	/// [`Subscriber`] once the track info is available, or the track's abort error (or
 	/// [`Error::Dropped`]) if it is already closed.
 	///
-	/// Reads only the groups the subscription's ranges cover.
-	/// [`Delay::max`] is what asks for data: delivery skips everything in range
-	/// that the budget convicts, so the default budget of zero delivers only the latest
-	/// group and a larger one reaches back over what it can still use.
+	/// Reads only the groups the subscription's ranges cover. A group reached only through
+	/// live joins is skipped once the widest of their `max` convicts it, so the default
+	/// [`Start::LATEST`] delivers only the latest group; a history range delivers every group
+	/// it covers.
 	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> kio::Pending<Subscribing> {
 		let (state, subscription) = self.resolve(Some(&subscription.into().unwrap_or_default()));
 		let subscription = subscription.expect("a subscription was requested");
@@ -8069,8 +8069,8 @@ impl Fetching {
 ///   publisher's demand.
 ///
 /// A group outside either is held rather than skipped past, so widening either one later
-/// makes it available again. Within both, [`Delay::max`] decides what is
-/// still worth delivering, measured against the track's live edge.
+/// makes it available again. Within both, a live join's `max` decides what it
+/// still delivers, measured against the track's live edge; a history range delivers every group.
 pub struct Subscriber {
 	name: Arc<str>,
 	// The broadcast this track belongs to; see [`Self::broadcast`].
@@ -11234,14 +11234,12 @@ impl Subscriber {
 	/// rewinds. The exception is a cached group it skipped as stale, which a wider budget
 	/// offers again.
 	///
-	/// Groups are semi-reliable, and the [`Delay::max`] budget is the other
-	/// thing (alongside eviction and a moving start) that decides which of them arrive:
-	/// one that has drifted further behind the live edge than the budget tolerates is
-	/// skipped rather than handed over, so a single read walks off a whole backlog. The
-	/// default is [`Duration::ZERO`], which takes the live
-	/// edge and writes the rest off; raise it to read history. [`Self::with_range`] and
-	/// [`Subscription::ranges`] are filters, not exemptions: backfill needs a budget that
-	/// covers it. [`Consumer::fetch_group`] is the way to ask for one old group outright.
+	/// Groups are semi-reliable, and a live join's `max` is the other thing (alongside
+	/// eviction and a moving start) that decides which of them arrive: a group reached only
+	/// through live joins that has drifted further behind the live edge than the widest
+	/// tolerates is skipped rather than handed over, so a single read walks off a whole
+	/// backlog. The default [`Start::LATEST`] takes the live edge and writes the rest off;
+	/// a history range (a time, position, or oldest start) reads every group it covers. [`Consumer::fetch_group`] is the way to ask for one old group outright.
 	/// Across same-instance route copies, the lowest next buffered group is delivered
 	/// first; a lower group that arrives later is still delivered in arrival order.
 	/// The budget remains attached to a returned group: if it stalls while newer data
@@ -12559,7 +12557,7 @@ impl Drop for Ticket {
 ///
 /// # Age and skipping
 ///
-/// [`Delay::max`] applies as this cursor reads, exactly as it does on the
+/// A live join's `max` applies as this cursor reads, exactly as it does on the
 /// arrival cursor: a group is skipped once its *reach*, where its immediate successor
 /// begins, is that far behind the newest frame on the track. Nothing weaker convicts it,
 /// because the reach is the only proof that *every* frame it could still hold is past the

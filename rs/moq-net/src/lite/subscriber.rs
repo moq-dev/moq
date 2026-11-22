@@ -5871,12 +5871,15 @@ mod tests {
 		// A live join under the budget, which the upstream placed at group 0: a stale drop
 		// under that budget ends what it reads.
 		let lag = Duration::from_secs(10);
-		let mut reader = serving.serving.subscribe(crate::track::Subscription::default().with_ranges([
-			crate::track::Range::from(crate::track::Start::Live {
-				min: lag,
-				max: Some(budget),
-			}),
-		]));
+		let mut reader =
+			serving.serving.subscribe(
+				crate::track::Subscription::default().with_ranges([crate::track::Range::from(
+					crate::track::Start::Live {
+						min: lag,
+						max: Some(budget),
+					},
+				)]),
+			);
 		serving.serving.answer_join(lag, None, Some(0), Duration::MAX);
 		let waiter = kio::Waiter::noop();
 		let old = |groups: std::ops::Range<u64>| {
@@ -6999,16 +7002,53 @@ mod tests {
 			// Lite-07 carries it on the live join, an older wire as the subscription's.
 			let max = match version.has_ranges() {
 				true => match msg.ranges[..] {
-					[lite::Range {
-						start: Some(lite::Anchor::Live { max, .. }),
-						..
-					}] => max,
+					[
+						lite::Range {
+							start: Some(lite::Anchor::Live { max, .. }),
+							..
+						},
+					] => max,
 					_ => panic!("{version}: one live join, got {:?}", msg.ranges),
 				},
 				false => msg.max_delay,
 			};
 			assert_eq!(max, Some(wait), "{version}: the subscriber's own max age");
 			assert!(!trailing, "{version}: a SUBSCRIBE_UPDATE followed the accept");
+		}
+	}
+
+	/// A wire before lite-07 carries the demand's widest live max as its one Subscriber Max
+	/// Age, even once its span narrows to a start, here the newest group an idle copy cached.
+	#[kio::test]
+	async fn a_span_narrowed_to_a_start_keeps_the_demands_max_age() {
+		for version in [Version::Lite05, Version::Lite06] {
+			let mut h = Harness::new(version);
+			let mut cached = h.producer.create_group(group::Info { start: 3 }).unwrap();
+			cached.write_frame(cached.key_time(), &b"x"[..]).unwrap();
+			cached.finish().unwrap();
+			h.producer.set_idle();
+
+			let wait = Duration::from_secs(10);
+			let mut sub = Sub::None;
+			let demand = Subscription::default().with_max(wait);
+			h.serve
+				.handle_subscription(&mut h.producer, &mut sub, Some(demand), true)
+				.await
+				.unwrap();
+
+			let (msg, _) = sent_subscribe(&h.wire(), version);
+			assert!(
+				matches!(
+					msg.ranges[..],
+					[lite::Range {
+						start: Some(lite::Anchor::Absolute(position)),
+						..
+					}] if position.group == 3
+				),
+				"{version}: asked from the newest cached group, got {:?}",
+				msg.ranges
+			);
+			assert_eq!(msg.max_delay, Some(wait), "{version}: the demand's max age");
 		}
 	}
 
@@ -7678,6 +7718,7 @@ mod tests {
 			probes: 0,
 			reasked: Default::default(),
 			ranges: vec![lite::Range::OPEN],
+			max_age: None,
 		};
 		let establish = serve.prepare_establish(&mut serving.serving, wire, &Default::default());
 		serving.mode = ServeMode::Establish(establish);
@@ -7846,6 +7887,7 @@ mod tests {
 			probes: 0,
 			reasked: Default::default(),
 			ranges: vec![lite::Range::OPEN],
+			max_age: None,
 		};
 		let reader = serving.serving.subscribe(None);
 		serving.serving.seen_subscription(Some(Subscription::default()));
@@ -7913,6 +7955,7 @@ mod tests {
 				probes: 0,
 				reasked: Default::default(),
 				ranges: vec![lite::Range::OPEN],
+				max_age: None,
 			};
 			let establish = serve.prepare_establish(&mut serving.serving, wire, &Default::default());
 			serving.mode = ServeMode::Establish(establish);
@@ -11330,9 +11373,9 @@ impl TrackServe {
 					Sub::Active(active) => active.live.next(),
 					Sub::None => 0,
 				};
-				let (demand, demand_ranges) = match request {
-					Some((demand, ranges)) => (Some(demand), ranges),
-					None => (None, Vec::new()),
+				let (demand, demand_ranges, max_age) = match request {
+					Some(request) => (Some(request.subscription), request.ranges, request.max_age),
+					None => (None, Vec::new(), None),
 				};
 				let asks = demand.as_ref().map_or(&[][..], |demand| &demand.asks[..]);
 				let joins = demand.as_ref().map_or(&[][..], |demand| &demand.joins[..]);
@@ -11365,10 +11408,20 @@ impl TrackServe {
 						})
 						.collect()
 				};
-				(demand.map(|demand| (demand, demand_ranges, probes, reasked)), groups)
+				(
+					demand.map(|demand| (demand, demand_ranges, probes, reasked, max_age)),
+					groups,
+				)
 			}
 			false => (
-				request.map(|(demand, ranges)| (demand, ranges, Vec::new(), Default::default())),
+				request.map(|request| {
+					let Request {
+						subscription,
+						ranges,
+						max_age,
+					} = request;
+					(subscription, ranges, Vec::new(), Default::default(), max_age)
+				}),
 				Default::default(),
 			),
 		};
@@ -11379,7 +11432,7 @@ impl TrackServe {
 		// What goes on the wire: the demand's ranges, then the fills', under the demand's
 		// parameters. The demand alone sets the floor.
 		let request = match request {
-			Some((demand, demand_ranges, probes, reasked)) => {
+			Some((demand, demand_ranges, probes, reasked, max_age)) => {
 				let mut ranges = demand_ranges.clone();
 				ranges.extend(probes.iter().copied());
 				ranges.extend(FillAsk::wire(&groups));
@@ -11390,6 +11443,7 @@ impl TrackServe {
 					probes: probes.len(),
 					reasked,
 					ranges,
+					max_age,
 				})
 			}
 			None if fills.is_empty() => None,
@@ -11400,6 +11454,7 @@ impl TrackServe {
 				probes: 0,
 				reasked: Default::default(),
 				ranges: FillAsk::wire(&groups).collect(),
+				max_age: fills.subscription().max_age(),
 			}),
 		};
 
@@ -11420,13 +11475,14 @@ impl TrackServe {
 							probes,
 							reasked,
 							ranges,
+							max_age,
 						} = wire;
 						// Downstream preferences changed: forward them upstream as a
 						// SUBSCRIBE_UPDATE (Lite03+ only; older peers can't carry one).
 						let start_moved = demand.is_some() && active.start != subscription.start();
 						active.priority = subscription.priority;
 						active.order = subscription.order;
-						active.max_delay = subscription.max_age();
+						active.max_delay = max_age;
 						// A lowered floor owes groups nobody asked for until now, in the session's
 						// tail as well as in the track's arrivals, which its start declaration
 						// restarts.
@@ -11442,7 +11498,7 @@ impl TrackServe {
 						let widened = (changed && demand.is_some())
 							.then(|| subscription.start().or(active.started.flatten()).unwrap_or(0)..u64::MAX);
 						if let Ok(mut tail) = active.tail.write() {
-							tail.follow(producer, subscription.widest());
+							tail.follow(producer, track::budget(max_age));
 							let now = self.subscriber.runtime.now();
 							for groups in lowered.into_iter().chain(widened) {
 								tail.demand(groups, now);
@@ -11525,7 +11581,7 @@ impl TrackServe {
 	///
 	/// `idle` when this opens a subscription for a copy whose newest cached group, while
 	/// idle, is its first.
-	fn wire_request(&self, pref: Option<Subscription>, idle: Option<u64>) -> Option<(Subscription, Vec<lite::Range>)> {
+	fn wire_request(&self, pref: Option<Subscription>, idle: Option<u64>) -> Option<Request> {
 		// An empty half-open range asks for nothing, and the wire cannot say that: its
 		// bounds are inclusive, so the nearest encoding either hands back the position
 		// the caller excluded or inverts the range outright once the two bounds meet. No
@@ -11533,6 +11589,9 @@ impl TrackServe {
 		// certainly empty is the very first position, which is what `Position::default()`
 		// stands in for.
 		let subscription = pref.filter(|sub| sub.end().is_none_or(|end| end > sub.start().unwrap_or_default()))?;
+		// Read before the span narrows: a span from a start is history, which drops the max of
+		// every live join it covers.
+		let max_age = subscription.max_age();
 		let ranged = self.subscriber.version.has_ranges();
 		// Lite-07 carries every range asked for; an older wire one span covering them.
 		let mut subscription = match ranged {
@@ -11558,25 +11617,27 @@ impl TrackServe {
 		if !self.subscriber.version.has_frame_bounds() {
 			subscription.resume = None;
 		}
-		wire_ranges(&subscription).map(|ranges| (subscription, ranges))
+		let ranges = wire_ranges(&subscription)?;
+		Some(Request {
+			subscription,
+			ranges,
+			max_age,
+		})
 	}
 
 	/// Open the SUBSCRIBE for `pref` alongside the TRACK still waiting on its TRACK_INFO,
 	/// registered with its copy pending. `None` when it asks for nothing.
 	fn pipeline(&self, pref: Subscription) -> Result<Option<Pipelined>, Error> {
 		// A copy not accepted yet caches nothing.
-		let Some((subscription, ranges)) = self.wire_request(Some(pref.clone()), None) else {
+		let Some(mut request) = self.wire_request(Some(pref.clone()), None) else {
 			return Ok(None);
 		};
-		let ranges = match self.subscriber.version.has_ranges() {
-			true => {
-				let fields = self.subscribe_fields(&subscription);
-				let budget = fit::Budget::new(self.subscriber.version, fields, 0, ranges.len());
-				fit::fit(ranges, &Default::default(), &Default::default(), budget)?.0
-			}
-			false => ranges,
-		};
-		let establish = self.register(subscription, ranges, None);
+		if self.subscriber.version.has_ranges() {
+			let fields = self.subscribe_fields(&request.subscription);
+			let budget = fit::Budget::new(self.subscriber.version, fields, 0, request.ranges.len());
+			request.ranges = fit::fit(request.ranges, &Default::default(), &Default::default(), budget)?.0;
+		}
+		let establish = self.register(request, None);
 		Ok(Some(Pipelined {
 			pref,
 			state: PipelinedState::Opening(establish),
@@ -11600,15 +11661,20 @@ impl TrackServe {
 			probes,
 			reasked: _,
 			ranges,
+			max_age,
 		} = wire;
 		// One asking only for fills is no live feed, so it leaves the floor alone.
 		if demand.is_some() {
 			self.request_floor(producer, subscription.start());
 		}
 		let framing = lite::Framing::new(producer.info(), self.subscriber.version);
-		let mut establish = self.register(
+		let request = Request {
 			subscription,
 			ranges,
+			max_age,
+		};
+		let mut establish = self.register(
+			request,
 			Some(Accepted {
 				producer: producer.clone(),
 				framing,
@@ -11656,17 +11722,22 @@ impl TrackServe {
 	/// immediately, so a late insert races the group stream (a group whose id isn't
 	/// in the map yet is dropped, stalling the track forever). The caller
 	/// deregisters `id` if the establish fails.
-	fn register(&self, subscription: Subscription, ranges: Vec<lite::Range>, copy: Option<Accepted>) -> Establish {
+	fn register(&self, request: Request, copy: Option<Accepted>) -> Establish {
+		let Request {
+			subscription,
+			ranges,
+			max_age,
+		} = request;
 		let id = self.subscriber.next_id.fetch_add(1, atomic::Ordering::Relaxed);
 
 		tracing::debug!(id, broadcast = %self.subscriber.log_path(&self.path), track = %self.name, "subscribe started");
 
 		// A pipelined SUBSCRIBE has no copy, so no max age, until it is adopted.
-		let tail = kio::Producer::new(Tail::new(tail::grace(subscription.widest())));
+		let tail = kio::Producer::new(Tail::new(tail::grace(track::budget(max_age))));
 		if let Some(copy) = &copy
 			&& let Ok(mut tail) = tail.write()
 		{
-			tail.follow(&copy.producer, subscription.widest());
+			tail.follow(&copy.producer, track::budget(max_age));
 		}
 		let mut entry = TrackEntry::new(copy, tail.clone());
 		let version = self.subscriber.version;
@@ -11691,6 +11762,7 @@ impl TrackServe {
 			fills_changed: false,
 			subscription,
 			ranges,
+			max_age,
 			tail,
 			parked: false,
 			state: EstablishState::Start,
@@ -11705,12 +11777,15 @@ impl TrackServe {
 		sub: &mut Sub,
 		subscription: Subscription,
 	) -> Result<(), Error> {
-		let subscription = match self.subscriber.version.has_ranges() {
-			true => subscription,
-			false => wire_span(subscription),
-		};
-		let ranges = wire_ranges(&subscription).expect("a non-empty subscription");
+		let Request {
+			subscription,
+			ranges,
+			max_age,
+		} = self
+			.wire_request(Some(subscription), None)
+			.expect("a non-empty subscription");
 		let wire = Wire {
+			max_age,
 			subscription: subscription.clone(),
 			demand: Some(subscription),
 			demand_ranges: ranges.clone(),
@@ -11801,6 +11876,18 @@ struct Wire {
 	/// The live probes to ask afresh; see [`SubStream::probes`].
 	reasked: std::collections::BTreeSet<u64>,
 	ranges: Vec<lite::Range>,
+	/// See [`Request::max_age`].
+	max_age: Option<Duration>,
+}
+
+/// A demand as a SUBSCRIBE carries it.
+struct Request {
+	/// The demand, narrowed to one span on a wire without ranges.
+	subscription: Subscription,
+	ranges: Vec<lite::Range>,
+	/// The `Subscriber Max Age` a wire before lite-07 carries: the demand's widest live
+	/// join's max, read before its span narrows.
+	max_age: Option<Duration>,
 }
 
 /// Opens the upstream SUBSCRIBE control stream: send the request, then (pre
@@ -11829,6 +11916,8 @@ struct Establish {
 	fill_groups: rangemap::RangeSet<u64>,
 	/// The ranges the SUBSCRIBE carries: the demand's, its probes, then the fills'.
 	ranges: Vec<lite::Range>,
+	/// See [`Request::max_age`].
+	max_age: Option<Duration>,
 	tail: kio::Producer<Tail>,
 	/// Its group streams stay parked once it is active; see [`SubStream::parked`].
 	parked: bool,
@@ -11856,7 +11945,7 @@ impl Establish {
 			broadcast: self.serve.path.clone(),
 			track: self.serve.name.as_str().into(),
 			priority: self.subscription.priority,
-			max_delay: self.subscription.max_age(),
+			max_delay: self.max_age,
 			ranges: self.ranges.clone(),
 			order: self.subscription.order,
 		};
@@ -11902,7 +11991,7 @@ impl Establish {
 			unanswered: (!answered).then(|| self.validity.clone()),
 			stream,
 			id: self.id,
-			max_delay: self.subscription.max_age(),
+			max_delay: self.max_age,
 			stale_budget: narrowest(&live),
 			start: self.subscription.start(),
 			live,
