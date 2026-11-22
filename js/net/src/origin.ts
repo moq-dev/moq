@@ -25,6 +25,7 @@ import {
 	Epochs,
 	firstEligible,
 	hiddenBelow,
+	holdsOnTie,
 	hooks,
 	mostSpecific,
 	routeHops,
@@ -377,7 +378,7 @@ function claimDepth(path: Path.Valid, route: WireRoute): number {
 
 /**
  * The preferred of `entries` (newest first, at `prefix`) for resolving `path`, not skipped
- * nor superseded: see {@link compareRouteCandidates}, then newest.
+ * nor superseded: see {@link compareRouteCandidates}, then {@link holdsOnTie}.
  */
 function preferredEntry(
 	path: Path.Valid,
@@ -403,9 +404,11 @@ function preferredEntry(
 			best = entry;
 			continue;
 		}
+		// Newest first, so an older entry replaces on a tie only where the tie holds the oldest.
 		const a = entry.route.peek();
 		const b = best.route.peek();
-		if (compareRouteCandidates(path, prefix, a, b) < 0) best = entry;
+		const order = compareRouteCandidates(path, prefix, a, b);
+		if (order < 0 || (order === 0 && holdsOnTie(path, prefix, a, b))) best = entry;
 	}
 	return best;
 }
