@@ -4820,26 +4820,27 @@ async fn recv_next(track: &mut track::Subscriber, emit_boundary: bool) -> Result
 }
 
 /// Bound `group` to what this subscription asked for, or `None` when it cannot be served
-/// at all.
+/// at all. Its read stops at the frame a range ends partway through it when `capped`, as
+/// lite-06 does; a lite-07 stream stops there itself, its read left free to see the group end.
 ///
 /// Frame bounds qualify the start and end group only; everything in between is served
 /// whole. A copy missing frames asked for reads them from upstream, as a cache only makes
 /// things faster. `None` means nothing upstream can supply them and the subscriber never
 /// asked for a partial group, so it must be skipped: a group is the unit of decodability,
 /// and only the subscriber knows whether a partial one is any use to it.
-fn position_group(group: group::Consumer, frames: &Frames) -> Option<group::Consumer> {
+fn position_group(group: group::Consumer, frames: &Frames, capped: bool) -> Option<group::Consumer> {
 	if group.start < frames.floor {
 		return None;
 	}
 	let expected = frames.start(group.start);
-	let end = frames.end(group.start).and_then(|last| last.checked_add(1));
+	let end = frames.end(group.start).filter(|_| capped);
 	group
 		.fetches_from(expected)
 		.then(|| group.with_end(end).fetching_from(expected))
 }
 
 /// The frame bounds of a subscription, which the model leaves to the publisher: it reads
-/// whole groups. Lite-06 bounds its one range's start and end; lite-07 only a range's start.
+/// whole groups.
 ///
 /// A frame bound qualifies the group its range starts or ends at, so everything in between
 /// is served whole.
@@ -4847,8 +4848,8 @@ fn position_group(group: group::Consumer, frames: &Frames) -> Option<group::Cons
 struct Frames {
 	/// Each group a range starts partway through, and the first frame it serves of it.
 	first: Vec<(u64, u64)>,
-	/// The group the range ends partway through, and the last frame it serves of it, inclusive.
-	last: Option<(u64, u64)>,
+	/// Each group a range ends partway through, and the frame it stops before, by group.
+	stops: Vec<(u64, u64)>,
 	/// The lowest group a legacy wire's start serves: its start names the first group at or
 	/// after it, where the model's time start includes the group containing it.
 	floor: u64,
@@ -4862,9 +4863,9 @@ impl Frames {
 			.map_or(0, |(_, first)| *first)
 	}
 
-	/// The last frame to serve of `group`, inclusive, or `None` for all of it.
+	/// The frame to stop `group` before, or `None` for all of it.
 	fn end(&self, group: u64) -> Option<u64> {
-		self.last.filter(|(at, _)| *at == group).map(|(_, last)| last)
+		end_of(&self.stops, group)
 	}
 }
 
@@ -4878,6 +4879,9 @@ struct Bounds {
 	/// that group and the first frame of it. [`Frames::first`] keeps those no other range
 	/// covers.
 	positions: std::collections::BTreeMap<u64, (u64, u64)>,
+	/// Each range ending partway through a group, by its index in `ranges`, with that group
+	/// and the frame it stops before. [`Frames::stops`] keeps those no other range covers.
+	stops: std::collections::BTreeMap<u64, (u64, u64)>,
 }
 
 impl Bounds {
@@ -4895,8 +4899,8 @@ impl Bounds {
 			ranges: Vec::with_capacity(ranges.len()),
 			frames: Frames::default(),
 			positions: Default::default(),
+			stops: Default::default(),
 		};
-		// Lite-06 bounds frames on its one range, and lite-07 only a range's start.
 		for range in ranges {
 			// Empty partway through a group, which whole groups can't say: keep its place,
 			// covering no group and narrowing no frame of one.
@@ -4919,22 +4923,23 @@ impl Bounds {
 				Some(lite::Anchor::Absolute(start)) if start.frame != 0 => Some((start.group, start.frame)),
 				_ => None,
 			};
+			let mut stop = None;
 			let end = match range.end {
 				None => None,
-				// A mid-group end includes its group, up to the frame before it.
-				Some(lite::Anchor::Absolute(end)) => match end.frame.checked_sub(1) {
-					Some(frame) => {
-						bounds.frames.last = Some((end.group, frame));
-						Some(end.group)
-					}
-					// An exclusive end at group 0 holds nothing, whatever the start.
-					None => match end.group.checked_sub(1) {
+				Some(lite::Anchor::Absolute(end)) => match end.frame {
+					0 => match end.group.checked_sub(1) {
 						Some(group) => Some(group),
+						// An exclusive end at group 0 holds nothing, whatever the start.
 						None => {
 							bounds.ranges.push(Range::EMPTY);
 							continue;
 						}
 					},
+					// A mid-group end includes its group, up to the frame before it.
+					frame => {
+						stop = Some((end.group, frame));
+						Some(end.group)
+					}
 				},
 				Some(lite::Anchor::Time(end)) => Some(end),
 				// Only a start may join live, which decoding enforces.
@@ -4943,16 +4948,23 @@ impl Bounds {
 					continue;
 				}
 			};
+			let range = Range { start, end };
 			// One ending before the group it starts partway through covers nothing, so it starts
-			// no group partway.
+			// no group partway, and an empty one stops none.
 			if let Some((group, frame)) = position
 				&& !matches!(end, Some(end) if end < group)
 			{
 				bounds.positions.insert(bounds.ranges.len() as u64, (group, frame));
 			}
-			bounds.ranges.push(Range { start, end });
+			if let Some(stop) = stop
+				&& !range.is_empty()
+			{
+				bounds.stops.insert(bounds.ranges.len() as u64, stop);
+			}
+			bounds.ranges.push(range);
 		}
 		bounds.frames.first = first_frames(bounds.positions.values(), &bounds.ranges);
+		bounds.frames.stops = stops(bounds.stops.values(), &bounds.ranges);
 		bounds
 	}
 
@@ -5001,6 +5013,23 @@ fn first_frames<'a>(
 		count - past - before <= 1
 	});
 	positions
+}
+
+/// The frame `group` stops before among `stops`, sorted by group, or `None` for all of it.
+fn end_of(stops: &[(u64, u64)], group: u64) -> Option<u64> {
+	let index = stops.binary_search_by_key(&group, |(at, _)| *at).ok()?;
+	Some(stops[index].1)
+}
+
+/// The frame ends of `stops` that apply among `ranges`, sorted by group: as for
+/// [`first_frames`], only a group no other range may cover stops partway through.
+fn stops<'a>(
+	stops: impl IntoIterator<Item = &'a (u64, u64)>,
+	ranges: impl IntoIterator<Item = &'a crate::track::Range>,
+) -> Vec<(u64, u64)> {
+	let mut stops = first_frames(stops, ranges);
+	stops.sort_unstable();
+	stops
 }
 
 /// A subscription's requested ranges in the model's whole groups, by Range ID, with the
@@ -5167,12 +5196,24 @@ struct GroupOutcomes {
 	dropped: Mutex<Vec<(Range<u64>, StreamError)>>,
 	/// The spans of the groups whose GROUP_END went out, which their stream accounts for.
 	whole: Mutex<Vec<Range<u64>>>,
+	/// Lite-07: the frame each group a range ends partway through stops before, by group
+	/// ([`Frames::stops`]), which a group already streaming follows as an update moves it.
+	stops: kio::Producer<Vec<(u64, u64)>>,
 }
 
 impl GroupOutcomes {
 	/// Record that the GROUP_END of the group at `key`, ending at `end`, went out.
 	fn whole(&self, key: u64, end: u64) {
 		self.whole.lock().unwrap().push(span(key, Some(end)));
+	}
+
+	/// Publish the frame ends `stops` to the groups streaming, waking them only when they move.
+	fn set_stops(&self, stops: &[(u64, u64)]) {
+		if self.stops.read().as_slice() != stops
+			&& let Ok(mut held) = self.stops.write()
+		{
+			*held = stops.to_vec();
+		}
 	}
 }
 
@@ -5221,7 +5262,7 @@ impl Subscription {
 			self.group_context(),
 			key,
 			frame_start,
-			false,
+			None,
 			Rank::Queue(priority),
 			group,
 		));
@@ -5290,6 +5331,9 @@ struct TrackRun {
 	/// Lite-07: each live range starting partway through a group, by Range ID, with that
 	/// group and its first frame, so an edit recomputes [`Frames::first`] from what is live.
 	positions: std::collections::BTreeMap<u64, (u64, u64)>,
+	/// Lite-07: each live range ending partway through a group, by Range ID, with that group
+	/// and the frame it stops before, so an edit recomputes [`Frames::stops`] from what is live.
+	stops: std::collections::BTreeMap<u64, (u64, u64)>,
 	/// The requested ranges in the model's whole groups, by Range ID, and what the read
 	/// cursor needs of them, kept current per edit.
 	requested: Requested,
@@ -5399,6 +5443,7 @@ impl TrackRun {
 		};
 		let bounded = bounds.ends(ctx.version);
 		let initial = bounds.ranges.len() as u64;
+		ctx.outcomes.set_stops(&bounds.frames.stops);
 
 		let mut unpinned = Unpinned::default();
 		if ctx.version.has_ranges() {
@@ -5414,6 +5459,7 @@ impl TrackRun {
 			requested: Requested::new((0..).zip(bounds.ranges.iter().copied())),
 			frames: bounds.frames,
 			positions: bounds.positions,
+			stops: bounds.stops,
 			refused: None,
 			ctx,
 			track,
@@ -5565,12 +5611,13 @@ impl TrackRun {
 		delay: crate::track::Delay,
 		order: Order,
 	) -> bool {
-		let mut positions = Vec::new();
+		let (mut positions, mut stopping) = (Vec::new(), Vec::new());
 		let added: Vec<(u64, crate::track::Range)> = added
 			.into_iter()
 			.map(|(id, range)| {
 				let bounds = Bounds::new(std::slice::from_ref(&range), false);
 				positions.extend(bounds.positions.values().map(|position| (id, *position)));
+				stopping.extend(bounds.stops.values().map(|stop| (id, *stop)));
 				(id, bounds.ranges[0])
 			})
 			.collect();
@@ -5600,10 +5647,12 @@ impl TrackRun {
 		for (id, range) in pins {
 			self.requested.insert(id, range);
 		}
-		// Retired and replaced ranges take their frame starts with them.
+		// Retired and replaced ranges take their frame bounds with them.
 		let had = !self.positions.is_empty();
+		let stopped = !self.stops.is_empty();
 		for id in retired.iter().chain(added.iter().map(|(id, _)| id)) {
 			self.positions.remove(id);
+			self.stops.remove(id);
 		}
 		for (id, range) in added {
 			self.requested.insert(id, range);
@@ -5614,8 +5663,13 @@ impl TrackRun {
 			}
 		}
 		self.positions.extend(positions);
+		self.stops.extend(stopping);
 		if had || !self.positions.is_empty() {
 			self.frames.first = first_frames(self.positions.values(), self.requested.ranges.values());
+		}
+		if stopped || !self.stops.is_empty() {
+			self.frames.stops = stops(self.stops.values(), self.requested.ranges.values());
+			self.ctx.outcomes.set_stops(&self.frames.stops);
 		}
 		moved
 	}
@@ -5697,8 +5751,12 @@ impl TrackRun {
 		self.positions = (bounds.positions.iter())
 			.map(|(index, position)| (ids[*index as usize], *position))
 			.collect();
+		self.stops = (bounds.stops.iter())
+			.map(|(index, stop)| (ids[*index as usize], *stop))
+			.collect();
 		self.requested = Requested::new(ids.into_iter().zip(bounds.ranges.iter().copied()));
 		self.frames = bounds.frames;
+		self.ctx.outcomes.set_stops(&self.frames.stops);
 		true
 	}
 
@@ -5922,7 +5980,7 @@ impl TrackRun {
 					if self.start.emits_range() && self.track.record_mut().told(key) {
 						return Poll::Ready(Ok(ControlFlow::Continue(())));
 					}
-					let Some(group) = position_group(group, &self.frames) else {
+					let Some(group) = position_group(group, &self.frames, !self.ctx.version.has_ranges()) else {
 						// Its head is gone with nothing upstream to fetch it from, and this
 						// subscriber didn't ask for a partial group. Skip it rather than open
 						// a stream that can only be reset; the next servable group resolves
@@ -6374,8 +6432,7 @@ impl TrackRun {
 	/// credit before the cursor hands out another.
 	fn open(&mut self, group: group::Consumer, frame_start: u64) {
 		let key = group.start;
-		// The stream stops at the end frame, before the group may end.
-		let capped = self.frames.end(key).is_some();
+		let end = self.frames.end(key);
 
 		// Use the latest steer for new groups so SUBSCRIBE_UPDATE applies to them too.
 		let steer = self.ctx.steer_current();
@@ -6397,7 +6454,7 @@ impl TrackRun {
 			self.ctx.group_context(),
 			key,
 			frame_start,
-			capped,
+			end,
 			rank,
 			group,
 		));
@@ -6716,6 +6773,34 @@ fn poll_given_up(group: &mut group::Consumer, waiter: &kio::Waiter) -> Option<Er
 	}
 }
 
+/// The frame group `key` stops before among `stops` once it moved from `end`, registering
+/// `waiter` until it does.
+fn poll_stop(
+	stops: &kio::Consumer<Vec<(u64, u64)>>,
+	key: u64,
+	end: Option<u64>,
+	waiter: &kio::Waiter,
+) -> Poll<Option<u64>> {
+	match stops.poll(waiter, |stops| match end_of(stops, key) {
+		moved if moved != end => Poll::Ready(moved),
+		_ => Poll::Pending,
+	}) {
+		Poll::Ready(Ok(end)) => Poll::Ready(end),
+		_ => Poll::Pending,
+	}
+}
+
+/// Whether a lite-07 stream of `group` stops before its next frame, `unsent` frames of the
+/// batch read behind the cursor: a range ends partway through the group at `end`, and the group
+/// runs past it, or may yet. One that finished at or before the end ends as usual.
+fn stopped(version: Version, end: Option<u64>, group: &group::Consumer, unsent: usize) -> bool {
+	let Some(end) = end.filter(|_| version.has_ranges()) else {
+		return false;
+	};
+	let next = group.index() - unsent as u64;
+	next >= end && group.settled_frames().is_none_or(|frames| frames as u64 > next)
+}
+
 /// Buffer GROUP_END once a lite-07 stream without the `ietf` extension's object records read
 /// `group` to the end of a finished group: a `Payload Length` of 0, then the group's
 /// exclusive end, counted from the highest timestamp `clock` carried. Returns the end when it
@@ -6750,8 +6835,13 @@ struct GroupServe {
 	group: group::Consumer,
 	key: u64,
 	frame_start: u64,
-	/// The stream stops at a subscription's end frame, so its FIN cannot end the group.
-	capped: bool,
+	/// The frame a range ending partway through the group stops it before, if any. Lite-06
+	/// keeps the one it opened with and FINs there, so its FIN cannot end the group. Lite-07
+	/// follows [`GroupOutcomes::stops`] and parks there with the stream open, for an update
+	/// that moves the end to send the rest on it.
+	end: Option<u64>,
+	/// Lite-07: the subscription's frame ends, followed while the stream serves.
+	stops: kio::Consumer<Vec<(u64, u64)>>,
 	/// The times the stream carried, which each FRAME's delta and GROUP_END count from.
 	clock: lite::Clock,
 	state: GroupState,
@@ -6811,7 +6901,14 @@ impl GroupServe {
 		clippy::too_many_arguments,
 		reason = "one group stream's header fields and how it is ranked, each from its own source"
 	)]
-	fn new(ctx: GroupContext, key: u64, frame_start: u64, capped: bool, rank: Rank, group: group::Consumer) -> Self {
+	fn new(
+		ctx: GroupContext,
+		key: u64,
+		frame_start: u64,
+		end: Option<u64>,
+		rank: Rank,
+		group: group::Consumer,
+	) -> Self {
 		// A lite-07 peer receives a compressed group as stored, others inflated.
 		let mut group = match ctx.version.has_compression() {
 			true => group.compressed(),
@@ -6819,6 +6916,7 @@ impl GroupServe {
 		};
 		let meter = group.delegate();
 		let clock = lite::Clock::new(ctx.version, key);
+		let stops = ctx.outcomes.stops.consume();
 		Self {
 			ctx,
 			rank,
@@ -6827,7 +6925,8 @@ impl GroupServe {
 			clock,
 			key,
 			frame_start,
-			capped,
+			end,
+			stops,
 			state: GroupState::Open,
 			budget: kio::coop::Budget::new(32),
 			meter,
@@ -6891,7 +6990,10 @@ impl GroupServe {
 		};
 		let header = writer.buffer(&lite::DataType::Group).and_then(|()| writer.buffer(&msg));
 		let records = match header {
-			Ok(()) => self.ctx.object_records.then(|| lite::ietf::Records::new(self.capped)),
+			// Only a cursor end FINs short of the group: a lite-07 stream parked at a Position
+			// end sends the rest once the end moves, or is reset.
+			Ok(()) => (self.ctx.object_records)
+				.then(|| lite::ietf::Records::new(!self.ctx.version.has_ranges() && self.end.is_some())),
 			Err(err) => {
 				// The header wrote nothing, so the group-stream reset has nothing to pin
 				// it to this subscription. The run loop reads the slot and resets the
@@ -6960,6 +7062,12 @@ impl GroupServe {
 						}
 					};
 					writer.set_priority(order);
+				}
+				// Lite-07: an update moved where a range ends partway through this group.
+				if self.ctx.version.has_ranges()
+					&& let Poll::Ready(end) = poll_stop(&self.stops, self.key, self.end, waiter)
+				{
+					self.end = end;
 				}
 			}
 
@@ -7032,6 +7140,25 @@ impl GroupServe {
 							} else if *ending == Ending::Whole {
 								// Everything flushed after the GROUP_END.
 								break 'serve Ok(());
+							} else if stopped(
+								self.ctx.version,
+								self.end,
+								&self.group,
+								batch.len().saturating_sub(*batch_pos),
+							) {
+								// Parked at a lite-07 Position end with the stream open, which holds
+								// its credit until an update moves the end, the group expires, or the
+								// subscription ends and resets it.
+								if let Some(err) = poll_given_up(&mut self.group, waiter) {
+									break 'serve Err(err);
+								}
+								// The end may have moved since the pass began, and its watch is
+								// registered only here then.
+								if let Poll::Ready(end) = poll_stop(&self.stops, self.key, self.end, waiter) {
+									self.end = end;
+									continue;
+								}
+								return Poll::Pending;
 							} else if *batch_pos < batch.len() {
 								let index = self.group.index() - batch.len() as u64 + *batch_pos as u64;
 								let batched = &mut batch[*batch_pos];
@@ -7268,7 +7395,7 @@ mod serve_group_test {
 		// Through frame 2 of group 5.
 		let capped = bounds(None, group(5, 3));
 		assert_eq!(capped.groups().end(), Some(6));
-		assert_eq!(capped.frames.end(5), Some(2));
+		assert_eq!(capped.frames.end(5), Some(3));
 
 		let started = bounds(group(5, 3), None);
 		assert_eq!((started.groups().start(), started.groups().end()), (Some(5), None));
@@ -7322,8 +7449,8 @@ mod serve_group_test {
 		);
 		let four = track.append_group(Timestamp::from_millis(4).unwrap()).unwrap();
 		let seven = track.append_group(Timestamp::from_millis(7).unwrap()).unwrap();
-		assert!(position_group(four.consume(), &legacy.frames).is_none());
-		assert!(position_group(seven.consume(), &legacy.frames).is_some());
+		assert!(position_group(four.consume(), &legacy.frames, true).is_none());
+		assert!(position_group(seven.consume(), &legacy.frames, true).is_some());
 	}
 
 	/// A range inside one group keeps both of its bounds there.
@@ -7337,7 +7464,7 @@ mod serve_group_test {
 			}],
 			false,
 		);
-		assert_eq!((inside.frames.start(5), inside.frames.end(5)), (2, Some(3)));
+		assert_eq!((inside.frames.start(5), inside.frames.end(5)), (2, Some(4)));
 		assert_eq!((inside.frames.start(4), inside.frames.end(6)), (0, None));
 	}
 
@@ -7445,19 +7572,19 @@ mod serve_group_test {
 		};
 
 		// Asked for whole groups, so the missing frames 0..5 make this unservable.
-		assert!(position_group(group.consume(), &Frames::default()).is_none());
+		assert!(position_group(group.consume(), &Frames::default(), true).is_none());
 
 		// Asked for exactly where it starts: servable, and positioned there.
-		let consumer = position_group(group.consume(), &starting(5)).unwrap();
+		let consumer = position_group(group.consume(), &starting(5), true).unwrap();
 		assert_eq!(consumer.index(), 5);
 
 		// Asked for an earlier frame than the group holds: still a hole, still skipped.
-		assert!(position_group(group.consume(), &starting(2)).is_none());
+		assert!(position_group(group.consume(), &starting(2), true).is_none());
 
 		// The offset belongs to the start group only; a later group is served whole.
 		let mut other = track.create_group(group::Info { start: 4 }).unwrap();
 		other.write_frame(other.key_time(), b"whole".to_vec()).unwrap();
-		let consumer = position_group(other.consume(), &starting(5)).unwrap();
+		let consumer = position_group(other.consume(), &starting(5), true).unwrap();
 		assert_eq!(consumer.index(), 0);
 	}
 
@@ -7475,11 +7602,11 @@ mod serve_group_test {
 		}
 		let group = group.finish().unwrap();
 		let ending = |group, frame| Frames {
-			last: Some((group, frame)),
+			stops: vec![(group, frame)],
 			..Frames::default()
 		};
 
-		let mut consumer = position_group(group.consume(), &ending(7, 1)).unwrap();
+		let mut consumer = position_group(group.consume(), &ending(7, 2), true).unwrap();
 		assert_eq!(
 			consumer.read_frame().now_or_never().unwrap().unwrap().unwrap().payload[0],
 			0
@@ -7494,7 +7621,7 @@ mod serve_group_test {
 		);
 
 		// A cap naming another group leaves this one uncapped.
-		let mut consumer = position_group(group.consume(), &ending(8, 1)).unwrap();
+		let mut consumer = position_group(group.consume(), &ending(8, 2), true).unwrap();
 		for i in 0..4u8 {
 			assert_eq!(
 				consumer.read_frame().now_or_never().unwrap().unwrap().unwrap().payload[0],
@@ -10341,6 +10468,213 @@ mod serve_group_test {
 		let tail = frames.windows(4).position(|w| w == b"tail").expect("the tail");
 		assert!(head < tail);
 		assert_eq!(drops(&mut writer, &log, version).await, []);
+	}
+
+	/// A lite-07 range ending at a Position stops its group there with the stream left open: an
+	/// update moving the end sends the rest on the same stream, one moving it lower stops a
+	/// stream already past it, and a group finishing at or before the end ends as usual.
+	#[kio::test]
+	async fn lite07_a_position_end_parks_the_group_until_an_update_moves_it() {
+		let at = |frame: Option<u64>| lite::Range {
+			start: Some(lite::Anchor::Time(0)),
+			end: frame.map(|frame| lite::Anchor::Absolute(track::Position::new(0, frame))),
+		};
+		// The group stream's bytes, whether it FINed, and whether it was reset.
+		let stream = |log: &Log| {
+			let (mut bytes, mut fin, mut reset) = (Vec::new(), false, false);
+			for (_, sent) in log.trail() {
+				match sent {
+					Sent::Write(write) => bytes.extend(write),
+					Sent::Finish => fin = true,
+					Sent::Reset(_) => reset = true,
+				}
+			}
+			(bytes, fin, reset)
+		};
+		let sent = |bytes: &[u8], frame: &[u8]| bytes.windows(frame.len()).any(|w| w == frame);
+
+		for initially in [Some(2), None] {
+			let track = track::Producer::new(
+				Arc::new(broadcast::Info::default()),
+				"test",
+				crate::track::Info::timed(),
+			);
+			let mut group = track.create_group(group::Info { start: 0 }).unwrap();
+			group
+				.write_frame(Timestamp::from_millis(0).unwrap(), b"aaaa".as_slice())
+				.unwrap();
+			let bounds = Bounds::new(&[at(initially)], false);
+			let subscriber = track.subscribe(
+				track::Subscription::default()
+					.with_delay(track::Delay::default().with_max(Duration::from_secs(3600)))
+					.with_ranges(bounds.ranges.iter().copied()),
+			);
+			let streams = Log::default();
+			let (run, mut writer, _log) = lite07_run(SinkSession::new(streams.clone()), subscriber);
+			let mut run = TrackRun::new(run.ctx, run.track, bounds, 0, run.steer_tx);
+			let drive = |run: &mut TrackRun, writer: &mut Writer<_, _>| {
+				while run.poll_step(writer, &kio::Waiter::noop()).is_ready() {}
+			};
+			drive(&mut run, &mut writer);
+			if initially.is_none() {
+				assert!(sent(&stream(&streams).0, b"aaaa"));
+				// Stopped before frame 2 while the stream is already open.
+				run.update(lite07_add(&run, &[], 1, &[at(Some(2))]));
+			}
+			group
+				.write_frame(Timestamp::from_millis(1).unwrap(), b"bbbb".as_slice())
+				.unwrap();
+			group
+				.write_frame(Timestamp::from_millis(2).unwrap(), b"cccc".as_slice())
+				.unwrap();
+			drive(&mut run, &mut writer);
+			let (bytes, fin, reset) = stream(&streams);
+			assert!(sent(&bytes, b"aaaa") && sent(&bytes, b"bbbb"), "{initially:?}");
+			assert!(!sent(&bytes, b"cccc"), "{initially:?}: nothing past the end");
+			assert!(!fin && !reset, "{initially:?}: parked with the stream open");
+
+			// Moved past the group, the rest goes out on the same stream.
+			let live = run.requested.ranges.keys().copied().max().unwrap() + 1;
+			run.update(lite07_add(&run, &[], live, &[at(None)]));
+			drive(&mut run, &mut writer);
+			assert!(sent(&stream(&streams).0, b"cccc"), "{initially:?}");
+			group
+				.write_frame(Timestamp::from_millis(3).unwrap(), b"dddd".as_slice())
+				.unwrap();
+			group.finish().unwrap();
+			drive(&mut run, &mut writer);
+			let (bytes, fin, reset) = stream(&streams);
+			assert!(sent(&bytes, b"dddd") && fin && !reset, "{initially:?}");
+			assert_eq!(group_headers(&streams, Version::Lite07), [0], "one stream");
+		}
+
+		// A group finishing at the end ends its stream as usual.
+		let track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let mut group = track.create_group(group::Info { start: 0 }).unwrap();
+		group
+			.write_frame(Timestamp::from_millis(0).unwrap(), b"aaaa".as_slice())
+			.unwrap();
+		group
+			.write_frame(Timestamp::from_millis(1).unwrap(), b"bbbb".as_slice())
+			.unwrap();
+		let bounds = Bounds::new(&[at(Some(2))], false);
+		let subscriber = track.subscribe(
+			track::Subscription::default()
+				.with_delay(track::Delay::default().with_max(Duration::from_secs(3600)))
+				.with_ranges(bounds.ranges.iter().copied()),
+		);
+		let streams = Log::default();
+		let (run, mut writer, _log) = lite07_run(SinkSession::new(streams.clone()), subscriber);
+		let mut run = TrackRun::new(run.ctx, run.track, bounds, 0, run.steer_tx);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert!(!stream(&streams).1, "open while the group may grow");
+		group.finish().unwrap();
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert!(stream(&streams).1, "FINed once the group ends at the end");
+
+		// A parked group that expires resets its stream.
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let mut group = track.create_group(group::Info { start: 0 }).unwrap();
+		group
+			.write_frame(Timestamp::from_millis(0).unwrap(), b"aaaa".as_slice())
+			.unwrap();
+		group
+			.write_frame(Timestamp::from_millis(1).unwrap(), b"bbbb".as_slice())
+			.unwrap();
+		let mut ranges = vec![at(Some(1))];
+		ranges.push(lite::Range {
+			start: Some(lite::Anchor::Time(1)),
+			end: None,
+		});
+		let bounds = Bounds::new(&ranges, false);
+		let subscriber = track.subscribe(
+			track::Subscription::default()
+				.with_delay(track::Delay::default().with_max(Duration::ZERO))
+				.with_ranges(bounds.ranges.iter().copied()),
+		);
+		let streams = Log::default();
+		let (run, mut writer, _log) = lite07_run(SinkSession::new(streams.clone()), subscriber);
+		let mut run = TrackRun::new(run.ctx, run.track, bounds, 0, run.steer_tx);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		let (bytes, fin, reset) = stream(&streams);
+		assert!(sent(&bytes, b"aaaa") && !sent(&bytes, b"bbbb") && !fin && !reset);
+		write_group(&mut track, 1, 1);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert!(
+			streams
+				.resets()
+				.contains(&Version::Lite07.encode_stream_code(&StreamError::Old))
+		);
+	}
+
+	/// A lite-07 stream parked at a Position end never FINs short of its group: it sends the
+	/// rest once the end moves, or is reset. So its Group State still promises END_OF_GROUP, and
+	/// the stream carries that record once the group finishes on it.
+	#[kio::test]
+	async fn lite07_a_position_end_keeps_the_end_of_group_record() {
+		let at = |frame: Option<u64>| lite::Range {
+			start: Some(lite::Anchor::Time(0)),
+			end: frame.map(|frame| lite::Anchor::Absolute(track::Position::new(0, frame))),
+		};
+		let track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let mut group = track.create_group(group::Info { start: 0 }).unwrap();
+		group
+			.set_wire(group::Wire {
+				sparse: false,
+				first_object: true,
+				first_id: 0,
+				extensions: false,
+				has_end: true,
+				fetchable: true,
+				last: None,
+			})
+			.unwrap();
+		for (millis, payload) in [(0, b"aaaa"), (1, b"bbbb"), (2, b"cccc")] {
+			group
+				.write_frame(Timestamp::from_millis(millis).unwrap(), payload.as_slice())
+				.unwrap();
+		}
+		let bounds = Bounds::new(&[at(Some(2))], false);
+		let subscriber = track.subscribe(
+			track::Subscription::default()
+				.with_delay(track::Delay::default().with_max(Duration::from_secs(3600)))
+				.with_ranges(bounds.ranges.iter().copied()),
+		);
+		let streams = Log::default();
+		let (mut run, mut writer, _log) = lite07_run(SinkSession::new(streams.clone()), subscriber);
+		run.ctx.object_records = true;
+		let mut run = TrackRun::new(run.ctx, run.track, bounds, 0, run.steer_tx);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+
+		let live = run.requested.ranges.keys().copied().max().unwrap() + 1;
+		run.update(lite07_add(&run, &[], live, &[at(None)]));
+		group
+			.set_end_object(crate::model::object::Fields {
+				id: 3,
+				properties: Default::default(),
+			})
+			.unwrap();
+		group.finish().unwrap();
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+
+		let (_, bytes) = group_stream(&streams, Version::Lite07, 0).expect("group 0 is served");
+		let state = bytes[0];
+		assert_ne!(state & 0x8, 0, "the Group State promises END_OF_GROUP: {bytes:?}");
+		// The END_OF_GROUP record, Object ID 3 after 2, follows the last frame with no properties.
+		let end = lite::ietf::encode_object(Some(2), 3, true).unwrap();
+		assert!(bytes.ends_with(&[end as u8, 0]), "{bytes:?}");
 	}
 
 	/// Group `key`'s Group Stream on `log`'s session, as its Frame Start and the bytes after
