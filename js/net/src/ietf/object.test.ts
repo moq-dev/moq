@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
-import { FrameTooLarge, StreamCode, Stream as StreamError } from "../error.ts";
+import { FrameTooLarge, ProtocolViolation, StreamCode, Stream as StreamError } from "../error.ts";
 import { Cursor, concat, encodeVarint, Reader, Writer } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import { MAX_FRAME_BYTES } from "../util/limits.ts";
 import { FetchHeader } from "./fetch.ts";
-import { decodeFetchObject, decodeGroupGap, encodeGroupGap, Frame, Group, objectTime } from "./object.ts";
+import { decodeFetchObject, decodeGroupGap, EndOfRange, encodeGroupGap, Frame, Group, objectTime } from "./object.ts";
 import { Version } from "./version.ts";
 
 const VERSION = Version.DRAFT_18;
@@ -142,5 +142,19 @@ test("a data stream's header goes out in one write, stream type included", async
 		expect(await fetch.u53()).toBe(FetchHeader.type);
 		expect((await FetchHeader.decode(fetch, version)).requestId).toBe(1_000_000n);
 		expect(await fetch.done()).toBe(true);
+	}
+});
+
+test("an End of Range decodes a 62-bit Object ID and refuses unknown flags", () => {
+	const cursor = (...values: (number | bigint)[]) => new Cursor(block(...values), VERSION);
+	const max = (1n << 62n) - 1n;
+	expect(decodeFetchObject(cursor(EndOfRange.NonExistent, max, max))).toEqual({
+		kind: "endOfRange",
+		reason: EndOfRange.NonExistent,
+		group: max,
+		object: max,
+	});
+	for (const flags of [0x80, 0x10d, 1n << 53n, max]) {
+		expect(() => decodeFetchObject(cursor(flags, 0, 0))).toThrow(ProtocolViolation);
 	}
 });

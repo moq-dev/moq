@@ -380,6 +380,10 @@ export class MockTransport implements WebTransport {
 	}
 
 	close(_closeInfo?: WebTransportCloseInfo): void {
+		// As a browser's does, so an unbounded reason fails here as it would there.
+		if (new TextEncoder().encode(_closeInfo?.reason ?? "").byteLength > 1024) {
+			throw new DOMException("close reason exceeds 1024 bytes", "SyntaxError");
+		}
 		const info = _closeInfo ?? { closeCode: 0, reason: "" };
 		this.#closeResolve(info);
 
