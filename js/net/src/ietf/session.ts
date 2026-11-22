@@ -1,4 +1,4 @@
-import { SessionError } from "../error.ts";
+import { closeReason, SessionError } from "../error.ts";
 import { type OpenOptions, Stream } from "../stream.ts";
 import { IetfSessionCode } from "./error.ts";
 import type { IetfVersion } from "./version.ts";
@@ -40,7 +40,7 @@ export class NativeSession implements Session {
 		try {
 			checkPeerRequestId(id, this.client);
 		} catch (err) {
-			if (err instanceof SessionError) this.#quic.close({ closeCode: err.code, reason: err.message });
+			if (err instanceof SessionError) this.#quic.close({ closeCode: err.code, reason: closeReason(err.message) });
 			throw err;
 		}
 	}
