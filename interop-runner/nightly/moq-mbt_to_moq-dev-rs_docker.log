@@ -4,11 +4,11 @@ Running interop tests...
   Relay:  moq-interop-relay:local
   Client: ghcr.io/ojii3/moq-mbt-interop-client:latest
   URL:    https://relay:4443
-time="2026-11-22T15:42:16Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-11-22T15:42:16Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-11-22T15:42:16Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-11-22T15:42:16Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
-time="2026-11-22T15:42:16Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
+time="2026-11-22T16:15:18Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-11-22T16:15:18Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-11-22T16:15:18Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-11-22T16:15:18Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
+time="2026-11-22T16:15:18Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
  Network runner-upstream_default Creating 
  Network runner-upstream_default Created 
  Container runner-upstream-relay-1 Creating 
@@ -19,12 +19,12 @@ Attaching to relay-1, test-client-1
  Container runner-upstream-relay-1 Starting 
  Container runner-upstream-relay-1 Started 
  Container runner-upstream-relay-1 Waiting 
-relay-1  | [2m2026-11-22T15:42:18.214306Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP receive buffer is smaller than requested; raise `net.core.rmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m1048576
-relay-1  | [2m2026-11-22T15:42:18.214326Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP send buffer is smaller than requested; raise `net.core.wmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m4194304
-relay-1  | [2m2026-11-22T15:42:18.215209Z[0m [32m INFO[0m [2mmoq_relay::cache[0m[2m:[0m cache governor enabled [3mcapacity[0m[2m=[0mNone [3mheadroom[0m[2m=[0m53687091
-relay-1  | [2m2026-11-22T15:42:18.215333Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m cluster initialized [3mhop_id[0m[2m=[0m3410909411906546
-relay-1  | [2m2026-11-22T15:42:18.215380Z[0m [32m INFO[0m [2mmoq_relay::relay[0m[2m:[0m listening [3maddr[0m[2m=[0m[::]:4443 [3mkind[0m[2m=[0m"quic"
-relay-1  | [2m2026-11-22T15:42:18.215514Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m no cluster peers configured; running standalone
+relay-1  | [2m2026-11-22T16:15:25.947149Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP receive buffer is smaller than requested; raise `net.core.rmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m1048576
+relay-1  | [2m2026-11-22T16:15:25.947167Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP send buffer is smaller than requested; raise `net.core.wmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m4194304
+relay-1  | [2m2026-11-22T16:15:25.947742Z[0m [32m INFO[0m [2mmoq_relay::cache[0m[2m:[0m cache governor enabled [3mcapacity[0m[2m=[0mNone [3mheadroom[0m[2m=[0m53687091
+relay-1  | [2m2026-11-22T16:15:25.947846Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m cluster initialized [3mhop_id[0m[2m=[0m1810003764530088
+relay-1  | [2m2026-11-22T16:15:25.947881Z[0m [32m INFO[0m [2mmoq_relay::relay[0m[2m:[0m listening [3maddr[0m[2m=[0m[::]:4443 [3mkind[0m[2m=[0m"quic"
+relay-1  | [2m2026-11-22T16:15:25.947976Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m no cluster peers configured; running standalone
  Container runner-upstream-relay-1 Healthy 
  Container runner-upstream-test-client-1 Starting 
 test-client-1  | Failure(src/cmd/track_probe/interop.mbt:134:5-134:76@OJII3/moq-mbt FAILED: the native interop client requires a moqt:// raw QUIC relay URL)
@@ -34,8 +34,8 @@ test-client-1  | Failure(src/cmd/track_probe/interop.mbt:134:5-134:76@OJII3/moq-
  Container runner-upstream-test-client-1 Stopping 
  Container runner-upstream-test-client-1 Stopped 
  Container runner-upstream-relay-1 Stopping 
-relay-1        | [2m2026-11-22T15:42:24.000210Z[0m [32m INFO[0m [2mmoq_relay::relay[0m[2m:[0m shutdown signal received; draining sessions (signal again to exit immediately) [3mwindow[0m[2m=[0m10s
-relay-1        | [2m2026-11-22T15:42:24.000245Z[0m [32m INFO[0m [2mmoq_relay::shutdown[0m[2m:[0m drain ended with every session gone; exiting [3melapsed[0m[2m=[0m1.513µs
+relay-1        | [2m2026-11-22T16:15:31.646339Z[0m [32m INFO[0m [2mmoq_relay::relay[0m[2m:[0m shutdown signal received; draining sessions (signal again to exit immediately) [3mwindow[0m[2m=[0m10s
+relay-1        | [2m2026-11-22T16:15:31.646365Z[0m [32m INFO[0m [2mmoq_relay::shutdown[0m[2m:[0m drain ended with every session gone; exiting [3melapsed[0m[2m=[0m741ns
  Container runner-upstream-relay-1 Stopped 
 [Krelay-1 exited with code 0
 
