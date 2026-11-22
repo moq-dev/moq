@@ -6,6 +6,10 @@ use std::time::Duration;
 
 use crate::Access;
 
+/// The shortest revalidate cadence: the wire writes whole seconds, so anything finer
+/// could round to the zero a relay would spin on.
+pub(crate) const MIN_REVALIDATE: Duration = Duration::from_secs(1);
+
 /// What a session may do, as the auth server answered.
 ///
 /// A 2xx carrying one of these admits; anything else refuses. A grant that names
@@ -145,9 +149,8 @@ impl Grant {
 		if self.revalidate.is_some() && self.expires.is_none() {
 			return Err(crate::Error::UnboundedRevalidate);
 		}
-		// A zero cadence would have the relay re-check in a tight loop.
-		if self.revalidate.is_some_and(|cadence| cadence.is_zero()) {
-			return Err(crate::Error::ZeroRevalidate);
+		if self.revalidate.is_some_and(|cadence| cadence < MIN_REVALIDATE) {
+			return Err(crate::Error::ShortRevalidate);
 		}
 		if let Some(tier) = &self.tier {
 			crate::tier::validate(tier)?;
@@ -184,13 +187,22 @@ mod tests {
 		}
 	}
 
-	/// A subsecond cadence writes as the nearest whole second, never the zero a relay refuses.
+	/// A cadence under a second is refused, so none writes as the zero the wire can't carry,
+	/// and a whole-second cadence round-trips exactly.
 	#[test]
-	fn a_subsecond_revalidate_writes_rounded() {
+	fn a_subsecond_revalidate_is_refused() {
 		let mut grant = full();
-		for (cadence, seconds) in [(750, 1), (1400, 1), (1600, 2)] {
+		for cadence in [0, 1, 400, 499, 500, 750, 999] {
 			grant.revalidate = Some(Duration::from_millis(cadence));
-			assert_eq!(serde_json::to_value(&grant).unwrap()["revalidate"], seconds);
+			assert!(
+				matches!(grant.validate(), Err(crate::Error::ShortRevalidate)),
+				"{cadence}ms"
+			);
+		}
+		for cadence in [1000, 1400, 1600] {
+			grant.revalidate = Some(Duration::from_millis(cadence));
+			grant.validate().unwrap();
+			assert!(serde_json::to_value(&grant).unwrap()["revalidate"].as_u64().unwrap() >= 1);
 		}
 	}
 
@@ -317,7 +329,7 @@ mod tests {
 
 		grant.expires = Some(now + Duration::from_secs(120));
 		grant.revalidate = Some(Duration::ZERO);
-		assert!(matches!(grant.validate(), Err(crate::Error::ZeroRevalidate)));
+		assert!(matches!(grant.validate(), Err(crate::Error::ShortRevalidate)));
 	}
 
 	#[test]

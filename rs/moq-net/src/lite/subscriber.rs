@@ -9273,7 +9273,7 @@ mod tests {
 	/// reprice on the same connection keeps it and updates in place.
 	#[kio::test]
 	async fn an_unnamed_publisher_stays_anonymous() {
-		let (mut subscriber, consumer) = restart_subscriber(SinkSession::new(Default::default()));
+		let (mut subscriber, consumer) = restart_subscriber(SinkSession::new(Default::default()), false);
 
 		let mut announced = Announced::default();
 		subscriber
@@ -9311,8 +9311,11 @@ mod tests {
 		assert_eq!(hops, vec![crate::Hop::UNKNOWN]);
 	}
 
-	pub(super) fn restart_subscriber(session: SinkSession) -> (Subscriber, crate::origin::Consumer) {
-		let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
+	/// A subscriber on a fresh origin, which forwards what it learned when `proxy`.
+	pub(super) fn restart_subscriber(session: SinkSession, proxy: bool) -> (Subscriber, crate::origin::Consumer) {
+		let mut config = origin::Config::new(std::num::NonZeroU64::new(1).unwrap());
+		config.proxy = proxy;
+		let origin = config.produce();
 		let consumer = origin.consume();
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),

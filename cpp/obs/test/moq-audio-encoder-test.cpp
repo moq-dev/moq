@@ -207,7 +207,7 @@ void CheckSubscriberDecodes(const char *preset, size_t channels)
 	auto broadcast = route->broadcast();
 
 	moq::AudioInit init{};
-	init.format = moq::AudioFormat::kOpus;
+	init.format = moq::AudioFormat::opus();
 	init.data = encoder.ExtraData();
 	auto track = TestOk(moq::MediaTrackProducer::audio(broadcast, moq::MediaTarget::kNamed{}, init), "audio track");
 

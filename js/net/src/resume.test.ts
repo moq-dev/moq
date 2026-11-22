@@ -1857,6 +1857,108 @@ test("a short group ends once no route holds more of it", async () => {
 	close();
 });
 
+// No route said the group ends at the frames already read. Mirrors the Rust test.
+test("a short close below the frames read fails the group", async () => {
+	const { a, b, swap, active, close } = await setup();
+	const ta = copy(a);
+	const tb = copy(b);
+	const sub = active.track("seq").subscribe({ delay: { max: Duration.millis(300_000) } });
+	const first = ta.write(0n, 2, false);
+	const group = sub.tryRecvGroup();
+	if (!group) throw new Error("expected group 0");
+	expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+	expect(dec.decode((await group.readFrame())?.payload)).toBe("0.1");
+	// The route replacing a holds one frame, then a fails and b closes the group there.
+	const second = tb.write(0n, 1, false);
+	await swap();
+	ta.producer.abort(new StreamError(StreamCode.SessionClosed));
+	second.finish();
+	await settle();
+	const err = await group.readFrame().then(
+		(frame) => frame,
+		(e: unknown) => e,
+	);
+	expect(err).toBeInstanceOf(Error);
+	expect(await group.closed).toBeInstanceOf(Error);
+	expect(first).toBeDefined();
+
+	sub.close();
+	close();
+});
+
+// A close below only frames a filtered read discarded ends it cleanly, as an empty range does.
+// Mirrors the Rust test.
+test("a short close below skipped frames ends the read", async () => {
+	const { a, b, swap, active, close } = await setup();
+	const ta = copy(a);
+	const tb = copy(b);
+	const sub = active.track("seq").subscribe({ delay: { max: Duration.millis(300_000) } });
+	const first = ta.write(0n, 2, false);
+	const group = sub.tryRecvGroup();
+	if (!group) throw new Error("expected group 0");
+	const reading = group.readFrameIndex({ from: 2 }).then(
+		(frame) => frame,
+		(e: unknown) => e,
+	);
+	expect(await isPending(reading)).toBe(true);
+	const second = tb.write(0n, 1, false);
+	await swap();
+	ta.producer.abort(new StreamError(StreamCode.SessionClosed));
+	await settle();
+	second.finish();
+	await settle();
+	expect(await reading).toBeUndefined();
+	expect(first).toBeDefined();
+
+	sub.close();
+	close();
+});
+
+// Fails with the verdict of the route that took over, as Rust does. Mirrors the Rust test.
+test("a short close below the frames read fails with the next route's verdict", async () => {
+	const { origin, a, b, swap, active, close } = await setup();
+	const ta = copy(a);
+	const tb = copy(b);
+	const sub = active.track("seq").subscribe({ delay: { max: Duration.millis(300_000) } });
+	const first = ta.write(0n, 2, false);
+	const group = sub.tryRecvGroup();
+	if (!group) throw new Error("expected group 0");
+	expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+	expect(dec.decode((await group.readFrame())?.payload)).toBe("0.1");
+	// The read moves onto b at frame 2 once a fails, and waits there.
+	const second = tb.write(0n, 1, false);
+	const disposeB = await swap();
+	ta.producer.abort(new StreamError(StreamCode.SessionClosed));
+	await settle();
+	const reading = group.readFrame().then(
+		(frame) => frame,
+		(e: unknown) => e,
+	);
+	expect(await isPending(reading)).toBe(true);
+	// c takes over before it holds the group, then b closes the group below that frame, and c
+	// gives it up.
+	const c = new BroadcastProducer();
+	const tc = copy(c);
+	const disposeC = serve(origin, c, 0n);
+	await settle();
+	await settle();
+	expect(await isPending(reading)).toBe(true);
+	second.finish();
+	await settle();
+	expect(await isPending(reading)).toBe(true);
+	hooks.dropTrackGroups(tc.producer, 0n, 1n, { error: new StreamError(StreamCode.DeliveryTimeout) });
+	await settle();
+	const err = await reading;
+	expect(toStreamCode(err)).toBe(StreamCode.DeliveryTimeout);
+	expect(toStreamCode(await group.closed)).toBe(StreamCode.DeliveryTimeout);
+	expect(first).toBeDefined();
+
+	sub.close();
+	disposeC();
+	disposeB();
+	close();
+});
+
 test("a short group ends as it closed while its copy still serves", async () => {
 	const { a, active, close } = await setup();
 	const ta = copy(a);
@@ -4270,32 +4372,117 @@ test("a switch backfills a group the replaced copy holds without its head", asyn
 	}
 });
 
-// The Rust reader drops the replaced copy instead (`a_switch_before_any_group_drops_the_replaced_copy`):
-// here it reads as the incumbent until the new route delivers, which bounds it.
-test("a switch before any group leaves the replaced copy uncapped as the incumbent", async () => {
+// Mirrors `a_switch_before_any_group_drops_the_replaced_copy` in rs/moq-net/src/model/resume.rs, once
+// the new route delivers: the Rust front splices a replacement only then.
+test("a switch before any group drops the replaced copy once the new route delivers", async () => {
 	const front = new Front();
 	const a = new BroadcastProducer();
 	const b = new BroadcastProducer();
 	const ta = copy(a);
 	const tb = copy(b);
+	// The old route's groups may land late.
+	hooks.receiveTrack(ta.producer);
 	front.serve(a.consume());
-	const sub = front.consumer.track("seq").subscribe();
+	// A budget long enough that the replaced copy's late group would still be read.
+	const sub = front.consumer.track("seq").subscribe({ delay: { max: Duration.millis(3_600_000) } });
 	try {
 		expect(drain(sub)).toEqual([]);
 		front.serve(b.consume());
-		expect(drain(sub)).toEqual([]);
 		await settle();
 		// Nothing held nor handed out: nothing to split, so the new route is asked as the reader was.
 		expect(tb.producer.subscription.peek()?.ranges?.[0]?.start).toBeUndefined();
-		expect(ta.producer.subscription.peek()?.ranges?.[0]?.end).toBeUndefined();
-		ta.write(0n);
-		tb.write(1n);
-		expect(drain(sub)).toEqual([0n, 1n]);
+		expect(ta.producer.subscription.peek()).toBeDefined();
+		tb.write(2n);
+		expect(sub.tryRecvGroup()?.start).toBe(2n);
+		// Landing after the new route delivered, the old route's group is not read: the Rust
+		// reader never held that copy past the splice.
+		ta.write(1n);
+		expect(drain(sub)).toEqual([]);
+		await settle();
+		expect(ta.producer.subscription.peek()).toBeUndefined();
 	} finally {
 		sub.close();
 		front.consumer.close();
 		a.close();
 		b.close();
+	}
+});
+
+// A switch keeps only the incumbent's copy: one whose route was replaced before it delivered goes
+// at once, as the Rust front never splices it.
+test("a switch before any group drops a replaced copy that never delivered", async () => {
+	const front = new Front();
+	const sources = [new BroadcastProducer(), new BroadcastProducer(), new BroadcastProducer()];
+	const [ta, tb, tc] = sources.map(copy);
+	front.serve(sources[0].consume());
+	const sub = front.consumer.track("seq").subscribe();
+	try {
+		front.serve(sources[1].consume());
+		await settle();
+		expect(tb.producer.subscription.peek()).toBeDefined();
+		front.serve(sources[2].consume());
+		await settle();
+		expect(tb.producer.subscription.peek()).toBeUndefined();
+		// The incumbent still serves until the new route delivers.
+		ta.write(0n);
+		await settle();
+		expect(drain(sub)).toEqual([0n]);
+		tc.write(1n);
+		expect(drain(sub)).toEqual([1n]);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		for (const source of sources) source.close();
+	}
+});
+
+// Parking between routes replaces the serving route with none: the copy that served stays until the
+// next route delivers, as the Rust front keeps reading it until the replacement splices.
+test("a switch before any group after a park keeps the parked copy until the new route delivers", async () => {
+	const front = new Front();
+	const sources = [new BroadcastProducer(), new BroadcastProducer()];
+	const [ta, tb] = sources.map(copy);
+	front.serve(sources[0].consume());
+	const sub = front.consumer.track("seq").subscribe();
+	try {
+		await settle();
+		front.park();
+		front.serve(sources[1].consume());
+		await settle();
+		ta.write(0n);
+		await settle();
+		expect(drain(sub)).toEqual([0n]);
+		tb.write(1n);
+		expect(drain(sub)).toEqual([1n]);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		for (const source of sources) source.close();
+	}
+});
+
+// A replacement after a park that fails before delivering leaves the parked copy serving.
+test("a replacement after a park that aborts before any group leaves the parked copy serving", async () => {
+	const front = new Front();
+	const sources = [new BroadcastProducer(), new BroadcastProducer()];
+	const [ta, tb] = sources.map(copy);
+	front.serve(sources[0].consume());
+	const sub = front.consumer.track("seq").subscribe();
+	try {
+		await settle();
+		front.park();
+		front.serve(sources[1].consume());
+		await settle();
+		tb.producer.abort(new StreamError(StreamCode(64)));
+		await settle();
+		expect(sub.closed.peek()).toBeUndefined();
+		ta.write(1n);
+		await settle();
+		expect(drain(sub)).toEqual([1n]);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		for (const source of sources) source.close();
 	}
 });
 
@@ -5362,6 +5549,132 @@ test("a clean end keeps the serving copy while a group read from a replaced one 
 		expect(dec.decode((await group.readFrame())?.payload)).toBe("1.1");
 		expect(await group.readFrame()).toBeUndefined();
 		group.close();
+	} finally {
+		sub.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+	}
+});
+
+// Once the track ended cleanly, a group still read whose route dies continues from the copy the
+// front serves next, and fails rather than waiting once the front concluded. Mirrors the Rust
+// `a_finished_tracks_fetch_moves_off_a_dying_route`, for a subscribed group.
+test.each([true, false])("an ended track's group moves off a dying route (rerouted: %p)", async (rerouted) => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	// The dying route fails the fetch of the rest too.
+	const failure = new StreamError(StreamCode.SessionClosed);
+	front.serve(counted(a, () => Promise.reject(failure)).route);
+	const sub = front.consumer.track("seq").subscribe({ delay: { max: Duration.millis(3_600_000) } });
+	try {
+		const open = ta.write(0n, 1, false);
+		const group = await sub.recvGroup();
+		if (group?.start !== 0n) throw new Error("expected group 0");
+		expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+		ta.producer.finish();
+		expect(await sub.recvGroup()).toBeUndefined();
+		expect(sub.closed.peek()).toBeNull();
+
+		// The route dies under the open group.
+		open.abort(failure);
+		const read = group.readFrame();
+		expect(await isPending(read)).toBe(true);
+		if (!rerouted) {
+			front.consumer.close();
+			expect(read).rejects.toBe(failure);
+			return;
+		}
+		tb.write(0n, 2);
+		front.serve(b.consume());
+		expect(dec.decode((await read)?.payload)).toBe("0.1");
+		expect(await group.readFrame()).toBeUndefined();
+		group.close();
+	} finally {
+		sub.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+	}
+});
+
+// A copy rerouted after the clean end that caches the rest of a failed group continues it, even once
+// the front concluded and the dying route can't fetch.
+test("an ended track's group continues from a rerouted copy's cache once the front concluded", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	const failure = new StreamError(StreamCode.SessionClosed);
+	front.serve(counted(a, () => Promise.reject(failure)).route);
+	const sub = front.consumer.track("seq").subscribe({ delay: { max: Duration.millis(3_600_000) } });
+	try {
+		// Its frame stays unread, so the group never stalls onto the rerouted copy.
+		const open = ta.write(0n, 1, false);
+		const group = await sub.recvGroup();
+		if (group?.start !== 0n) throw new Error("expected group 0");
+		ta.producer.finish();
+		expect(await sub.recvGroup()).toBeUndefined();
+
+		tb.write(0n, 2);
+		front.serve(counted(b, () => Promise.reject(failure)).route);
+		await settle();
+		front.consumer.close();
+		await settle();
+		open.abort(failure);
+		expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+		expect(dec.decode((await group.readFrame())?.payload)).toBe("0.1");
+		expect(await group.readFrame()).toBeUndefined();
+		group.close();
+	} finally {
+		sub.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+	}
+});
+
+// The copy a front serves after the clean end only continues the groups still read: it hands out
+// nothing, not even a group below the end the reader never got. Mirrors the Rust
+// `a_reader_stays_on_the_copy_its_track_finished_on`.
+test("an ended track's reader hands out nothing from the copy served after the end", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	const failure = new StreamError(StreamCode.SessionClosed);
+	front.serve(counted(a, () => Promise.reject(failure)).route);
+	const sub = front.consumer.track("seq").subscribe({ delay: { max: Duration.millis(3_600_000) } });
+	try {
+		const open = ta.write(1n, 1, false);
+		ta.write(3n);
+		const group = await sub.recvGroup();
+		if (group?.start !== 1n) throw new Error("expected group 1");
+		expect(drain(sub)).toEqual([3n]);
+		ta.producer.finish();
+		expect(await sub.recvGroup()).toBeUndefined();
+
+		// The copy served next holds group 2, which the copy the track ended on never had.
+		tb.write(1n, 2);
+		tb.write(2n);
+		tb.write(3n);
+		front.serve(b.consume());
+		await settle();
+		expect(drain(sub)).toEqual([]);
+		expect(sub.closed.peek()).toBeNull();
+
+		// It still continues the group read once its route dies.
+		expect(dec.decode((await group.readFrame())?.payload)).toBe("1.0");
+		open.abort(failure);
+		expect(dec.decode((await group.readFrame())?.payload)).toBe("1.1");
+		expect(await group.readFrame()).toBeUndefined();
+		group.close();
+		expect(drain(sub)).toEqual([]);
 	} finally {
 		sub.close();
 		front.consumer.close();

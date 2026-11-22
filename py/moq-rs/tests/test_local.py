@@ -189,7 +189,7 @@ def test_error_str_is_rust_display():
 def test_publish_media_lifecycle():
     broadcast = moq.BroadcastProducer()
     media = moq.media.TrackProducer.audio(
-        broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.OPUS, data=opus_head())
+        broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.opus(), data=opus_head())
     )
     media.write_frame(b"opus frame", moq.Timestamp(1000, 1_000_000))
     media.finish()
@@ -204,7 +204,7 @@ def test_publish_media_cut_and_seek():
     """
     broadcast = moq.BroadcastProducer()
     media = moq.media.TrackProducer.audio(
-        broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.OPUS, data=opus_head())
+        broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.opus(), data=opus_head())
     )
 
     for i in range(3):
@@ -235,7 +235,7 @@ def test_audio_rejects_bad_init_bytes():
     # init bytes that aren't an OpusHead, which must fail at publish rather than on a frame.
     broadcast = moq.BroadcastProducer()
     with pytest.raises(Exception):
-        moq.media.TrackProducer.audio(broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.OPUS, data=b""))
+        moq.media.TrackProducer.audio(broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.opus(), data=b""))
 
 
 async def test_local_publish_consume_audio():
@@ -243,7 +243,7 @@ async def test_local_publish_consume_audio():
     route = origin.route("live")
     broadcast = route.broadcast
     media = moq.media.TrackProducer.audio(
-        broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.OPUS, data=opus_head())
+        broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.opus(), data=opus_head())
     )
 
     consumer = origin.consume()
@@ -282,7 +282,7 @@ async def test_video_publish_consume():
     route = origin.route("video-test")
     broadcast = route.broadcast
     media = moq.media.TrackProducer.video(
-        broadcast, moq.media.VideoInit(format=moq.media.VideoFormat.H264, data=h264_init())
+        broadcast, moq.media.VideoInit(format=moq.media.VideoFormat.h264(), data=h264_init())
     )
 
     consumer = origin.consume()
@@ -321,7 +321,7 @@ async def test_video_publish_named_track():
     broadcast = route.broadcast
     media = moq.media.TrackProducer.video(
         broadcast,
-        moq.media.VideoInit(format=moq.media.VideoFormat.H264, data=h264_init()),
+        moq.media.VideoInit(format=moq.media.VideoFormat.h264(), data=h264_init()),
         target=moq.media.Named("hd"),
     )
     assert media.demand().name == "hd"
@@ -340,7 +340,7 @@ async def test_multiple_frames_ordering():
     route = origin.route("ordering-test")
     broadcast = route.broadcast
     media = moq.media.TrackProducer.audio(
-        broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.OPUS, data=opus_head())
+        broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.opus(), data=opus_head())
     )
 
     consumer = origin.consume()
@@ -371,7 +371,7 @@ async def test_catalog_update_on_new_track():
     route = origin.route("catalog-update")
     broadcast = route.broadcast
     _media1 = moq.media.TrackProducer.audio(
-        broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.OPUS, data=opus_head())
+        broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.opus(), data=opus_head())
     )
 
     consumer = origin.consume()
@@ -386,7 +386,7 @@ async def test_catalog_update_on_new_track():
 
         # Add a second audio track, which triggers a catalog update.
         _media2 = moq.media.TrackProducer.audio(
-            broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.OPUS, data=opus_head())
+            broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.opus(), data=opus_head())
         )
 
         catalog2 = await anext(cat_consumer)
@@ -422,14 +422,14 @@ async def test_holding_catalog_reader_reads_every_update_within_its_delay():
 def test_close_twice_is_a_noop():
     broadcast = moq.BroadcastProducer()
     _media = moq.media.TrackProducer.audio(
-        broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.OPUS, data=opus_head())
+        broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.opus(), data=opus_head())
     )
     broadcast.close()
     broadcast.close()
 
     with pytest.raises(Exception):
         moq.media.TrackProducer.audio(
-            broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.OPUS, data=opus_head())
+            broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.opus(), data=opus_head())
         )
 
 
@@ -942,7 +942,7 @@ async def test_dynamic_track_request_can_publish_media():
 
     media = moq.media.TrackProducer.audio(
         broadcast,
-        moq.media.AudioInit(format=moq.media.AudioFormat.OPUS, data=opus_head()),
+        moq.media.AudioInit(format=moq.media.AudioFormat.opus(), data=opus_head()),
         target=moq.media.Requested(track),
     )
     assert media.demand().name == "requested-audio"
@@ -1174,7 +1174,7 @@ async def test_container_consumer_default_latency_and_context_manager():
     route = origin.route("live")
     broadcast = route.broadcast
     media = moq.media.TrackProducer.audio(
-        broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.OPUS, data=opus_head())
+        broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.opus(), data=opus_head())
     )
 
     consumer = origin.consume()
@@ -1723,7 +1723,7 @@ def test_video_encoder_submits_and_receives():
     """The codec-only video encoder takes pictures and hands back access units one at a time."""
     encoder = moq.video.Encoder(
         moq.video.EncoderInput(
-            format=moq.video.PixelFormat.I420,
+            format=moq.video.PixelFormat.i420(),
             width=64,
             height=48,
             framerate=moq.video.FrameRate(numerator=30, denominator=1),
@@ -1756,7 +1756,7 @@ def test_audio_encoder_frame_init_and_bitrate():
     encoder = moq.audio.Encoder(output)
     assert encoder.frame_size == 480
     init = encoder.track_init()
-    assert init.format == moq.media.AudioFormat.OPUS
+    assert init.format == moq.media.AudioFormat.opus()
     assert init.data[:8] == b"OpusHead"
     encoder.set_bitrate(32_000)
     encoder.encode([0.0] * encoder.frame_size)
@@ -1776,7 +1776,7 @@ def test_video_namespace_names_its_configuration_types():
     )
     assert output.codec is codec
     assert isinstance(codec, moq.VideoCodec)
-    assert moq.video.PixelFormat.RGBA == moq.VideoPixelFormat.RGBA
+    assert moq.video.PixelFormat.rgba() == moq.VideoPixelFormat.rgba()
 
 
 def test_encode_audio_with_opus_object():
@@ -1862,7 +1862,7 @@ async def test_decode_video_frame():
     video = moq.video.Producer(
         moq.media.CatalogProducer(broadcast),
         moq.VideoEncoderInput(
-            format=moq.VideoPixelFormat.RGBA,
+            format=moq.VideoPixelFormat.rgba(),
             width=320,
             height=240,
             framerate=moq.video.FrameRate(numerator=30000, denominator=1001),
@@ -1901,11 +1901,11 @@ async def test_decode_video_frame():
     assert frame.timestamp().scale == 1_000_000
     assert frame.surface() is None
 
-    i420 = frame.pixels(moq.VideoPixelFormat.I420)
+    i420 = frame.pixels(moq.VideoPixelFormat.i420())
 
     assert len(i420) == frame.width() * frame.height() * 3 // 2
 
-    packed = frame.pixels(moq.VideoPixelFormat.RGBA)
+    packed = frame.pixels(moq.VideoPixelFormat.rgba())
     assert len(packed) == frame.width() * frame.height() * 4
     assert all(packed[i] == 0xFF for i in range(3, len(packed), 4)), "RGBA output should be opaque"
 
@@ -2112,7 +2112,7 @@ def test_container_timebase_belongs_to_one_broadcast():
     timebase = moq.media.Timebase(owner)
     with pytest.raises(moq.Error.Codec, match="another broadcast"):
         moq.media.ContainerProducer(
-            other, moq.media.ContainerInit(moq.media.ContainerFormat.FMP4, b"", timebase=timebase)
+            other, moq.media.ContainerInit(moq.media.ContainerFormat.fmp4(), b"", timebase=timebase)
         )
     owner.close()
     with pytest.raises(moq.Error.Closed):

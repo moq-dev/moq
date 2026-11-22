@@ -25,7 +25,6 @@ import * as Instance from "./instance.ts";
 import { hooks } from "./internal.ts";
 import { type Consumer as OriginConsumer, Producer as OriginProducer, type Requesting } from "./origin.ts";
 import * as Path from "./path.ts";
-import { routeFailed } from "./resume.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import type * as track from "./track.ts";
 import { overrideBroadcastWire, wireOf } from "./wire.ts";
@@ -263,6 +262,11 @@ class Publisher {
 
 	live(): Copy[] {
 		return this.routes.filter((copy) => copy !== undefined);
+	}
+
+	/** The route the front serves: the cheapest live one. */
+	serving(): Copy | undefined {
+		return this.live().at(-1);
 	}
 
 	newest(): number | undefined {
@@ -834,7 +838,8 @@ class Model {
 			if (!frame) {
 				// Short of whole only where a route closed it, and, unless the budget gave up or the
 				// group may have expired, only while a route that closed it lives: one whose route
-				// failed reads on from the route replacing it.
+				// failed reads on from the route replacing it, unless that route gave the group up, so
+				// nothing continues it.
 				const instance = this.instances[reader.instance];
 				const whole = reading.frames === frames(key) && instance.complete.has(key);
 				if (!whole && !instance.short.has(`${key}:${reading.frames}`)) {
@@ -844,7 +849,8 @@ class Model {
 					reader.spec.budget === "hour" &&
 					!reader.doomed &&
 					(instance.expired === undefined || key > instance.expired) &&
-					!instance.live().some((copy) => closed(copy, key, reading.frames))
+					!instance.live().some((copy) => closed(copy, key, reading.frames)) &&
+					!instance.serving()?.givenUp.has(key)
 				) {
 					this.failure ??= fail(
 						index,
@@ -987,8 +993,6 @@ class Model {
 				// or from the route it would continue from.
 				const gone = reading.end instanceof TooFarBehind || reading.end instanceof NotFound;
 				if (gone && instance.expired !== undefined && key <= instance.expired) continue;
-				// Unlike Rust, an ended JS reader follows no route, so a route failure ends a group still read.
-				if (ended && reading.end instanceof Error && routeFailed(reading.end)) continue;
 				problems += `group ${key} stopped at frame ${reading.frames} (${reading.end}); `;
 			}
 		}
@@ -1568,6 +1572,107 @@ test("regressions", async () => {
 				{ kind: "down", instance: 0, slot: 2 },
 				{ kind: "ranges", reader: 3, range: undefined },
 				{ kind: "write", instance: 0, slot: 0, group: 0, frames: 1 },
+			],
+			finish: false,
+		},
+		// A group read past where the serving copy then closes it short cannot end cleanly there: no
+		// route said it ends at the frames read. Mirrors the Rust case.
+		{
+			ops: [
+				{ kind: "join", reader: 0, spec: spec(false, "hour", undefined, false) },
+				{ kind: "write", instance: 0, slot: 0, group: 5, frames: 2 },
+				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "write", instance: 0, slot: 1, group: 5, frames: 1 },
+				{ kind: "down", instance: 0, slot: 0 },
+				{ kind: "close", instance: 0, slot: 1, group: undefined, down: false },
+			],
+			finish: false,
+		},
+		// A short close from a route that failed stands once the route replacing it gave the group up,
+		// so nothing continues it. Mirrors the Rust case.
+		{
+			ops: [
+				{ kind: "up", instance: 0, slot: 2 },
+				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "giveUp", instance: 0, slot: 1, group: 5 },
+				{ kind: "join", reader: 0, spec: spec(false, "hour", undefined, false) },
+				{ kind: "write", instance: 0, slot: 2, group: 5, frames: 1 },
+				{ kind: "close", instance: 0, slot: 2, group: undefined, down: true },
+			],
+			finish: false,
+		},
+		// A received route places a time start at the newest group it holds at or before it, so the
+		// group holding it is handed out before a switch, not placed later at the time's own key.
+		{
+			ops: [
+				{ kind: "join", reader: 0, spec: spec(false, "hour", undefined, false) },
+				{ kind: "ranges", reader: 0, range: [1, 2] },
+				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "up", instance: 0, slot: 2 },
+				{ kind: "down", instance: 0, slot: 2 },
+				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+			],
+			finish: false,
+		},
+		// The same with the switch's route closing the group as it fails.
+		{
+			ops: [
+				{ kind: "up", instance: 1, slot: 0 },
+				{ kind: "join", reader: 0, spec: spec(false, "hour", [1, 2], false) },
+				{ kind: "write", instance: 1, slot: 0, group: undefined, frames: 1 },
+				{ kind: "up", instance: 1, slot: 1 },
+				{ kind: "close", instance: 1, slot: 1, group: 0, down: true },
+				{ kind: "up", instance: 0, slot: 0 },
+			],
+			finish: false,
+		},
+		// A route's give-up outlives an expiry, as a Rust route's does, so an ordered read joining
+		// after it is not held on the group given up.
+		{
+			ops: [
+				{ kind: "join", reader: 0, spec: spec(false, "short", [2, 3], false) },
+				{ kind: "giveUp", instance: 0, slot: 0, group: 1 },
+				{ kind: "expire" },
+				{ kind: "join", reader: 1, spec: spec(true, "hour", undefined, false) },
+				{ kind: "advance", ms: 1 },
+			],
+			finish: false,
+		},
+		// An ordered read waiting below a group its route then closes short and fails takes that
+		// group from the failed copy, still buffered for it, and reads on from the next route.
+		{
+			ops: [
+				{ kind: "up", instance: 1, slot: 1 },
+				{ kind: "up", instance: 1, slot: 0 },
+				{ kind: "join", reader: 0, spec: spec(true, "hour", [0, 5], false) },
+				{ kind: "write", instance: 1, slot: 1, group: 4, frames: 1 },
+				{ kind: "close", instance: 1, slot: 1, group: undefined, down: true },
+			],
+			finish: false,
+		},
+		// Once the track ended, a group still read that its route closes short and then fails
+		// continues from the copy the front serves next, as the Rust front's reader does.
+		{
+			ops: [
+				{ kind: "write", instance: 0, slot: 0, group: 11, frames: 1 },
+				{ kind: "end", instance: 0, slot: 0 },
+				{ kind: "join", reader: 0, spec: spec(false, "hour", undefined, false) },
+				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "close", instance: 0, slot: 0, group: undefined, down: true },
+				{ kind: "up", instance: 0, slot: 0 },
+			],
+			finish: false,
+		},
+		// The same once a route that closed the group short ends the track and then fails.
+		{
+			ops: [
+				{ kind: "up", instance: 1, slot: 2 },
+				{ kind: "up", instance: 1, slot: 0 },
+				{ kind: "write", instance: 1, slot: 2, group: 11, frames: 1 },
+				{ kind: "join", reader: 0, spec: spec(true, "hour", [5, 12], false) },
+				{ kind: "close", instance: 1, slot: 2, group: undefined, down: false },
+				{ kind: "end", instance: 1, slot: 2 },
+				{ kind: "down", instance: 1, slot: 2 },
 			],
 			finish: false,
 		},

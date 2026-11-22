@@ -37,11 +37,12 @@
  * serves it later.
  *
  * The logical track ends cleanly once its serving copy does and no group the reader lacks may
- * still land below that end on a copy it replaced. Its `closed` settles and the reader leaves the
- * route, keeping each copy only while it holds something left to read, as a direct reader keeps
- * its buffer. Its end is the first one any copy declared, which a later mid-group end may refine;
- * a copy declaring another breaks the track's identity, which hurts only its own broadcast, so
- * nothing checks that copies agree.
+ * still land below that end on a copy it replaced. Its `closed` settles, and the reader keeps each
+ * copy only while it holds something left to read, as a direct reader keeps its buffer. It follows
+ * the route only for the groups still read, so one whose route dies continues from the copy served
+ * next, and leaves it once it holds nothing left to read. Its end is the first one any copy
+ * declared, which a later mid-group end may refine; a copy declaring another breaks the track's
+ * identity, which hurts only its own broadcast, so nothing checks that copies agree.
  *
  * @module
  */
@@ -279,11 +280,14 @@ class Route {
 		return true;
 	}
 
-	/** Between routes: readers wait for the next one, keeping what they have. */
+	/**
+	 * Between routes: readers wait for the next one, keeping what they have. The source that served
+	 * stays the incumbent until a later one delivers, as a replacement's would.
+	 */
 	park(): void {
 		if (!this.source) return;
 		this.generation++;
-		this.#hold(undefined);
+		if (!this.incumbent) this.#hold(this.source);
 		this.source = undefined;
 		this.#bump();
 	}
@@ -491,9 +495,16 @@ class Reader implements ResumeSource {
 	#closed = false;
 	/**
 	 * Set once the logical track ended cleanly: the reader drains what its copies hold and follows
-	 * no route. Holds the serving copy's largest then, kept once that copy goes.
+	 * the route only for the groups still read; see {@link #rerouted}. Holds the serving copy's
+	 * largest then, kept once that copy goes.
 	 */
 	#ended?: { largest?: track.Position; object?: track.Position; ended: true };
+	/**
+	 * Copies of the routes served after the track ended, newest last, subscribed only while a group
+	 * handed out is still read: they continue it off a route that dies, and hand out nothing.
+	 * Mirrors the Rust `Phase::Finished { routed }`.
+	 */
+	#rerouted: Copy[] = [];
 	/**
 	 * The first end any copy declared: the logical track's, whichever copy serves. A copy declaring
 	 * another breaks the track's identity, which hurts only its own broadcast, so nothing checks that
@@ -574,7 +585,10 @@ class Reader implements ResumeSource {
 	sync(): void {
 		if (this.#closed) return;
 		this.#follow();
-		if (this.#ended) return;
+		if (this.#ended) {
+			this.#reroute();
+			return;
+		}
 		const route = this.route;
 		if (this.#generation === route.generation) return;
 		this.#generation = route.generation;
@@ -597,14 +611,20 @@ class Reader implements ResumeSource {
 			(copy) => copy.source.from.closed === source.from.closed && !(copy.sub.closed.peek() instanceof Error),
 		);
 		const [returning] = index === -1 ? [] : this.#copies.splice(index, 1);
-		for (const copy of this.#copies) {
-			copy.replaced = true;
-			// Nothing held nor handed out: nothing to split. Asked for nothing, a copy's subscription
-			// would end with the track, and a fetch then landing a later group would read as the
-			// whole of it. Left uncapped, it reads as an incumbent until the new copy delivers (see
-			// #joinIncumbent and #observe), where the Rust reader lets it go at once, until
-			// quest/m1/switch-no-boundary-parity.md aligns them.
-			if (boundary !== undefined) this.#cap(copy, boundary);
+		if (boundary !== undefined) {
+			for (const copy of this.#copies) {
+				copy.replaced = true;
+				this.#cap(copy, boundary);
+			}
+		} else {
+			// Nothing held nor handed out: nothing to split, so the new copy serves it all. Kept and
+			// asked for nothing, a copy's subscription would end with the track, and a fetch then
+			// landing a later group would read as the whole of it. Only the incumbent's copy stays,
+			// uncapped until the new copy delivers (see #observe), as the Rust front splices a
+			// replacement only then; the rest go, as the Rust `Reader::sync` drops them.
+			const incumbent = route.incumbent;
+			this.#dropCopies((copy) => copy.source.from.closed !== incumbent?.from.closed);
+			for (const copy of this.#copies) copy.replaced = true;
 		}
 		if (returning) {
 			const copy = returning;
@@ -651,7 +671,7 @@ class Reader implements ResumeSource {
 		const incumbent = route.incumbent;
 		if (!incumbent || serving.source !== route.source) return;
 		if (hooks.latestKey(serving.sub) !== undefined) {
-			route.delivered(serving.source);
+			this.#delivering(serving);
 			return;
 		}
 		if (this.#copies.some((copy) => copy.source.from.closed === incumbent.from.closed)) return;
@@ -670,10 +690,53 @@ class Reader implements ResumeSource {
 	}
 
 	/**
+	 * Once the track ended, subscribe the serving route's copy for the groups still read, from the
+	 * lowest, should the route have moved past the copies the reader holds: their recoveries
+	 * continue there. Nothing is handed out from it, so the reader stays on the copy the track
+	 * ended on.
+	 */
+	#reroute(): void {
+		const route = this.route;
+		const source = route.source;
+		if (source && this.out.size > 0 && !this.copy(route.generation)) {
+			let floor: bigint | undefined;
+			for (const recover of this.out) floor = min(floor ?? recover.key, recover.key);
+			const asked: Pick<Copy, "floor" | "from" | "resolved"> = { floor };
+			const copy: Copy = {
+				generation: route.generation,
+				source,
+				sub: subscribe(source.wire, route.name, this.#wire(asked)),
+				...asked,
+				replaced: false,
+				lease: 0,
+			};
+			source.retain();
+			this.#bound(copy);
+			this.#rerouted.push(copy);
+		}
+		this.#unroute();
+	}
+
+	/**
+	 * Let go of the rerouted copies no group still read needs: each one a newer route superseded,
+	 * and every one once none is read. Once the ended reader holds nothing left to hand out either,
+	 * it leaves the route.
+	 */
+	#unroute(): void {
+		if (!this.#ended) return;
+		const newest = this.out.size > 0 ? this.#rerouted.at(-1) : undefined;
+		this.#rerouted = this.#rerouted.filter((copy) => {
+			if (copy === newest || copy.lease > 0) return true;
+			this.#drop(copy);
+			return false;
+		});
+		if (this.out.size === 0 && this.#copies.length === 0) this.route.leave(this);
+	}
+
+	/**
 	 * Where a switch splits the subscription: the largest group any copy holds, never below the
 	 * newest handed out. `undefined` while neither exists, when the new copy is asked for the ranges
-	 * as the copies it replaces were, and they are left uncapped. Mirrors the Rust
-	 * `Reader::boundary`.
+	 * as the copies it replaces were, and they go. Mirrors the Rust `Reader::boundary`.
 	 */
 	#boundary(): bigint | undefined {
 		let boundary = this.#newest;
@@ -929,7 +992,7 @@ class Reader implements ResumeSource {
 			this.#mirrored = subscription;
 			// New preferences may ask what a backfill failed to get.
 			this.#refused = undefined;
-			for (const copy of this.#copies) this.#update(copy);
+			for (const copy of [...this.#copies, ...this.#rerouted]) this.#update(copy);
 			// A copy just resolved replaced ranges against its cache, before its failover cap raised
 			// them, so the reader takes that resolution now, the newest copy's first.
 			const ranges = this.#ranges();
@@ -950,7 +1013,7 @@ class Reader implements ResumeSource {
 		if (cursor === this.#bounded) return;
 		const passed = this.#bounded.start;
 		this.#bounded = cursor;
-		for (const copy of this.#copies) this.#bound(copy);
+		for (const copy of [...this.#copies, ...this.#rerouted]) this.#bound(copy);
 		if (cursor.start < passed) this.#backfill(cursor.start, passed);
 		if (this.#ended) this.#letGo(this.#delivered);
 	}
@@ -1139,16 +1202,24 @@ class Reader implements ResumeSource {
 		);
 	}
 
-	/** The reader's copy of the route at `generation`, if it subscribed one, rather than a backfill of it. */
+	/**
+	 * The reader's copy of the route at `generation`, if it subscribed one, rather than a backfill of
+	 * it: once the track ended, the one rerouted for the groups still read.
+	 */
 	copy(generation: number): Copy | undefined {
-		return this.#copies.findLast((copy) => copy.generation === generation);
+		const matches = (copy: Copy) => copy.generation === generation;
+		return this.#copies.findLast(matches) ?? this.#rerouted.findLast(matches);
 	}
 
-	/** The copies other than `except` whose track still holds group `key` unfailed, newest first. */
+	/**
+	 * The copies other than `except` whose track still holds group `key` unfailed, newest first: the
+	 * rerouted ones too, which continue a group though they hand none out.
+	 */
 	holding(key: bigint, except: Copy): Copy[] {
+		const copies = [...this.#copies, ...this.#rerouted];
 		const holding: Copy[] = [];
-		for (let index = this.#copies.length - 1; index >= 0; index--) {
-			const copy = this.#copies[index];
+		for (let index = copies.length - 1; index >= 0; index--) {
+			const copy = copies[index];
 			if (copy !== except && hooks.holdsGroup(copy.sub, key)) holding.push(copy);
 		}
 		return holding;
@@ -1186,9 +1257,9 @@ class Reader implements ResumeSource {
 	}
 
 	/**
-	 * `copy` handed out `key`. The serving copy's first group bounds the replaced copies a switch
-	 * left uncapped, just below it: the incumbent copies a reader joining mid-switch reads (see
-	 * {@link #joinIncumbent}), and those replaced before any group was held or handed out. What
+	 * `copy` handed out `key`. The serving copy's first group bounds the incumbent copies a switch
+	 * left uncapped, just below it, unless they go (see {@link #delivering}): one a reader joining
+	 * mid-switch reads (see {@link #joinIncumbent}), and one a switch before any group kept. What
 	 * they hold under it may be groups the new route never has, and what is at or above it the new
 	 * route delivers. Never below a group already handed out. A group it replays, already handed
 	 * out, bounds nothing: the incumbent may still hold the next. Nor does a backfill of the
@@ -1197,7 +1268,7 @@ class Reader implements ResumeSource {
 	#observe(copy: Copy, key: bigint): void {
 		copy.delivered = true;
 		if (copy.replaced || copy.generation !== this.#generation) return;
-		this.route.delivered(copy.source);
+		if (this.#delivering(copy)) return;
 		const bound = max(this.#newest ?? -1n, key - 1n);
 		for (const replaced of this.#copies) {
 			if (replaced === copy || !replaced.replaced || replaced.until !== undefined) continue;
@@ -1206,6 +1277,29 @@ class Reader implements ResumeSource {
 			this.#update(replaced);
 			this.#bound(replaced);
 		}
+	}
+
+	/**
+	 * Serving `copy` delivers, which is when the Rust front splices it in. With nothing held nor
+	 * handed out, the replaced copies a switch left uncapped have nothing to drain, so they go, as
+	 * the Rust `Reader::sync` drops them on a switch without a boundary. Whether they went.
+	 */
+	#delivering(copy: Copy): boolean {
+		this.route.delivered(copy.source);
+		if (this.#newest !== undefined) return false;
+		if (this.#copies.some((other) => other !== copy && hooks.latestKey(other.sub) !== undefined)) return false;
+		this.#dropCopies((other) => other.replaced && other.until === undefined);
+		return true;
+	}
+
+	/** Let go of every copy `drops` picks, learning first any end one declared, which outlives it. */
+	#dropCopies(drops: (copy: Copy) => boolean): void {
+		this.#learnEnd();
+		this.#copies = this.#copies.filter((copy) => {
+			if (!drops(copy)) return true;
+			this.#drop(copy);
+			return false;
+		});
 	}
 
 	#deliverable(copy: Copy, key: bigint, delivered: Delivered): boolean {
@@ -1659,9 +1753,10 @@ class Reader implements ResumeSource {
 
 	/**
 	 * End the logical track cleanly, once its serving copy did and nothing it replaced may still
-	 * deliver a group below that end: settle `closed` and leave the route, keeping each copy only
-	 * while it holds something left to read. The other channel's backlog stays readable. Whether
-	 * the track ended.
+	 * deliver a group below that end: settle `closed`, keeping each copy only while it holds
+	 * something left to read. The other channel's backlog stays readable. The reader follows the
+	 * route only for the groups still read, and {@link #unroute} leaves it once it reads and holds
+	 * nothing. Whether the track ended.
 	 */
 	#conclude(): boolean {
 		if (this.#closed) return false;
@@ -1677,7 +1772,6 @@ class Reader implements ResumeSource {
 			ended: true,
 		};
 		this.#shell.close();
-		this.route.leave(this);
 		this.#letGo(this.#delivered);
 		this.wake();
 		return true;
@@ -1720,6 +1814,7 @@ class Reader implements ResumeSource {
 		// A gap may be skipped in parts no one copy knows whole: merge what the held copies skipped
 		// too.
 		if (lacking) for (const copy of this.#copies) this.#keepSkips(copy, lacking);
+		this.#unroute();
 		// Only the skipped start and end of each gap the reader still lacks, at most two runs a gap, so
 		// what is kept never outgrows the gaps however many routes come and go; a skip inside a gap is
 		// left to the copies that hold it.
@@ -1897,11 +1992,6 @@ class Reader implements ResumeSource {
 		this.#open.add(group);
 		void hooks.groupClosed(group).then(() => this.#open.delete(group));
 		return group;
-	}
-
-	/** The logical track ended cleanly, so no route continues it. */
-	get ended(): boolean {
-		return this.#ended !== undefined;
 	}
 
 	/** A group handed out ended or moved copies: let go of what nothing needs any more. */
@@ -2294,8 +2384,9 @@ class Reader implements ResumeSource {
 		// A recovery in flight settles with the group rather than adopting a replacement.
 		for (const group of this.#open) hooks.releaseGroupReader(group, abort);
 		this.#open.clear();
-		for (const copy of this.#copies) this.#drop(copy, abort);
+		for (const copy of [...this.#copies, ...this.#rerouted]) this.#drop(copy, abort);
 		this.#copies = [];
+		this.#rerouted = [];
 		this.route.leave(this);
 		// A read still waiting on the reader looks again and finds it closed.
 		this.wake();
@@ -2503,8 +2594,6 @@ class Recover implements GroupRecover {
 				const held = reader.holding(this.key, current)[0];
 				const cached = held && hooks.cachedGroup(held.sub, this.key, index);
 				if (cached) return this.#replacement(cached, held);
-				// Once the track ended, no route continues it: only a copy holding it could.
-				if (reader.ended) throw failed;
 				// A verdict would repeat from the route that gave it.
 				if (generation === current.generation && !this.#undelivered(failed, current)) throw failed;
 			}

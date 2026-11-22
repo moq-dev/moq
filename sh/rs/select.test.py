@@ -15,8 +15,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import parallel_tests
 
 ROOT = Path(__file__).resolve().parents[2]
-FUZZ_CRATES = ("moq-net", "moq-quic", "moq-mux", "moq-rtmp", "moq-sock", "moq-uring")
-FUZZ_EXCLUDES = " ".join(f"--exclude {crate}-fuzz" for crate in FUZZ_CRATES)
+FUZZ_CRATES = sorted(
+    package["name"]
+    for package in json.loads(
+        subprocess.run(
+            ["cargo", "metadata", "--locked", "--format-version", "1", "--no-deps"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    )["packages"]
+    if package["name"].endswith("-fuzz")
+)
+FUZZ_EXCLUDES = " ".join(f"--exclude {crate}" for crate in FUZZ_CRATES)
 DEVICE_FEATURES = "moq-video/capture moq-audio/capture moq-audio/playback moq-cli/play moq-cli/openh264"
 
 
@@ -62,6 +74,15 @@ def read_probes(glob):
 
 
 class SelectTest(unittest.TestCase):
+    def test_every_fuzz_crate_is_excluded(self):
+        # More than one, so a derivation that finds none cannot pass.
+        self.assertGreater(len(FUZZ_CRATES), 1)
+        # rs/justfile cannot call sh/rs/no-fuzz.sh, so its list is checked against the members.
+        recipe = re.search(r'^no_fuzz := "([^"]*)"', (ROOT / "rs/justfile").read_text(), re.M).group(1)
+        self.assertEqual(sorted(re.findall(r"--exclude (\S+)", recipe)), FUZZ_CRATES)
+        listed = subprocess.run(["bash", "sh/rs/no-fuzz.sh"], cwd=ROOT, check=True, capture_output=True, text=True)
+        self.assertEqual(listed.stdout.split(), FUZZ_CRATES)
+
     # CI runs target lints before its test build.
     def selected(self, *paths, action="lint", github_actions=False):
         with tempfile.TemporaryDirectory() as directory:
@@ -112,6 +133,12 @@ class SelectTest(unittest.TestCase):
                 with self.subTest(path=path, action=action):
                     calls = self.selected(path, action=action)
                     self.assertTrue(any(call.startswith(f"rs {action} --workspace ") for call in calls), calls)
+
+    def test_hakari_configuration_selects_workspace(self):
+        # It shapes the workspace-hack every crate depends on, and the lint checks it.
+        calls = self.selected(".config/hakari.toml")
+        self.assertTrue(any(call.startswith("rs lint --workspace ") for call in calls), calls)
+        self.assertRegex(".config/hakari.toml", dispatch_scope())
 
     def test_workspace_clippy_configuration_selects_workspace(self):
         # The root clippy.toml is every crate's lint policy, alone or beside one crate's change.
@@ -237,13 +264,13 @@ class SelectTest(unittest.TestCase):
                 self.assertTrue(any("/rs/moq-net-tests#" in call for call in calls), calls)
 
     def test_out_of_crate_target_selects_its_crate(self):
-        # moq-cli builds the Rust interop clients as examples from outside its crate.
+        # moq-interop builds the Rust interop clients from outside its crate.
         for path in ("test/interop/clients/rust/tail.rs", "test/interop/clients/rust/added.rs"):
             for action in ("lint", "fix"):
                 with self.subTest(path=path, action=action):
                     calls = self.selected(path, action=action)
                     self.assertTrue(
-                        any(call.startswith(f"rs {action} ") and "/rs/moq-cli#" in call for call in calls), calls
+                        any(call.startswith(f"rs {action} ") and "/rs/moq-interop#" in call for call in calls), calls
                     )
         self.assertEqual(self.selected("test/interop/compat/container.rs"), [])
 
@@ -370,6 +397,37 @@ class SelectTest(unittest.TestCase):
         calls = self.selected(bench, "rs/moq-stats/src/lib.rs", action="test")
         self.assertTrue(any("/rs/moq-relay#" in call for call in calls), calls)
 
+    def selected_crates(self, *paths):
+        """The crates the test build holds for a diff, by directory name."""
+        (call,) = [call for call in self.selected(*paths, action="test") if call.startswith("rs test ")]
+        return set(re.findall(r"/rs/([^/#]+)#", call))
+
+    def test_a_target_change_selects_only_its_crate(self):
+        # No crate depends on another's tests or examples, so their changes stop there.
+        for path, crate in (
+            ("rs/moq-net/tests/added.rs", "moq-net"),
+            ("rs/moq-net/examples/added.rs", "moq-net"),
+            # A read from a target, here moq-tokio's integration tests, is a target change too.
+            ("rs/moq-net/tests/range-table.json", "moq-tokio"),
+            # moq-relay's bench includes moq-net's session bench, which includes this helper.
+            ("rs/moq-net/tests/integration/support/harness.rs", "moq-relay"),
+        ):
+            with self.subTest(path=path):
+                crates = self.selected_crates(path)
+                self.assertIn(crate, crates)
+                # moq-cli depends on each of these crates, not on their targets.
+                self.assertNotIn("moq-cli", crates)
+        # A library that reads its own tests/ still reaches its dependents.
+        self.assertIn("moq-cli", self.selected_crates("rs/moq-json/tests/vectors.json"))
+
+    def test_a_dev_dependency_stops_at_its_dependent(self):
+        # hang's tests run on moq-tokio, but hang's library and its dependents do not.
+        crates = self.selected_crates("rs/moq-tokio/src/lib.rs")
+        self.assertIn("hang", crates)
+        self.assertIn("moq-relay", crates)
+        self.assertNotIn("moq-mux", crates)
+        self.assertIn("moq-mux", self.selected_crates("rs/hang/src/lib.rs"))
+
     def test_a_bench_alone_enables_its_required_features(self):
         # Alone in the selection, no dependent turns these on, and cargo would
         # skip the targets without a word.
@@ -479,10 +537,12 @@ class MetadataTest(unittest.TestCase):
     def test_directory_mismatch_still_selects_the_workspace(self):
         metadata = self.metadata()
         metadata["packages"][1]["name"] = "renamed"
+        metadata["packages"].append({**metadata["packages"][0], "name": "seed-fuzz"})
         result = self.run_selection(fixture=metadata)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("a crate directory no longer matches", result.stderr)
-        self.assertIn(f"rs test --workspace {FUZZ_EXCLUDES}", self.calls.read_text())
+        # The exclusions come from the metadata, so a fuzz crate nobody listed is still left out.
+        self.assertIn("rs test --workspace --exclude seed-fuzz ", self.calls.read_text())
 
     def test_every_jq_failure_stops_selection_even_after_partial_output(self):
         jq = self.scratch / "jq"

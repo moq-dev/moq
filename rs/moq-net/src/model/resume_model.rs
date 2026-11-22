@@ -269,6 +269,11 @@ impl Publisher {
 		self.routes.iter().flatten()
 	}
 
+	/// The route the front serves: the cheapest live one.
+	fn serving(&self) -> Option<&Copy> {
+		self.routes.iter().rev().flatten().next()
+	}
+
 	fn newest(&self) -> Option<u64> {
 		self.written.last_key_value().map(|(group, _)| *group)
 	}
@@ -921,7 +926,8 @@ impl Model {
 					Poll::Ready(Ok(None)) => {
 						// Short of whole only where a route closed it, and, unless the budget gave up or
 						// the group may have expired, only while a route that closed it lives: one whose
-						// route failed reads on from the route replacing it.
+						// route failed reads on from the route replacing it, unless that route gave the
+						// group up, so nothing continues it.
 						let whole = read.frames == frames(*key) && instance.complete.contains(key);
 						if !whole && !instance.short.contains(&(*key, read.frames)) {
 							return Err(fail(
@@ -933,6 +939,7 @@ impl Model {
 							&& reader.spec.budget == Budget::Hour
 							&& !reader.doomed && reader.floor.is_none_or(|floor| *key > floor)
 							&& !instance.live().any(|copy| copy.closed_at(*key, read.frames))
+							&& !instance.serving().is_some_and(|copy| copy.given_up.contains(key))
 						{
 							return Err(fail(
 								index,
@@ -1913,6 +1920,67 @@ fn regressions() {
 					frames: 1,
 				},
 				Op::Up { instance: 0, slot: 1 },
+			],
+			finish: false,
+		},
+		// A group read past where the serving copy then closes it short cannot end cleanly
+		// there: no route said it ends at the frames read.
+		Case {
+			ops: vec![
+				Op::Join {
+					reader: 0,
+					spec: spec(false, Budget::Hour, None, false),
+				},
+				Op::Write {
+					instance: 0,
+					slot: 0,
+					group: Some(5),
+					frames: 2,
+				},
+				Op::Up { instance: 0, slot: 1 },
+				Op::Write {
+					instance: 0,
+					slot: 1,
+					group: Some(5),
+					frames: 1,
+				},
+				Op::Down { instance: 0, slot: 0 },
+				Op::Close {
+					instance: 0,
+					slot: 1,
+					group: None,
+					down: false,
+				},
+			],
+			finish: false,
+		},
+		// A short close from a route that failed stands once the route replacing it gave the
+		// group up, so nothing continues it.
+		Case {
+			ops: vec![
+				Op::Up { instance: 0, slot: 2 },
+				Op::Up { instance: 0, slot: 1 },
+				Op::GiveUp {
+					instance: 0,
+					slot: 1,
+					group: 5,
+				},
+				Op::Join {
+					reader: 0,
+					spec: spec(false, Budget::Hour, None, false),
+				},
+				Op::Write {
+					instance: 0,
+					slot: 2,
+					group: Some(5),
+					frames: 1,
+				},
+				Op::Close {
+					instance: 0,
+					slot: 2,
+					group: None,
+					down: true,
+				},
 			],
 			finish: false,
 		},

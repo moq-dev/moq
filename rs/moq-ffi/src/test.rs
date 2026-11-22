@@ -220,7 +220,7 @@ async fn call_cancels_inner_on_drop() {
 }
 
 /// A bare [`MoqAudioInit`] with a format and its init bytes.
-fn audio_init(format: MoqAudioFormat, data: Vec<u8>) -> MoqAudioInit {
+fn audio_init(format: Arc<MoqAudioFormat>, data: Vec<u8>) -> MoqAudioInit {
 	MoqAudioInit {
 		format,
 		data,
@@ -228,7 +228,7 @@ fn audio_init(format: MoqAudioFormat, data: Vec<u8>) -> MoqAudioInit {
 	}
 }
 
-fn video_init(format: MoqVideoFormat, data: Vec<u8>) -> MoqVideoInit {
+fn video_init(format: Arc<MoqVideoFormat>, data: Vec<u8>) -> MoqVideoInit {
 	MoqVideoInit {
 		format,
 		data,
@@ -520,7 +520,7 @@ async fn media_track_reserves_through_its_demand() {
 			MoqMediaTarget::Named {
 				name: Some(name.into()),
 			},
-			audio_init(MoqAudioFormat::Opus, opus_head()),
+			audio_init(MoqAudioFormat::opus(), opus_head()),
 		)
 		.unwrap()
 	};
@@ -1378,7 +1378,7 @@ async fn whole_media_frames_require_the_callers_timestamp() {
 	let media = MoqMediaTrackProducer::audio(
 		&broadcast,
 		MoqMediaTarget::Named { name: None },
-		audio_init(MoqAudioFormat::Opus, opus_head()),
+		audio_init(MoqAudioFormat::opus(), opus_head()),
 	)
 	.unwrap();
 	assert!(matches!(
@@ -1410,7 +1410,7 @@ async fn catalog_now_fixes_the_clock_for_later_media() {
 	let media = MoqMediaTrackProducer::audio(
 		&broadcast,
 		MoqMediaTarget::Named { name: None },
-		audio_init(MoqAudioFormat::Opus, opus_head()),
+		audio_init(MoqAudioFormat::opus(), opus_head()),
 	)
 	.unwrap();
 	let now = catalog.now().unwrap();
@@ -1890,7 +1890,7 @@ async fn demand_handle_outlives_finish() {
 	let media = MoqMediaTrackProducer::audio(
 		&broadcast,
 		MoqMediaTarget::Named { name: None },
-		audio_init(MoqAudioFormat::Opus, opus_head()),
+		audio_init(MoqAudioFormat::opus(), opus_head()),
 	)
 	.unwrap();
 	let track_demand = track.demand().unwrap();
@@ -2301,7 +2301,7 @@ async fn typed_abort_unwanted_keeps_a_late_reader() {
 	let media = MoqMediaTrackProducer::audio(
 		&broadcast,
 		named("media"),
-		audio_init(MoqAudioFormat::Opus, opus_head()),
+		audio_init(MoqAudioFormat::opus(), opus_head()),
 	)
 	.unwrap();
 	typed_abort_unwanted(
@@ -2329,7 +2329,7 @@ async fn typed_abort_unwanted_keeps_a_late_reader() {
 	let stream = MoqMediaTrackStreamProducer::video(
 		&broadcast,
 		named("stream"),
-		video_init(MoqVideoFormat::H264, Vec::new()),
+		video_init(MoqVideoFormat::h264(), Vec::new()),
 	)
 	.unwrap();
 	typed_abort_unwanted(
@@ -2384,7 +2384,7 @@ async fn typed_abort_unwanted_keeps_a_late_reader() {
 		&MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
 		crate::video::MoqVideoProducerOptions {
 			input: crate::video::MoqVideoEncoderInput {
-				format: crate::video::MoqVideoPixelFormat::Rgba,
+				format: crate::video::MoqVideoPixelFormat::rgba(),
 				width: 320,
 				height: 240,
 				framerate: crate::video::MoqVideoFrameRate {
@@ -3369,7 +3369,7 @@ async fn video_publish_named_track() {
 		.await
 		.unwrap();
 
-	let init = || video_init(MoqVideoFormat::H264, h264_init());
+	let init = || video_init(MoqVideoFormat::h264(), h264_init());
 	let hd = MoqMediaTrackProducer::video(
 		&broadcast,
 		MoqMediaTarget::Named {
@@ -3425,14 +3425,18 @@ async fn video_rung_sits_below_its_lower_and_disables() {
 	let named = |name: &str| MoqMediaTarget::Named {
 		name: Some(name.into()),
 	};
-	let low =
-		MoqMediaTrackProducer::video(&broadcast, named("low"), video_init(MoqVideoFormat::H264, h264_init())).unwrap();
+	let low = MoqMediaTrackProducer::video(
+		&broadcast,
+		named("low"),
+		video_init(MoqVideoFormat::h264(), h264_init()),
+	)
+	.unwrap();
 	let high = MoqMediaTrackProducer::video(
 		&broadcast,
 		named("high"),
 		MoqVideoInit {
 			lower: Some(MoqMediaProducer::Track { producer: low.clone() }),
-			..video_init(MoqVideoFormat::H264, h264_init())
+			..video_init(MoqVideoFormat::h264(), h264_init())
 		},
 	)
 	.unwrap();
@@ -3475,15 +3479,18 @@ async fn stream_rung_is_funded_after_its_lower_and_resumes_at_a_keyframe() {
 	let named = |name: &str| MoqMediaTarget::Named {
 		name: Some(name.into()),
 	};
-	let low =
-		MoqMediaTrackStreamProducer::video(&broadcast, named("low"), video_init(MoqVideoFormat::H264, h264_init()))
-			.unwrap();
+	let low = MoqMediaTrackStreamProducer::video(
+		&broadcast,
+		named("low"),
+		video_init(MoqVideoFormat::h264(), h264_init()),
+	)
+	.unwrap();
 	let high = MoqMediaTrackStreamProducer::video(
 		&broadcast,
 		named("high"),
 		MoqVideoInit {
 			lower: Some(MoqMediaProducer::Stream { producer: low.clone() }),
-			..video_init(MoqVideoFormat::H264, h264_init())
+			..video_init(MoqVideoFormat::h264(), h264_init())
 		},
 	)
 	.unwrap();
@@ -3564,7 +3571,7 @@ async fn video_track_demand_follows_a_new_level() {
 		MoqMediaTarget::Named {
 			name: Some("hd".into()),
 		},
-		video_init(MoqVideoFormat::H264, h264_init()),
+		video_init(MoqVideoFormat::h264(), h264_init()),
 	)
 	.unwrap();
 	let keyframe = |level: u8| {
@@ -3600,7 +3607,7 @@ async fn track_stream_producer_publishes_its_last_access_unit() {
 		MoqMediaTarget::Named {
 			name: Some("video".into()),
 		},
-		video_init(MoqVideoFormat::H264, Vec::new()),
+		video_init(MoqVideoFormat::h264(), Vec::new()),
 	)
 	.unwrap();
 	let track = consumer.subscribe_track("video".into(), None).await.unwrap();
@@ -3648,7 +3655,7 @@ async fn requested_track_keeps_its_name() {
 		MoqMediaTarget::Requested {
 			request: request.clone(),
 		},
-		video_init(MoqVideoFormat::H264, h264_init()),
+		video_init(MoqVideoFormat::h264(), h264_init()),
 	)
 	.unwrap();
 	assert_eq!(media.demand().unwrap().name(), "requested");
@@ -3684,7 +3691,7 @@ async fn a_track_request_reports_its_answer() {
 		MoqMediaTarget::Requested {
 			request: second.clone(),
 		},
-		audio_init(MoqAudioFormat::Opus, vec![1, 2, 3]),
+		audio_init(MoqAudioFormat::opus(), vec![1, 2, 3]),
 	);
 	let failed = failed.map(|_| ());
 	assert!(matches!(failed, Err(MoqError::Codec { .. })), "{failed:?}");
@@ -3728,7 +3735,7 @@ async fn dynamic_track_request_can_publish_media() {
 	let media = MoqMediaTrackProducer::audio(
 		&broadcast,
 		MoqMediaTarget::Requested { request: track.clone() },
-		audio_init(MoqAudioFormat::Opus, opus_head()),
+		audio_init(MoqAudioFormat::opus(), opus_head()),
 	)
 	.unwrap();
 	assert_eq!(media.demand().unwrap().name(), "requested-audio");
@@ -3781,7 +3788,7 @@ async fn media_track_activity_and_name() {
 	let media = MoqMediaTrackProducer::audio(
 		&broadcast,
 		MoqMediaTarget::Named { name: None },
-		audio_init(MoqAudioFormat::Opus, init),
+		audio_init(MoqAudioFormat::opus(), init),
 	)
 	.unwrap();
 	let track_name = media.demand().unwrap().name();
@@ -3819,7 +3826,7 @@ async fn publish_media_aac_populates_description() {
 	let _media = MoqMediaTrackProducer::audio(
 		&broadcast,
 		MoqMediaTarget::Named { name: None },
-		audio_init(MoqAudioFormat::Aac, init.to_vec()),
+		audio_init(MoqAudioFormat::aac(), init.to_vec()),
 	)
 	.unwrap();
 
@@ -3850,7 +3857,7 @@ fn audio_rejects_bad_init_bytes() {
 	let err = MoqMediaTrackProducer::audio(
 		&broadcast,
 		MoqMediaTarget::Named { name: None },
-		audio_init(MoqAudioFormat::Opus, vec![]),
+		audio_init(MoqAudioFormat::opus(), vec![]),
 	)
 	.err()
 	.expect("an OpusHead-less opus track should fail");
@@ -4453,7 +4460,7 @@ async fn local_publish_consume_audio() {
 	let media = MoqMediaTrackProducer::audio(
 		&broadcast,
 		MoqMediaTarget::Named { name: None },
-		audio_init(MoqAudioFormat::Opus, init),
+		audio_init(MoqAudioFormat::opus(), init),
 	)
 	.unwrap();
 
@@ -4523,7 +4530,7 @@ async fn video_publish_consume() {
 	let media = MoqMediaTrackProducer::video(
 		&broadcast,
 		MoqMediaTarget::Named { name: None },
-		video_init(MoqVideoFormat::H264, init),
+		video_init(MoqVideoFormat::h264(), init),
 	)
 	.unwrap();
 
@@ -4602,7 +4609,7 @@ async fn video_raw_publish_consume() {
 		&crate::media::MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
 		crate::video::MoqVideoProducerOptions {
 			input: MoqVideoEncoderInput {
-				format: MoqVideoPixelFormat::Rgba,
+				format: MoqVideoPixelFormat::rgba(),
 				width: 320,
 				height: 240,
 				framerate: crate::video::MoqVideoFrameRate {
@@ -4729,7 +4736,7 @@ async fn video_decode_frame_ownership() {
 		&crate::media::MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
 		crate::video::MoqVideoProducerOptions {
 			input: MoqVideoEncoderInput {
-				format: MoqVideoPixelFormat::Rgba,
+				format: MoqVideoPixelFormat::rgba(),
 				width: 320,
 				height: 240,
 				framerate: crate::video::MoqVideoFrameRate {
@@ -4845,7 +4852,7 @@ async fn video_decode_frame_ownership() {
 			"a surface decode on macOS retains the pixel buffer"
 		);
 		assert_eq!(
-			retained.pixels(MoqVideoPixelFormat::I420).unwrap().len(),
+			retained.pixels(MoqVideoPixelFormat::i420()).unwrap().len(),
 			320 * 240 * 3 / 2
 		);
 	}
@@ -4853,10 +4860,10 @@ async fn video_decode_frame_ownership() {
 	assert_eq!((frame.width(), frame.height()), (320, 240));
 	assert!(frame.surface().is_none(), "a portable decode holds CPU pixels");
 
-	let i420 = frame.pixels(MoqVideoPixelFormat::I420).unwrap();
+	let i420 = frame.pixels(MoqVideoPixelFormat::i420()).unwrap();
 	assert_eq!(i420.len(), 320 * 240 * 3 / 2);
 
-	let packed = frame.pixels(MoqVideoPixelFormat::Rgba).unwrap();
+	let packed = frame.pixels(MoqVideoPixelFormat::rgba()).unwrap();
 	assert_eq!(packed.len(), 320 * 240 * 4);
 	// Every fourth byte is alpha, so an opaque frame proves the conversion ran rather than handing back planes.
 	assert!(
@@ -4865,7 +4872,7 @@ async fn video_decode_frame_ownership() {
 	);
 
 	// Converting again reads the same retained surface.
-	assert_eq!(frame.pixels(MoqVideoPixelFormat::I420).unwrap(), i420);
+	assert_eq!(frame.pixels(MoqVideoPixelFormat::i420()).unwrap(), i420);
 }
 
 /// The default start decodes a cached track from its oldest group, while
@@ -4881,7 +4888,7 @@ async fn video_decode_start() {
 		&crate::media::MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
 		crate::video::MoqVideoProducerOptions {
 			input: MoqVideoEncoderInput {
-				format: MoqVideoPixelFormat::Rgba,
+				format: MoqVideoPixelFormat::rgba(),
 				width: 320,
 				height: 240,
 				framerate: crate::video::MoqVideoFrameRate {
@@ -5003,7 +5010,7 @@ async fn video_raw_publish_from_many_threads() {
 		&crate::media::MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
 		crate::video::MoqVideoProducerOptions {
 			input: MoqVideoEncoderInput {
-				format: MoqVideoPixelFormat::Rgba,
+				format: MoqVideoPixelFormat::rgba(),
 				width: 320,
 				height: 240,
 				framerate: crate::video::MoqVideoFrameRate {
@@ -5084,7 +5091,7 @@ async fn video_raw_publish_rejects_bad_frames() {
 	let broadcast = create_announced(&origin, "video-raw-reject-test");
 
 	let input = |width, height| MoqVideoEncoderInput {
-		format: MoqVideoPixelFormat::Rgba,
+		format: MoqVideoPixelFormat::rgba(),
 		width,
 		height,
 		framerate: crate::video::MoqVideoFrameRate {
@@ -5181,7 +5188,7 @@ async fn multiple_frames_ordering() {
 	let media = MoqMediaTrackProducer::audio(
 		&broadcast,
 		MoqMediaTarget::Named { name: None },
-		audio_init(MoqAudioFormat::Opus, init),
+		audio_init(MoqAudioFormat::opus(), init),
 	)
 	.unwrap();
 
@@ -5244,7 +5251,7 @@ async fn catalog_update_on_new_track() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let broadcast = create_announced(&origin, "catalog-update");
 	let init = opus_head();
-	let mut first = audio_init(MoqAudioFormat::Opus, init.clone());
+	let mut first = audio_init(MoqAudioFormat::opus(), init.clone());
 	first.label = Some("English".to_string());
 	let _media1 = MoqMediaTrackProducer::audio(&broadcast, MoqMediaTarget::Named { name: None }, first).unwrap();
 
@@ -5268,7 +5275,7 @@ async fn catalog_update_on_new_track() {
 	let _media2 = MoqMediaTrackProducer::audio(
 		&broadcast,
 		MoqMediaTarget::Named { name: None },
-		audio_init(MoqAudioFormat::Opus, init),
+		audio_init(MoqAudioFormat::opus(), init),
 	)
 	.unwrap();
 
@@ -5291,7 +5298,7 @@ fn close_twice_is_a_noop() {
 	let _media = MoqMediaTrackProducer::audio(
 		&broadcast,
 		MoqMediaTarget::Named { name: None },
-		audio_init(MoqAudioFormat::Opus, init.clone()),
+		audio_init(MoqAudioFormat::opus(), init.clone()),
 	)
 	.unwrap();
 	broadcast.close().unwrap();
@@ -5300,7 +5307,7 @@ fn close_twice_is_a_noop() {
 	let Err(err) = MoqMediaTrackProducer::audio(
 		&broadcast,
 		MoqMediaTarget::Named { name: None },
-		audio_init(MoqAudioFormat::Opus, init),
+		audio_init(MoqAudioFormat::opus(), init),
 	) else {
 		panic!("publishing after close succeeded");
 	};
@@ -5370,7 +5377,7 @@ async fn children(
 		MoqMediaTarget::Named {
 			name: Some("media".into()),
 		},
-		audio_init(MoqAudioFormat::Opus, opus_head()),
+		audio_init(MoqAudioFormat::opus(), opus_head()),
 	)
 	.unwrap();
 	let readers = [
@@ -5550,7 +5557,7 @@ async fn a_failed_finish_ends_the_track_with_its_cause() {
 		MoqMediaTarget::Named {
 			name: Some("video".into()),
 		},
-		video_init(MoqVideoFormat::H264, h264_init()),
+		video_init(MoqVideoFormat::h264(), h264_init()),
 	)
 	.unwrap();
 	let reader = consumer.subscribe_track("video".into(), None).await.unwrap();
@@ -6271,7 +6278,7 @@ fn without_runtime() {
 		let media = MoqMediaTrackProducer::audio(
 			&broadcast,
 			MoqMediaTarget::Named { name: None },
-			audio_init(MoqAudioFormat::Opus, init),
+			audio_init(MoqAudioFormat::opus(), init),
 		)
 		.unwrap();
 		media
@@ -6391,7 +6398,7 @@ async fn server_client_run_end(version: &str) {
 	let media = MoqMediaTrackProducer::audio(
 		&broadcast,
 		MoqMediaTarget::Named { name: None },
-		audio_init(MoqAudioFormat::Opus, init),
+		audio_init(MoqAudioFormat::opus(), init),
 	)
 	.unwrap();
 
@@ -6510,7 +6517,7 @@ async fn server_client_run_end(version: &str) {
 	let replacement_media = MoqMediaTrackProducer::audio(
 		&replacement,
 		MoqMediaTarget::Named { name: None },
-		audio_init(MoqAudioFormat::Opus, opus_head()),
+		audio_init(MoqAudioFormat::opus(), opus_head()),
 	)
 	.unwrap();
 	let next = kio::clock::timeout(TIMEOUT, following.available())
@@ -6734,7 +6741,7 @@ async fn follow_follows_a_minted_replacement() {
 	let media = MoqMediaTrackProducer::audio(
 		&broadcast,
 		MoqMediaTarget::Named { name: None },
-		audio_init(MoqAudioFormat::Opus, opus_head()),
+		audio_init(MoqAudioFormat::opus(), opus_head()),
 	)
 	.unwrap();
 
@@ -7139,7 +7146,7 @@ async fn server_client_roundtrip_auto_origin() {
 	let media = MoqMediaTrackProducer::audio(
 		&broadcast,
 		MoqMediaTarget::Named { name: None },
-		audio_init(MoqAudioFormat::Opus, init),
+		audio_init(MoqAudioFormat::opus(), init),
 	)
 	.unwrap();
 
@@ -8375,7 +8382,7 @@ async fn video_encoder_follows_a_shrinking_grant() {
 		&crate::media::MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
 		crate::video::MoqVideoProducerOptions {
 			input: MoqVideoEncoderInput {
-				format: MoqVideoPixelFormat::Rgba,
+				format: MoqVideoPixelFormat::rgba(),
 				width: 320,
 				height: 240,
 				framerate: crate::video::MoqVideoFrameRate {
@@ -8435,7 +8442,7 @@ fn software_camera(bitrate: u64) -> (crate::video::MoqVideoEncoderInput, crate::
 	use crate::video::*;
 	(
 		MoqVideoEncoderInput {
-			format: MoqVideoPixelFormat::Rgba,
+			format: MoqVideoPixelFormat::rgba(),
 			width: 320,
 			height: 240,
 			framerate: crate::video::MoqVideoFrameRate {

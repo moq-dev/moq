@@ -4252,7 +4252,6 @@ name = "moq-audio"
 version = "0.1.10"
 dependencies = [
  "bench-harness",
- "bitstream-io 4.10.0",
  "block2 0.6.2",
  "bytes",
  "cpal",
@@ -4563,6 +4562,26 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-test",
+ "url",
+ "workspace-hack",
+]
+
+[[package]]
+name = "moq-interop"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "futures",
+ "hang",
+ "kio",
+ "moq-audio",
+ "moq-json",
+ "moq-mux",
+ "moq-net",
+ "moq-tokio",
+ "serde_json",
+ "tokio",
  "url",
  "workspace-hack",
 ]
