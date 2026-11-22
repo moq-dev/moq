@@ -966,8 +966,9 @@ impl Window {
 		let end = range.end.and_then(|end| end.checked_add(1));
 		let (anchor, asks) = match range.start {
 			Start::Time(time) => (Some(time), true),
-			// The oldest group held.
+			// The oldest group held, as for a live join reaching back past every group.
 			Start::Oldest => (None, false),
+			start if start.reaches_all() => (None, false),
 			// A hop whose copies place the join waits on them, as one with no group yet does.
 			Start::Live { .. } if holdings.defers() => {
 				self.pending.insert(key);
@@ -1645,6 +1646,35 @@ mod tests {
 		let window = Window::new(&[Range::ALL], Some(9), &Unheld);
 		assert!(!window.is_pending() && window.contains(3));
 		assert_eq!(window.start(), None);
+	}
+
+	/// A live join reaching back past every group starts at the oldest, as a range from the
+	/// oldest does, waiting on neither the live edge, an upstream's answer, nor the copies of
+	/// a hop holding nothing; its groups still go stale past its `max`.
+	#[test]
+	fn a_join_reaching_past_every_group_starts_at_the_oldest() {
+		let max = Duration::from_secs(1);
+		let within = Range::from(Start::within(max));
+		let held = Keys::new([33, 66]);
+		let answers = Keys {
+			answered: Some(3),
+			..Keys::new([33, 66])
+		};
+		let oldest = Some(Resolved {
+			start: 0,
+			end: None,
+			floored: false,
+		});
+		for window in [
+			Window::new(&[within], None, &held),
+			Window::keyed_since([(0, within)], |_| 3, Some(66), &answers),
+			Window::new(&[within], Some(9), &Unheld),
+		] {
+			assert!(window.is_settled() && window.contains(0));
+			assert_eq!(window.resolved(), [oldest]);
+			assert_eq!(window.joins().count(), 0, "asks no upstream to place it");
+			assert_eq!(window.budget().at(33), max);
+		}
 	}
 
 	/// The named floor is the lowest start, unless a range reaches back to the oldest

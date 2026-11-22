@@ -226,6 +226,10 @@ pub enum Start {
 	},
 }
 
+/// The lag of [`Start::within`]: the largest every implementation carries losslessly, long past
+/// any group.
+const WITHIN: Duration = Duration::from_millis((1 << 53) - 1);
+
 impl Start {
 	/// The latest group, skipping each the moment a newer one arrives: a live viewer holding
 	/// no buffer.
@@ -238,11 +242,17 @@ impl Start {
 	/// of the live edge: what a wire before lite-07 asks with its one `Subscriber Max Age` and
 	/// no start.
 	pub(crate) const fn within(max: Duration) -> Self {
-		// The largest lag every implementation carries losslessly, long past any group.
 		Self::Live {
-			min: Duration::from_millis((1 << 53) - 1),
+			min: WITHIN,
 			max: Some(max),
 		}
+	}
+
+	/// Whether this is a live join whose lag reaches back past every group, as
+	/// [`Self::within`]'s does: it starts at the oldest group, as [`Self::Oldest`] does,
+	/// wherever the live edge is, so placing it needs neither the edge nor an upstream's answer.
+	pub(crate) fn reaches_all(&self) -> bool {
+		matches!(self, Self::Live { min, .. } if *min >= WITHIN)
 	}
 
 	/// Whether this start is a floor for history rather than a live join, so the groups its

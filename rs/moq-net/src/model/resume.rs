@@ -4032,6 +4032,12 @@ mod test {
 			.unwrap()
 	}
 
+	/// A reader of every group from the oldest, as history: none goes stale.
+	fn history(logical: &track::Producer) -> track::Subscriber {
+		let all = Subscription::default().with_ranges([track::Range::ALL]);
+		logical.consume().subscribe(all).now_or_never().unwrap().unwrap()
+	}
+
 	fn recv(sub: &mut track::Subscriber) -> group::Consumer {
 		let Poll::Ready(group) = sub.poll_recv_group(&kio::Waiter::noop()) else {
 			panic!("a group")
@@ -4592,8 +4598,7 @@ mod test {
 		ended.anchored();
 		routes.serve(ended.consume());
 		write(&ended, 64);
-		let all = Subscription::default().with_ranges([track::Range::ALL]);
-		let mut reader = logical.consume().subscribe(all).now_or_never().unwrap().unwrap();
+		let mut reader = history(&logical);
 		let held = recv(&mut reader);
 		assert_eq!(held.start, 64);
 
@@ -5533,7 +5538,7 @@ mod test {
 		let track = logical(&routes);
 		let a = copy();
 		routes.serve(a.consume());
-		let mut sub = subscribe(&track, Duration::from_secs(10));
+		let mut sub = history(&track);
 
 		let mut open = a.create_group(group::Info { start: 0 }).unwrap();
 		open.write_frame(ts(0), b"a".as_ref()).unwrap();
@@ -7711,7 +7716,7 @@ mod test {
 			let logical = logical(&routes);
 			let a = copy();
 			routes.serve(a.consume());
-			let mut sub = subscribe(&logical, HOUR).with_range(4..);
+			let mut sub = history(&logical).with_range(4..);
 			for key in 0..6 {
 				write(&a, key);
 			}
@@ -7903,7 +7908,7 @@ mod test {
 				1,
 				track::Range::from(track::Start::Live {
 					min: Duration::from_millis(6),
-					max: Some(std::time::Duration::ZERO),
+					max: Some(HOUR),
 				}),
 			)],
 			priority: 0,
@@ -8533,7 +8538,7 @@ mod test {
 			let logical = logical(&routes);
 			let a = copy();
 			routes.serve(a.consume());
-			let mut sub = subscribe(&logical, HOUR);
+			let mut sub = history(&logical);
 			write(&a, 0);
 			assert_eq!(drain(&mut sub, ordered), [0]);
 			// Held, though not yet handed out.
@@ -9623,8 +9628,7 @@ mod test {
 		let a = received_copy();
 		routes.serve(a.consume());
 		// Every group from the oldest, so a late group below the first is still in range.
-		let all = Subscription::default().with_ranges([track::Range::ALL]);
-		let mut sub = logical.consume().subscribe(all).now_or_never().unwrap().unwrap();
+		let mut sub = history(&logical);
 		write(&a, 2);
 		a.finish_shared().unwrap();
 		assert_eq!(recv(&mut sub).start, 2);
@@ -9816,15 +9820,14 @@ mod test {
 			write(&a, key);
 		}
 		// A new range, so it resolves afresh rather than where the reader's old one did.
-		let behind = Subscription::default()
-			.with_ranges([track::Range {
-				start: track::Start::Live {
-					min: Duration::from_millis(1500),
-					max: Some(std::time::Duration::ZERO),
-				},
-				end: Some(1_000_000),
-			}])
-			.with_max(HOUR);
+		// No `max`, so the new copy is asked for it where it resolved; see `Range::asked`.
+		let behind = Subscription::default().with_ranges([track::Range {
+			start: track::Start::Live {
+				min: Duration::from_millis(1500),
+				max: None,
+			},
+			end: Some(1_000_000),
+		}]);
 		let reader = routes.readers.lock().unwrap().iter().find_map(Weak::upgrade).unwrap();
 		let channel = reader.lock().unwrap().subscription.clone();
 		channel.update(behind).unwrap();
@@ -10066,7 +10069,7 @@ mod test {
 		// Two behind the newest frame, at 4.
 		let updated = Subscription::default().with_ranges([track::Range::from(track::Start::Live {
 			min: Duration::from_millis(2),
-			max: Some(std::time::Duration::ZERO),
+			max: None,
 		})]);
 		let updated = Mirrored::of(&updated);
 		copy.update(&updated, &Change::All);
@@ -10631,12 +10634,11 @@ mod test {
 		}
 		routes.serve(a.consume());
 		// Two behind the newest frame, at 10.
-		let subscription = Subscription::default()
-			.with_ranges([track::Range::from(track::Start::Live {
-				min: Duration::from_millis(2),
-				max: Some(std::time::Duration::ZERO),
-			})])
-			.with_max(HOUR);
+		// No `max`, so the replacement is asked for it where it resolved; see `Range::asked`.
+		let subscription = Subscription::default().with_ranges([track::Range::from(track::Start::Live {
+			min: Duration::from_millis(2),
+			max: None,
+		})]);
 		let mut sub = logical
 			.consume()
 			.subscribe(subscription)
@@ -10842,12 +10844,11 @@ mod test {
 		}
 		routes.serve(a.consume());
 		// Two behind the newest frame, at 10: group 8.
-		let subscription = Subscription::default()
-			.with_ranges([track::Range::from(track::Start::Live {
-				min: Duration::from_millis(2),
-				max: Some(std::time::Duration::ZERO),
-			})])
-			.with_max(HOUR);
+		// No `max`, so the capped copy is asked for it where it resolved; see `Range::asked`.
+		let subscription = Subscription::default().with_ranges([track::Range::from(track::Start::Live {
+			min: Duration::from_millis(2),
+			max: None,
+		})]);
 		let sub = routes.consume().subscribe(subscription.into());
 		let mut reader = sub.reader.lock().unwrap();
 		let (groups, mirrored) = (reader.groups, reader.mirrored.clone());
@@ -11021,9 +11022,10 @@ mod test {
 		}
 		routes.serve(a.consume());
 		// A live join `back` behind the newest frame, a range of its own for each.
+		// No `max`, so a copy is asked for it where it resolved; see `Range::asked`.
 		let join = |back| track::Start::Live {
 			min: Duration::from_millis(back),
-			max: Some(HOUR),
+			max: None,
 		};
 		let ranges = |back| {
 			Subscription::default().with_ranges([track::Range {
@@ -11067,7 +11069,7 @@ mod test {
 		let front = logical(&routes);
 		let a = copy();
 		routes.serve(a.consume());
-		let mut live: Vec<_> = (0..5).map(|_| subscribe(&front, HOUR)).collect();
+		let mut live: Vec<_> = (0..5).map(|_| history(&front)).collect();
 		write(&a, 5);
 		for sub in &mut live {
 			assert_eq!(recv(sub).start, 5);
@@ -11075,7 +11077,7 @@ mod test {
 		let demand = front.subscription().unwrap();
 		assert_eq!(routes.subscription(demand.clone(), 5).start(), Some(5));
 		for _ in 0..64 {
-			drop(subscribe(&front, HOUR));
+			drop(history(&front));
 		}
 		assert_eq!(routes.subscription(demand, 5).start(), Some(5));
 		// Swept each time it fills, so it grows by doubling over the most readers alive at
@@ -11090,8 +11092,8 @@ mod test {
 		let front = logical(&routes);
 		let a = copy();
 		routes.serve(a.consume());
-		let mut first = subscribe(&front, HOUR);
-		let mut second = subscribe(&front, HOUR);
+		let mut first = history(&front);
+		let mut second = history(&front);
 		write(&a, 5);
 		assert_eq!(recv(&mut first).start, 5);
 		let demand = front.subscription().unwrap();
@@ -11104,7 +11106,7 @@ mod test {
 		// From the boundary, the largest group held: what the second reader lacks below it is
 		// the capped copy's to drain, or asked of the new route once a switch finds it missing.
 		assert_eq!(routes.subscription(demand.clone(), 2).start(), Some(10));
-		let pending = front.consume().subscribe(Subscription::default().with_max(HOUR));
+		let pending = history(&front);
 		assert_eq!(routes.subscription(front.subscription().unwrap(), 3).start(), None);
 		drop(pending);
 		drop(second);
