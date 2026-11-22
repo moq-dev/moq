@@ -4314,6 +4314,46 @@ fn recovered_crypto_precedes_unsent_flight() {
 	assert!(is_confirmed(pair.client_conn_mut(client_ch)));
 }
 
+/// A requeued handshake flight goes out in offset order, behind none of its later bytes.
+///
+/// The client, with a 4 KiB crypto buffer, holds the flight up to the datagram lost at offset
+/// 4420. Its retransmission is lost too, and the flight's tail never arrived, so a probe re-sends
+/// both; a tail ahead of the retransmission lands past the client's buffer and closes it.
+#[test]
+fn requeued_crypto_keeps_offset_order() {
+	let _guard = subscribe();
+	let (cert, key) = big_cert_and_key();
+	let mut pair = Pair::new(Default::default(), server_config_with_cert(cert.clone(), key));
+	pair.latency = Duration::from_millis(10);
+	let mut client = client_config_with_certs(vec![cert]);
+	client.transport.crypto_buffer_size = 4096;
+	let client_ch = pair.begin_connect(client);
+
+	// The server's datagrams by index: 4 holds offset 4420, 6 to 8 the flight's tail, and 12 the
+	// retransmission of 4420
+	const LOST: [usize; 5] = [4, 6, 7, 8, 12];
+	let mut sent = 0;
+	while !is_confirmed(pair.client_conn_mut(client_ch)) {
+		pair.drive_client();
+		pair.server.drive(pair.time, pair.client.addr);
+		let outbound = mem::take(&mut pair.server.outbound);
+		let batch = outbound.len();
+		for (index, datagram) in (sent..).zip(outbound) {
+			if !LOST.contains(&index) {
+				pair.server.outbound.push_back(datagram);
+			}
+		}
+		sent += batch;
+		pair.drive_server();
+		// Nothing left to wake: a closed client fails the assertion below
+		match min_opt(pair.client.next_wakeup(), pair.server.next_wakeup()) {
+			Some(t) => pair.time = pair.time.max(t),
+			None => break,
+		}
+	}
+	assert!(is_confirmed(pair.client_conn_mut(client_ch)));
+}
+
 /// A short idle timeout does not cut the handshake to two Initial flights.
 ///
 /// Before an RTT sample the PTO is 999ms, so a 2s idle timeout is armed at 2997ms, while
