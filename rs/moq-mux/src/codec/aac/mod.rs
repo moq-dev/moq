@@ -337,7 +337,10 @@ fn read_core<T: Buf>(reader: &mut BitReader<T>, object_type: u8, sample_rate: u3
 fn read_sample_rate<T: Buf>(reader: &mut BitReader<T>) -> Result<u32> {
 	let index = reader.read(4, Error::IncompleteConfig)? as u8;
 	if index == 15 {
-		return reader.read(24, Error::ExplicitSampleRateTooShort);
+		return match reader.read(24, Error::ExplicitSampleRateTooShort)? {
+			0 => Err(Error::UnsupportedConfig("an explicit sample rate of zero")),
+			rate => Ok(rate),
+		};
 	}
 	SAMPLE_RATES
 		.get(index as usize)
@@ -646,6 +649,12 @@ mod tests {
 		assert_eq!(cfg.profile, 2);
 		assert_eq!(cfg.sample_rate, 44100);
 		assert_eq!(cfg.channel_count, 2);
+	}
+
+	/// An explicit rate of zero, escape index 15 then 24 zero bits, describes no audio.
+	#[test]
+	fn explicit_zero_sample_rate_is_refused() {
+		assert!(Config::parse(&mut [0x17u8, 0x80, 0x00, 0x00, 0x10].as_slice()).is_err());
 	}
 
 	#[test]
