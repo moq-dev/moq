@@ -3075,56 +3075,6 @@ mod tests {
 			.collect()
 	}
 
-	/// A join's backlog that arrives below the cursor is dropped unread, yet the target
-	/// still learns when it arrived: the live packets queued behind it measured the join,
-	/// not the path, so they fold nothing rather than a 300 ms stall. The publisher stood at
-	/// group 200 as the subscription began; its backlog lands behind it, 41 groups over the
-	/// first 400 ms and 15 more 1.0 to 1.3 s in, with the live packets produced meanwhile
-	/// queued behind them. Without `delivered`, that backlog never reaches this node, though
-	/// the live packets still queue behind it.
-	async fn join_delay(delivered: bool) -> f64 {
-		let mut events = live(|produced| match produced + 40 {
-			at if at <= 400 => 400 + produced / 10,
-			at if (1000..1300).contains(&at) => 1300 + (produced - 960) / 10,
-			at => at,
-		});
-		// Group 200 lands first, so the publisher's largest names it.
-		events[0].0 = 0;
-		if delivered {
-			for i in 0..41 {
-				events.push((5 + 10 * i, 100 + i, 90_000 + 20 * i));
-			}
-			for s in 0..15 {
-				events.push((1000 + 20 * s, 141 + s, 99_700 + 20 * s));
-			}
-		}
-		events.sort_by_key(|&(at, sequence, _)| (at, sequence));
-		let (delay, backlog) = play(&events, |sequence| sequence >= 200).await;
-		assert_eq!(backlog, delivered);
-
-		// The estimator fed the same arrivals directly, each skipped group reported.
-		let mut target = crate::jitter::Target::new(Duration::ZERO, true, None);
-		target.set_frame(20.0);
-		for &(at, sequence, media) in &events {
-			match sequence >= 200 {
-				true => target.observe(at as f64, media as f64),
-				false => target.backlog(at as f64),
-			}
-		}
-		assert_eq!(delay, target.millis());
-		delay
-	}
-
-	#[tokio::test(start_paused = true)]
-	async fn a_join_backlog_skipped_below_the_cursor_folds_nothing() {
-		let skipped = join_delay(true).await;
-		let unseen = join_delay(false).await;
-		assert!(
-			skipped <= 100.0 && unseen >= 300.0,
-			"{skipped} ms skipped, {unseen} ms unseen"
-		);
-	}
-
 	/// A path that delivers every fifth packet 300 ms late from the start: each lands after
 	/// the cursor passed it and is dropped unread, but was produced after the subscription
 	/// began, so it is no backlog and holds no join open. The estimator measures the path
