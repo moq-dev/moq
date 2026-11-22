@@ -270,9 +270,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 	// application admitted the peer under confine it. A server may widen its handles so
 	// in-band AUTH can regrant, which leaves the grant as the only record of a scoped peer.
 	our_setup.node = match (version.has_routes(), &publish, &subscribe) {
-		(true, Some(publish), Some(subscribe)) => publish
-			.node_id(subscribe)
-			.filter(|_| auth.admits_whole()),
+		(true, Some(publish), Some(subscribe)) => publish.node_id(subscribe).filter(|_| auth.admits_whole()),
 		_ => None,
 	};
 	let routing = our_setup.node.is_some();

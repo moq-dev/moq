@@ -81,7 +81,10 @@ fn grant(path: &str) -> Grant {
 	let all = moq_net::Prefixes::all();
 	let mut grant = match path {
 		"/scoped" => {
-			let tenant: moq_net::Prefixes = ["tenant-a"].map(|prefix| prefix.parse().expect("a path")).into_iter().collect();
+			let tenant: moq_net::Prefixes = ["tenant-a"]
+				.map(|prefix| prefix.parse().expect("a path"))
+				.into_iter()
+				.collect();
 			Grant::new(tenant.clone(), tenant)
 		}
 		_ => Grant::new(all.clone(), all),
@@ -478,6 +481,9 @@ async fn scoped_link_exchanges_claims_inner() {
 	.await;
 	read_frame(&edge.origin, "tenant-a/cdn").await;
 	read_frame(&cdn.origin, "tenant-a/edge").await;
-	let at_edge = routes_when("the edge settles", &edge.origin, |routes| has(routes, &["tenant-a/edge"])).await;
+	let at_edge = routes_when("the edge settles", &edge.origin, |routes| {
+		has(routes, &["tenant-a/edge"])
+	})
+	.await;
 	assert!(!at_edge.contains_key("other/cam"), "the grant leaked: {at_edge:?}");
 }
