@@ -3,9 +3,9 @@
 //! A lite-06 relay copy of a timestamp-keyed track whose publisher never says which keys
 //! between its group starts are empty, and resets its first groups as `Old` after their
 //! headers went out: an ordered reader on the relay reaches the later groups, and the copy
-//! asks upstream about the keys between group starts once per run, not once per key. A run
-//! still asked when the publisher ends the track is answered by upstream before the copy
-//! finishes.
+//! asks upstream about the keys between group starts once per run, not once per key, on each
+//! hop of a relay chain too. A run still asked when the publisher ends the track is answered
+//! by upstream before the copy finishes.
 
 use crate::support;
 
@@ -41,13 +41,14 @@ fn fetches(pair: &support::harness::MockPair) -> usize {
 #[kio::test]
 async fn reset_groups_cost_no_fetch_per_key() {
 	// The ordered reader alone, from the first group; then behind a live reader holding the
-	// copy, joining once the resets are over.
-	for (live, join) in [(false, 0), (true, RESET + 1)] {
-		reset_groups(live, join).await;
+	// copy, joining once the resets are over; then alone again, two relays from the publisher,
+	// where the first answers each run's SUBSCRIBE from where its own copy resumes.
+	for (live, join, hops) in [(false, 0, 1), (true, RESET + 1, 1), (false, 0, 2)] {
+		reset_groups(live, join, hops).await;
 	}
 }
 
-async fn reset_groups(live: bool, join: u64) {
+async fn reset_groups(live: bool, join: u64, hops: u64) {
 	let publisher = origin(1);
 	let broadcast = publisher.route("bcast", origin::RouteOptions::hidden()).unwrap();
 	let track = broadcast
@@ -61,13 +62,22 @@ async fn reset_groups(live: bool, join: u64) {
 		.unwrap();
 	broadcast.announce().unwrap();
 
-	let relay = origin(2);
-	let mut options = MockConnectOptions::new("moq-lite-06".parse::<Version>().unwrap());
-	// Each FETCH costs a round trip, as on a network, so a walk shows within the run.
-	options.latency = Duration::from_millis(5);
-	options.server_publish = Some(publisher.consume());
-	options.client_subscribe = Some(relay.clone());
-	let upstream = connect_mock(options).await;
+	// Each relay copies the hop before it, the reader on the last.
+	let mut links = Vec::new();
+	let mut relays = Vec::new();
+	let mut source = publisher.consume();
+	for hop in 0..hops {
+		let relay = origin(hop + 2);
+		let mut options = MockConnectOptions::new("moq-lite-06".parse::<Version>().unwrap());
+		// Each FETCH costs a round trip, as on a network, so a walk shows within the run.
+		options.latency = Duration::from_millis(5);
+		options.server_publish = Some(source);
+		options.client_subscribe = Some(relay.clone());
+		links.push(connect_mock(options).await);
+		source = relay.consume();
+		relays.push(relay);
+	}
+	let relay = relays.last().unwrap().clone();
 	let remote = relay
 		.consume()
 		.follow("bcast", None)
@@ -140,14 +150,20 @@ async fn reset_groups(live: bool, join: u64) {
 		.await
 		.expect("the reader reaches the last group")
 		.unwrap();
-	assert_eq!(keys.last(), Some(&((GROUPS - 1) * GROUP)), "live {live}: read {keys:?}");
-	// At most one request per group: never one per key between them.
-	let fetched = fetches(&upstream);
-	assert!(
-		fetched <= GROUPS as usize,
-		"live {live}: {fetched} fetches for {GROUPS} groups"
+	assert_eq!(
+		keys.last(),
+		Some(&((GROUPS - 1) * GROUP)),
+		"live {live}, hops {hops}: read {keys:?}"
 	);
-	drop((track, broadcast, upstream, publisher, relay, finished));
+	// At most one request per group on each hop: never one per key between them.
+	for (hop, link) in links.iter().enumerate() {
+		let requests = fetches(link) + subscribes(link);
+		assert!(
+			requests <= 2 * GROUPS as usize,
+			"live {live}, hop {hop} of {hops}: {requests} requests for {GROUPS} groups"
+		);
+	}
+	drop((track, broadcast, links, publisher, relays, finished));
 }
 
 /// The SUBSCRIBEs the relay opened upstream: SUBSCRIBE's lite stream type is 2.
