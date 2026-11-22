@@ -1687,27 +1687,32 @@ test("a short group the replacement lacks reads on once it lands there", async (
 	close();
 });
 
-test("a short group on a failed route waits for the next one", async () => {
-	const { a, b, swap, active, close } = await setup();
-	const ta = copy(a);
-	const tb = copy(b);
-	const sub = active.track("seq").subscribe({ delay: { max: Duration.millis(300_000) } });
-	ta.write(0n, 1);
-	const group = sub.tryRecvGroup();
-	if (!group) throw new Error("expected group 0");
-	ta.producer.abort(new StreamError(StreamCode.SessionClosed));
-	await settle();
-	expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
-	const reading = group.readFrame();
-	expect(await isPending(reading)).toBe(true);
-	tb.write(0n, 2);
-	await swap();
-	expect(dec.decode((await reading)?.payload)).toBe("0.1");
-	expect(await group.readFrame()).toBeUndefined();
+// Taken after the failure too: a group the copy buffered for the reader is no less continuable
+// for not being taken yet, as a Rust reader takes it from the cache.
+for (const taken of ["before", "after"]) {
+	test(`a short group on a failed route waits for the next one, taken ${taken} the failure`, async () => {
+		const { a, b, swap, active, close } = await setup();
+		const ta = copy(a);
+		const tb = copy(b);
+		const sub = active.track("seq").subscribe({ delay: { max: Duration.millis(300_000) } });
+		ta.write(0n, 1);
+		let group = taken === "before" ? sub.tryRecvGroup() : undefined;
+		ta.producer.abort(new StreamError(StreamCode.SessionClosed));
+		await settle();
+		group ??= sub.tryRecvGroup();
+		if (!group) throw new Error("expected group 0");
+		expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+		const reading = group.readFrame();
+		expect(await isPending(reading)).toBe(true);
+		tb.write(0n, 2);
+		await swap();
+		expect(dec.decode((await reading)?.payload)).toBe("0.1");
+		expect(await group.readFrame()).toBeUndefined();
 
-	sub.close();
-	close();
-});
+		sub.close();
+		close();
+	});
+}
 
 test("a short group ends once no route holds more of it", async () => {
 	const { a, b, swap, active, close } = await setup();
