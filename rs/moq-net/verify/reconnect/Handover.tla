@@ -16,6 +16,10 @@
 (* session at any time, and every deadline passes at any time, since the   *)
 (* configured durations can order them either way.                         *)
 (*                                                                         *)
+(* `Connection::drain` stops the loop as `close` does, then sends the live *)
+(* session a GOAWAY and closes it once idle or at its deadline. That wait, *)
+(* `hold`, and the predecessor's cap are left to moq-tokio's tests.        *)
+(*                                                                         *)
 (* Scope: one target, redirects between endpoints the policy accepts plus  *)
 (* one it refuses, no retry window, no tokens, not connecting once, and no *)
 (* redirect-loop scoring. A session's age stands in for its tenure: 1 is   *)
@@ -56,7 +60,7 @@ VARIABLES
     lc,        \* `Lifecycle`: "connecting", "live", "offline", "closed"
     lcSess,    \* `Live::session` while lc = "live"
     migrating, \* `Live::migrating.is_some()`
-    spred,     \* the predecessor `Shared` mirrors for `Connection::close`
+    spred,     \* the predecessor `Shared` mirrors for `Connection::close` and `drain`
     started,   \* `Presence::sessions_started`
     ended,     \* `Presence::sessions_ended`
     misdials,  \* 1 once a dial went elsewhere than an unheeded redirect named
@@ -657,7 +661,8 @@ NoStaleSession ==
 
 \* What the handle reports is where the policy is: Connected on its live
 \* session, Migrating on its draining predecessor, Closed once it is done,
-\* and `Connection::close` drains the policy's predecessor.
+\* and `Connection::close` and `drain` (both take the sessions through `stop`) end the
+\* policy's predecessor.
 StatusTruthful ==
     Parked =>
         /\ lc = "live" /\ ~migrating => live = lcSess

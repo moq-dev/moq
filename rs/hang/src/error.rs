@@ -33,33 +33,9 @@ pub enum Error {
 	#[error("expected int")]
 	ExpectedInt(#[from] std::num::ParseIntError),
 
-	/// Failed to decode hexadecimal data.
-	#[error("hex error: {0}")]
-	Hex(String),
-
 	/// The timestamp is too large.
 	#[error("timestamp overflow")]
 	TimestampOverflow(#[from] moq_net::TimeOverflow),
-
-	/// The track must start with a keyframe.
-	#[error("must start with a keyframe")]
-	MissingKeyframe,
-
-	/// The timestamp of each keyframe must be monotonically increasing.
-	#[error("timestamp went backwards")]
-	TimestampBackwards,
-
-	/// Failed to parse a URL.
-	#[error("url parse error: {0}")]
-	Url(String),
-
-	/// A group contained zero frames.
-	#[error("empty group")]
-	EmptyGroup,
-
-	/// The format is not recognized.
-	#[error("unknown format: {0}")]
-	UnknownFormat(String),
 
 	/// A track with this name already exists in the catalog.
 	#[error("duplicate track: {0}")]
@@ -100,17 +76,5 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl From<serde_json::Error> for Error {
 	fn from(err: serde_json::Error) -> Self {
 		Error::Json(err.to_string())
-	}
-}
-
-impl From<hex::FromHexError> for Error {
-	fn from(err: hex::FromHexError) -> Self {
-		Error::Hex(err.to_string())
-	}
-}
-
-impl From<url::ParseError> for Error {
-	fn from(err: url::ParseError) -> Self {
-		Error::Url(err.to_string())
 	}
 }

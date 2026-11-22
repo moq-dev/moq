@@ -701,7 +701,7 @@ impl<O: Output> Media<O> {
 				let decoder = moq_video::decode::Sink::open(&config, &decode).await?;
 				// Nothing older than the playhead is worth presenting, so the delay
 				// doubles as the staleness budget on the wire.
-				let delay = moq_net::track::Delay {
+				let delay = moq_mux::container::Delay {
 					min: Some(self.args.video_delay()),
 					max: Some(self.args.video_delay()),
 				};

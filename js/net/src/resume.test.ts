@@ -950,12 +950,41 @@ test("a routed reader serves its live join as the serving copy resolves it", asy
 	front.serve(a.consume());
 	const sub = front.consumer
 		.track("seq")
-		.subscribe({ delay: { min: Duration.ZERO, max: null }, ranges: [{ end: 5n }] });
+		.subscribe({ delay: { max: null }, ranges: [{ start: { live: Duration.ZERO }, end: 5n }] });
 	try {
 		await settle();
 		// The copy holds the groups the join starts among, so it starts at the latest one.
 		expect(hooks.servingEnd(sub)).toBe(6n);
 		expect(hooks.servingRuns(sub, 0n, 10n)).toEqual([{ start: 4n, end: 6n }]);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		a.close();
+	}
+});
+
+// A front's reader subscribes to a copy only once a route serves it, which may be after the copy's
+// upstream answered the reader's live join. The copy takes the tick the reader added its range at,
+// not its own later one, so it places the join from that answer rather than asking again. Mirrors
+// the Rust fix behind `Copy::stamp`.
+test("a front's reader places a live join from an answer its copy recorded before subscribing", async () => {
+	const a = new BroadcastProducer();
+	const ta = copy(a);
+	hooks.receiveTrack(ta.producer);
+	hooks.answersJoins(ta.producer);
+	for (let key = 0n; key < 5n; key++) ta.write(key);
+	const front = new Front();
+	const sub = front.consumer
+		.track("seq")
+		.subscribe({ delay: { max: null }, ranges: [{ start: { live: Duration.ZERO } }] });
+	try {
+		// The copy's upstream answered the join after the reader added it, before any copy asked.
+		hooks.answerJoin(ta.producer, 0, undefined, 3n, NO_MAX_DELAY);
+		front.serve(a.consume());
+		await settle();
+		await settle();
+		expect(drain(sub)).toEqual([3n, 4n]);
+		expect(hooks.requested(ta.producer).joins()).toEqual([]);
 	} finally {
 		sub.close();
 		front.consumer.close();
@@ -1002,6 +1031,290 @@ test("a bounded read through routes ends once its window is read, across a route
 	} finally {
 		sub.close();
 		floored.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+	}
+});
+
+/**
+ * A group of the window under the serving copy's resume point that the local floor keeps out and
+ * the publisher skipped is accounted for: the read ends once the rest is read. Mirrors the Rust
+ * `a_skip_under_the_resume_point_the_local_floor_keeps_out_ends_the_read`.
+ */
+test("a skip under the resume point the local floor keeps out ends the read", async () => {
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	ta.write(0n);
+	ta.producer.skipGroups(1n, 2n);
+	ta.write(2n);
+	const front = new Front();
+	front.serve(a.consume());
+	const sub = front.consumer
+		.track("seq")
+		.subscribe({ delay: { max: Duration.millis(3_600_000) }, ranges: [{ start: 0n, end: 3n }] });
+	try {
+		await settle();
+		expect(drain(sub)).toEqual([0n, 2n]);
+		tb.write(3n);
+		front.serve(b.consume());
+		sub.withRange({ start: { included: 2n }, end: { excluded: 4n } });
+		await settle();
+		expect(drain(sub)).toEqual([3n]);
+		expect(await isPending(sub.recvGroup())).toBe(false);
+		expect(await sub.recvGroup()).toBeUndefined();
+	} finally {
+		sub.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+	}
+});
+
+/**
+ * A gap the local floor keeps out only the start of, which the replaced copy skipped, is accounted
+ * for once that copy goes, though the copy still owed the rest of the gap. Mirrors the Rust
+ * `a_skip_starting_a_gap_the_local_floor_keeps_out_ends_the_read`.
+ */
+test("a skip starting a gap the local floor keeps out ends the read", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	ta.write(0n);
+	ta.producer.skipGroups(1n, 2n);
+	hooks.dropTrackGroups(ta.producer, 2n, 3n, { error: new StreamError(StreamCode.NotFound) });
+	ta.write(3n);
+	const front = new Front();
+	front.serve(a.consume());
+	const sub = front.consumer
+		.track("seq")
+		.subscribe({ delay: { max: Duration.millis(3_600_000) }, ranges: [{ start: 0n, end: 4n }] });
+	try {
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([0n, 3n]);
+		tb.write(4n);
+		front.serve(b.consume());
+		sub.withRange({ start: { included: 2n }, end: { excluded: 5n } });
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([4n]);
+		// The replaced copy may still deliver 2.
+		const ended = sub.recvGroup();
+		expect(await isPending(ended)).toBe(true);
+		// Past the grace a late group is waited for, the replaced copy has nothing more and goes.
+		await clock.advance(Duration.millis(3_600_000));
+		expect(await ended).toBeUndefined();
+	} finally {
+		sub.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+		installed.close();
+	}
+});
+
+/**
+ * As above, with the kept-out start of the gap skipped in parts: the replaced copy knows one, the
+ * serving copy the other, and neither knows it whole. Mirrors the Rust
+ * `a_skip_split_between_a_replaced_and_the_serving_copy_ends_the_read`.
+ */
+test("a skip split between a replaced and the serving copy ends the read", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	ta.write(0n);
+	hooks.dropTrackGroups(ta.producer, 1n, 2n, { error: new StreamError(StreamCode.NotFound) });
+	ta.producer.skipGroups(2n, 3n);
+	hooks.dropTrackGroups(ta.producer, 3n, 4n, { error: new StreamError(StreamCode.NotFound) });
+	ta.write(4n);
+	const front = new Front();
+	front.serve(a.consume());
+	const sub = front.consumer
+		.track("seq")
+		.subscribe({ delay: { max: Duration.millis(3_600_000) }, ranges: [{ start: 0n, end: 5n }] });
+	try {
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([0n, 4n]);
+		tb.producer.skipGroups(1n, 2n);
+		tb.write(5n);
+		front.serve(b.consume());
+		sub.withRange({ start: { included: 3n }, end: { excluded: 6n } });
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([5n]);
+		// The replaced copy may still deliver 3.
+		const ended = sub.recvGroup();
+		expect(await isPending(ended)).toBe(true);
+		await clock.advance(Duration.millis(3_600_000));
+		expect(await ended).toBeUndefined();
+	} finally {
+		sub.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+		installed.close();
+	}
+});
+
+/**
+ * As above, with the replaced route behind an inner front: its skip is read through that front's
+ * serving copy, before the copy goes. Mirrors the Rust
+ * `a_skip_behind_an_inner_front_the_local_floor_keeps_out_ends_the_read`.
+ */
+test("a skip behind an inner front the local floor keeps out ends the read", async () => {
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	ta.write(0n);
+	ta.producer.skipGroups(1n, 2n);
+	ta.write(2n);
+	const inner = new Front();
+	inner.serve(a.consume());
+	const front = new Front();
+	front.serve(inner.consumer);
+	const sub = front.consumer
+		.track("seq")
+		.subscribe({ delay: { max: Duration.millis(3_600_000) }, ranges: [{ start: 0n, end: 3n }] });
+	try {
+		await settle();
+		expect(drain(sub)).toEqual([0n, 2n]);
+		tb.write(3n);
+		front.serve(b.consume());
+		sub.withRange({ start: { included: 2n }, end: { excluded: 4n } });
+		await settle();
+		expect(drain(sub)).toEqual([3n]);
+		expect(await isPending(sub.recvGroup())).toBe(false);
+		expect(await sub.recvGroup()).toBeUndefined();
+	} finally {
+		sub.close();
+		front.consumer.close();
+		inner.consumer.close();
+		a.close();
+		b.close();
+	}
+});
+
+/**
+ * A skip known only to a route an inner front replaced counts for an outer front reading that inner
+ * front as a copy, after the outer front switches away from it too. Mirrors the Rust
+ * `a_skip_behind_an_inner_switch_ends_the_read`.
+ */
+test("a skip behind an inner switch ends the read", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const c = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	const tc = copy(c);
+	ta.write(0n);
+	ta.producer.skipGroups(1n, 2n);
+	ta.write(2n);
+	const inner = new Front();
+	inner.serve(a.consume());
+	const front = new Front();
+	front.serve(inner.consumer);
+	const sub = front.consumer
+		.track("seq")
+		.subscribe({ delay: { max: Duration.millis(3_600_000) }, ranges: [{ start: 0n, end: 4n }] });
+	try {
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([0n, 2n]);
+		tb.write(3n);
+		inner.serve(b.consume());
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([3n]);
+		tc.write(4n);
+		front.serve(c.consume());
+		sub.withRange({ start: { included: 2n }, end: { excluded: 5n } });
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([4n]);
+		const ended = sub.recvGroup();
+		await clock.advance(Duration.millis(3_600_000));
+		expect(await ended).toBeUndefined();
+	} finally {
+		sub.close();
+		front.consumer.close();
+		inner.consumer.close();
+		a.close();
+		b.close();
+		c.close();
+		installed.close();
+	}
+});
+
+/**
+ * On one route, a group of the window that the local floor keeps out and the publisher skipped is
+ * the serving copy's to account for: the read ends once the rest is read. Mirrors the Rust
+ * `a_skip_under_the_local_floor_ends_a_single_route_read`.
+ */
+test("a skip under the local floor ends a single route read", async () => {
+	const a = new BroadcastProducer();
+	const ta = copy(a);
+	ta.producer.skipGroups(0n, 1n);
+	ta.write(1n);
+	ta.write(2n);
+	const front = new Front();
+	front.serve(a.consume());
+	const sub = front.consumer
+		.track("seq")
+		.subscribe({ delay: { max: Duration.millis(3_600_000) }, ranges: [{ start: 0n, end: 2n }] })
+		.withRange({ start: { included: 1n }, end: { excluded: 3n } });
+	try {
+		await settle();
+		expect(drain(sub)).toEqual([1n, 2n]);
+		expect(await isPending(sub.recvGroup())).toBe(false);
+		expect(await sub.recvGroup()).toBeUndefined();
+	} finally {
+		sub.close();
+		front.consumer.close();
+		a.close();
+	}
+});
+
+/**
+ * With overlapping ranges, a group the publisher skipped above the serving copy's resume point is
+ * accounted for through either range, wherever an earlier copy placed the other. Mirrors the Rust
+ * `a_skip_between_overlapping_placements_ends_the_read`.
+ */
+test("a skip between overlapping placements ends the read", async () => {
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	ta.producer.skipGroups(0n, 6n);
+	ta.write(6n);
+	const front = new Front();
+	front.serve(a.consume());
+	const ranges = [
+		{ start: 8n, end: 8n },
+		{ start: 0n, end: 8n },
+	];
+	const sub = front.consumer.track("seq").subscribe({ delay: { max: Duration.millis(3_600_000) }, ranges });
+	try {
+		await settle();
+		expect(drain(sub)).toEqual([6n]);
+		tb.producer.skipGroups(0n, 6n);
+		front.serve(b.consume());
+		await settle();
+		expect(drain(sub)).toEqual([]);
+		tb.producer.skipGroups(7n, 8n);
+		tb.write(8n);
+		tb.write(9n);
+		await settle();
+		expect(drain(sub)).toEqual([8n]);
+		expect(await isPending(sub.recvGroup())).toBe(false);
+		expect(await sub.recvGroup()).toBeUndefined();
+	} finally {
+		sub.close();
 		front.consumer.close();
 		a.close();
 		b.close();
@@ -1403,27 +1716,32 @@ test("a short group the replacement lacks reads on once it lands there", async (
 	close();
 });
 
-test("a short group on a failed route waits for the next one", async () => {
-	const { a, b, swap, active, close } = await setup();
-	const ta = copy(a);
-	const tb = copy(b);
-	const sub = active.track("seq").subscribe({ delay: { max: Duration.millis(300_000) } });
-	ta.write(0n, 1);
-	const group = sub.tryRecvGroup();
-	if (!group) throw new Error("expected group 0");
-	ta.producer.abort(new StreamError(StreamCode.SessionClosed));
-	await settle();
-	expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
-	const reading = group.readFrame();
-	expect(await isPending(reading)).toBe(true);
-	tb.write(0n, 2);
-	await swap();
-	expect(dec.decode((await reading)?.payload)).toBe("0.1");
-	expect(await group.readFrame()).toBeUndefined();
+// Taken after the failure too: a group the copy buffered for the reader is no less continuable
+// for not being taken yet, as a Rust reader takes it from the cache.
+for (const taken of ["before", "after"]) {
+	test(`a short group on a failed route waits for the next one, taken ${taken} the failure`, async () => {
+		const { a, b, swap, active, close } = await setup();
+		const ta = copy(a);
+		const tb = copy(b);
+		const sub = active.track("seq").subscribe({ delay: { max: Duration.millis(300_000) } });
+		ta.write(0n, 1);
+		let group = taken === "before" ? sub.tryRecvGroup() : undefined;
+		ta.producer.abort(new StreamError(StreamCode.SessionClosed));
+		await settle();
+		group ??= sub.tryRecvGroup();
+		if (!group) throw new Error("expected group 0");
+		expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+		const reading = group.readFrame();
+		expect(await isPending(reading)).toBe(true);
+		tb.write(0n, 2);
+		await swap();
+		expect(dec.decode((await reading)?.payload)).toBe("0.1");
+		expect(await group.readFrame()).toBeUndefined();
 
-	sub.close();
-	close();
-});
+		sub.close();
+		close();
+	});
+}
 
 test("a short group ends once no route holds more of it", async () => {
 	const { a, b, swap, active, close } = await setup();

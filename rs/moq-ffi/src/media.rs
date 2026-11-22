@@ -1788,7 +1788,10 @@ mod read_tests {
 	async fn raw_media_catalog_warmup_widens_the_subscription() {
 		let (_broadcast, track, _reader) = subscribe_warmup().await;
 		let subscription = track.subscription().unwrap();
-		assert_eq!(subscription.delay.min, Some(DELAY + WARMUP));
+		assert_eq!(
+			subscription.ranges,
+			[moq_net::track::Range::from(moq_net::track::Start::Live(DELAY + WARMUP))]
+		);
 		assert_eq!(subscription.delay.max, Some(DELAY + WARMUP));
 	}
 
@@ -2083,11 +2086,11 @@ impl MoqMediaTrackConsumer {
 		let resolved = broadcast
 			.resolve_inner(reference.as_deref(), instance.as_deref())
 			.await?;
-		let subscription = subscription
-			.map(moq_net::track::Subscription::try_from)
-			.transpose()?
-			.unwrap_or_default();
-		let playout = moq_mux::container::Playout::new(subscription.delay, warmup);
+		let (subscription, delay) = match subscription {
+			Some(subscription) => subscription.resolve()?,
+			None => Default::default(),
+		};
+		let playout = moq_mux::container::Playout::new(delay, warmup);
 		let subscription = playout.subscription(subscription);
 		let track = broadcast
 			.driver

@@ -232,15 +232,26 @@ impl Session {
 	///
 	/// Could error if registration fails, if the resource is invalid, or if
 	/// we run out of memory.
-	pub fn register_cuda_resource(
+	///
+	/// # Safety
+	///
+	/// NVENC reads `pitch` bytes per row for the session's height (times the
+	/// format's plane factor) from the buffer, and the buffer's length is not
+	/// checked against that: it must be at least that large, and `pitch` must
+	/// describe its rows. The buffer must also not be shared with CUDA work that
+	/// writes it while a [`MappedResource`] of it is alive.
+	pub unsafe fn register_cuda_resource(
 		&self,
 		pitch: u32,
 		mapped_buffer: MappedBuffer,
 	) -> Result<RegisteredResource<MappedBuffer>, EncodeError> {
 		let stream = self.encoder.ctx.default_stream();
+		// The read-recording guard drops here, before NVENC reads: a `MappedBuffer`
+		// is never written, and its owner is released only after the unregister.
 		let (device_ptr, _) = mapped_buffer.device_ptr(&stream);
 		// SAFETY: `mapped_buffer` owns the allocation addressed by `device_ptr`
-		// and is retained by the returned registration.
+		// and is retained by the returned registration; the caller vouches for
+		// `pitch` against its size.
 		unsafe {
 			self.register_generic_resource(
 				mapped_buffer,
@@ -294,15 +305,19 @@ impl Session {
 /// Abstraction around input buffer allocated using
 /// the NVIDIA Video Encoder API.
 ///
-/// The buffer is automatically destroyed when dropped.
+/// The buffer is automatically destroyed when dropped. It shares its session's
+/// driver handle, which is not thread-safe, so it cannot leave its thread:
+///
+/// ```compile_fail,E0277
+/// fn is_send<T: Send>() {}
+/// is_send::<moq_nvenc::Buffer>();
+/// ```
 #[derive(Debug)]
 pub struct Buffer {
 	pub(crate) ptr: *mut c_void,
 	pitch: u32,
 	encoder: Arc<Encoder>,
 }
-
-unsafe impl Send for Buffer {}
 
 impl Buffer {
 	/// Lock the input buffer.
@@ -519,14 +534,18 @@ impl Drop for BufferLock<'_> {
 /// Abstraction around the output bitstream buffer that
 /// is used as the output of the encoding.
 ///
-/// The buffer is automatically destroyed when dropped.
+/// The buffer is automatically destroyed when dropped. It shares its session's
+/// driver handle, which is not thread-safe, so it cannot leave its thread:
+///
+/// ```compile_fail,E0277
+/// fn is_send<T: Send>() {}
+/// is_send::<moq_nvenc::Bitstream>();
+/// ```
 #[derive(Debug)]
 pub struct Bitstream {
 	pub(crate) ptr: *mut c_void,
 	pub(crate) encoder: Arc<Encoder>,
 }
-
-unsafe impl Send for Bitstream {}
 
 impl Bitstream {
 	/// Lock the output bitstream.
@@ -577,10 +596,17 @@ impl Bitstream {
 		unsafe { (self.encoder.api.lock_bitstream)(self.encoder.ptr, &mut lock_bitstream_buffer_params) }
 			.result(&self.encoder)?;
 
-		// Get data.
-		let data_ptr = lock_bitstream_buffer_params.bitstreamBufferPtr;
+		let data_ptr = lock_bitstream_buffer_params.bitstreamBufferPtr.cast::<u8>();
 		let data_size = lock_bitstream_buffer_params.bitstreamSizeInBytes as usize;
-		let data = unsafe { std::slice::from_raw_parts_mut(data_ptr.cast::<u8>(), data_size) };
+		// SAFETY: the driver keeps the output valid until the unlock `BitstreamLock` performs on drop.
+		let Some(data) = (unsafe { locked_data(data_ptr, data_size) }) else {
+			// The caller never receives a lock to drop, so unlock here.
+			let _ = unsafe { (self.encoder.api.unlock_bitstream)(self.encoder.ptr, self.ptr) }.result(&self.encoder);
+			return Err(EncodeError::new(
+				ErrorKind::InvalidPtr,
+				Some("the driver locked a non-empty bitstream at a null address".into()),
+			));
+		};
 
 		Ok(BitstreamLock {
 			bitstream: self,
@@ -606,6 +632,23 @@ impl Drop for Bitstream {
 		let _ =
 			unsafe { (self.encoder.api.destroy_bitstream_buffer)(self.encoder.ptr, self.ptr) }.result(&self.encoder);
 	}
+}
+
+/// The bytes the driver locked, empty for an empty output. `None` for a null
+/// address with a nonzero size, which no slice can describe.
+///
+/// # Safety
+///
+/// A non-null `ptr` must be valid for reads of `len` bytes for `'a`.
+unsafe fn locked_data<'a>(ptr: *const u8, len: usize) -> Option<&'a [u8]> {
+	if len == 0 {
+		// An empty output may come with a null address, which a slice must not hold.
+		return Some(&[]);
+	}
+	if ptr.is_null() {
+		return None;
+	}
+	Some(unsafe { std::slice::from_raw_parts(ptr, len) })
 }
 
 /// An RAII lock on the output bitstream buffer.
@@ -675,13 +718,18 @@ impl Drop for BitstreamLock<'_> {
 /// The resource is unregistered when dropped, and only then is its owner
 /// released. The external buffer memory should still be properly destroyed
 /// by the client.
+///
+/// Like the session it belongs to, it cannot leave its thread:
+///
+/// ```compile_fail,E0277
+/// fn is_send<T: Send>() {}
+/// is_send::<moq_nvenc::RegisteredResource<()>>();
+/// ```
 #[derive(Debug)]
 pub struct RegisteredResource<T> {
 	registration: Registration<Arc<Encoder>, T>,
 	pitch: u32,
 }
-
-unsafe impl Send for RegisteredResource<MappedBuffer> {}
 
 impl<T> RegisteredResource<T> {
 	/// Map the resource for one [`Session::encode_picture`]. It is unmapped when
@@ -957,6 +1005,16 @@ mod tests {
 		)
 		.pitch(1920);
 		Registration::new(api, owner, &mut params)
+	}
+
+	#[test]
+	fn locked_data_never_builds_a_slice_from_null() {
+		// An empty output may carry any address; a null one still reads as empty.
+		assert_eq!(unsafe { locked_data(ptr::null(), 0) }, Some(&[][..]));
+		assert_eq!(unsafe { locked_data(ptr::null(), 4) }, None);
+		let bytes = [1u8, 2, 3];
+		assert_eq!(unsafe { locked_data(bytes.as_ptr(), 3) }, Some(&bytes[..]));
+		assert_eq!(unsafe { locked_data(bytes.as_ptr(), 0) }, Some(&[][..]));
 	}
 
 	#[test]

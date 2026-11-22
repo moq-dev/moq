@@ -5,7 +5,7 @@
 //! frames. The [`Session`] also stores some information such as the encode
 //! width and height so that you do not have to keep repeating it each time.
 
-use std::{fmt::Debug, sync::Arc};
+use std::{error::Error, fmt, fmt::Debug, sync::Arc};
 
 use super::{
 	encoder::Encoder,
@@ -25,6 +25,14 @@ use crate::{
 /// You need to call [`Encoder::start_session`] before you can
 /// encode frames using the session. On drop, the session will automatically
 /// send an empty EOS frame to flush the encoder.
+///
+/// The driver session is not thread-safe, so a `Session` cannot leave its
+/// thread, and submitting to it takes `&mut self`:
+///
+/// ```compile_fail,E0277
+/// fn is_send<T: Send>() {}
+/// is_send::<moq_nvenc::Session>();
+/// ```
 pub struct Session {
 	pub(crate) encoder: Arc<Encoder>,
 	pub(crate) width: u32,
@@ -44,6 +52,10 @@ pub struct Session {
 	/// the caller supplied no config (NVENC then uses preset defaults, which we
 	/// can't resubmit because we never saw them).
 	pub(crate) config: Option<Box<NV_ENC_CONFIG>>,
+
+	/// Set once [`end_of_stream`](Self::end_of_stream) is accepted: the driver
+	/// takes no pictures after it.
+	pub(crate) ended: bool,
 }
 
 // Hand-written because the retained bindgen params are plain C structs with no
@@ -151,7 +163,11 @@ impl Session {
 	/// Could error if the encode picture parameters were invalid or otherwise
 	/// incorrect, or if we run out memory.
 	///
-	/// An encoder-busy result is returned as an error so the caller can retry.
+	/// A refused picture hands both buffers back in [`Rejected`], so the caller
+	/// can retry after [`ErrorKind::EncoderBusy`](super::ErrorKind::EncoderBusy)
+	/// without recreating them. Once [`end_of_stream`](Self::end_of_stream) has
+	/// been accepted, every picture is refused with
+	/// [`ErrorKind::InvalidCall`](super::ErrorKind::InvalidCall).
 	/// A need-more-input result is instead represented by the returned
 	/// [`Submission`], which retains both buffers until completion.
 	/// [`Encoder::start_session`] refuses lookahead and B-frames, which are what
@@ -160,9 +176,9 @@ impl Session {
 	/// Safe code cannot release the input while it is in flight because the
 	/// submission owns it:
 	///
-	/// ```compile_fail
+	/// ```compile_fail,E0382
 	/// # use moq_nvenc::{Bitstream, Buffer, EncodePictureParams, Session};
-	/// fn submit(session: &Session, input: Buffer, output: Bitstream) {
+	/// fn submit(session: &mut Session, input: Buffer, output: Bitstream) {
 	///     let pending = session.encode_picture(input, output, EncodePictureParams::default()).unwrap();
 	///     drop(input);
 	///     drop(pending);
@@ -208,7 +224,7 @@ impl Session {
 	/// initialize_params.display_aspect_ratio(16, 9)
 	///     .framerate(30, 1)
 	///     .enable_picture_type_decision();
-	/// let session = encoder.start_session(
+	/// let mut session = encoder.start_session(
 	///     buffer_format,
 	///     initialize_params,
 	/// ).unwrap();
@@ -235,16 +251,22 @@ impl Session {
 	/// let (data, _input_buffer, _output_bitstream) = submission.finish().unwrap();
 	/// ```
 	pub fn encode_picture<I: EncoderInput>(
-		&self,
+		&mut self,
 		mut input_buffer: I,
 		output_bitstream: Bitstream,
 		params: EncodePictureParams,
-	) -> Result<Submission<I>, EncodeError> {
+	) -> Result<Submission<I>, Rejected<I>> {
+		let reject = |error, input, output| Rejected { error, input, output };
+		if self.ended {
+			let error = EncodeError::new(ErrorKind::InvalidCall, Some("the stream already ended".into()));
+			return Err(reject(error, input_buffer, output_bitstream));
+		}
 		if !same_session(input_buffer.encoder(), &output_bitstream.encoder, &self.encoder) {
-			return Err(EncodeError::new(
+			let error = EncodeError::new(
 				ErrorKind::InvalidParam,
 				Some("input and output must belong to this session".into()),
-			));
+			);
+			return Err(reject(error, input_buffer, output_bitstream));
 		}
 		let mut encode_pic_params = NV_ENC_PIC_PARAMS {
 			version: NV_ENC_PIC_PARAMS_VER,
@@ -275,7 +297,7 @@ impl Session {
 			Err(error) if error.kind() == ErrorKind::NeedMoreInput => {
 				Ok(Submission::new(input_buffer, output_bitstream))
 			}
-			Err(error) => Err(error),
+			Err(error) => Err(reject(error, input_buffer, output_bitstream)),
 		}
 	}
 
@@ -283,6 +305,8 @@ impl Session {
 	///
 	/// This function is called automatically on drop, but if you wish to
 	/// get the data after flushing, you should call this function yourself.
+	/// The session takes no more pictures once it is accepted, and a second call
+	/// errors with [`ErrorKind::InvalidCall`](super::ErrorKind::InvalidCall).
 	///
 	/// # Errors
 	///
@@ -291,16 +315,51 @@ impl Session {
 	/// If this returns an error with
 	/// [`ErrorKind::EncoderBusy`](super::ErrorKind::EncoderBusy) then you
 	/// should retry after a few milliseconds.
-	pub fn end_of_stream(&self) -> Result<(), EncodeError> {
+	pub fn end_of_stream(&mut self) -> Result<(), EncodeError> {
+		if self.ended {
+			return Err(EncodeError::new(
+				ErrorKind::InvalidCall,
+				Some("the stream already ended".into()),
+			));
+		}
 		let mut encode_pic_params = NV_ENC_PIC_PARAMS::end_of_stream();
-		unsafe { (self.encoder.api.encode_picture)(self.encoder.ptr, &mut encode_pic_params) }.result(&self.encoder)
+		unsafe { (self.encoder.api.encode_picture)(self.encoder.ptr, &mut encode_pic_params) }.result(&self.encoder)?;
+		// Only after the driver accepts it: a busy or failed EOS may be retried.
+		self.ended = true;
+		Ok(())
 	}
 }
 
 /// Send an EOS notifications on drop to flush the encoder.
 impl Drop for Session {
 	fn drop(&mut self) {
-		let _ = self.end_of_stream();
+		if !self.ended {
+			let _ = self.end_of_stream();
+		}
+	}
+}
+
+/// A picture [`Session::encode_picture`] refused, with the buffers it was given:
+/// the driver never took them, so they are free to reuse.
+#[derive(Debug)]
+pub struct Rejected<I> {
+	/// Why the picture was refused.
+	pub error: EncodeError,
+	/// The input, untouched by the driver.
+	pub input: I,
+	/// The output, untouched by the driver.
+	pub output: Bitstream,
+}
+
+impl<I> fmt::Display for Rejected<I> {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		fmt::Display::fmt(&self.error, f)
+	}
+}
+
+impl<I: Debug> Error for Rejected<I> {
+	fn source(&self) -> Option<&(dyn Error + 'static)> {
+		Some(&self.error)
 	}
 }
 
@@ -754,7 +813,7 @@ mod tests {
 		refuse_explicit(|config| config.rcParams.set_enableExtLookahead(1));
 		refuse_explicit(|config| config.frameIntervalP = 2);
 
-		let session = low_latency_session().expect("NVENC device disappeared");
+		let mut session = low_latency_session().expect("NVENC device disappeared");
 		let input = session.create_input_buffer().unwrap();
 		let output = session.create_output_bitstream().unwrap();
 		session
@@ -802,5 +861,29 @@ mod tests {
 
 		drop(session);
 		assert!(encoder.upgrade().is_none(), "failed submissions kept the session open");
+	}
+
+	/// The driver takes no picture after end-of-stream, so the session refuses
+	/// it before the driver does and hands the buffers back unused.
+	#[test]
+	fn pictures_after_end_of_stream_are_rejected_with_their_buffers() {
+		let Some(mut session) = low_latency_session() else {
+			return;
+		};
+		let input = session.create_input_buffer().unwrap();
+		let output = session.create_output_bitstream().unwrap();
+
+		session.end_of_stream().expect("end of stream was refused");
+		let error = session
+			.end_of_stream()
+			.expect_err("a second end of stream was accepted");
+		assert_eq!(error.kind(), ErrorKind::InvalidCall);
+
+		let rejected = session
+			.encode_picture(input, output, EncodePictureParams::default())
+			.expect_err("a picture after end of stream was accepted");
+		assert_eq!(rejected.error.kind(), ErrorKind::InvalidCall);
+		// The buffers are intact and still destroy cleanly.
+		drop((rejected.input, rejected.output));
 	}
 }

@@ -294,7 +294,7 @@ test("fill: a group a lowered floor asks the feed for is not asked of a fill", a
 	const broadcast = new BroadcastProducer();
 	const track = defined(broadcast.createTrack("video", { maxAge: null }));
 	hooks.receiveTrack(track);
-	const live = track.subscribe({ ranges: [{}], delay: { min: Duration.ZERO, max: null } });
+	const live = track.subscribe({ ranges: [{ start: { live: Duration.ZERO } }], delay: { max: null } });
 	hooks.startTrack(track, { start: 1n });
 	hooks.receiveGroup(track, { start: 1n, offset: 0 }).finish();
 	expect((await live.recvGroup())?.start).toBe(1n);
@@ -997,7 +997,7 @@ test("fill: a filled group stays wanted only while a reader will still read it",
 	const { broadcast, track } = resumed(5n);
 	const requests = track.requests();
 	// A live reader already passed every group below the edge.
-	const live = track.subscribe({ ranges: [{}], delay: { min: Duration.ZERO, max: null } });
+	const live = track.subscribe({ ranges: [{ start: { live: Duration.ZERO } }], delay: { max: null } });
 	expect((await live.ordered().nextGroup())?.start).toBe(5n);
 
 	const reader = track.subscribe(history);

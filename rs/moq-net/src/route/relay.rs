@@ -86,7 +86,7 @@ use crate::Path;
 
 use super::prefix::{ancestors, below, within_any, within_set};
 use super::reader::Reader;
-use super::{Error, Event, Id, Item, Key, MAX_HOPS, Metric, Rev, Shown};
+use super::{Error, Event, Id, Item, Key, MAX_COST, MAX_HOPS, Metric, Rev, Shown};
 
 /// How a forwarding node names itself on a path: its relay, and which start of that
 /// relay's process. A start only grows; one that repeats or goes back gets the relay's
@@ -329,7 +329,7 @@ impl<A: Item> Claim<A> {
 		let rank = (
 			draining || self.draining,
 			Reverse(priority.min(self.priority)),
-			cost.saturating_add(self.cost),
+			cost.saturating_add(self.cost).min(MAX_COST),
 		);
 		(rank, self.marked || route.marked)
 	}
@@ -371,7 +371,7 @@ impl<A: Item> Claim<A> {
 		let mut claim = self.clone();
 		// Saturating, as `model::origin`'s claim cost does, so a claim's cost never
 		// decides whether it can serve.
-		claim.cost = claim.cost.saturating_add(port.cost);
+		claim.cost = claim.cost.saturating_add(port.cost).min(MAX_COST);
 		claim.priority = claim.priority.min(port.priority);
 		claim.marked |= port.upstream;
 		stamp(&mut claim.chain, me, forwards);
@@ -3623,8 +3623,8 @@ mod tests {
 	}
 
 	/// A route whose cost a link would carry past the metric is never used, and never wraps
-	/// round to a cheap one. A claim's cost saturates there instead, so it never decides
-	/// whether the claim can serve.
+	/// round to a cheap one. A claim's cost saturates at the wire ceiling instead, so it
+	/// never decides whether the claim can serve.
 	#[test]
 	fn a_route_past_the_metric_is_never_used() {
 		let mut router = Router::<usize, u64, Run>::new(node(1), debounce(HOP));
@@ -3652,7 +3652,7 @@ mod tests {
 		let told = router.drain().into_iter().any(|(to, msg)| {
 			to == 3
 				&& matches!(&msg, Msg::Announce { changes } if changes.iter().any(|(broadcast, change)| {
-					*broadcast == far && matches!(change, Change::Live(claim) if claim.cost == Metric::MAX)
+					*broadcast == far && matches!(change, Change::Live(claim) if claim.cost == MAX_COST)
 				}))
 		});
 		assert!(told, "told at the metric's ceiling");
@@ -3660,7 +3660,7 @@ mod tests {
 			changes: vec![((p("near"), 7), claim(run(0), Metric::MAX))],
 		};
 		router.recv(3, announce).unwrap();
-		assert_eq!(router.own().1[&(p("near"), 7)].cost, Metric::MAX, "an endpoint's claim");
+		assert_eq!(router.own().1[&(p("near"), 7)].cost, MAX_COST, "an endpoint's claim");
 	}
 
 	/// A route that moves onto another path at the same rank changes no way to its claims,

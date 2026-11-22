@@ -125,7 +125,7 @@ async fn read(range: Range, by_time: bool) -> (BTreeSet<u64>, Vec<(u64, u64)>) {
 #[kio::test]
 async fn a_time_start_is_answered_by_the_group_containing_it() {
 	let range = Range {
-		start: Some(2500),
+		start: moq_net::track::Start::Time(2500),
 		end: Some(4500),
 	};
 	let (read, seen) = read(range, true).await;
@@ -141,7 +141,7 @@ async fn a_time_start_is_answered_by_the_group_containing_it() {
 #[kio::test]
 async fn a_time_start_at_a_key_is_served_key_by_key() {
 	let range = Range {
-		start: Some(2000),
+		start: moq_net::track::Start::Time(2000),
 		end: Some(4500),
 	};
 	let (read, seen) = read(range, false).await;

@@ -37,7 +37,7 @@ jobs:
 
       - uses: ./.github/actions/just
 
-      - uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd65adc8cdfcb92d # v1.8.1
+      - uses: dart-lang/setup-dart@2286a0c042b44434fe26d292bbce8d34f7ec662b # v1.8.2
 
       # The dry-run resolves moq_ffi from this checkout, whose generated
       # bindings are not in git. A tag stages against the published moq_ffi.
@@ -121,7 +121,7 @@ jobs:
           name: dart-package
           path: package
 
-      - uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd65adc8cdfcb92d # v1.8.1
+      - uses: dart-lang/setup-dart@2286a0c042b44434fe26d292bbce8d34f7ec662b # v1.8.2
 
       - name: Publish
         env:

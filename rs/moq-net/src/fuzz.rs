@@ -1199,7 +1199,6 @@ impl LiteSample {
 				track: "video".into(),
 				priority: 2,
 				max_delay: Some(std::time::Duration::from_secs(10)),
-				min_delay: None,
 				ranges: vec![lite::Range::OPEN],
 			}
 			.encode(w, version)
@@ -1398,7 +1397,6 @@ impl Default for Messages {
 				track: "video".into(),
 				priority: 3,
 				max_delay: Some(Duration::from_millis(500)),
-				min_delay: None,
 				ranges: vec![lite::Range {
 					start: Some(lite::Anchor::Absolute(crate::track::Position::group(1_000))),
 					end: None,
@@ -1409,7 +1407,6 @@ impl Default for Messages {
 				order: crate::track::Order::Descending,
 				priority: 4,
 				max_delay: Some(Duration::from_millis(500)),
-				min_delay: None,
 				// Lite-06, the bench's version, restates the ranges.
 				ranges: lite::RangeEdit::Replace(vec![lite::Range {
 					start: Some(lite::Anchor::Absolute(crate::track::Position::group(1_000))),
@@ -1578,7 +1575,6 @@ pub fn encode_subscribe(broadcast: &Path, track: &str, ietf: bool, out: &mut Vec
 			track: track.into(),
 			priority: 0,
 			max_delay: Some(std::time::Duration::ZERO),
-			min_delay: None,
 			ranges: vec![lite::Range::OPEN],
 			order: track::Order::Descending,
 		}
