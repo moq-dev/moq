@@ -32033,7 +32033,11 @@ mod test {
 		// Its own start names a group whatever its End.
 		assert_eq!(start(&mut producer.subscribe(time(1000, None))), Some(1000));
 		let mut through = producer.subscribe(time(0, Some(1700)));
-		assert_eq!(drain(&mut through), vec![0, 1000], "a time end in the pause stops after 1000");
+		assert_eq!(
+			drain(&mut through),
+			vec![0, 1000],
+			"a time end in the pause stops after 1000"
+		);
 		// 2000 has no End, so it spans up to the next start.
 		let mut open = producer.subscribe(time(2500, None));
 		assert_eq!(start(&mut open), Some(2000));
