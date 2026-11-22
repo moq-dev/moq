@@ -282,6 +282,59 @@ async fn an_object_is_spread_across_its_pcr_interval() {
 	);
 }
 
+/// An object is spread only across a PCR interval on the source's clock, which the jitter clock's
+/// drift may stretch on ours by no more than that drift: a further stretch, or a longer interval,
+/// writes it whole.
+#[test]
+fn an_object_spreads_across_a_pcr_interval_its_drift_stretched() {
+	const RUN: usize = 7 * 188;
+	let start = Instant::now();
+	let frame = Frame {
+		timestamp: moq_net::Timestamp::from_micros(0).unwrap(),
+		duration: None,
+		payload: Bytes::from(vec![0x47; 3 * RUN]),
+		keyframe: true,
+	};
+	let first = |after: Duration, micros: u64| {
+		let next = (
+			start.saturating_add(after),
+			moq_net::Timestamp::from_micros(micros).unwrap(),
+		);
+		super::release::Spread::new(frame.clone(), start, Some(next))
+			.take(start)
+			.unwrap()
+			.payload
+			.len()
+	};
+	assert_eq!(
+		first(Duration::from_micros(100_002), 100_000),
+		RUN,
+		"stretched by drift"
+	);
+	assert_eq!(
+		first(Duration::from_millis(100), 150_000),
+		3 * RUN,
+		"past a PCR interval"
+	);
+	assert_eq!(first(Duration::from_secs(1), 100_000), 3 * RUN, "stretched past drift");
+}
+
+/// Under no delay an object goes out whole as it arrives: a jump the importer did not mark
+/// does not hold the output until its time.
+#[tokio::test(start_paused = true)]
+async fn no_delay_writes_an_object_as_it_arrives() {
+	let mut objects: Vec<Object> = import(KYRION).await.objects.into_iter().take(2).collect();
+	objects[1].micros = objects[0].micros + 10_000_000;
+	let republished = republish(objects.clone(), |i, _| Duration::from_millis(40 * i as u64));
+	let source = crate::source::announced(&republished.consumer).await;
+	let mut release = Release::new(source, CatalogFormat::Hang, Duration::ZERO).await.unwrap();
+	let start = Instant::now();
+	for object in &objects {
+		assert!(rest(&mut release, object.payload.len()).await == object.payload);
+	}
+	assert!(start.elapsed() < Duration::from_secs(1), "held {:?}", start.elapsed());
+}
+
 /// The oracle times each run from the source, not from its stamp: the same runs written in one
 /// burst at their object's time fail it, stamped as released or with the object's time.
 #[tokio::test(start_paused = true)]

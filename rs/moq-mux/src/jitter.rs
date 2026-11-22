@@ -597,7 +597,7 @@ const LEADS: usize = (RATE_WINDOW / STEER.as_secs_f64()) as usize;
 const RESPONSE: f64 = 600.0;
 /// The furthest the clock runs off ours: 810 Hz of the 27 MHz system clock (ISO/IEC 13818-1
 /// 2.4.2.1).
-const MAX_DRIFT: f64 = 810.0 / 27e6;
+pub(crate) const MAX_DRIFT: f64 = 810.0 / 27e6;
 /// How fast that may change, per second: 0.075 Hz/s of 27 MHz (ISO/IEC 13818-1 2.4.2.1).
 const MAX_SLEW: f64 = 0.075 / 27e6;
 /// How close two tracks' depths under their envelopes are to fit them equally, in seconds: a

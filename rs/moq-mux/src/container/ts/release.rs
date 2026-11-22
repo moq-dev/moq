@@ -33,8 +33,9 @@ const SPREAD: Duration = Duration::from_millis(100);
 /// source's, then spreads its packets evenly up to the next object's time, seven at a time
 /// (a UDP datagram's worth), so the output keeps the source's rate whatever the arrival jitter.
 /// An object whose successor is not yet buffered when it comes due, or is more than ISO
-/// 13818-1's 100 ms PCR interval ahead, goes out whole. Two releases fed the same objects write
-/// the same bytes; where each held an object's successor when it came due, at the same times
+/// 13818-1's 100 ms PCR interval ahead, goes out whole, as does every object under no delay.
+/// Two releases that each receive every object before its deadline write the same bytes; where
+/// each held an object's successor when it came due, at the same times
 /// too, so a delay longer than the arrival jitter by a PCR interval keeps them in step. An
 /// object that arrives past its deadline is dropped and counted; the output shows a continuity
 /// error there, since nothing is rewritten, and carries on with the next object. A PCR clock
@@ -60,7 +61,7 @@ pub struct Release {
 }
 
 /// An object's runs, each due at its first byte's time on the way from the object's time to the next's.
-struct Spread {
+pub(super) struct Spread {
 	frame: Frame,
 	start: Instant,
 	span: Duration,
@@ -71,12 +72,18 @@ struct Spread {
 }
 
 impl Spread {
-	fn new(frame: Frame, start: Instant, next: Option<(Instant, moq_net::Timestamp)>) -> Self {
+	/// Spread `frame` from `start` to `next`, the successor's deadline and timestamp, if its
+	/// interval on the source's clock is a PCR interval and the jitter clock, which runs within
+	/// [`MAX_DRIFT`](jitter::MAX_DRIFT) of the source's, has not stretched it further.
+	pub(super) fn new(frame: Frame, start: Instant, next: Option<(Instant, moq_net::Timestamp)>) -> Self {
 		let next = next.filter(|(at, end)| {
 			*at >= start
-				&& at.duration_since(start) <= SPREAD
+				&& at.duration_since(start) <= SPREAD.mul_f64(1.0 + jitter::MAX_DRIFT)
 				&& end.scale() == frame.timestamp.scale()
-				&& end.value() >= frame.timestamp.value()
+				&& end
+					.checked_sub(frame.timestamp)
+					.and_then(|interval| interval.as_micros())
+					.is_ok_and(|micros| micros <= SPREAD.as_micros())
 		});
 		let runs = match next {
 			Some(_) => frame.payload.len().div_ceil(RUN).max(1),
@@ -104,7 +111,7 @@ impl Spread {
 	}
 
 	/// Every run due by `now`, as one frame stamped with the first one's time.
-	fn take(&mut self, now: Instant) -> Option<Frame> {
+	pub(super) fn take(&mut self, now: Instant) -> Option<Frame> {
 		let due = (self.sent..self.runs).take_while(|&i| self.due(i) <= now).count();
 		if due == 0 {
 			return None;
@@ -266,11 +273,17 @@ impl Release {
 			&& let Poll::Ready(ready) = self.jitter.poll_next(waiter)
 		{
 			self.released = true;
-			let next = self
-				.jitter
-				.front_deadline()
-				.zip(self.jitter.peek(&()).map(|frame| frame.timestamp));
-			self.spread = Some(Spread::new(ready.item, ready.deadline, next));
+			// No delay releases an object as it arrives, ahead of its deadline.
+			let (start, next) = match self.delay.is_zero() {
+				true => (kio::clock::now(), None),
+				false => (
+					ready.deadline,
+					self.jitter
+						.front_deadline()
+						.zip(self.jitter.peek(&()).map(|frame| frame.timestamp)),
+				),
+			};
+			self.spread = Some(Spread::new(ready.item, start, next));
 		}
 		if let Some(spread) = self.spread.as_mut() {
 			loop {
