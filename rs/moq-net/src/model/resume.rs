@@ -10283,7 +10283,7 @@ mod test {
 		Subscription::default()
 			.with_delay(Delay::default().with_max(HOUR))
 			.with_ranges(times.iter().map(|time| track::Range {
-				start: Some(*time),
+				start: track::Start::Time(*time),
 				end: None,
 			}))
 	}

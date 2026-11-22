@@ -871,9 +871,7 @@ impl Consume {
 	/// A raw reader's preferences, which join live unless a range names a start of its own:
 	/// at the stated minimum delay, or the latest group without one. Only a range with no
 	/// start reads the minimum, so stating it changes nothing else.
-	fn raw_subscription(
-		subscription: RawSubscription,
-	) -> moq_net::track::Subscription {
+	fn raw_subscription(subscription: RawSubscription) -> moq_net::track::Subscription {
 		let (subscription, delay) = Self::raw_delay(subscription);
 		delay.subscription(subscription)
 	}
@@ -971,11 +969,7 @@ impl Consume {
 		}
 	}
 
-	pub fn raw_track_update(
-		&mut self,
-		track: Id,
-		subscription: RawSubscription,
-	) -> Result<(), Error> {
+	pub fn raw_track_update(&mut self, track: Id, subscription: RawSubscription) -> Result<(), Error> {
 		let entry = self.raw_task.get_mut(track).ok_or(Error::TrackNotFound)?;
 		match &mut entry.control {
 			RawControl::Pending(pending) => *pending = Some(subscription),
