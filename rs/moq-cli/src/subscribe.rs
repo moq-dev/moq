@@ -3,8 +3,8 @@ use std::time::Duration;
 use anyhow::Context;
 use hang::catalog::{AudioCodecKind, VideoCodecKind};
 use moq_mux::catalog::{self, CatalogFormat, Stream};
+use moq_mux::container::Delay;
 use moq_mux::select;
-use moq_net::track::Delay;
 use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 

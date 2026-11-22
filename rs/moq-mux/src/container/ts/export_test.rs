@@ -10525,8 +10525,8 @@ async fn a_follower_keeps_a_return_awaiting_its_catalog_when_a_stitch_goes() {
 	assert_eq!(start.elapsed(), follow);
 }
 
-/// Each track subscription states the whole delay as its min and max, so a relay holds a group
-/// as long as the export could still play it.
+/// Each track subscription joins live the whole delay back and states it as its max, so a relay
+/// holds a group as long as the export could still play it.
 #[tokio::test(start_paused = true)]
 async fn a_subscription_states_the_whole_delay() {
 	let origin = crate::source::produce_origin();
@@ -10538,9 +10538,11 @@ async fn a_subscription_states_the_whole_delay() {
 		.await
 		.unwrap();
 	let _ = kio::clock::timeout(Duration::from_secs(1), export.next()).await;
+	let subscription = audio.track().subscription().unwrap();
+	assert_eq!(subscription.delay, moq_net::track::Delay::default().with_max(delay));
 	assert_eq!(
-		audio.track().subscription().unwrap().delay,
-		moq_net::track::Delay::default().with_min(delay).with_max(delay),
+		subscription.ranges,
+		[moq_net::track::Range::from(moq_net::track::Start::Live(delay))]
 	);
 	drop((live, catalog));
 }

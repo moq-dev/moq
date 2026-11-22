@@ -51,7 +51,7 @@ use windows::core::{GUID, Interface};
 use super::{Backend, Codec, Config, Stream};
 use crate::frame::d3d11::Texture;
 use crate::frame::{I420, Surface};
-use crate::mf::{ComGuard, create_d3d_device, mf_err, unpack_2x32};
+use crate::mf::{ComGuard, Locked, create_d3d_device, memory_buffer, mf_err, unpack_2x32};
 use crate::{Error, Frame};
 
 pub(crate) const NAME: &str = "mediafoundation";
@@ -268,18 +268,12 @@ impl MediaFoundation {
 	/// Wrap an Annex-B access unit as an input [`IMFSample`] in a fresh
 	/// system-memory buffer (the MFT uploads it to the GPU itself).
 	fn build_sample(&self, access_unit: &[u8]) -> Result<IMFSample, Error> {
-		let buffer = unsafe { MFCreateMemoryBuffer(access_unit.len() as u32).map_err(|e| mf_err("input buffer", e))? };
-		let mut ptr_out: *mut u8 = ptr::null_mut();
+		let buffer = memory_buffer(access_unit.len())?;
+		Locked::new(&buffer)?
+			.data_mut(access_unit.len())?
+			.copy_from_slice(access_unit);
 		unsafe {
-			buffer
-				.Lock(&mut ptr_out, None, None)
-				.map_err(|e| mf_err("lock input buffer", e))?;
-		}
-		// SAFETY: the buffer was allocated with `access_unit.len()` bytes and we
-		// hold the lock until `Unlock`.
-		unsafe { std::slice::from_raw_parts_mut(ptr_out, access_unit.len()) }.copy_from_slice(access_unit);
-		unsafe {
-			let _ = buffer.Unlock();
+			// `memory_buffer` already refused a length past `u32`.
 			buffer
 				.SetCurrentLength(access_unit.len() as u32)
 				.map_err(|e| mf_err("set input length", e))?;

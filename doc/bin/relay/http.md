@@ -73,6 +73,11 @@ sum the per-session [credit stalls](/concept/stats#presence) by `tier`: how ofte
 and how long a connection's writes waited on the peer's connection-level
 flow-control credit (`MAX_DATA`). Time growing here, while loss stays flat, means
 peers stopped granting credit rather than the network slowing delivery.
+The receiving side says why: `moq_relay_credit_held_readers_microseconds_total`
+and `moq_relay_credit_held_evicted_microseconds_total` sum, by `tier`, how long
+peers had a connection's whole receive window spent while this relay evicted
+nothing, waiting on a reader that had not looked at its data yet (a reader
+behind) or on an evicted reader yet to stop its stream.
 
 `moq_relay_control_tx_bytes_total` and `moq_relay_control_rx_bytes_total`
 count control-message bytes by `tier` and `class` (`session`, `announce`, `track_info`, `subscribe`, `fetch`,

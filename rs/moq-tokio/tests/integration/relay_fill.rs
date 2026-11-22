@@ -10,7 +10,7 @@
 use std::{collections::BTreeMap, process::Stdio, time::Duration};
 
 use anyhow::Context;
-use moq_net::track::{Delay, Info, Range, Subscription};
+use moq_net::track::{Delay, Info, Range, Start, Subscription};
 use moq_net::{Timescale, Timestamp, Version};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{ChildStdin, ChildStdout};
@@ -270,10 +270,7 @@ async fn relay(version: Version) -> anyhow::Result<()> {
 	let wide = Subscription::default()
 		.with_delay(Delay::default().with_max(None))
 		.with_ranges([match version.alpn() {
-			"moq-lite-05" => Range {
-				start: Some(0),
-				end: None,
-			},
+			"moq-lite-05" => Range::from(Start::Time(0)),
 			_ => Range::default(),
 		}]);
 	let mut below = relay.subscribe(wide.clone()).await?;
@@ -332,23 +329,25 @@ async fn relay_fill_javascript() {
 
 /// One reader of the range table, as `rs/moq-net/tests/range-table.json` states it.
 fn table_subscription(ask: &serde_json::Value) -> Subscription {
-	let time = |range: &serde_json::Value, key| range.get(key).and_then(serde_json::Value::as_u64);
+	let start = |range: &serde_json::Value| match range.get("start") {
+		None => Start::Oldest,
+		Some(start) => match start.get("live") {
+			Some(live) => Start::Live(Duration::from_millis(live.as_u64().expect("a lag"))),
+			None => Start::Time(start.as_u64().expect("a time")),
+		},
+	};
 	let ranges = match ask.get("ranges").and_then(serde_json::Value::as_array) {
 		Some(ranges) => ranges
 			.iter()
 			.map(|range| Range {
-				start: time(range, "start"),
-				end: time(range, "end"),
+				start: start(range),
+				end: range.get("end").and_then(serde_json::Value::as_u64),
 			})
 			.collect(),
 		None => vec![Range::default()],
 	};
-	let min = ask
-		.get("minAge")
-		.and_then(serde_json::Value::as_u64)
-		.map(Duration::from_millis);
 	Subscription::default()
-		.with_delay(Delay::default().with_min(min).with_max(None))
+		.with_delay(Delay::default().with_max(None))
 		.with_order(moq_net::track::Order::Ascending)
 		.with_ranges(ranges)
 }

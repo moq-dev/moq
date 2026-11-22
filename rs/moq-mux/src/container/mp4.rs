@@ -184,7 +184,7 @@ impl<S: Stream> Export<S> {
 	}
 
 	/// Set how far behind the live edge each per-track source plays; see [`fmp4::Export::with_delay`].
-	pub fn with_delay(mut self, delay: moq_net::track::Delay) -> Self {
+	pub fn with_delay(mut self, delay: crate::container::Delay) -> Self {
 		self.fmp4 = self.fmp4.with_delay(delay);
 		self
 	}
@@ -1316,7 +1316,7 @@ mod tests {
 
 	async fn export(live: &Live) -> super::Export<crate::catalog::Consumer> {
 		super::Export::new(live.source().await, live.catalog_stream().await)
-			.with_delay(moq_net::track::Delay::default().with_max(MAX_DELAY))
+			.with_delay(crate::container::Delay::default().with_max(MAX_DELAY))
 	}
 
 	/// Append everything the export writes without waiting for more input.

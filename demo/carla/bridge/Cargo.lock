@@ -593,7 +593,6 @@ dependencies = [
  "serde_json",
  "serde_with",
  "thiserror 2.0.21",
- "url",
 ]
 
 [[package]]
@@ -1023,7 +1022,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
- "url",
  "webm-iterable",
 ]
 
@@ -2159,7 +2157,6 @@ dependencies = [
  "idna",
  "percent-encoding",
  "serde",
- "serde_derive",
 ]
 
 [[package]]
