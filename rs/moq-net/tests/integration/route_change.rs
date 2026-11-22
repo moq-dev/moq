@@ -419,6 +419,7 @@ async fn route_dies_across_instances(version: &str, trigger: Trigger) {
 		origin::RouteEvent {
 			kind: origin::RouteKind::Start,
 			announce,
+			..
 		} => assert_eq!(announce.prefix.as_str(), "live"),
 		other => panic!("{version}: expected the initial start, got {other:?}"),
 	}
@@ -462,6 +463,7 @@ async fn route_dies_across_instances(version: &str, trigger: Trigger) {
 			origin::RouteEvent {
 				kind: origin::RouteKind::Restart,
 				announce,
+				..
 			} => {
 				assert_eq!(announce.prefix.as_str(), "live");
 				assert_eq!(
@@ -477,6 +479,7 @@ async fn route_dies_across_instances(version: &str, trigger: Trigger) {
 			origin::RouteEvent {
 				kind: origin::RouteKind::End,
 				announce,
+				..
 			} => assert_eq!(announce.prefix.as_str(), "live"),
 			other => panic!("{version} {trigger:?}: expected an end, got {other:?}"),
 		}
@@ -484,6 +487,7 @@ async fn route_dies_across_instances(version: &str, trigger: Trigger) {
 			origin::RouteEvent {
 				kind: origin::RouteKind::Start,
 				announce,
+				..
 			} => assert_eq!(announce.prefix.as_str(), "live"),
 			other => panic!("{version} {trigger:?}: expected a fresh start, got {other:?}"),
 		}
@@ -526,6 +530,7 @@ async fn better_route_restarts(version: &str) {
 		origin::RouteEvent {
 			kind: origin::RouteKind::Start,
 			announce,
+			..
 		} => assert_eq!(announce.prefix.as_str(), "live"),
 		other => panic!("{version}: expected the route, got {other:?}"),
 	}
@@ -540,6 +545,7 @@ async fn better_route_restarts(version: &str) {
 		origin::RouteEvent {
 			kind: origin::RouteKind::Restart,
 			announce,
+			..
 		} => assert_eq!(announce.prefix.as_str(), "live"),
 		other => panic!("{version}: expected a restart, got {other:?}"),
 	}

@@ -506,6 +506,7 @@ pub(super) async fn shown_at(node: &origin::Producer, path: &str) -> Option<Show
 				instance: route.instance().clone(),
 			}),
 			origin::RouteKind::End | origin::RouteKind::Offline => None,
+			kind => panic!("unexpected route kind {kind:?}"),
 		};
 	}
 	shown
@@ -540,6 +541,7 @@ impl Watch {
 					origin::RouteKind::Restart => support::Kind::Restart,
 					origin::RouteKind::End => support::Kind::End,
 					origin::RouteKind::Offline => support::Kind::Offline,
+					kind => panic!("unexpected route kind {kind:?}"),
 				};
 				let seen = Seen {
 					kind,

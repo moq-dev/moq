@@ -153,6 +153,7 @@ async fn read(reader: &mut moq_net::track::Ordered, count: usize) -> Vec<Result<
 		items.push(match item {
 			Item::Group(group) => Ok(group.start),
 			Item::Gap { range, .. } => Err(range),
+			_ => panic!("unexpected item"),
 		});
 	}
 	items

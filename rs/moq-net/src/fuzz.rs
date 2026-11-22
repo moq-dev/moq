@@ -572,6 +572,19 @@ pub fn route_info(
 	}
 }
 
+/// An [`Update`](crate::origin::RouteKind::Update) of the route at `prefix` with `cost`, as a
+/// consuming cursor yields it, for benches that replay route events.
+pub fn route_update(prefix: &str, cost: u64) -> crate::origin::RouteEvent {
+	crate::origin::RouteEvent {
+		kind: crate::origin::RouteKind::Update,
+		announce: crate::announce::Announce {
+			prefix: crate::Path::new(prefix).unwrap(),
+			captures: None,
+			route: route_info([], cost, None),
+		},
+	}
+}
+
 /// The hop ids a received route traversed, oldest first: crate-private chain state, for
 /// tests that check which path a route took.
 pub fn route_hops(route: &crate::origin::RouteInfo) -> Vec<u64> {

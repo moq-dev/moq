@@ -38,12 +38,14 @@ async fn read_until_synced(announced: &mut origin::Routes) -> BTreeSet<String> {
 				origin::RouteEvent {
 					kind: origin::RouteKind::Start | origin::RouteKind::Restart,
 					announce,
+					..
 				} => {
 					seen.insert(announce.prefix.to_string());
 				}
 				origin::RouteEvent {
 					kind: origin::RouteKind::End | origin::RouteKind::Offline,
 					announce,
+					..
 				} => {
 					seen.remove(announce.prefix.as_str());
 				}
@@ -202,7 +204,7 @@ async fn a_cold_relay_syncs_then_forwards_upstream_routes_as_live() {
 	let _upstream = connect_mock(options).await;
 	let event = announced.next().await.unwrap();
 	assert!(
-		matches!(event, origin::RouteEvent { kind: origin::RouteKind::Start, announce: route } if route.prefix.as_str() == "room/cam")
+		matches!(event, origin::RouteEvent { kind: origin::RouteKind::Start, announce: route, .. } if route.prefix.as_str() == "room/cam")
 	);
 	assert!(announced.poll_synced(&kio::Waiter::noop()).is_ready());
 }

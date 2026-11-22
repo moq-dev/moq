@@ -375,12 +375,14 @@ async fn wait_announced(origin: &origin::Consumer, path: &str, active: bool) {
 			kind:
 				moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Update | moq_net::origin::RouteKind::Restart,
 			announce: update,
+			..
 		} => {
 			live.insert(update.prefix.to_string());
 		}
 		moq_net::origin::RouteEvent {
 			kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
 			announce: update,
+			..
 		} => {
 			live.remove(update.prefix.as_str());
 		}

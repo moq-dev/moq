@@ -307,6 +307,7 @@ fn follow(index: usize, reader: &origin::Producer, log: Shared) {
 				RouteKind::End | RouteKind::Offline => {
 					log.borrow_mut().shown.remove(&(index, path));
 				}
+				kind => panic!("unexpected route kind {kind:?}"),
 			}
 		}
 	}));

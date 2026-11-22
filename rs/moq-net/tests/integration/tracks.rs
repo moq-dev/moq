@@ -37,9 +37,9 @@ async fn next(tracks: &mut moq_net::broadcast::Tracks) -> String {
 		.await
 		.expect("listing stalled")
 	{
-		Ok(Some(TracksEvent::Added { name, info })) => format!("+{}", named(info.kind(), &name)),
-		Ok(Some(TracksEvent::Removed { kind, name })) => format!("-{}", named(kind, &name)),
-		Ok(Some(TracksEvent::Finished { kind, name })) => format!("~{}", named(kind, &name)),
+		Ok(Some(TracksEvent::Added { name, info, .. })) => format!("+{}", named(info.kind(), &name)),
+		Ok(Some(TracksEvent::Removed { kind, name, .. })) => format!("-{}", named(kind, &name)),
+		Ok(Some(TracksEvent::Finished { kind, name, .. })) => format!("~{}", named(kind, &name)),
 		Ok(Some(TracksEvent::Synced)) => "synced".into(),
 		Ok(None) => "end".into(),
 		Err(err) => format!("error: {err}"),
@@ -122,6 +122,7 @@ async fn a_listing_carries_track_info() {
 	let Some(TracksEvent::Added {
 		name,
 		info: Listed::Track(info),
+		..
 	}) = event
 	else {
 		panic!("expected an add, got {event:?}");
@@ -165,6 +166,7 @@ async fn a_session_lists_its_peers_datagram_tracks() {
 	let Some(TracksEvent::Added {
 		name,
 		info: Listed::Datagrams(info),
+		..
 	}) = event
 	else {
 		panic!("expected the datagram track, got {event:?}");

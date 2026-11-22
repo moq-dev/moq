@@ -9,16 +9,11 @@ pub(super) fn initial(events: impl IntoIterator<Item = origin::RouteEvent>) -> V
 	let mut pending: Vec<Option<announce::Announce>> = Vec::new();
 	let mut positions = HashMap::new();
 	for event in events {
-		let (update, active) = match event {
-			origin::RouteEvent {
-				kind: origin::RouteKind::Start | origin::RouteKind::Update | origin::RouteKind::Restart,
-				announce: update,
-			} => (update, true),
-			origin::RouteEvent {
-				kind: origin::RouteKind::End | origin::RouteKind::Offline,
-				announce: update,
-			} => (update, false),
-		};
+		let origin::RouteEvent {
+			kind, announce: update, ..
+		} = event;
+		// A kind this match predates counts as active: the route is still advertised.
+		let active = !matches!(kind, origin::RouteKind::End | origin::RouteKind::Offline);
 		if let Some(index) = positions.remove(&update.prefix) {
 			pending[index] = None;
 		}

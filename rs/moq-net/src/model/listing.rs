@@ -28,6 +28,7 @@ use crate::{Error, datagram, track};
 
 /// Which of a broadcast's two namespaces a listed track is in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Kind {
 	/// A track of groups, read through [`Consumer::track`].
 	Track,
@@ -37,6 +38,7 @@ pub enum Kind {
 
 /// A listed track's fixed properties, whose variant is its [`Kind`].
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum Listed {
 	/// A track of groups, with the properties its TRACK_INFO carries.
 	Track(track::Info),
@@ -71,8 +73,10 @@ type Key = (Kind, Arc<str>);
 
 /// What a [`Tracks`] listing reports, in order.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum TracksEvent {
 	/// A track the broadcast lists, with its kind and fixed properties.
+	#[non_exhaustive]
 	Added {
 		/// The track's name, unique among the broadcast's listed tracks of its kind.
 		name: Arc<str>,
@@ -85,6 +89,7 @@ pub enum TracksEvent {
 	/// A track is no longer listed, unfinished: its producer dropped or aborted before
 	/// declaring its end, or the route or handler that listed it withdrew. A handler may still
 	/// serve its name on request.
+	#[non_exhaustive]
 	Removed {
 		/// The kind an earlier [`Self::Added`] reported.
 		kind: Kind,
@@ -93,6 +98,7 @@ pub enum TracksEvent {
 	},
 	/// A track is no longer listed because it finished: its producer declared its end. A
 	/// track of groups stays readable while the cache retains its groups.
+	#[non_exhaustive]
 	Finished {
 		/// The kind an earlier [`Self::Added`] reported.
 		kind: Kind,

@@ -138,6 +138,7 @@ fn via_a(announce: &origin::RouteEvent) -> bool {
 		origin::RouteEvent {
 			kind: origin::RouteKind::Start | origin::RouteKind::Update | origin::RouteKind::Restart,
 			announce: a,
+			..
 		} => &a.route,
 		origin::RouteEvent {
 			kind: origin::RouteKind::End | origin::RouteKind::Offline,

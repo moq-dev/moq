@@ -185,6 +185,7 @@ impl<S: ObjectStore> Producer<S> {
 				Event::Listed(Ok(Some(TracksEvent::Added {
 					name,
 					info: Listed::Track(info),
+					..
 				}))) => {
 					let queue = queues.entry(name.to_string()).or_insert_with(|| {
 						let queue = kio::Queue::new();

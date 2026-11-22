@@ -34,16 +34,11 @@ mod replay;
 fn scanned(events: Vec<origin::RouteEvent>) -> Vec<announce::Announce> {
 	let mut initial: Vec<announce::Announce> = Vec::new();
 	for event in events {
-		let (update, active) = match event {
-			origin::RouteEvent {
-				kind: origin::RouteKind::Start | origin::RouteKind::Update | origin::RouteKind::Restart,
-				announce: update,
-			} => (update, true),
-			origin::RouteEvent {
-				kind: origin::RouteKind::End | origin::RouteKind::Offline,
-				announce: update,
-			} => (update, false),
-		};
+		let origin::RouteEvent {
+			kind, announce: update, ..
+		} = event;
+		// A kind this match predates counts as active: the route is still advertised.
+		let active = !matches!(kind, origin::RouteKind::End | origin::RouteKind::Offline);
 		initial.retain(|held| held.prefix != update.prefix);
 		if active {
 			initial.push(update);
@@ -58,14 +53,7 @@ fn initial(c: &mut Criterion) {
 		for updates in [1, 8, 32] {
 			let events: Vec<_> = (0..updates)
 				.flat_map(|cost| {
-					(0..routes).map(move |route| origin::RouteEvent {
-						kind: origin::RouteKind::Update,
-						announce: announce::Announce {
-							prefix: moq_net::Path::new(&format!("route/{route}")).unwrap(),
-							captures: None,
-							route: moq_net::fuzz::route_info([], cost, None),
-						},
-					})
+					(0..routes).map(move |route| moq_net::fuzz::route_update(&format!("route/{route}"), cost))
 				})
 				.collect();
 			group.throughput(Throughput::Elements(events.len() as u64));
