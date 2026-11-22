@@ -910,7 +910,13 @@ fn a_withdrawn_copy_waiting_on_another_session_still_ends() {
 	second.serving(node.me(), &room, true);
 	let unserved = serves(&first);
 	assert!(
-		matches!(unserved.as_slice(), [Output::Unserve { gone: Gone::Withdrawn, .. }]),
+		matches!(
+			unserved.as_slice(),
+			[Output::Unserve {
+				gone: Gone::Withdrawn,
+				..
+			}]
+		),
 		"{unserved:?}"
 	);
 }

@@ -188,7 +188,9 @@ enum Stay {
 	Wanted,
 	/// Unwanted, and kept until a wanted one serves the claim. `ended` once its publisher
 	/// withdrew it, which outlasts the wait.
-	Leaving { ended: bool },
+	Leaving {
+		ended: bool,
+	},
 }
 
 /// One claim served through one session.
