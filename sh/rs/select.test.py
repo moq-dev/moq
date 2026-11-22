@@ -5,8 +5,10 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -281,6 +283,40 @@ class SelectTest(unittest.TestCase):
         # The lister still finds the read behind moq-dev/moq#8459.
         self.assertIn(("rs/moq-relay", "test/**/*.toml"), [(crate, glob) for crate, glob, _ in reads])
 
+    def test_reads_handles_nul_bytes_and_colon_lines(self):
+        # Literal NUL bytes, colon-prefixed lines, and missing trailing newlines
+        # must not shift file framing or line numbers in sh/rs/reads.sh.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            (repo / "rs/a/src").mkdir(parents=True)
+            (repo / "rs/a/Cargo.toml").write_text('[package]\nname = "a"\n')
+            (repo / "rs/a/src/lib.rs").write_bytes(
+                b'const A: &str = "\x00"; const B: &str = include_str!("../../shared.txt");\n'
+                b":not_a_header\n"
+                b"\n"
+                b' const D: &str = include_str!("../../tail.txt");'
+            )
+            (repo / "rs/b/src").mkdir(parents=True)
+            (repo / "rs/b/Cargo.toml").write_text('[package]\nname = "b"\n')
+            (repo / "rs/b/src/caf\u00e9.rs").write_bytes(b'const C: &str = include_str!("../../other.txt");')
+
+            result = subprocess.run(
+                ["bash", str(ROOT / "sh/rs/reads.sh")],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(
+                result.stdout.splitlines(),
+                [
+                    "rs/a rs/shared.txt rs/a/src/lib.rs:1",
+                    "rs/a rs/tail.txt rs/a/src/lib.rs:4",
+                    "rs/b rs/other.txt rs/b/src/caf\u00e9.rs:1",
+                ],
+            )
+
     def test_dispatch_scope_covers_out_of_crate_targets(self):
         scope = dispatch_scope()
         metadata = json.loads(
@@ -427,9 +463,14 @@ class MetadataTest(unittest.TestCase):
         jq = self.scratch / "jq"
         jq.write_text(
             "#!/usr/bin/env bash\nset -eu\n"
-            'count_file="$TEST_METADATA.count"\ncount=0\n'
+            'count_file="$TEST_METADATA.count"\nlock_dir="$TEST_METADATA.lock"\n'
+            # Pipeline stages (e.g. reads.sh | jq) invoke this wrapper concurrently;
+            # serialize counter updates with an atomic mkdir lock before exec.
+            'while ! mkdir "$lock_dir" 2>/dev/null; do sleep 0.005; done\n'
+            "count=0\n"
             'if [[ -f "$count_file" ]]; then read -r count <"$count_file"; fi\n'
             'count=$((count + 1))\nprintf "%s\\n" "$count" >"$count_file"\n'
+            'rmdir "$lock_dir"\n'
             'if [[ "$count" == "$FAIL_JQ" ]]; then\n'
             '    echo "partial output"\n    echo "jq: injected failure" >&2\n    exit 7\nfi\n'
             f'exec "{shutil.which("jq")}" "$@"\n'
@@ -577,5 +618,48 @@ fi
 """
 
 
+def _iter_cases(suite):
+    for item in suite:
+        if isinstance(item, unittest.TestSuite):
+            yield from _iter_cases(item)
+        else:
+            yield item
+
+
+def _run_parallel():
+    suite = unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])
+    cases = list(_iter_cases(suite))
+    workers = min(os.cpu_count() or 4, 8, max(len(cases), 1))
+
+    def run_one(case):
+        result = unittest.TestResult()
+        case.run(result)
+        return case, result
+
+    failures = []
+    errors = []
+    unexpected = []
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for _case, result in pool.map(run_one, cases):
+            failures.extend(result.failures)
+            errors.extend(result.errors)
+            unexpected.extend(result.unexpectedSuccesses)
+
+    for test, tb in errors:
+        print(f"ERROR: {test}\n{tb}", file=sys.stderr)
+    for test, tb in failures:
+        print(f"FAIL: {test}\n{tb}", file=sys.stderr)
+    for test in unexpected:
+        print(f"UNEXPECTED SUCCESS: {test}", file=sys.stderr)
+    print(
+        f"Ran {len(cases)} tests ({len(failures)} failures, {len(errors)} errors, {len(unexpected)} unexpected)",
+        file=sys.stderr,
+    )
+    sys.exit(1 if failures or errors or unexpected else 0)
+
+
 if __name__ == "__main__":
-    unittest.main()
+    if len(sys.argv) == 1:
+        _run_parallel()
+    else:
+        unittest.main()
