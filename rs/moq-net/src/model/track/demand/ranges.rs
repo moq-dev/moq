@@ -6,13 +6,17 @@
 //! before it covers too, so spans merge as they do over starts. A treap keeps each
 //! subtree's sum and lowest running sum, so a change touches two boundaries and asks one
 //! range-minimum question, whatever else the audience holds. Ranges with no time start can't
-//! be placed on that line and are counted by value instead.
+//! be placed on that line and are counted by value instead, live joins by lag and end under
+//! the largest `max` among them, since where a join lands doesn't depend on it.
 
 use std::cell::OnceCell;
 use std::collections::BTreeMap;
 use std::hash::{BuildHasher, RandomState};
 
+use std::time::Duration;
+
 use super::super::{Range, Start};
+use crate::model::subscription::max_of;
 use super::{add, remove};
 
 /// Every subscriber's ranges, counted so that one change costs O(log n).
@@ -23,8 +27,10 @@ pub(super) struct Ranges {
 	open: usize,
 	/// Ranges with a time start, as spans of starts.
 	time: Coverage,
-	/// The rest, live joins and ranges from the oldest group with an end, kept as they are.
+	/// Ranges from the oldest group with an end, kept as they are.
 	others: BTreeMap<Range, usize>,
+	/// Live joins by lag and end, each with the budgets its holders ask under.
+	joins: BTreeMap<(Duration, Option<u64>), BTreeMap<Duration, usize>>,
 	/// The last union read, until a change moves it.
 	union: OnceCell<Vec<Range>>,
 }
@@ -35,6 +41,8 @@ enum Shape {
 	Open,
 	/// A range with a time start, as the exclusive span of starts it covers.
 	Time(u64, Option<u64>),
+	/// A live join, by lag and end, and its budget.
+	Join((Duration, Option<u64>), Duration),
 	Other,
 }
 
@@ -46,7 +54,8 @@ impl Shape {
 			(Start::Time(start), None) => Self::Time(start, None),
 			// An end at the last start covers every group, as an open one does.
 			(Start::Time(start), Some(end)) => Self::Time(start, end.checked_add(1)),
-			(Start::Oldest, Some(_)) | (Start::Live(_), _) => Self::Other,
+			(Start::Live { min, .. }, end) => Self::Join((min, end), range.budget()),
+			(Start::Oldest, Some(_)) => Self::Other,
 		}
 	}
 }
@@ -65,6 +74,12 @@ impl Ranges {
 				let uncovered = self.time.min(start, end) == 0;
 				self.time.add(start, end, 1);
 				uncovered && !hidden
+			}
+			Shape::Join(join, budget) => {
+				let budgets = self.joins.entry(join).or_default();
+				let widest = budgets.last_key_value().map(|(widest, _)| *widest);
+				add(budgets, budget);
+				widest.is_none_or(|widest| budget > widest) && !hidden
 			}
 			Shape::Other => add(&mut self.others, range) && !hidden,
 		};
@@ -85,6 +100,16 @@ impl Ranges {
 				self.time.add(start, end, -1);
 				!hidden(self) && self.time.min(start, end) == 0
 			}
+			Shape::Join(join, budget) => {
+				let budgets = self.joins.get_mut(&join).expect("registered join");
+				let widest = budgets.last_key_value().map(|(widest, _)| *widest);
+				remove(budgets, budget);
+				let moved = budgets.last_key_value().map(|(widest, _)| *widest) != widest;
+				if budgets.is_empty() {
+					self.joins.remove(&join);
+				}
+				moved && !hidden(self)
+			}
 			Shape::Other => remove(&mut self.others, range) && !hidden(self),
 		};
 		self.union.take();
@@ -98,7 +123,7 @@ impl Ranges {
 
 	fn fold(&self) -> Vec<Range> {
 		if self.open > 0 {
-			return vec![Range::default()];
+			return vec![Range::ALL];
 		}
 		let mut union: Vec<Range> = self
 			.time
@@ -111,6 +136,13 @@ impl Ranges {
 			})
 			.collect();
 		union.extend(self.others.keys());
+		union.extend(self.joins.iter().filter_map(|(&(min, end), budgets)| {
+			let budget = *budgets.last_key_value()?.0;
+			Some(Range {
+				start: Start::Live { min, max: max_of(budget) },
+				end,
+			})
+		}));
 		union.sort_unstable();
 		union
 	}
@@ -275,7 +307,10 @@ mod tests {
 		let mut rng = rand::rngs::StdRng::seed_from_u64(0x72616e676573);
 		let start = |rng: &mut rand::rngs::StdRng| match rng.random_range(0..10) {
 			0 => Start::Oldest,
-			1 => Start::Live(std::time::Duration::from_millis(rng.random_range(0..3))),
+			1 => Start::Live {
+				min: Duration::from_millis(rng.random_range(0..3)),
+				max: [None, Some(Duration::ZERO), Some(Duration::from_millis(5))][rng.random_range(0..3)],
+			},
 			_ => Start::Time(rng.random_range(0..12)),
 		};
 		let mut ranges = Ranges::default();

@@ -58,7 +58,9 @@ use crate::{Error, Result, StreamError, group, stats, track};
 
 use super::delivered::Delivered;
 use super::idle::{Idle, Walk};
-use super::subscription::{Accounted, Containing, Cover, Holdings, Position, Resolved, Subscription, Unheld, Window};
+use super::subscription::{
+	Accounted, Budget, Containing, Cover, Holdings, Position, Resolved, Subscription, Unheld, Window,
+};
 use crate::ledger;
 
 /// What the front says about a logical track: the copy to read now, and how it ended.
@@ -286,7 +288,6 @@ impl Producer {
 		};
 		let mut edit = track::Edit {
 			priority: terms.priority,
-			delay: terms.delay,
 			order: terms.order,
 			..Default::default()
 		};
@@ -558,20 +559,16 @@ impl Consumer {
 
 	/// Subscribe to the logical track with the reader's own preferences.
 	pub(super) fn subscribe(&self, subscription: track::Preferences) -> Subscriber {
-		let (mirrored, revision, delay) = {
+		let (mirrored, revision) = {
 			let prefs = subscription.read();
 			// Only the ranges: the first sync mirrors the scalars, before it asks any copy.
 			let mut mirrored = Mirrored::default();
 			for (key, range) in prefs.ranges() {
 				mirrored.insert(key, range, prefs.since(key));
 			}
-			(mirrored, prefs.revision, prefs.delay)
+			(mirrored, prefs.revision)
 		};
-		let window = keyed(
-			mirrored.ranges.iter().map(|(key, range)| (*key, *range)),
-			delay,
-			&Unheld,
-		);
+		let window = keyed(mirrored.ranges.iter().map(|(key, range)| (*key, *range)), &Unheld);
 		let reader = Arc::new_cyclic(|this| {
 			Mutex::new(Reader {
 				this: this.clone(),
@@ -942,7 +939,6 @@ impl Copy {
 			retire,
 			add,
 			priority: reader.priority,
-			delay: reader.delay,
 			order: reader.order,
 		};
 		// Each live join as the reader added it, noted before the copy's window places it, so
@@ -1008,7 +1004,8 @@ impl Copy {
 		{
 			self.since = Some(self.track.now());
 		}
-		let budget = reader.mirrored.budget();
+		// The copy is let go as a whole, so it waits out the widest budget any group gets.
+		let budget = reader.window.budget().widest();
 		let grace = ledger::grace(budget);
 		// What is under the bound is past the reader's budget a full budget after a newer
 		// group superseded it, landed or not.
@@ -1651,7 +1648,6 @@ impl Fold {
 #[derive(Clone, Default)]
 struct Mirrored {
 	priority: i8,
-	delay: track::Delay,
 	order: track::Order,
 	feed: bool,
 	ranges: BTreeMap<u64, track::Range>,
@@ -1663,9 +1659,9 @@ struct Mirrored {
 impl Mirrored {
 	fn insert(&mut self, key: u64, range: track::Range, since: u64) {
 		self.ranges.insert(key, range);
-		match range.start {
-			track::Start::Live(_) => _ = self.since.insert(key, since),
-			track::Start::Oldest | track::Start::Time(_) => _ = self.since.remove(&key),
+		match range.join() {
+			Some(_) => _ = self.since.insert(key, since),
+			None => _ = self.since.remove(&key),
 		}
 	}
 
@@ -1674,15 +1670,10 @@ impl Mirrored {
 		self.since.remove(&key);
 	}
 
-	fn budget(&self) -> Duration {
-		self.delay.budget()
-	}
-
 	/// These preferences with `ranges` instead.
 	fn with_ranges(&self, ranges: Vec<track::Range>) -> Subscription {
 		Subscription {
 			priority: self.priority,
-			delay: self.delay,
 			ranges,
 			order: self.order,
 			feed: self.feed,
@@ -1833,10 +1824,7 @@ impl Reader {
 	/// it: from the boundary a switch splits at, its anchors where the serving copy placed
 	/// them.
 	fn resumed(&mut self, preferences: &[(u64, track::Range)]) -> Vec<(u64, track::Range)> {
-		let (revision, delay) = {
-			let current = self.subscription.read();
-			(current.revision, current.delay)
-		};
+		let revision = self.subscription.read().revision;
 		// Whether the reader mirrored these ranges, and so its copies resolved them.
 		let current = revision == self.revision;
 		let keys = preferences.iter().map(|(key, _)| *key);
@@ -1860,7 +1848,6 @@ impl Reader {
 				sub: Sub::Ready(sub), ..
 			}) => sub.resolve_ranges(&Subscription {
 				ranges: preferences.iter().map(|(_, range)| *range).collect(),
-				delay,
 				..Default::default()
 			}),
 			Some(copy) if current => keys.map(|key| copy.resolved.get(&key).copied()).collect(),
@@ -1957,7 +1944,7 @@ impl Reader {
 			// A time past 0, or a live join, which only a copy can place.
 			let waits = match range.start {
 				track::Start::Time(start) => start > 0,
-				track::Start::Live(_) => true,
+				track::Start::Live { .. } => true,
 				track::Start::Oldest => false,
 			};
 			let Some(resolved) = resolved.get(&key).copied() else {
@@ -2005,8 +1992,8 @@ impl Reader {
 		let mirrored = &self.mirrored;
 		let revision = self.revision;
 		let _ = self.subscription.poll_ref(waiter, |sub| {
-			let scalars = (sub.priority, sub.delay, sub.order, sub.feed);
-			let moved = scalars != (mirrored.priority, mirrored.delay, mirrored.order, mirrored.feed);
+			let scalars = (sub.priority, sub.order, sub.feed);
+			let moved = scalars != (mirrored.priority, mirrored.order, mirrored.feed);
 			if sub.revision != revision {
 				// The keys the changes since touched, each with its range now, or every range
 				// once the log no longer reaches back that far.
@@ -2029,8 +2016,7 @@ impl Reader {
 		if let Some((scalars, ranges, revision)) = changed {
 			self.revision = revision;
 			let mirrored = &mut self.mirrored;
-			(mirrored.priority, mirrored.delay, mirrored.order, mirrored.feed) = scalars;
-			self.window.set_delay(mirrored.delay);
+			(mirrored.priority, mirrored.order, mirrored.feed) = scalars;
 			let change = match ranges {
 				None => Change::Scalars,
 				Some(Ok(edited)) => {
@@ -2077,7 +2063,7 @@ impl Reader {
 						.map(|(key, (range, _))| (key, range))
 						.eq(&self.mirrored.ranges)
 						&& (ranges.iter())
-							.filter(|(_, (range, _))| matches!(range.start, track::Start::Live(_)))
+							.filter(|(_, (range, _))| range.join().is_some())
 							.map(|(key, (_, since))| (key, since))
 							.eq(&self.mirrored.since) =>
 				{
@@ -2093,11 +2079,7 @@ impl Reader {
 						mirrored.insert(key, range, since);
 					}
 					self.mirrored = mirrored;
-					self.window = keyed(
-						self.mirrored.ranges.iter().map(|(key, range)| (*key, *range)),
-						self.mirrored.delay,
-						&Unheld,
-					);
+					self.window = keyed(self.mirrored.ranges.iter().map(|(key, range)| (*key, *range)), &Unheld);
 					// The serving copy's resume point may cut off groups the new ranges cover,
 					// judged by the reader's window.
 					self.resumed = Some(Resumed::Ranges(self.mirrored.ranges.keys().copied().collect()));
@@ -2498,7 +2480,6 @@ impl Reader {
 		group.with_recover(Recover {
 			key,
 			reader: Some(self.this.clone()),
-			max_delay: None,
 			route: self.route.watch(),
 			generation: copy.generation,
 			copy: copy.track.clone(),
@@ -2545,7 +2526,8 @@ impl Reader {
 		self.groups_read = true;
 		self.backfill_gaps(delivered, waiter);
 		let groups = self.groups;
-		let budget = self.mirrored.budget();
+		// A copy is let go as a whole, so it waits out the widest budget any group gets.
+		let budget = self.window.budget().widest();
 		let floor = if ordered { delivered.floor() } else { 0 };
 		let mut lowest: Option<Candidate> = None;
 		let mut held = false;
@@ -3229,7 +3211,7 @@ impl Reader {
 		// delivers nothing more, even while a read still leases it, and one holding a group
 		// without its head may give that group up, so neither counts.
 		let start = self.groups.0;
-		let budget = self.mirrored.budget();
+		let budget = self.window.budget().widest();
 		let drains = |key: u64| {
 			self.copies.iter().any(|copy| {
 				copy.replaced
@@ -3267,9 +3249,6 @@ pub(super) struct Recover {
 	key: u64,
 	/// The reader it was handed out to, followed onto each new route; `None` for a fetch.
 	reader: Option<Weak<Mutex<Reader>>>,
-	/// A fetch's own age budget, asked of each route and judged while waiting on one.
-	/// `None` leaves the publisher's max age alone; unused for a reader.
-	max_delay: Option<std::time::Duration>,
 	/// The route, watched for [`Self::wants`]: every read of the group that parks asks it
 	/// whether the route moved past [`Self::generation`]. Moving that generation any other
 	/// way resets the watch, or a read would skip the move.
@@ -3310,7 +3289,6 @@ impl Clone for Recover {
 		Self {
 			key: self.key,
 			reader: self.reader.clone(),
-			max_delay: self.max_delay,
 			route: self.route.clone(),
 			generation: self.generation,
 			copy: self.copy.clone(),
@@ -3513,7 +3491,7 @@ impl Recover {
 			if res.is_pending()
 				&& let Some(budget) = self.poll_budget(waiter)
 				&& serving
-					.poll_stale(self.key, budget, self.window(waiter), &self.live, waiter)
+					.poll_stale(self.key, budget.at(self.key), self.window(waiter), &self.live, waiter)
 					.is_ready()
 			{
 				return Poll::Ready(Err(Error::Old));
@@ -3622,7 +3600,6 @@ impl Recover {
 				return Poll::Pending;
 			}
 			let options = group::Fetch {
-				max_delay: self.max_delay,
 				frame_start: index,
 				..Default::default()
 			};
@@ -3673,18 +3650,18 @@ impl Recover {
 		Poll::Pending
 	}
 
-	/// The budget for a late group: the reader's current one, or a fetch's own, which is
-	/// unbounded when it named none so that only the publisher's max age applies.
-	pub(super) fn poll_budget(&self, waiter: &kio::Waiter) -> Option<std::time::Duration> {
+	/// The budget for a late group: the reader's current one, or none for a fetch, so that
+	/// only the publisher's max age applies.
+	pub(super) fn poll_budget(&self, waiter: &kio::Waiter) -> Option<Budget> {
 		let Some(reader) = &self.reader else {
-			return Some(self.max_delay.unwrap_or(std::time::Duration::MAX));
+			return Some(Budget::uniform(Duration::MAX));
 		};
 		let reader = reader.upgrade()?;
 		let mut reader = reader.lock().unwrap_or_else(PoisonError::into_inner);
 		// A held group or frame may be the only thing being polled. Mirror and watch
 		// preferences here too, before judging its budget against the live edge.
 		reader.sync(waiter);
-		Some(reader.mirrored.budget())
+		Some(reader.window().budget())
 	}
 
 	/// The groups the reader's ranges resolve to, `None` while a live join waits on a first
@@ -3951,7 +3928,6 @@ impl kio::Task for Fetching {
 					Poll::Ready(Ok(group.with_recover(Recover {
 						key: self.key,
 						reader: None,
-						max_delay: self.options.options.max_delay,
 						route: self.route.watch(),
 						generation: served,
 						copy: serving.clone(),
@@ -3989,13 +3965,9 @@ impl kio::Task for Fetching {
 	}
 }
 
-/// A window over `ranges`, each under its key, for a subscriber with `delay`.
-fn keyed(
-	ranges: impl IntoIterator<Item = (u64, track::Range)>,
-	delay: track::Delay,
-	holdings: &impl Holdings,
-) -> Window {
-	Window::keyed(ranges, delay, None, holdings)
+/// A window over `ranges`, each under its key.
+fn keyed(ranges: impl IntoIterator<Item = (u64, track::Range)>, holdings: &impl Holdings) -> Window {
+	Window::keyed(ranges, None, holdings)
 }
 
 #[cfg(test)]

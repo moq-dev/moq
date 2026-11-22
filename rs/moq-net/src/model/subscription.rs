@@ -8,7 +8,7 @@ mod window;
 pub(super) use cover::{Cover, minus};
 pub(crate) use window::Accounted;
 pub(crate) use window::Resolved;
-pub(super) use window::{Containing, Found, Holdings, Join, Unheld, Unplaced, Window};
+pub(super) use window::{Budget, Containing, Found, Holdings, Join, Unheld, Unplaced, Window};
 
 /// Subscriber-side preferences for receiving a track.
 ///
@@ -22,12 +22,10 @@ pub struct Subscription {
 	/// Delivery priority, higher first, defaulting to 0. Higher values preempt lower ones
 	/// when bandwidth is constrained.
 	pub priority: i8,
-	/// How far behind the live edge this subscriber plays; see [`Delay`].
-	pub delay: Delay,
 	/// The spans of the track to deliver; see [`Range`].
 	///
-	/// The default is one [`Range::default`], which starts at [`Start::Oldest`]: as far back
-	/// as [`Delay::max`] allows. An empty list asks for nothing.
+	/// The default is one range from [`Start::LATEST`]: the latest group, skipping each the
+	/// moment a newer one arrives. An empty list asks for nothing.
 	///
 	/// A request to the publisher, aggregated across every live subscriber as the union of
 	/// their ranges, and this subscriber's read filter: it reads only the groups its own
@@ -52,10 +50,10 @@ pub struct Subscription {
 	/// copy. Only a range whose start is exactly that group's start uses
 	/// it. Aggregated only when every reader resumes: the lowest position then.
 	pub(crate) resume: Option<Position>,
-	/// The time starts a received copy's readers wait on, each with the widest budget one
-	/// waits under: the copy can't prove where the publisher would start them, so its session
-	/// asks its upstream with a range of its own from each. Only an aggregate holds any.
-	pub(crate) asks: Vec<(u64, Duration)>,
+	/// The time starts a received copy's readers wait on: the copy can't prove where the
+	/// publisher would start them, so its session asks its upstream with a range of its own
+	/// from each. Only an aggregate holds any.
+	pub(crate) asks: Vec<u64>,
 	/// The live joins a received copy's readers wait on: the copy can't prove where the
 	/// publisher would start them, so its session asks its upstream with a range of its own
 	/// for each that no unanswered range answers. Only an aggregate holds any.
@@ -63,104 +61,33 @@ pub struct Subscription {
 }
 
 /// A live join a received copy's readers wait on, by its [`Start::Live`] lag and its end, with
-/// the widest budget one waits under and the newest answer any of them saw before it began
-/// waiting: only an answer recorded after that is fresh for every one of them.
+/// the widest staleness budget one waits with and the newest answer any of them saw before it
+/// began waiting: only an answer recorded after that is fresh for every one of them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct JoinAsk {
 	pub min: Duration,
 	pub end: Option<u64>,
+	/// The widest [`Start::Live`] `max` among the readers waiting, as a budget.
 	pub budget: Duration,
 	pub since: u64,
 }
 
-/// How late a subscriber may fall behind the live edge.
-///
-/// The default is a zero maximum, which skips a superseded group at once. Where a subscriber
-/// starts is each range's [`Range::start`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Delay {
-	/// How long a superseded group stays worth delivering to this subscriber, or `None`
-	/// for as long as the publisher keeps it.
-	///
-	/// `Some(Duration::ZERO)` (the default) skips immediately: group 8 arriving means group
-	/// 7 is abandoned, timed or not. A larger budget tolerates that much reordering before
-	/// giving up. This never *adds* delay, since the bound is only reached once newer data
-	/// is already that far ahead. `None` is the publisher's
-	/// [`Info::max_age`](crate::track::Info::max_age) alone, what a reader reaching back
-	/// for history wants. Read in order, `None` waits at a missing group until it resolves;
-	/// see [`track::Ordered`](crate::track::Ordered) for where that can block.
-	///
-	/// This is the `Subscriber Max Age` on the wire, and it is stored here verbatim so
-	/// what was asked for stays readable. Encoded as milliseconds in a QUIC varint, so
-	/// a duration of `2^62` milliseconds or more cannot be put on the wire; `None` goes out
-	/// as the largest value every peer can read. Clamped to the publisher's
-	/// [`Info::max_age`](crate::track::Info::max_age), since waiting for a group longer
-	/// than it is kept around cannot produce it.
-	///
-	/// It caps every one of [`Subscription::ranges`]: a range names what may be delivered, and this
-	/// budget skips what inside it has gone stale.
-	///
-	/// # Where it is enforced
-	///
-	/// At both ends, and neither alone is enough. The publisher skips a group that has
-	/// aged out instead of putting it on the wire, which bounds a backlog before it
-	/// costs bandwidth. But what reaches the publisher is the aggregate across every
-	/// subscriber, resolved in favor of the most tolerant one, so that gate is only ever
-	/// as tight as the most patient viewer. The subscriber applies the same budget again
-	/// as it reads, where its own is the only one in play.
-	///
-	/// This bounds a *subscription*.
-	/// [`track::Consumer::fetch_group`](crate::track::Consumer::fetch_group) is exempt:
-	/// it names one old group explicitly, so there is no live edge to be late against.
-	///
-	/// # How delay is measured
-	///
-	/// By two clocks, and a group is stale once either reaches the budget. Both start at
-	/// its immediate servable successor, so the newest group is never stale.
-	///
-	/// In presentation time, a group is measured by its *reach*, where its successor
-	/// begins, against the newest frame of the latest group: it cannot present past its
-	/// successor, so once everything it could still hold falls outside the budget it is
-	/// provably useless. The candidate needs no timestamp of its own, so an empty or
-	/// stalled group is bounded by its stamped successor the same way.
-	///
-	/// In wall-clock time, a group is measured by how long ago its successor arrived at
-	/// this hop. That bounds what media time can't: a peer whose timestamps stop
-	/// advancing, a successor that never presents a frame, and an untimed track
-	/// (pre-Lite05 moq-lite, or moq-transport without TIMESCALE), which is judged by the
-	/// wall clock alone. A read waiting in a superseded group wakes at that deadline only
-	/// when something collects the track's cache pool: an origin's driver does, and a
-	/// standalone track needs [`Pool::poll`](crate::cache::Pool::poll) called, as its idle
-	/// expiry already does. Otherwise it is judged only when something else wakes the read.
-	pub max: Option<Duration>,
+/// A [`Start::Live`] `max` as a budget: `None` waits as long as anything could.
+pub(crate) fn budget(max: Option<Duration>) -> Duration {
+	max.unwrap_or(Duration::MAX)
 }
 
-impl Default for Delay {
-	fn default() -> Self {
-		Self {
-			max: Some(Duration::ZERO),
-		}
-	}
-}
-
-impl Delay {
-	/// Set [`Self::max`], returning `self` for chaining.
-	pub fn with_max(mut self, max: impl Into<Option<Duration>>) -> Self {
-		self.max = max.into();
-		self
-	}
-
-	/// [`Self::max`] as a budget: `None` waits as long as anything could.
-	pub(crate) fn budget(&self) -> Duration {
-		self.max.unwrap_or(Duration::MAX)
-	}
+/// A budget as a [`Start::Live`] `max`: `Duration::MAX` is no limit.
+pub(crate) fn max_of(budget: Duration) -> Option<Duration> {
+	Some(budget).filter(|budget| *budget != Duration::MAX)
 }
 
 /// Which of a subscription's pending groups the publisher sends first.
 ///
-/// A transmission order only: it never decides *whether* a group is delivered, which is
-/// [`Delay::max`]'s job. An ascending subscriber that wants a backlog
-/// therefore needs a budget that covers it.
+/// A transmission order only: it never decides *whether* a group is delivered. A history
+/// range ([`Start::Time`] or [`Start::Oldest`]) delivers every group it covers, and a
+/// [`Start::Live`] range skips what its `max` judges stale, so an ascending subscriber that
+/// wants a backlog drains it from a history range or a `max` that covers it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Order {
 	/// Oldest first, draining a backlog in key order.
@@ -177,7 +104,11 @@ pub enum Order {
 /// since a group is the unit of decodability, and an end includes its group. A range from
 /// [`Start::Time`] 2 through 6 delivers every group from the one containing time 2 through the
 /// one containing time 6. An end before a time start is empty.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+///
+/// Only a group reached through a [`Start::Live`] range alone can go stale. A group several
+/// ranges cover takes the largest `max` among them, and never goes stale while any history
+/// range covers it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Range {
 	/// Where delivery starts; see [`Start`].
 	pub start: Start,
@@ -189,13 +120,14 @@ pub struct Range {
 /// Where a [`Range`] starts.
 ///
 /// This is the `Start` Anchor on the moq-lite wire.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Start {
-	/// The oldest group still worth delivering: as far back as [`Delay::max`] allows, and
-	/// the publisher still holds.
-	#[default]
+	/// The oldest group the publisher still holds: a floor for history, whose groups are
+	/// delivered in full, bounded only by how long the publisher keeps them
+	/// ([`Info::max_age`](crate::track::Info::max_age)).
 	Oldest,
-	/// The group containing this time: the newest one starting at or before it.
+	/// The group containing this time: the newest one starting at or before it. A floor for
+	/// history, like [`Self::Oldest`]: its groups never go stale.
 	///
 	/// A time resolves at the hop that serves it, from the starts of the groups it holds. When
 	/// none does, a hop whose [`Requests`](crate::track::Requests) handler serves its history
@@ -206,20 +138,89 @@ pub enum Start {
 	/// A relay's copy that can't tell which group contains a time asks its upstream and waits
 	/// for the answer.
 	Time(u64),
-	/// A live join this far behind the live edge: the group containing the live edge minus
-	/// this lag, so a player's buffer arrives full instead of filling in real time, and zero
-	/// starts at the latest group.
-	///
-	/// The hop serving it measures the live edge in media time, from the newest frame it holds,
-	/// rounded up to whole ticks, and on a scale-less track by arrival on its own clock. It
-	/// resolves that time as a [`Self::Time`] start, so a publisher looks it up in its history,
-	/// and [`Delay::max`] still skips what has gone stale. A relay's copy forwards each join to
-	/// its upstream as its own range and starts it where that range's answer does. A range
-	/// resolves once, so a live edge that moves later moves nothing already started.
+	/// A live join `min` behind the live edge, whose groups go stale `max` behind it.
 	///
 	/// Carried in whole milliseconds, rounded up. moq-lite before 07 and moq-transport cannot
-	/// carry it, so it goes out as [`Self::Oldest`] there.
-	Live(Duration),
+	/// carry it, so it goes out as [`Self::Oldest`] there, under the subscription-wide max age
+	/// those wires carry instead.
+	Live {
+		/// How far behind the live edge to join: the group containing the live edge minus this
+		/// lag, so a player's buffer arrives full instead of filling in real time, and zero
+		/// starts at the latest group.
+		///
+		/// The hop serving it measures the live edge in media time, from the newest frame it
+		/// holds, rounded up to whole ticks, and on a scale-less track by arrival on its own
+		/// clock. It resolves that time as a [`Self::Time`] start would, so a publisher looks it
+		/// up in its history; `max` does not move it. A relay's copy forwards each join to its
+		/// upstream as its own range and starts it where that range's answer does. A range
+		/// resolves once, so a live edge that moves later moves nothing already started.
+		min: Duration,
+		/// How long a superseded group stays worth delivering, measured from the live edge, or
+		/// `None` for as long as the publisher keeps it.
+		///
+		/// `Some(Duration::ZERO)` skips immediately: group 8 arriving means group 7 is
+		/// abandoned, timed or not. A larger budget tolerates that much reordering before
+		/// giving up. This never *adds* delay, since the bound is only reached once newer data
+		/// is already that far ahead. Read in order, `None` waits at a missing group until it
+		/// resolves; see [`track::Ordered`](crate::track::Ordered) for where that can block.
+		/// A `max` below `min` skips the join's own oldest groups.
+		///
+		/// Changing only `max` on a range already live, with
+		/// [`Subscriber::update`](crate::track::Subscriber::update), keeps where it joined,
+		/// both here and upstream. Encoded as milliseconds in a QUIC varint, so a duration of
+		/// `2^62` milliseconds or more goes out as no limit. Clamped to the publisher's
+		/// [`Info::max_age`](crate::track::Info::max_age), since waiting for a group longer
+		/// than it is kept around cannot produce it.
+		///
+		/// # Where it is enforced
+		///
+		/// At both ends, and neither alone is enough. The publisher skips a group that has
+		/// aged out instead of putting it on the wire, which bounds a backlog before it
+		/// costs bandwidth. But what reaches the publisher is the aggregate across every
+		/// subscriber, resolved in favor of the most tolerant one, so that gate is only ever
+		/// as tight as the most patient viewer. The subscriber applies its own budget again
+		/// as it reads, where only its own ranges are in play.
+		///
+		/// This bounds a *subscription*.
+		/// [`track::Consumer::fetch_group`](crate::track::Consumer::fetch_group) is exempt:
+		/// it names one old group explicitly, so there is no live edge to be late against.
+		///
+		/// # How staleness is measured
+		///
+		/// By two clocks, and a group is stale once either reaches the budget. Both start at
+		/// its immediate servable successor, so the newest group is never stale.
+		///
+		/// In presentation time, a group is measured by its *reach*, where its successor
+		/// begins, against the newest frame of the latest group: it cannot present past its
+		/// successor, so once everything it could still hold falls outside the budget it is
+		/// provably useless. The candidate needs no timestamp of its own, so an empty or
+		/// stalled group is bounded by its stamped successor the same way.
+		///
+		/// In wall-clock time, a group is measured by how long ago its successor arrived at
+		/// this hop. That bounds what media time can't: a peer whose timestamps stop
+		/// advancing, a successor that never presents a frame, and an untimed track
+		/// (pre-Lite05 moq-lite, or moq-transport without TIMESCALE), which is judged by the
+		/// wall clock alone. A read waiting in a superseded group wakes at that deadline only
+		/// when something collects the track's cache pool: an origin's driver does, and a
+		/// standalone track needs [`Pool::poll`](crate::cache::Pool::poll) called, as its idle
+		/// expiry already does. Otherwise it is judged only when something else wakes the read.
+		max: Option<Duration>,
+	},
+}
+
+impl Start {
+	/// The latest group, skipping each the moment a newer one arrives: a live viewer holding
+	/// no buffer.
+	pub const LATEST: Self = Self::Live {
+		min: Duration::ZERO,
+		max: Some(Duration::ZERO),
+	};
+
+	/// Whether this start is a floor for history rather than a live join, so the groups its
+	/// range covers never go stale.
+	pub(crate) fn is_history(&self) -> bool {
+		!matches!(self, Self::Live { .. })
+	}
 }
 
 /// Every group from where the start places it, following the live edge.
@@ -239,12 +240,30 @@ impl Range {
 	pub(crate) fn time(&self) -> Option<u64> {
 		match self.start {
 			Start::Time(time) => Some(time),
-			Start::Oldest | Start::Live(_) => None,
+			Start::Oldest | Start::Live { .. } => None,
+		}
+	}
+
+	/// The staleness budget of the groups this range covers: its `max` for a live join, and
+	/// none for history.
+	pub(crate) fn budget(&self) -> Duration {
+		match self.start {
+			Start::Live { max, .. } => budget(max),
+			Start::Oldest | Start::Time(_) => Duration::MAX,
+		}
+	}
+
+	/// This range as a live join of the same lag and end, which a change of `max` alone
+	/// keeps: the key a join is placed and answered under.
+	pub(crate) fn join(&self) -> Option<(Duration, Option<u64>)> {
+		match self.start {
+			Start::Live { min, .. } => Some((min, self.end)),
+			Start::Oldest | Start::Time(_) => None,
 		}
 	}
 
 	/// Whether this range follows the live edge from no time: a live join, or one reaching
-	/// back from the oldest group its budget keeps, with no end.
+	/// back from the oldest group, with no end.
 	pub(crate) fn is_open(&self) -> bool {
 		self.time().is_none() && self.end.is_none()
 	}
@@ -254,6 +273,12 @@ impl Range {
 	pub(crate) const EMPTY: Self = Self {
 		start: Start::Time(1),
 		end: Some(0),
+	};
+
+	/// Every group the publisher holds, following the live edge.
+	pub const ALL: Self = Self {
+		start: Start::Oldest,
+		end: None,
 	};
 
 	/// The range from group `start` up to the exclusive group `end`, or onward for `None`:
@@ -284,12 +309,20 @@ pub(crate) fn live_millis(min: Duration) -> u64 {
 /// can't be placed without the live edge, so only an open range drops what it certainly
 /// covers: the open time span drops ranges starting inside it, and a range from the oldest
 /// group following the live edge covers everything. A live join reaches no further back than
-/// its lag, so it covers nothing else.
+/// its lag, so it covers nothing else, and live joins of the same lag and end are one range
+/// under the largest `max` among them: where a join lands doesn't depend on it.
 #[cfg(test)]
 pub(super) fn union(ranges: impl IntoIterator<Item = Range>) -> Vec<Range> {
 	let ranges: Vec<Range> = ranges.into_iter().filter(|range| !range.is_empty()).collect();
-	if ranges.contains(&Range::default()) {
-		return vec![Range::default()];
+	if ranges.contains(&Range::ALL) {
+		return vec![Range::ALL];
+	}
+	let mut joins = std::collections::BTreeMap::<(Duration, Option<u64>), Duration>::new();
+	for range in &ranges {
+		if let Some(join) = range.join() {
+			let widest = joins.entry(join).or_default();
+			*widest = (*widest).max(range.budget());
+		}
 	}
 
 	// An end at the last start covers every group, as an open one does.
@@ -316,7 +349,11 @@ pub(super) fn union(ranges: impl IntoIterator<Item = Range>) -> Vec<Range> {
 		})
 		.collect();
 	// A range with no time start can't be placed against the time spans.
-	union.extend(ranges.iter().filter(|range| range.time().is_none()));
+	union.extend(ranges.iter().filter(|range| range.start == Start::Oldest));
+	union.extend(joins.into_iter().map(|((min, end), budget)| Range {
+		start: Start::Live { min, max: max_of(budget) },
+		end,
+	}));
 	union.sort_unstable();
 	union.dedup();
 	union
@@ -326,8 +363,7 @@ impl Default for Subscription {
 	fn default() -> Self {
 		Self {
 			priority: 0,
-			delay: Delay::default(),
-			ranges: vec![Range::default()],
+			ranges: vec![Range::from(Start::LATEST)],
 			order: Order::Descending,
 			feed: false,
 			resume: None,
@@ -344,15 +380,14 @@ impl Subscription {
 		self
 	}
 
-	/// Set the [`Delay`], returning `self` for chaining.
-	pub fn with_delay(mut self, delay: Delay) -> Self {
-		self.delay = delay;
-		self
-	}
-
-	/// [`Delay::max`] as a budget: `None` waits as long as anything could.
-	pub(crate) fn budget(&self) -> Duration {
-		self.delay.budget()
+	/// The widest staleness budget any range gives a group: none while a history range is
+	/// asked for, and otherwise the largest live join's `max`.
+	pub(crate) fn widest(&self) -> Duration {
+		(self.ranges.iter())
+			.filter(|range| !range.is_empty())
+			.map(Range::budget)
+			.max()
+			.unwrap_or(Duration::ZERO)
 	}
 
 	/// Replace [`Self::ranges`], returning `self` for chaining.
@@ -477,6 +512,25 @@ impl Subscription {
 	pub(crate) fn with_range(self, range: impl RangeBounds<u64>) -> Self {
 		self.with_ranges([Range::groups(range)])
 	}
+
+	/// These preferences under a staleness budget the way a subscription-wide max age used to
+	/// apply one: [`Start::LATEST`] and [`Start::Oldest`] reach back as far as `max` and go
+	/// stale past it, or take every group for `None`; another live join keeps its lag and
+	/// takes `max`; a time start is history either way.
+	pub(crate) fn with_max(mut self, max: impl Into<Option<Duration>>) -> Self {
+		let max = max.into();
+		for range in &mut self.ranges {
+			range.start = match range.start {
+				Start::Oldest | Start::LATEST => match max {
+					Some(max) => Start::Live { min: max, max: Some(max) },
+					None => Start::Oldest,
+				},
+				Start::Live { min, .. } => Start::Live { min, max },
+				Start::Time(time) => Start::Time(time),
+			};
+		}
+		self
+	}
 }
 
 /// The most demanding request across subscribers, folded in one at a time: the reference
@@ -496,10 +550,6 @@ impl Combined {
 			return;
 		};
 		combined.priority = combined.priority.max(sub.priority);
-		combined.delay.max = match (combined.delay.max, sub.delay.max) {
-			(Some(a), Some(b)) => Some(a.max(b)),
-			_ => None,
-		};
 		combined.ranges.extend_from_slice(&sub.ranges);
 		// Key-first prioritization is enabled only when every subscriber wants it.
 		if let Order::Descending = sub.order {

@@ -9,7 +9,7 @@ use std::{
 	time::Duration,
 };
 
-use super::{Delay, JoinAsk, Order, Position, Range, Start, Subscription, TrackState, clamp_combined};
+use super::{JoinAsk, Order, Position, Range, Subscription, TrackState, clamp_combined};
 
 mod ranges;
 use ranges::Ranges;
@@ -35,7 +35,7 @@ pub(super) fn answered() -> u64 {
 pub(super) struct Subscriptions {
 	count: usize,
 	priority: BTreeMap<i8, usize>,
-	// Keyed by budget, so `None` counts as the widest of all.
+	/// Each non-empty range's staleness budget, counted: a history range's is the widest of all.
 	max_delay: BTreeMap<Duration, usize>,
 	ranges: Ranges,
 	descending: usize,
@@ -45,9 +45,9 @@ pub(super) struct Subscriptions {
 	resumes: BTreeMap<Position, usize>,
 	/// How many subscribers resume, so the aggregate asks without summing [`Self::resumes`].
 	resuming: usize,
-	/// The time starts a received copy's readers wait on, by time, counted under the budget
-	/// each waits with: see [`Subscription::asks`].
-	asks: BTreeMap<u64, BTreeMap<Duration, usize>>,
+	/// The time starts a received copy's readers wait on, by time, counted: see
+	/// [`Subscription::asks`].
+	asks: BTreeMap<u64, usize>,
 	/// The live joins a received copy's readers wait on, by lag and end: see
 	/// [`Subscription::joins`].
 	joins: BTreeMap<(Duration, Option<u64>), Waiting>,
@@ -66,7 +66,7 @@ pub(super) struct Subscriptions {
 	callers: kio::WaiterList,
 }
 
-/// The readers waiting on one live join, counted under the budget each waits with and the
+/// The readers waiting on one live join, counted under the `max` each waits with and the
 /// newest answer each saw before it began waiting.
 #[derive(Default)]
 struct Waiting {
@@ -96,14 +96,13 @@ pub(super) enum Requested {
 }
 
 /// Everything the aggregate holds besides its ranges.
-type Scalars = (i8, Delay, Order, bool, Option<Position>);
+type Scalars = (i8, Order, bool, Option<Position>);
 
 impl Subscriptions {
 	pub(super) fn combined(&self) -> Option<Subscription> {
-		let (priority, delay, order, feed, resume) = self.scalars()?;
+		let (priority, order, feed, resume) = self.scalars()?;
 		Some(Subscription {
 			priority,
-			delay,
 			ranges: self.ranges.union(),
 			order,
 			feed,
@@ -155,26 +154,18 @@ impl Subscriptions {
 		}
 	}
 
-	/// Each time start readers wait on, with the widest budget one waits under.
-	fn asks(&self) -> Vec<(u64, Duration)> {
-		(self.asks.iter())
-			.filter_map(|(time, budgets)| Some((*time, *budgets.last_key_value()?.0)))
-			.collect()
+	/// Each time start readers wait on.
+	fn asks(&self) -> Vec<u64> {
+		self.asks.keys().copied().collect()
 	}
 
-	/// Count a reader waiting on time start `time` under `budget`, or uncount one when not
-	/// `waits`, waking the aggregate's watchers when the widest budget at that time moves.
-	pub(super) fn ask(&mut self, time: u64, budget: Duration, waits: bool) -> kio::WaiterList {
-		let budgets = self.asks.entry(time).or_default();
-		let widest = budgets.last_key_value().map(|(budget, _)| *budget);
-		match waits {
-			true => _ = add(budgets, budget),
-			false => _ = remove(budgets, budget),
-		}
-		let moved = budgets.last_key_value().map(|(budget, _)| *budget) != widest;
-		if budgets.is_empty() {
-			self.asks.remove(&time);
-		}
+	/// Count a reader waiting on time start `time`, or uncount one when not `waits`, waking the
+	/// aggregate's watchers when the first starts or the last stops waiting on it.
+	pub(super) fn ask(&mut self, time: u64, waits: bool) -> kio::WaiterList {
+		let moved = match waits {
+			true => add(&mut self.asks, time),
+			false => remove(&mut self.asks, time),
+		};
 		match moved {
 			true => self.waiters.take(),
 			false => Default::default(),
@@ -183,10 +174,9 @@ impl Subscriptions {
 
 	/// [`Self::combined`] without its ranges, costing none of them.
 	pub(super) fn terms(&self) -> Option<Subscription> {
-		let (priority, delay, order, feed, resume) = self.scalars()?;
+		let (priority, order, feed, resume) = self.scalars()?;
 		Some(Subscription {
 			priority,
-			delay,
 			ranges: Vec::new(),
 			order,
 			feed,
@@ -196,7 +186,7 @@ impl Subscriptions {
 		})
 	}
 
-	/// The largest delay budget without materializing the subscription's ranges.
+	/// The widest staleness budget any range asks under, without materializing the ranges.
 	pub(super) fn max_delay(&self) -> Duration {
 		self.max_delay
 			.last_key_value()
@@ -207,9 +197,6 @@ impl Subscriptions {
 		(self.count != 0).then(|| {
 			(
 				*self.priority.last_key_value().unwrap().0,
-				Delay {
-					max: Some(*self.max_delay.last_key_value().unwrap().0).filter(|budget| *budget != Duration::MAX),
-				},
 				if self.descending == 0 {
 					Order::Ascending
 				} else {
@@ -378,9 +365,14 @@ impl Subscriptions {
 		let mut reshaped = false;
 		// New ranges count before old ones leave, so a range both hold never reads as gone.
 		let (gone, came) = moved;
+		for range in came.iter().filter(|range| !range.is_empty()) {
+			add(&mut self.max_delay, range.budget());
+		}
+		for range in gone.iter().filter(|range| !range.is_empty()) {
+			remove(&mut self.max_delay, range.budget());
+		}
 		if let Some(new) = &new {
 			add(&mut self.priority, new.priority);
-			add(&mut self.max_delay, new.budget());
 			for range in came {
 				reshaped |= self.ranges.add(*range);
 			}
@@ -394,7 +386,6 @@ impl Subscriptions {
 		}
 		if let Some(old) = &old {
 			remove(&mut self.priority, old.priority);
-			remove(&mut self.max_delay, old.budget());
 			for range in gone {
 				reshaped |= self.ranges.remove(*range);
 			}
@@ -460,16 +451,9 @@ fn remove<T: Ord>(counts: &mut BTreeMap<T, usize>, value: T) -> bool {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct Contribution {
 	priority: i8,
-	delay: Delay,
 	order: Order,
 	feed: bool,
 	resume: Option<Position>,
-}
-
-impl Contribution {
-	fn budget(&self) -> Duration {
-		self.delay.budget()
-	}
 }
 
 /// A change to a subscriber's preferences that edits its ranges by key: the ranges keyed
@@ -480,7 +464,6 @@ pub(crate) struct Edit {
 	pub retire: Vec<u64>,
 	pub add: Vec<(u64, Range)>,
 	pub priority: i8,
-	pub delay: Delay,
 	pub order: Order,
 }
 
@@ -489,7 +472,6 @@ pub(crate) struct Edit {
 /// a reader catches up on those alone.
 pub(in crate::model) struct Prefs {
 	pub priority: i8,
-	pub delay: Delay,
 	pub order: Order,
 	pub feed: bool,
 	pub resume: Option<Position>,
@@ -515,7 +497,6 @@ impl Prefs {
 	fn new(value: Subscription, tick: u64) -> Self {
 		let mut prefs = Self {
 			priority: value.priority,
-			delay: value.delay,
 			order: value.order,
 			feed: value.feed,
 			resume: value.resume,
@@ -543,7 +524,6 @@ impl Prefs {
 	pub fn subscription(&self) -> Subscription {
 		Subscription {
 			priority: self.priority,
-			delay: self.delay,
 			ranges: self.ranges.values().copied().collect(),
 			order: self.order,
 			feed: self.feed,
@@ -553,8 +533,13 @@ impl Prefs {
 		}
 	}
 
-	pub fn budget(&self) -> Duration {
-		self.delay.budget()
+	/// The widest staleness budget any of these ranges gives a group.
+	pub fn widest(&self) -> Duration {
+		(self.ranges.values())
+			.filter(|range| !range.is_empty())
+			.map(Range::budget)
+			.max()
+			.unwrap_or(Duration::ZERO)
 	}
 
 	/// Whether a subscriber joins at the live edge: a live join following it. A time start
@@ -587,7 +572,6 @@ impl Prefs {
 	fn contribution(&self) -> Contribution {
 		Contribution {
 			priority: self.priority,
-			delay: self.delay,
 			order: self.order,
 			feed: self.feed,
 			resume: self.resume,
@@ -599,9 +583,18 @@ impl Prefs {
 		if let Some(old) = self.ranges.insert(key, range) {
 			self.count(&old, -1);
 		}
-		match range.start {
-			Start::Live(_) => _ = self.since.insert(key, tick),
-			Start::Oldest | Start::Time(_) => _ = self.since.remove(&key),
+		match range.join() {
+			Some(_) => _ = self.since.insert(key, tick),
+			None => _ = self.since.remove(&key),
+		}
+	}
+
+	/// The join tick to add `range` under `key` at, `tick` for a new range: a live join that
+	/// changes only its `max` keeps the one it was added at, since it stays where it joined.
+	fn tick_for(&self, key: u64, range: &Range, tick: u64) -> u64 {
+		match self.ranges.get(&key) {
+			Some(old) if range.join().is_some() && old.join() == range.join() => self.since(key),
+			_ => tick,
 		}
 	}
 
@@ -651,11 +644,25 @@ impl Prefs {
 	}
 
 	/// Replace every preference, rekeying the ranges by position when they change: every
-	/// reader resolves them all again, its live joins added at join tick `tick`.
+	/// reader resolves them all again, its live joins added at join tick `tick`. Ranges that
+	/// change only a live join's `max` keep their keys, so each stays where it joined.
 	fn replace(&mut self, next: Subscription, tick: u64) {
-		(self.priority, self.delay, self.order, self.feed, self.resume) =
-			(next.priority, next.delay, next.order, next.feed, next.resume);
+		(self.priority, self.order, self.feed, self.resume) = (next.priority, next.order, next.feed, next.resume);
 		if self.ranges.values().eq(&next.ranges) {
+			return;
+		}
+		let retunes = self.ranges.len() == next.ranges.len()
+			&& (self.ranges.values().zip(&next.ranges))
+				.all(|(old, new)| old == new || (new.join().is_some() && old.join() == new.join()));
+		if retunes {
+			let changed: Vec<(u64, Range)> = (self.ranges.iter().zip(&next.ranges))
+				.filter(|((_, old), new)| old != new)
+				.map(|((key, _), new)| (*key, *new))
+				.collect();
+			for &(key, range) in &changed {
+				self.ranges.insert(key, range);
+			}
+			self.touched(changed.into_iter().map(|(key, _)| key));
 			return;
 		}
 		self.ranges.clear();
@@ -703,7 +710,6 @@ impl Preferences {
 		let contribution = value.contribution();
 		let next_contribution = Contribution {
 			priority: next.priority,
-			delay: next.delay,
 			order: next.order,
 			feed: next.feed,
 			resume: next.resume,
@@ -732,7 +738,6 @@ impl Preferences {
 		let contribution = value.contribution();
 		let scalars = Contribution {
 			priority: edit.priority,
-			delay: edit.delay,
 			order: edit.order,
 			..contribution
 		};
@@ -750,6 +755,7 @@ impl Preferences {
 			}
 		}
 		for (key, range) in edit.add {
+			let tick = value.tick_for(key, &range, tick);
 			if let Some(old) = value.remove(key) {
 				gone.push(old);
 			}
@@ -757,7 +763,7 @@ impl Preferences {
 			came.push(range);
 			touched.push(key);
 		}
-		(value.priority, value.delay, value.order) = (edit.priority, edit.delay, edit.order);
+		(value.priority, value.order) = (edit.priority, edit.order);
 		if !touched.is_empty() {
 			value.touched(touched);
 		}

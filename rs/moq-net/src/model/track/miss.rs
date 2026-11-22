@@ -28,11 +28,11 @@ use std::{
 use rangemap::{RangeInclusiveSet, RangeMap, RangeSet};
 
 use super::super::delivered::Delivered;
-use super::super::subscription::Cover;
+use super::super::subscription::{Budget, Cover};
 pub(super) use super::fill::Asking;
 use super::fill::{Ask, FillState, Join};
 use super::{Drift, Order, Position, TrackState};
-use crate::{Error, ledger};
+use crate::ledger;
 
 /// What a probe judges against: the span read, the feed's newest group, where the feed
 /// and readers start, and the drops revision.
@@ -45,7 +45,7 @@ pub(super) struct Misses {
 	at: Option<JudgedAt>,
 	ledger_revision: u64,
 	drops_revision: u64,
-	budget: Option<Duration>,
+	budget: Option<Budget>,
 	grace: Option<Duration>,
 	ended: bool,
 	/// The keys judged already, within what the reader reads up to the newest group.
@@ -102,7 +102,7 @@ pub(super) struct Misses {
 	unknown: Option<u64>,
 	/// The drops revision, budget, and coverage [`Self::unknown`] was found under: while the
 	/// terms hold, only the runs changed since are looked at.
-	unknown_at: Option<(u64, Duration, super::Coverage)>,
+	unknown_at: Option<(u64, Budget, super::Coverage)>,
 	/// The [`Forgotten`] revision this reader judged again up to.
 	forgotten: u64,
 }
@@ -531,19 +531,16 @@ impl Misses {
 		self.release(&lost);
 	}
 
-	/// Take in what the joined fills answered, waking `waiter` once the rest do. Returns the
-	/// runs to ask again: refused as too old for a budget tighter than this reader's.
+	/// Take in what the joined fills answered, waking `waiter` once the rest do.
 	///
 	/// Looks only at the joins whose fills answered since the last call, and the joins new
 	/// since, so a reader waiting on thousands of fills costs the ones that answered.
 	pub fn resolve(
 		&mut self,
 		state: &kio::Consumer<TrackState>,
-		max_delay: Option<Duration>,
 		given_up: &mut GivenUp,
 		waiter: &kio::Waiter,
-	) -> RangeSet<u64> {
-		let mut retry = RangeSet::new();
+	) {
 		self.answered
 			.tasks
 			.lock()
@@ -622,10 +619,6 @@ impl Misses {
 							inbox.saw(state.cached);
 						}
 					}
-					Err((Error::Old, asked)) if looser(max_delay, asked) => retry.insert(groups),
-					// Stale under the budget it was asked with, which this reader's is no wider
-					// than: a stale verdict a wider budget asks again, never a refusal spent for good.
-					Err((Error::Old, Some(asked))) => self.give_up_stale(groups, asked, given_up),
 					// A drop the track recorded is named by the drop cursor already.
 					Err(_) => self.settle(&state, groups, given_up),
 				}
@@ -649,7 +642,6 @@ impl Misses {
 				state.cache.watch_wall(at, waiter);
 			}
 		}
-		retry
 	}
 
 	/// Tell each fill this reader joined that a read picked up what it answered, so its
@@ -703,7 +695,7 @@ impl Misses {
 				.find(|(run, hole)| !drift.settles(run.start, hole))
 				.map(|(run, _)| run.end - 1),
 		};
-		self.unknown_at = Some((revision, drift.budget, drift.coverage.clone()));
+		self.unknown_at = Some((revision, drift.budget.clone(), drift.coverage.clone()));
 		self.unknown
 	}
 
@@ -763,7 +755,7 @@ impl Misses {
 		// Every reader probes on every poll, mostly with nothing changed since the last, so
 		// that answer costs neither the subscriptions' lock nor a clock read.
 		let unchanged = self.at == Some(at)
-			&& self.budget == Some(drift.budget)
+			&& self.budget.as_ref() == Some(&drift.budget)
 			&& self.ended == ended
 			&& self.ledger_revision == ledger.revision()
 			&& self.drops_revision == drops.revision()
@@ -800,7 +792,7 @@ impl Misses {
 				|| previous.4 != at.4
 				|| previous.5 != at.5
 				|| at.0 < previous.0
-		}) || self.budget != Some(drift.budget)
+		}) || self.budget.as_ref() != Some(&drift.budget)
 			|| self.grace != Some(grace)
 			|| self.ended != ended;
 		let low = id.0;
@@ -1025,7 +1017,7 @@ impl Misses {
 		}
 		self.ledger_revision = ledger.revision();
 		self.drops_revision = drops.revision();
-		self.budget = Some(drift.budget);
+		self.budget = Some(drift.budget.clone());
 		self.grace = Some(grace);
 		self.ended = ended;
 		self.at = Some(at);
@@ -1098,7 +1090,7 @@ impl Misses {
 
 		// An old cache's floor is a boundary inside a missing run, not a drift verdict
 		// for that whole run. Discard only its prefix before asking for the fresh suffix.
-		let floor = state.cache_floor(drift.budget);
+		let floor = drift.budget.floor(state.live_floor);
 		let old: Vec<_> = asks
 			.overlapping(&(0..floor))
 			.map(|run| run.start..run.end.min(floor))
@@ -1107,16 +1099,15 @@ impl Misses {
 			asks.remove(run.clone());
 			self.give_up(run, given_up);
 		}
-		// Starts never rewind, so a run whose newest group is stale under this reader's
-		// budget is stale throughout.
-		let stale: Vec<ops::Range<u64>> = asks
-			.iter()
-			.filter(|run| state.drifted(run.end - 1, &drift.edge, drift.budget))
-			.cloned()
+		// Starts never rewind, so a stretch under one budget whose newest group is stale under
+		// it is stale throughout.
+		let stale: Vec<(ops::Range<u64>, Duration)> = (asks.iter())
+			.flat_map(|run| drift.budget.runs(run.clone()))
+			.filter(|(run, budget)| state.drifted(run.end - 1, &drift.edge, *budget))
 			.collect();
-		for run in stale {
+		for (run, budget) in stale {
 			asks.remove(run.clone());
-			self.give_up_stale(run, drift.budget, given_up);
+			self.give_up_stale(run, budget, given_up);
 		}
 		asks
 	}
@@ -1157,7 +1148,7 @@ impl Misses {
 		if !only_arrivals
 			|| !self.deferred.runs.is_empty()
 			|| !self.refused.is_empty()
-			|| self.budget != Some(drift.budget)
+			|| self.budget.as_ref() != Some(&drift.budget)
 			|| self.grace != Some(grace)
 			|| self.ended != ended
 			|| self.drops_revision != state.drops_changes.revision()
@@ -1239,16 +1230,18 @@ impl Misses {
 		self.release(&released);
 		// Below an old cache's floor is a boundary, not a drift verdict; above it, a stretch
 		// went stale under this reader's budget.
-		let floor = state.cache_floor(drift.budget);
+		let floor = drift.budget.floor(state.live_floor);
 		for run in stale.iter() {
 			self.give_up(run.start..run.end.min(floor), given_up);
-			self.give_up_stale(run.start.max(floor)..run.end, drift.budget, given_up);
+			for (run, budget) in drift.budget.runs(run.start.max(floor)..run.end) {
+				self.give_up_stale(run, budget, given_up);
+			}
 		}
 	}
 
 	/// What [`Self::expire`] gives up as stale, and what arrived live, parking `waiter`.
 	fn expired(&self, state: &TrackState, drift: &Drift, waiter: &kio::Waiter) -> (RangeSet<u64>, RangeSet<u64>) {
-		let floor = state.cache_floor(drift.budget);
+		let floor = drift.budget.floor(state.live_floor);
 		// A floor raised after this fill was asked can cut through its wanted run.
 		let mut stale: RangeSet<u64> = self
 			.wanted
@@ -1264,7 +1257,7 @@ impl Misses {
 			.map(|run| run.start.max(floor));
 		while let Some(from) = next {
 			let bound = state.arrival(from, servable).map(|slot| slot.group.start);
-			let drifted = state.poll_drifted(from, servable, drift.budget, None, waiter);
+			let drifted = state.poll_drifted(from, servable, drift.budget.at(from), None, waiter);
 			next = self.stretches(state, from, bound, drifted, &mut stale, &mut arrived);
 		}
 		(stale, arrived)
@@ -1387,8 +1380,10 @@ impl Misses {
 		// A run given up stale under a narrower budget is no verdict for this reader, even
 		// before its next probe takes it back (see `Self::widen`).
 		for (run, judged) in self.stale.overlapping(&hole) {
-			if *judged < drift.budget {
-				given.remove(run.clone());
+			for (run, budget) in drift.budget.runs(run.clone()) {
+				if *judged < budget {
+					given.remove(run);
+				}
 			}
 		}
 		for run in given.iter() {
@@ -1448,15 +1443,19 @@ impl Misses {
 	/// them for the caller to reopen with [`Self::reopen`]: only a widening reverses a stale
 	/// verdict. Looks only when `budget` is wider than the narrowest it holds, whichever
 	/// budget a verdict was judged under and whenever it arrived.
-	pub fn widen(&mut self, budget: Duration) -> RangeSet<u64> {
-		if self.narrowest.is_none_or(|narrowest| budget <= narrowest) {
+	pub fn widen(&mut self, budget: &Budget) -> RangeSet<u64> {
+		if self.narrowest.is_none_or(|narrowest| budget.widest() <= narrowest) {
 			return RangeSet::new();
 		}
-		let widened: RangeSet<u64> = self
-			.stale
-			.iter()
-			.filter(|(_, judged)| **judged < budget)
-			.map(|(run, _)| run.clone())
+		let widened: RangeSet<u64> = (self.stale.iter())
+			.flat_map(|(run, judged)| {
+				let judged = *judged;
+				budget
+					.runs(run.clone())
+					.into_iter()
+					.filter(move |(_, now)| judged < *now)
+					.map(|(run, _)| run)
+			})
 			.collect();
 		for run in widened.iter() {
 			self.stale.remove(run.clone());
@@ -1684,16 +1683,6 @@ fn clip(run: ops::Range<u64>, from: u64, admitted: &RangeInclusiveSet<u64>) -> V
 		.collect()
 }
 
-/// Whether `ours` tolerates more than the budget a fill `asked` with, so its [`Error::Old`]
-/// was not this reader's.
-fn looser(ours: Option<Duration>, asked: Option<Duration>) -> bool {
-	match (asked, ours) {
-		(Some(asked), Some(ours)) => ours > asked,
-		(Some(_), None) => true,
-		(None, _) => false,
-	}
-}
-
 /// The misses a reader gave up, billed with its record and forgotten below its floor once it
 /// folds: it hands out nothing there, so never asks a fill for it again.
 impl super::super::record::Beside for Misses {
@@ -1812,7 +1801,6 @@ mod tests {
 		let state = track.state.read();
 		let drift = Drift {
 			budget,
-			bounded: false,
 			edge: state.drift_edge(&Servable::ALL),
 			coverage: None,
 		};
@@ -1957,7 +1945,6 @@ mod tests {
 		let state = track.state.read();
 		let drift = Drift {
 			budget,
-			bounded: false,
 			edge: state.drift_edge(&Servable::ALL),
 			coverage: None,
 		};
@@ -2033,7 +2020,6 @@ mod tests {
 		let state = track.state.read();
 		let drift = Drift {
 			budget,
-			bounded: false,
 			edge: state.drift_edge(&Servable::ALL),
 			coverage: None,
 		};
@@ -2145,7 +2131,6 @@ mod tests {
 		let state = track.state.read();
 		let drift = Drift {
 			budget,
-			bounded: false,
 			edge: state.drift_edge(&Servable::ALL),
 			coverage: None,
 		};
@@ -2328,7 +2313,6 @@ mod tests {
 				let state = track.state.read();
 				let drift = Drift {
 					budget,
-					bounded: false,
 					edge: state.drift_edge(&servable),
 					coverage: None,
 				};
@@ -2452,7 +2436,6 @@ mod tests {
 					let state = track.state.read();
 					let drift = Drift {
 						budget,
-						bounded: false,
 						edge: state.drift_edge(&Servable::ALL),
 						coverage: None,
 					};

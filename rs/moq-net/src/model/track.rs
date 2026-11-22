@@ -23,8 +23,9 @@ use super::record::{Pending, Record, Report};
 use crate::ledger::{self, Ledger};
 
 pub(crate) use super::subscription::Resolved;
-use super::subscription::{Accounted, Containing, Cover, Found, Holdings, Join, Unplaced, Window, minus};
-pub use super::subscription::{Delay, Order, Position, Range, Start, Subscription};
+use super::subscription::{Accounted, Budget, Containing, Cover, Found, Holdings, Join, Unplaced, Window, minus};
+pub use super::subscription::{Order, Position, Range, Start, Subscription};
+use super::subscription;
 pub(crate) use super::subscription::{JoinAsk, live_millis};
 use rangemap::{RangeInclusiveSet, RangeMap, RangeSet};
 
@@ -610,11 +611,9 @@ impl Anchors {
 /// How a received lite-07 copy's publisher answered the newest range asking one live join.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct JoinAnswer {
-	/// The group the join starts at, `None` for nothing to deliver.
+	/// The group the join starts at, `None` for nothing to deliver, whatever `max` it was
+	/// asked under: a join lands where its lag does.
 	start: Option<u64>,
-	/// The narrowest budget the range was asked under before its answer: a start the budget
-	/// moved past older groups holds only for a reader within it.
-	budget: Duration,
 	/// When it was recorded, by the join tick (see [`demand::Prefs::since`]): a reader that
 	/// began waiting later takes only a newer answer, since the live edge moved on.
 	tick: u64,
@@ -622,25 +621,23 @@ struct JoinAnswer {
 
 /// How a received copy's publisher answered the ranges asked from one time.
 ///
-/// The publisher starts a range at the oldest group its budget has not expired from the one
-/// containing the time, so a start at or before the time is that group, for every reader. A
-/// start past the time, or no group to deliver, says only that no group at or before it is
-/// left within the budget the range was answered under: a wider reader may still get one.
+/// The publisher starts a history range at the group containing the time, or the oldest it
+/// holds past it, so a start at or before the time is that group, and a start past the time,
+/// or no group to deliver, says no group at or before it is left.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct TimeStart {
 	/// The lowest group a range asked from the time started at.
 	start: Option<u64>,
-	/// The widest budget a range asked from the time was answered under with no group at or
-	/// before it.
-	past: Option<Duration>,
+	/// Whether a range asked from the time was answered with no group at or before it.
+	past: bool,
 }
 
 impl TimeStart {
-	/// Where the time falls for a reader within `budget`, `None` when no answer proves it.
-	fn containing(&self, time: u64, budget: Duration) -> Option<Containing> {
+	/// Where the time falls, `None` when no answer proves it.
+	fn containing(&self, time: u64) -> Option<Containing> {
 		match (self.start, self.past) {
 			(Some(start), _) if start <= time => Some(Containing::Group(start)),
-			(_, Some(past)) if budget <= past => Some(Containing::Before),
+			(_, true) => Some(Containing::Before),
 			_ => None,
 		}
 	}
@@ -1234,8 +1231,8 @@ impl Holdings for TrackState {
 	/// on a scale-less track, by arrival on this hop's clock, as expiry measures it.
 	///
 	/// A received lite-07 copy places it only where its upstream answered a range asking the
-	/// same join, recorded after `since`, under a budget at least as wide as the reader's:
-	/// the live edge is the upstream's, which no group held here measures. Otherwise it waits on
+	/// same join, recorded after `since`: the live edge is the upstream's, which no group held
+	/// here measures. Otherwise it waits on
 	/// its upstream, which its session asks with a range of its own. Another copy whose wire
 	/// reports where its ranges start places it only where the groups it holds prove, and waits
 	/// otherwise, until its end is declared and settled: then the join resolves as a time start.
@@ -1247,7 +1244,7 @@ impl Holdings for TrackState {
 		// measure it, as its upstream's would, holding the same final groups.
 		if self.joins_answered() {
 			return match self.join_answers.get(&(min, end)) {
-				Some(answer) if answer.tick > since && budget <= answer.budget => {
+				Some(answer) if answer.tick > since => {
 					answer.start.map_or(Join::Empty, Join::Group)
 				}
 				_ => Join::Unknown,
@@ -1451,7 +1448,7 @@ impl TrackState {
 		{
 			return Containing::Group(key);
 		}
-		if let Some(placed) = (self.time_starts.get(&time)).and_then(|reported| reported.containing(time, budget)) {
+		if let Some(placed) = (self.time_starts.get(&time)).and_then(|reported| reported.containing(time)) {
 			return placed;
 		}
 		match held {
@@ -1460,11 +1457,10 @@ impl TrackState {
 		}
 	}
 
-	/// Whether the range asked from `time` had no group at or before it for a reader within
-	/// `budget`: the live feed brings it none of the range's groups there.
-	fn answered_empty(&self, time: u64, budget: Duration) -> bool {
-		(self.time_starts.get(&time))
-			.is_some_and(|reported| reported.containing(time, budget) == Some(Containing::Before))
+	/// Whether the range asked from `time` had no group at or before it: the live feed brings
+	/// it none of the range's groups there.
+	fn answered_empty(&self, time: u64) -> bool {
+		(self.time_starts.get(&time)).is_some_and(|reported| reported.containing(time) == Some(Containing::Before))
 	}
 
 	/// Whether drops, for whatever reason, cover every key in `keys`. An empty run is covered.
@@ -4427,7 +4423,7 @@ pub(super) enum Board {
 
 /// Board `reader`'s group at its frame, which the copy it read shed: ride a copy that
 /// admits it, else ask the track's [`Requests`] handlers for a flight from that frame,
-/// with the reader's priority and budget.
+/// with the reader's priority.
 /// `None` when no handler can serve one.
 ///
 /// A compressed group's flight starts at frame 0, since a later frame builds on the ones
@@ -4451,8 +4447,6 @@ pub(super) fn board(track: &kio::Producer<TrackState>, reader: &group::Consumer)
 	let join = fills.lock().fly(&fills, key, frame, asking)?;
 	Some(Board::Wait(Boarding {
 		join: Box::new(join),
-		fills,
-		asking,
 		key,
 		frame,
 	}))
@@ -4477,9 +4471,6 @@ pub(super) fn hand_over(
 pub(super) struct Boarding {
 	// Boxed: a reader holds one only while boarding.
 	join: Box<fill::Join>,
-	// Where to ask again, with what, when a tighter budget than this reader's refused it.
-	fills: kio::Shared<FillState>,
-	asking: fill::Asking,
 	key: u64,
 	frame: u64,
 }
@@ -4499,36 +4490,15 @@ impl Boarding {
 		};
 		let key = self.key;
 		let answer = self.join.outcome().poll(waiter, |outcome| match outcome.refused(key) {
-			Some((err, asked)) => Poll::Ready(Err((err.clone(), asked))),
-			None if outcome.is_accepted(key) => Poll::Ready(outcome.partial(key, frames).ok_or((Error::Cancel, None))),
+			Some(err) => Poll::Ready(Err(err.clone())),
+			None if outcome.is_accepted(key) => Poll::Ready(outcome.partial(key, frames).ok_or(Error::Cancel)),
 			None => Poll::Pending,
 		});
-		// The closed channel's guard borrows the join, which a retry replaces.
-		let (err, asked) = match ready!(answer.map(|answer| answer.map_err(drop))) {
-			Ok(Ok(copy)) => return Poll::Ready(copy.try_consume().ok_or(Error::Cancel)),
-			Ok(Err(refused)) => refused,
-			Err(_closed) => return Poll::Ready(Err(Error::NotFound)),
-		};
-		// Boarded a flight already asked under a tighter budget, which judged the group too
-		// old for that budget, not ours: ask again with ours. Terminates, since the new
-		// flight asks at least our budget.
-		if !matches!(err, Error::Old) || !looser(asked, self.asking.max_delay) {
-			return Poll::Ready(Err(err));
+		match ready!(answer.map(|answer| answer.map_err(drop))) {
+			Ok(Ok(copy)) => Poll::Ready(copy.try_consume().ok_or(Error::Cancel)),
+			Ok(Err(err)) => Poll::Ready(Err(err)),
+			Err(_closed) => Poll::Ready(Err(Error::NotFound)),
 		}
-		let Some(join) = self.fills.lock().fly(&self.fills, key, self.frame, self.asking) else {
-			return Poll::Ready(Err(err));
-		};
-		*self.join = join;
-		self.poll(waiter)
-	}
-}
-
-/// Whether `ours` waits longer than the budget `asked` upstream, `None` being the longest.
-fn looser(asked: Option<Duration>, ours: Option<Duration>) -> bool {
-	match (asked, ours) {
-		(Some(asked), Some(ours)) => ours > asked,
-		(Some(_), None) => true,
-		(None, _) => false,
 	}
 }
 
@@ -5231,23 +5201,21 @@ impl Producer {
 		}
 	}
 
-	/// Record where the upstream publisher started each of this lite-07 copy's live wire
-	/// ranges, as `(time, start, budget)` by the time each asked from (0 for the oldest group),
-	/// `None` for one with no group to deliver at or before its time, answered under at most
-	/// `budget`, replacing the last set. A reader's time start this copy cannot place among its
-	/// own groups resolves to the range asked from it: a start at or before the time names the
-	/// group containing it, and anything else says no group there is left within the budget.
+	/// Record where the upstream publisher started each of this lite-07 copy's live history
+	/// ranges, as `(time, start)` by the time each asked from (0 for the oldest group), `None`
+	/// for one with no group to deliver at or before its time, replacing the last set. A
+	/// reader's time start this copy cannot place among its own groups resolves to the range
+	/// asked from it: a start at or before the time names the group containing it, and
+	/// anything else says no group there is left.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn time_starts(&self, starts: impl IntoIterator<Item = (u64, Option<u64>, Duration)>) {
+	pub(crate) fn time_starts(&self, starts: impl IntoIterator<Item = (u64, Option<u64>)>) {
 		let mut merged: BTreeMap<u64, TimeStart> = BTreeMap::new();
-		for (time, start, budget) in starts {
+		for (time, start) in starts {
 			let held = merged.entry(time).or_default();
 			if let Some(start) = start {
 				held.start = Some(held.start.map_or(start, |held| held.min(start)));
 			}
-			if start.is_none_or(|start| start > time) {
-				held.past = Some(held.past.map_or(budget, |held| held.max(budget)));
-			}
+			held.past |= start.is_none_or(|start| start > time);
 		}
 		if let Ok(mut state) = self.modify()
 			&& state.time_starts != merged
@@ -5259,11 +5227,11 @@ impl Producer {
 
 	/// Record how the upstream publisher answered a range of this lite-07 copy asking the live
 	/// join `min` behind the live edge through `end`: at group `start`, or `None` for nothing
-	/// to deliver, asked under at most `budget`. It replaces the join's earlier answer, and
-	/// places every reader of that join that began waiting before now, within the budget.
-	/// Returns the tick it was recorded at.
+	/// to deliver. It replaces the join's earlier answer, and places every reader of that join
+	/// that began waiting before now, whatever `max` each asks. Returns the tick it was
+	/// recorded at.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn answer_join(&self, min: Duration, end: Option<u64>, start: Option<u64>, budget: Duration) -> u64 {
+	pub(crate) fn answer_join(&self, min: Duration, end: Option<u64>, start: Option<u64>) -> u64 {
 		// Ticked first: a range added once the tick moved takes no answer recorded at it, and
 		// asks again.
 		let tick = demand::answered();
@@ -5272,7 +5240,7 @@ impl Producer {
 		};
 		state
 			.join_answers
-			.insert((min, end), JoinAnswer { start, budget, tick });
+			.insert((min, end), JoinAnswer { start, tick });
 		// A reader's join waiting on the upstream's answer places now.
 		state.placing += 1;
 		tick
@@ -6249,28 +6217,24 @@ fn clamp_max_delay(mut max_delay: Duration, bound: Option<Duration>) -> Duration
 	max_delay
 }
 
-/// `delay` with its budget clamped to `bound`, the one a received copy's demand asks its
-/// upstream under (see [`clamp_combined`]): an answer with no group at or before a time holds
-/// at most that far, so a reader places its time starts within it.
-fn placing(delay: Delay, bound: Option<Duration>) -> Delay {
-	match bound {
-		Some(bound) if delay.budget() > bound => delay.with_max(Some(bound)),
-		_ => delay,
-	}
-}
-
-/// Clamp the aggregate's max delay budget to `bound`; see [`clamp_max_delay`]. A bound that
-/// doesn't lower the budget leaves it as is, so an unbounded demand stays `None` on the wire
-/// rather than becoming a huge value no version can carry.
+/// Clamp each live join's `max` in the aggregate to `bound`; see [`clamp_max_delay`]. A
+/// bound that doesn't lower a budget leaves it as is, so an unbounded one stays `None` on the
+/// wire rather than becoming a huge value no version can carry. History ranges carry no
+/// budget: what the publisher keeps bounds them.
 fn clamp_combined(combined: Option<Subscription>, bound: Option<Duration>) -> Option<Subscription> {
 	let mut combined = combined?;
-	if let Some(bound) = bound
-		&& bound < combined.budget()
-	{
-		combined.delay.max = Some(bound);
+	let Some(bound) = bound else {
+		return Some(combined);
+	};
+	for range in &mut combined.ranges {
+		if let Start::Live { max, .. } = &mut range.start
+			&& subscription::budget(*max) > bound
+		{
+			*max = Some(bound);
+		}
 	}
-	for (_, budget) in &mut combined.asks {
-		*budget = clamp_max_delay(*budget, bound);
+	for join in &mut combined.joins {
+		join.budget = join.budget.min(bound);
 	}
 	Some(combined)
 }
@@ -7364,7 +7328,6 @@ impl Consumer {
 				frame_start: options.frame_start,
 				frame_end,
 				priority: options.priority,
-				max_delay: options.max_delay,
 				judges_drift: true,
 				result: None,
 				hit: Some(Box::new(group)),
@@ -7385,7 +7348,6 @@ impl Consumer {
 				frame_start: options.frame_start,
 				frame_end,
 				priority: options.priority,
-				max_delay: options.max_delay,
 				judges_drift: true,
 				result: None,
 				hit: None,
@@ -7789,7 +7751,6 @@ fn queue(fills: &kio::Shared<FillState>, key: u64, request: &FetchOptions) -> Op
 		frame_end: request.end,
 		asking: fill::Asking {
 			priority: options.priority,
-			max_delay: options.max_delay,
 			// One group either way, so it never turns a wider fill it joins newest first.
 			order: Order::Ascending,
 		},
@@ -7823,9 +7784,7 @@ pub struct Fetching {
 	frame_end: Option<u64>,
 	// This caller's priority, for a fetch that moves to a front's routes.
 	priority: i8,
-	// This caller's own age cap. None means only the publisher's max age.
-	max_delay: Option<Duration>,
-	// Whether this fetch refuses a group a newer cached one superseded, judged across the
+	// Whether this fetch refuses a group the publisher's max age expired, judged across the
 	// whole cache. A cursor's head fill leaves it to the cursor, which judges its window.
 	judges_drift: bool,
 	// The fill this fetch joined; `None` on a cache hit, or when no handler existed to
@@ -7876,7 +7835,6 @@ impl Fetching {
 			frame_start: request.options.frame_start,
 			frame_end: request.end,
 			priority: request.options.priority,
-			max_delay: request.options.max_delay,
 			judges_drift: true,
 			result,
 			hit,
@@ -7919,7 +7877,6 @@ impl Fetching {
 		{
 			let options = group::Fetch {
 				priority: self.priority,
-				max_delay: self.max_delay,
 				frame_start: self.frame_start,
 			};
 			self.resume = Some(Box::new(routes.fetch_group(
@@ -7944,7 +7901,7 @@ impl Fetching {
 		);
 		let cache = {
 			let state = state.read();
-			let budget = clamp_max_delay(self.max_delay.unwrap_or(Duration::MAX), state.max_age_bound());
+			let budget = clamp_max_delay(Duration::MAX, state.max_age_bound());
 			let _ = state.cache.wakes().watch_landing(key, waiter);
 			if self.judges_drift && state.poll_drifted(key, &Servable::ALL, budget, None, waiter) {
 				return Poll::Ready(Err(Error::Old));
@@ -7960,7 +7917,6 @@ impl Fetching {
 			reading: Reading::new(state.clone()),
 			key,
 			priority: self.priority,
-			max_delay: self.max_delay,
 			superseded: Superseded::default(),
 		});
 		let resolve = |group: group::Consumer| {
@@ -8008,13 +7964,13 @@ impl Fetching {
 
 		// An answered fill fails a joined fetch the cache cannot cover. The channel
 		// closing without an answer means its handlers went away.
-		let (err, asked, partial) = match result.outcome().poll(waiter, |outcome| match outcome.refused(key) {
-			Some((err, asked)) => Poll::Ready((err.clone(), asked, None)),
-			None if outcome.is_accepted(key) => Poll::Ready((Error::NotFound, None, outcome.partial(key, frames))),
+		let (err, partial) = match result.outcome().poll(waiter, |outcome| match outcome.refused(key) {
+			Some(err) => Poll::Ready((err.clone(), None)),
+			None if outcome.is_accepted(key) => Poll::Ready((Error::NotFound, outcome.partial(key, frames))),
 			None => Poll::Pending,
 		}) {
 			Poll::Ready(Ok(res)) => res,
-			Poll::Ready(Err(_closed)) => (Error::NotFound, None, None),
+			Poll::Ready(Err(_closed)) => (Error::NotFound, None),
 			Poll::Pending => return Poll::Pending,
 		};
 		// An accept caches the group before it answers the channel, which may land
@@ -8025,25 +7981,6 @@ impl Fetching {
 		// A later copy displaced the one accepted for this fetch from the cache.
 		if let Some(group) = partial.as_ref().and_then(group::Handle::try_consume) {
 			return Poll::Ready(Ok(resolve(group)));
-		}
-		// Joined after a tighter budget went on the wire, which judged the group too old
-		// for that budget, not ours: ask again with ours. Terminates, since the new
-		// fill asks at least our budget.
-		if matches!(err, Error::Old) && looser(asked, self.max_delay) {
-			let options = group::Fetch {
-				priority: self.priority,
-				max_delay: self.max_delay,
-				frame_start: self.frame_start,
-			};
-			self.result = queue(
-				&self.fills,
-				self.key,
-				&FetchOptions {
-					options,
-					end: self.frame_end,
-				},
-			);
-			return self.poll_answer(waiter);
 		}
 		Poll::Ready(Err(err))
 	}
@@ -8168,9 +8105,9 @@ impl Reserved {
 /// group that poll considers.
 #[derive(Clone)]
 struct Drift {
-	budget: Duration,
-	/// The budget is the track's max age bound, which no widening passes: its verdicts are final.
-	bounded: bool,
+	budget: Budget,
+	/// The track's max age bound, which no widening passes: a verdict at it is final.
+	bound: Option<Duration>,
 	edge: Edge,
 	/// The groups this reader reads; see [`Coverage`].
 	coverage: Coverage,
@@ -8187,9 +8124,14 @@ type Coverage = Option<(Cover, Option<u64>)>;
 /// verdict was judged against, whatever ranges the upstream judged it under, since a group's
 /// verdict looks only above it. Any other reader treats the run as unknown, and fills it on
 /// a request of its own: the upstream subscription never delivers a group it dropped.
-fn settles(budget: Duration, coverage: &Coverage, start: u64, hole: &Hole) -> bool {
+fn settles(budget: &Budget, coverage: &Coverage, start: u64, hole: &Hole) -> bool {
 	let Some(stale) = hole.stale_budget() else {
 		return true;
+	};
+	// A reader whose budget varies by group is held to its widest.
+	let budget = match budget.is_uniform() {
+		true => budget.at(start),
+		false => budget.widest(),
 	};
 	let Some((groups, cap)) = coverage else {
 		return false;
@@ -8238,7 +8180,7 @@ fn settling(old: &Coverage, new: &Coverage) -> Option<Option<ops::Range<u64>>> {
 impl Drift {
 	/// Whether `hole`, over a run from `start`, settles this reader; see [`settles`].
 	fn settles(&self, start: u64, hole: &Hole) -> bool {
-		settles(self.budget, &self.coverage, start, hole)
+		settles(&self.budget, &self.coverage, start, hole)
 	}
 }
 
@@ -8266,7 +8208,7 @@ enum Successors {
 	Reader(Arc<Live>),
 }
 
-/// Keeps one fetched group tied to this caller's age budget.
+/// Keeps one fetched group tied to the publisher's max age.
 struct FetchExpiry {
 	state: kio::ConsumerWeak<TrackState>,
 	/// See [`GroupExpiry::cache`].
@@ -8274,7 +8216,6 @@ struct FetchExpiry {
 	reading: Reading,
 	key: u64,
 	priority: i8,
-	max_delay: Option<Duration>,
 	superseded: Superseded,
 }
 
@@ -8330,7 +8271,6 @@ impl group::Expiry for FetchExpiry {
 			cache,
 			key: self.key,
 			priority: self.priority,
-			max_delay: self.max_delay,
 			superseded: Superseded::default(),
 		})
 	}
@@ -8338,7 +8278,6 @@ impl group::Expiry for FetchExpiry {
 	fn asking(&self) -> Asking {
 		Asking {
 			priority: self.priority,
-			max_delay: self.max_delay,
 			order: Order::Ascending,
 		}
 	}
@@ -8352,14 +8291,9 @@ impl group::Expiry for FetchExpiry {
 		if !self.cache.wakes().watch_landing(self.key, waiter) {
 			return false;
 		}
-		let max_delay = recover.and_then(|recover| recover.poll_budget(waiter));
+		let route = recover.and_then(|recover| recover.poll_budget(waiter));
 		let state = self.state.read();
-		let budget = match (self.max_delay, max_delay) {
-			(Some(fetch), Some(route)) => fetch.min(route),
-			(Some(fetch), None) => fetch,
-			(None, Some(route)) => route,
-			(None, None) => Duration::MAX,
-		};
+		let budget = route.map_or(Duration::MAX, |route| route.at(self.key));
 		let budget = clamp_max_delay(budget, state.max_age_bound());
 		state.poll_drifted(self.key, &Servable::ALL, budget, Some(&self.superseded), waiter)
 	}
@@ -8391,7 +8325,6 @@ impl group::Expiry for GroupExpiry {
 		let subscription = self.subscription.read();
 		Asking {
 			priority: subscription.priority,
-			max_delay: subscription.delay.max,
 			order: subscription.order,
 		}
 	}
@@ -8410,21 +8343,13 @@ impl group::Expiry for GroupExpiry {
 		if !self.cache.wakes().watch_landing(self.key, waiter) {
 			return false;
 		}
-		let max_delay = recover.and_then(|recover| recover.poll_budget(waiter));
-		let max_delay = max_delay.unwrap_or_else(|| {
-			let mut max_delay = Duration::default();
-			let _ = self.subscription.poll(waiter, |subscription| {
-				max_delay = subscription.budget();
-				Poll::<()>::Pending
-			});
-			max_delay
-		});
-
+		let mut budget = recover.and_then(|recover| recover.poll_budget(waiter));
 		let mut servable = Servable::ALL;
 		match &self.successors {
 			Successors::Cursor(published) => {
 				let _ = published.poll(waiter, |current| {
 					servable = current.servable.clone();
+					budget.get_or_insert_with(|| current.budget.clone());
 					Poll::<()>::Pending
 				});
 			}
@@ -8433,9 +8358,18 @@ impl group::Expiry for GroupExpiry {
 				servable = Servable::within(recover.and_then(|recover| recover.window(waiter)), live);
 			}
 		}
+		// Without a window to place the ranges, the widest any of them gives.
+		let budget = budget.unwrap_or_else(|| {
+			let mut widest = Duration::default();
+			let _ = self.subscription.poll(waiter, |subscription| {
+				widest = subscription.widest();
+				Poll::<()>::Pending
+			});
+			Budget::uniform(widest)
+		});
 
 		let state = self.state.read();
-		let budget = clamp_max_delay(max_delay, state.max_age_bound());
+		let budget = clamp_max_delay(budget.at(self.key), state.max_age_bound());
 		state.poll_drifted(self.key, &servable, budget, Some(&self.superseded), waiter)
 	}
 }
@@ -8559,7 +8493,6 @@ fn asking(subscription: &Preferences) -> miss::Asking {
 	let subscription = subscription.read();
 	miss::Asking {
 		priority: subscription.priority,
-		max_delay: subscription.delay.max,
 		order: subscription.order,
 	}
 }
@@ -8595,16 +8528,19 @@ struct Published {
 	cap: Option<u64>,
 	/// `runs` below `cap`.
 	servable: Servable,
+	/// How long each group stays worth delivering, as the window's ranges set it.
+	budget: Budget,
 }
 
 impl Published {
-	fn new(runs: Servable, revision: u64, cap: Option<u64>) -> Self {
+	fn new(runs: Servable, budget: Budget, revision: u64, cap: Option<u64>) -> Self {
 		let servable = runs.below(cap);
 		Self {
 			runs,
 			revision,
 			cap,
 			servable,
+			budget,
 		}
 	}
 }
@@ -9042,7 +8978,7 @@ struct Cursor {
 struct Asked {
 	/// The demand counting them, once one is counted.
 	subscriptions: Option<kio::Lock<Subscriptions>>,
-	times: Vec<(u64, Duration)>,
+	times: Vec<u64>,
 	joins: Vec<JoinAsk>,
 }
 
@@ -9052,7 +8988,7 @@ impl Asked {
 	/// once.
 	fn set(
 		&mut self,
-		mut times: Vec<(u64, Duration)>,
+		mut times: Vec<u64>,
 		mut joins: Vec<JoinAsk>,
 		subscriptions: impl FnOnce() -> kio::Lock<Subscriptions>,
 	) {
@@ -9081,7 +9017,7 @@ impl Asked {
 			}
 			let times = changes(&self.times, &times)
 				.into_iter()
-				.map(|((time, budget), waits)| subs.ask(time, budget, waits));
+				.map(|(time, waits)| subs.ask(time, waits));
 			let times: Vec<_> = times.collect();
 			let joins = changes(&self.joins, &joins)
 				.into_iter()
@@ -9155,7 +9091,7 @@ struct Within<'a> {
 /// The span, window revision, and the budget and coverage that settle received stale runs
 /// (see [`Drift::settles`]) a [`DropCursor`] last scanned the whole span under; between them
 /// it folds in only the runs that changed, and what the window gained.
-type Scan = (ops::Range<u64>, u64, Option<(Duration, Coverage)>);
+type Scan = (ops::Range<u64>, u64, Option<(Budget, Coverage)>);
 
 /// What a wire publisher's cursor gave up, found as it changes rather than by rescanning
 /// the cache on every poll.
@@ -9176,7 +9112,7 @@ struct DropCursor {
 	/// The budget and coverage of the last drift judged, which settle received stale runs
 	/// until the next: a queue-only poll judges none, and must not unsettle them.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	drift: Option<(Duration, Coverage)>,
+	drift: Option<(Budget, Coverage)>,
 }
 
 #[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
@@ -9223,7 +9159,7 @@ impl DropCursor {
 		&self,
 		state: &TrackState,
 		window: &Window,
-		old_drift: Option<&(Duration, Coverage)>,
+		old_drift: Option<&(Budget, Coverage)>,
 		span: &ops::Range<u64>,
 	) -> Option<Vec<ops::Range<u64>>> {
 		let last = span.end.checked_sub(1).filter(|last| *last >= span.start);
@@ -9279,7 +9215,7 @@ impl DropCursor {
 		// now; otherwise fold in only the runs that changed and what the window gained, so a
 		// drop costs each cursor the runs it touches, even one that starts a range.
 		if let Some(drift) = within.drift {
-			self.drift = Some((drift.budget, drift.coverage.clone()));
+			self.drift = Some((drift.budget.clone(), drift.coverage.clone()));
 		}
 		let scan = (span.clone(), within.revision, self.drift.clone());
 		let rescan = std::mem::take(&mut record.rescan);
@@ -9334,7 +9270,7 @@ impl DropCursor {
 				let run = dropped.start.max(changed.start)..dropped.end.min(changed.end);
 				// A received stale run that does not settle this reader is unknown to it.
 				let settled = match &self.drift {
-					Some((budget, coverage)) => settles(*budget, coverage, run.start, hole),
+					Some((budget, coverage)) => settles(budget, coverage, run.start, hole),
 					None => hole.stale_budget().is_none(),
 				};
 				if settled {
@@ -9446,12 +9382,10 @@ impl Cursor {
 			let preferences = subscription.read();
 			let ranges_revision = preferences.revision;
 			let state = state.read();
-			let delay = placing(preferences.delay, state.demand_bound());
 			let since = since_of(&preferences, preferences.ranges().map(|(key, _)| key));
 			let window = Window::keyed_since(
 				preferences.ranges(),
 				|key| since.get(&key).copied().unwrap_or(0),
-				delay,
 				state.latest_live(),
 				&*state,
 			);
@@ -9469,7 +9403,12 @@ impl Cursor {
 			(filter, state.cache.clone())
 		};
 		let live = Arc::<Live>::default();
-		let published = Published::new(Servable::of(&filter.window, &live), filter.resolved, None);
+		let published = Published::new(
+			Servable::of(&filter.window, &live),
+			filter.window.budget(),
+			filter.resolved,
+			None,
+		);
 		let mut cursor = Self {
 			state,
 			cache,
@@ -9577,16 +9516,17 @@ impl Cursor {
 		// A moved window or cap notifies nothing this cursor parked on.
 		idle::Idle::disarm(&mut self.idle);
 		let runs = Servable::of(&self.filter.window, &self.live);
+		let budget = self.filter.window.budget();
 		let (revision, cap) = (self.filter.resolved, self.end_key);
 		self.servable = runs.below(cap);
 		let next = |current: &Published| {
 			// Ranges a `Control` republished past this window stay until this cursor syncs
 			// to them; the cap is this cursor's own.
-			let runs = match current.revision > revision {
-				true => current.runs.clone(),
-				false => runs.clone(),
+			let (runs, budget) = match current.revision > revision {
+				true => (current.runs.clone(), current.budget.clone()),
+				false => (runs.clone(), budget.clone()),
 			};
-			let next = Published::new(runs, revision.max(current.revision), cap);
+			let next = Published::new(runs, budget, revision.max(current.revision), cap);
 			(next != *current).then_some(next)
 		};
 		// A no-op write is skipped: every handed-out group's expiry watches the channel.
@@ -9624,16 +9564,16 @@ impl Cursor {
 			return;
 		}
 		let state = self.state.read();
-		let budget = clamp_max_delay(window.budget(), state.demand_bound());
 		let times = match state.anchors == Anchors::Wire {
-			true => times.map(|time| (time, budget)).collect(),
+			true => times.collect(),
 			false => Vec::new(),
 		};
+		let bound = state.demand_bound();
 		let joins = match Holdings::answers_joins(&*state) {
-			true => (joins.map(|(min, end, since)| JoinAsk {
+			true => (joins.map(|(min, end, budget, since)| JoinAsk {
 				min,
 				end,
-				budget,
+				budget: clamp_max_delay(budget, bound),
 				since,
 			}))
 			.collect(),
@@ -9647,9 +9587,9 @@ impl Cursor {
 
 	/// [`Self::sync`] without the asks. Returns whether the window moved.
 	fn sync_window(&mut self) -> bool {
-		let (changed, delay) = {
+		let changed = {
 			let preferences = self.subscription.read();
-			let changed = (preferences.revision != self.filter.resolved).then(|| {
+			(preferences.revision != self.filter.resolved).then(|| {
 				let keys = match self.filter.stale {
 					true => None,
 					false => preferences.changes(self.filter.resolved),
@@ -9663,8 +9603,7 @@ impl Cursor {
 					Change::All(ranges) => ranges.iter().map(|(key, _)| *key).collect(),
 				};
 				(preferences.revision, change, since_of(&preferences, keys))
-			});
-			(changed, preferences.delay)
+			})
 		};
 		// A settled window has nothing to read from the track, whose lock every subscriber
 		// of it takes.
@@ -9673,7 +9612,6 @@ impl Cursor {
 		}
 		let state = self.state.read();
 		let holdings = &*state;
-		let delay = placing(delay, state.demand_bound());
 		let moved = match changed {
 			Some((revision, change, since)) => {
 				let since = |key: u64| since.get(&key).copied().unwrap_or(0);
@@ -9684,7 +9622,6 @@ impl Cursor {
 							.iter()
 							.filter_map(|(key, range)| Some((*key, (*range)?)))
 							.collect();
-						self.filter.window.set_delay(delay);
 						self.filter.window.edit_since(
 							changes.iter().map(|(key, _)| *key),
 							&added,
@@ -9696,7 +9633,7 @@ impl Cursor {
 						self.filter.lookups.retain(|lookup| lookup.join.is_some());
 					}
 					Change::All(ranges) => {
-						self.filter.window = Window::keyed_since(ranges, since, delay, state.latest_live(), holdings);
+						self.filter.window = Window::keyed_since(ranges, since, state.latest_live(), holdings);
 						self.filter.lookups.clear();
 					}
 				}
@@ -9708,15 +9645,9 @@ impl Cursor {
 			// The live feed had no group when the ranges resolved, so the newest one then was
 			// the first to arrive, or the newest once it went live, however many have arrived
 			// or left since. A live join not yet started reaches back by its lag.
-			None if self.filter.window.is_pending() => {
-				self.filter.window.set_delay(delay);
-				self.filter.window.settle(state.first_live(), holdings)
-			}
-			None => {
-				// A live join waiting on a group to measure the live edge by has not started either.
-				self.filter.window.set_delay(delay);
-				self.filter.window.settle(state.latest_live(), holdings)
-			}
+			None if self.filter.window.is_pending() => self.filter.window.settle(state.first_live(), holdings),
+			// A live join waiting on a group to measure the live edge by has not started either.
+			None => self.filter.window.settle(state.latest_live(), holdings),
 		};
 		drop(state);
 		if moved {
@@ -9775,7 +9706,7 @@ impl Cursor {
 		let given_up = self.misses.as_ref().map(|misses| misses.given_up());
 		let coverage = self.coverage();
 		let state = self.state.read();
-		let budget = clamp_max_delay(self.subscription.read().budget(), state.max_age_bound());
+		let budget = window.budget().clamped(state.max_age_bound());
 		let passes = ordered && !state.anchors.received();
 		let accounted = |gap: ops::Range<u64>| {
 			let mut left = RangeSet::new();
@@ -9793,7 +9724,7 @@ impl Cursor {
 			for (run, _) in state
 				.drops
 				.overlapping(&gap)
-				.filter(|(run, hole)| settles(budget, &coverage, run.start.max(gap.start), hole))
+				.filter(|(run, hole)| settles(&budget, &coverage, run.start.max(gap.start), hole))
 			{
 				left.remove(run.clone());
 			}
@@ -9998,7 +9929,7 @@ impl Cursor {
 	/// Owe again the groups this cursor skipped as stale under a budget narrower than
 	/// `budget`: only a widening reverses a stale verdict it has not reported. Costs the
 	/// skipped runs, never the cache, and nothing when the budget did not widen.
-	fn reoffer(&mut self, budget: Duration) {
+	fn reoffer(&mut self, budget: &Budget) {
 		for run in self.record.skipped.widened(budget) {
 			self.reowe(run);
 		}
@@ -10090,17 +10021,15 @@ impl Cursor {
 	/// [`Poll::Ready`]; the track ending surfaces as the error the caller was going to
 	/// get anyway.
 	fn poll_drift(&self, servable: &Servable, waiter: &kio::Waiter) -> Poll<Result<Drift>> {
-		let mut max_delay = Duration::default();
-		let _ = self.subscription.poll_ref(waiter, |subscription| {
-			max_delay = subscription.budget();
-			Poll::<()>::Pending
-		});
+		// Parked on the preferences, whose change the next sync of the window applies.
+		let _ = self.subscription.poll_ref(waiter, |_| Poll::<()>::Pending);
+		let budget = self.filter.window.budget();
 		let coverage = self.coverage();
 		self.poll(waiter, |state| {
 			let bound = state.max_age_bound();
 			Poll::Ready(Ok(Drift {
-				budget: clamp_max_delay(max_delay, bound),
-				bounded: bound.is_some_and(|bound| max_delay >= bound),
+				budget: budget.clone().clamped(bound),
+				bound,
 				edge: state.drift_edge(servable),
 				coverage: coverage.clone(),
 			}))
@@ -10118,14 +10047,14 @@ impl Cursor {
 		let window = &self.filter.window;
 		self.poll(waiter, |state| {
 			// An unjudgeable old gap cannot stand in for a fresh gap above the floor.
-			let floor = groups.start.max(state.cache_floor(drift.budget));
+			let floor = groups.start.max(drift.budget.floor(state.live_floor));
 			if floor >= groups.end {
 				return Poll::Ready(Ok(()));
 			}
 			let Some(owed) = state.owed(floor..groups.end, window) else {
 				return Poll::Ready(Ok(()));
 			};
-			if state.poll_drifted(owed, &drift.edge.servable, drift.budget, None, waiter) {
+			if state.poll_drifted(owed, &drift.edge.servable, drift.budget.at(owed), None, waiter) {
 				return Poll::Ready(Ok(()));
 			}
 			// The ledger may stop owing it before the budget gives up on it.
@@ -10154,7 +10083,7 @@ impl Cursor {
 			.poll(waiter, |state| {
 				waited.borrow_mut().clear();
 				// An unjudgeable old gap cannot hold a finite read, as for an owed group.
-				let floor = times.start.max(state.cache_floor(drift.budget));
+				let floor = times.start.max(drift.budget.floor(state.live_floor));
 				let grace = state.arrival_grace();
 				for time in window.waiting_in(floor..times.end) {
 					// With every key from the floor through the time accounted for, a group still
@@ -10172,8 +10101,8 @@ impl Cursor {
 					// Its range had no group to deliver, so the feed lands none of it. Its
 					// successor is this group's or one below: the group containing the time is
 					// judged as an owed group at it would be.
-					if state.answered_empty(time, drift.budget)
-						|| state.poll_drifted(time, &drift.edge.servable, drift.budget, None, waiter)
+					if state.answered_empty(time)
+						|| state.poll_drifted(time, &drift.edge.servable, drift.budget.at(time), None, waiter)
 					{
 						continue;
 					}
@@ -10218,7 +10147,7 @@ impl Cursor {
 	/// for this poll.
 	fn poll_stale(&self, group: &group::Consumer, drift: &Drift, waiter: &kio::Waiter) -> Poll<Result<bool>> {
 		self.poll(waiter, |state| {
-			Poll::Ready(Ok(state.is_stale(group.start, &drift.edge, drift.budget)))
+			Poll::Ready(Ok(state.is_stale(group.start, &drift.edge, drift.budget.at(group.start))))
 		})
 	}
 
@@ -10248,12 +10177,12 @@ impl Cursor {
 		}
 		let owed = self.filter.owed.first().map(|run| *run.start());
 		let skipped = self.record.skipped.lowest().into_iter().chain(owed).min();
-		let max_delay = self.subscription.read().budget();
 		let state = self.state.read();
-		let budget = clamp_max_delay(max_delay, state.max_age_bound());
+		let budgets = self.filter.window.budget().clamped(state.max_age_bound());
 		let edge = state.drift_edge(&self.servable);
 		let now = state.cache.pool().now_wall();
 		while let Some(oldest) = delivered.above_gap() {
+			let budget = budgets.at(oldest);
 			// Either clock, as `drifted` judges a group: without a successor, neither.
 			let Some(arrival) = state.arrival(oldest, &edge.servable) else {
 				break;
@@ -10397,7 +10326,7 @@ impl Cursor {
 	/// the answers entirely, paying only for the judgement that the new groups arrived.
 	fn probe(&mut self, from: u64, drift: &Drift, waiter: &kio::Waiter) {
 		self.look_up(waiter);
-		self.rejudge(drift.budget);
+		self.rejudge(&drift.budget);
 		let taken = &self.record.delivered;
 		let (window, cap, revision) = (&self.filter.window, self.end_key, self.filter.revision);
 		let misses = self.misses.get_or_insert_with(Box::default);
@@ -10443,14 +10372,7 @@ impl Cursor {
 				// What the reader asks with still reaches the fills it joined.
 				None => misses.update(&asking),
 			}
-			loop {
-				let retry = misses.resolve(&self.state, asking.max_delay, &mut given_up, waiter);
-				if retry.is_empty() {
-					break;
-				}
-				let fills = self.state.read().fills.clone();
-				misses.ask(&self.state, &fills, &retry, &asking, &mut given_up);
-			}
+			misses.resolve(&self.state, &mut given_up, waiter);
 		}
 		// Only what a fill still owes can expire.
 		if misses.is_waiting() {
@@ -10473,7 +10395,7 @@ impl Cursor {
 	/// under a narrower budget never settles a wider reader. What it already told stands: a
 	/// gap an [`Ordered`] returned, or any drop a wire publisher reported. A gap an
 	/// [`Ordered`] has yet to return is taken back from it.
-	fn rejudge(&mut self, budget: Duration) {
+	fn rejudge(&mut self, budget: &Budget) {
 		let Some(misses) = &mut self.misses else {
 			return;
 		};
@@ -10569,7 +10491,7 @@ impl Cursor {
 
 		// One scan for the whole poll, so walking a backlog off stays linear in its size.
 		let drift = ready!(self.poll_drift(&self.servable, waiter))?;
-		self.reoffer(drift.budget);
+		self.reoffer(&drift.budget);
 		self.probe(self.floor(), &drift, waiter);
 		// A time start's lookup the probe took in may have been refused.
 		if let Some(err) = &self.filter.refused {
@@ -10680,12 +10602,12 @@ impl Cursor {
 		{
 			self.record
 				.pending
-				.insert(key..end, Pending::own(Hole::stale(drift.budget)));
+				.insert(key..end, Pending::own(Hole::stale(drift.budget.at(key))));
 		}
-		match drift.bounded {
+		match drift.bound.is_some_and(|bound| drift.budget.at(key) >= bound) {
 			// A re-offered group stale at the bound is final.
 			true => self.record.skipped.remove(key),
-			false => self.skip(key, drift.budget),
+			false => self.skip(key, drift.budget.at(key)),
 		}
 		// Whatever the window is now: narrowed to a bounded one later, it accounts for this
 		// group by it, even once the group left the cache.
@@ -10724,13 +10646,10 @@ impl Cursor {
 	/// Ask a fill for the head of `key`, as a fetch from frame 0 would, taking in an
 	/// answer already at hand.
 	fn ask_head(&mut self, key: u64, waiter: &kio::Waiter) {
-		let asking = self.subscription.read();
-		let (priority, max_delay) = (asking.priority, asking.delay.max);
-		drop(asking);
+		let priority = self.subscription.read().priority;
 		let request = FetchOptions {
 			options: group::Fetch {
 				priority,
-				max_delay,
 				frame_start: 0,
 			},
 			end: None,
@@ -10794,8 +10713,8 @@ impl Cursor {
 					let _ = state.cache.wakes().watch_landing(key, waiter);
 					// Judged whether or not the cache still holds the headless copy: an evicted
 					// one goes stale all the same, and counts as a group of unknown size.
-					(key < state.cache_floor(drift.budget)
-						|| state.poll_drifted(key, &servable, drift.budget, None, waiter))
+					(key < state.cache_floor(drift.budget.at(key))
+						|| state.poll_drifted(key, &servable, drift.budget.at(key), None, waiter))
 					.then(|| {
 						let content = match state.lookup.get(&key) {
 							Some(slot) => slot.group.consume().content(),
@@ -10968,7 +10887,7 @@ impl Cursor {
 				// the edge can be evicted), so the group may still be delivered.
 				// Re-snapshot on every re-examination so the eventual count reflects the
 				// group's latest observed content.
-				self.seek_pending.insert(group.start, (group.content(), drift.budget));
+				self.seek_pending.insert(group.start, (group.content(), drift.budget.at(group.start)));
 				floor = group.start.saturating_add(1);
 				continue;
 			}
@@ -11102,29 +11021,23 @@ impl Republish {
 		let Some(published) = self.published.produce() else {
 			return;
 		};
-		let (ranges, since, delay, revision) = {
+		let (ranges, since, revision) = {
 			let current = preferences.read();
 			let since = since_of(&current, current.ranges().map(|(key, _)| key));
-			(
-				current.ranges().collect::<Vec<_>>(),
-				since,
-				current.delay,
-				current.revision,
-			)
+			(current.ranges().collect::<Vec<_>>(), since, current.revision)
 		};
 		if published.read().revision >= revision {
 			return;
 		}
 		let state = self.state.read();
-		let delay = placing(delay, state.demand_bound());
 		let since = |key: u64| since.get(&key).copied().unwrap_or(0);
-		let window = Window::keyed_since(ranges, since, delay, state.latest_live(), &*state);
+		let window = Window::keyed_since(ranges, since, state.latest_live(), &*state);
 		drop(state);
 		let runs = Servable::of(&window, &Arc::default());
 		if let Ok(mut current) = published.write()
 			&& current.revision < revision
 		{
-			*current = Published::new(runs, revision, current.cap);
+			*current = Published::new(runs, window.budget(), revision, current.cap);
 		}
 	}
 }
@@ -11615,11 +11528,10 @@ impl Subscriber {
 			Inner::Plain(cursor) => cursor,
 			Inner::Resume(resume, _) => return resume.has_unread_group(unread),
 		};
-		let budget = cursor.subscription.read().budget();
 		let state = cursor.state.read();
 		// A finite budget skips the cache below its floor at once, so it is not unread.
-		let budget = clamp_max_delay(budget, state.max_age_bound());
-		let floor = cursor.floor().max(state.cache_floor(budget)).max(unread.start);
+		let budget = cursor.filter.window.budget().clamped(state.max_age_bound());
+		let floor = cursor.floor().max(budget.floor(state.live_floor)).max(unread.start);
 		let eligible = |key: u64| {
 			key >= floor
 				&& super::subscription::before_end(key, unread.end)
@@ -11987,9 +11899,8 @@ impl Subscriber {
 			Inner::Plain(cursor) => {
 				let tick = demand::join_tick();
 				let state = cursor.state.read();
-				let delay = placing(subscription.delay, state.demand_bound());
 				let ranges = (0..).zip(subscription.ranges.iter().copied());
-				Window::keyed_since(ranges, |_| tick, delay, state.latest_live(), &*state).resolved()
+				Window::keyed_since(ranges, |_| tick, state.latest_live(), &*state).resolved()
 			}
 			Inner::Resume(..) => Vec::new(),
 		}
@@ -19681,7 +19592,6 @@ mod test {
 		let state = producer.state.read();
 		let drift = Drift {
 			budget: Duration::ZERO,
-			bounded: false,
 			edge: state.drift_edge(&Servable::ALL),
 			coverage: None,
 		};

@@ -4110,7 +4110,6 @@ impl Consumer {
 		self.expiry.as_ref().map_or(
 			super::track::Asking {
 				priority: 0,
-				max_delay: None,
 				order: super::subscription::Order::Ascending,
 			},
 			|expiry| expiry.asking(),
@@ -5315,12 +5314,6 @@ pub struct Fetch {
 	/// Delivery priority for the fetched group's stream, higher first. Defaults to 0.
 	pub priority: i8,
 
-	/// Maximum age behind the live edge this caller accepts.
-	///
-	/// `None` applies only the publisher's max age. An explicit value can
-	/// tighten, but never relax, that bound.
-	pub max_delay: Option<std::time::Duration>,
-
 	/// Index of the first frame to fetch within the group. Defaults to 0, the whole group.
 	///
 	/// Only a route change sets it, filling the hole after a head another route already
@@ -5336,12 +5329,6 @@ impl Fetch {
 	/// Set the delivery priority, returning `self` for chaining.
 	pub fn with_priority(mut self, priority: i8) -> Self {
 		self.priority = priority;
-		self
-	}
-
-	/// Limit how far behind the live edge the fetched group may fall.
-	pub fn with_max_delay(mut self, max_delay: std::time::Duration) -> Self {
-		self.max_delay = Some(max_delay);
 		self
 	}
 }
@@ -7914,7 +7901,6 @@ mod test {
 		fn asking(&self) -> crate::model::track::Asking {
 			crate::model::track::Asking {
 				priority: 0,
-				max_delay: None,
 				order: crate::model::subscription::Order::Ascending,
 			}
 		}
