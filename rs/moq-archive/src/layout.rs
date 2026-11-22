@@ -124,7 +124,12 @@ impl End {
 	}
 
 	pub(crate) fn decode(bytes: &[u8]) -> Result<Self> {
-		Ok(serde_json::from_slice(bytes)?)
+		let end = serde_json::from_slice(bytes)?;
+		if let Self::Finish(at) = &end {
+			check_id(at.group)?;
+			check_id(at.frame)?;
+		}
+		Ok(end)
 	}
 }
 
@@ -293,6 +298,7 @@ impl Object {
 		if self.entries.is_empty() {
 			return Err(Error::Empty);
 		}
+		check_id(self.frame_start)?;
 		let mut prev = None;
 		for entry in &self.entries {
 			let sequence = check_id(entry.sequence)?;
@@ -508,6 +514,35 @@ mod tests {
 				Object::decode(&[version, 0, 0][..], false),
 				Err(Error::Version(v)) if v == version as u64
 			));
+		}
+
+		// A first frame index past the format's IDs.
+		let mut past = Object {
+			frame_start: ID_MAX,
+			entries: vec![Entry {
+				sequence: 1,
+				frames: vec![frame(None, b"abc")],
+			}],
+		};
+		let at_max = past.encode(false).unwrap();
+		assert_eq!(Object::decode(at_max, false).unwrap(), past);
+		past.frame_start = ID_MAX + 1;
+		assert!(matches!(past.encode(false), Err(Error::Id(_))));
+		let mut table = BytesMut::new();
+		for value in [VERSION, ID_MAX + 1, 1, 1, 1, 3] {
+			write(&mut table, value).unwrap();
+		}
+		table.extend_from_slice(b"abc");
+		assert!(matches!(Object::decode(table.freeze(), false), Err(Error::Id(_))));
+	}
+
+	/// An end position past the format's IDs is refused, so replaying it can't overflow.
+	#[test]
+	fn end_positions_are_ids() {
+		let at = |group: u64, frame: u64| format!(r#"{{"finish":{{"group":{group},"frame":{frame}}}}}"#);
+		assert!(End::decode(at(ID_MAX, ID_MAX).as_bytes()).is_ok());
+		for (group, frame) in [(ID_MAX + 1, 0), (0, ID_MAX + 1), (u64::MAX, 1)] {
+			assert!(matches!(End::decode(at(group, frame).as_bytes()), Err(Error::Id(_))));
 		}
 	}
 }
