@@ -130,9 +130,11 @@ impl Config {
 		let mut asc = data.as_ref();
 		let len = asc.len();
 		let mut reader = BitReader::new(&mut asc);
-		let (core, fields) = Self::read(&mut reader)?;
-		// A sync extension past fields this reader does not follow leaves the core's parameters.
-		Ok(Self::read_rest(&mut reader, len, &core, fields).unwrap_or(core))
+		let (mut config, fields) = Self::read(&mut reader)?;
+		// Whatever the later fields recognized before one this parser doesn't follow still holds,
+		// so SBR found ahead of an unknown field isn't lost to the core.
+		let _ = Self::read_rest(&mut reader, len, &mut config, fields);
+		Ok(config)
 	}
 
 	/// Parse an AudioSpecificConfig that spans `asc`, at most [`CONFIG_MAX_LEN`] bytes.
@@ -144,8 +146,8 @@ impl Config {
 	pub(crate) fn parse_exact(mut asc: &[u8]) -> Result<Self> {
 		let len = asc.len();
 		let mut reader = BitReader::new(&mut asc);
-		let (core, fields) = Self::read(&mut reader)?;
-		let config = Self::read_rest(&mut reader, len, &core, fields)?;
+		let (mut config, fields) = Self::read(&mut reader)?;
+		Self::read_rest(&mut reader, len, &mut config, fields)?;
 		match len - reader.position().div_ceil(8) {
 			0 => Ok(config),
 			trailing => Err(Error::TrailingBytes(trailing)),
@@ -155,8 +157,8 @@ impl Config {
 	/// Read the fields after [`read`](Self::read)'s, in a config `len` bytes long: the rest of
 	/// the specific config, then any sync extension, which names what an SBR or PS decoder
 	/// plays the core as: the extension rate, and stereo under PS, as explicit signaling would.
-	fn read_rest<T: Buf>(reader: &mut BitReader<T>, len: usize, core_config: &Self, fields: Fields) -> Result<Self> {
-		let mut config = Self::new(core_config.profile, core_config.sample_rate, core_config.channel_count);
+	/// Each finding updates `config` whole as soon as it is read, so an error after one keeps it.
+	fn read_rest<T: Buf>(reader: &mut BitReader<T>, len: usize, config: &mut Self, fields: Fields) -> Result<()> {
 		let Fields {
 			object_type,
 			core,
@@ -225,7 +227,7 @@ impl Config {
 				}
 			}
 		}
-		Ok(config)
+		Ok(())
 	}
 
 	/// Read the fields up to a channelConfiguration 0's program config element, which gives the
@@ -1147,6 +1149,19 @@ mod tests {
 				);
 			}
 		}
+	}
+
+	/// SBR a sync extension names holds when the bits after it are not the PS sync extension:
+	/// padding there fails `parse_exact`, but `parse` still reports the SBR output.
+	#[test]
+	fn sbr_survives_an_unknown_field_after_it() {
+		let asc = [0x12, 0x10, 0x56, 0xE5, 0x98, 0x00, 0x00];
+		let config = Config::parse(&mut asc.as_slice()).unwrap();
+		assert_eq!(
+			(config.profile, config.sample_rate, config.channel_count),
+			(5, 48_000, 2)
+		);
+		assert!(Config::parse_exact(&asc).is_err());
 	}
 
 	#[test]

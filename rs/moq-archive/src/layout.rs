@@ -9,7 +9,7 @@ use object_store::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::path::{check_id, decode_track, encode_track, push};
-use crate::{Error, ID_WIDTH, Result, VERSION};
+use crate::{Error, ID_MAX, ID_WIDTH, Result, VERSION};
 
 /// The broadcast's completion marker, beside its track segments.
 pub(crate) const BROADCAST_END: &str = ".end";
@@ -119,17 +119,26 @@ impl From<Position> for At {
 }
 
 impl End {
+	/// Refused when its position is one the archive can't replay, so a producer fails writing it
+	/// rather than leaving a marker every later read refuses.
 	pub(crate) fn encode(&self) -> Result<Bytes> {
+		self.validate()?;
 		Ok(Bytes::from(serde_json::to_vec(self)?))
 	}
 
 	pub(crate) fn decode(bytes: &[u8]) -> Result<Self> {
-		let end = serde_json::from_slice(bytes)?;
-		if let Self::Finish(at) = &end {
-			check_id(at.group)?;
-			check_id(at.frame)?;
-		}
+		let end: Self = serde_json::from_slice(bytes)?;
+		end.validate()?;
 		Ok(end)
+	}
+
+	/// A finish within the IDs, or just past the last group an ID names.
+	fn validate(&self) -> Result<()> {
+		match *self {
+			Self::Finish(At { group, frame: 0 }) if group == ID_MAX + 1 => Ok(()),
+			Self::Finish(At { group, frame }) => check_id(group).and(check_id(frame)).map(drop),
+			Self::Error(_) => Ok(()),
+		}
 	}
 }
 
@@ -540,9 +549,16 @@ mod tests {
 	#[test]
 	fn end_positions_are_ids() {
 		let at = |group: u64, frame: u64| format!(r#"{{"finish":{{"group":{group},"frame":{frame}}}}}"#);
-		assert!(End::decode(at(ID_MAX, ID_MAX).as_bytes()).is_ok());
-		for (group, frame) in [(ID_MAX + 1, 0), (0, ID_MAX + 1), (u64::MAX, 1)] {
+		// Within the IDs, and the clean end just past a last group at `ID_MAX`.
+		for (group, frame) in [(ID_MAX, ID_MAX), (ID_MAX + 1, 0)] {
+			let end = End::decode(at(group, frame).as_bytes()).unwrap();
+			assert_eq!(End::decode(&end.encode().unwrap()).unwrap(), end);
+		}
+		// Refused both ways, so a producer never writes a marker a replay refuses.
+		for (group, frame) in [(ID_MAX + 1, 1), (ID_MAX + 2, 0), (0, ID_MAX + 1), (u64::MAX, 1)] {
 			assert!(matches!(End::decode(at(group, frame).as_bytes()), Err(Error::Id(_))));
+			let end = End::Finish(At { group, frame });
+			assert!(matches!(end.encode(), Err(Error::Id(_))), "{end:?}");
 		}
 	}
 }

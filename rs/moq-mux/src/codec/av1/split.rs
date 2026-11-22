@@ -338,8 +338,13 @@ mod tests {
 			buf.extend_from_slice(leb);
 			ObuIterator::new(&mut buf).next().map(|obu| obu.map(|_| ()))
 		};
-		// `u32::MAX` is a valid size, waiting for its payload.
-		assert!(size(&[0xff, 0xff, 0xff, 0xff, 0x0f]).is_none());
+		// `u32::MAX` is a valid size, waiting for its payload, where the whole OBU's length fits a
+		// `usize`; on a 32-bit target it can't, so it is refused.
+		let max = size(&[0xff, 0xff, 0xff, 0xff, 0x0f]);
+		match usize::BITS > 32 {
+			true => assert!(max.is_none()),
+			false => assert!(matches!(max, Some(Err(_)))),
+		}
 		// One past it, five bytes long, and a value only a 64-bit shift reaches.
 		assert!(matches!(size(&[0x80, 0x80, 0x80, 0x80, 0x10]), Some(Err(_))));
 		assert!(matches!(

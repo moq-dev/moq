@@ -165,6 +165,17 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_sbr_followed_by_an_unknown_field() {
+		// The backward-compatible SBR signaling, then padding where a PS sync extension could
+		// follow: the SBR still counts.
+		let mut config = catalog(2, 44_100, 2);
+		config.description = Some(bytes::Bytes::from_static(&[0x12, 0x10, 0x56, 0xE5, 0x98, 0x00, 0x00]));
+
+		let err = description(&config, 2).unwrap_err();
+		assert!(matches!(err, Error::Unsupported(msg) if msg.contains("mp4a.40.5")));
+	}
+
+	#[test]
 	fn accepts_a_sync_extension_that_declares_no_sbr() {
 		// The same config with sbrPresentFlag clear: an extension is present, but it
 		// says there is no SBR, so this really is plain AAC-LC.
