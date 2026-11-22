@@ -3673,8 +3673,9 @@ mod tests {
 	/// silently ignored.
 	#[test]
 	fn peer_egress_field_is_refused() {
-		serde_json::from_str::<Peer>(r#"{"url": "https://peer.example/", "cost": 2, "egress": 2}"#)
+		let err = serde_json::from_str::<Peer>(r#"{"url": "https://peer.example/", "cost": 2, "egress": 2}"#)
 			.expect_err("egress is no longer a field");
+		assert!(err.to_string().contains("egress"), "error must name the field: {err}");
 	}
 
 	/// `--cluster-connect` accepts a full URL verbatim (preserving its `?jwt=`)
