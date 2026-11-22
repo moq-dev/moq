@@ -1080,10 +1080,12 @@ impl Copy {
 				return Retains::Wait;
 			}
 			// A time start no copy placed at a group yet waits on the group holding its time,
-			// which starts at or before it: from the time, since the copy was asked from there,
-			// below its first arrival too.
-			if reader.unplaced.iter().any(|time| {
-				let groups = (*time).max(from)..end;
+			// which starts at or before it and past any group held below it, and on the rest of
+			// its range under the cap. Below the copy's first arrival too: it was asked from there.
+			if reader.unplaced.iter().any(|&(time, last)| {
+				let held = (self.track.peek_before(time.saturating_add(1))).map_or(0, |group| group.start);
+				let end = last.map_or(end, |last| end.min(last.saturating_add(1)));
+				let groups = held.max(from)..end;
 				!groups.is_empty() && self.may_land(groups, true, grace, Some(reader.delivered), reader.waiter)
 			}) {
 				return Retains::Wait;
@@ -1122,8 +1124,9 @@ struct Retain<'a> {
 	groups: (u64, Option<u64>),
 	window: &'a Window,
 	groups_read: bool,
-	/// The time starts of the reader's ranges no copy placed at a group yet.
-	unplaced: &'a [u64],
+	/// The time starts of the reader's ranges no copy placed at a group yet, each with its
+	/// range's end.
+	unplaced: &'a [(u64, Option<u64>)],
 	/// The newest group the serving copy has.
 	edge: Option<u64>,
 	mirrored: &'a Mirrored,
@@ -2416,10 +2419,10 @@ impl Reader {
 		};
 		// Only a time start a copy placed at a group names it: one that reached back past every
 		// group a copy held, or waits, still looks for the group holding its time.
-		let unplaced: Vec<u64> = match replaced {
+		let unplaced: Vec<(u64, Option<u64>)> = match replaced {
 			true => (self.mirrored.ranges.iter())
 				.filter(|(key, _)| !self.window.resolved_key(**key).is_some_and(|resolved| resolved.floored))
-				.filter_map(|(_, range)| range.time())
+				.filter_map(|(_, range)| Some((range.time()?, range.end)))
 				.collect(),
 			false => Vec::new(),
 		};
@@ -10856,6 +10859,91 @@ mod test {
 				"anchored={anchored}"
 			);
 		}
+	}
+
+	/// As [`an_unplaced_time_start_waits_on_a_replaced_copy`], with no group at the time: the
+	/// replaced copy declares it skipped, so the group holding the time starts below it, and
+	/// the reader waits for that group, as a plain cursor does.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_unplaced_time_start_waits_below_its_time_on_a_replaced_copy() {
+		let routes = Producer::new();
+		let front = logical(&routes);
+		let b = received_copy();
+		b.anchored();
+		routes.serve(b.consume());
+		let mut sub = front
+			.consume()
+			.subscribe(
+				Subscription::default()
+					.with_delay(Delay::default().with_max(HOUR))
+					.with_ranges([track::Range {
+						start: crate::track::Start::Time(7),
+						end: Some(7),
+					}]),
+			)
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		write(&b, 8);
+		let mut c = received_copy();
+		c.anchored();
+		c.start_at(9).unwrap();
+		write(&c, 9);
+		routes.serve(c.consume());
+		b.skip_groups(7..8);
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+
+		write(&b, 6);
+		assert_eq!(drain(&mut sub, false), [6]);
+		let resolved = sub.resolved_range(0).expect("placed");
+		assert_eq!((resolved.start, resolved.end), (6, Some(8)));
+		assert!(matches!(
+			sub.poll_recv_group(&kio::Waiter::noop()),
+			Poll::Ready(Ok(None))
+		));
+	}
+
+	/// A time start that reached back past every group a copy held stays unplaced once read,
+	/// but waits on a replaced copy only up to its range's end: a group past it holds neither
+	/// the start nor anything in range.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_unplaced_time_start_waits_on_a_replaced_copy_only_to_its_end() {
+		let routes = Producer::new();
+		let front = logical(&routes);
+		let b = received_copy();
+		b.anchored();
+		routes.serve(b.consume());
+		let mut sub = front
+			.consume()
+			.subscribe(
+				Subscription::default()
+					.with_delay(Delay::default().with_max(HOUR))
+					.with_ranges([track::Range {
+						start: crate::track::Start::Time(7),
+						end: Some(7),
+					}]),
+			)
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		write(&b, 9);
+		// Not anchored: its backfill reaches the range back past every group it holds.
+		let mut c = received_copy();
+		c.start_at(10).unwrap();
+		write(&c, 10);
+		routes.serve(c.consume());
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+
+		write(&b, 7);
+		assert_eq!(drain(&mut sub, false), [7]);
+		assert_eq!(copies(&routes), 1, "group 8 is past the range");
+		b.skip_groups(0..7);
+		assert!(matches!(
+			sub.poll_recv_group(&kio::Waiter::noop()),
+			Poll::Ready(Ok(None))
+		));
 	}
 
 	/// As [`an_unplaced_time_start_waits_on_a_replaced_copy`], for an outer front's backfill
