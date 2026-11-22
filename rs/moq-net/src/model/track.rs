@@ -9198,12 +9198,16 @@ impl DropCursor {
 			_ => return None,
 		};
 		// A scan judges a drop at its start within the span, so each one starting where a
-		// stale run newly settles is folded in whole.
+		// stale run newly settles is folded in whole. One wholly outside the span is never
+		// scanned, so only drops reaching into both are candidates.
 		if let Some(settling) = settling {
-			for (run, _) in state.drops.overlapping(&settling) {
-				let start = run.start.max(span.start);
-				if settling.contains(&start) {
-					grown.push(start..run.end);
+			let within = settling.start.max(span.start)..settling.end.min(span.end);
+			if !within.is_empty() {
+				for (run, _) in state.drops.overlapping(&within) {
+					let start = run.start.max(span.start);
+					if settling.contains(&start) {
+						grown.push(start..run.end.min(span.end));
+					}
 				}
 			}
 		}
@@ -14121,6 +14125,21 @@ mod test {
 		);
 		producer.skip_groups(1_001..2_000);
 		assert!(matches!(ordered.poll_next_group(&noop), Poll::Ready(Ok(Some(group))) if group.start == 1_000));
+		assert!(matches!(ordered.poll_next_group(&noop), Poll::Ready(Ok(None))));
+	}
+
+	/// An ordered read of a received copy never passes a key below a group landing past its
+	/// range: the feed may still land it, so the read waits and hands it out once it does.
+	#[cfg(feature = "async")]
+	#[test]
+	fn an_ordered_read_of_a_received_copy_waits_below_a_later_group() {
+		let producer = received_producer(None);
+		let mut ordered = producer.subscribe(replay().with_range(0..1)).ordered();
+		let _past = framed(&producer, 1, 1).finish().unwrap();
+		let noop = kio::Waiter::noop();
+		assert!(ordered.poll_next_group(&noop).is_pending(), "the feed may still land 0");
+		let _below = framed(&producer, 0, 1).finish().unwrap();
+		assert!(matches!(ordered.poll_next_group(&noop), Poll::Ready(Ok(Some(group))) if group.start == 0));
 		assert!(matches!(ordered.poll_next_group(&noop), Poll::Ready(Ok(None))));
 	}
 
@@ -30655,6 +30674,43 @@ mod test {
 			asked.push((fill.start().group, fill.end()));
 		}
 		assert_eq!(asked, [(0, 2)], "one fill, which both join");
+	}
+
+	/// A wider coverage settling a received stale run wholly below a reader's floor owes
+	/// nothing, rather than a run read backwards from the floor.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_stale_run_below_the_floor_settles_nothing() {
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		let _dynamic = producer.requests();
+		let budget = Duration::from_millis(500);
+		let delay = Delay::default().with_max(budget);
+		// The open range starts above the floor, so widening it to every group settles a run
+		// from below the floor up.
+		let mut reader = producer
+			.subscribe(
+				Subscription::default()
+					.with_delay(delay)
+					.with_ranges([Range::groups(0..2), Range::groups(12..)]),
+			)
+			.with_range(9..);
+		producer.give_up(1..2, Hole::stale(budget));
+		// A cached group, so a run read backwards would panic looking it up.
+		write_group(&producer, 12);
+		let waiter = kio::Waiter::noop();
+		assert!(reader.poll_drop(&waiter).is_pending(), "the run is below the floor");
+		reader
+			.update(
+				Subscription::default()
+					.with_delay(delay)
+					.with_ranges([Range::groups(0..)]),
+			)
+			.unwrap();
+		assert!(
+			reader.poll_drop(&waiter).is_pending(),
+			"the run is still below the floor"
+		);
 	}
 
 	/// A fill taken before the last handler closed still answers an unsettled stale run: a

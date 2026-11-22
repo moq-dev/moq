@@ -124,10 +124,10 @@ impl<S: Stream, C: Codec> Export<S, C> {
 		let mut catalog = catalog.clone();
 		self.source.retain_selectable(&mut catalog);
 
+		// The catalog's ranking, so a publisher's main orientation wins over its secondary one.
 		let picked = catalog
 			.video
-			.renditions
-			.iter()
+			.ranked()
 			.filter(|(_, c)| c.codec.kind() == C::KIND)
 			.collect::<Vec<_>>();
 
@@ -135,7 +135,7 @@ impl<S: Stream, C: Codec> Export<S, C> {
 			tracing::warn!(
 				count = picked.len(),
 				codec = ?C::KIND,
-				"multiple matching renditions in catalog snapshot; using the first by name. \
+				"multiple matching renditions in catalog snapshot; using the best ranked. \
 				 Narrow with catalog::Select to pick one explicitly."
 			);
 		}
