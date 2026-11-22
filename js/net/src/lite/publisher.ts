@@ -256,9 +256,10 @@ interface RunGroup {
 	/**
 	 * Lite-07: where each group a range ends partway through stops, by group (see
 	 * {@link FrameBounds.stops}). The stream parks there with the stream open, and sends the rest
-	 * on it once an update moves the end.
+	 * on it once an update moves the end. `ended` settles once the subscription's run ends, which
+	 * resets a parked stream: no update will move its stop any more.
 	 */
-	stops?: Getter<ReadonlyMap<bigint, number>>;
+	stops?: { at: Getter<ReadonlyMap<bigint, number>>; ended: Promise<void> };
 
 	/**
 	 * Lite-07: called as the stream buffers GROUP_END with the group's end, so the starts inside
@@ -305,22 +306,26 @@ function sameStops(a: ReadonlyMap<bigint, number>, b: ReadonlyMap<bigint, number
 
 /**
  * Wait while frame `index` of group `key` is at or past where `stops` stop it, until an update moves
- * the stop. Throws why the group was given up, or once the stream closes, which resets it: a parked
- * stream holds its credit only until the group expires or the subscription ends.
+ * the stop. Throws why the group was given up, or once `gone` settles, which resets the stream: a
+ * parked stream holds its credit only until the group expires, the stream closes, or the
+ * subscription ends.
+ *
+ * `gone` is made once per stream and reused, so moving the stop many times attaches no reaction
+ * per move.
  */
 async function parkAt(
 	stops: Getter<ReadonlyMap<bigint, number>>,
 	key: bigint,
 	index: number,
 	givenUp: GivenUp,
-	closed: Promise<unknown>,
+	gone: () => Promise<true>,
 ): Promise<void> {
 	for (;;) {
 		const stop = stops.peek().get(key);
 		if (stop === undefined || index < stop) return;
 		const stopped = await givenUp.write(async () => {
-			const gone = await race([stops.changed().then(() => false), closed.then(() => true)]);
-			if (gone === true) throw new Error("the stream closed while parked at a range's end");
+			const left = await race([stops.changed().then(() => false), gone()]);
+			if (left === true) throw new Error("parked at a range's end until the stream or subscription ended");
 		});
 		if (stopped) throw stopped;
 	}
@@ -1760,6 +1765,12 @@ export class Publisher {
 		const unsubscribed = new Promise<void>((resolve) => {
 			unsubscribe = resolve;
 		});
+		// Unlike `unsubscribed`, settles however the run ends: a group parked at a stop waits on an
+		// update, which no longer comes.
+		let end!: () => void;
+		const ended = new Promise<void>((resolve) => {
+			end = resolve;
+		});
 		try {
 			for (;;) {
 				if (startKey !== undefined && skipped.length > 0) {
@@ -2062,7 +2073,7 @@ export class Publisher {
 					unsubscribed,
 					start: range.start,
 					end: range.end,
-					stops: hasRanges(this.version) ? bounds.stops : undefined,
+					stops: hasRanges(this.version) ? { at: bounds.stops, ended } : undefined,
 					// The starts inside a group sent whole are accounted for by its GROUP_END, so the
 					// end-of-track scan never drops them.
 					ended: (end) => {
@@ -2095,6 +2106,7 @@ export class Publisher {
 			// A group held for the upstream START has no one left to read it.
 			first?.group.close();
 			if (!finished) unsubscribe();
+			end();
 			// A lite-07 subscriber FINs once it read the finished track's tail, or once it wants
 			// nothing more, even while a reply is still being written. Either way the groups still
 			// waiting for a slot are cancelled, but an opened stream may be a final group whose FIN
@@ -2611,6 +2623,15 @@ export class Publisher {
 			let reached = hooks.groupIndex(group) === startFrame;
 			// Whether every frame went out, which a finished group's GROUP_END then claims.
 			let whole = false;
+			// What ends a park at a stop (see parkAt), made on the first park and reused.
+			let left: Promise<true> | undefined;
+			const gone = () => {
+				left ??= race(stops ? [stream.closed, stops.ended] : [stream.closed]).then(
+					() => true as const,
+					() => true as const,
+				);
+				return left;
+			};
 
 			for (;;) {
 				const read = await race([hooks.readGroupFrame(group, compress), stream.closed]);
@@ -2632,7 +2653,7 @@ export class Publisher {
 				if (endFrame !== undefined && read.index > endFrame) break;
 				// Lite-07: hold a frame past a Position end, the stream open, until an update moves the
 				// end. A group ending at the end reads as its end above, so its stream ends as usual.
-				if (stops) await parkAt(stops, group.start, read.index, givenUp, stream.closed);
+				if (stops) await parkAt(stops.at, group.start, read.index, givenUp, gone);
 
 				let delta: bigint | undefined;
 				if (stamp !== undefined) {

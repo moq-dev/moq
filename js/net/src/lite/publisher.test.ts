@@ -2325,6 +2325,23 @@ test("lite-07 a Position end parks the group, the stream open, until an update m
 	} finally {
 		await ending.close();
 	}
+
+	// The subscriber leaving resets a parked stream: no update will move its stop.
+	const leaving = await servedSubscription({
+		version,
+		frames: ["a", "b", "c"],
+		maxAge: Duration.millis(3_600_000),
+		ranges: [{ start: { absolute: 0n }, end: { absolute: 0n, frame: 2 } }],
+	});
+	try {
+		const reset = leaving.stall();
+		leaving.serve(0n);
+		expect(await leaving.servedHeader()).toBe(0n);
+		leaving.client.close();
+		expect(await reset).toBeDefined();
+	} finally {
+		await leaving.close();
+	}
 });
 
 // The update and group are both ready when the write unblocks. Control is drained first, then
