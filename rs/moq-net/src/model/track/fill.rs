@@ -951,13 +951,15 @@ impl FillGroups {
 	/// The oldest group the first group may start at: [`start`](Self::start)'s, unless that is a
 	/// reader's time start no group the cache holds places. Then the first group is the one
 	/// containing that time: the group starting at it, or else the newest one starting before
-	/// it, at or after the floor. A handler knowing its groups only by key serves that key as
+	/// it, at or after the floor, unless that one ended whole at or before the time, which no
+	/// group then contains. A handler knowing its groups only by key serves that key as
 	/// any other; one that can tell which group holds the time, as from an index, may
 	/// [`accept`](Self::accept) that group instead, or [`drop_groups`](Self::drop_groups) the
 	/// key when none does. The reader starts where the answer says, never where the groups
 	/// the cache holds happen to say: a drop, or the fill closed unanswered, says no group
-	/// starts from the floor through the time, so it starts at the group just below the floor,
-	/// or past the time when the floor is 0. A [refusal](Self::refuse_groups) fails the reader
+	/// starts from the floor through the time, so it starts at the group just below the floor
+	/// (at its End once the time is past that group's span), or past the time when the floor is
+	/// 0. A [refusal](Self::refuse_groups) fails the reader
 	/// with its error until its ranges change.
 	pub fn floor(&self) -> u64 {
 		self.inner.floor.unwrap_or(self.inner.start.group)

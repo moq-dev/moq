@@ -635,13 +635,14 @@ export class FillGroups {
 	/**
 	 * The oldest group the first group may start at: {@link start}, unless that is a reader's time
 	 * start no cached group places. Then the first group is the one containing that time: the group
-	 * starting at it, or else the newest one starting before it, at or after the floor. A handler
+	 * starting at it, or else the newest one starting before it, at or after the floor, unless that
+	 * one ended whole at or before the time, which no group then contains. A handler
 	 * knowing its groups only by key serves that key as any other; one that can tell which group
 	 * holds the time, as from an index, may {@link accept} that group instead, or
 	 * {@link dropGroups} the key when none does. The reader starts where the answer says, never
 	 * where the cached groups happen to say: a drop, or the fill closed unanswered, says no group
-	 * starts from the floor through the time, so it starts at the group just below the floor, or
-	 * past the time when the floor is 0. A {@link refuseGroups refusal} fails the reader with its
+	 * starts from the floor through the time, so it starts at the group just below the floor (at its
+	 * End once the time is past that group's span), or past the time when the floor is 0. A {@link refuseGroups refusal} fails the reader with its
 	 * error until its ranges change.
 	 */
 	readonly floor: bigint;

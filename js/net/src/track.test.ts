@@ -1374,6 +1374,70 @@ test("a time start resolves on keys alone, before any group's first frame", () =
 	}
 });
 
+// A whole group's span runs from its start to its End: a time inside it starts at that group, and
+// a time in the pause past it belongs to no group, so a time start there starts at the next group,
+// even before that group exists, and a time end there stops after the whole group. A group with no
+// End spans up to the next start. Mirrors the Rust `time_anchors_resolve_against_group_spans`.
+test("time anchors resolve against group spans", () => {
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: null });
+	const append = (start: number, end?: bigint) => {
+		const group = producer.appendGroup(Timestamp.fromMillis(start));
+		group.writeFrame(textFrame("x", Timestamp.fromMillis(start)));
+		if (end === undefined) group.finish();
+		else group.finishAt(end);
+	};
+	const from = (start: bigint, end?: bigint) =>
+		producer.subscribe({ delay: { max: null }, ranges: [end === undefined ? { start } : { start, end }] });
+	append(0, 1000n);
+	append(1000, 1400n);
+
+	const inside = from(1200n);
+	const paused = from(1700n);
+	const atEnd = from(1400n);
+	const holdings = hooks.subscriberHoldings(inside);
+	expect(holdings.containing(1200n, NO_MAX_DELAY)).toEqual({ at: 1000n });
+	expect(holdings.containing(1700n, NO_MAX_DELAY)).toEqual({ at: 1400n });
+	expect(holdings.containing(1400n, NO_MAX_DELAY)).toEqual({ at: 1400n });
+	// Its own start names a group whatever its End.
+	expect(holdings.containing(1000n, NO_MAX_DELAY)).toEqual({ at: 1000n });
+	expect(drainGroups(inside)).toEqual([1000n]);
+	expect(drainGroups(paused)).toEqual([]);
+	expect(drainGroups(atEnd)).toEqual([]);
+
+	append(2000);
+	expect(drainGroups(inside)).toEqual([2000n]);
+	expect(drainGroups(paused)).toEqual([2000n]);
+	expect(drainGroups(atEnd)).toEqual([2000n]);
+	expect(drainGroups(from(0n, 1700n))).toEqual([0n, 1000n]);
+	// 2000 has no End, so it spans up to the next start.
+	expect(holdings.containing(2500n, NO_MAX_DELAY)).toEqual({ at: 2000n });
+	producer.close();
+});
+
+// A lite-07 copy holding a whole group places a time inside its span from that group alone, with
+// no successor, since its GROUP_END gave up the starts there. A time past its End waits until the
+// publisher skips the pause up to it, then starts at that End. Mirrors the Rust
+// `a_received_copy_places_a_time_from_a_whole_groups_span`.
+test("a received copy places a time from a whole group's span", () => {
+	const producer = receivedTrack({ timescale: Timescale.MILLI });
+	const group = producer.createGroup(1000n);
+	group.writeFrame(textFrame("x", Timestamp.fromMillis(1000)));
+	group.finishAt(1400n);
+	hooks.skipTrackGroups(producer, 1001n, 1400n);
+	const paused = producer.subscribe({ delay: { max: null }, ranges: [{ start: 1700n }] });
+	const holdings = hooks.subscriberHoldings(paused);
+	expect(holdings.containing(1300n, NO_MAX_DELAY)).toEqual({ at: 1000n });
+	expect(holdings.containing(1700n, NO_MAX_DELAY)).toBe("unknown");
+	expect(drainGroups(paused)).toEqual([]);
+
+	// The publisher names the pause with SUBSCRIBE_SKIP.
+	hooks.skipTrackGroups(producer, 1400n, 2000n);
+	expect(holdings.containing(1700n, NO_MAX_DELAY)).toEqual({ at: 1400n });
+	putGroup(producer, 2000n, 2000);
+	expect(drainGroups(paused)).toEqual([2000n]);
+	producer.close();
+});
+
 // A drop inside a time end is reported, and one past it is not: the end settles by key.
 test("a drop a time end covers is reported", () => {
 	const producer = new TrackProducer("test");

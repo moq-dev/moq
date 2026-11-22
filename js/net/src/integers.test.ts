@@ -70,7 +70,7 @@ test("time anchors round-trip beyond 2^53 and resolve adjacent times exactly", a
 	// Every group from 0 through the latest held, so a time names the group starting there.
 	const contiguous: Holdings = {
 		resolves: () => true,
-		containing: (time) => ({ group: time }),
+		containing: (time) => ({ at: time }),
 		nextStart: (from) => from,
 		complete: () => false,
 	};

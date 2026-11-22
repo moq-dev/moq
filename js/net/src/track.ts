@@ -325,7 +325,9 @@ export interface Range {
  *
  * - omitted, the oldest group still worth delivering: as far back as {@link Delay.max} allows, and
  *   the publisher still holds.
- * - a time, the group containing it: the newest one starting at or before it. A time resolves at
+ * - a time, the group containing it: the newest one starting at or before it, unless that group
+ *   ended whole at or before the time ({@link GroupProducer.finishAt}): a time past a whole group's
+ *   span lies in a pause no group contains, so the range starts at the next group. A time resolves at
  *   the hop that serves it, from the starts of the groups it holds. When none does, a hop whose fill
  *   handler serves its history asks it for the group containing the time (see
  *   {@link FillGroups.floor}), reading nothing until it answers; otherwise, or when the handler
@@ -1048,7 +1050,7 @@ type TimeStart = { start?: bigint; past?: number };
 // Where `time` falls for a reader within `budget` by what `reported` answered for it, undefined
 // when no answer proves it. Mirrors the Rust `TimeStart::containing`.
 function timeStartContaining(reported: TimeStart | undefined, time: bigint, budget: number): Containing | undefined {
-	if (reported?.start !== undefined && reported.start <= time) return { group: reported.start };
+	if (reported?.start !== undefined && reported.start <= time) return { at: reported.start };
 	if (reported?.past !== undefined && budget <= reported.past) return "before";
 	return undefined;
 }
@@ -3895,24 +3897,34 @@ export class Subscriber {
 			containing: (time, budget) => {
 				// A fetch names its group by start: the one starting there, never an earlier one
 				// containing it, as a Rust fetch reads by key.
-				if (anchors.atKeys || state.fetch) return { group: time };
+				if (anchors.atKeys || state.fetch) return { at: time };
 				const index = keyIndex(keys, time + 1n);
 				const below = index > 0 ? keys[index - 1] : undefined;
+				// Where a range from the time starts, `below` being the newest group starting at or before
+				// it: there, unless that group ended whole at or before the time, then at its End, so at the
+				// next group, since no group contains a time past a whole group's span. A time at the
+				// group's start names it whatever its End. Mirrors the Rust `Slot::reached`.
+				const reached = (below: bigint): { at: bigint } => {
+					const end = wholeAt(producer, below);
+					return { at: end !== undefined && time > below && end <= time ? max(end, below + 1n) : below };
+				};
 				// A lite-07 copy holds only part of the track, so it places a time only where it can prove
 				// what its upstream would answer: at a group held before it once every key between is
-				// given up for this reader, before every group once every key through it is, or where its
+				// given up for this reader (a whole group's GROUP_END gives up the starts inside its span,
+				// so it alone proves every time there), or at its End once the time is past that span,
+				// before every group once every key through it is, or where its
 				// upstream answered a range asked from that time. Anything else waits, and the reader asks
 				// its upstream for it (see `askTimes`): a group held after the time says nothing of one
 				// between, nor does a stale drop of a reader wider than the budget it was judged under.
 				// Mirrors the Rust `TrackState::containing_received`.
 				if (wire) {
-					if (below !== undefined && drops.givenUp(below + 1n, time + 1n, budget)) return { group: below };
+					if (below !== undefined && drops.givenUp(below + 1n, time + 1n, budget)) return reached(below);
 					const reported = timeStartContaining(anchors.starts.get(time), time, budget);
 					if (reported !== undefined) return reported;
 					if (below === undefined && drops.givenUp(0n, time + 1n, budget)) return "before";
 					return "unknown";
 				}
-				if (below !== undefined) return { group: below };
+				if (below !== undefined) return reached(below);
 				// Every key at or before it is gone, so whichever group held it will never arrive.
 				if (drops.covers(0n, time + 1n)) return "before";
 				return keys.length === 0 ? "unknown" : "before";
