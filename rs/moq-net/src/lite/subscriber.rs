@@ -8336,6 +8336,34 @@ mod tests {
 		assert_eq!(wire_ranges(&Subscription::default()), Some(vec![lite::Range::OPEN]));
 	}
 
+	/// A wire without ranges has no Position end, so a switch's frame cap goes out as the whole
+	/// group, the update byte for byte the one an uncapped switch sends: lite-06 is the wire a
+	/// relay of the previous release speaks.
+	#[test]
+	fn lite06_caps_a_switch_by_whole_group() {
+		use crate::coding::Encoder;
+		use crate::lite::Message;
+		let uncapped = Subscription::default().with_range(3..6);
+		let mut capped = uncapped.clone();
+		capped.cap = Some(Position::new(5, 2));
+		let update = |subscription: &Subscription| {
+			let ranges = wire_ranges(&wire_span(subscription.clone())).unwrap();
+			let msg = lite::SubscribeUpdate {
+				wanted_group: None,
+				priority: 0,
+				max_delay: None,
+				min_delay: None,
+				ranges: lite::RangeEdit::Replace(ranges),
+				order: track::Order::default(),
+			};
+			let mut buf = Vec::new();
+			msg.encode_msg(&mut Encoder::new(&mut buf, Version::Lite06.into()), Version::Lite06)
+				.unwrap();
+			buf
+		};
+		assert_eq!(update(&capped), update(&uncapped));
+	}
+
 	/// A wire without ranges asks from group 0 when no single start covers both a range
 	/// with no start and one with a start.
 	#[test]
@@ -10291,7 +10319,12 @@ fn wire_ranges(subscription: &Subscription) -> Option<Vec<lite::Range>> {
 /// none, which a pre-06 publisher reads as the latest group and a lite-06 one as no floor.
 /// One mixing the two asks from group 0, since no single start covers both: the latest
 /// group may sit below the start.
-fn wire_span(subscription: Subscription) -> Subscription {
+///
+/// It ends at a group's end, never at a Position: a publisher without ranges caps its cursor
+/// there and FINs the group, which would read as the group finishing short. A copy a switch
+/// replaces sends its boundary group whole there instead (see [`Subscription::cap`]).
+fn wire_span(mut subscription: Subscription) -> Subscription {
+	subscription.cap = None;
 	let start = match subscription.start() {
 		Some(start) => Some(start),
 		None if subscription.ranges.iter().any(|range| range.start.is_some()) => Some(0),
@@ -11385,7 +11418,6 @@ impl TrackServe {
 		// A wire without frame bounds asks the group whole.
 		if !self.subscriber.version.has_frame_bounds() {
 			subscription.resume = None;
-			subscription.cap = None;
 		}
 		wire_ranges(&subscription).map(|ranges| (subscription, ranges))
 	}

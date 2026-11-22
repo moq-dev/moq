@@ -56,7 +56,8 @@ pub struct Subscription {
 	/// Where a range ending at that group stops: before this frame, rather than through the
 	/// group's end. A route switch capping the copy it replaces where the new one resumes (see
 	/// [`Self::resume`]). Only a range whose end is exactly that group's start uses it.
-	/// Aggregated only when every reader caps: the highest position then.
+	/// Aggregated only when every reader caps: the highest position then. Only lite-07
+	/// carries it; an older wire ends at the group's end.
 	pub(crate) cap: Option<Position>,
 	/// The time starts a received copy's readers wait on, each with the widest budget one
 	/// waits under: the copy can't prove where the publisher would start them, so its session

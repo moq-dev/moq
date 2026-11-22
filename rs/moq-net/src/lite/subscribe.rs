@@ -1828,8 +1828,8 @@ mod test {
 	}
 
 	/// A lite-07 start may fall partway through a group, as its Position type: the group's
-	/// start, then the frame. An end there is refused, since FETCH reads a slice of a group,
-	/// and so is a Position at frame 0, which a Time says.
+	/// start, then the frame, and so may an end, which stops before that frame. A Position at
+	/// frame 0, which a Time says, is refused.
 	#[test]
 	fn lite07_starts_and_ends_partway_through_a_group() {
 		let mut msg = framed_sample();
