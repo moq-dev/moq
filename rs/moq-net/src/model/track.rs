@@ -8784,7 +8784,8 @@ impl Live {
 			let taken = {
 				let mut indexes = self.0.lock().unwrap_or_else(PoisonError::into_inner);
 				let indexed = Self::index(&mut indexes, state);
-				if !caught_up {
+				// Again whenever another search re-indexed it under its own cover meanwhile.
+				if !caught_up || indexed.cover != *groups {
 					indexed.catch_up(state, groups);
 					caught_up = true;
 				}
@@ -19769,6 +19770,36 @@ mod test {
 				}
 			}
 		}
+	}
+
+	/// A search that another search under another cover re-indexes between batches still
+	/// meets only its own groups: the index follows whichever cover searched it last.
+	#[test]
+	fn a_search_keeps_its_cover_across_batches() {
+		let producer = track_producer("test", Info::timed());
+		let _groups: Vec<_> = (0..40)
+			.map(|key| producer.create_group(group::Info { start: key }).unwrap())
+			.collect();
+		let live = Arc::default();
+		let mine = Cover::new([0..=9, 11..=19]);
+		let theirs = Cover::new([20..=29, 31..=39]);
+		let (ours, other) = (
+			Servable::covering(mine.clone(), None, &live),
+			Servable::covering(theirs, None, &live),
+		);
+		let state = producer.state.read();
+		let mut met = Vec::new();
+		let found = state.find_servable(&ours, 0, false, |slot: &Slot| {
+			if met.is_empty() {
+				let theirs = state.find_servable(&other, 0, false, |slot: &Slot| Some(slot.group.start));
+				assert_eq!(theirs, Some(20));
+			}
+			met.push(slot.group.start);
+			None::<()>
+		});
+		assert_eq!(found, None);
+		let expected: Vec<u64> = (0..40).filter(|key| mine.contains(*key)).collect();
+		assert_eq!(met, expected);
 	}
 
 	/// Once churn leaves the index holding more entries than the cache, a cache that then
