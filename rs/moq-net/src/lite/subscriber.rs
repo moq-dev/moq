@@ -8212,7 +8212,9 @@ mod tests {
 
 		// The publisher answers with an unknown response type.
 		let (mut send, _recv) = kio::wait(|waiter| peer.poll_accept_bi(waiter)).await.unwrap();
-		kio::wait(|waiter| send.poll_write(waiter, &[0x3f, 0x00])).await.unwrap();
+		kio::wait(|waiter| send.poll_write(waiter, &[0x3f, 0x00]))
+			.await
+			.unwrap();
 		let _reader = reader;
 
 		let gate = serve.gate();
