@@ -183,7 +183,9 @@ claim's path in Rust grows by exactly the relay that took it
   algebra, which has it invalid.
 - **Two sessions to one neighbour.** The algebra has one link per pair of nodes.
   The router can hold two sessions to one Node ID, and breaks a tie between them
-  by the session's key, after everything the algebra orders by.
+  by the session's key, after everything the algebra orders by. Their floor is
+  one per pair, which is why a relay names a session closed only once every
+  older one to that relay closed too (`a_second_session_keeps_the_route`).
 - **A saturated claim cost.** A claim's cost saturates at the metric, so a step
   past it adds nothing, where the algebra's always adds. The binding samples
   costs far below it.
@@ -209,10 +211,13 @@ convergent iteration started at a fixed point stays there, so each has exactly
 that fixed point.
 
 **The hypotheses hold.** A floor holds a session only once the node learned it
-closed, from its own session ending or from a neighbour naming it. Sessions
-between a pair of relays are numbered upward within a start, and a later start
-orders above every session of an earlier one, so no live session
-sits at or below a floor (`FloorsClosed`). A relay that sends GOAWAY sends it on
+closed, from a neighbour naming it. A relay names its own session only once every
+session it numbered lower to the same relay closed too, so a newer session that
+closes first, while an older one to that relay lives, is named only once the
+older one closes. Sessions between a pair of relays are numbered upward within a
+start, and a later start orders above every session of an earlier one, so no
+live session sits at or below a floor (`FloorsClosed`). A node also forgets
+floors, which only drops an accelerator. A relay that sends GOAWAY sends it on
 every session, and a node is named draining only by a neighbour that heard it
 (`DrainNamed`).
 
