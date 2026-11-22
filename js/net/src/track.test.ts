@@ -5857,7 +5857,10 @@ test("track: a declared end resolves an unproven live join", () => {
 		putGroup(producer, 1000n, 1000);
 		putGroup(producer, 3000n, 3000);
 		producer.finishAt({ group: 3001n, frame: 0 });
-		const reader = producer.subscribe({ delay: { max: null }, ranges: [{ start: { live: Duration.millis(1000) } }] });
+		const reader = producer.subscribe({
+			delay: { max: null },
+			ranges: [{ start: { live: Duration.millis(1000) } }],
+		});
 		expect(reader.tryRecvGroup()?.start).toBe(3000n);
 	} finally {
 		producer.close();

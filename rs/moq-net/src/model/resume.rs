@@ -2038,7 +2038,10 @@ impl Reader {
 				// Unchanged only if each live join also keeps its tick: one added again under the
 				// same key asks its copies anew.
 				Some(Err(ranges))
-					if ranges.iter().map(|(key, (range, _))| (key, range)).eq(&self.mirrored.ranges)
+					if ranges
+						.iter()
+						.map(|(key, (range, _))| (key, range))
+						.eq(&self.mirrored.ranges)
 						&& (ranges.iter())
 							.filter(|(_, (range, _))| matches!(range.start, track::Start::Live(_)))
 							.map(|(key, (_, since))| (key, since))
