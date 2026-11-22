@@ -5208,6 +5208,9 @@ impl kio::Task for FrontServe {
 								self.events.push_back(Event::Resolved { route, result: Ok(id) });
 								continue;
 							}
+							// A request nobody waits on any more is final: its claimant may
+							// already be skipping it, so ask afresh rather than revive it.
+							serve.requests.remove_if(&self.path, |producer| !producer.wanted());
 							let pending = match serve.requests.join(&self.path) {
 								Some(producer) => producer.consume(),
 								None => {
@@ -7330,6 +7333,15 @@ impl Request {
 	/// Reject the request, resolving every awaiting requester with `err`.
 	pub fn reject(self, err: Error) {
 		let _ = ServeState::resolve(&self.home, &self.path, &self.producer, Err(err));
+	}
+
+	/// Ready once no requester waits on the answer any more: each left, or the relay
+	/// moved it to another route. Final: a later requester gets a new request.
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_unwanted(&self, waiter: &kio::Waiter) -> Poll<()> {
+		// Only a front joining under the queue's lock adds a requester, and it never joins
+		// an unwanted request, so once unwanted the count stays at zero.
+		self.producer.poll_wanted_changed(waiter, true).map(|_| ())
 	}
 }
 
@@ -14021,6 +14033,79 @@ mod tests {
 		let prepared = queued(&claim).await.route(RouteOptions::hidden()).unwrap();
 		drop(prepared);
 		assert!(matches!(pending.await, Err(Error::Unroutable)));
+	}
+
+	/// Whether a held request reports nobody waits on it, without waiting.
+	#[cfg(feature = "async")]
+	fn unwanted(request: &Request) -> bool {
+		request.poll_unwanted(&kio::Waiter::noop()).is_ready()
+	}
+
+	/// A held request is unwanted once its only requester leaves, and stays so: a new
+	/// requester gets a new request rather than reviving the skipped one.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_request_is_unwanted_once_its_requester_leaves() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let claim = producer.claim("room", RouteOptions::default()).unwrap();
+		let pending = consumer.request("room/alice", None);
+		let request = queued(&claim).await;
+		assert!(!unwanted(&request));
+
+		drop(pending);
+		settle(|| unwanted(&request)).await;
+
+		let pending = consumer.request("room/alice", None);
+		let fresh = queued(&claim).await;
+		assert!(unwanted(&request), "a new requester never revives it");
+		assert!(!unwanted(&fresh));
+		drop(request);
+		fresh.serve(broadcast::Info::new().produce());
+		pending.await.expect("the fresh request answers");
+	}
+
+	/// Coalesced requesters share one request: it is unwanted only once the last leaves.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_coalesced_request_is_unwanted_once_the_last_requester_leaves() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let claim = producer.claim("room", RouteOptions::default()).unwrap();
+		let first = consumer.request("room/alice", None);
+		let second = consumer.request("room/alice", None);
+		let request = queued(&claim).await;
+
+		drop(first);
+		for _ in 0..10 {
+			kio::clock::sim::yield_now().await;
+		}
+		assert!(!unwanted(&request), "the second requester still waits");
+		assert!(claim.poll_requested(&kio::Waiter::noop()).is_pending(), "one request for both");
+
+		drop(second);
+		settle(|| unwanted(&request)).await;
+	}
+
+	/// A front moving to a cheaper route leaves the request it held unwanted, while its
+	/// requester resolves through the new route.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_request_is_unwanted_once_its_front_moves_to_another_route() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let pool = producer.claim("room", RouteOptions::default().with_cost(5)).unwrap();
+		let pending = consumer.request("room/alice", None);
+		let request = queued(&pool).await;
+
+		let node = producer.claim("room", RouteOptions::default().with_cost(1)).unwrap();
+		let moved = queued(&node).await;
+		settle(|| unwanted(&request)).await;
+		assert!(!unwanted(&moved));
+
+		let served = broadcast::Info::new().produce();
+		moved.serve(&served);
+		pending.await.expect("resolves through the cheaper route");
 	}
 
 	/// An answer prepared for a claim that went away is refused, never announced.
