@@ -34,17 +34,18 @@ Once the mirror is archived, delete the transition:
   enforces the module zip's own limits.
 - The "until the cutover" text in `go/ffi/README.md` and `infra/README.md`.
 
+Steps 1 to 3 ran on 2026-11-21 (maintainer-approved, from the maintainer's
+desktop): the `go-moq-dev` bucket and Worker are live, `https://go.moq.dev/`
+prints the banner, and `backfill` then `verify` covered all 46 versions. Those
+two ran with a temporary token scoped to `go-moq-dev`, since deleted. The
+`publish` Environment's R2 secret was matched to the "MoQ CI" token by date
+(both 2026-11-05; the only other apt/rpm token dates from May), and that token
+now has Object Read & Write on `go-moq-dev`. No run has used the stored secret
+against the bucket yet: the first is the next release's `Publish to go.moq.dev`
+step, which step 6 already waits on.
+
 ## Waiting
 
-- Maintainer: create the `go-moq-dev` bucket and deploy the Worker
-  (`just infra go create`, `just infra go deploy`), and give the `publish`
-  Environment's R2 token Object Read & Write on the bucket; steps 1 and 2 of
-  "Bootstrapping the Go module proxy" in `infra/README.md`. An agent holds no
-  Cloudflare login or R2 write key. Done when `curl -fsS https://go.moq.dev/`
-  prints the banner.
-- Maintainer: backfill and verify with that token
-  (`just infra go backfill`, then `just infra go verify`), step 3. Done when
-  `verify` prints a go.sum line for each of the 45 or more versions.
 - Maintainer: cut moq.dev over, step 4: in moq-dev/moq.dev, `worker/vanity.ts`
   serves `mod https://go.moq.dev` for `/moq-ffi` without a `go-source` tag
   (that repository's quest tree owns the change; a tested patch is in
