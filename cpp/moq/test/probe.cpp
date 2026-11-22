@@ -355,7 +355,7 @@ int main()
 	auto timebase_owner = ok(moq::BroadcastProducer::init(), "timebase owner");
 	auto timebase_other = ok(moq::BroadcastProducer::init(), "timebase other");
 	auto timebase = ok(moq::MediaTimebase::init(timebase_owner), "timebase");
-	auto foreign = moq::MediaContainerProducer::init(timebase_other, {moq::ContainerFormat::kFmp4, {}, timebase});
+	auto foreign = moq::MediaContainerProducer::init(timebase_other, {moq::ContainerFormat::fmp4(), {}, timebase});
 	CHECK(!foreign);
 	CHECK(std::holds_alternative<moq::Error::kCodec>(foreign.error().get_variant()));
 	ok(timebase_owner->close(), "close timebase owner");

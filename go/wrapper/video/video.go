@@ -17,7 +17,7 @@ import (
 type Codec = *ffi.MoqVideoCodec
 
 // PixelFormat is a CPU pixel layout (I420 or RGBA).
-type PixelFormat = ffi.MoqVideoPixelFormat
+type PixelFormat = *ffi.MoqVideoPixelFormat
 
 // EncoderKind selects the encoder backend; build one with moq.AutoEncoder and friends.
 type EncoderKind = ffi.MoqVideoEncoderKind
