@@ -1,4 +1,4 @@
-# [S] No resume or relay route mutant survives
+# [M] No resume or relay route mutant survives
 
 ## Goal
 
@@ -7,35 +7,46 @@ Nightly's mutants shards report no survivors in
 
 ## Plan
 
-Found by the 2026-11-20 triage of Nightly run
-[44767045952](https://github.com/moq-dev/moq/actions/runs/44767045952).
-[moq-dev/moq#9294](https://github.com/moq-dev/moq/pull/9294) killed or excluded
-27 of its 30 survivors. Three remain in `resume.rs`, in `unraised`: `start < floor`
-to `<=`, and the `end < floor` guard as `true` or `<=`. They decide only an anchor
-exactly at the resume point, or a time end above it; probes of both, with the
-replacement holding and lacking the floor group, read the same groups.
-[moq-dev/moq#9278](https://github.com/moq-dev/moq/pull/9278) deletes `unraised` for
-`raised`, which keeps only the `time < floor` guard: once it lands or closes, rerun
-`cargo mutants -f rs/moq-net/src/model/resume.rs --re raised` and kill or exclude
-what survives.
+A local run on 2026-11-21 (`cargo mutants --in-diff` over `resume.rs` and `route/`
+since Nightly's base 9df4313a, plus `--re 'in (Resume::add|Reader::resumed)$'`) found 34
+survivors, most from [moq-dev/moq#9278](https://github.com/moq-dev/moq/pull/9278) and
+[moq-dev/moq#9307](https://github.com/moq-dev/moq/pull/9307). The first PR on this quest
+killed or excluded 18. Line numbers are from that run; rerun
+`cargo mutants -f rs/moq-net/src/model/resume.rs` on current main first, since they drift.
+Kill each with a unit test, or exclude it in `.cargo/mutants.toml` when it changes nothing
+observable.
 
-[moq-dev/moq#9276](https://github.com/moq-dev/moq/pull/9276) resumes every reader
-at the switch's boundary, the largest group held. So
-`the_fronts_subscription_resumes_at_the_boundary_whichever_reader_is_behind`
-(formerly `..._past_the_reader_furthest_behind`) no longer tells readers apart,
-and `Resume::add`'s `at <= next` may survive again. To reach the comparison, both
-readers need a held head at their boundary: `held_at` returns `None` for a reader
-that handed out a group past every group its copies hold, and `Resume::add` then
-takes `Whole` first. So readers' positions differ only when their copies differ,
-such as one still holding a replaced or backfill copy with a later group, or more
-of the boundary group's frames. Kill it with two such readers, or exclude it as
-equivalent if no such pair is reachable.
+These 16 remain, with what is known about each:
 
-Line numbers drift; rerun `cargo mutants -f <file>` on current main first.
+- `Reader::resumed` (1792:16 `&&` to `||`, 1796:9 guard `failed` to `false`, 1799:10
+  guard `current` to `true` and to `false`, 1803:5 and 1804:5 deleting `ranges` and
+  `delay`): the resolution here mostly vanishes under `clamped`'s raise to the boundary.
+  A resolved start is never past the boundary, and an end past it does not resolve. Only
+  a live join resolves to `None` rather than a raised start, which is the only case that can
+  kill these. Under the test helpers, a group's start, its key, and its timestamp coincide,
+  which hides any difference between a time and a key.
+- `Reader::window` 1867:68 `<` to `>`, the cap filter on a resolved end: the serving copy
+  usually resolves the same end, so a test needs a capped copy to be the only one that can
+  place it.
+- `Reader::resolve` 1901:26 `>` to `>=`, a time start of 0 waiting on a copy: a probe from
+  time 0 under the resume point placed the range at 0 and read the same groups either
+  way, because `backfill_gaps` places a raised start the reader holds at its own time.
+  Probably equivalent.
+- `Reader::drained` returning `true`, and 2303:21 `&&` to `||` (resetting `since` on
+  replaced copies a group already superseded): the reader's own delivery budget gives up
+  the same gaps at the same time, so a test needs a gap younger than the copy's `since`.
+  Returning `true` differs only when the route ended cleanly while the serving copy failed
+  or no copy serves, where the track then waits for the replaced copies instead of ending.
+- `Reader::poll_lowest` 2544:33 `&&` to `||` (a backfill copy of the serving route that
+  reads late counts as serving): that copy reruns `backfill_gaps`, whose widening of a
+  reused backfill resets that copy's `since`. A test would need that later budget to matter.
+- `Reader::backfill` 2928:18 `|=` to `&=`: needs a b→c→b flap that widens a reused
+  backfill with a raised start.
+- `Reader::backfill_gaps` 2999:17 `<` to `<=` (probably equivalent, since `resolve` with an
+  empty map differs from `window()` only while no copy has answered), 3025:19 guard to
+  `false` and 3025:56 `>` to `<` (no reachable case found where the replaced copy's
+  resolution of a start differs from the window's floor), 3073:71 `<` to `<=` (a range
+  starting exactly at the resume point. It is delivered or drained either way, so this looks
+  equivalent).
 
 Public API: none. Wire: none.
-
-## Waiting
-
-- moq-dev/moq: [moq-dev/moq#9278](https://github.com/moq-dev/moq/pull/9278) lands or
-  closes; check with `gh pr view 9278 --json state`.
