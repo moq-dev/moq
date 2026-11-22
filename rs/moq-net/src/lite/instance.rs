@@ -90,13 +90,12 @@ pub(super) fn encode_route(
 	w.varint(epoch)
 }
 
-/// Decode lite-07's instance and epoch, `None` when they are well framed but the
-/// instance is not one this node can use, which withdraws only the claim naming it;
+/// Decode lite-07's instance and epoch, refusing an instance that is empty or not UTF-8;
 /// see [`encode_route`].
-pub(super) fn decode_forwarded(r: &mut Decoder<'_>) -> Result<Option<(Instance, u64)>, DecodeError> {
-	let instance = decode(r.bytes()?, r.bool()?).ok();
+pub(super) fn decode_forwarded(r: &mut Decoder<'_>) -> Result<(Instance, u64), DecodeError> {
+	let instance = decode(r.bytes()?, r.bool()?)?;
 	let epoch = r.varint()?;
-	Ok(instance.map(|instance| (instance, epoch)))
+	Ok((instance, epoch))
 }
 
 fn encode(w: &mut Encoder<'_>, instance: &Instance) -> Result<(), EncodeError> {
@@ -172,11 +171,11 @@ mod test {
 		)
 		.unwrap();
 		let mut decoder = Decoder::new(&buf, Version::Lite07.into());
-		assert_eq!(decode_forwarded(&mut decoder).unwrap(), Some((instance, 7)));
+		assert_eq!(decode_forwarded(&mut decoder).unwrap(), (instance, 7));
 		assert!(decoder.is_empty());
 
 		// Every lite-07 route names one: none is never sent, and a receiver refuses an
-		// invalid one without failing the stream.
+		// invalid one.
 		assert!(
 			encode_route(
 				&mut Encoder::new(&mut Vec::new(), Version::Lite07.into()),
@@ -192,8 +191,7 @@ mod test {
 		w.bool(false);
 		w.varint(0).unwrap();
 		let mut decoder = Decoder::new(&buf, Version::Lite07.into());
-		assert_eq!(decode_forwarded(&mut decoder).unwrap(), None);
-		assert!(decoder.is_empty());
+		assert!(decode_forwarded(&mut decoder).is_err());
 	}
 
 	#[test]

@@ -57,7 +57,3 @@ than floored, so a late group 7 went out after group 8 (which holds time 8) was 
 delivered from the old route. It may match what a plain reader of that empty route does.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Resumed read ends once its window is accounted for](/quest/m0/nightly/resume-exhausted-skips.md) - its rework of `model/resume.rs` must land first, since these survivors' lines and behavior move with it

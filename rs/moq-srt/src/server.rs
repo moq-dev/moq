@@ -21,13 +21,14 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use futures::{SinkExt, StreamExt};
+use futures::{SinkExt, Stream, StreamExt};
 use moq_mux::container::Frame;
 use moq_net::origin;
 use moq_net::time::Instant;
+use moq_net::transport::Wire;
 use srt_tokio::access::{AccessControlList, ConnectionMode, RejectReason, StandardAccessControlEntry};
 use srt_tokio::options::{PacketCount, SocketOptions, StreamId};
-use srt_tokio::{ConnectionRequest, SrtIncoming, SrtListener, SrtSocket};
+use srt_tokio::{ConnectionRequest, SocketStatistics, SrtIncoming, SrtListener, SrtSocket};
 
 use crate::{Program, Result};
 
@@ -166,11 +167,54 @@ impl Egress {
 /// Match libsrt's standard send-buffer window.
 const SRT_BUFFER_PACKETS: PacketCount = PacketCount(8192);
 
+/// How often a connection reports its statistics, and so how stale its [`Wire`] counts run.
+/// srt-protocol drops the final report when a connection closes, so this also bounds the
+/// bytes of a connection's last moments that go uncounted; 200 ms is the shortest it accepts.
+const STATISTICS_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Size the sender's buffer, and report statistics often enough for [`track`].
+///
 /// srt-tokio defaults its sender to only 32 packets, so one large keyframe can
 /// evict an unsent packet and wedge its send queue behind the missing sequence
 /// number.
-pub(crate) fn configure_buffers(options: &mut SocketOptions) {
+pub(crate) fn configure(options: &mut SocketOptions) {
 	options.sender.buffer_size = SRT_BUFFER_PACKETS * options.session.max_segment_size;
+	options.session.statistics_interval = STATISTICS_INTERVAL;
+}
+
+/// The IPv4 and UDP header bytes srt-protocol adds to every packet it counts, whatever the
+/// address family, so subtracting them leaves the SRT packet.
+const IP_UDP_HEADERS: u64 = 20 + 8;
+
+/// A cumulative byte count of SRT packets, without the IP and UDP headers srt-protocol estimates.
+fn srt_bytes(all_bytes: u64, packets: u64) -> u64 {
+	all_bytes.saturating_sub(packets.saturating_mul(IP_UDP_HEADERS))
+}
+
+/// Record `socket`'s cumulative wire bytes on `wire`, from each statistics report until its
+/// connection ends.
+///
+/// The task holds only the report stream, which ends with the connection, so it outlives
+/// neither the socket nor the wait for the last report.
+pub(crate) fn track(socket: &mut SrtSocket, wire: Wire) -> tokio::task::JoinHandle<()> {
+	tokio::spawn(record(socket.statistics().clone(), wire))
+}
+
+/// Run `serve`, which owns the socket and drops it, then wait for `tracking` to apply the
+/// connection's last report, so an embedder that drops its stats guard once this returns
+/// has every report counted.
+pub(crate) async fn settled<T>(tracking: tokio::task::JoinHandle<()>, serve: impl Future<Output = T>) -> T {
+	let result = serve.await;
+	// The task only copies counters, so it ends with the connection and cannot fail.
+	let _ = tracking.await;
+	result
+}
+
+async fn record(mut reports: impl Stream<Item = SocketStatistics> + Unpin, wire: Wire) {
+	while let Some(stats) = reports.next().await {
+		wire.set_sent_bytes(srt_bytes(stats.tx_all_bytes, stats.tx_all_packets));
+		wire.set_received_bytes(srt_bytes(stats.rx_all_bytes, stats.rx_all_packets));
+	}
 }
 
 /// An SRT server that yields each incoming connection's pending request as a
@@ -209,7 +253,7 @@ impl Server {
 		let (listener, incoming) = SrtListener::builder()
 			.socket(socket)
 			.latency(latency)
-			.set(configure_buffers)
+			.set(configure)
 			.bind(local_addr)
 			.await?;
 		Ok(Self {
@@ -360,15 +404,21 @@ impl Publish {
 	/// The ingest's max age is unrelated to the SRT receive latency [`Server::bind`]
 	/// negotiates, which is a transport buffer on this hop.
 	pub async fn accept(self, import: Import<'_>) -> Result<()> {
-		let socket = self.0.request.accept(None).await?;
+		let mut socket = self.0.request.accept(None).await?;
 		tracing::info!(peer = %self.0.peer, path = %import.broadcast, "SRT publish accepted");
 		let Import {
 			publisher,
 			broadcast,
 			ingest,
 			program,
+			wire,
 		} = import;
-		serve_publish(publisher, broadcast.as_str(), socket, &ingest, program).await
+		let tracking = track(&mut socket, wire);
+		settled(
+			tracking,
+			serve_publish(publisher, broadcast.as_str(), socket, &ingest, program),
+		)
+		.await
 	}
 
 	/// Reject the publish with a verdict the client can distinguish on the wire.
@@ -416,14 +466,19 @@ impl Play {
 	/// publisher), cancelling cleanly if the caller disconnects first. This future
 	/// resolves when playback ends, so callers usually run it on its own task.
 	pub async fn accept(self, export: Export<'_>) -> Result<()> {
-		let socket = self.0.request.accept(None).await?;
+		let mut socket = self.0.request.accept(None).await?;
+		let tracking = track(&mut socket, export.wire.clone());
 		tracing::info!(peer = %self.0.peer, path = %export.broadcast, "SRT play accepted");
 		let options = crate::ts::Options {
 			latency: self.0.latency,
 			follow: export.follow,
 			stitch: export.stitch,
 		};
-		serve_subscribe(export.subscriber, export.broadcast.as_str(), socket, options).await
+		settled(
+			tracking,
+			serve_subscribe(export.subscriber, export.broadcast.as_str(), socket, options),
+		)
+		.await
 	}
 
 	/// Reject the play with a verdict the client can distinguish on the wire.
@@ -448,6 +503,11 @@ pub struct Import<'a> {
 	/// [`broadcast`](Self::broadcast). `None` (the default) fails an ingest whose PAT lists
 	/// more than one.
 	pub program: Option<Program>,
+	/// Where the connection's wire bytes are counted, which an embedder registers a clone of
+	/// with [`stats::Session::wire`](moq_net::stats::Session::wire) before accepting, and holds the
+	/// guard it returns until the accepting future resolves, since dropping it ends the registration.
+	/// It holds SRT packet bytes, headers and retransmits included, without IP and UDP.
+	pub wire: Wire,
 }
 
 impl<'a> Import<'a> {
@@ -459,6 +519,7 @@ impl<'a> Import<'a> {
 			broadcast: broadcast.into(),
 			ingest: moq_mux::Ingest::default(),
 			program: None,
+			wire: Wire::new(),
 		}
 	}
 }
@@ -479,6 +540,11 @@ pub struct Export<'a> {
 	/// the same SRT connection. Off by default, which ends the stream with
 	/// [`moq_mux::Error::Replaced`].
 	pub stitch: bool,
+	/// Where the connection's wire bytes are counted, which an embedder registers a clone of
+	/// with [`stats::Session::wire`](moq_net::stats::Session::wire) before accepting, and holds the
+	/// guard it returns until the accepting future resolves, since dropping it ends the registration.
+	/// It holds SRT packet bytes, headers and retransmits included, without IP and UDP.
+	pub wire: Wire,
 }
 
 impl<'a> Export<'a> {
@@ -489,6 +555,7 @@ impl<'a> Export<'a> {
 			broadcast: broadcast.into(),
 			follow: Duration::ZERO,
 			stitch: false,
+			wire: Wire::new(),
 		}
 	}
 }
@@ -692,7 +759,7 @@ mod tests {
 
 	/// Regression: srt-tokio's 32-packet default sender buffer evicts unsent packets
 	/// once a burst overflows it, wedging the connection within the first few messages
-	/// (see [`configure_buffers`]).
+	/// (see [`configure`]).
 	#[tokio::test]
 	async fn accepted_socket_sends_a_burst_larger_than_srt_tokio_default() {
 		// TSBPD holds every payload for the negotiated latency before releasing it, so
@@ -739,6 +806,120 @@ mod tests {
 				.unwrap();
 			assert_eq!(payload.as_ref(), sequence.to_be_bytes());
 		}
+	}
+
+	/// A report counting `packets` packets of `payload` SRT payload bytes each, the way
+	/// srt-protocol does: IPv4, UDP, and SRT headers included.
+	fn report(packets: u64, payload: u64) -> SocketStatistics {
+		let mut stats = SocketStatistics::default();
+		stats.tx_all_packets = packets;
+		stats.tx_all_bytes = packets * (payload + 44);
+		stats.rx_all_packets = 2 * packets;
+		stats.rx_all_bytes = 2 * packets * (payload + 44);
+		stats
+	}
+
+	/// Each report replaces the last, a count short of its own headers never underflows, and the
+	/// final report stays after the stream ends.
+	#[tokio::test]
+	async fn wire_counts_srt_packets_without_ip_and_udp() {
+		let wire = Wire::new();
+		let mut short = SocketStatistics::default();
+		short.tx_all_bytes = 10;
+		short.tx_all_packets = 1;
+		record(futures::stream::iter([report(2, 1316), short]), wire.clone()).await;
+		assert_eq!((wire.sent_bytes(), wire.received_bytes()), (0, 0));
+
+		record(futures::stream::iter([report(2, 1316), report(3, 1316)]), wire.clone()).await;
+		// 16 bytes of SRT header per packet, and nothing of IP or UDP.
+		assert_eq!(wire.sent_bytes(), 3 * (1316 + 16));
+		assert_eq!(wire.received_bytes(), 6 * (1316 + 16));
+	}
+
+	/// A play's connection counts at least the SRT packets of the payload it sent.
+	/// srt-protocol's own data-only counters give the ground truth: payload plus a 16 byte SRT
+	/// header, once the 28 byte IP and UDP estimate is gone.
+	#[tokio::test]
+	async fn wire_covers_the_payload_a_connection_carried() {
+		kio::clock::host_time(); // real SRT sockets
+		const MESSAGES: u64 = 64;
+		const PAYLOAD: u64 = SRT_PAYLOAD as u64;
+		let mut server = Server::bind("127.0.0.1:0".parse().unwrap(), Duration::from_millis(50))
+			.await
+			.unwrap();
+		let addr = server.local_addr();
+		let caller = tokio::spawn(async move {
+			SrtSocket::builder()
+				.set(configure)
+				.latency(Duration::from_millis(50))
+				.call(addr, Some("#!::r=wire-test,m=request"))
+				.await
+				.unwrap()
+		});
+		let Some(Request::Play(play)) = server.accept().await else {
+			panic!("m=request must create a play request");
+		};
+		let mut sender = play.0.request.accept(None).await.unwrap();
+		let mut receiver = caller.await.unwrap();
+
+		let (sent, received) = (Wire::new(), Wire::new());
+		let tracking = [track(&mut sender, sent.clone()), track(&mut receiver, received.clone())];
+		let mut sender_reports = sender.statistics().clone();
+		let mut receiver_reports = receiver.statistics().clone();
+		for _ in 0..MESSAGES {
+			sender
+				.send((kio::clock::now().into_std(), Bytes::from(vec![7; SRT_PAYLOAD])))
+				.await
+				.unwrap();
+		}
+		for _ in 0..MESSAGES {
+			kio::clock::timeout(Duration::from_secs(3), receiver.next())
+				.await
+				.expect("the receiver stalled")
+				.expect("the sender closed early")
+				.unwrap();
+		}
+
+		// Wait for a report that has seen every data packet. A tracker holds it, or a later one,
+		// by the time its stream ends.
+		let report = kio::clock::timeout(Duration::from_secs(10), async {
+			loop {
+				let stats = sender_reports.next().await.expect("the sender's connection ended");
+				if stats.tx_data >= MESSAGES {
+					return stats;
+				}
+			}
+		})
+		.await
+		.expect("the sender never reported its data");
+		// Loopback loses nothing, so every data packet went out once.
+		assert_eq!(report.tx_data, MESSAGES);
+		assert_eq!(srt_bytes(report.tx_bytes, report.tx_data), MESSAGES * (PAYLOAD + 16));
+		// The receiver counts the same packets on its own.
+		let report = kio::clock::timeout(Duration::from_secs(10), async {
+			loop {
+				let stats = receiver_reports.next().await.expect("the receiver's connection ended");
+				if stats.rx_data >= MESSAGES {
+					return stats;
+				}
+			}
+		})
+		.await
+		.expect("the receiver never reported its data");
+		assert_eq!(srt_bytes(report.rx_bytes, report.rx_data), MESSAGES * (PAYLOAD + 16));
+
+		drop((sender, receiver));
+		for task in tracking {
+			task.await.unwrap();
+		}
+		assert!(
+			sent.sent_bytes() >= MESSAGES * (PAYLOAD + 16),
+			"sent {} for {MESSAGES} packets of {PAYLOAD} bytes",
+			sent.sent_bytes()
+		);
+		assert!(received.received_bytes() >= MESSAGES * (PAYLOAD + 16));
+		// The receiver answers with control packets alone.
+		assert!(sent.received_bytes() < sent.sent_bytes());
 	}
 
 	/// One muxer frame of `payload` bytes at `micros` of media time.
@@ -1101,6 +1282,7 @@ mod tests {
 				broadcast: moq_net::Path::from_static("live"),
 				follow,
 				stitch,
+				wire: Wire::new(),
 			})
 			.await
 		});
