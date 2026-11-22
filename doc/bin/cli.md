@@ -552,8 +552,7 @@ refusal. One that goes before serving, such as one still routed through a dead
 session, is no return. A replacement (a restarted publisher, under a new
 [instance](/concept/moq-lite#publisher-instances)) exits 1 unless `--stitch` follows
 it as a full program switch: a new PMT from its catalog, with every PID flagging
-the break. With `--passthrough`, `--stitch` writes the replacement's packets
-verbatim from its first group, so the seam is each PID's continuity break. A stitch waits for the replacement's first catalog snapshot until it
+the break. A stitch waits for the replacement's first catalog snapshot until it
 arrives or the replacement goes, keeping the old publisher playing meanwhile,
 so even the default `--follow 0s` switches to a replacement that is still
 starting. After the catalog arrives, the old instance keeps feeding for up to
@@ -562,7 +561,11 @@ Its subscriptions take lower priority so the replacement can acquire on a
 congested link. The marked switch drops the old instance's buffered tail, so
 the replacement plays at `--delay` rather than behind it. An unimpaired switch
 usable within that window adds no gap. Congestion can starve the old instance
-sooner or leave the replacement acquiring past the window, causing a gap.
+sooner or leave the replacement acquiring past the window, causing a gap. With
+`--passthrough`, `--stitch` instead switches as soon as the replacement's catalog
+arrives, with no overlap window: the old instance's buffered tail goes out on
+its clock, then the replacement's packets verbatim from its first group, so the
+seam is each PID's continuity break.
 Timestamps across instances are not aligned. Without `--stitch` the export
 stays on the old publisher while it is up. Only lite-07 sessions carry
 instances, so on the default version every return is a replacement. A failure other than the

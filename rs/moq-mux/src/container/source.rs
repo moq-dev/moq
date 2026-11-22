@@ -381,8 +381,8 @@ impl ExportSource {
 	/// On the same track, start after the last group it delivered, so the publisher's cached
 	/// group is not replayed, and hand that cursor on until this source delivers a frame of its
 	/// own. Another track is new content, read from its live edge, and the rendition never goes
-	/// back in time: frames are dropped until a sync frame past the latest one delivered. On a shared clock the first group read may overlap that, but a later group
-	/// that still does fails with [`Error::RenditionRewound`](crate::Error::RenditionRewound).
+	/// back in time: frames are dropped until a sync frame past the latest one delivered. On a
+	/// shared clock the first group read may overlap that, but a later group that still does fails with [`Error::RenditionRewound`](crate::Error::RenditionRewound).
 	pub(crate) fn resuming(mut self, resume: &Resume) -> Self {
 		if resume.target == self.target {
 			self.start().after = resume.group;

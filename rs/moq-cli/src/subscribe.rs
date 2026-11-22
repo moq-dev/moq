@@ -292,7 +292,6 @@ pub struct Subscribe {
 	finish: CancellationToken,
 }
 
-/// Log how a TS export's release clock keeps up with the source.
 /// How a TS export ends, suggesting `--stitch` when another instance replaced its broadcast.
 fn replaced(end: moq_mux::Result<()>) -> anyhow::Result<()> {
 	match end {
@@ -303,6 +302,7 @@ fn replaced(end: moq_mux::Result<()>) -> anyhow::Result<()> {
 	}
 }
 
+/// Log how a TS export's release clock keeps up with the source.
 fn log_release(release: &moq_mux::container::ts::stats::Release, message: &'static str) {
 	tracing::info!(
 		dropped = release.dropped,
