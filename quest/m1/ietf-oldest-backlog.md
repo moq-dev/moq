@@ -31,16 +31,11 @@ range too, since the union must reach back. Add a `wire_bounds` test for
 Oldest-only and Oldest mixed with Live, and an end-to-end test that an Oldest
 reader over moq-transport receives groups published before it subscribed.
 
-[Max Age is a Live range's staleness budget](/quest/m1/live-max-age.md) may
-redefine a None start; keep `Oldest` meaning "the oldest group the publisher
-holds" either way.
+A None start on lite-07 is history: the oldest group the publisher holds,
+delivered in full and bounded only by its max age; keep `Oldest` meaning that.
 
 ## Waiting
 
 - moq-dev/moq: [#9316](https://github.com/moq-dev/moq/pull/9316) merges; it
   replaces the Min Age shape this fix targets with `Start::Oldest`. Check with
   `gh pr view 9316 --json state`.
-
-## Related
-
-- [Max Age is a Live range's staleness budget](/quest/m1/live-max-age.md) - decides what a None start means on lite-07

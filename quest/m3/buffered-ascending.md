@@ -59,9 +59,9 @@ Implementation:
   ascending. A voice reply track has one subscriber, so it goes ascending end
   to end. Say in the watch docs that a mixed audience gets newest-first
   upstream.
-- The draft says an ascending subscriber SHOULD raise `Subscriber Max Age`.
-  Buffered mode already subscribes with `delay + lookahead`; confirm that covers
-  it.
+- The draft says an ascending subscriber SHOULD drain a backlog from a
+  history range, or raise its live join's `Max Age`. Buffered mode already
+  joins with a max of `delay + lookahead`; confirm that covers it.
 - Replace `Order`'s release rules in `js/watch/src/audio/order.ts` with the
   floor span, keeping `admit()` and the epoch reset ordering from #6549. Keep
   the decoder tests for a reversed head (now released at the floor) and the
