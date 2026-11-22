@@ -544,7 +544,7 @@ fn at(group: &group::Producer) -> Timestamp {
 /// The groups from the one starting at `key` onward.
 fn from(key: u64) -> track::Range {
 	track::Range {
-		start: Some(key),
+		start: track::Start::Time(key),
 		end: None,
 	}
 }

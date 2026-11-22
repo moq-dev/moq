@@ -473,6 +473,7 @@ impl Encoder {
 			encode_guid: initialize_params.encodeGUID,
 			init,
 			config,
+			ended: false,
 		})
 	}
 }

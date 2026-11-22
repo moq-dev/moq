@@ -837,6 +837,16 @@ impl Scrape {
 				"Time connections spent with a write blocked on the peer's connection-level credit (MAX_DATA).",
 				|p| p.credit_stalled_us,
 			),
+			(
+				"moq_relay_credit_held_readers_microseconds",
+				"Time peers had a connection's whole receive window spent while a reader behind held eviction off.",
+				|p| p.credit_held_readers_us,
+			),
+			(
+				"moq_relay_credit_held_evicted_microseconds",
+				"Time peers had a connection's whole receive window spent while an evicted reader had yet to stop its stream.",
+				|p| p.credit_held_evicted_us,
+			),
 			("moq_relay_requests", "Admitted request/response exchanges.", |p| {
 				p.requests
 			}),
@@ -2145,6 +2155,8 @@ mod tests {
 # TYPE moq_relay_control_rx_messages_total counter
 # TYPE moq_relay_control_tx_bytes_total counter
 # TYPE moq_relay_control_tx_messages_total counter
+# TYPE moq_relay_credit_held_evicted_microseconds_total counter
+# TYPE moq_relay_credit_held_readers_microseconds_total counter
 # TYPE moq_relay_credit_stalled_microseconds_total counter
 # TYPE moq_relay_credit_stalls_total counter
 # TYPE moq_relay_datagrams_total counter
@@ -2183,6 +2195,8 @@ counter moq_relay_announces_started_total{role="publisher",tier="edge"} 0
 counter moq_relay_announces_started_total{role="subscriber",tier="edge"} 1
 counter moq_relay_bytes_total{role="publisher",tier="edge"} 0
 counter moq_relay_bytes_total{role="subscriber",tier="edge"} 0
+counter moq_relay_credit_held_evicted_microseconds_total{tier="edge"} 0
+counter moq_relay_credit_held_readers_microseconds_total{tier="edge"} 0
 counter moq_relay_credit_stalled_microseconds_total{tier="edge"} 0
 counter moq_relay_credit_stalls_total{tier="edge"} 0
 counter moq_relay_datagrams_total{role="publisher",tier="edge"} 0

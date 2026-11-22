@@ -167,9 +167,6 @@ export class Answer {
 				}
 				const request = this.#request;
 				if (request) {
-					// Let go before its answer is written: the peer may send its next edit the
-					// moment it reads the answer, which can be before the write returns here.
-					this.#request = undefined;
 					await this.#edit(request);
 					continue;
 				}
@@ -205,6 +202,10 @@ export class Answer {
 		}
 		for (const [id, prefix] of request.add) this.#prefixes.set(id, prefix);
 
+		// Held until now, so an edit sent before this answer is refused rather than checked
+		// against stale prefixes. Let go before the answer is written: the peer may send its
+		// next edit the moment it reads it, which can be before the write returns here.
+		this.#request = undefined;
 		await this.#publish.stream.send({ status: "ok" });
 		await this.#sync();
 		const synced = request.add.map(([prefix]) => ({ status: "synced", prefix }) as const);
