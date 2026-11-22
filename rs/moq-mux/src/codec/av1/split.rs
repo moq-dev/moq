@@ -244,8 +244,10 @@ impl<'a, T: Buf + AsRef<[u8]> + 'a> Iterator for ObuIterator<'a, T> {
 			return Some(Ok(self.buf.copy_to_bytes(remaining)));
 		}
 
-		// LEB128 size field follows the header byte and optional extension byte.
-		let mut size: usize = 0;
+		// LEB128 size field follows the header byte and optional extension byte: at most eight
+		// bytes, holding a value no larger than `u32::MAX` (AV1 spec 4.10.5). It is decoded in
+		// `u64` so no shift overflows a 32-bit `usize`.
+		let mut size: u64 = 0;
 		let mut offset = if has_extension { 2 } else { 1 };
 		let mut shift = 0;
 
@@ -257,7 +259,7 @@ impl<'a, T: Buf + AsRef<[u8]> + 'a> Iterator for ObuIterator<'a, T> {
 			let byte = data[offset];
 			offset += 1;
 
-			size |= ((byte & 0x7F) as usize) << shift;
+			size |= u64::from(byte & 0x7F) << shift;
 			shift += 7;
 
 			if byte & 0x80 == 0 {
@@ -268,7 +270,13 @@ impl<'a, T: Buf + AsRef<[u8]> + 'a> Iterator for ObuIterator<'a, T> {
 			}
 		}
 
-		let total_size = offset + size;
+		let Some(total_size) = u32::try_from(size)
+			.ok()
+			.and_then(|size| usize::try_from(size).ok())
+			.and_then(|size| offset.checked_add(size))
+		else {
+			return Some(Err(Error::ObuSizeTooLarge.into()));
+		};
 		if total_size > self.buf.remaining() {
 			return None;
 		}
@@ -319,6 +327,24 @@ mod tests {
 		let mut frames = split.decode(buf, Some(pts)).unwrap();
 		frames.extend(split.flush(Some(pts)).unwrap());
 		frames
+	}
+
+	/// An OBU size is a LEB128 of at most eight bytes holding a value up to `u32::MAX`; a larger
+	/// one is refused rather than overflowing a 32-bit `usize`.
+	#[test]
+	fn obu_size_is_bounded() {
+		let size = |leb: &[u8]| {
+			let mut buf = BytesMut::from(&[0b0011_0010][..]);
+			buf.extend_from_slice(leb);
+			ObuIterator::new(&mut buf).next().map(|obu| obu.map(|_| ()))
+		};
+		// `u32::MAX` is a valid size, waiting for its payload.
+		assert!(size(&[0xff, 0xff, 0xff, 0xff, 0x0f]).is_none());
+		// One past it, five bytes long, and a value only a 64-bit shift reaches.
+		assert!(matches!(size(&[0x80, 0x80, 0x80, 0x80, 0x10]), Some(Err(_))));
+		assert!(matches!(size(&[0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01]), Some(Err(_))));
+		// A ninth byte is refused too.
+		assert!(matches!(size(&[0x80; 9]), Some(Err(_))));
 	}
 
 	/// A temporal unit with a sequence header + KEY_FRAME emits one keyframe.
