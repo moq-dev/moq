@@ -914,6 +914,10 @@ impl<F: Container> Consumer<F> {
 			});
 			let target = match should_skip {
 				true => next_group.map(|(i, start)| (i, Some(start))),
+				// Looking at the later groups can fill the max buffer while the cursor's group holds its
+				// first frame, which it then judges by what it holds and reads, as any group holding a
+				// frame does rather than be skipped.
+				false if held && self.memory.full() => continue,
 				// Once the later groups fill the max buffer, no more of them can be held while it waits,
 				// so move on to the next group even with nothing of it read yet: it reads as the
 				// cursor's group, and each such skip refunds what the group left behind held.
@@ -3176,6 +3180,49 @@ mod tests {
 			panic!("the leading picture reads");
 		};
 		assert_eq!(leading.timestamp, ts(160_000));
+		drop(open);
+	}
+
+	/// A held keyframe is judged by what its group holds once the max buffer fills, and read behind a
+	/// gap rather than dropped with the group: the pressure skip moves past only a group holding nothing.
+	#[tokio::test(start_paused = true)]
+	async fn a_held_keyframe_is_read_once_the_max_buffer_fills() {
+		let mut track = track_producer("gaps", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let subscription = track.subscribe(
+			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10))),
+		);
+		let wire = Container::Legacy(crate::container::Kind::Video);
+		let mut reader = Consumer::new(subscription, Container::Legacy(crate::container::Kind::Video));
+		let frame = |micros: u64, keyframe| Frame {
+			timestamp: ts(micros),
+			payload: Bytes::from_static(&[0xDE, 0xAD]),
+			keyframe,
+			duration: None,
+		};
+		let mut first = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
+		for (micros, keyframe) in [(0, true), (120_000, false), (40_000, false), (80_000, false)] {
+			wire.write(&mut first, &[frame(micros, keyframe)]).unwrap();
+		}
+		first.finish().unwrap();
+		for _ in 0..4 {
+			assert!(matches!(reader.read().await.unwrap(), Some(Read::Frame { .. })));
+		}
+		// The open GOP's keyframe waits for a frame to show whether it continues the first group.
+		let mut open = track.create_group(moq_net::group::Info { start: 280_000 }).unwrap();
+		wire.write(&mut open, &[frame(280_000, true)]).unwrap();
+		assert!(reader.poll_read(&kio::Waiter::noop()).is_pending());
+		// A later group's first frame, decoded while the keyframe waits, fills the max buffer before
+		// that frame lands. Its handle alone leaves room.
+		reader.set_max_buffer(reader.buffered_bytes() + std::mem::size_of::<GroupBuffer<Container>>() + 1);
+		write_group(&mut track, 560_000, &[ts(560_000)]);
+		let Some(Read::Gap { timestamp, duration }) = reader.read().await.unwrap() else {
+			panic!("the step reads as a gap, judged by the keyframe alone");
+		};
+		assert_eq!((timestamp, duration), (ts(120_000), ts(160_000)));
+		let Some(Read::Frame { frame: keyframe, .. }) = reader.read().await.unwrap() else {
+			panic!("the held keyframe reads rather than drop with its group");
+		};
+		assert_eq!(keyframe.timestamp, ts(280_000));
 		drop(open);
 	}
 
