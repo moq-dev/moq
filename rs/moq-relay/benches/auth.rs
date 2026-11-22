@@ -8,10 +8,7 @@ use moq_relay::{Connection, auth, cluster};
 use std::time::Duration;
 
 fn grant(prefix: &str) -> Grant {
-	Grant::new(
-		format!("{prefix}/**").parse::<moq_auth::Pattern>().unwrap(),
-		moq_auth::Patterns::new(),
-	)
+	Grant::new(prefix.parse::<moq_auth::Prefix>().unwrap(), moq_auth::Prefixes::new())
 }
 
 struct Fixture {

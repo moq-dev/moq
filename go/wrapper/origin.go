@@ -283,7 +283,7 @@ type AnnounceOptions struct {
 }
 
 // Announced lists the paths under a literal prefix matching an optional pattern filter, as each
-// becomes present, absent, or offline, or changes availability. To see another publisher instance take a path over, use Follow.
+// becomes present or absent. To see another publisher instance take a path over, use Follow.
 func (o *OriginConsumer) Announced(options AnnounceOptions) (*AnnounceConsumer, error) {
 	inner, err := o.inner.Announced(ffi.MoqAnnounceConfig{
 		Prefix: options.Prefix,
@@ -322,7 +322,7 @@ func (o *OriginConsumer) Request(ctx context.Context, path string, instance *Ins
 	return &BroadcastConsumer{inner: inner}, nil
 }
 
-// AnnounceConsumer is a listing of paths, each present, absent, or offline.
+// AnnounceConsumer is a listing of paths, each present or absent.
 type AnnounceConsumer struct {
 	inner *ffi.MoqAnnounceConsumer
 }

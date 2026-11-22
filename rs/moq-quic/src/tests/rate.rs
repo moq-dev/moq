@@ -57,7 +57,7 @@ fn run(pair: &mut Pair, duration: Duration, mut app: impl FnMut(&mut Pair)) {
 /// Write `stream` until flow control blocks it
 fn write_flat_out(send: &mut send::Stream<'_>) {
 	let buf = [0xAB; 16 * 1024];
-	while let Ok(n) = send.write(&mut &buf[..]) {
+	while let Poll::Ready(Ok(n)) = send.try_write(&mut &buf[..]) {
 		if n == 0 {
 			break;
 		}
@@ -70,7 +70,7 @@ fn read_all(mut recv: recv::Stream<'_>) -> u64 {
 		return 0;
 	};
 	let mut read = 0;
-	while let Ok(Some(chunk)) = chunks.next(usize::MAX) {
+	while let Poll::Ready(Ok(Some(chunk))) = chunks.try_next(usize::MAX) {
 		read += chunk.bytes.len() as u64;
 	}
 	chunks.finalize();
@@ -296,11 +296,11 @@ fn a_frame_larger_than_the_burst_arrives_gradually() {
 	let start = pair.time;
 	run(&mut pair, Duration::from_secs(5), |pair| {
 		if written < frame
-			&& let Ok(n) = pair.client_send(client_ch, s).write(&mut &data[written..])
+			&& let Poll::Ready(Ok(n)) = pair.client_send(client_ch, s).try_write(&mut &data[written..])
 		{
 			written += n;
 		}
-		if leased.is_none() && pair.server_recv(server_ch, s).lease(frame).is_ok() {
+		if leased.is_none() && matches!(pair.server_recv(server_ch, s).try_lease(frame), Poll::Ready(Ok(_))) {
 			leased = Some(pair.time);
 		}
 	});

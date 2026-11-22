@@ -875,9 +875,12 @@ mod tests {
 		let _finished = publisher.video.remove(1).finish().unwrap();
 		publisher
 			.catalog
-			.mutate(|catalog| {
-				catalog.video.renditions.remove("video1");
-			})
+			.mutate(
+				|catalog| {
+					catalog.video.renditions.remove("video1");
+				},
+				publisher.catalog.next_timestamp(),
+			)
 			.unwrap();
 		publisher.gop(5);
 		publisher.gop(6);

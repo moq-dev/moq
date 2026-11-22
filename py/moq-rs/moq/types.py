@@ -70,7 +70,6 @@ from moq_ffi import (
 )
 
 from ._records import (
-    Anchor,
     Backoff,
     ClientTls,
     ConnectionStats,
@@ -83,12 +82,12 @@ from ._records import (
     Subscription,
     Timestamp,
     TrackInfo,
+    TrackRefresh,
     VideoDecodedFrame,
     WebSocketConfig,
 )
 
 __all__ = [
-    "Anchor",
     "AudioCodec",
     "AudioEncoderInput",
     "AudioSampleFormat",
@@ -117,6 +116,7 @@ __all__ = [
     "Subscription",
     "Timestamp",
     "TrackInfo",
+    "TrackRefresh",
     "VideoCodec",
     "VideoEncoderInput",
     "VideoEncoderKind",

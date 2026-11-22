@@ -9,7 +9,7 @@ use std::{
 };
 
 use bytes::Buf;
-use moq_quic::{connection::Error as ConnectionError, send::End};
+use moq_quic::connection::Error as ConnectionError;
 use thiserror::Error;
 
 use crate::quic::driver::{
@@ -335,14 +335,22 @@ impl Half {
 		if let Some(x) = conn.error() {
 			return Poll::Ready(Err(Error::Connection(x)));
 		}
-		Poll::Ready(
-			match ready!(conn.inner.send_stream(self.stream.id).poll_write(waiter, buf)) {
-				Ok(written) => Ok(written),
-				Err(moq_quic::send::Error::Stopped(code)) => Err(Error::Stopped(code)),
-				Err(moq_quic::send::Error::ConnectionLost) => Err(Error::Connection(conn.lost())),
-				Err(err) => unreachable!("an open stream failed to write: {err:?}"),
-			},
-		)
+		let mut stream = conn.inner.send_stream(self.stream.id);
+		let err = match ready!(stream.poll_write(waiter, buf)) {
+			Ok(written) => return Poll::Ready(Ok(written)),
+			Err(err) => err,
+		};
+		// An open stream fails only once the peer stopped it or the connection was lost.
+		if let Ok(Some(code)) = stream.stopped() {
+			return Poll::Ready(Err(Error::Stopped(code)));
+		}
+		let lost = conn.error();
+		// Panicking under the lock would poison it for every handle.
+		drop(conn);
+		match lost {
+			Some(lost) => Poll::Ready(Err(Error::Connection(lost))),
+			None => unreachable!("an open stream failed to write: {err:?}"),
+		}
 	}
 
 	fn finish(&mut self) {
@@ -359,10 +367,7 @@ impl Half {
 		self.state = HalfState::Reset;
 		let mut conn = self.stream.conn.state.lock();
 		let mut stream = conn.inner.send_stream(self.stream.id);
-		let stopped = match stream.end() {
-			Ok(Some(End::Stopped(code))) => Some(code),
-			_ => None,
-		};
+		let stopped = stream.stopped().ok().flatten();
 		let reset = match offset {
 			Some(offset) => stream.reset_at(offset.inner, code),
 			None => stream.reset(code),
@@ -409,10 +414,7 @@ impl Half {
 		}
 		// A held stream is never released, and a reset consumes its handle, so only the peer's
 		// stop or the connection's loss leaves its bytes unacknowledged.
-		let stopped = match stream.end() {
-			Ok(Some(End::Stopped(code))) => Some(code),
-			_ => None,
-		};
+		let stopped = stream.stopped().ok().flatten();
 		let lost = conn.error();
 		// Panicking under the lock would poison it for every handle.
 		drop(conn);
@@ -443,13 +445,17 @@ impl StreamRef {
 		if let Some(&stopped) = self.reset.get() {
 			return Poll::Ready(Ok(stopped));
 		}
-		Poll::Ready(match ready!(conn.inner.send_stream(self.id).poll_end(waiter)) {
-			Ok(End::Stopped(code)) => Ok(Some(code)),
-			Ok(_) => Ok(None),
-			Err(moq_quic::send::Error::ConnectionLost) => Err(Error::Connection(conn.lost())),
-			// Only a released ID fails otherwise, which this stream holds until it drops.
-			Err(err) => unreachable!("a held send stream failed to end: {err:?}"),
-		})
+		let err = match ready!(conn.inner.send_stream(self.id).poll_stopped(waiter)) {
+			Ok(stopped) => return Poll::Ready(Ok(stopped)),
+			Err(err) => err,
+		};
+		// Only a released ID fails otherwise, which this stream holds until it drops.
+		let lost = conn.error();
+		drop(conn);
+		match lost {
+			Some(lost) => Poll::Ready(Err(Error::Connection(lost))),
+			None => unreachable!("a held send stream failed to end: {err:?}"),
+		}
 	}
 }
 
@@ -470,10 +476,7 @@ impl Drop for Half {
 			return;
 		}
 		let mut stream = conn.inner.send_stream(self.stream.id);
-		let stopped = match stream.end() {
-			Ok(Some(End::Stopped(code))) => Some(code),
-			_ => None,
-		};
+		let stopped = stream.stopped().ok().flatten();
 		let reset = match (&self.state, stopped) {
 			(HalfState::Reset, _) => None,
 			// Echo the code, as RFC 9000 section 3.5 asks, even after `finish`: the peer reads

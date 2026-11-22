@@ -7,7 +7,7 @@ import type { Goaway } from "../connection/goaway.ts";
 import type { Session } from "../connection/session.ts";
 import { detect, type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
-import { error, fromClose, ProtocolViolation, StreamCode, StreamError, sessionClosed } from "../error.ts";
+import { closeReason, error, fromClose, ProtocolViolation, StreamCode, StreamError, sessionClosed } from "../error.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { type Reader, Readers, type Stream } from "../stream.ts";
@@ -180,8 +180,8 @@ export class Connection implements Session {
 		this.#auth = new AuthSession({
 			requests: true,
 			peerGrant: {
-				publish: new Path.Patterns([Path.Pattern.all()]),
-				subscribe: new Path.Patterns(publish ? [Path.Pattern.all()] : []),
+				publish: Path.Prefixes.all(),
+				subscribe: publish ? Path.Prefixes.all() : new Path.Prefixes(),
 			},
 			handle,
 			draining: () => this.#goaway.peek() !== undefined || this.#phase.kind !== "open",
@@ -290,7 +290,7 @@ export class Connection implements Session {
 	// The peer broke the protocol, so losing the stream is not enough: nothing stops it
 	// repeating the violation on the next one.
 	#violated(err: ProtocolViolation) {
-		this.#close({ closeCode: err.code, reason: err.message });
+		this.#close({ closeCode: err.code, reason: closeReason(err.message) });
 	}
 
 	async #run(early: Reader[]): Promise<void> {
@@ -322,14 +322,14 @@ export class Connection implements Session {
 		}
 	}
 
-	/** The paths announced matching `scope`, each present or absent; see {@link Session.announced}. */
-	announced(scope?: Path.Pattern, options?: announce.Options): announce.Consumer {
-		return announce.list(this.#subscriber.routes(scope, options));
+	/** The paths announced matching `filter`, each present or absent; see {@link Session.announced}. */
+	announced(filter?: Path.Pattern, options?: announce.Options): announce.Consumer {
+		return announce.list(this.#subscriber.routes(filter, options));
 	}
 
-	/** Every route change matching `scope`, for code that forwards routes. @internal */
-	routes(scope?: Path.Pattern, options?: announce.Options): announce.Routes {
-		return this.#subscriber.routes(scope, options);
+	/** Every route change matching `filter`, for code that forwards routes. @internal */
+	routes(filter?: Path.Pattern, options?: announce.Options): announce.Routes {
+		return this.#subscriber.routes(filter, options);
 	}
 
 	/** Accepts request streams and dispatches them. */

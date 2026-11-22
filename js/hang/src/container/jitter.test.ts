@@ -123,6 +123,25 @@ describe("Jitter", () => {
 		}
 	});
 
+	it("holds a backlog skipped before the first observation until the join starts", () => {
+		// A newest-first replay lands the newer group first, so the backlog given up before anything was
+		// observed can land after the first observed frame. The join lasts until it did either way, so
+		// the frames held behind it fold nothing.
+		const traces = [undefined, 0, 1].map((at) => {
+			const jitter = new Jitter();
+			const trace: number[] = [];
+			for (let i = 0; i < 100; i++) {
+				if (i === at) jitter.backlog(1000);
+				jitter.observe(500 + i * 20 + (i >= 5 && i < 10 ? 200 : 0), i * 20);
+				trace.push(jitter.measured);
+			}
+			return trace;
+		});
+		const [plain, early, late] = traces;
+		expect(early).toEqual(late);
+		expect(late).not.toEqual(plain);
+	});
+
 	it("does not follow the absolute delay", () => {
 		// Only the spread of arrivals matters, not how far away the sender is.
 		const near = new Jitter();

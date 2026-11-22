@@ -51,18 +51,32 @@ check-test *args:
 # Everything `check` verifies besides clippy.
 [positional-arguments]
 lint *args:
-    python3 sh/rs/stats-docs.py
+    #!/usr/bin/env bash
+    set -euo pipefail
+    run() { "$@" || { echo "error: $* failed" >&2; return 1; }; }
+    pids=()
+    run python3 sh/rs/stats-docs.py & pids+=($!)
     # The environment is process-wide, so nothing writes it. A text check, because the
     # clock lint's test allowances also silence clippy's disallowed_methods.
-    git grep --untracked -nE '(^|[^[:alnum:]_])(set_var|remove_var)[[:space:]]*\(' -- 'rs/*.rs'; [ $? -eq 1 ] || { echo "error: a write to the process environment: pass the value down, or run a test in a child with test_env::Env" >&2; exit 1; }
-    cargo fmt --all --check
-    RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked --no-deps "$@"
-    cargo shear --deny-warnings
+    (
+        rc=0
+        git grep --untracked -nE '(^|[^[:alnum:]_])(set_var|remove_var)[[:space:]]*\(' -- 'rs/*.rs' || rc=$?
+        [ "$rc" -eq 1 ] || { echo "error: a write to the process environment: pass the value down, or run a test in a child with test_env::Env" >&2; exit 1; }
+    ) & pids+=($!)
+    run cargo fmt --all --check & pids+=($!)
+    RUSTDOCFLAGS="-D warnings" run bash sh/local.sh cargo doc --locked --no-deps "$@" & pids+=($!)
+    run cargo shear --deny-warnings & pids+=($!)
     # The workspace-hack's table order is `cargo hakari`'s, which `cargo sort` disagrees with.
-    cargo sort --check --no-format . $(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name != "workspace-hack") | .manifest_path | rtrimstr("/Cargo.toml")')
-    cargo hakari generate --diff
-    python3 sh/rs/hakari.py
-    python3 sh/rs/crypto.py
+    (
+        mapfile -t manifests < <(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name != "workspace-hack") | .manifest_path | rtrimstr("/Cargo.toml")')
+        run cargo sort --check --no-format . "${manifests[@]}"
+    ) & pids+=($!)
+    run cargo hakari generate --diff & pids+=($!)
+    run python3 sh/rs/hakari.py & pids+=($!)
+    run python3 sh/rs/crypto.py & pids+=($!)
+    fail=0
+    for pid in "${pids[@]}"; do wait "$pid" || fail=1; done
+    exit "$fail"
 
 # Auto-fix clippy/format/shear/sort.
 [positional-arguments]
@@ -89,6 +103,11 @@ lint-changed $LIST:
 # Like `check-test`, but only the crates in a changed-file list plus their dependents.
 check-test-changed $LIST:
     sh/rs/select.sh check-test "$LIST"
+
+# Clippy for macOS and Windows from this host, on the crates in a changed-file
+# list (or `--all`) plus their dependents; the gate runs it on every Rust diff.
+cross-lint-changed $LIST:
+    sh/rs/select.sh cross "$LIST"
 
 # Like `fix`, but only the crates in a changed-file list plus their dependents.
 fix-changed $LIST:
@@ -235,9 +254,10 @@ audit:
 
 # Outside nextest because the staticlib link alone outlasts its hang budget.
 
-# Compile and run libmoq's C fixtures, and the C doc samples, against libmoq.a. Must run on Unix.
-c-tests:
-    sh/rs/c-tests.sh
+# Compile and run libmoq's C fixtures, and the C doc samples, against libmoq.a; `--syntax` only compiles them against moq.h. Must run on Unix.
+[positional-arguments]
+c-tests *args:
+    sh/rs/c-tests.sh "$@"
 
 # The workspace-hack would supply third-party features a crate forgets to
 # declare, so CI runs this after `cargo hakari disable && cargo update
@@ -386,6 +406,8 @@ quic-sim:
     # Forward delay against RTT as a queue-growth signal: deterministic in the simulation, then over real sockets through each cellular moq-shaper preset, one at a time so they do not add to each other's noise.
     bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-quic --lib --run-ignored only --no-capture -E 'test(/^tests::receive_ts::/)'
     bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-tokio --test integration --run-ignored only --no-capture --test-threads 1 -E 'test(/^receive_ts::/)'
+    # A hundred bulk transfers on one relay connection all pause losslessly, where the merge gate runs twelve.
+    bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-relay --features test-support --test integration --run-ignored only -E 'test(/^quic_sim::many_/)'
     # Each realtime congestion controller against BBR3 over sim replicas of the cellular presets: queueing delay, throughput, reaction to the drop, and share beside CUBIC.
     bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-quic --lib --run-ignored only --no-capture -E 'test(/^tests::realtime::/)'
 

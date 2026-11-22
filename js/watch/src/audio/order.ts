@@ -5,7 +5,7 @@ import type { Duration } from "@moq/clock";
  *
  * Groups go out newest-first, so a subscription's head (the groups the publisher still holds) can
  * arrive after the live edge it was served alongside. The container's ordered read waits for it from
- * where the publisher's feed starts and hands groups over in sequence, so the head comes first here;
+ * where the publisher's feed starts and hands groups over in start order, so the head comes first here;
  * this keeps the order should it not. Chrome's AudioDecoder stamps every output from its first input,
  * so decoding the head after the live edge shifts the rest of the track, and the ring, anchored at the
  * first decoded frame, cannot place the head anyway.

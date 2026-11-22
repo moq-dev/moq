@@ -1,10 +1,13 @@
 import { type Dispose, type GetPromise, race } from "@moq/signals";
 import type { Consumer as GroupConsumer } from "../group.ts";
+import { hooks } from "../internal.ts";
 
 // Why to stop writing `group`: the subscription's budget gave it up, or it failed for good
-// before it was read whole (evicted, or its copy aborted with no route to continue it).
+// before it was read whole (evicted, or its copy aborted with no route to continue it). Through
+// the close a watch never decides, so watching a short close does not end a group a route move
+// may still continue.
 function reason(group: GroupConsumer): Error | undefined {
-	const closed = group.closed.peek();
+	const closed = hooks.groupClosed(group).peek();
 	return group.expired.peek() ?? (closed instanceof Error ? closed : undefined);
 }
 
@@ -28,7 +31,10 @@ export class GivenUp implements GetPromise<Error> {
 
 	constructor(group: GroupConsumer) {
 		this.#group = group;
-		this.#unwatch = [group.expired.subscribe(() => this.#check()), group.closed.subscribe(() => this.#check())];
+		this.#unwatch = [
+			group.expired.subscribe(() => this.#check()),
+			hooks.groupClosed(group).subscribe(() => this.#check()),
+		];
 	}
 
 	/**
@@ -43,8 +49,8 @@ export class GivenUp implements GetPromise<Error> {
 	async write(write: () => Promise<unknown>, cancel?: Promise<false>): Promise<Error | undefined> {
 		// Judged afresh rather than read from the watch: a wall-clock deadline can pass before
 		// its timer wakes the watch.
-		const stop = this.#stop ?? reason(this.#group);
-		if (stop) return stop;
+		this.#check();
+		if (this.#stop) return this.#stop;
 		const done = write().then(() => true as const);
 		const result = await race(cancel === undefined ? [done, this] : [done, this, cancel]);
 		return result === true || result === false ? undefined : result;

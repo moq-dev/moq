@@ -22,12 +22,17 @@ fn max_message_size(config: &Config) -> usize {
 }
 
 /// The socket settings for a session under `session`: messages and frames held to
-/// [`max_message_size`].
+/// [`max_message_size`], read in chunks of one default record.
+///
+/// The transport copies each message out, so the read buffer never backs a record. tungstenite
+/// allocates it up front and zero-fills it on every read, so it stays one default record
+/// rather than its 128 KiB default or a large record limit; a larger message grows it.
 pub(crate) fn capped(session: &Config) -> tungstenite::protocol::WebSocketConfig {
 	let max = max_message_size(session);
 	tungstenite::protocol::WebSocketConfig::default()
 		.max_message_size(Some(max))
 		.max_frame_size(Some(max))
+		.read_buffer_size(crate::transport::READ_BUFFER)
 }
 
 /// Keep-alive configuration for WebSocket transports.
@@ -113,9 +118,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Upgraded<T> {
 	///
 	/// An HTTP server hands over a type-erased upgraded stream, so QMux can't find
 	/// the socket itself. A server that kept a handle on the accepted connection
-	/// can attach it here and get the kernel's RTT (and, on Linux, delivery rate)
-	/// instead of only QMux's own `QX_PING` measurement. See
-	/// `TcpStats` (Linux and macOS).
+	/// can attach it here and get the kernel's RTT (and, on Linux, delivery rate and byte counts)
+	/// instead of only QMux's own `QX_PING` measurement, and keep the kernel's unsent
+	/// queue to about one congestion window. See `TcpStats` (Linux and macOS).
 	pub fn with_socket_stats(mut self, stats: crate::SharedSocketStats) -> Self {
 		self.socket_stats = Some(stats);
 		self
@@ -314,7 +319,16 @@ impl Client {
 		}
 
 		let config = self.session.clone().with_negotiated(version, protocol);
-		let transport = WsTransport::new(ws_stream, Address::Uri);
+		let tcp = match ws_stream.get_ref() {
+			MaybeTlsStream::Plain(tcp) => Some(tcp),
+			MaybeTlsStream::Rustls(tls) => Some(tls.get_ref().0),
+			_ => None,
+		};
+		let socket_stats = tcp.map(crate::tcp::adopt).transpose()?.flatten();
+		let mut transport = WsTransport::new(ws_stream, Address::Uri);
+		if let Some(stats) = socket_stats {
+			transport = transport.with_socket_stats(stats);
+		}
 		let transport = match self.keep_alive {
 			Some(ka) => transport.with_keep_alive(ka)?,
 			None => transport,
@@ -498,6 +512,60 @@ mod tests {
 	use super::*;
 	use tokio::io::AsyncWriteExt;
 
+	/// A WebSocket over loopback TCP counts the kernel's bytes: at least the payload each way,
+	/// read once the session ends and its driver publishes the last count. It waits on the
+	/// driver, not a clock, since the kernel's counters are real.
+	#[cfg(target_os = "linux")]
+	#[tokio::test]
+	async fn a_websocket_counts_the_tcp_bytes_it_moved() {
+		use moq_net::transport::poll::{RecvStream as _, SendOptions, SendStream as _, Session as _};
+
+		const PAYLOAD: usize = 100_000;
+
+		async fn send(session: &Session) {
+			let mut send = session.open_uni(SendOptions::default()).await.unwrap();
+			let mut data = bytes::Bytes::from(vec![7; PAYLOAD]);
+			while !data.is_empty() {
+				send.write_buf(&mut data).await.unwrap();
+			}
+			send.finish().unwrap();
+		}
+
+		async fn receive(session: &Session) {
+			let mut recv = session.accept_uni().await.unwrap();
+			let mut read = 0;
+			while let Some(chunk) = recv.read_chunk(usize::MAX).await.unwrap() {
+				read += chunk.len();
+			}
+			assert_eq!(read, PAYLOAD);
+		}
+
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let url = format!("ws://{}", listener.local_addr().unwrap());
+		let client = Client::new();
+		let (client, server) = tokio::join!(client.connect(&url), async {
+			let (socket, _) = listener.accept().await.unwrap();
+			Server::new().accept(socket).await
+		});
+		let (client, client_driver) = client.unwrap();
+		let (server, server_driver) = server.unwrap();
+		let client_driver = tokio::spawn(client_driver);
+		tokio::spawn(server_driver);
+
+		tokio::join!(send(&client), receive(&server));
+		tokio::join!(send(&server), receive(&client));
+		client.close(0, "done");
+		client_driver.await.unwrap();
+
+		let wire = client.wire().unwrap();
+		assert!(wire.sent_bytes() >= PAYLOAD as u64, "sent {}", wire.sent_bytes());
+		assert!(
+			wire.received_bytes() >= PAYLOAD as u64,
+			"received {}",
+			wire.received_bytes()
+		);
+	}
+
 	/// A frame declaring more than one record is refused at its header rather than
 	/// buffered whole, closing the session well before any timer would.
 	#[tokio::test(start_paused = true)]
@@ -528,5 +596,18 @@ mod tests {
 			"{:?}",
 			accepted.map(|_| ())
 		);
+	}
+
+	/// A large record limit bounds messages, not the read buffer tungstenite allocates and
+	/// zero-fills on every read.
+	#[test]
+	fn a_large_record_limit_keeps_the_read_buffer_small() {
+		let config = Config {
+			max_record_size: 64 << 20,
+			..Config::default()
+		};
+		let ws = capped(&config);
+		assert_eq!(ws.read_buffer_size, crate::transport::READ_BUFFER);
+		assert_eq!(ws.max_message_size, Some(64 << 20));
 	}
 }

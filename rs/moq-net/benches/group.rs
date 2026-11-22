@@ -277,7 +277,7 @@ fn replay() -> track::Subscription {
 	track::Subscription::default()
 		.with_delay(track::Delay::default().with_max(Duration::MAX))
 		.with_ranges([track::Range {
-			start: track::Anchor::Time(0),
+			start: track::Start::Time(0),
 			end: None,
 		}])
 }
@@ -319,14 +319,7 @@ fn bench_track_recv(c: &mut Criterion) {
 				},
 				|(ctx, mut subscriber)| {
 					for _ in 0..n {
-						let group = subscriber
-							.next_group()
-							.now_or_never()
-							.unwrap()
-							.unwrap()
-							.unwrap()
-							.group()
-							.unwrap();
+						let group = subscriber.next_group().now_or_never().unwrap().unwrap().unwrap();
 						black_box(group);
 					}
 					(ctx, subscriber)
@@ -1119,9 +1112,9 @@ fn replay_flights(ctx: &Flights, payloads: &[Bytes], readers: usize, apart: usiz
 				*read += 1;
 			}
 		}
-		while let Poll::Ready(Ok(track::Fill::Groups(fill))) = ctx.requests.poll_requested_fill(&waiter) {
+		while let Poll::Ready(Ok(fill)) = ctx.requests.poll_requested_fill(&waiter) {
 			let start = fill.start();
-			let group = fill.accept(start.group, None).unwrap();
+			let group = fill.accept(start.group, None).unwrap().expect("a fresh group");
 			let demand = group.demand();
 			served += 1;
 			flights.push(Flight {

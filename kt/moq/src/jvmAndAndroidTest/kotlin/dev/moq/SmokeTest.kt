@@ -37,6 +37,8 @@ import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.days
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.nanoseconds
 import kotlin.time.Duration.Companion.seconds
@@ -84,7 +86,7 @@ class SmokeTest {
             assertEquals(12.toByte(), request.priority())
             val producer = request.accept(null)
             assertEquals(12.toByte(), producer.priority())
-            assertNull(stream.demand().wanted())
+            assertFalse(stream.demand().wanted())
             producer.insert(Datagram(7uL, Timestamp.unscaled(7uL), "seven".encodeToByteArray()))
             val datagram = assertNotNull(consumer.recv())
             assertEquals(7uL, datagram.sequence)
@@ -116,7 +118,7 @@ class SmokeTest {
                     assertFailsWith<MoqException.Codec> {
                         ContainerProducer(
                             other,
-                            ContainerInit(ContainerFormat.FMP4, byteArrayOf(), timebase),
+                            ContainerInit(ContainerFormat.fmp4(), byteArrayOf(), timebase),
                         )
                     }
                     owner.end()
@@ -347,7 +349,7 @@ class SmokeTest {
 
     @Test
     fun `a default subscription skips superseded groups at once`() {
-        assertEquals(java.time.Duration.ZERO, Subscription.default().delay.min)
+        assertNull(Subscription.default().delay.min)
         assertEquals(java.time.Duration.ZERO, Subscription.default().delay.max)
     }
 
@@ -374,7 +376,7 @@ class SmokeTest {
                                 min = java.time.Duration.ZERO,
                                 max = java.time.Duration.ofSeconds(10),
                             ),
-                        ranges = listOf(Range(start = AnchorRelative(groups = 2uL))),
+                        ranges = listOf(Range(start = Timestamp.unscaled(0uL))),
                         order = Order.ASCENDING,
                     )
                 )
@@ -388,7 +390,7 @@ class SmokeTest {
         BroadcastProducer().use { broadcast ->
             val track = broadcast.publishTrack("status", null)
             val demand = track.demand()
-            while (demand.wantedChanged() != null) {}
+            while (demand.wantedChanged()) {}
 
             val late = track.consume(null)
             assertFalse(track.abortUnwanted(7u))
@@ -400,9 +402,9 @@ class SmokeTest {
             )
             assertEquals("still serving", late.readFrame()?.payload?.decodeToString())
 
-            while (demand.wantedChanged() == null) {}
+            while (!demand.wantedChanged()) {}
             late.cancel()
-            while (demand.wantedChanged() != null) {}
+            while (demand.wantedChanged()) {}
             assertTrue(track.abortUnwanted(7u))
             assertFailsWith<MoqException.Closed> { track.abortUnwanted(7u) }
         }
@@ -460,6 +462,38 @@ class SmokeTest {
     }
 
     @Test
+    fun `a refresh reads back as published and a bare one asks for nothing`() {
+        BroadcastProducer().use { broadcast ->
+            val refresh = TrackRefresh(ratio = 2u, interval = java.time.Duration.ofMillis(500))
+            val info = TrackInfo(maxAge = java.time.Duration.ZERO, refresh = refresh)
+            assertEquals(
+                refresh,
+                broadcast.publishTrack("refresh", info).consume(null).info().refresh,
+            )
+            assertEquals(
+                TrackRefresh(),
+                broadcast.publishTrack("plain", null).consume(null).info().refresh,
+            )
+        }
+    }
+
+    @Test
+    fun `refresh returns once the first subscriber asks for a group`() = runTest {
+        BroadcastProducer().use { broadcast ->
+            val info =
+                TrackInfo(maxAge = java.time.Duration.ZERO, refresh = TrackRefresh(ratio = 0u))
+            val track = broadcast.publishTrack("status", info)
+            val demand = track.demand()
+            track.consume(null).use { consumer ->
+                demand.refresh()
+                // A track with no group has nothing more to send: its first is already asked for.
+                consumer.refresh()
+            }
+            track.finish()
+        }
+    }
+
+    @Test
     fun `catalog handle closes with its broadcast`() {
         val broadcast = BroadcastProducer()
         val catalog = CatalogProducer(broadcast)
@@ -512,7 +546,7 @@ class SmokeTest {
                 dev.moq.media.TrackProducer.audio(
                     broadcast,
                     Named(null),
-                    AudioInit(format = AudioFormat.OPUS, data = opusHead()),
+                    AudioInit(format = AudioFormat.opus(), data = opusHead()),
                 )
             val consumer = broadcast.consume()
             val (name, audio) = catalog(consumer).audio.entries.single()
@@ -632,6 +666,16 @@ class SmokeTest {
         assertFailsWith<IllegalArgumentException> {
             Timestamp((1uL shl 61) - 1uL, 1uL).toDuration()
         }
+        // A quotient past a Long fails rather than wrapping to a negative duration.
+        assertFailsWith<IllegalArgumentException> { Timestamp(ULong.MAX_VALUE, 1uL).toDuration() }
+        assertFailsWith<IllegalArgumentException> { Timestamp(1uL, 0uL).toDuration() }
+        // Past what `inWholeNanoseconds` holds, the duration fails rather than saturating.
+        assertFailsWith<IllegalArgumentException> { Duration.INFINITE.toTimestamp() }
+        assertFailsWith<IllegalArgumentException> { (600 * 365).days.toTimestamp() }
+        assertEquals(
+            Timestamp(400uL * 365uL * 86_400uL * 1_000_000_000uL, 1_000_000_000uL),
+            (400 * 365).days.toTimestamp(),
+        )
         assertNull(AudioEncoderOutput(codec = AudioCodec.opus()).frameDuration)
     }
 
@@ -678,16 +722,16 @@ class SmokeTest {
                 )
             val producer = StreamProducer(broadcast, track)
             val demand = producer.demand()
-            while (demand.wantedChanged() != null) {}
+            while (demand.wantedChanged()) {}
 
             val late = StreamConsumer(broadcast.consume().subscribeTrack("events", null))
             assertFalse(producer.abortUnwanted(7u))
             producer.append("\"still serving\"", Timestamp(0uL, 1_000uL))
             assertEquals("\"still serving\"", late.next()?.value)
 
-            while (demand.wantedChanged() == null) {}
+            while (!demand.wantedChanged()) {}
             late.cancel()
-            while (demand.wantedChanged() != null) {}
+            while (demand.wantedChanged()) {}
             assertTrue(producer.abortUnwanted(7u))
             assertFailsWith<MoqException.Closed> { producer.abortUnwanted(7u) }
         }
@@ -749,12 +793,12 @@ class SmokeTest {
             SnapshotProducer(broadcast, track, config).use { producer ->
                 val demand: TrackDemand = producer.demand()
                 assertEquals("status", demand.name())
-                assertEquals(null, demand.wanted())
+                assertFalse(demand.wanted())
 
                 val consumer = SnapshotConsumer(broadcast.consume(), "status")
-                while (demand.wantedChanged() == null) {}
+                while (!demand.wantedChanged()) {}
                 consumer.cancel()
-                while (demand.wantedChanged() != null) {}
+                while (demand.wantedChanged()) {}
             }
         }
     }
@@ -774,11 +818,11 @@ class SmokeTest {
                 producer.update(Status(state = "live"), Timestamp(1uL, 1_000uL))
 
                 val consumer = SnapshotConsumer(broadcast.consume(), "status")
-                while (demand.wantedChanged() == null) {}
+                while (!demand.wantedChanged()) {}
                 // `first` cancels the collection, which must release the subscription without an
                 // explicit cancel.
                 assertEquals(Status(state = "live"), consumer.valuesAs<Status>().first().value)
-                while (demand.wantedChanged() != null) {}
+                while (demand.wantedChanged()) {}
             }
         }
     }
@@ -1176,7 +1220,7 @@ class SmokeTest {
                     )
                 moq.use {
                     val everything =
-                        Grant(publish = listOf("**"), subscribe = listOf("**"), expires = null)
+                        Grant(publish = listOf(""), subscribe = listOf(""), expires = null)
                     assertEquals(everything, moq.grants().updates().first { it != null })
                     val session = accepted.await()
                     assertEquals(everything, session.grants().updates().first { it != null })
@@ -1404,7 +1448,7 @@ class SmokeTest {
                             VideoProducerOptions(
                                 input =
                                     VideoEncoderInput(
-                                        format = VideoPixelFormat.RGBA,
+                                        format = VideoPixelFormat.rgba(),
                                         width = 320u,
                                         height = 240u,
                                         framerate = VideoFrameRate(30000u, 1001u),
@@ -1450,13 +1494,13 @@ class SmokeTest {
                         decoder.cancel()
                         assertNull(frame.surface())
 
-                        val planar = frame.pixels(VideoPixelFormat.I420)
+                        val planar = frame.pixels(VideoPixelFormat.i420())
                         assertEquals(
                             frame.width().toInt() * frame.height().toInt() * 3 / 2,
                             planar.size,
                         )
 
-                        val packed = frame.pixels(VideoPixelFormat.RGBA)
+                        val packed = frame.pixels(VideoPixelFormat.rgba())
                         assertEquals(
                             frame.width().toInt() * frame.height().toInt() * 4,
                             packed.size,

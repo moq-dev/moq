@@ -135,11 +135,8 @@ async fn a_dropped_run_waits_for_the_next_groups_first_packet() {
 			.expect("announced")
 			.expect("remote broadcast")
 			.unwrap();
-		let subscription = moq_net::track::Subscription::default().with_delay(
-			moq_net::track::Delay::default()
-				.with_min(None)
-				.with_max(Duration::from_secs(5)),
-		);
+		let subscription = moq_net::track::Subscription::default()
+			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(5)));
 		let subscribed = kio::clock::timeout(TIMEOUT, remote.track("audio").expect("track").subscribe(subscription))
 			.await
 			.expect("subscribed")
@@ -172,5 +169,64 @@ async fn a_dropped_run_waits_for_the_next_groups_first_packet() {
 				"{version}: packet {n} read as {read:?}"
 			);
 		}
+	}
+}
+
+/// A publisher from before moq-lite-07 declared a pause with a marker group, an empty payload at
+/// the end. A wire without group ends still carries one, and a reader still reads it as the end.
+#[tokio::test(start_paused = true)]
+async fn an_old_publishers_marker_group_reads_as_an_end() {
+	for version in ["moq-lite-05", "moq-lite-06"] {
+		let (publisher, subscriber, _sessions) = connect(version.parse().unwrap()).await;
+		let config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+		let container = Container::try_from(&config).unwrap();
+		let route = publisher.route("live", Default::default()).expect("route");
+		let track = route
+			.broadcast()
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.expect("track");
+
+		let remote = kio::clock::timeout(TIMEOUT, subscriber.consume().follow("live", None).unwrap().available())
+			.await
+			.expect("announced")
+			.expect("remote broadcast")
+			.unwrap();
+		let subscription = moq_net::track::Subscription::default()
+			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(5)));
+		let subscribed = kio::clock::timeout(TIMEOUT, remote.track("audio").expect("track").subscribe(subscription))
+			.await
+			.expect("subscribed")
+			.expect("subscription");
+		let mut reader = Consumer::new(subscribed, Container::try_from(&config).unwrap());
+
+		// A packet, the marker at its end, then speech a second later.
+		for (start, payload) in [(0, &PACKET[..]), (20_000, &[][..]), (1_000_000, &PACKET[..])] {
+			let timestamp = moq_net::Timestamp::from_micros(start).unwrap();
+			let mut group = track.append_group(timestamp).unwrap();
+			let frame = Frame {
+				timestamp,
+				payload: Bytes::copy_from_slice(payload),
+				keyframe: true,
+				duration: None,
+			};
+			container.write(&mut group, &[frame]).unwrap();
+			group.finish().unwrap();
+		}
+
+		// These wires report the run the pause skipped as dropped, so a gap may follow the end.
+		let mut reads = Vec::new();
+		while reads.len() < 3 {
+			let read = kio::clock::timeout(TIMEOUT, reader.read())
+				.await
+				.unwrap_or_else(|_| panic!("{version}: stalled after {reads:?}"))
+				.unwrap()
+				.expect("a read");
+			reads.push(match read {
+				Read::Frame { frame, .. } => format!("frame {}", frame.timestamp.as_micros().unwrap()),
+				Read::End { end, .. } => format!("end {}", end.as_micros().unwrap()),
+				Read::Gap { .. } => continue,
+			});
+		}
+		assert_eq!(reads, ["frame 0", "end 20000", "frame 1000000"], "{version}");
 	}
 }

@@ -36,9 +36,11 @@ fn timed() -> track::Info {
 }
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 async fn link(version: Version, from: &origin::Producer, to: &origin::Producer, cost: Option<u64>) -> MockPair {
@@ -68,8 +70,8 @@ enum Trigger {
 	Unannounce,
 	/// `R` gains a direct route to `P` that beats `A`.
 	BetterRoute,
-	/// The session `A -> R` dies with no standby, then reconnects. The broadcast closes
-	/// with its last route, so a viewer's subscription ends rather than resuming.
+	/// The session `A -> R` dies with no standby, then reconnects within the claim's
+	/// debounce: the claim comes back on the new session, and a viewer resumes on it.
 	Reconnect,
 }
 
@@ -249,15 +251,6 @@ impl Reader {
 		assert_eq!(self.take(expected.len(), who).await, expected, "{who}");
 	}
 
-	/// The subscription fails or ends, rather than hanging or delivering more.
-	async fn expect_end(&mut self, who: &str) {
-		match kio::clock::timeout(READ_TIMEOUT, self.rx.next()).await {
-			Ok(None | Some(Err(_))) => {}
-			Ok(Some(Ok(frame))) => panic!("{who}: delivered {frame:?} past its route"),
-			Err(_) => panic!("{who}: hung instead of ending"),
-		}
-	}
-
 	/// Nothing more has arrived: no duplicate frame or group trails.
 	fn expect_quiet(&mut self, who: &str) {
 		if let Ok(extra) = self.rx.try_recv() {
@@ -301,9 +294,6 @@ async fn handover(version: &str, trigger: Trigger, holder: Holder) {
 	};
 
 	topology.trigger(trigger).await;
-	if let (Trigger::Reconnect, Some(mut ended)) = (trigger, viewer.take()) {
-		ended.expect_end(&format!("{tag}: viewer")).await;
-	}
 	topology.write("delta2");
 
 	if let Some(viewer) = &mut viewer {

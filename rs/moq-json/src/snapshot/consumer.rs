@@ -26,8 +26,8 @@ pub struct Config {
 	/// [`Subscription::priority`](moq_net::track::Subscription::priority).
 	pub priority: i8,
 
-	/// The reader's playout delay behind the live edge, the subscription's
-	/// [`Delay`](moq_net::track::Delay) `min` and `max`.
+	/// The reader's playout delay behind the live edge: the subscription's
+	/// [`Start::Live`](moq_net::track::Start::Live) join and its [`Delay::max`](moq_net::track::Delay::max).
 	///
 	/// Zero (the default) skips a snapshot the moment a newer one arrives. A reader that holds each
 	/// snapshot until media reaches its timestamp sets its delay, so a superseded snapshot it may
@@ -68,11 +68,8 @@ impl<T: DeserializeOwned> Consumer<T> {
 	pub fn new(track: moq_net::track::Consumer, config: Config) -> Self {
 		let subscription = moq_net::track::Subscription::default()
 			.with_priority(config.priority)
-			.with_delay(
-				moq_net::track::Delay::default()
-					.with_min(config.delay)
-					.with_max(config.delay),
-			);
+			.with_delay(moq_net::track::Delay::default().with_max(config.delay))
+			.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Live(config.delay))]);
 		let name = track.name().to_string();
 		let mut track = Track::Subscribing(track.subscribe(subscription).into_inner());
 		// Join now when the track already resolves, as an in-process one does, so the publisher
@@ -209,13 +206,7 @@ impl Track {
 			unreachable!("resolved above")
 		};
 		// A snapshot is the newest group's content, so a group given up on changes nothing.
-		loop {
-			match std::task::ready!(track.poll_next_group(waiter))? {
-				Some(moq_net::track::Item::Group(group)) => return Poll::Ready(Ok(Some(group))),
-				Some(moq_net::track::Item::Gap { .. }) => continue,
-				None => return Poll::Ready(Ok(None)),
-			}
-		}
+		track.poll_next_group(waiter)
 	}
 }
 
@@ -252,7 +243,10 @@ mod subscription {
 		};
 		let _consumer = Consumer::<serde_json::Value>::new(track.consume(), config);
 		let subscription = track.subscription().expect("the consumer subscribed");
-		assert_eq!(subscription.delay.min, Some(delay));
+		assert_eq!(
+			subscription.ranges,
+			[moq_net::track::Range::from(moq_net::track::Start::Live(delay))]
+		);
 		assert_eq!(subscription.delay.max, Some(delay));
 	}
 }

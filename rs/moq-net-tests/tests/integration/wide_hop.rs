@@ -11,9 +11,10 @@ use support::harness::peer;
 fn produce(hop: u64) -> origin::Producer {
 	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
 	config.pool = cache::Pool::unbounded();
+	config.proxy = true;
 	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// A draft-18 peer declaring `u64::MAX` keeps its session and its place in the path.

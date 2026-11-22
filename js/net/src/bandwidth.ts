@@ -153,10 +153,7 @@ interface Registry {
 }
 
 function demanded(entry: Entry): boolean {
-	return (
-		!entry.demand ||
-		(hooks.demandReleased(entry.demand).peek() === undefined && entry.demand.wanted.peek() !== undefined)
-	);
+	return !entry.demand || (hooks.demandReleased(entry.demand).peek() === undefined && entry.demand.wanted.peek());
 }
 
 /** A division and what it divided, so a read that finds them unchanged reuses it. */
@@ -179,7 +176,7 @@ interface Division {
 function shareOf(plan: Plan, entry: Entry): number | undefined {
 	if (entry.demand) {
 		if (entry.demand.closed.peek() !== undefined) return undefined;
-		if (entry.demand.wanted.peek() === undefined) return plan.rejoin(entry);
+		if (!entry.demand.wanted.peek()) return plan.rejoin(entry);
 	}
 	return plan.grant(entry.id);
 }

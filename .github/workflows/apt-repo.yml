@@ -18,11 +18,13 @@ on:
 permissions:
   contents: read
 
-# Only one apt-repo job can mutate the bucket at a time. Concurrent
-# invocations queue and run in order.
+# Only one apt-repo job can mutate the bucket at a time. `queue: max` holds
+# every concurrent invocation, in order: the default queue keeps one pending
+# run and cancels the rest, which would drop a package from a release cut that
+# tags several binaries at once.
 concurrency:
   group: apt-repo
-  cancel-in-progress: false
+  queue: max
 
 jobs:
   publish:

@@ -45,9 +45,10 @@ fn info(payload: &Bytes) -> frame::Info {
 fn origin(hop: u64, pool: &cache::Pool) -> origin::Producer {
 	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
 	config.pool = pool.clone();
+	config.proxy = true;
 	let (origin, driver) = origin::Producer::new(config);
 	spawn(driver);
-	origin.with_proxy(true)
+	origin
 }
 
 /// Write `payload` once `group`'s fastest reader leaves room, or return `false` once no
@@ -83,9 +84,9 @@ async fn write_paced(
 /// whole group, so each fill finishes after its last frame.
 fn serve(requests: track::Requests, written: Arc<AtomicU64>, ended: Arc<AtomicU64>, finish: bool) {
 	drop(kio::clock::sim::spawn(async move {
-		while let Ok(track::Fill::Groups(fill)) = requests.requested_fill().await {
+		while let Ok(fill) = requests.requested_fill().await {
 			let start = fill.start();
-			let mut group = fill.accept(start.group, None).expect("accept");
+			let mut group = fill.accept(start.group, None).expect("accept").expect("a fresh group");
 			let mut demand = group.demand();
 			let (written, ended) = (written.clone(), ended.clone());
 			drop(kio::clock::sim::spawn(async move {

@@ -1,4 +1,6 @@
 /** Sweep failed group sends over independent publishers and subscribers. */
+
+import { defined } from "../src/defined.test-util.ts";
 import { randomHop } from "../src/hop.ts";
 import { Publisher } from "../src/lite/publisher.ts";
 import { decodeSubscribeResponseMaybe, Subscribe } from "../src/lite/subscribe.ts";
@@ -24,7 +26,7 @@ try {
 					const origin = new OriginProducer();
 					const broadcastRoute = origin.route(Path.from("bench"));
 					const broadcast = broadcastRoute.broadcast;
-					const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+					const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 					for (let sequence = 0n; sequence < BigInt(groups); sequence++) {
 						const group = track.createGroup(sequence);
 						// A timed group holds frames from its start up to the next group's.

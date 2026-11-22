@@ -41,7 +41,7 @@ async def test_server_client_roundtrip():
         published = server.route("hello", hidden=True)
         broadcast = published.broadcast
         media = moq.media.TrackProducer.audio(
-            broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.OPUS, data=opus_head())
+            broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.opus(), data=opus_head())
         )
         published.announce()
 
@@ -585,7 +585,7 @@ async def test_client_context_keeps_the_body_error():
                     reader = await asyncio.wait_for(consumer.subscribe_track("data"), timeout=5.0)
                     reading.append(asyncio.create_task(drain(reader)))
                     demand = track.demand()
-                    while await asyncio.wait_for(demand.wanted_changed(), timeout=5.0) is None:
+                    while not await asyncio.wait_for(demand.wanted_changed(), timeout=5.0):
                         pass
                     raise ZeroDivisionError("boom")
             # The error exits the context without draining, but the session is over.
@@ -638,7 +638,7 @@ async def test_session_auth_reads_the_grant():
             ) as client:
                 session = client.session
                 assert session is not None
-                everything = moq.Grant(publish=("**",), subscribe=("**",))
+                everything = moq.Grant(publish=("",), subscribe=("",))
                 await _await_grant(session, everything)
                 await asyncio.wait_for(accepted.wait(), timeout=5.0)
                 await _await_grant(sessions[0], everything)

@@ -17,7 +17,9 @@ function workspace() {
 		mkdirSync(dirname(join(root, path)), { recursive: true });
 		writeFileSync(join(root, path), text);
 	};
-	write("tsconfig.json", JSON.stringify({ compilerOptions: { strict: true, lib: ["ES2022"] } }));
+	// The default libs are nearly all of a build's parsing, under load seconds per key, and sit in
+	// node_modules, which the key leaves to the lockfile, so they cannot change what these tests check.
+	write("tsconfig.json", JSON.stringify({ compilerOptions: { strict: true, noLib: true } }));
 	write("pkg/package.json", JSON.stringify({ name: "@test/pkg", exports: { ".": "./src/index.ts" } }));
 	write("pkg/tsconfig.json", JSON.stringify({ extends: "../tsconfig.json", include: ["src"] }));
 	write("pkg/src/index.ts", 'export * from "./dep";\nexport * from "../../shared";\n');
@@ -33,10 +35,14 @@ test("a checkout elsewhere gets the same key", () => {
 });
 
 test("a file only the program reaches changes the key", () => {
-	for (const path of ["shared.ts", "tsconfig.json"]) {
+	const edits = {
+		"shared.ts": "export const shared = 2;\n",
+		"tsconfig.json": JSON.stringify({ compilerOptions: { noLib: true } }),
+	};
+	for (const [path, text] of Object.entries(edits)) {
 		const { key, write } = workspace();
 		const before = key();
-		write(path, "{}\n");
+		write(path, text);
 		expect(key()).not.toBe(before);
 	}
 });

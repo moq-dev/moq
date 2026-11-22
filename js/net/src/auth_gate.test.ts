@@ -5,8 +5,8 @@ import { Gate } from "./auth_gate.ts";
 import * as Path from "./path.ts";
 
 const grant = (prefix: string): Grant => ({
-	publish: new Path.Patterns([Path.Pattern.subtree(prefix)]),
-	subscribe: new Path.Patterns([]),
+	publish: new Path.Prefixes([Path.Prefix.parse(prefix)]),
+	subscribe: new Path.Prefixes(),
 });
 
 test("a gate allows everything until the peer answers", () => {

@@ -843,8 +843,8 @@ impl Import {
 /// from stdin; the gateways bridge another protocol.
 #[derive(usage_rs::Subcommands, Clone)]
 pub enum ImportSource {
-	/// Raw H.264 Annex-B from stdin.
-	Avc3,
+	/// Raw H.264 Annex B elementary stream from stdin.
+	H264,
 	/// Fragmented MP4 / CMAF from stdin.
 	Fmp4(Fmp4Import),
 	/// MPEG-TS from stdin.
@@ -876,7 +876,7 @@ impl ImportSource {
 	/// The stdin container format, when this source is one of the container formats.
 	pub fn stdin_format(&self) -> Option<PublishFormat> {
 		Some(match self {
-			Self::Avc3 => PublishFormat::Avc3,
+			Self::H264 => PublishFormat::H264,
 			Self::Fmp4(args) => PublishFormat::Fmp4 { cmaf: args.cmaf },
 			Self::Ts(args) if args.passthrough => PublishFormat::TsPassthrough {
 				pcr_pid: args.pcr_pid.map(|pid| pid.0),
@@ -906,7 +906,7 @@ impl ImportSource {
 			| Self::Archive(_) => Some("the gateway and archive imports build their own catalogs"),
 			#[cfg(feature = "capture")]
 			Self::Capture(_) => None,
-			Self::Avc3 | Self::Fmp4(_) | Self::Ts(_) | Self::Flv => None,
+			Self::H264 | Self::Fmp4(_) | Self::Ts(_) | Self::Flv => None,
 		}
 	}
 
@@ -923,7 +923,7 @@ impl ImportSource {
 			Self::Archive(_) => Some("`import archive` serves its recording until stopped"),
 			#[cfg(feature = "capture")]
 			Self::Capture(_) => Some("`import capture` has no clean end"),
-			Self::Avc3
+			Self::H264
 			| Self::Fmp4(_)
 			| Self::Ts(_)
 			| Self::Flv
@@ -1334,8 +1334,9 @@ pub struct Transport {
 
 	/// Write the multiplex an `import ts --passthrough` published back out byte-identical,
 	/// paced on its own PCR, `--delay` behind it. Packets that arrive later than that are
-	/// dropped, leaving a continuity error.
-	#[usage(long, conflicts("--follow", "--stitch", "--mux-rate"))]
+	/// dropped, leaving a continuity error. `--stitch` carries on with a replacement's
+	/// packets verbatim from its first group, so the seam shows as each PID's continuity break.
+	#[usage(long, conflicts("--mux-rate"))]
 	pub passthrough: bool,
 
 	/// The released spelling of [`Self::follow`].
@@ -1626,8 +1627,8 @@ mod tests {
 		}
 	}
 
-	/// `export ts --passthrough` writes the source's own packets, so it neither switches
-	/// programs, waits for a return, nor pads to a rate.
+	/// `export ts --passthrough` writes the source's own packets, so it pads to no rate, but
+	/// follows a return or a replacement as the demultiplexed export does.
 	#[test]
 	fn export_ts_passthrough_writes_the_source_alone() {
 		let parse = |args: &[&str]| {
@@ -1642,9 +1643,16 @@ mod tests {
 		let stdout = export.sink.container().unwrap();
 		assert!(stdout.passthrough);
 		assert_eq!(stdout.max_delay, Duration::from_secs(2));
-		for flags in [&["--stitch"][..], &["--follow", "10s"], &["--mux-rate", "20000000"]] {
-			assert!(parse(flags).is_err(), "{flags:?} must not start a run");
-		}
+		assert!(
+			parse(&["--mux-rate", "20000000"]).is_err(),
+			"--mux-rate must not start a run"
+		);
+		let cli = parse(&["--follow", "10s", "--stitch"]).unwrap();
+		let Command::Export(export) = &cli.stages[0] else {
+			panic!("not an export");
+		};
+		let stdout = export.sink.container().unwrap();
+		assert_eq!((stdout.follow, stdout.stitch), (Duration::from_secs(10), true));
 	}
 
 	fn export(flags: &[&str]) -> Result<Invocation, ParseError> {
@@ -1837,7 +1845,7 @@ mod tests {
 				["ts"].as_slice(),
 				&["fmp4"],
 				&["flv"],
-				&["avc3"],
+				&["h264"],
 				&["ts", "--program", "1"],
 			] {
 				import(flags, source).validate().unwrap();
@@ -2215,7 +2223,7 @@ mod tests {
 			"--listen-tcp-bind",
 			"127.0.0.1:0",
 			"--auth-public",
-			"**",
+			"",
 			"import",
 			"ts",
 		])
@@ -2233,7 +2241,7 @@ mod tests {
 			"--listen-unix-bind",
 			"/tmp/moq-cli.sock",
 			"--auth-public",
-			"**",
+			"",
 			"export",
 			"ts",
 		])
@@ -2256,7 +2264,7 @@ mod tests {
 			argv.extend(["import", "ts"]);
 			Invocation::try_parse_from(argv).expect("parse")
 		};
-		let err = parse(["--auth-public", "**"]).moq.validate().unwrap_err().to_string();
+		let err = parse(["--auth-public", ""]).moq.validate().unwrap_err().to_string();
 		assert!(err.contains("--auth-public ignores"), "{err}");
 		assert!(parse(["--auth-url", "http://127.0.0.1:4440/"]).moq.validate().is_ok());
 	}
@@ -2268,7 +2276,7 @@ mod tests {
 			"--listen-tcp-bind",
 			"127.0.0.1:0",
 			"--auth-public",
-			"**",
+			"",
 			"--drain-timeout",
 			"500ms",
 			"import",
@@ -2302,7 +2310,7 @@ mod tests {
 			"--listen-tcp-bind",
 			"127.0.0.1:0",
 			"--auth-public",
-			"**",
+			"",
 			"--drain-timeout",
 			"500ms",
 			"play",
@@ -2327,7 +2335,7 @@ mod tests {
 			"--auth-url",
 			"http://127.0.0.1:4440/",
 			"--auth-public",
-			"**",
+			"",
 			"import",
 			"ts",
 		])
@@ -2347,7 +2355,7 @@ mod tests {
 		assert!(cli.moq.validate().is_ok());
 
 		// A local verb refuses the flag like every other MoQ-side flag.
-		let cli = Invocation::try_parse_from(["moq", "--auth-public", "**", "auth", "generate"]).expect("parse");
+		let cli = Invocation::try_parse_from(["moq", "--auth-public", "", "auth", "generate"]).expect("parse");
 		assert!(cli.reject("auth").unwrap_err().to_string().contains("--auth-public"));
 	}
 
@@ -2851,7 +2859,7 @@ mod tests {
 			&["--listen-lb-id", "01"],
 			&["--listen-tcp-bind", "127.0.0.1:0"],
 			&["--cluster-node", "https://self.example"],
-			&["--auth-public", "**"],
+			&["--auth-public", ""],
 			&["--drain-timeout", "500ms"],
 		];
 		let dial: &[&[&str]] = &[
@@ -2909,7 +2917,7 @@ mod tests {
 			&["--listen-tls-cert", "cert.pem"],
 			&["--listen-tcp-tls"],
 			&["--listen-version", "moq-lite-02"],
-			&["--auth-public", "**"],
+			&["--auth-public", ""],
 		] {
 			let err = parse(flag).unserved().unwrap_err().to_string();
 			assert!(err.contains(flag[0]), "{flag:?}: {err}");

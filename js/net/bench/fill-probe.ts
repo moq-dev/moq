@@ -4,6 +4,7 @@
  */
 import { Duration } from "@moq/clock";
 import { Producer as BroadcastProducer } from "../src/broadcast.ts";
+import { defined } from "../src/defined.test-util.ts";
 import { hooks, staleHole } from "../src/internal.ts";
 import { Timestamp } from "../src/time.ts";
 
@@ -11,11 +12,8 @@ console.debug = () => {};
 console.log("runs,readers,step_us");
 for (const runs of [250, 1000, 4000, 16000]) {
 	for (const readers of [1, 8]) {
-		// One past the newest key the sweep reaches. A scale-less key counts as a millisecond of age,
-		// so the readers' delay spans every key, and the drops' wider budget keeps them untrusted.
-		const span = 8 + 2 * runs;
 		const broadcast = new BroadcastProducer();
-		const track = broadcast.createTrack("video", { maxAge: null });
+		const track = defined(broadcast.createTrack("video", { maxAge: null }));
 		// 2 and 3 are read up front, so the only gaps any fill is asked for are the drops below.
 		for (const sequence of [2n, 3n]) {
 			const live = track.createGroup(sequence);
@@ -30,8 +28,8 @@ for (const runs of [250, 1000, 4000, 16000]) {
 		const subs = Array.from({ length: readers }, () =>
 			track.subscribe({
 				// Capped, so the upstream's verdicts, judged under an open range, settle none of them.
-				ranges: [{ start: { time: 2n }, end: { time: BigInt(span) - 1n } }],
-				delay: { max: Duration.millis(span) },
+				ranges: [{ start: 2n, end: BigInt(8 + 2 * runs) - 1n }],
+				delay: { max: Duration.millis(30_000) },
 			}),
 		);
 		for (const sub of subs) {
@@ -44,7 +42,7 @@ for (const runs of [250, 1000, 4000, 16000]) {
 		// follows each, handed out while every fill asked so far is still out.
 		for (let i = 0; i < runs; i++) {
 			const sequence = BigInt(4 + 2 * i);
-			hooks.dropTrackGroups(track, sequence, sequence + 1n, staleHole(2 * span));
+			hooks.dropTrackGroups(track, sequence, sequence + 1n, staleHole(60_000));
 			for (const sub of subs) sub.tryRecvGroup();
 			const group = track.createGroup(sequence + 1n);
 			group.writeFrame({ payload: new Uint8Array([0]), timestamp: Timestamp.unscaled(group.start) });

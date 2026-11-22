@@ -27,13 +27,18 @@ name: Nightly
 # exception: deterministic and seconds long, so `just ci` gates every diff that
 # can move them, and audio-quality.yml reruns them here.
 #
+# `Mesh replay` runs real relays meshed over shaped links through link reopens, a
+# crash, and a roll between the newest release and this commit, about ten minutes a
+# cell. It reports what each fault cost rather than gating on it, so it belongs where
+# a number moving overnight is read, not where a merge waits.
+#
 # `mutants` edits the route and resume code one change at a time and fails on an
 # edit no test notices; each edit rebuilds moq-net's tests, about 27 runner-hours
 # for the full set, so it rotates (see sh/rs/mutants.sh).
 #
 # `route-proof` type-checks the route rule's convergence proof with Agda, about
-# two minutes. The Rust side of its binding, the generated `Vectors.agda`, is
-# checked current by every PR's tests; the proof itself only changes when the
+# two minutes. The Rust side of its binding, the generated `Vectors.agda` and
+# `ClaimVectors.agda`, is checked current by every PR's tests; the proof itself only changes when the
 # rule does, which review checks.
 #
 # `quic-interop` runs moq-quic against other QUIC stacks through the QUIC
@@ -239,6 +244,26 @@ jobs:
             recipe: obs test
           - name: libmoq C fixtures
             recipe: rs c-tests
+          # Reports what each fault costs a mesh of real relays, swept over relays and
+          # broadcasts per relay; fails only on an unfed reader, a broadcast shown after its
+          # source ended, or a mesh that never goes quiet. About 10 minutes a cell. A failed
+          # run keeps its directory under the hidden .tmp/, so its relay and reader logs ride along.
+          - name: Mesh replay (4 relays)
+            recipe: test mesh-replay --mesh test/mesh-replay/ring4.toml --broadcasts 4,32 --report target/bench/nightly/mesh-replay
+            artifact: mesh-replay-ring4
+            hidden-files: true
+            artifact-path: |
+              target/bench/nightly/mesh-replay
+              .tmp/harness/mesh-replay-*/*/*.log
+              .tmp/harness/mesh-replay-*/*/*.jsonl
+          - name: Mesh replay (6 relays)
+            recipe: test mesh-replay --mesh test/mesh-replay/ring6.toml --broadcasts 4,32 --report target/bench/nightly/mesh-replay
+            artifact: mesh-replay-ring6
+            hidden-files: true
+            artifact-path: |
+              target/bench/nightly/mesh-replay
+              .tmp/harness/mesh-replay-*/*/*.log
+              .tmp/harness/mesh-replay-*/*/*.jsonl
 
     steps:
       - name: Checkout
@@ -282,6 +307,7 @@ jobs:
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact-path }}
+          include-hidden-files: ${{ matrix.hidden-files || false }}
           retention-days: 45
 
       # Only scheduled runs serve as a later run's base.
@@ -309,7 +335,7 @@ jobs:
   # Explicit Pages deployment works with GITHUB_TOKEN; a branch push alone does not.
   benchmark-site:
     name: Benchmark site
-    needs: [nightly, sizes, gate-cost]
+    needs: [nightly, sizes]
     if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 15
@@ -405,6 +431,7 @@ jobs:
         # `test route-sweep` checks random lite-07 meshes against the route rules from a fresh seed; PRs run a fixed 8.
         # It also runs the router's handoff sweeps over 20,000 fixed scenarios; PRs run 150.
         # It also runs the bandwidth probe's acceptance suite, of which PRs run the short cases.
+        # `test route-race` races a lite-07 relay's session tasks in seeded orders from a fresh seed; PRs run a fixed 16.
         # `test drill impaired` runs the relay drills over a freshly seeded shaper; PRs run loopback.
         # `rs cli-export` runs moq-cli's export process tests, which take tens of seconds of real time.
         # `rs hls-conformance` probes every segment moq-hls serves with ffprobe, against its playlists and manifest.
@@ -415,7 +442,7 @@ jobs:
         # `rs v4l2` streams moq-video's V4L2 capture from the kernel's vivid
         # virtual camera, a module load no pull request job should make.
         # `js worklet-matrix` loads `?worklet` output through the bundlers pinned in test/worklet.
-        recipe: ["gh test-integration", "rs doctest --workspace", "test drill-sensitivity", "rs uring", "test drain", "test json-properties", "test resume-model", "test route-sweep", "rs quic-sim", "rs rung-disable", "test drill impaired", "rs cli-export", "rs hls-conformance", "rs quic-stress", "rs audio-devices", "rs multicast", "rs render-sw", "test qmux", "rs v4l2", "js worklet-matrix"]
+        recipe: ["gh test-integration", "rs doctest --workspace", "test drill-sensitivity", "rs uring", "test drain", "test json-properties", "test resume-model", "test route-sweep", "test route-race", "rs quic-sim", "rs rung-disable", "test drill impaired", "rs cli-export", "rs hls-conformance", "rs quic-stress", "rs audio-devices", "rs multicast", "rs render-sw", "test qmux", "rs v4l2", "js worklet-matrix"]
         include:
           # Miri interprets kio's and moq-net's in-memory unsafe and moq-sock's and moq-uring's
           # control-message walks; too slow for the merge gate.
@@ -471,17 +498,21 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The largest model gets a runner of its own, as does the warm model
-        # (its configs take about an hour together); the `rest` leg takes
-        # every other config, so a new one is checked without editing this
-        # list. sh/gh/nightly.test.py fails on a path that no longer exists.
+        # The largest model gets a runner of its own, as do the warm model
+        # (its configs take about an hour together) and the credit models
+        # (about 35 minutes); the `rest` leg takes every other config, so a
+        # new one is checked without editing this list. A new leg goes last,
+        # since each leg's cache key holds its index.
+        # sh/gh/nightly.test.py fails on a path that no longer exists.
         include:
           - name: resume
             paths: rs/moq-net/verify/resume
           - name: warm
             paths: rs/moq-net/verify/warm
           - name: rest
-            paths: ":!rs/moq-net/verify/resume :!rs/moq-net/verify/warm"
+            paths: ":!rs/moq-net/verify/resume :!rs/moq-net/verify/warm :!rs/moq-net/verify/credit"
+          - name: credit
+            paths: rs/moq-net/verify/credit
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -770,7 +801,7 @@ jobs:
   sizes:
     name: Shipping sizes
     # Measures what these release jobs upload rather than rebuilding it.
-    needs: [release-py-ffi, release-shared-ffi, release-libmoq, release-moq-relay, release-moq-cli]
+    needs: [release-py-ffi, release-shared-ffi, release-libmoq, release-c, release-moq-relay, release-moq-cli]
     runs-on: ubuntu-24.04-arm
     # Hosted `main` jobs write the Rust cache; see .github/actions/rust-cache.
     environment: ${{ github.ref == 'refs/heads/main' && 'cache-write' || '' }}
@@ -825,60 +856,12 @@ jobs:
           path: target/bench/size
           retention-days: 45
 
-  # The merge gate's own build and test cost under fixed scenarios, for the
-  # benchmark history (see bench/README.md). On the merge queue's runners,
-  # because hosted VMs expose no hardware counters. Those runners are
-  # systemd-nspawn containers on the maintainer's NixOS host, which share its
-  # PMU but must allow perf_event_open, which nspawn's seccomp filter denies by
-  # default. No Rust cache, which would replay compilations
-  # rather than measure them, and checkout's clean leaves an empty target
-  # directory. The scenarios run every module in turn, cold and then after a
-  # moq-net edit, so they take hours.
-  gate-cost:
-    name: Gate cost
-    # Main's reviewed code alone, as for Gate: these runners keep state the queue builds with.
-    if: github.ref == 'refs/heads/main'
-    runs-on: [self-hosted, moq-queue]
-    # One Nightly job on the queue's runners at a time, so this and Gate, or a
-    # dispatch beside the schedule, never hold both and stall the merge queue.
-    concurrency:
-      group: moq-queue-nightly
-      cancel-in-progress: false
-    timeout-minutes: 330
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      # The runner's home persists across jobs, so a Queue build's mbx Cargo
-      # shim and Cargo config are there, and the dev shell would put the shim
-      # back on PATH. A fresh home finds neither; the guest's Nix config is
-      # system-wide, so the cache still applies.
-      - name: Measure the gate
-        id: measure
-        run: |
-          export HOME="$RUNNER_TEMP/home"
-          mkdir -p "$HOME"
-          nix develop --command just gh gate-cost
-      - name: Record benchmark outcome
-        if: ${{ !cancelled() }}
-        run: nix develop --command just gh benchmark-report status "${{ steps.measure.outcome }}" target/bench/nightly/gate-cost
-      - name: Preserve results
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        with:
-          name: bench-gate-cost
-          path: target/bench/nightly/gate-cost
-          retention-days: 45
-
   # The queue's Check over every package, catching what a diff-scoped queue run
   # let into main. On the queue's runners, which check what the queue checks
   # and have the disk for a full build, which a hosted runner ran out of.
   # Those runners keep state the queue builds with, such as the Cargo registry,
   # so only main's reviewed code runs here, without the Rust cache, which only
-  # the queue writes (see .github/actions/rust-cache), and with a fresh home,
-  # as for Gate cost.
+  # the queue writes (see .github/actions/rust-cache), and with a fresh home.
   gate:
     name: Gate
     if: github.ref == 'refs/heads/main'

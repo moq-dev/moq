@@ -1,6 +1,6 @@
 //! Receive, reassembly, and reset: what a server pays to ingest, and to abandon, many streams.
 
-use std::time::Duration;
+use std::{task::Poll, time::Duration};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use moq_quic::{VarInt, recv, stream::Dir};
@@ -11,7 +11,7 @@ use moq_quic::{VarInt, recv, stream::Dir};
 )]
 mod common;
 
-use common::{Pair, Setup, Sink, ThreadCpu, payload};
+use common::{Pair, Setup, Sink, ThreadCpu, WriteNow, payload};
 
 /// Stream data per packet, so a stream of `n` packets spans about `n` datagrams.
 const PACKET: usize = 1100;
@@ -44,7 +44,7 @@ fn bench_loss(c: &mut Criterion<ThreadCpu>) {
 							for _ in 0..streams {
 								let id = conn.streams().open(Dir::Uni, Default::default()).expect("stream limit");
 								let mut stream = conn.send_stream(id);
-								assert_eq!(stream.write(&mut data.clone()).unwrap(), data.len());
+								assert_eq!(stream.write_now(&mut data.clone()), data.len());
 								stream.finish().unwrap();
 							}
 							pair.drive_until(|pair| pair.server.received.finished >= target);
@@ -79,7 +79,7 @@ fn bench_reset(c: &mut Criterion<ThreadCpu>) {
 						let ids: Vec<_> = (0..streams)
 							.map(|_| {
 								let id = conn.streams().open(Dir::Uni, Default::default()).expect("stream limit");
-								assert_eq!(conn.send_stream(id).write(&mut data.clone()).unwrap(), bytes);
+								assert_eq!(conn.send_stream(id).write_now(&mut data.clone()), bytes);
 								id
 							})
 							.collect();
@@ -277,7 +277,7 @@ fn bench_reset_debt(c: &mut Criterion<ThreadCpu>) {
 							let ids: Vec<_> = (0..resets)
 								.map(|_| {
 									let id = conn.streams().open(Dir::Uni, Default::default()).expect("stream limit");
-									assert_eq!(conn.send_stream(id).write(&mut data.clone()).unwrap(), PACKET);
+									assert_eq!(conn.send_stream(id).write_now(&mut data.clone()), PACKET);
 									id
 								})
 								.collect();
@@ -296,8 +296,12 @@ fn bench_reset_debt(c: &mut Criterion<ThreadCpu>) {
 							while let Some(id) = conn.streams().accept(Dir::Uni) {
 								let mut stream = conn.recv_stream(id);
 								let mut chunks = stream.read().unwrap();
-								assert!(matches!(chunks.next(usize::MAX), Err(recv::Error::Reset(_))));
+								assert!(matches!(
+									chunks.poll_next(&kio::Waiter::noop(), usize::MAX),
+									Poll::Ready(Err(recv::Error::Reset))
+								));
 								chunks.finalize();
+								assert!(stream.received_reset().unwrap().is_some());
 							}
 							let mut limits = moq_quic::Limits::default();
 							limits.receive_window = std::num::NonZeroU64::new(window as u64);

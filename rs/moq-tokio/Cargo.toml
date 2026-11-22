@@ -102,7 +102,7 @@ criterion = { package = "bench-harness", path = "../bench-harness" }
 # Use the channel type behind `mdns_sd::Receiver` so the mDNS readiness gate can
 # be driven with synthetic daemon events.
 flume = "0.12"
-kio = { path = "../kio", features = ["sim"] }
+kio = { path = "../kio", features = ["manual", "sim"] }
 # The integration tests build congestion controllers directly, including the candidates the
 # real-socket comparisons run.
 moq-congestion = { path = "../moq-congestion", features = ["lab"] }
@@ -118,11 +118,15 @@ rcgen = { workspace = true, features = ["pem"] }
 reqwest = { workspace = true, features = ["rustls-no-provider"] }
 rind-rcgen = { workspace = true }
 rind-rustls = { workspace = true }
+# The shared lite-07 range table, which the JavaScript relay's copy runs through.
+serde_json = { workspace = true }
 # Sockets a test holds or inspects: which ones the process still holds, so the
 # worker tests can prove a stopped group closed its own, and port reservations
 # that never listen, so a test needn't release a port another test could take.
 socket2 = { workspace = true, features = ["all"] }
 tempfile = "3"
+# Runs the tests that need a variable set in a child process given it.
+test-env = { path = "../test-env" }
 # test-util adds tokio::time::pause/auto-advance for the time-dependent tests.
 tokio = { workspace = true, features = ["test-util"] }
 tokio-rustls = { workspace = true }

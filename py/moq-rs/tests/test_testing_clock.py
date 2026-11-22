@@ -28,7 +28,7 @@ def test_a_pending_timer_waits_for_advance() -> None:
             origin = moq.OriginProducer()
             route = origin.route("clock", hidden=True)
             track = route.broadcast.publish_track("track", moq.TrackInfo(max_age=None))
-            from_group_0 = [moq.Range(start=moq.Anchor.ABSOLUTE(group=0))]
+            from_group_0 = [moq.Range(start=moq.Timestamp.unscaled(0))]
             consumer = track.consume(moq.Subscription(delay=moq.Delay(max=timedelta(seconds=1)), ranges=from_group_0))
 
             # Group 0 stalls with no frame, so the in-order read waits on it until

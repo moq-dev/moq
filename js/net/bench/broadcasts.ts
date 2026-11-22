@@ -5,6 +5,7 @@ import { Signal } from "@moq/signals";
 import type { Grant } from "../src/auth.ts";
 import { Producer as BroadcastProducer } from "../src/broadcast.ts";
 import { BroadcastCache } from "../src/consume.ts";
+import { defined } from "../src/defined.test-util.ts";
 import { toHop, WireRoute } from "../src/hop.ts";
 import * as Instance from "../src/instance.ts";
 import { Publisher } from "../src/lite/publisher.ts";
@@ -48,19 +49,13 @@ for (const scope of [
 				scope === "full-name" || scope === "overlap-only"
 					? origin.consume().routes(Path.Pattern.parse("**/*.chat"))
 					: (scope === "producer-scopes"
-							? origin.scope(
-									Path.empty(),
-									new Path.Patterns([Path.Pattern.parse(`room/**/tag-${index}`)]),
-								)
+							? origin.scope(Path.empty(), Path.Prefixes.parse([`room/0/tag-${index}`]))
 							: scope === "rooted-producers"
-								? origin.scope(
-										Path.from("room"),
-										new Path.Patterns([Path.Pattern.parse(`**/tag-${index}`)]),
-									)
+								? origin.scope(Path.from("room"), Path.Prefixes.parse([`0/tag-${index}`]))
 								: origin
 						).routes(
 							scope === "distinct-scopes" ? Path.Pattern.parse(`room/**/tag-${index}`) : undefined,
-							// These scopes only overlap `room/<index>`, so they measure the covering view.
+							// These scopes only lie beneath the touched route, so they measure the covering view.
 							{ covering: scope !== "unscoped" },
 						),
 			);
@@ -100,7 +95,7 @@ console.log("tracks,listings,create_remove_and_read_us");
 for (const trackCount of [8, 128, 1024]) {
 	for (const listingCount of [1, 8, 32]) {
 		const broadcast = new BroadcastProducer();
-		for (let index = 0; index < trackCount; index++) broadcast.createTrack(`held-${index}`);
+		for (let index = 0; index < trackCount; index++) defined(broadcast.createTrack(`held-${index}`));
 		const listings = Array.from({ length: listingCount }, () => broadcast.consume().tracks());
 		// Past each listing's initial set and SYNCED.
 		for (const listing of listings) {
@@ -108,7 +103,7 @@ for (const trackCount of [8, 128, 1024]) {
 		}
 		const start = performance.now();
 		for (let index = 0; index < listed; index++) {
-			broadcast.createTrack(`new-${index}`);
+			defined(broadcast.createTrack(`new-${index}`));
 			for (const listing of listings) {
 				const event = await listing.next();
 				if (event?.kind !== "added" || event.name !== `new-${index}`) throw new Error("listing missed a track");
@@ -193,24 +188,24 @@ const quic = {
 		};
 	},
 } as unknown as WebTransport;
-console.log("auth,patterns,fetches,grant_update_us");
-for (const patternCount of [8, 32, 128]) {
+console.log("auth,prefixes,fetches,grant_update_us");
+for (const prefixCount of [8, 32, 128]) {
 	for (const fetchCount of [1, 8, 32]) {
-		const subscribe = new Path.Patterns([
-			Path.Pattern.subtree("room"),
-			...Array.from({ length: patternCount - 1 }, (_, i) => Path.Pattern.literal(`other/${i}`)),
+		const subscribe = Path.Prefixes.parse([
+			"room",
+			...Array.from({ length: prefixCount - 1 }, (_, i) => `other/${i}`),
 		]);
-		const grant = new Signal<Grant | undefined>({ publish: new Path.Patterns(), subscribe });
+		const grant = new Signal<Grant | undefined>({ publish: new Path.Prefixes(), subscribe });
 		const subscriber = new Subscriber(quic, Version.DRAFT_05, toHop(1n), undefined, undefined, undefined, grant);
 		const groups = await Promise.all(
 			Array.from({ length: fetchCount }, (_, i) => subscriber.fetchGroup(Path.from(`room/${i}`), "video", 0n)),
 		);
 		const start = performance.now();
 		for (let i = 0; i < 1024; i++) {
-			grant.set({ publish: new Path.Patterns(), subscribe, expires: Wall.unixMillis(i) });
+			grant.set({ publish: new Path.Prefixes(), subscribe, expires: Wall.unixMillis(i) });
 			await Promise.resolve();
 		}
-		console.log(`fetch,${patternCount},${fetchCount},${(((performance.now() - start) * 1000) / 1024).toFixed(2)}`);
+		console.log(`fetch,${prefixCount},${fetchCount},${(((performance.now() - start) * 1000) / 1024).toFixed(2)}`);
 		for (const group of groups) {
 			if (group.closed.peek() !== undefined) throw new Error("allowed fetch ended");
 			group.close();

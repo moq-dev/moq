@@ -80,6 +80,12 @@ export interface ConnectionProps {
 	tokens?: readonly string[] | Signal<readonly string[]>;
 
 	/**
+	 * Carry the connection credential, the first token, in the URL's `auth` query parameter
+	 * instead of SETUP and `jwt`; see {@link ConnectProps.urlAuth}. Implies a private loop.
+	 */
+	urlAuth?: boolean;
+
+	/**
 	 * Maximum time for each connection attempt, the dial and the MoQ handshake (default:
 	 * 30000ms; `0` waits forever). An attempt that outlives it is retried like any other
 	 * failure. The same bound as the `timeout` option of {@link Connection.connect}.
@@ -120,8 +126,8 @@ export interface ConnectionProps {
  * session finishes its groups, and the handle and its origin carry across. A redirect the
  * `goaway` policy refuses stops the loop like an auth rejection does.
  *
- * Options the pool cannot honor (transport options, backoff, timeout, goaway, tokens, a pinned
- * certificate, caller-owned origins) use a private loop. An explicit `share: true`
+ * Options the pool cannot honor (transport options, backoff, timeout, goaway, tokens, a credential
+ * in the URL, a pinned certificate, caller-owned origins) use a private loop. An explicit `share: true`
  * refuses them. A supplied transport cannot reconnect at all; pass it to {@link Connection.connect}
  * instead.
  *
@@ -334,6 +340,7 @@ export class Connection {
 				timeout: props.timeout,
 				goaway: props.goaway,
 				tokens: props.tokens,
+				urlAuth: props.urlAuth,
 			});
 			signals.cleanup(() => loop.close());
 
@@ -356,20 +363,20 @@ export class Connection {
 	}
 
 	/**
-	 * Subscribe to broadcast announcements matching `scope`, spanning reconnects
+	 * Subscribe to broadcast announcements matching `filter`, spanning reconnects
 	 * and URL switches: a switch retracts everything from
 	 * the old relay's origin, then the new one's arrivals stream in.
 	 */
-	announced(scope: Path.Pattern = Path.Pattern.all(), options?: Announce.Options): Announce.Consumer {
-		return list(this.routes(scope, options));
+	announced(filter: Path.Pattern = Path.Pattern.all(), options?: Announce.Options): Announce.Consumer {
+		return list(this.routes(filter, options));
 	}
 
 	/**
-	 * Every route change matching `scope`, spanning reconnects like {@link announced}.
+	 * Every route change matching `filter`, spanning reconnects like {@link announced}.
 	 *
 	 * @internal
 	 */
-	routes(scope: Path.Pattern = Path.Pattern.all(), options?: Announce.Options): Routes {
+	routes(filter: Path.Pattern = Path.Pattern.all(), options?: Announce.Options): Routes {
 		const producer = new AnnounceProducer();
 		const consumer = producer.consume();
 
@@ -386,7 +393,7 @@ export class Connection {
 				return;
 			}
 			// A URL switch retracts what the old origin announced.
-			pumpAnnounced(effect, origin.routes(scope, options), producer);
+			pumpAnnounced(effect, origin.routes(filter, options), producer);
 		});
 
 		closeUnwanted(producer);
@@ -396,6 +403,7 @@ export class Connection {
 	}
 
 	/** Snapshot the live connection's transport counters, or undefined while disconnected. */
+	// fallow-ignore-next-line unused-class-member
 	async stats(): Promise<StatsType | undefined> {
 		return this.#established.peek()?.stats();
 	}
@@ -448,6 +456,7 @@ export class Connection {
 }
 
 /** Types on {@link Connection}: the handle is the class, these are its associated types. */
+// fallow-ignore-file unused-namespace-member
 export namespace Connection {
 	/** Options for {@link Connection}. @reexport */
 	export type Props = ConnectionProps;
@@ -524,6 +533,9 @@ function refuse(props?: ConnectionProps): void {
 	if (props.tokens !== undefined) {
 		throw new Error("tokens cannot be shared; pass share: false");
 	}
+	if (props.urlAuth) {
+		throw new Error("urlAuth cannot be shared; pass share: false");
+	}
 	if (props.timeout !== undefined) {
 		throw new Error("timeout cannot be shared; pass share: false");
 	}
@@ -539,6 +551,7 @@ function requiresPrivate(props: ConnectionProps): boolean {
 		props.websocket !== undefined ||
 		props.backoff !== undefined ||
 		props.tokens !== undefined ||
+		props.urlAuth === true ||
 		props.timeout !== undefined ||
 		props.goaway !== undefined ||
 		props.publish !== undefined ||

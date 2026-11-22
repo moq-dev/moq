@@ -96,12 +96,9 @@ function serveHistory(track: Moq.Track.Producer) {
 	const requests = track.requests();
 	void (async () => {
 		for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
-			if (fill.kind === "lookup") {
-				fill.close();
-				continue;
-			}
 			for (let sequence = fill.wanted(); sequence !== undefined; sequence = fill.wanted()) {
 				const group = fill.accept(sequence);
+				if (!group) throw new Error("the group was already answered");
 				for (const payload of frames(Number(sequence)))
 					group.writeFrame({ payload, timestamp: Moq.Time.Timestamp.unscaled(group.start) });
 				group.finish();
@@ -135,8 +132,9 @@ try {
 		const broadcastPublication = origin.route(Moq.Path.from(path), { hidden: true });
 		const broadcast = broadcastPublication.broadcast;
 		if (datagram) {
-			// Untimed: the OBJECT_DATAGRAM carries no timestamp, so the subscriber checks the payload alone.
+			// Untimed: each datagram's timestamp is unscaled at its sequence, which the OBJECT_DATAGRAM carries as its group ID.
 			const track = broadcast.createDatagrams("tail");
+			if (!track) throw new Error("the track already exists");
 			broadcastPublication.announce();
 			const lines = createInterface({ input: process.stdin });
 			const commands = lines[Symbol.asyncIterator]();
@@ -162,6 +160,7 @@ try {
 				maxAge: null,
 				...(status ? { priority: 2 } : {}),
 			});
+			if (!track) throw new Error("the track already exists");
 			if (cached) write(track);
 			if (history) serveHistory(track);
 			let head: Moq.Group.Producer | undefined;
@@ -188,7 +187,7 @@ try {
 				track.close();
 			} else if (!status && !cached && !history) {
 				const demand = track.demand();
-				while (demand.wanted.peek() === undefined) await demand.wanted.changed();
+				while (!demand.wanted.peek()) await demand.wanted.changed();
 				write(track);
 				track.close();
 			}
@@ -222,7 +221,8 @@ try {
 						frame.payload.every((byte) => byte === sequence),
 						"corrupt datagram",
 					);
-					assert.equal(frame.timestamp, undefined, "unexpected IETF timestamp");
+					// An untimed datagram's timestamp is unscaled at its sequence.
+					assert.equal(frame.timestamp.key, BigInt(sequence), "datagram timestamp is not its sequence");
 					process.stdout.write(`datagram ${sequence}\n`);
 				}
 				console.error("datagram clean groups=0,1,2,3 bytes=3600");
@@ -253,7 +253,7 @@ try {
 				// head predates the subscription.
 				const track = broadcast.track("tail").subscribe({
 					delay: { max: Duration.millis(drop ? 60_000 : 5000) },
-					...(late ? {} : { ranges: [{ start: { time: 0n } }] }),
+					...(late ? {} : { ranges: [{ start: 0n }] }),
 				});
 				if (compress)
 					assert.equal((await track.info()).compression, version === "moq-lite-07-wip" ? "deflate" : "none");

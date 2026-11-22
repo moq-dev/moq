@@ -108,16 +108,25 @@ module() {
 # before reading target/debug/libmoq_ffi.so. Cargo runs one build at a time per
 # target directory and leaves a fresh output untouched, so the first of those
 # lanes builds it while the rest wait in Cargo, and none rewrites it while
-# another reads it. py builds its test features into a target directory of its
-# own, and carla runs its tools outside py's venv.
+# another reads it. py and dart share target/ffi-testing (and lane=ffi_testing)
+# for their testing,openh264 builds, and carla runs its tools outside py's venv.
 module py '^(py/|sh/py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/|rs/uniffi-bindgen/|doc/lib/py/|doc/lib/samples\.sh$)' \
-    tools='uv' compiles=check
+    tools='uv' compiles=check lane=ffi_testing
 # sh/rs/select.sh widens to the whole workspace for inputs every crate shares.
 # moq-cli builds the Rust interop clients as examples from outside its
 # crate; sh/rs/select.test.py fails when a target's directory is missing.
-# moq-relay's tests read its NixOS module.
-module rs '^(\.cargo/|nix/modules/moq-relay\.nix$|sh/local\.(sh|ts)$|rs/|test/interop/clients/rust/|sh/rs/|Cargo\.(toml|lock)$|clippy\.toml$|rust-toolchain\.toml$|\.config/nextest\.toml$)' \
-    tools='cargo jq' compiles='check fix' fix
+# libmoq's lint compiles the C doc samples. The files Rust reads outside rs/,
+# which sh/rs/reads.sh lists and select.test.py holds this scope to, come
+# last: the relay's configs, unit, and NixOS module, the scripts the tests
+# run, and the vectors the tests share with JS and the docs.
+module rs '^(\.cargo/|doc/lib/c/|doc/lib/samples\.sh$|sh/local\.(sh|ts)$|rs/|test/interop/clients/rust/|sh/rs/|Cargo\.(toml|lock)$|clippy\.toml$|rust-toolchain\.toml$|\.config/nextest\.toml$|nix/modules/moq-relay\.nix$|(demo/relay|packaging|test)/.*\.toml$|packaging/moq-relay/moq-relay\.service$|test/interop/[^/]*\.ts$|test/(datagram-tracks/client|max-age/client|receive-credit/sender|relay-fill/relay|stream-limits/client)\.ts$|doc/concept/audio-jitter/.*\.json$|drafts/moq-e2ee-01-wip\.json$)' \
+    tools='cargo jq cc' compiles='check fix' fix
+# Clippy for macOS and Windows over rs's selection, so a platform-gated error
+# fails here rather than in the nightly native lanes. The flake pins its
+# toolchain and the zig that compiles its build scripts' C, so a change there
+# lints the whole workspace (see sh/rs/select.sh).
+module rs_cross "${scope[rs]%)}|flake\.(nix|lock)$)" \
+    tools='cargo jq nix zig' compiles=check
 # nix/Cargo.nix records each crate's dependencies, features, and targets,
 # read from the manifests, the lockfile, and the files cargo discovers targets
 # from. The pinned crate2nix comes from flake.lock.
@@ -136,24 +145,31 @@ module cpp '^(\.cargo/config\.toml$|cpp/moq/|cpp/justfile$|sh/cpp/|sh/clang-form
 # the libobs headers it compiles against.
 module obs_compile '^(\.cargo/config\.toml$|cpp/obs/|cpp/moq/|sh/obs/|rs/moq-ffi/|rs/libmoq/native-libs/|flake\.nix$)' \
     tools='cargo cmake pkg-config uniffi-bindgen-cpp' compiles=check lane=cpp
-# The bun lane serializes fixers and JS builds that write shared outputs.
-# Dependency setup separately uses sh/js/install.py across every entry point.
+# Dependency setup uses sh/js/install.py (locked) across every entry point,
+# and fix already sets limit=1, so read-only JS/Bun checks run in parallel.
 # Biome checks the whole repository. It registers before js so
 # that fix runs it first, since Biome can fix sources that the package build
 # rejects, such as a type-only export.
 module biome '' \
-    tools='bun uv' lane=bun fix
+    tools='bun uv' fix
 # The JS tests also read Rust's shared JSON vectors; sh/js/workspace.py
 # fails a check that reads a cross-tree input this pattern misses.
 # Root Nix inputs own the browser version every npm Playwright pin matches.
+# js and dead_code share a lane because package builds remove and recreate
+# js/*/dist/ while fallow resolves js/*/test-dts/*.ts imports against dist/.
 module js '^(js/|bench/browser/|doc/|drafts/|demo/(boy|web|carla/web)/|test/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$|flake\.(nix|lock)$)' \
-    tools='bun python3 uv' lane=bun fix
+    tools='bun python3 uv' lane=js_dist fix
+# fallow over the whole workspace: removing the last use of an export in one
+# package leaves it dead in the package that defines it, which a run scoped to
+# the changed packages would never analyze.
+module dead_code '(\.([mc]?[jt]sx?|vue)|(^|/)package\.json|^bun\.lock|^\.fallowrc\.jsonc)$' \
+    tools='bun uv' lane=js_dist
 # The recorded-trace replays play through the player's container consumer and
 # ring on a simulated clock: deterministic, seconds long, and only Bun (plus uv
 # for the install step), so they gate every diff that can move a row. It shares
-# the bun lane so it reads the dependencies js installs.
+# its own install lock so it can run beside js.
 module audio_quality '^(js/(hang|watch|net|signals|clock)/|test/audio-quality/|test/lib/|test/justfile$)' \
-    tools='bun uv' lane=bun
+    tools='bun uv'
 module kt '^(\.cargo/config\.toml$|kt/|sh/kt/|rs/moq-ffi/|rs/uniffi-bindgen/|doc/lib/kt/|doc/lib/samples\.sh$)' \
     tools='cargo gradle java ktfmt' compiles=check fix
 # Rust source is compiled below. Nix reads Cargo metadata, packaging inputs,
@@ -201,20 +217,20 @@ module swift '^(\.cargo/config\.toml$|swift/|sh/swift/|rs/moq-ffi/|rs/uniffi-bin
 module go '^(\.cargo/config\.toml$|go/|sh/go/|rs/moq-ffi/|doc/lib/go/|doc/lib/samples\.sh$)' \
     tools='cargo go uniffi-bindgen-go' compiles=check fix
 module drafts '^(drafts/|sh/drafts/|doc/\.vitepress/drafts\.ts$)' \
-    tools='bun uv kramdown-rfc xml2rfc' lane=bun
+    tools='bun uv kramdown-rfc xml2rfc'
 module markdown '' \
-    tools='bun uv' lane=bun fix
+    tools='bun uv' fix
 # Workflow lints and repository-wide policy, such as every opt-in test having a
 # caller, so they gate every diff.
 module gh '' \
-    tools='actionlint zizmor bun python3 uv cargo' lane=bun
+    tools='actionlint zizmor bun python3 uv cargo jq'
 # `just gh test`, the repository tooling tests, follow what they run and read,
 # including the selectors under sh/, the release-plz configuration, the nfpm
 # configs, the Cargo and Bun workspace manifests and lockfiles, and the flake
 # that pins their tools. Its check that Nightly's benchmark tests exist greps all of rs/, so it
 # runs in `gh check` instead. Nightly's full gate runs them whatever changed.
 module tooling '^(sh/|bench/|test/smoke/|packaging/|\.github/|\.cargo/|\.config/hakari\.toml$|\.release-plz\.toml$|Cargo\.(toml|lock)$|rs/moq-ffi/build\.sh$|go/wrapper/|rs/[^/]+/(Cargo\.toml|verify/.*\.cfg)$|js/[^/]+/(bench/|package\.json$)|package\.json$|bun\.lock$|flake\.(nix|lock)$)|(^|/)justfile$' \
-    tools='bun python3 uv cargo release-plz clippy-driver dpkg-deb nfpm rpm' lane=bun
+    tools='bun python3 uv cargo release-plz clippy-driver dpkg-deb nfpm rpm'
 # The drill mutations patch Rust source, so a Rust change can move the code
 # they target. Only nightly runs the drills; this catches a stale patch.
 module drill '^(rs/|test/drill/)'
@@ -255,13 +271,12 @@ module nix '' \
     tools='nixfmt' fix
 module justfile '' \
     fix
-# dart builds moq-ffi with the filtered environment its build hook gets, then
-# checks that the hook finds that build fresh. Any other Cargo build in between
-# reruns the host build scripts in target/debug that track the environment,
-# such as bindgen's BINDGEN_EXTRA_CLANG_ARGS, and so rebuilds what the hook
-# then rebuilds again, so it runs alone, last.
+# dart pins the cdylib generate.sh builds via hooks.user_defines.moq_ffi.library
+# so the Dart build hook never invokes Cargo again. It shares target/ffi-testing
+# (and its lane) with py so both reuse one testing,openh264 dependency build
+# without racing on libmoq_ffi.so.
 module dart '^(\.cargo/config\.toml$|dart/|sh/dart/|rs/moq-ffi/|doc/lib/dart/|doc/lib/samples\.sh$)' \
-    tools='cargo dart uniffi_bindgen_dart' compiles=check alone fix
+    tools='cargo dart uniffi_bindgen_dart' compiles=check lane=ffi_testing fix
 
 # Report each native suite from the same impact map, before any toolchain is
 # installed. Rust dependencies can break external consumers too, so include
@@ -419,10 +434,12 @@ step() {
     case "$1:$2" in
         check:js) run just js check-changed "$js_list" ;;
         check:workers) run just js workers ;;
+        check:dead_code) run just js dead-code ;;
         check:moq_sh) run just infra moq-sh test ;;
         # The check keeps docs and the isolated default-media lint; the test
         # phase enforces the other clippy checks in its existing build.
         check:rs) run just rs lint-changed "$rs_list" ;;
+        check:rs_cross) run just rs cross-lint-changed "$rs_list" ;;
         check:carla_bridge) run just carla bridge-check ;;
         check:bench)
             run python3 bench/compare.test.py

@@ -2,6 +2,7 @@ import { Error as NetError } from "@moq/net";
 import type * as z from "zod/mini";
 import { deepEqual, diff } from "../diff.ts";
 import { MAX_FRAME_BYTES, TAIL_BYTES, tailCharge } from "../limits.ts";
+import { stringify } from "../parse.ts";
 
 // Bound the number of patches a joiner must apply before reaching the current value.
 const MAX_DELTA_FRAMES = 256;
@@ -12,7 +13,7 @@ export interface Config<T> {
 	 * Encode changes as deltas (merge patches) against the group's snapshot. `false` encodes every
 	 * change as a new snapshot in its own group.
 	 *
-	 * A group of deltas runs until a joiner wants a fresh one, judged by the track's `refresh` ratio
+	 * A group of deltas runs until a reader asks for a fresh one, judged by the track's `refresh`
 	 * (see {@link Encoder.snapshot}), or until it reaches the frame or byte cap.
 	 *
 	 * Defaults to `true`.
@@ -176,13 +177,8 @@ export class Encoder<T> {
 
 		// Serialize once; parse it back to a normalized JSON value for diffing and comparison
 		// (dropping `undefined` fields, matching what lands on the wire).
-		const text = JSON.stringify(valid);
-		if (text === undefined) {
-			// `JSON.stringify` yields undefined for a top-level undefined, function, or symbol. Reject it
-			// here rather than letting it reach the wire as an unparseable frame.
-			throw new Error("value is not representable as JSON");
-		}
-
+		// A delta only nests the value's own fields, so checking the value covers its patches too.
+		const text = stringify(valid);
 		const json = JSON.parse(text);
 
 		// A resync has to emit even for an unchanged value: the frame that carried it may never have
@@ -212,9 +208,8 @@ export class Encoder<T> {
 	/**
 	 * Restate the last committed value as a full snapshot, which must open a new group.
 	 *
-	 * For a caller that opens groups itself: call it when a joiner wants a fresh group, such as when
-	 * the track's `demand().wanted` passes the largest group written, so the joiner reads the value
-	 * without the deltas before it. Returns `undefined` before the first value, when there is nothing
+	 * For a caller that opens groups itself: call it when a reader asks for a fresh group, which the
+	 * track's `demand().refresh` reports, so the reader gets the value without the deltas before it. Returns `undefined` before the first value, when there is nothing
 	 * to restate. The frame is a {@link Pending} like any other.
 	 */
 	snapshot(): Pending | undefined {

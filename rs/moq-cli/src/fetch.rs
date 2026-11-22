@@ -63,9 +63,10 @@ async fn fetch(
 
 	// Scoped to the broadcast, so the relay announces it by name even when a hidden
 	// segment such as `.stats` would keep it out of an unscoped listing.
-	let pattern = moq_net::Pattern::subtree(&broadcast).with_context(|| format!("invalid broadcast `{broadcast}`"))?;
+	let scope =
+		moq_net::Prefix::try_from(broadcast.as_str()).with_context(|| format!("invalid broadcast `{broadcast}`"))?;
 	let origin = moq_tokio::origin::spawn()
-		.scope("", &moq_net::Patterns::from(pattern))
+		.scope("", &moq_net::Prefixes::from(scope))
 		.with_context(|| format!("failed to scope to `{broadcast}`"))?;
 
 	// Subscribe-only: this session reads and never publishes.

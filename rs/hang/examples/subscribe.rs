@@ -63,19 +63,6 @@ async fn run_subscribe(consumer: moq_net::origin::Consumer) -> anyhow::Result<()
 					old.abort();
 				}
 			}
-			moq_net::announce::Event::Offline(announce) => {
-				tracing::info!(path = %announce.prefix, "broadcast offline");
-				if let Some(old) = playing.take() {
-					old.abort();
-				}
-			}
-			// The follow resumes on its own once the path is reachable again.
-			moq_net::announce::Event::Unavailable(announce) => {
-				tracing::info!(path = %announce.prefix, "broadcast unreachable");
-			}
-			moq_net::announce::Event::Available(announce) => {
-				tracing::info!(path = %announce.prefix, "broadcast reachable again");
-			}
 		}
 	}
 	anyhow::bail!("origin closed")
@@ -131,7 +118,7 @@ async fn play(broadcast: moq_net::broadcast::Consumer) -> anyhow::Result<()> {
 		.subscribe(
 			moq_net::track::Subscription::default()
 				.with_priority(1)
-				.with_delay(moq_net::track::Delay::default().with_min(None).with_max(latency)),
+				.with_delay(moq_net::track::Delay::default().with_max(latency)),
 		)
 		.await?;
 	let mut ordered =

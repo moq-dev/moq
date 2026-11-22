@@ -4,7 +4,7 @@
 # moq-relay authenticates with JWTs minted by the moq auth tooling, which ships
 # in several flavours from several registries:
 #
-#   - rust    : `moq auth` from moq-cli (cargo / brew / apt) or the moq flake (nix)
+#   - rust    : `moq auth` from the moq-cli crate or the moq package (cargo / brew / apt) or the moq flake (nix)
 #   - js-node : the @moq/auth npm package's `moq-auth` CLI, run under node
 #   - js-bun  : the same published npm package, run under bun
 #
@@ -224,7 +224,7 @@ rust_probe() {
 
 if needs rust; then
     if ! have "${TOKEN%% *}"; then
-        mark_broken rust "${TOKEN%% *} not found (cargo/brew/apt install moq-cli, or nix build github:moq-dev/moq#moq)"
+        mark_broken rust "${TOKEN%% *} not found (cargo install moq-cli, brew/apt install moq, or nix build github:moq-dev/moq#moq)"
     # `have` only checks the file exists; actually run it once, since a broken
     # published binary (e.g. a Homebrew bottle that baked in a /nix/store rpath
     # and aborts on launch) is exactly the packaging failure this test exists to

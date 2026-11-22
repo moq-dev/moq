@@ -38,9 +38,10 @@ lints [moq-dev/moq#6576](https://github.com/moq-dev/moq/pull/6576).
   declarations whose name appears only at the definition.
 - Unconditional dead-code suppressions are `expect`, so a stale one fails the
   build; check what the `cfg_attr` ones still guard.
-- Knip needs explicit entries for Bun tests, `*.browser.ts`, benches,
-  examples, worklets, TSX, `test/*` clients, and repo-root scripts, and
-  `ignore` for `rs/**/test_data`.
+- JS dead code is gated: `just js dead-code` runs fallow over the workspace
+  with the entries `.fallowrc.jsonc` lists. Review its
+  `fallow-ignore-next-line` suppressions, which mark public members with no
+  caller here.
 - Trace a CLI flag through the config merge, not prose or examples. Hidden
   deprecated spellings (`--client-*`, `--server-*`, the relay's legacy auth
   fields) fail with migration guidance on purpose.
@@ -68,13 +69,10 @@ lints [moq-dev/moq#6576](https://github.com/moq-dev/moq/pull/6576).
 ### Check first: lints
 
 - Already gated, so skip: `clippy::allow_attributes_without_reason`,
-  unfulfilled `expect`s, Biome's unused `biome-ignore`, ruff's `RUF100`, and
+  unfulfilled `expect`s (on Linux, macOS, and Windows), Biome's unused `biome-ignore`, ruff's `RUF100`, and
   pyright's unnecessary `type: ignore` in the Python wrapper. Review what
   those can't see. Generated and vendored bindings keep their blanket allows;
   `shellcheck disable` is out of scope.
-- CI lints Linux only, so run clippy for `aarch64-apple-darwin` and
-  `x86_64-pc-windows-gnu` from Linux with a rust-overlay toolchain and
-  `zig cc` for build scripts. That found every stale suppression last run.
 - Swift: read the nightly macOS job's Swift step for warnings. TypeScript:
   run typescript-eslint's `no-deprecated` once it supports the pinned
   TypeScript, and consider joining CI. The CARLA sim's pyright needs the

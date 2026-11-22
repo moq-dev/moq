@@ -77,7 +77,7 @@ a late subscription's `delay.max` or a fetch. The cache keeps an idle group for
 30 seconds whatever `maxAge` says; `maxAge` only bounds how far back a reader
 may reach into it. Audio keeps raw PCM while nobody listens, then encodes the part of
 that history a subscriber wants ahead of live audio when one arrives: from a live join's
-min delay (its playout delay plus the codec's warmup), or else within its max delay. Raw audio keeps up to
+lag (its playout delay plus the codec's warmup), or else within its max delay. Raw audio keeps up to
 `maxAge`, which for media defaults to 30 seconds (about 11.5 MB for 48 kHz
 stereo f32). With `maxAge: null`, which sets no publisher limit on the media, raw
 audio still keeps 30 seconds, since raw history needs a bound. The catalog and
@@ -138,9 +138,16 @@ puts every frame in its own group, and zero is refused. A longer join lets a
 relay keep fewer streams, at the cost of coarser loss: a viewer that falls
 behind skips a whole group. Frames still forward as they are encoded.
 
-Timestamps are `@moq/clock`'s `now()` since its origin, a `Duration`, so every
-source shares one timeline. The catalog's `sync.clock` maps it to wall time. Stamp your own tracks
-(e.g. text cues) on the same timeline to stay in sync.
+Timestamps are the page's media clock, `MediaClock.now()`, a `Duration` since
+`@moq/clock`'s origin, so every source shares one timeline. The catalog's `sync.clock` maps it to
+wall time. The media clock runs at the wall clock's rate, slewing toward it by at most 500 ppm and
+jumping forward across a suspend, so camera and screen video wall times stay on UTC however long
+the page publishes. Microphone audio counts its own samples, taking the same suspend jumps, and
+resamples by up to 2000 ppm to keep that count on the media clock, so it stays within a frame of
+its video over hours. A device clock further off than that drifts until the audio is 100 ms off,
+then re-anchors, dropping what a fast clock ran ahead. A file is placed on the media clock where it starts, keeps its own spacing
+after that, and jumps with a suspend. Stamp your own tracks (e.g. text cues) with
+`MediaClock.now()` to stay in sync.
 
 ## Custom tracks
 
@@ -164,6 +171,8 @@ signals.run((effect) => {
     // still replays the last value. Each value is stamped with when it was
     // written, so the track declares a timescale.
     const track = net.createTrack("meta.json", { timescale: Moq.Time.Timescale.MILLI });
+    // Undefined while a live track already holds the name.
+    if (!track) return;
     effect.cleanup(() => {
         track.finish();
         track.close();

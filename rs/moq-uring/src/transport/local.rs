@@ -128,7 +128,7 @@ impl<T: poll::SendStream> poll::SendStream for Local<T> {
 		self.0.offset()
 	}
 
-	fn poll_acked(&self, waiter: &kio::Waiter, offset: &Self::Offset) -> Poll<Result<poll::Acked, Self::Error>> {
+	fn poll_acked(&self, waiter: &kio::Waiter, offset: &Self::Offset) -> Poll<Result<(), Self::Error>> {
 		self.0.poll_acked(waiter, offset)
 	}
 
@@ -174,6 +174,10 @@ impl<T: poll::RecvStream> poll::RecvStream for Local<T> {
 
 	fn set_priority(&mut self, priority: i64) {
 		self.0.set_priority(priority)
+	}
+
+	fn set_window(&mut self, window: u64) -> Option<u64> {
+		self.0.set_window(window)
 	}
 
 	fn stop(&mut self, code: u32) {

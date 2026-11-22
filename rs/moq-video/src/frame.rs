@@ -1605,10 +1605,11 @@ pub mod apple {
 	use objc2_core_foundation::{CFDictionary, CFNumber, CFNumberType, CFRetained, CFString};
 	use objc2_core_video::{
 		CVPixelBuffer, CVPixelBufferCreate, CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRowOfPlane,
-		CVPixelBufferGetPixelFormatType, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferPool,
-		CVPixelBufferUnlockBaseAddress, kCVImageBufferYCbCrMatrix_ITU_R_601_4, kCVImageBufferYCbCrMatrix_ITU_R_709_2,
-		kCVImageBufferYCbCrMatrixKey, kCVPixelBufferHeightKey, kCVPixelBufferIOSurfacePropertiesKey,
-		kCVPixelBufferPixelFormatTypeKey, kCVPixelBufferWidthKey, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+		CVPixelBufferGetHeightOfPlane, CVPixelBufferGetPixelFormatType, CVPixelBufferGetPlaneCount,
+		CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferPool, CVPixelBufferUnlockBaseAddress,
+		kCVImageBufferYCbCrMatrix_ITU_R_601_4, kCVImageBufferYCbCrMatrix_ITU_R_709_2, kCVImageBufferYCbCrMatrixKey,
+		kCVPixelBufferHeightKey, kCVPixelBufferIOSurfacePropertiesKey, kCVPixelBufferPixelFormatTypeKey,
+		kCVPixelBufferWidthKey, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
 		kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, kCVPixelFormatType_420YpCbCr8Planar,
 	};
 	use objc2_video_toolbox::VTPixelTransferSession;
@@ -1765,21 +1766,14 @@ pub mod apple {
 			let (w, h) = (self.width as usize, self.height as usize);
 			let (cw, ch) = (w / 2, h / 2);
 
-			let status = unsafe { CVPixelBufferLockBaseAddress(&self.buffer, LOCK_READ_ONLY) };
-			if status != 0 {
-				return Err(Error::codec(anyhow::anyhow!(
-					"CVPixelBufferLockBaseAddress failed: {status}"
-				)));
-			}
-			let _guard = UnlockGuard(&self.buffer);
+			let locked = Locked::new(&self.buffer, LOCK_READ_ONLY)?;
 
 			let mut data = vec![0u8; I420::len(Size::new(self.width, self.height))?];
 			let (luma, chroma) = data.split_at_mut(w * h);
 			let (u_plane, v_plane) = chroma.split_at_mut(cw * ch);
 
 			// Plane 0: Y, copied row by row honoring stride.
-			let y_base = CVPixelBufferGetBaseAddressOfPlane(&self.buffer, 0) as *const u8;
-			let y_stride = CVPixelBufferGetBytesPerRowOfPlane(&self.buffer, 0);
+			let (y_base, y_stride) = locked.plane(0, w, h)?;
 			for row in 0..h {
 				unsafe {
 					ptr::copy_nonoverlapping(y_base.add(row * y_stride), luma[row * w..].as_mut_ptr(), w);
@@ -1787,8 +1781,7 @@ pub mod apple {
 			}
 
 			// Plane 1: interleaved UV -> split into U and V.
-			let uv_base = CVPixelBufferGetBaseAddressOfPlane(&self.buffer, 1) as *const u8;
-			let uv_stride = CVPixelBufferGetBytesPerRowOfPlane(&self.buffer, 1);
+			let (uv_base, uv_stride) = locked.plane(1, cw * 2, ch)?;
 			for row in 0..ch {
 				let src = unsafe { uv_base.add(row * uv_stride) };
 				for col in 0..cw {
@@ -1937,11 +1930,53 @@ pub mod apple {
 			.ok_or_else(|| Error::codec(anyhow::anyhow!("failed to build CFNumber")))
 	}
 
-	struct UnlockGuard<'a>(&'a CVPixelBuffer);
+	/// A pixel buffer with its base address locked, unlocked on drop so no early
+	/// return leaks the lock.
+	struct Locked<'a> {
+		buffer: &'a CVPixelBuffer,
+		flags: CVPixelBufferLockFlags,
+	}
 
-	impl Drop for UnlockGuard<'_> {
+	impl<'a> Locked<'a> {
+		fn new(buffer: &'a CVPixelBuffer, flags: CVPixelBufferLockFlags) -> Result<Self, Error> {
+			let status = unsafe { CVPixelBufferLockBaseAddress(buffer, flags) };
+			if status != 0 {
+				return Err(Error::codec(anyhow::anyhow!(
+					"CVPixelBufferLockBaseAddress failed: {status}"
+				)));
+			}
+			Ok(Self { buffer, flags })
+		}
+
+		/// Plane `index`'s base address and row stride, checked to hold `rows`
+		/// rows of `row_bytes` each, so copying that much stays inside it.
+		fn plane(&self, index: usize, row_bytes: usize, rows: usize) -> Result<(*mut u8, usize), Error> {
+			let planes = CVPixelBufferGetPlaneCount(self.buffer);
+			if index >= planes {
+				return Err(Error::codec(anyhow::anyhow!(
+					"pixel buffer has {planes} planes, not plane {index}"
+				)));
+			}
+			let base = CVPixelBufferGetBaseAddressOfPlane(self.buffer, index).cast::<u8>();
+			let stride = CVPixelBufferGetBytesPerRowOfPlane(self.buffer, index);
+			let height = CVPixelBufferGetHeightOfPlane(self.buffer, index);
+			if base.is_null() {
+				return Err(Error::codec(anyhow::anyhow!(
+					"pixel buffer plane {index} has no base address"
+				)));
+			}
+			if stride < row_bytes || height < rows {
+				return Err(Error::codec(anyhow::anyhow!(
+					"pixel buffer plane {index} is {stride} bytes by {height} rows, too small for {row_bytes} by {rows}"
+				)));
+			}
+			Ok((base, stride))
+		}
+	}
+
+	impl Drop for Locked<'_> {
 		fn drop(&mut self) {
-			unsafe { CVPixelBufferUnlockBaseAddress(self.0, LOCK_READ_ONLY) };
+			unsafe { CVPixelBufferUnlockBaseAddress(self.buffer, self.flags) };
 		}
 	}
 
@@ -2027,33 +2062,25 @@ pub mod apple {
 			.map(|p| unsafe { CFRetained::from_raw(p) })
 			.ok_or_else(|| Error::codec(anyhow::anyhow!("CVPixelBufferCreate failed: {status}")))?;
 
-		let flags = CVPixelBufferLockFlags(0);
-		let status = unsafe { CVPixelBufferLockBaseAddress(&buffer, flags) };
-		if status != 0 {
-			return Err(Error::codec(anyhow::anyhow!(
-				"CVPixelBufferLockBaseAddress failed: {status}"
-			)));
+		{
+			let locked = Locked::new(&buffer, CVPixelBufferLockFlags(0))?;
+			copy_plane(&locked, 0, frame.y(), w, h)?;
+			copy_plane(&locked, 1, frame.u(), cw, ch)?;
+			copy_plane(&locked, 2, frame.v(), cw, ch)?;
 		}
-
-		copy_plane(&buffer, 0, frame.y(), w, h);
-		copy_plane(&buffer, 1, frame.u(), cw, ch);
-		copy_plane(&buffer, 2, frame.v(), cw, ch);
-
-		unsafe { CVPixelBufferUnlockBaseAddress(&buffer, flags) };
 		Ok(buffer)
 	}
 
 	/// Copy a tightly-packed source plane into a pixel-buffer plane, honoring its
 	/// (possibly padded) row stride.
-	fn copy_plane(buffer: &CVPixelBuffer, plane: usize, src: &[u8], row_bytes: usize, rows: usize) {
-		let base = CVPixelBufferGetBaseAddressOfPlane(buffer, plane) as *mut u8;
-		let stride = CVPixelBufferGetBytesPerRowOfPlane(buffer, plane);
+	fn copy_plane(locked: &Locked, plane: usize, src: &[u8], row_bytes: usize, rows: usize) -> Result<(), Error> {
+		let (base, stride) = locked.plane(plane, row_bytes, rows)?;
 		for y in 0..rows {
-			unsafe {
-				let dst = base.add(y * stride);
-				std::ptr::copy_nonoverlapping(src[y * row_bytes..].as_ptr(), dst, row_bytes);
-			}
+			let row = &src[y * row_bytes..(y + 1) * row_bytes];
+			// SAFETY: `plane` checked the plane holds `rows` rows of `row_bytes`.
+			unsafe { std::ptr::copy_nonoverlapping(row.as_ptr(), base.add(y * stride), row_bytes) };
 		}
+		Ok(())
 	}
 }
 
@@ -3322,6 +3349,19 @@ mod tests {
 		assert_eq!(actual.height(), 242);
 		assert_eq!(actual.stride(), 322 * 4);
 		assert_eq!(actual.data(), expected.data());
+	}
+
+	/// A pixel buffer that claims a larger picture than CoreVideo allocated is
+	/// refused rather than read past its planes, and leaves it unlocked.
+	#[cfg(apple)]
+	#[test]
+	fn pixel_buffer_download_refuses_a_size_past_its_planes() {
+		let surface = nv12_surface(&gradient_i420(64, 48));
+		let oversized = super::apple::PixelBuffer::new(surface.buffer.clone(), 64, 480);
+		assert!(oversized.download_i420().is_err());
+
+		// The failed download released its lock, so the buffer still reads.
+		assert_eq!(surface.download_i420().unwrap().height, 48);
 	}
 
 	#[cfg(apple)]

@@ -196,7 +196,7 @@ enum Kind {
 /// Wait until some viewer wants the track, or none does.
 async fn until_wanted(demand: &moq_net::track::Demand, wanted: bool) -> moq_net::Result<()> {
 	let mut demand = demand.clone();
-	while demand.wanted_changed().await?.is_some() != wanted {}
+	while demand.wanted_changed().await? != wanted {}
 	Ok(())
 }
 
@@ -278,7 +278,7 @@ async fn run(config: &Config) -> Result<()> {
 	let consume_origin = moq_tokio::origin::spawn();
 	let viewers = consume_origin
 		.consume()
-		.scope(&viewer_path, &moq_net::Patterns::from(moq_net::Pattern::all()))
+		.scope(&viewer_path, &moq_net::Prefixes::all())
 		.context("invalid viewer prefix")?;
 
 	tracing::info!(url = %moq_tokio::RedactedUrl::new(&url), %name, broadcast = %broadcast_path, viewers = %viewer_path, "connecting to relay");

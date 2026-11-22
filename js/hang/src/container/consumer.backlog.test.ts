@@ -1,6 +1,6 @@
-// Pairs `rs/moq-audio`'s decode-path tests of the join's backlog: a group the consumer closes below
-// its cursor unread still tells the estimator when it arrived, but only when the publisher's largest
-// at the subscription's start shows it was produced before.
+// Pairs `rs/moq-audio`'s decode-path tests of the join's backlog: a group the ordered read gives up
+// unread still tells the estimator when it landed, but only when the publisher's largest at the
+// subscription's start shows it was produced before.
 
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { Duration, type Installed, Instant, now } from "@moq/clock";
@@ -29,11 +29,17 @@ type Event = [number, number, number];
  * consumer's measured term once they all have, beside the estimator fed the same arrivals with each
  * group `backlog` names reported rather than observed.
  */
-async function play(events: Event[], backlog: (group: number) => boolean): Promise<[number, number]> {
+async function play(
+	events: Event[],
+	backlog: (group: number) => boolean,
+	observing = false,
+): Promise<[number, number]> {
 	const track = new Track.Producer("audio");
-	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(2000) } }), {
+	const subscription = { delay: { max: Duration.millis(2000) } };
+	const consumer = new Consumer(track.subscribe(subscription), {
 		format: new Format("audio"),
 		delay: { min: Duration.millis(100), max: Duration.millis(2000) },
+		ordered: observing ? track.subscribe(subscription).ordered() : undefined,
 	});
 	const oracle = new Jitter();
 	const base = now().since(Instant.ZERO).asMillis();
@@ -81,7 +87,7 @@ const order = (a: Event, b: Event) => a[0] - b[0] || a[1] - b[1];
 // over the first 400 ms and 15 more 1.0 to 1.3 s in, with the live frames produced meanwhile queued
 // behind them. Without `delivered`, that backlog never reaches this node, though the live frames still
 // queue behind it.
-async function join(delivered: boolean): Promise<number> {
+async function join(delivered: boolean, observing: boolean): Promise<number> {
 	const events = live((produced) => {
 		const at = produced + 40;
 		if (at <= 400) return 400 + produced / 10;
@@ -94,14 +100,18 @@ async function join(delivered: boolean): Promise<number> {
 		for (let s = 0; s < 15; s++) events.push([1000 + 20 * s, 141 + s, 99_700 + 20 * s]);
 	}
 	events.sort(order);
-	const [measured, oracle] = await play(events, (group) => group < 200);
+	const [measured, oracle] = await play(events, (group) => group < 200, observing);
 	expect(measured).toBe(oracle);
 	return measured;
 }
 
+// Read through a second, ordered subscription, as the browser's audio decoder does, so the estimate
+// observes the backlog as it lands. Without one, the consumer's own ordered read would say nothing of
+// it: the backlog lands below where the read already is, and a local track's late arrival there is no
+// gap in JS (Rust reports it Old, `a_late_arrival_is_a_gap`), so its landing never reaches the estimate.
 test("a join's backlog skipped below the cursor folds nothing", async () => {
-	const skipped = await join(true);
-	const unseen = await join(false);
+	const skipped = await join(true, true);
+	const unseen = await join(false, true);
 	expect(skipped).toBeLessThanOrEqual(80);
 	expect(unseen).toBeGreaterThanOrEqual(280);
 });
@@ -123,53 +133,67 @@ test("late groups dropped from the start hold no join open", async () => {
 	expect(dropped).toBe(lost);
 });
 
-test("the join's boundary is the publisher's answer, not a group that raced it", async () => {
-	// Group 150 lands from a cache before the publisher answers that it stood at group 200. Group 160
-	// then arrives below the cursor: produced before the subscription, so it is backlog.
+/**
+ * A track whose ordered read's info resolves once `answer` is called, and whose largest is what
+ * `largest` says when asked. Its feed owes every key from `from`, as a session's would.
+ */
+function joining(from: bigint, largest: () => bigint | Promise<bigint>) {
 	const track = new Track.Producer("audio");
+	track.requests();
 	const subscriber = track.subscribe({ delay: { max: Duration.millis(2000) } });
-	let answered = false;
+	subscriber.withRange({ start: { included: from } });
 	let answer!: () => void;
-	const started = new Promise<void>((resolve) => {
+	const answered = new Promise<void>((resolve) => {
 		answer = resolve;
 	});
-	const raced = new Proxy(subscriber, {
-		get(target, key) {
-			if (key === "start") return () => started.then(() => undefined);
-			if (key === "info") return () => started.then(() => ({}));
-			if (key === "largest") return async () => ({ group: answered ? 200n : 150n, frame: 0 });
-			const value = Reflect.get(target, key, target);
-			return typeof value === "function" ? value.bind(target) : value;
-		},
-	});
-	const reported: number[] = [];
-	const backlog = spyOn(Jitter.prototype, "backlog").mockImplementation((arrival: number) => {
-		reported.push(arrival);
-	});
-	const consumer = new Consumer(raced, {
-		format: new Format("audio"),
-		delay: { min: Duration.millis(100), max: Duration.millis(2000) },
-	});
+	const proxy = <T extends object>(target: T, overrides: Record<string, unknown>): T =>
+		new Proxy(target, {
+			get(target, key) {
+				if (typeof key === "string" && key in overrides) return overrides[key];
+				const value = Reflect.get(target, key, target);
+				return typeof value === "function" ? value.bind(target) : value;
+			},
+		});
+	const ordered = () =>
+		proxy(subscriber.ordered(), {
+			info: () => answered.then(() => ({})),
+			largest: async () => ({ group: await largest(), frame: 0 }),
+		});
 	const write = (sequence: number, media: number) => {
 		const group = track.createGroup(BigInt(sequence));
 		const payload = new Uint8Array([...Varint.encode(media * 1000), 1]);
 		group.writeFrame({ payload, timestamp: Time.Timestamp.fromMicros(media * 1000) });
 		group.finish();
 	};
+	return { track, subscriber: proxy(subscriber, { ordered }), answer, write };
+}
+
+// The ordered read gives up group 151 that never came with group 152 that landed behind it, once 153
+// landed a budget ago. The publisher stood at group 200 as the subscription began, so the gap is
+// backlog: when 152 landed reaches the estimate, once. The read hands out its first group only once
+// its start is known, so a cached group can no longer race the publisher's answer.
+test("a gap given up at or below the join tells the estimate when it landed", async () => {
+	const { track, subscriber, answer, write } = joining(150n, () => 200n);
+	const reported: number[] = [];
+	const backlog = spyOn(Jitter.prototype, "backlog").mockImplementation((arrival: number) => {
+		reported.push(arrival);
+	});
+	const consumer = new Consumer(subscriber, {
+		format: new Format("audio"),
+		delay: { min: Duration.millis(100), max: Duration.millis(2000) },
+	});
 	try {
-		write(150, 0);
-		await clock.advance(Duration.ZERO);
-		answered = true;
 		answer();
+		write(150, 0);
 		expect(await consumer.next()).toMatchObject({ kind: "frame", group: 150n });
-		write(201, 1020);
-		await clock.advance(Duration.millis(200));
+		await clock.advance(Duration.millis(10));
+		const landed = now().since(Instant.ZERO).asMillis();
+		write(152, 40);
+		write(153, 60);
+		await clock.advance(Duration.millis(2001));
 		expect(await consumer.next()).toMatchObject({ kind: "gap" });
-		expect(await consumer.next()).toMatchObject({ kind: "frame", group: 201n });
-		write(160, 200);
-		write(202, 1040);
-		await clock.advance(Duration.ZERO);
-		expect(reported).toHaveLength(1);
+		expect(await consumer.next()).toMatchObject({ kind: "frame", group: 153n });
+		expect(reported).toEqual([landed]);
 	} finally {
 		backlog.mockRestore();
 		consumer.close();
@@ -178,56 +202,100 @@ test("the join's boundary is the publisher's answer, not a group that raced it",
 	}
 });
 
-test("the join's boundary is the publisher's answer, not the largest by the first group", async () => {
-	// The start resolves before the subscription is established, while the largest still names cached
-	// group 150. The publisher answers that it stood at group 200, then groups up to 210 land before
-	// the first reaches this consumer. Group 205 then arrives below the cursor: produced after the
-	// subscription began, so it is no backlog, unlike group 160.
-	const track = new Track.Producer("audio");
-	const subscriber = track.subscribe({ delay: { max: Duration.millis(2000) } });
-	let answered = false;
-	let advanced = false;
-	let answer!: () => void;
-	const started = new Promise<void>((resolve) => {
-		answer = resolve;
-	});
-	const raced = new Proxy(subscriber, {
-		get(target, key) {
-			if (key === "start") return async () => undefined;
-			if (key === "info") return () => started.then(() => ({}));
-			if (key === "largest") return async () => ({ group: advanced ? 210n : answered ? 200n : 150n, frame: 0 });
-			const value = Reflect.get(target, key, target);
-			return typeof value === "function" ? value.bind(target) : value;
-		},
-	});
+// The same gap when the publisher stood at group 151: its landing is 152's, produced since the
+// subscription began, so a gap reaching past the join is no backlog.
+test("a gap reaching past the join folds nothing", async () => {
+	const { track, subscriber, answer, write } = joining(150n, () => 151n);
 	const reported: number[] = [];
 	const backlog = spyOn(Jitter.prototype, "backlog").mockImplementation((arrival: number) => {
 		reported.push(arrival);
 	});
-	const consumer = new Consumer(raced, {
+	const consumer = new Consumer(subscriber, {
+		format: new Format("audio"),
+		delay: { min: Duration.millis(100), max: Duration.millis(2000) },
+	});
+	try {
+		answer();
+		write(150, 0);
+		expect(await consumer.next()).toMatchObject({ kind: "frame", group: 150n });
+		await clock.advance(Duration.millis(10));
+		write(152, 40);
+		write(153, 60);
+		await clock.advance(Duration.millis(2001));
+		expect(await consumer.next()).toMatchObject({ kind: "gap" });
+		expect(await consumer.next()).toMatchObject({ kind: "frame", group: 153n });
+		expect(reported).toEqual([]);
+	} finally {
+		backlog.mockRestore();
+		consumer.close();
+		track.finish();
+		track.close();
+	}
+});
+
+// The publisher answers that it stood at group 200, then its largest moves to 210 before the first
+// group reaches this consumer. Group 206, given up with hole 205, was produced after the subscription
+// began, so it is no backlog.
+test("the join's boundary is the publisher's answer, not the largest by the first group", async () => {
+	let advanced = false;
+	const { track, subscriber, answer, write } = joining(204n, () => (advanced ? 210n : 200n));
+	const reported: number[] = [];
+	const backlog = spyOn(Jitter.prototype, "backlog").mockImplementation((arrival: number) => {
+		reported.push(arrival);
+	});
+	const consumer = new Consumer(subscriber, {
 		format: new Format("audio"),
 		delay: { max: Duration.millis(2000) },
 	});
-	const write = (sequence: number, media: number) => {
-		const group = track.createGroup(BigInt(sequence));
-		const payload = new Uint8Array([...Varint.encode(media * 1000), 1]);
-		group.writeFrame({ payload, timestamp: Time.Timestamp.fromMicros(media * 1000) });
-		group.finish();
-	};
 	try {
-		await clock.advance(Duration.ZERO);
-		answered = true;
 		answer();
 		await clock.advance(Duration.ZERO);
 		advanced = true;
-		write(210, 200);
-		expect(await consumer.next()).toMatchObject({ kind: "frame", group: 210n });
-		write(205, 100);
+		write(204, 0);
+		expect(await consumer.next()).toMatchObject({ kind: "frame", group: 204n });
+		write(206, 40);
+		write(207, 60);
+		await clock.advance(Duration.millis(2001));
+		expect(await consumer.next()).toMatchObject({ kind: "gap" });
+		expect(await consumer.next()).toMatchObject({ kind: "frame", group: 207n });
+		expect(reported).toEqual([]);
+	} finally {
+		backlog.mockRestore();
+		consumer.close();
+		track.finish();
+		track.close();
+	}
+});
+
+// A cached backlog: group 150 went stale behind 151 before the subscription, so the read gives it up and
+// hands out 151 at once, both before the publisher's largest is known. The gap still waits for that
+// boundary rather than being dropped with the first group.
+test("a gap given up before the join's boundary is known still tells the estimate", async () => {
+	let settle!: (largest: bigint) => void;
+	const known = new Promise<bigint>((resolve) => {
+		settle = resolve;
+	});
+	const { track, subscriber, answer, write } = joining(150n, () => known);
+	const reported: number[] = [];
+	const backlog = spyOn(Jitter.prototype, "backlog").mockImplementation((arrival: number) => {
+		reported.push(arrival);
+	});
+	const landed = now().since(Instant.ZERO).asMillis();
+	write(150, 0);
+	await clock.advance(Duration.millis(10));
+	write(151, 20);
+	await clock.advance(Duration.millis(2001));
+	const consumer = new Consumer(subscriber, {
+		format: new Format("audio"),
+		delay: { min: Duration.millis(100), max: Duration.millis(2000) },
+	});
+	try {
+		answer();
+		expect(await consumer.next()).toMatchObject({ kind: "frame", group: 151n });
+		expect(reported).toEqual([]);
+		settle(200n);
 		await clock.advance(Duration.ZERO);
-		expect(reported).toHaveLength(0);
-		write(160, 0);
-		await clock.advance(Duration.ZERO);
-		expect(reported).toHaveLength(1);
+		expect(reported).toEqual([landed]);
 	} finally {
 		backlog.mockRestore();
 		consumer.close();

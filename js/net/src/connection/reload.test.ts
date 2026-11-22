@@ -10,6 +10,7 @@ import { ConnectTimeout, SessionCode, SessionError, StreamCode, toTransport } fr
 import { WireRoute } from "../hop.ts";
 // Loaded up front: a session imports it on first use, which takes host turns a Manual clock cannot wait out.
 import "../ietf/connection.ts";
+import { defined } from "../defined.test-util.ts";
 import { ALPN as IetfALPN } from "../ietf/version.ts";
 import { hooks } from "../internal.ts";
 import * as Lite from "../lite/index.ts";
@@ -867,7 +868,7 @@ for (const [name, teardown] of Object.entries(teardowns)) {
 		if (!origin) throw new Error("no origin");
 		const broadcastRoute = origin.route(Path.from("room"));
 		const broadcast = broadcastRoute.broadcast;
-		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+		const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 		await waitUntil(() => dials.length > 0);
 		const first = dials[0];
 		if (!first) throw new Error("no first dial");
@@ -954,7 +955,7 @@ for (const [name, drainEnd] of Object.entries(drainEnds)) {
 		const origin = new OriginProducer();
 		const broadcastRoute = origin.route(Path.from("room"));
 		const broadcast = broadcastRoute.broadcast;
-		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+		const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 		const reload = new Reload({
 			url: new URL("https://example.com/a"),
 			websocket: { enabled: false },
@@ -1014,7 +1015,7 @@ test("a retired GOAWAY predecessor still closes by its handover cap", async () =
 	const origin = new OriginProducer();
 	const broadcastRoute = origin.route(Path.from("room"));
 	const broadcast = broadcastRoute.broadcast;
-	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	const reload = new Reload({
 		url: new URL("https://example.com/"),
 		websocket: { enabled: false },
@@ -1082,8 +1083,8 @@ test("closing the loop keeps the tokens until the session drains", async () => {
 				if (!request) break;
 				const token = new TextDecoder().decode(request.token);
 				request.accept({
-					publish: new Path.Patterns(token === "token" ? [Path.Pattern.all()] : []),
-					subscribe: new Path.Patterns(),
+					publish: token === "token" ? Path.Prefixes.all() : new Path.Prefixes(),
+					subscribe: new Path.Prefixes(),
 				});
 			}
 		});
@@ -1097,7 +1098,7 @@ test("closing the loop keeps the tokens until the session drains", async () => {
 	await reload.auth.add("token").answered;
 	const broadcastRoute = origin.route(Path.from("room"));
 	const broadcast = broadcastRoute.broadcast;
-	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	const first = dials[0];
 	if (!first) throw new Error("no first dial");
 	const remote = wireOf(await first.server).consume(Path.from("room"));

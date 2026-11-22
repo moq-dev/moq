@@ -24,16 +24,19 @@ fn timed() -> moq_net::track::Info {
 }
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// A publisher announcing `bcast`, a relay subscribed to it, and a far origin subscribed
 /// to the relay, with `bcast` resolved at the relay and the far end.
 struct Relayed {
 	_publisher: moq_net::origin::Producer,
+	/// Held as a relay holds its origin: one whose sessions all end tears down.
+	_relay: moq_net::origin::Producer,
 	broadcast: moq_net::origin::Route,
 	upstream: MockPair,
 	_downstream: MockPair,
@@ -76,6 +79,7 @@ async fn relayed(version: &str) -> Relayed {
 		_downstream: downstream,
 		relayed: resolve(&relay).await,
 		remote: resolve(&far).await,
+		_relay: relay,
 	}
 }
 

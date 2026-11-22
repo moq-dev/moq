@@ -123,9 +123,23 @@ class TrackConsumer(_Stream[GroupConsumer]):
     def update(self, subscription: Subscription) -> None:
         """Change this subscriber's delivery preferences.
 
-        Raises on a time anchor the track can't serve.
+        Raises on a range time the track can't serve.
         """
         self._inner.update(subscription._ffi())
+
+    async def refresh(self) -> None:
+        """Ask the publisher for a group newer than the newest held, returning once it is sent.
+
+        Judged by the track's :class:`TrackRefresh`. It is sent once the newest group is old
+        enough, when whatever serves the track reads it: the session forwarding it upstream, or
+        a local publisher waiting in :meth:`TrackDemand.refresh`. Concurrent calls share one
+        request and all return when it is sent. Cancelling the call before then withdraws its
+        request. It returns at once when there is nothing to send: a track that does not
+        refresh, a ratio the newest group is under, a track with no group yet, or a request
+        already sent. It also returns when a newer group lands first. The new group arrives
+        through the normal reads, such as :meth:`next_group`.
+        """
+        await self._inner.refresh()
 
     def cancel(self) -> None:
         """Cancel the subscription and stop delivering groups."""

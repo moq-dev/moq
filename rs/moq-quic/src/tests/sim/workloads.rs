@@ -1,5 +1,7 @@
 //! Cancellation, duplex traffic, and unreliable traffic sharing the simulation's connection.
 
+use std::task::Poll;
+
 use super::*;
 
 const CODE: VarInt = VarInt(42);
@@ -66,7 +68,7 @@ impl Transfer {
 		}
 		let mut stream = conn.send_stream(id);
 		if matches!(self.end, End::Stop)
-			&& let Some(send::End::Stopped(code)) = stream.end().unwrap()
+			&& let Some(code) = stream.stopped().unwrap()
 		{
 			prop_assert_eq!(code, CODE);
 			stream.reset(code).unwrap();
@@ -78,16 +80,17 @@ impl Transfer {
 			_ => self.len,
 		};
 		while self.written < target {
-			match stream.write(&mut payload(key, self.written..target)) {
-				Ok(written) => self.written += written,
-				Err(send::Error::Blocked) => return Ok(()),
-				Err(send::Error::Stopped(code)) if matches!(self.end, End::Stop) => {
+			match stream.try_write(&mut payload(key, self.written..target)) {
+				Poll::Ready(Ok(written)) => self.written += written,
+				Poll::Pending => return Ok(()),
+				Poll::Ready(Err(send::Error::Stopped)) if matches!(self.end, End::Stop) => {
+					let code = stream.stopped().unwrap().expect("stopped with a code");
 					prop_assert_eq!(code, CODE);
 					stream.reset(code).unwrap();
 					self.sent = true;
 					return Ok(());
 				}
-				Err(error) => return Err(TestCaseError::fail(format!("{id} write: {error}"))),
+				Poll::Ready(Err(error)) => return Err(TestCaseError::fail(format!("{id} write: {error}"))),
 			}
 		}
 		match self.end {
@@ -113,14 +116,15 @@ impl Transfer {
 		}
 		let mut stream = conn.recv_stream(id);
 		let mut chunks = stream.read().unwrap();
+		let mut reset = false;
 		loop {
 			// Stop inside a chunk too, so a fully buffered stream cannot skip the stop path.
 			let max = match self.end {
 				End::Stop => self.cut - self.read,
 				_ => usize::MAX,
 			};
-			match chunks.next(max) {
-				Ok(Some(chunk)) => {
+			match chunks.try_next(max) {
+				Poll::Ready(Ok(Some(chunk))) => {
 					let end = self.read + chunk.bytes.len();
 					prop_assert!(end <= self.len);
 					prop_assert_eq!(chunk.bytes.as_ref(), payload(key, self.read..end));
@@ -129,27 +133,30 @@ impl Transfer {
 						break;
 					}
 				}
-				Ok(None) => {
+				Poll::Ready(Ok(None)) => {
 					prop_assert!(matches!(self.end, End::Finish));
 					prop_assert_eq!(self.read, self.len);
 					self.received = true;
 					break;
 				}
-				Err(recv::Error::Blocked) => break,
-				Err(recv::Error::Reset(code)) => {
-					prop_assert_eq!(code, CODE);
-					prop_assert!(matches!(self.end, End::Reset | End::ReliableReset));
-					prop_assert!(self.read <= self.cut);
-					if matches!(self.end, End::ReliableReset) {
-						prop_assert!(self.read >= (self.cut / 2).max(1));
-					}
-					self.received = true;
+				Poll::Pending => break,
+				Poll::Ready(Err(recv::Error::Reset)) => {
+					reset = true;
 					break;
 				}
-				Err(error) => return Err(TestCaseError::fail(format!("{id} read: {error}"))),
+				Poll::Ready(Err(error)) => return Err(TestCaseError::fail(format!("{id} read: {error}"))),
 			}
 		}
 		chunks.finalize();
+		if reset {
+			prop_assert_eq!(stream.received_reset(), Ok(Some(CODE)));
+			prop_assert!(matches!(self.end, End::Reset | End::ReliableReset));
+			prop_assert!(self.read <= self.cut);
+			if matches!(self.end, End::ReliableReset) {
+				prop_assert!(self.read >= (self.cut / 2).max(1));
+			}
+			self.received = true;
+		}
 		if matches!(self.end, End::Stop) && self.read == self.cut {
 			stream.stop(CODE).unwrap();
 			self.received = true;

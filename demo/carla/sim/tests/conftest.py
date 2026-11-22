@@ -25,10 +25,6 @@ class AnnounceEventAbsent(AnnounceEvent):
     pass
 
 
-class AnnounceEventOffline(AnnounceEvent):
-    pass
-
-
 class SnapshotProducer:
     """Records every published value; demand comes from the wrapped track."""
 
@@ -53,7 +49,6 @@ moq.Compression = SimpleNamespace(deflate=lambda: "deflate")
 moq.is_shutdown = lambda err: False
 moq.AnnounceEventPresent = AnnounceEventPresent
 moq.AnnounceEventAbsent = AnnounceEventAbsent
-moq.AnnounceEventOffline = AnnounceEventOffline
 moq.Timestamp = lambda value, scale: SimpleNamespace(value=value, scale=scale)
 moq.TrackInfo = lambda **kwargs: SimpleNamespace(**kwargs)
 
@@ -75,7 +70,7 @@ class CatalogProducer:
 
 
 moq_media.CatalogProducer = CatalogProducer
-moq_media.VideoFormat = SimpleNamespace(AVC3="avc3")
+moq_media.VideoFormat = SimpleNamespace(h264=lambda: "h264")
 moq_media.VideoInit = lambda **kwargs: SimpleNamespace(**kwargs)
 moq_media.VideoHint = lambda **kwargs: SimpleNamespace(**kwargs)
 moq_media.Dimensions = lambda **kwargs: SimpleNamespace(**kwargs)

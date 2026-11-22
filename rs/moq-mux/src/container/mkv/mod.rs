@@ -137,7 +137,8 @@ pub enum Error {
 	#[error("unsupported spherical video: {0}")]
 	UnsupportedSpatial(&'static str),
 
-	/// The named track joined after the MKV header was emitted.
+	/// The named track joined after the MKV header was emitted, with no failed track of its
+	/// kind to continue.
 	#[error("MKV track layout changed after header was emitted: track '{0}' added")]
 	HeaderAddedTrack(String),
 

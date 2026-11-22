@@ -264,7 +264,7 @@ test("close ends a pending read", async () => {
 	consumer.close();
 	expect(await Promise.all(pending)).toEqual([undefined, undefined]);
 	// The subscription the consumer owned is gone.
-	expect(track.demand().wanted.peek()).toBeUndefined();
+	expect(track.demand().wanted.peek()).toBe(false);
 	expect(await consumer.latest()).toBeUndefined();
 	producer.finish();
 });
@@ -376,6 +376,27 @@ test("mutate starts from the configured initial value", async () => {
 	expect((await consumer.next())?.value).toEqual({ a: 1 });
 });
 
+// JSON null is a published value: mutate must hand it over rather than the stale `initial`, and
+// must not refuse it as if nothing had been published.
+test("mutate starts from a published null", async () => {
+	for (const initial of [undefined, { a: 1 }]) {
+		const track = new Track.Producer("test");
+		const producer = new Producer<Value | null>({ track, initial });
+		producer.update(null, key());
+
+		let seen: Value | null | undefined;
+		producer.mutate((v) => {
+			seen = v;
+		}, key());
+		expect(seen).toBeNull();
+		producer.finish();
+		const consumer = new Consumer<Value | null>({ track });
+		const states: (Value | null)[] = [];
+		for (let state = await consumer.latest(); state; state = await consumer.latest()) states.push(state.value);
+		expect(states).toEqual([null]);
+	}
+});
+
 // A rejected edit never reached the wire, so the next owner starts from the last value that did.
 // Carrying the rejected edit forward would fail every later publish the same way. (Mirrors the Rust
 // `a_rejected_edit_leaves_modify_at_the_last_written_value`.)
@@ -435,7 +456,7 @@ function fill(producer: Producer<Value>): void {
 }
 
 test("deltas never roll without a joiner", async () => {
-	const track = new Track.Producer("test").accept({ refresh: 1 });
+	const track = new Track.Producer("test").accept({ refresh: { ratio: 1 } });
 	const producer = new Producer<Value>({ track });
 	for (let n = 0; n <= 10; n++) producer.update({ n }, key());
 	producer.finish();
@@ -449,7 +470,7 @@ test("a joiner over the ratio gets a fresh snapshot", async () => {
 		[8, [4]],
 		[1, [4, 1]],
 	] as const) {
-		const track = new Track.Producer("test").accept({ refresh, maxAge: null });
+		const track = new Track.Producer("test").accept({ refresh: { ratio: refresh }, maxAge: null });
 		const producer = new Producer<Value>({ track });
 		fill(producer);
 
@@ -464,8 +485,40 @@ test("a joiner over the ratio gets a fresh snapshot", async () => {
 	}
 });
 
+// An interval caps how often readers make the producer restate: a subscriber's refresh waits for
+// the newest group to age, then restates without a ratio to outweigh.
+test("a subscriber's refresh restates the value once the interval passes", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		const refresh = { interval: Duration.secs(5) };
+		const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, refresh, maxAge: null });
+		const producer = new Producer<Value>({ track });
+		const subscriber = track.subscribe();
+		for (let n = 0; n <= 3; n++) producer.update({ n }, Time.Timestamp.fromMillis(n * 10));
+
+		const sent = subscriber.refresh();
+		await clock.advance(Duration.secs(4));
+		expect(track.demand().refresh.peek()).toBe(false);
+		await clock.advance(Duration.secs(1));
+		// Restated as soon as it came due, which sent and answered it.
+		await sent;
+		expect(track.demand().refresh.peek()).toBe(false);
+		producer.finish();
+		subscriber.close();
+
+		expect(await structure(track.subscribe({ delay: { max: REPLAY_LATENCY } }).ordered())).toEqual([4, 1]);
+	} finally {
+		installed.close();
+	}
+});
+
 test("a refresh reuses the newest timestamp", async () => {
-	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, refresh: 1, maxAge: null });
+	const track = new Track.Producer("test").accept({
+		timescale: Time.Timescale.MILLI,
+		refresh: { ratio: 1 },
+		maxAge: null,
+	});
 	const producer = new Producer<Value>({ track });
 	for (let n = 0; n <= 3; n++) producer.update({ n }, Time.Timestamp.fromMillis(n * 10));
 
@@ -490,7 +543,11 @@ test("a refresh reuses the newest timestamp", async () => {
 // update, then restates the value there. (Mirrors the Rust
 // `a_refresh_after_older_updates_waits_for_a_later_one`.)
 test("a refresh after older updates waits for a later one", async () => {
-	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, refresh: 1, maxAge: null });
+	const track = new Track.Producer("test").accept({
+		timescale: Time.Timescale.MILLI,
+		refresh: { ratio: 1 },
+		maxAge: null,
+	});
 	const producer = new Producer<Value>({ track });
 	// Deltas may carry timestamps older than their group's first frame.
 	for (const [n, ms] of [30, 10, 20, 15].entries()) producer.update({ n }, Time.Timestamp.fromMillis(ms));
@@ -521,7 +578,7 @@ test("a refresh after older updates waits for a later one", async () => {
 // later update, then restates the value there. (Mirrors the Rust
 // `a_refresh_after_older_updates_waits_for_a_later_one`.)
 test("a scale-less refresh waits for an update past the open group's key", async () => {
-	const track = new Track.Producer("test").accept({ refresh: 1, maxAge: null });
+	const track = new Track.Producer("test").accept({ refresh: { ratio: 1 }, maxAge: null });
 	const producer = new Producer<Value>({ track });
 	// A snapshot and deltas, all at the open group's key.
 	for (let n = 0; n <= 3; n++) producer.update({ n }, Time.Timestamp.unscaled(5n));
@@ -552,7 +609,7 @@ test("a scale-less refresh waits for an update past the open group's key", async
 // update rides as a delta against it. (Mirrors the Rust
 // `a_refresh_after_a_rejected_update_restates_the_last_written_value`.)
 test("a refresh after a rejected update restates the last written value", async () => {
-	const track = new Track.Producer("test").accept({ refresh: 1, maxAge: null });
+	const track = new Track.Producer("test").accept({ refresh: { ratio: 1 }, maxAge: null });
 	const producer = new Producer<Value>({ track });
 	fill(producer);
 
@@ -584,7 +641,7 @@ test("no ratio never refreshes", async () => {
 });
 
 test("a compressed refresh opens a fresh group", async () => {
-	const track = new Track.Producer("test").accept({ refresh: 0, compression: "deflate", maxAge: null });
+	const track = new Track.Producer("test").accept({ refresh: { ratio: 0 }, compression: "deflate", maxAge: null });
 	const producer = new Producer<Value>({ track });
 	producer.update({ a: 1, b: 1 }, key());
 	producer.update({ a: 1, b: 2 }, key());

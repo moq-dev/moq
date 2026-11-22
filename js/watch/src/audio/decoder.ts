@@ -150,7 +150,9 @@ type Consumed = { path: Moq.Path.Valid; codec: string; consumer: Container.Consu
 
 // What the decoder does with the selected rendition. Only a running rendition counts a stall.
 type Phase =
-	| { kind: "stopped" }
+	// Not decoding. A stop keeps the last consumer, so a rendition resumed after a pause or a mute
+	// continues its estimate: the listener's stop says nothing about the path.
+	| { kind: "stopped"; consumer?: Consumed }
 	// Decoding the rendition at `key` into the ring, which an underrun or a stall is counted against.
 	| { kind: "running"; key: Key; consumer?: Consumed }
 	// The source failed to decode, and stays failed until another source is selected.
@@ -221,7 +223,7 @@ export class Decoder {
 	#readMaxDelay = new Signal<Duration>(Duration.ZERO);
 	// The container consumer's delay: the playout delay to start at and the shared budget. Its warmup
 	// reaches the start further back, to the media the decoder primes on.
-	#delay = new Signal<Moq.Track.Delay>({});
+	#delay = new Signal<Container.Delay>({});
 
 	// The codec's frame duration: the catalog constant, refined by each frame's own duration.
 	#frame = new Signal<Duration | undefined>(undefined);
@@ -609,11 +611,11 @@ export class Decoder {
 		// Closing this effect releases both its container reader and track subscription.
 		const failure = new Signal<Error | undefined>(undefined);
 		const rendition: Key = { path: broadcast.in.name.peek(), id: track };
-		// A swap keeps the outgoing consumer, whose estimate the replacement may continue.
+		// A swap or a resume keeps the outgoing consumer, whose estimate the replacement may continue.
 		this.#phase.set({
 			kind: "running",
 			key: rendition,
-			consumer: phase.kind === "running" ? phase.consumer : undefined,
+			consumer: phase.kind === "failed" ? undefined : phase.consumer,
 		});
 		let attempt: Effect | undefined;
 		effect.run((inner) => {
@@ -1038,8 +1040,9 @@ export class Decoder {
 	// Leave the running phase, failed or stopped; a stop keeps an earlier failure. No consumer
 	// replaces the outgoing one, so its estimate stops holding the buffer open.
 	#retire(failure?: Failure): void {
+		const phase = this.#phase.peek();
 		if (failure) this.#phase.set({ kind: "failed", failure });
-		else if (this.#phase.peek().kind === "running") this.#phase.set({ kind: "stopped" });
+		else if (phase.kind === "running") this.#phase.set({ kind: "stopped", consumer: phase.consumer });
 		this.#measured.set(undefined);
 		// Its arrivals stop holding the clock's reference.
 		this.#track.reset();
@@ -1091,7 +1094,7 @@ export class Decoder {
 		try {
 			landed = this.#place(sample);
 		} finally {
-			if (!preroll) this.#ring.peek()?.decoded(decoded, landed);
+			if (!preroll) this.#ring.peek()?.decoded(decoded, landed === undefined ? undefined : this.#terminal.delay);
 		}
 		return landed;
 	}

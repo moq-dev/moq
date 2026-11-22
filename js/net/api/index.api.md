@@ -15,7 +15,7 @@ export namespace Announce {
 		get synced(): Signals.Getter<boolean>;
 	}
 	export type Event = {
-		kind: "present" | "unavailable" | "available" | "absent" | "offline";
+		kind: "present" | "absent";
 	} & Announce.Announce;
 	export interface Options {
 		covering?: boolean;
@@ -35,8 +35,8 @@ export namespace Auth {
 	}
 	export interface Grant {
 		expires?: Clock.Wall;
-		publish: Path.Patterns;
-		subscribe: Path.Patterns;
+		publish: Path.Prefixes;
+		subscribe: Path.Prefixes;
 	}
 	export class Handle {
 		constructor();
@@ -108,8 +108,8 @@ export namespace Broadcast {
 		close(): void;
 		get closed(): Signals.GetPromise<null>;
 		consume(): Broadcast.Consumer;
-		createDatagrams(name: string, info?: Partial<Datagram.Info>): Datagram.Producer;
-		createTrack(name: string, info?: Track.InfoInit): Track.Producer;
+		createDatagrams(name: string, info?: Partial<Datagram.Info>): Datagram.Producer | undefined;
+		createTrack(name: string, info?: Track.InfoInit): Track.Producer | undefined;
 		removeTrack(name: string): void;
 		track(name: string): Track.Consumer;
 	}
@@ -168,6 +168,7 @@ export namespace Connection {
 		tokens?: readonly string[];
 		transport?: WebTransport;
 		url: URL;
+		urlAuth?: boolean;
 		versions?: readonly string[];
 		viewers?: Bandwidth.Viewers;
 		websocket?: Connection.WebSocketProps;
@@ -197,6 +198,7 @@ export namespace Connection {
 		tokens?: readonly string[] | Signals.Signal<readonly string[]>;
 		transport?: never;
 		url?: URL | Signals.Signal<URL | undefined>;
+		urlAuth?: boolean;
 		versions?: readonly string[] | Signals.Signal<readonly string[] | undefined>;
 		websocket?: Connection.WebSocketProps;
 		webtransport?: Connection.WebTransportProps;
@@ -204,7 +206,7 @@ export namespace Connection {
 	export type Redirect = "follow" | "same-host" | "ignore";
 	export interface Session {
 		abort(): void;
-		announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
+		announced(filter?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
 		readonly auth: Auth.Handle;
 		close(): Promise<void>;
 		readonly closed: Signals.GetPromise<Error | null>;
@@ -247,7 +249,7 @@ export class Connection {
 	constructor(props?: Connection.Props);
 	static readonly accept: ({ ... }: Connection.AcceptProps) => Promise<Connection.Session>;
 	readonly allocator: Signals.Getter<Bandwidth.Handle | undefined>;
-	announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
+	announced(filter?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
 	answered(): Promise<void>;
 	readonly auth: Signals.Getter<Auth.Handle | undefined>;
 	static readonly certificateHash: (cert: string | BufferSource) => Promise<Uint8Array<ArrayBuffer>>;
@@ -473,7 +475,7 @@ export namespace Origin {
 		withdraw(): void;
 	}
 	export class Consumer implements Origin.Reader {
-		announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
+		announced(filter?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
 		get closed(): Signals.GetPromise<Error | null>;
 		get discovery(): Signals.Getter<boolean | undefined>;
 		follow(path: Path.Valid, options?: Origin.FollowOptions): Origin.Following;
@@ -491,7 +493,7 @@ export namespace Origin {
 	}
 	export class Producer implements Origin.Table {
 		constructor();
-		announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
+		announced(filter?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
 		claim(prefix: Path.Valid, options?: Origin.RouteOptions): Origin.Claim;
 		close(abort?: Error): void;
 		get closed(): Signals.GetPromise<Error | null>;
@@ -500,10 +502,10 @@ export namespace Origin {
 		follow(path: Path.Valid, options?: Origin.FollowOptions): Origin.Following;
 		request(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
 		route(path: Path.Valid, options?: Origin.RouteOptions): Origin.Route;
-		scope(root: Path.Valid, patterns: Path.Patterns): Origin.Producer;
+		scope(root: Path.Valid, prefixes: Path.Prefixes): Origin.Producer;
 	}
 	export interface Reader {
-		announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
+		announced(filter?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
 		readonly closed: Signals.GetPromise<Error | null>;
 		readonly discovery: Signals.Getter<boolean | undefined>;
 		follow(path: Path.Valid, options?: Origin.FollowOptions): Origin.Following;
@@ -514,6 +516,7 @@ export namespace Origin {
 		reject(err: Error): void;
 		route(options?: Origin.RouteOptions): Origin.Route;
 		serve(source: Broadcast.Producer | Broadcast.Consumer): void;
+		unwanted(): Promise<void>;
 	}
 	export interface RequestOptions {
 		instance?: Instance.Valid;
@@ -558,8 +561,11 @@ export namespace Origin {
 
 export namespace Path {
 	export { InvalidPattern } from "@moq/pattern";
+	export { InvalidPrefix } from "@moq/pattern";
 	export { Pattern } from "@moq/pattern";
 	export { Patterns } from "@moq/pattern";
+	export { Prefix } from "@moq/pattern";
+	export { Prefixes } from "@moq/pattern";
 	export type Relative = string & {
 		__brand: "Relative";
 	};
@@ -659,13 +665,6 @@ export interface Timed<T> {
 }
 
 export namespace Track {
-	export type Anchor = {
-		relative: bigint;
-		time?: never;
-	} | {
-		relative?: never;
-		time: bigint;
-	};
 	export type Bound = {
 		excluded?: never;
 		included: bigint;
@@ -682,27 +681,26 @@ export namespace Track {
 	}
 	export interface Delay {
 		max?: Clock.Duration | null;
-		min?: Clock.Duration | null;
 	}
 	export class Demand {
 		get closed(): Signals.GetPromise<Error | null>;
 		readonly name: string;
-		get wanted(): Signals.Getter<bigint | undefined>;
+		get refresh(): Signals.Getter<boolean>;
+		get wanted(): Signals.Getter<boolean>;
 	}
 	export interface FetchGroupOptions {
 		maxDelay?: Clock.Duration;
 		priority?: number;
 		signal?: AbortSignal;
 	}
-	export type Fill = Track.FillGroups | Track.FillLookup;
 	export class FillGroups {
 		[Symbol.dispose](): void;
-		accept(start: bigint, info?: Track.Info): Group.Producer;
+		accept(start: bigint, info?: Track.Info): Group.Producer | undefined;
 		close(): void;
 		dropGroups(start: bigint, end: bigint): void;
 		readonly end: bigint;
+		readonly floor: bigint;
 		isWanted(key: bigint): boolean;
-		readonly kind: "groups";
 		get maxDelay(): Clock.Duration | null;
 		get order(): Track.Order;
 		get priority(): number;
@@ -711,15 +709,6 @@ export namespace Track {
 		unwanted(key: bigint): Promise<void>;
 		wanted(): bigint | undefined;
 		wantedChanged(): Promise<bigint | undefined>;
-	}
-	export class FillLookup {
-		[Symbol.dispose](): void;
-		accept(start: bigint, info?: Track.Info): Group.Producer;
-		close(): void;
-		readonly kind: "lookup";
-		get maxDelay(): Clock.Duration | null;
-		get priority(): number;
-		readonly time: bigint;
 	}
 	export interface Finished {
 		abort(error: Error): void;
@@ -739,11 +728,12 @@ export namespace Track {
 		compression: Track.Compression;
 		maxAge: Clock.Duration | null;
 		priority: number;
-		refresh: number | null;
+		refresh: Track.Refresh;
 		timescale: Time.Timescale | null;
 	}
-	export interface InfoInit extends Partial<Track.Info> {
+	export interface InfoInit extends Partial<Omit<Track.Info, "refresh">> {
 		maxAge?: Clock.Duration | null;
+		refresh?: Partial<Track.Refresh>;
 	}
 	export interface InfoOptions {
 		signal?: AbortSignal;
@@ -756,6 +746,7 @@ export namespace Track {
 		error: Error;
 		group?: never;
 		kind: "gap";
+		landed?: Clock.Instant;
 		start: bigint;
 	};
 	export type Order = "ascending" | "descending";
@@ -775,6 +766,7 @@ export namespace Track {
 		} & Group.Frame | undefined>;
 		readJson(): Promise<unknown | undefined>;
 		readString(): Promise<string | undefined>;
+		refresh(options?: Track.RefreshOptions): Promise<void>;
 		get subscription(): Signals.Getter<Track.Subscription | undefined>;
 		tryNextGroup(): Group.Consumer | undefined;
 		tryNextItem(): Track.Item | undefined;
@@ -809,28 +801,36 @@ export namespace Track {
 		writeFrame(frame: Group.Frame): void;
 	}
 	export interface Range {
-		end?: Track.Anchor;
-		start?: Track.Anchor;
+		end?: bigint;
+		start?: Track.Start;
+	}
+	export interface Refresh {
+		interval: Clock.Duration | null;
+		ratio: number | null;
+	}
+	export interface RefreshOptions {
+		signal?: AbortSignal;
 	}
 	export class Requests {
 		[Symbol.dispose](): void;
 		close(): void;
 		get name(): string;
-		requestedFill(): Promise<Track.Fill | undefined>;
+		requestedFill(): Promise<Track.FillGroups | undefined>;
 	}
+	export type Start = bigint | {
+		live: Clock.Duration;
+	};
 	export class Subscriber {
 		close(abort?: Error): void;
 		get closed(): Signals.GetPromise<Error | null>;
 		finished(): Promise<Track.Position>;
 		floor(): bigint | undefined;
 		info(): Promise<Track.Info>;
-		isSkipped(start: bigint, end: bigint): boolean;
 		largest(): Promise<Track.Position | undefined>;
 		readonly name: string;
-		nextInRange(from: bigint): bigint | undefined;
 		ordered(): Track.Ordered;
 		recvGroup(): Promise<Group.Consumer | undefined>;
-		start(): Promise<bigint | undefined>;
+		refresh(options?: Track.RefreshOptions): Promise<void>;
 		get subscription(): Signals.Getter<Track.Subscription | undefined>;
 		update(options: Track.Subscription): void;
 		withRange(groups: Track.Groups): this;

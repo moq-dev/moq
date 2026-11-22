@@ -7,6 +7,7 @@ import { Duration, Elapsed, timeout } from "@moq/clock";
 import type { Manual } from "@moq/clock/test";
 import * as cache from "../cache.ts";
 import { accept, connect } from "../connection/index.ts";
+import { defined } from "../defined.test-util.ts";
 import { StreamCode, StreamError, toStreamCode } from "../error.ts";
 import { hooks, type Recv, staleHole } from "../internal.ts";
 import { createMockTransportPair, manual } from "../mock.ts";
@@ -30,6 +31,9 @@ type Hop = "up" | "down";
 // A SUBSCRIBE_DROP or SUBSCRIBE_SKIP a subscriber decoded, and on which hop.
 interface Heard {
 	hop: Hop;
+	// Heard on a subscription opened after the chain's two, such as a recovery: its drops refuse
+	// only the fills owing the groups then, and settle no copy's record.
+	recovery: boolean;
 	kind: "drop" | "skip";
 	start: bigint;
 	end: bigint;
@@ -43,7 +47,7 @@ interface Heard {
  * still in flight.
  */
 function tap() {
-	const hops = new Map<Reader, Hop>();
+	const hops = new Map<Reader, { hop: Hop; recovery: boolean }>();
 	const heard: Heard[] = [];
 	const updates: SubscribeUpdate[] = [];
 	const held: (() => void)[] = [];
@@ -51,14 +55,14 @@ function tap() {
 
 	const start = SubscribeStart.decode.bind(SubscribeStart);
 	spyOn(SubscribeStart, "decode").mockImplementation(async (r, version) => {
-		if (!hops.has(r)) hops.set(r, hops.size === 0 ? "up" : "down");
+		if (!hops.has(r)) hops.set(r, { hop: hops.size === 0 ? "up" : "down", recovery: hops.size >= 2 });
 		return start(r, version);
 	});
 	const drop = SubscribeDrop.decode.bind(SubscribeDrop);
 	spyOn(SubscribeDrop, "decode").mockImplementation(async (r, version) => {
 		const msg = await drop(r, version);
 		const entry: Heard = {
-			hop: hops.get(r) ?? "down",
+			...(hops.get(r) ?? { hop: "down", recovery: true }),
 			kind: "drop",
 			start: msg.start,
 			end: msg.end,
@@ -71,7 +75,12 @@ function tap() {
 	const skip = SubscribeSkip.decode.bind(SubscribeSkip);
 	spyOn(SubscribeSkip, "decode").mockImplementation(async (r, version) => {
 		const msg = await skip(r, version);
-		heard.push({ hop: hops.get(r) ?? "down", kind: "skip", start: msg.start, end: msg.end });
+		heard.push({
+			...(hops.get(r) ?? { hop: "down", recovery: true }),
+			kind: "skip",
+			start: msg.start,
+			end: msg.end,
+		});
 		return msg;
 	});
 	const update = SubscribeUpdate.decodeMaybe.bind(SubscribeUpdate);
@@ -133,7 +142,7 @@ async function chain(up: Version, down: Version) {
 		for await (const request of claim.requested()) request.serve(wireOf(ingest).consume(request.path));
 	})();
 	const broadcast = source.route(path).broadcast;
-	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 	hooks.poolTrack(track, new cache.Pool({}));
 	const remote = wireOf(viewer).consume(path);
 
@@ -155,7 +164,7 @@ async function chain(up: Version, down: Version) {
 		/** Wait until the publisher's track has a subscriber through the relay. */
 		async reached() {
 			const demand = track.demand();
-			while (demand.wanted.peek() === undefined) await demand.wanted.changed();
+			while (!demand.wanted.peek()) await demand.wanted.changed();
 		},
 		async close() {
 			remote.close();
@@ -245,7 +254,7 @@ function groupsOf(rows: unknown[][]): unknown[] {
 		.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
-const WIDE: Subscription = { delay: { max: null }, order: "ascending", ranges: [{ start: { time: 0n } }] };
+const WIDE: Subscription = { delay: { max: null }, order: "ascending", ranges: [{ start: 0n }] };
 
 // Groups 1 to 4 after group 0 at 0s: 1 and 2 end 3s and 4s behind the 6s edge, and 3 starts 3s
 // behind it, so a 1.5s budget gives up 1 and 2 and still takes 3.
@@ -320,17 +329,17 @@ async function relayEvicted(readers: ("owed" | "fresh" | "widened")[]): Promise<
 	await chained.close();
 }
 
-// Mirrors Rust `a_group_the_relay_evicted_is_filled_never_dropped` in
+// Mirrors Rust `a_relay_eviction_is_filled_by_range_for_every_reader` in
 // rs/moq-net/tests/integration/drop_record.rs.
 test("a group the relay evicted while the publisher holds it is filled for a new and an owed reader", () =>
 	relayEvicted(["fresh", "owed"]));
 
-// Mirrors Rust `a_group_the_relay_evicted_is_filled_never_dropped` in
+// Mirrors Rust `a_relay_eviction_is_filled_by_range_for_every_reader` in
 // rs/moq-net/tests/integration/drop_record.rs.
 test("a group the relay evicted while the publisher holds it is filled for a widened reader", () =>
 	relayEvicted(["widened"]));
 
-// Mirrors Rust `an_evicted_drop_is_forwarded_unchanged_and_never_reoffered` in
+// Mirrors Rust `an_origin_eviction_drop_is_forwarded_final` in
 // rs/moq-net/tests/integration/drop_record.rs.
 test("an origin's evicted drops cross the relay unchanged, and no update re-offers them", async () => {
 	using clock = manual();
@@ -506,16 +515,24 @@ async function lostRun(readers: ("wide" | "narrow")[]): Promise<void> {
 			// reader takes the stale history: no hop still holds a newer group to judge it by.
 			const narrow = chained.remote.track("video").subscribe({
 				delay: { max: Duration.millis(1500) },
-				ranges: [{ start: { time: 1n } }],
+				ranges: [{ start: 1n }],
 			});
 			expect(groupsOf(await drain(clock, narrow))).toEqual([1n, 2n, 3n, 4n, 5n]);
 			narrow.close();
 		}
 	}
 	// Nothing a narrow budget gave up is named dropped with anything but OLD on the wire, which
-	// would settle every reader, wide ones too.
+	// would settle every reader, wide ones too. A recovery stops a group no fill owes any more with
+	// CANCEL, which its publisher names back in a drop when the stop beats the stream's end: that
+	// drop settles nothing.
 	if (readers.includes("wide")) {
-		const final = wire.heard.slice(heard).filter((row) => row.kind !== "drop" || row.error !== StreamCode.Old);
+		const final = wire.heard
+			.slice(heard)
+			.filter(
+				(row) =>
+					row.kind !== "drop" ||
+					(row.error !== StreamCode.Old && !(row.recovery && row.error === StreamCode.Cancel)),
+			);
 		expect(final).toEqual([]);
 	}
 	expect(chained.ended()).toBe(false);
@@ -524,17 +541,13 @@ async function lostRun(readers: ("wide" | "narrow")[]): Promise<void> {
 	await chained.close();
 }
 
-// Mirrors Rust `a_shed_run_is_judged_or_filled_through_the_relay` in
-// rs/moq-net/tests/integration/drop_record.rs.
 test("a sequence whose run the relay forgot is judged by a narrow reader", () => lostRun(["narrow"]));
 
-// Mirrors Rust `a_shed_run_is_judged_or_filled_through_the_relay` in
-// rs/moq-net/tests/integration/drop_record.rs.
 test("a sequence whose run the relay forgot is filled for a wide reader", () => lostRun(["narrow", "wide"]));
 
 const BILLIONS = 1n << 40n;
 
-// Mirrors Rust `a_run_of_billions_settles_in_one_step` in
+// Mirrors Rust `a_huge_run_settles_in_one_step` in
 // rs/moq-net/tests/integration/drop_record.rs.
 test("a run of billions of sequences is settled by each reader in one step, dropped or skipped", async () => {
 	using clock = manual();
@@ -559,16 +572,19 @@ test("a run of billions of sequences is settled by each reader in one step, drop
 			["group", 1n + 2n * BILLIONS],
 		]);
 	}
-	// The skip rides the GROUP above it, whose Previous Start passes over the run.
+	// Each run goes out as it was learned, as one message.
 	for (const hop of ["up", "down"] as const)
-		expect(wire.on(hop)).toEqual([["drop", 1n, 1n + BILLIONS, StreamCode.Cancel]]);
+		expect(wire.on(hop)).toEqual([
+			["drop", 1n, 1n + BILLIONS, StreamCode.Cancel],
+			["skip", 1n + BILLIONS, 1n + 2n * BILLIONS, undefined],
+		]);
 	expect(chained.fetches()).toEqual(before);
 
 	for (const reader of [narrow, wide]) reader.close();
 	await chained.close();
 });
 
-// Mirrors Rust `a_run_of_billions_settles_in_one_step` in
+// Mirrors Rust `a_huge_run_settles_in_one_step` in
 // rs/moq-net/tests/integration/drop_record.rs.
 for (const judged of ["unsettled by a widening", "forgotten by the relay"] as const) {
 	test(`a run of billions ${judged} is judged again in one step`, async () => {

@@ -69,7 +69,7 @@ pub use moq_quic::{Limits, LimitsError};
 pub use session::{RecvStream, SendGroup, SendStream, Session};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use socket::TcpStats;
-pub use socket::{SharedSocketStats, SocketStats};
+pub use socket::{SharedSocketStats, SocketBytes, SocketStats};
 
 /// The largest frame draft-00 accepts, header included
 const MAX_FRAME_SIZE: usize = 16384;

@@ -62,6 +62,18 @@ impl Archive {
 			.unwrap();
 	}
 
+	/// Delete the object starting group `sequence`, as retention would.
+	async fn prune(&self, track: &str, sequence: u64) {
+		let name = layout::Start {
+			group: sequence,
+			frame: 0,
+		}
+		.name()
+		.unwrap();
+		let path = crate::path::push(&self.dir(track), &name).unwrap();
+		self.store.inner().delete(&path).await.unwrap();
+	}
+
 	fn dir(&self, track: &str) -> object_store::path::Path {
 		layout::track_dir(self.store.prefix(), track).unwrap()
 	}
@@ -139,22 +151,17 @@ async fn subscribe(broadcast: &broadcast::Producer, track: &str) -> track::Order
 /// Every group from the one starting at `start` on.
 fn from(start: u64) -> track::Range {
 	track::Range {
-		start: track::Anchor::Time(start),
+		start: track::Start::Time(start),
 		end: None,
 	}
 }
 
 /// The next group, past the gaps the read reports for what the archive never held.
 async fn group(reader: &mut track::Ordered) -> Option<moq_net::group::Consumer> {
-	loop {
-		let item = timeout(Duration::from_secs(10), reader.next_group())
-			.await
-			.expect("a group arrives")
-			.unwrap()?;
-		if let track::Item::Group(group) = item {
-			return Some(group);
-		}
-	}
+	timeout(Duration::from_secs(10), reader.next_group())
+		.await
+		.expect("a group arrives")
+		.unwrap()
 }
 
 /// The next group's start, without waiting for it to end.
@@ -232,7 +239,7 @@ async fn a_recording_round_trips() {
 
 	let mut reader = subscribe(&broadcast, "video").await;
 	for sequence in 0..6 {
-		let mut group = reader.next_group().await.unwrap().unwrap().group().unwrap();
+		let mut group = reader.next_group().await.unwrap().unwrap();
 		assert_eq!(group.start, sequence);
 		for index in 0..3 {
 			let frame = group.read_frame().await.unwrap().unwrap();
@@ -456,7 +463,7 @@ async fn an_archive_without_markers_stays_open() {
 	let (broadcast, _run) = serve(&archive.store).await;
 	let mut reader = subscribe(&broadcast, "video").await;
 	assert_eq!(next(&mut reader).await.unwrap(), (0, expected(true, 0, 0..1)));
-	let mut group = reader.next_group().await.unwrap().unwrap().group().unwrap();
+	let mut group = reader.next_group().await.unwrap().unwrap();
 	assert!(group.read_frame().await.unwrap().is_some());
 	let pending = timeout(30 * REFRESH, group.read_frame()).await;
 	assert!(pending.is_err(), "the newest group stays open");
@@ -472,7 +479,7 @@ async fn closing_the_broadcast_cancels_the_live_tracks() {
 
 	let (broadcast, run) = serve(&archive.store).await;
 	let mut reader = subscribe(&broadcast, "video").await;
-	let mut group = reader.next_group().await.unwrap().unwrap().group().unwrap();
+	let mut group = reader.next_group().await.unwrap().unwrap();
 	assert!(group.read_frame().await.unwrap().is_some());
 
 	broadcast.close();
@@ -491,7 +498,7 @@ async fn a_gapped_continuation_aborts_the_open_group() {
 
 	let (broadcast, run) = serve(&archive.store).await;
 	let mut reader = subscribe(&broadcast, "video").await;
-	let mut group = reader.next_group().await.unwrap().unwrap().group().unwrap();
+	let mut group = reader.next_group().await.unwrap().unwrap();
 	assert!(group.read_frame().await.unwrap().is_some());
 
 	// Frame 1 of group 0 is missing.
@@ -514,7 +521,7 @@ async fn a_store_failure_aborts_the_served_tracks() {
 
 	let (broadcast, run) = serve(&archive.store).await;
 	let mut reader = subscribe(&broadcast, "video").await;
-	let mut group = reader.next_group().await.unwrap().unwrap().group().unwrap();
+	let mut group = reader.next_group().await.unwrap().unwrap();
 	assert!(group.read_frame().await.unwrap().is_some());
 
 	archive.store.inner().fail_lists();
@@ -570,7 +577,7 @@ async fn a_completed_archive_ends_as_recorded() {
 	let end = timeout(Duration::from_secs(10), reader.next_group())
 		.await
 		.expect("the track ends");
-	let end = end.map(|item| item.map(|item| item.group().expect("a group").start));
+	let end = end.map(|group| group.map(|group| group.start));
 	assert!(
 		matches!(end, Err(moq_net::Error::Stream(moq_net::StreamError::App(7)))),
 		"{end:?}"
@@ -723,9 +730,7 @@ async fn read_range(broadcast: &broadcast::Producer, track: &str, range: track::
 	let mut read = Vec::new();
 	while let Ok(group) = timeout(5 * REFRESH, reader.next_group()).await {
 		match group.unwrap() {
-			Some(track::Item::Group(group)) => read.push(group.start),
-			// Nothing is stored below the first group, which the read reports as a gap.
-			Some(track::Item::Gap { .. }) => {}
+			Some(group) => read.push(group.start),
 			None => break,
 		}
 	}
@@ -733,8 +738,8 @@ async fn read_range(broadcast: &broadcast::Producer, track: &str, range: track::
 }
 
 /// A time on a millisecond track.
-fn at(millis: u64) -> track::Anchor {
-	track::Anchor::Time(millis)
+fn at(millis: u64) -> Option<u64> {
+	Some(millis)
 }
 
 /// Group `sequence`'s frames `frames` on a timed track, keyed by its first frame's time:
@@ -766,36 +771,65 @@ async fn a_time_range_resolves_from_the_archive() {
 	stored(&archive, 0..10).await;
 
 	let (broadcast, _run) = serve(&archive.store).await;
-	let range = |start, end| track::Range { start, end };
+	let range = |start, end| track::Range {
+		start: track::Start::Time(start),
+		end,
+	};
 	assert_eq!(
-		read_range(&broadcast, "video", range(at(4_500), Some(at(6_500)))).await,
+		read_range(&broadcast, "video", range(4_500, at(6_500))).await,
 		[4_000, 5_000, 6_000]
 	);
 	// A start on the first frame of its group, in the second object of a pair.
-	assert_eq!(
-		read_range(&broadcast, "video", range(at(3_000), Some(at(3_001)))).await,
-		[3_000]
-	);
+	assert_eq!(read_range(&broadcast, "video", range(3_000, at(3_001))).await, [3_000]);
 	// An end alone, from the oldest group.
-	assert_eq!(
-		read_range(&broadcast, "video", range(at(0), Some(at(1_200)))).await,
-		[0, 1_000]
-	);
+	assert_eq!(read_range(&broadcast, "video", range(0, at(1_200))).await, [0, 1_000]);
 	// The cache now holds groups 6 and 9, but not what lies between: still looked up.
-	assert_eq!(
-		read_range(&broadcast, "video", range(at(8_500), Some(at(8_600)))).await,
-		[8_000]
-	);
+	assert_eq!(read_range(&broadcast, "video", range(8_500, at(8_600))).await, [8_000]);
 
 	// A start alone reads on through the live edge.
 	let track = broadcast.consume().track("video").unwrap();
 	let subscription = Subscription::default()
-		.with_ranges([range(at(7_002), None)])
+		.with_ranges([range(7_002, None)])
 		.with_order(Order::Ascending)
 		.with_delay(moq_net::track::Delay::default().with_max(None));
 	let mut reader = track.subscribe(subscription).await.unwrap().ordered();
 	for expected in 7..10 {
 		assert_eq!(sequence(&mut reader).await, Some(expected * 1000));
+	}
+}
+
+/// A time start whose lookup fails at the store, by a failing GET or an object that doesn't
+/// decode, fails the subscription with that failure, rather than starting where the groups
+/// cached happen to say.
+#[tokio::test(start_paused = true)]
+async fn a_failed_time_lookup_fails_the_subscription() {
+	for malformed in [false, true] {
+		let archive = Archive::new();
+		archive.track("video", 0, true).await;
+		stored(&archive, 0..10).await;
+
+		let (broadcast, _run) = serve(&archive.store).await;
+		// The object holding groups 4 and 5.
+		let object = "video/0000000000000004000-0000000000000000000";
+		match malformed {
+			true => archive.raw(object, b"x").await,
+			false => drop(archive.store.inner().fail_gets(&format!("rec/{object}"))),
+		}
+		let track = broadcast.consume().track("video").unwrap();
+		let subscription = Subscription::default()
+			.with_ranges([track::Range {
+				start: track::Start::Time(4_500),
+				end: None,
+			}])
+			.with_order(Order::Ascending)
+			.with_delay(moq_net::track::Delay::default().with_max(None));
+		let mut reader = track.subscribe(subscription).await.unwrap().ordered();
+		let read = timeout(5 * REFRESH, reader.next_group()).await.expect("answered");
+		let err = read.map(|group| group.map(|group| group.start)).unwrap_err();
+		assert!(
+			matches!(err, moq_net::Error::Stream(moq_net::StreamError::Internal)),
+			"malformed {malformed}: {err}"
+		);
 	}
 }
 
@@ -811,7 +845,7 @@ async fn a_completed_archive_reads_a_time_range() {
 
 	let (broadcast, _run) = serve(&archive.store).await;
 	let range = track::Range {
-		start: at(2_500),
+		start: track::Start::Time(2_500),
 		end: None,
 	};
 	assert_eq!(
@@ -830,8 +864,8 @@ async fn a_time_before_the_archive_starts_at_its_oldest_group() {
 
 	let (broadcast, _run) = serve(&archive.store).await;
 	let range = track::Range {
-		start: at(500),
-		end: Some(at(4_500)),
+		start: track::Start::Time(500),
+		end: at(4_500),
 	};
 	assert_eq!(read_range(&broadcast, "video", range).await, [3_000, 4_000]);
 }
@@ -848,8 +882,8 @@ async fn a_time_before_a_pruned_head_starts_at_the_oldest_whole_group() {
 
 	let (broadcast, _run) = serve(&archive.store).await;
 	let range = track::Range {
-		start: at(500),
-		end: Some(at(7_500)),
+		start: track::Start::Time(500),
+		end: at(7_500),
 	};
 	assert_eq!(read_range(&broadcast, "video", range).await, [6_000, 7_000]);
 }
@@ -864,8 +898,8 @@ async fn a_time_in_a_gap_starts_before_it() {
 
 	let (broadcast, _run) = serve(&archive.store).await;
 	let range = track::Range {
-		start: at(4_500),
-		end: Some(at(6_500)),
+		start: track::Start::Time(4_500),
+		end: at(6_500),
 	};
 	assert_eq!(read_range(&broadcast, "video", range).await, [3_000, 6_000]);
 }
@@ -911,8 +945,8 @@ async fn a_continuation_does_not_bound_a_group_start() {
 
 	let (broadcast, _run) = serve(&archive.store).await;
 	let range = track::Range {
-		start: at(600),
-		end: Some(at(700)),
+		start: track::Start::Time(600),
+		end: at(700),
 	};
 	assert_eq!(read_range(&broadcast, "video", range).await, [500]);
 }
@@ -937,8 +971,8 @@ async fn a_time_resolves_by_key_not_first_frame() {
 
 	let (broadcast, _run) = serve(&archive.store).await;
 	let range = track::Range {
-		start: at(2_200),
-		end: Some(at(2_300)),
+		start: track::Start::Time(2_200),
+		end: at(2_300),
 	};
 	assert_eq!(read_range(&broadcast, "video", range).await, [2_000]);
 }
@@ -954,8 +988,237 @@ async fn a_scale_less_track_looks_up_a_time_by_key() {
 
 	let (broadcast, _run) = serve(&archive.store).await;
 	let range = track::Range {
-		start: at(3),
-		end: Some(at(5)),
+		start: track::Start::Time(3),
+		end: at(5),
 	};
 	assert_eq!(read_range(&broadcast, "log", range).await, [2, 5]);
+}
+
+/// Serve `store` on `broadcast` with `config`, returning each track's index.
+async fn open(
+	store: &Store<Mock>,
+	broadcast: &broadcast::Producer,
+	config: Config,
+) -> (HashMap<String, Arc<Mutex<Index>>>, JoinHandle<Result<()>>) {
+	let consumer = Consumer::open(store.clone(), broadcast.clone(), config.with_refresh(REFRESH))
+		.await
+		.unwrap();
+	let indexes = consumer
+		.tracks
+		.iter()
+		.map(|(name, track)| (name.clone(), track.index.clone()))
+		.collect();
+	(indexes, tokio::spawn(consumer.run()))
+}
+
+/// A reader attached to a rolling archive indexes about what the store retains, however many
+/// retention rotations pass without it reading history.
+#[tokio::test(start_paused = true)]
+async fn a_rolling_archive_index_tracks_retention() {
+	const RETAINED: u64 = 4;
+	let archive = Archive::new();
+	archive.track("video", 0, true).await;
+	for sequence in 0..RETAINED {
+		archive.object("video", 0, vec![timed(sequence, 0..1)]).await;
+	}
+
+	let broadcast = broadcast::Info::new().produce();
+	let (indexes, _run) = open(&archive.store, &broadcast, Config::default()).await;
+	let index = &indexes["video"];
+	for sequence in RETAINED..RETAINED + 100 {
+		archive.object("video", 0, vec![timed(sequence, 0..1)]).await;
+		archive.prune("video", timed(sequence - RETAINED, 0..1).sequence).await;
+		sleep(REFRESH).await;
+		let held = index.lock().unwrap().len();
+		// Twice the retained objects, plus the one a refresh adds before it lists them all.
+		assert!(
+			held <= 2 * RETAINED as usize + 1,
+			"{held} objects indexed after {sequence}, {RETAINED} retained"
+		);
+	}
+}
+
+/// A time older than what retention kept reaches the oldest retained group, though the reader
+/// still indexes the pruned objects and caches none of them, with one listing rather than a GET
+/// per pruned object.
+#[tokio::test(start_paused = true)]
+async fn a_seek_across_pruned_history_reaches_the_oldest_retained_group() {
+	let archive = Archive::new();
+	archive.track("video", 0, true).await;
+	stored(&archive, 0..10).await;
+
+	let broadcast = broadcast::Info::new().produce();
+	let (_indexes, _run) = open(&archive.store, &broadcast, Config::default().with_cache(0)).await;
+	// Retention deletes the three oldest objects after the reader listed them.
+	for sequence in [0, 2, 4] {
+		archive.prune("video", sequence * 1000).await;
+	}
+	let mock = archive.store.inner().clone();
+	mock.take();
+	let range = |start| track::Range {
+		start: track::Start::Time(start),
+		end: at(6_500),
+	};
+	assert_eq!(read_range(&broadcast, "video", range(4_500)).await, [6_000]);
+	let pruned = mock
+		.gets()
+		.into_iter()
+		.filter(|get| {
+			["0000000000000000000-", "0000000000000002000-", "0000000000000004000-"]
+				.iter()
+				.any(|key| get.contains(key))
+		})
+		.count();
+	assert_eq!(pruned, 1, "one pruned GET lists the track again");
+	assert_eq!(read_range(&broadcast, "video", range(500)).await, [6_000]);
+}
+
+/// Retention that replaced everything the reader indexed before it refreshed leaves a seek the
+/// newer objects the store holds, which the listing the pruned GET starts adds to the index.
+#[tokio::test(start_paused = true)]
+async fn a_seek_finds_objects_retention_replaced_the_index_with() {
+	let archive = Archive::new();
+	archive.track("video", 0, true).await;
+	stored(&archive, 0..2).await;
+
+	let broadcast = broadcast::Info::new().produce();
+	let (indexes, _run) = open(&archive.store, &broadcast, Config::default().with_cache(0)).await;
+	stored(&archive, 2..6).await;
+	archive.prune("video", 0).await;
+	let mock = archive.store.inner().clone();
+	mock.take();
+
+	let track = broadcast.consume().track("video").unwrap();
+	let subscription = Subscription::default()
+		.with_ranges([from(500)])
+		.with_order(Order::Ascending)
+		.with_delay(Delay::default().with_max(None));
+	let mut reader = track.subscribe(subscription).await.unwrap().ordered();
+	assert!(sequence(&mut reader).await.is_some());
+	// Before any refresh lists after the cursor: yields, not time.
+	for _ in 0..1000 {
+		if indexes["video"].lock().unwrap().len() == 2 {
+			break;
+		}
+		tokio::task::yield_now().await;
+	}
+	assert_eq!(
+		indexes["video"].lock().unwrap().len(),
+		2,
+		"both retained objects are indexed"
+	);
+	assert!(
+		!mock
+			.take()
+			.iter()
+			.any(|op| matches!(op, crate::mock::Op::List { offset: Some(offset), .. } if !offset.ends_with(".info"))),
+		"no refresh listed after the cursor"
+	);
+}
+
+/// A key the store still lists but no longer serves, as a listing that lags its deletes leaves
+/// it, costs a seek one GET: the listing its 404 starts never adds it back, so the lookup moves
+/// on to what the store serves instead of reading it again.
+#[tokio::test(start_paused = true)]
+async fn a_seek_reads_a_listed_but_missing_object_once() {
+	let archive = Archive::new();
+	archive.track("video", 0, true).await;
+	stored(&archive, 0..10).await;
+
+	let broadcast = broadcast::Info::new().produce();
+	let (_indexes, _run) = open(&archive.store, &broadcast, Config::default().with_cache(0)).await;
+	let mock = archive.store.inner().clone();
+	const STALE: &str = "rec/video/0000000000000002000-";
+	mock.hide_gets(STALE);
+	// Room for a second read, which a lookup that relisted it back would take and then wait on.
+	let gate = mock.stall_gets(STALE);
+	gate.add_permits(2);
+	mock.take();
+
+	let range = track::Range {
+		start: track::Start::Time(2_500),
+		end: at(4_500),
+	};
+	// The newest group the store serves at or before the time, then the range's end.
+	assert_eq!(read_range(&broadcast, "video", range).await, [1_000, 4_000]);
+	let stale = mock.gets().iter().filter(|get| get.contains(STALE)).count();
+	assert_eq!(stale, 1, "the missing object is read once");
+}
+
+/// Recorded through a real DVR producer while a reader stays attached for many rotations: its
+/// index stays about the size of what the store retains, and a seek to the start of time
+/// reaches the oldest group the store holds, as a direct listing finds it.
+#[tokio::test(start_paused = true)]
+async fn a_reader_follows_a_real_dvr_through_its_rotations() {
+	let store = Store::new(Mock::memory(), "rec");
+	let source = broadcast::Info::new().produce();
+	let video = source
+		.create_track("video", track::Info::default().with_timescale(Timescale::MILLI))
+		.unwrap();
+	let dvr = crate::producer::Dvr::new(Duration::from_secs(2), Duration::from_secs(1));
+	let config = crate::producer::Config::default()
+		.with_duration(Duration::from_secs(1))
+		.with_flush(Duration::from_secs(100))
+		.with_dvr(dvr);
+	let _recording = tokio::spawn(crate::Producer::new(store.clone(), source.consume(), config).run());
+	while video.subscription().is_none() {
+		sleep(Duration::from_millis(1)).await;
+	}
+	let write = |sequence: u64| {
+		let mut group = video.create_group(group::Info { start: sequence * 1000 }).unwrap();
+		let pts = Timestamp::from_millis(sequence * 1000).unwrap();
+		group.write_frame(pts, Bytes::from(format!("{sequence}"))).unwrap();
+		group.finish().unwrap();
+	};
+	// Each group is its own object, stored once the next one starts.
+	for sequence in 0..2 {
+		write(sequence);
+		sleep(Duration::from_secs(1)).await;
+	}
+
+	// Groups nobody reads leave memory a second after their last write, as an origin expires
+	// them, so the seek reaches the store.
+	let mut info = broadcast::Info::new();
+	info.pool = moq_net::cache::Pool::new(moq_net::cache::Config::default().with_expiry(Duration::from_secs(1)));
+	let pool = info.pool.clone();
+	let broadcast = info.produce();
+	let (indexes, _run) = open(&store, &broadcast, Config::default().with_cache(0)).await;
+	let index = &indexes["video"];
+	let dir = layout::track_dir(store.prefix(), "video").unwrap();
+	let mut retained = Vec::new();
+	for sequence in 2..300 {
+		write(sequence);
+		sleep(Duration::from_secs(1)).await;
+		pool.poll(kio::clock::now(), &kio::Waiter::noop());
+
+		let listed = index::list(store.inner(), &dir, &dir.clone().join(layout::TRACK_INFO), false)
+			.await
+			.unwrap();
+		retained.push(listed.objects.len());
+		// Relisting halves the index back to what the store held at that listing, so the bound
+		// follows the most it retained.
+		let most = retained.iter().max().unwrap();
+		let held = index.lock().unwrap().len();
+		assert!(
+			held <= 2 * most + 1,
+			"{held} objects indexed after {sequence}, at most {most} retained"
+		);
+
+		if sequence % 50 == 0 {
+			let oldest = listed.objects.first().unwrap().0.0;
+			let track = broadcast.consume().track("video").unwrap();
+			let subscription = Subscription::default()
+				.with_ranges([from(0)])
+				.with_order(Order::Ascending)
+				.with_delay(Delay::default().with_max(None));
+			let mut reader = track.subscribe(subscription).await.unwrap().ordered();
+			assert_eq!(
+				super::tests::sequence(&mut reader).await,
+				Some(oldest),
+				"seek after {sequence}"
+			);
+		}
+	}
+	// Retention really rotated: the store held a few objects at a time, not all of them.
+	assert!(retained.iter().all(|count| *count <= 5), "{retained:?}");
 }

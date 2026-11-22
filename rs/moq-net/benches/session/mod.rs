@@ -88,6 +88,8 @@
 mod harness;
 #[path = "../../tests/integration/support/mock.rs"]
 pub(crate) mod mock;
+#[path = "../../tests/integration/support/schedule.rs"]
+mod schedule;
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -430,23 +432,34 @@ fn runtime() -> tokio::runtime::Runtime {
 		.unwrap()
 }
 
+/// How long a lite-07 origin's route node holds a closed session's claims in case another
+/// session serves them: its debounce, 32 hops of 25 ms (`route::relay::debounce`).
+const ROUTE_LINGER: Duration = Duration::from_millis(32 * 25);
+
 /// Drop what a cell built on `rt`, if Criterion's filter ran it, and assert every task its
 /// sessions and origins spawned ends with it: a task that outlives its handles leaks for
-/// as long as a relay runs.
+/// as long as a relay runs. The origins may first wait out [`ROUTE_LINGER`], on a paused
+/// clock so the wait costs nothing.
 fn retire<T>(rt: &tokio::runtime::Runtime, built: Option<T>) {
 	let Some(built) = built else {
 		return;
 	};
 	drop(built);
-	// Each close reaches the next driver on its following poll; this many passes is far
-	// more than any teardown chain takes.
 	rt.block_on(async {
-		for _ in 0..1024 {
-			if rt.metrics().num_alive_tasks() == 0 {
-				break;
+		tokio::time::pause();
+		// Each close reaches the next driver on its following poll; this many passes is far
+		// more than any teardown chain takes.
+		let settle = || async {
+			for _ in 0..1024 {
+				if rt.metrics().num_alive_tasks() == 0 {
+					break;
+				}
+				tokio::task::yield_now().await;
 			}
-			tokio::task::yield_now().await;
-		}
+		};
+		settle().await;
+		tokio::time::sleep(ROUTE_LINGER).await;
+		settle().await;
 	});
 	assert_eq!(rt.metrics().num_alive_tasks(), 0, "tasks outlived the cell's handles");
 }
@@ -531,7 +544,7 @@ fn at(group: &group::Producer) -> Timestamp {
 /// The groups from the one starting at `key` onward.
 fn from(key: u64) -> track::Range {
 	track::Range {
-		start: track::Anchor::Time(key),
+		start: track::Start::Time(key),
 		end: None,
 	}
 }
@@ -581,8 +594,7 @@ impl Backend for Model {
 	fn relay(id: u64, capacity: Option<u64>) -> (Self::Relay, cache::Pool) {
 		// A relay forwards the routes it learns, as moq-relay's cluster does; off, a
 		// moq-lite-07 viewer never learns the publisher's broadcasts.
-		let (origin, pool) = make_origin(id, capacity);
-		(origin.with_proxy(true), pool)
+		make_origin(id, capacity, true)
 	}
 
 	fn origin(relay: &Self::Relay) -> &origin::Producer {
@@ -618,7 +630,7 @@ impl Drop for Pair {
 	}
 }
 
-fn make_origin(id: u64, capacity: Option<u64>) -> (origin::Producer, cache::Pool) {
+fn make_origin(id: u64, capacity: Option<u64>, proxy: bool) -> (origin::Producer, cache::Pool) {
 	let mut config = origin::Config::new(std::num::NonZeroU64::new(id).unwrap());
 	let profiling = std::env::var_os("SESSION_EXPIRY_ONLY").is_some();
 	let pool = cache::Pool::new(if capacity.is_none() || profiling {
@@ -627,6 +639,7 @@ fn make_origin(id: u64, capacity: Option<u64>) -> (origin::Producer, cache::Pool
 		cache::Config::default().with_capacity(capacity)
 	});
 	config.pool = pool.clone();
+	config.proxy = proxy;
 	let (producer, driver) = origin::Producer::new(config);
 	harness::spawn(driver);
 	(producer, pool)
@@ -744,7 +757,7 @@ impl<B: Backend> Cluster<B> {
 
 	fn origin(&mut self, capacity: u64) -> (origin::Producer, cache::Pool) {
 		self.next_hop += 1;
-		make_origin(self.next_hop, (!self.expiry).then_some(capacity))
+		make_origin(self.next_hop, (!self.expiry).then_some(capacity), false)
 	}
 
 	/// Connect a viewer session to `relay`.
@@ -794,7 +807,7 @@ impl Viewer {
 		let mut announced = self
 			.origin
 			.consume()
-			.scope(path, &moq_net::Patterns::from(moq_net::Pattern::all()))
+			.scope(path, &moq_net::Prefixes::all())
 			.unwrap()
 			.routes();
 		let event = announced.next().await.expect("announced");
@@ -1875,7 +1888,7 @@ impl<B: Backend> ChurnRoom<B> {
 			drop(subscriber);
 			drop(track);
 			let mut demand = self.churn[session].demand();
-			while demand.wanted_changed().await.unwrap().is_some() {}
+			while demand.wanted_changed().await.unwrap() {}
 		}
 		start.elapsed()
 	}

@@ -29,6 +29,9 @@
 //! Readers draining a swapped track are swept over their count, the groups every
 //! route delivered, and the routes each reader still holds a copy of.
 //!
+//! A claim broader than its grant is filed at each of the grant's prefixes beneath it: one
+//! is filed and dropped, swept over those prefixes and the claims already filed at each.
+//!
 //! A claim's answer, and its retraction moving the claim to a fresh instance, is swept
 //! over the paths the claim already answered and the cursors watching it.
 //!
@@ -50,7 +53,7 @@ use std::time::Duration;
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use futures::FutureExt;
-use moq_net::{Instance, Pattern, Patterns, Timestamp, auth, broadcast, origin, track};
+use moq_net::{Instance, Pattern, Prefix, Prefixes, Timestamp, auth, broadcast, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -134,6 +137,38 @@ fn bench_announce(c: &mut Criterion) {
 	group.finish();
 }
 
+/// A claim at `a` through a grant of `prefixes` prefixes beneath it, filed at each, then
+/// dropped, with one root cursor watching, beside `claims` claims already filed at each prefix.
+/// A cost that grows with the claims at a prefix, rather than with the places one is filed at,
+/// shows up as a slope over `claims`.
+fn bench_filing(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/filing");
+	for prefixes in [1, 16, 256] {
+		group.throughput(Throughput::Elements(prefixes));
+		for claims in [1, 16, 256] {
+			let id = BenchmarkId::new(format!("{prefixes}prefixes"), format!("{claims}claims"));
+			group.bench_function(id, |b| {
+				let (producer, _driver) = origin::Producer::new(origin::Config::default());
+				let grant: Prefixes = (0..prefixes)
+					.map(|i| Prefix::try_from(format!("a/p{i}").as_str()).unwrap())
+					.collect();
+				let scoped = producer.scope("", &grant).unwrap();
+				let options = moq_net::origin::RouteOptions::default;
+				let _held: Vec<_> = (0..claims).map(|_| scoped.claim("a", options()).unwrap()).collect();
+				let mut cursor = producer.consume().routes();
+				while cursor.next().now_or_never().flatten().is_some() {}
+				b.iter(|| {
+					let claim = scoped.claim("a", options()).unwrap();
+					while cursor.next().now_or_never().flatten().is_some() {}
+					drop(claim);
+					while cursor.next().now_or_never().flatten().is_some() {}
+				});
+			});
+		}
+	}
+	group.finish();
+}
+
 /// Matched and overlap-only route churn, swept over table size and watching cursors,
 /// for listing cursors and covering ones.
 fn bench_announce_covering(c: &mut Criterion) {
@@ -152,7 +187,7 @@ fn bench_announce_covering(c: &mut Criterion) {
 						.collect();
 					let consumer = producer
 						.consume()
-						.scope("", &Patterns::from("**/*.chat".parse::<Pattern>().unwrap()))
+						.filter(&"**/*.chat".parse::<Pattern>().unwrap())
 						.unwrap();
 					let consumer = if covering { consumer.covering() } else { consumer };
 					let mut cursors: Vec<_> = (0..readers).map(|_| consumer.routes()).collect();
@@ -400,7 +435,7 @@ fn bench_announce_mounted(c: &mut Criterion) {
 					producer
 						.mount(format!("p{project}/.svc"), ".svc/p0")
 						.unwrap()
-						.scope(format!("p{project}"), &Patterns::from(Pattern::all()))
+						.scope(format!("p{project}"), &Prefixes::all())
 						.unwrap()
 						.consume()
 						.with_hidden(true)
@@ -453,10 +488,8 @@ fn bench_announce_fleet(c: &mut Criterion) {
 				.collect();
 			let _cursors: Vec<_> = (0..peers)
 				.map(|peer| {
-					let patterns: Patterns = [Pattern::subtree(&format!(".stats/p{}", peer % projects)).unwrap()]
-						.into_iter()
-						.collect();
-					consumer.scope("", &patterns).unwrap().routes()
+					let prefixes = Prefixes::from(Prefix::try_from(format!(".stats/p{}", peer % projects)).unwrap());
+					consumer.scope("", &prefixes).unwrap().routes()
 				})
 				.collect();
 			b.iter(|| {
@@ -548,7 +581,7 @@ fn bench_reprice_duplicate(c: &mut Criterion) {
 						let scoped = producer
 							.scope(
 								"",
-								&Patterns::from(Pattern::subtree(&format!("{PATH}/p{}", (peer - 1) % 2)).unwrap()),
+								&Prefixes::from(Prefix::try_from(format!("{PATH}/p{}", (peer - 1) % 2)).unwrap()),
 							)
 							.unwrap();
 						moq_net::fuzz::requests_route(
@@ -572,7 +605,7 @@ fn bench_reprice_duplicate(c: &mut Criterion) {
 							.consume()
 							.scope(
 								"",
-								&Patterns::from(Pattern::subtree(&format!("{PATH}/p{}", peer % 2)).unwrap()),
+								&Prefixes::from(Prefix::try_from(format!("{PATH}/p{}", peer % 2)).unwrap()),
 							)
 							.unwrap()
 							.with_hidden(true)
@@ -1254,7 +1287,7 @@ fn runtime() -> tokio::runtime::Runtime {
 /// Everything under `room/`, which leaves out only the `muted` subscription.
 fn room() -> auth::Grant {
 	let mut grant = auth::Grant::all();
-	grant.subscribe = Pattern::subtree("room").unwrap().into();
+	grant.subscribe = Prefix::try_from("room").unwrap().into();
 	grant
 }
 
@@ -1274,7 +1307,7 @@ fn bench_narrow_delivery(c: &mut Criterion) {
 				if narrowed {
 					// Covers every subscription but the muted one, which is not subscribed here.
 					let mut grant = room();
-					grant.subscribe.insert(Pattern::literal("muted").unwrap());
+					grant.subscribe.insert(Prefix::try_from("muted").unwrap());
 					watching.pair.server.auth().authorize(&grant);
 				}
 				b.iter(|| rt.block_on(watching.round()));
@@ -1705,13 +1738,7 @@ impl ResumeReader {
 	fn poll_group(&mut self, waiter: &kio::Waiter) -> Poll<moq_net::Result<Option<moq_net::group::Consumer>>> {
 		match self {
 			Self::Arrival(reader) => reader.poll_recv_group(waiter),
-			Self::Key(reader) => loop {
-				match std::task::ready!(reader.poll_next_group(waiter))? {
-					Some(track::Item::Group(group)) => return Poll::Ready(Ok(Some(group))),
-					Some(track::Item::Gap { .. }) => continue,
-					None => return Poll::Ready(Ok(None)),
-				}
-			},
+			Self::Key(reader) => reader.poll_next_group(waiter),
 		}
 	}
 }
@@ -1855,6 +1882,7 @@ criterion_group!(
 	benches,
 	bench_announce,
 	bench_announce_covering,
+	bench_filing,
 	bench_pending_churn,
 	bench_withdraw,
 	bench_withdraw_wave,

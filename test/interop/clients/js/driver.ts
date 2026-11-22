@@ -38,7 +38,7 @@ import {
 	waitForState,
 	waitForWatch,
 } from "./harness";
-import { type Sample, TONE_CHECK } from "./src/contract";
+import { audioPlays, type Sample, TONE_CHECK } from "./src/contract";
 import { ToneCheck } from "./tone";
 
 /** Remove the page's players, which closes their sessions, and wait until every transport has. */
@@ -192,8 +192,7 @@ async function watch(codec: string): Promise<boolean> {
 		const state = failedAudio ?? (await readPlayerState(page));
 		const wrongTone =
 			state.audioCodec?.split(".")[0] === codec &&
-			state.audioContext === "running" &&
-			!state.audioStalled &&
+			audioPlays(state) &&
 			state.audioChannels === tones.length &&
 			state.tones?.length === tones.length &&
 			state.tones.every(({ rms }) => rms >= TONE_CHECK.minRms);

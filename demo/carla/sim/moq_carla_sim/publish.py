@@ -364,11 +364,10 @@ class Drivers:
                 async for event in announced:
                     # Every variant carries `announce`; uniffi's stubs type only the enum.
                     driver = event.announce.captures[0]  # pyright: ignore[reportAttributeAccessIssue]
-                    if isinstance(event, (moq.AnnounceEventAbsent, moq.AnnounceEventOffline)):
+                    if isinstance(event, moq.AnnounceEventAbsent):
                         task = drivers.pop(driver, None)
                         if task is not None:
                             task.cancel()
-                    # Availability changes reach the follow, which waits them out.
                     elif isinstance(event, moq.AnnounceEventPresent) and driver not in drivers:
                         drivers[driver] = asyncio.create_task(
                             self._follow(client, driver, f"{prefix}/{driver}"), name=f"driver:{driver}"

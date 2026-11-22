@@ -1,8 +1,10 @@
 // Group IDs past 2^53 decode, survive a JS forwarding node, and encode again on every wire
-// version, as a third-party moq-transport publisher's or a fine timescale's start ticks may be.
+// version that can carry them, as a third-party moq-transport publisher's or a fine timescale's start
+// ticks may be.
 import { expect, test } from "bun:test";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { accept, connect } from "./connection/index.ts";
+import { defined } from "./defined.test-util.ts";
 import * as Ietf from "./ietf/index.ts";
 import * as Lite from "./lite/index.ts";
 import { createMockTransportPair } from "./mock.ts";
@@ -32,8 +34,8 @@ const WIRES: Wire[] = [
 	{ name: "lite-02", protocol: "", version: Lite.Version.DRAFT_02 },
 	{ name: "lite-03", protocol: Lite.ALPN_03 },
 	{ name: "lite-04", protocol: Lite.ALPN_04 },
-	{ name: "lite-05", protocol: Lite.ALPN_05, datagrams: true },
-	{ name: "lite-06", protocol: Lite.ALPN_06, datagrams: true },
+	// Lite-05 and lite-06 are missing: they stamp a scale-less track's frames and datagrams with
+	// their keys as milliseconds, which a JS hop's timestamps hold only below 2^53.
 	{ name: "lite-07-wip", protocol: Lite.ALPN_07_WIP, datagrams: true },
 	{ name: "ietf-18", protocol: Ietf.ALPN.DRAFT_18 },
 	{ name: "ietf-20", protocol: Ietf.ALPN.DRAFT_20 },
@@ -49,7 +51,7 @@ async function forward(input: BroadcastConsumer, carriesDatagrams: boolean): Pro
 	const copy = new BroadcastProducer();
 	if (carriesDatagrams) {
 		const reader = input.datagrams("video");
-		const writer = copy.createDatagrams("video", await reader.info());
+		const writer = defined(copy.createDatagrams("video", await reader.info()));
 		void (async () => {
 			try {
 				for (let datagram = await reader.recv(); datagram; datagram = await reader.recv())
@@ -62,7 +64,7 @@ async function forward(input: BroadcastConsumer, carriesDatagrams: boolean): Pro
 			}
 		})();
 	}
-	const video = copy.createTrack("video", await subscription.info());
+	const video = defined(copy.createTrack("video", await subscription.info()));
 	void (async () => {
 		for (let group = await subscription.recvGroup(); group; group = await subscription.recvGroup()) {
 			const out = video.createGroup(group.start);
@@ -88,8 +90,8 @@ for (const wire of WIRES) {
 
 		const path = Path.from("big");
 		const publication = source.route(path);
-		const datagrams = wire.datagrams ? publication.broadcast.createDatagrams("video") : undefined;
-		const track = publication.broadcast.createTrack("video");
+		const datagrams = wire.datagrams ? defined(publication.broadcast.createDatagrams("video")) : undefined;
+		const track = defined(publication.broadcast.createTrack("video"));
 
 		const dynamic = relay.claim(path);
 		const inputs: BroadcastConsumer[] = [];
@@ -106,7 +108,7 @@ for (const wire of WIRES) {
 		// Publish once the viewer's subscription reached the publisher through the relay, so
 		// every group rides it live rather than racing it.
 		const demand = track.demand();
-		while (demand.wanted.peek() === undefined) await demand.wanted.changed();
+		while (!demand.wanted.peek()) await demand.wanted.changed();
 
 		for (const key of [PAST_SAFE, MAX_QUIC]) {
 			const group = track.createGroup(key);
@@ -154,7 +156,7 @@ for (const wire of WIRES) {
 }
 
 test("a group sequence that is not a non-negative bigint is refused where a caller passes one", async () => {
-	const track = new BroadcastProducer().createTrack("video");
+	const track = defined(new BroadcastProducer().createTrack("video"));
 	// A plain JS caller can still pass a number, which would otherwise mix with bigints later.
 	expect(() => track.createGroup(1 as unknown as bigint)).toThrow(TypeError);
 	expect(() => track.createGroup(-1n)).toThrow(RangeError);

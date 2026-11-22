@@ -539,6 +539,13 @@ test("the removed per-transport protocols fail loudly", async () => {
 	}
 });
 
+test("urlAuth cannot reach a supplied transport, which never dials the URL", async () => {
+	const pair = createMockTransportPair(ALPN_05);
+	await expect(connect(url, { transport: pair.client, urlAuth: true, tokens: ["a"] })).rejects.toThrow(
+		"urlAuth cannot reach a supplied transport",
+	);
+});
+
 test("a peer cannot select outside the explicit versions", async () => {
 	const pair = createMockTransportPair(ALPN_05);
 	const restore = stubWebTransport(pair.client);
@@ -818,9 +825,9 @@ test("the WebSocket fallback grants stream limits and receive windows", async ()
 		uni: 10_000,
 		params: {
 			initialMaxData: 4_194_304n,
-			initialMaxStreamDataBidiLocal: 1_048_576n,
-			initialMaxStreamDataBidiRemote: 1_048_576n,
-			initialMaxStreamDataUni: 1_048_576n,
+			initialMaxStreamDataBidiLocal: 4_194_304n,
+			initialMaxStreamDataBidiRemote: 4_194_304n,
+			initialMaxStreamDataUni: 4_194_304n,
 		},
 	});
 	expect(

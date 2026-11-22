@@ -10,7 +10,8 @@ callers collapse the same way. No public API changes.
 ## Plan
 
 From the 2026-11-18 enum-return audit (maintainer, /quest-plan); the public
-half is the [outcome-enums epic](/quest/m2/outcome-enums/README.md). m4,
+half was the m2 outcome-enums epic, finished by
+[moq-dev/moq#9223](https://github.com/moq-dev/moq/pull/9223). m4,
 since nothing waits on it and it changes no API. Judge each against
 REVIEW.md's "Return what callers use"; keep one whose named variants read
 better than the bare type at its one call site, and say so in the PR.

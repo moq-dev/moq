@@ -7,7 +7,7 @@ import { nextMedia, subscribeMedia } from "./media";
 
 const flush = () => yieldNow();
 
-test("media max delay is present on the initial subscription and later updates", async () => {
+test("media joins live, with its delay on the initial subscription and later updates", async () => {
 	let initial: Moq.Track.Subscription | undefined;
 	const updates: Moq.Track.Subscription[] = [];
 	const subscriber = {
@@ -23,7 +23,7 @@ test("media max delay is present on the initial subscription and later updates",
 			},
 		}),
 	} as unknown as Moq.Broadcast.Consumer;
-	const delay = new Signal<Moq.Track.Delay>({ min: Duration.millis(100), max: Duration.millis(250) });
+	const delay = new Signal<Container.Delay>({ min: Duration.millis(100), max: Duration.millis(250) });
 	const effect = new Effect();
 
 	subscribeMedia(effect, {
@@ -32,11 +32,31 @@ test("media max delay is present on the initial subscription and later updates",
 		priority: 7,
 		delay,
 	});
-	expect(initial).toEqual({ priority: 7, delay: { min: Duration.millis(100), max: Duration.millis(250) } });
+	// A live join its min delay behind the live edge.
+	const live = [{ start: { live: Duration.millis(100) } }];
+	expect(initial).toEqual({
+		priority: 7,
+		delay: { max: Duration.millis(250) },
+		ranges: live,
+	});
 
 	delay.set({ min: Duration.millis(100), max: Duration.millis(500) });
 	await flush();
-	expect(updates.at(-1)).toEqual({ priority: 7, delay: { min: Duration.millis(100), max: Duration.millis(500) } });
+	expect(updates.at(-1)).toEqual({
+		priority: 7,
+		delay: { max: Duration.millis(500) },
+		ranges: live,
+	});
+
+	// A new min moves no join: the range resolves once, and placing it anew would skip media
+	// buffered behind the new start.
+	delay.set({ min: Duration.millis(300), max: Duration.millis(500) });
+	await flush();
+	expect(updates.at(-1)).toEqual({
+		priority: 7,
+		delay: { max: Duration.millis(500) },
+		ranges: live,
+	});
 
 	effect.close();
 });
