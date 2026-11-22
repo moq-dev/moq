@@ -555,6 +555,12 @@ export interface ResumeSource {
 	 * Below `passing`, which a key-order read is about to pass, no copy can deliver one later.
 	 */
 	tryDrop(delivered: Delivered, passing?: bigint): (Recv & { kind: "drop" }) | undefined;
+	/** Let a widening take back what the copies report, until the reader settles it. */
+	withdrawing(): void;
+	/** The drops the copies took back after a widening since the last call, none of which is reported any more. */
+	takeWithdrawn(): Run[];
+	/** Settle `[start, end)` on every copy, which the reader reported for good. */
+	settle(start: bigint, end: bigint): void;
 	/**
 	 * Whether the reader's bounded window has nothing left to deliver: every key of the whole window
 	 * the logical reader (`delivered`) lacks is accounted for, as {@link accounts} judges. A copy
@@ -1021,6 +1027,21 @@ export const hooks: {
 	/** Fold a route copy's record below `at`, where the reader it feeds is, which reports nothing there. */
 	fold: (subscriber: Subscriber, at: bigint) => void;
 	/**
+	 * Let a widening take back a route copy's dropped reports until its reader settles them, as an
+	 * ordered read does. Mirrors the Rust crate-private `track::Subscriber::set_withdrawing`.
+	 */
+	withdrawing: (subscriber: Subscriber) => void;
+	/**
+	 * The runs a route copy took back after a widening since the last call, none of which it reports
+	 * any more. Mirrors the Rust crate-private `track::Subscriber::take_withdrawn`.
+	 */
+	takeWithdrawn: (subscriber: Subscriber) => Run[];
+	/**
+	 * Settle `[start, end)` on a route copy, which its reader reported for good, so a widening never
+	 * takes it back. Mirrors the Rust crate-private `track::Subscriber::settle_gap`.
+	 */
+	settleGap: (subscriber: Subscriber, start: bigint, end: bigint) => void;
+	/**
 	 * What a lite publisher told its wire about a subscriber's keys, kept in the
 	 * subscriber's own record. Mirrors the Rust crate-private `track::Subscriber::record_mut`.
 	 */
@@ -1421,6 +1442,15 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	fold: () => {
+		throw new Error("track.ts not loaded");
+	},
+	withdrawing: () => {
+		throw new Error("track.ts not loaded");
+	},
+	takeWithdrawn: () => {
+		throw new Error("track.ts not loaded");
+	},
+	settleGap: () => {
 		throw new Error("track.ts not loaded");
 	},
 	wire: () => {

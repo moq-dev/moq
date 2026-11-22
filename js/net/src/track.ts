@@ -3311,6 +3311,10 @@ export class Subscriber {
 	#wired = false;
 	// What an ordered read owes before its next group; unset before its first read. See #tryItem.
 	#items?: Items;
+	// Behind a front's reader whose owner may take back a dropped report until it settles it, as an
+	// ordered read does: the runs a widening took back, for that reader to take. Mirrors the Rust
+	// `Cursor::withdrawn` behind a front's reader.
+	#withdrawn?: Run[];
 	// The group the frame-level helpers are currently draining, acquired through the
 	// key cursor so frame reads and {@link Ordered.nextGroup} share one floor.
 	#frameGroup?: GroupConsumer;
@@ -4705,6 +4709,19 @@ export class Subscriber {
 		};
 		hooks.forgetPastBudget = (subscriber, delivered) => subscriber.#forgetPastBudget(delivered);
 		hooks.fold = (subscriber, at) => subscriber.#fold(at);
+		hooks.withdrawing = (subscriber) => subscriber.#setWithdrawing();
+		hooks.takeWithdrawn = (subscriber) => {
+			subscriber.#takeBack();
+			const withdrawn = subscriber.#withdrawn ?? [];
+			if (subscriber.#withdrawn) subscriber.#withdrawn = [];
+			return withdrawn;
+		};
+		hooks.settleGap = (subscriber, start, end) => {
+			subscriber.#settleGap(start, end);
+			// Its reader passed these keys for good, so the copy never asks a fill for them again, as
+			// the Rust copy's misses keep a run its record settled given up.
+			for (const run of subscriber.#reads(start, end)) insertRun(subscriber.#givenUp, run.start, run.end);
+		};
 		hooks.wire = (subscriber) => subscriber.#wireRecord();
 		hooks.deliveredRuns = (subscriber) => subscriber.#delivered.runs;
 		hooks.reportedRuns = (subscriber) => subscriber.#reported.size;
@@ -5319,8 +5336,19 @@ export class Subscriber {
 	// Read off the record, not the refusals: a group arriving and then failing takes its key out
 	// of the refusal while the gap stays queued. Mirrors the Rust `Cursor::rejudge`.
 	#withdraw(budget: number): void {
+		if (this.#wired) return;
+		const withdrawn = this.#withdrawn;
+		// A front's copy takes back what its reader has yet to settle, for that reader to take back too.
+		if (withdrawn) {
+			for (const told of this.#reported.overlapping(this.#floor, UNBOUNDED)) {
+				if (told.kind !== "dropped" || told.ownStale === undefined || budget <= told.ownStale) continue;
+				this.#reported.set(told.start, told.end);
+				insertRun(withdrawn, told.start, told.end);
+			}
+			return;
+		}
 		const items = this.#items;
-		if (!items || this.#wired) return;
+		if (!items) return;
 		for (const gap of [...items.gaps]) {
 			for (const told of this.#reported.overlapping(gap.start, gap.end)) {
 				if (told.kind !== "dropped" || told.ownStale === undefined || budget <= told.ownStale) continue;
@@ -5338,10 +5366,15 @@ export class Subscriber {
 	#tryDrop(): (Recv & { kind: "drop" }) | undefined {
 		if (this.#resume) {
 			for (;;) {
+				this.#takeBack();
 				const queued = this.#nextResumedDrop();
 				if (queued) return queued;
 				const next = this.#resume.tryDrop(this.#delivered);
-				if (!next) return undefined;
+				if (!next) {
+					// Taken back by a widening during this poll, so before the read returns a gap.
+					this.#takeBack();
+					return undefined;
+				}
 				this.#queueResumedDrop(next);
 			}
 		}
@@ -5460,6 +5493,45 @@ export class Subscriber {
 			}
 			return recv;
 		}
+	}
+
+	// Take back what a resumed reader's copies took back after a widening (see #withdraw): a run still
+	// to report leaves the queue, and one reported is untold, for an ordered read to forget or this
+	// copy's reader to take back too. What the owner settled stays settled, since the copies were
+	// told of it. Only an owner that may take a report back lets the copies take theirs back.
+	// Mirrors the Rust `Logical::take_back`.
+	#takeBack(): void {
+		const resume = this.#resume;
+		if (!resume || this.#wired || (!this.#items && !this.#withdrawn)) return;
+		for (const run of resume.takeWithdrawn()) {
+			this.#pending = this.#pending.flatMap((queued) =>
+				!queued.received && !queued.skip && queued.stale !== undefined
+					? removeRun([queued], run.start, run.end)
+					: [queued],
+			);
+			for (const told of this.#reported.overlapping(run.start, run.end)) {
+				if (told.kind !== "dropped") continue;
+				const from = max(told.start, run.start);
+				const to = min(told.end, run.end);
+				this.#reported.set(from, to);
+				if (this.#items) this.#items.gaps = removeRun(this.#items.gaps, from, to);
+				if (this.#withdrawn) insertRun(this.#withdrawn, from, to);
+			}
+		}
+	}
+
+	// Let a widening take back the drops this reports until its owner settles them with #settleGap,
+	// as an ordered read does for the gaps it returns. Mirrors the Rust `Subscriber::set_withdrawing`.
+	#setWithdrawing(): void {
+		this.#withdrawn ??= [];
+		this.#resume?.withdrawing();
+	}
+
+	// Settle `[start, end)` as reported for good: a gap an ordered read returned. A front's copies are
+	// told too, so a widening never asks them again. Mirrors the Rust `Subscriber::settle_gap`.
+	#settleGap(start: bigint, end: bigint): void {
+		this.#settled(start, end);
+		this.#resume?.settle(start, end);
 	}
 
 	// Queue a run a resumed reader's copy gave up. Each copy reports to its own route; this
@@ -5587,6 +5659,8 @@ export class Subscriber {
 		let items = this.#items;
 		if (!items) {
 			items = this.#items = { gaps: [], at: 0n };
+			// What its copies report it may take back until it returns the gap.
+			this.#resume?.withdrawing();
 			// The drop record starts before the first read, so the cursor keeps what it gives up.
 			this.#findGaps(items);
 		}
@@ -5741,7 +5815,7 @@ export class Subscriber {
 		const error = this.#cutGap(items, index, given.start, resume);
 		items.at = max(items.at, given.end);
 		// Told once: no later drop of these keys is a gap again.
-		this.#settled(given.start, given.end);
+		this.#settleGap(given.start, given.end);
 		// Passed for good, as a group handed out is: an ordered read never goes back, so no group
 		// below its end is handed out after it, whether it lands late here or on a resumed
 		// reader's copy, and a fill no longer owes it there.

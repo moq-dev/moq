@@ -506,6 +506,12 @@ class Reader implements ResumeSource {
 	#delivered = new Delivered();
 	/** Runs the serving copy gave up and the reader has yet to report; see {@link #tryDrop}. */
 	#drops: DropRun[] = [];
+	/**
+	 * Whether the reader's owner may take back a drop it reported until it settles it, as an ordered
+	 * read does, so a widening may take back the copies' drops too. Mirrors the Rust
+	 * `Reader::withdrawing`.
+	 */
+	#withdrawing = false;
 	/** A copy that declared the track's end ran out cleanly at it, even if since let go. */
 	#settled = false;
 	/** Whether groups were ever asked for; until then the reader keeps no replaced copy. */
@@ -929,7 +935,12 @@ class Reader implements ResumeSource {
 			this.#mirrored = subscription;
 			// New preferences may ask what a backfill failed to get.
 			this.#refused = undefined;
-			for (const copy of this.#copies) this.#update(copy);
+			for (const copy of this.#copies) {
+				this.#update(copy);
+				// A widening judges the copy again, which may then take back a drop it reported that the
+				// reader's owner has yet to settle.
+				if (this.#withdrawing) hooks.withdrawing(copy.sub);
+			}
 			// A copy just resolved replaced ranges against its cache, before its failover cap raised
 			// them, so the reader takes that resolution now, the newest copy's first.
 			const ranges = this.#ranges();
@@ -1417,6 +1428,25 @@ class Reader implements ResumeSource {
 			if (split < gap.end) above.push({ start: split, end: gap.end });
 		}
 		return hooks.accountsFor(serving.sub, delivered, above, ordered);
+	}
+
+	withdrawing(): void {
+		this.#withdrawing = true;
+	}
+
+	takeWithdrawn(): Run[] {
+		const withdrawn: Run[] = [];
+		for (const copy of this.#copies) {
+			for (const run of hooks.takeWithdrawn(copy.sub)) {
+				insertRun(withdrawn, run.start, run.end);
+				this.#drops = removeRun(this.#drops, run.start, run.end);
+			}
+		}
+		return withdrawn;
+	}
+
+	settle(start: bigint, end: bigint): void {
+		for (const copy of this.#copies) hooks.settleGap(copy.sub, start, end);
 	}
 
 	tryDrop(delivered: Delivered, passing?: bigint): (Recv & { kind: "drop" }) | undefined {

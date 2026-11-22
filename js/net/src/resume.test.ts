@@ -5,6 +5,7 @@ import { race, Signal } from "@moq/signals";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer, type FetchFrom } from "./broadcast.ts";
 import { defined } from "./defined.test-util.ts";
 import { NotFound, SessionCode, SessionError, StreamCode, StreamError, toStreamCode } from "./error.ts";
+import { type FillGroups, rejectGroups } from "./fill.ts";
 import { type Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { WireRoute } from "./hop.ts";
 import type { Session as IetfSession } from "./ietf/session.ts";
@@ -3222,6 +3223,72 @@ test("a front's ordered reader holds a gap above a waiting time start", async ()
 	ordered.close();
 	front.consumer.close();
 	a.close();
+});
+
+// A run the serving copy's fill refused as stale under the reader's budget is no verdict for it once
+// it widens past that budget, unless it already returned the gap, on a front as on a plain reader:
+// it asks the run again, and the gap waits for that answer. Mirrors the Rust
+// `a_widened_read_asks_its_own_stale_refusal_again`.
+test("a front's widened ordered read asks its copy's stale refusal again unless it returned the gap", async () => {
+	for (const returned of [false, true]) {
+		const front = new Front();
+		const a = new BroadcastProducer();
+		const ta = copy(a);
+		hooks.receiveTrack(ta.producer);
+		const requests = ta.producer.requests();
+		ta.write(900n);
+		ta.write(2000n);
+		if (returned) ta.producer.skipGroups(901n, 1000n);
+		hooks.dropTrackGroups(ta.producer, 1000n, 1500n, staleHole(10_000));
+		front.serve(a.consume());
+		const subscriber = front.consumer
+			.track("seq")
+			.subscribe({ delay: { max: Duration.secs(1) } })
+			.withRange({ start: { included: 900n }, end: { excluded: 1600n } });
+		const ordered = subscriber.ordered();
+		const read = () => {
+			const out: string[] = [];
+			for (let item = ordered.tryNextItem(); item; item = ordered.tryNextItem()) {
+				if (item.kind === "group") out.push(`group ${item.group.start}`);
+				else out.push(`gap ${item.start}..${item.end}`);
+			}
+			return out;
+		};
+		await settle();
+		expect(read()).toEqual(["group 900"]);
+		const fill = await requests.requestedFill();
+		expect([fill?.start, fill?.end]).toEqual([1000n, 1500n]);
+		if (fill) rejectGroups(fill, 1000n, 1500n, new StreamError(StreamCode.Old), { budget: 1000, everyone: false });
+		await settle();
+		expect(read()).toEqual(returned ? ["gap 1000..1500"] : []);
+
+		// Widened past the budget the fill refused under: the refusal is no verdict for it now,
+		// unless the read already passed it.
+		subscriber.update({ delay: { max: null } });
+		if (!returned) ta.producer.skipGroups(901n, 1000n);
+		await settle();
+		expect(read()).toEqual([]);
+		let again: FillGroups | undefined;
+		void requests.requestedFill().then((fill) => {
+			again = fill;
+		});
+		await settle();
+		expect(again && [again.start, again.end]).toEqual(returned ? undefined : [1000n, 1500n]);
+		if (again) {
+			again.dropGroups(1000n, 1200n);
+			again.dropGroups(1201n, 1500n);
+			await settle();
+			expect(read()).toEqual(["gap 1000..1200"]);
+			again.accept(1200n)?.finish();
+			await settle();
+			expect(read()).toEqual(["group 1200", "gap 1201..1500"]);
+		}
+
+		requests.close();
+		ordered.close();
+		front.consumer.close();
+		a.close();
+	}
 });
 
 test("an ordered reader takes a replaced copy's buffered group before the new copy's later one", async () => {
