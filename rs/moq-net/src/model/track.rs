@@ -639,7 +639,7 @@ impl TimeStart {
 	/// Where the time falls for a reader within `budget`, `None` when no answer proves it.
 	fn containing(&self, time: u64, budget: Duration) -> Option<Containing> {
 		match (self.start, self.past) {
-			(Some(start), _) if start <= time => Some(Containing::Group(start)),
+			(Some(start), _) if start <= time => Some(Containing::At(start)),
 			(_, Some(past)) if budget <= past => Some(Containing::Before),
 			_ => None,
 		}
@@ -1044,6 +1044,17 @@ impl Slot {
 		self.copies().find_map(group::Handle::end)
 	}
 
+	/// Where a range from `time` starts, this group, at `key`, being the newest starting at or
+	/// before it: here, unless the group ended whole at or before the time, then at its End, so
+	/// at the next group, since no group contains a time past a whole group's span. A time at
+	/// the group's start names it whatever its End.
+	fn reached(&self, key: u64, time: u64) -> u64 {
+		match self.end() {
+			Some(end) if time > key && end <= time => end.max(key.saturating_add(1)),
+			_ => key,
+		}
+	}
+
 	/// Every copy this slot holds, the live group first.
 	fn copies(&self) -> impl Iterator<Item = &group::Handle> {
 		std::iter::once(&self.group).chain(self.head.as_deref())
@@ -1165,13 +1176,13 @@ impl Holdings for TrackState {
 
 	fn containing(&self, time: u64, budget: Duration) -> Containing {
 		if self.starts_at_keys {
-			return Containing::Group(time);
+			return Containing::At(time);
 		}
 		if self.anchors == Anchors::Wire {
 			return self.containing_received(time, budget);
 		}
 		match self.lookup.range(..=time).next_back() {
-			Some((&key, _)) => Containing::Group(key),
+			Some((&key, slot)) => Containing::At(slot.reached(key, time)),
 			// Every key at or before it is gone, so whichever group held it will never arrive.
 			None if self.dropped_cover(0..time.saturating_add(1)) => Containing::Before,
 			None if self.lookup.is_empty() => Containing::Unknown,
@@ -1438,18 +1449,20 @@ impl TrackState {
 	/// [`Holdings::containing`] on a lite-07 copy, which holds only part of the track, for a
 	/// reader within `budget`. It places a time only where it can prove what its upstream would
 	/// answer: at a group held there, at a group held before it once every key between is
-	/// given up for this reader (a GROUP's Previous Start links the two), before every group
+	/// given up for this reader (a GROUP's Previous Start links the two, and a whole group's
+	/// GROUP_END gives up the starts inside its span, so it alone proves every time there),
+	/// or at its End once the time is past that span, before every group
 	/// once every key through it is, or where its upstream answered a range asked from that
 	/// time. A stale drop is given up only for a reader within the budget it was judged under:
 	/// a wider one may still get that group, as for an answer.
 	/// Anything else is unknown, and the reader's session asks its upstream for it (see
 	/// [`Subscriber::asks`]): a group held after the time says nothing of one between.
 	fn containing_received(&self, time: u64, budget: Duration) -> Containing {
-		let held = self.lookup.range(..=time).next_back().map(|(&key, _)| key);
-		if let Some(key) = held
+		let held = self.lookup.range(..=time).next_back();
+		if let Some((&key, slot)) = held
 			&& self.given_up_for(key.saturating_add(1)..time.saturating_add(1), budget)
 		{
-			return Containing::Group(key);
+			return Containing::At(slot.reached(key, time));
 		}
 		if let Some(placed) = (self.time_starts.get(&time)).and_then(|reported| reported.containing(time, budget)) {
 			return placed;
@@ -10371,7 +10384,7 @@ impl Cursor {
 			lookup.join = None;
 			let found = match answer {
 				fill::TimeStart::Group(group) => Found::Group(group),
-				fill::TimeStart::Dropped => Found::Dropped { floor: lookup.floor },
+				fill::TimeStart::Dropped => Found::Dropped,
 				fill::TimeStart::Unanswered => Found::Unanswered,
 				// Where the time falls is unknown, so the reads fail rather than guess from the
 				// cache. The ranges resolve afresh once they change, asking again.

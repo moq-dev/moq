@@ -683,7 +683,7 @@ impl Holdings for Placed {
 	}
 
 	fn containing(&self, time: u64, _: Duration) -> Containing {
-		Containing::Group(time)
+		Containing::At(time)
 	}
 
 	fn next_start(&self, _: u64) -> Option<u64> {
