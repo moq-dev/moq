@@ -194,7 +194,10 @@ mod tests {
 		let mut grant = full();
 		for cadence in [0, 1, 400, 499, 500, 750, 999] {
 			grant.revalidate = Some(Duration::from_millis(cadence));
-			assert!(matches!(grant.validate(), Err(crate::Error::ShortRevalidate)), "{cadence}ms");
+			assert!(
+				matches!(grant.validate(), Err(crate::Error::ShortRevalidate)),
+				"{cadence}ms"
+			);
 		}
 		for cadence in [1000, 1400, 1600] {
 			grant.revalidate = Some(Duration::from_millis(cadence));

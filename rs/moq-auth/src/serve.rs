@@ -683,7 +683,10 @@ impl Server {
 		if policy.revalidate.is_some() && policy.expires.is_none() {
 			return Err(crate::Error::UnboundedRevalidate);
 		}
-		if policy.revalidate.is_some_and(|cadence| cadence < crate::grant::MIN_REVALIDATE) {
+		if policy
+			.revalidate
+			.is_some_and(|cadence| cadence < crate::grant::MIN_REVALIDATE)
+		{
 			return Err(crate::Error::ShortRevalidate);
 		}
 		if policy
@@ -1917,7 +1920,10 @@ mod tests {
 				expires: Some(Duration::from_secs(60)),
 				..Default::default()
 			};
-			assert!(matches!(Server::new(policy), Err(Error::ShortRevalidate)), "{cadence:?}");
+			assert!(
+				matches!(Server::new(policy), Err(Error::ShortRevalidate)),
+				"{cadence:?}"
+			);
 		}
 	}
 

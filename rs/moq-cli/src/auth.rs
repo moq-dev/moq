@@ -438,7 +438,7 @@ pub struct Serve {
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	tier: Option<String>,
 
-	/// How often the relay re-checks each grant. Off by default; needs `--expires`.
+	/// How often the relay re-checks each grant, at least 1s. Off by default; needs `--expires`.
 	#[usage(long, setting = "revalidate")]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	revalidate: Option<moq_tokio::cli::Duration>,
