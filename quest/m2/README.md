@@ -37,8 +37,6 @@ native crates, and public APIs:
   `#[non_exhaustive]` ([net-non-exhaustive-events](/quest/m2/net-non-exhaustive-events.md)),
   fix `hang::Catalog::without_ext` and drop dead `Error` variants and the unused
   `url` dependency ([hang-without-ext-and-errors](/quest/m2/hang-without-ext-and-errors.md)),
-  rename `moq-gst`'s retired `tls-disable-verify` property to
-  `connect-tls-insecure` ([gst-tls-insecure-prop](/quest/m2/gst-tls-insecure-prop.md)),
   narrow `@moq/room`'s `Room.remotes` to `ReadonlyMap`
   ([room-remotes-readonly](/quest/m2/room-remotes-readonly.md)), and open
   `moq-ffi`'s 5 closed extensible enums while deriving `Debug`/`Eq`/`Hash` on
