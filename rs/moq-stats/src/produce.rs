@@ -75,7 +75,8 @@ pub struct Config {
 	///
 	/// A root's view carries the traffic on paths at or under the root, named
 	/// relative to it, and the sessions scoped to the root or beneath it, in the
-	/// same tracks as the node's broadcast. It is announced while a session scoped
+	/// same tracks as the node's broadcast, bucketed where the node's are: by the
+	/// leading [`Self::depth`] segments of the full path. It is announced while a session scoped
 	/// to exactly that root is counted, plus the [`Self::linger`], and a root
 	/// returning after that is a new broadcast. The registry also stops counting
 	/// `<prefix>` under each session's own root, where a relay mounts the view.
@@ -479,7 +480,7 @@ impl Drain {
 		}
 		for view in self.roots.values_mut() {
 			if let Some(node) = &mut view.node {
-				node.collect(&view.report, self.tick, self.task.depth);
+				node.collect(&view.report, self.tick, view.depth);
 			}
 		}
 	}
@@ -492,12 +493,12 @@ impl Drain {
 		// A label's presence track and a prefix's track exist only while
 		// requested. See `serve_requests`.
 		self.node.serve_requests(&self.report, self.tick, stamp);
-		let Task { depth, linger, .. } = self.task;
+		let linger = self.task.linger;
 		// Dropping a view's publisher ends its broadcast.
 		self.roots.retain(|_, view| !view.lingered(stamp.at, linger));
 		for view in self.roots.values_mut() {
 			if let Some(node) = &mut view.node {
-				node.flush(self.tick, stamp, depth, linger);
+				node.flush(self.tick, stamp, view.depth, linger);
 				node.serve_requests(&view.report, self.tick, stamp);
 			}
 		}
@@ -778,6 +779,9 @@ impl<V: Serialize> Output<V> {
 /// and the publisher of its broadcast.
 struct RootView {
 	root: Path,
+	/// The node's depth less the root's own segments, so a view's buckets split the
+	/// root's paths where the node's do: a root at or below the depth is one bucket.
+	depth: usize,
 	/// `None` when the root's broadcast could not be announced, held anyway so the
 	/// refusal is logged once per run of the root rather than every drain.
 	node: Option<NodePublisher>,
@@ -799,6 +803,7 @@ impl RootView {
 			.and_then(|advertised| NodePublisher::create(task, &advertised));
 		Self {
 			root: root.clone(),
+			depth: task.depth.saturating_sub(root.parts().count()),
 			node,
 			report: Report::default(),
 			live: false,
