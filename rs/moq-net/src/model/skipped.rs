@@ -181,9 +181,15 @@ mod test {
 		assert_eq!(skipped.runs(), 2);
 		assert_eq!(skipped.lowest(), Some(1));
 
-		assert!(skipped.widened(&Budget::uniform(NARROW)).is_empty(), "the same budget reverses nothing");
+		assert!(
+			skipped.widened(&Budget::uniform(NARROW)).is_empty(),
+			"the same budget reverses nothing"
+		);
 		assert_eq!(skipped.widened(&Budget::uniform(WIDE)), vec![1..=2]);
-		assert!(skipped.widened(&Budget::uniform(WIDE)).is_empty(), "a run judged at the budget stays");
+		assert!(
+			skipped.widened(&Budget::uniform(WIDE)).is_empty(),
+			"a run judged at the budget stays"
+		);
 		assert_eq!(skipped.lowest(), Some(1), "a widened run stays until it is handed out");
 		// Rejudged under WIDE, the widened run now merges with the run already judged there.
 		assert_eq!(skipped.widened(&Budget::uniform(WIDE * 2)), vec![1..=2, 4..=4]);

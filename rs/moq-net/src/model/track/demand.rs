@@ -883,7 +883,9 @@ mod tests {
 				0 => Start::Oldest,
 				1 => Start::Live {
 					min: Duration::from_millis(rng.random_range(0..8)),
-					max: rng.random_bool(0.8).then(|| Duration::from_millis(rng.random_range(0..8))),
+					max: rng
+						.random_bool(0.8)
+						.then(|| Duration::from_millis(rng.random_range(0..8))),
 				},
 				_ => Start::Time(rng.random_range(0..8)),
 			};
