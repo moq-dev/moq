@@ -14,4 +14,4 @@ pub use api::LoadError;
 pub use buffer::{Bitstream, BitstreamLock, Buffer, BufferLock, EncoderInput, MappedResource, RegisteredResource};
 pub use encoder::{Encoder, EncoderInitParams};
 pub use result::{EncodeError, ErrorKind};
-pub use session::{EncodePictureParams, Session, Submission};
+pub use session::{EncodePictureParams, Rejected, Session, Submission};
