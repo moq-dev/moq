@@ -901,7 +901,8 @@ impl Misses {
 			}
 		}
 		// A run the track forgot is unknown again, so what this reader judged inside it and has
-		// not taken is judged afresh: asked of a fill, or given up by its budget.
+		// not taken is judged afresh: asked of a fill, or given up by its budget. What it gave up
+		// there, its own verdict, stays given up.
 		let (forgotten, revision) = state.forgotten.since(self.forgotten);
 		for run in forgotten {
 			let run = run.start.max(low)..run.end.min(top.saturating_add(1));
@@ -1045,6 +1046,7 @@ impl Misses {
 				self.filled.extend(held.clone());
 			}
 			for hole in holes(state, run.clone()) {
+				self.adopt_drops(state, hole.clone(), drift);
 				for hole in self.unclaimed(state, hole, drift) {
 					let (unfed, awaited) = state.unfed(hole, now);
 					for run in unfed.iter() {
@@ -1423,15 +1425,34 @@ impl Misses {
 		if groups.is_empty() {
 			return;
 		}
+		self.hold_verdict(groups.clone(), stale);
+		given_up.push((groups, stale));
+	}
+
+	/// Hold `groups` as given up, judged stale under `stale` if it was, so it is never asked
+	/// again unless a budget wider than `stale` takes it back.
+	fn hold_verdict(&mut self, groups: ops::Range<u64>, stale: Option<Duration>) {
 		self.given_up.insert(groups.clone());
 		match stale {
 			Some(budget) => {
-				self.stale.insert(groups.clone(), budget);
+				self.stale.insert(groups, budget);
 				self.narrowest = Some(self.narrowest.map_or(budget, |narrowest| narrowest.min(budget)));
 			}
-			None => self.stale.remove(groups.clone()),
+			None => self.stale.remove(groups),
 		}
-		given_up.push((groups, stale));
+	}
+
+	/// Take the track's drops that settle `hole` for this reader as its own verdicts: the
+	/// track sheds its drop set under pool pressure, which must not reopen what this reader
+	/// already gave up. Only its record's fold forgets them. The drop poll names them, so
+	/// nothing is reported here.
+	fn adopt_drops(&mut self, state: &TrackState, hole: ops::Range<u64>, drift: &Drift) {
+		for (run, gone) in state.drops.overlapping(&hole) {
+			let run = run.start.max(hole.start)..run.end.min(hole.end);
+			if !run.is_empty() && drift.settles(run.start, gone) {
+				self.hold_verdict(run, gone.stale_budget());
+			}
+		}
 	}
 
 	/// Take back the runs given up as stale under a budget narrower than `budget`, returning
@@ -1683,6 +1704,10 @@ fn clip(run: ops::Range<u64>, from: u64, admitted: &RangeInclusiveSet<u64>) -> V
 impl super::super::record::Beside for Misses {
 	fn runs(&self) -> u64 {
 		(self.given_up.len() + self.stale.len()) as u64
+	}
+
+	fn given_up_end(&self, key: u64) -> Option<u64> {
+		self.given_up.get(&key).map(|run| run.end)
 	}
 
 	fn forget_below(&mut self, floor: u64) {

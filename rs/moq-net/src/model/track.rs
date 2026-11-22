@@ -1928,7 +1928,8 @@ impl TrackState {
 	}
 
 	/// Forget the runs of the drop set given up longer than the pool's expiry window before
-	/// `now`: their keys are unknown again, as a shed run's are. Walks the set only once
+	/// `now`: their keys are unknown again to a reader that never judged them, as a shed run's
+	/// are. Walks the set only once
 	/// its oldest run is due, which a quarter of the window separates from the next.
 	fn expire_drops(&mut self, now: u64) {
 		if !self.drops_expired(now) {
@@ -1977,8 +1978,9 @@ impl TrackState {
 	}
 
 	/// Forget the lowest runs of the drop set until the debt is paid or `cap` bytes are
-	/// freed, returning the bytes freed. Their keys are unknown again: a reader judges
-	/// them by its budget, or fills them by range.
+	/// freed, returning the bytes freed. Their keys are unknown again to a reader that never
+	/// judged them, which judges them by its budget or fills them by range; one that did keeps
+	/// its verdict.
 	fn shed_drops(&mut self, cap: u64) -> u64 {
 		let mut paid = 0u64;
 		let kept = self.kept_drops();
@@ -2002,7 +2004,7 @@ impl TrackState {
 
 	/// Forget `run` of the drop set to reclaim it, accounting it in the arrivals as an evicted
 	/// group stays: the publisher accounted for it, so neither the tail nor a reader waits on
-	/// it again, and a reader that wants it asks a fill or judges it by its budget.
+	/// it again, and a reader that never judged it asks a fill or judges it by its budget.
 	///
 	/// A reclaim never adds a run to the arrivals, so forgetting a flood of fragments costs
 	/// nothing there: a run touching no accounted one takes the gap below it too, given up
@@ -31062,11 +31064,12 @@ mod test {
 		));
 	}
 
-	/// A reader that judged a dropped run before the pool forgot it, and has not read past it,
-	/// asks a fill for it once it is unknown again.
+	/// A reader that judged a dropped run before the pool forgot it keeps that verdict as its
+	/// own, so it asks no fill for the run once the track forgets it; only a reader that never
+	/// judged it finds it unknown and asks.
 	#[test]
 	#[cfg(feature = "async")]
-	fn a_reader_asks_a_fill_for_a_forgotten_run_it_judged() {
+	fn a_forgotten_run_is_asked_only_by_a_reader_that_never_judged_it() {
 		let pool = cache::Pool::new(cache::Config::default().with_expiry(Duration::from_secs(10)));
 		let producer = track_producer_pooled("test", pool.clone());
 		producer.received();
@@ -31089,10 +31092,18 @@ mod test {
 		pool.sweep();
 		assert!(producer.state.read().drops.is_empty(), "the run expired");
 		let _ = subscriber.poll_recv_group(&waiter);
+		assert!(
+			dynamic.poll_requested_fill(&waiter).is_pending(),
+			"the reader keeps its verdict on the forgotten run"
+		);
+
+		let mut later = producer.subscribe(patient());
+		let _ = later.poll_recv_group(&waiter);
 		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
-			panic!("the forgotten run is asked of a fill");
+			panic!("a reader that never judged the run asks a fill for it");
 		};
-		assert_eq!(fill.start().group..fill.end(), 1..2);
+		// With group 0, which expired too.
+		assert_eq!(fill.start().group..fill.end(), 0..2);
 	}
 
 	/// A source refusing a fill in disjoint groups pays for the runs it records, as a drop does.
