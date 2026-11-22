@@ -4158,6 +4158,9 @@ impl Consumer {
 			}
 			let index = self.cursor.index;
 			let short = matches!(res, Poll::Ready(Ok(None))) && self.closed_short();
+			// A copy taken over mid-group may close it below the frames already read, so its
+			// close cannot be where this read ends.
+			let past = short && self.closed_past();
 			let Some(recover) = self.carry.as_mut().and_then(|carry| carry.recover.as_mut()) else {
 				return res;
 			};
@@ -4194,6 +4197,13 @@ impl Consumer {
 			if !recover.wants(cause.error(), waiter) {
 				match &cause {
 					Cause::Failed(err) => recover.failed(index, err),
+					// The copy being read still serves and holds no more than was read, so
+					// nothing continues the group.
+					Cause::Closed if past => {
+						recover.failed(index, &Error::NotFound);
+						self.let_go();
+						return Poll::Ready(Err(Error::NotFound));
+					}
 					// The copy being read still serves, so its close is the group's end.
 					Cause::Closed => self.let_go(),
 					Cause::Stalled => {}
@@ -4201,7 +4211,8 @@ impl Consumer {
 				return res;
 			}
 			recover.recovering(index, &cause);
-			let closed = matches!(cause, Cause::Closed);
+			// A close stands only where the read is.
+			let closed = short && !past;
 			let replacement = match self.replacement(cause, waiter) {
 				Poll::Ready(Ok(replacement)) => replacement,
 				Poll::Ready(Err(err)) => {
@@ -4216,16 +4227,19 @@ impl Consumer {
 					return Poll::Ready(Err(err));
 				}
 				// The reader's budget bounds the wait for the rest, as it does a stall, and
-				// ends the group where it closed.
+				// ends the group where it closed, if that close stands.
 				Poll::Pending
-					if closed
+					if short
 						&& self
 							.expiry
 							.as_ref()
 							.is_some_and(|e| e.is_expired(self.recover(), waiter)) =>
 				{
 					self.let_go();
-					return res;
+					return match closed {
+						true => res,
+						false => Poll::Ready(Err(Error::Old)),
+					};
 				}
 				Poll::Pending => return Poll::Pending,
 			};
@@ -4755,6 +4769,11 @@ impl Consumer {
 				self.cursor.state.read().outcome,
 				Outcome::Finished(frames, None) | Outcome::Released(frames, None, _) if self.cursor.index >= frames
 			)
+	}
+
+	/// Whether the copy read closed the group short below the frame this reader reads next.
+	fn closed_past(&self) -> bool {
+		self.cursor.state.read().outcome.frames().is_some_and(|frames| self.cursor.index > frames)
 	}
 
 	fn recover_mut(&mut self) -> Option<&mut super::resume::Recover> {

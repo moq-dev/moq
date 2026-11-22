@@ -269,6 +269,11 @@ impl Publisher {
 		self.routes.iter().flatten()
 	}
 
+	/// The route the front serves: the cheapest live one.
+	fn serving(&self) -> Option<&Copy> {
+		self.routes.iter().rev().flatten().next()
+	}
+
 	fn newest(&self) -> Option<u64> {
 		self.written.last_key_value().map(|(group, _)| *group)
 	}
@@ -921,7 +926,8 @@ impl Model {
 					Poll::Ready(Ok(None)) => {
 						// Short of whole only where a route closed it, and, unless the budget gave up or
 						// the group may have expired, only while a route that closed it lives: one whose
-						// route failed reads on from the route replacing it.
+						// route failed reads on from the route replacing it, unless that route gave the
+						// group up, so nothing continues it.
 						let whole = read.frames == frames(*key) && instance.complete.contains(key);
 						if !whole && !instance.short.contains(&(*key, read.frames)) {
 							return Err(fail(
@@ -933,6 +939,7 @@ impl Model {
 							&& reader.spec.budget == Budget::Hour
 							&& !reader.doomed && reader.floor.is_none_or(|floor| *key > floor)
 							&& !instance.live().any(|copy| copy.closed_at(*key, read.frames))
+							&& !instance.serving().is_some_and(|copy| copy.given_up.contains(key))
 						{
 							return Err(fail(
 								index,
@@ -1949,8 +1956,8 @@ fn regressions() {
 			],
 			finish: false,
 		},
-		// A short close from a route that failed does not stand once the route replacing it
-		// gives the group up: that verdict ends the group.
+		// A short close from a route that failed stands once the route replacing it gave the
+		// group up, so nothing continues it.
 		Case {
 			ops: vec![
 				Op::Up { instance: 0, slot: 2 },
