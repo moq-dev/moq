@@ -195,7 +195,7 @@ RTT and about 5 Gbps at 100 ms; raise both for a busier link. Each peer can
 make the relay buffer up to its `receive_window` of unread or incomplete
 incoming data, so the peer count times that window bounds that data. A peer's
 retained groups are bounded separately by its `live_edges` (no bound by
-default), and data it has not acknowledged by `send_window`. Peers take the `[quic]` `stream_receive_window`
+default), and data sent to it but not yet acknowledged by `send_window`. Peers take the `[quic]` `stream_receive_window`
 like every other connection, so one group stream carries at most about 4 MiB per
 round trip.
 
