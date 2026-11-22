@@ -1571,8 +1571,12 @@ export class Publisher {
 				if (!range && !finished) continue;
 				let start: bigint | undefined;
 				if (range) {
-					start = max(range.start, startKey);
+					// A range added below where delivery started, such as a live join further behind
+					// the live edge, starts where it resolved: its groups from there are owed, so
+					// delivery now starts there too.
+					start = range.start;
 					if (range.end !== undefined && range.end <= start) start = undefined;
+					else startKey = min(startKey, start);
 				}
 				const started = new SubscribeStarted(id, start);
 				if (!(await controls.response(encodeSubscribeResponse(stream, { started }, this.version))))
