@@ -4,10 +4,6 @@ How to update your pipelines for each breaking change, newest first.
 
 ## Unreleased
 
-### `tls-disable-verify` is `connect-tls-insecure`
-
-The `moqsink` and `moqsrc` property `tls-disable-verify` is `connect-tls-insecure`, with no alias, matching `--connect-tls-insecure` and the `connect-*` properties beside it: a `gst-launch` line or application naming the old one fails at runtime.
-
 ### A disabled `moqsrc` rendition ends its pad
 
 Disabling a rendition in the catalog now ends its pad with EOS instead of holding it idle, and a re-enable adds a new pad (`video_1` after `video_0`) whose stream starts at the live edge, like any rendition the catalog adds.
