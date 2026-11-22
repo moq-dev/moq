@@ -2394,9 +2394,10 @@ mod tests {
 		}
 
 		// Priming would start at 1_006_000. The break's marker starts where the packets before it
-		// end, so the group after it starts a microsecond later.
-		assert_eq!(pts(1_050_000).await, vec![1_041_334, 1_041_333, 1_048_666, 1_070_000]);
-		assert_eq!(pts(1_000_000).await, vec![1_041_334, 1_041_333, 1_041_333, 1_061_333]);
+		// end, so the group after it starts a microsecond later, and so does every packet stamped
+		// with its first.
+		assert_eq!(pts(1_050_000).await, vec![1_041_334, 1_041_334, 1_048_666, 1_070_000]);
+		assert_eq!(pts(1_000_000).await, vec![1_041_334, 1_041_334, 1_041_334, 1_061_333]);
 	}
 
 	/// A codec that holds frames returns their packets late, and each still goes out at the stamp
