@@ -49,4 +49,15 @@ These 16 remain, with what is known about each:
   starting exactly at the resume point. It is delivered or drained either way, so this looks
   equivalent).
 
+Whoever kills the `resolve` and `backfill_gaps` survivors also settles a possible
+late-group ordering bug found while probing them, with a test, and fixes it if it is one.
+Setup: a reader updates to `from(8)`, exactly at the replacement's resume point, while
+the replacement is an empty received copy. Its window placed the range at start 0 rather
+than floored, so a late group 7 went out after group 8 (which holds time 8) was already
+delivered from the old route. It may match what a plain reader of that empty route does.
+
 Public API: none. Wire: none.
+
+## Required
+
+- [Resumed read ends once its window is accounted for](/quest/m0/nightly/resume-exhausted-skips.md) - its rework of `model/resume.rs` must land first, since these survivors' lines and behavior move with it
