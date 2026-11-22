@@ -33,6 +33,7 @@
 #   ./run.sh --loss 10             # drop 10% of the relay's datagrams to the subscriber (moq-shaper)
 #   ./run.sh --passthrough         # carry the multiplex whole (`import/export ts --passthrough`)
 #   ./run.sh --passthrough --mpts  # the same with two programs whose recovery points rarely line up
+#   ./run.sh --passthrough --restart 10 # SIGKILL the import 10 s in, restart it 0.5 s later
 
 # `--live` swaps the analyzer, not the rig. compliance.py grades a captured file
 # on the stream's own PCR clock, which is the right basis for the IRD model it
@@ -100,6 +101,7 @@ RATE=""         # bits/s moq-shaper carries from the relay to the subscriber, be
 QUEUE=""        # how long a datagram may wait for RATE before the path tail-drops it
 PASSTHROUGH=""  # carry the multiplex whole and grade the capture packet by packet against the source
 MPTS=""         # publish two programs, which only --passthrough carries whole
+RESTART=""      # seconds into the source to SIGKILL the import, restarted 0.5 s after it exits
 EXPORT=()       # extra `export ts` flags (--delay)
 # How far into the run the second subscriber joins. A late join is the point: two
 # exporters started together can share a cadence by starting together, which is
@@ -223,6 +225,10 @@ while [[ $# -gt 0 ]]; do
         --mpts)
             MPTS=1
             shift
+            ;;
+        --restart)
+            RESTART="$2"
+            shift 2
             ;;
         *)
             PASSTHRU+=("$1")
@@ -366,10 +372,31 @@ if [[ -n "$MPTS" && (-z "$PASSTHROUGH" || -n "$SOURCE$HRD$HEADROOM$LEAK$FULL$OPE
     echo "error: --mpts generates its own clip and needs --passthrough, the mode that carries a multiplex whole" >&2
     exit 1
 fi
+# The killed import's gap is the measurement, so nothing else may cost packets: one program,
+# whose groups passthrough.py can place, on an unimpaired path.
+if [[ -n "$RESTART" ]]; then
+    if [[ -z "$PASSTHROUGH" || -n "$MPTS$SHAPED" ]]; then
+        echo "error: --restart grades one program's passthrough gap and needs --passthrough, without --mpts, --loss or --rate" >&2
+        exit 1
+    fi
+    # The restarted import needs two groups of the source left to set its bound.
+    if ! [[ "$RESTART" =~ ^[0-9]+(\.[0-9]+)?$ ]] || ! awk -v r="$RESTART" -v d="$DURATION" 'BEGIN { exit !(r > 0 && r + 5 <= d) }'; then
+        echo "error: --restart takes seconds above 0 and at least 5 s before the end of the ${DURATION}s clip (got '$RESTART')" >&2
+        exit 1
+    fi
+fi
 IMPORT=(import ts)
 if [[ -n "$PASSTHROUGH" ]]; then
     IMPORT+=(--passthrough)
     EXPORT+=(--passthrough)
+fi
+# Each run of `moq import` is a new publisher instance, so the export follows the restart as
+# a replacement. A UDP input ends only on a receive timeout, which TSDuck counts in whole
+# seconds, and the importer holds its last object until its input ends: a 2 s delay keeps
+# that object on time. The delay is buffer, not loss, so the bound does not move with it.
+if [[ -n "$RESTART" ]]; then
+    [[ " ${EXPORT[*]} " == *" --delay "* ]] || EXPORT+=(--delay 2s)
+    EXPORT+=(--stitch)
 fi
 
 URL="" # set once a port is reserved, below
@@ -771,7 +798,50 @@ publish() {
             "$2" --connect "$3" --connect-version "$5" --broadcast "$4" "${@:6}"
     ' _ "$SRC_TS" "$MOQ" "$URL" "$BROADCAST" "$VERSION" "${IMPORT[@]}"
 }
-harness_spawn pub "$HARNESS_RUN/pub.log" publish
+# The source plays live into a UDP port whether or not an import reads it, so a killed
+# import loses what it held and what arrives while it is down, as a contribution feed would.
+# The export runs on throughout. Each import's input is kept, so passthrough.py can place
+# the downtime in the source.
+# shellcheck disable=SC2329  # invoked indirectly via 'harness_spawn'
+publish_restart() {
+    set +e
+    local feed status
+    # A second without a datagram ends an import's input once the source has finished.
+    # The subshell that runs moq records its PID before becoming it, so the kill hits moq alone.
+    import_run() {
+        # shellcheck disable=SC2016  # $1.. are the child bash -c positionals, not ours.
+        timeout -k 3 $((DURATION + 20 + 30)) bash -o pipefail -c '
+            tsp -I ip --receive-timeout 1000 "$1" | tee "$2" | {
+                echo "$BASHPID" >"$3"
+                exec "${@:4}"
+            }
+        ' _ "$SOURCE_PORT" "$HARNESS_RUN/import-$1.ts" "$HARNESS_RUN/import-$1.pid" \
+            "$MOQ" --connect "$URL" --connect-version "$VERSION" --broadcast "$BROADCAST" "${IMPORT[@]}"
+    }
+    import_run 1 &
+    local first=$!
+    tsp -I file "$SRC_TS" -P regulate --pcr-synchronous --wait-min 5 -O ip "127.0.0.1:$SOURCE_PORT" &
+    feed=$!
+    sleep "$RESTART"
+    echo "### killing the import ${RESTART}s in"
+    kill -KILL "$(cat "$HARNESS_RUN/import-1.pid")"
+    wait "$first"
+    printf 'killed import: %s\n' "$?" >>"$HARNESS_RUN/process-status.log"
+    sleep 0.5
+    echo "### restarting the import"
+    import_run 2
+    status=$?
+    printf 'restarted import: %s\n' "$status" >>"$HARNESS_RUN/process-status.log"
+    wait "$feed" || return $?
+    return "$status"
+}
+if [[ -n "$RESTART" ]]; then
+    harness_port source
+    SOURCE_PORT="$HARNESS_PORT"
+    harness_spawn pub "$HARNESS_RUN/pub.log" publish_restart
+else
+    harness_spawn pub "$HARNESS_RUN/pub.log" publish
+fi
 PUB_PID="$HARNESS_PID"
 
 # shellcheck disable=SC2329  # invoked from multiple failure paths below
@@ -915,7 +985,9 @@ echo "### captured $(wc -c <"$SUB_TS" | tr -d ' ') bytes -> analyzing"
 # the capture must still end on the source's last packet.
 if [[ -n "$PASSTHROUGH" ]]; then
     echo
-    if ! python3 "$DIR/passthrough.py" "$SRC_TS" "$SUB_TS" ${RATE:+--loss-ok} --report-json "$HARNESS_RUN/passthrough.json"; then
+    GRADE=(${RATE:+--loss-ok})
+    [[ -n "$RESTART" ]] && GRADE=(--restart "$HARNESS_RUN/import-1.ts" "$HARNESS_RUN/import-2.ts")
+    if ! python3 "$DIR/passthrough.py" "$SRC_TS" "$SUB_TS" ${GRADE[@]+"${GRADE[@]}"} --report-json "$HARNESS_RUN/passthrough.json"; then
         echo >&2
         echo "error: the capture is not the source's packets in place; the exporter reported:" >&2
         sed 's/\x1b\[[0-9;]*m//g' "$HARNESS_RUN/sub.log" |
@@ -924,7 +996,7 @@ if [[ -n "$PASSTHROUGH" ]]; then
         exit 1
     fi
     echo
-    if [[ -z "$SOURCE$OPEN_GOP$HRD$HEADROOM$LEAK$FULL$MPTS$RATE" ]]; then
+    if [[ -z "$SOURCE$OPEN_GOP$HRD$HEADROOM$LEAK$FULL$MPTS$RATE$RESTART" ]]; then
         python3 "$DIR/decode.py" "$SRC_TS" "$SUB_TS" --output "$HARNESS_RUN/decode" || exit 1
     else
         echo "decoded-content comparison: not covered for this profile"
