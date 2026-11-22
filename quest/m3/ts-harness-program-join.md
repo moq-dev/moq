@@ -19,7 +19,3 @@ existing `holes.py`.
 
 In m3, not m4, because the reporter's broadcast relies on this behaviour and
 offered to write the arm.
-
-## Related
-
-- [A TS export loses only what a restarted import missed](/quest/m1/ts-import-restart.md) - the arm that closes #9315

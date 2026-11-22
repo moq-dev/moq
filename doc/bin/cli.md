@@ -552,7 +552,8 @@ refusal. One that goes before serving, such as one still routed through a dead
 session, is no return. A replacement (a restarted publisher, under a new
 [instance](/concept/moq-lite#publisher-instances)) exits 1 unless `--stitch` follows
 it as a full program switch: a new PMT from its catalog, with every PID flagging
-the break. A stitch waits for the replacement's first catalog snapshot until it
+the break. With `--passthrough`, `--stitch` writes the replacement's packets
+verbatim from its first group, so the seam is each PID's continuity break. A stitch waits for the replacement's first catalog snapshot until it
 arrives or the replacement goes, keeping the old publisher playing meanwhile,
 so even the default `--follow 0s` switches to a replacement that is still
 starting. After the catalog arrives, the old instance keeps feeding for up to

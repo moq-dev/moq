@@ -161,9 +161,7 @@ def layout(source: list[bytes]) -> Layout:
             continue
         if pmt_pid is None and pid(pkt) == 0 and sec[0] == 0x00:
             end = 3 + ((sec[1] & 0x0F) << 8 | sec[2]) - 4
-            programs = [
-                (sec[i + 2] & 0x1F) << 8 | sec[i + 3] for i in range(8, end, 4) if sec[i] << 8 | sec[i + 1]
-            ]
+            programs = [(sec[i + 2] & 0x1F) << 8 | sec[i + 3] for i in range(8, end, 4) if sec[i] << 8 | sec[i + 1]]
             if len(programs) != 1:
                 raise Mismatch(f"the PAT lists {len(programs)} programs; --restart grades one")
             pmt_pid = programs[0]

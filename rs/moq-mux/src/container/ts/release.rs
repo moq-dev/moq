@@ -8,8 +8,8 @@ use kio::clock::Instant;
 use super::error::unsupported;
 use super::export;
 
-use crate::catalog::{CatalogFormat, Stream};
 use crate::catalog::hang::Catalog;
+use crate::catalog::{CatalogFormat, Stream};
 use crate::container::consumer::Event;
 use crate::container::{ExportSource, Frame};
 use crate::jitter::{self, Arrival, Push};

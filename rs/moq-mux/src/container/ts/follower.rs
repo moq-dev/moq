@@ -86,7 +86,6 @@ pub(super) mod sealed {
 	}
 }
 
-
 /// What the instances say serves the exported path.
 enum Serving {
 	/// The instance being exported, with no change since the export carried on into it.

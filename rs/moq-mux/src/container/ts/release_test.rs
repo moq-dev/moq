@@ -655,7 +655,12 @@ async fn follow(
 	ending: Ending,
 	second: Restart,
 	stitch: bool,
-) -> (Vec<(Instant, Frame)>, Option<crate::Result<()>>, Vec<Object>, Vec<Object>) {
+) -> (
+	Vec<(Instant, Frame)>,
+	Option<crate::Result<()>>,
+	Vec<Object>,
+	Vec<Object>,
+) {
 	// Six groups of a second each, from 10 s on the clock.
 	let objects = import(&fixture::assorted(10_000 * fixture::MS, 150, 25)).await.objects;
 	let mut groups: Vec<u64> = objects.iter().map(|object| object.group).collect();
@@ -733,7 +738,10 @@ async fn a_stitched_release_carries_on_into_a_restarted_import() {
 		pauses.max().unwrap() < Duration::from_secs(2),
 		"the output resumes within the downtime and the delay"
 	);
-	assert!(matches!(end, Some(Ok(()))), "the second instance's finish ends it: {end:?}");
+	assert!(
+		matches!(end, Some(Ok(()))),
+		"the second instance's finish ends it: {end:?}"
+	);
 }
 
 /// A replacement's clock may start behind the first's, as a restarted encoder's does: arriving

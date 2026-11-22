@@ -1643,7 +1643,10 @@ mod tests {
 		let stdout = export.sink.container().unwrap();
 		assert!(stdout.passthrough);
 		assert_eq!(stdout.max_delay, Duration::from_secs(2));
-		assert!(parse(&["--mux-rate", "20000000"]).is_err(), "--mux-rate must not start a run");
+		assert!(
+			parse(&["--mux-rate", "20000000"]).is_err(),
+			"--mux-rate must not start a run"
+		);
 		let cli = parse(&["--follow", "10s", "--stitch"]).unwrap();
 		let Command::Export(export) = &cli.stages[0] else {
 			panic!("not an export");
