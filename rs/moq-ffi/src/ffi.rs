@@ -1320,6 +1320,25 @@ mod tests {
 		kio::clock::timeout(Duration::from_secs(5), f).await.expect("timed out")
 	}
 
+	/// A binding call through `watch` reports a panic as an error instead of unwinding into the
+	/// host, whether or not its handle has an owner, and polls inside the runtime.
+	#[tokio::test]
+	async fn watch_isolates_a_panic_and_enters_the_runtime() {
+		let (_origin, owned, _failed) = panicking_origin();
+		for driver in [Background::default(), owned] {
+			let err = driver
+				.watch(async { panic!("injected watch panic") as Result<(), MoqError> })
+				.await
+				.expect_err("the panic should be reported");
+			assert!(matches!(err, MoqError::Task { .. }), "{err:?}");
+			let entered = driver
+				.watch(async { Ok(tokio::runtime::Handle::current().id() == runtime().handle.id()) })
+				.await
+				.unwrap();
+			assert!(entered, "the call should poll inside the FFI runtime");
+		}
+	}
+
 	#[tokio::test]
 	async fn cancel_drops_an_idle_state() {
 		let (task, dropped) = tracked();

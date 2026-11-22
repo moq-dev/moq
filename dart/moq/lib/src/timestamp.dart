@@ -10,16 +10,20 @@ extension TimestampDuration on MoqTimestamp {
   ///
   /// The timestamp itself is exact; keep it, not the duration, to republish a
   /// tick such as 90 kHz. Throws a [StateError] when unscaled, since a
-  /// scale-less track's key is no time, and a [RangeError] when the result
-  /// does not fit in a [Duration].
+  /// scale-less track's key is no time, an [ArgumentError] when the scale is
+  /// zero, and a [RangeError] when the result does not fit in a [Duration].
   Duration toDuration() {
     final scale = this.scale;
     if (scale == null) {
       throw StateError('unscaled timestamp #$value has no time');
     }
+    if (scale == 0) {
+      throw ArgumentError.value(this, 'timestamp', 'scale must not be zero');
+    }
+    // Both are u64, which a Dart int past 2^63 holds as negative.
+    final units = BigInt.from(scale).toUnsigned(64);
     // value * 10^6 can exceed 64 bits at the allowed bounds.
-    final units = BigInt.from(scale);
-    final micros = BigInt.from(value) * _microsPerSecond ~/ units;
+    final micros = BigInt.from(value).toUnsigned(64) * _microsPerSecond ~/ units;
     if (!micros.isValidInt) {
       throw RangeError('timestamp $value/$scale s does not fit in a Duration');
     }
