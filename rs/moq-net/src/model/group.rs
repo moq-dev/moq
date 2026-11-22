@@ -4436,6 +4436,12 @@ impl Consumer {
 		state.outcome.frames().unwrap_or(state.next_index)
 	}
 
+	/// How many frames the group holds for good once its producer closed it, `None` while it
+	/// may still grow or after it failed.
+	pub(crate) fn settled_frames(&self) -> Option<usize> {
+		self.cursor.state.read().outcome.frames()
+	}
+
 	/// Where the group ends in its track's timescale, once its producer finished it whole
 	/// with [`Producer::finish_at`], kept after its cache is released: `None` while it is open,
 	/// when it was aborted unfinished, or when it finished without an end.

@@ -5579,6 +5579,67 @@ mod test {
 		assert_eq!(routes.subscription(demand, 2).resume, Some(Position::new(5, 1)));
 	}
 
+	/// A switch caps the copy it replaces at the frame the new one resumes the boundary group
+	/// at, so the old route stops sending it there, and the reader still reads each frame once:
+	/// one already in flight on the old route, then the rest from the new one.
+	#[test]
+	fn a_switch_caps_the_replaced_copy_at_the_frame_the_new_one_resumes() {
+		let routes = Producer::new();
+		let track = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&track, Duration::from_secs(10));
+
+		let mut old = a.create_group(group::Info { start: 0 }).unwrap();
+		old.write_frame(ts(0), b"a".as_ref()).unwrap();
+		old.write_frame(ts(1), b"b".as_ref()).unwrap();
+		let mut reading = recv(&mut sub);
+		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+		assert_eq!(a.subscription().expect("subscribed").cap, None, "a serving copy is uncapped");
+
+		let b = copy();
+		routes.serve(b.consume());
+		assert_eq!(read(&mut reading), Some(b"b".to_vec()));
+		assert_eq!(b.subscription().expect("subscribed").resume, Some(Position::new(0, 2)));
+		let capped = a.subscription().expect("still subscribed");
+		assert_eq!(capped.cap, Some(Position::new(0, 2)), "stopped where the new copy resumes");
+		assert!(
+			capped.ranges.iter().all(|range| range.end == Some(0)),
+			"{:?}",
+			capped.ranges
+		);
+
+		// A frame already in flight on the old route lands there, and the rest on the new one.
+		old.write_frame(ts(2), b"c".as_ref()).unwrap();
+		let mut rest = b.create_group(group::Info { start: 0 }).unwrap();
+		rest.start_at(2).unwrap();
+		rest.write_frame(ts(2), b"c".as_ref()).unwrap();
+		rest.write_frame(ts(3), b"d".as_ref()).unwrap();
+		rest.finish().unwrap();
+		assert_eq!(read(&mut reading), Some(b"c".to_vec()));
+		// The old route never finishes the group, which it stopped: the read moves on.
+		assert_eq!(read(&mut reading), Some(b"d".to_vec()));
+		assert_eq!(read(&mut reading), None);
+		assert!(sub.recv_group().now_or_never().is_none(), "handed out twice");
+
+		// A copy returning to serve drops its cap, and the one it replaces takes it.
+		let routes = Producer::new();
+		let track = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&track, HOUR);
+		let mut old = a.create_group(group::Info { start: 0 }).unwrap();
+		old.write_frame(ts(0), b"a".as_ref()).unwrap();
+		let mut reading = recv(&mut sub);
+		let b = copy();
+		routes.serve(b.consume());
+		assert_eq!(a.subscription().unwrap().cap, Some(Position::new(0, 1)));
+		routes.serve(a.consume());
+		assert_eq!(a.subscription().unwrap().cap, None, "serving again");
+		assert_eq!(b.subscription().unwrap().cap, None, "b holds none of the group's head");
+		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+	}
+
 	/// A copy asked past the frames a reader held of a group adopts them once the rest lands,
 	/// so a reader joining after the copy that held them is gone reads the group whole.
 	#[test]
