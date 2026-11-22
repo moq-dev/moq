@@ -192,7 +192,8 @@ pub struct MissingKeyframe;
 #[error("group endpoint precedes a frame of its own")]
 pub struct InvalidEnd;
 
-/// A group starts before the previous group did: the source restarted, which is a new broadcast.
+/// A group starts before the previous group did, or a seek before what the track holds: the source
+/// restarted, which is a new broadcast.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error(
 	"frame timestamp {} is below the previous group's start {}",
@@ -202,7 +203,7 @@ pub struct InvalidEnd;
 pub struct TimestampRewind {
 	/// The refused frame's timestamp.
 	pub timestamp: moq_net::Timestamp,
-	/// The lowest allowed timestamp: the previous group's start.
+	/// The lowest allowed timestamp: the previous group's start, or the lowest start a seek allows.
 	pub floor: moq_net::Timestamp,
 }
 

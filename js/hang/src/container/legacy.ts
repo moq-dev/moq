@@ -155,8 +155,13 @@ export class Producer {
 	#end?: number;
 	// Furthest timestamp in finished groups, used only for discontinuity markers.
 	#liveEdge?: number;
-	// The current group start and the previous group start: a frame below it is a restart.
+	// The source timestamps of the current group's keyframe and the previous group's: a frame
+	// below it is a restart.
 	#start?: number;
+	// The source and written timestamps of the keyframe that opened the current group, when its
+	// start moved it past a marker. A frame at that source timestamp, such as the picture its
+	// parameter sets precede, is written with it.
+	#moved?: [number, number];
 	#floor?: number;
 	// The newest frame of every group before the current one: every frame of the current group
 	// presents after it.
@@ -189,11 +194,13 @@ export class Producer {
 	 * its own (a leading picture after a splice) is dropped, as is a keyframe at or before the newest
 	 * frame with no group open, with the frames after it until a keyframe opens a group. With no group
 	 * open, a keyframe landing on the latest group's start (media resuming right at a discontinuity's
-	 * marker) is stamped one unit of the track's timescale later. Throws if the first frame is not a
+	 * marker) is stamped one unit of the track's timescale later, and so is a frame at its timestamp
+	 * after it, such as the picture its parameter sets precede. Throws if the first frame is not a
 	 * keyframe, a group start goes backwards, or a frame is below the previous group start.
 	 */
 	encode(data: Uint8Array | Source, pts: Duration, keyframe: boolean) {
-		let timestamp = micros(pts);
+		const source = micros(pts);
+		let timestamp = this.#group && this.#moved?.[0] === source ? this.#moved[1] : source;
 		const floor = keyframe ? this.#start : this.#floor;
 		if (floor !== undefined && timestamp < floor) {
 			throw new Error("frame timestamp is below the previous group start");
@@ -242,7 +249,8 @@ export class Producer {
 			this.#floor = this.#start;
 			this.#ceiling = this.#newest;
 			this.#skipping = false;
-			this.#start = timestamp;
+			this.#start = source;
+			this.#moved = timestamp === source ? undefined : [source, timestamp];
 		} else if (!this.#group) {
 			throw new Error("must start with a keyframe");
 		}
@@ -252,12 +260,13 @@ export class Producer {
 			timestamp: Time.Timestamp.fromMicros(timestamp),
 		});
 
-		this.#reordered ||= this.#previous !== undefined && timestamp < this.#previous;
-		if (this.#previous !== undefined && timestamp > this.#previous) {
-			const delta = timestamp - this.#previous;
+		// The cadence follows the source, so a moved start never stretches the estimate after it.
+		this.#reordered ||= this.#previous !== undefined && source < this.#previous;
+		if (this.#previous !== undefined && source > this.#previous) {
+			const delta = source - this.#previous;
 			this.#interval = delta;
 		}
-		this.#previous = timestamp;
+		this.#previous = source;
 		if (this.#end === undefined || timestamp > this.#end) this.#end = timestamp;
 		if (this.#newest === undefined || timestamp > this.#newest) this.#newest = timestamp;
 	}

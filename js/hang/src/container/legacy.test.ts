@@ -116,6 +116,22 @@ test("Legacy Producer starts video resuming at a discontinuity's end past its ma
 	}
 });
 
+test("Legacy Producer moves a picture with the parameter sets a marker moved", async () => {
+	const media = track(Time.Timescale.MICRO);
+	const subscriber = media.subscribe({ delay: { max: Duration.millis(30_000) } });
+	const producer = new Producer(media, new Format("video"));
+	producer.encode(new Uint8Array([1]), Duration.micros(0), true);
+	producer.discontinuity(Duration.micros(33_000));
+	// The parameter sets, then their picture, both at the marker.
+	producer.encode(new Uint8Array([1]), Duration.micros(33_000), true);
+	producer.encode(new Uint8Array([1]), Duration.micros(33_000), true);
+	producer.encode(new Uint8Array([1]), Duration.micros(66_000), false);
+	producer.finish();
+
+	// Its End follows the source's 33ms cadence past the last frame, not the moved start's.
+	expect((await groups(subscriber))[2]).toEqual({ start: 33_001n, end: 99_000n, frames: [33_001, 33_001, 66_000, 99_000] });
+});
+
 test("Legacy Producer refuses an end below a frame of the open group, for every kind", () => {
 	for (const kind of ["audio", "video", "data"] as const) {
 		const media = track(Time.Timescale.MICRO);
