@@ -12,7 +12,7 @@ import { Counts } from "./cover.ts";
 import { maxDelayOf } from "./internal.ts";
 import { Ranges } from "./ranges.ts";
 import type { Delay, Order, Range, Subscription } from "./track.ts";
-import { rangeKey, sameRanges } from "./window.ts";
+import { liveMillis, rangeKey, sameRanges } from "./window.ts";
 
 /** The preferences besides the ranges, already checked and defaulted. */
 export interface Scalars {
@@ -105,6 +105,11 @@ export class Prefs implements Getter<Subscription | undefined> {
 	#scalars?: Scalars;
 	// In key order: a whole replacement keys by position, and each key an edit adds is past the rest.
 	#ranges = new Map<bigint, Range>();
+	// The join tick each live join range was added at, by key: see {@link since}.
+	#since = new Map<bigint, number>();
+	// The join tick a range added now is added at: the producer's {@link Subscriptions.joinTick}
+	// once these join its aggregate, 0 before.
+	#tick: () => number = () => 0;
 	// The preferences as last read, until they change.
 	#value?: Subscription;
 	/** Bumped on every change, so a reader wakes without reading the ranges. */
@@ -155,6 +160,27 @@ export class Prefs implements Getter<Subscription | undefined> {
 		return this.#ranges.entries();
 	}
 
+	/**
+	 * The join tick the live join range keyed `key` was added at, 0 for another: a received copy
+	 * places it only from an answer recorded since, the live edge having moved since any earlier one.
+	 * Mirrors the Rust `Prefs::since`.
+	 */
+	since(key: bigint): number {
+		return this.#since.get(key) ?? 0;
+	}
+
+	/**
+	 * Add the ranges from now on at the join tick `tick` reads, and the ranges held at the current
+	 * one: these join the aggregate that counts the answers, as the Rust `Preferences::register`
+	 * reads its tick.
+	 */
+	ticking(tick: () => number): void {
+		this.#tick = tick;
+		this.#since.clear();
+		const now = tick();
+		for (const [key, range] of this.#ranges) if (liveMillis(range) !== undefined) this.#since.set(key, now);
+	}
+
 	/** Wake every reader, as a change would, without changing anything. */
 	touch(): void {
 		this.revision.update((revision) => revision + 1);
@@ -184,17 +210,21 @@ export class Prefs implements Getter<Subscription | undefined> {
 		const readded = new Set(add.map(([key]) => key));
 		const gone: Range[] = [];
 		const came: Range[] = [];
+		const tick = this.#tick();
 		for (const key of retire) {
 			const range = this.#ranges.get(key);
 			// One added again is replaced in place below, keeping its order.
 			if (range === undefined || readded.has(key)) continue;
 			this.#ranges.delete(key);
+			this.#since.delete(key);
 			gone.push(range);
 		}
 		for (const [key, range] of add) {
 			const old = this.#ranges.get(key);
 			if (old !== undefined) gone.push(old);
 			this.#ranges.set(key, range);
+			if (liveMillis(range) !== undefined) this.#since.set(key, tick);
+			else this.#since.delete(key);
 			came.push(range);
 		}
 		const moved = gone.length > 0 || came.length > 0;
@@ -211,6 +241,9 @@ export class Prefs implements Getter<Subscription | undefined> {
 		this.#scalars = rest as Scalars;
 		if (!sameRanges([...this.#ranges.values()], ranges ?? [])) {
 			this.#ranges = new Map((ranges ?? []).map((range, index) => [BigInt(index), range]));
+			const tick = this.#tick();
+			this.#since.clear();
+			for (const [key, range] of this.#ranges) if (liveMillis(range) !== undefined) this.#since.set(key, tick);
 		}
 		// Read back as given, so its identity holds until the next change.
 		this.#value = next;
@@ -238,6 +271,9 @@ export class Subscriptions implements Getter<Subscription | undefined> {
 		string,
 		{ min: number; end: bigint | undefined; budgets: Counts<number>; since: Counts<number> }
 	>();
+	// How many answers to a received copy's live joins were recorded: a live join range a reader
+	// adds notes it, and takes only an answer recorded since (see {@link Prefs.since}).
+	#joinTick = 0;
 	#revision = new Signal(0);
 	// The aggregate as last read, until it changes; null for none read yet.
 	#value: Subscription | undefined | null = null;
@@ -347,6 +383,19 @@ export class Subscriptions implements Getter<Subscription | undefined> {
 	 * and the newest answer tick one saw before it began: its session asks its upstream to place each
 	 * with a range of its own. Mirrors the Rust `Subscription::joins`.
 	 */
+	/** How many join answers were recorded: see {@link answered}. Mirrors the Rust `Subscriptions::join_tick`. */
+	joinTick(): number {
+		return this.#joinTick;
+	}
+
+	/**
+	 * Note an answer to a live join recorded, returning its tick: greater than that of every range
+	 * added before. Mirrors the Rust `Subscriptions::answered`.
+	 */
+	answered(): number {
+		return ++this.#joinTick;
+	}
+
 	joins(): JoinAsk[] {
 		const joins: JoinAsk[] = [];
 		for (const { min, end, budgets, since } of this.#joins.values()) {

@@ -47,8 +47,6 @@ test.each([ALPN_06, ALPN_07_WIP])("refresh joins reach a browser publisher on %s
 		const remote = (await request.broadcast()).track("data");
 		expect((await remote.info()).refresh).toEqual({ ratio: alpn === ALPN_07_WIP ? 1 : null, interval: null });
 		const baseline = remote.subscribe();
-		// A reader joining at the live edge, which asks for a fresh group past the ratio.
-		const join = { ranges: [{ start: { live: Duration.ZERO } }] };
 		const group = hooks.appendNext(producer);
 		group.writeFrame({ payload: new Uint8Array(3), timestamp: Timestamp.unscaled(group.start) });
 		group.writeFrame({ payload: new Uint8Array(3), timestamp: Timestamp.unscaled(group.start) });
@@ -56,13 +54,13 @@ test.each([ALPN_06, ALPN_07_WIP])("refresh joins reach a browser publisher on %s
 		if (!received) throw new Error("group missing");
 		expect((await received.readFrame())?.payload.length).toBe(3);
 		expect((await received.readFrame())?.payload.length).toBe(3);
-		const joins = [remote.subscribe(join)];
+		const joins = [remote.subscribe()];
 		await clock.advance(Duration.nanos(0));
 		expect(asked.peek()).toBeUndefined();
 		updates.length = 0;
 		group.writeFrame({ payload: new Uint8Array(1), timestamp: Timestamp.unscaled(group.start) });
 		expect((await received.readFrame())?.payload.length).toBe(1);
-		for (let i = 0; i < 8; i++) joins.push(remote.subscribe(join));
+		for (let i = 0; i < 8; i++) joins.push(remote.subscribe());
 		await clock.advance(Duration.nanos(0));
 		if (alpn === ALPN_07_WIP) {
 			while (asked.peek() !== 1n) await asked.changed();
@@ -71,7 +69,7 @@ test.each([ALPN_06, ALPN_07_WIP])("refresh joins reach a browser publisher on %s
 		// Concurrent local joins coalesce into one upstream update.
 		expect(updates).toEqual(alpn === ALPN_07_WIP ? [1n] : []);
 		// A parameter change restates the wanted group rather than clearing it.
-		joins.push(remote.subscribe({ ...join, priority: 9 }));
+		joins.push(remote.subscribe({ priority: 9 }));
 		await clock.advance(Duration.nanos(0));
 		expect(updates).toEqual(alpn === ALPN_07_WIP ? [1n, 1n] : []);
 		for (const join of joins) join.close();

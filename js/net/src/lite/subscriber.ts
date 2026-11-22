@@ -1692,6 +1692,9 @@ export class Subscriber {
 		});
 		// A new upstream subscription: stale runs an earlier one reported were judged under other terms.
 		hooks.supersedeStale(producer);
+		// A wire whose ranges carry each live join answers where each starts, which alone places a
+		// reader's.
+		if (hasRanges(this.version)) hooks.answersJoins(producer);
 		if (!hasRanges(this.version)) {
 			hooks.dropAnchors(producer);
 			// A wire without ranges starts a time anchor at the first group at or after it, so its

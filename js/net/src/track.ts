@@ -1002,8 +1002,11 @@ let timeAnchors: (producer: Producer) => {
 	starts: ReadonlyMap<bigint, TimeStart>;
 	/** How the publisher answered the newest range asking each live join, by {@link joinKey}. */
 	joins: ReadonlyMap<string, JoinAnswer>;
-	/** How many join answers were recorded: see {@link JoinAnswer.tick}. */
-	joinTick: number;
+	/**
+	 * Whether a reader's live join places only where the publisher answered a range asking it: a
+	 * lite-07 copy, whose ranges carry each join. See `hooks.answersJoins`.
+	 */
+	answersJoins: boolean;
 	/** Bumped whenever the others, or whether the producer is a received copy, change. */
 	placing: number;
 };
@@ -1353,9 +1356,10 @@ export class Producer {
 	// upstream's. Holds only the joins its live ranges still ask. Mirrors the Rust
 	// `TrackState::join_answers`.
 	#joinAnswers = new Map<string, JoinAnswer>();
-	// How many join answers were recorded, which a join beginning to wait notes, so it takes only an
-	// answer recorded after it began. Mirrors the Rust `TrackState::join_tick`.
-	#joinTick = 0;
+	// Whether a reader's live join places only where `#joinAnswers` does: a lite-07 copy, whose wire's
+	// ranges carry each join and report where each starts. Another copy measures the join from the
+	// groups it holds. Mirrors the Rust `TrackState::answers_joins`.
+	#answersJoins = false;
 	// Counts changes to how a time start is placed other than by groups arriving or drops: the wire,
 	// `#timeStarts`, and `#startsAtKeys`. Mirrors the Rust `TrackState::placing`.
 	#placing = 0;
@@ -1608,7 +1612,7 @@ export class Producer {
 			atKeys: producer.#startsAtKeys,
 			starts: producer.#timeStarts,
 			joins: producer.#joinAnswers,
-			joinTick: producer.#joinTick,
+			answersJoins: producer.#answersJoins,
 			placing: producer.#placing,
 		});
 		hooks.startsAtKeys = (producer) => {
@@ -1639,8 +1643,13 @@ export class Producer {
 		answeredEmpty = (producer, time, budget) =>
 			timeStartContaining(producer.#timeStarts.get(time), time, budget) === "before";
 		countAsks = (producer, sink, times, joins) => producer.#countAsks(sink, times, joins);
+		hooks.answersJoins = (producer) => {
+			producer.#answersJoins = true;
+			producer.#placing++;
+		};
 		hooks.answerJoin = (producer, min, end, start, budget) => {
-			const tick = ++producer.#joinTick;
+			// Every range added before now takes this answer.
+			const tick = producer.#requested.answered();
 			producer.#joinAnswers.set(joinKey(min, end), { start, budget, tick });
 			producer.#placing++;
 			// A reader's join waiting on the upstream's answer places now.
@@ -2182,6 +2191,8 @@ export class Producer {
 	// applies its own, as each reader's budget does, so the demand asked upstream is the same
 	// before and after the info lands.
 	#join(sink: TrackState): void {
+		// Its live join ranges take only an answer recorded from now on.
+		sink.update.ticking(() => this.#requested.joinTick());
 		this.#moved(sink, { after: sink.update.contribution(), gone: [], came: [...sink.update.ranges()] }, true);
 		sink.update.watch = (change) => this.#moved(sink, change);
 		this.#subscribed();
@@ -3805,6 +3816,7 @@ export class Subscriber {
 			this.#latestGroup(),
 			this.#holdings(),
 			scalars ? maxDelayOf(scalars) : NO_MAX_DELAY,
+			(key) => update.since(key),
 		);
 		// Leaves the lookups the old ranges asked, which a settled window never reads again.
 		if (this.#lookups.length > 0) this.#lookUp();
@@ -3826,7 +3838,7 @@ export class Subscriber {
 		if (!producer) return;
 		const wire = !this.#resume && receivedCopy(producer) && !this.#state.dropsAnchors.peek();
 		const times = wire ? this.#window.asks() : [];
-		const joins = wire && !timeAnchors(producer).atKeys ? this.#window.joins() : [];
+		const joins = !this.#resume && timeAnchors(producer).answersJoins ? this.#window.joins() : [];
 		if (times.length === 0 && joins.length === 0 && this.#state.asks.length === 0 && this.#state.joins.length === 0)
 			return;
 		const budget = this.#window.budget;
@@ -3851,11 +3863,11 @@ export class Subscriber {
 		// A lite-07 copy holds only part of the track: a group held before a time contains it only
 		// once nothing between them is still to arrive.
 		const wire = receivedCopy(producer) && !state.dropsAnchors.peek();
-		// It places a live join only where its upstream answered a range asking the same join, recorded
-		// after the reader began waiting, under a budget at least as wide as the reader's: the live
-		// edge is the upstream's, which no group held here measures. Mirrors the Rust
-		// `Holdings::answers_joins for TrackState`.
-		const answers = wire && !anchors.atKeys;
+		// A lite-07 copy places a live join only where its upstream answered a range asking the same
+		// join, recorded after the reader's range was added, under a budget at least as wide as the
+		// reader's: the live edge is the upstream's, which no group held here measures. Mirrors the
+		// Rust `Holdings::answers_joins for TrackState`.
+		const answers = anchors.answersJoins;
 		// The times from `from` on that the drops from there leave open.
 		const uncovered = (from: bigint): Run | undefined => {
 			const start = drops.coveredFrom(from);
@@ -3915,13 +3927,13 @@ export class Subscriber {
 			// A received copy's handler is its session, which fetches by group alone.
 			looksUp: () => !receivedCopy(producer) && fillsOf(producer).serving,
 			join: (min, end, budget, since) => {
-				if (!answers) return this.#join(min);
+				if (!answers)
+					return this.#join(min, (time) => holdings.containing(time, budget), wire && !anchors.atKeys);
 				const answer = anchors.joins.get(joinKey(Math.ceil(min.asMillis()), end));
 				if (answer === undefined || answer.tick <= since || budget > answer.budget) return undefined;
 				return answer.start === undefined ? "empty" : { group: answer.start };
 			},
 			answersJoins: () => answers,
-			joinTick: () => anchors.joinTick,
 			// Skip runs coalesce, so a gap between two held groups is one run unless the cache
 			// evicted a group inside it.
 			neverProduced: (start, end) => {
@@ -3939,16 +3951,16 @@ export class Subscriber {
 
 	// Where a live join holding `min` behind the live edge starts on a hop that measures it, as
 	// {@link Holdings.join} says: in media time from the newest frame held, or on a scale-less track,
-	// by arrival on this hop's clock, as expiry measures it. Undefined while nothing held measures the
-	// live edge.
+	// by arrival on this hop's clock, as expiry measures it. Undefined while it can't tell.
 	//
 	// A hop serving its own track starts a timed one as a time start at the live edge minus `min`,
 	// which a fill handler looks up in its history, and a scale-less one at the newest group that
-	// arrived at least `min` ago, or the oldest held. A copy whose wire keys groups otherwise starts
-	// at a group held, by when each one's first frame presented, as its publisher resolved the join
-	// already. A lite-07 copy places none itself (see {@link Holdings.answersJoins}). Mirrors the Rust
-	// `TrackState::join`.
-	#join(min: Duration): Join | undefined {
+	// arrived at least `min` ago, or the oldest held. A `wire` copy (whose publisher reports where its
+	// ranges start, but not where each join does) places it only where the groups it holds prove, and
+	// waits otherwise. A copy whose wire keys groups otherwise starts at a group held, by when each
+	// one's first frame presented, as its publisher resolved the join already. A lite-07 copy places
+	// none itself (see {@link Holdings.answersJoins}). Mirrors the Rust `TrackState::join`.
+	#join(min: Duration, containing: (time: bigint) => Containing, wire: boolean): Join | undefined {
 		const timeline = this.#state.timeline;
 		// The newest group held for which `f` holds, failed ones aside.
 		const newest = (f: (group: GroupConsumer) => boolean) =>
@@ -3960,7 +3972,9 @@ export class Subscriber {
 		const scale = info.timescale;
 		if (scale == null) {
 			const at = now();
-			const group = newest((group) => at.since(hooks.groupArrived(group)).ge(min)) ?? oldest();
+			// This copy's arrivals don't reach back that far, but its upstream's may.
+			const group =
+				newest((group) => at.since(hooks.groupArrived(group)).ge(min)) ?? (wire ? undefined : oldest());
 			return group && { group: group.start };
 		}
 		const stamped = newest((group) => hooks.groupTimestamp(group) !== undefined);
@@ -3975,13 +3989,23 @@ export class Subscriber {
 		const back = (BigInt(Math.ceil(min.asNanos())) * BigInt(scale) + 999_999_999n) / 1_000_000_000n;
 		const producer = this.#state.producer;
 		if (!this.#state.dropsAnchors.peek() && !(producer && timeAnchors(producer).atKeys)) {
-			// Keys are group starts, so the newest group held starts no later than the edge.
+			// Keys are group starts, so the newest group held starts no later than the edge. A copy's
+			// feed may still be bringing older groups, which its own newest then trails: the largest
+			// its upstream reported puts the live edge no lower.
+			const largest = wire ? this.#state.largest.peek()?.group : undefined;
 			let top: bigint | undefined;
-			for (const at of [edge, newest(() => true)?.start]) {
+			for (const at of [edge, newest(() => true)?.start, largest]) {
 				if (at !== undefined && (top === undefined || at > top)) top = at;
 			}
 			if (top === undefined) return undefined;
-			return { time: top > back ? top - back : 0n };
+			const target = top > back ? top - back : 0n;
+			if (!wire || containing(target) !== "unknown") return { time: target };
+			// Groups never overlap in time, so one held starting by the target with a frame at or past
+			// it contains it: every later group starts after that frame.
+			const holder = newest((group) => group.start <= target);
+			const through = reach(holder);
+			if (holder && through !== undefined && through >= target) return { group: holder.start };
+			return undefined;
 		}
 		if (edge === undefined) return undefined;
 		const target = edge > back ? edge - back : 0n;
@@ -4608,8 +4632,19 @@ export class Subscriber {
 		};
 		hooks.editSubscriber = (subscriber, edit) => subscriber.#edit(edit);
 		hooks.preferences = (subscriber) => subscriber.#state.update;
-		hooks.resolveRanges = (subscriber, subscription) =>
-			new Window(subscription.ranges ?? [{}], subscriber.#latestGroup(), subscriber.#holdings()).resolved();
+		hooks.resolveRanges = (subscriber, subscription) => {
+			// A preview never takes an answer recorded before it: the live edge has moved since.
+			const producer = subscriber.#state.producer;
+			const tick = producer ? hooks.requested(producer).joinTick() : 0;
+			const ranges = (subscription.ranges ?? [{}]).map((range, index) => [BigInt(index), range] as const);
+			return Window.keyed(
+				ranges,
+				subscriber.#latestGroup(),
+				subscriber.#holdings(),
+				NO_MAX_DELAY,
+				() => tick,
+			).resolved();
+		};
 		hooks.tryNextGroup = (subscriber, floor) => {
 			subscriber.#raiseNext(floor);
 			return subscriber.#tryNextGroup();
@@ -6069,7 +6104,9 @@ export class Subscriber {
 		// A refused time start resolves every range again, as the Rust `Filter::stale` has it.
 		if (moved && this.#refusal) this.#resolve();
 		else if (moved) {
-			this.#window.edit(edit.retire, add, this.#latestGroup(), this.#holdings());
+			this.#window.edit(edit.retire, add, this.#latestGroup(), this.#holdings(), (key) =>
+				this.#state.update.since(key),
+			);
 			// Leaves the lookups the retired ranges asked, which a settled window never reads again.
 			if (this.#lookups.length > 0) this.#lookUp();
 			this.#moved();

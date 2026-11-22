@@ -176,6 +176,8 @@ async function run(c: Case, mode: Mode): Promise<void> {
 	const got = new Got();
 	const cleanup: (() => void)[] = [];
 	let cached: number | undefined;
+	// Whether the warm read ended before upstream could answer: an empty delivery the copy alone gave.
+	let endedWarm = false;
 	try {
 		switch (mode) {
 			case "direct": {
@@ -219,6 +221,7 @@ async function run(c: Case, mode: Mode): Promise<void> {
 				if (held) {
 					await got.read(clock, reader, 0);
 					cached = got.groups.length;
+					endedWarm = got.ended;
 					upstream.transport.release();
 				}
 				await got.read(clock, reader, want);
@@ -258,9 +261,9 @@ async function run(c: Case, mode: Mode): Promise<void> {
 
 		const delivered = got.delivered();
 		expect(delivered, `${mode}: delivered`).toEqual(c.deliver);
-		// A case delivering nothing can't show whether the copy asked: it answers nothing either way.
-		if (c.asks !== undefined && cached !== undefined && want > 0) {
-			const answered = cached === want;
+		if (c.asks !== undefined && cached !== undefined) {
+			// Delivering nothing is answered alone only if the reader ended before upstream could answer.
+			const answered = cached === want && (want > 0 || endedWarm);
 			if (answered === c.asks) {
 				throw new Error(
 					c.asks

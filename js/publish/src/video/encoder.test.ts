@@ -1504,9 +1504,6 @@ test("a repeated capture timestamp is dropped rather than failing the track", as
 	expect(closed).toBeUndefined();
 });
 
-// A reader joining at the live edge, which a refresh ratio may restate the newest group for.
-const LIVE_JOIN: Moq.Track.Subscription = { ranges: [{ start: { live: Duration.ZERO } }] };
-
 test("a join over the refresh ratio forces a keyframe on the next frame", async () => {
 	const keys = await recordKeyframes({ refresh: { ratio: 2 } }, async ({ track, send }) => {
 		const watching = track.subscribe();
@@ -1515,15 +1512,15 @@ test("a join over the refresh ratio forces a keyframe on the next frame", async 
 			await send(0);
 			await send(50);
 			// One 60 byte delta is under twice the 100 byte keyframe.
-			joined.push(track.subscribe(LIVE_JOIN));
+			joined.push(track.subscribe());
 			await send(100);
 			await send(150);
 			await send(200);
 			// Four deltas are over it, 200ms after the keyframe.
-			joined.push(track.subscribe(LIVE_JOIN));
+			joined.push(track.subscribe());
 			await send(250);
 			// A join after the fresh keyframe reads its group.
-			joined.push(track.subscribe(LIVE_JOIN));
+			joined.push(track.subscribe());
 			await send(300);
 		} finally {
 			watching.close();
@@ -1540,7 +1537,7 @@ test("a join that a written group serves forces no keyframe, even one encoded wi
 		await send(100);
 		// One 60 byte delta is under twice the 100 byte keyframe, so the join reads the open group.
 		await send(150);
-		const joined = track.subscribe(LIVE_JOIN);
+		const joined = track.subscribe();
 		try {
 			await send(200);
 			await send(250);

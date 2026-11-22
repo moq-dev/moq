@@ -383,10 +383,6 @@ test("wanted follows the first consumer", async () => {
 	expect(producer.demand().wanted.peek()).toBe(false);
 });
 
-// A reader joining at the live edge, which a refresh ratio may ask a fresh group for. One reading
-// from the oldest group, as by default, needs none.
-const LIVE_JOIN: Subscription = { ranges: [{ start: { live: Duration.ZERO } }] };
-
 // The cached group is served either way: refresh is a request, not a hold.
 test("a join over the refresh ratio wants the group after the newest", async () => {
 	for (const [delta, wanted] of [
@@ -396,7 +392,7 @@ test("a join over the refresh ratio wants the group after the newest", async () 
 	] as const) {
 		const producer = new TrackProducer("test").accept({ refresh: { ratio: 1 } });
 		refreshGroup(producer, delta);
-		const subscriber = producer.subscribe(LIVE_JOIN);
+		const subscriber = producer.subscribe();
 		expect(asked(producer)).toBe(wanted);
 		expect(refreshing(producer)).toBe(wanted !== undefined);
 		expect((await subscriber.recvGroup())?.start).toBe(0n);
@@ -407,19 +403,19 @@ test("a join over the refresh ratio wants the group after the newest", async () 
 test("joins coalesce until the group lands", () => {
 	const producer = new TrackProducer("test").accept({ refresh: { ratio: 1 } });
 	refreshGroup(producer, 4);
-	const subscribers = [producer.subscribe(LIVE_JOIN)];
+	const subscribers = [producer.subscribe()];
 	expect(asked(producer)).toBe(1n);
-	subscribers.push(producer.subscribe(LIVE_JOIN));
+	subscribers.push(producer.subscribe());
 	expect(asked(producer)).toBe(1n);
 
 	// Group 1 answers it, and a join under its ratio asks nothing more.
 	refreshGroup(producer, 0);
 	expect(asked(producer)).toBeUndefined();
-	subscribers.push(producer.subscribe(LIVE_JOIN));
+	subscribers.push(producer.subscribe());
 	expect(asked(producer)).toBeUndefined();
 
 	refreshGroup(producer, 4);
-	subscribers.push(producer.subscribe(LIVE_JOIN));
+	subscribers.push(producer.subscribe());
 	expect(asked(producer)).toBe(3n);
 	expect(refreshing(producer)).toBe(true);
 	for (const subscriber of subscribers) subscriber.close();
@@ -683,7 +679,7 @@ test("aborting a refresh withdraws an unsent request", async () => {
 
 		const join = new AbortController();
 		void subscriber.refresh({ signal: join.signal }).catch(() => {});
-		const joiner = producer.subscribe(LIVE_JOIN);
+		const joiner = producer.subscribe();
 		join.abort();
 		await clock.advance(Duration.secs(5));
 		expect(refreshing(producer)).toBe(true);
@@ -5724,6 +5720,7 @@ test("finishing returns handles that write nothing new but fill a late group", a
 // moved on, so the reader asks again and waits, however many groups the copy holds.
 test("track: a received copy places a live join only from a fresh answer", () => {
 	const producer = receivedTrack({ timescale: Timescale.MILLI });
+	hooks.answersJoins(producer);
 	const join = { delay: { max: null }, ranges: [{ start: { live: Duration.millis(200) }, end: 9000n }] };
 	try {
 		const first = producer.subscribe(join);
@@ -5753,10 +5750,32 @@ test("track: a received copy places a live join only from a fresh answer", () =>
 	}
 });
 
+// A copy whose wire carries no live join (lite-06, moq-transport) answers none, so it measures one
+// from the groups it holds: inside a held group whose frames reach past the join's time, with no
+// newer group yet, since groups never overlap. It asks nothing upstream for it.
+test("track: a copy that answers no joins places one inside a held group", () => {
+	const producer = receivedTrack({ timescale: Timescale.MILLI });
+	try {
+		const group = producer.createGroup(1000n);
+		for (let millis = 1000; millis <= 1900; millis += 100)
+			group.writeFrame(textFrame("x", Timestamp.fromMillis(millis)));
+		const reader = producer.subscribe({
+			delay: { max: null },
+			ranges: [{ start: { live: Duration.millis(200) } }],
+		});
+		expect(reader.tryRecvGroup()?.start).toBe(1000n);
+		expect(hooks.requested(producer).joins()).toEqual([]);
+		group.finish();
+	} finally {
+		producer.close();
+	}
+});
+
 // Readers asking the same live join, by lag and end, wait on one answer: one pending range upstream,
 // which places them all. A different end is a join of its own.
 test("track: readers with the same lag and end share one pending join", () => {
 	const producer = receivedTrack({ timescale: Timescale.MILLI });
+	hooks.answersJoins(producer);
 	const join = (end?: bigint): Subscription => ({
 		delay: { max: null },
 		ranges: [{ start: { live: Duration.millis(200) }, end }],
@@ -5792,6 +5811,7 @@ test("track: readers with the same lag and end share one pending join", () => {
 // delivers none of the groups the copy holds or receives later.
 test("track: a bounded join answered empty delivers nothing", () => {
 	const producer = receivedTrack({ timescale: Timescale.MILLI });
+	hooks.answersJoins(producer);
 	try {
 		const reader = producer.subscribe({
 			delay: { max: null },

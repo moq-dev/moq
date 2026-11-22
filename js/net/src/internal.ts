@@ -811,6 +811,12 @@ export const hooks: {
 	 */
 	startsAtKeys: (producer: Producer) => void;
 	/**
+	 * Have a received copy's readers place a live join only where its upstream answered a range
+	 * asking it (see `answerJoin`), for a wire whose ranges carry each join and report where each
+	 * starts. Mirrors the Rust `track::Producer::answers_joins`; assigned by `track.ts`.
+	 */
+	answersJoins: (producer: Producer) => void;
+	/**
 	 * Record where the upstream publisher started each of a lite-07 copy's live wire ranges, as
 	 * `[time, start, budget]` by the time each asked from (0 for the oldest group), `start`
 	 * undefined for one with no group to deliver at or before its time, answered under at most
@@ -1285,6 +1291,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	startsAtKeys: () => {
+		throw new Error("track.ts not loaded");
+	},
+	answersJoins: () => {
 		throw new Error("track.ts not loaded");
 	},
 	timeStarts: () => {

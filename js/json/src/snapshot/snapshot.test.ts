@@ -2,14 +2,11 @@ import { beforeEach, expect, test } from "bun:test";
 import { Duration } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { Error as NetError, StreamCode, Time, Track } from "@moq/net";
-import { hooks, NO_MAX_DELAY } from "../../../net/src/internal.ts";
+import { hooks } from "../../../net/src/internal.ts";
 import { key, resetKeys } from "../key.test-util.ts";
 import { Consumer } from "./consumer.ts";
 import { Encoder } from "./encoder.ts";
 import { Producer } from "./producer.ts";
-
-// A reader joining at the live edge, which a refresh ratio may restate the newest group for.
-const LIVE_JOIN: Track.Subscription = { ranges: [{ start: { live: Duration.ZERO } }] };
 
 beforeEach(resetKeys);
 
@@ -233,8 +230,6 @@ test("reads skip a group the subscription still owes", async () => {
 			};
 
 			put(0n);
-			// The upstream answers the consumers' live join at group 0, as a session records it.
-			hooks.answerJoin(track, 0, undefined, 0n, NO_MAX_DELAY);
 			expect((await latest.latest())?.value).toEqual({ n: 0 });
 			expect((await next.next())?.value).toEqual({ n: 0 });
 			const reads = [latest.latest(), next.next()];
@@ -480,7 +475,7 @@ test("a joiner over the ratio gets a fresh snapshot", async () => {
 		fill(producer);
 
 		// The joiner still reads the open group; the restatement serves whoever joins next.
-		const joiner = track.subscribe(LIVE_JOIN);
+		const joiner = track.subscribe();
 		await settle();
 		producer.finish();
 		joiner.close();
@@ -527,7 +522,7 @@ test("a refresh reuses the newest timestamp", async () => {
 	const producer = new Producer<Value>({ track });
 	for (let n = 0; n <= 3; n++) producer.update({ n }, Time.Timestamp.fromMillis(n * 10));
 
-	const joiner = track.subscribe(LIVE_JOIN);
+	const joiner = track.subscribe();
 	await settle();
 	producer.finish();
 	joiner.close();
@@ -557,7 +552,7 @@ test("a refresh after older updates waits for a later one", async () => {
 	// Deltas may carry timestamps older than their group's first frame.
 	for (const [n, ms] of [30, 10, 20, 15].entries()) producer.update({ n }, Time.Timestamp.fromMillis(ms));
 
-	const joiner = track.subscribe(LIVE_JOIN);
+	const joiner = track.subscribe();
 	await settle();
 	// No group may share the open group's start.
 	expect(track.largest()?.group).toBe(30n);
@@ -588,7 +583,7 @@ test("a scale-less refresh waits for an update past the open group's key", async
 	// A snapshot and deltas, all at the open group's key.
 	for (let n = 0; n <= 3; n++) producer.update({ n }, Time.Timestamp.unscaled(5n));
 
-	const joiner = track.subscribe(LIVE_JOIN);
+	const joiner = track.subscribe();
 	await settle();
 	expect(track.largest()?.group).toBe(5n);
 
@@ -622,7 +617,7 @@ test("a refresh after a rejected update restates the last written value", async 
 	const oversized = { big: "x".repeat(32 * 1024 * 1024 + 1) };
 	expect(() => producer.update(oversized, key())).toThrow(NetError.FrameTooLarge);
 
-	const joiner = track.subscribe(LIVE_JOIN);
+	const joiner = track.subscribe();
 	await settle();
 	producer.update({ n: 4 }, key());
 	producer.finish();
@@ -637,7 +632,7 @@ test("no ratio never refreshes", async () => {
 	const producer = new Producer<Value>({ track });
 	fill(producer);
 
-	const joiner = track.subscribe(LIVE_JOIN);
+	const joiner = track.subscribe();
 	await settle();
 	producer.finish();
 	joiner.close();
@@ -651,7 +646,7 @@ test("a compressed refresh opens a fresh group", async () => {
 	producer.update({ a: 1, b: 1 }, key());
 	producer.update({ a: 1, b: 2 }, key());
 
-	const joiner = track.subscribe(LIVE_JOIN);
+	const joiner = track.subscribe();
 	await settle();
 	// The change after the restatement rides as a delta in the new group.
 	producer.update({ a: 1, b: 3 }, key());

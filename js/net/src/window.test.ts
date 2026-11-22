@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Duration } from "@moq/clock";
+import { NO_MAX_DELAY } from "./internal.ts";
 import type { Range } from "./track.ts";
 import { UNBOUNDED } from "./util/key.ts";
 import {
@@ -61,9 +62,8 @@ class Keys implements Holdings {
 	looks = false;
 	dropped = 0n;
 	joins?: (min: Duration, end: bigint | undefined, budget: number, since: number) => Join | undefined;
-	// Whether only an upstream's answer places a live join, and the newest answer's tick.
-	answers = false;
-	tick = 0;
+	// The tick of the upstream's answer to every live join, which alone places one when set.
+	answered?: number;
 
 	constructor(held: Iterable<bigint> = []) {
 		this.held = new Set(held);
@@ -93,15 +93,12 @@ class Keys implements Holdings {
 	}
 
 	join(min: Duration, end: bigint | undefined, budget: number, since: number): Join | undefined {
+		if (this.answered !== undefined && this.answered <= since) return undefined;
 		return this.joins?.(min, end, budget, since);
 	}
 
 	answersJoins(): boolean {
-		return this.answers;
-	}
-
-	joinTick(): number {
-		return this.tick;
+		return this.answered !== undefined;
 	}
 
 	complete(): boolean {
@@ -242,6 +239,36 @@ describe("Window", () => {
 		edge = 9n;
 		expect(window.settle(9n, held)).toBe(false);
 		expect(window.start()).toBe(5n);
+	});
+
+	// Mirrors the Rust `a_copy_places_a_live_join_only_from_a_fresh_answer`.
+	test("a copy places a live join only from an answer recorded after its range was added", () => {
+		const held = new Keys([0n, 33n, 66n, 99n]);
+		held.joins = () => ({ group: 33n });
+		for (const lag of [0, 40]) {
+			held.answered = 3;
+			const window = Window.keyed([[0n, live(lag)]], 99n, held, NO_MAX_DELAY, () => 3);
+			expect([window.settled, window.contains(99n)]).toEqual([false, false]);
+			expect(window.joins()).toEqual([[lag, undefined, 3]]);
+
+			// A newer answer places it, at exactly the group upstream answered.
+			held.answered = 4;
+			expect(window.settle(99n, held)).toBe(true);
+			expect(covered(window, held.held)).toEqual([33n, 66n, 99n]);
+			expect(window.joins()).toEqual([]);
+		}
+
+		// An answer of nothing places a join with an end past it, and keeps one without waiting.
+		held.answered = 3;
+		held.joins = () => "empty";
+		const bounded = Window.keyed([[0n, live(40, 50n)]], 99n, held, NO_MAX_DELAY, () => 3);
+		const open = Window.keyed([[0n, live(40)]], 99n, held, NO_MAX_DELAY, () => 3);
+		held.answered = 4;
+		expect(bounded.settle(99n, held)).toBe(true);
+		expect(covered(bounded, held.held)).toEqual([]);
+		expect(bounded.settled).toBe(true);
+		expect(open.settle(99n, held)).toBe(false);
+		expect(open.joins()).toEqual([[40, undefined, 3]]);
 	});
 
 	test("a zero lag starts a live join at the latest group, once there is one", () => {
@@ -587,13 +614,15 @@ describe("ranges", () => {
 		expect(() => rangesOf([null as unknown as Range])).toThrow(TypeError);
 	});
 
-	test("an open live join joins live", () => {
+	test("an open range with no time start joins live", () => {
 		expect(joinsLive([live(0)])).toBe(true);
 		expect(joinsLive([groups(3n), live(500)])).toBe(true);
-		// The oldest group, a time start, and a join with an end don't follow the live edge.
-		expect(joinsLive(undefined)).toBe(false);
-		expect(joinsLive([{}])).toBe(false);
+		// From the oldest group, as by default, it follows the live edge too.
+		expect(joinsLive(undefined)).toBe(true);
+		expect(joinsLive([{}])).toBe(true);
+		// A time start, or any range with an end, doesn't.
 		expect(joinsLive([groups(3n)])).toBe(false);
+		expect(joinsLive([range(undefined, time(2n))])).toBe(false);
 		expect(joinsLive([live(0, 2n)])).toBe(false);
 	});
 

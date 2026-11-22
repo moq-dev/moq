@@ -8,7 +8,7 @@ import { defined } from "./defined.test-util.ts";
 import { NotFound, StreamCode, StreamError, toStreamCode } from "./error.ts";
 import { rejectGroups } from "./fill.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
-import { hooks, NO_MAX_DELAY, staleHole } from "./internal.ts";
+import { hooks, staleHole } from "./internal.ts";
 import * as Lite from "./lite/index.ts";
 import { createMockTransportPair } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
@@ -296,8 +296,6 @@ test("fill: a group a lowered floor asks the feed for is not asked of a fill", a
 	hooks.receiveTrack(track);
 	const live = track.subscribe({ ranges: [{ start: { live: Duration.ZERO } }], delay: { max: null } });
 	hooks.startTrack(track, { start: 1n });
-	// The upstream answers the live join at group 1, as the session records its START.
-	hooks.answerJoin(track, 0, undefined, 1n, NO_MAX_DELAY);
 	hooks.receiveGroup(track, { start: 1n, offset: 0 }).finish();
 	expect((await live.recvGroup())?.start).toBe(1n);
 	const requests = track.requests();
