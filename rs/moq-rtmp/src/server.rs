@@ -973,10 +973,10 @@ fn play_selection(
 			.enabled()
 			.map(|(_, config)| config)
 			.find(|config| !video_playable(config))
-	} else if catalog.video.renditions.values().any(video_playable) {
+	} else if catalog.video.enabled().any(|(_, config)| video_playable(config)) {
 		None
 	} else {
-		catalog.video.ranked().next().map(|(_, config)| config)
+		catalog.video.enabled().next().map(|(_, config)| config)
 	};
 	if let Some(config) = video_refused {
 		return Err(match video_fourcc(config.codec.kind(), capabilities.multitrack) {
@@ -995,10 +995,10 @@ fn play_selection(
 			.enabled()
 			.map(|(_, config)| config)
 			.find(|config| !audio_playable(config))
-	} else if catalog.audio.renditions.values().any(audio_playable) {
+	} else if catalog.audio.enabled().any(|(_, config)| audio_playable(config)) {
 		None
 	} else {
-		catalog.audio.ranked().next().map(|(_, config)| config)
+		catalog.audio.enabled().next().map(|(_, config)| config)
 	};
 	if let Some(config) = audio_refused {
 		return Err(match audio_fourcc(&config.codec, capabilities.multitrack) {
@@ -1417,11 +1417,14 @@ async fn flush_outbound<S: Stream>(stream: &mut S, work: &mut VecDeque<ServerSes
 /// `play` teardown, so the caller can abandon the play. Crucially it does *not*
 /// discard the bytes: RTMP is a single continuous chunk stream, so skipping any
 /// bytes would desynchronize the session's deserializer for everything
-/// [`play_pump`] parses afterwards. Pre-playback the client's control messages
-/// (window ack, set buffer length) need no reply, so any responses are left
-/// queued in `work` for `play_pump` to flush rather than written here. The only
-/// await is the read, so dropping this future when the broadcast arrives is
-/// cancellation-safe (no half-consumed read).
+/// [`play_pump`] parses afterwards.
+///
+/// It writes the responses the session owes before reading more, so `work` never
+/// holds more than one read's results, and a viewer flooding commands without
+/// reading the answers stalls on its own TCP window. The events it raises are
+/// dropped: nothing before playback acts on them. Each await is a single read or
+/// write, which moves bytes only when it completes, so dropping this future when
+/// the broadcast arrives loses nothing.
 async fn feed_input<S: Stream>(
 	stream: &mut S,
 	session: &mut ServerSession,
@@ -1429,6 +1432,23 @@ async fn feed_input<S: Stream>(
 ) -> anyhow::Result<()> {
 	let mut buffer = [0u8; READ_BUFFER];
 	loop {
+		match work.front_mut() {
+			Some(ServerSessionResult::OutboundResponse(packet)) if !packet.bytes.is_empty() => {
+				let n = stream.write(&packet.bytes).await?;
+				if n == 0 {
+					return Err(std::io::Error::from(std::io::ErrorKind::WriteZero).into());
+				}
+				packet.bytes.drain(..n);
+				continue;
+			}
+			// The viewer tore down the play before media started: stop waiting.
+			Some(ServerSessionResult::RaisedEvent(ServerSessionEvent::PlayStreamFinished { .. })) => return Ok(()),
+			Some(_) => {
+				work.pop_front();
+				continue;
+			}
+			None => {}
+		}
 		let n = stream.read(&mut buffer).await?;
 		if n == 0 {
 			return Ok(());
@@ -1436,17 +1456,7 @@ async fn feed_input<S: Stream>(
 		let results = session
 			.handle_input(&buffer[..n])
 			.map_err(|e| anyhow::anyhow!("rtmp handle_input: {e:?}"))?;
-		// The viewer tore down the play before media started: stop waiting.
-		let stopped = results.iter().any(|r| {
-			matches!(
-				r,
-				ServerSessionResult::RaisedEvent(ServerSessionEvent::PlayStreamFinished { .. })
-			)
-		});
 		work.extend(results);
-		if stopped {
-			return Ok(());
-		}
 	}
 }
 
@@ -1599,6 +1609,42 @@ mod tests {
 		);
 		assert_eq!(start.elapsed(), PUBLISH_IDLE_TIMEOUT);
 		publisher.abort(moq_net::Error::Cancel);
+	}
+
+	/// A viewer waiting for its broadcast that floods input owing replies, without reading
+	/// them, stalls on its own TCP window instead of growing the queue of owed replies.
+	#[tokio::test(start_paused = true)]
+	async fn a_flooding_viewer_cannot_grow_the_pre_play_queue() {
+		use crate::rml::chunk_io::ChunkSerializer;
+		use crate::rml::messages::RtmpMessage;
+
+		let (mut stream, mut viewer) = tokio::io::duplex(1024);
+		let (mut session, _) = ServerSession::new(ServerSessionConfig::new()).unwrap();
+		// A one-byte window makes every read owe an Acknowledgement, so megabytes of input
+		// owe more replies than the 1 KiB the viewer leaves unread holds.
+		let mut serializer = ChunkSerializer::new();
+		let mut window = || {
+			let payload = RtmpMessage::WindowAcknowledgement { size: 1 }
+				.into_message_payload(RtmpTimestamp::new(0), 0)
+				.unwrap();
+			serializer.serialize(&payload, false, false).unwrap().bytes
+		};
+		let flood: Vec<u8> = (0..1_000_000).flat_map(|_| window()).collect();
+		let flooder = tokio::spawn(async move {
+			viewer.write_all(&flood).await.unwrap();
+			viewer
+		});
+
+		let mut work = VecDeque::new();
+		let fed = kio::clock::timeout(
+			Duration::from_secs(60),
+			feed_input(&mut stream, &mut session, &mut work),
+		)
+		.await;
+		assert!(fed.is_err(), "the feed ended: {fed:?}");
+		assert!(work.len() <= 1, "{} replies queued", work.len());
+		assert!(!flooder.is_finished(), "the viewer wrote its whole flood unread");
+		flooder.abort();
 	}
 
 	#[tokio::test]
@@ -2506,6 +2552,16 @@ mod tests {
 		catalog.video.renditions.get_mut("b").unwrap().enabled = false;
 		assert!(play_selection(&catalog, &h264_only).is_ok());
 		assert_eq!(best(&catalog, &h264_only).as_deref(), Some("a"));
+
+		// A single-track client that decodes only a disabled rendition is refused, not
+		// accepted with no video: the selection never takes the disabled one.
+		catalog.video.renditions.get_mut("b").unwrap().enabled = true;
+		catalog.video.renditions.get_mut("a").unwrap().enabled = false;
+		let err = play_selection(&catalog, &legacy).expect_err("only disabled renditions are H.264");
+		assert!(err.contains("hvc1"), "{err}");
+		// With no enabled video at all, there is nothing to refuse.
+		catalog.video.renditions.get_mut("b").unwrap().enabled = false;
+		assert!(play_selection(&catalog, &legacy).is_ok());
 	}
 
 	/// A single-track client gets the best audio rendition it can play, not the first by name.
@@ -2550,6 +2606,12 @@ mod tests {
 			.insert("b".to_string(), audio(AudioCodec::Ac3, 128_000));
 		let err = play_selection(&unsupported, &legacy).expect_err("no playable audio");
 		assert!(err.contains("ac-3"), "{err}");
+
+		// A disabled AAC rendition does not make the play acceptable.
+		let mut disabled = catalog.clone();
+		disabled.audio.renditions.get_mut("b").unwrap().enabled = false;
+		let err = play_selection(&disabled, &legacy).expect_err("the only AAC is disabled");
+		assert!(err.contains("Opus"), "{err}");
 
 		// An advertised enhanced codec is kept, but not a sibling codec the client never
 		// advertised, even at a higher bitrate: an AC-3 decoder can't play E-AC-3.
