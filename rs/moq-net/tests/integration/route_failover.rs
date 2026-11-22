@@ -181,7 +181,8 @@ async fn reader(node: &origin::Producer, path: &str, start: kio::clock::Instant)
 	reader_of(node, path, "video", start).await
 }
 
-/// Read every frame of `name` at `path` through `node`, following it from the start.
+/// Read every frame of `name` at `path` through `node`, following it from the start in
+/// order: a reader joining with a backlog asks for it oldest first, as [`Liveness`] judges.
 async fn reader_of(
 	node: &origin::Producer,
 	path: &str,
@@ -189,7 +190,9 @@ async fn reader_of(
 	start: kio::clock::Instant,
 ) -> mpsc::UnboundedReceiver<Got> {
 	let remote = node.consume().request(path, None).await.unwrap();
-	let prefs = track::Subscription::default().with_max(Duration::from_secs(60));
+	let prefs = track::Subscription::default()
+		.with_max(Duration::from_secs(60))
+		.with_order(track::Order::Ascending);
 	let mut sub = remote.track(name).unwrap().subscribe(prefs).await.unwrap();
 	let (tx, rx) = mpsc::unbounded();
 	kio::clock::sim::spawn(async move {
