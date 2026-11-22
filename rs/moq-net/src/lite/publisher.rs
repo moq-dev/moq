@@ -4876,6 +4876,9 @@ struct Bounds {
 	/// that group and the first frame of it. [`Frames::first`] keeps those no other range
 	/// covers.
 	positions: std::collections::BTreeMap<u64, (u64, u64)>,
+	/// Lite-07: the group each live join already placed starts at, by its index in `ranges`
+	/// (see [`lite::Anchor::Joined`]).
+	placed: std::collections::BTreeMap<u64, u64>,
 }
 
 impl Bounds {
@@ -4894,6 +4897,7 @@ impl Bounds {
 			ranges: Vec::with_capacity(ranges.len()),
 			frames: Frames::default(),
 			positions: Default::default(),
+			placed: Default::default(),
 		};
 		// Lite-06 bounds frames on its one range, and lite-07 only a range's start.
 		for range in ranges {
@@ -4910,14 +4914,23 @@ impl Bounds {
 				Some(lite::Anchor::Absolute(position)) => Start::Time(position.group),
 				Some(lite::Anchor::Time(time)) => Start::Time(time),
 				Some(lite::Anchor::Live { min, max }) => Start::Live { min, max },
+				// Placed already, so its lag places nothing: it starts where it was placed and
+				// expires as a live join under its max age.
+				Some(lite::Anchor::Joined { max, .. }) => Start::Live {
+					min: Duration::ZERO,
+					max,
+				},
 			};
 			if legacy.is_some() && let Some(lite::Anchor::Absolute(start)) = range.start {
 				bounds.frames.floor = bounds.frames.floor.max(start.group);
 			}
 			let position = match range.start {
-				Some(lite::Anchor::Absolute(start)) if start.frame != 0 => Some((start.group, start.frame)),
+				Some(lite::Anchor::Absolute(start) | lite::Anchor::Joined { at: start, .. }) if start.frame != 0 => {
+					Some((start.group, start.frame))
+				}
 				_ => None,
 			};
+
 			let end = match range.end {
 				None => None,
 				// A mid-group end includes its group, up to the frame before it.
@@ -4937,7 +4950,7 @@ impl Bounds {
 				},
 				Some(lite::Anchor::Time(end)) => Some(end),
 				// Only a start may join live, which decoding enforces.
-				Some(lite::Anchor::Live { .. }) => {
+				Some(lite::Anchor::Live { .. } | lite::Anchor::Joined { .. }) => {
 					bounds.ranges.push(Range::EMPTY);
 					continue;
 				}
@@ -4948,6 +4961,9 @@ impl Bounds {
 				&& !matches!(end, Some(end) if end < group)
 			{
 				bounds.positions.insert(bounds.ranges.len() as u64, (group, frame));
+			}
+			if let Some(lite::Anchor::Joined { at, .. }) = range.start {
+				bounds.placed.insert(bounds.ranges.len() as u64, at.group);
 			}
 			bounds.ranges.push(Range { start, end });
 		}
@@ -4987,7 +5003,19 @@ impl Bounds {
 
 	/// The model's preferences for these ranges.
 	fn groups(&self) -> crate::track::Subscription {
-		crate::track::Subscription::default().with_ranges(self.ranges.iter().copied())
+		crate::track::Subscription {
+			placed: self.placed.clone(),
+			..crate::track::Subscription::default().with_ranges(self.ranges.iter().copied())
+		}
+	}
+
+	/// These ranges by the Range IDs `ids` give them, in order.
+	fn requested(&self, ids: impl IntoIterator<Item = u64>) -> Requested {
+		let mut requested = Requested::default();
+		for ((index, range), id) in (0..).zip(&self.ranges).zip(ids) {
+			requested.insert(id, *range, self.placed.get(&index).copied());
+		}
+		requested
 	}
 }
 
@@ -5031,6 +5059,8 @@ fn first_frames<'a>(
 #[derive(Debug, Default)]
 struct Requested {
 	ranges: std::collections::BTreeMap<u64, crate::track::Range>,
+	/// The group each live join already placed starts at, by Range ID.
+	placed: std::collections::BTreeMap<u64, u64>,
 	/// The time starts of the non-empty ranges, and how many of them start otherwise.
 	starts: std::collections::BTreeMap<u64, usize>,
 	unnamed: usize,
@@ -5042,27 +5072,33 @@ struct Requested {
 }
 
 impl Requested {
+	#[cfg(test)]
 	fn new(ranges: impl IntoIterator<Item = (u64, crate::track::Range)>) -> Self {
 		let mut requested = Self::default();
 		for (id, range) in ranges {
-			requested.insert(id, range);
+			requested.insert(id, range, None);
 		}
 		requested
 	}
 
-	fn insert(&mut self, id: u64, range: crate::track::Range) {
+	/// Hold `range` under Range ID `id`, a live join `placed` at that group.
+	fn insert(&mut self, id: u64, range: crate::track::Range, placed: Option<u64>) {
 		self.remove(id);
-		self.count(&range, 1);
+		if let Some(group) = placed {
+			self.placed.insert(id, group);
+		}
+		self.count(&range, placed, 1);
 		self.ranges.insert(id, range);
 	}
 
 	fn remove(&mut self, id: u64) {
 		if let Some(range) = self.ranges.remove(&id) {
-			self.count(&range, -1);
+			let placed = self.placed.remove(&id);
+			self.count(&range, placed, -1);
 		}
 	}
 
-	fn count(&mut self, range: &crate::track::Range, delta: isize) {
+	fn count(&mut self, range: &crate::track::Range, placed: Option<u64>, delta: isize) {
 		let tally = |counts: &mut std::collections::BTreeMap<u64, usize>, key: u64| {
 			let count = counts.entry(key).or_default();
 			*count = count.checked_add_signed(delta).expect("a counted range");
@@ -5077,7 +5113,7 @@ impl Requested {
 		if range.is_empty() {
 			return;
 		}
-		match range.time() {
+		match placed.or(range.time()) {
 			Some(start) => tally(&mut self.starts, start),
 			None => shift(&mut self.unnamed),
 		}
@@ -5435,7 +5471,7 @@ impl TrackRun {
 			unstarted: Default::default(),
 			unpinned,
 			bounded,
-			requested: Requested::new((0..).zip(bounds.ranges.iter().copied())),
+			requested: bounds.requested(0..),
 			frames: bounds.frames,
 			positions: bounds.positions,
 			refused: None,
@@ -5571,17 +5607,24 @@ impl TrackRun {
 		order: Order,
 	) -> bool {
 		let mut positions = Vec::new();
+		let mut placed = std::collections::BTreeMap::new();
 		let added: Vec<(u64, crate::track::Range)> = added
 			.into_iter()
 			.map(|(id, range)| {
 				let bounds = Bounds::new(std::slice::from_ref(&range), None);
 				positions.extend(bounds.positions.values().map(|position| (id, *position)));
+				placed.extend(bounds.placed.values().map(|group| (id, *group)));
 				(id, bounds.ranges[0])
 			})
 			.collect();
-		// A live join is never pinned (see [`due`]), so a retune replaces it as it stands.
+		// A live join is never pinned (see [`due`]), so a retune replaces it as it stands, one
+		// placed where it was placed.
 		let retuned: Vec<(u64, crate::track::Range)> = (retuned.into_iter())
-			.map(|(id, range)| (id, Bounds::new(std::slice::from_ref(&range), None).ranges[0]))
+			.map(|(id, range)| {
+				let bounds = Bounds::new(std::slice::from_ref(&range), None);
+				placed.extend(bounds.placed.values().map(|group| (id, *group)));
+				(id, bounds.ranges[0])
+			})
 			.collect();
 		for id in &retired {
 			self.unpinned.remove(*id);
@@ -5593,6 +5636,7 @@ impl TrackRun {
 		let edit = crate::track::Edit {
 			retire: retired.iter().copied().chain(replaced().map(|(id, _)| *id)).collect(),
 			add: replaced().chain(&added).copied().collect(),
+			placed: placed.clone(),
 			priority,
 			order,
 		};
@@ -5607,7 +5651,7 @@ impl TrackRun {
 			self.unstarted.remove(id);
 		}
 		for (id, range) in pins.into_iter().chain(retuned) {
-			self.requested.insert(id, range);
+			self.requested.insert(id, range, placed.get(&id).copied());
 		}
 		// Retired and replaced ranges take their frame starts with them.
 		let had = !self.positions.is_empty();
@@ -5615,11 +5659,12 @@ impl TrackRun {
 			self.positions.remove(id);
 		}
 		for (id, range) in added {
-			self.requested.insert(id, range);
+			self.requested.insert(id, range, placed.get(&id).copied());
 			self.unpinned.insert(id, due(&range, false));
+			// A live join already placed starts there as a time start does, answering no join.
 			if id >= self.initial {
-				self.unstarted
-					.insert(id, matches!(range.start, crate::track::Start::Live { .. }));
+				let joins = matches!(range.start, crate::track::Start::Live { .. }) && !placed.contains_key(&id);
+				self.unstarted.insert(id, joins);
 			}
 		}
 		self.positions.extend(positions);
@@ -5705,7 +5750,7 @@ impl TrackRun {
 		self.positions = (bounds.positions.iter())
 			.map(|(index, position)| (ids[*index as usize], *position))
 			.collect();
-		self.requested = Requested::new(ids.into_iter().zip(bounds.ranges.iter().copied()));
+		self.requested = bounds.requested(ids);
 		self.frames = bounds.frames;
 		true
 	}
@@ -7330,6 +7375,40 @@ mod serve_group_test {
 			Bounds::new(&time, None).ranges[0].start,
 			crate::track::Start::Time(1_000)
 		);
+	}
+
+	/// A placed live join starts at its position, frames included, with no lag to place it by,
+	/// and stays a live join under its max age.
+	#[test]
+	fn a_joined_start_is_a_placed_live_join() {
+		let max = Some(Duration::from_secs(1));
+		let joined = |frame| {
+			Bounds::new(
+				&[lite::Range {
+					start: Some(lite::Anchor::Joined {
+						at: track::Position { group: 5, frame },
+						max,
+					}),
+					end: None,
+				}],
+				None,
+			)
+		};
+		let placed = joined(3);
+		let groups = placed.groups();
+		assert_eq!(
+			groups.ranges,
+			[crate::track::Range::from(crate::track::Start::Live {
+				min: Duration::ZERO,
+				max
+			})]
+		);
+		assert_eq!(groups.placed, [(0, 5)].into());
+		assert_eq!(groups.start(), Some(5));
+		assert_eq!(placed.frames.start(5), 3);
+		assert_eq!(placed.requested(0..).start(), Some(5));
+		// Frame 0 is the whole group.
+		assert_eq!(joined(0).frames, Frames::default());
 	}
 
 	/// A wire without ranges means its start as the first group at or after it, so the
@@ -10193,6 +10272,56 @@ mod serve_group_test {
 			"group 1 is not served"
 		);
 		assert_eq!(drops(&mut writer, &log, version).await, [(1, 1)]);
+	}
+
+	/// A placed live join is served from where it was placed, not from where its lag would
+	/// place it, and its groups go stale under its max age as a live join's do: a late group
+	/// a history start would serve is dropped.
+	#[kio::test]
+	async fn lite07_a_joined_start_is_served_from_its_position_and_expires() {
+		let version = Version::Lite07;
+		let max = Some(Duration::from_secs(1));
+		// Placed at group 1000; a join with no lag would start at the latest, 3000. A time start
+		// there is history instead, whose groups never go stale.
+		let joined = lite::Anchor::Joined {
+			at: track::Position::group(1000),
+			max,
+		};
+		for (start, served) in [
+			(joined, vec![1000, 3000]),
+			(lite::Anchor::Time(1000), vec![1000, 2000, 3000]),
+		] {
+			let mut track = track::Producer::new(
+				Arc::new(broadcast::Info::default()),
+				"test",
+				crate::track::Info::timed(),
+			);
+			// A received copy, whose groups may land out of order.
+			track.received();
+			for key in [0, 1000, 3000] {
+				write_group(&mut track, key, key);
+			}
+			let bounds = Bounds::new(
+				&[lite::Range {
+					start: Some(start),
+					end: None,
+				}],
+				None,
+			);
+			let subscriber = track.subscribe(bounds.groups());
+			let session = Log::default();
+			let (run, mut writer, log) = lite07_run(SinkSession::new(session.clone()), subscriber);
+			let mut run = TrackRun::new(run.ctx, run.track, bounds, 0, run.steer_tx);
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			assert_eq!(run.start.resolved(), Some(1000), "{start:?}");
+			assert_eq!(drops(&mut writer, &log, version).await, [], "{start:?}");
+
+			// Group 2000's successor arrived a full max age ago, so it lands stale for a live join.
+			kio::clock::sim::advance(Duration::from_secs(2)).await;
+			write_group(&mut track, 2000, 2000);
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			assert_eq!(group_headers(&session, version), served, "{start:?}");
+		}
 	}
 
 	/// A group skipped for a missing head after SUBSCRIBE_START is dropped at once, not

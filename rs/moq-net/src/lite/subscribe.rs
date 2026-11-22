@@ -72,6 +72,14 @@ pub enum Anchor {
 		min: std::time::Duration,
 		max: Option<std::time::Duration>,
 	},
+	/// A live join already placed at this position, whose groups expire once they fall `max`
+	/// behind the live edge, as a [`Self::Live`] start's do. Its frame may be 0, the whole
+	/// group. A start only, lite07+ only: a route switch asking a new upstream for a join an
+	/// earlier one placed, which an older wire carries as the position.
+	Joined {
+		at: crate::track::Position,
+		max: Option<std::time::Duration>,
+	},
 }
 
 /// A span of a track, as the wire carries it.
@@ -263,7 +271,7 @@ fn encode_ranges(w: &mut Encoder<'_>, version: Version, ranges: &[Range]) -> Res
 		// A live join can't be carried, so it goes out as no start.
 		None | Some(Anchor::Live { .. }) => (None, 0),
 		Some(Anchor::Absolute(start)) => (Some(start.group), start.frame),
-		Some(Anchor::Time(_)) => return Err(EncodeError::Version),
+		Some(Anchor::Time(_) | Anchor::Joined { .. }) => return Err(EncodeError::Version),
 	};
 	let (end_group, end_frame) = match range.end {
 		None => (None, None),
@@ -274,7 +282,7 @@ fn encode_ranges(w: &mut Encoder<'_>, version: Version, ranges: &[Range]) -> Res
 			None => (Some(end.group.checked_sub(1).ok_or(EncodeError::InvalidState)?), None),
 		},
 		Some(Anchor::Time(_)) => return Err(EncodeError::Version),
-		Some(Anchor::Live { .. }) => return Err(EncodeError::InvalidState),
+		Some(Anchor::Live { .. } | Anchor::Joined { .. }) => return Err(EncodeError::InvalidState),
 	};
 	encode_start_group(w, version, start_group)?;
 	w.varint_opt(end_group)?;
@@ -327,7 +335,8 @@ pub(super) fn range_size(range: &Range, form: Form) -> Option<usize> {
 /// anchor, a start the max age places and the live edge as an end. Type 2, a position partway
 /// through a group, is a start only, so `end` refuses it, and so is one at frame 0, which type 1
 /// says. Type 3, a live join's lag in milliseconds then its max age in milliseconds plus one,
-/// zero for no limit, is a start only.
+/// zero for no limit, is a start only. So is type 4, a live join already placed: its group's
+/// start, a frame that may be 0, then its max age as type 3 carries it.
 fn decode_anchor(r: &mut Decoder<'_>, end: bool) -> Result<Option<Anchor>, DecodeError> {
 	Ok(match r.varint()? {
 		0 => None,
@@ -344,6 +353,13 @@ fn decode_anchor(r: &mut Decoder<'_>, end: bool) -> Result<Option<Anchor>, Decod
 			min: std::time::Duration::from_millis(r.varint()?),
 			max: r.varint_opt()?.map(std::time::Duration::from_millis),
 		}),
+		4 if !end => Some(Anchor::Joined {
+			at: crate::track::Position {
+				group: r.varint()?,
+				frame: r.varint()?,
+			},
+			max: r.varint_opt()?.map(std::time::Duration::from_millis),
+		}),
 		_ => return Err(DecodeError::InvalidValue),
 	})
 }
@@ -354,31 +370,31 @@ fn decode_anchor(r: &mut Decoder<'_>, end: bool) -> Result<Option<Anchor>, Decod
 /// is, and an exclusive end as the inclusive time just before it, an end at group 0 holding
 /// nothing a time can say. A start partway through a group goes out as a position, its
 /// group's start then the frame; an end there is refused, since FETCH reads a slice of a group.
-/// A live join goes out as its lag then its max age, each in milliseconds rounded up, and only
-/// as a start.
-fn wire_anchor(anchor: Option<Anchor>, end: bool) -> Result<(u64, [Option<u64>; 2]), EncodeError> {
+/// A live join goes out as its lag then its max age, each in milliseconds rounded up, and one
+/// already placed as its position then its max age, each only as a start.
+fn wire_anchor(anchor: Option<Anchor>, end: bool) -> Result<(u64, [Option<u64>; 3]), EncodeError> {
+	// Plus one, so zero says no limit.
+	let max_age =
+		|max: Option<std::time::Duration>| max.map_or(0, |max| crate::track::live_millis(max).saturating_add(1));
 	Ok(match anchor {
-		None => (0, [None, None]),
-		Some(Anchor::Time(time)) => (1, [Some(time), None]),
-		Some(Anchor::Live { .. }) if end => return Err(EncodeError::InvalidState),
-		Some(Anchor::Live { min, max }) => (
-			3,
-			[
-				Some(crate::track::live_millis(min)),
-				// Plus one, so zero says no limit.
-				Some(max.map_or(0, |max| crate::track::live_millis(max).saturating_add(1))),
-			],
-		),
+		None => (0, [None, None, None]),
+		Some(Anchor::Time(time)) => (1, [Some(time), None, None]),
+		Some(Anchor::Live { .. } | Anchor::Joined { .. }) if end => return Err(EncodeError::InvalidState),
+		Some(Anchor::Live { min, max }) => (3, [Some(crate::track::live_millis(min)), Some(max_age(max)), None]),
+		Some(Anchor::Joined { at, max }) => (4, [Some(at.group), Some(at.frame), Some(max_age(max))]),
 		Some(Anchor::Absolute(position)) if position.frame != 0 && end => return Err(EncodeError::Version),
-		Some(Anchor::Absolute(position)) if position.frame != 0 => (2, [Some(position.group), Some(position.frame)]),
+		Some(Anchor::Absolute(position)) if position.frame != 0 => {
+			(2, [Some(position.group), Some(position.frame), None])
+		}
 		Some(Anchor::Absolute(position)) if end => (
 			1,
 			[
 				Some(position.group.checked_sub(1).ok_or(EncodeError::InvalidState)?),
 				None,
+				None,
 			],
 		),
-		Some(Anchor::Absolute(position)) => (1, [Some(position.group), None]),
+		Some(Anchor::Absolute(position)) => (1, [Some(position.group), None, None]),
 	})
 }
 
@@ -1019,7 +1035,8 @@ impl LiveRanges {
 						return Err(DecodeError::InvalidValue);
 					}
 					let mut range = self.remove(id).ok_or(DecodeError::InvalidValue)?;
-					let Some(Anchor::Live { max: live, .. }) = &mut range.start else {
+					let Some(Anchor::Live { max: live, .. } | Anchor::Joined { max: live, .. }) = &mut range.start
+					else {
 						return Err(DecodeError::InvalidValue);
 					};
 					*live = max;
@@ -1118,16 +1135,15 @@ impl LiveRanges {
 		// A live join wanted again under another max age, its placement kept.
 		let mut retune = Vec::new();
 		remove.retain(|&id| {
-			let Some(Anchor::Live { min, .. }) = self.live[&id].start else {
-				return true;
-			};
 			let key = key_of(id);
-			let end = self.live[&id].end;
-			let found = added.iter().enumerate().find_map(|(index, (wanted_key, range))| match range.start {
-				Some(Anchor::Live { min: wanted, max }) if *wanted_key == key && wanted == min && range.end == end => {
-					Some((index, max))
-				}
-				_ => None,
+			let live = self.live[&id];
+			let found = added.iter().enumerate().find_map(|(index, (wanted_key, range))| {
+				let max = match (live.start, range.start) {
+					(Some(Anchor::Live { min, .. }), Some(Anchor::Live { min: wanted, max })) if wanted == min => max,
+					(Some(Anchor::Joined { at, .. }), Some(Anchor::Joined { at: wanted, max })) if wanted == at => max,
+					_ => return None,
+				};
+				(*wanted_key == key && range.end == live.end).then_some((index, max))
 			});
 			let Some((index, max)) = found else {
 				return true;
@@ -2148,10 +2164,10 @@ mod test {
 		));
 
 		// Type 2 was a relative anchor before lite-07 dropped it, and is a Position now, a
-		// start only; type 3 is Live, a start only; type 4 is assigned to nothing, as a start
-		// or an end. Each closes the session with a PROTOCOL_VIOLATION.
-		let starts = [4].map(|kind| (2, kind));
-		let ends = [2, 3, 4].map(|kind| (1, kind));
+		// start only; type 3 is Live and type 4 Joined, each a start only; type 5 is assigned
+		// to nothing, as a start or an end. Each closes the session with a PROTOCOL_VIOLATION.
+		let starts = [5].map(|kind| (2, kind));
+		let ends = [2, 3, 4, 5].map(|kind| (1, kind));
 		for (back, kind) in starts.into_iter().chain(ends) {
 			let mut buf = encode(&msg, version).unwrap();
 			let at = buf.len() - back;
@@ -2270,6 +2286,95 @@ mod test {
 			msg.ranges = vec![live(max)];
 			assert_eq!(roundtrip(&msg, Version::Lite07).ranges, vec![live(wire)], "{max:?}");
 		}
+	}
+
+	/// A placed live join rides as type 4: its group, a frame that may be 0, then its max age
+	/// as a live start carries it. Only a start, and only lite-07: an older wire refuses it for
+	/// the caller to carry as a position first.
+	#[test]
+	fn a_joined_start_roundtrips_on_lite07() {
+		let ms = std::time::Duration::from_millis;
+		let joined = |group, frame, max| Range {
+			start: Some(Anchor::Joined {
+				at: Position { group, frame },
+				max,
+			}),
+			end: Some(Anchor::Time(9_000)),
+		};
+		for (range, wire) in [
+			(joined(1_500, 0, None), joined(1_500, 0, None)),
+			(joined(1_500, 3, Some(ms(0))), joined(1_500, 3, Some(ms(0)))),
+			(joined(0, 7, Some(ms(250))), joined(0, 7, Some(ms(250)))),
+			(
+				joined(9, 1, Some(std::time::Duration::from_micros(1500))),
+				joined(9, 1, Some(ms(2))),
+			),
+		] {
+			let mut msg = subscribe_sample();
+			msg.ranges = vec![range];
+			assert_eq!(roundtrip(&msg, Version::Lite07).ranges, vec![wire], "{range:?}");
+		}
+
+		// The count, the type, group, frame, and max age plus one, then the end's type and time,
+		// 251 and 9000 each in two bytes.
+		let mut msg = subscribe_sample();
+		msg.ranges = vec![joined(5, 0, Some(ms(250)))];
+		let buf = encode(&msg, Version::Lite07).unwrap();
+		let tail = [1, 4, 5, 0, 0x80, 251, 1, 0xa3, 0x28];
+		assert_eq!(&buf[buf.len() - tail.len()..], tail);
+
+		// An end can't be a join, placed or not.
+		msg.ranges = vec![Range {
+			start: None,
+			end: joined(5, 0, None).start,
+		}];
+		assert!(matches!(encode(&msg, Version::Lite07), Err(EncodeError::InvalidState)));
+
+		msg.ranges = vec![Range {
+			start: joined(5, 1, None).start,
+			end: None,
+		}];
+		for version in [Version::Lite03, Version::Lite05, Version::Lite06] {
+			assert!(matches!(encode(&msg, version), Err(EncodeError::Version)), "{version}");
+		}
+	}
+
+	/// A placed join retunes its max age in place like a live one, kept where it was placed;
+	/// one placed elsewhere is another range.
+	#[test]
+	fn lite07_retunes_a_placed_join_in_place() {
+		let ms = std::time::Duration::from_millis;
+		let version = Version::Lite07;
+		let joined = |group, max| Range {
+			start: Some(Anchor::Joined {
+				at: Position { group, frame: 2 },
+				max,
+			}),
+			end: None,
+		};
+		let mut sent = LiveRanges::new(version, &[joined(5, Some(ms(500)))]);
+		let mut live_side = LiveRanges::new(version, &[joined(5, Some(ms(500)))]);
+		let edit = sent.edit(&[joined(5, None)]).unwrap();
+		assert_eq!(
+			edit,
+			RangeEdit::Edit {
+				remove: vec![],
+				add: vec![],
+				retune: vec![(0, None)],
+			}
+		);
+		live_side.apply(edit).unwrap();
+		assert_eq!(live_side.numbered(), vec![(0, joined(5, None))]);
+
+		let edit = sent.edit(&[joined(6, None)]).unwrap();
+		assert_eq!(
+			edit,
+			RangeEdit::Edit {
+				remove: vec![0],
+				add: vec![joined(6, None)],
+				retune: vec![],
+			}
+		);
 	}
 
 	/// An update retunes a live join wanted under another max age alone in place, keeping its

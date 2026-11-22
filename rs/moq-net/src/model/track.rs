@@ -23,7 +23,9 @@ use super::record::{Pending, Record, Report};
 use crate::ledger::{self, Ledger};
 
 pub(crate) use super::subscription::Resolved;
-use super::subscription::{Accounted, Budget, Containing, Cover, Found, Holdings, Join, Unplaced, Window, minus};
+use super::subscription::{
+	Accounted, Budget, Containing, Cover, Found, Holdings, Join, Joining, Unplaced, Window, minus,
+};
 pub use super::subscription::{Order, Position, Range, Start, Subscription};
 use super::subscription;
 pub(crate) use super::subscription::{JoinAsk, live_millis};
@@ -9341,8 +9343,8 @@ enum Change {
 
 /// The join tick each live join range in `prefs` keyed `keys` was added at: see
 /// [`demand::Prefs::since`].
-fn since_of(prefs: &demand::Prefs, keys: impl IntoIterator<Item = u64>) -> BTreeMap<u64, u64> {
-	keys.into_iter().map(|key| (key, prefs.since(key))).collect()
+fn since_of(prefs: &demand::Prefs, keys: impl IntoIterator<Item = u64>) -> BTreeMap<u64, Joining> {
+	keys.into_iter().map(|key| (key, prefs.joining(key))).collect()
 }
 
 /// A cursor's own ranges, resolved, and what keeps them current.
@@ -9385,7 +9387,7 @@ impl Cursor {
 			let since = since_of(&preferences, preferences.ranges().map(|(key, _)| key));
 			let window = Window::keyed_since(
 				preferences.ranges(),
-				|key| since.get(&key).copied().unwrap_or(0),
+				|key| since.get(&key).copied().unwrap_or_default(),
 				state.latest_live(),
 				&*state,
 			);
@@ -9614,7 +9616,7 @@ impl Cursor {
 		let holdings = &*state;
 		let moved = match changed {
 			Some((revision, change, since)) => {
-				let since = |key: u64| since.get(&key).copied().unwrap_or(0);
+				let since = |key: u64| since.get(&key).copied().unwrap_or_default();
 				self.filter.resolved = revision;
 				match change {
 					Change::Edit(changes) => {
@@ -11030,7 +11032,7 @@ impl Republish {
 			return;
 		}
 		let state = self.state.read();
-		let since = |key: u64| since.get(&key).copied().unwrap_or(0);
+		let since = |key: u64| since.get(&key).copied().unwrap_or_default();
 		let window = Window::keyed_since(ranges, since, state.latest_live(), &*state);
 		drop(state);
 		let runs = Servable::of(&window, &Arc::default());
@@ -11901,7 +11903,11 @@ impl Subscriber {
 				let tick = demand::join_tick();
 				let state = cursor.state.read();
 				let ranges = (0..).zip(subscription.ranges.iter().copied());
-				Window::keyed_since(ranges, |_| tick, state.latest_live(), &*state).resolved()
+				let joining = |key| match subscription.placed.get(&key) {
+					Some(group) => Joining::At(*group),
+					None => Joining::Since(tick),
+				};
+				Window::keyed_since(ranges, joining, state.latest_live(), &*state).resolved()
 			}
 			Inner::Resume(..) => Vec::new(),
 		}
@@ -17730,6 +17736,7 @@ mod test {
 		let added = demand::join_tick();
 		producer.answer_join(lag, None, Some(9));
 		let edit = Edit {
+			placed: Default::default(),
 			retire: Vec::new(),
 			add: vec![(1, Range::from(Start::Live { min: lag, max: None }))],
 			priority: 0,
@@ -29622,6 +29629,7 @@ mod test {
 			live.extend(add.iter().copied());
 			edited
 				.edit(Edit {
+					placed: Default::default(),
 					retire,
 					add,
 					priority: 0,

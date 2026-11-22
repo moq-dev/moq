@@ -8364,6 +8364,53 @@ mod tests {
 		assert_eq!(wire_ranges(&Subscription::default()), Some(vec![lite::Range::OPEN]));
 	}
 
+	/// A live join already placed goes out as `Joined`, from the frame a switch resumes at,
+	/// on lite-07, and as a start at its group on a wire without ranges, whose one max age
+	/// still takes its `max`.
+	#[test]
+	fn a_placed_join_goes_out_joined() {
+		let max = Some(Duration::from_secs(2));
+		let join = track::Range::from(crate::track::Start::Live {
+			min: Duration::from_millis(40),
+			max,
+		});
+		let mut placed = Subscription {
+			ranges: vec![join, join],
+			placed: [(1, 5)].into(),
+			..Default::default()
+		};
+		let joined = |frame| lite::Range {
+			start: Some(lite::Anchor::Joined {
+				at: Position { group: 5, frame },
+				max,
+			}),
+			end: None,
+		};
+		let live = lite::Range {
+			start: Some(lite::Anchor::Live {
+				min: Duration::from_millis(40),
+				max,
+			}),
+			end: None,
+		};
+		assert_eq!(wire_ranges(&placed), Some(vec![live, joined(0)]));
+		placed.resume = Some(Position::new(5, 2));
+		assert_eq!(wire_ranges(&placed), Some(vec![live, joined(2)]));
+
+		placed.ranges.remove(0);
+		placed.placed = [(0, 5)].into();
+		assert_eq!(placed.max_age(), max);
+		let span = wire_span(placed);
+		assert_eq!((span.start(), span.end()), (Some(5), None));
+		assert_eq!(
+			wire_ranges(&span),
+			Some(vec![lite::Range {
+				start: Some(lite::Anchor::Absolute(Position::new(5, 2))),
+				end: None,
+			}])
+		);
+	}
+
 	/// A wire without ranges asks from group 0 when no single start covers both a range
 	/// with no start and one with a start.
 	#[test]
@@ -10279,7 +10326,9 @@ mod tests {
 /// A group ID is the group's start, so a time anchor goes out as the group ID it names,
 /// on every version: a time start as the start, from the frame it resumes at (see
 /// [`Subscription::resume`]), and a time end as the exclusive group past it, which lite-07
-/// carries as the inclusive time again (see [`lite::Anchor::Absolute`]).
+/// carries as the inclusive time again (see [`lite::Anchor::Absolute`]). A placed live join
+/// goes out as [`lite::Anchor::Joined`] from the frame it resumes at too, which only lite-07
+/// carries: the narrowing below makes it a time start first on an older wire.
 /// `None` when nothing is left to ask for, which no wire can say. The caller narrows a
 /// subscription for a wire without ranges to the one span it carries first (see
 /// [`wire_span`]).
@@ -10288,20 +10337,26 @@ mod tests {
 /// between two groups misses the one containing it there.
 fn wire_ranges(subscription: &Subscription) -> Option<Vec<lite::Range>> {
 	let mut ranges = Vec::with_capacity(subscription.ranges.len());
-	for range in &subscription.ranges {
+	// A switch resumes the group it starts at past the frames the readers hold.
+	let resumed = |group| match subscription.resume {
+		Some(resume) if resume.group == group => resume,
+		_ => Position::group(group),
+	};
+	for (index, range) in (0..).zip(&subscription.ranges) {
 		if range.is_empty() {
 			continue;
 		}
-		// A switch resumes the group it starts at past the frames the readers hold. One from the
-		// oldest group goes upstream with no start, for the max age to place there, and a live
-		// join as itself, for the upstream to place behind its own live edge.
-		let start = match range.start {
-			track::Start::Oldest => None,
-			track::Start::Live { min, max } => Some(lite::Anchor::Live { min, max }),
-			track::Start::Time(time) => Some(lite::Anchor::Absolute(match subscription.resume {
-				Some(resume) if resume.group == time => resume,
-				_ => Position::group(time),
-			})),
+		// One from the oldest group goes upstream with no start, for the max age to place there,
+		// and a live join as itself, for the upstream to place behind its own live edge, or
+		// where it was already placed.
+		let start = match (range.start, subscription.placed.get(&index)) {
+			(track::Start::Live { max, .. }, Some(group)) => Some(lite::Anchor::Joined {
+				at: resumed(*group),
+				max,
+			}),
+			(track::Start::Oldest, _) => None,
+			(track::Start::Live { min, max }, None) => Some(lite::Anchor::Live { min, max }),
+			(track::Start::Time(time), _) => Some(lite::Anchor::Absolute(resumed(time))),
 		};
 		let end = range
 			.end
@@ -10322,7 +10377,7 @@ fn wire_ranges(subscription: &Subscription) -> Option<Vec<lite::Range>> {
 fn wire_span(subscription: Subscription) -> Subscription {
 	let start = match subscription.start() {
 		Some(start) => Some(start),
-		None if subscription.ranges.iter().any(|range| range.time().is_some()) => Some(0),
+		None if subscription.times().any(|(_, time)| time.is_some()) => Some(0),
 		None => None,
 	};
 	subscription.with_start(start)
@@ -10446,7 +10501,7 @@ impl SubStream {
 				continue;
 			};
 			let asked = match range.start {
-				Some(lite::Anchor::Absolute(time)) => time.group,
+				Some(lite::Anchor::Absolute(time) | lite::Anchor::Joined { at: time, .. }) => time.group,
 				None => 0,
 				Some(lite::Anchor::Live { min, .. }) => {
 					// Recorded once, as it arrives: a reader that began waiting since takes only a
@@ -10465,7 +10520,7 @@ impl SubStream {
 				Some(lite::Anchor::Absolute(end)) if end.frame == 0 => end.group > asked,
 				Some(lite::Anchor::Absolute(end)) => end.group >= asked,
 				Some(lite::Anchor::Time(end)) => end >= asked,
-				Some(lite::Anchor::Live { .. }) | None => false,
+				Some(lite::Anchor::Live { .. } | lite::Anchor::Joined { .. }) | None => false,
 			};
 			// One with no group to deliver says nothing of its time unless it reaches it.
 			if start.is_some() || reaches {
@@ -10758,7 +10813,9 @@ fn wire_join(range: &lite::Range) -> Option<(Duration, Option<u64>)> {
 fn narrowest(live: &lite::LiveRanges) -> Duration {
 	(live.iter())
 		.filter_map(|(_, range)| match range.start {
-			Some(lite::Anchor::Live { max, .. }) => Some(max.unwrap_or(Duration::MAX)),
+			Some(lite::Anchor::Live { max, .. } | lite::Anchor::Joined { max, .. }) => {
+				Some(max.unwrap_or(Duration::MAX))
+			}
 			_ => None,
 		})
 		.min()
@@ -10772,7 +10829,7 @@ fn through(end: Option<lite::Anchor>) -> Option<u64> {
 		lite::Anchor::Absolute(end) if end.frame == 0 => end.group.checked_sub(1),
 		lite::Anchor::Absolute(end) => Some(end.group),
 		lite::Anchor::Time(end) => Some(end),
-		lite::Anchor::Live { .. } => None,
+		lite::Anchor::Live { .. } | lite::Anchor::Joined { .. } => None,
 	}
 }
 

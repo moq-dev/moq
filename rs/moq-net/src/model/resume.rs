@@ -59,7 +59,7 @@ use crate::{Error, Result, StreamError, group, stats, track};
 use super::delivered::Delivered;
 use super::idle::{Idle, Walk};
 use super::subscription::{
-	Accounted, Budget, Containing, Cover, Holdings, Position, Resolved, Subscription, Unheld, Window,
+	Accounted, Budget, Containing, Cover, Holdings, Joining, Position, Resolved, Subscription, Unheld, Window,
 };
 use crate::ledger;
 
@@ -216,11 +216,17 @@ impl Producer {
 			// Ranges and resume under one lock, so a reader moving on between them cannot ask
 			// a range from one group and resume past another.
 			let mut reader = reader.lock().unwrap_or_else(PoisonError::into_inner);
-			let preferences: Vec<_> = reader.subscription.read().ranges().collect();
-			ranges.extend(reader.resumed(&preferences).into_iter().map(|(_, range)| range));
+			let preferences: Vec<_> = {
+				let current = reader.subscription.read();
+				current
+					.ranges()
+					.map(|(key, range)| (key, (range, current.placed(key))))
+					.collect()
+			};
+			ranges.extend(reader.resumed(&preferences).into_iter().map(|(_, asked)| asked));
 			resume.add(&reader);
 		}
-		demand.ranges = ranges;
+		(demand.ranges, demand.placed) = split(ranges);
 		let resume = resume.lowest();
 		demand.resume = resume.as_ref().map(|(resume, _)| *resume);
 		(demand, resume.map(|(_, head)| head))
@@ -256,7 +262,7 @@ impl Producer {
 					ranges.extend(
 						fold.fold_locked(reader, &mut locked, None)
 							.into_iter()
-							.map(|(_, range)| range),
+							.map(|(_, asked)| asked),
 					);
 					resume.add(&locked);
 				}
@@ -267,9 +273,11 @@ impl Producer {
 					held.sub.lend_head(resume.group, head.clone());
 				}
 				let resume = resume.map(|(resume, _)| resume);
+				let (ranges, placed) = split(ranges);
 				let _ = held.sub.update(Subscription {
 					ranges,
 					resume,
+					placed,
 					..terms
 				});
 				let keyed = held
@@ -296,7 +304,12 @@ impl Producer {
 			seen.insert(Arc::as_ptr(reader) as usize);
 			let (retire, add) = fold.refold(reader);
 			edit.retire.extend(retire);
-			edit.add.extend(add);
+			for (key, (range, placed)) in add {
+				edit.add.push((key, range));
+				if let Some(group) = placed {
+					edit.placed.insert(key, group);
+				}
+			}
 		}
 		// Readers that left take their ranges with them.
 		fold.readers.retain(|id, folded| {
@@ -564,11 +577,11 @@ impl Consumer {
 			// Only the ranges: the first sync mirrors the scalars, before it asks any copy.
 			let mut mirrored = Mirrored::default();
 			for (key, range) in prefs.ranges() {
-				mirrored.insert(key, range, prefs.since(key));
+				mirrored.insert(key, range, prefs.joining(key));
 			}
 			(mirrored, prefs.revision)
 		};
-		let window = keyed(mirrored.ranges.iter().map(|(key, range)| (*key, *range)), &Unheld);
+		let window = mirrored_window(&mirrored);
 		let reader = Arc::new_cyclic(|this| {
 			Mutex::new(Reader {
 				this: this.clone(),
@@ -794,9 +807,7 @@ impl Copy {
 		}
 		// Each live join as the reader added it, so an answer the copy recorded since places
 		// it, even one recorded before this subscription.
-		let _ = pending
-			.preferences()
-			.stamp(reader.since.iter().map(|(key, since)| (*key, *since)));
+		let _ = pending.preferences().stamp(reader.stamps());
 		Sub::Pending(Box::new(pending))
 	}
 
@@ -863,7 +874,10 @@ impl Copy {
 		// copy's window places it: rekeying below carries it to the reader's own keys.
 		let since = (0..)
 			.zip(reader.ranges.keys())
-			.filter_map(|(position, key)| Some((position, *reader.since.get(key)?)));
+			.filter_map(|(position, key)| match reader.joining.get(key)? {
+				Joining::Since(since) => Some((position, *since)),
+				Joining::At(_) => None,
+			});
 		let _ = match &mut self.sub {
 			Sub::Pending(pending) => pending.update(wire).and_then(|_| pending.preferences().stamp(since)),
 			Sub::Ready(sub) => sub.update_stamped(wire, since),
@@ -908,15 +922,14 @@ impl Copy {
 
 	/// The range keyed `key` as this copy is asked for it: the reader's own, from no earlier
 	/// than where it was asked to start, and through no later than where it was replaced.
-	fn wire(&self, reader: &Mirrored, key: u64) -> Option<track::Range> {
-		let range = reader.ranges.get(&key)?;
-		Some(range.asked(self.floor, self.end(), self.resolved.get(&key).copied()))
+	fn wire(&self, reader: &Mirrored, key: u64) -> Option<AskedRange> {
+		reader.asked(key, self.floor, self.end(), self.resolved.get(&key).copied())
 	}
 
 	/// Ask for the reader's current priority, delay, and order, and for the ranges keyed in
 	/// `keys` as [`Self::wire`] has them, answered or not: an edit of the ranges that moved.
 	fn send(&mut self, reader: &Mirrored, keys: impl IntoIterator<Item = u64>) {
-		let (mut retire, mut add) = (Vec::new(), Vec::new());
+		let (mut retire, mut add, mut placed) = (Vec::new(), Vec::new(), BTreeMap::new());
 		{
 			let held = self.preferences().read();
 			// A feed an edit can't carry is asked whole, which keys the ranges by position.
@@ -926,11 +939,14 @@ impl Copy {
 			}
 			for key in keys {
 				let wire = self.wire(reader, key);
-				if wire == held.range(key) {
+				if wire == held.range(key).map(|range| (range, held.placed(key))) {
 					continue;
 				}
 				match wire {
-					Some(range) => add.push((key, range)),
+					Some((range, group)) => {
+						add.push((key, range));
+						placed.extend(group.map(|group| (key, group)));
+					}
 					None => retire.push(key),
 				}
 			}
@@ -938,12 +954,13 @@ impl Copy {
 		let edit = track::Edit {
 			retire,
 			add,
+			placed,
 			priority: reader.priority,
 			order: reader.order,
 		};
 		// Each live join as the reader added it, noted before the copy's window places it, so
 		// an answer the copy recorded since places it.
-		let since = reader.since.iter().map(|(key, since)| (*key, *since));
+		let since = reader.stamps();
 		let _ = match &mut self.sub {
 			Sub::Pending(pending) => pending
 				.preferences()
@@ -1584,7 +1601,7 @@ struct Folded {
 impl Fold {
 	/// Fold in every range of `reader`, or the ranges keyed `keys` it still holds, returning
 	/// each under the held key it now has.
-	fn fold(&mut self, reader: &Arc<Mutex<Reader>>, keys: Option<BTreeSet<u64>>) -> Vec<(u64, track::Range)> {
+	fn fold(&mut self, reader: &Arc<Mutex<Reader>>, keys: Option<BTreeSet<u64>>) -> Vec<(u64, AskedRange)> {
 		let mut locked = reader.lock().unwrap_or_else(PoisonError::into_inner);
 		self.fold_locked(reader, &mut locked, keys)
 	}
@@ -1595,15 +1612,18 @@ impl Fold {
 		reader: &Arc<Mutex<Reader>>,
 		locked: &mut Reader,
 		keys: Option<BTreeSet<u64>>,
-	) -> Vec<(u64, track::Range)> {
+	) -> Vec<(u64, AskedRange)> {
 		let (preferences, revision) = {
 			let current = locked.subscription.read();
 			let preferences: Vec<_> = match &keys {
 				Some(keys) => keys
 					.iter()
-					.filter_map(|key| Some((*key, current.range(*key)?)))
+					.filter_map(|key| Some((*key, (current.range(*key)?, current.placed(*key)))))
 					.collect(),
-				None => current.ranges().collect(),
+				None => current
+					.ranges()
+					.map(|(key, range)| (key, (range, current.placed(key))))
+					.collect(),
 			};
 			(preferences, current.revision)
 		};
@@ -1630,7 +1650,7 @@ impl Fold {
 
 	/// What `reader` changed since it was last folded in: the held keys of the ranges it
 	/// retired or replaced, and the ranges it added, under new held keys.
-	fn refold(&mut self, reader: &Arc<Mutex<Reader>>) -> (Vec<u64>, Vec<(u64, track::Range)>) {
+	fn refold(&mut self, reader: &Arc<Mutex<Reader>>) -> (Vec<u64>, Vec<(u64, AskedRange)>) {
 		let id = Arc::as_ptr(reader) as usize;
 		let Some(folded) = self.readers.get_mut(&id) else {
 			return (Vec::new(), self.fold(reader, None));
@@ -1659,23 +1679,48 @@ struct Mirrored {
 	order: track::Order,
 	feed: bool,
 	ranges: BTreeMap<u64, track::Range>,
-	/// The join tick each live join range was added at in the reader's own preferences, which
-	/// each copy asked for it places it from: an answer the copy recorded since then.
-	since: BTreeMap<u64, u64>,
+	/// How each live join range is placed in the reader's own preferences: at the group it was
+	/// already placed at, which each copy is asked to place it at too, or from the join tick it
+	/// was added at, which each copy asked for it places it from: an answer the copy recorded
+	/// since then.
+	joining: BTreeMap<u64, Joining>,
 }
 
 impl Mirrored {
-	fn insert(&mut self, key: u64, range: track::Range, since: u64) {
+	fn insert(&mut self, key: u64, range: track::Range, joining: Joining) {
 		self.ranges.insert(key, range);
 		match range.join() {
-			Some(_) => _ = self.since.insert(key, since),
-			None => _ = self.since.remove(&key),
+			Some(_) => _ = self.joining.insert(key, joining),
+			None => _ = self.joining.remove(&key),
 		}
 	}
 
 	fn remove(&mut self, key: u64) {
 		self.ranges.remove(&key);
-		self.since.remove(&key);
+		self.joining.remove(&key);
+	}
+
+	/// The join tick each live join not yet placed was added at, by key: see
+	/// [`track::Preferences::stamp`].
+	fn stamps(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
+		self.joining.iter().filter_map(|(key, joining)| match joining {
+			Joining::Since(since) => Some((*key, *since)),
+			Joining::At(_) => None,
+		})
+	}
+
+	/// The group the range keyed `key` was already placed at, if it was.
+	fn placed(&self, key: u64) -> Option<u64> {
+		match self.joining.get(&key)? {
+			Joining::At(group) => Some(*group),
+			Joining::Since(_) => None,
+		}
+	}
+
+	/// The range keyed `key` as a copy asked from `floor` through the exclusive `end` asks for
+	/// it, where `resolved` places it: see [`asked`].
+	fn asked(&self, key: u64, floor: Option<u64>, end: Option<u64>, resolved: Option<Resolved>) -> Option<AskedRange> {
+		Some(asked(self.ranges.get(&key)?, self.placed(key), floor, end, resolved))
 	}
 
 	/// The widest budget any group gets: none while a history range is asked for, else the
@@ -1692,6 +1737,7 @@ impl Mirrored {
 			order: self.order,
 			feed: self.feed,
 			resume: None,
+			placed: BTreeMap::new(),
 			asks: Vec::new(),
 			joins: Vec::new(),
 		}
@@ -1705,13 +1751,50 @@ impl Mirrored {
 	/// [`Self::subscription`] from no earlier than `floor` and through no later than the
 	/// exclusive `end`, each range asked where `resolved` places it; see [`track::Range::asked`].
 	fn wire(&self, floor: Option<u64>, end: Option<u64>, resolved: &BTreeMap<u64, Resolved>) -> Subscription {
-		self.with_ranges(
-			self.ranges
-				.iter()
-				.map(|(key, range)| range.asked(floor, end, resolved.get(key).copied()))
-				.collect(),
-		)
+		let (ranges, placed) =
+			split((self.ranges.keys()).filter_map(|key| self.asked(*key, floor, end, resolved.get(key).copied())));
+		Subscription {
+			placed,
+			..self.with_ranges(ranges)
+		}
 	}
+}
+
+/// A range as a copy is asked for it, with the group a live join was placed at: see
+/// [`track::Range::asked`].
+type AskedRange = (track::Range, Option<u64>);
+
+/// `range`, a live join `placed` at that group if it was, as a copy asked from `floor`
+/// through the exclusive `end` asks for it, where `resolved` places it: a placed join starts
+/// no earlier than where it was placed, and stays placed whatever the bounds.
+fn asked(
+	range: &track::Range,
+	placed: Option<u64>,
+	floor: Option<u64>,
+	end: Option<u64>,
+	resolved: Option<Resolved>,
+) -> AskedRange {
+	let Some(group) = placed else {
+		return range.asked(floor, end, resolved);
+	};
+	let resolved = resolved.unwrap_or(Resolved {
+		start: group,
+		end: None,
+		floored: true,
+	});
+	range.asked(floor.max(Some(group)), end, Some(resolved))
+}
+
+/// `asked` as a subscription's ranges, and where each live join among them was placed, by
+/// its index: see [`Subscription::placed`].
+fn split(asked: impl IntoIterator<Item = AskedRange>) -> (Vec<track::Range>, BTreeMap<u64, u64>) {
+	let mut ranges = Vec::new();
+	let mut placed = BTreeMap::new();
+	for (range, group) in asked {
+		placed.extend(group.map(|group| (ranges.len() as u64, group)));
+		ranges.push(range);
+	}
+	(ranges, placed)
 }
 
 #[cfg(test)]
@@ -1725,7 +1808,7 @@ impl Mirrored {
 			..Default::default()
 		};
 		for (key, range) in (0..).zip(&subscription.ranges) {
-			mirrored.insert(key, *range, 0);
+			mirrored.insert(key, *range, Joining::default());
 		}
 		mirrored
 	}
@@ -1836,7 +1919,7 @@ impl Reader {
 	/// The ranges in `preferences`, from the reader's own, each as a new copy is asked for
 	/// it: from the boundary a switch splits at, its anchors where the serving copy placed
 	/// them.
-	fn resumed(&mut self, preferences: &[(u64, track::Range)]) -> Vec<(u64, track::Range)> {
+	fn resumed(&mut self, preferences: &[(u64, AskedRange)]) -> Vec<(u64, AskedRange)> {
 		let revision = self.subscription.read().revision;
 		// Whether the reader mirrored these ranges, and so its copies resolved them.
 		let current = revision == self.revision;
@@ -1859,10 +1942,14 @@ impl Reader {
 			}) if current => sub.resolved_ranges(keys),
 			Some(Copy {
 				sub: Sub::Ready(sub), ..
-			}) => sub.resolve_ranges(&Subscription {
-				ranges: preferences.iter().map(|(_, range)| *range).collect(),
-				..Default::default()
-			}),
+			}) => {
+				let (ranges, placed) = split(preferences.iter().map(|(_, asked)| *asked));
+				sub.resolve_ranges(&Subscription {
+					ranges,
+					placed,
+					..Default::default()
+				})
+			}
 			Some(copy) if current => keys.map(|key| copy.resolved.get(&key).copied()).collect(),
 			_ => Vec::new(),
 		};
@@ -1874,7 +1961,8 @@ impl Reader {
 			.enumerate()
 			.map(|(index, (key, range))| {
 				let resolved = resolved.get(index).copied().flatten();
-				(*key, range.asked(floor, None, resolved))
+				let (range, placed) = range;
+				(*key, asked(range, *placed, floor, None, resolved))
 			})
 			.collect()
 	}
@@ -2020,11 +2108,11 @@ impl Reader {
 				let ranges = match sub.changes(revision) {
 					Some(keys) => Ok(keys
 						.into_iter()
-						.map(|key| (key, sub.range(key).map(|range| (range, sub.since(key)))))
+						.map(|key| (key, sub.range(key).map(|range| (range, sub.joining(key)))))
 						.collect::<Vec<_>>()),
 					None => Err(sub
 						.ranges()
-						.map(|(key, range)| (key, (range, sub.since(key))))
+						.map(|(key, range)| (key, (range, sub.joining(key))))
 						.collect::<BTreeMap<_, _>>()),
 				};
 				changed = Some((scalars, Some(ranges), sub.revision));
@@ -2050,8 +2138,14 @@ impl Reader {
 						.iter()
 						.filter_map(|(key, range)| Some((*key, (*range)?.0)))
 						.collect();
-					self.window
-						.edit(edited.iter().map(|(key, _)| *key), &added, None, &Unheld);
+					let joining = &self.mirrored.joining;
+					self.window.edit_since(
+						edited.iter().map(|(key, _)| *key),
+						&added,
+						|key| joining.get(&key).copied().unwrap_or_default(),
+						None,
+						&Unheld,
+					);
 					// A retired range has nothing left to backfill, so a peer that keeps retiring
 					// and adding ranges before the floor resolves holds only its live ones here.
 					if let Some(Resumed::Ranges(keys)) = &mut self.resumed {
@@ -2085,21 +2179,21 @@ impl Reader {
 						&& (ranges.iter())
 							.filter(|(_, (range, _))| range.join().is_some())
 							.map(|(key, (_, since))| (key, since))
-							.eq(&self.mirrored.since) =>
+							.eq(&self.mirrored.joining) =>
 				{
 					Change::Scalars
 				}
 				Some(Err(ranges)) => {
 					let mut mirrored = Mirrored {
 						ranges: BTreeMap::new(),
-						since: BTreeMap::new(),
+						joining: BTreeMap::new(),
 						..std::mem::take(&mut self.mirrored)
 					};
 					for (key, (range, since)) in ranges {
 						mirrored.insert(key, range, since);
 					}
 					self.mirrored = mirrored;
-					self.window = keyed(self.mirrored.ranges.iter().map(|(key, range)| (*key, *range)), &Unheld);
+					self.window = mirrored_window(&self.mirrored);
 					// The serving copy's resume point may cut off groups the new ranges cover,
 					// judged by the reader's window.
 					self.resumed = Some(Resumed::Ranges(self.mirrored.ranges.keys().copied().collect()));
@@ -3985,9 +4079,11 @@ impl kio::Task for Fetching {
 	}
 }
 
-/// A window over `ranges`, each under its key.
-fn keyed(ranges: impl IntoIterator<Item = (u64, track::Range)>, holdings: &impl Holdings) -> Window {
-	Window::keyed(ranges, None, holdings)
+/// A window over the reader's ranges, each under its key, a live join already placed there.
+fn mirrored_window(reader: &Mirrored) -> Window {
+	let ranges = reader.ranges.iter().map(|(key, range)| (*key, *range));
+	let joining = |key| reader.joining.get(&key).copied().unwrap_or_default();
+	Window::keyed_since(ranges, joining, None, &Unheld)
 }
 
 #[cfg(test)]
@@ -4771,6 +4867,36 @@ mod test {
 			crate::track::Start::Time(66),
 			"not inside group 64"
 		);
+		assert_eq!(asked.resume, Some(Position::new(66, 1)));
+	}
+
+	/// A switch asks the next copy for a live join the serving copy placed as that join,
+	/// placed at the boundary past the frames held, so its groups still go stale past its
+	/// `max` there and nothing below the boundary is asked again.
+	#[test]
+	fn a_switch_asks_a_placed_live_join_with_its_max() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let first = received_copy();
+		routes.serve(first.consume());
+		write(&first, 64);
+		let mut live = subscribe(&logical, HOUR);
+		assert_eq!(recv(&mut live).start, 64);
+		write(&first, 66);
+		let _ = live.poll_recv_group(&kio::Waiter::noop());
+
+		let next = received_copy();
+		routes.serve(next.consume());
+		// The copy's aggregate, where a placed join's lag places nothing.
+		let asked = next.subscription().unwrap();
+		let placed = track::Start::Live {
+			min: Duration::ZERO,
+			max: Some(HOUR),
+		};
+		assert_eq!(asked.ranges, [track::Range::from(placed)]);
+		assert_eq!(asked.placed, [(0, 66)].into());
+		assert_eq!(asked.start(), Some(66));
+		assert_eq!(asked.max_age(), Some(HOUR));
 		assert_eq!(asked.resume, Some(Position::new(66, 1)));
 	}
 
@@ -7812,6 +7938,7 @@ mod test {
 		assert_eq!(copies(&routes), 1, "the replaced copy is let go");
 
 		sub.edit(track::Edit {
+			placed: Default::default(),
 			retire: Vec::new(),
 			add: vec![(
 				1,
@@ -7858,6 +7985,7 @@ mod test {
 		assert_eq!(drain(&mut sub, false), [8]);
 
 		sub.edit(track::Edit {
+			placed: Default::default(),
 			retire: Vec::new(),
 			add: vec![(
 				1,
@@ -7903,6 +8031,7 @@ mod test {
 		assert_eq!(drain(&mut sub, false), [8]);
 
 		sub.edit(track::Edit {
+			placed: Default::default(),
 			retire: Vec::new(),
 			add: vec![(
 				1,
@@ -7969,6 +8098,7 @@ mod test {
 			end: None,
 		};
 		let edit = |retire: u64, add: (u64, track::Range)| track::Edit {
+			placed: Default::default(),
 			retire: vec![retire],
 			add: vec![add],
 			priority: 0,
@@ -9756,6 +9886,7 @@ mod test {
 			edited
 				.subscription()
 				.edit(track::Edit {
+					placed: Default::default(),
 					retire,
 					add,
 					priority: 0,
@@ -9781,7 +9912,7 @@ mod test {
 					);
 					for key in keys {
 						assert_eq!(
-							held.range(key),
+							held.range(key).map(|range| (range, held.placed(key))),
 							copy.wire(&reader.mirrored, key),
 							"step {step}, key {key}"
 						);
@@ -9908,6 +10039,7 @@ mod test {
 		let revision = held.sub.preferences().read().revision;
 		holder
 			.edit(track::Edit {
+				placed: Default::default(),
 				retire: Vec::new(),
 				add: vec![(
 					1,
@@ -9931,6 +10063,7 @@ mod test {
 		// a whole ask carries then keys the same ranges by position again.
 		holder
 			.edit(track::Edit {
+				placed: Default::default(),
 				retire: vec![0],
 				add: Vec::new(),
 				priority: 0,
@@ -10004,6 +10137,7 @@ mod test {
 						})
 						.collect();
 					sub.edit(track::Edit {
+						placed: Default::default(),
 						retire,
 						add,
 						priority: rng.random_range(0..3),
