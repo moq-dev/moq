@@ -629,7 +629,7 @@ build_cargo() {
         [[ -n "$MOQ" ]] || MOQ="$TARGET_BASE/$PROFILE/moq"
     fi
     if needs c && have_c; then packages+=(libmoq); fi
-    if needs gst && have_gst; then packages+=(moq-gst); fi
+    if needs gst && [[ -z "$(gst_missing)" ]]; then packages+=(moq-gst); fi
     if [[ ${#packages[@]} -gt 0 ]]; then
         echo "building ${packages[*]} ($PROFILE)..."
         for package in "${packages[@]}"; do args+=(-p "$package"); done
@@ -844,15 +844,24 @@ prepare_c() {
 # a bare shell without it marks gst unavailable). Sets GST_PLUGIN_DIR to the dir
 # holding libgstmoq.{so,dylib}. Subscribe only: moqsink publishing needs an
 # encoder + request-pad muxing this client doesn't drive.
-have_gst() { have gst-launch-1.0 && have gst-inspect-1.0; }
+# Why this host can't build or run the GStreamer client, or nothing when it can.
+# moq-gst's sys crates find GStreamer through pkg-config, so a host with only the
+# runtime tools is unavailable here rather than aborting the shared cargo build.
+gst_missing() {
+    if ! have gst-launch-1.0; then
+        echo "gst-launch-1.0 not on PATH (needs a system GStreamer)"
+    elif ! have gst-inspect-1.0; then
+        echo "gst-inspect-1.0 not on PATH"
+    elif ! pkg-config --exists 'gstreamer-1.0 >= 1.14' 'gstreamer-audio-1.0 >= 1.14' 2>/dev/null; then
+        echo "GStreamer development files (gstreamer-1.0, gstreamer-audio-1.0 >= 1.14) not found by pkg-config"
+    fi
+}
 
 prepare_gst() {
-    have gst-launch-1.0 || {
-        mark_broken gst "gst-launch-1.0 not on PATH (needs a system GStreamer)"
-        return
-    }
-    have gst-inspect-1.0 || {
-        mark_broken gst "gst-inspect-1.0 not on PATH"
+    local missing
+    missing=$(gst_missing)
+    [[ -z "$missing" ]] || {
+        mark_broken gst "$missing"
         return
     }
     echo "checking gstreamer client (moq-gst plugin from the cargo build)..."

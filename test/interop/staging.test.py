@@ -106,6 +106,7 @@ esac
         # A stray shared moq library must never win over the staged staticlib.
         (self.profile / f"libmoq.{extension}").write_text("invalid shared library")
         executable(self.tools / "gst-launch-1.0", "exit 0\n")
+        executable(self.tools / "pkg-config", "exit 0\n")
         executable(
             self.tools / "gst-inspect-1.0",
             """
@@ -171,6 +172,30 @@ rm -rf "$TARGET_BASE"
 "$INTEROP_SUB_MOQ"
 """
         )
+
+    def test_gst_without_development_files_is_unavailable(self):
+        source = (ROOT / "test/interop/interop.sh").read_text().split("# ── setup", 1)[0]
+        source = re.sub(
+            r"^INTEROP_DIR=.*$", "INTEROP_DIR=" + shlex.quote(str(ROOT / "test/interop")), source, flags=re.M
+        )
+        self.env.update(RELAY_BIN=str(self.profile / "moq-relay"), CLI_BIN=str(self.profile / "moq"))
+        for tool in ("gst-launch-1.0", "gst-inspect-1.0"):
+            executable(self.tools / tool, "exit 0\n")
+        executable(self.tools / "pkg-config", "exit 1\n")
+        # moq-gst must stay out of the shared build, which would abort the whole run.
+        stub = self.tools / "cargo"
+        stub.write_text(stub.read_text().replace("    build)", "    build) exit 1 ;;\n    unused)"))
+        result = self.run_script(
+            source
+            + """
+require_tools
+SUB_LIST=(gst)
+build_cargo
+prepare_gst
+[[ "$BROKEN_LANGS" == " gst" ]]
+"""
+        )
+        self.assertIn("GStreamer development files", result.stdout)
 
     def test_wire_compat_adapters_and_current_binaries_are_owned(self):
         executable(self.tools / "gh", "exit 1\n")
