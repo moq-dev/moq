@@ -63,7 +63,7 @@ async def main():
 
         # Publish an Opus audio track (init bytes from your encoder)
         audio = moq.media.TrackProducer.audio(
-            broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.OPUS, data=opus_init_bytes)
+            broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.opus(), data=opus_init_bytes)
         )
 
         # Write frames

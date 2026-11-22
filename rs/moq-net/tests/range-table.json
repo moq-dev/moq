@@ -1,7 +1,7 @@
 {
 	"about": [
 		"The lite-07 range table: which groups a subscription delivers. rs/moq-net/tests/integration/range_table.rs and js/net/src/range-table.test.ts each run it over lite-07 within their language, and rs/moq-tokio/tests/integration/relay_fill.rs through a JavaScript relay between Rust peers (just test relay-fill).",
-		"Modes: direct, the origin's own track; cold, a copy nothing read before; warm, a copy its readers filled from the origin's history; late, a copy its readers joined before the origin wrote a group, so it received each live; switch, a reader moving mid-read from one route to another whose copy the case's copy readers filled (in Rust, each route a relay two hops from the origin); relay-cold and relay-warm, the JavaScript relay's copy.",
+		"Modes: direct, the origin's own track; cold, a copy nothing read before; warm, a copy its readers filled from the origin's history; late, a copy its readers joined before the origin wrote a group, so it received each live; chain, a Rust relay's copy, filled by the case's copy readers, serving a reader one relay hop further; switch, a reader moving mid-read from one route to another whose copy the case's copy readers filled (in Rust, each route a relay two hops from the origin); relay-cold and relay-warm, the JavaScript relay's copy.",
 		"groups: the origin's group starts in milliseconds, each group one frame at its start, appended (linked by Previous Start) unless append is false.",
 		"copy: the readers that shape what the copy holds before the case's reader joins; each stays subscribed. evict ages out every group nobody touches but the live edge.",
 		"read: the case's reader. ranges default to one with no start; a range's start is a time, or { live } in milliseconds behind the live edge, and its end a time, either omitted for none.",
@@ -22,15 +22,20 @@
 			"copy": [{}],
 			"read": { "ranges": [{ "start": 1500, "end": 1999 }] },
 			"deliver": [1000],
-			"asks": false,
-			"known": [
-				{
-					"mode": "switch",
-					"lang": "rs",
-					"quest": "/quest/m2/time-addressing/relayed-range-in-one-group.md",
-					"why": "a relay's wire publisher, serving from its copy, ends the range empty, so the reader two hops away gets nothing"
-				}
-			]
+			"asks": false
+		},
+		{
+			"name": "a time range inside the newest group delivers it",
+			"copy": [{}],
+			"read": { "ranges": [{ "start": 9500, "end": 9999 }] },
+			"deliver": [9000]
+		},
+		{
+			"name": "a copy holding only an older group asks for a time range inside one group",
+			"copy": [{ "ranges": [{ "start": 1000, "end": 1000 }] }],
+			"read": { "ranges": [{ "start": 5500, "end": 5999 }] },
+			"deliver": [5000],
+			"asks": true
 		},
 		{
 			"name": "a time start with no end follows the live edge",
@@ -100,7 +105,20 @@
 			"copy": [{}],
 			"read": { "ranges": [{ "start": 1000, "end": 2000 }, { "start": { "live": 1000 } }] },
 			"deliver": [1000, 2000, 8000, 9000],
-			"asks": true
+			"asks": true,
+			"known": [
+				{
+					"mode": "chain",
+					"lang": "rs",
+					"quest": "/quest/m2/time-addressing/relayed-live-join-start.md",
+					"why": "a relay whose copy holds the track sends SUBSCRIBE_START before upstream places the join, naming it no start"
+				},
+				{
+					"mode": "relay-warm",
+					"quest": "/quest/m2/time-addressing/relayed-live-join-start.md",
+					"why": "the JavaScript relay's warm copy delivers only the time range's groups"
+				}
+			]
 		},
 		{
 			"name": "a time start between held groups linked by Previous Start is answered from the copy",

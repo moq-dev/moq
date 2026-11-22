@@ -24,13 +24,28 @@ crates=$(git ls-files --cached --others --exclude-standard -- ':(glob)rs/**/Carg
 files=$(grep -rlE --include='*.rs' --exclude-dir=target '"(\{\}/|/)?\.\./' rs) || [[ $? == 1 ]]
 [[ -n "$files" ]] || exit 0
 
-# One argument per file; no path under rs/ holds whitespace.
-# Frame each file with a `:` header line and a leading space on every body line,
-# so jq scans each file once without any byte in the file (including NUL) ever
-# colliding with the frame boundary.
+# Only a literal that climbs can be a read, so jq sees just each such line and the one
+# before it, where a multi-line `include_str!(` opens (rustfmt keeps it there). Scanning
+# whole files made jq's regex cost grow with file size times matches.
+# Each window opens with a `:<first line> <file>` header and every body line has a
+# leading space, so no byte in a file (including NUL) ever collides with the frame
+# boundary. Whether a file mentions CARGO_MANIFEST_DIR, which the rule below spans the
+# whole file for, comes from its own list. One argument per file; no path under rs/
+# holds whitespace.
 # shellcheck disable=SC2086
-awk 'FNR==1 { print ":" FILENAME } { print " " $0 }' $files |
-    jq -rRs --arg crates "$crates" '
+manifests=$(grep -l CARGO_MANIFEST_DIR $files) || [[ $? == 1 ]]
+# shellcheck disable=SC2086
+awk '
+    FNR == 1 { prev = ""; n = 0 }
+    { n++ }
+    $0 ~ "\"(\\{\\}/|/)?\\.\\./" {
+        if (n > 1) { print ":" (n - 1) " " FILENAME; print " " prev }
+        else print ":" n " " FILENAME
+        print " " $0
+    }
+    { prev = $0 }
+' $files |
+    jq -rRs --arg crates "$crates" --arg manifests "$manifests" '
     def resolve: reduce split("/")[] as $s ([];
         if $s == ".." then .[:-1] elif $s == "." or $s == "" then . else . + [$s] end) | join("/");
     ($crates | split("\n") | map(select(. != ""))) as $crates
@@ -39,14 +54,14 @@ awk 'FNR==1 { print ":" FILENAME } { print " " $0 }' $files |
     | .[]
     | select(. != "")
     | split("\n ")
-    | .[0] as $file
+    | (.[0] | split(" ")) as [$first, $file]
     | (.[1:] | join("\n")) as $text
     | ($file | split("/")[:-1] | join("/")) as $dir
     | ([$crates[] | select(. as $c | $file | startswith($c + "/"))] | max_by(length)) as $crate
-    | ($text | test("CARGO_MANIFEST_DIR")) as $manifest
+    | ($manifests | split("\n") | index($file) != null) as $manifest
     | $text
     | match("(include(?:_str|_bytes)?!\\s*\\(\\s*|#\\[path\\s*=\\s*)?\"((?:\\{\\}/|/)?\\.\\./[^\"]*)\""; "g")
-    | "\($file):\($text[:.offset] | split("\n") | length)" as $source
+    | "\($file):\(($first | tonumber) + ($text[:.offset] | split("\n") | length) - 1)" as $source
     | .captures as [$from, $name]
     | if $from.string != null then "\($dir)/\($name.string)"
       elif $manifest then "\($crate)/\($name.string | ltrimstr("{}"))"

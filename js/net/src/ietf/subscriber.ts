@@ -149,6 +149,20 @@ function sees(filter: Filter, path: Path.Valid): boolean {
 }
 
 /**
+ * The group a SUBSCRIBE asks from, undefined for a live join. A range from the oldest group whose
+ * budget reaches back asks from group 0, so the publisher delivers the backlog it holds: a wire
+ * without ranges can't name the oldest any other way. A zero budget keeps only the latest group,
+ * which a live join already delivers. Mirrors the Rust `wire_start`.
+ */
+function wireStart(ranges: readonly track.Range[], delay: track.Delay | undefined): bigint | undefined {
+	const max = delay?.max;
+	const reaches = max === null || (max !== undefined && !max.isZero());
+	// Only a time start can be empty, so every range from the oldest group delivers something.
+	if (reaches && ranges.some((range) => range.start === undefined)) return 0n;
+	return wireSpan(ranges).start;
+}
+
+/**
  * Skip the `gap` keys just below the group at `key`, as an object's Prior Group ID Gap says
  * none of them will ever exist, through the path a lite SUBSCRIBE_SKIP takes. Best effort: a
  * publisher that sends none leaves those keys to arrive or be given up.
@@ -1577,7 +1591,9 @@ export class Subscriber {
 		if (cancelled.aborted) throw new Error("subscribe cancelled before it was sent");
 
 		this.#aliases.resubscribe({ broadcast, name: request.name });
-		const bounds = wireSpan(request.subscription.ranges ?? [{}]);
+		const ranges = request.subscription.ranges ?? [{}];
+		const bounds = wireSpan(ranges);
+		const start = wireStart(ranges, request.subscription.delay);
 		const msg = new Subscribe({
 			requestId,
 			trackNamespace: broadcast,
@@ -1589,7 +1605,7 @@ export class Subscriber {
 			// A known start is absolute, except group 0, which joins live with no filter. A Next
 			// Object join recovers its head through a fetch stream (see {@link Join}). Fixed for
 			// the subscription's life.
-			...joinFilter(version, bounds.start),
+			...joinFilter(version, start),
 		});
 		if (msg.fill) {
 			// The fill names this request and can overtake SUBSCRIBE_OK, so it waits on it here.
@@ -1672,10 +1688,14 @@ export class Subscriber {
 			hooks.reportedGroup(producer, ok.largest.groupId);
 		}
 		// Absolute subscriptions keep their prefix even when the answer follows its first data. A
-		// live join's earlier start is left to the copy's fills, one range FETCH per run.
+		// live join's earlier start is left to the copy's fills, one range FETCH per run. The
+		// publisher placed that start at its edge, so the groups below stay fillable for whatever
+		// each reader's budget reaches, even one from the oldest group, which names none of them,
+		// and one that joins after this SUBSCRIBE, which no update re-asks.
 		hooks.startTrack(producer, {
-			start: live ? (ok.largest?.groupId ?? 0n) : (bounds.start ?? 0n),
+			start: live ? (ok.largest?.groupId ?? 0n) : (start ?? 0n),
 			requested: bounds.start,
+			resolved: live && ok.largest !== undefined,
 		});
 		const source = this.#streamSources.get(request);
 		if (source)

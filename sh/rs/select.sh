@@ -78,7 +78,7 @@ select_packages() {
         sed -nE 's#^rs/([^/]*)/(benches|tests|examples)/.*#\1#p' "$list"
         sed -n 's/ target$//p' <<<"$readers"
     } | sort -u)
-    # A target can also sit outside its crate, as moq-cli's interop examples
+    # A target can also sit outside its crate, as moq-interop's clients
     # under test/interop/clients/rust/ do, so a change in the directory of a
     # target's root file, which holds that file's modules, seeds its crate.
     # Cargo leaves the manifest's `..` in `src_path`, so they are resolved here.

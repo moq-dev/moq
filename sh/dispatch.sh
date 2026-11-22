@@ -128,10 +128,10 @@ module() {
 # before reading target/debug/libmoq_ffi.so. Cargo runs one build at a time per
 # target directory and leaves a fresh output untouched, so the first of those
 # lanes builds it while the rest wait in Cargo, and none rewrites it while
-# another reads it. py builds its test features into a target directory of its
-# own, and carla runs its tools outside py's venv.
+# another reads it. py and dart share target/ffi-testing (and lane=ffi_testing)
+# for their testing,openh264 builds, and carla runs its tools outside py's venv.
 module py '^(py/|sh/py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/|rs/uniffi-bindgen/|doc/lib/py/|doc/lib/samples\.sh$)' \
-    tools='uv' compiles=check
+    tools='uv' compiles=check lane=ffi_testing
 # sh/rs/select.sh widens to the whole workspace for inputs every crate shares.
 # moq-cli builds the Rust interop clients as examples from outside its
 # crate; sh/rs/select.test.py fails when a target's directory is missing.
@@ -292,13 +292,12 @@ module nix '' \
     tools='nixfmt' fix
 module justfile '' \
     fix
-# dart builds moq-ffi with the filtered environment its build hook gets, then
-# checks that the hook finds that build fresh. Any other Cargo build in between
-# reruns the host build scripts in target/debug that track the environment,
-# such as bindgen's BINDGEN_EXTRA_CLANG_ARGS, and so rebuilds what the hook
-# then rebuilds again, so it runs alone, last.
+# dart pins the cdylib generate.sh builds via hooks.user_defines.moq_ffi.library
+# so the Dart build hook never invokes Cargo again. It shares target/ffi-testing
+# (and its lane) with py so both reuse one testing,openh264 dependency build
+# without racing on libmoq_ffi.so.
 module dart '^(\.cargo/config\.toml$|dart/|sh/dart/|rs/moq-ffi/|doc/lib/dart/|doc/lib/samples\.sh$)' \
-    tools='cargo dart uniffi_bindgen_dart' compiles=check alone fix
+    tools='cargo dart uniffi_bindgen_dart' compiles=check lane=ffi_testing fix
 
 # Report each native suite from the same impact map, before any toolchain is
 # installed. Rust dependencies can break external consumers too, so include

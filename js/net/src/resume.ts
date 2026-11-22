@@ -60,6 +60,7 @@ import {
 	hooks,
 	insertDrop,
 	insertRun,
+	type Land,
 	maxDelayOf,
 	type RecoverCause,
 	type Recv,
@@ -685,7 +686,8 @@ class Reader implements ResumeSource {
 
 	/**
 	 * Take nothing past group `until` from replaced `copy`, and ask for nothing past it on the wire:
-	 * the copy replacing it starts there. A cap only narrows. Mirrors the Rust `Copy::cap`.
+	 * the copy replacing it starts there. A cap only narrows. Mirrors the Rust `Copy::cap`, by group
+	 * only: a JS switch resumes no group partway, so it has no frame to stop the old copy at.
 	 */
 	#cap(copy: Copy, until: bigint): void {
 		if (copy.until === null || (copy.until !== undefined && copy.until <= until)) return;
@@ -2014,6 +2016,19 @@ class Reader implements ResumeSource {
 			for (const run of copySkips(copy, start, end)) skipped.addRun(run.start, run.end);
 		}
 		return runsIn(skipped, start, end);
+	}
+
+	// A copy this front replaced may still land a group its serving copy never will, so an outer
+	// front reading this one as a copy waits on every copy still kept, each past where it starts
+	// and under its bound. Mirrors the Rust `Subscriber::may_land`.
+	mayLand(land: Land): boolean {
+		for (const copy of this.#copies) {
+			const start = copy.backfill || copy.floor === undefined ? land.start : max(land.start, copy.floor);
+			const bound = copyEnd(copy);
+			const end = bound === undefined ? land.end : min(land.end, bound);
+			if (start < end && hooks.mayLand(copy.sub, { ...land, start, end })) return true;
+		}
+		return false;
 	}
 
 	// The serving route's copy holds what its publisher skipped or gave up.

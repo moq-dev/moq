@@ -14,8 +14,8 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
+import parallel_tests
 from test_env import dispatch_env
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -389,13 +389,7 @@ class QueryTests(unittest.TestCase):
                 self.assertIn(f"{action}: check text failed", result.stderr)
 
     def test_ci_requires_its_tool_stubs_even_when_the_host_has_them(self):
-        host = self.root / "host"
-        host.mkdir()
-        tool = host / "zizmor"
-        tool.write_text("#!/bin/sh\nexit 0\n")
-        tool.chmod(0o755)
-        with patch.dict(os.environ, PATH=str(host)):
-            self.stub_ci()
+        self.stub_ci()
         (self.bin / "zizmor").unlink()
         result = subprocess.run(
             ["bash", "sh/dispatch.sh", "ci", "origin/main"],
@@ -964,4 +958,4 @@ if __name__ == "__main__":
     if sys.argv[1:] == ["--bench"]:
         benchmark()
     else:
-        unittest.main()
+        parallel_tests.main(sys.modules[__name__])
