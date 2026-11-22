@@ -547,7 +547,13 @@ impl Recovery {
 			framing: lite::Framing::new(serving.info(), serve.subscriber.version),
 		};
 		tracing::debug!(track = %serve.name, ?groups, "recovering stale groups");
-		let establish = serve.register(subscription, ranges, Some(copy));
+		// No max age: the groups it recovers are the ones a max age dropped.
+		let request = super::Request {
+			subscription,
+			ranges,
+			max_age: None,
+		};
+		let establish = serve.register(request, Some(copy));
 		Self {
 			serve: serve.clone(),
 			serving: serving.clone(),
