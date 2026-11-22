@@ -40,9 +40,9 @@
  * still land below that end on a copy it replaced. Its `closed` settles, and the reader keeps each
  * copy only while it holds something left to read, as a direct reader keeps its buffer. It follows
  * the route only for the groups still read, so one whose route dies continues from the copy served
- * next, and leaves it once it holds nothing left to read. Its end is the first one any copy declared, which a later mid-group end may refine;
- * a copy declaring another breaks the track's identity, which hurts only its own broadcast, so
- * nothing checks that copies agree.
+ * next, and leaves it once it holds nothing left to read. Its end is the first one any copy
+ * declared, which a later mid-group end may refine; a copy declaring another breaks the track's
+ * identity, which hurts only its own broadcast, so nothing checks that copies agree.
  *
  * @module
  */
