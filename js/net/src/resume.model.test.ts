@@ -16,6 +16,7 @@ import { Duration } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import fc from "fast-check";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
+import * as cache from "./cache.ts";
 import { defined } from "./defined.test-util.ts";
 import { NotFound, StreamCode, StreamError, TooFarBehind } from "./error.ts";
 import type { Frame, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
@@ -534,6 +535,8 @@ class Model {
 		const serving = wireOf(this.origin).receive(PATH, route);
 		const broadcast = new BroadcastProducer();
 		const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
+		// Nothing drives a Rust route's pool, so its cache never expires: idle groups stay here too.
+		hooks.poolTrack(producer, new cache.Pool());
 		// The route's live feed, received from its publisher over a wire that reports no range's
 		// start, so its readers place starts against what it holds: the Rust model's `received()`.
 		hooks.receiveTrack(producer);

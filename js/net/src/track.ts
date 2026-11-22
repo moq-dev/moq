@@ -3010,7 +3010,11 @@ export class Producer {
 			this.#uncache(entry);
 		}
 		for (const sink of this.#sinks) {
-			for (const group of sink.groups.peek()) hooks.releaseGroupReader(group, abort);
+			// A finished group stays readable, and a route failure continues it from another copy
+			// once a front takes it, so only an unfinished one ends with the track.
+			for (const group of sink.groups.peek()) {
+				if (hooks.groupFate(group)() !== undefined) hooks.releaseGroupReader(group, abort);
+			}
 			closeTrackState(sink, abort);
 		}
 		this.#sinks.clear();
