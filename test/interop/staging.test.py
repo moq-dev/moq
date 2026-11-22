@@ -80,10 +80,10 @@ esac
         source = (ROOT / "test/interop/interop.sh").read_text()
         setup, runtime = source.split("# ── setup", 1)
         setup = re.sub(r"^INTEROP_DIR=.*$", "INTEROP_DIR=" + shlex.quote(str(ROOT / "test/interop")), setup, flags=re.M)
-        # Stage every example the build list names, including those only helper scripts run.
-        built = re.search(r"examples=\(([^)]*)\)", source).group(1).split()
+        # Stage every Rust client the build list names, including those only helper scripts run.
+        built = re.search(r"clients=\(([^)]*)\)", source).group(1).split()
         for name in set(built) | set(re.findall(r"\$EXAMPLES/(interop-[\w-]+)", runtime)):
-            executable(self.profile / "examples" / name, "echo owned-example\n")
+            executable(self.profile / name, "echo owned-example\n")
         # Exercise dereferencing, including a symlink to a cache outside target.
         cached = self.root / "cache"
         cached.mkdir()
@@ -127,14 +127,16 @@ printf '  moqsink: fixture\n  moqsrc: fixture\n'
         late_examples = "\n".join(
             '"' + path + '"'
             for path in sorted(
-                set(re.findall(r"\$(?:EXAMPLES|TARGET_BASE/\$PROFILE/examples)/interop-[\w-]+", runtime))
+                set(re.findall(r"\$(?:EXAMPLES|TARGET_BASE/\$PROFILE)/interop-[\w-]+", runtime))
             )
         )
         self.run_script(
             setup
             + f"""
 require_tools
-build_relay_cli
+# The C and GStreamer clients join the one cargo build only when a list names them.
+SUB_LIST=(rust c gst)
+build_cargo
 prepare_gst
 CLIENTS={shlex.quote(str(clients.parent))}
 prepare_c
@@ -164,7 +166,7 @@ GST_PLUGIN_PATH_1_0="$GST_PLUGIN_DIR" gst-inspect-1.0 moq
             source
             + """
 require_tools
-build_relay_cli
+build_cargo
 rm -rf "$TARGET_BASE"
 "$RELAY"
 "$MOQ"
