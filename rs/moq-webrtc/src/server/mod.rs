@@ -239,8 +239,6 @@ impl Server {
 	}
 }
 
-/// Shared `DELETE` handler for both bundled routers: parse the resource id from
-/// the trailing path segment and terminate the matching session.
 /// Whether a request's `Content-Type` is `application/sdp`, ignoring any parameters
 /// such as `charset`.
 #[cfg(feature = "server")]
@@ -252,6 +250,8 @@ pub(crate) fn is_sdp(headers: &axum::http::HeaderMap) -> bool {
 		.is_some_and(|essence| essence.trim().eq_ignore_ascii_case("application/sdp"))
 }
 
+/// Shared `DELETE` handler for both bundled routers: parse the resource id from
+/// the trailing path segment and terminate the matching session.
 #[cfg(feature = "server")]
 pub(crate) fn delete(server: &Server, path: &str) -> StatusCode {
 	match crate::sdp::parse_resource_id(path) {

@@ -1421,8 +1421,9 @@ async fn flush_outbound<S: Stream>(stream: &mut S, work: &mut VecDeque<ServerSes
 ///
 /// It writes the responses the session owes before reading more, so `work` never
 /// holds more than one read's results, and a viewer flooding commands without
-/// reading the answers stalls on its own TCP window. The events it raises are
-/// dropped: nothing before playback acts on them. Each await is a single read or
+/// reading the answers stalls on its own TCP window. A stop ends the wait at once,
+/// even queued behind replies; other events are dropped, since nothing before
+/// playback acts on them. Each await is a single read or
 /// write, which moves bytes only when it completes, so dropping this future when
 /// the broadcast arrives loses nothing.
 async fn feed_input<S: Stream>(
@@ -1432,6 +1433,16 @@ async fn feed_input<S: Stream>(
 ) -> anyhow::Result<()> {
 	let mut buffer = [0u8; READ_BUFFER];
 	loop {
+		// The viewer tore down the play before media started: stop waiting, even behind a reply
+		// it will never read.
+		if work.iter().any(|result| {
+			matches!(
+				result,
+				ServerSessionResult::RaisedEvent(ServerSessionEvent::PlayStreamFinished { .. })
+			)
+		}) {
+			return Ok(());
+		}
 		match work.front_mut() {
 			Some(ServerSessionResult::OutboundResponse(packet)) if !packet.bytes.is_empty() => {
 				let n = stream.write(&packet.bytes).await?;
@@ -1441,8 +1452,6 @@ async fn feed_input<S: Stream>(
 				packet.bytes.drain(..n);
 				continue;
 			}
-			// The viewer tore down the play before media started: stop waiting.
-			Some(ServerSessionResult::RaisedEvent(ServerSessionEvent::PlayStreamFinished { .. })) => return Ok(()),
 			Some(_) => {
 				work.pop_front();
 				continue;
@@ -1645,6 +1654,28 @@ mod tests {
 		assert!(work.len() <= 1, "{} replies queued", work.len());
 		assert!(!flooder.is_finished(), "the viewer wrote its whole flood unread");
 		flooder.abort();
+	}
+
+	/// A viewer that stops before playback ends the wait even behind a reply it never reads.
+	#[tokio::test(start_paused = true)]
+	async fn a_stop_behind_an_unread_reply_ends_the_wait() {
+		let (mut stream, _viewer) = tokio::io::duplex(1);
+		let (mut session, _) = ServerSession::new(ServerSessionConfig::new()).unwrap();
+		let (packet, _) = session.send_ping_request().unwrap();
+		let mut work = VecDeque::from([
+			ServerSessionResult::OutboundResponse(packet),
+			ServerSessionResult::RaisedEvent(ServerSessionEvent::PlayStreamFinished {
+				app_name: "live".into(),
+				stream_key: "cam".into(),
+			}),
+		]);
+		kio::clock::timeout(
+			Duration::from_secs(60),
+			feed_input(&mut stream, &mut session, &mut work),
+		)
+		.await
+		.expect("the stop waited on the reply")
+		.unwrap();
 	}
 
 	#[tokio::test]
