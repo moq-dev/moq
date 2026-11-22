@@ -594,6 +594,8 @@ export interface ResumeSource {
 	serving(): boolean;
 	/** The parts of `[start, end)` any copy held or let go says its publisher skipped; see `hooks.skippedIn`. */
 	skippedIn(start: bigint, end: bigint): Run[];
+	/** Whether a group in `land` may still land on a copy this reader keeps; see `hooks.mayLand`. */
+	mayLand(land: Land): boolean;
 	/** Where the run of keys from `key` the serving copy says no group arrives at ends; see `hooks.holeEnd`. */
 	holeEnd(key: bigint, dropped: boolean): bigint | undefined;
 	/** Where the group the serving copy holds whole at `key` ends; see `hooks.wholeEnd`. */
@@ -1076,7 +1078,10 @@ export const hooks: {
 	 * `track::Subscriber::stale_held`.
 	 */
 	staleHeld: (subscriber: Subscriber, start: bigint, end: bigint) => Run[];
-	/** Whether a group may still land on the live feed of the subscriber's track; see {@link Land}. */
+	/**
+	 * Whether a group may still land on the live feed of the subscriber's track, or for a front's
+	 * reader on any copy it keeps; see {@link Land}.
+	 */
 	mayLand: (subscriber: Subscriber, land: Land) => boolean;
 	/** A subscriber's largest location now, and whether it can still advance. */
 	peekLargest: (subscriber: Subscriber) => { largest?: Position; ended: boolean };

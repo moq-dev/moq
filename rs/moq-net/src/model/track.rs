@@ -7052,7 +7052,11 @@ impl Consumer {
 
 	/// Poll for a cached group, a terminal disposition, or a gap outliving its grace: the
 	/// group, the error a dropped or cut group was given up with, or `None` once it is gone.
+	/// A front's logical track answers from the copy serving it, which holds its groups.
 	pub(crate) fn poll_group(&self, key: u64, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
+		if let Some(serving) = self.serving() {
+			return serving.poll_group(key, waiter);
+		}
 		self.with_state(|state| {
 			let Some(state) = state else {
 				return Poll::Ready(Ok(None));
@@ -11473,6 +11477,25 @@ impl Subscriber {
 		}
 	}
 
+	/// Whether a group in `groups` may still land for this subscriber, by the rule
+	/// [`Consumer::may_land`] applies: a front's logical track asks every route copy it still
+	/// keeps, since one it replaced may land a group the serving copy never will.
+	pub(super) fn may_land(
+		&self,
+		groups: ops::Range<u64>,
+		floor: bool,
+		grace: Duration,
+		delivered: Option<&Delivered>,
+		waiter: &kio::Waiter,
+	) -> bool {
+		match &self.inner {
+			Inner::Plain(cursor) => {
+				!cursor.state.is_closed() && cursor.state.read().may_land(groups, floor, grace, delivered, waiter)
+			}
+			Inner::Resume(resume, _) => resume.may_land(groups, floor, grace, delivered, waiter),
+		}
+	}
+
 	/// The parts of `groups` the publisher declared skipped, as this subscriber knows them: a
 	/// front's logical track counts every route it held or let go.
 	/// Parks `waiter` until a change while some of `groups` is not.
@@ -11844,7 +11867,6 @@ impl Subscriber {
 	/// A publisher tells its peer where a live join or time start landed, which the peer
 	/// can't work out from the groups it receives. Settles the ranges once for the batch, so
 	/// asking for k of them costs O(k log n) past that.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn resolved_keys(&mut self, keys: impl IntoIterator<Item = u64>) -> Vec<Option<Resolved>> {
 		match &mut self.inner {
 			Inner::Plain(cursor) => {
@@ -11992,21 +12014,6 @@ impl Subscriber {
 				cursor.filter.window.covered_by(from, bounds.end, accounted)
 			}
 			Inner::Resume(resume, _) => resume.covered(from, bounds.end, accounted),
-		}
-	}
-
-	/// This subscriber's own ranges keyed in `keys`, in that order, as resolved here: `None`
-	/// for one empty, still waiting, or not held, and for every range of a front's reader,
-	/// whose copies resolve them.
-	pub(super) fn resolved_ranges(&mut self, keys: impl IntoIterator<Item = u64>) -> Vec<Option<Resolved>> {
-		match &mut self.inner {
-			Inner::Plain(cursor) => {
-				cursor.sync();
-				keys.into_iter()
-					.map(|key| cursor.filter.window.resolved_key(key))
-					.collect()
-			}
-			Inner::Resume(..) => keys.into_iter().map(|_| None).collect(),
 		}
 	}
 
@@ -17738,7 +17745,7 @@ mod test {
 				.with_delay(Delay::default().with_max(None)),
 		);
 		let placed = |subscriber: &mut Subscriber| {
-			subscriber.resolved_ranges([0])[0].map(|resolved| (resolved.start, resolved.floored))
+			subscriber.resolved_keys([0])[0].map(|resolved| (resolved.start, resolved.floored))
 		};
 		producer.time_starts([(0, Some(1000), Duration::MAX), (300, Some(1000), Duration::MAX)]);
 		assert_eq!(placed(&mut before), None);
@@ -32039,7 +32046,7 @@ mod test {
 		}]));
 		assert_eq!(drain(&mut subscriber), vec![0, 400]);
 		assert_eq!(
-			subscriber.resolved_ranges([0]),
+			subscriber.resolved_keys([0]),
 			vec![Some(Resolved {
 				start: 0,
 				end: Some(501),
