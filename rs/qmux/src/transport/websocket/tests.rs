@@ -178,6 +178,9 @@ async fn a_record_pins_none_of_the_sockets_buffer() {
 		let record = recv(&mut transport).await.unwrap();
 		assert_eq!(record, expected, "{size} bytes");
 		drop(expected);
-		assert!(freed.load(std::sync::atomic::Ordering::Relaxed), "a {size}-byte record pins the socket's buffer");
+		assert!(
+			freed.load(std::sync::atomic::Ordering::Relaxed),
+			"a {size}-byte record pins the socket's buffer"
+		);
 	}
 }
