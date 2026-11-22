@@ -117,7 +117,7 @@ idle_timeout = "10s"                 # Drop a connection after this long with no
 gso = true                           # UDP segmentation offload. Default.
 mtu_discovery = false                # Path MTU discovery. Default.
 receive_window = 4194304             # Whole-connection window, in bytes. Default (4 MiB).
-stream_receive_window = 1048576      # Per-stream window, in bytes. Default (1 MiB).
+stream_receive_window = 4194304      # Per-stream window, in bytes. Default (4 MiB).
 send_window = 4194304                # Unacknowledged outgoing data, in bytes. Default (4 MiB).
 qlog = "/var/log/moq/qlog"           # Existing directory.
 # keylog = "/private/keys.log"       # Explicit secret log path; unset is off.
@@ -158,7 +158,10 @@ gets through. WebSocket and TCP sessions cancel the same way; the relay accepts
 them at these windows too and widens peers to `[limits.peer.quic]`, and links
 it dials take these settings. `stream_receive_window` only paces one stream:
 its credit returns as bytes are read, whether or not their message is complete,
-so the 1 MiB default caps one group stream at about 67 Mbps at a 100 ms RTT.
+so the 4 MiB default caps one group stream at about 270 Mbps at a 100 ms RTT.
+Clients and peers share it, so a peer link carries one group stream as fast as
+a client connection does. It bounds no memory: the connection's `receive_window`
+caps what all of a peer's streams hold together.
 
 ## \[limits.client] and \[limits.peer]
 
@@ -178,8 +181,8 @@ live_edges = 0                       # No bound.
 
 [limits.peer.quic]
 max_streams = 100000                 # Concurrent QUIC streams per direction.
-receive_window = 16777216            # Connection-wide receive window (16 MiB).
-send_window = 16777216               # Unacknowledged outgoing data (16 MiB).
+receive_window = 67108864            # Connection-wide receive window (64 MiB).
+send_window = 67108864               # Unacknowledged outgoing data (64 MiB).
 ```
 
 `[limits.peer.quic]` takes only `max_streams`, `receive_window`, and `send_window`;
@@ -187,8 +190,14 @@ any other `[quic]` key is refused. They replace the `[quic]` values for a
 peer's connection once its grant is known, before the SETUP reply, over QUIC,
 WebSocket, or TCP alike. Links the relay dials get them from the handshake on.
 A link carrying a whole cluster is then not throttled by `[quic]` limits sized
-for one viewer, for example `--limits-peer-quic-max-streams=200000`. The 16 MiB windows carry about 450 Mbps at a 250 ms
-RTT and about 1 Gbps at 100 ms; raise both for a busier link.
+for one viewer, for example `--limits-peer-quic-max-streams=200000`. The 64 MiB windows carry about 2 Gbps at a 250 ms
+RTT and about 5 Gbps at 100 ms; raise both for a busier link. Each peer can
+make the relay buffer up to its `receive_window` of unread or incomplete
+incoming data, so the peer count times that window bounds that data. A peer's
+retained groups are bounded separately by its `live_edges` (no bound by
+default), and data sent to it but not yet acknowledged by `send_window`. Peers take the `[quic]` `stream_receive_window`
+like every other connection, so one group stream carries at most about 4 MiB per
+round trip.
 
 These are the defaults. Each subscription and FETCH holds a stream, as does each
 PUBLISH a peer's track listing gets, so `[quic]` or `[limits.peer.quic]`
