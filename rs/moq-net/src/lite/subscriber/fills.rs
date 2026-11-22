@@ -58,9 +58,9 @@ impl FillAsk {
 		})
 	}
 
-	/// `demand` asked with the fills' priority too. The demand's budget caps every range, so
-	/// the live feed never loosens for a fill: a group it drops as stale is recovered on its
-	/// own (see [`Recovery`]).
+	/// `demand` asked with the fills' priority too. A fill's range is its own, so the demand's
+	/// live joins keep their budgets and the live feed never loosens for a fill: a group it
+	/// drops as stale is recovered on its own (see [`Recovery`]).
 	pub fn merge(&self, demand: Subscription) -> Subscription {
 		let priority = demand.priority.max(self.priority);
 		demand.with_priority(priority)

@@ -25,7 +25,9 @@ use crate::ledger::{self, Ledger};
 use super::subscription;
 pub(crate) use super::subscription::Resolved;
 use super::subscription::{Accounted, Budget, Containing, Cover, Found, Holdings, Join, Unplaced, Window, minus};
-pub(crate) use super::subscription::{JoinAsk, budget, live_millis};
+#[cfg(feature = "async")]
+pub(crate) use super::subscription::budget;
+pub(crate) use super::subscription::{JoinAsk, live_millis};
 pub use super::subscription::{Order, Position, Range, Start, Subscription};
 use rangemap::{RangeInclusiveSet, RangeMap, RangeSet};
 

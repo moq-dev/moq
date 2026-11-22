@@ -227,6 +227,7 @@ impl Start {
 	/// A live join reaching back past every group, so it takes every group still within `max`
 	/// of the live edge: what a wire before lite-07 asks with its one `Subscriber Max Age` and
 	/// no start.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) const fn within(max: Duration) -> Self {
 		Self::Live {
 			min: PAST_EVERY_GROUP,

@@ -115,6 +115,7 @@ mod widened_max_age;
 mod zero_copy;
 
 /// A subscription under one staleness budget, as a subscription-wide max age once applied.
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(crate) trait WithMax {
 	/// A range from the oldest or the latest group takes every group still within `max`, or
 	/// every group for `None`; another live join keeps its lag and takes

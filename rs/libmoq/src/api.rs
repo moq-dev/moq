@@ -835,7 +835,9 @@ pub struct moq_delay {
 	pub min_us: u64,
 	/// How far a non-latest group may fall behind the live edge before it is skipped, in
 	/// microseconds. Zero skips immediately. Enforced by the publisher's cache and by any
-	/// local buffering, and it caps every range. It bounds lateness only, never the start.
+	/// local buffering. It bounds only ranges with no start: a range with a start is history,
+	/// delivered in full and bounded only by the publisher's max age. It bounds lateness, never
+	/// the start.
 	/// Ignored when `max_unlimited` is set.
 	pub max_us: u64,
 	/// No subscriber max: wait on a stalled group as long as the publisher's max age allows.
