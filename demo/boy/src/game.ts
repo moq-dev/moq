@@ -283,8 +283,8 @@ export class Game {
 		effect.cleanup(() => consumer.close());
 
 		// Closing the consumer on cleanup unblocks a pending latest() (it returns undefined), so the loop
-		// ends without racing the teardown. The consumer skips a status that fails the schema; a
-		// rejection is a real failure, such as a track closed with an error, and ends the loop.
+		// ends without racing the teardown. A rejection, whether a status that fails the schema or a
+		// track closed with an error, ends the loop.
 		effect.spawn(async () => {
 			// A failed read ends the loop, so release the subscription instead of downloading what nothing reads.
 			try {
