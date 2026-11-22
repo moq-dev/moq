@@ -1236,6 +1236,10 @@ impl Holdings for TrackState {
 		self.lookup.range(from..).next().map(|(&key, _)| key)
 	}
 
+	fn reached(&self, key: u64, time: u64) -> u64 {
+		self.lookup.get(&key).map_or(key, |slot| slot.reached(key, time))
+	}
+
 	fn complete(&self) -> bool {
 		self.outcome.is_final()
 	}
@@ -10381,6 +10385,15 @@ impl Cursor {
 					Poll::Pending => continue,
 				},
 			};
+			// A group answered below the time may end whole before it, which then lies in the pause
+			// past it: wait for it to end, so the start is the same whether the cache held it or not.
+			if let fill::TimeStart::Group(group) = answer
+				&& group < time
+				&& (self.state.read().lookup.get(&group))
+					.is_some_and(|slot| slot.end().is_none() && slot.serving().poll_closed(waiter).is_pending())
+			{
+				continue;
+			}
 			lookup.join = None;
 			let found = match answer {
 				fill::TimeStart::Group(group) => Found::Group(group),
@@ -28588,6 +28601,56 @@ mod test {
 		fill.drop_groups(5..8);
 		drop(fill);
 		assert_eq!(drain_groups(&mut subscriber), [4]);
+	}
+
+	/// A time in the pause past an evicted whole group starts where it would with that group
+	/// cached: the handler answers with the group, the reader waits for it to end, and its End
+	/// places the time past it, so the group is never read.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_looked_up_group_ending_before_the_time_starts_past_it() {
+		for cached in [true, false] {
+			let producer = track_producer("test", Info::timed());
+			let dynamic = producer.requests();
+			let append = |start: u64, end: u64| {
+				let mut group = producer.append_group(Timestamp::from_millis(start).unwrap()).unwrap();
+				group
+					.write_frame(Timestamp::from_millis(start).unwrap(), &b"x"[..])
+					.unwrap();
+				drop(group.finish_at(end).unwrap());
+			};
+			append(0, 400);
+			append(1000, 1400);
+			append(3000, 3400);
+			if !cached {
+				evict(&producer, 1000);
+			}
+			let mut subscriber = producer.subscribe(replay().with_order(Order::Ascending).with_ranges([Range {
+				start: crate::track::Start::Time(1700),
+				end: None,
+			}]));
+			let waiter = kio::Waiter::noop();
+			if !cached {
+				assert_eq!(drain_groups(&mut subscriber), Vec::<u64>::new());
+				let Poll::Ready(Ok(start)) = dynamic.poll_requested_fill(&waiter) else {
+					panic!("the time start asks for its group");
+				};
+				assert_eq!((start.start().group, start.floor()), (1700, 401));
+				let mut group = start.accept(1000, None).unwrap().expect("a fresh group");
+				group
+					.write_frame(Timestamp::from_millis(1000).unwrap(), &b"x"[..])
+					.unwrap();
+				assert_eq!(drain_groups(&mut subscriber), Vec::<u64>::new(), "waits for its End");
+				drop(group.finish_at(1400).unwrap());
+				drop(start);
+			}
+			assert_eq!(drain_groups(&mut subscriber), [3000], "cached: {cached}");
+			assert_eq!(
+				subscriber.resolved_range(0).map(|resolved| resolved.start),
+				Some(1400),
+				"cached: {cached}"
+			);
+		}
 	}
 
 	/// A time start just past a held group asks only the time's own key, from a floor at the

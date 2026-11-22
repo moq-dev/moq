@@ -80,6 +80,14 @@ pub(in crate::model) trait Holdings {
 	/// The lowest group held starting at or after `from`.
 	fn next_start(&self, from: u64) -> Option<u64>;
 
+	/// Where a range from `time` starts, given the group at `key` starting at or before it with
+	/// none between: there, or at that group's End once it is held whole and ended at or before
+	/// the time (see [`Containing::At`]).
+	fn reached(&self, key: u64, time: u64) -> u64 {
+		let _ = time;
+		key
+	}
+
 	/// Whether nothing more can arrive here, so a time start nothing contains reaches back
 	/// to the oldest group rather than wait.
 	fn complete(&self) -> bool;
@@ -736,7 +744,7 @@ impl Window {
 			self.uncount(key, &span);
 			let asked = span.looking.take().map(|looking| looking.floor);
 			(span.start, span.floored) = match found {
-				Found::Group(group) => (group, true),
+				Found::Group(group) => (holdings.reached(group, time), true),
 				// A floor is one past where the groups held placed it, which then holds it; from 0,
 				// no group starts at or before it, so the span reads from the time on.
 				Found::Dropped { floor } => (floor.checked_sub(1).unwrap_or(time), true),

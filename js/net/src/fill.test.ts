@@ -1673,6 +1673,52 @@ test("fill: a lookup answered below the eviction watermark starts the range ther
 	}
 });
 
+// A time in the pause past a whole group starts where it would with that group cached: the handler
+// answers with the group, the reader waits for it to end, and its End places the time past it, so
+// the group is never read. Mirrors the Rust `a_looked_up_group_ending_before_the_time_starts_past_it`.
+test("fill: a looked-up group ending before the time starts past it", async () => {
+	for (const cached of [true, false]) {
+		const broadcast = new BroadcastProducer();
+		const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
+		const requests = track.requests();
+		const write = (group: ReturnType<typeof track.createGroup>, start: number) =>
+			group.writeFrame({ payload: enc.encode(`g${start}`), timestamp: Timestamp.fromMillis(start) });
+		const times: bigint[] = [];
+		void (async () => {
+			for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
+				// A miss past 1000, or a time start floored past it: the index holds nothing there.
+				if (fill.floor < fill.start) times.push(fill.start, fill.floor);
+				if (fill.floor > 1000n) {
+					fill.dropGroups(fill.start, fill.end);
+					fill.close();
+					continue;
+				}
+				const group = defined(fill.accept(1000n));
+				write(group, 1000);
+				await yieldNow();
+				group.finishAt(1400n);
+				fill.close();
+			}
+		})();
+		for (const [start, end] of [
+			[0, 400n],
+			[1000, 1400n],
+			[3000, 3400n],
+		] as const) {
+			if (start === 1000 && !cached) continue;
+			const group = track.createGroup(BigInt(start));
+			write(group, start);
+			group.finishAt(end);
+		}
+		const reader = track.subscribe(fromTime(1700n));
+		expect((await reader.ordered().nextGroup())?.start).toBe(3000n);
+		expect(times).toEqual(cached ? [1700n, 1401n] : [1700n, 401n]);
+		reader.close();
+		requests.close();
+		broadcast.close();
+	}
+});
+
 test("fill: a time start dropped after its floor's group is evicted starts at that group", async () => {
 	const clock = new Manual();
 	const installed = clock.install();

@@ -951,8 +951,8 @@ impl FillGroups {
 	/// The oldest group the first group may start at: [`start`](Self::start)'s, unless that is a
 	/// reader's time start no group the cache holds places. Then the first group is the one
 	/// containing that time: the group starting at it, or else the newest one starting before
-	/// it, at or after the floor, unless that one ended whole at or before the time, which no
-	/// group then contains. A handler knowing its groups only by key serves that key as
+	/// it, at or after the floor; once that group ends whole at or before the time, the reader
+	/// starts past it, at its End. A handler knowing its groups only by key serves that key as
 	/// any other; one that can tell which group holds the time, as from an index, may
 	/// [`accept`](Self::accept) that group instead, or [`drop_groups`](Self::drop_groups) the
 	/// key when none does. The reader starts where the answer says, never where the groups

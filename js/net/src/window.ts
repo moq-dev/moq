@@ -296,6 +296,12 @@ export interface Holdings {
 	containing(time: bigint, budget: number): Containing;
 	/** The lowest group held starting at or after `from`. */
 	nextStart(from: bigint): bigint | undefined;
+	/**
+	 * Where a range from `time` starts, given the group at `key` starting at or before it with none
+	 * between: there, or at that group's End once it is held whole and ended at or before the time.
+	 * Absent for there. Mirrors the Rust `Holdings::reached`.
+	 */
+	reached?(key: bigint, time: bigint): bigint;
 	/** Whether nothing more can arrive here, so a time start nothing contains reaches back to the oldest group rather than wait. */
 	complete(): boolean;
 	/**
@@ -815,7 +821,7 @@ export class Window {
 			const asked = span.looking?.floor;
 			span.looking = undefined;
 			if (found.kind === "group") {
-				span.start = found.group;
+				span.start = holdings.reached?.(found.group, at) ?? found.group;
 				span.floored = true;
 			} else if (found.kind === "dropped") {
 				// A floor is one past the group held below the time, which then holds it; from 0, no
