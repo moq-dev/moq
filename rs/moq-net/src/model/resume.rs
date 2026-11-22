@@ -1043,11 +1043,11 @@ impl Copy {
 				}) {
 				return Retains::Wait;
 			}
-			// A fill still owes what its own feed has not accounted for: unanswered, it may land.
+			// A fill still owes what the reader owes under its bound and its own feed has not
+			// accounted for: unanswered, it may land.
 			if self.fills {
-				let lacking: Vec<std::ops::Range<u64>> = (reader.window.runs(from))
-					.take_while(|run| *run.start() < end)
-					.flat_map(|run| reader.delivered.gaps(*run.start()..run.end().saturating_add(1).min(end)))
+				let lacking: Vec<std::ops::Range<u64>> = (reader.owed.overlapping(&(from..end)))
+					.map(|run| run.start.max(from)..run.end.min(end))
 					.collect();
 				let owes = !lacking.is_empty()
 					&& match self.poll_ready(reader.groups, &kio::Waiter::noop()) {
@@ -1101,6 +1101,10 @@ struct Retain<'a> {
 	mirrored: &'a Mirrored,
 	delivered: &'a Delivered,
 	out: &'a [(u64, Weak<()>)],
+	/// What the reader lacks under the serving copy's resume point that only a fill may
+	/// still deliver: no copy holds it, another replaced copy still feeds it, or a copy
+	/// declared it skipped, as a group's Previous Start does for the keys under it.
+	owed: &'a RangeSet<u64>,
 	waiter: &'a kio::Waiter,
 }
 
@@ -2360,6 +2364,12 @@ impl Reader {
 			true => self.copies.last().and_then(|copy| copy.track.latest_key()),
 			false => None,
 		};
+		// Only a bounded window ends on what it was handed out, so only there may a fill let
+		// go early lose a group for good.
+		let owed = match self.window.end().is_some() && self.copies.iter().any(|copy| copy.fills) {
+			true => self.owed(delivered, waiter),
+			false => RangeSet::new(),
+		};
 		let reader = Retain {
 			groups: self.groups,
 			window: &self.window,
@@ -2368,6 +2378,7 @@ impl Reader {
 			mirrored: &self.mirrored,
 			delivered,
 			out: &self.out,
+			owed: &owed,
 			waiter,
 		};
 		let mut waits = false;
@@ -2429,6 +2440,32 @@ impl Reader {
 			skipped.extend(copy.skipped_in(groups.clone(), waiter).iter().cloned());
 		}
 		skipped
+	}
+
+	/// What [`Retain::owed`] holds: the gaps [`Self::lacking`] finds, less what a copy holds,
+	/// a replaced copy other than a fill still feeds, or a copy declared skipped.
+	fn owed(&self, delivered: &Delivered, waiter: &kio::Waiter) -> RangeSet<u64> {
+		let mut owed = RangeSet::new();
+		for gap in self.lacking(delivered) {
+			owed.insert(gap.clone());
+			for run in self.skipped_in(gap.clone(), waiter).iter() {
+				owed.remove(run.clone());
+			}
+			for copy in &self.copies {
+				for key in copy.track.cached_groups(gap.clone()) {
+					owed.remove(key..key + 1);
+				}
+				let feeds = copy.replaced && !copy.fills && !matches!(copy.done, Some(Err(_)));
+				if feeds && !copy_failed(&copy.track) {
+					let (from, until) = (copy.start(self.groups.0), copy.end().unwrap_or(u64::MAX));
+					let fed = from.max(gap.start)..until.min(gap.end);
+					if !fed.is_empty() {
+						owed.remove(fed);
+					}
+				}
+			}
+		}
+		owed
 	}
 
 	/// The gaps of `delivered` in the reader's window under the serving copy's resume point:

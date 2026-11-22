@@ -322,8 +322,8 @@ async fn warm(broadcast: &moq_net::broadcast::Consumer, case: &Case) -> Vec<trac
 	readers
 }
 
-/// Run `case` in `mode`: its reader's groups, or how it went wrong.
-async fn run(case: &Case, mode: Mode) -> Result<(), String> {
+/// Run `case` in `mode`: whether each reader ended, or how it went wrong.
+async fn run(case: &Case, mode: Mode) -> Result<bool, String> {
 	let source = Source::new();
 	let want = case.deliver.len();
 	let mut got = Got::default();
@@ -442,7 +442,9 @@ async fn run(case: &Case, mode: Mode) -> Result<(), String> {
 	if delivered != case.deliver {
 		return Err(format!("delivered {delivered:?}, ended: {}", got.ended));
 	}
+	let mut ended = got.ended;
 	if let Some(mut after) = after {
+		ended &= after.ended;
 		let delivered = after
 			.delivered(case.frames)
 			.await
@@ -461,7 +463,7 @@ async fn run(case: &Case, mode: Mode) -> Result<(), String> {
 			});
 		}
 	}
-	Ok(())
+	Ok(ended)
 }
 
 /// Run every case the mode applies to, failing with each that diverges. A known divergence is
@@ -473,8 +475,13 @@ async fn table(mode: Mode) {
 		if (warmed && case.copy.is_empty()) || case.known.iter().any(|known| known == mode.name()) {
 			continue;
 		}
-		if let Err(err) = run(&case, mode).await {
-			failures.push(format!("{}: {err}", case.name));
+		match run(&case, mode).await {
+			Err(err) => failures.push(format!("{}: {err}", case.name)),
+			// A switch never leaves a read open that ends direct from the origin.
+			Ok(false) if mode == Mode::Switch && run(&case, Mode::Direct).await == Ok(true) => {
+				failures.push(format!("{}: never ended, as it does direct", case.name));
+			}
+			Ok(_) => {}
 		}
 	}
 	assert!(failures.is_empty(), "{}: {failures:#?}", mode.name());
