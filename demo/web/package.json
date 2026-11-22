@@ -9,7 +9,7 @@
 	"scripts": {
 		"dev": "vite",
 		"build": "vite build",
-		"check": "tsc --noEmit"
+		"check": "bun check --no-script"
 	},
 	"dependencies": {
 		"@moq/clock": "workspace:*",
@@ -31,6 +31,6 @@
 		"open": "^11.0.4",
 		"tailwindcss": "^4.1.13",
 		"typescript": "7.0.2",
-		"vite": "^8.3.6"
+		"vite": "^8.3.8"
 	}
 }

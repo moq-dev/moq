@@ -44,9 +44,8 @@ fn subscribe_refusal<'a>(
 fn serving_subscription(subscriber_priority: u8) -> Subscription {
 	Subscription {
 		priority: super::priority::from_wire(subscriber_priority),
-		// No Max Age leaves the publisher's max age alone, whatever it turns out to be, and
-		// moq-transport has no field for a minimum.
-		delay: crate::track::Delay { min: None, max: None },
+		// No Max Age leaves the publisher's max age alone, whatever it turns out to be.
+		delay: crate::track::Delay { max: None },
 		// SUBSCRIBE_OK names the live edge, which a relay learns only from its upstream's
 		// answer: never from its cache, nor from an edge reported before.
 		feed: true,
@@ -815,9 +814,8 @@ enum UpdateRead {
 	Update(super::request_stream::Update),
 	/// The subscriber cancelled.
 	Cancelled,
-	/// A malformed message, which a protocol violation makes the session's to report.
-	Malformed(Error),
-	/// The update named a Request ID we never granted; the session is already closing.
+	/// Reading failed, such as on a malformed message or a Request ID we never granted. A
+	/// protocol violation already closed the session.
 	Failed(Error),
 }
 
@@ -1845,18 +1843,12 @@ impl Serving {
 					let written = match marker.poll(waiter, serve) {
 						Poll::Ready(res) => res,
 						Poll::Pending => {
-							let fin_cancels = super::request_stream::fin_cancels(version);
-							let cancelled = super::request_stream::poll_cancel(
+							ready!(request.publisher.poll_ended_cancel(
 								stream,
 								&mut request.request_finished,
 								&mut request.goaways,
-								fin_cancels,
 								waiter,
-							)
-							.is_ready() || request.publisher.session.poll_closed(waiter).is_ready();
-							if !cancelled {
-								return Poll::Pending;
-							}
+							));
 							Err(Error::Cancel)
 						}
 					};
@@ -2153,8 +2145,6 @@ impl RunSubscription {
 		enum Turn {
 			// The track and any fill finished, or the stream failed.
 			Served(Result<(), Error>),
-			// Reading the requester's next update failed.
-			Malformed(Error),
 			// The peer cancelled, or the session ended.
 			Cancelled,
 			// A REQUEST_UPDATE, already decoded.
@@ -2204,7 +2194,6 @@ impl RunSubscription {
 							match publisher.poll_update(stream, finished, goaways, waiter) {
 								Poll::Ready(UpdateRead::Update(update)) => break 'turn Turn::Update(update),
 								Poll::Ready(UpdateRead::Cancelled) => break 'turn Turn::Cancelled,
-								Poll::Ready(UpdateRead::Malformed(err)) => break 'turn Turn::Malformed(err),
 								Poll::Ready(UpdateRead::Failed(err)) => break 'turn Turn::Served(Err(err)),
 								Poll::Pending => {}
 							}
@@ -2228,19 +2217,6 @@ impl RunSubscription {
 					self.state = RunState::Next;
 
 					match turn {
-						// A malformed update, such as one whose AUTHORIZATION TOKEN names an alias,
-						// closes the session rather than only ending this subscription, as the same
-						// token on the request itself would. A source track's decode failure is not
-						// this requester's fault, so it reaches Served and ends only this subscription.
-						Turn::Malformed(err) => {
-							if super::subscriber::is_protocol_violation(&err) {
-								publisher.session.close(
-									super::error::to_session_code(&crate::SessionError::from(&err)),
-									&err.to_string(),
-								);
-							}
-							return Poll::Ready(Some(Served::Track(Err(err))));
-						}
 						Turn::Served(res) => return Poll::Ready(Some(Served::Track(res))),
 						Turn::Cancelled => return Poll::Ready(None),
 						Turn::Renewal(request_update::Verdict { verdict, grant: res }) => {
@@ -2465,15 +2441,6 @@ impl WaitResume {
 			let update = match read {
 				UpdateRead::Update(update) => update,
 				UpdateRead::Cancelled => return Poll::Ready(Err(None)),
-				UpdateRead::Malformed(err) => {
-					if super::subscriber::is_protocol_violation(&err) {
-						publisher.session.close(
-							super::error::to_session_code(&crate::SessionError::from(&err)),
-							&err.to_string(),
-						);
-					}
-					return failed(err);
-				}
 				UpdateRead::Failed(err) => return failed(err),
 			};
 			if renewal.pending() {
@@ -3258,6 +3225,34 @@ impl Publisher {
 		retain.poll_lapsed(waiter)
 	}
 
+	/// Ready once the requester cancels a subscription whose run ended, or the session closes.
+	///
+	/// An update that crossed the run's end is dropped unanswered: the PUBLISH_DONE that
+	/// follows answers it, as it answers one that crossed PUBLISH_DONE itself (see
+	/// [`Self::poll_retain_join`]). Ending the session over it would cost every other
+	/// subscription a benign race.
+	fn poll_ended_cancel(
+		&self,
+		stream: &mut Stream<Transport, Version>,
+		finished: &mut bool,
+		goaways: &mut super::request_stream::Messages,
+		waiter: &kio::Waiter,
+	) -> Poll<()> {
+		if self.session.poll_closed(waiter).is_ready() || stream.writer.poll_closed(waiter).is_ready() {
+			return Poll::Ready(());
+		}
+		let mut budget = kio::coop::Budget::new(32);
+		loop {
+			ready!(budget.poll_yield(waiter));
+			match ready!(self.poll_update(stream, finished, goaways, waiter)) {
+				UpdateRead::Update(update) => {
+					tracing::debug!(id = %update.request_id, "update crossed the end of track");
+				}
+				UpdateRead::Cancelled | UpdateRead::Failed(_) => return Poll::Ready(()),
+			}
+		}
+	}
+
 	/// Await [`RunSubscription`] with no fill.
 	#[cfg(test)]
 	async fn run_subscription(
@@ -3274,6 +3269,10 @@ impl Publisher {
 
 	/// Read the requester's next REQUEST_UPDATE on its request stream, admitting its
 	/// Request ID. Pending once the requester finished sending where a FIN does not cancel.
+	///
+	/// A malformed update, such as one whose AUTHORIZATION TOKEN names an alias, closes the
+	/// session rather than only ending this subscription, as the same token on the request
+	/// itself would.
 	fn poll_update(
 		&self,
 		stream: &mut Stream<Transport, Version>,
@@ -3300,12 +3299,12 @@ impl Publisher {
 				}
 				Ok(Some(Next::GoAway { redirect })) => {
 					if let Err(err) = goaways.receive(redirect) {
-						return Poll::Ready(UpdateRead::Malformed(err));
+						return Poll::Ready(UpdateRead::Failed(err));
 					}
 				}
 				Ok(None) if !super::request_stream::fin_cancels(self.version) => *finished = true,
 				Ok(None) => return Poll::Ready(UpdateRead::Cancelled),
-				Err(err) => return Poll::Ready(UpdateRead::Malformed(err)),
+				Err(err) => return Poll::Ready(UpdateRead::Failed(goaways.failed(err))),
 			}
 		}
 		Poll::Pending
@@ -9758,20 +9757,14 @@ mod serve_tests {
 				h.track.finish_shared().unwrap();
 				assert!(matches!(run.await, Some(Served::Track(Ok(())))), "{version}");
 			}
-			// The same reader now watches cancellation while the final marker waits for credit.
+			// The same reader now watches cancellation while the final marker waits for credit,
+			// where a second GOAWAY still closes the session.
 			session.push(&[0x10, 0, 2, 0, 0]);
 			let waiter = &kio::Waiter::noop();
 			assert!(
-				matches!(
-					super::super::request_stream::poll_cancel(
-						&mut stream,
-						&mut finished,
-						&mut goaways,
-						super::super::request_stream::fin_cancels(version),
-						waiter
-					),
-					Poll::Ready(Err(Error::ProtocolViolation))
-				),
+				h.publisher
+					.poll_ended_cancel(&mut stream, &mut finished, &mut goaways, waiter)
+					.is_ready(),
 				"{version}"
 			);
 			assert_eq!(h.log.closes()[0].0, 0x03, "{version}");
@@ -12676,6 +12669,71 @@ mod serve_tests {
 					"one stream carries each later object ({filter:?}, narrowed to {narrowing:?})"
 				);
 			}
+		}
+	}
+
+	/// An update crossing its track's end, while the END_OF_TRACK marker waits for stream
+	/// credit, ends at most its subscription: the session stays open, and the marker and
+	/// PUBLISH_DONE still go out, leaving the update unanswered.
+	#[kio::test]
+	async fn an_update_crossing_the_end_of_track_keeps_the_session() {
+		for version in ALL_VERSIONS {
+			let credit = kio::Producer::new(false);
+			let session = ScriptedSession::per_stream(vec![Vec::new()]).with_open_uni_gate(credit.consume());
+			let h = serve_session(version, crate::track::Info::timed(), session);
+			// An empty finished track: nothing to serve but the marker.
+			h.track.finish_shared().unwrap();
+			kio::clock::sim::yield_now().await;
+			let mut request = ScriptedSession::new(Vec::new());
+			request.log = h.log.clone();
+			let stream = Stream::open(&crate::driver::Transport::new(request.clone()), version)
+				.await
+				.unwrap();
+			let mut serving = std::pin::pin!(
+				h.publisher
+					.clone()
+					.run_subscribe_stream(stream, subscribe(Filter::Unfiltered, None))
+			);
+			serve_until(serving.as_mut(), "the subscription is accepted", || {
+				!h.log.trail().is_empty() && Wire::read(&h.log, version).sent(ietf::SubscribeOk::ID).is_some()
+			})
+			.await;
+
+			let update = ietf::SubscribeUpdate {
+				request_id: RequestId(2),
+				subscriber_priority: None,
+				forward: None,
+				filter: Some(Filter::Absolute {
+					start: Location { group: 0, object: 0 },
+					end: None,
+				}),
+				authorization_token: None,
+				new_group: None,
+				fill: None,
+			};
+			let mut bytes = Vec::new();
+			let mut encoder = Encoder::new(&mut bytes, version.into());
+			encoder.varint(ietf::SubscribeUpdate::ID).unwrap();
+			update.encode(&mut encoder, version).unwrap();
+			request.push(&bytes);
+			for _ in 0..50 {
+				assert!(
+					futures::poll!(serving.as_mut()).is_pending(),
+					"{version}: the marker waits for credit"
+				);
+				kio::clock::sim::yield_now().await;
+			}
+			assert_eq!(h.log.closes(), Vec::new(), "{version}: the update closed the session");
+
+			*credit.write().ok().expect("credit is live") = true;
+			served(&h, serving.as_mut()).await;
+			let wire = Wire::read(&h.log, version);
+			assert!(wire.publish_done.is_some(), "{version}: no PUBLISH_DONE");
+			assert!(
+				wire.sent(ietf::RequestOk::ID).is_none(),
+				"{version}: the update was answered"
+			);
+			assert_eq!(h.log.closes(), Vec::new(), "{version}: the session closed");
 		}
 	}
 
@@ -21755,13 +21813,11 @@ impl ServeRange {
 	}
 }
 
-/// Ask for a live join with a Min Age of zero, as a SUBSCRIBE without an absolute start does:
-/// a range with no start and no Min Age would reach back to the oldest group and have a
-/// relay's route replay everything it retains, and SUBSCRIBE_OK then name the oldest group
-/// replayed so far as Largest.
+/// Ask for a live join with no lag, as a SUBSCRIBE without an absolute start does: a range
+/// from the oldest group would have a relay's route replay everything it retains, and
+/// SUBSCRIBE_OK then name the oldest group replayed so far as Largest.
 fn live_join(subscription: &mut Subscription) {
-	*subscription = std::mem::take(subscription).with_ranges([track::Range::default()]);
-	subscription.delay.min = Some(Duration::ZERO);
+	*subscription = std::mem::take(subscription).with_ranges([track::Range::from(track::Start::Live(Duration::ZERO))]);
 }
 
 /// The slice of one group a subscription's [`ServeRange`] selects.

@@ -210,6 +210,22 @@ pub struct CreditStats {
 	/// The most credit the peer has had spent at once, leased or not yet read: how close the
 	/// connection came to filling its receive window
 	pub peak_spent: u64,
+	/// How long the peer had the whole window spent while eviction was held off
+	pub held: HeldStats,
+}
+
+/// Time the receive window stayed spent, the peer out of credit, while eviction waited, by what
+/// it waited on; see [`recv::Stream::poll_lease()`](crate::recv::Stream::poll_lease)
+///
+/// Time accrues as the connection is driven (receiving, timers, transmitting), so a hold in
+/// progress counts up to the latest of those.
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct HeldStats {
+	/// A reader had data it had not looked at yet, or waited behind a gap: a reader behind
+	pub readers: Duration,
+	/// An evicted reader had not stopped its stream, keeping the credit of bytes it took
+	pub evicted: Duration,
 }
 
 /// Connection-level send flow control: how long writers waited on the peer's credit

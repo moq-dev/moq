@@ -180,10 +180,11 @@ export class BucketReader {
 					name: event.name,
 					reader: new Json.Snapshot.Consumer({ track, schema: BucketFrameSchema }),
 				};
-			} else if ((event.kind === "removed" || event.kind === "finished") && event.name === this.#run?.name) {
+			} else if (event.kind === "removed" && event.name === this.#run?.name) {
 				this.#end(this.#run);
 				return { kind: "ended" };
 			}
+			// A finished run is left to its reader, which yields its final frames before it ends.
 		}
 	}
 

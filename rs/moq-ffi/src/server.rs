@@ -74,12 +74,54 @@ struct Origins {
 
 /// Where a server is in its lifecycle.
 enum Phase {
-	/// Nothing bound yet, or the last bind failed.
-	Idle(Origins),
-	/// `listen` started the accept loop.
+	/// Nothing bound yet, or the last listen failed or was cancelled.
+	Idle(Idle),
+	/// A `listen` started the accept loop and waits for its address. Rolled back to `Idle` if
+	/// that call fails or is dropped first.
+	Starting(Listening),
+	/// The accept loop is bound.
 	Listening(Listening),
 	/// Terminal. Keeps the loop's completion, so a later call still reports its panic.
 	Cancelled(crate::ffi::Background),
+}
+
+/// A server with no accept loop of its own.
+struct Idle {
+	origins: Origins,
+	/// The loop a dropped `listen` started, stopped but maybe still releasing its sockets.
+	stopping: Option<Stopping>,
+}
+
+impl Idle {
+	fn new(origins: Origins) -> Self {
+		Self {
+			origins,
+			stopping: None,
+		}
+	}
+
+	/// Block until the loop a dropped `listen` started has released its sockets, returning its
+	/// completion. Blocks like [`Listening::close`].
+	fn settle(&mut self) -> crate::ffi::Background {
+		self.stopping.take().map(Stopping::wait).unwrap_or_default()
+	}
+}
+
+/// An accept loop told to stop.
+struct Stopping {
+	driver: crate::ffi::Background,
+	/// Disconnects once the loop has closed the listener.
+	closed: std::sync::mpsc::Receiver<()>,
+}
+
+impl Stopping {
+	/// Waits on a std channel so it works from inside another runtime, but must not run on
+	/// an FFI runtime worker, which the accept loop may need.
+	fn wait(self) -> crate::ffi::Background {
+		// Disconnects when the loop finishes, or when the runtime is gone and dropped it.
+		let _ = self.closed.recv();
+		self.driver
+	}
 }
 
 /// A running accept loop, which `cancel` stops without waiting for a parked `accept`.
@@ -96,16 +138,40 @@ struct Listening {
 }
 
 impl Listening {
-	/// Stop the accept loop and block until the listener's sockets are released, returning
-	/// the loop's completion.
-	///
-	/// Waits on a std channel so it works from inside another runtime, but must not run on
-	/// an FFI runtime worker, which the accept loop may need.
-	fn close(self) -> crate::ffi::Background {
+	/// Stop the accept loop without waiting, falling back to `Idle`.
+	fn stop(self) -> Idle {
 		drop(self.stop);
-		// Disconnects when the loop finishes, or when the runtime is gone and dropped it.
-		let _ = self.closed.recv();
-		self.driver
+		Idle {
+			origins: self.origins,
+			stopping: Some(Stopping {
+				driver: self.driver,
+				closed: self.closed,
+			}),
+		}
+	}
+
+	/// Stop the accept loop and block until the listener's sockets are released, returning
+	/// the loop's completion. Blocks like [`Stopping::wait`].
+	fn close(self) -> crate::ffi::Background {
+		self.stop().settle()
+	}
+}
+
+/// Rolls a dropped or failed `listen` back from `Starting` to `Idle`.
+struct Rollback<'a>(&'a std::sync::Mutex<Phase>);
+
+impl Drop for Rollback<'_> {
+	fn drop(&mut self) {
+		// A drop may run while a panic unwinds, so a poisoned lock must not panic again.
+		let mut phase = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+		if matches!(*phase, Phase::Starting(_)) {
+			let Phase::Starting(listening) = std::mem::replace(&mut *phase, Phase::Cancelled(Default::default()))
+			else {
+				unreachable!("matched above");
+			};
+			// Not waited out here: a drop must not block. The next `listen` or `cancel` does.
+			*phase = Phase::Idle(listening.stop());
+		}
 	}
 }
 
@@ -223,7 +289,7 @@ pub struct MoqServer {
 }
 
 impl MoqServer {
-	/// Bind, and start the accept loop, moving `phase` from `Idle` to `Listening`.
+	/// Bind, and start the accept loop, moving `phase` from `Idle` to `Starting`.
 	///
 	/// `init` binds the QUIC socket, so it runs under the lock that `cancel` takes to close it.
 	fn start(
@@ -252,7 +318,7 @@ impl MoqServer {
 		let (stop, stopped) = tokio::sync::oneshot::channel();
 		let (closed, wait) = std::sync::mpsc::channel();
 		let driver = crate::ffi::spawn(serve(server, bound, queue, stopped, closed));
-		*phase = Phase::Listening(Listening {
+		*phase = Phase::Starting(Listening {
 			driver: driver.clone(),
 			stop,
 			closed: wait,
@@ -267,7 +333,7 @@ impl MoqServer {
 	#[cfg(test)]
 	pub(crate) fn accepting(&self) -> bool {
 		match &*self.phase.lock().unwrap() {
-			Phase::Listening(listening) => listening.queue.try_lock().is_err(),
+			Phase::Starting(listening) | Phase::Listening(listening) => listening.queue.try_lock().is_err(),
 			Phase::Idle(_) | Phase::Cancelled(_) => false,
 		}
 	}
@@ -284,7 +350,7 @@ impl MoqServer {
 		let (settings, origins) = Settings::new(config)?;
 		Ok(Arc::new(Self {
 			settings,
-			phase: std::sync::Mutex::new(Phase::Idle(origins)),
+			phase: std::sync::Mutex::new(Phase::Idle(Idle::new(origins))),
 		}))
 	}
 
@@ -293,12 +359,14 @@ impl MoqServer {
 	pub async fn listen(&self) -> Result<String, MoqError> {
 		let started = {
 			let mut phase = self.phase.lock().unwrap();
-			match &*phase {
-				Phase::Idle(origins) => {
-					let origins = origins.clone();
+			match &mut *phase {
+				Phase::Idle(idle) => {
+					// A loop a dropped listen started may still hold the address.
+					idle.settle().check()?;
+					let origins = idle.origins.clone();
 					Ok(self.start(&mut phase, origins)?)
 				}
-				Phase::Listening(_) => {
+				Phase::Starting(_) | Phase::Listening(_) => {
 					return Err(MoqError::Bind {
 						reason: "already listening".into(),
 					});
@@ -311,6 +379,8 @@ impl MoqServer {
 			Err(driver) => return cancelled(driver).await,
 		};
 
+		// Only this call leaves `Idle`, so a `Starting` phase is this call's own loop.
+		let rollback = Rollback(&self.phase);
 		let result = crate::ffi::run(async {
 			// Dropped only when the runtime is gone.
 			addr.await.map_err(|_| MoqError::Cancelled)?
@@ -318,16 +388,23 @@ impl MoqServer {
 		.await;
 		let after = {
 			let mut phase = self.phase.lock().unwrap();
-			match &*phase {
-				Phase::Cancelled(driver) => Some(driver.clone()),
-				// Only this call leaves `Idle`, so the loop that failed to bind is the one listening.
-				Phase::Listening(listening) if result.is_err() => {
-					*phase = Phase::Idle(listening.origins.clone());
+			match std::mem::replace(&mut *phase, Phase::Cancelled(Default::default())) {
+				Phase::Cancelled(driver) => {
+					*phase = Phase::Cancelled(driver.clone());
+					Some(driver)
+				}
+				Phase::Starting(listening) if result.is_ok() => {
+					*phase = Phase::Listening(listening);
 					None
 				}
-				Phase::Idle(_) | Phase::Listening(_) => None,
+				// A failed start falls back to `Idle` when `rollback` drops.
+				other => {
+					*phase = other;
+					None
+				}
 			}
 		};
+		drop(rollback);
 		if let Some(driver) = after {
 			return cancelled(driver).await;
 		}
@@ -342,7 +419,9 @@ impl MoqServer {
 	pub async fn accept(&self) -> Result<Option<Arc<MoqRequest>>, MoqError> {
 		let listening = match &*self.phase.lock().unwrap() {
 			Phase::Idle(_) => return Err(not_listening()),
-			Phase::Listening(listening) => Ok((listening.driver.clone(), listening.queue.clone())),
+			Phase::Starting(listening) | Phase::Listening(listening) => {
+				Ok((listening.driver.clone(), listening.queue.clone()))
+			}
 			Phase::Cancelled(driver) => Err(driver.clone()),
 		};
 		let (driver, queue) = match listening {
@@ -352,7 +431,7 @@ impl MoqServer {
 		// A cancel closes the loop, which ends the queue and wakes this.
 		let ended = driver.clone();
 		let request = driver
-			.watch(crate::ffi::run(async move {
+			.watch(async move {
 				let mut queue = tokio::select! {
 					// A request buffered before the loop ended still goes to whoever takes the queue.
 					biased;
@@ -361,13 +440,13 @@ impl MoqServer {
 					result = ended.finished() => return result.map(|()| None),
 				};
 				Ok::<_, MoqError>(queue.recv().await)
-			}))
+			})
 			.await;
 		// Read after the wait, so a parked accept holds no origin past a cancel.
 		let origins = match &*self.phase.lock().unwrap() {
 			Phase::Cancelled(driver) => Err(driver.clone()),
-			Phase::Idle(origins) => Ok(origins.clone()),
-			Phase::Listening(listening) => Ok(listening.origins.clone()),
+			Phase::Idle(idle) => Ok(idle.origins.clone()),
+			Phase::Starting(listening) | Phase::Listening(listening) => Ok(listening.origins.clone()),
 		};
 		let origins = match origins {
 			Ok(origins) => origins,
@@ -390,7 +469,7 @@ impl MoqServer {
 	pub fn cert_fingerprints(&self) -> Result<Vec<String>, MoqError> {
 		match &*self.phase.lock().unwrap() {
 			Phase::Idle(_) => Err(not_listening()),
-			Phase::Listening(listening) => {
+			Phase::Starting(listening) | Phase::Listening(listening) => {
 				listening.driver.check()?;
 				Ok(listening.certificates.fingerprints())
 			}
@@ -410,8 +489,8 @@ impl MoqServer {
 		// Closed under the lock, so a concurrent `cancel` returns only once the socket is released.
 		let mut phase = self.phase.lock().unwrap();
 		let driver = match std::mem::replace(&mut *phase, Phase::Cancelled(Default::default())) {
-			Phase::Idle(_) => Default::default(),
-			Phase::Listening(listening) => listening.close(),
+			Phase::Idle(mut idle) => idle.settle(),
+			Phase::Starting(listening) | Phase::Listening(listening) => listening.close(),
 			Phase::Cancelled(driver) => driver,
 		};
 		*phase = Phase::Cancelled(driver);

@@ -5,9 +5,14 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import parallel_tests
 
 ROOT = Path(__file__).resolve().parents[2]
 FUZZ_CRATES = ("moq-net", "moq-quic", "moq-mux", "moq-rtmp", "moq-sock", "moq-uring")
@@ -137,14 +142,16 @@ class SelectTest(unittest.TestCase):
 
     def test_gate_proves_send_depth_for_net(self):
         # moq-net and its dependencies can deepen the session driver's Send proof.
+        # send-depth runs in parallel with the stable lint steps in its own target dir.
         for path in ("rs/moq-net/src/lib.rs", "rs/kio/src/lib.rs", "Cargo.lock"):
             with self.subTest(path=path):
                 calls = [call for call in self.selected(path) if call != "rs c-tests --syntax"]
-                self.assertEqual(len(calls), 4, calls)
-                self.assertTrue(calls[0].startswith("rs lint "), calls)
-                self.assertEqual(calls[1], "rs media-defaults", calls)
-                self.assertEqual(calls[2], "rs no-async", calls)
-                self.assertEqual(calls[3], "rs send-depth", calls)
+                self.assertEqual(calls.count("rs send-depth"), 1, calls)
+                stable = [call for call in calls if call != "rs send-depth"]
+                self.assertEqual(len(stable), 3, stable)
+                self.assertTrue(stable[0].startswith("rs lint "), stable)
+                self.assertEqual(stable[1], "rs media-defaults", stable)
+                self.assertEqual(stable[2], "rs no-async", stable)
         # The script that runs the proof selects moq-net, so an edit to it is proved too.
         self.assertIn("rs send-depth", self.selected("sh/rs/send-depth.sh"))
         # Only the lint phase runs it, so the gate compiles it once.
@@ -154,11 +161,11 @@ class SelectTest(unittest.TestCase):
         self.assertIn("rs send-depth", self.selected("rs/moq-tokio/src/client.rs"))
 
     def test_gate_compiles_c_callers_against_libmoq(self):
-        # libmoq, a crate its header reaches, and the C callers' own inputs.
+        # libmoq, the C callers' own inputs, and workspace-wide changes.
         for path in (
             "rs/libmoq/src/lib.rs",
+            "rs/libmoq/build.rs",
             "rs/libmoq/c-tests/abort-unwanted.c",
-            "rs/moq-net/src/lib.rs",
             "sh/rs/c-tests.sh",
             "doc/lib/c/index.md",
             "doc/lib/samples.sh",
@@ -167,7 +174,11 @@ class SelectTest(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertRegex(path, dispatch_scope())
                 self.assertEqual(self.selected(path).count("rs c-tests --syntax"), 1)
-        # Only the lint phase runs it, and only for libmoq.
+        # Upstream crate edits cannot alter rs/libmoq/src (where cbindgen reads moq.h),
+        # so they skip the extra libmoq header check while still testing libmoq.
+        self.assertNotIn("rs c-tests --syntax", self.selected("rs/moq-net/src/lib.rs"))
+        self.assertTrue(any("/rs/libmoq#" in call for call in self.selected("rs/moq-net/src/lib.rs", action="test")))
+        # Only the lint phase runs it, and only when libmoq is seeded.
         self.assertNotIn("rs c-tests --syntax", self.selected("rs/libmoq/src/lib.rs", action="test"))
         self.assertNotIn("rs c-tests --syntax", self.selected("rs/moq-auth/src/lib.rs"))
 
@@ -274,6 +285,62 @@ class SelectTest(unittest.TestCase):
                     )
         # The lister still finds the read behind moq-dev/moq#8459.
         self.assertIn(("rs/moq-relay", "test/**/*.toml"), [(crate, glob) for crate, glob, _ in reads])
+
+    def test_reads_handles_nul_bytes_and_colon_lines(self):
+        # Literal NUL bytes, colon-prefixed lines, and missing trailing newlines
+        # must not shift file framing or line numbers in sh/rs/reads.sh.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            (repo / "rs/a/src").mkdir(parents=True)
+            (repo / "rs/a/Cargo.toml").write_text('[package]\nname = "a"\n')
+            (repo / "rs/a/src/lib.rs").write_bytes(
+                b'const A: &str = "\x00"; const B: &str = include_str!("../../shared.txt");\n'
+                b":not_a_header\n"
+                b"\n"
+                b' const D: &str = include_str!("../../tail.txt");'
+            )
+            (repo / "rs/b/src").mkdir(parents=True)
+            (repo / "rs/b/Cargo.toml").write_text('[package]\nname = "b"\n')
+            (repo / "rs/b/src/caf\u00e9.rs").write_bytes(b'const C: &str = include_str!("../../other.txt");')
+
+            result = subprocess.run(
+                ["bash", str(ROOT / "sh/rs/reads.sh")],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(
+                result.stdout.splitlines(),
+                [
+                    "rs/a rs/shared.txt rs/a/src/lib.rs:1",
+                    "rs/a rs/tail.txt rs/a/src/lib.rs:4",
+                    "rs/b rs/other.txt rs/b/src/caf\u00e9.rs:1",
+                ],
+            )
+
+    def test_reads_sees_an_include_that_opens_on_the_line_before_its_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            (repo / "rs/a/src").mkdir(parents=True)
+            (repo / "rs/a/Cargo.toml").write_text('[package]\nname = "a"\n')
+            (repo / "rs/a/src/lib.rs").write_text(
+                'const A: &str = include_str!(\n    "../../shared.txt",\n);\n'
+                'const DIR: &str = env!("CARGO_MANIFEST_DIR");\n'
+                'fn f() { let _ = std::fs::read(format!("{}/../fixture.bin", DIR)); }\n'
+            )
+            result = subprocess.run(
+                ["bash", str(ROOT / "sh/rs/reads.sh")], cwd=repo, check=True, capture_output=True, text=True
+            )
+            self.assertEqual(
+                result.stdout.splitlines(),
+                [
+                    "rs/a rs/fixture.bin rs/a/src/lib.rs:5",
+                    "rs/a rs/shared.txt rs/a/src/lib.rs:1",
+                ],
+            )
 
     def test_dispatch_scope_covers_out_of_crate_targets(self):
         scope = dispatch_scope()
@@ -421,9 +488,14 @@ class MetadataTest(unittest.TestCase):
         jq = self.scratch / "jq"
         jq.write_text(
             "#!/usr/bin/env bash\nset -eu\n"
-            'count_file="$TEST_METADATA.count"\ncount=0\n'
+            'count_file="$TEST_METADATA.count"\nlock_dir="$TEST_METADATA.lock"\n'
+            # Pipeline stages (e.g. reads.sh | jq) invoke this wrapper concurrently;
+            # serialize counter updates with an atomic mkdir lock before exec.
+            'while ! mkdir "$lock_dir" 2>/dev/null; do sleep 0.005; done\n'
+            "count=0\n"
             'if [[ -f "$count_file" ]]; then read -r count <"$count_file"; fi\n'
             'count=$((count + 1))\nprintf "%s\\n" "$count" >"$count_file"\n'
+            'rmdir "$lock_dir"\n'
             'if [[ "$count" == "$FAIL_JQ" ]]; then\n'
             '    echo "partial output"\n    echo "jq: injected failure" >&2\n    exit 7\nfi\n'
             f'exec "{shutil.which("jq")}" "$@"\n'
@@ -572,4 +644,4 @@ fi
 
 
 if __name__ == "__main__":
-    unittest.main()
+    parallel_tests.main(sys.modules[__name__])

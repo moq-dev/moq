@@ -185,15 +185,6 @@ impl Version {
 		)
 	}
 
-	/// Whether SUBSCRIBE and SUBSCRIBE_UPDATE carry the subscriber's optional
-	/// `Subscriber Min Age`. Added in lite-07; an earlier subscription decodes it as not stated.
-	pub(crate) fn has_min_delay(self) -> bool {
-		!matches!(
-			self,
-			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
-		)
-	}
-
 	/// Whether SUBSCRIBE and SUBSCRIBE_UPDATE's `Subscriber Max Age` is milliseconds plus one,
 	/// so 0 says no limit. Added in lite-07; earlier wires carry bare milliseconds.
 	pub(crate) fn has_unlimited_max_delay(self) -> bool {

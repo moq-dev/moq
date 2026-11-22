@@ -71,8 +71,9 @@ const SEND_WINDOW: u64 = 64 * 1024;
 ///
 /// Its connection receive window, the 1 MiB datagram buffer QMux keeps, its send window, and one
 /// record per stream it may hold, with room for its transport's buffers: two 16 KiB read
-/// buffers and 64 KiB queued, or tungstenite's 128 KiB read and write buffers, and the
-/// largest message it reads, twice over while a frame is unmasked into a message.
+/// buffers and 64 KiB queued, or tungstenite's 128 KiB write buffer and a read buffer of
+/// one record that may grow, 128 KiB covering each, and the largest message it reads, twice
+/// over while a message is copied out.
 fn budget() -> usize {
 	const MIB: usize = 1 << 20;
 	const RECORD: usize = 16 * 1024;

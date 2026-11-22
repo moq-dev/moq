@@ -415,6 +415,11 @@ class SubscriptionControls {
 		return this.#live.get(id) !== undefined;
 	}
 
+	/** Whether Range ID `id` is live and starts with a live join. */
+	joins(id: bigint): boolean {
+		return this.#live.get(id)?.start?.live !== undefined;
+	}
+
 	/** Whether {@link take} has a control to answer with now. */
 	pending(): boolean {
 		return this.#update !== undefined || this.#end !== undefined;
@@ -601,14 +606,14 @@ class Unpinned {
  */
 function due(range: WireRange, started: boolean): bigint | undefined {
 	if (isEmpty(requestedRange(range))) return undefined;
-	if (!started && range.start?.absolute === undefined) return 0n;
+	if (!started && range.start !== undefined && range.start.absolute === undefined) return 0n;
 	if (range.end?.time !== undefined) return range.end.time + 1n;
 	return undefined;
 }
 
 // `entry`, a range this subscription already held, resolved as it was: a range resolves once, so
 // an update that leaves it live never looks a time start up again in newer holdings, nor places a
-// live join again under a newer Min Age. A start reaching back to the oldest group held stays as
+// live join again against a newer live edge. A start reaching back to the oldest group held stays as
 // it was, since an absolute start would turn it into a floor the subscriber never named.
 function pin(asked: WireRange, resolved: Resolved | undefined): WireRange {
 	if (!resolved) return asked;
@@ -1097,10 +1102,7 @@ export class Publisher {
 		const subscription = (ranges: track.Range[]): track.Subscription => ({
 			priority: msg.priority,
 			order: msg.order,
-			delay: {
-				max: servingMaxDelay(msg.maxDelay),
-				min: msg.minDelay === undefined ? null : Duration.millis(msg.minDelay),
-			},
+			delay: { max: servingMaxDelay(msg.maxDelay) },
 			ranges,
 		});
 		let ranges: track.Range[];
@@ -1235,7 +1237,7 @@ export class Publisher {
 				for (const [id, range] of asked.entries()) unpinned.insert(BigInt(id), due(range, false));
 			// Each live range due once the latest group reached where it may resolve, with its start and
 			// end replaced by the groups they resolved to: a range resolves once, so an update that
-			// leaves it live never places a live join again under a newer Min Age, nor looks a time
+			// leaves it live never places a live join again against a newer live edge, nor looks a time
 			// start up again in newer holdings, here or on a relay's copies. Only the ranges still
 			// waiting are asked, and each is let go once its anchors settle, so this costs those ranges
 			// rather than every range. Mirrors the Rust `TrackRun::pin`.
@@ -1280,10 +1282,7 @@ export class Publisher {
 					const largest = hooks.peekLargest(track).largest?.group;
 					if (update.wantedGroup !== undefined && (largest === undefined || update.wantedGroup > largest))
 						hooks.askSubscriber(track, "refresh");
-					const delay = {
-						max: servingMaxDelay(update.maxDelay),
-						min: update.minDelay === undefined ? null : Duration.millis(update.minDelay),
-					};
+					const delay = { max: servingMaxDelay(update.maxDelay) };
 					if (!hasRanges(this.version)) {
 						// An older update restates its one span, replacing every range.
 						track.update({
@@ -1567,8 +1566,12 @@ export class Publisher {
 		// nothing can resolve it (`finished`). SUBSCRIBE_START goes first.
 		const reportStarted = async (finished: boolean): Promise<boolean> => {
 			if (startKey === undefined || unstarted.size === 0) return true;
-			// An update not taken yet retired one, and taking that update forgets it.
-			const held = [...unstarted].filter((id) => controls.holds(id));
+			// An update not taken yet retired one, and taking that update forgets it. In Range ID
+			// order, as the Rust `TrackRun::report_started` reports them.
+			const held = [...unstarted].filter((id) => controls.holds(id)).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+			// Every range clamps against where delivery started before this batch, so one reported
+			// later isn't clamped against a start an earlier join in the batch lowered.
+			const from = startKey;
 			const resolution = hooks.servingResolvedKeys(track, held);
 			for (const [index, id] of held.entries()) {
 				// Or one taken while an earlier start went out.
@@ -1577,8 +1580,14 @@ export class Publisher {
 				if (!range && !finished) continue;
 				let start: bigint | undefined;
 				if (range) {
-					start = max(range.start, startKey);
+					// A live join placed behind where delivery started, further from the live edge than
+					// the first ranges, starts where it was placed: the subscriber reads its answer as
+					// the join's start, so its groups from there are owed, and delivery now starts there
+					// too. Any other range starts no earlier than delivery.
+					const joins = controls.joins(id);
+					start = joins ? range.start : max(range.start, from);
 					if (range.end !== undefined && range.end <= start) start = undefined;
+					else startKey = min(startKey, start);
 				}
 				const started = new SubscribeStarted(id, start);
 				if (!(await controls.response(encodeSubscribeResponse(stream, { started }, this.version))))
@@ -1814,28 +1823,6 @@ export class Publisher {
 						else if (!(await forward(recv.start, recv.end, recv))) return false;
 						continue;
 					case "idle":
-						// A start past everything the track has (a subscriber resuming just after
-						// what it holds) is answered at once with the largest position, on
-						// versions that carry it: a quiet track may not reach that start for a
-						// while, and the subscriber judges what it holds against the answer.
-						if (emitRange && !startSent && hasLargest(this.version) && bounds.startGroup !== undefined) {
-							const startFrame = bounds.startFrame;
-							if (
-								largest !== undefined &&
-								(bounds.startGroup > largest.group ||
-									(bounds.startGroup === largest.group && startFrame > largest.frame))
-							) {
-								startSent = true;
-								startKey = bounds.startGroup;
-								if (!hasRanges(this.version)) raiseFloor(bounds.startGroup);
-								const start = new SubscribeStart(rangeStarts(bounds.startGroup), answered(largest));
-								if (
-									!(await controls.response(encodeSubscribeResponse(stream, { start }, this.version)))
-								)
-									return false;
-								continue;
-							}
-						}
 						// A lite-07 window whose bounded ranges all resolved empty owes nothing: say so at
 						// once, and the subscription ends as covered below. No group would ever answer it.
 						if (emitRange && !startSent && hasRanges(this.version)) {

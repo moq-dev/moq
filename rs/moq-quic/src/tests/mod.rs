@@ -3507,6 +3507,21 @@ fn datagram_unsupported() {
 	}
 }
 
+/// A side that refuses to receive datagrams reports none to send either, as `send` refuses them
+#[test]
+fn datagram_disabled_locally() {
+	let _guard = subscribe();
+	let mut pair = Pair::default();
+	let mut client = client_config();
+	client.transport.datagram.receive_buffer = None;
+	let (client_ch, _) = pair.connect_with(client);
+	assert_matches!(pair.client_datagrams(client_ch).max_size(), None);
+	assert_matches!(
+		pair.client_datagrams(client_ch).send(Bytes::new(), Default::default()),
+		Err(send::Error::Unsupported)
+	);
+}
+
 /// RFC 9221 section 3: a `max_datagram_frame_size` of 0 means no DATAGRAM support, and no frame,
 /// not even an empty one, fits it
 #[test]

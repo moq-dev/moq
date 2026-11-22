@@ -377,10 +377,15 @@ impl Backend for Nvenc {
 				.resource
 				.map()
 				.map_err(|e| Error::codec(anyhow::anyhow!("NVENC map CUDA input: {e}")))?;
-			let submission = self
-				.session
-				.encode_picture(mapped, output, params)
-				.map_err(|e| Error::codec(anyhow::anyhow!("NVENC encode: {e}")))?;
+			let submission = match self.session.encode_picture(mapped, output, params) {
+				Ok(submission) => submission,
+				Err(rejected) => {
+					// The driver never took the picture, so the output is reusable. The
+					// target is dropped with the rest of the failure paths.
+					self.output = Some(rejected.output);
+					return Err(Error::codec(anyhow::anyhow!("NVENC encode: {}", rejected.error)));
+				}
+			};
 			let (data, mapped, output) = drain_output(submission)?;
 			self.output = Some(output);
 			mapped
@@ -421,10 +426,15 @@ impl Backend for Nvenc {
 			}
 			drop(lock);
 
-			let submission = self
-				.session
-				.encode_picture(input, output, params)
-				.map_err(|e| Error::codec(anyhow::anyhow!("NVENC encode: {e}")))?;
+			let submission = match self.session.encode_picture(input, output, params) {
+				Ok(submission) => submission,
+				Err(rejected) => {
+					// The driver never took the picture, so both buffers are reusable.
+					self.input = Some(rejected.input);
+					self.output = Some(rejected.output);
+					return Err(Error::codec(anyhow::anyhow!("NVENC encode: {}", rejected.error)));
+				}
+			};
 			let (data, input, output) = drain_output(submission)?;
 			self.input = Some(input);
 			self.output = Some(output);

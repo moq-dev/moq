@@ -2589,7 +2589,7 @@ mod tests {
 			"url",
 			"broadcast",
 			"linger",
-			"tls-disable-verify",
+			"connect-tls-insecure",
 			"quic-idle-timeout",
 			"quic-keep-alive",
 			"quic-keylog",
