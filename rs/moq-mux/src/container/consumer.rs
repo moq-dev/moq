@@ -176,11 +176,17 @@ pub struct Consumer<F: Container> {
 	// contiguity check on a delivered hole.
 	presented_end: Option<std::time::Duration>,
 
+	// How the groups read so far run, for judging an unproven step.
+	cadence: Cadence,
+
+	// The cursor's group's frames read so far.
+	pictures: Pictures,
+
 	// Media went missing since the last item read, so the next one is preceded by a gap.
 	gap: bool,
 
 	// The cursor stepped over keys nothing declared skipped, so whether they held media is judged
-	// once the group it landed on shows where it starts.
+	// once the group it landed on shows where it starts: its first frame is held until then.
 	unproven: bool,
 
 	// The item a gap was returned ahead of.
@@ -279,6 +285,68 @@ impl Memory {
 
 fn pts_contiguous(end: Option<std::time::Duration>, next_start: std::time::Duration) -> bool {
 	end.is_some_and(|end| next_start <= end.saturating_add(CONTIGUITY_TOLERANCE))
+}
+
+/// The deepest reordering a codec allows, in pictures: H.264 and HEVC hold at most 16 frames, so 32
+/// fields. A reader measures a track's reordering and its last picture's duration within this many of
+/// a group's latest presentation times.
+const REORDER_MAX: usize = 32;
+
+/// How the groups read so far run, for judging a step over keys nothing declared skipped.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Cadence {
+	/// One picture, for a group whose frames carry no duration: its highest timestamp is where its
+	/// last picture starts, not ends. The largest step between its latest presentation times, so a
+	/// field/frame mix allows a frame. Zero once a group's end was exact.
+	slack: std::time::Duration,
+	/// The most frames that decoded ahead of a frame they present after, in any group read: an open
+	/// GOP's leading pictures decode after the keyframe, so its lowest picture comes within that many.
+	depth: usize,
+}
+
+/// Where the groups a reader read through ended, so a later reader of the track continues there.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Reached {
+	end: Option<std::time::Duration>,
+	cadence: Cadence,
+}
+
+/// The cursor's group's frames read so far.
+#[derive(Default)]
+struct Pictures {
+	/// The group's latest presentation times, ascending, at most [`REORDER_MAX`].
+	latest: Vec<std::time::Duration>,
+}
+
+impl Pictures {
+	/// Note a frame presenting `at`, returning how many frames read before it present after it.
+	fn read(&mut self, at: std::time::Duration) -> usize {
+		let below = self.latest.partition_point(|&t| t <= at);
+		let after = self.latest.len() - below;
+		match self.latest.len() < REORDER_MAX {
+			true => self.latest.insert(below, at),
+			// Full: the earliest leaves, unless this frame presents before every time kept.
+			false if below > 0 => {
+				self.latest.remove(0);
+				self.latest.insert(below - 1, at);
+			}
+			false => {}
+		}
+		after
+	}
+
+	/// The largest step between the latest presentation times read, zero for fewer than two.
+	fn step(&self) -> std::time::Duration {
+		(self.latest.windows(2))
+			.map(|pair| pair[1] - pair[0])
+			.max()
+			.unwrap_or_default()
+	}
+
+	/// The highest presentation time read.
+	fn highest(&self) -> Option<std::time::Duration> {
+		self.latest.last().copied()
+	}
 }
 
 /// A gap from the delivered `edge` to `resume`, in the resume's scale. Refused for an unscaled
@@ -404,6 +472,8 @@ impl<F: Container> Consumer<F> {
 			start: None,
 			floor: None,
 			presented_end: None,
+			cadence: Cadence::default(),
+			pictures: Pictures::default(),
 			gap: false,
 			unproven: false,
 			next: None,
@@ -417,14 +487,18 @@ impl<F: Container> Consumer<F> {
 
 	/// Continue groups an earlier reader of this track read up to `reached`: the first group
 	/// starting there reads as continuing them rather than past a hole.
-	pub(crate) fn continuing(mut self, reached: Option<std::time::Duration>) -> Self {
-		self.presented_end = reached;
+	pub(crate) fn continuing(mut self, reached: Reached) -> Self {
+		self.presented_end = reached.end;
+		self.cadence = reached.cadence;
 		self
 	}
 
 	/// Where the groups read through ended, for [`Self::continuing`].
-	pub(crate) fn reached(&self) -> Option<std::time::Duration> {
-		self.presented_end
+	pub(crate) fn reached(&self) -> Reached {
+		Reached {
+			end: self.presented_end,
+			cadence: self.cadence,
+		}
 	}
 
 	/// Start at the newest group, the live edge, rather than the floor or the oldest group the
@@ -623,9 +697,30 @@ impl<F: Container> Consumer<F> {
 				continue;
 			}
 
+			// Keys stepped over below the cursor's group lost media unless the group continues where
+			// the content read so far ended, which may take frames after its first to show: an open
+			// GOP's leading pictures decode after its keyframe but present before it. The group holds
+			// its first frame until it shows, so a gap is still read ahead of it.
+			let mut held = false;
+			if self.unproven
+				&& let Some(group) = self.pending.front_mut()
+				&& group.start <= self.current
+			{
+				// Before the first item nothing was read to lose, so there is nothing to wait for.
+				let bound = self.edge.and(self.presented_end).map(|end| end + self.cadence.slack);
+				match group.poll_continues(waiter, &self.format, bound, self.cadence.depth) {
+					Poll::Ready(Some(true)) => self.unproven = false,
+					Poll::Ready(Some(false)) => self.lose(),
+					// An endpoint, the group's end, or its failure comes first and is judged as it is read.
+					Poll::Ready(None) => {}
+					Poll::Pending => held = true,
+				}
+			}
+
 			// Return the next frame from the current group if possible.
 			// If the current group is finished or errored, advance to the next group.
-			if let Some(group) = self.pending.front_mut()
+			if !held
+				&& let Some(group) = self.pending.front_mut()
 				&& group.start <= self.current
 			{
 				match group.poll_read(waiter, &self.format) {
@@ -640,13 +735,11 @@ impl<F: Container> Consumer<F> {
 						}
 						if self.start.is_none_or(|(start, _)| start != seq) {
 							self.start = Some((seq, ts));
+							self.pictures.latest.clear();
 						}
+						let reordered = self.pictures.read(first);
+						self.cadence.depth = self.cadence.depth.max(reordered);
 						self.warmed.get_or_insert_with(|| first.saturating_add(self.warmup));
-						// Keys stepped over below this group lost media unless it continues where the
-						// content read so far ended.
-						if std::mem::take(&mut self.unproven) && !pts_contiguous(self.presented_end, first) {
-							self.lose();
-						}
 						let end = first + frame.duration.and_then(time).unwrap_or_default();
 						self.advance(end);
 						self.group = seq;
@@ -655,7 +748,8 @@ impl<F: Container> Consumer<F> {
 					Poll::Ready(Ok(Some(Event::FrameEnd { end, opens }))) => {
 						self.group = group.group.start;
 						let at = time(end).ok_or(moq_net::Error::TimestampMismatch)?;
-						if std::mem::take(&mut self.unproven) && !pts_contiguous(self.presented_end, at) {
+						let bound = self.presented_end.map(|end| end + self.cadence.slack);
+						if std::mem::take(&mut self.unproven) && !pts_contiguous(bound, at) {
 							self.lose();
 						}
 						self.advance(at);
@@ -727,6 +821,16 @@ impl<F: Container> Consumer<F> {
 							.and_then(time);
 						if let Some(end) = group.max_end.max(whole) {
 							self.presented_end = Some(end);
+							// Frames it carried say where its last picture ends: exactly when a duration
+							// or its end reaches past them, otherwise one picture past the highest.
+							if self.start.is_some_and(|(seq, _)| seq == group.group.start) {
+								let step = self.pictures.step();
+								if self.pictures.highest().is_some_and(|highest| end > highest) {
+									self.cadence.slack = std::time::Duration::ZERO;
+								} else if !step.is_zero() {
+									self.cadence.slack = step;
+								}
+							}
 						}
 						self.pending.pop_front();
 						self.current += 1;
@@ -770,8 +874,9 @@ impl<F: Container> Consumer<F> {
 			{
 				let polled = current.poll_min_timestamp(waiter, &self.format, true);
 				// A frame that landed since the read above is delivered, not judged: its end can
-				// reach the next group, and skipping there would throw it away as lost.
-				if current.ready() {
+				// reach the next group, and skipping there would throw it away as lost. A held frame
+				// waits on frames still to come instead.
+				if current.ready() && !held {
 					continue;
 				}
 				match polled {
@@ -1333,6 +1438,44 @@ impl<F: Container> GroupBuffer<F> {
 			}
 			if !ready!(self.buffer_once(waiter, format)?) {
 				return Poll::Ready(Ok(None));
+			}
+		}
+	}
+
+	/// Whether this group, landed on past keys nothing declared skipped, continues the content read
+	/// before it: a frame of it presents by `bound`, within one millisecond. Its lowest picture
+	/// decodes within `depth` frames of its first, so it looks no further, nor past its end, its
+	/// failure, or a full max buffer. `None` while it holds no frame, when an endpoint, its end, or a
+	/// failure comes first.
+	fn poll_continues(
+		&mut self,
+		waiter: &kio::Waiter,
+		format: &F,
+		bound: Option<std::time::Duration>,
+		depth: usize,
+	) -> Poll<Option<bool>> {
+		// Nothing proves a step with nowhere to continue from, so the first frame decides.
+		let depth = if bound.is_some() { depth } else { 0 };
+		loop {
+			if self.buffered.is_empty() && self.ready() {
+				return Poll::Ready(None);
+			}
+			let continues = (self.buffered.iter().take(depth + 1))
+				.any(|(frame, ..)| time(frame.timestamp).is_some_and(|at| pts_contiguous(bound, at)));
+			if continues {
+				return Poll::Ready(Some(true));
+			}
+			if self.buffered.len() > depth {
+				return Poll::Ready(Some(false));
+			}
+			// A group holding nothing buffers past a full max buffer, as the cursor's does. One holding
+			// a frame judges by what it holds, since only reading frames frees the buffer.
+			let lead = self.buffered.is_empty();
+			if !lead && self.memory.full() {
+				return Poll::Ready(Some(false));
+			}
+			if !ready!(self.look_once(waiter, format, !lead)) {
+				return Poll::Ready((!self.buffered.is_empty()).then_some(false));
 			}
 		}
 	}
@@ -2862,6 +3005,171 @@ mod tests {
 		}
 		let _track = track.finish().unwrap();
 		assert_eq!(items(&mut reader).await, ["0", "20000", "gap 40000+20000", "60000"]);
+	}
+
+	/// MP2 codes 1152 samples per frame, so its groups bridge as Opus's do.
+	#[tokio::test(start_paused = true)]
+	async fn mp2_durations_bridge_undeclared_runs_between_audio_groups() {
+		let track = track_producer("gaps", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let subscription = track.subscribe(
+			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10))),
+		);
+		let config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Mp2, 48_000, 2);
+		let mut reader = Consumer::new(subscription, Container::try_from(&config).unwrap());
+		// Two 24 ms frames per group. The group starting at 96 ms never arrives.
+		for start in [0, 48_000, 144_000] {
+			let mut group = track.create_group(moq_net::group::Info { start }).unwrap();
+			for at in [start, start + 24_000] {
+				let packet = Frame {
+					timestamp: ts(at),
+					payload: Bytes::from_static(&[0xFF, 0xFD]),
+					keyframe: at == start,
+					duration: None,
+				};
+				Container::try_from(&config)
+					.unwrap()
+					.write(&mut group, &[packet])
+					.unwrap();
+			}
+			group.finish().unwrap();
+		}
+		let _track = track.finish().unwrap();
+		assert_eq!(
+			items(&mut reader).await,
+			["0", "24000", "48000", "72000", "gap 96000+48000", "144000", "168000"]
+		);
+	}
+
+	/// Legacy video groups, each keyed by its first frame's timestamp as a moq-lite-06 hop delivers
+	/// them with nothing declared between them: the frames of each, in decode order, with no duration.
+	async fn legacy_video(groups: &[&[u64]]) -> Vec<String> {
+		let track = track_producer("gaps", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let subscription = track.subscribe(
+			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10))),
+		);
+		let wire = Container::Legacy(crate::container::Kind::Video);
+		let mut reader = Consumer::new(subscription, Container::Legacy(crate::container::Kind::Video));
+		for pictures in groups {
+			let start = pictures[0];
+			let mut group = track.create_group(moq_net::group::Info { start }).unwrap();
+			for &micros in *pictures {
+				let frame = Frame {
+					timestamp: ts(micros),
+					payload: Bytes::from_static(&[0xDE, 0xAD]),
+					keyframe: micros == start,
+					duration: None,
+				};
+				wire.write(&mut group, &[frame]).unwrap();
+			}
+			group.finish().unwrap();
+		}
+		let _track = track.finish().unwrap();
+		items(&mut reader).await
+	}
+
+	/// The second group is an open GOP: its leading pictures present between the first group's last
+	/// picture and its keyframe, so the two groups meet and nothing is lost.
+	#[tokio::test(start_paused = true)]
+	async fn an_open_gop_that_continues_the_previous_video_group_is_no_gap() {
+		assert_eq!(
+			legacy_video(&[&[0, 120_000, 40_000, 80_000], &[280_000, 160_000, 200_000, 240_000]]).await,
+			["0", "120000", "40000", "80000", "280000", "160000", "200000", "240000"]
+		);
+	}
+
+	/// A closed GOP with B-frames starts one picture past the previous group's highest timestamp,
+	/// which is where its last picture starts rather than ends.
+	#[tokio::test(start_paused = true)]
+	async fn a_closed_gop_one_picture_past_the_previous_video_group_is_no_gap() {
+		assert_eq!(
+			legacy_video(&[&[0, 120_000, 40_000, 80_000], &[160_000, 280_000, 200_000, 240_000]]).await,
+			["0", "120000", "40000", "80000", "160000", "280000", "200000", "240000"]
+		);
+	}
+
+	/// Field-coded open GOPs: the keyframe's second field decodes ahead of the leading pictures, so
+	/// the lowest one comes third, within how far the first group reordered. A 40 ms frame among the
+	/// second group's 20 ms fields allows its last picture to be one too.
+	#[tokio::test(start_paused = true)]
+	async fn field_coded_open_gops_that_continue_each_other_are_no_gap() {
+		let groups: &[&[u64]] = &[
+			&[0, 20_000, 120_000, 140_000, 40_000, 60_000, 80_000, 100_000],
+			&[240_000, 260_000, 160_000, 180_000, 220_000],
+			&[380_000, 400_000, 300_000, 320_000, 340_000, 360_000],
+		];
+		let read = legacy_video(groups).await;
+		assert!(!read.iter().any(|item| item.starts_with("gap")), "{read:?}");
+		assert_eq!(read.len(), 19);
+	}
+
+	/// A lost group is still a gap, read ahead of the next group's keyframe, though its leading pictures
+	/// would have presented nearer: the keyframe waits for them.
+	#[tokio::test(start_paused = true)]
+	async fn an_open_gop_past_a_lost_video_group_is_a_gap_before_its_keyframe() {
+		assert_eq!(
+			legacy_video(&[
+				&[0, 120_000, 40_000, 80_000],
+				&[280_000, 160_000, 200_000, 240_000],
+				// The group at 560 ms never arrives.
+				&[840_000, 720_000, 760_000, 800_000],
+			])
+			.await,
+			[
+				"0",
+				"120000",
+				"40000",
+				"80000",
+				"280000",
+				"160000",
+				"200000",
+				"240000",
+				"gap 280000+560000",
+				"840000",
+				"720000",
+				"760000",
+				"800000"
+			]
+		);
+	}
+
+	/// The keyframe of an open GOP is held only until a frame shows the group continues, so it reads
+	/// while the rest of its group is still to come.
+	#[tokio::test(start_paused = true)]
+	async fn an_open_gops_keyframe_reads_once_a_leading_picture_lands() {
+		let track = track_producer("gaps", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let subscription = track.subscribe(
+			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10))),
+		);
+		let wire = Container::Legacy(crate::container::Kind::Video);
+		let mut reader = Consumer::new(subscription, Container::Legacy(crate::container::Kind::Video));
+		let frame = |micros: u64, keyframe| Frame {
+			timestamp: ts(micros),
+			payload: Bytes::from_static(&[0xDE, 0xAD]),
+			keyframe,
+			duration: None,
+		};
+		let mut first = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
+		for (micros, keyframe) in [(0, true), (120_000, false), (40_000, false), (80_000, false)] {
+			wire.write(&mut first, &[frame(micros, keyframe)]).unwrap();
+		}
+		first.finish().unwrap();
+		for _ in 0..4 {
+			assert!(matches!(reader.read().await.unwrap(), Some(Read::Frame { .. })));
+		}
+		let mut open = track.create_group(moq_net::group::Info { start: 280_000 }).unwrap();
+		wire.write(&mut open, &[frame(280_000, true)]).unwrap();
+		let waiter = kio::Waiter::noop();
+		assert!(reader.poll_read(&waiter).is_pending(), "the keyframe waits for the next frame");
+		wire.write(&mut open, &[frame(160_000, false)]).unwrap();
+		let Some(Read::Frame { frame: keyframe, .. }) = reader.read().await.unwrap() else {
+			panic!("the keyframe reads, with no gap ahead of it");
+		};
+		assert_eq!(keyframe.timestamp, ts(280_000));
+		let Some(Read::Frame { frame: leading, .. }) = reader.read().await.unwrap() else {
+			panic!("the leading picture reads");
+		};
+		assert_eq!(leading.timestamp, ts(160_000));
+		drop(open);
 	}
 
 	#[kio::test]
