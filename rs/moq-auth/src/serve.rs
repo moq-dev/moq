@@ -683,6 +683,9 @@ impl Server {
 		if policy.revalidate.is_some() && policy.expires.is_none() {
 			return Err(crate::Error::UnboundedRevalidate);
 		}
+		if policy.revalidate.is_some_and(|cadence| cadence < crate::grant::MIN_REVALIDATE) {
+			return Err(crate::Error::ShortRevalidate);
+		}
 		if policy
 			.expires
 			.is_some_and(|bound| kio::clock::wall().checked_add(bound).is_none())
@@ -1902,6 +1905,20 @@ mod tests {
 			Denial::ExpiresOutOfRange
 		);
 		assert!(matches!(Server::new(endless), Err(Error::ExpiresOutOfRange)));
+	}
+
+	/// A cadence under a second would write as zero in the grant it stamps, so the policy is refused.
+	#[test]
+	fn a_subsecond_cadence_is_refused() {
+		for cadence in [Duration::ZERO, Duration::from_millis(400), Duration::from_millis(999)] {
+			let policy = Policy {
+				public: rules(&[""], &[""]),
+				revalidate: Some(cadence),
+				expires: Some(Duration::from_secs(60)),
+				..Default::default()
+			};
+			assert!(matches!(Server::new(policy), Err(Error::ShortRevalidate)), "{cadence:?}");
+		}
 	}
 
 	/// Regression: `--revalidate` near `Duration::MAX` overflowed the two-cadence
