@@ -916,8 +916,8 @@ impl<F: Container> Consumer<F> {
 				true => next_group.map(|(i, start)| (i, Some(start))),
 				// Looking at the later groups can fill the max buffer while the cursor's group holds its
 				// first frame, which it then judges by what it holds and reads, as any group holding a
-				// frame does rather than be skipped.
-				false if held && self.memory.full() => continue,
+				// frame does rather than be skipped. One still holding nothing is skipped below.
+				false if held && self.memory.full() && self.pending.front().is_some_and(GroupBuffer::ready) => continue,
 				// Once the later groups fill the max buffer, no more of them can be held while it waits,
 				// so move on to the next group even with nothing of it read yet: it reads as the
 				// cursor's group, and each such skip refunds what the group left behind held.
@@ -3223,6 +3223,31 @@ mod tests {
 			panic!("the held keyframe reads rather than drop with its group");
 		};
 		assert_eq!(keyframe.timestamp, ts(280_000));
+		drop(open);
+	}
+
+	/// A group the cursor stepped onto that holds nothing yet is skipped once the later groups fill the
+	/// max buffer, as before it held anything to judge.
+	#[tokio::test(start_paused = true)]
+	async fn an_empty_unproven_group_is_skipped_once_the_max_buffer_fills() {
+		let mut track = track_producer("gaps", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let subscription = track.subscribe(
+			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10))),
+		);
+		let mut reader = Consumer::new(subscription, Container::Legacy(crate::container::Kind::Video));
+		write_group(&mut track, 0, &[ts(0), ts(40_000)]);
+		for _ in 0..2 {
+			assert!(matches!(reader.read().await.unwrap(), Some(Read::Frame { .. })));
+		}
+		let open = track.create_group(moq_net::group::Info { start: 280_000 }).unwrap();
+		assert!(reader.poll_read(&kio::Waiter::noop()).is_pending());
+		reader.set_max_buffer(reader.buffered_bytes() + std::mem::size_of::<GroupBuffer<Container>>() + 1);
+		write_group(&mut track, 560_000, &[ts(560_000)]);
+		assert!(matches!(reader.read().await.unwrap(), Some(Read::Gap { .. })));
+		let Some(Read::Frame { frame, .. }) = reader.read().await.unwrap() else {
+			panic!("the later group reads");
+		};
+		assert_eq!(frame.timestamp, ts(560_000));
 		drop(open);
 	}
 
