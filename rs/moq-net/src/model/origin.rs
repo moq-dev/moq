@@ -670,8 +670,9 @@ impl RouteInfo {
 
 	/// Whether a usable path reaches the route's origin. An unavailable route is held:
 	/// the network lost every path to it but may recover one, so the announcement stays.
-	/// It ranks below every available one, a draining one included, and requests through
-	/// it may fail until it recovers: request again once it turns available.
+	/// It ranks below every available claim of its prefix, a draining one included, though a
+	/// more specific claim still shadows a broader one, and requests through it may fail until
+	/// it recovers: request again once it turns available.
 	pub fn available(&self) -> bool {
 		self.available
 	}
@@ -1885,6 +1886,9 @@ struct TableCursor {
 	current: HashMap<Path, CursorRoute>,
 	/// Whether the cursor delivers each route's [`Standing`], and a change to it.
 	ranked: bool,
+	/// Whether the cursor reports what each route captures. A lookup ignores captures, so
+	/// without them a claim filed above its root takes over from one filed there in place.
+	capturing: bool,
 }
 
 impl TableCursor {
@@ -1907,6 +1911,9 @@ impl TableCursor {
 	/// What the cursor's most specific matching scope member captures from an
 	/// exact announced prefix. An overlap-only route does not pin every wildcard.
 	fn captures(&self, prefix: &Path) -> Option<Vec<Pattern>> {
+		if !self.capturing {
+			return None;
+		}
 		let (literal, allowed) = match &self.named {
 			Some((mount, allowed)) => (Pattern::literal(mount.name(prefix)?.as_str()).ok()?, allowed),
 			None => (Pattern::literal(prefix.as_str()).ok()?, &self.allowed),
@@ -8146,6 +8153,11 @@ impl Consumer {
 	/// its peer about the scope while any stream watches it.
 	/// Drop the returned [`Routes`] to unregister.
 	pub fn routes(&self) -> Routes {
+		self.listing(true)
+	}
+
+	/// [`Self::routes`], reporting what each route captures only when `capturing`.
+	fn listing(&self, capturing: bool) -> Routes {
 		let state = kio::Producer::<OriginConsumerState>::default();
 		let cursor =
 			|root: Path, allowed: Patterns, hidden: Hidden, mount: Option<&Mount>, under: Path, holes: Vec<Path>| {
@@ -8163,6 +8175,7 @@ impl Consumer {
 					interested: self.interested,
 					current: HashMap::new(),
 					ranked: self.horizon.node == NodeFilter::Own,
+					capturing,
 				}
 			};
 
@@ -8286,7 +8299,8 @@ impl Consumer {
 		let path = path::convert(path)?;
 
 		// On a consumer limited to `foo/specific`, no route can ever cover `foo`.
-		if !self.scope.permits(&self.root.join(&path)?) {
+		let root = self.root.join(&path)?;
+		if !self.scope.permits(&root) {
 			return Err(Error::Unauthorized);
 		}
 
@@ -8304,13 +8318,19 @@ impl Consumer {
 			.patterns()
 			.intersect(&rooted.into())
 			.map_err(|_| Error::Unauthorized)?;
-		let consumer = Consumer { listed, ..self.clone() };
+		// Rooted at the path, so every claim covering it presents at the root, ranked as one
+		// answer the way a request ranks them, wherever each claim is filed.
+		let consumer = Consumer {
+			root,
+			listed,
+			..self.clone()
+		};
 
 		// Untagged: this is a lookup, not egress announce forwarding, so it must not drive
 		// the announce guards. Hiding narrows discovery, not lookup, so a hidden path
 		// follows like any other.
-		let announced = consumer.untagged().with_hidden(true).covering().routes();
-		Ok(Follow::new(announced, path))
+		let announced = consumer.untagged().with_hidden(true).covering().listing(false);
+		Ok(Follow::new(announced))
 	}
 
 	/// A resolution that already failed with `err`.
@@ -11323,6 +11343,50 @@ mod tests {
 				(&direct, 2)
 			);
 		}
+	}
+
+	/// A follower of a path ranks a claim filed deeper against the claim of its prefix as a
+	/// request does, so a better claim of the tier filed shallower takes over.
+	#[kio::test]
+	async fn a_follower_takes_the_claim_a_request_resolves() {
+		let route = |instance: &crate::Instance, node, above, draining| {
+			RouteInfo::new()
+				.with_instance(instance.clone(), 0)
+				.with_hops(hops(&[node]))
+				.with_node(Some(node_id(node)))
+				.with_lane(Lane {
+					above,
+					..Lane::default()
+				})
+				.with_draining(draining)
+		};
+		let producer = Config {
+			update_hold: Duration::ZERO,
+			..Config::from(origin(1))
+		}
+		.produce();
+		let consumer = producer.consume();
+		let mut follow = consumer.path_routes("src/a/b").unwrap();
+		let (deep, direct) = (crate::Instance::random(), crate::Instance::random());
+
+		let _filed = producer.forward("src/a", route(&deep, 10, 1, true)).unwrap();
+		let event = follow.next().await.expect("the origin is open");
+		assert!(
+			matches!(&event, RouteEvent { kind: RouteKind::Start, announce } if announce.route.instance() == &deep),
+			"{event:?}"
+		);
+
+		let made = producer.forward("src", route(&direct, 11, 0, false)).unwrap();
+		let event = kio::clock::timeout(Duration::from_secs(1), follow.next())
+			.await
+			.expect("the follower hears the takeover")
+			.expect("the origin is open");
+		assert!(
+			matches!(&event, RouteEvent { kind: RouteKind::Restart, announce } if announce.route.instance() == &direct),
+			"{event:?}"
+		);
+		let _pending = consumer.request("src/a/b", None);
+		assert_eq!(queued(&made).await.path().as_str(), "src/a/b");
 	}
 
 	/// Claims of one tier filed at different depths that tie through every rank hash on the path

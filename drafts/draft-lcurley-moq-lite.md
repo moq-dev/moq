@@ -573,10 +573,11 @@ A claim strictly inside another's paths always ranks above it, and a broadcast's
 The winning tier is the whole answer: a refusal from it never falls through to a less specific claim, so a service refusing a path does not leak the request to a catch-all, and one unserved path costs one round trip rather than a walk down the candidates.
 Nor is a refusal retried at another claim of the same prefix.
 
-Within the tier, a claim is ineligible while another claim of the tier carries its Instance at a higher Epoch, however cheap it is and whether or not a route reaches it, so a request fails with UNROUTABLE while the newest Epoch is unavailable.
+Within the tier, a claim is ineligible while another claim of the tier carries its Instance at a higher Epoch, however cheap it is and whether a route reaches it, so an older Epoch never stands in for an unavailable newer one: a request that selects that Instance fails with UNROUTABLE until its newest Epoch is available again.
 Among the eligible claims, the receiver SHOULD prefer one that is not `Unavailable`, then one that is not draining, then the highest priority, then the lowest cost, the claim's cost plus the cost of the route to the node announcing it, then the lowest Rendezvous Hash, and then the most recently received, so a reconnecting publisher is not outranked by the stale session it replaced.
 The Rendezvous Hash is the 64-bit FNV-1a hash, with the standard offset basis `0xCBF29CE484222325` and prime, of the requested path's UTF-8 bytes followed by the claim's Instance.
 Every node that knows the same claims ranks them the same, so equal-cost Instances of one prefix share its paths and every relay sends one path to the same Instance.
+The one exception is a claim shown at exactly the requested path that the receiver got on a session exchanging no routes, such as its own publisher's: it skips the Rendezvous Hash and ranks ahead of the claims it otherwise ties with, so between two such claims the most recently received wins, and a publisher that restarts under a new Instance takes over from the session it replaced at once.
 When choosing which claim to advertise for a prefix, the requested path is the prefix itself.
 
 A claim resolved this way serves the request like any other, and the claim is not consumed by it.

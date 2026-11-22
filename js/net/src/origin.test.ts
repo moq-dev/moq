@@ -2319,6 +2319,30 @@ test("a covering root advertises what a request for it resolves", async () => {
 	}
 });
 
+// Two claims of different instances at exactly the requested path skip the hash, as routes entered
+// here at the path do in Rust and as the draft's Resolution says, so the newest wins whichever
+// instance hashes lower: a publisher restarting under a new instance takes over at once.
+test("the newest claim at the path wins a tie whatever its hash", () => {
+	const path = Path.from("src/a");
+	for (const i of Array(16).keys()) {
+		const [a, b] = [`a${i}`, `b${i}`].map((name) => ({
+			...WireRoute.default,
+			instance: Instance.parse(name),
+			hops: [PEER],
+			claimed: true,
+		}));
+		// The candidates at the path, newest first.
+		const best = (...routes: WireRoute[]) =>
+			mostSpecific(
+				path,
+				(at) => (at === path ? routes : []),
+				(route) => route,
+			);
+		expect(best(a, b)).toBe(a);
+		expect(best(b, a)).toBe(b);
+	}
+});
+
 // A draining route still reaches its origin, so it outranks one held unavailable, however cheap.
 test("a draining route outranks an unavailable one", () => {
 	const draining = { ...WireRoute.default, draining: true, cost: 5n };
