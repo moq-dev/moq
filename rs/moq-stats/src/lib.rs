@@ -31,7 +31,9 @@
 //! `<bucket>/bucket.<epoch>.json` track of [`BucketFrame`]s, one per counter run, carrying the bucket's per-path
 //! [`Traffic`] and per-label [`Presence`], listed through the broadcast's
 //! track listing while the bucket is live; compute and parse names with
-//! [`bucket_track`] and [`parse_bucket_track`]. The full contract (paths,
+//! [`bucket_track`] and [`parse_bucket_track`]. With
+//! [`produce::Config::roots`], each root a session is scoped to also gets its own
+//! view at [`root_prefix`]`/node/<node>`. The full contract (paths,
 //! tracks, and counter semantics) is at
 //! <https://doc.moq.dev/concept/stats>.
 //!

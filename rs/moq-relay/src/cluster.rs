@@ -2933,6 +2933,61 @@ mod tests {
 		};
 	}
 
+	/// With root stats on, a client scoped to a root reads that root's view at
+	/// `.stats/node` under it, cannot publish there, and reading it counts nowhere.
+	#[tokio::test(start_paused = true)]
+	async fn a_root_reads_its_own_stats() {
+		let cluster = Cluster::spawn(Options::default().with_stats(crate::stats::Config {
+			enabled: true,
+			roots: true,
+			..Default::default()
+		}))
+		.expect("cluster");
+		let grant = || moq_auth::Grant::new(moq_auth::Prefix::all(), moq_auth::Prefix::all());
+		let lease = |root| auth::Lease::new(root, moq_auth::lease::Consumer::fixed(grant())).unwrap();
+		let (a, b) = (lease("/a"), lease("/b"));
+		let session = |lease: &auth::Lease| {
+			cluster.stats.tier(lease.token().tier.clone()).session(
+				moq_net::stats::SessionInfo::new(&lease.token().label).with_root(lease.token().root.clone()),
+			)
+		};
+		let (session_a, _session_b) = (session(&a), session(&b));
+
+		let options = moq_net::origin::RouteOptions::default;
+		let publisher = cluster.publisher(a.token()).expect("publish grant");
+		let _live = publisher.route("live", options()).expect("a client publishes in its root");
+		for path in [".stats", ".stats/node", ".stats/node/evil"] {
+			assert!(publisher.route(path, options()).is_err(), "route {path}");
+		}
+
+		let consumer = cluster
+			.subscriber(a.token())
+			.expect("subscribe grant")
+			.consume()
+			.with_stats(session_a);
+		let path = Path::from_static(".stats/node");
+		let broadcast = kio::clock::timeout(
+			std::time::Duration::from_secs(5),
+			consumer.follow(&path, None).unwrap().available(),
+		)
+		.await
+		.expect("root a's view is published")
+		.unwrap()
+		.unwrap();
+		let stats = moq_stats::Consumer::new(broadcast, Default::default());
+		let mut totals = stats.totals().expect("totals");
+		let frame = kio::wait(|waiter| totals.poll_next(waiter)).await.expect("read").expect("frame");
+		assert_eq!(frame[""].sessions.sessions_started, 1, "root a's own session, not root b's");
+
+		let mut report = moq_net::stats::Report::default();
+		cluster.stats.report(&mut report, moq_net::time::Instant::now());
+		assert!(
+			report.traffic.iter().all(|row| !row.path.as_str().contains(".stats")),
+			"reading root stats is uncounted: {:?}",
+			report.traffic
+		);
+	}
+
 	/// The publish task holds only a `Weak` to its producer, so it stops when the
 	/// last `moq_stats::Producer` clone drops. The cluster must therefore hold the
 	/// producer itself: a relay that keeps serving while silently publishing
